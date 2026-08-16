@@ -1,0 +1,101 @@
+# ============================================
+# Clang-Format 配置文件
+# 基于 GNU 风格，100% 兼容 clang-format 14.0.0
+# ============================================
+
+BasedOnStyle: GNU
+
+# ============================================
+# 核心配置：解决宏定义空格问题
+# ============================================
+
+# 关键！宏名和括号之间不加空格
+SpaceBeforeParens: Never
+
+# 注释对齐
+AlignTrailingComments: true
+
+# ============================================
+# 缩进配置（GNU风格）
+# ============================================
+
+# 使用Tab缩进（GNU风格）
+UseTab: Always
+IndentWidth: 8
+TabWidth: 8
+
+# 连续行缩进
+ContinuationIndentWidth: 8
+
+# 访问修饰符偏移
+AccessModifierOffset: -4
+
+# ============================================
+# 大括号风格（GNU风格）
+# ============================================
+
+BreakBeforeBraces: Allman
+
+# ============================================
+# 空格控制
+# ============================================
+
+# 指针和引用的对齐方式
+PointerAlignment: Left
+
+# 括号内不添加多余空格
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# 括号前是否有空格（用于函数声明）
+SpaceBeforeCtorInitializerColon: true
+
+# 赋值运算符前后空格
+SpaceBeforeAssignmentOperators: true
+
+# ============================================
+# 行长度和换行
+# ============================================
+
+# 列宽限制（GNU风格80列）
+ColumnLimit: 80
+
+# 在换行时，参数对齐方式
+AlignAfterOpenBracket: Align
+
+# ============================================
+# 代码布局
+# ============================================
+
+# 函数声明参数换行
+AllowAllParametersOfDeclarationOnNextLine: false
+
+# 短函数可以放在一行（只有inline函数可以）
+AllowShortFunctionsOnASingleLine: Inline
+
+# 短循环不能放在一行
+AllowShortLoopsOnASingleLine: false
+
+# 短if不能放在一行
+AllowShortIfStatementsOnASingleLine: false
+
+# ============================================
+# 其他配置
+# ============================================
+
+# 排序include
+SortIncludes: true
+
+# 返回类型换行
+AlwaysBreakAfterReturnType: None
+
+# 模板声明的换行
+AlwaysBreakTemplateDeclarations: true
+
+# ============================================
+# Penalty 配置（调整换行优先级）
+# ============================================
+
+PenaltyExcessCharacter: 100
+PenaltyReturnTypeOnItsOwnLine: 60
+PenaltyBreakBeforeFirstCallParameter: 19
