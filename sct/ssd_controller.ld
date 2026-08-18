@@ -174,11 +174,13 @@
 	.dram_rodata : 
 	{
 		. = ALIGN(4);
+		_sdram_rodata = .;
 		*(.dram_rodata)
 		*(.rodata)
 		*(.rodata.*)
 		. = ALIGN(4);
 		_edram_rodata = .;
+		_sidram_rodata = LOADADDR(.dram_rodata);
 	} > DRAM AT >NAND_FW
 	
 	

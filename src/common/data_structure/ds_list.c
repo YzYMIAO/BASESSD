@@ -1,7 +1,6 @@
 #include <config.h>
 #include <ds_list.h>
 
-
 /**
  * @brief 双向链表结构体
  *
@@ -10,21 +9,19 @@
  */
 struct ds_List_s
 {
-    size_t      size;       /**< 链表中元素的个数 */
-    Node       *head;       /**< 指向链表头节点的指针 */
-    Node       *tail;       /**< 指向链表尾节点的指针 */
+    size_t size; /**< 链表中元素的个数 */
+    Node  *head; /**< 指向链表头节点的指针 */
+    Node  *tail; /**< 指向链表尾节点的指针 */
 
-    void *(*mem_alloc)  (size_t size);          /**< 内存分配函数指针 */
-    void *(*mem_calloc) (size_t blocks, size_t size); /**< 内存分配并清零函数指针 */
-    void  (*mem_free)   (void *block);          /**< 内存释放函数指针 */
+    void *(*mem_alloc)(size_t size);                 /**< 内存分配函数指针 */
+    void *(*mem_calloc)(size_t blocks, size_t size); /**< 内存分配并清零函数指针 */
+    void (*mem_free)(void *block);                   /**< 内存释放函数指针 */
 };
 
-
 /* 静态函数声明 */
-static void splice_between(ds_List *list1, ds_List *list2, Node *left, Node *right);
+static void  splice_between(ds_List *list1, ds_List *list2, Node *left, Node *right);
 static Node *get_node(ds_List *list, void *element);
 static void *unlinkn(ds_List *list, Node *node);
-
 
 /**
  * @brief 获取指定索引位置的节点指针
@@ -40,25 +37,31 @@ static void *unlinkn(ds_List *list, Node *node);
  */
 static ds_Stat get_node_at(ds_List *list, size_t index, Node **out)
 {
-    if (list->size == 0 || index >= list->size) {
+    if (list->size == 0 || index >= list->size)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     Node *node = NULL;
 
     /* 选择从头部还是尾部开始遍历，以减少遍历次数 */
-    if (index < list->size / 2) {
+    if (index < list->size / 2)
+    {
         /* 从头部开始向后遍历 */
         node = list->head;
 
-        for (size_t i = 0; i < index; i++) {
+        for (size_t i = 0; i < index; i++)
+        {
             node = node->next;
         }
-    } else {
+    }
+    else
+    {
         /* 从尾部开始向前遍历 */
         node = list->tail;
 
-        for (size_t i = list->size - 1; i > index; i--) {
+        for (size_t i = list->size - 1; i > index; i--)
+        {
             node = node->prev;
         }
     }
@@ -66,7 +69,6 @@ static ds_Stat get_node_at(ds_List *list, size_t index, Node **out)
     *out = node;
     return DS_OK;
 }
-
 
 /**
  * @brief 在指定节点之前插入新节点
@@ -77,31 +79,35 @@ static ds_Stat get_node_at(ds_List *list, size_t index, Node **out)
  * @param[in] base 基准节点（新节点将插入到其前面）
  * @param[in] ins  要插入的新节点
  */
-static void link_behind(Node * const base, Node *ins)
+static void link_behind(Node *const base, Node *ins)
 {
     /* 从原链表中移除 ins 节点 */
-    if (ins->prev != NULL) {
+    if (ins->prev != NULL)
+    {
         ins->prev->next = ins->next;
     }
 
-    if (ins->next != NULL) {
+    if (ins->next != NULL)
+    {
         ins->next->prev = ins->prev;
     }
 
     /* 将 ins 插入到 base 前面 */
-    if (base->prev == NULL) {
+    if (base->prev == NULL)
+    {
         /* base 是头节点，ins 成为新的头节点 */
-        ins->prev       = base->prev;  /* NULL */
+        ins->prev       = base->prev; /* NULL */
         ins->next       = base;
         ins->next->prev = ins;
-    } else {
+    }
+    else
+    {
         ins->next       = base;
         ins->prev       = base->prev;
         ins->prev->next = ins;
         ins->next->prev = ins;
     }
 }
-
 
 /**
  * @brief 在指定节点之后插入新节点
@@ -112,31 +118,35 @@ static void link_behind(Node * const base, Node *ins)
  * @param[in] base 基准节点（新节点将插入到其后面）
  * @param[in] ins  要插入的新节点
  */
-static void __attribute__((unused)) link_after(Node * const base, Node *ins)
+static void __attribute__((unused)) link_after(Node *const base, Node *ins)
 {
     /* 从原链表中移除 ins 节点 */
-    if (ins->prev != NULL) {
+    if (ins->prev != NULL)
+    {
         ins->prev->next = ins->next;
     }
 
-    if (ins->next != NULL) {
+    if (ins->next != NULL)
+    {
         ins->next->prev = ins->prev;
     }
 
     /* 将 ins 插入到 base 后面 */
-    if (base->next == NULL) {
+    if (base->next == NULL)
+    {
         /* base 是尾节点，ins 成为新的尾节点 */
-        ins->next       = base->next;  /* NULL */
+        ins->next       = base->next; /* NULL */
         ins->prev       = base;
         ins->prev->next = ins;
-    } else {
+    }
+    else
+    {
         ins->next       = base->next;
         ins->prev       = base;
         ins->next->prev = ins;
         ins->prev->next = ins;
     }
 }
-
 
 /**
  * @brief 创建链表所有节点的外部拷贝
@@ -154,14 +164,17 @@ static bool link_all_externally(ds_List *list, Node **head, Node **tail)
 {
     Node *iter = list->head;
 
-    for (size_t i = 0; i < list->size; i++) {
+    for (size_t i = 0; i < list->size; i++)
+    {
         Node *new = list->mem_calloc(1, sizeof(Node));
 
-        if (new == NULL) {
+        if (new == NULL)
+        {
             /* 内存分配失败，清理已分配的节点 */
-            while (*head != NULL) {
+            while (*head != NULL)
+            {
                 Node *tmp = *head;
-                *head = tmp->next;
+                *head     = tmp->next;
                 list->mem_free(tmp);
             }
             return false;
@@ -169,11 +182,14 @@ static bool link_all_externally(ds_List *list, Node **head, Node **tail)
 
         new->data = iter->data;
 
-        if (*head == NULL) {
+        if (*head == NULL)
+        {
             /* 第一个节点 */
             *head = new;
             *tail = new;
-        } else {
+        }
+        else
+        {
             /* 链接到链表末尾 */
             (*tail)->next       = new;
             (*tail)->next->prev = *tail;
@@ -185,7 +201,6 @@ static bool link_all_externally(ds_List *list, Node **head, Node **tail)
 
     return true;
 }
-
 
 /**
  * @brief 初始化链表配置结构体为默认值
@@ -201,7 +216,6 @@ void ds_list_config_init(ds_ListConfig *lc)
     lc->mem_free   = free;
 }
 
-
 /**
  * @brief 根据指定配置创建新的链表
  *
@@ -212,11 +226,12 @@ void ds_list_config_init(ds_ListConfig *lc)
  *
  * @return DS_OK 创建成功，DS_ERR_ALLOC 内存分配失败
  */
-ds_Stat ds_list_new_conf(ds_ListConfig const * const conf, ds_List **out)
+ds_Stat ds_list_new_conf(ds_ListConfig const *const conf, ds_List **out)
 {
     ds_List *list = conf->mem_calloc(1, sizeof(ds_List));
 
-    if (list == NULL) {
+    if (list == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
@@ -227,7 +242,6 @@ ds_Stat ds_list_new_conf(ds_ListConfig const * const conf, ds_List **out)
     *out = list;
     return DS_OK;
 }
-
 
 /**
  * @brief 创建一个新的链表（使用默认配置）
@@ -246,7 +260,6 @@ ds_Stat ds_list_new(ds_List **out)
     return ds_list_new_conf(&lc, out);
 }
 
-
 /**
  * @brief 向链表末尾添加元素
  *
@@ -262,7 +275,6 @@ ds_Stat ds_list_add(ds_List *list, void *element)
     return ds_list_add_last(list, element);
 }
 
-
 /**
  * @brief 向链表尾部添加元素
  *
@@ -277,27 +289,30 @@ ds_Stat ds_list_add_last(ds_List *list, void *element)
 {
     Node *node = list->mem_calloc(1, sizeof(Node));
 
-    if (node == NULL) {
+    if (node == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
     node->data = element;
 
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         /* 链表为空，新节点同时作为头节点和尾节点 */
         list->head = node;
         list->tail = node;
-    } else {
+    }
+    else
+    {
         /* 链接到链表尾部 */
-        node->prev          = list->tail;
-        list->tail->next    = node;
-        list->tail          = node;
+        node->prev       = list->tail;
+        list->tail->next = node;
+        list->tail       = node;
     }
 
     list->size++;
     return DS_OK;
 }
-
 
 /**
  * @brief 向链表头部添加元素
@@ -313,27 +328,30 @@ ds_Stat ds_list_add_first(ds_List *list, void *element)
 {
     Node *node = list->mem_calloc(1, sizeof(Node));
 
-    if (node == NULL) {
+    if (node == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
     node->data = element;
 
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         /* 链表为空，新节点同时作为头节点和尾节点 */
         list->head = node;
         list->tail = node;
-    } else {
+    }
+    else
+    {
         /* 链接到链表头部 */
-        node->next          = list->head;
-        list->head->prev    = node;
-        list->head          = node;
+        node->next       = list->head;
+        list->head->prev = node;
+        list->head       = node;
     }
 
     list->size++;
     return DS_OK;
 }
-
 
 /**
  * @brief 在指定索引位置插入元素
@@ -353,13 +371,15 @@ ds_Stat ds_list_add_at(ds_List *list, void *element, size_t index)
 {
     Node *base = NULL;
 
-    if (get_node_at(list, index, &base) != DS_OK) {
+    if (get_node_at(list, index, &base) != DS_OK)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     Node *new = list->mem_calloc(1, sizeof(Node));
 
-    if (new == NULL) {
+    if (new == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
@@ -367,14 +387,14 @@ ds_Stat ds_list_add_at(ds_List *list, void *element, size_t index)
 
     link_behind(base, new);
 
-    if (index == 0) {
+    if (index == 0)
+    {
         list->head = new;
     }
 
     list->size++;
     return DS_OK;
 }
-
 
 /**
  * @brief 在指定位置插入另一个链表的所有元素
@@ -391,11 +411,13 @@ ds_Stat ds_list_add_at(ds_List *list, void *element, size_t index)
  */
 ds_Stat ds_list_add_list_at(ds_List *list1, ds_List *list2, size_t index)
 {
-    if (index > list1->size) {
+    if (index > list1->size)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
-    if (list2->size == 0) {
+    if (list2->size == 0)
+    {
         return DS_OK;
     }
 
@@ -403,7 +425,8 @@ ds_Stat ds_list_add_list_at(ds_List *list1, ds_List *list2, size_t index)
     Node *head = NULL;
     Node *tail = NULL;
 
-    if (link_all_externally(list2, &head, &tail) == false) {
+    if (link_all_externally(list2, &head, &tail) == false)
+    {
         return DS_ERR_ALLOC;
     }
 
@@ -413,36 +436,43 @@ ds_Stat ds_list_add_list_at(ds_List *list1, ds_List *list2, size_t index)
 
     get_node_at(list1, index, &end);
 
-    if (end != NULL) {
+    if (end != NULL)
+    {
         base = end->prev;
-    } else {
+    }
+    else
+    {
         get_node_at(list1, index - 1, &base);
     }
 
     /* 将新链表链接到 list1 中 */
-    if (end == NULL) {
+    if (end == NULL)
+    {
         /* index == size，尾插 */
         list1->tail->next = head;
         head->prev        = list1->tail;
         list1->tail       = tail;
-    } else if (base == NULL) {
+    }
+    else if (base == NULL)
+    {
         /* index == 0，头插 */
         list1->head->prev = tail;
         tail->next        = list1->head;
         list1->head       = head;
-    } else {
+    }
+    else
+    {
         /* 0 < index < size，中间插入 */
-        base->next        = head;
-        tail->next        = end;
-        end->prev         = tail;
-        head->prev        = base;
+        base->next = head;
+        tail->next = end;
+        end->prev  = tail;
+        head->prev = base;
     }
 
     list1->size += list2->size;
 
     return DS_OK;
 }
-
 
 /**
  * @brief 将 list2 的元素添加到空链表中
@@ -456,14 +486,16 @@ ds_Stat ds_list_add_list_at(ds_List *list1, ds_List *list2, size_t index)
  */
 ds_Stat ds_list_add_to_empty(ds_List *list1, ds_List *list2)
 {
-    if (list2->size == 0) {
+    if (list2->size == 0)
+    {
         return DS_OK;
     }
 
     Node *head = NULL;
     Node *tail = NULL;
 
-    if (link_all_externally(list2, &head, &tail) == false) {
+    if (link_all_externally(list2, &head, &tail) == false)
+    {
         return DS_ERR_ALLOC;
     }
 
@@ -472,7 +504,6 @@ ds_Stat ds_list_add_to_empty(ds_List *list1, ds_List *list2)
     list1->size = list2->size;
     return DS_OK;
 }
-
 
 /**
  * @brief 将 list2 的元素添加到 list1 末尾
@@ -486,13 +517,13 @@ ds_Stat ds_list_add_to_empty(ds_List *list1, ds_List *list2)
  */
 ds_Stat ds_list_add_list(ds_List *list1, ds_List *list2)
 {
-    if (list1->size == 0) {
+    if (list1->size == 0)
+    {
         return ds_list_add_to_empty(list1, list2);
     }
 
     return ds_list_add_list_at(list1, list2, list1->size);
 }
-
 
 /**
  * @brief 销毁链表（不释放元素数据）
@@ -504,13 +535,13 @@ ds_Stat ds_list_add_list(ds_List *list1, ds_List *list2)
  */
 void ds_list_destroy(ds_List *list)
 {
-    if (list->size > 0) {
+    if (list->size > 0)
+    {
         ds_list_remove_all(list);
     }
 
     list->mem_free(list);
 }
-
 
 /**
  * @brief 销毁链表并释放所有元素数据
@@ -526,13 +557,13 @@ void ds_list_destroy(ds_List *list)
  */
 void ds_list_destroy_cb(ds_List *list, void (*cb)(void *))
 {
-    if (list->size > 0) {
+    if (list->size > 0)
+    {
         ds_list_remove_all_cb(list, cb);
     }
 
     list->mem_free(list);
 }
-
 
 /**
  * @brief 将 list2 的节点拼接到 list1 末尾
@@ -550,7 +581,6 @@ ds_Stat ds_list_splice(ds_List *list1, ds_List *list2)
     return ds_list_splice_at(list1, list2, list1->size);
 }
 
-
 /**
  * @brief 在指定位置拼接另一个链表
  *
@@ -565,16 +595,19 @@ ds_Stat ds_list_splice(ds_List *list1, ds_List *list2)
  */
 ds_Stat ds_list_splice_at(ds_List *list1, ds_List *list2, size_t index)
 {
-    if (list2->size == 0) {
+    if (list2->size == 0)
+    {
         return DS_OK;
     }
 
-    if (index > list1->size) {
+    if (index > list1->size)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     /* 如果 list1 为空，直接接管 list2 */
-    if (list1->size == 0) {
+    if (list1->size == 0)
+    {
         list1->head = list2->head;
         list1->tail = list2->tail;
         list1->size = list2->size;
@@ -591,9 +624,12 @@ ds_Stat ds_list_splice_at(ds_List *list1, ds_List *list2, size_t index)
 
     get_node_at(list1, index, &end);
 
-    if (end != NULL) {
+    if (end != NULL)
+    {
         base = end->prev;
-    } else {
+    }
+    else
+    {
         get_node_at(list1, index - 1, &base);
     }
 
@@ -601,7 +637,6 @@ ds_Stat ds_list_splice_at(ds_List *list1, ds_List *list2, size_t index)
 
     return DS_OK;
 }
-
 
 /**
  * @brief 在两个节点之间拼接链表
@@ -616,22 +651,27 @@ ds_Stat ds_list_splice_at(ds_List *list1, ds_List *list2, size_t index)
  */
 static void splice_between(ds_List *list1, ds_List *list2, Node *left, Node *right)
 {
-    if (right == NULL) {
+    if (right == NULL)
+    {
         /* 拼接在尾部之后 */
-        list1->tail->next   = list2->head;
-        list2->head->prev   = list1->tail;
-        list1->tail         = list2->tail;
-    } else if (left == NULL) {
+        list1->tail->next = list2->head;
+        list2->head->prev = list1->tail;
+        list1->tail       = list2->tail;
+    }
+    else if (left == NULL)
+    {
         /* 拼接在头部之前 */
-        list2->tail->next   = list1->head;
-        list1->head->prev   = list2->tail;
-        list1->head         = list2->head;
-    } else {
+        list2->tail->next = list1->head;
+        list1->head->prev = list2->tail;
+        list1->head       = list2->head;
+    }
+    else
+    {
         /* 拼接在中间 */
-        left->next          = list2->head;
-        list2->tail->next   = right;
-        right->prev         = list2->tail;
-        list2->head->prev   = left;
+        left->next        = list2->head;
+        list2->tail->next = right;
+        right->prev       = list2->tail;
+        list2->head->prev = left;
     }
 
     list1->size += list2->size;
@@ -640,7 +680,6 @@ static void splice_between(ds_List *list1, ds_List *list2, Node *left, Node *rig
     list2->tail = NULL;
     list2->size = 0;
 }
-
 
 /**
  * @brief 从链表中移除指定元素（按指针值匹配）
@@ -657,11 +696,13 @@ ds_Stat ds_list_remove(ds_List *list, void *element, void **out)
 {
     Node *node = get_node(list, element);
 
-    if (node == NULL) {
+    if (node == NULL)
+    {
         return DS_ERR_VALUE_NOT_FOUND;
     }
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = node->data;
     }
 
@@ -669,7 +710,6 @@ ds_Stat ds_list_remove(ds_List *list, void *element, void **out)
 
     return DS_OK;
 }
-
 
 /**
  * @brief 在链表中查找指定元素对应的节点
@@ -685,8 +725,10 @@ static Node *get_node(ds_List *list, void *element)
 {
     Node *node = list->head;
 
-    while (node != NULL) {
-        if (node->data == element) {
+    while (node != NULL)
+    {
+        if (node->data == element)
+        {
             return node;
         }
         node = node->next;
@@ -694,7 +736,6 @@ static Node *get_node(ds_List *list, void *element)
 
     return NULL;
 }
-
 
 /**
  * @brief 从链表中移除指定节点
@@ -711,20 +752,24 @@ static void *unlinkn(ds_List *list, Node *node)
     void *data = node->data;
 
     /* 处理头节点 */
-    if (node->prev == NULL) {
+    if (node->prev == NULL)
+    {
         list->head = node->next;
     }
 
-    if (node->prev != NULL) {
+    if (node->prev != NULL)
+    {
         node->prev->next = node->next;
     }
 
     /* 处理尾节点 */
-    if (node->next == NULL) {
+    if (node->next == NULL)
+    {
         list->tail = node->prev;
     }
 
-    if (node->next != NULL) {
+    if (node->next != NULL)
+    {
         node->next->prev = node->prev;
     }
 
@@ -732,7 +777,6 @@ static void *unlinkn(ds_List *list, Node *node)
     list->size--;
     return data;
 }
-
 
 /**
  * @brief 移除指定索引位置的元素
@@ -745,21 +789,22 @@ static void *unlinkn(ds_List *list, Node *node)
  */
 ds_Stat ds_list_remove_at(ds_List *list, size_t index, void **out)
 {
-    Node *node;
+    Node   *node;
     ds_Stat status = get_node_at(list, index, &node);
 
-    if (status != DS_OK) {
+    if (status != DS_OK)
+    {
         return status;
     }
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = node->data;
     }
 
     unlinkn(list, node);
     return DS_OK;
 }
-
 
 /**
  * @brief 快速移除链表的头节点
@@ -773,19 +818,20 @@ ds_Stat ds_list_remove_at(ds_List *list, size_t index, void **out)
  */
 ds_Stat ds_list_remove_fast(ds_List *list, void **out)
 {
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     void *data = unlinkn(list, list->head);
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = data;
     }
 
     return DS_OK;
 }
-
 
 /**
  * @brief 移除链表的尾节点
@@ -799,19 +845,20 @@ ds_Stat ds_list_remove_fast(ds_List *list, void **out)
  */
 ds_Stat ds_list_remove_last(ds_List *list, void **out)
 {
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     void *data = unlinkn(list, list->tail);
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = data;
     }
 
     return DS_OK;
 }
-
 
 /**
  * @brief 移除链表中的所有节点
@@ -826,16 +873,19 @@ ds_Stat ds_list_remove_last(ds_List *list, void **out)
  */
 static bool unlinkn_all(ds_List *list, void (*cb)(void *))
 {
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         return false;
     }
 
     Node *node = list->head;
 
-    while (node != NULL) {
+    while (node != NULL)
+    {
         Node *tmp = node->next;
 
-        if (cb != NULL) {
+        if (cb != NULL)
+        {
             cb(node->data);
         }
 
@@ -845,7 +895,6 @@ static bool unlinkn_all(ds_List *list, void (*cb)(void *))
 
     return true;
 }
-
 
 /**
  * @brief 移除链表中的所有元素（不释放数据）
@@ -861,7 +910,8 @@ ds_Stat ds_list_remove_all(ds_List *list)
 {
     bool unlinked = unlinkn_all(list, NULL);
 
-    if (unlinked == true) {
+    if (unlinked == true)
+    {
         list->head = NULL;
         list->tail = NULL;
         return DS_OK;
@@ -869,7 +919,6 @@ ds_Stat ds_list_remove_all(ds_List *list)
 
     return DS_ERR_OUT_OF_RANGE;
 }
-
 
 /**
  * @brief 移除链表中的所有元素并释放数据
@@ -886,7 +935,8 @@ ds_Stat ds_list_remove_all_cb(ds_List *list, void (*cp)(void *))
 {
     bool unlinked = unlinkn_all(list, cp);
 
-    if (unlinked == true) {
+    if (unlinked == true)
+    {
         list->head = NULL;
         list->tail = NULL;
         return DS_OK;
@@ -894,7 +944,6 @@ ds_Stat ds_list_remove_all_cb(ds_List *list, void (*cp)(void *))
 
     return DS_ERR_OUT_OF_RANGE;
 }
-
 
 /**
  * @brief 替换指定索引位置的元素
@@ -908,21 +957,22 @@ ds_Stat ds_list_remove_all_cb(ds_List *list, void (*cp)(void *))
  */
 ds_Stat ds_list_replace_at(ds_List *list, void *element, size_t index, void **out)
 {
-    Node *node = NULL;
+    Node   *node   = NULL;
     ds_Stat status = get_node_at(list, index, &node);
 
-    if (status != DS_OK) {
+    if (status != DS_OK)
+    {
         return status;
     }
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = node->data;
     }
 
     node->data = element;
     return DS_OK;
 }
-
 
 /**
  * @brief 获取链表的头元素
@@ -934,19 +984,20 @@ ds_Stat ds_list_replace_at(ds_List *list, void *element, size_t index, void **ou
  */
 ds_Stat ds_list_get_first(ds_List *list, void **out)
 {
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     void *data = list->head->data;
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = data;
     }
 
     return DS_OK;
 }
-
 
 /**
  * @brief 获取链表的尾元素
@@ -958,19 +1009,20 @@ ds_Stat ds_list_get_first(ds_List *list, void **out)
  */
 ds_Stat ds_list_get_last(ds_List *list, void **out)
 {
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     void *data = list->tail->data;
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = data;
     }
 
     return DS_OK;
 }
-
 
 /**
  * @brief 获取指定索引位置的元素
@@ -983,16 +1035,16 @@ ds_Stat ds_list_get_last(ds_List *list, void **out)
  */
 ds_Stat ds_list_get_at(ds_List *list, size_t index, void **out)
 {
-    Node *node = NULL;
+    Node   *node   = NULL;
     ds_Stat status = get_node_at(list, index, &node);
 
-    if (status == DS_OK) {
+    if (status == DS_OK)
+    {
         *out = node->data;
     }
 
     return status;
 }
-
 
 /**
  * @brief 交换两个相邻节点
@@ -1005,45 +1057,51 @@ ds_Stat ds_list_get_at(ds_List *list, size_t index, void **out)
 static void swap_adjacent(Node *n1, Node *n2)
 {
     /* 先交换外节点，再链接内节点 */
-    if (n1->next == n2) {
+    if (n1->next == n2)
+    {
         /* 情况1: n1 在 n2 前面 */
         /* ... A -> n1 -> n2 -> B ... */
         /* 交换后: ... A -> n2 -> n1 -> B ... */
-        if (n2->next) {
-            n2->next->prev = n1;                /* B->prev = n1 */
+        if (n2->next)
+        {
+            n2->next->prev = n1; /* B->prev = n1 */
         }
 
-        n1->next = n2->next;                    /* n1->next = B */
+        n1->next = n2->next; /* n1->next = B */
 
-        if (n1->prev) {
-            n1->prev->next = n2;                /* A->next = n2 */
+        if (n1->prev)
+        {
+            n1->prev->next = n2; /* A->next = n2 */
         }
 
-        n2->prev = n1->prev;                    /* n2->prev = A */
+        n2->prev = n1->prev; /* n2->prev = A */
 
-        n2->next = n1;                          /* n2->next = n1 */
-        n1->prev = n2;                          /* n1->prev = n2 */
-    } else {
+        n2->next = n1; /* n2->next = n1 */
+        n1->prev = n2; /* n1->prev = n2 */
+    }
+    else
+    {
         /* 情况2: n2 在 n1 前面 */
         /* ... A -> n2 -> n1 -> B ... */
         /* 交换后: ... A -> n1 -> n2 -> B ... */
-        if (n1->next) {
-            n1->next->prev = n2;                /* B->prev = n2 */
+        if (n1->next)
+        {
+            n1->next->prev = n2; /* B->prev = n2 */
         }
 
-        n2->next = n1->next;                    /* n2->next = B */
+        n2->next = n1->next; /* n2->next = B */
 
-        if (n2->prev) {
-            n2->prev->next = n1;                /* A->next = n1 */
+        if (n2->prev)
+        {
+            n2->prev->next = n1; /* A->next = n1 */
         }
 
-        n1->prev = n2->prev;                    /* n1->prev = A */
+        n1->prev = n2->prev; /* n1->prev = A */
 
-        n1->next = n2;                          /* n1->next = n2 */
-        n2->prev = n1;                          /* n2->prev = n1 */
+        n1->next = n2; /* n1->next = n2 */
+        n2->prev = n1; /* n2->prev = n1 */
     }
 }
-
 
 /**
  * @brief 交换链表中两个节点的位置
@@ -1055,7 +1113,8 @@ static void swap_adjacent(Node *n1, Node *n2)
  */
 static void swap(Node *n1, Node *n2)
 {
-    if (n1->next == n2 || n2->next == n1) {
+    if (n1->next == n2 || n2->next == n1)
+    {
         swap_adjacent(n1, n2);
         return;
     }
@@ -1067,29 +1126,32 @@ static void swap(Node *n1, Node *n2)
     Node *n2_right = n2->next;
 
     /* 交换 n1 和 n2 在链表中的位置 */
-    if (n1_left != NULL) {
+    if (n1_left != NULL)
+    {
         n1_left->next = n2;
     }
 
     n2->prev = n1_left;
     n2->next = n1_right;
 
-    if (n1_right != NULL) {
+    if (n1_right != NULL)
+    {
         n1_right->prev = n2;
     }
 
-    if (n2_left != NULL) {
+    if (n2_left != NULL)
+    {
         n2_left->next = n1;
     }
 
     n1->prev = n2_left;
     n1->next = n2_right;
 
-    if (n2_right != NULL) {
+    if (n2_right != NULL)
+    {
         n2_right->prev = n1;
     }
 }
-
 
 /**
  * @brief 反转链表中元素的顺序
@@ -1100,7 +1162,8 @@ static void swap(Node *n1, Node *n2)
  */
 void ds_list_reverse(ds_List *list)
 {
-    if (list->size < 2) {
+    if (list->size < 2)
+    {
         return;
     }
 
@@ -1110,7 +1173,8 @@ void ds_list_reverse(ds_List *list)
     Node *left_ptr  = old_head;
     Node *right_ptr = old_tail;
 
-    for (size_t i = 0; i < list->size / 2; i++) {
+    for (size_t i = 0; i < list->size / 2; i++)
+    {
         Node *tmp_lp = left_ptr->next;
         Node *tmp_rp = right_ptr->prev;
 
@@ -1123,7 +1187,6 @@ void ds_list_reverse(ds_List *list)
     list->head = old_tail;
     list->tail = old_head;
 }
-
 
 /**
  * @brief 创建链表的子链表
@@ -1140,7 +1203,8 @@ void ds_list_reverse(ds_List *list)
  */
 ds_Stat ds_list_sublist(ds_List *list, size_t base, size_t end, ds_List **out)
 {
-    if (base > end || end >= list->size) {
+    if (base > end || end >= list->size)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
@@ -1153,22 +1217,26 @@ ds_Stat ds_list_sublist(ds_List *list, size_t base, size_t end, ds_List **out)
 
     ds_Stat status = ds_list_new_conf(&conf, &sublist);
 
-    if (status != DS_OK) {
+    if (status != DS_OK)
+    {
         return status;
     }
 
     Node *node = NULL;
-    status = get_node_at(list, base, &node);
+    status     = get_node_at(list, base, &node);
 
-    if (status != DS_OK) {
+    if (status != DS_OK)
+    {
         ds_list_destroy(sublist);
         return status;
     }
 
-    for (size_t i = base; i <= end; i++) {
+    for (size_t i = base; i <= end; i++)
+    {
         status = ds_list_add(sublist, node->data);
 
-        if (status != DS_OK) {
+        if (status != DS_OK)
+        {
             ds_list_destroy(sublist);
             return status;
         }
@@ -1179,7 +1247,6 @@ ds_Stat ds_list_sublist(ds_List *list, size_t base, size_t end, ds_List **out)
     *out = sublist;
     return DS_OK;
 }
-
 
 /**
  * @brief 创建链表的浅拷贝
@@ -1205,16 +1272,19 @@ ds_Stat ds_list_copy_shallow(ds_List *list, ds_List **out)
 
     ds_Stat status = ds_list_new_conf(&conf, &copy);
 
-    if (status != DS_OK) {
+    if (status != DS_OK)
+    {
         return status;
     }
 
     Node *node = list->head;
 
-    while (node != NULL) {
+    while (node != NULL)
+    {
         status = ds_list_add(copy, node->data);
 
-        if (status != DS_OK) {
+        if (status != DS_OK)
+        {
             ds_list_destroy(copy);
             return status;
         }
@@ -1225,7 +1295,6 @@ ds_Stat ds_list_copy_shallow(ds_List *list, ds_List **out)
     *out = copy;
     return DS_OK;
 }
-
 
 /**
  * @brief 创建链表的深拷贝
@@ -1250,16 +1319,19 @@ ds_Stat ds_list_copy_deep(ds_List *list, void *(*cp)(void *), ds_List **out)
 
     ds_Stat status = ds_list_new_conf(&conf, &copy);
 
-    if (status != DS_OK) {
+    if (status != DS_OK)
+    {
         return status;
     }
 
     Node *node = list->head;
 
-    while (node != NULL) {
+    while (node != NULL)
+    {
         status = ds_list_add(copy, cp(node->data));
 
-        if (status != DS_OK) {
+        if (status != DS_OK)
+        {
             /* 只销毁链表，数据的释放应由 cp 函数负责 */
             ds_list_destroy(copy);
             return status;
@@ -1271,7 +1343,6 @@ ds_Stat ds_list_copy_deep(ds_List *list, void *(*cp)(void *), ds_List **out)
     *out = copy;
     return DS_OK;
 }
-
 
 /**
  * @brief 将链表转换为数组
@@ -1286,28 +1357,30 @@ ds_Stat ds_list_copy_deep(ds_List *list, void *(*cp)(void *), ds_List **out)
  */
 ds_Stat ds_list_to_array(ds_List *list, void ***out)
 {
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     void **array = list->mem_alloc(list->size * sizeof(void *));
 
-    if (array == NULL) {
+    if (array == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
     size_t index = 0;
     Node  *node  = list->head;
 
-    while (node != NULL) {
+    while (node != NULL)
+    {
         array[index++] = node->data;
-        node = node->next;
+        node           = node->next;
     }
 
     *out = array;
     return DS_OK;
 }
-
 
 /**
  * @brief 统计链表中指定元素（按指针值）的出现次数
@@ -1322,8 +1395,10 @@ size_t ds_list_contains(ds_List *list, void *element)
     size_t count = 0;
     Node  *node  = list->head;
 
-    while (node != NULL) {
-        if (node->data == element) {
+    while (node != NULL)
+    {
+        if (node->data == element)
+        {
             count++;
         }
         node = node->next;
@@ -1331,7 +1406,6 @@ size_t ds_list_contains(ds_List *list, void *element)
 
     return count;
 }
-
 
 /**
  * @brief 统计链表中与指定值相等的元素出现次数（使用比较函数）
@@ -1349,8 +1423,10 @@ size_t ds_list_contains_value(ds_List *list, void *element, int (*comper)(void *
     size_t count = 0;
     Node  *node  = list->head;
 
-    while (node != NULL) {
-        if (comper(element, node->data) == 0) {
+    while (node != NULL)
+    {
+        if (comper(element, node->data) == 0)
+        {
             count++;
         }
         node = node->next;
@@ -1358,7 +1434,6 @@ size_t ds_list_contains_value(ds_List *list, void *element, int (*comper)(void *
 
     return count;
 }
-
 
 /**
  * @brief 查找指定元素在链表中的逻辑索引（使用比较函数）
@@ -1374,11 +1449,13 @@ size_t ds_list_contains_value(ds_List *list, void *element, int (*comper)(void *
  */
 ds_Stat ds_list_index_of(ds_List *list, void *element, int (*comper)(const void *, const void *), size_t *index)
 {
-    size_t i   = 0;
+    size_t i    = 0;
     Node  *node = list->head;
 
-    while (node != NULL) {
-        if (comper(element, node->data) == 0) {
+    while (node != NULL)
+    {
+        if (comper(element, node->data) == 0)
+        {
             *index = i;
             return DS_OK;
         }
@@ -1389,7 +1466,6 @@ ds_Stat ds_list_index_of(ds_List *list, void *element, int (*comper)(const void 
 
     return DS_ERR_OUT_OF_RANGE;
 }
-
 
 /**
  * @brief 获取链表的元素个数
@@ -1402,7 +1478,6 @@ size_t ds_list_size(ds_List *list)
 {
     return list->size;
 }
-
 
 /**
  * @brief 对链表进行排序（生成数组后排序）
@@ -1417,10 +1492,11 @@ size_t ds_list_size(ds_List *list)
  */
 ds_Stat ds_list_sort(ds_List *list, int (*comper)(void const *, void const *))
 {
-    void **array = NULL;
+    void  **array  = NULL;
     ds_Stat status = ds_list_to_array(list, &array);
 
-    if (status != DS_OK) {
+    if (status != DS_OK)
+    {
         return status;
     }
 
@@ -1428,15 +1504,15 @@ ds_Stat ds_list_sort(ds_List *list, int (*comper)(void const *, void const *))
 
     Node *node = list->head;
 
-    for (size_t i = 0; i < list->size; i++) {
+    for (size_t i = 0; i < list->size; i++)
+    {
         node->data = array[i];
-        node = node->next;
+        node       = node->next;
     }
 
     list->mem_free(array);
     return DS_OK;
 }
-
 
 /**
  * @brief 归并两个已排序的子链表
@@ -1449,8 +1525,8 @@ ds_Stat ds_list_sort(ds_List *list, int (*comper)(void const *, void const *))
  * @param[in]     r_size  右子链表的大小
  * @param[in]     comper  比较函数
  */
-static void split_merge(Node **left, Node **right, size_t l_size, size_t r_size,
-                        int (*comper)(void * const, void * const))
+static void split_merge(
+    Node **left, Node **right, size_t l_size, size_t r_size, int (*comper)(void *const, void *const))
 {
     size_t size = l_size + r_size;
     size_t l    = 0;
@@ -1459,19 +1535,24 @@ static void split_merge(Node **left, Node **right, size_t l_size, size_t r_size,
     Node *l_ptr = *left;
     Node *r_ptr = *right;
 
-    for (size_t i = 0; i < size; i++) {
+    for (size_t i = 0; i < size; i++)
+    {
         int c = comper(l_ptr->data, r_ptr->data);
 
-        if (c <= 0) {
-            if (i == 0 && size == 2) {
+        if (c <= 0)
+        {
+            if (i == 0 && size == 2)
+            {
                 break;
             }
 
             l++;
 
-            if (l == l_size) {
+            if (l == l_size)
+            {
                 /* 左子链表已全部归并 */
-                for (; r < r_size - 1; r++) {
+                for (; r < r_size - 1; r++)
+                {
                     r_ptr = r_ptr->next;
                 }
                 *right = r_ptr;
@@ -1479,27 +1560,33 @@ static void split_merge(Node **left, Node **right, size_t l_size, size_t r_size,
             }
 
             l_ptr = l_ptr->next;
-        } else {
+        }
+        else
+        {
             Node *tmp = r_ptr->next;
 
             link_behind(l_ptr, r_ptr);
 
-            if (i == 0 && size == 2) {
+            if (i == 0 && size == 2)
+            {
                 break;
             }
 
             r++;
 
-            if (r == r_size) {
+            if (r == r_size)
+            {
                 /* 右子链表已全部归并 */
-                for (; l < l_size - 1; l++) {
+                for (; l < l_size - 1; l++)
+                {
                     l_ptr = l_ptr->next;
                 }
                 *right = l_ptr;
                 break;
             }
 
-            if (i == 0) {
+            if (i == 0)
+            {
                 *left = r_ptr;
             }
 
@@ -1507,7 +1594,6 @@ static void split_merge(Node **left, Node **right, size_t l_size, size_t r_size,
         }
     }
 }
-
 
 /**
  * @brief 自底向上的归并排序
@@ -1521,9 +1607,10 @@ static void split_merge(Node **left, Node **right, size_t l_size, size_t r_size,
  *
  * @return 排序后子链表的头节点
  */
-static Node *split(ds_List *list, Node *base, size_t size, int (*comper)(void * const, void * const))
+static Node *split(ds_List *list, Node *base, size_t size, int (*comper)(void *const, void *const))
 {
-    if (size < 2) {
+    if (size < 2)
+    {
         return base;
     }
 
@@ -1532,7 +1619,8 @@ static Node *split(ds_List *list, Node *base, size_t size, int (*comper)(void * 
 
     Node *center = base;
 
-    for (size_t i = 0; i < l_size; i++) {
+    for (size_t i = 0; i < l_size; i++)
+    {
         center = center->next;
     }
 
@@ -1547,7 +1635,6 @@ static Node *split(ds_List *list, Node *base, size_t size, int (*comper)(void * 
     return l_head;
 }
 
-
 /**
  * @brief 原地归并排序链表
  *
@@ -1556,11 +1643,10 @@ static Node *split(ds_List *list, Node *base, size_t size, int (*comper)(void * 
  * @param[in,out] list   目标链表
  * @param[in]     comper 比较函数
  */
-void ds_list_sort_in_place(ds_List *list, int (*comper)(void * const, void * const))
+void ds_list_sort_in_place(ds_List *list, int (*comper)(void *const, void *const))
 {
     split(list, list->head, list->size, comper);
 }
-
 
 /**
  * @brief 对链表中的每个元素执行操作
@@ -1574,12 +1660,12 @@ void ds_list_foreach(ds_List *list, void (*op)(void *))
 {
     Node *node = list->head;
 
-    while (node != NULL) {
+    while (node != NULL)
+    {
         op(node->data);
         node = node->next;
     }
 }
-
 
 /**
  * @brief 对链表进行归约操作
@@ -1594,11 +1680,13 @@ void ds_list_foreach(ds_List *list, void (*op)(void *))
  */
 ds_Stat ds_list_reduce(ds_List *list, void (*fn)(void *, void *, void *), void *result)
 {
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
-    if (list->size == 1) {
+    if (list->size == 1)
+    {
         fn(list->head->data, NULL, result);
         return DS_OK;
     }
@@ -1608,7 +1696,8 @@ ds_Stat ds_list_reduce(ds_List *list, void (*fn)(void *, void *, void *), void *
     Node *curr = list->head->next->next;
     Node *next = NULL;
 
-    while (curr) {
+    while (curr)
+    {
         next = curr->next;
         fn(result, curr->data, result);
         curr = next;
@@ -1616,7 +1705,6 @@ ds_Stat ds_list_reduce(ds_List *list, void (*fn)(void *, void *, void *), void *
 
     return DS_OK;
 }
-
 
 /**
  * @brief 就地过滤链表（修改原链表）
@@ -1630,17 +1718,20 @@ ds_Stat ds_list_reduce(ds_List *list, void (*fn)(void *, void *, void *), void *
  */
 ds_Stat ds_list_fiter_mut(ds_List *list, bool (*pred)(void *))
 {
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     Node *curr = list->head;
     Node *next = NULL;
 
-    while (curr) {
+    while (curr)
+    {
         next = curr->next;
 
-        if (pred(curr->data) == false) {
+        if (pred(curr->data) == false)
+        {
             unlinkn(list, curr);
         }
 
@@ -1649,7 +1740,6 @@ ds_Stat ds_list_fiter_mut(ds_List *list, bool (*pred)(void *))
 
     return DS_OK;
 }
-
 
 /**
  * @brief 过滤链表并生成新链表（不修改原链表）
@@ -1667,7 +1757,8 @@ ds_Stat ds_list_fiter_mut(ds_List *list, bool (*pred)(void *))
  */
 ds_Stat ds_list_filter(ds_List *list, int (*pred)(void *), ds_List **out)
 {
-    if (list->size == 0) {
+    if (list->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
@@ -1678,18 +1769,22 @@ ds_Stat ds_list_filter(ds_List *list, int (*pred)(void *), ds_List **out)
     conf.mem_calloc = list->mem_calloc;
     conf.mem_free   = list->mem_free;
 
-    if (ds_list_new_conf(&conf, &filtered) != DS_OK) {
+    if (ds_list_new_conf(&conf, &filtered) != DS_OK)
+    {
         return DS_ERR_ALLOC;
     }
 
     Node *curr = list->head;
     Node *next = NULL;
 
-    while (curr) {
+    while (curr)
+    {
         next = curr->next;
 
-        if (pred(curr->data) == true) {
-            if (ds_list_add(filtered, curr->data) != DS_OK) {
+        if (pred(curr->data) == true)
+        {
+            if (ds_list_add(filtered, curr->data) != DS_OK)
+            {
                 ds_list_destroy(filtered);
                 return DS_ERR_ALLOC;
             }

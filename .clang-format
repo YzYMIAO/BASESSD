@@ -1,101 +1,126 @@
-# ============================================
-# Clang-Format 配置文件
-# 基于 GNU 风格，100% 兼容 clang-format 14.0.0
-# ============================================
+---
+# 配置适用版本：clang-format 14.x
+# 已验证版本：Ubuntu clang-format 14.0.0
+# 更换 clang-format 主版本后，应先执行 make format-check 验证配置兼容性。
 
-BasedOnStyle: GNU
+# clang-format 将 C 文件按 C++ 语言规则解析，这是正常行为。
+Language: Cpp
 
-# ============================================
-# 核心配置：解决宏定义空格问题
-# ============================================
+# 使用 Google 风格作为基础，再针对嵌入式 C 调整。
+BasedOnStyle: Google
 
-# 关键！宏名和括号之间不加空格
-SpaceBeforeParens: Never
+# 使用 4 空格缩进，禁止使用 Tab。
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
 
-# 注释对齐
-AlignTrailingComments: true
+# 120列适合寄存器定义和嵌入式函数声明。
+ColumnLimit: 120
 
-# ============================================
-# 缩进配置（GNU风格）
-# ============================================
+# 不根据现有代码推断指针风格，始终使用 int* pointer。
+DerivePointerAlignment: false
+PointerAlignment: Right
 
-# 使用Tab缩进（GNU风格）
-UseTab: Always
-IndentWidth: 8
-TabWidth: 8
+# 控制语句关键字后保留空格，例如 if (condition)。
+SpaceBeforeParens: ControlStatements
 
-# 连续行缩进
-ContinuationIndentWidth: 8
+# 不把函数和控制语句压缩成一行，便于断点调试和代码审查。
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
 
-# 访问修饰符偏移
-AccessModifierOffset: -4
+# switch 的 case 相对 switch 内容缩进一级。
+IndentCaseLabels: true
+IndentCaseBlocks: false
 
-# ============================================
-# 大括号风格（GNU风格）
-# ============================================
+# goto 标签只减少一级缩进，不强制放到行首。
+IndentGotoLabels: false
 
+# struct、enum和函数的大括号使用常见嵌入式风格。
+#左括号{在下一行左边
 BreakBeforeBraces: Allman
+#左括号{在声明右边
+#BreakBeforeBraces: Attach
+# clang-format 14 不支持顶层 SplitEmptyFunction/SplitEmptyRecord。
+# 当前使用 Allman 风格，空函数体按照该预设的默认规则处理。
 
-# ============================================
-# 空格控制
-# ============================================
+# 函数调用参数较多时允许逐行排列，减少横向拥挤。
+BinPackArguments: false
+BinPackParameters: false
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
 
-# 指针和引用的对齐方式
-PointerAlignment: Left
+# 长表达式换行时，操作符保留在上一行。
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+AlignOperands: Align
 
-# 括号内不添加多余空格
-SpacesInParentheses: false
+# 连续变量声明、赋值、宏和位域进行对齐。
+AlignConsecutiveDeclarations: true
+AlignConsecutiveAssignments: true
+AlignConsecutiveMacros: true
+AlignConsecutiveBitFields: true
+
+# 对齐反斜杠结尾的多行宏。
+AlignEscapedNewlines: Right
+
+# 尾随注释与代码之间至少保留一个空格。
+SpacesBeforeTrailingComments: 1
+
+# struct初始化和数组初始化中保留必要空格。
+Cpp11BracedListStyle: true
+SpaceBeforeCpp11BracedList: false
+SpacesInContainerLiterals: false
+
+# 不在类型转换括号内部添加空格。
+SpacesInCStyleCastParentheses: false
+SpaceAfterCStyleCast: false
+
+# 指针运算和数组下标保持紧凑。
 SpacesInSquareBrackets: false
 
-# 括号前是否有空格（用于函数声明）
-SpaceBeforeCtorInitializerColon: true
+# 预处理指令在 # 后缩进，嵌套条件编译更容易观察。
+IndentPPDirectives: AfterHash
+PPIndentWidth: 4
 
-# 赋值运算符前后空格
-SpaceBeforeAssignmentOperators: true
+# 自动重组include分组，并按大小写敏感方式排序。
+IncludeBlocks: Regroup
+SortIncludes: CaseSensitive
 
-# ============================================
-# 行长度和换行
-# ============================================
+# include顺序：
+# 1. 当前模块头文件
+# 2. 项目内部头文件
+# 3. C标准库和系统头文件
+IncludeCategories:
+  - Regex: '^".*"'
+    Priority: 1
+  - Regex: '^<(common|controller|flash_controller|ftl|host|nand|platform)/'
+    Priority: 2
+  - Regex: '^<'
+    Priority: 3
 
-# 列宽限制（GNU风格80列）
-ColumnLimit: 80
+# 保留include分组之间的空行。
+MaxEmptyLinesToKeep: 1
+KeepEmptyLinesAtTheStartOfBlocks: false
 
-# 在换行时，参数对齐方式
-AlignAfterOpenBracket: Align
+# 注释处理。
+ReflowComments: true
+SpacesInLineCommentPrefix:
+  Minimum: 1
+  Maximum: -1
 
-# ============================================
-# 代码布局
-# ============================================
+# 不自动改变字符串内容。
+AlwaysBreakBeforeMultilineStrings: false
 
-# 函数声明参数换行
-AllowAllParametersOfDeclarationOnNextLine: false
+# enum内容不强制压缩到一行。
+AllowShortEnumsOnASingleLine: false
 
-# 短函数可以放在一行（只有inline函数可以）
-AllowShortFunctionsOnASingleLine: Inline
+# namespace主要是兼容头文件或第三方代码，C代码通常不会用到。
+NamespaceIndentation: None
 
-# 短循环不能放在一行
-AllowShortLoopsOnASingleLine: false
-
-# 短if不能放在一行
-AllowShortIfStatementsOnASingleLine: false
-
-# ============================================
-# 其他配置
-# ============================================
-
-# 排序include
-SortIncludes: true
-
-# 返回类型换行
-AlwaysBreakAfterReturnType: None
-
-# 模板声明的换行
-AlwaysBreakTemplateDeclarations: true
-
-# ============================================
-# Penalty 配置（调整换行优先级）
-# ============================================
-
-PenaltyExcessCharacter: 100
-PenaltyReturnTypeOnItsOwnLine: 60
-PenaltyBreakBeforeFirstCallParameter: 19
+# clang-format 14 不支持 InsertNewlineAtEOF。
+# 文件末尾换行由编辑器的 EditorConfig 或保存设置保证。
+---

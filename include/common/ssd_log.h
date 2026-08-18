@@ -2,7 +2,8 @@
 #define SSD_LOG_H
 
 /* 日志级别由平台层决定如何输出，例如终端或 UART。 */
-typedef enum {
+typedef enum
+{
     SSD_LOG_ERROR = 0,
     SSD_LOG_WARNING,
     SSD_LOG_INFO,

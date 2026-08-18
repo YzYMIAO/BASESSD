@@ -4,7 +4,8 @@ static const ssd_platform_ops_t *g_platform_ops;
 
 int ssd_platform_register(const ssd_platform_ops_t *ops)
 {
-    if ((ops == NULL) || (ops->time_us == NULL)) {
+    if ((ops == NULL) || (ops->time_us == NULL))
+    {
         return -1;
     }
 

@@ -2,18 +2,20 @@
 
 int flash_controller_init(flash_controller_t *controller, nand_device_t *nand)
 {
-    if ((controller == NULL) || (nand == NULL)) {
+    if ((controller == NULL) || (nand == NULL))
+    {
         return SSD_STATUS_INVALID_ARGUMENT;
     }
 
-    controller->nand = nand;
+    controller->nand           = nand;
     controller->active_channel = 0U;
     return SSD_STATUS_OK;
 }
 
 int flash_controller_poll(flash_controller_t *controller)
 {
-    if (controller == NULL) {
+    if (controller == NULL)
+    {
         return SSD_STATUS_INVALID_ARGUMENT;
     }
 

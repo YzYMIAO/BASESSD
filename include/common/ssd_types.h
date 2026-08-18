@@ -11,12 +11,13 @@
 typedef uint64_t ssd_lba_t;
 typedef uint64_t ssd_ppa_t;
 
-typedef enum {
-    SSD_STATUS_OK = 0,
+typedef enum
+{
+    SSD_STATUS_OK               = 0,
     SSD_STATUS_INVALID_ARGUMENT = -1,
-    SSD_STATUS_NO_SPACE = -2,
-    SSD_STATUS_IO_ERROR = -3,
-    SSD_STATUS_NOT_SUPPORTED = -4
+    SSD_STATUS_NO_SPACE         = -2,
+    SSD_STATUS_IO_ERROR         = -3,
+    SSD_STATUS_NOT_SUPPORTED    = -4
 } ssd_status_t;
 
 #endif /* SSD_TYPES_H */

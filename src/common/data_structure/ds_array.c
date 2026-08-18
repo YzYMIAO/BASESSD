@@ -1,28 +1,26 @@
 #include <config.h>
 #include <ds_array.h>
 
-#define DEFAULT_CAPACITY           8       /**< 默认初始容量 */
-#define DEFAULT_EXPANSION_FACTOR   2       /**< 默认扩容因子 */
-
+#define DEFAULT_CAPACITY         8 /**< 默认初始容量 */
+#define DEFAULT_EXPANSION_FACTOR 2 /**< 默认扩容因子 */
 
 /**
  * 动态数组结构体
- * 
+ *
  * 该结构体管理一个动态数组，支持自动扩容、元素增删改查等操作。
  * 数组存储的是 void* 类型的指针，可以指向任意类型的数据。
  */
 struct ds_Array_s
 {
-    size_t              size;           /**< 当前数组中元素的个数 */
-    size_t              capacity;       /**< 当前数组的容量（可容纳的最大元素数） */
-    float               exp_factor;     /**< 扩容因子，用于计算扩容时的新容量 */
-    void              **buffer;         /**< 指向存储元素指针的底层缓冲区 */
+    size_t size;       /**< 当前数组中元素的个数 */
+    size_t capacity;   /**< 当前数组的容量（可容纳的最大元素数） */
+    float  exp_factor; /**< 扩容因子，用于计算扩容时的新容量 */
+    void **buffer;     /**< 指向存储元素指针的底层缓冲区 */
 
-    void *(*mem_alloc)  (size_t size);      /**< 内存分配函数指针 */
-    void *(*mem_calloc) (size_t blocks, size_t size); /**< 内存分配并清零函数指针 */
-    void  (*mem_free)   (void *block);       /**< 内存释放函数指针 */
+    void *(*mem_alloc)(size_t size);                 /**< 内存分配函数指针 */
+    void *(*mem_calloc)(size_t blocks, size_t size); /**< 内存分配并清零函数指针 */
+    void (*mem_free)(void *block);                   /**< 内存释放函数指针 */
 };
-
 
 /**
  * 在数组中查找指定元素并返回其索引
@@ -38,8 +36,10 @@ struct ds_Array_s
  */
 ds_Stat ar_array_index_of(ds_Array *ar, void *element, size_t *index)
 {
-    for (size_t i = 0; i < ar->size; i++) {
-        if (ar->buffer[i] == element) {
+    for (size_t i = 0; i < ar->size; i++)
+    {
+        if (ar->buffer[i] == element)
+        {
             *index = i;
             return DS_OK;
         }
@@ -47,13 +47,12 @@ ds_Stat ar_array_index_of(ds_Array *ar, void *element, size_t *index)
     return DS_ERR_OUT_OF_RANGE;
 }
 
-
 /**
  * 扩容数组的容量
  *
  * 当数组元素个数达到容量上限时，按照扩容因子计算新容量并重新分配内存。
  * 如果当前容量已达到 DS_MAX_ELEMENTS，则不再扩容。
- * 
+ *
  * @param[in,out] ar 需要扩容的数组
  *
  * @return DS_OK 扩容成功，DS_ERR_MAX_CAPACITY 已达最大容量，
@@ -61,22 +60,27 @@ ds_Stat ar_array_index_of(ds_Array *ar, void *element, size_t *index)
  */
 ds_Stat ar_expand_capacity(ds_Array *ar)
 {
-    if (ar->capacity == DS_MAX_ELEMENTS) {
+    if (ar->capacity == DS_MAX_ELEMENTS)
+    {
         return DS_ERR_MAX_CAPACITY;
     }
 
     size_t new_capacity = ar->capacity * ar->exp_factor;
 
     /* 检查容量溢出：如果新容量小于原容量，说明发生了整数溢出 */
-    if (new_capacity < ar->capacity) {
+    if (new_capacity < ar->capacity)
+    {
         ar->capacity = DS_MAX_ELEMENTS;
-    } else {
+    }
+    else
+    {
         ar->capacity = new_capacity;
     }
 
     void **new_buff = ar->mem_alloc(ar->capacity * sizeof(void *));
 
-    if (new_buff == NULL) {
+    if (new_buff == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
@@ -87,7 +91,6 @@ ds_Stat ar_expand_capacity(ds_Array *ar)
     ar->buffer = new_buff;
     return DS_OK;
 }
-
 
 /**
  * 创建一个新的动态数组
@@ -101,11 +104,10 @@ ds_Stat ar_expand_capacity(ds_Array *ar)
  */
 ds_Stat ds_array_new(ds_Array **out)
 {
-    ds_ArrayConfig  ac;
+    ds_ArrayConfig ac;
     ds_array_confing_init(&ac);
     return ds_array_new_confing(&ac, out);
 }
-
 
 /**
  * 根据指定配置创建新数组
@@ -119,33 +121,39 @@ ds_Stat ds_array_new(ds_Array **out)
  * @return DS_OK 创建成功，DS_ERR_INVALID_CAPACITY 容量配置无效，
  *         DS_ERR_ALLOC 内存分配失败
  *
- * @note 配置中的容量不能为0，且扩容因子必须满足 
+ * @note 配置中的容量不能为0，且扩容因子必须满足
  *       exp_factor < DS_MAX_ELEMENTS / capacity，否则返回 DS_ERR_INVALID_CAPACITY
  */
 ds_Stat ds_array_new_confing(ds_ArrayConfig *ac, ds_Array **out)
 {
     float ex;
 
-    if (ac->exp_factor <= 1) {
+    if (ac->exp_factor <= 1)
+    {
         ex = DEFAULT_EXPANSION_FACTOR;
-    } else {
+    }
+    else
+    {
         ex = ac->exp_factor;
     }
 
     /* 检查容量配置是否有效 */
-    if (ac->capacity == 0 || ex > DS_MAX_ELEMENTS / ac->capacity) {
+    if (ac->capacity == 0 || ex > DS_MAX_ELEMENTS / ac->capacity)
+    {
         return DS_ERR_INVALID_CAPACITY;
     }
 
     ds_Array *ar = ac->mem_calloc(1, sizeof(ds_Array));
 
-    if (ar == NULL) {
+    if (ar == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
     void **buff = ac->mem_alloc(ac->capacity * sizeof(void *));
 
-    if (buff == NULL) {
+    if (buff == NULL)
+    {
         ac->mem_free(ar);
         return DS_ERR_ALLOC;
     }
@@ -161,7 +169,6 @@ ds_Stat ds_array_new_confing(ds_ArrayConfig *ac, ds_Array **out)
     return DS_OK;
 }
 
-
 /**
  * 初始化数组配置结构体为默认值
  *
@@ -172,14 +179,13 @@ ds_Stat ds_array_new_confing(ds_ArrayConfig *ac, ds_Array **out)
  */
 void ds_array_confing_init(ds_ArrayConfig *ac)
 {
-    ac->capacity    = DEFAULT_CAPACITY;
-    ac->exp_factor  = DEFAULT_EXPANSION_FACTOR;
+    ac->capacity   = DEFAULT_CAPACITY;
+    ac->exp_factor = DEFAULT_EXPANSION_FACTOR;
 
-    ac->mem_free    = free;
-    ac->mem_alloc   = malloc;
-    ac->mem_calloc  = calloc;
+    ac->mem_free   = free;
+    ac->mem_alloc  = malloc;
+    ac->mem_calloc = calloc;
 }
-
 
 /**
  * 销毁数组（不释放元素数据）
@@ -195,7 +201,6 @@ void ds_array_destroy(ds_Array *ar)
     ar->mem_free(ar);
 }
 
-
 /**
  * 销毁数组并释放所有元素数据
  *
@@ -210,12 +215,12 @@ void ds_array_destroy(ds_Array *ar)
  */
 void ds_array_destroy_cb(ds_Array *ar, void (*cb)(void *))
 {
-    for (size_t i = 0; i < ar->size; i++) {
+    for (size_t i = 0; i < ar->size; i++)
+    {
         cb(ar->buffer[i]);
     }
     ds_array_destroy(ar);
 }
-
 
 /**
  * 向数组末尾添加一个元素
@@ -230,9 +235,11 @@ void ds_array_destroy_cb(ds_Array *ar, void (*cb)(void *))
  */
 ds_Stat ds_array_add(ds_Array *ar, void *element)
 {
-    if (ar->size >= ar->capacity) {
+    if (ar->size >= ar->capacity)
+    {
         ds_Stat status = ar_expand_capacity(ar);
-        if (status != DS_OK) {
+        if (status != DS_OK)
+        {
             return status;
         }
     }
@@ -242,7 +249,6 @@ ds_Stat ds_array_add(ds_Array *ar, void *element)
 
     return DS_OK;
 }
-
 
 /**
  * 在指定位置插入元素
@@ -262,20 +268,24 @@ ds_Stat ds_array_add(ds_Array *ar, void *element)
 ds_Stat ds_array_add_at(ds_Array *ar, void *element, size_t index)
 {
     /* 如果索引等于size，等同于在末尾添加 */
-    if (ar->size == index) {
+    if (ar->size == index)
+    {
         ar->buffer[index] = element;
         ar->size++;
         return DS_OK;
     }
 
     /* 检查索引是否有效 */
-    if ((ar->size == 0 && index != 0) || (index > ar->size - 1)) {
+    if ((ar->size == 0 && index != 0) || (index > ar->size - 1))
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
-    if (ar->size >= ar->capacity) {
+    if (ar->size >= ar->capacity)
+    {
         ds_Stat status = ar_expand_capacity(ar);
-        if (status != DS_OK) {
+        if (status != DS_OK)
+        {
             return status;
         }
     }
@@ -288,7 +298,6 @@ ds_Stat ds_array_add_at(ds_Array *ar, void *element, size_t index)
     ar->size++;
     return DS_OK;
 }
-
 
 /**
  * 替换指定位置的元素
@@ -304,18 +313,19 @@ ds_Stat ds_array_add_at(ds_Array *ar, void *element, size_t index)
  */
 ds_Stat ds_array_replace_at(ds_Array *ar, void *element, size_t index, void **out)
 {
-    if (index >= ar->size) {
+    if (index >= ar->size)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
-    if (out != NULL) {
-        *out = ar->buffer[index];  /* 注意：原代码写的是 out = ar->buffer[index]，已修正 */
+    if (out != NULL)
+    {
+        *out = ar->buffer[index]; /* 注意：原代码写的是 out = ar->buffer[index]，已修正 */
     }
 
     ar->buffer[index] = element;
     return DS_OK;
 }
-
 
 /**
  * 交换数组中两个位置的元素
@@ -328,17 +338,17 @@ ds_Stat ds_array_replace_at(ds_Array *ar, void *element, size_t index, void **ou
  */
 ds_Stat ds_array_swap_at(ds_Array *ar, size_t index1, size_t index2)
 {
-    if (index1 >= ar->size || index2 >= ar->size) {
+    if (index1 >= ar->size || index2 >= ar->size)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
-    void *temp = ar->buffer[index1];
+    void *temp         = ar->buffer[index1];
     ar->buffer[index1] = ar->buffer[index2];
     ar->buffer[index2] = temp;
 
     return DS_OK;
 }
-
 
 /**
  * 从数组中移除指定元素（按指针值匹配）
@@ -358,24 +368,26 @@ ds_Stat ds_array_remove(ds_Array *ar, void *element, void **out)
 
     ds_Stat status = ar_array_index_of(ar, element, &index);
 
-    if (status == DS_ERR_OUT_OF_RANGE) {
+    if (status == DS_ERR_OUT_OF_RANGE)
+    {
         return DS_ERR_VALUE_NOT_FOUND;
     }
 
-    if (index != ar->size - 1) {
+    if (index != ar->size - 1)
+    {
         size_t shift_size = (ar->size - 1 - index) * sizeof(void *);
         memmove(&(ar->buffer[index]), &(ar->buffer[index + 1]), shift_size);
     }
 
     ar->size--;
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = element;
     }
 
     return DS_OK;
 }
-
 
 /**
  * 移除指定索引位置的元素
@@ -390,15 +402,18 @@ ds_Stat ds_array_remove(ds_Array *ar, void *element, void **out)
  */
 ds_Stat ds_array_remove_at(ds_Array *ar, size_t index, void **out)
 {
-    if (index >= ar->size) {
+    if (index >= ar->size)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = ar->buffer[index];
     }
 
-    if (index != ar->size - 1) {
+    if (index != ar->size - 1)
+    {
         size_t shift_size = (ar->size - index - 1) * sizeof(void *);
         memmove(&(ar->buffer[index]), &(ar->buffer[index + 1]), shift_size);
     }
@@ -406,7 +421,6 @@ ds_Stat ds_array_remove_at(ds_Array *ar, size_t index, void **out)
     ar->size--;
     return DS_OK;
 }
-
 
 /**
  * 移除数组末尾的元素
@@ -421,7 +435,6 @@ ds_Stat ds_array_remove_last(ds_Array *ar, void **out)
     return ds_array_remove_at(ar, ar->size - 1, out);
 }
 
-
 /**
  * 移除数组中的所有元素（不释放数据）
  *
@@ -434,7 +447,6 @@ void ds_array_remove_all(ds_Array *ar)
 {
     ar->size = 0;
 }
-
 
 /**
  * 移除并释放数组中的所有元素
@@ -449,12 +461,12 @@ void ds_array_remove_all(ds_Array *ar)
  */
 void ds_array_remove_all_free(ds_Array *ar)
 {
-    for (size_t i = 0; i < ar->size; i++) {
+    for (size_t i = 0; i < ar->size; i++)
+    {
         free(ar->buffer[i]);
     }
     ds_array_remove_all(ar);
 }
-
 
 /**
  * 获取指定索引位置的元素
@@ -467,14 +479,14 @@ void ds_array_remove_all_free(ds_Array *ar)
  */
 ds_Stat ds_array_get_at(ds_Array *ar, size_t index, void **out)
 {
-    if (index >= ar->size) {
+    if (index >= ar->size)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     *out = ar->buffer[index];
     return DS_OK;
 }
-
 
 /**
  * 获取数组末尾的元素
@@ -486,13 +498,13 @@ ds_Stat ds_array_get_at(ds_Array *ar, size_t index, void **out)
  */
 ds_Stat ds_array_get_last(ds_Array *ar, void **out)
 {
-    if (ar->size == 0) {
+    if (ar->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     return ds_array_get_at(ar, ar->size - 1, out);
 }
-
 
 /**
  * 获取数组的底层缓冲区
@@ -506,11 +518,10 @@ ds_Stat ds_array_get_last(ds_Array *ar, void **out)
  * @note 直接修改返回的缓冲区可能导致数组状态不一致，
  *       应使用数组提供的 API 函数进行修改
  */
-const void * const * ds_array_get_buffer(ds_Array *ar)
+const void *const *ds_array_get_buffer(ds_Array *ar)
 {
-    return (const void * const *) ar->buffer;
+    return (const void *const *)ar->buffer;
 }
-
 
 /**
  * 创建数组的子数组（副本）
@@ -530,19 +541,22 @@ const void * const * ds_array_get_buffer(ds_Array *ar)
  */
 ds_Stat ds_array_subrarry(ds_Array *ar, size_t b, size_t e, ds_Array **out)
 {
-    if (b > e || e >= ar->size) {
+    if (b > e || e >= ar->size)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     ds_Array *sub_ar = ar->mem_calloc(1, sizeof(ds_Array));
 
-    if (sub_ar == NULL) {
+    if (sub_ar == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
     sub_ar->buffer = ar->mem_alloc(ar->capacity * sizeof(void *));
 
-    if (sub_ar->buffer == NULL) {
+    if (sub_ar->buffer == NULL)
+    {
         ar->mem_free(sub_ar);
         return DS_ERR_ALLOC;
     }
@@ -561,7 +575,6 @@ ds_Stat ds_array_subrarry(ds_Array *ar, size_t b, size_t e, ds_Array **out)
     return DS_OK;
 }
 
-
 /**
  * 创建数组的浅拷贝
  *
@@ -579,7 +592,8 @@ ds_Stat ds_array_copy_shallow(ds_Array *ar, ds_Array **out)
 {
     ds_Array *copy = ar->mem_calloc(1, sizeof(ds_Array));
 
-    if (copy == NULL) {
+    if (copy == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
@@ -587,7 +601,8 @@ ds_Stat ds_array_copy_shallow(ds_Array *ar, ds_Array **out)
      * 且 copy->capacity 未初始化，存在潜在问题，已修正为 ar->mem_alloc */
     copy->buffer = ar->mem_alloc(ar->capacity * sizeof(void *));
 
-    if (copy->buffer == NULL) {
+    if (copy->buffer == NULL)
+    {
         ar->mem_free(copy);
         return DS_ERR_ALLOC;
     }
@@ -597,13 +612,12 @@ ds_Stat ds_array_copy_shallow(ds_Array *ar, ds_Array **out)
     copy->mem_alloc  = ar->mem_alloc;
     copy->mem_calloc = ar->mem_calloc;
     copy->mem_free   = ar->mem_free;
-    copy->size       = ar->size;  /* 原代码缺少设置 size，此处补充 */
+    copy->size       = ar->size; /* 原代码缺少设置 size，此处补充 */
 
     memcpy(copy->buffer, ar->buffer, ar->size * sizeof(void *));
     *out = copy;
     return DS_OK;
 }
-
 
 /**
  * 创建数组的深拷贝
@@ -623,14 +637,16 @@ ds_Stat ds_array_copy_deep(ds_Array *ar, void *(*cp)(void *), ds_Array **out)
 {
     ds_Array *copy = ar->mem_calloc(1, sizeof(ds_Array));
 
-    if (copy == NULL) {
+    if (copy == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
     /* 原代码使用了 copy->mem_alloc，但 copy->capacity 未初始化，已修正 */
     copy->buffer = ar->mem_alloc(ar->capacity * sizeof(void *));
 
-    if (copy->buffer == NULL) {
+    if (copy->buffer == NULL)
+    {
         ar->mem_free(copy);
         return DS_ERR_ALLOC;
     }
@@ -642,14 +658,14 @@ ds_Stat ds_array_copy_deep(ds_Array *ar, void *(*cp)(void *), ds_Array **out)
     copy->mem_free   = ar->mem_free;
     copy->size       = ar->size;
 
-    for (size_t i = 0; i < ar->size; i++) {
+    for (size_t i = 0; i < ar->size; i++)
+    {
         copy->buffer[i] = cp(ar->buffer[i]);
     }
 
     *out = copy;
     return DS_OK;
 }
-
 
 /**
  * 就地过滤数组（修改原数组）
@@ -663,7 +679,8 @@ ds_Stat ds_array_copy_deep(ds_Array *ar, void *(*cp)(void *), ds_Array **out)
  */
 ds_Stat ds_array_filter_mut(ds_Array *ar, bool (*pred)(const void *))
 {
-    if (ar->size == 0) {
+    if (ar->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
@@ -672,14 +689,18 @@ ds_Stat ds_array_filter_mut(ds_Array *ar, bool (*pred)(const void *))
     size_t i    = 0;
 
     /* 从后向前遍历，减少元素移动次数 */
-    for (i = ar->size - 1; i != ((size_t)-1); i--) {
-        if (pred(ar->buffer[i]) == false) {
+    for (i = ar->size - 1; i != ((size_t)-1); i--)
+    {
+        if (pred(ar->buffer[i]) == false)
+        {
             rm++;
             continue;
         }
 
-        if (rm > 0) {
-            if (keep > 0) {
+        if (rm > 0)
+        {
+            if (keep > 0)
+            {
                 /* 注意：原代码 memmove 参数地址错误，已修正为取地址符 */
                 memmove(&(ar->buffer[i + 1]), &(ar->buffer[i + 1 + rm]), keep * sizeof(void *));
                 keep = 0;
@@ -691,8 +712,10 @@ ds_Stat ds_array_filter_mut(ds_Array *ar, bool (*pred)(const void *))
     }
 
     /* 处理剩余需要移除的元素 */
-    if (rm > 0) {
-        if (keep > 0) {
+    if (rm > 0)
+    {
+        if (keep > 0)
+        {
             memmove(&(ar->buffer[0]), &(ar->buffer[rm]), keep * sizeof(void *));
             keep = 0;
         }
@@ -701,7 +724,6 @@ ds_Stat ds_array_filter_mut(ds_Array *ar, bool (*pred)(const void *))
 
     return DS_OK;
 }
-
 
 /**
  * 过滤数组并生成新数组（不修改原数组）
@@ -721,13 +743,15 @@ ds_Stat ds_array_filter_mut(ds_Array *ar, bool (*pred)(const void *))
  */
 ds_Stat ds_array_filter(ds_Array *ar, bool (*pred)(const void *), ds_Array **out)
 {
-    if (ar->size == 0) {
+    if (ar->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     ds_Array *filter = ar->mem_calloc(1, sizeof(ds_Array));
 
-    if (filter == NULL) {
+    if (filter == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
@@ -735,15 +759,18 @@ ds_Stat ds_array_filter(ds_Array *ar, bool (*pred)(const void *), ds_Array **out
      * 正确做法是为 filter->buffer 分配内存，已修正 */
     filter->buffer = ar->mem_alloc(ar->capacity * sizeof(void *));
 
-    if (filter->buffer == NULL) {
+    if (filter->buffer == NULL)
+    {
         ar->mem_free(filter);
         return DS_ERR_ALLOC;
     }
 
     size_t f = 0;
 
-    for (size_t i = 0; i < ar->size; i++) {
-        if (pred(ar->buffer[i]) == true) {
+    for (size_t i = 0; i < ar->size; i++)
+    {
+        if (pred(ar->buffer[i]) == true)
+        {
             filter->buffer[f++] = ar->buffer[i];
         }
     }
@@ -759,7 +786,6 @@ ds_Stat ds_array_filter(ds_Array *ar, bool (*pred)(const void *), ds_Array **out
     return DS_OK;
 }
 
-
 /**
  * 反转数组中元素的顺序
  *
@@ -769,17 +795,18 @@ ds_Stat ds_array_filter(ds_Array *ar, bool (*pred)(const void *), ds_Array **out
  */
 void ds_array_reverse(ds_Array *ar)
 {
-    if (ar->size == 0) {
+    if (ar->size == 0)
+    {
         return;
     }
 
-    for (size_t i = 0, j = ar->size - 1; i < ar->size / 2; i++, j--) {
-        void *temp = ar->buffer[i];
+    for (size_t i = 0, j = ar->size - 1; i < ar->size / 2; i++, j--)
+    {
+        void *temp    = ar->buffer[i];
         ar->buffer[i] = ar->buffer[j];
         ar->buffer[j] = temp;
     }
 }
-
 
 /**
  * 统计数组中指定元素（按指针值）的出现次数
@@ -793,15 +820,16 @@ size_t ds_array_contains(ds_Array *ar, void *element)
 {
     size_t count = 0;
 
-    for (size_t i = 0; i < ar->size; i++) {
-        if (ar->buffer[i] == element) {
+    for (size_t i = 0; i < ar->size; i++)
+    {
+        if (ar->buffer[i] == element)
+        {
             count++;
         }
     }
 
     return count;
 }
-
 
 /**
  * 统计数组中与指定值相等的元素出现次数（使用比较函数）
@@ -818,15 +846,16 @@ size_t ds_array_contains_value(ds_Array *ar, void *element, int (*comper)(const 
 {
     size_t count = 0;
 
-    for (size_t i = 0; i < ar->size; i++) {
-        if (comper(ar->buffer[i], element) == 0) {
+    for (size_t i = 0; i < ar->size; i++)
+    {
+        if (comper(ar->buffer[i], element) == 0)
+        {
             count++;
         }
     }
 
     return count;
 }
-
 
 /**
  * 获取数组的元素个数
@@ -840,7 +869,6 @@ size_t ds_array_size(ds_Array *ar)
     return ar->size;
 }
 
-
 /**
  * 获取数组的容量
  *
@@ -852,7 +880,6 @@ size_t ds_array_capacity(ds_Array *ar)
 {
     return ar->capacity;
 }
-
 
 /**
  * 对数组进行排序
@@ -870,7 +897,6 @@ void ds_array_sort(ds_Array *ar, int (*comper)(const void *, const void *))
     qsort(ar->buffer, ar->size, sizeof(void *), comper);
 }
 
-
 /**
  * 对数组中的每个元素执行映射操作
  *
@@ -881,11 +907,11 @@ void ds_array_sort(ds_Array *ar, int (*comper)(const void *, const void *))
  */
 void ds_array_map(ds_Array *ar, void (*fn_map)(const void *))
 {
-    for (size_t i = 0; i < ar->size; i++) {
+    for (size_t i = 0; i < ar->size; i++)
+    {
         fn_map(ar->buffer[i]);
     }
 }
-
 
 /**
  * 对数组进行归约操作
@@ -901,20 +927,22 @@ void ds_array_map(ds_Array *ar, void (*fn_map)(const void *))
  */
 void ds_array_reduce(ds_Array *ar, void (*fn)(void *, void *, void *), void *result)
 {
-    if (ar->size == 1) {
+    if (ar->size == 1)
+    {
         fn(ar->buffer[0], NULL, result);
         return;
     }
 
-    if (ar->size > 1) {
+    if (ar->size > 1)
+    {
         fn(ar->buffer[0], ar->buffer[1], result);
     }
 
-    for (size_t i = 2; i < ar->size; i++) {
+    for (size_t i = 2; i < ar->size; i++)
+    {
         fn(result, ar->buffer[i], result);
     }
 }
-
 
 /**
  * 初始化数组迭代器
@@ -927,10 +955,9 @@ void ds_array_reduce(ds_Array *ar, void (*fn)(void *, void *, void *), void *res
 void ds_array_iter_init(ds_ArrayIter *iter, ds_Array *ar)
 {
     iter->ar           = ar;
-    iter->index        = 0;  /* 原代码缺少分号，已修正 */
+    iter->index        = 0; /* 原代码缺少分号，已修正 */
     iter->last_removed = false;
 }
-
 
 /**
  * 获取迭代器的下一个元素
@@ -944,7 +971,8 @@ void ds_array_iter_init(ds_ArrayIter *iter, ds_Array *ar)
  */
 ds_Stat ds_array_iter_next(ds_ArrayIter *iter, void **out)
 {
-    if (iter->index >= iter->ar->size) {
+    if (iter->index >= iter->ar->size)
+    {
         return DS_ITER_END;
     }
 
@@ -953,7 +981,6 @@ ds_Stat ds_array_iter_next(ds_ArrayIter *iter, void **out)
     iter->last_removed = false;
     return DS_OK;
 }
-
 
 /**
  * 移除迭代器上次返回的元素
@@ -973,15 +1000,16 @@ ds_Stat ds_array_iter_remove(ds_ArrayIter *iter, void **out)
 {
     ds_Stat status = DS_ERR_VALUE_NOT_FOUND;
 
-    if (iter->last_removed == false) {
+    if (iter->last_removed == false)
+    {
         status = ds_array_remove_at(iter->ar, iter->index - 1, out);
-        if (status == DS_OK) {
+        if (status == DS_OK)
+        {
             iter->last_removed = true;
         }
     }
     return status;
 }
-
 
 /**
  * 在迭代器当前位置插入元素
@@ -1003,7 +1031,6 @@ ds_Stat ds_array_iter_all(ds_ArrayIter *iter, void *element)
     return ds_array_add_at(iter->ar, element, iter->index++);
 }
 
-
 /**
  * 替换迭代器上次返回的元素
  *
@@ -1020,7 +1047,6 @@ ds_Stat ds_array_iter_replace(ds_ArrayIter *iter, void *element, void **out)
     return ds_array_replace_at(iter->ar, element, iter->index - 1, out);
 }
 
-
 /**
  * 获取迭代器上次返回元素的索引
  *
@@ -1035,4 +1061,3 @@ size_t ds_array_iter_index(ds_ArrayIter *iter)
 {
     return iter->index - 1;
 }
-

@@ -38,11 +38,20 @@ ALL_LIBS = $(foreach mod,$(MODULES),$(LIB_DIR)/lib$(mod).a)
 # 4. 链接和分析文件生成
 # ============================================================================
 
+# 固件 ELF 依赖链接脚本；修改内存布局后必须自动触发重新链接。
+ifeq ($(BUILD_TARGET),firmware)
+LINK_DEPS := $(LINKER_SCRIPT)
+else
+LINK_DEPS :=
+endif
+
 # 4.1 链接可执行文件（生成 .map 文件）
-$(TARGET).elf:$(S_OBJS) $(ALL_LIBS)
+$(TARGET).elf: $(S_OBJS) $(APP_OBJS) $(ALL_LIBS) $(LINK_DEPS)
 	@$(MKDIR) $(BIN_DIR)
 	@$(ECHO) "Linking $(BUILD_TYPE) version..."
-	$(Q)$(LD) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	# 模块静态库之间允许存在合理的双向引用，链接组负责重复扫描并解析符号。
+	$(Q)$(LD) $(LDFLAGS) $(S_OBJS) $(APP_OBJS) \
+		-Wl,--start-group $(ALL_LIBS) $(LDLIBS) -Wl,--end-group -o $@
 	@$(ECHO) "Build complete: $@"
 
 
@@ -90,7 +99,11 @@ $(OBJ_DIR)/%.lst: $(OBJ_DIR)/%.o
 # ============================================================================
 # 6. 收集所有分析文件
 # ============================================================================
-ANALYSIS_FILES = $(TARGET).map $(TARGET).sym $(TARGET).size $(TARGET).lst $(TARGET).bin
+ifeq ($(BUILD_TARGET),firmware)
+ANALYSIS_FILES =$(TARGET).elf $(TARGET) $(TARGET).sym $(TARGET).size $(TARGET).lst $(TARGET).bin
+else
+ANALYSIS_FILES = $(TARGET).elf
+endif
 
 # 所有 .i 文件列表
 ALL_I_FILES = $(C_SRCS:$(SRC_ROOT)/%.c=$(OBJ_DIR)/%.i)
@@ -98,15 +111,6 @@ ALL_I_FILES = $(C_SRCS:$(SRC_ROOT)/%.c=$(OBJ_DIR)/%.i)
 # 所有 .lst 文件列表
 ALL_LST_FILES = $(C_SRCS:$(SRC_ROOT)/%.c=$(OBJ_DIR)/%.lst)
 
-# ============================================================================
-# 7. 主目标
-# ============================================================================
-.PHONY: all
-all: $(TARGET) $(ANALYSIS_FILES)
-
-
-.PHONY: reall
-reall: clean all
 
 # ============================================================================
 # 8. 辅助目标
@@ -140,93 +144,3 @@ clean:
 distclean:
 	@$(ECHO) "Distcleaning all builds..."
 	$(Q)$(RMDIR) build
-
-
-# ============================================================================
-# 10. 信息目标
-# ============================================================================
-.PHONY: info
-info:
-	@echo "=== Build Configuration ==="
-	@echo "  BUILD_TYPE    : $(BUILD_TYPE)"
-	@echo "  TARGET        : $(TARGET)"
-	@echo "  MODULES       : $(MODULES)"
-	@echo "  ALL_LIBS       :"
-	@printf '    %s\n' $(ALL_LIBS)
-	@echo "  ALL_OBJS count: $(words $(ALL_OBJS))"
-	@echo ""
-	@echo "  ALL_INCS      :"
-	@printf '    %s\n' $(ALL_INCS)
-	@echo ""
-	@echo "  ALL_SRCS      :"
-	@printf '    %s\n' $(ALL_SRCS)
-	@echo ""
-	@echo "  CFLAGS        :"
-	@printf '    %s\n' $(CFLAGS)
-	@echo ""
-	@echo "  LDFLAGS       :"
-	@printf '    %s\n' $(LDFLAGS)
-	@echo ""
-	@echo "  LDLIBS        : $(LDLIBS)"
-	@echo "  CC            : $(CC)"
-	@echo "  AR            : $(AR)"
-	@echo ""
-	@echo "=== Analysis Files ==="
-	@echo "  BIN file      : $(TARGET).bin"
-	@echo "  MAP file      : $(TARGET).map"
-	@echo "  SYM file      : $(TARGET).sym"
-	@echo "  SIZE file     : $(TARGET).size"
-	@echo "  LST file      : $(TARGET).lst"
-	@echo "  Preprocess    : $(words $(ALL_I_FILES)) .i files"
-	@echo "  Disassembly   : $(words $(ALL_LST_FILES)) .lst files"
-
-# ============================================================================
-# 11. 帮助信息
-# ============================================================================
-.PHONY: help
-help:
-	@echo "============================================================"
-	@echo "  DS Library Build System"
-	@echo "============================================================"
-	@echo ""
-	@echo "  Build Targets:"
-	@echo "    all          - Build default (debug) target"
-	@echo "    debug        - Build debug version"
-	@echo "    release      - Build release version"
-	@echo "    asan         - Build with AddressSanitizer"
-	@echo ""
-	@echo "  Analysis Targets:"
-	@echo "    preprocess   - Generate .i files (preprocessed output)"
-	@echo "    disassemble  - Generate .lst files (disassembly listing)"
-	@echo "    build-with-log - Build with error log (build.log)"
-	@echo ""
-	@echo "  Cleanup Targets:"
-	@echo "    clean        - Remove build/$(BUILD_TYPE) directory"
-	@echo "    distclean    - Remove entire build/ directory"
-	@echo ""
-	@echo "  Info Targets:"
-	@echo "    info         - Show build configuration"
-	@echo "    help         - Show this help"
-	@echo ""
-	@echo "  Generated Files:"
-	@echo "    $(TARGET).map  - Memory map"
-	@echo "    $(TARGET).sym  - Symbol table"
-	@echo "    $(TARGET).size - Size summary"
-	@echo "    $(TARGET).lst  - Disassembly listing"
-	@echo "    $(OBJ_DIR)/*.i - Preprocessed files"
-	@echo "    $(OBJ_DIR)/*.lst - Per-file disassembly"
-	@echo "    $(BUILD_DIR)/build.log - Build error log"
-	@echo ""
-	@echo "  Variables:"
-	@echo "    BUILD_TYPE   - debug, release, asan (default: debug)"
-	@echo "    V=1          - Show full compile commands"
-	@echo "    CROSS_COMPILE- Cross-compilation prefix"
-	@echo "    COVERAGE=1   - Enable code coverage (gcov)"
-	@echo ""
-	@echo "  Examples:"
-	@echo "    make debug V=1              # Build debug with verbose output"
-	@echo "    make release                # Build optimized release"
-	@echo "    make COVERAGE=1             # Build with coverage support"
-	@echo "    make preprocess             # Generate .i files"
-	@echo "    make disassemble            # Generate disassembly listings"
-	@echo "============================================================"

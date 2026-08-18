@@ -1,10 +1,8 @@
 #include <config.h>
 #include <ds_stack.h>
 
-
-#define DEFAULT_CAPACITY           8   /**< 默认初始容量 */
-#define DEFAULT_EXPANSION_FACTOR   2   /**< 默认扩容因子 */
-
+#define DEFAULT_CAPACITY         8 /**< 默认初始容量 */
+#define DEFAULT_EXPANSION_FACTOR 2 /**< 默认扩容因子 */
 
 /**
  * @brief 栈结构体
@@ -15,16 +13,15 @@
  */
 struct ds_stack_s
 {
-    size_t      size;       /**< 当前栈中的元素个数 */
-    size_t      capacity;   /**< 当前栈容量 */
-    float       exp_factor; /**< 扩容因子 */
-    void     **buffer;     /**< 指向存储元素指针的数组缓冲区 */
+    size_t size;       /**< 当前栈中的元素个数 */
+    size_t capacity;   /**< 当前栈容量 */
+    float  exp_factor; /**< 扩容因子 */
+    void **buffer;     /**< 指向存储元素指针的数组缓冲区 */
 
-    void *(*mem_alloc)  (size_t size);          /**< 内存分配函数指针 */
-    void *(*mem_calloc) (size_t blocks, size_t size); /**< 内存分配并清零函数指针 */
-    void  (*mem_free)   (void *block);          /**< 内存释放函数指针 */
+    void *(*mem_alloc)(size_t size);                 /**< 内存分配函数指针 */
+    void *(*mem_calloc)(size_t blocks, size_t size); /**< 内存分配并清零函数指针 */
+    void (*mem_free)(void *block);                   /**< 内存释放函数指针 */
 };
-
 
 /**
  * @brief 创建一个新的栈（使用默认配置）
@@ -42,7 +39,6 @@ ds_Stat ds_stack_new(ds_Stack **out)
     ds_stack_conf_init(&conf);
     return ds_stack_new_conf(&conf, out);
 }
-
 
 /**
  * @brief 初始化栈配置结构体为默认值
@@ -62,7 +58,6 @@ void ds_stack_conf_init(ds_StackConfig *conf)
     conf->mem_free   = free;
 }
 
-
 /**
  * @brief 根据指定配置创建新的栈
  *
@@ -79,26 +74,32 @@ ds_Stat ds_stack_new_conf(ds_StackConfig *conf, ds_Stack **out)
     float ex;
 
     /* 扩容因子必须大于 1 */
-    if (conf->exp_factor <= 1) {
+    if (conf->exp_factor <= 1)
+    {
         ex = DEFAULT_EXPANSION_FACTOR;
-    } else {
+    }
+    else
+    {
         ex = conf->exp_factor;
     }
 
     /* 检查容量配置是否有效 */
-    if (conf->capacity == 0 || ex > DS_MAX_ELEMENTS / conf->capacity) {
+    if (conf->capacity == 0 || ex > DS_MAX_ELEMENTS / conf->capacity)
+    {
         return DS_ERR_INVALID_RANGE;
     }
 
     ds_Stack *stack = conf->mem_calloc(1, sizeof(ds_Stack));
 
-    if (stack == NULL) {
+    if (stack == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
     stack->buffer = conf->mem_alloc(conf->capacity * sizeof(void *));
 
-    if (stack->buffer == NULL) {
+    if (stack->buffer == NULL)
+    {
         conf->mem_free(stack);
         return DS_ERR_ALLOC;
     }
@@ -114,7 +115,6 @@ ds_Stat ds_stack_new_conf(ds_StackConfig *conf, ds_Stack **out)
 
     return DS_OK;
 }
-
 
 /**
  * @brief 扩容栈的容量
@@ -132,19 +132,22 @@ ds_Stat ds_stack_new_conf(ds_StackConfig *conf, ds_Stack **out)
  */
 ds_Stat expand_capacity(ds_Stack *stack)
 {
-    if (stack->capacity == DS_MAX_ELEMENTS) {
+    if (stack->capacity == DS_MAX_ELEMENTS)
+    {
         return DS_ERR_MAX_CAPACITY;
     }
 
     size_t new_capacity = stack->capacity * stack->exp_factor;
 
-    if (new_capacity < stack->capacity) {
+    if (new_capacity < stack->capacity)
+    {
         new_capacity = DS_MAX_ELEMENTS;
     }
 
     void **new_buffer = stack->mem_alloc(new_capacity * sizeof(void *));
 
-    if (new_buffer == NULL) {
+    if (new_buffer == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
@@ -158,7 +161,6 @@ ds_Stat expand_capacity(ds_Stack *stack)
 
     return DS_OK;
 }
-
 
 /**
  * @brief 销毁栈（不释放元素数据）
@@ -174,7 +176,6 @@ void ds_stack_destroy(ds_Stack *stack)
     stack->mem_free(stack);
 }
 
-
 /**
  * @brief 销毁栈并释放所有元素数据
  *
@@ -189,13 +190,13 @@ void ds_stack_destroy(ds_Stack *stack)
  */
 void ds_stack_destroy_cb(ds_Stack *stack, void (*cb)(void *))
 {
-    for (size_t i = 0; i < stack->size; i++) {
+    for (size_t i = 0; i < stack->size; i++)
+    {
         cb(stack->buffer[i]);
     }
     stack->mem_free(stack->buffer);
     stack->mem_free(stack);
 }
-
 
 /**
  * @brief 入栈操作
@@ -210,10 +211,12 @@ void ds_stack_destroy_cb(ds_Stack *stack, void (*cb)(void *))
  */
 ds_Stat ds_stack_push(ds_Stack *stack, void *element)
 {
-    if (stack->size >= stack->capacity) {
+    if (stack->size >= stack->capacity)
+    {
         ds_Stat status = expand_capacity(stack);
 
-        if (status != DS_OK) {
+        if (status != DS_OK)
+        {
             return status;
         }
     }
@@ -222,7 +225,6 @@ ds_Stat ds_stack_push(ds_Stack *stack, void *element)
     stack->size++;
     return DS_OK;
 }
-
 
 /**
  * @brief 查看栈顶元素（不移除）
@@ -236,7 +238,8 @@ ds_Stat ds_stack_push(ds_Stack *stack, void *element)
  */
 ds_Stat ds_stack_peek(ds_Stack *stack, void **out)
 {
-    if (stack->size == 0) {
+    if (stack->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
@@ -245,7 +248,6 @@ ds_Stat ds_stack_peek(ds_Stack *stack, void **out)
     *out = data;
     return DS_OK;
 }
-
 
 /**
  * @brief 出栈操作
@@ -259,7 +261,8 @@ ds_Stat ds_stack_peek(ds_Stack *stack, void **out)
  */
 ds_Stat ds_stack_pop(ds_Stack *stack, void **out)
 {
-    if (stack->size == 0) {
+    if (stack->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
@@ -269,7 +272,6 @@ ds_Stat ds_stack_pop(ds_Stack *stack, void **out)
     *out = data;
     return DS_OK;
 }
-
 
 /**
  * @brief 获取栈的元素个数
@@ -283,7 +285,6 @@ size_t ds_stack_size(ds_Stack *stack)
     return stack->size;
 }
 
-
 /**
  * @brief 对栈中的每个元素执行操作
  *
@@ -294,11 +295,11 @@ size_t ds_stack_size(ds_Stack *stack)
  */
 void ds_stack_map(ds_Stack *stack, void (*fn)(void *))
 {
-    for (size_t i = 0; i < stack->size; i++) {
+    for (size_t i = 0; i < stack->size; i++)
+    {
         fn(stack->buffer[i]);
     }
 }
-
 
 /**
  * @brief 就地过滤栈（修改原栈）
@@ -318,7 +319,8 @@ void ds_stack_map(ds_Stack *stack, void (*fn)(void *))
  */
 ds_Stat ds_stack_filter_mut(ds_Stack *stack, bool (*pred)(void *))
 {
-    if (stack->size == 0) {
+    if (stack->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
@@ -327,13 +329,16 @@ ds_Stat ds_stack_filter_mut(ds_Stack *stack, bool (*pred)(void *))
     size_t i    = 0;
 
     /* 从栈顶向栈底遍历 */
-    for (i = stack->size - 1; i != ((size_t)-1); i--) {
-        if (pred(stack->buffer[i]) == false) {
+    for (i = stack->size - 1; i != ((size_t)-1); i--)
+    {
+        if (pred(stack->buffer[i]) == false)
+        {
             rm++;
             continue;
         }
 
-        if (rm > 0) {
+        if (rm > 0)
+        {
             /* 将需要保留的元素移动到正确位置 */
             size_t block_size = keep * sizeof(void *);
             memmove(&(stack->buffer[i + 1]), &(stack->buffer[i + rm + 1]), block_size);
@@ -345,7 +350,8 @@ ds_Stat ds_stack_filter_mut(ds_Stack *stack, bool (*pred)(void *))
     }
 
     /* 处理栈顶剩余需要移除的元素 */
-    if (rm > 0) {
+    if (rm > 0)
+    {
         size_t block_size = keep * sizeof(void *);
         memmove(&(stack->buffer[i + 1]), &(stack->buffer[i + rm + 1]), block_size);
         stack->size -= rm;
@@ -353,7 +359,6 @@ ds_Stat ds_stack_filter_mut(ds_Stack *stack, bool (*pred)(void *))
 
     return DS_OK;
 }
-
 
 /**
  * @brief 过滤栈并生成新栈（不修改原栈）
@@ -371,19 +376,22 @@ ds_Stat ds_stack_filter_mut(ds_Stack *stack, bool (*pred)(void *))
  */
 ds_Stat ds_stack_filter(ds_Stack *stack, int (*pred)(void *), ds_Stack **out)
 {
-    if (stack->size == 0) {
+    if (stack->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     ds_Stack *filtered = stack->mem_calloc(1, sizeof(ds_Stack));
 
-    if (filtered == NULL) {
+    if (filtered == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
     filtered->buffer = stack->mem_alloc(stack->capacity * sizeof(void *));
 
-    if (filtered->buffer == NULL) {
+    if (filtered->buffer == NULL)
+    {
         stack->mem_free(filtered);
         return DS_ERR_ALLOC;
     }
@@ -395,8 +403,10 @@ ds_Stat ds_stack_filter(ds_Stack *stack, int (*pred)(void *), ds_Stack **out)
     filtered->mem_free   = stack->mem_free;
     filtered->size       = 0;
 
-    for (size_t i = 0; i < stack->size; i++) {
-        if (pred(stack->buffer[i]) == true) {
+    for (size_t i = 0; i < stack->size; i++)
+    {
+        if (pred(stack->buffer[i]) == true)
+        {
             filtered->buffer[filtered->size++] = stack->buffer[i];
         }
     }

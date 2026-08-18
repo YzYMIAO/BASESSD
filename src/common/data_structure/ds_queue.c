@@ -1,10 +1,8 @@
 #include <config.h>
-#include <ds_queue.h>
 #include <ds_deque.h>
+#include <ds_queue.h>
 
-
-#define DEFAULT_CAPACITY    8   /**< 默认初始容量 */
-
+#define DEFAULT_CAPACITY 8 /**< 默认初始容量 */
 
 /**
  * @brief 队列结构体（基于环形缓冲区）
@@ -15,17 +13,16 @@
  */
 struct ds_queue_s
 {
-    size_t      size;       /**< 当前队列中的元素个数 */
-    size_t      capacity;   /**< 队列容量（始终为 2 的幂） */
-    size_t      first;      /**< 队首元素的逻辑索引（物理索引 = first & (capacity-1)） */
-    size_t      last;       /**< 队尾元素的后一个位置的逻辑索引 */
-    void     **buffer;     /**< 指向存储元素指针的底层环形缓冲区 */
+    size_t size;     /**< 当前队列中的元素个数 */
+    size_t capacity; /**< 队列容量（始终为 2 的幂） */
+    size_t first;    /**< 队首元素的逻辑索引（物理索引 = first & (capacity-1)） */
+    size_t last;     /**< 队尾元素的后一个位置的逻辑索引 */
+    void **buffer;   /**< 指向存储元素指针的底层环形缓冲区 */
 
-    void *(*mem_alloc)  (size_t size);          /**< 内存分配函数指针 */
-    void *(*mem_calloc) (size_t blocks, size_t size); /**< 内存分配并清零函数指针 */
-    void  (*mem_free)   (void *block);          /**< 内存释放函数指针 */
+    void *(*mem_alloc)(size_t size);                 /**< 内存分配函数指针 */
+    void *(*mem_calloc)(size_t blocks, size_t size); /**< 内存分配并清零函数指针 */
+    void (*mem_free)(void *block);                   /**< 内存释放函数指针 */
 };
-
 
 /**
  * @brief 计算大于等于 n 的最小 2 的幂
@@ -40,11 +37,13 @@ struct ds_queue_s
  */
 static INLINE size_t upper_power_two(size_t n)
 {
-    if (n >= MAX_POW_TWO) {
+    if (n >= MAX_POW_TWO)
+    {
         return MAX_POW_TWO;
     }
 
-    if (n == 0) {
+    if (n == 0)
+    {
         return 1;
     }
 
@@ -64,7 +63,6 @@ static INLINE size_t upper_power_two(size_t n)
     return n;
 }
 
-
 /**
  * @brief 复制队列的缓冲区内容
  *
@@ -81,14 +79,18 @@ static INLINE size_t upper_power_two(size_t n)
  * @warning 原代码中浅拷贝分支的 memcpy 目标地址为 &buffer，
  *          这是错误的，应为 buffer（因为 buffer 本身就是指针）
  */
-static void copy_deque_buffer(ds_Queue const * const queue, void **buffer, void *(*cp)(void *))
+static void copy_deque_buffer(ds_Queue const *const queue, void **buffer, void *(*cp)(void *))
 {
-    if (cp == NULL) {
+    if (cp == NULL)
+    {
         /* 浅拷贝：直接复制指针 */
-        if (queue->last > queue->first) {
+        if (queue->last > queue->first)
+        {
             /* 队列在物理空间中是连续的 */
             memcpy(buffer, &(queue->buffer[queue->first]), queue->size * sizeof(void *));
-        } else {
+        }
+        else
+        {
             /* 队列在物理空间中是不连续的（跨越了缓冲区边界） */
             size_t l = queue->last;                    /* 右段元素个数 */
             size_t r = queue->capacity - queue->first; /* 左段元素个数 */
@@ -98,15 +100,17 @@ static void copy_deque_buffer(ds_Queue const * const queue, void **buffer, void 
             /* 再复制从缓冲区开头到 last 的部分 */
             memcpy(&(buffer[r]), &(queue->buffer[0]), l * sizeof(void *));
         }
-    } else {
+    }
+    else
+    {
         /* 深拷贝：对每个元素调用拷贝函数 */
-        for (size_t i = 0; i < queue->size; i++) {
+        for (size_t i = 0; i < queue->size; i++)
+        {
             size_t index = (queue->first + i) & (queue->capacity - 1);
-            buffer[i] = cp(queue->buffer[index]);
+            buffer[i]    = cp(queue->buffer[index]);
         }
     }
 }
-
 
 /**
  * @brief 扩容队列的容量
@@ -121,14 +125,16 @@ static void copy_deque_buffer(ds_Queue const * const queue, void **buffer, void 
  */
 static ds_Stat queue_expand_capacity(ds_Queue *queue)
 {
-    if (queue->capacity == MAX_POW_TWO) {
+    if (queue->capacity == MAX_POW_TWO)
+    {
         return DS_ERR_MAX_CAPACITY;
     }
 
-    size_t      new_capacity = queue->capacity << 1;
-    void     **new_buffer   = queue->mem_calloc(new_capacity, sizeof(void *));
+    size_t new_capacity = queue->capacity << 1;
+    void **new_buffer   = queue->mem_calloc(new_capacity, sizeof(void *));
 
-    if (new_buffer == NULL) {
+    if (new_buffer == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
@@ -142,7 +148,6 @@ static ds_Stat queue_expand_capacity(ds_Queue *queue)
 
     return DS_OK;
 }
-
 
 /**
  * @brief 创建一个新的队列（使用默认配置）
@@ -164,7 +169,6 @@ ds_Stat ds_queue_new(ds_Queue **queue)
     return ds_queue_new_conf(&conf, queue);
 }
 
-
 /**
  * @brief 初始化队列配置结构体为默认值
  *
@@ -174,13 +178,12 @@ ds_Stat ds_queue_new(ds_Queue **queue)
  */
 void ds_queue_conf_init(ds_QueueConfig *conf)
 {
-    conf->capacity   = DEFAULT_CAPACITY;
+    conf->capacity = DEFAULT_CAPACITY;
 
     conf->mem_free   = free;
     conf->mem_alloc  = malloc;
     conf->mem_calloc = calloc;
 }
-
 
 /**
  * @brief 根据指定配置创建新的队列
@@ -200,31 +203,32 @@ ds_Stat ds_queue_new_conf(ds_QueueConfig *conf, ds_Queue **out)
 {
     ds_Queue *queue = conf->mem_calloc(1, sizeof(ds_Queue));
 
-    if (queue == NULL) {
+    if (queue == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
     /* 注意：原代码中 buffer 的类型为 void*，但应为 void** */
     void **buffer = conf->mem_alloc(conf->capacity * sizeof(void *));
 
-    if (buffer == NULL) {
+    if (buffer == NULL)
+    {
         conf->mem_free(queue);
         return DS_ERR_ALLOC;
     }
 
-    queue->buffer    = buffer;
-    queue->capacity  = upper_power_two(conf->capacity);
-    queue->mem_alloc = conf->mem_alloc;
+    queue->buffer     = buffer;
+    queue->capacity   = upper_power_two(conf->capacity);
+    queue->mem_alloc  = conf->mem_alloc;
     queue->mem_calloc = conf->mem_calloc;
-    queue->mem_free  = conf->mem_free;
-    queue->size      = 0;
-    queue->first     = 0;
-    queue->last      = 0;
+    queue->mem_free   = conf->mem_free;
+    queue->size       = 0;
+    queue->first      = 0;
+    queue->last       = 0;
 
     *out = queue;
     return DS_OK;
 }
-
 
 /**
  * @brief 销毁队列（不释放元素数据）
@@ -240,7 +244,6 @@ void ds_queue_destroy(ds_Queue *queue)
     queue->mem_free(queue);
 }
 
-
 /**
  * @brief 销毁队列并释放所有元素数据
  *
@@ -255,13 +258,13 @@ void ds_queue_destroy(ds_Queue *queue)
  */
 void ds_queue_destroy_cb(ds_Queue *queue, void (*cb)(void *))
 {
-    for (size_t i = 0; i < queue->size; i++) {
+    for (size_t i = 0; i < queue->size; i++)
+    {
         size_t phy_index = (queue->first + i) & (queue->capacity - 1);
         cb(queue->buffer[phy_index]);
     }
     ds_queue_destroy(queue);
 }
-
 
 /**
  * @brief 入队操作（从队尾入队）
@@ -280,22 +283,23 @@ void ds_queue_destroy_cb(ds_Queue *queue, void (*cb)(void *))
  */
 ds_Stat ds_queue_push(ds_Queue *queue, void *element)
 {
-    if (queue->size >= queue->capacity) {
+    if (queue->size >= queue->capacity)
+    {
         ds_Stat status = queue_expand_capacity(queue);
 
-        if (status != DS_OK) {
+        if (status != DS_OK)
+        {
             return status;
         }
     }
 
     /* first 指针前移（无符号整数下溢自动回绕），使用位运算掩码 */
-    queue->first = (queue->first - 1) & (queue->capacity - 1);
+    queue->first                = (queue->first - 1) & (queue->capacity - 1);
     queue->buffer[queue->first] = element;
     queue->size++;
 
     return DS_OK;
 }
-
 
 /**
  * @brief 出队操作（从队首出队）
@@ -311,21 +315,22 @@ ds_Stat ds_queue_push(ds_Queue *queue, void *element)
  */
 ds_Stat ds_queue_pop(ds_Queue *queue, void **out)
 {
-    if (queue->size == 0) {
+    if (queue->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     /* last 指针前移，指向当前队尾元素的位置 */
     queue->last = (queue->last - 1) & (queue->capacity - 1);
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = queue->buffer[queue->last];
     }
 
     queue->size--;
     return DS_OK;
 }
-
 
 /**
  * @brief 查看队首元素（不移除）
@@ -339,16 +344,16 @@ ds_Stat ds_queue_pop(ds_Queue *queue, void **out)
  */
 ds_Stat ds_queue_peek(ds_Queue *queue, void **out)
 {
-    if (queue->size == 0) {
+    if (queue->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     size_t tail = (queue->last - 1) & (queue->capacity - 1);
-    *out = queue->buffer[tail];
+    *out        = queue->buffer[tail];
 
     return DS_OK;
 }
-
 
 /**
  * @brief 对队列中的每个元素执行指定函数
@@ -360,12 +365,12 @@ ds_Stat ds_queue_peek(ds_Queue *queue, void **out)
  */
 void ds_queue_foreach(ds_Queue *queue, void (*fn)(void *))
 {
-    for (size_t i = 0; i < queue->size; i++) {
+    for (size_t i = 0; i < queue->size; i++)
+    {
         size_t phy = (queue->first + i) & (queue->capacity - 1);
         fn(queue->buffer[phy]);
     }
 }
-
 
 /**
  * @brief 获取队列的元素个数

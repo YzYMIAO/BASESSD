@@ -6,4 +6,5 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <time.h>
+#include <stdint.h>
 #endif

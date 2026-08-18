@@ -11,6 +11,7 @@
 # 1. 包含配置
 # ----------------------------------------------------------------------------
 PROJECT_ROOT := $(CURDIR)
+BUILD_TARGET ?=firmware
 include $(PROJECT_ROOT)/config.mk
 
 # ============================================================================
@@ -29,21 +30,35 @@ include $(foreach mod,$(MODULES),$(SRC_ROOT)/$(mod)/makefile.mk)
 $(info All modules included)
 $(info ========================================)
 
-# 4. 将收集到的源文件转换为目标文件列表
-#    $(sort) 用于去重，防止同一个文件被多次编译
-C_SRCS := $(wildcard $(SRC_ROOT)/*c) $(sort $(MODULE_SRCS))
-S_SRCS := $(wildcard $(STARTUP_DIR)/*.s)
+ifeq ($(BUILD_TARGET),firmware)
+# 根目录 main.c 是固件应用入口，不归入静态库，必须在链接时显式加入。
+APP_C_SRCS := $(SRC_ROOT)/main.c
+C_SRCS := $(sort $(MODULE_SRCS) $(APP_C_SRCS))
+C_SRCS := $(filter-out $(SRC_ROOT)/platform/host_sim/%,$(C_SRCS))
+S_SRCS := $(wildcard $(SRC_ROOT)/platform/armv7r/*.s)
 ALL_SRCS := $(C_SRCS) $(S_SRCS)
 
 C_OBJS := $(patsubst $(SRC_ROOT)/%.c, $(OBJ_DIR)/%.o, $(C_SRCS))
-S_OBJS := $(patsubst $(STARTUP_DIR)/%.s, $(OBJ_DIR)/startup/%.o, $(S_SRCS))
+APP_OBJS := $(patsubst $(SRC_ROOT)/%.c, $(OBJ_DIR)/%.o, $(APP_C_SRCS))
+S_OBJS := $(patsubst $(SRC_ROOT)/%.s, $(OBJ_DIR)/%.o, $(S_SRCS))
 ALL_OBJS := $(C_OBJS) $(S_OBJS)
 
-# 5. 收集所有头文件路径并添加到编译选项
 ALL_INCS := $(sort $(MODULE_INCS))
 CFLAGS += $(addprefix -I, $(ALL_INCS))
+CFLAGS += -DSSD_FIRMWARE_BUILD
+else
+C_SRCS := $(sort $(MODULE_SRCS))
+ALL_SRCS := $(C_SRCS)
 
-# 6. 导出收集结果（供调试和rules.mk使用）
+C_OBJS := $(patsubst $(SRC_ROOT)/%.c, $(OBJ_DIR)/%.o, $(C_SRCS))
+ALL_OBJS := $(C_OBJS)
+
+ALL_INCS := $(sort $(MODULE_INCS))
+CFLAGS += $(addprefix -I, $(ALL_INCS))
+endif
+
+# 导出收集结果（供调试和rules.mk使用）
+$(info ========================================)
 $(info Collected $(words $(ALL_SRCS)) source files)
 $(info Collected $(words $(ALL_INCS)) include paths)
 $(info ========================================)
@@ -51,6 +66,7 @@ $(info ========================================)
 export C_SRCS
 export S_SRCS
 export C_OBJS
+export APP_OBJS
 export S_OBJS
 export ALL_OBJS
 # ============================================================================
@@ -71,3 +87,146 @@ release:
 
 asan:
 	$(MAKE) BUILD_TYPE=asan
+
+# ============================================================================
+# 主目标
+# ============================================================================
+.PHONY:all
+
+all: $(ANALYSIS_FILES)
+
+
+.PHONY: reall
+reall: clean all
+
+# ============================================================================
+# clang-format 配置
+# ============================================================================
+
+CLANG_FORMAT ?= clang-format
+
+# 只扫描项目自己维护的 C/C++ 源文件。
+FORMAT_FILES := $(shell find src include tests \
+	-type f \
+	\( -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.cpp' \) \
+	-not -path '*/cmsis/*' \
+	-not -path '*/third_party/*' \
+	)
+
+.PHONY: format format-check format-version
+
+# 原地格式化项目代码。
+format:
+	@command -v $(CLANG_FORMAT) >/dev/null 2>&1 || { \
+		echo "错误：未找到 $(CLANG_FORMAT)"; \
+		exit 1; \
+	}
+	@echo "Formatting $(words $(FORMAT_FILES)) files..."
+	@$(CLANG_FORMAT) -i $(FORMAT_FILES)
+	@echo "Format complete."
+
+# 只检查格式，不修改文件。
+# --dry-run 和 --Werror 需要较新的 clang-format。
+format-check:
+	@command -v $(CLANG_FORMAT) >/dev/null 2>&1 || { \
+		echo "错误：未找到 $(CLANG_FORMAT)"; \
+		exit 1; \
+	}
+	@echo "Checking source format..."
+	@$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
+	@echo "Format check passed."
+
+# 查看实际使用的clang-format版本。
+format-version:
+	@$(CLANG_FORMAT) --version
+
+# ============================================================================
+# 信息目标
+# ============================================================================
+.PHONY: info
+info:
+	@echo "=== Build Configuration ==="
+	@echo "  BUILD_TARGET    : $(BUILD_TARGET)"
+	@echo "  FIRMWARE_PLATFORM: $(FIRMWARE_PLATFORM)"
+	@echo "  BUILD_TYPE    : $(BUILD_TYPE)"
+	@echo "  TARGET        : $(TARGET)"
+	@echo "  MODULES       : $(MODULES)"
+	@echo "  ALL_LIBS       :"
+	@printf '    %s\n' $(ALL_LIBS)
+	@echo "  ALL_OBJS count: $(words $(ALL_OBJS))"
+	@echo ""
+	@echo "  ALL_INCS      :"
+	@printf '    %s\n' $(ALL_INCS)
+	@echo ""
+	@echo "  ALL_SRCS      :"
+	@printf '    %s\n' $(ALL_SRCS)
+	@echo ""
+	@echo "  CFLAGS        :"
+	@printf '    %s\n' $(CFLAGS)
+	@echo ""
+	@echo "  LDFLAGS       :"
+	@printf '    %s\n' $(LDFLAGS)
+	@echo ""
+	@echo "  LDLIBS        : $(LDLIBS)"
+	@echo "  CC            : $(CC)"
+	@echo "  AR            : $(AR)"
+	@echo ""
+	@echo "=== Analysis Files ==="
+	@echo "  BIN file      : $(TARGET).bin"
+	@echo "  MAP file      : $(TARGET).map"
+	@echo "  SYM file      : $(TARGET).sym"
+	@echo "  SIZE file     : $(TARGET).size"
+	@echo "  LST file      : $(TARGET).lst"
+	@echo "  Preprocess    : $(words $(ALL_I_FILES)) .i files"
+	@echo "  Disassembly   : $(words $(ALL_LST_FILES)) .lst files"
+
+# ============================================================================
+#  帮助信息
+# ============================================================================
+.PHONY: help
+help:
+	@echo "============================================================"
+	@echo "  DS Library Build System"
+	@echo "============================================================"
+	@echo ""
+	@echo "  Build Targets:"
+	@echo "    all          - Build default (debug) target"
+	@echo "    debug        - Build debug version"
+	@echo "    release      - Build release version"
+	@echo "    asan         - Build with AddressSanitizer"
+	@echo ""
+	@echo "  Analysis Targets:"
+	@echo "    preprocess   - Generate .i files (preprocessed output)"
+	@echo "    disassemble  - Generate .lst files (disassembly listing)"
+	@echo "    build-with-log - Build with error log (build.log)"
+	@echo ""
+	@echo "  Cleanup Targets:"
+	@echo "    clean        - Remove build/$(BUILD_TYPE) directory"
+	@echo "    distclean    - Remove entire build/ directory"
+	@echo ""
+	@echo "  Info Targets:"
+	@echo "    info         - Show build configuration"
+	@echo "    help         - Show this help"
+	@echo ""
+	@echo "  Generated Files:"
+	@echo "    $(TARGET).map  - Memory map"
+	@echo "    $(TARGET).sym  - Symbol table"
+	@echo "    $(TARGET).size - Size summary"
+	@echo "    $(TARGET).lst  - Disassembly listing"
+	@echo "    $(OBJ_DIR)/*.i - Preprocessed files"
+	@echo "    $(OBJ_DIR)/*.lst - Per-file disassembly"
+	@echo "    $(BUILD_DIR)/build.log - Build error log"
+	@echo ""
+	@echo "  Variables:"
+	@echo "    BUILD_TYPE   - debug, release, asan (default: debug)"
+	@echo "    V=1          - Show full compile commands"
+	@echo "    CROSS_COMPILE- Cross-compilation prefix"
+	@echo "    COVERAGE=1   - Enable code coverage (gcov)"
+	@echo ""
+	@echo "  Examples:"
+	@echo "    make debug V=1              # Build debug with verbose output"
+	@echo "    make release                # Build optimized release"
+	@echo "    make COVERAGE=1             # Build with coverage support"
+	@echo "    make preprocess             # Generate .i files"
+	@echo "    make disassemble            # Generate disassembly listings"
+	@echo "============================================================"

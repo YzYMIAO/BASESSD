@@ -27,7 +27,7 @@ $(C_OBJS):$(OBJ_DIR)/%.o: $(SRC_ROOT)/%.c
 endef
 
 define ASILE_template
-$(S_OBJS):$(OBJ_DIR)/startup/%.o:$(STARTUP_DIR)/%.s
+$(S_OBJS):$(OBJ_DIR)/%.o:$(SRC_ROOT)/%.s
 	@$$(MKDIR) $$(dir $$@)
 	@$$(ECHO) "Assembling the $$< ..."
 	$$(Q)$$(AS) $$(ASFLAGS) -MD -MP -c  $$< -o $$@

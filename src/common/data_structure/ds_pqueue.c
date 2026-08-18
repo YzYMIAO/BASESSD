@@ -1,9 +1,8 @@
 #include <config.h>
 #include <ds_pqueue.h>
 
-
-#define DEFAULT_CAPACITY           8   /**< 默认初始容量 */
-#define DEFAULT_EXPANSION_FACTOR   2   /**< 默认扩容因子 */
+#define DEFAULT_CAPACITY         8 /**< 默认初始容量 */
+#define DEFAULT_EXPANSION_FACTOR 2 /**< 默认扩容因子 */
 
 /**
  * @brief 获取父节点索引
@@ -11,7 +10,7 @@
  * @param[in] x 当前节点索引
  * @return 父节点索引（根节点的父节点为自身）
  */
-#define INDEX_PARENT(x)             ((x > 0) ? ((x - 1) / 2) : 0)
+#define INDEX_PARENT(x) ((x > 0) ? ((x - 1) / 2) : 0)
 
 /**
  * @brief 获取左子节点索引
@@ -19,7 +18,7 @@
  * @param[in] x 当前节点索引
  * @return 左子节点索引
  */
-#define INDEX_LEFT_CHILD(x)         (2 * x + 1)
+#define INDEX_LEFT_CHILD(x) (2 * x + 1)
 
 /**
  * @brief 获取右子节点索引
@@ -27,8 +26,7 @@
  * @param[in] x 当前节点索引
  * @return 右子节点索引
  */
-#define INDEX_RIGHT_CHILD(x)        (2 * x + 2)
-
+#define INDEX_RIGHT_CHILD(x) (2 * x + 2)
 
 /**
  * @brief 优先队列结构体（最大堆）
@@ -39,17 +37,16 @@
  */
 struct ds_pqueue_s
 {
-    size_t      size;       /**< 当前队列中的元素个数 */
-    size_t      capacity;   /**< 当前队列容量 */
-    float       exp_factor; /**< 扩容因子 */
-    void     **buffer;     /**< 指向存储元素指针的数组缓冲区 */
+    size_t size;       /**< 当前队列中的元素个数 */
+    size_t capacity;   /**< 当前队列容量 */
+    float  exp_factor; /**< 扩容因子 */
+    void **buffer;     /**< 指向存储元素指针的数组缓冲区 */
 
-    int   (*cmp)        (void const *a, void const *b); /**< 元素比较函数指针 */
-    void *(*mem_alloc)  (size_t size);                  /**< 内存分配函数指针 */
-    void *(*mem_calloc) (size_t blocks, size_t size);   /**< 内存分配并清零函数指针 */
-    void  (*mem_free)   (void *block);                  /**< 内存释放函数指针 */
+    int (*cmp)(void const *a, void const *b);        /**< 元素比较函数指针 */
+    void *(*mem_alloc)(size_t size);                 /**< 内存分配函数指针 */
+    void *(*mem_calloc)(size_t blocks, size_t size); /**< 内存分配并清零函数指针 */
+    void (*mem_free)(void *block);                   /**< 内存释放函数指针 */
 };
-
 
 /**
  * @brief 扩容优先队列的容量
@@ -64,22 +61,27 @@ struct ds_pqueue_s
  */
 static ds_Stat pqueue_expand_capacity(ds_Pqueue *pq)
 {
-    if (pq->capacity == DS_MAX_ELEMENTS) {
+    if (pq->capacity == DS_MAX_ELEMENTS)
+    {
         return DS_ERR_MAX_CAPACITY;
     }
 
     size_t new_capacity = (size_t)(pq->capacity * pq->exp_factor);
 
     /* 检查容量溢出：如果新容量小于原容量，说明发生了整数溢出 */
-    if (new_capacity < pq->capacity) {
+    if (new_capacity < pq->capacity)
+    {
         pq->capacity = DS_MAX_ELEMENTS;
-    } else {
+    }
+    else
+    {
         pq->capacity = new_capacity;
     }
 
     void **new_buffer = pq->mem_alloc(pq->capacity * sizeof(void *));
 
-    if (new_buffer == NULL) {
+    if (new_buffer == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
@@ -90,7 +92,6 @@ static ds_Stat pqueue_expand_capacity(ds_Pqueue *pq)
     pq->buffer = new_buffer;
     return DS_OK;
 }
-
 
 /**
  * @brief 创建一个新的优先队列（使用默认配置）
@@ -112,7 +113,6 @@ ds_Stat ds_pqueue_new(ds_Pqueue **pq, int (*cmp)(void const *, void const *))
     return ds_pqueue_new_conf(&conf, pq);
 }
 
-
 /**
  * @brief 初始化优先队列配置结构体为默认值
  *
@@ -124,14 +124,13 @@ ds_Stat ds_pqueue_new(ds_Pqueue **pq, int (*cmp)(void const *, void const *))
  */
 void ds_pqueue_conf_init(ds_PqueueConfig *conf, int (*cmp)(void const *, void const *))
 {
-    conf->capacity    = DEFAULT_CAPACITY;
-    conf->exp_factor  = DEFAULT_EXPANSION_FACTOR;
-    conf->cmp         = cmp;
-    conf->mem_alloc   = malloc;
-    conf->mem_calloc  = calloc;
-    conf->mem_free    = free;
+    conf->capacity   = DEFAULT_CAPACITY;
+    conf->exp_factor = DEFAULT_EXPANSION_FACTOR;
+    conf->cmp        = cmp;
+    conf->mem_alloc  = malloc;
+    conf->mem_calloc = calloc;
+    conf->mem_free   = free;
 }
-
 
 /**
  * @brief 根据指定配置创建新的优先队列
@@ -149,43 +148,48 @@ ds_Stat ds_pqueue_new_conf(ds_PqueueConfig *conf, ds_Pqueue **out)
     float ex = 0;
 
     /* 扩容因子必须大于 1 */
-    if (conf->exp_factor <= 1) {
+    if (conf->exp_factor <= 1)
+    {
         ex = DEFAULT_EXPANSION_FACTOR;
-    } else {
+    }
+    else
+    {
         ex = conf->exp_factor;
     }
 
     /* 检查容量配置是否有效 */
-    if (conf->capacity == 0 || ex >= DS_MAX_ELEMENTS / conf->capacity) {
+    if (conf->capacity == 0 || ex >= DS_MAX_ELEMENTS / conf->capacity)
+    {
         return DS_ERR_INVALID_CAPACITY;
     }
 
     ds_Pqueue *pq = conf->mem_calloc(1, sizeof(ds_Pqueue));
 
-    if (pq == NULL) {
+    if (pq == NULL)
+    {
         return DS_ERR_ALLOC;
     }
 
     void **new_buffer = conf->mem_alloc(conf->capacity * sizeof(void *));
 
-    if (new_buffer == NULL) {
+    if (new_buffer == NULL)
+    {
         conf->mem_free(pq);
         return DS_ERR_ALLOC;
     }
 
-    pq->buffer      = new_buffer;
-    pq->capacity    = conf->capacity;
-    pq->cmp         = conf->cmp;
-    pq->exp_factor  = ex;
-    pq->mem_alloc   = conf->mem_alloc;
-    pq->mem_calloc  = conf->mem_calloc;
-    pq->mem_free    = conf->mem_free;
-    pq->size        = 0;
+    pq->buffer     = new_buffer;
+    pq->capacity   = conf->capacity;
+    pq->cmp        = conf->cmp;
+    pq->exp_factor = ex;
+    pq->mem_alloc  = conf->mem_alloc;
+    pq->mem_calloc = conf->mem_calloc;
+    pq->mem_free   = conf->mem_free;
+    pq->size       = 0;
 
     *out = pq;
     return DS_OK;
 }
-
 
 /**
  * @brief 销毁优先队列（不释放元素数据）
@@ -201,7 +205,6 @@ void ds_pqueue_destroy(ds_Pqueue *pq)
     pq->mem_free(pq);
 }
 
-
 /**
  * @brief 销毁优先队列并释放所有元素数据
  *
@@ -216,13 +219,13 @@ void ds_pqueue_destroy(ds_Pqueue *pq)
  */
 void ds_pqueue_destroy_cb(ds_Pqueue *pq, void (*cb)(void *))
 {
-    for (size_t i = 0; i < pq->size; i++) {
+    for (size_t i = 0; i < pq->size; i++)
+    {
         cb(pq->buffer[i]);
     }
 
     ds_pqueue_destroy(pq);
 }
-
 
 /**
  * @brief 向优先队列中插入元素
@@ -239,10 +242,12 @@ void ds_pqueue_destroy_cb(ds_Pqueue *pq, void (*cb)(void *))
 ds_Stat ds_pqueue_push(ds_Pqueue *pq, void *element)
 {
     /* 如果队列已满，先扩容 */
-    if (pq->size >= pq->capacity) {
+    if (pq->size >= pq->capacity)
+    {
         ds_Stat status = pqueue_expand_capacity(pq);
 
-        if (status != DS_OK) {
+        if (status != DS_OK)
+        {
             return status;
         }
     }
@@ -254,21 +259,23 @@ ds_Stat ds_pqueue_push(ds_Pqueue *pq, void *element)
     pq->size++;
 
     /* 如果只有一个元素，无需调整 */
-    if (index == 0) {
+    if (index == 0)
+    {
         return DS_OK;
     }
 
     /* 上浮操作：将新元素与父节点比较，若优先级更高则交换 */
-    void *child  = pq->buffer[index];
+    void  *child  = pq->buffer[index];
     size_t pt_idx = INDEX_PARENT(index);
-    void *parent = pq->buffer[pt_idx];
+    void  *parent = pq->buffer[pt_idx];
 
-    while (index != 0 && pq->cmp(child, parent) > 0) {
+    while (index != 0 && pq->cmp(child, parent) > 0)
+    {
         /* 交换当前节点与父节点 */
         void *tmp = pq->buffer[index];
 
-        pq->buffer[index]   = pq->buffer[pt_idx];
-        pq->buffer[pt_idx]  = tmp;
+        pq->buffer[index]  = pq->buffer[pt_idx];
+        pq->buffer[pt_idx] = tmp;
 
         /* 更新索引并继续向上比较 */
         index  = pt_idx;
@@ -279,7 +286,6 @@ ds_Stat ds_pqueue_push(ds_Pqueue *pq, void *element)
 
     return DS_OK;
 }
-
 
 /**
  * @brief 获取堆顶元素（优先级最高的元素）
@@ -294,14 +300,14 @@ ds_Stat ds_pqueue_push(ds_Pqueue *pq, void *element)
  */
 ds_Stat ds_pqueue_top(ds_Pqueue *pq, void **out)
 {
-    if (pq->size == 0) {
+    if (pq->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     *out = pq->buffer[0];
     return DS_OK;
 }
-
 
 /**
  * @brief 移除并返回堆顶元素
@@ -317,15 +323,16 @@ ds_Stat ds_pqueue_top(ds_Pqueue *pq, void **out)
  */
 ds_Stat ds_pqueue_pop(ds_Pqueue *pq, void **out)
 {
-    if (pq->size == 0) {
+    if (pq->size == 0)
+    {
         return DS_ERR_OUT_OF_RANGE;
     }
 
     /* 将堆顶元素与最后一个元素交换 */
     void *tmp = pq->buffer[0];
 
-    pq->buffer[0]               = pq->buffer[pq->size - 1];
-    pq->buffer[pq->size - 1]    = tmp;
+    pq->buffer[0]            = pq->buffer[pq->size - 1];
+    pq->buffer[pq->size - 1] = tmp;
 
     /* 保存被移除的元素 */
     tmp = pq->buffer[pq->size - 1];
@@ -334,13 +341,13 @@ ds_Stat ds_pqueue_pop(ds_Pqueue *pq, void **out)
     /* 从堆顶开始下沉调整 */
     ds_pqueue_heapify(pq, 0);
 
-    if (out != NULL) {
+    if (out != NULL)
+    {
         *out = tmp;
     }
 
     return DS_OK;
 }
-
 
 /**
  * @brief 堆化操作（下沉调整）
@@ -354,7 +361,8 @@ ds_Stat ds_pqueue_pop(ds_Pqueue *pq, void **out)
  */
 void ds_pqueue_heapify(ds_Pqueue *pq, size_t index)
 {
-    if (pq->size <= 1) {
+    if (pq->size <= 1)
+    {
         return;
     }
 
@@ -363,26 +371,31 @@ void ds_pqueue_heapify(ds_Pqueue *pq, size_t index)
     size_t largest = index;
 
     /* 找出当前节点和两个子节点中优先级最高的节点 */
-    if (L < pq->size) {
+    if (L < pq->size)
+    {
         void *left = pq->buffer[L];
         void *curr = pq->buffer[largest];
 
-        if (pq->cmp(curr, left) < 0) {
+        if (pq->cmp(curr, left) < 0)
+        {
             largest = L;
         }
     }
 
-    if (R < pq->size) {
+    if (R < pq->size)
+    {
         void *right = pq->buffer[R];
         void *curr  = pq->buffer[largest];
 
-        if (pq->cmp(curr, right) < 0) {
+        if (pq->cmp(curr, right) < 0)
+        {
             largest = R;
         }
     }
 
     /* 如果当前节点不是优先级最高的，则交换并递归调整 */
-    if (index != largest) {
+    if (index != largest)
+    {
         void *swap_tmp = pq->buffer[index];
 
         pq->buffer[index]   = pq->buffer[largest];
@@ -391,7 +404,6 @@ void ds_pqueue_heapify(ds_Pqueue *pq, size_t index)
         ds_pqueue_heapify(pq, largest);
     }
 }
-
 
 /**
  * @brief 获取优先队列结构体的大小
