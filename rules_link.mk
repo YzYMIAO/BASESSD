@@ -18,6 +18,13 @@ OBJS_$(1) = $$(filter $$(OBJ_DIR)/$(1)/%.o, $$(ALL_OBJS))
 endef
 $(foreach mod,$(MODULES),$(eval $(call MODULE_OBJS_template,$(mod))))
 
+# STM32 HAL 属于 platform 层，归档进 libplatform.a。
+ifeq ($(BUILD_TARGET),firmware)
+ifeq ($(FIRMWARE_PLATFORM),stm32h7r3)
+OBJS_platform += $(THIRD_PARTY_C_OBJS)
+endif
+endif
+
 # ----------------------------------------------------------------------------
 # 2. 为每个模块生成静态库
 # ----------------------------------------------------------------------------
@@ -46,11 +53,11 @@ LINK_DEPS :=
 endif
 
 # 4.1 链接可执行文件（生成 .map 文件）
-$(TARGET).elf: $(S_OBJS) $(APP_OBJS) $(ALL_LIBS) $(LINK_DEPS)
+$(TARGET).elf: $(LINK_S_OBJS) $(APP_OBJS) $(ALL_LIBS) $(LINK_DEPS)
 	@$(MKDIR) $(BIN_DIR)
 	@$(ECHO) "Linking $(BUILD_TYPE) version..."
 	# 模块静态库之间允许存在合理的双向引用，链接组负责重复扫描并解析符号。
-	$(Q)$(LD) $(LDFLAGS) $(S_OBJS) $(APP_OBJS) \
+	$(Q)$(LD) $(LDFLAGS) $(LINK_S_OBJS) $(APP_OBJS) \
 		-Wl,--start-group $(ALL_LIBS) $(LDLIBS) -Wl,--end-group -o $@
 	@$(ECHO) "Build complete: $@"
 

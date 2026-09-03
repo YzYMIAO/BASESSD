@@ -19,7 +19,9 @@ INC_ROOT := $(PROJECT_ROOT)/include
 # ----------------------------------------------------------------------------
 # 1. 构建类型控制
 # ----------------------------------------------------------------------------
-BUILD_TYPE ?= debug
+
+
+
 
 VALID_BUILD_TARGETS := firmware host_sim
 ifeq ($(filter $(BUILD_TARGET),$(VALID_BUILD_TARGETS)),)
@@ -29,7 +31,15 @@ endif
 # Firmware builds use a replaceable SoC BSP.  reference_soc is the
 # repository-owned virtual hardware contract; a future real SoC can add a
 # sibling platform directory without changing the SSD core.
-FIRMWARE_PLATFORM ?= reference_soc
+
+
+ifeq ($(FIRMWARE_PLATFORM),stm32h7r3)
+CPU_TYPES := cortex-m7
+LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h7r3xx_flash.ld
+else ifeq ($(FIRMWARE_PLATFORM),reference_soc)
+CPU_TYPES := cortex-r5
+LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/reference_soc.ld
+endif
 # ----------------------------------------------------------------------------
 # 2. 目录结构（统一使用绝对路径）
 # ----------------------------------------------------------------------------
@@ -42,13 +52,9 @@ LIB_DIR   := $(BUILD_DIR)/lib
 BIN_DIR   := $(BUILD_DIR)/bin
 DEP_DIR   := $(BUILD_DIR)/dep
 
-ifeq ($(BUILD_TARGET),firmware)
-LINKER_SCRIPT ?= $(PROJECT_ROOT)/sct/$(FIRMWARE_PLATFORM).ld
-endif
 # 目标文件命名
 APP_NAME = $(BUILD_TYPE)$(APP_SUFFIX)
-
-TARGET   := $(BUILD_DIR)/$(APP_NAME)
+TARGET   := $(BIN_DIR)/$(APP_NAME)
 
 
 # ----------------------------------------------------------------------------
@@ -110,11 +116,18 @@ INC_FLAGS   = -I$(INC_ROOT)
 # -mthumb               使用 Thumb 指令集（16/32位混合编码，更高代码密度）
 # -mlittle-endian       使用小端字节序（Little-Endian）
 # -mfloat-abi=soft      使用软件浮点运算（不使用 FPU 硬件）
+ifeq ($(CPU_TYPES), cortex-r5)
 CPU_FLAGS := -mcpu=cortex-r5\
             -mthumb\
             -mlittle-endian\
             -mfloat-abi=soft
-
+else ifeq ($(CPU_TYPES), cortex-m7) 
+CPU_FLAGS := -mcpu=cortex-m7\
+            -mthumb\
+            -mlittle-endian\
+            -mfpu=fpv5-d16\
+            -mfloat-abi=hard
+endif
 
 #公共固件选项
 # -std=c11               指定使用 C11 标准
@@ -203,7 +216,8 @@ BASE_LDFLAGS = $(CPU_FLAGS)\
                 -specs=nano.specs\
                 -specs=nosys.specs\
                 -nostartfiles\
-                -Wl,--undefined=_printf_float
+                -Wl,--undefined=_printf_float\
+                -Wl,--gc-sections
 
 
 # -lc                            链接标准 C 库（libc.a）

@@ -4,7 +4,13 @@ MODULE_INCS += $(INC_ROOT)/platform
 
 SRC_PLATFORM = $(SRC_ROOT)/platform
 ifeq ($(BUILD_TARGET),firmware)
-PLATFORM_MODS = armv7r $(FIRMWARE_PLATFORM)
+ifeq ($(FIRMWARE_PLATFORM),reference_soc)
+PLATFORM_MODS = armv7r reference_soc
+else ifeq ($(FIRMWARE_PLATFORM),stm32h7r3)
+PLATFORM_MODS = stm32h7r3
+else
+$(error Unsupported FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM))
+endif
 else
 PLATFORM_MODS = host_sim
 endif

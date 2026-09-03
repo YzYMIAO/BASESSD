@@ -33,15 +33,32 @@ $(S_OBJS):$(OBJ_DIR)/%.o:$(SRC_ROOT)/%.s
 	$$(Q)$$(AS) $$(ASFLAGS) -MD -MP -c  $$< -o $$@
 endef
 
+define THIRD_PARTY_COMPILE_template
+$(THIRD_PARTY_C_OBJS):$(OBJ_DIR)/%.o:$(PROJECT_ROOT)/%.c
+	@$$(MKDIR) $$(dir $$@)
+	@$$(ECHO) "Compiling third-party $$< ..."
+	$$(Q)$$(CC) $$(CFLAGS) $$(THIRD_PARTY_CFLAGS) -MMD -MP -MF $$(@:.o=.d) -c $$< -o $$@
+
+$(THIRD_PARTY_S_OBJS):$(OBJ_DIR)/%.o:$(PROJECT_ROOT)/%.s
+	@$$(MKDIR) $$(dir $$@)
+	@$$(ECHO) "Assembling third-party $$< ..."
+	$$(Q)$$(AS) $$(ASFLAGS) -MD -MP -c $$< -o $$@
+endef
+
 # 展开编译规则
 $(eval $(COMPILE_template))
 $(eval $(ASILE_template))
+ifneq ($(strip $(THIRD_PARTY_C_OBJS) $(THIRD_PARTY_S_OBJS)),)
+$(eval $(THIRD_PARTY_COMPILE_template))
+endif
 # ----------------------------------------------------------------------------
 # 2. 自动包含依赖文件
 # ----------------------------------------------------------------------------
 -include $(wildcard $(OBJ_DIR)/*.d)
 -include $(wildcard $(OBJ_DIR)/*/*.d)
 -include $(wildcard $(OBJ_DIR)/*/*/*.d)
+-include $(THIRD_PARTY_C_OBJS:.o=.d)
+-include $(THIRD_PARTY_S_OBJS:.o=.d)
 # ----------------------------------------------------------------------------
 # 3. 代码覆盖率支持（通过 config.mk 中的 COVERAGE 控制�?
 # ----------------------------------------------------------------------------

@@ -12,16 +12,21 @@
 # ----------------------------------------------------------------------------
 PROJECT_ROOT := $(CURDIR)
 BUILD_TARGET ?=firmware
+FIRMWARE_PLATFORM ?= stm32h7r3
+BUILD_TYPE ?= debug
+
 include $(PROJECT_ROOT)/config.mk
 
 # ============================================================================
 # 关键修正：在包含rules.mk之前，先收集所有子模块的源文件
 # ============================================================================
 
+THIRD_PARTY_C_SRCS :=
+THIRD_PARTY_S_SRCS :=
 # 2. 初始化收集变量（供子模块追加）
 MODULE_SRCS :=
 MODULE_INCS :=
-
+PLATFORM_S_SRCS :=
 # 3. 包含所有子模块的声明文件（在解析阶段完成收集）
 #    这一步会将子模块中的 MODULE_SRCS += xxx 追加进来
 $(info ========================================)
@@ -32,16 +37,20 @@ $(info ========================================)
 
 ifeq ($(BUILD_TARGET),firmware)
 # 根目录 main.c 是固件应用入口，不归入静态库，必须在链接时显式加入。
-APP_C_SRCS := $(SRC_ROOT)/main.c
-C_SRCS := $(sort $(MODULE_SRCS) $(APP_C_SRCS))
-C_SRCS := $(filter-out $(SRC_ROOT)/platform/host_sim/%,$(C_SRCS))
-S_SRCS := $(wildcard $(SRC_ROOT)/platform/armv7r/*.s)
-ALL_SRCS := $(C_SRCS) $(S_SRCS)
+	APP_C_SRCS := $(SRC_ROOT)/main.c
+	C_SRCS := $(sort $(MODULE_SRCS) $(APP_C_SRCS))
+	C_SRCS := $(filter-out $(SRC_ROOT)/platform/host_sim/%,$(C_SRCS))
+	S_SRCS := $(sort $(PLATFORM_S_SRCS))
+	ALL_SRCS := $(C_SRCS) $(S_SRCS) $(THIRD_PARTY_C_SRCS) $(THIRD_PARTY_S_SRCS)
 
-C_OBJS := $(patsubst $(SRC_ROOT)/%.c, $(OBJ_DIR)/%.o, $(C_SRCS))
 APP_OBJS := $(patsubst $(SRC_ROOT)/%.c, $(OBJ_DIR)/%.o, $(APP_C_SRCS))
+C_OBJS := $(patsubst $(SRC_ROOT)/%.c, $(OBJ_DIR)/%.o, $(C_SRCS))
 S_OBJS := $(patsubst $(SRC_ROOT)/%.s, $(OBJ_DIR)/%.o, $(S_SRCS))
-ALL_OBJS := $(C_OBJS) $(S_OBJS)
+	THIRD_PARTY_C_OBJS := $(patsubst $(PROJECT_ROOT)/%.c,$(OBJ_DIR)/%.o,$(THIRD_PARTY_C_SRCS))
+	THIRD_PARTY_S_OBJS := $(patsubst $(PROJECT_ROOT)/%.s,$(OBJ_DIR)/%.o,$(THIRD_PARTY_S_SRCS))
+	LINK_S_OBJS := $(S_OBJS) $(THIRD_PARTY_S_OBJS)
+
+	ALL_OBJS := $(C_OBJS) $(S_OBJS) $(THIRD_PARTY_C_OBJS) $(THIRD_PARTY_S_OBJS)
 
 ALL_INCS := $(sort $(MODULE_INCS))
 CFLAGS += $(addprefix -I, $(ALL_INCS))
@@ -68,6 +77,7 @@ export S_SRCS
 export C_OBJS
 export APP_OBJS
 export S_OBJS
+export LINK_S_OBJS
 export ALL_OBJS
 # ============================================================================
 # 7. 包含编译和链接规则（明确分开包含）
