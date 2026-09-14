@@ -60,7 +60,7 @@ extern "C" {
 /* #define HAL_I3C_MODULE_ENABLED */
 #define HAL_ICACHE_MODULE_ENABLED
 /* #define HAL_IRDA_MODULE_ENABLED */
-/* #define HAL_IWDG_MODULE_ENABLED */
+ #define HAL_IWDG_MODULE_ENABLED 
 /* #define HAL_JPEG_MODULE_ENABLED */
 /* #define HAL_LPTIM_MODULE_ENABLED */
 /* #define HAL_LTDC_MODULE_ENABLED */
@@ -72,7 +72,7 @@ extern "C" {
 /* #define HAL_PCD_MODULE_ENABLED */
 /* #define HAL_PKA_MODULE_ENABLED */
 /* #define HAL_PSSI_MODULE_ENABLED */
-/* #define HAL_PWR_MODULE_ENABLED */
+#define HAL_PWR_MODULE_ENABLED
 /* #define HAL_RAMECC_MODULE_ENABLED */
 #define HAL_RCC_MODULE_ENABLED
 /* #define HAL_RNG_MODULE_ENABLED */
@@ -84,13 +84,13 @@ extern "C" {
 /* #define HAL_SMARTCARD_MODULE_ENABLED */
 /* #define HAL_SMBUS_MODULE_ENABLED */
 /* #define HAL_SPDIFRX_MODULE_ENABLED */
-/* #define HAL_SPI_MODULE_ENABLED */
+#define HAL_SPI_MODULE_ENABLED
 /* #define HAL_SRAM_MODULE_ENABLED */
 #define HAL_TIM_MODULE_ENABLED
 #define HAL_UART_MODULE_ENABLED
 #define HAL_USART_MODULE_ENABLED
-/* #define HAL_WWDG_MODULE_ENABLED */
-/* #define HAL_XSPI_MODULE_ENABLED */
+#define HAL_WWDG_MODULE_ENABLED
+#define HAL_XSPI_MODULE_ENABLED
 
 /* ########################## Oscillator Values adaptation ####################*/
 /**

@@ -11,8 +11,20 @@
  *  段属性宏
  * ============================================================ */
 
-/* ITCM 代码段（最快，关键代码） */
-#define ITCM_CODE __attribute__((section(".itcm_text")))
+/*
+ * 代码放置策略：
+ *   SSD_CODE_HIGH -> ITCM，启动时由启动代码从镜像复制后执行
+ *   SSD_CODE_FAST -> 内部 Flash，适合常用但不要求 TCM 延迟的代码
+ *   SSD_CODE_SLOW -> 外部 HyperRAM，必须在 hyperram_init() 后显式加载
+ *
+ * 使用独立的 .ssd_code_* 段名，避免被通用 .text* 通配符提前捕获。
+ */
+#define SSD_CODE_HIGH __attribute__((section(".ssd_code_high")))
+#define SSD_CODE_FAST __attribute__((section(".ssd_code_fast")))
+#define SSD_CODE_SLOW __attribute__((section(".ssd_code_slow")))
+
+/* 兼容已有命名。 */
+#define ITCM_CODE SSD_CODE_HIGH
 
 /* DTCM 数据段（最快，高频变量） */
 #define DTCM_DATA __attribute__((section(".dtcm_data")))
@@ -47,5 +59,18 @@
 
 /* 强制保留 */
 #define USED __attribute__((used))
+
+/* 组合属性，适合需要固定放置且不能被垃圾回收的入口函数。 */
+#define SSD_CODE_HIGH_USED SSD_CODE_HIGH USED
+#define SSD_CODE_FAST_USED SSD_CODE_FAST USED
+#define SSD_CODE_SLOW_USED SSD_CODE_SLOW USED
+
+/* 供启动/外部内存加载器使用的段边界符号。 */
+extern unsigned char __ssd_code_high_load_start[];
+extern unsigned char __ssd_code_high_start[];
+extern unsigned char __ssd_code_high_end[];
+extern unsigned char __ssd_code_slow_load_start[];
+extern unsigned char __ssd_code_slow_start[];
+extern unsigned char __ssd_code_slow_end[];
 
 #endif /* SSD_COMPILER_H */

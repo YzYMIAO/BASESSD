@@ -67,6 +67,10 @@
 #ifndef   __PACKED_UNION
   #define __PACKED_UNION                         union __attribute__((packed, aligned(1)))
 #endif
+/*这里是实现能对非对齐地址访问的结构体宏封装
+*1、用上面封装了一个结构体显式1字节对齐的GCC属性
+*2、定义了16和32字节的结构体对齐要求为字节
+*3、访问读写封装的时候需要先强转需要以void类型做中转因为一步强转有些编译器会出错*/
 #ifndef   __UNALIGNED_UINT32        /* deprecated */
   #pragma GCC diagnostic push
   #pragma GCC diagnostic ignored "-Wpacked"
@@ -110,9 +114,15 @@
 #ifndef   __ALIGNED
   #define __ALIGNED(x)                           __attribute__((aligned(x)))
 #endif
+/*告诉编译器：这个指针是访问某块内存区域的唯一方式。
+*这块内存只有通过这个指针才能访问，不会有其他指针指向同一块内存
+*编译器收到这个承诺后，可以进行更激进的优化：*/
 #ifndef   __RESTRICT
   #define __RESTRICT                             __restrict
 #endif
+/*这是一个编译器屏障（Compiler Barrier），也叫优化屏障（Optimization Barrier）
+*阻止编译器重排	屏障前的内存访问不能移到屏障后，屏障后的也不能移到屏障前
+* 强制重新加载所有内存	"memory" 告诉编译器"所有内存内容都可能被修改"，放弃所有缓存在寄存器中的内存值*/
 #ifndef   __COMPILER_BARRIER
   #define __COMPILER_BARRIER()                   __ASM volatile("":::"memory")
 #endif
@@ -128,6 +138,49 @@
            in the used linker script.
 
  */
+
+ /*
+     // .copy_table 段紧跟在 .text 之后或放在指定位置
+    .copy.table : ALIGN(4) {
+        __copy_table_start__ = .;        // 表起始符号
+        
+        // 第一个需要拷贝的段：.data
+        LONG (__etext)                   // src (Flash 加载地址)
+        LONG (__data_start__)            // dest (RAM 运行地址)
+        LONG (__data_end__ - __data_start__) // wlen (拷贝的字数，每个 LONG 为 4 字节)
+
+        // 可以在这里继续为其他段（如 .ramcode）添加类似的三个 LONG 条目
+        // 例如：
+        // LONG (__etext2)
+        // LONG (__data2_start__)
+        // LONG (__data2_end__ - __data2_start__)
+
+        __copy_table_end__ = .;          // 表结束符号
+    } > FLASH                           // 表本身存放在 FLASH 中*/
+
+  /*    // .bss 段定义
+    .bss (NOLOAD) : ALIGN(4) {
+        __bss_start__ = .;               // BSS 起始符号
+        *(.bss*)                         // 收集所有 .bss 段内容
+        *(COMMON)                        // 收集 COMMON 符号
+        __bss_end__ = .;                 // BSS 结束符号
+    } > RAM
+
+    // .zero.table 段
+    .zero.table : ALIGN(4) {
+        __zero_table_start__ = .;        // 表起始符号
+        
+        // 第一个需要清零的段：.bss
+        LONG (__bss_start__)             // dest (RAM 起始地址)
+        LONG (__bss_end__ - __bss_start__) // wlen (需要清零的字数)
+
+        // 可以在这里为其他 BSS 段添加类似的条目
+        // 例如：
+        // LONG (__bss2_start__)
+        // LONG (__bss2_end__ - __bss2_start__)
+
+        __zero_table_end__ = .;          // 表结束符号
+    } > FLASH                           // 表本身存放在 FLASH 中*/
 __STATIC_FORCEINLINE __NO_RETURN void __cmsis_start(void)
 {
   extern void _start(void) __NO_RETURN;
@@ -142,7 +195,8 @@ __STATIC_FORCEINLINE __NO_RETURN void __cmsis_start(void)
     uint32_t* dest;
     uint32_t  wlen;
   } __zero_table_t;
-
+  
+/*告诉编译器这些符号在外部定义*/
   extern const __copy_table_t __copy_table_start__;
   extern const __copy_table_t __copy_table_end__;
   extern const __zero_table_t __zero_table_start__;
@@ -160,7 +214,7 @@ __STATIC_FORCEINLINE __NO_RETURN void __cmsis_start(void)
     }
   }
 
-  _start();
+  _start(); /*跳转到main()函数，所以在开头表明没有返回*/
 }
 
 #define __PROGRAM_START           __cmsis_start
@@ -182,6 +236,12 @@ __STATIC_FORCEINLINE __NO_RETURN void __cmsis_start(void)
 #define __VECTOR_TABLE_ATTRIBUTE  __attribute__((used, section(".vectors")))
 #endif
 
+/*这段代码是CMSIS为ARMv8-M架构的TrustZone安全扩展提供的栈密封（Stack Sealing）支持，是一项重要的安全特性。*/
+/*在带有TrustZone的ARMv8-M处理器上，系统被划分为安全世界和非安全世界。
+
+栈密封是一种安全机制：在安全世界的栈顶（或栈底，取决于栈的增长方向）写入一个特殊的、固定的“哨兵”值（即“密封”）。
+当程序从非安全世界通过“安全入口函数”调用进入安全世界时，硬件或安全代码可以检查这个“哨兵”值是否完好。
+如果该值被意外篡改（例如因栈溢出或攻击），则表明栈数据可能已损坏，从而触发安全处理，防止恶意代码执行或信息泄露*/
 #if defined (__ARM_FEATURE_CMSE) && (__ARM_FEATURE_CMSE == 3U)
 #ifndef __STACK_SEAL
 #define __STACK_SEAL              __StackSeal
@@ -230,6 +290,7 @@ __STATIC_FORCEINLINE void __TZ_set_STACKSEAL_S (uint32_t* stackTop) {
 /**
   \brief   Wait For Interrupt
   \details Wait For Interrupt is a hint instruction that suspends execution until one of a number of events occurs.
+ “等待中断”是一种提示性指令，它会暂停执行过程，直到发生某种事件为止。
  */
 #define __WFI()                             __ASM volatile ("wfi":::"memory")
 
@@ -238,6 +299,7 @@ __STATIC_FORCEINLINE void __TZ_set_STACKSEAL_S (uint32_t* stackTop) {
   \brief   Wait For Event
   \details Wait For Event is a hint instruction that permits the processor to enter
            a low-power state until one of a number of events occurs.
+ “等待事件发生”是一种提示性指令，它允许处理器进入低功耗状态，直到某个事件发生为止。
  */
 #define __WFE()                             __ASM volatile ("wfe":::"memory")
 
@@ -245,6 +307,7 @@ __STATIC_FORCEINLINE void __TZ_set_STACKSEAL_S (uint32_t* stackTop) {
 /**
   \brief   Send Event
   \details Send Event is a hint instruction. It causes an event to be signaled to the CPU.
+ “Send Event”是一种提示性指令。它用于向CPU发送事件信号。
  */
 #define __SEV()                             __ASM volatile ("sev")
 
@@ -343,6 +406,8 @@ __STATIC_FORCEINLINE int16_t __REVSH(int16_t value)
   \param [in]    op2  Number of Bits to rotate
   \return               Rotated value
  */
+ /*CMSIS 统一提供 __ROR() 这样的函数接口，调用者不需要关心底层是 ROR 指令、GCC builtin，
+ 还是移位加或运算。GCC 根据编译目标和优化等级决定实现：为内联函数还是指令*/
 __STATIC_FORCEINLINE uint32_t __ROR(uint32_t op1, uint32_t op2)
 {
   op2 %= 32U;
@@ -361,6 +426,7 @@ __STATIC_FORCEINLINE uint32_t __ROR(uint32_t op1, uint32_t op2)
   \param [in]    value  is ignored by the processor.
                  If required, a debugger can use it to store additional information about the breakpoint.
  */
+ /*debug软件断点*/
 #define __BKPT(value)                       __ASM volatile ("bkpt "#value)
 
 
@@ -370,6 +436,8 @@ __STATIC_FORCEINLINE uint32_t __ROR(uint32_t op1, uint32_t op2)
   \param [in]    value  Value to reverse
   \return               Reversed value
  */
+ /*输入:  0b00000000 00000000 00000000 00000101
+输出:  0b10100000 00000000 00000000 00000000*/
 __STATIC_FORCEINLINE uint32_t __RBIT(uint32_t value)
 {
   uint32_t result;

@@ -62,7 +62,8 @@
      *  说明：地址为映射后的访问地址，具体取决于主控设计
      * ----------------------------------------------------------
      */
-    NAND_FW (rx) : ORIGIN = 0x80000000, LENGTH = 64M
+	 NAND_FW (rx) : ORIGIN = 0x80000000, LENGTH = 64M
+	 HYPERRAM (rwx) : ORIGIN = 0x70000000, LENGTH = 32M
  }
  
  /*段定义*/
@@ -96,6 +97,37 @@
 		. = ALIGN(4);
 		_eitcm = .; 
 	} > ITCM
+
+	/* 统一代码等级：高频 ITCM、常用内部镜像、低频 HyperRAM。 */
+	.ssd_code_high :
+	{
+		. = ALIGN(4);
+		__ssd_code_high_start = .;
+		KEEP(*(.ssd_code_high))
+		KEEP(*(.ssd_code_high.*))
+		. = ALIGN(4);
+		__ssd_code_high_end = .;
+	} > ITCM AT > NAND_FW
+	__ssd_code_high_load_start = LOADADDR(.ssd_code_high);
+
+	.ssd_code_fast :
+	{
+		. = ALIGN(4);
+		KEEP(*(.ssd_code_fast))
+		KEEP(*(.ssd_code_fast.*))
+		. = ALIGN(4);
+	} > ITCM
+
+	.ssd_code_slow :
+	{
+		. = ALIGN(4);
+		__ssd_code_slow_start = .;
+		KEEP(*(.ssd_code_slow))
+		KEEP(*(.ssd_code_slow.*))
+		. = ALIGN(4);
+		__ssd_code_slow_end = .;
+	} > HYPERRAM AT > NAND_FW
+	__ssd_code_slow_load_start = LOADADDR(.ssd_code_slow);
  
 	 /*
      * ========================================================
@@ -277,7 +309,7 @@
 		*(.debug_*)            /*DWARF 调试信息*/
 		*(.ARM.attributes)     /*ARM 架构版本、ABI 版本、浮点 ABI 等*/
 		*(.stab*)              /*老式 Stabs 调试符号表*/
-		*(.eh_frame*)          /*C++ 异常处理的栈展开信息*/
+		*(.eh_frame*)          /* 防止误启用异常展开代码 */
 	}
 	
 	

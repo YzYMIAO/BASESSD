@@ -153,7 +153,7 @@ BASE_FLAGS  = $(WARN_FLAGS) $(INC_FLAGS) $(FIRMWARE_CFLAGS)
 
 # 4.4 调试/优化选项（根据BUILD_TYPE）
 ifeq ($(BUILD_TYPE), debug)
-    OPT_FLAGS   = -O0 -g3 -ggdb3
+    OPT_FLAGS   = -O -g3 -ggdb3
     DBG_FLAGS   = -DDEBUG -D_DEBUG
     APP_SUFFIX  = _debug
 else ifeq ($(BUILD_TYPE), release)
@@ -216,9 +216,9 @@ BASE_LDFLAGS = $(CPU_FLAGS)\
                 -specs=nano.specs\
                 -specs=nosys.specs\
                 -nostartfiles\
-                -Wl,--undefined=_printf_float\
                 -Wl,--gc-sections
 
+#                -Wl,--undefined=_printf_float\
 
 # -lc                            链接标准 C 库（libc.a）
 # -lm                            链接数学库（libm.a）

@@ -8,4 +8,11 @@
 #include <time.h>
 #include <stdint.h>
 #include <limits.h>
+
+typedef enum
+{
+  SUCCESS = 0,
+  ERROR = !SUCCESS
+} FuncStatus;
+
 #endif

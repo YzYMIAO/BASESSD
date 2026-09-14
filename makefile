@@ -27,6 +27,8 @@ THIRD_PARTY_S_SRCS :=
 MODULE_SRCS :=
 MODULE_INCS :=
 PLATFORM_S_SRCS :=
+# C objects that must bypass static archives during the final link.
+LINK_C_OBJS :=
 # 3. 包含所有子模块的声明文件（在解析阶段完成收集）
 #    这一步会将子模块中的 MODULE_SRCS += xxx 追加进来
 $(info ========================================)
@@ -48,6 +50,9 @@ C_OBJS := $(patsubst $(SRC_ROOT)/%.c, $(OBJ_DIR)/%.o, $(C_SRCS))
 S_OBJS := $(patsubst $(SRC_ROOT)/%.s, $(OBJ_DIR)/%.o, $(S_SRCS))
 	THIRD_PARTY_C_OBJS := $(patsubst $(PROJECT_ROOT)/%.c,$(OBJ_DIR)/%.o,$(THIRD_PARTY_C_SRCS))
 	THIRD_PARTY_S_OBJS := $(patsubst $(PROJECT_ROOT)/%.s,$(OBJ_DIR)/%.o,$(THIRD_PARTY_S_SRCS))
+	# Application-owned sources must be linked as objects.  In particular, this
+	# allows strong interrupt handlers to override weak startup defaults.
+	LINK_C_OBJS := $(C_OBJS)
 	LINK_S_OBJS := $(S_OBJS) $(THIRD_PARTY_S_OBJS)
 
 	ALL_OBJS := $(C_OBJS) $(S_OBJS) $(THIRD_PARTY_C_OBJS) $(THIRD_PARTY_S_OBJS)
@@ -75,9 +80,9 @@ $(info ========================================)
 export C_SRCS
 export S_SRCS
 export C_OBJS
-export APP_OBJS
 export S_OBJS
 export LINK_S_OBJS
+export LINK_C_OBJS
 export ALL_OBJS
 # ============================================================================
 # 7. 包含编译和链接规则（明确分开包含）

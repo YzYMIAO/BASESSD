@@ -1,6 +1,6 @@
 
-#include <common.h>
-#include <munit.h>
+#include "common/common.h"
+#include "munit.h"
 static MunitLogLevel munit_log_level_fatal = MUNIT_LOG_ERROR;
 static MunitLogLevel munit_log_level_visible = MUNIT_LOG_ERROR;
 
@@ -108,8 +108,8 @@ void munit_errorf_ex(const char * filename, int line, const char * format, ...)
 
 		ptr 				= calloc(1, size);
 
-		if (MUNIT_LIKELY(ptr == NULL)) {
-			munit_logf_ex(MUNIT_LOG_ERROR, filename, line, "Failed to allocate %u byte", size);
+	if (MUNIT_UNLIKELY(ptr == NULL)) {
+			munit_logf_ex(MUNIT_LOG_ERROR, filename, line, "Failed to allocate %zu byte", size);
 		}
 
 		return ptr;

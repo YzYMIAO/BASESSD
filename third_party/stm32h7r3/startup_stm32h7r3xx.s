@@ -77,6 +77,23 @@ LoopCopyDataInit:
   cmp r4, r1
   bcc CopyDataInit
 
+/* Copy explicitly marked high-speed code from FLASH to ITCM. */
+  ldr r0, =__ssd_code_high_start
+  ldr r1, =__ssd_code_high_end
+  ldr r2, =__ssd_code_high_load_start
+  movs r3, #0
+  b LoopCopyHighCode
+
+CopyHighCode:
+  ldr r4, [r2, r3]
+  str r4, [r0, r3]
+  adds r3, r3, #4
+
+LoopCopyHighCode:
+  adds r4, r0, r3
+  cmp r4, r1
+  bcc CopyHighCode
+
 /* Zero fill the bss segment. */
   ldr r2, =_sbss
   ldr r4, =_ebss
@@ -91,8 +108,6 @@ LoopFillZerobss:
   cmp r2, r4
   bcc FillZerobss
 
-/* Call static constructors */
-    bl __libc_init_array
 /* Call the application's entry point.*/
   bl  main
 
@@ -124,7 +139,6 @@ Infinite_Loop:
 ******************************************************************************/
    .section  .isr_vector,"a",%progbits
   .type  g_pfnVectors, %object
-  .size  g_pfnVectors, .-g_pfnVectors
 
 g_pfnVectors:
   .word  _estack
@@ -301,6 +315,8 @@ g_pfnVectors:
   .word     FDCAN2_IT0_IRQHandler             /* FDCAN2 Interrupt 0 */
   .word     FDCAN2_IT1_IRQHandler             /* FDCAN2 Interrupt 1 */
 
+
+.size  g_pfnVectors, .-g_pfnVectors
 /*******************************************************************************
 *
 * Provide weak aliases for each Exception handler to the Default_Handler.

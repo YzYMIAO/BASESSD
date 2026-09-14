@@ -21,7 +21,12 @@
 
 
 
-#define MUNIT_ENABLE_ASSERT_ALIASES
+/*
+ * Do not define MUNIT_ENABLE_ASSERT_ALIASES here. Production and ordinary unit
+ * tests may use the standard <assert.h>; globally redefining assert causes test
+ * framework behavior to leak into unrelated code. Suites opting in may define
+ * it before including this header, but new tests should prefer munit_assert_*.
+ */
 
 
 #define MUNIT_TEST_NAME_LEN 37

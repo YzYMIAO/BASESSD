@@ -200,6 +200,9 @@ SECTIONS
     libc.a ( * )
     libm.a ( * )
     libgcc.a ( * )
+    *(.eh_frame*)
+    *(.ARM.extab*)
+    *(.ARM.exidx*)
   }
 
   .ARM.attributes 0 : { *(.ARM.attributes) }

@@ -9,5 +9,8 @@ CFLAGS += -DUSE_HAL_DRIVER -DSTM32H7R3xx
 ASFLAGS += -DSTM32H7R3xx
 THIRD_PARTY_CFLAGS += -Wno-cast-align
 
-# 板级自检驱动显式列出，避免依赖 board_*.c 命名约定。
-MODULE_SRCS += $(SRC_ROOT)/platform/stm32h7r3/h7r3_led.c
+# SoC 内部 IP 驱动保留在 stm32h7r3 根目录；外接板级器件放入 bsp 子目录。
+MODULE_SRCS += $(wildcard $(SRC_ROOT)/platform/stm32h7r3/*.c)
+MODULE_SRCS += $(wildcard $(SRC_ROOT)/platform/stm32h7r3/bsp/*.c)
+MODULE_INCS += $(INC_ROOT)/platform/stm32h7r3
+MODULE_INCS += $(INC_ROOT)/platform/stm32h7r3/bsp

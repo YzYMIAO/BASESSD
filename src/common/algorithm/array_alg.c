@@ -579,7 +579,7 @@ int removeElement( int * nums, int numsSize, int val )
 
 
 
-void swap( int * a, int * b )
+static void swap( int * a, int * b )
 {
 	int 			temp = *a;
 

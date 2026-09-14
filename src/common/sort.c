@@ -5,7 +5,7 @@
 #include <string.h>
 
 //交换两块内存
-void swap(void * a, void * b, size_t size)
+static void swap(void * a, void * b, size_t size)
 {
 	char *			pa	= (char *) a;
 	char *			pb	= (char *) b;

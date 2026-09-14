@@ -61,6 +61,8 @@ MEMORY
   BKPSRAM   (rw)  : ORIGIN = 0x38800000,  LENGTH = 0x00001000
 
   FLASH     (xrw) : ORIGIN = __FLASH_BEGIN, LENGTH = __FLASH_SIZE
+  /* XSPI2 HyperRAM 映射窗口；低速代码在运行时从 FLASH 搬运到此处。 */
+  HYPERRAM  (xrw) : ORIGIN = 0x70000000, LENGTH = 32M
 }
 
 /* Sections */
@@ -74,6 +76,39 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
+  /* 高速代码：VMA 在 ITCM，LMA 在内部 Flash，由启动文件复制。 */
+  .ssd_code_high :
+  {
+    . = ALIGN(4);
+    __ssd_code_high_start = .;
+    KEEP(*(.ssd_code_high))
+    KEEP(*(.ssd_code_high.*))
+    . = ALIGN(4);
+    __ssd_code_high_end = .;
+  } >ITCM AT>FLASH
+  __ssd_code_high_load_start = LOADADDR(.ssd_code_high);
+
+  /* 快速代码保留在内部 Flash，直接执行。 */
+  .ssd_code_fast :
+  {
+    . = ALIGN(4);
+    KEEP(*(.ssd_code_fast))
+    KEEP(*(.ssd_code_fast.*))
+    . = ALIGN(4);
+  } >FLASH
+
+  /* 低速代码：VMA 在 HyperRAM，LMA 在 Flash；不可在 HyperRAM 初始化前调用。 */
+  .ssd_code_slow :
+  {
+    . = ALIGN(4);
+    __ssd_code_slow_start = .;
+    KEEP(*(.ssd_code_slow))
+    KEEP(*(.ssd_code_slow.*))
+    . = ALIGN(4);
+    __ssd_code_slow_end = .;
+  } >HYPERRAM AT>FLASH
+  __ssd_code_slow_load_start = LOADADDR(.ssd_code_slow);
+
   /* The program code and other data into "FLASH" Rom type memory */
   .text :
   {
@@ -82,7 +117,6 @@ SECTIONS
     *(.text*)          /* .text* sections (code) */
     *(.glue_7)         /* glue arm to thumb code */
     *(.glue_7t)        /* glue thumb to arm code */
-    *(.eh_frame)
 
     KEEP (*(.init))
     KEEP (*(.fini))
@@ -100,50 +134,6 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
-  .ARM.extab (READONLY) : /* The READONLY keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
-  {
-    . = ALIGN(4);
-    *(.ARM.extab* .gnu.linkonce.armextab.*)
-    . = ALIGN(4);
-  } >FLASH
-
-  .ARM (READONLY) : /* The READONLY keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
-   {
-    . = ALIGN(4);
-    __exidx_start = .;
-    *(.ARM.exidx*)
-    __exidx_end = .;
-    . = ALIGN(4);
-  } >FLASH
-
-  .preinit_array  (READONLY) : /* The READONLY keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
-  {
-    . = ALIGN(4);
-    PROVIDE_HIDDEN (__preinit_array_start = .);
-    KEEP (*(.preinit_array*))
-    PROVIDE_HIDDEN (__preinit_array_end = .);
-    . = ALIGN(4);
-  } >FLASH
-
-  .init_array (READONLY) : /* The READONLY keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
-  {
-    . = ALIGN(4);
-    PROVIDE_HIDDEN (__init_array_start = .);
-    KEEP (*(SORT(.init_array.*)))
-    KEEP (*(.init_array*))
-    PROVIDE_HIDDEN (__init_array_end = .);
-    . = ALIGN(4);
-  } >FLASH
-
-  .fini_array (READONLY) : /* The READONLY keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
-  {
-    . = ALIGN(4);
-    PROVIDE_HIDDEN (__fini_array_start = .);
-    KEEP (*(SORT(.fini_array.*)))
-    KEEP (*(.fini_array*))
-    PROVIDE_HIDDEN (__fini_array_end = .);
-    . = ALIGN(4);
-  } >FLASH
 
   /* Used by the startup to initialize data */
   _sidata = LOADADDR(.data);
@@ -203,6 +193,10 @@ SECTIONS
     libc.a ( * )
     libm.a ( * )
     libgcc.a ( * )
+    /* 本工程为纯 C 裸机固件，不保留 C++ 异常/栈展开元数据。 */
+    *(.eh_frame*)
+    *(.ARM.extab*)
+    *(.ARM.exidx*)
   }
 
   .ARM.attributes 0 : { *(.ARM.attributes) }
