@@ -46,20 +46,19 @@
 void mpu_set_protection(uint32_t baseaddr, uint32_t size, uint32_t rnum, uint8_t de, uint8_t ap, uint8_t sen, uint8_t cen, uint8_t ben)
 {
     MPU_Region_InitTypeDef mpu_region_init_struct = {0};
-    
-    mpu_region_init_struct.Enable = MPU_REGION_ENABLE;
-    mpu_region_init_struct.Number = rnum;
-    mpu_region_init_struct.BaseAddress = baseaddr;
-    mpu_region_init_struct.Size = size;
+
+    mpu_region_init_struct.Enable           = MPU_REGION_ENABLE;
+    mpu_region_init_struct.Number           = rnum;
+    mpu_region_init_struct.BaseAddress      = baseaddr;
+    mpu_region_init_struct.Size             = size;
     mpu_region_init_struct.SubRegionDisable = 0x00;
-    mpu_region_init_struct.TypeExtField = MPU_TEX_LEVEL1;
+    mpu_region_init_struct.TypeExtField     = MPU_TEX_LEVEL1;
     mpu_region_init_struct.AccessPermission = ap;
-    mpu_region_init_struct.DisableExec = de;
-    mpu_region_init_struct.IsShareable = sen;
-    mpu_region_init_struct.IsCacheable = cen;
-    mpu_region_init_struct.IsBufferable = ben;
+    mpu_region_init_struct.DisableExec      = de;
+    mpu_region_init_struct.IsShareable      = sen;
+    mpu_region_init_struct.IsCacheable      = cen;
+    mpu_region_init_struct.IsBufferable     = ben;
     HAL_MPU_Disable();
     HAL_MPU_ConfigRegion(&mpu_region_init_struct);
     HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
-

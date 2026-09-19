@@ -3,7 +3,7 @@
 #include "stm32h7rsxx_hal.h"
 
 static uint32_t s_core_clock_hz;
-static bool s_initialized;
+static bool     s_initialized;
 
 /**
  * @brief 解析 CPU 时钟参数。
@@ -49,7 +49,7 @@ static bool delay_plus_enable_dwt(void)
 void delay_plus_init(uint32_t core_clock_hz)
 {
     s_core_clock_hz = delay_plus_resolve_clock(core_clock_hz);
-    s_initialized = (s_core_clock_hz != 0U) && delay_plus_enable_dwt();
+    s_initialized   = (s_core_clock_hz != 0U) && delay_plus_enable_dwt();
 }
 
 /**
@@ -139,7 +139,7 @@ delay_plus_status_t delay_plus_delay_us_busy(uint32_t us)
         return DELAY_PLUS_ERR_OUT_OF_RANGE;
     }
     cycles = (uint32_t)cycles64;
-    start = DWT->CYCCNT;
+    start  = DWT->CYCCNT;
 
     /* uint32_t 减法天然支持一次回绕；调用者不得超过上限。 */
     while ((uint32_t)(DWT->CYCCNT - start) < cycles)

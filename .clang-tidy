@@ -1,0 +1,10 @@
+Checks: '-*,readability-braces-around-statements'
+
+# 要求所有 if/else/for/while/do 语句显式使用大括号。
+CheckOptions:
+  - key: readability-braces-around-statements.ShortStatementLines
+    value: '0'
+
+# 仅检查工程源码；第三方和构建目录不纳入规则范围。
+HeaderFilterRegex: '^(include|src)/.*'
+FormatStyle: file

@@ -36,6 +36,9 @@ endif
 ifeq ($(FIRMWARE_PLATFORM),stm32h7r3)
 CPU_TYPES := cortex-m7
 LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h7r3xx_flash.ld
+else ifeq ($(FIRMWARE_PLATFORM),stm32h743)
+CPU_TYPES := cortex-m7
+LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h743xx_flash.ld
 else ifeq ($(FIRMWARE_PLATFORM),reference_soc)
 CPU_TYPES := cortex-r5
 LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/reference_soc.ld
@@ -244,7 +247,7 @@ endif
 # ----------------------------------------------------------------------------
 # 6. 模块列表（按依赖顺序：被依赖的在前）
 # ----------------------------------------------------------------------------
-MODULES = common controller flash_controller ftl host nand platform
+MODULES = common controller fc flash_controller ftl host nand platform
 
 # 固件目标额外包含启动编排模块；Host Simulator 使用自己的 main()。
 ifeq ($(BUILD_TARGET),firmware)

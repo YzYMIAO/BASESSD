@@ -12,7 +12,7 @@ static int accept_signature(const boot_image_header_t *header, void *context)
 
 static void test_image_validation(void)
 {
-    boot_image_header_t header = {0};
+    boot_image_header_t      header      = {0};
     boot_image_constraints_t constraints = {
         .chip_id                  = 0x1234U,
         .hardware_revision        = 2U,
@@ -49,7 +49,7 @@ static void test_metadata_copy_selection(void)
 {
     boot_metadata_t copies[2];
     boot_metadata_t selected;
-    uint32_t selected_copy;
+    uint32_t        selected_copy;
 
     boot_metadata_initialize(&copies[0], BOOT_SLOT_A, 10U);
     copies[1]          = copies[0];
@@ -68,9 +68,9 @@ static void test_metadata_copy_selection(void)
 static void test_pending_slot_retry_and_confirm(void)
 {
     boot_metadata_t metadata;
-    boot_slot_t selected;
-    uint8_t bootable[BOOT_SLOT_COUNT] = {1U, 1U};
-    int changed;
+    boot_slot_t     selected;
+    uint8_t         bootable[BOOT_SLOT_COUNT] = {1U, 1U};
+    int             changed;
 
     boot_metadata_initialize(&metadata, BOOT_SLOT_A, 10U);
     metadata.pending_slot    = BOOT_SLOT_B;
@@ -92,9 +92,9 @@ static void test_pending_slot_retry_and_confirm(void)
 static void test_retry_exhaustion_falls_back(void)
 {
     boot_metadata_t metadata;
-    boot_slot_t selected;
-    uint8_t bootable[BOOT_SLOT_COUNT] = {1U, 1U};
-    int changed;
+    boot_slot_t     selected;
+    uint8_t         bootable[BOOT_SLOT_COUNT] = {1U, 1U};
+    int             changed;
 
     boot_metadata_initialize(&metadata, BOOT_SLOT_A, 10U);
     metadata.pending_slot    = BOOT_SLOT_B;

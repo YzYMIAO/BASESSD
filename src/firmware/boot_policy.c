@@ -4,7 +4,7 @@
 
 static int boot_memory_equal(const uint8_t *left, const uint8_t *right, size_t size)
 {
-    size_t index;
+    size_t  index;
     uint8_t difference = 0U;
 
     /* 固定时间比较，避免哈希比较在第一个差异字节处提前退出。 */
@@ -63,9 +63,9 @@ static int boot_image_header_crc_is_valid(const boot_image_header_t *header)
 
 int boot_image_validate(const boot_image_header_t      *header,
                         const boot_image_constraints_t *constraints,
-                        const uint8_t                    actual_payload_hash[BOOT_SHA256_SIZE],
-                        boot_signature_verify_fn         verify_signature,
-                        void                            *verify_context)
+                        const uint8_t                   actual_payload_hash[BOOT_SHA256_SIZE],
+                        boot_signature_verify_fn        verify_signature,
+                        void                           *verify_context)
 {
     uint32_t image_end;
 
@@ -118,23 +118,22 @@ void boot_metadata_finalize(boot_metadata_t *metadata)
     metadata->crc32 = boot_crc32(metadata, sizeof(*metadata));
 }
 
-void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_t active_slot,
-                              uint32_t active_firmware_version)
+void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_t active_slot, uint32_t active_firmware_version)
 {
     if ((metadata == NULL) || ((uint32_t)active_slot >= BOOT_SLOT_COUNT))
     {
         return;
     }
 
-    metadata->magic               = BOOT_METADATA_MAGIC;
-    metadata->format_version      = BOOT_METADATA_VERSION;
-    metadata->sequence            = 1U;
-    metadata->active_slot         = (uint32_t)active_slot;
-    metadata->pending_slot        = BOOT_SLOT_NONE;
-    metadata->retry_remaining     = 0U;
-    metadata->successful_mask     = UINT32_C(1) << (uint32_t)active_slot;
-    metadata->firmware_version[0] = 0U;
-    metadata->firmware_version[1] = 0U;
+    metadata->magic                                   = BOOT_METADATA_MAGIC;
+    metadata->format_version                          = BOOT_METADATA_VERSION;
+    metadata->sequence                                = 1U;
+    metadata->active_slot                             = (uint32_t)active_slot;
+    metadata->pending_slot                            = BOOT_SLOT_NONE;
+    metadata->retry_remaining                         = 0U;
+    metadata->successful_mask                         = UINT32_C(1) << (uint32_t)active_slot;
+    metadata->firmware_version[0]                     = 0U;
+    metadata->firmware_version[1]                     = 0U;
     metadata->firmware_version[(uint32_t)active_slot] = active_firmware_version;
     boot_metadata_finalize(metadata);
 }
@@ -154,9 +153,9 @@ int boot_metadata_is_valid(const boot_metadata_t *metadata)
         return 0;
     }
 
-    copy         = *metadata;
-    expected     = copy.crc32;
-    copy.crc32   = 0U;
+    copy       = *metadata;
+    expected   = copy.crc32;
+    copy.crc32 = 0U;
     return expected == boot_crc32(&copy, sizeof(copy));
 }
 
@@ -166,11 +165,10 @@ static int boot_sequence_is_newer(uint32_t candidate, uint32_t reference)
     return (int32_t)(candidate - reference) > 0;
 }
 
-int boot_metadata_select_latest(const boot_metadata_t copies[2], boot_metadata_t *selected,
-                                uint32_t *selected_copy)
+int boot_metadata_select_latest(const boot_metadata_t copies[2], boot_metadata_t *selected, uint32_t *selected_copy)
 {
-    int valid0;
-    int valid1;
+    int      valid0;
+    int      valid1;
     uint32_t index;
 
     if ((copies == NULL) || (selected == NULL) || (selected_copy == NULL))
@@ -185,9 +183,9 @@ int boot_metadata_select_latest(const boot_metadata_t copies[2], boot_metadata_t
         return BOOT_POLICY_CORRUPT;
     }
 
-    index = (!valid0 || (valid1 && boot_sequence_is_newer(copies[1].sequence, copies[0].sequence)))
-                ? 1U
-                : 0U;
+    index          = (!valid0 || (valid1 && boot_sequence_is_newer(copies[1].sequence, copies[0].sequence)))
+                         ? 1U
+                         : 0U;
     *selected      = copies[index];
     *selected_copy = index;
     return BOOT_POLICY_OK;
@@ -199,8 +197,7 @@ static void boot_metadata_changed(boot_metadata_t *metadata)
     boot_metadata_finalize(metadata);
 }
 
-int boot_policy_select_slot(boot_metadata_t *metadata, const uint8_t slot_bootable[BOOT_SLOT_COUNT],
-                            boot_slot_t *selected_slot, int *metadata_changed)
+int boot_policy_select_slot(boot_metadata_t *metadata, const uint8_t slot_bootable[BOOT_SLOT_COUNT], boot_slot_t *selected_slot, int *metadata_changed)
 {
     uint32_t pending;
     uint32_t active;
@@ -249,8 +246,7 @@ int boot_policy_select_slot(boot_metadata_t *metadata, const uint8_t slot_bootab
     return BOOT_POLICY_NO_BOOTABLE_SLOT;
 }
 
-int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_t running_slot,
-                                uint32_t firmware_version)
+int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_t running_slot, uint32_t firmware_version)
 {
     uint32_t slot = (uint32_t)running_slot;
 
@@ -259,10 +255,10 @@ int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_t running_s
         return BOOT_POLICY_INVALID_ARGUMENT;
     }
 
-    metadata->active_slot            = slot;
-    metadata->pending_slot           = BOOT_SLOT_NONE;
-    metadata->retry_remaining        = 0U;
-    metadata->successful_mask       |= UINT32_C(1) << slot;
+    metadata->active_slot     = slot;
+    metadata->pending_slot    = BOOT_SLOT_NONE;
+    metadata->retry_remaining = 0U;
+    metadata->successful_mask |= UINT32_C(1) << slot;
     metadata->firmware_version[slot] = firmware_version;
     boot_metadata_changed(metadata);
     return BOOT_POLICY_OK;

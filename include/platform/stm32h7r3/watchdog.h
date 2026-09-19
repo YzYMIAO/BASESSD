@@ -28,10 +28,10 @@ typedef enum
 
 typedef enum
 {
-    STORAGE_WDG_FAULT_NONE = 0,          /* 当前健康，允许继续喂 IWDG。 */
-    STORAGE_WDG_FAULT_DOMAIN_TIMEOUT,    /* 一个必需域在 deadline 前没有前进。 */
-    STORAGE_WDG_FAULT_WWDG_WINDOW_MISSED,/* Supervisor 太晚运行，错过 WWDG 窗口。 */
-    STORAGE_WDG_FAULT_WWDG_EARLY_WAKEUP  /* WWDG 即将复位前产生了 EWI。 */
+    STORAGE_WDG_FAULT_NONE = 0,           /* 当前健康，允许继续喂 IWDG。 */
+    STORAGE_WDG_FAULT_DOMAIN_TIMEOUT,     /* 一个必需域在 deadline 前没有前进。 */
+    STORAGE_WDG_FAULT_WWDG_WINDOW_MISSED, /* Supervisor 太晚运行，错过 WWDG 窗口。 */
+    STORAGE_WDG_FAULT_WWDG_EARLY_WAKEUP   /* WWDG 即将复位前产生了 EWI。 */
 } storage_wdg_fault_t;
 
 /*
@@ -62,7 +62,7 @@ typedef struct
      * WWDG 依赖 PCLK 和严格调度节奏，因此可选。其作用是发现 Supervisor 过快或
      * 过慢运行；IWDG 仍是最终、独立时钟驱动的复位保障。
      */
-    bool enable_wwdg;
+    bool     enable_wwdg;
     uint32_t wwdg_prescaler;
     uint32_t wwdg_counter;
     uint32_t wwdg_window;
@@ -78,14 +78,14 @@ typedef struct
 
 typedef struct
 {
-    bool initialized;      /* 硬件和软件状态是否已经完成初始化。 */
-    bool iwdg_feeding;     /* false 表示已故障锁存，不会再刷新 IWDG。 */
-    bool wwdg_enabled;     /* 本次配置是否启用了 WWDG。 */
-    bool wwdg_early_warning; /* 是否已经收到 WWDG 的 EWI。 */
-    storage_wdg_fault_t fault; /* 首个故障原因，锁存后不被后续故障覆盖。 */
-    storage_wdg_domain_t fault_domain; /* 首个超时或异常关联的健康域。 */
-    uint32_t last_progress_ms[STORAGE_WDG_DOMAIN_COUNT]; /* 各域最后前进时刻。 */
-    uint32_t recovery_attempts[STORAGE_WDG_DOMAIN_COUNT]; /* 每域本次启动的恢复请求次数。 */
+    bool                 initialized;                                 /* 硬件和软件状态是否已经完成初始化。 */
+    bool                 iwdg_feeding;                                /* false 表示已故障锁存，不会再刷新 IWDG。 */
+    bool                 wwdg_enabled;                                /* 本次配置是否启用了 WWDG。 */
+    bool                 wwdg_early_warning;                          /* 是否已经收到 WWDG 的 EWI。 */
+    storage_wdg_fault_t  fault;                                       /* 首个故障原因，锁存后不被后续故障覆盖。 */
+    storage_wdg_domain_t fault_domain;                                /* 首个超时或异常关联的健康域。 */
+    uint32_t             last_progress_ms[STORAGE_WDG_DOMAIN_COUNT];  /* 各域最后前进时刻。 */
+    uint32_t             recovery_attempts[STORAGE_WDG_DOMAIN_COUNT]; /* 每域本次启动的恢复请求次数。 */
 } storage_wdg_status_t;
 
 /* 配置 IWDG 与可选 WWDG，并以当前 HAL tick 作为所有域的初始心跳时刻。 */

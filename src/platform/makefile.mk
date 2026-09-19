@@ -8,6 +8,8 @@ ifeq ($(FIRMWARE_PLATFORM),reference_soc)
 PLATFORM_MODS = armv7r reference_soc
 else ifeq ($(FIRMWARE_PLATFORM),stm32h7r3)
 PLATFORM_MODS = stm32h7r3
+else ifeq ($(FIRMWARE_PLATFORM),stm32h743)
+PLATFORM_MODS = stm32h743
 else
 $(error Unsupported FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM))
 endif

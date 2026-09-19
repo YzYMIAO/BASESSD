@@ -47,8 +47,10 @@ ITCM_CODE void TCM_Init(void)
     SCB_DTCMCR = SCB_DTCMCR_EN;
 
     /* 内存屏障 */
-    __asm volatile("dsb" ::: "memory");
-    __asm volatile("isb" ::: "memory");
+    __asm volatile("dsb" ::
+                       : "memory");
+    __asm volatile("isb" ::
+                       : "memory");
 }
 
 /* ============================================================

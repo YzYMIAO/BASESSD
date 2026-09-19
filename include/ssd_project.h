@@ -3,9 +3,9 @@
 
 /* 工程公共入口：业务模块只需包含本文件即可获得基础类型、属性和诊断接口。 */
 #include "common/common.h"
-#include "ssd_compiler.h"
-#include "common/ssd_log.h"
 #include "common/ssd_assert.h"
+#include "common/ssd_log.h"
+#include "ssd_compiler.h"
 
 /* 工程代码等级的语义名称，便于模块代码表达放置意图。 */
 #define SSD_CODE_CRITICAL SSD_CODE_HIGH

@@ -1,6 +1,7 @@
 
 
 #include "norflash_ex.h"
+
 #include "norflash.h"
 
 /**
@@ -17,9 +18,9 @@ static uint8_t norflash_ex_enter_mmap(void)
     {
         return 1;
     }
-    
+
     __enable_irq();
-    
+
     return 0;
 }
 
@@ -39,7 +40,7 @@ static uint8_t norflash_ex_exit_mmap(void)
     {
         return 1;
     }
-    
+
     return 0;
 }
 
@@ -56,12 +57,12 @@ uint8_t norflash_ex_init(void)
     {
         return 1;
     }
-    
+
     if (norflash_memory_mapped() != 0)
     {
         return 1;
     }
-    
+
     return 0;
 }
 
@@ -77,16 +78,16 @@ uint8_t norflash_ex_init(void)
 uint8_t norflash_ex_write(uint32_t address, uint8_t *data, uint32_t length)
 {
     uint8_t res = 0;
-    
+
     res = norflash_ex_exit_mmap();
-    
+
     if (res == 0)
     {
         res = norflash_write(address, data, length);
     }
-    
+
     norflash_ex_enter_mmap();
-    
+
     return res;
 }
 
@@ -102,11 +103,11 @@ uint8_t norflash_ex_write(uint32_t address, uint8_t *data, uint32_t length)
 uint8_t norflash_ex_read(uint32_t address, uint8_t *data, uint32_t length)
 {
     uint8_t res;
-    
+
     __disable_irq();
     res = norflash_read(address, data, length);
     __enable_irq();
-    
+
     return res;
 }
 
@@ -120,15 +121,15 @@ uint8_t norflash_ex_read(uint32_t address, uint8_t *data, uint32_t length)
 uint8_t norflash_ex_erase_sector(uint32_t address)
 {
     uint8_t res = 0;
-    
+
     res = norflash_ex_exit_mmap();
-    
+
     if (res == 0)
     {
         res = norflash_erase_sector(address);
     }
-    
+
     norflash_ex_enter_mmap();
-    
+
     return res;
 }

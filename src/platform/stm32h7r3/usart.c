@@ -4,17 +4,17 @@
 #include <stdio.h>
 #include <string.h>
 
-#define USART_RX_RING_MASK (USART_RX_RING_CAPACITY - 1U)
-#define USART_TX_RING_MASK (USART_TX_RING_CAPACITY - 1U)
+#define USART_RX_RING_MASK     (USART_RX_RING_CAPACITY - 1U)
+#define USART_TX_RING_MASK     (USART_TX_RING_CAPACITY - 1U)
 #define UART_CLI_MAX_ARGUMENTS 8U
 #define UART_ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 #if ((USART_RX_RING_CAPACITY & USART_RX_RING_MASK) != 0U)
-#error "USART_RX_RING_CAPACITY must be a power of two"
+#    error "USART_RX_RING_CAPACITY must be a power of two"
 #endif
 
 #if ((USART_TX_RING_CAPACITY & USART_TX_RING_MASK) != 0U)
-#error "USART_TX_RING_CAPACITY must be a power of two"
+#    error "USART_TX_RING_CAPACITY must be a power of two"
 #endif
 
 UART_HandleTypeDef g_uart1_handle = {0};
@@ -23,7 +23,7 @@ UART_HandleTypeDef g_uart1_handle = {0};
  * RX 环形队列：USART IRQ 是唯一生产者，uart_service_poll() 是唯一消费者。
  * IRQ 只发布 g_rx_head，主循环只推进 g_rx_tail，这是无锁 SPSC 队列成立的前提。
  */
-static uint8_t g_rx_ring[USART_RX_RING_CAPACITY];
+static uint8_t           g_rx_ring[USART_RX_RING_CAPACITY];
 static volatile uint16_t g_rx_head;
 static volatile uint16_t g_rx_tail;
 
@@ -31,16 +31,16 @@ static volatile uint16_t g_rx_tail;
  * TX 环形队列：普通固件上下文是生产者，USART IRQ 是消费者。
  * uart_log_write() 用极短的关中断区保护“入队 + 打开 TXEIE”的交接，防止日志丢在队列中。
  */
-static uint8_t g_tx_ring[USART_TX_RING_CAPACITY];
+static uint8_t           g_tx_ring[USART_TX_RING_CAPACITY];
 static volatile uint16_t g_tx_head;
 static volatile uint16_t g_tx_tail;
 
-static uart_stats_t g_uart_stats;
+static uart_stats_t     g_uart_stats;
 static uart_log_level_t g_uart_log_level = UART_LOG_INFO;
-static char g_cli_line[USART_CLI_LINE_CAPACITY];
-static uint16_t g_cli_length;
-static uint8_t g_cli_discarding;
-static uint8_t g_usart_ready;
+static char             g_cli_line[USART_CLI_LINE_CAPACITY];
+static uint16_t         g_cli_length;
+static uint8_t          g_cli_discarding;
+static uint8_t          g_usart_ready;
 
 /*
  * 命令表把“命令字符串 -> 参数约束 -> 处理函数”的关系集中管理。
@@ -50,11 +50,11 @@ typedef int (*uart_cli_handler_t)(int argc, char *argv[]);
 
 typedef struct
 {
-    const char *name;
-    const char *usage;
-    const char *description;
-    uint8_t min_argc;
-    uint8_t max_argc;
+    const char        *name;
+    const char        *usage;
+    const char        *description;
+    uint8_t            min_argc;
+    uint8_t            max_argc;
     uart_cli_handler_t handler;
 } uart_cli_command_t;
 
@@ -70,7 +70,9 @@ static uint8_t uart_rx_dequeue(uint8_t *byte)
     uint16_t tail = g_rx_tail;
 
     if (tail == g_rx_head)
+    {
         return 0U;
+    }
 
     /*
      * IRQ 必须先写 ring[head]，再更新 head；DMB 防止编译器/CPU 重排这两个动作。
@@ -87,7 +89,9 @@ static uint8_t uart_tx_dequeue(uint8_t *byte)
     uint16_t tail = g_tx_tail;
 
     if (tail == g_tx_head)
+    {
         return 0U;
+    }
 
     /* 先取出数据再推进 tail；推进 tail 后，该槽位才可以被生产者重新使用。 */
     *byte = g_tx_ring[tail];
@@ -128,10 +132,10 @@ static int uart_cli_log(int argc, char *argv[]);
  * 单独注册，不能把 raw NAND 或任意内存访问默认暴露在量产 UART 上。
  */
 static const uart_cli_command_t g_uart_cli_commands[] = {
-    {"help", "help", "show command list", 1U, 1U, uart_cli_help},
-    {"status", "status", "show UART error and queue counters", 1U, 1U, uart_cli_status},
-    {"version", "version", "show firmware console version", 1U, 1U, uart_cli_version},
-    {"log", "log level <error|warn|info|debug>", "set runtime log level", 3U, 3U, uart_cli_log},
+    {   "help",                              "help",                  "show command list", 1U, 1U,    uart_cli_help},
+    { "status",                            "status", "show UART error and queue counters", 1U, 1U,  uart_cli_status},
+    {"version",                           "version",      "show firmware console version", 1U, 1U, uart_cli_version},
+    {    "log", "log level <error|warn|info|debug>",              "set runtime log level", 3U, 3U,     uart_cli_log},
 };
 
 static int uart_cli_help(int argc, char *argv[])
@@ -173,18 +177,30 @@ static int uart_cli_log(int argc, char *argv[])
 
     (void)argc;
     if (strcmp(argv[1], "level") != 0)
+    {
         return -1;
+    }
 
     if (strcmp(argv[2], "error") == 0)
+    {
         uart_log_set_level(UART_LOG_ERROR);
+    }
     else if (strcmp(argv[2], "warn") == 0)
+    {
         uart_log_set_level(UART_LOG_WARNING);
+    }
     else if (strcmp(argv[2], "info") == 0)
+    {
         uart_log_set_level(UART_LOG_INFO);
+    }
     else if (strcmp(argv[2], "debug") == 0)
+    {
         uart_log_set_level(UART_LOG_DEBUG);
+    }
     else
+    {
         return -1;
+    }
 
     (void)uart_log_write(updated, sizeof(updated) - 1U);
     return 0;
@@ -196,23 +212,33 @@ static int uart_cli_log(int argc, char *argv[])
  */
 static int uart_cli_tokenize(char *line, char *argv[], uint32_t max_arguments)
 {
-    uint32_t argc = 0U;
-    char *cursor = line;
+    uint32_t argc   = 0U;
+    char    *cursor = line;
 
     while (*cursor != '\0')
     {
         while ((*cursor == ' ') || (*cursor == '\t'))
+        {
             cursor++;
+        }
         if (*cursor == '\0')
+        {
             break;
+        }
         if (argc == max_arguments)
+        {
             return -1;
+        }
 
         argv[argc++] = cursor;
         while ((*cursor != '\0') && (*cursor != ' ') && (*cursor != '\t'))
+        {
             cursor++;
+        }
         if (*cursor != '\0')
+        {
             *cursor++ = '\0';
+        }
     }
 
     return (int)argc;
@@ -221,13 +247,15 @@ static int uart_cli_tokenize(char *line, char *argv[], uint32_t max_arguments)
 static void uart_execute_command(char *line)
 {
     static const char unknown[] = "error: unknown command\r\n";
-    char *argv[UART_CLI_MAX_ARGUMENTS];
-    int argc;
-    uint32_t index;
+    char             *argv[UART_CLI_MAX_ARGUMENTS];
+    int               argc;
+    uint32_t          index;
 
     argc = uart_cli_tokenize(line, argv, UART_CLI_MAX_ARGUMENTS);
     if (argc == 0)
+    {
         return;
+    }
     if (argc < 0)
     {
         (void)uart_log_write("error: too many arguments\r\n", 27U);
@@ -239,7 +267,9 @@ static void uart_execute_command(char *line)
         const uart_cli_command_t *command = &g_uart_cli_commands[index];
 
         if (strcmp(argv[0], command->name) != 0)
+        {
             continue;
+        }
 
         if (((uint32_t)argc < command->min_argc) || ((uint32_t)argc > command->max_argc) ||
             (command->handler(argc, argv) != 0))
@@ -261,23 +291,25 @@ int _write(int file, char *buffer, int length)
     (void)file;
 
     if ((buffer == NULL) || (length <= 0))
+    {
         return 0;
+    }
 
     return uart_log_write(buffer, (uint32_t)length);
 }
 
 void usart_init(uint32_t baudrate)
 {
-    g_uart1_handle.Instance = USART_UX;
-    g_uart1_handle.Init.BaudRate = baudrate;
-    g_uart1_handle.Init.WordLength = UART_WORDLENGTH_8B;
-    g_uart1_handle.Init.StopBits = UART_STOPBITS_1;
-    g_uart1_handle.Init.Parity = UART_PARITY_NONE;
-    g_uart1_handle.Init.Mode = UART_MODE_TX_RX;
-    g_uart1_handle.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    g_uart1_handle.Init.OverSampling = UART_OVERSAMPLING_16;
-    g_uart1_handle.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-    g_uart1_handle.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+    g_uart1_handle.Instance                    = USART_UX;
+    g_uart1_handle.Init.BaudRate               = baudrate;
+    g_uart1_handle.Init.WordLength             = UART_WORDLENGTH_8B;
+    g_uart1_handle.Init.StopBits               = UART_STOPBITS_1;
+    g_uart1_handle.Init.Parity                 = UART_PARITY_NONE;
+    g_uart1_handle.Init.Mode                   = UART_MODE_TX_RX;
+    g_uart1_handle.Init.HwFlowCtl              = UART_HWCONTROL_NONE;
+    g_uart1_handle.Init.OverSampling           = UART_OVERSAMPLING_16;
+    g_uart1_handle.Init.OneBitSampling         = UART_ONE_BIT_SAMPLE_DISABLE;
+    g_uart1_handle.Init.ClockPrescaler         = UART_PRESCALER_DIV1;
     g_uart1_handle.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
     (void)HAL_UART_Init(&g_uart1_handle);
 
@@ -294,10 +326,12 @@ void usart_init(uint32_t baudrate)
 void HAL_UART_MspInit(UART_HandleTypeDef *huart)
 {
     RCC_PeriphCLKInitTypeDef rcc_periph_clk_init_struct = {0};
-    GPIO_InitTypeDef gpio_init_struct = {0};
+    GPIO_InitTypeDef         gpio_init_struct           = {0};
 
     if (huart->Instance != USART_UX)
+    {
         return;
+    }
 
     rcc_periph_clk_init_struct.PeriphClockSelection = RCC_PERIPHCLK_USART1;
     rcc_periph_clk_init_struct.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK2;
@@ -307,14 +341,14 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     USART_TX_GPIO_CLK_ENABLE();
     USART_RX_GPIO_CLK_ENABLE();
 
-    gpio_init_struct.Pin = USART_TX_GPIO_PIN;
-    gpio_init_struct.Mode = GPIO_MODE_AF_PP;
-    gpio_init_struct.Pull = GPIO_PULLUP;
-    gpio_init_struct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gpio_init_struct.Pin       = USART_TX_GPIO_PIN;
+    gpio_init_struct.Mode      = GPIO_MODE_AF_PP;
+    gpio_init_struct.Pull      = GPIO_PULLUP;
+    gpio_init_struct.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
     gpio_init_struct.Alternate = USART_TX_GPIO_AF;
     HAL_GPIO_Init(USART_TX_GPIO_PORT, &gpio_init_struct);
 
-    gpio_init_struct.Pin = USART_RX_GPIO_PIN;
+    gpio_init_struct.Pin       = USART_RX_GPIO_PIN;
     gpio_init_struct.Alternate = USART_RX_GPIO_AF;
     HAL_GPIO_Init(USART_RX_GPIO_PORT, &gpio_init_struct);
 
@@ -324,9 +358,9 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
 
 void usart_irq_handler(void)
 {
-    uint32_t status = USART_UX->ISR;
+    uint32_t status      = USART_UX->ISR;
     uint32_t clear_flags = 0U;
-    uint8_t byte;
+    uint8_t  byte;
 
     /*
      * 先累计原因再清标志。即便出现 FE/NE/ORE，也要继续读取 RDR 抽干 RX FIFO，
@@ -377,7 +411,9 @@ void usart_irq_handler(void)
     }
 
     if (clear_flags != 0U)
+    {
         USART_UX->ICR = clear_flags;
+    }
 
     if (((USART_UX->CR1 & USART_CR1_TXEIE_TXFNFIE) != 0U) &&
         ((USART_UX->ISR & USART_ISR_TXE_TXFNF) != 0U))
@@ -387,11 +423,15 @@ void usart_irq_handler(void)
          * 真正最后一位离开 TX 引脚需观察 TC，本日志路径不等待 TC。
          */
         while (((USART_UX->ISR & USART_ISR_TXE_TXFNF) != 0U) && uart_tx_dequeue(&byte))
+        {
             USART_UX->TDR = byte;
+        }
 
         /* 软件队列为空时关闭 TXEIE，否则 TXE 始终为 1 会产生空转中断。 */
         if (g_tx_tail == g_tx_head)
+        {
             USART_UX->CR1 &= ~USART_CR1_TXEIE_TXFNFIE;
+        }
     }
 }
 
@@ -401,7 +441,9 @@ int uart_log_write(const char *data, uint32_t length)
     uint32_t primask;
 
     if ((!g_usart_ready) || (data == NULL) || (length == 0U))
+    {
         return 0;
+    }
 
     /*
      * 保护“生产者入队”和“打开 TXEIE”的原子交接：若 IRQ 恰好看到队列为空并关闭 TXEIE，
@@ -429,7 +471,9 @@ int uart_log_write(const char *data, uint32_t length)
 
     /* 置位 TXEIE 后，TX FIFO 有空位就会进入 IRQ 并异步抽干软件队列。 */
     if (written != 0U)
+    {
         USART_UX->CR1 |= USART_CR1_TXEIE_TXFNFIE;
+    }
 
     __set_PRIMASK(primask);
 
@@ -438,26 +482,34 @@ int uart_log_write(const char *data, uint32_t length)
 
 int uart_log_printf(uart_log_level_t level, const char *format, ...)
 {
-    char message[192];
-    int prefix_length;
-    int message_length;
+    char    message[192];
+    int     prefix_length;
+    int     message_length;
     va_list args;
 
     if ((format == NULL) || (level > g_uart_log_level))
+    {
         return 0;
+    }
 
     prefix_length = snprintf(message, sizeof(message), "[%s] ", uart_log_level_name(level));
     if ((prefix_length < 0) || ((uint32_t)prefix_length >= sizeof(message)))
+    {
         return 0;
+    }
 
     va_start(args, format);
     message_length = vsnprintf(message + prefix_length, sizeof(message) - (uint32_t)prefix_length, format, args);
     va_end(args);
 
     if (message_length < 0)
+    {
         return 0;
+    }
     if ((uint32_t)message_length >= (sizeof(message) - (uint32_t)prefix_length))
+    {
         message_length = (int)(sizeof(message) - (uint32_t)prefix_length - 1U);
+    }
 
     return uart_log_write(message, (uint32_t)(prefix_length + message_length));
 }
@@ -465,7 +517,9 @@ int uart_log_printf(uart_log_level_t level, const char *format, ...)
 void uart_log_set_level(uart_log_level_t level)
 {
     if (level <= UART_LOG_DEBUG)
+    {
         g_uart_log_level = level;
+    }
 }
 
 uart_log_level_t uart_log_get_level(void)
@@ -476,7 +530,9 @@ uart_log_level_t uart_log_get_level(void)
 void uart_get_stats(uart_stats_t *stats)
 {
     if (stats != NULL)
+    {
         *stats = g_uart_stats;
+    }
 }
 
 void uart_service_poll(void)
@@ -489,7 +545,9 @@ void uart_service_poll(void)
         {
             /* CRLF 被视为一次提交；紧跟 CR 的 LF 不产生一个空命令。 */
             if ((byte == '\n') && (g_cli_length == 0U) && !g_cli_discarding)
+            {
                 continue;
+            }
 
             (void)uart_log_write("\r\n", 2U);
             if (g_cli_discarding)
@@ -502,7 +560,7 @@ void uart_service_poll(void)
                 g_cli_line[g_cli_length] = '\0';
                 uart_execute_command(g_cli_line);
             }
-            g_cli_length = 0U;
+            g_cli_length     = 0U;
             g_cli_discarding = 0U;
             uart_write_prompt();
         }

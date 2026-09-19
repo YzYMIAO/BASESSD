@@ -9,14 +9,14 @@
 void ssd_assert_fail(const char *expression, const char *file, int line);
 
 #if defined(NDEBUG)
-#define SSD_ASSERT(expression) ((void)0)
+#    define SSD_ASSERT(expression) ((void)0)
 #else
-#define SSD_ASSERT(expression)                                                                    \
-    do                                                                                            \
-    {                                                                                             \
-        if (!(expression))                                                                        \
-            ssd_assert_fail(#expression, __FILE__, __LINE__);                                    \
-    } while (0)
+#    define SSD_ASSERT(expression)                                \
+        do                                                        \
+        {                                                         \
+            if (!(expression))                                    \
+                ssd_assert_fail(#expression, __FILE__, __LINE__); \
+        } while (0)
 #endif
 
 #endif /* SSD_ASSERT_H */

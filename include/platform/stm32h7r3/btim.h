@@ -7,9 +7,13 @@
 #include <stdint.h>
 
 /* TIM6 supplies the periodic hardware update event for the software scheduler. */
-#define BTIM_TIMX               TIM6
-#define BTIM_TIMX_IRQn          TIM6_IRQn
-#define BTIM_TIMX_CLK_ENABLE()  do { __HAL_RCC_TIM6_CLK_ENABLE(); } while (0)
+#define BTIM_TIMX      TIM6
+#define BTIM_TIMX_IRQn TIM6_IRQn
+#define BTIM_TIMX_CLK_ENABLE()       \
+    do                               \
+    {                                \
+        __HAL_RCC_TIM6_CLK_ENABLE(); \
+    } while (0)
 
 /* A fixed table keeps scheduling deterministic and avoids dynamic allocation in firmware. */
 #define BTIM_SCHEDULER_MAX_TASKS 16U
@@ -37,8 +41,7 @@ void btim_timx_int_init(uint16_t arr, uint16_t psc);
 void btim_scheduler_init(void);
 
 /* 可选运行时注册接口，适合确实随模块生命周期出现/撤销的临时任务。 */
-bool btim_scheduler_add(btim_task_callback_t callback, void *context, uint32_t first_delay_ms, uint32_t period_ms,
-                        uint32_t *task_id);
+bool btim_scheduler_add(btim_task_callback_t callback, void *context, uint32_t first_delay_ms, uint32_t period_ms, uint32_t *task_id);
 
 /* Enable/disable a registered task without losing its timing configuration. */
 bool btim_scheduler_enable(uint32_t task_id, bool enabled);

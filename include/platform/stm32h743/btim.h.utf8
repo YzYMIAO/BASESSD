@@ -1,0 +1,33 @@
+#ifndef SSD_STM32H7R3_BTIM_H
+#define SSD_STM32H7R3_BTIM_H
+
+#include "sys.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
+/* TIM6 supplies the periodic hardware update event for the software scheduler. */
+#define BTIM_TIMX               TIM6
+#define BTIM_TIMX_IRQn          TIM6_IRQn
+#define BTIM_TIMX_CLK_ENABLE()  do { __HAL_RCC_TIM6_CLK_ENABLE(); } while (0)
+
+/* A fixed table keeps scheduling deterministic and avoids dynamic allocation in firmware. */
+#define BTIM_SCHEDULER_MAX_TASKS 16U
+
+/*
+ * Callback context is supplied by the owner. now_ms is a snapshot taken before
+ * task-table iteration, so a callback should not assume it changes while it runs.
+ * Callbacks execute in main/task context and may not block for long periods.
+ */
+typedef void (*btim_task_callback_t)(void *context, uint32_t now_ms);
+
+extern TIM_HandleTypeDef g_btimx_handle;
+
+/*
+ * Low-level TIM6 setup. For a 1 ms tick with a 300 MHz timer kernel clock use:
+ * arr = 1000 - 1, psc = 300 - 1. Confirm TIM6 kernel frequency in the clock tree.
+ */
+void btim_timx_int_init(uint16_t arr, uint16_t psc);
+
+/*
+ * 鍒濆

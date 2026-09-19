@@ -32,7 +32,7 @@ $(foreach mod,$(MODULES),$(eval $(call BUILD_LIB_template,$(mod))))
 # Firmware-owned source files link as individual objects.  Only vendor code is
 # archived, preserving its normal on-demand static-library behavior.
 ifeq ($(BUILD_TARGET),firmware)
-ifeq ($(FIRMWARE_PLATFORM),stm32h7r3)
+ifneq ($(filter stm32h7r3 stm32h743,$(FIRMWARE_PLATFORM)),)
 $(LIB_DIR)/libthird_party.a: $(THIRD_PARTY_C_OBJS)
 	@$(MKDIR) $(LIB_DIR)
 	@$(ECHO) "Archiving libthird_party.a..."
@@ -44,7 +44,7 @@ endif
 # 3. 收集所有库文件
 # ----------------------------------------------------------------------------
 ifeq ($(BUILD_TARGET),firmware)
-ifeq ($(FIRMWARE_PLATFORM),stm32h7r3)
+ifneq ($(filter stm32h7r3 stm32h743,$(FIRMWARE_PLATFORM)),)
 ALL_LIBS = $(LIB_DIR)/libthird_party.a
 else
 ALL_LIBS = $(foreach mod,$(MODULES),$(LIB_DIR)/lib$(mod).a)
@@ -92,7 +92,7 @@ $(TARGET).sym: $(TARGET).elf
 # 4.5 生成大小汇总表（.size）
 $(TARGET).size: $(TARGET).elf
 	@$(ECHO) "Generating size summary..."
-	$(Q)$(SIZE)	 -A $< > $@
+	$(Q)$(SIZE) -A $< | awk 'NR <= 2 { print; next } NF == 3 { printf "%-24s %10d 0x%08x\n", $$1, $$2, $$3; next } { print }' > $@
 	@$(ECHO) "Size summary:"
 	@cat $@
 

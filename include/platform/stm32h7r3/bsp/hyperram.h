@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 /* HyperRAM相关定义 */
-#define HYPERRAM_BASE_ADDR XSPI2_BASE
+#define HYPERRAM_BASE_ADDR       XSPI2_BASE
 #define HYPERRAM_CACHE_LINE_SIZE 32U
 
 /*
@@ -34,14 +34,13 @@ typedef struct
 } hyperram_test_report_t;
 
 /* 函数声明 */
-uint8_t hyperram_init(void);        /* 初始化HyperRAM */
-uint32_t hyperram_get_size(void);   /* 获取HyperRAM容量 */
-uint8_t hyperram_is_ready(void);
+uint8_t  hyperram_init(void);     /* 初始化HyperRAM */
+uint32_t hyperram_get_size(void); /* 获取HyperRAM容量 */
+uint8_t  hyperram_is_ready(void);
 
 /* Destructive board-level tests. offset and length must be 4-byte aligned. */
-hyperram_test_status_t hyperram_test_memory(uint32_t offset, uint32_t length,
-                                            hyperram_test_report_t *report);
-hyperram_test_status_t hyperram_test_address_lines(uint32_t stride,
+hyperram_test_status_t hyperram_test_memory(uint32_t offset, uint32_t length, hyperram_test_report_t *report);
+hyperram_test_status_t hyperram_test_address_lines(uint32_t                stride,
                                                    hyperram_test_report_t *report);
 
 #endif

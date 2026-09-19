@@ -8,7 +8,7 @@ static uint32_t g_fac_us = 0;
 #if SYS_SUPPORT_OS
 
 /* 添加公共头文件 ( ucos需要用到) */
-#include "os.h"
+#    include "os.h"
 
 /* 定义g_fac_ms变量, 表示ms延时的倍乘数, 代表每个节拍的ms数, (仅在使能os的时候,需要用到) */
 static uint16_t g_fac_ms = 0;
@@ -28,10 +28,9 @@ static uint16_t g_fac_ms = 0;
  */
 
 /* 支持UCOSII */
-#define delay_osrunning     OSRunning           /* OS是否运行标记,0,不运行;1,在运行 */
-#define delay_ostickspersec OS_TICKS_PER_SEC    /* OS时钟节拍,即每秒调度次数 */
-#define delay_osintnesting  OSIntNesting        /* 中断嵌套级别,即中断嵌套次数 */
-
+#    define delay_osrunning     OSRunning        /* OS是否运行标记,0,不运行;1,在运行 */
+#    define delay_ostickspersec OS_TICKS_PER_SEC /* OS时钟节拍,即每秒调度次数 */
+#    define delay_osintnesting  OSIntNesting     /* 中断嵌套级别,即中断嵌套次数 */
 
 /**
  * @brief     us级延时时,关闭任务调度(防止打断us级延迟)
@@ -40,7 +39,7 @@ static uint16_t g_fac_ms = 0;
  */
 void delay_osschedlock(void)
 {
-    OSSchedLock();                      /* UCOSII的方式,禁止调度，防止打断us延时 */
+    OSSchedLock(); /* UCOSII的方式,禁止调度，防止打断us延时 */
 }
 
 /**
@@ -50,7 +49,7 @@ void delay_osschedlock(void)
  */
 void delay_osschedunlock(void)
 {
-    OSSchedUnlock();                    /* UCOSII的方式,恢复调度 */
+    OSSchedUnlock(); /* UCOSII的方式,恢复调度 */
 }
 
 /**
@@ -60,14 +59,14 @@ void delay_osschedunlock(void)
  */
 void delay_ostimedly(uint32_t ticks)
 {
-    OSTimeDly(ticks);                               /* UCOSII延时 */
+    OSTimeDly(ticks); /* UCOSII延时 */
 }
 
 /**
  * @brief     systick中断服务函数,使用OS时用到
- * @param     ticks : 延时的节拍数  
+ * @param     ticks : 延时的节拍数
  * @retval    无
- */  
+ */
 void SysTick_Handler(void)
 {
     /* OS 开始跑了,才执行正常的调度处理 */
@@ -90,7 +89,7 @@ void delay_init(uint16_t sysclk)
 #if SYS_SUPPORT_OS
     uint32_t reload;
 #endif
-    
+
     g_fac_us = sysclk;
 #if SYS_SUPPORT_OS
     reload = sysclk;
@@ -114,17 +113,17 @@ void delay_us(uint32_t nus)
     uint32_t told;
     uint32_t tnow;
     uint32_t tcnt = 0;
-    
+
     reload = SysTick->LOAD;
-    ticks = nus * g_fac_us;
-    
+    ticks  = nus * g_fac_us;
+
 #if SYS_SUPPORT_OS
     if (delay_osrunning == OS_TRUE)
     {
         delay_osschedlock();
     }
 #endif
-    
+
     told = SysTick->VAL;
     while (1)
     {
@@ -146,7 +145,7 @@ void delay_us(uint32_t nus)
             }
         }
     }
-    
+
 #if SYS_SUPPORT_OS
     if (delay_osrunning == OS_TRUE)
     {
@@ -172,7 +171,7 @@ void delay_ms(uint16_t nms)
         nms %= g_fac_ms;
     }
 #endif
-    
+
     delay_us((uint32_t)nms * 1000);
 }
 

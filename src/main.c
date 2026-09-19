@@ -1,18 +1,27 @@
 
-#include "stm32h7rsxx_hal.h"
+#include "btim.h"
+#include "common/ssd_log.h"
+#include "delay.h"
+#include "fc/fc.h"
+// #include "led.h"
+#include "mpu.h"
+#include "nand/nand_dispatch.h"
+#include "nand/nand_mt29f4g08abadawp.h"
+#if defined(FC_NAND_TEST_ENABLE)
+#    include "test_fc_nand.h"
+#endif
+#include "stm32h7xx_hal.h"
 #include "sys.h"
 #include "usart.h"
-#include "delay.h"
-#include "led.h"
-#include "key.h"
-#include "exti.h"
-#include "btim.h"
-#include "mpu.h"
 #include "watchdog.h"
-#include "common/ssd_log.h"
 
 #include <string.h>
 
+/* 每次需要确认板上 ELF 是否更新时递增；仅用于开发阶段 UART 诊断。 */
+#define SSD_FIRMWARE_DEBUG_REVISION 20U
+#define SSD_WATCHDOG_ENABLE         0U
+
+#if (SSD_WATCHDOG_ENABLE != 0U)
 /*
  * 当前板级自检阶段只监督 Scheduler。产品启动 Host/NAND/FTL/GC/DMA 后，应把对应
  * bit 加入 required_domains，并在每个状态机的“确认前进”位置调用 report_progress()。
@@ -21,17 +30,18 @@
  * 数据手册的频率范围验证最短/最长复位时间，而不应把它当作精确的 30 s 定时器。
  */
 static const storage_wdg_config_t g_storage_wdg_config = {
-    .iwdg_prescaler = IWDG_PRESCALER_256,
-    .iwdg_reload = 3749U,
-    .required_domains = STORAGE_WDG_DOMAIN_MASK(STORAGE_WDG_DOMAIN_SCHEDULER),
-    .domain_timeout_ms = {[STORAGE_WDG_DOMAIN_SCHEDULER] = 100U},
-    .enable_wwdg = false,
-    .wwdg_prescaler = 0U,
-    .wwdg_counter = 0U,
-    .wwdg_window = 0U,
+    .iwdg_prescaler      = IWDG_PRESCALER_256,
+    .iwdg_reload         = 3749U,
+    .required_domains    = STORAGE_WDG_DOMAIN_MASK(STORAGE_WDG_DOMAIN_SCHEDULER),
+    .domain_timeout_ms   = {[STORAGE_WDG_DOMAIN_SCHEDULER] = 100U},
+    .enable_wwdg         = false,
+    .wwdg_prescaler      = 0U,
+    .wwdg_counter        = 0U,
+    .wwdg_window         = 0U,
     .wwdg_refresh_min_ms = 0U,
     .wwdg_refresh_max_ms = 0U,
 };
+#endif
 
 /* Common logging stays transport-neutral; this BSP binds it to the non-blocking UART queue. */
 static void stm32_uart_log_sink(const char *message)
@@ -44,7 +54,7 @@ void _init(void)
 }
 
 /*
- * STM32H7R3 烧录自检入口。
+ * STM32H743 烧录自检入口。
  * Reset_Handler 已完成 C 运行时初始化；HAL_Init() 配置 SysTick 为 1 ms 节拍。
  */
 /*
@@ -54,33 +64,51 @@ void SysTick_Handler(void)
 }
 */
 
-
-
 int main(void)
 {
+    uint8_t nand_init_result;
+
     sys_init();
     ssd_log_set_sink(stm32_uart_log_sink);
-    led_init();                         /* 初始化LED */
-    key_init();
-    exti_init();                        /* 初始化外部中断 */
-    /* TIM6 kernel clock is currently 300 MHz: divide to 1 MHz then count 1000 ticks = 1 ms. */
-    btim_timx_int_init(1000 - 1, 300 - 1);
+    SSD_LOGI("soft_ssd debug revision=%lu\r\n", (unsigned long)SSD_FIRMWARE_DEBUG_REVISION);
+    if (fc_init() != FC_STATUS_OK)
+    {
+        SSD_LOGE("fc init failed\r\n");
+    }
+    else if ((nand_init_result = nand_init()) != NAND_RESULT_OK)
+    {
+        SSD_LOGE("nand init failed: 0x%02X\r\n", (unsigned int)nand_init_result);
+    }
+    else
+    {
+        nand_dispatch_set_device_ready(1U);
+        SSD_LOGI("fc and nand raw path ready\r\n");
+    }
+    /* APB1=100 MHz and APB1 prescaler=2, so TIM6 kernel clock is 200 MHz. */
+    btim_timx_int_init(1000 - 1, 200 - 1);
     SSD_LOGI("soft_ssd console ready\r\n");
     SSD_LOGI("type 'help' for commands\r\n");
+#if (SSD_WATCHDOG_ENABLE != 0U)
     if (!storage_wdg_init(&g_storage_wdg_config))
+    {
         SSD_LOGE("watchdog supervisor init failed\r\n");
+    }
     else
     {
         /* 固定任务已在 btim.c 的 g_btim_tasks 中注册；这里只启动其运行态。 */
         btim_scheduler_init();
         SSD_LOGI("btim task table ready, IWDG nominal=30s, period=100ms\r\n");
     }
+#else
+    btim_scheduler_init();
+    SSD_LOGI("btim task table ready, IWDG disabled for debug\r\n");
+#endif
     uart_service_poll();
     while (1)
     {
         /* All command parsing and scheduled storage work remain outside ISR context. */
         uart_service_poll();
+        (void)fc_service();
         btim_scheduler_poll();
     }
 }
-

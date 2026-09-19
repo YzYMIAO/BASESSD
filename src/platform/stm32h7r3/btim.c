@@ -1,4 +1,5 @@
 #include "btim.h"
+
 #include "watchdog.h"
 
 #include <string.h>
@@ -9,11 +10,11 @@ TIM_HandleTypeDef g_btimx_handle = {0};
 /* 和 UART CLI 命令表一样，这是产品固定功能的只读注册描述。 */
 typedef struct
 {
-    const char *name;
-    uint32_t first_delay_ms;
-    uint32_t period_ms;
+    const char          *name;
+    uint32_t             first_delay_ms;
+    uint32_t             period_ms;
     btim_task_callback_t callback;
-    void *context;
+    void                *context;
 } btim_static_task_t;
 
 /*
@@ -23,11 +24,11 @@ typedef struct
 typedef struct
 {
     btim_task_callback_t callback;
-    void *context;
-    uint32_t next_due_ms;
-    uint32_t period_ms;
-    uint32_t runs;
-    uint8_t enabled;
+    void                *context;
+    uint32_t             next_due_ms;
+    uint32_t             period_ms;
+    uint32_t             runs;
+    uint8_t              enabled;
 } btim_task_runtime_t;
 
 #define BTIM_ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
@@ -43,13 +44,13 @@ typedef struct
  * 在运行中创建和撤销的临时任务。核心安全任务不使用动态槽位。
  */
 static const btim_static_task_t g_btim_task_table[] = {
-    /* 仅 IWDG 时不需要 WWDG 的毫秒级窗口检查；100 ms 足以监督 30 s 名义超时。 */
+  /* 仅 IWDG 时不需要 WWDG 的毫秒级窗口检查；100 ms 足以监督 30 s 名义超时。 */
     {"watchdog", 100U, 100U, storage_watchdog_task, NULL},
 };
 
 /* 私有运行态：前 N 项对应静态表；其余槽位保留给 btim_scheduler_add()。 */
 static btim_task_runtime_t g_btim_tasks[BTIM_SCHEDULER_MAX_TASKS];
-static volatile uint32_t g_btim_tick_ms;
+static volatile uint32_t   g_btim_tick_ms;
 
 static uint8_t btim_time_due(uint32_t now_ms, uint32_t due_ms)
 {
@@ -64,58 +65,65 @@ void btim_scheduler_init(void)
 
     /* 固定表越界属于编译配置错误；此处防御性返回，避免运行时内存越界。 */
     if (BTIM_ARRAY_SIZE(g_btim_task_table) > BTIM_SCHEDULER_MAX_TASKS)
+    {
         return;
+    }
 
     now_ms = btim_scheduler_now_ms();
     memset(g_btim_tasks, 0, sizeof(g_btim_tasks));
 
     for (index = 0U; index < BTIM_ARRAY_SIZE(g_btim_task_table); index++)
     {
-        const btim_static_task_t *config = &g_btim_task_table[index];
-        btim_task_runtime_t *runtime = &g_btim_tasks[index];
+        const btim_static_task_t *config  = &g_btim_task_table[index];
+        btim_task_runtime_t      *runtime = &g_btim_tasks[index];
 
-        runtime->callback = config->callback;
-        runtime->context = config->context;
+        runtime->callback    = config->callback;
+        runtime->context     = config->context;
         runtime->next_due_ms = now_ms + config->first_delay_ms;
-        runtime->period_ms = config->period_ms;
-        runtime->enabled = 1U;
+        runtime->period_ms   = config->period_ms;
+        runtime->enabled     = 1U;
     }
 }
 
 void btim_timx_int_init(uint16_t arr, uint16_t psc)
 {
-    g_btimx_handle.Instance = BTIM_TIMX;
-    g_btimx_handle.Init.Prescaler = psc;
-    g_btimx_handle.Init.Period = arr;
+    g_btimx_handle.Instance               = BTIM_TIMX;
+    g_btimx_handle.Init.Prescaler         = psc;
+    g_btimx_handle.Init.Period            = arr;
     g_btimx_handle.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
     (void)HAL_TIM_Base_Init(&g_btimx_handle);
     (void)HAL_TIM_Base_Start_IT(&g_btimx_handle);
 }
 
-bool btim_scheduler_add(btim_task_callback_t callback, void *context, uint32_t first_delay_ms, uint32_t period_ms,
-                        uint32_t *task_id)
+bool btim_scheduler_add(btim_task_callback_t callback, void *context, uint32_t first_delay_ms, uint32_t period_ms, uint32_t *task_id)
 {
     uint32_t index;
     uint32_t now_ms;
 
     if (callback == NULL)
+    {
         return false;
+    }
 
     now_ms = btim_scheduler_now_ms();
     /* 固定任务的槽位不可被动态任务占用。 */
     for (index = (uint32_t)BTIM_ARRAY_SIZE(g_btim_task_table); index < BTIM_SCHEDULER_MAX_TASKS; index++)
     {
         if (g_btim_tasks[index].callback != NULL)
+        {
             continue;
+        }
 
-        g_btim_tasks[index].callback = callback;
-        g_btim_tasks[index].context = context;
+        g_btim_tasks[index].callback    = callback;
+        g_btim_tasks[index].context     = context;
         g_btim_tasks[index].next_due_ms = now_ms + first_delay_ms;
-        g_btim_tasks[index].period_ms = period_ms;
-        g_btim_tasks[index].runs = 0U;
-        g_btim_tasks[index].enabled = 1U;
+        g_btim_tasks[index].period_ms   = period_ms;
+        g_btim_tasks[index].runs        = 0U;
+        g_btim_tasks[index].enabled     = 1U;
         if (task_id != NULL)
+        {
             *task_id = index;
+        }
         return true;
     }
 
@@ -125,7 +133,9 @@ bool btim_scheduler_add(btim_task_callback_t callback, void *context, uint32_t f
 bool btim_scheduler_enable(uint32_t task_id, bool enabled)
 {
     if (task_id >= BTIM_SCHEDULER_MAX_TASKS || g_btim_tasks[task_id].callback == NULL)
+    {
         return false;
+    }
 
     g_btim_tasks[task_id].enabled = enabled ? 1U : 0U;
     return true;
@@ -135,7 +145,9 @@ bool btim_scheduler_remove(uint32_t task_id)
 {
     /* 静态表项是产品核心配置，不能被运行时 remove() 意外删除。 */
     if ((task_id < BTIM_ARRAY_SIZE(g_btim_task_table)) || (task_id >= BTIM_SCHEDULER_MAX_TASKS))
+    {
         return false;
+    }
 
     memset(&g_btim_tasks[task_id], 0, sizeof(g_btim_tasks[task_id]));
     return true;
@@ -155,10 +167,12 @@ void btim_scheduler_poll(void)
     for (index = 0U; index < BTIM_SCHEDULER_MAX_TASKS; index++)
     {
         btim_task_runtime_t *task = &g_btim_tasks[index];
-        uint32_t due_ms;
+        uint32_t             due_ms;
 
         if ((task->callback == NULL) || (task->enabled == 0U) || !btim_time_due(now_ms, task->next_due_ms))
+        {
             continue;
+        }
 
         /*
          * Re-arm before invoking the callback. A task may disable/remove itself,
@@ -166,12 +180,16 @@ void btim_scheduler_poll(void)
          */
         due_ms = task->next_due_ms;
         if (task->period_ms == 0U)
+        {
             task->enabled = 0U;
+        }
         else
         {
             task->next_due_ms = due_ms + task->period_ms;
             if (btim_time_due(now_ms, task->next_due_ms))
+            {
                 task->next_due_ms = now_ms + task->period_ms;
+            }
         }
 
         task->runs++;
@@ -182,7 +200,9 @@ void btim_scheduler_poll(void)
 void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance != BTIM_TIMX)
+    {
         return;
+    }
 
     BTIM_TIMX_CLK_ENABLE();
     /* TIM6 only increments time; keep it below urgent data-plane interrupts. */

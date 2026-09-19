@@ -10,30 +10,32 @@
 #define COLLECTIONS_C_CC_RBUF_H
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
 #include "config.h"
+
 #include <stdint.h>
 
 #define DEFAULT_CC_RBUF_CAPACITY 10
 
-typedef struct ring_buffer_conf CC_RbufConf;
-typedef struct ring_buffer CC_Rbuf;
+    typedef struct ring_buffer_conf CC_RbufConf;
+    typedef struct ring_buffer      CC_Rbuf;
 
-ds_Stat       cc_rbuf_new           (CC_Rbuf **rbuf);
-ds_Stat       cc_rbuf_new_with_capacity(size_t capacity, CC_Rbuf **rbuf);
-void          cc_rbuf_conf_init     (CC_RbufConf *rconf);
-ds_Stat       cc_rbuf_conf_new      (CC_RbufConf *rconf, CC_Rbuf **rbuf);
-size_t        cc_rbuf_struct_size   ();
+    ds_Stat cc_rbuf_new(CC_Rbuf **rbuf);
+    ds_Stat cc_rbuf_new_with_capacity(size_t capacity, CC_Rbuf **rbuf);
+    void    cc_rbuf_conf_init(CC_RbufConf *rconf);
+    ds_Stat cc_rbuf_conf_new(CC_RbufConf *rconf, CC_Rbuf **rbuf);
+    size_t  cc_rbuf_struct_size();
 
-void          cc_rbuf_enqueue       (CC_Rbuf *rbuf, uint64_t item);
-ds_Stat       cc_rbuf_dequeue       (CC_Rbuf *rbuf, uint64_t *out);
-bool          cc_rbuf_is_empty      (CC_Rbuf *rbuf);
-size_t        cc_rbuf_size          (CC_Rbuf *rbuf);
-size_t        cc_rbuf_capacity      (CC_Rbuf *rbuf);
-void          cc_rbuf_destroy       (CC_Rbuf *rbuf);
-uint64_t      cc_rbuf_peek          (CC_Rbuf *rbuf, int index);
+    void     cc_rbuf_enqueue(CC_Rbuf *rbuf, uint64_t item);
+    ds_Stat  cc_rbuf_dequeue(CC_Rbuf *rbuf, uint64_t *out);
+    bool     cc_rbuf_is_empty(CC_Rbuf *rbuf);
+    size_t   cc_rbuf_size(CC_Rbuf *rbuf);
+    size_t   cc_rbuf_capacity(CC_Rbuf *rbuf);
+    void     cc_rbuf_destroy(CC_Rbuf *rbuf);
+    uint64_t cc_rbuf_peek(CC_Rbuf *rbuf, int index);
 
 #ifdef __cplusplus
 }

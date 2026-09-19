@@ -6,10 +6,10 @@
 #include <string.h>
 
 /* 两个 HAL handle 仅由本文件持有，禁止业务模块绕过 Supervisor 直接刷新硬件。 */
-static IWDG_HandleTypeDef g_storage_iwdg;
-static WWDG_HandleTypeDef g_storage_wwdg;
-static storage_wdg_config_t g_storage_wdg_config;
-static storage_wdg_status_t g_storage_wdg_status;
+static IWDG_HandleTypeDef          g_storage_iwdg;
+static WWDG_HandleTypeDef          g_storage_wwdg;
+static storage_wdg_config_t        g_storage_wdg_config;
+static storage_wdg_status_t        g_storage_wdg_status;
 static storage_wdg_recovery_hook_t g_storage_wdg_recovery_hook;
 /* 上一次成功刷新 WWDG 的 HAL tick，用来判断当前是否已进入允许刷新窗口。 */
 static uint32_t g_storage_wdg_last_wwdg_refresh_ms;
@@ -32,12 +32,14 @@ static bool storage_wdg_all_required_domains_healthy(uint32_t now_ms, storage_wd
 
     for (index = 0U; index < (uint32_t)STORAGE_WDG_DOMAIN_COUNT; index++)
     {
-        uint32_t mask = STORAGE_WDG_DOMAIN_MASK(index);
+        uint32_t mask       = STORAGE_WDG_DOMAIN_MASK(index);
         uint32_t timeout_ms = g_storage_wdg_config.domain_timeout_ms[index];
 
         /* 未列入 required_domains 的后台域不影响本次 IWDG 喂狗决定。 */
         if ((g_storage_wdg_config.required_domains & mask) == 0U)
+        {
             continue;
+        }
         if ((timeout_ms == 0U) || storage_wdg_elapsed(now_ms, g_storage_wdg_status.last_progress_ms[index], timeout_ms))
         {
             *timed_out_domain = (storage_wdg_domain_t)index;
@@ -55,9 +57,11 @@ static void storage_wdg_latch_fault(storage_wdg_domain_t domain, storage_wdg_fau
      * 更重要的是，不能由后来一次“正常心跳”把故障悄悄恢复为健康。
      */
     if (g_storage_wdg_status.fault != STORAGE_WDG_FAULT_NONE)
+    {
         return;
+    }
 
-    g_storage_wdg_status.fault = fault;
+    g_storage_wdg_status.fault        = fault;
     g_storage_wdg_status.fault_domain = domain;
     /* 停止 IWDG 喂狗，让独立时钟在确定上限内完成最终全芯片复位。 */
     g_storage_wdg_status.iwdg_feeding = false;
@@ -77,33 +81,41 @@ bool storage_wdg_init(const storage_wdg_config_t *config)
 
     /* WWDG 的软件窗口不合法时，拒绝启动，避免“看似启用、实际必然复位”。 */
     if (config == NULL)
+    {
         return false;
+    }
     if (config->enable_wwdg &&
         ((config->wwdg_refresh_min_ms == 0U) || (config->wwdg_refresh_max_ms <= config->wwdg_refresh_min_ms)))
+    {
         return false;
+    }
 
     /* 初始化时给每个域一次启动宽限期，避免还未启动的状态机立即超时。 */
     memset(&g_storage_wdg_status, 0, sizeof(g_storage_wdg_status));
     g_storage_wdg_config = *config;
-    now_ms = HAL_GetTick();
+    now_ms               = HAL_GetTick();
     for (index = 0U; index < (uint32_t)STORAGE_WDG_DOMAIN_COUNT; index++)
+    {
         g_storage_wdg_status.last_progress_ms[index] = now_ms;
+    }
 
-    g_storage_iwdg.Instance = IWDG;
+    g_storage_iwdg.Instance       = IWDG;
     g_storage_iwdg.Init.Prescaler = config->iwdg_prescaler;
-    g_storage_iwdg.Init.Reload = config->iwdg_reload;
-    g_storage_iwdg.Init.Window = IWDG_WINDOW_DISABLE;
-    g_storage_iwdg.Init.EWI = IWDG_EWI_DISABLE;
+    g_storage_iwdg.Init.Reload    = config->iwdg_reload;
+    g_storage_iwdg.Init.Window    = IWDG_WINDOW_DISABLE;
+    g_storage_iwdg.Init.EWI       = IWDG_EWI_DISABLE;
     if (HAL_IWDG_Init(&g_storage_iwdg) != HAL_OK)
+    {
         return false;
+    }
 
     g_storage_wdg_status.iwdg_feeding = true;
     if (config->enable_wwdg)
     {
-        g_storage_wwdg.Instance = WWDG;
+        g_storage_wwdg.Instance       = WWDG;
         g_storage_wwdg.Init.Prescaler = config->wwdg_prescaler;
-        g_storage_wwdg.Init.Counter = config->wwdg_counter;
-        g_storage_wwdg.Init.Window = config->wwdg_window;
+        g_storage_wwdg.Init.Counter   = config->wwdg_counter;
+        g_storage_wwdg.Init.Window    = config->wwdg_window;
         /* EWI 只用于诊断：回调记录故障，绝不自动 refresh，否则会掩盖主循环死锁。 */
         g_storage_wwdg.Init.EWIMode = WWDG_EWI_ENABLE;
         if (HAL_WWDG_Init(&g_storage_wwdg) != HAL_OK)
@@ -111,7 +123,7 @@ bool storage_wdg_init(const storage_wdg_config_t *config)
             g_storage_wdg_status.iwdg_feeding = false;
             return false;
         }
-        g_storage_wdg_status.wwdg_enabled = true;
+        g_storage_wdg_status.wwdg_enabled  = true;
         g_storage_wdg_last_wwdg_refresh_ms = now_ms;
     }
 
@@ -127,22 +139,28 @@ void storage_wdg_set_recovery_hook(storage_wdg_recovery_hook_t hook)
 void storage_wdg_report_progress(storage_wdg_domain_t domain)
 {
     if ((!g_storage_wdg_status.initialized) || !storage_wdg_domain_is_valid(domain))
+    {
         return;
+    }
 
     /* 故障锁存后心跳不再生效，必须走受控复位路径，不能静默恢复。 */
     if (g_storage_wdg_status.fault == STORAGE_WDG_FAULT_NONE)
+    {
         g_storage_wdg_status.last_progress_ms[domain] = HAL_GetTick();
+    }
 }
 
 void storage_wdg_service(void)
 {
     storage_wdg_domain_t timed_out_domain = STORAGE_WDG_DOMAIN_COUNT;
-    uint32_t now_ms;
-    uint32_t since_wwdg_refresh_ms;
+    uint32_t             now_ms;
+    uint32_t             since_wwdg_refresh_ms;
 
     /* 未初始化或已锁存故障时，一律不继续喂任何看门狗。 */
     if ((!g_storage_wdg_status.initialized) || (!g_storage_wdg_status.iwdg_feeding))
+    {
         return;
+    }
 
     now_ms = HAL_GetTick();
     if (!storage_wdg_all_required_domains_healthy(now_ms, &timed_out_domain))
@@ -188,14 +206,18 @@ void storage_watchdog_task(void *context, uint32_t now_ms)
 void storage_wdg_get_status(storage_wdg_status_t *status)
 {
     if (status != NULL)
+    {
         *status = g_storage_wdg_status;
+    }
 }
 
 void storage_wdg_wwdg_irq_handler(void)
 {
     /* HAL 会在此路径中清 EWI 标志并调用下方的 EarlyWakeupCallback。 */
     if (g_storage_wdg_status.wwdg_enabled)
+    {
         HAL_WWDG_IRQHandler(&g_storage_wwdg);
+    }
 }
 
 /*

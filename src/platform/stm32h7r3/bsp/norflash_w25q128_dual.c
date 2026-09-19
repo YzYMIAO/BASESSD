@@ -1,6 +1,7 @@
 
 
 #include "norflash_w25q128_dual.h"
+
 #include "delay.h"
 
 /* W25Q128命令定义 */
@@ -18,17 +19,17 @@
 #define W25Q128_COMMAND_FAST_READ_QUAD_IO       (0xEBUL)
 
 /* W25Q128 ID定义 */
-#define W25Q128_MANUFACTURER_DEVICE_ID          (0x17EFUL)
-#define BY25FQ128_MANUFACTURER_DEVICE_ID        (0x1768UL)
+#define W25Q128_MANUFACTURER_DEVICE_ID   (0x17EFUL)
+#define BY25FQ128_MANUFACTURER_DEVICE_ID (0x1768UL)
 
 /* W25Q128大小参数定义 */
-#define W25Q128_CHIP_SIZE                       (0x01000000UL)
-#define W25Q128_BLOCK_SIZE                      (0x00010000UL)
-#define W25Q128_SECTOR_SIZE                     (0x00001000UL)
-#define W25Q128_PAGE_SIZE                       (0x00000100UL)
+#define W25Q128_CHIP_SIZE   (0x01000000UL)
+#define W25Q128_BLOCK_SIZE  (0x00010000UL)
+#define W25Q128_SECTOR_SIZE (0x00001000UL)
+#define W25Q128_PAGE_SIZE   (0x00000100UL)
 
 /* W25Q128擦后数据值定义 */
-#define W25Q128_EMPTY_VALUE                     ((uint8_t)0xFF)
+#define W25Q128_EMPTY_VALUE ((uint8_t)0xFF)
 
 /**
  * @brief   软复位
@@ -40,46 +41,46 @@
 static uint8_t w25q128_dual_software_reset(XSPI_HandleTypeDef *hxspi)
 {
     XSPI_RegularCmdTypeDef xspi_regular_cmd_struct = {0};
-    
+
     if (hxspi == NULL)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_ENABLE_RESET;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_ENABLE_RESET;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_RESET_DEVICE;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_RESET_DEVICE;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
+
     delay_ms(1);
-    
+
     return 0;
 }
 
@@ -93,29 +94,29 @@ static uint8_t w25q128_dual_software_reset(XSPI_HandleTypeDef *hxspi)
 static uint8_t w25q128_dual_verify_identification(XSPI_HandleTypeDef *hxspi)
 {
     XSPI_RegularCmdTypeDef xspi_regular_cmd_struct = {0};
-    uint8_t data[4];
-    
+    uint8_t                data[4];
+
     if (hxspi == NULL)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_MANUFACTURER_DEVICE_ID;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_MANUFACTURER_DEVICE_ID;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.Address = 0x000000UL;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_1_LINE;
-    xspi_regular_cmd_struct.AddressWidth = HAL_XSPI_ADDRESS_24_BITS;
-    xspi_regular_cmd_struct.AddressDTRMode = HAL_XSPI_ADDRESS_DTR_DISABLE;
+    xspi_regular_cmd_struct.Address            = 0x000000UL;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_1_LINE;
+    xspi_regular_cmd_struct.AddressWidth       = HAL_XSPI_ADDRESS_24_BITS;
+    xspi_regular_cmd_struct.AddressDTRMode     = HAL_XSPI_ADDRESS_DTR_DISABLE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 2 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 2 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
@@ -128,7 +129,7 @@ static uint8_t w25q128_dual_verify_identification(XSPI_HandleTypeDef *hxspi)
     {
         return 1;
     }
-    
+
     return 0;
 }
 
@@ -141,28 +142,28 @@ static uint8_t w25q128_dual_verify_identification(XSPI_HandleTypeDef *hxspi)
  */
 static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
 {
-    XSPI_RegularCmdTypeDef xspi_regular_cmd_struct = {0};
+    XSPI_RegularCmdTypeDef  xspi_regular_cmd_struct  = {0};
     XSPI_AutoPollingTypeDef xspi_auto_polling_struct = {0};
-    uint8_t data[2];
-    
+    uint8_t                 data[2];
+
     if (hxspi == NULL)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_2;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_2;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
@@ -171,64 +172,64 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_WRITE_ENABLE;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_WRITE_ENABLE;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
+
     *(uint16_t *)data &= ~((1UL << 1) | ((1UL << 1) << 8));
     *(uint16_t *)data |= (1UL << 1) | ((1UL << 1) << 8);
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_WRITE_STATUS_REGISTER_2;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_WRITE_STATUS_REGISTER_2;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
@@ -237,47 +238,47 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (0UL << 0) | ((0UL << 0) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 0) | ((1UL << 0) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (0UL << 0) | ((0UL << 0) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 0) | ((1UL << 0) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_2;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_2;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
@@ -290,7 +291,7 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     {
         return 1;
     }
-    
+
     return 0;
 }
 /**
@@ -314,25 +315,25 @@ static uint8_t w25q128_dual_init(XSPI_HandleTypeDef *hxspi)
     {
         return 1;
     }
-    
+
     /* 软复位 */
     if (w25q128_dual_software_reset(hxspi) != 0)
     {
         return 1;
     }
-    
+
     /* 校验ID */
     if (w25q128_dual_verify_identification(hxspi) != 0)
     {
         return 1;
     }
-    
+
     /* 配置Quad SPI模式 */
     if (w25q128_dual_configure_quad(hxspi) != 0)
     {
         return 1;
     }
-    
+
     return 0;
 }
 
@@ -345,100 +346,100 @@ static uint8_t w25q128_dual_init(XSPI_HandleTypeDef *hxspi)
  */
 static uint8_t w25q128_dual_erase_chip(XSPI_HandleTypeDef *hxspi)
 {
-    XSPI_RegularCmdTypeDef xspi_regular_cmd_struct = {0};
+    XSPI_RegularCmdTypeDef  xspi_regular_cmd_struct  = {0};
     XSPI_AutoPollingTypeDef xspi_auto_polling_struct = {0};
-    
+
     if (hxspi == NULL)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_WRITE_ENABLE;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_WRITE_ENABLE;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_CHIP_ERASE;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_CHIP_ERASE;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (0UL << 0) | ((0UL << 0) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 0) | ((1UL << 0) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (0UL << 0) | ((0UL << 0) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 0) | ((1UL << 0) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, 200000UL) != HAL_OK)
     {
         return 1;
     }
-    
+
     return 0;
 }
 
@@ -452,103 +453,103 @@ static uint8_t w25q128_dual_erase_chip(XSPI_HandleTypeDef *hxspi)
  */
 static uint8_t w25q128_dual_erase_block(XSPI_HandleTypeDef *hxspi, uint32_t address)
 {
-    XSPI_RegularCmdTypeDef xspi_regular_cmd_struct = {0};
+    XSPI_RegularCmdTypeDef  xspi_regular_cmd_struct  = {0};
     XSPI_AutoPollingTypeDef xspi_auto_polling_struct = {0};
-    
+
     if (hxspi == NULL)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_WRITE_ENABLE;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_WRITE_ENABLE;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_BLOCK_ERASE;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_BLOCK_ERASE;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.Address = address;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_1_LINE;
-    xspi_regular_cmd_struct.AddressWidth = HAL_XSPI_ADDRESS_24_BITS;
-    xspi_regular_cmd_struct.AddressDTRMode = HAL_XSPI_ADDRESS_DTR_DISABLE;
+    xspi_regular_cmd_struct.Address            = address;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_1_LINE;
+    xspi_regular_cmd_struct.AddressWidth       = HAL_XSPI_ADDRESS_24_BITS;
+    xspi_regular_cmd_struct.AddressDTRMode     = HAL_XSPI_ADDRESS_DTR_DISABLE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (0UL << 0) | ((0UL << 0) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 0) | ((1UL << 0) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (0UL << 0) | ((0UL << 0) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 0) | ((1UL << 0) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, 400UL) != HAL_OK)
     {
         return 1;
     }
-    
+
     return 0;
 }
 
@@ -562,103 +563,103 @@ static uint8_t w25q128_dual_erase_block(XSPI_HandleTypeDef *hxspi, uint32_t addr
  */
 static uint8_t w25q128_dual_erase_sector(XSPI_HandleTypeDef *hxspi, uint32_t address)
 {
-    XSPI_RegularCmdTypeDef xspi_regular_cmd_struct = {0};
+    XSPI_RegularCmdTypeDef  xspi_regular_cmd_struct  = {0};
     XSPI_AutoPollingTypeDef xspi_auto_polling_struct = {0};
-    
+
     if (hxspi == NULL)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_WRITE_ENABLE;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_WRITE_ENABLE;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_SECTOR_ERASE;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_SECTOR_ERASE;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.Address = address;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_1_LINE;
-    xspi_regular_cmd_struct.AddressWidth = HAL_XSPI_ADDRESS_24_BITS;
-    xspi_regular_cmd_struct.AddressDTRMode = HAL_XSPI_ADDRESS_DTR_DISABLE;
+    xspi_regular_cmd_struct.Address            = address;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_1_LINE;
+    xspi_regular_cmd_struct.AddressWidth       = HAL_XSPI_ADDRESS_24_BITS;
+    xspi_regular_cmd_struct.AddressDTRMode     = HAL_XSPI_ADDRESS_DTR_DISABLE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (0UL << 0) | ((0UL << 0) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 0) | ((1UL << 0) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (0UL << 0) | ((0UL << 0) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 0) | ((1UL << 0) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, 400UL) != HAL_OK)
     {
         return 1;
     }
-    
+
     return 0;
 }
 
@@ -674,78 +675,78 @@ static uint8_t w25q128_dual_erase_sector(XSPI_HandleTypeDef *hxspi, uint32_t add
  */
 static uint8_t w25q128_dual_program_page(XSPI_HandleTypeDef *hxspi, uint32_t address, uint8_t *data, uint32_t length)
 {
-    XSPI_RegularCmdTypeDef xspi_regular_cmd_struct = {0};
+    XSPI_RegularCmdTypeDef  xspi_regular_cmd_struct  = {0};
     XSPI_AutoPollingTypeDef xspi_auto_polling_struct = {0};
-    
+
     if (hxspi == NULL)
     {
         return 1;
     }
-    
+
     if (length > (2 * W25Q128_PAGE_SIZE))
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_WRITE_ENABLE;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_WRITE_ENABLE;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_QUAD_INPUT_PAGE_PROGRAM;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_QUAD_INPUT_PAGE_PROGRAM;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.Address = address;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_1_LINE;
-    xspi_regular_cmd_struct.AddressWidth = HAL_XSPI_ADDRESS_24_BITS;
-    xspi_regular_cmd_struct.AddressDTRMode = HAL_XSPI_ADDRESS_DTR_DISABLE;
+    xspi_regular_cmd_struct.Address            = address;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_1_LINE;
+    xspi_regular_cmd_struct.AddressWidth       = HAL_XSPI_ADDRESS_24_BITS;
+    xspi_regular_cmd_struct.AddressDTRMode     = HAL_XSPI_ADDRESS_DTR_DISABLE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_4_LINES;
-    xspi_regular_cmd_struct.DataLength = length;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_4_LINES;
+    xspi_regular_cmd_struct.DataLength         = length;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
@@ -754,34 +755,34 @@ static uint8_t w25q128_dual_program_page(XSPI_HandleTypeDef *hxspi, uint32_t add
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (0UL << 0) | ((0UL << 0) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 0) | ((1UL << 0) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (0UL << 0) | ((0UL << 0) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 0) | ((1UL << 0) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, 3UL) != HAL_OK)
     {
         return 1;
     }
-    
+
     return 0;
 }
 
@@ -798,38 +799,38 @@ static uint8_t w25q128_dual_program_page(XSPI_HandleTypeDef *hxspi, uint32_t add
 static uint8_t w25q128_dual_read(XSPI_HandleTypeDef *hxspi, uint32_t address, uint8_t *data, uint32_t length)
 {
     XSPI_RegularCmdTypeDef xspi_regular_cmd_struct = {0};
-    
+
     if (hxspi == NULL)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_FAST_READ_QUAD_IO;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_FAST_READ_QUAD_IO;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.Address = address;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_4_LINES;
-    xspi_regular_cmd_struct.AddressWidth = HAL_XSPI_ADDRESS_24_BITS;
-    xspi_regular_cmd_struct.AddressDTRMode = HAL_XSPI_ADDRESS_DTR_DISABLE;
+    xspi_regular_cmd_struct.Address            = address;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_4_LINES;
+    xspi_regular_cmd_struct.AddressWidth       = HAL_XSPI_ADDRESS_24_BITS;
+    xspi_regular_cmd_struct.AddressDTRMode     = HAL_XSPI_ADDRESS_DTR_DISABLE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_4_LINES;
-    xspi_regular_cmd_struct.DataLength = length;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 6;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_4_LINES;
+    xspi_regular_cmd_struct.DataLength         = length;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 6;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
+
     if (HAL_XSPI_Receive(hxspi, data, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
+
     return 0;
 }
 
@@ -842,124 +843,124 @@ static uint8_t w25q128_dual_read(XSPI_HandleTypeDef *hxspi, uint32_t address, ui
  */
 static uint8_t w25q128_dual_memory_mapped(XSPI_HandleTypeDef *hxspi)
 {
-    XSPI_RegularCmdTypeDef xspi_regular_cmd_struct = {0};
-    XSPI_AutoPollingTypeDef xspi_auto_polling_struct = {0};
+    XSPI_RegularCmdTypeDef   xspi_regular_cmd_struct   = {0};
+    XSPI_AutoPollingTypeDef  xspi_auto_polling_struct  = {0};
     XSPI_MemoryMappedTypeDef xspi_memory_mapped_struct = {0};
-    
+
     if (hxspi == NULL)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_WRITE_ENABLE;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_WRITE_ENABLE;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_NONE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_NONE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_READ_STATUS_REGISTER_1;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_NONE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_NONE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_1_LINE;
-    xspi_regular_cmd_struct.DataLength = 1 * 2;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_1_LINE;
+    xspi_regular_cmd_struct.DataLength         = 1 * 2;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    xspi_auto_polling_struct.MatchValue = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMask = (1UL << 1) | ((1UL << 1) << 8);
-    xspi_auto_polling_struct.MatchMode = HAL_XSPI_MATCH_MODE_AND;
+    xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
+    xspi_auto_polling_struct.MatchMode     = HAL_XSPI_MATCH_MODE_AND;
     xspi_auto_polling_struct.AutomaticStop = HAL_XSPI_AUTOMATIC_STOP_ENABLE;
-    xspi_auto_polling_struct.IntervalTime = 0x10;
+    xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_READ_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_FAST_READ_QUAD_IO;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_READ_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_FAST_READ_QUAD_IO;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_4_LINES;
-    xspi_regular_cmd_struct.AddressWidth = HAL_XSPI_ADDRESS_24_BITS;
-    xspi_regular_cmd_struct.AddressDTRMode = HAL_XSPI_ADDRESS_DTR_DISABLE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_4_LINES;
+    xspi_regular_cmd_struct.AddressWidth       = HAL_XSPI_ADDRESS_24_BITS;
+    xspi_regular_cmd_struct.AddressDTRMode     = HAL_XSPI_ADDRESS_DTR_DISABLE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_4_LINES;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 6;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_4_LINES;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 6;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_regular_cmd_struct.OperationType = HAL_XSPI_OPTYPE_WRITE_CFG;
-    xspi_regular_cmd_struct.IOSelect = HAL_XSPI_SELECT_IO_7_0;
-    xspi_regular_cmd_struct.Instruction = W25Q128_COMMAND_QUAD_INPUT_PAGE_PROGRAM;
-    xspi_regular_cmd_struct.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE;
-    xspi_regular_cmd_struct.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS;
+
+    xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_WRITE_CFG;
+    xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
+    xspi_regular_cmd_struct.Instruction        = W25Q128_COMMAND_QUAD_INPUT_PAGE_PROGRAM;
+    xspi_regular_cmd_struct.InstructionMode    = HAL_XSPI_INSTRUCTION_1_LINE;
+    xspi_regular_cmd_struct.InstructionWidth   = HAL_XSPI_INSTRUCTION_8_BITS;
     xspi_regular_cmd_struct.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE;
-    xspi_regular_cmd_struct.AddressMode = HAL_XSPI_ADDRESS_1_LINE;
-    xspi_regular_cmd_struct.AddressWidth = HAL_XSPI_ADDRESS_24_BITS;
-    xspi_regular_cmd_struct.AddressDTRMode = HAL_XSPI_ADDRESS_DTR_DISABLE;
+    xspi_regular_cmd_struct.AddressMode        = HAL_XSPI_ADDRESS_1_LINE;
+    xspi_regular_cmd_struct.AddressWidth       = HAL_XSPI_ADDRESS_24_BITS;
+    xspi_regular_cmd_struct.AddressDTRMode     = HAL_XSPI_ADDRESS_DTR_DISABLE;
     xspi_regular_cmd_struct.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE;
-    xspi_regular_cmd_struct.DataMode = HAL_XSPI_DATA_4_LINES;
-    xspi_regular_cmd_struct.DataDTRMode = HAL_XSPI_DATA_DTR_DISABLE;
-    xspi_regular_cmd_struct.DummyCycles = 0;
-    xspi_regular_cmd_struct.DQSMode = HAL_XSPI_DQS_DISABLE;
+    xspi_regular_cmd_struct.DataMode           = HAL_XSPI_DATA_4_LINES;
+    xspi_regular_cmd_struct.DataDTRMode        = HAL_XSPI_DATA_DTR_DISABLE;
+    xspi_regular_cmd_struct.DummyCycles        = 0;
+    xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return 1;
     }
-    
-    xspi_memory_mapped_struct.TimeOutActivation = HAL_XSPI_TIMEOUT_COUNTER_ENABLE;
+
+    xspi_memory_mapped_struct.TimeOutActivation  = HAL_XSPI_TIMEOUT_COUNTER_ENABLE;
     xspi_memory_mapped_struct.TimeoutPeriodClock = 0;
     if (HAL_XSPI_MemoryMapped(hxspi, &xspi_memory_mapped_struct) != HAL_OK)
     {
         return 1;
     }
-    
+
     return 0;
 }
 
 /* 双W25Q128设备设备定义 */
 const norflash_t norflash_w25q128_dual = {
-    .type = NORFlash_W25Q128_Dual,
+    .type      = NORFlash_W25Q128_Dual,
     .parameter = {
-        .empty_value = W25Q128_EMPTY_VALUE,
-        .chip_size = 2 * W25Q128_CHIP_SIZE,
-        .block_size = 2 * W25Q128_BLOCK_SIZE,
-        .sector_size = 2 * W25Q128_SECTOR_SIZE,
-        .page_size = 2 * W25Q128_PAGE_SIZE,
-    },
+                  .empty_value = W25Q128_EMPTY_VALUE,
+                  .chip_size   = 2 * W25Q128_CHIP_SIZE,
+                  .block_size  = 2 * W25Q128_BLOCK_SIZE,
+                  .sector_size = 2 * W25Q128_SECTOR_SIZE,
+                  .page_size   = 2 * W25Q128_PAGE_SIZE,
+                  },
     .ops = {
-        .init = w25q128_dual_init,
-        .deinit = NULL,
-        .erase_chip = w25q128_dual_erase_chip,
-        .erase_block = w25q128_dual_erase_block,
-        .erase_sector = w25q128_dual_erase_sector,
-        .program_page = w25q128_dual_program_page,
-        .read = w25q128_dual_read,
-        .memory_mapped = w25q128_dual_memory_mapped,
-    },
+                  .init          = w25q128_dual_init,
+                  .deinit        = NULL,
+                  .erase_chip    = w25q128_dual_erase_chip,
+                  .erase_block   = w25q128_dual_erase_block,
+                  .erase_sector  = w25q128_dual_erase_sector,
+                  .program_page  = w25q128_dual_program_page,
+                  .read          = w25q128_dual_read,
+                  .memory_mapped = w25q128_dual_memory_mapped,
+                  },
 };

@@ -1,6 +1,5 @@
 ---
-# 配置适用版本：clang-format 14.x
-# 已验证版本：Ubuntu clang-format 14.0.0
+# 配置适用版本：clang-format 15.x 及以上
 # 更换 clang-format 主版本后，应先执行 make format-check 验证配置兼容性。
 
 # clang-format 将 C 文件按 C++ 语言规则解析，这是正常行为。
@@ -15,8 +14,8 @@ ContinuationIndentWidth: 4
 TabWidth: 4
 UseTab: Never
 
-# 120列适合寄存器定义和嵌入式函数声明。
-ColumnLimit: 120
+# 关键修改 1：不自动换行，完全由源码手动控制
+ColumnLimit: 0
 
 # 不根据现有代码推断指针风格，始终使用 int* pointer。
 DerivePointerAlignment: false
@@ -31,6 +30,9 @@ AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 AllowShortCaseLabelsOnASingleLine: false
 AllowShortBlocksOnASingleLine: Never
+
+# 即使控制语句只有一行，也始终使用大括号。
+InsertBraces: true
 
 # switch 的 case 相对 switch 内容缩进一级。
 IndentCaseLabels: true
@@ -58,6 +60,8 @@ BreakBeforeBinaryOperators: None
 BreakBeforeTernaryOperators: true
 AlignOperands: Align
 
+# 关键修改 3：结构体数组元素按字段纵向对齐
+AlignArrayOfStructures: Right
 # 连续变量声明、赋值、宏和位域进行对齐。
 AlignConsecutiveDeclarations: true
 AlignConsecutiveAssignments: true
