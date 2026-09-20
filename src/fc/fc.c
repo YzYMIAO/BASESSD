@@ -73,16 +73,12 @@ static uint8_t fc_command_id_is_valid(fc_command_id_t command_id)
 
 static uint8_t fc_buffer_id_is_valid(const fc_t *controller, fc_buffer_id_t buffer_id)
 {
-    return (uint8_t)((controller != NULL) && (buffer_id < FC_BUFFER_POOL_DEPTH) &&
+    return (uint8_t)((buffer_id < FC_BUFFER_POOL_DEPTH) &&
                      (controller->buffer_state[buffer_id] != 0U));
 }
 
 static uint8_t *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
-    if (fc_buffer_id_is_valid(controller, buffer_id) == 0U)
-    {
-        return NULL;
-    }
     return controller->buffer_pool[buffer_id];
 }
 
@@ -90,10 +86,6 @@ static fc_buffer_id_t fc_real_buffer_to_buffer_id_internal(fc_t *controller, con
 {
     uint16_t index;
 
-    if ((controller == NULL) || (buffer == NULL))
-    {
-        return FC_BUFFER_ID_INVALID;
-    }
     for (index = 0U; index < FC_BUFFER_POOL_DEPTH; index++)
     {
         if (buffer == controller->buffer_pool[index])
@@ -106,10 +98,6 @@ static fc_buffer_id_t fc_real_buffer_to_buffer_id_internal(fc_t *controller, con
 
 static fc_status_t fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
-    if (fc_buffer_id_is_valid(controller, buffer_id) == 0U)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
     controller->buffer_state[buffer_id]     = 0U;
     controller->buffer_free_next[buffer_id] = controller->buffer_free_head;
     controller->buffer_free_head            = buffer_id;
@@ -135,9 +123,9 @@ static uint8_t fc_command_to_id(const fc_t *controller, const fc_command_t *comm
     return 0U;
 }
 
-static uint8_t fc_command_descriptor_count(const fc_t *controller, const fc_command_t *command)
+static uint8_t fc_command_descriptor_count(const fc_command_t *command)
 {
-    return ((controller != NULL) && (command != NULL) && (command->desc_id != FC_DESCRIPTOR_ID_INVALID)) ? (uint8_t)(command->config.cw + 1U) : 0U;
+    return (command->desc_id != FC_DESCRIPTOR_ID_INVALID) ? (uint8_t)(command->config.cw + 1U) : 0U;
 }
 
 static uint8_t fc_command_descriptors_owned(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command)
@@ -148,7 +136,7 @@ static uint8_t fc_command_descriptors_owned(const fc_t *controller, fc_command_i
     uint16_t               pool_index;
     uint8_t                found;
 
-    for (descriptor_count = 0U; descriptor_count < (controller, command); descriptor_count++)
+    for (descriptor_count = 0U; descriptor_count < fc_command_descriptor_count(command); descriptor_count++)
     {
         found = 0U;
         pool_index = descriptor_id;
@@ -235,11 +223,6 @@ static fc_status_t fc_init_internal(fc_t *controller)
     fc_status_t result;
     uint16_t    index;
 
-    if (controller == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-
     memset(g_fc_command_pool, 0, sizeof(g_fc_command_pool));
     memset(g_fc_descriptor_pool, 0, sizeof(g_fc_descriptor_pool));
     memset(g_fc_buffer_pool, 0, sizeof(g_fc_buffer_pool));
@@ -313,10 +296,6 @@ static fc_command_t *fc_command_alloc_internal(fc_t *controller)
 {
     fc_command_id_t command_id;
 
-    if (controller == NULL)
-    {
-        return NULL;
-    }
     command_id = controller->command_free_head;
     if (command_id == FC_COMMAND_ID_INVALID)
     {
@@ -335,11 +314,8 @@ static fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_comman
     uint16_t          descriptor_index;
     fc_command_id_t command_id;
 
-    if ((fc_command_to_id(controller, command, &command_id) == 0U) ||
-        (controller->command_state[command_id] != FC_COMMAND_STATE_ALLOCATED))
-    {
-        return NULL;
-    }
+    /* Derive command_id from pointer arithmetic (already validated at public API). */
+    command_id       = (fc_command_id_t)(command - controller->command_pool);
     descriptor_index = controller->descriptor_free_head;
     if (descriptor_index == UINT16_MAX)
     {
@@ -357,10 +333,6 @@ static fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
 {
     uint16_t buffer_index;
 
-    if (controller == NULL)
-    {
-        return FC_BUFFER_ID_INVALID;
-    }
     buffer_index = controller->buffer_free_head;
     if (buffer_index == UINT16_MAX)
     {
@@ -373,10 +345,6 @@ static fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
 
 static fc_status_t fc_buffer_release_internal_api(fc_t *controller, fc_buffer_id_t buffer_id)
 {
-    if (controller == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
     return fc_buffer_release_internal(controller, buffer_id);
 }
 
@@ -406,14 +374,11 @@ static void fc_command_resources_rollback(fc_t *controller, fc_command_id_t comm
 static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc_command_t *command, uint8_t index,
                                                              fc_descriptor_t **configured_descriptor)
 {
-    fc_command_id_t command_id;
-    fc_descriptor_t  *descriptor;
-    fc_buffer_id_t    buffer_id;
-    uint8_t           cw;
+    fc_descriptor_t *descriptor;
+    fc_buffer_id_t   buffer_id;
+    uint8_t          cw;
 
-    if ((configured_descriptor == NULL) || (fc_command_to_id(controller, command, &command_id) == 0U) ||
-        (controller->command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) ||
-        (index > command->config.cw))
+    if (configured_descriptor == NULL)
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
@@ -449,12 +414,7 @@ static fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, f
     fc_descriptor_t  *previous = NULL;
     uint8_t           index;
 
-    if ((fc_command_to_id(controller, command, &command_id) == 0U) ||
-        (controller->command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) ||
-        (command->desc_id != FC_DESCRIPTOR_ID_INVALID))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    command_id = (fc_command_id_t)(command - controller->command_pool);
     for (index = 0U; index <= command->config.cw; index++)
     {
         fc_descriptor_t *descriptor = NULL;
@@ -482,39 +442,22 @@ static fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, f
 
 static fc_status_t fc_submit_to_queue(fc_t *controller, fc_submission_queue_t *queue, fc_command_t *command)
 {
-    fc_status_t       result;
     fc_command_id_t command_id;
 
-    if ((fc_command_to_id(controller, command, &command_id) == 0U) ||
-        (controller->command_state[command_id] != FC_COMMAND_STATE_ALLOCATED))
+    command_id = (fc_command_id_t)(command - controller->command_pool);
+    if (fc_submission_queue_push(queue, command_id) == FC_STATUS_OK)
     {
-        return FC_STATUS_INVALID_ARGUMENT;
+        controller->command_state[command_id] = FC_COMMAND_STATE_QUEUED;
+        return FC_STATUS_OK;
     }
-    result = fc_command_validate(command);
-    if ((result == FC_STATUS_OK) && (fc_command_descriptors_owned(controller, command_id, command) == 0U))
-    {
-        result = FC_STATUS_INVALID_ARGUMENT;
-    }
-    if (result == FC_STATUS_OK)
-    {
-        result = fc_submission_queue_push(queue, command_id);
-        if (result == FC_STATUS_OK)
-        {
-            controller->command_state[command_id] = FC_COMMAND_STATE_QUEUED;
-        }
-    }
-    return result;
+    return FC_STATUS_QUEUE_FULL;
 }
 
 static fc_status_t fc_submit_internal(fc_t *controller, fc_command_t *command)
 {
     fc_status_t result;
 
-    if (controller == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    result = fc_submit_to_queue(controller, (command != NULL) && (command->high_priority != 0U) ? &controller->hsq : &controller->sq, command);
+    result = fc_submit_to_queue(controller, (command->high_priority != 0U) ? &controller->hsq : &controller->sq, command);
     fc_register_queue_state(controller);
     return result;
 }
@@ -548,10 +491,6 @@ static fc_status_t fc_poll_internal(fc_t *controller)
     fc_command_id_t            command_id;
     nand_dispatch_completion_t nand_completion;
 
-    if (controller == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
     const uint8_t nand_result = nand_dispatch_poll(&nand_completion);
 
     if (nand_result != NAND_RESULT_NOT_READY)
@@ -635,18 +574,10 @@ static fc_status_t fc_poll_internal(fc_t *controller)
 static fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *completion)
 {
     fc_status_t       result;
-    fc_command_t     *command;
     fc_command_id_t command_id;
 
-    if ((controller == NULL) || (completion == NULL) ||
-        (completion->command_id >= FC_COMMAND_POOL_DEPTH) ||
-        (fc_command_to_id(controller, &controller->command_pool[completion->command_id], &command_id) == 0U) ||
-        (controller->command_state[command_id] != FC_COMMAND_STATE_ACTIVE))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    command = &controller->command_pool[command_id];
-    result = fc_completion_queue_push(&controller->cq, completion);
+    command_id = completion->command_id;
+    result     = fc_completion_queue_push(&controller->cq, completion);
     if (result == FC_STATUS_OK)
     {
         controller->command_state[command_id] = FC_COMMAND_STATE_COMPLETED;
@@ -659,10 +590,6 @@ static fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_stat
 {
     fc_status_t result;
 
-    if ((controller == NULL) || (completion == NULL))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
     result = fc_completion_queue_pop(&controller->cq, completion);
     fc_register_queue_state(controller);
     return result;
@@ -674,16 +601,7 @@ static fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_
     uint16_t          next_descriptor_index;
     fc_command_id_t command_id;
 
-    if ((fc_command_to_id(controller, command, &command_id) == 0U) ||
-        ((controller->command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) &&
-         (controller->command_state[command_id] != FC_COMMAND_STATE_COMPLETED)))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    if (fc_cq_contains_command(controller, command) != 0U)
-    {
-        return FC_STATUS_NOT_READY;
-    }
+    command_id = (fc_command_id_t)(command - controller->command_pool);
     descriptor_index = controller->command_descriptor_head[command_id];
     while (descriptor_index != UINT16_MAX)
     {
@@ -733,6 +651,14 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor(uint16_t descriptor_id)
 
 fc_status_t fc_command_configure_descriptors(fc_command_t *command)
 {
+    fc_command_id_t command_id;
+
+    if ((command == NULL) || (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
+        (g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) ||
+        (command->desc_id != FC_DESCRIPTOR_ID_INVALID))
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
     return fc_command_configure_descriptors_internal(&g_fc_controller, command);
 }
 
@@ -743,21 +669,42 @@ fc_buffer_id_t fc_buffer_alloc(void)
 
 fc_status_t fc_buffer_release(fc_buffer_id_t buffer_id)
 {
+    if (fc_buffer_id_is_valid(&g_fc_controller, buffer_id) == 0U)
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
     return fc_buffer_release_internal_api(&g_fc_controller, buffer_id);
 }
 
 uint8_t *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
 {
+    if (fc_buffer_id_is_valid(&g_fc_controller, buffer_id) == 0U)
+    {
+        return NULL;
+    }
     return fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
 }
 
 fc_buffer_id_t fc_real_buffer_to_buffer_id(const uint8_t *buffer)
 {
+    if (buffer == NULL)
+    {
+        return FC_BUFFER_ID_INVALID;
+    }
     return fc_real_buffer_to_buffer_id_internal(&g_fc_controller, buffer);
 }
 
 fc_status_t fc_submit(fc_command_t *command)
 {
+    fc_command_id_t command_id;
+
+    if ((command == NULL) || (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
+        (g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) ||
+        (fc_command_validate(command) != FC_STATUS_OK) ||
+        (fc_command_descriptors_owned(&g_fc_controller, command_id, command) == 0U))
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
     return fc_submit_internal(&g_fc_controller, command);
 }
 
@@ -768,11 +715,27 @@ fc_status_t fc_service(void)
 
 fc_status_t fc_poll_completion(fc_command_status_t *completion)
 {
+    if (completion == NULL)
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
     return fc_poll_completion_internal(&g_fc_controller, completion);
 }
 
 fc_status_t fc_command_release(fc_command_t *command)
 {
+    fc_command_id_t command_id;
+
+    if ((command == NULL) || (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
+        ((g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) &&
+         (g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_COMPLETED)))
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
+    if (fc_cq_contains_command(&g_fc_controller, command) != 0U)
+    {
+        return FC_STATUS_NOT_READY;
+    }
     return fc_command_release_internal_api(&g_fc_controller, command);
 }
 
