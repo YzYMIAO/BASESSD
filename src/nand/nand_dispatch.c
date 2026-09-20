@@ -55,7 +55,7 @@ static uint8_t nand_dispatch_target_is_valid(const fc_command_t *command)
 static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion, const fc_command_t *command)
 {
     *completion = (nand_dispatch_completion_t){0};
-    completion->command_id = (command != NULL) ? command->command_id : FC_COMMAND_HANDLE_INVALID;
+    completion->command_id = (command != NULL) ? command->command_id : FC_COMMAND_ID_INVALID;
     completion->failed_descriptor_id = FC_DESCRIPTOR_ID_INVALID;
     completion->cw_status[0] = FC_CW_STATUS_UNUSED;
     completion->cw_status[1] = FC_CW_STATUS_UNUSED;
@@ -278,7 +278,7 @@ static uint8_t nand_dispatch_execute_page(fc_command_t *command, nand_dispatch_c
     return result;
 }
 
-static uint8_t nand_dispatch_execute_command(fc_command_t *command, nand_dispatch_completion_t *completion)
+__attribute__((unused)) static uint8_t nand_dispatch_execute_command(fc_command_t *command, nand_dispatch_completion_t *completion)
 {
     nand_fc_completion_t nand_completion;
     uint8_t operation = (uint8_t)command->config.operation;
@@ -336,7 +336,7 @@ uint8_t nand_dispatch_init(void)
         {
             for (lun = 0U; lun < LUN_NUM; lun++)
             {
-                g_nand_dispatch_tasks[channel][ce][lun].command_id = FC_COMMAND_HANDLE_INVALID;
+                g_nand_dispatch_tasks[channel][ce][lun].command_id = FC_COMMAND_ID_INVALID;
                 g_nand_dispatch_tasks[channel][ce][lun].descriptor_id = FC_DESCRIPTOR_ID_INVALID;
             }
         }
@@ -387,9 +387,8 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
             {
                 nand_dispatch_task_t *task = &g_nand_dispatch_tasks[channel][ce][lun];
                 fc_command_t *command;
-                uint8_t result;
                 nand_fc_completion_t nand_completion;
-                if (task->command_id == FC_COMMAND_HANDLE_INVALID)
+                if (task->command_id == FC_COMMAND_ID_INVALID)
                 {
                     continue;
                 }
@@ -432,7 +431,7 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                     continue;
                 }
                 *completion = task->completion;
-                task->command_id = FC_COMMAND_HANDLE_INVALID;
+                task->command_id = FC_COMMAND_ID_INVALID;
                 g_nand_channel_cursor = (uint8_t)((channel + 1U) % CH_NUM);
                 return result;
             }
@@ -448,7 +447,7 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                 return NAND_RESULT_INVALID_ARGUMENT;
             }
             task = &g_nand_dispatch_tasks[channel][command->config.ce][command->config.lun];
-            if (task->command_id != FC_COMMAND_HANDLE_INVALID)
+            if (task->command_id != FC_COMMAND_ID_INVALID)
             {
                 continue;
             }
@@ -462,7 +461,7 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
             task->operation = (uint8_t)command->config.operation;
             if (nand_dispatch_task_request_prepare(task, &task->request) != NAND_RESULT_OK)
             {
-                task->command_id = FC_COMMAND_HANDLE_INVALID;
+                task->command_id = FC_COMMAND_ID_INVALID;
                 return NAND_RESULT_INVALID_ARGUMENT;
             }
             SSD_LOGD("nand: FC dispatch op=%u buffer=%p length=%u column=0x%04X row=0x%06lX\r\n", task->operation, (void *)task->request.data, task->request.data_length, task->request.column, (unsigned long)task->request.row);
@@ -476,7 +475,7 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
             nand_completion.nand_status      = task->transaction.completion.nand_status;
             nand_dispatch_task_complete(task, result, &nand_completion);
             *completion = task->completion;
-            task->command_id = FC_COMMAND_HANDLE_INVALID;
+            task->command_id = FC_COMMAND_ID_INVALID;
             return result;
         }
     }

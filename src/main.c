@@ -1,5 +1,6 @@
 
 #include "btim.h"
+#include "common/ssd_crash.h"
 #include "common/ssd_log.h"
 #include "delay.h"
 #include "fc/fc.h"
@@ -44,9 +45,33 @@ static const storage_wdg_config_t g_storage_wdg_config = {
 #endif
 
 /* Common logging stays transport-neutral; this BSP binds it to the non-blocking UART queue. */
-static void stm32_uart_log_sink(const char *message)
+static int stm32_uart_log_sink(const char *message, uint32_t length)
 {
-    (void)uart_log_write(message, (uint32_t)strlen(message));
+    return uart_log_write(message, length);
+}
+
+static int stm32_uart_log_flush_sink(uint32_t timeout_ms)
+{
+    return uart_log_flush(timeout_ms);
+}
+
+static void stm32_report_previous_crash(void)
+{
+    const ssd_crash_record_t *record = ssd_crash_record_get();
+
+    if (record == NULL)
+    {
+        return;
+    }
+
+    SSD_LOGE("previous assert: %s (%s:%lu)\r\n",
+             record->expression,
+             record->file,
+             (unsigned long)record->line);
+    if (ssd_log_flush(1000U) == 0)
+    {
+        ssd_crash_record_clear();
+    }
 }
 /* Newlib-nano calls this hook from __libc_init_array when no CRT provides it. */
 void _init(void)
@@ -70,6 +95,8 @@ int main(void)
 
     sys_init();
     ssd_log_set_sink(stm32_uart_log_sink);
+    ssd_log_set_flush_sink(stm32_uart_log_flush_sink);
+    stm32_report_previous_crash();
     SSD_LOGI("soft_ssd debug revision=%lu\r\n", (unsigned long)SSD_FIRMWARE_DEBUG_REVISION);
     if (fc_init() != FC_STATUS_OK)
     {

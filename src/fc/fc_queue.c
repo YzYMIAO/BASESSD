@@ -2,7 +2,7 @@
 
 #include <stddef.h>
 
-fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_handle *storage, uint16_t depth)
+fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, uint16_t depth)
 {
     if ((queue == NULL) || (storage == NULL) || (depth == 0U))
     {
@@ -22,9 +22,9 @@ fc_status_t fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_st
     return FC_STATUS_OK;
 }
 
-fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_handle command_handle)
+fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id)
 {
-    if ((queue == NULL) || (command_handle == FC_COMMAND_HANDLE_INVALID))
+    if ((queue == NULL) || (command_id == FC_COMMAND_ID_INVALID))
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
@@ -32,15 +32,15 @@ fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_ha
     {
         return FC_STATUS_QUEUE_FULL;
     }
-    queue->entries[queue->tail] = command_handle;
+    queue->entries[queue->tail] = command_id;
     queue->tail                 = (uint16_t)((queue->tail + 1U) % queue->depth);
     queue->count++;
     return FC_STATUS_OK;
 }
 
-fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_handle *command_handle)
+fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id)
 {
-    if ((queue == NULL) || (command_handle == NULL))
+    if ((queue == NULL) || (command_id == NULL))
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
@@ -48,7 +48,7 @@ fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_han
     {
         return FC_STATUS_QUEUE_EMPTY;
     }
-    *command_handle = queue->entries[queue->head];
+    *command_id = queue->entries[queue->head];
     queue->head     = (uint16_t)((queue->head + 1U) % queue->depth);
     queue->count--;
     return FC_STATUS_OK;

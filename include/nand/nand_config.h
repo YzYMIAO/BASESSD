@@ -4,8 +4,10 @@
 #include <stdint.h>
 
 #define PAGE_SIZE (2112)
-#define PAGE_NUM  (64)
-#define BLOCK_NUM (2048)
+#define PAGE_MAIN_SIZE  (2048)
+#define PAGE_SPARE_SIZE (64)
+#define PAGES_PER_BLOCK (64)
+#define BLOCKS_PER_PLANE (2048)
 #define PLANE_NUM (2)
 #define DIE_NUM   (1)
 #define LUN_NUM   (1)
@@ -16,7 +18,7 @@
 #define CW_WIDTH         (2U)  /* 4个codeword,各个cw的起始位置在4等分处。 */
 #define PAGE_ADDR_WIDTH  (6U)  /* PA0~PA5，每 Block 64 页。 */
 #define PLANE_ADDR_WIDTH (1U)  /* BA6，Plane 选择。 */
-#define BLOCK_ADDR_WIDTH (11U) /* BA7~BA17，每 Plane 2048 个 Block。 */
+#define BLOCK_ADDR_WIDTH (11U) /* BA7~BA17，每 Plane BLOCKS_PER_PLANE 个 Block。 */
 #define DIE_ADDR_WIDTH   (0U)
 #define LUN_ADDR_WIDTH   (0U)
 
@@ -72,7 +74,7 @@ static inline nand_paa_t paa_make(uint32_t page, uint32_t plane, uint32_t block,
 
 static inline uint8_t paa_is_valid(uint32_t page, uint32_t plane, uint32_t block, uint32_t lun, uint32_t cw)
 {
-    return (uint8_t)((page < PAGE_NUM) && (plane < PLANE_NUM) && (block < BLOCK_NUM) &&
+    return (uint8_t)((page < PAGES_PER_BLOCK) && (plane < PLANE_NUM) && (block < BLOCKS_PER_PLANE) &&
                      (lun < LUN_NUM) && (cw < CW_NUM));
 }
 

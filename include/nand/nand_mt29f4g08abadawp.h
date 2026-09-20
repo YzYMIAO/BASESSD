@@ -1,7 +1,7 @@
 #ifndef PLATFORM_STM32H743_NAND_MT29F4G08ABADAWP_H
 #define PLATFORM_STM32H743_NAND_MT29F4G08ABADAWP_H
 
-#include "nand/onfi_1_0.h"
+#include "nand/nand_fc_interface.h"
 #include "sys.h"
 
 /* MT29F4G08ABADAWP physical geometry. FC/FTL logical geometry is in nand_config.h. */
@@ -24,28 +24,6 @@
 /* R/B# is a backend-ready indication, not a NAND command interface. */
 #define MT29F4G08ABADAWP_RB_GPIO_PORT GPIOD
 #define MT29F4G08ABADAWP_RB_GPIO_PIN  GPIO_PIN_6
-
-typedef struct
-{
-    uint16_t column;
-    uint32_t row;
-    uint8_t *data;
-    uint16_t data_length;
-} nand_fc_request_t;
-
-typedef struct
-{
-    uint8_t execution_status; /* NAND_RESULT_* */
-    uint8_t nand_status;      /* Raw 70h status value after command completion. */
-} nand_fc_completion_t;
-
-typedef struct
-{
-    nand_engine_state_t       engine;
-    nand_command_request_t    request;
-    nand_command_completion_t completion;
-    uint8_t                   active;
-} nand_fc_transaction_t;
 
 /*
  * Initializes FMC hardware and verifies the NAND through OP_RESET/OP_READ_ID/OP_SET_FEATURES.

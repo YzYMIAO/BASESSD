@@ -297,7 +297,7 @@ static fc_status_t fc_nand_test_process_batch_completion(const fc_command_status
                 return FC_STATUS_IO_ERROR;
             }
             next_id = (fc_descriptor_id_t)descriptor->next_id;
-            words = (const uint32_t *)fc_buffer_id_to_real_buffer((fc_buffer_id_t)descriptor->buffer_id);
+            words = (const uint32_t *)(uintptr_t)fc_buffer_id_to_real_buffer((fc_buffer_id_t)descriptor->buffer_id);
             if (words == NULL)
             {
                 fc_nand_test_release_command_resources(command);
@@ -340,15 +340,15 @@ static fc_status_t fc_nand_test_run_block_pipeline(nand_paa_t test_paa, uint8_t 
 
     SSD_LOGI("[FC TEST] %s begin, block=%lu plane=%lu lun=%lu pages=%u window=%u\r\n", name,
              (unsigned long)paa_to_block(test_paa), (unsigned long)paa_to_plane(test_paa),
-             (unsigned long)paa_to_lun(test_paa), (unsigned int)PAGE_NUM,
+             (unsigned long)paa_to_lun(test_paa), (unsigned int)PAGES_PER_BLOCK,
              (unsigned int)FC_NAND_TEST_PAGE_WINDOW);
     fc_nand_test_log_resource_stats("begin", completed, next_page, outstanding);
-    while (completed < PAGE_NUM)
+    while (completed < PAGES_PER_BLOCK)
     {
         uint32_t index;
         uint8_t submitted = 0U;
 
-        for (index = 0U; index < FC_NAND_TEST_PAGE_WINDOW && next_page < PAGE_NUM; index++)
+        for (index = 0U; index < FC_NAND_TEST_PAGE_WINDOW && next_page < PAGES_PER_BLOCK; index++)
         {
             if (slots[index].active == 0U)
             {
@@ -408,17 +408,17 @@ static fc_status_t fc_nand_test_run_block_pipeline(nand_paa_t test_paa, uint8_t 
             outstanding--;
             SSD_LOGI("[FC TEST] %s page=%lu completed inflight=%lu\r\n", name,
                      (unsigned long)completed_page, (unsigned long)outstanding);
-            if ((completed % FC_NAND_TEST_PROGRESS_PAGES) == 0U || completed == PAGE_NUM)
+            if ((completed % FC_NAND_TEST_PROGRESS_PAGES) == 0U || completed == PAGES_PER_BLOCK)
             {
                 SSD_LOGI("[FC TEST] %s progress: %lu/%u pages\r\n", name,
-                         (unsigned long)completed, (unsigned int)PAGE_NUM);
+                         (unsigned long)completed, (unsigned int)PAGES_PER_BLOCK);
             }
-            if ((completed % FC_NAND_TEST_STATS_INTERVAL) == 0U || completed == PAGE_NUM)
+            if ((completed % FC_NAND_TEST_STATS_INTERVAL) == 0U || completed == PAGES_PER_BLOCK)
             {
                 fc_nand_test_log_resource_stats("reclaim", completed, next_page, outstanding);
             }
         }
-        if ((submitted == 0U) && (outstanding == 0U) && (completed < PAGE_NUM))
+        if ((submitted == 0U) && (outstanding == 0U) && (completed < PAGES_PER_BLOCK))
         {
             if (service_count >= FC_NAND_TEST_SERVICE_LIMIT)
             {
@@ -596,7 +596,7 @@ static __attribute__((unused)) fc_status_t fc_nand_test_read_page(nand_paa_t tes
         {
             fc_descriptor_t *descriptor = fc_nand_test_descriptor(descriptor_id);
             descriptor_id = (fc_descriptor_id_t)descriptor->next_id;
-            const uint32_t *words = (const uint32_t *)fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+            const uint32_t *words = (const uint32_t *)(uintptr_t)fc_buffer_id_to_real_buffer(descriptor->buffer_id);
 
             if (words == NULL)
             {

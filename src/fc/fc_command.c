@@ -1,31 +1,20 @@
 #include "fc_command.h"
+#include "nand/onfi_1_0.h"
 
 #include "onfi_1_0.h"
 
 #include <stddef.h>
 
-static uint8_t fc_command_is_page_data_operation(uint8_t operation)
-{
-    return (uint8_t)((operation == OP_NORMAL_READ_PAGE) || (operation == OP_NORMAL_PROGRAM_PAGE));
-}
-
-static uint8_t fc_command_cw_count(const fc_command_t *command)
-{
-    return (command == NULL) ? 0U : (uint8_t)(command->config.cw + 1U);
-}
-
 fc_status_t fc_command_validate(const fc_command_t *command)
 {
-    if (command == NULL)
+    const nand_operation_map_t *op;
+
+    if (command->config.operation >= OP_COUNT)
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
-    if ((command->config.operation >= OP_COUNT) || (command->config.ldpc > FC_LDPC_RAW) ||
-        (command->config.cw >= 4U) || (command->config.page_type >= 4U))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    if ((fc_command_is_page_data_operation((uint8_t)command->config.operation) != 0U) &&
+    op = &g_nand_operation_map[command->config.operation];
+    if ((op->data_input_cycles != 0U) &&
         (command->desc_id == FC_DESCRIPTOR_ID_INVALID))
     {
         return FC_STATUS_INVALID_ARGUMENT;
@@ -42,9 +31,9 @@ void fc_command_status_init(fc_command_status_t *status, const fc_command_t *com
         return;
     }
     *status = (fc_command_status_t){0};
-    status->command_id = (command != NULL) ? command->command_id : FC_COMMAND_HANDLE_INVALID;
+    status->command_id = (command != NULL) ? command->command_id : FC_COMMAND_ID_INVALID;
     status->desc_id    = (command != NULL) ? command->desc_id : FC_DESCRIPTOR_ID_INVALID;
-    count              = fc_command_cw_count(command);
+    count              = (command != NULL) ? (uint8_t)(command->config.cw + 1U) : 0U;
     status->status0    = FC_CW_STATUS_READY;
     status->status1    = (count > 1U) ? FC_CW_STATUS_READY : 0U;
     status->status2    = (count > 2U) ? FC_CW_STATUS_READY : 0U;

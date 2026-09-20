@@ -12,7 +12,7 @@
  */
 typedef struct
 {
-    fc_command_handle *entries;
+    fc_command_id_t *entries;
     uint16_t           depth;
     uint16_t           head;
     uint16_t           tail;
@@ -33,12 +33,12 @@ typedef struct
 } fc_completion_queue_t;
 
 /* storage 由 FC 内部固定提供，队列不分配也不释放内存。 */
-fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_handle *storage, uint16_t depth);
+fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, uint16_t depth);
 fc_status_t fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, uint16_t depth);
 
 /* 入队满时返回 FC_STATUS_QUEUE_FULL；出队空时返回 FC_STATUS_QUEUE_EMPTY。 */
-fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_handle command_handle);
-fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_handle *command_handle);
+fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id);
+fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id);
 fc_status_t fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion);
 fc_status_t fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion);
 

@@ -6,7 +6,7 @@ extern UART_HandleTypeDef g_uart1_handle;
 uint8_t uart_tx_dma_init(void)
 {
     __HAL_RCC_DMA1_CLK_ENABLE();
-    g_dma_handle.Instance                 = USART_TX_DMA_STREAM;
+    g_dma_handle.Instance                 = DMA1_Stream0;
     g_dma_handle.Init.Request             = DMA_REQUEST_USART1_TX;
     g_dma_handle.Init.Direction           = DMA_MEMORY_TO_PERIPH;
     g_dma_handle.Init.PeriphInc           = DMA_PINC_DISABLE;
@@ -25,8 +25,8 @@ uint8_t uart_tx_dma_init(void)
         return 0U;
     }
     __HAL_LINKDMA(&g_uart1_handle, hdmatx, g_dma_handle);
-    HAL_NVIC_SetPriority(USART_TX_DMA_IRQn, 4U, 0U);
-    HAL_NVIC_EnableIRQ(USART_TX_DMA_IRQn);
+    HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 4U, 0U);
+    HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
     return 1U;
 }
 

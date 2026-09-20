@@ -2,7 +2,7 @@
 #define NAND_DISPATCH_H
 
 #include "fc/fc_command.h"
-#include "nand_engine.h"
+#include "nand_fc_interface.h"
 
 #include <stdint.h>
 

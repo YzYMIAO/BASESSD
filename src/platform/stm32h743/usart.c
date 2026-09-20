@@ -37,12 +37,14 @@ static volatile uint16_t g_rx_tail;
  * TX 环形队列：普通固件上下文是生产者，USART IRQ 是消费者。
  * uart_log_write() 用极短的关中断区保护“入队 + 打开 TXEIE”的交接，防止日志丢在队列中。
  */
-static uint8_t           g_tx_ring[USART_TX_RING_CAPACITY];
+/* The padding makes final cache-line maintenance safe when a DMA segment ends at ring end. */
+static uint8_t g_tx_ring[USART_TX_RING_CAPACITY + 31U] __ALIGNED(32);
 static volatile uint16_t g_tx_head;
 static volatile uint16_t g_tx_tail;
 static volatile uint16_t g_tx_dma_length;
 static volatile uint8_t  g_tx_dma_active;
 static uint8_t           g_tx_dma_ready;
+static volatile uint8_t  g_tx_transport_fault;
 
 static uart_stats_t     g_uart_stats;
 static uart_log_level_t g_uart_log_level = UART_LOG_INFO;
@@ -106,6 +108,7 @@ static uint8_t uart_tx_dequeue(uint8_t *byte)
     *byte = g_tx_ring[tail];
     __DMB();
     g_tx_tail = (tail + 1U) & USART_TX_RING_MASK;
+    __SEV();
     return 1U;
 }
 
@@ -123,13 +126,19 @@ static void uart_tx_dma_start_locked(void)
     length = (g_tx_head > tail) ? (uint16_t)(g_tx_head - tail) : (uint16_t)(USART_TX_RING_CAPACITY - tail);
 
     /* TX Ring is cacheable AXI SRAM; DMA must see bytes written by the CPU before it starts. */
-    SCB_CleanDCache_by_Addr((uint32_t *)&g_tx_ring[tail], (int32_t)length);
+    SCB_CleanDCache_by_Addr((uint32_t *)(uintptr_t)&g_tx_ring[tail], (int32_t)((length + 31U) & ~31U));
     g_tx_dma_length = length;
     g_tx_dma_active = 1U;
     if (HAL_DMA_Start_IT(&g_dma_handle, (uint32_t)&g_tx_ring[tail], (uint32_t)&USART_UX->TDR, length) != HAL_OK)
     {
         g_tx_dma_active = 0U;
         g_uart_stats.tx_dma_errors++;
+        g_uart_stats.tx_transport_errors++;
+        g_tx_transport_fault = 1U;
+        /* No tail movement occurred; the TXE fallback drains the retained bytes. */
+        g_tx_dma_ready = 0U;
+        USART_UX->CR1 |= USART_CR1_TXEIE_TXFNFIE;
+        __SEV();
         return;
     }
     USART_UX->CR3 |= USART_CR3_DMAT;
@@ -146,16 +155,33 @@ static void uart_tx_dma_complete(DMA_HandleTypeDef *dma_handle)
     g_tx_tail      = (uint16_t)((g_tx_tail + transferred) & USART_TX_RING_MASK);
     __DMB();
     g_tx_dma_active = 0U;
+    __SEV();
     uart_tx_dma_start_locked();
 }
 
 static void uart_tx_dma_error(DMA_HandleTypeDef *dma_handle)
 {
+    uint16_t remaining;
+    uint16_t transferred;
+
     (void)dma_handle;
     USART_UX->CR3 &= ~USART_CR3_DMAT;
+    remaining = (uint16_t)__HAL_DMA_GET_COUNTER(&g_dma_handle);
+    if (remaining > g_tx_dma_length)
+    {
+        remaining = g_tx_dma_length;
+    }
+    transferred   = (uint16_t)(g_tx_dma_length - remaining);
+    g_tx_tail     = (uint16_t)((g_tx_tail + transferred) & USART_TX_RING_MASK);
     g_tx_dma_length = 0U;
     g_tx_dma_active = 0U;
     g_uart_stats.tx_dma_errors++;
+    g_uart_stats.tx_transport_errors++;
+    g_tx_transport_fault = 1U;
+    /* The transferred prefix has reached the UART FIFO; TXE sends only the remainder. */
+    g_tx_dma_ready = 0U;
+    USART_UX->CR1 |= USART_CR1_TXEIE_TXFNFIE;
+    __SEV();
 }
 
 static void uart_write_prompt(void)
@@ -171,10 +197,13 @@ static void uart_print_status(void)
 
     uart_get_stats(&stats);
     (void)uart_log_printf(UART_LOG_INFO,
-                          "uart: rx_ovf=%lu tx_drop=%lu dma_err=%lu ore=%lu fe=%lu ne=%lu pe=%lu\r\n",
+                          "uart: rx_ovf=%lu tx_drop=%lu tx_ctx=%lu flush_to=%lu dma_err=%lu tx_fault=%lu ore=%lu fe=%lu ne=%lu pe=%lu\r\n",
                           (unsigned long)stats.rx_overflow,
                           (unsigned long)stats.tx_dropped,
+                          (unsigned long)stats.tx_context_errors,
+                          (unsigned long)stats.tx_flush_timeouts,
                           (unsigned long)stats.tx_dma_errors,
+                          (unsigned long)stats.tx_transport_errors,
                           (unsigned long)stats.overrun_errors,
                           (unsigned long)stats.framing_errors,
                           (unsigned long)stats.noise_errors,
@@ -351,12 +380,12 @@ static int uart_cli_nand(int argc, char *argv[])
              (uart_cli_parse_u32(argv[7], &page) == 0) && (uart_cli_parse_u32(argv[8], &cw) == 0))
     {
         if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM) ||
-            (paa_is_valid(page, plane, block, lun, cw) == 0U))
+            (paa_is_valid(lun, block, plane, page, cw) == 0U))
         {
             (void)uart_log_write("error: PAA field out of range\r\n", 32U);
             return 0;
         }
-        paa = paa_make(page, plane, block, lun, cw);
+        paa = paa_make(lun, block, plane, page, cw);
         (void)uart_log_printf(UART_LOG_INFO,
                               "PAA=0x%08lX (ch=%lu ce=%lu lun=%lu plane=%lu block=%lu page=%lu cw=%lu)\r\n",
                               (unsigned long)paa, (unsigned long)ch, (unsigned long)ce, (unsigned long)lun,
@@ -370,6 +399,8 @@ static int uart_cli_nand(int argc, char *argv[])
     (void)uart_log_printf((result == FC_STATUS_OK) ? UART_LOG_INFO : UART_LOG_ERROR,
                           "nand test result=%d\r\n",
                           (int)result);
+    /* Test completion is reported only after the result has reached the UART TX pin. */
+    (void)uart_log_flush(5000U);
     return 0;
 }
 #endif
@@ -614,40 +645,50 @@ void usart_irq_handler(void)
 int uart_log_write(const char *data, uint32_t length)
 {
     uint32_t written = 0U;
-    uint32_t primask;
 
     if ((!g_usart_ready) || (data == NULL) || (length == 0U))
     {
         return 0;
     }
 
-    /*
-     * 保护“生产者入队”和“打开 TXEIE”的原子交接：若 IRQ 恰好看到队列为空并关闭 TXEIE，
-     * 主循环又在此刻只入队，会导致新日志无人触发发送、永久滞留。临界区内仅复制 RAM 和
-     * 写一个控制寄存器，严禁加入等待外设或 printf 等可能拉长关中断时间的操作。
-     */
-    primask = __get_PRIMASK();
-    __disable_irq();
-    while (written < length)
+    /* A DMA transport error has an ambiguous byte boundary; do not claim later writes are reliable. */
+    if (g_tx_transport_fault != 0U)
     {
-        uint16_t head = g_tx_head;
-        uint16_t next = (head + 1U) & USART_TX_RING_MASK;
-
-        if (next == g_tx_tail)
-        {
-            /* 日志不能反向阻塞存储 I/O；饱和时明确丢弃新字节而非等待串口发送。 */
-            g_uart_stats.tx_dropped += length - written;
-            break;
-        }
-
-        g_tx_ring[head] = (uint8_t)data[written++];
-        __DMB();
-        g_tx_head = next;
+        return -1;
     }
 
-    /* DMA owns TX when available; otherwise retain TXE interrupt as a diagnostic fallback. */
-    if (written != 0U)
+    if ((__get_IPSR() != 0U) || (__get_PRIMASK() != 0U))
     {
+        g_uart_stats.tx_context_errors++;
+        return -1;
+    }
+
+    while (written < length)
+    {
+        uint32_t primask = __get_PRIMASK();
+
+        if (g_tx_transport_fault != 0U)
+        {
+            return -1;
+        }
+
+        /* Publish bytes and arm the consumer atomically; never wait with IRQs masked. */
+        __disable_irq();
+        while (written < length)
+        {
+            uint16_t head = g_tx_head;
+            uint16_t next = (head + 1U) & USART_TX_RING_MASK;
+
+            if (next == g_tx_tail)
+            {
+                break;
+            }
+
+            g_tx_ring[head] = (uint8_t)data[written++];
+            __DMB();
+            g_tx_head = next;
+        }
+
         if (g_tx_dma_ready != 0U)
         {
             uart_tx_dma_start_locked();
@@ -656,11 +697,60 @@ int uart_log_write(const char *data, uint32_t length)
         {
             USART_UX->CR1 |= USART_CR1_TXEIE_TXFNFIE;
         }
+        __set_PRIMASK(primask);
+
+        if (written < length)
+        {
+            /* Consumers publish __SEV() after every tail advance, so no release is missed. */
+            __WFE();
+        }
     }
 
-    __set_PRIMASK(primask);
-
     return (int)written;
+}
+
+int uart_log_flush(uint32_t timeout_ms)
+{
+    uint32_t start_tick;
+
+    if ((g_usart_ready == 0U) || (__get_IPSR() != 0U) || (__get_PRIMASK() != 0U))
+    {
+        return -1;
+    }
+
+    start_tick = HAL_GetTick();
+    for (;;)
+    {
+        uint8_t empty;
+        uint8_t dma_active;
+        uint32_t primask = __get_PRIMASK();
+
+        __disable_irq();
+        empty      = (g_tx_head == g_tx_tail) ? 1U : 0U;
+        dma_active = g_tx_dma_active;
+        if (g_tx_transport_fault != 0U)
+        {
+            __set_PRIMASK(primask);
+            return -1;
+        }
+        if ((empty != 0U) && (dma_active == 0U) && ((USART_UX->ISR & USART_ISR_TC) != 0U))
+        {
+            __set_PRIMASK(primask);
+            return 0;
+        }
+        __set_PRIMASK(primask);
+
+        if ((timeout_ms != UART_LOG_FLUSH_FOREVER) && ((HAL_GetTick() - start_tick) >= timeout_ms))
+        {
+            g_uart_stats.tx_flush_timeouts++;
+            return -1;
+        }
+        if ((empty == 0U) || (dma_active != 0U))
+        {
+            /* tail updates call __SEV(); TC-only completion is polled below. */
+            __WFE();
+        }
+    }
 }
 
 int uart_log_printf(uart_log_level_t level, const char *format, ...)

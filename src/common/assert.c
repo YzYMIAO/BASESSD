@@ -1,11 +1,17 @@
 #include "common/ssd_assert.h"
+#include "common/ssd_crash.h"
 #include "common/ssd_log.h"
 
 #include <stdlib.h>
 
+#define SSD_ASSERT_FLUSH_TIMEOUT_MS 1000U
+
 void ssd_assert_fail(const char *expression, const char *file, int line)
 {
-    SSD_LOGE("assertion failed: %s (%s:%d)\n", expression, file, line);
+    ssd_crash_record_assert(expression, file, (uint32_t)line);
+    SSD_LOGE("assertion failed: %s (%s:%d)\r\n", expression, file, line);
+    /* A fault line is useful only if the asynchronous transport is drained before stopping. */
+    (void)ssd_log_flush(SSD_ASSERT_FLUSH_TIMEOUT_MS);
 
 #if defined(SSD_FIRMWARE_BUILD)
     /* A running IWDG turns this terminal state into a bounded, diagnosable reset. */

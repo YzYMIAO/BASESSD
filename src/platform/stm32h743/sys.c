@@ -152,6 +152,12 @@ uint8_t sys_stm32_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sys
     }
 
     (void)HAL_PWREx_EnableUSBVoltageDetector();
+    /* Crash records live in BKPSRAM and must survive software resets. */
+    __HAL_RCC_BKPRAM_CLK_ENABLE();
+    if (HAL_PWREx_EnableBkUpReg() != HAL_OK)
+    {
+        return ERROR;
+    }
     __HAL_RCC_CSI_ENABLE();
     __HAL_RCC_SYSCFG_CLK_ENABLE();
     HAL_EnableCompensationCell();

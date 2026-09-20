@@ -44,6 +44,7 @@
 #define USART_RX_RING_CAPACITY  256U
 #define USART_TX_RING_CAPACITY  4096U
 #define USART_CLI_LINE_CAPACITY 128U
+#define UART_LOG_FLUSH_FOREVER  0U
 
 typedef enum
 {
@@ -61,7 +62,10 @@ typedef struct
 {
     uint32_t rx_overflow;    /* Software RX ring was full. */
     uint32_t tx_dropped;     /* New log bytes rejected because TX ring was full. */
+    uint32_t tx_context_errors; /* Logging attempted from an ISR or while interrupts were masked. */
+    uint32_t tx_flush_timeouts; /* Flush could not observe queue empty, DMA idle, and TC before its deadline. */
     uint32_t tx_dma_errors;  /* DMA transfer errors; TXE interrupt fallback remains active. */
+    uint32_t tx_transport_errors; /* A UART/DMA transport fault makes reliable delivery unprovable. */
     uint32_t overrun_errors; /* USART ORE: peripheral/FIFO was not drained in time. */
     uint32_t framing_errors; /* USART FE: stop bit was invalid. */
     uint32_t noise_errors;   /* USART NE: noise was detected while sampling. */
@@ -79,15 +83,18 @@ void usart_init(uint32_t baudrate);
 void usart_irq_handler(void);
 
 /*
- * 非阻塞发送接口：不会等待 TXE 或 TC，因此不会因为串口线速拖慢 FTL/GC 等关键路径。
- * 队列满时，已写入的部分保留，剩余的新日志直接丢弃并累计 tx_dropped；返回值是实际入队字节数。
- * 当前模型只有一个正常上下文生产者和一个 USART IRQ 消费者；不要从多个 ISR 同时调用。
+ * 可靠发送接口：正常任务上下文返回前，data 的全部字节均已进入 TX 队列。队列满时
+ * 等待 DMA/USART IRQ 推进 tail，形成反压，不短写、不丢弃。不得从 ISR、持有不可等待
+ * 锁的临界区或中断已屏蔽的上下文调用；这些调用返回 -1 并累计 tx_context_errors。
  */
 int              uart_log_write(const char *data, uint32_t length);
 int              uart_log_printf(uart_log_level_t level, const char *format, ...);
 void             uart_log_set_level(uart_log_level_t level);
 uart_log_level_t uart_log_get_level(void);
 void             uart_get_stats(uart_stats_t *stats);
+
+/* Wait until the TX queue is empty, DMA is idle, and USART TC confirms the final stop bit left TX. */
+int uart_log_flush(uint32_t timeout_ms);
 
 /*
  * 在主循环或唯一的低优先级控制台任务中周期调用，负责回显、组装一行并执行 CLI。
