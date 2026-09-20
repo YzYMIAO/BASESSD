@@ -25,10 +25,7 @@ typedef struct
 fc_status_t    fc_init(void);
 fc_command_t  *fc_command_alloc(void);
 fc_command_t    *fc_command_id_to_command(uint16_t command_id);
-fc_command_id_t   fc_command_to_command_id(const fc_command_t *command);
 fc_descriptor_t  *fc_descriptor_id_to_descriptor(uint16_t descriptor_id);
-fc_descriptor_id_t fc_descriptor_to_descriptor_id(const fc_descriptor_t *descriptor);
-fc_descriptor_id_t fc_command_descriptors_alloc(fc_command_t *command, uint8_t cw_count);
 fc_status_t     fc_command_configure_descriptors(fc_command_t *command);
 fc_descriptor_id_t fc_descriptor_alloc(fc_command_t *command);
 fc_buffer_id_t fc_buffer_alloc(void);

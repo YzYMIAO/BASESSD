@@ -453,25 +453,30 @@ static inline uint32_t   paa_to_nand_row(nand_paa_t paa);  // 转换为 NAND 行
 
 ### 8.1 空壳/占位模块
 
-| 模块 | 状态 | 计划 |
+| 模块 | 状态 | 说明 |
 |------|------|------|
+| `src/flash_controller/` | ✅ 已删除 | 死代码模块，已被 FC + nand_dispatch 取代 |
+| `src/nand/bad_block.c` | ✅ 已删除 | 桩文件 |
+| `src/nand/ecc.c` | ✅ 已删除 | 桩文件 |
+| `src/nand/nand_command.c` | ✅ 已删除 | 桩文件，所有 ONFI 命令编码已在 `onfi_1_0.c` 实现 |
+| `src/nand/nand_timing.c` | ✅ 已删除 | 桩文件，时序参数已在 `nand_operation_map_t.timing` 中 |
 | `fc_ldpc_engine` | encode/decode 返回 NOT_SUPPORTED | 待实现 BCH/LDPC 算法 |
 | `fc_raid_engine` | XOR 返回 NOT_SUPPORTED | 待实现 |
 | `fc_data_path` | encode/decode 为 no-op | 接入 random→LDPC→RAID 管线 |
-| `nand_command.c` | #warning 占位 | 命令编码与状态转换 |
-| `nand/bad_block.c` | #warning 占位 | 坏块状态记录 |
-| `nand/ecc.c` | #warning 占位 | ECC 可纠/不可纠模拟 |
-| `nand/nand_timing.c` | #warning 占位 | 异步完成时间推进 |
 
 ### 8.2 接口待改进项
 
-| 问题 | 说明 |
-|------|------|
-| `nand_fc_*` 类型位置 | 定义在 `nand_mt29f4g08abadawp.h`（芯片头文件），应提取到通用接口头 |
-| `nand_config.h` 命名歧义 | `PAGE_NUM→PAGES_PER_BLOCK`，`BLOCK_NUM→BLOCKS_PER_PLANE` |
-| 缺少 Main/Spare 分离 | 没有 `PAGE_MAIN_SIZE` / `PAGE_SPARE_SIZE` 宏 |
-| `nand_device_t` 遗留 | 与 nand_dispatch 路径并存但未连通，flash_controller 模块为死代码 |
-| 双向头文件依赖 | `nand_dispatch.h` include `fc.h`，FC include `nand_dispatch.h` |
+| 问题 | 说明 | 状态 |
+|------|------|------|
+| `nand_fc_*` 类型位置 | 已提取到 `nand_fc_interface.h`（通用接口头） | ✅ 已解决 |
+| `nand_config.h` 命名歧义 | `PAGE_NUM→PAGES_PER_BLOCK`，`BLOCK_NUM→BLOCKS_PER_PLANE` | ✅ 已解决 |
+| 缺少 Main/Spare 分离 | 已添加 `PAGE_MAIN_SIZE` / `PAGE_SPARE_SIZE` 宏 | ✅ 已解决 |
+| `nand_device_t` 遗留 | 与 FTL 模拟路径共存，未来 FTL 迁移到 FC 接口后可移除 | 📝 已文档化 |
+| 双向头文件依赖 | `nand_dispatch.h` 现只 include `fc/fc_types.h`（仅基础类型）；FC 在 submit 时预解析 Descriptor 链，nand_dispatch 不再回调 FC | ✅ 已解决 |
+| `fc_command_handle` 编译 bug | `fc.c` 内部类型已统一为 `fc_command_id_t` | ✅ 已解决 |
+| 死代码 `flash_controller/` | 模块已删除 | ✅ 已解决 |
+| 桩文件清理 | `bad_block.c`, `ecc.c`, `nand_command.c`, `nand_timing.c` 已删除 | ✅ 已解决 |
+| 双完成结构转换 | `fc_complete_from_nand()` 简化为直接字段拷贝 | ✅ 已解决 |
 
 ### 8.3 功能扩展规划
 
