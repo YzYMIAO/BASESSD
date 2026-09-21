@@ -6,34 +6,34 @@
 #include <stdint.h>
 
 /* ONFI 1.0 command cycles used by the initial command set. */
-#define NAND_CMD_READ_PAGE_SETUP      0x00U
-#define NAND_CMD_READ_PAGE_CONFIRM    0x30U
-#define NAND_CMD_PROGRAM_PAGE_SETUP   0x80U
-#define NAND_CMD_PROGRAM_PAGE_CONFIRM 0x10U
-#define NAND_CMD_BLOCK_ERASE_SETUP    0x60U
-#define NAND_CMD_BLOCK_ERASE_CONFIRM  0xD0U
-#define NAND_CMD_READ_STATUS          0x70U
-#define NAND_ONFI_CMD_RESET           0xFFU
-#define NAND_CMD_READ_ID              0x90U
-#define NAND_CMD_READ_PARAMETER_PAGE  0xECU
-#define NAND_CMD_READ_UNIQUE_ID       0xEDU
-#define NAND_CMD_GET_FEATURES         0xEEU
-#define NAND_CMD_SET_FEATURES         0xEFU
-#define NAND_CMD_READ_STATUS_ENHANCED 0x78U
-#define NAND_CMD_RANDOM_DATA_READ     0x05U
-#define NAND_CMD_RANDOM_DATA_READ_END 0xE0U
-#define NAND_CMD_RANDOM_DATA_INPUT    0x85U
-#define NAND_CMD_READ_MODE            0x00U
-#define NAND_CMD_READ_PAGE_CACHE_SEQ  0x31U
-#define NAND_CMD_READ_PAGE_CACHE_LAST 0x3FU
-#define NAND_CMD_PROGRAM_PAGE_CACHE   0x15U
-#define NAND_CMD_INTERNAL_DATA_MOVE   0x35U
-#define NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH 0x11U  /* Multi-Plane 编程切换 plane */
-#define NAND_CMD_BLOCK_UNLOCK_LOW     0x23U
-#define NAND_CMD_BLOCK_UNLOCK_HIGH    0x24U
-#define NAND_CMD_BLOCK_LOCK           0x2AU
-#define NAND_CMD_BLOCK_LOCK_TIGHT     0x2CU
-#define NAND_CMD_BLOCK_LOCK_STATUS    0x7AU
+#define NAND_CMD_READ_PAGE_SETUP            0x00U
+#define NAND_CMD_READ_PAGE_CONFIRM          0x30U
+#define NAND_CMD_PROGRAM_PAGE_SETUP         0x80U
+#define NAND_CMD_PROGRAM_PAGE_CONFIRM       0x10U
+#define NAND_CMD_BLOCK_ERASE_SETUP          0x60U
+#define NAND_CMD_BLOCK_ERASE_CONFIRM        0xD0U
+#define NAND_CMD_READ_STATUS                0x70U
+#define NAND_ONFI_CMD_RESET                 0xFFU
+#define NAND_CMD_READ_ID                    0x90U
+#define NAND_CMD_READ_PARAMETER_PAGE        0xECU
+#define NAND_CMD_READ_UNIQUE_ID             0xEDU
+#define NAND_CMD_GET_FEATURES               0xEEU
+#define NAND_CMD_SET_FEATURES               0xEFU
+#define NAND_CMD_READ_STATUS_ENHANCED       0x78U
+#define NAND_CMD_RANDOM_DATA_READ           0x05U
+#define NAND_CMD_RANDOM_DATA_READ_END       0xE0U
+#define NAND_CMD_RANDOM_DATA_INPUT          0x85U
+#define NAND_CMD_READ_MODE                  0x00U
+#define NAND_CMD_READ_PAGE_CACHE_SEQ        0x31U
+#define NAND_CMD_READ_PAGE_CACHE_LAST       0x3FU
+#define NAND_CMD_PROGRAM_PAGE_CACHE         0x15U
+#define NAND_CMD_INTERNAL_DATA_MOVE         0x35U
+#define NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH 0x11U /* Multi-Plane 编程切换 plane */
+#define NAND_CMD_BLOCK_UNLOCK_LOW           0x23U
+#define NAND_CMD_BLOCK_UNLOCK_HIGH          0x24U
+#define NAND_CMD_BLOCK_LOCK                 0x2AU
+#define NAND_CMD_BLOCK_LOCK_TIGHT           0x2CU
+#define NAND_CMD_BLOCK_LOCK_STATUS          0x7AU
 
 #define NAND_STATUS_READY 0x40U
 #define NAND_STATUS_FAIL  0x01U

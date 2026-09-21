@@ -16,7 +16,7 @@
 typedef struct
 {
     uint16_t column;
-    uint32_t row[NAND_PLANE_MAX];  /* 按 plane 索引，单 plane 用 row[0]，多 plane 填 row[0..plane_count-1] */
+    uint32_t row[NAND_PLANE_MAX]; /* 按 plane 索引，单 plane 用 row[0]，多 plane 填 row[0..plane_count-1] */
     uint8_t *data;
     uint16_t data_length;
 } nand_fc_request_t;

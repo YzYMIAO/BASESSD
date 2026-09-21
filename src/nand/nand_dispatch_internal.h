@@ -21,14 +21,14 @@ typedef struct
 {
     uint16_t command_id;
     uint8_t  operation;
-    uint8_t  ch;             /* Channel — needed for page_buffer access. */
-    uint8_t  ce;             /* Chip-enable — needed for routing. */
-    uint8_t  lun;            /* LUN — needed for routing. */
-    uint8_t  page_type : 2;  /* Copy from dispatch request for LDPC engine. */
+    uint8_t  ch;            /* Channel — needed for page_buffer access. */
+    uint8_t  ce;            /* Chip-enable — needed for routing. */
+    uint8_t  lun;           /* LUN — needed for routing. */
+    uint8_t  page_type : 2; /* Copy from dispatch request for LDPC engine. */
     uint8_t  reserved  : 6;
-    uint8_t  cw_index;       /* Current CW being processed (0-based, within current plane). */
-    uint8_t  cw_count;       /* CW count per plane. */
-    uint8_t  plane_count;    /* Plane count (1 for single-plane, 2+ for multi-plane). */
+    uint8_t  cw_index;    /* Current CW being processed (0-based, within current plane). */
+    uint8_t  cw_count;    /* CW count per plane. */
+    uint8_t  plane_count; /* Plane count (1 for single-plane, 2+ for multi-plane). */
     uint8_t  started;
     uint8_t  parameter[4];
     uint8_t  feature_addr;

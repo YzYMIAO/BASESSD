@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define PAGE_SIZE        (2112)
+#define PAGE_SIZE (2112)
 
 /* 通道页缓冲大小：单 plane 操作只用 PAGE_SIZE，多 plane 操作需要双倍缓冲。 */
 #define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM)
@@ -20,13 +20,13 @@
 
 /* 最大支持的 Plane 数（行地址数组深度）。当前硬件 PLANE_NUM=2，
  * NAND_PLANE_MAX=4 为未来 4Plane/6Plane NAND 预留扩展空间。 */
-#define NAND_PLANE_MAX   (4U)
+#define NAND_PLANE_MAX (4U)
 
 /* 多 plane 操作时 CW 总数上限 = max plane × CW per plane */
-#define CW_TOTAL_MAX     (CW_NUM * PLANE_NUM)  /* 4×2=8 */
+#define CW_TOTAL_MAX (CW_NUM * PLANE_NUM) /* 4×2=8 */
 
 /* 通道页缓冲大小：多 plane 操作需要 PLANE_NUM 倍缓冲 */
-#define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM)  /* 2112×2=4224 */
+#define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM) /* 2112×2=4224 */
 
 #define CW_WIDTH         (2U)  /* 4个codeword,各个cw的起始位置在4等分处。 */
 #define PAGE_ADDR_WIDTH  (6U)  /* PA0~PA5，每 Block 64 页。 */

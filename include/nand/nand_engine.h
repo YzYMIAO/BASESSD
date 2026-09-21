@@ -42,7 +42,7 @@ typedef struct
 {
     uint8_t  operation;
     uint16_t column;
-    uint32_t row[NAND_PLANE_MAX];  /* 按 plane 索引，uop ROW  handler 通过 operand 选取 */
+    uint32_t row[NAND_PLANE_MAX]; /* 按 plane 索引，uop ROW  handler 通过 operand 选取 */
     uint8_t *buffer;
     uint16_t data_length;
 } nand_command_request_t;

@@ -14,21 +14,28 @@
 
 typedef struct
 {
-    uint16_t entries[NAND_CHANNEL_QUEUE_DEPTH];
+    uint16_t command_id;
+    uint8_t  ce;
+    uint8_t  lun;
+} nand_dispatch_queue_entry_t;
+
+typedef struct
+{
+    nand_dispatch_queue_entry_t entries[NAND_CHANNEL_QUEUE_DEPTH];
     uint16_t head;
     uint16_t tail;
     uint16_t count;
 } nand_channel_queue_t;
 
-static nand_channel_queue_t       g_nand_channel_queues[CH_NUM];
-static uint8_t                    g_nand_channel_cursor;
-static uint8_t                    g_nand_device_ready;
+static nand_channel_queue_t g_nand_channel_queues[CH_NUM];
+static uint8_t              g_nand_channel_cursor;
+static uint8_t              g_nand_device_ready;
 
 /* 每 LUN 链状态：原 g_nand_dispatch_tasks[ch][ce][lun] 的一维扩展。
  * 单命令：count=1，tasks[0] 预加载。
  * 链式命令：count=N，tasks[0..N-1] 预加载，poll 从 cursor=0 推进到 N-1。 */
-static nand_dispatch_lun_chain_t  g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
-static uint8_t                    g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
+static nand_dispatch_lun_chain_t g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
+static uint8_t                   g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
 
 /* ======================================================================
  * 辅助函数
@@ -43,12 +50,11 @@ static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion
     completion->failed_descriptor_id = FC_DESCRIPTOR_ID_INVALID;
     for (i = 0U; i < CW_TOTAL_MAX; i++)
     {
-        completion->cw_status[i]     = FC_CW_STATUS_UNUSED;
+        completion->cw_status[i] = FC_CW_STATUS_UNUSED;
     }
 }
 
-static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t result,
-                                         const nand_fc_completion_t *nand_completion)
+static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
 {
     task->completion.execution_status = result;
     task->completion.nand_status      = nand_completion->nand_status;
@@ -142,9 +148,13 @@ uint8_t nand_dispatch_submit(const nand_dispatch_request_t *request)
     chain->count  = 1U;
     chain->cursor = 0U;
 
-    /* 入队 command_id */
-    queue->entries[queue->tail] = (uint16_t)request->command_id;
-    queue->tail                 = (uint16_t)((queue->tail + 1U) % NAND_CHANNEL_QUEUE_DEPTH);
+    /* 入队 command_id + ce/lun */
+    queue->entries[queue->tail] = (nand_dispatch_queue_entry_t){
+        .command_id = (uint16_t)request->command_id,
+        .ce         = request->ce,
+        .lun        = request->lun,
+    };
+    queue->tail  = (uint16_t)((queue->tail + 1U) % NAND_CHANNEL_QUEUE_DEPTH);
     queue->count++;
     return NAND_RESULT_OK;
 }
@@ -191,8 +201,12 @@ uint8_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint
     for (i = 0U; i < count; i++)
     {
         nand_dispatch_task_load(&chain->tasks[i], &requests[i]);
-        queue->entries[queue->tail] = requests[i].command_id;
-        queue->tail                 = (uint16_t)((queue->tail + 1U) % NAND_CHANNEL_QUEUE_DEPTH);
+        queue->entries[queue->tail] = (nand_dispatch_queue_entry_t){
+            .command_id = requests[i].command_id,
+            .ce         = requests[i].ce,
+            .lun        = requests[i].lun,
+        };
+        queue->tail  = (uint16_t)((queue->tail + 1U) % NAND_CHANNEL_QUEUE_DEPTH);
         queue->count++;
     }
 
@@ -317,7 +331,7 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                             chain->count = 0U;
                             return NAND_RESULT_INVALID_ARGUMENT;
                         }
-                        result = nand_fc_start(&task->transaction, task->operation, &task->request);
+                        result        = nand_fc_start(&task->transaction, task->operation, &task->request);
                         task->started = 1U;
                         if (result == NAND_RESULT_NOT_READY)
                         {
@@ -330,8 +344,8 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                     }
 
                     /* 整链结束 → 返回 completion */
-                    *completion       = task->completion;
-                    chain->count      = 0U;
+                    *completion           = task->completion;
+                    chain->count          = 0U;
                     g_nand_channel_cursor = (uint8_t)((channel + 1U) % CH_NUM);
                     return result;
                 }
@@ -341,15 +355,13 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
         /* ── Phase 2: 从通道队列出队新命令 ── */
         if (queue->count != 0U)
         {
-            uint16_t                  command_id = queue->entries[queue->head];
-            nand_dispatch_lun_chain_t *chain;
-            nand_dispatch_task_t      *task;
-            nand_fc_completion_t       nand_completion;
-            uint8_t                    result;
+            nand_dispatch_queue_entry_t queue_entry = queue->entries[queue->head];
+            nand_dispatch_lun_chain_t  *chain;
+            nand_dispatch_task_t       *task;
+            nand_fc_completion_t        nand_completion;
+            uint8_t                     result;
 
-            /* 从 command_id 反查 ch/ce/lun（队列中所有命令在同一 channel，但 ce/lun 不同）*/
-            /* 当前为单 CE/LUN 简化版：CE=0, LUN=0 */
-            chain = &g_nand_dispatch_chains[channel][0U][0U];
+            chain = &g_nand_dispatch_chains[channel][queue_entry.ce][queue_entry.lun];
             if (chain->count != 0U)
             {
                 continue; /* LUN busy */
@@ -373,7 +385,7 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                      (void *)task->request.data,
                      task->request.data_length,
                      task->request.column,
-                     (unsigned long)task->request.row);
+                     (unsigned long)task->request.row[0]);
 
             result        = nand_fc_start(&task->transaction, task->operation, &task->request);
             task->started = 1U;

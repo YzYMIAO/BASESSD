@@ -44,7 +44,7 @@ fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_
 fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, uint16_t offset);
 
 /* 一次性从队头弹出 count 条命令到 ids[0..count-1]（ids 可为 NULL 仅消耗）。 */
-void fc_submission_queue_pop_n(fc_submission_queue_t *queue, fc_command_id_t *ids, uint16_t count);
+void        fc_submission_queue_pop_n(fc_submission_queue_t *queue, fc_command_id_t *ids, uint16_t count);
 fc_status_t fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion);
 fc_status_t fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion);
 

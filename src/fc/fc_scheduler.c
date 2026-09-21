@@ -75,13 +75,13 @@ fc_status_t fc_scheduler_select(fc_scheduler_t *scheduler, fc_command_id_t *comm
 
 fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_chain_t *chain)
 {
-    fc_command_id_t  head_id;
-    fc_command_t    *cmd;
-    uint8_t          ch;
-    uint8_t          ce;
-    uint8_t          lun;
-    uint16_t         index;
-    uint8_t          chain_len;
+    fc_command_id_t head_id;
+    fc_command_t   *cmd;
+    uint8_t         ch;
+    uint8_t         ce;
+    uint8_t         lun;
+    uint16_t        index;
+    uint8_t         chain_len;
 
     if ((scheduler == NULL) || (chain == NULL))
     {
@@ -146,9 +146,9 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
         }
 
         /* chain == 1: 收集后续连续命令 */
-        ch  = cmd->config.ch;
-        ce  = cmd->config.ce;
-        lun = cmd->config.lun;
+        ch        = cmd->config.ch;
+        ce        = cmd->config.ce;
+        lun       = cmd->config.lun;
         chain_len = 1U;
 
         while (chain_len < FC_SCHEDULER_CHAIN_MAX)

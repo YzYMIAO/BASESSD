@@ -177,9 +177,9 @@ static uint8_t req_single(nand_dispatch_task_t *task)
     uint16_t data_length = g_nand_operation_map[task->operation].data_length;
 
     task->request = (nand_fc_request_t){
-        .column = 0U,
-        .row = {(task->cw_count != 0U) ? paa_to_nand_row(task->cw_paa[0][0]) : 0U},
-        .data = task->cw_buffers[0][0],
+        .column      = 0U,
+        .row         = {(task->cw_count != 0U) ? paa_to_nand_row(task->cw_paa[0][0]) : 0U},
+        .data        = task->cw_buffers[0][0],
         .data_length = data_length};
     return NAND_RESULT_OK;
 }
@@ -192,9 +192,9 @@ static uint8_t req_single(nand_dispatch_task_t *task)
 static uint8_t req_no_data(nand_dispatch_task_t *task)
 {
     task->request = (nand_fc_request_t){
-        .column = 0U,
-        .row = {(task->cw_count != 0U) ? paa_to_nand_row(task->cw_paa[0][0]) : 0U},
-        .data = NULL,
+        .column      = 0U,
+        .row         = {(task->cw_count != 0U) ? paa_to_nand_row(task->cw_paa[0][0]) : 0U},
+        .data        = NULL,
         .data_length = 0U};
     return NAND_RESULT_OK;
 }
@@ -211,11 +211,12 @@ static uint8_t req_multi_plane_read(nand_dispatch_task_t *task)
     memset(page_buffer, 0x00, PAGE_BUFFER_SIZE);
 
     task->request = (nand_fc_request_t){
-        .column = 0U,
-        .row = {paa_to_nand_row(task->cw_paa[0][0]),
-                paa_to_nand_row(task->cw_paa[1][0])},
-        .data = page_buffer,
-        .data_length = PAGE_BUFFER_SIZE};
+        .column      = 0U,
+        .row         = {paa_to_nand_row(task->cw_paa[0][0]),
+                        paa_to_nand_row(task->cw_paa[1][0])},
+        .data        = page_buffer,
+        .data_length = PAGE_BUFFER_SIZE
+    };
     return NAND_RESULT_OK;
 }
 
@@ -239,16 +240,18 @@ static uint8_t req_multi_plane_program(nand_dispatch_task_t *task)
                 return NAND_RESULT_INVALID_ARGUMENT;
             }
             memcpy(&page_buffer[plane * PAGE_SIZE + cw * (PAGE_SIZE / CW_NUM)],
-                   task->cw_buffers[plane][cw], PAGE_SIZE / CW_NUM);
+                   task->cw_buffers[plane][cw],
+                   PAGE_SIZE / CW_NUM);
         }
     }
 
     task->request = (nand_fc_request_t){
-        .column = 0U,
-        .row = {paa_to_nand_row(task->cw_paa[0][0]),
-                paa_to_nand_row(task->cw_paa[1][0])},
-        .data = page_buffer,
-        .data_length = PAGE_BUFFER_SIZE};
+        .column      = 0U,
+        .row         = {paa_to_nand_row(task->cw_paa[0][0]),
+                        paa_to_nand_row(task->cw_paa[1][0])},
+        .data        = page_buffer,
+        .data_length = PAGE_BUFFER_SIZE
+    };
     return NAND_RESULT_OK;
 }
 
@@ -260,11 +263,12 @@ static uint8_t req_multi_plane_program(nand_dispatch_task_t *task)
 static uint8_t req_multi_plane_erase(nand_dispatch_task_t *task)
 {
     task->request = (nand_fc_request_t){
-        .column = 0U,
-        .row = {paa_to_nand_row(task->cw_paa[0][0]),
-                paa_to_nand_row(task->cw_paa[1][0])},
-        .data = NULL,
-        .data_length = 0U};
+        .column      = 0U,
+        .row         = {paa_to_nand_row(task->cw_paa[0][0]),
+                        paa_to_nand_row(task->cw_paa[1][0])},
+        .data        = NULL,
+        .data_length = 0U
+    };
     return NAND_RESULT_OK;
 }
 
@@ -272,8 +276,7 @@ static uint8_t req_multi_plane_erase(nand_dispatch_task_t *task)
  * completion_multi_plane
  *   多 plane 操作 completion：遍历 plane × CW，逐 CW 设置状态
  * -------------------------------------------------------------------- */
-static void completion_multi_plane(nand_dispatch_task_t *task, uint8_t result,
-                                    const nand_fc_completion_t *nand_completion)
+static void completion_multi_plane(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
 {
     uint8_t status = (result == NAND_RESULT_OK)        ? FC_CW_STATUS_SUCCESS
                      : (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT
@@ -303,75 +306,75 @@ static void completion_multi_plane(nand_dispatch_task_t *task, uint8_t result,
  * ====================================================================== */
 
 const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COUNT] = {
-    [OP_RESET]                          = completion_single,
-    [OP_READ_ID]                        = completion_single,
-    [OP_READ_PARAMETER_PAGE]            = completion_single,
-    [OP_READ_UNIQUE_ID]                 = completion_single,
-    [OP_GET_FEATURES]                   = completion_single,
-    [OP_SET_FEATURES]                   = completion_single,
-    [OP_READ_STATUS]                    = completion_single,
-    [OP_READ_STATUS_ENHANCED]           = completion_single,
-    [OP_RANDOM_DATA_READ]               = completion_single,
-    [OP_RANDOM_DATA_INPUT]              = completion_single,
-    [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE] = completion_single,
-    [OP_READ_MODE]                      = completion_single,
-    [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]    = completion_per_cw,
-    [OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT]  = completion_per_cw,
-    [OP_READ_PAGE_CACHE_SEQ]            = completion_per_cw,
-    [OP_READ_PAGE_CACHE_RANDOM]         = completion_per_cw,
-    [OP_READ_PAGE_CACHE_LAST]           = completion_per_cw,
-    [OP_NORMAL_PROGRAM_PAGE]            = completion_all_cws,
-    [OP_PROGRAM_PAGE_CACHE]             = completion_all_cws,
-    [OP_ERASE_BLOCK]                    = completion_all_cws,
-    [OP_READ_FOR_INTERNAL_DATA_MOVE]    = completion_single,
-    [OP_PROGRAM_FOR_INTERNAL_MOVE]      = completion_single,
-    [OP_BLOCK_UNLOCK_LOW]               = completion_single,
-    [OP_BLOCK_UNLOCK_HIGH]              = completion_single,
-    [OP_BLOCK_LOCK]                     = completion_single,
-    [OP_BLOCK_LOCK_TIGHT]               = completion_single,
-    [OP_BLOCK_LOCK_STATUS]              = completion_single,
-    [OP_OTP_DATA_LOCK]                  = completion_single,
-    [OP_OTP_DATA_PROGRAM]               = completion_all_cws,
-    [OP_OTP_DATA_READ]                  = completion_per_cw,
+    [OP_RESET]                                  = completion_single,
+    [OP_READ_ID]                                = completion_single,
+    [OP_READ_PARAMETER_PAGE]                    = completion_single,
+    [OP_READ_UNIQUE_ID]                         = completion_single,
+    [OP_GET_FEATURES]                           = completion_single,
+    [OP_SET_FEATURES]                           = completion_single,
+    [OP_READ_STATUS]                            = completion_single,
+    [OP_READ_STATUS_ENHANCED]                   = completion_single,
+    [OP_RANDOM_DATA_READ]                       = completion_single,
+    [OP_RANDOM_DATA_INPUT]                      = completion_single,
+    [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = completion_single,
+    [OP_READ_MODE]                              = completion_single,
+    [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = completion_per_cw,
+    [OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT]      = completion_per_cw,
+    [OP_READ_PAGE_CACHE_SEQ]                    = completion_per_cw,
+    [OP_READ_PAGE_CACHE_RANDOM]                 = completion_per_cw,
+    [OP_READ_PAGE_CACHE_LAST]                   = completion_per_cw,
+    [OP_NORMAL_PROGRAM_PAGE]                    = completion_all_cws,
+    [OP_PROGRAM_PAGE_CACHE]                     = completion_all_cws,
+    [OP_ERASE_BLOCK]                            = completion_all_cws,
+    [OP_READ_FOR_INTERNAL_DATA_MOVE]            = completion_single,
+    [OP_PROGRAM_FOR_INTERNAL_MOVE]              = completion_single,
+    [OP_BLOCK_UNLOCK_LOW]                       = completion_single,
+    [OP_BLOCK_UNLOCK_HIGH]                      = completion_single,
+    [OP_BLOCK_LOCK]                             = completion_single,
+    [OP_BLOCK_LOCK_TIGHT]                       = completion_single,
+    [OP_BLOCK_LOCK_STATUS]                      = completion_single,
+    [OP_OTP_DATA_LOCK]                          = completion_single,
+    [OP_OTP_DATA_PROGRAM]                       = completion_all_cws,
+    [OP_OTP_DATA_READ]                          = completion_per_cw,
     [OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT] = completion_multi_plane,
     [OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT]    = completion_multi_plane,
-    [OP_PROGRAM_PAGE_MULTI_PLANE]       = completion_multi_plane,
-    [OP_ERASE_BLOCK_MULTI_PLANE]        = completion_multi_plane,
+    [OP_PROGRAM_PAGE_MULTI_PLANE]               = completion_multi_plane,
+    [OP_ERASE_BLOCK_MULTI_PLANE]                = completion_multi_plane,
 };
 
 const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
-    [OP_RESET]                          = req_no_data,
-    [OP_READ_ID]                        = req_single,
-    [OP_READ_PARAMETER_PAGE]            = req_single,
-    [OP_READ_UNIQUE_ID]                 = req_single,
-    [OP_GET_FEATURES]                   = req_feature,
-    [OP_SET_FEATURES]                   = req_feature,
-    [OP_READ_STATUS]                    = req_single,
-    [OP_READ_STATUS_ENHANCED]           = req_single,
-    [OP_RANDOM_DATA_READ]               = req_single,
-    [OP_RANDOM_DATA_INPUT]              = req_single,
-    [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE] = req_single,
-    [OP_READ_MODE]                      = req_no_data,
-    [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]    = req_read_page,
-    [OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT]  = req_read_page,
-    [OP_READ_PAGE_CACHE_SEQ]            = req_cache_read,
-    [OP_READ_PAGE_CACHE_RANDOM]         = req_cache_read,
-    [OP_READ_PAGE_CACHE_LAST]           = req_cache_read,
-    [OP_NORMAL_PROGRAM_PAGE]            = req_program_page,
-    [OP_PROGRAM_PAGE_CACHE]             = req_program_page,
-    [OP_ERASE_BLOCK]                    = req_erase,
-    [OP_READ_FOR_INTERNAL_DATA_MOVE]    = req_no_data,
-    [OP_PROGRAM_FOR_INTERNAL_MOVE]      = req_single,
-    [OP_BLOCK_UNLOCK_LOW]               = req_no_data,
-    [OP_BLOCK_UNLOCK_HIGH]              = req_no_data,
-    [OP_BLOCK_LOCK]                     = req_no_data,
-    [OP_BLOCK_LOCK_TIGHT]               = req_no_data,
-    [OP_BLOCK_LOCK_STATUS]              = req_single,
-    [OP_OTP_DATA_LOCK]                  = req_no_data,
-    [OP_OTP_DATA_PROGRAM]               = req_program_page,
-    [OP_OTP_DATA_READ]                  = req_read_page,
+    [OP_RESET]                                  = req_no_data,
+    [OP_READ_ID]                                = req_single,
+    [OP_READ_PARAMETER_PAGE]                    = req_single,
+    [OP_READ_UNIQUE_ID]                         = req_single,
+    [OP_GET_FEATURES]                           = req_feature,
+    [OP_SET_FEATURES]                           = req_feature,
+    [OP_READ_STATUS]                            = req_single,
+    [OP_READ_STATUS_ENHANCED]                   = req_single,
+    [OP_RANDOM_DATA_READ]                       = req_single,
+    [OP_RANDOM_DATA_INPUT]                      = req_single,
+    [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = req_single,
+    [OP_READ_MODE]                              = req_no_data,
+    [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = req_read_page,
+    [OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT]      = req_read_page,
+    [OP_READ_PAGE_CACHE_SEQ]                    = req_cache_read,
+    [OP_READ_PAGE_CACHE_RANDOM]                 = req_cache_read,
+    [OP_READ_PAGE_CACHE_LAST]                   = req_cache_read,
+    [OP_NORMAL_PROGRAM_PAGE]                    = req_program_page,
+    [OP_PROGRAM_PAGE_CACHE]                     = req_program_page,
+    [OP_ERASE_BLOCK]                            = req_erase,
+    [OP_READ_FOR_INTERNAL_DATA_MOVE]            = req_no_data,
+    [OP_PROGRAM_FOR_INTERNAL_MOVE]              = req_single,
+    [OP_BLOCK_UNLOCK_LOW]                       = req_no_data,
+    [OP_BLOCK_UNLOCK_HIGH]                      = req_no_data,
+    [OP_BLOCK_LOCK]                             = req_no_data,
+    [OP_BLOCK_LOCK_TIGHT]                       = req_no_data,
+    [OP_BLOCK_LOCK_STATUS]                      = req_single,
+    [OP_OTP_DATA_LOCK]                          = req_no_data,
+    [OP_OTP_DATA_PROGRAM]                       = req_program_page,
+    [OP_OTP_DATA_READ]                          = req_read_page,
     [OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT] = req_multi_plane_read,
     [OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT]    = req_multi_plane_read,
-    [OP_PROGRAM_PAGE_MULTI_PLANE]       = req_multi_plane_program,
-    [OP_ERASE_BLOCK_MULTI_PLANE]        = req_multi_plane_erase,
+    [OP_PROGRAM_PAGE_MULTI_PLANE]               = req_multi_plane_program,
+    [OP_ERASE_BLOCK_MULTI_PLANE]                = req_multi_plane_erase,
 };

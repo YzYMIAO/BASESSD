@@ -625,9 +625,9 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                     }
                     request.cws[0][cw].paa    = descriptor->paa;
                     request.cws[0][cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
-                                                 ? fc_buffer_id_to_real_buffer_internal(controller, descriptor->buffer_id)
-                                                 : NULL;
-                    desc_id = (fc_descriptor_id_t)descriptor->next_id;
+                                                    ? fc_buffer_id_to_real_buffer_internal(controller, descriptor->buffer_id)
+                                                    : NULL;
+                    desc_id                   = (fc_descriptor_id_t)descriptor->next_id;
                 }
             }
 
@@ -645,7 +645,7 @@ static fc_status_t fc_poll_internal(fc_t *controller)
         else
         {
             /* 链式命令（count >= 2）：构建 requests[] → submit_chain */
-            uint8_t               chain_count = sched_chain.count;
+            uint8_t                 chain_count = sched_chain.count;
             nand_dispatch_request_t reqs[FC_SCHEDULER_CHAIN_MAX];
 
             for (i = 0U; i < chain_count; i++)
@@ -660,7 +660,7 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                     return FC_STATUS_IO_ERROR;
                 }
                 controller->command_state[command_id] = FC_COMMAND_STATE_ACTIVE;
-                command = &controller->command_pool[command_id];
+                command                               = &controller->command_pool[command_id];
 
                 reqs[i]              = (nand_dispatch_request_t){0};
                 reqs[i].command_id   = (uint16_t)command_id;
@@ -714,9 +714,9 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                         }
                         reqs[i].cws[0][cw].paa    = descriptor->paa;
                         reqs[i].cws[0][cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
-                                                     ? fc_buffer_id_to_real_buffer_internal(controller, descriptor->buffer_id)
-                                                     : NULL;
-                        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+                                                        ? fc_buffer_id_to_real_buffer_internal(controller, descriptor->buffer_id)
+                                                        : NULL;
+                        desc_id                   = (fc_descriptor_id_t)descriptor->next_id;
                     }
                 }
             }
