@@ -3,6 +3,7 @@
 
 #include "fc_queue.h"
 #include "nand/nand_config.h"
+#include "nand/nand_dispatch.h"
 
 /*
  * 调度器：HSQ 优先于普通 SQ。
@@ -12,8 +13,8 @@
  * 收集同 ch/ce/lun 的整条链一次性弹出给 FC 做 submit_chain。
  */
 
-/* 最长命令链（Read Retry = 3，RAID 恢复 = 4~5, 取 8 余量） */
-#define FC_SCHEDULER_CHAIN_MAX 8U
+/* 最长命令链：与 nand_dispatch 的 chain buffer 深度一致 */
+#define FC_SCHEDULER_CHAIN_MAX NAND_DISPATCH_CHAIN_DEPTH
 
 typedef struct
 {

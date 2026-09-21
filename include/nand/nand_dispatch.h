@@ -35,12 +35,13 @@ typedef struct
     uint8_t                 ch;            /* Channel. */
     uint8_t                 ce;            /* Chip-enable. */
     uint8_t                 lun;           /* LUN. */
-    uint8_t                 cw_count;      /* Number of active codewords (1 .. CW_NUM). */
+    uint8_t                 cw_count;      /* CW count per plane (1 .. CW_NUM). */
+    uint8_t                 plane_count;   /* Plane count (1 = single, 2+ = multi-plane). */
     uint8_t                 page_type : 2; /* LP/MP/UP/TP — LDPC engine needs this for decode threshold. */
     uint8_t                 reserved  : 6; /* Reserved for future data-path bits. */
     uint8_t                 parameter[4];  /* ≤4-byte inline parameter data. */
     uint8_t                 feature_addr;  /* Feature register addr for SET/GET_FEATURES (column). */
-    nand_dispatch_cw_info_t cws[CW_NUM];   /* Pre-resolved per-CW data; cw_count entries valid. */
+    nand_dispatch_cw_info_t cws[PLANE_NUM][CW_NUM];  /* Pre-resolved per-CW per-plane data. */
 } nand_dispatch_request_t;
 
 typedef struct
@@ -48,8 +49,8 @@ typedef struct
     uint16_t command_id;
     uint8_t  execution_status;
     uint8_t  nand_status;
-    uint8_t  cw_status[4];
-    uint8_t  ecc_bit_count[4]; /* Per-CW ECC corrected bit count; 0 if ECC engine not integrated. */
+    uint8_t  cw_status[CW_TOTAL_MAX];       /* Per-CW status: single-plane = 4, multi-plane = 8 */
+    uint8_t  ecc_bit_count[CW_TOTAL_MAX];   /* Per-CW ECC count */
     uint16_t failed_descriptor_id;
 } nand_dispatch_completion_t;
 

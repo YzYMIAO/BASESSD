@@ -28,6 +28,7 @@
 #define NAND_CMD_READ_PAGE_CACHE_LAST 0x3FU
 #define NAND_CMD_PROGRAM_PAGE_CACHE   0x15U
 #define NAND_CMD_INTERNAL_DATA_MOVE   0x35U
+#define NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH 0x11U  /* Multi-Plane 编程切换 plane */
 #define NAND_CMD_BLOCK_UNLOCK_LOW     0x23U
 #define NAND_CMD_BLOCK_UNLOCK_HIGH    0x24U
 #define NAND_CMD_BLOCK_LOCK           0x2AU
@@ -126,12 +127,23 @@
  */
 #define OP_READ_MODE (11U)
 
-/* OP_NORMAL_READ_PAGE
+/* OP_NORMAL_READ_PAGE_WITH_DATA_OUT
  * ----------------------------------------------------------------------------------------------
  * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< 30 >~~~~~< Dout1 >-< Dout2 >-< Doutn >-< 70 >-< Status >
+ * 标准单 Plane 读取，30h 后 tR 等待，数据加载完成后立即输出整页 PAGE_SIZE 字节。
  * ----------------------------------------------------------------------------------------------
  */
-#define OP_NORMAL_READ_PAGE (12U)
+#define OP_NORMAL_READ_PAGE_WITH_DATA_OUT (12U)
+
+/* OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< 30 >~~~~~< 70 >-< Status >
+ * 单 Plane 读取，30h 后 tR 将数据加载到页缓冲，不输出到总线。
+ * 数据留在 NAND 内部，后续通过 RANDOM_DATA_READ (05h-E0h) 分 CW 读取。
+ * 适用于配合 05h-E0h 随机读取或需要先加载再处理其他操作的场景。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT (34U)
 
 /* OP_READ_PAGE_CACHE_SEQ
  * ----------------------------------------------------------------------------------------------
@@ -250,7 +262,90 @@
  */
 #define OP_OTP_DATA_READ (28U)
 
-#define OP_COUNT (29U)
+/* MULTI-PLANE READ OPERATIONS */
+/* OP_READ_PAGE_MULTI_PLANE
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1_P0 >-< R2_P0 >-< R3_P0 >-< 00 >-< C1 >-< C2 >-< R1_P1 >-< R2_P1 >-< R3_P1 >-< 30 >~~~~~< Dout1..n(双页) >-< 70 >-< Status >
+ *       |--- Plane 0 地址周期 (5 字节, 含 plane bit = 0) ---|
+ *                                                                |--- Plane 1 地址周期 (5 字节, 含 plane bit = 1) ---|
+ * 两个 Plane 共用相同的列地址 (C1/C2)，仅行地址中的 plane bit 不同。
+ * 30h 后 R/B# 等待 tR，一次性输出 PAGE_SIZE * PLANE_NUM 字节。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_READ_PAGE_MULTI_PLANE (29U)
+
+/* MULTI-PLANE PROGRAM OPERATIONS */
+/* OP_PROGRAM_PAGE_MULTI_PLANE
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 80 >-< C1 >-< C2 >-< R1_P0 >-< R2_P0 >-< R3_P0 >-< Din_P0(2112B) >-< 11 >-< C1 >-< C2 >-< R1_P1 >-< R2_P1 >-< R3_P1 >-< Din_P1(2112B) >-< 10 >~~~~~< 70 >-< Status >
+ *       |--- Plane 0 地址周期 (5 字节) -----|               |--- Plane 1 地址周期 (5 字节) -----|
+ * 80h 载入 Plane 0 数据和地址 → 11h 切换 Plane → 载入 Plane 1 数据和地址 → 10h 确认烧录。
+ * 11h 是 ONFI 标准的 Multi-Plane 切换命令，告诉 NAND 现在载入第二个 Plane。
+ * tPROG 后两个 Plane 同时烧录。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_PROGRAM_PAGE_MULTI_PLANE (30U)
+
+/* MULTI-PLANE ERASE OPERATIONS */
+/* OP_ERASE_BLOCK_MULTI_PLANE
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 60 >-< R1_P0 >-< R2_P0 >-< R3_P0 >-< 60 >-< R1_P1 >-< R2_P1 >-< R3_P1 >-< D0 >~~~~~< 70 >-< Status >
+ *       |--- Plane 0 行地址 (3 字节, 无列地址) ---|
+ *                                                      |--- Plane 1 行地址 (3 字节, 无列地址) ---|
+ * 两个 Plane 共用同一 Block 号，仅 plane bit (BA6) 不同。
+ * D0h 后 tBERS，两个 Plane 同时擦除。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_ERASE_BLOCK_MULTI_PLANE (33U)
+
+/* MULTI-PLANE READ (WITHOUT DATA OUT) */
+/* OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1_P0 >-< R2_P0 >-< R3_P0 >-< 00 >-< C1 >-< C2 >-< R1_P1 >-< R2_P1 >-< R3_P1 >-< 30 >~~~~~< 70 >-< Status >
+ * 30h 后 tR 将两个 Plane 数据加载到各 Plane 页缓冲中，但不输出到总线。
+ * 数据留在 NAND 内部，后续通过 RANDOM_DATA_READ (05h-E0h) 逐 CW 读取。
+ * 适用于需要先完成其他操作再回读数据的场景。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT (29U)
+
+/* MULTI-PLANE READ (WITH DATA OUT) */
+/* OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1_P0 >-< R2_P0 >-< R3_P0 >-< 00 >-< C1 >-< C2 >-< R1_P1 >-< R2_P1 >-< R3_P1 >-< 30 >~~~~~< Dout1..n(双页) >-< 70 >-< Status >
+ * 30h 后 R/B# 等待 tR，一次性输出 PAGE_SIZE * PLANE_NUM 字节。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT (30U)
+
+/* MULTI-PLANE PROGRAM OPERATIONS */
+/* OP_PROGRAM_PAGE_MULTI_PLANE
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 80 >-< C1 >-< C2 >-< R1_P0 >-< R2_P0 >-< R3_P0 >-< Din_P0(2112B) >-< 11 >-< C1 >-< C2 >-< R1_P1 >-< R2_P1 >-< R3_P1 >-< Din_P1(2112B) >-< 10 >~~~~~< 70 >-< Status >
+ *       |--- Plane 0 地址周期 (5 字节) -----|               |--- Plane 1 地址周期 (5 字节) -----|
+ * 80h 载入 Plane 0 数据和地址 → 11h 切换 Plane → 载入 Plane 1 数据和地址 → 10h 确认烧录。
+ * 11h 是 ONFI 标准的 Multi-Plane 切换命令，告诉 NAND 现在载入第二个 Plane。
+ * tPROG 后两个 Plane 同时烧录。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_PROGRAM_PAGE_MULTI_PLANE (31U)
+
+/* MULTI-PLANE ERASE OPERATIONS */
+/* OP_ERASE_BLOCK_MULTI_PLANE
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 60 >-< R1_P0 >-< R2_P0 >-< R3_P0 >-< 60 >-< R1_P1 >-< R2_P1 >-< R3_P1 >-< D0 >~~~~~< 70 >-< Status >
+ *       |--- Plane 0 行地址 (3 字节, 无列地址) ---|
+ *                                                      |--- Plane 1 行地址 (3 字节, 无列地址) ---|
+ * 两个 Plane 共用同一 Block 号，仅 plane bit (BA6) 不同。
+ * D0h 后 tBERS，两个 Plane 同时擦除。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_ERASE_BLOCK_MULTI_PLANE (32U)
+
+/* SINGLE PLANE READ (WITHOUT DATA OUT) */
+#define OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT (34U)
+
+#define OP_COUNT (35U)
 
 typedef struct
 {

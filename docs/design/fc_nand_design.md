@@ -9,6 +9,8 @@
 > - **Phase B**: 核心结构重组（status/descriptor/ECC/dispatch 边界）
 > - **Phase C**: SET/GET_FEATURES 内联数据路径（§14）
 > - **Phase D**: nand_dispatch 函数指针表重构（§15）
+> - **Phase D(续)**: per-LUN chain buffer 命令链执行（§16）
+> - **Phase E**: Multi-Plane 操作支持 + 行地址数组重构 + OP 码拆分（§17）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
 
@@ -1959,3 +1961,179 @@ Phase D 包含了 §15（函数指针表重构）和 §16（命令链执行）�
 | 改动范围 | nand_dispatch 内部 | nand_dispatch + fc_scheduler + fc |
 | 代码编译 | ✅ 通过 | ✅ 通过 |
 
+
+---
+
+## 17. Multi-Plane 操作支持与行地址数组重构 (Phase E)
+
+### 17.1 动机
+
+MT29F4G08ABADAWP 支持 2 Plane 操作（Multi-Plane READ/PROGRAM/ERASE），但现有架构将 `cw_paa/buffers` 设计为平面一维数组 `[CW_NUM]`(4)，无法支持 Multi-Plane 场景中 `CW_NUM × PLANE_NUM = 8` 的 CW 总数。
+
+同时，`nand_command_request_t.row` 为单值 `uint32_t`，Multi-Plane 操作需要发送两组行地址（Plane 0 和 Plane 1），而地址周期中的 plane bit 差异仅在于 BA6。
+
+### 17.2 数据维度扩展
+
+#### 方案对比
+
+| 方案 | 做法 | 评价 |
+|------|------|------|
+| A: 展平 cw_count | `cw_paa[CW_TOTAL_MAX]` 展平为 8 个，`cw_count` 语义变为"总 CW 数" | ❌ 丢失 plane 维度信息，每 plane CW 数量不明确 |
+| B: 加 plane 维度（选中） | `cw_paa[PLANE_NUM][CW_NUM]`，`cw_count` 仍为"每 plane CW 数"，`plane_count` 标明 plane 数 | ✅ 维度正交，语义清晰 |
+
+选中方案 B 后各层数据结构的变化：
+
+```c
+// nand_dispatch_request_t — 请求
+nand_dispatch_cw_info_t cws[PLANE_NUM][CW_NUM];  // [plane][cw]
+
+// nand_dispatch_task_t — 任务
+nand_paa_t cw_paa[PLANE_NUM][CW_NUM];
+uint8_t   *cw_buffers[PLANE_NUM][CW_NUM];
+uint8_t    cw_count;     // 每 plane CW 数
+uint8_t    plane_count;  // plane 数 (1/2)
+
+// nand_dispatch_completion_t — 完成
+uint8_t cw_status[CW_TOTAL_MAX];      // 8 个（vs 原有 4 个）
+uint8_t ecc_bit_count[CW_TOTAL_MAX];
+```
+
+`fc_cmd_conf_t.cw` 位宽不变（仍为 2 位，最大表示 4 CW/plane），Multi-Plane 通过独立 OP 码区分。
+
+### 17.3 行地址数组重构
+
+#### 方案对比
+
+| 方案 | 做法 | 评价 |
+|------|------|------|
+| A: 新增 uop 类型 | 加 `NAND_UOP_ROW_0_SECOND`/`ROW_1_SECOND`/`ROW_2_SECOND` 三个新 uop 类型 | ❌ 2 plane 加 3 个，4 plane 加 9 个，不可扩展 |
+| B: **operand 选择索引** | `row` 改为 `row[NAND_PLANE_MAX]`，ROW_0/1/2 handler 通过 `uop->operand` 选择 row 索引 | ✅ 零新增 uop 类型，任意 plane 数不改 uop |
+
+选中方案 B：
+
+```c
+// nand_fc_interface.h / nand_engine.h
+uint32_t row[NAND_PLANE_MAX];  // row[0]=plane0, row[1]=plane1, ...
+
+// nand_fmc.c — ROW handler 改动
+*config->address = (uint8_t)(request->row[uop->operand]);
+```
+
+uop 序列中通过 operand 选择 plane：
+
+```c
+{ NAND_UOP_ROW_0,  0U },  // operand=0 → row[0] (Plane 0)
+{ NAND_UOP_ROW_0,  1U },  // operand=1 → row[1] (Plane 1)
+```
+
+单 plane 操作 operand 全部为 0，完全向后兼容。
+
+### 17.4 OP 码设计： WITH_DATA_OUT / WITHOUT_DATA_OUT
+
+#### 设计原因
+
+NAND 读取命令（00h→地址→30h→tR）执行后，数据被加载到 NAND 内部页缓冲。**是否立即输出数据**是两个独立场景：
+
+| 场景 | 做法 | 适用 |
+|------|------|------|
+| 立即输出 | 30h→tR→**Dout** | 正常读路径、单页读完即用 |
+| 延迟输出 | 30h→tR→**无 Dout** | Multi-Plane 读、配合 05h-E0h 随机读、Cache Read 链 |
+
+两种场景执行完全相同的地址序列和 tR 等待，差异仅在 uop 序列末尾是否包含 `NAND_UOP_DATA_OUT` 一条。
+
+为此，单 Plane 和多 Plane 的读操作均拆分为两个 OP 码：
+
+| OP 码 | 值 | 说明 |
+|-------|----|------|
+| `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` | 12 | 单 Plane 读 + 立即 Dout（原 `OP_NORMAL_READ_PAGE`） |
+| `OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT` | 34 | 单 Plane 读，仅加载到页缓冲 |
+| `OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT` | 29 | 双 Plane 读，加载到两页缓冲 |
+| `OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT` | 30 | 双 Plane 读 + 立即双页 Dout |
+
+PROGRAM 和 ERASE 不存在"延迟执行"场景，故不分拆。
+
+#### uop 序列差异示例
+
+```c
+/* WITH_DATA_OUT: 末尾含 DATA_OUT */
+{ NAND_UOP_COMMAND, 30h },
+{ NAND_UOP_WAIT_READY,   },
+{ NAND_UOP_DATA_OUT,     },   /* ← 立即输出 */
+{ NAND_UOP_READ_STATUS,  },
+{ NAND_UOP_END,          },
+
+/* WITHOUT_DATA_OUT: 末尾不含 DATA_OUT */
+{ NAND_UOP_COMMAND, 30h },
+{ NAND_UOP_WAIT_READY,   },
+{ NAND_UOP_READ_STATUS,  },   /* ← 跳过 DATA_OUT，直接检查状态 */
+{ NAND_UOP_END,          },
+```
+
+### 17.5 Multi-Plane 操作 OP 码
+
+| OP 码 | 值 | uop 序列 | data_length |
+|-------|----|---------|-------------|
+| `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` | 12 | 70h→Status→00h→C1C2R1R2R3→30h→tR→Dout→70h→Status | PAGE_SIZE |
+| `OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT` | 34 | 70h→Status→00h→C1C2R1R2R3→30h→tR→70h→Status | PAGE_SIZE |
+| `OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT` | 29 | 70h→Status→00h→C1C2R1R2R3(P0)→00h→C1C2R1R2R3(P1)→30h→tR→70h→Status | PAGE_BUFFER_SIZE |
+| `OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT` | 30 | 70h→Status→00h→C1C2R1R2R3(P0)→00h→C1C2R1R2R3(P1)→30h→tR→**Dout(双页)**→70h→Status | PAGE_BUFFER_SIZE |
+| `OP_PROGRAM_PAGE_MULTI_PLANE` | 31 | 70h→Status→80h→C1C2R1R2R3(P0)→Din(P0)→**11h**→C1C2R1R2R3(P1)→Din(P1)→10h→tPROG→70h→Status | PAGE_BUFFER_SIZE |
+| `OP_ERASE_BLOCK_MULTI_PLANE` | 32 | 70h→Status→60h→R1R2R3(P0)→60h→R1R2R3(P1)→D0h→tBERS→70h→Status | 0 |
+
+### 17.6 关键命令码：11h
+
+`NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH (0x11)` 在 ONFI 标准中定义为 Multi-Plane COPYBACK READ 命令，在多 Plane PROGRAM 时序中起到切换 Plane 的作用：
+
+```
+80h → C1C2R1R2R3 → Din(Plane0 全页) →
+11h → C1C2R1R2R3 → Din(Plane1 全页) →       ← 11h 切换 Plane
+10h → tPROG（双 Plane 同时烧录）
+```
+
+### 17.7 数据缓冲扩展
+
+```c
+#define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM)  // 4224 字节
+static uint8_t g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
+```
+
+单 Plane 操作只用首 `PAGE_SIZE` 字节，多 Plane 操作写入 `PAGE_BUFFER_SIZE` 字节。
+
+req_multi_plane_program handler 将各 Plane 各 CW 的数据拼接到 page_buffer：
+
+```c
+for (plane = 0; plane < PLANE_NUM; plane++) {
+    for (cw = 0; cw < task->cw_count; cw++) {
+        memcpy(&page_buffer[plane * PAGE_SIZE + cw * (PAGE_SIZE / CW_NUM)],
+               task->cw_buffers[plane][cw], PAGE_SIZE / CW_NUM);
+    }
+}
+```
+
+读完成后 poll 中拆回各 plane 各 CW buffer 的逻辑同理。
+
+### 17.8 文件变更
+
+| 文件 | 说明 |
+|------|------|
+| `include/nand/nand_config.h` | 新增 `NAND_PLANE_MAX`、`CW_TOTAL_MAX`、`PAGE_BUFFER_SIZE` |
+| `include/nand/nand_engine.h` | `nand_command_request_t.row` → `row[NAND_PLANE_MAX]` |
+| `include/nand/nand_fc_interface.h` | `nand_fc_request_t.row` → `row[NAND_PLANE_MAX]` |
+| `include/nand/onfi_1_0.h` | 新增 5 个 Multi-Plane OP 码 + `NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH`；拆读 OP 码为 WITH/WITHOUT_DATA_OUT 双版本；`OP_COUNT` 从 32 → 35 |
+| `src/nand/onfi_1_0.c` | 新增 5 组 uop 序列 + 映射表 5 项 |
+| `src/nand/nand_fmc.c` | ROW_0/1/2 handler 通过 `uop->operand` 索引 `row[]` |
+| `src/nand/nand_mt29f4g08abadawp.c` | 默认读接口改为 `WITH_DATA_OUT` 版本 |
+| `include/nand/nand_dispatch.h` | `cws[CW_NUM]` → `cws[PLANE_NUM][CW_NUM]`；`cw_status[4]` → `[CW_TOTAL_MAX]`；新增 `plane_count` |
+| `src/nand/nand_dispatch_internal.h` | `cw_paa/buffers[CW_NUM]` → `[PLANE_NUM][CW_NUM]`；新增 `plane_count` |
+| `src/nand/nand_dispatch.c` | `page_buffer` 尺寸扩展；`nand_dispatch_task_load()` 适配双 plane 拷贝；`completion_init` 适配 `CW_TOTAL_MAX`；CW chaining 条件增加 `WITHOUT_DATA_OUT` |
+| `src/nand/nand_dispatch_tables.c` | 新增 5 个 req handler + completion handler + 两张函数指针表各加 5 项 |
+| `src/fc/fc.c` | `cws[plane][cw]` 适配新维度 |
+
+### 17.9 设计演进
+
+| 迭代 | 问题 | 方案 |
+|------|------|------|
+| v1 | 单 plane 数组 `cw_paa[CW_NUM]` 不能支持 multi-plane | 展平为 `cw_paa[CW_TOTAL_MAX]` |
+| v2 | 展平后丢失 plane 语义，`cw_count` 意义模糊 | 加 plane 维度 `cw_paa[PLANE_NUM][CW_NUM]` |
+| v3 | ROW_0/1/2 handler 固定读 `request->row`，多 plane 发第二组地址需新 uop | `row`→`row[NAND_PLANE_MAX]`，operand 选索引 |
+| v4 | 读命令只有一种：30h 后必出数据 | 拆为 WITH/WITHOUT_DATA_OUT 双版本 |

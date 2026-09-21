@@ -597,13 +597,13 @@ static fc_status_t fc_poll_internal(fc_t *controller)
 
             if (command->config.operation == OP_ERASE_BLOCK)
             {
-                request.cws[0U].paa    = command->paa;
-                request.cws[0U].buffer = NULL;
+                request.cws[0U][0U].paa    = command->paa;
+                request.cws[0U][0U].buffer = NULL;
             }
             else if ((command->config.operation == OP_SET_FEATURES) ||
                      (command->config.operation == OP_GET_FEATURES))
             {
-                request.cws[0U].buffer = (uint8_t *)&command->parameter0;
+                request.cws[0U][0U].buffer = (uint8_t *)&command->parameter0;
             }
             else if (request.cw_count > 0U)
             {
@@ -623,8 +623,8 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                         fc_register_queue_state(controller);
                         return FC_STATUS_IO_ERROR;
                     }
-                    request.cws[cw].paa    = descriptor->paa;
-                    request.cws[cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
+                    request.cws[0][cw].paa    = descriptor->paa;
+                    request.cws[0][cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
                                                  ? fc_buffer_id_to_real_buffer_internal(controller, descriptor->buffer_id)
                                                  : NULL;
                     desc_id = (fc_descriptor_id_t)descriptor->next_id;
@@ -686,13 +686,13 @@ static fc_status_t fc_poll_internal(fc_t *controller)
 
                 if (command->config.operation == OP_ERASE_BLOCK)
                 {
-                    reqs[i].cws[0U].paa    = command->paa;
-                    reqs[i].cws[0U].buffer = NULL;
+                    reqs[i].cws[0U][0U].paa    = command->paa;
+                    reqs[i].cws[0U][0U].buffer = NULL;
                 }
                 else if ((command->config.operation == OP_SET_FEATURES) ||
                          (command->config.operation == OP_GET_FEATURES))
                 {
-                    reqs[i].cws[0U].buffer = (uint8_t *)&command->parameter0;
+                    reqs[i].cws[0U][0U].buffer = (uint8_t *)&command->parameter0;
                 }
                 else if (reqs[i].cw_count > 0U)
                 {
@@ -712,8 +712,8 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                             fc_register_queue_state(controller);
                             return FC_STATUS_IO_ERROR;
                         }
-                        reqs[i].cws[cw].paa    = descriptor->paa;
-                        reqs[i].cws[cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
+                        reqs[i].cws[0][cw].paa    = descriptor->paa;
+                        reqs[i].cws[0][cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
                                                      ? fc_buffer_id_to_real_buffer_internal(controller, descriptor->buffer_id)
                                                      : NULL;
                         desc_id = (fc_descriptor_id_t)descriptor->next_id;

@@ -28,7 +28,7 @@ static uint8_t                    g_nand_device_ready;
  * 单命令：count=1，tasks[0] 预加载。
  * 链式命令：count=N，tasks[0..N-1] 预加载，poll 从 cursor=0 推进到 N-1。 */
 static nand_dispatch_lun_chain_t  g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
-static uint8_t                    g_nand_channel_page_buffer[CH_NUM][PAGE_SIZE];
+static uint8_t                    g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
 
 /* ======================================================================
  * 辅助函数
@@ -36,13 +36,15 @@ static uint8_t                    g_nand_channel_page_buffer[CH_NUM][PAGE_SIZE];
 
 static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion, uint16_t command_id)
 {
+    uint8_t i;
+
     *completion                      = (nand_dispatch_completion_t){0};
     completion->command_id           = command_id;
     completion->failed_descriptor_id = FC_DESCRIPTOR_ID_INVALID;
-    completion->cw_status[0]         = FC_CW_STATUS_UNUSED;
-    completion->cw_status[1]         = FC_CW_STATUS_UNUSED;
-    completion->cw_status[2]         = FC_CW_STATUS_UNUSED;
-    completion->cw_status[3]         = FC_CW_STATUS_UNUSED;
+    for (i = 0U; i < CW_TOTAL_MAX; i++)
+    {
+        completion->cw_status[i]     = FC_CW_STATUS_UNUSED;
+    }
 }
 
 static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t result,
@@ -69,6 +71,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->page_type    = request->page_type;
     task->cw_index     = 0U;
     task->cw_count     = request->cw_count;
+    task->plane_count  = request->plane_count;
     task->started      = 0U;
     task->parameter[0] = request->parameter[0];
     task->parameter[1] = request->parameter[1];
@@ -77,8 +80,10 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->feature_addr = request->feature_addr;
     for (cw = 0U; cw < request->cw_count; cw++)
     {
-        task->cw_paa[cw]     = request->cws[cw].paa;
-        task->cw_buffers[cw] = request->cws[cw].buffer;
+        task->cw_paa[0][cw]     = request->cws[0][cw].paa;
+        task->cw_buffers[0][cw] = request->cws[0][cw].buffer;
+        task->cw_paa[1][cw]     = request->cws[1][cw].paa;
+        task->cw_buffers[1][cw] = request->cws[1][cw].buffer;
     }
 }
 
@@ -258,7 +263,7 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                     {
                         nand_dispatch_task_complete(task, result, &nand_completion);
                         if ((result != NAND_RESULT_OK) ||
-                            ((task->operation != OP_NORMAL_READ_PAGE) && (task->operation != OP_OTP_DATA_READ)) ||
+                            ((task->operation != OP_NORMAL_READ_PAGE_WITH_DATA_OUT) && (task->operation != OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) && (task->operation != OP_OTP_DATA_READ)) ||
                             (task->cw_index + 1U >= task->cw_count))
                         {
                             break;
@@ -267,10 +272,10 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                         task->operation = OP_RANDOM_DATA_READ;
                         task->started   = 1U;
                         {
-                            nand_paa_t cw_paa    = task->cw_paa[task->cw_index];
-                            uint8_t   *cw_buffer = task->cw_buffers[task->cw_index];
+                            nand_paa_t cw_paa    = task->cw_paa[0][task->cw_index];
+                            uint8_t   *cw_buffer = task->cw_buffers[0][task->cw_index];
                             uint16_t   cw_column = (uint16_t)(task->cw_index * (PAGE_SIZE / 4U));
-                            task->request        = (nand_fc_request_t){cw_column, paa_to_nand_row(cw_paa), cw_buffer, (uint16_t)(PAGE_SIZE / 4U)};
+                            task->request        = (nand_fc_request_t){.column = cw_column, .row = {paa_to_nand_row(cw_paa)}, .data = cw_buffer, .data_length = (uint16_t)(PAGE_SIZE / 4U)};
                         }
                         result = nand_fc_start(&task->transaction, task->operation, &task->request);
                         if (result == NAND_RESULT_NOT_READY)
@@ -293,7 +298,7 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                         uint8_t cache_cw;
                         for (cache_cw = 0U; cache_cw < task->cw_count; cache_cw++)
                         {
-                            memcpy(task->cw_buffers[cache_cw],
+                            memcpy(task->cw_buffers[0][cache_cw],
                                    &g_nand_channel_page_buffer[channel][cache_cw * (PAGE_SIZE / 4U)],
                                    PAGE_SIZE / 4U);
                         }

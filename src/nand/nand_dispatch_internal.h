@@ -26,15 +26,16 @@ typedef struct
     uint8_t  lun;            /* LUN — needed for routing. */
     uint8_t  page_type : 2;  /* Copy from dispatch request for LDPC engine. */
     uint8_t  reserved  : 6;
-    uint8_t  cw_index;       /* Current CW being processed (0-based). */
-    uint8_t  cw_count;
+    uint8_t  cw_index;       /* Current CW being processed (0-based, within current plane). */
+    uint8_t  cw_count;       /* CW count per plane. */
+    uint8_t  plane_count;    /* Plane count (1 for single-plane, 2+ for multi-plane). */
     uint8_t  started;
     uint8_t  parameter[4];
     uint8_t  feature_addr;
 
-    /* Pre-resolved per-CW data; cw_count entries valid. */
-    nand_paa_t cw_paa[CW_NUM];
-    uint8_t   *cw_buffers[CW_NUM];
+    /* Pre-resolved per-CW per-plane data. cw_count × plane_count entries valid. */
+    nand_paa_t cw_paa[PLANE_NUM][CW_NUM];
+    uint8_t   *cw_buffers[PLANE_NUM][CW_NUM];
 
     nand_fc_request_t          request;
     nand_fc_transaction_t      transaction;

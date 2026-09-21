@@ -42,7 +42,7 @@ uint8_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *request, nan
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    command_request              = (nand_command_request_t){operation, request->column, request->row, request->data, request->data_length};
+    command_request              = (nand_command_request_t){operation, request->column, {request->row[0]}, request->data, request->data_length};
     status                       = nand_engine_execute(nand_fmc_backend_get(), map->uops, &map->timing, &command_request, &command_completion);
     completion->execution_status = status;
     completion->nand_status      = command_completion.nand_status;
@@ -63,7 +63,7 @@ uint8_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operation, con
     {
         return NAND_RESULT_INVALID_ARGUMENT;
     }
-    transaction->request    = (nand_command_request_t){operation, request->column, request->row, request->data, request->data_length};
+    transaction->request    = (nand_command_request_t){operation, request->column, {request->row[0]}, request->data, request->data_length};
     transaction->completion = (nand_command_completion_t){0};
     transaction->active     = 1U;
     result                  = nand_engine_start(&transaction->engine, nand_fmc_backend_get(), map->uops, &map->timing, &transaction->request, &transaction->completion);
@@ -101,14 +101,14 @@ uint8_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *c
 
 uint8_t nand_fc_reset(nand_fc_completion_t *completion)
 {
-    const nand_fc_request_t request = {0U, 0U, NULL, 0U};
+    const nand_fc_request_t request = {.column = 0U, .row = {0U}, .data = NULL, .data_length = 0U};
 
     return nand_fc_execute(OP_RESET, &request, completion);
 }
 
 uint8_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion)
 {
-    const nand_fc_request_t request = {0U, 0U, id, 5U};
+    const nand_fc_request_t request = {.column = 0U, .row = {0U}, .data = id, .data_length = 5U};
 
     if (id == NULL)
     {
@@ -119,7 +119,7 @@ uint8_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion)
 
 uint8_t nand_fc_set_features(uint8_t feature_address, const uint8_t feature_data[4], nand_fc_completion_t *completion)
 {
-    const nand_fc_request_t request = {feature_address, 0U, (uint8_t *)feature_data, 4U};
+    const nand_fc_request_t request = {.column = feature_address, .row = {0U}, .data = (uint8_t *)feature_data, .data_length = 4U};
 
     if (feature_data == NULL)
     {
@@ -130,7 +130,7 @@ uint8_t nand_fc_set_features(uint8_t feature_address, const uint8_t feature_data
 
 uint8_t nand_fc_read_page(const nand_fc_request_t *request, nand_fc_completion_t *completion)
 {
-    return nand_fc_execute(OP_NORMAL_READ_PAGE, request, completion);
+    return nand_fc_execute(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, request, completion);
 }
 
 uint8_t nand_fc_program_page(const nand_fc_request_t *request, nand_fc_completion_t *completion)

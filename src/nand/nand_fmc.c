@@ -146,7 +146,7 @@ static uint8_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const n
     (void)uop;
     (void)timing;
     (void)completion;
-    *config->address = (uint8_t)request->row;
+    *config->address = (uint8_t)request->row[uop->operand];
     return NAND_RESULT_OK;
 }
 
@@ -157,7 +157,7 @@ static uint8_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const n
     (void)uop;
     (void)timing;
     (void)completion;
-    *config->address = (uint8_t)(request->row >> 8U);
+    *config->address = (uint8_t)(request->row[uop->operand] >> 8U);
     return NAND_RESULT_OK;
 }
 
@@ -168,7 +168,7 @@ static uint8_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const n
     (void)uop;
     (void)timing;
     (void)completion;
-    *config->address = (uint8_t)(request->row >> 16U);
+    *config->address = (uint8_t)(request->row[uop->operand] >> 16U);
     return NAND_RESULT_OK;
 }
 
