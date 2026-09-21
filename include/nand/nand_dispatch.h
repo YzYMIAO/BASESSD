@@ -10,6 +10,13 @@
 /* One fixed FIFO is attached to each physical NAND channel. */
 #define NAND_CHANNEL_QUEUE_DEPTH (64U)
 
+/*
+ * 链式命令最大深度（每个 LUN 可连续缓存的命令数）。
+ * 当前设计用于 Read Retry 序列（SET_FEATURES + READ + SET_FEATURES = 3 条）。
+ * 增大以支持 RAID 恢复等更长序列。
+ */
+#define NAND_DISPATCH_CHAIN_DEPTH (4U)
+
 typedef struct
 {
     nand_paa_t paa;    /* CW-level PAA resolved by FC before dispatch. */
@@ -59,6 +66,14 @@ void nand_dispatch_set_device_ready(uint8_t ready);
 
 /* Submit one pre-resolved command to the channel FIFO. */
 uint8_t nand_dispatch_submit(const nand_dispatch_request_t *request);
+
+/*
+ * 原子提交整条命令链到指定 LUN 的 chain buffer + 通道队列。
+ * requests[0..count-1] 必须在同一 ch/ce/lun。
+ * 队列空间无法容纳整链或 LUN chain buffer 非空闲时返回 NOT_READY，无副作用。
+ * 链中命令按序执行（由 poll 自动推进 cursor），中间不可被 HSQ 打断。
+ */
+uint8_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count);
 
 /* Execute one pending command from one Channel FIFO through ONFI -> NAND Engine -> FMC. */
 uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion);

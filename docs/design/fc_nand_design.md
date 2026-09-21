@@ -1679,3 +1679,283 @@ RANDOM_DATA_READ（05h-C1-C2-E0h）等命令的数据传输长度不由命令码
 
 `req_single` handler 通过 `g_nand_operation_map[op].data_length` 读取该值，无需为每个小操作各写一个 handler。
 
+---
+
+## 16. 命令链执行设计 (Phase D — 续)
+
+### 16.1 问题背景
+
+Read Retry 流程要求三个命令严格依次执行，中间不能被任何其他命令插入：
+
+```
+SET_FEATURES(偏移电压)  →  RETRY READ  →  SET_FEATURES(恢复电压)
+  └── 命令 1            └── 命令 2       └── 命令 3
+```
+
+同一 LUN 的 HSQ 命令（如 GC 强制擦除）可能在任意时刻插入，打乱 Read Retry 的顺序，导致电压未被恢复。
+
+### 16.2 方案对比
+
+实现"不可打断的命令序列"有两种候选方案：
+
+#### 方案 A：chain_next_id（在 poll 路径中动态跳转）
+
+在 `nand_dispatch_task_t` 中增加 `uint16_t chain_next_id`。当前命令完成后 poll 检查该字段，非 INVALID 则不清 LUN busy、直接加载下一命令。
+
+```c
+if (task->chain_next_id != FC_COMMAND_ID_INVALID) {
+    // 不清 LUN busy, 从 command pool 加载下一命令
+    task = load_from_command_id(task->chain_next_id);
+    nand_fc_start(…);
+    continue;  // 继续等
+}
+```
+
+#### 方案 B：per-LUN chain buffer（加 task 维度，选中方案）
+
+将 `g_nand_dispatch_tasks[ch][ce][lun]` 扩展为 `g_nand_dispatch_chains[ch][ce][lun].tasks[NAND_DISPATCH_CHAIN_DEPTH]`，submit_chain 预加载整链，poll 通过 cursor 自动推进。
+
+```c
+// 当前命令完成
+if (chain->cursor + 1U < chain->count) {
+    chain->cursor++;           // 推进到下一命令
+    task = &chain->tasks[chain->cursor];
+    nand_fc_start(…);           // 不清 LUN busy, 不返回 completion
+    continue;
+}
+// 整链结束
+*completion = task->completion;
+chain->count = 0;               // 释放 LUN
+```
+
+#### 对比
+
+| 维度 | A: chain_next_id | B: per-LUN chain buffer ✅ |
+|------|-----------------|--------------------------|
+| 修改范围 | poll 完成路径 + task | nand_dispatch_submit / poll / scheduler |
+| poll() 纯度 | ❌ 被污染，要感知链跳转 | ✅ 纯粹，与单命令代码路径一致 |
+| 整链可见性 | ❌ 链只有部分在 task 中 | ✅ tasks[0..N-1] 完整可见 |
+| 调试友好 | ❌ 链信息分散 | ✅ dump chain buffer 即得全貌 |
+| watchdog / QoS | ⚠️ 难区分"长命令"还是"链" | ✅ 知道整链长度 |
+| 扩展性 | 链内跳转逻辑与 CW chaining 交织 | 与 CW chaining 正交（各自独立循环） |
+| 资源预先评估 | ❌ 走一步看一步 | ✅ 提前知道占多少链 slot |
+| 队列深度需求 | 1 就够 | 需能容整链（当前 64 足够） |
+| **企业类似方案** | 少量消费级固件使用 | 主流：模拟硬件 sequencer 槽位 |
+
+**选择方案 B 的理由**：
+1. poll() 不被链语义污染——它看到的仍然是"逐命令执行"，仅多了"连续执行不返回"的能力
+2. 与 CW chaining 正交——CW 链在外层 for(;;) 循环中处理，命令链在内层 while(1) 中推进，互不干扰
+3. 架构与企业级 SSD 固件一致——本质是在 FC 层用软件模拟硬件 sequencer 的槽位机制
+
+### 16.3 整体架构
+
+```
+FTL / Read Recovery (构造 chain 命令)
+  │ config.chain=1 → config.chain=0
+  ▼
+SQ: [cmd_A(SET_FEATURES, chain=1)] [cmd_B(READ, chain=1)] [cmd_C(SET_FEATURES, chain=0)]
+                              │
+                              ▼
+fc_scheduler_select_chain():
+  1. 从 SQ 弹出 cmd_A
+  2. 检测 cmd_A.config.chain == 1 → 连续 peek 后续命令
+  3. 收集 cmd_B(chain=1), cmd_C(chain=0) → 验证同一 ch/ce/lun
+  4. 一次性弹出整链 → chain={ids: [A, B, C], count=3}
+                              │
+                              ▼
+fc_poll_internal():
+  for i=0..2:
+    fc_command_validate(command_i)  → 合法性检查
+    resolve descriptor chain        → 预解析 PAA/buffer
+    reqs[i] = { … }
+  nand_dispatch_submit_chain(reqs, 3)
+                              │
+                              ▼
+nand_dispatch_submit_chain():
+  原子检查: LUN chain->count==0 AND 队列空间够 3 条
+  chain->tasks[0] = cmd_A   ← 预加载
+  chain->tasks[1] = cmd_B   ← 预加载
+  chain->tasks[2] = cmd_C   ← 预加载
+  chain->count = 3, cursor = 0
+  入队 command_id_A, command_id_B, command_id_C
+                              │
+                              ▼
+nand_dispatch_poll():
+  Phase 1 ─── cursor=0 → step tasks[0] → 完成 → cursor++ → start tasks[1]
+  Phase 1 ─── cursor=1 → step tasks[1] → 完成 → cursor++ → start tasks[2]
+  Phase 1 ─── cursor=2 → step tasks[2] → 完成 → count=0 → 返回 completion
+                                ↑ 链执行期间 LUN busy, HSQ 无法插入
+```
+
+### 16.4 数据结构
+
+#### per-LUN chain buffer
+
+```c
+// nand_dispatch_internal.h
+
+#define NAND_DISPATCH_CHAIN_DEPTH 4U
+
+typedef struct {
+    nand_dispatch_task_t tasks[NAND_DISPATCH_CHAIN_DEPTH];
+    uint8_t              count;   /* 0=空闲, 1=单命令, 3=3条链 */
+    uint8_t              cursor;  /* 当前执行 tasks[cursor] */
+} nand_dispatch_lun_chain_t;
+```
+
+#### 调度器链结构
+
+```c
+// fc_scheduler.h
+
+#define FC_SCHEDULER_CHAIN_MAX 8U
+
+typedef struct {
+    fc_command_id_t ids[FC_SCHEDULER_CHAIN_MAX];
+    uint8_t         count;  /* 0=空, 1=单命令, 2+=链 */
+} fc_scheduler_chain_t;
+```
+
+`nand_dispatch_task_t` 新增 `ce` 和 `lun` 字段（此前只有 `ch`，单 CE/LUN 时代硬编码），供后续多 CE/LUN 使用。
+
+### 16.5 submit_chain 原子性
+
+`nand_dispatch_submit_chain()` 提供 ACID 语义的链提交：
+
+```
+原子性检查:
+  if (chain->count != 0)  → LUN 忙, 拒绝
+  if (queue->count + count > NAND_CHANNEL_QUEUE_DEPTH)  → 队列空间不够, 拒绝
+  // 注意：两个条件同时满足才通过，不会出现"部分入队"的情况
+
+预加载:
+  for i = 0..count-1:
+    tasks[i] ← 从 requests[i] 拷贝
+  chain->count = count, cursor = 0
+
+入队:
+  for i = 0..count-1:
+    queue->entries[tail++] = requests[i].command_id
+```
+
+关键语义：**队列空间不足整链时返回 NOT_READY，无一进入队列。** 调用者下次轮询时再试。
+
+### 16.6 poll 链推进逻辑
+
+poll() 中 Phase 1 stepping 循环内的链推进：
+
+```c
+/* 内层 while(1): 单命令完成 → CW chaining → 命令链推进 → 继续 step */
+while (1) {
+    task = &chain->tasks[chain->cursor];
+    result = nand_fc_step(&task->transaction, &nand_completion);
+    if (result == NAND_RESULT_NOT_READY) break;
+
+    /* CW 级 chaining (多 CW READ) */
+    for (;;) {
+        nand_dispatch_task_complete(task, result, &nand_completion);
+        if (CW 全部完成) break;
+        task->cw_index++;
+        task->operation = OP_RANDOM_DATA_READ;
+        nand_fc_start(…);
+    }
+
+    /* 命令链推进 */
+    if (chain->cursor + 1U < chain->count) {
+        chain->cursor++;           /* ← 不下发 completion, 不清 LUN busy */
+        task = &chain->tasks[chain->cursor];
+        g_nand_dispatch_req_table[task->operation](task);
+        nand_fc_start(…);
+        continue;                  /* while(1) 继续 step 下一命令 */
+    }
+
+    /* 整链结束 → 唯一出口 */
+    *completion = task->completion;
+    chain->count = 0;
+    return result;
+}
+```
+
+### 16.7 调度器链检测
+
+`fc_scheduler_select_chain()` 取代原有的 `fc_scheduler_select()` 成为 FC 的主入口：
+
+```c
+fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_chain_t *chain)
+{
+    /* Phase 1: HSQ 优先 — HSQ 命令不参与链 */
+    if (HSQ 非空) {
+        找第一个目标不忙的命令;
+        弹出一条 → chain->count = 1;
+        返回;
+    }
+
+    /* Phase 2: 普通 SQ */
+    for (遍历 SQ) {
+        if (目标忙) { 旋转跳过; continue; }
+
+        弹出队头 → chain->ids[0];
+
+        if (队头.config.chain == 0) {
+            /* 单命令 */
+            chain->count = 1;
+            return;
+        }
+
+        /* chain == 1: 收集同 target 的后续命令 */
+        while (chain_len < FC_SCHEDULER_CHAIN_MAX) {
+            next = peek(0);
+            if (next.ch/ce/lun != 当前) break;
+            if (next.config.chain == 0) { 加入; break; }
+            加入; /* chain=1, 继续 */
+        }
+        chain->count = chain_len;
+        return;
+    }
+    return 队列空;
+}
+```
+
+**连续性保证**：链中命令必须在 SQ 中连续（由 FTL/Read Recovery 在提交时保证），中间不能插入其他 LUN 的命令。`scheduler_collect_chain` 会在发现 ch/ce/lun 变化时截断链，回退到单命令模式。
+
+### 16.8 文件变更
+
+| 文件 | 说明 |
+|------|------|
+| `include/nand/nand_dispatch.h` | 新增 `NAND_DISPATCH_CHAIN_DEPTH`、`nand_dispatch_submit_chain()` 声明 |
+| `src/nand/nand_dispatch_internal.h` | 新增 `task.ce/lun`、`nand_dispatch_lun_chain_t` |
+| `src/nand/nand_dispatch.c` | `g_nand_dispatch_tasks[][][]` → `g_nand_dispatch_chains[][][].tasks[]`；新增 `nand_dispatch_task_load()`；`submit()` 改用 chain；新增 `submit_chain()`；`poll()` Phase 1 chain 推进 + Phase 2 出队适配 |
+| `include/fc/fc_scheduler.h` | 新增 `FC_SCHEDULER_CHAIN_MAX`、`fc_scheduler_chain_t`、`fc_scheduler_select_chain()` |
+| `src/fc/fc_scheduler.c` | 新增 `fc_scheduler_select_chain()` 链识别 + 整链弹出 |
+| `include/fc/fc_queue.h` | 新增 `fc_submission_queue_peek()`、`fc_submission_queue_pop_n()` |
+| `src/fc/fc_queue.c` | 实现 `peek()`、`pop_n()` |
+| `src/fc/fc.c` | `fc_poll_internal()` 改用 `fc_scheduler_select_chain()`，增加链式命令构建 + `submit_chain` 路径 |
+
+### 16.9 使用方式（FTL / Read Recovery）
+
+FTL 或 Read Recovery 模块提交 Read Retry 链时：
+
+```c
+/* 提交三条链式命令到 SQ */
+command_A.config.chain = 1;  // SET_FEATURES(偏移)
+command_B.config.chain = 1;  // RETRY_READ
+command_C.config.chain = 0;  // SET_FEATURES(恢复) — chain=0 表示链结束
+
+fc_command_submit(&command_A);  // 按 A → B → C 顺序连续 submit
+fc_command_submit(&command_B);
+fc_command_submit(&command_C);
+```
+
+调度器自动识别 `chain` 标志，dispatch 层自动按序执行。HSQ 在整个链执行期间无法插入该 LUN。
+
+### 16.10 与 Phase D (函数指针表) 的关系
+
+Phase D 包含了 §15（函数指针表重构）和 §16（命令链执行）两个子阶段：
+
+| 子阶段 | §15 函数指针表 | §16 命令链 |
+|--------|---------------|-----------|
+| 状态 | ✅ 已完成代码+文档 | ✅ 已完成代码+文档 |
+| 解决的问题 | if-else 链 → O(1) 查表 | 命令原子性 + HSQ 防插入 |
+| 改动范围 | nand_dispatch 内部 | nand_dispatch + fc_scheduler + fc |
+| 代码编译 | ✅ 通过 | ✅ 通过 |
+

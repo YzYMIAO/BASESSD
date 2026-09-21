@@ -21,10 +21,12 @@ typedef struct
 {
     uint16_t command_id;
     uint8_t  operation;
-    uint8_t  ch;            /* Channel — needed for page_buffer access. */
-    uint8_t  page_type : 2; /* Copy from dispatch request for LDPC engine. */
+    uint8_t  ch;             /* Channel — needed for page_buffer access. */
+    uint8_t  ce;             /* Chip-enable — needed for routing. */
+    uint8_t  lun;            /* LUN — needed for routing. */
+    uint8_t  page_type : 2;  /* Copy from dispatch request for LDPC engine. */
     uint8_t  reserved  : 6;
-    uint8_t  cw_index; /* Current CW being processed (0-based). */
+    uint8_t  cw_index;       /* Current CW being processed (0-based). */
     uint8_t  cw_count;
     uint8_t  started;
     uint8_t  parameter[4];
@@ -38,6 +40,19 @@ typedef struct
     nand_fc_transaction_t      transaction;
     nand_dispatch_completion_t completion;
 } nand_dispatch_task_t;
+
+/*
+ * Per-LUN 链状态。
+ * count=0 表示 LUN 空闲；count>0 时 cursor 指示当前执行的 task 索引。
+ * 链中所有命令均在同一 ch/ce/lun 上，预加载完成后由 poll 自动推进 cursor，
+ * 不清 LUN busy，直到 cursor==count-1 时返回 completion。
+ */
+typedef struct
+{
+    nand_dispatch_task_t tasks[NAND_DISPATCH_CHAIN_DEPTH];
+    uint8_t              count;
+    uint8_t              cursor;
+} nand_dispatch_lun_chain_t;
 
 /* ======================================================================
  * 函数指针表类型定义

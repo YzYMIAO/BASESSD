@@ -85,3 +85,28 @@ fc_status_t fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_sta
     queue->count--;
     return FC_STATUS_OK;
 }
+
+fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, uint16_t offset)
+{
+    if ((queue == NULL) || (offset >= queue->count))
+    {
+        return FC_COMMAND_ID_INVALID;
+    }
+    uint16_t index = (uint16_t)((queue->head + offset) % queue->depth);
+    return queue->entries[index];
+}
+
+void fc_submission_queue_pop_n(fc_submission_queue_t *queue, fc_command_id_t *ids, uint16_t count)
+{
+    fc_command_id_t cmd;
+    uint16_t        i;
+
+    if (queue == NULL)
+    {
+        return;
+    }
+    for (i = 0U; i < count; i++)
+    {
+        (void)fc_submission_queue_pop(queue, (ids != NULL) ? &ids[i] : &cmd);
+    }
+}
