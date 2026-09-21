@@ -3,6 +3,7 @@
 #include "common/ssd_log.h"
 #include "delay.h"
 #include "onfi_1_0.h"
+#include "platform/stm32h743/nand_dma.h"
 
 #include <stddef.h>
 
@@ -175,7 +176,7 @@ static uint8_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const n
 static uint8_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-    uint16_t                 index;
+    uint8_t                  result;
 
     (void)uop;
     (void)timing;
@@ -185,9 +186,15 @@ static uint8_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    for (index = 0U; index < request->data_length; index++)
+    result = nand_dma_memory_to_fmc(config->data, request->buffer, request->data_length);
+    if (result != 0U)
     {
-        *config->data = request->buffer[index];
+        /* DMA 失败回退到 CPU 逐字节搬运 */
+        uint16_t index;
+        for (index = 0U; index < request->data_length; index++)
+        {
+            *config->data = request->buffer[index];
+        }
     }
 
     completion->transfer_status = NAND_RESULT_OK;
@@ -197,7 +204,7 @@ static uint8_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const
 static uint8_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-    uint16_t                 index;
+    uint8_t                  result;
 
     (void)uop;
     (void)timing;
@@ -207,9 +214,15 @@ static uint8_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, cons
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    for (index = 0U; index < request->data_length; index++)
+    result = nand_dma_fmc_to_memory(config->data, request->buffer, request->data_length);
+    if (result != 0U)
     {
-        request->buffer[index] = *config->data;
+        /* DMA 失败回退到 CPU 逐字节搬运 */
+        uint16_t index;
+        for (index = 0U; index < request->data_length; index++)
+        {
+            request->buffer[index] = *config->data;
+        }
     }
 
     if (request->operation == OP_READ_ID)

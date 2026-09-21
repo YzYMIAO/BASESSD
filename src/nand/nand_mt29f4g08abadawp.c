@@ -3,6 +3,7 @@
 #include "common/ssd_log.h"
 #include "delay.h"
 #include "nand_fmc.h"
+#include "platform/stm32h743/nand_dma.h"
 
 #include <stddef.h>
 
@@ -192,6 +193,12 @@ uint8_t nand_init(void)
         {
             SSD_LOGE("nand: FMC backend configure failed\r\n");
             return NAND_RESULT_OPERATION_FAILED;
+        }
+
+        if (nand_dma_init() != 0U)
+        {
+            SSD_LOGE("nand: DMA init failed, falling back to PIO\r\n");
+            /* DMA 失败不是致命错误，回退到 CPU 逐字节搬运 */
         }
     }
 
