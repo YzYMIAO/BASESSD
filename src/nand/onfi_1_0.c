@@ -1,5 +1,7 @@
 #include "onfi_1_0.h"
 
+#include "nand_config.h"
+
 #include <stddef.h>
 
 #define NAND_TIME_TWB_US   (1U)
@@ -342,3 +344,72 @@ const nand_operation_map_t g_nand_operation_map[OP_COUNT] =
         [OP_OTP_DATA_PROGRAM]               = {              OP_OTP_DATA_PROGRAM,               "OTP_DATA_PROGRAM",   NAND_CMD_PROGRAM_PAGE_SETUP, NAND_CMD_PROGRAM_PAGE_CONFIRM, 5U, 1U, 0U, 0U,  g_nand_normal_program_page_uops,               {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
         [OP_OTP_DATA_READ]                  = {                 OP_OTP_DATA_READ,                  "OTP_DATA_READ",      NAND_CMD_READ_PAGE_SETUP,    NAND_CMD_READ_PAGE_CONFIRM, 5U, 0U, 0U, 0U,     g_nand_normal_read_page_uops,                  {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
 };
+
+uint8_t nand_operation_has_data(uint8_t operation)
+{
+    if (operation >= OP_COUNT)
+    {
+        return 0U;
+    }
+    if (g_nand_operation_map[operation].data_input_cycles > 0U)
+    {
+        return 1U;
+    }
+    if ((operation == OP_RESET) || (operation == OP_READ_MODE) ||
+        (operation == OP_BLOCK_LOCK) || (operation == OP_BLOCK_LOCK_TIGHT) ||
+        (operation == OP_BLOCK_UNLOCK_LOW) || (operation == OP_BLOCK_UNLOCK_HIGH) ||
+        (operation == OP_READ_FOR_INTERNAL_DATA_MOVE) || (operation == OP_OTP_DATA_LOCK))
+    {
+        return 0U;
+    }
+    if (operation == OP_ERASE_BLOCK)
+    {
+        return 0U;
+    }
+    return 1U;
+}
+
+uint16_t nand_operation_data_length(uint8_t operation)
+{
+    switch (operation)
+    {
+        case OP_READ_ID:
+            return 5U;
+        case OP_READ_PARAMETER_PAGE:
+        case OP_READ_UNIQUE_ID:
+            return 256U;
+        case OP_GET_FEATURES:
+        case OP_SET_FEATURES:
+            return 4U;
+        case OP_READ_STATUS:
+        case OP_READ_STATUS_ENHANCED:
+        case OP_BLOCK_LOCK_STATUS:
+            return 1U;
+        case OP_RANDOM_DATA_READ:
+        case OP_RANDOM_DATA_INPUT:
+            return PAGE_SIZE / CW_NUM;
+        case OP_PROGRAM_FOR_INTERNAL_DATA_MOVE:
+        case OP_PROGRAM_FOR_INTERNAL_MOVE:
+            return 1U;
+        case OP_NORMAL_READ_PAGE:
+        case OP_NORMAL_PROGRAM_PAGE:
+        case OP_PROGRAM_PAGE_CACHE:
+        case OP_READ_PAGE_CACHE_SEQ:
+        case OP_READ_PAGE_CACHE_RANDOM:
+        case OP_READ_PAGE_CACHE_LAST:
+        case OP_OTP_DATA_PROGRAM:
+        case OP_OTP_DATA_READ:
+            return PAGE_SIZE;
+        case OP_RESET:
+        case OP_READ_MODE:
+        case OP_BLOCK_LOCK:
+        case OP_BLOCK_LOCK_TIGHT:
+        case OP_BLOCK_UNLOCK_LOW:
+        case OP_BLOCK_UNLOCK_HIGH:
+        case OP_READ_FOR_INTERNAL_DATA_MOVE:
+        case OP_OTP_DATA_LOCK:
+        case OP_ERASE_BLOCK:
+        default:
+            return 0U;
+    }
+}

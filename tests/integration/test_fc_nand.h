@@ -11,6 +11,9 @@ fc_status_t fc_nand_test_read_id(void);
 fc_status_t fc_nand_test_erase_block(nand_paa_t test_paa);
 fc_status_t fc_nand_test_program_block(nand_paa_t test_paa);
 fc_status_t fc_nand_test_read_block(nand_paa_t test_paa);
+fc_status_t fc_nand_test_reset(void);
+fc_status_t fc_nand_test_read_status(void);
+fc_status_t fc_nand_test_set_get_features(void);
 fc_status_t fc_nand_test_run_all(nand_paa_t test_paa);
 
 #endif /* TEST_FC_NAND_H */

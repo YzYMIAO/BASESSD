@@ -74,7 +74,8 @@ struct fc_descriptor_t
     DWORD buffer_id : 16; /* Buffer Pool ID; 0xFFFF means invalid. */
     DWORD next_id   : 16; /* Next Descriptor ID; 0xFFFF terminates the chain. */
     DWORD status    : 8;  /* CW status, using FC_CW_STATUS_* bits. */
-    DWORD reserved  : 24; /* Reserved for future Descriptor state. */
+    DWORD ecc_bits  : 8;  /* ECC corrected bit count from last completion; 0 if no error. */
+    DWORD reserved  : 16; /* Reserved for future Descriptor state. */
 };
 
 /* SQ command owned by FC after submission; command_id is the Command Pool slot ID. */
@@ -85,21 +86,28 @@ struct fc_command_t
     DWORD desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
     DWORD high_priority : 1;  /* 0=SQ, 1=HSQ. */
     DWORD module        : 4;  /* Completion route owner; FC does not invoke callbacks. */
-    DWORD reserved1     : 11; /* Reserved for future Command control. */
+    DWORD feature_addr  : 8;  /* SET/GET_FEATURES register address, sent via COLUMN_0. */
+    DWORD reserved1     : 3;  /* Reserved for future Command control. */
     DWORD faa; /* FTL address; retained for completion and recovery. */
     DWORD paa; /* Operation-dependent target; data commands use Descriptor PAA values. */
     fc_cmd_conf_t config; /* Operation, NAND location, CW and data-path configuration. */
-    DWORD parameter0 : 8; /* Command parameter byte 0. */
-    DWORD parameter1 : 8; /* Command parameter byte 1. */
-    DWORD parameter2 : 8; /* Command parameter byte 2. */
-    DWORD parameter3 : 8; /* Command parameter byte 3. */
+    uint8_t parameter0; /* Command parameter byte 0. */
+    uint8_t parameter1; /* Command parameter byte 1. */
+    uint8_t parameter2; /* Command parameter byte 2. */
+    uint8_t parameter3; /* Command parameter byte 3. */
 };
 
-/* CQ entry containing IDs and per-CW status; FTL resolves Command and Descriptor data by ID. */
+/* CQ entry containing IDs, per-CW status and ECC info; FTL resolves Command and Descriptor data by ID. */
 struct fc_command_status_t
 {
     DWORD command_id : 16; /* Completed Command Pool ID. */
     DWORD desc_id    : 16; /* First Descriptor ID; 0xFFFF means invalid. */
+    DWORD module     : 4;  /* Copy of command->module for direct routing without ID lookup. */
+    DWORD ecc_bit0   : 8;  /* CW0 ECC corrected bit count */
+    DWORD ecc_bit1   : 8;  /* CW1 ECC corrected bit count */
+    DWORD ecc_bit2   : 8;  /* CW2 ECC corrected bit count */
+    DWORD ecc_bit3   : 8;  /* CW3 ECC corrected bit count */
+    DWORD reserved   : 4;
     DWORD status0    : 8;  /* CW0 status. */
     DWORD status1    : 8;  /* CW1 status. */
     DWORD status2    : 8;  /* CW2 status. */

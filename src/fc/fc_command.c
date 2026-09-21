@@ -14,11 +14,16 @@ fc_status_t fc_command_validate(const fc_command_t *command)
         return FC_STATUS_INVALID_ARGUMENT;
     }
     op = &g_nand_operation_map[command->config.operation];
-    if ((op->data_input_cycles != 0U) &&
+    if ((command->config.operation != OP_SET_FEATURES) &&
+        (command->config.operation != OP_GET_FEATURES) &&
+        nand_operation_has_data((uint8_t)command->config.operation) &&
         (command->desc_id == FC_DESCRIPTOR_ID_INVALID))
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
+    /* data_input_cycles > 0 is a subset of nand_operation_has_data() — the latter also
+     * includes data-output operations (READ_STATUS, READ_ID, etc.) that need a buffer. */
+    (void)op;
     return FC_STATUS_OK;
 }
 
@@ -33,7 +38,12 @@ void fc_command_status_init(fc_command_status_t *status, const fc_command_t *com
     *status = (fc_command_status_t){0};
     status->command_id = (command != NULL) ? command->command_id : FC_COMMAND_ID_INVALID;
     status->desc_id    = (command != NULL) ? command->desc_id : FC_DESCRIPTOR_ID_INVALID;
+    status->module     = (command != NULL) ? command->module : 0U;
     count              = (command != NULL) ? (uint8_t)(command->config.cw + 1U) : 0U;
+    status->ecc_bit0   = 0U;
+    status->ecc_bit1   = (count > 1U) ? 0U : FC_CW_STATUS_UNUSED;
+    status->ecc_bit2   = (count > 2U) ? 0U : FC_CW_STATUS_UNUSED;
+    status->ecc_bit3   = (count > 3U) ? 0U : FC_CW_STATUS_UNUSED;
     status->status0    = FC_CW_STATUS_READY;
     status->status1    = (count > 1U) ? FC_CW_STATUS_READY : 0U;
     status->status2    = (count > 2U) ? FC_CW_STATUS_READY : 0U;

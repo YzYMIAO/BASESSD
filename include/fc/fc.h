@@ -33,6 +33,13 @@ fc_status_t    fc_buffer_release(fc_buffer_id_t buffer_id);
 uint8_t       *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id);
 fc_buffer_id_t fc_real_buffer_to_buffer_id(const uint8_t *buffer);
 
+/* 便利函数：将外部数据按 CW 大小依次拷贝到命令的所有 desc buffer 中。
+ * 数据不够时剩余部分用 0xFF dummy 填充。 */
+fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t length);
+
+/* 便利函数：获取命令中指定 CW 索引的 buffer 指针（读操作后使用）。 */
+uint8_t     *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index);
+
 /* high_priority=0 提交 SQ；high_priority=1 提交 HSQ。 */
 fc_status_t fc_submit(fc_command_t *command);
 

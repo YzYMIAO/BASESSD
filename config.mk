@@ -247,7 +247,7 @@ endif
 # ----------------------------------------------------------------------------
 # 6. 模块列表（按依赖顺序：被依赖的在前）
 # ----------------------------------------------------------------------------
-MODULES = common controller fc flash_controller ftl host nand platform
+MODULES = common controller fc ftl host nand platform
 
 # 固件目标额外包含启动编排模块；Host Simulator 使用自己的 main()。
 ifeq ($(BUILD_TARGET),firmware)

@@ -141,7 +141,7 @@ static void fc_nand_test_command_configure(fc_command_t *command, uint8_t operat
     command->config.ce        = 0U;
     command->config.lun       = 0U;
     command->paa              = paa;
-    command->config.cw        = (uint8_t)(descriptor_count - 1U);
+    command->config.cw        = (descriptor_count > 0U) ? (uint8_t)(descriptor_count - 1U) : 0U;
     command->config.crc       = 0U; /* CRC enabled; set to 1 only to disable it. */
     command->config.ldpc      = FC_LDPC_FULL; /* Full LDPC path enabled. */
     command->config.raid      = 0U; /* Normal RAID path; nonzero selects a RAID operation. */
@@ -639,16 +639,168 @@ fc_status_t fc_nand_test_read_block(nand_paa_t test_paa)
     return fc_nand_test_run_block_pipeline(test_paa, OP_NORMAL_READ_PAGE, "READ_BLOCK");
 }
 
+fc_status_t fc_nand_test_reset(void)
+{
+    fc_command_t *command;
+    fc_status_t   result;
+
+    command = fc_command_alloc();
+    if (command == NULL)
+    {
+        return FC_STATUS_RESOURCE_EMPTY;
+    }
+    SSD_LOGI("[FC TEST] RESET submit\r\n");
+    fc_nand_test_command_configure(command, OP_RESET, 0U, 0U);
+    command->desc_id = FC_DESCRIPTOR_ID_INVALID;
+    result           = fc_nand_test_wait_completion(command);
+    if (fc_nand_test_release_command(command) != FC_STATUS_OK)
+    {
+        return FC_STATUS_IO_ERROR;
+    }
+    return result;
+}
+
+fc_status_t fc_nand_test_read_status(void)
+{
+    fc_command_t *command;
+    uint8_t      *buffer;
+    fc_status_t   result;
+
+    command = fc_command_alloc();
+    if (command == NULL)
+    {
+        return FC_STATUS_RESOURCE_EMPTY;
+    }
+    SSD_LOGI("[FC TEST] READ_STATUS submit\r\n");
+    fc_nand_test_command_configure(command, OP_READ_STATUS, 0U, 1U);
+    result = fc_command_configure_descriptors(command);
+    if (result != FC_STATUS_OK)
+    {
+        (void)fc_command_release(command);
+        return result;
+    }
+    buffer = fc_buffer_id_to_real_buffer(fc_nand_test_descriptor((fc_descriptor_id_t)command->desc_id)->buffer_id);
+    if (buffer == NULL)
+    {
+        return FC_STATUS_IO_ERROR;
+    }
+    result = fc_nand_test_wait_completion(command);
+    if (result == FC_STATUS_OK)
+    {
+        SSD_LOGI("[FC TEST] READ_STATUS=0x%02X (READY=%u FAIL=%u)\r\n",
+                 buffer[0], (unsigned int)((buffer[0] & NAND_STATUS_READY) != 0U),
+                 (unsigned int)((buffer[0] & NAND_STATUS_FAIL) != 0U));
+        if ((buffer[0] & NAND_STATUS_READY) == 0U)
+        {
+            result = FC_STATUS_IO_ERROR;
+        }
+    }
+    for (fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id; descriptor_id != FC_DESCRIPTOR_ID_INVALID; )
+    {
+        fc_descriptor_t *descriptor = fc_nand_test_descriptor(descriptor_id);
+        descriptor_id = (fc_descriptor_id_t)descriptor->next_id;
+        if (fc_buffer_release(descriptor->buffer_id) != FC_STATUS_OK)
+        {
+            return FC_STATUS_IO_ERROR;
+        }
+    }
+    if (fc_nand_test_release_command(command) != FC_STATUS_OK)
+    {
+        return FC_STATUS_IO_ERROR;
+    }
+    return result;
+}
+
+fc_status_t fc_nand_test_set_get_features(void)
+{
+    fc_command_t *set_cmd;
+    fc_command_t *get_cmd;
+    fc_status_t   result;
+
+    /* SET_FEATURES: 设置 feature 地址 0x01 的值为 [0x40, 0x00, 0x00, 0x00]. */
+    set_cmd = fc_command_alloc();
+    if (set_cmd == NULL)
+    {
+        return FC_STATUS_RESOURCE_EMPTY;
+    }
+    SSD_LOGI("[FC TEST] SET_FEATURES submit\r\n");
+    fc_nand_test_command_configure(set_cmd, OP_SET_FEATURES, 0U, 1U);
+    /* 无 descriptor 分配 — 数据以内联方式传递 */
+    set_cmd->feature_addr = 0x01U;
+    set_cmd->parameter0   = 0x40U;  /* Enable ECC, enable "NORMAL" parameter page */
+    set_cmd->parameter1   = 0x00U;
+    set_cmd->parameter2   = 0x00U;
+    set_cmd->parameter3   = 0x00U;
+    result = fc_nand_test_wait_completion(set_cmd);
+    if (result != FC_STATUS_OK)
+    {
+        SSD_LOGE("[FC TEST] SET_FEATURES failed: %d\r\n", (int)result);
+        (void)fc_nand_test_release_command(set_cmd);
+        return result;
+    }
+    SSD_LOGI("[FC TEST] SET_FEATURES passed\r\n");
+
+    /* GET_FEATURES: 回读 feature 地址 0x01. */
+    get_cmd = fc_command_alloc();
+    if (get_cmd == NULL)
+    {
+        (void)fc_nand_test_release_command(set_cmd);
+        return FC_STATUS_RESOURCE_EMPTY;
+    }
+    SSD_LOGI("[FC TEST] GET_FEATURES submit\r\n");
+    fc_nand_test_command_configure(get_cmd, OP_GET_FEATURES, 0U, 1U);
+    get_cmd->feature_addr = 0x01U;
+    result = fc_nand_test_wait_completion(get_cmd);
+    if (result == FC_STATUS_OK)
+    {
+        SSD_LOGI("[FC TEST] GET_FEATURES(0x01)=%02X %02X %02X %02X\r\n",
+                 get_cmd->parameter0, get_cmd->parameter1,
+                 get_cmd->parameter2, get_cmd->parameter3);
+        if ((get_cmd->parameter0 != 0x40U) || (get_cmd->parameter1 != 0x00U) ||
+            (get_cmd->parameter2 != 0x00U) || (get_cmd->parameter3 != 0x00U))
+        {
+            SSD_LOGE("[FC TEST] GET_FEATURES mismatch\r\n");
+            result = FC_STATUS_IO_ERROR;
+        }
+    }
+    else
+    {
+        SSD_LOGE("[FC TEST] GET_FEATURES failed: %d\r\n", (int)result);
+    }
+
+    (void)fc_nand_test_release_command(get_cmd);
+    (void)fc_nand_test_release_command(set_cmd);
+    return result;
+}
+
 fc_status_t fc_nand_test_run_all(nand_paa_t test_paa)
 {
     fc_status_t result;
 
+    result = fc_nand_test_reset();
+    if (result != FC_STATUS_OK)
+    {
+        return result;
+    }
+    SSD_LOGI("[FC TEST] RESET passed\r\n");
     result = fc_nand_test_read_id();
     if (result != FC_STATUS_OK)
     {
         return result;
     }
     SSD_LOGI("[FC TEST] READ_ID passed\r\n");
+    result = fc_nand_test_read_status();
+    if (result != FC_STATUS_OK)
+    {
+        return result;
+    }
+    SSD_LOGI("[FC TEST] READ_STATUS passed\r\n");
+    result = fc_nand_test_set_get_features();
+    if (result != FC_STATUS_OK)
+    {
+        return result;
+    }
+    SSD_LOGI("[FC TEST] SET/GET_FEATURES passed\r\n");
     result = fc_nand_test_erase_block(test_paa);
     if (result != FC_STATUS_OK)
     {

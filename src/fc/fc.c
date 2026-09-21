@@ -414,6 +414,17 @@ static fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, f
     fc_descriptor_t  *previous = NULL;
     uint8_t           index;
 
+    /* NO_DATA operations (RESET, BLOCK_LOCK, READ_MODE, etc.) and ERASE have no
+     * data payload — they do not need descriptors or buffers.
+     * SET/GET_FEATURES use inline parameter[0..3] + feature_addr instead. */
+    if ((nand_operation_has_data((uint8_t)command->config.operation) == 0U) ||
+        (command->config.operation == OP_SET_FEATURES) ||
+        (command->config.operation == OP_GET_FEATURES))
+    {
+        command->desc_id = FC_DESCRIPTOR_ID_INVALID;
+        return FC_STATUS_OK;
+    }
+
     command_id = (fc_command_id_t)(command - controller->command_pool);
     for (index = 0U; index <= command->config.cw; index++)
     {
@@ -465,18 +476,48 @@ static fc_status_t fc_submit_internal(fc_t *controller, fc_command_t *command)
 static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_completion_t *nand_completion)
 {
     fc_command_status_t completion;
+    fc_command_t       *command;
 
     if ((nand_completion == NULL) || (nand_completion->command_id >= FC_COMMAND_POOL_DEPTH))
     {
         return FC_STATUS_IO_ERROR;
     }
 
+    command = &controller->command_pool[nand_completion->command_id];
+
     completion.command_id = nand_completion->command_id;
     completion.desc_id    = nand_completion->failed_descriptor_id;
+    completion.module     = command->module;
+    completion.ecc_bit0   = nand_completion->ecc_bit_count[0];
+    completion.ecc_bit1   = nand_completion->ecc_bit_count[1];
+    completion.ecc_bit2   = nand_completion->ecc_bit_count[2];
+    completion.ecc_bit3   = nand_completion->ecc_bit_count[3];
     completion.status0    = nand_completion->cw_status[0];
     completion.status1    = nand_completion->cw_status[1];
     completion.status2    = nand_completion->cw_status[2];
     completion.status3    = nand_completion->cw_status[3];
+
+    /* Write back per-CW status and ECC count to descriptors for retry/RAID recovery.
+     * NO_DATA and ERASE operations have no descriptor chain to write back to. */
+    if (command->desc_id != FC_DESCRIPTOR_ID_INVALID)
+    {
+        fc_descriptor_id_t desc_id = (fc_descriptor_id_t)command->desc_id;
+        uint8_t            cw;
+
+        for (cw = 0U; cw < (uint8_t)(command->config.cw + 1U); cw++)
+        {
+            fc_descriptor_t *descriptor;
+
+            if (desc_id >= FC_DESCRIPTOR_POOL_DEPTH)
+            {
+                break;
+            }
+            descriptor               = &controller->descriptor_pool[desc_id];
+            descriptor->status       = nand_completion->cw_status[cw];
+            descriptor->ecc_bits     = nand_completion->ecc_bit_count[cw];
+            desc_id = (fc_descriptor_id_t)descriptor->next_id;
+        }
+    }
 
     if (fc_complete_internal(controller, &completion) != FC_STATUS_OK)
     {
@@ -506,9 +547,9 @@ static fc_status_t fc_poll_internal(fc_t *controller)
     if (result == FC_STATUS_OK)
     {
         fc_command_t       *command;
-        fc_descriptor_id_t  desc_id;
         nand_dispatch_request_t request;
         uint8_t             cw;
+        fc_descriptor_id_t  desc_id;
 
         if ((fc_command_id_is_valid(command_id) == 0U) || (controller->command_state[command_id] != FC_COMMAND_STATE_QUEUED))
         {
@@ -524,33 +565,64 @@ static fc_status_t fc_poll_internal(fc_t *controller)
         request.ch         = (uint8_t)command->config.ch;
         request.ce         = (uint8_t)command->config.ce;
         request.lun        = (uint8_t)command->config.lun;
-        request.cw_count   = (uint8_t)(command->config.cw + 1U);
+        request.page_type  = (uint8_t)command->config.page_type;
         request.parameter[0] = (uint8_t)command->parameter0;
         request.parameter[1] = (uint8_t)command->parameter1;
         request.parameter[2] = (uint8_t)command->parameter2;
         request.parameter[3] = (uint8_t)command->parameter3;
+        request.feature_addr = (uint8_t)command->feature_addr;
 
-        desc_id = (fc_descriptor_id_t)command->desc_id;
-        for (cw = 0U; cw < request.cw_count; cw++)
+        if (nand_operation_has_data((uint8_t)command->config.operation))
         {
-            const fc_descriptor_t *descriptor =
-                (desc_id < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[desc_id] : NULL;
+            request.cw_count = (uint8_t)(command->config.cw + 1U);
+        }
+        else
+        {
+            /* ERASE uses 1 CW for address routing but no data descriptor; NO_DATA uses 0. */
+            request.cw_count = (command->config.operation == OP_ERASE_BLOCK) ? 1U : 0U;
+        }
 
-            if (descriptor == NULL)
+        if (command->config.operation == OP_ERASE_BLOCK)
+        {
+            /* ERASE: PAA in command->paa, no descriptor chain. */
+            request.cws[0U].paa    = command->paa;
+            request.cws[0U].buffer = NULL;
+        }
+        else if ((command->config.operation == OP_SET_FEATURES) ||
+                 (command->config.operation == OP_GET_FEATURES))
+        {
+            /* SET/GET_FEATURES: 无 descriptor 分配。
+             * buffer 直接指向 command->parameter[0..3] 的地址，
+             * NAND 的读写数据直接落在此处：
+             *   - SET_FEATURES: NAND 从该地址读取 4 字节发出
+             *   - GET_FEATURES: NAND 回写的 4 字节直接写入此处
+             * 调用者通过 command->parameter0..3 直接访问结果。 */
+            request.cws[0U].buffer = (uint8_t*)&command->parameter0;
+        }
+        else if (request.cw_count > 0U)
+        {
+            desc_id = (fc_descriptor_id_t)command->desc_id;
+            for (cw = 0U; cw < request.cw_count; cw++)
             {
-                nand_completion                  = (nand_dispatch_completion_t){0};
-                nand_completion.command_id       = command_id;
-                nand_completion.execution_status = NAND_RESULT_NOT_READY;
-                nand_completion.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
-                (void)fc_complete_from_nand(controller, &nand_completion);
-                fc_register_queue_state(controller);
-                return FC_STATUS_IO_ERROR;
+                const fc_descriptor_t *descriptor =
+                    (desc_id < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[desc_id] : NULL;
+
+                if (descriptor == NULL)
+                {
+                    nand_completion                  = (nand_dispatch_completion_t){0};
+                    nand_completion.command_id       = command_id;
+                    nand_completion.execution_status = NAND_RESULT_NOT_READY;
+                    nand_completion.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
+                    (void)fc_complete_from_nand(controller, &nand_completion);
+                    fc_register_queue_state(controller);
+                    return FC_STATUS_IO_ERROR;
+                }
+                request.cws[cw].paa    = descriptor->paa;
+                request.cws[cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
+                                             ? fc_buffer_id_to_real_buffer_internal(controller, descriptor->buffer_id)
+                                             : NULL;
+                desc_id = (fc_descriptor_id_t)descriptor->next_id;
             }
-            request.cws[cw].paa    = descriptor->paa;
-            request.cws[cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
-                                         ? fc_buffer_id_to_real_buffer_internal(controller, descriptor->buffer_id)
-                                         : NULL;
-            desc_id = (fc_descriptor_id_t)descriptor->next_id;
         }
 
         if (nand_dispatch_submit(&request) != NAND_RESULT_OK)
@@ -692,6 +764,106 @@ fc_buffer_id_t fc_real_buffer_to_buffer_id(const uint8_t *buffer)
         return FC_BUFFER_ID_INVALID;
     }
     return fc_real_buffer_to_buffer_id_internal(&g_fc_controller, buffer);
+}
+
+fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t length)
+{
+    fc_command_id_t    command_id;
+    fc_descriptor_id_t desc_id;
+    uint8_t            cw_count;
+    uint8_t            i;
+    const uint8_t     *src;
+
+    if ((command == NULL) || (data == NULL) ||
+        (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
+        (g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) ||
+        (command->desc_id == FC_DESCRIPTOR_ID_INVALID))
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
+
+    cw_count = (uint8_t)(command->config.cw + 1U);
+    src      = (const uint8_t *)data;
+    desc_id  = (fc_descriptor_id_t)command->desc_id;
+
+    for (i = 0U; i < cw_count; i++)
+    {
+        fc_descriptor_t *descriptor;
+        uint8_t         *buf;
+        uint32_t         copy_len;
+
+        if (desc_id >= FC_DESCRIPTOR_POOL_DEPTH)
+        {
+            return FC_STATUS_INVALID_ARGUMENT;
+        }
+        descriptor = &g_fc_controller.descriptor_pool[desc_id];
+        if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
+        {
+            return FC_STATUS_INVALID_ARGUMENT;
+        }
+        buf = fc_buffer_id_to_real_buffer_internal(&g_fc_controller, descriptor->buffer_id);
+
+        if (length > 0U)
+        {
+            copy_len = (length >= FC_BUFFER_POOL_CW_SIZE) ? FC_BUFFER_POOL_CW_SIZE : length;
+            (void)memcpy(buf, src, copy_len);
+            src    += copy_len;
+            length -= copy_len;
+
+            /* 当前 buffer 未填满部分用 0xFF dummy 填充 */
+            if (copy_len < FC_BUFFER_POOL_CW_SIZE)
+            {
+                (void)memset(buf + copy_len, 0xFF, (size_t)(FC_BUFFER_POOL_CW_SIZE - copy_len));
+            }
+        }
+        else
+        {
+            /* 数据已耗尽，整 buffer 填充 0xFF dummy */
+            (void)memset(buf, 0xFF, FC_BUFFER_POOL_CW_SIZE);
+        }
+
+        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+    }
+
+    return FC_STATUS_OK;
+}
+
+uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
+{
+    fc_command_id_t    command_id;
+    fc_descriptor_id_t desc_id;
+    uint8_t            i;
+
+    if ((command == NULL) ||
+        (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
+        (command->desc_id == FC_DESCRIPTOR_ID_INVALID) ||
+        (cw_index > command->config.cw))
+    {
+        return NULL;
+    }
+
+    desc_id = (fc_descriptor_id_t)command->desc_id;
+    for (i = 0U; i <= cw_index; i++)
+    {
+        fc_descriptor_t *descriptor;
+
+        if (desc_id >= FC_DESCRIPTOR_POOL_DEPTH)
+        {
+            return NULL;
+        }
+        descriptor = &g_fc_controller.descriptor_pool[desc_id];
+        if (i == cw_index)
+        {
+            if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
+            {
+                return NULL;
+            }
+            return fc_buffer_id_to_real_buffer_internal(&g_fc_controller, descriptor->buffer_id);
+        }
+        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+    }
+
+    return NULL;
 }
 
 fc_status_t fc_submit(fc_command_t *command)
