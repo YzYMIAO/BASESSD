@@ -262,6 +262,8 @@ typedef struct
     uint8_t                 data_input_cycles;
     uint8_t                 valid_while_selected_lun_busy;
     uint8_t                 valid_while_other_lun_busy;
+    uint8_t                 has_data;    /* 操作是否需要数据传输（替代 nand_operation_has_data） */
+    uint16_t                data_length; /* 数据传输字节数 0=无数据（替代 nand_operation_data_length） */
     const nand_uop_t       *uops;
     nand_operation_timing_t timing;
 } nand_operation_map_t;
@@ -269,12 +271,15 @@ typedef struct
 /* OP_* 可直接作为下标访问，不需要命令表扫描或操作码解析。 */
 extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
 
-/* 判断 operation 是否涉及用户数据传输（即是否需要 descriptor + buffer）。NO_DATA 类操作（RESET、LOCK、
- * READ_MODE 等）和 ERASE 返回 0。 */
-uint8_t nand_operation_has_data(uint8_t operation);
+/* 判断 operation 是否涉及用户数据传输（即是否需要 descriptor + buffer）。
+ * NO_DATA 类操作（RESET、LOCK、READ_MODE 等）和 ERASE 返回 0。
+ * 推荐直接读 g_nand_operation_map[op].has_data。 */
+#define nand_operation_has_data(op) \
+    ((op) < OP_COUNT ? g_nand_operation_map[(op)].has_data : 0U)
 
-/* 返回 operation 的数据传输字节数。NO_DATA 类操作返回 0，单 CW 操作返回实际传输长度，
- * PAGE 级操作返回 PAGE_SIZE。 */
-uint16_t nand_operation_data_length(uint8_t operation);
+/* 返回 operation 的数据传输字节数。NO_DATA 类操作返回 0。
+ * 推荐直接读 g_nand_operation_map[op].data_length。 */
+#define nand_operation_data_length(op) \
+    ((op) < OP_COUNT ? g_nand_operation_map[(op)].data_length : 0U)
 
 #endif /* PLATFORM_STM32H743_ONFI_1_0_H */

@@ -1,7 +1,7 @@
 #include "nand_fmc.h"
 
-#include "delay.h"
 #include "common/ssd_log.h"
+#include "delay.h"
 #include "onfi_1_0.h"
 
 #include <stddef.h>
@@ -214,8 +214,7 @@ static uint8_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, cons
 
     if (request->operation == OP_READ_ID)
     {
-        SSD_LOGI("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n", request->buffer[0], request->buffer[1],
-                 request->buffer[2], request->buffer[3], request->buffer[4], (void *)request->buffer);
+        SSD_LOGI("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n", request->buffer[0], request->buffer[1], request->buffer[2], request->buffer[3], request->buffer[4], (void *)request->buffer);
     }
 
     completion->transfer_status = NAND_RESULT_OK;
@@ -248,7 +247,7 @@ static uint8_t nand_fmc_exec_read_status(void *context, const nand_uop_t *uop, c
 
     (void)uop;
     (void)request;
-    *config->command        = NAND_CMD_READ_STATUS;
+    *config->command = NAND_CMD_READ_STATUS;
     /* tWHR is 60 ns minimum for this NAND. Use one full microsecond on the MCU. */
     delay_us(timing->twh_us);
     completion->nand_status = *config->data;

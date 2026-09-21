@@ -13,10 +13,10 @@
 typedef struct
 {
     fc_command_id_t *entries;
-    uint16_t           depth;
-    uint16_t           head;
-    uint16_t           tail;
-    uint16_t           count;
+    uint16_t         depth;
+    uint16_t         head;
+    uint16_t         tail;
+    uint16_t         count;
 } fc_submission_queue_t;
 
 /*

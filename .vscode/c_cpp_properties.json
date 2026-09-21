@@ -1,0 +1,18 @@
+{
+    "configurations": [
+        {
+            "name": "STM32H743",
+            "compileCommands": "${workspaceFolder}/compile_commands.json",
+            "includePath": [
+                "${workspaceFolder}/include/**"
+            ],
+            "defines": [
+                "STM32H743xx"
+            ],
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "gcc-arm"
+        }
+    ],
+    "version": 4
+}

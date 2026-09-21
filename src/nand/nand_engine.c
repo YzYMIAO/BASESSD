@@ -1,7 +1,7 @@
 #include "nand_engine.h"
 
-#include "delay.h"
 #include "common/ssd_log.h"
+#include "delay.h"
 #include "onfi_1_0.h"
 
 #include <stddef.h>
@@ -85,7 +85,7 @@ uint8_t nand_engine_step(nand_engine_state_t *state)
                 return NAND_RESULT_INVALID_ARGUMENT;
             }
             state->wait_started = 1U;
-            state->wait_polls = 0U;
+            state->wait_polls   = 0U;
         }
 
         result = handler(state->backend->context, uop, state->request, state->timing, state->completion);
@@ -100,7 +100,9 @@ uint8_t nand_engine_step(nand_engine_state_t *state)
                 ((state->debug_polls == 1U) || ((state->debug_polls % 1000U) == 0U)))
             {
                 SSD_LOGD("nand: program pending uop=%u status=0x%02X wait=%u\r\n",
-                         state->uop_index, state->completion->nand_status, state->debug_polls);
+                         state->uop_index,
+                         state->completion->nand_status,
+                         state->debug_polls);
             }
             if ((uop->type == NAND_UOP_WAIT_READY) || (uop->type == NAND_UOP_CHECK_READY))
             {
@@ -112,7 +114,9 @@ uint8_t nand_engine_step(nand_engine_state_t *state)
                     (state->wait_polls >= state->timing->busy_timeout_us))
                 {
                     SSD_LOGE("nand: WAIT_READY timeout op=%u polls=%u timeout_us=%u\r\n",
-                             state->request->operation, state->wait_polls, state->timing->busy_timeout_us);
+                             state->request->operation,
+                             state->wait_polls,
+                             state->timing->busy_timeout_us);
                     state->active = 0U;
                     return NAND_RESULT_TIMEOUT;
                 }
@@ -131,7 +135,7 @@ uint8_t nand_engine_step(nand_engine_state_t *state)
             return result;
         }
         state->wait_started = 0U;
-        state->wait_polls = 0U;
+        state->wait_polls   = 0U;
     }
 
     state->active = 0U;

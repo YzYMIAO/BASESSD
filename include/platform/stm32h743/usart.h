@@ -60,16 +60,16 @@ typedef enum
  */
 typedef struct
 {
-    uint32_t rx_overflow;    /* Software RX ring was full. */
-    uint32_t tx_dropped;     /* New log bytes rejected because TX ring was full. */
-    uint32_t tx_context_errors; /* Logging attempted from an ISR or while interrupts were masked. */
-    uint32_t tx_flush_timeouts; /* Flush could not observe queue empty, DMA idle, and TC before its deadline. */
-    uint32_t tx_dma_errors;  /* DMA transfer errors; TXE interrupt fallback remains active. */
+    uint32_t rx_overflow;         /* Software RX ring was full. */
+    uint32_t tx_dropped;          /* New log bytes rejected because TX ring was full. */
+    uint32_t tx_context_errors;   /* Logging attempted from an ISR or while interrupts were masked. */
+    uint32_t tx_flush_timeouts;   /* Flush could not observe queue empty, DMA idle, and TC before its deadline. */
+    uint32_t tx_dma_errors;       /* DMA transfer errors; TXE interrupt fallback remains active. */
     uint32_t tx_transport_errors; /* A UART/DMA transport fault makes reliable delivery unprovable. */
-    uint32_t overrun_errors; /* USART ORE: peripheral/FIFO was not drained in time. */
-    uint32_t framing_errors; /* USART FE: stop bit was invalid. */
-    uint32_t noise_errors;   /* USART NE: noise was detected while sampling. */
-    uint32_t parity_errors;  /* USART PE: received parity did not match. */
+    uint32_t overrun_errors;      /* USART ORE: peripheral/FIFO was not drained in time. */
+    uint32_t framing_errors;      /* USART FE: stop bit was invalid. */
+    uint32_t noise_errors;        /* USART NE: noise was detected while sampling. */
+    uint32_t parity_errors;       /* USART PE: received parity did not match. */
 } uart_stats_t;
 
 extern UART_HandleTypeDef g_uart1_handle;

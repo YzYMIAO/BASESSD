@@ -8,8 +8,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
-#include "stm32h7xx.h"
 #include "btim.h"
+#include "stm32h7xx.h"
 #include "usart.h"
 #include "watchdog.h"
 /* USER CODE END Includes */

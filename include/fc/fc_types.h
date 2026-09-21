@@ -21,9 +21,9 @@ typedef uint16_t fc_command_id_t;
 typedef uint16_t fc_descriptor_id_t;
 typedef uint16_t fc_buffer_id_t;
 
-#define FC_COMMAND_ID_INVALID ((fc_command_id_t)0xFFFFU)
+#define FC_COMMAND_ID_INVALID    ((fc_command_id_t)0xFFFFU)
 #define FC_DESCRIPTOR_ID_INVALID ((fc_descriptor_id_t)0xFFFFU)
-#define FC_BUFFER_ID_INVALID      ((fc_buffer_id_t)0xFFFFU)
+#define FC_BUFFER_ID_INVALID     ((fc_buffer_id_t)0xFFFFU)
 
 typedef struct fc_command_t        fc_command_t;
 typedef struct fc_descriptor_t     fc_descriptor_t;

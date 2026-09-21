@@ -1,6 +1,6 @@
 #include "fc_command.h"
-#include "nand/onfi_1_0.h"
 
+#include "nand/onfi_1_0.h"
 #include "onfi_1_0.h"
 
 #include <stddef.h>
@@ -35,7 +35,7 @@ void fc_command_status_init(fc_command_status_t *status, const fc_command_t *com
     {
         return;
     }
-    *status = (fc_command_status_t){0};
+    *status            = (fc_command_status_t){0};
     status->command_id = (command != NULL) ? command->command_id : FC_COMMAND_ID_INVALID;
     status->desc_id    = (command != NULL) ? command->desc_id : FC_DESCRIPTOR_ID_INVALID;
     status->module     = (command != NULL) ? command->module : 0U;

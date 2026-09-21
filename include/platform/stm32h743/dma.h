@@ -5,8 +5,8 @@
 
 #include "sys.h"
 
-//#define DMA1_Stream0 DMA1_Stream0
-//#define DMA1_Stream0_IRQn   DMA1_Stream0_IRQn
+// #define DMA1_Stream0 DMA1_Stream0
+// #define DMA1_Stream0_IRQn   DMA1_Stream0_IRQn
 
 extern DMA_HandleTypeDef g_dma_handle;
 

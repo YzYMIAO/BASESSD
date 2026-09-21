@@ -25,7 +25,6 @@ typedef enum
     FC_COMMAND_MODULE_WEAR_LEVELING
 } fc_command_module_t;
 
-
 /*
 | 状态 | 汇总规则 |
 |---|---|
@@ -38,16 +37,16 @@ typedef enum
 | `READY` | 建议所有有效 CW 都 Ready 后才算命令 Ready |
 | `PROTECTED` | 任意 CW 或目标块受保护即置位 |
 */
-#define FC_CW_STATUS_NAND_FAIL   (1U << 0)
-#define FC_CW_STATUS_TIMEOUT     (1U << 1)
-#define FC_CW_STATUS_CRC_ERROR   (1U << 2)
-#define FC_CW_STATUS_UNC         (1U << 3)
-#define FC_CW_STATUS_MATA_ERROR  (1U << 4)
-#define FC_CW_STATUS_RAID_ERROR  (1U << 5)
-#define FC_CW_STATUS_READY       (1U << 6)
-#define FC_CW_STATUS_PROTECTED   (1U << 7)
-#define FC_CW_STATUS_UNUSED      (0U)
-#define FC_CW_STATUS_SUCCESS     (FC_CW_STATUS_READY)
+#define FC_CW_STATUS_NAND_FAIL  (1U << 0)
+#define FC_CW_STATUS_TIMEOUT    (1U << 1)
+#define FC_CW_STATUS_CRC_ERROR  (1U << 2)
+#define FC_CW_STATUS_UNC        (1U << 3)
+#define FC_CW_STATUS_MATA_ERROR (1U << 4)
+#define FC_CW_STATUS_RAID_ERROR (1U << 5)
+#define FC_CW_STATUS_READY      (1U << 6)
+#define FC_CW_STATUS_PROTECTED  (1U << 7)
+#define FC_CW_STATUS_UNUSED     (0U)
+#define FC_CW_STATUS_SUCCESS    (FC_CW_STATUS_READY)
 
 /* Command and Descriptor share this 32-bit operation configuration. */
 typedef struct fc_cmd_conf_t
@@ -69,32 +68,32 @@ typedef struct fc_cmd_conf_t
 /* Descriptor for one CW, including its physical address, Buffer ID, link ID and status. */
 struct fc_descriptor_t
 {
-    DWORD paa; /* Physical NAND address; valid for this Descriptor's CW. */
-    fc_cmd_conf_t config; /* Copy of Command configuration; config.cw is this CW index. */
-    DWORD buffer_id : 16; /* Buffer Pool ID; 0xFFFF means invalid. */
-    DWORD next_id   : 16; /* Next Descriptor ID; 0xFFFF terminates the chain. */
-    DWORD status    : 8;  /* CW status, using FC_CW_STATUS_* bits. */
-    DWORD ecc_bits  : 8;  /* ECC corrected bit count from last completion; 0 if no error. */
-    DWORD reserved  : 16; /* Reserved for future Descriptor state. */
+    DWORD         paa;            /* Physical NAND address; valid for this Descriptor's CW. */
+    fc_cmd_conf_t config;         /* Copy of Command configuration; config.cw is this CW index. */
+    DWORD         buffer_id : 16; /* Buffer Pool ID; 0xFFFF means invalid. */
+    DWORD         next_id   : 16; /* Next Descriptor ID; 0xFFFF terminates the chain. */
+    DWORD         status    : 8;  /* CW status, using FC_CW_STATUS_* bits. */
+    DWORD         ecc_bits  : 8;  /* ECC corrected bit count from last completion; 0 if no error. */
+    DWORD         reserved  : 16; /* Reserved for future Descriptor state. */
 };
 
 /* SQ command owned by FC after submission; command_id is the Command Pool slot ID. */
 struct fc_command_t
 {
-    DWORD command_id : 16; /* Command Pool ID; 0xFFFF means invalid. */
-    DWORD reserved0  : 16; /* Reserved for Command Pool metadata. */
-    DWORD desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
-    DWORD high_priority : 1;  /* 0=SQ, 1=HSQ. */
-    DWORD module        : 4;  /* Completion route owner; FC does not invoke callbacks. */
-    DWORD feature_addr  : 8;  /* SET/GET_FEATURES register address, sent via COLUMN_0. */
-    DWORD reserved1     : 3;  /* Reserved for future Command control. */
-    DWORD faa; /* FTL address; retained for completion and recovery. */
-    DWORD paa; /* Operation-dependent target; data commands use Descriptor PAA values. */
-    fc_cmd_conf_t config; /* Operation, NAND location, CW and data-path configuration. */
-    uint8_t parameter0; /* Command parameter byte 0. */
-    uint8_t parameter1; /* Command parameter byte 1. */
-    uint8_t parameter2; /* Command parameter byte 2. */
-    uint8_t parameter3; /* Command parameter byte 3. */
+    DWORD         command_id    : 16; /* Command Pool ID; 0xFFFF means invalid. */
+    DWORD         reserved0     : 16; /* Reserved for Command Pool metadata. */
+    DWORD         desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
+    DWORD         high_priority : 1;  /* 0=SQ, 1=HSQ. */
+    DWORD         module        : 4;  /* Completion route owner; FC does not invoke callbacks. */
+    DWORD         feature_addr  : 8;  /* SET/GET_FEATURES register address, sent via COLUMN_0. */
+    DWORD         reserved1     : 3;  /* Reserved for future Command control. */
+    DWORD         faa;                /* FTL address; retained for completion and recovery. */
+    DWORD         paa;                /* Operation-dependent target; data commands use Descriptor PAA values. */
+    fc_cmd_conf_t config;             /* Operation, NAND location, CW and data-path configuration. */
+    uint8_t       parameter0;         /* Command parameter byte 0. */
+    uint8_t       parameter1;         /* Command parameter byte 1. */
+    uint8_t       parameter2;         /* Command parameter byte 2. */
+    uint8_t       parameter3;         /* Command parameter byte 3. */
 };
 
 /* CQ entry containing IDs, per-CW status and ECC info; FTL resolves Command and Descriptor data by ID. */
@@ -108,10 +107,10 @@ struct fc_command_status_t
     DWORD ecc_bit2   : 8;  /* CW2 ECC corrected bit count */
     DWORD ecc_bit3   : 8;  /* CW3 ECC corrected bit count */
     DWORD reserved   : 4;
-    DWORD status0    : 8;  /* CW0 status. */
-    DWORD status1    : 8;  /* CW1 status. */
-    DWORD status2    : 8;  /* CW2 status. */
-    DWORD status3    : 8;  /* CW3 status. */
+    DWORD status0    : 8; /* CW0 status. */
+    DWORD status1    : 8; /* CW1 status. */
+    DWORD status2    : 8; /* CW2 status. */
+    DWORD status3    : 8; /* CW3 status. */
 };
 
 fc_status_t fc_command_validate(const fc_command_t *command);

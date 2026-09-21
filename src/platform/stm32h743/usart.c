@@ -38,7 +38,7 @@ static volatile uint16_t g_rx_tail;
  * uart_log_write() 用极短的关中断区保护“入队 + 打开 TXEIE”的交接，防止日志丢在队列中。
  */
 /* The padding makes final cache-line maintenance safe when a DMA segment ends at ring end. */
-static uint8_t g_tx_ring[USART_TX_RING_CAPACITY + 31U] __ALIGNED(32);
+static uint8_t           g_tx_ring[USART_TX_RING_CAPACITY + 31U] __ALIGNED(32);
 static volatile uint16_t g_tx_head;
 static volatile uint16_t g_tx_tail;
 static volatile uint16_t g_tx_dma_length;
@@ -150,9 +150,9 @@ static void uart_tx_dma_complete(DMA_HandleTypeDef *dma_handle)
 
     (void)dma_handle;
     USART_UX->CR3 &= ~USART_CR3_DMAT;
-    transferred   = g_tx_dma_length;
+    transferred     = g_tx_dma_length;
     g_tx_dma_length = 0U;
-    g_tx_tail      = (uint16_t)((g_tx_tail + transferred) & USART_TX_RING_MASK);
+    g_tx_tail       = (uint16_t)((g_tx_tail + transferred) & USART_TX_RING_MASK);
     __DMB();
     g_tx_dma_active = 0U;
     __SEV();
@@ -171,8 +171,8 @@ static void uart_tx_dma_error(DMA_HandleTypeDef *dma_handle)
     {
         remaining = g_tx_dma_length;
     }
-    transferred   = (uint16_t)(g_tx_dma_length - remaining);
-    g_tx_tail     = (uint16_t)((g_tx_tail + transferred) & USART_TX_RING_MASK);
+    transferred     = (uint16_t)(g_tx_dma_length - remaining);
+    g_tx_tail       = (uint16_t)((g_tx_tail + transferred) & USART_TX_RING_MASK);
     g_tx_dma_length = 0U;
     g_tx_dma_active = 0U;
     g_uart_stats.tx_dma_errors++;
@@ -223,12 +223,12 @@ static int uart_cli_nand(int argc, char *argv[]);
  * 单独注册，不能把 raw NAND 或任意内存访问默认暴露在量产 UART 上。
  */
 static const uart_cli_command_t g_uart_cli_commands[] = {
-    {   "help",                              "help",                                     "show command list", 1U, 1U,    uart_cli_help},
-    { "status",                            "status",                    "show UART error and queue counters", 1U, 1U,  uart_cli_status},
-    {"version",                           "version",                         "show firmware console version", 1U, 1U, uart_cli_version},
-    {    "log", "log level <error|warn|info|debug>",                                 "set runtime log level", 3U, 3U,     uart_cli_log},
+    {   "help",                                                                             "help",                   "show command list", 1U, 1U,    uart_cli_help},
+    { "status",                                                                           "status",  "show UART error and queue counters", 1U, 1U,  uart_cli_status},
+    {"version",                                                                          "version",       "show firmware console version", 1U, 1U, uart_cli_version},
+    {    "log",                                                "log level <error|warn|info|debug>",               "set runtime log level", 3U, 3U,     uart_cli_log},
 #if defined(FC_NAND_TEST_ENABLE)
-    {   "nand",         "nand id | nand test <PAA> | nand paa <ch> <ce> <lun> <plane> <block> <page> <cw>", "run raw NAND diagnostic or make PAA", 2U, 9U,    uart_cli_nand},
+    {   "nand", "nand id | nand test <PAA> | nand paa <ch> <ce> <lun> <plane> <block> <page> <cw>", "run raw NAND diagnostic or make PAA", 2U, 9U,    uart_cli_nand},
 #endif
 };
 
@@ -388,8 +388,14 @@ static int uart_cli_nand(int argc, char *argv[])
         paa = paa_make(lun, block, plane, page, cw);
         (void)uart_log_printf(UART_LOG_INFO,
                               "PAA=0x%08lX (ch=%lu ce=%lu lun=%lu plane=%lu block=%lu page=%lu cw=%lu)\r\n",
-                              (unsigned long)paa, (unsigned long)ch, (unsigned long)ce, (unsigned long)lun,
-                              (unsigned long)plane, (unsigned long)block, (unsigned long)page, (unsigned long)cw);
+                              (unsigned long)paa,
+                              (unsigned long)ch,
+                              (unsigned long)ce,
+                              (unsigned long)lun,
+                              (unsigned long)plane,
+                              (unsigned long)block,
+                              (unsigned long)page,
+                              (unsigned long)cw);
         return 0;
     }
     else
@@ -721,8 +727,8 @@ int uart_log_flush(uint32_t timeout_ms)
     start_tick = HAL_GetTick();
     for (;;)
     {
-        uint8_t empty;
-        uint8_t dma_active;
+        uint8_t  empty;
+        uint8_t  dma_active;
         uint32_t primask = __get_PRIMASK();
 
         __disable_irq();

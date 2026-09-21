@@ -22,9 +22,9 @@ void ssd_crash_record_assert(const char *expression, const char *file, uint32_t 
 {
     uint32_t checksum;
 
-    g_ssd_crash_record.magic = 0U;
+    g_ssd_crash_record.magic   = 0U;
     g_ssd_crash_record.version = SSD_CRASH_VERSION;
-    g_ssd_crash_record.line = line;
+    g_ssd_crash_record.line    = line;
     ssd_crash_copy((char *)g_ssd_crash_record.expression, expression);
     ssd_crash_copy((char *)g_ssd_crash_record.file, file);
     checksum = SSD_CRASH_VERSION ^ line;
@@ -35,7 +35,8 @@ void ssd_crash_record_assert(const char *expression, const char *file, uint32_t 
         checksum ^= (uint8_t)g_ssd_crash_record.file[index];
     }
     g_ssd_crash_record.checksum = checksum;
-    __asm volatile("" ::: "memory");
+    __asm volatile("" ::
+                       : "memory");
     g_ssd_crash_record.magic = SSD_CRASH_MAGIC;
 }
 

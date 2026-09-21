@@ -8,6 +8,7 @@
 > - **Phase A**: buffer_id 便捷接口（`fc_write_cmd_data` / `fc_get_cmd_data_ptr`）
 > - **Phase B**: 核心结构重组（status/descriptor/ECC/dispatch 边界）
 > - **Phase C**: SET/GET_FEATURES 内联数据路径（§14）
+> - **Phase D**: nand_dispatch 函数指针表重构（§15）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
 
@@ -1509,4 +1510,172 @@ else if ((task->operation == OP_SET_FEATURES) || (task->operation == OP_GET_FEAT
 | 原始方案 | 分配 desc + buffer（528B）传递 5 字节 | 浪费资源 |
 | 内联方案 v1 | `fc_command_t.reserved1:11` → `feature_addr:8`；保留 `DWORD parameter : 8` | 位域不可取地址，读回数据无法送达 |
 | 内联方案 v2（最终） | parameter 改为 `uint8_t`；buffer 直接指向 `&command->parameter0`；去掉 task.parameter 重定向 | 读回数据正确落入 command |
+
+---
+
+## 15. nand_dispatch 函数指针表重构 (Phase D)
+
+### 15.1 动机
+
+`nand_dispatch_execute_command()` 和 `nand_dispatch_poll()` 中大量 if-else 链根据 `task->operation` 判断 NAND 操作类型并构造 `nand_fc_request_t`。每条 if-else 链包含 6-7 次条件比较，不仅增加执行时间，还带来分支预测惩罚。
+
+在嵌入式 Cortex-R5/M7 上，分支预测错误代价约 12-14 周期，而函数指针间接跳转固定为 2-3 周期。将条件链替换为函数指针表可显著提升 dispatch 层的执行确定性。
+
+### 15.2 设计方案
+
+两张独立函数指针表，均以 `OP_*`（0~28）为直接下标：
+
+| 表 | 类型 | 用途 | 替代目标 |
+|----|------|------|---------|
+| `g_nand_dispatch_req_table[OP_COUNT]` | `uint8_t (*)(nand_dispatch_task_t *)` | 从 task 预解析数据构造 `nand_fc_request_t` | `nand_dispatch_poll()` 中的 ~90 行 if-else 链 |
+| `g_nand_dispatch_completion_table[OP_COUNT]` | `void (*)(nand_dispatch_task_t *, uint8_t, const nand_fc_completion_t *)` | 设置 cw_status 和 failed_descriptor_id | `nand_dispatch_task_complete()` 中的 if-else 链 |
+
+### 15.3 Request 构建 handler
+
+共 7 个 handler，覆盖全部 29 个 OP：
+
+| Handler | 覆盖的 OP | 行为 |
+|---------|----------|------|
+| `req_program_page` | NORMAL_PROGRAM_PAGE, OTP_DATA_PROGRAM, PROGRAM_PAGE_CACHE | 将各 CW buffer 拼接到 `g_nand_channel_page_buffer[task->ch]`，request.data_length = PAGE_SIZE |
+| `req_read_page` | NORMAL_READ_PAGE, OTP_DATA_READ | 仅 CW0：request = (column=0, row, buffer=cw_buffers[0], length=PAGE_SIZE/4) |
+| `req_cache_read` | READ_PAGE_CACHE_SEQ/RANDOM/LAST | 一次性读 full page：request = (0, row, page_buffer, PAGE_SIZE) |
+| `req_erase` | ERASE_BLOCK | 纯地址：request = (0, row, NULL, 0) |
+| `req_feature` | SET_FEATURES, GET_FEATURES | column = feature_addr：request = (feature_addr, 0, cw_buffers[0], 4) |
+| `req_single` | READ_ID, READ_PARAM_PAGE, READ_UNIQUE_ID, READ_STATUS, READ_STATUS_ENH, RANDOM_DATA_READ, RANDOM_DATA_INPUT 等 | 通用固定长度：length 从 `g_nand_operation_map[op].data_length` 读取 |
+| `req_no_data` | RESET, READ_MODE, BLOCK_LOCK, BLOCK_UNLOCK 等 | 无数据传输，纯 row 地址 |
+
+### 15.4 Completion 策略 handler
+
+共 3 个 handler：
+
+| Handler | 行为 | 适用 OP |
+|---------|------|--------|
+| `completion_all_cws` | 所有 CW 共享同一完成状态；fail → failed_descriptor_id = 0 | PROGRAM (3)、ERASE |
+| `completion_per_cw` | 只设当前 cw_index 的状态；fail → failed_descriptor_id = cw_index | READ (2)、CACHE_READ (3) |
+| `completion_single` | 只设 cw_status[0] | 其余所有 |
+
+### 15.5 分派点简化
+
+**重构前**（`nand_dispatch_poll()` 出队处）：
+
+```c
+if (op == OP_NORMAL_PROGRAM_PAGE || op == OP_OTP_DATA_PROGRAM || ...) {
+    // ~10 行 PROGRAM 拼 buffer 逻辑
+} else if (op == OP_NORMAL_READ_PAGE || ...) {
+    // ~6 行 READ 构建逻辑
+} else if (op == OP_READ_PAGE_CACHE_SEQ || ...) {
+    // ~6 行 CACHE 构建逻辑
+} else if (...) ... // 共 7 个分支 ~90 行
+```
+
+**重构后**（1 行）：
+
+```c
+result = g_nand_dispatch_req_table[task->operation](task);
+```
+
+### 15.6 `nand_operation_map_t` 协议属性增强
+
+`nand_operation_map_t` 新增两个协议属性字段（它们是 ONFI 协议属性，不是 dispatch 策略）：
+
+```c
+typedef struct {
+    // ... 原有字段不变
+    uint8_t  has_data;     /* 操作是否需要数据传输 */
+    uint16_t data_length;  /* 数据传输字节数（0 = 无数据） */
+    // ...
+} nand_operation_map_t;
+```
+
+对应删除两个独立函数 `nand_operation_has_data()` 和 `nand_operation_data_length()`，改为宏直接查表：
+
+```c
+#define nand_operation_has_data(op) \
+    ((op) < OP_COUNT ? g_nand_operation_map[(op)].has_data : 0U)
+#define nand_operation_data_length(op) \
+    ((op) < OP_COUNT ? g_nand_operation_map[(op)].data_length : 0U)
+```
+
+初始化表改用 designated initializer，每个字段名显式标注，消除之前依赖字段顺序可能引发的歧义：
+
+```c
+[OP_NORMAL_READ_PAGE] = {
+    .operation   = OP_NORMAL_READ_PAGE,
+    .name        = "READ_PAGE",
+    .command_1   = NAND_CMD_READ_PAGE_SETUP,
+    .command_2   = NAND_CMD_READ_PAGE_CONFIRM,
+    .has_data    = 1U,
+    .data_length = PAGE_SIZE,
+    .uops        = g_nand_normal_read_page_uops,
+    // ...
+},
+```
+
+### 15.7 废弃代码清理
+
+以下函数被标记为废弃并删除：
+
+| 函数 | 原因 |
+|------|------|
+| `nand_dispatch_execute_request()` | 已被 `nand_fc_start/step` 非阻塞接口替代 |
+| `nand_dispatch_execute_page()` | 逻辑分散到 `req_program_page` / `req_read_page` handler |
+| `nand_dispatch_execute_command()` | 标记 `__attribute__((unused))`，功能完全由函数指针表覆盖 |
+
+### 15.8 文件结构
+
+```
+src/nand/
+├── nand_dispatch.c              # 核心：init, submit, poll, task_complete (~200 行)
+├── nand_dispatch_internal.h     # NEW：内部类型定义（task_t + 函数指针表类型）
+├── nand_dispatch_tables.c       # NEW：7 个 req handler + 3 个 completion handler + 表 (~200 行)
+├── onfi_1_0.c                   # 改：map 表 +2 字段，改用 designated initializer
+
+include/nand/
+├── nand_dispatch.h              # 公用接口不变
+├── onfi_1_0.h                   # map_t +2 字段，函数声明 → 宏
+```
+
+### 15.9 扩展性
+
+未来加新操作（如 Phase 4 LDPC 的专用读取命令）只需三步：
+
+1. 在 `onfi_1_0.h` 定义 `OP_LDPC_READ = 29`，`OP_COUNT` 递增
+2. 在 `onfi_1_0.c` 表加一行 `[OP_LDPC_READ] = { ... has_data = 1U, ... }`
+3. 在 `nand_dispatch_tables.c` 加 handler + 一行表项 `[OP_LDPC_READ] = req_ldpc_read`
+
+**不需要修改任何 if-else 或 switch 语句。**
+
+### 15.10 性能对比
+
+| 指标 | if-else 链（重构前） | 函数指针表（重构后） |
+|------|-------------------|-------------------|
+| 分支数 | 6-7 次条件比较 + 嵌套 | 1 次间接跳转（O(1)） |
+| 执行路径确定性 | ❌ 取决于 OP 值 | ✅ 固定 2-3 周期 |
+| 分支预测惩罚 | 高（每 if 都可能预测失败） | 无（jump table） |
+| 添加新操作 | 改 2 处 if-else 链 | 加 handler + 表项 |
+
+### 15.11 与 nand_engine 的架构一致性
+
+`nand_engine` 层本身已使用函数指针表（`backend->handlers[uop->type]`）驱动 UOP 执行：
+```c
+handler = state->backend->handlers[uop->type];
+result = handler(state->backend->context, uop, ...);
+```
+
+本次重构使 dispatch 层与 engine 层的架构风格一致：**上层（dispatch）用函数指针表选择策略，下层（engine）用函数指针表执行微操作**。两层均无条件判断链，均为纯表驱动。
+
+### 15.12 RANDOM_DATA_READ 的数据传输长度说明
+
+RANDOM_DATA_READ（05h-C1-C2-E0h）等命令的数据传输长度不由命令码本身决定，而是由 FMC 硬件产生的 RE# 时钟脉冲数控制。`nand_operation_map_t.data_length` 中记录的值不是命令的"固有属性"，而是**传输长度的默认值**，通过 `nand_fc_request_t.data_length` 传递给 FMC 层作为 DMA/RE# 脉冲计数器：
+
+```c
+[OP_RANDOM_DATA_READ] = {
+    ...
+    .data_length = (PAGE_SIZE / CW_NUM),
+    /* 注：RE# 时钟次数由 FMC 控制，data_length 仅作为传输长度参数
+     * 传递给 FMC 层的 DMA/RE# 脉冲计数器 */
+},
+```
+
+`req_single` handler 通过 `g_nand_operation_map[op].data_length` 读取该值，无需为每个小操作各写一个 handler。
 

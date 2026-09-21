@@ -3,17 +3,17 @@
 
 #include <stdint.h>
 
-#define PAGE_SIZE (2112)
-#define PAGE_MAIN_SIZE  (2048)
-#define PAGE_SPARE_SIZE (64)
-#define PAGES_PER_BLOCK (64)
+#define PAGE_SIZE        (2112)
+#define PAGE_MAIN_SIZE   (2048)
+#define PAGE_SPARE_SIZE  (64)
+#define PAGES_PER_BLOCK  (64)
 #define BLOCKS_PER_PLANE (2048)
-#define PLANE_NUM (2)
-#define DIE_NUM   (1)
-#define LUN_NUM   (1)
-#define CH_NUM    (1)
-#define CE_NUM    (1)
-#define CW_NUM    (4U)
+#define PLANE_NUM        (2)
+#define DIE_NUM          (1)
+#define LUN_NUM          (1)
+#define CH_NUM           (1)
+#define CE_NUM           (1)
+#define CW_NUM           (4U)
 
 #define CW_WIDTH         (2U)  /* 4个codeword,各个cw的起始位置在4等分处。 */
 #define PAGE_ADDR_WIDTH  (6U)  /* PA0~PA5，每 Block 64 页。 */

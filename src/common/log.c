@@ -6,8 +6,8 @@
 #include <string.h>
 
 /* This filter applies before formatting, so suppressed logs consume no TX queue space. */
-static ssd_log_level_t g_ssd_log_level = SSD_LOG_INFO;
-static ssd_log_sink_t  g_ssd_log_sink;
+static ssd_log_level_t      g_ssd_log_level = SSD_LOG_INFO;
+static ssd_log_sink_t       g_ssd_log_sink;
 static ssd_log_flush_sink_t g_ssd_log_flush_sink;
 static uint32_t             g_ssd_log_truncated;
 static uint32_t             g_ssd_log_write_failures;
@@ -15,8 +15,8 @@ static uint32_t             g_ssd_log_write_failures;
 int ssd_log_write(ssd_log_level_t level, const char *message)
 {
     const ssd_platform_ops_t *platform = ssd_platform_get();
-    uint32_t length;
-    int result;
+    uint32_t                  length;
+    int                       result;
 
     if ((message == NULL) || (level > g_ssd_log_level))
     {
@@ -65,14 +65,14 @@ int ssd_log_vprintf(ssd_log_level_t level, const char *format, va_list args)
     }
     if ((size_t)length >= sizeof(message))
     {
-        static const char marker[] = "...[truncated]";
-        const size_t marker_length = sizeof(marker) - 1U;
-        const size_t marker_offset = sizeof(message) - marker_length - 1U;
+        static const char marker[]      = "...[truncated]";
+        const size_t      marker_length = sizeof(marker) - 1U;
+        const size_t      marker_offset = sizeof(message) - marker_length - 1U;
 
         g_ssd_log_truncated++;
         (void)memcpy(&message[marker_offset], marker, marker_length);
         message[sizeof(message) - 1U] = '\0';
-        length = (int)(sizeof(message) - 1U);
+        length                        = (int)(sizeof(message) - 1U);
     }
 
     /* Pass already-formatted text to the platform sink to preserve transport independence. */

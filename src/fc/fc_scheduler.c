@@ -31,7 +31,7 @@ static uint8_t fc_scheduler_target_is_busy(const fc_scheduler_t *scheduler, fc_c
 
 fc_status_t fc_scheduler_select(fc_scheduler_t *scheduler, fc_command_id_t *command_id)
 {
-    uint16_t               index;
+    uint16_t index;
 
     if ((scheduler == NULL) || (command_id == NULL))
     {

@@ -299,7 +299,114 @@ GET_FEATURES:
 
 ---
 
+## Phase D: nand_dispatch 函数指针表重构
+
+### 动机
+
+`nand_dispatch_poll()` 中根据 `task->operation` 判断 NAND 操作类型的 if-else 链包含 6-7 次条件比较，不仅增加执行时间，还带来分支预测惩罚。同期 `nand_dispatch_execute_command()`（已 `unused`）也包含同样的模式。
+
+### 改动
+
+整体变更涉及 **三张函数指针表** + ONFI 映射表属性增强：
+
+#### 1. Request 构建函数指针表
+
+替换 `nand_dispatch_poll()` 出队处的 ~90 行 if-else 链（L253-346，旧文件行号）。
+
+**7 个 handler 覆盖全部 29 个 OP**：
+
+| Handler | 覆盖操作 | 行为 |
+|---------|---------|------|
+| `req_program_page` | NORMAL_PROGRAM_PAGE, OTP_DATA_PROGRAM, PROGRAM_PAGE_CACHE | 拼 CW buffer → page_buffer，全页写入 |
+| `req_read_page` | NORMAL_READ_PAGE, OTP_DATA_READ | 仅 CW0 读取（后续由 poll chaining 处理） |
+| `req_cache_read` | READ_PAGE_CACHE_SEQ/RANDOM/LAST | 一次性全页读到 page_buffer |
+| `req_erase` | ERASE_BLOCK | 纯 row 地址，无 buffer |
+| `req_feature` | SET/GET_FEATURES | column = feature_addr, length = 4 |
+| `req_single` | READ_ID, READ_PARAM_PAGE, READ_STATUS 等 | 通用：length 从 `g_nand_operation_map[].data_length` 读取 |
+| `req_no_data` | RESET, READ_MODE, BLOCK_LOCK 等 | 无数据，纯地址 |
+
+**分派点从 ~90 行 if-else 简化为 1 行**：
+
+```c
+// 重构前：
+if ((task->operation == OP_NORMAL_PROGRAM_PAGE) || ...) { /* ~10 行 */ }
+else if ((task->operation == OP_NORMAL_READ_PAGE) || ...) { /* ~6 行 */ }
+else if (...) ...  // 共 7 个分支 ~90 行
+
+// 重构后：
+result = g_nand_dispatch_req_table[task->operation](task);
+```
+
+#### 2. Completion 策略函数指针表
+
+替换 `nand_dispatch_task_complete()` 的 if-else 链（3 分支 → 3 handler）：
+
+| Handler | 策略 | 适用 OP |
+|---------|------|--------|
+| `completion_all_cws` | 所有 CW 共享完成状态 | PROGRAM, ERASE |
+| `completion_per_cw` | 只设当前 cw_index 状态 | READ, CACHE_READ |
+| `completion_single` | 只设 cw_status[0] | 其余 |
+
+#### 3. ONFI 映射表属性增强
+
+`nand_operation_map_t` 新增两个字段（它们是 ONFI 协议属性，不是 dispatch 策略）：
+
+```c
+typedef struct {
+    ...
+    uint8_t  has_data;     /* 替代 nand_operation_has_data() */
+    uint16_t data_length;  /* 替代 nand_operation_data_length() */
+    ...
+} nand_operation_map_t;
+```
+
+- 对应函数声明改为宏直接查表
+- 映射表改用 designated initializer（消除字段顺序依赖）
+- `nand_operation_has_data()` / `nand_operation_data_length()` 函数体从 `onfi_1_0.c` 中删除
+
+#### 4. 废弃代码清理
+
+| 函数 | 原因 |
+|------|------|
+| `nand_dispatch_execute_request()` | 已被 `nand_fc_start/step` 非阻塞接口替代 |
+| `nand_dispatch_execute_page()` | 逻辑分散到 handler |
+| `nand_dispatch_execute_command()` | 标记 `unused`，功能完全由函数指针表覆盖 |
+
+### 文件变更
+
+| 文件 | 变更类型 | 说明 |
+|------|---------|------|
+| `src/nand/nand_dispatch_internal.h` | **新建** | 内部类型：`nand_dispatch_task_t` + 函数指针表类型声明 |
+| `src/nand/nand_dispatch_tables.c` | **新建** | 7 个 req handler + 3 个 completion handler + 表定义 |
+| `src/nand/nand_dispatch.c` | 重构 | 移出 ~100 行废弃代码；if-else 链 → 查表；`task` 新增 `ch` 字段 |
+| `src/nand/onfi_1_0.c` | 重构 | 映射表 +2 字段，改用 designated initializer；删除 2 个函数 |
+| `include/nand/onfi_1_0.h` | 重构 | `map_t` +2 字段；函数声明 → 宏 |
+| `src/fc/fc.c` | 无实质变更 | 宏替换（`nand_operation_has_data` 调用不变） |
+| `src/fc/fc_command.c` | 无实质变更 | 宏替换 |
+
+### 性能
+
+| 指标 | 重构前（if-else 链） | 重构后（函数指针表） |
+|------|-------------------|-------------------|
+| 分支数 | 6-7 次比较 | 1 次间接跳转（O(1)） |
+| 执行时间 | 不确定，取决于分支预测 | 固定 2-3 周期 |
+| 分支预测惩罚 | 高 | 无（jump table） |
+| 扩展新操作 | 改 2-3 处 if-else | 加 handler + 表项 |
+
+### 架构一致性
+
+本次重构使 dispatch 层与 engine 层的架构风格一致：
+
+```
+dispatch 层：g_nand_dispatch_req_table[op](task)          ← 函数指针表选策略
+engine  层：backend->handlers[uop->type](context, uop)    ← 函数指针表执行微操作
+```
+
+两层均无任何条件判断链，均为纯表驱动。
+
+---
+
 ## 参考文档
 
 - 接口使用指南：👉 [fc_api_usage.md](../design/fc_api_usage.md)
-- 设计方案（含 §13 贯穿分析）：👉 [fc_nand_design.md](../design/fc_nand_design.md#13-控制状态位贯穿分析与-dispatch-边界设计)
+- 设计方案（含 §15 Phase D）：👉 [fc_nand_design.md](../design/fc_nand_design.md#15-nand_dispatch-函数指针表重构-phase-d)

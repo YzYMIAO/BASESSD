@@ -37,7 +37,7 @@ uint8_t rng_init(void)
  */
 void HAL_RNG_MspInit(RNG_HandleTypeDef *hrng)
 {
-	UNUSED(hrng);
+    UNUSED(hrng);
     RCC_PeriphCLKInitTypeDef rcc_periph_clk_init;
 
     /* RNG 时钟源选择 PLL1_Q，最终 RNG kernel clock=200 MHz。 */

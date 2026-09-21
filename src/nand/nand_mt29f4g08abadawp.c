@@ -69,8 +69,7 @@ uint8_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operation, con
     result                  = nand_engine_start(&transaction->engine, nand_fmc_backend_get(), map->uops, &map->timing, &transaction->request, &transaction->completion);
     if ((result != NAND_RESULT_OK) && (result != NAND_RESULT_NOT_READY))
     {
-        SSD_LOGE("nand: start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result,
-                 transaction->completion.nand_status);
+        SSD_LOGE("nand: start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result, transaction->completion.nand_status);
         transaction->active = 0U;
     }
     else if (result == NAND_RESULT_OK)
@@ -94,9 +93,8 @@ uint8_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *c
     {
         completion->execution_status = result;
         completion->nand_status      = transaction->completion.nand_status;
-        SSD_LOGD("nand: complete, op=%u result=0x%02X status=0x%02X\r\n", transaction->request.operation, result,
-                 completion->nand_status);
-        transaction->active          = 0U;
+        SSD_LOGD("nand: complete, op=%u result=0x%02X status=0x%02X\r\n", transaction->request.operation, result, completion->nand_status);
+        transaction->active = 0U;
     }
     return result;
 }
@@ -161,8 +159,8 @@ uint8_t nand_init(void)
     g_nand_handle.Init.EccComputation  = FMC_NAND_ECC_DISABLE;
     g_nand_handle.Init.ECCPageSize     = FMC_NAND_ECC_PAGE_SIZE_512BYTE;
     /* Start with the board-vendor's conservative timings before switching NAND to Mode 4. */
-    g_nand_handle.Init.TCLRSetupTime   = 8U;
-    g_nand_handle.Init.TARSetupTime    = 8U;
+    g_nand_handle.Init.TCLRSetupTime = 8U;
+    g_nand_handle.Init.TARSetupTime  = 8U;
 
     /* FMC kernel clock=220 MHz. These values are valid at NAND power-on default timing. */
     common_timing.SetupTime     = 4U;
@@ -178,7 +176,7 @@ uint8_t nand_init(void)
     }
     SSD_LOGI("nand: FMC ready, R/B#=%u\r\n",
              (unsigned int)HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT,
-                                             MT29F4G08ABADAWP_RB_GPIO_PIN));
+                                            MT29F4G08ABADAWP_RB_GPIO_PIN));
 
     {
         const nand_fmc_config_t fmc_config = {
@@ -203,9 +201,10 @@ uint8_t nand_init(void)
     if (result != NAND_RESULT_OK)
     {
         SSD_LOGE("nand: reset failed, result=0x%02X status=0x%02X R/B#=%u\r\n",
-                 (unsigned int)result, (unsigned int)completion.nand_status,
+                 (unsigned int)result,
+                 (unsigned int)completion.nand_status,
                  (unsigned int)HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT,
-                                                 MT29F4G08ABADAWP_RB_GPIO_PIN));
+                                                MT29F4G08ABADAWP_RB_GPIO_PIN));
         return result;
     }
     SSD_LOGI("nand: reset complete, status=0x%02X\r\n", (unsigned int)completion.nand_status);
@@ -213,12 +212,11 @@ uint8_t nand_init(void)
     if (result != NAND_RESULT_OK)
     {
         SSD_LOGE("nand: read ID failed, result=0x%02X status=0x%02X\r\n",
-                 (unsigned int)result, (unsigned int)completion.nand_status);
+                 (unsigned int)result,
+                 (unsigned int)completion.nand_status);
         return result;
     }
-    SSD_LOGI("nand: ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0],
-             (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3],
-             (unsigned int)id[4]);
+    SSD_LOGI("nand: ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0], (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3], (unsigned int)id[4]);
     if ((((uint32_t)id[1] << 24U) | ((uint32_t)id[2] << 16U) | ((uint32_t)id[3] << 8U) | id[4]) != MT29F4G08ABADAWP_ID)
     {
         SSD_LOGE("nand: unexpected ID\r\n");
@@ -228,7 +226,8 @@ uint8_t nand_init(void)
     if (result != NAND_RESULT_OK)
     {
         SSD_LOGE("nand: set feature 01h failed, result=0x%02X status=0x%02X\r\n",
-                 (unsigned int)result, (unsigned int)completion.nand_status);
+                 (unsigned int)result,
+                 (unsigned int)completion.nand_status);
         return result;
     }
     SSD_LOGI("nand: init complete\r\n");

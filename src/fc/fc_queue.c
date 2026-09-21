@@ -49,7 +49,7 @@ fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_
         return FC_STATUS_QUEUE_EMPTY;
     }
     *command_id = queue->entries[queue->head];
-    queue->head     = (uint16_t)((queue->head + 1U) % queue->depth);
+    queue->head = (uint16_t)((queue->head + 1U) % queue->depth);
     queue->count--;
     return FC_STATUS_OK;
 }
