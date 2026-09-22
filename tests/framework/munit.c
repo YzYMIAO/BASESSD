@@ -421,7 +421,7 @@ munit_rand_double(void)
 
 /* 向参数数组添加一个参数。 */
 static MunitResult
-munit_parameters_add(size_t *params_size, MunitParameter *params[*params_size], char *name, char *value)
+munit_parameters_add(size_t *params_size, MunitParameter *params[*params_size], const char *name, const char *value)
 {
     *params = realloc(*params, sizeof(MunitParameter) * (*params_size + 2));
     if (*params == NULL)
@@ -519,7 +519,7 @@ static void munit_suite_list_tests(const MunitSuite *suite, bool show_params, co
     const MunitTest          *test;
     const MunitParameterEnum *params;
     bool                      first;
-    char                    **val;
+    const char              **val;
     const MunitSuite         *child_suite;
 
     for (test = suite->tests; test != NULL && test->name != NULL; test++)
@@ -873,7 +873,7 @@ static void munit_test_runner_run_test_with_params(MunitTestRunner *runner, cons
 static void munit_test_runner_run_test_wild(MunitTestRunner *runner, const MunitTest *test, const char *test_name, MunitParameter *params, MunitParameter *p)
 {
     const MunitParameterEnum *pe;
-    char                    **values;
+    const char              **values;
     MunitParameter           *next;
 
     for (pe = test->parameters; pe != NULL && pe->name != NULL; pe++)
@@ -960,7 +960,7 @@ static void munit_test_runner_run_test(MunitTestRunner *runner, const MunitTest 
     const MunitParameter     *cli_p;                  // 遍历 runner->parameters 的游标
     bool                      filled;                 // 标记当前参数是否已被 CLI 指定
     unsigned int              possible;               // 当前参数枚举中的值个数
-    char                    **vals;                   // 遍历 pe->values 的游标
+    const char              **vals;                   // 遍历 pe->values 的游标
     size_t                    first_wild;             // params 数组中第一个通配参数的索引位置
     const MunitParameter     *wp;                     // 遍历 wild_params 的游标
     int                       pidx;                   // 随机选择的参数值索引

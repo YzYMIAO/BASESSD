@@ -73,10 +73,16 @@ Level 3: FC Lifecycle ── 真实 NAND 硬件执行
 | `test_scheduler_select_hsq_first` | `fc_scheduler_select` | HSQ 优先于 SQ |
 | `test_scheduler_select_sq_order` | `fc_scheduler_select` | SQ FIFO 顺序 |
 | `test_scheduler_select_busy_skip` | `fc_scheduler_select` | LUN 忙 → 旋转 → NOT_READY |
+| `test_scheduler_starvation` | `fc_scheduler_select_chain` | 连续 3 个非读后触发饥饿保护，读优先 |
 | `test_scheduler_select_chain_single` | `fc_scheduler_select_chain` | 单命令 chain |
 | `test_scheduler_select_chain_multi` | `fc_scheduler_select_chain` | 3 命令链收集 |
+| `test_scheduler_select_null` | `fc_scheduler_select` | NULL 输入返回错误 |
 
-**共计 31 个测试函数。**
+**command 子套件额外包含**：`submit_null` / `poll_completion_null` / `configure_descriptors_null`
+
+**queue 子套件额外包含**：`cqueue_init` / `cqueue_init_null` / `cqueue_push_pop` / `cqueue_overflow` / `cqueue_null`
+
+**共计 45 个测试函数。**（command 13 + queue 17 + scheduler 12 + fc_api 3）
 
 ### 2.2 Level 2 — 数据路径测试
 
@@ -441,7 +447,8 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
-| 2026-09-22 | v1.3 | Level 3 实现：34 个 OP 全生命周期测试编译通过。参数化 `test_lifecycle_op`，CLI 传入 block，PAA 约定。设计文档同步更新用例表、OP 覆盖表、套件模板、文件组织 |
-| 2026-09-22 | v1.2 | Level 2 实现：15 个测试编译通过。同步 config.ldpc 判断（encode/decode/raid_recover 三处），用例表、套件模板、构建配置、文件组织 |
-| 2026-09-22 | v1.1 | Level 1 实现：31 个测试编译通过。文件合并、UART CLI 集成、旧代码残留清理 |
-| 2026-09-22 | v1.0 | 初始版本：测试分层、用例清单、套件组织、集成方案 |
+| 2026-09-22 | v1.4 | 最终审视修复：饥饿保护测试改为 select_chain、补 completion_queue 测试、补 submit/poll/configure NULL 测试、补 starvation 测试。Level 1 从 31→45 测试。上传代码提交 Phase P |
+| 2026-09-22 | v1.3 | Level 3 实现：34 个 OP 全生命周期测试编译通过 |
+| 2026-09-22 | v1.2 | Level 2 实现：15 个测试编译通过。config.ldpc 修复 |
+| 2026-09-22 | v1.1 | Level 1 实现：31 个测试编译通过。文件合并、UART CLI 集成 |
+| 2026-09-22 | v1.0 | 初始版本 |

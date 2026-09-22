@@ -399,8 +399,8 @@ typedef enum Munit_Result_e
 
 typedef struct Munit_Parameter_s
 {
-    char *name;  // 参数名称
-    char *value; // 参数值
+    const char *name;  // 参数名称
+    const char *value; // 参数值
 } MunitParameter;
 
 // 测试函数类型定义
@@ -418,13 +418,13 @@ typedef enum Munit_Test_Options_s
 
 typedef struct Munit_Parameter_Enum_s
 {
-    char  *name;   // 参数名称
-    char **values; // 参数的可能值列表以 NULL结尾
+    const char  *name;   // 参数名称
+    const char **values; // 参数的可能值列表以 NULL结尾
 } MunitParameterEnum;
 
 typedef struct Munit_Test_s
 {
-    char               *name;       // 测试名称
+    const char         *name;       // 测试名称
     MunitTestFunc       test;       // 测试函数指针
     MunitTestSetup      setup;      // 测试前设置函数，如资源的分配和初始化
     MunitTestTearDown   tear_down;  // 测试后清理函数，如内存释放和资源回收
@@ -441,7 +441,7 @@ typedef enum Munit_Suite_Option_e
 typedef struct Munit_Suite_s MunitSuite;
 typedef struct Munit_Suite_s
 {
-    char            *prefix;     // 套件测试前缀
+    const char      *prefix;     // 套件测试前缀
     MunitTest       *tests;      // 本套件的测试数组
     MunitSuite      *suites;     // 子套件数组(支持套件)
     unsigned int     iterations; // 默认迭代次数
@@ -454,6 +454,9 @@ typedef struct Munit_Test_Runner_s MunitTestRunner;
 /* 测试运行器主入口（裸机入口）：绕过 munit_suite_main 的 CLI 解析，
  * 直接构建 MunitTestRunner 后调用此函数执行套件。 */
 void munit_test_runner_run(MunitTestRunner *runner);
+
+/* 标准测试入口：从 argc/argv 解析 CLI 参数，执行指定测试套件。 */
+int munit_suite_main(const MunitSuite *suite, void *user_data, int argc, char *const argv[argc + 1]);
 
 typedef struct Munit_Argument_s MunitArgument;
 typedef struct Munit_Argument_s

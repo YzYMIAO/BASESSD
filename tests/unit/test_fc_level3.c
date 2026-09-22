@@ -119,7 +119,7 @@ _Static_assert(sizeof(g_op_table) / sizeof(g_op_table[0]) == OP_COUNT,
  **************************************************************************/
 
 /* 参数名数组 — 在 setup 中填充 */
-static char *g_op_names[OP_COUNT + 1];
+static const char *g_op_names[OP_COUNT + 1];
 
 static MunitParameterEnum g_lifecycle_params[] = {
     { "operation", g_op_names },
