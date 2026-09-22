@@ -9,6 +9,10 @@ fc_status_t fc_command_validate(const fc_command_t *command)
 {
     const nand_operation_map_t *op;
 
+    if (command == NULL)
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
     if (command->config.operation >= OP_COUNT)
     {
         return FC_STATUS_INVALID_ARGUMENT;

@@ -239,9 +239,8 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
     if (command->config.random == 0U)  /* FC_RANDOM_ENABLE */
     {
         desc_id = (fc_descriptor_id_t)command->desc_id;
-        cw      = 0U;
 
-        while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (cw <= command->config.cw))
+        for (cw = 0U; cw < (uint8_t)(command->config.cw + 1U); cw++)
         {
             desc = fc_descriptor_id_to_descriptor(desc_id);
             if (desc == NULL) break;
@@ -254,7 +253,6 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             }
 
             desc_id = (fc_descriptor_id_t)desc->next_id;
-            cw++;
         }
     }
 
