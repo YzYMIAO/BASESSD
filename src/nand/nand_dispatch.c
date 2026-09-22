@@ -35,7 +35,7 @@ static uint8_t              g_nand_device_ready;
  * 单命令：count=1，tasks[0] 预加载。
  * 链式命令：count=N，tasks[0..N-1] 预加载，poll 从 cursor=0 推进到 N-1。 */
 static nand_dispatch_lun_chain_t g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
-static uint8_t                   g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
+uint8_t                   g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
 
 /* ======================================================================
  * 辅助函数
@@ -99,10 +99,6 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
 
 nand_result_t nand_dispatch_init(void)
 {
-    uint8_t channel;
-    uint8_t ce;
-    uint8_t lun;
-
     memset(g_nand_channel_queues, 0, sizeof(g_nand_channel_queues));
     memset(g_nand_dispatch_chains, 0, sizeof(g_nand_dispatch_chains));
     g_nand_channel_cursor = 0U;

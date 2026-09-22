@@ -71,8 +71,8 @@ fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer)
     }
 
     /* 32 位对齐 XOR，速度优化（528B / 4 = 132 次） */
-    acc32 = (uint32_t *)ctx->acc_buf;
-    buf32 = (const uint32_t *)cw_buffer;
+    acc32 = (uint32_t *)(void *)ctx->acc_buf;
+    buf32 = (const uint32_t *)(const void *)cw_buffer;
     for (i = 0; i < (FC_BUFFER_POOL_CW_SIZE / sizeof(uint32_t)); i++)
     {
         acc32[i] ^= buf32[i];
@@ -125,7 +125,7 @@ void fc_raid_recover(uint8_t *recovered,
                      uint8_t failed_idx, uint16_t length)
 {
     uint8_t  i;
-    uint32_t *rec32 = (uint32_t *)recovered;
+    uint32_t *rec32 = (uint32_t *)(void *)recovered;
     uint16_t word_len = length / sizeof(uint32_t);
 
     if ((recovered == NULL) || (buffers == NULL) || (count == 0U) ||
@@ -144,7 +144,7 @@ void fc_raid_recover(uint8_t *recovered,
         }
         for (uint16_t w = 0U; w < word_len; w++)
         {
-            rec32[w] ^= ((const uint32_t *)buffers[i])[w];
+            rec32[w] ^= ((const uint32_t *)(const void *)buffers[i])[w];
         }
     }
 }

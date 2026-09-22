@@ -95,6 +95,7 @@ static void store_ecc8(struct fc_bch_control *bch, uint8_t *dst, const uint32_t 
 static int  modulo(struct fc_bch_control *bch, unsigned int v);
 static int  mod_s(struct fc_bch_control *bch, unsigned int v);
 static int  deg(unsigned int poly);
+static unsigned int gf_div(struct fc_bch_control *bch, unsigned int a, unsigned int b);
 static unsigned int gf_mul(struct fc_bch_control *bch, unsigned int a, unsigned int b);
 static unsigned int gf_sqr(struct fc_bch_control *bch, unsigned int a);
 static unsigned int gf_inv(struct fc_bch_control *bch, unsigned int a);
@@ -201,7 +202,7 @@ void fc_bch_encode(struct fc_bch_control *bch, const uint8_t *data,
         len  -= mlen;
     }
 
-    pdata = (const uint32_t *)data;
+    pdata = (const uint32_t *)(const void *)data;
     mlen  = len / 4U;
     data += 4U * mlen;
     len  -= 4U * mlen;
@@ -246,6 +247,18 @@ static inline int mod_s(struct fc_bch_control *bch, unsigned int v)
 {
     const unsigned int n = GF_N(bch);
     return (v < n) ? (int)v : (int)(v - n);
+}
+
+static inline int deg(unsigned int poly)
+{
+    if (poly == 0) return -1;
+    return (int)(sizeof(unsigned int) * 8U - __builtin_clz(poly)) - 1;
+}
+
+static inline unsigned int gf_div(struct fc_bch_control *bch, unsigned int a, unsigned int b)
+{
+    if ((a == 0U) || (b == 0U)) return 0U;
+    return bch->a_pow_tab[(unsigned int)mod_s(bch, (unsigned int)((int)bch->a_log_tab[a] + (int)((int)GF_N(bch) - (int)bch->a_log_tab[b])))];
 }
 
 static inline unsigned int gf_mul(struct fc_bch_control *bch, unsigned int a, unsigned int b)
@@ -328,7 +341,7 @@ static int compute_error_locator_polynomial(struct fc_bch_control *bch, const un
     pelp->deg = 0; pelp->c[0] = 1;
     elp->deg = 0; elp->c[0] = 1;
 
-    for (i = 0; (i < t) && (elp->deg <= (int)t); i++) {
+    for (i = 0; (i < t) && ((int)elp->deg <= (int)t); i++) {
         if (d) {
             k = (int)(2U * i) - pp;
             gf_poly_copy(elp_copy, elp);
@@ -340,7 +353,7 @@ static int compute_error_locator_polynomial(struct fc_bch_control *bch, const un
                 }
             }
             tmp = (unsigned int)((int)pelp->deg + k);
-            if ((int)tmp > elp->deg) {
+            if ((int)tmp > (int)elp->deg) {
                 elp->deg = (int)tmp;
                 gf_poly_copy(pelp, elp_copy);
                 pd = d;
@@ -353,7 +366,7 @@ static int compute_error_locator_polynomial(struct fc_bch_control *bch, const un
                 d ^= gf_mul(bch, elp->c[j], syn[2U * i + 2U - j]);
         }
     }
-    return (elp->deg > (int)t) ? -1 : elp->deg;
+    return ((int)elp->deg > (int)t) ? -1 : (int)elp->deg;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -692,7 +705,7 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, uint8_t swap
     bch->mod8_tab  = (uint32_t *)calloc(words * 1024U, sizeof(uint32_t));
     bch->ecc_buf   = (uint32_t *)calloc(words, sizeof(uint32_t));
     bch->ecc_buf2  = (uint32_t *)calloc(words, sizeof(uint32_t));
-    bch->xi_tab    = (uint32_t *)calloc((unsigned int)m, sizeof(uint32_t));
+    bch->xi_tab    = (unsigned int *)calloc((unsigned int)m, sizeof(unsigned int));
     bch->syn       = (unsigned int *)calloc(2U * (unsigned int)t, sizeof(unsigned int));
     bch->cache     = (int *)calloc(2U * (unsigned int)t, sizeof(int));
     bch->elp       = (struct gf_poly *)calloc((size_t)((unsigned int)t + 1U), sizeof(struct gf_poly_deg1));

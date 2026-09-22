@@ -1022,3 +1022,45 @@ fc_complete_from_nand:
 | #1 | `failed_descriptor_id` 在 ECC 后指向错误 CW | ✅ 已修复 |
 | #E | CQ push 失败时命令泄漏（ACTIVE 状态） | ✅ 已修复 |
 | #4 | 迭代条件写法不统一 | ✅ 已修复 |
+
+---
+
+## Phase O: 编译警告清理 — 链接修复 + 类型安全 + 死代码防护
+
+**日期**: 2026-09-22
+**涉及的提交**: （尚未合并，当前工作区改动）
+
+### 背景
+
+Phase M/N 引入的代码以及历史遗留问题累计了约 30 个编译警告（剔除占位文件的 `#warning` TODO 标记和 OP 宏文档区重复定义），包括链接错误、类型不兼容、未用变量/函数、指针对齐等问题。
+
+### 改动
+
+| 文件 | 改动 |
+|------|------|
+| `include/nand/onfi_1_0.h` | 删除 OP_PROGRAM_PAGE_MULTI_PLANE(30U) 和 OP_ERASE_BLOCK_MULTI_PLANE(33U) 的文档区重复定义（值分别为 30U/33U，与正式定义区 31U/32U 冲突） |
+| `src/fc/fc_bch_engine.c` | ① 实现 `deg()` 函数体（原仅前向声明无定义，链接错误） ② 实现 `gf_div()` 函数体（原未定义，链接错误） ③ `xi_tab` 分配类型从 `uint32_t*` 修复为 `unsigned int*`（与结构体成员类型匹配） ④ sign-compare 警告统一加 `(int)` 显式转换 ⑤ cast-align 警告改为 `(const uint32_t *)(const void *)` 中间转换 |
+| `src/fc/fc_ldpc_engine.c` | `g_qc` 变量和 `fc_ecc_init_ldpc()` 用 `#if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)` 条件编译保护 |
+| `src/fc/fc_raid_engine.c` | 4 处 `uint8_t*`→`uint32_t*` cast 加 `(void*)` 中间转换消除 cast-align 警告 |
+| `src/fc/fc_scheduler.c` | `fc_submission_queue_pop(..., &cmd)` 类型不兼容（cmd 为 `fc_command_t*`，pop 需 `fc_command_id_t*`）修复 |
+| `src/nand/nand_dispatch.c` | `g_nand_channel_page_buffer` 去掉 `static` 使 nand_dispatch_tables.c 的 `extern` 引用可链接 |
+| `src/nand/nand_mt29f4g08abadawp.c` | `g_nand_timing_fast` 和 `nand_fmc_timing_to_pcc()` 用 `#if (CONFIG_NAND_TIMING_MODE_4 != 0)` 条件编译保护 |
+| `src/platform/stm32h743/delay.c` | 添加 `g_dwt_cyccnt_per_us` 全局变量定义并与 `g_dwt_cycles_per_us` 同步初始化，修复 nand_rb_interrupt.c 的 `extern` 链接 |
+| `src/platform/stm32h743/nand_rb_interrupt.c` | 删除未用的 `GPIO_InitTypeDef gpio` 变量 |
+
+### 解决的问题
+
+| # | 问题 | 状态 |
+|---|---|---|
+| #1 | `fc_bch_engine.c`: `deg()` 声明无定义，链接失败 | ✅ 已修复 |
+| #2 | `fc_bch_engine.c`: `gf_div()` 未声明未定义，`find_poly_deg3/4_roots` 链接失败 | ✅ 已修复 |
+| #3 | `fc_bch_engine.c`: `xi_tab` 类型不匹配 (`uint32_t*` vs `unsigned int*`) | ✅ 已修复 |
+| #4 | `fc_bch_engine.c`: 3 处 sign-compare + 1 处三目符号变化 | ✅ 已修复 |
+| #5 | `fc_bch_engine.c` / `fc_raid_engine.c`: cast-align 警告 | ✅ 已修复 |
+| #6 | `fc_ldpc_engine.c`: `g_qc` / `fc_ecc_init_ldpc` 在 BCH 编译模式下未使用 | ✅ 已修复 |
+| #7 | `fc_scheduler.c`: `pop(&cmd)` 传参类型不兼容 | ✅ 已修复 |
+| #8 | `nand_dispatch.c`: `g_nand_channel_page_buffer` static 导致跨文件链接失败 | ✅ 已修复 |
+| #9 | `nand_mt29f4g08abadawp.c`: Mode 4 函数/常量在默认配置下未使用 | ✅ 已修复 |
+| #10 | `delay.c`: `g_dwt_cyccnt_per_us` 未定义导致 nand_rb_interrupt 链接失败 | ✅ 已修复 |
+| #11 | `nand_rb_interrupt.c`: 未用变量 `gpio` | ✅ 已修复 |
+| - | `onfi_1_0.h`: OP_PROGRAM/ERASE_MULTI_PLANE 宏重复定义 | ✅ 已修复 |

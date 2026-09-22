@@ -85,9 +85,9 @@ fc_status_t fc_scheduler_select(fc_scheduler_t *scheduler, fc_command_id_t *comm
                 return fc_submission_queue_pop(scheduler->hsq, command_id);
             }
             /* 目标忙，移到队尾继续找 */
-            fc_command_id_t skipped;
-            (void)fc_submission_queue_pop(scheduler->hsq, &skipped);
-            (void)fc_submission_queue_push(scheduler->hsq, skipped);
+            fc_command_id_t skipped_id;
+            (void)fc_submission_queue_pop(scheduler->hsq, &skipped_id);
+            (void)fc_submission_queue_push(scheduler->hsq, skipped_id);
         }
         return FC_STATUS_NOT_READY;
     }
@@ -134,7 +134,8 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
             cmd     = fc_command_id_to_command(head_id);
             if (cmd == NULL)
             {
-                (void)fc_submission_queue_pop(scheduler->hsq, &cmd);
+                fc_command_id_t null_id;
+                (void)fc_submission_queue_pop(scheduler->hsq, &null_id);
                 continue;
             }
             if (fc_scheduler_target_is_busy(scheduler, head_id) == 0U)

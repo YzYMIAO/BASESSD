@@ -37,8 +37,6 @@ extern uint32_t g_dwt_cyccnt_per_us;
 
 void nand_rb_interrupt_init(void)
 {
-    GPIO_InitTypeDef gpio = {0};
-
     g_rb_int.armed = 0U;
     g_rb_int.triggered = 0U;
     g_rb_int.arm_cycles = 0U;

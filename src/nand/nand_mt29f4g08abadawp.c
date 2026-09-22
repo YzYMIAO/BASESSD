@@ -18,10 +18,12 @@ static const nand_fmc_timing_t g_nand_timing_slow = {
 };
 
 /* 高速时序（ONFI Mode 4，tRC=20ns） */
+#if (CONFIG_NAND_TIMING_MODE_4 != 0U)
 static const nand_fmc_timing_t g_nand_timing_fast = {
     20U, 5U, 5U, 5U, 5U, 5U, 10U, 5U, 5U, 10U, 5U, 5U, 10U, 20U, 30U,
     10U, 10U, 0U, 10U, 12U, 5U, 5U, 50U, 50U, 5U, 5U, 20U, 50U, 30U,
 };
+#endif /* CONFIG_NAND_TIMING_MODE_4 */
 
 /*
  * 根据 ONFI 时序参数 nand_fmc_timing_t 和 FMC 时钟频率，
@@ -36,6 +38,7 @@ static const nand_fmc_timing_t g_nand_timing_fast = {
  *   HoldSetupTime = max(tCH, tALH, tCLH, tDH)      / tHCLK
  *   HiZSetupTime  = tRHZ / tHCLK
  */
+#if (CONFIG_NAND_TIMING_MODE_4 != 0U)
 static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi,
                                     FMC_NAND_PCC_TimingTypeDef *pcc)
 {
@@ -72,6 +75,7 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi,
 
     #undef CEIL_DIV
 }
+#endif /* CONFIG_NAND_TIMING_MODE_4 */
 static uint8_t nand_fmc_wait_ready(void *context, uint16_t timeout_us)
 {
     uint16_t elapsed_us;

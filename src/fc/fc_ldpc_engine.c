@@ -23,7 +23,9 @@
  */
 
 static fc_bch_control_t *g_bch = NULL;
+#if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
 static fc_ldpc_qc_t     *g_qc  = NULL;
+#endif
 
 static uint8_t fc_ecc_init_bch(void)
 {
@@ -34,6 +36,7 @@ static uint8_t fc_ecc_init_bch(void)
     return (g_bch != NULL) ? 1U : 0U;
 }
 
+#if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
 static uint8_t fc_ecc_init_ldpc(void)
 {
     if (g_qc == NULL)
@@ -42,6 +45,7 @@ static uint8_t fc_ecc_init_ldpc(void)
     }
     return (g_qc != NULL) ? 1U : 0U;
 }
+#endif
 
 fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length)
 {
