@@ -3,11 +3,14 @@
 
 #include <stdint.h>
 
-#define NAND_RESULT_OK               0x00U
-#define NAND_RESULT_INVALID_ARGUMENT 0xE1U
-#define NAND_RESULT_TIMEOUT          0xE2U
-#define NAND_RESULT_NOT_READY        0xE3U
-#define NAND_RESULT_OPERATION_FAILED 0xE4U
+typedef enum
+{
+    NAND_RESULT_OK                = 0x00U,
+    NAND_RESULT_INVALID_ARGUMENT  = 0xE1U,
+    NAND_RESULT_TIMEOUT           = 0xE2U,
+    NAND_RESULT_NOT_READY         = 0xE3U,
+    NAND_RESULT_OPERATION_FAILED  = 0xE4U,
+} nand_result_t;
 
 typedef enum
 {
@@ -61,7 +64,7 @@ typedef struct
     uint16_t busy_timeout_us;
 } nand_operation_timing_t;
 
-typedef uint8_t (*nand_uop_handler_t)(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+typedef nand_result_t (*nand_uop_handler_t)(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 
 typedef struct
 {
@@ -89,16 +92,10 @@ typedef struct
  * 阻塞式执行整条 UOP 序列，直到完成或出错。
  *
  * @deprecated 仅用于初始化阶段的同步调用（nand_init）。
- * 命令生命周期中的热路径请使用 nand_engine_start() + nand_engine_step()
- * 非阻塞组合，避免 CPU 空转等待 tPROG/tBERS。
- *
- * 当前调用者（nand_fc_execute 系列）仅在以下场景使用：
- *   - nand_fc_reset / nand_fc_read_id / nand_fc_set_features
- *   - nand_fc_read_page / nand_fc_program_page / nand_fc_erase_block
- *   这些在 nand_init() 过程中各调用一次，阻塞开销可接受。
+ * ...
  */
-uint8_t nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion);
-uint8_t nand_engine_start(nand_engine_state_t *state, const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion);
-uint8_t nand_engine_step(nand_engine_state_t *state);
+nand_result_t nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion);
+nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion);
+nand_result_t nand_engine_step(nand_engine_state_t *state);
 
 #endif /* PLATFORM_STM32H743_NAND_ENGINE_H */

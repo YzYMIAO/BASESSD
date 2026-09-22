@@ -11,6 +11,10 @@
 > - **Phase D**: nand_dispatch 函数指针表重构（§15）
 > - **Phase D(续)**: per-LUN chain buffer 命令链执行（§16）
 > - **Phase E**: Multi-Plane 操作支持 + 行地址数组重构 + OP 码拆分（§17）
+> - **Phase F/G/H**: WAIT_READY 中断驱动、DMA 中断完成、ONFI 时序切换
+> - **Phase I**: 读饥饿保护（QoS）
+> - **Phase J**: 加扰引擎扩展（多算法 + 多种子策略）
+> - **Phase K**: BCH ECC 引擎移植 + QC-LDPC 硬判决
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
 
@@ -273,7 +277,16 @@ nand_engine_start()    —— 异步模式，初始化状态机
 nand_engine_step()     —— 异步模式，推进一步，返回 NOT_READY 表示需继续轮询
 ```
 
-WAIT_READY 和 CHECK_READY 内置超时检测（`busy_timeout_us`），超时返回 `NAND_RESULT_TIMEOUT`。
+#### WAIT_READY — 中断驱动 vs 引擎超时
+
+WAIT_READY 与 CHECK_READY 在 nand_engine_step() 中有不同的超时处理策略：
+
+| UOP 类型 | 超时由谁判定 | 后备机制 | 原因 |
+|----------|-------------|---------|------|
+| WAIT_READY | **handler 全权处理**（nand_fmc_exec_wait_ready） | 超时→GPIO 轮询最后一次确认 | handler 内部走 EXTI6 中断路径，t/o 后还能做 GPIO 确认 |
+| CHECK_READY | **引擎层判定**（DWT 计数器 + wait_polls） | 超时→直接 TIMEOUT | 依赖 70h 状态寄存器，超时后重发 70h |
+
+引擎遇到 WAIT_READY 时**直接返回 NOT_READY**，不插入任何超时逻辑——超时完全由 handler 通过 nand_rb_interrupt_timed_out() 自行判断：
 
 ### 3.2 FMC 硬件后端 (nand_fmc)
 
@@ -434,24 +447,56 @@ FC 通过 `fc_complete_from_nand()` 将 `nand_dispatch_completion_t` 转换为 `
 
 ## 5. 数据路径 (Data Path)
 
+FC 数据路径分两个方向：
+
+- **写路径 (encode)**：FC 内部在 NAND Program 前调用，对 FTL 完全透明
+- **读路径 (decode)**：分为两阶段
+  - **Stage 1**：FC 内部在 NAND Read 完成后、CQ push 前自动执行
+  - **Stage 2**：FTL 触发的 RAID 恢复路径
+
 ### 5.1 编码流程 (Page Pack)
 
 ```
 User Data (512B/CW)
   → [Random Engine] 加扰（LFSR，种子 PAA × program_sequence）
   → [LDPC Engine] 编码（添加 parity）
+  → RAID XOR 编码（如配置）
   → 写入 NAND
 ```
+
+RAID XOR 在 ECC 编码之后进行，保证了 parity CW 同样经过 ECC 保护。所有步骤在 FC 内部完成。
 
 ### 5.2 解码流程 (Page Unpack)
 
 ```
-NAND 读取
-  → [LDPC Engine] 解码（hard/soft/raw）
-  → 若失败 → [RAID Engine] XOR 恢复
-  → [Random Engine] 解扰
-  → User Data
+NAND 读取完成
+  │
+  ├─ Stage 1 / FC 内部（CQ push 前）:
+  │   ┌──────────────────────────────────┐
+  │   │ 逐 CW: ECC 解码                  │
+  │   │   ├─ 全部成功 → 解扰所有 buffer  │
+  │   │   │              → push CQ (status=READY)
+  │   │   └─ 有 CW 失败 → 不解扰 buffer  │
+  │   │                → push CQ (status=UNC)
+  │   └──────────────────────────────────┘
+  │
+  └─ Stage 2 / FTL 触发（poll CQ 后）:
+      遍历 desc 链，发现 status=UNC
+      ┌──────────────────────────────────┐
+      │ 调用 fc_data_path_raid_recover() │
+      │   ├─ RAID XOR 重建 failed CW     │
+      │   ├─ ECC 重试                   │
+      │   ├─ 解扰所有 CW                │
+      │   └─ 更新 desc->status = READY  │
+      └──────────────────────────────────┘
+      │
+      └─ 仍失败 → BBT / read retry / 其他恢复策略
 ```
+
+**关键设计约束**：
+- RAID XOR 在 scrambled domain 进行：ECC 失败时，其他 CW 处于 "ECC 已纠正但仍加扰" 状态，XOR 重建的结果与被恢复 CW 处于同一 domain，重建后 ECC 解码再统一解扰
+- 加解扰完全对 FTL 透明：FTL 从不直接调用 Random 引擎
+- RAID 恢复后的解扰统一在 `raid_recover()` 内部完成，不暴露到 FTL
 
 ### 5.3 CW 布局
 
@@ -525,9 +570,9 @@ static inline uint32_t   paa_to_nand_row(nand_paa_t paa);  // 转换为 NAND 行
 | `src/nand/ecc.c` | ✅ 已删除 | 桩文件 |
 | `src/nand/nand_command.c` | ✅ 已删除 | 桩文件，所有 ONFI 命令编码已在 `onfi_1_0.c` 实现 |
 | `src/nand/nand_timing.c` | ✅ 已删除 | 桩文件，时序参数已在 `nand_operation_map_t.timing` 中 |
-| `fc_ldpc_engine` | encode/decode 返回 NOT_SUPPORTED | 待实现 BCH/LDPC 算法 |
-| `fc_raid_engine` | XOR 返回 NOT_SUPPORTED | 待实现 |
-| `fc_data_path` | encode/decode 为 no-op | 接入 random→LDPC→RAID 管线 |
+| `fc_ldpc_engine` | ✅ 已完成 | BCH(m=13, t=4) 编码/解码；QC-LDPC 硬判决编码/解码（可选） |
+| `fc_raid_engine` | ✅ 已完成 | per-LUN START/ACCUMULATE/END 序列；fc_raid_recover 静态恢复 |
+| `fc_data_path` | ✅ 已完成 | 写路径：Random→ECC→RAID；读路径：ECC→条件解扰（FC 内部）/ RAID 恢复（FTL 触发） |
 
 ### 8.2 接口待改进项
 
@@ -545,13 +590,13 @@ static inline uint32_t   paa_to_nand_row(nand_paa_t paa);  // 转换为 NAND 行
 
 ### 8.3 功能扩展规划
 
-| 阶段 | 内容 |
-|------|------|
-| Phase 1 | 多 LUN 并发：nand_engine 异步步进 + 每 LUN 独立状态机 |
-| Phase 2 | DMA 数据传输：FMC 数据窗口改为 DMA 驱动 |
-| Phase 3 | 中断驱动：R/B# EXTI 替代轮询 WAIT_READY |
-| Phase 4 | LDPC 硬解码实现 |
-| Phase 5 | RAID 跨 Plane XOR 恢复 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| Phase 1 | 多 LUN 并发：nand_engine 异步步进 + 每 LUN 独立状态机 | ✅ |
+| Phase 2 | DMA 数据传输：FMC 数据窗口改为 DMA 驱动，中断完成通知 | ✅ |
+| Phase 3 | 中断驱动：R/B# EXTI 替代轮询 WAIT_READY | ✅ |
+| Phase 4 | LDPC 硬解码实现 + BCH ECC 移植 | ✅ |
+| Phase 5 | RAID 跨 Plane XOR 恢复 + 读路径管线拆分 | ✅ |
 
 ---
 
@@ -2129,6 +2174,119 @@ for (plane = 0; plane < PLANE_NUM; plane++) {
 | `src/nand/nand_dispatch_tables.c` | 新增 5 个 req handler + completion handler + 两张函数指针表各加 5 项 |
 | `src/fc/fc.c` | `cws[plane][cw]` 适配新维度 |
 
+---
+
+## 18. 多通道支持现状与硬件限制
+
+### 18.1 当前硬件拓扑
+
+```
+STM32H743 FMC 总线（单条并行总线）
+  └─ MT29F4G08ABADAWP (1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page)
+```
+
+当前物理连接：**1 通道 × 1 片选 × 1 LUN**。
+
+### 18.2 软件架构的多通道准备
+
+调度层和 dispatch 层已按 `[CH_NUM][CE_NUM][LUN_NUM]` 多维数组编写：
+
+```c
+// nand_config.h
+#define CH_NUM (1U)
+#define CE_NUM (1U)
+#define LUN_NUM (1U)
+
+// nand_dispatch.c — 各维度数组
+static nand_channel_queue_t       g_nand_channel_queues[CH_NUM];
+static nand_dispatch_lun_chain_t  g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
+static uint8_t                    g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
+
+// fc_scheduler.c — per-LUN busy 表
+uint8_t busy[CH_NUM][CE_NUM][LUN_NUM];
+```
+
+`nand_dispatch_poll()` 遍历所有通道：
+```c
+for (count = 0; count < CH_NUM; count++) {
+    channel = (uint8_t)((g_nand_channel_cursor + count) % CH_NUM);
+    for (ce = 0; ce < CE_NUM; ce++)
+        for (lun_idx = 0; lun_idx < LUN_NUM; lun_idx++) { ... }
+}
+```
+
+FC 命令包含通道字段：
+```c
+// fc_cmd_conf_t
+DWORD ch  : 2;   /* 目标通道号 */
+DWORD ce  : 2;   /* 目标片选号 */
+DWORD lun : 2;   /* 目标 LUN 号 */
+```
+
+这些代码在多通道场景下**逻辑正确**——改 `CH_NUM` 后数组和循环会自动扩展。
+
+### 18.3 当前不支持多通道的模块
+
+以下模块**单例硬编码**，不感知通道维度：
+
+| 模块 | 现状 | 问题 |
+|------|------|------|
+| `nand_fmc.c` — FMC 后端 | `static nand_fmc_config_t g_nand_fmc_config` 全局一份 | 第二片 NAND 没有自己的 FMC 地址窗口 + CE 引脚配置 |
+| `nand_fmc.c` — Backend | `static nand_engine_backend_t g_nand_fmc_backend` 全局一份 | backend 指向同一个 config，所有通道共享 |
+| `nand_rb_interrupt.c` — RB 中断 | 单 EXTI6（PD6） | 第二片 NAND 的 RB 引脚没有 EXTI 通道可接 |
+| `nand_dma.c` — DMA | 单对 `DMA2_Stream0/1` | 两个通道同时传输时无额外 Stream 可用 |
+| `nand_engine_state_t` — 引擎状态 | 不含 `ch`/`ce`/`lun` 字段 | step 推进时不知道自己在哪个通道上 |
+
+### 18.4 硬件层面的本质限制
+
+STM32H743 的 **FMC（Flexible Memory Controller）是共享总线控制器**，不是多通道 NAND 控制器：
+
+| 对比项 | FMC（当前） | 专用 NAND 控制器（企业级/MPU） |
+|--------|------------|-----------------------------|
+| 总线结构 | **单条并行总线**，CLE/ALE/RE/WE 共用 | **每条通道独立**命令/地址/数据线 |
+| 并行度 | ❌ 不能——总线一次只能操作一个设备 | ✅ 各通道独立执行，命令并发 |
+| RB 引脚 | GPIO 或 EXTI，**数量有限** | 控制器内置，每通道独立采样 |
+| DMA 通道 | 需要手动分配，有限 | 通常内置 per-channel DMA |
+| 多片连接方式 | CE 分时复用总线（片选切换） | 独立通道，无总线竞争 |
+
+**FMC 接多片 NAND 只能 CE 分时复用**：
+
+```
+FMC 总线 (地址/数据/控制线共用)
+  ├── CE0 → NAND #0
+  ├── CE1 → NAND #1
+  └── CE2 → NAND #2
+
+任何时候只能有一片 NAND 在使用总线。
+```
+
+不是真正的"多通道并行"，只是"多片分时复用一条总线"。
+
+### 18.5 如果要支持多通道，需要改什么
+
+| 改动项 | 说明 | 工作量 |
+|--------|------|--------|
+| `nand_fmc_config_t` 数组化 | `config[CH_NUM]`，每通道独立 FMC 地址 + CE + RB | 小（结构体数组） |
+| `nand_engine_backend_t` 数组化 | `backend[CH_NUM]`，每通道独立 handler table | 小 |
+| `nand_fmc_exec_wait_ready` 多实例 | 每个 backend 有独立 RB 中断资源 | 中（需多 EXTI） |
+| DMA 资源化 | 每通道独立 DMA Stream 或排队传输 | 中 |
+| `nand_engine_state_t` 加通道 id | step 中知道自己操作的通道 | 小 |
+| FMC 总线仲裁 | 多通道共享总线时的冲突避免 | 大（需加锁或排队） |
+
+### 18.6 验证结论
+
+| 层面 | 多通道支持程度 | 能否验证 |
+|------|--------------|---------|
+| FC 调度器 + busy 表 | ✅ 代码完整，改 `CH_NUM` 即可 | ❌ 单通道硬件 |
+| dispatch 队列 + chain buffer | ✅ 代码完整 | ❌ 单通道硬件 |
+| dispatch poll 遍历 | ✅ 代码完整 | ❌ 单通道硬件 |
+| FMC 后端 | ❌ 单例 | ❌ 无法 |
+| RB 中断 | ❌ 单 EXTI | ❌ 无法 |
+| DMA | ❌ 单对 Stream | ❌ 无法 |
+| 引擎状态机 | ❌ 无通道 id | ❌ 无法 |
+
+**结论**：调度层和 dispatch 层的多通道架构是真实的。FMC/NAND 引擎层需要改造才能真正支持多通道。
+
 ### 17.9 设计演进
 
 | 迭代 | 问题 | 方案 |
@@ -2137,3 +2295,121 @@ for (plane = 0; plane < PLANE_NUM; plane++) {
 | v2 | 展平后丢失 plane 语义，`cw_count` 意义模糊 | 加 plane 维度 `cw_paa[PLANE_NUM][CW_NUM]` |
 | v3 | ROW_0/1/2 handler 固定读 `request->row`，多 plane 发第二组地址需新 uop | `row`→`row[NAND_PLANE_MAX]`，operand 选索引 |
 | v4 | 读命令只有一种：30h 后必出数据 | 拆为 WITH/WITHOUT_DATA_OUT 双版本 |
+
+---
+
+## 19. ONFI 时序模式切换
+
+### 19.1 问题背景
+
+`nand_init()` 在 FMC 初始化时配置了保守时序，随后通过 SET_FEATURES(01h) 将 NAND 芯片切换到高速 Mode 4（tRC=20ns），但 **FMC 硬件时序寄存器从未更新**，FMC 始终跑在低速时序，浪费了 Mode 4 的速度提升。
+
+### 19.2 控制宏
+
+```c
+// nand_config.h
+#define CONFIG_NAND_TIMING_MODE_4 (0U)
+```
+
+| 值 | 模式 | 说明 |
+|----|------|------|
+| 0（默认） | 低速 | NAND 默认 Mode 0（tRC=50ns），FMC 保守时序。用于功能验证初期 |
+| 1 | 高速 | NAND 切 Mode 4（tRC=20ns），FMC 重新初始化为匹配快速时序 |
+
+### 19.3 两套时序参数
+
+```c
+// nand_mt29f4g08abadawp.c
+static const nand_fmc_timing_t g_nand_timing_slow = { 70U, 5U, 10U, ... };  // Mode 0
+static const nand_fmc_timing_t g_nand_timing_fast = { 20U, 5U,  5U, ... };  // Mode 4
+```
+
+### 19.4 ONFI → FMC 换算
+
+```c
+static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi,
+                                    FMC_NAND_PCC_TimingTypeDef *pcc);
+```
+
+| FMC 寄存器 | ONFI 参数 | 公式 |
+|-----------|-----------|------|
+| `SetupTime` | max(tCLS, tALS, tCS) | /5ns 向上取整 |
+| `WaitSetupTime` | max(tRP, tWP) | /5ns 向上取整 |
+| `HoldSetupTime` | max(tCH, tALH, tCLH, tDH) | /5ns 向上取整 |
+| `HiZSetupTime` | tRHZ | /5ns 向上取整 |
+
+FMC kernel clock = 220 MHz，tHCLK ≈ 4.55ns，取整为 5ns 计算。
+
+### 19.5 nand_init() 双路径
+
+低速模式：
+```
+HAL_NAND_Init(保守) → RESET/READ_ID/校验 → 跳过 Mode 4 → 完成
+  NAND: Mode 0（tRC=50ns）
+  FMC:  保守时序
+```
+
+高速模式：
+```
+HAL_NAND_Init(保守) → RESET/READ_ID/校验 → SET_FEATURES(Mode 4)
+  → nand_fmc_timing_to_pcc(fast) → HAL_NAND_Init(快速) → nand_fmc_configure(fast) → 完成
+  NAND: Mode 4（tRC=20ns）
+  FMC:  快速时序
+```
+
+### 19.6 已知限制
+
+`nand_fmc_timing_to_pcc()` 当前用 `/5ns` 简单除法向上取整，未考虑 FMC 建立/保持时间的余量。如需更精确的时序适配，需引入 FMC 时序模型根据 HCLK 频率动态计算。
+
+---
+
+## 20. 读饥饿保护（Read Starvation Protection / QoS）
+
+### 20.1 问题
+
+调度器（`fc_scheduler`）对读写命令一视同仁。写命令（PROGRAM, tPROG≈300μs）或擦除命令（ERASE, tBERS≈1ms）连续占用 LUN 时，后续的读命令可能被长时间阻塞，导致**读饥饿**。
+
+### 20.2 控制宏
+
+```c
+// fc_scheduler.h
+#define FC_SCHEDULER_READ_PRIORITY_WRITE_BUDGET (3U)
+```
+
+连续执行 N 条非读命令后，触发读优先调度。执行一条读命令后计数器清零。
+
+### 20.3 实现
+
+#### 读操作识别
+
+`fc_scheduler_op_is_read()` 识别 16 种读相关操作，非读操作（PROGRAM/ERASE/SET_FEATURES 等）受饥饿保护约束。
+
+#### select_chain() SQ 遍历逻辑
+
+```
+① 前置扫描：count ≥ 3 时扫描 SQ 是否存在读命令（sq_has_read）
+② 旋转拦截：count ≥ 3 且队头为非读且 sq_has_read=1 → 旋转到队尾
+③ 执行：弹出链头命令，更新 count（读→0，非读→++）
+```
+
+#### 死锁防护
+
+`sq_has_read` 前置扫描确保**全写队列**场景下不触发保护。如果 SQ 内完全没有读命令，写命令正常执行，不会被无限旋转。
+
+### 20.4 队列操作说明
+
+SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `head/tail` 指针，Command Pool 内容不变。旋转不是丢弃——被旋转的命令会在队列循环一圈后回到队头执行。
+
+### 20.5 场景验证
+
+| 场景 | 行为 |
+|------|------|
+| 全写队列 [W,W,W,W] | sq_has_read=0 → 不触发 → 全部正常执行 |
+| 读写混合，写 ≤ 3 | count < 3 → 不触发 |
+| 写 ≥ 3 + 队列有读 | sq_has_read=1 → 后续写旋转 → 读优先执行 → count 归零 |
+
+### 20.6 当前局限性
+
+- 仅在 SQ 层面生效。HSQ 为高优先级通道，跳过读饥饿保护。
+- 命令链（chain=1）中无法插队读命令（链原子性），但链结束后下一轮 select 即可切换。
+- `CH_NUM=1`、`LUN_NUM=1` 时读饥饿问题不明显，本设计主要为多 LUN/多通道架构预留。

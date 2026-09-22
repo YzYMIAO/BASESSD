@@ -1,3 +1,4 @@
+#include "common/common.h"
 /*
  * ============================================================
  *  NAND 加载器 + TCM 初始化
@@ -119,5 +120,5 @@ ITCM_CODE int NAND_Load_Firmware(uint32_t dst, uint32_t src, uint32_t size)
         dst_ptr[i] = NAND_DATA;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }

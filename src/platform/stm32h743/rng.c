@@ -1,3 +1,4 @@
+#include "common/common.h"
 #include "rng.h"
 
 #include "delay.h"
@@ -23,10 +24,10 @@ uint8_t rng_init(void)
     }
     if (retry >= 10000)
     {
-        return 1; /* 随机数产生器工作不正常 */
+        return FUNC_STATUS_ERROR; /* 随机数产生器工作不正常 */
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**

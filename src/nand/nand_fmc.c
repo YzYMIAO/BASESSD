@@ -4,26 +4,27 @@
 #include "delay.h"
 #include "onfi_1_0.h"
 #include "platform/stm32h743/nand_dma.h"
+#include "platform/stm32h743/nand_rb_interrupt.h"
 
 #include <stddef.h>
 
 static nand_fmc_config_t g_nand_fmc_config;
 
-static uint8_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_command_primary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_command_secondary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_read_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_check_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static uint8_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_command_primary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_command_secondary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_read_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_check_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static nand_result_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 
 static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
     {
@@ -50,7 +51,7 @@ static const nand_engine_backend_t g_nand_fmc_backend =
         .context  = &g_nand_fmc_config,
 };
 
-uint8_t nand_fmc_configure(const nand_fmc_config_t *config)
+nand_result_t nand_fmc_configure(const nand_fmc_config_t *config)
 {
     if ((config == NULL) || (config->data == NULL) || (config->command == NULL) || (config->address == NULL) || (config->wait_ready == NULL))
     {
@@ -66,18 +67,40 @@ const nand_engine_backend_t *nand_fmc_backend_get(void)
     return &g_nand_fmc_backend;
 }
 
-static uint8_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
     (void)uop;
     (void)request;
-    (void)completion;
-    (void)timing;
-    return (config->wait_ready(config->context, 1U) == 0U) ? NAND_RESULT_OK : NAND_RESULT_NOT_READY;
+
+    if (nand_rb_interrupt_armed() == 0U)
+    {
+        /* 首次进入 WAIT_READY: 配置 EXTI6 上升沿中断 + 超时 */
+        nand_rb_interrupt_arm(timing->busy_timeout_us);
+        completion->nand_status = 0U;
+        return NAND_RESULT_NOT_READY;
+    }
+
+    /* ── 中断已触发 → NAND 就绪 ── */
+    if (nand_rb_interrupt_triggered() != 0U)
+    {
+        nand_rb_interrupt_disarm();
+        return NAND_RESULT_OK;
+    }
+
+    /* ── 超时 ── */
+    if (nand_rb_interrupt_timed_out() != 0U)
+    {
+        nand_rb_interrupt_disarm();
+        /* 回到轮询模式做最后一次确认（避免中断丢失） */
+        return (config->wait_ready(config->context, 1U) == 0U) ? NAND_RESULT_OK : NAND_RESULT_TIMEOUT;
+    }
+
+    return NAND_RESULT_NOT_READY;
 }
 
-static uint8_t nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -88,7 +111,7 @@ static uint8_t nand_fmc_exec_command(void *context, const nand_uop_t *uop, const
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_command_primary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_command_primary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -103,7 +126,7 @@ static uint8_t nand_fmc_exec_command_primary(void *context, const nand_uop_t *uo
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_command_secondary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_command_secondary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -118,7 +141,7 @@ static uint8_t nand_fmc_exec_command_secondary(void *context, const nand_uop_t *
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -129,7 +152,7 @@ static uint8_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, cons
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -140,7 +163,7 @@ static uint8_t nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, cons
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -151,7 +174,7 @@ static uint8_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const n
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -162,7 +185,7 @@ static uint8_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const n
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -173,10 +196,9 @@ static uint8_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const n
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-    uint8_t                  result;
 
     (void)uop;
     (void)timing;
@@ -186,10 +208,29 @@ static uint8_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    result = nand_dma_memory_to_fmc(config->data, request->buffer, request->data_length);
-    if (result != 0U)
+    /*
+     * 两步 DMA（非阻塞），与 WAIT_READY 一致：
+     *   ① 首次进入 → 启动 DMA（中断模式）→ 返回 NOT_READY
+     *   ② 后续 step → DMA 完成标志已置位 → 返回 OK
+     *   DMA 启动失败 → 回退 PIO
+     */
+    if (nand_dma_data_out_done() == 0U)
     {
-        /* DMA 失败回退到 CPU 逐字节搬运 */
+        if (nand_dma_memory_to_fmc_start_IT(config->data, request->buffer, request->data_length) == 0U)
+        {
+            return NAND_RESULT_NOT_READY;
+        }
+        /* DMA 启动失败，回退到 PIO */
+    }
+    else
+    {
+        /* DMA 传输完成，直接返回，不执行 PIO 回退 */
+        completion->transfer_status = NAND_RESULT_OK;
+        return NAND_RESULT_OK;
+    }
+
+    /* DMA 不可用 → PIO 退路 */
+    {
         uint16_t index;
         for (index = 0U; index < request->data_length; index++)
         {
@@ -201,10 +242,9 @@ static uint8_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-    uint8_t                  result;
 
     (void)uop;
     (void)timing;
@@ -214,10 +254,36 @@ static uint8_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, cons
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    result = nand_dma_fmc_to_memory(config->data, request->buffer, request->data_length);
-    if (result != 0U)
+    /*
+     * 两步 DMA（非阻塞），与 WAIT_READY / DATA_IN 一致：
+     *   ① 首次进入 → 启动 DMA（中断模式）→ 返回 NOT_READY
+     *   ② 后续 step → DMA 完成标志已置位 → Invalidate D-Cache → 返回 OK
+     *   DMA 启动失败 → 回退 PIO
+     */
+    if (nand_dma_data_in_done() == 0U)
     {
-        /* DMA 失败回退到 CPU 逐字节搬运 */
+        if (nand_dma_fmc_to_memory_start_IT(config->data, request->buffer, request->data_length) == 0U)
+        {
+            return NAND_RESULT_NOT_READY;
+        }
+        /* DMA 启动失败，回退到 PIO */
+    }
+    else
+    {
+        /* READ 方向：DMA 完成后 Invalidate D-Cache */
+        nand_dma_cache_invalidate(request->buffer, request->data_length);
+
+        if (request->operation == OP_READ_ID)
+        {
+            SSD_LOGI("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n", request->buffer[0], request->buffer[1], request->buffer[2], request->buffer[3], request->buffer[4], (void *)request->buffer);
+        }
+
+        completion->transfer_status = NAND_RESULT_OK;
+        return NAND_RESULT_OK;
+    }
+
+    /* DMA 不可用 → PIO 退路 */
+    {
         uint16_t index;
         for (index = 0U; index < request->data_length; index++)
         {
@@ -234,7 +300,7 @@ static uint8_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, cons
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
     uint8_t                  status;
@@ -254,7 +320,7 @@ static uint8_t nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uo
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_read_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_read_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -267,7 +333,7 @@ static uint8_t nand_fmc_exec_read_status(void *context, const nand_uop_t *uop, c
     return NAND_RESULT_OK;
 }
 
-static uint8_t nand_fmc_exec_check_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_check_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     (void)context;
     (void)uop;
@@ -276,7 +342,7 @@ static uint8_t nand_fmc_exec_check_ready(void *context, const nand_uop_t *uop, c
     return ((completion->nand_status & NAND_STATUS_READY) != 0U) ? NAND_RESULT_OK : NAND_RESULT_NOT_READY;
 }
 
-static uint8_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     (void)context;
     (void)uop;

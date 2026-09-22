@@ -492,3 +492,533 @@ uop 序列差异仅在于 30h→tR→DATA_OUT 一行的有无。
 | `src/nand/nand_dispatch.c` | 适配 | `page_buffer` 尺寸扩展、`nand_dispatch_task_load()` 双 plane 拷贝、`completion_init` 循环到 `CW_TOTAL_MAX`、CW chaining 条件增加 `WITHOUT_DATA_OUT` |
 | `src/nand/nand_dispatch_tables.c` | 新增 handler + 表项 | 新增 `req_multi_plane_read/program/erase`、`completion_multi_plane`；两张函数指针表各加 5 项 |
 | `src/fc/fc.c` | 适配 | `cws[plane][cw]` 新索引语法 |
+
+---
+
+## Phase F: WAIT_READY 中断驱动 + 引擎超时分层修复
+
+**日期**: 2026-09-21
+**涉及的提交**: （尚未合并，当前工作区改动）
+
+### 背景
+
+WAIT_READY 原先通过 GPIO 轮询（`delay_us(1)` 循环）等待 NAND R/B# 引脚变高，浪费 CPU 资源。同时引擎层与 handler 层存在双重 DWT 超时竞争，导致 handler 的 GPIO 后备确认被引擎超时的早返回绕开。
+
+### 改动
+
+| 文件 | 改动 |
+|------|------|
+| `src/platform/stm32h743/nand_rb_interrupt.c` | `arm()` 在使能 EXTI6 后立即检查 RB 电平。若已为高（NAND 空闲）则直接标记 `triggered=1`，消除 arm 时 RB 已是高电平导致上升沿中断永不触发的问题 |
+| `src/nand/nand_engine.c` | WAIT_READY 超时判定移交给 handler 全权处理，引擎层直接返回 NOT_READY。CHECK_READY 继续保持引擎层超时（依赖 70h 重发机制）。解决了原有引擎层 DWT 超时抢在 handler GPIO 后备之前返回 TIMEOUT 的问题 |
+| `src/nand/nand_fmc.c` | `nand_fmc_exec_wait_ready()` 从 GPIO 轮询改为 EXTI6 中断方案：首次布防中断，后续检查 triggered/timed_out，超时后 GPIO 轮询最后一次确认 |
+| `src/nand/nand_mt29f4g08abadawp.c` | `nand_init()` 中新增 `nand_rb_interrupt_init()` 调用 |
+| `docs/design/fc_nand_design.md` | 更新 WAIT_READY/CHECK_READY 超时策略说明 |
+| `src/platform/stm32h743/nand_rb_interrupt.c` | 模块注释更新工作流程 |
+
+### 设计要点
+
+#### WAIT_READY 与 CHECK_READY 的分层超时策略
+
+| UOP 类型 | 超时判定方 | 后备机制 | 原因 |
+|----------|-----------|---------|------|
+| WAIT_READY | handler 全权处理 | 超时→GPIO 轮询最后一次确认 | 走 EXTI6 中断路径，需要 GPIO 回退防中断丢失 |
+| CHECK_READY | 引擎层（DWT + wait_polls） | 超时→直接 TIMEOUT | 依赖 70h 状态寄存器，超时后重发 70h |
+
+#### arm 时 RB 高电平的处理
+
+`nand_rb_interrupt_arm()` 使能 EXTI6 后立即读一次 GPIO 电平。若 RB 已高（NAND 空闲），上升沿永不发生，直接标记 `triggered=1`，下次 step 立即返回 OK。
+
+#### 中断丢失保护
+
+即使 EXTI6 中断因噪声等原因丢失，WAIT_READY handler 在 `timed_out()==1` 时会回退到 GPIO 轮询确认，确保 NAND 不会因为中断丢失而被误判为超时。
+
+### 资源开销
+
+EXTI6 中断路径：中断进出约 60~80 cycles（Cortex-M7），远小于 GPIO 轮询的 `busy_timeout_us`（38~1050μs）。
+
+---
+
+## Phase G: DMA 中断驱动（DATA_IN/DATA_OUT 非阻塞）
+
+**日期**: 2026-09-21
+**涉及的提交**: （尚未合并，当前工作区改动）
+
+### 背景
+
+DATA_IN（PROGRAM 方向）和 DATA_OUT（READ 方向）的 DMA 传输使用 `HAL_DMA_PollForTransfer` 同步轮询等待完成。DMA 传输 528 字节期间（约 3μs）CPU 空转。
+
+### 改动
+
+将 DATA_IN/DATA_OUT 改为**两步模式**，与 WAIT_READY 的中断驱动方案完全一致：
+
+| 步骤 | WAIT_READY | DATA_IN/DATA_OUT |
+|------|-----------|-----------------|
+| ① 首次 | `nand_rb_interrupt_arm()` 布防 EXTI6 | `nand_dma_*_start_IT()` 启动 DMA（中断模式） |
+| ② 返回 | `NOT_READY` | `NOT_READY` |
+| ③ ISR | `g_rb_int.triggered = 1` | `g_dma_data_out/in_done = 1` |
+| ④ 后续 step | 检查 `triggered` → OK | 检查 `done` → OK |
+
+### 文件变更
+
+| 文件 | 改动 |
+|------|------|
+| `src/platform/stm32h743/nand_dma.c` | 重构：提取公共 init 函数；新增 `g_dma_data_out_done`/`g_dma_data_in_done` 完成标志；新增 `nand_dma_*_start_IT()` 非阻塞启动函数；新增 `nand_dma_data_out/in_done()` 检查函数；新增 `nand_dma_irq_handler_data_out/in()` ISR 入口 |
+| `include/platform/stm32h743/nand_dma.h` | 新增中断版 API 声明；轮询版保留做后备 |
+| `src/nand/nand_fmc.c` | `nand_fmc_exec_data_in()` 改为两步模式：首次启动 DMA(IT) 返回 NOT_READY，后续检查完成标志；`nand_fmc_exec_data_out()` 同理，完成后 Invalidate D-Cache；DMA 失败均回退 PIO |
+| `src/platform/stm32h743/stm32h7rsxx_it.c` | 新增 `DMA2_Stream0_IRQHandler()` / `DMA2_Stream1_IRQHandler()`，分别调 `nand_dma_irq_handler_data_out/in()` |
+| `include/platform/stm32h743/stm32h7rsxx_it.h` | 新增两个 ISR 声明 |
+
+### 设计要点
+
+1. **DMA 完成中断在 ISR 中只设标志**，真正的传输完成判定在 handler step 中检查。与 WAIT_READY 的 `triggered` 标志完全一致。
+2. **DATA_OUT（READ 方向）的 D-Cache Invalidate** 在 handler 检查到 `done==1` 时执行，不在 ISR 中做（ISR 应尽量轻量）。
+3. **DMA 失败回退链路**：中断版启动失败 → 轮询版 → PIO，逐级降级。
+4. **DATA_IN（PROGRAM 方向）不需要 ISR 中 Invalidate**，因为 Clean 在启动前已做，DMA 只读不写 buffer。
+
+---
+
+## Phase H: ONFI 时序模式切换（低速/高速双模）
+
+**日期**: 2026-09-21
+**涉及的提交**: （尚未合并，当前工作区改动）
+
+### 背景
+
+NAND 初始化时使用保守时序（Mode 0, tRC=50ns）完成 RESET/READ_ID 后，通过 SET_FEATURES(01h) 将 NAND 切换到 Mode 4（tRC=20ns），但 FMC 硬件时序寄存器从未更新——FMC 始终跑在低速时序，浪费了 Mode 4 的速度提升。
+
+### 改动
+
+| 文件 | 改动 |
+|------|------|
+| `include/nand/nand_config.h` | 新增 `CONFIG_NAND_TIMING_MODE_4` 宏，0=低速（默认），1=高速 |
+| `src/nand/nand_mt29f4g08abadawp.c` | 新增 `g_nand_timing_slow` / `g_nand_timing_fast` 两套 ONFI 时序参数表；新增 `nand_fmc_timing_to_pcc()` 将 ONFI 时序换算为 FMC PCC 硬件寄存器值；`nand_init()` 的条件分支：低速模式跳过 Mode 4 切换，高速模式先切 NAND 再重新初始化 FMC 硬件 |
+
+### 设计要点
+
+#### 双路径
+
+低速模式（`CONFIG_NAND_TIMING_MODE_4=0`，默认）：
+```
+HAL_NAND_Init(保守) → RESET/READ_ID/校验 → 跳过 Mode 4 → 完成
+  NAND: Mode 0（默认, tRC=50ns）
+  FMC:  保守时序
+```
+
+高速模式（`CONFIG_NAND_TIMING_MODE_4=1`）：
+```
+HAL_NAND_Init(保守) → RESET/READ_ID/校验 → SET_FEATURES(Mode 4)
+  → nand_fmc_timing_to_pcc(fast) → HAL_NAND_Init(快速) → nand_fmc_configure(fast) → 完成
+  NAND: Mode 4（tRC=20ns）
+  FMC:  快速时序
+```
+
+#### ONFI → FMC 换算规则
+
+| FMC 寄存器 | ONFI 参数 | 公式 |
+|-----------|-----------|------|
+| `SetupTime` | max(tCLS, tALS, tCS) | /5ns 向上取整 |
+| `WaitSetupTime` | max(tRP, tWP) | /5ns 向上取整 |
+| `HoldSetupTime` | max(tCH, tALH, tCLH, tDH) | /5ns 向上取整 |
+| `HiZSetupTime` | tRHZ | /5ns 向上取整 |
+
+FMC kernel clock = 220 MHz，tHCLK ≈ 4.55ns，取整为 5ns 计算周期数。
+
+### 后续工作
+
+- 当前 `nand_fmc_timing_to_pcc()` 用 `/5ns` 简单换算，未考虑 FMC 建立/保持时间的余量。如需更精确的时序适配，需引入 FMC 时序模型根据 HCLK 频率动态计算。
+- 默认保持低速模式，功能验证稳定后改为高速模式。
+
+---
+
+## Phase I: 读饥饿保护（Read Starvation Protection / QoS）
+
+**日期**: 2026-09-21
+**涉及的提交**: （尚未合并，当前工作区改动）
+
+### 背景
+
+调度器对读写命令一视同仁，写命令或擦除命令连续占用 LUN 时，读命令可能被长时间阻塞。在单 LUN 场景下虽不明显，但在多 LUN/多通道架构下读延迟可能大幅恶化。
+
+### 改动
+
+| 文件 | 改动 |
+|------|------|
+| `include/fc/fc_scheduler.h` | 新增 `FC_SCHEDULER_READ_PRIORITY_WRITE_BUDGET` 宏（默认 3）；`fc_scheduler_t` 新增 `consecutive_write_count` 计数器 |
+| `src/fc/fc_scheduler.c` | 新增 `fc_scheduler_op_is_read()` 识别 16 种读操作；`select_chain()` SQ 遍历中增加读饥饿保护逻辑 + `sq_has_read` 前置死锁检测 |
+
+### 设计要点
+
+#### 工作原理
+
+调度器维护一个 `consecutive_write_count` 计数器，连续执行非读命令（PROGRAM/ERASE/SET_FEATURES 等）时递增，执行读命令时清零。当计数达到 `FC_SCHEDULER_READ_PRIORITY_WRITE_BUDGET(3)` 时，后续非读命令被**旋转到队尾**，让排队的读命令先执行。
+
+#### 死锁防护
+
+添加 `sq_has_read` 前置扫描：仅在 SQ 中确实存在读命令时才触发优先保护。全写队列场景下不拦截，避免写命令被无限旋转。
+
+#### 队列操作
+
+SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `head/tail` 指针，Command Pool 内容不变。旋转不是丢弃——命令最终会回到队头执行。
+
+#### 场景验证
+
+| 场景 | 行为 |
+|------|------|
+| 全写队列 | sq_has_read=0 → 不触发保护 → 所有写正常执行 |
+| 读写混合，写 ≤ 3 | count < 3 → 不触发保护 |
+| 写 ≥ 3 + 队列有读 | sq_has_read=1 → 后续写旋转 → 读优先执行 → count 归零 |
+
+---
+
+## Phase J: 加扰引擎扩展（多算法 + 多种子策略）
+
+**日期**: 2026-09-21
+**涉及的提交**: （尚未合并，当前工作区改动）
+
+### 背景
+
+加扰引擎仅支持 XOR-shift 一种算法，种子策略单一。实际消费级/企业级 SSD 更广泛使用 LFSR 标准算法，且不同写入场景需要不同的种子扩散策略。
+
+### 改动
+
+| 文件 | 改动 |
+|------|------|
+| `include/fc/fc_random_engine.h` | 新增 `FC_RANDOM_ALGO_*` 三种算法宏、`FC_RANDOM_SEED_STRATEGY_*` 三种种子策略宏；新增 `fc_random_algo_name()` / `fc_random_seed_strategy_name()` 调试接口 |
+| `src/fc/fc_random_engine.c` | 重构为算法/策略分离的内置实现；新增 LFSR 16（ONFI 标准多项式）实现、新增 Simple XOR 实现、新增 Enhanced / Program-sequence-weighted 两种种子策略；默认算法从 XOR-shift 改为 **LFSR 16** |
+
+### 默认配置
+
+```c
+#define FC_RANDOM_ALGO          FC_RANDOM_ALGO_LFSR       /* ONFI 标准多项式的 LFSR 16 */
+#define FC_RANDOM_SEED_STRATEGY FC_RANDOM_SEED_BASIC      /* program_sequence ^ PAA */
+```
+
+### 算法对比
+
+| 算法 | 默认 | 核心机制 | 周期 | 每字节开销 | 行业对标 |
+|------|------|---------|------|-----------|---------|
+| **LFSR 16** | ✅ 默认 | 多项式 x¹⁶ + x¹⁴ + x¹³ + x¹¹ + 1 | 2¹⁶-1 | ~40 ops | ONFI 标准，消费/企业级最主流 |
+| XOR-shift 32 | — | seed ^= seed<<13; ^= seed>>17; ^= seed<<5 | 2³²-1 | ~6 ops | 三星等消费级同类 |
+| Simple XOR | — | 固定 64B pattern 循环异或 | pattern 长度 64 | ~2 ops | 低端方案 |
+
+### 种子策略对比
+
+| 策略 | 默认 | 特点 |
+|------|------|------|
+| **Basic** | ✅ 默认 | program_sequence ^ PAA 简单混合 |
+| Enhanced | — | 各字段独立 bit 位 + 黄金分割扩散 + CW 维度 |
+| Program-seq-weighted | — | 高权重写入序列，高耐久场景 |
+
+### 企业级注意
+
+企业级与消费级在加扰算法上没有本质区别，都使用 LFSR 或 XOR-shift。真正区别在于：企业级强制 AES-256 XTS 加密（加密后数据天然随机化）、硬件 DMA 引擎 inline 实现零 CPU 开销、种子可能混入更多维度（Die ID 等）。
+
+---
+
+## Phase K: BCH ECC 引擎移植 + QC-LDPC 硬判决
+
+**日期**: 2026-09-22
+**涉及的提交**: （尚未合并，当前工作区改动）
+
+### 背景
+
+ECC 引擎长期为 stub（返回 NOT_SUPPORTED），无法实际纠错。同时需要为未来 LDPC 算法预留架构扩展点。
+
+### 改动
+
+| 文件 | 改动 |
+|------|------|
+| `include/fc/fc_command.h` | `fc_ldpc_mode_t` 重定义为 `fc_ecc_mode_t`，语义变更为 ldpc=0→BCH, 1→LDPC hard, 2→LDPC soft, 3→LDPC raw |
+| `include/fc/fc_ldpc_engine.h` | 新增 `FC_ECC_ALGO_BCH/LDPC` 编译宏；`fc_ldpc_config_t` 保留不变 |
+| `src/fc/fc_ldpc_engine.c` | 重构为分发层：`FC_ECC_ALGO` 宏选择 BCH 或 LDPC 实现，调用下层引擎 |
+| `include/fc/fc_bch_engine.h` | **新建**：BCH 引擎接口（`fc_bch_init/encode/decode/free/ecc_bytes/t`） |
+| `src/fc/fc_bch_engine.c` | **新建**：BCH(m=13, t=4) 完整实现，移植自 Linux 内核 lib/bch.c（GPL v2），作者 Ivan Djelic |
+| `include/fc/fc_ldpc_qc_engine.h` | **新建**：QC-LDPC 引擎接口（单例初始化，encode/decode） |
+| `src/fc/fc_ldpc_qc_engine.c` | **新建**：QC-LDPC 硬判决 Bit-flipping 完整实现，全局静态数组零动态分配 |
+
+### BCH 参数
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| m | 13 | Galois 域阶数，n=2¹³-1=8191 |
+| t | 4 | 纠错能力（bit） |
+| parity | 7B（52bit）→ 8B 够用 | BCH 校验码长度 |
+| DATA 编码范围 | 520B | META(4) + CRC(4) + USER(512) |
+| 查表大小 | ~40 KB | a_pow_tab(16KB) + a_log_tab(16KB) + mod8_tab(8KB) |
+
+### QC-LDPC 参数
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| 码长 n | 4224 bit (528B) | 完整 CW |
+| 信息位 k | 4160 bit (520B) | META+CRC+USER |
+| 校验位 m | 64 bit (8B) | parity 区 |
+| 码率 R | 0.985 | 极高码率 |
+| Z | 16 | 循环子矩阵大小 |
+| H_base | 4 × 264 | 基矩阵 |
+| 列重 dv | 3 | 每比特参与 3 个校验方程 |
+| 解码 | Bit-flipping | 硬判决，阈值自适应递减 |
+
+### 存储优化
+
+全局静态数组，全部使用最小数据类型，零动态分配：
+
+| 数组 | 类型 | 大小 |
+|------|------|------|
+| `g_col_to_check[4224][3]` | `uint8_t` | 12 KB |
+| `g_col_weight[4224]` | `uint8_t` | 4 KB |
+| `g_row_to_var[64][~66]` | `uint16_t` | ~8.5 KB |
+| `g_h_base[4][264]` | `int8_t` | 1 KB |
+| **合计** | | **~25 KB** |
+
+### CW 布局（ECC 部分不变）
+
+```
+[META:4][CRC:4][USER:512][PARITY:8] = 528B
+                        ↑ BCH t=4 或 QC-LDPC
+```
+
+### fc_data_path.c 调用链路
+
+BCH 或 LDPC 算法选择由编译宏 `FC_ECC_ALGO` 控制，运行时 `ldpc` 位域预留未来切换能力。`fc_data_path.c` 代码零改动。
+
+### 已知限制
+
+- 码率 0.985 下 LDPC 硬判决纠错能力约 t=1~2，低于 BCH t=4
+- LDPC 的真正优势在低码率（r<0.9）+ 软判决场景
+- 软判决需要 NAND 支持多电压读取（multi-read → LLR），当前 SLC 硬件不支持
+
+---
+
+## Phase L: RAID XOR 引擎实现 + 管线重排
+
+**日期**: 2026-09-22
+**涉及的提交**: （尚未合并，当前工作区改动）
+
+### 背景
+
+RAID 引擎长期为 stub（返回 NOT_SUPPORTED）。同时 decode 管线中 RAID 放在 ECC 之前，顺序错误——ECC 未解码时无法知道哪个 CW 需要 RAID 恢复。
+
+### 改动
+
+| 文件 | 改动 |
+|------|------|
+| `include/fc/fc_raid_engine.h` | 重写：新增 `fc_raid_context_t`（per-LUN 累加器）、START/ACCUMULATE/END 序列接口、`fc_raid_save/restore` 中断保护、`fc_raid_recover` 静态恢复 |
+| `src/fc/fc_raid_engine.c` | 完整实现：全局静态上下文池、32bit 对齐 XOR 加速、`processed>=total` 溢出保护、影子缓冲 save/restore |
+| `src/fc/fc_data_path.c` | 重写：写路径接入 RAID XOR 编码、读路径修正为 ECC→条件 RAID→Random 顺序、新增 `fc_collect_buffers` 辅助、decode 中 buffer=NULL 不再静默跳过 |
+| `src/fc/fc.c` | `fc_init_internal()` 中新增 `fc_raid_init_ctx()` 调用，遍历所有 LUN 初始化 |
+
+### 设计要点
+
+#### 管线顺序（已修正）
+
+```
+写入 (encode):
+  Random → ECC → RAID XOR  ← RAID 保护 ECC 后的完整码字
+
+读取 (decode):
+  ECC → (若 UNC) RAID 恢复 → 重试 ECC → Random
+  RAID 不是固定 stage，是条件性恢复路径。ECC 全部成功则 RAID 完全跳过。
+```
+
+#### RAID 序列模型
+
+三个基础指令模拟企业硬件 RAID 加速器：
+
+| 指令 | 功能 |
+|------|------|
+| START | 拷贝第一个 CW 到 acc_buf，标记 active |
+| ACCUMULATE | acc_buf ^= cw_buffer |
+| END | acc_buf 写入 parity_buffer，清 active |
+
+per-LUN 独立上下文，支持多 LUN 并发 RAID 序列。
+
+#### 中断保护
+
+`fc_raid_save/restore` 为多 Plane（≥4）场景预留。当前 PLANE_NUM=2 时一次 START→ACCUMULATE→END 瞬间完成，无中断风险。影子缓冲机制已预留，待调度器中 HSQ 打断路径接入后生效。
+
+#### 静态恢复（fc_raid_recover）
+
+用于 ECC 解码失败后的条件恢复。输入所有 CW buffer（含 parity）和 failed_idx，输出恢复后的数据。不依赖 LUN 上下文，支持跨 Plane 恢复。
+
+### RAID 恢复的数学原理
+
+```
+Parity = CW0 ⊕ CW2 ⊕ CW3        (写时计算)
+CW2(损坏) = CW0 ⊕ Parity ⊕ CW3  (读时恢复)  → 数学精确，无损
+```
+
+XOR 恢复是线性无损的。正确的管线顺序保证 parity CW 同样经过 ECC 编码，受 NAND 存储保护。
+
+### 当前限制
+
+- 只支持 1 个 CW 失败（单 XOR 极限）
+- 多个 CW 同时失败时返回 IO_ERROR
+- PLANE_NUM=4 以上时需要调度器接入 fc_raid_save/restore 保护累加器
+
+---
+
+## Phase M: 读路径管线拆分 — FC 内部 ECC 解码 + FTL 触发 RAID 恢复
+
+**日期**: 2026-09-22
+**涉及的提交**: （尚未合并，当前工作区改动）
+
+### 背景
+
+之前的 `fc_data_path_decode` 将 ECC 解码、RAID 恢复、Random 解扰捆绑在一个全自动管线中，存在三个问题：
+
+1. **架构分层错误**：FC controller 不应该替 FTL 决策 RAID 恢复策略；FTL 需要根据 per-CW status 精细化处理
+2. **dead code**：`count == failed_idx` 用于跳过 RAID 恢复后的 CW，但控制流是单遍的，永远不会触发
+3. **不在主路径上**：`fc_data_path_decode` 从未被调用，ECC/RAID 管线在 CQ push 前完全未执行
+
+### 改动
+
+| 文件 | 改动 |
+|------|------|
+| `include/fc/fc_data_path.h` | 接口重设计：`fc_data_path_decode` → `fc_data_path_process_read()` + `fc_data_path_raid_recover()`，头文件文档明确分工和约束 |
+| `src/fc/fc_data_path.c` | 重写实现：拆为 FC 内部 Stage1 + FTL 触发 Stage2；去掉了 dead code；修复 `count < 2` 时静默吞没失败的问题 |
+| `src/fc/fc.c` | `fc_complete_from_nand()` 中插入 `fc_data_path_process_read()` 调用，CQ entry 的 status 从 descriptor 读取（ECC 解码后结果）；新增 `fc_is_page_read()` 白名单区分 Page Read 与非数据类命令 |
+| `src/fc/fc_raid_engine.c` | 添加 `#include "fc.h"` 修复 `FC_BUFFER_POOL_CW_SIZE` 未声明编译错误 |
+
+### 设计要点
+
+#### 读路径两阶段分工
+
+```
+Stage 1 — FC 内部（CQ push 前）:
+  fc_data_path_process_read()
+    遍历 desc 链逐 CW:
+      ECC 解码 → 更新 desc->status
+    全部成功 → 解扰所有 buffer → 推 CQ (status=READY)
+    有失败   → 不解扰任何 buffer → 推 CQ (status=UNC)
+    此时非失败 CW 处于 "ECC 已纠正但仍加扰" 状态
+
+Stage 2 — FTL 触发（poll CQ 后）:
+  fc_data_path_raid_recover()
+    收到 CQ entry → 遍历 desc 链发现 status=UNC
+    调用 fc_data_path_raid_recover()
+      ├─ RAID XOR 重建 failed CW
+      ├─ ECC 重试
+      ├─ 解扰所有 CW
+      └─ 更新所有 desc->status = READY
+    仍失败 → 走其他策略（read retry / BBT 等）
+```
+
+#### FC 内部集成
+
+- 仅对 **Page Read 操作**（`fc_is_page_read()` 白名单）执行 Data Path
+- `READ_ID` / `GET_FEATURES` / `READ_STATUS` 等绕行
+- CQ entry 的 per-CW status 从 descriptor 读取（ECC 解码后的结果）
+- 非 Page Read 命令透传 NAND completion 原始状态
+
+#### 文档更新
+
+- `docs/design/fc_nand_design.md` §5 数据路径章节：重写为两阶段 decode 流程图，更新 encode 路径加上 RAID，更新 8.1 占位模块状态为 ✅ 已完成，更新 8.3 功能扩展规划 Phase 4/5 为 ✅
+
+### 解决的问题
+
+| 编号 | 问题 | 状态 |
+|------|------|------|
+| #1 | 架构分层错误：FC 不应替 FTL 决策 RAID 恢复 | ✅ 已修复 |
+| #2 | `count == failed_idx` dead code | ✅ 已移除 |
+| #3 | decode 管线不在主路径上 | ✅ 已集成到 `fc_complete_from_nand` |
+| #4 | `count < 2` 时静默吞没失败 | ✅ 已修复 |
+
+---
+
+## Phase N: FC↔NAND 层数据路径闭环 — encode 集成 + 边界修正 + 缺陷修复
+
+**日期**: 2026-09-22
+**涉及的提交**: （尚未合并，当前工作区改动）
+
+### 背景
+
+Phase M 完成了读路径的管线拆分和白名单集成，但在后续的全面审查中发现了多个闭环问题：
+
+1. **encode 路径未集成**：`fc_data_path_encode` 从未被调用，NAND 写入的是未编码的原始数据，与读路径的 ECC 解码不对称
+2. **Page Read 白名单不准确**：`WITHOUT_DATA_OUT` 操作无数据传输不应走 Data Path；`READ_FOR_INTERNAL_DATA_MOVE` 使用 `req_no_data` 无 host buffer
+3. **Multi-Plane 读数据未拆分**：OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT 读入 page_buffer 后未拆分到各 CW buffer
+4. **failed_descriptor_id 偏离**：ECC 解码后失败 CW 可能变化，但 CQ entry 的 desc_id 仍指向 NAND 层原始值
+5. **CQ 满时命令泄漏**：`fc_complete_internal` 失败时命令状态保持 ACTIVE 导致泄漏
+6. **迭代风格不统一**：fc_data_path.c 使用 `while (cw <= config.cw)` 而 fc.c 使用 `for (cw < config.cw+1)`
+
+### 改动
+
+| 文件 | 改动 |
+|------|------|
+| `src/fc/fc.c` | ① 新增 `fc_is_page_write()` 白名单 ② 修正 `fc_is_page_read()` 白名单：移除 `WITHOUT_DATA_OUT`、`READ_FOR_INTERNAL_DATA_MOVE` ③ 单命令/链命令路径插入 `fc_data_path_encode()` 调用 ④ `failed_descriptor_id` 在 ECC 解码后更新为第一个 UNC desc 的 ID ⑤ CQ push 失败时强制标记 COMPLETED 防止命令泄漏 |
+| `src/nand/nand_dispatch.c` | 新增 Multi-Plane WITH_DATA_OUT 完成后的 page_buffer→CW buffer 拆分循环 |
+| `src/fc/fc_data_path.c` | Pass 1 loop 统一为 `for (cw = 0; cw < config.cw + 1)` 写法 |
+
+### 设计要点
+
+#### encode 集成点
+
+```
+FTL submit → fc_poll_internal 调度
+  → fc_data_path_encode(command)         ← 新增：Random 加扰 → ECC 编码 → RAID XOR
+  → 构建 nand_dispatch_request
+  → nand_dispatch_submit / submit_chain
+```
+
+encode 在 resolve descriptor 链之前执行，直接修改 buffer pool 中的数据。与 decode 路径对称：encode 在 submit 前、decode 在 complete 后。
+
+#### fc_is_page_read / fc_is_page_write 白名单
+
+```
+fc_is_page_read() — Page Read 操作（数据经 ECC 编码）:
+  OP_NORMAL_READ_PAGE_WITH_DATA_OUT          ✅
+  OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT     ✅（需配合 buffer 拆分）
+  OP_READ_PAGE_CACHE_SEQ/RANDOM/LAST         ✅
+  OP_RANDOM_DATA_READ                        ✅
+  ---
+  OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT       ❌ 无数据输出
+  OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT  ❌ 无数据输出
+  OP_READ_FOR_INTERNAL_DATA_MOVE             ❌ req_no_data，无 host buffer
+
+fc_is_page_write() — Page Program 操作（数据需 ECC 编码）:
+  OP_NORMAL_PROGRAM_PAGE                     ✅
+  OP_PROGRAM_PAGE_CACHE                      ✅
+  OP_OTP_DATA_PROGRAM                        ✅
+  OP_PROGRAM_PAGE_MULTI_PLANE                ✅
+  ---
+  OP_PROGRAM_FOR_INTERNAL_MOVE               ❌ 内部搬移，非 ECC 页数据
+```
+
+#### Multi-Plane 读数据拆分
+
+```
+poll 中 Multi-Plane WITH_DATA_OUT 完成后：
+  page_buffer[PAGE_BUFFER_SIZE] (4224B)
+    ├─ Plane 0 [0..2111] → cw_buffers[0][0..3] (每个 528B)
+    └─ Plane 1 [2112..4223] → cw_buffers[1][0..3] (每个 528B)
+```
+
+拆分后在 fc_complete_from_nand 中走 Data Path ECC 解码。
+
+#### CQ 满时命令泄漏保护
+
+```
+fc_complete_from_nand:
+  Step 1: writeback desc status
+  Step 2: process_read (ECC 解码)
+  Step 3: populate CQ entry
+    → fc_complete_internal() 失败（CQ 满）
+    → 强制 command_state = COMPLETED
+    → 返回 IO_ERROR
+```
+
+强制切 COMPLETED 后，FTL 无法通过 fc_poll_completion 感知此命令（CQ entry 丢失）。
+这是 fatal 级系统背压错误，需要上层（FTL/主机驱动）通过寄存器轮询检测 CQ 满条件后干预。
+
+### 解决的问题
+
+| # | 问题 | 状态 |
+|---|---|---|
+| #A | `fc_data_path_encode` 未调用，读写编码不对称 | ✅ 已修复 |
+| #B | Multi-Plane WITH_DATA_OUT 数据未拆分到 CW buffer | ✅ 已修复 |
+| #C | `fc_is_page_read` 白名单含不应走 Data Path 的操作 | ✅ 已修复 |
+| #C2 | `fc_is_page_write` 白名单含不应 encode 的操作 | ✅ 已修复 |
+| #1 | `failed_descriptor_id` 在 ECC 后指向错误 CW | ✅ 已修复 |
+| #E | CQ push 失败时命令泄漏（ACTIVE 状态） | ✅ 已修复 |
+| #4 | 迭代条件写法不统一 | ✅ 已修复 |

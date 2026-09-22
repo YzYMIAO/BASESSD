@@ -1,3 +1,4 @@
+#include "common/common.h"
 #include "dma.h"
 
 DMA_HandleTypeDef         g_dma_handle;
@@ -22,12 +23,12 @@ uint8_t uart_tx_dma_init(void)
 
     if ((HAL_DMA_DeInit(&g_dma_handle) != HAL_OK) || (HAL_DMA_Init(&g_dma_handle) != HAL_OK))
     {
-        return 0U;
+        return FUNC_STATUS_SUCCESS;
     }
     __HAL_LINKDMA(&g_uart1_handle, hdmatx, g_dma_handle);
     HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 4U, 0U);
     HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
-    return 1U;
+    return FUNC_STATUS_ERROR;
 }
 
 void uart_tx_dma_irq_handler(void)

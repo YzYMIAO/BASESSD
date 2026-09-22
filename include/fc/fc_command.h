@@ -7,22 +7,63 @@
 
 typedef enum
 {
-    FC_LDPC_FULL = 0U,
-    FC_LDPC_HARD,
-    FC_LDPC_SOFT,
-    FC_LDPC_RAW
-} fc_ldpc_mode_t;
+    FC_ECC_MODE_BCH       = 0U,  /* BCH encode/decode */
+    FC_ECC_MODE_LDPC_HARD = 1U,  /* LDPC hard-decision */
+    FC_ECC_MODE_LDPC_SOFT = 2U,  /* LDPC soft-decision */
+    FC_ECC_MODE_LDPC_RAW  = 3U,  /* LDPC raw (no decode) */
+} fc_ecc_mode_t;
 
 typedef enum
 {
-    FC_COMMAND_MODULE_HOST_IO = 0U,
-    FC_COMMAND_MODULE_FTL,
-    FC_COMMAND_MODULE_GC,
-    FC_COMMAND_MODULE_READ_RECOVERY,
-    FC_COMMAND_MODULE_METADATA,
-    FC_COMMAND_MODULE_BBT,
-    FC_COMMAND_MODULE_CHECKPOINT,
-    FC_COMMAND_MODULE_WEAR_LEVELING
+    FC_RAID_MODE_NORMAL  = 0U,  /* 无 RAID */
+    FC_RAID_MODE_DECODE  = 1U,  /* RAID 解码（ECC 失败时恢复） */
+    FC_RAID_MODE_ENCODE  = 2U,  /* RAID 编码（生成 parity） */
+    FC_RAID_MODE_RECOVER = 3U,  /* RAID 恢复（同 decode） */
+    FC_RAID_MODE_CHECK   = 4U,  /* RAID 校验（暂未实现） */
+} fc_raid_mode_t;
+
+typedef enum
+{
+    FC_PAGE_TYPE_LP = 0U,  /* Lower Page (SLC page / TLC LP) */
+    FC_PAGE_TYPE_MP = 1U,  /* Middle Page (TLC MP) */
+    FC_PAGE_TYPE_UP = 2U,  /* Upper Page (TLC UP) */
+    FC_PAGE_TYPE_TP = 3U,  /* Triple Page (QLC TP) */
+} fc_page_type_t;
+
+typedef enum
+{
+    FC_CRC_ENABLE  = 0U,   /* CRC 校验使能 */
+    FC_CRC_DISABLE = 1U,   /* CRC 校验禁用 */
+} fc_crc_mode_t;
+
+typedef enum
+{
+    FC_RANDOM_ENABLE  = 0U,  /* 数据加扰使能 */
+    FC_RANDOM_DISABLE = 1U,  /* 数据加扰禁用 */
+} fc_random_mode_t;
+
+typedef enum
+{
+    FC_CHAIN_END  = 0U,  /* 链结束，单命令 */
+    FC_CHAIN_MORE = 1U,  /* 链中间，后续还有命令 */
+} fc_chain_mode_t;
+
+typedef enum
+{
+    FC_PRIORITY_SQ  = 0U,  /* 普通优先级（Submission Queue） */
+    FC_PRIORITY_HSQ = 1U,  /* 高优先级（High-priority SQ） */
+} fc_priority_t;
+
+typedef enum
+{
+    FC_COMMAND_MODULE_HOST_IO       = 0U,
+    FC_COMMAND_MODULE_FTL           = 1U,
+    FC_COMMAND_MODULE_GC            = 2U,
+    FC_COMMAND_MODULE_READ_RECOVERY = 3U,
+    FC_COMMAND_MODULE_METADATA      = 4U,
+    FC_COMMAND_MODULE_BBT           = 5U,
+    FC_COMMAND_MODULE_CHECKPOINT    = 6U,
+    FC_COMMAND_MODULE_WEAR_LEVELING = 7U,
 } fc_command_module_t;
 
 /*
@@ -51,17 +92,17 @@ typedef enum
 /* Command and Descriptor share this 32-bit operation configuration. */
 typedef struct fc_cmd_conf_t
 {
-    DWORD operation : 8; /* ONFI operation macro. */
+    DWORD operation : 8; /* ONFI operation macro (OP_*). */
     DWORD ch        : 2; /* NAND channel number. */
     DWORD ce        : 2; /* NAND chip-enable number. */
     DWORD lun       : 2; /* NAND LUN number. */
     DWORD cw        : 2; /* Command: CW count minus one; Descriptor: CW index. */
-    DWORD crc       : 1; /* 0=enabled, 1=disabled. */
-    DWORD ldpc      : 2; /* 0=normal, 1=hard, 2=soft, 3=raw. */
-    DWORD raid      : 3; /* 0=normal, 1=decode, 2=encode, 3=recover, 4=check. */
-    DWORD random    : 1; /* 0=enabled, 1=disabled. */
-    DWORD chain     : 1; /* 0=end of chain, 1=more commands follow. */
-    DWORD page_type : 2; /* 0=LP, 1=MP, 2=UP, 3=TP. */
+    DWORD crc       : 1; /* FC_CRC_ENABLE / FC_CRC_DISABLE. */
+    DWORD ldpc      : 2; /* fc_ecc_mode_t: BCH/LDPC_HARD/LDPC_SOFT/LDPC_RAW. */
+    DWORD raid      : 3; /* fc_raid_mode_t: NORMAL/DECODE/ENCODE/RECOVER/CHECK. */
+    DWORD random    : 1; /* FC_RANDOM_ENABLE / FC_RANDOM_DISABLE. */
+    DWORD chain     : 1; /* FC_CHAIN_END / FC_CHAIN_MORE. */
+    DWORD page_type : 2; /* fc_page_type_t: LP/MP/UP/TP. */
     DWORD reserved  : 6; /* Reserved for future configuration. */
 } fc_cmd_conf_t;
 

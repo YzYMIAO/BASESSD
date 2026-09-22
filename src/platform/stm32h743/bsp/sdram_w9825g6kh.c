@@ -1,3 +1,4 @@
+#include "common/common.h"
 
 #include "sdram_w9825g6kh.h"
 
@@ -36,7 +37,7 @@ uint8_t sdram_init(void)
     sdram_timing.RCDDelay             = SDRAM_TMR_ROW_TO_COLUMN;
     if (HAL_SDRAM_Init(&g_sdram_handle, &sdram_timing) != HAL_OK)
     {
-        return 1U;
+        return FUNC_STATUS_ERROR;
     }
 
     if (sdram_initialization_sequence() != 0U)
@@ -54,7 +55,7 @@ uint8_t sdram_init(void)
     {
         return 3U;
     }
-    return 0U;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -69,7 +70,7 @@ uint8_t sdram_initialization_sequence(void)
     /* SDRAM控制器初始化完成以后还需要按照如下顺序初始化SDRAM */
     if (sdram_send_cmd(0U, FMC_SDRAM_CMD_CLK_ENABLE, 1U, 0U) != 0U)
     {
-        return 1U;
+        return FUNC_STATUS_ERROR;
     }
     delay_us(500); /* 至少延时500us */
     if (sdram_send_cmd(0U, FMC_SDRAM_CMD_PALL, 1U, 0U) != 0U)
@@ -93,7 +94,7 @@ uint8_t sdram_initialization_sequence(void)
     {
         return 4U;
     }
-    return 0U;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -165,11 +166,11 @@ uint8_t sdram_send_cmd(uint8_t bankx, uint8_t cmd, uint8_t refresh, uint16_t reg
 
     if (HAL_SDRAM_SendCommand(&g_sdram_handle, &command, 0X1000) == HAL_OK) /* 向SDRAM发送命令 */
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
     else
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 }
 

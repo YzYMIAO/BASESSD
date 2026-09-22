@@ -1,3 +1,4 @@
+#include "common/common.h"
 #include "platform/platform.h"
 
 static const ssd_platform_ops_t *g_platform_ops;
@@ -10,7 +11,7 @@ int ssd_platform_register(const ssd_platform_ops_t *ops)
     }
 
     g_platform_ops = ops;
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 const ssd_platform_ops_t *ssd_platform_get(void)

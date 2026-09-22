@@ -16,6 +16,13 @@
 /* 最长命令链：与 nand_dispatch 的 chain buffer 深度一致 */
 #define FC_SCHEDULER_CHAIN_MAX NAND_DISPATCH_CHAIN_DEPTH
 
+/*
+ * 读饥饿保护：连续执行 N 条非读命令（PROGRAM/ERASE 等）后，
+ * 调度器将跳过后续非读命令，优先调度读命令。
+ * 执行一条读命令后计数器清零。
+ */
+#define FC_SCHEDULER_READ_PRIORITY_WRITE_BUDGET (3U)
+
 typedef struct
 {
     fc_command_id_t ids[FC_SCHEDULER_CHAIN_MAX];
@@ -27,6 +34,7 @@ typedef struct
     fc_submission_queue_t *sq;
     fc_submission_queue_t *hsq;
     uint8_t                busy[CH_NUM][CE_NUM][LUN_NUM];
+    uint8_t                consecutive_write_count; /* 读饥饿保护：连续非读命令计数 */
 } fc_scheduler_t;
 
 fc_status_t fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq);

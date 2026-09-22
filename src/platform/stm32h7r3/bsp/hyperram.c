@@ -1,3 +1,4 @@
+#include "common/common.h"
 
 
 #include "hyperram.h"
@@ -57,15 +58,15 @@ static uint8_t hyperram_read_register(uint32_t address, uint16_t *data)
     xspi_hyperbus_cmd_struct.DataMode     = HAL_XSPI_DATA_8_LINES;
     if (HAL_XSPI_HyperbusCmd(&g_xspi_handle, &xspi_hyperbus_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (HAL_XSPI_Receive(&g_xspi_handle, (uint8_t *)data, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -88,15 +89,15 @@ static uint8_t hyperram_write_register(uint32_t address, uint16_t data)
     xspi_hyperbus_cmd_struct.DataMode     = HAL_XSPI_DATA_8_LINES;
     if (HAL_XSPI_HyperbusCmd(&g_xspi_handle, &xspi_hyperbus_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (HAL_XSPI_Transmit(&g_xspi_handle, (uint8_t *)&data, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -112,27 +113,27 @@ static uint8_t hyperram_check_identification(void)
 
     if (hyperram_read_register(HYPERRAM_IDENTIFICATION_REGISTER_1, &data) != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (((data & HYPERRAM_IDENTIFICATION_1_MASK_DEVICE_TYPE) >> HYPERRAM_IDENTIFICATION_1_POS_DEVICE_TYPE) != HYPERRAM_IDENTIFICATION_1_DEVICE_TYPE)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (hyperram_read_register(HYPERRAM_IDENTIFICATION_REGISTER_0, &data) != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (((data & HYPERRAM_IDENTIFICATION_0_MASK_MANUFACTURER) >> HYPERRAM_IDENTIFICATION_0_POS_MANUFACTURER) != HYPERRAM_IDENTIFICATION_0_MANUFACTURER)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     hyperram_size = 1UL << (((((data & HYPERRAM_IDENTIFICATION_0_MASK_COL_COUNT) >> HYPERRAM_IDENTIFICATION_0_POS_COL_COUNT) + 1) + (((data & HYPERRAM_IDENTIFICATION_0_MASK_ROW_COUNT) >> HYPERRAM_IDENTIFICATION_0_POS_ROW_COUNT) + 1)) + 1);
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -148,26 +149,26 @@ static uint8_t hyperram_config_differential_clock(void)
 
     if (hyperram_read_register(HYPERRAM_CONFIGURATION_REGISTER_1, &data) != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     data &= ~(1UL << 6);
     if (hyperram_write_register(HYPERRAM_CONFIGURATION_REGISTER_1, data) != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* Verify that the device accepted the CR1 update before memory mapping. */
     if (hyperram_read_register(HYPERRAM_CONFIGURATION_REGISTER_1, &data) != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     if ((data & (1UL << 6)) != 0U)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -190,17 +191,17 @@ static uint8_t hyperram_memory_mapped(void)
     xspi_hyperbus_cmd_struct.DataMode   = HAL_XSPI_DATA_8_LINES;
     if (HAL_XSPI_HyperbusCmd(&g_xspi_handle, &xspi_hyperbus_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_memory_mapped_struct.TimeOutActivation  = HAL_XSPI_TIMEOUT_COUNTER_ENABLE;
     xspi_memory_mapped_struct.TimeoutPeriodClock = 0;
     if (HAL_XSPI_MemoryMapped(&g_xspi_handle, &xspi_memory_mapped_struct) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -226,7 +227,7 @@ uint8_t hyperram_init(void)
     rcc_periph_clk_init_struct.Xspi2ClockSelection  = RCC_XSPI2CLKSOURCE_PLL2S;
     if (HAL_RCCEx_PeriphCLKConfig(&rcc_periph_clk_init_struct) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 使能时钟 */
@@ -268,7 +269,7 @@ uint8_t hyperram_init(void)
     g_xspi_handle.Init.MemorySelect            = HAL_XSPI_CSSEL_NCS1;
     if (HAL_XSPI_Init(&g_xspi_handle) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 配置XSPIM */
@@ -278,7 +279,7 @@ uint8_t hyperram_init(void)
     xspim_cfg_struct.Req2AckTime = 1U;
     if (HAL_XSPIM_Config(&g_xspi_handle, &xspim_cfg_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 配置HyperBus参数 */
@@ -288,7 +289,7 @@ uint8_t hyperram_init(void)
     xspi_hyperbus_cfg_struct.LatencyMode         = HAL_XSPI_FIXED_LATENCY;
     if (HAL_XSPI_HyperbusCfg(&g_xspi_handle, &xspi_hyperbus_cfg_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 硬件复位HyperRAM */
@@ -299,24 +300,24 @@ uint8_t hyperram_init(void)
     {
         if (hyperram_check_identification() != 0)
         {
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
     }
 
     /* 配置HyperRAM差分时钟模式 */
     if (hyperram_config_differential_clock() != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 配置HyperRAM内存映射 */
     if (hyperram_memory_mapped() != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     hyperram_ready = 1U;
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**

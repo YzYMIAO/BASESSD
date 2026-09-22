@@ -97,7 +97,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
  * 初始化 / 就绪
  * ====================================================================== */
 
-uint8_t nand_dispatch_init(void)
+nand_result_t nand_dispatch_init(void)
 {
     uint8_t channel;
     uint8_t ce;
@@ -119,7 +119,7 @@ void nand_dispatch_set_device_ready(uint8_t ready)
  * submit — 单命令入队
  * ====================================================================== */
 
-uint8_t nand_dispatch_submit(const nand_dispatch_request_t *request)
+nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request)
 {
     nand_channel_queue_t      *queue;
     nand_dispatch_lun_chain_t *chain;
@@ -168,7 +168,7 @@ uint8_t nand_dispatch_submit(const nand_dispatch_request_t *request)
  *   3. 入队后链中命令按序执行，HSQ 无法插入
  * ====================================================================== */
 
-uint8_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count)
+nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count)
 {
     nand_channel_queue_t      *queue;
     nand_dispatch_lun_chain_t *chain;
@@ -225,7 +225,7 @@ uint8_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint
  *   Phase 2 — 从通道队列出队 command_id，启动 LUN 的第一个命令。
  * ====================================================================== */
 
-uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
+nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
 {
     uint8_t channel;
     uint8_t count;
@@ -315,6 +315,20 @@ uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                             memcpy(task->cw_buffers[0][cache_cw],
                                    &g_nand_channel_page_buffer[channel][cache_cw * (PAGE_SIZE / 4U)],
                                    PAGE_SIZE / 4U);
+                        }
+                    }
+
+                    /* Multi-Plane WITH_DATA_OUT: 把 page_buffer 拆回各 plane 各 CW buffer */
+                    if (task->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
+                    {
+                        uint8_t mp_plane, mp_cw;
+                        for (mp_plane = 0U; mp_plane < task->plane_count; mp_plane++)
+                        {
+                            for (mp_cw = 0U; mp_cw < task->cw_count; mp_cw++)
+                            {
+                                uint8_t *src = &g_nand_channel_page_buffer[channel][mp_plane * PAGE_SIZE + mp_cw * (PAGE_SIZE / CW_NUM)];
+                                memcpy(task->cw_buffers[mp_plane][mp_cw], src, PAGE_SIZE / CW_NUM);
+                            }
                         }
                     }
 

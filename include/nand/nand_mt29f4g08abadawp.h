@@ -32,16 +32,16 @@
 uint8_t nand_init(void);
 
 /* Generic ONFI execution entry: OP_* -> g_nand_operation_map -> UOP -> FMC backend. */
-uint8_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *request, nand_fc_completion_t *completion);
-uint8_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operation, const nand_fc_request_t *request);
-uint8_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *completion);
+nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *request, nand_fc_completion_t *completion);
+nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operation, const nand_fc_request_t *request);
+nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *completion);
 
 /* Typed ONFI operation helpers. No helper writes FMC command/address/data windows directly. */
-uint8_t nand_fc_reset(nand_fc_completion_t *completion);
-uint8_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion);
-uint8_t nand_fc_set_features(uint8_t feature_address, const uint8_t feature_data[4], nand_fc_completion_t *completion);
-uint8_t nand_fc_read_page(const nand_fc_request_t *request, nand_fc_completion_t *completion);
-uint8_t nand_fc_program_page(const nand_fc_request_t *request, nand_fc_completion_t *completion);
-uint8_t nand_fc_erase_block(const nand_fc_request_t *request, nand_fc_completion_t *completion);
+nand_result_t nand_fc_reset(nand_fc_completion_t *completion);
+nand_result_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion);
+nand_result_t nand_fc_set_features(uint8_t feature_address, const uint8_t feature_data[4], nand_fc_completion_t *completion);
+nand_result_t nand_fc_read_page(const nand_fc_request_t *request, nand_fc_completion_t *completion);
+nand_result_t nand_fc_program_page(const nand_fc_request_t *request, nand_fc_completion_t *completion);
+nand_result_t nand_fc_erase_block(const nand_fc_request_t *request, nand_fc_completion_t *completion);
 
 #endif /* PLATFORM_STM32H743_NAND_MT29F4G08ABADAWP_H */

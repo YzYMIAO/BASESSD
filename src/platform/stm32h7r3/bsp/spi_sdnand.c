@@ -1,3 +1,4 @@
+#include "common/common.h"
 
 
 #include "spi_sdnand.h"
@@ -60,7 +61,7 @@ static uint8_t sdnand_spi_init(sdnand_spi_speed_t speed)
 
     if (speed >= SDNAND_SPI_SPEED_DUMMY)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     ptr = (__IO uint8_t *)&spi_handle;
@@ -73,7 +74,7 @@ static uint8_t sdnand_spi_init(sdnand_spi_speed_t speed)
     spi_handle.Instance = SDNAND_SPI;
     if (HAL_SPI_DeInit(&spi_handle) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 初始化SPI */
@@ -107,10 +108,10 @@ static uint8_t sdnand_spi_init(sdnand_spi_speed_t speed)
     spi_handle.Init.ReadyPolarity           = SPI_RDY_POLARITY_HIGH;
     if (HAL_SPI_Init(&spi_handle) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -217,11 +218,11 @@ static uint8_t sdnand_wait_ready(void)
     {
         if (sdnand_spi_read_write_byte(0xFF) == 0xFF)
         {
-            return 0;
+            return FUNC_STATUS_SUCCESS;
         }
     }
 
-    return 1;
+    return FUNC_STATUS_ERROR;
 }
 
 /**
@@ -270,11 +271,11 @@ static uint8_t sdnand_chip_select_enable(void)
     SDNAND_CS(0);
     if (sdnand_wait_ready() == 0)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     sdnand_chip_select_disable();
-    return 1;
+    return FUNC_STATUS_ERROR;
 }
 
 /**
@@ -300,17 +301,17 @@ static uint8_t sdnand_recv_data(uint8_t *data, uint16_t length)
     }
     if (t == 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (length == 0)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     if (data == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 接收数据 */
@@ -324,7 +325,7 @@ static uint8_t sdnand_recv_data(uint8_t *data, uint16_t length)
     sdnand_spi_read_write_byte(0xFF);
     sdnand_spi_read_write_byte(0xFF);
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -342,7 +343,7 @@ static uint8_t sdnand_send_block_data(uint8_t token, const uint8_t *data)
     /* 校验SD NAND就绪 */
     if (sdnand_wait_ready() != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 发送参数 */
@@ -352,7 +353,7 @@ static uint8_t sdnand_send_block_data(uint8_t token, const uint8_t *data)
     {
         if (data == NULL)
         {
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
         for (data_index = 0; data_index < sdnand_info.logic_block_size; data_index++)
         {
@@ -365,11 +366,11 @@ static uint8_t sdnand_send_block_data(uint8_t token, const uint8_t *data)
 
         if ((sdnand_spi_read_write_byte(0xFF) & 0x1F) != 0x05)
         {
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -460,12 +461,12 @@ static uint8_t sdnand_read_ocr(uint8_t ocr[4])
 {
     if (sdnand_send_cmd(SDNAND_CMD58, 0UL) != 0x00U)
     {
-        return 1U;
+        return FUNC_STATUS_ERROR;
     }
 
     sdnand_read_response_bytes(ocr, 4U);
     sdnand_chip_select_disable();
-    return 0U;
+    return FUNC_STATUS_SUCCESS;
 }
 
 static uint8_t sdnand_parse_csd(void)
@@ -493,7 +494,7 @@ static uint8_t sdnand_parse_csd(void)
 
         if (read_bl_len > 11U)
         {
-            return 1U;
+            return FUNC_STATUS_ERROR;
         }
 
         sdnand_info.block_size      = 1UL << read_bl_len;
@@ -503,7 +504,7 @@ static uint8_t sdnand_parse_csd(void)
     }
     else
     {
-        return 1U;
+        return FUNC_STATUS_ERROR;
     }
 
     sdnand_info.logic_block_size = SDNAND_BLOCK_SIZE;
@@ -537,7 +538,7 @@ uint8_t sdnand_init(void)
     /* SD NAND初始化前低速模式初始化SPI */
     if (sdnand_spi_init(SDNAND_SPI_SPEED_LOW) != 0U)
     {
-        return 1U;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 发送至少74个时钟以上电SD */
@@ -560,7 +561,7 @@ uint8_t sdnand_init(void)
     if (ready == 0U)
     {
         sdnand_chip_select_disable();
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* CMD8 distinguishes legacy SDSC cards from SD v2 cards. */
@@ -571,7 +572,7 @@ uint8_t sdnand_init(void)
         sdnand_chip_select_disable();
         if ((resp7[2] != 0x01U) || (resp7[3] != 0xAAU))
         {
-            return 1U;
+            return FUNC_STATUS_ERROR;
         }
 
         sdnand_info.card_type = SDNAND_CARD_SDSC_V2;
@@ -586,7 +587,7 @@ uint8_t sdnand_init(void)
     else
     {
         sdnand_chip_select_disable();
-        return 1U;
+        return FUNC_STATUS_ERROR;
     }
 
     /* ACMD41 remains in Idle until the card finishes its internal startup. */
@@ -605,12 +606,12 @@ uint8_t sdnand_init(void)
     if (ready == 0U)
     {
         sdnand_chip_select_disable();
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (sdnand_read_ocr(sdnand_info.ocr) != 0U)
     {
-        return 1U;
+        return FUNC_STATUS_ERROR;
     }
 
     if ((sdnand_info.card_type == SDNAND_CARD_SDSC_V2) &&
@@ -622,7 +623,7 @@ uint8_t sdnand_init(void)
     /* SD NAND初始化后高速模式初始化SPI */
     if (sdnand_spi_init(SDNAND_SPI_SPEED_HIGH) != 0U)
     {
-        return 1U;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 设置块大小 */
@@ -630,7 +631,7 @@ uint8_t sdnand_init(void)
         (sdnand_send_cmd(SDNAND_CMD16, SDNAND_BLOCK_SIZE) != 0x00U))
     {
         sdnand_chip_select_disable();
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     sdnand_chip_select_disable();
 
@@ -638,12 +639,12 @@ uint8_t sdnand_init(void)
     if (sdnand_send_cmd(SDNAND_CMD9, 0UL) != 0x00)
     {
         sdnand_chip_select_disable();
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     if (sdnand_recv_data(sdnand_info.csd, sizeof(sdnand_info.csd)) != 0)
     {
         sdnand_chip_select_disable();
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     sdnand_chip_select_disable();
 
@@ -665,18 +666,18 @@ uint8_t sdnand_read_disk(uint8_t *data, uint32_t block_index, uint32_t block_num
 
     if (block_num == 0)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     if (data == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if ((block_index >= sdnand_info.logic_block_num) ||
         (block_num > (sdnand_info.logic_block_num - block_index)))
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 计算块地址 */
@@ -688,13 +689,13 @@ uint8_t sdnand_read_disk(uint8_t *data, uint32_t block_index, uint32_t block_num
         if (sdnand_send_cmd(SDNAND_CMD17, address) != 0x00)
         {
             sdnand_chip_select_disable();
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
 
         if (sdnand_recv_data(data, sdnand_info.logic_block_size) != 0)
         {
             sdnand_chip_select_disable();
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
     }
     /* 多块读 */
@@ -703,7 +704,7 @@ uint8_t sdnand_read_disk(uint8_t *data, uint32_t block_index, uint32_t block_num
         if (sdnand_send_cmd(SDNAND_CMD18, address) != 0x00)
         {
             sdnand_chip_select_disable();
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
 
         while (block_num--)
@@ -711,7 +712,7 @@ uint8_t sdnand_read_disk(uint8_t *data, uint32_t block_index, uint32_t block_num
             if (sdnand_recv_data(data, sdnand_info.logic_block_size) != 0)
             {
                 sdnand_chip_select_disable();
-                return 1;
+                return FUNC_STATUS_ERROR;
             }
             data += sdnand_info.logic_block_size;
         }
@@ -719,14 +720,14 @@ uint8_t sdnand_read_disk(uint8_t *data, uint32_t block_index, uint32_t block_num
         if (sdnand_send_cmd(SDNAND_CMD12, 0UL) != 0x00U)
         {
             sdnand_chip_select_disable();
-            return 1U;
+            return FUNC_STATUS_ERROR;
         }
     }
 
     /* 取消片选 */
     sdnand_chip_select_disable();
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -744,18 +745,18 @@ uint8_t sdnand_write_disk(uint8_t *data, uint32_t block_index, uint32_t block_nu
 
     if (block_num == 0)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     if (data == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if ((block_index >= sdnand_info.logic_block_num) ||
         (block_num > (sdnand_info.logic_block_num - block_index)))
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 计算块地址 */
@@ -767,13 +768,13 @@ uint8_t sdnand_write_disk(uint8_t *data, uint32_t block_index, uint32_t block_nu
         if (sdnand_send_cmd(SDNAND_CMD24, address) != 0x00)
         {
             sdnand_chip_select_disable();
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
 
         if (sdnand_send_block_data(SDNAND_DATA_TOKEN_SINGLE, data) != 0)
         {
             sdnand_chip_select_disable();
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
     }
     /* 多块写 */
@@ -786,7 +787,7 @@ uint8_t sdnand_write_disk(uint8_t *data, uint32_t block_index, uint32_t block_nu
         if (sdnand_send_cmd(SDNAND_CMD25, address) != 0x00)
         {
             sdnand_chip_select_disable();
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
 
         while (block_num--)
@@ -794,25 +795,25 @@ uint8_t sdnand_write_disk(uint8_t *data, uint32_t block_index, uint32_t block_nu
             if (sdnand_send_block_data(SDNAND_DATA_TOKEN_MULTI_WRITE, data) != 0)
             {
                 sdnand_chip_select_disable();
-                return 1;
+                return FUNC_STATUS_ERROR;
             }
             data += sdnand_info.logic_block_size;
         }
         if (sdnand_send_block_data(SDNAND_DATA_TOKEN_STOP_WRITE, NULL) != 0)
         {
             sdnand_chip_select_disable();
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
 
         if (sdnand_wait_ready() != 0U)
         {
             sdnand_chip_select_disable();
-            return 1U;
+            return FUNC_STATUS_ERROR;
         }
     }
 
     /* 取消片选 */
     sdnand_chip_select_disable();
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }

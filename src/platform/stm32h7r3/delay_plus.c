@@ -1,3 +1,4 @@
+#include "common/common.h"
 #include "delay_plus.h"
 
 #include "stm32h7rsxx_hal.h"
@@ -93,7 +94,7 @@ uint32_t delay_plus_max_busy_us(void)
 
     if ((s_core_clock_hz == 0U) || !s_initialized)
     {
-        return 0U;
+        return FUNC_STATUS_SUCCESS;
     }
 
     /* DWT 为 32 位自由运行计数器，等待区间必须小于一个完整回绕周期。 */

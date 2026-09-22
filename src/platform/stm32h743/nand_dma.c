@@ -1,3 +1,4 @@
+#include "common/common.h"
 #include "nand_dma.h"
 
 #include "stm32h7xx_hal.h"
@@ -17,65 +18,65 @@
  *   - SCB_CleanDCache_by_Addr() 以 32 字节对齐的地址和大小操作
  *   - 传入的 buffer 可能未对齐，需对齐到 32 字节边界
  *   - 实际 buffer 在 FC Buffer Pool 中，起始地址由链接器决定
+ *
+ * 传输模式：
+ *   轮询版：HAL_DMA_PollForTransfer 同步等待，DMA 期间 CPU 空转。
+ *   中断版：HAL_DMA_Start_IT 非阻塞启动，ISR 设完成标志。
+ *           handler 在后续 step 中检查标志，步进逻辑与 WAIT_READY 一致。
  */
 
 /* DMA2 stream handles — 不使用全局 g_dma_handle 避免与 UART 冲突 */
 static DMA_HandleTypeDef g_nand_dma_in;   /* DMA2_Stream1: FMC→memory (READ)  */
 static DMA_HandleTypeDef g_nand_dma_out;  /* DMA2_Stream0: memory→FMC (PROGRAM) */
 
-uint8_t nand_dma_init(void)
+/* ── 中断完成标志（volatile 防编译器优化） ── */
+static volatile uint8_t g_dma_data_out_done;  /* PROGRAM 方向 DMA 完成标志 */
+static volatile uint8_t g_dma_data_in_done;   /* READ 方向 DMA 完成标志 */
+
+static nand_dma_result_t nand_dma_init_stream(DMA_HandleTypeDef *handle, DMA_Stream_TypeDef *instance)
 {
-    /* ── DATA_IN 方向: memory → FMC (PROGRAM) ── */
-    g_nand_dma_out.Instance                 = DMA2_Stream0;
-    g_nand_dma_out.Init.Request             = DMA_REQUEST_MEM2MEM;
-    g_nand_dma_out.Init.Direction           = DMA_MEMORY_TO_MEMORY;
-    g_nand_dma_out.Init.PeriphInc           = DMA_PINC_DISABLE;       /* FMC data reg 不自增 */
-    g_nand_dma_out.Init.MemInc              = DMA_MINC_ENABLE;         /* buffer 自增 */
-    g_nand_dma_out.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
-    g_nand_dma_out.Init.MemDataAlignment    = DMA_MDATAALIGN_BYTE;
-    g_nand_dma_out.Init.Mode                = DMA_NORMAL;
-    g_nand_dma_out.Init.Priority            = DMA_PRIORITY_HIGH;
-    g_nand_dma_out.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;
-    g_nand_dma_out.Init.FIFOThreshold       = DMA_FIFO_THRESHOLD_FULL;
-    g_nand_dma_out.Init.MemBurst            = DMA_MBURST_SINGLE;
-    g_nand_dma_out.Init.PeriphBurst         = DMA_PBURST_SINGLE;
+    handle->Instance                      = instance;
+    handle->Init.Request                  = DMA_REQUEST_MEM2MEM;
+    handle->Init.Direction                = DMA_MEMORY_TO_MEMORY;
+    handle->Init.PeriphInc                = DMA_PINC_DISABLE;       /* FMC data reg 不自增 */
+    handle->Init.MemInc                   = DMA_MINC_ENABLE;         /* buffer 自增 */
+    handle->Init.PeriphDataAlignment      = DMA_PDATAALIGN_BYTE;
+    handle->Init.MemDataAlignment         = DMA_MDATAALIGN_BYTE;
+    handle->Init.Mode                     = DMA_NORMAL;
+    handle->Init.Priority                 = DMA_PRIORITY_HIGH;
+    handle->Init.FIFOMode                 = DMA_FIFOMODE_DISABLE;
+    handle->Init.FIFOThreshold            = DMA_FIFO_THRESHOLD_FULL;
+    handle->Init.MemBurst                 = DMA_MBURST_SINGLE;
+    handle->Init.PeriphBurst              = DMA_PBURST_SINGLE;
 
-    if (HAL_DMA_Init(&g_nand_dma_out) != HAL_OK)
-    {
-        return 1U;
-    }
-
-    /* ── DATA_OUT 方向: FMC → memory (READ) ── */
-    g_nand_dma_in.Instance                  = DMA2_Stream1;
-    g_nand_dma_in.Init.Request              = DMA_REQUEST_MEM2MEM;
-    g_nand_dma_in.Init.Direction            = DMA_MEMORY_TO_MEMORY;
-    g_nand_dma_in.Init.PeriphInc            = DMA_PINC_DISABLE;
-    g_nand_dma_in.Init.MemInc               = DMA_MINC_ENABLE;
-    g_nand_dma_in.Init.PeriphDataAlignment  = DMA_PDATAALIGN_BYTE;
-    g_nand_dma_in.Init.MemDataAlignment     = DMA_MDATAALIGN_BYTE;
-    g_nand_dma_in.Init.Mode                 = DMA_NORMAL;
-    g_nand_dma_in.Init.Priority             = DMA_PRIORITY_HIGH;
-    g_nand_dma_in.Init.FIFOMode             = DMA_FIFOMODE_DISABLE;
-    g_nand_dma_in.Init.FIFOThreshold        = DMA_FIFO_THRESHOLD_FULL;
-    g_nand_dma_in.Init.MemBurst             = DMA_MBURST_SINGLE;
-    g_nand_dma_in.Init.PeriphBurst          = DMA_PBURST_SINGLE;
-
-    if (HAL_DMA_Init(&g_nand_dma_in) != HAL_OK)
-    {
-        /* 清理已初始化的 out */
-        HAL_DMA_DeInit(&g_nand_dma_out);
-        return 1U;
-    }
-
-    return 0U;
+    return (HAL_DMA_Init(handle) == HAL_OK) ? DMA_RESULT_OK : DMA_RESULT_ERROR;
 }
 
-uint8_t nand_dma_memory_to_fmc(volatile uint8_t *fmc_data_reg,
+nand_dma_result_t nand_dma_init(void)
+{
+    if ((nand_dma_init_stream(&g_nand_dma_out, DMA2_Stream0) != 0U) ||
+        (nand_dma_init_stream(&g_nand_dma_in, DMA2_Stream1) != 0U))
+    {
+        return DMA_RESULT_ERROR;
+    }
+
+    /* 清初始标志 */
+    g_dma_data_out_done = 0U;
+    g_dma_data_in_done  = 0U;
+
+    return DMA_RESULT_OK;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 轮询版（保留做后备，DMA 失败时回退到 PIO 前使用）
+ * ══════════════════════════════════════════════════════════════════ */
+
+nand_dma_result_t nand_dma_memory_to_fmc(volatile uint8_t *fmc_data_reg,
                                 const uint8_t *buffer, uint16_t length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
-        return 1U;
+        return DMA_RESULT_ERROR;
     }
 
     /* DMA 前 Clean D-Cache，让 DMA 看到 buffer 的最新数据 */
@@ -87,24 +88,24 @@ uint8_t nand_dma_memory_to_fmc(volatile uint8_t *fmc_data_reg,
                       (uint32_t)fmc_data_reg,
                       length) != HAL_OK)
     {
-        return 1U;
+        return DMA_RESULT_ERROR;
     }
 
-    /* 轮询等待完成（后续改为中断驱动） */
+    /* 轮询等待完成 */
     if (HAL_DMA_PollForTransfer(&g_nand_dma_out, HAL_DMA_FULL_TRANSFER, HAL_MAX_DELAY) != HAL_OK)
     {
-        return 1U;
+        return DMA_RESULT_ERROR;
     }
 
-    return 0U;
+    return DMA_RESULT_OK;
 }
 
-uint8_t nand_dma_fmc_to_memory(volatile uint8_t *fmc_data_reg,
+nand_dma_result_t nand_dma_fmc_to_memory(volatile uint8_t *fmc_data_reg,
                                 uint8_t *buffer, uint16_t length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
-        return 1U;
+        return DMA_RESULT_ERROR;
     }
 
     /* 启动 DMA: FMC data reg → memory (memory-to-memory) */
@@ -113,20 +114,119 @@ uint8_t nand_dma_fmc_to_memory(volatile uint8_t *fmc_data_reg,
                       (uint32_t)buffer,
                       length) != HAL_OK)
     {
-        return 1U;
+        return DMA_RESULT_ERROR;
     }
 
     /* 轮询等待完成 */
     if (HAL_DMA_PollForTransfer(&g_nand_dma_in, HAL_DMA_FULL_TRANSFER, HAL_MAX_DELAY) != HAL_OK)
     {
-        return 1U;
+        return DMA_RESULT_ERROR;
     }
 
     /* DMA 后 Invalidate D-Cache，让 CPU 从主存读取 */
     nand_dma_cache_invalidate(buffer, length);
 
-    return 0U;
+    return DMA_RESULT_OK;
 }
+
+/* ══════════════════════════════════════════════════════════════════
+ * 中断版（非阻塞）
+ * ══════════════════════════════════════════════════════════════════ */
+
+nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile uint8_t *fmc_data_reg,
+                                          const uint8_t *buffer, uint16_t length)
+{
+    if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
+    {
+        return DMA_RESULT_ERROR;
+    }
+
+    /* DMA 前 Clean D-Cache */
+    nand_dma_cache_clean(buffer, length);
+
+    g_dma_data_out_done = 0U;
+
+    if (HAL_DMA_Start_IT(&g_nand_dma_out,
+                         (uint32_t)buffer,
+                         (uint32_t)fmc_data_reg,
+                         length) != HAL_OK)
+    {
+        return DMA_RESULT_ERROR;
+    }
+
+    return DMA_RESULT_OK;
+}
+
+nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile uint8_t *fmc_data_reg,
+                                          uint8_t *buffer, uint16_t length)
+{
+    if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
+    {
+        return DMA_RESULT_ERROR;
+    }
+
+    g_dma_data_in_done = 0U;
+
+    if (HAL_DMA_Start_IT(&g_nand_dma_in,
+                         (uint32_t)fmc_data_reg,
+                         (uint32_t)buffer,
+                         length) != HAL_OK)
+    {
+        return DMA_RESULT_ERROR;
+    }
+
+    return DMA_RESULT_OK;
+}
+
+uint8_t nand_dma_data_out_done(void)
+{
+    return g_dma_data_out_done;
+}
+
+uint8_t nand_dma_data_in_done(void)
+{
+    return g_dma_data_in_done;
+}
+
+/*
+ * DMA2_Stream0 传输完成 ISR（PROGRAM 方向：memory→FMC）。
+ * 由 stm32h7rsxx_it.c 的 DMA2_Stream0_IRQHandler() 调用。
+ */
+void nand_dma_irq_handler_data_out(void)
+{
+    HAL_DMA_IRQHandler(&g_nand_dma_out);
+
+    /* TCIF0_4: Stream0/4 的传输完成标志 */
+    if (__HAL_DMA_GET_FLAG(&g_nand_dma_out, DMA_FLAG_TCIF0_4) != 0U)
+    {
+        __HAL_DMA_CLEAR_FLAG(&g_nand_dma_out, DMA_FLAG_TCIF0_4);
+        g_dma_data_out_done = 1U;
+    }
+}
+
+/*
+ * DMA2_Stream1 传输完成 ISR（READ 方向：FMC→memory）。
+ * 由 stm32h7rsxx_it.c 的 DMA2_Stream1_IRQHandler() 调用。
+ *
+ * READ 方向需要在 ISR 中 Invalidate D-Cache，
+ * 因为 DMA 写入 buffer 后 D-Cache 中的副本已过时，
+ * CPU 下一次读 buffer 时必须从主存加载。
+ */
+void nand_dma_irq_handler_data_in(void)
+{
+    HAL_DMA_IRQHandler(&g_nand_dma_in);
+
+    /* TCIF1_5: Stream1/5 的传输完成标志 */
+    if (__HAL_DMA_GET_FLAG(&g_nand_dma_in, DMA_FLAG_TCIF1_5) != 0U)
+    {
+        __HAL_DMA_CLEAR_FLAG(&g_nand_dma_in, DMA_FLAG_TCIF1_5);
+        g_dma_data_in_done = 1U;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * D-Cache 维护（轮询版和中断版共用）
+ * ══════════════════════════════════════════════════════════════════ */
 
 void nand_dma_cache_clean(const uint8_t *buffer, uint16_t length)
 {

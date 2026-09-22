@@ -48,7 +48,7 @@ typedef struct
     void                 *context;
 } nand_fmc_config_t;
 
-uint8_t                      nand_fmc_configure(const nand_fmc_config_t *config);
+nand_result_t nand_fmc_configure(const nand_fmc_config_t *config);
 const nand_engine_backend_t *nand_fmc_backend_get(void);
 
 #endif /* PLATFORM_STM32H743_NAND_FMC_H */

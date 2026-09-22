@@ -1,3 +1,4 @@
+#include "common/common.h"
 #include "usart.h"
 
 #include "dma.h"
@@ -82,7 +83,7 @@ static uint8_t uart_rx_dequeue(uint8_t *byte)
 
     if (tail == g_rx_head)
     {
-        return 0U;
+        return FUNC_STATUS_SUCCESS;
     }
 
     /*
@@ -92,7 +93,7 @@ static uint8_t uart_rx_dequeue(uint8_t *byte)
     *byte = g_rx_ring[tail];
     __DMB();
     g_rx_tail = (tail + 1U) & USART_RX_RING_MASK;
-    return 1U;
+    return FUNC_STATUS_ERROR;
 }
 
 static uint8_t uart_tx_dequeue(uint8_t *byte)
@@ -101,7 +102,7 @@ static uint8_t uart_tx_dequeue(uint8_t *byte)
 
     if (tail == g_tx_head)
     {
-        return 0U;
+        return FUNC_STATUS_SUCCESS;
     }
 
     /* 先取出数据再推进 tail；推进 tail 后，该槽位才可以被生产者重新使用。 */
@@ -109,7 +110,7 @@ static uint8_t uart_tx_dequeue(uint8_t *byte)
     __DMB();
     g_tx_tail = (tail + 1U) & USART_TX_RING_MASK;
     __SEV();
-    return 1U;
+    return FUNC_STATUS_ERROR;
 }
 
 /* Called with IRQs masked by uart_log_write(), or from the DMA completion ISR. */
@@ -244,7 +245,7 @@ static int uart_cli_help(int argc, char *argv[])
 
         (void)uart_log_printf(UART_LOG_INFO, "%-38s %s\r\n", command->usage, command->description);
     }
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 static int uart_cli_status(int argc, char *argv[])
@@ -252,7 +253,7 @@ static int uart_cli_status(int argc, char *argv[])
     (void)argc;
     (void)argv;
     uart_print_status();
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 static int uart_cli_version(int argc, char *argv[])
@@ -262,7 +263,7 @@ static int uart_cli_version(int argc, char *argv[])
     (void)argc;
     (void)argv;
     (void)uart_log_write(version, sizeof(version) - 1U);
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 static int uart_cli_log(int argc, char *argv[])
@@ -297,7 +298,7 @@ static int uart_cli_log(int argc, char *argv[])
     }
 
     (void)uart_log_write(updated, sizeof(updated) - 1U);
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 #if defined(FC_NAND_TEST_ENABLE)
@@ -347,7 +348,7 @@ static int uart_cli_parse_u32(const char *text, uint32_t *value)
         text++;
     }
     *value = result;
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 static int uart_cli_nand(int argc, char *argv[])
@@ -383,7 +384,7 @@ static int uart_cli_nand(int argc, char *argv[])
             (paa_is_valid(lun, block, plane, page, cw) == 0U))
         {
             (void)uart_log_write("error: PAA field out of range\r\n", 32U);
-            return 0;
+            return FUNC_STATUS_SUCCESS;
         }
         paa = paa_make(lun, block, plane, page, cw);
         (void)uart_log_printf(UART_LOG_INFO,
@@ -396,7 +397,7 @@ static int uart_cli_nand(int argc, char *argv[])
                               (unsigned long)block,
                               (unsigned long)page,
                               (unsigned long)cw);
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
     else
     {
@@ -407,7 +408,7 @@ static int uart_cli_nand(int argc, char *argv[])
                           (int)result);
     /* Test completion is reported only after the result has reached the UART TX pin. */
     (void)uart_log_flush(5000U);
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 #endif
 
@@ -497,7 +498,7 @@ int _write(int file, char *buffer, int length)
 
     if ((buffer == NULL) || (length <= 0))
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     return uart_log_write(buffer, (uint32_t)length);
@@ -654,7 +655,7 @@ int uart_log_write(const char *data, uint32_t length)
 
     if ((!g_usart_ready) || (data == NULL) || (length == 0U))
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     /* A DMA transport error has an ambiguous byte boundary; do not claim later writes are reliable. */
@@ -742,7 +743,7 @@ int uart_log_flush(uint32_t timeout_ms)
         if ((empty != 0U) && (dma_active == 0U) && ((USART_UX->ISR & USART_ISR_TC) != 0U))
         {
             __set_PRIMASK(primask);
-            return 0;
+            return FUNC_STATUS_SUCCESS;
         }
         __set_PRIMASK(primask);
 
@@ -768,13 +769,13 @@ int uart_log_printf(uart_log_level_t level, const char *format, ...)
 
     if ((format == NULL) || (level > g_uart_log_level))
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     prefix_length = snprintf(message, sizeof(message), "[%s] ", uart_log_level_name(level));
     if ((prefix_length < 0) || ((uint32_t)prefix_length >= sizeof(message)))
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     va_start(args, format);
@@ -783,7 +784,7 @@ int uart_log_printf(uart_log_level_t level, const char *format, ...)
 
     if (message_length < 0)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
     if ((uint32_t)message_length >= (sizeof(message) - (uint32_t)prefix_length))
     {

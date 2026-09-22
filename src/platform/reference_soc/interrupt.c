@@ -1,3 +1,4 @@
+#include "common/common.h"
 #include "platform/interrupt.h"
 
 #include <stddef.h>
@@ -22,7 +23,7 @@ int ssd_irq_register(uint32_t irq, ssd_irq_handler_t handler, void *context)
 
     g_irq_table[irq].handler = handler;
     g_irq_table[irq].context = context;
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 void ssd_irq_enable(uint32_t irq)

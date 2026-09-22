@@ -28,6 +28,28 @@
 /* 通道页缓冲大小：多 plane 操作需要 PLANE_NUM 倍缓冲 */
 #define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM) /* 2112×2=4224 */
 
+/*
+ * ONFI 时序模式控制
+ *
+ * CONFIG_NAND_TIMING_MODE_4
+ *   0 = 低速模式（NAND 默认时序，FMC 全速保守时序）
+ *       所有 ONFI 操作在 NAND 默认 Mode 0（tRC=50ns）下运行，
+ *       nand_init() 中跳过 SET_FEATURES 切换 Mode 4 的步骤。
+ *       用于功能验证初期，排除时序问题。
+ *
+ *   1 = 高速模式（ONFI Mode 4，tRC=20ns）
+ *       nand_init() 中会：
+ *       ① 低速初始化 FMC + 访问 NAND 完成 RESET/READ_ID
+ *       ② SET_FEATURES 切 NAND 到 Mode 4
+ *       ③ 重新配置 FMC 硬件时序寄存器为 Mode 4 参数
+ *       NAND 和 FMC 均运行在 50MHz 接口速率。
+ *
+ * 默认：0（低速模式），功能验证稳定后改为 1。
+ */
+#ifndef CONFIG_NAND_TIMING_MODE_4
+#    define CONFIG_NAND_TIMING_MODE_4 (0U)
+#endif
+
 #define CW_WIDTH         (2U)  /* 4个codeword,各个cw的起始位置在4等分处。 */
 #define PAGE_ADDR_WIDTH  (6U)  /* PA0~PA5，每 Block 64 页。 */
 #define PLANE_ADDR_WIDTH (1U)  /* BA6，Plane 选择。 */

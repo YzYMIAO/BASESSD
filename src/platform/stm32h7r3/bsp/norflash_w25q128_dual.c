@@ -1,3 +1,4 @@
+#include "common/common.h"
 
 
 #include "norflash_w25q128_dual.h"
@@ -44,7 +45,7 @@ static uint8_t w25q128_dual_software_reset(XSPI_HandleTypeDef *hxspi)
 
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -60,7 +61,7 @@ static uint8_t w25q128_dual_software_reset(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -76,12 +77,12 @@ static uint8_t w25q128_dual_software_reset(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     delay_ms(1);
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -98,7 +99,7 @@ static uint8_t w25q128_dual_verify_identification(XSPI_HandleTypeDef *hxspi)
 
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -119,18 +120,18 @@ static uint8_t w25q128_dual_verify_identification(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     if (HAL_XSPI_Receive(hxspi, data, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     if (((((uint16_t)data[0] | (data[2] << 8)) != W25Q128_MANUFACTURER_DEVICE_ID) || (((uint16_t)data[1] | (data[3] << 8)) != W25Q128_MANUFACTURER_DEVICE_ID)) && ((((uint16_t)data[0] | (data[2] << 8)) != BY25FQ128_MANUFACTURER_DEVICE_ID) || (((uint16_t)data[1] | (data[3] << 8)) != BY25FQ128_MANUFACTURER_DEVICE_ID)))
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -148,7 +149,7 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
 
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -166,11 +167,11 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     if (HAL_XSPI_Receive(hxspi, data, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -186,7 +187,7 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
     xspi_regular_cmd_struct.IOSelect           = HAL_XSPI_SELECT_IO_7_0;
@@ -203,7 +204,7 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
@@ -212,7 +213,7 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     *(uint16_t *)data &= ~((1UL << 1) | ((1UL << 1) << 8));
@@ -232,11 +233,11 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     if (HAL_XSPI_Transmit(hxspi, data, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -254,7 +255,7 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (0UL << 0) | ((0UL << 0) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 0) | ((1UL << 0) << 8);
@@ -263,7 +264,7 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -281,18 +282,18 @@ static uint8_t w25q128_dual_configure_quad(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     if (HAL_XSPI_Receive(hxspi, data, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     if ((*(uint16_t *)data & ((1UL << 1) | ((1UL << 1) << 8))) != ((1UL << 1) | ((1UL << 1) << 8)))
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 /**
  * @brief   配置DTR-OPI模式
@@ -313,28 +314,28 @@ static uint8_t w25q128_dual_init(XSPI_HandleTypeDef *hxspi)
 {
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 软复位 */
     if (w25q128_dual_software_reset(hxspi) != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 校验ID */
     if (w25q128_dual_verify_identification(hxspi) != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 配置Quad SPI模式 */
     if (w25q128_dual_configure_quad(hxspi) != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -351,7 +352,7 @@ static uint8_t w25q128_dual_erase_chip(XSPI_HandleTypeDef *hxspi)
 
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -367,7 +368,7 @@ static uint8_t w25q128_dual_erase_chip(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -385,7 +386,7 @@ static uint8_t w25q128_dual_erase_chip(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
@@ -394,7 +395,7 @@ static uint8_t w25q128_dual_erase_chip(XSPI_HandleTypeDef *hxspi)
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -410,7 +411,7 @@ static uint8_t w25q128_dual_erase_chip(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -428,7 +429,7 @@ static uint8_t w25q128_dual_erase_chip(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (0UL << 0) | ((0UL << 0) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 0) | ((1UL << 0) << 8);
@@ -437,10 +438,10 @@ static uint8_t w25q128_dual_erase_chip(XSPI_HandleTypeDef *hxspi)
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, 200000UL) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -458,7 +459,7 @@ static uint8_t w25q128_dual_erase_block(XSPI_HandleTypeDef *hxspi, uint32_t addr
 
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -474,7 +475,7 @@ static uint8_t w25q128_dual_erase_block(XSPI_HandleTypeDef *hxspi, uint32_t addr
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -492,7 +493,7 @@ static uint8_t w25q128_dual_erase_block(XSPI_HandleTypeDef *hxspi, uint32_t addr
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
@@ -501,7 +502,7 @@ static uint8_t w25q128_dual_erase_block(XSPI_HandleTypeDef *hxspi, uint32_t addr
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -520,7 +521,7 @@ static uint8_t w25q128_dual_erase_block(XSPI_HandleTypeDef *hxspi, uint32_t addr
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -538,7 +539,7 @@ static uint8_t w25q128_dual_erase_block(XSPI_HandleTypeDef *hxspi, uint32_t addr
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (0UL << 0) | ((0UL << 0) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 0) | ((1UL << 0) << 8);
@@ -547,10 +548,10 @@ static uint8_t w25q128_dual_erase_block(XSPI_HandleTypeDef *hxspi, uint32_t addr
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, 400UL) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -568,7 +569,7 @@ static uint8_t w25q128_dual_erase_sector(XSPI_HandleTypeDef *hxspi, uint32_t add
 
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -584,7 +585,7 @@ static uint8_t w25q128_dual_erase_sector(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -602,7 +603,7 @@ static uint8_t w25q128_dual_erase_sector(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
@@ -611,7 +612,7 @@ static uint8_t w25q128_dual_erase_sector(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -630,7 +631,7 @@ static uint8_t w25q128_dual_erase_sector(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -648,7 +649,7 @@ static uint8_t w25q128_dual_erase_sector(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (0UL << 0) | ((0UL << 0) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 0) | ((1UL << 0) << 8);
@@ -657,10 +658,10 @@ static uint8_t w25q128_dual_erase_sector(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, 400UL) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -680,12 +681,12 @@ static uint8_t w25q128_dual_program_page(XSPI_HandleTypeDef *hxspi, uint32_t add
 
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (length > (2 * W25Q128_PAGE_SIZE))
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -701,7 +702,7 @@ static uint8_t w25q128_dual_program_page(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -719,7 +720,7 @@ static uint8_t w25q128_dual_program_page(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
@@ -728,7 +729,7 @@ static uint8_t w25q128_dual_program_page(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -749,11 +750,11 @@ static uint8_t w25q128_dual_program_page(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     if (HAL_XSPI_Transmit(hxspi, data, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -771,7 +772,7 @@ static uint8_t w25q128_dual_program_page(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (0UL << 0) | ((0UL << 0) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 0) | ((1UL << 0) << 8);
@@ -780,10 +781,10 @@ static uint8_t w25q128_dual_program_page(XSPI_HandleTypeDef *hxspi, uint32_t add
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, 3UL) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -802,7 +803,7 @@ static uint8_t w25q128_dual_read(XSPI_HandleTypeDef *hxspi, uint32_t address, ui
 
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -823,15 +824,15 @@ static uint8_t w25q128_dual_read(XSPI_HandleTypeDef *hxspi, uint32_t address, ui
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (HAL_XSPI_Receive(hxspi, data, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -849,7 +850,7 @@ static uint8_t w25q128_dual_memory_mapped(XSPI_HandleTypeDef *hxspi)
 
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -865,7 +866,7 @@ static uint8_t w25q128_dual_memory_mapped(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_COMMON_CFG;
@@ -883,7 +884,7 @@ static uint8_t w25q128_dual_memory_mapped(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
     xspi_auto_polling_struct.MatchValue    = (1UL << 1) | ((1UL << 1) << 8);
     xspi_auto_polling_struct.MatchMask     = (1UL << 1) | ((1UL << 1) << 8);
@@ -892,7 +893,7 @@ static uint8_t w25q128_dual_memory_mapped(XSPI_HandleTypeDef *hxspi)
     xspi_auto_polling_struct.IntervalTime  = 0x10;
     if (HAL_XSPI_AutoPolling(hxspi, &xspi_auto_polling_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_READ_CFG;
@@ -911,7 +912,7 @@ static uint8_t w25q128_dual_memory_mapped(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_regular_cmd_struct.OperationType      = HAL_XSPI_OPTYPE_WRITE_CFG;
@@ -930,17 +931,17 @@ static uint8_t w25q128_dual_memory_mapped(XSPI_HandleTypeDef *hxspi)
     xspi_regular_cmd_struct.DQSMode            = HAL_XSPI_DQS_DISABLE;
     if (HAL_XSPI_Command(hxspi, &xspi_regular_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     xspi_memory_mapped_struct.TimeOutActivation  = HAL_XSPI_TIMEOUT_COUNTER_ENABLE;
     xspi_memory_mapped_struct.TimeoutPeriodClock = 0;
     if (HAL_XSPI_MemoryMapped(hxspi, &xspi_memory_mapped_struct) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /* 双W25Q128设备设备定义 */

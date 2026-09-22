@@ -1,3 +1,4 @@
+#include "common/common.h"
 #include "delay.h"
 
 static uint32_t g_core_clock_hz;
@@ -154,7 +155,7 @@ uint32_t delay_max_busy_us(void)
 {
     if (!g_delay_initialized || (g_core_clock_hz == 0U))
     {
-        return 0U;
+        return FUNC_STATUS_SUCCESS;
     }
 
 #if DELAY_USE_DWT

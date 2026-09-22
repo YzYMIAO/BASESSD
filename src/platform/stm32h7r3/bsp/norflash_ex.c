@@ -1,3 +1,4 @@
+#include "common/common.h"
 
 
 #include "norflash_ex.h"
@@ -16,12 +17,12 @@ static uint8_t norflash_ex_enter_mmap(void)
     norflash_init();
     if (norflash_memory_mapped() != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     __enable_irq();
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -38,10 +39,10 @@ static uint8_t norflash_ex_exit_mmap(void)
     SCB_InvalidateDCache();
     if (norflash_init() == NORFlash_Unknow)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -55,15 +56,15 @@ uint8_t norflash_ex_init(void)
 {
     if (norflash_init() == NORFlash_Unknow)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (norflash_memory_mapped() != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**

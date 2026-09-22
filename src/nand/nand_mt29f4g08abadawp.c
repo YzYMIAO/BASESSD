@@ -2,14 +2,76 @@
 
 #include "common/ssd_log.h"
 #include "delay.h"
+#include "nand_config.h"
 #include "nand_fmc.h"
 #include "platform/stm32h743/nand_dma.h"
+#include "platform/stm32h743/nand_rb_interrupt.h"
 
 #include <stddef.h>
 
 static NAND_HandleTypeDef g_nand_handle;
 
-/* R/B# polling is backend transport behavior. Command/status sequencing remains in ONFI UOPs. */
+/* 低速时序（NAND 默认 Mode 0，tRC=50ns） */
+static const nand_fmc_timing_t g_nand_timing_slow = {
+    70U, 5U, 10U, 5U, 5U, 10U, 15U, 5U, 7U, 20U, 7U, 10U, 10U, 25U, 50U,
+    10U, 15U, 0U, 20U, 16U, 7U, 15U, 100U, 100U, 5U, 10U, 20U, 100U, 60U,
+};
+
+/* 高速时序（ONFI Mode 4，tRC=20ns） */
+static const nand_fmc_timing_t g_nand_timing_fast = {
+    20U, 5U, 5U, 5U, 5U, 5U, 10U, 5U, 5U, 10U, 5U, 5U, 10U, 20U, 30U,
+    10U, 10U, 0U, 10U, 12U, 5U, 5U, 50U, 50U, 5U, 5U, 20U, 50U, 30U,
+};
+
+/*
+ * 根据 ONFI 时序参数 nand_fmc_timing_t 和 FMC 时钟频率，
+ * 计算 FMC PCC 硬件寄存器值。
+ *
+ * FMC kernel clock = 220 MHz → tHCLK ≈ 4.55 ns。
+ * 所有 ONFI 时序量纲为 ns，向上取整到整周期数。
+ *
+ * 当前实现基于 MT29F4G08ABADAWP 异步时序协商规则：
+ *   SetupTime     = max(tCLS, tALS, tCS)           / tHCLK
+ *   WaitSetupTime = max(tRP, tWP)                  / tHCLK
+ *   HoldSetupTime = max(tCH, tALH, tCLH, tDH)      / tHCLK
+ *   HiZSetupTime  = tRHZ / tHCLK
+ */
+static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi,
+                                    FMC_NAND_PCC_TimingTypeDef *pcc)
+{
+    /* FMC kernel clock period in ns, fixed at compile time for STM32H743 */
+    const uint32_t hclk_ns = 5U;  /* 220 MHz → 4.55 ns, 取整到 5 ns */
+
+    #define CEIL_DIV(a, b) (((a) + (b) - 1U) / (b))
+
+    /* max(tCLS, tALS, tCS) → SetupTime */
+    {
+        uint32_t max_ns = onfi->t_cls_ns;
+        if (onfi->t_als_ns > max_ns) max_ns = onfi->t_als_ns;
+        if (onfi->t_cs_ns  > max_ns) max_ns = onfi->t_cs_ns;
+        pcc->SetupTime = (uint8_t)CEIL_DIV(max_ns, hclk_ns);
+    }
+
+    /* max(tRP, tWP) → WaitSetupTime */
+    {
+        uint32_t max_ns = onfi->t_rp_ns;
+        if (onfi->t_wp_ns > max_ns) max_ns = onfi->t_wp_ns;
+        pcc->WaitSetupTime = (uint8_t)CEIL_DIV(max_ns, hclk_ns);
+    }
+
+    /* max(tCH, tALH, tCLH, tDH) → HoldSetupTime */
+    {
+        uint32_t max_ns = onfi->t_ch_ns;
+        if (onfi->t_alh_ns > max_ns) max_ns = onfi->t_alh_ns;
+        if (onfi->t_clh_ns > max_ns) max_ns = onfi->t_clh_ns;
+        if (onfi->t_dh_ns  > max_ns) max_ns = onfi->t_dh_ns;
+        pcc->HoldSetupTime = (uint8_t)CEIL_DIV(max_ns, hclk_ns);
+    }
+
+    pcc->HiZSetupTime = (uint8_t)CEIL_DIV(onfi->t_rhz_max_ns, hclk_ns);
+
+    #undef CEIL_DIV
+}
 static uint8_t nand_fmc_wait_ready(void *context, uint16_t timeout_us)
 {
     uint16_t elapsed_us;
@@ -26,7 +88,7 @@ static uint8_t nand_fmc_wait_ready(void *context, uint16_t timeout_us)
     return 1U;
 }
 
-uint8_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *request, nand_fc_completion_t *completion)
+nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *request, nand_fc_completion_t *completion)
 {
     const nand_operation_map_t *map;
     nand_command_request_t      command_request;
@@ -50,7 +112,7 @@ uint8_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *request, nan
     return status;
 }
 
-uint8_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operation, const nand_fc_request_t *request)
+nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operation, const nand_fc_request_t *request)
 {
     const nand_operation_map_t *map;
     uint8_t                     result;
@@ -81,7 +143,7 @@ uint8_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operation, con
     return result;
 }
 
-uint8_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *completion)
+nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *completion)
 {
     uint8_t result;
 
@@ -100,14 +162,14 @@ uint8_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *c
     return result;
 }
 
-uint8_t nand_fc_reset(nand_fc_completion_t *completion)
+nand_result_t nand_fc_reset(nand_fc_completion_t *completion)
 {
     const nand_fc_request_t request = {.column = 0U, .row = {0U}, .data = NULL, .data_length = 0U};
 
     return nand_fc_execute(OP_RESET, &request, completion);
 }
 
-uint8_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion)
+nand_result_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion)
 {
     const nand_fc_request_t request = {.column = 0U, .row = {0U}, .data = id, .data_length = 5U};
 
@@ -118,7 +180,7 @@ uint8_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion)
     return nand_fc_execute(OP_READ_ID, &request, completion);
 }
 
-uint8_t nand_fc_set_features(uint8_t feature_address, const uint8_t feature_data[4], nand_fc_completion_t *completion)
+nand_result_t nand_fc_set_features(uint8_t feature_address, const uint8_t feature_data[4], nand_fc_completion_t *completion)
 {
     const nand_fc_request_t request = {.column = feature_address, .row = {0U}, .data = (uint8_t *)feature_data, .data_length = 4U};
 
@@ -129,17 +191,17 @@ uint8_t nand_fc_set_features(uint8_t feature_address, const uint8_t feature_data
     return nand_fc_execute(OP_SET_FEATURES, &request, completion);
 }
 
-uint8_t nand_fc_read_page(const nand_fc_request_t *request, nand_fc_completion_t *completion)
+nand_result_t nand_fc_read_page(const nand_fc_request_t *request, nand_fc_completion_t *completion)
 {
     return nand_fc_execute(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, request, completion);
 }
 
-uint8_t nand_fc_program_page(const nand_fc_request_t *request, nand_fc_completion_t *completion)
+nand_result_t nand_fc_program_page(const nand_fc_request_t *request, nand_fc_completion_t *completion)
 {
     return nand_fc_execute(OP_NORMAL_PROGRAM_PAGE, request, completion);
 }
 
-uint8_t nand_fc_erase_block(const nand_fc_request_t *request, nand_fc_completion_t *completion)
+nand_result_t nand_fc_erase_block(const nand_fc_request_t *request, nand_fc_completion_t *completion)
 {
     return nand_fc_execute(OP_ERASE_BLOCK, request, completion);
 }
@@ -151,7 +213,6 @@ uint8_t nand_init(void)
     nand_fc_completion_t       completion;
     uint8_t                    id[5];
     uint8_t                    result;
-    const uint8_t              mode_4[4] = {4U, 0U, 0U, 0U};
 
     g_nand_handle.Instance             = FMC_NAND_DEVICE;
     g_nand_handle.Init.NandBank        = FMC_NAND_BANK3;
@@ -179,12 +240,15 @@ uint8_t nand_init(void)
              (unsigned int)HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT,
                                             MT29F4G08ABADAWP_RB_GPIO_PIN));
 
+    /* 初始化 R/B# EXTI6 中断（在首次 NAND 命令前完成） */
+    nand_rb_interrupt_init();
+
     {
         const nand_fmc_config_t fmc_config = {
             .data       = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
             .command    = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_CMD_OFFSET),
             .address    = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_ADDR_OFFSET),
-            .timing     = {70U, 5U, 10U, 5U, 5U, 10U, 15U, 5U, 7U, 20U, 7U, 10U, 10U, 25U, 50U, 10U, 15U, 0U, 20U, 16U, 7U, 15U, 100U, 100U, 5U, 10U, 20U, 100U, 60U},
+            .timing     = g_nand_timing_slow,
             .wait_ready = nand_fmc_wait_ready,
             .context    = NULL,
         };
@@ -229,14 +293,56 @@ uint8_t nand_init(void)
         SSD_LOGE("nand: unexpected ID\r\n");
         return NAND_RESULT_OPERATION_FAILED;
     }
-    result = nand_fc_set_features(0x01U, mode_4, &completion);
-    if (result != NAND_RESULT_OK)
+
+#if CONFIG_NAND_TIMING_MODE_4
+    /* ── 高速模式：切 NAND 到 Mode 4 + 更新 FMC 硬件时序 ── */
     {
-        SSD_LOGE("nand: set feature 01h failed, result=0x%02X status=0x%02X\r\n",
-                 (unsigned int)result,
-                 (unsigned int)completion.nand_status);
-        return result;
+        const uint8_t mode_4[4] = {4U, 0U, 0U, 0U};
+        FMC_NAND_PCC_TimingTypeDef fast_pcc = {0};
+
+        result = nand_fc_set_features(0x01U, mode_4, &completion);
+        if (result != NAND_RESULT_OK)
+        {
+            SSD_LOGE("nand: set feature 01h (Mode 4) failed, result=0x%02X status=0x%02X\r\n",
+                     (unsigned int)result,
+                     (unsigned int)completion.nand_status);
+            return result;
+        }
+        SSD_LOGI("nand: switched NAND to ONFI Mode 4\r\n");
+
+        /* 根据 Mode 4 时序重新计算 FMC PCC 硬件参数 */
+        nand_fmc_timing_to_pcc(&g_nand_timing_fast, &fast_pcc);
+        g_nand_handle.Init.TCLRSetupTime = 4U;
+        g_nand_handle.Init.TARSetupTime  = 4U;
+        if (HAL_NAND_Init(&g_nand_handle, &fast_pcc, &fast_pcc) != HAL_OK)
+        {
+            SSD_LOGE("nand: HAL_NAND_Init (Mode 4) failed\r\n");
+            return NAND_RESULT_OPERATION_FAILED;
+        }
+        SSD_LOGI("nand: FMC timing updated for Mode 4\r\n");
+
+        /* 更新 FMC 后端时序，供 UOP handler 使用 */
+        {
+            nand_fmc_config_t fast_fmc = {
+                .data       = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
+                .command    = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_CMD_OFFSET),
+                .address    = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_ADDR_OFFSET),
+                .timing     = g_nand_timing_fast,
+                .wait_ready = nand_fmc_wait_ready,
+                .context    = NULL,
+            };
+            if (nand_fmc_configure(&fast_fmc) != NAND_RESULT_OK)
+            {
+                SSD_LOGE("nand: FMC backend configure (Mode 4) failed\r\n");
+                return NAND_RESULT_OPERATION_FAILED;
+            }
+        }
     }
+#else
+    /* ── 低速模式：跳过 Mode 4 切换，NAND 和 FMC 都运行在默认慢速时序 ── */
+    SSD_LOGI("nand: keeping NAND at default timing (CONFIG_NAND_TIMING_MODE_4=0)\r\n");
+#endif /* CONFIG_NAND_TIMING_MODE_4 */
+
     SSD_LOGI("nand: init complete\r\n");
     return NAND_RESULT_OK;
 }

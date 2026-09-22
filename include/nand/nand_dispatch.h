@@ -60,13 +60,13 @@ typedef struct
 #endif
 
 /* Initialize fixed Channel Dispatch Queues. This function does not initialize FMC hardware. */
-uint8_t nand_dispatch_init(void);
+nand_result_t nand_dispatch_init(void);
 
 /* NAND/FMC initialisation succeeded; FC may submit media commands after this. */
 void nand_dispatch_set_device_ready(uint8_t ready);
 
 /* Submit one pre-resolved command to the channel FIFO. */
-uint8_t nand_dispatch_submit(const nand_dispatch_request_t *request);
+nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request);
 
 /*
  * 原子提交整条命令链到指定 LUN 的 chain buffer + 通道队列。
@@ -74,9 +74,9 @@ uint8_t nand_dispatch_submit(const nand_dispatch_request_t *request);
  * 队列空间无法容纳整链或 LUN chain buffer 非空闲时返回 NOT_READY，无副作用。
  * 链中命令按序执行（由 poll 自动推进 cursor），中间不可被 HSQ 打断。
  */
-uint8_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count);
+nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count);
 
 /* Execute one pending command from one Channel FIFO through ONFI -> NAND Engine -> FMC. */
-uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion);
+nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion);
 
 #endif /* NAND_DISPATCH_H */

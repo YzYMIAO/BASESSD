@@ -1,3 +1,4 @@
+#include "common/common.h"
 
 
 #include "qspi.h"
@@ -31,11 +32,11 @@ uint8_t qspi_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime)
 
     if (wtime)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
     else
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 }
 
@@ -60,11 +61,11 @@ uint8_t qspi_init(void)
 
     if (HAL_QSPI_Init(&g_qspi_handle) == HAL_OK)
     {
-        return 0; /* QSPI初始化成功 */
+        return FUNC_STATUS_SUCCESS; /* QSPI初始化成功 */
     }
     else
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 }
 
@@ -232,16 +233,16 @@ uint8_t qspi_receive(uint8_t *buf, uint32_t datalen)
 {
     if ((buf == NULL) || (datalen == 0U))
     {
-        return 1U;
+        return FUNC_STATUS_ERROR;
     }
     g_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
     if (HAL_QSPI_Receive(&g_qspi_handle, buf, 5000) == HAL_OK)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
     else
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 }
 
@@ -255,15 +256,15 @@ uint8_t qspi_transmit(uint8_t *buf, uint32_t datalen)
 {
     if ((buf == NULL) || (datalen == 0U))
     {
-        return 1U;
+        return FUNC_STATUS_ERROR;
     }
     g_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
     if (HAL_QSPI_Transmit(&g_qspi_handle, buf, 5000) == HAL_OK)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
     else
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 }

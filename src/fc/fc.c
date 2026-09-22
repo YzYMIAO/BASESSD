@@ -3,7 +3,53 @@
 #include "fc_queue.h"
 #include "fc_registers.h"
 #include "fc_scheduler.h"
+#include "fc_data_path.h"
+#include "fc_raid_engine.h"
 #include "nand/nand_dispatch.h"
+
+/*
+ * 判断 operation 是否为带 ECC 编码数据的 Page Read。
+ * 这类命令读取的 NAND 页数据经过 ECC 编码，需要 FC 内部
+ * 在 CQ push 前自动做 ECC 解码 + 条件解扰。
+ *
+ * READ_ID / READ_STATUS / GET_FEATURES 等虽然也有数据返回，
+ * 但它们不是 ECC 编码的 Page Data，不应走 Data Path 处理。
+ */
+static uint8_t fc_is_page_read(uint8_t operation)
+{
+    switch (operation)
+    {
+        case OP_NORMAL_READ_PAGE_WITH_DATA_OUT:
+        case OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT:
+        case OP_READ_PAGE_CACHE_SEQ:
+        case OP_READ_PAGE_CACHE_RANDOM:
+        case OP_READ_PAGE_CACHE_LAST:
+        case OP_RANDOM_DATA_READ:
+            return 1U;
+        default:
+            return 0U;
+    }
+}
+
+/*
+ * 判断 operation 是否为带 ECC 编码数据的 Page Write。
+ * 写入 NAND 之前需要对数据做 Random 加扰 + ECC 编码 + RAID XOR。
+ *
+ * SET_FEATURES 虽然也写数据，但不是 ECC 编码的 Page Data，不应走 Data Path。
+ */
+static uint8_t fc_is_page_write(uint8_t operation)
+{
+    switch (operation)
+    {
+        case OP_NORMAL_PROGRAM_PAGE:
+        case OP_PROGRAM_PAGE_CACHE:
+        case OP_OTP_DATA_PROGRAM:
+        case OP_PROGRAM_PAGE_MULTI_PLANE:
+            return 1U;
+        default:
+            return 0U;
+    }
+}
 
 #include <stddef.h>
 #include <string.h>
@@ -267,6 +313,13 @@ static fc_status_t fc_init_internal(fc_t *controller)
     {
         return FC_STATUS_IO_ERROR;
     }
+
+    /* 初始化 RAID 引擎上下文（每个 LUN 独立） */
+    for (uint8_t lun = 0U; lun < LUN_NUM; lun++)
+    {
+        fc_raid_init_ctx(lun);
+    }
+
     for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
     {
         controller->command_free_next[index]       = ((index + 1U) < FC_COMMAND_POOL_DEPTH) ? (fc_command_id_t)(index + 1U) : FC_COMMAND_ID_INVALID;
@@ -484,20 +537,7 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
 
     command = &controller->command_pool[nand_completion->command_id];
 
-    completion.command_id = nand_completion->command_id;
-    completion.desc_id    = nand_completion->failed_descriptor_id;
-    completion.module     = command->module;
-    completion.ecc_bit0   = nand_completion->ecc_bit_count[0];
-    completion.ecc_bit1   = nand_completion->ecc_bit_count[1];
-    completion.ecc_bit2   = nand_completion->ecc_bit_count[2];
-    completion.ecc_bit3   = nand_completion->ecc_bit_count[3];
-    completion.status0    = nand_completion->cw_status[0];
-    completion.status1    = nand_completion->cw_status[1];
-    completion.status2    = nand_completion->cw_status[2];
-    completion.status3    = nand_completion->cw_status[3];
-
-    /* Write back per-CW status and ECC count to descriptors for retry/RAID recovery.
-     * NO_DATA and ERASE operations have no descriptor chain to write back to. */
+    /* ── Step 1: Write back per-CW status and ECC count from NAND completion ── */
     if (command->desc_id != FC_DESCRIPTOR_ID_INVALID)
     {
         fc_descriptor_id_t desc_id = (fc_descriptor_id_t)command->desc_id;
@@ -518,8 +558,83 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         }
     }
 
+    /* ── Step 2: Data path processing (ECC decode + conditional descramble) ──
+     * 仅对 Page Read 命令执行。READ_ID / GET_FEATURES 等命令
+     * 返回的数据不是 ECC 编码的 NAND 页数据，不应进入 Data Path。 */
+    if (fc_is_page_read((uint8_t)command->config.operation) != 0U)
+    {
+        (void)fc_data_path_process_read(command);
+        /* 即使 process_read 返回 IO_ERROR（有 CW 不可纠），
+         * 已完成 ECC 解码的 desc->status 已更新。
+         * 后续 completion entry 将从 descriptor 读取最终 status。 */
+    }
+
+    /* ── Step 3: Populate completion entry ── */
+    completion.command_id = nand_completion->command_id;
+    completion.desc_id    = nand_completion->failed_descriptor_id;
+    completion.module     = command->module;
+
+    if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) &&
+        (fc_is_page_read((uint8_t)command->config.operation) != 0U))
+    {
+        /* 从 descriptor 读取 ECC 解码后的 per-CW status/ecc_bits */
+        fc_descriptor_id_t did;
+        uint8_t            i;
+        uint8_t            status_slot[4];
+        uint8_t            ecc_slot[4];
+        uint8_t            found_unc = 0U;
+
+        did = (fc_descriptor_id_t)command->desc_id;
+        for (i = 0U; i < 4U; i++)
+        {
+            if ((did < FC_DESCRIPTOR_POOL_DEPTH) && (i <= command->config.cw))
+            {
+                const fc_descriptor_t *d = &controller->descriptor_pool[did];
+                status_slot[i] = d->status;
+                ecc_slot[i]    = d->ecc_bits;
+                /* 更新 failed_descriptor_id 指向 ECC 解码后第一个 UNC 的 desc */
+                if ((found_unc == 0U) && (d->status == FC_CW_STATUS_UNC))
+                {
+                    completion.desc_id = did;
+                    found_unc          = 1U;
+                }
+                did = (fc_descriptor_id_t)d->next_id;
+            }
+            else
+            {
+                status_slot[i] = FC_CW_STATUS_UNUSED;
+                ecc_slot[i]    = 0U;
+            }
+        }
+        completion.status0  = status_slot[0];
+        completion.status1  = status_slot[1];
+        completion.status2  = status_slot[2];
+        completion.status3  = status_slot[3];
+        completion.ecc_bit0 = ecc_slot[0];
+        completion.ecc_bit1 = ecc_slot[1];
+        completion.ecc_bit2 = ecc_slot[2];
+        completion.ecc_bit3 = ecc_slot[3];
+    }
+    else
+    {
+        /* 非 page read：直接透传 NAND completion 状态 */
+        completion.ecc_bit0 = nand_completion->ecc_bit_count[0];
+        completion.ecc_bit1 = nand_completion->ecc_bit_count[1];
+        completion.ecc_bit2 = nand_completion->ecc_bit_count[2];
+        completion.ecc_bit3 = nand_completion->ecc_bit_count[3];
+        completion.status0  = nand_completion->cw_status[0];
+        completion.status1  = nand_completion->cw_status[1];
+        completion.status2  = nand_completion->cw_status[2];
+        completion.status3  = nand_completion->cw_status[3];
+    }
+
     if (fc_complete_internal(controller, &completion) != FC_STATUS_OK)
     {
+        /* CQ 满：强制标记 COMPLETED 防止命令泄漏。
+         * 数据路径处理（ECC 解码等）和 descriptor 状态已更新，
+         * 但 CQ entry 丢失，FTL 无法通过 fc_poll_completion 感知。
+         * 这是 fatal 级系统背压错误，需要上层干预。 */
+        controller->command_state[nand_completion->command_id] = FC_COMMAND_STATE_COMPLETED;
         return FC_STATUS_IO_ERROR;
     }
     return FC_STATUS_OK;
@@ -571,6 +686,13 @@ static fc_status_t fc_poll_internal(fc_t *controller)
             }
             controller->command_state[command_id] = FC_COMMAND_STATE_ACTIVE;
             command                               = &controller->command_pool[command_id];
+
+            /* ── Data Path encode: Random 加扰 → ECC 编码 → RAID XOR ──
+             * 在 NAND 编程前对 buffer 数据做编码，对 FTL 完全透明。 */
+            if (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+            {
+                (void)fc_data_path_encode(command);
+            }
 
             /* Pre-resolve descriptor-chain data into a self-contained dispatch request. */
             request              = (nand_dispatch_request_t){0};
@@ -661,6 +783,13 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                 }
                 controller->command_state[command_id] = FC_COMMAND_STATE_ACTIVE;
                 command                               = &controller->command_pool[command_id];
+
+                /* ── Data Path encode: Random 加扰 → ECC 编码 → RAID XOR ──
+                 * 在 NAND 编程前对 buffer 数据做编码，对 FTL 完全透明。 */
+                if (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                {
+                    (void)fc_data_path_encode(command);
+                }
 
                 reqs[i]              = (nand_dispatch_request_t){0};
                 reqs[i].command_id   = (uint16_t)command_id;

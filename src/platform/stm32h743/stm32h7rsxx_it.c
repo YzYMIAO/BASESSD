@@ -7,6 +7,7 @@
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
 #include "platform/stm32h743/dma.h"
+#include "platform/stm32h743/nand_dma.h"
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN TD */
@@ -265,6 +266,24 @@ void TIM6_DAC_IRQHandler(void)
 void WWDG_IRQHandler(void)
 {
     storage_wdg_wwdg_irq_handler();
+}
+
+/**
+ * @brief   DMA2 Stream0 中断服务函数（NAND PROGRAM 方向 DMA 完成）
+ * @note    由 nand_dma_irq_handler_data_out() 处理
+ */
+void DMA2_Stream0_IRQHandler(void)
+{
+    nand_dma_irq_handler_data_out();
+}
+
+/**
+ * @brief   DMA2 Stream1 中断服务函数（NAND READ 方向 DMA 完成）
+ * @note    由 nand_dma_irq_handler_data_in() 处理
+ */
+void DMA2_Stream1_IRQHandler(void)
+{
+    nand_dma_irq_handler_data_in();
 }
 
 /* USER CODE END 1 */

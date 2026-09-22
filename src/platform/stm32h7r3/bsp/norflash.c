@@ -1,3 +1,4 @@
+#include "common/common.h"
 
 
 #include "norflash.h"
@@ -40,12 +41,12 @@ static uint8_t norflash_xspi1_init(XSPI_HandleTypeDef *hxspi, norflash_type_t ty
 
     if (hxspi == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if ((type == NORFlash_Unknow) || (type >= NORFlash_Dummy))
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     ptr = (__IO uint8_t *)hxspi;
@@ -58,7 +59,7 @@ static uint8_t norflash_xspi1_init(XSPI_HandleTypeDef *hxspi, norflash_type_t ty
     hxspi->Instance = XSPI1;
     if (HAL_XSPI_DeInit(hxspi) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 初始化XSPI */
@@ -95,7 +96,7 @@ static uint8_t norflash_xspi1_init(XSPI_HandleTypeDef *hxspi, norflash_type_t ty
     hxspi->Init.MemorySelect            = HAL_XSPI_CSSEL_NCS1;
     if (HAL_XSPI_Init(hxspi) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 配置XSPIM */
@@ -103,10 +104,10 @@ static uint8_t norflash_xspi1_init(XSPI_HandleTypeDef *hxspi, norflash_type_t ty
     xspim_cfg_struct.IOPort      = HAL_XSPIM_IOPORT_1;
     if (HAL_XSPIM_Config(hxspi, &xspim_cfg_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -120,10 +121,10 @@ static uint8_t norflash_xspi1_deinit(XSPI_HandleTypeDef *hxspi)
 {
     if (HAL_XSPI_DeInit(hxspi) != HAL_OK)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 #ifndef __SYS_H
@@ -199,7 +200,7 @@ norflash_type_t norflash_init(void)
     {
         if (norflash_deinit() != 0)
         {
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
     }
 
@@ -243,7 +244,7 @@ uint8_t norflash_deinit(void)
 {
     if (norflash == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 反初始化NOR Flash设备 */
@@ -251,19 +252,19 @@ uint8_t norflash_deinit(void)
     {
         if (norflash->ops.deinit(&xspi1_handle) != 0)
         {
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
     }
 
     /* 反初始化XSPI1 */
     if (norflash_xspi1_deinit(&xspi1_handle) != 0)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     norflash = NULL;
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }
 
 /**
@@ -277,12 +278,12 @@ uint8_t norflash_erase_chip(void)
 {
     if (norflash == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (xspi1_handle.State == HAL_XSPI_STATE_BUSY_MEM_MAPPED)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 全片擦除NOR Flash设备 */
@@ -290,11 +291,11 @@ uint8_t norflash_erase_chip(void)
     {
         if (norflash->ops.erase_chip(&xspi1_handle) == 0)
         {
-            return 0;
+            return FUNC_STATUS_SUCCESS;
         }
     }
 
-    return 1;
+    return FUNC_STATUS_ERROR;
 }
 
 /**
@@ -308,12 +309,12 @@ uint8_t norflash_erase_block(uint32_t address)
 {
     if (norflash == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (xspi1_handle.State == HAL_XSPI_STATE_BUSY_MEM_MAPPED)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 块擦除NOR Flash设备 */
@@ -321,11 +322,11 @@ uint8_t norflash_erase_block(uint32_t address)
     {
         if (norflash->ops.erase_block(&xspi1_handle, address) == 0)
         {
-            return 0;
+            return FUNC_STATUS_SUCCESS;
         }
     }
 
-    return 1;
+    return FUNC_STATUS_ERROR;
 }
 
 /**
@@ -339,12 +340,12 @@ uint8_t norflash_erase_sector(uint32_t address)
 {
     if (norflash == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (xspi1_handle.State == HAL_XSPI_STATE_BUSY_MEM_MAPPED)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 扇区擦除NOR Flash设备 */
@@ -352,11 +353,11 @@ uint8_t norflash_erase_sector(uint32_t address)
     {
         if (norflash->ops.erase_sector(&xspi1_handle, address) == 0)
         {
-            return 0;
+            return FUNC_STATUS_SUCCESS;
         }
     }
 
-    return 1;
+    return FUNC_STATUS_ERROR;
 }
 
 /**
@@ -372,17 +373,17 @@ uint8_t norflash_program_page(uint32_t address, uint8_t *data, uint32_t length)
 {
     if (norflash == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (xspi1_handle.State == HAL_XSPI_STATE_BUSY_MEM_MAPPED)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (length > norflash->parameter.page_size)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 页编程NOR Flash设备 */
@@ -390,11 +391,11 @@ uint8_t norflash_program_page(uint32_t address, uint8_t *data, uint32_t length)
     {
         if (norflash->ops.program_page(&xspi1_handle, address, data, length) == 0)
         {
-            return 0;
+            return FUNC_STATUS_SUCCESS;
         }
     }
 
-    return 1;
+    return FUNC_STATUS_ERROR;
 }
 
 /**
@@ -413,7 +414,7 @@ uint8_t norflash_read(uint32_t address, uint8_t *data, uint32_t length)
 
     if (norflash == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     /* 内存映射状态下直接从映射地址读取 */
@@ -430,7 +431,7 @@ uint8_t norflash_read(uint32_t address, uint8_t *data, uint32_t length)
             data[length - 1] = *(volatile uint8_t *)(NORFLASH_MEMORY_MAPPED_BASE + address + length - 1);
         }
 
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     /* 读NOR Flash设备 */
@@ -438,11 +439,11 @@ uint8_t norflash_read(uint32_t address, uint8_t *data, uint32_t length)
     {
         if (norflash->ops.read(&xspi1_handle, address, data, length) == 0)
         {
-            return 0;
+            return FUNC_STATUS_SUCCESS;
         }
     }
 
-    return 1;
+    return FUNC_STATUS_ERROR;
 }
 
 /**
@@ -456,12 +457,12 @@ uint8_t norflash_memory_mapped(void)
 {
     if (norflash == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (xspi1_handle.State == HAL_XSPI_STATE_BUSY_MEM_MAPPED)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     /* 开启NOR Flash设备内存映射 */
@@ -469,11 +470,11 @@ uint8_t norflash_memory_mapped(void)
     {
         if (norflash->ops.memory_mapped(&xspi1_handle) == 0)
         {
-            return 0;
+            return FUNC_STATUS_SUCCESS;
         }
     }
 
-    return 1;
+    return FUNC_STATUS_ERROR;
 }
 
 /**
@@ -485,7 +486,7 @@ uint8_t norflash_get_empty_value(void)
 {
     if (norflash == NULL)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     return norflash->parameter.empty_value;
@@ -500,7 +501,7 @@ uint32_t norflash_get_chip_size(void)
 {
     if (norflash == NULL)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     return norflash->parameter.chip_size;
@@ -515,7 +516,7 @@ uint32_t norflash_get_block_size(void)
 {
     if (norflash == NULL)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     return norflash->parameter.block_size;
@@ -530,7 +531,7 @@ uint32_t norflash_get_sector_size(void)
 {
     if (norflash == NULL)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     return norflash->parameter.sector_size;
@@ -545,7 +546,7 @@ uint32_t norflash_get_page_size(void)
 {
     if (norflash == NULL)
     {
-        return 0;
+        return FUNC_STATUS_SUCCESS;
     }
 
     return norflash->parameter.page_size;
@@ -576,12 +577,12 @@ uint8_t norflash_write(uint32_t address, uint8_t *data, uint32_t length)
 
     if (norflash == NULL)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     if (xspi1_handle.State == HAL_XSPI_STATE_BUSY_MEM_MAPPED)
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     sector_size = norflash_get_sector_size();
@@ -590,7 +591,7 @@ uint8_t norflash_write(uint32_t address, uint8_t *data, uint32_t length)
     /* NOR Flash扇区缓冲区大小校验 */
     if (sector_size > (sizeof(norflash_sector_buffer) / sizeof(norflash_sector_buffer[0])))
     {
-        return 1;
+        return FUNC_STATUS_ERROR;
     }
 
     sectors_index = address / sector_size;
@@ -604,7 +605,7 @@ uint8_t norflash_write(uint32_t address, uint8_t *data, uint32_t length)
         /* 读取NOR Flash扇区数据 */
         if (norflash_read(sectors_index * sector_size, norflash_sector_buffer, sector_size) != 0)
         {
-            return 1;
+            return FUNC_STATUS_ERROR;
         }
 
         /* NOR Flash扇区待写入位置数据空校验 */
@@ -622,7 +623,7 @@ uint8_t norflash_write(uint32_t address, uint8_t *data, uint32_t length)
             /* 擦除NOR Flash扇区 */
             if (norflash_erase_sector(sectors_index * sector_size) != 0)
             {
-                return 1;
+                return FUNC_STATUS_ERROR;
             }
 
             /* 待写入数据写入NOR Flash扇区缓冲区 */
@@ -637,7 +638,7 @@ uint8_t norflash_write(uint32_t address, uint8_t *data, uint32_t length)
             {
                 if (norflash_program_page(sectors_index * sector_size + pages_index * page_size, &norflash_sector_buffer[pages_index * page_size], page_size) != 0)
                 {
-                    return 1;
+                    return FUNC_STATUS_ERROR;
                 }
             }
         }
@@ -655,7 +656,7 @@ uint8_t norflash_write(uint32_t address, uint8_t *data, uint32_t length)
                 /* 待写入数据写入NOR Flash */
                 if (norflash_program_page(sectors_index * sector_size + pages_index * page_size + page_offset, data, page_write_length) != 0)
                 {
-                    return 1;
+                    return FUNC_STATUS_ERROR;
                 }
                 data += page_write_length;
 
@@ -668,5 +669,5 @@ uint8_t norflash_write(uint32_t address, uint8_t *data, uint32_t length)
         sector_offset = 0;
     }
 
-    return 0;
+    return FUNC_STATUS_SUCCESS;
 }

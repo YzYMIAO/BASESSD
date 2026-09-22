@@ -8,7 +8,7 @@
 
 #define NAND_ENGINE_MAX_UOPS 64U
 
-uint8_t nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion)
+nand_result_t nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion)
 {
     nand_engine_state_t state;
     uint8_t             result;
@@ -21,7 +21,7 @@ uint8_t nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop
     return result;
 }
 
-uint8_t nand_engine_start(nand_engine_state_t *state, const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion)
+nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion)
 {
     if ((state == NULL) || (backend == NULL) || (backend->handlers == NULL) || (uops == NULL) ||
         (timing == NULL) || (request == NULL) || (completion == NULL))
@@ -41,7 +41,7 @@ uint8_t nand_engine_start(nand_engine_state_t *state, const nand_engine_backend_
     return nand_engine_step(state);
 }
 
-uint8_t nand_engine_step(nand_engine_state_t *state)
+nand_result_t nand_engine_step(nand_engine_state_t *state)
 {
     const nand_uop_t  *uop;
     nand_uop_handler_t handler;
@@ -110,17 +110,32 @@ uint8_t nand_engine_step(nand_engine_state_t *state)
                 {
                     state->wait_polls++;
                 }
+
+                /*
+                 * WAIT_READY: 超时完全由 handler 全权处理（含 GPIO 后备确认），
+                 * 引擎不干预。handler（nand_fmc_exec_wait_ready）内部分三步：
+                 *   ① 布防 EXTI6 上升沿中断
+                 *   ② 中断触发 → NAND 就绪
+                 *   ③ 超时 → GPIO 轮询最后一次确认
+                 * 因此引擎直接返回 NOT_READY，不插入额外超时逻辑。
+                 */
+                if (uop->type == NAND_UOP_WAIT_READY)
+                {
+                    return NAND_RESULT_NOT_READY;
+                }
+
+                /* CHECK_READY: 依赖 70h 状态寄存器，引擎负责超时判定 */
                 if (delay_dwt_elapsed_us(state->wait_start_cycles, state->timing->busy_timeout_us) ||
                     (state->wait_polls >= state->timing->busy_timeout_us))
                 {
-                    SSD_LOGE("nand: WAIT_READY timeout op=%u polls=%u timeout_us=%u\r\n",
+                    SSD_LOGE("nand: CHECK_READY timeout op=%u polls=%u timeout_us=%u\r\n",
                              state->request->operation,
                              state->wait_polls,
                              state->timing->busy_timeout_us);
                     state->active = 0U;
                     return NAND_RESULT_TIMEOUT;
                 }
-                if ((uop->type == NAND_UOP_CHECK_READY) && (state->uop_index > 0U))
+                if (state->uop_index > 0U)
                 {
                     /* Re-read status (70h) before checking R/B# again. */
                     state->uop_index--;
