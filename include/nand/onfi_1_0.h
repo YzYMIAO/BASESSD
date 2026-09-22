@@ -143,7 +143,7 @@
  * 适用于配合 05h-E0h 随机读取或需要先加载再处理其他操作的场景。
  * ----------------------------------------------------------------------------------------------
  */
-#define OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT (34U)
+#define OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT (33U)
 
 /* OP_READ_PAGE_CACHE_SEQ
  * ----------------------------------------------------------------------------------------------
@@ -317,10 +317,7 @@
  */
 #define OP_ERASE_BLOCK_MULTI_PLANE (32U)
 
-/* SINGLE PLANE READ (WITHOUT DATA OUT) */
-#define OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT (34U)
-
-#define OP_COUNT (35U)
+#define OP_COUNT (34U)
 
 typedef struct
 {

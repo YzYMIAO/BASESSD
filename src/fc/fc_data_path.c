@@ -119,6 +119,7 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
     }
 
     /* ── Stage 2: ECC 编码 ── */
+    if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
     {
         const fc_ldpc_config_t ldpc_config = {
             .codeword_bytes = FC_BUFFER_POOL_CW_SIZE,
@@ -210,17 +211,25 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
         buffer = fc_buffer_id_to_real_buffer(desc->buffer_id);
         if (buffer == NULL) return FC_STATUS_INVALID_ARGUMENT;
 
-        result = fc_ldpc_decode(&ldpc_config, buffer, FC_BUFFER_POOL_CW_SIZE);
+        if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
+        {
+            result = fc_ldpc_decode(&ldpc_config, buffer, FC_BUFFER_POOL_CW_SIZE);
 
-        if (result == FC_STATUS_IO_ERROR)
-        {
-            /* ECC 不可纠：buffer 保持 scrambled，desc status 置 UNC */
-            desc->status = FC_CW_STATUS_UNC;
-            all_ok       = 0U;
+            if (result == FC_STATUS_IO_ERROR)
+            {
+                /* ECC 不可纠：buffer 保持 scrambled，desc status 置 UNC */
+                desc->status = FC_CW_STATUS_UNC;
+                all_ok       = 0U;
+            }
+            else if ((result == FC_STATUS_OK) || (result == FC_STATUS_NOT_SUPPORTED))
+            {
+                /* ECC 成功（或跳过）：desc status 置 READY */
+                desc->status = FC_CW_STATUS_READY;
+            }
         }
-        else if ((result == FC_STATUS_OK) || (result == FC_STATUS_NOT_SUPPORTED))
+        else
         {
-            /* ECC 成功（或跳过）：desc status 置 READY */
+            /* LDPC RAW 模式：跳过 ECC 解码，直接标记 READY */
             desc->status = FC_CW_STATUS_READY;
         }
 
@@ -298,6 +307,7 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
     }
 
     /* ── ECC 重试 ── */
+    if (cmd->config.ldpc != FC_ECC_MODE_LDPC_RAW)
     {
         const fc_ldpc_config_t ldpc_config = {
             .codeword_bytes = FC_BUFFER_POOL_CW_SIZE,

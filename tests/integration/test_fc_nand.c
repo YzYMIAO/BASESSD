@@ -162,7 +162,7 @@ static void fc_nand_test_command_configure(fc_command_t *command, uint8_t operat
     command->paa              = paa;
     command->config.cw        = (descriptor_count > 0U) ? (uint8_t)(descriptor_count - 1U) : 0U;
     command->config.crc       = 0U;           /* CRC enabled; set to 1 only to disable it. */
-    command->config.ldpc      = FC_LDPC_FULL; /* Full LDPC path enabled. */
+    command->config.ldpc      = FC_ECC_MODE_BCH; /* Full BCH ECC path enabled. */
     command->config.raid      = 0U;           /* Normal RAID path; nonzero selects a RAID operation. */
     command->config.random    = 0U;           /* Randomizer enabled; set to 1 only to disable it. */
     command->config.chain     = 0U;           /* This test submits one standalone command. */
@@ -300,7 +300,7 @@ static fc_status_t fc_nand_test_process_batch_completion(const fc_command_status
         slot->active  = 0U;
         return FC_STATUS_IO_ERROR;
     }
-    if (operation == OP_NORMAL_READ_PAGE)
+    if (operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT)
     {
         descriptor_id = (fc_descriptor_id_t)command->desc_id;
         while (descriptor_id != FC_DESCRIPTOR_ID_INVALID)
@@ -593,7 +593,7 @@ static __attribute__((unused)) fc_status_t fc_nand_test_read_page(nand_paa_t tes
         return FC_STATUS_RESOURCE_EMPTY;
     }
     SSD_LOGD("[FC TEST] READ submit, paa=0x%08lX\r\n", (unsigned long)test_paa);
-    fc_nand_test_command_configure(command, OP_NORMAL_READ_PAGE, test_paa, CW_NUM);
+    fc_nand_test_command_configure(command, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, test_paa, CW_NUM);
     result = fc_command_configure_descriptors(command);
     if (result != FC_STATUS_OK)
     {
@@ -648,7 +648,7 @@ static __attribute__((unused)) fc_status_t fc_nand_test_read_page(nand_paa_t tes
 
 fc_status_t fc_nand_test_read_block(nand_paa_t test_paa)
 {
-    return fc_nand_test_run_block_pipeline(test_paa, OP_NORMAL_READ_PAGE, "READ_BLOCK");
+    return fc_nand_test_run_block_pipeline(test_paa, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, "READ_BLOCK");
 }
 
 fc_status_t fc_nand_test_reset(void)

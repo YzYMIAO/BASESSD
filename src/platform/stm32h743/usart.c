@@ -8,7 +8,7 @@
 #include <string.h>
 
 #if defined(FC_NAND_TEST_ENABLE)
-#    include "test_fc_nand.h"
+#    include "ut_main.h"
 #endif
 
 #define USART_RX_RING_MASK     (USART_RX_RING_CAPACITY - 1U)
@@ -216,7 +216,7 @@ static int uart_cli_status(int argc, char *argv[]);
 static int uart_cli_version(int argc, char *argv[]);
 static int uart_cli_log(int argc, char *argv[]);
 #if defined(FC_NAND_TEST_ENABLE)
-static int uart_cli_nand(int argc, char *argv[]);
+static int uart_cli_test(int argc, char *argv[]);
 #endif
 
 /*
@@ -229,7 +229,9 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
     {"version",                                                                          "version",       "show firmware console version", 1U, 1U, uart_cli_version},
     {    "log",                                                "log level <error|warn|info|debug>",               "set runtime log level", 3U, 3U,     uart_cli_log},
 #if defined(FC_NAND_TEST_ENABLE)
-    {   "nand", "nand id | nand test <PAA> | nand paa <ch> <ce> <lun> <plane> <block> <page> <cw>", "run raw NAND diagnostic or make PAA", 2U, 9U,    uart_cli_nand},
+/* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
+/* { "nand", ... }, */
+    {   "test", "test [--seed N] [--list] [--list-params] [test_name...]", "run munit unit test suite", 1U, 10U, uart_cli_test},
 #endif
 };
 
@@ -302,113 +304,21 @@ static int uart_cli_log(int argc, char *argv[])
 }
 
 #if defined(FC_NAND_TEST_ENABLE)
+#    include "ut_main.h"
+
+/* TODO: uart_cli_nand 和 uart_cli_parse_u32 待迁移用 munit test 替换 */
+#if 0
 static int uart_cli_parse_u32(const char *text, uint32_t *value)
 {
-    uint32_t result = 0U;
-    uint8_t  base   = 10U;
-
-    if ((text == NULL) || (value == NULL) || (*text == '\0'))
-    {
-        return -1;
-    }
-    if ((text[0] == '0') && ((text[1] == 'x') || (text[1] == 'X')))
-    {
-        base = 16U;
-        text += 2;
-        if (*text == '\0')
-        {
-            return -1;
-        }
-    }
-    while (*text != '\0')
-    {
-        uint8_t digit;
-
-        if ((*text >= '0') && (*text <= '9'))
-        {
-            digit = (uint8_t)(*text - '0');
-        }
-        else if ((base == 16U) && (*text >= 'a') && (*text <= 'f'))
-        {
-            digit = (uint8_t)(*text - 'a' + 10U);
-        }
-        else if ((base == 16U) && (*text >= 'A') && (*text <= 'F'))
-        {
-            digit = (uint8_t)(*text - 'A' + 10U);
-        }
-        else
-        {
-            return -1;
-        }
-        if ((digit >= base) || (result > ((UINT32_MAX - digit) / base)))
-        {
-            return -1;
-        }
-        result = result * base + digit;
-        text++;
-    }
-    *value = result;
-    return FUNC_STATUS_SUCCESS;
+    ...
 }
+#endif
+#endif
 
-static int uart_cli_nand(int argc, char *argv[])
+#if defined(FC_NAND_TEST_ENABLE)
+static int uart_cli_test(int argc, char *argv[])
 {
-    fc_status_t result;
-    uint32_t    paa;
-    uint32_t    ch;
-    uint32_t    ce;
-    uint32_t    lun;
-    uint32_t    plane;
-    uint32_t    block;
-    uint32_t    page;
-    uint32_t    cw;
-
-    if ((argc == 2) && (strcmp(argv[1], "id") == 0))
-    {
-        result = fc_nand_test_read_id();
-    }
-    else if ((argc == 3) && (strcmp(argv[1], "test") == 0) &&
-             (uart_cli_parse_u32(argv[2], &paa) == 0))
-    {
-        (void)uart_log_printf(UART_LOG_WARNING,
-                              "warning: NAND block containing PAA=0x%08lX will be erased\r\n",
-                              (unsigned long)paa);
-        result = fc_nand_test_run_all((nand_paa_t)paa);
-    }
-    else if ((argc == 9) && (strcmp(argv[1], "paa") == 0) && (uart_cli_parse_u32(argv[2], &ch) == 0) &&
-             (uart_cli_parse_u32(argv[3], &ce) == 0) && (uart_cli_parse_u32(argv[4], &lun) == 0) &&
-             (uart_cli_parse_u32(argv[5], &plane) == 0) && (uart_cli_parse_u32(argv[6], &block) == 0) &&
-             (uart_cli_parse_u32(argv[7], &page) == 0) && (uart_cli_parse_u32(argv[8], &cw) == 0))
-    {
-        if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM) ||
-            (paa_is_valid(lun, block, plane, page, cw) == 0U))
-        {
-            (void)uart_log_write("error: PAA field out of range\r\n", 32U);
-            return FUNC_STATUS_SUCCESS;
-        }
-        paa = paa_make(lun, block, plane, page, cw);
-        (void)uart_log_printf(UART_LOG_INFO,
-                              "PAA=0x%08lX (ch=%lu ce=%lu lun=%lu plane=%lu block=%lu page=%lu cw=%lu)\r\n",
-                              (unsigned long)paa,
-                              (unsigned long)ch,
-                              (unsigned long)ce,
-                              (unsigned long)lun,
-                              (unsigned long)plane,
-                              (unsigned long)block,
-                              (unsigned long)page,
-                              (unsigned long)cw);
-        return FUNC_STATUS_SUCCESS;
-    }
-    else
-    {
-        return -1;
-    }
-    (void)uart_log_printf((result == FC_STATUS_OK) ? UART_LOG_INFO : UART_LOG_ERROR,
-                          "nand test result=%d\r\n",
-                          (int)result);
-    /* Test completion is reported only after the result has reached the UART TX pin. */
-    (void)uart_log_flush(5000U);
-    return FUNC_STATUS_SUCCESS;
+    return ut_run_all(argc, argv);
 }
 #endif
 

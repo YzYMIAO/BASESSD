@@ -56,10 +56,8 @@ void munit_logf_ex(MunitLogLevel level, const char *filename, int line, const ch
     munit_logf_exv(level, stderr, filename, line, format, ap);
     va_end(ap);
 
-    if (level >= munit_log_level_fatal)
-    {
-        abort();
-    }
+    /* 嵌入式环境没有 fork，不能通过 abort() 实现测试隔离。
+     * 断言失败由 munit_errorf_ex 中的 while(1) 处理，此处仅做日志输出。 */
 }
 
 MUNIT_PRINTF(3, 4)
@@ -207,7 +205,7 @@ static char *munit_maybe_concat(size_t *len, char *prefix, char *suffix)
     }
     else
     {
-        res_len = prefix_len + prefix_len;
+        res_len = prefix_len + suffix_len;
         res     = malloc(res_len + 1);
         memcpy(res, prefix, prefix_len);
         memcpy(res + prefix_len, suffix, suffix_len);
@@ -1015,21 +1013,18 @@ static void munit_test_runner_run_test(MunitTestRunner *runner, const MunitTest 
             if (runner->single_parameter_mode == 1)
             {
                 possible = 0;
-
                 for (vals = pe->values; *vals != NULL; vals++)
                 {
                     possible++;
+                }
 
-                    /* 我们希望测试是可重现的，即使你只运行一个测试，
-                     * 但我们不希望每个具有相同参数数量的测试都选择相同的参数编号，
-                     * 因此使用测试名称作为基本盐值。 */
-                    pidx = munit_rand_at_most(munit_str_hash(test_name), possible - 1);
+                /* possible >= 1 由上面 pe->values[0] != NULL 保证 */
+                pidx = munit_rand_at_most(munit_str_hash(test_name), possible - 1);
 
-                    if (MUNIT_UNLIKELY(munit_parameters_add(&params_len, &params, pe->name, pe->values[pidx]) !=
-                                       MUNIT_OK))
-                    {
-                        goto cleanup;
-                    }
+                if (MUNIT_UNLIKELY(munit_parameters_add(&params_len, &params, pe->name, pe->values[pidx]) !=
+                                   MUNIT_OK))
+                {
+                    goto cleanup;
                 }
             }
             else
@@ -1129,10 +1124,8 @@ static void munit_test_runner_run_suite(MunitTestRunner *runner, const MunitSuit
                 // 命令行参数的前缀部分与当前套件前缀匹配
                 // 测试名称与命令行参数的剩余部分匹配
                 if ((pre_len == 0 || strncmp(pre, *test_name, pre_len) == 0) &&
-                    strncmp(test->name, *test_name + pre_len, strlen(*test_name + pre_len)))
+                    strncmp(test->name, *test_name + pre_len, strlen(*test_name + pre_len)) == 0)
                 {
-                    /* printf("%ld\t %s\t %s\t %s\t %s\t\n",pre_l,pre,*test_name,test->name,*test_name + pre_l);
-                     */
                     munit_test_runner_run_test(runner, test, pre);
                 }
 
@@ -1152,16 +1145,16 @@ static void munit_test_runner_run_suite(MunitTestRunner *runner, const MunitSuit
         {
             goto cleanup;
         }
+    }
 
-        // 运行任何子套件
-        for (child_suite = suite->suites; child_suite != NULL && child_suite->prefix != NULL; child_suite++)
-        {
-            munit_test_runner_run_suite(runner, child_suite, pre);
-        }
+    // 运行任何子套件（在 test 循环外面，确保每个子套件只执行一次）
+    for (child_suite = suite->suites; child_suite != NULL && child_suite->prefix != NULL; child_suite++)
+    {
+        munit_test_runner_run_suite(runner, child_suite, pre);
+    }
 
 cleanup:
-        munit_maybe_free_concat(pre, prefix, suite->prefix);
-    }
+    munit_maybe_free_concat(pre, prefix, suite->prefix);
 }
 
 /**
@@ -1185,7 +1178,7 @@ cleanup:
  * @note  如果 runner->tests 不为空，则只会执行匹配的测试用例
  * @see   munit_test_runner_run_suite 实际执行递归遍历的内部函数
  */
-static void munit_test_runner_run(MunitTestRunner *runner)
+void munit_test_runner_run(MunitTestRunner *runner)
 {
     munit_test_runner_run_suite(runner, runner->suite, NULL);
 }
@@ -1320,7 +1313,7 @@ int munit_suite_main_custom(const MunitSuite   *suite,
                 endptr     = argv[arg + 1];
                 iterations = strtoul(argv[arg + 1], &endptr, 0);
 
-                if (*envpter != '\0' || iterations > UNIT_MAX)
+                if (*endptr != '\0' || iterations > UNIT_MAX)
                 {
                     munit_logf_internal(MUNIT_LOG_ERROR, stderr, "invalid value ('%s') passed to %s", argv[arg + 1], argv[arg]);
                     goto cleanup;
@@ -1331,14 +1324,14 @@ int munit_suite_main_custom(const MunitSuite   *suite,
             }
             else if (strcmp("param", argv[arg] + 2) == 0)
             {
-                if (arg + 1 > argc)
+                if (arg + 2 >= argc)
                 {
                     munit_logf_internal(MUNIT_LOG_ERROR, stderr, "%s requires two arguments", argv[arg]);
                     goto cleanup;
                 }
 
                 runner.parameters = realloc(runner.parameters,
-                                            sizeof(MunitParameter) * sizeof(parameters_size + 2));
+                                            sizeof(MunitParameter) * (parameters_size + 2));
 
                 if (runner.parameters == NULL)
                 {
@@ -1381,7 +1374,7 @@ int munit_suite_main_custom(const MunitSuite   *suite,
 
                 arg++;
             }
-            else if (strcmp("help", argv[arg + 1]) == 0)
+            else if (strcmp("help", argv[arg] + 2) == 0)
             {
                 munit_print_help(argc, argv, user_data, arguments);
                 result = EXIT_SUCCESS;
@@ -1391,15 +1384,15 @@ int munit_suite_main_custom(const MunitSuite   *suite,
             {
                 runner.single_parameter_mode = 1;
             }
-            else if (strcmp("show-stderr", argv[arg + 2]) == 0)
+            else if (strcmp("show-stderr", argv[arg] + 2) == 0)
             {
                 runner.show_stder = 1;
             }
-            else if (strcmp("no-fork", argv[arg + 2]) == 0)
+            else if (strcmp("no-fork", argv[arg] + 2) == 0)
             {
                 runner.fork = 0;
             }
-            else if (strcmp("fatal-failures", argv[arg + 2]) == 0)
+            else if (strcmp("fatal-failures", argv[arg] + 2) == 0)
             {
                 runner.fatal_failures = 1;
             }
@@ -1445,6 +1438,12 @@ int munit_suite_main_custom(const MunitSuite   *suite,
                 arg++;
             }
             else if (strcmp("list", argv[arg] + 2) == 0)
+            {
+                munit_suite_list_tests(suite, 0, NULL);
+                result = EXIT_SUCCESS;
+                goto cleanup;
+            }
+            else if (strcmp("list-params", argv[arg] + 2) == 0)
             {
                 munit_suite_list_tests(suite, 1, NULL);
                 result = EXIT_SUCCESS;

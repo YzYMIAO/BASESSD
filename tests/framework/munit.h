@@ -242,7 +242,7 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...);
     {                                                                          \
         const char *munit_tmp_a_ = (a);                                        \
         const char *munit_tmp_b_ = (b);                                        \
-        if (MUNIT_UNLIKELY(strcmp(munit_tmp_a, munit_tmp_b) != 0))             \
+        if (MUNIT_UNLIKELY(strcmp(munit_tmp_a_, munit_tmp_b_) != 0))             \
         {                                                                      \
             munit_errorf("assertion failed: string %s == %s (\"%s\"==\"%s\")", \
                          #a,                                                   \
@@ -257,7 +257,7 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...);
     {                                                                          \
         const char *munit_tmp_a_ = (a);                                        \
         const char *munit_tmp_b_ = (b);                                        \
-        if (MUNIT_UNLIKELY(strcmp(munit_tmp_a, munit_tmp_b) == 0))             \
+        if (MUNIT_UNLIKELY(strcmp(munit_tmp_a_, munit_tmp_b_) == 0))             \
         {                                                                      \
             munit_errorf("assertion failed: string %s != %s (\"%s\"==\"%s\")", \
                          #a,                                                   \
@@ -447,6 +447,13 @@ typedef struct Munit_Suite_s
     unsigned int     iterations; // 默认迭代次数
     MunitSuiteOption options;    // 套件选项
 } MunitSuite;
+
+/* 前向声明：测试运行器上下文，用于裸机直接调用的入口。 */
+typedef struct Munit_Test_Runner_s MunitTestRunner;
+
+/* 测试运行器主入口（裸机入口）：绕过 munit_suite_main 的 CLI 解析，
+ * 直接构建 MunitTestRunner 后调用此函数执行套件。 */
+void munit_test_runner_run(MunitTestRunner *runner);
 
 typedef struct Munit_Argument_s MunitArgument;
 typedef struct Munit_Argument_s

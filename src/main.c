@@ -9,7 +9,8 @@
 #include "nand/nand_dispatch.h"
 #include "nand/nand_mt29f4g08abadawp.h"
 #if defined(FC_NAND_TEST_ENABLE)
-#    include "test_fc_nand.h"
+/* TODO: 待重构为 munit UT 框架后移除 */
+/* #include "test_fc_nand.h" */
 #endif
 #include "stm32h7xx_hal.h"
 #include "sys.h"
