@@ -108,17 +108,29 @@ void nand_rb_interrupt_arm(uint32_t timeout_us)
 
     /* 1us 等待后再读引脚 */
     uint8_t pin_after = HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_6);
-    SSD_LOGD("rb_arm tWB done pin=%u\r\n", (unsigned)pin_after);
-
-    /* ★ RB 已经高电平 → 上升沿永远不会来，直接标记已触发 */
-    if (pin_after == GPIO_PIN_SET)
+    if (g_dwt_cyccnt_per_us != 0U)
     {
-        SSD_LOGD("rb_arm SHORT-CIRCUIT: pin still HIGH, marking triggered\r\n");
-        g_rb_int.triggered = 1U;
+        uint32_t start       = *((volatile uint32_t *)0xE0001004UL);
+        uint32_t delay_cycle = (uint32_t)g_dwt_cyccnt_per_us * 1U;
+        while ((*((volatile uint32_t *)0xE0001004UL) - start) < delay_cycle) {}
+    }
+    uint8_t pin_1us = HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_6);
+    SSD_LOGD("rb_arm tWB done pin_before=%u pin_after=%u\r\n", (unsigned)pin_after, (unsigned)pin_1us);
+
+    if (pin_1us == GPIO_PIN_RESET)
+    {
+        /* 引脚为 LOW → NAND 忙碌中，等待 EXTI 上升沿中断 */
+        SSD_LOGD("rb_arm pin LOW, waiting for EXTI rising edge\r\n");
     }
     else
     {
-        SSD_LOGD("rb_arm pin LOW, waiting for EXTI rising edge\r\n");
+        /*
+         * 引脚仍为 HIGH → 可能原因：
+         * 1. 首次 WAIT_READY（未发 busy 命令），NAND 本空间闲
+         * 2. FMC posted write 尚未完成，命令还没到达 NAND
+         * 无论哪种情况都不做短路，让超时回退 GPIO 轮询做最终确认。
+         */
+        SSD_LOGD("rb_arm pin HIGH, no short-circuit, will timeout->poll\r\n");
     }
 }
 

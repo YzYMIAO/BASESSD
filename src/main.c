@@ -20,7 +20,7 @@
 #include <string.h>
 
 /* 每次需要确认板上 ELF 是否更新时递增；仅用于开发阶段 UART 诊断。 */
-#define SSD_FIRMWARE_DEBUG_REVISION 20U
+#define SSD_FIRMWARE_DEBUG_REVISION 21U
 #define SSD_WATCHDOG_ENABLE         0U
 
 #if (SSD_WATCHDOG_ENABLE != 0U)
@@ -98,6 +98,7 @@ int main(void)
     ssd_log_set_sink(stm32_uart_log_sink);
     ssd_log_set_flush_sink(stm32_uart_log_flush_sink);
     ssd_log_set_level(SSD_LOG_DEBUG);
+    SSD_LOGD("debug logging enabled\r\n");
     /* VBAT 未供电时 BKPSRAM 无法保持；调试阶段暂不读取 Crash Record。 */
     /* stm32_report_previous_crash(); */
     SSD_LOGI("soft_ssd debug revision=%lu\r\n", (unsigned long)SSD_FIRMWARE_DEBUG_REVISION);
