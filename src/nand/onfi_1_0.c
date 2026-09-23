@@ -6,8 +6,8 @@
 
 #define NAND_TIME_TWB_US   (1U)
 #define NAND_TIME_TRST_US  (500U)
-#define NAND_TIME_TPROG_US (300U)
-#define NAND_TIME_TBERS_US (1050U)
+#define NAND_TIME_TPROG_US (700U)
+#define NAND_TIME_TBERS_US (5000U)
 #define NAND_TIME_TR_US    (38U)
 #define NAND_TIME_TWH_US   (1U)
 

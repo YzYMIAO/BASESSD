@@ -63,6 +63,7 @@ S_OBJS := $(patsubst $(SRC_ROOT)/%.s,$(OBJ_DIR)/%.o,$(S_SRCS))
 ALL_INCS := $(sort $(MODULE_INCS))
 CFLAGS += $(addprefix -I,$(ALL_INCS))
 CFLAGS += -DSSD_FIRMWARE_BUILD
+CFLAGS += $(CFLAGS_EXTRA)
 else
 C_SRCS := $(sort $(MODULE_SRCS))
 ALL_SRCS := $(C_SRCS)
@@ -110,7 +111,7 @@ asan:
 
 # 真实 NAND 集成测试。PAA 在烧录后由串口命令 nand test <PAA> 显式传入。
 tests:
-	$(MAKE)  BUILD_TARGET=firmware FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1
+	$(MAKE)  BUILD_TARGET=firmware FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1 CFLAGS_EXTRA=-DMUNIT_ENABLE_TIMING
 
 # ============================================================================
 # 主目标

@@ -2,6 +2,81 @@
 #include "munit.h"
 
 #include "common/common.h"
+
+#if defined(MUNIT_ENABLE_TIMING)
+#    include "sys.h"
+
+/* 纳秒/微秒常量 */
+#define MUNIT_NS_PER_US (1000UL)
+#define MUNIT_US_PER_MS (1000UL)
+
+/* DWT CYCCNT 读取（直接访问寄存器，不依赖 delay 模块） */
+#define MUNIT_DWT_CYCCNT (*((volatile uint32_t *)0xE0001004UL))
+
+/*
+ * munit_print_time — 打印纳秒时间值，自适应选择单位
+ */
+static void munit_print_time(FILE *fp, uint64_t ns)
+{
+    if (ns >= 1000000000ULL)
+    {
+        fprintf(fp, "%lu.%02lu s",  (unsigned long)(ns / 1000000000ULL),
+                                    (unsigned long)((ns % 1000000000ULL) / 10000000ULL));
+    }
+    else if (ns >= 1000000ULL)
+    {
+        fprintf(fp, "%lu.%02lu ms", (unsigned long)(ns / 1000000ULL),
+                                    (unsigned long)((ns % 1000000ULL) / 10000ULL));
+    }
+    else if (ns >= 1000ULL)
+    {
+        fprintf(fp, "%lu.%02lu us", (unsigned long)(ns / 1000ULL),
+                                    (unsigned long)((ns % 1000ULL) / 10ULL));
+    }
+    else
+    {
+        fprintf(fp, "%lu ns", (unsigned long)ns);
+    }
+}
+
+/* 首次调用时使能 DWT CYCCNT（如果尚未使能） */
+static void munit_timing_init(void)
+{
+    volatile uint32_t *dwt_ctrl  = (volatile uint32_t *)0xE0001000UL;
+    volatile uint32_t *demcr     = (volatile uint32_t *)0xE000EDFCUL;
+    volatile uint32_t *dwt_cyccnt = (volatile uint32_t *)0xE0001004UL;
+
+    if ((*dwt_ctrl & 0x00000001U) == 0U)
+    {
+        *demcr     |= 0x01000000U;
+        *dwt_cyccnt = 0U;
+        *dwt_ctrl  |= 0x00000001U;
+    }
+}
+
+/* 检查 DWT CYCCNT 是否已使能（在 main 初始化中由 sys/delay 完成） */
+#define MUNIT_TIMING_INIT()   do { } while (0)
+
+typedef struct {
+    uint32_t start_cycles;
+} munit_timing_ctx_t;
+
+static void munit_timing_start(munit_timing_ctx_t *ctx)
+{
+    ctx->start_cycles = MUNIT_DWT_CYCCNT;
+}
+
+static uint64_t munit_timing_stop(const munit_timing_ctx_t *ctx)
+{
+    uint32_t now       = MUNIT_DWT_CYCCNT;
+    uint32_t elapsed   = now - ctx->start_cycles;
+
+    /* cycles → ns = cycles * 1e9 / 400MHz（STM32H743 @400MHz） */
+    uint64_t ns = (uint64_t)elapsed * 1000000000ULL;
+    ns /= 400000000ULL;
+    return ns;
+}
+#endif /* MUNIT_ENABLE_TIMING */
 static MunitLogLevel munit_log_level_fatal   = MUNIT_LOG_ERROR;
 static MunitLogLevel munit_log_level_visible = MUNIT_LOG_ERROR;
 
@@ -623,11 +698,25 @@ static MunitResult munit_test_runner_exec(MunitTestRunner *runner, const MunitTe
 
     munit_rand_seed(runner->seed);
 
+#if defined(MUNIT_ENABLE_TIMING)
+    uint64_t iter_ns = 0;
+#endif
+
     do
     {
         void *data = (test->setup == NULL) ? runner->user_data : test->setup(params, runner->user_data);
 
+#if defined(MUNIT_ENABLE_TIMING)
+        munit_timing_ctx_t timing_ctx;
+        munit_timing_start(&timing_ctx);
+#endif
+
         result = test->test(params, data);
+
+#if defined(MUNIT_ENABLE_TIMING)
+        iter_ns = munit_timing_stop(&timing_ctx);
+        report->wall_clock += iter_ns;
+#endif
 
         if (test->tear_down != NULL)
         {
@@ -665,11 +754,11 @@ static MunitResult munit_test_runner_exec(MunitTestRunner *runner, const MunitTe
     return result;
 }
 
-#define MUNIT_RESULT_STRING_OK    "OK   "
-#define MUNIT_RESULT_STRING_SKIP  "SKIP "
-#define MUNIT_RESULT_STRING_FAIL  "FAIL "
-#define MUNIT_RESULT_STRING_ERROR "ERROR"
-#define MUNIT_RESULT_STRING_TODO  "TODO "
+#define MUNIT_RESULT_STRING_OK    "OK    "
+#define MUNIT_RESULT_STRING_SKIP  "SKIP  "
+#define MUNIT_RESULT_STRING_FAIL  "FAIL  "
+#define MUNIT_RESULT_STRING_ERROR "ERROR "
+#define MUNIT_RESULT_STRING_TODO  "TODO  "
 
 static void munit_test_runner_print_color(const MunitTestRunner *runner, const char *string, char color)
 {
@@ -742,8 +831,8 @@ static void munit_test_runner_run_test_with_params(MunitTestRunner *runner, cons
     const MunitParameter *param;
     if (params != NULL)
     {
-        output_l = 2;
-        fputs("  ", MUNIT_OUTPUT_FILE);
+        output_l = 4;
+        fputs("    ", MUNIT_OUTPUT_FILE);
         first = 1;
         for (param = params; param != NULL && param->name != NULL; param++)
         {
@@ -768,6 +857,11 @@ static void munit_test_runner_run_test_with_params(MunitTestRunner *runner, cons
     fflush(MUNIT_OUTPUT_FILE);
 
     result = munit_test_runner_exec(runner, test, params, &report);
+
+#if defined(MUNIT_ENABLE_TIMING)
+    /* 累加本次测试耗时到 runner 全局报告 */
+    runner->report.wall_clock += report.wall_clock;
+#endif
 
     fputs("[ ", MUNIT_OUTPUT_FILE);
     if ((test->option & MUNIT_TEST_OPTION_TODO) == MUNIT_TEST_OPTION_TODO)
@@ -802,37 +896,20 @@ static void munit_test_runner_run_test_with_params(MunitTestRunner *runner, cons
         runner->report.skiped++;
         result = MUNIT_SKIP;
     }
-    else if (report.successful > 1)
-    {
-        munit_test_runner_print_color(runner, MUNIT_RESULT_STRING_OK, '2');
-#if defined(MUNIT_ENABLE_TIMING)
-        fputs(" ] [ ", MUNIT_OUTPUT_FILE);
-        munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock / report.successful);
-        fputs(" / ", MUNIT_OUTPUT_FILE);
-        munit_print_time(MUNIT_OUTPUT_FILE, report.cpu_clock / report.successful);
-        fprintf(MUNIT_OUTPUT_FILE, " CPU ]\n  %-" MUNIT_XSTRINGIFY(MUNIT_TEST_NAME_LEN) "s Total: [ ", "");
-        munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock);
-        fputs(" / ", MUNIT_OUTPUT_FILE);
-        munit_print_time(MUNIT_OUTPUT_FILE, report.cpu_clock);
-        fputs(" CPU", MUNIT_OUTPUT_FILE);
-#endif
-        runner->report.successful++;
-        result = MUNIT_OK;
-    }
     else if (report.successful > 0)
     {
         munit_test_runner_print_color(runner, MUNIT_RESULT_STRING_OK, '2');
 #if defined(MUNIT_ENABLE_TIMING)
         fputs(" ] [ ", MUNIT_OUTPUT_FILE);
-        munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock);
-        fputs(" / ", MUNIT_OUTPUT_FILE);
-        munit_print_time(MUNIT_OUTPUT_FILE, report.cpu_clock);
-        fputs(" CPU", MUNIT_OUTPUT_FILE);
+        if (report.successful > 1)
+            munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock / report.successful);
+        else
+            munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock);
 #endif
+        fputs(" ]\n", MUNIT_OUTPUT_FILE);
         runner->report.successful++;
         result = MUNIT_OK;
     }
-    fputs(" ]\n", MUNIT_OUTPUT_FILE);
 
     if (result == MUNIT_FAIL || result == MUNIT_ERROR || runner->show_stder)
     {
@@ -967,6 +1044,26 @@ static void munit_test_runner_run_test(MunitTestRunner *runner, const MunitTest 
 
     /* 重新设置随机种子，确保每次测试的可重现性 */
     munit_rand_seed(runner->seed);
+
+    /* -- print test name with alignment -- */
+    {
+        unsigned int name_len = (unsigned int)strlen(test_name);
+        fputs(test_name, MUNIT_OUTPUT_FILE);
+        fputc(':', MUNIT_OUTPUT_FILE);
+        name_len++;
+        /* 如果有参数化测试，在测试名后换行；否则对齐到 MUNIT_TEST_NAME_LEN */
+        if (test->parameters != NULL && test->parameters[0].name != NULL)
+        {
+            fputc('\n', MUNIT_OUTPUT_FILE);
+        }
+        else
+        {
+            while (name_len++ < MUNIT_TEST_NAME_LEN)
+            {
+                fputc(' ', MUNIT_OUTPUT_FILE);
+            }
+        }
+    }
 
     if (test->parameters == NULL)
     {
@@ -1502,7 +1599,22 @@ int munit_suite_main_custom(const MunitSuite   *suite,
     }
     else
     {
-        fprintf(MUNIT_OUTPUT_FILE, "%d of %d (%0.0f%%) tests successful,%d (%0.0f%%) test skipped.\n", runner.report.successful, test_run, (((double)runner.report.successful) / ((double)test_run)) * 100.0, runner.report.skiped, (((double)runner.report.skiped) / ((double)tests_total)) * 100.0);
+        /* 嵌入式 printf 通常不支持 %f，用整数百分比避免浮点 */
+        unsigned long pct_success = 0UL;
+        unsigned long pct_skipped = 0UL;
+        if (test_run > 0)
+            pct_success = ((unsigned long)runner.report.successful * 100UL) / (unsigned long)test_run;
+        if (tests_total > 0)
+            pct_skipped = ((unsigned long)runner.report.skiped * 100UL) / (unsigned long)tests_total;
+
+        fprintf(MUNIT_OUTPUT_FILE, "%d of %d (%lu%%) tests successful, %d (%lu%%) test skipped.",
+                runner.report.successful, test_run, pct_success,
+                runner.report.skiped, pct_skipped);
+#if defined(MUNIT_ENABLE_TIMING)
+        fprintf(MUNIT_OUTPUT_FILE, " Total wall-clock: ");
+        munit_print_time(MUNIT_OUTPUT_FILE, runner.report.wall_clock);
+#endif
+        fputc('\n', MUNIT_OUTPUT_FILE);
     }
 
     if (runner.report.failed == 0 && runner.report.errored == 0)

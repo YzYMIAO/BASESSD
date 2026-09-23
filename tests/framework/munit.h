@@ -24,7 +24,7 @@
  * it before including this header, but new tests should prefer munit_assert_*.
  */
 
-#define MUNIT_TEST_NAME_LEN 37
+#define MUNIT_TEST_NAME_LEN 55
 
 /**************************************************************************
  *                            断言宏定义

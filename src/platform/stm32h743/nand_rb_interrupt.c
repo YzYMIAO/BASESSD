@@ -83,6 +83,23 @@ void nand_rb_interrupt_arm(uint32_t timeout_us)
     EXTI->IMR1 |= EXTI_IMR1_IM6;
     HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
+    /*
+     * ★ tWB 等待 + GPIO 确认
+     *
+     * 刚发完 busy-making 命令（D0h/10h/30h 等）后，NAND 需要最长 1us（tWB）
+     * 才能将 R/B# 拉低。如果不等待直接读引脚，NAND 尚未拉低，引脚读回 HIGH，
+     * 短路条件成立 → 立即标记 triggered=1 → WAIT_READY 立即返回 → 实际并未等待。
+     *
+     * 这里用 DWT 自旋等待 1us（tWB max），确保 NAND 有足够时间拉低 R/B#，
+     * 然后再检查 GPIO。如果仍然 HIGH，说明 NAND 确实空闲，可以短路。
+     */
+    if (g_dwt_cyccnt_per_us != 0U)
+    {
+        uint32_t start       = *((volatile uint32_t *)0xE0001004UL);
+        uint32_t delay_cycle = (uint32_t)g_dwt_cyccnt_per_us * 1U;  /* 1 us */
+        while ((*((volatile uint32_t *)0xE0001004UL) - start) < delay_cycle) {}
+    }
+
     /* ★ RB 已经高电平 → 上升沿永远不会来，直接标记已触发 */
     if (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_6) == GPIO_PIN_SET)
     {
