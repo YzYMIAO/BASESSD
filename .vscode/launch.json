@@ -2,7 +2,38 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug STM32H743II (J-Link)",
+      "name": "Debug STM32H743II (WSL → Win JLink)",
+      "cwd": "${workspaceFolder}",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "external",
+
+      "device": "STM32H743II",
+
+      "gdbTarget": "localhost:2331",
+
+      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
+
+      "gdbPath": "/usr/bin/gdb-multiarch",
+
+      "runToEntryPoint": "main",
+
+      "preLaunchCommands": [
+        "monitor reset halt",
+        "load",
+        "monitor reset"
+      ],
+
+      "postLaunchCommands": [
+        "monitor halt"
+      ],
+
+      "svdFile": "${workspaceFolder}/STM32H743xI.svd",
+
+      "armToolchainPath": "/usr/bin"
+    },
+    {
+      "name": "Debug STM32H743II (WSL-only JLink)",
       "cwd": "${workspaceFolder}",
       "type": "cortex-debug",
       "request": "launch",
@@ -14,13 +45,12 @@
 
       "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
 
-      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServerCL.exe",
-      "gdbPath": "D:/StudyTool/ARM/bin/arm-none-eabi-gdb.exe",
+      "gdbPath": "/usr/bin/gdb-multiarch",
+      "armToolchainPath": "/usr/bin",
+      "serverpath": "D:/StudyTool/Develop/JLink_V972/JLinkGDBServer.exe",
 
       "runToEntryPoint": "main",
-      "preLaunchCommands": [
-        "set substitute-path /mnt/d/01_work_project/soft_ssd D:/01_work_project/soft_ssd"
-      ]
+      "svdFile": "${workspaceFolder}/STM32H743xI.svd"
     }
   ]
 }
