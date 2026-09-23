@@ -13,6 +13,11 @@
 | v0.1 | 2026-09-21 | 初始框架：页级 L2P + 顺序分配 | Claude |
 | v0.2 | 2026-09-23 | 完整设计：DRAM-less L2P cache、Region-based caching、CLOCK、Journal、Checkpoint | Claude |
 | v0.3 | 2026-09-23 | 架构决策记录、行业对比、Block 分类、Block 生命周期图、FTL 接口说明 | Claude |
+| v0.4 | 2026-09-23 | Write-back 四级触发条件 + 企业级 flush 对比 + 6 个补充设计要点 | Claude |
+| v0.5 | 2026-09-23 | GC 多维度加权评分 + 六级触发 + 原子性保证（Journal/GC Bitmap）+ 企业级参考；Block 分类重写（拓扑/Super Block/温度/OP/Pre-conditioned）；Phase 规划扩展（P2.8~P2.11）；Allocator 接口增加温度参数 | Claude |
+| v0.6 | 2026-09-23 | ftl_service 主循环调度设计：三级模式（IDLE/NORMAL/BUSY）+ 企业级后台调度器参考 + 主循环完整形态 | Claude |
+| v0.7 | 2026-09-23 | Journal 自身可靠性设计（四层保护：ECC/CRC/entry_count/sequence）+ Journal Page 完整格式；BBT 完整设计（出厂扫描 + 运行时隔离 + Block Skip 替换 + 企业级参考） | Claude |
+| v0.8 | 2026-09-24 | 设计总结章节（§15）：设计定位/决策总览/硬件依赖审查/企业消费级一致性/Phase 实施顺序；ADR 扩展至 11 项（ADR-6~11）；§10 企业对比表更新；§13 小节编号修复；§1.4 决策表扩展；§5.3 Region 地址修正为 ch/ce/lun 参数 | Claude |
 
 ---
 
@@ -29,10 +34,12 @@
 9. [架构决策记录](#9-架构决策记录)
 10. [企业级实现对比](#10-企业级实现对比)
 11. [FTL 对外接口](#11-ftl-对外接口)
-12. [与 FC 层接口约定](#12-与-fc-层接口约定)
-13. [未解决问题](#13-未解决问题)
-14. [Phase 规划](#14-phase-规划)
-15. [附录：核心数据结构原型](#15-附录核心数据结构原型)
+12. [ftl_service 主循环调度](#12-ftl_service-主循环调度)
+13. [与 FC 层接口约定](#13-与-fc-层接口约定)
+14. [未解决问题](#14-未解决问题)
+15. [设计总结](#15-设计总结)
+16. [Phase 规划](#16-phase-规划)
+17. [附录：核心数据结构原型](#17-附录核心数据结构原型)
 
 ---
 
@@ -93,6 +100,11 @@ BAST（Block Associative Sector Translation）和 FAST（Fully Associative Secto
 | 写回策略 | **Write-back + Journal** | 性能与掉电安全的折中 |
 | FTL → NAND | **通过 FC 接口** | 经过 CRC/ECC/Random 完整数据保护 |
 | RAID | **不实现** | 复杂度高，当前 SLC 暂不需要 |
+| Super Block | **跨双 Plane** | 学习企业级跨 Die 条带化，当前双 Plane 配对 |
+| 温度分区 | **Hot / Cold 双 Open Super Block** | 提升 GC 效率，冷热分离 |
+| OP | **10% 预留（可配置 7~28%）** | RMA 坏块替换 + 性能保速 |
+| Free Pool | **三级（Pre-conditioned/Normal/Emergency）** | 学习 Background GC 和前台 IO 隔离 |
+| SLC Cache | **不实现** | 本身就是 SLC NAND |
 
 ---
 
@@ -157,55 +169,425 @@ BAST（Block Associative Sector Translation）和 FAST（Fully Associative Secto
 
 ## 3. NAND Block 分类
 
-纯页映射（Page Mapping）下，NAND 物理空间划分为四类 Block：
+### 3.1 拓扑结构
 
-### 3.1 元数据区（Metadata Blocks）
+整个 FTL 设计以 `[ch][ce][lun]` 为拓扑维度，不假设任何维度为 1。
 
-固定位置，不由 allocator 管理，出厂时必须是好块：
-
-```
-┌──────────────┬──────┬──────────────┬─────────────────────────────┐
-│ 类型          │ 数量  │ 位置          │ 内容                         │
-├──────────────┼──────┼──────────────┼─────────────────────────────┤
-│ L2P 表        │ ~32  │ Block 0~31   │ 完整 L2P 映射表（2048 regions）│
-│ Checkpoint   │  2   │ Block 32~33  │ L2P 快照 + header           │
-│ Journal      │  2   │ Block 34~35  │ 元数据变更日志               │
-│ BBT          │  1   │ Block 36     │ 坏块表（出厂 + 运行时）       │
-│ Block 擦除计数 │  1   │ Block 37     │ 4096 Blocks × 2B 擦除计数表   │
-│ Reserved     │  2   │ Block 38~39  │ 替换备用（坏块替换）          │
-├──────────────┼──────┼──────────────┼─────────────────────────────┤
-│ 小计          │ ~40  │              │ 约 1% 的容量                 │
-└──────────────┴──────┴──────────────┴─────────────────────────────┘
+```c
+/* nand_config.h 中定义的物理拓扑 */
+#define CH_NUM      (1)     // 通道数
+#define CE_NUM      (1)     // 每通道片选数
+#define LUN_NUM     (1)     // 每片选 LUN 数
+#define PLANE_NUM   (2)     // 每 LUN Plane 数
 ```
 
-### 3.2 数据区（Data Blocks）
+所有全局数据结构按此维度声明：
 
-纯页映射下所有 Data Block 地位相等——没有"日志块"和"数据块"之分：
+```c
+ftl_lun_allocator_t g_allocator[CH_NUM][CE_NUM][LUN_NUM];
+
+for (ch = 0; ch < CH_NUM; ch++)
+    for (ce = 0; ce < CE_NUM; ce++)
+        for (lun = 0; lun < LUN_NUM; lun++)
+            process_lun(ch, ce, lun);
+```
+
+### 3.2 每 LUN Block 分类
 
 ```
-每个 Data Block 的状态机：
-  Open Block    → 当前正在顺序写入，每 Plane 一个（可扩展多温区）
-  Closed Block  → 已写满 64 页，含有效页 + 无效页，等待 GC 回收
-  Free Block    → 已擦除（全 0xFF），在 free pool 中待分配
+每 LUN 的 NAND 物理空间（当前 2 Plane × 2048 Block = 4096 Block / LUN）
+
+┌──────────────────────────────────────────────────────────────┐
+│  Metadata Blocks（元数据区）  每 LUN 独立一份                │
+│  ├── L2P Table (32 blocks)    完整 L2P 映射表                │
+│  ├── Checkpoint (2 blocks)    L2P 快照                      │
+│  ├── Journal (2 blocks)       掉电恢复日志                   │
+│  ├── BBT (1 block)            坏块表                         │
+│  ├── Erase Count (1 block)    擦除计数表                     │
+│  └── Reserved (2+ blocks)     替换预留                      │
+│                                                              │
+│  User Data Area（数据区）      跨 Plane Super Block 管理    │
+│  ├── OP Blocks (10%)          预留空间（不映射给用户）       │
+│  ├── Open Super Block         当前写入位置（跨双 Plane）     │
+│  │     ├── Plane 0: Block N                                │
+│  │     └── Plane 1: Block M                                │
+│  ├── Closed Super Blocks      已写满，有效+无效页混合        │
+│  ├── Pre-conditioned Pool     预擦除池（BG GC 持续补充）     │
+│  └── Free Blocks              已擦除待分配                   │
+│                                                              │
+│  Bad Blocks（坏块）            BBT 标记                      │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-### 3.3 空闲池（Free Pool）
+### 3.3 元数据区（Metadata Blocks）
 
-所有已擦除的 Free Block 组成的池子。Allocator 从中取 Block 分配写入。
+每 LUN 固定位置，不由 allocator 管理，出厂时必须是好块：
 
-### 3.4 坏块（Bad Blocks）
+```
+┌──────────────┬──────┬────────────────────────────────┐
+│ 类型          │ 数量  │ 内容                            │
+├──────────────┼──────┼────────────────────────────────┤
+│ L2P 表        │ ~32  │ L2P mapping regions（本 LUN 的）│
+│ Checkpoint   │  2   │ L2P 快照 + header               │
+│ Journal      │  2   │ 元数据变更日志                   │
+│ BBT          │  1   │ 本 LUN 坏块表                   │
+│ Erase Count  │  1   │ 本 LUN 擦除计数表                │
+│ Reserved     │  2   │ 坏块替换备用                    │
+├──────────────┼──────┼────────────────────────────────┤
+│ 小计          │ ~40  │ 每 LUN 约 1% 容量               │
+└──────────────┴──────┴────────────────────────────────┘
+```
 
-出厂坏块 + 运行时新增坏块，BBT 管理，分配时跳过。
+多 LUN 时元数据各 LUN 独立。L2P region 地址计算含 ch/ce/lun 参数：
 
-### 3.5 与企业方案对比
+```c
+static nand_paa_t l2p_region_ppa(uint8_t ch, uint8_t ce, uint8_t lun,
+                                  uint16_t region_id)
+{
+    uint16_t block_offset = region_id / PAGES_PER_BLOCK;
+    uint16_t page_in_block = region_id % PAGES_PER_BLOCK;
+    return paa_make(page_in_block, 0, L2P_BASE_BLOCK + block_offset, lun, 0);
+}
+```
+
+### 3.4 Super Block（跨 Plane 条带化）
+
+Super Block 是跨双 Plane 的逻辑写入单元。当前硬件 PLANE_NUM=2，双 Plane 各取一个物理 Block 配对。
+
+```
+Open Super Block:
+  Plane 0: Block A（由 allocator 分配）
+  Plane 1: Block B（由 allocator 分配，双 Plane 同步写入）
+
+写入以 Super Block 为粒度，双 Plane 并行（Multi-Plane PROGRAM）：
+  Page 0: Plane0-Page0 + Plane1-Page0
+  ...
+  Page 63: Plane0-Page63 + Plane1-Page63 → Super Block 写满
+```
+
+```c
+typedef struct {
+    uint16_t plane_blocks[PLANE_NUM];   // Plane 0 和 Plane 1 的 Block 号
+    uint8_t  next_page;                  // 当前写入页（0~63，双 Plane 同步）
+} super_block_t;
+
+nand_paa_t super_block_page_paa(const super_block_t *sb, uint8_t plane, uint8_t page) {
+    return paa_make(page, plane, sb->plane_blocks[plane], 0, 0);
+}
+```
+
+### 3.5 温度分区（Multi-Stream）
+
+为提升 GC 效率，数据按更新频率分温度写入不同的 Open Super Block。
+
+```
+Hot Super Block:   ← 频繁写入的数据（用户 IO 热数据）
+  数据特征：更新频繁，无效页比例增长快
+  GC 效率：高（80~90% 无效页）
+
+Cold Super Block:  ← 几乎不更新的数据（GC 搬移、元数据）
+  数据特征：几乎不变，无效页比例极低
+  GC 效率：低（0~5% 无效页），但几乎不用回收
+```
+
+温度归类策略：
+
+| 数据来源 | 温度 | 理由 |
+|---------|------|------|
+| 用户写入（Host IO） | HOT | 可能频繁更新 |
+| GC 搬移的有效页 | COLD | 已至少存活一轮 GC |
+| GC 搬移的热数据 | HOT | 仍可能频繁更新 |
+| L2P/Journal/元数据 | COLD | 几乎不更新 |
+
+### 3.6 OP 区域（Over-Provisioning 10%）
+
+OP 是数据区中**不映射给用户**的好块，由 allocator 统一管理但 L2P 不覆盖。
+
+```c
+#define FTL_OP_PERCENT    (10)    // 10% 预留空间，可调 7~28，设为 0 禁用
+```
+
+**OP 在 RMA 和性能恢复中的作用**：
+
+```
+RMA 场景：
+  出厂时：总好块 4056，用户可见 3611 块（OP=10% 约 405 块）
+  使用中：新增 50 个坏块 → 从 OP 池替换 → 用户容量不变 ✅
+  没有 OP：坏块替换 → 用户容量减少 → 设备"变小" ❌
+
+性能恢复场景：
+  写入压力大时：OP 池提供 400+ Block GC 缓冲
+  GC 有充足空间后台搬移 → 前台写入速度稳定 ✅
+  没有 OP：free pool 耗尽 → 前台 IO 等 GC → 写入断崖下降 ❌
+```
+
+### 3.7 Pre-conditioned Pool（预擦除池 — 三级 Free Pool）
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Free Pool 三级结构                                            │
+│                                                              │
+│  Pre-conditioned Pool（预擦除池）                              │
+│  ├── 已擦除好，前台 IO 零等待分配                              │
+│  ├── 由 Background GC 持续补充                                 │
+│  └── 目标水位：>= FREE_POOL_TARGET                            │
+│                                                              │
+│  Free Pool（普通池）                                          │
+│  ├── 已擦除待分配                                             │
+│  └── Pre-conditioned 耗尽时从此取                              │
+│                                                              │
+│  Emergency Pool（紧急池）                                     │
+│  ├── 最后防线                                                │
+│  ├── 仅当 free pool 耗尽时启用                                │
+│  └── 启用瞬间触发强制 GC                                      │
+└──────────────────────────────────────────────────────────────┘
+```
+
+```c
+#define FREE_POOL_TARGET      (32)     // Pre-conditioned 目标水位
+#define FREE_POOL_EMERGENCY   (8)      // 紧急水位
+
+void ftl_refill_pre_cond(ftl_context_t *ftl) {
+    if (ftl->free_pool.pre_cond_count < FREE_POOL_TARGET) {
+        if (ftl->free_pool.free_count > FREE_POOL_EMERGENCY) {
+            ftl_gc_background(ftl);  // 非阻塞后台 GC
+        }
+    }
+}
+```
+
+### 3.8 坏块管理（BBT）
+
+坏块管理分三个阶段：出厂扫描 → 运行时隔离 → 替换机制。
+
+#### 3.8.1 出厂坏块扫描
+
+```
+NAND 出厂时，每个 Block 的前 2 页（Page 0~1）的 OOB 区域
+标记了该 Block 是否为出厂坏块。
+
+OOB 标记规则（JEDEC/ONFI 标准）：
+  非坏块：OOB[0]（Block 0）或 OOB[0..1]（其余 Block）= 0xFF ✅
+  出厂坏块：OOB[0] ≠ 0xFF ❌
+```
+
+**扫描流程**：
+
+```c
+int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun) {
+    uint16_t bad_count = 0;
+
+    /* 遍历所有 Block */
+    for (uint16_t block = 0; block < BLOCKS_PER_PLANE * PLANE_NUM; block++) {
+        for (uint32_t plane = 0; plane < PLANE_NUM; plane++) {
+            nand_paa_t check_page = paa_make(0, plane, block, lun, 0);  // Page 0
+
+            /* 通过 FC 读该页的 OOB（Spare 区前 2 字节）*/
+            uint8_t oob_mark[2];
+            fc_read_oob(check_page, oob_mark, 2);
+
+            if (oob_mark[0] != 0xFF) {
+                alloc->bad_blocks[bad_count++] = block;
+                break;  // 任一 Plane 坏即整 Block 坏
+            }
+        }
+    }
+
+    alloc->bad_count = bad_count;
+
+    /* 排除元数据区中的坏块 */
+    for (int i = 0; i < alloc->bad_count; i++) {
+        if (alloc->bad_blocks[i] < METADATA_BLOCK_COUNT) {
+            /* 元数据 Block 坏块 → 从 Reserved 替换 */
+            bbt_replace_metadata_block(alloc->bad_blocks[i]);
+        }
+    }
+
+    return bad_count;
+}
+```
+
+**扫描性能估算**：
+
+```
+每个 Block 读 2 页（Page 0 + 1），每次 ~25μs
+总 Block ≈ 4096
+总时间 ≈ 4096 × 2 × 25μs ≈ 205ms
+加上 OOB 数据传输（~10μs/页）≈ 40ms
+合计 ≈ 250ms
+→ 在启动过程中可接受（放在 firmware_boot_stage_storage）
+```
+
+**坏块替换策略**：
+
+```
+元数据区坏块（Block 0~39）：
+  → 从 Reserved Block（38~39）替换
+  → 若 Reserved 用完 → 从 OP 池取一块替换
+  → 若 OP 池无剩余 → DEVICE_FAILED
+
+数据区坏块：
+  → 加入 bad_blocks 列表，allocator 跳过即可
+  → 不替换（数据区坏块不损失容量——OP 池就是为此存在的）
+```
+
+**坏块表存储格式**：
+
+```c
+#define BBT_MAGIC       0x424254AB      // "BBT\xAB"
+#define BBT_MAX_BLOCKS  (BLOCKS_PER_PLANE * PLANE_NUM)  // 4096
+
+typedef struct {
+    uint32_t magic;                 // 魔数验证
+    uint32_t sequence;              // 单调递增（最新有效）
+    uint32_t total_blocks;          // 总 Block 数
+    uint32_t bad_count;             // 坏块数
+    uint32_t reserved[3];           // 保留
+    uint8_t  bad_map[BBT_MAX_BLOCKS / 8];  // 4096 bit = 512B
+    uint32_t crc;                   // 校验和
+} __attribute__((packed)) bbt_header_t;
+```
+
+- 在 NAND 元数据区 Block 36 存储
+- 占用 1 page（2048B），实际 ~520B header + bitmap，剩余 padding
+- 冗余存 3 份（同一 Block 的 Page 0/1/2），防 BBT 自身损坏
+
+#### 3.8.2 运行时坏块隔离
+
+运行时坏块的检测时机：
+
+```
+检测时机       触发条件                     处理方式
+──────────    ──────────────────────────   ─────────────────
+PROGRAM 完成    FC_CW_STATUS_NAND_FAIL      标记坏块 → 数据搬移
+ERASE 完成      FC_CW_STATUS_NAND_FAIL      标记坏块
+READ 重试超限   ECC 连续多次升高 + retry 失败  标记坏块 → 数据搬移
+```
+
+**隔离流程**：
+
+```c
+/* FC 完成后检查坏块 */
+void ftl_check_bad_block(ftl_context_t *ftl, fc_command_status_t *completion) {
+    /* 检查是否有 NAND_FAIL 状态 */
+    if ((completion->status0 & FC_CW_STATUS_NAND_FAIL) == 0 &&
+        (completion->status1 & FC_CW_STATUS_NAND_FAIL) == 0 &&
+        (completion->status2 & FC_CW_STATUS_NAND_FAIL) == 0 &&
+        (completion->status3 & FC_CW_STATUS_NAND_FAIL) == 0) {
+        return;  // 无失败
+    }
+
+    /* 定位失败的 Block */
+    fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
+    uint16_t fail_block = paa_to_block(cmd->paa);
+    uint8_t  fail_plane = paa_to_plane(cmd->paa);
+
+    /* 隔离坏块 */
+    allocator_mark_bad(&ftl->alloc, fail_block);
+
+    /* 更新 BBT（写 NAND） */
+    bbt_update(&ftl->bbt, fail_block, 1);  // 1 = bad
+
+    /* 如果是 PROGRAM 失败：尝试在其他位置重写 */
+    if (cmd->config.operation == OP_NORMAL_PROGRAM_PAGE) {
+        ftl_rewrite_failed_data(ftl, cmd);
+    }
+
+    /* 如果是 ERASE 失败：无需搬移，直接标记 */
+}
+```
+
+#### 3.8.3 替换机制
+
+```
+坏块替换策略：Block Skip（跳过）
+
+  allocator_alloc() 中跳过坏块：
+
+    nand_paa_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature) {
+        uint16_t candidate;
+
+        do {
+            /* 从 free pool 取一个 Block */
+            candidate = alloc->free_blocks[--alloc->free_count];
+
+            /* 跳过坏块 */
+        } while (bbt_is_bad(&alloc->bbt, candidate));  
+
+        /* 检查是否 OP Block */
+        if (alloc->op_count > 0 && alloc->op_used < alloc->op_count) {
+            /* 还有 OP 余额 → 从 OP 池分配 */
+            return bbt_alloc_from_op(alloc, candidate);
+        }
+
+        return candidate;
+    }
+```
+
+**为什么用 Block Skip 而不是 Block Sparing**：
+
+```
+Block Skip（本方案）：                              Block Sparing（企业级）：
+  alloc 时跳过坏块 → 容量自然减少                    预留替换块 → 坏块替换 → 容量不变
+
+  你的场景（512MiB SLC）：                            企业级场景（8TB QLC）：
+  出厂坏块 ≈ 2~10 个（SLC 优秀良率）                    出厂坏块 ≈ 数千个（QLC 良率差）
+  跳过 ~10 个对 512MiB 无感                             需要 sparing 弥补大容量损失
+
+结论：你的方案用 Block Skip 足够了。
+  OP 池（10%）自然吸收了坏块替换的容量损失。
+  即使新增 50 个坏块，OP 池也能覆盖。
+```
+
+#### 3.8.4 企业级 BBT 参考
+
+| 维度 | 本方案 | 消费级 | 企业级 |
+|------|--------|--------|--------|
+| 出厂扫描 | 全量扫描 4096 Block | 全量扫描 | 增量扫描（只查未查过的）|
+| BBT 存储 | NAND 固定 Block ×3 冗余 | NAND ×3 冗余 | NAND + SRAM cache + RAID1 |
+| 运行时检测 | PROGRAM/ERASE 完成后 | 同左 | 同左 + ECC 趋势预测 |
+| 替换策略 | Block Skip | Block Skip | Stripe Skip + Sparing |
+| 新增坏块 | alloc 跳过 | 同左 | 动态映射表更新 |
+| 坏块预测 | 无 | 无 | 根据 ECC 上升趋势预测即将坏的 Block |
+
+**企业级的坏块预测（Predictive Failures）**：
+
+```
+企业级 SSD 不等到 PROGRAM 失败才标记坏块——太晚了：
+
+  监控每个 Block 的 ECC 纠正比特数趋势
+  ECC 连续 N 次上升 → "预测"为即将坏块
+  → 主动搬移该 Block 的数据
+  → 标记为"慢死"（Slow Death）Block
+  → 不再分配新数据
+
+好处：
+  在数据彻底损坏之前搬移 ✅
+  用户无感 ✅
+  避免 Read Error 触发读恢复的性能抖动 ✅
+```
+
+#### 3.8.5 参数建议
+
+| 参数 | 建议值 | 说明 |
+|------|--------|------|
+| BBT_REDUNDANCY | 3 | BBT 冗余份数 |
+| BBT_STORE_BLOCK | 36 | BBT 存储 Block 号 |
+| SCAN_PAGES_PER_BLOCK | 2 | 出厂扫描每 Block 读的页数 |
+| MAX_BAD_BLOCKS | 200 | BBT bitmap 容量上限 |
+| ECC_PREDICT_THRESHOLD | 8 次 | ECC 连续上升触发预测 |
+
+### 3.9 与企业方案对比
 
 | 维度 | 本方案 | 企业级（Samsung / Solidigm） |
 |------|--------|-----------------------------|
-| Metadata 位置 | 固定 Block 0~39 | 动态分配 + RAID1 镜像保护 |
-| 数据区分区 | 单一 | Hot/Cold/Normal 多温区 |
-| 空闲池 | 单池 | Pre-conditioned pool（预擦除保证 QoS）|
-| 坏块替换 | Block skip | Block sparing + RAID stripe 重映射 |
-| Over-provisioning | 无单独预留 | 7~28% 系统预留 |
+| Super Block | 跨双 Plane Super Block | 跨 N Die Super Block |
+| 温度分区 | Hot / Cold | 多级温度 |
+| OP | 10%（可配置 0~28%） | 7~28% |
+| Free Pool | 三级（Pre-conditioned/Normal/Emergency） | 多层 + 动态调节 |
+| GC | Background GC 持续补充 | 后台预测性 GC |
+| SLC Cache | 不需要（本身就是 SLC） | 是（TLC/QLC） |
+| 元数据分布 | 每 LUN 固定位置 | 跨 Die 动态分配 + RAID1 |
 
 ---
 
@@ -213,62 +595,119 @@ BAST（Block Associative Sector Translation）和 FAST（Fully Associative Secto
 
 ### 4.1 完整流程
 
+当前生命周期以 Super Block 为粒度，三级 Free Pool 管理，多维度触发 GC：
+
 ```
-                ┌──────────────────┐
-                │   Free Pool      │  ← 已擦除，全 0xFF，等待分配
-                │   初始有空闲块    │
-                └────────┬─────────┘
-                         │ allocator: 选最少擦除块分配（动态磨损均衡）
-                         ▼
-                ┌──────────────────┐
-                │   Open Block     │  ← 当前写入位置，顺序写页
-                │   [已写47页][空]  │    每 Plane 1 个
-                └────────┬─────────┘
-                         │ 写满 64 页
-                         ▼
-                ┌──────────────────┐
-                │  Closed Block    │  ← 等待 GC 回收
-                │  V=有效 I=无效    │    VVI VIVV ...
-                │  [VVVIVIIIV...]  │    无效页由 L2P 更新产生
-                └────────┬─────────┘
-                         │ free pool < 阈值 → 触发 GC
-                         ▼
+                ┌────────────────────────┐
+                │      Free Pool          │
+                │      三级池              │
+                │  ┌────────────────────┐ │
+                │  │ Pre-conditioned     │ │ ← 提前擦好，前台零等待分配
+                │  │ Normal              │ │
+                │  │ Emergency           │ │ ← 最后防线
+                │  └────────────────────┘ │
+                └───────────┬────────────┘
+                            │ allocator: 双 Plane 各取一个配对 + 磨损均衡
+                            ▼
+                ┌──────────────────────────┐
+                │  Open Super Block          │  ← 当前写入位置
+                │  Plane0: Block A            │    每温度等级 1 个
+                │  Plane1: Block B            │    Hot / Cold
+                │  [已写 30/64 页]            │
+                └──────────┬───────────────┘
+                            │ 64 页写满
+                            ▼
+                ┌──────────────────────────┐
+                │  Closed Super Block        │  ← 等待 GC
+                │  Plane0: [VVI..IVV]        │    跨双 Plane
+                │  Plane1: [IVV..VVI]        │    有效页 + 无效页
+                └──────────┬───────────────┘
+                            │ 多维度触发 GC
+                            ▼
                 ┌──────────────────────────────────────────┐
-                │  GC Victim Block                          │
-                │  ① 贪心选有效页最少的 Block                │
-                │  ② 读所有有效页（通过 FC）                 │
-                │  ③ 写到新的 Open Block                    │
-                │  ④ 更新 L2P（cache write → journal）      │
-                │  ⑤ Erase victim                          │
-                │  ⑥ 归还 Free Pool                        │
+                │  GC 执行                                  │
+                │  ① 多维度选 victim（有效页,擦除,温度,时间）│
+                │  ② 遍历双 Plane，搬移有效页（通过 FC）     │
+                │  ③ 原子性保证：journal + GC bitmap         │
+                │  ④ 擦除双 Plane victim Block              │
+                │  ⑤ 归还 Pre-conditioned Pool              │
                 └──────────────────────────────────────────┘
+                            │
+                            ▼
+                  回到 Free Pool（Pre-conditioned）
 ```
 
 ### 4.2 关键说明
 
 - 不存在"日志区→数据区"的 merge 操作（那是混合映射的概念）
 - 纯页映射下，数据落地就是最终位置
-- Block 生命周期是 Free → Open → Closed → GC Erase → Free 的循环
-- GC 时的"搬移"是：读 Closed Block 的有效页 → 写到新的 Open Block → 更新映射 → 擦除原 Block
+- 生命周期是 Free → Open Super Block → Closed Super Block → GC Erase → Free 的循环
+- GC 以 Super Block 为粒度，一次回收双 Plane 的两个物理 Block
+- GC 的"搬移"是：读 Super Block 中所有有效页 → 写到新的 Open Super Block → 更新映射 → 擦除原双 Block
+- Pre-conditioned Pool 由 Background GC 持续补充，前台 IO 无需等待 GC
 
-### 4.3 各阶段状态详情
+### 4.3 GC Victim 选择算法（多维度加权评分）
 
-```
-一个 Block 的内部状态（64 页 × 4 CW = 256 CW）：
-  ┌──────────────────────────────────────┐
-  │ Page  0: [LBA=0][LBA=1][LBA=2][LBA=3] 有效
-  │ Page  1: [LBA=4][ L=I  ][L=I  ][L=I  ] 页部分无效
-  │ Page  2: [LBA=8][LBA=9][ L=I  ][ L=I  ] 无效页
-  │ ...
-  │ Page 63: [LBA=252][LBA=253][LBA=254][LBA=255] 全部有效
-  └──────────────────────────────────────┘
+纯贪心（选有效页最少的 Block）在 SLC 场景下基本可用，但存在缺陷：
 
-GC 视角：
-  - 有效 CW：有 L2P entry 指向它
-  - 无效 CW：已被新版本覆盖（L2P 指向另一个 PPA）
-  - 无效比 = 1 - (有效 CW 数 / 256)
-  - GC 选 victim 时优先选无效比最高的 Block
-```
+- **磨损均衡缺失**：可能选中擦除次数 5000 次快报废的 Block，而非 20 次几乎全新的
+- **温度维度缺失**：COLD 数据有效页几乎不变，下次 GC 还得搬
+
+本方案使用多维度加权评分，四个维度同时考虑。
+
+加权公式：`score = 0.50 × valid_ratio + 0.20 × (1 - erase_ratio) + 0.20 × temp_factor + 0.10 × (1 - age_ratio)`
+
+| 权重 | 值 | 说明 |
+|------|----|------|
+| w1 (有效页) | 0.50 | 核心指标，直接影响写放大 |
+| w2 (擦除次数) | 0.20 | 磨损均衡，避开临近寿命的 Block |
+| w3 (温度) | 0.20 | HOT 数据"自然死亡"快，投资未来无效收益 |
+| w4 (时间) | 0.10 | 保证每个 Block 都有机会被回收 |
+
+### 4.4 GC 触发条件（多维度触发）
+
+不只依赖 free pool 水位线，而是多维度综合判断：
+
+| 触发 | 条件 | 说明 | 紧急度 |
+|------|------|------|--------|
+| T1: 水位线 | Pre-conditioned < 32 | 核心触发，空闲块不足 | 🔴 紧急 |
+| T2: 写入量 | 累计写入 > 1024 次 | 写入量触发，分散 GC 压力 | 🟡 主动 |
+| T3: 定时 | 500ms 定时器到期 | 空闲时有空就做一点 | 🟢 后台 |
+| T4: 强制 | Emergency pool 启用 | 无空闲块时的最后手段 | 🔴 紧急 |
+| T5: 磨损均衡 | 最大/最小擦除比 > 10 | 防止局部 Block 磨损太快 | 🟡 均衡 |
+| T6: 碎片率 | 平均有效页 > 70% | Block 碎片化时提前整理 | 🟡 预防 |
+
+### 4.5 GC 搬移的原子性保证
+
+GC 搬移（读 → 写新位置 → 更新 L2P → 擦除旧 Block）不是原子的。掉电可能发生在中间任何一步。
+
+三层保护机制：
+
+- **Layer 1: Journal** — 每个 L2P 更新先写 Journal 后改 cache，掉电后 Journal 回放重建 L2P
+- **Layer 2: GC Bitmap** — 在 NAND 元数据区记录搬移进度 bitmap，每搬 16 页更新一次，掉电恢复后从断点继续
+- **Layer 3: 双拷贝容忍** — 任何掉电场景最多产生一个"孤悬"Block，不会丢数据，下次 GC 回收
+
+### 4.6 企业级 GC 参考
+
+企业级 GC 不是为了"回收空间"，而是"维持性能一致"。Idle Time GC 持续在后台做，前台 IO 永远不感知 GC。同时动态调节 GC 占用的 NAND 带宽（Host 活跃时 ≤ 10%，空闲时 100%）。
+
+三星 GC 策略 = 多维度加权 × 动态优先级 × Soft/Hard 多级阈值。
+
+### 4.7 GC 参数配置建议
+
+| 参数 | 建议值 | 说明 |
+|------|--------|------|
+| PRE_COND_LOW_WATER | 32 blocks | Pre-conditioned 低水位 |
+| GC_INTERVAL_WRITES | 1024 | 写入量触发间隔 |
+| GC_TIMER_INTERVAL_MS | 500 ms | 定时触发间隔 |
+| GC_WEAR_LEVEL_RATIO | 10 | 最大/最小擦除比阈值 |
+| GC_FRAGMENT_THRESHOLD | 0.7 | 平均有效页 > 70% 触发 |
+| GC_WEIGHT_VALID | 0.50 | 有效页权重 |
+| GC_WEIGHT_ERASE | 0.20 | 擦除次数权重 |
+| GC_WEIGHT_TEMP | 0.20 | 温度权重 |
+| GC_WEIGHT_AGE | 0.10 | 时间公平权重 |
+| GC_BANDWIDTH_HOST_ACTIVE | 10% | Host 活跃时 GC 带宽上限 |
+| GC_BANDWIDTH_HOST_IDLE | 100% | Host 空闲时 GC 带宽 |
 
 ---
 
@@ -317,10 +756,12 @@ L2P 表（NAND 元数据区 Block 0~31）：
 #define L2P_BASE_BLOCK      (0)     // 元数据从 Block 0 开始
 #define L2P_TOTAL_BLOCKS    (32)    // 32 blocks for full table
 
-static nand_paa_t l2p_region_ppa(uint16_t region_id) {
-    uint16_t block_offset = region_id / 64;   // pages per block
-    uint16_t page_in_block = region_id % 64;
-    return paa_make(page_in_block, 0, L2P_BASE_BLOCK + block_offset, 0, 0);
+static nand_paa_t l2p_region_ppa(uint8_t ch, uint8_t ce, uint8_t lun,
+                                  uint16_t region_id)
+{
+    uint16_t block_offset = region_id / PAGES_PER_BLOCK;
+    uint16_t page_in_block = region_id % PAGES_PER_BLOCK;
+    return paa_make(page_in_block, 0, L2P_BASE_BLOCK + block_offset, lun, 0);
 }
 ```
 
@@ -528,6 +969,128 @@ int ftl_write(ftl_context_t *ftl, ssd_lba_t lba, const void *data) {
 - 回收 sequence ≤ checkpoint_seq 的 journal 条目
 - 擦除 journal block 复用
 
+### 7.6 Journal 自身可靠性（掉电保护）
+
+Journal 保护 L2P 映射不丢失，但 Journal 本身也写在 NAND 上。写 Journal 时掉电怎么办？这是 Journal 设计的"递归可靠性问题"。
+
+#### 三种掉电场景
+
+```
+Journal Page PROGRAM 的三个阶段：
+
+  ① SRAM buffer 中累积 128 条 entry（未写 NAND）
+     掉电 → 最多丢失 128 条 entry                        ← 掉电点 A
+
+  ② FC PROGRAM 提交，NAND 开始烧录（~300μs）
+     半途掉电 → 页面上数据不完整                           ← 掉电点 B
+
+  ③ PROGRAM 成功，但返回途中掉电
+     FTL 不知是否写入成功                                  ← 掉电点 C
+```
+
+#### 四层保护（不需要双写）
+
+本方案的四层保护，充分利用 FC 层已有的 BCH ECC，不需要双写（2×写放大）：
+
+```
+Layer 1: BCH ECC（FC 层自带，零额外开销）
+  ────────────────────────────────────────────────────
+  每次 FC PROGRAM/READ 都经过 BCH ECC（t=4）
+  ECC 可纠正 ≤4 bit 的错误，超过时返回 UNC
+  掉电点 B 导致的半烧录页面 → 如有少量 bit 错 → ECC 自动修 ✅
+                              超过纠错能力 → ECC 报 UNC → 整页丢弃 ✅
+
+Layer 2: Entry 内置 CRC
+  ────────────────────────────────────────────────────
+  Journal entry 的 CRC 字段做二次校验：
+  ECC 虽然能纠正 ≤4 bit，但不能保证"纠正后的数据一定正确"
+  CRC 做最终验证 → 消除 ECC 误纠可能 ✅
+
+Layer 3: Header entry_count 精确定位
+  ────────────────────────────────────────────────────
+  Header 中记录本页实际有效的 entry 数（0~128）：
+    恢复时只解析前 entry_count 条，之后的忽略 ✅
+    Header 受 ECC 保护 → entry_count 可信 ✅
+
+Layer 4: 单调递增 sequence
+  ────────────────────────────────────────────────────
+  每个 entry 有连续递增的 sequence 号
+  恢复时检测连续性：gap → 截断于此
+  即使 page CRC 假阳性 → sequence 不连续也能检测 ✅
+
+  双 Block 轮换（不是双写！）：
+  Block J0 写满 → 切 J1 → J0 擦除
+  恢复时读 J0 和 J1 最后一页，取 sequence 大的
+  无需双写代价，只需多读一页 ✅
+```
+
+#### Journal Page 完整格式
+
+```
+每个 Journal Page（2048B = 1 NAND page = 4 CW × 512B）：
+
+┌─────────────────────────────────────────────────────────┐
+│ Header: 12B                                              │
+│  ├── magic       (4B) = 0x4A4F5552 ("JOUR")            │
+│  ├── page_seq    (4B) = 本页第一条 entry 的全局序号      │
+│  ├── entry_count (2B) = 本页有效 entry 数（0~128）       │
+│  └── block_seq   (2B) = 本 Journal Block 写入轮次       │
+├─────────────────────────────────────────────────────────┤
+│ Entries: N × 16B （N = entry_count，≤ 128）              │
+│  ├── entry[0]: lba(4B) | old_paa(4B) | new_paa(4B)     │
+│  │         : seq(4B) = 单调递增全局序号                  │
+│  ├── entry[1]                                            │
+│  ├── ...                                                 │
+│  └── entry[N-1]                                          │
+├─────────────────────────────────────────────────────────┤
+│ Padding: (128 - N) × 16B = 0xFF（未使用区域）            │
+└─────────────────────────────────────────────────────────┘
+注意：Header + Entries 整页由 FC 的 BCH ECC 保护（写入 4 CW）。
+      Entry 内部 CRC 已在 entry 结构中（16B含 sequence 和 CRC）。
+```
+
+#### entry_count 应对掉电点 B
+
+```
+掉电发生在 PROGRAM 中途（掉电点 B）：
+  NAND 页面部分烧录 → entry_count 可能是正确值或 0xFF
+
+恢复时读该页：
+  FC READ → BCH ECC 解码
+    ├── 成功  → entry_count 可信 → 只解析前 entry_count 条 ✅
+    └── 失败  → 整页无效 → 只用上一页 ✅
+```
+
+#### 企业级做法参考
+
+```
+企业级 SSD 有硬件掉电保护方案：
+
+三星/铠侠：
+  Journal 有独立电源轨 + 大电容（~5ms）
+  检测到掉电 → 电容支撑完成最后一次 PROGRAM
+  → "掉电点 B" 在硬件层面消除
+
+消费级 DRAM-less：
+  无掉电电容 → 纯软件方案
+  → 方案与本节设计一致：ECC + CRC + sequence + batch flush + 定时 flush
+
+UFS/eMMC：
+  硬件加速 Journal（Replay Protected Memory Block）
+  硬件保证 write atomicity
+```
+
+#### 本方案总结
+
+| 保护层 | 实现 | 成本 | 保护能力 |
+|--------|------|------|---------|
+| BCH ECC (t=4) | FC 层自带 | 0 | 纠正 ≤4 bit，检测更多 ✅ |
+| Entry CRC | 16B entry 包含 CRC | 4B/entry | 二次校验 ✅ |
+| entry_count header | Header 2B | ~0 | 精确定位有效 entry ✅ |
+| Monotonic sequence | 已有字段 | 4B/entry | 检测 gap 和乱序 ✅ |
+| 双块轮换 | 2 Block 轮流写 | ~0 | 避免双写代价 ✅ |
+| 双写 | ❌ 不需要 | — | ECC 四层已足够 |
+
 ---
 
 ## 8. Checkpoint 机制
@@ -612,19 +1175,73 @@ typedef struct {
 | 理由 | 命中率接近 LRU，无需链表/内存分配，O(1) amortized |
 | 拒绝方案 | LRU（需链表，嵌入式麻烦）、FIFO（命中率低）|
 
+### ADR-6：Super Block（跨双 Plane 条带化）
+
+| 项目 | 决策 |
+|------|------|
+| 选型 | **跨双 Plane Super Block** |
+| 理由 | 学习企业级跨 Die 条带化逻辑；双 Plane 并行 Multi-Plane PROGRAM 提升写入带宽；FC 层已支持 Multi-Plane 操作 |
+| 拒绝方案 | 单 Block 独立写入（无法利用双 Plane 并行）|
+| 代价 | Super Block 配对增加 allocator 复杂度 |
+
+### ADR-7：温度分区（Multi-Stream）
+
+| 项目 | 决策 |
+|------|------|
+| 选型 | **Hot / Cold 双 Open Super Block** |
+| 理由 | 冷热数据分离提升 GC 效率；HOT 数据无效页增长快、回收效率高；COLD 数据几乎不变、几乎不用回收；纯软件逻辑，无硬件依赖 |
+| 拒绝方案 | 单温区混合写入（GC 效率差）、多级温度（512MiB 容量不需要）|
+| 代价 | allocator 需维护双 Super Block；FTL 写操作需指定温度参数 |
+
+### ADR-8：OP 10% 预留
+
+| 项目 | 决策 |
+|------|------|
+| 选型 | **10% 预留（可配置 7~28%）** |
+| 理由 | 消费级典型值；RMA 场景坏块替换后用户容量不变；写入压力大时提供 GC 缓冲、防止性能断崖 |
+| 拒绝方案 | 0% OP（坏块替换直接减少用户容量，写入压力时 GC 阻塞前台 IO）|
+| 代价 | 用户可见容量减少约 10%（512MiB → ~456MiB）|
+
+### ADR-9：三级 Free Pool（Pre-conditioned/Normal/Emergency）
+
+| 项目 | 决策 |
+|------|------|
+| 选型 | **三级结构：Pre-conditioned + Normal + Emergency** |
+| 理由 | 学习企业级 Background GC 和前台 IO 隔离；Pre-conditioned 池保证前台 IO 零等待分配；Emergency 池作为最后防线 |
+| 拒绝方案 | 单池（前台 IO 可能等 GC 擦除）|
+| 代价 | 需维护三级池计数和 Background GC 补充逻辑 |
+
+### ADR-10：SLC Cache 不实现
+
+| 项目 | 决策 |
+|------|------|
+| 选型 | **不实现 SLC Cache** |
+| 理由 | 当前 NAND 本身就是 SLC，不存在 TLC/QLC 的慢速写入问题；SLC Cache 是 TLC/QLC SSD 的写加速技术 |
+| 拒绝方案 | （不适用）|
+
+### ADR-11：坏块管理（BBT）
+
+| 项目 | 决策 |
+|------|------|
+| 选型 | **出厂全量扫描 + 运行时隔离 + Block Skip 替换** |
+| 理由 | SLC 出厂坏块极少（~2~10 个），全量扫描 250ms 可接受；Block Skip 零额外硬件成本；OP 池自然吸收坏块替换的容量损失 |
+| 拒绝方案 | Block Sparing（企业级大容量 QLC 才需要）；ECC 趋势坏块预测（SLC 不需要）|
+| 代价 | 出厂扫描增加启动时间 ~250ms；需要 FC 支持 OOB/Spare 区读取 |
+
 ---
 
 ## 10. 企业级实现对比
 
 ### 10.1 Block 管理对比
 
-| 维度 | 本方案 | 消费级（Phison/SMI） | 企业级（Samsung/Solidigm） |
-|------|--------|---------------------|--------------------------|
-| 数据块分区 | 单一 | 2~4 温区 | 热/冷/普通 + SLC cache |
-| 空闲池 | 单池 | 多层池（不同 P/E） | Pre-conditioned + 紧急池 |
-| GC 触发 | free count < 10% | 多级阈值 | 后台预测性 GC |
-| Over-provision | 无单独预留 | 7~15% | 7~28% |
-| 写缓冲 | 无 | SLC mode buffer | SLC / pseudo-SLC cache |
+| 维度 | 本方案（当前设计） | 消费级（Phison/SMI） | 企业级（Samsung/Solidigm） |
+|------|-----------------|---------------------|--------------------------|
+| 数据块分区 | Hot / Cold 双温区 | 2~4 温区 | 多级温度 + SLC cache |
+| 空闲池 | 三级（Pre-conditioned/Normal/Emergency） | 多层池（不同 P/E） | Pre-conditioned + 紧急池 |
+| GC 触发 | 六级（水位线/写入量/定时/磨损/碎片/强制） | 多级阈值 | 后台预测性 GC |
+| Over-provision | 10% 预留 | 7~15% | 7~28% |
+| 写缓冲 | 无（SLC 不需要） | SLC mode buffer | SLC / pseudo-SLC cache |
+| Super Block | 跨双 Plane | 跨 Die | 跨 N Die Super Block |
 
 ### 10.2 L2P 管理对比
 
@@ -638,12 +1255,14 @@ typedef struct {
 
 ### 10.3 企业级的"多流写入"
 
-本方案当前只有单 Open Block。企业级按数据温度分多 Open Block：
+本方案已实现 Hot / Cold 双 Open Super Block，与企业级多温区写入方向一致：
 
 ```
-本方案（单 Open Block）:
-  Open Block: [A(热)][B(冷)][C(热)][D(GC)] ← 冷热混写
-  GC 时整 Block 搬 → 无效页率不集中 → GC 效率差
+本方案（Hot / Cold 双 Open Super Block）:
+  Hot  Super Block:  [A(热)][C(热)][E(热)]...   ← 用户 IO 数据
+  Cold Super Block:  [B(冷)][D(冷)][F(冷)]...   ← GC 搬移的有效页、元数据
+  GC Hot:  无效页率高 → 很快回收 ✅
+  GC Cold: 无效页率低 → 几乎不用回收 ✅
 
 企业级（多温区）:
   Hot Open Block:  [A][C][E][G]...   ← 频繁更新
@@ -754,11 +1373,17 @@ void journal_truncate(l2p_journal_t *journal, uint32_t seq);
 **Allocator**（`allocator.h`）：
 
 ```c
-int       allocator_init(ftl_allocator_t *alloc);
-nand_paa_t allocator_alloc(ftl_allocator_t *alloc);
-void      allocator_free_block(ftl_allocator_t *alloc, uint16_t block);
-void      allocator_mark_bad(ftl_allocator_t *alloc, uint16_t block);
-int       allocator_check_gc(const ftl_allocator_t *alloc);
+/* 温度等级 */
+#define FTL_TEMP_HOT    0
+#define FTL_TEMP_COLD   1
+#define FTL_TEMP_NUM    2
+
+int        allocator_init(ftl_allocator_t *alloc, uint8_t op_percent);
+nand_paa_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature);
+void       allocator_free_block(ftl_allocator_t *alloc, uint16_t block);
+void       allocator_mark_bad(ftl_allocator_t *alloc, uint16_t block);
+int        allocator_needs_gc(const ftl_allocator_t *alloc);
+void       allocator_refill_pre_cond(ftl_allocator_t *alloc);
 ```
 
 ### 11.4 性能估算
@@ -774,9 +1399,239 @@ Write-back flush 代价 ≈ 200~300 μs（一次 NAND program）
 
 ---
 
-## 12. 与 FC 层接口约定
+## 12. ftl_service 主循环调度
 
-### 12.1 FTL 使用 FC 的约束表
+`ftl_service()` 是整个 FTL 的"心脏"，负责协调前台 IO 和后台任务的执行时序。
+
+### 12.1 调度模型概述
+
+```
+每次 ftl_service() 调用的执行顺序：
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  ftl_service()                                              │
+  │                                                             │
+  │  Phase 1 ── fc_service() 最多 NAND_SUBMIT_BUDGET 次         │
+  │  ├── 推进 NAND 命令执行                                     │
+  │  └── 计数 submitted（本轮新提交的 NAND 命令数）               │
+  │                                                             │
+  │  Phase 2 ── 处理完成回调                                    │
+  │  ├── while (fc_poll_completion() == OK)                     │
+  │  └── 根据 completion.module 路由到不同 handler               │
+  │                                                             │
+  │  Phase 3 ── 后台任务（三级模式切换）                          │
+  │  ├── IDLE 模式：NAND 完全空闲 → 全力做后台                   │
+  │  ├── NORMAL 模式：相对空闲 → 适度做后台                      │
+  │  └── BUSY 模式：前台 IO 活跃 → 最小后台                      │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+**三级模式切换依据**：SQ 队列深度 + 上轮提交的 NAND 命令数。
+
+| 模式 | 条件 | 前台 IO 带宽 | 后台任务带宽 |
+|------|------|------------|------------|
+| IDLE | SQ 空 + submitted == 0 | 0% | 100% |
+| NORMAL | SQ 使用率 < 25% | ~70% | ~30% |
+| BUSY | SQ 使用率 ≥ 25% | ~95% | ~5% |
+
+### 12.2 三种后台模式的行为
+
+#### IDLE 模式（NAND 完全空闲）
+
+```
+触发条件：SQ 队列空 + 上一轮没有提交新命令
+行为：
+  flush:    l2p_cache_flush_all()          → 清空所有 dirty
+  GC:       refill_pre_cond(32)             → 补满 pre-conditioned 池
+  Journal:  journal_flush_page()            → 强制写 journal buffer
+  Checkpoint: 累计写入量够就 cp_create()
+设计思路：NAND 闲着也是闲着，把后台活做完，下次 Host IO 来时系统处于最佳状态
+```
+
+#### NORMAL 模式（系统相对空闲）
+
+```
+触发条件：SQ 使用率 < 25%
+行为：
+  flush:    l2p_cache_flush_background(4)  → 最多 flush 4 条
+  GC:       if (pre_cond < 水位) 搬 1~4 页
+  Journal:  不单独 flush（让 page_buf 自然填满）
+  Checkpoint: 检查但不一定执行
+设计思路：留 NAND 带宽给突发 IO，后台任务"慢慢做"
+```
+
+#### BUSY 模式（前台 IO 活跃）
+
+```
+触发条件：SQ 使用率 ≥ 25%
+行为：
+  flush:    l2p_cache_flush_background(1)  → 只 flush 1 条（防 evict 阻塞）
+  GC:       跳过（除非 Emergency pool 启用）
+  Journal:  跳过
+  Checkpoint: 跳过
+设计思路：前台 IO 优先。唯一例外：Emergency pool 启用时强制 GC。
+```
+
+### 12.3 实现
+
+```c
+#define NAND_SUBMIT_BUDGET      (4)      // 每轮最多提交 4 条
+#define BG_NORMAL_FLUSH_COUNT   (4)
+#define BG_BUSY_FLUSH_COUNT     (1)
+#define BG_NORMAL_GC_PAGES      (4)
+#define BG_BUSY_GC_PAGES        (0)
+#define BG_IDLE_GC_TARGET       (32)
+#define CP_WRITE_INTERVAL       (1024)
+#define CP_TIME_INTERVAL_MS     (10000)
+
+void ftl_service(ftl_context_t *ftl) {
+    /* Phase 1: fc_service 推进 NAND */
+    uint32_t submitted = 0;
+    for (int i = 0; i < NAND_SUBMIT_BUDGET; i++) {
+        if (fc_service() != FC_STATUS_OK) break;
+        submitted++;
+    }
+
+    /* Phase 2: 处理完成回调 */
+    fc_command_status_t completion;
+    while (fc_poll_completion(&completion) == FC_STATUS_OK) {
+        ftl_process_completion(ftl, &completion);
+    }
+
+    /* Phase 3: 判断总线状态，选后台模式 */
+    uint8_t sq_used = fc_get_sq_usage();
+
+    if (sq_used == 0 && submitted == 0) {
+        ftl_service_idle(ftl);
+    } else if (sq_used < FC_SQ_DEPTH * 25 / 100) {
+        ftl_service_normal(ftl);
+    } else {
+        ftl_service_busy(ftl);
+    }
+}
+
+static void ftl_service_idle(ftl_context_t *ftl) {
+    l2p_cache_flush_all(&ftl->cache);
+    uint32_t to_free = FREE_POOL_TARGET - ftl->free_pool.pre_cond_count;
+    while (to_free > 0) {
+        if (!ftl_gc_background(ftl, 16)) break;
+        to_free -= 2;
+    }
+    journal_flush_page(&ftl->journal);
+    ftl_cp_check(ftl);
+}
+
+static void ftl_service_normal(ftl_context_t *ftl) {
+    l2p_cache_flush_background(&ftl->cache, BG_NORMAL_FLUSH_COUNT);
+    if (ftl->free_pool.pre_cond_count < PRE_COND_LOW_WATER) {
+        ftl_gc_background(ftl, BG_NORMAL_GC_PAGES);
+    }
+    ftl->total_writes++;
+    if (ftl->total_writes % CP_WRITE_INTERVAL == 0) {
+        ftl_cp_check(ftl);
+    }
+}
+
+static void ftl_service_busy(ftl_context_t *ftl) {
+    l2p_cache_flush_background(&ftl->cache, BG_BUSY_FLUSH_COUNT);
+    if (ftl->free_pool.pre_cond_count == 0) {
+        ftl_gc_emergency(ftl);  /* 同步 GC，前台 IO 会等 */
+    }
+}
+```
+
+### 12.4 企业级主循环参考
+
+```
+企业级 SSD 主循环（三星/Solidigm）：
+
+  while (1) {
+      process_host_doorbell();      // NVMe 提交队列
+      ftl_submit_host_io();         // 查 L2P、构造 FC 命令
+      fc_service();                 // 推进 NAND
+      process_fc_completions();     // 中断下半部
+      background_scheduler();       // 独立后台任务调度器
+  }
+```
+
+企业级后台调度器使用**独立时间预算**控制每个任务：
+
+```c
+typedef struct {
+    void     (*task_func)(void);
+    uint32_t  interval_ticks;        // 最小执行间隔（主循环次数）
+    uint32_t  ticks_since_run;
+    uint8_t   priority;              // 0=最高, 3=最低
+    uint32_t  budget_us;             // 每轮最多花多少 μs
+} background_task_t;
+
+void background_scheduler(void) {
+    uint32_t budget_remaining = BG_TOTAL_BUDGET_US;  // 每轮总预算
+    for (int i = 0; i < BG_TASK_COUNT; i++) {
+        background_task_t *task = &g_bg_tasks[i];
+        task->ticks_since_run++;
+        if (task->ticks_since_run < task->interval_ticks) continue;
+
+        uint32_t start = timer_get_us();
+        task->task_func();                              // 传预算执行
+        uint32_t elapsed = timer_get_us() - start;
+        budget_remaining -= MIN(elapsed, task->budget_us);
+        task->ticks_since_run = 0;
+
+        if (budget_remaining < MIN_TASK_BUDGET_US) break;
+    }
+}
+```
+
+**企业级 vs 本方案对比**：
+
+| 维度 | 本方案（三级模式） | 企业级方案 |
+|------|-----------------|-----------|
+| 调度粒度 | 按 SQ 深度分三级 | 每个任务独立时间预算 + 间隔 |
+| 后台抢占 | Phase 3 整体让路 | 高优任务可打断低优 |
+| 时间控制 | 按"做几条"控制 | 精确到 μs 硬件定时器 |
+| 前台保护 | SQ > 75% 停后台 | NAND 带宽比例动态调节 10~100% |
+| 多核 | 无 | CPU0 = 前台 IO, CPU1 = 后台任务 |
+
+**企业级反直觉做法——Inline mini-GC**：
+
+```
+ftl_write() → allocator_alloc()
+  → 发现 pre_cond_pool 太低
+  → 不等后台，inline 做一次 mini-GC（搬 1 页）
+  → 继续写
+
+原理：写操作要等 NAND program（~300μs），
+      CPU 在等待间隙闲着也是闲着，顺便做后台
+```
+
+### 12.5 主循环完整形态
+
+```c
+int main(void) {
+    platform_init();         // 时钟、外设
+    fc_init();               // FC 层初始化
+    ftl_init(&g_ftl);        // FTL 层初始化（含 L2P cache 加载）
+    controller_init(&g_ctrl, &g_ftl);
+
+    while (1) {
+        if (host_io_pending()) {
+            host_process_requests(&g_ctrl);
+        }
+        ftl_service(&g_ftl);           // FTL 主循环（含 fc_service）
+        watchdog_refresh();
+        if (ftl_is_idle(&g_ftl)) {
+            cpu_sleep();               // 空闲时低功耗
+        }
+    }
+}
+```
+
+---
+
+## 13. 与 FC 层接口约定
+
+### 13.1 FTL 使用 FC 的约束表
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -795,7 +1650,7 @@ Write-back flush 代价 ≈ 200~300 μs（一次 NAND program）
 └─────────────────────────────────────┴────────────────────────┘
 ```
 
-### 12.2 FTL 写数据的标准序列
+### 13.2 FTL 写数据的标准序列
 
 ```c
 nand_paa_t ftl_write_data(ssd_lba_t lba, const uint8_t *data, uint32_t len) {
@@ -823,7 +1678,7 @@ nand_paa_t ftl_write_data(ssd_lba_t lba, const uint8_t *data, uint32_t len) {
 }
 ```
 
-### 12.3 FTL 应当避免的操作
+### 13.3 FTL 应当避免的操作
 
 ```
 ❌ 直接调用 nand_read_page() / nand_program_page()
@@ -838,7 +1693,7 @@ nand_paa_t ftl_write_data(ssd_lba_t lba, const uint8_t *data, uint32_t len) {
 
 ---
 
-## 13. 未解决问题
+## 14. 未解决问题
 
 | # | 问题 | 影响 | 当前选项 |
 |---|------|------|---------|
@@ -851,7 +1706,89 @@ nand_paa_t ftl_write_data(ssd_lba_t lba, const uint8_t *data, uint32_t len) {
 
 ---
 
-## 14. Phase 规划
+## 15. 设计总结
+
+### 15.1 设计定位
+
+```
+本方案定位：消费级 DRAM-less SSD（UFS/eMMC 主控档次）
+对标产品：Phison E21T / WD SN580 / UFS 4.0 嵌入式方案
+硬件平台：STM32H743（1MB SRAM + 8MB SDRAM）+ MT29F4G08 SLC NAND（512MiB）
+```
+
+### 15.2 设计决策总览
+
+| 决策 | 选择 | 行业对标 | 硬件可行性 |
+|------|------|---------|-----------|
+| 映射策略 | 纯 CW 级（512B）页映射 | 所有现代 SSD 标准做法 | ✅ 与 FC 完全对齐 |
+| L2P 存储 | NAND 元数据区（DRAM-less） | UFS/eMMC 主流 | ✅ 1MB SRAM 可做 cache |
+| L2P 缓存 | SRAM region cache (64~128 regions) | Phison/SMI DRAM-less 方案 | ✅ 64KB~256KB |
+| 替换策略 | CLOCK | 嵌入式主流，Phison/UFS 使用 | ✅ O(1)，无动态内存 |
+| 写回策略 | Write-back + Journal | 消费级 DRAM-less 标配 | ✅ 纯软件 |
+| Super Block | 跨双 Plane | 企业级跨 Die 的简化版本 | ✅ FC Multi-Plane 已支持 |
+| 温度分区 | Hot / Cold 双 Open Super Block | 消费级 2~4 温区 | ✅ 纯软件 |
+| OP 预留 | 10%（可配置 0~28%） | 消费级典型值 7~15% | ✅ 编译期配置 |
+| Free Pool | 三级（Pre-conditioned/Normal/Emergency） | 企业级 Background GC | ✅ 纯软件 |
+| Bad Block 管理 | 出厂全量扫描 + Block Skip | 消费级标准 | ⚠️ 需要 FC OOB 接口 |
+| GC 算法 | 多维度加权评分 + 六级触发 | 与企业级一致 | ✅ 纯软件计算 |
+| GC 原子性 | Journal + GC Bitmap + 双拷贝容忍 | 消费级/企业级做法 | ✅ 纯软件 |
+| 主循环调度 | 三级模式（IDLE/NORMAL/BUSY） | 与消费级一致 | ✅ 纯软件 |
+| RAID | 不实现（CONFIG_FC_RAID = 0） | — | SLC 不需要 |
+| SLC Cache | 不实现 | — | 本身就是 SLC |
+
+### 15.3 硬件依赖审查
+
+所有设计功能中，除 BBT 出厂扫描需要 FC 支持 OOB/Spare 区读取外，其余功能均为纯软件逻辑，当前 FC 层和硬件平台已全部支持：
+
+| 功能 | 硬件依赖 | 状态 |
+|------|---------|------|
+| Multi-Plane PROGRAM/READ/ERASE | FC 层操作码 | ✅ FC Phase E 已实现 |
+| BCH ECC（t=4） | FC 数据路径 | ✅ FC Phase K 已实现 |
+| CRC-32 | FC 数据路径 | ✅ FC Phase L 已实现 |
+| Random 加扰 | FC 数据路径 | ✅ FC Phase J 已实现 |
+| DMA 传输 | FC/NAND 层 | ✅ FC Phase F/G/H 已实现 |
+| OOB/Spare 区读写 | FC 接口 | ⚠️ 需确认/添加 |
+
+### 15.4 与企业/消费级的一致性
+
+```
+本方案   vs   消费级 DRAM-less (Phison E21T)  vs   企业级 (Samsung PM9A3)
+─────────────────────────────────────────────────────────────────────────
+纯页映射 ✅       纯页映射                        纯页映射（全表在 DRAM）
+CLOCK ✅          CLOCK / 2Q                     不需要（全表常驻）
+Write-back+J ✅   Write-back+J                   直写 DRAM
+Hot/Cold 分区 ✅  2~4 温区                       多级 + SLC cache
+三级 Free Pool ✅ 多层池                          Pre-conditioned + 紧急池
+OP 10% ✅         7~15%                          7~28%
+BBT Block Skip ✅ Block Skip                     Stripe Skip + Sparing
+无掉电电容 ✅     无掉电电容                      有掉电电容
+三级主循环 ✅     类似                            硬件时间预算调度器
+```
+
+**结论**：本方案与消费级 DRAM-less SSD 主流做法一致，定位合理。没有"为了炫技而做的无用功能"，也没有"当前硬件无法支持的设计"。唯一的缺口是 FC 层的 OOB 读写接口。
+
+### 15.5 Phase 实施顺序建议
+
+```
+Phase 0 — L2P Cache 基础设施
+  └── P0.1 → P0.2 → P0.3 → P0.4 → P0.5
+
+Phase 1 — 掉电恢复
+  └── P1.1 → P1.2 / P1.6 → P1.3 → P1.4 → P1.5
+       └── P1.7（Journal 掉电窗口）
+
+Phase 2 — 完整 FTL
+  └── P2.1 → P2.2 → P2.3 → P2.9（OP）→ P2.10（三级池）
+       └── P2.8（温度区）→ P2.4 / P2.11（GC）
+       └── P2.5 / P2.6 / P2.7（ftl_service）
+
+Phase 3 — 优化
+  └── P3.1 → P3.2 → P3.3 → P3.4
+```
+
+---
+
+## 16. Phase 规划
 
 ### Phase 0：基础设施（核心 cache + FC 适配）
 
@@ -867,22 +1804,29 @@ nand_paa_t ftl_write_data(ssd_lba_t lba, const uint8_t *data, uint32_t len) {
 
 | 任务 | 说明 | 估算 |
 |------|------|------|
-| P1.1 | Journal 格式 + NAND 写入 | 中 |
+| P1.1 | Journal 格式 + NAND 写入（含 buffer 半满提前 flush）| 中 |
 | P1.2 | Write-back + journal 集成 ftl_write | 中 |
 | P1.3 | 启动时 journal 回放 | 中 |
 | P1.4 | Checkpoint 全量/增量 | 小 |
 | P1.5 | 完整启动恢复流程 | 中 |
+| P1.6 | Write-back 四级触发（水位线 + 定时 + evict + 同步）| 中 |
+| P1.7 | Journal 定时 flush + 掉电窗口控制 | 小 |
 
 ### Phase 2：完整 FTL
 
 | 任务 | 说明 | 估算 |
 |------|------|------|
-| P2.1 | Allocator（free block + 顺序写指针） | 中 |
+| P2.1 | Allocator（Super Block 分配 + 双 Plane 配对 + 顺序写指针 + 温度参数） | 中 |
 | P2.2 | Bad block 扫描 + BBT | 中 |
 | P2.3 | 反向映射 bitmap | 小 |
-| P2.4 | GC 贪心 victim + 同步搬移 | 大 |
-| P2.5 | Background flush 集成 ftl_service | 小 |
-| P2.6 | Thrashing 检测 + 降级 | 中 |
+| P2.4 | GC 多维度加权 victim + 同步搬移（含搬移中阶段性 flush + 原子性保证） | 大 |
+| P2.5 | Background flush 集成 ftl_service（水位线 + 定时） | 小 |
+| P2.6 | NAND 带宽动态感知（FC 队列深度调节 flush/GC 速度） | 中 |
+| P2.7 | Thrashing 检测 + 降级 | 中 |
+| P2.8 | Hot/Cold 温度分区（allocator 双 Super Block + 归类策略） | 中 |
+| P2.9 | OP 预留实现（默认 10%，支持 RMA 坏块替换 + 性能保速） | 小 |
+| P2.10 | Pre-conditioned pool + Background GC 三级 Free Pool | 中 |
+| P2.11 | GC 按 Super Block 粒度回收（双 Plane 擦除 + GC Bitmap） | 中 |
 
 ### Phase 3：优化
 
@@ -895,7 +1839,7 @@ nand_paa_t ftl_write_data(ssd_lba_t lba, const uint8_t *data, uint32_t len) {
 
 ---
 
-## 15. 附录：核心数据结构原型
+## 16. 附录：核心数据结构原型
 
 ### L2P Cache 接口
 
