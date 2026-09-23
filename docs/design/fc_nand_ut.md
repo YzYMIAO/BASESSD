@@ -116,6 +116,7 @@ Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的�
 | `encode_random_off` | random=off, 4CW, raid=normal | ECC 编码后末 8B parity 非零；round-trip decode 恢复原文 |
 | `encode_random_on` | random=on, 4CW, raid=normal | 加扰 + ECC；decode + 解扰后恢复原文 |
 | `encode_raid_on` | random=on, 4CW, raid=encode | 全路径编码；清空 CW0 → RAID recover → 恢复 |
+_(CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
 | `encode_single_cw` | random=off, 1CW, raid=normal | 单 CW 边界 |
 | `encode_null` | command=NULL | NULL 输入 |
 | `process_read_ok_random_on` | random=on, 4CW, 全 OK | 解码 + 解扰后原文恢复 |
@@ -128,8 +129,12 @@ Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的�
 | `raid_recover_last` | random=on, 4CW, failed_idx=3 | 恢复末位 parity CW |
 | `raid_recover_no_random` | random=off, 4CW, failed_idx=1 | 无加扰恢复 |
 | `raid_recover_null` | cmd=NULL | NULL 输入 |
+_(以上 raid_recover 测试仅在 CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
 
-**共计 15 个测试函数。**
+| `generate_stripe_parity` | random=on, 2cmd×4CW | 跨命令 stripe XOR parity 验证 |
+_(CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
+
+**共计 15 个测试函数。（CONFIG_FC_RAID=1 时额外含 raid_recover + stripe parity，约 +6 个）**
 
 ### 2.3 Level 3 — FC 全链路测试
 
@@ -447,6 +452,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-09-22 | v1.5 | 消除全部编译警告：munit.h/c `const` 限定符修复（MunitTest/MunitParameter/MunitSuite 等），test_fc_level3.c `g_op_names` const 修复 |
 | 2026-09-22 | v1.4 | 最终审视修复：饥饿保护测试改为 select_chain、补 completion_queue 测试、补 submit/poll/configure NULL 测试、补 starvation 测试。Level 1 从 31→45 测试。上传代码提交 Phase P |
 | 2026-09-22 | v1.3 | Level 3 实现：34 个 OP 全生命周期测试编译通过 |
 | 2026-09-22 | v1.2 | Level 2 实现：15 个测试编译通过。config.ldpc 修复 |

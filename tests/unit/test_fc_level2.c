@@ -24,9 +24,12 @@
 #include "fc/fc_data_path.h"
 #include "fc/fc_ldpc_engine.h"
 #include "fc/fc_random_engine.h"
-#include "fc/fc_raid_engine.h"
 #include "nand/onfi_1_0.h"
 #include "nand/nand_config.h"
+
+#if CONFIG_FC_RAID
+#include "fc/fc_raid_engine.h"
+#endif
 
 #include <string.h>
 
@@ -90,7 +93,8 @@ static fc_command_t *alloc_cmd(uint8_t cw_count, uint8_t random_mode, uint8_t ra
     return cmd;
 }
 
-/* 获取 desc 链中第 idx 个 CW 的 buffer 指针（idx=0 为第一个 CW） */
+/* 获取 desc 链中第 idx 个 CW 的 buffer 指针（idx=0 为第一个 CW）
+ * 返回 USER 数据区首地址（FTL 视角） */
 static uint8_t *get_cw_buffer(const fc_command_t *cmd, uint8_t idx)
 {
     fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
@@ -103,6 +107,28 @@ static uint8_t *get_cw_buffer(const fc_command_t *cmd, uint8_t idx)
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
             if (desc == NULL) return NULL;
             return fc_buffer_id_to_real_buffer(desc->buffer_id);
+        }
+        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        if (desc == NULL) return NULL;
+        desc_id = (fc_descriptor_id_t)desc->next_id;
+        i++;
+    }
+    return NULL;
+}
+
+/* 获取 desc 链中第 idx 个 CW 的基址（META 开头，FC 内部使用） */
+static uint8_t *get_cw_base(const fc_command_t *cmd, uint8_t idx)
+{
+    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    uint8_t            i       = 0U;
+
+    while (desc_id != FC_DESCRIPTOR_ID_INVALID)
+    {
+        if (i == idx)
+        {
+            fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+            if (desc == NULL) return NULL;
+            return fc_buffer_get_base(desc->buffer_id);
         }
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
         if (desc == NULL) return NULL;
@@ -158,7 +184,7 @@ static MunitResult test_encode_random_off(const MunitParameter params[], void *d
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
         munit_assert_not_null(buf);
-        fill_pattern(buf, FC_BUFFER_POOL_CW_SIZE, (uint8_t)(0x55U + i));
+        fill_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x55U + i));
     }
 
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
@@ -167,26 +193,29 @@ static MunitResult test_encode_random_off(const MunitParameter params[], void *d
     for (uint8_t i = 0U; i < count; i++)
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
+        uint8_t *base = get_cw_base(cmd, i);
         munit_assert_not_null(buf);
-        /* 前 520 字节应保持原始数据 */
-        munit_assert_uint32(check_pattern(buf, FC_BUFFER_POOL_CW_SIZE - 8U, (uint8_t)(0x55U + i)), ==, 1U);
+        munit_assert_not_null(base);
+        /* USER 数据区（512 字节）应保持原始数据 */
+        munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x55U + i)), ==, 1U);
         /* 末 8 字节为 ECC parity，非零 */
         uint8_t parity_zero = 1U;
-        for (uint16_t j = FC_BUFFER_POOL_CW_SIZE - 8U; j < FC_BUFFER_POOL_CW_SIZE; j++)
+        for (uint16_t j = FC_BUFFER_DATA_SIZE; j < FC_BUFFER_POOL_CW_SIZE; j++)
         {
-            if (buf[j] != 0U) { parity_zero = 0U; break; }
+            if (base[j] != 0U) { parity_zero = 0U; break; }
         }
         munit_assert_uint32(parity_zero, ==, 0U);
     }
 
     /* round-trip：ECC 解码后恢复原始 pattern */
     {
-        const fc_ldpc_config_t cfg = { FC_BUFFER_POOL_CW_SIZE, 8U, 4U };
+        const fc_ldpc_config_t cfg = { FC_BUFFER_DATA_SIZE, 8U, 4U };
         for (uint8_t i = 0U; i < count; i++)
         {
             uint8_t *buf = get_cw_buffer(cmd, i);
-            munit_assert_int(fc_ldpc_decode(&cfg, buf, FC_BUFFER_POOL_CW_SIZE), ==, FC_STATUS_OK);
-            munit_assert_uint32(check_pattern(buf, FC_BUFFER_POOL_CW_SIZE, (uint8_t)(0x55U + i)), ==, 1U);
+            uint8_t *base = get_cw_base(cmd, i);
+            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
+            munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x55U + i)), ==, 1U);
         }
     }
 
@@ -204,18 +233,19 @@ static MunitResult test_encode_random_on(const MunitParameter params[], void *da
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
         munit_assert_not_null(buf);
-        fill_pattern(buf, FC_BUFFER_POOL_CW_SIZE, 0xAAU);
+        fill_pattern(buf, FC_BUFFER_USER_SIZE, 0xAAU);
     }
 
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
     /* round-trip：ECC 解码 → 解扰 → 原始 pattern 恢复 */
     {
-        const fc_ldpc_config_t cfg = { FC_BUFFER_POOL_CW_SIZE, 8U, 4U };
+        const fc_ldpc_config_t cfg = { FC_BUFFER_DATA_SIZE, 8U, 4U };
         for (uint8_t i = 0U; i < count; i++)
         {
             uint8_t *buf = get_cw_buffer(cmd, i);
-            munit_assert_int(fc_ldpc_decode(&cfg, buf, FC_BUFFER_POOL_CW_SIZE), ==, FC_STATUS_OK);
+            uint8_t *base = get_cw_base(cmd, i);
+            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
             /* ECC 解码后数据仍在加扰状态，需解扰恢复原文 */
             fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
             for (uint8_t d = 0U; d < i; d++)
@@ -226,14 +256,16 @@ static MunitResult test_encode_random_on(const MunitParameter params[], void *da
             }
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
             uint32_t seed = fc_random_seed_from_paa(desc->paa, 0U);
-            fc_random_transform(buf, FC_BUFFER_POOL_CW_SIZE, seed);
-            munit_assert_uint32(check_pattern(buf, FC_BUFFER_POOL_CW_SIZE, 0xAAU), ==, 1U);
+            fc_random_transform(base, FC_BUFFER_DATA_SIZE, seed);
+            munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0xAAU), ==, 1U);
         }
     }
 
     fc_command_release(cmd);
     return MUNIT_OK;
 }
+
+#if CONFIG_FC_RAID
 
 static MunitResult test_encode_raid_on(const MunitParameter params[], void *data)
 {
@@ -248,7 +280,7 @@ static MunitResult test_encode_raid_on(const MunitParameter params[], void *data
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
         munit_assert_not_null(buf);
-        fill_pattern(buf, FC_BUFFER_POOL_CW_SIZE, (uint8_t)(0x10U + i));
+        fill_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x10U + i));
     }
 
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
@@ -261,7 +293,7 @@ static MunitResult test_encode_raid_on(const MunitParameter params[], void *data
         uint8_t *buffers[CW_TOTAL_MAX];
         for (uint8_t i = 0U; i < count; i++)
         {
-            buffers[i] = get_cw_buffer(cmd, i);
+            buffers[i] = get_cw_base(cmd, i);
         }
 
         /* 清空 CW0，模拟丢失 */
@@ -272,12 +304,13 @@ static MunitResult test_encode_raid_on(const MunitParameter params[], void *data
         fc_raid_recover(recovered, buffers, count, 0U, FC_BUFFER_POOL_CW_SIZE);
         memcpy(buffers[0], recovered, FC_BUFFER_POOL_CW_SIZE);
 
-        /* ECC 解码 + 解扰后验证 */
-        const fc_ldpc_config_t cfg = { FC_BUFFER_POOL_CW_SIZE, 8U, 4U };
-        for (uint8_t i = 0U; i < count; i++)
+        /* ECC 解码 + 解扰后验证（不包含 parity CW，它存储的是 XOR 结果） */
+        const fc_ldpc_config_t cfg = { FC_BUFFER_DATA_SIZE, 8U, 4U };
+        for (uint8_t i = 0U; i < count - 1U; i++)
         {
-            uint8_t *buf = buffers[i];
-            munit_assert_int(fc_ldpc_decode(&cfg, buf, FC_BUFFER_POOL_CW_SIZE), ==, FC_STATUS_OK);
+            uint8_t *base = buffers[i];
+            uint8_t *buf = get_cw_buffer(cmd, i);
+            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
             fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
             for (uint8_t d = 0U; d < i; d++)
             {
@@ -287,14 +320,16 @@ static MunitResult test_encode_raid_on(const MunitParameter params[], void *data
             }
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
             uint32_t seed = fc_random_seed_from_paa(desc->paa, 0U);
-            fc_random_transform(buf, FC_BUFFER_POOL_CW_SIZE, seed);
-            munit_assert_uint32(check_pattern(buf, FC_BUFFER_POOL_CW_SIZE, (uint8_t)(0x10U + i)), ==, 1U);
+            fc_random_transform(base, FC_BUFFER_DATA_SIZE, seed);
+            munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x10U + i)), ==, 1U);
         }
     }
 
     fc_command_release(cmd);
     return MUNIT_OK;
 }
+
+#endif /* CONFIG_FC_RAID */
 
 static MunitResult test_encode_single_cw(const MunitParameter params[], void *data)
 {
@@ -304,15 +339,16 @@ static MunitResult test_encode_single_cw(const MunitParameter params[], void *da
     munit_assert_uint32(count, ==, 1U);
 
     uint8_t *buf = get_cw_buffer(cmd, 0U);
+    uint8_t *base = get_cw_base(cmd, 0U);
     munit_assert_not_null(buf);
-    fill_pattern(buf, FC_BUFFER_POOL_CW_SIZE, 0x55U);
+    fill_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U);
 
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
     /* round-trip decode */
-    const fc_ldpc_config_t cfg = { FC_BUFFER_POOL_CW_SIZE, 8U, 4U };
-    munit_assert_int(fc_ldpc_decode(&cfg, buf, FC_BUFFER_POOL_CW_SIZE), ==, FC_STATUS_OK);
-    munit_assert_uint32(check_pattern(buf, FC_BUFFER_POOL_CW_SIZE, 0x55U), ==, 1U);
+    const fc_ldpc_config_t cfg = { FC_BUFFER_DATA_SIZE, 8U, 4U };
+    munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
+    munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
 
     fc_command_release(cmd);
     return MUNIT_OK;
@@ -354,11 +390,11 @@ static MunitResult test_process_read_ok_random_on(const MunitParameter params[],
     for (uint8_t i = 0U; i < count; i++)
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
-        fill_pattern(buf, FC_BUFFER_POOL_CW_SIZE, 0x55U);
+        fill_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U);
     }
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
-    /* process_read：ECC 解码 + 解扰 */
+    /* process_read：ECC 解码 + 解扰 + CRC 校验 */
     fc_status_t result = fc_data_path_process_read(cmd);
     munit_assert_int(result, ==, FC_STATUS_OK);
 
@@ -366,7 +402,7 @@ static MunitResult test_process_read_ok_random_on(const MunitParameter params[],
     for (uint8_t i = 0U; i < count; i++)
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
-        munit_assert_uint32(check_pattern(buf, FC_BUFFER_POOL_CW_SIZE, 0x55U), ==, 1U);
+        munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
     }
 
     fc_command_release(cmd);
@@ -382,7 +418,7 @@ static MunitResult test_process_read_ok_random_off(const MunitParameter params[]
     for (uint8_t i = 0U; i < count; i++)
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
-        fill_pattern(buf, FC_BUFFER_POOL_CW_SIZE, (uint8_t)(0x55U + i));
+        fill_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x55U + i));
     }
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
@@ -392,7 +428,7 @@ static MunitResult test_process_read_ok_random_off(const MunitParameter params[]
     for (uint8_t i = 0U; i < count; i++)
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
-        munit_assert_uint32(check_pattern(buf, FC_BUFFER_POOL_CW_SIZE, (uint8_t)(0x55U + i)), ==, 1U);
+        munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x55U + i)), ==, 1U);
     }
 
     fc_command_release(cmd);
@@ -408,17 +444,17 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
     for (uint8_t i = 0U; i < count; i++)
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
-        fill_pattern(buf, FC_BUFFER_POOL_CW_SIZE, 0x55U);
+        fill_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U);
     }
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
     /* 破坏 CW1：翻转多个字节 → ECC 无法纠正 */
-    uint8_t *buf1 = get_cw_buffer(cmd, 1U);
-    munit_assert_not_null(buf1);
-    buf1[0]   ^= 0xFF;
-    buf1[100] ^= 0xFF;
-    buf1[200] ^= 0xFF;
-    buf1[300] ^= 0xFF;
+    uint8_t *buf1_base = get_cw_base(cmd, 1U);
+    munit_assert_not_null(buf1_base);
+    buf1_base[0]   ^= 0xFF;
+    buf1_base[100] ^= 0xFF;
+    buf1_base[200] ^= 0xFF;
+    buf1_base[300] ^= 0xFF;
 
     /* process_read 应返回 IO_ERROR（不解扰） */
     fc_status_t result = fc_data_path_process_read(cmd);
@@ -455,11 +491,11 @@ static MunitResult test_process_read_single_cw(const MunitParameter params[], vo
     munit_assert_uint32(count, ==, 1U);
 
     uint8_t *buf = get_cw_buffer(cmd, 0U);
-    fill_pattern(buf, FC_BUFFER_POOL_CW_SIZE, 0x55U);
+    fill_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U);
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
     munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
-    munit_assert_uint32(check_pattern(buf, FC_BUFFER_POOL_CW_SIZE, 0x55U), ==, 1U);
+    munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
 
     fc_command_release(cmd);
     return MUNIT_OK;
@@ -486,7 +522,11 @@ static MunitResult test_process_read_null(const MunitParameter params[], void *d
  *     off      1              无加扰恢复
  *
  *  策略：encode（含 RAID）→ 破坏指定 CW → raid_recover → 验证恢复
+ *
+ *  编译开关：CONFIG_FC_RAID
  **************************************************************************/
+
+#if CONFIG_FC_RAID
 
 static void do_raid_recover_test(uint8_t random_mode, uint8_t failed_idx)
 {
@@ -495,33 +535,33 @@ static void do_raid_recover_test(uint8_t random_mode, uint8_t failed_idx)
     munit_assert_uint32(count, >=, 3U);
     munit_assert_uint32(failed_idx, <, count);
 
-    /* 不同 CW 填不同 pattern */
+    /* 不同 CW 填不同 pattern（USER 数据区 512B） */
     for (uint8_t i = 0U; i < count; i++)
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
-        fill_pattern(buf, FC_BUFFER_POOL_CW_SIZE, (uint8_t)(0x10U + i));
+        fill_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x10U + i));
     }
 
     /* encode：加扰 + ECC + RAID XOR */
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
-    /* 破坏指定 CW：翻转全部 bit */
-    uint8_t *failed_buf = get_cw_buffer(cmd, failed_idx);
-    munit_assert_not_null(failed_buf);
+    /* 破坏指定 CW（全 CW 528B 翻转，使 ECC 不可纠） */
+    uint8_t *failed_base = get_cw_base(cmd, failed_idx);
+    munit_assert_not_null(failed_base);
     for (uint16_t j = 0U; j < FC_BUFFER_POOL_CW_SIZE; j++)
     {
-        failed_buf[j] ^= 0xFF;
+        failed_base[j] ^= 0xFF;
     }
 
     /* raid_recover：XOR 重建 + ECC 重试 + 解扰 */
     fc_status_t result = fc_data_path_raid_recover(cmd, failed_idx);
     munit_assert_int(result, ==, FC_STATUS_OK);
 
-    /* 验证：全部 CW 恢复原始 pattern */
+    /* 验证：全部 CW USER 数据区恢复原始 pattern */
     for (uint8_t i = 0U; i < count; i++)
     {
         uint8_t *buf = get_cw_buffer(cmd, i);
-        munit_assert_uint32(check_pattern(buf, FC_BUFFER_POOL_CW_SIZE, (uint8_t)(0x10U + i)), ==, 1U);
+        munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x10U + i)), ==, 1U);
     }
 
     fc_command_release(cmd);
@@ -563,6 +603,138 @@ static MunitResult test_raid_recover_null(const MunitParameter params[], void *d
 }
 
 /**************************************************************************
+ *  stripe parity 测试 — fc_data_path_generate_stripe_parity()
+ *
+ *  验证跨命令 stripe XOR parity 的正确性，不依赖 NAND 硬件。
+ *  使用两条命令（数据 + parity），各 4 CW，数据命令先走 encode() 加扰/ECC，
+ *  然后 generate_stripe_parity() XOR → parity ECC 编码。
+ *
+ *  验证方式：清空数据命令某 CW → 用 fc_raid_recover 从 parity 重建 →
+ *  与原始 pattern 一致。
+ **************************************************************************/
+
+static MunitResult test_generate_stripe_parity(const MunitParameter params[], void *data)
+{
+    (void)params; (void)data;
+    fc_command_t *data_cmd;
+    fc_command_t *parity_cmd;
+    uint8_t       cw_count;
+    uint8_t       cw;
+
+    /* 分配数据命令（4 CW, random=ON, raid=NORMAL — 不再在 encode 里做 XOR） */
+    data_cmd = alloc_cmd(4U, FC_RANDOM_ENABLE, FC_RAID_MODE_NORMAL);
+    cw_count = get_cw_count(data_cmd);
+    munit_assert_uint32(cw_count, ==, 4U);
+
+    /* 不同 CW 填不同 pattern */
+    for (uint8_t i = 0U; i < cw_count; i++)
+    {
+        uint8_t *buf = get_cw_buffer(data_cmd, i);
+        munit_assert_not_null(buf);
+        fill_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x20U + i));
+    }
+
+    /* encode 数据命令：META → CRC → Random → ECC */
+    munit_assert_int(fc_data_path_encode(data_cmd), ==, FC_STATUS_OK);
+
+    /* 分配 parity 命令（同 CW 数，raid=NORMAL） */
+    parity_cmd = alloc_cmd(cw_count, FC_RANDOM_DISABLE, FC_RAID_MODE_NORMAL);
+    munit_assert_uint32(get_cw_count(parity_cmd), ==, cw_count);
+
+    /* 同步 parity desc 的 FAA（模拟 fc_stripe_submit 中的行为） */
+    {
+        fc_descriptor_id_t d_desc_id = (fc_descriptor_id_t)data_cmd->desc_id;
+        fc_descriptor_id_t p_desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
+        for (uint8_t i = 0U; i < cw_count; i++)
+        {
+            fc_descriptor_t *ddesc = fc_descriptor_id_to_descriptor(d_desc_id);
+            fc_descriptor_t *pdesc = fc_descriptor_id_to_descriptor(p_desc_id);
+            munit_assert_not_null(ddesc);
+            munit_assert_not_null(pdesc);
+            pdesc->faa = ddesc->faa;
+            d_desc_id = (fc_descriptor_id_t)ddesc->next_id;
+            p_desc_id = (fc_descriptor_id_t)pdesc->next_id;
+        }
+    }
+
+    /* 调用 generate_stripe_parity — XOR 数据命令 CW 到 parity buffer + ECC 编码 parity */
+    {
+        const fc_command_t *data_ptrs[1U]; /* PLANE_NUM=2 → 1 条数据命令 */
+        data_ptrs[0U] = data_cmd;
+        munit_assert_int(fc_data_path_generate_stripe_parity(data_ptrs, 1U, parity_cmd), ==, FC_STATUS_OK);
+    }
+
+    /*
+     * 验证：清空数据命令的 CW0 → 用 fc_raid_recover() 从 parity + 其他 CW 重建 →
+     * ECC 解码 + 解扰 → 与原始 pattern 一致。
+     *
+     * buffers[] 数组：[CW0, CW1, CW2, CW3, parity_CW0, parity_CW1, parity_CW2, parity_CW3]
+     * XOR 重建时传入所有 CW 和 parity CW，fc_raid_recover 会跳过 failed_idx 并 XOR 其余。
+     */
+    {
+        uint8_t *buffers[CW_TOTAL_MAX];
+        uint8_t  total_count;
+
+        /* 收集数据命令的 CW 基址 */
+        for (uint8_t i = 0U; i < cw_count; i++)
+        {
+            buffers[i] = get_cw_base(data_cmd, i);
+            munit_assert_not_null(buffers[i]);
+        }
+        /* 收集 parity 命令的 CW 基址 */
+        for (uint8_t i = 0U; i < cw_count; i++)
+        {
+            buffers[cw_count + i] = get_cw_base(parity_cmd, i);
+            munit_assert_not_null(buffers[cw_count + i]);
+        }
+        total_count = (uint8_t)(cw_count + cw_count); /* 8 */
+
+        /* 清空数据命令 CW0，模拟丢失 */
+        memset(buffers[0U], 0, FC_BUFFER_POOL_CW_SIZE);
+
+        /* RAID XOR 重建 CW0：传入所有 CW（含 parity） */
+        {
+            uint8_t recovered[FC_BUFFER_POOL_CW_SIZE];
+            fc_raid_recover(recovered, buffers, total_count, 0U, FC_BUFFER_POOL_CW_SIZE);
+            memcpy(buffers[0U], recovered, FC_BUFFER_POOL_CW_SIZE);
+        }
+
+        /* ECC 解码 + 解扰后验证数据 CW0~CW3（parity CW 不验证，它们存储 XOR 结果） */
+        const fc_ldpc_config_t cfg = { FC_BUFFER_DATA_SIZE, 8U, 4U };
+        for (uint8_t i = 0U; i < cw_count; i++)
+        {
+            uint8_t *base = buffers[i];
+            uint8_t *buf  = get_cw_buffer(data_cmd, i);
+            munit_assert_not_null(base);
+            munit_assert_not_null(buf);
+
+            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
+
+            /* 解扰 */
+            fc_descriptor_id_t desc_id = (fc_descriptor_id_t)data_cmd->desc_id;
+            for (uint8_t d = 0U; d < i; d++)
+            {
+                fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(desc_id);
+                if (dsc == NULL) break;
+                desc_id = (fc_descriptor_id_t)dsc->next_id;
+            }
+            fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+            munit_assert_not_null(desc);
+            uint32_t seed = fc_random_seed_from_paa(desc->paa, 0U);
+            fc_random_transform(base, FC_BUFFER_DATA_SIZE, seed);
+
+            munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x20U + i)), ==, 1U);
+        }
+    }
+
+    fc_command_release(data_cmd);
+    fc_command_release(parity_cmd);
+    return MUNIT_OK;
+}
+
+#endif /* CONFIG_FC_RAID */
+
+/**************************************************************************
  *  套件定义
  *
  *  所有 Level 2 测试共享 setup_level2 suite 级 setup（一次性 fc_init）
@@ -572,7 +744,9 @@ MunitTest g_fc_data_path_tests[] = {
     /* ── encode ── */
     { "encode_random_off",    test_encode_random_off,    setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
     { "encode_random_on",     test_encode_random_on,     setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+#if CONFIG_FC_RAID
     { "encode_raid_on",       test_encode_raid_on,       setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+#endif
     { "encode_single_cw",     test_encode_single_cw,     setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
     { "encode_null",          test_encode_null,          setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 
@@ -584,11 +758,16 @@ MunitTest g_fc_data_path_tests[] = {
     { "process_read_null",          test_process_read_null,          setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 
     /* ── raid_recover ── */
+#if CONFIG_FC_RAID
     { "raid_recover_first",    test_raid_recover_first,    setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
     { "raid_recover_mid",      test_raid_recover_mid,      setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
     { "raid_recover_last",     test_raid_recover_last,     setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
     { "raid_recover_no_random", test_raid_recover_no_random, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
     { "raid_recover_null",     test_raid_recover_null,     setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+
+    /* ── stripe parity ── */
+    { "generate_stripe_parity", test_generate_stripe_parity, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+#endif /* CONFIG_FC_RAID */
 
     { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 };

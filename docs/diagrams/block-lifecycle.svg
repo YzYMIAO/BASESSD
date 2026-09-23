@@ -1,0 +1,250 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 820" role="img" aria-label="FTL Block Lifecycle in Pure Page Mapping: Free → Open → Closed → GC Victim → Erase → Free">
+  <style>
+    text { font-family: 'Courier New', monospace; font-size: 12px; fill: currentColor; }
+    .title { font-size: 16px; font-weight: bold; }
+    .subtitle { font-size: 11px; fill: #888; }
+    .label { font-size: 11px; }
+    .small { font-size: 10px; }
+    .arrow { stroke: currentColor; stroke-width: 1.5; fill: none; }
+    .arrow-thick { stroke: currentColor; stroke-width: 2.5; fill: none; }
+    .box { fill: transparent; stroke: currentColor; stroke-width: 1.5; rx: 4; ry: 4; }
+    .box-filled { stroke: currentColor; stroke-width: 1.5; rx: 4; ry: 4; }
+    .region-free { fill: #e8f5e9; stroke: #2e7d32; }
+    .region-open { fill: #fff3e0; stroke: #e65100; }
+    .region-closed { fill: #e3f2fd; stroke: #1565c0; }
+    .region-gc { fill: #fce4ec; stroke: #c62828; }
+    .region-meta { fill: #f3e5f5; stroke: #6a1b9a; }
+    .region-bbt { fill: #eceff1; stroke: #37474f; }
+    .dashed { stroke-dasharray: 5,4; }
+  </style>
+
+  <!-- Title -->
+  <text x="550" y="30" text-anchor="middle" class="title">FTL Block Lifecycle — 纯页映射</text>
+  <text x="550" y="46" text-anchor="middle" class="subtitle">Free → Open → Closed → GC Victim → Erase → Free 循环</text>
+
+  <!-- ======================== -->
+  <!-- NAND Physical Space View -->
+  <!-- ======================== -->
+  <text x="50" y="75" class="label" font-weight="bold">NAND 物理空间划分</text>
+
+  <!-- Metadata blocks -->
+  <rect x="50" y="85" width="100" height="110" class="box-filled region-meta" />
+  <text x="100" y="105" text-anchor="middle" class="small" fill="#6a1b9a">Metadata</text>
+  <text x="100" y="118" text-anchor="middle" class="small" fill="#6a1b9a">Blocks</text>
+  <text x="100" y="135" text-anchor="middle" class="small" fill="#6a1b9a">~40 blocks</text>
+  <text x="100" y="152" text-anchor="middle" class="small" fill="#6a1b9a">L2P / CP /</text>
+  <text x="100" y="165" text-anchor="middle" class="small" fill="#6a1b9a">Journal / BBT</text>
+  <text x="100" y="182" text-anchor="middle" class="small" fill="#6a1b9a">/ EraseCount</text>
+
+  <!-- Data blocks section -->
+  <rect x="160" y="85" width="440" height="110" class="box" />
+  <text x="380" y="100" text-anchor="middle" class="label" font-weight="bold">Data Blocks（用户数据区）</text>
+
+  <!-- Open block -->
+  <rect x="170" y="110" width="120" height="70" class="box-filled region-open" />
+  <text x="230" y="128" text-anchor="middle" class="small" fill="#e65100">Open Block</text>
+  <text x="230" y="142" text-anchor="middle" class="small" fill="#e65100">（当前写入）</text>
+  <text x="230" y="158" text-anchor="middle" class="small" fill="#e65100">64页部分已写</text>
+
+  <!-- Closed blocks -->
+  <rect x="300" y="110" width="110" height="70" class="box-filled region-closed" />
+  <text x="355" y="128" text-anchor="middle" class="small" fill="#1565c0">Closed Blocks</text>
+  <text x="355" y="142" text-anchor="middle" class="small" fill="#1565c0">（已写满）</text>
+  <text x="355" y="158" text-anchor="middle" class="small" fill="#1565c0">有有效页+无效页</text>
+
+  <!-- GC victim highlight -->
+  <rect x="420" y="110" width="70" height="70" class="box-filled region-gc" stroke-dasharray="3,2" />
+  <text x="455" y="128" text-anchor="middle" class="small" fill="#c62828">GC</text>
+  <text x="455" y="142" text-anchor="middle" class="small" fill="#c62828">Victim</text>
+
+  <!-- Bad blocks -->
+  <rect x="500" y="110" width="90" height="70" class="box-filled region-bbt" />
+  <text x="545" y="128" text-anchor="middle" class="small" fill="#37474f">Bad</text>
+  <text x="545" y="142" text-anchor="middle" class="small" fill="#37474f">Blocks</text>
+
+  <!-- Free pool -->
+  <rect x="610" y="85" width="100" height="110" class="box-filled region-free" />
+  <text x="660" y="105" text-anchor="middle" class="small" fill="#2e7d32">Free Pool</text>
+  <text x="660" y="118" text-anchor="middle" class="small" fill="#2e7d32">（空闲块）</text>
+  <text x="660" y="135" text-anchor="middle" class="small" fill="#2e7d32">已擦除</text>
+  <text x="660" y="152" text-anchor="middle" class="small" fill="#2e7d32">全 0xFF</text>
+  <text x="660" y="169" text-anchor="middle" class="small" fill="#2e7d32">等待分配</text>
+
+  <!-- Legend -->
+  <rect x="780" y="85" width="270" height="110" class="box" rx="4" />
+  <text x="795" y="100" class="small" font-weight="bold">图例</text>
+  <rect x="795" y="108" width="14" height="14" class="region-open" />
+  <text x="815" y="120" class="small">Open Block: 当前写入位置</text>
+  <rect x="795" y="128" width="14" height="14" class="region-closed" />
+  <text x="815" y="140" class="small">Closed Block: 已写满，含有效+无效页</text>
+  <rect x="795" y="148" width="14" height="14" class="region-gc" />
+  <text x="815" y="160" class="small">GC Victim: 被选中回收</text>
+  <rect x="795" y="168" width="14" height="14" class="region-free" />
+  <text x="815" y="180" class="small">Free: 已擦除，可分配</text>
+
+  <!-- ======================== -->
+  <!-- Lifecycle Flow -->
+  <!-- ======================== -->
+  <text x="50" y="235" class="label" font-weight="bold">Block 生命周期流转</text>
+
+  <!-- Start: Free Pool -->
+  <rect x="80" y="260" width="160" height="80" class="box-filled region-free" rx="8" />
+  <text x="160" y="290" text-anchor="middle" class="label" font-weight="bold" fill="#2e7d32">Free Pool</text>
+  <text x="160" y="308" text-anchor="middle" class="small" fill="#2e7d32">空闲块，已擦除</text>
+  <text x="160" y="324" text-anchor="middle" class="small" fill="#2e7d32">初始 count ≈ 总块 - 元数据 - 坏块</text>
+
+  <!-- Arrow: Free → Open -->
+  <line x1="240" y1="300" x2="340" y2="300" class="arrow" marker-end="url(#arrow)" />
+  <text x="290" y="290" text-anchor="middle" class="small">选最少擦除块的</text>
+  <text x="290" y="278" text-anchor="middle" class="small">分配（动态磨损均衡）</text>
+
+  <!-- Open Block -->
+  <rect x="350" y="260" width="180" height="80" class="box-filled region-open" rx="8" />
+  <text x="440" y="285" text-anchor="middle" class="label" font-weight="bold" fill="#e65100">Open Block</text>
+  <text x="440" y="300" text-anchor="middle" class="small" fill="#e65100">顺序写入页</text>
+  <text x="440" y="316" text-anchor="middle" class="small" fill="#e65100">每 Plane 1 个（可扩展多温区）</text>
+  <text x="440" y="332" text-anchor="middle" class="small" fill="#e65100">写满 64 页 → Closed</text>
+
+  <!-- Mini page layout inside Open Block -->
+  <rect x="370" y="268" width="140" height="18" class="box-filled" fill="#ffcc80" stroke="#e65100" />
+  <rect x="370" y="268" width="105" height="18" fill="#ffb74d" stroke="#e65100" />
+  <text x="422" y="281" text-anchor="middle" class="small" fill="#bf360c">已写 47 页</text>
+  <text x="463" y="281" text-anchor="middle" class="small" fill="#bf360c">空闲 17 页</text>
+
+  <!-- Arrow: Open → Closed -->
+  <line x1="530" y1="280" x2="620" y2="280" class="arrow" />
+  <text x="575" y="270" text-anchor="middle" class="small">写满 64 页</text>
+
+  <!-- Closed Blocks -->
+  <rect x="630" y="240" width="200" height="120" class="box-filled region-closed" rx="8" />
+  <text x="730" y="260" text-anchor="middle" class="label" font-weight="bold" fill="#1565c0">Closed Blocks</text>
+  <text x="730" y="278" text-anchor="middle" class="small" fill="#1565c0">Block A: [VVVVI..V] 8 有效</text>
+  <text x="730" y="294" text-anchor="middle" class="small" fill="#1565c0">Block B: [.I.IVI.V] 6 有效</text>
+  <text x="730" y="310" text-anchor="middle" class="small" fill="#1565c0">Block C: [VVVVVVVV] 64 有效</text>
+  <text x="730" y="326" text-anchor="middle" class="small" fill="#1565c0">Block D: [IIIIIIII] 0 有效</text>
+  <text x="730" y="342" text-anchor="middle" class="small" fill="#1565c0">V=有效 I=无效（被新版本覆盖）</text>
+
+  <!-- Arrow: Closed → GC -->
+  <path d="M 720 360 L 720 400 L 440 400 L 440 425" class="arrow" />
+  <text x="575" y="393" text-anchor="middle" class="small">free pool 低于阈值 → 触发 GC</text>
+
+  <!-- GC Box -->
+  <rect x="280" y="430" width="320" height="120" class="box-filled region-gc" rx="8" />
+  <text x="440" y="450" text-anchor="middle" class="label" font-weight="bold" fill="#c62828">Garbage Collection（GC）</text>
+  <text x="440" y="470" text-anchor="middle" class="small" fill="#c62828">1. 选 victim（贪心：有效页最少）</text>
+  <text x="440" y="488" text-anchor="middle" class="small" fill="#c62828">2. 读 victim 中所有有效页 → FC 读完</text>
+  <text x="440" y="506" text-anchor="middle" class="small" fill="#c62828">3. 有效页写入新的 Open Block</text>
+  <text x="440" y="524" text-anchor="middle" class="small" fill="#c62828">4. 更新 L2P（cache write → journal）</text>
+  <text x="440" y="542" text-anchor="middle" class="small" fill="#c62828">5. Erase victim block → 归还 Free Pool</text>
+
+  <!-- Arrow: GC → Free -->
+  <line x1="440" y1="550" x2="440" y2="590" class="arrow-thick" />
+  <text x="455" y="575" class="small" fill="#c62828">擦除完成，归还</text>
+
+  <!-- Free Pool (bottom) -->
+  <rect x="350" y="595" width="180" height="60" class="box-filled region-free" rx="8" />
+  <text x="440" y="618" text-anchor="middle" class="label" font-weight="bold" fill="#2e7d32">Free Pool</text>
+  <text x="440" y="638" text-anchor="middle" class="small" fill="#2e7d32">空闲块 +1</text>
+
+  <!-- ======================== -->
+  <!-- Right side: Block Internal State Detail -->
+  <!-- ======================== -->
+  <text x="870" y="235" class="label" font-weight="bold">Block 内部状态</text>
+
+  <rect x="870" y="250" width="200" height="150" class="box" rx="4" />
+  <text x="970" y="268" text-anchor="middle" class="small" font-weight="bold">一个 Block（64 页）</text>
+
+  <!-- 64 page grid -->
+  <g transform="translate(882, 280)">
+    <!-- Row 0 -->
+    <rect x="0" y="0" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="16" y="0" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="32" y="0" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="48" y="0" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="64" y="0" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="80" y="0" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="96" y="0" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="112" y="0" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <!-- Row 1 -->
+    <rect x="0" y="12" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="16" y="12" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="32" y="12" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="48" y="12" width="14" height="10" fill="#ef9a9a" stroke="#555" stroke-width="0.5"/>
+    <rect x="64" y="12" width="14" height="10" fill="#ef9a9a" stroke="#555" stroke-width="0.5"/>
+    <rect x="80" y="12" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="96" y="12" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="112" y="12" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <!-- Row 2 -->
+    <rect x="0" y="24" width="14" height="10" fill="#ef9a9a" stroke="#555" stroke-width="0.5"/>
+    <rect x="16" y="24" width="14" height="10" fill="#ef9a9a" stroke="#555" stroke-width="0.5"/>
+    <rect x="32" y="24" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="48" y="24" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="64" y="24" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="80" y="24" width="14" height="10" fill="#ef9a9a" stroke="#555" stroke-width="0.5"/>
+    <rect x="96" y="24" width="14" height="10" fill="#ef9a9a" stroke="#555" stroke-width="0.5"/>
+    <rect x="112" y="24" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <!-- Row 3 -->
+    <rect x="0" y="36" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="16" y="36" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="32" y="36" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="48" y="36" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="64" y="36" width="14" height="10" fill="#ef9a9a" stroke="#555" stroke-width="0.5"/>
+    <rect x="80" y="36" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="96" y="36" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="112" y="36" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <!-- Row 4 -->
+    <rect x="0" y="48" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="16" y="48" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="32" y="48" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="48" y="48" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="64" y="48" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="80" y="48" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="96" y="48" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="112" y="48" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <!-- Row 5 -->
+    <rect x="0" y="60" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="16" y="60" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="32" y="60" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="48" y="60" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="64" y="60" width="14" height="10" fill="#ef9a9a" stroke="#555" stroke-width="0.5"/>
+    <rect x="80" y="60" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="96" y="60" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="112" y="60" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <!-- Row 6 -->
+    <rect x="0" y="72" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="16" y="72" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="32" y="72" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="48" y="72" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="64" y="72" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="80" y="72" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="96" y="72" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="112" y="72" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <!-- Row 7 -->
+    <rect x="0" y="84" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="16" y="84" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="32" y="84" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="48" y="84" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="64" y="84" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="80" y="84" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="96" y="84" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+    <rect x="112" y="84" width="14" height="10" fill="#a5d6a7" stroke="#555" stroke-width="0.5"/>
+  </g>
+
+  <text x="920" y="450" text-anchor="middle" class="small" fill="#2e7d32">■ 有效页（有 L2P 指向它）</text>
+  <text x="920" y="466" text-anchor="middle" class="small" fill="#c62828">■ 无效页（已被新版本覆盖）</text>
+  <text x="920" y="482" text-anchor="middle" class="small">64 页 × 4 CW = 256 CW</text>
+  <text x="920" y="498" text-anchor="middle" class="small">无效比 = 1 - (有效CW数/256)</text>
+
+  <!-- ======================== -->
+  <!-- Background GC vs Foreground -->
+  <!-- ======================== -->
+  <text x="870" y="540" class="label" font-weight="bold">GC 触发场景</text>
+  <rect x="870" y="550" width="200" height="130" class="box" rx="4" />
+  <text x="970" y="568" text-anchor="middle" class="small" font-weight="bold">GC 同步/后台</text>
+  <text x="880" y="586" class="small" fill="#2e7d32">✅ 后台 GC（理想）:</text>
+  <text x="880" y="602" class="small">free pool 低于 阈值 →</text>
+  <text x="880" y="618" class="small">后台搬移，不影响前台 IO</text>
+  <text x="880" y="638" class="small" fill="#c62828">❌ 前台 GC（最差）:</text>
+  <text x="880" y="654" class="small">free pool = 0 → 写入被阻塞</text>
+  <text x="880" y="670" class="small">等待 GC 完成才能继续写</text>
+</svg>

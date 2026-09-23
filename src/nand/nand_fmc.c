@@ -77,6 +77,8 @@ static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
     if (nand_rb_interrupt_armed() == 0U)
     {
         /* 首次进入 WAIT_READY: 配置 EXTI6 上升沿中断 + 超时 */
+        SSD_LOGD("wait_ready op=%u FIRST arm timeout=%u\r\n",
+                 (unsigned)request->operation, (unsigned)timing->busy_timeout_us);
         nand_rb_interrupt_arm(timing->busy_timeout_us);
         completion->nand_status = 0U;
         return NAND_RESULT_NOT_READY;
@@ -85,6 +87,7 @@ static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
     /* ── 中断已触发 → NAND 就绪 ── */
     if (nand_rb_interrupt_triggered() != 0U)
     {
+        SSD_LOGD("wait_ready op=%u TRIGGERED -> OK\r\n", (unsigned)request->operation);
         nand_rb_interrupt_disarm();
         return NAND_RESULT_OK;
     }
@@ -92,6 +95,7 @@ static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
     /* ── 超时 ── */
     if (nand_rb_interrupt_timed_out() != 0U)
     {
+        SSD_LOGD("wait_ready op=%u TIMEOUT polling fallback\r\n", (unsigned)request->operation);
         nand_rb_interrupt_disarm();
         /* 回到轮询模式做最后一次确认（避免中断丢失） */
         return (config->wait_ready(config->context, 1U) == 0U) ? NAND_RESULT_OK : NAND_RESULT_TIMEOUT;

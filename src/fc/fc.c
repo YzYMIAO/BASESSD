@@ -4,8 +4,12 @@
 #include "fc_registers.h"
 #include "fc_scheduler.h"
 #include "fc_data_path.h"
-#include "fc_raid_engine.h"
+#include "fc_crc_engine.h"
 #include "nand/nand_dispatch.h"
+
+#if CONFIG_FC_RAID
+#include "fc_raid_engine.h"
+#endif
 
 /*
  * 判断 operation 是否为带 ECC 编码数据的 Page Read。
@@ -64,6 +68,29 @@ typedef enum
     FC_COMMAND_STATE_COMPLETED
 } fc_command_state_t;
 
+#if CONFIG_FC_RAID
+/* ── 跨 Plane Stripe RAID 积累状态 ──
+ *
+ * 当前 PLANE_NUM=2，FC_STRIPE_DATA_MAX=1，单命令即满 stripe，
+ * fc_stripe_submit() 在 fc_poll_internal() 中直接处理，不经过 accumulator。
+ *
+ * fc_stripe_accum_t 和 stripe_accum[] 为 PLANE_NUM>=4 预留扩展：
+ * 当需要跨多次 fc_service() 调用积累多条数据命令后统一提交 parity 时，
+ * 由 fc_poll_stripe_accumulate()（待实现）管理。 */
+
+/* 单组 stripe 的最大数据命令数 = PLANE_NUM - 1 */
+#define FC_STRIPE_DATA_MAX ((uint8_t)(PLANE_NUM - 1U))
+
+/* 每个 LUN 的 stripe 积累状态（PLANE_NUM>=4 扩展预留） */
+typedef struct {
+    uint8_t         active;           /* 0=空闲, 1=积累中 */
+    uint8_t         ch, ce, lun;      /* 目标 LUN */
+    uint8_t         count;            /* 已积累的数据命令数 */
+    fc_command_id_t data_ids[FC_STRIPE_DATA_MAX]; /* 已积累的数据命令 ID */
+    fc_command_id_t parity_id;        /* 已分配的 parity 命令 ID */
+} fc_stripe_accum_t;
+#endif /* CONFIG_FC_RAID */
+
 typedef struct
 {
     fc_registers_t        registers;
@@ -87,6 +114,12 @@ typedef struct
     uint16_t         buffer_free_head;
     fc_command_id_t  active_handle;
     uint8_t          active_valid;
+
+    /* ── Stripe RAID 积累状态 ── */
+#if CONFIG_FC_RAID
+    fc_stripe_accum_t stripe_accum[LUN_NUM];                /* 每 LUN stripe 积累 */
+    fc_command_id_t   stripe_parity_for_data[FC_COMMAND_POOL_DEPTH]; /* 数据命令 ID → parity 命令 ID 映射 */
+#endif /* CONFIG_FC_RAID */
 } fc_t;
 
 /* fc_complete_from_nand() is defined before the internal completion implementation. */
@@ -315,10 +348,27 @@ static fc_status_t fc_init_internal(fc_t *controller)
     }
 
     /* 初始化 RAID 引擎上下文（每个 LUN 独立） */
+#if CONFIG_FC_RAID
     for (uint8_t lun = 0U; lun < LUN_NUM; lun++)
     {
         fc_raid_init_ctx(lun);
     }
+#endif /* CONFIG_FC_RAID */
+
+    /* 初始化 CRC 引擎 */
+    fc_crc_init();
+
+    /* 初始化 Stripe RAID 积累状态 */
+#if CONFIG_FC_RAID
+    for (uint8_t lun = 0U; lun < LUN_NUM; lun++)
+    {
+        controller->stripe_accum[lun] = (fc_stripe_accum_t){0};
+    }
+    for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
+    {
+        controller->stripe_parity_for_data[index] = FC_COMMAND_ID_INVALID;
+    }
+#endif /* CONFIG_FC_RAID */
 
     for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
     {
@@ -456,6 +506,7 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
     descriptor->config.cw  = cw;
     descriptor->buffer_id  = buffer_id;
     descriptor->next_id    = FC_DESCRIPTOR_ID_INVALID;
+    descriptor->faa        = (uint32_t)(command->faa + index);
     *configured_descriptor = descriptor;
     return FC_STATUS_OK;
 }
@@ -640,6 +691,222 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     return FC_STATUS_OK;
 }
 
+/* ══════════════════════════════════════════════════════════
+ * Stripe RAID 辅助函数
+ *
+ * fc_stripe_release_parity()  — 回收 parity 命令的 desc+buffer+command 资源
+ * fc_stripe_submit()         — 分配 parity 命令、配置、XOR、构建 MP request、submit
+ *
+ * 编译开关：CONFIG_FC_RAID (include/fc/fc.h)
+ * ══════════════════════════════════════════════════════════ */
+
+#if CONFIG_FC_RAID
+
+/*
+ * 回收 parity 命令占用的所有资源，返回 command slot 到空闲池。
+ * 在 NAND completion 路径中调用，parity 数据已完成使命。
+ */
+static void fc_stripe_release_parity(fc_t *controller, fc_command_id_t parity_id)
+{
+    uint16_t descriptor_index;
+    uint16_t next_descriptor_index;
+
+    if (parity_id >= FC_COMMAND_POOL_DEPTH)
+    {
+        return;
+    }
+
+    /* 释放 parity 命令的 desc 链 + buffer */
+    descriptor_index = controller->command_descriptor_head[parity_id];
+    while (descriptor_index != UINT16_MAX)
+    {
+        next_descriptor_index = controller->descriptor_owned_next[descriptor_index];
+
+        /* 释放 buffer */
+        fc_buffer_id_t buf_id = controller->descriptor_pool[descriptor_index].buffer_id;
+        if (buf_id != FC_BUFFER_ID_INVALID)
+        {
+            (void)fc_buffer_release_internal(controller, buf_id);
+        }
+
+        /* 释放 descriptor */
+        controller->descriptor_pool[descriptor_index]       = (fc_descriptor_t){0};
+        controller->descriptor_owner[descriptor_index]      = FC_COMMAND_ID_INVALID;
+        controller->descriptor_owned_next[descriptor_index] = UINT16_MAX;
+        controller->descriptor_free_next[descriptor_index]  = controller->descriptor_free_head;
+        controller->descriptor_free_head                    = descriptor_index;
+
+        descriptor_index = next_descriptor_index;
+    }
+    controller->command_descriptor_head[parity_id] = UINT16_MAX;
+
+    /* 返回 command slot 到空闲池 */
+    controller->command_pool[parity_id]            = (fc_command_t){0};
+    controller->command_state[parity_id]           = FC_COMMAND_STATE_FREE;
+    controller->command_free_next[parity_id]       = controller->command_free_head;
+    controller->command_free_head                  = parity_id;
+}
+
+/*
+ * 处理 raid=ENCODE 命令的 Stripe 提交路径：
+ *  ① 分配 parity 命令（command + desc 链 + buffer）
+ *  ② 配置 parity 命令的 OP 码和 PAA（plane = PLANE_NUM-1）
+ *  ③ fc_data_path_generate_stripe_parity() — XOR + ECC 编码 parity
+ *  ④ 构建 Multi-Plane dispatch request（cws[0]=data, cws[1]=parity）
+ *  ⑤ nand_dispatch_submit()
+ *
+ * 成功时 parity 命令由 completion 路径自动释放。
+ * 失败时已分配资源全部回滚 + 数据命令以 error completion 返回。
+ *
+ * 仅处理 PLANE_NUM=2 场景（单数据命令 + 单 parity 命令）。
+ */
+static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc_command_id_t data_cmd_id)
+{
+    fc_command_t            *parity_cmd;
+    fc_command_id_t          parity_id;
+    nand_dispatch_request_t  mp_req;
+    uint8_t                  cw_count;
+    uint8_t                  cw;
+    fc_descriptor_id_t       desc_id;
+    const fc_command_t      *data_ptrs[FC_STRIPE_DATA_MAX];
+
+    cw_count = (uint8_t)(data_cmd->config.cw + 1U);
+
+    /* ① 分配 parity command */
+    parity_cmd = fc_command_alloc_internal(controller);
+    if (parity_cmd == NULL)
+    {
+        goto stripe_error;
+    }
+    parity_id = parity_cmd->command_id;
+
+    /* ② 配置 parity command */
+    parity_cmd->config           = data_cmd->config;
+    parity_cmd->config.raid      = FC_RAID_MODE_NORMAL;  /* parity 命令不需要 RAID */
+    parity_cmd->config.operation = OP_PROGRAM_PAGE_MULTI_PLANE;  /* 提交时走 Multi-Plane */
+    parity_cmd->high_priority    = data_cmd->high_priority;
+    parity_cmd->module           = data_cmd->module;
+    parity_cmd->faa              = data_cmd->faa;
+
+    /* 调整 PAA：same page/block/lun/cw，plane = PLANE_NUM-1 */
+    {
+        uint32_t page  = paa_to_page(data_cmd->paa);
+        uint32_t block = paa_to_block(data_cmd->paa);
+        uint32_t plun  = paa_to_lun(data_cmd->paa);
+        parity_cmd->paa = paa_make(page, (uint32_t)(PLANE_NUM - 1U), block, plun, 0U);
+    }
+
+    /* ③ 分配 parity desc + buffer */
+    if (fc_command_configure_descriptors_internal(controller, parity_cmd) != FC_STATUS_OK)
+    {
+        /* release parity command slot (no desc/buffer allocated yet, but alloc_internal consumed slot) */
+        controller->command_pool[parity_id]            = (fc_command_t){0};
+        controller->command_state[parity_id]           = FC_COMMAND_STATE_FREE;
+        controller->command_free_next[parity_id]       = controller->command_free_head;
+        controller->command_free_head                  = parity_id;
+        goto stripe_error;
+    }
+
+    /* 写入 parity descriptors 的 faa（与数据命令对应 CW 一致） */
+    {
+        fc_descriptor_id_t data_desc_id = (fc_descriptor_id_t)data_cmd->desc_id;
+        fc_descriptor_id_t parity_desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
+
+        for (cw = 0U; cw < cw_count; cw++)
+        {
+            fc_descriptor_t *pdesc = fc_descriptor_id_to_descriptor(parity_desc_id);
+            fc_descriptor_t *ddesc = fc_descriptor_id_to_descriptor(data_desc_id);
+            if ((pdesc != NULL) && (ddesc != NULL))
+            {
+                pdesc->faa = ddesc->faa;
+            }
+            parity_desc_id = (pdesc != NULL) ? (fc_descriptor_id_t)pdesc->next_id : FC_DESCRIPTOR_ID_INVALID;
+            data_desc_id   = (ddesc != NULL) ? (fc_descriptor_id_t)ddesc->next_id : FC_DESCRIPTOR_ID_INVALID;
+        }
+    }
+
+    /* ④ fc_data_path_generate_stripe_parity() — XOR + ECC 编码 parity */
+    data_ptrs[0U] = data_cmd;
+    if (fc_data_path_generate_stripe_parity(data_ptrs, 1U, parity_cmd) != FC_STATUS_OK)
+    {
+        fc_stripe_release_parity(controller, parity_id);
+        goto stripe_error;
+    }
+
+    /* ⑤ 构建 Multi-Plane dispatch request */
+    mp_req              = (nand_dispatch_request_t){0};
+    mp_req.command_id   = (uint16_t)data_cmd_id;  /* 完成路由回数据命令 */
+    mp_req.operation    = OP_PROGRAM_PAGE_MULTI_PLANE;
+    mp_req.ch           = (uint8_t)data_cmd->config.ch;
+    mp_req.ce           = (uint8_t)data_cmd->config.ce;
+    mp_req.lun          = (uint8_t)data_cmd->config.lun;
+    mp_req.plane_count  = PLANE_NUM;
+    mp_req.cw_count     = cw_count;
+    mp_req.page_type    = (uint8_t)data_cmd->config.page_type;
+
+    /* 填充 cws[0] = 数据命令 CW PAA + buffer */
+    desc_id = (fc_descriptor_id_t)data_cmd->desc_id;
+    for (cw = 0U; cw < cw_count; cw++)
+    {
+        const fc_descriptor_t *desc = (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
+            ? &controller->descriptor_pool[desc_id] : NULL;
+
+        if (desc == NULL)
+        {
+            fc_stripe_release_parity(controller, parity_id);
+            goto stripe_error;
+        }
+        mp_req.cws[0U][cw].paa    = desc->paa;
+        mp_req.cws[0U][cw].buffer = (desc->buffer_id != FC_BUFFER_ID_INVALID)
+                                        ? fc_buffer_get_base(desc->buffer_id) : NULL;
+        desc_id = (fc_descriptor_id_t)desc->next_id;
+    }
+
+    /* 填充 cws[1] = parity 命令 CW PAA + buffer */
+    desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
+    for (cw = 0U; cw < cw_count; cw++)
+    {
+        const fc_descriptor_t *desc = (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
+            ? &controller->descriptor_pool[desc_id] : NULL;
+
+        if (desc == NULL)
+        {
+            fc_stripe_release_parity(controller, parity_id);
+            goto stripe_error;
+        }
+        mp_req.cws[1U][cw].paa    = desc->paa;
+        mp_req.cws[1U][cw].buffer = (desc->buffer_id != FC_BUFFER_ID_INVALID)
+                                        ? fc_buffer_get_base(desc->buffer_id) : NULL;
+        desc_id = (fc_descriptor_id_t)desc->next_id;
+    }
+
+    /* 注册 parity 命令到数据命令的清理映射表 */
+    controller->stripe_parity_for_data[data_cmd_id] = parity_id;
+
+    /* ⑥ nand_dispatch_submit() */
+    if (nand_dispatch_submit(&mp_req) != NAND_RESULT_OK)
+    {
+        controller->stripe_parity_for_data[data_cmd_id] = FC_COMMAND_ID_INVALID;
+        fc_stripe_release_parity(controller, parity_id);
+        goto stripe_error;
+    }
+
+    return FC_STATUS_OK;
+
+stripe_error:
+    /* 数据命令注 error completion，让 FTL 感知失败 */
+    {
+        nand_dispatch_completion_t fail_comp = (nand_dispatch_completion_t){0};
+        fail_comp.command_id       = (uint16_t)data_cmd_id;
+        fail_comp.execution_status = NAND_RESULT_NOT_READY;
+        fail_comp.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
+        (void)fc_complete_from_nand(controller, &fail_comp);
+    }
+    return FC_STATUS_IO_ERROR;
+}
+
+#endif /* CONFIG_FC_RAID */
+
 static fc_status_t fc_poll_internal(fc_t *controller)
 {
     fc_status_t                result;
@@ -650,10 +917,27 @@ static fc_status_t fc_poll_internal(fc_t *controller)
 
     if (nand_result != NAND_RESULT_NOT_READY)
     {
+
         if (fc_complete_from_nand(controller, &nand_completion) != FC_STATUS_OK)
         {
             return FC_STATUS_IO_ERROR;
         }
+
+        /* ── Stripe parity 清理 ──
+         * 如果完成的命令是 stripe 数据命令，释放内部 parity 命令资源。 */
+#if CONFIG_FC_RAID
+        {
+            fc_command_id_t completed_id = (fc_command_id_t)nand_completion.command_id;
+            if ((completed_id < FC_COMMAND_POOL_DEPTH) &&
+                (controller->stripe_parity_for_data[completed_id] != FC_COMMAND_ID_INVALID))
+            {
+                fc_command_id_t parity_id = controller->stripe_parity_for_data[completed_id];
+                controller->stripe_parity_for_data[completed_id] = FC_COMMAND_ID_INVALID;
+                fc_stripe_release_parity(controller, parity_id);
+            }
+        }
+#endif /* CONFIG_FC_RAID */
+
         fc_register_queue_state(controller);
         return (nand_result == NAND_RESULT_OK) ? FC_STATUS_OK : FC_STATUS_IO_ERROR;
     }
@@ -687,12 +971,23 @@ static fc_status_t fc_poll_internal(fc_t *controller)
             controller->command_state[command_id] = FC_COMMAND_STATE_ACTIVE;
             command                               = &controller->command_pool[command_id];
 
-            /* ── Data Path encode: Random 加扰 → ECC 编码 → RAID XOR ──
+            /* ── Data Path encode: Random 加扰 → ECC 编码（RAID XOR 已移至 stripe 路径）──
              * 在 NAND 编程前对 buffer 数据做编码，对 FTL 完全透明。 */
             if (fc_is_page_write((uint8_t)command->config.operation) != 0U)
             {
                 (void)fc_data_path_encode(command);
             }
+
+            /* ── Stripe RAID 分支：raid=ENCODE 的 page write 走 Multi-Plane 提交 ── */
+#if CONFIG_FC_RAID
+            if ((fc_is_page_write((uint8_t)command->config.operation) != 0U) &&
+                (command->config.raid == FC_RAID_MODE_ENCODE))
+            {
+                result = fc_stripe_submit(controller, command, command_id);
+                fc_register_queue_state(controller);
+                return result;  /* 成功/失败均已在 fc_stripe_submit 中处理 */
+            }
+#endif /* CONFIG_FC_RAID */
 
             /* Pre-resolve descriptor-chain data into a self-contained dispatch request. */
             request              = (nand_dispatch_request_t){0};
@@ -747,7 +1042,7 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                     }
                     request.cws[0][cw].paa    = descriptor->paa;
                     request.cws[0][cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
-                                                    ? fc_buffer_id_to_real_buffer_internal(controller, descriptor->buffer_id)
+                                                    ? fc_buffer_get_base(descriptor->buffer_id)
                                                     : NULL;
                     desc_id                   = (fc_descriptor_id_t)descriptor->next_id;
                 }
@@ -843,7 +1138,7 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                         }
                         reqs[i].cws[0][cw].paa    = descriptor->paa;
                         reqs[i].cws[0][cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
-                                                        ? fc_buffer_id_to_real_buffer_internal(controller, descriptor->buffer_id)
+                                                        ? fc_buffer_get_base(descriptor->buffer_id)
                                                         : NULL;
                         desc_id                   = (fc_descriptor_id_t)descriptor->next_id;
                     }
@@ -979,6 +1274,23 @@ fc_status_t fc_buffer_release(fc_buffer_id_t buffer_id)
 
 uint8_t *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
 {
+    uint8_t *base;
+
+    if (fc_buffer_id_is_valid(&g_fc_controller, buffer_id) == 0U)
+    {
+        return NULL;
+    }
+    base = fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
+    if (base == NULL)
+    {
+        return NULL;
+    }
+    /* 对外只暴露 USER 数据区，跳过 META(4) + CRC(4) */
+    return base + FC_BUFFER_USER_OFFSET;
+}
+
+uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id)
+{
     if (fc_buffer_id_is_valid(&g_fc_controller, buffer_id) == 0U)
     {
         return NULL;
@@ -992,7 +1304,8 @@ fc_buffer_id_t fc_real_buffer_to_buffer_id(const uint8_t *buffer)
     {
         return FC_BUFFER_ID_INVALID;
     }
-    return fc_real_buffer_to_buffer_id_internal(&g_fc_controller, buffer);
+    /* 外部拿到的是 USER 区域指针，回退 8 字节到 CW 基址再比对 */
+    return fc_real_buffer_to_buffer_id_internal(&g_fc_controller, buffer - FC_BUFFER_USER_OFFSET);
 }
 
 fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t length)
@@ -1030,19 +1343,19 @@ fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t 
         {
             return FC_STATUS_INVALID_ARGUMENT;
         }
-        buf = fc_buffer_id_to_real_buffer_internal(&g_fc_controller, descriptor->buffer_id);
+        buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
 
         if (length > 0U)
         {
-            copy_len = (length >= FC_BUFFER_POOL_CW_SIZE) ? FC_BUFFER_POOL_CW_SIZE : length;
+            copy_len = (length >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : length;
             (void)memcpy(buf, src, copy_len);
             src += copy_len;
             length -= copy_len;
 
             /* 当前 buffer 未填满部分用 0xFF dummy 填充 */
-            if (copy_len < FC_BUFFER_POOL_CW_SIZE)
+            if (copy_len < FC_BUFFER_USER_SIZE)
             {
-                (void)memset(buf + copy_len, 0xFF, (size_t)(FC_BUFFER_POOL_CW_SIZE - copy_len));
+                (void)memset(buf + copy_len, 0xFF, (size_t)(FC_BUFFER_USER_SIZE - copy_len));
             }
         }
         else
@@ -1087,7 +1400,7 @@ uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
             {
                 return NULL;
             }
-            return fc_buffer_id_to_real_buffer_internal(&g_fc_controller, descriptor->buffer_id);
+            return fc_buffer_id_to_real_buffer(descriptor->buffer_id);
         }
         desc_id = (fc_descriptor_id_t)descriptor->next_id;
     }

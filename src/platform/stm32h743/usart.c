@@ -401,9 +401,20 @@ static void uart_execute_command(char *line)
 /*
  * newlib-nano 的 printf 最终会调用 _write()。把它接到软件 TX 队列后，现有 printf
  * 自动变成非阻塞日志；返回短写表示队列已满，业务代码不应据此重试或等待。
+ *
+ * 行尾归一化：裸机串口终端（PuTTY/minicom 等）要求 \r\n 才能正确换行。
+ * printf/puts/fprintf 在 newlib-nano 中只输出 \n，此处扫描 buffer，
+ * 在裸 \n（前面不是 \r）前插入 \r，同时避免已有 \r\n 被重复加 \r。
+ * 所有走 printf 的输出（SSD_LOGI/munit 测试报告等）自动受益，
+ * 直接调 uart_log_write() 的不受影响。
  */
 int _write(int file, char *buffer, int length)
 {
+    int           i;
+    uint8_t       needs_cr;
+    int           src_i;
+    unsigned int  dst_len;
+
     (void)file;
 
     if ((buffer == NULL) || (length <= 0))
@@ -411,7 +422,60 @@ int _write(int file, char *buffer, int length)
         return FUNC_STATUS_SUCCESS;
     }
 
-    return uart_log_write(buffer, (uint32_t)length);
+    /* ── 快速路径：buffer 中没有裸 \n，原样发送 ── */
+    needs_cr = 0U;
+    for (i = 0; i < length; i++)
+    {
+        if ((buffer[i] == '\n') && ((i == 0) || (buffer[i - 1] != '\r')))
+        {
+            needs_cr = 1U;
+            break;
+        }
+    }
+    if (needs_cr == 0U)
+    {
+        return uart_log_write(buffer, (uint32_t)length);
+    }
+
+    /* ── 慢速路径：在裸 \n 前插入 \r ── */
+#define WRITE_BUF_SIZE 512U
+    static char converted[WRITE_BUF_SIZE];
+    dst_len = 0;
+
+    for (src_i = 0; src_i < length; src_i++)
+    {
+        if ((buffer[src_i] == '\n') && ((src_i == 0) || (buffer[src_i - 1] != '\r')))
+        {
+            /* 需要写 \r\n，检查剩余空间 */
+            if (dst_len + 2 > WRITE_BUF_SIZE)
+            {
+                /* 刷新已转换部分再继续 */
+                (void)uart_log_write(converted, (uint32_t)dst_len);
+                dst_len = 0;
+            }
+            converted[dst_len++] = '\r';
+            converted[dst_len++] = '\n';
+        }
+        else
+        {
+            if (dst_len + 1 > WRITE_BUF_SIZE)
+            {
+                (void)uart_log_write(converted, (uint32_t)dst_len);
+                dst_len = 0;
+            }
+            converted[dst_len++] = buffer[src_i];
+        }
+    }
+
+    /* 刷剩余 */
+    if (dst_len > 0)
+    {
+        (void)uart_log_write(converted, (uint32_t)dst_len);
+    }
+
+    /* 告知上层全部发出（不重试） */
+    return length;
+#undef WRITE_BUF_SIZE
 }
 
 void usart_init(uint32_t baudrate)

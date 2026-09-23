@@ -152,12 +152,15 @@ uint8_t sys_stm32_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sys
     }
 
     (void)HAL_PWREx_EnableUSBVoltageDetector();
-    /* Crash records live in BKPSRAM and must survive software resets. */
-    __HAL_RCC_BKPRAM_CLK_ENABLE();
-    if (HAL_PWREx_EnableBkUpReg() != HAL_OK)
-    {
-        return ERROR;
-    }
+    /*
+     * Crash Records 通过 BKPSRAM（备份 SRAM）在软复位后保留。
+     * 要使 VDD 掉电后数据不丢，需要 VBAT 引脚供电并打开备份稳压器。
+     * 当前核心板仅通过 SWD 供电（VBAT 悬空），备份稳压器永远无法就绪，
+     * 使能它会导致卡死。调试阶段跳过。
+     *
+     *   __HAL_RCC_BKPRAM_CLK_ENABLE();
+     *   if (HAL_PWREx_EnableBkUpReg() != HAL_OK) { return ERROR; }
+     */
     __HAL_RCC_CSI_ENABLE();
     __HAL_RCC_SYSCFG_CLK_ENABLE();
     HAL_EnableCompensationCell();

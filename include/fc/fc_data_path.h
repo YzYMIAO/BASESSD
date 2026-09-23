@@ -39,6 +39,25 @@
 
 fc_status_t fc_data_path_encode(const fc_command_t *command);
 
+#if CONFIG_FC_RAID
+/* ── 跨 Plane Stripe RAID parity 生成（FC 内部） ── */
+
+/*
+ * 对 PLANE_NUM-1 条数据命令做跨命令 XOR，结果写入 parity 命令的 buffer，
+ * 然后对 parity buffer 做 ECC 编码。
+ *
+ * data_cmds:   数据命令指针数组（长度 = data_count）
+ * data_count:  数据命令数量 = PLANE_NUM - 1
+ * parity_cmd:  已分配 desc+buffer 的 parity 命令
+ *
+ * FC 内部在 stripe 累积完成后、提交 dispatch 前自动调用。
+ */
+fc_status_t fc_data_path_generate_stripe_parity(
+    const fc_command_t *data_cmds[],
+    uint8_t             data_count,
+    const fc_command_t *parity_cmd);
+#endif /* CONFIG_FC_RAID */
+
 /* ── 读路径 Stage 1：ECC 解码（FC 内部，CQ push 前） ── */
 
 /*

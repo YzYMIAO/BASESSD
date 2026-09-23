@@ -3,10 +3,31 @@
 
 #include "fc_command.h"
 
+/* ── 功能特性开关 ── */
+
+/*
+ * Stripe RAID 功能使能。
+ *   0 = 禁用（默认）。RAID 相关代码不编译，fc_cmd_conf_t.config.raid 固定为 NORMAL。
+ *   1 = 启用。跨 Plane RAID XOR parity generation + recovery。
+ *
+ * 当前未启用（功能代码已完成但未验证，待硬件就绪后开启）。
+ */
+#ifndef CONFIG_FC_RAID
+#    define CONFIG_FC_RAID (0U)
+#endif
+
 #define FC_COMMAND_POOL_DEPTH    (64U)
 #define FC_DESCRIPTOR_POOL_DEPTH (256U)
 #define FC_BUFFER_POOL_DEPTH     (128U)
 #define FC_BUFFER_POOL_CW_SIZE   (PAGE_SIZE / 4U)
+
+/*
+ * CW 布局: [META:4][CRC:4][USER:512][PARITY:8] = 528B
+ * 对外接口只暴露 USER 数据区，META/CRC/PARITY 由 FC 内部管理。
+ */
+#define FC_BUFFER_USER_OFFSET    (8U)    /* USER 区域在 CW 中的偏移 */
+#define FC_BUFFER_USER_SIZE      (512U)  /* 暴露给 FTL 的用户数据大小 */
+#define FC_BUFFER_DATA_SIZE      (520U)  /* META+CRC+USER = 加扰/ECC 处理的数据区大小 */
 #define FC_SQ_DEPTH              (64U)
 #define FC_HSQ_DEPTH             (16U)
 #define FC_CQ_DEPTH              (64U)
@@ -32,6 +53,10 @@ fc_buffer_id_t     fc_buffer_alloc(void);
 fc_status_t        fc_buffer_release(fc_buffer_id_t buffer_id);
 uint8_t           *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id);
 fc_buffer_id_t     fc_real_buffer_to_buffer_id(const uint8_t *buffer);
+
+/* FC 内部使用：返回 CW 基址（META 开头，528B 完整 CW）。
+   数据路径（加扰/ECC/RAID）使用此接口。 */
+uint8_t           *fc_buffer_get_base(fc_buffer_id_t buffer_id);
 
 /* 便利函数：将外部数据按 CW 大小依次拷贝到命令的所有 desc buffer 中。
  * 数据不够时剩余部分用 0xFF dummy 填充。 */

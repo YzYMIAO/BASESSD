@@ -15,6 +15,9 @@
 > - **Phase I**: 读饥饿保护（QoS）
 > - **Phase J**: 加扰引擎扩展（多算法 + 多种子策略）
 > - **Phase K**: BCH ECC 引擎移植 + QC-LDPC 硬判决
+> - **Phase L**: CRC-32 引擎实现 + 数据路径集成（§5.1）
+> - **Phase M**: Buffer 偏移重构（FC_BUFFER_USER_OFFSET, fc_buffer_get_base）
+> - **Phase N**: 跨 Plane Stripe RAID 重构（删旧覆盖末 CW，新增 generate_stripe_parity，fc_poll_internal stripe 积累 + Multi-Plane 提交）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
 
@@ -73,7 +76,35 @@
 |--------|------|----------|------|
 | Command Pool | 64 | `fc_command_t` | 命令控制块 |
 | Descriptor Pool | 256 | `fc_descriptor_t` | 数据描述符（每 CW 一个） |
-| Buffer Pool | 128 | 528 字节（= PAGE_SIZE / 4） | 数据缓冲区 |
+| Buffer Pool | 128 | 528 字节（= PAGE_SIZE / 4） | 数据缓冲区（CW 内部布局见 §5.3） |
+
+Buffer Pool 内部每个 CW（528 字节）分层管理：
+
+```
+对外暴露区域（FTL 可见）：
+  [USER:512B]    ← fc_buffer_id_to_real_buffer() 返回此首地址
+
+内部管理区域（FC 管控，FTL 不感知）：
+  [META:4B]      ← 命令元数据（FAA 等）
+  [CRC:4B]       ← USER 数据的 CRC-32 校验值
+  [USER:512B]    ← 用户数据（FTL 填入）
+  [PARITY:8B]    ← ECC 校验数据
+
+对外接口通过 FC_BUFFER_USER_OFFSET(8) 偏移，只暴露 USER 区给 FTL。
+FC 内部通过 fc_buffer_get_base() 获取 CW 基址（META 开头），用于加扰/ECC/RAID。
+```
+
+### 各模块数据处理范围
+
+| 模块 | 处理大小 | 影响区域 | 原因 |
+|------|---------|---------|------|
+| CRC | 512 | `[4:8]` 写入 CRC 值 | 只保护 USER 数据 |
+| Random 加扰 | **520** | `[0:520]` 全数据区 | ECC 会覆盖 parity 区，RN 白做 |
+| ECC 编解码 | 520 → 8B parity | 读 `[0:520]`，写 `[520:528]` | BCH 输入 520 数据，输出 8B parity |
+| RAID XOR | 528 | 全 CW（含 parity）| 需要保护 parity 自身完整性 |
+
+ECC 引擎的 `data_length` 参数直接表示实际数据大小（520B），parity 始终写入 `data + data_length`。
+RAID XOR 使用 `FC_BUFFER_POOL_CW_SIZE(528)`，读全 CW。
 
 容量设计理由：
 - 64 个 Command：覆盖一个 Block 的所有 Page（64 页），支持 pipeline 提交
@@ -129,9 +160,9 @@ struct fc_descriptor_t {
     fc_cmd_conf_t config;    // 继承命令配置，config.cw 表示当前 CW 索引
     DWORD buffer_id : 16;   // Buffer Pool ID，0xFFFF=无效
     DWORD next_id   : 16;   // 下一个 Descriptor ID，0xFFFF=链表结束
+    DWORD faa;               // FTL 逻辑地址（LBA），每个 CW 独立，写入 META
     DWORD status    : 8;    // CW 状态（FC_CW_STATUS_*），完成时由 FC 回写
     DWORD ecc_bits  : 8;    // ECC 纠正比特数，完成时由 FC 回写（0=无错误）
-    DWORD reserved  : 16;   // 保留
 };
 ```
 
@@ -140,6 +171,7 @@ struct fc_descriptor_t {
 - **Buffer 与 Descriptor 解耦**：通过 buffer_id 引用，Buffer 可独立释放（如 UNC 时释放 buffer 保留 descriptor 信息）
 - **linked list 链式连接**：通过 next_id 遍历，无需 Command 中维护 descriptor_count
 - **状态 & ECC 回写**：NAND 完成时 FC 将 `cw_status` 和 `ecc_bit_count` 回写至 descriptor 的 `status` 和 `ecc_bits` 字段。FTL 遍历 desc 链即可获取每 CW 详细状态，无需 CQ 查询。这对 Read Retry、RAID 恢复路径至关重要。
+- **per-CW FAA**：`faa` 替代原 `reserved:16`，每个 Descriptor 拥有独立的 FTL 逻辑地址。`fc_command_configure_descriptors()` 中自动计算 `desc->faa = command->faa + cw_index`，encode 时写入 `buffer[0..4]`（META 区），用于读回时的端到端地址校验。
 
 ### 2.4 CW 状态位
 
@@ -220,8 +252,9 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor(uint16_t id);
 fc_status_t   fc_command_configure_descriptors(fc_command_t *cmd); // 自动遍历 CW 数量配置 Descriptor 链
 fc_buffer_id_t fc_buffer_alloc(void);                   // 申请 Buffer（返 ID）
 fc_status_t   fc_buffer_release(fc_buffer_id_t id);     // 释放 Buffer
-uint8_t      *fc_buffer_id_to_real_buffer(fc_buffer_id_t); // ID→指针
-fc_buffer_id_t fc_real_buffer_to_buffer_id(const uint8_t *);
+uint8_t      *fc_buffer_id_to_real_buffer(fc_buffer_id_t); // ID→指针，返回 USER 数据区首地址（跳过 META+CRC 共 8B）
+fc_buffer_id_t fc_real_buffer_to_buffer_id(const uint8_t *); // 指针→ID（自动回退 8B 偏移到 CW 基址后比对）
+uint8_t      *fc_buffer_get_base(fc_buffer_id_t);       // ID→指针，返回 CW 基址（META 开头，FC 数据路径内部使用）
 fc_status_t   fc_submit(fc_command_t *cmd);             // 提交到 SQ 或 HSQ（根据 high_priority）
 fc_status_t   fc_service(void);                         // 调度执行（上层 while(1) 轮询）
 fc_status_t   fc_poll_completion(fc_command_status_t *); // 从 CQ 取完成项
@@ -450,21 +483,50 @@ FC 通过 `fc_complete_from_nand()` 将 `nand_dispatch_completion_t` 转换为 `
 FC 数据路径分两个方向：
 
 - **写路径 (encode)**：FC 内部在 NAND Program 前调用，对 FTL 完全透明
+  - CRC 计算（`config.crc == FC_CRC_ENABLE` 时）
+  - Random 加扰
+  - ECC 编码
+  - RAID XOR 编码（如配置）
 - **读路径 (decode)**：分为两阶段
   - **Stage 1**：FC 内部在 NAND Read 完成后、CQ push 前自动执行
+    - ECC 解码
+    - 全部成功 → 解扰 → CRC 校验
+    - 有 CW 失败 → 不解扰（供 RAID XOR 恢复在 scrambled domain 进行）
   - **Stage 2**：FTL 触发的 RAID 恢复路径
 
 ### 5.1 编码流程 (Page Pack)
 
 ```
 User Data (512B/CW)
-  → [Random Engine] 加扰（LFSR，种子 PAA × program_sequence）
-  → [LDPC Engine] 编码（添加 parity）
-  → RAID XOR 编码（如配置）
-  → 写入 NAND
+  → [META] 写入 per-CW FAA（desc->faa，存 buffer[0..4]）
+  → [CRC Engine] CRC-32 计算（仅 USER 区域，写入 CRC 字段 [4:8]）
+  → [Random Engine] 加扰（LFSR，种子 PAA × program_sequence，操作 520B 数据区）
+  → [LDPC Engine] 编码（520B 数据 → 8B parity，写入 [520:528]）
+  → （数据命令累积到 PLANE_NUM-1 条后）
+  → [Stripe RAID] fc_data_path_generate_stripe_parity() 跨命令 XOR → parity 写入独立 Plane
+  → 数据命令 + parity 命令一起提交 nand_dispatch → Multi-Plane PROGRAM
 ```
 
+RAID XOR 不再覆盖最后一个 CW 的用户数据。Plane 数为 2 的幂（2/4/8），Parity 独立占用最后一个 Plane：
+
+| Plane 数 | 数据命令 | parity 命令 |
+|----------|---------|------------|
+| 2        | D0 (Plane 0) | P0 (Plane 1) |
+| 4        | D0/D1/D2 (Plane 0-2) | P0 (Plane 3) |
+| 8        | D0~D6 (Plane 0-6) | P0 (Plane 7) |
+
+FTL 只提交 PLANE_NUM-1 条数据命令（config.raid=2），FC 内部自动：
+1. 累积 stripe 成员（PLANE_NUM=2 时在单次 fc_service() 内同步完成）
+2. 内部分配 parity 命令资源（command + desc 链 + buffer）
+3. 调用 fc_data_path_generate_stripe_parity() 做跨命令 XOR
+   - XOR 数据命令各 CW 的 scrambled data（520B）到 parity buffer
+   - ECC 编码 parity buffer
+4. parity 命令不经过 META/CRC/Random（parity buffer 内容已在 scrambled domain，META 为 XOR 结果，只靠 ECC 保护完整性）
+5. 数据命令 + parity 命令以 Multi-Plane PROGRAM 一次提交 nand_dispatch
+6. 完成时 parity 命令资源自动释放，FTL 只感知数据命令的 completion
+
 RAID XOR 在 ECC 编码之后进行，保证了 parity CW 同样经过 ECC 保护。所有步骤在 FC 内部完成。
+META（FAA）和 CRC 在加扰前写入，受后续加扰和 ECC 的完整保护。
 
 ### 5.2 解码流程 (Page Unpack)
 
@@ -472,13 +534,14 @@ RAID XOR 在 ECC 编码之后进行，保证了 parity CW 同样经过 ECC 保�
 NAND 读取完成
   │
   ├─ Stage 1 / FC 内部（CQ push 前）:
-  │   ┌──────────────────────────────────┐
-  │   │ 逐 CW: ECC 解码                  │
-  │   │   ├─ 全部成功 → 解扰所有 buffer  │
-  │   │   │              → push CQ (status=READY)
-  │   │   └─ 有 CW 失败 → 不解扰 buffer  │
+  │   ┌──────────────────────────────────────┐
+  │   │ 逐 CW: ECC 解码                      │
+  │   │   ├─ 全部成功 → 解扰所有 buffer       │
+  │   │   │              → CRC 校验          │
+  │   │   │              → push CQ (status=READY/CRC_ERROR)
+  │   │   └─ 有 CW 失败 → 不解扰 buffer       │
   │   │                → push CQ (status=UNC)
-  │   └──────────────────────────────────┘
+  │   └──────────────────────────────────────┘
   │
   └─ Stage 2 / FTL 触发（poll CQ 后）:
       遍历 desc 链，发现 status=UNC
@@ -503,10 +566,19 @@ NAND 读取完成
 每个 Page（2112 字节）= 4 个 CW × 528 字节，CW 布局：
 
 ```
-[META:16B][CRC:4B][USER DATA:476B][LDPC PARITY:32B] = 528B
+[0:4]   META    — FC 内部管理（FAA 等元数据）
+[4:8]   CRC     — FC 计算写入（CRC-32 覆盖 USER 区域）
+[8:520] USER    — FTL 填入的用户数据（512 字节）
+[520:528] PARITY — ECC 编码引擎生成的校验数据
+
+FTL 通过 fc_buffer_id_to_real_buffer() 拿到的指针指向 [8]，
+直接读写 512 字节 USER 数据，不感知其余区域。
+
+FC 内部通过 fc_buffer_get_base() 获取 CW 基址（[0]），
+数据路径（加扰/ECC/RAID）操作全 528 字节。
 ```
 
-META 目前使用 4 字节 FAA（FTL 逻辑地址），剩余 12 字节保留。CW 在 Page 中位置由 CW index 决定，第 0 个 CW 从 offset 0 开始，依次四等分。
+数据路径编码流程（加扰/ECC/RAID）：
 
 ---
 

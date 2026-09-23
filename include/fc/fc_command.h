@@ -106,16 +106,16 @@ typedef struct fc_cmd_conf_t
     DWORD reserved  : 6; /* Reserved for future configuration. */
 } fc_cmd_conf_t;
 
-/* Descriptor for one CW, including its physical address, Buffer ID, link ID and status. */
+/* Descriptor for one CW, including its physical address, Buffer ID, link ID, status, ECC info, and FAA. */
 struct fc_descriptor_t
 {
     DWORD         paa;            /* Physical NAND address; valid for this Descriptor's CW. */
     fc_cmd_conf_t config;         /* Copy of Command configuration; config.cw is this CW index. */
     DWORD         buffer_id : 16; /* Buffer Pool ID; 0xFFFF means invalid. */
     DWORD         next_id   : 16; /* Next Descriptor ID; 0xFFFF terminates the chain. */
+    DWORD         faa;            /* FTL logical address (LBA) for this specific CW. Written to META on encode. */
     DWORD         status    : 8;  /* CW status, using FC_CW_STATUS_* bits. */
     DWORD         ecc_bits  : 8;  /* ECC corrected bit count from last completion; 0 if no error. */
-    DWORD         reserved  : 16; /* Reserved for future Descriptor state. */
 };
 
 /* SQ command owned by FC after submission; command_id is the Command Pool slot ID. */

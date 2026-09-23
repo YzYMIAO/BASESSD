@@ -63,6 +63,7 @@ S_OBJS := $(patsubst $(SRC_ROOT)/%.s,$(OBJ_DIR)/%.o,$(S_SRCS))
 ALL_INCS := $(sort $(MODULE_INCS))
 CFLAGS += $(addprefix -I,$(ALL_INCS))
 CFLAGS += -DSSD_FIRMWARE_BUILD
+CFLAGS += -DDEBUG_FTL
 CFLAGS += $(CFLAGS_EXTRA)
 else
 C_SRCS := $(sort $(MODULE_SRCS))

@@ -8,6 +8,7 @@
 /* USER CODE END Includes */
 #include "platform/stm32h743/dma.h"
 #include "platform/stm32h743/nand_dma.h"
+#include "platform/stm32h743/nand_rb_interrupt.h"
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN TD */
@@ -266,6 +267,15 @@ void TIM6_DAC_IRQHandler(void)
 void WWDG_IRQHandler(void)
 {
     storage_wdg_wwdg_irq_handler();
+}
+
+/**
+ * @brief   EXTI9_5 中断服务函数（NAND R/B# EXTI6 上升沿触发）
+ * @note    由 nand_rb_interrupt_handler() 处理
+ */
+void EXTI9_5_IRQHandler(void)
+{
+    nand_rb_interrupt_handler();
 }
 
 /**

@@ -6,41 +6,34 @@
 #include <stdint.h>
 
 /*
- * RAID XOR 引擎。
+ * ============================================================================
+ * RAID XOR 引擎 — 编译开关
  *
- * ============== 设计概览 ==============
+ * 当前 CONFIG_FC_RAID=0（默认不启用），所有 RAID 功能代码不编译。
  *
+ * 何时开启：硬件功能验证闭环后，需要启用跨 Plane XOR 数据保护时。
+ * 打开方法：在 include/fc/fc.h 中 #define CONFIG_FC_RAID 1
+ *
+ * 开启后需要实现：
+ *   1) 写路径：fc_poll_internal() 中 raid=ENCODE 分支分配 parity 命令、
+ *      调用 generate_stripe_parity()、以 Multi-Plane PROGRAM 提交
+ *   2) 读路径：FTL 提交 Multi-Plane READ 读取双 Plane 数据后，
+ *      ECC 失败时利用 parity CW 做 XOR 重建恢复
+ *   3) 读恢复：fc_data_path_raid_recover() 适配跨命令 buffer 收集
+ *
+ * 设计文档：docs/design/fc_nand_design.md §5.1
+ * ============================================================================
+ */
+
+#include "fc.h"  /* 确保 CONFIG_FC_RAID 定义可见 */
+
+#if CONFIG_FC_RAID
+
+/*
  * RAID 操作的三个基础指令：
  *   START  → 初始化累加器 = 第一个 CW 的数据
  *   CONTINUE → 累加器 ^= 当前 CW
  *   END    → 累加器 = XOR 结果，写入 parity buffer
- *
- * ============== 中断保护 ==============
- *
- * RAID 序列执行期间（START 后、END 前），如果 HSQ 高优命令需要
- * 操作同一个 LUN，当前 RAID 上下文会被 save 到影子缓冲，
- * HSQ 完成后 restore 回来继续。
- * 当前 2 Plane 场景下不会触发此路径，但框架已预留。
- *
- * ============== 应用场景 ==============
- *
- * Multi-Plane PROGRAM (连续多条 PROGRAM 命令写不同 Plane):
- *   START  → ACCUMULATE(Plane0) → ACCUMULATE(Plane1) → ... → END
- *
- * Multi-Plane READ + 恢复 (某个 CW ECC 不可纠):
- *   用 RAID 恢复后重试 ECC：
- *   failed_cw = ⊕(除 failed_cw 外的所有 CW 的 ECC 解码结果)
- *   不需要 START/CONTINUE/END，直接调用 fc_raid_recover() 静态恢复
- *
- * ============== PLANE_NUM 约束 ==============
- *
- * 当前 PLANE_NUM=2 时：
- *   Multi-Plane Write: START → ACCUMULATE(P0) → ACCUMULATE(P1) → END
- *   没有中断风险（2 Plane 只需 1 次 CONTINUE，瞬间完成）。
- *
- * PLANE_NUM >= 4 时：
- *   HSQ 可能在任一次 ACCUMULATE 之后插入高优命令，
- *   需要 save/restore 保护累加器。
  */
 
 /* 每个 LUN 的 RAID 上下文 */
@@ -68,7 +61,6 @@ void fc_raid_init_ctx(uint8_t lun);
 /*
  * 开始新的 RAID XOR 序列。
  * 将 cw_buffer 拷贝到 acc_buf 作为累加器初始值。
- * 每次新的 Multi-Plane 操作前调用一次。
  *
  * @param lun       LUN 编号
  * @param cw_buffer 第一个 CW 的数据（PAA 对应的 buffer）
@@ -78,9 +70,7 @@ void fc_raid_init_ctx(uint8_t lun);
 fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total);
 
 /*
- * 累加一个 CW 到 RAID 累加器。
- * acc_buf ^= cw_buffer（逐字节 XOR）。
- * 应在每个后续 CW 数据准备好后调用。
+ * 累加一个 CW 到 RAID 累加器。acc_buf ^= cw_buffer。
  *
  * @param lun       LUN 编号
  * @param cw_buffer 当前 CW 的数据
@@ -109,17 +99,19 @@ void fc_raid_restore(uint8_t lun);
 /* ── 静态恢复（ECC 失败后使用，不需要 LUN 上下文） ── */
 
 /*
- * 从所有 CW 和 parity Xor 恢复 failed_idx 的数据。
- * recovered[i] ^= buffers[j][i] for all j != failed_idx, 再 ^= parity[i]。
+ * 从所有 CW 和 parity XOR 重建 failed_idx 的数据：
+ *   recovered = buffers[0] ^ buffers[1] ^ ... ^ buffers[count-1]
+ *   跳过 failed_idx。
  *
  * @param recovered   输出：恢复后的 buffer
  * @param buffers     所有 CW buffer 指针数组（含 parity）
  * @param count       buffers 总数
  * @param failed_idx  失败的 buffer 索引（0..count-1）
- * @param length      每个 buffer 的长度（CW_SIZE）
+ * @param length      每个 buffer 的长度
  */
 void fc_raid_recover(uint8_t *recovered,
                      uint8_t *buffers[], uint8_t count,
                      uint8_t failed_idx, uint16_t length);
 
+#endif /* CONFIG_FC_RAID */
 #endif /* FC_RAID_ENGINE_H */

@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#if CONFIG_FC_RAID
+
 /*
  * RAID XOR 引擎实现。
  *
@@ -36,10 +38,9 @@ fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total)
 
     if (ctx->active != 0U)
     {
-        return FC_STATUS_NOT_READY;  /* 当前 LUN 的 RAID 序列未结束 */
+        return FC_STATUS_NOT_READY;
     }
 
-    /* 拷贝第一个 CW 作为累加器初始值 */
     memcpy(ctx->acc_buf, cw_buffer, FC_BUFFER_POOL_CW_SIZE);
     ctx->active   = 1U;
     ctx->processed = 1U;
@@ -70,7 +71,7 @@ fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer)
         return FC_STATUS_NOT_READY;
     }
 
-    /* 32 位对齐 XOR，速度优化（528B / 4 = 132 次） */
+    /* 32 位对齐 XOR */
     acc32 = (uint32_t *)(void *)ctx->acc_buf;
     buf32 = (const uint32_t *)(const void *)cw_buffer;
     for (i = 0; i < (FC_BUFFER_POOL_CW_SIZE / sizeof(uint32_t)); i++)
@@ -148,3 +149,5 @@ void fc_raid_recover(uint8_t *recovered,
         }
     }
 }
+
+#endif /* CONFIG_FC_RAID */

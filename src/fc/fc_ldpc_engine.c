@@ -65,16 +65,15 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
     }
 
     {
-        uint16_t data_len = (data_length > 8U) ? (uint16_t)(data_length - 8U) : 0U;
         uint8_t  ecc_buf[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
-        if (data_len == 0U)
+        if (data_length < 8U)
         {
             return FC_STATUS_INVALID_ARGUMENT;
         }
 
-        fc_bch_encode(g_bch, data, data_len, ecc_buf);
-        memcpy(data + data_len, ecc_buf, 8U);
+        fc_bch_encode(g_bch, data, data_length, ecc_buf);
+        memcpy(data + data_length, ecc_buf, 8U);
     }
 
     return FC_STATUS_OK;
@@ -88,9 +87,11 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
     }
 
     {
-        /* data 前 520B = 数据，后 8B = parity，编码直接写入 */
-        uint8_t tmp[528];
-        memcpy(tmp, data, 528);
+        /* data_length = 520（数据区），后 8B = parity 输出区 */
+        uint16_t full_len = (uint16_t)(data_length + 8U);
+        uint8_t  tmp[FC_BUFFER_POOL_CW_SIZE];
+
+        memcpy(tmp, data, full_len);
         fc_ldpc_qc_encode(g_qc, tmp, data);
     }
 
@@ -119,18 +120,17 @@ fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16
     }
 
     {
-        uint16_t     data_len = (data_length > 8U) ? (uint16_t)(data_length - 8U) : 0U;
-        uint8_t     *recv_ecc = data + data_len;
+        uint8_t     *recv_ecc = data + data_length;
         unsigned int errloc[4];
         int          nerr;
         uint16_t     i;
 
-        if (data_len == 0U)
+        if (data_length < 8U)
         {
             return FC_STATUS_INVALID_ARGUMENT;
         }
 
-        nerr = fc_bch_decode(g_bch, data, data_len, recv_ecc, NULL, NULL, errloc);
+        nerr = fc_bch_decode(g_bch, data, data_length, recv_ecc, NULL, NULL, errloc);
 
         if (nerr < 0)
         {
@@ -140,7 +140,7 @@ fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16
         for (i = 0U; i < (uint16_t)nerr; i++)
         {
             unsigned int bit_pos = errloc[i];
-            if (bit_pos < (unsigned int)(data_len * 8U))
+            if (bit_pos < (unsigned int)(data_length * 8U))
             {
                 data[bit_pos / 8U] ^= (uint8_t)(1U << (bit_pos % 8U));
             }
@@ -157,6 +157,13 @@ fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16
         return FC_STATUS_NOT_SUPPORTED;
     }
 
+    /*
+     * data_length = 520（来自调用者），但 QC-LDPC 解码器硬码
+     * 码长 n=4224bit=528B（520B 数据 + 8B parity），内部直接
+     * 按 528B 操作 buffer。buffer 实际分配为 FC_BUFFER_POOL_CW_SIZE(528)，
+     * 访问安全。此处显式抑制未使用参数警告。
+     */
+    (void)data_length;
     return fc_ldpc_qc_decode(g_qc, data);
 
 #else

@@ -3,6 +3,8 @@
 #include "stm32h7xx_hal.h"
 #include "stm32h743xx.h"
 
+#include "common/ssd_log.h"
+
 #include <stddef.h>
 
 /*
@@ -83,6 +85,10 @@ void nand_rb_interrupt_arm(uint32_t timeout_us)
     EXTI->IMR1 |= EXTI_IMR1_IM6;
     HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
+    SSD_LOGD("rb_arm timeout=%lu pin=%u\r\n",
+             (unsigned long)timeout_us,
+             (unsigned)HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_6));
+
     /*
      * ★ tWB 等待 + GPIO 确认
      *
@@ -100,10 +106,19 @@ void nand_rb_interrupt_arm(uint32_t timeout_us)
         while ((*((volatile uint32_t *)0xE0001004UL) - start) < delay_cycle) {}
     }
 
+    /* 1us 等待后再读引脚 */
+    uint8_t pin_after = HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_6);
+    SSD_LOGD("rb_arm tWB done pin=%u\r\n", (unsigned)pin_after);
+
     /* ★ RB 已经高电平 → 上升沿永远不会来，直接标记已触发 */
-    if (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_6) == GPIO_PIN_SET)
+    if (pin_after == GPIO_PIN_SET)
     {
+        SSD_LOGD("rb_arm SHORT-CIRCUIT: pin still HIGH, marking triggered\r\n");
         g_rb_int.triggered = 1U;
+    }
+    else
+    {
+        SSD_LOGD("rb_arm pin LOW, waiting for EXTI rising edge\r\n");
     }
 }
 
@@ -150,6 +165,8 @@ void nand_rb_interrupt_handler(void)
     {
         /* 清除 pending 标志 */
         EXTI->PR1 = EXTI_PR1_PR6;
+
+        SSD_LOGD("rb_irq FIRED!\r\n");
 
         /* 标记触发 */
         g_rb_int.triggered = 1U;

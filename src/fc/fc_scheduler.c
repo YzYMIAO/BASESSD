@@ -103,7 +103,7 @@ fc_status_t fc_scheduler_select(fc_scheduler_t *scheduler, fc_command_id_t *comm
         (void)fc_submission_queue_pop(scheduler->sq, &skipped);
         (void)fc_submission_queue_push(scheduler->sq, skipped);
     }
-    return FC_STATUS_QUEUE_EMPTY;
+    return (scheduler->sq->count != 0U) ? FC_STATUS_NOT_READY : FC_STATUS_QUEUE_EMPTY;
 }
 
 /* ── 链式 select 接口 ── */
