@@ -97,6 +97,7 @@ int main(void)
     sys_init();
     ssd_log_set_sink(stm32_uart_log_sink);
     ssd_log_set_flush_sink(stm32_uart_log_flush_sink);
+    ssd_log_set_level(SSD_LOG_DEBUG);
     /* VBAT 未供电时 BKPSRAM 无法保持；调试阶段暂不读取 Crash Record。 */
     /* stm32_report_previous_crash(); */
     SSD_LOGI("soft_ssd debug revision=%lu\r\n", (unsigned long)SSD_FIRMWARE_DEBUG_REVISION);
