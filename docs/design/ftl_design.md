@@ -17,7 +17,11 @@
 | v0.5 | 2026-09-23 | GC 多维度加权评分 + 六级触发 + 原子性保证（Journal/GC Bitmap）+ 企业级参考；Block 分类重写（拓扑/Super Block/温度/OP/Pre-conditioned）；Phase 规划扩展（P2.8~P2.11）；Allocator 接口增加温度参数 | Claude |
 | v0.6 | 2026-09-23 | ftl_service 主循环调度设计：三级模式（IDLE/NORMAL/BUSY）+ 企业级后台调度器参考 + 主循环完整形态 | Claude |
 | v0.7 | 2026-09-23 | Journal 自身可靠性设计（四层保护：ECC/CRC/entry_count/sequence）+ Journal Page 完整格式；BBT 完整设计（出厂扫描 + 运行时隔离 + Block Skip 替换 + 企业级参考） | Claude |
-| v0.8 | 2026-09-24 | 设计总结章节（§15）：设计定位/决策总览/硬件依赖审查/企业消费级一致性/Phase 实施顺序；ADR 扩展至 11 项（ADR-6~11）；§10 企业对比表更新；§13 小节编号修复；§1.4 决策表扩展；§5.3 Region 地址修正为 ch/ce/lun 参数 | Claude |
+| v0.9 | 2026-09-24 | Super Block 坏块处理升级：Block Skip → Block Sparing + Spare Pool；"两层映射"方案废弃，回归行业标准物理 PAA 直映射（§3.8.3/ADR-11/§9/§15 联动更新） | Claude |
+| v0.10 | 2026-09-24 | 新增静态磨损均衡（Static Wear Leveling）完整设计：三星企业级独立 Daemon 方案，三条件触发、冷 Block 选择算法、数据搬移流程、ftl_service 集成（§4.8 新增） | Claude |
+| v0.11 | 2026-09-24 | Journal 回收触发条件重写：三级触发（水位线 85%/95% + 写入量 4096 + 定时 10s），基于企业级"预算推导"法，配套"无阻塞原则"（§7.5 重写） | Claude |
+| v0.12 | 2026-09-24 | L2P 表磨损均衡定量分析（§14 U5 已解决+详细推导表）；§14 未解决问题列表更新（U2/U3/U4/U5 已解决，新增 §14.1 完整分析小节） | Claude |
+| v0.13 | 2026-09-24 | 元数据区从固定 32 blocks 改为动态分配：新增 Metadata Directory + Anchor Block 设计（§3.3/§5.5）；Region 写回双 Plane 交错 Multi-Plane 加速（§5.6）；§14 U1/U6 已解决 | Claude |
 
 ---
 
@@ -102,8 +106,9 @@ BAST（Block Associative Sector Translation）和 FAST（Fully Associative Secto
 | RAID | **不实现** | 复杂度高，当前 SLC 暂不需要 |
 | Super Block | **跨双 Plane** | 学习企业级跨 Die 条带化，当前双 Plane 配对 |
 | 温度分区 | **Hot / Cold 双 Open Super Block** | 提升 GC 效率，冷热分离 |
-| OP | **10% 预留（可配置 7~28%）** | RMA 坏块替换 + 性能保速 |
+| OP | **10% 预留（可配置 7~28%）** | 性能保速 + GC 缓冲 |
 | Free Pool | **三级（Pre-conditioned/Normal/Emergency）** | 学习 Background GC 和前台 IO 隔离 |
+| Bad Block | **Block Sparing（Spare Pool 保水位）** | 学习企业级坏块替换，不做额外映射层 |
 | SLC Cache | **不实现** | 本身就是 SLC NAND |
 
 ---
@@ -219,36 +224,94 @@ for (ch = 0; ch < CH_NUM; ch++)
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### 3.3 元数据区（Metadata Blocks）
+### 3.3 元数据区（Metadata Blocks）— 动态分配
 
-每 LUN 固定位置，不由 allocator 管理，出厂时必须是好块：
+传统消费级设计使用固定元数据区，但企业级（Samsung/Solidigm）使用**动态分配**：
+元数据和用户数据共享 Free Pool，通过 Metadata Directory 追踪元数据位置。
 
 ```
-┌──────────────┬──────┬────────────────────────────────┐
-│ 类型          │ 数量  │ 内容                            │
-├──────────────┼──────┼────────────────────────────────┤
-│ L2P 表        │ ~32  │ L2P mapping regions（本 LUN 的）│
-│ Checkpoint   │  2   │ L2P 快照 + header               │
-│ Journal      │  2   │ 元数据变更日志                   │
-│ BBT          │  1   │ 本 LUN 坏块表                   │
-│ Erase Count  │  1   │ 本 LUN 擦除计数表                │
-│ Reserved     │  2   │ 坏块替换备用                    │
-├──────────────┼──────┼────────────────────────────────┤
-│ 小计          │ ~40  │ 每 LUN 约 1% 容量               │
-└──────────────┴──────┴────────────────────────────────┘
+Anchor Block（固定位置，出厂好块）:
+  Block A0, A1（2 blocks）— 只存 Metadata Directory
+  Directory 记录每份元数据当前的物理位置
+  每次元数据位置变更时更新 Directory
+
+元数据（动态分配，从 Free Pool 取）:
+  ┌──────────────────────────────────────────────────┐
+  │  L2P Region     ── 分散在任意物理 Block 中        │
+  │  Journal        ── 在数据区中动态分配的 Block      │
+  │  Checkpoint     ── 同上                          │
+  │  BBT            ── 同上                          │
+  │  Erase Count    ── 同上                          │
+  └──────────────────────────────────────────────────┘
+
+数据区（User + OP + Spare Pool）:
+  与元数据共享同一个 Free Pool
+  分配时通过类型标记区分
 ```
 
-多 LUN 时元数据各 LUN 独立。L2P region 地址计算含 ch/ce/lun 参数：
+固定方案 vs 动态方案对比：
+
+| 维度 | 固定 32 blocks | 动态分配（企业级）|
+|------|--------------|------------------|
+| 磨损分布 | 集中在 32 块 | ✅ 均匀分布到所有好块 |
+| 坏块影响 | 需要 Reserved 替换 | ✅ 自动跳过，Free Pool 自然替换 |
+| 元数据 GC | 周期 GC 压缩 32 块 | ✅ 不需要（写新位置，旧位无效）|
+| 启动时间 | 扫描固定位置 | ✅ 只需读 Anchor 2 pages |
+| 复杂度 | 低 | ⚠️ 需维护 Directory |
+
+#### Anchor Block
 
 ```c
-static nand_paa_t l2p_region_ppa(uint8_t ch, uint8_t ce, uint8_t lun,
-                                  uint16_t region_id)
-{
-    uint16_t block_offset = region_id / PAGES_PER_BLOCK;
-    uint16_t page_in_block = region_id % PAGES_PER_BLOCK;
-    return paa_make(page_in_block, 0, L2P_BASE_BLOCK + block_offset, lun, 0);
+#define ANCHOR_BLOCKS      (2)     // 2 个固定 Block
+
+#define METADATA_TYPE_L2P_REGION    (0)
+#define METADATA_TYPE_JOURNAL       (1)
+#define METADATA_TYPE_CHECKPOINT    (2)
+#define METADATA_TYPE_BBT           (3)
+#define METADATA_TYPE_ERASE_COUNT   (4)
+
+typedef struct {
+    uint8_t  type;               // 元数据类型
+    uint16_t id;                 // L2P region_id / 0 for others
+    nand_paa_t paa;              // 物理位置
+} __attribute__((packed)) metadata_entry_t;  // 7 bytes × 128
+
+typedef struct {
+    uint32_t          magic;        // "ANDIR"
+    uint32_t          sequence;     // 单调递增
+    uint32_t          entry_count;  // 有效 entry 数
+    metadata_entry_t  entries[128]; // 128 × 7 = 896B
+    uint32_t          crc;
+} metadata_directory_t;             // ~904B，占 1 NAND page
+```
+
+- Anchor Block 出厂时必须为好块（预留 2 个固定好块）
+- Directory 冗余存 3 份（同 Block 的 Page 0/1/2）
+- 序列号单调递增，启动时取最大 sequence 有效
+
+#### 元数据分配 API
+
+```c
+/* 从 Free Pool 分配一个物理位置存放元数据 */
+nand_paa_t allocator_alloc_metadata(ftl_allocator_t *alloc,
+                                     uint8_t metadata_type,
+                                     uint16_t id,
+                                     uint8_t preferred_plane) {
+    /* 从 Free Pool 取一个块（元数据走 COLD 温度）*/
+    uint16_t block = allocator_select_block(alloc, FTL_TEMP_COLD,
+                                             preferred_plane);
+    nand_paa_t paa = paa_make(0, preferred_plane, block, 0, 0);
+
+    /* 更新 Metadata Directory */
+    metadata_dir_update(&g_metadata_dir, metadata_type, id, paa);
+
+    return paa;
 }
 ```
+
+分配时优先选低擦除次数的 Block，元数据自身也参与全局磨损均衡。
+Anchor Block 本身几乎不擦（只在 Directory 满页时才写一次，~16K 条元数据
+变更才写一次，1 个 Anchor Block Page = 64 次变更才满 → 非常非常低的磨损）。
 
 ### 3.4 Super Block（跨 Plane 条带化）
 
@@ -299,7 +362,7 @@ Cold Super Block:  ← 几乎不更新的数据（GC 搬移、元数据）
 | GC 搬移的热数据 | HOT | 仍可能频繁更新 |
 | L2P/Journal/元数据 | COLD | 几乎不更新 |
 
-### 3.6 OP 区域（Over-Provisioning 10%）
+### 3.6 OP 区域（Over-Provisioning 10%）与 Spare Pool（替换池）
 
 OP 是数据区中**不映射给用户**的好块，由 allocator 统一管理但 L2P 不覆盖。
 
@@ -307,19 +370,63 @@ OP 是数据区中**不映射给用户**的好块，由 allocator 统一管理�
 #define FTL_OP_PERCENT    (10)    // 10% 预留空间，可调 7~28，设为 0 禁用
 ```
 
-**OP 在 RMA 和性能恢复中的作用**：
+Spare Pool 是**独立于 OP 的替换储备**，专用于运行时坏块替换后补充 free pool 水位：
+
+```c
+#define FTL_SPARE_POOL_SIZE   (50)    // 替换池大小，覆盖生命周期新增坏块
+```
+
+#### OP 与 Spare Pool 的分工
+
+| 池 | 用途 | 大小 | 是否可以回收 |
+|----|------|------|------------|
+| OP 10% | GC 缓冲 + 性能保速 | ~405 blocks（总好块 × 10%） | ✅ GC 正常使用 |
+| Spare Pool | 坏块替换专用 | ~50 blocks | ❌ 只出不进，耗尽后容量下降 |
+
+#### OP 在 RMA 和性能恢复中的作用
 
 ```
 RMA 场景：
-  出厂时：总好块 4056，用户可见 3611 块（OP=10% 约 405 块）
-  使用中：新增 50 个坏块 → 从 OP 池替换 → 用户容量不变 ✅
-  没有 OP：坏块替换 → 用户容量减少 → 设备"变小" ❌
+  出厂时：总好块 4056，Spare Pool ~50，OP ~400，用户可见 ~3600 块
+  使用中：新增 50 个坏块 → Spare Pool 补充 → 用户容量不变 ✅
+  Spare Pool 耗尽后新增坏块 → 用户容量自然减少
 
 性能恢复场景：
   写入压力大时：OP 池提供 400+ Block GC 缓冲
   GC 有充足空间后台搬移 → 前台写入速度稳定 ✅
   没有 OP：free pool 耗尽 → 前台 IO 等 GC → 写入断崖下降 ❌
 ```
+
+#### 运行时坏块替换流程
+
+```
+Super Block {P0-BlockA, P1-BlockB} 中 P0-BlockA PROGRAM 失败：
+
+  ① 关闭这个 Super Block（不再写入新数据）
+  
+  ② 数据拯救：
+     P0-BlockA 的已写页 → 能读就搬，不能读就丢
+     P1-BlockB 的已写页 → 全部读到 buffer → 写入新 Super Block
+  
+  ③ 更新 L2P：
+     被搬移的数据 → L2P 指向新的物理地址
+  
+  ④ 标记坏块：
+     BBT 标记 P0-BlockA = BAD
+  
+  ⑤ 处理好的 Block：
+     P1-BlockB 擦除 → 成功则回 free pool，失败也标记坏块
+  
+  ⑥ Spare Pool 补充：
+     从 Spare Pool 取一个好块 → 加入 free pool（保容量水位）
+  
+  ⑦ 分配新的 Super Block：
+     从 free pool 取双 Plane Block 配对
+```
+
+**重要**：运行时 Multi-Plane PROGRAM 中一个 Plane 的 Block 损坏，
+**不需要将两个 Block 的编号对齐**——ONFI Multi-Plane 命令中
+每个 Plane 有独立的行地址（含自己的 Block#），异号不影响并行操作。
 
 ### 3.7 Pre-conditioned Pool（预擦除池 — 三级 Free Pool）
 
@@ -500,44 +607,69 @@ void ftl_check_bad_block(ftl_context_t *ftl, fc_command_status_t *completion) {
 #### 3.8.3 替换机制
 
 ```
-坏块替换策略：Block Skip（跳过）
+坏块替换策略：Block Sparing（替换池补充）
 
-  allocator_alloc() 中跳过坏块：
+  Sparing 不是"坏块→替换块"的静态映射，而是在坏块发生后
+  从 Spare Pool 取一个好块补充到 free pool，保容量水位。
+
+  运行时坏块替换流程（以 Super Block PROGRAM 失败为例）:
+
+    Super Block {P0-BlockA, P1-BlockB} 中 P0-BlockA PROGRAM 失败：
+
+      ① 关闭该 Super Block（不再写入新数据）
+      
+      ② 数据拯救：
+         P0-BlockA 的已写页 → 能读就搬，不能读就丢
+         P1-BlockB 的已写页 → 全部读到 buffer → 写入新 Super Block
+      
+      ③ 更新 L2P：
+         被搬移的数据 → L2P 指向新的物理地址
+      
+      ④ 标记坏块：
+         BBT 标记 P0-BlockA = BAD
+      
+      ⑤ 处理好的 Block：
+         P1-BlockB 擦除 → 成功则回 free pool，失败也标记坏块
+      
+      ⑥ Spare Pool 补充：
+         spare_pool_alloc() → 取一个好块加入 free pool（保容量水位）
+      
+      ⑦ 分配新的 Super Block：
+         从 free pool 取双 Plane Block 配对
+
+  allocator 分配时跳过坏块 + 通过 Spare Pool 保水位：
 
     nand_paa_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature) {
         uint16_t candidate;
 
         do {
-            /* 从 free pool 取一个 Block */
             candidate = alloc->free_blocks[--alloc->free_count];
-
-            /* 跳过坏块 */
-        } while (bbt_is_bad(&alloc->bbt, candidate));  
-
-        /* 检查是否 OP Block */
-        if (alloc->op_count > 0 && alloc->op_used < alloc->op_count) {
-            /* 还有 OP 余额 → 从 OP 池分配 */
-            return bbt_alloc_from_op(alloc, candidate);
-        }
+        } while (bbt_is_bad(&alloc->bbt, candidate));  // 跳过坏块
 
         return candidate;
     }
+
+    void ftl_handle_bad_block(ftl_allocator_t *alloc) {
+        if (alloc->spare_pool.count > 0) {
+            uint16_t replacement = alloc->spare_pool.blocks[--alloc->spare_pool.count];
+            alloc->free_blocks[alloc->free_count++] = replacement;  // 保水位
+        }
+        // spare pool 耗尽后 free_count 自然减少 → 容量下降
+    }
 ```
 
-**为什么用 Block Skip 而不是 Block Sparing**：
+**为什么用 Spare Pool 而不是 Block Remap Table**：
 
 ```
-Block Skip（本方案）：                              Block Sparing（企业级）：
-  alloc 时跳过坏块 → 容量自然减少                    预留替换块 → 坏块替换 → 容量不变
-
-  你的场景（512MiB SLC）：                            企业级场景（8TB QLC）：
-  出厂坏块 ≈ 2~10 个（SLC 优秀良率）                    出厂坏块 ≈ 数千个（QLC 良率差）
-  跳过 ~10 个对 512MiB 无感                             需要 sparing 弥补大容量损失
-
-结论：你的方案用 Block Skip 足够了。
-  OP 池（10%）自然吸收了坏块替换的容量损失。
-  即使新增 50 个坏块，OP 池也能覆盖。
+Block Remap Table（"两层映射"）                   Spare Pool（本方案）：
+  维护 bad_block → replacement_block 的映射       只补充 free pool，不做映射
+  读写需查 remap 表翻译                              PAA 直接物理，无需翻译
+  企业级不用这层间接                                  企业级也用 spare + data migration
 ```
+
+ONFI Multi-Plane 命令中每个 Plane 有独立的行地址，
+坏块导致配对异号不影响 Multi-Plane 并行操作，
+所以不需要 "Block Remap" 来对齐编号。
 
 #### 3.8.4 企业级 BBT 参考
 
@@ -546,7 +678,7 @@ Block Skip（本方案）：                              Block Sparing（企业
 | 出厂扫描 | 全量扫描 4096 Block | 全量扫描 | 增量扫描（只查未查过的）|
 | BBT 存储 | NAND 固定 Block ×3 冗余 | NAND ×3 冗余 | NAND + SRAM cache + RAID1 |
 | 运行时检测 | PROGRAM/ERASE 完成后 | 同左 | 同左 + ECC 趋势预测 |
-| 替换策略 | Block Skip | Block Skip | Stripe Skip + Sparing |
+| 替换策略 | Block Sparing（Spare Pool 保水位） | Block Skip | Stripe Skip + Sparing |
 | 新增坏块 | alloc 跳过 | 同左 | 动态映射表更新 |
 | 坏块预测 | 无 | 无 | 根据 ECC 上升趋势预测即将坏的 Block |
 
@@ -576,6 +708,7 @@ Block Skip（本方案）：                              Block Sparing（企业
 | SCAN_PAGES_PER_BLOCK | 2 | 出厂扫描每 Block 读的页数 |
 | MAX_BAD_BLOCKS | 200 | BBT bitmap 容量上限 |
 | ECC_PREDICT_THRESHOLD | 8 次 | ECC 连续上升触发预测 |
+| FTL_SPARE_POOL_SIZE | 50 | 替换池大小（覆盖生命周期坏块）|
 
 ### 3.9 与企业方案对比
 
@@ -709,6 +842,215 @@ GC 搬移（读 → 写新位置 → 更新 L2P → 擦除旧 Block）不是原�
 | GC_BANDWIDTH_HOST_ACTIVE | 10% | Host 活跃时 GC 带宽上限 |
 | GC_BANDWIDTH_HOST_IDLE | 100% | Host 空闲时 GC 带宽 |
 
+### 4.8 静态磨损均衡（Static Wear Leveling）
+
+消费级 SSD 大多不做静态 WL，依赖动态均衡就够了。但 TLC/QLC（3000~5000 P/E）下冷热不均会缩短设备寿命，所以企业级（Samsung）有独立的静态 WL Daemon。当前设计虽运行在 SLC 上，但以学习 TLC/QLC 企业级做法为目标，全量实现静态 WL。
+
+#### 4.8.1 总体架构
+
+静态 WL 作为 `ftl_service()` 中的独立后台任务，与 GC 并列：
+
+```
+ftl_service() Phase 3:
+  ├── flush:        dirty cache 写回
+  ├── GC:           回收有效页少的 Block（回收空间）
+  ├── WL:           ✅ 静态磨损均衡（搬冷数据，均衡擦除）
+  └── Checkpoint:   定期保存 L2P 快照
+```
+
+WL 与 GC 的分工：
+
+```
+           有效页少         有效页多
+  ┌────────┬──────────────┬──────────────┐
+  │擦除高   │ GC 选         │ 不管          │ ← 擦除次数已够
+  ├────────┼──────────────┼──────────────┤
+  │擦除低   │ GC/WL 都选    │ WL 选         │ ← WL 的目标
+  └────────┴──────────────┴──────────────┘
+```
+
+#### 4.8.2 触发条件（三条件 OR）
+
+```c
+#define WL_DELTA_THRESHOLD    (5000)    // max-min 差值
+#define WL_MAX_AVG_RATIO      (3)       // max/avg 比值
+#define WL_LOW_ZONE_WIDTH     (1000)    // 低擦除区宽度
+#define WL_LOW_BLOCK_PCT      (5)       // 低区 Block 占比阈值
+#define WL_MIN_INTERVAL       (1000)    // 最小间隔（写入次数）
+
+bool wl_should_trigger(ftl_context_t *ftl) {
+    if (ftl->total_writes - ftl->wl_last_run < WL_MIN_INTERVAL)
+        return false;
+
+    uint32_t max_ec = allocator_max_erase(&ftl->alloc);
+    uint32_t min_ec = allocator_min_erase(&ftl->alloc);
+    uint32_t avg_ec = allocator_avg_erase(&ftl->alloc);
+
+    /* 条件 1：最大/最小差值（核心触发） */
+    if (max_ec - min_ec >= WL_DELTA_THRESHOLD)
+        return true;
+
+    /* 条件 2：最大/平均比值（防止少数 Block 过热） */
+    if (max_ec >= avg_ec * WL_MAX_AVG_RATIO)
+        return true;
+
+    /* 条件 3：低擦除区 Block 数量（大量 Block 未充分磨损） */
+    uint32_t low_zone = min_ec + WL_LOW_ZONE_WIDTH;
+    uint32_t low_count = count_blocks_below(&ftl->alloc, low_zone);
+    if (low_count > ftl->alloc.total_blocks * WL_LOW_BLOCK_PCT / 100)
+        return true;
+
+    return false;
+}
+```
+
+三星企业级 SSD 使用此类多维度触发条件，确保在静负载等极端场景下也不会出现单个 Block 过度磨损。
+
+#### 4.8.3 受害块选择算法
+
+WL 选 victim 的目标与 GC 相反——**选有效页最多 + 擦除次数最少的 Block**（最冷的冷数据）。
+
+```c
+typedef struct {
+    bool      found;
+    uint16_t  plane_blocks[PLANE_NUM];   // 双 Plane Block 号
+    uint32_t  avg_erase;                 // victim 平均擦除次数
+    uint16_t  valid_pages;               // 有效页数
+} wl_victim_t;
+
+wl_victim_t wl_select_victim(ftl_context_t *ftl) {
+    wl_victim_t best = { .found = false, .valid_pages = 0 };
+    uint32_t min_ec = allocator_min_erase(&ftl->alloc);
+
+    for (int i = 0; i < ftl->alloc.closed_sb_count; i++) {
+        super_block_t *sb = &ftl->alloc.closed_sb_list[i];
+        if (sb_is_open(sb)) continue;
+
+        uint32_t sb_ec = super_block_avg_erase(ftl, sb);
+        if (sb_ec > min_ec + WL_LOW_ZONE_WIDTH) continue;  // 不在低区
+
+        uint16_t valid = reverse_bitmap_sb_valid_count(ftl, sb);
+        if (valid < sb->total_pages * WL_MIN_VALID_RATIO) continue;  // 有效页不够多
+
+        /* 评分：有效页越多越优先（越冷越值得搬） */
+        if (valid > best.valid_pages) {
+            best.found = true;
+            best.avg_erase = sb_ec;
+            best.valid_pages = valid;
+            best.plane_blocks[0] = sb->blocks[0];
+            best.plane_blocks[1] = sb->blocks[1];
+        }
+    }
+    return best;
+}
+```
+
+关键区别：
+
+| 维度 | GC victim | WL victim |
+|------|-----------|-----------|
+| 有效页 | 越少越好（快速回收空间） | 越多越好（冷数据标志） |
+| 擦除次数 | 越高越好（保护低擦除块） | 越低越好（需要被擦一次） |
+| 筛选条件 | valid_ratio < 30% | valid_ratio > WL_MIN_VALID_RATIO |
+
+#### 4.8.4 数据搬移流程
+
+```c
+void wl_relocate(ftl_context_t *ftl, wl_victim_t *victim) {
+    SSD_LOGI("[WL] relocating SB, erase=%u, valid=%d/%d",
+             victim->avg_erase, victim->valid_pages, PLANE_NUM * PAGES_PER_BLOCK);
+
+    /* Step 1: 遍历双 Plane 所有有效页，搬移到 Cold Super Block */
+    for (int plane = 0; plane < PLANE_NUM; plane++) {
+        for (int page = 0; page < PAGES_PER_BLOCK; page++) {
+            nand_paa_t paa = paa_make(page, plane, victim->plane_blocks[plane], 0, 0);
+            if (!reverse_bitmap_is_valid(ftl, paa)) continue;
+
+            uint8_t buf[PAGE_SIZE];
+            ftl_fc_read_page(paa, buf, PAGE_SIZE);
+            nand_paa_t new_paa = allocator_alloc(&ftl->alloc, FTL_TEMP_COLD);
+            ftl_fc_write_page(new_paa, buf, PAGE_SIZE, 0);
+            l2p_cache_remap_paa(&ftl->cache, paa, new_paa);
+            journal_append_remap(&ftl->journal, paa, new_paa);
+        }
+    }
+
+    /* Step 2: 擦除双 Block */
+    for (int plane = 0; plane < PLANE_NUM; plane++) {
+        uint16_t block = victim->plane_blocks[plane];
+        ftl_erase_block(ftl, block, victim->avg_erase, plane);
+        ftl->alloc.erase_counts[block]++;
+    }
+
+    /* Step 3: 归还到 Pre-conditioned Pool */
+    allocator_free_blocks(&ftl->alloc, victim->plane_blocks, PLANE_NUM);
+}
+```
+
+流程与 GC 搬移一致，区别在于：
+- 搬移目标是 **Cold Super Block**（温度分区到 COLD）
+- Journal 记录的是 **PAA 重映射**（不是 LBA→PAA 的变化）
+- 搬完后归还 Pre-conditioned Pool
+
+#### 4.8.5 WL 在 ftl_service 中的调度
+
+```c
+void ftl_service_phase3(ftl_context_t *ftl) {
+    switch (ftl->mode) {
+    case IDLE:
+        l2p_cache_flush_all(ftl);
+        gc_background(ftl, GC_IDLE_BUDGET);
+        ftl_wear_leveling(ftl);                 // ✅ IDLE 全力做 WL
+        journal_flush_page(ftl);
+        cp_check(ftl);
+        break;
+
+    case NORMAL:
+        l2p_cache_flush_background(ftl, 4);
+        gc_background(ftl, GC_NORMAL_BUDGET);
+        if (wl_should_trigger(ftl))
+            wl_relocate(ftl, wl_select_victim(ftl));  // ✅ NORMAL 可执行
+        break;
+
+    case BUSY:
+        l2p_cache_flush_background(ftl, 1);
+        if (ftl->free_pool.emergency > 0)
+            gc_emergency(ftl);
+        /* WL 不执行，前台 IO 优先 */
+        break;
+    }
+}
+```
+
+#### 4.8.6 对写放大（WA）的影响
+
+静态 WL 增加写放大，但在企业级场景中代价极低：
+
+```
+TLC（3000~5000 P/E，~400GB 容量）：
+  每次 WL：搬移 ~80 有效页（~320KB 写入）
+  生命周期内：~200 次 WL → ~64MB 额外写入
+  总写入能力：~1.2PB（100k per 4KB × 各因子）
+  WL 贡献的 WA：< 0.0001% → 可忽略
+
+当前 SLC（100k P/E，512MiB）：
+  触发次数更少，WA 更可忽略
+
+结论：静态 WL 对 WA 的影响微乎其微。
+```
+
+#### 4.8.7 参数建议
+
+| 参数 | 建议值 | 说明 |
+|------|--------|------|
+| WL_DELTA_THRESHOLD | 5000 | max-min 擦除差值触发 |
+| WL_MAX_AVG_RATIO | 3 | max/avg 擦除比 ≥ 3x 触发 |
+| WL_LOW_ZONE_WIDTH | 1000 | 低擦除区宽度 |
+| WL_LOW_BLOCK_PCT | 5 | 低区 Block 占比 ≥ 5% 触发 |
+| WL_MIN_INTERVAL | 1000 writes | 两次 WL 最小间隔 |
+| WL_MIN_VALID_RATIO | 70% | 只搬有效页 ≥ 70% 的冷 Block |
+| WL_BUDGET_SB | 1 SB/cycle | 每轮最多搬 1 个 Super Block |
+
 ---
 
 ## 5. L2P 映射表设计
@@ -723,7 +1065,7 @@ LBA 0x00003 ──→ CW 3 of Page X ──→ PAA(page, plane, block, page, cw=
 LBA 0x00004 ──→ CW 0 of Page X+1 ──→ ...
 ```
 
-- 1 entry = `nand_paa_t`（uint32_t），`[CW:2][PAGE:6][PLANE:1][BLOCK:11]` = 20 bit 有效
+- 1 entry = `nand_paa_t`（uint32_t），`[CW:2][PAGE:6][PLANE:1][BLOCK:12]` = 21 bit 有效
 - 每 1 个 LBA 对应 1 个 CW（512B user data）
 - **必须整页写入**：SLC NAND 不支持 partial page program，FTL 写 512B 的物理操作始终是整页（4 CW）写入
 
@@ -750,18 +1092,48 @@ L2P 表（NAND 元数据区 Block 0~31）：
   entry[511] → PAA for LBA = region_id × 512 + 511
 ```
 
-### 5.3 Region 物理地址计算
+### 5.3 Region 物理地址计算（通过 Metadata Directory）
+
+动态分配下，Region 的物理位置通过 Metadata Directory 查询，
+不再使用固定公式：
 
 ```c
-#define L2P_BASE_BLOCK      (0)     // 元数据从 Block 0 开始
-#define L2P_TOTAL_BLOCKS    (32)    // 32 blocks for full table
+/* 启动时加载 Metadata Directory */
+metadata_directory_t g_metadata_dir;
 
-static nand_paa_t l2p_region_ppa(uint8_t ch, uint8_t ce, uint8_t lun,
-                                  uint16_t region_id)
-{
-    uint16_t block_offset = region_id / PAGES_PER_BLOCK;
-    uint16_t page_in_block = region_id % PAGES_PER_BLOCK;
-    return paa_make(page_in_block, 0, L2P_BASE_BLOCK + block_offset, lun, 0);
+/* 读取 LBA 所在 Region 的物理位置 */
+static nand_paa_t l2p_region_ppa(uint16_t region_id) {
+    /* ① 查 Directory：优先 SRAM 中的缓存 */
+    metadata_entry_t *entry = metadata_dir_lookup(&g_metadata_dir,
+                                                   METADATA_TYPE_L2P_REGION,
+                                                   region_id);
+    if (entry != NULL) {
+        return entry->paa;   // 已有记录 → 直接返回物理 PAA
+    }
+
+    /* ② 首次访问（或 Directory 被 evict）：从 Free Pool 分配 */
+    /*    偶数 region_id → Plane 0，奇数 → Plane 1（双 Plane 交错）*/
+    uint8_t plane = (uint8_t)(region_id & 1U);
+
+    nand_paa_t paa = metadata_dir_alloc_region(&g_metadata_dir,
+                                                region_id, plane);
+    return paa;
+}
+
+/* 分配新的元数据物理位置 */
+nand_paa_t metadata_dir_alloc_region(metadata_directory_t *dir,
+                                      uint16_t region_id,
+                                      uint8_t plane) {
+    /* 从 Free Pool 取块（元数据走 COLD 温度）*/
+    uint16_t block = allocator_select_block(&g_alloc, FTL_TEMP_COLD, plane);
+
+    /* 起始页 = 0（每次分配从 Page 0 开始顺序写入）*/
+    nand_paa_t paa = paa_make(0, plane, block, 0, 0);
+
+    /* 更新 Directory */
+    metadata_dir_add(dir, METADATA_TYPE_L2P_REGION, region_id, paa);
+
+    return paa;
 }
 ```
 
@@ -771,6 +1143,233 @@ static nand_paa_t l2p_region_ppa(uint8_t ch, uint8_t ce, uint8_t lun,
 uint16_t region_id  = lba >> 9;      // lba / 512 → 0..2047
 uint16_t entry_idx  = lba & 0x1FF;   // lba % 512 → 0..511
 ```
+
+### 5.5 Metadata Directory（元数据目录）
+
+Metadata Directory 是动态元数据分配的核心数据结构，
+SRAM 常驻（~1KB），启动时从 Anchor Block 加载。
+
+#### 数据结构
+
+```c
+#define METADATA_DIR_ENTRIES    (128)
+
+typedef struct {
+    uint8_t   type;                // METADATA_TYPE_*
+    uint16_t  id;                  // L2P region_id / 0 for others
+    nand_paa_t paa;                // 物理 NAND 位置
+    uint32_t  sequence;            // 最近更新时间戳
+} metadata_dir_entry_t;             // 11 bytes
+
+typedef struct {
+    metadata_dir_entry_t entries[METADATA_DIR_ENTRIES];
+    uint16_t             count;                // 有效 entry 数
+    uint32_t             anchor_sequence;      // 当前 Anchor sequence
+    bool                 dirty;                // 是否有未写回 Anchor 的变更
+} metadata_dir_cache_t;             // SRAM 常驻 ~1.4KB
+```
+
+#### 核心操作
+
+```c
+/* 查找元数据位置 */
+nand_paa_t metadata_dir_lookup(metadata_dir_cache_t *dir,
+                                uint8_t type, uint16_t id) {
+    for (int i = 0; i < dir->count; i++) {
+        if (dir->entries[i].type == type && dir->entries[i].id == id)
+            return dir->entries[i].paa;
+    }
+    return PAA_INVALID;   // 未找到
+}
+
+/* 添加/更新元数据位置 */
+void metadata_dir_update(metadata_dir_cache_t *dir,
+                          uint8_t type, uint16_t id, nand_paa_t new_paa) {
+    /* 查找现有 entry（覆盖旧位置）*/
+    for (int i = 0; i < dir->count; i++) {
+        if (dir->entries[i].type == type && dir->entries[i].id == id) {
+            dir->entries[i].paa = new_paa;
+            dir->entries[i].sequence++;
+            dir->dirty = true;
+            return;
+        }
+    }
+    /* 新增 entry */
+    dir->entries[dir->count].type = type;
+    dir->entries[dir->count].id = id;
+    dir->entries[dir->count].paa = new_paa;
+    dir->entries[dir->count].sequence = dir->anchor_sequence;
+    dir->count++;
+    dir->dirty = true;
+}
+
+/* 将目录写回 Anchor Block（满 64 变更或 Checkpoint 时调用）*/
+void metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir) {
+    if (!dir->dirty) return;
+
+    metadata_directory_t anchor;
+    anchor.magic = 0x414E4449;    // "ANDIR"
+    anchor.sequence = ++dir->anchor_sequence;
+    anchor.entry_count = dir->count;
+    for (int i = 0; i < dir->count; i++) {
+        anchor.entries[i].type = dir->entries[i].type;
+        anchor.entries[i].id = dir->entries[i].id;
+        anchor.entries[i].paa = dir->entries[i].paa;
+    }
+    anchor.crc = crc32(&anchor, offsetof(typeof(anchor), crc));
+
+    /* 写入 Anchor Block（Multi-Plane 双份冗余）*/
+    fc_write_page(ANCHOR_BLOCK_PAA(anchor_page), &anchor, sizeof(anchor));
+    fc_write_page(ANCHOR_BLOCK_PAA(anchor_page + 1), &anchor, sizeof(anchor));
+
+    dir->dirty = false;
+}
+```
+
+#### Anchor 同步触发条件
+
+| 触发条件 | 说明 |
+|---------|------|
+| Directory 变更 ≥ 64 次 | 批次写入，减少 Anchor 擦写 |
+| Checkpoint 时 | 与 L2P flush 同步 |
+| ftl_service(IDLE) | 空闲时保证最新 |
+
+#### 启动加载 Anchor
+
+```c
+int metadata_dir_load(metadata_dir_cache_t *dir) {
+    /* 扫描两个 Anchor Block 各 3 个冗余页 */
+    metadata_directory_t candidates[6];
+    for (int i = 0; i < 6; i++) {
+        fc_read_page(anchor_paa(i), &candidates[i], sizeof(metadata_directory_t));
+    }
+
+    /* 选 magic 正确 + CRC 正确 + sequence 最大的 */
+    metadata_directory_t *best = NULL;
+    for (int i = 0; i < 6; i++) {
+        if (candidates[i].magic != 0x414E4449) continue;
+        if (crc32(&candidates[i], offsetof(typeof(candidates[i]), crc))
+            != candidates[i].crc) continue;
+        if (!best || candidates[i].sequence > best->sequence)
+            best = &candidates[i];
+    }
+
+    if (!best) return SSD_STATUS_IO_ERROR;  // 无有效 Anchor
+
+    /* 重建 SRAM cache */
+    dir->count = best->entry_count;
+    dir->anchor_sequence = best->sequence;
+    for (int i = 0; i < dir->count; i++) {
+        dir->entries[i].type = best->entries[i].type;
+        dir->entries[i].id = best->entries[i].id;
+        dir->entries[i].paa = best->entries[i].paa;
+    }
+    dir->dirty = false;
+    return SSD_STATUS_OK;
+}
+```
+
+### 5.6 双 Plane Region 交错与 flush 加速
+
+#### 背景
+
+传统的 L2P region 写回固定在 Plane 0 操作，浪费 Multi-Plane 能力：
+
+```
+传统（单 Plane）:
+  Plane 0: [R0][R1][R2][R3]...   64 次 flush = 64 × 300μs = 19.2ms
+
+企业级（双 Plane 交错）:
+  Plane 0: [R0][R2][R4][R6]...   ┐  32 次 Multi-Plane
+  Plane 1: [R1][R3][R5][R7]...   ┘  = 32 × 300μs = 9.6ms
+  → 写回速度翻倍！
+```
+
+#### Region 到 Plane 的映射
+
+```c
+/* Region 0 → Plane 0, Region 1 → Plane 1, Region 2 → Plane 0, ... */
+static uint8_t region_to_plane(uint16_t region_id) {
+    return (uint8_t)(region_id & 1U);
+}
+```
+
+偶数 Region 固定在 Plane 0，奇数在 Plane 1，保证任意相邻两次 flush 可配对。
+
+#### Cache Flush 的 Multi-Plane 优化
+
+```c
+/* 在 §6.2 的 Cache evict 和 background flush 中使用 */
+void l2p_cache_flush_pair(l2p_cache_t *cache) {
+    /* 找两个 DIRTY region，分别在 Plane 0 和 Plane 1 */
+    int p0_idx = -1, p1_idx = -1;
+
+    for (int i = 0; i < L2P_CACHE_SIZE; i++) {
+        if (cache->lines[i].state != L2P_CACHE_DIRTY) continue;
+        if (region_to_plane(cache->lines[i].region_id) == 0)
+            p0_idx = i;
+        else
+            p1_idx = i;
+        if (p0_idx >= 0 && p1_idx >= 0) break;
+    }
+
+    if (p0_idx >= 0 && p1_idx >= 0) {
+        /* 两页同 page#，不同 plane → Multi-Plane PROGRAM */
+        nand_paa_t paa0 = metadata_dir_lookup(&g_metadata_dir,
+                           METADATA_TYPE_L2P_REGION,
+                           cache->lines[p0_idx].region_id);
+        nand_paa_t paa1 = metadata_dir_lookup(&g_metadata_dir,
+                           METADATA_TYPE_L2P_REGION,
+                           cache->lines[p1_idx].region_id);
+
+        /* 确保 page# 相同且分属不同 plane */
+        uint8_t page = allocator_get_next_metadata_page(
+                         &g_alloc, 0, 1);
+
+        /* 构造 Multi-Plane 命令 */
+        fc_command_t *cmd = fc_command_alloc();
+        cmd->config.operation = OP_MULTI_PLANE_PROGRAM_PAGE;
+        // desc[0]: Plane0 region data
+        // desc[1]: Plane1 region data
+        fc_submit(cmd);
+
+        cache->lines[p0_idx].state = L2P_CACHE_CLEAN;
+        cache->lines[p1_idx].state = L2P_CACHE_CLEAN;
+
+    } else if (p0_idx >= 0) {
+        /* 只有一个 Plane 有 DIRTY → 单 Plane fallback */
+        flush_single_region(cache, p0_idx);
+    } else if (p1_idx >= 0) {
+        flush_single_region(cache, p1_idx);
+    }
+}
+```
+
+#### 性能对比
+
+| flush 方式 | 每次耗时 | 64 次 flush | 加速比 |
+|-----------|---------|------------|--------|
+| 单 Plane 逐次 | 300μs | 19.2ms | 1x |
+| 双 Plane 交错 Multi-Plane | 300μs | 9.6ms | **2x** |
+| 批量 4 条（每次 2 对） | 4×300μs | 4.8ms | **4x** |
+
+#### Directory 与双 Plane 的联动
+
+```
+启动时：
+  ① 读 Anchor → Metadata Directory → 知道每 Region 的位置
+  ② 偶 region → P0, 奇 region → P1（交错分配）
+  
+写入时：
+  flush(a) → metadata_dir_update(region_a, new_paa)
+  flush(b) → metadata_dir_update(region_b, new_paa)
+  
+读回时：
+  cache_miss(region_x) → metadata_dir_lookup(region_x) → 直接读
+```
+
+Metadata Directory 是双 Plane 交错的基础——没有 Directory 就不知道
+Region 当前在哪，也就无法利用双 Plane 并行。
 
 ---
 
@@ -962,12 +1561,188 @@ int ftl_write(ftl_context_t *ftl, ssd_lba_t lba, const void *data) {
   ④ 后台 flush dirty regions 到 NAND L2P 表
 ```
 
-### 7.5 Journal 回收
+### 7.5 Journal 回收（与 Checkpoint 协同）
 
-- Journal 填满一块后，配合 Checkpoint 截断
-- Checkpoint 时记下全局 sequence 号
-- 回收 sequence ≤ checkpoint_seq 的 journal 条目
-- 擦除 journal block 复用
+#### 7.5.1 核心问题
+
+Journal 是环形双 Block（J0 ↔ J1），写满后需要回切。
+但旧 Block 中的条目在 Checkpoint 截断之前不能安全擦除：
+
+```
+时序：
+  Phase 1: J0 写满 64 页（8192 条 entry，seq=1~8192）→ 切 J1
+  Phase 2: J1 写满 → 需回切 J0
+  Phase 3: J0 中还有 seq=1~8192 → 不能擦！
+  Phase 4: 必须先 Checkpoint（sequence ≥ 8192）→ 截断 → 擦 J0 复用
+```
+
+**Checkpoint 的作用**：记录一个全局 sequence 号 checkpoint_seq，
+Journal 中 sequence ≤ checkpoint_seq 的条目已写入 L2P table，可回收。
+
+#### 7.5.2 触发条件（三级触发）
+
+企业级 SSD（三星/铠侠）的 Journal 回收使用多级触发策略，
+核心原则是**前台 IO 不能被后台任务阻塞**。
+
+**条件 1：水位线触发（Journal 容量预警）**
+
+由系统最坏情况 NAND 带宽预算推导：
+
+```
+已知：
+  - Journal 容量：2 Block × 64 页 × 128 条 = 16,384 条
+  - NAND PROGRAM：~300μs/页（批量 flush 4 条 dirty cache 约 1.2ms）
+  - Checkpoint 需要 flush 最多 64 条 dirty cache
+  - 最坏情况：BUSY 模式下 Checkpoint 被延迟
+
+推导 85%（JOURNAL_FULL_THRESHOLD）：
+  剩余空间 = 15% × 128 页 ≈ 19 页
+  19 页 × 128 条 = 2,432 条 entry 的写入时间
+  2,432 次 ftl_write 期间 ftl_service 有足够多轮次分批完成 Checkpoint
+  → 85% 安全
+
+推导 95%（JOURNAL_CRITICAL）：
+  剩余空间 = 5% × 128 页 ≈ 6 页 = 768 条 entry
+  768 次写入 ≈ 768 × 300μs ≈ 230ms
+  这是最后防线——230ms 内必须完成 Checkpoint
+  触发后在 BUSY 模式下也强制执行
+```
+
+```c
+#define JOURNAL_FULL_THRESHOLD   (85)      // 水位线触发（%）
+#define JOURNAL_CRITICAL         (95)      // 紧急水位（阻塞触发）
+
+void journal_check_watermark(l2p_journal_t *j) {
+    uint8_t used = (j->current_page * 100 +
+                    j->current_entry * 100 / JOURNAL_ENTRIES_PER_PAGE)
+                   / PAGES_PER_BLOCK;
+
+    if (used >= JOURNAL_CRITICAL)
+        j->emergency = true;            // 强制 Checkpoint，前台可能等待
+    else if (used >= JOURNAL_FULL_THRESHOLD)
+        j->checkpoint_needed = true;    // 设标志，后台执行
+}
+```
+
+**条件 2：写入量触发（CP_WRITE_INTERVAL）**
+
+由 Journal 容量与安全余量推导：
+
+```
+Journal 总容量 = 16,384 条（2 Block × 64 页 × 128 条）
+CP_WRITE_INTERVAL = 4,096 次
+  4,096 × 4 = 16,384 ← 刚好 Journal 满
+  留 4 倍余量：Journal 至少可承受 4 次 Checkpoint 失败后写满
+
+消费级 DRAM-less 典型值 1,024~4,096 writes。
+企业级（有 DRAM Journal buffer）可达 100k~1M。
+```
+
+```c
+#define CP_WRITE_INTERVAL        (4096)    // 写入量触发
+```
+
+**条件 3：定时触发（CP_TIME_INTERVAL_MS）**
+
+Host 写入量很小时，条件 2 不会触发，但 Journal 中可能有少量残留。
+定时 Checkpoint 保证下次启动回放量有限：
+
+```
+场景：
+  Host 每 30 秒写 1 条数据
+  条件 2 永远不会触发（4096 条写入要 3.4 小时）
+  Journal 可能积累几百条
+    
+定时触发（10 秒）：
+  即使只写了几条，也会 Checkpoint
+  下次启动 Journal 几乎为空
+```
+
+```c
+#define CP_TIME_INTERVAL_MS      (10000)   // 定时触发（10 秒）
+```
+
+#### 7.5.3 Checkpoint 执行流程
+
+```c
+void ftl_checkpoint(ftl_context_t *ftl) {
+    /* ① flush 所有 dirty cache → L2P table（NAND 元数据区）*/
+    l2p_cache_flush_all(&ftl->cache);
+
+    /* ② 写 Checkpoint header（含当前 sequence）*/
+    l2p_checkpoint_header_t cp;
+    cp.sequence = ftl->journal.sequence_counter;
+    cp.journal_sequence = cp.sequence;
+    cp.timestamp = timer_get_ms();
+    cp.region_bitmap[...] = ...;        // 增量 checkpoint 只需 bitmap
+    checkpoint_write(&cp);
+
+    /* ③ 截断 Journal */
+    journal_truncate(&ftl->journal, cp.sequence);
+
+    /* ④ 擦除已回收的 Journal Block */
+    // journal_truncate 内部处理擦除
+
+    ftl->cp_sequence = cp.sequence;
+    SSD_LOGI("[CP] seq=%u done", cp.sequence);
+}
+```
+
+#### 7.5.4 在 ftl_service 中的决策
+
+```c
+void ftl_cp_check(ftl_context_t *ftl) {
+    l2p_journal_t *j = &ftl->journal;
+
+    /* ① 紧急水位 → 强制 Checkpoint */
+    if (j->emergency) {
+        ftl_checkpoint(ftl);
+        j->emergency = false;
+        return;
+    }
+
+    /* ② 写入量触发 */
+    if (ftl->total_writes % CP_WRITE_INTERVAL == 0) {
+        ftl_checkpoint(ftl);
+        return;
+    }
+
+    /* ③ 定时触发（仅 IDLE/NORMAL，BUSY 跳过）*/
+    if (ftl->mode != BUSY &&
+        timer_elapsed_ms(ftl->cp_timer) >= CP_TIME_INTERVAL_MS) {
+        ftl_checkpoint(ftl);
+        timer_reset(ftl->cp_timer);
+        return;
+    }
+
+    /* ④ 水位线标志（由 journal_check_watermark 在 append 时设置）*/
+    if (j->checkpoint_needed && ftl->mode != BUSY) {
+        ftl_checkpoint(ftl);
+        j->checkpoint_needed = false;
+        return;
+    }
+}
+```
+
+企业级"无阻塞原则"总结：
+
+| 条件 | 执行模式 | 是否阻塞前台 IO |
+|------|---------|----------------|
+| 水位线（85%） | NORMAL / IDLE | 否 |
+| 写入量（4096） | NORMAL / IDLE | 否 |
+| 定时（10s） | NORMAL / IDLE | 否 |
+| 紧急（95%） | 任何模式 | ⚠️ 可能阻塞 |
+
+#### 7.5.5 参数汇总
+
+| 参数 | 值 | 推导依据 |
+|------|----|---------|
+| CP_WRITE_INTERVAL | 4,096 writes | Journal 容量 16,384 条，4 倍余量 |
+| JOURNAL_FULL_THRESHOLD | 85% | 剩余 19 页够分批做完 Checkpoint |
+| JOURNAL_CRITICAL | 95% | 剩余 6 页，230ms 最后防线 |
+| CP_TIME_INTERVAL_MS | 10,000 ms | Host 静负载保底 |
+| FLUSH_BUDGET (NORMAL) | 4 line/轮 | 4 × 300μs ≈ 1.2ms，不阻塞前台 |
+| FLUSH_BUDGET (IDLE) | 全部 | NAND 空闲，全速 flush |
 
 ### 7.6 Journal 自身可靠性（掉电保护）
 
@@ -1118,16 +1893,226 @@ typedef struct {
 
 ### 8.3 启动恢复完整流程
 
+本文档的 Boot 框架（`firmware_boot_stage_storage`）提供了启动阶段入口，
+FTL 的恢复在此阶段完成。
+
+#### 8.3.1 核心矛盾
+
+Checkpoint 保存的是 L2P 全表（2048 regions = 4MB），
+而 SRAM cache 只有 64 个 line（~131KB）。
+**不能预加载全表，必须按需加载**。
+
+因此 Checkpoint 的作用不是"把全表搬到 SRAM"，
+而是**标记 Journal 回放的起点**——Journal 中 sequence ≤ cp_seq 的条目
+已通过后台 flush 写入了 NAND L2P 表，无需回放。
+
+#### 8.3.2 关机类型判断
+
+```c
+int ftl_boot_recovery(ftl_context_t *ftl) {
+    /* 1. 扫描 Checkpoint 区域 → 最新 header */
+    l2p_checkpoint_header_t cp;
+    int cp_found = find_latest_checkpoint(&cp);
+
+    /* 2. 扫描 Journal → 获取最后 sequence */
+    uint32_t journal_last_seq = journal_get_last_sequence(&ftl->journal);
+
+    /* 3. 判断关机类型 */
+    if (!cp_found) {
+        return boot_fresh_start(ftl);          // 出厂首次启动
+    }
+
+    if (journal_last_seq <= cp.journal_sequence) {
+        return boot_clean_start(ftl, &cp);     // 干净关机
+    } else {
+        return boot_power_failure_recovery(ftl, &cp);  // 异常掉电
+    }
+}
 ```
-冷启动恢复：
-  ┌─────────────────────────────────────────────────────┐
-  │ ① 扫描 Checkpoint 区域 → 最新 header（seq 最大）    │
-  │ ② 加载 Checkpoint 中的 L2P regions                  │
-  │ ③ 回放 Journal（seq > cp_seq 的条目）               │
-  │ ④ Cache 标记 DIRTY → 后台 flush                     │
-  │ ⑤ Controller → Ready                                │
-  └─────────────────────────────────────────────────────┘
+
+#### 8.3.3 出厂首次启动（Fresh Start）
+
+```c
+int boot_fresh_start(ftl_context_t *ftl) {
+    l2p_cache_init(&ftl->cache);               // Cache 全 INVALID
+    allocator_init(&ftl->alloc);               // 扫描 BBT、构建 free pool
+    bbt_load(&ftl->bbt);
+    erase_count_load(&ftl->alloc);
+    journal_init(&ftl->journal);               // Journal 空
+    ftl->cp_sequence = 0;
+    return SSD_STATUS_OK;
+}
 ```
+
+启动时间 ≈ BBT 扫描（250ms）+ Allocator（50ms）≈ **~300ms**。
+
+#### 8.3.4 干净关机启动（Clean Start）
+
+条件：Journal 中所有条目的 sequence ≤ Checkpoint 的 journal_sequence，
+即 Journal 已全部回放到 L2P table，无需回放。
+
+```c
+int boot_clean_start(ftl_context_t *ftl, l2p_checkpoint_header_t *cp) {
+    /* ① Cache 全 INVALID（不预加载任何 region）*/
+    l2p_cache_init(&ftl->cache);
+
+    /* ② Allocator 初始化 */
+    allocator_init(&ftl->alloc);               // 扫描 BBT
+    allocator_rebuild_sb_list(&ftl->alloc);    // 重建 Super Block 列表
+    allocator_recover_write_pointer(&ftl->alloc);  // 恢复写指针
+
+    /* ③ BBT 加载 */
+    bbt_load(&ftl->bbt);
+
+    /* ④ Erase Count 表加载 */
+    erase_count_load(&ftl->alloc);
+
+    /* ⑤ Controller → Ready */
+    ftl->cp_sequence = cp->sequence;
+
+    SSD_LOGI("[Boot] clean: free=%u, SB next_page=%d",
+             ftl->alloc.free_count, ftl->alloc.open_sb.next_page);
+    return SSD_STATUS_OK;
+}
+```
+
+**关键设计**：Cache 全空，首次 Host IO 触发的 cache miss 才从 NAND
+按需加载对应的 Region。不需要预加载 Checkpoint 中的数据。
+
+启动时间 ≈ BBT 扫描（250ms）+ Allocator 重建（50ms）+ 写指针恢复（2ms）
+≈ **~350ms**。
+
+#### 8.3.5 异常掉电恢复（Power Failure Recovery）
+
+条件：Journal 有未回放到 L2P table 的条目（sequence > cp_seq）。
+
+```c
+int boot_power_failure_recovery(ftl_context_t *ftl,
+                                 l2p_checkpoint_header_t *cp) {
+    /* ① Cache 全 INVALID */
+    l2p_cache_init(&ftl->cache);
+
+    /* ② Journal 批量回放 */
+    journal_replay_batched(&ftl->journal, &ftl->cache,
+                            cp->journal_sequence);
+
+    /* ③ Allocator 初始化 + 写指针扫描恢复 */
+    allocator_init(&ftl->alloc);
+    allocator_rebuild_sb_list(&ftl->alloc);
+    allocator_scan_write_pointer(&ftl->alloc);   // 异常掉电需扫描 NAND
+
+    /* ④ Controller → Ready */
+    ftl->cp_sequence = cp->sequence;
+
+    /* Cache 中的 DIRTY lines 由后台 flush 逐步写回 NAND L2P 表 */
+    SSD_LOGI("[Boot] power failure: %u journal entries replayed",
+             ftl->journal.replayed_count);
+    return SSD_STATUS_OK;
+}
+```
+
+#### 8.3.6 Journal 批量回放优化
+
+异常掉电时 Journal 可能包含数千条未回放条目。逐条回放会导致
+严重的 cache 颠簸——每次 LBA 变更都可能触发 region load/evict/flush。
+
+优化策略：按 Region 分组批量回放。
+
+```c
+#define JOURNAL_BATCH_SIZE  (2048)    // SDRAM 中暂存
+
+int journal_replay_batched(l2p_journal_t *journal, l2p_cache_t *cache,
+                            uint32_t since_seq) {
+    /* ① 把需要回放的 entry 读到 SDRAM buffer */
+    l2p_journal_entry_t batch[JOURNAL_BATCH_SIZE];
+    int count = journal_read_entries_since(journal, since_seq,
+                                           batch, JOURNAL_BATCH_SIZE);
+
+    /* ② 按 region_id 排序（同 Region 的聚在一起）*/
+    sort_by_region(batch, count);
+
+    /* ③ 逐 Region 回放：每个 Region 只加载一次 */
+    int i = 0;
+    while (i < count) {
+        uint16_t cur_region = lba_to_region(batch[i].lba);
+
+        /* 加载这个 Region（可能触发 evict + flush）*/
+        l2p_cache_line_t *line = l2p_cache_find_or_load(cache, cur_region);
+
+        /* 应用该 Region 的所有条目 */
+        while (i < count && lba_to_region(batch[i].lba) == cur_region) {
+            line->entries[batch[i].lba & 0x1FF] = batch[i].new_paa;
+            line->state = L2P_CACHE_DIRTY;
+            i++;
+        }
+    }
+
+    SSD_LOGI("[Journal] batch replay: %d entries in ~%d regions",
+             count, count / 32 + 1);
+    return count;
+}
+```
+
+**优化效果**：回放 2048 条条目，最多只需 64 次 Region load。
+平均每个 Region 含 ~32 条，比逐条回放的 2048 次 cache 操作减少 32 倍。
+
+#### 8.3.7 写指针恢复（Write Pointer Recovery）
+
+异常掉电时，Open Super Block 写到第 N 页时掉电，不知道当前写到哪一页。
+
+```c
+void allocator_scan_write_pointer(ftl_allocator_t *alloc) {
+    super_block_t *sb = &alloc->hot_open_sb;
+    uint8_t page_buf[16];         // 只读 16B 就够了
+
+    for (int page = 0; page < PAGES_PER_BLOCK; page++) {
+        for (int plane = 0; plane < PLANE_NUM; plane++) {
+            nand_paa_t paa = paa_make(page, plane, sb->blocks[plane], 0, 0);
+
+            fc_read_page_raw(paa, page_buf, 16);   // RAW 读，跳过 ECC
+
+            if (is_all_ff(page_buf, 16)) {
+                /* 找到第一个空白页 */
+                sb->next_page = page;
+                SSD_LOGI("[Boot] write pointer: SB next_page=%d", page);
+                return;
+            }
+        }
+    }
+}
+```
+
+干净关机时写指针由 allocator 的 next_page 在内存中跟踪，
+不需要扫描 NAND（`allocator_recover_write_pointer` 直接取内存值）。
+
+#### 8.3.8 启动时间总结
+
+| 阶段 | 干净关机 | 异常掉电 | 说明 |
+|------|---------|---------|------|
+| FW Stage: PLATFORM | ~10ms | ~10ms | 平台初始化 |
+| FW Stage: MEMORY | ~5ms | ~5ms | 内存初始化 |
+| FW Stage: IMAGE | ~2ms | ~2ms | 镜像验证 |
+| FC Init + NAND Probe | ~50ms | ~50ms | FC 层初始化 |
+| BBT 扫描 | ~250ms | ~250ms | 全量 4096 Block |
+| Checkpoint 扫描 | ~1ms | ~1ms | 读最新 header |
+| Journal 扫描 | ~1ms | ~1ms | 读最后 sequence |
+| Journal 回放 | 0ms | ~100ms | 仅异常掉电需要 |
+| Allocator 重建 | ~50ms | ~50ms | Super Block 列表 |
+| Write Pointer | ~2ms | ~5ms | 干净取内存值，异常需扫描 |
+| FW Stage: HOST | ~5ms | ~5ms | Host 初始化 |
+| **总计** | **~370ms** | **~480ms** | |
+
+异常掉电恢复后，Cache 中的 DIRTY lines 由后台 flush 逐步写回，
+不阻塞 Controller → Ready。
+
+#### 8.3.9 参数建议
+
+| 参数 | 建议值 | 说明 |
+|------|--------|------|
+| BOOT_CLEAN_TIME | ~370ms | 干净关机启动时间目标 |
+| BOOT_DIRTY_TIME | ~500ms | 异常掉电恢复时间目标 |
+| JOURNAL_BATCH_SIZE | 2048 entries | 批量回放 buffer（SDRAM）|
+| WRITE_PTR_SCAN_GRANULE | 16 bytes | 写指针扫描每次读取大小 |
 
 ---
 
@@ -1219,14 +2204,16 @@ typedef struct {
 | 理由 | 当前 NAND 本身就是 SLC，不存在 TLC/QLC 的慢速写入问题；SLC Cache 是 TLC/QLC SSD 的写加速技术 |
 | 拒绝方案 | （不适用）|
 
-### ADR-11：坏块管理（BBT）
+### ADR-11：坏块管理（BBT）— Block Sparing
 
 | 项目 | 决策 |
 |------|------|
-| 选型 | **出厂全量扫描 + 运行时隔离 + Block Skip 替换** |
-| 理由 | SLC 出厂坏块极少（~2~10 个），全量扫描 250ms 可接受；Block Skip 零额外硬件成本；OP 池自然吸收坏块替换的容量损失 |
-| 拒绝方案 | Block Sparing（企业级大容量 QLC 才需要）；ECC 趋势坏块预测（SLC 不需要）|
-| 代价 | 出厂扫描增加启动时间 ~250ms；需要 FC 支持 OOB/Spare 区读取 |
+| 选型 | **出厂全量扫描 + 运行时隔离 + Block Sparing（Spare Pool 保水位）** |
+| 理由 | 学习企业级坏块替换做法；Spare Pool 保证运行时坏块不减少用户容量；出厂坏块扫描 250ms 可接受；Sparing 不需要 block remap 表——只补充 free pool，不做映射 |
+| 拒绝方案 | Block Skip（容量自然减少，不符合企业级学习目标）；Block Remap Table（行业不用两层映射）|
+| 代价 | 出厂扫描增加启动时间 ~250ms；SPARE_POOL_SIZE × 1 Block 容量占用；需要 FC 支持 OOB/Spare 区读取 |
+
+**与 §3.6 OP 的关系**：Spare Pool 替换坏块，OP 池负责 GC 缓冲和性能保速，二者职责分离。
 
 ---
 
@@ -1695,14 +2682,86 @@ nand_paa_t ftl_write_data(ssd_lba_t lba, const uint8_t *data, uint32_t len) {
 
 ## 14. 未解决问题
 
-| # | 问题 | 影响 | 当前选项 |
-|---|------|------|---------|
-| 1 | Region 物理存储：固定 vs 动态元数据 block | 固定简单但磨损集中 | 固定 32 blocks（SLC 100k P/E 足够） |
-| 2 | Journal 可靠性：journal 本身怎么防掉电 | journal page program 到一半掉电 | 双页 + CRC 校验 |
-| 3 | 启动加载策略：加载 checkpoint 全表还是按需 miss | 启动延迟 vs 首次访问延迟 | 干净关机 → 按需 miss；异常掉电 → checkpoint |
-| 4 | Journal 回收时机 | 需要确保 L2P 表已同步 | 配合 checkpoint 同步截断 |
-| 5 | L2P 表磨损：元数据 block 擦除是否超过数据 block | 寿命不均衡 | region 更新合并 + checkpoint 批量写 |
-| 6 | 多 Plane 下 region 分布：是否跨 plane 并行写入 | L2P 写回性能 | 可优化为 Multi-Plane PROGRAM |
+| # | 问题 | 影响 | 状态 |
+|---|------|------|------|
+| 1 | Region 物理存储：固定 vs 动态元数据 block | 固定简单但磨损集中 | ✅ 已解决（见 §3.3/§5.5）：Metadata Directory + Anchor Block 动态分配，磨损均匀分布 |
+| 2 | Journal 可靠性：journal 本身怎么防掉电 | journal page program 到一半掉电 | ✅ 四层保护（见 §7.6） |
+| 3 | 启动加载策略：加载 checkpoint 全表还是按需 miss | 启动延迟 vs 首次访问延迟 | ✅ 已解决（见 §8.3）：干净关机按需 miss，异常掉电批量回放 |
+| 4 | Journal 回收时机 | 需要确保 L2P 表已同步 | ✅ 已解决（见 §7.5）：三级触发（水位线 85%/95% + 写入量 4096 + 定时 10s） |
+| 5 | L2P 表磨损：元数据 block 擦除是否超过数据 block | 寿命不均衡 | ✅ 有余量（见 §14.1）：动态分配后磨损均匀分布，Anchor 几乎无磨损 |
+| 6 | 多 Plane 下 region 分布：是否跨 plane 并行写入 | L2P 写回性能 | ✅ 已解决（见 §5.6）：偶/奇 Region 交错 Plane 0/1，Multi-Plane flush 并行，速度翻倍 |
+
+### 14.1 L2P 表磨损均衡分析
+
+#### 负载模型
+
+```
+NAND 规格：SLC, 100k P/E, 512MiB
+L2P 表：32 blocks × 64 pages = 2,048 页（日志结构写入）
+Cache：64 line，每条 DIRTY 触发一次 Region flush（写 1 页）
+全盘写 = 1,048,576 次 LBA 写入
+```
+
+#### L2P 表磨损推导
+
+每次全盘写产生的 Region flush 次数：
+
+```
+Cache 64 line，全盘随机写：
+  64 次 Write → Cache 满 → evict 1 个 DIRTY Region → flush 1 页
+  1,048,576 / 64 = 16,384 次 evict flush
+  加上 background flush / checkpoint flush ≈ 2,000 次
+  合计 ≈ 18,000 次 Region flush / 全盘写
+```
+
+元数据区 GC 频率：
+
+```
+元数据区总页数 = 32 × 64 = 2,048 页
+每次元数据 GC = 所有 32 blocks 擦除一次（压缩后重新分布）
+GC 频率 = 18,000 / 2,048 ≈ 8.8 次 / 全盘写
+每个 metadata block 擦除次数 = 8.8 次 / 全盘写
+寿命内全盘写 = 100,000 / 8.8 ≈ 11,363 次
+总写入量 = 11,363 × 512MiB ≈ 5.68 TB
+```
+
+#### 与数据区寿命对比
+
+| 区域 | 寿命（TB 写入） | 说明 |
+|------|---------------|------|
+| User + OP | ~12.98 TB | 4056 block × 3.2GB/block |
+| **L2P 表（32 blocks）** | **~5.68 TB** | 数据区的 44%，仍有余量 |
+| **Journal（2 blocks）** | **~800 GB** | ⚠️ 最短的瓶颈 |
+
+#### 每日写入 vs 实际寿命
+
+| 每日写入 | L2P 表寿命 | Journal 寿命 |
+|---------|-----------|-------------|
+| 10 GB（极端） | 1.6 年 | 80 天 ❌ |
+| 1 GB（较忙） | 15.6 年 | 2.2 年 ⚠️ |
+| 100 MB（学习/开发） | 156 年 ✅ | 22 年 ✅ |
+
+#### 结论
+
+**L2P 表（32 blocks）在学习和开发场景下有余量。**
+实际消耗比最坏模型更低——顺序写入的 cache 命中率高、批量 flush 合并更新、Journal 重复 LBA 会被截断。
+
+**Journal 是真正的瓶颈**（2 blocks 仅 ~800GB），但容易解决：
+
+```
+JOURNAL_BLOCKS: 2 → 4
+→ Journal 寿命从 800GB 翻倍到 1.6TB
+→ 10GB/天场景下从 80 天到 160 天
+
+如果还不够：JOURNAL_BLOCKS → 8，寿命 3.2TB
+代价仅仅是多占 6 个好 block（OP 池 10% = ~400 block 中占极小比例）
+```
+
+#### 缓解措施（可选实现）
+
+- **Region 更新合并**：多次写同一 Region 的 LBA 合并为一次 flush
+- **Checkpoint 批量写**：Checkpoint 统一更新多个 Region，分摊元数据 GC 开出
+- **增大 JOURNAL_BLOCKS**（推荐，最简单）
 
 ---
 
@@ -1729,7 +2788,7 @@ nand_paa_t ftl_write_data(ssd_lba_t lba, const uint8_t *data, uint32_t len) {
 | 温度分区 | Hot / Cold 双 Open Super Block | 消费级 2~4 温区 | ✅ 纯软件 |
 | OP 预留 | 10%（可配置 0~28%） | 消费级典型值 7~15% | ✅ 编译期配置 |
 | Free Pool | 三级（Pre-conditioned/Normal/Emergency） | 企业级 Background GC | ✅ 纯软件 |
-| Bad Block 管理 | 出厂全量扫描 + Block Skip | 消费级标准 | ⚠️ 需要 FC OOB 接口 |
+| Bad Block 管理 | 出厂全量扫描 + Block Sparing（Spare Pool） | 企业级标准做法 | ⚠️ 需要 FC OOB 接口 |
 | GC 算法 | 多维度加权评分 + 六级触发 | 与企业级一致 | ✅ 纯软件计算 |
 | GC 原子性 | Journal + GC Bitmap + 双拷贝容忍 | 消费级/企业级做法 | ✅ 纯软件 |
 | 主循环调度 | 三级模式（IDLE/NORMAL/BUSY） | 与消费级一致 | ✅ 纯软件 |
@@ -1760,7 +2819,7 @@ Write-back+J ✅   Write-back+J                   直写 DRAM
 Hot/Cold 分区 ✅  2~4 温区                       多级 + SLC cache
 三级 Free Pool ✅ 多层池                          Pre-conditioned + 紧急池
 OP 10% ✅         7~15%                          7~28%
-BBT Block Skip ✅ Block Skip                     Stripe Skip + Sparing
+BBT Sparing ✅    Block Skip                     Stripe Skip + Sparing
 无掉电电容 ✅     无掉电电容                      有掉电电容
 三级主循环 ✅     类似                            硬件时间预算调度器
 ```
