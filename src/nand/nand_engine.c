@@ -54,7 +54,7 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    for (; state->uop_index < NAND_ENGINE_MAX_UOPS; state->uop_index++)
+    for (; state->uop_index < NAND_ENGINE_MAX_UOPS; )
     {
         uop = &state->uops[state->uop_index];
 
@@ -69,6 +69,48 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
             return NAND_RESULT_INVALID_ARGUMENT;
         }
 
+        /* ── NAND_UOP_JUMP_IF_NOT_READY：引擎直接处理的条件跳转微指令 ── */
+        if (uop->type == NAND_UOP_JUMP_IF_NOT_READY)
+        {
+            if ((state->completion->nand_status & NAND_STATUS_READY) != 0U)
+            {
+                /* NAND ready → 推进到下一 UOP */
+                state->uop_index++;
+                continue;
+            }
+
+            /* NAND busy → 超时检测 */
+            if (state->wait_started == 0U)
+            {
+                if (!delay_dwt_cycles_now(&state->wait_start_cycles))
+                {
+                    state->active = 0U;
+                    return NAND_RESULT_INVALID_ARGUMENT;
+                }
+                state->wait_started = 1U;
+                state->wait_polls   = 0U;
+            }
+            if (state->wait_polls < UINT16_MAX)
+            {
+                state->wait_polls++;
+            }
+
+            if (delay_dwt_elapsed_us(state->wait_start_cycles, state->timing->busy_timeout_us) ||
+                (state->wait_polls >= state->timing->busy_timeout_us))
+            {
+                SSD_LOGE("nand: JUMP_IF_NOT_READY timeout op=%u polls=%u timeout_us=%u\r\n",
+                         state->request->operation,
+                         state->wait_polls,
+                         state->timing->busy_timeout_us);
+                state->active = 0U;
+                return NAND_RESULT_TIMEOUT;
+            }
+
+            /* 未超时：跳回 operand 步重新执行 70h 轮询序列 */
+            state->uop_index -= (uint16_t)uop->operand;
+            return NAND_RESULT_NOT_READY;
+        }
+
         handler = state->backend->handlers[uop->type];
 
         if (handler == NULL)
@@ -76,7 +118,7 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
             return NAND_RESULT_INVALID_ARGUMENT;
         }
 
-        if (((uop->type == NAND_UOP_WAIT_READY) || (uop->type == NAND_UOP_CHECK_READY)) &&
+        if ((uop->type == NAND_UOP_WAIT_READY) &&
             (state->wait_started == 0U))
         {
             if (!delay_dwt_cycles_now(&state->wait_start_cycles))
@@ -93,7 +135,7 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
         if (result == NAND_RESULT_OK)
         {
             if ((uop->type == NAND_UOP_DATA_IN) || (uop->type == NAND_UOP_DATA_OUT) ||
-                (uop->type == NAND_UOP_WAIT_READY) || (uop->type == NAND_UOP_CHECK_READY) ||
+                (uop->type == NAND_UOP_WAIT_READY) ||
                 (uop->type == NAND_UOP_CHECK_FAIL) || (uop->type == NAND_UOP_END))
             {
                 SSD_LOGD("nand: uop[%u]=%u OK op=%u nand_st=0x%02X polls=%u\r\n",
@@ -102,6 +144,10 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
                          (unsigned)state->completion->nand_status,
                          (unsigned)state->debug_polls);
             }
+            state->uop_index++;
+            state->wait_started = 0U;
+            state->wait_polls   = 0U;
+            continue;
         }
 
         if (result == NAND_RESULT_NOT_READY)
@@ -118,42 +164,22 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
                          state->completion->nand_status,
                          state->debug_polls);
             }
-            if ((uop->type == NAND_UOP_WAIT_READY) || (uop->type == NAND_UOP_CHECK_READY))
+            if (uop->type == NAND_UOP_WAIT_READY)
             {
                 if (state->wait_polls < UINT16_MAX)
                 {
                     state->wait_polls++;
                 }
 
-                /*
-                 * WAIT_READY / CHECK_READY: 引擎统一负责超时判定。
-                 * WAIT_READY handler 直接读 RB# GPIO 引脚电平，
-                 * LOW = NAND busy → NOT_READY，HIGH = ready → OK。
-                 *
-                 * 超时采用双保险：
-                 *   ① DWT 硬件周期计数器（精确到 cycle 级）
-                 *   ② wait_polls 计数上限（uint16_t 软保护）
-                 *
-                 * WAIT_READY 第一次进入时（wait_started==0）记录 DWT
-                 * 起点，后续 step 持续检查超时条件，防止 NAND 挂死。
-                 */
                 if (delay_dwt_elapsed_us(state->wait_start_cycles, state->timing->busy_timeout_us) ||
                     (state->wait_polls >= state->timing->busy_timeout_us))
                 {
-                    SSD_LOGE("nand: WAIT_READY/CHECK_READY timeout op=%u polls=%u timeout_us=%u\r\n",
+                    SSD_LOGE("nand: WAIT_READY timeout op=%u polls=%u timeout_us=%u\r\n",
                              state->request->operation,
                              state->wait_polls,
                              state->timing->busy_timeout_us);
                     state->active = 0U;
                     return NAND_RESULT_TIMEOUT;
-                }
-                if (uop->type == NAND_UOP_CHECK_READY)
-                {
-                    if (state->uop_index > 0U)
-                    {
-                        /* Re-read status (70h) before checking RDY again. */
-                        state->uop_index--;
-                    }
                 }
             }
             return NAND_RESULT_NOT_READY;
@@ -164,8 +190,6 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
             state->active = 0U;
             return result;
         }
-        state->wait_started = 0U;
-        state->wait_polls   = 0U;
     }
 
     state->active = 0U;

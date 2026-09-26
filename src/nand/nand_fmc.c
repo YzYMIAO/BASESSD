@@ -12,8 +12,6 @@ static __attribute__((used)) nand_fmc_config_t g_nand_fmc_config;
 
 static __attribute__((used)) nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_command_primary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_command_secondary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
@@ -22,8 +20,6 @@ static __attribute__((used)) nand_result_t nand_fmc_exec_row_2(void *context, co
 static __attribute__((used)) nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_read_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_check_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 
@@ -31,8 +27,6 @@ static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
     {
         [NAND_UOP_WAIT_READY]        = nand_fmc_exec_wait_ready,
         [NAND_UOP_COMMAND]           = nand_fmc_exec_command,
-        [NAND_UOP_COMMAND_PRIMARY]   = nand_fmc_exec_command_primary,
-        [NAND_UOP_COMMAND_SECONDARY] = nand_fmc_exec_command_secondary,
         [NAND_UOP_COLUMN_0]          = nand_fmc_exec_column_0,
         [NAND_UOP_COLUMN_1]          = nand_fmc_exec_column_1,
         [NAND_UOP_ROW_0]             = nand_fmc_exec_row_0,
@@ -41,8 +35,7 @@ static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
         [NAND_UOP_DATA_IN]           = nand_fmc_exec_data_in,
         [NAND_UOP_DATA_OUT]          = nand_fmc_exec_data_out,
         [NAND_UOP_DATA_OUT_STATUS]   = nand_fmc_exec_data_out_status,
-        [NAND_UOP_READ_STATUS]       = nand_fmc_exec_read_status,
-        [NAND_UOP_CHECK_READY]       = nand_fmc_exec_check_ready,
+        [NAND_UOP_JUMP_IF_NOT_READY] = NULL,
         [NAND_UOP_CHECK_FAIL]        = nand_fmc_exec_check_fail,
         [NAND_UOP_DELAY_US]          = nand_fmc_exec_delay_us,
 };
@@ -77,19 +70,15 @@ static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
     (void)completion;
 
     /*
-     * RB# GPIO 轮询，在 handler 内部完成超时等待，不依赖引擎的 DWT 超时。
+     * RB# GPIO 轮询：NAND 已由前面的 DELAY_US 保证过 tWB 窗口，
+     * handler 不再包含 tWB 保护，仅做纯 spin-wait。
      *
-     * tWB 保护：CONFIRM 命令后 NAND 需要最长 1 µs 才能拉低 RB#。
-     * 如果第一次读 GPIO 看到 HIGH，等 2 µs（> tWB max）后重读，
-     * 以区分"刚写完 CONFIRM 还没进入忙态"和"NAND 真 ready"。
-     *
-     * 确认 NAND busy（RB#=LOW）后，在 handler 内 spin-wait 直到 RB#=HIGH
-     * 或超时。这样引擎的 DWT 起点在 handler 返回后才会记录，不会因
-     * tWB 窗口期间计时导致误超时。
+     * 如果第一次读到 RB#=HIGH，说明 NAND 已经 ready 或根本没 busy，
+     * 直接返回 OK（极短 busy 或无 busy 均视为 ready）。
      */
     if (HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT, MT29F4G08ABADAWP_RB_GPIO_PIN) == 0U)
     {
-        /* RB# LOW → NAND 已 busy，spin-wait 直到 ready */
+        /* RB# LOW → NAND busy，spin-wait 直到 ready */
         uint32_t polls = 0U;
         while (HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT, MT29F4G08ABADAWP_RB_GPIO_PIN) == 0U)
         {
@@ -103,25 +92,7 @@ static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
         return NAND_RESULT_OK;
     }
 
-    /* RB# HIGH → tWB 窗口保护：等 2 µs 后确认 NAND 是否开始 busy */
-    delay_us(2U);
-    if (HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT, MT29F4G08ABADAWP_RB_GPIO_PIN) == 0U)
-    {
-        /* 现在 RB#=LOW → NAND 已 busy，spin-wait */
-        uint32_t polls = 0U;
-        while (HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT, MT29F4G08ABADAWP_RB_GPIO_PIN) == 0U)
-        {
-            polls++;
-            if (polls >= timing->busy_timeout_us)
-            {
-                return NAND_RESULT_TIMEOUT;
-            }
-            delay_us(1U);
-        }
-        return NAND_RESULT_OK;
-    }
-
-    /* RB# 仍 HIGH → NAND 已经 ready（极短的 busy 或无 busy） */
+    /* RB# HIGH → NAND 已 ready（极短的 busy 或无 busy） */
     return NAND_RESULT_OK;
 }
 
@@ -133,36 +104,6 @@ static nand_result_t nand_fmc_exec_command(void *context, const nand_uop_t *uop,
     (void)timing;
     (void)completion;
     *config->command = (uint8_t)uop->operand;
-    return NAND_RESULT_OK;
-}
-
-static nand_result_t nand_fmc_exec_command_primary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
-{
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-
-    (void)uop;
-    (void)timing;
-    (void)completion;
-    if (request->operation >= OP_COUNT)
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
-    *config->command = g_nand_operation_map[request->operation].command_1;
-    return NAND_RESULT_OK;
-}
-
-static nand_result_t nand_fmc_exec_command_secondary(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
-{
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-
-    (void)uop;
-    (void)timing;
-    (void)completion;
-    if (request->operation >= OP_COUNT)
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
-    *config->command = g_nand_operation_map[request->operation].command_2;
     return NAND_RESULT_OK;
 }
 
@@ -355,8 +296,8 @@ static nand_result_t nand_fmc_exec_data_out_status(void *context, const nand_uop
     uint8_t                  status;
 
     (void)uop;
-    /* Command-primary has just issued 70h or 78h; wait until DQ drives status. */
-    delay_us(timing->twh_us);
+    (void)timing;
+    /* 延时已由 UOP 序列中的 DELAY_US 保证，handler 直读 DQ 数据 */
     status                  = *config->data;
     completion->nand_status = status;
 
@@ -367,28 +308,6 @@ static nand_result_t nand_fmc_exec_data_out_status(void *context, const nand_uop
     }
 
     return NAND_RESULT_OK;
-}
-
-static nand_result_t nand_fmc_exec_read_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
-{
-    const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-
-    (void)uop;
-    (void)request;
-    *config->command = NAND_CMD_READ_STATUS;
-    /* tWHR is 60 ns minimum for this NAND. Use one full microsecond on the MCU. */
-    delay_us(timing->twh_us);
-    completion->nand_status = *config->data;
-    return NAND_RESULT_OK;
-}
-
-static nand_result_t nand_fmc_exec_check_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
-{
-    (void)context;
-    (void)uop;
-    (void)request;
-    (void)timing;
-    return ((completion->nand_status & NAND_STATUS_READY) != 0U) ? NAND_RESULT_OK : NAND_RESULT_NOT_READY;
 }
 
 static nand_result_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)

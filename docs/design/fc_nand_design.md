@@ -282,45 +282,119 @@ fc_status_t   fc_get_resource_stats(fc_resource_stats_t *); // 资源使用统�
 
 ### 3.1 微操作引擎 (nand_engine)
 
-设计理念：将每个 ONFI 命令拆解为 UOP（Micro-Operation）序列，由引擎逐步执行。
+设计理念：**软件微码（Software Microcode）**。每条 UOP（Micro-Operation）自包含、不查外部表、不含隐式逻辑，模仿企业级 SSD 控制器硬件 micro-sequencer 的设计。
 
-**UOP 类型**（15 种）：
+```
+企业级硬件微码（Intel / Samsung / Kioxia）:
+  INST_0: SET_CMD(0x00)    ← 指令自带命令值
+  INST_1: SET_ADDR(col0)   ← 值随指令走
+  INST_2: SET_CMD(0x30)    ← 又一个命令，自有值
+  INST_3: WAIT_RB#         ← 纯硬件等待
+  ...
 
-| UOP | 说明 |
-|-----|------|
-| WAIT_READY | 等待 R/B# 信号 |
-| COMMAND | 发送命令字节 |
-| COMMAND_PRIMARY | 发送首命令字节（READ_ID 等单命令操作） |
-| COMMAND_SECONDARY | 发送次命令字节 |
-| COLUMN_0/1 | 发送列地址 |
-| ROW_0/1/2 | 发送行地址 |
-| DATA_IN | 数据写入 NAND |
-| DATA_OUT | 从 NAND 读取数据 |
-| DATA_OUT_STATUS | 读取状态字节 |
-| READ_STATUS | 发送 70h，读取状态 |
-| CHECK_READY | 检查 Ready 位 |
-| CHECK_FAIL | 检查 Fail 位 |
-| END | 序列结束 |
+软件微码（当前实现）:
+  { COMMAND,   NAND_CMD_READ_PAGE_SETUP    },  // 自包含
+  { COLUMN_0,                            0U  },  // 列地址
+  { COLUMN_1,                            0U  },
+  { ROW_0,                               0U  },
+  { ROW_1,                               0U  },
+  { ROW_2,                               0U  },
+  { COMMAND,   NAND_CMD_READ_PAGE_CONFIRM },
+  { DELAY_US,  NAND_TIME_TWB_US           },  // 显式 tWB
+  { WAIT_READY,                          0U  },  // 纯 RB# 轮询
+```
 
-**执行模式**：
+三段式演进：
+
+| 阶段 | UOP 数量 | 设计问题 |
+|------|---------|---------|
+| Phase S 前 | 15 | `COMMAND_PRIMARY/SECONDARY` 查 `operation_map` 表，命令值不直观；隐式延时（tWB/tWHR/tADL）藏在 handler 内；`CHECK_READY` + `uop_index--` hack |
+| Phase S 改后 | 13 | 命令统一 `COMMAND` 直写；延时显式 `DELAY_US`；条件跳转 `JUMP_IF_NOT_READY` 替代引擎 hack；WAIT_READY 纯化 |
+
+**UOP 类型**（13 种）：
+
+| UOP | 说明 | 职责 |
+|-----|------|------|
+| WAIT_READY | 纯 RB# GPIO spin-wait | 不含 tWB/tADL 保护，不查表 |
+| COMMAND | 发送命令字节 | operand 直写命令值，自包含 |
+| COLUMN_0/1 | 发送列地址 | — |
+| ROW_0/1/2 | 发送行地址 | operand 选 row[] 索引（多 plane） |
+| DATA_IN | 数据写入 NAND | — |
+| DATA_OUT | 从 NAND 读取数据 | — |
+| DATA_OUT_STATUS | 读取状态字节 | 纯读 DQ，不含延时 |
+| JUMP_IF_NOT_READY | 条件跳转微指令 | operand=相对偏移步数，引擎直接处理 |
+| CHECK_FAIL | 检查 Fail 位 | nand_status & 0x01，失败终止序列 |
+| DELAY_US | 固定微秒延时 | delay_us(operand)，无硬件依赖 |
+| END | 序列终止 | — |
+
+**删除的 UOP**：
+
+| 删除的类型 | 替代方案 | 原因 |
+|-----------|---------|------|
+| ~~COMMAND_PRIMARY~~ | `COMMAND` + operand 直写 | 查 operation_map 表，不直观、不自包含 |
+| ~~COMMAND_SECONDARY~~ | `COMMAND` + operand 直写 | 同上 |
+| ~~READ_STATUS~~ | `COMMAND(70h) → DELAY_US → DATA_OUT_STATUS` | 复合操作拆为三步单责 UOP |
+| ~~CHECK_READY~~ | `JUMP_IF_NOT_READY(-3)` | 引擎不再需要 uop_index-- hack |
+
+**与主控微码对比**：
+
+| 特性 | 企业主控硬件微码 | 软件微码（当前） |
+|------|----------------|----------------|
+| 命令值来源 | 微指令内嵌 | `COMMAND` operand 直写 |
+| 固定延时 | 延时微指令 | `DELAY_US` |
+| 条件跳转 | `JUMP_IF_NOT_READY` | 引擎内置，相对偏移 |
+| tWB 保护 | 显式 DELAY 在 CONFIRM 后 | `DELAY_US(tWB)` + `WAIT_READY` |
+| tWHR | 显式 DELAY 在 70h 后 | `DELAY_US(tWH)` 在序列中 |
+| RB# 轮询 | 纯引脚电平检测 | `WAIT_READY` 纯 spin-wait |
+| 引擎层 | 无 UOP 特判 | 除 `WAIT_READY` / `JUMP` 超时外无特判 |
+| 无条件跳转 | 有 | 无（当前无需求） |
+| 子程序调用 | 有 | 无（当前无需求） |
+
+#### WAIT_READY — 纯 RB# GPIO 轮询
+
+WAIT_READY handler（`nand_fmc_exec_wait_ready`）在 handler 内部完成 RB# GPIO 轮询 + 超时等待，不返回 NOT_READY，**不依赖引擎的 DWT 超时**。
+
+流程（简化后）：
+1. 读 RB# GPIO：LOW → NAND busy → 1µs/步 spin-wait 直到 HIGH 或超时
+2. RB# HIGH → 直接返回 OK（NAND 已 ready）
+
+**不再包含 tWB 保护**。tWB（CONFIRM 后最长 1µs 等待 NAND 拉低 RB#）已由 UOP 序列中的 `{ DELAY_US, NAND_TIME_TWB_US }` 显式保证。
+
+#### JUMP_IF_NOT_READY — 条件跳转微指令
+
+JUMP_IF_NOT_READY 由引擎直接处理，不走 handler 表（handler 表项为 NULL）：
+
+1. 检查 `nand_status & NAND_STATUS_READY`：ready 则推进到下一 UOP
+2. busy 则检查 DWT 超时，未超时则 `uop_index -= operand` 跳回重发 70h 轮询序列
+
+典型的 70h 状态轮询 4 步循环：
+
+```
+步 N+0: { NAND_UOP_COMMAND,            0x70 }    // 发 70h
+步 N+1: { NAND_UOP_DELAY_US,             1U }    // tWHR
+步 N+2: { NAND_UOP_DATA_OUT_STATUS,     0U }     // 读状态
+步 N+3: { NAND_UOP_JUMP_IF_NOT_READY,   3U }     // busy 则跳回步 N
+```
+
+每次循环完整重发 70h、等 tWHR、读状态、检查 ready，无需引擎层特殊逻辑。
+
+#### 隐式延时显式化
+
+此前 tWB、tWHR、tADL 等固定延时分散在各 handler 内部，UOP 序列不可见。改后全部显式化：
+
+| 隐式延时 | 原位置 | 现位置 |
+|---------|--------|--------|
+| tWB（CONFIRM→RB# 拉低，1µs） | WAIT_READY handler 内 `delay_us(2U)` | `{ DELAY_US, NAND_TIME_TWB_US }` 在 CONFIRM 后 |
+| tWHR（70h→DQ 有效，1µs） | DATA_OUT_STATUS handler 内 `delay_us(twh_us)` | `{ DELAY_US, NAND_TIME_TWH_US }` 在 70h 后 |
+| tADL（11h 切换 plane，1µs） | WAIT_READY 伪装（RB# 不变） | `{ DELAY_US, 1U }` 在 11h 后 |
+
+#### 引擎执行模型
 
 ```
 nand_engine_execute()  —— 同步模式，阻塞直到完成
 nand_engine_start()    —— 异步模式，初始化状态机
 nand_engine_step()     —— 异步模式，推进一步，返回 NOT_READY 表示需继续轮询
 ```
-
-#### WAIT_READY — handler 内 spin-wait 超时
-
-WAIT_READY handler（`nand_fmc_exec_wait_ready`）在 handler 内部完成 RB# GPIO 轮询 + 超时等待，不返回 NOT_READY，**不依赖引擎的 DWT 超时**。此前的中断驱动方案（EXTI6）已回退。
-
-流程：
-1. 读 RB# GPIO：LOW → NAND busy → 1µs/步 spin-wait 直到 HIGH 或超时
-2. RB# HIGH → 等 2µs（tWB 保护窗口）后重读 → LOW 则进入 spin-wait，HIGH 则返回 OK
-
-这样避免了引擎 DWT 计时器在 tWB 期间过早启动导致的误超时。
-
-CHECK_READY 继续保持引擎层超时（DWT 计数器 + wait_polls），因为依赖 70h 状态寄存器，超时后重发 70h。
 
 ### 3.2 FMC 硬件后端 (nand_fmc)
 
@@ -2188,16 +2262,26 @@ PROGRAM 和 ERASE 不存在"延迟执行"场景，故不分拆。
 ```c
 /* WITH_DATA_OUT: 末尾含 DATA_OUT */
 { NAND_UOP_COMMAND, 30h },
+{ NAND_UOP_DELAY_US, 1U  },   /* tWB */
 { NAND_UOP_WAIT_READY,   },
 { NAND_UOP_DATA_OUT,     },   /* ← 立即输出 */
-{ NAND_UOP_READ_STATUS,  },
-{ NAND_UOP_END,          },
+{ NAND_UOP_COMMAND, 70h  },   /* 70h 状态轮询 */
+{ NAND_UOP_DELAY_US, 1U  },   /* tWHR */
+{ NAND_UOP_DATA_OUT_STATUS },
+{ NAND_UOP_JUMP_IF_NOT_READY, 3U },  /* busy 则跳回 70h */
+{ NAND_UOP_CHECK_FAIL,     },
+{ NAND_UOP_END,            },
 
 /* WITHOUT_DATA_OUT: 末尾不含 DATA_OUT */
 { NAND_UOP_COMMAND, 30h },
+{ NAND_UOP_DELAY_US, 1U  },   /* tWB */
 { NAND_UOP_WAIT_READY,   },
-{ NAND_UOP_READ_STATUS,  },   /* ← 跳过 DATA_OUT，直接检查状态 */
-{ NAND_UOP_END,          },
+{ NAND_UOP_COMMAND, 70h  },   /* 70h 状态轮询（跳过 DATA_OUT） */
+{ NAND_UOP_DELAY_US, 1U  },   /* tWHR */
+{ NAND_UOP_DATA_OUT_STATUS },
+{ NAND_UOP_JUMP_IF_NOT_READY, 3U },
+{ NAND_UOP_CHECK_FAIL,     },
+{ NAND_UOP_END,            },
 ```
 
 ### 17.5 Multi-Plane 操作 OP 码
