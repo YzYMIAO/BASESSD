@@ -2,6 +2,7 @@
 #include "munit.h"
 
 #include "common/common.h"
+#include "fc/fc.h"
 
 #if defined(MUNIT_ENABLE_TIMING)
 #    include "sys.h"
@@ -39,8 +40,8 @@ static void munit_print_time(FILE *fp, uint64_t ns)
     }
 }
 
-/* 首次调用时使能 DWT CYCCNT（如果尚未使能） */
-static void munit_timing_init(void)
+/* 首次调用时使能 DWT CYCCNT（如果尚未使能） — 被 MUNIT_TIMING_INIT() 宏替代，保留仅供参考。 */
+static void __attribute__((unused)) munit_timing_init(void)
 {
     volatile uint32_t *dwt_ctrl  = (volatile uint32_t *)0xE0001000UL;
     volatile uint32_t *demcr     = (volatile uint32_t *)0xE000EDFCUL;
@@ -157,6 +158,21 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...)
     va_start(ap, format);
     munit_logf_exv(MUNIT_LOG_ERROR, stderr, filename, line, format, ap);
     va_end(ap);
+
+    /* 打印 FC 资源使用情况 */
+    {
+        fc_resource_stats_t stats;
+        if (fc_get_resource_stats(&stats) == FC_STATUS_OK)
+        {
+            fprintf(stderr, "[RES] cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
+                    (unsigned)stats.command_used,   (unsigned)FC_COMMAND_POOL_DEPTH,
+                    (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
+                    (unsigned)stats.buffer_used,     (unsigned)FC_BUFFER_POOL_DEPTH,
+                    (unsigned)stats.sq_used,
+                    (unsigned)stats.hsq_used,
+                    (unsigned)stats.cq_used);
+        }
+    }
 
     // abort();
     //  ===== 嵌入式环境：打印信息后卡死 =====

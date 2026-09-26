@@ -20,7 +20,7 @@
 #include <string.h>
 
 /* 每次需要确认板上 ELF 是否更新时递增；仅用于开发阶段 UART 诊断。 */
-#define SSD_FIRMWARE_DEBUG_REVISION 21U
+#define SSD_FIRMWARE_DEBUG_REVISION 23U
 #define SSD_WATCHDOG_ENABLE         0U
 
 #if (SSD_WATCHDOG_ENABLE != 0U)
@@ -56,6 +56,7 @@ static int stm32_uart_log_flush_sink(uint32_t timeout_ms)
     return uart_log_flush(timeout_ms);
 }
 
+#if 0
 static void stm32_report_previous_crash(void)
 {
     const ssd_crash_record_t *record = ssd_crash_record_get();
@@ -74,6 +75,7 @@ static void stm32_report_previous_crash(void)
         ssd_crash_record_clear();
     }
 }
+#endif
 /* Newlib-nano calls this hook from __libc_init_array when no CRT provides it. */
 void _init(void)
 {
@@ -97,7 +99,7 @@ int main(void)
     sys_init();
     ssd_log_set_sink(stm32_uart_log_sink);
     ssd_log_set_flush_sink(stm32_uart_log_flush_sink);
-    ssd_log_set_level(SSD_LOG_DEBUG);
+    ssd_log_set_level(SSD_LOG_INFO);
     SSD_LOGD("debug logging enabled\r\n");
     /* VBAT 未供电时 BKPSRAM 无法保持；调试阶段暂不读取 Crash Record。 */
     /* stm32_report_previous_crash(); */
