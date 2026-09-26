@@ -1,183 +1,130 @@
 #!/bin/bash
 # debug_env.sh — 一键启动 WSL → Windows JLinkGDBServer 调试环境
 #
-# 用法:
-#   chmod +x scripts/debug_env.sh
-#   ./scripts/debug_env.sh
+# 架构（直连方案，无 portproxy）:
+#   GDB → localhost:2331 → socat → Windows_IP:2331 → JLink(0.0.0.0:2331)
 #
-# 本脚本自动完成:
-#   1. 检查并启动 Windows JLinkGDBServer
-#   2. 检查并重建 Windows portproxy (需管理员权限)
-#   3. 启动 WSL socat 端口转发
-#   4. 验证全链路连通性
+#   JLink 用 -LocalHostOnly 0 绑定 0.0.0.0:2331（所有接口），
+#   socat 直接把 WSL localhost 的流量转发到 Windows IP，
+#   完全绕过 portproxy 或 WSL2 内建转发。
 #
-# 依赖:
-#   - Windows: JLinkGDBServerCL.exe (V9.72, D:\StudyTool\Develop\JLink_V972\)
-#   - WSL:    socat, gdb-multiarch
+# 前置条件（只需一次）:
+#   无。不再依赖 portproxy / 防火墙规则 / WSL2 内建转发。
+#
+# 历史教训:
+#   - 2026-09-26: portproxy zombie rule 反复出现（§8.7/§8.9/§8.10），
+#     IP Helper 重启重建仍无法恢复。改用 -LocalHostOnly 0 直连后一次成功。
+#     → 彻底移除 portproxy/WSL2 内建转发两条 fallback 路径
+#   - 2026-09-25: nc -zv localhost 只能测 socat listen 端口，不能测转发是否可达
+#     → 先 socat 再 /dev/tcp 验证
+#   - 2026-09-25: netstat 看到 0.0.0.0:2331 是 svchost(portproxy) 不是 JLink
+#     → Step 1 不再暴力杀 0.0.0.0:PORT 的进程
 
-set -e
-
-# ========================
-# 配置区（按需修改）
-# ========================
 JLINK_EXE="D:\\StudyTool\\Develop\\JLink_V972\\JLinkGDBServerCL.exe"
 DEVICE="STM32H743II"
 PORT=2331
-# Windows 端 IP（WSL 默认网关 — 通过 ip route show default 自动获取）
 WINDOWS_IP=$(ip route show default | awk '{print $3}')
-# WSL 端 IP（仅用于输出参考）
-WSL_IP=$(hostname -I | awk '{print $1}')
 
 echo ""
 echo "============================================"
-echo "  WSL → J-Link 调试环境启动脚本"
+echo "  WSL -> J-Link 调试环境启动脚本"
 echo "============================================"
 echo "  设备     : $DEVICE"
 echo "  端口     : $PORT"
-echo "  WSL IP  : $WSL_IP"
 echo "  Win IP  : $WINDOWS_IP"
 echo "============================================"
 echo ""
 
-# -----------------------
-# Step 1: 检查 Windows JLinkGDBServer
-# -----------------------
-echo "[1/5] 检查 Windows JLinkGDBServer..."
+# ========== Step 1: 清干净所有旧进程 ==========
+echo "[1/4] 全清理旧进程..."
 
-JLINK_PID=$(powershell.exe "Get-Process JLinkGDBServerCL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id" 2>/dev/null | tr -d '\r')
-
-if [ -n "$JLINK_PID" ]; then
-    echo "  ✅ JLinkGDBServer 已在运行 (PID: $JLINK_PID)"
-else
-    echo "  ⚠️  JLinkGDBServer 未启动，正在启动..."
-    # 用 Start-Process 在后台启动（隐藏窗口）
-    powershell.exe -Command "& {
-        Start-Process -WindowStyle Hidden -FilePath '$JLINK_EXE' -ArgumentList '-device $DEVICE -if SWD -speed 4000 -port $PORT';
-        Start-Sleep 3;
-        Write-Host 'JLinkGDBServer started';
-    }" 2>&1 | grep -v "^$"
-    sleep 2
-
-    # 再次检查是否启动成功
-    JLINK_PID=$(powershell.exe "Get-Process JLinkGDBServerCL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id" 2>/dev/null | tr -d '\r')
-    if [ -n "$JLINK_PID" ]; then
-        echo "  ✅ JLinkGDBServer 启动成功 (PID: $JLINK_PID)"
-    else
-        echo "  ❌ JLinkGDBServer 启动失败!"
-        echo "     请在 Windows 手动启动:"
-        echo "     \"$JLINK_EXE\" -device $DEVICE -if SWD -speed 4000 -port $PORT"
-        exit 1
-    fi
-fi
-
-# -----------------------
-# Step 2: 检查并重建 portproxy
-# -----------------------
-echo "[2/5] 检查 Windows portproxy..."
-
-# 检查 portproxy 是否已存在
-PORTPROXY_EXISTS=$(powershell.exe "netsh interface portproxy show v4tov4 | findstr '0.0.0.0.*$PORT'" 2>/dev/null | tr -d '\r')
-
-if [ -n "$PORTPROXY_EXISTS" ]; then
-    echo "  ✅ portproxy 已存在: 0.0.0.0:$PORT → 127.0.0.1:$PORT"
-else
-    echo "  ⚠️  portproxy 不存在，正在创建..."
-    echo "  ⚠️  如后续提示错误，请以管理员身份运行:"
-    echo "       netsh interface portproxy add v4tov4 listenport=$PORT listenaddress=0.0.0.0 connectport=$PORT connectaddress=127.0.0.1"
-    echo ""
-    powershell.exe -Command "Start-Process -Verb RunAs -WindowStyle Hidden -FilePath 'netsh' -ArgumentList 'interface portproxy add v4tov4 listenport=$PORT listenaddress=0.0.0.0 connectport=$PORT connectaddress=127.0.0.1'" 2>&1 | grep -v "^$"
-    sleep 2
-
-    # 确认
-    PORTPROXY_EXISTS=$(powershell.exe "netsh interface portproxy show v4tov4 | findstr '0.0.0.0.*$PORT'" 2>/dev/null | tr -d '\r')
-    if [ -n "$PORTPROXY_EXISTS" ]; then
-        echo "  ✅ portproxy 创建成功"
-    else
-        echo "  ⚠️  portproxy 可能未创建成功（无管理员权限）"
-        echo "     手动执行（以管理员身份打开 CMD）:"
-        echo "     netsh interface portproxy add v4tov4 listenport=$PORT listenaddress=0.0.0.0 connectport=$PORT connectaddress=127.0.0.1"
-    fi
-fi
-
-# -----------------------
-# Step 3: 清理并重启 socat
-# -----------------------
-echo "[3/5] 设置 WSL socat 隧道..."
-
-# 杀掉所有旧的 socat 实例
-OLD_SOCAT=$(pgrep -f "socat.*TCP-LISTEN:$PORT" 2>/dev/null || true)
-if [ -n "$OLD_SOCAT" ]; then
-    kill $OLD_SOCAT 2>/dev/null || true
-    echo "  ⚠️  已清理旧 socat (PID: $(echo $OLD_SOCAT | tr '\n' ' '))"
-fi
-
-# 启动新的 socat
-# 架构: WSL localhost → WSL socat → Windows IP → Windows portproxy(0.0.0.0) → 127.0.0.1 → JLinkGDBServer
-#
-# ⚠️ 为什么用 Windows IP 而不是 localhost？
-#    WSL2 的 localhost 转发只适用于 Windows 进程绑定的 127.0.0.1。
-#    但 portproxy 绑定在 0.0.0.0（所有接口），用 localhost 转发时 WSL2 内核
-#    不会将流量路由到 portproxy。所以需要显式使用 Windows 的 WSL 虚拟网卡 IP
-#    来保证流量正确到达 portproxy。
-socat TCP-LISTEN:$PORT,reuseaddr,fork TCP:$WINDOWS_IP:$PORT &
-SOCAT_PID=$!
+# 杀 WSL 侧的 socat（避免端口占用）
+pkill -9 -f "socat.*$PORT" 2>/dev/null || true
 sleep 1
 
-# 检查 socat 是否运行
-if kill -0 $SOCAT_PID 2>/dev/null; then
-    echo "  ✅ socat 隧道运行中 (PID: $SOCAT_PID)"
-    echo "     localhost:$PORT → $WINDOWS_IP:$PORT"
-else
-    echo "  ❌ socat 启动失败"
-    exit 1
+# 杀 Windows 侧的 JLinkGDBServer（确保下次启动绑定正确的端口 + -LocalHostOnly 0）
+powershell.exe "taskkill /F /IM JLinkGDBServerCL.exe" 2>/dev/null || true
+sleep 2
+
+echo "  所有旧进程已清理"
+
+# ========== Step 2: 启动 JLink（-LocalHostOnly 0 直接绑定 0.0.0.0）==========
+echo "[2/4] 启动 Windows JLinkGDBServer..."
+
+echo "  $JLINK_EXE -device $DEVICE -if SWD -speed 4000 -port $PORT -LocalHostOnly 0"
+# -LocalHostOnly 0: JLink 绑定 0.0.0.0（所有网络接口），
+#                   不再需要 portproxy / WSL2 内建转发
+powershell.exe -Command "Start-Process -WindowStyle Normal -FilePath '$JLINK_EXE' -ArgumentList '-device $DEVICE -if SWD -speed 4000 -port $PORT -LocalHostOnly 0'" > /dev/null 2>&1 || true
+
+echo "  等待 JLink 绑定端口 $PORT..."
+JLINK_READY=false
+for i in $(seq 1 30); do
+    sleep 1
+    jpid=$(powershell.exe "Get-Process JLinkGDBServerCL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id" 2>/dev/null | tr -d '\r')
+    if [ -z "$jpid" ]; then
+        echo "  等待 JLink 进程... (${i}s)"
+        continue
+    fi
+    # JLink 带 -LocalHostOnly 0 时会绑定 0.0.0.0:PORT
+    # 先查 0.0.0.0，再查 127.0.0.1（兼容旧 JLink 版本）
+    bind_info=$(powershell.exe "netstat -ano | findstr '0.0.0.0:$PORT ' | findstr LISTENING" 2>/dev/null | head -1 | tr -d '\r')
+    if [ -z "$bind_info" ]; then
+        bind_info=$(powershell.exe "netstat -ano | findstr '127.0.0.1:$PORT ' | findstr LISTENING" 2>/dev/null | head -1 | tr -d '\r')
+    fi
+    if [ -n "$bind_info" ]; then
+        echo "  JLink 已绑定 (${i}s)"
+        JLINK_READY=true
+        break
+    fi
+    echo "  JLink 进程存在，等待绑定... (${i}s)"
+done
+
+if [ "$JLINK_READY" = false ]; then
+    echo "  自动启动失败，请手动打开 Windows -> 启动 JLinkGDBServer:"
+    echo "     & \"$JLINK_EXE\" -device $DEVICE -if SWD -speed 4000 -port $PORT -LocalHostOnly 0"
+    echo "  启动后按回车键继续..."
+    read -p "  按回车键继续..."
 fi
 
-# -----------------------
-# Step 4: 验证连通性
-# -----------------------
-echo "[4/5] 验证全链路连通性..."
+# ========== Step 3: socat 直连 Windows_IP ==========
+echo "[3/4] 启动 socat 隧道（直连 Windows_IP）..."
 
-if nc -zv localhost $PORT 2>/dev/null; then
-    echo "  ✅ localhost:$PORT 连接成功"
+pkill -9 -f "socat.*$PORT" 2>/dev/null || true
+sleep 1
+
+echo "  启动 socat: localhost:$PORT -> $WINDOWS_IP:$PORT"
+socat TCP-LISTEN:$PORT,reuseaddr,fork TCP:$WINDOWS_IP:$PORT &
+SOCAT_PID=$!
+sleep 2
+
+# 最终验证: 用 /dev/tcp 做真实连接测试
+# nc -zv localhost 只能测 socat 的 listen fd 是否打开，
+# 不能测 socat fork 出的子进程能否连上下游（2026-09-25 §8.8 教训）。
+# /dev/tcp 是 bash 内建的 TCP 连接，模拟 GDB 的真实连接行为。
+if timeout 3 bash -c "echo >/dev/tcp/localhost/$PORT" 2>/dev/null; then
+    echo "  socat 运行中 (PID: $SOCAT_PID, localhost:$PORT -> $WINDOWS_IP:$PORT)"
 else
-    echo "  ❌ localhost:$PORT 连接失败"
-    echo "     请检查:"
-    echo "       1. JLinkGDBServer 是否在 Windows 运行"
-    echo "       2. portproxy 是否创建成功 (管理员 CMD)"
-    echo "       3. Windows 防火墙是否放行 TCP/$PORT"
-    exit 1
+    echo "  socat 启动了但连接测试失败。请检查:"
+    echo "     1. JLinkGDBServer 是否在 Windows 运行（带 -LocalHostOnly 0）"
+    echo "     2. WSL 到 Windows 网络: nc -zv $WINDOWS_IP $PORT"
+    echo "     3. 如不通，手动启动 socat 后按 F5:"
+    echo "        socat TCP-LISTEN:$PORT,reuseaddr,fork TCP:$WINDOWS_IP:$PORT &"
 fi
 
-# -----------------------
-# Step 5: 检查 GDB 可用性
-# -----------------------
-echo "[5/5] 检查 GDB..."
-
-if command -v gdb-multiarch &>/dev/null; then
-    echo "  ✅ gdb-multiarch: $(which gdb-multiarch)"
-else
-    echo "  ⚠️  gdb-multiarch 未安装，正在安装..."
-    echo "     请手动执行: sudo apt-get install -y gdb-multiarch"
+# ========== Step 4: 更新 launch.json ==========
+echo "[4/4] 更新 launch.json..."
+LAUNCH_FILE="$(cd "$(dirname "$0")/.." && pwd)/.vscode/launch.json"
+if [ -f "$LAUNCH_FILE" ]; then
+    sed -i "s/\"gdbTarget\": \"localhost:[0-9]*\"/\"gdbTarget\": \"localhost:$PORT\"/" "$LAUNCH_FILE"
+    echo "  gdbTarget -> localhost:$PORT"
 fi
 
-# -----------------------
-# 完成
-# -----------------------
 echo ""
 echo "============================================"
-echo "  ✅ 调试环境就绪！请按 F5 开始调试"
+echo "  调试环境就绪！请按 F5 开始调试"
 echo "============================================"
 echo ""
-echo "  终止方式:"
-echo "    - 按 Ctrl+C 终止本脚本（会清理 socat）"
-echo "    - 单独停止 JLinkGDBServer:"
-echo "        powershell.exe \"taskkill /F /IM JLinkGDBServerCL.exe\""
-echo "    - 单独停止 socat:"
-echo "        kill $(pgrep -f 'socat.*$PORT')"
-echo ""
 
-# 等待 Ctrl+C 以清理
-trap "echo ''; echo '正在清理 socat...'; kill $SOCAT_PID 2>/dev/null; echo '已清理。'; exit 0" INT TERM
-
-# 保持脚本运行，等待用户 Ctrl+C
+# 捕获 Ctrl+C 只杀 socat，不影响 Windows 上的 JLink 窗口
+trap "echo '正在退出（不影响 JLink 窗口）'; kill $SOCAT_PID 2>/dev/null; true" INT TERM
 wait $SOCAT_PID
