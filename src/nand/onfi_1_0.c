@@ -6,9 +6,9 @@
 
 #define NAND_TIME_TWB_US   (1U)
 #define NAND_TIME_TRST_US  (500U)
-#define NAND_TIME_TPROG_US (700U)
-#define NAND_TIME_TBERS_US (5000U)
-#define NAND_TIME_TR_US    (38U)
+#define NAND_TIME_TPROG_US (700U)    /* tPROG typ=200µs, 3.5× 余量 */
+#define NAND_TIME_TBERS_US (5000U)   /* tBERS typ=700µs, ~7× 余量 */
+#define NAND_TIME_TR_US    (38U)     /* tR typ=25µs, 1.5× 余量 */
 #define NAND_TIME_TWH_US   (1U)
 
 static const nand_uop_t g_nand_normal_read_page_uops[] =
@@ -102,6 +102,7 @@ static const nand_uop_t g_nand_read_address_uops[] = {
     {    NAND_UOP_CHECK_READY, 0U},
     {NAND_UOP_COMMAND_PRIMARY, 0U},
     {       NAND_UOP_COLUMN_0, 0U},
+    {    NAND_UOP_WAIT_READY, 0U},
     {       NAND_UOP_DATA_OUT, 0U},
     {    NAND_UOP_READ_STATUS, 0U},
     {    NAND_UOP_CHECK_READY, 0U},
@@ -274,6 +275,7 @@ static const nand_uop_t g_nand_internal_program_uops[] = {
     {            NAND_UOP_ROW_0, 0U},
     {            NAND_UOP_ROW_1, 0U},
     {            NAND_UOP_ROW_2, 0U},
+    {          NAND_UOP_DATA_IN, 0U},
     {NAND_UOP_COMMAND_SECONDARY, 0U},
     {       NAND_UOP_WAIT_READY, 0U},
     {      NAND_UOP_READ_STATUS, 0U},
