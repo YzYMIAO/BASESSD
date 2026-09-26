@@ -29,6 +29,7 @@ typedef enum
     NAND_UOP_READ_STATUS,
     NAND_UOP_CHECK_READY,
     NAND_UOP_CHECK_FAIL,
+    NAND_UOP_DELAY_US,   /* 固定微秒延时，operand=延时微秒数 */
     NAND_UOP_END,
     NAND_UOP_COUNT,
 } nand_uop_type_t;

@@ -25,6 +25,7 @@ static __attribute__((used)) nand_result_t nand_fmc_exec_data_out_status(void *c
 static __attribute__((used)) nand_result_t nand_fmc_exec_read_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_check_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+static __attribute__((used)) nand_result_t nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 
 static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
     {
@@ -43,6 +44,7 @@ static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
         [NAND_UOP_READ_STATUS]       = nand_fmc_exec_read_status,
         [NAND_UOP_CHECK_READY]       = nand_fmc_exec_check_ready,
         [NAND_UOP_CHECK_FAIL]        = nand_fmc_exec_check_fail,
+        [NAND_UOP_DELAY_US]          = nand_fmc_exec_delay_us,
 };
 
 static const nand_engine_backend_t g_nand_fmc_backend =
@@ -396,4 +398,14 @@ static nand_result_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *u
     (void)request;
     (void)timing;
     return ((completion->nand_status & NAND_STATUS_FAIL) == 0U) ? NAND_RESULT_OK : NAND_RESULT_OPERATION_FAILED;
+}
+
+static nand_result_t nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+{
+    (void)context;
+    (void)request;
+    (void)timing;
+    (void)completion;
+    delay_us(uop->operand);
+    return NAND_RESULT_OK;
 }
