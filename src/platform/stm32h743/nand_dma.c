@@ -1,4 +1,8 @@
 #include "common/common.h"
+#include "nand/nand_config.h"
+
+#if CONFIG_NAND_DMA
+
 #include "nand_dma.h"
 
 #include "stm32h7xx_hal.h"
@@ -32,6 +36,38 @@ static DMA_HandleTypeDef g_nand_dma_out;  /* DMA2_Stream0: memory→FMC (PROGRAM
 /* ── 中断完成标志（volatile 防编译器优化） ── */
 static volatile uint8_t g_dma_data_out_done;  /* PROGRAM 方向 DMA 完成标志 */
 static volatile uint8_t g_dma_data_in_done;   /* READ 方向 DMA 完成标志 */
+
+/* 运行态 DMA 使能标志。默认等于 CONFIG_NAND_DMA。
+ * 可在 nand 空闲时动态切换。 */
+uint8_t g_nand_dma_enable = CONFIG_NAND_DMA;
+
+/*
+ * HAL_DMA_MspInit — DMA 硬件平台初始化（弱函数重写）。
+ *
+ * HAL_DMA_Init() 内部自动调用本函数。这里不调 HAL_NVIC 是为了和中断版
+ * DMA 一致（ISR 已注册），轮询版没有 MspInit 也能工作但时钟必须打开。
+ */
+void HAL_DMA_MspInit(DMA_HandleTypeDef *hdma)
+{
+    static uint8_t dma2_clock_enabled = 0U;
+
+    if (dma2_clock_enabled == 0U)
+    {
+        __HAL_RCC_DMA2_CLK_ENABLE();
+        dma2_clock_enabled = 1U;
+    }
+
+    if (hdma->Instance == DMA2_Stream0)
+    {
+        HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5U, 0U);
+        HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+    }
+    else if (hdma->Instance == DMA2_Stream1)
+    {
+        HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, 5U, 0U);
+        HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
+    }
+}
 
 static nand_dma_result_t nand_dma_init_stream(DMA_HandleTypeDef *handle, DMA_Stream_TypeDef *instance)
 {
@@ -188,18 +224,61 @@ uint8_t nand_dma_data_in_done(void)
     return g_dma_data_in_done;
 }
 
+void nand_dma_clear_flags(void)
+{
+    g_dma_data_out_done = 0U;
+    g_dma_data_in_done  = 0U;
+}
+
+uint8_t nand_dma_is_out_busy(void)
+{
+    /* 读 DMA2 Stream0 CR.EN 位 — 1 = 传输进行中 */
+    return (DMA2_Stream0->CR & DMA_SxCR_EN) != 0U ? 1U : 0U;
+}
+
+uint8_t nand_dma_is_in_busy(void)
+{
+    /* 读 DMA2 Stream1 CR.EN 位 — 1 = 传输进行中 */
+    return (DMA2_Stream1->CR & DMA_SxCR_EN) != 0U ? 1U : 0U;
+}
+
+void nand_dma_abort_out(void)
+{
+    if (HAL_DMA_Abort(&g_nand_dma_out) != HAL_OK)
+    {
+        /* Abort 失败时强制停止，不阻塞 */
+        (void)HAL_DMA_Abort_IT(&g_nand_dma_out);
+    }
+    g_dma_data_out_done = 0U;
+}
+
+void nand_dma_abort_in(void)
+{
+    if (HAL_DMA_Abort(&g_nand_dma_in) != HAL_OK)
+    {
+        (void)HAL_DMA_Abort_IT(&g_nand_dma_in);
+    }
+    g_dma_data_in_done = 0U;
+}
+
 /*
  * DMA2_Stream0 传输完成 ISR（PROGRAM 方向：memory→FMC）。
  * 由 stm32h7rsxx_it.c 的 DMA2_Stream0_IRQHandler() 调用。
  */
 void nand_dma_irq_handler_data_out(void)
 {
+    /*
+     * 在 HAL_DMA_IRQHandler 清除标志前先捕获 TCIF。
+     * STM32H7 HAL 的 IRQHandler 内部会调用 __HAL_DMA_CLEAR_FLAG，
+     * 如果在之后才检查标志就永远读不到了。
+     */
+    uint32_t tcif = __HAL_DMA_GET_FLAG(&g_nand_dma_out, DMA_FLAG_TCIF0_4);
+
     HAL_DMA_IRQHandler(&g_nand_dma_out);
 
-    /* TCIF0_4: Stream0/4 的传输完成标志 */
-    if (__HAL_DMA_GET_FLAG(&g_nand_dma_out, DMA_FLAG_TCIF0_4) != 0U)
+    if (tcif != 0U)
     {
-        __HAL_DMA_CLEAR_FLAG(&g_nand_dma_out, DMA_FLAG_TCIF0_4);
+        /* 不重复清标志（HAL 已清），只设软件完成标志 */
         g_dma_data_out_done = 1U;
     }
 }
@@ -214,12 +293,13 @@ void nand_dma_irq_handler_data_out(void)
  */
 void nand_dma_irq_handler_data_in(void)
 {
+    /* 同 data_out：HAL 清除标志前先捕获 */
+    uint32_t tcif = __HAL_DMA_GET_FLAG(&g_nand_dma_in, DMA_FLAG_TCIF1_5);
+
     HAL_DMA_IRQHandler(&g_nand_dma_in);
 
-    /* TCIF1_5: Stream1/5 的传输完成标志 */
-    if (__HAL_DMA_GET_FLAG(&g_nand_dma_in, DMA_FLAG_TCIF1_5) != 0U)
+    if (tcif != 0U)
     {
-        __HAL_DMA_CLEAR_FLAG(&g_nand_dma_in, DMA_FLAG_TCIF1_5);
         g_dma_data_in_done = 1U;
     }
 }
@@ -258,3 +338,5 @@ void nand_dma_cache_invalidate(uint8_t *buffer, uint16_t length)
     (void)length;
 #endif
 }
+
+#endif /* CONFIG_NAND_DMA */

@@ -90,6 +90,20 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
 
         result = handler(state->backend->context, uop, state->request, state->timing, state->completion);
 
+        if (result == NAND_RESULT_OK)
+        {
+            if ((uop->type == NAND_UOP_DATA_IN) || (uop->type == NAND_UOP_DATA_OUT) ||
+                (uop->type == NAND_UOP_WAIT_READY) || (uop->type == NAND_UOP_CHECK_READY) ||
+                (uop->type == NAND_UOP_CHECK_FAIL) || (uop->type == NAND_UOP_END))
+            {
+                SSD_LOGD("nand: uop[%u]=%u OK op=%u nand_st=0x%02X polls=%u\r\n",
+                         (unsigned)state->uop_index, (unsigned)uop->type,
+                         (unsigned)state->request->operation,
+                         (unsigned)state->completion->nand_status,
+                         (unsigned)state->debug_polls);
+            }
+        }
+
         if (result == NAND_RESULT_NOT_READY)
         {
             if (state->debug_polls < UINT16_MAX)
@@ -112,33 +126,34 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
                 }
 
                 /*
-                 * WAIT_READY: 超时完全由 handler 全权处理（含 GPIO 后备确认），
-                 * 引擎不干预。handler（nand_fmc_exec_wait_ready）内部分三步：
-                 *   ① 布防 EXTI6 上升沿中断
-                 *   ② 中断触发 → NAND 就绪
-                 *   ③ 超时 → GPIO 轮询最后一次确认
-                 * 因此引擎直接返回 NOT_READY，不插入额外超时逻辑。
+                 * WAIT_READY / CHECK_READY: 引擎统一负责超时判定。
+                 * WAIT_READY handler 直接读 RB# GPIO 引脚电平，
+                 * LOW = NAND busy → NOT_READY，HIGH = ready → OK。
+                 *
+                 * 超时采用双保险：
+                 *   ① DWT 硬件周期计数器（精确到 cycle 级）
+                 *   ② wait_polls 计数上限（uint16_t 软保护）
+                 *
+                 * WAIT_READY 第一次进入时（wait_started==0）记录 DWT
+                 * 起点，后续 step 持续检查超时条件，防止 NAND 挂死。
                  */
-                if (uop->type == NAND_UOP_WAIT_READY)
-                {
-                    return NAND_RESULT_NOT_READY;
-                }
-
-                /* CHECK_READY: 依赖 70h 状态寄存器，引擎负责超时判定 */
                 if (delay_dwt_elapsed_us(state->wait_start_cycles, state->timing->busy_timeout_us) ||
                     (state->wait_polls >= state->timing->busy_timeout_us))
                 {
-                    SSD_LOGE("nand: CHECK_READY timeout op=%u polls=%u timeout_us=%u\r\n",
+                    SSD_LOGE("nand: WAIT_READY/CHECK_READY timeout op=%u polls=%u timeout_us=%u\r\n",
                              state->request->operation,
                              state->wait_polls,
                              state->timing->busy_timeout_us);
                     state->active = 0U;
                     return NAND_RESULT_TIMEOUT;
                 }
-                if (state->uop_index > 0U)
+                if (uop->type == NAND_UOP_CHECK_READY)
                 {
-                    /* Re-read status (70h) before checking R/B# again. */
-                    state->uop_index--;
+                    if (state->uop_index > 0U)
+                    {
+                        /* Re-read status (70h) before checking RDY again. */
+                        state->uop_index--;
+                    }
                 }
             }
             return NAND_RESULT_NOT_READY;

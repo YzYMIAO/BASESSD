@@ -103,7 +103,8 @@ typedef struct fc_cmd_conf_t
     DWORD random    : 1; /* FC_RANDOM_ENABLE / FC_RANDOM_DISABLE. */
     DWORD chain     : 1; /* FC_CHAIN_END / FC_CHAIN_MORE. */
     DWORD page_type : 2; /* fc_page_type_t: LP/MP/UP/TP. */
-    DWORD reserved  : 6; /* Reserved for future configuration. */
+    DWORD multi_plane : 3; /* 0=single; N=N-plane → total desc = multi_plane * (cw+1) */
+    DWORD reserved    : 3; /* Reserved for future configuration. */
 } fc_cmd_conf_t;
 
 /* Descriptor for one CW, including its physical address, Buffer ID, link ID, status, ECC info, and FAA. */
@@ -137,21 +138,20 @@ struct fc_command_t
     uint8_t       parameter3;         /* Command parameter byte 3. */
 };
 
-/* CQ entry containing IDs, per-CW status and ECC info; FTL resolves Command and Descriptor data by ID. */
+/* CQ entry containing command-level status and ECC info; FTL resolves Command and Descriptor data by ID.
+ * Per-CW detail (status, ecc_bits) lives in the descriptor chain (fc_descriptor_t.status / .ecc_bits).
+ * The aggregated status byte uses FC_CW_STATUS_* bits: READY=0x40, NAND_FAIL=0x01, TIMEOUT=0x02, etc. */
 struct fc_command_status_t
 {
     DWORD command_id : 16; /* Completed Command Pool ID. */
-    DWORD desc_id    : 16; /* First Descriptor ID; 0xFFFF means invalid. */
+    DWORD desc_id    : 16; /* First Descriptor ID; 0xFFFF means invalid. Updated to first-failing desc on error. */
     DWORD module     : 4;  /* Copy of command->module for direct routing without ID lookup. */
     DWORD ecc_bit0   : 8;  /* CW0 ECC corrected bit count */
     DWORD ecc_bit1   : 8;  /* CW1 ECC corrected bit count */
     DWORD ecc_bit2   : 8;  /* CW2 ECC corrected bit count */
     DWORD ecc_bit3   : 8;  /* CW3 ECC corrected bit count */
-    DWORD reserved   : 4;
-    DWORD status0    : 8; /* CW0 status. */
-    DWORD status1    : 8; /* CW1 status. */
-    DWORD status2    : 8; /* CW2 status. */
-    DWORD status3    : 8; /* CW3 status. */
+    DWORD status     : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
+    DWORD reserved   : 20; /* Was: status0:8, status1:8, status2:8, status3:8 */
 };
 
 fc_status_t fc_command_validate(const fc_command_t *command);

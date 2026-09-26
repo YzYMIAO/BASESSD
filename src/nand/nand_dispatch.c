@@ -35,7 +35,7 @@ static uint8_t              g_nand_device_ready;
  * 单命令：count=1，tasks[0] 预加载。
  * 链式命令：count=N，tasks[0..N-1] 预加载，poll 从 cursor=0 推进到 N-1。 */
 static nand_dispatch_lun_chain_t g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
-uint8_t                   g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
+uint8_t                   g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
 
 /* ======================================================================
  * 辅助函数
@@ -259,13 +259,45 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
 
                     if (task->started == 0U)
                     {
-                        break; /* 等 Phase 2 启动第一个命令 */
+                        /* Phase 1 启动 pre-loaded 命令——不等 Phase 2。
+                         * submit() 已设 chain->count=1，Phase 2 检查到
+                         * chain->count != 0 会认为 LUN busy 而跳过，
+                         * 命令永远无法启动。 */
+                        result = g_nand_dispatch_req_table[task->operation](task);
+                        if (result != NAND_RESULT_OK)
+                        {
+                            chain->count = 0U;
+                            return NAND_RESULT_INVALID_ARGUMENT;
+                        }
+                        result = nand_fc_start(&task->transaction,
+                                               task->operation,
+                                               &task->request);
+                        task->started = 1U;
+                        if (result == NAND_RESULT_NOT_READY)
+                        {
+                            break;
+                        }
+                        nand_completion.execution_status = result;
+                        nand_completion.nand_status      = task->transaction.completion.nand_status;
+                        /* 消耗对应的 channel queue entry。
+                         * submit() 既 pre-loaded task 也推了 queue entry。
+                         * Phase 1 已启动命令，queue 入口必须移除，
+                         * 否则 Phase 2 会误认为新命令而重复执行。 */
+                        if ((queue->count != 0U) &&
+                            (queue->entries[queue->head].ce == ce) &&
+                            (queue->entries[queue->head].lun == lun_idx))
+                        {
+                            queue->head = (uint16_t)((queue->head + 1U) % NAND_CHANNEL_QUEUE_DEPTH);
+                            queue->count--;
+                        }
                     }
-
-                    result = nand_fc_step(&task->transaction, &nand_completion);
-                    if (result == NAND_RESULT_NOT_READY)
+                    else
                     {
-                        break;
+                        result = nand_fc_step(&task->transaction, &nand_completion);
+                        if (result == NAND_RESULT_NOT_READY)
+                        {
+                            break;
+                        }
                     }
 
                     /* ── CW 级 chaining（多 CW READ 的 RANDOM_DATA_READ 链） ── */
@@ -273,7 +305,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                     {
                         nand_dispatch_task_complete(task, result, &nand_completion);
                         if ((result != NAND_RESULT_OK) ||
-                            ((task->operation != OP_NORMAL_READ_PAGE_WITH_DATA_OUT) && (task->operation != OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) && (task->operation != OP_OTP_DATA_READ)) ||
+                            ((task->operation != OP_NORMAL_READ_PAGE_WITH_DATA_OUT) && (task->operation != OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) && (task->operation != OP_OTP_DATA_READ) && (task->operation != OP_RANDOM_DATA_READ)) ||
                             (task->cw_index + 1U >= task->cw_count))
                         {
                             break;

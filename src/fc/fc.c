@@ -6,6 +6,7 @@
 #include "fc_data_path.h"
 #include "fc_crc_engine.h"
 #include "nand/nand_dispatch.h"
+#include "common/ssd_log.h"
 
 #if CONFIG_FC_RAID
 #include "fc_raid_engine.h"
@@ -131,7 +132,7 @@ static fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *c
  */
 static fc_command_t        g_fc_command_pool[FC_COMMAND_POOL_DEPTH];
 static fc_descriptor_t     g_fc_descriptor_pool[FC_DESCRIPTOR_POOL_DEPTH];
-static uint8_t             g_fc_buffer_pool[FC_BUFFER_POOL_DEPTH][FC_BUFFER_POOL_CW_SIZE];
+static uint8_t             g_fc_buffer_pool[FC_BUFFER_POOL_DEPTH][FC_BUFFER_POOL_CW_SIZE] __attribute__((section(".noncacheable_buffer")));
 static fc_command_id_t     g_fc_sq_storage[FC_SQ_DEPTH];
 static fc_command_id_t     g_fc_hsq_storage[FC_HSQ_DEPTH];
 static fc_command_status_t g_fc_cq_storage[FC_CQ_DEPTH];
@@ -495,15 +496,28 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
         return FC_STATUS_RESOURCE_EMPTY;
     }
 
-    cw = (uint8_t)(paa_to_cw(command->paa) + index);
-    if (cw >= CW_NUM)
+    if (command->config.multi_plane > 0U)
     {
-        (void)fc_buffer_release_internal(controller, buffer_id);
-        return FC_STATUS_INVALID_ARGUMENT;
+        uint8_t plane  = index / CW_NUM;
+        uint8_t cw_idx = index % CW_NUM;
+        uint32_t blk   = paa_to_block(command->paa);
+        uint32_t pg    = paa_to_page(command->paa);
+        descriptor->paa        = paa_make(pg, plane, blk, 0U, cw_idx);
+        descriptor->config     = command->config;
+        descriptor->config.cw  = cw_idx;
     }
-    descriptor->paa        = (command->paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
-    descriptor->config     = command->config;
-    descriptor->config.cw  = cw;
+    else
+    {
+        cw = (uint8_t)(paa_to_cw(command->paa) + index);
+        if (cw >= CW_NUM)
+        {
+            (void)fc_buffer_release_internal(controller, buffer_id);
+            return FC_STATUS_INVALID_ARGUMENT;
+        }
+        descriptor->paa        = (command->paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
+        descriptor->config     = command->config;
+        descriptor->config.cw  = cw;
+    }
     descriptor->buffer_id  = buffer_id;
     descriptor->next_id    = FC_DESCRIPTOR_ID_INVALID;
     descriptor->faa        = (uint32_t)(command->faa + index);
@@ -528,8 +542,12 @@ static fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, f
         return FC_STATUS_OK;
     }
 
+    uint8_t total_desc = (command->config.multi_plane > 0U)
+        ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
+        : (uint8_t)(command->config.cw + 1U);
+
     command_id = (fc_command_id_t)(command - controller->command_pool);
-    for (index = 0U; index <= command->config.cw; index++)
+    for (index = 0U; index < total_desc; index++)
     {
         fc_descriptor_t *descriptor = NULL;
         fc_status_t      result     = fc_command_configure_descriptor_internal(controller, command, index, &descriptor);
@@ -593,8 +611,11 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     {
         fc_descriptor_id_t desc_id = (fc_descriptor_id_t)command->desc_id;
         uint8_t            cw;
+        uint8_t            total_cw = (command->config.multi_plane > 0U)
+            ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
+            : (uint8_t)(command->config.cw + 1U);
 
-        for (cw = 0U; cw < (uint8_t)(command->config.cw + 1U); cw++)
+        for (cw = 0U; cw < total_cw; cw++)
         {
             fc_descriptor_t *descriptor;
 
@@ -631,18 +652,31 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         /* 从 descriptor 读取 ECC 解码后的 per-CW status/ecc_bits */
         fc_descriptor_id_t did;
         uint8_t            i;
-        uint8_t            status_slot[4];
-        uint8_t            ecc_slot[4];
+        uint8_t            status_slot[4]  = {0U, 0U, 0U, 0U};
+        uint8_t            ecc_slot[4]    = {0U, 0U, 0U, 0U};
         uint8_t            found_unc = 0U;
+        uint8_t            total_cw  = (command->config.multi_plane > 0U)
+            ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
+            : (uint8_t)(command->config.cw + 1U);
 
         did = (fc_descriptor_id_t)command->desc_id;
-        for (i = 0U; i < 4U; i++)
+        for (i = 0U; i < total_cw; i++)
         {
-            if ((did < FC_DESCRIPTOR_POOL_DEPTH) && (i <= command->config.cw))
+            if ((did < FC_DESCRIPTOR_POOL_DEPTH) &&
+                (i < 4U || command->config.multi_plane > 0U))
             {
                 const fc_descriptor_t *d = &controller->descriptor_pool[did];
-                status_slot[i] = d->status;
-                ecc_slot[i]    = d->ecc_bits;
+                /* 将前 4 个 CW 的 ECC 和 status 填入 completion slot；
+                 * 后续 CW（多 plane）仅累加 status。 */
+                if (i < 4U)
+                {
+                    status_slot[i] = d->status;
+                    ecc_slot[i]    = d->ecc_bits;
+                }
+                else
+                {
+                    status_slot[i - 4U] |= d->status;
+                }
                 /* 更新 failed_descriptor_id 指向 ECC 解码后第一个 UNC 的 desc */
                 if ((found_unc == 0U) && (d->status == FC_CW_STATUS_UNC))
                 {
@@ -653,14 +687,15 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
             }
             else
             {
-                status_slot[i] = FC_CW_STATUS_UNUSED;
-                ecc_slot[i]    = 0U;
+                if (i < 4U)
+                {
+                    status_slot[i] = FC_CW_STATUS_UNUSED;
+                    ecc_slot[i]    = 0U;
+                }
+                break;
             }
         }
-        completion.status0  = status_slot[0];
-        completion.status1  = status_slot[1];
-        completion.status2  = status_slot[2];
-        completion.status3  = status_slot[3];
+        completion.status    = (uint8_t)(status_slot[0] | status_slot[1] | status_slot[2] | status_slot[3]);
         completion.ecc_bit0 = ecc_slot[0];
         completion.ecc_bit1 = ecc_slot[1];
         completion.ecc_bit2 = ecc_slot[2];
@@ -673,10 +708,10 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         completion.ecc_bit1 = nand_completion->ecc_bit_count[1];
         completion.ecc_bit2 = nand_completion->ecc_bit_count[2];
         completion.ecc_bit3 = nand_completion->ecc_bit_count[3];
-        completion.status0  = nand_completion->cw_status[0];
-        completion.status1  = nand_completion->cw_status[1];
-        completion.status2  = nand_completion->cw_status[2];
-        completion.status3  = nand_completion->cw_status[3];
+        completion.status   = (uint8_t)(nand_completion->cw_status[0] |
+                                        nand_completion->cw_status[1] |
+                                        nand_completion->cw_status[2] |
+                                        nand_completion->cw_status[3]);
     }
 
     if (fc_complete_internal(controller, &completion) != FC_STATUS_OK)
@@ -975,6 +1010,29 @@ static fc_status_t fc_poll_internal(fc_t *controller)
              * 在 NAND 编程前对 buffer 数据做编码，对 FTL 完全透明。 */
             if (fc_is_page_write((uint8_t)command->config.operation) != 0U)
             {
+                /* 在 encode 前将 PAA 写入 CW META 字段 [0..3] */
+                {
+                    fc_descriptor_id_t mid = (fc_descriptor_id_t)command->desc_id;
+                    uint8_t            mw;
+                    uint8_t            meta_total = (command->config.multi_plane > 0U)
+                        ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
+                        : (uint8_t)(command->config.cw + 1U);
+                    for (mw = 0U; mw < meta_total; mw++)
+                    {
+                        fc_descriptor_t *md = (mid < FC_DESCRIPTOR_POOL_DEPTH)
+                                                ? &controller->descriptor_pool[mid] : NULL;
+                        if ((md != NULL) && (md->buffer_id != FC_BUFFER_ID_INVALID))
+                        {
+                            uint8_t  *cw_base = fc_buffer_id_to_real_buffer_internal(controller, md->buffer_id);
+                            nand_paa_t meta_paa = md->paa;
+                            cw_base[0] = (uint8_t)(meta_paa >> 0U);
+                            cw_base[1] = (uint8_t)(meta_paa >> 8U);
+                            cw_base[2] = (uint8_t)(meta_paa >> 16U);
+                            cw_base[3] = (uint8_t)(meta_paa >> 24U);
+                        }
+                        mid = (mid < FC_DESCRIPTOR_POOL_DEPTH) ? (fc_descriptor_id_t)controller->descriptor_pool[mid].next_id : FC_DESCRIPTOR_ID_INVALID;
+                    }
+                }
                 (void)fc_data_path_encode(command);
             }
 
@@ -1009,13 +1067,25 @@ static fc_status_t fc_poll_internal(fc_t *controller)
             }
             else
             {
-                request.cw_count = (command->config.operation == OP_ERASE_BLOCK) ? 1U : 0U;
+                request.cw_count = ((command->config.operation == OP_ERASE_BLOCK) ||
+                                    (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)) ? 1U : 0U;
             }
 
             if (command->config.operation == OP_ERASE_BLOCK)
             {
                 request.cws[0U][0U].paa    = command->paa;
                 request.cws[0U][0U].buffer = NULL;
+            }
+            else if (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)
+            {
+                request.plane_count          = PLANE_NUM;
+                request.cw_count             = 1U;
+                request.cws[0U][0U].paa      = paa_make(paa_to_page(command->paa), 0U,
+                                                         paa_to_block(command->paa), 0U, 0U);
+                request.cws[1U][0U].paa      = paa_make(paa_to_page(command->paa), 1U,
+                                                         paa_to_block(command->paa), 0U, 0U);
+                request.cws[0U][0U].buffer   = NULL;
+                request.cws[1U][0U].buffer   = NULL;
             }
             else if ((command->config.operation == OP_SET_FEATURES) ||
                      (command->config.operation == OP_GET_FEATURES))
@@ -1025,31 +1095,88 @@ static fc_status_t fc_poll_internal(fc_t *controller)
             else if (request.cw_count > 0U)
             {
                 desc_id = (fc_descriptor_id_t)command->desc_id;
-                for (cw = 0U; cw < request.cw_count; cw++)
+                if (command->config.multi_plane > 0U)
                 {
-                    const fc_descriptor_t *descriptor =
-                        (desc_id < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[desc_id] : NULL;
-
-                    if (descriptor == NULL)
+                    /* Multi-plane: walk full desc chain, sort into cws[plane][cw] */
+                    uint8_t total_cw = (uint8_t)(command->config.multi_plane * request.cw_count);
+                    uint8_t idx;
+                    for (idx = 0U; idx < total_cw; idx++)
                     {
-                        nand_completion                  = (nand_dispatch_completion_t){0};
-                        nand_completion.command_id       = command_id;
-                        nand_completion.execution_status = NAND_RESULT_NOT_READY;
-                        nand_completion.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
-                        (void)fc_complete_from_nand(controller, &nand_completion);
-                        fc_register_queue_state(controller);
-                        return FC_STATUS_IO_ERROR;
+                        const fc_descriptor_t *descriptor =
+                            (desc_id < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[desc_id] : NULL;
+                        if (descriptor == NULL)
+                        {
+                            nand_completion                  = (nand_dispatch_completion_t){0};
+                            nand_completion.command_id       = command_id;
+                            nand_completion.execution_status = NAND_RESULT_NOT_READY;
+                            nand_completion.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
+                            (void)fc_complete_from_nand(controller, &nand_completion);
+                            fc_register_queue_state(controller);
+                            return FC_STATUS_IO_ERROR;
+                        }
+                        uint8_t plane = (uint8_t)paa_to_plane(descriptor->paa);
+                        uint8_t cw_s  = (uint8_t)paa_to_cw(descriptor->paa);
+                        request.cws[plane][cw_s].paa    = descriptor->paa;
+                        if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
+                        {
+                            /* Page read/write 需要 CW 基址（ECC 在完整 528B CW 上处理）；
+                             * 非 page 命令数据直接写入 USER 区域，test/FTL 通过
+                             * fc_buffer_id_to_real_buffer 直接读取。 */
+                            request.cws[plane][cw_s].buffer =
+                                (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
+                                (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                                    ? fc_buffer_get_base(descriptor->buffer_id)
+                                    : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+                        }
+                        else
+                        {
+                            request.cws[plane][cw_s].buffer = NULL;
+                        }
+                        desc_id = (fc_descriptor_id_t)descriptor->next_id;
                     }
-                    request.cws[0][cw].paa    = descriptor->paa;
-                    request.cws[0][cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
-                                                    ? fc_buffer_get_base(descriptor->buffer_id)
-                                                    : NULL;
-                    desc_id                   = (fc_descriptor_id_t)descriptor->next_id;
+                    request.plane_count = (uint8_t)command->config.multi_plane;
+                }
+                else
+                {
+                    /* Single-plane: existing path */
+                    for (cw = 0U; cw < request.cw_count; cw++)
+                    {
+                        const fc_descriptor_t *descriptor =
+                            (desc_id < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[desc_id] : NULL;
+
+                        if (descriptor == NULL)
+                        {
+                            nand_completion                  = (nand_dispatch_completion_t){0};
+                            nand_completion.command_id       = command_id;
+                            nand_completion.execution_status = NAND_RESULT_NOT_READY;
+                            nand_completion.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
+                            (void)fc_complete_from_nand(controller, &nand_completion);
+                            fc_register_queue_state(controller);
+                            return FC_STATUS_IO_ERROR;
+                        }
+                        request.cws[0][cw].paa    = descriptor->paa;
+                        if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
+                        {
+                            request.cws[0][cw].buffer =
+                                (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
+                                (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                                    ? fc_buffer_get_base(descriptor->buffer_id)
+                                    : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+                        }
+                        else
+                        {
+                            request.cws[0][cw].buffer = NULL;
+                        }
+                        desc_id                   = (fc_descriptor_id_t)descriptor->next_id;
+                    }
                 }
             }
 
             if (nand_dispatch_submit(&request) != NAND_RESULT_OK)
             {
+                SSD_LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_count=%u plane_count=%u\r\n",
+                         (unsigned)command->config.operation, (unsigned)command_id,
+                         (unsigned)request.cw_count, (unsigned)request.plane_count);
                 nand_completion                  = (nand_dispatch_completion_t){0};
                 nand_completion.command_id       = command_id;
                 nand_completion.execution_status = NAND_RESULT_NOT_READY;
@@ -1105,13 +1232,25 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                 }
                 else
                 {
-                    reqs[i].cw_count = (command->config.operation == OP_ERASE_BLOCK) ? 1U : 0U;
+                    reqs[i].cw_count = ((command->config.operation == OP_ERASE_BLOCK) ||
+                                        (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)) ? 1U : 0U;
                 }
 
                 if (command->config.operation == OP_ERASE_BLOCK)
                 {
                     reqs[i].cws[0U][0U].paa    = command->paa;
                     reqs[i].cws[0U][0U].buffer = NULL;
+                }
+                else if (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)
+                {
+                    reqs[i].plane_count          = PLANE_NUM;
+                    reqs[i].cw_count             = 1U;
+                    reqs[i].cws[0U][0U].paa      = paa_make(paa_to_page(command->paa), 0U,
+                                                             paa_to_block(command->paa), 0U, 0U);
+                    reqs[i].cws[1U][0U].paa      = paa_make(paa_to_page(command->paa), 1U,
+                                                             paa_to_block(command->paa), 0U, 0U);
+                    reqs[i].cws[0U][0U].buffer   = NULL;
+                    reqs[i].cws[1U][0U].buffer   = NULL;
                 }
                 else if ((command->config.operation == OP_SET_FEATURES) ||
                          (command->config.operation == OP_GET_FEATURES))
@@ -1121,26 +1260,75 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                 else if (reqs[i].cw_count > 0U)
                 {
                     desc_id = (fc_descriptor_id_t)command->desc_id;
-                    for (cw = 0U; cw < reqs[i].cw_count; cw++)
+                    if (command->config.multi_plane > 0U)
                     {
-                        const fc_descriptor_t *descriptor =
-                            (desc_id < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[desc_id] : NULL;
-
-                        if (descriptor == NULL)
+                        uint8_t total_cw_req = (uint8_t)(command->config.multi_plane * reqs[i].cw_count);
+                        uint8_t idx;
+                        for (idx = 0U; idx < total_cw_req; idx++)
                         {
-                            nand_completion                  = (nand_dispatch_completion_t){0};
-                            nand_completion.command_id       = command_id;
-                            nand_completion.execution_status = NAND_RESULT_NOT_READY;
-                            nand_completion.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
-                            (void)fc_complete_from_nand(controller, &nand_completion);
-                            fc_register_queue_state(controller);
-                            return FC_STATUS_IO_ERROR;
+                            const fc_descriptor_t *descriptor =
+                                (desc_id < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[desc_id] : NULL;
+                            if (descriptor == NULL)
+                            {
+                                nand_completion                  = (nand_dispatch_completion_t){0};
+                                nand_completion.command_id       = command_id;
+                                nand_completion.execution_status = NAND_RESULT_NOT_READY;
+                                nand_completion.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
+                                (void)fc_complete_from_nand(controller, &nand_completion);
+                                fc_register_queue_state(controller);
+                                return FC_STATUS_IO_ERROR;
+                            }
+                            uint8_t plane = (uint8_t)paa_to_plane(descriptor->paa);
+                            uint8_t cw_s  = (uint8_t)paa_to_cw(descriptor->paa);
+                            reqs[i].cws[plane][cw_s].paa    = descriptor->paa;
+                            if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
+                            {
+                                reqs[i].cws[plane][cw_s].buffer =
+                                    (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
+                                    (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                                        ? fc_buffer_get_base(descriptor->buffer_id)
+                                        : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+                            }
+                            else
+                            {
+                                reqs[i].cws[plane][cw_s].buffer = NULL;
+                            }
+                            desc_id = (fc_descriptor_id_t)descriptor->next_id;
                         }
-                        reqs[i].cws[0][cw].paa    = descriptor->paa;
-                        reqs[i].cws[0][cw].buffer = (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
-                                                        ? fc_buffer_get_base(descriptor->buffer_id)
-                                                        : NULL;
-                        desc_id                   = (fc_descriptor_id_t)descriptor->next_id;
+                        reqs[i].plane_count = (uint8_t)command->config.multi_plane;
+                    }
+                    else
+                    {
+                        for (cw = 0U; cw < reqs[i].cw_count; cw++)
+                        {
+                            const fc_descriptor_t *descriptor =
+                                (desc_id < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[desc_id] : NULL;
+
+                            if (descriptor == NULL)
+                            {
+                                nand_completion                  = (nand_dispatch_completion_t){0};
+                                nand_completion.command_id       = command_id;
+                                nand_completion.execution_status = NAND_RESULT_NOT_READY;
+                                nand_completion.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
+                                (void)fc_complete_from_nand(controller, &nand_completion);
+                                fc_register_queue_state(controller);
+                                return FC_STATUS_IO_ERROR;
+                            }
+                            reqs[i].cws[0][cw].paa    = descriptor->paa;
+                            if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
+                            {
+                                reqs[i].cws[0][cw].buffer =
+                                    (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
+                                    (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                                        ? fc_buffer_get_base(descriptor->buffer_id)
+                                        : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+                            }
+                            else
+                            {
+                                reqs[i].cws[0][cw].buffer = NULL;
+                            }
+                            desc_id                   = (fc_descriptor_id_t)descriptor->next_id;
+                        }
                     }
                 }
             }
@@ -1298,6 +1486,27 @@ uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id)
     return fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
 }
 
+uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index)
+{
+    if (command == NULL) return NULL;
+    fc_descriptor_id_t did = (fc_descriptor_id_t)command->desc_id;
+    uint8_t idx = 0U;
+    while (did != FC_DESCRIPTOR_ID_INVALID)
+    {
+        if (idx == cw_index)
+        {
+            fc_descriptor_t *d = (did < FC_DESCRIPTOR_POOL_DEPTH) ? &g_fc_controller.descriptor_pool[did] : NULL;
+            if (d == NULL) return NULL;
+            return (d->buffer_id != FC_BUFFER_ID_INVALID)
+                   ? fc_buffer_id_to_real_buffer_internal(&g_fc_controller, d->buffer_id)
+                   : NULL;
+        }
+        did = (did < FC_DESCRIPTOR_POOL_DEPTH) ? (fc_descriptor_id_t)g_fc_controller.descriptor_pool[did].next_id : FC_DESCRIPTOR_ID_INVALID;
+        idx++;
+    }
+    return NULL;
+}
+
 fc_buffer_id_t fc_real_buffer_to_buffer_id(const uint8_t *buffer)
 {
     if (buffer == NULL)
@@ -1440,9 +1649,20 @@ fc_status_t fc_command_release(fc_command_t *command)
 {
     fc_command_id_t command_id;
 
-    if ((command == NULL) || (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
-        ((g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) &&
-         (g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_COMPLETED)))
+    if (command == NULL)
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
+
+    command_id = command->command_id;
+    if ((command_id >= FC_COMMAND_POOL_DEPTH) ||
+        (&g_fc_controller.command_pool[command_id] != command))
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
+
+    if ((g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) &&
+        (g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_COMPLETED))
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }

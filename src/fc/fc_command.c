@@ -48,10 +48,7 @@ void fc_command_status_init(fc_command_status_t *status, const fc_command_t *com
     status->ecc_bit1   = (count > 1U) ? 0U : FC_CW_STATUS_UNUSED;
     status->ecc_bit2   = (count > 2U) ? 0U : FC_CW_STATUS_UNUSED;
     status->ecc_bit3   = (count > 3U) ? 0U : FC_CW_STATUS_UNUSED;
-    status->status0    = FC_CW_STATUS_READY;
-    status->status1    = (count > 1U) ? FC_CW_STATUS_READY : 0U;
-    status->status2    = (count > 2U) ? FC_CW_STATUS_READY : 0U;
-    status->status3    = (count > 3U) ? FC_CW_STATUS_READY : 0U;
+    status->status     = FC_CW_STATUS_READY;
 }
 
 void fc_command_status_set_cw(fc_command_status_t *status, uint8_t cw, uint8_t cw_status, fc_descriptor_id_t descriptor_id)
@@ -60,24 +57,20 @@ void fc_command_status_set_cw(fc_command_status_t *status, uint8_t cw, uint8_t c
     {
         return;
     }
-    switch (cw)
-    {
-        case 0U:
-            status->status0 = cw_status;
-            break;
-        case 1U:
-            status->status1 = cw_status;
-            break;
-        case 2U:
-            status->status2 = cw_status;
-            break;
-        default:
-            status->status3 = cw_status;
-            break;
-    }
+
+    /* OR per-CW status bits into the aggregated command-level status. */
+    status->status |= cw_status;
+
+    /* Record the first-failing descriptor's ID for error-path lookup. */
     if ((cw_status & (FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_TIMEOUT | FC_CW_STATUS_CRC_ERROR |
                       FC_CW_STATUS_UNC | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_RAID_ERROR)) != 0U)
     {
-        status->desc_id = descriptor_id;
+        /* Only overwrite desc_id on first error; later CW errors keep the first. */
+        if ((status->status & (FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_TIMEOUT | FC_CW_STATUS_CRC_ERROR |
+                                FC_CW_STATUS_UNC | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_RAID_ERROR))
+                                == cw_status)
+        {
+            status->desc_id = descriptor_id;
+        }
     }
 }

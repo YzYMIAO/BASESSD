@@ -74,7 +74,7 @@ static void *setup_level3(const MunitParameter params[], void *user_data)
  **************************************************************************/
 
 #define BLOCK_TEST        (100U)   /* 固定测试 block */
-#define BLOCK_DEST        (101U)   /* 内部搬移目标 block */
+#define BLOCK_DEST        (102U)   /* 内部搬移目标 block */
 
 /**************************************************************************
  *  PAA 辅助
@@ -337,10 +337,13 @@ static void run_lifecycle(fc_command_t *cmd)
     munit_assert_uint32(completed, ==, 1U);
     munit_assert_uint32(completion.command_id, ==, cmd->command_id);
 
-    SSD_LOGI("[L3] done op=%s status=0x%02X param0=0x%08lX\r\n",
+SSD_LOGI("[L3] done op=%s status=0x%02X ecc=0x%02X/0x%02X/0x%02X/0x%02X\r\n",
              g_nand_operation_map[cmd->config.operation].name,
              (unsigned)completion.status,
-             (unsigned long)completion.parameter0);
+             (unsigned)completion.ecc_bit0,
+             (unsigned)completion.ecc_bit1,
+             (unsigned)completion.ecc_bit2,
+             (unsigned)completion.ecc_bit3);
 
     /* --- 4. release --- */
     release_command_buffers(cmd);
@@ -391,10 +394,13 @@ static void run_submit_poll(fc_command_t *cmd, fc_command_status_t *completion)
     munit_assert_uint32(completed, ==, 1U);
     munit_assert_uint32(completion->command_id, ==, cmd->command_id);
 
-    SSD_LOGI("[L3] done op=%s status=0x%02X param0=0x%08lX\r\n",
+SSD_LOGI("[L3] done op=%s status=0x%02X ecc=0x%02X/0x%02X/0x%02X/0x%02X\r\n",
              g_nand_operation_map[cmd->config.operation].name,
              (unsigned)completion->status,
-             (unsigned long)completion->parameter0);
+             (unsigned)completion->ecc_bit0,
+             (unsigned)completion->ecc_bit1,
+             (unsigned)completion->ecc_bit2,
+             (unsigned)completion->ecc_bit3);
 }
 
 /**************************************************************************
@@ -902,8 +908,8 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
  *  流程：
  *    1. 擦除 block 100 + 101
  *    2. 写 block 100（64 pages，独立 pattern）
- *    3. 对 page 0 执行 READ_FOR_INTERNAL_DATA_MOVE
- *    4. 对 page 0 执行 PROGRAM_FOR_INTERNAL_MOVE（搬移到 block 101 page 0）
+*    3. 对每 page 执行 READ_FOR_INTERNAL_DATA_MOVE
+ *    4. 对每 page 执行 PROGRAM_FOR_INTERNAL_MOVE（搬移到 block 102）
  *    5. 读 block 101 page 0 验证数据一致性
  *
  *  验证点：
@@ -923,11 +929,38 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     /* Step 2: 写源 block（64 pages，独立 pattern） */
     write_block(BLOCK_TEST, 0U);
 
-    /* Step 3+4: 逐 page 内部搬移：READ → PROGRAM pair */
+/* Step 2.5: 用普通读（00h-30h）验证 block 100 数据正确，排除写阶段问题 */
+    SSD_LOGI("[L3] verify source block %u data before internal move\r\n", (unsigned)BLOCK_TEST);
+    {
+        fc_command_t *cmd = read_page(BLOCK_TEST, 0U, 0U);
+        fc_command_status_t completion;
+        fc_status_t         result;
+        uint32_t            service_count;
+        uint8_t             completed = 0U;
+
+        munit_assert_not_null(cmd);
+        result = fc_submit(cmd);
+        munit_assert_int(result, ==, FC_STATUS_OK);
+        for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
+        {
+            (void)fc_service();
+            result = fc_poll_completion(&completion);
+            if (result == FC_STATUS_OK) { completed = 1U; break; }
+        }
+        munit_assert_uint32(completed, ==, 1U);
+        munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
+        munit_assert_uint8(verify_page_data(cmd, BLOCK_TEST, 0U, 0U), ==, 1U);
+        SSD_LOGI("[L3] source block %u page 0 data verified OK\r\n", (unsigned)BLOCK_TEST);
+        release_command_buffers(cmd);
+        result = fc_command_release(cmd);
+        munit_assert_int(result, ==, FC_STATUS_OK);
+    }
+
+    /* Step 3+4: 逐 page 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_MOVE */
     {
         for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
         {
-            /* 3a: READ_FOR_INTERNAL_DATA_MOVE — 将源 block page 读到 NAND 内部缓存 */
+            /* 3a: READ_FOR_INTERNAL_DATA_MOVE (00h-35h) — 将源 block page 读到 NAND 内部缓存 */
             {
                 fc_command_t *cmd = fc_command_alloc();
                 munit_assert_not_null(cmd);
@@ -935,16 +968,20 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
                 cmd->config.ch        = 0U;
                 cmd->config.ce        = 0U;
                 cmd->config.lun       = 0U;
-                cmd->config.cw        = 0U;
+                cmd->config.cw        = CW_NUM - 1U;
                 cmd->config.random    = FC_RANDOM_DISABLE;
                 cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
                 cmd->config.raid      = FC_RAID_MODE_NORMAL;
-                cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
                 cmd->paa              = make_paa(BLOCK_TEST, 0U, page);
+
+                /* 分配 desc chain（提供 CW 级 PAA 映射给 dispatch） */
+                fc_status_t ret = fc_command_configure_descriptors(cmd);
+                munit_assert_int(ret, ==, FC_STATUS_OK);
+
                 run_lifecycle(cmd);
             }
 
-            /* 3b: PROGRAM_FOR_INTERNAL_MOVE — 将内部缓存放数据写入目标 block page */
+            /* 3b: PROGRAM_FOR_INTERNAL_MOVE (85h-10h) — 将内部缓存数据写入目标 block page */
             {
                 fc_command_t *cmd = fc_command_alloc();
                 munit_assert_not_null(cmd);
@@ -952,21 +989,15 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
                 cmd->config.ch        = 0U;
                 cmd->config.ce        = 0U;
                 cmd->config.lun       = 0U;
-                cmd->config.cw        = 0U;
+                cmd->config.cw        = CW_NUM - 1U;
                 cmd->config.random    = FC_RANDOM_DISABLE;
                 cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
                 cmd->config.raid      = FC_RAID_MODE_NORMAL;
                 cmd->paa              = make_paa(BLOCK_DEST, 0U, page);
 
-                /* has_data=1, 需要 desc + buffer */
+                /* 分配 desc chain（提供 CW 级 PAA 映射给 dispatch） */
                 fc_status_t ret = fc_command_configure_descriptors(cmd);
                 munit_assert_int(ret, ==, FC_STATUS_OK);
-
-                fc_descriptor_t *d = fc_descriptor_id_to_descriptor((fc_descriptor_id_t)cmd->desc_id);
-                munit_assert_not_null(d);
-                uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
-                munit_assert_not_null(buf);
-                buf[0] = (uint8_t)make_paa(BLOCK_TEST, 0U, page);
 
                 run_lifecycle(cmd);
             }

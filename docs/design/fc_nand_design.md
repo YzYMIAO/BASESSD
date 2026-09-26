@@ -310,16 +310,17 @@ nand_engine_start()    —— 异步模式，初始化状态机
 nand_engine_step()     —— 异步模式，推进一步，返回 NOT_READY 表示需继续轮询
 ```
 
-#### WAIT_READY — 中断驱动 vs 引擎超时
+#### WAIT_READY — handler 内 spin-wait 超时
 
-WAIT_READY 与 CHECK_READY 在 nand_engine_step() 中有不同的超时处理策略：
+WAIT_READY handler（`nand_fmc_exec_wait_ready`）在 handler 内部完成 RB# GPIO 轮询 + 超时等待，不返回 NOT_READY，**不依赖引擎的 DWT 超时**。此前的中断驱动方案（EXTI6）已回退。
 
-| UOP 类型 | 超时由谁判定 | 后备机制 | 原因 |
-|----------|-------------|---------|------|
-| WAIT_READY | **handler 全权处理**（nand_fmc_exec_wait_ready） | 超时→GPIO 轮询最后一次确认 | handler 内部走 EXTI6 中断路径，t/o 后还能做 GPIO 确认 |
-| CHECK_READY | **引擎层判定**（DWT 计数器 + wait_polls） | 超时→直接 TIMEOUT | 依赖 70h 状态寄存器，超时后重发 70h |
+流程：
+1. 读 RB# GPIO：LOW → NAND busy → 1µs/步 spin-wait 直到 HIGH 或超时
+2. RB# HIGH → 等 2µs（tWB 保护窗口）后重读 → LOW 则进入 spin-wait，HIGH 则返回 OK
 
-引擎遇到 WAIT_READY 时**直接返回 NOT_READY**，不插入任何超时逻辑——超时完全由 handler 通过 nand_rb_interrupt_timed_out() 自行判断：
+这样避免了引擎 DWT 计时器在 tWB 期间过早启动导致的误超时。
+
+CHECK_READY 继续保持引擎层超时（DWT 计数器 + wait_polls），因为依赖 70h 状态寄存器，超时后重发 70h。
 
 ### 3.2 FMC 硬件后端 (nand_fmc)
 
@@ -336,6 +337,19 @@ typedef struct {
     nand_fmc_wait_ready_t wait_ready; // R/B# 检测函数
 } nand_fmc_config_t;
 ```
+
+#### DATA_IN / DATA_OUT — PIO/DMA 双模
+
+DATA_IN（CPU→FMC→NAND，PROGRAM 方向）和 DATA_OUT（NAND→FMC→CPU，READ 方向）handler 支持编译态和运行态双模切换：
+
+| 模式 | 配置 | 行为 |
+|------|------|------|
+| PIO（默认） | `CONFIG_NAND_DMA=0` | CPU 逐字节 `*config->data = buf[i]` |
+| DMA（可选） | `CONFIG_NAND_DMA=1` | 三态非阻塞：①done→OK ②busy→NOT_READY ③首次→启动DMA_IT |
+
+运行态可通过 `g_nand_dma_enable` 全局变量切换（PIO↔DMA，NAND 空闲时安全）。
+
+**DMA 不可用结论**：STM32H743 的 FMC NAND 控制器**没有专用 DMA 请求线**（DMAMUX1 映射表 0~137 中无 FMC/NAND 条目）。DMA memory-to-memory 模式下 DMA2 无法与 FMC NAND 等待状态握手（FMC 在 AXI 域，DMA2 在 AHB 域）。FMC NAND 只能走 PIO 逐字节访问。如需 DMA + 硬件 ECC NAND 控制器，建议换 NXP i.MX RT 系列（GPMI 控制器内置 DMA + BCH）。
 
 ### 3.3 ONFI 1.0 命令表 (onfi_1_0)
 
@@ -665,7 +679,7 @@ static inline uint32_t   paa_to_nand_row(nand_paa_t paa);  // 转换为 NAND 行
 | 阶段 | 内容 | 状态 |
 |------|------|------|
 | Phase 1 | 多 LUN 并发：nand_engine 异步步进 + 每 LUN 独立状态机 | ✅ |
-| Phase 2 | DMA 数据传输：FMC 数据窗口改为 DMA 驱动，中断完成通知 | ✅ |
+| Phase 2 | DMA 数据传输：FMC 数据窗口改为 DMA 驱动，中断完成通知 | ❌ STM32H7 限制 |
 | Phase 3 | 中断驱动：R/B# EXTI 替代轮询 WAIT_READY | ✅ |
 | Phase 4 | LDPC 硬解码实现 + BCH ECC 移植 | ✅ |
 | Phase 5 | RAID 跨 Plane XOR 恢复 + 读路径管线拆分 | ✅ |
@@ -2197,7 +2211,32 @@ PROGRAM 和 ERASE 不存在"延迟执行"场景，故不分拆。
 | `OP_PROGRAM_PAGE_MULTI_PLANE` | 31 | 70h→Status→80h→C1C2R1R2R3(P0)→Din(P0)→**11h**→C1C2R1R2R3(P1)→Din(P1)→10h→tPROG→70h→Status | PAGE_BUFFER_SIZE |
 | `OP_ERASE_BLOCK_MULTI_PLANE` | 32 | 70h→Status→60h→R1R2R3(P0)→60h→R1R2R3(P1)→D0h→tBERS→70h→Status | 0 |
 
-### 17.6 关键命令码：11h
+### 17.6 内部搬移 OP 码：片上 Copy-Back
+
+内部数据搬移利用 NAND 的 Read-Modify-Write 能力，将数据从源页读到 NAND 内部缓存寄存器后直接写入目标页，无需经过 Host 总线。MT29F4G08ABADAWP 的 ONFI copy-back 时序为：
+
+```
+00h + addr → 35h         // READ_FOR_INTERNAL_DATA_MOVE：源页读入缓存，tR 后 ready
+85h + addr → 10h         // PROGRAM_FOR_INTERNAL_MOVE：缓存数据写入目标页，tPROG 后 ready
+两种场景均有三个 OP 码支持内部操作：
+
+| OP 码 | 值 | uop 序列 | 说明 |
+|-------|----|---------|------|
+| `OP_READ_FOR_INTERNAL_DATA_MOVE` | 19 | `70h→Status→00h→C1C2R1R2R3→35h→tR→70h→Status` | 源页读入 NAND 内部缓存 |
+| `OP_PROGRAM_FOR_INTERNAL_MOVE` | 20 | `70h→Status→85h→C1C2R1R2R3→10h→tPROG→70h→Status` | 纯 copy-back，无 DATA_IN（NAND 内部转发） |
+| `OP_PROGRAM_FOR_INTERNAL_DATA_MOVE` | 10 | `70h→Status→85h→C1C2R1R2R3→1B Data→10h→tPROG→70h→Status` | 写 1 字节替换后写回（含 DATA_IN） |
+
+关键区别：
+
+| 特性 | `PROGRAM_FOR_INTERNAL_MOVE` | `PROGRAM_FOR_INTERNAL_DATA_MOVE` |
+|------|---------------------------|--------------------------------|
+| DATA_IN | 无 | 1 字节 |
+| 用途 | GC 纯搬移 | GC + ECC 纠正（替换损坏 CW 数据） |
+| 等效可拆解 | 不可拆（移即是原子） | RANDOM_DATA_INPUT + 10h |
+| `has_data` | 1（分配 desc chain 提供 PAA 映射） | 1 |
+| `data_length` | 0 | 1 |
+
+### 17.7 关键命令码：11h
 
 `NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH (0x11)` 在 ONFI 标准中定义为 Multi-Plane COPYBACK READ 命令，在多 Plane PROGRAM 时序中起到切换 Plane 的作用：
 

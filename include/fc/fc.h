@@ -58,6 +58,11 @@ fc_buffer_id_t     fc_real_buffer_to_buffer_id(const uint8_t *buffer);
    数据路径（加扰/ECC/RAID）使用此接口。 */
 uint8_t           *fc_buffer_get_base(fc_buffer_id_t buffer_id);
 
+/* 返回 CW 中 META 字段指针（4 字节，位于 CW 基址偏移 0）。
+   META 包含 FAA/PAA 信息，由 FC 在 program 前自动填写。
+   FTL/Test 在 read 完成后可通过此接口验证物理地址一致性。 */
+uint8_t           *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index);
+
 /* 便利函数：将外部数据按 CW 大小依次拷贝到命令的所有 desc buffer 中。
  * 数据不够时剩余部分用 0xFF dummy 填充。 */
 fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t length);

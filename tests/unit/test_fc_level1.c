@@ -18,6 +18,7 @@
 #include "fc/fc_queue.h"
 #include "fc/fc_scheduler.h"
 #include "nand/onfi_1_0.h"
+#include "common/ssd_log.h"
 
 /**************************************************************************
  *  Part 1: fc_command 测试
@@ -129,10 +130,7 @@ static MunitResult test_command_status_init_cw1(const MunitParameter params[], v
     munit_assert_uint32(cq_entry.desc_id,    ==, 0x02U);
     munit_assert_uint32(cq_entry.module,     ==, FC_COMMAND_MODULE_FTL);
 
-    munit_assert_uint32(cq_entry.status0,    ==, FC_CW_STATUS_READY);
-    munit_assert_uint32(cq_entry.status1,    ==, FC_CW_STATUS_UNUSED);
-    munit_assert_uint32(cq_entry.status2,    ==, FC_CW_STATUS_UNUSED);
-    munit_assert_uint32(cq_entry.status3,    ==, FC_CW_STATUS_UNUSED);
+    munit_assert_uint32(cq_entry.status,     ==, FC_CW_STATUS_READY);
 
     munit_assert_uint32(cq_entry.ecc_bit0,   ==, 0U);
     munit_assert_uint32(cq_entry.ecc_bit1,   ==, FC_CW_STATUS_UNUSED);
@@ -157,10 +155,7 @@ static MunitResult test_command_status_init_cw4(const MunitParameter params[], v
 
     fc_command_status_init(&cq_entry, &cmd);
 
-    munit_assert_uint32(cq_entry.status0,    ==, FC_CW_STATUS_READY);
-    munit_assert_uint32(cq_entry.status1,    ==, FC_CW_STATUS_READY);
-    munit_assert_uint32(cq_entry.status2,    ==, FC_CW_STATUS_READY);
-    munit_assert_uint32(cq_entry.status3,    ==, FC_CW_STATUS_READY);
+    munit_assert_uint32(cq_entry.status,     ==, FC_CW_STATUS_READY);
 
     munit_assert_uint32(cq_entry.ecc_bit0,   ==, 0U);
     munit_assert_uint32(cq_entry.ecc_bit1,   ==, 0U);
@@ -180,16 +175,16 @@ static MunitResult test_command_status_set_cw_valid(const MunitParameter params[
     fc_command_status_t cq_entry = {0};
 
     fc_command_status_set_cw(&cq_entry, 0U, FC_CW_STATUS_SUCCESS, 0x10U);
-    munit_assert_uint32(cq_entry.status0,  ==, FC_CW_STATUS_SUCCESS);
+    munit_assert_uint32(cq_entry.status,  ==, FC_CW_STATUS_SUCCESS);
     munit_assert_uint32(cq_entry.desc_id,  ==, 0U); /* success 不记录 desc_id */
 
     fc_command_status_set_cw(&cq_entry, 1U, FC_CW_STATUS_NAND_FAIL, 0x20U);
-    munit_assert_uint32(cq_entry.status1,  ==, FC_CW_STATUS_NAND_FAIL);
+    munit_assert_uint32(cq_entry.status,  ==, (uint8_t)(FC_CW_STATUS_SUCCESS | FC_CW_STATUS_NAND_FAIL));
     munit_assert_uint32(cq_entry.desc_id,  ==, 0x20U); /* 错误位记录 desc_id */
 
     fc_command_status_set_cw(&cq_entry, 3U, FC_CW_STATUS_UNC, 0x40U);
-    munit_assert_uint32(cq_entry.status3,  ==, FC_CW_STATUS_UNC);
-    munit_assert_uint32(cq_entry.desc_id,  ==, 0x40U);
+    munit_assert_uint32(cq_entry.status,  ==, (uint8_t)(FC_CW_STATUS_SUCCESS | FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_UNC));
+    munit_assert_uint32(cq_entry.desc_id,  ==, 0x20U); /* 保留第一个错误的 desc_id */
 
     return MUNIT_OK;
 }
@@ -202,10 +197,10 @@ static MunitResult test_command_status_set_cw_overflow(const MunitParameter para
     fc_command_status_t cq_entry = {0};
 
     fc_command_status_set_cw(&cq_entry, 4U, FC_CW_STATUS_NAND_FAIL, 0x50U);
-    munit_assert_uint32(cq_entry.status0,  ==, 0U);
+    munit_assert_uint32(cq_entry.status,  ==, 0U);
 
     fc_command_status_set_cw(&cq_entry, 255U, FC_CW_STATUS_NAND_FAIL, 0x60U);
-    munit_assert_uint32(cq_entry.status0,  ==, 0U);
+    munit_assert_uint32(cq_entry.status,  ==, 0U);
 
     return MUNIT_OK;
 }
@@ -494,7 +489,7 @@ static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *dat
     munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
 
     entry.command_id = 0x01U;
-    entry.status0    = FC_CW_STATUS_READY;
+    entry.status    = FC_CW_STATUS_READY;
     munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_OK);
 
     entry.command_id = 0x02U;
@@ -523,7 +518,7 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
     munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
 
     fc_command_status_t entry = {0};
-    entry.status0 = FC_CW_STATUS_READY;
+    entry.status = FC_CW_STATUS_READY;
 
     for (i = 0U; i < TEST_CQ_DEPTH; i++)
     {
@@ -562,6 +557,22 @@ static MunitResult test_cqueue_null(const MunitParameter params[], void *data)
 
 static int g_scheduler_inited = 0;
 
+static void print_resource_stats(const char *tag)
+{
+    fc_resource_stats_t stats;
+    if (fc_get_resource_stats(&stats) == FC_STATUS_OK)
+    {
+        SSD_LOGI("[RES] %s: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
+                 tag,
+                 (unsigned)stats.command_used,   (unsigned)FC_COMMAND_POOL_DEPTH,
+                 (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
+                 (unsigned)stats.buffer_used,     (unsigned)FC_BUFFER_POOL_DEPTH,
+                 (unsigned)stats.sq_used,
+                 (unsigned)stats.hsq_used,
+                 (unsigned)stats.cq_used);
+    }
+}
+
 static void *setup_scheduler_suite(const MunitParameter params[], void *user_data)
 {
     (void)params;
@@ -572,6 +583,7 @@ static void *setup_scheduler_suite(const MunitParameter params[], void *user_dat
         fc_init();
         g_scheduler_inited = 1;
     }
+    print_resource_stats("L1_sched");
     return NULL;
 }
 
@@ -701,6 +713,9 @@ static MunitResult test_scheduler_select_hsq_first(const MunitParameter params[]
     munit_assert_int(fc_scheduler_select(&scheduler, &cmd_id), ==, FC_STATUS_OK);
     munit_assert_uint32(cmd_id, ==, cmd_sq->command_id);
 
+    fc_command_release(cmd_sq);
+    fc_command_release(cmd_hsq);
+
     return MUNIT_OK;
 }
 
@@ -735,6 +750,9 @@ static MunitResult test_scheduler_select_sq_order(const MunitParameter params[],
 
     munit_assert_int(fc_scheduler_select(&scheduler, &cmd_id), ==, FC_STATUS_OK);
     munit_assert_uint32(cmd_id, ==, cmd_b->command_id);
+
+    fc_command_release(cmd_a);
+    fc_command_release(cmd_b);
 
     return MUNIT_OK;
 }
@@ -774,6 +792,9 @@ static MunitResult test_scheduler_select_busy_skip(const MunitParameter params[]
     munit_assert_int(fc_scheduler_select(&scheduler, &cmd_id), ==, FC_STATUS_OK);
     munit_assert_uint32(cmd_id, ==, cmd_a->command_id);
 
+    fc_command_release(cmd_a);
+    fc_command_release(cmd_b);
+
     return MUNIT_OK;
 }
 
@@ -805,16 +826,17 @@ static MunitResult test_scheduler_starvation(const MunitParameter params[], void
     fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
     fc_scheduler_init(&scheduler, &sq, &hsq);
 
+    fc_command_t *write_cmds[3];
     /* push 3 个非读命令（PROGRAM），chain=0 单命令 */
     for (i = 0U; i < 3U; i++)
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
-        cmd->config.ch = 0U; cmd->config.ce = 0U; cmd->config.lun = 0U;
-        cmd->config.operation = OP_NORMAL_PROGRAM_PAGE;
-        cmd->config.chain = FC_CHAIN_END;
-        cmd->high_priority = FC_PRIORITY_SQ;
-        fc_submission_queue_push(&sq, cmd->command_id);
+        write_cmds[i] = fc_command_alloc();
+        munit_assert_not_null(write_cmds[i]);
+        write_cmds[i]->config.ch = 0U; write_cmds[i]->config.ce = 0U; write_cmds[i]->config.lun = 0U;
+        write_cmds[i]->config.operation = OP_NORMAL_PROGRAM_PAGE;
+        write_cmds[i]->config.chain = FC_CHAIN_END;
+        write_cmds[i]->high_priority = FC_PRIORITY_SQ;
+        fc_submission_queue_push(&sq, write_cmds[i]->command_id);
     }
 
     /* select_chain 前 3 次都返回 PROGRAM（写计数递增） */
@@ -827,24 +849,23 @@ static MunitResult test_scheduler_starvation(const MunitParameter params[], void
         munit_assert_uint32(cmd->config.operation, ==, OP_NORMAL_PROGRAM_PAGE);
     }
 
+    fc_command_t *rd_cmd, *wr_cmd;
     /* push 1 个读命令 + 1 个非读命令 */
-    {
-        fc_command_t *rd = fc_command_alloc();
-        munit_assert_not_null(rd);
-        rd->config.ch = 0U; rd->config.ce = 0U; rd->config.lun = 0U;
-        rd->config.operation = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-        rd->config.chain = FC_CHAIN_END;
-        rd->high_priority = FC_PRIORITY_SQ;
-        fc_submission_queue_push(&sq, rd->command_id);
+    rd_cmd = fc_command_alloc();
+    munit_assert_not_null(rd_cmd);
+    rd_cmd->config.ch = 0U; rd_cmd->config.ce = 0U; rd_cmd->config.lun = 0U;
+    rd_cmd->config.operation = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    rd_cmd->config.chain = FC_CHAIN_END;
+    rd_cmd->high_priority = FC_PRIORITY_SQ;
+    fc_submission_queue_push(&sq, rd_cmd->command_id);
 
-        fc_command_t *wr = fc_command_alloc();
-        munit_assert_not_null(wr);
-        wr->config.ch = 0U; wr->config.ce = 0U; wr->config.lun = 0U;
-        wr->config.operation = OP_NORMAL_PROGRAM_PAGE;
-        wr->config.chain = FC_CHAIN_END;
-        wr->high_priority = FC_PRIORITY_SQ;
-        fc_submission_queue_push(&sq, wr->command_id);
-    }
+    wr_cmd = fc_command_alloc();
+    munit_assert_not_null(wr_cmd);
+    wr_cmd->config.ch = 0U; wr_cmd->config.ce = 0U; wr_cmd->config.lun = 0U;
+    wr_cmd->config.operation = OP_NORMAL_PROGRAM_PAGE;
+    wr_cmd->config.chain = FC_CHAIN_END;
+    wr_cmd->high_priority = FC_PRIORITY_SQ;
+    fc_submission_queue_push(&sq, wr_cmd->command_id);
 
     /* write_budget=3 已满，select_chain 应选出读命令（starvation 保护触发） */
     munit_assert_int(fc_scheduler_select_chain(&scheduler, &chain), ==, FC_STATUS_OK);
@@ -852,6 +873,10 @@ static MunitResult test_scheduler_starvation(const MunitParameter params[], void
     fc_command_t *cmd = fc_command_id_to_command(chain.ids[0U]);
     munit_assert_not_null(cmd);
     munit_assert_uint32(cmd->config.operation, ==, OP_NORMAL_READ_PAGE_WITH_DATA_OUT);
+
+    for (i = 0U; i < 3U; i++) fc_command_release(write_cmds[i]);
+    fc_command_release(rd_cmd);
+    fc_command_release(wr_cmd);
 
     return MUNIT_OK;
 }
@@ -882,6 +907,8 @@ static MunitResult test_scheduler_select_chain_single(const MunitParameter param
     munit_assert_int(fc_scheduler_select_chain(&scheduler, &chain), ==, FC_STATUS_OK);
     munit_assert_uint32(chain.count, ==, 1U);
     munit_assert_uint32(chain.ids[0], ==, cmd->command_id);
+
+    fc_command_release(cmd);
 
     return MUNIT_OK;
 }
@@ -916,6 +943,8 @@ static MunitResult test_scheduler_select_chain_multi(const MunitParameter params
     munit_assert_uint32(chain.count, ==, 3U);
     for (i = 0U; i < 3U; i++)
         munit_assert_uint32(chain.ids[i], ==, cmds[i]->command_id);
+
+    for (i = 0U; i < 3U; i++) fc_command_release(cmds[i]);
 
     return MUNIT_OK;
 }

@@ -1064,3 +1064,149 @@ Phase M/N 引入的代码以及历史遗留问题累计了约 30 个编译警告
 | #10 | `delay.c`: `g_dwt_cyccnt_per_us` 未定义导致 nand_rb_interrupt 链接失败 | ✅ 已修复 |
 | #11 | `nand_rb_interrupt.c`: 未用变量 `gpio` | ✅ 已修复 |
 | - | `onfi_1_0.h`: OP_PROGRAM/ERASE_MULTI_PLANE 宏重复定义 | ✅ 已修复 |
+
+---
+
+## Phase P: FC dispatch Phase 1 修复 + WAIT_READY spin-wait + META 接口
+
+**日期**: 2026-09-24
+
+### 背景
+
+nand_dispatch_poll() 中 Phase 1 看到 task->started == 0 后直接 break，期望 Phase 2 启动命令。但 submit() 已设 chain->count=1，Phase 2 看到 chain->count != 0 以为 LUN busy 而跳过，命令永远无法启动。
+
+WAIT_READY handler 原返回 NOT_READY 依赖引擎 DWT 超时，但 DWT 在 tWB 窗口期间启动计时，导致 handler 确认 NAND busy 后下一次 step 就被误判超时。
+
+### 改动
+
+| 文件 | 改动 |
+|------|------|
+| `src/nand/nand_fmc.c` | `nand_fmc_exec_wait_ready` 重写为 handler 内 spin-wait + 超时，不再返回 NOT_READY；DATA_IN/DATA_OUT 改为 PIO/DMA 双模（CONFIG_NAND_DMA 编译开关 + g_nand_dma_enable 运行态切换） |
+| `src/fc/fc.c` | program 前写 META（PAA 到 CW[0..3]）；新增 `fc_buffer_get_meta()` |
+| `include/fc/fc.h` | 声明 `fc_buffer_get_meta()` |
+| `include/nand/nand_config.h` | 新增 `CONFIG_NAND_DMA` 宏定义（PIO/DMA 编译开关） |
+| `include/platform/stm32h743/nand_dma.h` | 声明 `g_nand_dma_enable` 运行态全局变量 |
+| `src/platform/stm32h743/nand_dma.c` | 新增 `g_nand_dma_enable` 定义，默认等于 CONFIG_NAND_DMA |
+| `tests/unit/test_fc_level3.c` | 新增 `memset_read_buffer()` + `unlock_block()` + `memset 0xCC` debug 辅助；全量 `FC_ECC_MODE_BCH` → `FC_ECC_MODE_LDPC_RAW` 跳过 ECC |
+| `docs/design/fc_nand_design.md` | WAIT_READY 策略说明从"中断驱动"改为"handler 内 spin-wait" |
+
+### 设计要点
+
+#### Phase 1 直接启动 pre-loaded 命令
+
+单命令场景：submit() 预加载 chain->count=1、task->started=0 的同时推入 channel queue。Phase 1 检查到 started==0 后直接调用 req_table 初始化 request，然后 nand_fc_start() 启动。同步完成时消耗 queue entry 避免 Phase 2 重复启动。
+
+#### WAIT_READY handler 内 spin-wait
+
+确认 RB#=LOW（NAND busy）后，在 handler 内部 1µs/步 poll，直到 RB#=HIGH 或超时。tWB 窗口保护：第一次读 RB#=HIGH 时等 2µs 后重读。不再返回 NOT_READY，引擎 DWT 超时变为死代码。
+
+#### DATA_IN/DATA_OUT PIO/DMA 双模
+
+引入 `CONFIG_NAND_DMA` 编译开关 + `g_nand_dma_enable` 运行态标志：
+
+```
+CONFIG_NAND_DMA = 0（默认，PIO）：
+  DATA_IN/DATA_OUT handler → CPU 逐字节循环
+
+CONFIG_NAND_DMA = 1（DMA）：
+  DATA_IN/DATA_OUT handler → 三态 DMA 非阻塞：
+    ① done 标志 → OK
+    ② DMA EN 位 busy → NOT_READY
+    ③ 首次 → 启动 DMA_IT → 失败回退 PIO
+```
+
+运行时可通过 `g_nand_dma_enable = 1/0` 动态切换，切换需在 NAND 空闲时进行。
+
+#### META 字段自动填写
+
+FC 在 program 前将 desc->paa 写入 CW buffer[0..3]（META 区域），ECC 覆盖整个数据区包括 META。读回后可通过 `fc_buffer_get_meta()` 获取 META 指针，验证 PAA 一致性。
+
+### DMA 不可用结论
+
+STM32H743 的 FMC NAND 控制器**没有专用硬件 DMA 请求线**（对照 stm32h7xx_hal_dma.h 所有 DMA_REQUEST_* 定义，0~137 中无 FMC/NAND。DMAMUX1 映射表中 FMC 不存在）。DMA memory-to-memory 模式下 DMA2 无法与 FMC NAND 的等待状态握手，导致数据错位或卡死。
+
+FMC NAND 只能走 **PIO 逐字节访问**。这在工业产品中是真实可用的方案。如需 DMA + 硬件 ECC 的 NAND 控制器，建议换 NXP i.MX RT 系列（GPMI 控制器内建 DMA + BCH ECC）。
+
+### 当前状态
+
+测试通过（100%）。ECC 仍绕过（FC_ECC_MODE_LDPC_RAW）。
+
+---
+
+## Phase Q: 全测试流程修复 — Buffer 泄漏 + g_nand_device_ready 重置 + NOCACHE 段 + 多 Plane 支持
+
+**日期**: 2026-09-26
+
+### 背景
+
+全量跑 `test` 时 Level 3 lifecycle 测试全部失败，单跑 `test /fc-nand/lifecycleinit_sequence` 却全部通过。异同分析暴露了两个问题。
+
+### 问题 1: g_nand_device_ready 被 fc_init() 重置（根因）
+
+`fc_init()` 内部调用 `nand_dispatch_init()` 将 `g_nand_device_ready` 置零。
+
+| 场景 | 调用链 | device_ready |
+|------|--------|-------------|
+| main() 启动 | fc_init() → nand_dispatch_init() → 0 → nand_init() → ... → 1 | ✅ 1 |
+| Level 1 setup | fc_init() → nand_dispatch_init() → 0 | ❌ 0 |
+| Level 2 setup | fc_init() → 已 init → 跳过 | ❌ 0（保持）|
+| 全量跑 L3 | nand_dispatch_submit → device_ready=0 → NAND_FAIL | ❌ |
+| 单跑 L3 | 不触发 fc_init() → device_ready=1 → 正常 | ✅ |
+
+**修复**：`setup_level3` 中调用 `nand_dispatch_set_device_ready(1)` 恢复。
+
+### 问题 2: Level 2 Buffer 泄漏
+
+`fc_command_release()` 释放 command 和 descriptor，但不释放 buffer（buffer 由测试显式释放）。Level 2 每测试分配 4 个 buffer（4 CW × 1 cmd），`fc_command_release` 只释放 command + descriptor，buffer 不释放。10 个测试后泄漏 22 个 buffer。
+
+**修复**：每个 `alloc_cmd` + `fc_command_release` 对之间补 `release_command_buffers(cmd)`。
+
+### 文件变更
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `include/fc/fc_command.h` | `reserved:6` → `multi_plane:3 + reserved:3` | 多 Plane 控制位域 |
+| `src/fc/fc.c` | 多处修改 | descriptor PAA 生成、request 多 Plane 分拣、OP_ERASE_BLOCK_MULTI_PLANE 独立分支、buffer 出口策略（page vs non-page） |
+| `src/fc/fc_data_path.c` | `total_desc` 计算 | process_read 支持多 desc |
+| `src/nand/onfi_1_0.c` | `g_nand_read_address_uops` 加 WAIT_READY | 修复 READ_PARAMETER_PAGE/GET_FEATURES 读回 0xFF |
+| `linker/stm32h743xx_flash.ld` | AXI_NOCACHE 32KB → 128KB | 容纳 buffer pool |
+| `src/platform/stm32h743/sys.c` | MPU Region 11 128KB | 对应链接脚本 |
+| `src/fc/fc.c` | `g_fc_buffer_pool` 加 `.noncacheable_buffer` | 解决 D-Cache 不一致 |
+| `src/nand/nand_dispatch.c` | `g_nand_channel_page_buffer` 加 `.noncacheable_buffer` | 同上 |
+| `tests/unit/test_fc_level1.c` | 6 个 scheduler 测试补 `fc_command_release` | 消除 command 泄漏 |
+| `tests/unit/test_fc_level2.c` | 补 `release_cmd_buffers` | 消除 buffer 泄漏 |
+| `tests/unit/test_fc_level3.c` | 重写 3 个测试 + 资源打印 | multi_plane / random_data / lock_tight |
+
+## Phase R: 内部搬移 OP 码修正 — 去 DATA_IN + 4CW 对齐 + 设计文档
+
+**日期**: 2026-09-26
+
+### 背景
+
+`test_internal_data_move` 运行失败，报错 `page=0 cw=0 offset=0: got 0xFF expected 0x00`：
+1. READ_FOR_INTERNAL_DATA_MOVE 和 PROGRAM_FOR_INTERNAL_MOVE 的 `config.cw=0`（仅 1 个 desc），与写/读的 4 CW 不匹配，验证阶段读回 4 CW 时报多出的 CW 为 0xFF
+2. `g_nand_internal_program_uops` 含有 NAND_UOP_DATA_IN（发送 1 字节未初始化数据），破坏了 NAND cache register 内容，导致目标页全 0xFF
+
+### 改动
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `src/nand/onfi_1_0.c` | `g_nand_internal_program_uops` 删除 NAND_UOP_DATA_IN | copy-back 真 85h-10h，无数据输入 |
+| `src/nand/onfi_1_0.c` | `OP_PROGRAM_FOR_INTERNAL_MOVE` data_input_cycles=0, data_length=0, has_data=1 | 纯内部搬移，无数据输入但有 desc chain |
+| `src/nand/onfi_1_0.c` | `OP_READ_FOR_INTERNAL_DATA_MOVE` has_data=0→1 | 需要 desc chain 提供 CW PAA 映射 |
+| `tests/unit/test_fc_level3.c` | `test_internal_data_move` 读/写 `config.cw = CW_NUM - 1` + call `fc_command_configure_descriptors` | 4 CW 对齐，desc chain 提供 per-CW PAA |
+| `docs/design/fc_nand_design.md` | 新增 §17.6 内部搬移 OP 码表格 | `PROGRAM_FOR_INTERNAL_MOVE` vs `PROGRAM_FOR_INTERNAL_DATA_MOVE` 对比 |
+
+### 设计要点
+
+#### OP 码语义明确化
+
+| OP | 命令序列 | 数据路径 | 用途 |
+|----|---------|---------|------|
+| `READ_FOR_INTERNAL_DATA_MOVE` | 00h+addr→35h→tR | NAND cache 内部，无 host 数据 | GC 读源页 |
+| `PROGRAM_FOR_INTERNAL_MOVE` | 85h+addr→10h→tPROG | NAND cache 内部转发，无 DATA_IN | GC 纯搬移 |
+| `PROGRAM_FOR_INTERNAL_DATA_MOVE` | 85h+addr+1B→10h→tPROG | 1 字节 DATA_IN | GC + ECC 纠正 |
+
+#### `has_data=1, data_length=0` 含义
+
+`has_data=1` 使 fc_command_configure_descriptors() 分配 desc chain，提供 per-CW PAA 映射给 nand_dispatch。但 internal move OP 的 data 不走 host buffer（data_length=0），nand_fc_request_t 的 data=NULL 且 data_length=0，NAND 引擎跳过 DATA_IN/DATA_OUT uop。desc chain 仅用于"行走 PAA 空间"——dispatch 需要知道每个 CW 映射到哪个物理 page/block。`

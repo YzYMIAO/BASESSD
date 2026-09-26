@@ -130,6 +130,15 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
     {
         return NAND_RESULT_INVALID_ARGUMENT;
     }
+
+    /* 清零 DMA 完成标志，防止上一命令的残留标志导致 DATA_IN/DATA_OUT 误判 */
+    nand_dma_clear_flags();
+
+    SSD_LOGD("nand_fc_start: op=%u col=%u row=0x%06X data=%p len=%u\r\n",
+             (unsigned)operation, (unsigned)request->column,
+             (unsigned)request->row[0], (const void *)request->data,
+             (unsigned)request->data_length);
+
     transaction->request    = (nand_command_request_t){operation, request->column, {request->row[0]}, request->data, request->data_length};
     transaction->completion = (nand_command_completion_t){0};
     transaction->active     = 1U;

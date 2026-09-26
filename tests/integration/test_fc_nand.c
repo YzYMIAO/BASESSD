@@ -59,24 +59,13 @@ static fc_descriptor_t *fc_nand_test_descriptor(fc_descriptor_id_t descriptor_id
 
 static uint8_t fc_nand_test_completion_is_success(const fc_command_status_t *completion, uint8_t cw_count)
 {
-    if ((completion == NULL) || (cw_count == 0U) || (cw_count > CW_NUM) ||
-        (completion->status0 != FC_CW_STATUS_SUCCESS))
+    if ((completion == NULL) || (cw_count == 0U) || (cw_count > CW_NUM))
     {
         return 0U;
     }
-    if ((cw_count > 1U) && (completion->status1 != FC_CW_STATUS_SUCCESS))
-    {
-        return 0U;
-    }
-    if ((cw_count > 2U) && (completion->status2 != FC_CW_STATUS_SUCCESS))
-    {
-        return 0U;
-    }
-    if ((cw_count > 3U) && (completion->status3 != FC_CW_STATUS_SUCCESS))
-    {
-        return 0U;
-    }
-    return 1U;
+    /* All CWs must have READY bit set in the aggregated status.
+     * For success, READY must be the only status bit set — no FAIL/CRC/UNC/etc. */
+    return (completion->status == FC_CW_STATUS_SUCCESS) ? 1U : 0U;
 }
 
 /* The caller selects the target LUN/Plane/Block; block tests always start at CW0 of each Page. */
@@ -110,19 +99,15 @@ static fc_status_t fc_nand_test_wait_completion(fc_command_t *command)
         }
         if (result == FC_STATUS_OK)
         {
-            SSD_LOGD("[FC TEST] completion cmd=0x%04X desc=0x%04X status0=0x%02X status1=0x%02X status2=0x%02X status3=0x%02X\r\n",
+            SSD_LOGD("[FC TEST] completion cmd=0x%04X desc=0x%04X status=0x%02X\r\n",
                      completion.command_id,
                      completion.desc_id,
-                     completion.status0,
-                     completion.status1,
-                     completion.status2,
-                     completion.status3);
+                     completion.status);
             if ((completion.command_id != command->command_id) ||
                 (fc_nand_test_completion_is_success(&completion, (uint8_t)(command->config.cw + 1U)) == 0U))
             {
-                SSD_LOGE("[FC TEST] completion failed: status0=0x%02X status1=0x%02X desc=0x%04X\r\n",
-                         completion.status0,
-                         completion.status1,
+                SSD_LOGE("[FC TEST] completion failed: status=0x%02X desc=0x%04X\r\n",
+                         completion.status,
                          completion.desc_id);
                 return FC_STATUS_IO_ERROR;
             }

@@ -37,8 +37,7 @@
 #include <stddef.h>
 #include <string.h>
 
-/* ── 辅助：遍历 desc 链收集 buffer 指针（decode/RAID 用，保持索引对齐 desc 链） ── */
-
+#if CONFIG_FC_RAID
 static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd,
                                           uint8_t *buffers[],
                                           nand_paa_t buffer_paa[],
@@ -61,6 +60,7 @@ static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd,
     }
     return count;
 }
+#endif /* CONFIG_FC_RAID */
 
 /* ══════════════════════════════════════════════════════════
  * 编码 — FC 内部调用
@@ -326,6 +326,10 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
         return FC_STATUS_INVALID_ARGUMENT;
     }
 
+    const uint8_t total_desc = (command->config.multi_plane > 0U)
+        ? (uint8_t)((uint8_t)(command->config.cw + 1U) * command->config.multi_plane)
+        : (uint8_t)(command->config.cw + 1U);
+
     const fc_ldpc_config_t ldpc_config = {
         .codeword_bytes = FC_BUFFER_DATA_SIZE,
         .parity_bytes   = 8U,
@@ -335,7 +339,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
     /* ── Pass 1: ECC 解码所有 CW ── */
     desc_id = (fc_descriptor_id_t)command->desc_id;
 
-    for (cw = 0U; cw < (uint8_t)(command->config.cw + 1U); cw++)
+    for (cw = 0U; cw < total_desc; cw++)
     {
         desc = fc_descriptor_id_to_descriptor(desc_id);
         if (desc == NULL) return FC_STATUS_INVALID_ARGUMENT;
@@ -381,7 +385,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
     {
         desc_id = (fc_descriptor_id_t)command->desc_id;
 
-        for (cw = 0U; cw < (uint8_t)(command->config.cw + 1U); cw++)
+        for (cw = 0U; cw < total_desc; cw++)
         {
             desc = fc_descriptor_id_to_descriptor(desc_id);
             if (desc == NULL) break;
@@ -407,7 +411,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
         {
             desc_id = (fc_descriptor_id_t)command->desc_id;
 
-            for (cw = 0U; cw < (uint8_t)(command->config.cw + 1U); cw++)
+            for (cw = 0U; cw < total_desc; cw++)
             {
                 desc = fc_descriptor_id_to_descriptor(desc_id);
                 if (desc == NULL) break;

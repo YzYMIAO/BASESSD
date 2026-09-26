@@ -10,11 +10,11 @@ ENTRY(Reset_Handler)
 __FLASH_BEGIN = 0x08000000;
 __FLASH_SIZE = 0x00200000;
 
-/* Keep the final 32 KiB of AXI SRAM for DMA buffers marked non-cacheable. */
+/* Keep the final 128 KiB of AXI SRAM for DMA/NAND buffers marked non-cacheable. */
 __AXI_RAM_BEGIN = 0x24000000;
-__AXI_RAM_SIZE = 0x00078000;
-__AXI_NOCACHE_BEGIN = 0x24078000;
-__AXI_NOCACHE_SIZE = 0x00008000;
+__AXI_RAM_SIZE = 0x00060000;
+__AXI_NOCACHE_BEGIN = 0x24060000;
+__AXI_NOCACHE_SIZE = 0x00020000;
 
 _Min_Heap_Size = 0x200;
 _Min_Stack_Size = 0x800;
@@ -95,6 +95,17 @@ SECTIONS
     . = ALIGN(4);
     _edata = .;
   } > AXI_RAM AT > FLASH
+
+  /* Non-cacheable DMA/NAND buffers in AXI_NOCACHE (MPU-disabled DCache). */
+  .noncacheable_buffer (NOLOAD) :
+  {
+    . = ALIGN(32);
+    __NONCACHEABLEBUFFER_BEGIN = .;
+    KEEP(*(noncacheable_buffer))
+    KEEP(*(noncacheable_buffer.*))
+    . = ALIGN(32);
+    __NONCACHEABLEBUFFER_END = .;
+  } > AXI_NOCACHE
 
   .bss (NOLOAD) :
   {

@@ -39,6 +39,22 @@
 
 static int g_level2_inited = 0;
 
+static void print_resource_stats(const char *tag)
+{
+    fc_resource_stats_t stats;
+    if (fc_get_resource_stats(&stats) == FC_STATUS_OK)
+    {
+        fprintf(stderr, "[RES] %s: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\n",
+               tag,
+               (unsigned)stats.command_used,   (unsigned)FC_COMMAND_POOL_DEPTH,
+               (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
+               (unsigned)stats.buffer_used,     (unsigned)FC_BUFFER_POOL_DEPTH,
+               (unsigned)stats.sq_used,
+               (unsigned)stats.hsq_used,
+               (unsigned)stats.cq_used);
+    }
+}
+
 static void *setup_level2(const MunitParameter params[], void *user_data)
 {
     (void)params;
@@ -48,12 +64,28 @@ static void *setup_level2(const MunitParameter params[], void *user_data)
         fc_init();
         g_level2_inited = 1;
     }
+    print_resource_stats("L2");
     return NULL;
 }
 
 /**************************************************************************
  *  辅助函数
  **************************************************************************/
+
+static void release_cmd_buffers(fc_command_t *cmd)
+{
+    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    while (desc_id != FC_DESCRIPTOR_ID_INVALID)
+    {
+        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        if (desc == NULL) break;
+        if (desc->buffer_id != FC_BUFFER_ID_INVALID)
+        {
+            (void)fc_buffer_release(desc->buffer_id);
+        }
+        desc_id = (fc_descriptor_id_t)desc->next_id;
+    }
+}
 
 /* 用固定 pattern 填充 buffer（每个 CW 对应一个 desc buffer） */
 static void fill_pattern(uint8_t *buffer, uint16_t length, uint8_t pattern)
@@ -219,6 +251,7 @@ static MunitResult test_encode_random_off(const MunitParameter params[], void *d
         }
     }
 
+    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -261,6 +294,7 @@ static MunitResult test_encode_random_on(const MunitParameter params[], void *da
         }
     }
 
+    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -325,6 +359,7 @@ static MunitResult test_encode_raid_on(const MunitParameter params[], void *data
         }
     }
 
+    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -350,6 +385,7 @@ static MunitResult test_encode_single_cw(const MunitParameter params[], void *da
     munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
     munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
 
+    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -405,6 +441,7 @@ static MunitResult test_process_read_ok_random_on(const MunitParameter params[],
         munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
     }
 
+    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -431,6 +468,7 @@ static MunitResult test_process_read_ok_random_off(const MunitParameter params[]
         munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x55U + i)), ==, 1U);
     }
 
+    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -479,6 +517,7 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
         }
     }
 
+    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -497,6 +536,7 @@ static MunitResult test_process_read_single_cw(const MunitParameter params[], vo
     munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
     munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
 
+    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -564,6 +604,7 @@ static void do_raid_recover_test(uint8_t random_mode, uint8_t failed_idx)
         munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x10U + i)), ==, 1U);
     }
 
+    release_cmd_buffers(cmd);
     fc_command_release(cmd);
 }
 
@@ -727,6 +768,8 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
         }
     }
 
+    release_cmd_buffers(data_cmd);
+    release_cmd_buffers(parity_cmd);
     fc_command_release(data_cmd);
     fc_command_release(parity_cmd);
     return MUNIT_OK;
