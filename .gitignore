@@ -85,3 +85,8 @@ Desktop.ini
 
 # WSL 与 Windows 互操作产生的文件
 *.Zone.Identifier
+
+# 调试临时文件
+operand
+query
+sh/flash.jlink
