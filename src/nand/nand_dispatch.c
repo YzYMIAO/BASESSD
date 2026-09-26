@@ -349,6 +349,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                     /* Multi-Plane WITH_DATA_OUT: 把 page_buffer 拆回各 plane 各 CW buffer */
                     if (task->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
                     {
+
                         uint8_t mp_plane, mp_cw;
                         for (mp_plane = 0U; mp_plane < task->plane_count; mp_plane++)
                         {

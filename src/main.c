@@ -20,7 +20,7 @@
 #include <string.h>
 
 /* 每次需要确认板上 ELF 是否更新时递增；仅用于开发阶段 UART 诊断。 */
-#define SSD_FIRMWARE_DEBUG_REVISION 23U
+#define SSD_FIRMWARE_DEBUG_REVISION 24U
 #define SSD_WATCHDOG_ENABLE         0U
 
 #if (SSD_WATCHDOG_ENABLE != 0U)

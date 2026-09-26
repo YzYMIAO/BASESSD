@@ -215,7 +215,8 @@ static uint8_t req_multi_plane_read(nand_dispatch_task_t *task)
         .row         = {paa_to_nand_row(task->cw_paa[0][0]),
                         paa_to_nand_row(task->cw_paa[1][0])},
         .data        = page_buffer,
-        .data_length = PAGE_BUFFER_SIZE
+        .data_length = PAGE_SIZE     /* 每次 DATA_OUT 只读 1 个 Plane（2112 字节）
+                                      * 第二个 Plane 由 06h-E0h + DATA_OUT operand=PAGE_SIZE 分两次读取 */
     };
     return NAND_RESULT_OK;
 }
@@ -250,7 +251,8 @@ static uint8_t req_multi_plane_program(nand_dispatch_task_t *task)
         .row         = {paa_to_nand_row(task->cw_paa[0][0]),
                         paa_to_nand_row(task->cw_paa[1][0])},
         .data        = page_buffer,
-        .data_length = PAGE_BUFFER_SIZE
+        .data_length = PAGE_SIZE     /* 每次 DATA_IN 只发 1 个 Plane（2112 字节），
+                                      * 第二个 Plane 由 DATA_IN opernad=PAGE_SIZE 偏移读取 */
     };
     return NAND_RESULT_OK;
 }
@@ -323,6 +325,7 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
     [OP_READ_PAGE_CACHE_SEQ]                    = completion_per_cw,
     [OP_READ_PAGE_CACHE_RANDOM]                 = completion_per_cw,
     [OP_READ_PAGE_CACHE_LAST]                   = completion_per_cw,
+    [OP_READ_PAGE_CACHE_START]                  = completion_all_cws,
     [OP_NORMAL_PROGRAM_PAGE]                    = completion_all_cws,
     [OP_PROGRAM_PAGE_CACHE]                     = completion_all_cws,
     [OP_ERASE_BLOCK]                            = completion_all_cws,
@@ -360,6 +363,7 @@ const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
     [OP_READ_PAGE_CACHE_SEQ]                    = req_cache_read,
     [OP_READ_PAGE_CACHE_RANDOM]                 = req_cache_read,
     [OP_READ_PAGE_CACHE_LAST]                   = req_cache_read,
+    [OP_READ_PAGE_CACHE_START]                  = req_no_data,
     [OP_NORMAL_PROGRAM_PAGE]                    = req_program_page,
     [OP_PROGRAM_PAGE_CACHE]                     = req_program_page,
     [OP_ERASE_BLOCK]                            = req_erase,

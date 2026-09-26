@@ -109,7 +109,7 @@ nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *reques
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    command_request              = (nand_command_request_t){operation, request->column, {request->row[0]}, request->data, request->data_length};
+    command_request              = (nand_command_request_t){operation, request->column, {request->row[0], request->row[1]}, request->data, request->data_length};
     status                       = nand_engine_execute(nand_fmc_backend_get(), map->uops, &map->timing, &command_request, &command_completion);
     completion->execution_status = status;
     completion->nand_status      = command_completion.nand_status;
@@ -139,7 +139,7 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
              (unsigned)request->row[0], (const void *)request->data,
              (unsigned)request->data_length);
 
-    transaction->request    = (nand_command_request_t){operation, request->column, {request->row[0]}, request->data, request->data_length};
+    transaction->request    = (nand_command_request_t){operation, request->column, {request->row[0], request->row[1]}, request->data, request->data_length};
     transaction->completion = (nand_command_completion_t){0};
     transaction->active     = 1U;
     result                  = nand_engine_start(&transaction->engine, nand_fmc_backend_get(), map->uops, &map->timing, &transaction->request, &transaction->completion);

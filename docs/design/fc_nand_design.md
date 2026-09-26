@@ -2246,7 +2246,7 @@ PROGRAM 和 ERASE 不存在"延迟执行"场景，故不分拆。
 10h → tPROG（双 Plane 同时烧录）
 ```
 
-### 17.7 数据缓冲扩展
+### 17.7a 数据缓冲扩展
 
 ```c
 #define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM)  // 4224 字节
@@ -2268,7 +2268,45 @@ for (plane = 0; plane < PLANE_NUM; plane++) {
 
 读完成后 poll 中拆回各 plane 各 CW buffer 的逻辑同理。
 
-### 17.8 文件变更
+### 17.8 NAND 数据传输模式：中转 vs 直写
+
+NAND 读写操作根据输出/输入方式不同，采用中转或直写两种数据传输模式。
+
+#### 直写模式（Direct Write/Read）
+
+NORMAL_READ_PAGE_WITH_DATA_OUT 利用 NAND 的 `05h-E0h` 随机列读能力实现无中转的 CW 级读取：
+
+```
+第1步: 00h-addr-30h → DATA_OUT(528B, CW0) → 直接送入 cw_buffers[0][0]
+第2步: 05h-col(528)-E0h → DATA_OUT(528B, CW1) → 直接送入 cw_buffers[0][1]
+第3步: 05h-col(1056)-E0h → DATA_OUT(528B, CW2) → 直接送入 cw_buffers[0][2]
+第4步: 05h-col(1584)-E0h → DATA_OUT(528B, CW3) → 直接送入 cw_buffers[0][3]
+```
+
+每次 DATA_OUT 只有 528 字节（一个 CW），`req_read_page` 将 `data_length` 设为 `PAGE_SIZE / CW_NUM`，poll 中的 chaining 循环自动将后续 CW 的 operation 改为 `OP_RANDOM_DATA_READ`（05h-E0h），逐个 CW 读取到各自 buffer。
+
+NORMAL_PROGRAM_PAGE 虽然也是单页操作，但 NAND 不支持 80h 后逐个 CW 写入再确认——必须一次送完整页数据再发 10h。因此走中转模式。
+
+#### 中转模式（Page Buffer Bounce）
+
+| 操作 | 原因 | 中转数据量 |
+|------|------|-----------|
+| NORMAL_PROGRAM_PAGE | NAND 编程必须连续输入整页 | 2112 → page_buffer |
+| PROGRAM_PAGE_CACHE | 同上 | 2112 → page_buffer |
+| PROGRAM_PAGE_MULTI_PLANE | 双 Plane 数据需拼接后两次 DATA_IN | 4224 → page_buffer |
+| READ_PAGE_CACHE_SEQ/RANDOM/LAST | 31h/3Fh 一次性输出整页，无中途 05h-E0h 机会 | 2112 → page_buffer → 拆分回 CW |
+| READ_PAGE_MULTI_PLANE_WITH_DATA_OUT | 双页连续输出 4224 字节 | 4224 → page_buffer → 拆分回 Plane/CW |
+
+#### 对比
+
+| | 直写模式 | 中转模式 |
+|----|---------|---------|
+| 拷贝次数 | 0 次额外拷贝 | 1 次 memcpy（读写各 1 次） |
+| 适用场景 | 单个 CW 可独立寻址的操作 | 必须连续传输整页/多页的操作 |
+| 实现方式 | poll chaining 循环 + RANDOM_DATA_READ | req_xx handler → page_buffer → 拆分 |
+| 例 | NORMAL_READ_PAGE_WITH_DATA_OUT | 所有 Program、Cache Read、Multi-Plane |
+
+### 17.9 文件变更
 
 | 文件 | 说明 |
 |------|------|
@@ -2398,7 +2436,7 @@ FMC 总线 (地址/数据/控制线共用)
 
 **结论**：调度层和 dispatch 层的多通道架构是真实的。FMC/NAND 引擎层需要改造才能真正支持多通道。
 
-### 17.9 设计演进
+### 17.10 设计演进
 
 | 迭代 | 问题 | 方案 |
 |------|------|------|

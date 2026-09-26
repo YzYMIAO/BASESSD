@@ -21,6 +21,7 @@
 #define NAND_CMD_SET_FEATURES               0xEFU
 #define NAND_CMD_READ_STATUS_ENHANCED       0x78U
 #define NAND_CMD_RANDOM_DATA_READ           0x05U
+#define NAND_CMD_RANDOM_DATA_READ_TWO_PLANE 0x06U
 #define NAND_CMD_RANDOM_DATA_READ_END       0xE0U
 #define NAND_CMD_RANDOM_DATA_INPUT          0x85U
 #define NAND_CMD_READ_MODE                  0x00U
@@ -165,6 +166,16 @@
  * ----------------------------------------------------------------------------------------------
  */
 #define OP_READ_PAGE_CACHE_LAST (15U)
+
+/* OP_READ_PAGE_CACHE_START
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< 30 >~~~~~< 70 >-< Status >
+ * Cache 读管线启动：00h-地址-30h 将页加载到 NAND 内部页缓冲，不输出到总线。
+ * 数据由后续 READ_PAGE_CACHE_SEQ（31h）被动输出。
+ * 语义上等价于 WITHOUT_DATA_OUT，但专用于 Cache 读序列的首条命令。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_READ_PAGE_CACHE_START (34U)
 
 /* PROGRAM OPERATIONS */
 /* OP_NORMAL_PROGRAM_PAGE
@@ -317,7 +328,7 @@
  */
 #define OP_ERASE_BLOCK_MULTI_PLANE (32U)
 
-#define OP_COUNT (34U)
+#define OP_COUNT (35U)  /* 0..34 inclusive */
 
 typedef struct
 {

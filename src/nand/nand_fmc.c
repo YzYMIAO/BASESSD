@@ -225,13 +225,15 @@ static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
     uint16_t                 index;
     uint8_t                  dma_ok;
 
-    (void)uop;
     (void)timing;
 
     if ((request->buffer == NULL) || (request->data_length == 0U))
     {
         return NAND_RESULT_INVALID_ARGUMENT;
     }
+
+    /* uop->operand 作为 buffer 偏移量（用于 Multi-Plane Program） */
+    const uint8_t *src = request->buffer + uop->operand;
 
     /* ── DMA 路径（非阻塞中断模式） ── */
     if (g_nand_dma_enable != 0U)
@@ -252,7 +254,7 @@ static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
 
         /* 首次进入：启动 DMA（memory → FMC data reg） */
         dma_ok = nand_dma_memory_to_fmc_start_IT(config->data,
-                                                  request->buffer,
+                                                  src,
                                                   request->data_length);
         if (dma_ok == 0U)
         {
@@ -267,7 +269,7 @@ static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
     /* ── PIO 路径（默认/回退） ── */
     for (index = 0U; index < request->data_length; index++)
     {
-        *config->data = request->buffer[index];
+        *config->data = src[index];
     }
 
     completion->transfer_status = NAND_RESULT_OK;
@@ -280,13 +282,15 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
     uint16_t                 index;
     uint8_t                  dma_ok;
 
-    (void)uop;
     (void)timing;
 
     if ((request->buffer == NULL) || (request->data_length == 0U))
     {
         return NAND_RESULT_INVALID_ARGUMENT;
     }
+
+    /* uop->operand 作为 buffer 偏移量（用于 Multi-Plane Read 的第二 Plane） */
+    uint8_t *dst = request->buffer + uop->operand;
 
     /* ── DMA 路径（非阻塞中断模式） ── */
     if (g_nand_dma_enable != 0U)
@@ -295,7 +299,7 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
         if (nand_dma_data_in_done() != 0U)
         {
             /* DMA 完成：Invalidate D-Cache 后取数据 */
-            nand_dma_cache_invalidate(request->buffer, request->data_length);
+            nand_dma_cache_invalidate(dst, request->data_length);
             if (request->operation == OP_READ_ID)
             {
                 SSD_LOGI("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
@@ -314,7 +318,7 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
 
         /* 首次进入：启动 DMA（FMC data reg → memory） */
         dma_ok = nand_dma_fmc_to_memory_start_IT(config->data,
-                                                  request->buffer,
+                                                  dst,
                                                   request->data_length);
         if (dma_ok == 0U)
         {
@@ -329,7 +333,7 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
     /* ── PIO 路径（默认/回退） ── */
     for (index = 0U; index < request->data_length; index++)
     {
-        request->buffer[index] = *config->data;
+        dst[index] = *config->data;
     }
 
     if (request->operation == OP_READ_ID)
