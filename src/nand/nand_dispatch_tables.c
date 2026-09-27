@@ -21,8 +21,7 @@
  * ====================================================================== */
 
 /* 全局 page_buffer 引用（与 nand_dispatch.c 中相同） */
-extern uint8_t              g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
-extern nand_dispatch_task_t g_nand_dispatch_tasks[CH_NUM][CE_NUM][LUN_NUM];
+extern uint8_t g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
 
 /* --------------------------------------------------------------------
  * completion_all_cws
@@ -341,6 +340,13 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
     [OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT]    = completion_multi_plane,
     [OP_PROGRAM_PAGE_MULTI_PLANE]               = completion_multi_plane,
     [OP_ERASE_BLOCK_MULTI_PLANE]                = completion_multi_plane,
+    /* Phase V: ISSUE/WAIT/FETCH completion */
+    [OP_READ_PAGE_LOAD]                         = completion_single,
+    [OP_READ_PAGE_FETCH]                        = completion_per_cw,
+    [OP_PROGRAM_PAGE_ISSUE]                     = completion_all_cws,
+    [OP_PROGRAM_PAGE_WAIT]                      = completion_all_cws,
+    [OP_ERASE_BLOCK_ISSUE]                      = completion_all_cws,
+    [OP_ERASE_BLOCK_WAIT]                       = completion_all_cws,
 };
 
 const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
@@ -377,4 +383,11 @@ const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
     [OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT]    = req_multi_plane_read,
     [OP_PROGRAM_PAGE_MULTI_PLANE]               = req_multi_plane_program,
     [OP_ERASE_BLOCK_MULTI_PLANE]                = req_multi_plane_erase,
+    /* Phase V: ISSUE/WAIT/FETCH request */
+    [OP_READ_PAGE_LOAD]                         = req_read_page,
+    [OP_READ_PAGE_FETCH]                        = req_read_page,
+    [OP_PROGRAM_PAGE_ISSUE]                     = req_program_page,
+    [OP_PROGRAM_PAGE_WAIT]                      = req_no_data,
+    [OP_ERASE_BLOCK_ISSUE]                      = req_erase,
+    [OP_ERASE_BLOCK_WAIT]                       = req_no_data,
 };

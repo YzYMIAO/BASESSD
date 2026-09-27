@@ -46,6 +46,9 @@ static const nand_engine_backend_t g_nand_fmc_backend =
         .context  = &g_nand_fmc_config,
 };
 
+/* ── Phase V: per-(CH,CE,LUN) 实例数组 ── */
+nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM][LUN_NUM];
+
 nand_result_t nand_fmc_configure(const nand_fmc_config_t *config)
 {
     if ((config == NULL) || (config->data == NULL) || (config->command == NULL) || (config->address == NULL) || (config->wait_ready == NULL))
@@ -60,6 +63,33 @@ nand_result_t nand_fmc_configure(const nand_fmc_config_t *config)
 const nand_engine_backend_t *nand_fmc_backend_get(void)
 {
     return &g_nand_fmc_backend;
+}
+
+/* ── Phase V: per-(CH,CE,LUN) backend 初始化 ── */
+
+nand_result_t nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun,
+                                     const nand_fmc_config_t *config)
+{
+    nand_fmc_instance_t *inst;
+
+    if ((config == NULL) || (ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
+    {
+        return NAND_RESULT_INVALID_ARGUMENT;
+    }
+    inst         = &g_nand_fmc_instances[ch][ce][lun];
+    inst->config = *config;
+    inst->backend.handlers = g_nand_fmc_handlers;
+    inst->backend.context  = &inst->config;
+    return NAND_RESULT_OK;
+}
+
+const nand_engine_backend_t *nand_fmc_backend_get_ext(uint8_t ch, uint8_t ce, uint8_t lun)
+{
+    if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
+    {
+        return NULL;
+    }
+    return &g_nand_fmc_instances[ch][ce][lun].backend;
 }
 
 static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)

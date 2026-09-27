@@ -84,6 +84,8 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->parameter[2] = request->parameter[2];
     task->parameter[3] = request->parameter[3];
     task->feature_addr = request->feature_addr;
+    /* Phase V: 绑定 per-LUN backend */
+    task->backend      = nand_fmc_backend_get_ext(request->ch, request->ce, request->lun);
     for (cw = 0U; cw < request->cw_count; cw++)
     {
         task->cw_paa[0][cw]     = request->cws[0][cw].paa;

@@ -51,4 +51,22 @@ typedef struct
 nand_result_t                nand_fmc_configure(const nand_fmc_config_t *config);
 const nand_engine_backend_t *nand_fmc_backend_get(void);
 
+/* ── Phase V: per-(CH,CE,LUN) 后端实例 ── */
+
+typedef struct
+{
+    nand_fmc_config_t       config;
+    nand_engine_backend_t   backend;
+} nand_fmc_instance_t;
+
+/* 初始化指定 (ch,ce,lun) 的 FMC 后端实例。config 内容拷贝到实例。 */
+nand_result_t nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun,
+                                     const nand_fmc_config_t *config);
+
+/* 获取指定 (ch,ce,lun) 的 engine backend 指针。越界返回 NULL。 */
+const nand_engine_backend_t *nand_fmc_backend_get_ext(uint8_t ch, uint8_t ce, uint8_t lun);
+
+/* 全局实例数组（供 nand_dispatch 直接访问） */
+extern nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM][LUN_NUM];
+
 #endif /* PLATFORM_STM32H743_NAND_FMC_H */
