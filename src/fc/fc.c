@@ -30,7 +30,6 @@ static uint8_t fc_is_page_read(uint8_t operation)
         case OP_READ_PAGE_CACHE_RANDOM:
         case OP_READ_PAGE_CACHE_LAST:
         case OP_RANDOM_DATA_READ:
-        case OP_READ_PAGE_FETCH:             /* Phase V: FETCH 也有数据输出 */
             return 1U;
         default:
             return 0U;
@@ -51,7 +50,6 @@ static uint8_t fc_is_page_write(uint8_t operation)
         case OP_PROGRAM_PAGE_CACHE:
         case OP_OTP_DATA_PROGRAM:
         case OP_PROGRAM_PAGE_MULTI_PLANE:
-        case OP_PROGRAM_PAGE_ISSUE:          /* Phase V: ISSUE 段也有数据写入 */
             return 1U;
         default:
             return 0U;

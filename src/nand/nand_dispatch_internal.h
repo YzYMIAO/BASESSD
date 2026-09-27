@@ -13,7 +13,6 @@
 #include "nand_config.h"
 #include "nand_dispatch.h"
 #include "nand_fc_interface.h"
-#include "nand_fmc.h"
 #include "onfi_1_0.h"
 
 #include <stdint.h>
@@ -38,37 +37,22 @@ typedef struct
     nand_paa_t cw_paa[PLANE_NUM][CW_NUM];
     uint8_t   *cw_buffers[PLANE_NUM][CW_NUM];
 
-    const nand_engine_backend_t *backend;   /* per-LUN backend (Phase V) */
-
     nand_fc_request_t          request;
     nand_fc_transaction_t      transaction;
     nand_dispatch_completion_t completion;
 } nand_dispatch_task_t;
 
 /*
- * LUN 相位枚举 (Phase V multi-LUN)
- */
-#define LUN_PHASE_IDLE   (0U)  /* LUN 空闲 */
-#define LUN_PHASE_ISSUE  (1U)  /* 正在执行 ISSUE uop */
-#define LUN_PHASE_ISSUED (2U)  /* ISSUE 完成，LUN 内部操作中（tR/tPROG/tBERS） */
-#define LUN_PHASE_FETCH  (3U)  /* 正在执行 WAIT/FETCH uop */
-
-/*
  * Per-LUN 链状态。
  * count=0 表示 LUN 空闲；count>0 时 cursor 指示当前执行的 task 索引。
  * 链中所有命令均在同一 ch/ce/lun 上，预加载完成后由 poll 自动推进 cursor，
  * 不清 LUN busy，直到 cursor==count-1 时返回 completion。
- *
- * Phase V 扩展：phase 跟踪 LUN 在 ISSUE/ISSUED/FETCH 之间的状态转换，
- * wait_start_cycles 记录 ISSUE 完成时的 DWT 时间戳，用于最小等待时间控制。
  */
 typedef struct
 {
     nand_dispatch_task_t tasks[NAND_DISPATCH_CHAIN_DEPTH];
     uint8_t              count;
     uint8_t              cursor;
-    uint8_t              phase;              /* Phase V: LUN_PHASE_* */
-    uint32_t             wait_start_cycles;  /* Phase V: ISSUE 完成时 DWT 时间戳 */
 } nand_dispatch_lun_chain_t;
 
 /* ======================================================================

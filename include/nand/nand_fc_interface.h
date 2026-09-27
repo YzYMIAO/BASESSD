@@ -29,11 +29,10 @@ typedef struct
 
 typedef struct
 {
-    nand_engine_state_t            engine;
-    nand_command_request_t         request;
-    nand_command_completion_t      completion;
-    const nand_engine_backend_t   *backend;   /* per-LUN backend (Phase V) */
-    uint8_t                        active;
+    nand_engine_state_t       engine;
+    nand_command_request_t    request;
+    nand_command_completion_t completion;
+    uint8_t                   active;
 } nand_fc_transaction_t;
 
 #endif /* NAND_FC_INTERFACE_H */

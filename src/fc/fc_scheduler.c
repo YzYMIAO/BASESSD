@@ -32,8 +32,6 @@ static uint8_t fc_scheduler_op_is_read(uint8_t operation)
         case OP_READ_STATUS:
         case OP_READ_STATUS_ENHANCED:
         case OP_BLOCK_LOCK_STATUS:
-        case OP_READ_PAGE_LOAD:             /* Phase V: LOAD 是 ISSUE 段，算读 */
-        case OP_READ_PAGE_FETCH:            /* Phase V: FETCH 是读完成段 */
             return 1U;
         default:
             return 0U;
