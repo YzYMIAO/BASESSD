@@ -432,10 +432,10 @@ extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
     ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].op_type == OP_TYPE_WAIT) || \
                          (g_nand_operation_map[(op)].op_type == OP_TYPE_FETCH)) : 0U)
 
-/* 判断 operation 是否为可拆分的原子 OP（有配对 OP 码且自身不是配对段） */
+/* 判断 operation 是否为可拆分的原子 OP（type=ATOMIC 且有配对 ISSUE 码） */
 #define nand_operation_is_splittable(op) \
-    ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].pair_op != 0U) && \
-                         (g_nand_operation_map[(op)].pair_op != (op))) : 0U)
+    ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].op_type == OP_TYPE_ATOMIC) && \
+                         (g_nand_operation_map[(op)].pair_op != 0U)) : 0U)
 
 /* 返回原子 OP 对应的 ISSUE 段 OP 码（不可拆分则返回自身） */
 #define nand_operation_to_issue(op) \
