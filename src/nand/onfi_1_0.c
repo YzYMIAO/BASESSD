@@ -24,6 +24,7 @@ static const nand_uop_t g_nand_normal_read_page_uops[] =
         {      NAND_UOP_ROW_1,                         0U},
         {      NAND_UOP_ROW_2,                         0U},
         {    NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
+        { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
         { NAND_UOP_WAIT_READY,                         0U},
         {   NAND_UOP_DATA_OUT,                         0U},
         {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
@@ -47,6 +48,7 @@ static const nand_uop_t g_nand_normal_read_page_without_data_out_uops[] =
         {      NAND_UOP_ROW_1,                         0U},
         {      NAND_UOP_ROW_2,                         0U},
         {    NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
+        { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
         { NAND_UOP_WAIT_READY,                         0U},
         {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
@@ -70,6 +72,7 @@ static const nand_uop_t g_nand_normal_program_page_uops[] =
         {      NAND_UOP_ROW_2,                            0U},
         {    NAND_UOP_DATA_IN,                            0U},
         {    NAND_UOP_COMMAND, NAND_CMD_PROGRAM_PAGE_CONFIRM},
+        { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
         { NAND_UOP_WAIT_READY,                            0U},
         {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
@@ -90,6 +93,7 @@ static const nand_uop_t g_nand_erase_block_uops[] =
         {      NAND_UOP_ROW_1,                           0U},
         {      NAND_UOP_ROW_2,                           0U},
         {    NAND_UOP_COMMAND, NAND_CMD_BLOCK_ERASE_CONFIRM},
+        { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
         { NAND_UOP_WAIT_READY,                           0U},
         {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
@@ -247,6 +251,7 @@ static const nand_uop_t g_nand_program_move_uops[] = {
     {            NAND_UOP_ROW_2, 0U},
     {          NAND_UOP_DATA_IN, 0U},
     {  NAND_UOP_COMMAND, NAND_CMD_PROGRAM_PAGE_CONFIRM},        /* 10h */
+    { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
     {       NAND_UOP_WAIT_READY, 0U},
     {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
@@ -329,6 +334,7 @@ static const nand_uop_t g_nand_program_cache_uops[] = {
     {            NAND_UOP_ROW_2, 0U},
     {          NAND_UOP_DATA_IN, 0U},
     {  NAND_UOP_COMMAND, NAND_CMD_PROGRAM_PAGE_CACHE},          /* 15h */
+    { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
     {       NAND_UOP_WAIT_READY, 0U},
     {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
@@ -349,6 +355,7 @@ static const nand_uop_t g_nand_internal_read_uops[] = {
     {            NAND_UOP_ROW_1, 0U},
     {            NAND_UOP_ROW_2, 0U},
     {  NAND_UOP_COMMAND, NAND_CMD_INTERNAL_DATA_MOVE},          /* 35h */
+    { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
     {       NAND_UOP_WAIT_READY, 0U},
     {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
@@ -369,6 +376,7 @@ static const nand_uop_t g_nand_internal_program_uops[] = {
     {            NAND_UOP_ROW_1, 0U},
     {            NAND_UOP_ROW_2, 0U},
     {  NAND_UOP_COMMAND, NAND_CMD_PROGRAM_PAGE_CONFIRM},        /* 10h */
+    { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
     {       NAND_UOP_WAIT_READY, 0U},
     {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
@@ -457,6 +465,7 @@ static const nand_uop_t g_nand_otp_lock_uops[] = {
     {            NAND_UOP_ROW_1, 0U},
     {            NAND_UOP_ROW_2, 0U},
     {  NAND_UOP_COMMAND, NAND_CMD_PROGRAM_PAGE_CONFIRM},  /* 10h */
+    { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
     {       NAND_UOP_WAIT_READY, 0U},
     {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
@@ -539,6 +548,7 @@ static const nand_uop_t g_nand_multi_plane_read_without_data_out_uops[] =
         {      NAND_UOP_ROW_2,                         1U},
  /* 30h + tR，无数据输出（数据留在页缓冲中） */
         {    NAND_UOP_COMMAND, NAND_CMD_READ_PAGE_CONFIRM},
+        { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
         { NAND_UOP_WAIT_READY,                         0U},
         {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
@@ -564,7 +574,7 @@ static const nand_uop_t g_nand_multi_plane_program_uops[] =
         {    NAND_UOP_DATA_IN,                                  0U}, /* Plane 0 全页: buffer[0..2111] */
   /* ③ 11h 切换 plane + 地址 + Din (Plane 1) */
         {    NAND_UOP_COMMAND, NAND_CMD_MULTI_PLANE_PROGRAM_SWITCH}, /* 11h */
-        { NAND_UOP_DELAY_US,                                  1U}, /* tADL                                  0U}, /* tADL: 11h 后等待 plane 切换完成 */
+        { NAND_UOP_DELAY_US,                                  1U}, /* tADL: 11h 切换 plane */
         {    NAND_UOP_COMMAND,         NAND_CMD_PROGRAM_PAGE_SETUP}, /* 80h: Plane 1 地址周期 */
         {   NAND_UOP_COLUMN_0,                                  0U},
         {   NAND_UOP_COLUMN_1,                                  0U},
@@ -574,6 +584,7 @@ static const nand_uop_t g_nand_multi_plane_program_uops[] =
         {    NAND_UOP_DATA_IN,                        PAGE_SIZE}, /* Plane 1 全页: buffer[2112..4223] */
   /* ⑥ 10h 确认 + tPROG */
         {    NAND_UOP_COMMAND,       NAND_CMD_PROGRAM_PAGE_CONFIRM},
+        { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
         { NAND_UOP_WAIT_READY,                                  0U},
         {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
@@ -601,6 +612,7 @@ static const nand_uop_t g_nand_multi_plane_erase_uops[] =
         {      NAND_UOP_ROW_2,                           1U},
  /* ⑤ D0h 确认 + tBERS */
         {    NAND_UOP_COMMAND, NAND_CMD_BLOCK_ERASE_CONFIRM},
+        { NAND_UOP_DELAY_US, NAND_TIME_TWB_US},
         { NAND_UOP_WAIT_READY,                           0U},
         {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
 {NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
