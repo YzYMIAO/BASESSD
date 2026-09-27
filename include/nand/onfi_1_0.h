@@ -106,16 +106,17 @@
  */
 #define OP_RANDOM_DATA_READ (8U)
 
-/* OP_RANDOM_DATA_INPUT
- * ----------------------------------------------------------------------------------------------
- * < 85 >-< C1 >-< C2 >-< Din1 >-< Dinn >
- * ----------------------------------------------------------------------------------------------
- */
-#define OP_RANDOM_DATA_INPUT (9U)
+/* 操作码 9 已删除（原 OP_RANDOM_DATA_INPUT），
+ * 功能由 OP_PROGRAM_FOR_INTERNAL_DATA_MOVE 完整覆盖。 */
 
 /* OP_PROGRAM_FOR_INTERNAL_DATA_MOVE
  * ----------------------------------------------------------------------------------------------
- * < 85 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< Din >-< 10 >
+ * < 70 >-< Status >-< 85 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< Din(1B) >-< 10 >~~~~~< 70 >-< Status >
+ *
+ * ONFI 内部搬移的"替换写入"模式：85h + 地址 + 1 字节数据后发 10h 确认，
+ * 将单字节写入页缓冲中指定位置，然后写入 NAND。不同于纯 copy-back
+ * （OP_PROGRAM_FOR_INTERNAL_MOVE），它允许在搬移过程中替换 1 字节数据
+ * （如 ECC 纠正后的单字节修正），然后 10h 触发 tPROG 写入 NAND。
  * ----------------------------------------------------------------------------------------------
  */
 #define OP_PROGRAM_FOR_INTERNAL_DATA_MOVE (10U)
@@ -328,7 +329,7 @@
  */
 #define OP_ERASE_BLOCK_MULTI_PLANE (32U)
 
-#define OP_COUNT (35U)  /* 0..34 inclusive */
+#define OP_COUNT (35U) /* 0..34 inclusive */
 
 typedef struct
 {
