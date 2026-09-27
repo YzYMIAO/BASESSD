@@ -197,8 +197,8 @@ static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
 
         /* 首次进入：启动 DMA（memory → FMC data reg） */
         dma_ok = nand_dma_memory_to_fmc_start_IT(config->data,
-                                                  src,
-                                                  request->data_length);
+                                                 src,
+                                                 request->data_length);
         if (dma_ok == 0U)
         {
             return NAND_RESULT_NOT_READY; /* DMA 启动中 */
@@ -246,8 +246,12 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
             if (request->operation == OP_READ_ID)
             {
                 SSD_LOGI("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
-                         request->buffer[0], request->buffer[1], request->buffer[2],
-                         request->buffer[3], request->buffer[4], (void *)request->buffer);
+                         request->buffer[0],
+                         request->buffer[1],
+                         request->buffer[2],
+                         request->buffer[3],
+                         request->buffer[4],
+                         (void *)request->buffer);
             }
             completion->transfer_status = NAND_RESULT_OK;
             return NAND_RESULT_OK;
@@ -261,8 +265,8 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
 
         /* 首次进入：启动 DMA（FMC data reg → memory） */
         dma_ok = nand_dma_fmc_to_memory_start_IT(config->data,
-                                                  dst,
-                                                  request->data_length);
+                                                 dst,
+                                                 request->data_length);
         if (dma_ok == 0U)
         {
             return NAND_RESULT_NOT_READY;
@@ -282,8 +286,12 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
     if (request->operation == OP_READ_ID)
     {
         SSD_LOGI("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
-                 request->buffer[0], request->buffer[1], request->buffer[2],
-                 request->buffer[3], request->buffer[4], (void *)request->buffer);
+                 request->buffer[0],
+                 request->buffer[1],
+                 request->buffer[2],
+                 request->buffer[3],
+                 request->buffer[4],
+                 (void *)request->buffer);
     }
 
     completion->transfer_status = NAND_RESULT_OK;

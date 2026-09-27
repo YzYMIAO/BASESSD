@@ -13,15 +13,69 @@ static NAND_HandleTypeDef g_nand_handle;
 
 /* 低速时序（NAND 默认 Mode 0，tRC=50ns） */
 static const nand_fmc_timing_t g_nand_timing_slow = {
-    70U, 5U, 10U, 5U, 5U, 10U, 15U, 5U, 7U, 20U, 7U, 10U, 10U, 25U, 50U,
-    10U, 15U, 0U, 20U, 16U, 7U, 15U, 100U, 100U, 5U, 10U, 20U, 100U, 60U,
+    70U,
+    5U,
+    10U,
+    5U,
+    5U,
+    10U,
+    15U,
+    5U,
+    7U,
+    20U,
+    7U,
+    10U,
+    10U,
+    25U,
+    50U,
+    10U,
+    15U,
+    0U,
+    20U,
+    16U,
+    7U,
+    15U,
+    100U,
+    100U,
+    5U,
+    10U,
+    20U,
+    100U,
+    60U,
 };
 
 /* 高速时序（ONFI Mode 4，tRC=20ns） */
 #if (CONFIG_NAND_TIMING_MODE_4 != 0U)
 static const nand_fmc_timing_t g_nand_timing_fast = {
-    20U, 5U, 5U, 5U, 5U, 5U, 10U, 5U, 5U, 10U, 5U, 5U, 10U, 20U, 30U,
-    10U, 10U, 0U, 10U, 12U, 5U, 5U, 50U, 50U, 5U, 5U, 20U, 50U, 30U,
+    20U,
+    5U,
+    5U,
+    5U,
+    5U,
+    5U,
+    10U,
+    5U,
+    5U,
+    10U,
+    5U,
+    5U,
+    10U,
+    20U,
+    30U,
+    10U,
+    10U,
+    0U,
+    10U,
+    12U,
+    5U,
+    5U,
+    50U,
+    50U,
+    5U,
+    5U,
+    20U,
+    50U,
+    30U,
 };
 #endif /* CONFIG_NAND_TIMING_MODE_4 */
 
@@ -39,41 +93,59 @@ static const nand_fmc_timing_t g_nand_timing_fast = {
  *   HiZSetupTime  = tRHZ / tHCLK
  */
 #if (CONFIG_NAND_TIMING_MODE_4 != 0U)
-static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi,
-                                    FMC_NAND_PCC_TimingTypeDef *pcc)
+static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
+                                   FMC_NAND_PCC_TimingTypeDef *pcc)
 {
     /* FMC kernel clock period in ns, fixed at compile time for STM32H743 */
-    const uint32_t hclk_ns = 5U;  /* 220 MHz → 4.55 ns, 取整到 5 ns */
+    const uint32_t hclk_ns = 5U; /* 220 MHz → 4.55 ns, 取整到 5 ns */
 
-    #define CEIL_DIV(a, b) (((a) + (b) - 1U) / (b))
+#    define CEIL_DIV(a, b) (((a) + (b)-1U) / (b))
 
     /* max(tCLS, tALS, tCS) → SetupTime */
     {
         uint32_t max_ns = onfi->t_cls_ns;
-        if (onfi->t_als_ns > max_ns) max_ns = onfi->t_als_ns;
-        if (onfi->t_cs_ns  > max_ns) max_ns = onfi->t_cs_ns;
+        if (onfi->t_als_ns > max_ns)
+        {
+            max_ns = onfi->t_als_ns;
+        }
+        if (onfi->t_cs_ns > max_ns)
+        {
+            max_ns = onfi->t_cs_ns;
+        }
         pcc->SetupTime = (uint8_t)CEIL_DIV(max_ns, hclk_ns);
     }
 
     /* max(tRP, tWP) → WaitSetupTime */
     {
         uint32_t max_ns = onfi->t_rp_ns;
-        if (onfi->t_wp_ns > max_ns) max_ns = onfi->t_wp_ns;
+        if (onfi->t_wp_ns > max_ns)
+        {
+            max_ns = onfi->t_wp_ns;
+        }
         pcc->WaitSetupTime = (uint8_t)CEIL_DIV(max_ns, hclk_ns);
     }
 
     /* max(tCH, tALH, tCLH, tDH) → HoldSetupTime */
     {
         uint32_t max_ns = onfi->t_ch_ns;
-        if (onfi->t_alh_ns > max_ns) max_ns = onfi->t_alh_ns;
-        if (onfi->t_clh_ns > max_ns) max_ns = onfi->t_clh_ns;
-        if (onfi->t_dh_ns  > max_ns) max_ns = onfi->t_dh_ns;
+        if (onfi->t_alh_ns > max_ns)
+        {
+            max_ns = onfi->t_alh_ns;
+        }
+        if (onfi->t_clh_ns > max_ns)
+        {
+            max_ns = onfi->t_clh_ns;
+        }
+        if (onfi->t_dh_ns > max_ns)
+        {
+            max_ns = onfi->t_dh_ns;
+        }
         pcc->HoldSetupTime = (uint8_t)CEIL_DIV(max_ns, hclk_ns);
     }
 
     pcc->HiZSetupTime = (uint8_t)CEIL_DIV(onfi->t_rhz_max_ns, hclk_ns);
 
-    #undef CEIL_DIV
+#    undef CEIL_DIV
 }
 #endif /* CONFIG_NAND_TIMING_MODE_4 */
 static uint8_t nand_fmc_wait_ready(void *context, uint16_t timeout_us)
@@ -109,7 +181,10 @@ nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *reques
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    command_request              = (nand_command_request_t){operation, request->column, {request->row[0], request->row[1]}, request->data, request->data_length};
+    command_request = (nand_command_request_t){
+        operation, request->column, {request->row[0], request->row[1]},
+          request->data, request->data_length
+    };
     status                       = nand_engine_execute(nand_fmc_backend_get(), map->uops, &map->timing, &command_request, &command_completion);
     completion->execution_status = status;
     completion->nand_status      = command_completion.nand_status;
@@ -135,11 +210,16 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
     nand_dma_clear_flags();
 
     SSD_LOGD("nand_fc_start: op=%u col=%u row=0x%06X data=%p len=%u\r\n",
-             (unsigned)operation, (unsigned)request->column,
-             (unsigned)request->row[0], (const void *)request->data,
+             (unsigned)operation,
+             (unsigned)request->column,
+             (unsigned)request->row[0],
+             (const void *)request->data,
              (unsigned)request->data_length);
 
-    transaction->request    = (nand_command_request_t){operation, request->column, {request->row[0], request->row[1]}, request->data, request->data_length};
+    transaction->request = (nand_command_request_t){
+        operation, request->column, {request->row[0], request->row[1]},
+          request->data, request->data_length
+    };
     transaction->completion = (nand_command_completion_t){0};
     transaction->active     = 1U;
     result                  = nand_engine_start(&transaction->engine, nand_fmc_backend_get(), map->uops, &map->timing, &transaction->request, &transaction->completion);
@@ -310,8 +390,8 @@ uint8_t nand_init(void)
 #if CONFIG_NAND_TIMING_MODE_4
     /* ── 高速模式：切 NAND 到 Mode 4 + 更新 FMC 硬件时序 ── */
     {
-        const uint8_t mode_4[4] = {4U, 0U, 0U, 0U};
-        FMC_NAND_PCC_TimingTypeDef fast_pcc = {0};
+        const uint8_t              mode_4[4] = {4U, 0U, 0U, 0U};
+        FMC_NAND_PCC_TimingTypeDef fast_pcc  = {0};
 
         result = nand_fc_set_features(0x01U, mode_4, &completion);
         if (result != NAND_RESULT_OK)

@@ -1,4 +1,5 @@
 #include "fc_ldpc_engine.h"
+
 #include "fc_bch_engine.h"
 #include "fc_ldpc_qc_engine.h"
 
@@ -24,7 +25,7 @@
 
 static fc_bch_control_t *g_bch = NULL;
 #if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
-static fc_ldpc_qc_t     *g_qc  = NULL;
+static fc_ldpc_qc_t *g_qc = NULL;
 #endif
 
 static uint8_t fc_ecc_init_bch(void)
@@ -65,7 +66,7 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
     }
 
     {
-        uint8_t  ecc_buf[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        uint8_t ecc_buf[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
         if (data_length < 8U)
         {

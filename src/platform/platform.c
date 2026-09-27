@@ -1,5 +1,6 @@
-#include "common/common.h"
 #include "platform/platform.h"
+
+#include "common/common.h"
 
 static const ssd_platform_ops_t *g_platform_ops;
 

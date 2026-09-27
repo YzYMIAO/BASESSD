@@ -25,12 +25,12 @@
  * CW 布局: [META:4][CRC:4][USER:512][PARITY:8] = 528B
  * 对外接口只暴露 USER 数据区，META/CRC/PARITY 由 FC 内部管理。
  */
-#define FC_BUFFER_USER_OFFSET    (8U)    /* USER 区域在 CW 中的偏移 */
-#define FC_BUFFER_USER_SIZE      (512U)  /* 暴露给 FTL 的用户数据大小 */
-#define FC_BUFFER_DATA_SIZE      (520U)  /* META+CRC+USER = 加扰/ECC 处理的数据区大小 */
-#define FC_SQ_DEPTH              (64U)
-#define FC_HSQ_DEPTH             (16U)
-#define FC_CQ_DEPTH              (64U)
+#define FC_BUFFER_USER_OFFSET (8U)   /* USER 区域在 CW 中的偏移 */
+#define FC_BUFFER_USER_SIZE   (512U) /* 暴露给 FTL 的用户数据大小 */
+#define FC_BUFFER_DATA_SIZE   (520U) /* META+CRC+USER = 加扰/ECC 处理的数据区大小 */
+#define FC_SQ_DEPTH           (64U)
+#define FC_HSQ_DEPTH          (16U)
+#define FC_CQ_DEPTH           (64U)
 
 typedef struct
 {
@@ -56,12 +56,12 @@ fc_buffer_id_t     fc_real_buffer_to_buffer_id(const uint8_t *buffer);
 
 /* FC 内部使用：返回 CW 基址（META 开头，528B 完整 CW）。
    数据路径（加扰/ECC/RAID）使用此接口。 */
-uint8_t           *fc_buffer_get_base(fc_buffer_id_t buffer_id);
+uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id);
 
 /* 返回 CW 中 META 字段指针（4 字节，位于 CW 基址偏移 0）。
    META 包含 FAA/PAA 信息，由 FC 在 program 前自动填写。
    FTL/Test 在 read 完成后可通过此接口验证物理地址一致性。 */
-uint8_t           *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index);
+uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index);
 
 /* 便利函数：将外部数据按 CW 大小依次拷贝到命令的所有 desc buffer 中。
  * 数据不够时剩余部分用 0xFF dummy 填充。 */

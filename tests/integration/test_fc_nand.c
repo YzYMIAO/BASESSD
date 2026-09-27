@@ -146,12 +146,12 @@ static void fc_nand_test_command_configure(fc_command_t *command, uint8_t operat
     command->config.lun       = 0U;
     command->paa              = paa;
     command->config.cw        = (descriptor_count > 0U) ? (uint8_t)(descriptor_count - 1U) : 0U;
-    command->config.crc       = 0U;           /* CRC enabled; set to 1 only to disable it. */
+    command->config.crc       = 0U;              /* CRC enabled; set to 1 only to disable it. */
     command->config.ldpc      = FC_ECC_MODE_BCH; /* Full BCH ECC path enabled. */
-    command->config.raid      = 0U;           /* Normal RAID path; nonzero selects a RAID operation. */
-    command->config.random    = 0U;           /* Randomizer enabled; set to 1 only to disable it. */
-    command->config.chain     = 0U;           /* This test submits one standalone command. */
-    command->config.page_type = 0U;           /* LP page for the current SLC test device. */
+    command->config.raid      = 0U;              /* Normal RAID path; nonzero selects a RAID operation. */
+    command->config.random    = 0U;              /* Randomizer enabled; set to 1 only to disable it. */
+    command->config.chain     = 0U;              /* This test submits one standalone command. */
+    command->config.page_type = 0U;              /* LP page for the current SLC test device. */
     command->module           = FC_COMMAND_MODULE_FTL;
 }
 

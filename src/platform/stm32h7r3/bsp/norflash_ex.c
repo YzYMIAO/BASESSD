@@ -1,8 +1,6 @@
-#include "common/common.h"
-
-
 #include "norflash_ex.h"
 
+#include "common/common.h"
 #include "norflash.h"
 
 /**

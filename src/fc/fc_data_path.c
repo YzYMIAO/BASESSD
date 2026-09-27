@@ -39,9 +39,9 @@
 
 #if CONFIG_FC_RAID
 static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd,
-                                          uint8_t *buffers[],
-                                          nand_paa_t buffer_paa[],
-                                          uint8_t max_count)
+                                         uint8_t            *buffers[],
+                                         nand_paa_t          buffer_paa[],
+                                         uint8_t             max_count)
 {
     fc_descriptor_id_t desc_id;
     uint8_t            count = 0U;
@@ -50,10 +50,13 @@ static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd,
          (desc_id != FC_DESCRIPTOR_ID_INVALID) && (count < max_count);)
     {
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) break;
+        if (desc == NULL)
+        {
+            break;
+        }
 
         /* 解码路径需要操作全 CW，取基址 */
-        buffers[count] = fc_buffer_get_base(desc->buffer_id);
+        buffers[count]    = fc_buffer_get_base(desc->buffer_id);
         buffer_paa[count] = desc->paa;
         count++;
         desc_id = (fc_descriptor_id_t)desc->next_id;
@@ -83,7 +86,10 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL) return FC_STATUS_INVALID_ARGUMENT;
+            if (desc == NULL)
+            {
+                return FC_STATUS_INVALID_ARGUMENT;
+            }
 
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
@@ -101,7 +107,10 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL) return FC_STATUS_INVALID_ARGUMENT;
+            if (desc == NULL)
+            {
+                return FC_STATUS_INVALID_ARGUMENT;
+            }
 
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
@@ -121,7 +130,10 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL) return FC_STATUS_INVALID_ARGUMENT;
+            if (desc == NULL)
+            {
+                return FC_STATUS_INVALID_ARGUMENT;
+            }
 
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
@@ -146,7 +158,10 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL) return FC_STATUS_INVALID_ARGUMENT;
+            if (desc == NULL)
+            {
+                return FC_STATUS_INVALID_ARGUMENT;
+            }
 
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
@@ -222,14 +237,23 @@ fc_status_t fc_data_path_generate_stripe_parity(
         for (uint8_t s = 0U; s < cw; s++)
         {
             fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(desc_id);
-            if (dsc == NULL) return FC_STATUS_INVALID_ARGUMENT;
+            if (dsc == NULL)
+            {
+                return FC_STATUS_INVALID_ARGUMENT;
+            }
             desc_id = (fc_descriptor_id_t)dsc->next_id;
         }
         {
             fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(desc_id);
-            if (dsc == NULL) return FC_STATUS_INVALID_ARGUMENT;
+            if (dsc == NULL)
+            {
+                return FC_STATUS_INVALID_ARGUMENT;
+            }
             parity_buf = fc_buffer_get_base(dsc->buffer_id);
-            if (parity_buf == NULL) return FC_STATUS_INVALID_ARGUMENT;
+            if (parity_buf == NULL)
+            {
+                return FC_STATUS_INVALID_ARGUMENT;
+            }
         }
 
         /* XOR 所有数据命令的对应 CW 数据区 */
@@ -242,14 +266,23 @@ fc_status_t fc_data_path_generate_stripe_parity(
             for (uint8_t s = 0U; s < cw; s++)
             {
                 fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(data_desc_id);
-                if (dsc == NULL) return FC_STATUS_INVALID_ARGUMENT;
+                if (dsc == NULL)
+                {
+                    return FC_STATUS_INVALID_ARGUMENT;
+                }
                 data_desc_id = (fc_descriptor_id_t)dsc->next_id;
             }
             {
                 fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(data_desc_id);
-                if (dsc == NULL) return FC_STATUS_INVALID_ARGUMENT;
+                if (dsc == NULL)
+                {
+                    return FC_STATUS_INVALID_ARGUMENT;
+                }
                 data_buf = fc_buffer_get_base(dsc->buffer_id);
-                if (data_buf == NULL) return FC_STATUS_INVALID_ARGUMENT;
+                if (data_buf == NULL)
+                {
+                    return FC_STATUS_INVALID_ARGUMENT;
+                }
             }
 
             if (first != 0U)
@@ -261,8 +294,8 @@ fc_status_t fc_data_path_generate_stripe_parity(
             else
             {
                 /* 后续数据命令：XOR 累加 */
-                uint32_t *parity32 = (uint32_t *)(void *)parity_buf;
-                const uint32_t *data32 = (const uint32_t *)(const void *)data_buf;
+                uint32_t       *parity32 = (uint32_t *)(void *)parity_buf;
+                const uint32_t *data32   = (const uint32_t *)(const void *)data_buf;
                 for (uint16_t w = 0U; w < (FC_BUFFER_DATA_SIZE / sizeof(uint32_t)); w++)
                 {
                     parity32[w] ^= data32[w];
@@ -284,7 +317,10 @@ fc_status_t fc_data_path_generate_stripe_parity(
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL) return FC_STATUS_INVALID_ARGUMENT;
+            if (desc == NULL)
+            {
+                return FC_STATUS_INVALID_ARGUMENT;
+            }
 
             uint8_t *buf = fc_buffer_get_base(desc->buffer_id);
             if (buf != NULL)
@@ -314,12 +350,12 @@ fc_status_t fc_data_path_generate_stripe_parity(
 
 fc_status_t fc_data_path_process_read(const fc_command_t *command)
 {
-    fc_descriptor_id_t  desc_id;
-    fc_descriptor_t    *desc;
-    uint8_t            *buffer;
-    fc_status_t         result;
-    uint8_t             all_ok = 1U;
-    uint8_t             cw;
+    fc_descriptor_id_t desc_id;
+    fc_descriptor_t   *desc;
+    uint8_t           *buffer;
+    fc_status_t        result;
+    uint8_t            all_ok = 1U;
+    uint8_t            cw;
 
     if (command == NULL)
     {
@@ -327,8 +363,8 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
     }
 
     const uint8_t total_desc = (command->config.multi_plane > 0U)
-        ? (uint8_t)((uint8_t)(command->config.cw + 1U) * command->config.multi_plane)
-        : (uint8_t)(command->config.cw + 1U);
+                                   ? (uint8_t)((uint8_t)(command->config.cw + 1U) * command->config.multi_plane)
+                                   : (uint8_t)(command->config.cw + 1U);
 
     const fc_ldpc_config_t ldpc_config = {
         .codeword_bytes = FC_BUFFER_DATA_SIZE,
@@ -342,10 +378,16 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
     for (cw = 0U; cw < total_desc; cw++)
     {
         desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) return FC_STATUS_INVALID_ARGUMENT;
+        if (desc == NULL)
+        {
+            return FC_STATUS_INVALID_ARGUMENT;
+        }
 
         buffer = fc_buffer_get_base(desc->buffer_id);
-        if (buffer == NULL) return FC_STATUS_INVALID_ARGUMENT;
+        if (buffer == NULL)
+        {
+            return FC_STATUS_INVALID_ARGUMENT;
+        }
 
         if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
         {
@@ -381,14 +423,17 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
     }
 
     /* ── Pass 2: 所有 CW ECC 成功 → 解扰 ── */
-    if (command->config.random == 0U)  /* FC_RANDOM_ENABLE */
+    if (command->config.random == 0U) /* FC_RANDOM_ENABLE */
     {
         desc_id = (fc_descriptor_id_t)command->desc_id;
 
         for (cw = 0U; cw < total_desc; cw++)
         {
             desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL) break;
+            if (desc == NULL)
+            {
+                break;
+            }
 
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
@@ -414,7 +459,10 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             for (cw = 0U; cw < total_desc; cw++)
             {
                 desc = fc_descriptor_id_to_descriptor(desc_id);
-                if (desc == NULL) break;
+                if (desc == NULL)
+                {
+                    break;
+                }
 
                 buffer = fc_buffer_get_base(desc->buffer_id);
                 if (buffer != NULL)
@@ -506,7 +554,7 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
     }
 
     /* ── 解扰所有 CW ── */
-    if (cmd->config.random == 0U)  /* FC_RANDOM_ENABLE */
+    if (cmd->config.random == 0U) /* FC_RANDOM_ENABLE */
     {
         for (i = 0U; i < count; i++)
         {

@@ -17,18 +17,17 @@
  *   failed_idx: 首位 / 中间 / 末位
  */
 
-#include "munit.h"
-
 #include "fc/fc.h"
 #include "fc/fc_command.h"
 #include "fc/fc_data_path.h"
 #include "fc/fc_ldpc_engine.h"
 #include "fc/fc_random_engine.h"
-#include "nand/onfi_1_0.h"
+#include "munit.h"
 #include "nand/nand_config.h"
+#include "nand/onfi_1_0.h"
 
 #if CONFIG_FC_RAID
-#include "fc/fc_raid_engine.h"
+#    include "fc/fc_raid_engine.h"
 #endif
 
 #include <string.h>
@@ -44,14 +43,7 @@ static void print_resource_stats(const char *tag)
     fc_resource_stats_t stats;
     if (fc_get_resource_stats(&stats) == FC_STATUS_OK)
     {
-        fprintf(stderr, "[RES] %s: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\n",
-               tag,
-               (unsigned)stats.command_used,   (unsigned)FC_COMMAND_POOL_DEPTH,
-               (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
-               (unsigned)stats.buffer_used,     (unsigned)FC_BUFFER_POOL_DEPTH,
-               (unsigned)stats.sq_used,
-               (unsigned)stats.hsq_used,
-               (unsigned)stats.cq_used);
+        fprintf(stderr, "[RES] %s: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\n", tag, (unsigned)stats.command_used, (unsigned)FC_COMMAND_POOL_DEPTH, (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH, (unsigned)stats.buffer_used, (unsigned)FC_BUFFER_POOL_DEPTH, (unsigned)stats.sq_used, (unsigned)stats.hsq_used, (unsigned)stats.cq_used);
     }
 }
 
@@ -78,7 +70,10 @@ static void release_cmd_buffers(fc_command_t *cmd)
     while (desc_id != FC_DESCRIPTOR_ID_INVALID)
     {
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) break;
+        if (desc == NULL)
+        {
+            break;
+        }
         if (desc->buffer_id != FC_BUFFER_ID_INVALID)
         {
             (void)fc_buffer_release(desc->buffer_id);
@@ -99,7 +94,9 @@ static uint8_t check_pattern(const uint8_t *buffer, uint16_t length, uint8_t pat
     for (uint16_t i = 0U; i < length; i++)
     {
         if (buffer[i] != pattern)
+        {
             return 0U;
+        }
     }
     return 1U;
 }
@@ -137,11 +134,17 @@ static uint8_t *get_cw_buffer(const fc_command_t *cmd, uint8_t idx)
         if (i == idx)
         {
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL) return NULL;
+            if (desc == NULL)
+            {
+                return NULL;
+            }
             return fc_buffer_id_to_real_buffer(desc->buffer_id);
         }
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) return NULL;
+        if (desc == NULL)
+        {
+            return NULL;
+        }
         desc_id = (fc_descriptor_id_t)desc->next_id;
         i++;
     }
@@ -159,11 +162,17 @@ static uint8_t *get_cw_base(const fc_command_t *cmd, uint8_t idx)
         if (i == idx)
         {
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL) return NULL;
+            if (desc == NULL)
+            {
+                return NULL;
+            }
             return fc_buffer_get_base(desc->buffer_id);
         }
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) return NULL;
+        if (desc == NULL)
+        {
+            return NULL;
+        }
         desc_id = (fc_descriptor_id_t)desc->next_id;
         i++;
     }
@@ -180,7 +189,10 @@ static uint8_t get_cw_count(const fc_command_t *cmd)
     {
         count++;
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) break;
+        if (desc == NULL)
+        {
+            break;
+        }
         desc_id = (fc_descriptor_id_t)desc->next_id;
     }
     return count;
@@ -207,9 +219,10 @@ static uint8_t get_cw_count(const fc_command_t *cmd)
 
 static MunitResult test_encode_random_off(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
-    fc_command_t *cmd = alloc_cmd(4U, FC_RANDOM_DISABLE, FC_RAID_MODE_NORMAL);
-    uint8_t count = get_cw_count(cmd);
+    (void)params;
+    (void)data;
+    fc_command_t *cmd   = alloc_cmd(4U, FC_RANDOM_DISABLE, FC_RAID_MODE_NORMAL);
+    uint8_t       count = get_cw_count(cmd);
     munit_assert_uint32(count, ==, 4U);
 
     for (uint8_t i = 0U; i < count; i++)
@@ -224,7 +237,7 @@ static MunitResult test_encode_random_off(const MunitParameter params[], void *d
     /* 验证：ECC 编码后末 8 字节为 parity（非零），前 520 字节保持原始 pattern */
     for (uint8_t i = 0U; i < count; i++)
     {
-        uint8_t *buf = get_cw_buffer(cmd, i);
+        uint8_t *buf  = get_cw_buffer(cmd, i);
         uint8_t *base = get_cw_base(cmd, i);
         munit_assert_not_null(buf);
         munit_assert_not_null(base);
@@ -234,17 +247,21 @@ static MunitResult test_encode_random_off(const MunitParameter params[], void *d
         uint8_t parity_zero = 1U;
         for (uint16_t j = FC_BUFFER_DATA_SIZE; j < FC_BUFFER_POOL_CW_SIZE; j++)
         {
-            if (base[j] != 0U) { parity_zero = 0U; break; }
+            if (base[j] != 0U)
+            {
+                parity_zero = 0U;
+                break;
+            }
         }
         munit_assert_uint32(parity_zero, ==, 0U);
     }
 
     /* round-trip：ECC 解码后恢复原始 pattern */
     {
-        const fc_ldpc_config_t cfg = { FC_BUFFER_DATA_SIZE, 8U, 4U };
+        const fc_ldpc_config_t cfg = {FC_BUFFER_DATA_SIZE, 8U, 4U};
         for (uint8_t i = 0U; i < count; i++)
         {
-            uint8_t *buf = get_cw_buffer(cmd, i);
+            uint8_t *buf  = get_cw_buffer(cmd, i);
             uint8_t *base = get_cw_base(cmd, i);
             munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
             munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x55U + i)), ==, 1U);
@@ -258,9 +275,10 @@ static MunitResult test_encode_random_off(const MunitParameter params[], void *d
 
 static MunitResult test_encode_random_on(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
-    fc_command_t *cmd = alloc_cmd(4U, FC_RANDOM_ENABLE, FC_RAID_MODE_NORMAL);
-    uint8_t count = get_cw_count(cmd);
+    (void)params;
+    (void)data;
+    fc_command_t *cmd   = alloc_cmd(4U, FC_RANDOM_ENABLE, FC_RAID_MODE_NORMAL);
+    uint8_t       count = get_cw_count(cmd);
 
     for (uint8_t i = 0U; i < count; i++)
     {
@@ -273,10 +291,10 @@ static MunitResult test_encode_random_on(const MunitParameter params[], void *da
 
     /* round-trip：ECC 解码 → 解扰 → 原始 pattern 恢复 */
     {
-        const fc_ldpc_config_t cfg = { FC_BUFFER_DATA_SIZE, 8U, 4U };
+        const fc_ldpc_config_t cfg = {FC_BUFFER_DATA_SIZE, 8U, 4U};
         for (uint8_t i = 0U; i < count; i++)
         {
-            uint8_t *buf = get_cw_buffer(cmd, i);
+            uint8_t *buf  = get_cw_buffer(cmd, i);
             uint8_t *base = get_cw_base(cmd, i);
             munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
             /* ECC 解码后数据仍在加扰状态，需解扰恢复原文 */
@@ -284,11 +302,14 @@ static MunitResult test_encode_random_on(const MunitParameter params[], void *da
             for (uint8_t d = 0U; d < i; d++)
             {
                 fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(desc_id);
-                if (dsc == NULL) break;
+                if (dsc == NULL)
+                {
+                    break;
+                }
                 desc_id = (fc_descriptor_id_t)dsc->next_id;
             }
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            uint32_t seed = fc_random_seed_from_paa(desc->paa, 0U);
+            uint32_t         seed = fc_random_seed_from_paa(desc->paa, 0U);
             fc_random_transform(base, FC_BUFFER_DATA_SIZE, seed);
             munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0xAAU), ==, 1U);
         }
@@ -303,10 +324,11 @@ static MunitResult test_encode_random_on(const MunitParameter params[], void *da
 
 static MunitResult test_encode_raid_on(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
+    (void)params;
+    (void)data;
     /* 至少需要 2 个 CW 才能验证 RAID XOR */
-    fc_command_t *cmd = alloc_cmd(4U, FC_RANDOM_ENABLE, FC_RAID_MODE_ENCODE);
-    uint8_t count = get_cw_count(cmd);
+    fc_command_t *cmd   = alloc_cmd(4U, FC_RANDOM_ENABLE, FC_RAID_MODE_ENCODE);
+    uint8_t       count = get_cw_count(cmd);
     munit_assert_uint32(count, >=, 2U);
 
     /* 不同 CW 填不同 pattern */
@@ -339,21 +361,24 @@ static MunitResult test_encode_raid_on(const MunitParameter params[], void *data
         memcpy(buffers[0], recovered, FC_BUFFER_POOL_CW_SIZE);
 
         /* ECC 解码 + 解扰后验证（不包含 parity CW，它存储的是 XOR 结果） */
-        const fc_ldpc_config_t cfg = { FC_BUFFER_DATA_SIZE, 8U, 4U };
+        const fc_ldpc_config_t cfg = {FC_BUFFER_DATA_SIZE, 8U, 4U};
         for (uint8_t i = 0U; i < count - 1U; i++)
         {
             uint8_t *base = buffers[i];
-            uint8_t *buf = get_cw_buffer(cmd, i);
+            uint8_t *buf  = get_cw_buffer(cmd, i);
             munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
             fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
             for (uint8_t d = 0U; d < i; d++)
             {
                 fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(desc_id);
-                if (dsc == NULL) break;
+                if (dsc == NULL)
+                {
+                    break;
+                }
                 desc_id = (fc_descriptor_id_t)dsc->next_id;
             }
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            uint32_t seed = fc_random_seed_from_paa(desc->paa, 0U);
+            uint32_t         seed = fc_random_seed_from_paa(desc->paa, 0U);
             fc_random_transform(base, FC_BUFFER_DATA_SIZE, seed);
             munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x10U + i)), ==, 1U);
         }
@@ -368,12 +393,13 @@ static MunitResult test_encode_raid_on(const MunitParameter params[], void *data
 
 static MunitResult test_encode_single_cw(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
-    fc_command_t *cmd = alloc_cmd(1U, FC_RANDOM_DISABLE, FC_RAID_MODE_NORMAL);
-    uint8_t count = get_cw_count(cmd);
+    (void)params;
+    (void)data;
+    fc_command_t *cmd   = alloc_cmd(1U, FC_RANDOM_DISABLE, FC_RAID_MODE_NORMAL);
+    uint8_t       count = get_cw_count(cmd);
     munit_assert_uint32(count, ==, 1U);
 
-    uint8_t *buf = get_cw_buffer(cmd, 0U);
+    uint8_t *buf  = get_cw_buffer(cmd, 0U);
     uint8_t *base = get_cw_base(cmd, 0U);
     munit_assert_not_null(buf);
     fill_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U);
@@ -381,7 +407,7 @@ static MunitResult test_encode_single_cw(const MunitParameter params[], void *da
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
     /* round-trip decode */
-    const fc_ldpc_config_t cfg = { FC_BUFFER_DATA_SIZE, 8U, 4U };
+    const fc_ldpc_config_t cfg = {FC_BUFFER_DATA_SIZE, 8U, 4U};
     munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
     munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
 
@@ -392,7 +418,8 @@ static MunitResult test_encode_single_cw(const MunitParameter params[], void *da
 
 static MunitResult test_encode_null(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
+    (void)params;
+    (void)data;
     munit_assert_int(fc_data_path_encode(NULL), ==, FC_STATUS_INVALID_ARGUMENT);
     return MUNIT_OK;
 }
@@ -418,9 +445,10 @@ static MunitResult test_encode_null(const MunitParameter params[], void *data)
 
 static MunitResult test_process_read_ok_random_on(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
-    fc_command_t *cmd = alloc_cmd(4U, FC_RANDOM_ENABLE, FC_RAID_MODE_NORMAL);
-    uint8_t count = get_cw_count(cmd);
+    (void)params;
+    (void)data;
+    fc_command_t *cmd   = alloc_cmd(4U, FC_RANDOM_ENABLE, FC_RAID_MODE_NORMAL);
+    uint8_t       count = get_cw_count(cmd);
 
     /* 先 encode（加扰 + ECC） */
     for (uint8_t i = 0U; i < count; i++)
@@ -448,9 +476,10 @@ static MunitResult test_process_read_ok_random_on(const MunitParameter params[],
 
 static MunitResult test_process_read_ok_random_off(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
-    fc_command_t *cmd = alloc_cmd(4U, FC_RANDOM_DISABLE, FC_RAID_MODE_NORMAL);
-    uint8_t count = get_cw_count(cmd);
+    (void)params;
+    (void)data;
+    fc_command_t *cmd   = alloc_cmd(4U, FC_RANDOM_DISABLE, FC_RAID_MODE_NORMAL);
+    uint8_t       count = get_cw_count(cmd);
 
     for (uint8_t i = 0U; i < count; i++)
     {
@@ -475,9 +504,10 @@ static MunitResult test_process_read_ok_random_off(const MunitParameter params[]
 
 static MunitResult test_process_read_unc(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
-    fc_command_t *cmd = alloc_cmd(4U, FC_RANDOM_ENABLE, FC_RAID_MODE_NORMAL);
-    uint8_t count = get_cw_count(cmd);
+    (void)params;
+    (void)data;
+    fc_command_t *cmd   = alloc_cmd(4U, FC_RANDOM_ENABLE, FC_RAID_MODE_NORMAL);
+    uint8_t       count = get_cw_count(cmd);
 
     for (uint8_t i = 0U; i < count; i++)
     {
@@ -489,7 +519,7 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
     /* 破坏 CW1：翻转多个字节 → ECC 无法纠正 */
     uint8_t *buf1_base = get_cw_base(cmd, 1U);
     munit_assert_not_null(buf1_base);
-    buf1_base[0]   ^= 0xFF;
+    buf1_base[0] ^= 0xFF;
     buf1_base[100] ^= 0xFF;
     buf1_base[200] ^= 0xFF;
     buf1_base[300] ^= 0xFF;
@@ -524,9 +554,10 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
 
 static MunitResult test_process_read_single_cw(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
-    fc_command_t *cmd = alloc_cmd(1U, FC_RANDOM_ENABLE, FC_RAID_MODE_NORMAL);
-    uint8_t count = get_cw_count(cmd);
+    (void)params;
+    (void)data;
+    fc_command_t *cmd   = alloc_cmd(1U, FC_RANDOM_ENABLE, FC_RAID_MODE_NORMAL);
+    uint8_t       count = get_cw_count(cmd);
     munit_assert_uint32(count, ==, 1U);
 
     uint8_t *buf = get_cw_buffer(cmd, 0U);
@@ -543,7 +574,8 @@ static MunitResult test_process_read_single_cw(const MunitParameter params[], vo
 
 static MunitResult test_process_read_null(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
+    (void)params;
+    (void)data;
     munit_assert_int(fc_data_path_process_read(NULL), ==, FC_STATUS_INVALID_ARGUMENT);
     return MUNIT_OK;
 }
@@ -570,8 +602,8 @@ static MunitResult test_process_read_null(const MunitParameter params[], void *d
 
 static void do_raid_recover_test(uint8_t random_mode, uint8_t failed_idx)
 {
-    fc_command_t *cmd = alloc_cmd(4U, random_mode, FC_RAID_MODE_ENCODE);
-    uint8_t count = get_cw_count(cmd);
+    fc_command_t *cmd   = alloc_cmd(4U, random_mode, FC_RAID_MODE_ENCODE);
+    uint8_t       count = get_cw_count(cmd);
     munit_assert_uint32(count, >=, 3U);
     munit_assert_uint32(failed_idx, <, count);
 
@@ -610,35 +642,40 @@ static void do_raid_recover_test(uint8_t random_mode, uint8_t failed_idx)
 
 static MunitResult test_raid_recover_first(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
+    (void)params;
+    (void)data;
     do_raid_recover_test(FC_RANDOM_ENABLE, 0U);
     return MUNIT_OK;
 }
 
 static MunitResult test_raid_recover_mid(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
+    (void)params;
+    (void)data;
     do_raid_recover_test(FC_RANDOM_ENABLE, 1U);
     return MUNIT_OK;
 }
 
 static MunitResult test_raid_recover_last(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
+    (void)params;
+    (void)data;
     do_raid_recover_test(FC_RANDOM_ENABLE, 3U);
     return MUNIT_OK;
 }
 
 static MunitResult test_raid_recover_no_random(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
+    (void)params;
+    (void)data;
     do_raid_recover_test(FC_RANDOM_DISABLE, 1U);
     return MUNIT_OK;
 }
 
 static MunitResult test_raid_recover_null(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
+    (void)params;
+    (void)data;
     munit_assert_int(fc_data_path_raid_recover(NULL, 0U), ==, FC_STATUS_INVALID_ARGUMENT);
     return MUNIT_OK;
 }
@@ -656,7 +693,8 @@ static MunitResult test_raid_recover_null(const MunitParameter params[], void *d
 
 static MunitResult test_generate_stripe_parity(const MunitParameter params[], void *data)
 {
-    (void)params; (void)data;
+    (void)params;
+    (void)data;
     fc_command_t *data_cmd;
     fc_command_t *parity_cmd;
     uint8_t       cw_count;
@@ -693,8 +731,8 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
             munit_assert_not_null(ddesc);
             munit_assert_not_null(pdesc);
             pdesc->faa = ddesc->faa;
-            d_desc_id = (fc_descriptor_id_t)ddesc->next_id;
-            p_desc_id = (fc_descriptor_id_t)pdesc->next_id;
+            d_desc_id  = (fc_descriptor_id_t)ddesc->next_id;
+            p_desc_id  = (fc_descriptor_id_t)pdesc->next_id;
         }
     }
 
@@ -741,7 +779,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
         }
 
         /* ECC 解码 + 解扰后验证数据 CW0~CW3（parity CW 不验证，它们存储 XOR 结果） */
-        const fc_ldpc_config_t cfg = { FC_BUFFER_DATA_SIZE, 8U, 4U };
+        const fc_ldpc_config_t cfg = {FC_BUFFER_DATA_SIZE, 8U, 4U};
         for (uint8_t i = 0U; i < cw_count; i++)
         {
             uint8_t *base = buffers[i];
@@ -756,7 +794,10 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
             for (uint8_t d = 0U; d < i; d++)
             {
                 fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(desc_id);
-                if (dsc == NULL) break;
+                if (dsc == NULL)
+                {
+                    break;
+                }
                 desc_id = (fc_descriptor_id_t)dsc->next_id;
             }
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
@@ -784,33 +825,33 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
  **************************************************************************/
 
 MunitTest g_fc_data_path_tests[] = {
-    /* ── encode ── */
-    { "encode_random_off",    test_encode_random_off,    setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "encode_random_on",     test_encode_random_on,     setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+  /* ── encode ── */
+    {         "encode_random_off",          test_encode_random_off, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {          "encode_random_on",           test_encode_random_on, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 #if CONFIG_FC_RAID
-    { "encode_raid_on",       test_encode_raid_on,       setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {            "encode_raid_on",             test_encode_raid_on, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 #endif
-    { "encode_single_cw",     test_encode_single_cw,     setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "encode_null",          test_encode_null,          setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {          "encode_single_cw",           test_encode_single_cw, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {               "encode_null",                test_encode_null, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
-    /* ── process_read ── */
-    { "process_read_ok_random_on",  test_process_read_ok_random_on,  setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "process_read_ok_random_off", test_process_read_ok_random_off, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "process_read_unc",           test_process_read_unc,           setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "process_read_single_cw",     test_process_read_single_cw,     setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "process_read_null",          test_process_read_null,          setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+ /* ── process_read ── */
+    { "process_read_ok_random_on",  test_process_read_ok_random_on, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"process_read_ok_random_off", test_process_read_ok_random_off, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {          "process_read_unc",           test_process_read_unc, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    "process_read_single_cw",     test_process_read_single_cw, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "process_read_null",          test_process_read_null, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
-    /* ── raid_recover ── */
+ /* ── raid_recover ── */
 #if CONFIG_FC_RAID
-    { "raid_recover_first",    test_raid_recover_first,    setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "raid_recover_mid",      test_raid_recover_mid,      setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "raid_recover_last",     test_raid_recover_last,     setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "raid_recover_no_random", test_raid_recover_no_random, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "raid_recover_null",     test_raid_recover_null,     setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {        "raid_recover_first",         test_raid_recover_first, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {          "raid_recover_mid",           test_raid_recover_mid, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "raid_recover_last",          test_raid_recover_last, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    "raid_recover_no_random",     test_raid_recover_no_random, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "raid_recover_null",          test_raid_recover_null, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
-    /* ── stripe parity ── */
-    { "generate_stripe_parity", test_generate_stripe_parity, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-#endif /* CONFIG_FC_RAID */
+ /* ── stripe parity ── */
+    {    "generate_stripe_parity",     test_generate_stripe_parity, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+#endif  /* CONFIG_FC_RAID */
 
-    { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    {                        NULL,                            NULL,         NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

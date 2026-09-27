@@ -1,6 +1,6 @@
-#include "common/common.h"
 #include "usart.h"
 
+#include "common/common.h"
 #include "dma.h"
 
 #include <stdarg.h>
@@ -224,14 +224,14 @@ static int uart_cli_test(int argc, char *argv[]);
  * 单独注册，不能把 raw NAND 或任意内存访问默认暴露在量产 UART 上。
  */
 static const uart_cli_command_t g_uart_cli_commands[] = {
-    {   "help",                                                                             "help",                   "show command list", 1U, 1U,    uart_cli_help},
-    { "status",                                                                           "status",  "show UART error and queue counters", 1U, 1U,  uart_cli_status},
-    {"version",                                                                          "version",       "show firmware console version", 1U, 1U, uart_cli_version},
-    {    "log",                                                "log level <error|warn|info|debug>",               "set runtime log level", 3U, 3U,     uart_cli_log},
+    {   "help",                                                    "help",                  "show command list", 1U,  1U,    uart_cli_help},
+    { "status",                                                  "status", "show UART error and queue counters", 1U,  1U,  uart_cli_status},
+    {"version",                                                 "version",      "show firmware console version", 1U,  1U, uart_cli_version},
+    {    "log",                       "log level <error|warn|info|debug>",              "set runtime log level", 3U,  3U,     uart_cli_log},
 #if defined(FC_NAND_TEST_ENABLE)
-/* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
-/* { "nand", ... }, */
-    {   "test", "test [--seed N] [--list] [--list-params] [test_name...]", "run munit unit test suite", 1U, 10U, uart_cli_test},
+  /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
+  /* { "nand", ... }, */
+    {   "test", "test [--seed N] [--list] [--list-params] [test_name...]",          "run munit unit test suite", 1U, 10U,    uart_cli_test},
 #endif
 };
 
@@ -307,12 +307,12 @@ static int uart_cli_log(int argc, char *argv[])
 #    include "ut_main.h"
 
 /* TODO: uart_cli_nand 和 uart_cli_parse_u32 待迁移用 munit test 替换 */
-#if 0
+#    if 0
 static int uart_cli_parse_u32(const char *text, uint32_t *value)
 {
     ...
 }
-#endif
+#    endif
 #endif
 
 #if defined(FC_NAND_TEST_ENABLE)
@@ -410,10 +410,10 @@ static void uart_execute_command(char *line)
  */
 int _write(int file, char *buffer, int length)
 {
-    int           i;
-    uint8_t       needs_cr;
-    int           src_i;
-    unsigned int  dst_len;
+    int          i;
+    uint8_t      needs_cr;
+    int          src_i;
+    unsigned int dst_len;
 
     (void)file;
 

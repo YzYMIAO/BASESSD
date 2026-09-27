@@ -1,12 +1,13 @@
-#include "common/common.h"
 #include "delay.h"
+
+#include "common/common.h"
 
 static uint32_t g_core_clock_hz;
 static bool     g_delay_initialized;
 static uint32_t g_dwt_cycles_per_us;
 /* NAND RB 中断模块使用的 DWT 周期/微秒值（在 delay_init 中同步设定） */
-uint32_t g_dwt_cyccnt_per_us;
-static bool     g_dwt_initialized;
+uint32_t    g_dwt_cyccnt_per_us;
+static bool g_dwt_initialized;
 
 #if !DELAY_USE_DWT
 static uint32_t g_systick_cycles_per_us;

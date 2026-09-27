@@ -7,51 +7,51 @@
 
 typedef enum
 {
-    FC_ECC_MODE_BCH       = 0U,  /* BCH encode/decode */
-    FC_ECC_MODE_LDPC_HARD = 1U,  /* LDPC hard-decision */
-    FC_ECC_MODE_LDPC_SOFT = 2U,  /* LDPC soft-decision */
-    FC_ECC_MODE_LDPC_RAW  = 3U,  /* LDPC raw (no decode) */
+    FC_ECC_MODE_BCH       = 0U, /* BCH encode/decode */
+    FC_ECC_MODE_LDPC_HARD = 1U, /* LDPC hard-decision */
+    FC_ECC_MODE_LDPC_SOFT = 2U, /* LDPC soft-decision */
+    FC_ECC_MODE_LDPC_RAW  = 3U, /* LDPC raw (no decode) */
 } fc_ecc_mode_t;
 
 typedef enum
 {
-    FC_RAID_MODE_NORMAL  = 0U,  /* 无 RAID */
-    FC_RAID_MODE_DECODE  = 1U,  /* RAID 解码（ECC 失败时恢复） */
-    FC_RAID_MODE_ENCODE  = 2U,  /* RAID 编码（生成 parity） */
-    FC_RAID_MODE_RECOVER = 3U,  /* RAID 恢复（同 decode） */
-    FC_RAID_MODE_CHECK   = 4U,  /* RAID 校验（暂未实现） */
+    FC_RAID_MODE_NORMAL  = 0U, /* 无 RAID */
+    FC_RAID_MODE_DECODE  = 1U, /* RAID 解码（ECC 失败时恢复） */
+    FC_RAID_MODE_ENCODE  = 2U, /* RAID 编码（生成 parity） */
+    FC_RAID_MODE_RECOVER = 3U, /* RAID 恢复（同 decode） */
+    FC_RAID_MODE_CHECK   = 4U, /* RAID 校验（暂未实现） */
 } fc_raid_mode_t;
 
 typedef enum
 {
-    FC_PAGE_TYPE_LP = 0U,  /* Lower Page (SLC page / TLC LP) */
-    FC_PAGE_TYPE_MP = 1U,  /* Middle Page (TLC MP) */
-    FC_PAGE_TYPE_UP = 2U,  /* Upper Page (TLC UP) */
-    FC_PAGE_TYPE_TP = 3U,  /* Triple Page (QLC TP) */
+    FC_PAGE_TYPE_LP = 0U, /* Lower Page (SLC page / TLC LP) */
+    FC_PAGE_TYPE_MP = 1U, /* Middle Page (TLC MP) */
+    FC_PAGE_TYPE_UP = 2U, /* Upper Page (TLC UP) */
+    FC_PAGE_TYPE_TP = 3U, /* Triple Page (QLC TP) */
 } fc_page_type_t;
 
 typedef enum
 {
-    FC_CRC_ENABLE  = 0U,   /* CRC 校验使能 */
-    FC_CRC_DISABLE = 1U,   /* CRC 校验禁用 */
+    FC_CRC_ENABLE  = 0U, /* CRC 校验使能 */
+    FC_CRC_DISABLE = 1U, /* CRC 校验禁用 */
 } fc_crc_mode_t;
 
 typedef enum
 {
-    FC_RANDOM_ENABLE  = 0U,  /* 数据加扰使能 */
-    FC_RANDOM_DISABLE = 1U,  /* 数据加扰禁用 */
+    FC_RANDOM_ENABLE  = 0U, /* 数据加扰使能 */
+    FC_RANDOM_DISABLE = 1U, /* 数据加扰禁用 */
 } fc_random_mode_t;
 
 typedef enum
 {
-    FC_CHAIN_END  = 0U,  /* 链结束，单命令 */
-    FC_CHAIN_MORE = 1U,  /* 链中间，后续还有命令 */
+    FC_CHAIN_END  = 0U, /* 链结束，单命令 */
+    FC_CHAIN_MORE = 1U, /* 链中间，后续还有命令 */
 } fc_chain_mode_t;
 
 typedef enum
 {
-    FC_PRIORITY_SQ  = 0U,  /* 普通优先级（Submission Queue） */
-    FC_PRIORITY_HSQ = 1U,  /* 高优先级（High-priority SQ） */
+    FC_PRIORITY_SQ  = 0U, /* 普通优先级（Submission Queue） */
+    FC_PRIORITY_HSQ = 1U, /* 高优先级（High-priority SQ） */
 } fc_priority_t;
 
 typedef enum
@@ -92,17 +92,17 @@ typedef enum
 /* Command and Descriptor share this 32-bit operation configuration. */
 typedef struct fc_cmd_conf_t
 {
-    DWORD operation : 8; /* ONFI operation macro (OP_*). */
-    DWORD ch        : 2; /* NAND channel number. */
-    DWORD ce        : 2; /* NAND chip-enable number. */
-    DWORD lun       : 2; /* NAND LUN number. */
-    DWORD cw        : 2; /* Command: CW count minus one; Descriptor: CW index. */
-    DWORD crc       : 1; /* FC_CRC_ENABLE / FC_CRC_DISABLE. */
-    DWORD ldpc      : 2; /* fc_ecc_mode_t: BCH/LDPC_HARD/LDPC_SOFT/LDPC_RAW. */
-    DWORD raid      : 3; /* fc_raid_mode_t: NORMAL/DECODE/ENCODE/RECOVER/CHECK. */
-    DWORD random    : 1; /* FC_RANDOM_ENABLE / FC_RANDOM_DISABLE. */
-    DWORD chain     : 1; /* FC_CHAIN_END / FC_CHAIN_MORE. */
-    DWORD page_type : 2; /* fc_page_type_t: LP/MP/UP/TP. */
+    DWORD operation   : 8; /* ONFI operation macro (OP_*). */
+    DWORD ch          : 2; /* NAND channel number. */
+    DWORD ce          : 2; /* NAND chip-enable number. */
+    DWORD lun         : 2; /* NAND LUN number. */
+    DWORD cw          : 2; /* Command: CW count minus one; Descriptor: CW index. */
+    DWORD crc         : 1; /* FC_CRC_ENABLE / FC_CRC_DISABLE. */
+    DWORD ldpc        : 2; /* fc_ecc_mode_t: BCH/LDPC_HARD/LDPC_SOFT/LDPC_RAW. */
+    DWORD raid        : 3; /* fc_raid_mode_t: NORMAL/DECODE/ENCODE/RECOVER/CHECK. */
+    DWORD random      : 1; /* FC_RANDOM_ENABLE / FC_RANDOM_DISABLE. */
+    DWORD chain       : 1; /* FC_CHAIN_END / FC_CHAIN_MORE. */
+    DWORD page_type   : 2; /* fc_page_type_t: LP/MP/UP/TP. */
     DWORD multi_plane : 3; /* 0=single; N=N-plane → total desc = multi_plane * (cw+1) */
     DWORD reserved    : 3; /* Reserved for future configuration. */
 } fc_cmd_conf_t;
@@ -115,8 +115,8 @@ struct fc_descriptor_t
     DWORD         buffer_id : 16; /* Buffer Pool ID; 0xFFFF means invalid. */
     DWORD         next_id   : 16; /* Next Descriptor ID; 0xFFFF terminates the chain. */
     DWORD         faa;            /* FTL logical address (LBA) for this specific CW. Written to META on encode. */
-    DWORD         status    : 8;  /* CW status, using FC_CW_STATUS_* bits. */
-    DWORD         ecc_bits  : 8;  /* ECC corrected bit count from last completion; 0 if no error. */
+    DWORD         status   : 8;   /* CW status, using FC_CW_STATUS_* bits. */
+    DWORD         ecc_bits : 8;   /* ECC corrected bit count from last completion; 0 if no error. */
 };
 
 /* SQ command owned by FC after submission; command_id is the Command Pool slot ID. */

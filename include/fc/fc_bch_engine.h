@@ -37,8 +37,7 @@ void fc_bch_free(fc_bch_control_t *bch);
  * @ecc 缓冲区大小应为 bch->ecc_bytes 字节。
  *       首次调用前必须清零，支持增量计算。
  */
-void fc_bch_encode(fc_bch_control_t *bch, const uint8_t *data,
-                   unsigned int len, uint8_t *ecc);
+void fc_bch_encode(fc_bch_control_t *bch, const uint8_t *data, unsigned int len, uint8_t *ecc);
 
 /*
  * BCH 解码：检测并定位 data+recv_ecc 中的错误。
@@ -49,10 +48,7 @@ void fc_bch_encode(fc_bch_control_t *bch, const uint8_t *data,
  *            errloc[i] >= 8*len → ECC 区错误
  *          纠正：data[errloc/8] ^= (1 << (errloc%8))
  */
-int fc_bch_decode(fc_bch_control_t *bch, const uint8_t *data,
-                  unsigned int len, const uint8_t *recv_ecc,
-                  const uint8_t *calc_ecc, const unsigned int *syn,
-                  unsigned int *errloc);
+int fc_bch_decode(fc_bch_control_t *bch, const uint8_t *data, unsigned int len, const uint8_t *recv_ecc, const uint8_t *calc_ecc, const unsigned int *syn, unsigned int *errloc);
 
 /* 辅助函数：获取 BCH 引擎的 ECC 字节数 */
 unsigned int fc_bch_ecc_bytes(const fc_bch_control_t *bch);

@@ -21,16 +21,15 @@
  *   ssd> test --list
  */
 
-#include "munit.h"
-
+#include "common/ssd_log.h"
 #include "fc/fc.h"
 #include "fc/fc_command.h"
 #include "fc/fc_queue.h"
 #include "fc/fc_scheduler.h"
-#include "nand/onfi_1_0.h"
+#include "munit.h"
 #include "nand/nand_config.h"
 #include "nand/nand_dispatch.h"
-#include "common/ssd_log.h"
+#include "nand/onfi_1_0.h"
 
 #include <string.h>
 
@@ -52,9 +51,12 @@ static void *setup_level3(const MunitParameter params[], void *user_data)
     if (fc_get_resource_stats(&stats) == FC_STATUS_OK)
     {
         SSD_LOGI("[RES] L3_start: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
-                 (unsigned)stats.command_used,   (unsigned)FC_COMMAND_POOL_DEPTH,
-                 (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
-                 (unsigned)stats.buffer_used,     (unsigned)FC_BUFFER_POOL_DEPTH,
+                 (unsigned)stats.command_used,
+                 (unsigned)FC_COMMAND_POOL_DEPTH,
+                 (unsigned)stats.descriptor_used,
+                 (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
+                 (unsigned)stats.buffer_used,
+                 (unsigned)FC_BUFFER_POOL_DEPTH,
                  (unsigned)stats.sq_used,
                  (unsigned)stats.hsq_used,
                  (unsigned)stats.cq_used);
@@ -73,8 +75,8 @@ static void *setup_level3(const MunitParameter params[], void *user_data)
  *  block 101：内部搬移目标
  **************************************************************************/
 
-#define BLOCK_TEST        (100U)   /* 固定测试 block */
-#define BLOCK_DEST        (102U)   /* 内部搬移目标 block */
+#define BLOCK_TEST (100U) /* 固定测试 block */
+#define BLOCK_DEST (102U) /* 内部搬移目标 block */
 
 /**************************************************************************
  *  PAA 辅助
@@ -122,9 +124,15 @@ static void memset_read_buffer(fc_command_t *cmd)
     while (did != FC_DESCRIPTOR_ID_INVALID)
     {
         fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
-        if (d == NULL) break;
+        if (d == NULL)
+        {
+            break;
+        }
         uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
-        if (buf != NULL) memset(buf, 0xCC, FC_BUFFER_USER_SIZE);
+        if (buf != NULL)
+        {
+            memset(buf, 0xCC, FC_BUFFER_USER_SIZE);
+        }
         did = d->next_id;
     }
 }
@@ -150,7 +158,10 @@ static uint8_t cmd_configure_and_fill(fc_command_t *cmd, uint16_t block, uint8_t
     while (desc_id != FC_DESCRIPTOR_ID_INVALID)
     {
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) break;
+        if (desc == NULL)
+        {
+            break;
+        }
         uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
         if (buf != NULL)
         {
@@ -168,13 +179,16 @@ static uint8_t cmd_configure_and_fill(fc_command_t *cmd, uint16_t block, uint8_t
 
 static uint8_t verify_cw_status_all_success(fc_command_t *cmd)
 {
-    uint8_t all_ok = 1U;
+    uint8_t            all_ok  = 1U;
     fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
     uint8_t            cw_idx  = 0U;
     while (desc_id != FC_DESCRIPTOR_ID_INVALID)
     {
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) break;
+        if (desc == NULL)
+        {
+            break;
+        }
         if ((desc->status & FC_CW_STATUS_SUCCESS) == 0U)
         {
             munit_errorf("CW %u status=0x%02X expected FC_CW_STATUS_SUCCESS", cw_idx, (unsigned)desc->status);
@@ -209,7 +223,10 @@ static void release_command_buffers(fc_command_t *cmd)
     while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (iter < CW_TOTAL_MAX))
     {
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) break;
+        if (desc == NULL)
+        {
+            break;
+        }
         if (desc->buffer_id != FC_BUFFER_ID_INVALID)
         {
             (void)fc_buffer_release(desc->buffer_id);
@@ -231,7 +248,10 @@ static uint8_t verify_page_data(fc_command_t *cmd, uint16_t block, uint8_t page,
     while (desc_id != FC_DESCRIPTOR_ID_INVALID)
     {
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) break;
+        if (desc == NULL)
+        {
+            break;
+        }
         uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
         if (buf != NULL)
         {
@@ -241,8 +261,11 @@ static uint8_t verify_page_data(fc_command_t *cmd, uint16_t block, uint8_t page,
                 if (buf[i] != exp)
                 {
                     munit_errorf("page=%u cw=%u offset=%u: got 0x%02X expected 0x%02X",
-                                 (unsigned)page, (unsigned)cw_idx, (unsigned)i,
-                                 (unsigned)buf[i], (unsigned)exp);
+                                 (unsigned)page,
+                                 (unsigned)cw_idx,
+                                 (unsigned)i,
+                                 (unsigned)buf[i],
+                                 (unsigned)exp);
                     all_ok = 0U;
                     goto next_desc;
                 }
@@ -267,7 +290,10 @@ static uint8_t verify_page_erased(fc_command_t *cmd, uint8_t page)
     while (desc_id != FC_DESCRIPTOR_ID_INVALID)
     {
         fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL) break;
+        if (desc == NULL)
+        {
+            break;
+        }
         uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
         if (buf != NULL)
         {
@@ -276,7 +302,10 @@ static uint8_t verify_page_erased(fc_command_t *cmd, uint8_t page)
                 if (buf[i] != 0xFFU)
                 {
                     munit_errorf("page=%u cw=%u offset=%u: got 0x%02X expected 0xFF (erased)",
-                                 (unsigned)page, (unsigned)cw_idx, (unsigned)i, (unsigned)buf[i]);
+                                 (unsigned)page,
+                                 (unsigned)cw_idx,
+                                 (unsigned)i,
+                                 (unsigned)buf[i]);
                     all_ok = 0U;
                     goto next_desc;
                 }
@@ -424,17 +453,17 @@ static void erase_block(uint16_t block, uint8_t multi_plane)
     fc_command_t *cmd = fc_command_alloc();
     munit_assert_not_null(cmd);
 
-    cmd->config.operation = multi_plane ? OP_ERASE_BLOCK_MULTI_PLANE : OP_ERASE_BLOCK;
-    cmd->config.ch        = 0U;
-    cmd->config.ce        = 0U;
-    cmd->config.lun       = 0U;
-    cmd->config.random    = FC_RANDOM_DISABLE;
-    cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-    cmd->config.raid      = FC_RAID_MODE_NORMAL;
-    cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-    cmd->config.cw        = 0U;
+    cmd->config.operation   = multi_plane ? OP_ERASE_BLOCK_MULTI_PLANE : OP_ERASE_BLOCK;
+    cmd->config.ch          = 0U;
+    cmd->config.ce          = 0U;
+    cmd->config.lun         = 0U;
+    cmd->config.random      = FC_RANDOM_DISABLE;
+    cmd->config.ldpc        = FC_ECC_MODE_LDPC_RAW;
+    cmd->config.raid        = FC_RAID_MODE_NORMAL;
+    cmd->desc_id            = FC_DESCRIPTOR_ID_INVALID;
+    cmd->config.cw          = 0U;
     cmd->config.multi_plane = multi_plane ? PLANE_NUM : 0U;
-    cmd->paa              = make_paa(block, 0U, 0U);
+    cmd->paa                = make_paa(block, 0U, 0U);
 
     run_lifecycle(cmd);
 }
@@ -491,9 +520,15 @@ static fc_command_t *read_page(uint16_t block, uint8_t page, uint8_t plane)
         while (did != FC_DESCRIPTOR_ID_INVALID)
         {
             fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
-            if (d == NULL) break;
+            if (d == NULL)
+            {
+                break;
+            }
             uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
-            if (buf != NULL) memset(buf, 0xCC, FC_BUFFER_USER_SIZE);
+            if (buf != NULL)
+            {
+                memset(buf, 0xCC, FC_BUFFER_USER_SIZE);
+            }
             did = d->next_id;
         }
     }
@@ -524,13 +559,13 @@ static void write_block_cache(uint16_t block, uint8_t plane)
             /* 最后 page 用 NORMAL 10h 确认 */
             cmd->config.operation = OP_NORMAL_PROGRAM_PAGE;
         }
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->config.crc       = FC_CRC_DISABLE;
+        cmd->config.ch     = 0U;
+        cmd->config.ce     = 0U;
+        cmd->config.lun    = 0U;
+        cmd->config.random = FC_RANDOM_DISABLE;
+        cmd->config.ldpc   = FC_ECC_MODE_LDPC_RAW;
+        cmd->config.raid   = FC_RAID_MODE_NORMAL;
+        cmd->config.crc    = FC_CRC_DISABLE;
 
         (void)cmd_configure_and_fill(cmd, block, page, plane);
         run_lifecycle(cmd);
@@ -732,7 +767,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         munit_assert_not_null(d);
         uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
         munit_assert_not_null(buf);
-        munit_assert_uint8(buf[0], ==, 0x4FU);  /* 'O' */
+        munit_assert_uint8(buf[0], ==, 0x4FU); /* 'O' */
 
         release_command_buffers(cmd);
         result = fc_command_release(cmd);
@@ -910,7 +945,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
  *  流程：
  *    1. 擦除 block 100 + 101
  *    2. 写 block 100（64 pages，独立 pattern）
-*    3. 对每 page 执行 READ_FOR_INTERNAL_DATA_MOVE
+ *    3. 对每 page 执行 READ_FOR_INTERNAL_DATA_MOVE
  *    4. 对每 page 执行 PROGRAM_FOR_INTERNAL_MOVE（搬移到 block 102）
  *    5. 读 block 101 page 0 验证数据一致性
  *
@@ -931,9 +966,9 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     /* Step 2: 写源 block（64 pages，独立 pattern） */
     write_block(BLOCK_TEST, 0U);
 
-/* Step 2.5: 用普通读（00h-30h）验证 block 100 数据正确，排除写阶段问题 */
+    /* Step 2.5: 用普通读（00h-30h）验证 block 100 数据正确，排除写阶段问题 */
     {
-        fc_command_t *cmd = read_page(BLOCK_TEST, 0U, 0U);
+        fc_command_t       *cmd = read_page(BLOCK_TEST, 0U, 0U);
         fc_command_status_t completion;
         fc_status_t         result;
         uint32_t            service_count;
@@ -946,7 +981,11 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
         {
             (void)fc_service();
             result = fc_poll_completion(&completion);
-            if (result == FC_STATUS_OK) { completed = 1U; break; }
+            if (result == FC_STATUS_OK)
+            {
+                completed = 1U;
+                break;
+            }
         }
         munit_assert_uint32(completed, ==, 1U);
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
@@ -1149,7 +1188,7 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
     write_block_cache(BLOCK_TEST, 0U);
 
     /* Phase 2: Cache 读序列 */
-    uint8_t page;
+    uint8_t             page;
     fc_command_status_t completion;
     fc_status_t         result;
     uint32_t            service_count;
@@ -1182,7 +1221,11 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         {
             (void)fc_service();
             result = fc_poll_completion(&completion);
-            if (result == FC_STATUS_OK) { completed = 1U; break; }
+            if (result == FC_STATUS_OK)
+            {
+                completed = 1U;
+                break;
+            }
         }
         munit_assert_uint32(completed, ==, 1U);
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
@@ -1222,7 +1265,11 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         {
             (void)fc_service();
             result = fc_poll_completion(&completion);
-            if (result == FC_STATUS_OK) { completed = 1U; break; }
+            if (result == FC_STATUS_OK)
+            {
+                completed = 1U;
+                break;
+            }
         }
         munit_assert_uint32(completed, ==, 1U);
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
@@ -1262,7 +1309,11 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         {
             (void)fc_service();
             result = fc_poll_completion(&completion);
-            if (result == FC_STATUS_OK) { completed = 1U; break; }
+            if (result == FC_STATUS_OK)
+            {
+                completed = 1U;
+                break;
+            }
         }
         munit_assert_uint32(completed, ==, 1U);
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
@@ -1303,17 +1354,17 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
         fc_command_t *cmd = fc_command_alloc();
         munit_assert_not_null(cmd);
 
-        cmd->config.operation = OP_PROGRAM_PAGE_MULTI_PLANE;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->config.crc       = FC_CRC_DISABLE;
-        cmd->config.cw        = CW_NUM - 1U;                    /* per-plane CW count - 1 */
-        cmd->config.multi_plane = PLANE_NUM;                    /* = 2 */
-        cmd->paa              = make_paa(BLOCK_TEST, 0U, page); /* base PAA: plane 0 */
+        cmd->config.operation   = OP_PROGRAM_PAGE_MULTI_PLANE;
+        cmd->config.ch          = 0U;
+        cmd->config.ce          = 0U;
+        cmd->config.lun         = 0U;
+        cmd->config.random      = FC_RANDOM_DISABLE;
+        cmd->config.ldpc        = FC_ECC_MODE_LDPC_RAW;
+        cmd->config.raid        = FC_RAID_MODE_NORMAL;
+        cmd->config.crc         = FC_CRC_DISABLE;
+        cmd->config.cw          = CW_NUM - 1U;                    /* per-plane CW count - 1 */
+        cmd->config.multi_plane = PLANE_NUM;                      /* = 2 */
+        cmd->paa                = make_paa(BLOCK_TEST, 0U, page); /* base PAA: plane 0 */
 
         fc_status_t result = fc_command_configure_descriptors(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
@@ -1325,11 +1376,14 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
             while (did != FC_DESCRIPTOR_ID_INVALID)
             {
                 fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
-                if (d == NULL) break;
+                if (d == NULL)
+                {
+                    break;
+                }
                 uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
                 if (buf != NULL)
                 {
-                    uint8_t p = idx / CW_NUM;  /* plane 0 or 1 */
+                    uint8_t p = idx / CW_NUM; /* plane 0 or 1 */
                     memset(buf, (p == 0U) ? 0x55 : 0xAA, FC_BUFFER_USER_SIZE);
                 }
                 did = (fc_descriptor_id_t)d->next_id;
@@ -1346,17 +1400,17 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
         fc_command_t *cmd = fc_command_alloc();
         munit_assert_not_null(cmd);
 
-        cmd->config.operation = OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->config.crc       = FC_CRC_DISABLE;
-        cmd->config.cw        = CW_NUM - 1U;
+        cmd->config.operation   = OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT;
+        cmd->config.ch          = 0U;
+        cmd->config.ce          = 0U;
+        cmd->config.lun         = 0U;
+        cmd->config.random      = FC_RANDOM_DISABLE;
+        cmd->config.ldpc        = FC_ECC_MODE_LDPC_RAW;
+        cmd->config.raid        = FC_RAID_MODE_NORMAL;
+        cmd->config.crc         = FC_CRC_DISABLE;
+        cmd->config.cw          = CW_NUM - 1U;
         cmd->config.multi_plane = PLANE_NUM;
-        cmd->paa              = make_paa(BLOCK_TEST, 0U, page);
+        cmd->paa                = make_paa(BLOCK_TEST, 0U, page);
 
         fc_status_t result = fc_command_configure_descriptors(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
@@ -1393,20 +1447,27 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
             while (did != FC_DESCRIPTOR_ID_INVALID)
             {
                 fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
-                if (d == NULL) break;
+                if (d == NULL)
+                {
+                    break;
+                }
                 uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
                 if (buf != NULL)
                 {
-                    uint8_t p  = idx / CW_NUM;
-                    uint8_t cw = idx % CW_NUM;
+                    uint8_t p       = idx / CW_NUM;
+                    uint8_t cw      = idx % CW_NUM;
                     uint8_t exp_val = (p == 0U) ? 0x55U : 0xAAU;
                     for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
                     {
                         if (buf[i] != exp_val)
                         {
                             munit_errorf("multi_plane page=%u plane=%u cw=%u offset=%u: got 0x%02X expected 0x%02X",
-                                         (unsigned)page, (unsigned)p, (unsigned)cw, (unsigned)i,
-                                         (unsigned)buf[i], (unsigned)exp_val);
+                                         (unsigned)page,
+                                         (unsigned)p,
+                                         (unsigned)cw,
+                                         (unsigned)i,
+                                         (unsigned)buf[i],
+                                         (unsigned)exp_val);
                             goto mp_desc_next;
                         }
                     }
@@ -1458,7 +1519,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
 
         /* Normal read page — 加载 NAND 页缓冲 */
         {
-            fc_command_t *cmd = read_page(BLOCK_TEST, page, 0U);
+            fc_command_t       *cmd = read_page(BLOCK_TEST, page, 0U);
             fc_command_status_t completion;
             fc_status_t         result;
             uint32_t            service_count;
@@ -1470,7 +1531,11 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             {
                 (void)fc_service();
                 result = fc_poll_completion(&completion);
-                if (result == FC_STATUS_OK) { completed = 1U; break; }
+                if (result == FC_STATUS_OK)
+                {
+                    completed = 1U;
+                    break;
+                }
             }
             munit_assert_uint32(completed, ==, 1U);
             munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
@@ -1493,7 +1558,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             cmd->config.random    = FC_RANDOM_DISABLE;
             cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
             cmd->config.raid      = FC_RAID_MODE_NORMAL;
-            cmd->config.cw        = 0U;                      /* 1 个 desc */
+            cmd->config.cw        = 0U; /* 1 个 desc */
             cmd->paa              = paa_make(page, 0U, BLOCK_TEST, 0U, cw);
 
             fc_status_t result = fc_command_configure_descriptors(cmd);
@@ -1504,21 +1569,25 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             result = fc_submit(cmd);
             munit_assert_int(result, ==, FC_STATUS_OK);
 
-            uint8_t completed = 0U;
+            uint8_t             completed = 0U;
             fc_command_status_t completion;
             for (uint32_t i = 0U; i < SERVICE_LOOP_MAX; i++)
             {
                 (void)fc_service();
                 result = fc_poll_completion(&completion);
-                if (result == FC_STATUS_OK) { completed = 1U; break; }
+                if (result == FC_STATUS_OK)
+                {
+                    completed = 1U;
+                    break;
+                }
             }
             munit_assert_uint32(completed, ==, 1U);
             munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
 
             /* 逐字节验证 — 使用 PAA 编码的 CW 编号计算偏移 */
             {
-                fc_descriptor_id_t did = (fc_descriptor_id_t)cmd->desc_id;
-                fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(did);
+                fc_descriptor_id_t did  = (fc_descriptor_id_t)cmd->desc_id;
+                fc_descriptor_t   *desc = fc_descriptor_id_to_descriptor(did);
                 if (desc != NULL)
                 {
                     uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
@@ -1526,13 +1595,15 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
                     {
                         for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
                         {
-                            uint8_t exp = expected_byte(BLOCK_TEST, page, 0U,
-                                                         (uint32_t)cw * FC_BUFFER_USER_SIZE + i);
+                            uint8_t exp = expected_byte(BLOCK_TEST, page, 0U, (uint32_t)cw * FC_BUFFER_USER_SIZE + i);
                             if (buf[i] != exp)
                             {
                                 munit_errorf("random_data page=%u cw=%u off=%u: got 0x%02X exp 0x%02X",
-                                             (unsigned)page, (unsigned)cw, (unsigned)i,
-                                             (unsigned)buf[i], (unsigned)exp);
+                                             (unsigned)page,
+                                             (unsigned)cw,
+                                             (unsigned)i,
+                                             (unsigned)buf[i],
+                                             (unsigned)exp);
                                 goto rand_page_done;
                             }
                         }
@@ -1665,17 +1736,17 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
  **************************************************************************/
 
 MunitTest g_fc_lifecycle_tests[] = {
-    { "init_sequence",       test_init_sequence,       setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "feature_write_read",  test_feature_write_read,  setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_query",        test_status_query,        setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "internal_data_move",  test_internal_data_move,  setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "block_erase_verify",  test_block_erase_verify,  setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "block_write_read",    test_block_write_read,    setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "block_cache_ops",     test_block_cache_ops,     setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "block_multi_plane",   test_block_multi_plane,   setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "block_random_data",   test_block_random_data,   setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-#if 0 /* block_lock_tight 被 #if 0 隔开，此处不注册 */
+    {     "init_sequence",      test_init_sequence, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"feature_write_read", test_feature_write_read, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      "status_query",       test_status_query, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"internal_data_move", test_internal_data_move, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"block_erase_verify", test_block_erase_verify, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {  "block_write_read",   test_block_write_read, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {   "block_cache_ops",    test_block_cache_ops, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { "block_multi_plane",  test_block_multi_plane, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { "block_random_data",  test_block_random_data, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+#if 0  /* block_lock_tight 被 #if 0 隔开，此处不注册 */
     { "block_lock_tight",    test_block_lock_tight,    setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 #endif
-    { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    {                NULL,                    NULL,         NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

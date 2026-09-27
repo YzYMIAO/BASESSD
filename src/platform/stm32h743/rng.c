@@ -1,6 +1,6 @@
-#include "common/common.h"
 #include "rng.h"
 
+#include "common/common.h"
 #include "delay.h"
 
 RNG_HandleTypeDef g_rng_handle; /* RNG句柄 */

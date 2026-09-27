@@ -54,7 +54,7 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    for (; state->uop_index < NAND_ENGINE_MAX_UOPS; )
+    for (; state->uop_index < NAND_ENGINE_MAX_UOPS;)
     {
         uop = &state->uops[state->uop_index];
 
@@ -139,7 +139,8 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
                 (uop->type == NAND_UOP_CHECK_FAIL) || (uop->type == NAND_UOP_END))
             {
                 SSD_LOGD("nand: uop[%u]=%u OK op=%u nand_st=0x%02X polls=%u\r\n",
-                         (unsigned)state->uop_index, (unsigned)uop->type,
+                         (unsigned)state->uop_index,
+                         (unsigned)uop->type,
                          (unsigned)state->request->operation,
                          (unsigned)state->completion->nand_status,
                          (unsigned)state->debug_polls);

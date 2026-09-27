@@ -35,23 +35,23 @@
 /* ── STM32H743 CRC 寄存器偏移（不使用 HAL/CMSIS 以保持模块独立） ── */
 
 /* CRC 外设基地址 */
-#define FC_CRC_BASE              (0x58026000UL)
+#define FC_CRC_BASE (0x58026000UL)
 
 /* CRC 寄存器偏移 */
-#define FC_CRC_DR_OFFSET         (0x00UL)  /* Data Register      — 写输入数据，读 CRC 结果 */
-#define FC_CRC_IDR_OFFSET        (0x04UL)  /* Independent Data Register */
-#define FC_CRC_CR_OFFSET         (0x08UL)  /* Control Register   — 包含 RESET 位 */
-#define FC_CRC_INIT_OFFSET       (0x10UL)  /* Initial Value Register */
-#define FC_CRC_POL_OFFSET        (0x14UL)  /* Polynomial Register */
+#define FC_CRC_DR_OFFSET   (0x00UL) /* Data Register      — 写输入数据，读 CRC 结果 */
+#define FC_CRC_IDR_OFFSET  (0x04UL) /* Independent Data Register */
+#define FC_CRC_CR_OFFSET   (0x08UL) /* Control Register   — 包含 RESET 位 */
+#define FC_CRC_INIT_OFFSET (0x10UL) /* Initial Value Register */
+#define FC_CRC_POL_OFFSET  (0x14UL) /* Polynomial Register */
 
 /* CRC 控制寄存器 (CR) 位定义 */
-#define FC_CRC_CR_RESET          (1UL << 0)  /* RESET 位：重置 CRC 计算器至 INIT 值 */
+#define FC_CRC_CR_RESET (1UL << 0) /* RESET 位：重置 CRC 计算器至 INIT 值 */
 
 /* 寄存器访问宏 */
-#define FC_CRC_REG(offset)       (*(volatile uint32_t *)(FC_CRC_BASE + (offset)))
+#define FC_CRC_REG(offset) (*(volatile uint32_t *)(FC_CRC_BASE + (offset)))
 
 /* ── 全局状态 ── */
-static uint8_t g_crc_ready = 0U;  /* 非零表示初始化成功 */
+static uint8_t g_crc_ready = 0U; /* 非零表示初始化成功 */
 
 void fc_crc_init(void)
 {
@@ -74,8 +74,8 @@ void fc_crc_init(void)
     FC_CRC_REG(FC_CRC_CR_OFFSET)   = FC_CRC_CR_RESET;
 
     /* 简单验证：写入 IDR（8 位只读寄存器），读回确认外设响应 */
-    FC_CRC_REG(FC_CRC_IDR_OFFSET)  = 0xA5U;
-    idr = FC_CRC_REG(FC_CRC_IDR_OFFSET) & 0xFFU;
+    FC_CRC_REG(FC_CRC_IDR_OFFSET) = 0xA5U;
+    idr                           = FC_CRC_REG(FC_CRC_IDR_OFFSET) & 0xFFU;
 
     g_crc_ready = (idr == 0xA5U) ? 1U : 0U;
 }

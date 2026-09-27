@@ -11,14 +11,13 @@
  * 唯一链接依赖：g_nand_operation_map（.rodata, onfi_1_0.o）
  */
 
-#include "munit.h"
-
+#include "common/ssd_log.h"
 #include "fc/fc.h"
 #include "fc/fc_command.h"
 #include "fc/fc_queue.h"
 #include "fc/fc_scheduler.h"
+#include "munit.h"
 #include "nand/onfi_1_0.h"
-#include "common/ssd_log.h"
 
 /**************************************************************************
  *  Part 1: fc_command 测试
@@ -54,7 +53,7 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
     for (uint8_t op = 0U; op < OP_COUNT; op++)
     {
         cmd.config.operation = op;
-        cmd.desc_id = 0U;
+        cmd.desc_id          = 0U;
         munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_OK);
     }
 
@@ -127,15 +126,15 @@ static MunitResult test_command_status_init_cw1(const MunitParameter params[], v
     fc_command_status_init(&cq_entry, &cmd);
 
     munit_assert_uint32(cq_entry.command_id, ==, 0x01U);
-    munit_assert_uint32(cq_entry.desc_id,    ==, 0x02U);
-    munit_assert_uint32(cq_entry.module,     ==, FC_COMMAND_MODULE_FTL);
+    munit_assert_uint32(cq_entry.desc_id, ==, 0x02U);
+    munit_assert_uint32(cq_entry.module, ==, FC_COMMAND_MODULE_FTL);
 
-    munit_assert_uint32(cq_entry.status,     ==, FC_CW_STATUS_READY);
+    munit_assert_uint32(cq_entry.status, ==, FC_CW_STATUS_READY);
 
-    munit_assert_uint32(cq_entry.ecc_bit0,   ==, 0U);
-    munit_assert_uint32(cq_entry.ecc_bit1,   ==, FC_CW_STATUS_UNUSED);
-    munit_assert_uint32(cq_entry.ecc_bit2,   ==, FC_CW_STATUS_UNUSED);
-    munit_assert_uint32(cq_entry.ecc_bit3,   ==, FC_CW_STATUS_UNUSED);
+    munit_assert_uint32(cq_entry.ecc_bit0, ==, 0U);
+    munit_assert_uint32(cq_entry.ecc_bit1, ==, FC_CW_STATUS_UNUSED);
+    munit_assert_uint32(cq_entry.ecc_bit2, ==, FC_CW_STATUS_UNUSED);
+    munit_assert_uint32(cq_entry.ecc_bit3, ==, FC_CW_STATUS_UNUSED);
 
     return MUNIT_OK;
 }
@@ -155,12 +154,12 @@ static MunitResult test_command_status_init_cw4(const MunitParameter params[], v
 
     fc_command_status_init(&cq_entry, &cmd);
 
-    munit_assert_uint32(cq_entry.status,     ==, FC_CW_STATUS_READY);
+    munit_assert_uint32(cq_entry.status, ==, FC_CW_STATUS_READY);
 
-    munit_assert_uint32(cq_entry.ecc_bit0,   ==, 0U);
-    munit_assert_uint32(cq_entry.ecc_bit1,   ==, 0U);
-    munit_assert_uint32(cq_entry.ecc_bit2,   ==, 0U);
-    munit_assert_uint32(cq_entry.ecc_bit3,   ==, 0U);
+    munit_assert_uint32(cq_entry.ecc_bit0, ==, 0U);
+    munit_assert_uint32(cq_entry.ecc_bit1, ==, 0U);
+    munit_assert_uint32(cq_entry.ecc_bit2, ==, 0U);
+    munit_assert_uint32(cq_entry.ecc_bit3, ==, 0U);
 
     return MUNIT_OK;
 }
@@ -175,16 +174,16 @@ static MunitResult test_command_status_set_cw_valid(const MunitParameter params[
     fc_command_status_t cq_entry = {0};
 
     fc_command_status_set_cw(&cq_entry, 0U, FC_CW_STATUS_SUCCESS, 0x10U);
-    munit_assert_uint32(cq_entry.status,  ==, FC_CW_STATUS_SUCCESS);
-    munit_assert_uint32(cq_entry.desc_id,  ==, 0U); /* success 不记录 desc_id */
+    munit_assert_uint32(cq_entry.status, ==, FC_CW_STATUS_SUCCESS);
+    munit_assert_uint32(cq_entry.desc_id, ==, 0U); /* success 不记录 desc_id */
 
     fc_command_status_set_cw(&cq_entry, 1U, FC_CW_STATUS_NAND_FAIL, 0x20U);
-    munit_assert_uint32(cq_entry.status,  ==, (uint8_t)(FC_CW_STATUS_SUCCESS | FC_CW_STATUS_NAND_FAIL));
-    munit_assert_uint32(cq_entry.desc_id,  ==, 0x20U); /* 错误位记录 desc_id */
+    munit_assert_uint32(cq_entry.status, ==, (uint8_t)(FC_CW_STATUS_SUCCESS | FC_CW_STATUS_NAND_FAIL));
+    munit_assert_uint32(cq_entry.desc_id, ==, 0x20U); /* 错误位记录 desc_id */
 
     fc_command_status_set_cw(&cq_entry, 3U, FC_CW_STATUS_UNC, 0x40U);
-    munit_assert_uint32(cq_entry.status,  ==, (uint8_t)(FC_CW_STATUS_SUCCESS | FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_UNC));
-    munit_assert_uint32(cq_entry.desc_id,  ==, 0x20U); /* 保留第一个错误的 desc_id */
+    munit_assert_uint32(cq_entry.status, ==, (uint8_t)(FC_CW_STATUS_SUCCESS | FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_UNC));
+    munit_assert_uint32(cq_entry.desc_id, ==, 0x20U); /* 保留第一个错误的 desc_id */
 
     return MUNIT_OK;
 }
@@ -197,10 +196,10 @@ static MunitResult test_command_status_set_cw_overflow(const MunitParameter para
     fc_command_status_t cq_entry = {0};
 
     fc_command_status_set_cw(&cq_entry, 4U, FC_CW_STATUS_NAND_FAIL, 0x50U);
-    munit_assert_uint32(cq_entry.status,  ==, 0U);
+    munit_assert_uint32(cq_entry.status, ==, 0U);
 
     fc_command_status_set_cw(&cq_entry, 255U, FC_CW_STATUS_NAND_FAIL, 0x60U);
-    munit_assert_uint32(cq_entry.status,  ==, 0U);
+    munit_assert_uint32(cq_entry.status, ==, 0U);
 
     return MUNIT_OK;
 }
@@ -266,7 +265,9 @@ static MunitResult test_queue_wrap_around(const MunitParameter params[], void *d
     munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
 
     for (i = 0U; i < TEST_Q_DEPTH; i++)
+    {
         munit_assert_int(fc_submission_queue_push(&q, (fc_command_id_t)(0x10U + i)), ==, FC_STATUS_OK);
+    }
 
     munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
     munit_assert_uint32(val, ==, 0x10U);
@@ -300,7 +301,9 @@ static MunitResult test_queue_overflow(const MunitParameter params[], void *data
     munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
 
     for (i = 0U; i < TEST_Q_DEPTH; i++)
+    {
         munit_assert_int(fc_submission_queue_push(&q, (fc_command_id_t)i), ==, FC_STATUS_OK);
+    }
 
     munit_assert_int(fc_submission_queue_push(&q, 0xFFU), ==, FC_STATUS_QUEUE_FULL);
 
@@ -366,7 +369,9 @@ static MunitResult test_queue_pop_n(const MunitParameter params[], void *data)
     munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
 
     for (i = 0U; i < 5U; i++)
+    {
         munit_assert_int(fc_submission_queue_push(&q, (fc_command_id_t)(0x10U + i)), ==, FC_STATUS_OK);
+    }
 
     fc_submission_queue_pop_n(&q, ids, 3U);
     munit_assert_uint32(ids[0], ==, 0x10U);
@@ -398,7 +403,9 @@ static MunitResult test_queue_empty_full(const MunitParameter params[], void *da
     munit_assert_uint32(fc_submission_queue_peek(&q, 0U), ==, FC_COMMAND_ID_INVALID);
 
     for (i = 0U; i < TEST_Q_DEPTH; i++)
+    {
         munit_assert_int(fc_submission_queue_push(&q, (fc_command_id_t)i), ==, FC_STATUS_OK);
+    }
 
     munit_assert_int(fc_submission_queue_push(&q, 0xFFU), ==, FC_STATUS_QUEUE_FULL);
 
@@ -458,7 +465,7 @@ static MunitResult test_cqueue_init(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    fc_command_status_t  storage[TEST_CQ_DEPTH];
+    fc_command_status_t   storage[TEST_CQ_DEPTH];
     fc_completion_queue_t q;
 
     munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
@@ -481,15 +488,15 @@ static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *dat
     (void)params;
     (void)data;
 
-    fc_command_status_t  storage[TEST_CQ_DEPTH];
+    fc_command_status_t   storage[TEST_CQ_DEPTH];
     fc_completion_queue_t q;
-    fc_command_status_t  entry = {0};
-    fc_command_status_t  popped = {0};
+    fc_command_status_t   entry  = {0};
+    fc_command_status_t   popped = {0};
 
     munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
 
     entry.command_id = 0x01U;
-    entry.status    = FC_CW_STATUS_READY;
+    entry.status     = FC_CW_STATUS_READY;
     munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_OK);
 
     entry.command_id = 0x02U;
@@ -511,14 +518,14 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
     (void)params;
     (void)data;
 
-    fc_command_status_t  storage[TEST_CQ_DEPTH];
+    fc_command_status_t   storage[TEST_CQ_DEPTH];
     fc_completion_queue_t q;
     uint16_t              i;
 
     munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
 
     fc_command_status_t entry = {0};
-    entry.status = FC_CW_STATUS_READY;
+    entry.status              = FC_CW_STATUS_READY;
 
     for (i = 0U; i < TEST_CQ_DEPTH; i++)
     {
@@ -564,9 +571,12 @@ static void print_resource_stats(const char *tag)
     {
         SSD_LOGI("[RES] %s: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
                  tag,
-                 (unsigned)stats.command_used,   (unsigned)FC_COMMAND_POOL_DEPTH,
-                 (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
-                 (unsigned)stats.buffer_used,     (unsigned)FC_BUFFER_POOL_DEPTH,
+                 (unsigned)stats.command_used,
+                 (unsigned)FC_COMMAND_POOL_DEPTH,
+                 (unsigned)stats.descriptor_used,
+                 (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
+                 (unsigned)stats.buffer_used,
+                 (unsigned)FC_BUFFER_POOL_DEPTH,
                  (unsigned)stats.sq_used,
                  (unsigned)stats.hsq_used,
                  (unsigned)stats.cq_used);
@@ -599,7 +609,7 @@ static MunitResult test_scheduler_init(const MunitParameter params[], void *data
     fc_submission_queue_t sq, hsq;
     fc_scheduler_t        scheduler;
 
-    fc_submission_queue_init(&sq,  sq_storage, SCHED_Q_DEPTH);
+    fc_submission_queue_init(&sq, sq_storage, SCHED_Q_DEPTH);
     fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
 
     munit_assert_int(fc_scheduler_init(&scheduler, &sq, &hsq), ==, FC_STATUS_OK);
@@ -620,7 +630,7 @@ static MunitResult test_scheduler_init_null(const MunitParameter params[], void 
     fc_submission_queue_t sq, hsq;
 
     munit_assert_int(fc_scheduler_init(NULL, NULL, NULL), ==, FC_STATUS_INVALID_ARGUMENT);
-    munit_assert_int(fc_scheduler_init(NULL, &sq, &hsq),  ==, FC_STATUS_INVALID_ARGUMENT);
+    munit_assert_int(fc_scheduler_init(NULL, &sq, &hsq), ==, FC_STATUS_INVALID_ARGUMENT);
 
     return MUNIT_OK;
 }
@@ -637,7 +647,7 @@ static MunitResult test_scheduler_set_clear_busy(const MunitParameter params[], 
     fc_submission_queue_t sq, hsq;
     fc_scheduler_t        scheduler;
 
-    fc_submission_queue_init(&sq,  sq_storage, SCHED_Q_DEPTH);
+    fc_submission_queue_init(&sq, sq_storage, SCHED_Q_DEPTH);
     fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
     fc_scheduler_init(&scheduler, &sq, &hsq);
 
@@ -669,7 +679,7 @@ static MunitResult test_scheduler_select_empty(const MunitParameter params[], vo
     fc_scheduler_t        scheduler;
     fc_command_id_t       cmd_id;
 
-    fc_submission_queue_init(&sq,  sq_storage, SCHED_Q_DEPTH);
+    fc_submission_queue_init(&sq, sq_storage, SCHED_Q_DEPTH);
     fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
     fc_scheduler_init(&scheduler, &sq, &hsq);
 
@@ -689,7 +699,7 @@ static MunitResult test_scheduler_select_hsq_first(const MunitParameter params[]
     fc_scheduler_t        scheduler;
     fc_command_id_t       cmd_id;
 
-    fc_submission_queue_init(&sq,  sq_storage, SCHED_Q_DEPTH);
+    fc_submission_queue_init(&sq, sq_storage, SCHED_Q_DEPTH);
     fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
     fc_scheduler_init(&scheduler, &sq, &hsq);
 
@@ -698,11 +708,15 @@ static MunitResult test_scheduler_select_hsq_first(const MunitParameter params[]
     munit_assert_not_null(cmd_sq);
     munit_assert_not_null(cmd_hsq);
 
-    cmd_sq->config.ch = 0U; cmd_sq->config.ce = 0U; cmd_sq->config.lun = 0U;
+    cmd_sq->config.ch     = 0U;
+    cmd_sq->config.ce     = 0U;
+    cmd_sq->config.lun    = 0U;
     cmd_sq->high_priority = FC_PRIORITY_SQ;
     fc_submission_queue_push(&sq, cmd_sq->command_id);
 
-    cmd_hsq->config.ch = 0U; cmd_hsq->config.ce = 0U; cmd_hsq->config.lun = 0U;
+    cmd_hsq->config.ch     = 0U;
+    cmd_hsq->config.ce     = 0U;
+    cmd_hsq->config.lun    = 0U;
     cmd_hsq->high_priority = FC_PRIORITY_HSQ;
     fc_submission_queue_push(&hsq, cmd_hsq->command_id);
 
@@ -730,7 +744,7 @@ static MunitResult test_scheduler_select_sq_order(const MunitParameter params[],
     fc_scheduler_t        scheduler;
     fc_command_id_t       cmd_id;
 
-    fc_submission_queue_init(&sq,  sq_storage, SCHED_Q_DEPTH);
+    fc_submission_queue_init(&sq, sq_storage, SCHED_Q_DEPTH);
     fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
     fc_scheduler_init(&scheduler, &sq, &hsq);
 
@@ -739,8 +753,12 @@ static MunitResult test_scheduler_select_sq_order(const MunitParameter params[],
     munit_assert_not_null(cmd_a);
     munit_assert_not_null(cmd_b);
 
-    cmd_a->config.ch = 0U; cmd_a->config.ce = 0U; cmd_a->config.lun = 0U;
-    cmd_b->config.ch = 0U; cmd_b->config.ce = 0U; cmd_b->config.lun = 0U;
+    cmd_a->config.ch  = 0U;
+    cmd_a->config.ce  = 0U;
+    cmd_a->config.lun = 0U;
+    cmd_b->config.ch  = 0U;
+    cmd_b->config.ce  = 0U;
+    cmd_b->config.lun = 0U;
 
     fc_submission_queue_push(&sq, cmd_a->command_id);
     fc_submission_queue_push(&sq, cmd_b->command_id);
@@ -768,7 +786,7 @@ static MunitResult test_scheduler_select_busy_skip(const MunitParameter params[]
     fc_scheduler_t        scheduler;
     fc_command_id_t       cmd_id;
 
-    fc_submission_queue_init(&sq,  sq_storage, SCHED_Q_DEPTH);
+    fc_submission_queue_init(&sq, sq_storage, SCHED_Q_DEPTH);
     fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
     fc_scheduler_init(&scheduler, &sq, &hsq);
 
@@ -777,8 +795,12 @@ static MunitResult test_scheduler_select_busy_skip(const MunitParameter params[]
     munit_assert_not_null(cmd_a);
     munit_assert_not_null(cmd_b);
 
-    cmd_a->config.ch = 0U; cmd_a->config.ce = 0U; cmd_a->config.lun = 0U;
-    cmd_b->config.ch = 0U; cmd_b->config.ce = 0U; cmd_b->config.lun = 0U;
+    cmd_a->config.ch  = 0U;
+    cmd_a->config.ce  = 0U;
+    cmd_a->config.lun = 0U;
+    cmd_b->config.ch  = 0U;
+    cmd_b->config.ce  = 0U;
+    cmd_b->config.lun = 0U;
 
     fc_submission_queue_push(&sq, cmd_a->command_id);
     fc_submission_queue_push(&sq, cmd_b->command_id);
@@ -822,7 +844,7 @@ static MunitResult test_scheduler_starvation(const MunitParameter params[], void
     fc_scheduler_chain_t  chain;
     uint16_t              i;
 
-    fc_submission_queue_init(&sq,  sq_storage, SCHED_Q_DEPTH);
+    fc_submission_queue_init(&sq, sq_storage, SCHED_Q_DEPTH);
     fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
     fc_scheduler_init(&scheduler, &sq, &hsq);
 
@@ -832,10 +854,12 @@ static MunitResult test_scheduler_starvation(const MunitParameter params[], void
     {
         write_cmds[i] = fc_command_alloc();
         munit_assert_not_null(write_cmds[i]);
-        write_cmds[i]->config.ch = 0U; write_cmds[i]->config.ce = 0U; write_cmds[i]->config.lun = 0U;
+        write_cmds[i]->config.ch        = 0U;
+        write_cmds[i]->config.ce        = 0U;
+        write_cmds[i]->config.lun       = 0U;
         write_cmds[i]->config.operation = OP_NORMAL_PROGRAM_PAGE;
-        write_cmds[i]->config.chain = FC_CHAIN_END;
-        write_cmds[i]->high_priority = FC_PRIORITY_SQ;
+        write_cmds[i]->config.chain     = FC_CHAIN_END;
+        write_cmds[i]->high_priority    = FC_PRIORITY_SQ;
         fc_submission_queue_push(&sq, write_cmds[i]->command_id);
     }
 
@@ -853,18 +877,22 @@ static MunitResult test_scheduler_starvation(const MunitParameter params[], void
     /* push 1 个读命令 + 1 个非读命令 */
     rd_cmd = fc_command_alloc();
     munit_assert_not_null(rd_cmd);
-    rd_cmd->config.ch = 0U; rd_cmd->config.ce = 0U; rd_cmd->config.lun = 0U;
+    rd_cmd->config.ch        = 0U;
+    rd_cmd->config.ce        = 0U;
+    rd_cmd->config.lun       = 0U;
     rd_cmd->config.operation = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    rd_cmd->config.chain = FC_CHAIN_END;
-    rd_cmd->high_priority = FC_PRIORITY_SQ;
+    rd_cmd->config.chain     = FC_CHAIN_END;
+    rd_cmd->high_priority    = FC_PRIORITY_SQ;
     fc_submission_queue_push(&sq, rd_cmd->command_id);
 
     wr_cmd = fc_command_alloc();
     munit_assert_not_null(wr_cmd);
-    wr_cmd->config.ch = 0U; wr_cmd->config.ce = 0U; wr_cmd->config.lun = 0U;
+    wr_cmd->config.ch        = 0U;
+    wr_cmd->config.ce        = 0U;
+    wr_cmd->config.lun       = 0U;
     wr_cmd->config.operation = OP_NORMAL_PROGRAM_PAGE;
-    wr_cmd->config.chain = FC_CHAIN_END;
-    wr_cmd->high_priority = FC_PRIORITY_SQ;
+    wr_cmd->config.chain     = FC_CHAIN_END;
+    wr_cmd->high_priority    = FC_PRIORITY_SQ;
     fc_submission_queue_push(&sq, wr_cmd->command_id);
 
     /* write_budget=3 已满，select_chain 应选出读命令（starvation 保护触发） */
@@ -874,7 +902,10 @@ static MunitResult test_scheduler_starvation(const MunitParameter params[], void
     munit_assert_not_null(cmd);
     munit_assert_uint32(cmd->config.operation, ==, OP_NORMAL_READ_PAGE_WITH_DATA_OUT);
 
-    for (i = 0U; i < 3U; i++) fc_command_release(write_cmds[i]);
+    for (i = 0U; i < 3U; i++)
+    {
+        fc_command_release(write_cmds[i]);
+    }
     fc_command_release(rd_cmd);
     fc_command_release(wr_cmd);
 
@@ -894,13 +925,15 @@ static MunitResult test_scheduler_select_chain_single(const MunitParameter param
     fc_scheduler_t        scheduler;
     fc_scheduler_chain_t  chain;
 
-    fc_submission_queue_init(&sq,  sq_storage, SCHED_Q_DEPTH);
+    fc_submission_queue_init(&sq, sq_storage, SCHED_Q_DEPTH);
     fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
     fc_scheduler_init(&scheduler, &sq, &hsq);
 
     fc_command_t *cmd = fc_command_alloc();
     munit_assert_not_null(cmd);
-    cmd->config.ch = 0U; cmd->config.ce = 0U; cmd->config.lun = 0U;
+    cmd->config.ch    = 0U;
+    cmd->config.ce    = 0U;
+    cmd->config.lun   = 0U;
     cmd->config.chain = FC_CHAIN_END;
     fc_submission_queue_push(&sq, cmd->command_id);
 
@@ -925,7 +958,7 @@ static MunitResult test_scheduler_select_chain_multi(const MunitParameter params
     fc_scheduler_chain_t  chain;
     uint16_t              i;
 
-    fc_submission_queue_init(&sq,  sq_storage, SCHED_Q_DEPTH);
+    fc_submission_queue_init(&sq, sq_storage, SCHED_Q_DEPTH);
     fc_submission_queue_init(&hsq, hsq_storage, SCHED_Q_DEPTH);
     fc_scheduler_init(&scheduler, &sq, &hsq);
 
@@ -934,7 +967,9 @@ static MunitResult test_scheduler_select_chain_multi(const MunitParameter params
     {
         cmds[i] = fc_command_alloc();
         munit_assert_not_null(cmds[i]);
-        cmds[i]->config.ch = 0U; cmds[i]->config.ce = 0U; cmds[i]->config.lun = 0U;
+        cmds[i]->config.ch    = 0U;
+        cmds[i]->config.ce    = 0U;
+        cmds[i]->config.lun   = 0U;
         cmds[i]->config.chain = (i < 2U) ? FC_CHAIN_MORE : FC_CHAIN_END;
         fc_submission_queue_push(&sq, cmds[i]->command_id);
     }
@@ -942,9 +977,14 @@ static MunitResult test_scheduler_select_chain_multi(const MunitParameter params
     munit_assert_int(fc_scheduler_select_chain(&scheduler, &chain), ==, FC_STATUS_OK);
     munit_assert_uint32(chain.count, ==, 3U);
     for (i = 0U; i < 3U; i++)
+    {
         munit_assert_uint32(chain.ids[i], ==, cmds[i]->command_id);
+    }
 
-    for (i = 0U; i < 3U; i++) fc_command_release(cmds[i]);
+    for (i = 0U; i < 3U; i++)
+    {
+        fc_command_release(cmds[i]);
+    }
 
     return MUNIT_OK;
 }
@@ -982,56 +1022,56 @@ static MunitResult test_configure_descriptors_null(const MunitParameter params[]
  **************************************************************************/
 
 MunitTest g_fc_command_tests[] = {
-    { "validate_null",                    test_command_validate_null,             NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "validate_op_range",                test_command_validate_op_range,         NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "validate_desc_needed",             test_command_validate_desc_needed,      NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "validate_set_get_no_desc",         test_command_validate_set_get_no_desc,  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_init_null",                 test_command_status_init_null,          NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_init_cw1",                  test_command_status_init_cw1,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_init_cw4",                  test_command_status_init_cw4,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_set_cw_valid",              test_command_status_set_cw_valid,       NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_set_cw_overflow",           test_command_status_set_cw_overflow,    NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_set_cw_null",               test_command_status_set_cw_null,        NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    /* fc_submit / fc_poll_completion NULL 测试（需要 fc_init） */
-    { "submit_null",                      test_submit_null,                      setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "poll_completion_null",             test_poll_completion_null,             setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "configure_descriptors_null",       test_configure_descriptors_null,       setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    {             "validate_null",            test_command_validate_null,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "validate_op_range",        test_command_validate_op_range,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      "validate_desc_needed",     test_command_validate_desc_needed,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {  "validate_set_get_no_desc", test_command_validate_set_get_no_desc,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {          "status_init_null",         test_command_status_init_null,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           "status_init_cw1",          test_command_status_init_cw1,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           "status_init_cw4",          test_command_status_init_cw4,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       "status_set_cw_valid",      test_command_status_set_cw_valid,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    "status_set_cw_overflow",   test_command_status_set_cw_overflow,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {        "status_set_cw_null",       test_command_status_set_cw_null,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+ /* fc_submit / fc_poll_completion NULL 测试（需要 fc_init） */
+    {               "submit_null",                      test_submit_null, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      "poll_completion_null",             test_poll_completion_null, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"configure_descriptors_null",       test_configure_descriptors_null, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                        NULL,                                  NULL,                  NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };
 
 MunitTest g_fc_queue_tests[] = {
-    { "push_pop",       test_queue_push_pop,       NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "wrap_around",    test_queue_wrap_around,    NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "overflow",       test_queue_overflow,       NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "peek",           test_queue_peek,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "peek_empty",     test_queue_peek_empty,     NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "pop_n",          test_queue_pop_n,          NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "empty_full",     test_queue_empty_full,     NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "init_null",      test_queue_init_null,      NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "push_null",      test_queue_push_null,      NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "pop_null",       test_queue_pop_null,       NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "peek_null",      test_queue_peek_null,      NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "pop_n_null",     test_queue_pop_n_null,     NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    /* completion queue */
-    { "cqueue_init",    test_cqueue_init,          NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "cqueue_init_null", test_cqueue_init_null,   NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "cqueue_push_pop", test_cqueue_push_pop,     NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "cqueue_overflow", test_cqueue_overflow,     NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "cqueue_null",    test_cqueue_null,          NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    {        "push_pop",    test_queue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     "wrap_around", test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {        "overflow",    test_queue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {            "peek",        test_queue_peek, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      "peek_empty",  test_queue_peek_empty, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           "pop_n",       test_queue_pop_n, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      "empty_full",  test_queue_empty_full, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       "init_null",   test_queue_init_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       "push_null",   test_queue_push_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {        "pop_null",    test_queue_pop_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       "peek_null",   test_queue_peek_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      "pop_n_null",  test_queue_pop_n_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+ /* completion queue */
+    {     "cqueue_init",       test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"cqueue_init_null",  test_cqueue_init_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { "cqueue_push_pop",   test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { "cqueue_overflow",   test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     "cqueue_null",       test_cqueue_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {              NULL,                   NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };
 
 MunitTest g_fc_scheduler_tests[] = {
-    { "init",              test_scheduler_init,              NULL,                  NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "init_null",         test_scheduler_init_null,         NULL,                  NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "set_clear_busy",    test_scheduler_set_clear_busy,    NULL,                  NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_empty",      test_scheduler_select_empty,      setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_hsq_first",  test_scheduler_select_hsq_first,  setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_sq_order",   test_scheduler_select_sq_order,   setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_busy_skip",  test_scheduler_select_busy_skip,  setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_null",       test_scheduler_select_null,       setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "starvation",        test_scheduler_starvation,        setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_chain_single", test_scheduler_select_chain_single, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_chain_multi",  test_scheduler_select_chain_multi,  setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    {               "init",                test_scheduler_init,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {          "init_null",           test_scheduler_init_null,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     "set_clear_busy",      test_scheduler_set_clear_busy,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       "select_empty",        test_scheduler_select_empty, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {   "select_hsq_first",    test_scheduler_select_hsq_first, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    "select_sq_order",     test_scheduler_select_sq_order, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {   "select_busy_skip",    test_scheduler_select_busy_skip, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {        "select_null",         test_scheduler_select_null, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "starvation",          test_scheduler_starvation, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"select_chain_single", test_scheduler_select_chain_single, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { "select_chain_multi",  test_scheduler_select_chain_multi, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                 NULL,                               NULL,                  NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

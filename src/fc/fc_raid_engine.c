@@ -1,4 +1,5 @@
 #include "fc_raid_engine.h"
+
 #include "fc.h"
 #include "nand/nand_config.h"
 
@@ -42,7 +43,7 @@ fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total)
     }
 
     memcpy(ctx->acc_buf, cw_buffer, FC_BUFFER_POOL_CW_SIZE);
-    ctx->active   = 1U;
+    ctx->active    = 1U;
     ctx->processed = 1U;
     ctx->total     = total;
     return FC_STATUS_OK;
@@ -50,8 +51,8 @@ fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total)
 
 fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer)
 {
-    uint16_t i;
-    uint32_t *acc32;
+    uint16_t        i;
+    uint32_t       *acc32;
     const uint32_t *buf32;
 
     if ((lun >= LUN_NUM) || (cw_buffer == NULL))
@@ -122,12 +123,14 @@ void fc_raid_restore(uint8_t lun)
 }
 
 void fc_raid_recover(uint8_t *recovered,
-                     uint8_t *buffers[], uint8_t count,
-                     uint8_t failed_idx, uint16_t length)
+                     uint8_t *buffers[],
+                     uint8_t  count,
+                     uint8_t  failed_idx,
+                     uint16_t length)
 {
-    uint8_t  i;
-    uint32_t *rec32 = (uint32_t *)(void *)recovered;
-    uint16_t word_len = length / sizeof(uint32_t);
+    uint8_t   i;
+    uint32_t *rec32    = (uint32_t *)(void *)recovered;
+    uint16_t  word_len = length / sizeof(uint32_t);
 
     if ((recovered == NULL) || (buffers == NULL) || (count == 0U) ||
         (failed_idx >= count) || (length == 0U))

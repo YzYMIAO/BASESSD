@@ -1,15 +1,15 @@
 #include "fc.h"
 
+#include "common/ssd_log.h"
+#include "fc_crc_engine.h"
+#include "fc_data_path.h"
 #include "fc_queue.h"
 #include "fc_registers.h"
 #include "fc_scheduler.h"
-#include "fc_data_path.h"
-#include "fc_crc_engine.h"
 #include "nand/nand_dispatch.h"
-#include "common/ssd_log.h"
 
 #if CONFIG_FC_RAID
-#include "fc_raid_engine.h"
+#    include "fc_raid_engine.h"
 #endif
 
 /*
@@ -80,15 +80,16 @@ typedef enum
  * 由 fc_poll_stripe_accumulate()（待实现）管理。 */
 
 /* 单组 stripe 的最大数据命令数 = PLANE_NUM - 1 */
-#define FC_STRIPE_DATA_MAX ((uint8_t)(PLANE_NUM - 1U))
+#    define FC_STRIPE_DATA_MAX ((uint8_t)(PLANE_NUM - 1U))
 
 /* 每个 LUN 的 stripe 积累状态（PLANE_NUM>=4 扩展预留） */
-typedef struct {
-    uint8_t         active;           /* 0=空闲, 1=积累中 */
-    uint8_t         ch, ce, lun;      /* 目标 LUN */
-    uint8_t         count;            /* 已积累的数据命令数 */
+typedef struct
+{
+    uint8_t         active;                       /* 0=空闲, 1=积累中 */
+    uint8_t         ch, ce, lun;                  /* 目标 LUN */
+    uint8_t         count;                        /* 已积累的数据命令数 */
     fc_command_id_t data_ids[FC_STRIPE_DATA_MAX]; /* 已积累的数据命令 ID */
-    fc_command_id_t parity_id;        /* 已分配的 parity 命令 ID */
+    fc_command_id_t parity_id;                    /* 已分配的 parity 命令 ID */
 } fc_stripe_accum_t;
 #endif /* CONFIG_FC_RAID */
 
@@ -118,9 +119,9 @@ typedef struct
 
     /* ── Stripe RAID 积累状态 ── */
 #if CONFIG_FC_RAID
-    fc_stripe_accum_t stripe_accum[LUN_NUM];                /* 每 LUN stripe 积累 */
+    fc_stripe_accum_t stripe_accum[LUN_NUM];                         /* 每 LUN stripe 积累 */
     fc_command_id_t   stripe_parity_for_data[FC_COMMAND_POOL_DEPTH]; /* 数据命令 ID → parity 命令 ID 映射 */
-#endif /* CONFIG_FC_RAID */
+#endif                                                               /* CONFIG_FC_RAID */
 } fc_t;
 
 /* fc_complete_from_nand() is defined before the internal completion implementation. */
@@ -498,13 +499,13 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
 
     if (command->config.multi_plane > 0U)
     {
-        uint8_t plane  = index / CW_NUM;
-        uint8_t cw_idx = index % CW_NUM;
-        uint32_t blk   = paa_to_block(command->paa);
-        uint32_t pg    = paa_to_page(command->paa);
-        descriptor->paa        = paa_make(pg, plane, blk, 0U, cw_idx);
-        descriptor->config     = command->config;
-        descriptor->config.cw  = cw_idx;
+        uint8_t  plane        = index / CW_NUM;
+        uint8_t  cw_idx       = index % CW_NUM;
+        uint32_t blk          = paa_to_block(command->paa);
+        uint32_t pg           = paa_to_page(command->paa);
+        descriptor->paa       = paa_make(pg, plane, blk, 0U, cw_idx);
+        descriptor->config    = command->config;
+        descriptor->config.cw = cw_idx;
     }
     else
     {
@@ -514,9 +515,9 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
             (void)fc_buffer_release_internal(controller, buffer_id);
             return FC_STATUS_INVALID_ARGUMENT;
         }
-        descriptor->paa        = (command->paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
-        descriptor->config     = command->config;
-        descriptor->config.cw  = cw;
+        descriptor->paa       = (command->paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
+        descriptor->config    = command->config;
+        descriptor->config.cw = cw;
     }
     descriptor->buffer_id  = buffer_id;
     descriptor->next_id    = FC_DESCRIPTOR_ID_INVALID;
@@ -543,8 +544,8 @@ static fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, f
     }
 
     uint8_t total_desc = (command->config.multi_plane > 0U)
-        ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
-        : (uint8_t)(command->config.cw + 1U);
+                             ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
+                             : (uint8_t)(command->config.cw + 1U);
 
     command_id = (fc_command_id_t)(command - controller->command_pool);
     for (index = 0U; index < total_desc; index++)
@@ -612,8 +613,8 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         fc_descriptor_id_t desc_id = (fc_descriptor_id_t)command->desc_id;
         uint8_t            cw;
         uint8_t            total_cw = (command->config.multi_plane > 0U)
-            ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
-            : (uint8_t)(command->config.cw + 1U);
+                                          ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
+                                          : (uint8_t)(command->config.cw + 1U);
 
         for (cw = 0U; cw < total_cw; cw++)
         {
@@ -652,12 +653,12 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         /* 从 descriptor 读取 ECC 解码后的 per-CW status/ecc_bits */
         fc_descriptor_id_t did;
         uint8_t            i;
-        uint8_t            status_slot[4]  = {0U, 0U, 0U, 0U};
+        uint8_t            status_slot[4] = {0U, 0U, 0U, 0U};
         uint8_t            ecc_slot[4]    = {0U, 0U, 0U, 0U};
-        uint8_t            found_unc = 0U;
-        uint8_t            total_cw  = (command->config.multi_plane > 0U)
-            ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
-            : (uint8_t)(command->config.cw + 1U);
+        uint8_t            found_unc      = 0U;
+        uint8_t            total_cw       = (command->config.multi_plane > 0U)
+                                                ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
+                                                : (uint8_t)(command->config.cw + 1U);
 
         did = (fc_descriptor_id_t)command->desc_id;
         for (i = 0U; i < total_cw; i++)
@@ -695,7 +696,7 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
                 break;
             }
         }
-        completion.status    = (uint8_t)(status_slot[0] | status_slot[1] | status_slot[2] | status_slot[3]);
+        completion.status   = (uint8_t)(status_slot[0] | status_slot[1] | status_slot[2] | status_slot[3]);
         completion.ecc_bit0 = ecc_slot[0];
         completion.ecc_bit1 = ecc_slot[1];
         completion.ecc_bit2 = ecc_slot[2];
@@ -709,9 +710,9 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         completion.ecc_bit2 = nand_completion->ecc_bit_count[2];
         completion.ecc_bit3 = nand_completion->ecc_bit_count[3];
         completion.status   = (uint8_t)(nand_completion->cw_status[0] |
-                                        nand_completion->cw_status[1] |
-                                        nand_completion->cw_status[2] |
-                                        nand_completion->cw_status[3]);
+                                      nand_completion->cw_status[1] |
+                                      nand_completion->cw_status[2] |
+                                      nand_completion->cw_status[3]);
     }
 
     if (fc_complete_internal(controller, &completion) != FC_STATUS_OK)
@@ -776,10 +777,10 @@ static void fc_stripe_release_parity(fc_t *controller, fc_command_id_t parity_id
     controller->command_descriptor_head[parity_id] = UINT16_MAX;
 
     /* 返回 command slot 到空闲池 */
-    controller->command_pool[parity_id]            = (fc_command_t){0};
-    controller->command_state[parity_id]           = FC_COMMAND_STATE_FREE;
-    controller->command_free_next[parity_id]       = controller->command_free_head;
-    controller->command_free_head                  = parity_id;
+    controller->command_pool[parity_id]      = (fc_command_t){0};
+    controller->command_state[parity_id]     = FC_COMMAND_STATE_FREE;
+    controller->command_free_next[parity_id] = controller->command_free_head;
+    controller->command_free_head            = parity_id;
 }
 
 /*
@@ -797,13 +798,13 @@ static void fc_stripe_release_parity(fc_t *controller, fc_command_id_t parity_id
  */
 static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc_command_id_t data_cmd_id)
 {
-    fc_command_t            *parity_cmd;
-    fc_command_id_t          parity_id;
-    nand_dispatch_request_t  mp_req;
-    uint8_t                  cw_count;
-    uint8_t                  cw;
-    fc_descriptor_id_t       desc_id;
-    const fc_command_t      *data_ptrs[FC_STRIPE_DATA_MAX];
+    fc_command_t           *parity_cmd;
+    fc_command_id_t         parity_id;
+    nand_dispatch_request_t mp_req;
+    uint8_t                 cw_count;
+    uint8_t                 cw;
+    fc_descriptor_id_t      desc_id;
+    const fc_command_t     *data_ptrs[FC_STRIPE_DATA_MAX];
 
     cw_count = (uint8_t)(data_cmd->config.cw + 1U);
 
@@ -817,17 +818,17 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
 
     /* ② 配置 parity command */
     parity_cmd->config           = data_cmd->config;
-    parity_cmd->config.raid      = FC_RAID_MODE_NORMAL;  /* parity 命令不需要 RAID */
-    parity_cmd->config.operation = OP_PROGRAM_PAGE_MULTI_PLANE;  /* 提交时走 Multi-Plane */
+    parity_cmd->config.raid      = FC_RAID_MODE_NORMAL;         /* parity 命令不需要 RAID */
+    parity_cmd->config.operation = OP_PROGRAM_PAGE_MULTI_PLANE; /* 提交时走 Multi-Plane */
     parity_cmd->high_priority    = data_cmd->high_priority;
     parity_cmd->module           = data_cmd->module;
     parity_cmd->faa              = data_cmd->faa;
 
     /* 调整 PAA：same page/block/lun/cw，plane = PLANE_NUM-1 */
     {
-        uint32_t page  = paa_to_page(data_cmd->paa);
-        uint32_t block = paa_to_block(data_cmd->paa);
-        uint32_t plun  = paa_to_lun(data_cmd->paa);
+        uint32_t page   = paa_to_page(data_cmd->paa);
+        uint32_t block  = paa_to_block(data_cmd->paa);
+        uint32_t plun   = paa_to_lun(data_cmd->paa);
         parity_cmd->paa = paa_make(page, (uint32_t)(PLANE_NUM - 1U), block, plun, 0U);
     }
 
@@ -835,16 +836,16 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     if (fc_command_configure_descriptors_internal(controller, parity_cmd) != FC_STATUS_OK)
     {
         /* release parity command slot (no desc/buffer allocated yet, but alloc_internal consumed slot) */
-        controller->command_pool[parity_id]            = (fc_command_t){0};
-        controller->command_state[parity_id]           = FC_COMMAND_STATE_FREE;
-        controller->command_free_next[parity_id]       = controller->command_free_head;
-        controller->command_free_head                  = parity_id;
+        controller->command_pool[parity_id]      = (fc_command_t){0};
+        controller->command_state[parity_id]     = FC_COMMAND_STATE_FREE;
+        controller->command_free_next[parity_id] = controller->command_free_head;
+        controller->command_free_head            = parity_id;
         goto stripe_error;
     }
 
     /* 写入 parity descriptors 的 faa（与数据命令对应 CW 一致） */
     {
-        fc_descriptor_id_t data_desc_id = (fc_descriptor_id_t)data_cmd->desc_id;
+        fc_descriptor_id_t data_desc_id   = (fc_descriptor_id_t)data_cmd->desc_id;
         fc_descriptor_id_t parity_desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
 
         for (cw = 0U; cw < cw_count; cw++)
@@ -869,22 +870,23 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     }
 
     /* ⑤ 构建 Multi-Plane dispatch request */
-    mp_req              = (nand_dispatch_request_t){0};
-    mp_req.command_id   = (uint16_t)data_cmd_id;  /* 完成路由回数据命令 */
-    mp_req.operation    = OP_PROGRAM_PAGE_MULTI_PLANE;
-    mp_req.ch           = (uint8_t)data_cmd->config.ch;
-    mp_req.ce           = (uint8_t)data_cmd->config.ce;
-    mp_req.lun          = (uint8_t)data_cmd->config.lun;
-    mp_req.plane_count  = PLANE_NUM;
-    mp_req.cw_count     = cw_count;
-    mp_req.page_type    = (uint8_t)data_cmd->config.page_type;
+    mp_req             = (nand_dispatch_request_t){0};
+    mp_req.command_id  = (uint16_t)data_cmd_id; /* 完成路由回数据命令 */
+    mp_req.operation   = OP_PROGRAM_PAGE_MULTI_PLANE;
+    mp_req.ch          = (uint8_t)data_cmd->config.ch;
+    mp_req.ce          = (uint8_t)data_cmd->config.ce;
+    mp_req.lun         = (uint8_t)data_cmd->config.lun;
+    mp_req.plane_count = PLANE_NUM;
+    mp_req.cw_count    = cw_count;
+    mp_req.page_type   = (uint8_t)data_cmd->config.page_type;
 
     /* 填充 cws[0] = 数据命令 CW PAA + buffer */
     desc_id = (fc_descriptor_id_t)data_cmd->desc_id;
     for (cw = 0U; cw < cw_count; cw++)
     {
         const fc_descriptor_t *desc = (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
-            ? &controller->descriptor_pool[desc_id] : NULL;
+                                          ? &controller->descriptor_pool[desc_id]
+                                          : NULL;
 
         if (desc == NULL)
         {
@@ -893,8 +895,9 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
         }
         mp_req.cws[0U][cw].paa    = desc->paa;
         mp_req.cws[0U][cw].buffer = (desc->buffer_id != FC_BUFFER_ID_INVALID)
-                                        ? fc_buffer_get_base(desc->buffer_id) : NULL;
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+                                        ? fc_buffer_get_base(desc->buffer_id)
+                                        : NULL;
+        desc_id                   = (fc_descriptor_id_t)desc->next_id;
     }
 
     /* 填充 cws[1] = parity 命令 CW PAA + buffer */
@@ -902,7 +905,8 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     for (cw = 0U; cw < cw_count; cw++)
     {
         const fc_descriptor_t *desc = (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
-            ? &controller->descriptor_pool[desc_id] : NULL;
+                                          ? &controller->descriptor_pool[desc_id]
+                                          : NULL;
 
         if (desc == NULL)
         {
@@ -911,8 +915,9 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
         }
         mp_req.cws[1U][cw].paa    = desc->paa;
         mp_req.cws[1U][cw].buffer = (desc->buffer_id != FC_BUFFER_ID_INVALID)
-                                        ? fc_buffer_get_base(desc->buffer_id) : NULL;
-        desc_id = (fc_descriptor_id_t)desc->next_id;
+                                        ? fc_buffer_get_base(desc->buffer_id)
+                                        : NULL;
+        desc_id                   = (fc_descriptor_id_t)desc->next_id;
     }
 
     /* 注册 parity 命令到数据命令的清理映射表 */
@@ -932,9 +937,9 @@ stripe_error:
     /* 数据命令注 error completion，让 FTL 感知失败 */
     {
         nand_dispatch_completion_t fail_comp = (nand_dispatch_completion_t){0};
-        fail_comp.command_id       = (uint16_t)data_cmd_id;
-        fail_comp.execution_status = NAND_RESULT_NOT_READY;
-        fail_comp.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
+        fail_comp.command_id                 = (uint16_t)data_cmd_id;
+        fail_comp.execution_status           = NAND_RESULT_NOT_READY;
+        fail_comp.cw_status[0]               = FC_CW_STATUS_NAND_FAIL;
         (void)fc_complete_from_nand(controller, &fail_comp);
     }
     return FC_STATUS_IO_ERROR;
@@ -952,7 +957,6 @@ static fc_status_t fc_poll_internal(fc_t *controller)
 
     if (nand_result != NAND_RESULT_NOT_READY)
     {
-
         if (fc_complete_from_nand(controller, &nand_completion) != FC_STATUS_OK)
         {
             return FC_STATUS_IO_ERROR;
@@ -966,7 +970,7 @@ static fc_status_t fc_poll_internal(fc_t *controller)
             if ((completed_id < FC_COMMAND_POOL_DEPTH) &&
                 (controller->stripe_parity_for_data[completed_id] != FC_COMMAND_ID_INVALID))
             {
-                fc_command_id_t parity_id = controller->stripe_parity_for_data[completed_id];
+                fc_command_id_t parity_id                        = controller->stripe_parity_for_data[completed_id];
                 controller->stripe_parity_for_data[completed_id] = FC_COMMAND_ID_INVALID;
                 fc_stripe_release_parity(controller, parity_id);
             }
@@ -1015,20 +1019,21 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                     fc_descriptor_id_t mid = (fc_descriptor_id_t)command->desc_id;
                     uint8_t            mw;
                     uint8_t            meta_total = (command->config.multi_plane > 0U)
-                        ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
-                        : (uint8_t)(command->config.cw + 1U);
+                                                        ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
+                                                        : (uint8_t)(command->config.cw + 1U);
                     for (mw = 0U; mw < meta_total; mw++)
                     {
                         fc_descriptor_t *md = (mid < FC_DESCRIPTOR_POOL_DEPTH)
-                                                ? &controller->descriptor_pool[mid] : NULL;
+                                                  ? &controller->descriptor_pool[mid]
+                                                  : NULL;
                         if ((md != NULL) && (md->buffer_id != FC_BUFFER_ID_INVALID))
                         {
-                            uint8_t  *cw_base = fc_buffer_id_to_real_buffer_internal(controller, md->buffer_id);
+                            uint8_t   *cw_base  = fc_buffer_id_to_real_buffer_internal(controller, md->buffer_id);
                             nand_paa_t meta_paa = md->paa;
-                            cw_base[0] = (uint8_t)(meta_paa >> 0U);
-                            cw_base[1] = (uint8_t)(meta_paa >> 8U);
-                            cw_base[2] = (uint8_t)(meta_paa >> 16U);
-                            cw_base[3] = (uint8_t)(meta_paa >> 24U);
+                            cw_base[0]          = (uint8_t)(meta_paa >> 0U);
+                            cw_base[1]          = (uint8_t)(meta_paa >> 8U);
+                            cw_base[2]          = (uint8_t)(meta_paa >> 16U);
+                            cw_base[3]          = (uint8_t)(meta_paa >> 24U);
                         }
                         mid = (mid < FC_DESCRIPTOR_POOL_DEPTH) ? (fc_descriptor_id_t)controller->descriptor_pool[mid].next_id : FC_DESCRIPTOR_ID_INVALID;
                     }
@@ -1043,7 +1048,7 @@ static fc_status_t fc_poll_internal(fc_t *controller)
             {
                 result = fc_stripe_submit(controller, command, command_id);
                 fc_register_queue_state(controller);
-                return result;  /* 成功/失败均已在 fc_stripe_submit 中处理 */
+                return result; /* 成功/失败均已在 fc_stripe_submit 中处理 */
             }
 #endif /* CONFIG_FC_RAID */
 
@@ -1068,7 +1073,9 @@ static fc_status_t fc_poll_internal(fc_t *controller)
             else
             {
                 request.cw_count = ((command->config.operation == OP_ERASE_BLOCK) ||
-                                    (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)) ? 1U : 0U;
+                                    (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE))
+                                       ? 1U
+                                       : 0U;
             }
 
             if (command->config.operation == OP_ERASE_BLOCK)
@@ -1078,14 +1085,12 @@ static fc_status_t fc_poll_internal(fc_t *controller)
             }
             else if (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)
             {
-                request.plane_count          = PLANE_NUM;
-                request.cw_count             = 1U;
-                request.cws[0U][0U].paa      = paa_make(paa_to_page(command->paa), 0U,
-                                                         paa_to_block(command->paa), 0U, 0U);
-                request.cws[1U][0U].paa      = paa_make(paa_to_page(command->paa), 1U,
-                                                         paa_to_block(command->paa), 0U, 0U);
-                request.cws[0U][0U].buffer   = NULL;
-                request.cws[1U][0U].buffer   = NULL;
+                request.plane_count        = PLANE_NUM;
+                request.cw_count           = 1U;
+                request.cws[0U][0U].paa    = paa_make(paa_to_page(command->paa), 0U, paa_to_block(command->paa), 0U, 0U);
+                request.cws[1U][0U].paa    = paa_make(paa_to_page(command->paa), 1U, paa_to_block(command->paa), 0U, 0U);
+                request.cws[0U][0U].buffer = NULL;
+                request.cws[1U][0U].buffer = NULL;
             }
             else if ((command->config.operation == OP_SET_FEATURES) ||
                      (command->config.operation == OP_GET_FEATURES))
@@ -1114,9 +1119,9 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                             fc_register_queue_state(controller);
                             return FC_STATUS_IO_ERROR;
                         }
-                        uint8_t plane = (uint8_t)paa_to_plane(descriptor->paa);
-                        uint8_t cw_s  = (uint8_t)paa_to_cw(descriptor->paa);
-                        request.cws[plane][cw_s].paa    = descriptor->paa;
+                        uint8_t plane                = (uint8_t)paa_to_plane(descriptor->paa);
+                        uint8_t cw_s                 = (uint8_t)paa_to_cw(descriptor->paa);
+                        request.cws[plane][cw_s].paa = descriptor->paa;
                         if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
                         {
                             /* Page read/write 需要 CW 基址（ECC 在完整 528B CW 上处理）；
@@ -1124,7 +1129,7 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                              * fc_buffer_id_to_real_buffer 直接读取。 */
                             request.cws[plane][cw_s].buffer =
                                 (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
-                                (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                                        (fc_is_page_write((uint8_t)command->config.operation) != 0U)
                                     ? fc_buffer_get_base(descriptor->buffer_id)
                                     : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
                         }
@@ -1154,12 +1159,12 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                             fc_register_queue_state(controller);
                             return FC_STATUS_IO_ERROR;
                         }
-                        request.cws[0][cw].paa    = descriptor->paa;
+                        request.cws[0][cw].paa = descriptor->paa;
                         if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
                         {
                             request.cws[0][cw].buffer =
                                 (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
-                                (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                                        (fc_is_page_write((uint8_t)command->config.operation) != 0U)
                                     ? fc_buffer_get_base(descriptor->buffer_id)
                                     : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
                         }
@@ -1167,7 +1172,7 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                         {
                             request.cws[0][cw].buffer = NULL;
                         }
-                        desc_id                   = (fc_descriptor_id_t)descriptor->next_id;
+                        desc_id = (fc_descriptor_id_t)descriptor->next_id;
                     }
                 }
             }
@@ -1175,8 +1180,10 @@ static fc_status_t fc_poll_internal(fc_t *controller)
             if (nand_dispatch_submit(&request) != NAND_RESULT_OK)
             {
                 SSD_LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_count=%u plane_count=%u\r\n",
-                         (unsigned)command->config.operation, (unsigned)command_id,
-                         (unsigned)request.cw_count, (unsigned)request.plane_count);
+                         (unsigned)command->config.operation,
+                         (unsigned)command_id,
+                         (unsigned)request.cw_count,
+                         (unsigned)request.plane_count);
                 nand_completion                  = (nand_dispatch_completion_t){0};
                 nand_completion.command_id       = command_id;
                 nand_completion.execution_status = NAND_RESULT_NOT_READY;
@@ -1233,7 +1240,9 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                 else
                 {
                     reqs[i].cw_count = ((command->config.operation == OP_ERASE_BLOCK) ||
-                                        (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)) ? 1U : 0U;
+                                        (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE))
+                                           ? 1U
+                                           : 0U;
                 }
 
                 if (command->config.operation == OP_ERASE_BLOCK)
@@ -1243,14 +1252,12 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                 }
                 else if (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)
                 {
-                    reqs[i].plane_count          = PLANE_NUM;
-                    reqs[i].cw_count             = 1U;
-                    reqs[i].cws[0U][0U].paa      = paa_make(paa_to_page(command->paa), 0U,
-                                                             paa_to_block(command->paa), 0U, 0U);
-                    reqs[i].cws[1U][0U].paa      = paa_make(paa_to_page(command->paa), 1U,
-                                                             paa_to_block(command->paa), 0U, 0U);
-                    reqs[i].cws[0U][0U].buffer   = NULL;
-                    reqs[i].cws[1U][0U].buffer   = NULL;
+                    reqs[i].plane_count        = PLANE_NUM;
+                    reqs[i].cw_count           = 1U;
+                    reqs[i].cws[0U][0U].paa    = paa_make(paa_to_page(command->paa), 0U, paa_to_block(command->paa), 0U, 0U);
+                    reqs[i].cws[1U][0U].paa    = paa_make(paa_to_page(command->paa), 1U, paa_to_block(command->paa), 0U, 0U);
+                    reqs[i].cws[0U][0U].buffer = NULL;
+                    reqs[i].cws[1U][0U].buffer = NULL;
                 }
                 else if ((command->config.operation == OP_SET_FEATURES) ||
                          (command->config.operation == OP_GET_FEATURES))
@@ -1278,14 +1285,14 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                                 fc_register_queue_state(controller);
                                 return FC_STATUS_IO_ERROR;
                             }
-                            uint8_t plane = (uint8_t)paa_to_plane(descriptor->paa);
-                            uint8_t cw_s  = (uint8_t)paa_to_cw(descriptor->paa);
-                            reqs[i].cws[plane][cw_s].paa    = descriptor->paa;
+                            uint8_t plane                = (uint8_t)paa_to_plane(descriptor->paa);
+                            uint8_t cw_s                 = (uint8_t)paa_to_cw(descriptor->paa);
+                            reqs[i].cws[plane][cw_s].paa = descriptor->paa;
                             if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
                             {
                                 reqs[i].cws[plane][cw_s].buffer =
                                     (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
-                                    (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                                            (fc_is_page_write((uint8_t)command->config.operation) != 0U)
                                         ? fc_buffer_get_base(descriptor->buffer_id)
                                         : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
                             }
@@ -1314,12 +1321,12 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                                 fc_register_queue_state(controller);
                                 return FC_STATUS_IO_ERROR;
                             }
-                            reqs[i].cws[0][cw].paa    = descriptor->paa;
+                            reqs[i].cws[0][cw].paa = descriptor->paa;
                             if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
                             {
                                 reqs[i].cws[0][cw].buffer =
                                     (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
-                                    (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                                            (fc_is_page_write((uint8_t)command->config.operation) != 0U)
                                         ? fc_buffer_get_base(descriptor->buffer_id)
                                         : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
                             }
@@ -1327,7 +1334,7 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                             {
                                 reqs[i].cws[0][cw].buffer = NULL;
                             }
-                            desc_id                   = (fc_descriptor_id_t)descriptor->next_id;
+                            desc_id = (fc_descriptor_id_t)descriptor->next_id;
                         }
                     }
                 }
@@ -1488,18 +1495,24 @@ uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id)
 
 uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index)
 {
-    if (command == NULL) return NULL;
+    if (command == NULL)
+    {
+        return NULL;
+    }
     fc_descriptor_id_t did = (fc_descriptor_id_t)command->desc_id;
-    uint8_t idx = 0U;
+    uint8_t            idx = 0U;
     while (did != FC_DESCRIPTOR_ID_INVALID)
     {
         if (idx == cw_index)
         {
             fc_descriptor_t *d = (did < FC_DESCRIPTOR_POOL_DEPTH) ? &g_fc_controller.descriptor_pool[did] : NULL;
-            if (d == NULL) return NULL;
+            if (d == NULL)
+            {
+                return NULL;
+            }
             return (d->buffer_id != FC_BUFFER_ID_INVALID)
-                   ? fc_buffer_id_to_real_buffer_internal(&g_fc_controller, d->buffer_id)
-                   : NULL;
+                       ? fc_buffer_id_to_real_buffer_internal(&g_fc_controller, d->buffer_id)
+                       : NULL;
         }
         did = (did < FC_DESCRIPTOR_POOL_DEPTH) ? (fc_descriptor_id_t)g_fc_controller.descriptor_pool[did].next_id : FC_DESCRIPTOR_ID_INVALID;
         idx++;

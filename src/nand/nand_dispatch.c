@@ -22,9 +22,9 @@ typedef struct
 typedef struct
 {
     nand_dispatch_queue_entry_t entries[NAND_CHANNEL_QUEUE_DEPTH];
-    uint16_t head;
-    uint16_t tail;
-    uint16_t count;
+    uint16_t                    head;
+    uint16_t                    tail;
+    uint16_t                    count;
 } nand_channel_queue_t;
 
 static nand_channel_queue_t g_nand_channel_queues[CH_NUM];
@@ -35,7 +35,7 @@ static uint8_t              g_nand_device_ready;
  * 单命令：count=1，tasks[0] 预加载。
  * 链式命令：count=N，tasks[0..N-1] 预加载，poll 从 cursor=0 推进到 N-1。 */
 static nand_dispatch_lun_chain_t g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
-uint8_t                   g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
+uint8_t                          g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
 
 /* ======================================================================
  * 辅助函数
@@ -150,7 +150,7 @@ nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request)
         .ce         = request->ce,
         .lun        = request->lun,
     };
-    queue->tail  = (uint16_t)((queue->tail + 1U) % NAND_CHANNEL_QUEUE_DEPTH);
+    queue->tail = (uint16_t)((queue->tail + 1U) % NAND_CHANNEL_QUEUE_DEPTH);
     queue->count++;
     return NAND_RESULT_OK;
 }
@@ -202,7 +202,7 @@ nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests
             .ce         = requests[i].ce,
             .lun        = requests[i].lun,
         };
-        queue->tail  = (uint16_t)((queue->tail + 1U) % NAND_CHANNEL_QUEUE_DEPTH);
+        queue->tail = (uint16_t)((queue->tail + 1U) % NAND_CHANNEL_QUEUE_DEPTH);
         queue->count++;
     }
 
@@ -269,7 +269,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                             chain->count = 0U;
                             return NAND_RESULT_INVALID_ARGUMENT;
                         }
-                        result = nand_fc_start(&task->transaction,
+                        result        = nand_fc_start(&task->transaction,
                                                task->operation,
                                                &task->request);
                         task->started = 1U;
@@ -349,7 +349,6 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                     /* Multi-Plane WITH_DATA_OUT: 把 page_buffer 拆回各 plane 各 CW buffer */
                     if (task->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
                     {
-
                         uint8_t mp_plane, mp_cw;
                         for (mp_plane = 0U; mp_plane < task->plane_count; mp_plane++)
                         {

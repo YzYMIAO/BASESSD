@@ -8,11 +8,11 @@
 #    include "sys.h"
 
 /* 纳秒/微秒常量 */
-#define MUNIT_NS_PER_US (1000UL)
-#define MUNIT_US_PER_MS (1000UL)
+#    define MUNIT_NS_PER_US (1000UL)
+#    define MUNIT_US_PER_MS (1000UL)
 
 /* DWT CYCCNT 读取（直接访问寄存器，不依赖 delay 模块） */
-#define MUNIT_DWT_CYCCNT (*((volatile uint32_t *)0xE0001004UL))
+#    define MUNIT_DWT_CYCCNT (*((volatile uint32_t *)0xE0001004UL))
 
 /*
  * munit_print_time — 打印纳秒时间值，自适应选择单位
@@ -21,18 +21,15 @@ static void munit_print_time(FILE *fp, uint64_t ns)
 {
     if (ns >= 1000000000ULL)
     {
-        fprintf(fp, "%lu.%02lu s",  (unsigned long)(ns / 1000000000ULL),
-                                    (unsigned long)((ns % 1000000000ULL) / 10000000ULL));
+        fprintf(fp, "%lu.%02lu s", (unsigned long)(ns / 1000000000ULL), (unsigned long)((ns % 1000000000ULL) / 10000000ULL));
     }
     else if (ns >= 1000000ULL)
     {
-        fprintf(fp, "%lu.%02lu ms", (unsigned long)(ns / 1000000ULL),
-                                    (unsigned long)((ns % 1000000ULL) / 10000ULL));
+        fprintf(fp, "%lu.%02lu ms", (unsigned long)(ns / 1000000ULL), (unsigned long)((ns % 1000000ULL) / 10000ULL));
     }
     else if (ns >= 1000ULL)
     {
-        fprintf(fp, "%lu.%02lu us", (unsigned long)(ns / 1000ULL),
-                                    (unsigned long)((ns % 1000ULL) / 10ULL));
+        fprintf(fp, "%lu.%02lu us", (unsigned long)(ns / 1000ULL), (unsigned long)((ns % 1000ULL) / 10ULL));
     }
     else
     {
@@ -43,22 +40,26 @@ static void munit_print_time(FILE *fp, uint64_t ns)
 /* 首次调用时使能 DWT CYCCNT（如果尚未使能） — 被 MUNIT_TIMING_INIT() 宏替代，保留仅供参考。 */
 static void __attribute__((unused)) munit_timing_init(void)
 {
-    volatile uint32_t *dwt_ctrl  = (volatile uint32_t *)0xE0001000UL;
-    volatile uint32_t *demcr     = (volatile uint32_t *)0xE000EDFCUL;
+    volatile uint32_t *dwt_ctrl   = (volatile uint32_t *)0xE0001000UL;
+    volatile uint32_t *demcr      = (volatile uint32_t *)0xE000EDFCUL;
     volatile uint32_t *dwt_cyccnt = (volatile uint32_t *)0xE0001004UL;
 
     if ((*dwt_ctrl & 0x00000001U) == 0U)
     {
-        *demcr     |= 0x01000000U;
+        *demcr |= 0x01000000U;
         *dwt_cyccnt = 0U;
-        *dwt_ctrl  |= 0x00000001U;
+        *dwt_ctrl |= 0x00000001U;
     }
 }
 
 /* 检查 DWT CYCCNT 是否已使能（在 main 初始化中由 sys/delay 完成） */
-#define MUNIT_TIMING_INIT()   do { } while (0)
+#    define MUNIT_TIMING_INIT() \
+        do                      \
+        {                       \
+        } while (0)
 
-typedef struct {
+typedef struct
+{
     uint32_t start_cycles;
 } munit_timing_ctx_t;
 
@@ -69,8 +70,8 @@ static void munit_timing_start(munit_timing_ctx_t *ctx)
 
 static uint64_t munit_timing_stop(const munit_timing_ctx_t *ctx)
 {
-    uint32_t now       = MUNIT_DWT_CYCCNT;
-    uint32_t elapsed   = now - ctx->start_cycles;
+    uint32_t now     = MUNIT_DWT_CYCCNT;
+    uint32_t elapsed = now - ctx->start_cycles;
 
     /* cycles → ns = cycles * 1e9 / 400MHz（STM32H743 @400MHz） */
     uint64_t ns = (uint64_t)elapsed * 1000000000ULL;
@@ -164,13 +165,7 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...)
         fc_resource_stats_t stats;
         if (fc_get_resource_stats(&stats) == FC_STATUS_OK)
         {
-            fprintf(stderr, "[RES] cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
-                    (unsigned)stats.command_used,   (unsigned)FC_COMMAND_POOL_DEPTH,
-                    (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
-                    (unsigned)stats.buffer_used,     (unsigned)FC_BUFFER_POOL_DEPTH,
-                    (unsigned)stats.sq_used,
-                    (unsigned)stats.hsq_used,
-                    (unsigned)stats.cq_used);
+            fprintf(stderr, "[RES] cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n", (unsigned)stats.command_used, (unsigned)FC_COMMAND_POOL_DEPTH, (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH, (unsigned)stats.buffer_used, (unsigned)FC_BUFFER_POOL_DEPTH, (unsigned)stats.sq_used, (unsigned)stats.hsq_used, (unsigned)stats.cq_used);
         }
     }
 
@@ -918,9 +913,13 @@ static void munit_test_runner_run_test_with_params(MunitTestRunner *runner, cons
 #if defined(MUNIT_ENABLE_TIMING)
         fputs(" ] [ ", MUNIT_OUTPUT_FILE);
         if (report.successful > 1)
+        {
             munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock / report.successful);
+        }
         else
+        {
             munit_print_time(MUNIT_OUTPUT_FILE, report.wall_clock);
+        }
 #endif
         fputs(" ]\n", MUNIT_OUTPUT_FILE);
         runner->report.successful++;
@@ -1619,13 +1618,15 @@ int munit_suite_main_custom(const MunitSuite   *suite,
         unsigned long pct_success = 0UL;
         unsigned long pct_skipped = 0UL;
         if (test_run > 0)
+        {
             pct_success = ((unsigned long)runner.report.successful * 100UL) / (unsigned long)test_run;
+        }
         if (tests_total > 0)
+        {
             pct_skipped = ((unsigned long)runner.report.skiped * 100UL) / (unsigned long)tests_total;
+        }
 
-        fprintf(MUNIT_OUTPUT_FILE, "%d of %d (%lu%%) tests successful, %d (%lu%%) test skipped.",
-                runner.report.successful, test_run, pct_success,
-                runner.report.skiped, pct_skipped);
+        fprintf(MUNIT_OUTPUT_FILE, "%d of %d (%lu%%) tests successful, %d (%lu%%) test skipped.", runner.report.successful, test_run, pct_success, runner.report.skiped, pct_skipped);
 #if defined(MUNIT_ENABLE_TIMING)
         fprintf(MUNIT_OUTPUT_FILE, " Total wall-clock: ");
         munit_print_time(MUNIT_OUTPUT_FILE, runner.report.wall_clock);

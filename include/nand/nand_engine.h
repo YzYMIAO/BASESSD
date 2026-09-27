@@ -5,11 +5,11 @@
 
 typedef enum
 {
-    NAND_RESULT_OK                = 0x00U,
-    NAND_RESULT_INVALID_ARGUMENT  = 0xE1U,
-    NAND_RESULT_TIMEOUT           = 0xE2U,
-    NAND_RESULT_NOT_READY         = 0xE3U,
-    NAND_RESULT_OPERATION_FAILED  = 0xE4U,
+    NAND_RESULT_OK               = 0x00U,
+    NAND_RESULT_INVALID_ARGUMENT = 0xE1U,
+    NAND_RESULT_TIMEOUT          = 0xE2U,
+    NAND_RESULT_NOT_READY        = 0xE3U,
+    NAND_RESULT_OPERATION_FAILED = 0xE4U,
 } nand_result_t;
 
 typedef enum
@@ -26,7 +26,7 @@ typedef enum
     NAND_UOP_DATA_OUT_STATUS,
     NAND_UOP_JUMP_IF_NOT_READY,
     NAND_UOP_CHECK_FAIL,
-    NAND_UOP_DELAY_US,   /* 固定微秒延时，operand=延时微秒数 */
+    NAND_UOP_DELAY_US, /* 固定微秒延时，operand=延时微秒数 */
     NAND_UOP_END,
     NAND_UOP_COUNT,
 } nand_uop_type_t;

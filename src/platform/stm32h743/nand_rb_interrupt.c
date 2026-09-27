@@ -1,9 +1,8 @@
 #include "nand_rb_interrupt.h"
 
-#include "stm32h7xx_hal.h"
-#include "stm32h743xx.h"
-
 #include "common/ssd_log.h"
+#include "stm32h743xx.h"
+#include "stm32h7xx_hal.h"
 
 #include <stddef.h>
 
@@ -27,11 +26,12 @@
  * 当前实现使用 DWT 计数器做超时检测。
  */
 
-static volatile struct {
-    uint8_t  armed;           /* 已 arm，等待触发或超时 */
-    uint8_t  triggered;       /* EXTI6 上升沿已触发 */
-    uint32_t arm_cycles;      /* arm 时的 DWT 计数值 */
-    uint32_t timeout_us;      /* 超时微秒数 */
+static volatile struct
+{
+    uint8_t  armed;      /* 已 arm，等待触发或超时 */
+    uint8_t  triggered;  /* EXTI6 上升沿已触发 */
+    uint32_t arm_cycles; /* arm 时的 DWT 计数值 */
+    uint32_t timeout_us; /* 超时微秒数 */
 } g_rb_int;
 
 /* DWT 时钟周期计数（在 delay.h 中已声明） */
@@ -39,8 +39,8 @@ extern uint32_t g_dwt_cyccnt_per_us;
 
 void nand_rb_interrupt_init(void)
 {
-    g_rb_int.armed = 0U;
-    g_rb_int.triggered = 0U;
+    g_rb_int.armed      = 0U;
+    g_rb_int.triggered  = 0U;
     g_rb_int.arm_cycles = 0U;
     g_rb_int.timeout_us = 0U;
 
@@ -51,8 +51,7 @@ void nand_rb_interrupt_init(void)
     __HAL_RCC_SYSCFG_CLK_ENABLE();
 
     /* 将 EXTI6 连接到 PD6 (SYSCFG_EXTICR2_EXTI6_PD) */
-    SYSCFG->EXTICR[1] = (SYSCFG->EXTICR[1] & ~SYSCFG_EXTICR2_EXTI6_Msk)
-                        | SYSCFG_EXTICR2_EXTI6_PD;
+    SYSCFG->EXTICR[1] = (SYSCFG->EXTICR[1] & ~SYSCFG_EXTICR2_EXTI6_Msk) | SYSCFG_EXTICR2_EXTI6_PD;
 
     /* 配置 EXTI6 上升沿触发 */
     EXTI->RTSR1 |= EXTI_RTSR1_TR6;
@@ -75,7 +74,7 @@ void nand_rb_interrupt_arm(uint32_t timeout_us)
     /* 记录 arm 时的 DWT 计数值（使用 delay_dwt_cycles_now 类似方法） */
     if (g_dwt_cyccnt_per_us != 0U)
     {
-        g_rb_int.arm_cycles = *((volatile uint32_t *)0xE0001004UL);  /* DWT_CYCCNT */
+        g_rb_int.arm_cycles = *((volatile uint32_t *)0xE0001004UL); /* DWT_CYCCNT */
     }
 
     /* 清除可能残留的 pending 标志 */
@@ -102,8 +101,10 @@ void nand_rb_interrupt_arm(uint32_t timeout_us)
     if (g_dwt_cyccnt_per_us != 0U)
     {
         uint32_t start       = *((volatile uint32_t *)0xE0001004UL);
-        uint32_t delay_cycle = (uint32_t)g_dwt_cyccnt_per_us * 1U;  /* 1 us */
-        while ((*((volatile uint32_t *)0xE0001004UL) - start) < delay_cycle) {}
+        uint32_t delay_cycle = (uint32_t)g_dwt_cyccnt_per_us * 1U; /* 1 us */
+        while ((*((volatile uint32_t *)0xE0001004UL) - start) < delay_cycle)
+        {
+        }
     }
 
     /* 1us 等待后再读引脚 */
@@ -112,7 +113,9 @@ void nand_rb_interrupt_arm(uint32_t timeout_us)
     {
         uint32_t start       = *((volatile uint32_t *)0xE0001004UL);
         uint32_t delay_cycle = (uint32_t)g_dwt_cyccnt_per_us * 1U;
-        while ((*((volatile uint32_t *)0xE0001004UL) - start) < delay_cycle) {}
+        while ((*((volatile uint32_t *)0xE0001004UL) - start) < delay_cycle)
+        {
+        }
     }
     uint8_t pin_1us = HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_6);
     SSD_LOGD("rb_arm tWB done pin_before=%u pin_after=%u\r\n", (unsigned)pin_after, (unsigned)pin_1us);

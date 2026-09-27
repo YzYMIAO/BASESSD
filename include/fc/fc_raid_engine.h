@@ -25,7 +25,7 @@
  * ============================================================================
  */
 
-#include "fc.h"  /* 确保 CONFIG_FC_RAID 定义可见 */
+#include "fc.h" /* 确保 CONFIG_FC_RAID 定义可见 */
 
 #if CONFIG_FC_RAID
 
@@ -37,12 +37,13 @@
  */
 
 /* 每个 LUN 的 RAID 上下文 */
-typedef struct {
-    uint8_t  active;          /* 0=空闲, 1=RAID 序列进行中 */
-    uint8_t  acc_buf[528];    /* XOR 累加器缓冲（一个 CW 大小） */
-    uint8_t  processed;        /* 已累加的 CW 数（含 START） */
-    uint8_t  total;            /* 期望累加的总 CW 数 */
-    uint32_t start_paa;        /* 起始 PAA（调试用） */
+typedef struct
+{
+    uint8_t  active;       /* 0=空闲, 1=RAID 序列进行中 */
+    uint8_t  acc_buf[528]; /* XOR 累加器缓冲（一个 CW 大小） */
+    uint8_t  processed;    /* 已累加的 CW 数（含 START） */
+    uint8_t  total;        /* 期望累加的总 CW 数 */
+    uint32_t start_paa;    /* 起始 PAA（调试用） */
 } fc_raid_context_t;
 
 /*
@@ -110,8 +111,10 @@ void fc_raid_restore(uint8_t lun);
  * @param length      每个 buffer 的长度
  */
 void fc_raid_recover(uint8_t *recovered,
-                     uint8_t *buffers[], uint8_t count,
-                     uint8_t failed_idx, uint16_t length);
+                     uint8_t *buffers[],
+                     uint8_t  count,
+                     uint8_t  failed_idx,
+                     uint16_t length);
 
 #endif /* CONFIG_FC_RAID */
 #endif /* FC_RAID_ENGINE_H */

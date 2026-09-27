@@ -24,31 +24,31 @@ extern MunitTest g_fc_lifecycle_tests[];
 /* Level 3: 全链路测试 */
 
 static MunitSuite g_fc_nand_suite =
-{
-    (char *)"/fc-nand/",
-    NULL,
-    (MunitSuite[]){
-        /* Level 1 */
-        { (char *)"command",   g_fc_command_tests,   NULL, 1, MUNIT_SUITE_OPTION_NONE },
-        { (char *)"queue",     g_fc_queue_tests,     NULL, 1, MUNIT_SUITE_OPTION_NONE },
-        { (char *)"scheduler", g_fc_scheduler_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+    {
+        (char *)"/fc-nand/",
+        NULL,
+        (MunitSuite[]){
+                       /* Level 1 */
+                       {(char *)"command", g_fc_command_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                       {(char *)"queue", g_fc_queue_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                       {(char *)"scheduler", g_fc_scheduler_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
-        /* Level 2 */
-        { (char *)"data_path", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+                       /* Level 2 */
+                       {(char *)"data_path", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
-        /* Level 3 */
-        { (char *)"lifecycle", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+                       /* Level 3 */
+                       {(char *)"lifecycle", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
-        /* Level 2 */
-        /* TODO: data_path 子套件 */
+                       /* Level 2 */
+                       /* TODO: data_path 子套件 */
 
-        /* Level 3 */
-        /* TODO: lifecycle 子套件 */
+                       /* Level 3 */
+                       /* TODO: lifecycle 子套件 */
 
-        { NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE },
-    },
-    1,
-    MUNIT_SUITE_OPTION_NONE,
+                       {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
+                       },
+        1,
+        MUNIT_SUITE_OPTION_NONE,
 };
 
 int ut_run_all(int argc, char *argv[])

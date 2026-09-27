@@ -67,8 +67,7 @@ void fc_command_status_set_cw(fc_command_status_t *status, uint8_t cw, uint8_t c
     {
         /* Only overwrite desc_id on first error; later CW errors keep the first. */
         if ((status->status & (FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_TIMEOUT | FC_CW_STATUS_CRC_ERROR |
-                                FC_CW_STATUS_UNC | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_RAID_ERROR))
-                                == cw_status)
+                               FC_CW_STATUS_UNC | FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_RAID_ERROR)) == cw_status)
         {
             status->desc_id = descriptor_id;
         }

@@ -3,12 +3,11 @@
 
 #if CONFIG_NAND_DMA
 
-#include "nand_dma.h"
+#    include "nand_dma.h"
+#    include "stm32h743xx.h"
+#    include "stm32h7xx_hal.h"
 
-#include "stm32h7xx_hal.h"
-#include "stm32h743xx.h"
-
-#include <stddef.h>
+#    include <stddef.h>
 
 /*
  * FMC NAND DMA 驱动实现。
@@ -30,12 +29,12 @@
  */
 
 /* DMA2 stream handles — 不使用全局 g_dma_handle 避免与 UART 冲突 */
-static DMA_HandleTypeDef g_nand_dma_in;   /* DMA2_Stream1: FMC→memory (READ)  */
-static DMA_HandleTypeDef g_nand_dma_out;  /* DMA2_Stream0: memory→FMC (PROGRAM) */
+static DMA_HandleTypeDef g_nand_dma_in;  /* DMA2_Stream1: FMC→memory (READ)  */
+static DMA_HandleTypeDef g_nand_dma_out; /* DMA2_Stream0: memory→FMC (PROGRAM) */
 
 /* ── 中断完成标志（volatile 防编译器优化） ── */
-static volatile uint8_t g_dma_data_out_done;  /* PROGRAM 方向 DMA 完成标志 */
-static volatile uint8_t g_dma_data_in_done;   /* READ 方向 DMA 完成标志 */
+static volatile uint8_t g_dma_data_out_done; /* PROGRAM 方向 DMA 完成标志 */
+static volatile uint8_t g_dma_data_in_done;  /* READ 方向 DMA 完成标志 */
 
 /* 运行态 DMA 使能标志。默认等于 CONFIG_NAND_DMA。
  * 可在 nand 空闲时动态切换。 */
@@ -71,19 +70,19 @@ void HAL_DMA_MspInit(DMA_HandleTypeDef *hdma)
 
 static nand_dma_result_t nand_dma_init_stream(DMA_HandleTypeDef *handle, DMA_Stream_TypeDef *instance)
 {
-    handle->Instance                      = instance;
-    handle->Init.Request                  = DMA_REQUEST_MEM2MEM;
-    handle->Init.Direction                = DMA_MEMORY_TO_MEMORY;
-    handle->Init.PeriphInc                = DMA_PINC_DISABLE;       /* FMC data reg 不自增 */
-    handle->Init.MemInc                   = DMA_MINC_ENABLE;         /* buffer 自增 */
-    handle->Init.PeriphDataAlignment      = DMA_PDATAALIGN_BYTE;
-    handle->Init.MemDataAlignment         = DMA_MDATAALIGN_BYTE;
-    handle->Init.Mode                     = DMA_NORMAL;
-    handle->Init.Priority                 = DMA_PRIORITY_HIGH;
-    handle->Init.FIFOMode                 = DMA_FIFOMODE_DISABLE;
-    handle->Init.FIFOThreshold            = DMA_FIFO_THRESHOLD_FULL;
-    handle->Init.MemBurst                 = DMA_MBURST_SINGLE;
-    handle->Init.PeriphBurst              = DMA_PBURST_SINGLE;
+    handle->Instance                 = instance;
+    handle->Init.Request             = DMA_REQUEST_MEM2MEM;
+    handle->Init.Direction           = DMA_MEMORY_TO_MEMORY;
+    handle->Init.PeriphInc           = DMA_PINC_DISABLE; /* FMC data reg 不自增 */
+    handle->Init.MemInc              = DMA_MINC_ENABLE;  /* buffer 自增 */
+    handle->Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    handle->Init.MemDataAlignment    = DMA_MDATAALIGN_BYTE;
+    handle->Init.Mode                = DMA_NORMAL;
+    handle->Init.Priority            = DMA_PRIORITY_HIGH;
+    handle->Init.FIFOMode            = DMA_FIFOMODE_DISABLE;
+    handle->Init.FIFOThreshold       = DMA_FIFO_THRESHOLD_FULL;
+    handle->Init.MemBurst            = DMA_MBURST_SINGLE;
+    handle->Init.PeriphBurst         = DMA_PBURST_SINGLE;
 
     return (HAL_DMA_Init(handle) == HAL_OK) ? DMA_RESULT_OK : DMA_RESULT_ERROR;
 }
@@ -108,7 +107,8 @@ nand_dma_result_t nand_dma_init(void)
  * ══════════════════════════════════════════════════════════════════ */
 
 nand_dma_result_t nand_dma_memory_to_fmc(volatile uint8_t *fmc_data_reg,
-                                const uint8_t *buffer, uint16_t length)
+                                         const uint8_t    *buffer,
+                                         uint16_t          length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -137,7 +137,8 @@ nand_dma_result_t nand_dma_memory_to_fmc(volatile uint8_t *fmc_data_reg,
 }
 
 nand_dma_result_t nand_dma_fmc_to_memory(volatile uint8_t *fmc_data_reg,
-                                uint8_t *buffer, uint16_t length)
+                                         uint8_t          *buffer,
+                                         uint16_t          length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -170,7 +171,8 @@ nand_dma_result_t nand_dma_fmc_to_memory(volatile uint8_t *fmc_data_reg,
  * ══════════════════════════════════════════════════════════════════ */
 
 nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile uint8_t *fmc_data_reg,
-                                          const uint8_t *buffer, uint16_t length)
+                                                  const uint8_t    *buffer,
+                                                  uint16_t          length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -194,7 +196,8 @@ nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile uint8_t *fmc_data_reg
 }
 
 nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile uint8_t *fmc_data_reg,
-                                          uint8_t *buffer, uint16_t length)
+                                                  uint8_t          *buffer,
+                                                  uint16_t          length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -310,33 +313,33 @@ void nand_dma_irq_handler_data_in(void)
 
 void nand_dma_cache_clean(const uint8_t *buffer, uint16_t length)
 {
-#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+#    if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
     /*
      * SCB_CleanDCache_by_Addr 需要 32 字节对齐的地址和大小（向上取整）。
      * FC Buffer Pool 中的 buffer 起始地址已对齐（528 = 16×33，16 字节对齐），
      * 但 D-Cache 行是 32 字节，用当前地址向下取整，长度向上取整到 32 倍数。
      */
-    uint32_t addr = (uint32_t)buffer;
+    uint32_t addr         = (uint32_t)buffer;
     uint32_t aligned_addr = addr & ~0x1FUL;
-    uint32_t aligned_len = (uint32_t)((addr - aligned_addr) + length + 31U) & ~0x1FUL;
+    uint32_t aligned_len  = (uint32_t)((addr - aligned_addr) + length + 31U) & ~0x1FUL;
     SCB_CleanDCache_by_Addr((void *)aligned_addr, (int32_t)aligned_len);
-#else
+#    else
     (void)buffer;
     (void)length;
-#endif
+#    endif
 }
 
 void nand_dma_cache_invalidate(uint8_t *buffer, uint16_t length)
 {
-#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
-    uint32_t addr = (uint32_t)buffer;
+#    if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    uint32_t addr         = (uint32_t)buffer;
     uint32_t aligned_addr = addr & ~0x1FUL;
-    uint32_t aligned_len = (uint32_t)((addr - aligned_addr) + length + 31U) & ~0x1FUL;
+    uint32_t aligned_len  = (uint32_t)((addr - aligned_addr) + length + 31U) & ~0x1FUL;
     SCB_InvalidateDCache_by_Addr((void *)aligned_addr, (int32_t)aligned_len);
-#else
+#    else
     (void)buffer;
     (void)length;
-#endif
+#    endif
 }
 
 #endif /* CONFIG_NAND_DMA */

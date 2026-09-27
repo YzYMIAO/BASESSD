@@ -19,8 +19,8 @@
  * FC_RANDOM_ALGO_SIMPLE_XOR
  *   固定伪随机模式重复，低端方案。不需要种子递推，每 CW 用固定 pattern 异或。
  */
-#define FC_RANDOM_ALGO_LFSR      (0U)
-#define FC_RANDOM_ALGO_XORSHIFT  (1U)
+#define FC_RANDOM_ALGO_LFSR       (0U)
+#define FC_RANDOM_ALGO_XORSHIFT   (1U)
 #define FC_RANDOM_ALGO_SIMPLE_XOR (2U)
 
 #ifndef FC_RANDOM_ALGO
@@ -51,7 +51,7 @@
 #endif
 
 /* 从 PAA 和 program_sequence 生成加扰种子 */
-uint32_t    fc_random_seed_from_paa(nand_paa_t paa, uint32_t program_sequence);
+uint32_t fc_random_seed_from_paa(nand_paa_t paa, uint32_t program_sequence);
 
 /*
  * 对 data[0..length-1] 进行加扰/解扰。

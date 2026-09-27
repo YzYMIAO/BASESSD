@@ -31,7 +31,6 @@ static uint8_t fc_scheduler_op_is_read(uint8_t operation)
         case OP_READ_UNIQUE_ID:
         case OP_READ_STATUS:
         case OP_READ_STATUS_ENHANCED:
-        case OP_READ_MODE:
         case OP_BLOCK_LOCK_STATUS:
             return 1U;
         default:
@@ -45,8 +44,8 @@ fc_status_t fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
-    scheduler->sq  = sq;
-    scheduler->hsq = hsq;
+    scheduler->sq                      = sq;
+    scheduler->hsq                     = hsq;
     scheduler->consecutive_write_count = 0U;
     memset(scheduler->busy, 0, sizeof(scheduler->busy));
     return FC_STATUS_OK;
@@ -165,7 +164,7 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
     {
         for (scan = 0U; scan < scheduler->sq->count; scan++)
         {
-            fc_command_id_t scan_id = scheduler->sq->entries[(uint16_t)(scheduler->sq->head + scan) % scheduler->sq->depth];
+            fc_command_id_t scan_id  = scheduler->sq->entries[(uint16_t)(scheduler->sq->head + scan) % scheduler->sq->depth];
             fc_command_t   *scan_cmd = fc_command_id_to_command(scan_id);
             if ((scan_cmd != NULL) && (fc_scheduler_op_is_read((uint8_t)scan_cmd->config.operation) != 0U))
             {

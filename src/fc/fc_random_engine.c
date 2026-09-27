@@ -22,11 +22,11 @@ static uint32_t fc_random_seed_from_paa_impl(nand_paa_t paa, uint32_t program_se
     uint32_t seed = golden_ratio;
 
     seed ^= program_sequence * golden_ratio;
-    seed ^= (uint32_t)paa_to_lun(paa)   << 31U;
+    seed ^= (uint32_t)paa_to_lun(paa) << 31U;
     seed ^= (uint32_t)paa_to_plane(paa) << 23U;
     seed ^= (uint32_t)paa_to_block(paa) << 7U;
     seed ^= (uint32_t)paa_to_page(paa);
-    seed ^= (uint32_t)paa_to_cw(paa)    << 28U;
+    seed ^= (uint32_t)paa_to_cw(paa) << 28U;
 
     return (seed != 0U) ? seed : 0x1U;
 }
@@ -43,13 +43,13 @@ static uint32_t fc_random_seed_from_paa_impl(nand_paa_t paa, uint32_t program_se
 
     uint32_t seed = golden_ratio;
 
-    seed ^= program_sequence * 0xDEADBEEFUL;                    /* 高权重 */
+    seed ^= program_sequence * 0xDEADBEEFUL; /* 高权重 */
     seed ^= (program_sequence >> 16U) * golden_ratio;
-    seed ^= (uint32_t)paa_to_lun(paa)   << 31U;
+    seed ^= (uint32_t)paa_to_lun(paa) << 31U;
     seed ^= (uint32_t)paa_to_plane(paa) << 23U;
     seed ^= (uint32_t)paa_to_block(paa) << 1U;
-    seed ^= (uint32_t)paa_to_page(paa)  << 8U;
-    seed ^= (uint32_t)paa_to_cw(paa)    << 28U;
+    seed ^= (uint32_t)paa_to_page(paa) << 8U;
+    seed ^= (uint32_t)paa_to_cw(paa) << 28U;
 
     return (seed != 0U) ? seed : 0x1U;
 }
@@ -60,7 +60,7 @@ static uint32_t fc_random_seed_from_paa_impl(nand_paa_t paa, uint32_t program_se
 {
     uint32_t seed;
 
-    seed  = program_sequence ^ (paa_to_lun(paa) << 16U) ^ paa;
+    seed = program_sequence ^ (paa_to_lun(paa) << 16U) ^ paa;
     seed ^= (paa_to_plane(paa) << 14U) ^ (paa_to_block(paa) << 2U) ^ paa_to_page(paa);
     return (seed != 0U) ? seed : 0x1U;
 }
@@ -98,7 +98,7 @@ static uint32_t fc_random_seed_from_paa_impl(nand_paa_t paa, uint32_t program_se
  * 反馈位 = bit15 ^ bit13 ^ bit12 ^ bit10（0-indexed）
  * 周期 2¹⁶ - 1 = 65535
  */
-#define FC_LFSR_PERIOD (65535U)
+#    define FC_LFSR_PERIOD (65535U)
 
 static uint8_t fc_lfsr_byte(uint32_t *state)
 {
@@ -112,8 +112,9 @@ static uint8_t fc_lfsr_byte(uint32_t *state)
         /* 反馈位 = bit15 ^ bit13 ^ bit12 ^ bit10 */
         {
             uint8_t fb = (uint8_t)(((lfsr >> 15U) ^ (lfsr >> 13U) ^
-                                    (lfsr >> 12U) ^ (lfsr >> 10U)) & 1U);
-            lfsr = (uint16_t)((lfsr >> 1U) | ((uint16_t)fb << 15U));
+                                    (lfsr >> 12U) ^ (lfsr >> 10U)) &
+                                   1U);
+            lfsr       = (uint16_t)((lfsr >> 1U) | ((uint16_t)fb << 15U));
         }
     }
     *state = lfsr;
@@ -150,7 +151,7 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
  * 每 length 字节重复 pattern 绕回。
  * 适合资源极度受限的场景。
  */
-#define FC_SIMPLE_XOR_PATTERN_LEN  (64U)
+#    define FC_SIMPLE_XOR_PATTERN_LEN (64U)
 
 static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint32_t seed)
 {

@@ -1,8 +1,8 @@
 #include "fc_ldpc_qc_engine.h"
 
 #include <stddef.h>
-#include <string.h>
 #include <stdint.h>
+#include <string.h>
 
 /*
  * QC-LDPC 引擎实现（硬判决 Bit-flipping）。
@@ -37,11 +37,11 @@
 static int8_t g_h_base[QC_BASE_R][QC_BASE_C];
 
 /* 列→校验方程链接：col_to_check[col][0..col_weight-1] */
-static uint8_t  g_col_to_check[QC_N][3];
-static uint8_t  g_col_weight[QC_N];  /* 每列权重（固定为 3） */
+static uint8_t g_col_to_check[QC_N][3];
+static uint8_t g_col_weight[QC_N]; /* 每列权重（固定为 3） */
 
 /* 行→变量节点链接 */
-static uint16_t g_row_to_var[QC_M][QC_N * 3U / QC_M + 1U];  /* 每行约 198 个 */
+static uint16_t g_row_to_var[QC_M][QC_N * 3U / QC_M + 1U]; /* 每行约 198 个 */
 static uint16_t g_row_weight[QC_M];
 
 static uint8_t g_initialized = 0U;
@@ -79,17 +79,21 @@ static void qc_build_base(void)
             {
                 row = lcg_rand(&seed) % QC_BASE_R;
                 if (((used_rows >> row) & 1U) == 0U)
+                {
                     break;
+                }
             }
             used_rows |= (1U << row);
-            shift   = lcg_rand(&seed) % QC_Z;
+            shift            = lcg_rand(&seed) % QC_Z;
             g_h_base[row][c] = (int8_t)shift;
         }
     }
 
     /* 校验部分：阶梯结构，H_p = diag(恒等阵) */
     for (r = 0; r < QC_BASE_R; r++)
+    {
         g_h_base[r][QC_DATA_C + r] = 0;
+    }
 }
 
 static void qc_expand_links(void)
@@ -104,26 +108,32 @@ static void qc_expand_links(void)
     memset(col_pos, 0, sizeof(col_pos));
     memset(row_pos, 0, sizeof(row_pos));
 
-    for (r = 0; r < QC_BASE_R; r++) {
-        for (c = 0; c < QC_BASE_C; c++) {
-            if (g_h_base[r][c] < 0) continue;
+    for (r = 0; r < QC_BASE_R; r++)
+    {
+        for (c = 0; c < QC_BASE_C; c++)
+        {
+            if (g_h_base[r][c] < 0)
+            {
+                continue;
+            }
             uint32_t shift = (uint32_t)g_h_base[r][c];
-            for (s = 0; s < QC_Z; s++) {
+            for (s = 0; s < QC_Z; s++)
+            {
                 uint32_t var_idx = c * QC_Z + s;
                 uint32_t chk_idx = r * QC_Z + ((s + shift) % QC_Z);
                 uint32_t p;
 
                 /* 列→校验 */
-                p = col_pos[var_idx];
+                p                          = col_pos[var_idx];
                 g_col_to_check[var_idx][p] = chk_idx;
-                g_col_weight[var_idx] = (uint8_t)(p + 1U);
-                col_pos[var_idx] = p + 1U;
+                g_col_weight[var_idx]      = (uint8_t)(p + 1U);
+                col_pos[var_idx]           = p + 1U;
 
                 /* 行→变量 */
-                p = row_pos[chk_idx];
+                p                        = row_pos[chk_idx];
                 g_row_to_var[chk_idx][p] = (uint16_t)var_idx;
-                g_row_weight[chk_idx] = (uint16_t)(p + 1U);
-                row_pos[chk_idx] = p + 1U;
+                g_row_weight[chk_idx]    = (uint16_t)(p + 1U);
+                row_pos[chk_idx]         = p + 1U;
             }
         }
     }
@@ -134,15 +144,18 @@ static void qc_expand_links(void)
  * ═══════════════════════════════════════════════════════════════ */
 
 void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
-                        const uint8_t *data_in,
-                        uint8_t *data_out)
+                       const uint8_t      *data_in,
+                       uint8_t            *data_out)
 {
     uint8_t  parity[8];
     uint32_t bit_pos, i;
 
     (void)qc;
 
-    if (!g_initialized) return;
+    if (!g_initialized)
+    {
+        return;
+    }
 
     memcpy(data_out, data_in, 520);
     memset(parity, 0, 8);
@@ -150,7 +163,10 @@ void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
     for (bit_pos = 0; bit_pos < QC_K; bit_pos++)
     {
         uint8_t data_bit = (uint8_t)((data_in[bit_pos / 8U] >> (bit_pos % 8U)) & 1U);
-        if (data_bit == 0U) continue;
+        if (data_bit == 0U)
+        {
+            continue;
+        }
 
         /* 此数据位关联的所有校验位取反（列重固定为 3） */
         uint32_t w = (uint32_t)g_col_weight[bit_pos];
@@ -178,7 +194,9 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
     uint32_t max_iter;
 
     if (!qc || !data || !g_initialized)
+    {
         return FC_STATUS_INVALID_ARGUMENT;
+    }
 
     max_iter = (uint32_t)qc->max_iter;
 
@@ -192,7 +210,7 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
         for (chk = 0; chk < QC_M; chk++)
         {
             uint32_t sum = 0U;
-            uint32_t w = (uint32_t)g_row_weight[chk];
+            uint32_t w   = (uint32_t)g_row_weight[chk];
 
             for (i = 0; i < w; i++)
             {
@@ -204,14 +222,19 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
         }
 
         if (syn_ones == 0U)
+        {
             return FC_STATUS_OK;
+        }
 
         /* ── 统计每列失败校验数 ── */
         memset(col_failures, 0, sizeof(col_failures));
 
         for (chk = 0; chk < QC_M; chk++)
         {
-            if (syndromes[chk] == 0U) continue;
+            if (syndromes[chk] == 0U)
+            {
+                continue;
+            }
             uint32_t w = (uint32_t)g_row_weight[chk];
             for (i = 0; i < w; i++)
             {
@@ -222,8 +245,14 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
 
         /* ── 阈值递减 ── */
         threshold = 3U;
-        if (threshold > syn_ones) threshold = syn_ones;
-        if (threshold == 0U) threshold = 1U;
+        if (threshold > syn_ones)
+        {
+            threshold = syn_ones;
+        }
+        if (threshold == 0U)
+        {
+            threshold = 1U;
+        }
 
         {
             uint32_t flipped = 0U;
@@ -239,7 +268,8 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
 
             if (flipped == 0U)
             {
-                if (threshold > 1U) {
+                if (threshold > 1U)
+                {
                     /* 下次迭代降阈，但旧阈无翻转，直返 IO_ERROR */
                 }
                 break;
@@ -259,10 +289,12 @@ fc_ldpc_qc_t *fc_ldpc_qc_init(uint8_t max_iter)
     static fc_ldpc_qc_t g_qc;
 
     if (g_initialized)
+    {
         return &g_qc;
+    }
 
     g_qc.initialized = 1U;
-    g_qc.max_iter   = (max_iter > 0U) ? max_iter : 15U;
+    g_qc.max_iter    = (max_iter > 0U) ? max_iter : 15U;
 
     qc_build_base();
     qc_expand_links();

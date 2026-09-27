@@ -1,8 +1,6 @@
-#include "common/common.h"
-
-
 #include "norflash_w25q128_dual.h"
 
+#include "common/common.h"
 #include "delay.h"
 
 /* W25Q128命令定义 */

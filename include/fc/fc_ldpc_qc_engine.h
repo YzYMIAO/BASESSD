@@ -2,6 +2,7 @@
 #define FC_LDPC_QC_ENGINE_H
 
 #include "fc_types.h"
+
 #include <stdint.h>
 
 /*
@@ -25,7 +26,8 @@
  */
 
 /* QC-LDPC 控制结构体 */
-typedef struct {
+typedef struct
+{
     uint8_t initialized;
     uint8_t max_iter;
 } fc_ldpc_qc_t;
@@ -39,8 +41,8 @@ fc_ldpc_qc_t *fc_ldpc_qc_init(uint8_t max_iter);
  * data_out[0..527] → 528B 码字（520B data + 8B parity）
  */
 void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
-                        const uint8_t *data_in,
-                        uint8_t *data_out);
+                       const uint8_t      *data_in,
+                       uint8_t            *data_out);
 
 /*
  * QC-LDPC 硬判决解码

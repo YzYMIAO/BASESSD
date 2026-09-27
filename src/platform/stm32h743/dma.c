@@ -1,5 +1,6 @@
-#include "common/common.h"
 #include "dma.h"
+
+#include "common/common.h"
 
 DMA_HandleTypeDef         g_dma_handle;
 extern UART_HandleTypeDef g_uart1_handle;

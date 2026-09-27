@@ -14,14 +14,14 @@
  */
 
 /* CW 内各区域偏移/大小 */
-#define FC_CRC_META_SIZE         (4U)
-#define FC_CRC_FIELD_SIZE        (4U)
-#define FC_CRC_USER_SIZE         (512U)
-#define FC_CRC_USER_OFFSET       (FC_CRC_META_SIZE + FC_CRC_FIELD_SIZE)  /* = 8 */
+#define FC_CRC_META_SIZE   (4U)
+#define FC_CRC_FIELD_SIZE  (4U)
+#define FC_CRC_USER_SIZE   (512U)
+#define FC_CRC_USER_OFFSET (FC_CRC_META_SIZE + FC_CRC_FIELD_SIZE) /* = 8 */
 
 /* CRC 计算结果类型 */
-#define FC_CRC_RESULT_OK         (0U)
-#define FC_CRC_RESULT_ERROR      (1U)
+#define FC_CRC_RESULT_OK    (0U)
+#define FC_CRC_RESULT_ERROR (1U)
 
 /**
  * @brief   初始化 STM32H743 CRC 硬件外设

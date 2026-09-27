@@ -1,8 +1,6 @@
-#include "common/common.h"
-
-
 #include "qspi.h"
 
+#include "common/common.h"
 #include "norflash_w25q256.h"
 
 QSPI_HandleTypeDef g_qspi_handle; /* QSPI句柄 */

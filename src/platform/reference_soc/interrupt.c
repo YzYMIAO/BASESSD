@@ -1,5 +1,6 @@
-#include "common/common.h"
 #include "platform/interrupt.h"
+
+#include "common/common.h"
 
 #include <stddef.h>
 

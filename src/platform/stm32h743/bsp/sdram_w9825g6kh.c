@@ -1,7 +1,6 @@
-#include "common/common.h"
-
 #include "sdram_w9825g6kh.h"
 
+#include "common/common.h"
 #include "delay.h"
 #include "sys.h"
 
