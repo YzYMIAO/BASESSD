@@ -222,7 +222,12 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
     };
     transaction->completion = (nand_command_completion_t){0};
     transaction->active     = 1U;
-    result                  = nand_engine_start(&transaction->engine, nand_fmc_backend_get(), map->uops, &map->timing, &transaction->request, &transaction->completion);
+    /* Phase V: 用 transaction->backend，未设置时默认回退 */
+    if (transaction->backend == NULL)
+    {
+        transaction->backend = nand_fmc_backend_get();
+    }
+    result = nand_engine_start(&transaction->engine, transaction->backend, map->uops, &map->timing, &transaction->request, &transaction->completion);
     if ((result != NAND_RESULT_OK) && (result != NAND_RESULT_NOT_READY))
     {
         SSD_LOGE("nand: start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result, transaction->completion.nand_status);
@@ -346,7 +351,7 @@ uint8_t nand_init(void)
             .context    = NULL,
         };
 
-        if (nand_fmc_configure(&fmc_config) != NAND_RESULT_OK)
+        if (nand_fmc_init_instance(0U, 0U, 0U, &fmc_config) != NAND_RESULT_OK)
         {
             SSD_LOGE("nand: FMC backend configure failed\r\n");
             return NAND_RESULT_OPERATION_FAILED;
@@ -424,7 +429,7 @@ uint8_t nand_init(void)
                 .wait_ready = nand_fmc_wait_ready,
                 .context    = NULL,
             };
-            if (nand_fmc_configure(&fast_fmc) != NAND_RESULT_OK)
+            if (nand_fmc_init_instance(0U, 0U, 0U, &fast_fmc) != NAND_RESULT_OK)
             {
                 SSD_LOGE("nand: FMC backend configure (Mode 4) failed\r\n");
                 return NAND_RESULT_OPERATION_FAILED;

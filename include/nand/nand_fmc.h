@@ -51,4 +51,17 @@ typedef struct
 nand_result_t                nand_fmc_configure(const nand_fmc_config_t *config);
 const nand_engine_backend_t *nand_fmc_backend_get(void);
 
+/* ── Phase V: per-(CH,CE,LUN) 后端实例 ── */
+typedef struct
+{
+    nand_fmc_config_t       config;
+    nand_engine_backend_t   backend;
+} nand_fmc_instance_t;
+
+nand_result_t nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun,
+                                     const nand_fmc_config_t *config);
+const nand_engine_backend_t *nand_fmc_backend_get_ext(uint8_t ch, uint8_t ce, uint8_t lun);
+
+extern nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM][LUN_NUM];
+
 #endif /* PLATFORM_STM32H743_NAND_FMC_H */

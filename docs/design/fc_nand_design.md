@@ -18,6 +18,7 @@
 > - **Phase L**: CRC-32 引擎实现 + 数据路径集成（§5.1）
 > - **Phase M**: Buffer 偏移重构（FC_BUFFER_USER_OFFSET, fc_buffer_get_base）
 > - **Phase N**: 跨 Plane Stripe RAID 重构（删旧覆盖末 CW，新增 generate_stripe_parity，fc_poll_internal stripe 积累 + Multi-Plane 提交）
+> - **Phase V**: 多 LUN 并发 ISSUE/WAIT/FETCH 拆分 + FMC 后端数组化 + 调度器 phase 机（§18.7 完整实现）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
 
@@ -2621,16 +2622,15 @@ WAIT/FETCH 型 OP 的 UOP 序列只包含 WAIT_READY + 70h 轮询 + DATA_OUT + C
 | fc_scheduler | 需识别 ISSUE/Wait/FETCH 类型，ISSUE 型不排队直接插入 |
 | chain buffer | 同 LUN 的 ISSUE→WAIT 自动组成链，中间不可被其他命令插入 |
 
-#### 18.7.6 当前是否支持并发
+#### 18.7.6 当前是否支持并发（→ Phase V 已实现）
 
 | 层面 | 支持程度 | 原因 |
 |------|---------|------|
 | dispatch 数据结构 | ✅ 就绪 | `g_nand_dispatch_chains[CH][CE][LUN]` 多维 |
-| FMC 硬件总线 | ⚠️ 命令级可切 | 发完命令释放总线，WAIT_READY 卡住 |
-| **OP 码层** | ❌ **卡住** | ISSUE/WAIT 未拆分 |
-| **调度器层** | ❌ **卡住** | poll 不切 LUN |
-
-拆分 OP 码是该功能的前提条件，当前优先级不高，留待 Phase U 实现。
+| FMC 硬件总线 | ⚠️ 命令级可切 | 发完命令释放总线，WAIT_READY 卡住（硬件限制） |
+| **OP 码层** | ✅ Phase V | 新增 6 个 ISSUE/WAIT/FETCH OP 码 + uop 序列 |
+| **调度器层** | ✅ Phase V | poll phase 机（ISSUE→ISSUED→FETCH）+ LUN 状态切换 |
+| **FMC 后端** | ✅ Phase V | per-(CH,CE,LUN) 实例数组化 |
 
 ### 17.10 设计演进
 

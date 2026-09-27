@@ -326,7 +326,48 @@
  */
 #define OP_ERASE_BLOCK_MULTI_PLANE (32U)
 
-#define OP_COUNT (35U) /* 0..34 inclusive */
+/* ── Phase V: MULTI-LUN ISSUE/WAIT/FETCH 拆分 OP 码 ── */
+
+/* OP_READ_PAGE_LOAD:
+ * 70h轮询→00h→C1C2R1R2R3→30h→tWB→END
+ * 不含 WAIT_READY(tR)，发完立即返回，LUN 进入 tR 期。
+ * 必须由 OP_READ_PAGE_FETCH 完成 WAIT_READY + DATA_OUT + 状态检查。 */
+#define OP_READ_PAGE_LOAD (35U)
+
+/* OP_READ_PAGE_FETCH:
+ * WAIT_READY(tR)→DATA_OUT→70h轮询→CHECK_FAIL→END
+ * 与 OP_READ_PAGE_LOAD 配对。 */
+#define OP_READ_PAGE_FETCH (36U)
+
+/* OP_PROGRAM_PAGE_ISSUE:
+ * 70h轮询→80h→C1C2R1R2R3→DATA_IN→10h→tWB→END
+ * 不含 WAIT_READY(tPROG)，发完立即返回，LUN 进入 tPROG 期。
+ * 必须由 OP_PROGRAM_PAGE_WAIT 完成等待 + 状态检查。 */
+#define OP_PROGRAM_PAGE_ISSUE (37U)
+
+/* OP_PROGRAM_PAGE_WAIT:
+ * WAIT_READY(tPROG)→70h轮询→CHECK_FAIL→END
+ * 无数据传输。与 OP_PROGRAM_PAGE_ISSUE 配对。 */
+#define OP_PROGRAM_PAGE_WAIT (38U)
+
+/* OP_ERASE_BLOCK_ISSUE:
+ * 70h轮询→60h→R1R2R3→D0h→tWB→END
+ * 不含 WAIT_READY(tBERS)，发完立即返回，LUN 进入 tBERS 期。
+ * 必须由 OP_ERASE_BLOCK_WAIT 完成等待 + 状态检查。 */
+#define OP_ERASE_BLOCK_ISSUE (39U)
+
+/* OP_ERASE_BLOCK_WAIT:
+ * WAIT_READY(tBERS)→70h轮询→CHECK_FAIL→END
+ * 无数据传输。与 OP_ERASE_BLOCK_ISSUE 配对。 */
+#define OP_ERASE_BLOCK_WAIT (40U)
+
+#define OP_COUNT (41U) /* 0..40 inclusive */
+
+/* ── Phase V: OP 类型枚举 ── */
+#define OP_TYPE_ATOMIC (0U) /* 原原子 OP 码 */
+#define OP_TYPE_ISSUE  (1U) /* ISSUE 段——发完立即返回 */
+#define OP_TYPE_WAIT   (2U) /* WAIT 段——等完成，无数据 */
+#define OP_TYPE_FETCH  (3U) /* FETCH 段——等完成 + 读数据 */
 
 typedef struct
 {
@@ -338,8 +379,11 @@ typedef struct
     uint8_t                 data_input_cycles;
     uint8_t                 valid_while_selected_lun_busy;
     uint8_t                 valid_while_other_lun_busy;
-    uint8_t                 has_data;    /* 操作是否需要数据传输（替代 nand_operation_has_data） */
-    uint16_t                data_length; /* 数据传输字节数 0=无数据（替代 nand_operation_data_length） */
+    uint8_t                 has_data;
+    uint16_t                data_length;
+    uint8_t                 op_type       : 2; /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
+    uint8_t                 pair_op;           /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
+    uint16_t                min_busy_us;       /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ） */
     const nand_uop_t       *uops;
     nand_operation_timing_t timing;
 } nand_operation_map_t;
@@ -357,5 +401,19 @@ extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
  * 推荐直接读 g_nand_operation_map[op].data_length。 */
 #define nand_operation_data_length(op) \
     ((op) < OP_COUNT ? g_nand_operation_map[(op)].data_length : 0U)
+
+/* ── Phase V 多 LUN 辅助宏 ── */
+#define nand_operation_is_issue(op) \
+    ((op) < OP_COUNT ? (g_nand_operation_map[(op)].op_type == OP_TYPE_ISSUE) : 0U)
+#define nand_operation_is_wait_or_fetch(op) \
+    ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].op_type == OP_TYPE_WAIT) || \
+                         (g_nand_operation_map[(op)].op_type == OP_TYPE_FETCH)) : 0U)
+#define nand_operation_is_splittable(op) \
+    ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].op_type == OP_TYPE_ATOMIC) && \
+                         (g_nand_operation_map[(op)].pair_op != 0U)) : 0U)
+#define nand_operation_to_issue(op) \
+    ((op) < OP_COUNT ? g_nand_operation_map[(op)].pair_op : (op))
+#define nand_operation_get_pair(op) \
+    ((op) < OP_COUNT ? g_nand_operation_map[(op)].pair_op : (op))
 
 #endif /* PLATFORM_STM32H743_ONFI_1_0_H */
