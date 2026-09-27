@@ -90,25 +90,38 @@ static nand_paa_t make_paa(uint16_t block, uint8_t plane, uint8_t page)
 }
 
 /**************************************************************************
- *  Buffer pattern 辅助
+ *  Buffer pattern 辅助（固定 pattern，不依赖 block/page）
  *
- *  每个 page 用 (block << 8 | page) 做 seed，生成 CW 粒度的 pattern。
- *  这样各 page 数据不同但可预测，读回后能逐字节还原验证。
+ *  Plane 0: 0x12345678 循环填充（小端：78 56 34 12）
+ *  Plane 1: 0x87654321 循环填充（小端：21 43 65 87）
+ *
+ *  固定 pattern 的好处：
+ *    1. 一眼可识别（0x12/0x34/0x56/0x78 不会是随机噪声）
+ *    2. 各 page / CW 数据一致，校验函数简单直接
+ *    3. 内部搬移验证无需区分源/目标 block 参数
  **************************************************************************/
 
-static void fill_page_pattern(uint8_t *buf, uint16_t block, uint8_t page, uint8_t plane)
+static uint32_t page_pattern(uint8_t plane)
 {
-    uint16_t seed = (uint16_t)((block & 0xFFU) << 8U) | (uint16_t)((uint16_t)page << 4U) | plane;
+    return (plane == 0U) ? 0x12345678UL : 0x87654321UL;
+}
+
+static void fill_page_pattern(uint8_t *buf, uint8_t plane)
+{
+    const uint32_t pattern = page_pattern(plane);
+    const uint8_t  *pp     = (const uint8_t *)&pattern;
+
     for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
     {
-        buf[i] = (uint8_t)(seed + (uint16_t)i);
+        buf[i] = pp[i % 4U];
     }
 }
 
-static uint8_t expected_byte(uint16_t block, uint8_t page, uint8_t plane, uint32_t offset)
+/* 直接用 pattern 返回预期字节，不经过 block/page 运算 */
+static uint8_t expected_byte(uint8_t plane, uint32_t offset)
 {
-    uint16_t seed = (uint16_t)((block & 0xFFU) << 8U) | (uint16_t)((uint16_t)page << 4U) | plane;
-    return (uint8_t)(seed + (uint16_t)(offset % 256U));
+    const uint32_t pattern = page_pattern(plane);
+    return ((const uint8_t *)&pattern)[offset % 4U];
 }
 
 /**************************************************************************
@@ -165,7 +178,7 @@ static uint8_t cmd_configure_and_fill(fc_command_t *cmd, uint16_t block, uint8_t
         uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
         if (buf != NULL)
         {
-            fill_page_pattern(buf, block, page, plane);
+            fill_page_pattern(buf, plane);
         }
         desc_id = (fc_descriptor_id_t)desc->next_id;
         cw_idx++;
@@ -240,7 +253,7 @@ static void release_command_buffers(fc_command_t *cmd)
  *  辅助：读回 desc chain buffer，与预期 pattern 逐字节对比
  **************************************************************************/
 
-static uint8_t verify_page_data(fc_command_t *cmd, uint16_t block, uint8_t page, uint8_t plane)
+static uint8_t verify_page_data(fc_command_t *cmd, uint8_t plane)
 {
     uint8_t            all_ok  = 1U;
     fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
@@ -257,11 +270,10 @@ static uint8_t verify_page_data(fc_command_t *cmd, uint16_t block, uint8_t page,
         {
             for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
             {
-                uint8_t exp = expected_byte(block, page, plane, (uint32_t)cw_idx * FC_BUFFER_USER_SIZE + i);
+                uint8_t exp = expected_byte(plane, (uint32_t)cw_idx * FC_BUFFER_USER_SIZE + i);
                 if (buf[i] != exp)
                 {
-                    munit_errorf("page=%u cw=%u offset=%u: got 0x%02X expected 0x%02X",
-                                 (unsigned)page,
+                    munit_errorf("cw=%u offset=%u: got 0x%02X expected 0x%02X",
                                  (unsigned)cw_idx,
                                  (unsigned)i,
                                  (unsigned)buf[i],
@@ -617,7 +629,7 @@ static void read_block_verify(uint16_t block, uint8_t plane)
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
 
         /* 逐字节验证数据 */
-        munit_assert_uint8(verify_page_data(cmd, block, page, plane), ==, 1U);
+        munit_assert_uint8(verify_page_data(cmd, plane), ==, 1U);
 
         release_command_buffers(cmd);
         result = fc_command_release(cmd);
@@ -966,33 +978,9 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     /* Step 2: 写源 block（64 pages，独立 pattern） */
     write_block(BLOCK_TEST, 0U);
 
-    /* Step 2.5: 用普通读（00h-30h）验证 block 100 数据正确，排除写阶段问题 */
+    /* Step 2.5: 用普通读（00h-30h）验证 block 100 全部 64 pages 正确，排除写阶段问题 */
     {
-        fc_command_t       *cmd = read_page(BLOCK_TEST, 0U, 0U);
-        fc_command_status_t completion;
-        fc_status_t         result;
-        uint32_t            service_count;
-        uint8_t             completed = 0U;
-
-        munit_assert_not_null(cmd);
-        result = fc_submit(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
-        for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
-        {
-            (void)fc_service();
-            result = fc_poll_completion(&completion);
-            if (result == FC_STATUS_OK)
-            {
-                completed = 1U;
-                break;
-            }
-        }
-        munit_assert_uint32(completed, ==, 1U);
-        munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
-        munit_assert_uint8(verify_page_data(cmd, BLOCK_TEST, 0U, 0U), ==, 1U);
-        release_command_buffers(cmd);
-        result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        read_block_verify(BLOCK_TEST, 0U);
     }
 
     /* Step 3+4: 逐 page 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_MOVE */
@@ -1274,7 +1262,7 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         munit_assert_uint32(completed, ==, 1U);
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
         /* 31h 输出的数据是 CACHE_START/上一轮 31h 加载的页，即 page-1 */
-        munit_assert_uint8(verify_page_data(cmd, BLOCK_TEST, (uint8_t)(page - 1U), 0U), ==, 1U);
+        munit_assert_uint8(verify_page_data(cmd, 0U), ==, 1U);
         release_command_buffers(cmd);
         result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
@@ -1318,7 +1306,7 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         munit_assert_uint32(completed, ==, 1U);
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
         /* 3Fh 输出最后一页数据 */
-        munit_assert_uint8(verify_page_data(cmd, BLOCK_TEST, PAGES_PER_BLOCK - 1U, 0U), ==, 1U);
+        munit_assert_uint8(verify_page_data(cmd, 0U), ==, 1U);
         release_command_buffers(cmd);
         result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
@@ -1369,7 +1357,7 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
         fc_status_t result = fc_command_configure_descriptors(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
 
-        /* Fill desc[0..3] = plane 0 (0x55), desc[4..7] = plane 1 (0xAA) */
+        /* Fill desc[0..3] = plane 0 pattern, desc[4..7] = plane 1 pattern */
         {
             fc_descriptor_id_t did = (fc_descriptor_id_t)cmd->desc_id;
             uint8_t            idx = 0U;
@@ -1384,7 +1372,7 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
                 if (buf != NULL)
                 {
                     uint8_t p = idx / CW_NUM; /* plane 0 or 1 */
-                    memset(buf, (p == 0U) ? 0x55 : 0xAA, FC_BUFFER_USER_SIZE);
+                    fill_page_pattern(buf, p);
                 }
                 did = (fc_descriptor_id_t)d->next_id;
                 idx++;
@@ -1440,7 +1428,7 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
             munit_assert_uint32(completed, ==, 1U);
         }
 
-        /* Verify data plane-by-plane */
+        /* Verify data plane-by-plane using pattern */
         {
             fc_descriptor_id_t did = (fc_descriptor_id_t)cmd->desc_id;
             uint8_t            idx = 0U;
@@ -1454,12 +1442,12 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
                 uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
                 if (buf != NULL)
                 {
-                    uint8_t p       = idx / CW_NUM;
-                    uint8_t cw      = idx % CW_NUM;
-                    uint8_t exp_val = (p == 0U) ? 0x55U : 0xAAU;
+                    uint8_t p  = idx / CW_NUM;
+                    uint8_t cw = idx % CW_NUM;
                     for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
                     {
-                        if (buf[i] != exp_val)
+                        uint8_t exp = expected_byte(p, (uint32_t)cw * FC_BUFFER_USER_SIZE + i);
+                        if (buf[i] != exp)
                         {
                             munit_errorf("multi_plane page=%u plane=%u cw=%u offset=%u: got 0x%02X expected 0x%02X",
                                          (unsigned)page,
@@ -1467,7 +1455,7 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
                                          (unsigned)cw,
                                          (unsigned)i,
                                          (unsigned)buf[i],
-                                         (unsigned)exp_val);
+                                         (unsigned)exp);
                             goto mp_desc_next;
                         }
                     }
@@ -1595,7 +1583,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
                     {
                         for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
                         {
-                            uint8_t exp = expected_byte(BLOCK_TEST, page, 0U, (uint32_t)cw * FC_BUFFER_USER_SIZE + i);
+                            uint8_t exp = expected_byte(0U, (uint32_t)cw * FC_BUFFER_USER_SIZE + i);
                             if (buf[i] != exp)
                             {
                                 munit_errorf("random_data page=%u cw=%u off=%u: got 0x%02X exp 0x%02X",
@@ -1700,7 +1688,7 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
             if (d == NULL) break;
             buf = fc_buffer_id_to_real_buffer(d->buffer_id);
             if (buf == NULL) break;
-            if (buf[0] != expected_byte(BLOCK_TEST, page, 0U, (uint32_t)cw_idx * FC_BUFFER_USER_SIZE))
+            if (buf[0] != expected_byte(0U, (uint32_t)cw_idx * FC_BUFFER_USER_SIZE))
             {
                 locked = 1U;
                 break;

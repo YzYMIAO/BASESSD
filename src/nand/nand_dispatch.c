@@ -2,6 +2,7 @@
 #include "delay.h"
 #include "fc/fc_command.h"
 #include "nand_config.h"
+#include "nand/nand_debug.h"
 #include "nand_dispatch_internal.h"
 #include "nand_mt29f4g08abadawp.h"
 #include "onfi_1_0.h"

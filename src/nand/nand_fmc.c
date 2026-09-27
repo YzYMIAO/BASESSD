@@ -2,6 +2,7 @@
 
 #include "common/ssd_log.h"
 #include "delay.h"
+#include "nand/nand_debug.h"
 #include "nand/nand_mt29f4g08abadawp.h"
 #include "onfi_1_0.h"
 #include "platform/stm32h743/nand_dma.h"
@@ -100,6 +101,7 @@ static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
     {
         /* RB# LOW → NAND busy，spin-wait 直到 ready */
         uint32_t polls = 0U;
+        FMC_LOGD("WAIT_READY start op=%u\r\n", (unsigned)request->operation);
         while (HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT, MT29F4G08ABADAWP_RB_GPIO_PIN) == 0U)
         {
             polls++;
@@ -109,10 +111,12 @@ static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
             }
             delay_us(1U);
         }
+        FMC_LOGD("WAIT_READY done op=%u polls=%u\r\n", (unsigned)request->operation, (unsigned)polls);
         return NAND_RESULT_OK;
     }
 
     /* RB# HIGH → NAND 已 ready（极短的 busy 或无 busy） */
+    FMC_LOGD("WAIT_READY immediate op=%u\r\n", (unsigned)request->operation);
     return NAND_RESULT_OK;
 }
 
@@ -233,6 +237,7 @@ static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
     for (index = 0U; index < request->data_length; index++)
     {
         *config->data = src[index];
+        __DMB();
     }
 
     completion->transfer_status = NAND_RESULT_OK;
@@ -325,15 +330,10 @@ static nand_result_t nand_fmc_exec_data_out_status(void *context, const nand_uop
 
     (void)uop;
     (void)timing;
-    /* 延时已由 UOP 序列中的 DELAY_US 保证，handler 直读 DQ 数据 */
+    (void)request;
+    /* 直读 DQ 总线 → completion->nand_status（状态值通过 completion 链→CQ，不写 buffer） */
     status                  = *config->data;
     completion->nand_status = status;
-
-    if ((request->buffer != NULL) && (request->data_length != 0U))
-    {
-        request->buffer[0]          = status;
-        completion->transfer_status = NAND_RESULT_OK;
-    }
 
     return NAND_RESULT_OK;
 }

@@ -2,6 +2,7 @@
 
 #include "common/ssd_log.h"
 #include "delay.h"
+#include "nand/nand_debug.h"
 #include "onfi_1_0.h"
 
 #include <stddef.h>
