@@ -378,6 +378,31 @@ JUMP_IF_NOT_READY 由引擎直接处理，不走 handler 表（handler 表项为
 
 每次循环完整重发 70h、等 tWHR、读状态、检查 ready，无需引擎层特殊逻辑。
 
+#### CHECK_FAIL — 使用规则
+
+CHECK_FAIL 检查 `completion->nand_status & 0x01`（NAND 状态寄存器的 FAIL bit），
+失败则返回 `NAND_RESULT_OPERATION_FAILED`，引擎终止序列。不是所有 OP 都需要它：
+
+| 有 CHECK_FAIL | 原因 |
+|-------------|------|
+| 所有含 10h/D0h 的程序/擦除操作 | CONFIRM 后 NAND 可能内部烧录/擦除失败 |
+| SET_FEATURES（写 ONFI 寄存器） | 写寄存器可能被 NAND 拒绝 |
+| RESET | 复位后检查 NAND 状态是否正常 |
+| 所有含 30h 的 READ 操作（含 MULTI_PLANE_READ） | 30h 后页加载可能内部出错 |
+| INTERNAL_READ_FOR_DATA_MOVE（35h） | 内部搬移读取阶段可能出错 |
+| CACHE_READ_SEQ/LAST/RANDOM（31h/3Fh） | Cache 读序列中 NAND 内部可能出错 |
+
+| 无 CHECK_FAIL | 原因 |
+|-------------|------|
+| GET_FEATURES / READ_ID / READ_PARAM_PAGE / READ_UNIQUE_ID | 读芯片信息/寄存器，不触发内部操作，无"失败"概念 |
+| RANDOM_DATA_READ | 05h-E0h 读已加载的页缓冲，不触发 NAND 内部操作 |
+| RANDOM_DATA_INPUT | 85h 只写页缓冲，无 CONFIRM，写缓冲不会失败 |
+| READ_STATUS / READ_STATUS_ENHANCED | 读状态寄存器本身，查自己无意义 |
+| READ_MODE | 发 00h 设置读模式，无内部操作 |
+| BLOCK_UNLOCK/LOCK/LOCK_TIGHT/LOCK_STATUS | 锁操作由 NAND 内部逻辑完成，不通过 FAIL bit 报告 |
+
+**例外**：PROGRAM_FOR_INTERNAL_DATA_MOVE 有 CHECK_FAIL，因为它含 85h-addr-1B-10h 的完整编程序列（有 10h CONFIRM）。而 PROGRAM_FOR_INTERNAL_MOVE 是纯 copy-back（无 DATA_IN ），同样有 10h CONFIRM，也有 CHECK_FAIL。
+
 #### 隐式延时显式化
 
 此前 tWB、tWHR、tADL 等固定延时分散在各 handler 内部，UOP 序列不可见。改后全部显式化：
