@@ -8,8 +8,6 @@
 
 #include <stddef.h>
 
-static __attribute__((used)) nand_fmc_config_t g_nand_fmc_config;
-
 static __attribute__((used)) nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 static __attribute__((used)) nand_result_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
@@ -38,32 +36,26 @@ static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
         [NAND_UOP_JUMP_IF_NOT_READY] = NULL,
         [NAND_UOP_CHECK_FAIL]        = nand_fmc_exec_check_fail,
         [NAND_UOP_DELAY_US]          = nand_fmc_exec_delay_us,
-};
+    };
 
-static const nand_engine_backend_t g_nand_fmc_backend =
-    {
-        .handlers = g_nand_fmc_handlers,
-        .context  = &g_nand_fmc_config,
-};
+/* ── Phase V: per-(CH,CE,LUN) 实例数组 ── */
+nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM][LUN_NUM];
 
+/*
+ * 向后兼容接口。
+ * nand_fmc_configure() 等价于 nand_fmc_init_instance(0,0,0, config)。
+ * nand_fmc_backend_get() 返回 (0,0,0) 实例的 backend。
+ * nand_init() 已改用 nand_fmc_init_instance()，这些接口仅供未迁移的外部代码使用。
+ */
 nand_result_t nand_fmc_configure(const nand_fmc_config_t *config)
 {
-    if ((config == NULL) || (config->data == NULL) || (config->command == NULL) || (config->address == NULL) || (config->wait_ready == NULL))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
-
-    g_nand_fmc_config = *config;
-    return NAND_RESULT_OK;
+    return nand_fmc_init_instance(0U, 0U, 0U, config);
 }
 
 const nand_engine_backend_t *nand_fmc_backend_get(void)
 {
-    return &g_nand_fmc_backend;
+    return &g_nand_fmc_instances[0][0][0].backend;
 }
-
-/* ── Phase V: per-(CH,CE,LUN) 实例数组 ── */
-nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM][LUN_NUM];
 
 nand_result_t nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun,
                                      const nand_fmc_config_t *config)
