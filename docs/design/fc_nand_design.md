@@ -2520,6 +2520,91 @@ FMC 总线 (地址/数据/控制线共用)
 
 **结论**：调度层和 dispatch 层的多通道架构是真实的。FMC/NAND 引擎层需要改造才能真正支持多通道。
 
+### 18.7 多 LUN 并发：OP 码 ISSUE/WAIT/FETCH 拆分设计
+
+#### 18.7.1 问题
+
+当前所有 OP 码是原子序列——从 70h 轮询到命令发出到等待完成到数据输出，一条龙锁住 LUN：
+
+```
+OP_NORMAL_READ_PAGE_WITH_DATA_OUT:
+  70h轮询 → 00h-addr-30h → tR(WAIT_READY) → DATA_OUT → 70h轮询 → CHECK_FAIL → END
+  ├─────────────── LUN 独占整个序列 ────────────────┤
+```
+
+多 LUN 场景下，LUN 0 在 tR 期间（25µs），dispatch 只能干等，不能趁隙切到 LUN 1 发命令。
+
+#### 18.7.2 企业做法：三阶段拆分
+
+企业级主控将每个 NAND 操作拆为三段独立原语，调度器可交叉执行：
+
+| 原语 | 描述 | 阻塞？ | 典型耗时 |
+|------|------|--------|---------|
+| **ISSUE** | 发命令 + 地址（或 + 数据），不等完成 | ❌ µs 级 | ~1-5µs |
+| **WAIT** | 等 R/B# 或 70h 状态轮询到 ready | ✅ 阻塞 | tR 25µs / tPROG 200µs |
+| **FETCH** | 读数据或检查最终状态 | ✅ 阻塞 | ~10µs（读整页）|
+
+例如双 LUN 并发读取：
+
+```
+时间 ──────────────────────────────────────────────────────▶
+
+LUN 0: ISSUE(00h-addr-30h) → [tR 25µs]
+                              ↑ 总线空闲，可切 LUN
+LUN 1:                       ISSUE(00h-addr-30h) → [tR 25µs]
+                                                   ↑ 两 LUN 都 busy
+LUN 0:                                               ← FETCH(Dout)
+LUN 1:                                                   ← FETCH(Dout)
+```
+
+总耗时 ≈ tR(25µs) + FETCH(10µs)，而不是 2 × (tR+FETCH) = 70µs。
+
+#### 18.7.3 现有雏形
+
+当前架构已有部分拆分迹象：
+
+| OP 码 | 接近的企业原语 | 差距 |
+|-------|--------------|------|
+| `OP_READ_PAGE_CACHE_START` | READ_ISSUE | 末尾有 70h 轮询，没做到"发完立即返回" |
+| `OP_READ_PAGE_WITHOUT_DATA_OUT` | READ_ISSUE | 同上，含 tR + 70h 轮询 |
+| `OP_READ_PAGE_CACHE_SEQ` | READ_FETCH | 结合了 WAIT + FETCH，没拆分 |
+| `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` | 未拆分 | 整条锁住的原子序列 |
+
+#### 18.7.4 拆分方案
+
+每个读/写/擦操作拆为两个 OP 码：
+
+| 原 READ OP | 拆为 ISSUE | 拆为 WAIT+FETCH |
+|-----------|-----------|----------------|
+| `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` | `OP_READ_PAGE_LOAD` | `OP_READ_PAGE_FETCH` |
+| `OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT` | `OP_READ_PAGE_LOAD` | —（已加载，FETCH 由 RANDOM_DATA_READ 完成）|
+| `OP_NORMAL_PROGRAM_PAGE` | `OP_PROGRAM_PAGE_ISSUE` | `OP_PROGRAM_PAGE_WAIT` |
+| `OP_ERASE_BLOCK` | `OP_ERASE_BLOCK_ISSUE` | `OP_ERASE_BLOCK_WAIT` |
+
+ISSUE 型 OP 的 UOP 序列只包含"发命令+地址+数据+CONFIRM"，**不含 WAIT_READY 和 70h 轮询**，执行完立即返回（µs 级），不阻塞 LUN。
+
+WAIT/FETCH 型 OP 的 UOP 序列只包含 WAIT_READY + 70h 轮询 + DATA_OUT + CHECK_FAIL。
+
+#### 18.7.5 调度器层面影响
+
+| 层面 | 改动 |
+|------|------|
+| dispatch_poll Phase 1 | 执行完 ISSUE 后不清 LUN busy，记录"等待完成"状态，继续其他 LUN |
+| dispatch_poll Phase 1 | WAIT/FETCH 只对"等待完成"的 LUN 执行，ready 后清除 LUN busy |
+| fc_scheduler | 需识别 ISSUE/Wait/FETCH 类型，ISSUE 型不排队直接插入 |
+| chain buffer | 同 LUN 的 ISSUE→WAIT 自动组成链，中间不可被其他命令插入 |
+
+#### 18.7.6 当前是否支持并发
+
+| 层面 | 支持程度 | 原因 |
+|------|---------|------|
+| dispatch 数据结构 | ✅ 就绪 | `g_nand_dispatch_chains[CH][CE][LUN]` 多维 |
+| FMC 硬件总线 | ⚠️ 命令级可切 | 发完命令释放总线，WAIT_READY 卡住 |
+| **OP 码层** | ❌ **卡住** | ISSUE/WAIT 未拆分 |
+| **调度器层** | ❌ **卡住** | poll 不切 LUN |
+
+拆分 OP 码是该功能的前提条件，当前优先级不高，留待 Phase U 实现。
+
 ### 17.10 设计演进
 
 | 迭代 | 问题 | 方案 |
