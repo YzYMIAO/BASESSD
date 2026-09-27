@@ -123,6 +123,33 @@ static uint8_t req_read_page(nand_dispatch_task_t *task)
 }
 
 /* --------------------------------------------------------------------
+ * req_fetch_page
+ *   OP_READ_PAGE_FETCH
+ *   一次性读 full page 到 page_buffer（后续由 poll() 拆回各 CW buffer）。
+ *   与 req_read_page 不同：FETCH 没有后续 CW chaining，必须一次性读完。
+ * -------------------------------------------------------------------- */
+static uint8_t req_fetch_page(nand_dispatch_task_t *task)
+{
+    uint8_t  cw;
+    uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch];
+
+    for (cw = 0U; cw < task->cw_count; cw++)
+    {
+        if (task->cw_buffers[0][cw] == NULL)
+        {
+            return NAND_RESULT_INVALID_ARGUMENT;
+        }
+    }
+    memset(page_buffer, 0x00, PAGE_SIZE);
+    task->request = (nand_fc_request_t){
+        .column      = 0U,
+        .row         = {paa_to_nand_row(task->cw_paa[0][0])},
+        .data        = page_buffer,
+        .data_length = PAGE_SIZE};
+    return NAND_RESULT_OK;
+}
+
+/* --------------------------------------------------------------------
  * req_cache_read
  *   READ_PAGE_CACHE_SEQ / READ_PAGE_CACHE_RANDOM / READ_PAGE_CACHE_LAST
  *   一次性读 full page 到 page_buffer（后续由 poll() 拆回各 CW buffer）
@@ -386,7 +413,7 @@ const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
     [OP_ERASE_BLOCK_MULTI_PLANE]                = req_multi_plane_erase,
     /* Phase V: ISSUE/WAIT/FETCH request */
     [OP_READ_PAGE_LOAD]                         = req_read_page,
-    [OP_READ_PAGE_FETCH]                        = req_read_page,
+    [OP_READ_PAGE_FETCH]                        = req_fetch_page,
     [OP_PROGRAM_PAGE_ISSUE]                     = req_program_page,
     [OP_PROGRAM_PAGE_WAIT]                      = req_no_data,
     [OP_ERASE_BLOCK_ISSUE]                      = req_erase,

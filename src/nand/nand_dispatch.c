@@ -418,6 +418,18 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                         }
                     }
 
+                    /* OP_READ_PAGE_FETCH 完成：把 page_buffer 拆回各 CW buffer */
+                    if (task->operation == OP_READ_PAGE_FETCH)
+                    {
+                        uint8_t fetch_cw;
+                        for (fetch_cw = 0U; fetch_cw < task->cw_count; fetch_cw++)
+                        {
+                            memcpy(task->cw_buffers[0][fetch_cw],
+                                   &g_nand_channel_page_buffer[channel][fetch_cw * (PAGE_SIZE / 4U)],
+                                   PAGE_SIZE / 4U);
+                        }
+                    }
+
                     /* Multi-Plane WITH_DATA_OUT: 把 page_buffer 拆回各 plane 各 CW buffer */
                     if (task->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
                     {
