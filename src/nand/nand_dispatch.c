@@ -265,41 +265,42 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                 {
                     uint16_t min_us = g_nand_operation_map[task->operation].min_busy_us;
 
-                    if ((min_us == 0U) ||
-                        delay_dwt_elapsed_us(chain->wait_start_cycles, min_us))
-                    {
-                        uint8_t pair_op = nand_operation_get_pair(task->operation);
-
-                        if (pair_op != 0U && pair_op != task->operation)
-                        {
-                            task->operation = pair_op;
-                        }
-                        result = g_nand_dispatch_req_table[task->operation](task);
-                        if (result != NAND_RESULT_OK)
-                        {
-                            chain->count = 0U;
-                            return NAND_RESULT_INVALID_ARGUMENT;
-                        }
-                        result = nand_fc_start(&task->transaction,
-                                               task->operation,
-                                               &task->request);
-                        task->started = 1U;
-                        if (result == NAND_RESULT_NOT_READY)
-                        {
-                            continue;
-                        }
-                        nand_completion.execution_status = result;
-                        nand_completion.nand_status      = task->transaction.completion.nand_status;
-                        chain->phase = LUN_PHASE_FETCH;
-                        /* 同步完成 → 继续到下面的 step 循环处理本次完成 */
-                    }
-                    else
+                    if ((min_us != 0U) &&
+                        !delay_dwt_elapsed_us(chain->wait_start_cycles, min_us))
                     {
                         continue; /* 最小等待时间未到，下一轮再检查 */
                     }
+
+                    /* 时间到，启动 FETCH/WAIT 配对 OP */
+                    uint8_t pair_op = nand_operation_get_pair(task->operation);
+                    if (pair_op != 0U && pair_op != task->operation)
+                    {
+                        task->operation = pair_op;
+                    }
+                    result = g_nand_dispatch_req_table[task->operation](task);
+                    if (result != NAND_RESULT_OK)
+                    {
+                        chain->count = 0U;
+                        return NAND_RESULT_INVALID_ARGUMENT;
+                    }
+                    result = nand_fc_start(&task->transaction,
+                                           task->operation,
+                                           &task->request);
+                    task->started = 1U;
+                    chain->phase  = LUN_PHASE_FETCH;
+                    if (result == NAND_RESULT_NOT_READY)
+                    {
+                        continue;
+                    }
+                    /* FETCH 同步完成（例如 RB# 已 ready）—— 进入下面的 step 处理路径。
+                     * 注意：此时 transaction->active == 0（nand_fc_start 设的），
+                     * 下面的 step 路径必须能处理 active==0 的同步完成情况。 */
+                    nand_completion.execution_status = result;
+                    nand_completion.nand_status      = task->transaction.completion.nand_status;
                 }
 
                 /* ── 内层循环：step / start → CW chaining → chain advance → completion ── */
+                result = NAND_RESULT_OK;
                 while (1)
                 {
                     if (task->started == 0U)
@@ -341,19 +342,28 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                     }
                     else
                     {
-                        result = nand_fc_step(&task->transaction, &nand_completion);
-                        if (result == NAND_RESULT_NOT_READY)
+                        /* Phase V: active=0 说明命令已在 start() 中同步完成（如 FETCH WAIT_READY 已 ready）。
+                         * 此时 nand_completion 已由 ISSUED handler 或之前的 step 设好，无需再次 step。 */
+                        if (task->transaction.active != 0U)
                         {
-                            break;
+                            result = nand_fc_step(&task->transaction, &nand_completion);
+                            if (result == NAND_RESULT_NOT_READY)
+                            {
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            result = nand_completion.execution_status;
                         }
                     }
 
                     /* ── 命令完成后的处理 ── */
-                    nand_dispatch_task_complete(task, result, &nand_completion);
 
                     /* Phase V: ISSUE 段完成 → 切到 ISSUED 等 LUN 内部操作完成 */
                     if (chain->phase == LUN_PHASE_ISSUE)
                     {
+                        nand_dispatch_task_complete(task, result, &nand_completion);
                         chain->phase = LUN_PHASE_ISSUED;
                         delay_dwt_cycles_now(&chain->wait_start_cycles);
                         break; /* 不清 LUN busy，等 tR/tPROG/tBERS */
@@ -362,6 +372,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                     /* ── CW 级 chaining（多 CW READ 的 RANDOM_DATA_READ 链） ── */
                     for (;;)
                     {
+                        nand_dispatch_task_complete(task, result, &nand_completion);
                         if ((result != NAND_RESULT_OK) ||
                             ((task->operation != OP_NORMAL_READ_PAGE_WITH_DATA_OUT) &&
                              (task->operation != OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) &&
