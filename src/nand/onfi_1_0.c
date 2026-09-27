@@ -195,15 +195,12 @@ static const nand_uop_t g_nand_read_status_uops[] = {
     {            NAND_UOP_END, 0U}
 };
 static const nand_uop_t g_nand_read_status_enhanced_uops[] = {
-    {NAND_UOP_COMMAND, NAND_CMD_READ_STATUS},
-{NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
-{NAND_UOP_DATA_OUT_STATUS, 0U},
-    {NAND_UOP_JUMP_IF_NOT_READY, 3U},
-    {    NAND_UOP_COMMAND, NAND_CMD_READ_STATUS_ENHANCED},  /* 78h */
+    {    NAND_UOP_COMMAND, NAND_CMD_READ_STATUS_ENHANCED},  /* 78h: 指定地址读任意 LUN/Plane 状态 */
     {          NAND_UOP_ROW_0, 0U},
     {          NAND_UOP_ROW_1, 0U},
     {          NAND_UOP_ROW_2, 0U},
-    {NAND_UOP_DATA_OUT_STATUS, 0U},
+    { NAND_UOP_DELAY_US, NAND_TIME_TWH_US},
+{NAND_UOP_DATA_OUT_STATUS, 0U},
     {            NAND_UOP_END, 0U}
 };
 static const nand_uop_t g_nand_random_read_uops[] = {
