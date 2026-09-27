@@ -1179,6 +1179,12 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                 }
             }
 
+            /* Phase V: splittable 原子命令自动拆为 ISSUE（仅在多 LUN 场景有意义） */
+            if ((LUN_NUM > 1U) && nand_operation_is_splittable(request.operation))
+            {
+                request.operation = nand_operation_to_issue(request.operation);
+            }
+
             if (nand_dispatch_submit(&request) != NAND_RESULT_OK)
             {
                 SSD_LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_count=%u plane_count=%u\r\n",

@@ -21,8 +21,7 @@
  * ====================================================================== */
 
 /* 全局 page_buffer 引用（与 nand_dispatch.c 中相同） */
-extern uint8_t              g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
-extern nand_dispatch_task_t g_nand_dispatch_tasks[CH_NUM][CE_NUM][LUN_NUM];
+extern uint8_t g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
 
 /* --------------------------------------------------------------------
  * completion_all_cws
