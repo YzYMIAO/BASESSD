@@ -129,6 +129,16 @@ static inline uint8_t paa_is_valid(uint32_t page, uint32_t plane, uint32_t block
                      (lun < LUN_NUM) && (cw < CW_NUM));
 }
 
+/* LBA → CW META 转换。
+ * 一个 page 有 4 CW，每个 CW 对应一个 LBA。
+ * CW0/LBA(xx00), CW1/LBA(xx01), CW2/LBA(xx10), CW3/LBA(xx11)
+ * 即：低 CW_WIDTH 位放 cw_index，高位保留 lba 原有值。 */
+static inline uint32_t lba_to_cw_meta(uint32_t lba, uint8_t cw_index)
+{
+    const uint32_t mask = NAND_FIELD_MASK(CW_WIDTH);
+    return (lba & ~mask) | ((uint32_t)cw_index & mask);
+}
+
 /* MT29F4G08 行地址：PA[5:0] -> bit[5:0]，Plane/BA6 -> bit[6]，BA[17:7] -> bit[17:7]。 */
 static inline uint32_t paa_to_nand_row(nand_paa_t paa)
 {
@@ -140,6 +150,229 @@ static inline uint32_t paa_to_nand_row(nand_paa_t paa)
 static inline uint16_t paa_to_cw(nand_paa_t paa)
 {
     return (uint16_t)((paa >> CW_WIDTH_SHIFT) & NAND_FIELD_MASK(CW_WIDTH));
+}
+
+/* ── PAA 便利函数 ── */
+
+/* Page 基址（CW=0，页级操作基址） */
+static inline nand_paa_t paa_page_base(nand_paa_t paa)
+{
+    return paa & ~(nand_paa_t)NAND_FIELD_MASK(CW_WIDTH);
+}
+
+/* 同 page 内换 CW */
+static inline nand_paa_t paa_with_cw(nand_paa_t paa, uint32_t cw)
+{
+    const uint32_t cw_mask = NAND_FIELD_MASK(CW_WIDTH);
+    return (paa & ~(nand_paa_t)cw_mask) | ((cw & cw_mask) << CW_WIDTH_SHIFT);
+}
+
+/* 是否同 Block（无视 Page/Plane/CW） */
+static inline uint8_t paa_same_block(nand_paa_t a, nand_paa_t b)
+{
+    return (uint8_t)((a & PAA_BLOCK_MASK) == (b & PAA_BLOCK_MASK));
+}
+
+/* 是否同 Page（无视 CW） */
+static inline uint8_t paa_same_page(nand_paa_t a, nand_paa_t b)
+{
+    return (uint8_t)((paa_page_base(a)) == (paa_page_base(b)));
+}
+
+/* 各字段是否在芯片规格范围内（nand_paa_t 版本） */
+static inline uint8_t paa_is_valid_paa(nand_paa_t paa)
+{
+    return (uint8_t)((paa_to_page(paa)  < PAGES_PER_BLOCK) &&
+                     (paa_to_plane(paa) < PLANE_NUM) &&
+                     (paa_to_block(paa) < BLOCKS_PER_PLANE) &&
+                     (paa_to_lun(paa)   < LUN_NUM) &&
+                     (paa_to_cw(paa)    < CW_NUM));
+}
+
+/* ── PAA 替换字段 ── */
+
+static inline nand_paa_t paa_with_page(nand_paa_t paa, uint32_t page)
+{
+    return (nand_paa_t)((paa & ~(PAA_PAGE_MASK << PAA_PAGE_SHIFT)) |
+                        ((page & PAA_PAGE_MASK) << PAA_PAGE_SHIFT));
+}
+
+static inline nand_paa_t paa_with_plane(nand_paa_t paa, uint32_t plane)
+{
+    return (nand_paa_t)((paa & ~(PAA_PLANE_MASK << PAA_PLANE_SHIFT)) |
+                        ((plane & PAA_PLANE_MASK) << PAA_PLANE_SHIFT));
+}
+
+static inline nand_paa_t paa_with_block(nand_paa_t paa, uint32_t block)
+{
+    return (nand_paa_t)((paa & ~(PAA_BLOCK_MASK << PAA_BLOCK_SHIFT)) |
+                        ((block & PAA_BLOCK_MASK) << PAA_BLOCK_SHIFT));
+}
+
+static inline nand_paa_t paa_with_lun(nand_paa_t paa, uint32_t lun)
+{
+    return (nand_paa_t)((paa & ~(PAA_LUN_MASK << PAA_LUN_SHIFT)) |
+                        ((lun & PAA_LUN_MASK) << PAA_LUN_SHIFT));
+}
+
+/* ── PBA（完整物理地址）定义 ──
+ *
+ * PBA = [CH][CE][PAA]
+ *
+ * PAA 已包含芯片内地址 [LUN][BLOCK][PLANE][PAGE][CW]，
+ * PBA 在其高位扩展拓扑路由：CH（通道号）、CE（片选号）。
+ *
+ * 布局（低位优先）：
+ *   [CW:2][PAGE:6][PLANE:1][BLOCK:11][LUN:LUN_ADDR_WIDTH][CE:CE_WIDTH][CH:CH_WIDTH]
+ *   ↑←────────── PAA ──────────→↑
+ *   ↑←────────────── PBA ──────────────────→↑
+ *
+ * PBA 位宽根据芯片实际参数（CH_NUM、CE_NUM、LUN_ADDR_WIDTH 等）自动计算。
+ * 某宽度为 0 时对应位域不占用 PBA 编码空间。
+ */
+
+/* PBA 拓扑位宽：按硬件配置的最大值预留 */
+#define PBA_CE_WIDTH          (2U)    /* CE 位宽，支持最多 4 CE */
+#define PBA_CH_WIDTH          (2U)    /* CH 位宽，支持最多 4 CH */
+
+/* PBA 移位：PAA 之上扩展拓扑 */
+#define PBA_CE_SHIFT          (PAA_LUN_SHIFT + LUN_ADDR_WIDTH)
+#define PBA_CH_SHIFT          (PBA_CE_SHIFT + PBA_CE_WIDTH)
+
+/* PBA 掩码 */
+#define PBA_CE_MASK           NAND_FIELD_MASK(PBA_CE_WIDTH)
+#define PBA_CH_MASK           NAND_FIELD_MASK(PBA_CH_WIDTH)
+
+/* PAA 提取掩码：取 PBA 低 PAA 位宽，保留芯片内地址 */
+#define PAA_FROM_PBA_MASK     ((1U << (PAA_LUN_SHIFT + LUN_ADDR_WIDTH)) - 1U)
+
+typedef uint32_t nand_pba_t;
+
+/* 无效 PBA 值。PBA 编码最多 26 bit，全 F 不可能是合法地址。 */
+#define NAND_PBA_INVALID        (0xFFFFFFFFU)
+
+/* ── PBA 提取函数 ── */
+
+static inline uint32_t pba_to_ch(nand_pba_t pba)
+{
+    return (pba >> PBA_CH_SHIFT) & PBA_CH_MASK;
+}
+
+static inline uint32_t pba_to_ce(nand_pba_t pba)
+{
+    return (pba >> PBA_CE_SHIFT) & PBA_CE_MASK;
+}
+
+/* 从 PBA 提取芯片内地址（PAA） */
+static inline nand_paa_t pba_to_paa(nand_pba_t pba)
+{
+    return (nand_paa_t)(pba & PAA_FROM_PBA_MASK);
+}
+
+/* 构造 PBA */
+static inline nand_pba_t pba_make(uint32_t ch, uint32_t ce,
+                                   uint32_t page, uint32_t plane,
+                                   uint32_t block, uint32_t lun, uint32_t cw)
+{
+    nand_paa_t paa = paa_make(page, plane, block, lun, cw);
+    return (nand_pba_t)paa |
+           ((ce  & PBA_CE_MASK) << PBA_CE_SHIFT) |
+           ((ch  & PBA_CH_MASK) << PBA_CH_SHIFT);
+}
+
+/* ── 组合提取（pba → PAA → 字段的一步直达）── */
+
+static inline uint32_t pba_to_page(nand_pba_t pba)  { return paa_to_page(pba_to_paa(pba)); }
+static inline uint32_t pba_to_plane(nand_pba_t pba) { return paa_to_plane(pba_to_paa(pba)); }
+static inline uint32_t pba_to_block(nand_pba_t pba) { return paa_to_block(pba_to_paa(pba)); }
+static inline uint32_t pba_to_lun(nand_pba_t pba)   { return paa_to_lun(pba_to_paa(pba)); }
+static inline uint16_t pba_to_cw(nand_pba_t pba)    { return paa_to_cw(pba_to_paa(pba)); }
+static inline uint32_t pba_to_nand_row(nand_pba_t pba) { return paa_to_nand_row(pba_to_paa(pba)); }
+
+/* ── 便利构造 ── */
+
+/* 从已有 PAA + CH/CE 构造 PBA */
+static inline nand_pba_t pba_from_paa(uint32_t ch, uint32_t ce, nand_paa_t paa)
+{
+    return (nand_pba_t)paa |
+           ((ce & PBA_CE_MASK) << PBA_CE_SHIFT) |
+           ((ch & PBA_CH_MASK) << PBA_CH_SHIFT);
+}
+
+/* 获取 Page 基址 PBA（CW=0，页级操作基址） */
+static inline nand_pba_t pba_page_base(nand_pba_t pba)
+{
+    return pba & ~(nand_pba_t)NAND_FIELD_MASK(CW_WIDTH);
+}
+
+/* 同 page 内换 CW */
+static inline nand_pba_t pba_with_cw(nand_pba_t pba, uint32_t cw)
+{
+    return (pba & ~(nand_pba_t)NAND_FIELD_MASK(CW_WIDTH)) |
+           ((cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT);
+}
+
+/* 替换 PBA 中的各字段 */
+static inline nand_pba_t pba_with_page(nand_pba_t pba, uint32_t page)
+{
+    nand_paa_t paa = pba_to_paa(pba);
+    return pba_from_paa(pba_to_ch(pba), pba_to_ce(pba), paa_with_page(paa, page));
+}
+
+static inline nand_pba_t pba_with_plane(nand_pba_t pba, uint32_t plane)
+{
+    nand_paa_t paa = pba_to_paa(pba);
+    return pba_from_paa(pba_to_ch(pba), pba_to_ce(pba), paa_with_plane(paa, plane));
+}
+
+static inline nand_pba_t pba_with_block(nand_pba_t pba, uint32_t block)
+{
+    nand_paa_t paa = pba_to_paa(pba);
+    return pba_from_paa(pba_to_ch(pba), pba_to_ce(pba), paa_with_block(paa, block));
+}
+
+static inline nand_pba_t pba_with_lun(nand_pba_t pba, uint32_t lun)
+{
+    nand_paa_t paa = pba_to_paa(pba);
+    return pba_from_paa(pba_to_ch(pba), pba_to_ce(pba), paa_with_lun(paa, lun));
+}
+
+static inline nand_pba_t pba_with_ch(nand_pba_t pba, uint32_t ch)
+{
+    return (nand_pba_t)((pba & ~(PBA_CH_MASK << PBA_CH_SHIFT)) |
+                        ((ch & PBA_CH_MASK) << PBA_CH_SHIFT));
+}
+
+static inline nand_pba_t pba_with_ce(nand_pba_t pba, uint32_t ce)
+{
+    return (nand_pba_t)((pba & ~(PBA_CE_MASK << PBA_CE_SHIFT)) |
+                        ((ce & PBA_CE_MASK) << PBA_CE_SHIFT));
+}
+
+/* ── 比较与校验 ── */
+
+/* 是否同 Block（无视 Page/Plane/CW） */
+static inline uint8_t pba_same_block(nand_pba_t a, nand_pba_t b)
+{
+    return (uint8_t)((a & PAA_BLOCK_MASK) == (b & PAA_BLOCK_MASK));
+}
+
+/* 是否同 Page（无视 CW） */
+static inline uint8_t pba_same_page(nand_pba_t a, nand_pba_t b)
+{
+    return (uint8_t)((pba_page_base(a)) == (pba_page_base(b)));
+}
+
+/* 各字段是否在芯片规格范围内 */
+static inline uint8_t pba_is_valid(nand_pba_t pba)
+{
+    return (uint8_t)((pba_to_page(pba)  < PAGES_PER_BLOCK) &&
+                     (pba_to_plane(pba) < PLANE_NUM) &&
+                     (pba_to_block(pba) < BLOCKS_PER_PLANE) &&
+                     (pba_to_lun(pba)   < LUN_NUM) &&
+                     (pba_to_cw(pba)    < CW_NUM) &&
+                     (pba_to_ch(pba)    < CH_NUM) &&
+                     (pba_to_ce(pba)    < CE_NUM));
 }
 
 #endif

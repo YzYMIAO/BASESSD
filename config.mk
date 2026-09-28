@@ -249,11 +249,6 @@ endif
 # ----------------------------------------------------------------------------
 MODULES = common controller fc ftl host nand platform
 
-# 固件目标额外包含启动编排模块；Host Simulator 使用自己的 main()。
-ifeq ($(BUILD_TARGET),firmware)
-MODULES += firmware
-endif
-
 # ============================================================================
 # 注意：MODULE_SRCS 和 MODULE_INCS 的收集在顶层 Makefile 中完成
 # 这里只负责声明模块列表

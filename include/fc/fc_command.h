@@ -114,7 +114,10 @@ struct fc_descriptor_t
     fc_cmd_conf_t config;         /* Copy of Command configuration; config.cw is this CW index. */
     DWORD         buffer_id : 16; /* Buffer Pool ID; 0xFFFF means invalid. */
     DWORD         next_id   : 16; /* Next Descriptor ID; 0xFFFF terminates the chain. */
-    DWORD         faa;            /* FTL logical address (LBA) for this specific CW. Written to META on encode. */
+    DWORD         meta;           /* CW META 值：写时从 command->meta 转换填入，读后存放 NAND 读回的 META 值。 */
+
+    /* 注意：meta 字段的内容由 lba_to_cw_meta() 从 command->meta + cw_index 转换得到；
+     * command->meta 保持不变，始终是 Host LBA（当前语义）。 */
     DWORD         status   : 8;   /* CW status, using FC_CW_STATUS_* bits. */
     DWORD         ecc_bits : 8;   /* ECC corrected bit count from last completion; 0 if no error. */
 };
@@ -129,7 +132,7 @@ struct fc_command_t
     DWORD         module        : 4;  /* Completion route owner; FC does not invoke callbacks. */
     DWORD         feature_addr  : 8;  /* SET/GET_FEATURES register address, sent via COLUMN_0. */
     DWORD         reserved1     : 3;  /* Reserved for future Command control. */
-    DWORD         faa;                /* FTL address; retained for completion and recovery. */
+    DWORD         meta;               /* META 值，写入 NAND CW buffer[0..3]；当前为 LBA，未来可扩展。 */
     DWORD         paa;                /* Operation-dependent target; data commands use Descriptor PAA values. */
     fc_cmd_conf_t config;             /* Operation, NAND location, CW and data-path configuration. */
     uint8_t       parameter0;         /* Command parameter byte 0. */

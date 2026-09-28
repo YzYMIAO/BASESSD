@@ -14,14 +14,16 @@ FTL 模块通过 `include/ftl/ftl.h` 对外暴露以下接口。
 ```c
 /* FTL 主上下文 */
 struct ftl_context {
-    l2p_cache_t       cache;             // SRAM L2P cache
-    ftl_allocator_t   alloc;             // 空闲 block / 写指针
-    l2p_journal_t     journal;           // log-structured journal
-    uint32_t          cp_sequence;       // 当前 checkpoint 序号
-    uint32_t          cp_interval;       // checkpoint 触发间隔
-    uint32_t          total_writes;      // 写入总次数
-    uint32_t          cache_hits;        // L2P cache 统计
-    uint32_t          cache_misses;
+    uint8_t             ch, ce, lun;        // 拓扑参数
+    l2p_cache_t         cache;              // SRAM L2P cache (~132KB)
+    ftl_allocator_t     alloc;              // 空闲 block / Super Block 写指针
+    l2p_journal_t       journal;            // log-structured journal
+    metadata_dir_cache_t metadata_dir;      // Metadata Directory
+    uint32_t            cp_timer_start;     // Checkpoint 计时
+    uint32_t            cp_sequence;        // 上次 Checkpoint sequence
+    uint32_t            gc_last_run_writes; // GC 计时
+    uint32_t            gc_timer_start;
+    uint32_t            total_writes;       // 写入总次数
 };
 ```
 
@@ -29,14 +31,13 @@ struct ftl_context {
 
 | 接口 | 类型 | 说明 | 备注 |
 |------|------|------|------|
-| `ftl_init()` | 初始化 | 初始化 L2P cache、allocator、journal | 在 `fc_init()` 之后调用 |
-| `ftl_read()` | 读写 | 按 LBA 读取用户数据 | 内部通过 FC 完成 |
-| `ftl_write()` | 读写 | 按 LBA 写入用户数据 | alloc → FC 写 → journal → cache |
-| `ftl_trim()` | 读写 | 取消 LBA 映射 | 仅改 L2P+bitmap，不擦除数据 |
-| `ftl_service()` | 主循环 | 推进 FC 调度 + 后台任务 | 在 main loop 中频繁调用 |
-| `ftl_background_flush()` | 后台 | 强制 flush dirty cache | 可在 gc/checkpoint 前调用 |
-| `ftl_gc_execute()` | 后台 | 执行 GC（同步阻塞） | 不推荐直接调用，由 ftl_service 触发 |
-| `ftl_checkpoint()` | 后台 | 创建 checkpoint | 由 ftl_service 按 cp_interval 触发 |
+| `ftl_init()` | 初始化 | 初始化 L2P cache、allocator、journal、Metadata Directory、BBT、LR | 在 `fc_init()` 之后调用 |
+| `ftl_submit_read()` | 异步读 | 非阻塞提交读请求（pending 表驱动完成） | L2P→PBA→FC submit→pending |
+| `ftl_submit_write()` | 异步写 | 非阻塞提交写请求 + Journal + watermark | alloc→FC submit→journal→L2P |
+| `ftl_service()` | 主循环 | 推进 FC 调度 + 后台任务（flush/GC/WL/Checkpoint） | 在 main loop 中频繁调用 |
+| `ftl_read()` | 同步读 | `ftl_submit_read` + 循环 polling 直到 pending 释放 | 被 controller 层调用 |
+| `ftl_write()` | 同步写 | `ftl_submit_write` + 循环 polling 直到 SQ/CQ 空 | 被 controller 层调用 |
+| `ftl_trim()` | TRIM | 取消 LBA 映射（写 FTL_PBA_INVALID） | 仅改 cache，标记 DIRTY |
 
 ### 1.3 完整使用流程
 
@@ -44,24 +45,36 @@ struct ftl_context {
 /* 系统启动 */
 fc_init();                              // ① FC 初始化
 ftl_context_t ftl;
-ftl_init(&ftl);                         // ② FTL 初始化（加载 checkpoint/journal）
+
+/* 供 FTL 使用的静态数组（由调用者提供存储） */
+static uint16_t g_free_blocks[BLOCKS_PER_PLANE * PLANE_NUM];
+static uint16_t g_bad_blocks[BLOCKS_PER_PLANE * PLANE_NUM];
+static uint32_t g_erase_counts[BLOCKS_PER_PLANE * PLANE_NUM];
+static super_block_t g_closed_sb_list[SUPER_BLOCK_LIST_MAX];
+
+ftl_init(&ftl, 0, 0, 0,
+         g_free_blocks, BLOCKS_PER_PLANE * PLANE_NUM,
+         g_bad_blocks,
+         g_erase_counts,
+         g_closed_sb_list);             // ② FTL 初始化（Metadata Directory 加载/初始化）
 
 /* 主循环 */
 while (1) {
     ftl_service(&ftl);                  // ③ 推进 FTL（含 fc_service 内部调用）
     
-    /* 处理 Host IO 请求（在 ftl_service 之外或内部集成） */
+    /* 处理 Host IO 请求 */
     if (host_request_available()) {
         ssd_request_t req = host_dequeue();
         switch (req.opcode) {
             case SSD_REQUEST_READ:
-                ftl_read(&ftl, req.lba, req.buffer, req.count);
+                /* ftl_read 是同步包装（内部 submit + poll 完成） */
+                req.completion_status = ftl_read(&ftl, req.start_lba, req.buffer);
                 break;
             case SSD_REQUEST_WRITE:
-                ftl_write(&ftl, req.lba, req.buffer, req.count);
+                req.completion_status = ftl_write(&ftl, req.start_lba, req.buffer);
                 break;
             case SSD_REQUEST_TRIM:
-                ftl_trim(&ftl, req.lba, req.count);
+                req.completion_status = ftl_trim(&ftl, req.start_lba);
                 break;
         }
     }
@@ -116,7 +129,14 @@ typedef struct {
     uint16_t          clock_hand;        // CLOCK 替换指针
     uint32_t          hit_count;         // 统计
     uint32_t          miss_count;
+    metadata_dir_cache_t *md_dir;        // Metadata Directory 指针
 } l2p_cache_t;
+
+/* 设置 Metadata Directory 指针 */
+static inline void l2p_cache_set_md_dir(l2p_cache_t *cache, metadata_dir_cache_t *md_dir);
+
+/* L2P Table 固定位置映射：Region → PBA */
+static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint16_t region_id);
 ```
 
 ### 2.2 接口
@@ -325,7 +345,7 @@ static int ftl_fc_write_page(nand_paa_t paa, const uint8_t *data,
     cmd->config.page_type = FC_PAGE_TYPE_LP;
     cmd->config.module = FC_COMMAND_MODULE_FTL;
     cmd->paa = paa;
-    cmd->faa = lba;
+    cmd->lba = lba;
 
     fc_command_configure_descriptors(cmd);
     fc_write_cmd_data(cmd, data, len);
@@ -356,7 +376,7 @@ static int ftl_fc_read_page(nand_paa_t paa, uint8_t *data,
     cmd->config.page_type = FC_PAGE_TYPE_LP;
     cmd->config.module = FC_COMMAND_MODULE_FTL;
     cmd->paa = paa;
-    cmd->faa = lba;
+    cmd->lba = lba;
 
     fc_command_configure_descriptors(cmd);
     fc_submit(cmd);
@@ -393,7 +413,7 @@ static int ftl_fc_write_meta(nand_paa_t paa, const uint8_t *data, uint16_t len) 
 
 ### 5.3 约束汇总
 
-| 操作 | CRC | Random | LDPC | module | faa |
+| 操作 | CRC | Random | LDPC | module | lba |
 |------|-----|--------|------|--------|-----|
 | 用户数据读/写 | ENABLE | ENABLE | BCH | FTL | lba |
 | L2P region 读/写 | DISABLE | DISABLE | BCH | METADATA | 不填 |

@@ -86,7 +86,7 @@ Buffer Pool 内部每个 CW（528 字节）分层管理：
   [USER:512B]    ← fc_buffer_id_to_real_buffer() 返回此首地址
 
 内部管理区域（FC 管控，FTL 不感知）：
-  [META:4B]      ← 命令元数据（FAA 等）
+  [META:4B]      ← FC 管理（LBA 等 META 信息），读回时自动校验
   [CRC:4B]       ← USER 数据的 CRC-32 校验值
   [USER:512B]    ← 用户数据（FTL 填入）
   [PARITY:8B]    ← ECC 校验数据
@@ -123,7 +123,7 @@ struct fc_command_t {
     DWORD module     : 4;     // 完成回调路由（HOST_IO/FTL/GC/READ_RECOVERY/METADATA/BBT/CHECKPOINT/WEAR_LEVELING）
     DWORD feature_addr : 8;   // SET/GET_FEATURES 寄存器地址，通过 COLUMN_0 发送
     DWORD reserved1  : 3;     // 保留（未来命令控制扩展）
-    DWORD faa;                 // FTL 逻辑地址（LAA）
+    DWORD meta;              // META 值，当前传 LBA（Host 逻辑地址），未来可扩展
     DWORD paa;                 // 物理地址（操作相关）
     fc_cmd_conf_t config;      // 操作配置（见下文）
     uint8_t parameter0;        // 命令参数字节 0
@@ -161,7 +161,7 @@ struct fc_descriptor_t {
     fc_cmd_conf_t config;    // 继承命令配置，config.cw 表示当前 CW 索引
     DWORD buffer_id : 16;   // Buffer Pool ID，0xFFFF=无效
     DWORD next_id   : 16;   // 下一个 Descriptor ID，0xFFFF=链表结束
-    DWORD faa;               // FTL 逻辑地址（LBA），每个 CW 独立，写入 META
+    DWORD meta;              // META 值：写时从 command->meta 转换填入，读后存放 NAND 读回的 META 值。
     DWORD status    : 8;    // CW 状态（FC_CW_STATUS_*），完成时由 FC 回写
     DWORD ecc_bits  : 8;    // ECC 纠正比特数，完成时由 FC 回写（0=无错误）
 };
@@ -172,7 +172,7 @@ struct fc_descriptor_t {
 - **Buffer 与 Descriptor 解耦**：通过 buffer_id 引用，Buffer 可独立释放（如 UNC 时释放 buffer 保留 descriptor 信息）
 - **linked list 链式连接**：通过 next_id 遍历，无需 Command 中维护 descriptor_count
 - **状态 & ECC 回写**：NAND 完成时 FC 将 `cw_status` 和 `ecc_bit_count` 回写至 descriptor 的 `status` 和 `ecc_bits` 字段。FTL 遍历 desc 链即可获取每 CW 详细状态，无需 CQ 查询。这对 Read Retry、RAID 恢复路径至关重要。
-- **per-CW FAA**：`faa` 替代原 `reserved:16`，每个 Descriptor 拥有独立的 FTL 逻辑地址。`fc_command_configure_descriptors()` 中自动计算 `desc->faa = command->faa + cw_index`，encode 时写入 `buffer[0..4]`（META 区），用于读回时的端到端地址校验。
+- **per-CW META**：`meta` 替代原 `reserved:16`，每个 Descriptor 拥有独立的 META 值。`fc_command_configure_descriptors()` 中通过 `lba_to_cw_meta(command->lba, cw_index)` 自动计算 `desc->meta`，encode 时写入 `buffer[0..4]`（META 区），用于读回时的端到端地址校验。FC 在 decode 路径中自动对比 desc->meta 与读回值，不匹配时置 MATA_ERROR。
 
 ### 2.4 CW 状态位
 
@@ -612,7 +612,7 @@ FC 数据路径分两个方向：
 
 ```
 User Data (512B/CW)
-  → [META] 写入 per-CW FAA（desc->faa，存 buffer[0..4]）
+  → [META] 写入 per-CW META（desc->meta，存 buffer[0..4]）
   → [CRC Engine] CRC-32 计算（仅 USER 区域，写入 CRC 字段 [4:8]）
   → [Random Engine] 加扰（LFSR，种子 PAA × program_sequence，操作 520B 数据区）
   → [LDPC Engine] 编码（520B 数据 → 8B parity，写入 [520:528]）
@@ -640,7 +640,7 @@ FTL 只提交 PLANE_NUM-1 条数据命令（config.raid=2），FC 内部自动�
 6. 完成时 parity 命令资源自动释放，FTL 只感知数据命令的 completion
 
 RAID XOR 在 ECC 编码之后进行，保证了 parity CW 同样经过 ECC 保护。所有步骤在 FC 内部完成。
-META（FAA）和 CRC 在加扰前写入，受后续加扰和 ECC 的完整保护。
+META（LBA）和 CRC 在加扰前写入，受后续加扰和 ECC 的完整保护。
 
 ### 5.2 解码流程 (Page Unpack)
 
@@ -680,7 +680,7 @@ NAND 读取完成
 每个 Page（2112 字节）= 4 个 CW × 528 字节，CW 布局：
 
 ```
-[0:4]   META    — FC 内部管理（FAA 等元数据）
+[0:4]   META    — FC 内部管理（LBA 等 META 信息）
 [4:8]   CRC     — FC 计算写入（CRC-32 覆盖 USER 区域）
 [8:520] USER    — FTL 填入的用户数据（512 字节）
 [520:528] PARITY — ECC 编码引擎生成的校验数据

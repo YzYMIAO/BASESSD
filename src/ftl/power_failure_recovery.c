@@ -1,2 +1,302 @@
-/* 选择最新有效检查点，回放日志并处理未完成的写入。 */
-#warning "选择最新有效检查点,回放日志并处理未完成的写入。"
+#include "ftl/power_failure_recovery.h"
+#include "ftl/ftl.h"
+#include "ftl/checkpoint.h"
+#include "ftl/metadata.h"
+#include "ftl/ftl_fc_interface.h"
+#include "fc/fc.h"
+#include "nand/onfi_1_0.h"
+
+#include <string.h>
+
+int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
+{
+    l2p_checkpoint_header_t cp;
+    int                     cp_found;
+    ftl_boot_result_t       local_result;
+
+    if ((ftl == NULL) || (result == NULL))
+    {
+        return SSD_STATUS_INVALID_ARGUMENT;
+    }
+
+    memset(&local_result, 0, sizeof(local_result));
+
+    /* ① 扫描 Checkpoint */
+    cp_found = checkpoint_find_latest(&cp);
+
+    if (!cp_found)
+    {
+        /* 无有效 Checkpoint → 出厂首次启动 */
+        int ret = ftl_boot_fresh_start(ftl);
+        if (ret == SSD_STATUS_OK)
+        {
+            local_result.boot_type = BOOT_FRESH_START;
+            local_result.cp_sequence = 0U;
+            local_result.journal_entries = 0U;
+            *result = local_result;
+        }
+        return ret;
+    }
+
+    /* ② 扫描 Journal 获取最后 sequence（直接读 header 不修改状态） */
+    {
+        uint32_t journal_last_seq = 0U;
+
+        /*
+         * 从 Journal 最新有效页读最后 sequence。
+         * 不调 journal_replay——后者会修改 journal 内部状态。
+         * 用临时 scan 读各页的 header 取最大 page_seq。
+         */
+        {
+            uint8_t  b, page;
+
+            for (b = 0U; b < 2U; b++)
+            {
+                for (page = 0U; page < PAGES_PER_BLOCK; page++)
+                {
+                    uint8_t    page_data[JOURNAL_PAGE_SIZE];
+                    nand_pba_t pba;
+                    int        ret;
+                    uint32_t   magic;
+
+                    pba = pba_make(ftl->ch, ftl->ce,
+                                   page, (uint8_t)(page & 1U),
+                                   (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1,
+                                   0, 0);
+
+                    ret = ftl_internal_read_page(pba, page_data, sizeof(page_data),
+                                                  FC_CRC_DISABLE, FC_RANDOM_DISABLE,
+                                                  FC_COMMAND_MODULE_METADATA, 0U);
+                    if (ret != 0) continue;
+
+                    memcpy(&magic, page_data + 0, sizeof(magic));
+                    if (magic != JOURNAL_MAGIC) continue;
+
+                    {
+                        uint32_t ps;
+                        memcpy(&ps, page_data + 4, sizeof(ps));
+                        if (ps > journal_last_seq)
+                        {
+                            journal_last_seq = ps;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (journal_last_seq <= cp.journal_sequence)
+        {
+            /* 干净关机 */
+            int ret = ftl_boot_clean_start(ftl, cp.sequence);
+            if (ret == SSD_STATUS_OK)
+            {
+                local_result.boot_type = BOOT_CLEAN_START;
+                local_result.cp_sequence = cp.sequence;
+                local_result.journal_entries = 0U;
+                *result = local_result;
+            }
+            return ret;
+        }
+        else
+        {
+            /* 异常掉电 */
+            int ret = ftl_boot_power_failure(ftl, cp.journal_sequence, &local_result);
+            if (ret == SSD_STATUS_OK)
+            {
+                local_result.boot_type = BOOT_POWER_FAILURE;
+                local_result.cp_sequence = cp.sequence;
+                *result = local_result;
+            }
+            return ret;
+        }
+    }
+}
+
+int ftl_boot_fresh_start(struct ftl_context *ftl)
+{
+    if (ftl == NULL) return SSD_STATUS_INVALID_ARGUMENT;
+
+    /* ① L2P Cache 全 INVALID */
+    l2p_cache_init(&ftl->cache);
+
+    /* ② Allocator 已由 ftl_init 初始化，此处不需重复做 */
+
+    /* ③ Journal 已由 ftl_init 初始化（空） */
+    /* ④ checkpoint sequence = 0 */
+    ftl->cp_sequence = 0U;
+    ftl->cp_timer_start = 0U;
+
+    return SSD_STATUS_OK;
+}
+
+int ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
+{
+    if (ftl == NULL) return SSD_STATUS_INVALID_ARGUMENT;
+
+    /* ① Cache 全 INVALID（首次 miss 时按需从 NAND L2P Table 加载） */
+    l2p_cache_init(&ftl->cache);
+
+    /* ② Allocator 已由 ftl_init 初始化（free pool + 各列表已就绪）*/
+
+    /* ③ 写指针恢复：干净关机时 next_page 由 allocator 在内存中跟踪 */
+    /* 当前 allocator 的 open SB 在 init 时未初始化，等首次 alloc 分配新 SB */
+    /*  clean start 场景不需要扫描 NAND */
+
+    /* ④ Controller → Ready */
+    ftl->cp_sequence = cp_sequence;
+    ftl->cp_timer_start = 0U;
+
+    return SSD_STATUS_OK;
+}
+
+int ftl_boot_power_failure(struct ftl_context *ftl,
+                            uint32_t cp_sequence,
+                            ftl_boot_result_t *result)
+{
+    uint32_t entry_count;
+
+    if ((ftl == NULL) || (result == NULL))
+    {
+        return SSD_STATUS_INVALID_ARGUMENT;
+    }
+
+    /* ① Cache 全 INVALID */
+    l2p_cache_init(&ftl->cache);
+
+    /* ② Journal 回放（sequence > cp_sequence 的条目 → L2P Cache） */
+    /* journal_replay 已实现扫描 J0/J1，提取 entry 并 l2p_cache_write */
+    {
+        (void)journal_replay(&ftl->journal, &ftl->cache);
+
+        /*
+         * 估算回放的 entry 数：
+         *   replay 后的 current_entry/current_page 减去初始值
+         *   简化：如果 current_entry > 0 说明有数据回放
+         */
+        if (ftl->journal.current_entry > 0U)
+        {
+            entry_count = (uint32_t)ftl->journal.current_page *
+                          JOURNAL_ENTRIES_PER_PAGE +
+                          ftl->journal.current_entry;
+        }
+        else
+        {
+            entry_count = 0U;
+        }
+
+        /*
+         * journal_replay 写入了 L2P Cache，所有 line 标记 DIRTY。
+         * 这些 DIRTY entries 会在 ftl_service IDLE 模式中由 background flush
+         * 逐步写回 NAND L2P Table。
+         */
+    }
+
+    /* ③ Allocator 已初始化 + 写指针扫描恢复 */
+    {
+        /* Hot Super Block 写指针扫描 */
+        if (ftl->alloc.hot_sb.valid != 0U)
+        {
+            ftl_boot_scan_write_pointer(&ftl->alloc,
+                                         ftl->ch, ftl->ce,
+                                         &ftl->alloc.hot_sb);
+        }
+
+        /* Cold Super Block 写指针扫描 */
+        if (ftl->alloc.cold_sb.valid != 0U)
+        {
+            ftl_boot_scan_write_pointer(&ftl->alloc,
+                                         ftl->ch, ftl->ce,
+                                         &ftl->alloc.cold_sb);
+        }
+    }
+
+    /* ④ Controller → Ready */
+    ftl->cp_sequence  = cp_sequence;
+    ftl->cp_timer_start = 0U;
+
+    /* ⑤ 输出结果 */
+    result->boot_type       = BOOT_POWER_FAILURE;
+    result->cp_sequence     = cp_sequence;
+    result->journal_entries = entry_count;
+
+    return SSD_STATUS_OK;
+}
+
+void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
+                                  uint8_t ch, uint8_t ce,
+                                  super_block_t *sb)
+{
+    uint8_t  page;
+    uint8_t  plane;
+
+    if ((alloc == NULL) || (sb == NULL) || (sb->valid == 0U))
+    {
+        return;
+    }
+
+    /*
+     * 扫描 NAND 找第一个全 0xFF 页（= 未写入的空白页）。
+     * 从 Page 0 开始逐 Plane 扫描，每种 mode 尝试一次读。
+     *
+     * 注意：使用标准 BCH ECC 读，如果页已写但 ECC 失败，
+     * 返回 -1 表示该页非空白。全 0xFF 的未写页在 LDPC_RAW 下
+     * 读出的数据也全 0xFF。
+     */
+    for (page = 0U; page < PAGES_PER_BLOCK; page++)
+    {
+        for (plane = 0U; plane < PLANE_NUM; plane++)
+        {
+            uint8_t    buf[16];   /* 读 16 字节就够了 */
+            nand_pba_t pba;
+            int        ret;
+
+            pba = pba_make(ch, ce, page, plane, sb->plane_blocks[plane], 0, 0);
+
+            memset(buf, 0xFF, sizeof(buf));
+
+            /*
+             * 用 LDPC_RAW 模式读（跳过 ECC，获得原始数据）。
+             * 如果完全全 0xFF → 空页。
+             */
+            ret = ftl_internal_read_page_raw(pba, buf);
+
+            /*
+             * 即使 LDPC_RAW 返回失败，也检查数据是否全 FF。
+             * 全 FF + 读失败 → 出厂坏块或空块
+             * 全 FF + 读成功 → 空页
+             */
+            {
+                uint8_t  i;
+                uint8_t  all_ff = 1U;
+
+                for (i = 0U; i < sizeof(buf); i++)
+                {
+                    if (buf[i] != 0xFFU)
+                    {
+                        all_ff = 0U;
+                        break;
+                    }
+                }
+
+                /*
+                 * 找到第一个全 0xFF 页 → 写指针位置。
+                 * 只检查 Plane 0（双 Plane 同步写入）。
+                 */
+                if (all_ff)
+                {
+                    sb->next_page = page;
+                    return;
+                }
+            }
+
+            (void)ret;  /* ret 不重要，有数据就继续扫 */
+        }
+    }
+
+    /*
+     * 全 Block 都没找到空页 → Block 已写满。
+     * next_page 保持 PAGES_PER_BLOCK（=64，已满）。
+     * 调用者会在 allocator_alloc 中检测到写满并分配新 SB。
+     */
+    sb->next_page = PAGES_PER_BLOCK;
+}

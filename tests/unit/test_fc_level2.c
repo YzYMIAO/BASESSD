@@ -730,7 +730,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
             fc_descriptor_t *pdesc = fc_descriptor_id_to_descriptor(p_desc_id);
             munit_assert_not_null(ddesc);
             munit_assert_not_null(pdesc);
-            pdesc->faa = ddesc->faa;
+            pdesc->meta = ddesc->meta;
             d_desc_id  = (fc_descriptor_id_t)ddesc->next_id;
             p_desc_id  = (fc_descriptor_id_t)pdesc->next_id;
         }

@@ -67,6 +67,10 @@ uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index);
  * 数据不够时剩余部分用 0xFF dummy 填充。 */
 fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t length);
 
+/* 便利函数：从命令的所有 desc buffer 按 CW 顺序读取用户数据。
+ * 与 fc_write_cmd_data 对称，用于读完成后的数据提取。 */
+fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length);
+
 /* 便利函数：获取命令中指定 CW 索引的 buffer 指针（读操作后使用）。 */
 uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index);
 

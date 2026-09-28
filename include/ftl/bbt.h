@@ -1,0 +1,161 @@
+#ifndef FTL_BBT_H
+#define FTL_BBT_H
+
+/*
+ * BBT（Bad Block Table）— 坏块表持久化
+ *
+ * 三个阶段：
+ *   1. 出厂扫描：遍历所有 Block，读第 0 页判断坏块标记
+ *   2. 运行时隔离：PROGRAM/ERASE 失败 → BBT 标记 + allocator 跳过
+ *   3. 替换机制：Block Sparing — 从 Spare Pool 取好块补充 Free Pool
+ *
+ * BBT 存储在 NAND Block 36，每份冗余 3 页。
+ * bad_map[512] = 4096 bit，覆盖所有 4096 Block。
+ */
+
+#include "ftl/allocator.h"
+
+#include <stdint.h>
+#include <stddef.h>
+
+/* ── BBT Block 位置 ── */
+#define BBT_BLOCK               (36U)
+#define BBT_REDUNDANCY          (3U)     /* 每 Block 冗余页数 */
+#define BBT_TOTAL_PAGES         (6U)     /* 2 Block × 3 页（预留备用 Block）*/
+#define BBT_BLOCK_BACKUP        (39U)    /* 备用 BBT Block（Block 36 坏时用）*/
+
+/* ── BBT Header 格式 ── */
+#define BBT_MAGIC               (0x424254ABUL)   /* "BBT\xAB" */
+#define BBT_MAX_BLOCKS          (4096U)
+#define BBT_BITMAP_SIZE         (BBT_MAX_BLOCKS / 8U)   /* 512B */
+
+typedef struct
+{
+    uint32_t magic;                  /* BBT_MAGIC */
+    uint32_t sequence;               /* 单调递增，最新有效 */
+    uint32_t total_blocks;           /* 总 Block 数 */
+    uint32_t bad_count;              /* 坏块数 */
+    uint32_t reserved[3];
+    uint8_t  bad_map[BBT_BITMAP_SIZE];  /* 4096 bit = 512B */
+    uint32_t crc;                    /* 校验和 */
+} __attribute__((packed)) bbt_header_t;  /* 4+4+4+4+12+512+4 = 544B */
+
+/* ── 接口 ── */
+
+/*
+ * bbt_init - BBT 初始化
+ *
+ * 从 NAND Block 36 加载 BBT。如果无有效 BBT（首次使用），
+ * 执行出厂扫描构建初始 BBT。
+ *
+ * @param alloc  Allocator 上下文（bad_blocks、bad_count 等输出）
+ * @param ch     CH
+ * @param ce     CE
+ * @param lun    LUN
+ * @return 0 成功，-1 失败
+ */
+int bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun);
+
+/*
+ * bbt_scan_factory - 出厂坏块扫描
+ *
+ * 遍历所有 Block 的 Page 0，读数据。
+ * 扫描策略（因 FC 层无独立 OOB 接口）：
+ *   尝试以 BCH ECC 读取该页。
+ *     - 返回 NAND_FAIL/UNC → 出厂坏块
+ *     - 读取成功 → 好块
+ *
+ * 设计文档中的 OOB[0] != 0xFF 检测需要 FC 层支持
+ * 单独的 OOB/Spare 区读取，当前 fallback 到 ECC 检测。
+ *
+ * @param alloc   Allocator 上下文（bad_blocks 输出）
+ * @param ch      CH
+ * @param ce      CE
+ * @param lun     LUN
+ * @return 检测到的坏块数
+ */
+int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun);
+
+/*
+ * bbt_mark_bad - 运行时标记坏块
+ *
+ * ① BBT bitmap 置位
+ * ② allocator_mark_bad() — 加入 SRAM bad_blocks 列表
+ * ③ bbt_save() — 写回 NAND
+ * ④ 从 Spare Pool 补充 Free Pool（保容量水位）
+ *
+ * @param alloc  Allocator 上下文
+ * @param block  坏 Block 编号
+ * @param ch     CH
+ * @param ce     CE
+ * @return 0 成功，-1 失败
+ */
+int bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16_t block);
+
+/*
+ * bbt_is_bad - 查询 Block 是否坏块
+ *
+ * @param bad_map  BBT bitmap
+ * @param block    Block 编号
+ * @return 1 坏块，0 好块
+ */
+static inline int bbt_is_bad(const uint8_t *bad_map, uint16_t block)
+{
+    if (bad_map == NULL) return 0;
+    return (bad_map[block >> 3] >> (block & 7U)) & 1U;
+}
+
+/*
+ * bbt_set_bad - 在 bitmap 中将 Block 标记为坏块
+ *
+ * @param bad_map  BBT bitmap
+ * @param block    Block 编号
+ */
+static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
+{
+    if (bad_map != NULL)
+    {
+        bad_map[block >> 3] |= (uint8_t)(1U << (block & 7U));
+    }
+}
+
+/*
+ * bbt_save - 将 BBT 写回 NAND
+ *
+ * 写 3 页冗余到 Block 36 + 3 页到备用 Block 39。
+ * CRC 保护 + sequence 递增。
+ *
+ * @param alloc  Allocator 上下文
+ * @param ch     CH
+ * @param ce     CE
+ * @return 0 成功，-1 失败
+ */
+int bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce);
+
+/*
+ * bbt_load - 从 NAND 加载 BBT
+ *
+ * 扫描 6 页，选 magic+CRC+sequence 最大的。
+ *
+ * @param bad_map     输出：bt_bitmap[512]
+ * @param bad_count   输出：坏块数
+ * @param sequence    输出：最新 sequence
+ * @param ch          CH
+ * @param ce          CE
+ * @return 0 成功，-1 无有效 BBT
+ */
+int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence,
+              uint8_t ch, uint8_t ce);
+
+/*
+ * bbt_spare_pool_refill - 从 Spare Pool 补充 Free Pool
+ *
+ * PROGRAM/ERASE 失败标记坏块后，从 Spare Pool 取一个好块
+ * 加入 alloc->free_blocks 保容量水位。
+ *
+ * @param alloc  Allocator 上下文
+ * @return 0 补充成功，-1 Spare Pool 耗尽
+ */
+int bbt_spare_pool_refill(ftl_allocator_t *alloc);
+
+#endif /* FTL_BBT_H */

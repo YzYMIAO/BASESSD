@@ -523,7 +523,7 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
     }
     descriptor->buffer_id  = buffer_id;
     descriptor->next_id    = FC_DESCRIPTOR_ID_INVALID;
-    descriptor->faa        = (uint32_t)(command->faa + index);
+    descriptor->meta       = lba_to_cw_meta(command->meta, (uint8_t)descriptor->config.cw);
     *configured_descriptor = descriptor;
     return FC_STATUS_OK;
 }
@@ -824,7 +824,7 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     parity_cmd->config.operation = OP_PROGRAM_PAGE_MULTI_PLANE; /* 提交时走 Multi-Plane */
     parity_cmd->high_priority    = data_cmd->high_priority;
     parity_cmd->module           = data_cmd->module;
-    parity_cmd->faa              = data_cmd->faa;
+    parity_cmd->meta              = data_cmd->meta;
 
     /* 调整 PAA：same page/block/lun/cw，plane = PLANE_NUM-1 */
     {
@@ -845,7 +845,7 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
         goto stripe_error;
     }
 
-    /* 写入 parity descriptors 的 faa（与数据命令对应 CW 一致） */
+    /* 写入 parity descriptors 的 meta（与数据命令对应 CW 一致） */
     {
         fc_descriptor_id_t data_desc_id   = (fc_descriptor_id_t)data_cmd->desc_id;
         fc_descriptor_id_t parity_desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
@@ -856,7 +856,7 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
             fc_descriptor_t *ddesc = fc_descriptor_id_to_descriptor(data_desc_id);
             if ((pdesc != NULL) && (ddesc != NULL))
             {
-                pdesc->faa = ddesc->faa;
+                pdesc->meta = ddesc->meta;
             }
             parity_desc_id = (pdesc != NULL) ? (fc_descriptor_id_t)pdesc->next_id : FC_DESCRIPTOR_ID_INVALID;
             data_desc_id   = (ddesc != NULL) ? (fc_descriptor_id_t)ddesc->next_id : FC_DESCRIPTOR_ID_INVALID;
@@ -1592,6 +1592,61 @@ fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t 
         {
             /* 数据已耗尽，整 buffer 填充 0xFF dummy */
             (void)memset(buf, 0xFF, FC_BUFFER_POOL_CW_SIZE);
+        }
+
+        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+    }
+
+    return FC_STATUS_OK;
+}
+
+fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length)
+{
+    fc_command_id_t    command_id;
+    fc_descriptor_id_t desc_id;
+    uint8_t            i;
+    uint8_t            cw_count;
+    uint8_t           *dst;
+    uint32_t           remaining;
+
+    if ((command == NULL) || (data == NULL) ||
+        (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
+        (command->desc_id == FC_DESCRIPTOR_ID_INVALID))
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
+
+    cw_count  = (uint8_t)(command->config.cw + 1U);
+    dst       = (uint8_t *)data;
+    remaining = length;
+    desc_id   = (fc_descriptor_id_t)command->desc_id;
+
+    for (i = 0U; (i < cw_count) && (remaining > 0U); i++)
+    {
+        fc_descriptor_t *descriptor;
+        uint8_t         *buf;
+
+        if (desc_id >= FC_DESCRIPTOR_POOL_DEPTH)
+        {
+            return FC_STATUS_IO_ERROR;
+        }
+        descriptor = &g_fc_controller.descriptor_pool[desc_id];
+        if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
+        {
+            return FC_STATUS_IO_ERROR;
+        }
+
+        buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+        if (buf == NULL)
+        {
+            return FC_STATUS_IO_ERROR;
+        }
+
+        {
+            uint32_t copy_len = (remaining >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : remaining;
+            (void)memcpy(dst, buf, copy_len);
+            dst       += copy_len;
+            remaining -= copy_len;
         }
 
         desc_id = (fc_descriptor_id_t)descriptor->next_id;

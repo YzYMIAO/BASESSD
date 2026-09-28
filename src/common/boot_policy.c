@@ -1,4 +1,4 @@
-#include "firmware/boot_policy.h"
+#include "common/boot_policy.h"
 
 #include <stddef.h>
 

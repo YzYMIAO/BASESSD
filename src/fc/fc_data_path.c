@@ -94,7 +94,7 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
             {
-                (void)memcpy(buffer, &desc->faa, FC_CRC_META_SIZE);
+                (void)memcpy(buffer, &desc->meta, FC_CRC_META_SIZE);
             }
             desc_id = (fc_descriptor_id_t)desc->next_id;
         }
@@ -487,6 +487,32 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
 
                 desc_id = (fc_descriptor_id_t)desc->next_id;
             }
+        }
+    }
+
+    /* ── Pass 4: META 读回 + 校验 ── */
+    {
+        desc_id = (fc_descriptor_id_t)command->desc_id;
+        for (cw = 0U; cw < total_desc; cw++)
+        {
+            desc = fc_descriptor_id_to_descriptor(desc_id);
+            if (desc == NULL)
+            {
+                break;
+            }
+            buffer = fc_buffer_get_base(desc->buffer_id);
+            if (buffer != NULL)
+            {
+                uint32_t read_meta;
+                (void)memcpy(&read_meta, buffer, FC_CRC_META_SIZE);
+                desc->meta = read_meta;
+                uint32_t expected = lba_to_cw_meta(command->meta, cw);
+                if (read_meta != expected)
+                {
+                    desc->status |= FC_CW_STATUS_MATA_ERROR;
+                }
+            }
+            desc_id = (fc_descriptor_id_t)desc->next_id;
         }
     }
 

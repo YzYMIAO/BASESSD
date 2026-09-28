@@ -96,6 +96,43 @@ RAID 功能因实现复杂度过高，在当前 SLC 阶段不实现。具体不�
 
 ---
 
+## v0.18 — FTL 全部模块实现 + 代码审视修复
+
+**日期**：2026-09-29
+
+### 内容
+FTL 层剩余 5 个模块全部实现，21 个源文件 0 个 `#warning` 核心桩。代码审视修复 4 个逻辑断裂。
+
+### 新增模块
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| **Checkpoint** | `checkpoint.h/c` | 全量 L2P 快照 + Journal 截断协同 + 三级触发（水位线/写入量/定时）+ 紧急 95% 强制 + Block 37-38 各 3 页冗余 |
+| **BBT** | `bbt.h/c` | 出厂扫描（LDPC_RAW 读 Page 0）+ NAND 持久化（Block 36+39 各 3 页冗余，CRC 保护）+ 运行时标记 + Spare Pool 预留接口 |
+| **Read Recovery** | `read_recovery.h/c` | Stage 1 SET_FEATURES Read Retry（8 次重试）+ Stage 2 邻近页辅助 + ECC 趋势预测（环形 buffer，连续上升告警）+ 4 级 Block 健康状态 |
+| **Power Failure Recovery** | `power_failure_recovery.h/c` | 三类启动判断（fresh/clean/PF）+ 写指针 NAND 扫描 + ftl_boot_recovery 主入口 |
+| **Wear Leveling** | `wear_leveling.h/c` | 动态（alloc 选低擦除）+ 静态三星 Daemon（三条件触发：差值 5000 / 比值 3x / 低区占比 5%）+ wl_relocate 搬移 + wl_execute 集成 ftl_service |
+
+### 代码审视修复（4 个逻辑断裂）
+
+| # | 问题 | 影响 | 修复 |
+|---|------|------|------|
+| 1 | `l2p_cache_set_md_dir()` 从未调用 | `cache->md_dir` 永远 NULL，所有 Region 查询回退固定位置，Metadata Directory 完全无效 | `ftl_init()` 中加调用 |
+| 2 | `bbt_init()` 从未调用 | 出厂坏块不加载，所有 4096 Block 视为好块 | `ftl_init()` 中加调用 |
+| 3 | `ftl_internal_sync_wait()` 中 release "other" completion | 用户读的 pending 表项泄漏，8 次后所有读请求失败 | 删除 release 代码，注释说明单 LUN 无并发 |
+| 4 | `ftl_boot_recovery()` 调 `journal_replay` 做判断 | 双重 replay 浪费 2× Journal 扫描时间 + 修改 journal 内部状态 | 改为直接读 header `page_seq` |
+
+### 编译状态
+**零错误零警告**。FTL 层 21 个源文件全部通过。Binary size: 58368 bytes。
+
+### 剩余 #warning（非 FTL 层）
+- Controller 层：`request.c` `scheduler.c` `state_machine.c` — 主机请求拆分/调度/状态机
+- NVMe 层：`nvme_admin.c` `nvme_io.c` `submission_queue.c` `completion_queue.c` — 当前用 UART CLI
+- Platform BSP：`timer.c` `uart.c` `cache.c` `dma.c` `pcie.c` `interrupt.c` — 已有 soc.h + DWT 实现
+- Host Sim：5 个文件 — PC 模拟环境，当前跑在真实硬件
+
+---
+
 ## 未解决问题记录
 
 以下问题在设计讨论中已识别但未最终决定，留待后续 Phase 实施时确定：
