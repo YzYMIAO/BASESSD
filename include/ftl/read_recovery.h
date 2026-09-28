@@ -31,50 +31,50 @@
  *   ④ 读失败后的恢复调度入口
  */
 
-#include "nand/nand_config.h"
-#include "ftl/ftl_type.h"
 #include "ftl/allocator.h"
+#include "ftl/ftl_type.h"
 #include "ftl/l2p_cache.h"
+#include "nand/nand_config.h"
 
 #include <stdint.h>
 
 /* ── ECC 趋势参数 ── */
-#define RR_ECC_HISTORY_DEPTH        (8U)         /* 每个 Block 追踪最近 8 次 ECC */
-#define RR_ECC_RISING_THRESHOLD     (4U)         /* 连续上升 ≥4 次触发预测 */
-#define RR_ECC_HIGH_WATER          (6U)         /* 单次 ECC ≥6 bits → 告警 */
-#define RR_ECC_MAX                 (15U)        /* BCH t=4 最大可纠 bit 数（保守上限）*/
-#define RR_MAX_RETRY               (8U)         /* 最大 read retry 次数 */
-#define RR_NEIGHBOR_ATTEMPTS       (2U)         /* 邻近页辅助尝试次数 */
+#define RR_ECC_HISTORY_DEPTH    (8U)  /* 每个 Block 追踪最近 8 次 ECC */
+#define RR_ECC_RISING_THRESHOLD (4U)  /* 连续上升 ≥4 次触发预测 */
+#define RR_ECC_HIGH_WATER       (6U)  /* 单次 ECC ≥6 bits → 告警 */
+#define RR_ECC_MAX              (15U) /* BCH t=4 最大可纠 bit 数（保守上限）*/
+#define RR_MAX_RETRY            (8U)  /* 最大 read retry 次数 */
+#define RR_NEIGHBOR_ATTEMPTS    (2U)  /* 邻近页辅助尝试次数 */
 
 /* ── Read Retry ONFI Feature Address ── */
-#define RR_FEATURE_READ_RETRY      (0x89U)      /* Micron/ONFI Read Retry */
-#define RR_FEATURE_READ_RETRY_MODE (0x00U)      /* Mode 0 = normal, 1-7 = retry modes */
+#define RR_FEATURE_READ_RETRY      (0x89U) /* Micron/ONFI Read Retry */
+#define RR_FEATURE_READ_RETRY_MODE (0x00U) /* Mode 0 = normal, 1-7 = retry modes */
 
 /* ── 预测性坏块状态 ── */
 typedef enum
 {
-    RR_BLOCK_HEALTHY   = 0,       /* 正常 */
-    RR_BLOCK_WARNING   = 1,       /* ECC 上升趋势中 */
-    RR_BLOCK_CRITICAL  = 2,       /* ECC 接近上限 */
-    RR_BLOCK_DYING     = 3,       /* 预计即将坏块，准备搬移 */
+    RR_BLOCK_HEALTHY  = 0, /* 正常 */
+    RR_BLOCK_WARNING  = 1, /* ECC 上升趋势中 */
+    RR_BLOCK_CRITICAL = 2, /* ECC 接近上限 */
+    RR_BLOCK_DYING    = 3, /* 预计即将坏块，准备搬移 */
 } rr_block_health_t;
 
 /* ── ECC 历史记录（per-Block） ── */
 typedef struct
 {
-    uint8_t  ecc_history[RR_ECC_HISTORY_DEPTH];  /* 最近 N 次 ECC bit 计数 */
-    uint8_t  history_idx;                         /* 环形 buffer 写指针 */
-    uint8_t  rising_count;                        /* 连续上升计数 */
-    uint8_t  health;                              /* rr_block_health_t */
-    uint32_t last_update;                         /* 上次更新（写入次数/时间戳） */
+    uint8_t  ecc_history[RR_ECC_HISTORY_DEPTH]; /* 最近 N 次 ECC bit 计数 */
+    uint8_t  history_idx;                       /* 环形 buffer 写指针 */
+    uint8_t  rising_count;                      /* 连续上升计数 */
+    uint8_t  health;                            /* rr_block_health_t */
+    uint32_t last_update;                       /* 上次更新（写入次数/时间戳） */
 } rr_ecc_track_t;
 
 /* ── Read Recovery 上下文 ── */
 typedef struct
 {
-    rr_ecc_track_t *block_track;                  /* per-Block ECC 追踪数组（外部提供）*/
-    uint16_t        max_blocks;                   /* 追踪数组大小 */
-    uint8_t         retry_count;                  /* 当前重试计数 */
+    rr_ecc_track_t *block_track; /* per-Block ECC 追踪数组（外部提供）*/
+    uint16_t        max_blocks;  /* 追踪数组大小 */
+    uint8_t         retry_count; /* 当前重试计数 */
 } ftl_read_recovery_t;
 
 /* ── 接口 ── */
@@ -87,8 +87,8 @@ typedef struct
  * @param max_blocks 数组大小
  */
 void rr_init(ftl_read_recovery_t *rr,
-              rr_ecc_track_t *block_track,
-              uint16_t max_blocks);
+             rr_ecc_track_t      *block_track,
+             uint16_t             max_blocks);
 
 /*
  * rr_record_ecc - 记录一次读取的 ECC bit 数，更新趋势
@@ -102,8 +102,9 @@ void rr_init(ftl_read_recovery_t *rr,
  * @param total_writes 当前写入总次数（用于时间戳）
  */
 void rr_record_ecc(ftl_read_recovery_t *rr,
-                    uint16_t block, uint8_t ecc_bits,
-                    uint32_t total_writes);
+                   uint16_t             block,
+                   uint8_t              ecc_bits,
+                   uint32_t             total_writes);
 
 /*
  * rr_recover_read - 读取失败后的恢复尝试
@@ -124,9 +125,13 @@ void rr_record_ecc(ftl_read_recovery_t *rr,
  * @return 0 恢复成功，-1 恢复失败（需走 XOR/RAID 或上报）
  */
 int rr_recover_read(ftl_read_recovery_t *rr,
-                     uint8_t ch, uint8_t ce,
-                     nand_pba_t pba, void *buffer, uint32_t length,
-                     lba_t lba, uint8_t *retry_count);
+                    uint8_t              ch,
+                    uint8_t              ce,
+                    nand_pba_t           pba,
+                    void                *buffer,
+                    uint32_t             length,
+                    lba_t                lba,
+                    uint8_t             *retry_count);
 
 /*
  * rr_check_predictive - 检查是否需要预测性搬移

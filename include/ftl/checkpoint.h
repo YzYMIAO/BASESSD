@@ -13,9 +13,9 @@
  * Store: Block 37-38（固定），各 3 页冗余
  */
 
-#include "ftl/l2p_cache.h"
-#include "ftl/journal.h"
 #include "ftl/allocator.h"
+#include "ftl/journal.h"
+#include "ftl/l2p_cache.h"
 
 #include <stdint.h>
 
@@ -23,25 +23,25 @@
 struct ftl_context;
 
 /* ── Checkpoint Block 位置 ── */
-#define CHECKPOINT_BLOCK0           (37U)
-#define CHECKPOINT_BLOCK1           (38U)
-#define CHECKPOINT_REDUNDANCY       (3U)         /* 每 Block 3 页 */
-#define CHECKPOINT_TOTAL_PAGES      (6U)
+#define CHECKPOINT_BLOCK0      (37U)
+#define CHECKPOINT_BLOCK1      (38U)
+#define CHECKPOINT_REDUNDANCY  (3U) /* 每 Block 3 页 */
+#define CHECKPOINT_TOTAL_PAGES (6U)
 
 /* ── Header Magic ── */
-#define CHECKPOINT_MAGIC            (0xCCCCCCCCUL)
+#define CHECKPOINT_MAGIC (0xCCCCCCCCUL)
 
 /* ── Header 格式（~920B < 2048B） ── */
 typedef struct
 {
-    uint32_t magic;                  /* CHECKPOINT_MAGIC */
-    uint32_t sequence;               /* 单调递增，最新有效 */
-    uint32_t timestamp;              /* timer_get_ms() 快照 */
-    uint32_t region_count;           /* 本 checkpoint 包含的 region 数 */
-    uint32_t region_bitmap[64];      /* 2048 bit，哪些 region 在 checkpoint 中 */
-    uint32_t journal_sequence;       /* 截断到此 sequence 之前的 journal */
-    uint32_t crc;                    /* 校验和 */
-    uint8_t  padding[2048 - 7 * 4 - 4];  /* 填满 2048B */
+    uint32_t magic;                     /* CHECKPOINT_MAGIC */
+    uint32_t sequence;                  /* 单调递增，最新有效 */
+    uint32_t timestamp;                 /* timer_get_ms() 快照 */
+    uint32_t region_count;              /* 本 checkpoint 包含的 region 数 */
+    uint32_t region_bitmap[64];         /* 2048 bit，哪些 region 在 checkpoint 中 */
+    uint32_t journal_sequence;          /* 截断到此 sequence 之前的 journal */
+    uint32_t crc;                       /* 校验和 */
+    uint8_t  padding[2048 - 7 * 4 - 4]; /* 填满 2048B */
 } l2p_checkpoint_header_t;
 
 /* ── 接口 ── */

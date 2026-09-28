@@ -182,11 +182,11 @@ static inline uint8_t paa_same_page(nand_paa_t a, nand_paa_t b)
 /* 各字段是否在芯片规格范围内（nand_paa_t 版本） */
 static inline uint8_t paa_is_valid_paa(nand_paa_t paa)
 {
-    return (uint8_t)((paa_to_page(paa)  < PAGES_PER_BLOCK) &&
+    return (uint8_t)((paa_to_page(paa) < PAGES_PER_BLOCK) &&
                      (paa_to_plane(paa) < PLANE_NUM) &&
                      (paa_to_block(paa) < BLOCKS_PER_PLANE) &&
-                     (paa_to_lun(paa)   < LUN_NUM) &&
-                     (paa_to_cw(paa)    < CW_NUM));
+                     (paa_to_lun(paa) < LUN_NUM) &&
+                     (paa_to_cw(paa) < CW_NUM));
 }
 
 /* ── PAA 替换字段 ── */
@@ -232,24 +232,24 @@ static inline nand_paa_t paa_with_lun(nand_paa_t paa, uint32_t lun)
  */
 
 /* PBA 拓扑位宽：按硬件配置的最大值预留 */
-#define PBA_CE_WIDTH          (2U)    /* CE 位宽，支持最多 4 CE */
-#define PBA_CH_WIDTH          (2U)    /* CH 位宽，支持最多 4 CH */
+#define PBA_CE_WIDTH (2U) /* CE 位宽，支持最多 4 CE */
+#define PBA_CH_WIDTH (2U) /* CH 位宽，支持最多 4 CH */
 
 /* PBA 移位：PAA 之上扩展拓扑 */
-#define PBA_CE_SHIFT          (PAA_LUN_SHIFT + LUN_ADDR_WIDTH)
-#define PBA_CH_SHIFT          (PBA_CE_SHIFT + PBA_CE_WIDTH)
+#define PBA_CE_SHIFT (PAA_LUN_SHIFT + LUN_ADDR_WIDTH)
+#define PBA_CH_SHIFT (PBA_CE_SHIFT + PBA_CE_WIDTH)
 
 /* PBA 掩码 */
-#define PBA_CE_MASK           NAND_FIELD_MASK(PBA_CE_WIDTH)
-#define PBA_CH_MASK           NAND_FIELD_MASK(PBA_CH_WIDTH)
+#define PBA_CE_MASK NAND_FIELD_MASK(PBA_CE_WIDTH)
+#define PBA_CH_MASK NAND_FIELD_MASK(PBA_CH_WIDTH)
 
 /* PAA 提取掩码：取 PBA 低 PAA 位宽，保留芯片内地址 */
-#define PAA_FROM_PBA_MASK     ((1U << (PAA_LUN_SHIFT + LUN_ADDR_WIDTH)) - 1U)
+#define PAA_FROM_PBA_MASK ((1U << (PAA_LUN_SHIFT + LUN_ADDR_WIDTH)) - 1U)
 
 typedef uint32_t nand_pba_t;
 
 /* 无效 PBA 值。PBA 编码最多 26 bit，全 F 不可能是合法地址。 */
-#define NAND_PBA_INVALID        (0xFFFFFFFFU)
+#define NAND_PBA_INVALID (0xFFFFFFFFU)
 
 /* ── PBA 提取函数 ── */
 
@@ -270,24 +270,40 @@ static inline nand_paa_t pba_to_paa(nand_pba_t pba)
 }
 
 /* 构造 PBA */
-static inline nand_pba_t pba_make(uint32_t ch, uint32_t ce,
-                                   uint32_t page, uint32_t plane,
-                                   uint32_t block, uint32_t lun, uint32_t cw)
+static inline nand_pba_t pba_make(uint32_t ch, uint32_t ce, uint32_t page, uint32_t plane, uint32_t block, uint32_t lun, uint32_t cw)
 {
     nand_paa_t paa = paa_make(page, plane, block, lun, cw);
     return (nand_pba_t)paa |
-           ((ce  & PBA_CE_MASK) << PBA_CE_SHIFT) |
-           ((ch  & PBA_CH_MASK) << PBA_CH_SHIFT);
+           ((ce & PBA_CE_MASK) << PBA_CE_SHIFT) |
+           ((ch & PBA_CH_MASK) << PBA_CH_SHIFT);
 }
 
 /* ── 组合提取（pba → PAA → 字段的一步直达）── */
 
-static inline uint32_t pba_to_page(nand_pba_t pba)  { return paa_to_page(pba_to_paa(pba)); }
-static inline uint32_t pba_to_plane(nand_pba_t pba) { return paa_to_plane(pba_to_paa(pba)); }
-static inline uint32_t pba_to_block(nand_pba_t pba) { return paa_to_block(pba_to_paa(pba)); }
-static inline uint32_t pba_to_lun(nand_pba_t pba)   { return paa_to_lun(pba_to_paa(pba)); }
-static inline uint16_t pba_to_cw(nand_pba_t pba)    { return paa_to_cw(pba_to_paa(pba)); }
-static inline uint32_t pba_to_nand_row(nand_pba_t pba) { return paa_to_nand_row(pba_to_paa(pba)); }
+static inline uint32_t pba_to_page(nand_pba_t pba)
+{
+    return paa_to_page(pba_to_paa(pba));
+}
+static inline uint32_t pba_to_plane(nand_pba_t pba)
+{
+    return paa_to_plane(pba_to_paa(pba));
+}
+static inline uint32_t pba_to_block(nand_pba_t pba)
+{
+    return paa_to_block(pba_to_paa(pba));
+}
+static inline uint32_t pba_to_lun(nand_pba_t pba)
+{
+    return paa_to_lun(pba_to_paa(pba));
+}
+static inline uint16_t pba_to_cw(nand_pba_t pba)
+{
+    return paa_to_cw(pba_to_paa(pba));
+}
+static inline uint32_t pba_to_nand_row(nand_pba_t pba)
+{
+    return paa_to_nand_row(pba_to_paa(pba));
+}
 
 /* ── 便利构造 ── */
 
@@ -366,13 +382,13 @@ static inline uint8_t pba_same_page(nand_pba_t a, nand_pba_t b)
 /* 各字段是否在芯片规格范围内 */
 static inline uint8_t pba_is_valid(nand_pba_t pba)
 {
-    return (uint8_t)((pba_to_page(pba)  < PAGES_PER_BLOCK) &&
+    return (uint8_t)((pba_to_page(pba) < PAGES_PER_BLOCK) &&
                      (pba_to_plane(pba) < PLANE_NUM) &&
                      (pba_to_block(pba) < BLOCKS_PER_PLANE) &&
-                     (pba_to_lun(pba)   < LUN_NUM) &&
-                     (pba_to_cw(pba)    < CW_NUM) &&
-                     (pba_to_ch(pba)    < CH_NUM) &&
-                     (pba_to_ce(pba)    < CE_NUM));
+                     (pba_to_lun(pba) < LUN_NUM) &&
+                     (pba_to_cw(pba) < CW_NUM) &&
+                     (pba_to_ch(pba) < CH_NUM) &&
+                     (pba_to_ce(pba) < CE_NUM));
 }
 
 #endif

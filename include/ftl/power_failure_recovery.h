@@ -20,10 +20,10 @@
  * 设计文档参考：§8.3 启动恢复完整流程
  */
 
-#include "ftl/l2p_cache.h"
+#include "common/ssd_types.h"
 #include "ftl/allocator.h"
 #include "ftl/journal.h"
-#include "common/ssd_types.h"
+#include "ftl/l2p_cache.h"
 
 #include <stdint.h>
 
@@ -33,17 +33,17 @@ struct ftl_context;
 /* ── 启动类型 ── */
 typedef enum
 {
-    BOOT_FRESH_START = 0,        /* 出厂首次启动 */
-    BOOT_CLEAN_START,            /* 干净关机 */
-    BOOT_POWER_FAILURE,          /* 异常掉电恢复 */
+    BOOT_FRESH_START = 0, /* 出厂首次启动 */
+    BOOT_CLEAN_START,     /* 干净关机 */
+    BOOT_POWER_FAILURE,   /* 异常掉电恢复 */
 } ftl_boot_type_t;
 
 /* ── 启动结果 ── */
 typedef struct
 {
-    ftl_boot_type_t boot_type;   /* 启动类型 */
-    uint32_t        cp_sequence;      /* Checkpoint sequence（0 = 无） */
-    uint32_t        journal_entries;   /* 回放的 Journal entry 数 */
+    ftl_boot_type_t boot_type;       /* 启动类型 */
+    uint32_t        cp_sequence;     /* Checkpoint sequence（0 = 无） */
+    uint32_t        journal_entries; /* 回放的 Journal entry 数 */
 } ftl_boot_result_t;
 
 /* ── 接口 ── */
@@ -109,8 +109,8 @@ int ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence);
  * @return SSD_STATUS_OK 成功，负值失败
  */
 int ftl_boot_power_failure(struct ftl_context *ftl,
-                            uint32_t cp_sequence,
-                            ftl_boot_result_t *result);
+                           uint32_t            cp_sequence,
+                           ftl_boot_result_t  *result);
 
 /*
  * ftl_boot_scan_write_pointer - 写指针扫描恢复
@@ -124,7 +124,8 @@ int ftl_boot_power_failure(struct ftl_context *ftl,
  * @param sb     Open Super Block 指针
  */
 void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
-                                  uint8_t ch, uint8_t ce,
-                                  super_block_t *sb);
+                                 uint8_t          ch,
+                                 uint8_t          ce,
+                                 super_block_t   *sb);
 
 #endif /* FTL_POWER_FAILURE_RECOVERY_H */

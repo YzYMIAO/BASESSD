@@ -505,7 +505,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             {
                 uint32_t read_meta;
                 (void)memcpy(&read_meta, buffer, FC_CRC_META_SIZE);
-                desc->meta = read_meta;
+                desc->meta        = read_meta;
                 uint32_t expected = lba_to_cw_meta(command->meta, cw);
                 if (read_meta != expected)
                 {

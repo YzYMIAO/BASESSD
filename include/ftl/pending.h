@@ -18,11 +18,11 @@
 
 typedef struct
 {
-    uint16_t  used       : 1;   /* 1: 槽位占用 */
-    uint16_t  command_id : 15;  /* FC command_id */
-    lba_t     lba;              /* LBA, 用于校验 */
-    void     *buffer;           /* caller 的读 buffer */
-    uint32_t  count;            /* sector 数 */
+    uint16_t used       : 1;  /* 1: 槽位占用 */
+    uint16_t command_id : 15; /* FC command_id */
+    lba_t    lba;             /* LBA, 用于校验 */
+    void    *buffer;          /* caller 的读 buffer */
+    uint32_t count;           /* sector 数 */
 } ftl_pending_req_t;
 
 /*

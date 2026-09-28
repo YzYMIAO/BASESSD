@@ -1,9 +1,10 @@
 #include "ftl/power_failure_recovery.h"
-#include "ftl/ftl.h"
-#include "ftl/checkpoint.h"
-#include "ftl/metadata.h"
-#include "ftl/ftl_fc_interface.h"
+
 #include "fc/fc.h"
+#include "ftl/checkpoint.h"
+#include "ftl/ftl.h"
+#include "ftl/ftl_fc_interface.h"
+#include "ftl/metadata.h"
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
@@ -30,10 +31,10 @@ int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
         int ret = ftl_boot_fresh_start(ftl);
         if (ret == SSD_STATUS_OK)
         {
-            local_result.boot_type = BOOT_FRESH_START;
-            local_result.cp_sequence = 0U;
+            local_result.boot_type       = BOOT_FRESH_START;
+            local_result.cp_sequence     = 0U;
             local_result.journal_entries = 0U;
-            *result = local_result;
+            *result                      = local_result;
         }
         return ret;
     }
@@ -48,7 +49,7 @@ int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
          * 用临时 scan 读各页的 header 取最大 page_seq。
          */
         {
-            uint8_t  b, page;
+            uint8_t b, page;
 
             for (b = 0U; b < 2U; b++)
             {
@@ -59,18 +60,19 @@ int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
                     int        ret;
                     uint32_t   magic;
 
-                    pba = pba_make(ftl->ch, ftl->ce,
-                                   page, (uint8_t)(page & 1U),
-                                   (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1,
-                                   0, 0);
+                    pba = pba_make(ftl->ch, ftl->ce, page, (uint8_t)(page & 1U), (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
 
-                    ret = ftl_internal_read_page(pba, page_data, sizeof(page_data),
-                                                  FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                                  FC_COMMAND_MODULE_METADATA, 0U);
-                    if (ret != 0) continue;
+                    ret = ftl_internal_read_page(pba, page_data, sizeof(page_data), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
+                    if (ret != 0)
+                    {
+                        continue;
+                    }
 
                     memcpy(&magic, page_data + 0, sizeof(magic));
-                    if (magic != JOURNAL_MAGIC) continue;
+                    if (magic != JOURNAL_MAGIC)
+                    {
+                        continue;
+                    }
 
                     {
                         uint32_t ps;
@@ -90,10 +92,10 @@ int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
             int ret = ftl_boot_clean_start(ftl, cp.sequence);
             if (ret == SSD_STATUS_OK)
             {
-                local_result.boot_type = BOOT_CLEAN_START;
-                local_result.cp_sequence = cp.sequence;
+                local_result.boot_type       = BOOT_CLEAN_START;
+                local_result.cp_sequence     = cp.sequence;
                 local_result.journal_entries = 0U;
-                *result = local_result;
+                *result                      = local_result;
             }
             return ret;
         }
@@ -103,9 +105,9 @@ int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
             int ret = ftl_boot_power_failure(ftl, cp.journal_sequence, &local_result);
             if (ret == SSD_STATUS_OK)
             {
-                local_result.boot_type = BOOT_POWER_FAILURE;
+                local_result.boot_type   = BOOT_POWER_FAILURE;
                 local_result.cp_sequence = cp.sequence;
-                *result = local_result;
+                *result                  = local_result;
             }
             return ret;
         }
@@ -114,7 +116,10 @@ int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
 
 int ftl_boot_fresh_start(struct ftl_context *ftl)
 {
-    if (ftl == NULL) return SSD_STATUS_INVALID_ARGUMENT;
+    if (ftl == NULL)
+    {
+        return SSD_STATUS_INVALID_ARGUMENT;
+    }
 
     /* ① L2P Cache 全 INVALID */
     l2p_cache_init(&ftl->cache);
@@ -123,7 +128,7 @@ int ftl_boot_fresh_start(struct ftl_context *ftl)
 
     /* ③ Journal 已由 ftl_init 初始化（空） */
     /* ④ checkpoint sequence = 0 */
-    ftl->cp_sequence = 0U;
+    ftl->cp_sequence    = 0U;
     ftl->cp_timer_start = 0U;
 
     return SSD_STATUS_OK;
@@ -131,7 +136,10 @@ int ftl_boot_fresh_start(struct ftl_context *ftl)
 
 int ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
 {
-    if (ftl == NULL) return SSD_STATUS_INVALID_ARGUMENT;
+    if (ftl == NULL)
+    {
+        return SSD_STATUS_INVALID_ARGUMENT;
+    }
 
     /* ① Cache 全 INVALID（首次 miss 时按需从 NAND L2P Table 加载） */
     l2p_cache_init(&ftl->cache);
@@ -143,15 +151,15 @@ int ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
     /*  clean start 场景不需要扫描 NAND */
 
     /* ④ Controller → Ready */
-    ftl->cp_sequence = cp_sequence;
+    ftl->cp_sequence    = cp_sequence;
     ftl->cp_timer_start = 0U;
 
     return SSD_STATUS_OK;
 }
 
 int ftl_boot_power_failure(struct ftl_context *ftl,
-                            uint32_t cp_sequence,
-                            ftl_boot_result_t *result)
+                           uint32_t            cp_sequence,
+                           ftl_boot_result_t  *result)
 {
     uint32_t entry_count;
 
@@ -176,7 +184,7 @@ int ftl_boot_power_failure(struct ftl_context *ftl,
         if (ftl->journal.current_entry > 0U)
         {
             entry_count = (uint32_t)ftl->journal.current_page *
-                          JOURNAL_ENTRIES_PER_PAGE +
+                              JOURNAL_ENTRIES_PER_PAGE +
                           ftl->journal.current_entry;
         }
         else
@@ -197,21 +205,23 @@ int ftl_boot_power_failure(struct ftl_context *ftl,
         if (ftl->alloc.hot_sb.valid != 0U)
         {
             ftl_boot_scan_write_pointer(&ftl->alloc,
-                                         ftl->ch, ftl->ce,
-                                         &ftl->alloc.hot_sb);
+                                        ftl->ch,
+                                        ftl->ce,
+                                        &ftl->alloc.hot_sb);
         }
 
         /* Cold Super Block 写指针扫描 */
         if (ftl->alloc.cold_sb.valid != 0U)
         {
             ftl_boot_scan_write_pointer(&ftl->alloc,
-                                         ftl->ch, ftl->ce,
-                                         &ftl->alloc.cold_sb);
+                                        ftl->ch,
+                                        ftl->ce,
+                                        &ftl->alloc.cold_sb);
         }
     }
 
     /* ④ Controller → Ready */
-    ftl->cp_sequence  = cp_sequence;
+    ftl->cp_sequence    = cp_sequence;
     ftl->cp_timer_start = 0U;
 
     /* ⑤ 输出结果 */
@@ -223,11 +233,12 @@ int ftl_boot_power_failure(struct ftl_context *ftl,
 }
 
 void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
-                                  uint8_t ch, uint8_t ce,
-                                  super_block_t *sb)
+                                 uint8_t          ch,
+                                 uint8_t          ce,
+                                 super_block_t   *sb)
 {
-    uint8_t  page;
-    uint8_t  plane;
+    uint8_t page;
+    uint8_t plane;
 
     if ((alloc == NULL) || (sb == NULL) || (sb->valid == 0U))
     {
@@ -246,7 +257,7 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
     {
         for (plane = 0U; plane < PLANE_NUM; plane++)
         {
-            uint8_t    buf[16];   /* 读 16 字节就够了 */
+            uint8_t    buf[16]; /* 读 16 字节就够了 */
             nand_pba_t pba;
             int        ret;
 
@@ -266,8 +277,8 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
              * 全 FF + 读成功 → 空页
              */
             {
-                uint8_t  i;
-                uint8_t  all_ff = 1U;
+                uint8_t i;
+                uint8_t all_ff = 1U;
 
                 for (i = 0U; i < sizeof(buf); i++)
                 {
@@ -289,7 +300,7 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
                 }
             }
 
-            (void)ret;  /* ret 不重要，有数据就继续扫 */
+            (void)ret; /* ret 不重要，有数据就继续扫 */
         }
     }
 

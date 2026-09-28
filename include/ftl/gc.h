@@ -18,18 +18,18 @@
  *   掉电时最多遗留"孤悬"Block，下次 GC 回收
  */
 
-#include "nand/nand_config.h"   /* nand_pba_t, PLANE_NUM, PAGES_PER_BLOCK */
-#include "ftl/l2p_cache.h"     /* l2p_cache_t */
-#include "ftl/journal.h"       /* l2p_journal_t */
-#include "ftl/allocator.h"     /* ftl_allocator_t, super_block_t */
+#include "ftl/allocator.h"    /* ftl_allocator_t, super_block_t */
+#include "ftl/journal.h"      /* l2p_journal_t */
+#include "ftl/l2p_cache.h"    /* l2p_cache_t */
+#include "nand/nand_config.h" /* nand_pba_t, PLANE_NUM, PAGES_PER_BLOCK */
 
 #include <stdint.h>
 
 /* ── GC 参数 ── */
 
-#define PRE_COND_LOW_WATER      (32U)       /* Pre-conditioned 低水位 */
-#define GC_INTERVAL_WRITES      (1024U)     /* 写入量触发间隔 */
-#define GC_TIMER_INTERVAL_MS    (500U)      /* 定时触发间隔（ms）*/
+#define PRE_COND_LOW_WATER   (32U)   /* Pre-conditioned 低水位 */
+#define GC_INTERVAL_WRITES   (1024U) /* 写入量触发间隔 */
+#define GC_TIMER_INTERVAL_MS (500U)  /* 定时触发间隔（ms）*/
 
 /* ── 接口函数 ── */
 
@@ -60,8 +60,7 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim);
  * @param victim  要搬移的 victim Super Block
  * @return 搬移的页数
  */
-int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache,
-                   l2p_journal_t *journal, super_block_t *victim);
+int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *journal, super_block_t *victim);
 
 /*
  * gc_erase_and_free - 擦除 victim Block 并归还到 Free Pool

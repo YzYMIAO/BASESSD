@@ -118,8 +118,8 @@ struct fc_descriptor_t
 
     /* 注意：meta 字段的内容由 lba_to_cw_meta() 从 command->meta + cw_index 转换得到；
      * command->meta 保持不变，始终是 Host LBA（当前语义）。 */
-    DWORD         status   : 8;   /* CW status, using FC_CW_STATUS_* bits. */
-    DWORD         ecc_bits : 8;   /* ECC corrected bit count from last completion; 0 if no error. */
+    DWORD status   : 8; /* CW status, using FC_CW_STATUS_* bits. */
+    DWORD ecc_bits : 8; /* ECC corrected bit count from last completion; 0 if no error. */
 };
 
 /* SQ command owned by FC after submission; command_id is the Command Pool slot ID. */

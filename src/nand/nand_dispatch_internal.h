@@ -38,7 +38,7 @@ typedef struct
     nand_paa_t cw_paa[PLANE_NUM][CW_NUM];
     uint8_t   *cw_buffers[PLANE_NUM][CW_NUM];
 
-    const nand_engine_backend_t *backend;   /* Phase V: per-LUN backend */
+    const nand_engine_backend_t *backend; /* Phase V: per-LUN backend */
 
     nand_fc_request_t          request;
     nand_fc_transaction_t      transaction;
@@ -48,10 +48,10 @@ typedef struct
 /*
  * LUN 相位枚举 (Phase V multi-LUN ISSUE/WAIT/FETCH phase machine)
  */
-#define LUN_PHASE_IDLE   (0U)  /* LUN 空闲 */
-#define LUN_PHASE_ISSUE  (1U)  /* 正在执行 ISSUE uop */
-#define LUN_PHASE_ISSUED (2U)  /* ISSUE 完成，LUN 内部操作中（tR/tPROG/tBERS） */
-#define LUN_PHASE_FETCH  (3U)  /* 正在执行 WAIT/FETCH uop */
+#define LUN_PHASE_IDLE   (0U) /* LUN 空闲 */
+#define LUN_PHASE_ISSUE  (1U) /* 正在执行 ISSUE uop */
+#define LUN_PHASE_ISSUED (2U) /* ISSUE 完成，LUN 内部操作中（tR/tPROG/tBERS） */
+#define LUN_PHASE_FETCH  (3U) /* 正在执行 WAIT/FETCH uop */
 
 /*
  * Per-LUN 链状态。
@@ -68,8 +68,8 @@ typedef struct
     nand_dispatch_task_t tasks[NAND_DISPATCH_CHAIN_DEPTH];
     uint8_t              count;
     uint8_t              cursor;
-    uint8_t              phase;              /* Phase V: LUN_PHASE_* */
-    uint32_t             wait_start_cycles;  /* Phase V: ISSUE 完成时 DWT 时间戳 */
+    uint8_t              phase;             /* Phase V: LUN_PHASE_* */
+    uint32_t             wait_start_cycles; /* Phase V: ISSUE 完成时 DWT 时间戳 */
 } nand_dispatch_lun_chain_t;
 
 /* ======================================================================

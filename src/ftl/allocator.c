@@ -12,10 +12,14 @@
  *     所以 pre_cond_count 始终等于 free_count。
  */
 int allocator_init(ftl_allocator_t *alloc,
-                   uint8_t ch, uint8_t ce, uint8_t lun,
-                   uint16_t *free_blocks,    uint16_t free_block_count,
-                   uint16_t *bad_blocks,     uint32_t *erase_counts,
-                   super_block_t *closed_sb_list)
+                   uint8_t          ch,
+                   uint8_t          ce,
+                   uint8_t          lun,
+                   uint16_t        *free_blocks,
+                   uint16_t         free_block_count,
+                   uint16_t        *bad_blocks,
+                   uint32_t        *erase_counts,
+                   super_block_t   *closed_sb_list)
 {
     if (alloc == NULL)
     {
@@ -23,19 +27,19 @@ int allocator_init(ftl_allocator_t *alloc,
     }
 
     /* 固定参数 */
-    alloc->ch         = ch;
-    alloc->ce         = ce;
-    alloc->lun        = lun;
+    alloc->ch           = ch;
+    alloc->ce           = ce;
+    alloc->lun          = lun;
     alloc->total_blocks = free_block_count;
 
     /* Free Pool */
-    alloc->free_blocks    = free_blocks;
-    alloc->free_count     = 0U;
-    alloc->pre_cond_count = 0U;
+    alloc->free_blocks     = free_blocks;
+    alloc->free_count      = 0U;
+    alloc->pre_cond_count  = 0U;
     alloc->emergency_count = 0U;
 
     /* Open Super Block（暂无效，首次 alloc 时分配） */
-    memset(&alloc->hot_sb,  0, sizeof(alloc->hot_sb));
+    memset(&alloc->hot_sb, 0, sizeof(alloc->hot_sb));
     memset(&alloc->cold_sb, 0, sizeof(alloc->cold_sb));
     alloc->hot_sb.temperature  = FTL_TEMP_HOT;
     alloc->cold_sb.temperature = FTL_TEMP_COLD;
@@ -48,8 +52,8 @@ int allocator_init(ftl_allocator_t *alloc,
     alloc->erase_counts = erase_counts;
 
     /* 坏块 */
-    alloc->bad_blocks      = bad_blocks;
-    alloc->bad_count       = 0U;
+    alloc->bad_blocks       = bad_blocks;
+    alloc->bad_count        = 0U;
     alloc->spare_pool_count = 0U;
 
     return 0;
@@ -138,11 +142,11 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
             return NAND_PBA_INVALID;
         }
 
-        sb->plane_blocks[0]  = block0;
-        sb->plane_blocks[1]  = block1;
-        sb->next_page        = 0U;
-        sb->temperature      = temperature;
-        sb->valid            = 1U;
+        sb->plane_blocks[0] = block0;
+        sb->plane_blocks[1] = block1;
+        sb->next_page       = 0U;
+        sb->temperature     = temperature;
+        sb->valid           = 1U;
 
         /* 同步 pre_cond_count：已从 Free Pool 取走 2 个 Block */
         if (alloc->pre_cond_count > 2U)

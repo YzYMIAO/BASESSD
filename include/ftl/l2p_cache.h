@@ -16,42 +16,42 @@
  * 写回策略：Write-back（Dirty 标记，延迟写回 NAND）
  */
 
-#include "nand/nand_config.h"   /* nand_pba_t */
-#include "ftl/ftl_type.h"       /* lba_t */
-#include "ftl/metadata.h"       /* metadata_dir_cache_t */
+#include "ftl/ftl_type.h"     /* lba_t */
+#include "ftl/metadata.h"     /* metadata_dir_cache_t */
+#include "nand/nand_config.h" /* nand_pba_t */
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* ── 宏 ── */
 
-#define L2P_ENTRIES_PER_REGION  (512U)                     /* 每 region 512 条 entry */
-#define L2P_REGION_SIZE         (L2P_ENTRIES_PER_REGION * sizeof(uint32_t))  /* 2KB */
-#define L2P_REGIONS_TOTAL       (2048U)                    /* 总 region 数 */
-#define L2P_CACHE_SIZE          (64U)                      /* cache 行数（可配 32/64/128）*/
-#define FTL_PBA_INVALID         (0xFFFFFFFFU)              /* 无效 PBA */
+#define L2P_ENTRIES_PER_REGION (512U)                                      /* 每 region 512 条 entry */
+#define L2P_REGION_SIZE        (L2P_ENTRIES_PER_REGION * sizeof(uint32_t)) /* 2KB */
+#define L2P_REGIONS_TOTAL      (2048U)                                     /* 总 region 数 */
+#define L2P_CACHE_SIZE         (64U)                                       /* cache 行数（可配 32/64/128）*/
+#define FTL_PBA_INVALID        (0xFFFFFFFFU)                               /* 无效 PBA */
 
 /* L2P Table NAND 固定位置：
  *   Region r → Block = L2P_BASE_BLOCK + (r / 64), Page = r % 64
  *   偶 Region → Plane 0, 奇 Region → Plane 1（双 Plane 交错）
  *   共 2048 regions / 64 pages-per-block = 32 blocks
  */
-#define L2P_BASE_BLOCK          (0U)                       /* L2P 起始 Block */
-#define L2P_TABLE_BLOCKS        (32U)                      /* 总占用 Block 数 */
+#define L2P_BASE_BLOCK   (0U)  /* L2P 起始 Block */
+#define L2P_TABLE_BLOCKS (32U) /* 总占用 Block 数 */
 
 /* 固定位置映射：Region r → PBA */
 static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint16_t region_id)
 {
-    uint8_t  plane = (uint8_t)(region_id & 1U);               /* 偶 P0, 奇 P1 */
+    uint8_t  plane = (uint8_t)(region_id & 1U);                     /* 偶 P0, 奇 P1 */
     uint16_t block = (uint16_t)(L2P_BASE_BLOCK + (region_id >> 6)); /* /64 */
-    uint8_t  page  = (uint8_t)(region_id & 0x3FU);           /* %64 */
+    uint8_t  page  = (uint8_t)(region_id & 0x3FU);                  /* %64 */
     return pba_make(ch, ce, page, plane, block, 0, 0);
 }
 
 /* ── Region 分解 ── */
 
-#define L2P_REGION_SHIFT        (9U)                       /* lba / 512 */
-#define L2P_REGION_MASK         (L2P_ENTRIES_PER_REGION - 1U)  /* lba % 512 */
+#define L2P_REGION_SHIFT (9U)                          /* lba / 512 */
+#define L2P_REGION_MASK  (L2P_ENTRIES_PER_REGION - 1U) /* lba % 512 */
 
 static inline uint16_t lba_to_region(lba_t lba)
 {
@@ -67,33 +67,33 @@ static inline uint16_t lba_to_entry(lba_t lba)
 
 typedef enum
 {
-    L2P_CACHE_INVALID = 0,      /* cache 行无效，entries 全 FTL_PBA_INVALID */
-    L2P_CACHE_CLEAN,            /* cache 行有效，未修改 */
-    L2P_CACHE_DIRTY,            /* cache 行有效，已修改（需写回 NAND） */
-    L2P_CACHE_FLUSHING,         /* 正在写回 NAND（不可驱逐，不可读写） */
+    L2P_CACHE_INVALID = 0, /* cache 行无效，entries 全 FTL_PBA_INVALID */
+    L2P_CACHE_CLEAN,       /* cache 行有效，未修改 */
+    L2P_CACHE_DIRTY,       /* cache 行有效，已修改（需写回 NAND） */
+    L2P_CACHE_FLUSHING,    /* 正在写回 NAND（不可驱逐，不可读写） */
 } l2p_cache_state_t;
 
 /* ── Cache Line ── */
 
 typedef struct
 {
-    nand_pba_t entries[L2P_ENTRIES_PER_REGION];   /* 512 条 PBA = 2KB */
-    uint16_t   region_id;                          /* 0..2047 */
-    uint8_t    state;                              /* l2p_cache_state_t */
-    uint16_t   access_count;                       /* CLOCK 访问计数 */
+    nand_pba_t entries[L2P_ENTRIES_PER_REGION]; /* 512 条 PBA = 2KB */
+    uint16_t   region_id;                       /* 0..2047 */
+    uint8_t    state;                           /* l2p_cache_state_t */
+    uint16_t   access_count;                    /* CLOCK 访问计数 */
 } l2p_cache_line_t;
 
 /* ── Cache 上下文 ── */
 
 typedef struct
 {
-    l2p_cache_line_t lines[L2P_CACHE_SIZE];        /* 64 × (2KB + 4B) ≈ 128 KB */
-    uint16_t         clock_hand;                   /* CLOCK 替换指针 */
-    uint32_t         hit_count;                    /* 统计：命中次数 */
-    uint32_t         miss_count;                   /* 统计：未命中次数 */
+    l2p_cache_line_t lines[L2P_CACHE_SIZE]; /* 64 × (2KB + 4B) ≈ 128 KB */
+    uint16_t         clock_hand;            /* CLOCK 替换指针 */
+    uint32_t         hit_count;             /* 统计：命中次数 */
+    uint32_t         miss_count;            /* 统计：未命中次数 */
 
     /* Metadata Directory 指针（由 ftl_context_t 提供） */
-    metadata_dir_cache_t *md_dir;                  /* 用于 Region 位置查找 */
+    metadata_dir_cache_t *md_dir; /* 用于 Region 位置查找 */
 } l2p_cache_t;
 
 /*

@@ -12,37 +12,37 @@
  * 三级模式切换依据 SQ 队列深度 + 上轮提交的 NAND 命令数。
  */
 
-#include "ftl/l2p_cache.h"
-#include "ftl/allocator.h"
-#include "ftl/journal.h"
-#include "ftl/gc.h"
-#include "ftl/pending.h"
-#include "ftl/metadata.h"
-#include "ftl/checkpoint.h"
 #include "common/ssd_types.h"
+#include "ftl/allocator.h"
+#include "ftl/checkpoint.h"
+#include "ftl/gc.h"
+#include "ftl/journal.h"
+#include "ftl/l2p_cache.h"
+#include "ftl/metadata.h"
+#include "ftl/pending.h"
 
 #include <stdint.h>
 
 /* ── 宏 ── */
 
-#define NAND_SUBMIT_BUDGET      (4U)        /* 每轮最多提交 4 条 */
-#define BG_NORMAL_FLUSH_COUNT   (4U)        /* NORMAL 模式下最多 flush 4 line */
-#define BG_BUSY_FLUSH_COUNT     (1U)        /* BUSY 模式下最多 flush 1 line */
-#define BG_NORMAL_GC_PAGES      (4U)        /* NORMAL 模式下 GC 搬 4 页 */
-#define BG_IDLE_GC_TARGET       (32U)       /* IDLE 模式下目标补充 32 Block */
-#define CP_WRITE_INTERVAL       (1024U)     /* 写入量触发间隔 */
-#define CP_TIME_INTERVAL_MS     (10000U)    /* 定时触发间隔（ms）*/
+#define NAND_SUBMIT_BUDGET    (4U)     /* 每轮最多提交 4 条 */
+#define BG_NORMAL_FLUSH_COUNT (4U)     /* NORMAL 模式下最多 flush 4 line */
+#define BG_BUSY_FLUSH_COUNT   (1U)     /* BUSY 模式下最多 flush 1 line */
+#define BG_NORMAL_GC_PAGES    (4U)     /* NORMAL 模式下 GC 搬 4 页 */
+#define BG_IDLE_GC_TARGET     (32U)    /* IDLE 模式下目标补充 32 Block */
+#define CP_WRITE_INTERVAL     (1024U)  /* 写入量触发间隔 */
+#define CP_TIME_INTERVAL_MS   (10000U) /* 定时触发间隔（ms）*/
 
-#define FTL_READ_USER_SIZE      (2048U)     /* 一次读返回的用户数据大小 = 4 CW × 512B */
+#define FTL_READ_USER_SIZE (2048U) /* 一次读返回的用户数据大小 = 4 CW × 512B */
 
 /* ── FTL 主上下文 ── */
 
 typedef struct ftl_context
 {
     /* 拓扑参数 */
-    uint8_t  ch;
-    uint8_t  ce;
-    uint8_t  lun;
+    uint8_t ch;
+    uint8_t ce;
+    uint8_t lun;
 
     /* L2P Cache */
     l2p_cache_t cache;
@@ -57,8 +57,8 @@ typedef struct ftl_context
     metadata_dir_cache_t metadata_dir;
 
     /* Checkpoint 计时 */
-    uint32_t cp_timer_start;             /* 上次 Checkpoint 时间戳 */
-    uint32_t cp_sequence;                /* 上次 Checkpoint sequence */
+    uint32_t cp_timer_start; /* 上次 Checkpoint 时间戳 */
+    uint32_t cp_sequence;    /* 上次 Checkpoint sequence */
 
     /* GC 计时 */
     uint32_t gc_last_run_writes;
@@ -85,10 +85,13 @@ typedef struct ftl_context
  * @return 0 成功
  */
 int ftl_init(ftl_context_t *ftl,
-             uint8_t ch, uint8_t ce, uint8_t lun,
-             uint16_t *free_blocks,    uint16_t free_count,
-             uint16_t *bad_blocks,
-             uint32_t *erase_counts,
+             uint8_t        ch,
+             uint8_t        ce,
+             uint8_t        lun,
+             uint16_t      *free_blocks,
+             uint16_t       free_count,
+             uint16_t      *bad_blocks,
+             uint32_t      *erase_counts,
              super_block_t *closed_sb_list);
 
 /*

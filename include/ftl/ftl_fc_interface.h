@@ -23,8 +23,8 @@
  */
 
 #include "fc/fc_command.h"
-#include "nand/nand_config.h"
 #include "ftl/ftl_type.h"
+#include "nand/nand_config.h"
 
 #include <stdint.h>
 
@@ -63,9 +63,7 @@ int ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out, uin
  * @param lba     META 值（验证用）
  * @return 0 成功，-1 失败
  */
-int ftl_internal_read_page(nand_pba_t pba, void *buffer, uint32_t length,
-                            uint8_t crc, uint8_t random, uint8_t module,
-                            lba_t lba);
+int ftl_internal_read_page(nand_pba_t pba, void *buffer, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba);
 
 /*
  * ftl_internal_read_page_raw - 同步读全页（含 Spare/OOB 区）
@@ -95,9 +93,7 @@ int ftl_internal_read_page_raw(nand_pba_t pba, void *buffer);
  * @param lba     META 值
  * @return 0 成功，-1 失败
  */
-int ftl_internal_write_page(nand_pba_t pba, const void *data, uint32_t length,
-                             uint8_t crc, uint8_t random, uint8_t module,
-                             lba_t lba);
+int ftl_internal_write_page(nand_pba_t pba, const void *data, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba);
 
 /*
  * ftl_internal_erase_block - 同步擦除一个 Block

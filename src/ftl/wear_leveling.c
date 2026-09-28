@@ -1,7 +1,8 @@
-#include "ftl/ftl.h"
 #include "ftl/wear_leveling.h"
-#include "ftl/ftl_fc_interface.h"
+
 #include "fc/fc.h"
+#include "ftl/ftl.h"
+#include "ftl/ftl_fc_interface.h"
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
@@ -20,7 +21,10 @@ int wl_should_trigger(const struct ftl_context *ftl)
     uint32_t low_zone;
     uint32_t low_count;
 
-    if (ftl == NULL) return 0;
+    if (ftl == NULL)
+    {
+        return 0;
+    }
 
     /* WL 最小间隔检查 */
     if (ftl->total_writes < WL_MIN_INTERVAL)
@@ -63,7 +67,10 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
     uint16_t    total_pages_per_sb;
     uint16_t    min_valid_pages;
 
-    if ((ftl == NULL) || (victim == NULL)) return 0;
+    if ((ftl == NULL) || (victim == NULL))
+    {
+        return 0;
+    }
 
     memset(&best, 0, sizeof(best));
     min_ec = wl_min_erase(ftl);
@@ -77,7 +84,10 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
         uint32_t             sb_ec;
 
         /* 跳过仍为 Open 的 SB */
-        if (sb->valid != 0U) continue;
+        if (sb->valid != 0U)
+        {
+            continue;
+        }
 
         /* 计算该 Super Block 的平均擦除次数 */
         {
@@ -92,7 +102,10 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
         }
 
         /* 不在低擦除区 → 跳过（擦除够多了） */
-        if (sb_ec > (min_ec + WL_LOW_ZONE_WIDTH)) continue;
+        if (sb_ec > (min_ec + WL_LOW_ZONE_WIDTH))
+        {
+            continue;
+        }
 
         /*
          * 有效页估算：使用 next_page（写入进度）近似。
@@ -101,20 +114,26 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
          */
         {
             uint16_t valid = sb->next_page;
-            if (valid < min_valid_pages) continue;
+            if (valid < min_valid_pages)
+            {
+                continue;
+            }
 
             if (valid > best.valid_pages)
             {
-                best.found               = 1U;
-                best.avg_erase           = sb_ec;
-                best.valid_pages         = valid;
-                best.plane_blocks[0]     = sb->plane_blocks[0];
-                best.plane_blocks[1]     = sb->plane_blocks[1];
+                best.found           = 1U;
+                best.avg_erase       = sb_ec;
+                best.valid_pages     = valid;
+                best.plane_blocks[0] = sb->plane_blocks[0];
+                best.plane_blocks[1] = sb->plane_blocks[1];
             }
         }
     }
 
-    if (!best.found) return 0;
+    if (!best.found)
+    {
+        return 0;
+    }
 
     *victim = best;
     return 1;
@@ -126,7 +145,10 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
     uint8_t  page;
     uint32_t migrated = 0U;
 
-    if ((ftl == NULL) || (victim == NULL) || (!victim->found)) return 0;
+    if ((ftl == NULL) || (victim == NULL) || (!victim->found))
+    {
+        return 0;
+    }
 
     /* Step 1: 遍历双 Plane 所有有效页，搬移到 Cold Super Block */
     for (plane = 0U; plane < PLANE_NUM; plane++)
@@ -140,8 +162,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
             nand_pba_t new_pba;
             int        ret;
 
-            pba = pba_make(ftl->ch, ftl->ce, page, plane,
-                           victim->plane_blocks[plane], 0, 0);
+            pba = pba_make(ftl->ch, ftl->ce, page, plane, victim->plane_blocks[plane], 0, 0);
 
             /* 读页 + 从 META 提取 LBA */
             memset(buf, 0, sizeof(buf));
@@ -152,7 +173,10 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
                 fc_command_status_t completion;
 
                 cmd = fc_command_alloc();
-                if (cmd == NULL) continue;
+                if (cmd == NULL)
+                {
+                    continue;
+                }
 
                 cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
                 cmd->config.cw          = 3U;
@@ -206,7 +230,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
             old_pba = l2p_cache_read(&ftl->cache, lba);
             if (old_pba != pba)
             {
-                continue;  /* 已被覆盖，无效页 */
+                continue; /* 已被覆盖，无效页 */
             }
 
             /* 分配 Cold Super Block 新页 */
@@ -217,9 +241,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
             }
 
             /* 写入新位置 */
-            ret = ftl_internal_write_page(new_pba, buf, FTL_READ_USER_SIZE,
-                                           FC_CRC_ENABLE, FC_RANDOM_ENABLE,
-                                           FC_COMMAND_MODULE_GC, lba);
+            ret = ftl_internal_write_page(new_pba, buf, FTL_READ_USER_SIZE, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_GC, lba);
             if (ret != 0)
             {
                 continue;
@@ -238,11 +260,11 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
     /* Step 2: 擦除双 Block + 递增擦除计数 + 归还 Free Pool */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        uint16_t    block;
-        nand_pba_t  block_pba;
-        int         ret;
+        uint16_t   block;
+        nand_pba_t block_pba;
+        int        ret;
 
-        block = victim->plane_blocks[plane];
+        block     = victim->plane_blocks[plane];
         block_pba = pba_make(ftl->ch, ftl->ce, 0, plane, block, 0, 0);
 
         ret = ftl_internal_erase_block(block_pba);
@@ -264,10 +286,19 @@ int wl_execute(struct ftl_context *ftl)
 {
     wl_victim_t victim;
 
-    if (ftl == NULL) return 0;
+    if (ftl == NULL)
+    {
+        return 0;
+    }
 
-    if (!wl_should_trigger(ftl)) return 0;
-    if (!wl_select_victim(ftl, &victim)) return 0;
+    if (!wl_should_trigger(ftl))
+    {
+        return 0;
+    }
+    if (!wl_select_victim(ftl, &victim))
+    {
+        return 0;
+    }
 
     return wl_relocate(ftl, &victim);
 }
@@ -277,7 +308,10 @@ uint32_t wl_max_erase(const struct ftl_context *ftl)
     uint16_t i;
     uint32_t max_ec = 0U;
 
-    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL)) return 0U;
+    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL))
+    {
+        return 0U;
+    }
 
     for (i = 0U; i < BLOCKS_PER_PLANE * PLANE_NUM; i++)
     {
@@ -295,7 +329,10 @@ uint32_t wl_min_erase(const struct ftl_context *ftl)
     uint16_t i;
     uint32_t min_ec = UINT32_MAX;
 
-    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL)) return 0U;
+    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL))
+    {
+        return 0U;
+    }
 
     for (i = 0U; i < BLOCKS_PER_PLANE * PLANE_NUM; i++)
     {
@@ -311,10 +348,13 @@ uint32_t wl_min_erase(const struct ftl_context *ftl)
 uint32_t wl_avg_erase(const struct ftl_context *ftl)
 {
     uint16_t i;
-    uint32_t sum = 0U;
+    uint32_t sum   = 0U;
     uint16_t count = 0U;
 
-    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL)) return 0U;
+    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL))
+    {
+        return 0U;
+    }
 
     for (i = 0U; i < BLOCKS_PER_PLANE * PLANE_NUM; i++)
     {
@@ -322,7 +362,10 @@ uint32_t wl_avg_erase(const struct ftl_context *ftl)
         count++;
     }
 
-    if (count == 0U) return 0U;
+    if (count == 0U)
+    {
+        return 0U;
+    }
     return sum / count;
 }
 
@@ -331,7 +374,10 @@ uint32_t wl_count_blocks_below(const struct ftl_context *ftl, uint32_t threshold
     uint16_t i;
     uint32_t count = 0U;
 
-    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL)) return 0U;
+    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL))
+    {
+        return 0U;
+    }
 
     for (i = 0U; i < BLOCKS_PER_PLANE * PLANE_NUM; i++)
     {

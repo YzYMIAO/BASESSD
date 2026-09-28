@@ -1,7 +1,8 @@
 #include "ftl/bbt.h"
-#include "ftl/ftl_fc_interface.h"
+
 #include "common/boot_policy.h"
 #include "fc/fc.h"
+#include "ftl/ftl_fc_interface.h"
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
@@ -10,12 +11,12 @@
  * BBT 内部 SRAM 缓存（全局单例，运行时用）。
  * 出厂扫描或加载时填充，bbt_mark_bad 时同步更新。
  */
-static uint8_t  g_bbt_bitmap[BBT_BITMAP_SIZE];   /* 4096 bit = 512B */
-static uint32_t g_bbt_sequence = 0U;              /* 当前 sequence */
-static int      g_bbt_dirty    = 0;               /* 是否有未写回 NAND 的变更 */
+static uint8_t  g_bbt_bitmap[BBT_BITMAP_SIZE]; /* 4096 bit = 512B */
+static uint32_t g_bbt_sequence = 0U;           /* 当前 sequence */
+static int      g_bbt_dirty    = 0;            /* 是否有未写回 NAND 的变更 */
 
 /* BBT CRC 覆盖的字节数（从开头到 crc 字段） */
-#define BBT_CRC_SIZE  (sizeof(uint32_t) * 4 + sizeof(uint32_t) * 3 + BBT_BITMAP_SIZE)
+#define BBT_CRC_SIZE (sizeof(uint32_t) * 4 + sizeof(uint32_t) * 3 + BBT_BITMAP_SIZE)
 
 int bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun)
 {
@@ -23,7 +24,10 @@ int bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun)
     int      ret;
     uint32_t loaded_bad_count = 0U;
 
-    if (alloc == NULL) return -1;
+    if (alloc == NULL)
+    {
+        return -1;
+    }
 
     memset(g_bbt_bitmap, 0, sizeof(g_bbt_bitmap));
     g_bbt_sequence = 0U;
@@ -36,7 +40,7 @@ int bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun)
         uint16_t block;
         uint16_t bad_idx = 0U;
 
-        g_bbt_sequence = seq;
+        g_bbt_sequence   = seq;
         alloc->bad_count = (uint16_t)loaded_bad_count;
 
         /* 重建 alloc->bad_blocks 数组 */
@@ -66,7 +70,10 @@ int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun
 
     (void)lun;
 
-    if (alloc == NULL) return 0;
+    if (alloc == NULL)
+    {
+        return 0;
+    }
 
     memset(g_bbt_bitmap, 0, sizeof(g_bbt_bitmap));
     g_bbt_dirty = 0;
@@ -86,12 +93,15 @@ int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun
      */
     for (block = 0U; block < BBT_MAX_BLOCKS; block++)
     {
-        uint8_t     raw_buf[PAGE_SIZE];
-        nand_pba_t  page_pba0;
-        int         ret0;
+        uint8_t    raw_buf[PAGE_SIZE];
+        nand_pba_t page_pba0;
+        int        ret0;
 
         /* 跳过 Block 0（出厂总是好块）*/
-        if (block == 0U) continue;
+        if (block == 0U)
+        {
+            continue;
+        }
 
         /* 尝试读 Page 0（只检查 Plane 0） */
         page_pba0 = pba_make(ch, ce, 0, 0, block, 0, 0);
@@ -127,7 +137,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun
     }
 
     alloc->bad_count = bad_idx;
-    g_bbt_dirty = 1;
+    g_bbt_dirty      = 1;
 
     /* 将扫描结果写入 NAND BBT */
     (void)bbt_save(alloc, ch, ce);
@@ -137,7 +147,10 @@ int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun
 
 int bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16_t block)
 {
-    if ((alloc == NULL) || (block >= BBT_MAX_BLOCKS)) return -1;
+    if ((alloc == NULL) || (block >= BBT_MAX_BLOCKS))
+    {
+        return -1;
+    }
 
     /* BBT bitmap 置位 */
     bbt_set_bad(g_bbt_bitmap, block);
@@ -160,16 +173,22 @@ int bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce)
     bbt_header_t header;
     uint8_t      i;
 
-    if (alloc == NULL) return -1;
-    if (!g_bbt_dirty) return 0;
+    if (alloc == NULL)
+    {
+        return -1;
+    }
+    if (!g_bbt_dirty)
+    {
+        return 0;
+    }
 
     g_bbt_sequence++;
 
     memset(&header, 0, sizeof(header));
-    header.magic       = BBT_MAGIC;
-    header.sequence    = g_bbt_sequence;
+    header.magic        = BBT_MAGIC;
+    header.sequence     = g_bbt_sequence;
     header.total_blocks = BBT_MAX_BLOCKS;
-    header.bad_count   = alloc->bad_count;
+    header.bad_count    = alloc->bad_count;
 
     memcpy(header.bad_map, g_bbt_bitmap, BBT_BITMAP_SIZE);
 
@@ -181,31 +200,26 @@ int bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce)
     for (i = 0U; i < BBT_REDUNDANCY; i++)
     {
         nand_pba_t pba = pba_make(ch, ce, i, (uint8_t)(i & 1U), BBT_BLOCK, 0, 0);
-        (void)ftl_internal_write_page(pba, &header, sizeof(header),
-                                       FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                       FC_COMMAND_MODULE_BBT, 0U);
+        (void)ftl_internal_write_page(pba, &header, sizeof(header), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_BBT, 0U);
     }
 
     /* 再写 3 页到备用 Block 39 */
     for (i = 0U; i < BBT_REDUNDANCY; i++)
     {
         nand_pba_t pba = pba_make(ch, ce, i, (uint8_t)(i & 1U), BBT_BLOCK_BACKUP, 0, 0);
-        (void)ftl_internal_write_page(pba, &header, sizeof(header),
-                                       FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                       FC_COMMAND_MODULE_BBT, 0U);
+        (void)ftl_internal_write_page(pba, &header, sizeof(header), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_BBT, 0U);
     }
 
     g_bbt_dirty = 0;
     return 0;
 }
 
-int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence,
-              uint8_t ch, uint8_t ce)
+int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t ch, uint8_t ce)
 {
-    bbt_header_t candidates[BBT_TOTAL_PAGES];
+    bbt_header_t  candidates[BBT_TOTAL_PAGES];
     bbt_header_t *best = NULL;
-    uint8_t i;
-    int found = 0;
+    uint8_t       i;
+    int           found = 0;
 
     if ((bad_map == NULL) || (bad_count == NULL) || (sequence == NULL))
     {
@@ -235,13 +249,17 @@ int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence,
 
         pba = pba_make(ch, ce, page, (uint8_t)(page & 1U), block, 0, 0);
 
-        ret = ftl_internal_read_page(pba, &candidates[i], sizeof(candidates[i]),
-                                      FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                      FC_COMMAND_MODULE_BBT, 0U);
-        if (ret != 0) continue;
+        ret = ftl_internal_read_page(pba, &candidates[i], sizeof(candidates[i]), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_BBT, 0U);
+        if (ret != 0)
+        {
+            continue;
+        }
 
         /* 验证 Magic */
-        if (candidates[i].magic != BBT_MAGIC) continue;
+        if (candidates[i].magic != BBT_MAGIC)
+        {
+            continue;
+        }
 
         /* 验证 CRC */
         {
@@ -258,12 +276,15 @@ int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence,
         /* 选 sequence 最大的 */
         if ((best == NULL) || (candidates[i].sequence > best->sequence))
         {
-            best = &candidates[i];
+            best  = &candidates[i];
             found = 1;
         }
     }
 
-    if (!found) return -1;
+    if (!found)
+    {
+        return -1;
+    }
 
     /* 输出到 caller */
     memcpy(bad_map, best->bad_map, BBT_BITMAP_SIZE);

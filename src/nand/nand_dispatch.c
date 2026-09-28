@@ -1,8 +1,8 @@
 #include "common/ssd_log.h"
 #include "delay.h"
 #include "fc/fc_command.h"
-#include "nand_config.h"
 #include "nand/nand_debug.h"
+#include "nand_config.h"
 #include "nand_dispatch_internal.h"
 #include "nand_mt29f4g08abadawp.h"
 #include "onfi_1_0.h"
@@ -87,7 +87,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->parameter[3] = request->parameter[3];
     task->feature_addr = request->feature_addr;
     /* Phase V: 绑定 per-LUN backend */
-    task->backend      = nand_fmc_backend_get_ext(request->ch, request->ce, request->lun);
+    task->backend             = nand_fmc_backend_get_ext(request->ch, request->ce, request->lun);
     task->transaction.backend = task->backend; /* 同步到 transaction，供 nand_fc_start 使用 */
     for (cw = 0U; cw < request->cw_count; cw++)
     {
@@ -284,7 +284,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                         chain->count = 0U;
                         return NAND_RESULT_INVALID_ARGUMENT;
                     }
-                    result = nand_fc_start(&task->transaction,
+                    result        = nand_fc_start(&task->transaction,
                                            task->operation,
                                            &task->request);
                     task->started = 1U;
@@ -313,7 +313,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                             chain->count = 0U;
                             return NAND_RESULT_INVALID_ARGUMENT;
                         }
-                        result = nand_fc_start(&task->transaction,
+                        result        = nand_fc_start(&task->transaction,
                                                task->operation,
                                                &task->request);
                         task->started = 1U;
@@ -457,7 +457,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                             chain->count = 0U;
                             return NAND_RESULT_INVALID_ARGUMENT;
                         }
-                        result = nand_fc_start(&task->transaction,
+                        result        = nand_fc_start(&task->transaction,
                                                task->operation,
                                                &task->request);
                         task->started = 1U;

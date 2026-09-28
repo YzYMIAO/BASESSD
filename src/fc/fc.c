@@ -30,7 +30,7 @@ static uint8_t fc_is_page_read(uint8_t operation)
         case OP_READ_PAGE_CACHE_RANDOM:
         case OP_READ_PAGE_CACHE_LAST:
         case OP_RANDOM_DATA_READ:
-        case OP_READ_PAGE_FETCH:             /* Phase V */
+        case OP_READ_PAGE_FETCH: /* Phase V */
             return 1U;
         default:
             return 0U;
@@ -51,7 +51,7 @@ static uint8_t fc_is_page_write(uint8_t operation)
         case OP_PROGRAM_PAGE_CACHE:
         case OP_OTP_DATA_PROGRAM:
         case OP_PROGRAM_PAGE_MULTI_PLANE:
-        case OP_PROGRAM_PAGE_ISSUE:          /* Phase V */
+        case OP_PROGRAM_PAGE_ISSUE: /* Phase V */
             return 1U;
         default:
             return 0U;
@@ -824,7 +824,7 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     parity_cmd->config.operation = OP_PROGRAM_PAGE_MULTI_PLANE; /* 提交时走 Multi-Plane */
     parity_cmd->high_priority    = data_cmd->high_priority;
     parity_cmd->module           = data_cmd->module;
-    parity_cmd->meta              = data_cmd->meta;
+    parity_cmd->meta             = data_cmd->meta;
 
     /* 调整 PAA：same page/block/lun/cw，plane = PLANE_NUM-1 */
     {
@@ -1645,7 +1645,7 @@ fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length)
         {
             uint32_t copy_len = (remaining >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : remaining;
             (void)memcpy(dst, buf, copy_len);
-            dst       += copy_len;
+            dst += copy_len;
             remaining -= copy_len;
         }
 

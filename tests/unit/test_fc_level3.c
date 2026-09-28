@@ -109,7 +109,7 @@ static uint32_t page_pattern(uint8_t plane)
 static void fill_page_pattern(uint8_t *buf, uint8_t plane)
 {
     const uint32_t pattern = page_pattern(plane);
-    const uint8_t  *pp     = (const uint8_t *)&pattern;
+    const uint8_t *pp      = (const uint8_t *)&pattern;
 
     for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
     {

@@ -31,35 +31,35 @@
  * ====================================================================== */
 
 #ifndef NAND_DBG_FC
-#    define NAND_DBG_FC         0U   /* FC 层：submit/completion/busy 跟踪 */
+#    define NAND_DBG_FC 0U /* FC 层：submit/completion/busy 跟踪 */
 #endif
 
 #ifndef NAND_DBG_SCHED
-#    define NAND_DBG_SCHED      0U   /* 调度器：select/skip/chain 仲裁 */
+#    define NAND_DBG_SCHED 0U /* 调度器：select/skip/chain 仲裁 */
 #endif
 
 #ifndef NAND_DBG_DISPATCH
-#    define NAND_DBG_DISPATCH   0U   /* Dispatch：Phase 1/2 状态转换 */
+#    define NAND_DBG_DISPATCH 0U /* Dispatch：Phase 1/2 状态转换 */
 #endif
 
 #ifndef NAND_DBG_ENGINE
-#    define NAND_DBG_ENGINE     0U   /* Engine：uop step 逐条执行 */
+#    define NAND_DBG_ENGINE 0U /* Engine：uop step 逐条执行 */
 #endif
 
 #ifndef NAND_DBG_FMC
-#    define NAND_DBG_FMC        0U   /* FMC：PIO/WAIT_READY/RB# GPIO */
+#    define NAND_DBG_FMC 0U /* FMC：PIO/WAIT_READY/RB# GPIO */
 #endif
 
 #ifndef NAND_DBG_DATA
-#    define NAND_DBG_DATA       0U   /* 数据内容（DATA_IN/OUT 首尾窗口） */
+#    define NAND_DBG_DATA 0U /* 数据内容（DATA_IN/OUT 首尾窗口） */
 #endif
 
 #ifndef NAND_DBG_TIMING
-#    define NAND_DBG_TIMING     0U   /* DWT 时间戳 / 等待超时计时 */
+#    define NAND_DBG_TIMING 0U /* DWT 时间戳 / 等待超时计时 */
 #endif
 
 #ifndef NAND_DBG_RES
-#    define NAND_DBG_RES        1U   /* 资源统计 [RES]（测试中 cmd/desc/buf 使用量） */
+#    define NAND_DBG_RES 1U /* 资源统计 [RES]（测试中 cmd/desc/buf 使用量） */
 #endif
 
 /* ======================================================================
@@ -71,9 +71,9 @@
  * ====================================================================== */
 
 #if NAND_DBG_FC
-#    define FC_LOGD(...)   SSD_LOGI("[FC] "   __VA_ARGS__)
+#    define FC_LOGD(...) SSD_LOGI("[FC] " __VA_ARGS__)
 #else
-#    define FC_LOGD(...)   ((void)0U)
+#    define FC_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_SCHED
@@ -83,39 +83,39 @@
 #endif
 
 #if NAND_DBG_DISPATCH
-#    define DISP_LOGD(...) SSD_LOGI("[DSP] "  __VA_ARGS__)
+#    define DISP_LOGD(...) SSD_LOGI("[DSP] " __VA_ARGS__)
 #else
 #    define DISP_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_ENGINE
-#    define ENG_LOGD(...)  SSD_LOGI("[ENG] "  __VA_ARGS__)
+#    define ENG_LOGD(...) SSD_LOGI("[ENG] " __VA_ARGS__)
 #else
-#    define ENG_LOGD(...)  ((void)0U)
+#    define ENG_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_FMC
-#    define FMC_LOGD(...)  SSD_LOGI("[FMC] "  __VA_ARGS__)
+#    define FMC_LOGD(...) SSD_LOGI("[FMC] " __VA_ARGS__)
 #else
-#    define FMC_LOGD(...)  ((void)0U)
+#    define FMC_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_DATA
-#    define DATA_LOGD(...) SSD_LOGI("[DAT] "  __VA_ARGS__)
+#    define DATA_LOGD(...) SSD_LOGI("[DAT] " __VA_ARGS__)
 #else
 #    define DATA_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_TIMING
-#    define TIM_LOGD(...)  SSD_LOGI("[TIM] "  __VA_ARGS__)
+#    define TIM_LOGD(...) SSD_LOGI("[TIM] " __VA_ARGS__)
 #else
-#    define TIM_LOGD(...)  ((void)0U)
+#    define TIM_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_RES
-#    define RES_LOGD(...)  SSD_LOGI("[RES] "  __VA_ARGS__)
+#    define RES_LOGD(...) SSD_LOGI("[RES] " __VA_ARGS__)
 #else
-#    define RES_LOGD(...)  ((void)0U)
+#    define RES_LOGD(...) ((void)0U)
 #endif
 
 #endif /* NAND_DEBUG_H */

@@ -19,29 +19,30 @@
  *   — 二者独立运行，互不干扰
  */
 
-#include <stdint.h>
 #include "nand/nand_config.h"
+
+#include <stdint.h>
 
 /* ── 前向声明（ftl_context_t 在 ftl.h 中定义，.c 文件需先 include ftl.h） ── */
 struct ftl_context;
 
 /* ── WL 参数 ── */
 
-#define WL_DELTA_THRESHOLD    (5000U)    /* max-min 差值触发 */
-#define WL_MAX_AVG_RATIO      (3U)       /* max/avg 比值触发 */
-#define WL_LOW_ZONE_WIDTH     (1000U)    /* 低擦除区宽度 */
-#define WL_LOW_BLOCK_PCT      (5U)       /* 低区 Block 占比阈值 */
-#define WL_MIN_INTERVAL       (1000U)    /* 最小间隔（写入次数） */
-#define WL_MIN_VALID_RATIO    (70U)      /* 只搬有效页 ≥ 70% 的冷 Block */
+#define WL_DELTA_THRESHOLD (5000U) /* max-min 差值触发 */
+#define WL_MAX_AVG_RATIO   (3U)    /* max/avg 比值触发 */
+#define WL_LOW_ZONE_WIDTH  (1000U) /* 低擦除区宽度 */
+#define WL_LOW_BLOCK_PCT   (5U)    /* 低区 Block 占比阈值 */
+#define WL_MIN_INTERVAL    (1000U) /* 最小间隔（写入次数） */
+#define WL_MIN_VALID_RATIO (70U)   /* 只搬有效页 ≥ 70% 的冷 Block */
 
 /* ── WL Victim 选择结果 ── */
 
 typedef struct
 {
-    uint8_t    found : 1;                    /* 是否找到 victim */
-    uint16_t   plane_blocks[PLANE_NUM];      /* 双 Plane Block 号 */
-    uint32_t   avg_erase;                    /* victim 平均擦除次数 */
-    uint16_t   valid_pages;                  /* 有效页数 */
+    uint8_t  found : 1;               /* 是否找到 victim */
+    uint16_t plane_blocks[PLANE_NUM]; /* 双 Plane Block 号 */
+    uint32_t avg_erase;               /* victim 平均擦除次数 */
+    uint16_t valid_pages;             /* 有效页数 */
 } wl_victim_t;
 
 /* ── 接口 ── */

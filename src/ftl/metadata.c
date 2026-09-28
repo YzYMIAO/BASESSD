@@ -1,14 +1,15 @@
 #include "ftl/metadata.h"
-#include "ftl/l2p_cache.h"
-#include "ftl/ftl_fc_interface.h"
+
 #include "common/boot_policy.h"
 #include "fc/fc.h"
+#include "ftl/ftl_fc_interface.h"
+#include "ftl/l2p_cache.h"
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
 
 /* 计算 CRC 覆盖的字节数（从开头到 crc 字段之前） */
-#define METADATA_DIR_CRC_OFFSET  (sizeof(uint32_t) * 3 + sizeof(metadata_entry_t) * METADATA_DIR_ENTRIES)
+#define METADATA_DIR_CRC_OFFSET (sizeof(uint32_t) * 3 + sizeof(metadata_entry_t) * METADATA_DIR_ENTRIES)
 /* = 4 + 4 + 4 + 896 = 908 */
 
 void metadata_dir_init(metadata_dir_cache_t *dir)
@@ -18,7 +19,10 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
     uint16_t block;
     uint8_t  page;
 
-    if (dir == NULL) return;
+    if (dir == NULL)
+    {
+        return;
+    }
 
     dir->count           = 0U;
     dir->anchor_sequence = 0U;
@@ -38,17 +42,21 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
     }
 
     /* 当前 metadata 分区块指针（初始指向固定区域之后第一个可用块） */
-    dir->cur_metadata_block = L2P_BASE_BLOCK + L2P_TABLE_BLOCKS;  /* Block 32 */
+    dir->cur_metadata_block = L2P_BASE_BLOCK + L2P_TABLE_BLOCKS; /* Block 32 */
     dir->cur_metadata_page  = 0U;
     dir->cur_metadata_plane = 0U;
 }
 
 nand_paa_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
-                                uint8_t type, uint16_t id)
+                               uint8_t                     type,
+                               uint16_t                    id)
 {
     uint16_t i;
 
-    if (dir == NULL) return NAND_PBA_INVALID;
+    if (dir == NULL)
+    {
+        return NAND_PBA_INVALID;
+    }
 
     for (i = 0U; i < dir->count; i++)
     {
@@ -62,11 +70,16 @@ nand_paa_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
 }
 
 void metadata_dir_update(metadata_dir_cache_t *dir,
-                          uint8_t type, uint16_t id, nand_paa_t new_paa)
+                         uint8_t               type,
+                         uint16_t              id,
+                         nand_paa_t            new_paa)
 {
     uint16_t i;
 
-    if (dir == NULL) return;
+    if (dir == NULL)
+    {
+        return;
+    }
 
     /* 查找现有 entry（覆盖旧位置） */
     for (i = 0U; i < dir->count; i++)
@@ -94,17 +107,20 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
 }
 
 nand_paa_t metadata_dir_alloc_region(metadata_dir_cache_t *dir,
-                                      ftl_allocator_t *alloc,
-                                      uint16_t region_id)
+                                     ftl_allocator_t      *alloc,
+                                     uint16_t              region_id)
 {
-    uint8_t  plane;
-    uint16_t block;
-    uint8_t  page;
+    uint8_t    plane;
+    uint16_t   block;
+    uint8_t    page;
     nand_paa_t paa;
 
-    if ((dir == NULL) || (alloc == NULL)) return NAND_PBA_INVALID;
+    if ((dir == NULL) || (alloc == NULL))
+    {
+        return NAND_PBA_INVALID;
+    }
 
-    plane = (uint8_t)(region_id & 1U);  /* 偶 P0, 奇 P1 */
+    plane = (uint8_t)(region_id & 1U); /* 偶 P0, 奇 P1 */
 
     /*
      * 在当前 metadata block 中顺序写入。
@@ -120,9 +136,9 @@ nand_paa_t metadata_dir_alloc_region(metadata_dir_cache_t *dir,
         tmp_pba = allocator_alloc(alloc, FTL_TEMP_COLD);
         if (tmp_pba == NAND_PBA_INVALID)
         {
-            return NAND_PBA_INVALID;  /* Free Pool 空 */
+            return NAND_PBA_INVALID; /* Free Pool 空 */
         }
-        block = (uint16_t)pba_to_block(tmp_pba);
+        block                   = (uint16_t)pba_to_block(tmp_pba);
         dir->cur_metadata_block = block;
         dir->cur_metadata_page  = 0U;
         dir->cur_metadata_plane = plane;
@@ -147,7 +163,10 @@ int metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
     metadata_directory_t anchor;
     uint8_t              i;
 
-    if ((dir == NULL) || (!dir->dirty)) return 0;
+    if ((dir == NULL) || (!dir->dirty))
+    {
+        return 0;
+    }
 
     /* 构造 Anchor 页 */
     anchor.magic       = ANCHOR_MAGIC;
@@ -180,15 +199,13 @@ int metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
      */
     {
         nand_pba_t pba;
-        int ret;
+        int        ret;
 
         /* 3 份冗余写入 Anchor Block 0 的 Page 0/1/2 */
         for (i = 0U; i < ANCHOR_REDUNDANCY; i++)
         {
             pba = pba_make(0, 0, i, (uint8_t)(i & 1U), ANCHOR_BLOCK0, 0, 0);
-            ret = ftl_internal_write_page(pba, &anchor, sizeof(anchor),
-                                           FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                           FC_COMMAND_MODULE_METADATA, 0U);
+            ret = ftl_internal_write_page(pba, &anchor, sizeof(anchor), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
             if (ret != 0)
             {
                 /* 单份写失败不影响整体（有冗余） */
@@ -200,9 +217,7 @@ int metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         for (i = 0U; i < ANCHOR_REDUNDANCY; i++)
         {
             pba = pba_make(0, 0, i, (uint8_t)(i & 1U), ANCHOR_BLOCK1, 0, 0);
-            ret = ftl_internal_write_page(pba, &anchor, sizeof(anchor),
-                                           FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                           FC_COMMAND_MODULE_METADATA, 0U);
+            ret = ftl_internal_write_page(pba, &anchor, sizeof(anchor), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
             if (ret != 0)
             {
                 continue;
@@ -218,12 +233,15 @@ int metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
 
 int metadata_dir_load(metadata_dir_cache_t *dir)
 {
-    metadata_directory_t candidates[6];
+    metadata_directory_t  candidates[6];
     metadata_directory_t *best = NULL;
-    uint8_t i;
-    int found = 0;
+    uint8_t               i;
+    int                   found = 0;
 
-    if (dir == NULL) return -1;
+    if (dir == NULL)
+    {
+        return -1;
+    }
 
     memset(candidates, 0, sizeof(candidates));
 
@@ -236,12 +254,10 @@ int metadata_dir_load(metadata_dir_cache_t *dir)
         pba = metadata_dir_anchor_paa(i);
         memset(&candidates[i], 0, sizeof(candidates[i]));
 
-        ret = ftl_internal_read_page(pba, &candidates[i], sizeof(candidates[i]),
-                                      FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                      FC_COMMAND_MODULE_METADATA, 0U);
+        ret = ftl_internal_read_page(pba, &candidates[i], sizeof(candidates[i]), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
         if (ret != 0)
         {
-            continue;  /* 读失败，跳过 */
+            continue; /* 读失败，跳过 */
         }
 
         /* 验证 Magic */
@@ -256,8 +272,8 @@ int metadata_dir_load(metadata_dir_cache_t *dir)
             candidates[i].crc  = 0U;
             if (boot_crc32(&candidates[i], METADATA_DIR_CRC_OFFSET) != saved_crc)
             {
-                candidates[i].crc = saved_crc;  /* 恢复 */
-                continue;  /* CRC 错误，跳过 */
+                candidates[i].crc = saved_crc; /* 恢复 */
+                continue;                      /* CRC 错误，跳过 */
             }
             candidates[i].crc = saved_crc;
         }
@@ -265,19 +281,18 @@ int metadata_dir_load(metadata_dir_cache_t *dir)
         /* 选 sequence 最大的 */
         if ((best == NULL) || (candidates[i].sequence > best->sequence))
         {
-            best = &candidates[i];
+            best  = &candidates[i];
             found = 1;
         }
     }
 
     if (!found)
     {
-        return -1;  /* 无有效 Anchor */
+        return -1; /* 无有效 Anchor */
     }
 
     /* 重建 SRAM cache */
-    dir->count           = (uint16_t)(best->entry_count < METADATA_DIR_ENTRIES ?
-                                      best->entry_count : METADATA_DIR_ENTRIES);
+    dir->count           = (uint16_t)(best->entry_count < METADATA_DIR_ENTRIES ? best->entry_count : METADATA_DIR_ENTRIES);
     dir->anchor_sequence = best->sequence;
     dir->dirty           = 0U;
     dir->change_count    = 0U;
@@ -323,9 +338,9 @@ int metadata_dir_load(metadata_dir_cache_t *dir)
 
 nand_paa_t metadata_dir_anchor_paa(uint8_t idx)
 {
-    uint8_t  block;
-    uint8_t  page;
-    uint8_t  plane;
+    uint8_t block;
+    uint8_t page;
+    uint8_t plane;
 
     /*
      * idx 0/1/2 → Anchor Block 0, Page 0/1/2

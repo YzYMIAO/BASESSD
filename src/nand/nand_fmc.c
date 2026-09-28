@@ -37,7 +37,7 @@ static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
         [NAND_UOP_JUMP_IF_NOT_READY] = NULL,
         [NAND_UOP_CHECK_FAIL]        = nand_fmc_exec_check_fail,
         [NAND_UOP_DELAY_US]          = nand_fmc_exec_delay_us,
-    };
+};
 
 /* ── Phase V: per-(CH,CE,LUN) 实例数组 ── */
 nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM][LUN_NUM];
@@ -58,8 +58,7 @@ const nand_engine_backend_t *nand_fmc_backend_get(void)
     return &g_nand_fmc_instances[0][0][0].backend;
 }
 
-nand_result_t nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun,
-                                     const nand_fmc_config_t *config)
+nand_result_t nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun, const nand_fmc_config_t *config)
 {
     nand_fmc_instance_t *inst;
 
@@ -67,8 +66,8 @@ nand_result_t nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun,
     {
         return NAND_RESULT_INVALID_ARGUMENT;
     }
-    inst                = &g_nand_fmc_instances[ch][ce][lun];
-    inst->config        = *config;
+    inst                   = &g_nand_fmc_instances[ch][ce][lun];
+    inst->config           = *config;
     inst->backend.handlers = g_nand_fmc_handlers;
     inst->backend.context  = &inst->config;
     return NAND_RESULT_OK;

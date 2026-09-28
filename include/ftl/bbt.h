@@ -15,30 +15,30 @@
 
 #include "ftl/allocator.h"
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* ── BBT Block 位置 ── */
-#define BBT_BLOCK               (36U)
-#define BBT_REDUNDANCY          (3U)     /* 每 Block 冗余页数 */
-#define BBT_TOTAL_PAGES         (6U)     /* 2 Block × 3 页（预留备用 Block）*/
-#define BBT_BLOCK_BACKUP        (39U)    /* 备用 BBT Block（Block 36 坏时用）*/
+#define BBT_BLOCK        (36U)
+#define BBT_REDUNDANCY   (3U)  /* 每 Block 冗余页数 */
+#define BBT_TOTAL_PAGES  (6U)  /* 2 Block × 3 页（预留备用 Block）*/
+#define BBT_BLOCK_BACKUP (39U) /* 备用 BBT Block（Block 36 坏时用）*/
 
 /* ── BBT Header 格式 ── */
-#define BBT_MAGIC               (0x424254ABUL)   /* "BBT\xAB" */
-#define BBT_MAX_BLOCKS          (4096U)
-#define BBT_BITMAP_SIZE         (BBT_MAX_BLOCKS / 8U)   /* 512B */
+#define BBT_MAGIC       (0x424254ABUL) /* "BBT\xAB" */
+#define BBT_MAX_BLOCKS  (4096U)
+#define BBT_BITMAP_SIZE (BBT_MAX_BLOCKS / 8U) /* 512B */
 
 typedef struct
 {
-    uint32_t magic;                  /* BBT_MAGIC */
-    uint32_t sequence;               /* 单调递增，最新有效 */
-    uint32_t total_blocks;           /* 总 Block 数 */
-    uint32_t bad_count;              /* 坏块数 */
+    uint32_t magic;        /* BBT_MAGIC */
+    uint32_t sequence;     /* 单调递增，最新有效 */
+    uint32_t total_blocks; /* 总 Block 数 */
+    uint32_t bad_count;    /* 坏块数 */
     uint32_t reserved[3];
     uint8_t  bad_map[BBT_BITMAP_SIZE];  /* 4096 bit = 512B */
-    uint32_t crc;                    /* 校验和 */
-} __attribute__((packed)) bbt_header_t;  /* 4+4+4+4+12+512+4 = 544B */
+    uint32_t crc;                       /* 校验和 */
+} __attribute__((packed)) bbt_header_t; /* 4+4+4+4+12+512+4 = 544B */
 
 /* ── 接口 ── */
 
@@ -101,7 +101,10 @@ int bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16_t block)
  */
 static inline int bbt_is_bad(const uint8_t *bad_map, uint16_t block)
 {
-    if (bad_map == NULL) return 0;
+    if (bad_map == NULL)
+    {
+        return 0;
+    }
     return (bad_map[block >> 3] >> (block & 7U)) & 1U;
 }
 
@@ -144,8 +147,7 @@ int bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce);
  * @param ce          CE
  * @return 0 成功，-1 无有效 BBT
  */
-int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence,
-              uint8_t ch, uint8_t ce);
+int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t ch, uint8_t ce);
 
 /*
  * bbt_spare_pool_refill - 从 Spare Pool 补充 Free Pool

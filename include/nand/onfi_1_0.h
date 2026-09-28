@@ -381,9 +381,9 @@ typedef struct
     uint8_t                 valid_while_other_lun_busy;
     uint8_t                 has_data;
     uint16_t                data_length;
-    uint8_t                 op_type       : 2; /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
-    uint8_t                 pair_op;           /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
-    uint16_t                min_busy_us;       /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ） */
+    uint8_t                 op_type : 2; /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
+    uint8_t                 pair_op;     /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
+    uint16_t                min_busy_us; /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ） */
     const nand_uop_t       *uops;
     nand_operation_timing_t timing;
 } nand_operation_map_t;
@@ -405,12 +405,14 @@ extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
 /* ── Phase V 多 LUN 辅助宏 ── */
 #define nand_operation_is_issue(op) \
     ((op) < OP_COUNT ? (g_nand_operation_map[(op)].op_type == OP_TYPE_ISSUE) : 0U)
-#define nand_operation_is_wait_or_fetch(op) \
+#define nand_operation_is_wait_or_fetch(op)                                     \
     ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].op_type == OP_TYPE_WAIT) || \
-                         (g_nand_operation_map[(op)].op_type == OP_TYPE_FETCH)) : 0U)
-#define nand_operation_is_splittable(op) \
+                        (g_nand_operation_map[(op)].op_type == OP_TYPE_FETCH))  \
+                     : 0U)
+#define nand_operation_is_splittable(op)                                          \
     ((op) < OP_COUNT ? ((g_nand_operation_map[(op)].op_type == OP_TYPE_ATOMIC) && \
-                         (g_nand_operation_map[(op)].pair_op != 0U)) : 0U)
+                        (g_nand_operation_map[(op)].pair_op != 0U))               \
+                     : 0U)
 #define nand_operation_to_issue(op) \
     ((op) < OP_COUNT ? g_nand_operation_map[(op)].pair_op : (op))
 #define nand_operation_get_pair(op) \

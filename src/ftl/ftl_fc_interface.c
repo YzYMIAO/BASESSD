@@ -1,7 +1,7 @@
 #include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_type.h"
 
 #include "fc/fc.h"
+#include "ftl/ftl_type.h"
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
@@ -45,11 +45,10 @@ int ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length)
  * @param timeout_us  超时（0 = 使用默认 10ms）
  * @return 0 完成, -1 超时
  */
-int ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out,
-                            uint32_t timeout_us)
+int ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out, uint32_t timeout_us)
 {
-    uint32_t elapsed = 0U;
-    uint32_t max_wait = (timeout_us > 0U) ? timeout_us : 10000U;  /* 默认 10ms */
+    uint32_t elapsed  = 0U;
+    uint32_t max_wait = (timeout_us > 0U) ? timeout_us : 10000U; /* 默认 10ms */
     (void)elapsed;
     (void)max_wait;
 
@@ -61,7 +60,7 @@ int ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out,
     for (;;)
     {
         fc_command_status_t completion;
-        fc_status_t ret;
+        fc_status_t         ret;
 
         /* 驱动 FC 引擎 */
         (void)fc_service();
@@ -76,7 +75,7 @@ int ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out,
                 {
                     *status_out = completion;
                 }
-                return 0;   /* 找到目标完成 */
+                return 0; /* 找到目标完成 */
             }
 
             /*
@@ -96,13 +95,11 @@ int ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out,
     return -1;
 }
 
-int ftl_internal_read_page(nand_pba_t pba, void *buffer, uint32_t length,
-                            uint8_t crc, uint8_t random, uint8_t module,
-                            lba_t lba)
+int ftl_internal_read_page(nand_pba_t pba, void *buffer, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
 {
-    fc_command_t          *cmd;
-    fc_command_status_t    completion;
-    int                    ret;
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
 
     /* 1. 分配命令 */
     cmd = fc_command_alloc();
@@ -113,7 +110,7 @@ int ftl_internal_read_page(nand_pba_t pba, void *buffer, uint32_t length,
 
     /* 2. 配置 */
     cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw          = 3U;       /* 4 CW */
+    cmd->config.cw          = 3U; /* 4 CW */
     cmd->config.crc         = (DWORD)crc;
     cmd->config.random      = (DWORD)random;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
@@ -164,13 +161,11 @@ int ftl_internal_read_page(nand_pba_t pba, void *buffer, uint32_t length,
     return 0;
 }
 
-int ftl_internal_write_page(nand_pba_t pba, const void *data, uint32_t length,
-                             uint8_t crc, uint8_t random, uint8_t module,
-                             lba_t lba)
+int ftl_internal_write_page(nand_pba_t pba, const void *data, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
 {
-    fc_command_t          *cmd;
-    fc_command_status_t    completion;
-    int                    ret;
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
 
     /* 1. 分配命令 */
     cmd = fc_command_alloc();
@@ -181,7 +176,7 @@ int ftl_internal_write_page(nand_pba_t pba, const void *data, uint32_t length,
 
     /* 2. 配置 */
     cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
-    cmd->config.cw          = 3U;       /* 4 CW */
+    cmd->config.cw          = 3U; /* 4 CW */
     cmd->config.crc         = (DWORD)crc;
     cmd->config.random      = (DWORD)random;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
@@ -234,9 +229,9 @@ int ftl_internal_write_page(nand_pba_t pba, const void *data, uint32_t length,
 
 int ftl_internal_erase_block(nand_pba_t block_pba)
 {
-    fc_command_t          *cmd;
-    fc_command_status_t    completion;
-    int                    ret;
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
 
     /* 1. 分配命令 */
     cmd = fc_command_alloc();
@@ -247,7 +242,7 @@ int ftl_internal_erase_block(nand_pba_t block_pba)
 
     /* 2. 配置 */
     cmd->config.operation   = OP_ERASE_BLOCK;
-    cmd->config.cw          = 0U;       /* 擦除不涉及 CW */
+    cmd->config.cw          = 0U; /* 擦除不涉及 CW */
     cmd->config.crc         = FC_CRC_DISABLE;
     cmd->config.random      = FC_RANDOM_DISABLE;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
@@ -300,7 +295,10 @@ int ftl_internal_read_page_raw(nand_pba_t pba, void *buffer)
     uint8_t             cw;
 
     cmd = fc_command_alloc();
-    if (cmd == NULL) return -1;
+    if (cmd == NULL)
+    {
+        return -1;
+    }
 
     /* 以 LDPC_RAW 模式读全页（跳过 ECC 解码） */
     cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
@@ -339,9 +337,10 @@ int ftl_internal_read_page_raw(nand_pba_t pba, void *buffer)
         uint8_t *src = fc_get_cmd_data_ptr(cmd, cw);
         if (src != NULL)
         {
-            uint32_t cw_user_size = FC_BUFFER_USER_SIZE;  /* 512B */
+            uint32_t cw_user_size = FC_BUFFER_USER_SIZE; /* 512B */
             memcpy((uint8_t *)buffer + (uint32_t)cw * FC_BUFFER_POOL_CW_SIZE,
-                   src, cw_user_size);
+                   src,
+                   cw_user_size);
         }
     }
 

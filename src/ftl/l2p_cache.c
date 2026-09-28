@@ -1,4 +1,5 @@
 #include "ftl/l2p_cache.h"
+
 #include "ftl/ftl_fc_interface.h"
 #include "nand/onfi_1_0.h"
 
@@ -77,7 +78,7 @@ static int l2p_cache_evict_one(l2p_cache_t *cache)
 
         if (line->state == L2P_CACHE_FLUSHING)
         {
-            continue;   /* 跳过正在写回的 line */
+            continue; /* 跳过正在写回的 line */
         }
 
         if (line->state == L2P_CACHE_INVALID)
@@ -107,7 +108,7 @@ static int l2p_cache_evict_one(l2p_cache_t *cache)
         return (int)idx;
     }
 
-    return -1;  /* 全 FLUSHING */
+    return -1; /* 全 FLUSHING */
 }
 
 /*
@@ -162,8 +163,8 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
         if (cache->md_dir != NULL)
         {
             region_paa = metadata_dir_lookup(cache->md_dir,
-                                              METADATA_TYPE_L2P_REGION,
-                                              region_id);
+                                             METADATA_TYPE_L2P_REGION,
+                                             region_id);
         }
 
         if (region_paa != NAND_PBA_INVALID)
@@ -178,9 +179,12 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
         }
 
         int ret = ftl_internal_read_page(region_pba,
-                                          line->entries, L2P_REGION_SIZE,
-                                          FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                          FC_COMMAND_MODULE_METADATA, 0U);
+                                         line->entries,
+                                         L2P_REGION_SIZE,
+                                         FC_CRC_DISABLE,
+                                         FC_RANDOM_DISABLE,
+                                         FC_COMMAND_MODULE_METADATA,
+                                         0U);
         if (ret == 0)
         {
             line->state = L2P_CACHE_CLEAN;
@@ -258,7 +262,7 @@ int l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
 
     if (line->state != L2P_CACHE_DIRTY)
     {
-        return 0;  /* 不需要 flush */
+        return 0; /* 不需要 flush */
     }
 
     /* 标记为 FLUSHING，防止 evict 选中 */
@@ -273,8 +277,8 @@ int l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
         if (cache->md_dir != NULL)
         {
             region_paa = metadata_dir_lookup(cache->md_dir,
-                                              METADATA_TYPE_L2P_REGION,
-                                              line->region_id);
+                                             METADATA_TYPE_L2P_REGION,
+                                             line->region_id);
         }
 
         if (region_paa != NAND_PBA_INVALID)
@@ -299,9 +303,12 @@ int l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
      * CRC/Random DISABLED（元数据不走加扰/CRC），仅 BCH ECC 保护。
      */
     ret = ftl_internal_write_page(region_pba,
-                                   line->entries, L2P_REGION_SIZE,
-                                   FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                   FC_COMMAND_MODULE_METADATA, 0U);
+                                  line->entries,
+                                  L2P_REGION_SIZE,
+                                  FC_CRC_DISABLE,
+                                  FC_RANDOM_DISABLE,
+                                  FC_COMMAND_MODULE_METADATA,
+                                  0U);
 
     if (ret == 0)
     {

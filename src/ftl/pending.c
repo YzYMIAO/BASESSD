@@ -26,7 +26,7 @@ int pending_add(uint16_t cmd_id, lba_t lba, void *buffer, uint32_t count)
         }
     }
 
-    return -1;  /* 表满 */
+    return -1; /* 表满 */
 }
 
 ftl_pending_req_t *pending_lookup(uint16_t cmd_id)
