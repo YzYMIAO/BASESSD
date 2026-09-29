@@ -52,23 +52,70 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
 
                 if (pending != NULL)
                 {
+                    uint32_t data_size = FTL_READ_USER_SIZE * ((pending->pages > 0U) ? pending->pages : 1U);
+
                     if ((completion->status & FC_CW_STATUS_NAND_FAIL) == 0U)
                     {
                         if (pending->buffer != NULL)
                         {
+                            /* 读成功：拷贝数据到 caller buffer */
                             (void)ftl_cmd_read_data(cmd, pending->buffer,
-                                                    FTL_READ_USER_SIZE);
+                                                    data_size);
+                            if (pending->status_out != NULL)
+                            {
+                                *pending->status_out = SSD_STATUS_OK;
+                            }
                         }
+                        else if (pending->cache_intermediate == 0U)
+                        {
+                            /* 写成功（非 cache 中间页）：确认 Journal + L2P（modify-after-confirm） */
+                            journal_append(&pending->ftl->journal,
+                                           pending->lba,
+                                           pending->old_pba,
+                                           pending->new_pba);
+                            l2p_cache_write(&pending->ftl->cache,
+                                            pending->lba,
+                                            pending->new_pba);
+                            checkpoint_journal_watermark(&pending->ftl->journal);
+                            pending->ftl->total_writes++;
+                            if (pending->status_out != NULL)
+                            {
+                                *pending->status_out = SSD_STATUS_OK;
+                            }
+                        }
+                        /* cache_intermediate 页：跳过 L2P/Journal 更新，等最终 10h 确认 */
                     }
-                    else if (pending->buffer != NULL)
+                    else
                     {
-                        memset(pending->buffer, 0, FTL_READ_USER_SIZE);
+                        if (pending->buffer != NULL)
+                        {
+                            /* 读失败：返回全零 */
+                            memset(pending->buffer, 0, data_size);
+                        }
+                        else
+                        {
+                            /* 写失败：标记坏块（RAM only，后台 bbt_flush 持久化） */
+                            uint16_t block = pba_to_block(pending->new_pba);
+                            bbt_mark_bad(&pending->ftl->alloc, block);
+                            /* L2P 不动 → 自动回滚到 old_pba，旧数据完好 */
+                            /* Super Block 空洞由 GC 扫描时自然跳过 */
+                        }
+                        if (pending->status_out != NULL)
+                        {
+                            *pending->status_out = SSD_STATUS_IO_ERROR;
+                        }
                     }
 
                     /* 通知等待方 */
                     if (pending->complete_flag != NULL)
                     {
                         *pending->complete_flag = 1U;
+                    }
+
+                    /* Controller 子请求完成回调（聚合计数器减 1） */
+                    if (pending->on_complete != NULL)
+                    {
+                        pending->on_complete(pending->on_complete_ctx);
                     }
 
                     pending_remove(cmd_id);
@@ -131,6 +178,9 @@ static void ftl_service_idle(ftl_context_t *ftl)
     /* 强制写 Journal buffer */
     journal_flush_page(&ftl->journal);
 
+    /* BBT 持久化（攒批写 NAND BBT） */
+    (void)bbt_flush(&ftl->alloc);
+
     /* Checkpoint 检查 */
     if (checkpoint_check_trigger(ftl, 0U))
     {
@@ -167,6 +217,9 @@ static void ftl_service_normal(ftl_context_t *ftl)
     {
         (void)wl_execute(ftl);
     }
+
+    /* BBT 持久化（NORMAL 模式周期性刷入） */
+    (void)bbt_flush(&ftl->alloc);
 
     /* Checkpoint 检查（NORMAL 模式也执行） */
     if (checkpoint_check_trigger(ftl, 0U))
@@ -303,17 +356,23 @@ void ftl_service(ftl_context_t *ftl)
     }
 }
 
-ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer, uint32_t count)
+ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer,
+                             uint32_t pages,
+                             volatile uint8_t *complete_flag,
+                             volatile ssd_status_t *status_out,
+                             pending_cb_t on_complete, void *on_complete_ctx)
 {
     fc_command_t *cmd;
     nand_pba_t    pba;
+    uint32_t      data_size;
     int           ret;
     lba_t         internal_lba;
 
-    if ((ftl == NULL) || (buffer == NULL) || (count != 1U))
+    if ((ftl == NULL) || (buffer == NULL) || (pages == 0U) || (pages > 2U))
     {
         return FTL_ERROR;
     }
+    data_size = FTL_READ_USER_SIZE * pages;
 
     /* LBA 越界检查 */
     if (lba >= FTL_LBA_MAX)
@@ -325,7 +384,22 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer, uin
     pba = l2p_cache_read(&ftl->cache, internal_lba);
     if (pba == FTL_PBA_INVALID)
     {
-        memset(buffer, 0, FTL_READ_USER_SIZE);
+        memset(buffer, 0, data_size);
+
+        /* 通知等待方：虽无 NAND 操作，但仍需发完成信号 */
+        if (status_out != NULL)
+        {
+            *status_out = SSD_STATUS_OK;
+        }
+        if (complete_flag != NULL)
+        {
+            *complete_flag = 1U;
+        }
+        if (on_complete != NULL)
+        {
+            on_complete(on_complete_ctx);
+        }
+
         return FTL_OK;
     }
 
@@ -336,13 +410,21 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer, uin
         return FTL_ERROR;
     }
 
-    /* ③ 配置读命令 */
-    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    /* ③ 配置读命令 — 根据 pages 选择单 Plane 或 Multi-Plane */
+    if (pages == 1U)
+    {
+        cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+        cmd->config.multi_plane = 0U;
+    }
+    else
+    {
+        cmd->config.operation   = OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT;
+        cmd->config.multi_plane = 2U;
+    }
     cmd->config.cw          = 3U;
     cmd->config.crc         = FC_CRC_ENABLE;
     cmd->config.random      = FC_RANDOM_ENABLE;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     cmd->module             = FC_COMMAND_MODULE_FTL;
@@ -357,7 +439,10 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer, uin
     }
 
     /* ⑤ 注册 pending（必须早于 submit，避免竞态） */
-    ret = pending_add(cmd->command_id, internal_lba, buffer, count, NULL);
+    ret = pending_add(cmd->command_id, internal_lba, buffer,
+                      on_complete, on_complete_ctx, complete_flag,
+                      status_out,
+                      NAND_PBA_INVALID, NAND_PBA_INVALID, NULL, 0U, pages);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
@@ -376,18 +461,24 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer, uin
     return FTL_OK;
 }
 
-ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data, uint32_t count, volatile uint8_t *complete_flag)
+ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data,
+                              uint32_t pages,
+                              volatile uint8_t *complete_flag,
+                              volatile ssd_status_t *status_out,
+                              pending_cb_t on_complete, void *on_complete_ctx)
 {
     fc_command_t *cmd;
     nand_pba_t    new_pba;
     nand_pba_t    old_pba;
+    uint32_t      data_size;
     int           ret;
     lba_t         internal_lba;
 
-    if ((ftl == NULL) || (data == NULL) || (count != 1U))
+    if ((ftl == NULL) || (data == NULL) || (pages == 0U) || (pages > 2U))
     {
         return FTL_ERROR;
     }
+    data_size = FTL_READ_USER_SIZE * pages;
 
     /* LBA 越界检查 */
     if (lba >= FTL_LBA_MAX)
@@ -406,19 +497,27 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data
     /* ② 读旧 PBA（journal 记录用） */
     old_pba = l2p_cache_read(&ftl->cache, internal_lba);
 
-    /* ③ 配置 FC 写命令 */
+    /* ③ 配置 FC 写命令 — 根据 pages 选择单 Plane 或 Multi-Plane */
     cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return FTL_ERROR;
     }
 
-    cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
+    if (pages == 1U)
+    {
+        cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
+        cmd->config.multi_plane = 0U;
+    }
+    else
+    {
+        cmd->config.operation   = OP_PROGRAM_PAGE_MULTI_PLANE;
+        cmd->config.multi_plane = 2U;
+    }
     cmd->config.cw          = 3U;
     cmd->config.crc         = FC_CRC_ENABLE;
     cmd->config.random      = FC_RANDOM_ENABLE;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     cmd->module             = FC_COMMAND_MODULE_FTL;
@@ -432,15 +531,18 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data
         return FTL_ERROR;
     }
 
-    ret = ftl_cmd_write_data(cmd, data, FTL_READ_USER_SIZE);
+    ret = ftl_cmd_write_data(cmd, data, data_size);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
 
-    /* ⑤ 注册 pending（complete_flag 在 NAND PROGRAM 完成后置 1） */
-    ret = pending_add(cmd->command_id, internal_lba, NULL, count, complete_flag);
+    /* ⑤ 注册 pending（complete_flag + old/new_pba + ftl 用于写完成确认） */
+    ret = pending_add(cmd->command_id, internal_lba, NULL,
+                      on_complete, on_complete_ctx, complete_flag,
+                      status_out,
+                      old_pba, new_pba, ftl, 0U, pages);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
@@ -455,18 +557,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data
         return FTL_ERROR;
     }
 
-    /* ⑦ Journal 记录（SRAM buffer，不写 NAND） */
-    journal_append(&ftl->journal, internal_lba, old_pba, new_pba);
-
-    /* 检查 Journal 水位 */
-    checkpoint_journal_watermark(&ftl->journal);
-
-    /* ⑧ 更新 L2P Cache（write-back，标记 DIRTY） */
-    l2p_cache_write(&ftl->cache, internal_lba, new_pba);
-
-    /* ⑨ 统计 */
-    ftl->total_writes++;
-
+    /* ⑦ Journal + L2P 在 completion handler 中确认 NAND PROGRAM 成功后执行 */
     return FTL_OK;
 }
 

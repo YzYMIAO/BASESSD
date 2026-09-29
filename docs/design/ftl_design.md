@@ -31,6 +31,11 @@
 | v0.20 | 2026-09-29 | 返回值体系统一 + 历史死代码清理：新增 ftl_status_t{FTL_OK=0,FTL_ERROR=-1} 企业级风格枚举，~32 个操作函数从 int 改为 ftl_status_t，谓词/计数函数保持 int；修复 checkpoint_find_latest 因 FTL_OK=0 导致的调用反转 bug；ftl_cmd_setup_ppa 等 3 函数从 (int) 强转改为显式 FC_STATUS_OK 映射；删除历史遗留文件 nand.h/c、nand_geometry.h/c、config/nand_geometry.h、config/ftl_config.h、__patch*.txt；删除死代码 pba_t、wl_init()、allocator_refill_pre_cond()；wl_relocate 复用 gc_read_page_with_lba + gc_erase_and_free（~60 行重复代码消除）；ssd_types.h 清除 ssd_ppa_t；l2p_cache.h 显式 include allocator.h 消除隐式依赖 | Claude |
 | v0.21 | 2026-09-29 | FTL 拓扑信息重构：删除 ftl_context_t/allocator_t/journal_t 中的 ch/ce/lun 散落字段，统一为 ftl_topology_t 结构体；ftl_init 新增 ftl_topology_t 参数替代原 ch/ce/lun 3 个参数；全部 pba_make 的 CH/CE 源改为从 topology 或 alloc->ch/ce 获取，消除硬编码 0,0；allocator/journal/metadata/checkpoint/bbt/power_failure_recovery/wear_leveling 各模块全部接入拓扑路由 | Claude |
 | v0.22 | 2026-09-29 | FTL 对外接口异步化：删除 ftl_read/ftl_write 同步包装，FTL 对外只提供非阻塞接口；ftl_submit_write 新增 complete_flag 参数跟踪 NAND PROGRAM 完成；Controller 层改为纯异步提交 + complete_flag 轮询；新增 ssd_controller_is_complete()；ssd_request_t.completion_status 改为 ssd_status_t | Claude |
+| v0.23 | 2026-09-29 | D4 多 LBA 拆分实现（方案 A — Controller 层拆分）：ftl_submit_read/write 去掉 count 参数（只支持单页）；pending 表新增 on_complete 回调+ctx 字段；request.c 实现 ssd_request_split 循环（block_count 次→N 个单页子请求）；on_sub_complete 递减 sub_remaining 归零时置父请求 complete_flag；单块读也传 complete_flag 正常发完成信号；PBA 无效路径也发回调/信号 | Claude |
+| v0.24 | 2026-09-29 | D5 写失败回滚（modify-after-confirm + BBT 两阶段 + 自动回滚）：ftl_submit_write 中 journal_append/l2p_cache_write 后移到 completion handler 的成功确认路径；pending 表加 old_pba/new_pba/ftl 字段；写失败→bbt_mark_bad RAM only + background bbt_flush；L2P 不动=自动回滚到旧数据；Super Block 空洞由 GC 自然跳过 | Claude |
+| v0.25 | 2026-09-29 | D6 队列深度/背压确认（pending 表满即隐式背压，DRAM-less 消费级不需额外机制）：SQ 深度 64 >> 实际并发（pending=8），pending 表满→FTL_ERROR→Controller→Host 重试，已自然构成流控 | Claude |
+| v0.26 | 2026-09-29 | D7 多命令流水线实现：修正 D4——ftl_submit_read/write 加回 pages 参数（1=单 Plane, 2=Multi-Plane）；Super Block 双 Plane 同步写入（OP_PROGRAM_PAGE_MULTI_PLANE, multi_plane=2）；读路径区分顺序/随机（两两连续 LBA 配对 Multi-Plane）；Cache Program 安全中间页标志 cache_intermediate 跳过 L2P/Journal 确认 | Claude |
+| v0.27 | 2026-09-29 | D8 错误通知粒度（消费级 DRAM-less）：pending 表加 status_out 指针，completion handler 写入 SSD_STATUS_OK/IO_ERROR；ftl_submit_read/write 签名加 status_out 参数；Controller 层传 &request->completion_status 接收异步完成状态 | Claude |
 
 ---
 
@@ -3227,20 +3232,454 @@ Step 12 — Wear Leveling
 | **ftl_submit_write pending** | 写请求注册 pending + complete_flag，NAND PROGRAM 真完成后才通知 caller | ✅ |
 | **Controller 异步提交** | ssd_controller_submit 纯异步，ssd_controller_is_complete 轮询完成状态 | ✅ |
 
+### 已解决
+
+| 编号 | 问题 | 解决方案 |
+|------|------|---------|
+| D4 | **多 LBA 拆分** | ✅ **方案 A — Controller 层拆分**（D7 修正：ftl_submit_read/write 加回 pages 参数支持 Multi-Plane） |
+| D5 | **写失败回滚** | ✅ **modify-after-confirm + BBT 两阶段 + 自动回滚**：`journal_append`/`l2p_cache_write` 移到 completion handler 确认路径；pending 表加 old_pba/new_pba/ftl 字段；写失败→`bbt_mark_bad` RAM only，后台 `bbt_flush` 批量持久化 BBT；L2P 不动=自动回滚 old_pba；Super Block 空洞由 GC 自然跳过 |
+| D6 | **队列深度/背压** | ✅ **pending 表满即隐式背压（DRAM-less 消费级）**：见下方 §17 D6 详细分析 |
+| D7 | **多命令流水线** | ✅ **Multi-Plane + Cache Program 安全中间页**：见下方 §18 D7 详细分析 |
+| D8 | **错误通知粒度** | ✅ **status_out 指针（消费级 DRAM-less）**：见下方 §19 D8 详细分析 |
+
 ### 剩余待办（对外接口待讨论）
 
 以下为 FTL 对外接口层面已识别但未最终决定的问题，待后续讨论：
 
 | 编号 | 问题 | 说明 |
 |------|------|------|
-| D3/D4/D5 | **LBA 地址体系统一** | ssd_lba_t(uint64_t) vs lba_t(uint32_t) 边界，API 参数是否统一 |
-| D4 | **多 LBA 拆分** | block_count != 1 的请求在 Controller 层还是 FTL 层拆分 |
-| D5 | **写失败回滚** | NAND PROGRAM 失败后 L2P/Journal 已更新但数据未写入，需标记坏块+回滚 |
-| D6 | **队列深度/背压** | 多 LUN 并发时 FC SQ 深度有限，需流控机制 |
-| D7 | **多命令流水线** | Multi-Plane / Cache Program 多命令并行提交 |
-| D8 | **错误通知** | ftl_submit_read/write 的 complete_flag 只能通知"完成"，不能细粒度传递错误码 |
+| D3 | **LBA 地址体系统一** | ssd_lba_t(uint64_t) vs lba_t(uint32_t) 边界，API 参数是否统一 |
+| D4 | **多 LBA 拆分** | ✅ 已实现 — Controller 层拆分，`request.c` → `on_sub_complete` 回调聚合，FTL 层保持单页原语 |
+| D5 | **写失败回滚** | ✅ 已实现 — modify-after-confirm + BBT 两阶段 + 自动回滚 |
+| D6 | **队列深度/背压** | ✅ 已实现 — pending 表满即隐式背压（DRAM-less 消费级），不需额外机制 |
+| D7 | **多命令流水线** | ✅ 已实现 — Multi-Plane（写总是双 Plane）+ pages 参数修正 D4 + Cache Program 安全中间页 |
+| D8 | **错误通知** | ✅ 已实现 — status_out 指针传递 SSD_STATUS_OK/IO_ERROR，消费级完成状态通知 |
 
-以上编号 D3~D8 为暂定讨论序号，将在后续 FTL 对外接口讨论中逐一确定。
+## 17. D6 队列深度/背压方案详细分析
+
+### 17.1 问题背景
+
+D4（多 LBA 拆分）后，单次 host 请求（`block_count=N`）会产生 N 个 FC 命令同时入队。当前 FC 资源池深度的基础上，多个提交者（host IO / GC / Metadata / BBT）同时竞争，可能出现队列/池满的情况。
+
+D5（modify-after-confirm）后，写完成回调中使用 `ftl_context_t *ftl` 访问 ftl 上下文写入 Journal + L2P。这引入了 ftl 与 fc 边界之间的上下文依赖，但不影响队列模型。
+
+### 17.2 当前资源预算
+
+| 资源 | 宏 | 深度 | 谁在用 |
+|------|------|------|--------|
+| Command Pool | `FC_COMMAND_POOL_DEPTH` | 64 | 所有 FC 命令（host IO + GC + metadata + BBT + Checkpoint）|
+| Descriptor Pool | `FC_DESCRIPTOR_POOL_DEPTH` | 256 | 每个命令占用 (cw+1) 个 desc |
+| Buffer Pool | `FC_BUFFER_POOL_DEPTH` | 128 | 数据缓冲区（读/写） |
+| SQ（普通队列） | `FC_SQ_DEPTH` | 64 | 普通优先级命令（用户数据） |
+| HSQ（高优队列）| `FC_HSQ_DEPTH` | 16 | 高优先级命令（元数据操作） |
+| CQ（完成队列） | `FC_CQ_DEPTH` | 64 | 已完成命令等待消费 |
+| Pending 表 | `FTL_PENDING_MAX` | 8 | 用户数据 IO 的异步追踪 |
+| 每轮提交预算 | `NAND_SUBMIT_BUDGET` | 4 | ftl_service 每轮最多提交 |
+| LUN 数 | `LUN_NUM` | 1 | 硬件并发单元数 |
+
+### 17.3 四种背压方案分析
+
+#### 方案 ①：直接返回错误（当前做法）
+
+**原理**：队列/池满时 `fc_submit()` 返回 `FC_STATUS_QUEUE_FULL` → `ftl_submit_*()` 返回 `FTL_ERROR` → Controller 层通知 host 错误。
+
+```c
+// fc_submit → QUEUE_FULL 时的传播路径
+fc_submit()
+  → fc_submit_internal()
+    → fc_submission_queue_push()  // count == depth → QUEUE_FULL
+    → return FC_STATUS_QUEUE_FULL
+
+ftl_submit_write()
+  → pending_add()           // pending 满 → FTL_ERROR
+  → 或 fc_submit()          // QUEUE_FULL → FTL_ERROR
+  → fc_command_release(cmd) // 回滚资源
+  → return FTL_ERROR
+
+controller.c / request.c
+  → 收到 FTL_ERROR
+  → 设置 completion_status = error
+  → 设置 complete_flag = 1
+  → host 收到错误，自行决定重试
+```
+
+| 方面 | 评价 |
+|------|------|
+| **复杂度** | 零——已有完整路径 |
+| **资源回滚** | ✅ 完整（fc_command_release + pending_remove 齐全） |
+| **延迟** | 低——即时返回 |
+| **公平性** | ❌ 无优先级，谁先碰到谁失败 |
+| **适用场景** | **DRAM-less 消费级**、资源深度 > 实际消费的场景 |
+
+**行业使用**：eMMC/UFS 消费级控制器，NVMe 消费级 SSD（SRAM 资源紧张时）。
+
+#### 方案 ②：内部排队重试（FTL internal retry queue）
+
+**原理**：`fc_submit` 失败时不放弃，而是将命令放入一个内部重试队列，在后续 `ftl_service` 的 fc_service 阶段重试。
+
+```c
+// FTL 侧
+ftl_submit_write()
+  → fc_submit() → QUEUE_FULL
+  → retry_queue_push(cmd)   // 放入重试队列
+
+ftl_service()
+  → Phase 1: fc_service()  + 重试队列弹出
+    → for each pending in retry_queue:
+        if (fc_submit(retry_cmd) == OK) remove from queue
+  → Phase 2: completion_table_drain()
+```
+
+| 方面 | 评价 |
+|------|------|
+| **复杂度** | 中——需要额外的 retry queue + 重试逻辑 |
+| **资源占用** | 中——retry queue 占用 SRAM（~cmd_handle × 深度） |
+| **延迟** | 高——提交被推迟到下一轮 ftl_service |
+| **公平性** | ✅ 可做（按入队顺序或优先级排序） |
+| **适用场景** | 企业级、对服务质量有要求但资源有限的场景 |
+
+**行业使用**：极少独立实现——多数企业级选择方案③或④。
+
+#### 方案 ③：背压（backpressure via NAND_SUBMIT_BUDGET 动态调节）
+
+**原理**：根据 SQ 或 pending 表的占用率动态调整 `NAND_SUBMIT_BUDGET`，从源头控制 FTL → FC 的提交速率。
+
+```c
+// ftl_service 中动态调节
+void ftl_service(ftl_context_t *ftl)
+{
+    uint8_t budget = NAND_SUBMIT_BUDGET;
+
+    // SQ 占用 > 75% → 限流
+    if (fc_sq_usage() > (FC_SQ_DEPTH * 3 / 4))
+        budget = 1;
+
+    // pending > 75% → 主机 IO 限流（但允许 GC/metadata 继续）
+    if (pending_usage() > (FTL_PENDING_MAX * 3 / 4))
+        budget = (budget > 1U) ? 1U : 0U;
+
+    for (uint8_t i = 0; i < budget; i++)
+        fc_service();
+    ...
+}
+```
+
+| 方面 | 评价 |
+|------|------|
+| **复杂度** | 低-中——只需修改 ftl_service 中 budget 的计算 |
+| **资源占用** | 极低 |
+| **延迟** | 中——提交速率被主动限制，但不会彻底拒绝 |
+| **公平性** | ✅ 可按模块分别限流（host IO 受限但 GC/metadata 不受限） |
+| **适用场景** | 企业级、Host 压力可能超过处理后端的场景 |
+
+**行业使用**：Samsung、Phison 企业级主控中常见，通常结合 Per-command credit 系统。
+
+#### 方案 ④：主机级流控（NVMe doorbell backpressure）
+
+**原理**：在 Host 协议层控制入侵。NVMe 协议原生支持 SQ doorbell 管理——Controller 固件可以指示 host "暂停提交新命令"。
+
+```c
+// 控制器层
+ssd_controller_submit()
+  → pending_usage() > 阈值
+  → 不接收新命令，返回 SSD_STATUS_BUSY
+  → 或 NVMe 层暂停处理 doorbell 更新
+```
+
+| 方面 | 评价 |
+|------|------|
+| **复杂度** | 高——需要 NVMe 协议支持 |
+| **资源占用** | 最低（在 host 侧阻塞） |
+| **延迟** | 最低（host 直接停发，固件不需要保留重试资源） |
+| **公平性** | ✅ NVMe Arbitation 机制原生支持 |
+| **适用场景** | **所有带 NVMe 接口的 SSD**（企业级和消费级都使用） |
+
+**行业使用**：每款 NVMe SSD 的标准做法——通过主机端的 Submission Queue Tail Doorbell 寄存器更新来控制入侵。
+
+### 17.4 方案对比
+
+| 维度 | ① 直接错误 | ② 内部重试 | ③ 动态 budget | ④ 主机流控 |
+|------|-----------|-----------|-------------|-----------|
+| 实现复杂度 | **0** | **中** | **低-中** | **高** |
+| SRAM 额外开销 | 0 | retry queue | 0 | 0 |
+| 命令丢弃 | 是 | 否 | 否 | 否 |
+| 延迟影响 | 最低 | 最高（推迟） | 中（主动减速） | 最低（host 不发） |
+| 优先级支持 | 无 | 可做 | 可做 | NVMe 原生 |
+| **适用阶段** | **当前（DRAM-less 消费级）** | 少用 | 多 LUN 阶段 | NVMe 阶段 |
+
+### 17.5 选择理由
+
+本项目选择 **方案①（直接返回错误 = pending 表满即隐式背压）**，基于以下定量分析：
+
+**资源预算推算**：
+
+```
+资源        深度    实际占用峰值
+────────────────────────────────
+SQ          64      NAND_SUBMIT_BUDGET=4 每轮提交 ≤4
+                    同时最多 pending(8) + 同步操作 ≤8
+                    峰值 ≈ 12 << 64  ✅
+
+Command Pool 64     SQ(12) + HSQ(GC/Metadata ~6) ≈ 18 << 64 ✅
+
+Pending 表    8     D4 拆分 block_count=8 时吃满
+                    → 新的 host 提交会 pending_add FAIL
+                    → 自动拒绝过量提交 → 这就是背压
+```
+
+核心逻辑：
+
+1. **SQ 深度 64 >> 实际并发**：当前 LUN_NUM=1、pending=8、budget=4，实际需要 SQ 中的命令最多 ≈ 12，只占 SQ 的 18%。`FC_STATUS_QUEUE_FULL` 几乎不会发生。
+
+2. **真正的瓶颈是 pending 表（8 槽）**：pending 表满时 `pending_add()` 返回 `FTL_ERROR`，FTL 在 fc_submit **之前**就拒绝了请求，不会浪费 FC 资源池。这天然形成"资源耗尽即背压"。
+
+3. **SRAM 是 DRAM-less 最贵的资源**：维护一个 retry queue（方案②）需要额外的 SRAM，与 DRAM-less 设计目标（最小化 SRAM 占用）相悖。
+
+4. **NVMe 阶段自然过渡到方案④**：当 NVMe 层实现后，host 级流控（方案④）会成为主流——那时方案①作为 fallback 保留。
+
+### 17.6 结论
+
+| 决策 | 值 |
+|------|-----|
+| **当前方案** | ① 直接返回错误（pending 表满即背压） |
+| **适用阶段** | DRAM-less 消费级，LUN_NUM=1，pending=8 |
+| **未来升级路径** | P-A pending 表扩展后 → 必要时加方案③（动态 budget） |
+| **远期** | NVMe 层实现后 → 方案④（主机级流控）成为主流 |
+| **不采用** | 方案②（内部重试）— SRAM 开销不合理 |
+
+## 18. D7 多命令流水线方案详细分析
+
+### 18.1 问题背景
+
+D4 实现了多 LBA 拆分，但 FTL 接口的 `count` 参数被完全删除，导致 FTL 无法得知单次操作涉及几个 Plane。D4 的设计假设"FTL 只做单页原语"过于绝对——Multi-Plane 操作中，FTL 必须知道 pages 数才能配置正确的 OP 码和 multi_plane 字段。
+
+同时存在三种可用的 NAND 并行技术：
+
+| 技术 | NAND 命令 | 效果 | 现状 |
+|------|----------|------|------|
+| **Multi-Plane** | `80h-11h-80h-10h` / `30h` 双地址 | 双 Plane 并行 tPROG/tR → ~2x 吞吐 | FC 层完整支持，FTL 层全部 `multi_plane=0U` |
+| **Cache Program** | `80h-address-data-15h` 流水线 | tPROG 与后续数据加载重叠 → ~1.3-1.5x | OP 码已定义，dispatch 表已注册 |
+| **ISSUE/WAIT/FETCH** | Phase V 拆分 | LUN 间时间片轮转 | 已部分实现 |
+
+### 18.2 当前资源预算（D7 相关）
+
+| 资源 | 值 | 说明 |
+|------|-----|------|
+| `PLANE_NUM` | 2 | 每 LUN 双 Plane |
+| `LUN_NUM` | 1 | 当前单 LUN |
+| `PAGES_PER_BLOCK` | 64 | Super Block 容量 = 64 页 |
+| Super Block 结构 | `plane_blocks[2]` | 两个 Plane 各一个 Block，配对写入 |
+| FC `multi_plane` 字段 | 3 bit | 0=single, N=N-plane desc 数 × N |
+| FC OP 码 | 已定义 `OP_PROGRAM_PAGE_MULTI_PLANE(31)`, `OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT(30)` | FTL 层全部用 `OP_NORMAL_*` |
+| `FC_SQ_DEPTH` | 64 | 命令队列 |
+
+### 18.3 三种流水线技术分析
+
+#### Multi-Plane
+
+**原理**：ONFI 标准中，一个命令序列可以携带两个 Plane 的地址和数据，NAND 内部双 Plane 同时烧录/读取。
+
+**写流程（OP_PROGRAM_PAGE_MULTI_PLANE）**：
+```
+80h-C1C2R1_P0R2_P0R3_P0-Din_P0-11h-C1C2R1_P1R2_P1R3_P1-Din_P1-10h ~~~~ tPROG ~~~~ 70h-Status
+      |--- Plane 0 地址+数据---|    |--- Plane 1 地址+数据---|
+```
+11h 是 ONFI Multi-Plane 切换命令，两 Plane 数据加载完后 10h 同时烧录。
+
+**读流程（OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT）**：
+```
+00h-C1C2R1_P0R2_P0R3_P0-00h-C1C2R1_P1R2_P1R3_P1-30h ~~~~ tR ~~~~ Dout(双页)
+```
+一次 tR 后输出两 Plane 数据。
+
+**FC 层 desc 分配**：
+```c
+// multi_plane=2, cw=3 → total_desc = 2 × 4 = 8
+desc[0~3]: plane=0, cw=0~3    ← command->paa 自动拆
+desc[4~7]: plane=1, cw=0~3
+```
+
+**效率**：双 Plane PROGRAM 的 tPROG 与单 Plane 相同（~500μs），因此吞吐翻倍。
+
+#### Cache Program
+
+**原理**：NAND 内部有 cache register 和 data register（主寄存器）两级缓冲。`15h` 将 cache register 数据拷贝到 data register 后立即释放 cache register，copy 过程与 data register 的 tPROG 重叠。
+
+```
+时间 →
+  [LOAD₀→15h]  tCBSY  [LOAD₁→15h]  tCBSY  [LOAD₂→10h]  tPROG
+       │══tCBSY══│           │══tCBSY══│           │══tPROG══│
+       ↑cache→data          ↑cache→data          ↑真正等待完成
+```
+
+**ONFI 规格说明**（MT29F4G08ABADAWP 数据手册）：
+
+> PROGRAM PAGE CACHE (80h-15h) copies data from the cache register to the data register; then moves the data register contents to the specified block and page address.
+>
+> After the data is copied to the data register, the cache register is available for additional commands.
+>
+> When the LUN's status shows busy with a PROGRAM CACHE operation (RDY=1, ARDY=0), the host should check the status of the FAILC bit to see if a **previous** cache operation was successful.
+
+**关键时序参数**：
+| 参数 | 值 | 含义 |
+|------|-----|------|
+| tCBSY | ~3μs | cache→data register 拷贝 |
+| tPROG | ~500μs | data register→NAND array 烧录 |
+| Cache hit | ~1.3-1.5x | tPROG 被后续 15h 数据加载部分掩盖 |
+
+**掉电安全性分析**：
+
+ONFI 规格中，`15h` 的 WAIT_READY 等待的是 tCBSY（cache→data register 拷贝完成），**不是** tPROG（data→NAND array 烧录完成）。tPROG 在 WAIT_READY 返回时仍在后台运行。
+
+```
+uop 序列（g_nand_program_cache_uops）:
+  ① 70h 轮询等 LUN ready
+  ② 80h + 地址 + 数据 → cache register
+  ③ 15h → 开始 tCBSY
+  ④ WAIT_READY          ← 等 tCBSY 完成（cache register 空闲）
+  ⑤ 70h + CHECK_FAIL    ← 检查的是上一个 cache op 的 FAILC
+  ⑥ END → completion
+        ↑ dispatch 在此处向上发 completion → FTL 收到后 D5 确认路径
+```
+
+这意味着：**中间页（15h）的 completion 到达时，数据可能还未烧入 NAND 阵列**。如果在 tPROG 中途掉电，数据丢失，但 D5 的 modify-after-confirm 已更新 L2P/Journal → 指向无效物理页。
+
+#### ISSUE/WAIT/FETCH
+
+Phase V 已实现：`OP_READ_PAGE_LOAD`(35) / `OP_READ_PAGE_FETCH`(36) / `OP_PROGRAM_PAGE_ISSUE`(37) / `OP_PROGRAM_PAGE_WAIT`(38) 等。
+用于多 LUN 并发时时间片轮转，当前 LUN_NUM=1 未激活。
+
+### 18.4 三种技术的互斥关系
+
+| 组合 | 可行性 | 原因 |
+|------|--------|------|
+| **Multi-Plane + Cache Program** | ❌ | ONFI 不支持。Multi-Plane 用 11h 切换 Plane，Cache Program 用 15h 结束，命令序列不兼容 |
+| **Multi-Plane + ISSUE/WAIT** | ✅ | Multi-Plane 可作为单个 ATOMIC 命令，被 ISSUE/WAIT 包装 |
+| **Cache Program + ISSUE/WAIT** | ✅ | Cache 流水线中的每一页可作为独立的 ISSUE/WAIT |
+| **ISSUE/WAIT 自身** | ✅ | Phase V 已实现，用于多 LUN |
+
+**场景选择策略**：
+
+| 场景 | 技术 | 原因 |
+|------|------|------|
+| **Super Block 写入（host IO / GC 连续写入）** | Multi-Plane | Super Block 双 Plane 天生配对，tPROG 翻倍收益 |
+| **大块顺序写入（连续多页，单 LUN）** | Cache Program | 多页流水线，tPROG 重叠 |
+| **多 LUN 并发** | ISSUE/WAIT + multi-plane per LUN | LUN 间时间片 + 单 LUN 内 Multi-Plane |
+| **随机单 LBA** | 单 Plane | 没有配对机会 |
+
+### 18.5 存储主控做法
+
+企业级/消费级主控统一采用以下策略：
+
+```
+Controller 层:
+  ┌── 识别连续 LBA 对 → 双 Plane Multi-Plane（pages=2）
+  ├── 识别连续多页写序列 → Cache Program（pending 标记 cache_intermediate）
+  └── 随机/奇数 LBA → 单 Plane（pages=1）
+
+FTL 层:
+  ┌── 接收 pages 参数，构造对应 OP 码 + multi_plane
+  ├── completion handler 中检查 cache_intermediate
+  │   ├── 0 = 正常确认（Journal + L2P）
+  │   └── 1 = 中间页跳过确认（等最终 10h）
+  └── PBA 无效自动回滚
+```
+
+### 18.6 实现方案
+
+#### 修正 D4：加回 pages 参数
+
+D4 将 `count` 完全删除不恰当。FTL 需要知道单次操作涉及的页数以配置正确的 FC 命令参数。
+
+```c
+// 修正后签名
+ftl_status_t ftl_submit_read(ftl, lba, buffer, pages, complete_flag, on_complete, ctx);
+ftl_status_t ftl_submit_write(ftl, lba, data, pages, complete_flag, on_complete, ctx);
+```
+
+| pages | 含义 | OP 码 | multi_plane | 数据量 |
+|-------|------|-------|------------|--------|
+| 1 | 单 Plane | `OP_NORMAL_*` | 0 | 2048 |
+| 2 | 双 Plane Multi-Plane | `OP_*_MULTI_PLANE` | 2 | 4096 |
+
+#### Multi-Plane 实现
+
+写路径（`ftl_submit_write`）：
+- pages=2 → `OP_PROGRAM_PAGE_MULTI_PLANE` + `multi_plane=2` + data size=4096
+- Super Block 写入天生双 Plane → 写总是 Multi-Plane
+
+读路径（`ftl_submit_read`）：
+- pages=2 → `OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT` + `multi_plane=2`
+- 顺序读配对：Controller 层两两连续 LBA 合并
+
+#### Cache Program 安全机制
+
+```c
+typedef struct {
+    ...
+    uint16_t pages             : 2;   // 操作涉及的页数
+    uint16_t cache_intermediate : 1;  // 1=Cache Program 中间页
+} ftl_pending_req_t;
+
+// ftl_handle_completion 中：
+if (NAND_SUCCESS && buffer == NULL)   // 写完成
+{
+    if (pending->cache_intermediate == 0)
+    {
+        journal_append(...);            // 更新 Journal
+        l2p_cache_write(...);           // 更新 L2P
+    }
+    // cache_intermediate=1 → 跳过，等最终页完成
+}
+```
+
+**最终页（10h）**正常触发 L2P/Journal 更新，前面的中间页（15h）只发 complete_flag 和 on_complete 回调用于 Controller 聚合，但不更新 FTL 元数据。
+
+如果中间页 NAND_FAIL：标记坏块 + 回滚（与 D5 机制一致，L2P 不动）。
+
+### 18.7 Controller 层配对策略
+
+`ssd_request_split` 中：
+
+```
+写拆分：两两配对 pages=2
+  block_count=8 → [p0p1][p2p3][p4p5][p6p7] → 4 次 Multi-Plane
+
+读拆分：两两配对 pages=2
+  block_count=8 → 4 次 Multi-Plane（顺序读覆盖）
+  block_count=3 → 1 次 Multi-Plane + 1 次单 Plane（奇数剩余）
+```
+
+`sub_remaining` 计数器修正为 `ceil(block_count/2)`，因为一次 Multi-Plane 命令覆盖两个 LBA。
+
+### 18.8 波及的文件
+
+| 文件 | 改动 |
+|------|------|
+| `include/ftl/ftl.h` | `ftl_submit_read/write` 加 `pages` 参数 |
+| `include/ftl/pending.h` | 结构体加 `pages` + `cache_intermediate`；`pending_add` 签名加 2 参数 |
+| `src/ftl/ftl.c` | `submit_read/write` pages 分支 + Multi-Plane OP 码；`handle_completion` cache 中间页跳过确认 |
+| `src/ftl/pending.c` | `pending_add` 实现加 2 参数 |
+| `src/controller/controller.c` | 单块直通传 pages=1 |
+| `src/controller/request.c` | 配对拆分 pages=2，奇数 pages=1；`sub_remaining` 修正为 `ceil(N/2)` |
+
+### 18.9 其他内部函数不受影响
+
+| 函数 | 原因 |
+|------|------|
+| `ftl_internal_write_page/read_page` | 元数据操作不走 Super Block，保持 `multi_plane=0` |
+| `ftl_internal_erase_block` | 擦除 Multi-Plane OP 码（OP_ERASE_BLOCK_MULTI_PLANE）暂不使用 |
+| `gc.c` | GC 逐页搬移，`multi_plane=0` |
+| `ftl_fc_interface.c` ×4 | 同步单页操作 |
+
+### 18.10 结论
+
+| 技术 | 状态 | 实现 |
+|------|------|------|
+| **Multi-Plane 写** | ✅ 已实现 | Super Block 写入总是 pages=2 |
+| **Multi-Plane 读** | ✅ 已实现 | Controller 层连续 LBA 配对 pages=2 |
+| **Cache Program** | ✅ 基础设施就绪 | OP 码 + dispatch 表已注册；FTL 层用 `cache_intermediate` 确保掉电安全；实际使用预留 |
+| **ISSUE/WAIT** | ⏳ Phase V 已部分实现 | 多 LUN 时启用 auto-split |
 
 ### 剩余待办（非对外接口，未实现待处理）
 
@@ -3259,7 +3698,7 @@ Step 12 — Wear Leveling
 
 | 任务 | 说明 | 状态 |
 |------|------|------|
-| P-B.1 | Controller 请求拆分（`request.c`） | ⚠️ `#warning` |
+| P-B.1 | Controller 请求拆分（`request.c`） | ✅ 已实现 — `ssd_request_split` + `on_sub_complete` 回调聚合 |
 | P-B.2 | 优先级调度（`scheduler.c`） | ⚠️ `#warning` |
 | P-B.3 | 状态机管理（`state_machine.c`） | ⚠️ `#warning` |
 | P-B.4 | NVMe Admin 命令（`nvme_admin.c`） | ⚠️ `#warning` |

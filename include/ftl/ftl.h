@@ -103,7 +103,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl,
 void ftl_service(ftl_context_t *ftl);
 
 /*
- * ftl_submit_read - 非阻塞提交读请求
+ * ftl_submit_read - 非阻塞提交读请求（单页或多 Plane）
  *
  * 内部：
  *   ① l2p_cache_read() 查 PBA
@@ -112,33 +112,51 @@ void ftl_service(ftl_context_t *ftl);
  *   ④ 注册 pending 表
  *   ⑤ 数据在 ftl_service() Phase 2 中路由到 buffer
  *
- * @param ftl    FTL 上下文
- * @param lba    逻辑地址（uint64_t，匹配 NVMe 协议宽度）
- * @param buffer 数据 buffer（至少 FTL_READ_USER_SIZE 字节）
- * @param count  sector 数（当前只支持 1）
+ * @param ftl            FTL 上下文
+ * @param lba            逻辑地址（uint64_t，匹配 NVMe 协议宽度）
+ * @param buffer         数据 buffer（单页至少 FTL_READ_USER_SIZE，双页至少 2×）
+ * @param pages          页数（1=单 Plane，2=双 Plane Multi-Plane 读）
+ * @param complete_flag  非 NULL 时 NAND READ 完成后置 1（用于控制器异步跟踪）
+ * @param status_out     非 NULL 时完成 handler 写入 SSD_STATUS_OK/IO_ERROR
+ * @param on_complete    完成回调（可选，用于 Controller 层子请求聚合）
+ * @param on_complete_ctx 回调上下文
  * @return FTL_OK 成功提交，FTL_ERROR 失败
  */
-ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer, uint32_t count);
+ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer,
+                             uint32_t pages,
+                             volatile uint8_t *complete_flag,
+                             volatile ssd_status_t *status_out,
+                             pending_cb_t on_complete, void *on_complete_ctx);
 
 /*
- * ftl_submit_write - 非阻塞提交写请求
+ * ftl_submit_write - 非阻塞提交写请求（单页或双 Plane Multi-Plane）
+ *
+ * pages=2 时使用双 Plane Multi-Plane PROGRAM（OP_PROGRAM_PAGE_MULTI_PLANE），
+ * 在同一 Super Block 页内同时写入两个 Plane。数据 buffer 需包含两个连续页的数据
+ * （总长度 = FTL_READ_USER_SIZE × pages 字节）。
  *
  * 内部：
  *   ① allocator_alloc(FTL_TEMP_HOT) → new_pba
  *   ② l2p_cache_read(lba) → old_pba（journal 用）
  *   ③ FC 命令构造 + submit（异步写 NAND）
- *   ④ journal_append(lba, old_pba, new_pba)
- *   ⑤ l2p_cache_write(lba, new_pba)
- *   ⑥ 注册 pending（complete_flag 在 NAND PROGRAM 完成后置 1）
+ *   ④ 注册 pending（complete_flag 在 NAND PROGRAM 完成后置 1）
+ *   ⑤ Journal + L2P 在 completion handler 中确认 NAND PROGRAM 成功后执行
  *
  * @param ftl            FTL 上下文
- * @param lba            逻辑地址（uint64_t，匹配 NVMe 协议宽度）
- * @param data           数据指针（至少 FTL_READ_USER_SIZE 字节）
- * @param count          sector 数（当前只支持 1）
+ * @param lba            逻辑地址（pages=2 时 lba 必须为偶数，代表双 Plane 的 plane 0 侧）
+ * @param data           数据指针（至少 FTL_READ_USER_SIZE × pages 字节）
+ * @param pages          页数（1=单 Plane，2=双 Plane Multi-Plane PROGRAM）
  * @param complete_flag  非 NULL 时 NAND PROGRAM 完成后置 1（用于控制器异步跟踪）
+ * @param status_out     非 NULL 时完成 handler 写入 SSD_STATUS_OK/IO_ERROR
+ * @param on_complete    完成回调（可选，用于 Controller 层子请求聚合）
+ * @param on_complete_ctx 回调上下文
  * @return FTL_OK 成功提交，FTL_ERROR 失败
  */
-ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data, uint32_t count, volatile uint8_t *complete_flag);
+ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data,
+                              uint32_t pages,
+                              volatile uint8_t *complete_flag,
+                              volatile ssd_status_t *status_out,
+                              pending_cb_t on_complete, void *on_complete_ctx);
 
 /*
  * ftl_trim - 取消 LBA 映射（非阻塞）

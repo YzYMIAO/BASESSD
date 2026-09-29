@@ -389,3 +389,291 @@ ftl_init(ftl, topo, free_blocks, free_count, bad_blocks, erase_counts, closed_sb
 | Block 类型 | 未区分 | 元数据/数据/空闲/坏块 |
 | Modules | 9 个桩 | 完整接口定义 |
 | RAID | 无（CONFIG=0） | 无（CONFIG=0） |
+
+---
+
+## v0.23 — D4 多 LBA 拆分（Controller 层方案 A）
+
+**日期**：2026-09-29
+
+### 背景
+
+`block_count != 1` 的多 LBA 请求一直被 `count != 1U` 守卫拒绝。FTL 对外接口的 `count` 参数语义不清晰——它存在但从未真正被消费。
+
+### 决策：方案 A — Controller 层拆分
+
+存储主控行业标准做法：Controller 层负责主机协议翻译（多 LBA → 单页子请求），FTL 层只处理单页原语。
+
+### 改动清单
+
+#### FTL 接口净化
+
+| 接口 | 旧签名 | 新签名 |
+|------|--------|--------|
+| `ftl_submit_read` | `(ftl, lba, buf, count)` | `(ftl, lba, buf, complete_flag, on_complete, ctx)` |
+| `ftl_submit_write` | `(ftl, lba, data, count, complete_flag)` | `(ftl, lba, data, complete_flag, on_complete, ctx)` |
+
+- 删除 `count` 参数（FTL 只支持单页）
+- 新增 `pending_cb_t on_complete` + `void *on_complete_ctx` 回调（pending 完成通知）
+- 读请求新增 `complete_flag` 参数（此前读没有完成信号）
+
+#### Pending 表扩展
+
+`ftl_pending_req_t` 变化：
+- 删除 `count` 字段（未使用）
+- 新增 `on_complete` 回调指针 + `on_complete_ctx` 上下文
+- `pending_add` 签名对应更新
+
+#### Completion 路径
+
+`ftl_handle_completion` 中新增回调调用：`complete_flag=1` 后 → `on_complete(ctx)`（pending 释放前）。
+
+读请求 PBA 无效路径也发完成信号（memset 零后 → `complete_flag=1` → `on_complete(ctx)`），确保所有提交路径的完成语义一致。
+
+#### Controller 拆分
+
+`controller.c`：
+- `block_count == 1`：直通 FTL，传 `complete_flag`
+- `block_count > 1`：路由到 `ssd_request_split()`
+
+`request.c`（核心拆分实现）：
+
+```c
+static void on_sub_complete(void *ctx) {
+    ssd_request_t *req = (ssd_request_t *)ctx;
+    if (req->sub_remaining > 0U) req->sub_remaining--;
+    if (req->sub_remaining == 0U) req->complete_flag = 1U;
+}
+```
+
+`ssd_request_t` 新增 `sub_remaining` 计数器。
+
+### 波及的文件
+
+| 文件 | 改动 |
+|------|------|
+| `include/ftl/ftl.h` | `ftl_submit_read/write` 签名：删 count + 加 complete_flag(读) + 加 on_complete/ctx |
+| `include/ftl/pending.h` | 删 count + 加 on_complete/ctx；新增 `pending_cb_t` 类型 |
+| `src/ftl/pending.c` | `pending_add` 签名更新 |
+| `src/ftl/ftl.c` | `ftl_submit_read/write` 实现对应调整；`ftl_handle_completion` 加 on_complete 调用；PBA 无效发完成信号 |
+| `include/controller/ssd_request.h` | 新增 `sub_remaining` 字段 |
+| `src/controller/controller.c` | block_count 拆分路由（1→直通，>1→ssd_request_split） |
+| `src/controller/request.c` | 核心拆分实现 + on_sub_complete 回调聚合 |
+| `src/controller/completion.c` | 注释更新 |
+
+### 编译状态
+
+**零错误零警告**。Binary size: 58368 bytes（不变）。
+
+---
+
+## v0.24 — D5 写失败回滚（modify-after-confirm + BBT 两阶段 + 自动回滚）
+
+**日期**：2026-09-29
+
+### 背景
+
+`ftl_submit_write` 在 `fc_submit` 后立即执行 `journal_append` + `l2p_cache_write`，此时 NAND PROGRAM 尚未完成。如果 PROGRAM 失败：
+
+1. **Journal 包含不可逆的映射** — 掉电后 replay 将 LBA 指向未写完成的新块 → 数据静默损坏
+2. **L2P 指向垃圾数据** — 映射已更新但物理页无效
+3. **坏块未标记** — 失败的 block 没有标记为坏，后续可能被重新分配
+
+同时 `bbt_mark_bad` 在当前实现中同步写 NAND（`bbt_save` → 6 页 PROGRAM），如果在 completion handler 中调用会阻塞 completion 泵数毫秒。
+
+### 决策：modify-after-confirm + BBT 两阶段 + 自然回滚
+
+#### 顺序修正
+
+`journal_append` / `l2p_cache_write` / `checkpoint_journal_watermark` / `total_writes++` 从 `ftl_submit_write` 移入 `ftl_handle_completion` 的写成功确认路径，NAND PROGRAM 确认成功后执行（存储主控 industry standard）。
+
+#### BBT 两阶段化
+
+| 阶段 | 位置 | 操作 | NAND 访问 |
+|------|------|------|-----------|
+| 快速路径 | `ftl_handle_completion` | BBT bitmap 置位 + allocator 列表标记 | ❌ 无 |
+| 后台持久化 | `ftl_service_idle/normal` → `bbt_flush()` | 攒批写 BBT payload 到 Block 36+39（6 页） | ✅ |
+
+#### 回滚
+
+写失败后 L2P 不动（自动指向 `old_pba`），无额外回滚逻辑。Super Block 空洞由 GC 扫描时读 NAND 失败自然跳过。
+
+### 改动清单
+
+#### Pending 表扩展
+
+`include/ftl/pending.h`：
+- `ftl_pending_req_t` 新增 `old_pba` / `new_pba` / `ftl` 三个字段
+- `pending_add` 签名新增 3 参数
+
+`src/ftl/pending.c`：`pending_add` 实现对应更新
+
+#### ftl_submit_write 顺序修正
+
+`src/ftl/ftl.c` — `ftl_submit_write`：
+- 删除 `journal_append()` / `l2p_cache_write()` / `checkpoint_journal_watermark()` / `total_writes++`
+- `pending_add` 传 `old_pba`, `new_pba`, `ftl`
+- 注释改为 `/* Journal + L2P 在 completion handler 中确认 NAND PROGRAM 成功后执行 */`
+
+#### ftl_handle_completion 确认/回滚
+
+`src/ftl/ftl.c` — `ftl_handle_completion` FC_COMMAND_MODULE_FTL 路径：
+
+| 条件 | 动作 |
+|------|------|
+| NAND_SUCCESS + buffer != NULL（读成功） | `ftl_cmd_read_data`（不变） |
+| NAND_SUCCESS + buffer == NULL（写成功） | `journal_append` + `l2p_cache_write` + `checkpoint_journal_watermark` + `total_writes++` |
+| NAND_FAIL + buffer != NULL（读失败） | `memset` 零（不变） |
+| NAND_FAIL + buffer == NULL（写失败） | `pba_to_block` → `bbt_mark_bad`（RAM only） |
+
+#### BBT 两阶段化
+
+`src/ftl/bbt.c` — `bbt_mark_bad`：删除 `bbt_save()` 调用
+`src/ftl/bbt.c` — 新增 `bbt_flush()` 公开函数
+`include/ftl/bbt.h` — 声明 `bbt_flush()`
+`src/ftl/ftl.c` — `ftl_service_idle` + `ftl_service_normal` 中调用 `bbt_flush()`
+
+### 波及的文件
+
+| 文件 | 改动 |
+|------|------|
+| `include/ftl/pending.h` | pending 加 old_pba/new_pba/ftl 字段 + pending_add 签名扩展；恢复 FTL_PENDING_MAX 宏 |
+| `src/ftl/pending.c` | pending_add 实现对应更新 |
+| `src/ftl/ftl.c` — `ftl_submit_write` | 移出 journal/l2p/watermark/total_writes；pending_add 传 old_pba/new_pba/ftl |
+| `src/ftl/ftl.c` — `ftl_handle_completion` | 写成功→确认 journal+l2p；写失败→坏块标记 |
+| `src/ftl/ftl.c` — `ftl_submit_read` | pending_add 适配新签名 |
+| `src/ftl/bbt.c` — `bbt_mark_bad` | 删除同步 bbt_save() |
+| `src/ftl/bbt.c` | 新增 bbt_flush() |
+| `include/ftl/bbt.h` | 声明 bbt_flush() |
+| `src/ftl/ftl.c` — `ftl_service` | IDLE/NORMAL 模式加 bbt_flush() |
+
+### 编译状态
+
+**零错误零警告**。Binary size: 58368 bytes（不变）。
+
+---
+
+## v0.25 — D6 队列深度/背压方案确认（pending 表满即隐式背压）
+**日期**：2026-09-29
+
+### 背景
+
+D4 多 LBA 拆分后，单次 host 请求（`block_count=N`）产生 N 个 FC 命令同时入 SQ。
+SQ 深度 64、Command Pool 64、Pending 表 8 各层资源构成多层漏斗。需要确认背压策略。
+
+### 决策：方案① pending 表满即隐式背压
+
+四种方案的原理、实现和行业使用情况在 `ftl_design.md §17` 中详细分析。
+
+**选择理由（定量分析）**：
+
+| 资源 | 深度 | 实际占用峰值 | 结论 |
+|------|------|-------------|------|
+| SQ | 64 | budget=4 + pending ≤8 + HSQ ≤6 ≈ 18 | << 64 ✅ |
+| Command Pool | 64 | 同 SQ ≈ 18 | << 64 ✅ |
+| Pending 表 | 8 | D4 拆分 block_count=8 时吃满 ⚠️ | **真正瓶颈** |
+
+核心逻辑：
+- SQ/池满几乎不会发生：实际并发 << 深度
+- pending 表满时 `pending_add()` → `FTL_ERROR` → fc_submit 之前就拒绝
+- SRAM 是 DRAM-less 最贵的资源，不设 retry queue（方案②）
+- NVMe 实现后自然过渡到方案④（主机级流控）
+
+**不采用**：
+- 方案②（内部排队重试）：需额外 SRAM，与 DRAM-less 设计相悖
+- 方案③（动态 budget）：当前资源深度足够，预算固定即可
+- 方案④（主机级流控）：NVMe 层还没实现
+
+### 波及的文件
+
+| 文件 | 改动 |
+|------|------|
+| `docs/design/ftl_design.md` | 新增 §17 D6 详细分析（四种方案原理 + 对比表 + 定量推算 + 选择理由） |
+
+**无代码改动**。
+
+---
+
+## v0.26 — D7 多命令流水线（Multi-Plane + Cache Program 安全中间页）
+
+**日期**：2026-09-29
+
+### 背景
+
+D4 的"FTL 只做单页原语"过于绝对——Multi-Plane 操作中 FTL 必须知道页数才能配置正确的 OP 码和 multi_plane 字段。同时 Super Block 设计（`plane_blocks[2]`）天生为双 Plane 配对，但 `allocator_alloc` 只返回单页 PBA。
+
+### 决策：修正 D4 + Multi-Plane + Cache Program 安全
+
+#### 修正 D4：加回 pages 参数
+
+```c
+ftl_submit_read(ftl, lba, buf, pages, complete_flag, status_out, on_complete, ctx)
+ftl_submit_write(ftl, lba, data, pages, complete_flag, status_out, on_complete, ctx)
+```
+
+| pages | 含义 | OP 码 | multi_plane | 数据量 |
+|-------|------|-------|------------|--------|
+| 1 | 单 Plane | `OP_NORMAL_*` | 0 | 2048 |
+| 2 | 双 Plane Multi-Plane | `OP_*_MULTI_PLANE` | 2 | 4096 |
+
+#### Multi-Plane
+
+写总是 pages=2（Super Block 双 Plane 同步写入），读由 Controller 层两两连续 LBA 配对。
+
+#### Cache Program 安全
+
+`pending_req_t` 加 `cache_intermediate:1` 标志。中间页（15h）completion 时不更新 Journal/L2P，等最终页（10h）确认后一起更新。
+
+### 波及的文件
+
+| 文件 | 改动 |
+|------|------|
+| `include/ftl/ftl.h` | `ftl_submit_read/write` 签名加 `pages` 参数 |
+| `include/ftl/pending.h` | 结构体加 `pages` + `cache_intermediate`；`pending_add` 签名加 2 参数 |
+| `src/ftl/ftl.c` | `submit_read/write` pages 分支 + Multi-Plane OP 码；`handle_completion` cache 中间页跳过确认 |
+| `src/ftl/pending.c` | `pending_add` 实现加 2 参数 |
+| `src/controller/controller.c` | 单块直通传 pages=1 |
+| `src/controller/request.c` | 配对拆分 pages=2，奇数 pages=1；`sub_remaining` 修正为 `ceil(N/2)` |
+
+### 编译状态
+
+**零错误零警告**。Binary size: 58368 bytes（不变）。
+
+---
+
+## v0.27 — D8 错误通知粒度（status_out 消费级完成状态）
+
+**日期**：2026-09-29
+
+### 背景
+
+`complete_flag` 只能通知"完成"，不能区分"成功完成"和"失败完成"。消费级 DRAM-less 不需要企业级的 ECC 计数、failed descriptor ID、Error Log Entry——只需要知道"成功了还是失败了"。
+
+### 决策：status_out 指针
+
+pending 表加 `volatile ssd_status_t *status_out` 指针（同 complete_flag 模式），completion handler 在置 `complete_flag` 的同时写入 `SSD_STATUS_OK` / `SSD_STATUS_IO_ERROR`。
+
+```
+ftl_handle_completion:
+  NAND_SUCCESS + 读 → ftl_cmd_read_data → *status_out = SSD_STATUS_OK
+  NAND_SUCCESS + 写(非cache中间页) → journal+l2p → *status_out = SSD_STATUS_OK
+  NAND_FAIL + 读 → memset 零 → *status_out = SSD_STATUS_IO_ERROR
+  NAND_FAIL + 写 → bbt_mark_bad → *status_out = SSD_STATUS_IO_ERROR
+  cache_intermediate → 不设 status_out（由最终页决定）
+```
+
+### 波及的文件
+
+| 文件 | 改动 |
+|------|------|
+| `include/ftl/pending.h` | pending 加 `status_out`；`pending_add` 签名加 1 参数；加 `#include "common/ssd_types.h"` |
+| `src/ftl/pending.c` | `pending_add` 实现加 `status_out` |
+| `include/ftl/ftl.h` | `ftl_submit_read/write` 签名加 `volatile ssd_status_t *status_out` |
+| `src/ftl/ftl.c` — `ftl_handle_completion` | 各路径写 `*status_out = OK/IO_ERROR` |
+| `src/ftl/ftl.c` — `ftl_submit_read/write` | `pending_add` 传 `status_out` |
+| `src/controller/controller.c` | 单块传 `&request->completion_status` |
+| `src/controller/request.c` | 拆分传 `&request->completion_status` |
+
+### 编译状态
+
+**零错误零警告**。Binary size: 58368 bytes（不变）。

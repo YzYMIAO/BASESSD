@@ -8,7 +8,8 @@
 ## 1. FTL 对外 API
 
 FTL 模块通过 `include/ftl/ftl.h` 对外暴露以下接口。
-FTL 对外只提供**非阻塞接口**，不提供同步包装。Controller 层通过 `complete_flag` 轮询异步完成状态。
+FTL 对外只提供**非阻塞单页接口**，不提供同步包装。多页请求由 Controller 层拆分后逐个提交 FTL。
+Controller 层通过 `complete_flag` 轮询或 `on_complete` 回调跟踪异步完成状态。
 
 ### 1.1 核心数据结构
 
@@ -33,22 +34,78 @@ struct ftl_context {
 | 接口 | 类型 | 说明 | 备注 |
 |------|------|------|------|
 | `ftl_init()` | 初始化 | 初始化 L2P cache、allocator、journal、Metadata Directory、BBT | 在 `fc_init()` 之后调用 |
-| `ftl_submit_read()` | 异步读 | 非阻塞提交读请求（pending 表 + complete_flag 驱动完成） | L2P→PBA→FC submit→pending |
-| `ftl_submit_write()` | 异步写 | 非阻塞提交写请求 + Journal + watermark + complete_flag | alloc→FC submit→journal→L2P→pending |
+| `ftl_submit_read()` | 异步读 | 非阻塞提交单页读请求（pending 表 + complete_flag + on_complete 回调） | L2P→PBA→FC submit→pending |
+| `ftl_submit_write()` | 异步写 | 非阻塞提交单页写请求 + Journal + watermark + complete_flag + on_complete 回调 | alloc→FC submit→journal→L2P→pending |
 | `ftl_trim()` | 异步取消映射 | 写 FTL_PBA_INVALID 到 L2P Cache，标记 DIRTY | 非阻塞 |
 | `ftl_service()` | 主循环 | 推进 FC 调度 + 统一完成泵 + 后台任务（flush/GC/WL/Checkpoint） | 在 main loop 中频繁调用 |
 
-**注**：FTL 不提供同步包装（删除 `ftl_read`/`ftl_write`）。Controller 层通过 `ssd_controller_submit()` 异步提交请求，通过 `ssd_controller_is_complete()` 轮询完成状态。
+**注**：
+- FTL 提供**单页和多 Plane 接口**（pages=1=单 Plane 2048 字节，pages=2=双 Plane Multi-Plane 4096 字节）。多 LBA 请求由 Controller 层拆分配对后提交。
+- FTL 不提供同步包装（删除 `ftl_read`/`ftl_write`）。
+- Controller 层通过 `ssd_controller_submit()` 异步提交请求，通过 `ssd_controller_is_complete()` 或 `on_complete` 回调跟踪完成。
 
-### 1.3 异步完成机制
+### 1.3 函数签名
 
-所有异步请求通过 `volatile uint8_t complete_flag` 通知完成：
+```c
+/* ftl.h — 当前签名 */
 
-- **读请求**：NAND READ 完成 + 数据拷贝到 caller buffer 后，completion handler 置位 `complete_flag`
-- **写请求**：NAND PROGRAM 完成后，completion handler 置位 `complete_flag`
+#include "ftl/pending.h"  /* pending_cb_t */
+
+/*
+ * ftl_submit_read - 非阻塞提交读请求（单页或多 Plane）
+ *
+ * @param ftl             FTL 上下文
+ * @param lba             逻辑地址（uint64_t，匹配 NVMe 协议宽度）
+ * @param buffer          数据 buffer（单页至少 FTL_READ_USER_SIZE = 2048，双页至少 4096）
+ * @param pages           页数（1=单 Plane, 2=双 Plane Multi-Plane）
+ * @param complete_flag   非 NULL 时 NAND READ 完成后置 1（用于控制器异步跟踪）
+ * @param status_out      非 NULL 时完成 handler 写入 SSD_STATUS_OK/IO_ERROR
+ * @param on_complete     完成回调（可选，用于 Controller 子请求聚合）
+ * @param on_complete_ctx 回调上下文（e.g. ssd_request_t*）
+ * @return FTL_OK 成功提交，FTL_ERROR 失败
+ */
+ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer,
+                             uint32_t pages,
+                             volatile uint8_t *complete_flag,
+                             volatile ssd_status_t *status_out,
+                             pending_cb_t on_complete, void *on_complete_ctx);
+
+/*
+ * ftl_submit_write - 非阻塞提交写请求（单页或双 Plane Multi-Plane）
+ *
+ * @param ftl             FTL 上下文
+ * @param lba             逻辑地址（uint64_t，匹配 NVMe 协议宽度）
+ * @param data            数据指针（至少 FTL_READ_USER_SIZE × pages 字节）
+ * @param pages           页数（1=单 Plane, 2=双 Plane Multi-Plane PROGRAM）
+ * @param complete_flag   非 NULL 时 NAND PROGRAM 完成后置 1（用于控制器异步跟踪）
+ * @param status_out      非 NULL 时完成 handler 写入 SSD_STATUS_OK/IO_ERROR
+ * @param on_complete     完成回调（可选，用于 Controller 子请求聚合）
+ * @param on_complete_ctx 回调上下文（e.g. ssd_request_t*）
+ * @return FTL_OK 成功提交，FTL_ERROR 失败
+ */
+ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data,
+                              uint32_t pages,
+                              volatile uint8_t *complete_flag,
+                              volatile ssd_status_t *status_out,
+                              pending_cb_t on_complete, void *on_complete_ctx);
+```
+
+### 1.4 异步完成机制
+
+所有异步请求通过三种机制通知完成：
+
+1. **`complete_flag` 轮询**：completion handler 置位 `volatile uint8_t` 标志，caller 在主循环中轮询
+2. **`status_out` 状态码**：completion handler 写入 `SSD_STATUS_OK` 或 `SSD_STATUS_IO_ERROR`，与 `complete_flag` 配合使用
+3. **`on_complete` 回调**：completion handler 在 `complete_flag` 置位后调用回调（用于 Controller 子请求计数器聚合）
+
+完成时序：
+- **读请求**：NAND READ 完成 + 数据拷贝到 caller buffer → `status_out=OK` → `complete_flag=1` → `on_complete(ctx)`
+- **写请求**：NAND PROGRAM 完成后 → `status_out=OK` → `complete_flag=1` → `on_complete(ctx)`
+- **PBA 无效（读）**：直接 memset 零 → `status_out=OK` → `complete_flag=1` → `on_complete(ctx)` (无需 NAND 操作)
+- **NAND 失败**：读返回全零 / 写标记坏块 → `status_out=IO_ERROR` → `complete_flag=1` → `on_complete(ctx)`
 - **TRIM**：立即完成（只改 L2P Cache，不写 NAND）
 
-### 1.3 Completion Table（统一完成路由）
+### 1.5 Completion Table（统一完成路由）
 
 `completion_table.h/c` 提供统一完成事件分发，消除 `ftl_service` 和 `ftl_internal_sync_wait` 各自 `fc_poll_completion` 造成的 completion 丢失问题。
 
@@ -85,7 +142,109 @@ void ftl_sync_waiter_handler_with_release(const fc_command_status_t *completion,
 2. 无注册但设置了 default → 走 `ftl_handle_completion`（FTL pending 表、complete_flag、命令释放等）
 3. 都没有 → 静默丢弃（不应发生）
 
-### 1.4 完整使用流程
+### 1.6 写完成确认（modify-after-confirm）
+
+写请求（`ftl_submit_write`）的 Journal + L2P 更新不在提交路径中执行，而是后移到 completion handler 中、确认 NAND PROGRAM 成功后执行：
+
+```
+ftl_submit_write(lba, data)
+  ├─ allocator_alloc() → new_pba
+  ├─ l2p_cache_read() → old_pba
+  ├─ fc_submit(NAND PROGRAM)            ← 异步，立即返回
+  └─ return FTL_OK                      ← Journal/L2P 未更新
+
+       ↓ 几十~几百 μs 后
+
+  ftl_handle_completion()
+    ├─ NAND_SUCCESS →
+    │   journal_append(lba, old, new)     ← 确认后记录
+    │   l2p_cache_write(lba, new_pba)
+    │   complete_flag = 1
+    │
+    └─ NAND_FAIL →
+        bbt_mark_bad(new_pba.block)       ← RAM only（后台 BBT flush）
+        L2P 不动 → 自动回滚到 old_pba     ← 旧数据完好
+        complete_flag = 1
+```
+
+**Pending 表新增字段**：
+
+```c
+typedef struct {
+    ...
+    nand_pba_t       old_pba;              /* 写前旧 PBA（journal/回滚用） */
+    nand_pba_t       new_pba;              /* 新分配的 PBA（坏块标记用） */
+    ftl_context_t   *ftl;                  /* completion handler 访问 ftl */
+} ftl_pending_req_t;
+```
+
+**坏块标记两阶段化**：
+
+| 阶段 | 位置 | 操作 | NAND 访问 |
+|------|------|------|-----------|
+| 快速路径 | `ftl_handle_completion` | BBT bitmap 置位 + allocator 标记 | ❌ 无 |
+| 后台持久化 | `ftl_service_idle/normal` → `bbt_flush()` | 攒批写 NAND BBT（Block 36+39） | ✅ 一次 6 页 |
+
+**回滚**：写失败后 L2P 不动（自动指向 `old_pba`），Super Block 空洞由 GC 扫描时读失败自然跳过。无需额外回滚逻辑。
+
+### 1.7 Pending 表完整数据结构
+
+多 LBA 请求（`block_count > 1`）由 Controller 层 **`request.c`** 拆分为 N 个单页子请求，按序提交 FTL。
+
+**数据流**：
+
+```
+ssd_controller_submit(req{block_count=N})
+  ├── block_count == 1 → 直通 ftl_submit_read/write（单页，传 complete_flag）
+  └── block_count > 1  → ssd_request_split()
+        ├─ ftl_submit_read(lba+0, buf+0,        on_sub_complete, req)
+        ├─ ftl_submit_read(lba+1, buf+2048,      on_sub_complete, req)
+        ├─ ...
+        └─ ftl_submit_read(lba+N-1, buf+N*2048,  on_sub_complete, req)
+             每个完成 → ftl_handle_completion
+               → on_sub_complete() → sub_remaining--
+               → sub_remaining == 0 → req->complete_flag = 1
+```
+
+**关键实现** (`src/controller/request.c`)：
+
+```c
+static void on_sub_complete(void *ctx)
+{
+    ssd_request_t *req = (ssd_request_t *)ctx;
+    if (req->sub_remaining > 0U)
+        req->sub_remaining--;
+    if (req->sub_remaining == 0U)
+        req->complete_flag = 1U;
+}
+
+int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
+{
+    request->sub_remaining = request->block_count;
+    for (i = 0; i < request->block_count; i++) {
+        ftl_submit_read(ctrl->ftl, start_lba + i,
+                        buf + i * FTL_READ_USER_SIZE,
+                        NULL, on_sub_complete, request);
+    }
+}
+```
+
+写请求类似，但传 `complete_flag=NULL`（子请求用回调聚合，不用轮询）。
+
+**结构体变化** (`ssd_request_t`)：
+
+```c
+typedef struct {
+    ssd_request_opcode_t opcode;
+    uint64_t             start_lba;
+    uint32_t             block_count;
+    void                *buffer;
+    size_t               buffer_size;
+    ssd_status_t         completion_status;
+    volatile uint8_t     complete_flag;
+    volatile uint32_t    sub_remaining;      /* ← 新增：未完成的子请求数 */
+} ssd_request_t;
+```
 
 ```c
 /* 系统启动 */
@@ -547,37 +706,52 @@ src/ftl/
 
 ---
 
-## 8. 与 FTL 子模块的接口关系
+## 8. 三层架构与接口关系
 
 ```
-                 ┌─────────────────────────┐
-                 │    Controller 层          │
-                 │  ssd_controller_submit()  │
-                 └────────────┬────────────┘
-                              │ ftl_read/write/trim
-                 ┌────────────▼────────────┐
-                 │      ftl_service()       │←── main loop 频繁调用
-                 │                         │
-                 │  ┌───────────────────┐  │
-                 │  │  ftl_submit_read  │  │  pending 表驱动
-                 │  │  ftl_submit_write │  │  journal + cache
-                 │  └────────┬──────────┘  │
-                 │           │             │
-                 │  ┌────────▼──────────┐  │
-                 │  │ ftl_handle_       │  │  completion 路由
-                 │  │ completion()      │  │  FTL/METADATA/GC
-                 │  └───────────────────┘  │
-                 │                         │
-                 │  ┌───────────────────┐  │
-                 │  │ Phase 3 后台      │  │
-                 │  │ IDLE/NORMAL/BUSY  │  │
-                 │  │ GC/WL/Checkpoint  │  │
-                 │  └───────────────────┘  │
-                 └────────────┬────────────┘
-                              │ ftl_cmd_setup_ppa / ftl_internal_*
-                 ┌────────────▼────────────┐
-                 │     FC 层               │
-                 │  fc_submit / fc_service  │
-                 │  fc_poll_completion     │
-                 └─────────────────────────┘
+                 ┌───────────────────────────────────┐
+                 │         Host / NVMe 层              │
+                 │   nvme_process_command()            │
+                 │   ———————————————                  │
+                 │   SLBA + NLB → ssd_request_t        │
+                 └──────────────┬────────────────────┘
+                                │ ssd_controller_submit()
+                    ┌───────────▼──────────────────────────┐
+                    │       Controller 层      src/controller/ │
+                    │                                        │
+                    │  ┌────────────────────────────────┐   │
+                    │  │ request.c: ssd_request_split()  │   │
+                    │  │  block_count > 1 → N 个单页子请求│   │
+                    │  │  on_sub_complete → sub_remaining│   │
+                    │  │  → 0 → complete_flag = 1       │   │
+                    │  └────────────────────────────────┘   │
+                    │           │ ftl_submit_read/write      │
+                    │           │ (on_complete, complete_flag)│
+                    └───────────┼──────────────────────────┘
+                 ┌──────────────▼────────────────────────────┐
+                 │          FTL 层         src/ftl/           │
+                 │                                            │
+                 │  ftl_submit_read(lba, buf, complete_flag,  │ ← 单页原语
+                 │                    on_complete, ctx)       │
+                 │  ftl_submit_write(lba, data, complete_flag,│
+                 │                     on_complete, ctx)      │
+                 │                                            │
+                 │  ┌────────────────────────────────────┐   │
+                 │  │ ftl_handle_completion()             │   │
+                 │  │   ① 数据拷贝 → buffer              │   │
+                 │  │   ② complete_flag = 1              │   │
+                 │  │   ③ on_complete(ctx) ← 回调聚合    │   │
+                 │  │   ④ pending_remove                 │   │
+                 │  └────────────────────────────────────┘   │
+                 │                                            │
+                 │  ┌────────────────────────────────────┐   │
+                 │  │ Phase 3 后台 IDLE/NORMAL/BUSY       │   │
+                 │  │ GC / WL / Checkpoint                │   │
+                 │  └────────────────────────────────────┘   │
+                 └──────────────┬──────────────────────────┘
+                                │ ftl_cmd_setup_ppa / fc_submit
+                 ┌──────────────▼────────────────────────────┐
+                 │     FC 层          src/fc/                  │
+                 │  fc_submit / fc_service / fc_poll_completion│
+                 └─────────────────────────────────────────────┘
 ```

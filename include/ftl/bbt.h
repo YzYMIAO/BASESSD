@@ -136,6 +136,17 @@ static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
 ftl_status_t bbt_save(const ftl_allocator_t *alloc);
 
 /*
+ * bbt_flush - 将脏 BBT 写回 NAND（后台调用，两阶段持久化）
+ *
+ * 当 g_bbt_dirty 置位时，调用 bbt_save 将 BBT bitmap 写入 Block 36 + 39。
+ * 不需要每次写失败都立即写 BBT，后台攒批批量写入。
+ *
+ * @param alloc  Allocator 上下文
+ * @return FTL_OK 成功（含无需写入），FTL_ERROR 写入失败
+ */
+ftl_status_t bbt_flush(ftl_allocator_t *alloc);
+
+/*
  * bbt_load - 从 NAND 加载 BBT
  *
  * 扫描 6 页，选 magic+CRC+sequence 最大的。

@@ -23,6 +23,7 @@ typedef struct
     size_t               buffer_size;
     ssd_status_t         completion_status;
     volatile uint8_t     complete_flag;      /* FTL completion handler 置 1 */
+    volatile uint32_t    sub_remaining;      /* 未完成的子请求数（Controller 拆分用） */
 } ssd_request_t;
 
 #endif /* SSD_REQUEST_H */

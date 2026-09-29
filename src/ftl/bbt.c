@@ -153,18 +153,14 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t block)
         return FTL_ERROR;
     }
 
-    /* BBT bitmap 置位 */
+    /* BBT bitmap 置位（RAM only — 后台 bbt_flush 持久化到 NAND） */
     bbt_set_bad(g_bbt_bitmap, block);
     g_bbt_dirty = 1;
 
-    /* allocator 侧记录 */
+    /* allocator 侧记录（不再分配此 block） */
     allocator_mark_bad(alloc, block);
 
-    /* 写回 NAND */
-    (void)bbt_save(alloc);
-
-    /* 从 Spare Pool 补充 Free Pool */
-    (void)bbt_spare_pool_refill(alloc);
+    /* 不再同步调 bbt_save() — NAND BBT 持久化由后台 bbt_flush 批量执行 */
 
     return FTL_OK;
 }
@@ -213,6 +209,16 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc)
 
     g_bbt_dirty = 0;
     return FTL_OK;
+}
+
+ftl_status_t bbt_flush(ftl_allocator_t *alloc)
+{
+    /* 仅当 dirty 时才写 NAND */
+    if (!g_bbt_dirty)
+    {
+        return FTL_OK;
+    }
+    return bbt_save(alloc);
 }
 
 ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, ftl_topology_t topo)
