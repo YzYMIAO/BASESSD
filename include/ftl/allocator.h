@@ -17,6 +17,7 @@
  *   PBA 的 page 字段由 allocator 管理，block/plane 从 Free Pool 分配。
  */
 
+#include "ftl/ftl_type.h"   /* ftl_status_t */
 #include "nand/nand_config.h" /* nand_pba_t, nand_paa_t, PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
 
 #include <stdint.h>
@@ -110,9 +111,9 @@ typedef struct
  *
  * Step 3：只初始化空列表，不扫描物理 NAND。BBT 扫描等后续实现。
  *
- * @return 0 成功，负值失败
+ * @return ftl_status_t — FTL_OK 成功
  */
-int allocator_init(ftl_allocator_t *alloc,
+ftl_status_t allocator_init(ftl_allocator_t *alloc,
                    uint8_t          ch,
                    uint8_t          ce,
                    uint8_t          lun,
@@ -165,14 +166,5 @@ void allocator_mark_bad(ftl_allocator_t *alloc, uint16_t block);
  * @return 1 需要 GC，0 不需要
  */
 int allocator_needs_gc(const ftl_allocator_t *alloc);
-
-/*
- * allocator_refill_pre_cond - 后台补充 Pre-conditioned Pool
- *
- * Step 3：桩，仅 #warning。后续由 ftl_service 中的 Background GC 调用。
- *
- * @param alloc Allocator 上下文
- */
-void allocator_refill_pre_cond(ftl_allocator_t *alloc);
 
 #endif /* FTL_ALLOCATOR_H */

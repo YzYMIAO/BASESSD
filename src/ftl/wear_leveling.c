@@ -3,15 +3,10 @@
 #include "fc/fc.h"
 #include "ftl/ftl.h"
 #include "ftl/ftl_fc_interface.h"
+#include "ftl/gc.h"
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
-
-void wl_init(struct ftl_context *ftl)
-{
-    (void)ftl;
-    /* WL 使用 ftl_context_t 中的总写入次数计算间隔，无单独状态需初始化 */
-}
 
 int wl_should_trigger(const struct ftl_context *ftl)
 {
@@ -23,13 +18,13 @@ int wl_should_trigger(const struct ftl_context *ftl)
 
     if (ftl == NULL)
     {
-        return 0;
+        return FTL_OK;
     }
 
     /* WL 最小间隔检查 */
     if (ftl->total_writes < WL_MIN_INTERVAL)
     {
-        return 0;
+        return FTL_OK;
     }
 
     max_ec = wl_max_erase(ftl);
@@ -56,7 +51,7 @@ int wl_should_trigger(const struct ftl_context *ftl)
         return 1;
     }
 
-    return 0;
+    return FTL_OK;
 }
 
 int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
@@ -69,7 +64,7 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 
     if ((ftl == NULL) || (victim == NULL))
     {
-        return 0;
+        return FTL_OK;
     }
 
     memset(&best, 0, sizeof(best));
@@ -126,13 +121,14 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
                 best.valid_pages     = valid;
                 best.plane_blocks[0] = sb->plane_blocks[0];
                 best.plane_blocks[1] = sb->plane_blocks[1];
+                best.next_page       = sb->next_page;
             }
         }
     }
 
     if (!best.found)
     {
-        return 0;
+        return FTL_OK;
     }
 
     *victim = best;
@@ -144,16 +140,20 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
     uint8_t  plane;
     uint8_t  page;
     uint32_t migrated = 0U;
+    uint8_t  max_page;
 
     if ((ftl == NULL) || (victim == NULL) || (!victim->found))
     {
-        return 0;
+        return FTL_OK;
     }
+
+    /* 使用 victim->next_page（写入进度）限定扫描范围 */
+    max_page = (victim->next_page > 0U) ? victim->next_page : PAGES_PER_BLOCK;
 
     /* Step 1: 遍历双 Plane 所有有效页，搬移到 Cold Super Block */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        for (page = 0U; page < PAGES_PER_BLOCK; page++)
+        for (page = 0U; page < max_page; page++)
         {
             uint8_t    buf[FTL_READ_USER_SIZE];
             lba_t      lba;
@@ -164,66 +164,11 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
 
             pba = pba_make(ftl->ch, ftl->ce, page, plane, victim->plane_blocks[plane], 0, 0);
 
-            /* 读页 + 从 META 提取 LBA */
+            /* 读页 + 从 META 提取 LBA（复用 GC 辅助函数） */
             memset(buf, 0, sizeof(buf));
-
-            /* 使用 GC 的读 META 模式 */
+            if (gc_read_page_with_lba(pba, buf, &lba) != 0)
             {
-                fc_command_t       *cmd;
-                fc_command_status_t completion;
-
-                cmd = fc_command_alloc();
-                if (cmd == NULL)
-                {
-                    continue;
-                }
-
-                cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-                cmd->config.cw          = 3U;
-                cmd->config.crc         = FC_CRC_ENABLE;
-                cmd->config.random      = FC_RANDOM_ENABLE;
-                cmd->config.ldpc        = FC_ECC_MODE_BCH;
-                cmd->config.multi_plane = 0U;
-                cmd->config.chain       = FC_CHAIN_END;
-                cmd->config.page_type   = FC_PAGE_TYPE_LP;
-                cmd->module             = FC_COMMAND_MODULE_GC;
-                cmd->meta               = 0U;
-
-                if (ftl_cmd_setup_ppa(cmd, pba) != 0)
-                {
-                    (void)fc_command_release(cmd);
-                    continue;
-                }
-
-                if (fc_submit(cmd) != FC_STATUS_OK)
-                {
-                    (void)fc_command_release(cmd);
-                    continue;
-                }
-
-                ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-                if ((ret != 0) || (completion.status & FC_CW_STATUS_NAND_FAIL))
-                {
-                    (void)fc_command_release(cmd);
-                    continue;
-                }
-
-                /* 读用户数据 */
-                (void)ftl_cmd_read_data(cmd, buf, FTL_READ_USER_SIZE);
-
-                /* 从 META 提取 LBA（CW0） */
-                {
-                    uint8_t *meta_ptr = fc_buffer_get_meta(cmd, 0U);
-                    uint32_t meta_cw0 = 0U;
-
-                    if (meta_ptr != NULL)
-                    {
-                        memcpy(&meta_cw0, meta_ptr, sizeof(meta_cw0));
-                    }
-                    lba = (lba_t)(meta_cw0 & ~3UL);
-                }
-
-                (void)fc_command_release(cmd);
+                continue; /* 读失败，跳过 */
             }
 
             /* 查 L2P：当前映射是否仍指向本 PBA */
@@ -241,7 +186,9 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
             }
 
             /* 写入新位置 */
-            ret = ftl_internal_write_page(new_pba, buf, FTL_READ_USER_SIZE, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_GC, lba);
+            ret = ftl_internal_write_page(new_pba, buf, FTL_READ_USER_SIZE,
+                                           FC_CRC_ENABLE, FC_RANDOM_ENABLE,
+                                           FC_COMMAND_MODULE_GC, lba);
             if (ret != 0)
             {
                 continue;
@@ -257,26 +204,15 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
         }
     }
 
-    /* Step 2: 擦除双 Block + 递增擦除计数 + 归还 Free Pool */
-    for (plane = 0U; plane < PLANE_NUM; plane++)
+    /* Step 2: 构造临时 Super Block，复用 gc_erase_and_free 擦除+归还 */
     {
-        uint16_t   block;
-        nand_pba_t block_pba;
-        int        ret;
+        super_block_t tmp_sb;
 
-        block     = victim->plane_blocks[plane];
-        block_pba = pba_make(ftl->ch, ftl->ce, 0, plane, block, 0, 0);
+        tmp_sb.plane_blocks[0] = victim->plane_blocks[0];
+        tmp_sb.plane_blocks[1] = victim->plane_blocks[1];
+        tmp_sb.valid = 0U; /* gc_erase_and_free 要求 valid==0 */
 
-        ret = ftl_internal_erase_block(block_pba);
-        if (ret == 0)
-        {
-            ftl->alloc.erase_counts[block]++;
-            allocator_free_block(&ftl->alloc, block);
-        }
-        else
-        {
-            allocator_mark_bad(&ftl->alloc, block);
-        }
+        gc_erase_and_free(&ftl->alloc, &tmp_sb);
     }
 
     return (int)migrated;
@@ -288,16 +224,16 @@ int wl_execute(struct ftl_context *ftl)
 
     if (ftl == NULL)
     {
-        return 0;
+        return FTL_OK;
     }
 
     if (!wl_should_trigger(ftl))
     {
-        return 0;
+        return FTL_OK;
     }
     if (!wl_select_victim(ftl, &victim))
     {
-        return 0;
+        return FTL_OK;
     }
 
     return wl_relocate(ftl, &victim);

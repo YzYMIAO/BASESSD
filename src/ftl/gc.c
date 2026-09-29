@@ -8,7 +8,7 @@
 #include <string.h>
 
 /*
- * 读取一页 NAND，返回用户数据 + 从 META 提取的 LBA。
+ * gc_read_page_with_lba - 读取一页 NAND，返回用户数据 + 从 META 提取的 LBA
  *
  * 内部管理 FC 命令生命周期：
  *   alloc → config → submit → sync_wait → read_data → get_meta → release
@@ -18,7 +18,7 @@
  * @param lba_out     输出：从 META 提取的 LBA（可为 NULL）
  * @return 0 成功, -1 失败
  */
-static int gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out)
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out)
 {
     fc_command_t *cmd;
     uint32_t      meta_cw0;
@@ -27,7 +27,7 @@ static int gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out
     cmd = fc_command_alloc();
     if (cmd == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
@@ -44,13 +44,13 @@ static int gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out
     if (ftl_cmd_setup_ppa(cmd, pba) != 0)
     {
         (void)fc_command_release(cmd);
-        return -1;
+        return FTL_ERROR;
     }
 
     if (fc_submit(cmd) != FC_STATUS_OK)
     {
         (void)fc_command_release(cmd);
-        return -1;
+        return FTL_ERROR;
     }
 
     {
@@ -59,13 +59,13 @@ static int gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out
         if (ret != 0)
         {
             (void)fc_command_release(cmd);
-            return -1;
+            return FTL_ERROR;
         }
 
         if (completion.status & FC_CW_STATUS_NAND_FAIL)
         {
             (void)fc_command_release(cmd);
-            return -1;
+            return FTL_ERROR;
         }
     }
 
@@ -99,7 +99,7 @@ static int gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out
         *lba_out = (lba_t)(meta_cw0 & ~3UL);
     }
 
-    return 0;
+    return FTL_OK;
 }
 
 void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim)
@@ -141,7 +141,7 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 
     if ((alloc == NULL) || (victim == NULL))
     {
-        return 0;
+        return FTL_OK;
     }
 
     for (i = 0U; i < alloc->closed_sb_count; i++)
@@ -172,7 +172,7 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
 
     if ((alloc == NULL) || (cache == NULL) || (victim == NULL))
     {
-        return 0;
+        return FTL_OK;
     }
 
     for (plane = 0U; plane < PLANE_NUM; plane++)
@@ -236,10 +236,10 @@ int gc_check_trigger(const ftl_allocator_t *alloc, uint32_t total_writes, uint32
 {
     if (alloc == NULL)
     {
-        return 0;
+        return FTL_OK;
     }
 
-    if (alloc->pre_cond_count < PRE_COND_LOW_WATER)
+    if (alloc->pre_cond_count < FREE_POOL_TARGET)
     {
         return 1;
     }
@@ -252,5 +252,5 @@ int gc_check_trigger(const ftl_allocator_t *alloc, uint32_t total_writes, uint32
         return 1;
     }
 
-    return 0;
+    return FTL_OK;
 }

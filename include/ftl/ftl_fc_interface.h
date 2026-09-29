@@ -30,9 +30,9 @@
 
 /* ── PBA helper（已实现）── */
 
-int ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
-int ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t length);
-int ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length);
+ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
+ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t length);
+ftl_status_t ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length);
 
 /* ── 内部同步 NAND 操作 ── */
 
@@ -47,7 +47,7 @@ int ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length);
  * @param timeout_us  超时微秒（0=使用默认）
  * @return 0 找到（status_out 有效），-1 超时
  */
-int ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out, uint32_t timeout_us);
+ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out, uint32_t timeout_us);
 
 /*
  * ftl_internal_read_page - 同步读一页 NAND 到 buffer
@@ -63,23 +63,18 @@ int ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out, uin
  * @param lba     META 值（验证用）
  * @return 0 成功，-1 失败
  */
-int ftl_internal_read_page(nand_pba_t pba, void *buffer, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba);
+ftl_status_t ftl_internal_read_page(nand_pba_t pba, void *buffer, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba);
 
 /*
  * ftl_internal_read_page_raw - 同步读全页（含 Spare/OOB 区）
  *
- * 以 LDPC_RAW 模式读取完整的 NAND 页面（PAGE_SIZE = 2112 字节），
- * 不经过 ECC 解码。用于出厂坏块扫描时读取 OOB 标记。
- *
- * 内部读 CW 数据后组装全页 buffer，布局：
- *   [CW0_data:528][CW1_data:528][CW2_data:528][CW3_data:528] = 2112B
- *   其中每个 CW: [META:4][CRC:4][USER:512][PARITY:8]
+ * 以 LDPC_RAW 模式读取完整的 NAND 页面（PAGE_SIZE = 2112 字节）。
  *
  * @param pba     物理地址
  * @param buffer  输出 buffer（至少 PAGE_SIZE = 2112 字节）
- * @return 0 成功，-1 失败
+ * @return FTL_OK 成功，FTL_ERROR 失败
  */
-int ftl_internal_read_page_raw(nand_pba_t pba, void *buffer);
+ftl_status_t ftl_internal_read_page_raw(nand_pba_t pba, void *buffer);
 
 /*
  * ftl_internal_write_page - 同步写一页数据到 NAND
@@ -91,16 +86,16 @@ int ftl_internal_read_page_raw(nand_pba_t pba, void *buffer);
  * @param random  FC_RANDOM_ENABLE / FC_RANDOM_DISABLE
  * @param module  FC_COMMAND_MODULE_*
  * @param lba     META 值
- * @return 0 成功，-1 失败
+ * @return FTL_OK 成功，FTL_ERROR 失败
  */
-int ftl_internal_write_page(nand_pba_t pba, const void *data, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba);
+ftl_status_t ftl_internal_write_page(nand_pba_t pba, const void *data, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba);
 
 /*
  * ftl_internal_erase_block - 同步擦除一个 Block
  *
  * @param block_pba  Block 的 PBA（page/plane/cw 无关）
- * @return 0 成功，-1 失败
+ * @return FTL_OK 成功，FTL_ERROR 失败
  */
-int ftl_internal_erase_block(nand_pba_t block_pba);
+ftl_status_t ftl_internal_erase_block(nand_pba_t block_pba);
 
 #endif /* FTL_FC_INTERFACE_H */

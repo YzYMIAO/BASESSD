@@ -3,6 +3,7 @@
 #include "fc/fc.h"
 #include "ftl/bbt.h"
 #include "ftl/checkpoint.h"
+#include "ftl/completion_table.h"
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/pending.h"
 #include "ftl/power_failure_recovery.h"
@@ -14,24 +15,29 @@
 /* ── 内部辅助 ── */
 
 /*
- * ftl_handle_completion - 处理 FC 命令完成回调
+ * ftl_handle_completion - 处理 FC 命令完成回调（默认 handler）
+ *
+ * 作为 completion_table 的默认 handler 注册，所有未注册精确路由
+ * 的 completion 都走此函数。
  *
  * 根据 completion.module 路由：
  *   FTL      → 查 pending 表 → 读数据 / release
- *   METADATA → release（同步操作已完成）
- *   GC       → release（同步操作已完成）
+ *   METADATA → release（同步操作完成后释放）
+ *   GC       → release
+ *
+ * @param completion  FC completion status
+ * @param ctx         ftl_context_t 指针
  */
-static void ftl_handle_completion(ftl_context_t             *ftl,
-                                  const fc_command_status_t *completion)
+static void ftl_handle_completion(const fc_command_status_t *completion,
+                                  void                      *ctx)
 {
-    fc_command_t *cmd;
-    uint16_t      cmd_id;
+    ftl_context_t *ftl      = (ftl_context_t *)ctx;
+    uint16_t       cmd_id   = (uint16_t)completion->command_id;
+    fc_command_t  *cmd;
 
     (void)ftl;
 
-    cmd_id = (uint16_t)completion->command_id;
-    cmd    = fc_command_id_to_command(cmd_id);
-
+    cmd = fc_command_id_to_command(cmd_id);
     if (cmd == NULL)
     {
         return;
@@ -46,38 +52,30 @@ static void ftl_handle_completion(ftl_context_t             *ftl,
 
                 if (pending != NULL)
                 {
-                    /* 读请求完成：拷贝数据到 caller buffer */
                     if ((completion->status & FC_CW_STATUS_NAND_FAIL) == 0U)
                     {
-                        (void)ftl_cmd_read_data(cmd, pending->buffer, FTL_READ_USER_SIZE);
+                        (void)ftl_cmd_read_data(cmd, pending->buffer,
+                                                FTL_READ_USER_SIZE);
                     }
                     else
                     {
-                        /* NAND 失败，填 0 */
                         memset(pending->buffer, 0, FTL_READ_USER_SIZE);
                     }
 
                     pending_remove(cmd_id);
                 }
-                /* 写请求：没有 pending 项，直接 release */
 
                 (void)fc_command_release(cmd);
             }
             break;
 
         case FC_COMMAND_MODULE_METADATA:
-            /* 元数据操作完成（Region flush / Journal flush / Erase）
-             * 这些操作使用同步等待，但 completion 仍然会经过这里
-             * 如果同步等待已经调过 release，这里 cmd 已经无效 */
-            /* 安全：检查 command_id 是否有效后才 release */
-            if (cmd->command_id != FC_COMMAND_ID_INVALID)
-            {
-                (void)fc_command_release(cmd);
-            }
-            break;
-
         case FC_COMMAND_MODULE_GC:
-            /* GC 操作完成（同步等待处理） */
+        case FC_COMMAND_MODULE_CHECKPOINT:
+        case FC_COMMAND_MODULE_BBT:
+            /* 元数据类操作完成后 release
+             * 如果同步等待 handler 已提前 release，此处 fc_command_release
+             * 会返回错误，忽略即可 */
             if (cmd->command_id != FC_COMMAND_ID_INVALID)
             {
                 (void)fc_command_release(cmd);
@@ -85,7 +83,6 @@ static void ftl_handle_completion(ftl_context_t             *ftl,
             break;
 
         default:
-            /* 未知模块，安全 release */
             if (cmd->command_id != FC_COMMAND_ID_INVALID)
             {
                 (void)fc_command_release(cmd);
@@ -190,7 +187,7 @@ static void ftl_service_busy(ftl_context_t *ftl)
 
 /* ── 对外接口 ── */
 
-int ftl_init(ftl_context_t *ftl,
+ftl_status_t ftl_init(ftl_context_t *ftl,
              uint8_t        ch,
              uint8_t        ce,
              uint8_t        lun,
@@ -202,61 +199,65 @@ int ftl_init(ftl_context_t *ftl,
 {
     if (ftl == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     ftl->ch  = ch;
     ftl->ce  = ce;
     ftl->lun = lun;
 
-    /* Pending Request 表 */
+    /* ├─ Completion 路由表 ── */
+    completion_table_init();
+
+    /* ├─ 注册默认 handler（= ftl_handle_completion）── */
+    completion_table_set_default(ftl_handle_completion, ftl);
+
+    /* ├─ Pending Request 表 ── */
     pending_init();
 
-    /* L2P Cache */
+    /* ├─ L2P Cache ── */
     l2p_cache_init(&ftl->cache);
 
-    /* Allocator */
+    /* ├─ Allocator ── */
     allocator_init(&ftl->alloc,
-                   ch,
-                   ce,
-                   lun,
-                   free_blocks,
-                   free_count,
-                   bad_blocks,
-                   erase_counts,
-                   closed_sb_list);
+                   ch, ce, lun,
+                   free_blocks, free_count,
+                   bad_blocks, erase_counts, closed_sb_list);
 
-    /* Journal */
+    /* ├─ 连接 L2P Cache → Metadata Directory + Allocator ── */
+    /* 此时 Metadata Directory 尚未加载，先设 NULL，后续 bbt_init/md_load 后更新 */
+    l2p_cache_set_md_dir(&ftl->cache, NULL, &ftl->alloc);
+
+    /* ├─ Journal ── */
     journal_init(&ftl->journal, ch, ce, lun);
 
-    /* Metadata Directory */
+    /* ├─ Metadata Directory ── */
     {
         int md_ret = metadata_dir_load(&ftl->metadata_dir);
         if (md_ret != 0)
         {
-            /* 无有效 Anchor（首次使用），重新初始化固定映射 */
             metadata_dir_init(&ftl->metadata_dir);
         }
     }
 
-    /* 连接 L2P Cache → Metadata Directory */
-    l2p_cache_set_md_dir(&ftl->cache, &ftl->metadata_dir);
+    /* ├─ 重新连接 L2P Cache（此时 md_dir 已就绪）── */
+    l2p_cache_set_md_dir(&ftl->cache, &ftl->metadata_dir, &ftl->alloc);
 
-    /* BBT 初始化（从 NAND 加载或出厂扫描） */
+    /* ├─ BBT 初始化（从 NAND 加载或出厂扫描）── */
     (void)bbt_init(&ftl->alloc, ch, ce, lun);
 
-    /* Checkpoint */
+    /* ├─ Checkpoint 计时 ── */
     ftl->cp_timer_start = 0U;
     ftl->cp_sequence    = 0U;
 
-    /* GC 计时 */
+    /* ├─ GC 计时 ── */
     ftl->gc_last_run_writes = 0U;
     ftl->gc_timer_start     = 0U;
 
-    /* 统计 */
+    /* ├─ 统计 ── */
     ftl->total_writes = 0U;
 
-    return 0;
+    return FTL_OK;
 }
 
 void ftl_service(ftl_context_t *ftl)
@@ -278,14 +279,8 @@ void ftl_service(ftl_context_t *ftl)
         submitted++;
     }
 
-    /* Phase 2: 处理完成回调 */
-    {
-        fc_command_status_t completion;
-        while (fc_poll_completion(&completion) == FC_STATUS_OK)
-        {
-            ftl_handle_completion(ftl, &completion);
-        }
-    }
+    /* Phase 2: 统一完成泵 — 替代原有 fc_poll_completion 循环 */
+    completion_table_drain();
 
     /* Phase 3: 三级后台模式 */
     if (submitted == 0U)
@@ -302,7 +297,7 @@ void ftl_service(ftl_context_t *ftl)
     }
 }
 
-int ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count)
+ftl_status_t ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count)
 {
     fc_command_t *cmd;
     nand_pba_t    pba;
@@ -310,23 +305,21 @@ int ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count)
 
     if ((ftl == NULL) || (buffer == NULL) || (count != 1U))
     {
-        return -1;
+        return FTL_ERROR;
     }
 
-    /* ① 查 L2P Cache 获取 PBA */
     pba = l2p_cache_read(&ftl->cache, lba);
     if (pba == FTL_PBA_INVALID)
     {
-        /* 未映射的 LBA → 全零返回 */
         memset(buffer, 0, FTL_READ_USER_SIZE);
-        return 0;
+        return FTL_OK;
     }
 
     /* ② 分配 FC 命令 */
     cmd = fc_command_alloc();
     if (cmd == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     /* ③ 配置读命令 */
@@ -346,7 +339,7 @@ int ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count)
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
-        return -1;
+        return FTL_ERROR;
     }
 
     /* ⑤ 注册 pending（必须早于 submit，避免竞态） */
@@ -354,7 +347,7 @@ int ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count)
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
-        return -1; /* pending 表满 */
+        return FTL_ERROR;
     }
 
     /* ⑥ 异步提交 */
@@ -362,14 +355,14 @@ int ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count)
     {
         pending_remove(cmd->command_id);
         (void)fc_command_release(cmd);
-        return -1;
+        return FTL_ERROR;
     }
 
-    /* ⑦ 立即返回，数据在 ftl_service Phase 2 中拷贝到 buffer */
-    return 0;
+    /* ⑦ 立即返回，数据在 completion_table_drain 中拷贝到 buffer */
+    return FTL_OK;
 }
 
-int ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t count)
+ftl_status_t ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t count)
 {
     fc_command_t *cmd;
     nand_pba_t    new_pba;
@@ -378,14 +371,14 @@ int ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t c
 
     if ((ftl == NULL) || (data == NULL) || (count != 1U))
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     /* ① Allocator 分配新 PBA */
     new_pba = allocator_alloc(&ftl->alloc, FTL_TEMP_HOT);
     if (new_pba == NAND_PBA_INVALID)
     {
-        return -1; /* 无空闲空间 */
+        return FTL_ERROR;
     }
 
     /* ② 读旧 PBA（journal 记录用） */
@@ -395,7 +388,7 @@ int ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t c
     cmd = fc_command_alloc();
     if (cmd == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
@@ -414,21 +407,21 @@ int ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t c
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
-        return -1;
+        return FTL_ERROR;
     }
 
     ret = ftl_cmd_write_data(cmd, data, FTL_READ_USER_SIZE);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
-        return -1;
+        return FTL_ERROR;
     }
 
     /* ⑤ 异步提交到 NAND */
     if (fc_submit(cmd) != FC_STATUS_OK)
     {
         (void)fc_command_release(cmd);
-        return -1;
+        return FTL_ERROR;
     }
 
     /* ⑥ Journal 记录（SRAM buffer，不写 NAND） */
@@ -443,7 +436,7 @@ int ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t c
     /* ⑧ 统计 */
     ftl->total_writes++;
 
-    return 0;
+    return FTL_OK;
 }
 
 /* ── 同步包装（被 controller 层调用）── */
@@ -461,18 +454,11 @@ int ftl_read(ftl_context_t *ftl, ssd_lba_t lba, void *buffer)
         return SSD_STATUS_IO_ERROR;
     }
 
-    /* 驱动完成：循环 poll 直到 pending 表释放 */
+    /* 驱动完成：统一完成泵直到 pending 表释放 */
     for (;;)
     {
         (void)fc_service();
-        {
-            fc_command_status_t completion;
-            while (fc_poll_completion(&completion) == FC_STATUS_OK)
-            {
-                ftl_handle_completion(ftl, &completion);
-            }
-        }
-        /* pending 已清空 → 数据在 buffer 中 */
+        completion_table_drain();
         if (pending_lookup_by_lba((lba_t)lba) == NULL)
         {
             break;
@@ -497,23 +483,17 @@ int ftl_write(ftl_context_t *ftl, ssd_lba_t lba, const void *data)
         return SSD_STATUS_NO_SPACE;
     }
 
-    /* 驱动完成 */
+    /* 驱动完成：统一完成泵直到 SQ/CQ 空 */
     for (;;)
     {
-        fc_command_status_t completion;
         (void)fc_service();
-        while (fc_poll_completion(&completion) == FC_STATUS_OK)
+        completion_table_drain();
+
+        fc_resource_stats_t stats;
+        (void)fc_get_resource_stats(&stats);
+        if (stats.sq_used == 0U && stats.cq_used == 0U)
         {
-            ftl_handle_completion(ftl, &completion);
-        }
-        /* 写请求没有 pending，检查 SQ/CQ 空作为完成标志 */
-        {
-            fc_resource_stats_t stats;
-            (void)fc_get_resource_stats(&stats);
-            if (stats.sq_used == 0U && stats.cq_used == 0U)
-            {
-                break;
-            }
+            break;
         }
     }
 
@@ -527,7 +507,6 @@ int ftl_trim(ftl_context_t *ftl, ssd_lba_t lba)
         return SSD_STATUS_INVALID_ARGUMENT;
     }
 
-    /* TRIM = 写 FTL_PBA_INVALID 到 L2P Cache */
     l2p_cache_write(&ftl->cache, (lba_t)lba, FTL_PBA_INVALID);
     return SSD_STATUS_OK;
 }

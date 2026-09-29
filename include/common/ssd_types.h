@@ -9,7 +9,6 @@
 #include <stdint.h>
 
 typedef uint64_t ssd_lba_t;
-typedef uint64_t ssd_ppa_t;
 
 typedef enum
 {

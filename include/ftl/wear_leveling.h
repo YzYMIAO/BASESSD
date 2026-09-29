@@ -19,6 +19,7 @@
  *   — 二者独立运行，互不干扰
  */
 
+#include "common/ssd_types.h"
 #include "nand/nand_config.h"
 
 #include <stdint.h>
@@ -43,16 +44,10 @@ typedef struct
     uint16_t plane_blocks[PLANE_NUM]; /* 双 Plane Block 号 */
     uint32_t avg_erase;               /* victim 平均擦除次数 */
     uint16_t valid_pages;             /* 有效页数 */
+    uint8_t  next_page;               /* 写入进度（复用 GC 间接获取 next_page） */
 } wl_victim_t;
 
 /* ── 接口 ── */
-
-/*
- * wl_init - 初始化磨损均衡
- *
- * @param ftl  FTL 上下文
- */
-void wl_init(struct ftl_context *ftl);
 
 /*
  * wl_should_trigger - 检查是否需要触发静态 WL
@@ -92,7 +87,7 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim);
  *
  * @param ftl    FTL 上下文
  * @param victim 要搬移的 victim
- * @return 搬移的页数
+ * @return SSD_STATUS_OK 成功，SSD_STATUS_IO_ERROR 失败
  */
 int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim);
 
@@ -100,7 +95,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim);
  * wl_execute - 执行一轮静态 WL（should_trigger + select + relocate）
  *
  * @param ftl  FTL 上下文
- * @return 搬移的页数，0 未执行
+ * @return 搬移的页数（>0 = 执行了搬移），0 = 未执行
  */
 int wl_execute(struct ftl_context *ftl);
 

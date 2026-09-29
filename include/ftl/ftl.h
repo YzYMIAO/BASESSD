@@ -82,9 +82,9 @@ typedef struct ftl_context
  * @param bad_blocks      bad block 数组（由调用者提供）
  * @param erase_counts    擦除次数数组（由调用者提供）
  * @param closed_sb_list  closed Super Block 数组（由调用者提供）
- * @return 0 成功
+ * @return FTL_OK 成功
  */
-int ftl_init(ftl_context_t *ftl,
+ftl_status_t ftl_init(ftl_context_t *ftl,
              uint8_t        ch,
              uint8_t        ce,
              uint8_t        lun,
@@ -119,9 +119,9 @@ void ftl_service(ftl_context_t *ftl);
  * @param lba    逻辑地址
  * @param buffer 数据 buffer（至少 FTL_READ_USER_SIZE 字节）
  * @param count  sector 数（当前只支持 1）
- * @return 0 成功提交，-1 失败
+ * @return FTL_OK 成功提交，FTL_ERROR 失败
  */
-int ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count);
+ftl_status_t ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count);
 
 /*
  * ftl_submit_write - 非阻塞提交写请求
@@ -137,9 +137,9 @@ int ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count)
  * @param lba    逻辑地址
  * @param data   数据指针（至少 FTL_READ_USER_SIZE 字节）
  * @param count  sector 数（当前只支持 1）
- * @return 0 成功提交，-1 失败
+ * @return FTL_OK 成功提交，FTL_ERROR 失败
  */
-int ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t count);
+ftl_status_t ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t count);
 
 /*
  * ftl_read - 同步读（被 controller 层调用）

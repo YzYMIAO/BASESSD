@@ -18,7 +18,7 @@ static int      g_bbt_dirty    = 0;            /* 是否有未写回 NAND 的变
 /* BBT CRC 覆盖的字节数（从开头到 crc 字段） */
 #define BBT_CRC_SIZE (sizeof(uint32_t) * 4 + sizeof(uint32_t) * 3 + BBT_BITMAP_SIZE)
 
-int bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun)
+ftl_status_t bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun)
 {
     uint32_t seq;
     int      ret;
@@ -26,7 +26,7 @@ int bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun)
 
     if (alloc == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     memset(g_bbt_bitmap, 0, sizeof(g_bbt_bitmap));
@@ -56,7 +56,7 @@ int bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun)
         }
         alloc->bad_count = bad_idx;
 
-        return 0;
+        return FTL_OK;
     }
 
     /* 无有效 BBT → 执行出厂扫描 */
@@ -72,7 +72,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun
 
     if (alloc == NULL)
     {
-        return 0;
+        return FTL_OK;
     }
 
     memset(g_bbt_bitmap, 0, sizeof(g_bbt_bitmap));
@@ -145,11 +145,11 @@ int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun
     return (int)bad_idx;
 }
 
-int bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16_t block)
+ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16_t block)
 {
     if ((alloc == NULL) || (block >= BBT_MAX_BLOCKS))
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     /* BBT bitmap 置位 */
@@ -165,21 +165,21 @@ int bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16_t block)
     /* 从 Spare Pool 补充 Free Pool */
     (void)bbt_spare_pool_refill(alloc);
 
-    return 0;
+    return FTL_OK;
 }
 
-int bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce)
+ftl_status_t bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce)
 {
     bbt_header_t header;
     uint8_t      i;
 
     if (alloc == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
     if (!g_bbt_dirty)
     {
-        return 0;
+        return FTL_OK;
     }
 
     g_bbt_sequence++;
@@ -211,10 +211,10 @@ int bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce)
     }
 
     g_bbt_dirty = 0;
-    return 0;
+    return FTL_OK;
 }
 
-int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t ch, uint8_t ce)
+ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t ch, uint8_t ce)
 {
     bbt_header_t  candidates[BBT_TOTAL_PAGES];
     bbt_header_t *best = NULL;
@@ -223,7 +223,7 @@ int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t 
 
     if ((bad_map == NULL) || (bad_count == NULL) || (sequence == NULL))
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     memset(candidates, 0, sizeof(candidates));
@@ -283,7 +283,7 @@ int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t 
 
     if (!found)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     /* 输出到 caller */
@@ -291,10 +291,10 @@ int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t 
     *bad_count = best->bad_count;
     *sequence  = best->sequence;
 
-    return 0;
+    return FTL_OK;
 }
 
-int bbt_spare_pool_refill(ftl_allocator_t *alloc)
+ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc)
 {
     (void)alloc;
 
@@ -304,5 +304,5 @@ int bbt_spare_pool_refill(ftl_allocator_t *alloc)
      *
      * 完整实现待 allocator 扩展 spare_pool_blocks[] 数组后接入。
      */
-    return -1;
+    return FTL_ERROR;
 }

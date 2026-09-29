@@ -9,27 +9,24 @@
 
 #include <string.h>
 
-int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
+ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
 {
     l2p_checkpoint_header_t cp;
-    int                     cp_found;
     ftl_boot_result_t       local_result;
 
     if ((ftl == NULL) || (result == NULL))
     {
-        return SSD_STATUS_INVALID_ARGUMENT;
+        return FTL_ERROR;
     }
 
     memset(&local_result, 0, sizeof(local_result));
 
     /* ① 扫描 Checkpoint */
-    cp_found = checkpoint_find_latest(&cp);
-
-    if (!cp_found)
+    if (checkpoint_find_latest(&cp) != FTL_OK)
     {
         /* 无有效 Checkpoint → 出厂首次启动 */
         int ret = ftl_boot_fresh_start(ftl);
-        if (ret == SSD_STATUS_OK)
+        if (ret == FTL_OK)
         {
             local_result.boot_type       = BOOT_FRESH_START;
             local_result.cp_sequence     = 0U;
@@ -90,7 +87,7 @@ int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
         {
             /* 干净关机 */
             int ret = ftl_boot_clean_start(ftl, cp.sequence);
-            if (ret == SSD_STATUS_OK)
+            if (ret == FTL_OK)
             {
                 local_result.boot_type       = BOOT_CLEAN_START;
                 local_result.cp_sequence     = cp.sequence;
@@ -103,7 +100,7 @@ int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
         {
             /* 异常掉电 */
             int ret = ftl_boot_power_failure(ftl, cp.journal_sequence, &local_result);
-            if (ret == SSD_STATUS_OK)
+            if (ret == FTL_OK)
             {
                 local_result.boot_type   = BOOT_POWER_FAILURE;
                 local_result.cp_sequence = cp.sequence;
@@ -114,11 +111,11 @@ int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
     }
 }
 
-int ftl_boot_fresh_start(struct ftl_context *ftl)
+ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl)
 {
     if (ftl == NULL)
     {
-        return SSD_STATUS_INVALID_ARGUMENT;
+        return FTL_ERROR;
     }
 
     /* ① L2P Cache 全 INVALID */
@@ -131,14 +128,14 @@ int ftl_boot_fresh_start(struct ftl_context *ftl)
     ftl->cp_sequence    = 0U;
     ftl->cp_timer_start = 0U;
 
-    return SSD_STATUS_OK;
+    return FTL_OK;
 }
 
-int ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
+ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
 {
     if (ftl == NULL)
     {
-        return SSD_STATUS_INVALID_ARGUMENT;
+        return FTL_ERROR;
     }
 
     /* ① Cache 全 INVALID（首次 miss 时按需从 NAND L2P Table 加载） */
@@ -154,10 +151,10 @@ int ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
     ftl->cp_sequence    = cp_sequence;
     ftl->cp_timer_start = 0U;
 
-    return SSD_STATUS_OK;
+    return FTL_OK;
 }
 
-int ftl_boot_power_failure(struct ftl_context *ftl,
+ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
                            uint32_t            cp_sequence,
                            ftl_boot_result_t  *result)
 {
@@ -165,7 +162,7 @@ int ftl_boot_power_failure(struct ftl_context *ftl,
 
     if ((ftl == NULL) || (result == NULL))
     {
-        return SSD_STATUS_INVALID_ARGUMENT;
+        return FTL_ERROR;
     }
 
     /* ① Cache 全 INVALID */
@@ -229,7 +226,7 @@ int ftl_boot_power_failure(struct ftl_context *ftl,
     result->cp_sequence     = cp_sequence;
     result->journal_entries = entry_count;
 
-    return SSD_STATUS_OK;
+    return FTL_OK;
 }
 
 void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,

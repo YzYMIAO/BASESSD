@@ -135,7 +135,7 @@ void journal_flush_page(l2p_journal_t *journal)
     memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
 }
 
-int journal_replay(l2p_journal_t *journal, l2p_cache_t *cache)
+ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache)
 {
     uint8_t  b, page;
     uint32_t max_sequence = 0U;
@@ -145,7 +145,7 @@ int journal_replay(l2p_journal_t *journal, l2p_cache_t *cache)
 
     if ((journal == NULL) || (cache == NULL))
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     /* 扫描两个 Journal Block */
@@ -259,7 +259,7 @@ int journal_replay(l2p_journal_t *journal, l2p_cache_t *cache)
 
     memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
 
-    return 0;
+    return FTL_OK;
 }
 
 void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)

@@ -11,7 +11,7 @@
  *     所有归还到 Free Pool 的 Block 都已擦除（调用者保证），
  *     所以 pre_cond_count 始终等于 free_count。
  */
-int allocator_init(ftl_allocator_t *alloc,
+ftl_status_t allocator_init(ftl_allocator_t *alloc,
                    uint8_t          ch,
                    uint8_t          ce,
                    uint8_t          lun,
@@ -23,7 +23,7 @@ int allocator_init(ftl_allocator_t *alloc,
 {
     if (alloc == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     /* 固定参数 */
@@ -56,7 +56,7 @@ int allocator_init(ftl_allocator_t *alloc,
     alloc->bad_count        = 0U;
     alloc->spare_pool_count = 0U;
 
-    return 0;
+    return FTL_OK;
 }
 
 /*
@@ -210,7 +210,7 @@ int allocator_needs_gc(const ftl_allocator_t *alloc)
 {
     if (alloc == NULL)
     {
-        return 0;
+        return FTL_OK;
     }
 
     /* T1: 水位线 — Pre-conditioned 低于目标水位 */
@@ -225,24 +225,5 @@ int allocator_needs_gc(const ftl_allocator_t *alloc)
         return 1;
     }
 
-    return 0;
-}
-
-void allocator_refill_pre_cond(ftl_allocator_t *alloc)
-{
-    if (alloc == NULL)
-    {
-        return;
-    }
-
-    /*
-     * 同步 pre_cond_count 与 free_count。
-     *
-     * 调用者（ftl_service IDLE/NORMAL 模式）在完成 GC 搬移 + 擦除后
-     * 调此函数刷新 pre_cond_count 水位。
-     *
-     * 所有 Free Pool 中的 Block 已由 GC 擦除 → 全部可视为 Pre-conditioned。
-     * 后续若引入单独 Pre-conditioned 队列，此处需做真正搬移。
-     */
-    alloc->pre_cond_count = alloc->free_count;
+    return FTL_OK;
 }

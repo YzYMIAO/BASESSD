@@ -50,7 +50,7 @@ typedef struct
 void journal_init(l2p_journal_t *journal, uint8_t ch, uint8_t ce, uint8_t lun);
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba);
 void journal_flush_page(l2p_journal_t *journal);
-int  journal_replay(l2p_journal_t *journal, l2p_cache_t *cache);
+ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache);
 void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);
 
 #endif /* FTL_JOURNAL_H */

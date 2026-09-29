@@ -22,11 +22,11 @@ int pending_add(uint16_t cmd_id, lba_t lba, void *buffer, uint32_t count)
             g_pending[i].lba        = lba;
             g_pending[i].buffer     = buffer;
             g_pending[i].count      = count;
-            return 0;
+            return FTL_OK;
         }
     }
 
-    return -1; /* 表满 */
+    return FTL_ERROR; /* 表满 */
 }
 
 ftl_pending_req_t *pending_lookup(uint16_t cmd_id)

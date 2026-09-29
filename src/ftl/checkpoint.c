@@ -14,7 +14,7 @@
 #define CHECKPOINT_CRC_OFFSET (CHECKPOINT_CRC_SIZE + sizeof(uint32_t) * 64) /* + region_bitmap[64] */
 /* = 24 + 256 = 280 bytes covered by CRC */
 
-int checkpoint_create(ftl_context_t *ftl)
+ftl_status_t checkpoint_create(ftl_context_t *ftl)
 {
     l2p_checkpoint_header_t cp;
     uint8_t                 i;
@@ -22,7 +22,7 @@ int checkpoint_create(ftl_context_t *ftl)
 
     if (ftl == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     /* ① flush 所有 dirty cache → NAND L2P Table */
@@ -83,7 +83,7 @@ int checkpoint_create(ftl_context_t *ftl)
     return ret_total;
 }
 
-int checkpoint_find_latest(l2p_checkpoint_header_t *cp)
+ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp)
 {
     l2p_checkpoint_header_t  candidates[6];
     l2p_checkpoint_header_t *best = NULL;
@@ -92,7 +92,7 @@ int checkpoint_find_latest(l2p_checkpoint_header_t *cp)
 
     if (cp == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     memset(candidates, 0, sizeof(candidates));
@@ -151,11 +151,11 @@ int checkpoint_find_latest(l2p_checkpoint_header_t *cp)
 
     if (!found)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     *cp = *best;
-    return 0;
+    return FTL_OK;
 }
 
 int checkpoint_check_trigger(const ftl_context_t *ftl, uint32_t elapsed_ms)
@@ -164,7 +164,7 @@ int checkpoint_check_trigger(const ftl_context_t *ftl, uint32_t elapsed_ms)
 
     if (ftl == NULL)
     {
-        return 0;
+        return FTL_OK;
     }
 
     /* T1: Journal 水位线 */
@@ -186,14 +186,14 @@ int checkpoint_check_trigger(const ftl_context_t *ftl, uint32_t elapsed_ms)
         return 1;
     }
 
-    return 0;
+    return FTL_OK;
 }
 
 int checkpoint_is_emergency(const ftl_context_t *ftl)
 {
     if (ftl == NULL)
     {
-        return 0;
+        return FTL_OK;
     }
 
     return (int)ftl->journal.emergency;

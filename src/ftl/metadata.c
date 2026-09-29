@@ -158,14 +158,14 @@ nand_paa_t metadata_dir_alloc_region(metadata_dir_cache_t *dir,
     return paa;
 }
 
-int metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
+ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
 {
     metadata_directory_t anchor;
     uint8_t              i;
 
     if ((dir == NULL) || (!dir->dirty))
     {
-        return 0;
+        return FTL_OK;
     }
 
     /* 构造 Anchor 页 */
@@ -228,10 +228,10 @@ int metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
     dir->dirty        = 0U;
     dir->change_count = 0U;
 
-    return 0;
+    return FTL_OK;
 }
 
-int metadata_dir_load(metadata_dir_cache_t *dir)
+ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
 {
     metadata_directory_t  candidates[6];
     metadata_directory_t *best = NULL;
@@ -240,7 +240,7 @@ int metadata_dir_load(metadata_dir_cache_t *dir)
 
     if (dir == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     memset(candidates, 0, sizeof(candidates));
@@ -288,7 +288,7 @@ int metadata_dir_load(metadata_dir_cache_t *dir)
 
     if (!found)
     {
-        return -1; /* 无有效 Anchor */
+        return FTL_ERROR; /* 无有效 Anchor */
     }
 
     /* 重建 SRAM cache */
@@ -333,7 +333,7 @@ int metadata_dir_load(metadata_dir_cache_t *dir)
         dir->cur_metadata_plane = 0U;
     }
 
-    return 0;
+    return FTL_OK;
 }
 
 nand_paa_t metadata_dir_anchor_paa(uint8_t idx)

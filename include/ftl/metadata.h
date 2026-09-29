@@ -139,7 +139,7 @@ nand_paa_t metadata_dir_alloc_region(metadata_dir_cache_t *dir,
  * @param dir  Directory cache
  * @return 0 成功，-1 失败
  */
-int metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir);
+ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir);
 
 /*
  * metadata_dir_load - 从 Anchor Block 加载 Directory
@@ -149,7 +149,7 @@ int metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir);
  * @param dir  Directory cache（输出）
  * @return 0 成功，-1 无有效 Anchor（需首次初始化）
  */
-int metadata_dir_load(metadata_dir_cache_t *dir);
+ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir);
 
 /*
  * metadata_dir_anchor_paa - 返回第 n 个 Anchor 页的 PAA

@@ -19,6 +19,7 @@
  */
 
 #include "ftl/allocator.h"    /* ftl_allocator_t, super_block_t */
+#include "ftl/ftl_type.h"     /* lba_t */
 #include "ftl/journal.h"      /* l2p_journal_t */
 #include "ftl/l2p_cache.h"    /* l2p_cache_t */
 #include "nand/nand_config.h" /* nand_pba_t, PLANE_NUM, PAGES_PER_BLOCK */
@@ -27,11 +28,23 @@
 
 /* ── GC 参数 ── */
 
-#define PRE_COND_LOW_WATER   (32U)   /* Pre-conditioned 低水位 */
 #define GC_INTERVAL_WRITES   (1024U) /* 写入量触发间隔 */
 #define GC_TIMER_INTERVAL_MS (500U)  /* 定时触发间隔（ms）*/
 
 /* ── 接口函数 ── */
+
+/*
+ * gc_read_page_with_lba - 读取一页 NAND，返回用户数据 + 从 META 提取的 LBA
+ *
+ * 内部管理 FC 命令生命周期，无需调用者关心 alloc/submit/release。
+ * 可被 GC、WL 等需要读 NAND + 取 LBA 的模块复用。
+ *
+ * @param pba         物理地址
+ * @param buffer      输出：用户数据 buffer（2048 字节，可为 NULL）
+ * @param lba_out     输出：从 META 提取的 LBA（可为 NULL）
+ * @return 0 成功, -1 失败
+ */
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out);
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block

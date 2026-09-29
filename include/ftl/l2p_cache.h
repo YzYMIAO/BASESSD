@@ -16,8 +16,9 @@
  * 写回策略：Write-back（Dirty 标记，延迟写回 NAND）
  */
 
-#include "ftl/ftl_type.h"     /* lba_t */
-#include "ftl/metadata.h"     /* metadata_dir_cache_t */
+#include "ftl/allocator.h"  /* ftl_allocator_t */
+#include "ftl/ftl_type.h"   /* lba_t */
+#include "ftl/metadata.h"   /* metadata_dir_cache_t */
 #include "nand/nand_config.h" /* nand_pba_t */
 
 #include <stddef.h>
@@ -94,19 +95,26 @@ typedef struct
 
     /* Metadata Directory 指针（由 ftl_context_t 提供） */
     metadata_dir_cache_t *md_dir; /* 用于 Region 位置查找 */
+
+    /* Allocator 指针（由 ftl_context_t 提供，用于 Region 动态分配） */
+    ftl_allocator_t *alloc;
 } l2p_cache_t;
 
 /*
- * l2p_cache_set_md_dir - 设置 Metadata Directory 指针
+ * l2p_cache_set_md_dir - 设置 Metadata Directory 指针和 Allocator 指针
  *
  * @param cache  cache 上下文
  * @param md_dir Metadata Directory 指针（来自 ftl_context_t）
+ * @param alloc  Allocator 指针（来自 ftl_context_t，用于 Region 动态分配）
  */
-static inline void l2p_cache_set_md_dir(l2p_cache_t *cache, metadata_dir_cache_t *md_dir)
+static inline void l2p_cache_set_md_dir(l2p_cache_t *cache,
+                                         metadata_dir_cache_t *md_dir,
+                                         ftl_allocator_t *alloc)
 {
     if (cache != NULL)
     {
         cache->md_dir = md_dir;
+        cache->alloc  = alloc;
     }
 }
 
@@ -158,11 +166,11 @@ void l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
  * @param line_idx  line 索引（0 ~ L2P_CACHE_SIZE-1）
  * @return 0 成功
  */
-int l2p_cache_flush_one(l2p_cache_t *cache, int line_idx);
+ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx);
 
 /*
  * l2p_cache_flush_all - 写回所有 DIRTY cache line
  */
-int l2p_cache_flush_all(l2p_cache_t *cache);
+ftl_status_t l2p_cache_flush_all(l2p_cache_t *cache);
 
 #endif /* FTL_L2P_CACHE_H */

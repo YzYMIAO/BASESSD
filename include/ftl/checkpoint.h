@@ -56,7 +56,7 @@ typedef struct
  * @param ftl  FTL 上下文
  * @return 0 成功，-1 失败
  */
-int checkpoint_create(struct ftl_context *ftl);
+ftl_status_t checkpoint_create(struct ftl_context *ftl);
 
 /*
  * checkpoint_find_latest - 扫描 Block 37-38 找最新有效 Checkpoint
@@ -66,7 +66,7 @@ int checkpoint_create(struct ftl_context *ftl);
  * @param cp  输出：找到的 Header
  * @return 0 找到，-1 无有效 Checkpoint
  */
-int checkpoint_find_latest(l2p_checkpoint_header_t *cp);
+ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp);
 
 /*
  * checkpoint_check_trigger - 检查 Checkpoint 触发条件

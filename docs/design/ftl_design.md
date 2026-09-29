@@ -26,7 +26,9 @@
 | v0.15 | 2026-09-28 | 地址体系全面定稿：LAA/LBA/PBA/PAA 行业标准定义、cmd->meta 代替 cmd->faa、PBA=[CH][CE][PAA] bitfield、ftl_cmd_setup_ppa/ftl_cmd_write_data/ftl_cmd_read_data 三函数设计 | Claude |
 | v0.16 | 2026-09-28 | Step 1~5 完整实现：PBA/PAA 全套 inline、ftl_fc_interface 桩、L2P Cache 纯 SRAM+CLOCK、Allocator+Super Block、Journal 固定 Block、GC+ftl_service 三级主循环 | Claude |
 | v0.17 | 2026-09-29 | FTL 全面打通 NAND 路径：17 个核心桩全部替换为真实 FC 调用；新增同步 NAND 操作层（ftl_internal_read/write/erase）；新增 Pending Request 表；新增 ftl_read/write/trim 同步包装；GC 完整 7 步搬移（读 META→查 L2P→分配 Cold→写→L2P→Journal）；Metadata Directory 完整实现（Anchor Block 33-34 + 动态分配 + CRC 保护）；Allocator 全部桩消除（pre_cond/needs_gc/refill 同步）；controller 层 3 个隐式声明消除 | Claude |
-| v0.18 | 2026-09-29 | FTL 全部剩余模块实现：Checkpoint（全量+Journal截断+三级触发）、BBT（出厂扫描+NAND持久化+运行时标记+6页冗余）、Read Recovery（Read Retry+邻近页辅助+ECC趋势预测）、Power Failure Recovery（三类启动+写指针扫描NAND）、Wear Leveling（动态+静态三星Daemon+三条件触发）；代码审视修复4个逻辑断裂（md_dir未连接、bbt_init未调用、sync_wait pending泄漏、boot_recovery双重replay）；JOURNAL_MAGIC/HEADER_SIZE 移至 journal.h 开放；ftl_init 初始化顺序补全 | Claude |
+| v0.18 | 2026-09-29 | FTL 全部剩余模块实现：Checkpoint、BBT、Read Recovery、Power Failure Recovery、Wear Leveling；代码审视修复4个逻辑断裂 | Claude |
+| v0.19 | 2026-09-29 | Completion Table 统一完成路由：消除 ftl_service Phase2 和 ftl_internal_sync_wait 两个"泵"互相吞 completion 的 bug；新增 completion_table.h/c（16 项路由表 + 同步等待器 + 统一泵）；ftl_internal_sync_wait 改为注册 sync_waiter 后走 completion_table_drain，不再独占 fc_poll_completion；L2P Region 动态分配接入：cache 增加 alloc 指针，flush_one 中首次写 Region 改为真实调用 metadata_dir_alloc_region（取消回退固定位置） | Claude |
+| v0.20 | 2026-09-29 | 返回值体系统一 + 历史死代码清理：新增 ftl_status_t{FTL_OK=0,FTL_ERROR=-1} 企业级风格枚举，~32 个操作函数从 int 改为 ftl_status_t，谓词/计数函数保持 int；修复 checkpoint_find_latest 因 FTL_OK=0 导致的调用反转 bug；ftl_cmd_setup_ppa 等 3 函数从 (int) 强转改为显式 FC_STATUS_OK 映射；删除历史遗留文件 nand.h/c、nand_geometry.h/c、config/nand_geometry.h、config/ftl_config.h、__patch*.txt；删除死代码 pba_t、wl_init()、allocator_refill_pre_cond()；wl_relocate 复用 gc_read_page_with_lba + gc_erase_and_free（~60 行重复代码消除）；ssd_types.h 清除 ssd_ppa_t；l2p_cache.h 显式 include allocator.h 消除隐式依赖 | Claude |
 
 ---
 
@@ -3077,20 +3079,24 @@ BBT Sparing ✅    Block Skip                     Stripe Skip + Sparing
 
 ### 15.5 实施顺序与当前状态
 
-#### 已实现（2026-09-29 最终状态：FTL 全部模块完成）
+#### 已实现（2026-09-29 最终状态：FTL 全部模块完成 + Completion Table 统一路由 + Region 动态分配）
 
 ```
 Step 1 — ftl_fc_interface 层 + 地址体系
   ├── include/ftl/ftl_fc_interface.h      ✅ ftl_cmd_setup_ppa / write_data / read_data
   ├── src/ftl/ftl_fc_interface.c          ✅ + ftl_internal_read/write/erase/sync_wait + read_raw
-  ├── include/ftl/ftl_type.h              ✅ lba_t / pba_t 类型
+  ├── include/ftl/ftl_type.h              ✅ lba_t / ftl_status_t 类型
+  │                                       ✅ 企业级两值枚举 FTL_OK=0 / FTL_ERROR=-1
+  │                                       ✅ 删除 pba_t（已由 nand_pba_t 替代）
   ├── include/nand/nand_config.h          ✅ PBA/PAA 全套 40+ inline 函数
-  └── 废弃: firm_boot / l2p.h / garbage_collection 已清理
+  └── 废弃: firm_boot / l2p.h / garbage_collection / nand.h / nand_geometry.h 已清理
 
 Step 2 — L2P Cache + CLOCK + 真实 NAND 读写
-  ├── include/ftl/l2p_cache.h             ✅ 数据结构 + md_dir 指针 + l2p_region_pba()
+  ├── include/ftl/l2p_cache.h             ✅ 数据结构 + md_dir/alloc 指针 + l2p_region_pba()
   └── src/ftl/l2p_cache.c                 ✅ Region load（读 NAND）+ flush（写 NAND）
-                                           ✅ 通过 Metadata Directory 动态定位（回退固定位置）
+                                           ✅ 通过 Metadata Directory 动态定位（含动态分配）
+                                           ✅ l2p_cache_set_md_dir 增加 alloc 指针
+                                           ✅ flush_one 首次写 Region → metadata_dir_alloc_region
 
 Step 3 — Allocator + Super Block
   ├── include/ftl/allocator.h             ✅ 三级 Free Pool + Super Block 配对
@@ -3111,8 +3117,14 @@ Step 5 — GC + ftl_service 主循环
   │                                       ✅ gc_erase_and_free（真实擦除 + 失败标记坏块）
   ├── include/ftl/ftl.h                   ✅ ftl_context_t + 全部子模块字段
   └── src/ftl/ftl.c                       ✅ submit_read/write（异步）+ read/write/trim（同步包装）
-                                           ✅ handle_completion 路由（FTL/METADATA/GC）
+                                           ✅ handle_completion 路由（FTL/METADATA/GC/BBT/CHECKPOINT）
                                            ✅ GC/WL/Checkpoint 三级后台集成
+
+Step 13 — Completion Table 统一完成路由
+  ├── include/ftl/completion_table.h      ✅ 16 项路由表 + 同步等待器 + 统一泵声明
+  └── src/ftl/completion_table.c          ✅ completion_table_add/lookup/remove/drain
+                                           ✅ ftl_sync_waiter_handler（带/不带 release）
+                                           ✅ completion_table_set_default（= ftl_handle_completion）
 
 Step 6 — Metadata Directory
   ├── include/ftl/metadata.h              ✅ Anchor Block (33-34) + 128 entry Directory
@@ -3163,6 +3175,16 @@ Step 12 — Wear Leveling
   ├── bbt_init()                          ✅ ftl_init 中加载 BBT
   ├── sync_wait "other" release           ✅ 删除（单 LUN 无并发）
   └── boot_recovery journal_replay        ✅ 改为直接读 header，不修改 journal 状态
+
+#### 代码审视修复（v0.19 — Completion Table 统一完成路由）
+  ├── ftl_internal_sync_wait              ✅ 改为 completion_table_add + sync_waiter
+  │                                       ✅ 不再独占 fc_poll_completion
+  │                                       ✅ completion_table_drain 自动路由非目标 completion 到 ftl_handle_completion
+  ├── ftl_service Phase 2                 ✅ 改为 completion_table_drain() 统一泵
+  │                                       ✅ ftl_handle_completion 注册为 default handler
+  ├── ftl_read/ftl_write 同步循环         ✅ 改为 completion_table_drain()，两泵合并为一个
+  ├── l2p_cache_flush_one Region 分配     ✅ TODO 消除：首次写 Region → metadata_dir_alloc_region
+  └── ftl_init 连接 Cache → Allocator     ✅ l2p_cache_set_md_dir 增加 alloc 指针参数
 ```
 
 #### 未实现（非 FTL 核心模块，后续方向）
@@ -3174,58 +3196,70 @@ Step 12 — Wear Leveling
 | NVMe Host | `nvme_admin.c` / `nvme_io.c` / `submission_queue.c` / `completion_queue.c` | NVMe 协议层（当前用 UART CLI）|
 | Host Sim | `flash_simulator.c` / `file_backend.c` / `event_loop.c` / `fault_injection.c` / `simulated_time.c` | PC 端模拟环境（当前跑在真实硬件）|
 
-**FTL 层 21 个源文件，0 个 `#warning` 核心桩。全部模块已实现并通过编译。**
+**FTL 层 22 个源文件，0 个 `#warning` 核心桩。全部模块已实现并通过编译。**
 
 ---
 
 ## 16. Phase 规划
 
-### Phase 0：基础设施（核心 cache + FC 适配）
+### 已实现（截至 2026-09-29 v0.19）
 
-| 任务 | 说明 | 估算 |
+| 任务 | 说明 | 状态 |
 |------|------|------|
-| P0.1 | L2P cache 数据结构 + CLOCK 替换 | 小 |
-| P0.2 | Cache lookup/miss/evict（通过 FC 读 NAND） | 中 |
-| P0.3 | Cache update/dirty 标记 | 小 |
-| P0.4 | Cache flush（通过 FC 写 NAND） | 中 |
-| P0.5 | FTL 读写改用 FC 接口 | 中 |
+| L2P Cache + CLOCK | 64 row SRAM region cache，CLOCK 替换，Region NAND load/flush | ✅ |
+| Allocator + Super Block | 三级 Free Pool，跨双 Plane，磨损均衡，Hot/Cold 双温区 | ✅ |
+| Journal | 固定 Block 40-41 双 Block 环形，SRAM buffer + flush_page，Header 4 字段 | ✅ |
+| GC | 7 步搬移：读 META→查 L2P→分配 Cold→写→L2P→Journal，贪心 victim | ✅ |
+| Checkpoint | 全量 L2P 快照 + 6 页冗余 + CRC，Journal 截断协同，三级触发 | ✅ |
+| BBT | 出厂扫描（LDPC_RAW）+ NAND 持久化 + 运行时标记 + 6 页冗余 + CRC | ✅ |
+| Read Recovery | Read Retry（8 次）+ 邻近页辅助 + ECC 趋势预测 + 4 级健康状态 | ✅ |
+| Power Failure Recovery | 三类启动判断 + 写指针 NAND 扫描 | ✅ |
+| Wear Leveling | 动态（alloc 选低擦除）+ 静态三星 Daemon（三条件触发）| ✅ |
+| Metadata Directory | Anchor Block 33-34 + 动态分配 + CRC，L2P Region 双 Plane 交错 | ✅ |
+| Pending Request 表 | 8 项固定表，command_id + LBA lookup | ✅ |
+| ftl_service 主循环 | 三级模式（IDLE/NORMAL/BUSY），GC/WL/Checkpoint 集成 | ✅ |
+| ftl_fc_interface | 3 PBA helper + 4 内部同步 NAND 操作（read/write/erase/sync_wait/read_raw）| ✅ |
+| **Completion Table** | 统一完成路由，消除两泵冲突，sycn_waiter 不走独立 fc_poll_completion | ✅ |
+| **L2P Region 动态分配** | flush_one 首次写通过 metadata_dir_alloc_region 从 Free Pool 分配 | ✅ |
 
-### Phase 1：掉电恢复
+### 剩余待办
 
-| 任务 | 说明 | 估算 |
+#### P-A：多 LUN 并发前置（依赖 Completion Table 已就绪）
+
+| 任务 | 说明 | 优先级 |
+|------|------|--------|
+| P-A.1 | `fc_poll_completion` CQ 深度确认 — 确保 CQ 能同时容纳多 LUN 的完成事件 | 高 |
+| P-A.2 | pending 表扩展 — `FTL_PENDING_MAX` 从 8 增大到 16/32，支持多 LUN 并发 pending | 高 |
+| P-A.3 | `ftl_write` 同步等待改为 per-cmd sync_waiter — 脱离全局 SQ/CQ 空判定，改用 `completion_table_add` + 等具体 cmd_id | 高 |
+| P-A.4 | `rr_record_ecc` 接入读完成路径 — 当前为 ⚠️ 未接入，需 timer + completion 集成 | 中 |
+
+#### P-B：Controller / Host 层
+
+| 任务 | 说明 | 状态 |
 |------|------|------|
-| P1.1 | Journal 格式 + NAND 写入（含 buffer 半满提前 flush）| 中 |
-| P1.2 | Write-back + journal 集成 ftl_write | 中 |
-| P1.3 | 启动时 journal 回放 | 中 |
-| P1.4 | Checkpoint 全量/增量 | 小 |
-| P1.5 | 完整启动恢复流程 | 中 |
-| P1.6 | Write-back 四级触发（水位线 + 定时 + evict + 同步）| 中 |
-| P1.7 | Journal 定时 flush + 掉电窗口控制 | 小 |
+| P-B.1 | Controller 请求拆分（`request.c`） | ⚠️ `#warning` |
+| P-B.2 | 优先级调度（`scheduler.c`） | ⚠️ `#warning` |
+| P-B.3 | 状态机管理（`state_machine.c`） | ⚠️ `#warning` |
+| P-B.4 | NVMe Admin 命令（`nvme_admin.c`） | ⚠️ `#warning` |
+| P-B.5 | NVMe IO 命令（`nvme_io.c`） | ⚠️ `#warning` |
+| P-B.6 | Submission/Completion Queue（`submission_queue.c` / `completion_queue.c`） | ⚠️ `#warning` |
 
-### Phase 2：完整 FTL
+#### P-C：优化
 
-| 任务 | 说明 | 估算 |
+| 任务 | 说明 | 备注 |
 |------|------|------|
-| P2.1 | Allocator（Super Block 分配 + 双 Plane 配对 + 顺序写指针 + 温度参数） | 中 |
-| P2.2 | Bad block 扫描 + BBT | 中 |
-| P2.3 | 反向映射 bitmap | 小 |
-| P2.4 | GC 多维度加权 victim + 同步搬移（含搬移中阶段性 flush + 原子性保证） | 大 |
-| P2.5 | Background flush 集成 ftl_service（水位线 + 定时） | 小 |
-| P2.6 | NAND 带宽动态感知（FC 队列深度调节 flush/GC 速度） | 中 |
-| P2.7 | Thrashing 检测 + 降级 | 中 |
-| P2.8 | Hot/Cold 温度分区（allocator 双 Super Block + 归类策略） | 中 |
-| P2.9 | OP 预留实现（默认 10%，支持 RMA 坏块替换 + 性能保速） | 小 |
-| P2.10 | Pre-conditioned pool + Background GC 三级 Free Pool | 中 |
-| P2.11 | GC 按 Super Block 粒度回收（双 Plane 擦除 + GC Bitmap） | 中 |
+| P-C.1 | Prefetch 顺序读预加载 | 后续 Phase |
+| P-C.2 | GC L2P 批量更新优化 | 后续 Phase |
+| P-C.3 | Warm boot 保留 cache | 后续 Phase |
+| P-C.4 | 性能计数器 + 调试接口 | 后续 Phase |
+| P-C.5 | 反向映射 bitmap（每 SB 64 bit 有效页 bitmap） | GC 加速 |
+| P-C.6 | Thrashing 检测 + 降级 | miss_rate > 90% 时切换 write-through |
 
-### Phase 3：优化
+### 已废弃（旧 Phase 规划中的已完成项）
 
-| 任务 | 说明 | 估算 |
-|------|------|------|
-| P3.1 | Prefetch 顺序读预加载 | 中 |
-| P3.2 | GC L2P 批量更新优化 | 中 |
-| P3.3 | Warm boot 保留 cache | 小 |
-| P3.4 | 性能计数器 + 调试接口 | 小 |
+以下为旧 §16 Phase 规划中已实现的任务，不再追踪：
+
+~~Phase 0~~ ✅ Phase 1 ~~掉电恢复~~ ✅ Phase 2 ~~完整 FTL~~ ✅
 
 ---
 

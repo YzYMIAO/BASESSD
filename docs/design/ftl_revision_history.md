@@ -133,17 +133,159 @@ FTL 层剩余 5 个模块全部实现，21 个源文件 0 个 `#warning` 核心�
 
 ---
 
-## 未解决问题记录
+## v0.19 — Completion Table 统一完成路由 + L2P Region 动态分配
 
-以下问题在设计讨论中已识别但未最终决定，留待后续 Phase 实施时确定：
+**日期**：2026-09-29
 
-| # | 问题 | 影响 | 当前倾向 | 最终决策 |
-|---|------|------|---------|---------|
-| U1 | Region 固定 vs 动态 block | 元数据 block 磨损 | 固定 32 blocks | ⏳ |
-| U2 | Journal 自身可靠性 | 掉电时 journal 损坏 | 双页 + CRC | ⏳ |
-| U3 | 启动加载策略 | 启动时间 | 按需 miss | ⏳ |
-| U4 | L2P 表磨损均衡 | 元数据 block 寿命 | region 更新合并 | ⏳ |
-| U5 | 多温区支持 | GC 效率 | 暂不实现，预留接口 | ⏳ |
+### 背景
+
+代码审视发现三个结构性隐患：
+1. **两泵冲突**：`ftl_service` Phase 2 和 `ftl_internal_sync_wait` 各自调用 `fc_poll_completion` 消费 CQ entry。同步等待循环中的 `fc_poll_completion` 会"吞掉"用户 I/O 的完成事件——数据不拷贝到 caller buffer、pending 不释放、命令不 release。
+2. **`ftl_write` 完成判定依赖全局 SQ/CQ 空**：在并发内部操作（GC、Region flush、Checkpoint）同时运行时可能提前返回或无限等待。
+3. **L2P Region 首次写入回退固定位置**：`l2p_cache_flush_one` 中的 TODO 显示 Region 动态分配未接入，始终回退 Block 0~31。
+
+### 解决方案
+
+新增 `Completion Table` 模块（`completion_table.h/c`）：
+
+```
+统一完成路由设计（企业级 Unified Completion Pump）：
+
+每个 I/O 提交时可注册 completion handler：
+  completion_table_add(cmd_id, handler, ctx);
+
+fc_poll_completion() 消费一个 CQ entry 后：
+  ① cmd_id → 查 completion_table → 找到 handler
+  ② handler(cmd, ctx) — 可能触发 pending 回拷或设置 waiter->done
+  ③ 无注册 → 走 default handler（ftl_handle_completion）
+
+所有完成事件统一经过 completion_table_drain() 分发：
+  ftl_service Phase 2:  completion_table_drain()
+  ftl_internal_sync_wait:  completion_table_add → completion_table_drain()
+  ftl_read/ftl_write 同步循环:  completion_table_drain()
+```
+
+### 改动清单
+
+| 文件 | 改动 | 说明 |
+|------|------|------|
+| `include/ftl/completion_table.h` | **新增** | 16 项路由表 + `ftl_sync_waiter_t` + 统一泵声明 |
+| `src/ftl/completion_table.c` | **新增** | 路由表实现 + `ftl_sync_waiter_handler`（带/不带 release）|
+| `src/ftl/ftl.c` | 重写 | `ftl_handle_completion` 改为 default handler 注册；Phase 2 改为 `completion_table_drain()`；同步循环统一泵 |
+| `src/ftl/ftl_fc_interface.c` | 重写 | `ftl_internal_sync_wait` 改为 `completion_table_add` + `completion_table_drain()` 循环，不再独占 `fc_poll_completion` |
+| `include/ftl/l2p_cache.h` | 修改 | 新增 `alloc` 指针；`l2p_cache_set_md_dir` 增加 `alloc` 参数 |
+| `src/ftl/l2p_cache.c` | 修改 | `l2p_cache_flush_one` 中 TODO 消除：首次写 Region 调用 `metadata_dir_alloc_region` 动态分配 |
+| `src/ftl/ftl.c` → `ftl_init()` | 修改 | 两次 `l2p_cache_set_md_dir`：md_dir 未就绪时设 NULL（首次），加载后重设（含 alloc）|
+
+### 三个隐患修复状态
+
+| 隐患 | 状态 | 机制 |
+|------|------|------|
+| 同步等待吞 completion | ✅ **已修复** | `completion_table_drain` 自动路由非目标 completion 到 default handler |
+| ftl_write 全局空判定 | ⚠️ **改善** | 同步循环已用统一泵，后续可改为 per-cmd sync_waiter |
+| Region 回退固定位置 | ✅ **已修复** | 首次写通过 `metadata_dir_alloc_region` 从 Free Pool 分配 |
+
+### 多 LUN 并发前置条件
+
+现在同步等待和用户 I/O 共用同一个泵，完成事件不被吞。
+后续还需：
+1. CQ 深度确认 — 确保 FC 层 CQ 能容纳多 LUN 完成事件
+2. `FTL_PENDING_MAX` 扩展 — 从 8 增至 16/32
+3. `ftl_write` 同步等待改为 per-cmd sync_waiter
+
+### 编译状态
+
+**零错误零警告**。新增 `completion_table.o` 398B text + 200B bss（16 项路由表）。FTL 层 22 个源文件。
+Binary size: 58368 bytes。
+
+---
+
+## v0.20 — 返回值体系统一 + 历史死代码清理 + WL/GC 重复消除
+
+**日期**：2026-09-29
+
+### 背景
+
+FTL 层 ~30 个操作函数的返回值不统一：`int 0/-1`、`SSD_STATUS_OK/IO_ERROR`、`(int)fc_status_t` 混用，
+调用者需要记住每个函数的成功/失败约定。同时项目积累了一批已退役的历史遗留文件。
+
+### 返回值统一方案（企业级风格）
+
+参考存储主控行业做法，FTL 内部按职责分三类：
+
+| 类别 | 返回值 | 函数数 | 说明 |
+|------|--------|--------|------|
+| **操作函数** | `ftl_status_t` | ~32 | `FTL_OK=0` / `FTL_ERROR=-1`，两值简洁枚举 |
+| **谓词函数** | `int` | ~8 | 保持 `1=是` / `0=否`（check_trigger/needs_gc 等） |
+| **计数函数** | `int` | ~3 | 保持非负=数量（gc_migrate_sb/wl_relocate 等） |
+| **对外 API** | `ssd_status_t` | 3 | 保持 `SSD_STATUS_*`（ftl_read/write/trim） |
+
+### 新增类型
+
+`include/ftl/ftl_type.h`：
+
+```c
+typedef enum {
+    FTL_OK    = 0,   /* 成功 */
+    FTL_ERROR = -1,  /* 通用失败 */
+} ftl_status_t;
+```
+
+与 `ssd_status_t` 的边界：FTL 对外 API 依然返回 `ssd_status_t`，内部模块间调用返回 `ftl_status_t`。
+在 `ftl_read/write` 包装中：`FTL_ERROR` → `SSD_STATUS_IO_ERROR`。
+
+### 改动清单
+
+#### 头文件签名变更（13 个头文件）
+
+| 模块 | 函数 | 旧 | 新 |
+|------|------|----|----|
+| `allocator.h` | `allocator_init` | `int` | `ftl_status_t` |
+| `bbt.h` | `bbt_init/mark_bad/save/load/spare_pool_refill` | `int` | `ftl_status_t` |
+| `checkpoint.h` | `checkpoint_create/find_latest` | `int` | `ftl_status_t` |
+| `gc.h` | `gc_read_page_with_lba` | `int` | `ftl_status_t` |
+| `journal.h` | `journal_replay` | `int` | `ftl_status_t` |
+| `l2p_cache.h` | `l2p_cache_flush_one/flush_all` | `int` | `ftl_status_t` |
+| `metadata.h` | `metadata_dir_flush_to_anchor/load` | `int` | `ftl_status_t` |
+| `completion_table.h` | `completion_table_add` | `int` | `ftl_status_t` |
+| `ftl_fc_interface.h` | 全部 7 个函数 | `int` | `ftl_status_t` |
+| `power_failure_recovery.h` | 全部 4 个函数 | `int` | `ftl_status_t` |
+| `wear_leveling.h` | `wl_init()` | 删除 | — |
+| `ftl.h` | `ftl_init/submit_read/submit_write` | `int` | `ftl_status_t` |
+| `ssd_types.h` | `ssd_ppa_t` | 删除 | — |
+
+#### 审视修复（返回值切换中发现的 bug）
+
+| # | 问题 | 文件 | 修法 |
+|---|------|------|------|
+| 1 | `checkpoint_find_latest` 改为 `ftl_status_t` 后调用处 `if (!cp_found)` 逻辑反转 | `power_failure_recovery.c` | `if (checkpoint_find_latest(&cp) != FTL_OK)` |
+| 2 | `ftl_cmd_setup_ppa` 等 3 函数返回 `(int)fc_*()` 强转 | `ftl_fc_interface.c` | `(fc_*() == FC_STATUS_OK) ? FTL_OK : FTL_ERROR` |
+
+#### 历史死代码删除
+
+| 文件 | 理由 |
+|------|------|
+| `include/nand/nand.h` + `src/nand/nand.c` | 旧 NAND 后端抽象，0 调用，已被 FC 层取代 |
+| `include/nand/nand_geometry.h` + `src/nand/nand_geometry.c` | 唯一用户是 nand.h（已死），几何参数已在 nand_config.h |
+| `config/nand_geometry.h` | 设计文档已标废弃 |
+| `config/ftl_config.h` | SSD_FTL_LBA_SIZE=4096 0 引用 |
+| `include/ftl/ftl_type.h` → `typedef uint32_t pba_t` | 无人用，全用 nand_pba_t |
+| `include/ftl/wear_leveling.h` → `wl_init()` | 5 行空实现 0 处调用 |
+| `include/ftl/allocator.h` + `src/ftl/allocator.c` → `allocator_refill_pre_cond` | dead code（free_count 已在 allocator_free_block 中自同步）|
+| `common/ssd_types.h` → `typedef uint64_t ssd_ppa_t` | 已被 nand_paa_t 替代 |
+| `__patch_01.txt` + `__patch__.txt` | 根目录临时残留 |
+
+#### WL/GC 重复代码消除
+
+| 改动 | 效果 |
+|------|------|
+| `wl_relocate` 内联 FC 命令序列（~45 行）→ `gc_read_page_with_lba()` | `gc_read_page_with_lba` 从 `static` 升为 `gc.h` 公开接口 |
+| `wl_relocate` 擦除循环（~15 行）→ `gc_erase_and_free()` | 构造临时 `super_block_t` 后复用 GC 擦除逻辑 |
+| `gc.h` 的 `PRE_COND_LOW_WATER` → 删除（与 allocator.h 的 `FREE_POOL_TARGET` 重复）| 调用处改为 `FREE_POOL_TARGET` |
+
+### 编译状态
+
+**零错误零 FTL 警告**。源文件数 105→103。Binary size: 58368 bytes（不变，死代码不链接）。
 
 ---
 

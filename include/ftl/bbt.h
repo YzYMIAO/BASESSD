@@ -54,7 +54,7 @@ typedef struct
  * @param lun    LUN
  * @return 0 成功，-1 失败
  */
-int bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun);
+ftl_status_t bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun);
 
 /*
  * bbt_scan_factory - 出厂坏块扫描
@@ -90,7 +90,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun
  * @param ce     CE
  * @return 0 成功，-1 失败
  */
-int bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16_t block);
+ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16_t block);
 
 /*
  * bbt_is_bad - 查询 Block 是否坏块
@@ -133,7 +133,7 @@ static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
  * @param ce     CE
  * @return 0 成功，-1 失败
  */
-int bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce);
+ftl_status_t bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce);
 
 /*
  * bbt_load - 从 NAND 加载 BBT
@@ -147,7 +147,7 @@ int bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce);
  * @param ce          CE
  * @return 0 成功，-1 无有效 BBT
  */
-int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t ch, uint8_t ce);
+ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t ch, uint8_t ce);
 
 /*
  * bbt_spare_pool_refill - 从 Spare Pool 补充 Free Pool
@@ -158,6 +158,6 @@ int bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t 
  * @param alloc  Allocator 上下文
  * @return 0 补充成功，-1 Spare Pool 耗尽
  */
-int bbt_spare_pool_refill(ftl_allocator_t *alloc);
+ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc);
 
 #endif /* FTL_BBT_H */

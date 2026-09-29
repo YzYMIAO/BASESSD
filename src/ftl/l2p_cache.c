@@ -29,6 +29,7 @@ void l2p_cache_init(l2p_cache_t *cache)
     cache->hit_count  = 0U;
     cache->miss_count = 0U;
     cache->md_dir     = NULL;
+    cache->alloc      = NULL;
 }
 
 /*
@@ -108,7 +109,7 @@ static int l2p_cache_evict_one(l2p_cache_t *cache)
         return (int)idx;
     }
 
-    return -1; /* 全 FLUSHING */
+    return FTL_ERROR; /* 全 FLUSHING */
 }
 
 /*
@@ -246,7 +247,7 @@ void l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
     line->state              = L2P_CACHE_DIRTY;
 }
 
-int l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
+ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
 {
     l2p_cache_line_t *line;
     nand_pba_t        region_pba;
@@ -255,14 +256,14 @@ int l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
 
     if ((cache == NULL) || (line_idx < 0) || (line_idx >= (int)L2P_CACHE_SIZE))
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     line = &cache->lines[line_idx];
 
     if (line->state != L2P_CACHE_DIRTY)
     {
-        return 0; /* 不需要 flush */
+        return FTL_OK; /* 不需要 flush */
     }
 
     /* 标记为 FLUSHING，防止 evict 选中 */
@@ -283,17 +284,28 @@ int l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
 
         if (region_paa != NAND_PBA_INVALID)
         {
+            /* 已知位置 */
             region_pba = pba_from_paa(0, 0, region_paa);
         }
-        else if (cache->md_dir != NULL)
+        else if ((cache->md_dir != NULL) && (cache->alloc != NULL))
         {
-            /* 未分配 → 分配新页 */
-            /* 注意：这里需要 alloc，但 l2p_cache_flush_one 没有 alloc 参数。
-             * 简化：先回退到固定位置，后续使用 ftl_context_t 中的 alloc 完善。 */
-            region_pba = l2p_region_pba(0, 0, line->region_id);
+            /* 未分配 → 通过 Directory 动态分配新位置 */
+            region_paa = metadata_dir_alloc_region(cache->md_dir,
+                                                    cache->alloc,
+                                                    line->region_id);
+            if (region_paa != NAND_PBA_INVALID)
+            {
+                region_pba = pba_from_paa(0, 0, region_paa);
+            }
+            else
+            {
+                /* 动态分配失败（Free Pool 空），回退固定位置 */
+                region_pba = l2p_region_pba(0, 0, line->region_id);
+            }
         }
         else
         {
+            /* 回退固定位置（md_dir 或 alloc 不可用） */
             region_pba = l2p_region_pba(0, 0, line->region_id);
         }
     }
@@ -323,13 +335,13 @@ int l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
     return ret;
 }
 
-int l2p_cache_flush_all(l2p_cache_t *cache)
+ftl_status_t l2p_cache_flush_all(l2p_cache_t *cache)
 {
     uint16_t i;
 
     if (cache == NULL)
     {
-        return -1;
+        return FTL_ERROR;
     }
 
     for (i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -344,5 +356,5 @@ int l2p_cache_flush_all(l2p_cache_t *cache)
         }
     }
 
-    return 0;
+    return FTL_OK;
 }

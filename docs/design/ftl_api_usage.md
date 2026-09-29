@@ -34,10 +34,47 @@ struct ftl_context {
 | `ftl_init()` | 初始化 | 初始化 L2P cache、allocator、journal、Metadata Directory、BBT | 在 `fc_init()` 之后调用 |
 | `ftl_submit_read()` | 异步读 | 非阻塞提交读请求（pending 表驱动完成） | L2P→PBA→FC submit→pending |
 | `ftl_submit_write()` | 异步写 | 非阻塞提交写请求 + Journal + watermark | alloc→FC submit→journal→L2P |
-| `ftl_service()` | 主循环 | 推进 FC 调度 + 后台任务（flush/GC/WL/Checkpoint） | 在 main loop 中频繁调用 |
-| `ftl_read()` | 同步读 | `ftl_submit_read` + 循环 polling 直到 pending 释放 | 被 controller 层调用 |
-| `ftl_write()` | 同步写 | `ftl_submit_write` + 循环 polling 直到 SQ/CQ 空 | 被 controller 层调用 |
+| `ftl_service()` | 主循环 | 推进 FC 调度 + 统一完成泵 + 后台任务（flush/GC/WL/Checkpoint） | 在 main loop 中频繁调用 |
+| `ftl_read()` | 同步读 | `ftl_submit_read` + 循环 `fc_service`/`completion_table_drain` 直到 pending 释放 | 被 controller 层调用 |
+| `ftl_write()` | 同步写 | `ftl_submit_write` + 循环 `fc_service`/`completion_table_drain` 直到 SQ/CQ 空 | 被 controller 层调用 |
 | `ftl_trim()` | TRIM | 取消 LBA 映射（写 FTL_PBA_INVALID） | 仅改 cache，标记 DIRTY |
+
+### 1.3 Completion Table（统一完成路由）
+
+`completion_table.h/c` 提供统一完成事件分发，消除 `ftl_service` 和 `ftl_internal_sync_wait` 各自 `fc_poll_completion` 造成的 completion 丢失问题。
+
+```c
+// completion_table.h — 完整接口
+
+#define COMPLETION_TABLE_SIZE (16U)
+
+/* 注册一个 completion handler */
+int completion_table_add(uint16_t cmd_id,
+                         completion_handler_fn_t handler,
+                         void *ctx);
+
+/* 消费所有 CQ entry 并路由到各 handler */
+void completion_table_drain(void);
+
+/* 设置默认 handler（未注册精确路由的 completion 走此路径） */
+void completion_table_set_default(completion_handler_fn_t handler, void *ctx);
+
+/* 同步等待器 */
+typedef struct {
+    uint16_t             cmd_id;
+    uint8_t              done;               /* handler 置 1 */
+    fc_command_status_t  completion;          /* 保存的完成状态 */
+} ftl_sync_waiter_t;
+
+void ftl_sync_waiter_handler(const fc_command_status_t *completion, void *ctx);
+void ftl_sync_waiter_handler_with_release(const fc_command_status_t *completion,
+                                          void *ctx);
+```
+
+**路由规则**：
+1. `completion_table` 中有注册 handler → 精确路由（用于同步等待、专用回调）
+2. 无注册但设置了 default → 走 `ftl_handle_completion`（FTL pending 表、命令释放等）
+3. 都没有 → 静默丢弃（不应发生）
 
 ### 1.3 完整使用流程
 

@@ -64,7 +64,7 @@ typedef struct
  * @param result 输出：启动结果
  * @return SSD_STATUS_OK 成功，负值失败
  */
-int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result);
+ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result);
 
 /*
  * ftl_boot_fresh_start - 出厂首次启动
@@ -76,9 +76,9 @@ int ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result);
  *   ④ Metadata Directory 初始化（固定映射）
  *
  * @param ftl  FTL 上下文
- * @return SSD_STATUS_OK
+ * @return FTL_OK 成功，FTL_ERROR 失败
  */
-int ftl_boot_fresh_start(struct ftl_context *ftl);
+ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl);
 
 /*
  * ftl_boot_clean_start - 干净关机启动
@@ -90,9 +90,9 @@ int ftl_boot_fresh_start(struct ftl_context *ftl);
  *
  * @param ftl  FTL 上下文
  * @param cp_sequence  Checkpoint sequence
- * @return SSD_STATUS_OK
+ * @return FTL_OK 成功，FTL_ERROR 失败
  */
-int ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence);
+ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence);
 
 /*
  * ftl_boot_power_failure - 异常掉电恢复
@@ -106,9 +106,9 @@ int ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence);
  * @param ftl  FTL 上下文
  * @param cp_sequence  Checkpoint sequence（回放起点）
  * @param result       输出：回放的 entry 数
- * @return SSD_STATUS_OK 成功，负值失败
+ * @return FTL_OK 成功，FTL_ERROR 失败
  */
-int ftl_boot_power_failure(struct ftl_context *ftl,
+ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
                            uint32_t            cp_sequence,
                            ftl_boot_result_t  *result);
 
