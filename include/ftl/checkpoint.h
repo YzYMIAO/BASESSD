@@ -63,10 +63,11 @@ ftl_status_t checkpoint_create(struct ftl_context *ftl);
  *
  * 扫描 6 页，选 magic + CRC 正确 + sequence 最大的。
  *
- * @param cp  输出：找到的 Header
+ * @param cp    输出：找到的 Header
+ * @param topo  拓扑信息（Checkpoint Block 所在芯片路由）
  * @return 0 找到，-1 无有效 Checkpoint
  */
-ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp);
+ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t topo);
 
 /*
  * checkpoint_check_trigger - 检查 Checkpoint 触发条件

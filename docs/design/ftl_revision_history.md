@@ -289,6 +289,77 @@ typedef enum {
 
 ---
 
+## v0.21 — FTL 拓扑信息重构（ftl_topology_t）
+
+**日期**：2026-09-29
+
+### 背景
+
+`ftl_context_t` 中散落 `ch/ce/lun` 三个字段，`ftl_init` 需要 8 个参数，
+Controller 层被迫知道底层 NAND 拓扑。行业做法是 FTL 对外只暴露 LBA，
+拓扑信息在初始化时一次性传入后由各子模块内部持有。
+
+### 改动
+
+将分散在各结构体中的 `ch/ce/lun` 字段统一为 `ftl_topology_t`：
+
+| 结构体 | 原字段 | 改为 |
+|--------|--------|------|
+| `ftl_context_t` | `ch / ce / lun` | `ftl_topology_t topo` |
+| `ftl_allocator_t` | `ch / ce / lun`（曾被删除又恢复） | `ch / ce`（保留，从 topo 初始化） |
+| `l2p_journal_t` | `ch / ce / lun` | `ftl_topology_t topo` |
+| `metadata_dir_cache_t` | （无） | `ftl_topology_t topo` |
+
+### 新增类型
+
+`ftl_type.h`：
+
+```c
+typedef struct {
+    uint8_t ch;
+    uint8_t ce;
+    uint8_t lun;
+} ftl_topology_t;
+```
+
+### 接口变化
+
+```c
+// 旧
+ftl_init(ftl, ch, ce, lun, free_blocks, free_count, bad_blocks, erase_counts, closed_sb_list);
+
+// 新
+ftl_init(ftl, topo, free_blocks, free_count, bad_blocks, erase_counts, closed_sb_list);
+```
+
+所有元数据路径（Journal/Checkpoint/BBT/Anchor）使用 `topo.ch/ce` 构造 PBA。
+用户数据路径（allocator_alloc）使用 `alloc->ch/ce` 构造 PBA。
+
+### 波及的文件
+
+| 文件 | 改动 |
+|------|------|
+| `include/ftl/ftl_type.h` | **新增** `ftl_topology_t` |
+| `include/ftl/ftl.h` | `ftl_context_t` 增加 `topo` 字段；`ftl_init` 增加 `ftl_topology_t` 参数 |
+| `include/ftl/allocator.h` | 恢复 `ch/ce` 字段；`allocator_init` 恢复 `ch/ce` 参数 |
+| `include/ftl/journal.h` | `l2p_journal_t` 增加 `topo`；`journal_init` 增加 `ftl_topology_t` 参数 |
+| `include/ftl/metadata.h` | `metadata_dir_cache_t` 增加 `topo` 字段 |
+| `include/ftl/checkpoint.h` | `checkpoint_find_latest` 增加 `ftl_topology_t` 参数 |
+| `include/ftl/bbt.h` | `bbt_load` 增加 `ftl_topology_t` 参数 |
+| `src/ftl/ftl.c` | `ftl_init` 签名更新，子模块初始化传拓扑 |
+| `src/ftl/journal.c` | 全部 `pba_make(0,0,...)` → `pba_make(topo.ch, topo.ce, ...)` |
+| `src/ftl/allocator.c` | `allocator_init` 保存 `ch/ce`；`allocator_alloc` 用 `alloc->ch/ce` |
+| `src/ftl/gc.c` | `pba_make(0,0,...)` → `pba_make(alloc->ch, alloc->ce, ...)` |
+| `src/ftl/checkpoint.c` | `pba_make(0,0,...)` → `pba_make(topo.ch/ce)` 或 `ftl->topo.ch/ce` |
+| `src/ftl/bbt.c` | `pba_make(0,0,...)` → `pba_make(alloc->ch/ce)` 或 `pba_make(topo.ch/ce)` |
+| `src/ftl/metadata.c` | `pba_make(0,0,...)` → `pba_make(dir->topo.ch/ce)` |
+| `src/ftl/wear_leveling.c` | `pba_make(0,0,...)` → `pba_make(ftl->topo.ch/ce)` |
+| `src/ftl/power_failure_recovery.c` | `pba_make(0,0,...)` → `pba_make(ftl->topo.ch/ce)`；`checkpoint_find_latest` 传 `ftl->topo` |
+
+### 编译状态
+
+**零错误零 FTL 警告**。Binary size: 58368 bytes。
+
 ## CLOCK 替换策略升级方向
 
 当前选择 CLOCK 算法作为替换策略。以下为已识别的优化方向，标记为**未来升级**，当前不实现：

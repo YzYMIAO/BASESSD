@@ -24,20 +24,29 @@ typedef uint32_t lba_t;
  * 企业级 SSD 固件的 FTL 内部采用简洁的两值枚举：
  *   FTL_OK    =  0  操作成功
  *   FTL_ERROR = -1  操作失败（通用，不细分错误码）
- *
- * 所有 FTL 内部「操作函数」（init/flush/create/save/load/read/write 等）
- * 统一返回此类型。谓词函数（check_trigger/is_emergency/needs_gc 等）
- * 和计数函数（gc_migrate_sb/wl_relocate 等）保持 int。
- *
- * 与 ssd_status_t 的边界：
- *   FTL 对外 API（ftl_read/ftl_write/ftl_trim）返回 ssd_status_t
- *   FTL 内部模块间调用返回 ftl_status_t
- *   在 ftl_read/write 包装函数中：FTL_ERROR → SSD_STATUS_IO_ERROR
  */
 typedef enum
 {
     FTL_OK    = 0,  /* 成功 */
     FTL_ERROR = -1, /* 通用失败 */
 } ftl_status_t;
+
+/*
+ * ftl_topology_t — FTL 拓扑描述
+ *
+ * 描述本 FTL 实例管理的芯片路由。
+ *   ch/ce/lun — 本 FTL 绑定的 NAND 芯片。
+ *               元数据（Journal/BBT/Checkpoint/Anchor）存放在此芯片。
+ *               用户数据由 allocator 基于此拓扑做负载均衡路由。
+ *
+ * ftl_init 内部初始化，不暴露给 controller 层。
+ * 各子模块在初始化时接收一份副本。
+ */
+typedef struct
+{
+    uint8_t ch;
+    uint8_t ce;
+    uint8_t lun;
+} ftl_topology_t;
 
 #endif /* FTL_TYPE_H */

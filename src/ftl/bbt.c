@@ -18,7 +18,7 @@ static int      g_bbt_dirty    = 0;            /* 是否有未写回 NAND 的变
 /* BBT CRC 覆盖的字节数（从开头到 crc 字段） */
 #define BBT_CRC_SIZE (sizeof(uint32_t) * 4 + sizeof(uint32_t) * 3 + BBT_BITMAP_SIZE)
 
-ftl_status_t bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun)
+ftl_status_t bbt_init(ftl_allocator_t *alloc)
 {
     uint32_t seq;
     int      ret;
@@ -34,7 +34,10 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lu
     g_bbt_dirty    = 0;
 
     /* 尝试从 NAND 加载已存在的 BBT */
-    ret = bbt_load(g_bbt_bitmap, &loaded_bad_count, &seq, ch, ce);
+    {
+        ftl_topology_t topo = { .ch = alloc->ch, .ce = alloc->ce, .lun = 0 };
+        ret = bbt_load(g_bbt_bitmap, &loaded_bad_count, &seq, topo);
+    }
     if (ret == 0)
     {
         uint16_t block;
@@ -60,15 +63,13 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lu
     }
 
     /* 无有效 BBT → 执行出厂扫描 */
-    return bbt_scan_factory(alloc, ch, ce, lun);
+    return bbt_scan_factory(alloc);
 }
 
-int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun)
+int bbt_scan_factory(ftl_allocator_t *alloc)
 {
     uint16_t block;
     uint16_t bad_idx = 0U;
-
-    (void)lun;
 
     if (alloc == NULL)
     {
@@ -104,7 +105,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun
         }
 
         /* 尝试读 Page 0（只检查 Plane 0） */
-        page_pba0 = pba_make(ch, ce, 0, 0, block, 0, 0);
+        page_pba0 = pba_make(alloc->ch, alloc->ce, 0, 0, block, 0, 0);
 
         memset(raw_buf, 0xFF, sizeof(raw_buf));
         ret0 = ftl_internal_read_page_raw(page_pba0, raw_buf);
@@ -140,12 +141,12 @@ int bbt_scan_factory(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint8_t lun
     g_bbt_dirty      = 1;
 
     /* 将扫描结果写入 NAND BBT */
-    (void)bbt_save(alloc, ch, ce);
+    (void)bbt_save(alloc);
 
     return (int)bad_idx;
 }
 
-ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16_t block)
+ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t block)
 {
     if ((alloc == NULL) || (block >= BBT_MAX_BLOCKS))
     {
@@ -160,7 +161,7 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16
     allocator_mark_bad(alloc, block);
 
     /* 写回 NAND */
-    (void)bbt_save(alloc, ch, ce);
+    (void)bbt_save(alloc);
 
     /* 从 Spare Pool 补充 Free Pool */
     (void)bbt_spare_pool_refill(alloc);
@@ -168,7 +169,7 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint8_t ch, uint8_t ce, uint16
     return FTL_OK;
 }
 
-ftl_status_t bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce)
+ftl_status_t bbt_save(const ftl_allocator_t *alloc)
 {
     bbt_header_t header;
     uint8_t      i;
@@ -199,14 +200,14 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce)
     /* 写 3 页到 Block 36 */
     for (i = 0U; i < BBT_REDUNDANCY; i++)
     {
-        nand_pba_t pba = pba_make(ch, ce, i, (uint8_t)(i & 1U), BBT_BLOCK, 0, 0);
+        nand_pba_t pba = pba_make(alloc->ch, alloc->ce, i, (uint8_t)(i & 1U), BBT_BLOCK, 0, 0);
         (void)ftl_internal_write_page(pba, &header, sizeof(header), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_BBT, 0U);
     }
 
     /* 再写 3 页到备用 Block 39 */
     for (i = 0U; i < BBT_REDUNDANCY; i++)
     {
-        nand_pba_t pba = pba_make(ch, ce, i, (uint8_t)(i & 1U), BBT_BLOCK_BACKUP, 0, 0);
+        nand_pba_t pba = pba_make(alloc->ch, alloc->ce, i, (uint8_t)(i & 1U), BBT_BLOCK_BACKUP, 0, 0);
         (void)ftl_internal_write_page(pba, &header, sizeof(header), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_BBT, 0U);
     }
 
@@ -214,7 +215,7 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc, uint8_t ch, uint8_t ce)
     return FTL_OK;
 }
 
-ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, uint8_t ch, uint8_t ce)
+ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, ftl_topology_t topo)
 {
     bbt_header_t  candidates[BBT_TOTAL_PAGES];
     bbt_header_t *best = NULL;
@@ -247,7 +248,7 @@ ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence,
             page  = (uint8_t)(i - BBT_REDUNDANCY);
         }
 
-        pba = pba_make(ch, ce, page, (uint8_t)(page & 1U), block, 0, 0);
+        pba = pba_make(topo.ch, topo.ce, page, (uint8_t)(page & 1U), block, 0, 0);
 
         ret = ftl_internal_read_page(pba, &candidates[i], sizeof(candidates[i]), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_BBT, 0U);
         if (ret != 0)

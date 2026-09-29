@@ -204,7 +204,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         /* 3 份冗余写入 Anchor Block 0 的 Page 0/1/2 */
         for (i = 0U; i < ANCHOR_REDUNDANCY; i++)
         {
-            pba = pba_make(0, 0, i, (uint8_t)(i & 1U), ANCHOR_BLOCK0, 0, 0);
+            pba = pba_make(dir->topo.ch, dir->topo.ce, i, (uint8_t)(i & 1U), ANCHOR_BLOCK0, 0, 0);
             ret = ftl_internal_write_page(pba, &anchor, sizeof(anchor), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
             if (ret != 0)
             {
@@ -216,7 +216,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         /* 同样写入 Anchor Block 1（双 Block 冗余） */
         for (i = 0U; i < ANCHOR_REDUNDANCY; i++)
         {
-            pba = pba_make(0, 0, i, (uint8_t)(i & 1U), ANCHOR_BLOCK1, 0, 0);
+            pba = pba_make(dir->topo.ch, dir->topo.ce, i, (uint8_t)(i & 1U), ANCHOR_BLOCK1, 0, 0);
             ret = ftl_internal_write_page(pba, &anchor, sizeof(anchor), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
             if (ret != 0)
             {

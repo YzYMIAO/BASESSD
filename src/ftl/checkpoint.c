@@ -65,7 +65,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
             page  = (uint8_t)(i - 3U);
         }
 
-        pba = pba_make(ftl->ch, ftl->ce, page, (uint8_t)(page & 1U), block, 0, 0);
+        pba = pba_make(ftl->topo.ch, ftl->topo.ce, page, (uint8_t)(page & 1U), block, 0, 0);
 
         ret = ftl_internal_write_page(pba, &cp, sizeof(cp), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_CHECKPOINT, 0U);
         if (ret != 0)
@@ -83,7 +83,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
     return ret_total;
 }
 
-ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp)
+ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t topo)
 {
     l2p_checkpoint_header_t  candidates[6];
     l2p_checkpoint_header_t *best = NULL;
@@ -115,7 +115,7 @@ ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp)
             page  = (uint8_t)(i - 3U);
         }
 
-        pba = pba_make(0, 0, page, (uint8_t)(page & 1U), block, 0, 0);
+        pba = pba_make(topo.ch, topo.ce, page, (uint8_t)(page & 1U), block, 0, 0);
 
         ret = ftl_internal_read_page(pba, &candidates[i], sizeof(candidates[i]), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_CHECKPOINT, 0U);
         if (ret != 0)

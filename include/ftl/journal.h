@@ -31,10 +31,8 @@ typedef struct
 
 typedef struct
 {
-    uint8_t    ch;
-    uint8_t    ce;
-    uint8_t    lun;
-    nand_pba_t block_pba[2];
+    ftl_topology_t topo;          /* 目标 NAND 芯片路由 */
+    nand_pba_t     block_pba[2];
 
     uint8_t  current_block;
     uint8_t  current_page;
@@ -47,7 +45,7 @@ typedef struct
     uint8_t emergency;
 } l2p_journal_t;
 
-void journal_init(l2p_journal_t *journal, uint8_t ch, uint8_t ce, uint8_t lun);
+void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba);
 void journal_flush_page(l2p_journal_t *journal);
 ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache);

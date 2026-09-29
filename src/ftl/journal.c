@@ -21,19 +21,17 @@
 /* "JOUR" — little-endian 4-byte magic */
 #define JOURNAL_MAGIC (0x524F554AUL)
 
-void journal_init(l2p_journal_t *journal, uint8_t ch, uint8_t ce, uint8_t lun)
+void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 {
     if (journal == NULL)
     {
         return;
     }
 
-    journal->ch  = ch;
-    journal->ce  = ce;
-    journal->lun = lun;
+    journal->topo = topo;
 
-    journal->block_pba[0] = pba_make(ch, ce, 0, 0, JOURNAL_BLOCK0, 0, 0);
-    journal->block_pba[1] = pba_make(ch, ce, 0, 0, JOURNAL_BLOCK1, 0, 0);
+    journal->block_pba[0] = pba_make(topo.ch, topo.ce, 0, 0, JOURNAL_BLOCK0, 0, 0);
+    journal->block_pba[1] = pba_make(topo.ch, topo.ce, 0, 0, JOURNAL_BLOCK1, 0, 0);
 
     journal->current_block    = 0U;
     journal->current_page     = 0U;
@@ -103,7 +101,7 @@ void journal_flush_page(l2p_journal_t *journal)
 
     /* 构造当前写入页的 PBA */
     target_page = journal->current_page;
-    page_pba    = pba_make(journal->ch, journal->ce, target_page, (uint8_t)(target_page & 1U), (journal->current_block == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
+    page_pba    = pba_make(journal->topo.ch, journal->topo.ce, target_page, (uint8_t)(target_page & 1U), (journal->current_block == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
 
     /*
      * 同步写 Journal 页到 NAND。
@@ -127,7 +125,7 @@ void journal_flush_page(l2p_journal_t *journal)
 
         /* 擦除目标 Block（已存在的旧数据）*/
         nand_pba_t new_block_pba = pba_make(
-            journal->ch, journal->ce, 0, 0, (journal->current_block == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
+            0, 0, 0, 0, (journal->current_block == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
         (void)ftl_internal_erase_block(new_block_pba);
     }
 
@@ -160,7 +158,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache)
             int        ret;
 
             /* 读 Journal 页 */
-            page_pba = pba_make(journal->ch, journal->ce, page, (uint8_t)(page & 1U), (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
+            page_pba = pba_make(journal->topo.ch, journal->topo.ce, page, (uint8_t)(page & 1U), (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
 
             memset(page_data, 0xFF, sizeof(page_data));
             ret = ftl_internal_read_page(page_pba,
@@ -287,7 +285,7 @@ void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
     b = (journal->current_block == 0U) ? 1U : 0U;
 
     {
-        nand_pba_t block_pba = pba_make(journal->ch, journal->ce, 0, 0, (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
+        nand_pba_t block_pba = pba_make(journal->topo.ch, journal->topo.ce, 0, 0, (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
         (void)ftl_internal_erase_block(block_pba);
     }
 

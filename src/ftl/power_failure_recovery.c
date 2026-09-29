@@ -22,7 +22,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
     memset(&local_result, 0, sizeof(local_result));
 
     /* ① 扫描 Checkpoint */
-    if (checkpoint_find_latest(&cp) != FTL_OK)
+    if (checkpoint_find_latest(&cp, ftl->topo) != FTL_OK)
     {
         /* 无有效 Checkpoint → 出厂首次启动 */
         int ret = ftl_boot_fresh_start(ftl);
@@ -57,7 +57,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
                     int        ret;
                     uint32_t   magic;
 
-                    pba = pba_make(ftl->ch, ftl->ce, page, (uint8_t)(page & 1U), (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
+                    pba = pba_make(ftl->topo.ch, ftl->topo.ce, page, (uint8_t)(page & 1U), (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
 
                     ret = ftl_internal_read_page(pba, page_data, sizeof(page_data), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
                     if (ret != 0)
@@ -202,8 +202,8 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
         if (ftl->alloc.hot_sb.valid != 0U)
         {
             ftl_boot_scan_write_pointer(&ftl->alloc,
-                                        ftl->ch,
-                                        ftl->ce,
+                                        0,
+                                        0,
                                         &ftl->alloc.hot_sb);
         }
 
@@ -211,8 +211,8 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
         if (ftl->alloc.cold_sb.valid != 0U)
         {
             ftl_boot_scan_write_pointer(&ftl->alloc,
-                                        ftl->ch,
-                                        ftl->ce,
+                                        0,
+                                        0,
                                         &ftl->alloc.cold_sb);
         }
     }

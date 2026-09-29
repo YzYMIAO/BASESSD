@@ -76,6 +76,9 @@ typedef struct
     uint16_t cur_metadata_block; /* 当前分配的 metadata block */
     uint8_t  cur_metadata_page;  /* 下一可用 page */
     uint8_t  cur_metadata_plane; /* 当前 plane */
+
+    /* 拓扑信息（Anchor Block 所在芯片路由） */
+    ftl_topology_t topo;
 } metadata_dir_cache_t;
 
 /* ── API ── */

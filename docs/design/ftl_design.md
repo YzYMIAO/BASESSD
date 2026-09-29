@@ -29,6 +29,7 @@
 | v0.18 | 2026-09-29 | FTL 全部剩余模块实现：Checkpoint、BBT、Read Recovery、Power Failure Recovery、Wear Leveling；代码审视修复4个逻辑断裂 | Claude |
 | v0.19 | 2026-09-29 | Completion Table 统一完成路由：消除 ftl_service Phase2 和 ftl_internal_sync_wait 两个"泵"互相吞 completion 的 bug；新增 completion_table.h/c（16 项路由表 + 同步等待器 + 统一泵）；ftl_internal_sync_wait 改为注册 sync_waiter 后走 completion_table_drain，不再独占 fc_poll_completion；L2P Region 动态分配接入：cache 增加 alloc 指针，flush_one 中首次写 Region 改为真实调用 metadata_dir_alloc_region（取消回退固定位置） | Claude |
 | v0.20 | 2026-09-29 | 返回值体系统一 + 历史死代码清理：新增 ftl_status_t{FTL_OK=0,FTL_ERROR=-1} 企业级风格枚举，~32 个操作函数从 int 改为 ftl_status_t，谓词/计数函数保持 int；修复 checkpoint_find_latest 因 FTL_OK=0 导致的调用反转 bug；ftl_cmd_setup_ppa 等 3 函数从 (int) 强转改为显式 FC_STATUS_OK 映射；删除历史遗留文件 nand.h/c、nand_geometry.h/c、config/nand_geometry.h、config/ftl_config.h、__patch*.txt；删除死代码 pba_t、wl_init()、allocator_refill_pre_cond()；wl_relocate 复用 gc_read_page_with_lba + gc_erase_and_free（~60 行重复代码消除）；ssd_types.h 清除 ssd_ppa_t；l2p_cache.h 显式 include allocator.h 消除隐式依赖 | Claude |
+| v0.21 | 2026-09-29 | FTL 拓扑信息重构：删除 ftl_context_t/allocator_t/journal_t 中的 ch/ce/lun 散落字段，统一为 ftl_topology_t 结构体；ftl_init 新增 ftl_topology_t 参数替代原 ch/ce/lun 3 个参数；全部 pba_make 的 CH/CE 源改为从 topology 或 alloc->ch/ce 获取，消除硬编码 0,0；allocator/journal/metadata/checkpoint/bbt/power_failure_recovery/wear_leveling 各模块全部接入拓扑路由 | Claude |
 
 ---
 

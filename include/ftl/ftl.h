@@ -39,10 +39,8 @@
 
 typedef struct ftl_context
 {
-    /* 拓扑参数 */
-    uint8_t ch;
-    uint8_t ce;
-    uint8_t lun;
+    /* 拓扑信息（本 FTL 绑定的 NAND 芯片路由） */
+    ftl_topology_t topo; /* 本 FTL 绑定的 NAND 芯片路由 */
 
     /* L2P Cache */
     l2p_cache_t cache;
@@ -73,26 +71,22 @@ typedef struct ftl_context
 /*
  * ftl_init - 初始化 FTL 子系统
  *
- * @param ftl  FTL 上下文
- * @param ch   所属 CH
- * @param ce   所属 CE
- * @param lun  所属 LUN
- * @param free_blocks     free block 数组（由调用者提供）
- * @param free_count      free block 数
- * @param bad_blocks      bad block 数组（由调用者提供）
- * @param erase_counts    擦除次数数组（由调用者提供）
- * @param closed_sb_list  closed Super Block 数组（由调用者提供）
+ * @param ftl            FTL 上下文
+ * @param topo           拓扑信息（本 FTL 绑定的 NAND 芯片路由）
+ * @param free_blocks    free block 数组（由调用者提供）
+ * @param free_count     free block 数
+ * @param bad_blocks     bad block 数组（由调用者提供）
+ * @param erase_counts   擦除次数数组（由调用者提供）
+ * @param closed_sb_list closed Super Block 数组（由调用者提供）
  * @return FTL_OK 成功
  */
 ftl_status_t ftl_init(ftl_context_t *ftl,
-             uint8_t        ch,
-             uint8_t        ce,
-             uint8_t        lun,
-             uint16_t      *free_blocks,
-             uint16_t       free_count,
-             uint16_t      *bad_blocks,
-             uint32_t      *erase_counts,
-             super_block_t *closed_sb_list);
+                      ftl_topology_t topo,
+                      uint16_t      *free_blocks,
+                      uint16_t       free_count,
+                      uint16_t      *bad_blocks,
+                      uint32_t      *erase_counts,
+                      super_block_t *closed_sb_list);
 
 /*
  * ftl_service - FTL 主循环调度（每次 main loop 调用一次）

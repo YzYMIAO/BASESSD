@@ -188,23 +188,19 @@ static void ftl_service_busy(ftl_context_t *ftl)
 /* ── 对外接口 ── */
 
 ftl_status_t ftl_init(ftl_context_t *ftl,
-             uint8_t        ch,
-             uint8_t        ce,
-             uint8_t        lun,
-             uint16_t      *free_blocks,
-             uint16_t       free_count,
-             uint16_t      *bad_blocks,
-             uint32_t      *erase_counts,
-             super_block_t *closed_sb_list)
+                      ftl_topology_t topo,
+                      uint16_t      *free_blocks,
+                      uint16_t       free_count,
+                      uint16_t      *bad_blocks,
+                      uint32_t      *erase_counts,
+                      super_block_t *closed_sb_list)
 {
     if (ftl == NULL)
     {
         return FTL_ERROR;
     }
 
-    ftl->ch  = ch;
-    ftl->ce  = ce;
-    ftl->lun = lun;
+    ftl->topo = topo;
 
     /* ├─ Completion 路由表 ── */
     completion_table_init();
@@ -220,7 +216,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl,
 
     /* ├─ Allocator ── */
     allocator_init(&ftl->alloc,
-                   ch, ce, lun,
+                   topo.ch, topo.ce,
                    free_blocks, free_count,
                    bad_blocks, erase_counts, closed_sb_list);
 
@@ -229,9 +225,10 @@ ftl_status_t ftl_init(ftl_context_t *ftl,
     l2p_cache_set_md_dir(&ftl->cache, NULL, &ftl->alloc);
 
     /* ├─ Journal ── */
-    journal_init(&ftl->journal, ch, ce, lun);
+    journal_init(&ftl->journal, ftl->topo);
 
     /* ├─ Metadata Directory ── */
+    ftl->metadata_dir.topo = ftl->topo;
     {
         int md_ret = metadata_dir_load(&ftl->metadata_dir);
         if (md_ret != 0)
@@ -244,7 +241,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl,
     l2p_cache_set_md_dir(&ftl->cache, &ftl->metadata_dir, &ftl->alloc);
 
     /* ├─ BBT 初始化（从 NAND 加载或出厂扫描）── */
-    (void)bbt_init(&ftl->alloc, ch, ce, lun);
+    (void)bbt_init(&ftl->alloc);
 
     /* ├─ Checkpoint 计时 ── */
     ftl->cp_timer_start = 0U;

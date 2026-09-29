@@ -12,24 +12,21 @@
  *     所以 pre_cond_count 始终等于 free_count。
  */
 ftl_status_t allocator_init(ftl_allocator_t *alloc,
-                   uint8_t          ch,
-                   uint8_t          ce,
-                   uint8_t          lun,
-                   uint16_t        *free_blocks,
-                   uint16_t         free_block_count,
-                   uint16_t        *bad_blocks,
-                   uint32_t        *erase_counts,
-                   super_block_t   *closed_sb_list)
+                            uint8_t          ch,
+                            uint8_t          ce,
+                            uint16_t        *free_blocks,
+                            uint16_t         free_block_count,
+                            uint16_t        *bad_blocks,
+                            uint32_t        *erase_counts,
+                            super_block_t   *closed_sb_list)
 {
     if (alloc == NULL)
     {
         return FTL_ERROR;
     }
 
-    /* 固定参数 */
     alloc->ch           = ch;
     alloc->ce           = ce;
-    alloc->lun          = lun;
     alloc->total_blocks = free_block_count;
 
     /* Free Pool */

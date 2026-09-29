@@ -52,7 +52,7 @@ typedef struct
     uint8_t  valid;                   /* 1=正在使用（Open），0=已关闭 */
 } super_block_t;
 
-/* 返回 Super Block 中指定 Plane/Page 的 PBA（含 CH/CE 拓扑） */
+/* 返回 Super Block 中指定 Plane/Page 的 PBA（用户数据使用 FTL_DATA_CH/CE） */
 static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const super_block_t *sb, uint8_t plane, uint8_t page)
 {
     return pba_make(ch, ce, page, plane, sb->plane_blocks[plane], 0, 0);
@@ -65,10 +65,9 @@ static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const supe
 
 typedef struct
 {
-    /* ── 固定拓扑参数 ── */
-    uint8_t  ch;           /* 本 Allocator 所属 CH（当前固定 0） */
-    uint8_t  ce;           /* 本 Allocator 所属 CE（当前固定 0） */
-    uint8_t  lun;          /* 本 Allocator 所属 LUN（当前固定 0） */
+    /* ── 拓扑参数 ── */
+    uint8_t  ch;           /* 本 Allocator 绑定的 CH */
+    uint8_t  ce;           /* 本 Allocator 绑定的 CE */
     uint16_t total_blocks; /* 总好 Block 数（出厂扫描后确定） */
 
     /* ── Free Pool（三级） ── */
@@ -100,28 +99,24 @@ typedef struct
  * allocator_init - 初始化 Allocator
  *
  * @param alloc      Allocator 上下文（由调用者提供存储）
- * @param ch         所属通道
- * @param ce         所属片选
- * @param lun        所属 LUN
+ * @param ch         Allocator 绑定的 CH
+ * @param ce         Allocator 绑定的 CE
  * @param free_blocks     free block 数组（由调用者提供）
  * @param free_block_count free block 数组大小
  * @param bad_blocks      bad block 数组（由调用者提供）
  * @param erase_counts    擦除次数数组（由调用者提供）
  * @param closed_sb_list  closed Super Block 数组（由调用者提供）
  *
- * Step 3：只初始化空列表，不扫描物理 NAND。BBT 扫描等后续实现。
- *
  * @return ftl_status_t — FTL_OK 成功
  */
 ftl_status_t allocator_init(ftl_allocator_t *alloc,
-                   uint8_t          ch,
-                   uint8_t          ce,
-                   uint8_t          lun,
-                   uint16_t        *free_blocks,
-                   uint16_t         free_block_count,
-                   uint16_t        *bad_blocks,
-                   uint32_t        *erase_counts,
-                   super_block_t   *closed_sb_list);
+                            uint8_t          ch,
+                            uint8_t          ce,
+                            uint16_t        *free_blocks,
+                            uint16_t         free_block_count,
+                            uint16_t        *bad_blocks,
+                            uint32_t        *erase_counts,
+                            super_block_t   *closed_sb_list);
 
 /*
  * allocator_alloc - 分配一个 PBA（一页，4 CW）

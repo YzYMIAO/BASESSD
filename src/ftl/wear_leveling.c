@@ -162,7 +162,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
             nand_pba_t new_pba;
             int        ret;
 
-            pba = pba_make(ftl->ch, ftl->ce, page, plane, victim->plane_blocks[plane], 0, 0);
+            pba = pba_make(ftl->topo.ch, ftl->topo.ce, page, plane, victim->plane_blocks[plane], 0, 0);
 
             /* 读页 + 从 META 提取 LBA（复用 GC 辅助函数） */
             memset(buf, 0, sizeof(buf));
