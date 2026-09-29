@@ -391,4 +391,66 @@ static inline uint8_t pba_is_valid(nand_pba_t pba)
                      (pba_to_ce(pba) < CE_NUM));
 }
 
-#endif
+/* ══════════════════════════════════════════════════════════════
+ * nand_addr_t — 展开的芯片内地址（遍历/迭代用）
+ *
+ * 存储主控内部地址分两层：
+ *   nand_addr_t（展开） — 遍历路径用，字段直接访问不需要 shift
+ *   nand_pba_t  (packed) — L2P 表存储接口用，32-bit 紧凑
+ *
+ * 遍历路径不再先 pba_make 打包再 ftl_cmd_setup_ppa 拆包，
+ * 而是直接用 addr_to_cmd（定义于 ftl_fc_interface.h）填入 FC 命令。
+ * ══════════════════════════════════════════════════════════════ */
+
+typedef struct
+{
+    uint8_t  ch;       /* Channel */
+    uint8_t  ce;       /* Chip Enable */
+    uint8_t  lun;      /* LUN (Die) */
+    uint16_t block;    /* Block number (0..2047) */
+    uint8_t  plane;    /* Plane (0/1) */
+    uint8_t  page;     /* Page in block (0..63) */
+    uint8_t  cw;       /* Code Word (0..3, 0=全部) */
+} nand_addr_t;
+
+/* nand_addr_t → nand_pba_t */
+static inline nand_pba_t pba_from_addr(const nand_addr_t *addr)
+{
+    return pba_make(addr->ch, addr->ce, addr->page, addr->plane,
+                    addr->block, addr->lun, addr->cw);
+}
+
+/* nand_pba_t → nand_addr_t（展开）。allocator/L2P 返回紧凑 PBA，
+ * 遍历路径填 FC 命令前展开一次。 */
+static inline nand_addr_t addr_from_pba(nand_pba_t pba)
+{
+    nand_addr_t addr;
+
+    addr.ch     = (uint8_t)pba_to_ch(pba);
+    addr.ce     = (uint8_t)pba_to_ce(pba);
+    addr.lun    = (uint8_t)pba_to_lun(pba);
+    addr.block  = (uint16_t)pba_to_block(pba);
+    addr.plane  = (uint8_t)pba_to_plane(pba);
+    addr.page   = (uint8_t)pba_to_page(pba);
+    addr.cw     = (uint8_t)pba_to_cw(pba);
+
+    return addr;
+}
+
+/* 从 PAA + CH/CE 构造 nand_addr_t（元数据固定位置 / Directory 查找结果用） */
+static inline nand_addr_t addr_from_paa(uint8_t ch, uint8_t ce, nand_paa_t paa)
+{
+    nand_addr_t addr;
+
+    addr.ch     = ch;
+    addr.ce     = ce;
+    addr.lun    = (uint8_t)paa_to_lun(paa);
+    addr.block  = (uint16_t)paa_to_block(paa);
+    addr.plane  = (uint8_t)paa_to_plane(paa);
+    addr.page   = (uint8_t)paa_to_page(paa);
+    addr.cw     = (uint8_t)paa_to_cw(paa);
+
+    return addr;
+}
+
+#endif /* NAND_CONFIG_H */

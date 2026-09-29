@@ -8,6 +8,65 @@
 
 #include <string.h>
 
+/* ── 内部同步写页（原 ftl_internal_write_page 内联化，随机地址 → addr 直填）── */
+static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length,
+                                    uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
+    cmd->config.cw          = 3U;
+    cmd->config.crc         = (DWORD)crc;
+    cmd->config.random      = (DWORD)random;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = (DWORD)module;
+    cmd->meta               = (DWORD)lba;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if ((data != NULL) && (length > 0U))
+    {
+        (void)ftl_cmd_write_data(cmd, data, length);
+    }
+
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (completion.status & FC_CW_STATUS_NAND_FAIL)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
 int wl_should_trigger(const struct ftl_context *ftl)
 {
     uint32_t max_ec;
@@ -186,9 +245,12 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
             }
 
             /* 写入新位置 */
-            ret = ftl_internal_write_page(new_pba, buf, FTL_READ_USER_SIZE,
-                                           FC_CRC_ENABLE, FC_RANDOM_ENABLE,
-                                           FC_COMMAND_MODULE_GC, lba);
+            {
+                nand_addr_t waddr = addr_from_pba(new_pba);
+                ret = sync_write_page(waddr, buf, FTL_READ_USER_SIZE,
+                                      FC_CRC_ENABLE, FC_RANDOM_ENABLE,
+                                      FC_COMMAND_MODULE_GC, lba);
+            }
             if (ret != 0)
             {
                 continue;

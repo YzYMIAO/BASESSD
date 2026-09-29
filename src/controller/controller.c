@@ -40,19 +40,23 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
     request->complete_flag     = 0U;
     request->completion_status = SSD_STATUS_OK;
 
+    /* 组装 IO 请求模板（lba/buffer 由各路径覆盖） */
+    request->io.complete_flag   = &request->complete_flag;
+    request->io.status_out      = &request->completion_status;
+    request->io.on_complete     = NULL;
+    request->io.on_complete_ctx = NULL;
+
     if (request->block_count == 1U)
     {
         /* 单块直接提交 */
+        request->io.lba    = request->start_lba;
+        request->io.buffer = request->buffer;
+        request->io.pages  = 1U;
+
         switch (request->opcode)
         {
             case SSD_REQUEST_READ:
-                if (ftl_submit_read(controller->ftl,
-                                    request->start_lba,
-                                    request->buffer,
-                                    1U,                 /* pages=1: 单页读 */
-                                    &request->complete_flag,
-                                    &request->completion_status,
-                                    NULL, NULL) != FTL_OK)
+                if (ftl_submit_read(controller->ftl, &request->io) != FTL_OK)
                 {
                     request->completion_status = SSD_STATUS_IO_ERROR;
                     request->complete_flag     = 1U;
@@ -60,13 +64,7 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
                 break;
 
             case SSD_REQUEST_WRITE:
-                if (ftl_submit_write(controller->ftl,
-                                     request->start_lba,
-                                     request->buffer,
-                                     1U,                 /* pages=1: 单页写 */
-                                     &request->complete_flag,
-                                     &request->completion_status,
-                                     NULL, NULL) != FTL_OK)
+                if (ftl_submit_write(controller->ftl, &request->io) != FTL_OK)
                 {
                     request->completion_status = SSD_STATUS_NO_SPACE;
                     request->complete_flag     = 1U;

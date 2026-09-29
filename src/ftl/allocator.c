@@ -11,26 +11,19 @@
  *     所有归还到 Free Pool 的 Block 都已擦除（调用者保证），
  *     所以 pre_cond_count 始终等于 free_count。
  */
-ftl_status_t allocator_init(ftl_allocator_t *alloc,
-                            uint8_t          ch,
-                            uint8_t          ce,
-                            uint16_t        *free_blocks,
-                            uint16_t         free_block_count,
-                            uint16_t        *bad_blocks,
-                            uint32_t        *erase_counts,
-                            super_block_t   *closed_sb_list)
+ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *params)
 {
-    if (alloc == NULL)
+    if ((alloc == NULL) || (params == NULL))
     {
         return FTL_ERROR;
     }
 
-    alloc->ch           = ch;
-    alloc->ce           = ce;
-    alloc->total_blocks = free_block_count;
+    alloc->ch           = params->topo.ch;
+    alloc->ce           = params->topo.ce;
+    alloc->total_blocks = params->free_count;
 
     /* Free Pool */
-    alloc->free_blocks     = free_blocks;
+    alloc->free_blocks     = params->free_blocks;
     alloc->free_count      = 0U;
     alloc->pre_cond_count  = 0U;
     alloc->emergency_count = 0U;
@@ -42,14 +35,14 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc,
     alloc->cold_sb.temperature = FTL_TEMP_COLD;
 
     /* Closed 列表 */
-    alloc->closed_sb_list  = closed_sb_list;
+    alloc->closed_sb_list  = params->closed_sb_list;
     alloc->closed_sb_count = 0U;
 
     /* 磨损信息 */
-    alloc->erase_counts = erase_counts;
+    alloc->erase_counts = params->erase_counts;
 
     /* 坏块 */
-    alloc->bad_blocks       = bad_blocks;
+    alloc->bad_blocks       = params->bad_blocks;
     alloc->bad_count        = 0U;
     alloc->spare_pool_count = 0U;
 

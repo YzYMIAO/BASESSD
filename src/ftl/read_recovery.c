@@ -7,6 +7,65 @@
 
 #include <string.h>
 
+/* ── 内部同步读页（原 ftl_internal_read_page 内联化，CRC/Random 使能 + LBA META）── */
+static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length,
+                                   uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    cmd->config.cw          = 3U;
+    cmd->config.crc         = (DWORD)crc;
+    cmd->config.random      = (DWORD)random;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = (DWORD)module;
+    cmd->meta               = (DWORD)lba;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (completion.status & FC_CW_STATUS_NAND_FAIL)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if ((buffer != NULL) && (length > 0U))
+    {
+        (void)ftl_cmd_read_data(cmd, buffer, length);
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
 void rr_init(ftl_read_recovery_t *rr,
              rr_ecc_track_t      *block_track,
              uint16_t             max_blocks)
@@ -141,7 +200,10 @@ static int rr_exec_retry(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buffer, u
     /*
      * Step 2: 用新模式重试读
      */
-    ret = ftl_internal_read_page(pba, buffer, length, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, lba);
+    {
+        nand_addr_t raddr = addr_from_pba(pba);
+        ret = sync_read_page(raddr, buffer, length, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, lba);
+    }
     if (ret == 0)
     {
         return 0; /* 重试成功 */
@@ -219,21 +281,24 @@ static int rr_neighbor_assist(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buff
 
     for (i = 0; i < (int)RR_NEIGHBOR_ATTEMPTS; i++)
     {
-        nand_pba_t neighbor_pba;
-        uint8_t    neighbor_buf[FC_BUFFER_USER_SIZE * CW_NUM];
-        int        ret;
+        nand_addr_t neighbor_addr;
+        uint8_t     neighbor_buf[FC_BUFFER_USER_SIZE * CW_NUM];
+        int         ret;
 
-        neighbor_pba = pba_make(ch, ce, neighbors[i], plane, block, 0, 0);
+        neighbor_addr = addr_from_paa(ch, ce, paa_make(neighbors[i], plane, block, 0U, 0U));
 
         memset(neighbor_buf, 0, sizeof(neighbor_buf));
-        ret = ftl_internal_read_page(neighbor_pba, neighbor_buf, sizeof(neighbor_buf), FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, 0U);
+        ret = sync_read_page(neighbor_addr, neighbor_buf, sizeof(neighbor_buf), FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, 0U);
         if (ret == 0)
         {
             /*
              * 邻居读成功 → 说明 Block 本身没问题，
              * 可能是目标页有局部 bit 错。用标准 ECC 再试一次。
              */
-            ret = ftl_internal_read_page(pba, buffer, length, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, lba);
+            {
+                nand_addr_t raddr = addr_from_pba(pba);
+                ret = sync_read_page(raddr, buffer, length, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, lba);
+            }
             if (ret == 0)
             {
                 return 0; /* 邻近页辅助后恢复成功 */

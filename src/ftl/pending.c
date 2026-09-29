@@ -11,16 +11,16 @@ void pending_init(void)
     memset(g_pending, 0, sizeof(g_pending));
 }
 
-int pending_add(uint16_t cmd_id, lba_t lba, void *buffer,
-                pending_cb_t on_complete, void *on_complete_ctx,
-                volatile uint8_t *complete_flag,
-                volatile ssd_status_t *status_out,
+int pending_add(uint16_t cmd_id, const ftl_io_request_t *io,
                 nand_pba_t old_pba, nand_pba_t new_pba,
-                ftl_context_t *ftl,
-                uint16_t cache_intermediate,
-                uint16_t pages)
+                ftl_context_t *ftl, uint8_t cache_intermediate)
 {
     uint8_t i;
+
+    if (io == NULL)
+    {
+        return FTL_ERROR;
+    }
 
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -28,17 +28,11 @@ int pending_add(uint16_t cmd_id, lba_t lba, void *buffer,
         {
             g_pending[i].used               = 1U;
             g_pending[i].command_id         = cmd_id;
-            g_pending[i].lba                = lba;
-            g_pending[i].buffer             = buffer;
-            g_pending[i].on_complete        = on_complete;
-            g_pending[i].on_complete_ctx    = on_complete_ctx;
-            g_pending[i].complete_flag      = complete_flag;
-            g_pending[i].status_out         = status_out;
+            g_pending[i].io                 = *io; /* 按值拷贝整个 IO 请求描述 */
             g_pending[i].old_pba            = old_pba;
             g_pending[i].new_pba            = new_pba;
             g_pending[i].ftl                = ftl;
             g_pending[i].cache_intermediate = cache_intermediate;
-            g_pending[i].pages              = pages;
             return FTL_OK;
         }
     }
@@ -69,7 +63,7 @@ ftl_pending_req_t *pending_lookup_by_lba(lba_t lba)
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if ((g_pending[i].used != 0U) &&
-            (g_pending[i].lba == lba))
+            (g_pending[i].io.lba == lba))
         {
             return &g_pending[i];
         }

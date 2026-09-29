@@ -35,6 +35,12 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
 
     request->sub_remaining = (request->block_count + 1U) / 2U;
 
+    /* 子请求公共字段（循环内复用 io 模板，仅改 lba/buffer/pages） */
+    request->io.complete_flag   = NULL;               /* 子请求用 on_complete 聚合 */
+    request->io.status_out      = &request->completion_status;
+    request->io.on_complete     = on_sub_complete;
+    request->io.on_complete_ctx = request;
+
     switch (request->opcode)
     {
         case SSD_REQUEST_READ:
@@ -46,16 +52,14 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
             {
                 uint8_t *buf = (uint8_t *)request->buffer + (i * FTL_READ_USER_SIZE);
 
+                request->io.lba    = request->start_lba + i;
+                request->io.buffer = buf;
+
                 if ((i + 1U < request->block_count))
                 {
                     /* 双 Plane Multi-Plane 读 */
-                    if (ftl_submit_read(controller->ftl,
-                                        request->start_lba + i,
-                                        buf,
-                                        2U,
-                                        NULL,               /* 子请求用 on_complete 聚合 */
-                                        &request->completion_status,
-                                        on_sub_complete, request) != FTL_OK)
+                    request->io.pages = 2U;
+                    if (ftl_submit_read(controller->ftl, &request->io) != FTL_OK)
                     {
                         request->completion_status = SSD_STATUS_IO_ERROR;
                         request->complete_flag     = 1U;
@@ -66,13 +70,8 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                 else
                 {
                     /* 单 Plane 读 */
-                    if (ftl_submit_read(controller->ftl,
-                                        request->start_lba + i,
-                                        buf,
-                                        1U,
-                                        NULL,
-                                        &request->completion_status,
-                                        on_sub_complete, request) != FTL_OK)
+                    request->io.pages = 1U;
+                    if (ftl_submit_read(controller->ftl, &request->io) != FTL_OK)
                     {
                         request->completion_status = SSD_STATUS_IO_ERROR;
                         request->complete_flag     = 1U;
@@ -93,16 +92,14 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
             {
                 const uint8_t *data = (const uint8_t *)request->buffer + (i * FTL_READ_USER_SIZE);
 
+                request->io.lba    = request->start_lba + i;
+                request->io.buffer = (void *)data;
+
                 if ((i + 1U < request->block_count))
                 {
                     /* 双 Plane Multi-Plane 写（pages=2，数据 4096 字节） */
-                    if (ftl_submit_write(controller->ftl,
-                                         request->start_lba + i,
-                                         data,
-                                         2U,
-                                         NULL,               /* 子请求用 on_complete 聚合 */
-                                         &request->completion_status,
-                                         on_sub_complete, request) != FTL_OK)
+                    request->io.pages = 2U;
+                    if (ftl_submit_write(controller->ftl, &request->io) != FTL_OK)
                     {
                         request->completion_status = SSD_STATUS_NO_SPACE;
                         request->complete_flag     = 1U;
@@ -113,13 +110,8 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                 else
                 {
                     /* 单 Plane 写 */
-                    if (ftl_submit_write(controller->ftl,
-                                         request->start_lba + i,
-                                         data,
-                                         1U,
-                                         NULL,
-                                         &request->completion_status,
-                                         on_sub_complete, request) != FTL_OK)
+                    request->io.pages = 1U;
+                    if (ftl_submit_write(controller->ftl, &request->io) != FTL_OK)
                     {
                         request->completion_status = SSD_STATUS_NO_SPACE;
                         request->complete_flag     = 1U;

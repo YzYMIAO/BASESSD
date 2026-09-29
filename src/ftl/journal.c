@@ -6,20 +6,211 @@
 
 #include <string.h>
 
-/*
- * Journal Page Header Layout（放在 page_buf 开头）：
- *   offset  size  field
- *   0       4     magic       = 0x4A4F5552 ("JOUR")
- *   4       4     page_seq    = 本页第一条 entry 的全局序号
- *   8       2     entry_count = 本页有效 entry 数（0~128）
- *   10      2     block_seq   = 本 Journal Block 写入轮次
- *   12      N*16  entries     = N × l2p_journal_entry_t
- *   12+N*16 ...  padding     = 0xFF
+/* ── 内部同步写页（原 ftl_internal_write_page 内联化）──
+ *
+ * 固定地址直填：由 nand_addr_t 构造 → addr_to_cmd，不再 pba_make 打包。
+ * 元数据页写入固定位置，不依赖 allocator。
  */
-#define JOURNAL_HEADER_SIZE (12U)
+static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length,
+                                    uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
 
-/* "JOUR" — little-endian 4-byte magic */
-#define JOURNAL_MAGIC (0x524F554AUL)
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
+    cmd->config.cw          = 3U;
+    cmd->config.crc         = (DWORD)crc;
+    cmd->config.random      = (DWORD)random;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = (DWORD)module;
+    cmd->meta               = (DWORD)lba;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if ((data != NULL) && (length > 0U))
+    {
+        (void)ftl_cmd_write_data(cmd, data, length);
+    }
+
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (completion.status & FC_CW_STATUS_NAND_FAIL)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* ── 内部同步读页（原 ftl_internal_read_page 内联化）── */
+static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length,
+                                   uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    cmd->config.cw          = 3U;
+    cmd->config.crc         = (DWORD)crc;
+    cmd->config.random      = (DWORD)random;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = (DWORD)module;
+    cmd->meta               = (DWORD)lba;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (completion.status & FC_CW_STATUS_NAND_FAIL)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if ((buffer != NULL) && (length > 0U))
+    {
+        (void)ftl_cmd_read_data(cmd, buffer, length);
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* ── 内部同步擦除（原 ftl_internal_erase_block 内联化，20ms 超时）── */
+static ftl_status_t sync_erase_block(nand_addr_t addr)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd->config.operation   = OP_ERASE_BLOCK;
+    cmd->config.cw          = 0U;
+    cmd->config.crc         = FC_CRC_DISABLE;
+    cmd->config.random      = FC_RANDOM_DISABLE;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = FC_COMMAND_MODULE_METADATA;
+    cmd->meta               = 0U;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 20000U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (completion.status & FC_CW_STATUS_NAND_FAIL)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* ── Journal Block 页地址辅助 ── */
+static nand_addr_t journal_page_addr(const l2p_journal_t *journal, uint8_t b, uint8_t page)
+{
+    nand_addr_t addr;
+
+    addr.ch     = journal->topo.ch;
+    addr.ce     = journal->topo.ce;
+    addr.lun    = journal->topo.lun;
+    addr.block  = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
+    addr.plane  = (uint8_t)(page & 1U); /* 偶页 P0, 奇页 P1（双 Plane 交错） */
+    addr.page   = page;
+    addr.cw     = 0U; /* 0 = 整页 */
+
+    return addr;
+}
+
+static nand_addr_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
+{
+    nand_addr_t addr;
+
+    addr.ch     = journal->topo.ch;
+    addr.ce     = journal->topo.ce;
+    addr.lun    = journal->topo.lun;
+    addr.block  = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
+    addr.plane  = 0U;
+    addr.page   = 0U;
+    addr.cw     = 0U;
+
+    return addr;
+}
 
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 {
@@ -72,11 +263,11 @@ void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
 
 void journal_flush_page(l2p_journal_t *journal)
 {
-    nand_pba_t page_pba;
-    uint8_t    target_page;
-    uint32_t   hdr_page_seq;
-    uint16_t   hdr_entry_count;
-    uint16_t   hdr_block_seq;
+    nand_addr_t waddr;
+    uint8_t     target_page;
+    uint32_t    hdr_page_seq;
+    uint16_t    hdr_entry_count;
+    uint16_t    hdr_block_seq;
 
     if (journal == NULL)
     {
@@ -99,21 +290,17 @@ void journal_flush_page(l2p_journal_t *journal)
     memcpy(journal->page_buf + 8, &hdr_entry_count, sizeof(hdr_entry_count));
     memcpy(journal->page_buf + 10, &hdr_block_seq, sizeof(hdr_block_seq));
 
-    /* 构造当前写入页的 PBA */
+    /* 构造当前写入页的地址 */
     target_page = journal->current_page;
-    page_pba    = pba_make(journal->topo.ch, journal->topo.ce, target_page, (uint8_t)(target_page & 1U), (journal->current_block == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
+    waddr       = journal_page_addr(journal, (uint8_t)journal->current_block, target_page);
 
     /*
      * 同步写 Journal 页到 NAND。
      * CRC/Random DISABLED：Journal 有自身四层保护（ECC/CRC/entry_count/sequence）。
      */
-    (void)ftl_internal_write_page(page_pba,
-                                  journal->page_buf,
-                                  JOURNAL_PAGE_SIZE,
-                                  FC_CRC_DISABLE,
-                                  FC_RANDOM_DISABLE,
-                                  FC_COMMAND_MODULE_METADATA,
-                                  0U);
+    (void)sync_write_page(waddr, journal->page_buf, JOURNAL_PAGE_SIZE,
+                          FC_CRC_DISABLE, FC_RANDOM_DISABLE,
+                          FC_COMMAND_MODULE_METADATA, 0U);
 
     /* 推进指针 */
     journal->current_page++;
@@ -124,9 +311,7 @@ void journal_flush_page(l2p_journal_t *journal)
         journal->current_page  = 0U;
 
         /* 擦除目标 Block（已存在的旧数据）*/
-        nand_pba_t new_block_pba = pba_make(
-            0, 0, 0, 0, (journal->current_block == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
-        (void)ftl_internal_erase_block(new_block_pba);
+        (void)sync_erase_block(journal_block_addr(journal, (uint8_t)journal->current_block));
     }
 
     journal->current_entry = 0U;
@@ -151,23 +336,19 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache)
     {
         for (page = 0; page < PAGES_PER_BLOCK; page++)
         {
-            uint8_t    page_data[JOURNAL_PAGE_SIZE];
-            uint16_t   count;
-            uint32_t   page_seq;
-            nand_pba_t page_pba;
-            int        ret;
+            uint8_t     page_data[JOURNAL_PAGE_SIZE];
+            uint16_t    count;
+            uint32_t    page_seq;
+            nand_addr_t raddr;
+            int         ret;
 
             /* 读 Journal 页 */
-            page_pba = pba_make(journal->topo.ch, journal->topo.ce, page, (uint8_t)(page & 1U), (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
+            raddr = journal_page_addr(journal, b, (uint8_t)page);
 
             memset(page_data, 0xFF, sizeof(page_data));
-            ret = ftl_internal_read_page(page_pba,
-                                         page_data,
-                                         JOURNAL_PAGE_SIZE,
-                                         FC_CRC_DISABLE,
-                                         FC_RANDOM_DISABLE,
-                                         FC_COMMAND_MODULE_METADATA,
-                                         0U);
+            ret = sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE,
+                                 FC_CRC_DISABLE, FC_RANDOM_DISABLE,
+                                 FC_COMMAND_MODULE_METADATA, 0U);
             if (ret != 0)
             {
                 continue; /* 读失败，跳过本页 */
@@ -284,10 +465,7 @@ void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
     /* 擦除非当前 Block（对方 Block 中所有 entry 的 seq ≤ cp_seq，可安全擦除） */
     b = (journal->current_block == 0U) ? 1U : 0U;
 
-    {
-        nand_pba_t block_pba = pba_make(journal->topo.ch, journal->topo.ce, 0, 0, (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1, 0, 0);
-        (void)ftl_internal_erase_block(block_pba);
-    }
+    (void)sync_erase_block(journal_block_addr(journal, b));
 
     /* 如果当前 Block 的 current_page 已推进，对方 Block 已擦除，
      * 当前 Block 继续写入，直到写满后回切到已擦除的对方 Block。 */

@@ -12,8 +12,9 @@
  * 三级模式切换依据 SQ 队列深度 + 上轮提交的 NAND 命令数。
  */
 
+#include "common/ftl_types.h" /* ftl_io_request_t */
 #include "common/ssd_types.h"
-#include "ftl/allocator.h"
+#include "ftl/allocator.h"    /* ftl_init_params_t, super_block_t */
 #include "ftl/checkpoint.h"
 #include "ftl/gc.h"
 #include "ftl/journal.h"
@@ -74,22 +75,11 @@ typedef struct ftl_context
 /*
  * ftl_init - 初始化 FTL 子系统
  *
- * @param ftl            FTL 上下文
- * @param topo           拓扑信息（本 FTL 绑定的 NAND 芯片路由）
- * @param free_blocks    free block 数组（由调用者提供）
- * @param free_count     free block 数
- * @param bad_blocks     bad block 数组（由调用者提供）
- * @param erase_counts   擦除次数数组（由调用者提供）
- * @param closed_sb_list closed Super Block 数组（由调用者提供）
+ * @param ftl   FTL 上下文
+ * @param params 初始化参数（拓扑 + 大数组存储，见 ftl_init_params_t 定义）
  * @return FTL_OK 成功
  */
-ftl_status_t ftl_init(ftl_context_t *ftl,
-                      ftl_topology_t topo,
-                      uint16_t      *free_blocks,
-                      uint16_t       free_count,
-                      uint16_t      *bad_blocks,
-                      uint32_t      *erase_counts,
-                      super_block_t *closed_sb_list);
+ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params);
 
 /*
  * ftl_service - FTL 主循环调度（每次 main loop 调用一次）
@@ -109,31 +99,21 @@ void ftl_service(ftl_context_t *ftl);
  *   ① l2p_cache_read() 查 PBA
  *   ② PBA 无效 → memset(buffer, 0), 立即返回
  *   ③ FC 命令构造 + submit（异步）
- *   ④ 注册 pending 表
+ *   ④ 注册 pending（io 按值嵌入）
  *   ⑤ 数据在 ftl_service() Phase 2 中路由到 buffer
  *
- * @param ftl            FTL 上下文
- * @param lba            逻辑地址（uint64_t，匹配 NVMe 协议宽度）
- * @param buffer         数据 buffer（单页至少 FTL_READ_USER_SIZE，双页至少 2×）
- * @param pages          页数（1=单 Plane，2=双 Plane Multi-Plane 读）
- * @param complete_flag  非 NULL 时 NAND READ 完成后置 1（用于控制器异步跟踪）
- * @param status_out     非 NULL 时完成 handler 写入 SSD_STATUS_OK/IO_ERROR
- * @param on_complete    完成回调（可选，用于 Controller 层子请求聚合）
- * @param on_complete_ctx 回调上下文
+ * @param ftl  FTL 上下文
+ * @param req  IO 请求描述（lba/buffer/pages/complete_flag/status_out/on_complete/ctx）
  * @return FTL_OK 成功提交，FTL_ERROR 失败
  */
-ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer,
-                             uint32_t pages,
-                             volatile uint8_t *complete_flag,
-                             volatile ssd_status_t *status_out,
-                             pending_cb_t on_complete, void *on_complete_ctx);
+ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req);
 
 /*
  * ftl_submit_write - 非阻塞提交写请求（单页或双 Plane Multi-Plane）
  *
- * pages=2 时使用双 Plane Multi-Plane PROGRAM（OP_PROGRAM_PAGE_MULTI_PLANE），
+ * req->pages=2 时使用双 Plane Multi-Plane PROGRAM（OP_PROGRAM_PAGE_MULTI_PLANE），
  * 在同一 Super Block 页内同时写入两个 Plane。数据 buffer 需包含两个连续页的数据
- * （总长度 = FTL_READ_USER_SIZE × pages 字节）。
+ * （总长度 = FTL_READ_USER_SIZE × req->pages 字节）。
  *
  * 内部：
  *   ① allocator_alloc(FTL_TEMP_HOT) → new_pba
@@ -142,21 +122,11 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer,
  *   ④ 注册 pending（complete_flag 在 NAND PROGRAM 完成后置 1）
  *   ⑤ Journal + L2P 在 completion handler 中确认 NAND PROGRAM 成功后执行
  *
- * @param ftl            FTL 上下文
- * @param lba            逻辑地址（pages=2 时 lba 必须为偶数，代表双 Plane 的 plane 0 侧）
- * @param data           数据指针（至少 FTL_READ_USER_SIZE × pages 字节）
- * @param pages          页数（1=单 Plane，2=双 Plane Multi-Plane PROGRAM）
- * @param complete_flag  非 NULL 时 NAND PROGRAM 完成后置 1（用于控制器异步跟踪）
- * @param status_out     非 NULL 时完成 handler 写入 SSD_STATUS_OK/IO_ERROR
- * @param on_complete    完成回调（可选，用于 Controller 层子请求聚合）
- * @param on_complete_ctx 回调上下文
+ * @param ftl  FTL 上下文
+ * @param req  IO 请求描述（req->lba 在 pages=2 时必须为偶数，代表双 Plane 的 plane 0 侧）
  * @return FTL_OK 成功提交，FTL_ERROR 失败
  */
-ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data,
-                              uint32_t pages,
-                              volatile uint8_t *complete_flag,
-                              volatile ssd_status_t *status_out,
-                              pending_cb_t on_complete, void *on_complete_ctx);
+ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);
 
 /*
  * ftl_trim - 取消 LBA 映射（非阻塞）

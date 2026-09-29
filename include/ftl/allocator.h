@@ -17,8 +17,8 @@
  *   PBA 的 page 字段由 allocator 管理，block/plane 从 Free Pool 分配。
  */
 
-#include "ftl/ftl_type.h"   /* ftl_status_t */
-#include "nand/nand_config.h" /* nand_pba_t, nand_paa_t, PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
+#include "ftl/ftl_type.h"   /* ftl_status_t, ftl_topology_t */
+#include "nand/nand_config.h" /* nand_pba_t, nand_addr_t, nand_paa_t, PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
 
 #include <stdint.h>
 
@@ -46,16 +46,53 @@
 
 typedef struct
 {
-    uint16_t plane_blocks[PLANE_NUM]; /* Plane 0 和 Plane 1 的 Block 号 */
-    uint8_t  next_page;               /* 当前写入页（0~63，双 Plane 同步） */
-    uint8_t  temperature;             /* FTL_TEMP_HOT / FTL_TEMP_COLD */
-    uint8_t  valid;                   /* 1=正在使用（Open），0=已关闭 */
+    ftl_topology_t topo;                  /* 本 Super Block 绑定的 NAND 芯片路由（ch/ce/lun） */
+    uint16_t plane_blocks[PLANE_NUM];     /* Plane 0 和 Plane 1 的 Block 号 */
+    uint8_t  next_page;                   /* 当前写入页（0~63，双 Plane 同步） */
+    uint8_t  temperature;                 /* FTL_TEMP_HOT / FTL_TEMP_COLD */
+    uint8_t  valid;                       /* 1=正在使用（Open），0=已关闭 */
 } super_block_t;
+
+/* ── 初始化参数（ftl_init / allocator_init 共用）──
+ *
+ * 大数组存储（free/bad/erase/closed 列表）由调用者（host 层）提供，
+ * 本结构体只传递指针与计数，指针模式避免 FTL 自身持有大数组。
+ * 定义于此（而非 common/ftl_types.h）：依赖 super_block_t（本文件定义），
+ * 放 common 会形成 ftl_types.h ↔ allocator.h 循环 include。
+ */
+typedef struct
+{
+    ftl_topology_t  topo;           /* 本 FTL 绑定的 NAND 芯片路由 */
+    uint16_t       *free_blocks;    /* free block 数组（由调用者提供） */
+    uint16_t        free_count;     /* free block 数 */
+    uint16_t       *bad_blocks;     /* bad block 数组（由调用者提供） */
+    uint32_t       *erase_counts;   /* 擦除次数数组（由调用者提供） */
+    super_block_t  *closed_sb_list; /* closed Super Block 数组（由调用者提供） */
+} ftl_init_params_t;
+
+/* 返回 Super Block 中指定 Plane/Page 的展开地址（ch/ce/lun 取自 sb->topo） */
+static inline nand_addr_t super_block_page_addr(const super_block_t *sb, uint8_t plane, uint8_t page)
+{
+    nand_addr_t addr;
+
+    addr.ch     = sb->topo.ch;
+    addr.ce     = sb->topo.ce;
+    addr.lun    = sb->topo.lun;
+    addr.block  = sb->plane_blocks[plane];
+    addr.plane  = plane;
+    addr.page   = page;
+    addr.cw     = 0U; /* 0 = 整页（页级操作基址） */
+
+    return addr;
+}
 
 /* 返回 Super Block 中指定 Plane/Page 的 PBA（用户数据使用 FTL_DATA_CH/CE） */
 static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const super_block_t *sb, uint8_t plane, uint8_t page)
 {
-    return pba_make(ch, ce, page, plane, sb->plane_blocks[plane], 0, 0);
+    nand_addr_t addr = super_block_page_addr(sb, plane, page);
+    addr.ch = ch; /* 显式覆盖，保持旧语义（调用点自带的 ch/ce） */
+    addr.ce = ce;
+    return pba_from_addr(&addr);
 }
 
 /* ── Allocator 上下文 ──
@@ -98,25 +135,14 @@ typedef struct
 /*
  * allocator_init - 初始化 Allocator
  *
- * @param alloc      Allocator 上下文（由调用者提供存储）
- * @param ch         Allocator 绑定的 CH
- * @param ce         Allocator 绑定的 CE
- * @param free_blocks     free block 数组（由调用者提供）
- * @param free_block_count free block 数组大小
- * @param bad_blocks      bad block 数组（由调用者提供）
- * @param erase_counts    擦除次数数组（由调用者提供）
- * @param closed_sb_list  closed Super Block 数组（由调用者提供）
+ * @param alloc  Allocator 上下文（由调用者提供存储）
+ * @param params 初始化参数（拓扑 + 大数组存储，见 ftl_init_params_t 定义）
+ *               free_blocks / free_count / bad_blocks / erase_counts / closed_sb_list
+ *               均为调用者提供的存储指针
  *
  * @return ftl_status_t — FTL_OK 成功
  */
-ftl_status_t allocator_init(ftl_allocator_t *alloc,
-                            uint8_t          ch,
-                            uint8_t          ce,
-                            uint16_t        *free_blocks,
-                            uint16_t         free_block_count,
-                            uint16_t        *bad_blocks,
-                            uint32_t        *erase_counts,
-                            super_block_t   *closed_sb_list);
+ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *params);
 
 /*
  * allocator_alloc - 分配一个 PBA（一页，4 CW）

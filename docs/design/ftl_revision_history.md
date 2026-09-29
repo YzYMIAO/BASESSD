@@ -677,3 +677,234 @@ ftl_handle_completion:
 ### 编译状态
 
 **零错误零警告**。Binary size: 58368 bytes（不变）。
+
+## v0.28 — 地址体系双层化 + 形参优化 Step 1/2（nand_addr_t + addr_to_cmd + 同步操作内联化）
+
+**日期**：2026-09-30
+
+### 背景
+
+- 形参数过多：`ftl_internal_read/write_page(7)`、`pending_add(12)`、`ftl_submit_read/write(8)`、`ftl_init(7)`
+- 遍历路径无意义打包拆包：`pba_make` 打包 → `ftl_cmd_setup_ppa` 拆包（GC 搬移、元数据扫描、Checkpoint）
+- `super_block_t` 不含拓扑，调用点从外部传 ch/ce
+
+### 决策：地址双层化
+
+存储主控内部地址分两层：
+
+| 层 | 类型 | 用途 | 布局 |
+|----|------|------|------|
+| **展开** | `nand_addr_t` | 遍历/迭代路径直填 FC 命令 | 独立字段（ch/ce/lun/block/plane/page/cw），无需 shift |
+| **紧凑** | `nand_pba_t` (packed) | L2P 表存储接口 | 32-bit 位域（[CH][CE][PAA]） |
+
+遍历路径不再打包→拆包，直接用展开地址：
+
+```c
+/* nand_config.h — 双向转换 */
+nand_pba_t pba_from_addr(const nand_addr_t *addr);   // addr → PBA
+nand_addr_t addr_from_pba(nand_pba_t pba);           // PBA → addr（随机路径）
+nand_addr_t addr_from_paa(uint8_t ch, uint8_t ce, nand_paa_t paa);  // PAA+CH/CE → addr（元数据）
+
+/* ftl_fc_interface.h — 地址直填 */
+ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *addr);
+```
+
+`super_block_t` 加 `ftl_topology_t topo` 字段，新增 `super_block_page_addr(sb, plane, page)`
+（ch/ce/lun 取自 sb->topo）。旧 `super_block_page_pba(ch, ce, sb, ...)` 保留为兼容委托。
+
+### Step 1 内容（地址类型 + 结构体拓扑）
+
+| 文件 | 改动 |
+|------|------|
+| `include/nand/nand_config.h` | `nand_addr_t` + `pba_from_addr` + `addr_from_pba` + `addr_from_paa`；修复头文件守卫破坏 |
+| `include/ftl/allocator.h` | `super_block_t` 加 `topo`；新增 `super_block_page_addr`；旧 PBA helper 保留委托 |
+| `include/ftl/ftl_fc_interface.h` | 新增 `addr_to_cmd` inline |
+| `include/common/ftl_types.h` | 新建：`ftl_io_request_t` / `ftl_init_params_t`（Step 3/4 使用） |
+
+### Step 2 内容（删除 4 个同步包装，内联化）
+
+`ftl_internal_read_page / write_page / erase_block / read_page_raw` 四个包装函数从
+`ftl_fc_interface.c` 删除（-232 行），各模块内联为 `static` 同步助手
+（`alloc → addr_to_cmd → submit → sync_wait → release`）：
+
+| 模块 | 内联助手 | 地址来源 |
+|------|---------|---------|
+| `l2p_cache.c` | `sync_read_page` / `sync_write_page` | `addr_from_paa` / `addr_from_pba` |
+| `journal.c` | `sync_read/write_page`、`sync_erase_block` | `journal_page_addr` / `journal_block_addr` |
+| `checkpoint.c` | `sync_read/write_page` | `checkpoint_page_addr` |
+| `metadata.c` | `sync_read/write_page` | `anchor_page_addr` |
+| `bbt.c` | `sync_read/write_page`、`sync_read_page_raw` | `bbt_page_addr` |
+| `gc.c` | `sync_write_page`、`sync_erase_block` | `addr_from_pba` / `super_block_page_addr` |
+| `wear_leveling.c` | `sync_write_page` | `addr_from_pba` |
+| `read_recovery.c` | `sync_read_page` | `addr_from_pba` / `addr_from_paa` |
+| `power_failure_recovery.c` | `sync_read_page`、`sync_read_page_raw` | `journal_page_addr` |
+
+仅保留 `ftl_internal_sync_wait`（completion_table 统一路由）。
+
+### 保留原则
+
+- **随机 IO 路径**（`ftl.c` 从 L2P 拿 PBA 后 `ftl_cmd_setup_ppa`）**保留不动** —— PBA 已在手，无需展开
+- `gc_read_page_with_lba`（GC 读页 + 提取 LBA）保留不动
+- 元数据操作不走 Super Block，保持 `multi_plane=0`
+
+### 编译状态
+
+**零错误零警告**。13 文件，+1379/-463（含 Step 1 未提交部分）。`ftl_fc_interface.c` 净 -227。
+
+### 下一步
+
+- Step 3：`ftl_submit_read/write` 改 `(ftl, req)` 结构体传参；`pending_req_t` 嵌入 `io_request`
+- Step 4：`ftl_init` / `allocator_init` 改指针传参（`ftl_init_params_t`）
+
+## v0.29 — 形参优化 Step 3（ftl_submit_read/write → (ftl, req) + pending 嵌入 io）
+
+**日期**：2026-09-30
+
+### 背景
+
+`ftl_submit_read/write` 有 8 个形参（lba/buffer/pages/complete_flag/status_out/on_complete/on_complete_ctx），
+`pending_add` 有 12 个形参，pending 表与 submit 签名重复描述同一请求。
+
+### 决策：ftl_io_request_t 结构体传参 + pending 按值嵌入
+
+1. **`ftl_submit_read/write(ftl_context_t *ftl, const ftl_io_request_t *req)`** — 8 形参 → 2
+2. **`ftl_pending_req_t` 嵌入 `ftl_io_request_t io`**（`g_pending[i].io = *req` 一次性拷贝 7 字段）
+3. **`pending_add(cmd_id, io, old_pba, new_pba, ftl, cache_intermediate)`** — 12 形参 → 6
+4. **位域 → 普通字段**：`used:1/command_id:15/pages:2/cache_intermediate:1` 展开（设计原则"非数组结构体不用位域"）
+
+### pending_cb_t 迁移（打破循环 include）
+
+- `pending.h` embed `ftl_io_request_t` 需 include `ftl_types.h`
+- `ftl_types.h` 原本 include `pending.h` 取 `pending_cb_t` → 循环
+- **方案**：`pending_cb_t` 迁至 `ftl_types.h`，`pending.h` 单向 include `ftl_types.h`
+- 顺带修复遗留隐患：`ftl_init_params_t` 用 `super_block_t` 但未 include `allocator.h`（此前未编译进任何 .c）
+
+### 波及的文件
+
+| 文件 | 改动 |
+|------|------|
+| `include/common/ftl_types.h` | `pending_cb_t` 迁入；补 `#include "ftl/allocator.h"` |
+| `include/ftl/pending.h` | 单向 include ftl_types.h；`ftl_pending_req_t` 嵌 `io` + 位域展开；`pending_add` 6 形参 |
+| `src/ftl/pending.c` | `pending_add` 实现 `g_pending[i].io = *io`（结构体拷贝）；`lookup_by_lba` 改 `io.lba` |
+| `include/ftl/ftl.h` | 两个 submit 签名改 `(ftl, req)`；补 include ftl_types.h |
+| `src/ftl/ftl.c` | submit 改读 `req->` 字段；`ftl_handle_completion` 改 `pending->io.` 前缀；old/new_pba/ftl/cache_intermediate 不变 |
+| `include/controller/ssd_request.h` | 加 include ftl_types.h；结构体加 `ftl_io_request_t io` |
+| `src/controller/controller.c` | 单块：填 `request->io`（lba/buffer/pages + 通知指针）后 `ftl_submit_*(ftl, &request->io)` |
+| `src/controller/request.c` | 拆分：公共字段（on_complete/status_out）循环前设一次，循环内只改 lba/buffer/pages |
+
+### Controller 层调用形态
+
+```c
+/* 单块直通（controller.c） */
+request->io.lba           = request->start_lba;
+request->io.buffer        = request->buffer;
+request->io.pages         = 1U;
+request->io.complete_flag = &request->complete_flag;
+request->io.status_out    = &request->completion_status;
+ftl_submit_read(controller->ftl, &request->io);
+
+/* 拆分（request.c）— 循环内复用 io 模板 */
+request->io.complete_flag   = NULL;               /* 子请求用回调聚合 */
+request->io.status_out      = &request->completion_status;
+request->io.on_complete     = on_sub_complete;
+request->io.on_complete_ctx = request;
+for (i = 0; i < block_count; ) {
+    request->io.lba    = start_lba + i;
+    request->io.buffer = buf + i * FTL_READ_USER_SIZE;
+    request->io.pages  = (i + 1 < block_count) ? 2U : 1U;
+    ftl_submit_read(controller->ftl, &request->io);
+    i += (request->io.pages == 2U) ? 2U : 1U;
+}
+```
+
+> io 只需在 submit 调用期间有效（pending 表立即按值拷贝），循环内复用安全。
+
+### 语义不变项（回归防护）
+
+- `ftl_handle_completion` 分支逻辑（读成功/写确认/读失败 memset/写失败标坏块/cache_intermediate 跳过）零改动，仅字段前缀
+- `data_size = FTL_READ_USER_SIZE × req->pages` 与 0/1/2 校验不变
+- PBA 无效快速路径（memset + 通知）行为不变
+- `pending_lookup / lookup_by_lba / remove` 不变
+- `ftl_init_params_t`（Step 4 用）不动
+
+### 编译状态
+
+**零错误零警告**。23 文件，+1666/-697（含 Step 1/2 与文档）。`ftl.c` 净 -100、`pending.c` 净 -24、`request.c` 净 -48、`controller.c` 净 -26（均为形参聚合受益）。
+
+### 下一步
+
+- Step 4：`ftl_init` / `allocator_init` 改指针传参（`ftl_init_params_t`）
+
+## v0.30 — 形参优化 Step 4（ftl_init / allocator_init → ftl_init_params_t 指针传参）
+
+**日期**：2026-09-30
+
+### 背景
+
+`ftl_init` 7 个形参（topo/free_blocks/free_count/bad_blocks/erase_counts/closed_sb_list），
+`allocator_init` 8 个形参（ch/ce + 同 6 个）。Step 1 已建 `ftl_init_params_t` 但未落地。
+
+### 决策：结构体指针传参
+
+```c
+ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params);          /* 7 → 2 */
+ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *params); /* 8 → 2 */
+```
+
+`ftl_init` 内部将 `params` 原样透传给 `allocator_init`（拓扑经 `ftl->topo` 保持一致）。
+
+### ftl_init_params_t 定义位置（打破循环 include）
+
+- 初版放 `common/ftl_types.h`，但该结构体依赖 `super_block_t`（allocator.h 定义），
+  而 allocator.h 需要 include ftl_types.h（拿 ftl_init_params_t）→ **循环 include 报错**
+- **方案**：`ftl_init_params_t` 定义于 `include/ftl/allocator.h`（super_block_t 之后），
+  `common/ftl_types.h` 收敛为 `pending_cb_t` + `ftl_io_request_t`（无 allocator 依赖）
+
+```
+common/ftl_types.h  ── pending_cb_t / ftl_io_request_t（无 allocator 依赖）
+ftl/allocator.h     ── super_block_t → ftl_init_params_t（依赖闭合方向正确）
+ftl.h               ── include common/ftl_types.h + ftl/allocator.h
+```
+
+### 波及的文件
+
+| 文件 | 改动 |
+|------|------|
+| `include/common/ftl_types.h` | 删除 `ftl_init_params_t`（移往 allocator.h）；去掉 `#include "ftl/allocator.h"` |
+| `include/ftl/allocator.h` | 新增 `ftl_init_params_t`（super_block_t 之后）；`allocator_init` 改 `(alloc, const params*)` |
+| `src/ftl/allocator.c` | `allocator_init` 读 `params->topo/free_blocks/free_count/bad_blocks/erase_counts/closed_sb_list` |
+| `include/ftl/ftl.h` | `ftl_init` 改 `(ftl, const params*)`；include 调整为 common/ftl_types.h + ftl/allocator.h |
+| `src/ftl/ftl.c` | `ftl_init` 接收 params → `ftl->topo = params->topo` → `allocator_init(&ftl->alloc, params)` |
+
+### 启动示例（host 层）
+
+```c
+ftl_init_params_t params = {
+    .topo           = {0, 0, 0},
+    .free_blocks    = g_free_blocks,
+    .free_count     = BLOCKS_PER_PLANE * PLANE_NUM,
+    .bad_blocks     = g_bad_blocks,
+    .erase_counts   = g_erase_counts,
+    .closed_sb_list = g_closed_sb_list,
+};
+ftl_init(&ftl, &params);
+```
+
+### 编译状态
+
+**零错误零警告**。24 文件，+1848/-806（含 Step 1~3 与文档）。`allocator.c` 净 -14、`ftl.c` 净 -60（init 路径）。
+
+### 总结：形参优化 4 步全部完成
+
+| 步骤 | 内容 | 形参变化 | 状态 |
+|------|------|---------|------|
+| Step 1 | nand_addr_t + addr_to_cmd + super_block_t topo + ftl_types.h | — | ✅ v0.28 |
+| Step 2 | 删除 4 个 ftl_internal_* 包装，内联 sync 助手 | 7 → 0 | ✅ v0.28 |
+| Step 3 | ftl_submit_read/write (ftl, req) + pending 嵌 io | 8 → 2 / 12 → 6 | ✅ v0.29 |
+| Step 4 | ftl_init / allocator_init (params 指针) | 7→2 / 8→2 | ✅ v0.30 |
+
+### 下一步
+
+- P-A：pending 表扩展 8 → 16/32
+- P-B：scheduler / state_machine / NVMe 层（`#warning` 桩）
+- P-D：GC 加速等优化

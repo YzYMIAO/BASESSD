@@ -18,6 +18,201 @@ static int      g_bbt_dirty    = 0;            /* 是否有未写回 NAND 的变
 /* BBT CRC 覆盖的字节数（从开头到 crc 字段） */
 #define BBT_CRC_SIZE (sizeof(uint32_t) * 4 + sizeof(uint32_t) * 3 + BBT_BITMAP_SIZE)
 
+/* ── 内部同步写页（原 ftl_internal_write_page 内联化，固定地址直填）── */
+static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
+    cmd->config.cw          = 3U;
+    cmd->config.crc         = FC_CRC_DISABLE;
+    cmd->config.random      = FC_RANDOM_DISABLE;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = FC_COMMAND_MODULE_BBT;
+    cmd->meta               = 0U;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if ((data != NULL) && (length > 0U))
+    {
+        (void)ftl_cmd_write_data(cmd, data, length);
+    }
+
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (completion.status & FC_CW_STATUS_NAND_FAIL)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* ── 内部同步读页（原 ftl_internal_read_page 内联化）── */
+static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    cmd->config.cw          = 3U;
+    cmd->config.crc         = FC_CRC_DISABLE;
+    cmd->config.random      = FC_RANDOM_DISABLE;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = FC_COMMAND_MODULE_BBT;
+    cmd->meta               = 0U;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (completion.status & FC_CW_STATUS_NAND_FAIL)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if ((buffer != NULL) && (length > 0U))
+    {
+        (void)ftl_cmd_read_data(cmd, buffer, length);
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* ── 内部同步读全页（原 ftl_internal_read_page_raw 内联化，LDPC_RAW）──
+ *
+ * 以 LDPC_RAW 模式读完整 NAND 页（PAGE_SIZE=2112），4 个 CW 依次拷出，
+ * 每 CW 拷 FC_BUFFER_USER_SIZE 字节到 buffer 的 CW 槽（FC_BUFFER_POOL_CW_SIZE 间隔）。
+ */
+static ftl_status_t sync_read_page_raw(nand_addr_t addr, void *buffer)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+    uint8_t             cw;
+
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    cmd->config.cw          = 3U;
+    cmd->config.crc         = FC_CRC_DISABLE;
+    cmd->config.random      = FC_RANDOM_DISABLE;
+    cmd->config.ldpc        = FC_ECC_MODE_LDPC_RAW;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = FC_COMMAND_MODULE_BBT;
+    cmd->meta               = 0U;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    for (cw = 0U; cw < CW_NUM; cw++)
+    {
+        uint8_t *src = fc_get_cmd_data_ptr(cmd, cw);
+        if (src != NULL)
+        {
+            memcpy((uint8_t *)buffer + (uint32_t)cw * FC_BUFFER_POOL_CW_SIZE,
+                   src,
+                   FC_BUFFER_USER_SIZE);
+        }
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* ── BBT 固定位置页地址辅助（Block 36 / 备用 Block 39 各 3 页）── */
+static nand_addr_t bbt_page_addr(uint8_t ch, uint8_t ce, uint8_t i)
+{
+    nand_addr_t addr;
+
+    addr.ch     = ch;
+    addr.ce     = ce;
+    addr.lun    = 0U;
+    addr.plane  = (uint8_t)((i & 1U) & 1U);
+    addr.page   = (uint8_t)((i < BBT_REDUNDANCY) ? i : (i - BBT_REDUNDANCY));
+    addr.block  = (uint8_t)((i < BBT_REDUNDANCY) ? BBT_BLOCK : BBT_BLOCK_BACKUP);
+    addr.cw     = 0U;
+
+    return addr;
+}
+
 ftl_status_t bbt_init(ftl_allocator_t *alloc)
 {
     uint32_t seq;
@@ -94,9 +289,9 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
      */
     for (block = 0U; block < BBT_MAX_BLOCKS; block++)
     {
-        uint8_t    raw_buf[PAGE_SIZE];
-        nand_pba_t page_pba0;
-        int        ret0;
+        uint8_t     raw_buf[PAGE_SIZE];
+        nand_addr_t page_addr0;
+        int         ret0;
 
         /* 跳过 Block 0（出厂总是好块）*/
         if (block == 0U)
@@ -105,10 +300,10 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
         }
 
         /* 尝试读 Page 0（只检查 Plane 0） */
-        page_pba0 = pba_make(alloc->ch, alloc->ce, 0, 0, block, 0, 0);
+        page_addr0 = addr_from_paa(alloc->ch, alloc->ce, paa_make(0U, 0U, block, 0U, 0U));
 
         memset(raw_buf, 0xFF, sizeof(raw_buf));
-        ret0 = ftl_internal_read_page_raw(page_pba0, raw_buf);
+        ret0 = sync_read_page_raw(page_addr0, raw_buf);
 
         /*
          * LDPC_RAW 模式下，即使 NAND 物理失败，
@@ -196,15 +391,15 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc)
     /* 写 3 页到 Block 36 */
     for (i = 0U; i < BBT_REDUNDANCY; i++)
     {
-        nand_pba_t pba = pba_make(alloc->ch, alloc->ce, i, (uint8_t)(i & 1U), BBT_BLOCK, 0, 0);
-        (void)ftl_internal_write_page(pba, &header, sizeof(header), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_BBT, 0U);
+        nand_addr_t pba = bbt_page_addr(alloc->ch, alloc->ce, i);
+        (void)sync_write_page(pba, &header, sizeof(header));
     }
 
     /* 再写 3 页到备用 Block 39 */
     for (i = 0U; i < BBT_REDUNDANCY; i++)
     {
-        nand_pba_t pba = pba_make(alloc->ch, alloc->ce, i, (uint8_t)(i & 1U), BBT_BLOCK_BACKUP, 0, 0);
-        (void)ftl_internal_write_page(pba, &header, sizeof(header), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_BBT, 0U);
+        nand_addr_t pba = bbt_page_addr(alloc->ch, alloc->ce, (uint8_t)(i + BBT_REDUNDANCY));
+        (void)sync_write_page(pba, &header, sizeof(header));
     }
 
     g_bbt_dirty = 0;
@@ -238,25 +433,12 @@ ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence,
     /* 扫描 Block 36 + Block 39 共 6 页 */
     for (i = 0U; i < BBT_TOTAL_PAGES; i++)
     {
-        nand_pba_t pba;
-        uint8_t    block;
-        uint8_t    page;
-        int        ret;
+        nand_addr_t pba;
+        int         ret;
 
-        if (i < BBT_REDUNDANCY)
-        {
-            block = BBT_BLOCK;
-            page  = i;
-        }
-        else
-        {
-            block = BBT_BLOCK_BACKUP;
-            page  = (uint8_t)(i - BBT_REDUNDANCY);
-        }
+        pba = bbt_page_addr(topo.ch, topo.ce, i);
 
-        pba = pba_make(topo.ch, topo.ce, page, (uint8_t)(page & 1U), block, 0, 0);
-
-        ret = ftl_internal_read_page(pba, &candidates[i], sizeof(candidates[i]), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_BBT, 0U);
+        ret = sync_read_page(pba, &candidates[i], sizeof(candidates[i]));
         if (ret != 0)
         {
             continue;

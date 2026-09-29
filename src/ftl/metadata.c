@@ -12,6 +12,138 @@
 #define METADATA_DIR_CRC_OFFSET (sizeof(uint32_t) * 3 + sizeof(metadata_entry_t) * METADATA_DIR_ENTRIES)
 /* = 4 + 4 + 4 + 896 = 908 */
 
+/* ── 内部同步写页（原 ftl_internal_write_page 内联化，固定地址直填）── */
+static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
+    cmd->config.cw          = 3U;
+    cmd->config.crc         = FC_CRC_DISABLE;
+    cmd->config.random      = FC_RANDOM_DISABLE;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = FC_COMMAND_MODULE_METADATA;
+    cmd->meta               = 0U;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if ((data != NULL) && (length > 0U))
+    {
+        (void)ftl_cmd_write_data(cmd, data, length);
+    }
+
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (completion.status & FC_CW_STATUS_NAND_FAIL)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* ── 内部同步读页（原 ftl_internal_read_page 内联化）── */
+static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    cmd->config.cw          = 3U;
+    cmd->config.crc         = FC_CRC_DISABLE;
+    cmd->config.random      = FC_RANDOM_DISABLE;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = FC_COMMAND_MODULE_METADATA;
+    cmd->meta               = 0U;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (completion.status & FC_CW_STATUS_NAND_FAIL)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if ((buffer != NULL) && (length > 0U))
+    {
+        (void)ftl_cmd_read_data(cmd, buffer, length);
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* ── Anchor 固定位置页地址（Block0/Block1 各 3 页）── */
+static nand_addr_t anchor_page_addr(uint8_t ch, uint8_t ce, uint8_t i)
+{
+    nand_addr_t addr;
+
+    addr.ch     = ch;
+    addr.ce     = ce;
+    addr.lun    = 0U;
+    addr.plane  = (uint8_t)((i & 1U) & 1U);
+    addr.page   = (uint8_t)((i < ANCHOR_REDUNDANCY) ? i : (i - ANCHOR_REDUNDANCY));
+    addr.block  = (uint8_t)((i < ANCHOR_REDUNDANCY) ? ANCHOR_BLOCK0 : ANCHOR_BLOCK1);
+    addr.cw     = 0U;
+
+    return addr;
+}
+
 void metadata_dir_init(metadata_dir_cache_t *dir)
 {
     uint16_t i;
@@ -162,6 +294,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
 {
     metadata_directory_t anchor;
     uint8_t              i;
+    int                  ret;
 
     if ((dir == NULL) || (!dir->dirty))
     {
@@ -198,14 +331,11 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
      * 如果 sequence 溢出（几乎不可能），回绕覆盖。
      */
     {
-        nand_pba_t pba;
-        int        ret;
-
         /* 3 份冗余写入 Anchor Block 0 的 Page 0/1/2 */
         for (i = 0U; i < ANCHOR_REDUNDANCY; i++)
         {
-            pba = pba_make(dir->topo.ch, dir->topo.ce, i, (uint8_t)(i & 1U), ANCHOR_BLOCK0, 0, 0);
-            ret = ftl_internal_write_page(pba, &anchor, sizeof(anchor), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
+            nand_addr_t aaddr = anchor_page_addr(dir->topo.ch, dir->topo.ce, i);
+            ret = sync_write_page(aaddr, &anchor, sizeof(anchor));
             if (ret != 0)
             {
                 /* 单份写失败不影响整体（有冗余） */
@@ -216,8 +346,8 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         /* 同样写入 Anchor Block 1（双 Block 冗余） */
         for (i = 0U; i < ANCHOR_REDUNDANCY; i++)
         {
-            pba = pba_make(dir->topo.ch, dir->topo.ce, i, (uint8_t)(i & 1U), ANCHOR_BLOCK1, 0, 0);
-            ret = ftl_internal_write_page(pba, &anchor, sizeof(anchor), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
+            nand_addr_t aaddr = anchor_page_addr(dir->topo.ch, dir->topo.ce, (uint8_t)(i + ANCHOR_REDUNDANCY));
+            ret = sync_write_page(aaddr, &anchor, sizeof(anchor));
             if (ret != 0)
             {
                 continue;
@@ -248,13 +378,13 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
     /* 扫描 2 Block × 3 页 = 6 个候选 */
     for (i = 0U; i < ANCHOR_PAGES; i++)
     {
-        nand_pba_t pba;
-        int        ret;
+        nand_addr_t pba;
+        int         ret;
 
-        pba = metadata_dir_anchor_paa(i);
+        pba = addr_from_paa(dir->topo.ch, dir->topo.ce, metadata_dir_anchor_paa(i));
         memset(&candidates[i], 0, sizeof(candidates[i]));
 
-        ret = ftl_internal_read_page(pba, &candidates[i], sizeof(candidates[i]), FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
+        ret = sync_read_page(pba, &candidates[i], sizeof(candidates[i]));
         if (ret != 0)
         {
             continue; /* 读失败，跳过 */
