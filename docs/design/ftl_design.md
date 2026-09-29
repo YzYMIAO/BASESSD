@@ -30,6 +30,7 @@
 | v0.19 | 2026-09-29 | Completion Table 统一完成路由：消除 ftl_service Phase2 和 ftl_internal_sync_wait 两个"泵"互相吞 completion 的 bug；新增 completion_table.h/c（16 项路由表 + 同步等待器 + 统一泵）；ftl_internal_sync_wait 改为注册 sync_waiter 后走 completion_table_drain，不再独占 fc_poll_completion；L2P Region 动态分配接入：cache 增加 alloc 指针，flush_one 中首次写 Region 改为真实调用 metadata_dir_alloc_region（取消回退固定位置） | Claude |
 | v0.20 | 2026-09-29 | 返回值体系统一 + 历史死代码清理：新增 ftl_status_t{FTL_OK=0,FTL_ERROR=-1} 企业级风格枚举，~32 个操作函数从 int 改为 ftl_status_t，谓词/计数函数保持 int；修复 checkpoint_find_latest 因 FTL_OK=0 导致的调用反转 bug；ftl_cmd_setup_ppa 等 3 函数从 (int) 强转改为显式 FC_STATUS_OK 映射；删除历史遗留文件 nand.h/c、nand_geometry.h/c、config/nand_geometry.h、config/ftl_config.h、__patch*.txt；删除死代码 pba_t、wl_init()、allocator_refill_pre_cond()；wl_relocate 复用 gc_read_page_with_lba + gc_erase_and_free（~60 行重复代码消除）；ssd_types.h 清除 ssd_ppa_t；l2p_cache.h 显式 include allocator.h 消除隐式依赖 | Claude |
 | v0.21 | 2026-09-29 | FTL 拓扑信息重构：删除 ftl_context_t/allocator_t/journal_t 中的 ch/ce/lun 散落字段，统一为 ftl_topology_t 结构体；ftl_init 新增 ftl_topology_t 参数替代原 ch/ce/lun 3 个参数；全部 pba_make 的 CH/CE 源改为从 topology 或 alloc->ch/ce 获取，消除硬编码 0,0；allocator/journal/metadata/checkpoint/bbt/power_failure_recovery/wear_leveling 各模块全部接入拓扑路由 | Claude |
+| v0.22 | 2026-09-29 | FTL 对外接口异步化：删除 ftl_read/ftl_write 同步包装，FTL 对外只提供非阻塞接口；ftl_submit_write 新增 complete_flag 参数跟踪 NAND PROGRAM 完成；Controller 层改为纯异步提交 + complete_flag 轮询；新增 ssd_controller_is_complete()；ssd_request_t.completion_status 改为 ssd_status_t | Claude |
 
 ---
 
@@ -3203,7 +3204,7 @@ Step 12 — Wear Leveling
 
 ## 16. Phase 规划
 
-### 已实现（截至 2026-09-29 v0.19）
+### 已实现（截至 2026-09-29 v0.22）
 
 | 任务 | 说明 | 状态 |
 |------|------|------|
@@ -3217,13 +3218,33 @@ Step 12 — Wear Leveling
 | Power Failure Recovery | 三类启动判断 + 写指针 NAND 扫描 | ✅ |
 | Wear Leveling | 动态（alloc 选低擦除）+ 静态三星 Daemon（三条件触发）| ✅ |
 | Metadata Directory | Anchor Block 33-34 + 动态分配 + CRC，L2P Region 双 Plane 交错 | ✅ |
-| Pending Request 表 | 8 项固定表，command_id + LBA lookup | ✅ |
+| Pending Request 表 | 8 项固定表，command_id + LBA lookup，支持 complete_flag 通知 | ✅ |
 | ftl_service 主循环 | 三级模式（IDLE/NORMAL/BUSY），GC/WL/Checkpoint 集成 | ✅ |
 | ftl_fc_interface | 3 PBA helper + 4 内部同步 NAND 操作（read/write/erase/sync_wait/read_raw）| ✅ |
 | **Completion Table** | 统一完成路由，消除两泵冲突，sycn_waiter 不走独立 fc_poll_completion | ✅ |
 | **L2P Region 动态分配** | flush_one 首次写通过 metadata_dir_alloc_region 从 Free Pool 分配 | ✅ |
+| **FTL 对外接口异步化** | 删除 ftl_read/ftl_write 同步包装，纯异步 ftl_submit_read/write + complete_flag 跟踪 | ✅ |
+| **ftl_submit_write pending** | 写请求注册 pending + complete_flag，NAND PROGRAM 真完成后才通知 caller | ✅ |
+| **Controller 异步提交** | ssd_controller_submit 纯异步，ssd_controller_is_complete 轮询完成状态 | ✅ |
 
-### 剩余待办
+### 剩余待办（对外接口待讨论）
+
+以下为 FTL 对外接口层面已识别但未最终决定的问题，待后续讨论：
+
+| 编号 | 问题 | 说明 |
+|------|------|------|
+| D3/D4/D5 | **LBA 地址体系统一** | ssd_lba_t(uint64_t) vs lba_t(uint32_t) 边界，API 参数是否统一 |
+| D4 | **多 LBA 拆分** | block_count != 1 的请求在 Controller 层还是 FTL 层拆分 |
+| D5 | **写失败回滚** | NAND PROGRAM 失败后 L2P/Journal 已更新但数据未写入，需标记坏块+回滚 |
+| D6 | **队列深度/背压** | 多 LUN 并发时 FC SQ 深度有限，需流控机制 |
+| D7 | **多命令流水线** | Multi-Plane / Cache Program 多命令并行提交 |
+| D8 | **错误通知** | ftl_submit_read/write 的 complete_flag 只能通知"完成"，不能细粒度传递错误码 |
+
+以上编号 D3~D8 为暂定讨论序号，将在后续 FTL 对外接口讨论中逐一确定。
+
+### 剩余待办（非对外接口，未实现待处理）
+
+#### P-A：多 LUN 并发前置（依赖 Completion Table 已就绪）
 
 #### P-A：多 LUN 并发前置（依赖 Completion Table 已就绪）
 

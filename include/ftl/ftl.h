@@ -35,6 +35,9 @@
 
 #define FTL_READ_USER_SIZE (2048U) /* 一次读返回的用户数据大小 = 4 CW × 512B */
 
+/* 最大有效 LBA = 总 Region 数 × 每 Region entry 数 */
+#define FTL_LBA_MAX        ((uint64_t)L2P_REGIONS_TOTAL * L2P_ENTRIES_PER_REGION)
+
 /* ── FTL 主上下文 ── */
 
 typedef struct ftl_context
@@ -110,12 +113,12 @@ void ftl_service(ftl_context_t *ftl);
  *   ⑤ 数据在 ftl_service() Phase 2 中路由到 buffer
  *
  * @param ftl    FTL 上下文
- * @param lba    逻辑地址
+ * @param lba    逻辑地址（uint64_t，匹配 NVMe 协议宽度）
  * @param buffer 数据 buffer（至少 FTL_READ_USER_SIZE 字节）
  * @param count  sector 数（当前只支持 1）
  * @return FTL_OK 成功提交，FTL_ERROR 失败
  */
-ftl_status_t ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count);
+ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer, uint32_t count);
 
 /*
  * ftl_submit_write - 非阻塞提交写请求
@@ -126,42 +129,23 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32
  *   ③ FC 命令构造 + submit（异步写 NAND）
  *   ④ journal_append(lba, old_pba, new_pba)
  *   ⑤ l2p_cache_write(lba, new_pba)
+ *   ⑥ 注册 pending（complete_flag 在 NAND PROGRAM 完成后置 1）
  *
- * @param ftl    FTL 上下文
- * @param lba    逻辑地址
- * @param data   数据指针（至少 FTL_READ_USER_SIZE 字节）
- * @param count  sector 数（当前只支持 1）
+ * @param ftl            FTL 上下文
+ * @param lba            逻辑地址（uint64_t，匹配 NVMe 协议宽度）
+ * @param data           数据指针（至少 FTL_READ_USER_SIZE 字节）
+ * @param count          sector 数（当前只支持 1）
+ * @param complete_flag  非 NULL 时 NAND PROGRAM 完成后置 1（用于控制器异步跟踪）
  * @return FTL_OK 成功提交，FTL_ERROR 失败
  */
-ftl_status_t ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t count);
+ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data, uint32_t count, volatile uint8_t *complete_flag);
 
 /*
- * ftl_read - 同步读（被 controller 层调用）
+ * ftl_trim - 取消 LBA 映射（非阻塞）
  *
- * @param ftl    FTL 上下文
- * @param lba    逻辑地址
- * @param buffer 数据 buffer
- * @return SSD_STATUS_OK 成功，负值失败
+ * @param ftl  FTL 上下文
+ * @param lba  逻辑地址（uint64_t）
  */
-int ftl_read(ftl_context_t *ftl, ssd_lba_t lba, void *buffer);
-
-/*
- * ftl_write - 同步写（被 controller 层调用）
- *
- * @param ftl    FTL 上下文
- * @param lba    逻辑地址
- * @param data   数据指针
- * @return SSD_STATUS_OK 成功，负值失败
- */
-int ftl_write(ftl_context_t *ftl, ssd_lba_t lba, const void *data);
-
-/*
- * ftl_trim - TRIM（取消映射）
- *
- * @param ftl    FTL 上下文
- * @param lba    逻辑地址
- * @return SSD_STATUS_OK 成功
- */
-int ftl_trim(ftl_context_t *ftl, ssd_lba_t lba);
+void ftl_trim(ftl_context_t *ftl, uint64_t lba);
 
 #endif /* FTL_SERVICE_H */

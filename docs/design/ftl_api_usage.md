@@ -8,13 +8,14 @@
 ## 1. FTL 对外 API
 
 FTL 模块通过 `include/ftl/ftl.h` 对外暴露以下接口。
+FTL 对外只提供**非阻塞接口**，不提供同步包装。Controller 层通过 `complete_flag` 轮询异步完成状态。
 
 ### 1.1 核心数据结构
 
 ```c
 /* FTL 主上下文 */
 struct ftl_context {
-    uint8_t             ch, ce, lun;        // 拓扑参数
+    ftl_topology_t      topo;               // 拓扑信息（ch/ce/lun）
     l2p_cache_t         cache;              // SRAM L2P cache (~132KB)
     ftl_allocator_t     alloc;              // 空闲 block / Super Block 写指针
     l2p_journal_t       journal;            // log-structured journal
@@ -32,12 +33,20 @@ struct ftl_context {
 | 接口 | 类型 | 说明 | 备注 |
 |------|------|------|------|
 | `ftl_init()` | 初始化 | 初始化 L2P cache、allocator、journal、Metadata Directory、BBT | 在 `fc_init()` 之后调用 |
-| `ftl_submit_read()` | 异步读 | 非阻塞提交读请求（pending 表驱动完成） | L2P→PBA→FC submit→pending |
-| `ftl_submit_write()` | 异步写 | 非阻塞提交写请求 + Journal + watermark | alloc→FC submit→journal→L2P |
+| `ftl_submit_read()` | 异步读 | 非阻塞提交读请求（pending 表 + complete_flag 驱动完成） | L2P→PBA→FC submit→pending |
+| `ftl_submit_write()` | 异步写 | 非阻塞提交写请求 + Journal + watermark + complete_flag | alloc→FC submit→journal→L2P→pending |
+| `ftl_trim()` | 异步取消映射 | 写 FTL_PBA_INVALID 到 L2P Cache，标记 DIRTY | 非阻塞 |
 | `ftl_service()` | 主循环 | 推进 FC 调度 + 统一完成泵 + 后台任务（flush/GC/WL/Checkpoint） | 在 main loop 中频繁调用 |
-| `ftl_read()` | 同步读 | `ftl_submit_read` + 循环 `fc_service`/`completion_table_drain` 直到 pending 释放 | 被 controller 层调用 |
-| `ftl_write()` | 同步写 | `ftl_submit_write` + 循环 `fc_service`/`completion_table_drain` 直到 SQ/CQ 空 | 被 controller 层调用 |
-| `ftl_trim()` | TRIM | 取消 LBA 映射（写 FTL_PBA_INVALID） | 仅改 cache，标记 DIRTY |
+
+**注**：FTL 不提供同步包装（删除 `ftl_read`/`ftl_write`）。Controller 层通过 `ssd_controller_submit()` 异步提交请求，通过 `ssd_controller_is_complete()` 轮询完成状态。
+
+### 1.3 异步完成机制
+
+所有异步请求通过 `volatile uint8_t complete_flag` 通知完成：
+
+- **读请求**：NAND READ 完成 + 数据拷贝到 caller buffer 后，completion handler 置位 `complete_flag`
+- **写请求**：NAND PROGRAM 完成后，completion handler 置位 `complete_flag`
+- **TRIM**：立即完成（只改 L2P Cache，不写 NAND）
 
 ### 1.3 Completion Table（统一完成路由）
 
@@ -73,10 +82,10 @@ void ftl_sync_waiter_handler_with_release(const fc_command_status_t *completion,
 
 **路由规则**：
 1. `completion_table` 中有注册 handler → 精确路由（用于同步等待、专用回调）
-2. 无注册但设置了 default → 走 `ftl_handle_completion`（FTL pending 表、命令释放等）
+2. 无注册但设置了 default → 走 `ftl_handle_completion`（FTL pending 表、complete_flag、命令释放等）
 3. 都没有 → 静默丢弃（不应发生）
 
-### 1.3 完整使用流程
+### 1.4 完整使用流程
 
 ```c
 /* 系统启动 */
@@ -89,45 +98,20 @@ static uint16_t g_bad_blocks[BLOCKS_PER_PLANE * PLANE_NUM];
 static uint32_t g_erase_counts[BLOCKS_PER_PLANE * PLANE_NUM];
 static super_block_t g_closed_sb_list[SUPER_BLOCK_LIST_MAX];
 
-ftl_init(&ftl, 0, 0, 0,
+ftl_topology_t topo = {0, 0, 0};        // 拓扑参数（当前单芯片）
+
+ftl_init(&ftl, topo,
          g_free_blocks, BLOCKS_PER_PLANE * PLANE_NUM,
          g_bad_blocks,
          g_erase_counts,
          g_closed_sb_list);             // ② FTL 初始化
 
-/* 主循环 */
+/* 主循环（企业级异步模式） */
 while (1) {
-    ftl_service(&ftl);                  // ③ 推进 FTL（含 fc_service 内部调用）
-
-    /* 处理 Host IO 请求 */
-    if (host_request_available()) {
-        ssd_request_t req = host_dequeue();
-        switch (req.opcode) {
-            case SSD_REQUEST_READ:
-                req.completion_status = ftl_read(&ftl, req.start_lba, req.buffer);
-                break;
-            case SSD_REQUEST_WRITE:
-                req.completion_status = ftl_write(&ftl, req.start_lba, req.buffer);
-                break;
-            case SSD_REQUEST_TRIM:
-                req.completion_status = ftl_trim(&ftl, req.start_lba);
-                break;
-        }
-    }
+    uart_service_poll();                // 收 Host 命令 → ssd_controller_submit()
+    ftl_service(&ftl);                  // ③ 推进 FTL（FC + 完成路由 + 后台任务）
+    /* 请求完成状态由 ssd_controller_is_complete() 轮询 */
 }
-```
-
-### 1.4 同步模型说明
-
-```
-内部同步操作（metadata/GC/journal 用到）：
-  ftl_internal_*() 内部：alloc → submit → sync_wait → release（阻塞等待）
-
-用户 IO：
-  ftl_submit_read/write() → 异步提交
-  ftl_read/write()        → 封装同步等待（循环 poll 直到完成）
-
-主循环中的 ftl_service() 处理完成回调 + 后台任务（flush、GC、WL、Checkpoint）。
 ```
 
 ---

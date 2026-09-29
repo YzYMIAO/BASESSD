@@ -8,8 +8,6 @@
 
 #include <stdint.h>
 
-typedef uint64_t ssd_lba_t;
-
 typedef enum
 {
     SSD_STATUS_OK               = 0,

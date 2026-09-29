@@ -4,6 +4,7 @@
 #include "common/ssd_types.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef enum
 {
@@ -16,11 +17,12 @@ typedef enum
 typedef struct
 {
     ssd_request_opcode_t opcode;
-    ssd_lba_t            start_lba;
+    uint64_t             start_lba;
     uint32_t             block_count;
     void                *buffer;
     size_t               buffer_size;
-    int                  completion_status;
+    ssd_status_t         completion_status;
+    volatile uint8_t     complete_flag;      /* FTL completion handler 置 1 */
 } ssd_request_t;
 
 #endif /* SSD_REQUEST_H */

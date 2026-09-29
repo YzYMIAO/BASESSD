@@ -16,13 +16,17 @@
 
 #define FTL_PENDING_MAX (8U)
 
+/* 前向声明 */
+struct ssd_request;
+
 typedef struct
 {
-    uint16_t used       : 1;  /* 1: 槽位占用 */
-    uint16_t command_id : 15; /* FC command_id */
-    lba_t    lba;             /* LBA, 用于校验 */
-    void    *buffer;          /* caller 的读 buffer */
-    uint32_t count;           /* sector 数 */
+    uint16_t         used       : 1;  /* 1: 槽位占用 */
+    uint16_t         command_id : 15; /* FC command_id */
+    lba_t            lba;             /* LBA, 用于校验 */
+    void            *buffer;          /* caller 的读 buffer（写请求时为 NULL） */
+    uint32_t         count;           /* sector 数 */
+    volatile uint8_t *complete_flag;  /* 非 NULL 时 completion handler 置 1 */
 } ftl_pending_req_t;
 
 /*
@@ -31,15 +35,16 @@ typedef struct
 void pending_init(void);
 
 /*
- * pending_add - 注册一个 pending 读请求
+ * pending_add - 注册一个 pending 请求
  *
- * @param cmd_id     FC command_id
- * @param lba        逻辑地址
- * @param buffer     caller 数据 buffer
- * @param count      sector 数
+ * @param cmd_id        FC command_id
+ * @param lba           逻辑地址
+ * @param buffer        caller 数据 buffer（读请求）/ NULL（写请求不拷贝数据）
+ * @param count         sector 数
+ * @param complete_flag 非 NULL 时请求完成 handler 会置 1（用于控制器异步跟踪）
  * @return 0 成功, -1 表满
  */
-int pending_add(uint16_t cmd_id, lba_t lba, void *buffer, uint32_t count);
+int pending_add(uint16_t cmd_id, lba_t lba, void *buffer, uint32_t count, volatile uint8_t *complete_flag);
 
 /*
  * pending_lookup - 按 command_id 查找 pending 项

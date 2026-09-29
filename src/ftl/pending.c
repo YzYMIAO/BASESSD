@@ -9,7 +9,7 @@ void pending_init(void)
     memset(g_pending, 0, sizeof(g_pending));
 }
 
-int pending_add(uint16_t cmd_id, lba_t lba, void *buffer, uint32_t count)
+int pending_add(uint16_t cmd_id, lba_t lba, void *buffer, uint32_t count, volatile uint8_t *complete_flag)
 {
     uint8_t i;
 
@@ -17,11 +17,12 @@ int pending_add(uint16_t cmd_id, lba_t lba, void *buffer, uint32_t count)
     {
         if (g_pending[i].used == 0U)
         {
-            g_pending[i].used       = 1U;
-            g_pending[i].command_id = cmd_id;
-            g_pending[i].lba        = lba;
-            g_pending[i].buffer     = buffer;
-            g_pending[i].count      = count;
+            g_pending[i].used          = 1U;
+            g_pending[i].command_id    = cmd_id;
+            g_pending[i].lba           = lba;
+            g_pending[i].buffer        = buffer;
+            g_pending[i].count         = count;
+            g_pending[i].complete_flag = complete_flag;
             return FTL_OK;
         }
     }

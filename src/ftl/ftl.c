@@ -54,12 +54,21 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                 {
                     if ((completion->status & FC_CW_STATUS_NAND_FAIL) == 0U)
                     {
-                        (void)ftl_cmd_read_data(cmd, pending->buffer,
-                                                FTL_READ_USER_SIZE);
+                        if (pending->buffer != NULL)
+                        {
+                            (void)ftl_cmd_read_data(cmd, pending->buffer,
+                                                    FTL_READ_USER_SIZE);
+                        }
                     }
-                    else
+                    else if (pending->buffer != NULL)
                     {
                         memset(pending->buffer, 0, FTL_READ_USER_SIZE);
+                    }
+
+                    /* 通知等待方 */
+                    if (pending->complete_flag != NULL)
+                    {
+                        *pending->complete_flag = 1U;
                     }
 
                     pending_remove(cmd_id);
@@ -294,18 +303,26 @@ void ftl_service(ftl_context_t *ftl)
     }
 }
 
-ftl_status_t ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32_t count)
+ftl_status_t ftl_submit_read(ftl_context_t *ftl, uint64_t lba, void *buffer, uint32_t count)
 {
     fc_command_t *cmd;
     nand_pba_t    pba;
     int           ret;
+    lba_t         internal_lba;
 
     if ((ftl == NULL) || (buffer == NULL) || (count != 1U))
     {
         return FTL_ERROR;
     }
 
-    pba = l2p_cache_read(&ftl->cache, lba);
+    /* LBA 越界检查 */
+    if (lba >= FTL_LBA_MAX)
+    {
+        return FTL_ERROR;
+    }
+    internal_lba = (lba_t)lba;
+
+    pba = l2p_cache_read(&ftl->cache, internal_lba);
     if (pba == FTL_PBA_INVALID)
     {
         memset(buffer, 0, FTL_READ_USER_SIZE);
@@ -329,7 +346,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     cmd->module             = FC_COMMAND_MODULE_FTL;
-    cmd->meta               = (DWORD)lba;
+    cmd->meta               = (DWORD)internal_lba;
 
     /* ④ 配置 PBA + desc 链 */
     ret = ftl_cmd_setup_ppa(cmd, pba);
@@ -340,7 +357,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32
     }
 
     /* ⑤ 注册 pending（必须早于 submit，避免竞态） */
-    ret = pending_add(cmd->command_id, lba, buffer, count);
+    ret = pending_add(cmd->command_id, internal_lba, buffer, count, NULL);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
@@ -359,17 +376,25 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, lba_t lba, void *buffer, uint32
     return FTL_OK;
 }
 
-ftl_status_t ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t count)
+ftl_status_t ftl_submit_write(ftl_context_t *ftl, uint64_t lba, const void *data, uint32_t count, volatile uint8_t *complete_flag)
 {
     fc_command_t *cmd;
     nand_pba_t    new_pba;
     nand_pba_t    old_pba;
     int           ret;
+    lba_t         internal_lba;
 
     if ((ftl == NULL) || (data == NULL) || (count != 1U))
     {
         return FTL_ERROR;
     }
+
+    /* LBA 越界检查 */
+    if (lba >= FTL_LBA_MAX)
+    {
+        return FTL_ERROR;
+    }
+    internal_lba = (lba_t)lba;
 
     /* ① Allocator 分配新 PBA */
     new_pba = allocator_alloc(&ftl->alloc, FTL_TEMP_HOT);
@@ -379,7 +404,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, u
     }
 
     /* ② 读旧 PBA（journal 记录用） */
-    old_pba = l2p_cache_read(&ftl->cache, lba);
+    old_pba = l2p_cache_read(&ftl->cache, internal_lba);
 
     /* ③ 配置 FC 写命令 */
     cmd = fc_command_alloc();
@@ -397,7 +422,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, u
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     cmd->module             = FC_COMMAND_MODULE_FTL;
-    cmd->meta               = (DWORD)lba;
+    cmd->meta               = (DWORD)internal_lba;
 
     /* ④ 配置 PBA + desc 链 + 写入数据 */
     ret = ftl_cmd_setup_ppa(cmd, new_pba);
@@ -414,96 +439,43 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, lba_t lba, const void *data, u
         return FTL_ERROR;
     }
 
-    /* ⑤ 异步提交到 NAND */
-    if (fc_submit(cmd) != FC_STATUS_OK)
+    /* ⑤ 注册 pending（complete_flag 在 NAND PROGRAM 完成后置 1） */
+    ret = pending_add(cmd->command_id, internal_lba, NULL, count, complete_flag);
+    if (ret != 0)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
 
-    /* ⑥ Journal 记录（SRAM buffer，不写 NAND） */
-    journal_append(&ftl->journal, lba, old_pba, new_pba);
+    /* ⑥ 异步提交到 NAND */
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        pending_remove(cmd->command_id);
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    /* ⑦ Journal 记录（SRAM buffer，不写 NAND） */
+    journal_append(&ftl->journal, internal_lba, old_pba, new_pba);
 
     /* 检查 Journal 水位 */
     checkpoint_journal_watermark(&ftl->journal);
 
-    /* ⑦ 更新 L2P Cache（write-back，标记 DIRTY） */
-    l2p_cache_write(&ftl->cache, lba, new_pba);
+    /* ⑧ 更新 L2P Cache（write-back，标记 DIRTY） */
+    l2p_cache_write(&ftl->cache, internal_lba, new_pba);
 
-    /* ⑧ 统计 */
+    /* ⑨ 统计 */
     ftl->total_writes++;
 
     return FTL_OK;
 }
 
-/* ── 同步包装（被 controller 层调用）── */
+/* ── UART CLI 便利包装（非阻塞，仅用于 pending 表跟踪）── */
 
-int ftl_read(ftl_context_t *ftl, ssd_lba_t lba, void *buffer)
+void ftl_trim(ftl_context_t *ftl, uint64_t lba)
 {
-    if ((ftl == NULL) || (buffer == NULL))
+    if (ftl != NULL)
     {
-        return SSD_STATUS_INVALID_ARGUMENT;
+        l2p_cache_write(&ftl->cache, (lba_t)lba, FTL_PBA_INVALID);
     }
-
-    /* 异步提交读 */
-    if (ftl_submit_read(ftl, (lba_t)lba, buffer, 1U) != 0)
-    {
-        return SSD_STATUS_IO_ERROR;
-    }
-
-    /* 驱动完成：统一完成泵直到 pending 表释放 */
-    for (;;)
-    {
-        (void)fc_service();
-        completion_table_drain();
-        if (pending_lookup_by_lba((lba_t)lba) == NULL)
-        {
-            break;
-        }
-    }
-
-    return SSD_STATUS_OK;
-}
-
-int ftl_write(ftl_context_t *ftl, ssd_lba_t lba, const void *data)
-{
-    int ret;
-
-    if ((ftl == NULL) || (data == NULL))
-    {
-        return SSD_STATUS_INVALID_ARGUMENT;
-    }
-
-    ret = ftl_submit_write(ftl, (lba_t)lba, data, 1U);
-    if (ret != 0)
-    {
-        return SSD_STATUS_NO_SPACE;
-    }
-
-    /* 驱动完成：统一完成泵直到 SQ/CQ 空 */
-    for (;;)
-    {
-        (void)fc_service();
-        completion_table_drain();
-
-        fc_resource_stats_t stats;
-        (void)fc_get_resource_stats(&stats);
-        if (stats.sq_used == 0U && stats.cq_used == 0U)
-        {
-            break;
-        }
-    }
-
-    return SSD_STATUS_OK;
-}
-
-int ftl_trim(ftl_context_t *ftl, ssd_lba_t lba)
-{
-    if (ftl == NULL)
-    {
-        return SSD_STATUS_INVALID_ARGUMENT;
-    }
-
-    l2p_cache_write(&ftl->cache, (lba_t)lba, FTL_PBA_INVALID);
-    return SSD_STATUS_OK;
 }

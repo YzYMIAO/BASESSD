@@ -18,7 +18,8 @@ typedef struct
     ftl_context_t         *ftl;
 } ssd_controller_t;
 
-int ssd_controller_init(ssd_controller_t *controller, ftl_context_t *ftl);
-int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
+int      ssd_controller_init(ssd_controller_t *controller, ftl_context_t *ftl);
+int      ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
+uint8_t  ssd_controller_is_complete(const ssd_request_t *request);
 
 #endif /* SSD_CONTROLLER_H */
