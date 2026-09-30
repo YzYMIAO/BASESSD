@@ -17,6 +17,7 @@
  *   PBA 的 page 字段由 allocator 管理，block/plane 从 Free Pool 分配。
  */
 
+#include "ftl/bst.h"         /* ftl_block_t, FTL_BLOCK_TOTAL, ftl_gblock, ftl_block_is_bad */
 #include "ftl/ftl_type.h"   /* ftl_status_t, ftl_topology_t */
 #include "nand/nand_config.h" /* nand_pba_t, nand_addr_t, nand_paa_t, PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
 
@@ -55,7 +56,7 @@ typedef struct
 
 /* ── 初始化参数（ftl_init / allocator_init 共用）──
  *
- * 大数组存储（free/bad/erase/closed 列表）由调用者（host 层）提供，
+ * 大数组存储（free/closed/BST 等）由调用者（host 层）提供，
  * 本结构体只传递指针与计数，指针模式避免 FTL 自身持有大数组。
  * 定义于此（而非 common/ftl_types.h）：依赖 super_block_t（本文件定义），
  * 放 common 会形成 ftl_types.h ↔ allocator.h 循环 include。
@@ -63,10 +64,9 @@ typedef struct
 typedef struct
 {
     ftl_topology_t  topo;           /* 本 FTL 绑定的 NAND 芯片路由 */
-    uint16_t       *free_blocks;    /* free block 数组（由调用者提供） */
+    uint16_t       *free_blocks;    /* free block 数组（全局 Block 号，由调用者提供） */
     uint16_t        free_count;     /* free block 数 */
-    uint16_t       *bad_blocks;     /* bad block 数组（由调用者提供） */
-    uint32_t       *erase_counts;   /* 擦除次数数组（由调用者提供） */
+    ftl_block_t    *blocks;         /* Block State Table（由调用者提供，容量 FTL_BLOCK_TOTAL） */
     super_block_t  *closed_sb_list; /* closed Super Block 数组（由调用者提供） */
 } ftl_init_params_t;
 
@@ -122,13 +122,10 @@ typedef struct
     super_block_t *closed_sb_list;  /* 已写满的 Super Block 数组（由调用者提供） */
     uint16_t       closed_sb_count; /* 已关闭 Super Block 数 */
 
-    /* ── 磨损信息 ── */
-    uint32_t *erase_counts; /* 每 Block 擦除次数数组（由调用者提供） */
-
-    /* ── 坏块 ── */
-    uint16_t *bad_blocks;       /* 坏 Block 编号数组（由调用者提供） */
-    uint16_t  bad_count;        /* 坏 Block 数 */
-    uint16_t  spare_pool_count; /* Spare Pool 剩余 Block 数 */
+    /* ── Block State Table（统一 per-Block 状态） ── */
+    ftl_block_t *blocks;        /* 每 Block 状态数组（由调用者提供） */
+    uint16_t     bad_count;     /* 坏 Block 数 */
+    uint16_t     spare_pool_count; /* Spare Pool 剩余 Block 数 */
 } ftl_allocator_t;
 
 /* ── 接口函数 ── */
@@ -138,7 +135,7 @@ typedef struct
  *
  * @param alloc  Allocator 上下文（由调用者提供存储）
  * @param params 初始化参数（拓扑 + 大数组存储，见 ftl_init_params_t 定义）
- *               free_blocks / free_count / bad_blocks / erase_counts / closed_sb_list
+ *               free_blocks / free_count / blocks / closed_sb_list
  *               均为调用者提供的存储指针
  *
  * @return ftl_status_t — FTL_OK 成功
@@ -164,22 +161,23 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature);
 /*
  * allocator_free_block - GC 擦除后将 Block 归还到 Free Pool
  *
- * Step 3：桩，仅 #warning 和增加计数。
- *
- * @param alloc Allocator 上下文
- * @param block 要归还的 Block 编号
+ * @param alloc  Allocator 上下文
+ * @param gblock 要归还的 Block 编号（全局 Block 号）
  */
-void allocator_free_block(ftl_allocator_t *alloc, uint16_t block);
+void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
 
 /*
- * allocator_mark_bad - 运行时标记坏块
+ * allocator_remove_closed_sb - GC 回收后从 Closed 列表移除条目（swap-remove，O(1)）
  *
- * Step 3：桩，仅 #warning。
+ * 修 closed_sb_count 只增不减导致的列表爆炸 + 已回收 SB 被再次选为 victim 的无限 GC 空转。
  *
- * @param alloc Allocator 上下文
- * @param block 坏 Block 编号
+ * @param alloc      Allocator 上下文
+ * @param closed_idx 要移除的 closed 列表索引
  */
-void allocator_mark_bad(ftl_allocator_t *alloc, uint16_t block);
+void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx);
+
+/* 说明：allocator_mark_bad 已删除——坏块标记统一走 bbt_mark_bad（BBT 单数据源），
+ * BBT 内部将 is_bad 位写入 ftl_block_t.state 并维护 alloc->bad_count。 */
 
 /*
  * allocator_needs_gc - 检查是否需要触发 GC

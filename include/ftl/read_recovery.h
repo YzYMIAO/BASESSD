@@ -32,6 +32,7 @@
  */
 
 #include "ftl/allocator.h"
+#include "ftl/bst.h"        /* rr_ecc_track_t, rr_block_health_t, RR_ECC_HISTORY_DEPTH, ftl_block_t */
 #include "ftl/ftl_type.h"
 #include "ftl/l2p_cache.h"
 #include "nand/nand_config.h"
@@ -39,7 +40,6 @@
 #include <stdint.h>
 
 /* ── ECC 趋势参数 ── */
-#define RR_ECC_HISTORY_DEPTH    (8U)  /* 每个 Block 追踪最近 8 次 ECC */
 #define RR_ECC_RISING_THRESHOLD (4U)  /* 连续上升 ≥4 次触发预测 */
 #define RR_ECC_HIGH_WATER       (6U)  /* 单次 ECC ≥6 bits → 告警 */
 #define RR_ECC_MAX              (15U) /* BCH t=4 最大可纠 bit 数（保守上限）*/
@@ -50,45 +50,17 @@
 #define RR_FEATURE_READ_RETRY      (0x89U) /* Micron/ONFI Read Retry */
 #define RR_FEATURE_READ_RETRY_MODE (0x00U) /* Mode 0 = normal, 1-7 = retry modes */
 
-/* ── 预测性坏块状态 ── */
-typedef enum
-{
-    RR_BLOCK_HEALTHY  = 0, /* 正常 */
-    RR_BLOCK_WARNING  = 1, /* ECC 上升趋势中 */
-    RR_BLOCK_CRITICAL = 2, /* ECC 接近上限 */
-    RR_BLOCK_DYING    = 3, /* 预计即将坏块，准备搬移 */
-} rr_block_health_t;
+/* 预测性坏块状态 rr_block_health_t / ECC 历史 rr_ecc_track_t 已迁入 ftl/bst.h */
 
-/* ── ECC 历史记录（per-Block） ── */
+/* ── Read Recovery 上下文 ──
+ * ECC 追踪数组已并入 ftl_block_t.rr（Block State Table 单数据源），
+ * 本上下文只保留重试计数。 */
 typedef struct
 {
-    uint8_t  ecc_history[RR_ECC_HISTORY_DEPTH]; /* 最近 N 次 ECC bit 计数 */
-    uint8_t  history_idx;                       /* 环形 buffer 写指针 */
-    uint8_t  rising_count;                      /* 连续上升计数 */
-    uint8_t  health;                            /* rr_block_health_t */
-    uint32_t last_update;                       /* 上次更新（写入次数/时间戳） */
-} rr_ecc_track_t;
-
-/* ── Read Recovery 上下文 ── */
-typedef struct
-{
-    rr_ecc_track_t *block_track; /* per-Block ECC 追踪数组（外部提供）*/
-    uint16_t        max_blocks;  /* 追踪数组大小 */
-    uint8_t         retry_count; /* 当前重试计数 */
+    uint8_t retry_count; /* 当前重试计数 */
 } ftl_read_recovery_t;
 
 /* ── 接口 ── */
-
-/*
- * rr_init - 初始化 Read Recovery
- *
- * @param rr         Read Recovery 上下文
- * @param block_track per-Block ECC 追踪数组（由调用者提供存储）
- * @param max_blocks 数组大小
- */
-void rr_init(ftl_read_recovery_t *rr,
-             rr_ecc_track_t      *block_track,
-             uint16_t             max_blocks);
 
 /*
  * rr_record_ecc - 记录一次读取的 ECC bit 数，更新趋势
@@ -96,15 +68,13 @@ void rr_init(ftl_read_recovery_t *rr,
  * 企业级做法：每次 read 完成后记录 ecc_bits，
  * 连续上升 → warning → critical → 触发搬移。
  *
- * @param rr       Read Recovery 上下文
- * @param block    Block 编号
- * @param ecc_bits 本次读取的 ECC 纠正 bit 数（取 4 CW 中的最大值）
+ * @param track       per-Block ECC 追踪（&ftl->alloc.blocks[gblock].rr）
+ * @param ecc_bits    本次读取的 ECC 纠正 bit 数（取 4 CW 中的最大值）
  * @param total_writes 当前写入总次数（用于时间戳）
  */
-void rr_record_ecc(ftl_read_recovery_t *rr,
-                   uint16_t             block,
-                   uint8_t              ecc_bits,
-                   uint32_t             total_writes);
+void rr_record_ecc(rr_ecc_track_t *track,
+                   uint8_t         ecc_bits,
+                   uint32_t        total_writes);
 
 /*
  * rr_recover_read - 读取失败后的恢复尝试
@@ -139,19 +109,19 @@ int rr_recover_read(ftl_read_recovery_t *rr,
  * ECC 趋势连续上升 ≥ RR_ECC_RISING_THRESHOLD 次
  * 或单次 ECC ≥ RR_ECC_HIGH_WATER → 返回该 Block。
  *
- * @param rr    Read Recovery 上下文
- * @param block 输出：需搬移的 Block 编号
+ * @param blocks    Block State Table（全表）
+ * @param max_blocks 表大小（FTL_BLOCK_TOTAL）
+ * @param gblock    输出：需搬移的全局 Block 编号
  * @return 1 需要搬移，0 不需要
  */
-int rr_check_predictive(ftl_read_recovery_t *rr, uint16_t *block);
+int rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t *gblock);
 
 /*
  * rr_get_health - 获取 Block 健康状态
  *
- * @param rr    Read Recovery 上下文
- * @param block Block 编号
+ * @param track per-Block ECC 追踪（&blocks[gblock].rr）
  * @return rr_block_health_t
  */
-rr_block_health_t rr_get_health(const ftl_read_recovery_t *rr, uint16_t block);
+rr_block_health_t rr_get_health(const rr_ecc_track_t *track);
 
 #endif /* FTL_READ_RECOVERY_H */

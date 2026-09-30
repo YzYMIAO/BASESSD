@@ -43,8 +43,7 @@ typedef struct
     uint8_t  found : 1;               /* 是否找到 victim */
     uint16_t plane_blocks[PLANE_NUM]; /* 双 Plane Block 号 */
     uint32_t avg_erase;               /* victim 平均擦除次数 */
-    uint16_t valid_pages;             /* 有效页数 */
-    uint8_t  next_page;               /* 写入进度（复用 GC 间接获取 next_page） */
+    uint16_t valid_pages;             /* 有效页数（双 Plane VPC 之和） */
 } wl_victim_t;
 
 /* ── 接口 ── */

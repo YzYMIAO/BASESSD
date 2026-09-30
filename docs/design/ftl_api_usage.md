@@ -107,16 +107,17 @@ typedef struct
 typedef struct
 {
     ftl_topology_t  topo;           /* 本 FTL 绑定的 NAND 芯片路由（ch/ce/lun） */
-    uint16_t       *free_blocks;    /* free block 数组（由调用者提供存储） */
+    uint16_t       *free_blocks;    /* free block 数组（全局块号，由调用者提供存储） */
     uint16_t        free_count;     /* free block 数 */
-    uint16_t       *bad_blocks;     /* bad block 数组（由调用者提供存储） */
-    uint32_t       *erase_counts;   /* 擦除次数数组（由调用者提供存储） */
+    ftl_block_t    *blocks;         /* Block State Table（v0.32，容量 FTL_BLOCK_TOTAL，必填） */
     super_block_t  *closed_sb_list; /* closed Super Block 数组（由调用者提供存储） */
 } ftl_init_params_t;
 ```
 
 > **v0.30**：`ftl_init` / `allocator_init` 形参 7→2 / 8→2，统一收敛为
 > `(ftl_context_t *ftl, const ftl_init_params_t *params)`。
+> **v0.32**：`bad_blocks` / `erase_counts` 两指针**删除**——per-block 状态统一进
+> `ftl_block_t *blocks`（BST 单数据源），坏块位 + 擦除计数 + VPC + 位图 + ECC 全在表内。
 > **定义位置**：`ftl_init_params_t` 依赖 `super_block_t`（allocator.h 定义），放
 > `common/ftl_types.h` 会与 allocator.h 形成循环 include → 定位于 `allocator.h`（super_block_t 之后）。
 > 启动示例见 §1.7（`ftl_init(&ftl, &params)`）。
@@ -302,24 +303,24 @@ fc_init();                              // ① FC 初始化
 ftl_context_t ftl;
 
 /* 供 FTL 使用的静态数组（由调用者提供存储） */
-static uint16_t g_free_blocks[BLOCKS_PER_PLANE * PLANE_NUM];
-static uint16_t g_bad_blocks[BLOCKS_PER_PLANE * PLANE_NUM];
-static uint32_t g_erase_counts[BLOCKS_PER_PLANE * PLANE_NUM];
+static uint16_t     g_free_blocks[BLOCKS_PER_PLANE * PLANE_NUM];  /* 全局块号 */
 static super_block_t g_closed_sb_list[SUPER_BLOCK_LIST_MAX];
+static ftl_block_t  g_blocks[FTL_BLOCK_TOTAL];  /* v0.32: Block State Table（56B×4096=224KB） */
 
 ftl_init_params_t params = {
     .topo           = {0, 0, 0},                      // 拓扑（当前单芯片 ch/ce/lun）
     .free_blocks    = g_free_blocks,
     .free_count     = BLOCKS_PER_PLANE * PLANE_NUM,   // 出厂扫描后实际好块数
-    .bad_blocks     = g_bad_blocks,
-    .erase_counts   = g_erase_counts,
+    .blocks         = g_blocks,                       // v0.32: BST（必填，未提供则 ftl_init 失败）
     .closed_sb_list = g_closed_sb_list,
 };
 
 ftl_init(&ftl, &params);                // ② FTL 初始化（v0.30：结构体指针传参）
                                         //    内部：completion_table_init → pending_init
-                                        //         → l2p_cache_init → allocator_init(&ftl->alloc, params)
-                                        //         → metadata_dir_load → bbt_init
+                                        //         → BST memset（v0.32）→ l2p_cache_init
+                                        //         → allocator_init(&ftl->alloc, params)
+                                        //         → metadata_dir_load → bbt_init（填充 BST bad 位）
+                                        //    BST 由调用者提供存储，未提供（NULL）→ FTL_ERROR
 
 /* 主循环（企业级异步模式） */
 while (1) {
@@ -548,9 +549,8 @@ typedef struct {
     super_block_t cold_sb;              // Cold Open Super Block
     super_block_t *closed_sb_list;      // Closed SB 数组
     uint16_t    closed_sb_count;
-    uint32_t   *erase_counts;           // 擦除次数数组
-    uint16_t   *bad_blocks;             // 坏块数组
-    uint16_t    bad_count;
+    ftl_block_t *blocks;               // Block State Table（v0.32，含 erase_count/valid_map/state/bad_reason/rr）
+    uint16_t    bad_count;             // 坏块数
     uint16_t    spare_pool_count;
 } ftl_allocator_t;
 ```

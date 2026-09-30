@@ -382,6 +382,9 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
      * 注意：使用标准 BCH ECC 读，如果页已写但 ECC 失败，
      * 返回 -1 表示该页非空白。全 0xFF 的未写页在 LDPC_RAW 下
      * 读出的数据也全 0xFF。
+     *
+     * 同时重建 BST 有效页位图：扫描到的非空页置位（掉电后
+     * bitmap/VPC 是 RAM 态，冷启动为零，必须从这里重建）。
      */
     for (page = 0U; page < PAGES_PER_BLOCK; page++)
     {
@@ -427,6 +430,20 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
                 {
                     sb->next_page = page;
                     return;
+                }
+            }
+
+            /* 非空页：写指针之前的数据页，重建 BST 有效位图 + 置 OPEN 状态 */
+            if (alloc->blocks != NULL)
+            {
+                uint16_t    gblock = ftl_gblock(plane, sb->plane_blocks[plane]);
+                ftl_block_t *b     = &alloc->blocks[gblock];
+
+                ftl_block_set_valid(b, plane, page);
+                if (!ftl_block_is_bad(b))
+                {
+                    ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
+                    ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED);
                 }
             }
 

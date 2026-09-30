@@ -8,10 +8,11 @@
 #include <string.h>
 
 /*
- * BBT 内部 SRAM 缓存（全局单例，运行时用）。
- * 出厂扫描或加载时填充，bbt_mark_bad 时同步更新。
+ * BBT 内部状态（全局单例）。
+ * 坏块位图已并入 ftl_block_t.state（Block State Table 单数据源），
+ * NAND 持久化仍用紧凑 bad_map[512] 格式（bbt_header_t，一字不改），
+ * bbt_save 时从 BST 重建 bitmap。
  */
-static uint8_t  g_bbt_bitmap[BBT_BITMAP_SIZE]; /* 4096 bit = 512B */
 static uint32_t g_bbt_sequence = 0U;           /* 当前 sequence */
 static int      g_bbt_dirty    = 0;            /* 是否有未写回 NAND 的变更 */
 
@@ -224,37 +225,42 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
         return FTL_ERROR;
     }
 
-    memset(g_bbt_bitmap, 0, sizeof(g_bbt_bitmap));
     g_bbt_sequence = 0U;
     g_bbt_dirty    = 0;
 
     /* 尝试从 NAND 加载已存在的 BBT */
     {
+        uint8_t tmp_bad_map[BBT_BITMAP_SIZE];
+
         ftl_topology_t topo = { .ch = alloc->ch, .ce = alloc->ce, .lun = alloc->lun };
-        ret = bbt_load(g_bbt_bitmap, &loaded_bad_count, &seq, topo);
-    }
-    if (ret == 0)
-    {
-        uint16_t block;
-        uint16_t bad_idx = 0U;
-
-        g_bbt_sequence   = seq;
-        alloc->bad_count = (uint16_t)loaded_bad_count;
-
-        /* 重建 alloc->bad_blocks 数组 */
-        for (block = 0U; block < BBT_MAX_BLOCKS; block++)
+        ret = bbt_load(tmp_bad_map, &loaded_bad_count, &seq, topo);
+        if (ret == 0)
         {
-            if (bbt_is_bad(g_bbt_bitmap, block))
+            uint16_t gblock;
+            uint16_t bad_idx = 0U;
+
+            g_bbt_sequence   = seq;
+            alloc->bad_count = (uint16_t)loaded_bad_count;
+
+            /* 从 NAND bitmap 重建 BST is_bad 位（单数据源） */
+            for (gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
             {
-                if (bad_idx < BLOCKS_PER_PLANE * PLANE_NUM)
+                if (bbt_is_bad(tmp_bad_map, gblock))
                 {
-                    alloc->bad_blocks[bad_idx++] = block;
+                    ftl_block_set_bad(&alloc->blocks[gblock]);
+                    ftl_block_set_bad_reason(&alloc->blocks[gblock],
+                                             (uint8_t)FTL_BLOCK_BAD_FACTORY);
+                    ftl_block_state_clr(&alloc->blocks[gblock],
+                                        FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
+                                        FTL_BLOCK_STATE_FREE);
+                    ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
+                    bad_idx++;
                 }
             }
-        }
-        alloc->bad_count = bad_idx;
+            alloc->bad_count = bad_idx;
 
-        return FTL_OK;
+            return FTL_OK;
+        }
     }
 
     /* 无有效 BBT → 执行出厂扫描 */
@@ -263,7 +269,7 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
 
 int bbt_scan_factory(ftl_allocator_t *alloc)
 {
-    uint16_t block;
+    uint16_t gblock;
     uint16_t bad_idx = 0U;
 
     if (alloc == NULL)
@@ -271,7 +277,6 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
         return FTL_OK;
     }
 
-    memset(g_bbt_bitmap, 0, sizeof(g_bbt_bitmap));
     g_bbt_dirty = 0;
 
     /*
@@ -287,20 +292,24 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
      *   可能是空块的特征，不是坏块特征。真正的 OOB 检测需要
      *   FC 层扩展 spare 区读取功能。
      */
-    for (block = 0U; block < BBT_MAX_BLOCKS; block++)
+    for (gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
     {
         uint8_t     raw_buf[PAGE_SIZE];
         nand_addr_t page_addr0;
         int         ret0;
 
         /* 跳过 Block 0（出厂总是好块）*/
-        if (block == 0U)
+        if (gblock == 0U)
         {
             continue;
         }
 
-        /* 尝试读 Page 0（只检查 Plane 0） */
-        page_addr0 = addr_from_paa(alloc->ch, alloc->ce, paa_make(0U, 0U, block, 0U, 0U));
+        /* 尝试读 Page 0（全局号 → 各 Plane 的物理块号） */
+        {
+            uint8_t plane = (uint8_t)(gblock / BLOCKS_PER_PLANE);
+            uint16_t block = (uint16_t)(gblock % BLOCKS_PER_PLANE);
+            page_addr0 = addr_from_paa(alloc->ch, alloc->ce, paa_make(0U, plane, block, 0U, 0U));
+        }
 
         memset(raw_buf, 0xFF, sizeof(raw_buf));
         ret0 = sync_read_page_raw(page_addr0, raw_buf);
@@ -324,11 +333,14 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
         /* 保守策略：读取出错就标记坏块 */
         if (ret0 != 0)
         {
-            bbt_set_bad(g_bbt_bitmap, block);
-            if (bad_idx < BLOCKS_PER_PLANE * PLANE_NUM)
-            {
-                alloc->bad_blocks[bad_idx++] = block;
-            }
+            ftl_block_set_bad(&alloc->blocks[gblock]);
+            ftl_block_set_bad_reason(&alloc->blocks[gblock],
+                                     (uint8_t)FTL_BLOCK_BAD_FACTORY);
+            ftl_block_state_clr(&alloc->blocks[gblock],
+                                FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
+                                FTL_BLOCK_STATE_FREE);
+            ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
+            bad_idx++;
         }
     }
 
@@ -341,19 +353,26 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
     return (int)bad_idx;
 }
 
-ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t block)
+ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock, uint8_t reason)
 {
-    if ((alloc == NULL) || (block >= BBT_MAX_BLOCKS))
+    if ((alloc == NULL) || (gblock >= BBT_MAX_BLOCKS) || (alloc->blocks == NULL))
     {
         return FTL_ERROR;
     }
 
-    /* BBT bitmap 置位（RAM only — 后台 bbt_flush 持久化到 NAND） */
-    bbt_set_bad(g_bbt_bitmap, block);
+    /* BST is_bad 置位（单数据源，后台 bbt_flush 持久化到 NAND）。
+     * 同时清空有效页位图——坏块后该块不会再产生有效页，
+     * 残留的 VPC/bitmap 会让 GC/WL 误判其为可回收块。
+     * 记录坏块原因（FACTORY/PROGRAM/ERASE/READ/GC_MOVE/TRIM）。 */
+    ftl_block_set_bad(&alloc->blocks[gblock]);
+    ftl_block_set_bad_reason(&alloc->blocks[gblock], reason);
+    ftl_block_clear_valid(&alloc->blocks[gblock]);
+    ftl_block_state_clr(&alloc->blocks[gblock],
+                        FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
+                        FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);
+    ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
+    alloc->bad_count++;
     g_bbt_dirty = 1;
-
-    /* allocator 侧记录（不再分配此 block） */
-    allocator_mark_bad(alloc, block);
 
     /* 不再同步调 bbt_save() — NAND BBT 持久化由后台 bbt_flush 批量执行 */
 
@@ -382,7 +401,17 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc)
     header.total_blocks = BBT_MAX_BLOCKS;
     header.bad_count    = alloc->bad_count;
 
-    memcpy(header.bad_map, g_bbt_bitmap, BBT_BITMAP_SIZE);
+    /* 从 BST 重建 NAND 持久化 bitmap（NAND 格式一字不改） */
+    {
+        uint16_t gblock;
+        for (gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
+        {
+            if (ftl_block_is_bad(&alloc->blocks[gblock]))
+            {
+                bbt_set_bad(header.bad_map, gblock);
+            }
+        }
+    }
 
     /* CRC（crc 字段置 0 后计算） */
     header.crc = 0U;

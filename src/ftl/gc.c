@@ -1,6 +1,7 @@
 #include "ftl/gc.h"
 
 #include "fc/fc.h"
+#include "ftl/bbt.h"
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/journal.h"
 #include "nand/onfi_1_0.h"
@@ -214,41 +215,75 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
     return FTL_OK;
 }
 
-void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim)
+void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t now)
 {
     uint8_t plane;
+    uint16_t closed_idx;
 
     if ((alloc == NULL) || (victim == NULL) || (victim->valid != 0U))
     {
         return;
     }
 
+    closed_idx = 0U;
+    if (alloc->closed_sb_count > 0U)
+    {
+        /* 定位 victim 在 closed_sb_list 中的索引（通过 plane_blocks[0] 比对） */
+        for (closed_idx = 0U; closed_idx < alloc->closed_sb_count; closed_idx++)
+        {
+            if (alloc->closed_sb_list[closed_idx].plane_blocks[0] == victim->plane_blocks[0])
+            {
+                break;
+            }
+        }
+        if (closed_idx >= alloc->closed_sb_count)
+        {
+            /* 未找到：可能是 WL 临时 SB，无需移除列表 */
+            closed_idx = UINT16_MAX;
+        }
+    }
+    else
+    {
+        closed_idx = UINT16_MAX;
+    }
+
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        uint16_t   block;
+        uint16_t    gblock;
         nand_addr_t block_addr;
         int         ret;
 
-        block      = victim->plane_blocks[plane];
+        gblock     = ftl_gblock(plane, victim->plane_blocks[plane]);
         block_addr = super_block_page_addr(victim, plane, 0U);
 
         ret = sync_erase_block(block_addr);
         if (ret == 0)
         {
-            alloc->erase_counts[block]++;
-            allocator_free_block(alloc, block);
+            /* 擦除成功：擦除计数 +1，记录最近擦除时间戳（单调写入量），bitmap/VPC 归零，归还 Free Pool */
+            alloc->blocks[gblock].erase_count++;
+            alloc->blocks[gblock].last_pe_ts = now;
+            ftl_block_clear_valid(&alloc->blocks[gblock]);
+            allocator_free_block(alloc, gblock);
         }
         else
         {
-            allocator_mark_bad(alloc, block);
+            /* 擦除失败：标记坏块（BBT 单数据源，后台持久化） */
+            (void)bbt_mark_bad(alloc, gblock, (uint8_t)FTL_BLOCK_BAD_ERASE);
         }
+    }
+
+    /* 从 Closed 列表移除已回收条目（swap-remove）—— 修复 closed_sb_count 只增不减导致的
+     * 列表爆炸 + 已回收 SB 被再次选为 victim 的无限 GC 空转 */
+    if (closed_idx != UINT16_MAX)
+    {
+        allocator_remove_closed_sb(alloc, closed_idx);
     }
 }
 
 int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 {
     uint16_t i;
-    uint16_t best_valid = PAGES_PER_BLOCK + 1U;
+    uint16_t best_valid = PLANE_NUM * PAGES_PER_BLOCK + 1U;
     int      found      = 0;
 
     if ((alloc == NULL) || (victim == NULL))
@@ -259,15 +294,24 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
     for (i = 0U; i < alloc->closed_sb_count; i++)
     {
         super_block_t *sb = &alloc->closed_sb_list[i];
+        uint16_t       valid;
+        uint8_t        p;
 
         if (sb->valid != 0U)
         {
             continue;
         }
 
-        if (sb->next_page < best_valid)
+        /* 有效页数 = 双 Plane 各物理块 VPC 之和（真实计数，替代 next_page 近似） */
+        valid = 0U;
+        for (p = 0U; p < PLANE_NUM; p++)
         {
-            best_valid = sb->next_page;
+            valid = (uint16_t)(valid + alloc->blocks[ftl_gblock(p, sb->plane_blocks[p])].valid_count);
+        }
+
+        if (valid < best_valid)
+        {
+            best_valid = valid;
             *victim    = sb;
             found      = 1;
         }
@@ -279,7 +323,6 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *journal, super_block_t *victim)
 {
     uint8_t  plane;
-    uint8_t  page;
     uint32_t migrated = 0U;
 
     if ((alloc == NULL) || (cache == NULL) || (victim == NULL))
@@ -289,58 +332,81 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
 
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        for (page = 0U; page < victim->next_page; page++)
+        uint16_t    gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
+        uint64_t    valid_map  = alloc->blocks[gblock_src].valid_map[plane];
+
+        /*
+         * 直接扫有效页位图：只搬置位页，跳过无效页（空洞/已覆盖）。
+         * 相比逐页读 NAND META + L2P 反查，省去无效页的 NAND 读。
+         */
+        while (valid_map != 0ULL)
         {
-            uint8_t    buf[2048];
-            lba_t      lba;
-            nand_pba_t pba;
-            nand_pba_t old_pba;
-            nand_pba_t new_pba;
-            int        ret;
+            uint8_t page = (uint8_t)__builtin_ctzll(valid_map);
+            valid_map &= (valid_map - 1ULL); /* 清最低置位 bit */
 
-            pba = super_block_page_pba(alloc->ch, alloc->ce, victim, plane, page);
-
-            /* 读页 + 获取 LBA + 验证有效性（一步完成） */
-            memset(buf, 0, sizeof(buf));
-            if (gc_read_page_with_lba(pba, buf, &lba) != 0)
             {
-                continue; /* 读失败，跳过 */
-            }
+                uint8_t    buf[2048];
+                lba_t      lba;
+                nand_pba_t pba;
+                nand_pba_t old_pba;
+                nand_pba_t new_pba;
+                int        ret;
 
-            /* 查 L2P：当前映射是否仍指向本 PBA */
-            old_pba = l2p_cache_read(cache, lba);
-            if (old_pba != pba)
-            {
-                continue; /* 已被覆盖，无效页 */
-            }
+                pba = super_block_page_pba(alloc->ch, alloc->ce, victim, plane, page);
 
-            /* 分配新 PBA（Cold Super Block） */
-            new_pba = allocator_alloc(alloc, FTL_TEMP_COLD);
-            if (new_pba == NAND_PBA_INVALID)
-            {
-                break;
-            }
+                /* 读页 + 获取 LBA + 验证有效性（bitmap 已保证置位，此处只取 LBA） */
+                memset(buf, 0, sizeof(buf));
+                if (gc_read_page_with_lba(pba, buf, &lba) != 0)
+                {
+                    continue; /* 读失败，跳过 */
+                }
 
-            /* 写用户数据到新位置 */
-            {
-                nand_addr_t waddr = addr_from_pba(new_pba);
-                ret = sync_write_page(waddr, buf, sizeof(buf), FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_GC, (lba_t)lba);
-            }
-            if (ret != 0)
-            {
-                continue;
-            }
+                /* 查 L2P：当前映射是否仍指向本 PBA（bitmap 与 L2P 双校验） */
+                old_pba = l2p_cache_read(cache, lba);
+                if (old_pba != pba)
+                {
+                    /* 已被覆盖，无效页 → 清 bitmap 保持同步 */
+                    ftl_block_clr_valid(&alloc->blocks[gblock_src], plane, page);
+                    continue;
+                }
 
-            /* 更新 L2P Cache */
-            l2p_cache_write(cache, lba, new_pba);
+                /* 分配新 PBA（Cold Super Block） */
+                new_pba = allocator_alloc(alloc, FTL_TEMP_COLD);
+                if (new_pba == NAND_PBA_INVALID)
+                {
+                    break;
+                }
 
-            /* Journal 记录 */
-            if (journal != NULL)
-            {
-                journal_append(journal, lba, old_pba, new_pba);
+                /* 写用户数据到新位置 */
+                {
+                    nand_addr_t waddr = addr_from_pba(new_pba);
+                    ret = sync_write_page(waddr, buf, sizeof(buf), FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_GC, (lba_t)lba);
+                }
+                if (ret != 0)
+                {
+                    continue;
+                }
+
+                /* 更新 L2P Cache */
+                l2p_cache_write(cache, lba, new_pba);
+
+                /* Journal 记录 */
+                if (journal != NULL)
+                {
+                    journal_append(journal, lba, old_pba, new_pba);
+                }
+
+                /* VPC/bitmap 维护：源块清位，新块置位（单点更新防漂移） */
+                ftl_block_clr_valid(&alloc->blocks[gblock_src], plane, page);
+                ftl_block_set_valid(&alloc->blocks[ftl_pba_gblock(new_pba)],
+                                    (uint8_t)pba_to_plane(new_pba),
+                                    (uint8_t)pba_to_page(new_pba));
+
+                /* GC 搬移代数：新块记录被搬过一次 */
+                alloc->blocks[ftl_pba_gblock(new_pba)].gc_generation++;
+
+                migrated++;
             }
-
-            migrated++;
         }
     }
 

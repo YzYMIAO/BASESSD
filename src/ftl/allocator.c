@@ -39,13 +39,25 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
     alloc->closed_sb_list  = params->closed_sb_list;
     alloc->closed_sb_count = 0U;
 
-    /* 磨损信息 */
-    alloc->erase_counts = params->erase_counts;
-
-    /* 坏块 */
-    alloc->bad_blocks       = params->bad_blocks;
+    /* Block State Table（每 Block 状态统一承载；由调用者提供存储） */
+    alloc->blocks           = params->blocks;
     alloc->bad_count        = 0U;
     alloc->spare_pool_count = 0U;
+
+    /* 状态机初始：未坏块默认 FREE（坏块由 bbt_init 置 BAD） */
+    if (alloc->blocks != NULL)
+    {
+        uint16_t i;
+        for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
+        {
+            ftl_block_t *b = &alloc->blocks[i];
+            if (!ftl_block_is_bad(b))
+            {
+                ftl_block_state_set(b, FTL_BLOCK_STATE_FREE);
+                ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+            }
+        }
+    }
 
     return FTL_OK;
 }
@@ -68,14 +80,20 @@ static uint16_t allocator_select_block(ftl_allocator_t *alloc)
 
     for (i = 0U; i < alloc->free_count; i++)
     {
-        uint16_t block = alloc->free_blocks[i];
-        uint32_t ec    = alloc->erase_counts[block];
+        uint16_t    gblock = alloc->free_blocks[i];
+        ftl_block_t *blk   = &alloc->blocks[gblock];
 
-        if (ec < min_erase)
+        /* 防御性跳过坏块（坏块不会出现在 Free Pool，双保险） */
+        if (ftl_block_is_bad(blk))
         {
-            min_erase  = ec;
+            continue;
+        }
+
+        if (blk->erase_count < min_erase)
+        {
+            min_erase  = blk->erase_count;
             best_idx   = i;
-            best_block = block;
+            best_block = gblock;
         }
     }
 
@@ -86,14 +104,77 @@ static uint16_t allocator_select_block(ftl_allocator_t *alloc)
 
 /*
  * 内部工具：从 Open 转移到 Closed 列表
+ *
+ * 注意：sb_id 语义统一为「Closed 列表索引」——块在 Open SB 时 sb_id=UINT16_MAX（占位），
+ * 关闭后指向 closed_sb_list 中的条目索引；GC 回收从列表移除时恢复 UINT16_MAX。
  */
 static void allocator_close_sb(ftl_allocator_t *alloc, super_block_t *sb)
 {
+    uint8_t plane;
+    uint16_t closed_idx = alloc->closed_sb_count;
+
+    /* 写满关闭：两物理块置 CLOSED（清 OPEN），记录反向索引 = closed 列表索引 */
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, sb->plane_blocks[plane])];
+        ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN);
+        ftl_block_state_set(b, FTL_BLOCK_STATE_CLOSED);
+        ftl_block_set_sb(b, closed_idx);
+    }
+
     if (alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX)
     {
         alloc->closed_sb_list[alloc->closed_sb_count++] = *sb;
     }
     sb->valid = 0U;
+}
+
+/*
+ * allocator_remove_closed_sb - GC 回收后从 Closed 列表移除条目（swap-remove，O(1)）
+ *
+ * 不移除会让 closed_sb_count 只增不减 → 列表爆炸 + 已回收 SB 被再次选为 victim
+ * （其 block 已 FREE、VPC=0，select_victim 恒命中）→ 无限 GC 空转。
+ *
+ * @param alloc      Allocator 上下文
+ * @param closed_idx 要移除的 closed 列表索引
+ */
+void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
+{
+    uint8_t plane;
+
+    if ((alloc == NULL) || (closed_idx >= alloc->closed_sb_count))
+    {
+        return;
+    }
+
+    /* 被移除条目的两 block 恢复"未归属"（已由 allocator_free_block 置 FREE + 清 sb_id，
+     * 这里兜底再清一次索引，避免残留） */
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        ftl_block_t *b = &alloc->blocks[ftl_gblock(plane,
+                                                   alloc->closed_sb_list[closed_idx].plane_blocks[plane])];
+        if (ftl_block_sb_id(b) == closed_idx)
+        {
+            ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+        }
+    }
+
+    /* swap-remove：末位条目搬到被移除位，并修正其两 block 的 sb_id */
+    alloc->closed_sb_count--;
+    if (closed_idx != alloc->closed_sb_count)
+    {
+        super_block_t *moved = &alloc->closed_sb_list[closed_idx];
+        *moved              = alloc->closed_sb_list[alloc->closed_sb_count];
+
+        for (plane = 0U; plane < PLANE_NUM; plane++)
+        {
+            ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, moved->plane_blocks[plane])];
+            if (ftl_block_sb_id(b) == alloc->closed_sb_count)
+            {
+                ftl_block_set_sb(b, closed_idx);
+            }
+        }
+    }
 }
 
 nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
@@ -139,6 +220,22 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
         sb->temperature     = temperature;
         sb->valid           = 1U;
 
+        /* 状态机：两物理块置 OPEN（清 FREE/CLOSED）+ 记录温度流 + 反向索引 sb_id
+         * （OPEN 时 sb_id 占位 NO_SB，关闭后由 allocator_close_sb 写 closed 索引） */
+        {
+            uint8_t plane;
+            for (plane = 0U; plane < PLANE_NUM; plane++)
+            {
+                uint16_t    gblock = ftl_gblock(plane, (plane == 0U) ? block0 : block1);
+                ftl_block_t *b     = &alloc->blocks[gblock];
+
+                ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED);
+                ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
+                ftl_block_set_temp(b, temperature);
+                ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+            }
+        }
+
         /* 同步 pre_cond_count：已从 Free Pool 取走 2 个 Block */
         if (alloc->pre_cond_count > 2U)
         {
@@ -159,8 +256,10 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
     return pba;
 }
 
-void allocator_free_block(ftl_allocator_t *alloc, uint16_t block)
+void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
 {
+    ftl_block_t *b;
+
     if (alloc == NULL)
     {
         return;
@@ -168,34 +267,25 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t block)
 
     /*
      * Block 擦除由调用者（gc_erase_and_free）确保在调用本函数前已完成。
-     * 本函数只归还 Block 编号到 Free Pool，并同步 pre_cond_count。
+     * 本函数只归还 Block 编号（全局 Block 号）到 Free Pool，并同步 pre_cond_count。
      */
-    if (alloc->free_count < BLOCKS_PER_PLANE * PLANE_NUM)
+    if (alloc->free_count < FTL_BLOCK_TOTAL)
     {
-        alloc->free_blocks[alloc->free_count++] = block;
+        alloc->free_blocks[alloc->free_count++] = gblock;
     }
+
+    /* 状态机：置 FREE（清 OPEN/CLOSED/TEMP），清反向索引 */
+    b = &alloc->blocks[gblock];
+    ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
+                           FTL_BLOCK_TEMP_MASK);
+    ftl_block_state_set(b, FTL_BLOCK_STATE_FREE);
+    ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 
     /* 所有 Free Pool 中的 Block 都已擦除 → pre_cond_count = free_count */
     alloc->pre_cond_count = alloc->free_count;
 }
 
-void allocator_mark_bad(ftl_allocator_t *alloc, uint16_t block)
-{
-    if (alloc == NULL)
-    {
-        return;
-    }
-
-    /*
-     * SRAM 中记录坏块编号，allocator_select_block 在遍历 Free Pool 时
-     * 不再涉及此 Block。NAND BBT 的持久化写入由 bbt 模块（bad_block_management.c）
-     * 负责，当前为桩。
-     */
-    if (alloc->bad_count < BLOCKS_PER_PLANE * PLANE_NUM)
-    {
-        alloc->bad_blocks[alloc->bad_count++] = block;
-    }
-}
+/* 说明：allocator_mark_bad 已删除——坏块标记统一走 bbt_mark_bad（BBT 单数据源）。 */
 
 int allocator_needs_gc(const ftl_allocator_t *alloc)
 {

@@ -10,7 +10,9 @@
  *   3. 替换机制：Block Sparing — 从 Spare Pool 取好块补充 Free Pool
  *
  * BBT 存储在 NAND Block 36，每份冗余 3 页。
- * bad_map[512] = 4096 bit，覆盖所有 4096 Block。
+ * bad_map[512] = 4096 bit，覆盖所有 4096 Block（NAND 持久化格式，保持不变）。
+ * RAM 运行时坏块位统一存于 ftl_block_t.state（Block State Table 单数据源），
+ * bbt_save 时从 BST 重建 bad_map。
  */
 
 #include "ftl/allocator.h"
@@ -46,12 +48,9 @@ typedef struct
  * bbt_init - BBT 初始化
  *
  * 从 NAND Block 36 加载 BBT。如果无有效 BBT（首次使用），
- * 执行出厂扫描构建初始 BBT。
+ * 执行出厂扫描构建初始 BBT。坏块位写入 alloc->blocks[].state。
  *
- * @param alloc  Allocator 上下文（bad_blocks、bad_count 等输出）
- * @param ch     CH
- * @param ce     CE
- * @param lun    LUN
+ * @param alloc  Allocator 上下文（blocks、bad_count 等输出）
  * @return 0 成功，-1 失败
  */
 ftl_status_t bbt_init(ftl_allocator_t *alloc);
@@ -68,10 +67,7 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc);
  * 设计文档中的 OOB[0] != 0xFF 检测需要 FC 层支持
  * 单独的 OOB/Spare 区读取，当前 fallback 到 ECC 检测。
  *
- * @param alloc   Allocator 上下文（bad_blocks 输出）
- * @param ch      CH
- * @param ce      CE
- * @param lun     LUN
+ * @param alloc   Allocator 上下文（blocks 输出）
  * @return 检测到的坏块数
  */
 int bbt_scan_factory(ftl_allocator_t *alloc);
@@ -79,18 +75,15 @@ int bbt_scan_factory(ftl_allocator_t *alloc);
 /*
  * bbt_mark_bad - 运行时标记坏块
  *
- * ① BBT bitmap 置位
- * ② allocator_mark_bad() — 加入 SRAM bad_blocks 列表
- * ③ bbt_save() — 写回 NAND
- * ④ 从 Spare Pool 补充 Free Pool（保容量水位）
+ * ① ftl_block_t.state 置位 + bad_reason（BST 单数据源）
+ * ② bbt_flush() — 后台写回 NAND
  *
  * @param alloc  Allocator 上下文
- * @param block  坏 Block 编号
- * @param ch     CH
- * @param ce     CE
+ * @param gblock 坏 Block 编号（全局 Block 号）
+ * @param reason 坏块原因（FTL_BLOCK_BAD_*，见 ftl/bst.h）
  * @return 0 成功，-1 失败
  */
-ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t block);
+ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock, uint8_t reason);
 
 /*
  * bbt_is_bad - 查询 Block 是否坏块

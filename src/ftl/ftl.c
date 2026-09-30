@@ -63,11 +63,11 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                                                     data_size);
 
                             /* Read Recovery：记录本次读的 ECC 纠正 bit 数（取 4 CW 最大值），
-                             * 用于慢死预测（连续上升 → WARNING → 主动搬移）。 */
-                            if (ftl->rr.block_track != NULL)
+                             * 用于慢死预测（连续上升 → WARNING → 主动搬移）。
+                             * ECC 历史存于 BST（ftl->alloc.blocks[].rr）。 */
                             {
-                                uint16_t block = (uint16_t)pba_to_block(cmd->paa);
-                                uint8_t  ecc   = 0U;
+                                uint16_t gblock = ftl_pba_gblock(cmd->paa);
+                                uint8_t  ecc    = 0U;
                                 for (uint8_t k = 0U; k < 4U; k++)
                                 {
                                     uint8_t b = (k == 0U) ? (uint8_t)completion->ecc_bit0
@@ -79,7 +79,10 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                                         ecc = b;
                                     }
                                 }
-                                rr_record_ecc(&ftl->rr, block, ecc, ftl->total_writes);
+                                rr_record_ecc(&ftl->alloc.blocks[gblock].rr, ecc, ftl->total_writes);
+
+                                /* read disturb 计数：读成功累加（周期归零由上层维护） */
+                                ftl->alloc.blocks[gblock].read_count++;
                             }
 
                             if (pending->io.status_out != NULL)
@@ -99,6 +102,32 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                                             pending->new_pba);
                             checkpoint_journal_watermark(&pending->ftl->journal);
                             pending->ftl->total_writes++;
+
+                            /* VPC/bitmap 维护：新页置位 + 覆盖写清旧页（单点更新防漂移）
+                             *
+                             * 注意：当前写请求只配置单 Plane 写（new_pba 只含一个 plane 的页）。
+                             * 控制器层 pages=2 的 Multi-Plane 写，实际是发起两条单 Plane PROGRAM
+                             * 到双 Plane（每次 allocator_alloc 取一页、写一侧 plane），
+                             * 所以这里始终只需处理一个 plane 的一页。 */
+                            {
+                                ftl_block_t *nb = &pending->ftl->alloc.blocks[ftl_pba_gblock(pending->new_pba)];
+                                ftl_block_set_valid(nb,
+                                                    (uint8_t)pba_to_plane(pending->new_pba),
+                                                    (uint8_t)pba_to_page(pending->new_pba));
+
+                                /* program 计数：写成功累加（健康模型） */
+                                nb->program_count++;
+
+                                /* 覆盖写：旧页失效（old_pba 有效时） */
+                                if (pending->old_pba != NAND_PBA_INVALID)
+                                {
+                                    ftl_block_t *ob = &pending->ftl->alloc.blocks[ftl_pba_gblock(pending->old_pba)];
+                                    ftl_block_clr_valid(ob,
+                                                        (uint8_t)pba_to_plane(pending->old_pba),
+                                                        (uint8_t)pba_to_page(pending->old_pba));
+                                }
+                            }
+
                             if (pending->io.status_out != NULL)
                             {
                                 *pending->io.status_out = SSD_STATUS_OK;
@@ -140,10 +169,12 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                         else
                         {
                             /* 写失败：标记坏块（RAM only，后台 bbt_flush 持久化） */
-                            uint16_t block = pba_to_block(pending->new_pba);
-                            bbt_mark_bad(&pending->ftl->alloc, block);
+                            (void)bbt_mark_bad(&pending->ftl->alloc,
+                                               ftl_pba_gblock(pending->new_pba),
+                                               (uint8_t)FTL_BLOCK_BAD_PROGRAM);
                             /* L2P 不动 → 自动回滚到 old_pba，旧数据完好 */
                             /* Super Block 空洞由 GC 扫描时自然跳过 */
+                            /* VPC：写失败的新页不计入（写成功才 ++），空洞块 VPC 偏低 → GC 优先回收 */
                         }
                         if (pending->io.status_out != NULL)
                         {
@@ -212,7 +243,7 @@ static void ftl_service_idle(ftl_context_t *ftl)
                 break;
             }
             (void)gc_migrate_sb(&ftl->alloc, &ftl->cache, &ftl->journal, victim);
-            gc_erase_and_free(&ftl->alloc, victim);
+            gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
             target -= 2U;
         }
     }
@@ -253,7 +284,7 @@ static void ftl_service_normal(ftl_context_t *ftl)
         if (gc_select_victim(&ftl->alloc, &victim))
         {
             (void)gc_migrate_sb(&ftl->alloc, &ftl->cache, &ftl->journal, victim);
-            gc_erase_and_free(&ftl->alloc, victim);
+            gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
         }
     }
 
@@ -312,11 +343,15 @@ ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params)
     /* ├─ Pending Request 表 ── */
     pending_init();
 
-    /* ├─ Read Recovery ├─
-     * per-Block ECC 追踪数组由调用者提供（ftl->rr_block_track），
-     * 容量 default = 物理 Block 总数。未提供时 read recovery 空转。 */
-    ftl->rr_max_blocks = (uint16_t)(BLOCKS_PER_PLANE * PLANE_NUM);
-    rr_init(&ftl->rr, ftl->rr_block_track, ftl->rr_max_blocks);
+    /* ├─ Block State Table ├─
+     * per-Block 状态数组由调用者提供（params->blocks），本表是
+     * erase_count / valid_count / state / bad_reason / valid_map / rr
+     * 的统一承载，read recovery 也靠它供电。未提供则初始化失败。 */
+    if (params->blocks == NULL)
+    {
+        return FTL_ERROR;
+    }
+    memset(params->blocks, 0, sizeof(ftl_block_t) * FTL_BLOCK_TOTAL);
 
     /* ├─ L2P Cache ── */
     l2p_cache_init(&ftl->cache);
@@ -597,8 +632,22 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
 
 void ftl_trim(ftl_context_t *ftl, uint64_t lba)
 {
-    if (ftl != NULL)
+    nand_pba_t old_pba;
+
+    if (ftl == NULL)
     {
-        l2p_cache_write(&ftl->cache, (lba_t)lba, FTL_PBA_INVALID);
+        return;
     }
+
+    /* 查旧映射：若非 INVALID，同步清该页的 bitmap/VPC（否则 VPC 虚高，GC 选 victim 不准） */
+    old_pba = l2p_cache_read(&ftl->cache, (lba_t)lba);
+    if (old_pba != NAND_PBA_INVALID)
+    {
+        ftl_block_clr_valid(&ftl->alloc.blocks[ftl_pba_gblock(old_pba)],
+                            (uint8_t)pba_to_plane(old_pba),
+                            (uint8_t)pba_to_page(old_pba));
+    }
+
+    /* 取消 LBA 映射（非阻塞） */
+    l2p_cache_write(&ftl->cache, (lba_t)lba, FTL_PBA_INVALID);
 }

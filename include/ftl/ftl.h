@@ -70,10 +70,8 @@ typedef struct ftl_context
     /* 统计 */
     uint32_t total_writes;
 
-    /* Read Recovery：per-Block ECC 趋势追踪 + 读失败恢复 */
-    ftl_read_recovery_t rr;              /* Read Recovery 上下文 */
-    rr_ecc_track_t     *rr_block_track;  /* per-Block ECC 追踪数组（由调用者提供） */
-    uint16_t            rr_max_blocks;   /* rr_block_track 数组大小 */
+    /* Read Recovery：per-Block ECC 趋势追踪已并入 alloc.blocks[].rr（BST 单数据源） */
+    ftl_read_recovery_t rr; /* Read Recovery 上下文（仅重试计数） */
 } ftl_context_t;
 
 /* ── 接口 ── */

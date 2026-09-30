@@ -66,38 +66,14 @@ static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t leng
     return FTL_OK;
 }
 
-void rr_init(ftl_read_recovery_t *rr,
-             rr_ecc_track_t      *block_track,
-             uint16_t             max_blocks)
+void rr_record_ecc(rr_ecc_track_t *track,
+                   uint8_t         ecc_bits,
+                   uint32_t        total_writes)
 {
-    if (rr == NULL)
+    if (track == NULL)
     {
         return;
     }
-
-    rr->block_track = block_track;
-    rr->max_blocks  = max_blocks;
-    rr->retry_count = 0U;
-
-    if (block_track != NULL)
-    {
-        memset(block_track, 0, sizeof(rr_ecc_track_t) * max_blocks);
-    }
-}
-
-void rr_record_ecc(ftl_read_recovery_t *rr,
-                   uint16_t             block,
-                   uint8_t              ecc_bits,
-                   uint32_t             total_writes)
-{
-    rr_ecc_track_t *track;
-
-    if ((rr == NULL) || (rr->block_track == NULL) || (block >= rr->max_blocks))
-    {
-        return;
-    }
-
-    track = &rr->block_track[block];
 
     /*
      * 环形 buffer 写入当前 ECC bit 数。
@@ -362,22 +338,22 @@ int rr_recover_read(ftl_read_recovery_t *rr,
     return -1;
 }
 
-int rr_check_predictive(ftl_read_recovery_t *rr, uint16_t *block)
+int rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t *gblock)
 {
     uint16_t i;
 
-    if ((rr == NULL) || (rr->block_track == NULL) || (block == NULL))
+    if ((blocks == NULL) || (gblock == NULL))
     {
         return 0;
     }
 
-    for (i = 0U; i < rr->max_blocks; i++)
+    for (i = 0U; i < max_blocks; i++)
     {
-        rr_ecc_track_t *track = &rr->block_track[i];
+        const rr_ecc_track_t *track = &blocks[i].rr;
 
         if (track->health >= RR_BLOCK_CRITICAL)
         {
-            *block = i;
+            *gblock = i;
             return 1;
         }
     }
@@ -385,12 +361,12 @@ int rr_check_predictive(ftl_read_recovery_t *rr, uint16_t *block)
     return 0;
 }
 
-rr_block_health_t rr_get_health(const ftl_read_recovery_t *rr, uint16_t block)
+rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
 {
-    if ((rr == NULL) || (rr->block_track == NULL) || (block >= rr->max_blocks))
+    if (track == NULL)
     {
         return RR_BLOCK_HEALTHY;
     }
 
-    return (rr_block_health_t)rr->block_track[block].health;
+    return (rr_block_health_t)track->health;
 }

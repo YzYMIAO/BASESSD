@@ -40,6 +40,8 @@
 | v0.28 | 2026-09-30 | 地址体系双层化 + 形参优化 Step 1/2：新增 nand_addr_t（展开地址）与 pba_from_addr/addr_from_pba/addr_from_paa 双向转换，遍历路径不再 pba_make 打包→拆包；super_block_t 加 ftl_topology_t topo + super_block_page_addr；ftl_fc_interface.h 新增 addr_to_cmd 直填；删除 ftl_internal_read/write_page/erase_block/read_page_raw 四个包装（-232 行），各模块内联为 static sync 助手；新建 ftl_types.h（ftl_io_request_t/ftl_init_params_t 供 Step 3/4）；随机 IO 路径 ftl_cmd_setup_ppa 保留 | Claude |
 | v0.29 | 2026-09-30 | 形参优化 Step 3：ftl_submit_read/write 改 (ftl, req) 结构体传参（8 形参→2，ftl_io_request_t）；ftl_pending_req_t 按值嵌入 ftl_io_request_t io（pending_add 12 形参→6）；pending_cb_t 从 pending.h 迁至 ftl_types.h 打破循环 include；ssd_request_t 增加 ftl_io_request_t io 复用模板（单块直填，拆分循环内只改 lba/buffer/pages） | Claude |
 | v0.30 | 2026-09-30 | 形参优化 Step 4：ftl_init / allocator_init 改 ftl_init_params_t 结构体指针传参（7/8 形参→2）；ftl_init_params_t 定义于 allocator.h（依赖 super_block_t，避免 ftl_types.h↔allocator.h 循环 include）；ftl_types.h 收敛为 pending_cb_t + ftl_io_request_t | Claude |
+| v0.31 | 2026-09-30 | **P-A 多 LUN 并发前置**：Pending 表 + Completion Table 扩容（8→32）；元数据 lun 泛化；ECC 返回链路打通（fc_ldpc_decode err_bits）；read recovery 接入（rr_block_track 空转待供电） | Claude |
+| v0.32 | 2026-09-30 | **Block State Table（BST）统一 per-block 结构体数组**：新建 ftl/bst.h；合并 erase_counts/bad_blocks/g_bbt_bitmap/rr_block_track 四张分散表为 ftl_block_t[4096] 单数组（56B/项=224KB 全常驻 SRAM）；修复 3 处全局/per-plane 块号碰撞 bug（ftl_gblock 单点转换）；read recovery 由空转变为供电；逐页有效位图 valid_map + VPC 全真值维护（写/覆盖/GC迁移/擦除/trim/坏块/掉电七点闭环）；GC/WL 迁移扫位图免 NAND 读（P-C.5 落地）；行业全字段补全（状态机/温度/坏块原因/read&program 计数/last_pe_ts/gc_generation/sb_id 反向索引）；PFR 掉电 closed_sb_list 重建留二期 | Claude |
 
 ---
 
@@ -165,15 +167,19 @@ BAST（Block Associative Sector Translation）和 FAST（Fully Associative Secto
 
 ### 2.3 SRAM 预算
 
+> **v0.32 更新**：Block State Table（BST）统一 per-block 承载后，FTL 元数据从 ~45KB 增至 ~220KB
+> （56B × 4096 = 224KB BST，含逐页有效位图 valid_map 64KB + ECC 历史 rr 64KB + 状态机/温度/计数等）。
+> 全常驻 SRAM（功能优先），剩余 ~537KB；DRAM-less 产品化裁剪路径（档三：核心 SRAM + 扩展 NAND）见 §19。
+
 | 占用方 | 大小 | 占比 |
 |--------|------|------|
 | FC 控制结构（Pool + Queue） | ~77 KB | 7.5% |
 | L2P Cache (64 regions) | ~131 KB | 12.8% |
-| FTL 元数据（allocator + bitmap + BBT + 擦除计数） | ~45 KB | 4.4% |
+| FTL 元数据（allocator + BST + BBT） | ~220 KB | 21.5% |
 | Journal 缓冲 | ~2 KB | 0.2% |
 | 栈 + 其他运行时 | ~32 KB | 3.1% |
-| **小计** | **~287 KB** | **28%** |
-| 剩余（Firmware / 其他） | ~737 KB | 72% |
+| **小计** | **~462 KB** | **45%** |
+| 剩余（Firmware / 其他） | ~537 KB | 52% |
 | **总计** | **1 MB** | **100%** |
 
 ### 2.4 SDRAM（8MB）用途
@@ -1134,6 +1140,106 @@ TLC（3000~5000 P/E，~400GB 容量）：
 | WL_MIN_INTERVAL | 1000 writes | 两次 WL 最小间隔 |
 | WL_MIN_VALID_RATIO | 70% | 只搬有效页 ≥ 70% 的冷 Block |
 | WL_BUDGET_SB | 1 SB/cycle | 每轮最多搬 1 个 Super Block |
+
+---
+
+## 4.9 Block State Table（BST）— 统一 per-block 结构体数组
+
+> **v0.32 新增**。实现：`include/ftl/bst.h`，`ftl_block_t[4096]`（56B/项 = 224KB，全常驻 SRAM）。
+
+### 4.9.1 背景：分散 per-block 元数据的统一
+
+v0.31 前 per-block 信息分散四张表，无统一承载，且存 3 处全局/per-plane 块号碰撞 bug：
+
+| 现有信息 | 存放 | 粒度 | 问题 |
+|---|---|---|---|
+| 擦除次数 | `allocator->erase_counts[]` | 每 block | plane1 与 plane0 索引碰撞（gc.c:238 用 per-plane 号） |
+| 坏块 RAM 列表 | `bad_blocks[]`+`bad_count` | 每 block | 与 bbt bitmap 双写可能漂移 |
+| 坏块持久化位图 | `g_bbt_bitmap[512]` | 每 block 1bit | 独立 static 单例，非单数据源 |
+| 有效页数 | 无——GC/WL 用 `sb->next_page` 近似 | 每 SB | 非真值，选 victim 不准 |
+| ECC 趋势 | `rr_ecc_track_t[]`（未分配） | 每 block | read recovery 空转 |
+| 温度 | 仅 `super_block_t.temperature` | 每 SB | block 关闭后 GC/WL 不读 |
+| 块状态 | 散落（free_blocks/sb->valid） | — | 块不知道自己状态 |
+
+**3 处块号碰撞 bug（已修复）**：
+1. `gc_erase_and_free` 用 per-plane 号索引 4096 容量数组 → 2048..4095 从未被写
+2. `allocator_select_block` 用 `free_blocks[i]`（per-plane 号）索引 erase_counts → 同样碰撞
+3. `bbt_scan_factory` `block` 走到 4095 被 11bit 掩码截断 → 重复扫 plane0
+
+修复：`ftl_gblock(plane, block) = plane * BLOCKS_PER_PLANE + block` 单点转换，全部索引统一全局块号。
+
+### 4.9.2 结构（行业 Block Info Table 标准形态）
+
+```c
+typedef struct {
+    uint32_t       erase_count;          /* 4B  @0   擦除次数 */
+    uint32_t       last_pe_ts;           /* 4B  @4   最近擦除时间戳（WL 冷热避聚） */
+    uint16_t       read_count;           /* 2B  @8   read disturb 计数 */
+    uint16_t       program_count;        /* 2B  @10  program 计数（健康模型） */
+    uint16_t       valid_count;          /* 2B  @12  双 Plane 合计有效页 0..128 */
+    uint16_t       state;                /* 2B  @14  状态机+温度（bitmask 宏） */
+    uint8_t        bad_reason;           /* 1B  @16  坏块原因 */
+    uint8_t        gc_generation;        /* 1B  @17  GC 搬移代数 */
+    uint16_t       sb_id;                /* 2B  @18  block→SB 反向索引 */
+    uint16_t       _pad;                 /* 2B  @20  对齐 */
+    uint64_t       valid_map[PLANE_NUM]; /* 16B @24  per-Plane 逐页有效位图 */
+    rr_ecc_track_t rr;                   /* 16B @40  ECC 健康历史 */
+} ftl_block_t;                           /* 56B → 4096×56 = 224KB */
+```
+
+**`state` 位域**（bitmask 宏 + 访问器，非 C 位域——嵌入式可移植）：
+
+```
+bit0  BAD        bit1  OPEN      bit2  CLOSED    bit3  FREE
+bit4  RESERVED   bit5  TEMP_HOT  bit6  TEMP_COLD bit7  PRE_COND
+bit8  EMERGENCY  bit9-15 预留
+```
+
+**坏块原因**（`bad_reason` 独立 1B）：`FACTORY / PROGRAM / ERASE / READ / GC_MOVE / TRIM`
+
+### 4.9.3 与消费级/企业级对比
+
+| 维度 | 本方案（v0.32） | 消费级 DRAM-less（Phison/SMI/Realtek） | 企业级（Samsung/Solidigm） |
+|------|-----------------|--------------------------------------|---------------------------|
+| 粒度 | 物理 Block 全局号索引 | 物理 Block BIT | 物理 Block Descriptor |
+| 状态机 | BAD/OPEN/CLOSED/FREE + 分级 | FREE/OPEN/CLOSED/BAD | 多级 + 迁移代数 |
+| VPC | `valid_count` 计数 + `valid_map` 逐页位图 | VPC + bitmap（可选） | VPC + bitmap |
+| 坏块原因 | 独立 `bad_reason` | 位域 2-4bit | 位域 + 日志 |
+| 温度 | block 级 HOT/COLD 位 | block 级温区位 | 多级温度流 |
+| read disturb | `read_count` 2B（预铺） | 部分有 | 有（读计数触发搬移） |
+| 反向索引 | `sb_id` | 有（SB→block + block→SB） | 有 |
+| ECC 健康 | `rr` 8 深度历史 | 健康度等级 | 全历史落 DRAM |
+| 每项内存 | 56B | 4~16B（压缩版） | 数百 B（DRAM 不心疼） |
+| 存储 | **全常驻 SRAM** | 核心 SRAM + 扩展 NAND | 全 DRAM 常驻 |
+
+**选择理由**：行业 BIT 字段全、粒度物理块、VPC+bitmap 双承载；本方案全字段对齐，
+但当前**全常驻 SRAM**（功能优先，224KB 放得下）。产品化裁剪路径见 §19（档三）。
+
+### 4.9.4 维护点（全真值，缺一不可）
+
+| 事件 | 动作 |
+|---|---|
+| 写成功 | 新页置位 + VPC++ + program_count++；覆盖写清旧页（old_pba）+ VPC-- |
+| 读成功 | read_count++ + rr_record_ecc（ECC 历史） |
+| GC/WL 迁移成功 | 旧页清位 + VPC--；新页置位 + VPC++ + gc_generation++ |
+| 擦除成功 | erase_count++ + last_pe_ts 写 + bitmap 清空 + VPC=0 + 状态 FREE |
+| trim | 清旧页 bitmap + VPC-- |
+| 坏块 | 置 BAD + clear_valid + bad_reason（PROGRAM/ERASE/READ/GC_MOVE） |
+| 分配 | 置 OPEN + TEMP + sb_id |
+| 写满关闭 | 置 CLOSED + sb_id → closed 索引 |
+| 掉电恢复 | open SB 扫描重建 bitmap + 置 OPEN（closed 重建二期） |
+
+全部经 `ftl_block_set/clr_valid`、`ftl_block_state_set/clr` 等访问器单点更新，防 VPC 与位图漂移。
+
+### 4.9.5 为什么选"统一单数组"而非"分散表"
+
+| 方案 | 优点 | 缺点 |
+|---|---|---|
+| A：统一 `ftl_block_t[]` 单数组（**选中**） | 单一数据源；GC/WL/read recovery/BBT/allocator 共享；一次骨架切换可回退 | 工程量大；BSS 224KB |
+| B：保持分散 + 只补 rr 表 | 改动小 | 数据仍分散；GC 加速需第三张表 |
+| C：按 Super Block 组织 | SB 级语义集中 | 擦除/坏块/ECC 是物理块级事实，需重映射全部索引；改动最大 |
+
+**结论**：A 符合行业 BIT（物理块粒度）与 DRAM-less 单数据源纪律。
 
 ---
 
@@ -3263,7 +3369,6 @@ nand_paa_t（芯片内地址）                = [LUN][BLOCK][PLANE][PAGE][CW]
 ---
 
 ## 16. Phase 规划
-
 ### 已实现（截至 2026-09-29 v0.22）
 
 | 任务 | 说明 | 状态 |
@@ -3766,7 +3871,7 @@ if (NAND_SUCCESS && buffer == NULL)   // 写完成
 | P-C.2 | GC L2P 批量更新优化 | 后续 Phase |
 | P-C.3 | Warm boot 保留 cache | 后续 Phase |
 | P-C.4 | 性能计数器 + 调试接口 | 后续 Phase |
-| P-C.5 | 反向映射 bitmap（每 SB 64 bit 有效页 bitmap） | GC 加速 |
+| P-C.5 | 反向映射 bitmap（每 SB 64 bit 有效页 bitmap） | ✅ **v0.32 已实现**——`ftl_block_t.valid_map[PLANE_NUM]`（per-plane 64bit），GC/WL 迁移扫置位页免 NAND 读（见 §4.9） |
 | P-C.6 | Thrashing 检测 + 降级 | miss_rate > 90% 时切换 write-through |
 
 ### 已废弃（旧 Phase 规划中的已完成项）
@@ -3774,6 +3879,75 @@ if (NAND_SUCCESS && buffer == NULL)   // 写完成
 以下为旧 §16 Phase 规划中已实现的任务，不再追踪：
 
 ~~Phase 0~~ ✅ Phase 1 ~~掉电恢复~~ ✅ Phase 2 ~~完整 FTL~~ ✅
+
+---
+
+## 19. Block State Table 产品化裁剪路径（档三：SRAM 核心 + NAND 扩展）
+
+> **v0.32 记录，本期不实现**。全常驻 SRAM（56B/224KB）能放下（剩 ~537KB），但违背 DRAM-less 纪律。
+> 行业真实做法是分层。当 SRAM 压力真实出现 + 扩展字段有消费方时，按本路径裁剪。
+
+### 19.1 为什么需要
+
+| 项 | 现状（全常驻） | 产品化（档三） |
+|---|---|---|
+| SRAM BST | 224KB | ~100KB（核心 40KB + valid_map 64KB） |
+| 扩展字段 | SRAM 常驻 | NAND 持久化 |
+| 适用 | 功能验证阶段 | 产品化裁剪 |
+
+### 19.2 分层架构
+
+```
+SRAM 核心（~40KB）：erase_count + valid_count + state + bad_reason + sb_id + read_count
+SRAM valid_map（64KB，保持性能）：GC 迁移免 NAND 读（P-C.5）
+NAND 扩展表（ftl_block_ext_t[]，SRAM 不占）：
+    program_count + last_pe_ts + gc_generation + rr 完整历史
+```
+
+```c
+/* NAND 持久化扩展表（每 LUN 一张，类似 BBT/checkpoint 的存储格式） */
+typedef struct {
+    uint16_t program_count;   /* program 计数（健康模型，冷数据） */
+    uint32_t last_pe_ts;      /* 最近擦除时间戳（WL 低频） */
+    uint8_t  gc_generation;   /* GC 搬移代数（调试/分析） */
+    uint8_t  _pad;
+} ftl_block_ext_t;            /* 8B/块 → NAND 元数据区 */
+```
+
+### 19.3 加载流程（启动）
+
+```
+ftl_init
+  → allocator_init（SRAM 核心 40KB memset 0）
+  → bbt_init（从 NAND BBT 加载 bad bit → state.BAD + bad_reason）
+  → metadata 加载扩展表 ftl_block_ext_t[]（若存在）→ 回填 SRAM 的 program/ts/gc_gen
+  → （无 checkpoint → 扩展表全 0，冷启动）
+```
+
+### 19.4 存储流程（周期落盘）
+
+```
+扩展字段脏 → 后台 flush（复用 BBT dirty 机制）→ 写 NAND 扩展表
+  触发：ftl_service 后台（与 bbt_flush 同批）或 checkpoint 时
+  写：allocator 擦除成功（last_pe_ts）、迁移成功（gc_gen++）→ 标脏 → flush
+```
+
+### 19.5 为什么本期不做
+
+1. 扩展表持久化子系统（序列化 + CRC + 冗余 + 加载/落盘时机 + 脏跟踪）比 BBT 更复杂
+2. read/program 计数、last_pe_ts、gc_generation **当前无消费方**（为后续预留）
+3. **功能优先全常驻 → 产品化裁剪**是行业流程；SRAM 压力真实出现 + 字段有消费方后再做，
+   届时已知拆谁、有数据驱动
+
+### 19.6 裁剪顺序（若需降内存）
+
+| 裁剪 | 省内存 | 代价 |
+|---|---|---|
+| 砍 `program_count` | 8KB | 失去 program 健康模型 |
+| 砍 `read_count` | 8KB | read disturb 预铺失去 |
+| 砍 `gc_generation` | 4KB | 迁移代数丢失 |
+| `last_pe_ts` → NAND | 16KB | WL 冷热避聚失去 |
+| `valid_map` → GC 临时扫 | 64KB | 迁移重新读 NAND（性能降） |
 
 ---
 

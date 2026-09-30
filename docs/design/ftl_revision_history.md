@@ -905,6 +905,69 @@ ftl_init(&ftl, &params);
 
 ### 下一步
 
-- P-A：pending 表扩展 8 → 16/32
+- P-A：pending 表扩展 8 → 16/32（✅ v0.31 已做）
 - P-B：scheduler / state_machine / NVMe 层（`#warning` 桩）
-- P-D：GC 加速等优化
+- P-C.5：反向映射 bitmap（✅ v0.32 已做——`ftl_block_t.valid_map`）
+- PFR closed_sb_list 掉电重建（v0.32 二期项）
+
+---
+
+## v0.31 — P-A 多 LUN 并发前置 + read recovery 接入
+
+**日期**：2026-09-30
+
+**内容**：
+- Pending 表 + Completion Table 扩容（8→32），多 LUN 并发软件前置
+- 元数据 lun 泛化（bbt/checkpoint/metadata 地址构造器加 lun 形参）
+- ECC 返回链路打通：`fc_ldpc_decode` 加 `err_bits` out 参数
+- read recovery 接入：`ftl_context` 加 `rr` + `rr_block_track`（**未分配，空转**）
+
+**遗留**：rr_block_track 无存储（空转）→ v0.32 BST 供电解决。
+
+---
+
+## v0.32 — Block State Table（BST）统一 per-block 结构体数组
+
+**日期**：2026-09-30
+
+### 背景
+
+v0.31 read recovery 接入后，per-block 元数据分散四张表（erase_counts / bad_blocks /
+g_bbt_bitmap / rr_block_track），无统一承载，且存 3 处全局/per-plane 块号碰撞 bug。
+
+### 关键决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 统一单数组 vs 分散表 | **A：统一 `ftl_block_t[4096]`** | 单一数据源，GC/WL/read recovery/BBT 共享；符合行业 BIT |
+| 粒度 | 物理 Block 全局号 | 擦除/坏块/ECC 是物理级事实；SB 是逻辑层 |
+| 存储位置 | 调用者经 `ftl_init_params_t.blocks` | 与 free_blocks/closed_sb_list 指针契约一致；多 LUN 每 LUN 一张 |
+| VPC + bitmap | **全真值**（valid_count + valid_map） | P-C.5 落地；GC/WL 迁移扫位图免 NAND 读 |
+| 全字段 | **56B/224KB 全常驻 SRAM** | 功能优先，剩 ~537KB；档三裁剪见 ftl_design §19 |
+| state 表示 | **bitmask 宏 + 访问器**（非位域/联合体） | 嵌入式可移植 + 可位运算 |
+| bad_reason | 独立 `uint8_t` | 可读性（用户拍板），6 种原因枚举 |
+
+### 实现
+
+- 新建 `include/ftl/bst.h`：`ftl_block_t`（56B）+ 状态位 + 访问器 + 坏块原因枚举
+- 修复 3 处全局/per-plane 块号碰撞：`ftl_gblock(plane, block)` 单点转换
+- read recovery 由空转变为供电：ECC 历史入 `ftl_block_t.rr`
+- VPC/bitmap 七点闭环：写成功（含覆盖清旧页）/ 读成功 / GC·WL 迁移 / 擦除 / trim / 坏块 / 掉电
+- GC/WL 迁移改扫 `valid_map` 置位页（`__builtin_ctzll`），免无效页 NAND 读
+- `bbt_mark_bad` 签名扩展带 bad_reason（3 处调用点）
+- PFR open SB 扫描重建 bitmap + 置 OPEN
+- **Closed 列表回收闭环**（审视补全）：新增 `allocator_remove_closed_sb`（swap-remove O(1)），
+  GC 擦除后从 `closed_sb_list` 移除 victim——修 `closed_sb_count` 只增不减导致的列表爆炸 +
+  已回收 SB 被再次选为 victim 的无限 GC 空转；`sb_id` 语义统一（OPEN 占位 NO_SB，关闭写 closed 索引，
+  swap-remove 时同步修正）；`gc_erase_and_free` 加 `now` 参数传 `ftl->total_writes` 修 last_pe_ts
+  非单调时间戳
+
+### 编译状态
+
+**零错误零警告**（`make` + `make tests`）。16 文件，+520/-355。
+
+### 二期项
+
+- **PFR closed_sb_list 掉电重建**：本期只做 open SB 状态机；closed 重建需扫全 NAND
+  判有效页分组，涉及既有 PFR 缺口，独立立项
+- **档三（SRAM 核心 + NAND 扩展）**：全常驻 224KB 的产品化裁剪路径，已写入 ftl_design §19，不实现

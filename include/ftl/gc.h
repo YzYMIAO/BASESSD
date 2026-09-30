@@ -78,10 +78,14 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
 /*
  * gc_erase_and_free - 擦除 victim Block 并归还到 Free Pool
  *
- * @param alloc  Allocator 上下文
- * @param victim 已搬完的 victim Super Block
+ * 擦除成功后从 Closed 列表移除 victim（swap-remove，修 list 只增不减），
+ * 记录 last_pe_ts = now（单调写入量时间戳）。
+ *
+ * @param alloc   Allocator 上下文
+ * @param victim  已搬完的 victim Super Block
+ * @param now     当前单调时间戳（ftl->total_writes）
  */
-void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim);
+void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t now);
 
 /*
  * gc_check_trigger - 检查是否需要触发 GC

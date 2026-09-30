@@ -143,14 +143,14 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
             continue;
         }
 
-        /* 计算该 Super Block 的平均擦除次数 */
+        /* 计算该 Super Block 的平均擦除次数（全局 Block 号索引 BST） */
         {
             uint32_t ec_sum = 0U;
             uint8_t  p;
 
             for (p = 0U; p < PLANE_NUM; p++)
             {
-                ec_sum += ftl->alloc.erase_counts[sb->plane_blocks[p]];
+                ec_sum += ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])].erase_count;
             }
             sb_ec = ec_sum / PLANE_NUM;
         }
@@ -162,12 +162,18 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
         }
 
         /*
-         * 有效页估算：使用 next_page（写入进度）近似。
-         * 完整实现应查 reverse_bitmap，但当前简化。
+         * 有效页 = 双 Plane 各物理块 VPC 之和（真实计数）。
          * 有效页越多（越冷）越优先。
          */
         {
-            uint16_t valid = sb->next_page;
+            uint16_t valid = 0U;
+            uint8_t  p;
+
+            for (p = 0U; p < PLANE_NUM; p++)
+            {
+                valid = (uint16_t)(valid + ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])].valid_count);
+            }
+
             if (valid < min_valid_pages)
             {
                 continue;
@@ -180,7 +186,6 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
                 best.valid_pages     = valid;
                 best.plane_blocks[0] = sb->plane_blocks[0];
                 best.plane_blocks[1] = sb->plane_blocks[1];
-                best.next_page       = sb->next_page;
             }
         }
     }
@@ -197,72 +202,83 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
 {
     uint8_t  plane;
-    uint8_t  page;
     uint32_t migrated = 0U;
-    uint8_t  max_page;
 
     if ((ftl == NULL) || (victim == NULL) || (!victim->found))
     {
         return FTL_OK;
     }
 
-    /* 使用 victim->next_page（写入进度）限定扫描范围 */
-    max_page = (victim->next_page > 0U) ? victim->next_page : PAGES_PER_BLOCK;
-
-    /* Step 1: 遍历双 Plane 所有有效页，搬移到 Cold Super Block */
+    /* Step 1: 遍历双 Plane 有效页位图，只搬置位页（免 NAND 读无效页） */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        for (page = 0U; page < max_page; page++)
+        uint16_t    gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
+        uint64_t    valid_map  = ftl->alloc.blocks[gblock_src].valid_map[plane];
+
+        while (valid_map != 0ULL)
         {
-            uint8_t    buf[FTL_READ_USER_SIZE];
-            lba_t      lba;
-            nand_pba_t pba;
-            nand_pba_t old_pba;
-            nand_pba_t new_pba;
-            int        ret;
+            uint8_t page = (uint8_t)__builtin_ctzll(valid_map);
+            valid_map &= (valid_map - 1ULL); /* 清最低置位 bit */
 
-            pba = pba_make(ftl->topo.ch, ftl->topo.ce, page, plane, victim->plane_blocks[plane], 0, 0);
-
-            /* 读页 + 从 META 提取 LBA（复用 GC 辅助函数） */
-            memset(buf, 0, sizeof(buf));
-            if (gc_read_page_with_lba(pba, buf, &lba) != 0)
             {
-                continue; /* 读失败，跳过 */
+                uint8_t    buf[FTL_READ_USER_SIZE];
+                lba_t      lba;
+                nand_pba_t pba;
+                nand_pba_t old_pba;
+                nand_pba_t new_pba;
+                int        ret;
+
+                pba = pba_make(ftl->topo.ch, ftl->topo.ce, page, plane, victim->plane_blocks[plane], 0, 0);
+
+                /* 读页 + 从 META 提取 LBA（复用 GC 辅助函数） */
+                memset(buf, 0, sizeof(buf));
+                if (gc_read_page_with_lba(pba, buf, &lba) != 0)
+                {
+                    continue; /* 读失败，跳过 */
+                }
+
+                /* 查 L2P：当前映射是否仍指向本 PBA */
+                old_pba = l2p_cache_read(&ftl->cache, lba);
+                if (old_pba != pba)
+                {
+                    /* 已被覆盖，无效页 → 清 bitmap 保持同步 */
+                    ftl_block_clr_valid(&ftl->alloc.blocks[gblock_src], plane, page);
+                    continue;
+                }
+
+                /* 分配 Cold Super Block 新页 */
+                new_pba = allocator_alloc(&ftl->alloc, FTL_TEMP_COLD);
+                if (new_pba == NAND_PBA_INVALID)
+                {
+                    break;
+                }
+
+                /* 写入新位置 */
+                {
+                    nand_addr_t waddr = addr_from_pba(new_pba);
+                    ret = sync_write_page(waddr, buf, FTL_READ_USER_SIZE,
+                                          FC_CRC_ENABLE, FC_RANDOM_ENABLE,
+                                          FC_COMMAND_MODULE_GC, lba);
+                }
+                if (ret != 0)
+                {
+                    continue;
+                }
+
+                /* 更新 L2P Cache */
+                l2p_cache_write(&ftl->cache, lba, new_pba);
+
+                /* Journal 记录 */
+                journal_append(&ftl->journal, lba, old_pba, new_pba);
+
+                /* VPC/bitmap 维护：源块清位，新块置位（单点更新防漂移） */
+                ftl_block_clr_valid(&ftl->alloc.blocks[gblock_src], plane, page);
+                ftl_block_set_valid(&ftl->alloc.blocks[ftl_pba_gblock(new_pba)],
+                                    (uint8_t)pba_to_plane(new_pba),
+                                    (uint8_t)pba_to_page(new_pba));
+
+                migrated++;
             }
-
-            /* 查 L2P：当前映射是否仍指向本 PBA */
-            old_pba = l2p_cache_read(&ftl->cache, lba);
-            if (old_pba != pba)
-            {
-                continue; /* 已被覆盖，无效页 */
-            }
-
-            /* 分配 Cold Super Block 新页 */
-            new_pba = allocator_alloc(&ftl->alloc, FTL_TEMP_COLD);
-            if (new_pba == NAND_PBA_INVALID)
-            {
-                break;
-            }
-
-            /* 写入新位置 */
-            {
-                nand_addr_t waddr = addr_from_pba(new_pba);
-                ret = sync_write_page(waddr, buf, FTL_READ_USER_SIZE,
-                                      FC_CRC_ENABLE, FC_RANDOM_ENABLE,
-                                      FC_COMMAND_MODULE_GC, lba);
-            }
-            if (ret != 0)
-            {
-                continue;
-            }
-
-            /* 更新 L2P Cache */
-            l2p_cache_write(&ftl->cache, lba, new_pba);
-
-            /* Journal 记录 */
-            journal_append(&ftl->journal, lba, old_pba, new_pba);
-
-            migrated++;
         }
     }
 
@@ -274,7 +290,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
         tmp_sb.plane_blocks[1] = victim->plane_blocks[1];
         tmp_sb.valid = 0U; /* gc_erase_and_free 要求 valid==0 */
 
-        gc_erase_and_free(&ftl->alloc, &tmp_sb);
+        gc_erase_and_free(&ftl->alloc, &tmp_sb, ftl->total_writes);
     }
 
     return (int)migrated;
@@ -306,16 +322,21 @@ uint32_t wl_max_erase(const struct ftl_context *ftl)
     uint16_t i;
     uint32_t max_ec = 0U;
 
-    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL))
+    if ((ftl == NULL) || (ftl->alloc.blocks == NULL))
     {
         return 0U;
     }
 
-    for (i = 0U; i < BLOCKS_PER_PLANE * PLANE_NUM; i++)
+    for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
-        if (ftl->alloc.erase_counts[i] > max_ec)
+        const ftl_block_t *b = &ftl->alloc.blocks[i];
+        if (ftl_block_is_bad(b))
         {
-            max_ec = ftl->alloc.erase_counts[i];
+            continue; /* 坏块不计入磨损统计 */
+        }
+        if (b->erase_count > max_ec)
+        {
+            max_ec = b->erase_count;
         }
     }
 
@@ -327,20 +348,25 @@ uint32_t wl_min_erase(const struct ftl_context *ftl)
     uint16_t i;
     uint32_t min_ec = UINT32_MAX;
 
-    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL))
+    if ((ftl == NULL) || (ftl->alloc.blocks == NULL))
     {
         return 0U;
     }
 
-    for (i = 0U; i < BLOCKS_PER_PLANE * PLANE_NUM; i++)
+    for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
-        if (ftl->alloc.erase_counts[i] < min_ec)
+        const ftl_block_t *b = &ftl->alloc.blocks[i];
+        if (ftl_block_is_bad(b))
         {
-            min_ec = ftl->alloc.erase_counts[i];
+            continue; /* 坏块不计入磨损统计 */
+        }
+        if (b->erase_count < min_ec)
+        {
+            min_ec = b->erase_count;
         }
     }
 
-    return min_ec;
+    return (min_ec == UINT32_MAX) ? 0U : min_ec;
 }
 
 uint32_t wl_avg_erase(const struct ftl_context *ftl)
@@ -349,14 +375,19 @@ uint32_t wl_avg_erase(const struct ftl_context *ftl)
     uint32_t sum   = 0U;
     uint16_t count = 0U;
 
-    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL))
+    if ((ftl == NULL) || (ftl->alloc.blocks == NULL))
     {
         return 0U;
     }
 
-    for (i = 0U; i < BLOCKS_PER_PLANE * PLANE_NUM; i++)
+    for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
-        sum += ftl->alloc.erase_counts[i];
+        const ftl_block_t *b = &ftl->alloc.blocks[i];
+        if (ftl_block_is_bad(b))
+        {
+            continue; /* 坏块不计入磨损统计 */
+        }
+        sum += b->erase_count;
         count++;
     }
 
@@ -372,14 +403,19 @@ uint32_t wl_count_blocks_below(const struct ftl_context *ftl, uint32_t threshold
     uint16_t i;
     uint32_t count = 0U;
 
-    if ((ftl == NULL) || (ftl->alloc.erase_counts == NULL))
+    if ((ftl == NULL) || (ftl->alloc.blocks == NULL))
     {
         return 0U;
     }
 
-    for (i = 0U; i < BLOCKS_PER_PLANE * PLANE_NUM; i++)
+    for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
-        if (ftl->alloc.erase_counts[i] < threshold)
+        const ftl_block_t *b = &ftl->alloc.blocks[i];
+        if (ftl_block_is_bad(b))
+        {
+            continue; /* 坏块不计入磨损统计 */
+        }
+        if (b->erase_count < threshold)
         {
             count++;
         }
