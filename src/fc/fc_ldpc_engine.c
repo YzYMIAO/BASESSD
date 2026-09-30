@@ -103,9 +103,15 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
 #endif
 }
 
-fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length)
+fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length,
+                           uint8_t *err_bits)
 {
     (void)config;
+
+    if (err_bits != NULL)
+    {
+        *err_bits = 0U;
+    }
 
     if ((data == NULL) || (data_length == 0U))
     {
@@ -136,6 +142,12 @@ fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16
         if (nerr < 0)
         {
             return FC_STATUS_IO_ERROR;
+        }
+
+        /* BCH 成功解码：报告纠正的 bit 数（0..t） */
+        if (err_bits != NULL)
+        {
+            *err_bits = (uint8_t)(unsigned int)nerr;
         }
 
         for (i = 0U; i < (uint16_t)nerr; i++)

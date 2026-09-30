@@ -105,6 +105,7 @@ typedef struct
     /* ── 拓扑参数 ── */
     uint8_t  ch;           /* 本 Allocator 绑定的 CH */
     uint8_t  ce;           /* 本 Allocator 绑定的 CE */
+    uint8_t  lun;          /* 本 Allocator 绑定的 LUN */
     uint16_t total_blocks; /* 总好 Block 数（出厂扫描后确定） */
 
     /* ── Free Pool（三级） ── */

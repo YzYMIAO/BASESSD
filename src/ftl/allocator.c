@@ -20,6 +20,7 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
 
     alloc->ch           = params->topo.ch;
     alloc->ce           = params->topo.ce;
+    alloc->lun          = params->topo.lun;
     alloc->total_blocks = params->free_count;
 
     /* Free Pool */

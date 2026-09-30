@@ -27,13 +27,14 @@
 | v0.16 | 2026-09-28 | Step 1~5 完整实现：PBA/PAA 全套 inline、ftl_fc_interface 桩、L2P Cache 纯 SRAM+CLOCK、Allocator+Super Block、Journal 固定 Block、GC+ftl_service 三级主循环 | Claude |
 | v0.17 | 2026-09-29 | FTL 全面打通 NAND 路径：17 个核心桩全部替换为真实 FC 调用；新增同步 NAND 操作层（ftl_internal_read/write/erase）；新增 Pending Request 表；新增 ftl_read/write/trim 同步包装；GC 完整 7 步搬移（读 META→查 L2P→分配 Cold→写→L2P→Journal）；Metadata Directory 完整实现（Anchor Block 33-34 + 动态分配 + CRC 保护）；Allocator 全部桩消除（pre_cond/needs_gc/refill 同步）；controller 层 3 个隐式声明消除 | Claude |
 | v0.18 | 2026-09-29 | FTL 全部剩余模块实现：Checkpoint、BBT、Read Recovery、Power Failure Recovery、Wear Leveling；代码审视修复4个逻辑断裂 | Claude |
-| v0.19 | 2026-09-29 | Completion Table 统一完成路由：消除 ftl_service Phase2 和 ftl_internal_sync_wait 两个"泵"互相吞 completion 的 bug；新增 completion_table.h/c（16 项路由表 + 同步等待器 + 统一泵）；ftl_internal_sync_wait 改为注册 sync_waiter 后走 completion_table_drain，不再独占 fc_poll_completion；L2P Region 动态分配接入：cache 增加 alloc 指针，flush_one 中首次写 Region 改为真实调用 metadata_dir_alloc_region（取消回退固定位置） | Claude |
+| v0.19 | 2026-09-29 | Completion Table 统一完成路由：消除 ftl_service Phase2 和 ftl_internal_sync_wait 两个"泵"互相吞 completion 的 bug；新增 completion_table.h/c（16 项路由表【v0.31 扩为 32】+ 同步等待器 + 统一泵）；ftl_internal_sync_wait 改为注册 sync_waiter 后走 completion_table_drain，不再独占 fc_poll_completion；L2P Region 动态分配接入：cache 增加 alloc 指针，flush_one 中首次写 Region 改为真实调用 metadata_dir_alloc_region（取消回退固定位置） | Claude |
 | v0.20 | 2026-09-29 | 返回值体系统一 + 历史死代码清理：新增 ftl_status_t{FTL_OK=0,FTL_ERROR=-1} 企业级风格枚举，~32 个操作函数从 int 改为 ftl_status_t，谓词/计数函数保持 int；修复 checkpoint_find_latest 因 FTL_OK=0 导致的调用反转 bug；ftl_cmd_setup_ppa 等 3 函数从 (int) 强转改为显式 FC_STATUS_OK 映射；删除历史遗留文件 nand.h/c、nand_geometry.h/c、config/nand_geometry.h、config/ftl_config.h、__patch*.txt；删除死代码 pba_t、wl_init()、allocator_refill_pre_cond()；wl_relocate 复用 gc_read_page_with_lba + gc_erase_and_free（~60 行重复代码消除）；ssd_types.h 清除 ssd_ppa_t；l2p_cache.h 显式 include allocator.h 消除隐式依赖 | Claude |
 | v0.21 | 2026-09-29 | FTL 拓扑信息重构：删除 ftl_context_t/allocator_t/journal_t 中的 ch/ce/lun 散落字段，统一为 ftl_topology_t 结构体；ftl_init 新增 ftl_topology_t 参数替代原 ch/ce/lun 3 个参数；全部 pba_make 的 CH/CE 源改为从 topology 或 alloc->ch/ce 获取，消除硬编码 0,0；allocator/journal/metadata/checkpoint/bbt/power_failure_recovery/wear_leveling 各模块全部接入拓扑路由 | Claude |
 | v0.22 | 2026-09-29 | FTL 对外接口异步化：删除 ftl_read/ftl_write 同步包装，FTL 对外只提供非阻塞接口；ftl_submit_write 新增 complete_flag 参数跟踪 NAND PROGRAM 完成；Controller 层改为纯异步提交 + complete_flag 轮询；新增 ssd_controller_is_complete()；ssd_request_t.completion_status 改为 ssd_status_t | Claude |
 | v0.23 | 2026-09-29 | D4 多 LBA 拆分实现（方案 A — Controller 层拆分）：ftl_submit_read/write 去掉 count 参数（只支持单页）；pending 表新增 on_complete 回调+ctx 字段；request.c 实现 ssd_request_split 循环（block_count 次→N 个单页子请求）；on_sub_complete 递减 sub_remaining 归零时置父请求 complete_flag；单块读也传 complete_flag 正常发完成信号；PBA 无效路径也发回调/信号 | Claude |
 | v0.24 | 2026-09-29 | D5 写失败回滚（modify-after-confirm + BBT 两阶段 + 自动回滚）：ftl_submit_write 中 journal_append/l2p_cache_write 后移到 completion handler 的成功确认路径；pending 表加 old_pba/new_pba/ftl 字段；写失败→bbt_mark_bad RAM only + background bbt_flush；L2P 不动=自动回滚到旧数据；Super Block 空洞由 GC 自然跳过 | Claude |
-| v0.25 | 2026-09-29 | D6 队列深度/背压确认（pending 表满即隐式背压，DRAM-less 消费级不需额外机制）：SQ 深度 64 >> 实际并发（pending=8），pending 表满→FTL_ERROR→Controller→Host 重试，已自然构成流控 | Claude |
+| v0.31 | 2026-09-30 | **Pending 表 + Completion Table 扩容**：`FTL_PENDING_MAX` 8→32、`COMPLETION_TABLE_SIZE` 16→32（多 LUN 并发软件前置）；纯常量改动，表为线性扫描数组无位域/mask 依赖；同步背压预算（§17.5）定量数字一并更新 | Claude |
+| v0.25 | 2026-09-29 | D6 队列深度/背压确认（pending 表满即隐式背压，DRAM-less 消费级不需额外机制）：SQ 深度 64 >> 实际并发（pending=8→v0.31 扩为 32），pending 表满→FTL_ERROR→Controller→Host 重试，已自然构成流控 | Claude |
 | v0.26 | 2026-09-29 | D7 多命令流水线实现：修正 D4——ftl_submit_read/write 加回 pages 参数（1=单 Plane, 2=Multi-Plane）；Super Block 双 Plane 同步写入（OP_PROGRAM_PAGE_MULTI_PLANE, multi_plane=2）；读路径区分顺序/随机（两两连续 LBA 配对 Multi-Plane）；Cache Program 安全中间页标志 cache_intermediate 跳过 L2P/Journal 确认 | Claude |
 | v0.27 | 2026-09-29 | D8 错误通知粒度（消费级 DRAM-less）：pending 表加 status_out 指针，completion handler 写入 SSD_STATUS_OK/IO_ERROR；ftl_submit_read/write 签名加 status_out 参数；Controller 层传 &request->completion_status 接收异步完成状态 | Claude |
 | v0.28 | 2026-09-30 | 地址体系双层化 + 形参优化 Step 1/2：新增 nand_addr_t（展开地址）与 pba_from_addr/addr_from_pba/addr_from_paa 双向转换，遍历路径不再 pba_make 打包→拆包；super_block_t 加 ftl_topology_t topo + super_block_page_addr；ftl_fc_interface.h 新增 addr_to_cmd 直填；删除 ftl_internal_read/write_page/erase_block/read_page_raw 四个包装（-232 行），各模块内联为 static sync 助手；新建 ftl_types.h（ftl_io_request_t/ftl_init_params_t 供 Step 3/4）；随机 IO 路径 ftl_cmd_setup_ppa 保留 | Claude |
@@ -3155,7 +3156,7 @@ Step 5 — GC + ftl_service 主循环
                                            ✅ GC/WL/Checkpoint 三级后台集成
 
 Step 13 — Completion Table 统一完成路由
-  ├── include/ftl/completion_table.h      ✅ 16 项路由表 + 同步等待器 + 统一泵声明
+  ├── include/ftl/completion_table.h      ✅ 32 项路由表 + 同步等待器 + 统一泵声明
   └── src/ftl/completion_table.c          ✅ completion_table_add/lookup/remove/drain
                                            ✅ ftl_sync_waiter_handler（带/不带 release）
                                            ✅ completion_table_set_default（= ftl_handle_completion）
@@ -3167,7 +3168,7 @@ Step 6 — Metadata Directory
                                            ✅ CRC 保护（boot_crc32）
 
 Step 7 — Pending Request 表
-  ├── include/ftl/pending.h               ✅ 8 项固定表 + lba lookup
+  ├── include/ftl/pending.h               ✅ 32 项固定表 + lba lookup
   └── src/ftl/pending.c                   ✅ add/lookup/lookup_by_lba/remove
 
 Step 8 — Checkpoint
@@ -3277,7 +3278,7 @@ nand_paa_t（芯片内地址）                = [LUN][BLOCK][PLANE][PAGE][CW]
 | Power Failure Recovery | 三类启动判断 + 写指针 NAND 扫描 | ✅ |
 | Wear Leveling | 动态（alloc 选低擦除）+ 静态三星 Daemon（三条件触发）| ✅ |
 | Metadata Directory | Anchor Block 33-34 + 动态分配 + CRC，L2P Region 双 Plane 交错 | ✅ |
-| Pending Request 表 | 8 项固定表，command_id + LBA lookup，支持 complete_flag 通知 | ✅ |
+| Pending Request 表 | 32 项固定表，command_id + LBA lookup，支持 complete_flag 通知 | ✅ |
 | ftl_service 主循环 | 三级模式（IDLE/NORMAL/BUSY），GC/WL/Checkpoint 集成 | ✅ |
 | ftl_fc_interface | 3 PBA helper + 4 内部同步 NAND 操作（read/write/erase/sync_wait/read_raw）| ✅ |
 | **Completion Table** | 统一完成路由，消除两泵冲突，sycn_waiter 不走独立 fc_poll_completion | ✅ |
@@ -3327,7 +3328,7 @@ D5（modify-after-confirm）后，写完成回调中使用 `ftl_context_t *ftl` 
 | SQ（普通队列） | `FC_SQ_DEPTH` | 64 | 普通优先级命令（用户数据） |
 | HSQ（高优队列）| `FC_HSQ_DEPTH` | 16 | 高优先级命令（元数据操作） |
 | CQ（完成队列） | `FC_CQ_DEPTH` | 64 | 已完成命令等待消费 |
-| Pending 表 | `FTL_PENDING_MAX` | 8 | 用户数据 IO 的异步追踪 |
+| Pending 表 | `FTL_PENDING_MAX` | 32 | 用户数据 IO 的异步追踪 |
 | 每轮提交预算 | `NAND_SUBMIT_BUDGET` | 4 | ftl_service 每轮最多提交 |
 | LUN 数 | `LUN_NUM` | 1 | 硬件并发单元数 |
 
@@ -3471,21 +3472,21 @@ ssd_controller_submit()
 资源        深度    实际占用峰值
 ────────────────────────────────
 SQ          64      NAND_SUBMIT_BUDGET=4 每轮提交 ≤4
-                    同时最多 pending(8) + 同步操作 ≤8
-                    峰值 ≈ 12 << 64  ✅
+                    同时最多 pending(32) + 同步操作 ≤8
+                    峰值 ≈ 36 << 64  ✅
 
-Command Pool 64     SQ(12) + HSQ(GC/Metadata ~6) ≈ 18 << 64 ✅
+Command Pool 64     SQ(36) + HSQ(GC/Metadata ~6) ≈ 42 << 64 ✅
 
-Pending 表    8     D4 拆分 block_count=8 时吃满
+Pending 表   32     D4 拆分 block_count=8 时占用 8/32
                     → 新的 host 提交会 pending_add FAIL
                     → 自动拒绝过量提交 → 这就是背压
 ```
 
 核心逻辑：
 
-1. **SQ 深度 64 >> 实际并发**：当前 LUN_NUM=1、pending=8、budget=4，实际需要 SQ 中的命令最多 ≈ 12，只占 SQ 的 18%。`FC_STATUS_QUEUE_FULL` 几乎不会发生。
+1. **SQ 深度 64**：当前 LUN_NUM=1、pending=32、budget=4，实际需要 SQ 中的命令最多 ≈ 36，仍远小于 SQ 64。`FC_STATUS_QUEUE_FULL` 几乎不会发生。
 
-2. **真正的瓶颈是 pending 表（8 槽）**：pending 表满时 `pending_add()` 返回 `FTL_ERROR`，FTL 在 fc_submit **之前**就拒绝了请求，不会浪费 FC 资源池。这天然形成"资源耗尽即背压"。
+2. **真正瓶颈仍是 pending 表（32 槽）**：pending 表满时 `pending_add()` 返回 `FTL_ERROR`，FTL 在 fc_submit **之前**就拒绝了请求，不会浪费 FC 资源池。扩到 32 后，单 LUN 的原始并发仍未吃满——它为多 LUN 并发的 pending 深度预留了上限。
 
 3. **SRAM 是 DRAM-less 最贵的资源**：维护一个 retry queue（方案②）需要额外的 SRAM，与 DRAM-less 设计目标（最小化 SRAM 占用）相悖。
 
@@ -3496,7 +3497,7 @@ Pending 表    8     D4 拆分 block_count=8 时吃满
 | 决策 | 值 |
 |------|-----|
 | **当前方案** | ① 直接返回错误（pending 表满即背压） |
-| **适用阶段** | DRAM-less 消费级，LUN_NUM=1，pending=8 |
+| **适用阶段** | DRAM-less 消费级，LUN_NUM=1，pending=32 |
 | **未来升级路径** | P-A pending 表扩展后 → 必要时加方案③（动态 budget） |
 | **远期** | NVMe 层实现后 → 方案④（主机级流控）成为主流 |
 | **不采用** | 方案②（内部重试）— SRAM 开销不合理 |
@@ -3742,7 +3743,7 @@ if (NAND_SUCCESS && buffer == NULL)   // 写完成
 | 任务 | 说明 | 优先级 |
 |------|------|--------|
 | P-A.1 | `fc_poll_completion` CQ 深度确认 — 确保 CQ 能同时容纳多 LUN 的完成事件 | 高 |
-| P-A.2 | pending 表扩展 — `FTL_PENDING_MAX` 从 8 增大到 16/32，支持多 LUN 并发 pending | 高 |
+| P-A.2 | pending 表扩展 — `FTL_PENDING_MAX` 从 8 增大到 32 ✅ **（v0.31 已实现）** | 高 |
 | P-A.3 | `ftl_write` 同步等待改为 per-cmd sync_waiter — 脱离全局 SQ/CQ 空判定，改用 `completion_table_add` + 等具体 cmd_id | 高 |
 | P-A.4 | `rr_record_ecc` 接入读完成路径 — 当前为 ⚠️ 未接入，需 timer + completion 集成 | 中 |
 

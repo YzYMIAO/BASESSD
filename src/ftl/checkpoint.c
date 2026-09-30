@@ -133,13 +133,13 @@ static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t leng
 }
 
 /* ── Checkpoint 固定位置页地址（Block0/Block1 各 3 页）── */
-static nand_addr_t checkpoint_page_addr(uint8_t ch, uint8_t ce, uint8_t i)
+static nand_addr_t checkpoint_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint8_t i)
 {
     nand_addr_t addr;
 
     addr.ch     = ch;
     addr.ce     = ce;
-    addr.lun    = 0U;
+    addr.lun    = lun;
     addr.plane  = (uint8_t)((i & 1U) & 1U); /* 页号奇偶 → P1/P0（双 Plane 交错） */
     addr.page   = (uint8_t)((i < 3U) ? i : (i - 3U));
     addr.block  = (uint8_t)((i < 3U) ? CHECKPOINT_BLOCK0 : CHECKPOINT_BLOCK1);
@@ -186,7 +186,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
         nand_addr_t pba;
         int         ret;
 
-        pba = checkpoint_page_addr(ftl->topo.ch, ftl->topo.ce, i);
+        pba = checkpoint_page_addr(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, i);
 
         ret = sync_write_page(pba, &cp, sizeof(cp), FC_COMMAND_MODULE_CHECKPOINT);
         if (ret != 0)
@@ -223,7 +223,7 @@ ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t 
         nand_addr_t pba;
         int         ret;
 
-        pba = checkpoint_page_addr(topo.ch, topo.ce, i);
+        pba = checkpoint_page_addr(topo.ch, topo.ce, topo.lun, i);
 
         ret = sync_read_page(pba, &candidates[i], sizeof(candidates[i]), FC_COMMAND_MODULE_CHECKPOINT);
         if (ret != 0)

@@ -391,7 +391,8 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
 
         if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
         {
-            result = fc_ldpc_decode(&ldpc_config, buffer, FC_BUFFER_DATA_SIZE);
+            uint8_t ecc_bits = 0U;
+            result = fc_ldpc_decode(&ldpc_config, buffer, FC_BUFFER_DATA_SIZE, &ecc_bits);
 
             if (result == FC_STATUS_IO_ERROR)
             {
@@ -401,8 +402,9 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             }
             else if ((result == FC_STATUS_OK) || (result == FC_STATUS_NOT_SUPPORTED))
             {
-                /* ECC 成功（或跳过）：desc status 置 READY */
+                /* ECC 成功（或跳过）：desc status 置 READY，记录纠正的 bit 数 */
                 desc->status = FC_CW_STATUS_READY;
+                desc->ecc_bits = ecc_bits;
             }
         }
         else
@@ -571,7 +573,7 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
         };
         fc_status_t ecc_result;
 
-        ecc_result = fc_ldpc_decode(&ldpc_config, buffers[failed_cw_idx], FC_BUFFER_DATA_SIZE);
+        ecc_result = fc_ldpc_decode(&ldpc_config, buffers[failed_cw_idx], FC_BUFFER_DATA_SIZE, NULL);
         if (ecc_result == FC_STATUS_IO_ERROR)
         {
             /* RAID 重建后 ECC 仍失败 → 硬件层面不可恢复 */

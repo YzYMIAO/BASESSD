@@ -263,7 +263,7 @@ static MunitResult test_encode_random_off(const MunitParameter params[], void *d
         {
             uint8_t *buf  = get_cw_buffer(cmd, i);
             uint8_t *base = get_cw_base(cmd, i);
-            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
+            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
             munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x55U + i)), ==, 1U);
         }
     }
@@ -296,7 +296,7 @@ static MunitResult test_encode_random_on(const MunitParameter params[], void *da
         {
             uint8_t *buf  = get_cw_buffer(cmd, i);
             uint8_t *base = get_cw_base(cmd, i);
-            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
+            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
             /* ECC 解码后数据仍在加扰状态，需解扰恢复原文 */
             fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
             for (uint8_t d = 0U; d < i; d++)
@@ -366,7 +366,7 @@ static MunitResult test_encode_raid_on(const MunitParameter params[], void *data
         {
             uint8_t *base = buffers[i];
             uint8_t *buf  = get_cw_buffer(cmd, i);
-            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
+            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
             fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
             for (uint8_t d = 0U; d < i; d++)
             {
@@ -408,7 +408,7 @@ static MunitResult test_encode_single_cw(const MunitParameter params[], void *da
 
     /* round-trip decode */
     const fc_ldpc_config_t cfg = {FC_BUFFER_DATA_SIZE, 8U, 4U};
-    munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
+    munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
     munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
 
     release_cmd_buffers(cmd);
@@ -787,7 +787,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
             munit_assert_not_null(base);
             munit_assert_not_null(buf);
 
-            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE), ==, FC_STATUS_OK);
+            munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
 
             /* 解扰 */
             fc_descriptor_id_t desc_id = (fc_descriptor_id_t)data_cmd->desc_id;

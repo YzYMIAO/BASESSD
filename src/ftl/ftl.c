@@ -61,6 +61,27 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                             /* 读成功：拷贝数据到 caller buffer */
                             (void)ftl_cmd_read_data(cmd, pending->io.buffer,
                                                     data_size);
+
+                            /* Read Recovery：记录本次读的 ECC 纠正 bit 数（取 4 CW 最大值），
+                             * 用于慢死预测（连续上升 → WARNING → 主动搬移）。 */
+                            if (ftl->rr.block_track != NULL)
+                            {
+                                uint16_t block = (uint16_t)pba_to_block(cmd->paa);
+                                uint8_t  ecc   = 0U;
+                                for (uint8_t k = 0U; k < 4U; k++)
+                                {
+                                    uint8_t b = (k == 0U) ? (uint8_t)completion->ecc_bit0
+                                              : (k == 1U) ? (uint8_t)completion->ecc_bit1
+                                              : (k == 2U) ? (uint8_t)completion->ecc_bit2
+                                                          : (uint8_t)completion->ecc_bit3;
+                                    if (b > ecc)
+                                    {
+                                        ecc = b;
+                                    }
+                                }
+                                rr_record_ecc(&ftl->rr, block, ecc, ftl->total_writes);
+                            }
+
                             if (pending->io.status_out != NULL)
                             {
                                 *pending->io.status_out = SSD_STATUS_OK;
@@ -89,8 +110,32 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                     {
                         if (pending->io.buffer != NULL)
                         {
-                            /* 读失败：返回全零 */
-                            memset(pending->io.buffer, 0, data_size);
+                            /* 读失败：先尝试 Read Recovery 恢复，恢复成功则数据已就位 */
+                            uint8_t retry_count = 0U;
+                            int     recovered   = rr_recover_read(&ftl->rr,
+                                                                  ftl->topo.ch, ftl->topo.ce,
+                                                                  cmd->paa,
+                                                                  pending->io.buffer, data_size,
+                                                                  pending->io.lba, &retry_count);
+                            if (recovered == 0)
+                            {
+                                /* Read recovery 成功：恢复好的数据已写入 caller buffer */
+                                if (pending->io.status_out != NULL)
+                                {
+                                    *pending->io.status_out = SSD_STATUS_OK;
+                                }
+                            }
+                            else
+                            {
+                                /* 恢复失败：返回全零 + 标记坏块 */
+                                memset(pending->io.buffer, 0, data_size);
+                                (void)retry_count; /* 恢复失败，重试次数无意义 */
+                                /* NOTE: 不在此处 mark bad，避免与 BBT/GC 分工混淆；交由预测搬移/GC 处理 */
+                                if (pending->io.status_out != NULL)
+                                {
+                                    *pending->io.status_out = SSD_STATUS_IO_ERROR;
+                                }
+                            }
                         }
                         else
                         {
@@ -266,6 +311,12 @@ ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params)
 
     /* ├─ Pending Request 表 ── */
     pending_init();
+
+    /* ├─ Read Recovery ├─
+     * per-Block ECC 追踪数组由调用者提供（ftl->rr_block_track），
+     * 容量 default = 物理 Block 总数。未提供时 read recovery 空转。 */
+    ftl->rr_max_blocks = (uint16_t)(BLOCKS_PER_PLANE * PLANE_NUM);
+    rr_init(&ftl->rr, ftl->rr_block_track, ftl->rr_max_blocks);
 
     /* ├─ L2P Cache ── */
     l2p_cache_init(&ftl->cache);

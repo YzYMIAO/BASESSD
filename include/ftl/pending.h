@@ -17,7 +17,7 @@
 
 #include <stdint.h>
 
-#define FTL_PENDING_MAX (8U)
+#define FTL_PENDING_MAX (32U)
 
 /* 前向声明 */
 struct ftl_context;

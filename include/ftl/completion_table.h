@@ -31,7 +31,7 @@ typedef struct
     void                   *ctx;         /* 回调上下文 */
 } completion_entry_t;
 
-#define COMPLETION_TABLE_SIZE (16U) /* 最多同时跟踪 16 个命令 */
+#define COMPLETION_TABLE_SIZE (32U) /* 最多同时跟踪 32 个命令 */
 
 /* ── 路由表 API ── */
 

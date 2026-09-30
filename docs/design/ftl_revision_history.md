@@ -169,7 +169,7 @@ fc_poll_completion() 消费一个 CQ entry 后：
 
 | 文件 | 改动 | 说明 |
 |------|------|------|
-| `include/ftl/completion_table.h` | **新增** | 16 项路由表 + `ftl_sync_waiter_t` + 统一泵声明 |
+| `include/ftl/completion_table.h` | **新增** | 16 项路由表【v0.31 扩为 32】+ `ftl_sync_waiter_t` + 统一泵声明 |
 | `src/ftl/completion_table.c` | **新增** | 路由表实现 + `ftl_sync_waiter_handler`（带/不带 release）|
 | `src/ftl/ftl.c` | 重写 | `ftl_handle_completion` 改为 default handler 注册；Phase 2 改为 `completion_table_drain()`；同步循环统一泵 |
 | `src/ftl/ftl_fc_interface.c` | 重写 | `ftl_internal_sync_wait` 改为 `completion_table_add` + `completion_table_drain()` 循环，不再独占 `fc_poll_completion` |
@@ -190,12 +190,12 @@ fc_poll_completion() 消费一个 CQ entry 后：
 现在同步等待和用户 I/O 共用同一个泵，完成事件不被吞。
 后续还需：
 1. CQ 深度确认 — 确保 FC 层 CQ 能容纳多 LUN 完成事件
-2. `FTL_PENDING_MAX` 扩展 — 从 8 增至 16/32
+2. `FTL_PENDING_MAX` 扩展 — 从 8 增至 32 ✅ **（v0.31 已完成）**
 3. `ftl_write` 同步等待改为 per-cmd sync_waiter
 
 ### 编译状态
 
-**零错误零警告**。新增 `completion_table.o` 398B text + 200B bss（16 项路由表）。FTL 层 22 个源文件。
+**零错误零警告**。新增 `completion_table.o` 398B text + 200B bss（32 项路由表，v0.31 扩）。FTL 层 22 个源文件。
 Binary size: 58368 bytes。
 
 ---
@@ -559,7 +559,7 @@ static void on_sub_complete(void *ctx) {
 ### 背景
 
 D4 多 LBA 拆分后，单次 host 请求（`block_count=N`）产生 N 个 FC 命令同时入 SQ。
-SQ 深度 64、Command Pool 64、Pending 表 8 各层资源构成多层漏斗。需要确认背压策略。
+SQ 深度 64、Command Pool 64、Pending 表 32 各层资源构成多层漏斗。需要确认背压策略。
 
 ### 决策：方案① pending 表满即隐式背压
 
@@ -569,9 +569,9 @@ SQ 深度 64、Command Pool 64、Pending 表 8 各层资源构成多层漏斗。
 
 | 资源 | 深度 | 实际占用峰值 | 结论 |
 |------|------|-------------|------|
-| SQ | 64 | budget=4 + pending ≤8 + HSQ ≤6 ≈ 18 | << 64 ✅ |
-| Command Pool | 64 | 同 SQ ≈ 18 | << 64 ✅ |
-| Pending 表 | 8 | D4 拆分 block_count=8 时吃满 ⚠️ | **真正瓶颈** |
+| SQ | 64 | budget=4 + pending ≤32 + HSQ ≤6 ≈ 42 | << 64 ✅ |
+| Command Pool | 64 | 同 SQ ≈ 42 | << 64 ✅ |
+| Pending 表 | 32 | D4 拆分 block_count=8 时占用 8/32 ⚠️ | 并发上限（v0.31 扩） |
 
 核心逻辑：
 - SQ/池满几乎不会发生：实际并发 << 深度

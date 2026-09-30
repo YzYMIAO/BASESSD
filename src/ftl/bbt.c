@@ -198,13 +198,13 @@ static ftl_status_t sync_read_page_raw(nand_addr_t addr, void *buffer)
 }
 
 /* ── BBT 固定位置页地址辅助（Block 36 / 备用 Block 39 各 3 页）── */
-static nand_addr_t bbt_page_addr(uint8_t ch, uint8_t ce, uint8_t i)
+static nand_addr_t bbt_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint8_t i)
 {
     nand_addr_t addr;
 
     addr.ch     = ch;
     addr.ce     = ce;
-    addr.lun    = 0U;
+    addr.lun    = lun;
     addr.plane  = (uint8_t)((i & 1U) & 1U);
     addr.page   = (uint8_t)((i < BBT_REDUNDANCY) ? i : (i - BBT_REDUNDANCY));
     addr.block  = (uint8_t)((i < BBT_REDUNDANCY) ? BBT_BLOCK : BBT_BLOCK_BACKUP);
@@ -230,7 +230,7 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
 
     /* 尝试从 NAND 加载已存在的 BBT */
     {
-        ftl_topology_t topo = { .ch = alloc->ch, .ce = alloc->ce, .lun = 0 };
+        ftl_topology_t topo = { .ch = alloc->ch, .ce = alloc->ce, .lun = alloc->lun };
         ret = bbt_load(g_bbt_bitmap, &loaded_bad_count, &seq, topo);
     }
     if (ret == 0)
@@ -391,14 +391,14 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc)
     /* 写 3 页到 Block 36 */
     for (i = 0U; i < BBT_REDUNDANCY; i++)
     {
-        nand_addr_t pba = bbt_page_addr(alloc->ch, alloc->ce, i);
+        nand_addr_t pba = bbt_page_addr(alloc->ch, alloc->ce, alloc->lun, i);
         (void)sync_write_page(pba, &header, sizeof(header));
     }
 
     /* 再写 3 页到备用 Block 39 */
     for (i = 0U; i < BBT_REDUNDANCY; i++)
     {
-        nand_addr_t pba = bbt_page_addr(alloc->ch, alloc->ce, (uint8_t)(i + BBT_REDUNDANCY));
+        nand_addr_t pba = bbt_page_addr(alloc->ch, alloc->ce, alloc->lun, (uint8_t)(i + BBT_REDUNDANCY));
         (void)sync_write_page(pba, &header, sizeof(header));
     }
 
@@ -436,7 +436,7 @@ ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence,
         nand_addr_t pba;
         int         ret;
 
-        pba = bbt_page_addr(topo.ch, topo.ce, i);
+        pba = bbt_page_addr(topo.ch, topo.ce, topo.lun, i);
 
         ret = sync_read_page(pba, &candidates[i], sizeof(candidates[i]));
         if (ret != 0)
