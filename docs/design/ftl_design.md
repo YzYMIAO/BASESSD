@@ -1621,12 +1621,13 @@ l2p_cache_read(cache, lba):
       state == INVALID    → 直接占用
 
     选中 victim line 后:
-      victim 是 DIRTY → l2p_cache_flush_one(victim_idx) 写回 NAND（Step 2 不实现）
-      l2p_cache_load_region(victim, region_id) 从 NAND 加载（Step 2 不实现，填 FTL_PBA_INVALID）
+      victim 是 DIRTY → l2p_cache_flush_one(victim_idx) 写回 NAND（已实现：sync_write_page）
+      l2p_cache_find_or_load：从 NAND L2P Table 加载 region
+        （metadata_dir_lookup 查位置；未分配回退固定位置 l2p_region_pba；sync_read_page）
       victim->region_id = region_id
-      victim->state     = L2P_CACHE_INVALID（Step 2 暂不置 CLEAN）
+      victim->state     = 加载成功 L2P_CACHE_CLEAN / 失败 L2P_CACHE_INVALID
       victim->access_count = 1
-      return victim->entries[entry_idx]（当 region 未加载时为 FTL_PBA_INVALID）
+      return victim->entries[entry_idx]（加载失败时 entries 全 FTL_PBA_INVALID）
 ```
 
 ### 6.3 更新流程（Write-back）
@@ -1898,7 +1899,7 @@ void ftl_checkpoint(ftl_context_t *ftl) {
     l2p_checkpoint_header_t cp;
     cp.sequence = ftl->journal.sequence_counter;
     cp.journal_sequence = cp.sequence;
-    cp.timestamp = timer_get_ms();
+    cp.timestamp = timer_get_ms();   /* 伪码示意：实际见 checkpoint.c——timer_get_ms 不可用，恒 0（v0.37 遗留） */
     cp.region_bitmap[...] = ...;        // 增量 checkpoint 只需 bitmap
     checkpoint_write(&cp);
 
@@ -2947,7 +2948,7 @@ int main(void) {
 ### 13.2 FTL 写数据的标准序列
 
 ```c
-nand_paa_t ftl_write_data(ssd_lba_t lba, const uint8_t *data, uint32_t len) {
+nand_paa_t ftl_write_data(lba_t lba, const uint8_t *data, uint32_t len) {
     fc_command_t *cmd = fc_command_alloc();
 
     cmd->config.operation    = OP_NORMAL_PROGRAM_PAGE;
@@ -3334,10 +3335,11 @@ Step 12 — Wear Leveling
 
 | 模块 | 文件 | 说明 |
 |------|------|------|
-| Controller 层 | `request.c` / `state_machine.c` / `scheduler.c` | 主机请求拆分、状态机、优先级调度 |
+| Controller 层 | `state_machine.c` / `scheduler.c` | 状态机、优先级调度（`request.c` 已在 v0.23/v0.36 实现——拆分 + 跨实例路由，非桩） |
 | Platform BSP | `timer.c` / `uart.c` / `cache.c` / `dma.c` / `interrupt.c` | 硬件外设驱动（已有 soc.h + DWT 实现）|
-| NVMe Host | `nvme_admin.c` / `nvme_io.c` / `submission_queue.c` / `completion_queue.c` | NVMe 协议层（当前用 UART CLI）|
+| NVMe Host | `nvme_admin.c` / `nvme_io.c` / `submission_queue.c` / `completion_queue.c` | NVMe 协议层（当前用 UART CLI，v0.30 P-B 立项）|
 | Host Sim | `flash_simulator.c` / `file_backend.c` / `event_loop.c` / `fault_injection.c` / `simulated_time.c` | PC 端模拟环境（当前跑在真实硬件）|
+| 平台计时钩子 | `ssd_platform_ops_t.time_us`（platform.h 已定义，stm32h743 未注册） | Checkpoint T3 定时 + GC 定时 + cp.timestamp 接线（见 v0.37 遗留）|
 
 **FTL 层 22 个源文件，0 个 `#warning` 核心桩。全部模块已实现并通过编译。**
 
@@ -3404,13 +3406,13 @@ nand_paa_t（芯片内地址）                = [LUN][BLOCK][PLANE][PAGE][CW]
 | D7 | **多命令流水线** | ✅ **Multi-Plane + Cache Program 安全中间页**：见下方 §18 D7 详细分析 |
 | D8 | **错误通知粒度** | ✅ **status_out 指针（消费级 DRAM-less）**：见下方 §19 D8 详细分析 |
 
-### 剩余待办（对外接口待讨论）
+### 剩余待办（对外接口）
 
-以下为 FTL 对外接口层面已识别但未最终决定的问题，待后续讨论：
+以下为 FTL 对外接口层面已识别的问题（D4~D8 均已实现，仅 D3 遗留）：
 
 | 编号 | 问题 | 说明 |
 |------|------|------|
-| D3 | **LBA 地址体系统一** | ssd_lba_t(uint64_t) vs lba_t(uint32_t) 边界，API 参数是否统一 |
+| D3 | **LBA 地址体系统一** | ssd_lba_t(uint64_t) 已废弃删除（v0.20 死代码清理），当前 lba_t=uint32_t 统一；`ftl_io_request_t.lba` 保留 uint64_t（NVMe 协议宽度）。剩余问题：UART/NVMe host 层入参宽度与 lba_t 的边界 |
 | D4 | **多 LBA 拆分** | ✅ 已实现 — Controller 层拆分，`request.c` → `on_sub_complete` 回调聚合，FTL 层保持单页原语 |
 | D5 | **写失败回滚** | ✅ 已实现 — modify-after-confirm + BBT 两阶段 + 自动回滚 |
 | D6 | **队列深度/背压** | ✅ 已实现 — pending 表满即隐式背压（DRAM-less 消费级），不需额外机制 |
@@ -3941,6 +3943,9 @@ ftl_init
 3. **功能优先全常驻 → 产品化裁剪**是行业流程；SRAM 压力真实出现 + 字段有消费方后再做，
    届时已知拆谁、有数据驱动
 
+> **v0.37 状态**：全常驻 224KB 已落 AXI_RAM 实测（AXI_RAM≈355.5KB 剩 11.5KB、SRAM2≈24KB 剩 104KB），
+> SRAM 压力尚未真实出现，本裁剪路径保持**不实现**。触发条件未变：SRAM 紧张 + 扩展字段有消费方。
+
 ### 19.6 裁剪顺序（若需降内存）
 
 | 裁剪 | 省内存 | 代价 |
@@ -4067,6 +4072,6 @@ typedef struct ftl_context {
 int  ftl_init(ftl_context_t *ftl);   /* 旧原型，见顶部 ⚠️ 注 */
 int  ftl_read(ftl_context_t *ftl, lba_t lba, void *data, uint32_t count);
 int  ftl_write(ftl_context_t *ftl, lba_t lba, const void *data, uint32_t count);
-int  ftl_trim(ftl_context_t *ftl, ssd_lba_t lba, uint32_t count);
+void ftl_trim(ftl_context_t *ftl, lba_t lba, uint32_t count);
 void ftl_service(ftl_context_t *ftl);
 void ftl_background_flush(ftl_context_t *ftl);

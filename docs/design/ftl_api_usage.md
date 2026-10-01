@@ -120,7 +120,9 @@ typedef struct
 > `ftl_block_t *blocks`（BST 单数据源），坏块位 + 擦除计数 + VPC + 位图 + ECC 全在表内。
 > **定义位置**：`ftl_init_params_t` 依赖 `super_block_t`（allocator.h 定义），放
 > `common/ftl_types.h` 会与 allocator.h 形成循环 include → 定位于 `allocator.h`（super_block_t 之后）。
-> 启动示例见 §1.7（`ftl_init(&ftl, &params)`）。
+> **v0.37 补充**：`free_count` 传 0 即可（allocator_init 内部硬清零），free pool 由调用者在
+> `ftl_init` 后遍历 BST 非坏块 `allocator_free_block` 回填（allocator_init 不填、bbt 只标坏块）。
+> 启动示例见 §1.7（v0.37 多维生产版）。
 
 ### 1.4 异步完成机制
 
@@ -240,7 +242,7 @@ ssd_controller_submit(req{block_count=N})
         ├─ request->io.lba    = start_lba + i;      // 循环内复用 io 模板
         ├─ request->io.buffer = buf + i*2048;
         ├─ request->io.pages  = (成对) 2 / (奇数尾) 1;
-        ├─ ftl_submit_read(ctrl->ftl, &request->io)
+        ├─ ftl_submit_read(ssd_controller_route(ctrl, io.lba), &request->io)  // v0.36 按 LBA 路由
         ├─ ...
         └─ 每个完成 → ftl_handle_completion
               → io.on_complete() → sub_remaining--
@@ -261,21 +263,13 @@ static void on_sub_complete(void *ctx)
 
 int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
 {
-    request->sub_remaining = (request->block_count + 1U) / 2U;  /* 两两配对 */
-
-    /* 子请求公共字段（只设一次） */
-    request->io.complete_flag   = NULL;               /* 子请求用回调聚合 */
-    request->io.status_out      = &request->completion_status;
-    request->io.on_complete     = on_sub_complete;
-    request->io.on_complete_ctx = request;
-
-    for (i = 0; i < request->block_count; ) {
-        request->io.lba    = request->start_lba + i;
-        request->io.buffer = buf + i * FTL_READ_USER_SIZE;
-        request->io.pages  = (i + 1 < block_count) ? 2U : 1U;
-        ftl_submit_read(controller->ftl, &request->io);
-        i += (request->io.pages == 2U) ? 2U : 1U;
-    }
+    /* v0.36：子请求数预统计（ssd_split_count），替代硬公式 (block_count+1)/2：
+     *   - 连续 LBA 同实例才配对 pages=2（ssd_split_use_multi_plane），
+     *     跨 region/实例边界切实例时降级单 Plane → 实际子请求数 > 公式值
+     *   - 未映射读会同步完成（ftl_submit_read PBA INVALID 路径），必须先计数后提交
+     *   计数不足 → sub_remaining 永不归零 → 父请求 complete_flag 永不置位（host 悬挂） */
+    request->sub_remaining = ssd_split_count(controller, request);
+    ...
 }
 ```
 
@@ -298,34 +292,55 @@ typedef struct {
 ```
 
 ```c
-/* 系统启动 */
+/* 系统启动（v0.37 生产路径：见 src/main.c ssd_ftl_boot / ssd_ftl_boot_all） */
 fc_init();                              // ① FC 初始化
-ftl_context_t ftl;
+nand_init();                            // ② NAND 初始化
+nand_dispatch_set_device_ready(1U);     // ③ 使能 NAND 命令分发
 
-/* 供 FTL 使用的静态数组（由调用者提供存储） */
-static uint16_t     g_free_blocks[BLOCKS_PER_PLANE * PLANE_NUM];  /* 全局块号 */
-static super_block_t g_closed_sb_list[SUPER_BLOCK_LIST_MAX];
-static ftl_block_t  g_blocks[FTL_BLOCK_TOTAL];  /* v0.32: Block State Table（56B×4096=224KB） */
+/* 每 (ch,ce,lun) 一个 FTL 实例（多维声明，宏改动即扩展；v0.35 多维化） */
+static ftl_context_t     g_ftl[CH_NUM][CE_NUM][LUN_NUM];
+static uint16_t          g_free_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL]; /* → SRAM2 */
+static super_block_t     g_closed_sb_list[CH_NUM][CE_NUM][LUN_NUM][SUPER_BLOCK_LIST_MAX]; /* → SRAM2 */
+static ftl_block_t       g_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL];   /* BST 224KB → AXI_RAM */
+static ssd_controller_t  g_ctrl;
 
 ftl_init_params_t params = {
-    .topo           = {0, 0, 0},                      // 拓扑（当前单芯片 ch/ce/lun）
-    .free_blocks    = g_free_blocks,
-    .free_count     = BLOCKS_PER_PLANE * PLANE_NUM,   // 出厂扫描后实际好块数
-    .blocks         = g_blocks,                       // v0.32: BST（必填，未提供则 ftl_init 失败）
-    .closed_sb_list = g_closed_sb_list,
+    .topo           = { .ch = ch, .ce = ce, .lun = lun },  // 本实例拓扑
+    .free_blocks    = g_free_blocks[ch][ce][lun],
+    .free_count     = 0U,                                  // 回填前为 0（allocator_init 硬清零）
+    .blocks         = g_blocks[ch][ce][lun],               // BST（必填，未提供则 ftl_init 失败）
+    .closed_sb_list = g_closed_sb_list[ch][ce][lun],
 };
 
-ftl_init(&ftl, &params);                // ② FTL 初始化（v0.30：结构体指针传参）
-                                        //    内部：completion_table_init → pending_init
-                                        //         → BST memset（v0.32）→ l2p_cache_init
-                                        //         → allocator_init(&ftl->alloc, params)
-                                        //         → metadata_dir_load → bbt_init（填充 BST bad 位）
-                                        //    BST 由调用者提供存储，未提供（NULL）→ FTL_ERROR
+ftl_init(&g_ftl[ch][ce][lun], &params);   // ④ FTL 初始化（v0.30：结构体指针传参）
+                                          //    内部：completion_table_init → pending_init
+                                          //         → BST memset（v0.32）→ l2p_cache_init
+                                          //         → allocator_init（free pool 空）
+                                          //         → metadata_dir_load → bbt_init（填充 BST bad 位）
+                                          //    BST 由调用者提供存储，未提供（NULL）→ FTL_ERROR
 
-/* 主循环（企业级异步模式） */
+/* ⑤ free pool 回填（v0.37 最大缺口）：
+ *    allocator_init 不填 free pool（free_count 硬清零）、bbt 只标坏块不产 free_blocks。
+ *    必须遍历 BST 非坏块逐个 allocator_free_block，否则首次写 allocator_alloc 失败。 */
+for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++) {
+    if (!ftl_block_is_bad(&g_blocks[ch][ce][lun][g])) {
+        allocator_free_block(&g_ftl[ch][ce][lun].alloc, g);
+    }
+}
+
+ftl_boot_recovery(&g_ftl[ch][ce][lun], &result);  // ⑥ 启动恢复（FRESH/CLEAN/POWER_FAILURE）
+
+/* ⑦ controller 绑定：g_ftl_ptrs 三维指针表（类型匹配 ssd_controller_init 形参） */
+ssd_controller_init(&g_ctrl, g_ftl_ptrs);
+
+/* 主循环（企业级异步模式；v0.37 g_ftl_ready 守卫） */
 while (1) {
     uart_service_poll();                // 收 Host 命令 → ssd_controller_submit()
-    ftl_service(&ftl);                  // ③ 推进 FTL（FC + 完成路由 + 后台任务）
+    if (g_ftl_ready) {
+        ftl_service(&g_ftl[0][0][0]);   // ⑧ 推进 FTL（FC + 完成路由 + 后台任务）
+    } else {
+        (void)fc_service();             //    boot 失败降级裸 fc_service
+    }
     /* 请求完成状态由 ssd_controller_is_complete() 轮询 */
 }
 ```
@@ -368,10 +383,13 @@ typedef struct {
     uint32_t          miss_count;
     uint8_t           ch, ce, lun;       // 本 cache 绑定拓扑（固定位置寻址 + 路由）
     metadata_dir_cache_t *md_dir;        // Metadata Directory 指针
+    ftl_allocator_t      *alloc;         // Allocator 指针（Region 动态分配；v0.19 加）
 } l2p_cache_t;
 
-/* 设置 Metadata Directory 指针 */
-static inline void l2p_cache_set_md_dir(l2p_cache_t *cache, metadata_dir_cache_t *md_dir);
+/* 设置 Metadata Directory + Allocator 指针（v0.19 加 alloc 参数） */
+static inline void l2p_cache_set_md_dir(l2p_cache_t *cache,
+                                        metadata_dir_cache_t *md_dir,
+                                        ftl_allocator_t *alloc);
 
 /* 全局 LBA → (ch,ce,lun) 路由（行业主控哈希；LUN_NUM=1 时恒 0） */
 static inline uint32_t lba_route_ch(uint64_t lba);
@@ -635,7 +653,7 @@ nand_addr_t super_block_page_addr(const super_block_t *sb, uint8_t plane, uint8_
 
 ### 5.3 内部同步 NAND 操作（内联化）
 
-**Step 2 起，`ftl_internal_read_page / write_page / erase_block / read_page_raw` 四个包装函数已删除**，
+**v0.28 起，`ftl_internal_read_page / write_page / erase_block / read_page_raw` 四个包装函数已删除**，
 各模块内联为 `static` 同步助手（`alloc → addr_to_cmd → submit → sync_wait → release`），
 仅保留统一等待入口：
 

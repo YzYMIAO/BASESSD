@@ -163,12 +163,13 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun);
  *
  * 内部：
  *   hit  → access_count++，直接返回 entry
- *   miss → CLOCK 选 victim（DIRTY 需先 flush），标记新 region_id
- *          region 数据由后台加载（Step 2 暂不实现，返回 FTL_PBA_INVALID）
+ *   miss → CLOCK 选 victim（DIRTY 需先 flush），标记新 region_id，
+ *          region 数据从 NAND L2P Table 加载（sync_read_page：
+ *          经 metadata_dir_lookup 查位置，未分配时回退固定位置映射）
  *
  * @param cache  cache 上下文
  * @param lba    逻辑地址
- * @return PBA 映射值，FTL_PBA_INVALID 表示未映射或尚未加载
+ * @return PBA 映射值，FTL_PBA_INVALID 表示未映射或加载失败
  */
 nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba);
 
@@ -187,11 +188,13 @@ void l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
 /*
  * l2p_cache_flush_one - 写回指定索引的 DIRTY cache line 到 NAND
  *
- * Step 2：暂不实现（返回 0 但不写 NAND，仅清除 DIRTY 标记）。
- * 后续接入 Region 写后：
- *   ① line->state = FLUSHING
- *   ② 通过 ftl_cmd_sys_write_page 写 Region 到 NAND
- *   ③ line->state = CLEAN
+ * 已实现（v0.19 起）：
+ *   ① line->state = FLUSHING（防 evict 选中）
+ *   ② 位置：经 metadata_dir_lookup 查已分配位置；未分配（首次写）经
+ *      metadata_dir_alloc_region 从 Free Pool 动态分配；分配失败/无 md_dir
+ *      时回退固定位置映射（l2p_region_pba）
+ *   ③ sync_write_page 写 Region 到 NAND
+ *   ④ line->state = CLEAN
  *
  * @param cache     cache 上下文
  * @param line_idx  line 索引（0 ~ L2P_CACHE_SIZE-1）

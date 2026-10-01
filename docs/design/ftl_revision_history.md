@@ -126,8 +126,8 @@ FTL 层剩余 5 个模块全部实现，21 个源文件 0 个 `#warning` 核心�
 **零错误零警告**。FTL 层 21 个源文件全部通过。Binary size: 58368 bytes。
 
 ### 剩余 #warning（非 FTL 层）
-- Controller 层：`request.c` `scheduler.c` `state_machine.c` — 主机请求拆分/调度/状态机
-- NVMe 层：`nvme_admin.c` `nvme_io.c` `submission_queue.c` `completion_queue.c` — 当前用 UART CLI
+- Controller 层：`scheduler.c` `state_machine.c` — 主机请求调度/状态机（`request.c` 已在 v0.23/v0.36 实现，非桩）
+- NVMe 层：`nvme_admin.c` `nvme_io.c` `submission_queue.c` `completion_queue.c` — 当前用 UART CLI，5 个桩文件（含 nvme_controller.c 返回 NOT_SUPPORTED）
 - Platform BSP：`timer.c` `uart.c` `cache.c` `dma.c` `pcie.c` `interrupt.c` — 已有 soc.h + DWT 实现
 - Host Sim：5 个文件 — PC 模拟环境，当前跑在真实硬件
 
@@ -906,9 +906,10 @@ ftl_init(&ftl, &params);
 ### 下一步
 
 - P-A：pending 表扩展 8 → 16/32（✅ v0.31 已做）
-- P-B：scheduler / state_machine / NVMe 层（`#warning` 桩）
+- P-B：scheduler / state_machine / NVMe 层（`#warning` 桩，6 文件）
 - P-C.5：反向映射 bitmap（✅ v0.32 已做——`ftl_block_t.valid_map`）
 - PFR closed_sb_list 掉电重建（v0.32 二期项）
+- CP/GC 定时触发接线（`checkpoint_check_trigger(ftl, 0U)` / `gc_check_trigger(..., 500U)` 硬编码 elapsed；`cp_timestamp` 恒 0——需平台 `time_us` 钩子）
 
 ---
 
@@ -1048,11 +1049,11 @@ v0.34 把 LUN_NUM 改成 2 与 MT29F4G08 真实结构（单 die，DIE_NUM=1）�
 
 零错误零新增警告（debug + tests）。commit `5f886e1`。LUN_NUM=1 折叠单 LUN，行为与现状一致。
 
-### 遗留（v0.36 已闭环第一条）
+### 遗留（v0.36/v0.37 已闭环）
 
 - **controller 三维 ftl 指针 + 路由**：✅ 已实现（v0.36，见下）
-- **main.c FTL 上线**：host 大数组（g_blocks[CH][CE][LUN][FTL_BLOCK_TOTAL] 等）+ ftl_init 循环，无生产调用——v0.37 计划，见下
-- SRAM：每 LUN 352KB（BST 224KB + L2P 128KB）；LUN_NUM=1 时 AXI_RAM 剩 364KB 勉强放下；LUN_NUM=2 需跨区
+- **main.c FTL 上线**：✅ 已实现（v0.37 eeb2ace，见下）——host 大数组 + ftl_init 循环 + free pool 回填 + boot 恢复 + controller 接入，主循环切 ftl_service
+- SRAM：每 LUN 352KB（BST 224KB + L2P 128KB）；v0.37 实测 AXI_RAM≈355.5KB + SRAM2≈24KB 不溢出；LUN_NUM=2 需跨区
 
 ## v0.36 — Controller FTL 实例三维路由接入（ftl[CH][CE][LUN] + 按 LBA 路由）
 
@@ -1140,7 +1141,28 @@ v0.36 把 controller 路由接入，但 **FTL 仍无生产调用入口**——`s
 
 ### 待确认/遗留
 
-- 档三分层（BST 存储分层）——独立任务
+- 档三分层（BST 存储分层）——独立任务（触发条件未变，见 ftl_design §19）
 - 掉电重建 closed_sb_list——v0.32 二期遗留
 - pending/completion 全局单例多实例化——LUN_NUM>1 启用时必修
 - controller 传参的 `g_ftl_ptrs` 显式指针表（避免 -Wincompatible-pointer-types）；若后续 controller 头改收数组退化形式（`ftl_context_t (*ftl)[CE][LUN]`）可去掉
+- Checkpoint/GC 定时触发接线：`checkpoint_check_trigger(ftl, 0U)` 的 elapsed 恒 0、`gc_check_trigger(..., 500U)` 硬编码；`cp_timestamp` 恒 0（timer_get_ms 不可用）——需平台 `time_us` 钩子（`ssd_platform_ops_t.time_us` 已定义但 stm32h743 未注册），T3/GC 定时只在写入量/水位触发下生效
+- write 路径 pending 完成依赖 completion_table_drain 泵（非同步释放）——pending 槽位只在完成回调释放，submit 失败路径已配对 remove；无显式泄漏（UART 层尚未接 pending 通知，上板前关注）
+
+### FTL 层未实现清单（后续实现参考）
+
+> 本清单汇总「FTL 层边界内」的真实缺口（与上文遗留对应，按优先级排序）。
+> 非 FTL 层（NVMe/controller 调度/UART CLI/平台 BSP 计时）见 ftl_design §16「未实现」。
+
+| # | 项 | 现状 | 影响 | 工作量 | 入口/依赖 |
+|---|----|------|------|--------|-----------|
+| F1 | **CP/GC 定时触发接线 + 平台 time_us 钩子** | `checkpoint_check_trigger(ftl,0U)` elapsed 恒 0；`gc_check_trigger(...,500U)` 硬编码；`cp.timestamp=0`；`cp_timer_start`/`gc_timer_start` 只清零从未读 | T3 定时 checkpoint 不触发；GC 定时用假值；checkpoint 头部无真实时间戳 | 小（半天内） | ① platform 层实现并注册 `ssd_platform_ops_t.time_us`（stm32h743 可用 HAL_GetTick×1000 或 DWT）② ftl_service 用其计算 elapsed 传入 trigger ③ checkpoint_create 填 timestamp |
+| F2 | **掉电重建 closed_sb_list** | `power_failure_recovery.c` 只重建 open SB 写指针；closed 列表掉电后为空 | 掉电重启后已满 SB 不回收 → GC 空间泄漏（不丢数据，但容量衰减） | 大（独立立项） | v0.32 二期项；需扫全 NAND 判有效页分组（复用 ftl_block_is_valid / sync_read_page） |
+| F3 | **predictive 搬移（read disturb / 慢死）** | `rr_record_ecc` 只记录；`rr_check_predictive` 无调用方；read_count 只累加 | CRITICAL/DYING 块不主动搬移，靠读到坏才兜底 | 中 | ftl_service 或 GC 后台周期调 `rr_check_predictive` → 选中块搬移（wl_relocate 可复用） |
+| F4 | **checkpoint 增量（region_bitmap）** | 全量写 6 页（region_bitmap 恒全 1，恢复不消费）；`journal_sequence` 与 `sequence` 同值 | 每次 checkpoint 写全表，容量/寿命开销大 | 大 | 增量需跟踪 dirty region（l2p cache DIRTY 行 → bitmap）+ 恢复按 bitmap 局部加载 |
+| F5 | **写 Multi-Plane 真双页（VPC/空洞侧）** | 写 pages=2 时仅 pba（plane0）置 valid；plane1 页不置位、L2P 只映射偶数 LBA | 跨 plane 写无 bitmap 追踪，VPC 少记 1/2；读 planes 配对基于偶数 LBA 假设 | 中 | completion handler 需对 new_pba 的 plane1 页也 set_valid；`ftl_cmd_setup_ppa` 侧已按 multi_plane 展开 desc（FC 层支持），缺口在 FTL 侧确认/簿记 |
+| F6 | **pending/completion 单例多实例化** | `g_pending[32]`/`g_table[32]` 全局单例 | LUN_NUM>1 多 FTL 实例共享命令路由 → 冲突 | 中（LUN>1 前必修） | v0.34 遗留；pfr 中 scan_write_pointer 硬编码 ch/ce=0 同源 |
+| F7 | **写失败 Super Block 空洞的显式回滚** | 依赖「写失败不计 VPC + GC 自然跳过」 | 空洞页数据悬空，GC 前读到旧 L2P 指向的页仍可能触发 RR | 低 | 可选：失败写后该页显式标记 / journal 补偿；现状可运行 |
+| F8 | **journal 空间不足的紧急 checkpoint 回切校验** | `journal_truncate` 简化实现（擦除非当前 block）；`checkpoint_is_emergency` 有但触发面未验证 | Journal 满时依赖 checkpoint 水位线，简化截断在极端写模式下的正确性未测 | 中（测试为主） | 上板高压写验证；`journal_flush_page` 满页回切逻辑已实现 |
+| F9 | **CQ/SQ 深度与多实例并发实测** | FC 池深度（64/256/128/64/16/64）按单实例预算 | 多 LUN/多实例并发 + 后台（GC/CP/BBT）同时争池未实测 | 中（测试） | 上板多实例后观察；文档 §17 背压已分析 |
+
+**上板验证（v0.37）是 F1/F8/F9 的前置**：FTL 首次真跑，UART 日志 + 高压写会暴露 allocator/pending/GC 的真实行为。
