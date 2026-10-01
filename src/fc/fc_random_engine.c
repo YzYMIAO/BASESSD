@@ -4,12 +4,31 @@
 
 #include <stddef.h>
 
+/*
+ * fc_random_engine.c — NAND 数据加扰/解扰引擎
+ *
+ * 加扰目的：打散写入 NAND 的数据 pattern，避免长串 0/1 造成
+ * 单元间干扰（Program Disturb / Read Disturb）恶化，也便于
+ * 均衡各页误码率。加扰与解扰是同一操作（XOR 对称）。
+ *
+ * 两套可配置策略（编译期宏，见 fc_random_engine.h）：
+ *   种子生成  ：FC_RANDOM_SEED_STRATEGY（BASIC / ENHANCED / WEIGHTED）
+ *   加扰算法  ：FC_RANDOM_ALGO（LFSR / XORSHIFT / SIMPLE_XOR）
+ */
+
 /* ══════════════════════════════════════════════════════════════════
  * 种子生成策略
  * ══════════════════════════════════════════════════════════════════ */
 
 #if (FC_RANDOM_SEED_STRATEGY == FC_RANDOM_SEED_ENHANCED)
 
+/* --------------------------------------------------------------------
+ * fc_random_seed_from_paa_impl（ENHANCED 策略）
+ *   功能：从 PAA + 写入序列生成加扰种子。
+ *   实现要点：各字段独立左移到不同 bit 位再 XOR（避免位重叠）；
+ *         黄金分割常数 0x9E3779B9（≈2^32/φ）做扩散；
+ *         CW 维度使同一 page 内不同 CW 种子不同。
+ * -------------------------------------------------------------------- */
 static uint32_t fc_random_seed_from_paa_impl(nand_paa_t paa, uint32_t program_sequence)
 {
     /*
@@ -33,6 +52,12 @@ static uint32_t fc_random_seed_from_paa_impl(nand_paa_t paa, uint32_t program_se
 
 #elif (FC_RANDOM_SEED_STRATEGY == FC_RANDOM_SEED_PROGRAM_SEQUENCE_WEIGHTED)
 
+/* --------------------------------------------------------------------
+ * fc_random_seed_from_paa_impl（PROGRAM_SEQUENCE_WEIGHTED 策略）
+ *   功能：从 PAA + 写入序列生成加扰种子（写入序列权重更高）。
+ *   实现要点：program_sequence 用 0xDEADBEEF 高权重乘 + 高位再混，
+ *         随写入次数增加 seed 变化更快（高耐久场景）。
+ * -------------------------------------------------------------------- */
 static uint32_t fc_random_seed_from_paa_impl(nand_paa_t paa, uint32_t program_sequence)
 {
     /*
@@ -56,6 +81,11 @@ static uint32_t fc_random_seed_from_paa_impl(nand_paa_t paa, uint32_t program_se
 
 #else /* FC_RANDOM_SEED_BASIC (默认) */
 
+/* --------------------------------------------------------------------
+ * fc_random_seed_from_paa_impl（BASIC 策略，默认）
+ *   功能：从 PAA + 写入序列生成加扰种子。
+ *   实现要点：program_sequence ^ 各 PAA 字段移位后的简单混合。
+ * -------------------------------------------------------------------- */
 static uint32_t fc_random_seed_from_paa_impl(nand_paa_t paa, uint32_t program_sequence)
 {
     uint32_t seed;
@@ -97,9 +127,12 @@ static uint32_t fc_random_seed_from_paa_impl(nand_paa_t paa, uint32_t program_se
  * 16 级 LFSR，多项式 x¹⁶ + x¹⁴ + x¹³ + x¹¹ + 1
  * 反馈位 = bit15 ^ bit13 ^ bit12 ^ bit10（0-indexed）
  * 周期 2¹⁶ - 1 = 65535
+ * （对应多项式 x^16 + x^14 + x^13 + x^11 + 1，
+ *   反馈抽头即其非零系数位）
  */
 #    define FC_LFSR_PERIOD (65535U)
 
+/* 生成一个伪随机字节（8 bit 递推） */
 static uint8_t fc_lfsr_byte(uint32_t *state)
 {
     uint16_t lfsr = (uint16_t)(*state & 0xFFFFU);
@@ -121,6 +154,12 @@ static uint8_t fc_lfsr_byte(uint32_t *state)
     return result;
 }
 
+/* --------------------------------------------------------------------
+ * fc_random_transform_impl（LFSR 算法）
+ *   功能：用 LFSR 流按字节异或 data（加扰=解扰）。
+ *   实现要点：seed 低 16 位作初始状态（0 强制为 1，防全零卡死）；
+ *         每字节 8 次移位递推取 8 bit。
+ * -------------------------------------------------------------------- */
 static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint32_t seed)
 {
     uint16_t index;
@@ -153,6 +192,11 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
  */
 #    define FC_SIMPLE_XOR_PATTERN_LEN (64U)
 
+/* --------------------------------------------------------------------
+ * fc_random_transform_impl（SIMPLE_XOR 算法）
+ *   功能：用 seed 生成 64B 伪随机 pattern，循环异或 data。
+ *   实现要点：pattern 由 XOR-shift 递推生成；性能开销最小。
+ * -------------------------------------------------------------------- */
 static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint32_t seed)
 {
     uint8_t  pattern[FC_SIMPLE_XOR_PATTERN_LEN];
@@ -183,6 +227,12 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
 
 #elif (FC_RANDOM_ALGO == FC_RANDOM_ALGO_XORSHIFT)
 
+/* --------------------------------------------------------------------
+ * fc_random_transform_impl（XORSHIFT 算法）
+ *   功能：XOR-shift 32 三步递推流按字节异或 data。
+ *   实现要点：seed ^= seed<<13; ^= seed>>17; ^= seed<<5（周期 2^32-1）；
+ *         seed 为 0 时无意义（返回 INVALID_ARGUMENT）。
+ * -------------------------------------------------------------------- */
 static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint32_t seed)
 {
     uint16_t index;
@@ -207,16 +257,19 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
  * 公接口
  * ══════════════════════════════════════════════════════════════════ */
 
+/* 种子生成（策略由编译宏决定） */
 uint32_t fc_random_seed_from_paa(nand_paa_t paa, uint32_t program_sequence)
 {
     return fc_random_seed_from_paa_impl(paa, program_sequence);
 }
 
+/* 加扰/解扰（XOR 对称；算法由编译宏决定） */
 fc_status_t fc_random_transform(uint8_t *data, uint16_t length, uint32_t seed)
 {
     return fc_random_transform_impl(data, length, seed);
 }
 
+/* 当前算法名（调试用） */
 const char *fc_random_algo_name(void)
 {
 #if (FC_RANDOM_ALGO == FC_RANDOM_ALGO_XORSHIFT)

@@ -53,6 +53,17 @@
 /* ── 全局状态 ── */
 static uint8_t g_crc_ready = 0U; /* 非零表示初始化成功 */
 
+/* --------------------------------------------------------------------
+ * fc_crc_init
+ *   功能：初始化 STM32H743 CRC 硬件外设。
+ *   参数：无。
+ *   返回：无。
+ *   实现要点：
+ *     - 直接操作 RCC 寄存器使能 CRC 时钟（AHB4ENR bit19）。
+ *     - 默认配置即 IEEE 802.3 CRC-32（多项式 0x04C11DB7、INIT 0xFFFFFFFF、
+ *       不反相），无需改动；写 INIT + RESET 确认外设可访问。
+ *     - 用 IDR（8 位只读影子寄存器）写读回环验证外设响应，置 g_crc_ready。
+ * -------------------------------------------------------------------- */
 void fc_crc_init(void)
 {
     uint32_t idr;
@@ -80,6 +91,16 @@ void fc_crc_init(void)
     g_crc_ready = (idr == 0xA5U) ? 1U : 0U;
 }
 
+/* --------------------------------------------------------------------
+ * fc_crc_compute
+ *   功能：对 512B USER 数据计算 CRC-32（硬件 CRC 外设）。
+ *   参数：user_data —— USER 数据指针（buffer+8，可未 4 字节对齐）。
+ *   返回：CRC-32 值；参数非法或未初始化返回 0。
+ *   实现要点：
+ *     - 每次先 RESET 引擎回 INIT 值（保证独立计算）。
+ *     - 数据可能未对齐，逐字 memcpy 到临时变量再写 DR 保证对齐访问。
+ *     - 32 位写入 DR 即自动喂入 CRC 引擎。
+ * -------------------------------------------------------------------- */
 uint32_t fc_crc_compute(const uint8_t *user_data)
 {
     uint32_t word;
@@ -108,6 +129,12 @@ uint32_t fc_crc_compute(const uint8_t *user_data)
     return FC_CRC_REG(FC_CRC_DR_OFFSET);
 }
 
+/* --------------------------------------------------------------------
+ * fc_crc_verify
+ *   功能：校验 USER 数据的 CRC 与存储值是否一致。
+ *   参数：user_data —— USER 指针；stored_crc —— 存储的 CRC 值。
+ *   返回：FC_CRC_RESULT_OK / FC_CRC_RESULT_ERROR。
+ * -------------------------------------------------------------------- */
 uint8_t fc_crc_verify(const uint8_t *user_data, uint32_t stored_crc)
 {
     if (user_data == NULL)

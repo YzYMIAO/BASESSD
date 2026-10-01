@@ -5,6 +5,21 @@
 
 #include <stdint.h>
 
+/*
+ * fc_command.h — FC 命令 / Descriptor / CQ 结构体
+ *
+ * 资源模型：
+ *   - Command（fc_command_t）      ：一条 NVMe/FTL 提交的命令，对应 SQ 槽位。
+ *   - Descriptor（fc_descriptor_t）：一个 CW 的数据描述（PAA + buffer + ECC 状态），
+ *                                    命令经 descriptor 链串联（next_id 链接）。
+ *   - CQ 完成项（fc_command_status_t）：命令级聚合状态 + 各 CW ECC 计数。
+ *
+ * 三池深度见 fc.h（FC_COMMAND_POOL_DEPTH / FC_DESCRIPTOR_POOL_DEPTH /
+ * FC_BUFFER_POOL_DEPTH）。命令/描述符用 16 位 Pool ID 互相关联，
+ * 0xFFFF = 无效句柄。
+ */
+
+/* ECC 解码模式（配置写入 fc_cmd_conf_t.ldpc） */
 typedef enum
 {
     FC_ECC_MODE_BCH       = 0U, /* BCH encode/decode */
@@ -13,6 +28,7 @@ typedef enum
     FC_ECC_MODE_LDPC_RAW  = 3U, /* LDPC raw (no decode) */
 } fc_ecc_mode_t;
 
+/* RAID 模式（配置写入 fc_cmd_conf_t.raid） */
 typedef enum
 {
     FC_RAID_MODE_NORMAL  = 0U, /* 无 RAID */
@@ -22,6 +38,7 @@ typedef enum
     FC_RAID_MODE_CHECK   = 4U, /* RAID 校验（暂未实现） */
 } fc_raid_mode_t;
 
+/* NAND 页类型（TLC/QLC 多页编程时区分；SLC 只有 LP） */
 typedef enum
 {
     FC_PAGE_TYPE_LP = 0U, /* Lower Page (SLC page / TLC LP) */
@@ -30,30 +47,35 @@ typedef enum
     FC_PAGE_TYPE_TP = 3U, /* Triple Page (QLC TP) */
 } fc_page_type_t;
 
+/* CRC 校验开关（配置写入 fc_cmd_conf_t.crc） */
 typedef enum
 {
     FC_CRC_ENABLE  = 0U, /* CRC 校验使能 */
     FC_CRC_DISABLE = 1U, /* CRC 校验禁用 */
 } fc_crc_mode_t;
 
+/* 数据加扰开关（配置写入 fc_cmd_conf_t.random） */
 typedef enum
 {
     FC_RANDOM_ENABLE  = 0U, /* 数据加扰使能 */
     FC_RANDOM_DISABLE = 1U, /* 数据加扰禁用 */
 } fc_random_mode_t;
 
+/* 链式命令标记（配置写入 fc_cmd_conf_t.chain） */
 typedef enum
 {
     FC_CHAIN_END  = 0U, /* 链结束，单命令 */
     FC_CHAIN_MORE = 1U, /* 链中间，后续还有命令 */
 } fc_chain_mode_t;
 
+/* 命令优先级（选择写入 SQ 还是 HSQ） */
 typedef enum
 {
     FC_PRIORITY_SQ  = 0U, /* 普通优先级（Submission Queue） */
     FC_PRIORITY_HSQ = 1U, /* 高优先级（High-priority SQ） */
 } fc_priority_t;
 
+/* 完成路由归属模块：FC 只按此分类路由 completion，不主动回调 */
 typedef enum
 {
     FC_COMMAND_MODULE_HOST_IO       = 0U,
@@ -78,6 +100,7 @@ typedef enum
 | `READY` | 建议所有有效 CW 都 Ready 后才算命令 Ready |
 | `PROTECTED` | 任意 CW 或目标块受保护即置位 |
 */
+/* 每 CW 状态位：命令级聚合状态 = 各 CW 状态按上表规则 OR 合并 */
 #define FC_CW_STATUS_NAND_FAIL  (1U << 0)
 #define FC_CW_STATUS_TIMEOUT    (1U << 1)
 #define FC_CW_STATUS_CRC_ERROR  (1U << 2)
@@ -89,7 +112,7 @@ typedef enum
 #define FC_CW_STATUS_UNUSED     (0U)
 #define FC_CW_STATUS_SUCCESS    (FC_CW_STATUS_READY)
 
-/* Command and Descriptor share this 32-bit operation configuration. */
+/* Command 与 Descriptor 共用 32 位操作配置（位域布局见下） */
 typedef struct fc_cmd_conf_t
 {
     DWORD operation   : 8; /* ONFI operation macro (OP_*). */
@@ -107,7 +130,11 @@ typedef struct fc_cmd_conf_t
     DWORD reserved    : 3; /* Reserved for future configuration. */
 } fc_cmd_conf_t;
 
-/* Descriptor for one CW, including its physical address, Buffer ID, link ID, status, ECC info, and FAA. */
+/*
+ * 单 CW 描述符：物理地址 + 配置 + 缓冲 ID + 链 ID + 状态 + ECC 信息。
+ * 一条命令的 desc 链 = 按 (multi_plane × cw_count) 数量排列的 descriptor 数组，
+ * next_id 串联；0xFFFF 终止。
+ */
 struct fc_descriptor_t
 {
     DWORD         paa;            /* Physical NAND address; valid for this Descriptor's CW. */
@@ -122,7 +149,10 @@ struct fc_descriptor_t
     DWORD ecc_bits : 8; /* ECC corrected bit count from last completion; 0 if no error. */
 };
 
-/* SQ command owned by FC after submission; command_id is the Command Pool slot ID. */
+/*
+ * SQ 命令：被 FC 持有直至完成。command_id = Command Pool 槽位号，
+ * desc_id = 首个 Descriptor ID（0xFFFF = 无描述符）。
+ */
 struct fc_command_t
 {
     DWORD         command_id    : 16; /* Command Pool ID; 0xFFFF means invalid. */
@@ -141,9 +171,9 @@ struct fc_command_t
     uint8_t       parameter3;         /* Command parameter byte 3. */
 };
 
-/* CQ entry containing command-level status and ECC info; FTL resolves Command and Descriptor data by ID.
- * Per-CW detail (status, ecc_bits) lives in the descriptor chain (fc_descriptor_t.status / .ecc_bits).
- * The aggregated status byte uses FC_CW_STATUS_* bits: READY=0x40, NAND_FAIL=0x01, TIMEOUT=0x02, etc. */
+/* CQ 完成项：命令级聚合状态 + 各 CW ECC 计数。
+ * Per-CW 细节（status/ecc_bits）在 descriptor 链中；
+ * 聚合 status 用 FC_CW_STATUS_* 位（READY=0x40、NAND_FAIL=0x01、TIMEOUT=0x02…）。 */
 struct fc_command_status_t
 {
     DWORD command_id : 16; /* Completed Command Pool ID. */

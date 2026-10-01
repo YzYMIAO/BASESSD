@@ -38,6 +38,15 @@
 #include <string.h>
 
 #if CONFIG_FC_RAID
+/* --------------------------------------------------------------------
+ * fc_collect_decode_buffers
+ *   功能：沿 desc 链收集命令所有 CW 的 buffer 基址与 PAA。
+ *   参数：cmd —— 命令；buffers —— 输出指针数组；buffer_paa —— 输出 PAA 数组；
+ *         max_count —— 容量上限（CW_TOTAL_MAX）。
+ *   返回：收集到的 CW 数量。
+ *   实现要点：解码路径需操作全 CW，用 fc_buffer_get_base 取 528B 完整 CW
+ *         基址（含 META/CRC/PARITY），索引与 desc 链位置对齐。
+ * -------------------------------------------------------------------- */
 static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd,
                                          uint8_t            *buffers[],
                                          nand_paa_t          buffer_paa[],
@@ -69,6 +78,18 @@ static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd,
  * 编码 — FC 内部调用
  * ══════════════════════════════════════════════════════════ */
 
+/* --------------------------------------------------------------------
+ * fc_data_path_encode
+ *   功能：写路径全自动管线——META 填充 → CRC → 加扰 → ECC 编码。
+ *   参数：command —— 待写命令（desc 链已配置）。
+ *   返回：FC_STATUS_OK / INVALID_ARGUMENT / 数据路径错误。
+ *   实现要点：
+ *     - Stage 0：META 写入——每个 CW 的 meta 拷贝到 buffer[0..4]。
+ *     - Stage 1：CRC 编码（config.crc 使能时）——对 USER 区算 CRC 存 buffer[4..8]。
+ *     - Stage 1：加扰（config.random 使能时）——seed 由 PAA 派生。
+ *     - Stage 2：ECC 编码（非 LDPC_RAW 模式）——对 520B 数据区编码，8B parity 写入。
+ *     - Stage 3 已被移除：跨命令 stripe RAID 在 generate_stripe_parity() 单独处理。
+ * -------------------------------------------------------------------- */
 fc_status_t fc_data_path_encode(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
@@ -197,6 +218,18 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
 
 #if CONFIG_FC_RAID
 
+/* --------------------------------------------------------------------
+ * fc_data_path_generate_stripe_parity
+ *   功能：跨命令 XOR 生成 parity 并对其做 ECC 编码。
+ *   参数：data_cmds —— 数据命令数组；data_count —— 数据命令数；
+ *         parity_cmd —— parity 命令（desc+buffer 已分配）。
+ *   返回：FC_STATUS_OK / INVALID_ARGUMENT（参数/desc 链损坏）。
+ *   实现要点：
+ *     - parity 的 CW 数须与数据命令一致（跨命令按 CW 对齐）。
+ *     - 数据区 FC_BUFFER_DATA_SIZE=520B 参与 XOR；ECC parity 区
+ *       [520..528] 不参与（由后续 ECC 编码生成）。
+ *     - XOR 累加：首条数据命令 memcpy 作初值，后续按 32-bit 字异或。
+ * -------------------------------------------------------------------- */
 fc_status_t fc_data_path_generate_stripe_parity(
     const fc_command_t *data_cmds[],
     uint8_t             data_count,
@@ -348,6 +381,21 @@ fc_status_t fc_data_path_generate_stripe_parity(
  * 全部成功 → 解扰所有 buffer。有失败 → buffer 保持 scrambled 状态。
  * ══════════════════════════════════════════════════════════ */
 
+/* --------------------------------------------------------------------
+ * fc_data_path_process_read
+ *   功能：读路径 Stage 1——ECC 解码 + 条件解扰 + CRC 校验 + META 读回校验。
+ *   参数：command —— 已完成 NAND 读取的命令。
+ *   返回：FC_STATUS_OK（全部 CW 成功，buffer 已解扰）/
+ *         FC_STATUS_IO_ERROR（存在不可纠 CW，buffer 保持 scrambled+corrected）/
+ *         INVALID_ARGUMENT。
+ *   实现要点：
+ *     - Pass 1：逐 CW ECC 解码；失败置 UNC 并记录 all_ok=0。
+ *     - 有失败直接返回 IO_ERROR（不解扰，供 FTL RAID 在 scrambled domain 恢复）。
+ *     - Pass 2：全部成功才解扰（seed 由 PAA 派生）。
+ *     - Pass 3：CRC 校验（使能时）——失败置 CRC_ERROR 位。
+ *     - Pass 4：META 读回并与 lba_to_cw_meta(command->meta, cw) 比对——
+ *       不一致置 MATA_ERROR 位。
+ * -------------------------------------------------------------------- */
 fc_status_t fc_data_path_process_read(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
@@ -532,6 +580,19 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
 
 #if CONFIG_FC_RAID
 
+/* --------------------------------------------------------------------
+ * fc_data_path_raid_recover
+ *   功能：读路径 Stage 2——RAID XOR 重建失败 CW + ECC 重试 + 解扰。
+ *   参数：cmd —— 命令；failed_cw_idx —— 失败 CW 在 desc 链中的索引。
+ *   返回：FC_STATUS_OK（恢复成功）/
+ *         FC_STATUS_IO_ERROR（RAID 重建后 ECC 仍失败，硬件不可恢复）/
+ *         INVALID_ARGUMENT。
+ *   实现要点：
+ *     - 收集全 CW buffer+PAA，XOR 重建 failed CW（scrambled domain 内）。
+ *     - ECC 重试：重建后仍不可纠 → 返回 IO_ERROR。
+ *     - 解扰所有 CW（seed 由各 CW PAA 派生）。
+ *     - 沿 desc 链把所有 desc status 置 READY。
+ * -------------------------------------------------------------------- */
 fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw_idx)
 {
     uint8_t           *buffers[CW_TOTAL_MAX];

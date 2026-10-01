@@ -18,6 +18,9 @@
 
 #include <stdint.h>
 
+/* ── dispatch task：一次预解析后的命令实例 ──
+ * 由 nand_dispatch_task_load() 从 nand_dispatch_request_t 填充，
+ * poll 依此驱动 nand_fc_start/step。 */
 typedef struct
 {
     uint16_t command_id;
@@ -30,7 +33,7 @@ typedef struct
     uint8_t  cw_index;    /* Current CW being processed (0-based, within current plane). */
     uint8_t  cw_count;    /* CW count per plane. */
     uint8_t  plane_count; /* Plane count (1 for single-plane, 2+ for multi-plane). */
-    uint8_t  started;
+    uint8_t  started;     /* 0=未启动；1=已 nand_fc_start（含 start 内同步完成） */
     uint8_t  parameter[4];
     uint8_t  feature_addr;
 
@@ -47,6 +50,10 @@ typedef struct
 
 /*
  * LUN 相位枚举 (Phase V multi-LUN ISSUE/WAIT/FETCH phase machine)
+ *   IDLE  → ISSUE → ISSUED → FETCH → IDLE
+ *   ISSUE ：发完命令立即返回，LUN 进入 tR/tPROG/tBERS
+ *   ISSUED：DWT 计时最短忙期，到点后启动配对 WAIT/FETCH
+ *   FETCH ：执行 WAIT_READY + 数据 + 状态检查
  */
 #define LUN_PHASE_IDLE   (0U) /* LUN 空闲 */
 #define LUN_PHASE_ISSUE  (1U) /* 正在执行 ISSUE uop */

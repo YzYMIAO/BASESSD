@@ -7,7 +7,8 @@
 #include <string.h>
 
 /*
- * ECC 引擎实现。
+ * fc_ldpc_engine.c — ECC 统一入口（BCH / QC-LDPC 按编译宏切换）
+ *
  * FC_ECC_ALGO 控制编译使用 BCH 或 LDPC。
  *
  * BCH（默认）：
@@ -23,11 +24,13 @@
  *   LDPC 的真正优势在低码率（r<0.9）和软判决场景。
  */
 
+/* 全局 BCH / QC-LDPC 引擎实例（单例，首次使用惰性初始化） */
 static fc_bch_control_t *g_bch = NULL;
 #if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
 static fc_ldpc_qc_t *g_qc = NULL;
 #endif
 
+/* 惰性初始化 BCH 引擎（m=13, t=4，本工程 CW 参数） */
 static uint8_t fc_ecc_init_bch(void)
 {
     if (g_bch == NULL)
@@ -38,6 +41,7 @@ static uint8_t fc_ecc_init_bch(void)
 }
 
 #if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
+/* 惰性初始化 QC-LDPC 引擎（最大迭代 15） */
 static uint8_t fc_ecc_init_ldpc(void)
 {
     if (g_qc == NULL)
@@ -48,6 +52,16 @@ static uint8_t fc_ecc_init_ldpc(void)
 }
 #endif
 
+/* --------------------------------------------------------------------
+ * fc_ldpc_encode
+ *   功能：ECC 编码——data[0..len-1] 的校验码写入 data[len..len+7]。
+ *   参数：config —— 配置（本实现未用）；data —— 数据缓冲（含 8B parity 尾区）；
+ *         data_length —— 数据字节数（520）。
+ *   返回：FC_STATUS_OK / INVALID_ARGUMENT / NOT_SUPPORTED（引擎初始化失败）。
+ *   实现要点：
+ *     - BCH 分支：fc_bch_encode 生成 8B parity 写 data[520..527]。
+ *     - LDPC 分支：qc_encode 输入输出均为 528B 完整码字。
+ * -------------------------------------------------------------------- */
 fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length)
 {
     (void)config;
@@ -103,6 +117,18 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
 #endif
 }
 
+/* --------------------------------------------------------------------
+ * fc_ldpc_decode
+ *   功能：ECC 解码——检测/纠正 data[0..len-1]+parity[len..len+7]。
+ *   参数：config —— 配置（未用）；data —— 码字缓冲；data_length —— 数据长；
+ *         err_bits —— 输出纠正 bit 数（可 NULL）。
+ *   返回：FC_STATUS_OK（成功，data 已纠正）/ IO_ERROR（不可纠）/
+ *         INVALID_ARGUMENT / NOT_SUPPORTED。
+ *   实现要点：
+ *     - BCH 分支：fc_bch_decode 返回错误位置数组，errloc<8*len 为数据区
+ *       错误，按位翻转纠正；err_bits = 纠正数（0..t）。
+ *     - LDPC 分支：qc_decode 内部按 528B 码字直接操作。
+ * -------------------------------------------------------------------- */
 fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length,
                            uint8_t *err_bits)
 {

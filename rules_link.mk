@@ -90,11 +90,17 @@ $(TARGET).sym: $(TARGET).elf
 	$(Q)$(NM) -n $< > $@
 
 # 4.5 生成大小汇总表（.size）
+#  stm32h743 平台额外追加 SRAM 使用汇总（按 linker/stm32h743xx_flash.ld 的区域容量）
 $(TARGET).size: $(TARGET).elf
 	@$(ECHO) "Generating size summary..."
 	$(Q)$(SIZE) -A $< | awk 'NR <= 2 { print; next } NF == 3 { printf "%-24s %10d 0x%08x\n", $$1, $$2, $$3; next } { print }' > $@
 	@$(ECHO) "Size summary:"
 	@cat $@
+ifeq ($(FIRMWARE_PLATFORM),stm32h743)
+	@$(ECHO) ""
+	@$(ECHO) "SRAM usage:"
+	$(Q)$(NM) --print-size -n $< | awk 'function hex(s){return strtonum("0x" s)} BEGIN{r[1]="AXI_RAM";a[1]=hex("24000000");c[1]=384;r[2]="AXI_NOCACHE";a[2]=hex("24060000");c[2]=128;r[3]="DTCM";a[3]=hex("20000000");c[3]=16;r[4]="SRAM1";a[4]=hex("30000000");c[4]=128;r[5]="SRAM2";a[5]=hex("30020000");c[5]=128;r[6]="SRAM3";a[6]=hex("30040000");c[6]=32;r[7]="SRAM4";a[7]=hex("38000000");c[7]=64;n=7} NF>=4 && $$1 ~ /^[0-9a-f]+$$/ && $$2 ~ /^[0-9a-f]+$$/{sz=hex($$2);addr=hex($$1);for(i=1;i<=n;i++) if(addr>=a[i] && addr<a[i]+c[i]*1024) u[i]+=sz} END{printf "=== SRAM Usage (stm32h743) ===\n";printf "%-16s %8s %10s %7s\n","Region","Capacity","Used","%";for(i=1;i<=n;i++){printf "%-16s %6d KB %8.1f KB %6.1f%%\n",r[i],c[i],u[i]/1024,u[i]/c[i]/1024*100}totc=0;totu=0;for(i=1;i<=n;i++){totc+=c[i];totu+=u[i]}printf "%-16s %6d KB %8.1f KB %6.1f%%\n","Total",totc,totu/1024,totu/totc/1024*100}' | tee -a $@
+endif
 
 # 4.6 生成反汇编列表（.lst）
 $(TARGET).lst: $(TARGET).elf

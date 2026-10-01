@@ -5,7 +5,7 @@
 #include <string.h>
 
 /*
- * QC-LDPC 引擎实现（硬判决 Bit-flipping）。
+ * fc_ldpc_qc_engine.c — QC-LDPC 引擎实现（硬判决 Bit-flipping）
  *
  * ── 参数 ──
  *   码长  n = 4224 bit (528B)
@@ -14,6 +14,23 @@
  *   子块  Z = 16
  *   基矩阵 H_base: 4 × 264
  *   列重 dv = 3（固定）
+ *
+ * ── QC-LDPC 构造原理 ──
+ *   校验矩阵 H 由 Z×Z 循环子矩阵组成（QC = Quasi-Cyclic）：
+ *   基矩阵每个条目 (row,col)=shift 表示一个 Z×Z 循环移位单位阵
+ *   （shift 为该子块内单位阵的循环移位量，-1 表示全零块）。
+ *   码率 R = k/n = 4160/4224 ≈ 0.985，高码率下纠错能力约 t=1~2。
+ *
+ * ── 编码原理 ──
+ *   校验位 p 满足 H·[data|p]^T = 0，即 p = H_p⁻¹ · H_d · data^T。
+ *   校验部分选"阶梯结构"（H_p = diag 单位阵），使编码退化为
+ *   逐数据位：data_bit=1 时取反其关联的所有校验位（列重 dv 次异或）。
+ *
+ * ── 解码原理（硬判决 Bit-flipping）──
+ *   ① 综合式 s = H × y^T（逐校验行 XOR 变量节点）
+ *   ② 对每个变量节点统计关联的失败校验数 fi
+ *   ③ fi ≥ 阈值 → 翻转该比特（阈值随 syn_ones 自适应：min(3, syn_ones)）
+ *   ④ 重复直至 s=0（成功）或达到 max_iter（失败）
  *
  * ── 存储设计 ──
  *   所有查表结构均使用全局静态数组，无动态分配。
@@ -33,7 +50,7 @@
 
 /* ── 全局查表结构 ──────────────────────────────────────────── */
 
-/* 基矩阵 */
+/* 基矩阵：每项 = 循环移位量（-1 = 全零子块，0..Z-1 = 循环移位） */
 static int8_t g_h_base[QC_BASE_R][QC_BASE_C];
 
 /* 列→校验方程链接：col_to_check[col][0..col_weight-1] */
@@ -46,8 +63,9 @@ static uint16_t g_row_weight[QC_M];
 
 static uint8_t g_initialized = 0U;
 
-/* ── 伪随机数生成器（固定种子） ────────────────────────────── */
+/* ── 伪随机数生成器（固定种子，保证每次编译生成相同 H） ────── */
 
+/* 线性同余 PRNG：state = state*1103515245 + 12345（标准 LCG 参数） */
 static uint32_t lcg_rand(uint32_t *state)
 {
     *state = *state * 1103515245U + 12345U;
@@ -56,6 +74,7 @@ static uint32_t lcg_rand(uint32_t *state)
 
 /* ── 构造 ──────────────────────────────────────────── */
 
+/* 构建基矩阵：数据列随机指派 3 行 + 随机移位；校验列阶梯结构 */
 static void qc_build_base(void)
 {
     uint32_t seed = 0x20250921UL;
@@ -63,7 +82,8 @@ static void qc_build_base(void)
 
     memset(g_h_base, -1, sizeof(g_h_base));
 
-    /* 数据部分（0..QC_DATA_C-1）：每列 3 个非 -1 条目 */
+    /* 数据部分（0..QC_DATA_C-1）：每列 3 个非 -1 条目
+     * （列重 dv=3：随机选 3 个互不相同的行，各给随机循环移位量） */
     for (c = 0; c < QC_DATA_C; c++)
     {
         uint32_t used_rows = 0U;
@@ -89,13 +109,15 @@ static void qc_build_base(void)
         }
     }
 
-    /* 校验部分：阶梯结构，H_p = diag(恒等阵) */
+    /* 校验部分：阶梯结构，H_p = diag(恒等阵)
+     * 使 H_p 可逆且编码退化（见文件头编码原理） */
     for (r = 0; r < QC_BASE_R; r++)
     {
         g_h_base[r][QC_DATA_C + r] = 0;
     }
 }
 
+/* 从基矩阵展开链接：每个子块条目展开成 Z 个变量↔校验连接 */
 static void qc_expand_links(void)
 {
     uint32_t r, c, s;
@@ -114,11 +136,12 @@ static void qc_expand_links(void)
         {
             if (g_h_base[r][c] < 0)
             {
-                continue;
+                continue; /* 全零子块，无连接 */
             }
             uint32_t shift = (uint32_t)g_h_base[r][c];
             for (s = 0; s < QC_Z; s++)
             {
+                /* 循环移位：变量 (c*Z+s) 连到校验 (r*Z + (s+shift)%Z) */
                 uint32_t var_idx = c * QC_Z + s;
                 uint32_t chk_idx = r * QC_Z + ((s + shift) % QC_Z);
                 uint32_t p;
@@ -143,6 +166,14 @@ static void qc_expand_links(void)
  * 编码
  * ═══════════════════════════════════════════════════════════════ */
 
+/* --------------------------------------------------------------------
+ * fc_ldpc_qc_encode
+ *   功能：QC-LDPC 编码——520B 数据 → 528B 码字（520B + 8B parity）。
+ *   参数：qc —— 引擎；data_in —— 输入 520B；data_out —— 输出 528B。
+ *   返回：无（未初始化静默返回）。
+ *   实现要点：阶梯结构编码——数据位为 1 时异或其关联的校验位
+ *         （parity 初始为 0，逐数据位累加即得校验向量）。
+ * -------------------------------------------------------------------- */
 void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
                        const uint8_t      *data_in,
                        uint8_t            *data_out)
@@ -184,6 +215,17 @@ void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
  * 解码（硬判决 Bit-flipping）
  * ═══════════════════════════════════════════════════════════════ */
 
+/* --------------------------------------------------------------------
+ * fc_ldpc_qc_decode
+ *   功能：QC-LDPC 硬判决解码——翻转失败校验关联多的比特直至综合式归零。
+ *   参数：qc —— 引擎；data —— 528B 码字（原地修改返回纠正结果）。
+ *   返回：FC_STATUS_OK（s=0）/ IO_ERROR（超迭代或无可翻转）/
+ *         INVALID_ARGUMENT。
+ *   实现要点（Bit-flipping 三阶段）：
+ *     - 综合式：逐校验行 XOR 变量节点，统计失败校验数 syn_ones。
+ *     - 失败计数：对每个失败校验，其关联变量 fi++。
+ *     - 翻转：fi ≥ min(3, syn_ones) 的变量翻转；无翻转则提前退出。
+ * -------------------------------------------------------------------- */
 fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
 {
     uint8_t  syndromes[QC_M];
@@ -223,7 +265,7 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
 
         if (syn_ones == 0U)
         {
-            return FC_STATUS_OK;
+            return FC_STATUS_OK; /* 码字合法，解码成功 */
         }
 
         /* ── 统计每列失败校验数 ── */
@@ -243,7 +285,7 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
             }
         }
 
-        /* ── 阈值递减 ── */
+        /* ── 阈值递减：min(3, syn_ones)，至少为 1 ── */
         threshold = 3U;
         if (threshold > syn_ones)
         {
@@ -257,6 +299,7 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
         {
             uint32_t flipped = 0U;
 
+            /* 翻转所有失败校验数 ≥ 阈值的变量 */
             for (var = 0; var < QC_N; var++)
             {
                 if (col_failures[var] >= threshold)
@@ -268,10 +311,7 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
 
             if (flipped == 0U)
             {
-                if (threshold > 1U)
-                {
-                    /* 下次迭代降阈，但旧阈无翻转，直返 IO_ERROR */
-                }
+                /* 无翻转 → 陷入不动点，直接判失败 */
                 break;
             }
         }
@@ -284,6 +324,12 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
  * 初始化
  * ═══════════════════════════════════════════════════════════════ */
 
+/* --------------------------------------------------------------------
+ * fc_ldpc_qc_init
+ *   功能：单例初始化 QC-LDPC 引擎（首次调用构造查表，全局复用）。
+ *   参数：max_iter —— 最大解码迭代（0 时默认 15）。
+ *   返回：引擎句柄（全局单例，静态）。
+ * -------------------------------------------------------------------- */
 fc_ldpc_qc_t *fc_ldpc_qc_init(uint8_t max_iter)
 {
     static fc_ldpc_qc_t g_qc;

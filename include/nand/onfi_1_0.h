@@ -5,6 +5,19 @@
 
 #include <stdint.h>
 
+/*
+ * onfi_1_0.h — ONFI 1.0 命令集定义 + 操作表 + 辅助宏
+ *
+ * 本头文件定义：
+ *   - NAND 命令字节宏（NAND_CMD_* / NAND_STATUS_*）
+ *   - OP_* 操作码（g_nand_operation_map 的下标）
+ *   - nand_operation_map_t 结构体（命令属性 + UOP 序列 + 时序）
+ *   - Phase V 辅助宏（ISSUE/WAIT/FETCH 拆分判定）
+ *
+ * 与 nand_engine.h 的关系：OP_* 对应一条 UOP 序列（定义于 onfi_1_0.c），
+ * 由 nand_engine 解释执行。
+ */
+
 /* ONFI 1.0 command cycles used by the initial command set. */
 #define NAND_CMD_READ_PAGE_SETUP            0x00U
 #define NAND_CMD_READ_PAGE_CONFIRM          0x30U
@@ -36,8 +49,11 @@
 #define NAND_CMD_BLOCK_LOCK_TIGHT           0x2CU
 #define NAND_CMD_BLOCK_LOCK_STATUS          0x7AU
 
+/* 70h 状态字节位定义：bit6=READY、bit0=FAIL */
 #define NAND_STATUS_READY 0x40U
 #define NAND_STATUS_FAIL  0x01U
+
+/* ═══ 1. 基础操作（RESET / 读 ID / 参数页 / 特性） ═══ */
 
 /* RESET OPERATIONS */
 /* OP_RESET
@@ -106,6 +122,8 @@
  */
 #define OP_RANDOM_DATA_READ (8U)
 
+/* ═══ 2. 内部数据搬移（copy-back / 单字节替换） ═══ */
+
 /* 操作码 9 已删除（原 OP_RANDOM_DATA_INPUT），
  * 功能由 OP_PROGRAM_FOR_INTERNAL_DATA_MOVE 完整覆盖。 */
 
@@ -123,6 +141,8 @@
  * ----------------------------------------------------------------------------------------------
  */
 #define OP_PROGRAM_FOR_INTERNAL_DATA_MOVE (10U)
+
+/* ═══ 3. 页读 / Cache 读 ═══ */
 
 /* READ OPERATIONS */
 
@@ -174,6 +194,8 @@
  * ----------------------------------------------------------------------------------------------
  */
 #define OP_READ_PAGE_CACHE_START (34U)
+
+/* ═══ 4. 页写 / Cache 写 / 擦除 / 锁 ═══ */
 
 /* PROGRAM OPERATIONS */
 /* OP_NORMAL_PROGRAM_PAGE
@@ -271,6 +293,8 @@
  */
 #define OP_OTP_DATA_READ (28U)
 
+/* ═══ 5. 多 Plane 操作 ═══ */
+
 /* MULTI-PLANE READ OPERATIONS */
 /* OP_READ_PAGE_MULTI_PLANE
  * ----------------------------------------------------------------------------------------------
@@ -326,6 +350,8 @@
  */
 #define OP_ERASE_BLOCK_MULTI_PLANE (32U)
 
+/* ═══ 6. Phase V: ISSUE/WAIT/FETCH 拆分 ═══ */
+
 /* ── Phase V: MULTI-LUN ISSUE/WAIT/FETCH 拆分 OP 码 ── */
 
 /* OP_READ_PAGE_LOAD:
@@ -369,23 +395,25 @@
 #define OP_TYPE_WAIT   (2U) /* WAIT 段——等完成，无数据 */
 #define OP_TYPE_FETCH  (3U) /* FETCH 段——等完成 + 读数据 */
 
+/* ═══ 7. 操作表结构 + Phase V 辅助宏 ═══ */
+
 typedef struct
 {
-    uint8_t                 operation;
-    const char             *name;
-    uint8_t                 command_1;
-    uint8_t                 command_2;
-    uint8_t                 address_cycles;
-    uint8_t                 data_input_cycles;
-    uint8_t                 valid_while_selected_lun_busy;
-    uint8_t                 valid_while_other_lun_busy;
-    uint8_t                 has_data;
-    uint16_t                data_length;
+    uint8_t                 operation;  /* OP_* 码（== 数组下标） */
+    const char             *name;       /* 可读名（日志用） */
+    uint8_t                 command_1;  /* 命令值 1（如读页 00h / 编程 80h；无则 0） */
+    uint8_t                 command_2;  /* 命令值 2（如读页 30h / 编程 10h；无则 0） */
+    uint8_t                 address_cycles; /* 地址周期数（列+行；多 plane 为两倍） */
+    uint8_t                 data_input_cycles; /* DATA_IN 段数（写类操作） */
+    uint8_t                 valid_while_selected_lun_busy; /* 本 LUN busy 时可否下发 */
+    uint8_t                 valid_while_other_lun_busy;    /* 其他 LUN busy 时可否下发（多 LUN 准入） */
+    uint8_t                 has_data;   /* 是否涉及用户数据传输（需 descriptor+buffer） */
+    uint16_t                data_length; /* 数据传输字节数 */
     uint8_t                 op_type : 2; /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
     uint8_t                 pair_op;     /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
-    uint16_t                min_busy_us; /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ） */
-    const nand_uop_t       *uops;
-    nand_operation_timing_t timing;
+    uint16_t                min_busy_us; /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ 带余量） */
+    const nand_uop_t       *uops;        /* UOP 序列（onfi_1_0.c 定义） */
+    nand_operation_timing_t timing;      /* 操作时序参数（twb/trst/twh/busy_timeout） */
 } nand_operation_map_t;
 
 /* OP_* 可直接作为下标访问，不需要命令表扫描或操作码解析。 */
@@ -402,7 +430,12 @@ extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
 #define nand_operation_data_length(op) \
     ((op) < OP_COUNT ? g_nand_operation_map[(op)].data_length : 0U)
 
-/* ── Phase V 多 LUN 辅助宏 ── */
+/* ── Phase V 多 LUN 辅助宏 ──
+ * op_type/pair_op 判定（见 nand_operation_map_t）：
+ *   is_issue        ：该 OP 是否 ISSUE 段（发完即返回，LUN 进入 busy）
+ *   is_wait_or_fetch：该 OP 是否 WAIT/FETCH 段（等完成）
+ *   is_splittable   ：原子 OP 且存在配对 OP（可拆分为 ISSUE+WAIT/FETCH）
+ *   to_issue / get_pair：取配对 OP 码（原子 OP 取自身） */
 #define nand_operation_is_issue(op) \
     ((op) < OP_COUNT ? (g_nand_operation_map[(op)].op_type == OP_TYPE_ISSUE) : 0U)
 #define nand_operation_is_wait_or_fetch(op)                                     \

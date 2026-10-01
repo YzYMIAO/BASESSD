@@ -3,6 +3,24 @@
 
 #include "fc_command.h"
 
+/*
+ * fc.h — FC 层对外接口（命令池 / 缓冲池 / 调度 / 服务入口）
+ *
+ * 核心资源：
+ *   - Command Pool（FC_COMMAND_POOL_DEPTH=64）：命令槽位
+ *   - Descriptor Pool（FC_DESCRIPTOR_POOL_DEPTH=256）：CW 描述符
+ *   - Buffer Pool（FC_BUFFER_POOL_DEPTH=128）：CW 数据缓冲
+ *
+ * 生命周期（对 FTL）：
+ *   fc_command_alloc() → 填 config/参数 → fc_command_configure_descriptors()
+ *   → fc_submit() → fc_service()（后台推进）→ fc_poll_completion() 取完成
+ *   → fc_command_release() 回收。
+ *
+ * buffer 布局（528B CW）：
+ *   [META:4][CRC:4][USER:512][PARITY:8]
+ *   对外只暴露 USER 区（fc_buffer_id_to_real_buffer 返回 offset=8 处）。
+ */
+
 /* ── 功能特性开关 ── */
 
 /*
@@ -16,10 +34,11 @@
 #    define CONFIG_FC_RAID (0U)
 #endif
 
+/* 固定资源池深度 */
 #define FC_COMMAND_POOL_DEPTH    (64U)
 #define FC_DESCRIPTOR_POOL_DEPTH (256U)
 #define FC_BUFFER_POOL_DEPTH     (128U)
-#define FC_BUFFER_POOL_CW_SIZE   (PAGE_SIZE / 4U)
+#define FC_BUFFER_POOL_CW_SIZE   (PAGE_SIZE / 4U) /* 528B = 每 CW 缓冲大小 */
 
 /*
  * CW 布局: [META:4][CRC:4][USER:512][PARITY:8] = 528B
@@ -28,10 +47,13 @@
 #define FC_BUFFER_USER_OFFSET (8U)   /* USER 区域在 CW 中的偏移 */
 #define FC_BUFFER_USER_SIZE   (512U) /* 暴露给 FTL 的用户数据大小 */
 #define FC_BUFFER_DATA_SIZE   (520U) /* META+CRC+USER = 加扰/ECC 处理的数据区大小 */
+
+/* 队列深度 */
 #define FC_SQ_DEPTH           (64U)
 #define FC_HSQ_DEPTH          (16U)
 #define FC_CQ_DEPTH           (64U)
 
+/* 资源使用统计（测试/监控用） */
 typedef struct
 {
     uint16_t sq_used;
@@ -42,8 +64,10 @@ typedef struct
     uint16_t buffer_used;
 } fc_resource_stats_t;
 
-/* 初始化 FC 内部固定 Pool、SQ、HSQ、CQ 和调度器。 */
-fc_status_t        fc_init(void);
+/* ── 初始化 ── */
+fc_status_t fc_init(void);
+
+/* ── Command / Descriptor / Buffer Pool 分配与查询 ── */
 fc_command_t      *fc_command_alloc(void);
 fc_command_t      *fc_command_id_to_command(uint16_t command_id);
 fc_descriptor_t   *fc_descriptor_id_to_descriptor(uint16_t descriptor_id);
@@ -74,6 +98,7 @@ fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length)
 /* 便利函数：获取命令中指定 CW 索引的 buffer 指针（读操作后使用）。 */
 uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index);
 
+/* ── 提交 / 服务 / 完成 ── */
 /* high_priority=0 提交 SQ；high_priority=1 提交 HSQ。 */
 fc_status_t fc_submit(fc_command_t *command);
 

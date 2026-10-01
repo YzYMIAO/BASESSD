@@ -1,3 +1,17 @@
+/*
+ * fc_scheduler.c — FC 调度器
+ *
+ * 职责：从 HSQ/SQ 选择可执行命令（目标 LUN 不忙），跳过忙碌目标；
+ *       支持链式命令收集（同 ch/ce/lun 的连续命令整链弹出）；
+ *       带读饥饿保护（连续非读命令超过预算时优先调度读命令）。
+ *
+ * 调度规则：
+ *   - HSQ 优先于 SQ；HSQ 命令不参与链式，每次独立弹出一条。
+ *   - 目标忙的命令"旋转"到队尾（pop+push）继续找下一条。
+ *   - SQ 链式：config.chain=1 时连续收集同 target 命令直到 chain=0。
+ *   - 读饥饿保护仅在 SQ 中确实存在读命令时触发，避免死锁。
+ */
+
 #include "fc_scheduler.h"
 
 #include "fc.h"
@@ -40,6 +54,12 @@ static uint8_t fc_scheduler_op_is_read(uint8_t operation)
     }
 }
 
+/* --------------------------------------------------------------------
+ * fc_scheduler_init
+ *   功能：初始化调度器（绑定 SQ/HSQ，清零 busy 表与写计数）。
+ *   参数：scheduler —— 调度器；sq/hsq —— 队列指针。
+ *   返回：FC_STATUS_OK / INVALID_ARGUMENT。
+ * -------------------------------------------------------------------- */
 fc_status_t fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq)
 {
     if ((scheduler == NULL) || (sq == NULL) || (hsq == NULL))
@@ -53,6 +73,12 @@ fc_status_t fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *
     return FC_STATUS_OK;
 }
 
+/* --------------------------------------------------------------------
+ * fc_scheduler_target_is_busy
+ *   功能：查询命令目标 (ch,ce,lun) 是否忙。
+ *   参数：scheduler —— 调度器；command_id —— 命令 ID。
+ *   返回：1=忙（或命令无效），0=不忙。
+ * -------------------------------------------------------------------- */
 static uint8_t fc_scheduler_target_is_busy(const fc_scheduler_t *scheduler, fc_command_id_t command_id)
 {
     const fc_command_t *command;
@@ -67,6 +93,13 @@ static uint8_t fc_scheduler_target_is_busy(const fc_scheduler_t *scheduler, fc_c
 
 /* ── 原单命令 select 接口，保留兼容性 ── */
 
+/* --------------------------------------------------------------------
+ * fc_scheduler_select
+ *   功能：选一条目标不忙的命令（单命令语义）。
+ *   参数：scheduler —— 调度器；command_id —— 输出。
+ *   返回：FC_STATUS_OK / NOT_READY（全忙）/ QUEUE_EMPTY / INVALID_ARGUMENT。
+ *   实现要点：HSQ 优先；忙碌命令旋转到队尾继续找。
+ * -------------------------------------------------------------------- */
 fc_status_t fc_scheduler_select(fc_scheduler_t *scheduler, fc_command_id_t *command_id)
 {
     uint16_t index;
@@ -109,6 +142,18 @@ fc_status_t fc_scheduler_select(fc_scheduler_t *scheduler, fc_command_id_t *comm
 
 /* ── 链式 select 接口 ── */
 
+/* --------------------------------------------------------------------
+ * fc_scheduler_select_chain
+ *   功能：从 HSQ/SQ 选命令，支持链式收集。
+ *   参数：scheduler —— 调度器；chain —— 输出（ids + count）。
+ *   返回：FC_STATUS_OK（count≥1）/ NOT_READY（HSQ 全忙）/
+ *         QUEUE_EMPTY / INVALID_ARGUMENT。
+ *   实现要点：
+ *     - HSQ 命令不参与链（count=1）。
+ *     - SQ：先做读饥饿保护前置扫描（是否有读命令），再逐条选；
+ *       chain=1 时连续收集同 (ch,ce,lun) 命令直到 chain=0 或链满。
+ *     - 连续写计数在选到命令时更新（读清零 / 非读累加）。
+ * -------------------------------------------------------------------- */
 fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_chain_t *chain)
 {
     fc_command_id_t head_id;
@@ -271,6 +316,13 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
     return (scheduler->sq->count != 0U) ? FC_STATUS_NOT_READY : FC_STATUS_QUEUE_EMPTY;
 }
 
+/* --------------------------------------------------------------------
+ * fc_scheduler_set_busy / fc_scheduler_clear_busy
+ *   功能：置位/清除指定目标 (ch,ce,lun) 的 busy 标记。
+ *   参数：scheduler —— 调度器；ch/ce/lun —— 目标。
+ *   返回：无（越界忽略）。
+ *   实现要点：fc_service 在 dispatch 前 set_busy、完成后 clear_busy。
+ * -------------------------------------------------------------------- */
 void fc_scheduler_set_busy(fc_scheduler_t *scheduler, uint8_t ch, uint8_t ce, uint8_t lun)
 {
     if ((scheduler != NULL) && (ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM))

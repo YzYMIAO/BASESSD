@@ -37,6 +37,8 @@
 
 /* ── 写路径（FC 内部） ── */
 
+/* 全自动写管线：加扰 → ECC 编码 → RAID XOR parity。
+ * FTL 提交命令后、dispatch 前由 FC 自动调用（对 FTL 透明）。 */
 fc_status_t fc_data_path_encode(const fc_command_t *command);
 
 #if CONFIG_FC_RAID

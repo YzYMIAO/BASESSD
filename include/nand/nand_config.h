@@ -3,12 +3,25 @@
 
 #include <stdint.h>
 
+/*
+ * nand_config.h — NAND 逻辑几何 + 地址编码（PAA/PBA/nand_addr_t）
+ *
+ * 本头文件定义：
+ *   - 逻辑几何宏（页/块/plane/lun/ch/ce 数量）
+ *   - 软件地址编码：PAA（芯片内地址）与 PBA（含 CH/CE 的完整地址）
+ *   - nand_addr_t（展开式地址，遍历路径用）
+ *
+ * 与芯片物理几何（nand_mt29f4g08abadawp.h）区分：本文件是 FC/FTL 的
+ * 逻辑视角，物理视角见芯片头文件。
+ */
+
+/* 页大小：2112 = 主区 2048 + 备区 64 */
 #define PAGE_SIZE (2112)
 
 /* 通道页缓冲大小：单 plane 操作只用 PAGE_SIZE，多 plane 操作需要双倍缓冲。 */
 #define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM)
-#define PAGE_MAIN_SIZE   (2048)
-#define PAGE_SPARE_SIZE  (64)
+#define PAGE_MAIN_SIZE   (2048)   /* 主区字节数 */
+#define PAGE_SPARE_SIZE  (64)     /* 备区字节数 */
 #define PAGES_PER_BLOCK  (64)
 #define BLOCKS_PER_PLANE (2048)
 #define PLANE_NUM        (2)
@@ -25,7 +38,8 @@
 /* 多 plane 操作时 CW 总数上限 = max plane × CW per plane */
 #define CW_TOTAL_MAX (CW_NUM * PLANE_NUM) /* 4×2=8 */
 
-/* 通道页缓冲大小：多 plane 操作需要 PLANE_NUM 倍缓冲 */
+/* 通道页缓冲大小：多 plane 操作需要 PLANE_NUM 倍缓冲。
+ * ⚠ 与上面第 9 行重复定义（后者覆盖），保留为兼容既有引用。 */
 #define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM) /* 2112×2=4224 */
 
 /*

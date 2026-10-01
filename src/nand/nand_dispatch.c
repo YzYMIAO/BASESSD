@@ -1,3 +1,23 @@
+/*
+ * nand_dispatch.c — NAND 命令分发器
+ *
+ * 职责：接收 FC 侧预解析的多命令请求（nand_dispatch_request_t），
+ *       送入通道 FIFO，由 poll 驱动 NAND 引擎执行：
+ *         FC 预解析 → submit/submit_chain 入队 → poll 出队 + 执行 + 回 completion
+ *
+ * 层次关系：
+ *   上层 FC（fc_command.h）→ 本文件（dispatch）
+ *     → nand_fc_start/step（nand_mt29*.c）→ nand_engine（UOP 解释器）→ FMC 后端
+ *
+ * 执行模型：
+ *   - 单线程 poll 推进模型，无锁；依赖外部串行调用 poll。
+ *   - submit/submit_chain 仅"登记"命令（入队 + 预加载 task），
+ *     实际执行发生在后续 poll。
+ *   - 每 LUN 一个 chain buffer（Phase V），支持链式命令 + ISSUE/WAIT/FETCH 相位机。
+ *
+ * 对外接口：nand_dispatch_init / submit / submit_chain / poll / set_device_ready。
+ */
+
 #include "common/ssd_log.h"
 #include "delay.h"
 #include "fc/fc_command.h"
@@ -14,35 +34,54 @@
  * 通道队列及全局状态
  * ====================================================================== */
 
+/* 通道 FIFO 元素：仅供 poll Phase 2 出队路由到具体 chain。 */
 typedef struct
 {
-    uint16_t command_id;
-    uint8_t  ce;
-    uint8_t  lun;
+    uint16_t command_id; /* FC 完成池关联键 */
+    uint8_t  ce;         /* 出队路由键：CE */
+    uint8_t  lun;        /* 出队路由键：LUN */
 } nand_dispatch_queue_entry_t;
 
+/* 每通道一个环形 FIFO（深度 NAND_CHANNEL_QUEUE_DEPTH）。 */
 typedef struct
 {
     nand_dispatch_queue_entry_t entries[NAND_CHANNEL_QUEUE_DEPTH];
-    uint16_t                    head;
-    uint16_t                    tail;
-    uint16_t                    count;
+    uint16_t                    head;  /* 出队游标 */
+    uint16_t                    tail;  /* 入队游标 */
+    uint16_t                    count; /* 当前元素数（满时 = DEPTH） */
 } nand_channel_queue_t;
 
+/* 通道 FIFO 数组（CH_NUM 个），submit 入队、poll Phase 2 出队 */
 static nand_channel_queue_t g_nand_channel_queues[CH_NUM];
+/* round-robin 游标：poll 从上次返回通道的下一个通道续走，保证各通道公平 */
 static uint8_t              g_nand_channel_cursor;
+/* 设备就绪门控：仅 submit 准入检查，poll 不检查 */
 static uint8_t              g_nand_device_ready;
 
 /* 每 LUN 链状态：原 g_nand_dispatch_tasks[ch][ce][lun] 的一维扩展。
  * 单命令：count=1，tasks[0] 预加载。
- * 链式命令：count=N，tasks[0..N-1] 预加载，poll 从 cursor=0 推进到 N-1。 */
+ * 链式命令：count=N，tasks[0..N-1] 预加载，poll 从 cursor=0 推进到 N-1。
+ * count 双语义：既是链深又是"LUN 忙"标志（count!=0 即忙）。 */
 static nand_dispatch_lun_chain_t g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
+/* 通道页缓冲：置于 noncacheable_buffer 段（DMA/FMC 直访，D-Cache 关闭）。
+ * 多 plane 时拼接双页（plane stride = PAGE_SIZE），poll 三处 memcpy 拆页依赖它。 */
 uint8_t                          g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
 
 /* ======================================================================
  * 辅助函数
  * ====================================================================== */
 
+/* --------------------------------------------------------------------
+ * nand_dispatch_completion_init
+ *   功能：初始化一个 completion 结构（全清零 + 哨兵值）。
+ *   参数：completion —— 目标；command_id —— FC 关联键。
+ *   返回：无。
+ *   实现要点：
+ *     - *completion = {0} 复合字面量整体清零。
+ *     - failed_descriptor_id 置 FC_DESCRIPTOR_ID_INVALID。
+ *     - cw_status 用 CW_TOTAL_MAX（=8，单/多 plane 最大值）全量预置
+ *       FC_CW_STATUS_UNUSED，避免脏数据（此时 cw_count 尚未拷贝）。
+ * -------------------------------------------------------------------- */
 static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion, uint16_t command_id)
 {
     uint8_t i;
@@ -56,6 +95,17 @@ static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion
     }
 }
 
+/* --------------------------------------------------------------------
+ * nand_dispatch_task_complete
+ *   功能：统一收尾路径——写 execution_status/nand_status 后按 operation
+ *         分派到对应 completion 策略 handler。
+ *   参数：task —— 完成任务；result —— 执行结果；nand_completion —— NAND 完成。
+ *   返回：无。
+ *   实现要点：经 g_nand_dispatch_completion_table[operation] 分派
+ *        （completion_per_cw / all_cws / multi_plane，见 nand_dispatch_tables.c）。
+ *         注意 poll 中多处先改写 task->operation 再 complete，handler 按
+ *         最新 operation 匹配（如 LOAD→FETCH 切换）。
+ * -------------------------------------------------------------------- */
 static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
 {
     task->completion.execution_status = result;
@@ -64,8 +114,18 @@ static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t resu
     g_nand_dispatch_completion_table[task->operation](task, result, nand_completion);
 }
 
-/* 将 dispatch_request 预加载到指定的 task slot。
- * 被 submit / submit_chain 共用。 */
+/* --------------------------------------------------------------------
+ * nand_dispatch_task_load
+ *   功能：把 FC 预解析的 request 搬运到 chain 的 task slot。
+ *   参数：task —— 目标 slot；request —— 预解析请求。
+ *   返回：无。
+ *   实现要点：
+ *     - 复位 cw_index=0 / started=0（poll 的启动判断依赖 started==0）。
+ *     - Phase V：绑定 per-LUN backend 到 task->backend 并同步到
+ *       transaction->backend（供 nand_fc_start 使用，两指针必须一致）。
+ *     - 双层数组 cw_paa/cw_buffers[plane][cw] 按 request->cws 逐 CW 搬运；
+ *       plane 下标写死 0/1（双 plane 上限）。
+ * -------------------------------------------------------------------- */
 static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispatch_request_t *request)
 {
     uint8_t cw;
@@ -102,6 +162,13 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
  * 初始化 / 就绪
  * ====================================================================== */
 
+/* --------------------------------------------------------------------
+ * nand_dispatch_init
+ *   功能：清零软件调度状态。
+ *   参数：无。
+ *   返回：恒 NAND_RESULT_OK。
+ *   实现要点：仅清软件状态，不碰 FMC 硬件（见 nand_dispatch.h）。
+ * -------------------------------------------------------------------- */
 nand_result_t nand_dispatch_init(void)
 {
     memset(g_nand_channel_queues, 0, sizeof(g_nand_channel_queues));
@@ -111,6 +178,13 @@ nand_result_t nand_dispatch_init(void)
     return NAND_RESULT_OK;
 }
 
+/* --------------------------------------------------------------------
+ * nand_dispatch_set_device_ready
+ *   功能：置/清设备就绪门控位。
+ *   参数：ready —— 非 0 置就绪。
+ *   返回：无。
+ *   实现要点：归一化到 0/1；device_ready 仅 submit 检查，poll 不检查。
+ * -------------------------------------------------------------------- */
 void nand_dispatch_set_device_ready(uint8_t ready)
 {
     g_nand_device_ready = (ready != 0U) ? 1U : 0U;
@@ -120,6 +194,17 @@ void nand_dispatch_set_device_ready(uint8_t ready)
  * submit — 单命令入队
  * ====================================================================== */
 
+/* --------------------------------------------------------------------
+ * nand_dispatch_submit
+ *   功能：单命令入队（非阻塞登记）。
+ *   参数：request —— 预解析的单个命令请求。
+ *   返回：NAND_RESULT_OK / INVALID_ARGUMENT / NOT_READY（LUN 忙或队列满）。
+ *   实现要点：
+ *   - LUN 忙判定 = chain->count!=0（count 兼作忙标志）。
+ *   - 预加载到 tasks[0]，count=1/cursor=0/phase=IDLE。
+ *   - 入队 command_id+ce/lun，环形尾指针 %DEPTH 推进。
+ *   - 本函数只是"登记"，实际执行在后续 poll。
+ * -------------------------------------------------------------------- */
 nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request)
 {
     nand_channel_queue_t      *queue;
@@ -135,13 +220,13 @@ nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request)
     chain = &g_nand_dispatch_chains[request->ch][request->ce][request->lun];
     if (chain->count != 0U)
     {
-        return NAND_RESULT_NOT_READY; /* LUN 忙 */
+        return NAND_RESULT_NOT_READY; /* LUN 忙（count 兼作忙标志） */
     }
 
     queue = &g_nand_channel_queues[request->ch];
     if (queue->count == NAND_CHANNEL_QUEUE_DEPTH)
     {
-        return NAND_RESULT_NOT_READY;
+        return NAND_RESULT_NOT_READY; /* 通道 FIFO 满 */
     }
 
     /* 预加载到 tasks[0] */
@@ -170,6 +255,18 @@ nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request)
  *   3. 入队后链中命令按序执行，HSQ 无法插入
  * ====================================================================== */
 
+/* --------------------------------------------------------------------
+ * nand_dispatch_submit_chain
+ *   功能：整链原子入队（多命令按序执行）。
+ *   参数：requests —— 命令数组；count —— 链长（1..NAND_DISPATCH_CHAIN_DEPTH）。
+ *   返回：NAND_RESULT_OK / INVALID_ARGUMENT / NOT_READY（忙或队列不足）。
+ *   实现要点：
+ *     - 只校验 requests[0] 的 ch/ce/lun——假定整链同 ch/ce/lun（调用方保证）。
+ *     - 空间原子检查用 (uint16_t)(count+queue->count) 无符号饱和比较；
+ *       count≤4、queue->count≤64，无溢出风险。
+ *     - 先全部预加载 task + 入队，最后才挂链（count/cursor/phase）；
+ *       保证 poll 不会看到半挂载的链（"准原子"）。
+ * -------------------------------------------------------------------- */
 nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count)
 {
     nand_channel_queue_t      *queue;
@@ -212,6 +309,7 @@ nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests
         queue->count++;
     }
 
+    /* 全部入队后才挂链：poll 不会看到半挂载链 */
     chain->count  = count;
     chain->cursor = 0U;
     chain->phase  = LUN_PHASE_IDLE;
@@ -226,8 +324,26 @@ nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests
  *              当前命令完成后自动推进 cursor，不清 LUN busy。
  *              整链结束（cursor+1==count）才返回 completion。
  *   Phase 2 — 从通道队列出队 command_id，启动 LUN 的第一个命令。
+ *
+ * 相位机（Phase V）：IDLE → ISSUE → ISSUED → FETCH → IDLE
+ *   ISSUE：发完命令即返回，LUN 进入 tR/tPROG/tBERS
+ *   ISSUED：DWT 计时最短忙期，到点后启动配对 WAIT/FETCH
+ *   FETCH：执行 WAIT_READY + 数据 + 状态检查
  * ====================================================================== */
 
+/* --------------------------------------------------------------------
+ * nand_dispatch_poll
+ *   功能：推进各通道各 LUN 的活跃事务，并出队启动新命令。
+ *   参数：completion —— 有命令完成时回填（整链一次调用返回）。
+ *   返回：NAND_RESULT_OK（有完成，completion 有效）/
+ *         NOT_READY（无命令可推进或完成，调用方应轮询重试）。
+ *   实现要点：本文件最深逻辑——
+ *     - 外层 round-robin 遍历通道（从上次游标处续走）。
+ *     - Phase 1 推进活跃 chain：ISSUED 块先查最短忙期，再启动配对
+ *       WAIT/FETCH；内层 while 处理 started==0 启动与 started!=0 step。
+ *     - completion 有两条返回路径：Phase 1 整链结束（含单命令）、
+ *       Phase 2 单命令立即完成（见两处 return 的分工）。
+ * -------------------------------------------------------------------- */
 nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
 {
     uint8_t channel;
@@ -240,6 +356,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
 
     for (count = 0U; count < CH_NUM; count++)
     {
+        /* round-robin：从上次返回通道的下一个续走，各通道公平 */
         channel                     = (uint8_t)((g_nand_channel_cursor + count) % CH_NUM);
         nand_channel_queue_t *queue = &g_nand_channel_queues[channel];
         uint8_t               ce;
@@ -256,7 +373,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
 
                 if (chain->count == 0U)
                 {
-                    continue;
+                    continue; /* 该 LUN 空闲，跳过 */
                 }
 
                 nand_dispatch_task_t *task = &chain->tasks[chain->cursor];
@@ -264,15 +381,19 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                 /* ── LUN_PHASE_ISSUED: LUN 内部操作中，检查是否可启动 FETCH/WAIT ── */
                 if (chain->phase == LUN_PHASE_ISSUED)
                 {
+                    /* min_busy_us = tR(38)/tPROG(700)/tBERS(5000)，带余量的典型值 */
                     uint16_t min_us = g_nand_operation_map[task->operation].min_busy_us;
 
                     if ((min_us != 0U) &&
                         !delay_dwt_elapsed_us(chain->wait_start_cycles, min_us))
                     {
-                        continue; /* 最小等待时间未到，下一轮再检查 */
+                        /* 最短等待未到，下一轮再检查（continue 而非 break，
+                         * 否则会跳过本 LUN 的 Phase 2 出队） */
+                        continue;
                     }
 
-                    /* 时间到，启动 FETCH/WAIT 配对 OP */
+                    /* 时间到，启动配对 OP（LOAD↔FETCH / ISSUE↔WAIT）；
+                     * 原子 OP 的 pair_op==自身，跳过不切换 */
                     uint8_t pair_op = nand_operation_get_pair(task->operation);
                     if (pair_op != 0U && pair_op != task->operation)
                     {
@@ -332,7 +453,9 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                         }
                         nand_completion.execution_status = result;
                         nand_completion.nand_status      = task->transaction.completion.nand_status;
-                        /* 消耗对应的 channel queue entry */
+                        /* 消耗对应的 channel queue entry：head entry 的 ce/lun
+                         * 与当前 LUN 相符才出队——环形 FIFO 先进先出，靠轮转
+                         * 命中隐式配对，无显式标记。 */
                         if ((queue->count != 0U) &&
                             (queue->entries[queue->head].ce == ce) &&
                             (queue->entries[queue->head].lun == lun_idx))
@@ -366,14 +489,17 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                     {
                         nand_dispatch_task_complete(task, result, &nand_completion);
                         chain->phase = LUN_PHASE_ISSUED;
+                        /* 记录 tR/tPROG/tBERS 起点，供 ISSUED 块最短等待用 */
                         delay_dwt_cycles_now(&chain->wait_start_cycles);
-                        break; /* 不清 LUN busy，等 tR/tPROG/tBERS */
+                        break; /* 不清 LUN busy，下一轮由 ISSUED 块接管 */
                     }
 
                     /* ── CW 级 chaining（多 CW READ 的 RANDOM_DATA_READ 链） ── */
                     for (;;)
                     {
                         nand_dispatch_task_complete(task, result, &nand_completion);
+                        /* chaining 条件：整页读入页缓冲型操作 + 还有下一 CW
+                         * （仅普通读/OTP 读/随机读这几类可按 CW 链式续读） */
                         if ((result != NAND_RESULT_OK) ||
                             ((task->operation != OP_NORMAL_READ_PAGE_WITH_DATA_OUT) &&
                              (task->operation != OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) &&
@@ -384,11 +510,12 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                             break;
                         }
                         task->cw_index++;
-                        task->operation = OP_RANDOM_DATA_READ;
-                        task->started   = 1U;
+                        task->operation = OP_RANDOM_DATA_READ; /* 链中后续 CW 统一改用随机读 */
+                        task->started   = 1U;                   /* 复用 start 路径但标记已启动 */
                         {
                             nand_paa_t cw_paa    = task->cw_paa[0][task->cw_index];
                             uint8_t   *cw_buffer = task->cw_buffers[0][task->cw_index];
+                            /* 列地址 = CW 偏移 × 528B（PAGE_SIZE/4，页缓冲按 CW 等分，4=CW_NUM） */
                             uint16_t   cw_column = (uint16_t)(task->cw_index * (PAGE_SIZE / 4U));
                             task->request        = (nand_fc_request_t){.column = cw_column, .row = {paa_to_nand_row(cw_paa)}, .data = cw_buffer, .data_length = (uint16_t)(PAGE_SIZE / 4U)};
                         }
@@ -405,7 +532,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                         break;
                     }
 
-                    /* Cache reads: 把 page_buffer 拆回各 CW buffer */
+                    /* Cache reads: 把 page_buffer 拆回各 CW buffer（整页数据落在通道页缓冲） */
                     if ((task->operation == OP_READ_PAGE_CACHE_SEQ) ||
                         (task->operation == OP_READ_PAGE_CACHE_RANDOM) ||
                         (task->operation == OP_READ_PAGE_CACHE_LAST))
@@ -419,7 +546,8 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                         }
                     }
 
-                    /* OP_READ_PAGE_FETCH 完成：把 page_buffer 拆回各 CW buffer */
+                    /* OP_READ_PAGE_FETCH 完成：把 page_buffer 拆回各 CW buffer
+                     * （FETCH 数据落在通道 page_buffer 而非各 CW buffer，FMC 数据路径约定） */
                     if (task->operation == OP_READ_PAGE_FETCH)
                     {
                         uint8_t fetch_cw;
@@ -431,7 +559,9 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                         }
                     }
 
-                    /* Multi-Plane WITH_DATA_OUT: 把 page_buffer 拆回各 plane 各 CW buffer */
+                    /* Multi-Plane WITH_DATA_OUT: 把 page_buffer 拆回各 plane 各 CW buffer
+                     * offset = plane*PAGE_SIZE + cw*(PAGE_SIZE/CW_NUM)：
+                     * 双 plane 数据按 plane 顺序拼接，plane stride=2112、CW stride=528 */
                     if (task->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
                     {
                         uint8_t mp_plane, mp_cw;
@@ -501,7 +631,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
             chain = &g_nand_dispatch_chains[channel][queue_entry.ce][queue_entry.lun];
             if (chain->count != 0U)
             {
-                continue; /* LUN busy */
+                continue; /* 目标 LUN 仍忙，entry 留队等下一轮 */
             }
 
             queue->head = (uint16_t)((queue->head + 1U) % NAND_CHANNEL_QUEUE_DEPTH);
@@ -537,7 +667,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
             }
             if (result == NAND_RESULT_NOT_READY)
             {
-                continue;
+                continue; /* entry 已出队，命令留在 task，由 Phase 1 下轮接管 */
             }
             nand_completion.execution_status = result;
             nand_completion.nand_status      = task->transaction.completion.nand_status;
@@ -551,12 +681,12 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                 continue;
             }
 
-            /* 单命令立即完成 — 检查是否在链中（count=1 表示单命令） */
+            /* 单命令立即完成（count=1 表示单命令；count>1 为链，由 Phase 1 推进） */
             if (chain->count > 1U)
             {
-                /* 链中还有后续命令，由 Phase 1 继续推进 */
-                continue;
+                continue; /* 链中还有后续命令，交给 Phase 1 */
             }
+            /* completion 返回点之二（对等 Phase 1 的整链结束） */
             *completion  = task->completion;
             chain->count = 0U;
             return result;
