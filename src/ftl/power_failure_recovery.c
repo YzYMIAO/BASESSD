@@ -252,7 +252,7 @@ ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl)
     }
 
     /* ① L2P Cache 全 INVALID */
-    l2p_cache_init(&ftl->cache);
+    l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
     /* ② Allocator 已由 ftl_init 初始化，此处不需重复做 */
 
@@ -272,7 +272,7 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
     }
 
     /* ① Cache 全 INVALID（首次 miss 时按需从 NAND L2P Table 加载） */
-    l2p_cache_init(&ftl->cache);
+    l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
     /* ② Allocator 已由 ftl_init 初始化（free pool + 各列表已就绪）*/
 
@@ -299,7 +299,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
     }
 
     /* ① Cache 全 INVALID */
-    l2p_cache_init(&ftl->cache);
+    l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
     /* ② Journal 回放（sequence > cp_sequence 的条目 → L2P Cache） */
     /* journal_replay 已实现扫描 J0/J1，提取 entry 并 l2p_cache_write */

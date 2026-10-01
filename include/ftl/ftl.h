@@ -37,8 +37,9 @@
 
 #define FTL_READ_USER_SIZE (2048U) /* 一次读返回的用户数据大小 = 4 CW × 512B */
 
-/* 最大有效 LBA = 总 Region 数 × 每 Region entry 数 */
-#define FTL_LBA_MAX        ((uint64_t)L2P_REGIONS_TOTAL * L2P_ENTRIES_PER_REGION)
+/* 最大有效 LBA（全局） = 每 (ch,ce,lun) region 数 × entry × 设备维度数。
+ * LUN_NUM/CH_NUM/CE_NUM=1 时 = 2048×512 = 1,048,576（单 LUN 满容量，总量不变）。 */
+#define FTL_LBA_MAX        ((uint64_t)L2P_REGIONS_PER_LUN * L2P_ENTRIES_PER_REGION * CH_NUM * CE_NUM * LUN_NUM)
 
 /* ── FTL 主上下文 ── */
 

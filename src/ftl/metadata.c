@@ -138,7 +138,8 @@ static nand_addr_t anchor_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint8_t
     addr.lun    = lun;
     addr.plane  = (uint8_t)((i & 1U) & 1U);
     addr.page   = (uint8_t)((i < ANCHOR_REDUNDANCY) ? i : (i - ANCHOR_REDUNDANCY));
-    addr.block  = (uint8_t)((i < ANCHOR_REDUNDANCY) ? ANCHOR_BLOCK0 : ANCHOR_BLOCK1);
+    addr.block  = (uint8_t)(((i < ANCHOR_REDUNDANCY) ? ANCHOR_BLOCK0 : ANCHOR_BLOCK1) +
+                            (lun * ANCHOR_BLOCK_STRIDE));
     addr.cw     = 0U;
 
     return addr;
@@ -161,20 +162,20 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
     dir->dirty           = 0U;
     dir->change_count    = 0U;
 
-    for (i = 0U; (i < L2P_REGIONS_TOTAL) && (i < METADATA_DIR_ENTRIES); i++)
+    for (i = 0U; (i < L2P_REGIONS_PER_LUN) && (i < METADATA_DIR_ENTRIES); i++)
     {
         plane = (uint8_t)(i & 1U);
-        block = (uint16_t)(L2P_BASE_BLOCK + (i >> 6));
+        block = (uint16_t)(L2P_BASE_BLOCK + ((uint16_t)dir->topo.lun * L2P_BLOCKS_PER_LUN) + (i >> 6));
         page  = (uint8_t)(i & 0x3FU);
 
         dir->entries[dir->count].type = METADATA_TYPE_L2P_REGION;
         dir->entries[dir->count].id   = i;
-        dir->entries[dir->count].paa  = paa_make(page, plane, block, 0, 0);
+        dir->entries[dir->count].paa  = paa_make(page, plane, block, dir->topo.lun, 0);
         dir->count++;
     }
 
-    /* 当前 metadata 分区块指针（初始指向固定区域之后第一个可用块） */
-    dir->cur_metadata_block = L2P_BASE_BLOCK + L2P_TABLE_BLOCKS; /* Block 32 */
+    /* 当前 metadata 分区块指针（初始指向本 LUN 固定区域之后第一个可用块） */
+    dir->cur_metadata_block = (uint16_t)(L2P_BASE_BLOCK + ((uint16_t)dir->topo.lun * L2P_BLOCKS_PER_LUN) + L2P_BLOCKS_PER_LUN);
     dir->cur_metadata_page  = 0U;
     dir->cur_metadata_plane = 0U;
 }
@@ -279,7 +280,7 @@ nand_paa_t metadata_dir_alloc_region(metadata_dir_cache_t *dir,
     page  = dir->cur_metadata_page;
     block = dir->cur_metadata_block;
 
-    paa = paa_make(page, plane, block, 0, 0);
+    paa = paa_make(page, plane, block, dir->topo.lun, 0);
 
     /* 更新 Directory */
     metadata_dir_update(dir, METADATA_TYPE_L2P_REGION, region_id, paa);
@@ -381,7 +382,7 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
         nand_addr_t pba;
         int         ret;
 
-        pba = addr_from_paa(dir->topo.ch, dir->topo.ce, metadata_dir_anchor_paa(i));
+        pba = addr_from_paa(dir->topo.ch, dir->topo.ce, paa_with_lun(metadata_dir_anchor_paa(i), dir->topo.lun));
         memset(&candidates[i], 0, sizeof(candidates[i]));
 
         ret = sync_read_page(pba, &candidates[i], sizeof(candidates[i]));
@@ -446,8 +447,8 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
                 uint16_t b = (uint16_t)paa_to_block(dir->entries[i].paa);
                 uint8_t  p = (uint8_t)paa_to_page(dir->entries[i].paa);
 
-                /* 跳过固定区域 Block 0~31 */
-                if (b >= (L2P_BASE_BLOCK + L2P_TABLE_BLOCKS))
+                /* 跳过本 LUN 固定区域（起始 = lun×L2P_BLOCKS_PER_LUN 起 L2P_BLOCKS_PER_LUN 块） */
+                if (b >= (L2P_BASE_BLOCK + ((uint16_t)dir->topo.lun * L2P_BLOCKS_PER_LUN) + L2P_BLOCKS_PER_LUN))
                 {
                     if ((b > max_block) || ((b == max_block) && (p > max_page)))
                     {
@@ -489,5 +490,7 @@ nand_paa_t metadata_dir_anchor_paa(uint8_t idx)
 
     plane = (uint8_t)(page & 1U);
 
+    /* lun 由调用侧（anchor_page_addr / 各模块 topo）带出——此处仅固定块/页/plane，
+     * 调用点用 anchor_page_addr(dir->topo.ch, dir->topo.ce, dir->topo.lun, i) 展开。 */
     return paa_make(page, plane, block, 0, 0);
 }

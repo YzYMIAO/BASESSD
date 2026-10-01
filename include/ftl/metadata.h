@@ -23,9 +23,10 @@
 
 #include <stdint.h>
 
-/* ── Anchor Block 位置 ── */
-#define ANCHOR_BLOCK0         (33U) /* Anchor Block 0 */
-#define ANCHOR_BLOCK1         (34U) /* Anchor Block 1 */
+/* ── Anchor Block 位置（每 (ch,ce,lun) 独立一套，按 lun 错开 stride）── */
+#define ANCHOR_BLOCK0         (33U) /* Anchor Block 0（LUN 0） */
+#define ANCHOR_BLOCK1         (34U) /* Anchor Block 1（LUN 0） */
+#define ANCHOR_BLOCK_STRIDE   (2U)  /* 每 LUN Anchor 占 2 Block，跨 LUN 错开 */
 #define ANCHOR_REDUNDANCY     (3U)  /* 每 Block 冗余页数 */
 #define ANCHOR_PAGES          (6U)  /* 共 2 Block × 3 页 = 6 */
 #define ANCHOR_PAGE_PER_BLOCK (3U)  /* 每 Block 3 页 */
@@ -155,10 +156,12 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir);
 ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir);
 
 /*
- * metadata_dir_anchor_paa - 返回第 n 个 Anchor 页的 PAA
+ * metadata_dir_anchor_paa - 返回第 n 个 Anchor 页的 PAA（不含 lun）
+ *
+ * 固定块/页/plane 由 idx 推导；lun 由调用侧（anchor_page_addr / 各模块 topo）带出。
  *
  * @param idx 0..5
- * @return PAA
+ * @return PAA（lun 为 0，调用方用 paa_with_lun 补 lun）
  */
 nand_paa_t metadata_dir_anchor_paa(uint8_t idx);
 

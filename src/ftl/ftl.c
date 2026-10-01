@@ -361,8 +361,8 @@ ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params)
     }
     memset(params->blocks, 0, sizeof(ftl_block_t) * FTL_BLOCK_TOTAL);
 
-    /* ├─ L2P Cache ── */
-    l2p_cache_init(&ftl->cache);
+    /* ├─ L2P Cache（绑定本 FTL 的 ch/ce/lun，固定位置寻址与路由据此展开）── */
+    l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
     /* ├─ Allocator ── */
     allocator_init(&ftl->alloc, params);
@@ -456,12 +456,14 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     }
     data_size = FTL_READ_USER_SIZE * req->pages;
 
-    /* LBA 越界检查 */
+    /* LBA 越界检查（全局 LBA 空间） */
     if (req->lba >= FTL_LBA_MAX)
     {
         return FTL_ERROR;
     }
-    internal_lba = (lba_t)req->lba;
+    /* 全局 LBA → 本 FTL（ch/ce/lun）的片内 local LBA（交错路由，见 l2p_cache.h）。
+     * 本 FTL 上下文已绑定固定 (ch,ce,lun)；LUN_NUM=1 时折叠为原值。 */
+    internal_lba = lba_to_local(req->lba);
 
     pba = l2p_cache_read(&ftl->cache, internal_lba);
     if (pba == FTL_PBA_INVALID)
@@ -557,12 +559,13 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
     }
     data_size = FTL_READ_USER_SIZE * req->pages;
 
-    /* LBA 越界检查 */
+    /* LBA 越界检查（全局 LBA 空间） */
     if (req->lba >= FTL_LBA_MAX)
     {
         return FTL_ERROR;
     }
-    internal_lba = (lba_t)req->lba;
+    /* 全局 LBA → 本 FTL（ch/ce/lun）的片内 local LBA（交错路由，见 l2p_cache.h）。 */
+    internal_lba = lba_to_local(req->lba);
 
     /* ① Allocator 分配新 PBA
      * Free Pool 耗尽 → 同步跑一轮紧急 GC（回收 1 个 Super Block = 2 个 Block，
@@ -654,14 +657,23 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
 void ftl_trim(ftl_context_t *ftl, uint64_t lba)
 {
     nand_pba_t old_pba;
+    lba_t      local_lba;
 
     if (ftl == NULL)
     {
         return;
     }
+    if (lba >= FTL_LBA_MAX)
+    {
+        return;
+    }
+
+    /* 全局 LBA → 本 FTL 片内 local（与读/写路径一致的交错路由）。
+     * controller 无维度知识，转换在本 FTL 内部完成。 */
+    local_lba = lba_to_local(lba);
 
     /* 查旧映射：若非 INVALID，同步清该页的 bitmap/VPC（否则 VPC 虚高，GC 选 victim 不准） */
-    old_pba = l2p_cache_read(&ftl->cache, (lba_t)lba);
+    old_pba = l2p_cache_read(&ftl->cache, local_lba);
     if (old_pba != NAND_PBA_INVALID)
     {
         ftl_block_clr_valid(&ftl->alloc.blocks[ftl_pba_gblock(old_pba)],
@@ -670,5 +682,5 @@ void ftl_trim(ftl_context_t *ftl, uint64_t lba)
     }
 
     /* 取消 LBA 映射（非阻塞） */
-    l2p_cache_write(&ftl->cache, (lba_t)lba, FTL_PBA_INVALID);
+    l2p_cache_write(&ftl->cache, local_lba, FTL_PBA_INVALID);
 }

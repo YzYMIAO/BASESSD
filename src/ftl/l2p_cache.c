@@ -125,7 +125,7 @@ static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t
     return FTL_OK;
 }
 
-void l2p_cache_init(l2p_cache_t *cache)
+void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
 {
     uint16_t i;
 
@@ -133,6 +133,10 @@ void l2p_cache_init(l2p_cache_t *cache)
     {
         return;
     }
+
+    cache->ch = ch;
+    cache->ce = ce;
+    cache->lun = lun;
 
     for (i = 0U; i < L2P_CACHE_SIZE; i++)
     {
@@ -290,13 +294,13 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
 
         if (region_paa != NAND_PBA_INVALID)
         {
-            /* 通过 Directory 查到位置 → 展开地址 */
-            region_addr = addr_from_paa(0, 0, region_paa);
+            /* 通过 Directory 查到位置 → 展开地址（ch/ce 取本 cache 拓扑） */
+            region_addr = addr_from_paa(cache->ch, cache->ce, region_paa);
         }
         else
         {
-            /* 回退固定位置 → 展开地址 */
-            region_addr = addr_from_pba(l2p_region_pba(0, 0, region_id));
+            /* 回退固定位置 → 展开地址（ch/ce/lun 取本 cache 拓扑） */
+            region_addr = addr_from_pba(l2p_region_pba(cache->ch, cache->ce, cache->lun, region_id));
         }
 
         int ret = sync_read_page(region_addr, line->entries, L2P_REGION_SIZE);
@@ -320,7 +324,7 @@ nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba)
     uint16_t          entry_idx;
     l2p_cache_line_t *line;
 
-    if ((cache == NULL) || (lba >= L2P_REGIONS_TOTAL * L2P_ENTRIES_PER_REGION))
+    if ((cache == NULL) || (lba >= L2P_REGIONS_PER_LUN * L2P_ENTRIES_PER_REGION))
     {
         return FTL_PBA_INVALID;
     }
@@ -343,7 +347,7 @@ void l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
     uint16_t          entry_idx;
     l2p_cache_line_t *line;
 
-    if ((cache == NULL) || (lba >= L2P_REGIONS_TOTAL * L2P_ENTRIES_PER_REGION))
+    if ((cache == NULL) || (lba >= L2P_REGIONS_PER_LUN * L2P_ENTRIES_PER_REGION))
     {
         return;
     }
@@ -398,8 +402,8 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
 
         if (region_paa != NAND_PBA_INVALID)
         {
-            /* 已知位置 → 展开地址 */
-            region_addr = addr_from_paa(0, 0, region_paa);
+            /* 已知位置 → 展开地址（ch/ce 取本 cache 拓扑） */
+            region_addr = addr_from_paa(cache->ch, cache->ce, region_paa);
         }
         else if ((cache->md_dir != NULL) && (cache->alloc != NULL))
         {
@@ -409,18 +413,18 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
                                                     line->region_id);
             if (region_paa != NAND_PBA_INVALID)
             {
-                region_addr = addr_from_paa(0, 0, region_paa);
+                region_addr = addr_from_paa(cache->ch, cache->ce, region_paa);
             }
             else
             {
                 /* 动态分配失败（Free Pool 空），回退固定位置 */
-                region_addr = addr_from_pba(l2p_region_pba(0, 0, line->region_id));
+                region_addr = addr_from_pba(l2p_region_pba(cache->ch, cache->ce, cache->lun, line->region_id));
             }
         }
         else
         {
             /* 回退固定位置（md_dir 或 alloc 不可用） */
-            region_addr = addr_from_pba(l2p_region_pba(0, 0, line->region_id));
+            region_addr = addr_from_pba(l2p_region_pba(cache->ch, cache->ce, cache->lun, line->region_id));
         }
     }
 

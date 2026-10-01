@@ -28,25 +28,26 @@
 
 #define L2P_ENTRIES_PER_REGION (512U)                                      /* 每 region 512 条 entry */
 #define L2P_REGION_SIZE        (L2P_ENTRIES_PER_REGION * sizeof(uint32_t)) /* 2KB */
-#define L2P_REGIONS_TOTAL      (2048U)                                     /* 总 region 数 */
+#define L2P_REGIONS_TOTAL      (2048U)                                     /* LBA 空间总 region 数（全设备） */
+#define L2P_REGIONS_PER_LUN    (L2P_REGIONS_TOTAL / LUN_NUM)               /* 每 (ch,ce,lun) 独立 region 表容量 */
 #define L2P_CACHE_SIZE         (64U)                                       /* cache 行数（可配 32/64/128）*/
 #define FTL_PBA_INVALID        (0xFFFFFFFFU)                               /* 无效 PBA */
 
-/* L2P Table NAND 固定位置：
+/* L2P Table NAND 固定位置（每 (ch,ce,lun) 独立表，按 lun 错开 block 偏移）：
  *   Region r → Block = L2P_BASE_BLOCK + (r / 64), Page = r % 64
  *   偶 Region → Plane 0, 奇 Region → Plane 1（双 Plane 交错）
- *   共 2048 regions / 64 pages-per-block = 32 blocks
+ *   每 LUN 表占 L2P_REGIONS_PER_LUN / 64 个 Block，跨 LUN 依次错开。
  */
-#define L2P_BASE_BLOCK   (0U)  /* L2P 起始 Block */
-#define L2P_TABLE_BLOCKS (32U) /* 总占用 Block 数 */
+#define L2P_BASE_BLOCK   (0U)   /* L2P 起始 Block */
+#define L2P_BLOCKS_PER_LUN (L2P_REGIONS_PER_LUN / 64U)                    /* 每 LUN 表块数（1: 32, 2: 16） */
 
-/* 固定位置映射：Region r → PBA */
-static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint16_t region_id)
+/* 固定位置映射：Region r → PBA（lun 维度参与 block 错位） */
+static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t region_id)
 {
-    uint8_t  plane = (uint8_t)(region_id & 1U);                     /* 偶 P0, 奇 P1 */
-    uint16_t block = (uint16_t)(L2P_BASE_BLOCK + (region_id >> 6)); /* /64 */
-    uint8_t  page  = (uint8_t)(region_id & 0x3FU);                  /* %64 */
-    return pba_make(ch, ce, page, plane, block, 0, 0);
+    uint8_t  plane = (uint8_t)(region_id & 1U);                                            /* 偶 P0, 奇 P1 */
+    uint16_t block = (uint16_t)(L2P_BASE_BLOCK + (lun * L2P_BLOCKS_PER_LUN) + (region_id >> 6)); /* /64 + lun 错位 */
+    uint8_t  page  = (uint8_t)(region_id & 0x3FU);                                         /* %64 */
+    return pba_make(ch, ce, page, plane, block, lun, 0);
 }
 
 /* ── Region 分解 ── */
@@ -54,9 +55,31 @@ static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint16_t region_
 #define L2P_REGION_SHIFT (9U)                          /* lba / 512 */
 #define L2P_REGION_MASK  (L2P_ENTRIES_PER_REGION - 1U) /* lba % 512 */
 
-static inline uint16_t lba_to_region(lba_t lba)
+/* 全局 LBA → (ch,ce,lun) 路由（行业主控：哈希到三维）。
+ * CH_NUM/CE_NUM/LUN_NUM 均来自 nand_config.h，当前全 1 → 恒路由 (0,0,0)。 */
+static inline uint32_t lba_route_ch(uint64_t lba)
 {
-    return (uint16_t)(lba >> L2P_REGION_SHIFT);
+    return (uint32_t)((lba >> 9U) % CH_NUM);
+}
+static inline uint32_t lba_route_ce(uint64_t lba)
+{
+    return (uint32_t)((lba >> 9U) % CE_NUM);
+}
+static inline uint32_t lba_route_lun(uint64_t lba)
+{
+    return (uint32_t)((lba >> 9U) % LUN_NUM);
+}
+
+/* 全局 LBA → 片内 local LBA（本 (ch,ce,lun) 的表内偏移）。
+ * 交错：lun 取低位 → 连续 LBA 摊到各 LUN，顺序写并发收益最大。 */
+static inline lba_t lba_to_local(uint64_t lba)
+{
+    return (lba_t)(lba / (uint64_t)(CH_NUM * CE_NUM * LUN_NUM));
+}
+
+static inline uint16_t lba_to_region(lba_t local_lba)
+{
+    return (uint16_t)(local_lba >> L2P_REGION_SHIFT);
 }
 
 static inline uint16_t lba_to_entry(lba_t lba)
@@ -79,7 +102,7 @@ typedef enum
 typedef struct
 {
     nand_pba_t entries[L2P_ENTRIES_PER_REGION]; /* 512 条 PBA = 2KB */
-    uint16_t   region_id;                       /* 0..2047 */
+    uint16_t   region_id;                       /* 0..L2P_REGIONS_PER_LUN-1（本表内编号） */
     uint8_t    state;                           /* l2p_cache_state_t */
     uint16_t   access_count;                    /* CLOCK 访问计数 */
 } l2p_cache_line_t;
@@ -92,6 +115,11 @@ typedef struct
     uint16_t         clock_hand;            /* CLOCK 替换指针 */
     uint32_t         hit_count;             /* 统计：命中次数 */
     uint32_t         miss_count;            /* 统计：未命中次数 */
+
+    /* 本 cache 绑定的拓扑（ch/ce/lun，决定固定位置寻址与路由） */
+    uint8_t ch;
+    uint8_t ce;
+    uint8_t lun;
 
     /* Metadata Directory 指针（由 ftl_context_t 提供） */
     metadata_dir_cache_t *md_dir; /* 用于 Region 位置查找 */
@@ -124,8 +152,11 @@ static inline void l2p_cache_set_md_dir(l2p_cache_t *cache,
  * l2p_cache_init - 初始化 cache，所有 line 置 INVALID
  *
  * @param cache  cache 上下文指针（由调用者提供存储空间）
+ * @param ch     本 cache 绑定的 CH（固定位置寻址 + 路由用）
+ * @param ce     本 cache 绑定的 CE
+ * @param lun    本 cache 绑定的 LUN
  */
-void l2p_cache_init(l2p_cache_t *cache);
+void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun);
 
 /*
  * l2p_cache_read - 读取 LBA 对应的 PBA 映射
