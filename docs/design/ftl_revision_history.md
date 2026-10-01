@@ -971,3 +971,85 @@ g_bbt_bitmap / rr_block_track），无统一承载，且存 3 处全局/per-plan
 - **PFR closed_sb_list 掉电重建**：本期只做 open SB 状态机；closed 重建需扫全 NAND
   判有效页分组，涉及既有 PFR 缺口，独立立项
 - **档三（SRAM 核心 + NAND 扩展）**：全常驻 224KB 的产品化裁剪路径，已写入 ftl_design §19，不实现
+
+## v0.33 — FTL 内部边缘缺口闭环（write 路径紧急 GC + RR Stage 3 兜底）
+
+**日期**：2026-10-01
+
+### 关键决策
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| Free Pool 耗尽 → write 路径 | **同步紧急 GC 兜底**（gc_select_victim + migrate + erase_and_free 1 个 SB 后重试一次） | 写请求在 Free Pool 枯竭瞬间不再丢弃；真无空间才返回 FTL_ERROR |
+| RR Stage 3 | **显式坏块标记**（`bbt_mark_bad(FTL_BLOCK_BAD_READ)`） | 不做 XOR/RAID 恢复（FC raid 引擎孤儿代码）；页面损坏提升块级不可靠，预测搬移/GC 接手 |
+| allocator.h #warning | 移除，改正式文档 | write 路径已闭环 |
+
+### 实现
+
+- `ftl_submit_write` 第①步：`allocator_alloc` 失败 → 同步 GC → 重试（`src/ftl/ftl.c`）
+- 读失败恢复全失败 → `bbt_mark_bad(READ)`（`src/ftl/ftl.c`）
+- `read_recovery.c` Stage 3 注释改显式兜底语义；`allocator.h`/`read_recovery.h` 文档同步
+
+### 编译状态
+
+零错误零新增警告（debug + tests）。commit `e727d29`。
+
+## v0.34 — P-A 多 LUN 命令层机制启用（ISSUE/WAIT/FETCH + auto-split 活代码）
+
+**日期**：2026-10-01
+
+### 背景
+
+Phase V 已建好 ISSUE/WAIT/FETCH 三阶段骨架，但 `LUN_NUM=1/LUN_ADDR_WIDTH=0` 使机制全为死代码。
+
+### 关键决策
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| LUN_NUM | 临时改 2（后续 v0.35 回滚至真实芯片 1） | 让门控 `(LUN_NUM>1U)` 变活、机制可验证 |
+| 原子 OP pair_op | 3 个原子 OP 补 pair_op（READ→LOAD/PROGRAM→ISSUE/ERASE→ISSUE） | `nand_operation_is_splittable` 依赖 op_type==ATOMIC && pair_op!=0 |
+| desc PAA lun | 修复 `paa_make(...,0U,...)` → 保留 `paa_to_lun(command->paa)` | 多 LUN desc META/随机种子/ECC 依赖 |
+| 链式路径 | 补 auto-split（与单命令路径一致） | 单命令已有 fc.c:1341，链式缺失 |
+| sb->topo | allocator_alloc 分配时绑定真实 ch/ce/lun | 此前恒零，擦除/GC 地址全零 |
+
+### 编译状态
+
+零错误零新增警告。commit `4e14c2a`。**注意：LUN_NUM=2 为临时验证值，v0.35 已回滚至 1。**
+
+## v0.35 — 数据平面多维度化（L2P 分片 + ch/ce/lun 泛化 + 路由哈希）
+
+**日期**：2026-10-01
+
+### 背景
+
+v0.34 把 LUN_NUM 改成 2 与 MT29F4G08 真实结构（单 die，DIE_NUM=1）不符。用户决策：**配置回滚真实芯片（LUN_NUM=1），代码按多维度写，用 CH_NUM/CE_NUM/LUN_NUM 宏定大小**——换芯片只改宏。
+
+### 关键决策
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| 配置 | LUN_NUM 2→1、LUN_ADDR_WIDTH 1→0 | MT29F4G08 单 die；P-A pair_op/auto-split 修复保留（换宏即活） |
+| L2P 分片 | `L2P_REGIONS_PER_LUN = 2048/LUN_NUM`、`L2P_BLOCKS_PER_LUN`、`l2p_region_pba(ch,ce,lun,...)` | 行业标准：每 LUN 独立 region 表，总容量不变 |
+| 路由 | `lba_route_ch/ce/lun` 哈希 + `lba_to_local` 交错 | 行业主控 LBA 哈希到三维；顺序写摊多 die |
+| META 语义 | **存片内 local_lba** | GC/WL/journal replay/读恢复反查随 local 自洽（全链决策基准） |
+| cache 拓扑 | `l2p_cache_t` 加 ch/ce/lun；`l2p_cache_init(cache,ch,ce,lun)` | 消固定位置寻址写死 0 |
+| metadata_dir | 预填/alloc_region/anchor 按 `dir->topo.lun` 错开（ANCHOR_BLOCK_STRIDE + L2P_BLOCKS_PER_LUN） | 每 LUN 独立 anchor 区 |
+| trim | 收全局 LBA → lba_to_local | controller 无维度知识，转换 ftl 内部完成 |
+
+### 实现
+
+- `nand_config.h`：LUN_NUM/LUN_ADDR_WIDTH 回滚
+- `l2p_cache.h/.c`：分片宏 + 路由 + local 转换 + cache 绑定 topo + 固定位置回退按 lun
+- `metadata.h/.c`：anchor stride + 预填/alloc/load 按 topo.lun
+- `ftl.c`：read/write/trim 全局→local；`cmd->meta=local`；l2p_cache_init 绑 topo
+- `pfr.c`：3 处 l2p_cache_init 同步
+
+### 编译状态
+
+零错误零新增警告（debug + tests）。commit `5f886e1`。LUN_NUM=1 折叠单 LUN，行为与现状一致。
+
+### 遗留
+
+- **main.c FTL 上线**：host 大数组（g_blocks[CH][CE][LUN][FTL_BLOCK_TOTAL] 等）+ ftl_init 循环，无生产调用
+- **controller 三维 ftl 指针 + 路由**：`ssd_controller_t.ftl[CH][CE][LUN]`、`request.c` 按 lba 选 ftl
+- SRAM：每 LUN 352KB（BST 224KB + L2P 128KB）；LUN_NUM=1 时 AXI_RAM 剩 364KB 勉强放下；LUN_NUM=2 需跨区

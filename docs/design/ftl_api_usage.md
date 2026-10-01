@@ -339,9 +339,10 @@ while (1) {
 ```c
 #define L2P_ENTRIES_PER_REGION   512     // region 内 PBA 数
 #define L2P_CACHE_SIZE           64      // cache 行数（32/64/128）
-#define L2P_REGIONS_TOTAL        2048    // 总 region 数
+#define L2P_REGIONS_TOTAL        2048    // LBA 空间总 region 数（全设备）
+#define L2P_REGIONS_PER_LUN      (L2P_REGIONS_TOTAL / LUN_NUM)  // 每 (ch,ce,lun) 表容量（v0.35 分片）
+#define L2P_BLOCKS_PER_LUN       (L2P_REGIONS_PER_LUN / 64U)    // 每 LUN 表块数（1: 32, 2: 16）
 #define L2P_BASE_BLOCK           (0U)    // L2P 表起始 Block
-#define L2P_TABLE_BLOCKS         (32U)   // L2P 表总 Block 数
 
 // Cache line 状态
 typedef enum {
@@ -354,32 +355,41 @@ typedef enum {
 /* 单条 cache line = 2KB + 元数据 */
 typedef struct {
     nand_pba_t  entries[L2P_ENTRIES_PER_REGION];   // 512 × 4B = 2048B
-    uint16_t    region_id;                           // 0..2047
+    uint16_t    region_id;                           // 0..L2P_REGIONS_PER_LUN-1（本表内编号，v0.35）
     uint8_t     state;                               // l2p_cache_state_t
     uint16_t    access_count;                        // CLOCK 访问计数
 } l2p_cache_line_t;
 
-/* 整体 cache */
+/* 整体 cache（v0.35 起绑定本 (ch,ce,lun) 拓扑） */
 typedef struct {
     l2p_cache_line_t  lines[L2P_CACHE_SIZE];
     uint16_t          clock_hand;        // CLOCK 替换指针
     uint32_t          hit_count;         // 统计
     uint32_t          miss_count;
+    uint8_t           ch, ce, lun;       // 本 cache 绑定拓扑（固定位置寻址 + 路由）
     metadata_dir_cache_t *md_dir;        // Metadata Directory 指针
 } l2p_cache_t;
 
 /* 设置 Metadata Directory 指针 */
 static inline void l2p_cache_set_md_dir(l2p_cache_t *cache, metadata_dir_cache_t *md_dir);
 
-/* L2P Table 固定位置映射：Region → PBA */
-static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint16_t region_id);
+/* 全局 LBA → (ch,ce,lun) 路由（行业主控哈希；LUN_NUM=1 时恒 0） */
+static inline uint32_t lba_route_ch(uint64_t lba);
+static inline uint32_t lba_route_ce(uint64_t lba);
+static inline uint32_t lba_route_lun(uint64_t lba);
+
+/* 全局 LBA → 片内 local LBA（交错：lun 取低位 → 顺序写摊多 die） */
+static inline lba_t lba_to_local(uint64_t lba);
+
+/* L2P Table 固定位置映射：Region → PBA（lun 维度参与 block 错位） */
+static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t region_id);
 ```
 
 ### 2.2 接口
 
 ```c
-/* 初始化 cache（所有 line 置 INVALID） */
-void l2p_cache_init(l2p_cache_t *cache);
+/* 初始化 cache（所有 line 置 INVALID；v0.35 起绑定 ch/ce/lun） */
+void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun);
 
 /*
  * 读取 LBA 的 PBA 映射。

@@ -1570,7 +1570,9 @@ Region 当前在哪，也就无法利用双 Plane 并行。
 ```c
 #define L2P_ENTRIES_PER_REGION   (512)                     // region 内 PBA 数
 #define L2P_REGION_SIZE          (L2P_ENTRIES_PER_REGION * sizeof(uint32_t))  // 2KB
-#define L2P_REGIONS_TOTAL        (2048)                     // 总 region 数
+#define L2P_REGIONS_TOTAL        (2048)                     // LBA 空间总 region 数（全设备）
+#define L2P_REGIONS_PER_LUN      (L2P_REGIONS_TOTAL / LUN_NUM)  // 每 (ch,ce,lun) 表容量（v0.35 分片）
+#define L2P_BLOCKS_PER_LUN       (L2P_REGIONS_PER_LUN / 64U)    // 每 LUN 表块数（1: 32, 2: 16）
 #define L2P_CACHE_SIZE           (64)                       // 可配置：32/64/128
 #define FTL_PBA_INVALID          (0xFFFFFFFFU)              // 无效 PBA，全 F 不可能为合法地址
 
@@ -1753,7 +1755,7 @@ int ftl_write(ftl_context_t *ftl, lba_t lba, const void *data) {
     cmd->config.random    = FC_RANDOM_ENABLE;
     cmd->config.ldpc      = FC_ECC_MODE_BCH;
     cmd->config.module    = FC_COMMAND_MODULE_FTL;
-    cmd->meta             = lba;                    // META 写入 LBA
+    cmd->meta             = lba;                    // META 写入 LBA（v0.35 起为片内 local_lba，见 §3.x 路由）
     ftl_cmd_setup_ppa(cmd, new_pba);                // 配置 PBA + desc 链
     ftl_cmd_write_data(cmd, data, 2048);             // 用户数据拷贝
     fc_submit(cmd);                                  // 非阻塞提交
@@ -1774,7 +1776,7 @@ int ftl_write(ftl_context_t *ftl, lba_t lba, const void *data) {
 
 ```
 冷启动（无 journal）:
-  l2p_cache_init() → cache 全 INVALID
+  l2p_cache_init(cache, ch, ce, lun) → cache 全 INVALID（v0.35 起绑定拓扑）
   首次访问时从 NAND 加载 region
 
 热启动（有 journal）:
@@ -2157,7 +2159,7 @@ int ftl_boot_recovery(ftl_context_t *ftl) {
 
 ```c
 int boot_fresh_start(ftl_context_t *ftl) {
-    l2p_cache_init(&ftl->cache);               // Cache 全 INVALID
+    l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);   // v0.35 绑定拓扑               // Cache 全 INVALID
     allocator_init(&ftl->alloc, &params);      // 扫描 BBT、构建 free pool（v0.30 结构体传参）
     bbt_load(&ftl->bbt);
     erase_count_load(&ftl->alloc);
@@ -2177,7 +2179,7 @@ int boot_fresh_start(ftl_context_t *ftl) {
 ```c
 int boot_clean_start(ftl_context_t *ftl, l2p_checkpoint_header_t *cp) {
     /* ① Cache 全 INVALID（不预加载任何 region）*/
-    l2p_cache_init(&ftl->cache);
+    l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);   // v0.35 绑定拓扑
 
     /* ② Allocator 初始化 */
     allocator_init(&ftl->alloc, &params);      // 扫描 BBT（v0.30 结构体传参）
@@ -2213,7 +2215,7 @@ int boot_clean_start(ftl_context_t *ftl, l2p_checkpoint_header_t *cp) {
 int boot_power_failure_recovery(ftl_context_t *ftl,
                                  l2p_checkpoint_header_t *cp) {
     /* ① Cache 全 INVALID */
-    l2p_cache_init(&ftl->cache);
+    l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);   // v0.35 绑定拓扑
 
     /* ② Journal 批量回放 */
     journal_replay_batched(&ftl->journal, &ftl->cache,
@@ -2568,9 +2570,9 @@ void ftl_gc_execute(ftl_context_t *ftl);
 **L2P Cache**（`l2p_cache.h`）：
 
 ```c
-void       l2p_cache_init(l2p_cache_t *cache);
-nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba);
-void       l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
+void       l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun); /* v0.35 绑定拓扑 */
+nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t local_lba);   /* 收片内 local LBA */
+void       l2p_cache_write(l2p_cache_t *cache, lba_t local_lba, nand_pba_t pba);
 void       l2p_cache_flush_one(l2p_cache_t *cache, int idx);
 void       l2p_cache_flush_all(l2p_cache_t *cache);
 void       l2p_cache_flush_background(l2p_cache_t *cache, int max_count);
@@ -3969,11 +3971,13 @@ ftl_init
 #define L2P_ENTRIES_PER_REGION  (512)
 #define L2P_REGION_SIZE         (2048)      // 512 × 4B
 #define L2P_CACHE_SIZE          (64)        // 可调: 32/64/128
-#define L2P_REGIONS_TOTAL       (2048)
+#define L2P_REGIONS_TOTAL       (2048)      // LBA 空间总 region 数
+#define L2P_REGIONS_PER_LUN     (L2P_REGIONS_TOTAL / LUN_NUM)  // v0.35: 每 (ch,ce,lun) 表容量
+#define L2P_BLOCKS_PER_LUN      (L2P_REGIONS_PER_LUN / 64U)    // v0.35: 每 LUN 表块数
 
 typedef struct {
     nand_pba_t entries[L2P_ENTRIES_PER_REGION];  // 512 PBA = 2KB
-    uint16_t   region_id;
+    uint16_t   region_id;                        // 0..L2P_REGIONS_PER_LUN-1（本表内编号，v0.35）
     uint8_t    state : 2;      // INVALID=0, CLEAN=1, DIRTY=2, FLUSHING=3
     uint16_t   access_count : 14;
 } l2p_cache_line_t;
@@ -3982,11 +3986,12 @@ typedef struct {
     l2p_cache_line_t lines[L2P_CACHE_SIZE];
     uint16_t         clock_hand;
     uint32_t         hit_count, miss_count;
+    uint8_t          ch, ce, lun;               // v0.35: 本 cache 绑定拓扑
 } l2p_cache_t;
 
-void       l2p_cache_init(l2p_cache_t *cache);
-nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba);
-void       l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
+void       l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun);  // v0.35 绑定拓扑
+nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t local_lba);   // v0.35 收片内 local
+void       l2p_cache_write(l2p_cache_t *cache, lba_t local_lba, nand_pba_t pba);
 void       l2p_cache_flush_one(l2p_cache_t *cache, int idx);
 void       l2p_cache_flush_all(l2p_cache_t *cache);
 ```
