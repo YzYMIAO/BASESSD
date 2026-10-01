@@ -1,17 +1,10 @@
-# Cortex-R5 SSD Firmware
+# STM32H743 SSD Firmware
 
-## Host simulator
-
-```sh
-make BUILD_TARGET=host_sim all
-```
-
-## Reference Cortex-R5 firmware
+Build for the STM32H743 with the MT29F4G08 NAND device:
 
 ```sh
-make BUILD_TARGET=firmware FIRMWARE_PLATFORM=reference_soc all
+make BUILD_TARGET=firmware FIRMWARE_PLATFORM=stm32h743 debug
 ```
 
-The reference platform defines a virtual hardware contract. It does not use
-register addresses from an undocumented SSD controller SoC. See
-`docs/hardware_contract.md` for the current assumptions.
+See `docs/design/wsl_debug_environment.md` for the WSL↔JLink debug chain and
+`docs/hardware_contract.md` for the target assumptions.

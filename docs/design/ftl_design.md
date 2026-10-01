@@ -3338,7 +3338,6 @@ Step 12 — Wear Leveling
 | Controller 层 | `state_machine.c` / `scheduler.c` | 状态机、优先级调度（`request.c` 已在 v0.23/v0.36 实现——拆分 + 跨实例路由，非桩） |
 | Platform BSP | `timer.c` / `uart.c` / `cache.c` / `dma.c` / `interrupt.c` | 硬件外设驱动（已有 soc.h + DWT 实现）|
 | NVMe Host | `nvme_admin.c` / `nvme_io.c` / `submission_queue.c` / `completion_queue.c` | NVMe 协议层（当前用 UART CLI，v0.30 P-B 立项）|
-| Host Sim | `flash_simulator.c` / `file_backend.c` / `event_loop.c` / `fault_injection.c` / `simulated_time.c` | PC 端模拟环境（当前跑在真实硬件）|
 | 平台计时钩子 | `ssd_platform_ops_t.time_us`（platform.h 已定义，stm32h743 未注册） | Checkpoint T3 定时 + GC 定时 + cp.timestamp 接线（见 v0.37 遗留）|
 
 **FTL 层 22 个源文件，0 个 `#warning` 核心桩。全部模块已实现并通过编译。**

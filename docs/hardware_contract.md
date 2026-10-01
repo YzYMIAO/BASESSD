@@ -1,38 +1,21 @@
-# Reference Cortex-R5 Hardware Contract
+# STM32H743 Hardware Contract
 
-This project does not target a publicly documented SSD controller SoC.  The
-firmware therefore separates architecture code from the replaceable SoC BSP.
+This project targets the STM32H743 (Cortex-M7) MCU with an MT29F4G08 NAND
+device, accessed through the FMC bank 3 interface. Core SSD modules never
+access MMIO registers directly; register access lives in
+`src/platform/stm32h743` and `src/platform/bsp`.
 
-## Stable architecture assumptions
-
-- ARMv7-R Cortex-R5, single core, little-endian.
-- ARM exception vectors and separate IRQ, FIQ, abort, undefined and SVC stacks.
-- Freestanding C11 firmware built with `arm-none-eabi-gcc`.
-- Core SSD modules never access MMIO registers directly.
-
-## Reference virtual SoC
-
-The `reference_soc` platform is a software contract, not a real chip:
+## Memory layout (AXI_RAM)
 
 | Region | Base | Size | Purpose |
 | --- | ---: | ---: | --- |
-| Boot memory | `0x00000000` | 2 MiB | vectors, code, constants |
-| DTCM | `0x20000000` | 64 KiB | processor mode stacks |
-| SRAM | `0x21000000` | 512 KiB | initialized data and BSS |
-| DRAM | `0x40000000` | 256 MiB | FTL tables and host buffers |
-
-No physical UART, timer, interrupt controller, PCIe, NAND or DMA register
-addresses are invented.  Their interfaces are placeholders for a future BSP.
-
-## Boot assumption
-
-The first firmware stage assumes a debugger, ROM model or simulator has loaded
-the ELF image and initialized executable memory. NAND boot and DDR PHY training
-remain outside the generic ARMv7-R startup path.
+| AXI_RAM | `0x24000000` | 384 KiB | FTL instances, BST `g_blocks`, L2P cache |
+| SRAM2 | `0x30020000` | 128 KiB | free pool and closed SB list |
+| DTCM | `0x20000000` | 128 KiB | stacks, hot data |
 
 ## Build selection
 
 ```sh
-make BUILD_TARGET=host_sim all
-make BUILD_TARGET=firmware FIRMWARE_PLATFORM=reference_soc all
+make BUILD_TARGET=firmware FIRMWARE_PLATFORM=stm32h743 debug
+make BUILD_TARGET=firmware FIRMWARE_PLATFORM=stm32h743 tests
 ```

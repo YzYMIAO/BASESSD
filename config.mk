@@ -23,15 +23,10 @@ INC_ROOT := $(PROJECT_ROOT)/include
 
 
 
-VALID_BUILD_TARGETS := firmware host_sim
+VALID_BUILD_TARGETS := firmware
 ifeq ($(filter $(BUILD_TARGET),$(VALID_BUILD_TARGETS)),)
     $(error Invalid BUILD_TARGET=$(BUILD_TARGET), valid values: $(VALID_BUILD_TARGETS))
 endif
-
-# Firmware builds use a replaceable SoC BSP.  reference_soc is the
-# repository-owned virtual hardware contract; a future real SoC can add a
-# sibling platform directory without changing the SSD core.
-
 
 ifeq ($(FIRMWARE_PLATFORM),stm32h7r3)
 CPU_TYPES := cortex-m7
@@ -39,9 +34,6 @@ LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h7r3xx_flash.ld
 else ifeq ($(FIRMWARE_PLATFORM),stm32h743)
 CPU_TYPES := cortex-m7
 LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/stm32h743xx_flash.ld
-else ifeq ($(FIRMWARE_PLATFORM),reference_soc)
-CPU_TYPES := cortex-r5
-LINKER_SCRIPT ?= $(PROJECT_ROOT)/linker/reference_soc.ld
 endif
 # ----------------------------------------------------------------------------
 # 2. 目录结构（统一使用绝对路径）
@@ -115,22 +107,14 @@ WARN_FLAGS += -Wno-pedantic
 #  头文件路径（基础路径，模块特定的路径会在后面追加）
 INC_FLAGS   = -I$(INC_ROOT)
 
-# -mcpu=cortex-r5       指定目标处理器为 ARM Cortex-R5
+# -mcpu=cortex-m7       指定目标处理器为 ARM Cortex-M7
 # -mthumb               使用 Thumb 指令集（16/32位混合编码，更高代码密度）
 # -mlittle-endian       使用小端字节序（Little-Endian）
-# -mfloat-abi=soft      使用软件浮点运算（不使用 FPU 硬件）
-ifeq ($(CPU_TYPES), cortex-r5)
-CPU_FLAGS := -mcpu=cortex-r5\
-            -mthumb\
-            -mlittle-endian\
-            -mfloat-abi=soft
-else ifeq ($(CPU_TYPES), cortex-m7) 
 CPU_FLAGS := -mcpu=cortex-m7\
             -mthumb\
             -mlittle-endian\
             -mfpu=fpv5-d16\
             -mfloat-abi=hard
-endif
 
 #公共固件选项
 # -std=c11               指定使用 C11 标准
@@ -229,20 +213,6 @@ BASE_LDFLAGS = $(CPU_FLAGS)\
 LDLIBS := -lc -lm -lgcc
 
 LDFLAGS = $(BASE_LDFLAGS) $(TYPE_LDFLAGS) $(LDLIBS)
-
-
-
-ifeq ($(BUILD_TARGET),host_sim)
-#PC模拟编译选项
-CFLAGS := \
-    -I$(INC_ROOT) \
-    -std=c11 \
-    -Wall \
-    -Wextra \
-    -g3
-
-LDFLAGS := -fsanitize=address
-endif
 
 # ----------------------------------------------------------------------------
 # 6. 模块列表（按依赖顺序：被依赖的在前）

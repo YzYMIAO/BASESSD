@@ -129,7 +129,6 @@ FTL 层剩余 5 个模块全部实现，21 个源文件 0 个 `#warning` 核心�
 - Controller 层：`scheduler.c` `state_machine.c` — 主机请求调度/状态机（`request.c` 已在 v0.23/v0.36 实现，非桩）
 - NVMe 层：`nvme_admin.c` `nvme_io.c` `submission_queue.c` `completion_queue.c` — 当前用 UART CLI，5 个桩文件（含 nvme_controller.c 返回 NOT_SUPPORTED）
 - Platform BSP：`timer.c` `uart.c` `cache.c` `dma.c` `pcie.c` `interrupt.c` — 已有 soc.h + DWT 实现
-- Host Sim：5 个文件 — PC 模拟环境，当前跑在真实硬件
 
 ---
 

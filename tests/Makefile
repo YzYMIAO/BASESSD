@@ -1,5 +1,5 @@
 # Host-only unit-test entry point. Test framework sources are intentionally not
-# part of src/common and are never linked into firmware or host_sim products.
+# part of src/common and are never linked into firmware products.
 CC ?= gcc
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -g3
 
@@ -14,7 +14,7 @@ unit: $(UNIT_BOOT_POLICY)
 test: unit
 	$(UNIT_BOOT_POLICY)
 
-$(UNIT_BOOT_POLICY): unit/test_boot_policy.c $(ROOT)/src/firmware/boot_policy.c
+$(UNIT_BOOT_POLICY): unit/test_boot_policy.c $(ROOT)/src/common/boot_policy.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(ROOT)/include $^ -o $@
 

@@ -7,21 +7,19 @@
 5. 初始化 C 数据段和 BSS，并调用 `soc_memory_init()`。
 6. 初始化中断控制器并进入 `main()`。
 
-参考 SoC 假定调试器、ROM 模型或模拟器已经装载 ELF。NAND Boot、DDR
-PHY 训练、时钟树和 TCM 配置都依赖真实芯片，不属于通用 ARMv7-R
-启动代码。
+STM32H743 固件从片内 Flash 启动，`Reset_Handler` 由 `stm32h743` 平台提供。
 
 ## 当前 C 启动状态机
 
-`src/main.c` 调用 `firmware_boot_execute()`，依次经过：
+`src/main.c` 依次经过：
 
 1. Platform：UART、Timer、平台接口和中断控制器。
-2. Memory：DDR、MPU、Cache 和 ECC。
+2. Memory：MPU、Cache 和 ECC。
 3. Image：镜像头、CRC/Hash、签名和 A/B 槽选择。
 4. Storage：NAND 探测、坏块表和 FTL 元数据恢复。
-5. Host：PCIe、NVMe 队列和 Controller Ready。
+5. Host：NVMe 队列和 Controller Ready。
 
-参考 SoC 目前只有流程和接口，以下能力仍为占位：
+以下能力仍为占位：
 
 - 复位原因寄存器读取。
 - DDR PHY Training、DDR ECC 和内存测试。
@@ -29,14 +27,11 @@ PHY 训练、时钟树和 TCM 配置都依赖真实芯片，不属于通用 ARMv
 - 固件镜像格式、完整性校验和安全启动。
 - NAND Controller、DMA、ECC 和坏块扫描。
 - FTL Checkpoint 加载、Journal 回放和掉电恢复。
-- PCIe PHY、BAR、MSI/MSI-X、Doorbell 和 NVMe Ready。
-
-存在任何占位能力时，状态机进入 `FIRMWARE_BOOT_STAGE_PLACEHOLDER_READY`，
-不会把参考流程完成误认为真实 SSD 已经可以接收主机 IO。
+- NVMe Doorbell、MSI/MSI-X 和 NVMe Ready。
 
 ## A/B 镜像策略模块
 
-`include/firmware/boot_policy.h` 与 `src/firmware/boot_policy.c` 提供不依赖具体
+`include/common/boot_policy.h` 与 `src/common/boot_policy.c` 提供不依赖具体
 Flash 控制器的启动策略实现，包含：
 
 - 固件镜像头 CRC、芯片/硬件版本、加载区间和防回滚检查。

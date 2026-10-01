@@ -43,7 +43,6 @@ ifeq ($(BUILD_TARGET),firmware)
 # 根目录 main.c 是固件应用入口，不归入静态库，必须在链接时显式加入。
 	APP_C_SRCS := $(SRC_ROOT)/main.c
 	C_SRCS := $(sort $(MODULE_SRCS) $(APP_C_SRCS))
-	C_SRCS := $(filter-out $(SRC_ROOT)/platform/host_sim/%,$(C_SRCS))
 	S_SRCS := $(sort $(PLATFORM_S_SRCS))
 	ALL_SRCS := $(C_SRCS) $(S_SRCS) $(THIRD_PARTY_C_SRCS) $(THIRD_PARTY_S_SRCS) $(TEST_C_SRCS)
 
