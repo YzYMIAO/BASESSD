@@ -1048,8 +1048,99 @@ v0.34 把 LUN_NUM 改成 2 与 MT29F4G08 真实结构（单 die，DIE_NUM=1）�
 
 零错误零新增警告（debug + tests）。commit `5f886e1`。LUN_NUM=1 折叠单 LUN，行为与现状一致。
 
-### 遗留
+### 遗留（v0.36 已闭环第一条）
 
-- **main.c FTL 上线**：host 大数组（g_blocks[CH][CE][LUN][FTL_BLOCK_TOTAL] 等）+ ftl_init 循环，无生产调用
-- **controller 三维 ftl 指针 + 路由**：`ssd_controller_t.ftl[CH][CE][LUN]`、`request.c` 按 lba 选 ftl
+- **controller 三维 ftl 指针 + 路由**：✅ 已实现（v0.36，见下）
+- **main.c FTL 上线**：host 大数组（g_blocks[CH][CE][LUN][FTL_BLOCK_TOTAL] 等）+ ftl_init 循环，无生产调用——v0.37 计划，见下
 - SRAM：每 LUN 352KB（BST 224KB + L2P 128KB）；LUN_NUM=1 时 AXI_RAM 剩 364KB 勉强放下；LUN_NUM=2 需跨区
+
+## v0.36 — Controller FTL 实例三维路由接入（ftl[CH][CE][LUN] + 按 LBA 路由）
+
+**日期**：2026-10-01
+
+### 背景
+
+v0.35 数据平面多维化停在模块层（每 FTL 实例已绑 (ch,ce,lun)，但 controller 仍是单 `ftl_context_t *ftl` 指针，全仓无路由）。本版本把 controller 升级为三维指针数组 + 按 LBA 路由，把多维化推到系统层闭环。
+
+### 关键决策
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| init 接口 | `ssd_controller_init(controller, ftl_context_t *ftl[CH_NUM][CE_NUM][LUN_NUM])` | 收三维数组，逐槽校验非空 + 槽位 topo 一致 |
+| 路由函数 | `ssd_controller_route`（controller.c 内部函数，request.c 拆分循环共用，不暴露进公共头） | 按 `lba_route_ch/ce/lun`（region 粒度取模）选实例；后续换哈希策略只改此处 |
+| Multi-Plane 配对 | `ssd_split_use_multi_plane`：连续 LBA 同实例才 pages=2，跨 region 边界切实例时降级单 Plane | FC Multi-Plane desc 从单个 `cmd->paa` 展开 plane0/1（fc.c:597-605），一次操作永远落在单个 (ch,ce,lun)；跨实例配 pages=2 会写错芯片导致静默数据丢失 |
+| 配对判断基准 | 用「route 相等」而非「region 相等」 | route 相等才是同实例的充要条件；region 相等过严漏掉大量可配对场景；换哈希自动跟随 |
+| 子请求计数 | `ssd_split_count` 预统计（替代硬公式 `ceil(block_count/2)`） | 跨实例降级使实际子请求数 > 公式值，欠计导致父请求 `complete_flag` 永不置位（host 悬挂）；且未映射读会同步完成，必须先计数后提交 |
+| route helper 位置 | controller.c 内部函数 + request.c 前向声明 | controller.h 不依赖 l2p_cache.h（保持接口头纯净，业界做法） |
+
+### 实现
+
+- `include/controller/controller.h`：`ssd_controller_t.ftl` 单指针 → `ftl_context_t *ftl[CH_NUM][CE_NUM][LUN_NUM]`；init 签名收三维数组
+- `src/controller/controller.c`：新增 `ssd_controller_route`（内部函数）；init 三重循环逐槽校验（非空 + topo 一致）；submit 单块分支 3 处 `controller->ftl` → 局部 `ftl`（route 后）
+- `src/controller/request.c`：新增 `ssd_split_use_multi_plane` + `ssd_split_count`；拆分循环内每轮按 `io.lba` 路由 + 同实例配对判断；4 处 `controller->ftl` → 局部 `ftl`
+
+### 正确性要点
+
+- 跨实例 Multi-Plane 必须降级：FC desc 从单 `cmd->paa` 展开，一次操作永远落在单 (ch,ce,lun)。跨实例配 pages=2 会把 512 数据写进 A 芯片 plane1，读路由到 B → B 的 L2P 查不到 → 静默读零（数据丢失）。
+- 子请求计数必须预统计：跨实例降级使实际数 > `ceil(block_count/2)`，硬公式欠计 → host 悬挂；未映射读同步完成（ftl.c:472-487）须先计数后提交。
+- LUN_NUM=1 折叠：`lba_route_*` 恒 0 → 配对恒真、计数 = ceil(block_count/2)，行为与现状完全一致（零回归）。
+
+### 编译状态
+
+零告警（host gcc -pedantic）+ 固件 stm32h743 debug/release/tests 通过。commit `86552ce`（已推送）。
+
+### 边界行为（用户确认）
+
+拆分写失败保持 **partial write 语义**（已成功子请求不回滚，host 决定重试）——业界 NVMe 主流做法；批量回滚不在本次范围。
+
+## v0.37 — main.c FTL 上线（✅ 已实现）
+
+**日期**：2026-10-01
+
+### 背景
+
+v0.36 把 controller 路由接入，但 **FTL 仍无生产调用入口**——`src/main.c` 只做 `fc_init` + `nand_init` + UART + watchdog，从不调 `ftl_init`/`ftl_service`。本版本把 main.c 接入 FTL 全链路，让多维化真正可运行、可上板。
+
+### 关键决策（已与用户确认）
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| SRAM 布局（方案 B 修正） | BST `g_blocks[4096]`（224KB）**连续落 AXI_RAM**；`g_free_blocks` + `g_closed_sb_list` 落 **SRAM2**；l2p cache 随 ftl_context_t 在 AXI_RAM | SRAM1 仅 128KB（< BST 224KB），BST 不能落 SRAM1；拆两段会破坏 `params.blocks` 线性索引契约；AXI_RAM 空余 367KB，g_ftl(131.5)+g_blocks(224)=355.5KB 刚好放下 |
+| BST 存储分层 | **档三分层记为后续独立任务，本次不动 BST 结构** | 大工程（读写路径全部改造 + NAND 布局 + 掉电一致性），塞进本次会爆炸 |
+| free pool 回填 | 调用者（main.c）在 `ftl_init` 后遍历 BST 非坏块 `allocator_free_block` 逐个回填 | allocator_init 不填 free pool（free_count 硬清零）、bbt_scan_factory 只标坏块不产 free_blocks——**当前最大缺口，不回填则首次写失败** |
+| boot 恢复 | `ftl_boot_recovery(&ftl, &result)` 由 main.c 调用（ftl_init 后、ftl_service 前） | ftl_init 内部不调用 boot；第一次上电 = BOOT_FRESH_START |
+| 主循环 | `ftl_service(&g_ftl[0][0][0])` 替换裸 `fc_service()`（加 ftl_ready 守卫，失败降级 fc_service） | ftl_service Phase1 内部已含 fc_service（≤4 次） |
+| 掉电重建 closed_sb_list | 本次不处理（v0.32 二期遗留） | power_failure 只重建 open SB；closed 列表为空时 GC 不回收已满 SB（空间泄漏但不丢数据） |
+| controller 传参 | **显式 `g_ftl_ptrs` 三维指针表**（`ftl_context_t *[CH][CE][LUN]`） | C 数组退化规则：static 数组名退化为「指向 [CE][LUN] 子数组的指针」，与形参「指向指针的 [CE][LUN] 数组的指针」类型不匹配，GCC 10.3 起恒报 `-Wincompatible-pointer-types`（host/arm 双编译器复现）。指针表在 boot 后填 `&g_ftl[...]`，类型精确匹配 |
+
+### SRAM 核算（已验证，debug 实测）
+
+| 对象 | 尺寸 | 落点 | 区域空余 |
+|------|------|------|---------|
+| `g_ftl`（含 l2p cache 128.5KB + journal/md ~3KB） | 131.5KB | AXI_RAM | 384-16.7=367KB |
+| `g_blocks` BST | 224KB | AXI_RAM（连续） | 367-131.5-224=11.5KB 剩 |
+| `g_free_blocks[4096]` uint16 | 8KB | SRAM2 | 128KB |
+| `g_closed_sb_list[1024]` super_block_t | 16KB | SRAM2 | 128-24=104KB 剩 |
+| 合计 | ~379.5KB | AXI 355.5 + SRAM2 24 | ✓ 不溢出 |
+
+**链接实测**（`arm-none-eabi-nm` debug.elf）：`.sram2_data` = 20480B（= 8KB free + 16KB closed，0x30020000 起）；`.bss` = 383348B（AXI_RAM，g_ftl + g_blocks + 既有 16.7KB，末址 0x2405d9e8 < 0x24060000）✓ 不溢出。
+
+### 实现（src/main.c，唯一改动文件）
+
+1. **include 区**新增：controller.h / ftl.h / allocator.h / bst.h / power_failure_recovery.h。
+2. **声明区**：`g_ftl[CH][CE][LUN]`（AXI_RAM）、`g_blocks[CH][CE][LUN][FTL_BLOCK_TOTAL]`（AXI_RAM 连续）、`g_free_blocks[...]` + `g_closed_sb_list[...]`（`.sram2_data` NOLOAD）、`g_ctrl`、`g_ftl_ready`（主循环守卫）、`g_ftl_ptrs`（三维指针路由表）。
+3. **`ssd_ftl_boot(ch,ce,lun)`**：构造 `ftl_init_params_t`（topo={ch,ce,lun}、blocks/free_blocks/closed_sb_list 指向多维子数组、free_count=0）→ `ftl_init`（内部含 bbt_init 标坏块）→ **遍历 BST 非坏块 `allocator_free_block` 回填 free pool** → `ftl_boot_recovery` → 日志 `[FTL] instance ... free blocks=N` + `[FTL] boot type=...`。
+4. **`ssd_ftl_boot_all()`**：全实例三重循环 boot → 填 `g_ftl_ptrs` → `ssd_controller_init(&g_ctrl, g_ftl_ptrs)` → 成功置 `g_ftl_ready` + 日志 `[FTL] controller ready, lba_max=...`；任一失败降级（不置 ready，主循环退回裸 fc_service）。
+5. **main()**：nand_init 成功分支末尾调 `ssd_ftl_boot_all()`；主循环 `if (g_ftl_ready) ftl_service(&g_ftl[0][0][0]); else fc_service();`。
+
+### 验证
+
+- make debug / release / tests 均**零新警告**（tests 仅剩余既有 controller/host `#warning` 占位注释；release `-s` 剥离符号故 nm 汇总显示 0，debug 实测 `.sram2_data`=20KB、AXI .bss 末 0x2405d9e8 不溢出）
+- 上板 UART 预期：`[FTL] instance ch=0 ce=0 lun=0 free blocks=N`（N≈4096−坏块）、`[FTL] boot type=0`（FRESH）、`[FTL] controller ready, lba_max=1048576`、主循环跑 ftl_service 不挂、首次写 allocator_alloc 成功
+
+### 待确认/遗留
+
+- 档三分层（BST 存储分层）——独立任务
+- 掉电重建 closed_sb_list——v0.32 二期遗留
+- pending/completion 全局单例多实例化——LUN_NUM>1 启用时必修
+- controller 传参的 `g_ftl_ptrs` 显式指针表（避免 -Wincompatible-pointer-types）；若后续 controller 头改收数组退化形式（`ftl_context_t (*ftl)[CE][LUN]`）可去掉
