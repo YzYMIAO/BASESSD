@@ -5,15 +5,77 @@
 /* 外部：request.c — 拆分多块请求 */
 int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request);
 
-int ssd_controller_init(ssd_controller_t *controller, ftl_context_t *ftl)
+/*
+ * ssd_controller_route - 按全局 LBA 路由到对应 FTL 实例
+ *
+ * 使用 l2p_cache.h 的 lba_route_ch/ce/lun（region 粒度取模）选实例；
+ * 后续换哈希策略只改此处。CH_NUM=CE_NUM=LUN_NUM=1 时恒返回 ftl[0][0][0]。
+ * 非 static：request.c 拆分循环共用（前向声明在 request.c），不暴露进公共头。
+ *
+ * @param controller Controller 上下文（可为 NULL，返回 NULL）
+ * @param lba        Host 全局 LBA（uint64_t）
+ * @return 路由到的 FTL 实例指针；入参非法或索引越界返回 NULL
+ */
+ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, uint64_t lba)
 {
+    uint32_t ch;
+    uint32_t ce;
+    uint32_t lun;
+
+    if (controller == NULL)
+    {
+        return NULL;
+    }
+
+    ch  = lba_route_ch(lba);
+    ce  = lba_route_ce(lba);
+    lun = lba_route_lun(lba);
+
+    /* 防御性索引越界：路由取模结果本应在 [0,N) 内，宏配置错误时兜底返回 NULL */
+    if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
+    {
+        return NULL;
+    }
+
+    return controller->ftl[ch][ce][lun];
+}
+
+int ssd_controller_init(ssd_controller_t *controller,
+                        ftl_context_t *ftl[CH_NUM][CE_NUM][LUN_NUM])
+{
+    uint8_t ch;
+    uint8_t ce;
+    uint8_t lun;
+
     if ((controller == NULL) || (ftl == NULL))
     {
         return SSD_STATUS_INVALID_ARGUMENT;
     }
 
+    /* 逐槽校验并绑定 FTL 实例：任一槽位缺失或槽位与实例 topo 不符即失败 */
+    for (ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (lun = 0U; lun < LUN_NUM; lun++)
+            {
+                if (ftl[ch][ce][lun] == NULL)
+                {
+                    return SSD_STATUS_INVALID_ARGUMENT;
+                }
+                /* 槽位索引必须等于实例绑定拓扑：保证 LBA 路由与芯片定位语义一致 */
+                if ((ftl[ch][ce][lun]->topo.ch != ch) ||
+                    (ftl[ch][ce][lun]->topo.ce != ce) ||
+                    (ftl[ch][ce][lun]->topo.lun != lun))
+                {
+                    return SSD_STATUS_INVALID_ARGUMENT;
+                }
+                controller->ftl[ch][ce][lun] = ftl[ch][ce][lun];
+            }
+        }
+    }
+
     controller->state = SSD_CONTROLLER_INITIALIZING;
-    controller->ftl   = ftl;
     controller->state = SSD_CONTROLLER_READY;
     return SSD_STATUS_OK;
 }
@@ -29,7 +91,8 @@ uint8_t ssd_controller_is_complete(const ssd_request_t *request)
 
 int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
 {
-    int ret;
+    int    ret;
+    ftl_context_t *ftl;
 
     if ((controller == NULL) || (request == NULL) || (controller->state != SSD_CONTROLLER_READY))
     {
@@ -48,15 +111,23 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
 
     if (request->block_count == 1U)
     {
-        /* 单块直接提交 */
+        /* 单块直接提交：按块 LBA 路由到对应 FTL 实例 */
         request->io.lba    = request->start_lba;
         request->io.buffer = request->buffer;
         request->io.pages  = 1U;
 
+        ftl = ssd_controller_route(controller, request->io.lba);
+        if (ftl == NULL)
+        {
+            request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
+            request->complete_flag     = 1U;
+            return SSD_STATUS_INVALID_ARGUMENT;
+        }
+
         switch (request->opcode)
         {
             case SSD_REQUEST_READ:
-                if (ftl_submit_read(controller->ftl, &request->io) != FTL_OK)
+                if (ftl_submit_read(ftl, &request->io) != FTL_OK)
                 {
                     request->completion_status = SSD_STATUS_IO_ERROR;
                     request->complete_flag     = 1U;
@@ -64,7 +135,7 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
                 break;
 
             case SSD_REQUEST_WRITE:
-                if (ftl_submit_write(controller->ftl, &request->io) != FTL_OK)
+                if (ftl_submit_write(ftl, &request->io) != FTL_OK)
                 {
                     request->completion_status = SSD_STATUS_NO_SPACE;
                     request->complete_flag     = 1U;
@@ -72,7 +143,7 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
                 break;
 
             case SSD_REQUEST_TRIM:
-                ftl_trim(controller->ftl, request->start_lba);
+                ftl_trim(ftl, request->start_lba);
                 request->completion_status = SSD_STATUS_OK;
                 request->complete_flag     = 1U;
                 break;
