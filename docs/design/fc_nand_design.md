@@ -19,6 +19,7 @@
 > - **Phase M**: Buffer 偏移重构（FC_BUFFER_USER_OFFSET, fc_buffer_get_base）
 > - **Phase N**: 跨 Plane Stripe RAID 重构（删旧覆盖末 CW，新增 generate_stripe_parity，fc_poll_internal stripe 积累 + Multi-Plane 提交）
 > - **Phase V**: 多 LUN 并发 ISSUE/WAIT/FETCH 拆分 + FMC 后端数组化 + 调度器 phase 机（§18.7 完整实现）
+> - **Phase X**: FC-NAND 全模块注释补全 + 行业方案对比补全（§21）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
 
@@ -2041,7 +2042,7 @@ typedef struct {
 ```c
 // fc_scheduler.h
 
-#define FC_SCHEDULER_CHAIN_MAX 8U
+#define FC_SCHEDULER_CHAIN_MAX NAND_DISPATCH_CHAIN_DEPTH /* = 4U，与 dispatch 链缓冲深度一致 */
 
 typedef struct {
     fc_command_id_t ids[FC_SCHEDULER_CHAIN_MAX];
@@ -2488,15 +2489,14 @@ DWORD lun : 2;   /* 目标 LUN 号 */
 
 ### 18.3 当前不支持多通道的模块
 
-以下模块**单例硬编码**，不感知通道维度：
+以下模块在**多通道维度**的现状（FMC 后端已 Phase V 数组化，但仅 (0,0,0) 实例被使用）：
 
 | 模块 | 现状 | 问题 |
 |------|------|------|
-| `nand_fmc.c` — FMC 后端 | `static nand_fmc_config_t g_nand_fmc_config` 全局一份 | 第二片 NAND 没有自己的 FMC 地址窗口 + CE 引脚配置 |
-| `nand_fmc.c` — Backend | `static nand_engine_backend_t g_nand_fmc_backend` 全局一份 | backend 指向同一个 config，所有通道共享 |
+| `nand_fmc.c` — FMC 后端 | ✅ 已数组化 `g_nand_fmc_instances[CH][CE][LUN]` + `nand_fmc_init_instance()`（Phase V） | 仅 (0,0,0) 实例被 `nand_init()` 配置；第二片 NAND 需额外 CE 引脚配置 |
 | `nand_rb_interrupt.c` — RB 中断 | 单 EXTI6（PD6） | 第二片 NAND 的 RB 引脚没有 EXTI 通道可接 |
 | `nand_dma.c` — DMA | 单对 `DMA2_Stream0/1` | 两个通道同时传输时无额外 Stream 可用 |
-| `nand_engine_state_t` — 引擎状态 | 不含 `ch`/`ce`/`lun` 字段 | step 推进时不知道自己在哪个通道上 |
+| `nand_engine_state_t` — 引擎状态 | 不含 `ch`/`ce`/`lun` 字段 | step 推进时不知道自己在哪个通道上（依赖 transaction 的 backend 透传） |
 
 ### 18.4 硬件层面的本质限制
 
@@ -2527,11 +2527,11 @@ FMC 总线 (地址/数据/控制线共用)
 
 | 改动项 | 说明 | 工作量 |
 |--------|------|--------|
-| `nand_fmc_config_t` 数组化 | `config[CH_NUM]`，每通道独立 FMC 地址 + CE + RB | 小（结构体数组） |
-| `nand_engine_backend_t` 数组化 | `backend[CH_NUM]`，每通道独立 handler table | 小 |
+| `nand_fmc_config_t` 数组化 | `config[CH_NUM]`，每通道独立 FMC 地址 + CE + RB | ✅ 已完成（Phase V `g_nand_fmc_instances[CH][CE][LUN]`，但仅 (0,0,0) 实例使用） |
+| `nand_engine_backend_t` 数组化 | `backend[CH_NUM]`，每通道独立 handler table | ✅ 已完成（`nand_fmc_init_instance` 每实例一份 backend） |
 | `nand_fmc_exec_wait_ready` 多实例 | 每个 backend 有独立 RB 中断资源 | 中（需多 EXTI） |
 | DMA 资源化 | 每通道独立 DMA Stream 或排队传输 | 中 |
-| `nand_engine_state_t` 加通道 id | step 中知道自己操作的通道 | 小 |
+| `nand_engine_state_t` 加通道 id | step 中知道自己操作的通道 | 小（现依赖 transaction->backend 透传） |
 | FMC 总线仲裁 | 多通道共享总线时的冲突避免 | 大（需加锁或排队） |
 
 ### 18.6 验证结论
@@ -2541,10 +2541,10 @@ FMC 总线 (地址/数据/控制线共用)
 | FC 调度器 + busy 表 | ✅ 代码完整，改 `CH_NUM` 即可 | ❌ 单通道硬件 |
 | dispatch 队列 + chain buffer | ✅ 代码完整 | ❌ 单通道硬件 |
 | dispatch poll 遍历 | ✅ 代码完整 | ❌ 单通道硬件 |
-| FMC 后端 | ❌ 单例 | ❌ 无法 |
+| FMC 后端 | ✅ 已数组化（仅 (0,0,0) 实例配置） | ❌ 多实例无法（单 NAND） |
 | RB 中断 | ❌ 单 EXTI | ❌ 无法 |
 | DMA | ❌ 单对 Stream | ❌ 无法 |
-| 引擎状态机 | ❌ 无通道 id | ❌ 无法 |
+| 引擎状态机 | ⚠️ 无通道 id，靠 transaction->backend 透传 | ⚠️ 单通道可运行 |
 
 **结论**：调度层和 dispatch 层的多通道架构是真实的。FMC/NAND 引擎层需要改造才能真正支持多通道。
 
@@ -2758,3 +2758,111 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
 - 仅在 SQ 层面生效。HSQ 为高优先级通道，跳过读饥饿保护。
 - 命令链（chain=1）中无法插队读命令（链原子性），但链结束后下一轮 select 即可切换。
 - `CH_NUM=1`、`LUN_NUM=1` 时读饥饿问题不明显，本设计主要为多 LUN/多通道架构预留。
+- `CH_NUM=1`、`LUN_NUM=1` 时读饥饿问题不明显，本设计主要为多 LUN/多通道架构预留。
+
+---
+
+## 21. 存储主控行业对比与硬件限制（退而求其次的选择）
+
+### 21.1 引言：为什么需要"退而求其次"
+
+本项目目标平台是 **STM32H743 MCU + 1× MT29F4G08ABADAWP（单通道 SLC NAND）**。这与真正的 SSD 主控（企业级 Samsung/Intel、消费级 Phison/SMI、手机 UFS 控制器）之间存在**本质的硬件代差**——MCU 是通用处理器，不是专用 NAND 控制器。因此本项目的很多设计是对行业方案的"软件模拟 + 妥协"。
+
+本章先给总览对比，再逐项说明"差异 → 硬件限制 → 我们的选择（无奈退而求其次）"。
+
+### 21.2 总体对比总览
+
+| 维度 | 企业级 NVMe SSD | 消费级 NVMe/SATA | UFS 主控 | 本项目（STM32H743） |
+|------|---------------|-----------------|---------|-------------------|
+| 控制器 | 专用 ASIC + 多核 CPU | 专用 ASIC + CPU | 专用 ASIC + CPU | **通用 MCU（Cortex-M7 480MHz）** |
+| DRAM | 数 GB DDR | 256MB~1GB（或 HMB） | 数百 KB~MB SRAM | **0（DRAM-less，仅 1MB SRAM）** |
+| NAND 通道 | 8~32 通道 | 4~8 通道 | 1~4 通道 | **1 通道 × 1 CE × 1 LUN** |
+| ECC | 硬件 LDPC 引擎（数 Gbps） | 硬件 LDPC/BCH 引擎 | 硬件 LDPC | **软件 BCH(m=13,t=4)/LDPC（CPU 逐 CW）** |
+| 数据搬移 | 硬件 DMA 多通道 | 硬件 DMA | 硬件 | **单对 DMA2 Stream（PIO 兜底）** |
+| RAID | 硬件 XOR 引擎 | 部分硬件 | 部分 | **软件 XOR（跨命令/跨 Plane）** |
+| 加扰 | 硬件 inline（DMA 内） | 硬件 inline | 硬件 | **软件 LFSR/XOR-shift** |
+| 调度 | 硬件命令队列 + 固件调度器 | 硬件队列 + 固件 | 硬件 | **纯软件轮询调度器（单线程）** |
+| 中断 | 命令完成中断 + 多队列 | 同上 | 同上 | **R/B# EXTI + 主循环轮询混合** |
+| 功耗/性能 | 数 W / 数 GBps | 数 W / GBps | 数百 mW | **~百 mA / 单通道 SLC** |
+
+### 21.3 逐维度差异与"退而求其次"的选择
+
+#### 21.3.1 无 DRAM → L2P 全表落 NAND + SRAM Cache
+
+- **行业**：企业/消费级用 DRAM 放完整 L2P 表（4GB SSD ≈ 8MB 表），UFS 用 SRAM cache 部分映射。
+- **硬件限制**：本项目 **0 DRAM**（无外部 SDRAM 接 FMC 的可行方案），SRAM 仅 1MB 且被 FTL 元数据/BST 占据 ~220KB。
+- **无奈选择**：DRAM-less 方案——L2P 全表存 NAND，SRAM 用 Region Cache（64 条 × 2KB ≈ 128KB），CLOCK 替换。这就是 UFS/消费级入门 SSD（SN580 HMB）同路线。
+- **代价**：每次 L2P miss 要读 NAND 一个 region（2KB），随机读延迟增加；全表常驻做不到。
+
+#### 21.3.2 单通道 → 无法并行，只能"分时复用 + 软件并发"
+
+- **行业**：企业级 8~32 通道并行，命令级并发是常态。
+- **硬件限制**：STM32H743 的 **FMC 是共享总线控制器**，不是多通道 NAND 控制器。接多片 NAND 只能 CE 分时复用一条总线，任何时候只有一片在传数据（见 §18）。
+- **无奈选择**：`CH_NUM=1` 单通道；用 **Phase V ISSUE/WAIT/FETCH 拆分**在软件层模拟"并发"——发完命令（ISSUE）释放总线，等 tR/tPROG 时（WAIT）切其他 LUN。这是对多 LUN 并发的软件近似，**总线本身无法同时传两片 NAND 数据**。
+- **代价**：多 LUN 只是"重叠等待时间"，不是真正并行搬移数据；单通道吞吐上限 ~50MB/s（SLC Mode 4）。
+
+#### 21.3.3 无硬件 ECC → 软件 BCH/LDPC
+
+- **行业**：企业级硬件 LDPC 引擎纠错数 Gbps；消费级硬件 BCH/LDPC。
+- **硬件限制**：STM32H743 无 NAND ECC 外设；CPU 480MHz 跑软件 ECC。
+- **无奈选择**：**软件 BCH(m=13, t=4)**（Linux lib/bch.c 移植，8B parity），可选软件 QC-LDPC 硬判决（码率 0.985，t≈1~2）。
+- **代价**：
+  - 吞吐低：BCH 编码/解码是 CPU 密集操作，无法达到硬件引擎速率。
+  - 纠错能力弱：t=4（SLC 够用，TLC/QLC 远不够）；LDPC 硬判决在高码率下纠错有限，软判决未实现（stub）。
+  - **每次读/写都要占用 CPU**，与数据搬移竞争 M7 周期。
+
+#### 21.3.4 无硬件数据搬移 → 单对 DMA + PIO 兜底
+
+- **行业**：每通道独立硬件 DMA，DMA 引擎内完成数据搬移 + ECC inline。
+- **硬件限制**：STM32H743 DMA2 仅 Stream0/1 被 FMC 数据窗口占用（一对），多通道/多方向同时搬移不可行。
+- **无奈选择**：单对 DMA（memory↔FMC）非阻塞中断模式，DMA 启动失败/禁用时**回退 PIO 逐字节**（见 §3.2）。
+- **代价**：单方向同时只有一组 DMA；PIO 路径占用 CPU 逐字节写 FMC 窗口（慢但可用）。无硬件 ECC inline，需 CPU 先 ECC 再 DMA（或反序）。
+
+#### 21.3.5 无硬件加扰 → 软件 LFSR
+
+- **行业**：DMA 引擎内硬件 inline 加扰/解扰（企业级强制 AES-XTS 加密后数据天然随机）。
+- **硬件限制**：无。
+- **无奈选择**：软件 LFSR（x¹⁶+x¹⁴+x¹³+x¹¹+1）/ XOR-shift / 简单 XOR，编码前 CPU 逐字节异或。
+- **代价**：占用 CPU 周期；无 AES 加密（消费/企业级数据安全要求未覆盖）。
+
+#### 21.3.6 无硬件 XOR → 软件 RAID
+
+- **行业**：企业级硬件 XOR 引擎做 RAID 编解码（每秒数十 GB）。
+- **硬件限制**：无。
+- **无奈选择**：软件 XOR（跨命令/跨 Plane），32bit 字对齐异或。
+- **代价**：RAID 恢复是 CPU 密集；`CONFIG_FC_RAID=0` 默认关闭（代码完成未验证，等硬件闭环后开启）。
+
+#### 21.3.7 无硬件命令队列 → 软件轮询调度
+
+- **行业**：硬件多队列（SQ/CQ）+ 固件调度器，命令完成中断驱动。
+- **硬件限制**：MCU 无专用 NAND 命令队列。
+- **无奈选择**：软件 SQ/HSQ/CQ 环形队列 + 单线程 `fc_service()` 轮询 + R/B# EXTI 中断辅助（Phase F/G 已实现部分）。
+- **代价**：单线程轮询 CPU 占用高；读饥饿保护（§20）是软件 QoS 的近似；无多队列优先级硬件支持（HSQ 为软件近似）。
+
+#### 21.3.8 无硬件页缓冲 → 软件 page_buffer 拼接
+
+- **行业**：控制器内部 SRAM 页缓冲 + 硬件页拼接（multi-plane 数据自动拼接）。
+- **硬件限制**：FMC 是并行总线，无 NAND 控制器页缓冲硬件。
+- **无奈选择**：软件 `g_nand_channel_page_buffer`（noncacheable 段）+ req_* handler 手动拼接/拆页（见 §17.7a）。
+- **代价**：多 plane 数据要 CPU memcpy 拼接/拆回；占用 SRAM（4224B/通道）。
+
+### 21.4 汇总：哪些是"不可逾越"的硬件限制
+
+| 限制 | 本质原因 | 是否可软件弥补 |
+|------|---------|--------------|
+| 单通道总线 | FMC 共享总线 | ❌ 物理不可并行（只能分时） |
+| 无 DRAM | 无外部内存接口可行方案 | ⚠️ 用 NAND+SRAM cache 近似 |
+| 无硬件 ECC | MCU 无 ECC 外设 | ⚠️ 软件 BCH/LDPC（慢+弱） |
+| 单对 DMA | DMA2 Stream 有限 | ⚠️ PIO 兜底（慢） |
+| 无硬件加扰/XOR | MCU 无 | ⚠️ 软件实现（占 CPU） |
+| 无硬件队列 | MCU 无 | ⚠️ 软件队列 + 轮询（占 CPU） |
+
+### 21.5 结论
+
+本项目的 FC-NAND 架构在**软件层面完整对齐了企业/消费级主控的分层模型**（命令池/描述符/缓冲池、调度器、数据路径、ECC/RAID/加扰引擎、ISSUE/WAIT/FETCH 并发原语），这是与行业一致的"形"。
+
+但受 STM32H743 MCU 硬件限制，所有**需要硬件引擎加速的部分**（ECC、DMA 多通道、加扰、XOR、页缓冲拼接、命令队列）都只能退化为**软件实现 + CPU 周期换功能**，单通道总线更是物理上限。因此本项目定位是：
+
+> **"用 MCU 软件模拟企业级 SSD 主控架构的教学/研究实现"**——验证 FTL/FC/NAND 分层、命令并发、数据路径、ECC/RAID 的完整软件闭环；性能与真正的 SSD 主控不在一个数量级，但在架构正确性和功能完整性上是自洽的。
+
+这正是"退而求其次"的必然：**形似而神不似，功能完整而性能有限**。
