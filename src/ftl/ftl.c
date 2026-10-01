@@ -4,6 +4,7 @@
 #include "ftl/bbt.h"
 #include "ftl/checkpoint.h"
 #include "ftl/completion_table.h"
+#include "ftl/gc.h"        /* gc_select_victim / gc_migrate_sb / gc_erase_and_free（紧急 GC） */
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/pending.h"
 #include "ftl/power_failure_recovery.h"
@@ -156,10 +157,17 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                             }
                             else
                             {
-                                /* 恢复失败：返回全零 + 标记坏块 */
+                                /* 恢复失败：返回全零 + 标记坏块
+                                 *
+                                 * Stage 1（Read Retry）+ Stage 2（邻近页辅助）全失败 →
+                                 * 页面已损坏提升为块级不可靠，显式标记坏块（RAM only，
+                                 * 后台 bbt_flush 持久化），交由预测搬移/GC 接手搬走有效页。
+                                 * （RR Stage 3 XOR/RAID 恢复属后续阶段，当前不做。） */
                                 memset(pending->io.buffer, 0, data_size);
                                 (void)retry_count; /* 恢复失败，重试次数无意义 */
-                                /* NOTE: 不在此处 mark bad，避免与 BBT/GC 分工混淆；交由预测搬移/GC 处理 */
+                                (void)bbt_mark_bad(&pending->ftl->alloc,
+                                                   ftl_pba_gblock(cmd->paa),
+                                                   (uint8_t)FTL_BLOCK_BAD_READ);
                                 if (pending->io.status_out != NULL)
                                 {
                                     *pending->io.status_out = SSD_STATUS_IO_ERROR;
@@ -556,11 +564,24 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
     }
     internal_lba = (lba_t)req->lba;
 
-    /* ① Allocator 分配新 PBA */
+    /* ① Allocator 分配新 PBA
+     * Free Pool 耗尽 → 同步跑一轮紧急 GC（回收 1 个 Super Block = 2 个 Block，
+     * 足够一个 2-page 请求），归还后再重试一次分配。真无空间才返回失败。 */
     new_pba = allocator_alloc(&ftl->alloc, FTL_TEMP_HOT);
     if (new_pba == NAND_PBA_INVALID)
     {
-        return FTL_ERROR;
+        super_block_t *victim;
+
+        if (gc_select_victim(&ftl->alloc, &victim))
+        {
+            (void)gc_migrate_sb(&ftl->alloc, &ftl->cache, &ftl->journal, victim);
+            gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
+        }
+        new_pba = allocator_alloc(&ftl->alloc, FTL_TEMP_HOT);
+        if (new_pba == NAND_PBA_INVALID)
+        {
+            return FTL_ERROR; /* 无 victim 可回收 / GC 未归还空间 */
+        }
     }
 
     /* ② 读旧 PBA（journal 记录用） */

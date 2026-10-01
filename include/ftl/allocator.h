@@ -149,7 +149,7 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
  *   ① 从对应温度的 Open Super Block 取当前写入位置
  *   ② Super Block 已写满 → 关闭它（→ Closed），从 Free Pool 分配新的 Super Block
  *   ③ 返回当前页的 PBA，next_page++
- *   ④ Free Pool 耗尽 → 返回 FTL_PBA_INVALID（#warning 待 GC 实现）
+ *   ④ Free Pool 耗尽 → 返回 NAND_PBA_INVALID（write 路径触发紧急 GC 重试）
  *
  * @param alloc       Allocator 上下文
  * @param temperature FTL_TEMP_HOT / FTL_TEMP_COLD

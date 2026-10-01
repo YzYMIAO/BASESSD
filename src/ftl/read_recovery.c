@@ -332,8 +332,12 @@ int rr_recover_read(ftl_read_recovery_t *rr,
         return 0; /* Stage 2 恢复成功 */
     }
 
-    /* Stage 3+ : 未来扩展 XOR/RAID 恢复 */
-    /* 当前未实现，返回失败 */
+    /* Stage 3: 恢复失败 → 显式兜底
+     *
+     * Stage 1（Read Retry）+ Stage 2（邻近页辅助）全失败后，
+     * 页面已损坏提升为块级不可靠。调用方（读完成路径）在此处
+     * 标记坏块（FTL_BLOCK_BAD_READ）+ 搬移，由预测搬移/GC 接手。
+     * XOR/RAID 恢复（原规划 Stage 3）属后续阶段，当前不实现。 */
 
     return -1;
 }

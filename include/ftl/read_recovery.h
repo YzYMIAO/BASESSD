@@ -14,7 +14,7 @@
  *     读取目标页的上下邻居页，利用 NAND 单元间电压干扰
  *     的物理特性辅助纠错。适用于 ECC 略超纠错上限的场景。
  *
- *   Stage 3 — XOR/RAID 恢复（未来扩展）
+ *   Stage 3 — XOR/RAID 恢复（后续阶段，当前未实现）
  *     跨 Plane 的 Stripe RAID 数据恢复。
  *
  *   Stage 4 — 坏块标记 + 数据搬移
@@ -82,7 +82,7 @@ void rr_record_ecc(rr_ecc_track_t *track,
  * 多级恢复管线：
  *   ① 标准 read retry（切换读电压模式）
  *   ② 邻近页辅助读取（读 +1/-1 页辅助纠错）
- *   ③ 返回失败通知
+ *   ③ 恢复失败 → 调用方标记坏块 + 搬移（XOR/RAID 恢复后续阶段实现）
  *
  * @param rr       Read Recovery 上下文
  * @param ch       CH
@@ -92,7 +92,7 @@ void rr_record_ecc(rr_ecc_track_t *track,
  * @param length   读取长度
  * @param lba      LBA（META 验证）
  * @param retry_count 输出：重试次数
- * @return 0 恢复成功，-1 恢复失败（需走 XOR/RAID 或上报）
+ * @return 0 恢复成功，-1 恢复失败（调用方标记坏块，XOR/RAID 恢复待后续阶段）
  */
 int rr_recover_read(ftl_read_recovery_t *rr,
                     uint8_t              ch,
