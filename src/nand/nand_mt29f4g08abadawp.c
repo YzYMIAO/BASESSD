@@ -455,7 +455,9 @@ uint8_t nand_init(void)
     nand_rb_interrupt_init();
 
     {
-        /* 低速 FMC 后端：数据/命令/地址窗口 = FMC_BASE | 0 / A16 / A17 */
+        /* 低速 FMC 后端：数据/命令/地址窗口 = FMC_BASE | 0 / A16 / A17。
+         * Phase V: 同一 FMC 窗口/时序对全部 [CH][CE][LUN] 实例有效，
+         * 循环初始化 per-LUN backend（硬件单 die 时退化为一次调用）。 */
         const nand_fmc_config_t fmc_config = {
             .data       = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
             .command    = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_CMD_OFFSET),
@@ -464,11 +466,22 @@ uint8_t nand_init(void)
             .wait_ready = nand_fmc_wait_ready,
             .context    = NULL,
         };
+        uint8_t fmc_ch, fmc_ce, fmc_lun;
 
-        if (nand_fmc_init_instance(0U, 0U, 0U, &fmc_config) != NAND_RESULT_OK)
+        for (fmc_ch = 0U; fmc_ch < CH_NUM; fmc_ch++)
         {
-            SSD_LOGE("nand: FMC backend configure failed\r\n");
-            return NAND_RESULT_OPERATION_FAILED;
+            for (fmc_ce = 0U; fmc_ce < CE_NUM; fmc_ce++)
+            {
+                for (fmc_lun = 0U; fmc_lun < LUN_NUM; fmc_lun++)
+                {
+                    if (nand_fmc_init_instance(fmc_ch, fmc_ce, fmc_lun, &fmc_config) != NAND_RESULT_OK)
+                    {
+                        SSD_LOGE("nand: FMC backend configure failed ch=%u ce=%u lun=%u\r\n",
+                                 (unsigned)fmc_ch, (unsigned)fmc_ce, (unsigned)fmc_lun);
+                        return NAND_RESULT_OPERATION_FAILED;
+                    }
+                }
+            }
         }
 
         if (nand_dma_init() != 0U)
@@ -535,7 +548,8 @@ uint8_t nand_init(void)
         }
         SSD_LOGI("nand: FMC timing updated for Mode 4\r\n");
 
-        /* 更新 FMC 后端时序，供 UOP handler 使用 */
+        /* 更新 FMC 后端时序，供 UOP handler 使用。
+         * Phase V: 循环更新全部 [CH][CE][LUN] 实例（与低速分支一致）。 */
         {
             nand_fmc_config_t fast_fmc = {
                 .data       = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
@@ -545,10 +559,22 @@ uint8_t nand_init(void)
                 .wait_ready = nand_fmc_wait_ready,
                 .context    = NULL,
             };
-            if (nand_fmc_init_instance(0U, 0U, 0U, &fast_fmc) != NAND_RESULT_OK)
+            uint8_t fmc_ch2, fmc_ce2, fmc_lun2;
+
+            for (fmc_ch2 = 0U; fmc_ch2 < CH_NUM; fmc_ch2++)
             {
-                SSD_LOGE("nand: FMC backend configure (Mode 4) failed\r\n");
-                return NAND_RESULT_OPERATION_FAILED;
+                for (fmc_ce2 = 0U; fmc_ce2 < CE_NUM; fmc_ce2++)
+                {
+                    for (fmc_lun2 = 0U; fmc_lun2 < LUN_NUM; fmc_lun2++)
+                    {
+                        if (nand_fmc_init_instance(fmc_ch2, fmc_ce2, fmc_lun2, &fast_fmc) != NAND_RESULT_OK)
+                        {
+                            SSD_LOGE("nand: FMC backend configure (Mode 4) failed ch=%u ce=%u lun=%u\r\n",
+                                     (unsigned)fmc_ch2, (unsigned)fmc_ce2, (unsigned)fmc_lun2);
+                            return NAND_RESULT_OPERATION_FAILED;
+                        }
+                    }
+                }
             }
         }
     }

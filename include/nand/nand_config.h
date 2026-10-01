@@ -26,7 +26,7 @@
 #define BLOCKS_PER_PLANE (2048)
 #define PLANE_NUM        (2)
 #define DIE_NUM          (1)
-#define LUN_NUM          (1)
+#define LUN_NUM          (2)   /* 每片选 LUN 数（Phase V 多 LUN 并发；硬件 1 die，软件近似） */
 #define CH_NUM           (1)
 #define CE_NUM           (1)
 #define CW_NUM           (4U)
@@ -85,7 +85,7 @@
 #define PLANE_ADDR_WIDTH (1U)  /* BA6，Plane 选择。 */
 #define BLOCK_ADDR_WIDTH (11U) /* BA7~BA17，每 Plane BLOCKS_PER_PLANE 个 Block。 */
 #define DIE_ADDR_WIDTH   (0U)
-#define LUN_ADDR_WIDTH   (0U)
+#define LUN_ADDR_WIDTH   (1U) /* Phase V: PAA 获得 LUN 位域（支持 LUN_NUM=2） */
 
 /*
  * 软件 PAA 打包布局（低位优先）：

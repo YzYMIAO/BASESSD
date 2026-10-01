@@ -220,6 +220,12 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
         sb->temperature     = temperature;
         sb->valid           = 1U;
 
+        /* 绑定真实拓扑（Phase V: 多 LUN 时 Super Block 必须知道所属 ch/ce/lun，
+         * super_block_page_addr 由此展开地址——此前 sb->topo 恒为零） */
+        sb->topo.ch  = alloc->ch;
+        sb->topo.ce  = alloc->ce;
+        sb->topo.lun = alloc->lun;
+
         /* 状态机：两物理块置 OPEN（清 FREE/CLOSED）+ 记录温度流 + 反向索引 sb_id
          * （OPEN 时 sb_id 占位 NO_SB，关闭后由 allocator_close_sb 写 closed 索引） */
         {

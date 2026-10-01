@@ -600,7 +600,8 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
         uint8_t  cw_idx       = index % CW_NUM;
         uint32_t blk          = paa_to_block(command->paa);
         uint32_t pg           = paa_to_page(command->paa);
-        descriptor->paa       = paa_make(pg, plane, blk, 0U, cw_idx);
+        /* 保留 command->paa 的 LUN 字段（多 LUN 并发必需：desc PAA/META/随机种子/ECC 都依赖它） */
+        descriptor->paa       = paa_make(pg, plane, blk, paa_to_lun(command->paa), cw_idx);
         descriptor->config    = command->config;
         descriptor->config.cw = cw_idx;
     }
@@ -1397,6 +1398,13 @@ static fc_status_t fc_poll_internal(fc_t *controller)
                 reqs[i].parameter[2] = (uint8_t)command->parameter2;
                 reqs[i].parameter[3] = (uint8_t)command->parameter3;
                 reqs[i].feature_addr = (uint8_t)command->feature_addr;
+
+                /* Phase V: 链式路径 splittable 原子命令自动拆为 ISSUE（与单命令路径一致，
+                 * 仅 LUN_NUM>1 时生效；拆分后由 dispatch Phase 机异步接续 WAIT/FETCH） */
+                if ((LUN_NUM > 1U) && nand_operation_is_splittable(reqs[i].operation))
+                {
+                    reqs[i].operation = nand_operation_to_issue(reqs[i].operation);
+                }
 
                 if (nand_operation_has_data((uint8_t)command->config.operation))
                 {
