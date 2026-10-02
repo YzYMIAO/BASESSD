@@ -32,6 +32,9 @@ extern MunitTest g_f4_tests[];
 /* F6 pending/completion 多实例化（per-instance pending + 全局 completion 路由） */
 extern MunitTest g_f6_pending_tests[];
 
+/* F10 journal_replay 全量回放（post-CP 多页 + last-write-wins + GC flush 契约） */
+extern MunitTest g_f10_tests[];
+
 static MunitSuite g_fc_nand_suite =
     {
         (char *)"/fc-nand/",
@@ -56,6 +59,9 @@ static MunitSuite g_fc_nand_suite =
 
                        /* F6 pending/completion 多实例化 */
                        {(char *)"f6", g_f6_pending_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+
+                       /* F10 journal_replay 全量回放 */
+                       {(char *)"f10", g_f10_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
                        {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                        },

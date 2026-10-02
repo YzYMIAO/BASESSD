@@ -283,6 +283,13 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
         }
     }
 
+    /* F10：搬移条目先落盘再擦除 victim（与 gc_migrate_sb 同契约）。
+     * journal 是 write-back，不 flush 则掉电窗口内恢复回放指向已擦除块。 */
+    if (migrated > 0U)
+    {
+        journal_flush_page(&ftl->journal);
+    }
+
     /* Step 2: 构造临时 Super Block，复用 gc_erase_and_free 擦除+归还 */
     {
         super_block_t tmp_sb;

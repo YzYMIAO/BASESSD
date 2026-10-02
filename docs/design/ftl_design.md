@@ -906,9 +906,9 @@ GC 搬移（读 → 写新位置 → 更新 L2P → 擦除旧 Block）不是原�
 
 三层保护机制：
 
-- **Layer 1: Journal** — 每个 L2P 更新先写 Journal 后改 cache，掉电后 Journal 回放重建 L2P
-- **Layer 2: GC Bitmap** — 在 NAND 元数据区记录搬移进度 bitmap，每搬 16 页更新一次，掉电恢复后从断点继续
-- **Layer 3: 双拷贝容忍** — 任何掉电场景最多产生一个"孤悬"Block，不会丢数据，下次 GC 回收
+- **Layer 1: Journal** — 每个 L2P 更新先写 Journal 后改 cache，掉电后 Journal 回放重建 L2P。**实现约束（v0.43）**：Journal 是 write-back（`page_buf` 攒满才 flush），GC/WL 擦除 victim 前必须 `journal_flush_page` 强制落盘——否则掉电落在"搬移条目未落盘 + victim 已擦除"窗口，回放指向已擦除块（数据损坏）。`gc_migrate_sb`/`wl_relocate` 已按此接线。
+- **Layer 2: GC Bitmap** — 在 NAND 元数据区记录搬移进度 bitmap，每搬 16 页更新一次，掉电恢复后从断点继续。**未实现**（设计有、代码无）；v0.43 用"擦除前 flush"闭合等价窗口，Layer 2 留作后续优化。
+- **Layer 3: 双拷贝容忍** — 任何掉电场景最多产生一个"孤悬"Block，不会丢数据，下次 GC 回收。**依赖 Layer 1/2 正确性**：在"擦除先于 flush"窗口下不成立（v0.43 已闭合）。
 
 ### 4.6 企业级 GC 参考
 
@@ -2617,7 +2617,9 @@ typedef struct {
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old, nand_pba_t new);
 void journal_flush_page(l2p_journal_t *journal);
-int  journal_replay(l2p_journal_t *journal, l2p_cache_t *cache);
+/* v0.43 起：journal_replay 加 cp_sequence——只回放 page_seq > cp_sequence 的
+ * 页（≤ 的已落 L2P 表），按 (page_seq, entry_index) 递增序应用（last-write-wins） */
+int  journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence);
 void journal_truncate(l2p_journal_t *journal, uint32_t seq);
 ```
 
@@ -4025,7 +4027,7 @@ typedef struct {
 
 void journal_init(l2p_journal_t *journal);
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old, nand_pba_t new);
-int  journal_replay(l2p_journal_t *journal, l2p_cache_t *cache);
+int  journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence);
 void journal_truncate(l2p_journal_t *journal, uint32_t seq);
 void journal_flush_page(l2p_journal_t *journal);
 ```

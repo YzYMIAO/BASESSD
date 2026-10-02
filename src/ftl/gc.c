@@ -410,6 +410,14 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
         }
     }
 
+    /* F10：搬移条目先落盘再擦除 victim。journal 是 write-back（page_buf 攒
+     * 满才 flush），若不在此强制 flush，掉电落在"搬移条目未落盘 + victim
+     * 已擦除"窗口 → 恢复回放指向已擦除块 = 数据损坏。 */
+    if ((journal != NULL) && (migrated > 0U))
+    {
+        journal_flush_page(journal);
+    }
+
     return (int)migrated;
 }
 

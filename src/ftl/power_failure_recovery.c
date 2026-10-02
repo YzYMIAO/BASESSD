@@ -405,10 +405,11 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
     /* ① Cache 全 INVALID */
     l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
-    /* ② Journal 回放（sequence > cp_sequence 的条目 → L2P Cache） */
-    /* journal_replay 已实现扫描 J0/J1，提取 entry 并 l2p_cache_write */
+    /* ② Journal 回放（sequence > cp_sequence 的条目 → L2P Cache）。
+     *    F10：journal_replay 按 (page_seq, entry_index) 递增序回放所有
+     *    page_seq > cp_sequence 的页——只回放最大一页会静默丢 ≥2 页条目。 */
     {
-        (void)journal_replay(&ftl->journal, &ftl->cache);
+        (void)journal_replay(&ftl->journal, &ftl->cache, cp_sequence);
 
         /*
          * 估算回放的 entry 数：

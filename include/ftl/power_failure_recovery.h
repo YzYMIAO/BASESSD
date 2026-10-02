@@ -159,6 +159,7 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
  * 调用时机（ftl_boot_recovery 内）：
  *   Clean Start → l2p_cache_init 之后（反查触发按需 region 加载，正确但慢）
  *   Power Failure → journal_replay 之后（cache 已含未回放 entry，零加载）
+ *                   （F10：journal_replay 全量回放 post-CP 条目）
  *
  * @param ftl    FTL 上下文
  * @param stats  输出：重建统计（可为 NULL）

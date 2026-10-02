@@ -318,7 +318,8 @@ void journal_flush_page(l2p_journal_t *journal)
     memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
 }
 
-ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache)
+ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache,
+                            uint32_t cp_sequence)
 {
     uint8_t  b, page;
     uint32_t max_sequence = 0U;
@@ -326,13 +327,26 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache)
     uint8_t  last_page    = 0U;
     uint8_t  last_entry   = 0U;
 
+    /* F10：已发现的"需回放页"（page_seq > cp_sequence）记录表。
+     * 双块 × 每块 64 页 ≤ 128 页；每页 4×4B=16B → 512B 栈上数组。
+     * 按 (page_seq, entry_index) 递增序应用依赖先收集后排序。 */
+    typedef struct
+    {
+        uint32_t page_seq;
+        uint8_t  block;
+        uint8_t  page;
+        uint8_t  entry_count;
+    } replay_page_t;
+    replay_page_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
+    uint8_t       replay_count = 0U;
+
     if ((journal == NULL) || (cache == NULL))
     {
         return FTL_ERROR;
     }
 
-    /* 扫描两个 Journal Block */
-    for (b = 0; b < 2; b++)
+    /* 第一遍：扫描两个 Journal Block，收集需回放页（page_seq > cp_sequence） */
+    for (b = 0; b < JOURNAL_BLOCK_COUNT; b++)
     {
         for (page = 0; page < PAGES_PER_BLOCK; page++)
         {
@@ -385,27 +399,82 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache)
                 page_seq = ps;
             }
 
-            /* 如果本页 seq 比之前发现的大，更新最后位置 */
+            /* 跟踪最大 page_seq（用于更新写指针） */
             if (page_seq >= max_sequence)
             {
                 max_sequence = page_seq;
                 last_block   = b;
                 last_page    = page;
                 last_entry   = (uint8_t)(count - 1U);
+            }
 
-                /* 应用所有 entry 到 L2P Cache */
+            /* F10：只收集 post-checkpoint 页（≤ cp_sequence 的条目已在
+             * checkpoint 时 flush 进 NAND L2P 表，无需回放） */
+            if (page_seq > cp_sequence)
+            {
+                if (replay_count <
+                    (uint8_t)(JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK))
                 {
-                    uint16_t i;
-                    for (i = 0U; i < count; i++)
-                    {
-                        uint32_t entry_lba;
-                        uint32_t entry_new_pba;
-                        uint16_t offset = JOURNAL_HEADER_SIZE +
-                                          sizeof(l2p_journal_entry_t) * i;
-                        memcpy(&entry_lba, page_data + offset + 0, 4);
-                        memcpy(&entry_new_pba, page_data + offset + 8, 4);
-                        l2p_cache_write(cache, (lba_t)entry_lba, (nand_pba_t)entry_new_pba);
-                    }
+                    replay_pages[replay_count].page_seq    = page_seq;
+                    replay_pages[replay_count].block       = b;
+                    replay_pages[replay_count].page        = page;
+                    replay_pages[replay_count].entry_count = (uint8_t)count;
+                    replay_count++;
+                }
+            }
+        }
+    }
+
+    /* 第二遍：按 (page_seq, entry_index) 递增序应用条目。
+     * 插入排序（replay_count ≤ 128）：per-LBA last-write-wins——
+     * 同 LBA 的旧条目（含 GC/WL 搬移记录）被后写覆盖，不指向已擦除块。 */
+    {
+        uint8_t i;
+        uint8_t n;
+
+        for (i = 1U; i < replay_count; i++)
+        {
+            replay_page_t key = replay_pages[i];
+
+            n = i;
+            while ((n > 0U) && (replay_pages[n - 1U].page_seq > key.page_seq))
+            {
+                replay_pages[n] = replay_pages[n - 1U];
+                n--;
+            }
+            replay_pages[n] = key;
+        }
+
+        for (i = 0U; i < replay_count; i++)
+        {
+            uint8_t     page_data[JOURNAL_PAGE_SIZE];
+            nand_addr_t raddr;
+            int         ret;
+
+            raddr = journal_page_addr(journal, replay_pages[i].block,
+                                      replay_pages[i].page);
+
+            memset(page_data, 0xFF, sizeof(page_data));
+            ret = sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE,
+                                 FC_CRC_DISABLE, FC_RANDOM_DISABLE,
+                                 FC_COMMAND_MODULE_METADATA, 0U);
+            if (ret != 0)
+            {
+                continue; /* 页已失效，跳过（应用顺序其余页不受影响） */
+            }
+
+            {
+                uint16_t k;
+                for (k = 0U; k < replay_pages[i].entry_count; k++)
+                {
+                    uint32_t entry_lba;
+                    uint32_t entry_new_pba;
+                    uint16_t offset = JOURNAL_HEADER_SIZE +
+                                      sizeof(l2p_journal_entry_t) * k;
+                    memcpy(&entry_lba, page_data + offset + 0, 4);
+                    memcpy(&entry_new_pba, page_data + offset + 8, 4);
+                    l2p_cache_write(cache, (lba_t)entry_lba,
+                                    (nand_pba_t)entry_new_pba);
                 }
             }
         }

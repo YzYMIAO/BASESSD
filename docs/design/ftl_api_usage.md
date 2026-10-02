@@ -434,7 +434,7 @@ int l2p_cache_flush_all(l2p_cache_t *cache);
 
 ```
 l2p_cache_read()    → ftl_submit_read / ftl_submit_write 查旧 PBA
-l2p_cache_write()   → ftl_submit_write 更新 L2P / journal_replay
+l2p_cache_write()   → ftl_submit_write 更新 L2P / journal_replay（F10：回放写 cache）
 l2p_cache_flush_one → l2p_cache_evict_one（CLOCK 驱逐时）、ftl_service 后台 flush
 l2p_cache_flush_all → checkpoint_create / ftl_service_idle
 ```
@@ -514,10 +514,13 @@ void journal_append(l2p_journal_t *journal, lba_t lba,
 void journal_flush_page(l2p_journal_t *journal);
 
 /*
- * 启动时回放所有 journal entries → 重建 cache。
- * 扫描 J0/J1，验证 magic/entry_count/sequence，更新 L2P Cache。
+ * 启动时回放 journal entries → 重建 cache。
+ * F10：只回放 page_seq > cp_sequence 的页（≤ cp_sequence 的条目已在
+ * checkpoint 时 flush 进 NAND L2P 表），按 (page_seq, entry_index) 递增序
+ * 应用（per-LBA last-write-wins）。旧实现只回放最大一页 → 掉电跨 ≥2 页丢写。
  */
-int journal_replay(l2p_journal_t *journal, l2p_cache_t *cache);
+int journal_replay(l2p_journal_t *journal, l2p_cache_t *cache,
+                   uint32_t cp_sequence);
 
 /*
  * 截断 sequence ≤ up_to 的所有 journal entries。

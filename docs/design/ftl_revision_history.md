@@ -1336,7 +1336,51 @@ F6（ftl_revision_history F 清单）：`g_pending[32]`（src/ftl/pending.c）�
 | F6 | **pending/completion 单例多实例化** | ✅ **v0.42 已实现** — pending 表 per-instance（`ftl->pending[32]`，API 加 ftl 首参，删 pending 项内 ftl 字段）；completion 表保持全局（FC CQ 全局 + cmd_id 唯一，per-instance 会让异实例 completion 走错 default handler → 数据丢失），新增 `g_route[CH][CE][LUN]` 按 cmd->config.ch/ce/lun 路由到实例；`g_rr_last_scan_ms` 一并移入 ftl_context；`ftl_internal_sync_wait` 签名不变（21 处调用点零改动） | LUN_NUM>1 多 FTL 实例安全共存（第二个实例 init 不再冲掉第一个的 pending）；多 LUN 并发前置 | 中 | 见 v0.42 条目 |
 | F7 | **写失败 Super Block 空洞的显式回滚** | ✅ **v0.39 已实现** — `allocator_close_open_sb` 运行时关闭坏 SB（行业流程 §3.8 ①）+ `bbt_mark_bad` 标坏 block 号 + L2P 自动回滚；坏 SB 进 closed → GC 优先回收 | 修复"坏块还挂在 OPEN SB 里继续写"的状态矛盾；好 plane 经 GC 擦除回 free pool | 低 | 见 v0.39 条目 |
 | F8 | **journal 空间不足的紧急 checkpoint 回切校验** | `journal_truncate` 简化实现（擦除非当前 block）；`checkpoint_is_emergency` 有但触发面未验证 | Journal 满时依赖 checkpoint 水位线，简化截断在极端写模式下的正确性未测 | 中（测试为主） | 上板高压写验证；`journal_flush_page` 满页回切逻辑已实现 |
-| F10 | **journal_replay 只回放最新一页（掉电 ≥2 页条目丢失）** | `journal_replay`（journal.c:389-410）只应用 `page_seq` 最大的那页的 128 条 entry；掉电时若 post-checkpoint 条目跨 ≥2 页，只恢复最新 128 条，其余静默丢失。F4 review（v0.41）发现，明确**未实现**，留待后续 | 掉电恢复丢写（post-CP 条目超过 128 条时） | 中 | 改 `journal_replay` 应用所有 `page_seq > cp.journal_sequence` 页的条目；依赖恢复侧能拿到 cp.journal_sequence（v0.41 已把 `cp` 传进 `ftl_boot_power_failure`，条件已具备） |
+| F10 | **journal_replay 只回放最新一页（掉电 ≥2 页条目丢失）** | ✅ **v0.43 已实现** — `journal_replay` 签名加 `cp_sequence`，两遍扫描：收集全部 `page_seq > cp_sequence` 页 → 按 `(page_seq, entry_index)` 递增序应用（per-LBA last-write-wins，同 LBA 旧 GC/WL 搬移条目被新写覆盖）；**顺带闭合 GC/WL 擦除先于 journal flush 的掉电损坏窗口**（Explore 调研发现：journal write-back 未 flush 就擦 victim，掉电回放指已擦除块 → `gc_migrate_sb`/`wl_relocate` 擦除前强制 `journal_flush_page`）；host 单测 `/f10/` 5 例（多页回放/CP 过滤/last-write-wins/排序防御/GC flush 契约，内存 NAND 桩） | 掉电恢复丢写（post-CP 条目超过 128 条时）+ 回放指向已擦除块 | 中 | 见 v0.43 条目 |
 | F9 | **CQ/SQ 深度与多实例并发实测** | FC 池深度（64/256/128/64/16/64）按单实例预算 | 多 LUN/多实例并发 + 后台（GC/CP/BBT）同时争池未实测 | 中（测试） | 上板多实例后观察；文档 §17 背压已分析 |
 
 **上板验证（v0.37）是 F1/F8/F9 的前置**：FTL 首次真跑，UART 日志 + 高压写会暴露 allocator/pending/GC 的真实行为。
+
+## v0.43 — F10 journal_replay 全量回放 + GC/WL 擦除前强制 flush
+
+**日期**：2026-10-02
+
+### 背景
+
+F10（F 清单，v0.41 F4 review 发现）：`journal_replay` 只回放 `page_seq` 最大那一页的 128 条 entry。而 checkpoint 窗口内 journal 条目量可达 **~13,900 条 ≈ 109 页**（CP 触发：每 1024 次写 / journal 85% 水位 ≈ 13,900 条 / 10s 定时，checkpoint.c:345-374）。掉电时 post-CP 条目跨 ≥2 页 → 只恢复最新 128 条，其余**静默丢失**。
+
+Explore 调研另发现一个超出 F10 原描述的**真数据损坏窗口**：journal 是 write-back（RAM `page_buf` 攒 128 条才 `journal_flush_page`）；GC/WL 搬移 append 条目到 RAM 缓冲后**同步擦除 victim 块**，两者间无任何 flush。掉电落在窗口内 → NAND 上只有旧条目 `X→A`（指向已被擦除块），新条目 `X→B` 从未落盘 → 恢复回放后 L2P 指向已擦除块 = 数据损坏。此窗口 F10 全量回放不修复（新条目根本不在 NAND 上），必须一并闭合。
+
+### 关键决策
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| `journal_replay` 签名 | 加 `cp_sequence`（`cp->journal_sequence`），由 `ftl_boot_power_failure` 传入 | v0.41 已把 `cp` 传进恢复侧，前置条件已具备；过滤 `page_seq > cp_sequence` 的页（≤ 的条目已在 checkpoint 时 flush 进 NAND L2P 表） |
+| 回放顺序 | 两遍扫描：收集全部需回放页 → 按 `(page_seq, entry_index)` 插入排序后逐页应用 | per-LBA last-write-wins——同 LBA 的旧 GC/WL 搬移条目被新写覆盖，不指向已擦除块；双块 page_seq 区间不交叠（truncate 擦整非当前块），显式排序防御未来 truncate 变化 |
+| GC/WL 擦除前 flush | `gc_migrate_sb` / `wl_relocate` 在 `gc_erase_and_free` 前调 `journal_flush_page` | 闭合"搬移条目未落盘 + victim 已擦除"掉电窗口；`journal_flush_page` 幂等（空缓冲 no-op），后台 idle flush 不受影响 |
+| 栈上页表 | `replay_pages[128]`（2 块×64 页），每项 16B → 512B | 现有栈上已有 `page_data[2048]`；不缓存 entry（逐页重读），SRAM 余量充足 |
+
+### 实现
+
+1. **`include/ftl/journal.h`**：`journal_replay` 声明加 `uint32_t cp_sequence` 第三参。
+2. **`src/ftl/journal.c`**：`journal_replay` 重写中段——第一遍扫描收集 `page_seq > cp_sequence` 页（沿用 magic/count/上限校验），第二遍按 `(page_seq, entry_index)` 插入排序后逐页应用 entry；保留尾部写指针推进（`current_block/page/entry` + `sequence_counter`，`ftl_boot_power_failure` 依赖其估算 entry_count）。
+3. **`src/ftl/power_failure_recovery.c`**：`ftl_boot_power_failure` 把 `cp_sequence` 传给 `journal_replay`。
+4. **`src/ftl/gc.c` + `src/ftl/wear_leveling.c`**：搬移循环结束、擦除前 `journal_flush_page`。
+5. **测试**：`tests/unit/test_f10_replay.c`（5 例，内存 NAND 桩）——多页回放（3 页全回放，旧实现只回放最大页）/ CP 过滤（`page_seq ≤ cp_sequence` 不回放）/ last-write-wins（同 LBA 旧 GC 条目被新写覆盖）/ 排序防御（跨块条目按 page_seq 序结果一致）/ GC flush 契约（擦除前 flush 后条目必落盘）+ `tests/Makefile` target `f10` + 上板 `src/fc/makefile.mk`/`ut_main.c` 注册 `/f10/` 套件。
+6. **`tests/framework/munit_stub_fc.c`**：`ftl_cmd_write/read_data` 从 no-op 升级为内存 NAND 桩（静态数组按 `cmd->paa` 地址读写 + erase 清 0xFF），`journal_truncate` 改弱符号（F10 链真实 journal.c 强符号自动覆盖）。
+7. **`docs/design/ftl_revision_history.md`**：v0.43 条目 + F 清单 F10 标"✅ v0.43 已实现"。
+
+### 验证
+
+- `make -C tests test`：f4（5/5）+ f6（4/4）+ **f10（5/5）** 全过，编译零警告（-Werror）
+- `make` 默认固件零错误零新增警告
+- `make FC_NAND_TEST_ENABLE=1` 上板测试固件零错误编译
+- 上板验证（待 FTL 完工统一做）：高压写中随机掉电 + 重启，`/f10/` 套件回放多页/覆盖场景数据一致
+
+### FTL 层剩余清单
+
+> 本清单汇总「FTL 层边界内」的真实缺口（与上文遗留对应，按优先级排序）。
+> 非 FTL 层（NVMe/controller 调度/UART CLI/平台 BSP 计时）见 ftl_design §16「未实现」。
+
+| # | 项 | 现状 | 影响 | 工作量 | 入口/依赖 |
+|---|----|------|------|--------|-----------|
