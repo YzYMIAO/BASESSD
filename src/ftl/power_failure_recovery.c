@@ -233,7 +233,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
         else
         {
             /* 异常掉电 */
-            int ret = ftl_boot_power_failure(ftl, cp.journal_sequence, &local_result);
+            int ret = ftl_boot_power_failure(ftl, &cp, &local_result);
             if (ret == FTL_OK)
             {
                 local_result.boot_type   = BOOT_POWER_FAILURE;
@@ -294,16 +294,113 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
     return FTL_OK;
 }
 
+/*
+ * ftl_boot_apply_region_bitmap - 按 checkpoint region_bitmap 局部加载 L2P cache
+ *
+ * F4：掉电恢复时，checkpoint 只保证「bitmap 置位的 region」的 NAND 页等于
+ * CP 时刻快照。boot 后对 cache 行做约束：
+ *
+ *   ① DIRTY 行（journal_replay 刚写入的最新数据）→ 一律跳过。
+ *      CLEAN 声明"cache==NAND"是假的（NAND 是 CP 时刻旧值，cache 是
+ *      post-CP 回放值）；INVALID 则直接丢弃回放数据。保持 DIRTY，
+ *      由后台 flush 逐步写回。
+ *   ② bitmap 置位区：显式从 NAND 加载 region 页 → 置 CLEAN。
+ *      该区页 = CP 时刻快照（CP 时已 flush 落盘），预载可复用给
+ *      ftl_rebuild_closed_sb_list 的反查。不可直接置 CLEAN——line 的
+ *      entries 仍是 init 时全 FTL_PBA_INVALID，read 会对有效映射返回假 INVALID。
+ *   ③ bitmap 未置位区：置 INVALID，下一访问懒加载 CP 时刻快照。
+ *      该区未在本次 CP 落盘，NAND 页为更旧值/从未写，懒加载即正确。
+ *
+ * 必须在 journal_replay 之后调用（replay 前 cache 刚 init，所有 line
+ * region_id=0，先强制会误匹配全部行）。
+ */
+static void ftl_boot_apply_region_bitmap(ftl_context_t *ftl,
+                                         const l2p_checkpoint_header_t *cp)
+{
+    uint16_t i;
+
+    if ((ftl == NULL) || (cp == NULL))
+    {
+        return;
+    }
+
+    for (i = 0U; i < L2P_CACHE_SIZE; i++)
+    {
+        l2p_cache_line_t *line = &ftl->cache.lines[i];
+        uint32_t          word;
+        uint32_t          mask;
+        int               in_bitmap;
+
+        if (line->state == L2P_CACHE_DIRTY)
+        {
+            continue; /* ① 回放数据，保持 DIRTY 待后台 flush */
+        }
+
+        word     = cp->region_bitmap[line->region_id / 32U];
+        mask     = (1UL << (line->region_id & 31U));
+        in_bitmap = ((word & mask) != 0U);
+
+        if (in_bitmap)
+        {
+            /* ② 预载 bitmap 区（仅 CLEAN/INVALID 行；DIRTY 已在上方跳过） */
+            if (line->state != L2P_CACHE_CLEAN)
+            {
+                nand_paa_t region_paa = NAND_PBA_INVALID;
+                nand_addr_t region_addr;
+
+                if (ftl->cache.md_dir != NULL)
+                {
+                    region_paa = metadata_dir_lookup(ftl->cache.md_dir,
+                                                     METADATA_TYPE_L2P_REGION,
+                                                     line->region_id);
+                }
+
+                if (region_paa != NAND_PBA_INVALID)
+                {
+                    region_addr = addr_from_paa(ftl->cache.ch, ftl->cache.ce,
+                                                region_paa);
+                }
+                else
+                {
+                    region_addr = addr_from_pba(l2p_region_pba(ftl->cache.ch,
+                                                               ftl->cache.ce,
+                                                               ftl->cache.lun,
+                                                               line->region_id));
+                }
+
+                if (sync_read_page(region_addr, line->entries,
+                                   L2P_REGION_SIZE) == FTL_OK)
+                {
+                    line->state = L2P_CACHE_CLEAN;
+                }
+                else
+                {
+                    /* 读失败保持 INVALID（entries 仍全 INVALID，懒加载兜底） */
+                    line->state = L2P_CACHE_INVALID;
+                }
+            }
+        }
+        else
+        {
+            /* ③ 未覆盖区：INVALID → 下一访问懒加载 CP 时刻快照 */
+            line->state = L2P_CACHE_INVALID;
+        }
+    }
+}
+
 ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
-                           uint32_t            cp_sequence,
-                           ftl_boot_result_t  *result)
+                                    const l2p_checkpoint_header_t *cp,
+                                    ftl_boot_result_t  *result)
 {
     uint32_t entry_count;
+    uint32_t cp_sequence;
 
-    if ((ftl == NULL) || (result == NULL))
+    if ((ftl == NULL) || (result == NULL) || (cp == NULL))
     {
         return FTL_ERROR;
     }
+
+    cp_sequence = cp->journal_sequence;
 
     /* ① Cache 全 INVALID */
     l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
@@ -336,7 +433,11 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
          */
     }
 
-    /* ③ Allocator 重建（F2：掉电重启后全扫 NAND 重建 Closed SB 列表）。
+    /* ③ 按 Checkpoint region_bitmap 局部加载（F4）：跳过 DIRTY 回放行，
+     *    bitmap 区预载 CLEAN，非 bitmap 区 INVALID（懒加载 CP 时刻快照） */
+    ftl_boot_apply_region_bitmap(ftl, cp);
+
+    /* ④ Allocator 重建（F2：掉电重启后全扫 NAND 重建 Closed SB 列表）。
      *    journal_replay 已把未回放 entry 写入 cache → L2P 反查零 region 加载。
      *    顺带替代原 hot_sb/cold_sb 写指针扫描（原实现被 valid!=0 门控恒假）。 */
     {
@@ -344,11 +445,11 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
         (void)ftl_rebuild_closed_sb_list(ftl, &rebuild_stats);
     }
 
-    /* ④ Controller → Ready */
+    /* ⑤ Controller → Ready */
     ftl->cp_sequence    = cp_sequence;
     ftl->cp_timer_start = 0U;
 
-    /* ⑤ 输出结果 */
+    /* ⑥ 输出结果 */
     result->boot_type       = BOOT_POWER_FAILURE;
     result->cp_sequence     = cp_sequence;
     result->journal_entries = entry_count;

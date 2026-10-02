@@ -22,6 +22,7 @@
 
 #include "common/ssd_types.h"
 #include "ftl/allocator.h"
+#include "ftl/checkpoint.h"     /* l2p_checkpoint_header_t */
 #include "ftl/journal.h"
 #include "ftl/l2p_cache.h"
 
@@ -109,16 +110,17 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
  * Journal > Checkpoint，需回放未写到 L2P Table 的条目：
  *   ① Cache 全 INVALID
  *   ② Journal 回放 → 重建 L2P Cache
- *   ③ Allocator 重建 + 写指针扫描（异常掉电需扫描 NAND）
- *   ④ cp_sequence 记录
+ *   ③ Checkpoint region_bitmap 应用（F4：局部加载 bitmap 区，见实现注释）
+ *   ④ Allocator 重建 + 写指针扫描（异常掉电需扫描 NAND）
+ *   ⑤ cp_sequence 记录
  *
  * @param ftl  FTL 上下文
- * @param cp_sequence  Checkpoint sequence（回放起点）
- * @param result       输出：回放的 entry 数
+ * @param cp   最新 Checkpoint header（含 region_bitmap，回放起点 = journal_sequence）
+ * @param result 输出：回放的 entry 数
  * @return FTL_OK 成功，FTL_ERROR 失败
  */
 ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
-                           uint32_t            cp_sequence,
+                           const l2p_checkpoint_header_t *cp,
                            ftl_boot_result_t  *result);
 
 /*

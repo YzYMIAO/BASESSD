@@ -1243,6 +1243,42 @@ F2（ftl_revision_history F 清单）：`closed_sb_list` 是纯 RAM 态（SRAM2 
 
 - **已知代价**：Clean Start 重建的 L2P 反查触发按需 region 加载（cache 空，从 NAND 读 L2P 表），开机比 Power Failure 分支慢；另 erase_count 无持久化表，开机后 WL 短暂退化为全平局。
 
+## v0.41 — F4 checkpoint 增量（region_bitmap）
+
+**日期**：2026-10-02
+
+### 背景
+
+F4（ftl_revision_history F 清单）：checkpoint 目前全量写 6 页 header（`region_bitmap` 恒全 1、`region_count` 恒全量），恢复侧完全不消费 bitmap。目标是把 checkpoint 改造成行业标准语义：**按 region 脏标记填 bitmap + 恢复侧按 bitmap 局部加载**。
+
+关键事实（设计确认）：checkpoint 的「6 页」是 header 冗余（写 2048B header 到 Block 37/38 各 3 页），**不是 L2P 全表**；单 die 拓扑（LUN_NUM=1）下增量**没有 NAND 页数收益**（脏区数据本来就都要写，每区最多一页；evict 兜底保证任何脏区最终落 NAND）。用户确认**仍完整实现**——这是行业标准格式语义 + 未来多 LUN 的前置（多 die 时 checkpoint 不再覆盖全部芯片，bitmap 才有真正的增量收益）。
+
+### 关键决策
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| 脏区追踪 | `l2p_cache_t` 加 `region_dirty_bitmap[L2P_REGIONS_PER_LUN/32]`（256B SRAM），`l2p_cache_write` 置位、`l2p_cache_flush_one` 成功清零 | 与 line 级 state 互补：evict 兜底 flush 后行 CLEAN/失效，但"本次周期内被改过"由 bitmap 记住；bit=1 ⟺ 该区 NAND 页可能有未落盘数据 |
+| 快照先于 flush | `checkpoint_create` ①先 `memcpy` 快照 bitmap → ②按 bitmap 只 flush 脏区 → ③填 header → ④写 6 页 → ⑤anchor → ⑥truncate | flush 内 `flush_one` 会清 bit，先 flush 后快照则 bitmap 恒空、header 声称无区当前（功能为空）；truncate 必须最后（其擦对方块依赖 ≤cp_seq 已落表） |
+| flush 失败中止 | `checkpoint_flush_dirty_regions` 任一失败 → `checkpoint_create` 立即 `return FTL_ERROR`，不写 header/不 flush anchor/不截断 journal | 失败区 NAND 页仍旧、bit 保持置位；若继续写 header 声称已落盘 → boot 按 bitmap 预载旧页 = 数据一致性破坏。不再忽略 flush 返回值（原 182 行 `l2p_cache_flush_all` 返回值被 `(void)` 吞掉，改后必须消费） |
+| evict 失败保留行 | `l2p_cache_evict_one`：DIRTY 行 flush 失败 → **不复用该行**（视同 FLUSHING 跳过继续找；找不到返回 FTL_ERROR） | 原实现 flush 失败仍置 INVALID 复用 → RAM 脏数据丢弃 + NAND 页仍旧 + **bit 置位但无 resident DIRTY 行（孤儿 bit）** → checkpoint 按 bitmap 假声明 → boot 必坏读。F4 前置修复 |
+| 恢复按 bitmap 局部加载 | `ftl_boot_power_failure` 签名追加 `const l2p_checkpoint_header_t *cp`；`journal_replay` 后新增 `ftl_boot_apply_region_bitmap`：DIRTY（回放）行跳过；bitmap 区显式读页置 CLEAN；非 bitmap 区置 INVALID（懒加载 CP 时刻快照） | 回放行若 CLEAN 声明"cache==NAND"是假（NAND 是 CP 时刻旧值）、INVALID 则直接丢回放数据；INVALID 行直接置 CLEAN 的 entries 仍是 init 全 0xFF，read 对有效映射返回假 INVALID。强制顺序必须在 replay 之后（init 后所有行 region_id=0，先强制误匹配全部 64 行）。`ftl_boot_clean_start` 不变（天然安全：全 INVALID + 懒加载） |
+| 诚实标注 | 单 die 下选择性 flush 与 `flush_all` **覆盖完全相同**（都是所有 resident DIRTY 行）；`ftl_service_idle` 每 tick 的 `l2p_cache_flush_all`（ftl.c:303）使 IDLE 模式 CP 触发时 bitmap 近空 | **本改造不减少写页数**；真实收益只在多 die/multi-LUN 时 CP 不再覆盖全部芯片才出现。格式/语义前移是主要目的 |
+
+### 实现
+
+1. **`include/ftl/l2p_cache.h` + `src/ftl/l2p_cache.c`**：`l2p_cache_t` 加 `region_dirty_bitmap[L2P_REGIONS_PER_LUN/32]`；`l2p_cache_init` memset 0；`l2p_cache_write` 置位；`l2p_cache_flush_one` 成功路径清位（失败保持）；`l2p_cache_evict_one` 失败保留行（见决策）。
+2. **`src/ftl/checkpoint.c`**：新增 static `checkpoint_flush_dirty_regions`（只 flush state==DIRTY && bit 置位的行）；`checkpoint_create` 改「快照 bitmap → 选择性 flush（失败中止）→ header（region_count=置位 word 数，无消费方仅信息量）→ 6 页 → anchor → truncate」；`region_bitmap` 从 cache 快照填入。
+3. **`src/ftl/power_failure_recovery.c`**：`ftl_boot_power_failure` 签名 `(ftl, cp, result)`（调用点 236 行同步改）；新增 static `ftl_boot_apply_region_bitmap`（跳过 DIRTY 回放行 / bitmap 区显式读页 CLEAN / 非 bitmap 区 INVALID）；`cp_sequence` 改取 `cp->journal_sequence`。
+4. **`include/ftl/power_failure_recovery.h`**：签名 + include checkpoint.h。
+5. **测试**：`tests/unit/test_f4_region_bitmap.c`（5 例，纯 RAM + FC 桩：bit 生命周期、evict 失败保留行、CP 中止）+ `tests/framework/munit_stub_fc.c/.h`（host 虚拟成功 FC 桩 + `fc_stub_fail_next` 失败注入）+ `tests/unit/f4_stub_fail.c`（上板同名符号）+ `tests/Makefile` host target + `src/fc/makefile.mk`/`ut_main.c` 上板注册。
+6. **`docs/design/ftl_revision_history.md`**：v0.41 条目 + F 清单 F4 标"✅ v0.41 已实现"。
+
+### 验证
+
+- make debug / release / tests 均**零错误零新增警告**（仅剩余既有 usart.c:321 死代码 + controller/host `#warning` 桩）
+- host 单元测试 `make -C tests f4`：5/5 全过
+- 上板验证（待 FTL 完工统一做）：连续写 → checkpoint → 断电重启 → 断言恢复读正确（bitmap 区预载 CLEAN 与懒加载无差别）、flush 失败注入路径（临时改 fc 桩）CP 中止不丢数据
+
 ### FTL 层未实现清单（后续实现参考）
 
 > 本清单汇总「FTL 层边界内」的真实缺口（与上文遗留对应，按优先级排序）。
@@ -1253,11 +1289,12 @@ F2（ftl_revision_history F 清单）：`closed_sb_list` 是纯 RAM 态（SRAM2 
 | F1 | **CP/GC 定时触发接线 + 平台 time_us 钩子** | ✅ **v0.38 已实现** — `stm32_platform_time_us`（HAL_GetTick×1000）注册 `ssd_platform_ops_t`；ftl.c `ftl_now_ms()` 计算真实 elapsed；`cp_timer_start`/`gc_timer_start` 触发后回写；`cp.timestamp` 填真实时间戳 | T3 定时 checkpoint（10s）/GC 定时（500ms）首次真正生效 | 小（半天内） | 见 v0.38 条目 |
 | F2 | **掉电重建 closed_sb_list** | ✅ **v0.40 已实现** — `ftl_rebuild_closed_sb_list`（power_failure_recovery）：全 NAND 扫描，逐 plane LDPC_RAW 判空 + `gc_read_page_with_lba` 取 LBA + `l2p_cache_read` 反查回填 valid_map；满块进 closed_sb_list（`allocator_add_closed_sb`）、前 2 部分写对恢复 Open、其余强制 Closed；free pool 拉出写过块；clean/PF 两分支都接线 | 掉电重启后已满 SB 正确重建 → GC 回收 + 不丢数据；顺带修复 free pool 回填误纳元数据块 | 大（独立立项） | 见 v0.40 条目 |
 | F3 | **predictive 搬移（read disturb / 慢死）** | ✅ **v0.38 已实现** — `wl_predictive_relocate`（并入 wear_leveling）：`rr_predictive_scan` 扫 Closed 块 health≥CRITICAL → sb_id 反查 SB → `wl_relocate` 整 SB 搬移 → 双 plane `rr_retire_block` 退役（RESERVED，不标坏）；ftl_service_idle 带 1s 节流接入 | CRITICAL/DYING 块主动搬移 + 退役，不再靠读到坏兜底 | 中 | 见 v0.38 条目 |
-| F4 | **checkpoint 增量（region_bitmap）** | 全量写 6 页（region_bitmap 恒全 1，恢复不消费）；`journal_sequence` 与 `sequence` 同值 | 每次 checkpoint 写全表，容量/寿命开销大 | 大 | 增量需跟踪 dirty region（l2p cache DIRTY 行 → bitmap）+ 恢复按 bitmap 局部加载 |
+| F4 | **checkpoint 增量（region_bitmap）** | ✅ **v0.41 已实现** — 脏区追踪（`region_dirty_bitmap` 置位/成功清零）+ `checkpoint_create` 快照先于 flush + 选择性 flush 失败中止 + 恢复侧 `ftl_boot_apply_region_bitmap` 按 bitmap 局部加载（跳过回放行）；顺带修 evict flush 失败丢脏数据（孤儿 bit）。**诚实标注：单 die 拓扑下与全量写页数相同，真实收益在 multi-LUN** | 行业标准 bitmap 语义 + 多 LUN 前置（CP 不再覆盖全部芯片时才有增量页数收益） | 大 | 见 v0.41 条目 |
 | F5 | **写 Multi-Plane 真双页（VPC/空洞侧）** | ✅ **v0.38 已实现** — allocator 同号双 plane（industry super block）+ completion 对 plane1 页对称簿记（set_valid/L2P io.lba+1/Journal/清旧页）；pending 加 `old_pba1` | 跨 plane 写 VPC/映射/GC 搬移完整闭环，修复"plane1 烧错块"根因 | 中 | 见 v0.38 条目 |
 | F6 | **pending/completion 单例多实例化** | `g_pending[32]`/`g_table[32]` 全局单例 | LUN_NUM>1 多 FTL 实例共享命令路由 → 冲突 | 中（LUN>1 前必修） | v0.34 遗留；pfr 中 scan_write_pointer 硬编码 ch/ce=0 同源 |
 | F7 | **写失败 Super Block 空洞的显式回滚** | ✅ **v0.39 已实现** — `allocator_close_open_sb` 运行时关闭坏 SB（行业流程 §3.8 ①）+ `bbt_mark_bad` 标坏 block 号 + L2P 自动回滚；坏 SB 进 closed → GC 优先回收 | 修复"坏块还挂在 OPEN SB 里继续写"的状态矛盾；好 plane 经 GC 擦除回 free pool | 低 | 见 v0.39 条目 |
 | F8 | **journal 空间不足的紧急 checkpoint 回切校验** | `journal_truncate` 简化实现（擦除非当前 block）；`checkpoint_is_emergency` 有但触发面未验证 | Journal 满时依赖 checkpoint 水位线，简化截断在极端写模式下的正确性未测 | 中（测试为主） | 上板高压写验证；`journal_flush_page` 满页回切逻辑已实现 |
+| F10 | **journal_replay 只回放最新一页（掉电 ≥2 页条目丢失）** | `journal_replay`（journal.c:389-410）只应用 `page_seq` 最大的那页的 128 条 entry；掉电时若 post-checkpoint 条目跨 ≥2 页，只恢复最新 128 条，其余静默丢失。F4 review（v0.41）发现，明确**未实现**，留待后续 | 掉电恢复丢写（post-CP 条目超过 128 条时） | 中 | 改 `journal_replay` 应用所有 `page_seq > cp.journal_sequence` 页的条目；依赖恢复侧能拿到 cp.journal_sequence（v0.41 已把 `cp` 传进 `ftl_boot_power_failure`，条件已具备） |
 | F9 | **CQ/SQ 深度与多实例并发实测** | FC 池深度（64/256/128/64/16/64）按单实例预算 | 多 LUN/多实例并发 + 后台（GC/CP/BBT）同时争池未实测 | 中（测试） | 上板多实例后观察；文档 §17 背压已分析 |
 
 **上板验证（v0.37）是 F1/F8/F9 的前置**：FTL 首次真跑，UART 日志 + 高压写会暴露 allocator/pending/GC 的真实行为。

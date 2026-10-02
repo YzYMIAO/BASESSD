@@ -116,6 +116,13 @@ typedef struct
     uint32_t         hit_count;             /* 统计：命中次数 */
     uint32_t         miss_count;            /* 统计：未命中次数 */
 
+    /* Region 级脏标记（F4，自上次 checkpoint 以来本 region 有过写）。
+     * 与 line 级 state 互补：line DIRTY 只描述 resident 行，evict 兜底
+     * flush 后行 CLEAN/失效，但 region 的"本次周期内被改过"仍由本 bitmap
+     * 记住。checkpoint_create 以它填 region_bitmap（先快照再 flush）。
+     * bit=1：自上次 checkpoint 以来 region_id 有写（flush 落盘后清零）。 */
+    uint32_t region_dirty_bitmap[L2P_REGIONS_PER_LUN / 32U]; /* LUN_NUM=1 → 64 word = 256B */
+
     /* 本 cache 绑定的拓扑（ch/ce/lun，决定固定位置寻址与路由） */
     uint8_t ch;
     uint8_t ce;

@@ -26,6 +26,9 @@ extern MunitTest g_fc_lifecycle_tests[];
 /* F2 掉电重建 closed_sb_list 簿记（allocator + metadata 谓词，纯 RAM） */
 extern MunitTest g_rebuild_tests[];
 
+/* F4 checkpoint 增量 region_bitmap 簿记（l2p cache 脏标记，纯 RAM） */
+extern MunitTest g_f4_tests[];
+
 static MunitSuite g_fc_nand_suite =
     {
         (char *)"/fc-nand/",
@@ -44,6 +47,9 @@ static MunitSuite g_fc_nand_suite =
 
                        /* F2 掉电重建簿记 */
                        {(char *)"rebuild", g_rebuild_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+
+                       /* F4 checkpoint 增量 region_bitmap 簿记 */
+                       {(char *)"f4", g_f4_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
                        {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                        },

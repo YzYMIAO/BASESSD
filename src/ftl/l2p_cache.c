@@ -138,6 +138,9 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
     cache->ce = ce;
     cache->lun = lun;
 
+    /* Region 级脏标记：开机全清（F4） */
+    memset(cache->region_dirty_bitmap, 0, sizeof(cache->region_dirty_bitmap));
+
     for (i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         l2p_cache_line_t *line = &cache->lines[i];
@@ -225,7 +228,18 @@ static int l2p_cache_evict_one(l2p_cache_t *cache)
 
         if (line->state == L2P_CACHE_DIRTY)
         {
-            (void)l2p_cache_flush_one(cache, idx);
+            /*
+             * 脏行先写回再复用（F4 关键前置）：
+             * flush 失败 → 脏数据仍在该行，NAND 页仍旧、region 脏标记仍置位。
+             * 此刻绝不能复用本行（当前实现直接置 INVALID 会丢掉 RAM 脏数据，
+             * 留下"bit 置位但无 resident DIRTY 行"的孤儿 bit，checkpoint 会
+             * 按 bitmap 假声明该区已落盘 → boot 必坏读）。视同 FLUSHING 跳过，
+             * 继续找下一个可驱逐行。
+             */
+            if (l2p_cache_flush_one(cache, (int)idx) != FTL_OK)
+            {
+                continue;
+            }
         }
 
         /* 标记为 INVALID，等待调用者重新初始化 */
@@ -233,7 +247,7 @@ static int l2p_cache_evict_one(l2p_cache_t *cache)
         return (int)idx;
     }
 
-    return FTL_ERROR; /* 全 FLUSHING */
+    return FTL_ERROR; /* 全 FLUSHING / 全部可驱逐行 flush 失败 */
 }
 
 /*
@@ -363,6 +377,9 @@ void l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
 
     line->entries[entry_idx] = pba;
     line->state              = L2P_CACHE_DIRTY;
+
+    /* Region 级脏标记（F4）：置本 region 的 bit。flush 落盘成功后清零。 */
+    cache->region_dirty_bitmap[region_id / 32U] |= (1UL << (region_id & 31U));
 }
 
 ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
@@ -437,10 +454,14 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
     if (ret == 0)
     {
         line->state = L2P_CACHE_CLEAN;
+
+        /* 落盘成功：本 region 的脏标记清零（下次 checkpoint 不再重写） */
+        cache->region_dirty_bitmap[line->region_id / 32U] &=
+            ~(1UL << (line->region_id & 31U));
     }
     else
     {
-        /* 写失败，恢复 DIRTY，后续可重试 */
+        /* 写失败，恢复 DIRTY，后续可重试；脏标记保持置位 */
         line->state = L2P_CACHE_DIRTY;
     }
 

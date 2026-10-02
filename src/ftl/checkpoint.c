@@ -167,39 +167,96 @@ static nand_addr_t checkpoint_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uin
     return addr;
 }
 
+/*
+ * checkpoint_flush_dirty_regions - 按 region 脏标记只 flush 脏区
+ *
+ * 覆盖：cache 中所有 state==DIRTY 且其 region 的脏标记置位的行
+ *（等价于"本轮周期内改过的 region"；与 flush_all 对 resident 行的
+ * 覆盖相同，语义上先快照 bitmap 再 flush）。
+ *
+ * 任一 flush 失败立即返回 FTL_ERROR——调用方必须中止 checkpoint：
+ * 该 region 的 NAND 页仍旧（脏标记保持置位），若继续写 header 声称其
+ * 已落盘，boot 会按 bitmap 预载旧页 → 数据一致性破坏。
+ */
+static ftl_status_t checkpoint_flush_dirty_regions(l2p_cache_t *cache)
+{
+    uint16_t i;
+
+    for (i = 0U; i < L2P_CACHE_SIZE; i++)
+    {
+        l2p_cache_line_t *line = &cache->lines[i];
+        uint32_t          word;
+        uint32_t          mask;
+
+        if (line->state != L2P_CACHE_DIRTY)
+        {
+            continue;
+        }
+
+        /* 只有 region 脏标记置位的行才需要写回（其余在本次周期内未改） */
+        word = cache->region_dirty_bitmap[line->region_id / 32U];
+        mask = (1UL << (line->region_id & 31U));
+        if ((word & mask) == 0U)
+        {
+            continue;
+        }
+
+        if (l2p_cache_flush_one(cache, (int)i) != FTL_OK)
+        {
+            return FTL_ERROR;
+        }
+    }
+
+    return FTL_OK;
+}
+
 ftl_status_t checkpoint_create(ftl_context_t *ftl)
 {
     l2p_checkpoint_header_t cp;
     uint8_t                 i;
     int                     ret_total = 0;
+    uint32_t                region_words = 0U;
 
     if (ftl == NULL)
     {
         return FTL_ERROR;
     }
 
-    /* ① flush 所有 dirty cache → NAND L2P Table */
-    l2p_cache_flush_all(&ftl->cache);
-
-    /* ② 构造 Header */
+    /* ① 快照 region 脏标记 → 构造 Header（先快照后 flush：flush 会清位） */
     memset(&cp, 0, sizeof(cp));
+    memcpy(cp.region_bitmap, ftl->cache.region_dirty_bitmap,
+           sizeof(cp.region_bitmap));
+
+    /* region_count = 置位 word 数（无消费方，仅信息量；多 LUN 时高位 word 恒 0） */
+    for (i = 0U; i < 64U; i++)
+    {
+        if (cp.region_bitmap[i] != 0U)
+        {
+            region_words++;
+        }
+    }
+    cp.region_count = region_words;
+
+    /* ② 按 bitmap 只 flush 脏 region → NAND L2P Table。
+     *    flush 失败必须中止（见 checkpoint_flush_dirty_regions 注释），
+     *    不写 header / 不 flush anchor / 不截断 journal，保 DIRTY 行与
+     *    journal 供下个 checkpoint 重试（95% 紧急水位仍兜底强制）。 */
+    if (checkpoint_flush_dirty_regions(&ftl->cache) != FTL_OK)
+    {
+        return FTL_ERROR;
+    }
+
+    /* ③ 完成 Header 剩余字段 */
     cp.magic            = CHECKPOINT_MAGIC;
     cp.sequence         = ftl->journal.sequence_counter; /* 用 journal 最新 sequence */
     cp.timestamp        = checkpoint_now_ms(ftl);         /* 平台 time_us 换算 ms 快照 */
-    cp.region_count     = L2P_REGIONS_TOTAL;             /* 全量 checkpoint */
     cp.journal_sequence = ftl->journal.sequence_counter; /* 截断到此 seq */
-
-    /* region_bitmap: 全 1（全量） */
-    for (i = 0U; i < 64U; i++)
-    {
-        cp.region_bitmap[i] = 0xFFFFFFFFU;
-    }
 
     /* CRC */
     cp.crc = 0U;
     cp.crc = boot_crc32(&cp, sizeof(cp) - sizeof(cp.padding) - 4); /* 不含 padding 和 crc 自身 */
 
-    /* ③ 写 6 页冗余 */
+    /* ④ 写 6 页冗余 */
     for (i = 0U; i < CHECKPOINT_TOTAL_PAGES; i++)
     {
         nand_addr_t pba;
@@ -217,7 +274,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
     /* ④ flush Metadata Directory（保证 Directory 最新） */
     metadata_dir_flush_to_anchor(&ftl->metadata_dir);
 
-    /* ⑤ 截断 Journal */
+    /* ⑤ 截断 Journal（间接入口：纯 RAM 测试构建可用弱桩替换 journal_truncate） */
     journal_truncate(&ftl->journal, cp.journal_sequence);
 
     return ret_total;

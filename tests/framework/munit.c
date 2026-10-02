@@ -169,6 +169,10 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...)
         }
     }
 
+#if defined(__linux__) || defined(__unix__)
+    /* host 构建：失败直接退出（嵌入式是卡死保留现场） */
+    exit(EXIT_FAILURE);
+#else
     // abort();
     //  ===== 嵌入式环境：打印信息后卡死 =====
     while (1)
@@ -177,6 +181,7 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...)
         // 现场（寄存器、堆栈、内存）全部保留
         // 连接调试器可以查看所有状态
     }
+#endif
 }
 /*** 内存分配 ***/
 /* 内存申请 */
