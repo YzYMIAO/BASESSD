@@ -1087,7 +1087,7 @@ v0.35 数据平面多维化停在模块层（每 FTL 实例已绑 (ch,ce,lun)，
 
 ### 编译状态
 
-零告警（host gcc -pedantic）+ 固件 stm32h743 debug/release/tests 通过。commit `86552ce`（已推送）。
+零告警（gcc -pedantic）+ 固件 stm32h743 debug/release/tests 通过。commit `86552ce`（已推送）。
 
 ### 边界行为（用户确认）
 
@@ -1111,7 +1111,7 @@ v0.36 把 controller 路由接入，但 **FTL 仍无生产调用入口**——`s
 | boot 恢复 | `ftl_boot_recovery(&ftl, &result)` 由 main.c 调用（ftl_init 后、ftl_service 前） | ftl_init 内部不调用 boot；第一次上电 = BOOT_FRESH_START |
 | 主循环 | `ftl_service(&g_ftl[0][0][0])` 替换裸 `fc_service()`（加 ftl_ready 守卫，失败降级 fc_service） | ftl_service Phase1 内部已含 fc_service（≤4 次） |
 | 掉电重建 closed_sb_list | 本次不处理（v0.32 二期遗留） | power_failure 只重建 open SB；closed 列表为空时 GC 不回收已满 SB（空间泄漏但不丢数据） |
-| controller 传参 | **显式 `g_ftl_ptrs` 三维指针表**（`ftl_context_t *[CH][CE][LUN]`） | C 数组退化规则：static 数组名退化为「指向 [CE][LUN] 子数组的指针」，与形参「指向指针的 [CE][LUN] 数组的指针」类型不匹配，GCC 10.3 起恒报 `-Wincompatible-pointer-types`（host/arm 双编译器复现）。指针表在 boot 后填 `&g_ftl[...]`，类型精确匹配 |
+| controller 传参 | **显式 `g_ftl_ptrs` 三维指针表**（`ftl_context_t *[CH][CE][LUN]`） | C 数组退化规则：static 数组名退化为「指向 [CE][LUN] 子数组的指针」，与形参「指向指针的 [CE][LUN] 数组的指针」类型不匹配，GCC 10.3 起恒报 `-Wincompatible-pointer-types`（gcc/arm 双编译器复现）。指针表在 boot 后填 `&g_ftl[...]`，类型精确匹配 |
 
 ### SRAM 核算（已验证，debug 实测）
 
@@ -1270,13 +1270,13 @@ F4（ftl_revision_history F 清单）：checkpoint 目前全量写 6 页 header�
 2. **`src/ftl/checkpoint.c`**：新增 static `checkpoint_flush_dirty_regions`（只 flush state==DIRTY && bit 置位的行）；`checkpoint_create` 改「快照 bitmap → 选择性 flush（失败中止）→ header（region_count=置位 word 数，无消费方仅信息量）→ 6 页 → anchor → truncate」；`region_bitmap` 从 cache 快照填入。
 3. **`src/ftl/power_failure_recovery.c`**：`ftl_boot_power_failure` 签名 `(ftl, cp, result)`（调用点 236 行同步改）；新增 static `ftl_boot_apply_region_bitmap`（跳过 DIRTY 回放行 / bitmap 区显式读页 CLEAN / 非 bitmap 区 INVALID）；`cp_sequence` 改取 `cp->journal_sequence`。
 4. **`include/ftl/power_failure_recovery.h`**：签名 + include checkpoint.h。
-5. **测试**：`tests/unit/test_f4_region_bitmap.c`（5 例，纯 RAM + FC 桩：bit 生命周期、evict 失败保留行、CP 中止）+ `tests/framework/munit_stub_fc.c/.h`（host 虚拟成功 FC 桩 + `fc_stub_fail_next` 失败注入）+ `tests/unit/f4_stub_fail.c`（上板同名符号）+ `tests/Makefile` host target + `src/fc/makefile.mk`/`ut_main.c` 上板注册。
+5. **测试**：`tests/unit/test_f4_region_bitmap.c`（5 例，纯 RAM + FC 桩：bit 生命周期、evict 失败保留行、CP 中止）+ `tests/framework/munit_stub_fc.c/.h`（PC 本机 FC 桩 + `fc_stub_fail_next` 失败注入）+ `tests/unit/f4_stub_fail.c`（上板同名符号）+ `tests/Makefile` PC 本机 target + `src/fc/makefile.mk`/`ut_main.c` 上板注册。（v0.44 起：PC 桩/本机 target 与 F4 测试一并移除，测试统一走 `make tests` 上板。）
 6. **`docs/design/ftl_revision_history.md`**：v0.41 条目 + F 清单 F4 标"✅ v0.41 已实现"。
 
 ### 验证
 
 - make debug / release / tests 均**零错误零新增警告**（仅剩余既有 usart.c:321 死代码 + controller/host `#warning` 桩）
-- host 单元测试 `make -C tests f4`：5/5 全过
+- PC 本机纯 RAM 验证 `make -C tests f4`：5/5 全过（v0.44 起移除）
 - 上板验证（待 FTL 完工统一做）：连续写 → checkpoint → 断电重启 → 断言恢复读正确（bitmap 区预载 CLEAN 与懒加载无差别）、flush 失败注入路径（临时改 fc 桩）CP 中止不丢数据
 
 ## v0.42 — F6 pending/completion 多实例化（per-instance pending + 全局 completion 路由）
@@ -1311,13 +1311,13 @@ F6（ftl_revision_history F 清单）：`g_pending[32]`（src/ftl/pending.c）�
 3. **`include/ftl/ftl.h`**：`ftl_context_t` 加 `pending[FTL_PENDING_MAX]` + `rr_last_scan_ms`（不 include completion_table.h，无环）。
 4. **`src/ftl/ftl.c`**：删全局 `g_rr_last_scan_ms`（22 行）；`ftl_handle_completion` FTL case 内 `completion_table_route(cmd->config.ch/ce/lun)`（位域显式 (uint8_t) 转换），NULL → release+break；全部 `pending->ftl->X` → `ftl->X`；`ftl_init` 改 `pending_init(ftl)` + `ftl->rr_last_scan_ms=0` + set_default 注释注明 ctx 仅 fallback；submit_read/write 的 `pending_add(ftl,...)/pending_remove(ftl,...)`。
 5. **`src/main.c`**：include completion_table.h；`ssd_ftl_boot_all` 填完 `g_ftl_ptrs` 后 `completion_table_set_route(g_ftl_ptrs)`（boot 后、controller init 前）。
-6. **测试**：`tests/unit/test_f6_pending.c`（4 例纯 RAM：实例隔离 / init 只清本实例 / 满 32 背压互不挤占 / route 越界 NULL）+ host target `make -C tests f6`（链 pending.c + completion_table.c + munit + munit_stub_fc，桩补 `fc_poll_completion`=QUEUE_EMPTY + `fc_command_id_to_command`=NULL）+ 上板 `src/fc/makefile.mk`/`ut_main.c` 注册 `/f6/` 套件。
+6. **测试**：`tests/unit/test_f6_pending.c`（4 例纯 RAM：实例隔离 / init 只清本实例 / 满 32 背压互不挤占 / route 越界 NULL）+ PC 本机 target `make -C tests f6`（链 pending.c + completion_table.c + munit + munit_stub_fc，桩补 `fc_poll_completion`=QUEUE_EMPTY + `fc_command_id_to_command`=NULL）+ 上板 `src/fc/makefile.mk`/`ut_main.c` 注册 `/f6/` 套件。（v0.44 起：PC 桩/本机 target 与 F6 测试一并移除，测试统一走 `make tests` 上板。）
 7. **`docs/design/ftl_revision_history.md`**：v0.42 条目 + F 清单 F6 标"✅ v0.42 已实现"。
 
 ### 验证
 
 - make debug / release / tests 均**零错误零新增警告**（仅剩余既有 usart.c:321 死代码 + controller/host `#warning` 桩）
-- host 单元测试 `make -C tests f4`（5/5）+ `f6`（4/4）全过
+- PC 本机纯 RAM 验证 `make -C tests f4`（5/5）+ `f6`（4/4）全过（v0.44 起移除）
 - grep 复核：`pending_lookup/add/remove/init` 调用点全部带 ftl 首参；`g_pending`/`g_rr_last_scan_ms`/`pending->ftl` 归零；`ftl_internal_sync_wait` 21 处调用点无改动
 - 上板验证（待 FTL 完工统一做）：LUN_NUM=2 双实例提交 → 各自 completion 正确路由（读回填各自 buffer、写确认各自 Journal）
 
@@ -1336,7 +1336,7 @@ F6（ftl_revision_history F 清单）：`g_pending[32]`（src/ftl/pending.c）�
 | F6 | **pending/completion 单例多实例化** | ✅ **v0.42 已实现** — pending 表 per-instance（`ftl->pending[32]`，API 加 ftl 首参，删 pending 项内 ftl 字段）；completion 表保持全局（FC CQ 全局 + cmd_id 唯一，per-instance 会让异实例 completion 走错 default handler → 数据丢失），新增 `g_route[CH][CE][LUN]` 按 cmd->config.ch/ce/lun 路由到实例；`g_rr_last_scan_ms` 一并移入 ftl_context；`ftl_internal_sync_wait` 签名不变（21 处调用点零改动） | LUN_NUM>1 多 FTL 实例安全共存（第二个实例 init 不再冲掉第一个的 pending）；多 LUN 并发前置 | 中 | 见 v0.42 条目 |
 | F7 | **写失败 Super Block 空洞的显式回滚** | ✅ **v0.39 已实现** — `allocator_close_open_sb` 运行时关闭坏 SB（行业流程 §3.8 ①）+ `bbt_mark_bad` 标坏 block 号 + L2P 自动回滚；坏 SB 进 closed → GC 优先回收 | 修复"坏块还挂在 OPEN SB 里继续写"的状态矛盾；好 plane 经 GC 擦除回 free pool | 低 | 见 v0.39 条目 |
 | F8 | **journal 空间不足的紧急 checkpoint 回切校验** | `journal_truncate` 简化实现（擦除非当前 block）；`checkpoint_is_emergency` 有但触发面未验证 | Journal 满时依赖 checkpoint 水位线，简化截断在极端写模式下的正确性未测 | 中（测试为主） | 上板高压写验证；`journal_flush_page` 满页回切逻辑已实现 |
-| F10 | **journal_replay 只回放最新一页（掉电 ≥2 页条目丢失）** | ✅ **v0.43 已实现** — `journal_replay` 签名加 `cp_sequence`，两遍扫描：收集全部 `page_seq > cp_sequence` 页 → 按 `(page_seq, entry_index)` 递增序应用（per-LBA last-write-wins，同 LBA 旧 GC/WL 搬移条目被新写覆盖）；**顺带闭合 GC/WL 擦除先于 journal flush 的掉电损坏窗口**（Explore 调研发现：journal write-back 未 flush 就擦 victim，掉电回放指已擦除块 → `gc_migrate_sb`/`wl_relocate` 擦除前强制 `journal_flush_page`）；host 单测 `/f10/` 5 例（多页回放/CP 过滤/last-write-wins/排序防御/GC flush 契约，内存 NAND 桩） | 掉电恢复丢写（post-CP 条目超过 128 条时）+ 回放指向已擦除块 | 中 | 见 v0.43 条目 |
+| F10 | **journal_replay 只回放最新一页（掉电 ≥2 页条目丢失）** | ✅ **v0.43 已实现** — `journal_replay` 签名加 `cp_sequence`，两遍扫描：收集全部 `page_seq > cp_sequence` 页 → 按 `(page_seq, entry_index)` 递增序应用（per-LBA last-write-wins，同 LBA 旧 GC/WL 搬移条目被新写覆盖）；**顺带闭合 GC/WL 擦除先于 journal flush 的掉电损坏窗口**（Explore 调研发现：journal write-back 未 flush 就擦 victim，掉电回放指已擦除块 → `gc_migrate_sb`/`wl_relocate` 擦除前强制 `journal_flush_page`）；PC 本机单测 `/f10/` 5 例（多页回放/CP 过滤/last-write-wins/排序防御/GC flush 契约，内存 NAND 桩，v0.44 起随 PC 桩一并移除） | 掉电恢复丢写（post-CP 条目超过 128 条时）+ 回放指向已擦除块 | 中 | 见 v0.43 条目 |
 | F9 | **CQ/SQ 深度与多实例并发实测** | FC 池深度（64/256/128/64/16/64）按单实例预算 | 多 LUN/多实例并发 + 后台（GC/CP/BBT）同时争池未实测 | 中（测试） | 上板多实例后观察；文档 §17 背压已分析 |
 
 **上板验证（v0.37）是 F1/F8/F9 的前置**：FTL 首次真跑，UART 日志 + 高压写会暴露 allocator/pending/GC 的真实行为。

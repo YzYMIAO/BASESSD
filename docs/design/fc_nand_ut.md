@@ -394,8 +394,10 @@ tests/
 ├── integration/
 │   ├── test_fc_nand.c     # 旧硬件集成测试（暂保留，待废弃）
 │   └── test_fc_nand.h
-└── Makefile               # host-only 构建（不变）
 ```
+
+> 注：测试全部随 `make tests`（FC_NAND_TEST_ENABLE=1）编入固件、在 STM32H743 上经
+> UART CLI 触发；无 PC/host 独立编译入口。
 
 ### 5.2 断言使用
 

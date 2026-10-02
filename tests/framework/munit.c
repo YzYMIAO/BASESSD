@@ -170,7 +170,7 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...)
     }
 
 #if defined(__linux__) || defined(__unix__)
-    /* host 构建：失败直接退出（嵌入式是卡死保留现场） */
+    /* PC 环境编译（munit 运行器平台适配）：失败直接退出；嵌入式卡死保留现场 */
     exit(EXIT_FAILURE);
 #else
     // abort();

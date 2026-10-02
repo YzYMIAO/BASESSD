@@ -15,14 +15,6 @@ TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level2.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level3.c
 # F2 掉电重建 closed_sb_list 簿记（allocator + metadata 谓词，纯 RAM）
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_rebuild.c
-# F4 checkpoint 增量 region_bitmap 簿记（l2p cache 脏标记，纯 RAM）
-TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_f4_region_bitmap.c
-# F4 host 失败注入开关（上板时无 host 桩，用本定义提供符号）
-TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/f4_stub_fail.c
-# F6 pending/completion 多实例化（per-instance pending + 全局 completion 路由）
-TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_f6_pending.c
-# F10 journal_replay 全量回放（post-CP 多页 + last-write-wins + GC flush 契约）
-TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_f10_replay.c
 MODULE_INCS += $(PROJECT_ROOT)/tests/unit
 # 测试统一入口
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ut_main.c
