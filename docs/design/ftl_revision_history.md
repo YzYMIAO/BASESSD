@@ -1177,6 +1177,34 @@ FTL 层三个已知缺口在本版本闭环（对应「FTL 层未实现清单」
 - make debug / release / tests 均**零错误零新增警告**（仅剩余既有 usart.c:321 死代码警告 + controller/host `#warning` 桩）
 - F5 关键正确性：allocator 同号配对（坏块单 plane 整对跳过）、completion 双页簿记对称性、读路径无需改（同号后 desc 派生自动正确）
 - 上板验证（F1/F8/F9 前置，待 FTL 完工统一做）：T3 定时 checkpoint 10s 触发、GC 定时 500ms、pages=2 写读回一致、GC 搬移后 plane1 数据存活、predictive 巡检触发
+
+## v0.39 — F7 写失败 Super Block 关闭（行业坏块替换流程）
+
+**日期**：2026-10-02
+
+### 背景
+
+F7（ftl_revision_history F 清单）：写失败路径原只 `bbt_mark_bad` 标坏块，但 **Super Block 仍保持 Open 继续写**——坏块还挂在 OPEN SB 里，与 allocator 状态矛盾（bbt_mark_bad 清 valid + 摘块，而 SB next_page 还推着写）。设计文档 §3.8「运行时坏块替换流程」已定义行业做法但未实现。
+
+### 关键决策
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| 写失败处理 | **① 关闭当前 Open SB（不再写入）→ 进 closed_sb_list → GC 优先回收（VPC 低）；② bbt_mark_bad 标 block 号；③ L2P 不动自动回滚 old_pba** | 行业流程 §3.8：坏 SB 立即退役不再写，GC 回收时好 plane 擦除回 free pool、坏 plane 擦失败再标坏 |
+| 标坏粒度 | 保留 `bbt_mark_bad`（标 block 号） | 同号双 plane 下两 plane 一起退役（同号语义固有粒度：一个 block 号横跨两 plane，物理上常同坏） |
+| 空洞页 | 不置 valid（现状保留），GC 搬移跳过 | L2P 已回滚，读不会读空洞页 |
+
+### 实现
+
+1. **`include/ftl/allocator.h` + `src/ftl/allocator.c`**：新增 `allocator_close_open_sb(alloc, temperature)` —— 运行时关闭指定温度的 Open SB（复用内部 `allocator_close_sb`：置 CLOSED + 进 closed_sb_list + valid=0）。
+2. **`src/ftl/ftl.c`**：写失败分支（completion handler）—— 调 `allocator_close_open_sb(FTL_TEMP_HOT)` 关闭坏 SB，然后 `bbt_mark_bad` 标坏，L2P 不动自动回滚。
+
+### 验证
+
+- make debug / release / tests 均**零错误零新增警告**（仅剩余既有 usart.c:321 + controller/host `#warning` 桩）
+- 逻辑闭环：写失败 → 坏 SB 关闭进 closed → GC 选 victim（VPC 低）→ gc_erase_and_free 擦双 plane → 好 plane 回 free pool、坏 plane 擦失败标坏
+- 上板验证（待 FTL 完工统一做）：注入 PROGRAM 失败 → 观察 SB 关闭 + GC 回收 + 好 plane 复用
+
 - pending/completion 全局单例多实例化——LUN_NUM>1 启用时必修
 - controller 传参的 `g_ftl_ptrs` 显式指针表（避免 -Wincompatible-pointer-types）；若后续 controller 头改收数组退化形式（`ftl_context_t (*ftl)[CE][LUN]`）可去掉
 - write 路径 pending 完成依赖 completion_table_drain 泵（非同步释放）——pending 槽位只在完成回调释放，submit 失败路径已配对 remove；无显式泄漏（UART 层尚未接 pending 通知，上板前关注）
@@ -1194,7 +1222,7 @@ FTL 层三个已知缺口在本版本闭环（对应「FTL 层未实现清单」
 | F4 | **checkpoint 增量（region_bitmap）** | 全量写 6 页（region_bitmap 恒全 1，恢复不消费）；`journal_sequence` 与 `sequence` 同值 | 每次 checkpoint 写全表，容量/寿命开销大 | 大 | 增量需跟踪 dirty region（l2p cache DIRTY 行 → bitmap）+ 恢复按 bitmap 局部加载 |
 | F5 | **写 Multi-Plane 真双页（VPC/空洞侧）** | ✅ **v0.38 已实现** — allocator 同号双 plane（industry super block）+ completion 对 plane1 页对称簿记（set_valid/L2P io.lba+1/Journal/清旧页）；pending 加 `old_pba1` | 跨 plane 写 VPC/映射/GC 搬移完整闭环，修复"plane1 烧错块"根因 | 中 | 见 v0.38 条目 |
 | F6 | **pending/completion 单例多实例化** | `g_pending[32]`/`g_table[32]` 全局单例 | LUN_NUM>1 多 FTL 实例共享命令路由 → 冲突 | 中（LUN>1 前必修） | v0.34 遗留；pfr 中 scan_write_pointer 硬编码 ch/ce=0 同源 |
-| F7 | **写失败 Super Block 空洞的显式回滚** | 依赖「写失败不计 VPC + GC 自然跳过」 | 空洞页数据悬空，GC 前读到旧 L2P 指向的页仍可能触发 RR | 低 | 可选：失败写后该页显式标记 / journal 补偿；现状可运行 |
+| F7 | **写失败 Super Block 空洞的显式回滚** | ✅ **v0.39 已实现** — `allocator_close_open_sb` 运行时关闭坏 SB（行业流程 §3.8 ①）+ `bbt_mark_bad` 标坏 block 号 + L2P 自动回滚；坏 SB 进 closed → GC 优先回收 | 修复"坏块还挂在 OPEN SB 里继续写"的状态矛盾；好 plane 经 GC 擦除回 free pool | 低 | 见 v0.39 条目 |
 | F8 | **journal 空间不足的紧急 checkpoint 回切校验** | `journal_truncate` 简化实现（擦除非当前 block）；`checkpoint_is_emergency` 有但触发面未验证 | Journal 满时依赖 checkpoint 水位线，简化截断在极端写模式下的正确性未测 | 中（测试为主） | 上板高压写验证；`journal_flush_page` 满页回切逻辑已实现 |
 | F9 | **CQ/SQ 深度与多实例并发实测** | FC 池深度（64/256/128/64/16/64）按单实例预算 | 多 LUN/多实例并发 + 后台（GC/CP/BBT）同时争池未实测 | 中（测试） | 上板多实例后观察；文档 §17 背压已分析 |
 

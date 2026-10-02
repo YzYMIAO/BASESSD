@@ -167,6 +167,19 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature);
 void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
 
 /*
+ * allocator_close_open_sb - 运行时关闭当前 Open Super Block（写失败等场景）
+ *
+ * 行业坏块替换流程：Super Block 中某 plane PROGRAM 失败后，①关闭该 SB
+ * （不再写入新数据）→ 进 closed_sb_list → GC 优先回收（VPC 低）。坏块
+ * 标记仍由 bbt_mark_bad 完成（标 block 号，同号双 plane 下两 plane 一起退役）。
+ *
+ * @param alloc      Allocator 上下文
+ * @param temperature 要关闭的 Open SB 温度（FTL_TEMP_HOT / FTL_TEMP_COLD）
+ * @return FTL_OK 成功，FTL_ERROR 无对应 Open SB
+ */
+ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature);
+
+/*
  * allocator_remove_closed_sb - GC 回收后从 Closed 列表移除条目（swap-remove，O(1)）
  *
  * 修 closed_sb_count 只增不减导致的列表爆炸 + 已回收 SB 被再次选为 victim 的无限 GC 空转。

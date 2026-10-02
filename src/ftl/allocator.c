@@ -206,6 +206,26 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
     }
 }
 
+ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature)
+{
+    super_block_t *sb;
+
+    if (alloc == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+    if ((sb == NULL) || (sb->valid == 0U))
+    {
+        return FTL_ERROR; /* 无对应 Open SB */
+    }
+
+    /* 关闭：置 CLOSED + 进 closed_sb_list + valid=0（行业坏块替换流程 ①） */
+    allocator_close_sb(alloc, sb);
+    return FTL_OK;
+}
+
 nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
 {
     super_block_t *sb;

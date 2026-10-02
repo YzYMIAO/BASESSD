@@ -233,13 +233,20 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                         }
                         else
                         {
-                            /* 写失败：标记坏块（RAM only，后台 bbt_flush 持久化） */
+                            /* 写失败：行业坏块替换流程（ftl_design §3.8）
+                             *
+                             * ① 关闭当前 Open Super Block（不再写入新数据）→ 进 closed_sb_list
+                             *    → GC 优先回收（该 SB VPC 偏低：失败页不置 valid + 旧页被覆盖清位）
+                             * ② bbt_mark_bad（RAM only，后台 bbt_flush 持久化）——标 block 号，
+                             *    同号双 plane 下两 plane 一起退役（同号语义固有粒度）
+                             * ③ L2P 不动 → 自动回滚到 old_pba，旧数据完好
+                             * ④ GC 回收时：好 plane 擦除回 free pool；坏 plane 擦除失败再标坏
+                             */
+                            (void)allocator_close_open_sb(&pending->ftl->alloc,
+                                                          (uint8_t)FTL_TEMP_HOT);
                             (void)bbt_mark_bad(&pending->ftl->alloc,
                                                ftl_pba_gblock(pending->new_pba),
                                                (uint8_t)FTL_BLOCK_BAD_PROGRAM);
-                            /* L2P 不动 → 自动回滚到 old_pba，旧数据完好 */
-                            /* Super Block 空洞由 GC 扫描时自然跳过 */
-                            /* VPC：写失败的新页不计入（写成功才 ++），空洞块 VPC 偏低 → GC 优先回收 */
                         }
                         if (pending->io.status_out != NULL)
                         {
