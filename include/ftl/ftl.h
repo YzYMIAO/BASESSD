@@ -51,6 +51,10 @@ typedef struct ftl_context
     /* L2P Cache */
     l2p_cache_t cache;
 
+    /* Pending Request 表（F6：per-instance，本实例异步请求追踪）
+     * 由 pending.c 操作，submit 时按值嵌入 io 请求。 */
+    ftl_pending_req_t pending[FTL_PENDING_MAX];
+
     /* Allocator */
     ftl_allocator_t alloc;
 
@@ -70,6 +74,9 @@ typedef struct ftl_context
 
     /* 统计 */
     uint32_t total_writes;
+
+    /* 慢死预测巡检节流（F6：per-instance，原全局 g_rr_last_scan_ms） */
+    uint32_t rr_last_scan_ms;
 
     /* Read Recovery：per-Block ECC 趋势追踪已并入 alloc.blocks[].rr（BST 单数据源） */
     ftl_read_recovery_t rr; /* Read Recovery 上下文（仅重试计数） */

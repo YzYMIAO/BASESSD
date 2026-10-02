@@ -7,6 +7,7 @@
 #include "fc/fc.h"
 #include "ftl/allocator.h"
 #include "ftl/bst.h"
+#include "ftl/completion_table.h"
 #include "ftl/ftl.h"
 #include "ftl/metadata.h"
 #include "ftl/power_failure_recovery.h"
@@ -192,6 +193,11 @@ static void ssd_ftl_boot_all(void)
             }
         }
     }
+
+    /* F6：全局 completion 表的实例路由表 = 全部实例 boot 完成后的 g_ftl_ptrs。
+     * 必须在所有 ftl_init 之后、首次 ftl_service 之前设置（路由表是全局的，
+     * 补进哪个实例都行，一次设置覆盖全部）。 */
+    completion_table_set_route(g_ftl_ptrs);
 
     ctrl_ret = ssd_controller_init(&g_ctrl, g_ftl_ptrs);
     if (ctrl_ret != SSD_STATUS_OK)

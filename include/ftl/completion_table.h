@@ -18,6 +18,9 @@
 #include "ftl/ftl_type.h"   /* ftl_status_t */
 #include <stdint.h>
 
+/* ── 前向声明（ftl_context_t 在 ftl.h 中定义）── */
+struct ftl_context;
+
 /* ── Completion 路由表项 ── */
 
 typedef void (*completion_handler_fn_t)(const fc_command_status_t *completion,
@@ -43,6 +46,22 @@ void                         completion_table_remove(uint16_t cmd_id);
 completion_entry_t          *completion_table_lookup(uint16_t cmd_id);
 void                         completion_table_set_default(completion_handler_fn_t handler,
                                                            void                  *ctx);
+
+/*
+ * completion_table_set_route - 设置实例路由表（F6）
+ *
+ * 全局 completion 表保持单一（FC CQ 全局、cmd_id 全局唯一），默认 handler
+ * 按命令 ch/ce/lun 路由到对应 FTL 实例的 pending 表。本函数在 main.c
+ * 填完 g_ftl_ptrs 后调用一次（所有实例 boot 完成后）。
+ *
+ * @param route  CH_NUM×CE_NUM×LUN_NUM 三维 ftl_context_t* 表（仿 main.c g_ftl_ptrs）
+ */
+void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM]);
+
+/*
+ * completion_table_route - 按 (ch,ce,lun) 取实例（越界/未设置返回 NULL）
+ */
+struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun);
 
 /*
  * completion_table_drain - 消费所有 CQ entry 并通过路由表分发

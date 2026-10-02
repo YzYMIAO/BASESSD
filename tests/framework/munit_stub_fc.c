@@ -75,6 +75,22 @@ fc_status_t fc_get_resource_stats(fc_resource_stats_t *stats)
     return FC_STATUS_NOT_SUPPORTED; /* host 环境无 FC 资源：munit 不打印 RES 行 */
 }
 
+/* fc_poll_completion 桩：恒 QUEUE_EMPTY → completion_table_drain 的
+ * while 循环立即终止（返回 OK=0 会死循环）。F4/F6 测试不真正 drain。 */
+fc_status_t fc_poll_completion(fc_command_status_t *completion)
+{
+    (void)completion;
+    return FC_STATUS_QUEUE_EMPTY;
+}
+
+/* fc_command_id_to_command 桩：F6 的 with_release handler 引用；返回 NULL
+ * 即可（release 分支跳过，无泄漏风险）。 */
+fc_command_t *fc_command_id_to_command(uint16_t command_id)
+{
+    (void)command_id;
+    return NULL;
+}
+
 /* 平台 time_us：checkpoint_now_ms 引用（host 桩返回 0，timestamp 退化 0） */
 const ssd_platform_ops_t *ssd_platform_get(void)
 {

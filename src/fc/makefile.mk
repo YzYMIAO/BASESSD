@@ -19,6 +19,8 @@ TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_rebuild.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_f4_region_bitmap.c
 # F4 host 失败注入开关（上板时无 host 桩，用本定义提供符号）
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/f4_stub_fail.c
+# F6 pending/completion 多实例化（per-instance pending + 全局 completion 路由）
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_f6_pending.c
 MODULE_INCS += $(PROJECT_ROOT)/tests/unit
 # 测试统一入口
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ut_main.c

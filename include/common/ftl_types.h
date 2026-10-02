@@ -33,7 +33,7 @@ typedef void (*pending_cb_t)(void *ctx);
  *
  * 由 Controller 层构造后整体传入 ftl_submit_read / ftl_submit_write
  * （形参 (ftl, req) 共 2 个，替换原先 8 个散落形参）。
- * pending 表按值嵌入本结构体（g_pending[i].io = *req），submit 调用期间
+ * pending 表按值嵌入本结构体（ftl->pending[i].io = *req），submit 调用期间
  * 只要求 req 有效，之后完成处理用 pending 表中的拷贝。
  */
 typedef struct

@@ -29,6 +29,9 @@ extern MunitTest g_rebuild_tests[];
 /* F4 checkpoint 增量 region_bitmap 簿记（l2p cache 脏标记，纯 RAM） */
 extern MunitTest g_f4_tests[];
 
+/* F6 pending/completion 多实例化（per-instance pending + 全局 completion 路由） */
+extern MunitTest g_f6_pending_tests[];
+
 static MunitSuite g_fc_nand_suite =
     {
         (char *)"/fc-nand/",
@@ -50,6 +53,9 @@ static MunitSuite g_fc_nand_suite =
 
                        /* F4 checkpoint 增量 region_bitmap 簿记 */
                        {(char *)"f4", g_f4_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+
+                       /* F6 pending/completion 多实例化 */
+                       {(char *)"f6", g_f6_pending_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
                        {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                        },

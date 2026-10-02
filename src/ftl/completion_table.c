@@ -1,15 +1,20 @@
 #include "ftl/completion_table.h"
 
 #include "fc/fc.h"
+#include "ftl/ftl.h"      /* ftl_context_t（route 表） */
 #include "ftl/ftl_type.h"
+#include "nand/nand_config.h" /* CH_NUM/CE_NUM/LUN_NUM */
 
 #include <string.h>
 
 /* ── 静态路由表 ── */
 
-static completion_entry_t     g_table[COMPLETION_TABLE_SIZE];
+static completion_entry_t      g_table[COMPLETION_TABLE_SIZE];
 static completion_handler_fn_t g_default_handler = NULL;
 static void                   *g_default_ctx     = NULL;
+
+/* ── 实例路由表（F6）：default handler 按命令 ch/ce/lun → FTL 实例 ── */
+static struct ftl_context *g_route[CH_NUM][CE_NUM][LUN_NUM];
 
 /* ── 路由表基础操作 ── */
 
@@ -18,6 +23,7 @@ void completion_table_init(void)
     memset(g_table, 0, sizeof(g_table));
     g_default_handler = NULL;
     g_default_ctx     = NULL;
+    memset(g_route, 0, sizeof(g_route));
 }
 
 ftl_status_t completion_table_add(uint16_t                  cmd_id,
@@ -79,6 +85,33 @@ void completion_table_set_default(completion_handler_fn_t handler, void *ctx)
 {
     g_default_handler = handler;
     g_default_ctx     = ctx;
+}
+
+void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
+{
+    uint8_t ch;
+    uint8_t ce;
+    uint8_t lun;
+
+    for (ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (lun = 0U; lun < LUN_NUM; lun++)
+            {
+                g_route[ch][ce][lun] = (route != NULL) ? route[ch][ce][lun] : NULL;
+            }
+        }
+    }
+}
+
+struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun)
+{
+    if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
+    {
+        return NULL;
+    }
+    return g_route[ch][ce][lun];
 }
 
 /*
