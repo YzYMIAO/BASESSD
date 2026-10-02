@@ -29,7 +29,8 @@ typedef struct
     ftl_io_request_t   io;                /* ★ 嵌入请求描述（lba/buffer/pages/通知/回调），按值拷贝 */
     /* ↓↓↓ 写完成确认/回滚（写专用，读请求时无效） ↓↓↓ */
     nand_pba_t         old_pba;           /* 写前旧 PBA（journal/回滚用） */
-    nand_pba_t         new_pba;           /* 新分配的 PBA（坏块标记用） */
+    nand_pba_t         new_pba;           /* 新分配的 PBA（坏块标记用，Multi-Plane 时 = plane0） */
+    nand_pba_t         old_pba1;          /* pages=2 时 plane1 写前旧 PBA（Multi-Plane 双页簿记） */
     struct ftl_context *ftl;              /* completion handler 访问 ftl（写确认用） */
     uint8_t            cache_intermediate;/* 1: Cache Program 中间页（15h），completion 时不更新 L2P/Journal */
 } ftl_pending_req_t;
@@ -48,13 +49,15 @@ void pending_init(void);
  * @param io                 IO 请求描述（lba/buffer/pages/complete_flag/status_out/on_complete/ctx）
  * @param old_pba            写前旧 PBA（写请求用，读传 NAND_PBA_INVALID）
  * @param new_pba            新分配的 PBA（写请求用，读传 NAND_PBA_INVALID）
+ * @param old_pba1           pages=2 时 plane1 写前旧 PBA（单页请求传 NAND_PBA_INVALID）
  * @param ftl                FTL 上下文（写请求用，读传 NULL）
  * @param cache_intermediate Cache Program 中间页标志（1=中间页跳过 L2P/Journal 更新）
  * @return FTL_OK 成功，FTL_ERROR 表满
  */
 int pending_add(uint16_t cmd_id, const ftl_io_request_t *io,
                 nand_pba_t old_pba, nand_pba_t new_pba,
-                struct ftl_context *ftl, uint8_t cache_intermediate);
+                nand_pba_t old_pba1, struct ftl_context *ftl,
+                uint8_t cache_intermediate);
 
 /*
  * pending_lookup - 按 command_id 查找 pending 项

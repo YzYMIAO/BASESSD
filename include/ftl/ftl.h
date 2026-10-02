@@ -128,7 +128,9 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req);
  *   ⑤ Journal + L2P 在 completion handler 中确认 NAND PROGRAM 成功后执行
  *
  * @param ftl  FTL 上下文
- * @param req  IO 请求描述（req->lba 在 pages=2 时必须为偶数，代表双 Plane 的 plane 0 侧）
+ * @param req  IO 请求描述（pages=2 时 io.lba 与 io.lba+1 是两个连续 LBA，分别
+ *             映射 plane0/plane1 页，与奇偶无关；allocator 同号双 plane 保证
+ *             Multi-Plane 命令烧录位置与簿记一致）
  * @return FTL_OK 成功提交，FTL_ERROR 失败
  */
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);

@@ -16,6 +16,11 @@
 
 /* ── 内部辅助 ── */
 
+/* 慢死预测巡检节流：≥1s 才扫一轮（read disturb 是慢变量，频繁全扫无谓开销） */
+#define RR_SCAN_INTERVAL_MS (1000U)
+
+static uint32_t g_rr_last_scan_ms; /* 上次巡检时刻（单实例场景；多实例后移入 ftl_context） */
+
 /*
  * ftl_now_ms - 当前单调毫秒（经平台抽象 time_us 换算）。
  *
@@ -124,10 +129,11 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
 
                             /* VPC/bitmap 维护：新页置位 + 覆盖写清旧页（单点更新防漂移）
                              *
-                             * 注意：当前写请求只配置单 Plane 写（new_pba 只含一个 plane 的页）。
-                             * 控制器层 pages=2 的 Multi-Plane 写，实际是发起两条单 Plane PROGRAM
-                             * 到双 Plane（每次 allocator_alloc 取一页、写一侧 plane），
-                             * 所以这里始终只需处理一个 plane 的一页。 */
+                             * plane0（new_pba 所在 plane）簿记保留。
+                             * pages=2 的 Multi-Plane 写：FC 层按「同 block/page + plane=1」派生
+                             * plane1 desc（allocator 同号双 plane 后即实际烧录位置），
+                             * 这里对 plane1 页做同样簿记（set_valid + L2P + Journal），
+                             * 避免 plane1 成为无映射幽灵页（GC 不搬 → 擦除丢数据）。 */
                             {
                                 ftl_block_t *nb = &pending->ftl->alloc.blocks[ftl_pba_gblock(pending->new_pba)];
                                 ftl_block_set_valid(nb,
@@ -144,6 +150,39 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                                     ftl_block_clr_valid(ob,
                                                         (uint8_t)pba_to_plane(pending->old_pba),
                                                         (uint8_t)pba_to_page(pending->old_pba));
+                                }
+                            }
+
+                            /* pages=2 Multi-Plane：plane1 页（io.lba+1）同样簿记 */
+                            if (pending->io.pages == 2U)
+                            {
+                                nand_pba_t pba1 = pba_make(pba_to_ch(pending->new_pba),
+                                                           pba_to_ce(pending->new_pba),
+                                                           pba_to_page(pending->new_pba),
+                                                           1U, /* plane1 */
+                                                           pba_to_block(pending->new_pba),
+                                                           pba_to_lun(pending->new_pba),
+                                                           0U);
+                                ftl_block_t *nb1 = &pending->ftl->alloc.blocks[ftl_pba_gblock(pba1)];
+
+                                ftl_block_set_valid(nb1, 1U, (uint8_t)pba_to_page(pba1));
+                                nb1->program_count++;
+
+                                /* L2P：io.lba+1 → plane1 页 */
+                                l2p_cache_write(&pending->ftl->cache,
+                                                (lba_t)(pending->io.lba + 1U),
+                                                pba1);
+                                journal_append(&pending->ftl->journal,
+                                               (lba_t)(pending->io.lba + 1U),
+                                               pending->old_pba1, pba1);
+
+                                /* 覆盖写：plane1 旧页失效 */
+                                if (pending->old_pba1 != NAND_PBA_INVALID)
+                                {
+                                    ftl_block_t *ob1 = &pending->ftl->alloc.blocks[ftl_pba_gblock(pending->old_pba1)];
+                                    ftl_block_clr_valid(ob1,
+                                                        (uint8_t)pba_to_plane(pending->old_pba1),
+                                                        (uint8_t)pba_to_page(pending->old_pba1));
                                 }
                             }
 
@@ -276,6 +315,16 @@ static void ftl_service_idle(ftl_context_t *ftl)
 
     /* 磨损均衡（IDLE 全力执行） */
     (void)wl_execute(ftl);
+
+    /* 慢死预测巡检（节流 1s；一次只搬一个 SB，防长时间阻塞） */
+    {
+        uint32_t now_ms = ftl_now_ms();
+        if ((now_ms - g_rr_last_scan_ms) >= RR_SCAN_INTERVAL_MS)
+        {
+            g_rr_last_scan_ms = now_ms;
+            (void)wl_predictive_relocate(ftl);
+        }
+    }
 
     /* 强制写 Journal buffer */
     journal_flush_page(&ftl->journal);
@@ -560,7 +609,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
 
     /* ⑤ 注册 pending（必须早于 submit，避免竞态；io 按值嵌入） */
     ret = pending_add(cmd->command_id, req,
-                      NAND_PBA_INVALID, NAND_PBA_INVALID, NULL, 0U);
+                      NAND_PBA_INVALID, NAND_PBA_INVALID, NAND_PBA_INVALID, NULL, 0U);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
@@ -584,6 +633,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
     fc_command_t *cmd;
     nand_pba_t    new_pba;
     nand_pba_t    old_pba;
+    nand_pba_t    old_pba1 = NAND_PBA_INVALID;
     uint32_t      data_size;
     int           ret;
     lba_t         internal_lba;
@@ -623,8 +673,12 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
         }
     }
 
-    /* ② 读旧 PBA（journal 记录用） */
-    old_pba = l2p_cache_read(&ftl->cache, internal_lba);
+    /* ② 读旧 PBA（journal 记录用）。
+     * pages=2 时平面1 页也要读旧映射（Multi-Plane 双页簿记，见 completion）。 */
+    old_pba  = l2p_cache_read(&ftl->cache, internal_lba);
+    old_pba1 = (req->pages == 2U)
+                   ? l2p_cache_read(&ftl->cache, (lba_t)(internal_lba + 1U))
+                   : NAND_PBA_INVALID;
 
     /* ③ 配置 FC 写命令 — 根据 pages 选择单 Plane 或 Multi-Plane */
     cmd = fc_command_alloc();
@@ -669,7 +723,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
 
     /* ⑤ 注册 pending（io 按值嵌入 + old/new_pba + ftl 用于写完成确认） */
     ret = pending_add(cmd->command_id, req,
-                      old_pba, new_pba, ftl, 0U);
+                      old_pba, new_pba, old_pba1, ftl, 0U);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);

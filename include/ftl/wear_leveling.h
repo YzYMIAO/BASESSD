@@ -118,4 +118,17 @@ uint32_t wl_avg_erase(const struct ftl_context *ftl);
  */
 uint32_t wl_count_blocks_below(const struct ftl_context *ftl, uint32_t threshold);
 
+/*
+ * wl_predictive_relocate - 慢死预测巡检 + 整体搬移
+ *
+ * 企业级 Predictive Failures 做法：后台周期扫 Closed 块 ECC 健康，
+ * 命中 health ≥ CRITICAL 的慢死块 → 整 Super Block 搬移（wl_relocate）
+ * → 双 plane 块退役（不再分配新数据，不标坏）。
+ * 接入 ftl_service_idle（带时间节流）。
+ *
+ * @param ftl  FTL 上下文
+ * @return 1 完成一轮搬移，0 无命中
+ */
+int wl_predictive_relocate(struct ftl_context *ftl);
+
 #endif /* FTL_WEAR_LEVELING_H */

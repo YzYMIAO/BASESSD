@@ -374,3 +374,52 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
 
     return (rr_block_health_t)track->health;
 }
+
+int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
+{
+    uint16_t i;
+
+    if ((alloc == NULL) || (alloc->blocks == NULL) || (gblock == NULL))
+    {
+        return 0;
+    }
+
+    for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    {
+        const ftl_block_t *b = &alloc->blocks[i];
+
+        /* 慢死预测只针对 Closed 块：Open 还在写、Free 没数据、Bad/Reserved 已退役 */
+        if (!ftl_block_state_is(b, FTL_BLOCK_STATE_CLOSED))
+        {
+            continue;
+        }
+
+        if (b->rr.health >= RR_BLOCK_CRITICAL)
+        {
+            *gblock = i;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+void rr_retire_block(ftl_block_t *b)
+{
+    if (b == NULL)
+    {
+        return;
+    }
+
+    /* 退役：不再分配新数据（RESERVED = Spare Pool 语义），不标坏（BBT 不删、仍可读） */
+    ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
+                           FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);
+    ftl_block_state_set(b, FTL_BLOCK_STATE_RESERVED);
+    ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+
+    /* 健康复位：块仍活着，ECC 趋势重计（read_count 归零，read disturb 重计） */
+    b->rr.health      = (uint8_t)RR_BLOCK_HEALTHY;
+    b->rr.rising_count = 0U;
+    (void)memset(b->rr.ecc_history, 0, sizeof(b->rr.ecc_history));
+    b->read_count = 0U;
+}

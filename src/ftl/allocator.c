@@ -63,42 +63,71 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
 }
 
 /*
- * 内部工具：从 Free Pool 选择一个 Block（磨损均衡：选擦除次数最少的）
- * 若 free_count 为 0 则返回 UINT16_MAX
+ * 内部工具：从 Free Pool 移除一个 gblock（swap-remove，O(1)）
+ * @return 1 移除成功，0 未找到
+ */
+static uint8_t allocator_pool_remove(ftl_allocator_t *alloc, uint16_t gblock)
+{
+    uint16_t i;
+
+    for (i = 0U; i < alloc->free_count; i++)
+    {
+        if (alloc->free_blocks[i] == gblock)
+        {
+            alloc->free_blocks[i] = alloc->free_blocks[--alloc->free_count];
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+/*
+ * 内部工具：从 Free Pool 选一个 Super Block 的 block 号（磨损均衡）
+ *
+ * 行业标准：Super Block 的 plane0/plane1 用同一 block 号（NAND 行地址 plane
+ * 只差 BA6 位，block 必须同号），Multi-Plane 命令一次写双 plane 同号页。
+ * 遍历 block 号 b in 0..BLOCKS_PER_PLANE-1，两 plane 的 gblock 都必须
+ * 在 Free Pool（state & FREE）且非坏；寿命取双 plane 平均擦除次数（Super
+ * Block 整体寿命 = 两 plane 共同），选平均最小。
+ *
+ * 若 free_count 为 0 或无可配对 block 则返回 UINT16_MAX
  */
 static uint16_t allocator_select_block(ftl_allocator_t *alloc)
 {
-    uint16_t best_idx   = 0U;
+    uint16_t b;
     uint16_t best_block = UINT16_MAX;
     uint32_t min_erase  = UINT32_MAX;
-    uint16_t i;
 
-    if (alloc->free_count == 0U)
+    if ((alloc == NULL) || (alloc->blocks == NULL) || (alloc->free_count == 0U))
     {
         return UINT16_MAX;
     }
 
-    for (i = 0U; i < alloc->free_count; i++)
+    for (b = 0U; b < BLOCKS_PER_PLANE; b++)
     {
-        uint16_t    gblock = alloc->free_blocks[i];
-        ftl_block_t *blk   = &alloc->blocks[gblock];
+        uint16_t    g0 = ftl_gblock(0U, b);
+        uint16_t    g1 = ftl_gblock(1U, b);
+        ftl_block_t *blk0 = &alloc->blocks[g0];
+        ftl_block_t *blk1 = &alloc->blocks[g1];
+        uint32_t    sum;
 
-        /* 防御性跳过坏块（坏块不会出现在 Free Pool，双保险） */
-        if (ftl_block_is_bad(blk))
+        /* 双 plane 都必须空闲且非坏（坏块不参与配对） */
+        if ((!ftl_block_state_is(blk0, FTL_BLOCK_STATE_FREE)) ||
+            (!ftl_block_state_is(blk1, FTL_BLOCK_STATE_FREE)) ||
+            ftl_block_is_bad(blk0) || ftl_block_is_bad(blk1))
         {
             continue;
         }
 
-        if (blk->erase_count < min_erase)
+        /* 寿命取双 plane 平均擦除次数；比较用和（均值单调同序） */
+        sum = (uint32_t)blk0->erase_count + (uint32_t)blk1->erase_count;
+        if (sum < min_erase)
         {
-            min_erase  = blk->erase_count;
-            best_idx   = i;
-            best_block = gblock;
+            min_erase  = sum;
+            best_block = b;
         }
     }
 
-    /* 从 Free Pool 移除选中 Block */
-    alloc->free_blocks[best_idx] = alloc->free_blocks[--alloc->free_count];
     return best_block;
 }
 
@@ -199,13 +228,12 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
             allocator_close_sb(alloc, sb);
         }
 
+        /* 行业标准：Super Block 双 plane 同号 block（Multi-Plane 命令要求） */
         block0 = allocator_select_block(alloc);
-        block1 = allocator_select_block(alloc);
-
-        if ((block0 == UINT16_MAX) || (block1 == UINT16_MAX))
+        if (block0 == UINT16_MAX)
         {
             /*
-             * Free Pool 耗尽。
+             * Free Pool 无可配对 block（耗尽 / 单 plane 坏块残留）。
              *
              * 返回 NAND_PBA_INVALID，调用者（ftl_submit_write）需触发紧急 GC
              * 回收 Closed Super Block 后重试。
@@ -213,6 +241,11 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
              */
             return NAND_PBA_INVALID;
         }
+        block1 = block0; /* 双 plane 同号：plane 由 gblock 位域区分 */
+
+        /* 从 Free Pool 移除双 plane 两个 gblock（swap-remove） */
+        (void)allocator_pool_remove(alloc, ftl_gblock(0U, block0));
+        (void)allocator_pool_remove(alloc, ftl_gblock(1U, block1));
 
         sb->plane_blocks[0] = block0;
         sb->plane_blocks[1] = block1;

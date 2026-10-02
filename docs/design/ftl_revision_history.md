@@ -1140,11 +1140,45 @@ v0.36 把 controller 路由接入，但 **FTL 仍无生产调用入口**——`s
 
 ### 待确认/遗留
 
-- 档三分层（BST 存储分层）——独立任务（触发条件未变，见 ftl_design §19）
 - 掉电重建 closed_sb_list——v0.32 二期遗留
+
+## v0.38 — F1/F3/F5 闭环（time_us 钩子 + predictive 搬移 + Multi-Plane 双页簿记）
+
+**日期**：2026-10-02
+
+### 背景
+
+FTL 层三个已知缺口在本版本闭环（对应「FTL 层未实现清单」F1/F3/F5）：
+- **F1**：T3 定时触发从未生效（`checkpoint_check_trigger(ftl,0U)` 恒传 0、`gc_check_trigger(...,500U)` 硬编码、`cp.timestamp` 恒 0）
+- **F3**：`rr_check_predictive` 无调用方 → CRITICAL/DYING 块不主动搬移
+- **F5**：Multi-Plane 写（pages=2）只簿记 plane0，plane1 是"幽灵页"，且探索确认根因更深——**allocator 独立选异号块**导致 plane1 实际烧录到错误物理块
+
+### 关键决策
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| F1 时间源 | **平台抽象 `ssd_platform_ops_t.time_us`**（新增 `stm32_platform_time_us` = HAL_GetTick×1000，main.c boot 前注册） | FTL 核心不直接依赖 H743 平台实现（架构边界）；register 强制 time_us 非 NULL；us→ms `/1000` 换算防 10s 阈值变 10ms |
+| F1 计时字段 | `ftl_now_ms()` helper（未注册返 0 → T3 恒不触发，行为等同接线前）；`cp_timer_start`/`gc_timer_start` 触发后回写 | 复用已有 trigger 签名（elapsed_ms 参数本就在），只填真实值 |
+| F3 挂载 | **ftl_service_idle 巡检 + 1s 节流**（`RR_SCAN_INTERVAL_MS`），一次只搬一个 SB | 行业后台周期性巡检；read disturb 是慢变量，避免频繁全扫 4096 块 |
+| F3 搬移粒度 | **整 Super Block**（`wl_relocate` 复用）+ 双 plane `rr_retire_block` 退役 | 行业 Predictive Failures：有效页整体搬走 + 慢死块退役（RESERVED，不再分配新数据），**不标坏**（BBT 不删、仍可读） |
+| F3 归属 | `wl_predictive_relocate` **并入 wear_leveling.c**（删独立 predictive.c） | 搬移执行本来就归 WL，predictive 只是新触发源；RR 模块只留 scan/retire（健康判定） |
+| F5 核心 | **allocator 同号双 plane**：`allocator_select_block` 按 block 号配对（双 plane 必须 FREE 且非坏，寿命取平均 EC），`allocator_alloc` 从 pool 移除两 gblock | 行业 super block = 每 plane 取同编号 block（NAND 行地址 plane 只差 BA6 位，block 必须同号）；修复 plane1 烧错块根因 |
+| F5 簿记 | completion 对 plane1 页对称簿记（set_valid/program_count/L2P `io.lba+1`/Journal/覆盖清旧页）；pending 加 `old_pba1` | plane1 不再无映射幽灵页 → GC/WL 搬移不丢数据，运行/掉电恢复路径一致 |
+| F5 语义 | pages=2 = `io.lba` 与 `io.lba+1` 两个连续 LBA 分别映射 plane0/plane1（**与奇偶无关**） | 放宽旧"必须偶数"假设；controller 拆分已产生连续 LBA 对，无需改 |
+
+### 实现
+
+1. **F1**：`src/platform/stm32h743/platform_ops.c/h`（新增）+ `src/main.c`（注册）+ `src/ftl/ftl.c`（`ftl_now_ms` + 三处 trigger elapsed + 回写）+ `src/ftl/checkpoint.c`（`cp.timestamp` 填真值）。
+2. **F3**：`src/ftl/read_recovery.c/h`（`rr_predictive_scan` 只扫 Closed health≥CRITICAL + `rr_retire_block` 置 RESERVED/健康复位）+ `src/ftl/wear_leveling.c/h`（`wl_predictive_relocate`）+ `src/ftl/ftl.c`（idle 巡检 1s 节流）。
+3. **F5**：`src/ftl/allocator.c`（`allocator_pool_remove` 新增 + `allocator_select_block` 同号配对 + `allocator_alloc` 双 gblock 移除 + `plane_blocks[0]=plane_blocks[1]`）+ `src/ftl/pending.c/h`（`old_pba1`）+ `src/ftl/ftl.c`（submit 读 `old_pba1` + completion 双页簿记）+ `include/ftl/ftl.h`（pages=2 语义注释）。
+
+### 验证
+
+- make debug / release / tests 均**零错误零新增警告**（仅剩余既有 usart.c:321 死代码警告 + controller/host `#warning` 桩）
+- F5 关键正确性：allocator 同号配对（坏块单 plane 整对跳过）、completion 双页簿记对称性、读路径无需改（同号后 desc 派生自动正确）
+- 上板验证（F1/F8/F9 前置，待 FTL 完工统一做）：T3 定时 checkpoint 10s 触发、GC 定时 500ms、pages=2 写读回一致、GC 搬移后 plane1 数据存活、predictive 巡检触发
 - pending/completion 全局单例多实例化——LUN_NUM>1 启用时必修
 - controller 传参的 `g_ftl_ptrs` 显式指针表（避免 -Wincompatible-pointer-types）；若后续 controller 头改收数组退化形式（`ftl_context_t (*ftl)[CE][LUN]`）可去掉
-- Checkpoint/GC 定时触发接线：`checkpoint_check_trigger(ftl, 0U)` 的 elapsed 恒 0、`gc_check_trigger(..., 500U)` 硬编码；`cp_timestamp` 恒 0（timer_get_ms 不可用）——需平台 `time_us` 钩子（`ssd_platform_ops_t.time_us` 已定义但 stm32h743 未注册），T3/GC 定时只在写入量/水位触发下生效
 - write 路径 pending 完成依赖 completion_table_drain 泵（非同步释放）——pending 槽位只在完成回调释放，submit 失败路径已配对 remove；无显式泄漏（UART 层尚未接 pending 通知，上板前关注）
 
 ### FTL 层未实现清单（后续实现参考）
@@ -1154,11 +1188,11 @@ v0.36 把 controller 路由接入，但 **FTL 仍无生产调用入口**——`s
 
 | # | 项 | 现状 | 影响 | 工作量 | 入口/依赖 |
 |---|----|------|------|--------|-----------|
-| F1 | **CP/GC 定时触发接线 + 平台 time_us 钩子** | `checkpoint_check_trigger(ftl,0U)` elapsed 恒 0；`gc_check_trigger(...,500U)` 硬编码；`cp.timestamp=0`；`cp_timer_start`/`gc_timer_start` 只清零从未读 | T3 定时 checkpoint 不触发；GC 定时用假值；checkpoint 头部无真实时间戳 | 小（半天内） | ① platform 层实现并注册 `ssd_platform_ops_t.time_us`（stm32h743 可用 HAL_GetTick×1000 或 DWT）② ftl_service 用其计算 elapsed 传入 trigger ③ checkpoint_create 填 timestamp |
+| F1 | **CP/GC 定时触发接线 + 平台 time_us 钩子** | ✅ **v0.38 已实现** — `stm32_platform_time_us`（HAL_GetTick×1000）注册 `ssd_platform_ops_t`；ftl.c `ftl_now_ms()` 计算真实 elapsed；`cp_timer_start`/`gc_timer_start` 触发后回写；`cp.timestamp` 填真实时间戳 | T3 定时 checkpoint（10s）/GC 定时（500ms）首次真正生效 | 小（半天内） | 见 v0.38 条目 |
 | F2 | **掉电重建 closed_sb_list** | `power_failure_recovery.c` 只重建 open SB 写指针；closed 列表掉电后为空 | 掉电重启后已满 SB 不回收 → GC 空间泄漏（不丢数据，但容量衰减） | 大（独立立项） | v0.32 二期项；需扫全 NAND 判有效页分组（复用 ftl_block_is_valid / sync_read_page） |
-| F3 | **predictive 搬移（read disturb / 慢死）** | `rr_record_ecc` 只记录；`rr_check_predictive` 无调用方；read_count 只累加 | CRITICAL/DYING 块不主动搬移，靠读到坏才兜底 | 中 | ftl_service 或 GC 后台周期调 `rr_check_predictive` → 选中块搬移（wl_relocate 可复用） |
+| F3 | **predictive 搬移（read disturb / 慢死）** | ✅ **v0.38 已实现** — `wl_predictive_relocate`（并入 wear_leveling）：`rr_predictive_scan` 扫 Closed 块 health≥CRITICAL → sb_id 反查 SB → `wl_relocate` 整 SB 搬移 → 双 plane `rr_retire_block` 退役（RESERVED，不标坏）；ftl_service_idle 带 1s 节流接入 | CRITICAL/DYING 块主动搬移 + 退役，不再靠读到坏兜底 | 中 | 见 v0.38 条目 |
 | F4 | **checkpoint 增量（region_bitmap）** | 全量写 6 页（region_bitmap 恒全 1，恢复不消费）；`journal_sequence` 与 `sequence` 同值 | 每次 checkpoint 写全表，容量/寿命开销大 | 大 | 增量需跟踪 dirty region（l2p cache DIRTY 行 → bitmap）+ 恢复按 bitmap 局部加载 |
-| F5 | **写 Multi-Plane 真双页（VPC/空洞侧）** | 写 pages=2 时仅 pba（plane0）置 valid；plane1 页不置位、L2P 只映射偶数 LBA | 跨 plane 写无 bitmap 追踪，VPC 少记 1/2；读 planes 配对基于偶数 LBA 假设 | 中 | completion handler 需对 new_pba 的 plane1 页也 set_valid；`ftl_cmd_setup_ppa` 侧已按 multi_plane 展开 desc（FC 层支持），缺口在 FTL 侧确认/簿记 |
+| F5 | **写 Multi-Plane 真双页（VPC/空洞侧）** | ✅ **v0.38 已实现** — allocator 同号双 plane（industry super block）+ completion 对 plane1 页对称簿记（set_valid/L2P io.lba+1/Journal/清旧页）；pending 加 `old_pba1` | 跨 plane 写 VPC/映射/GC 搬移完整闭环，修复"plane1 烧错块"根因 | 中 | 见 v0.38 条目 |
 | F6 | **pending/completion 单例多实例化** | `g_pending[32]`/`g_table[32]` 全局单例 | LUN_NUM>1 多 FTL 实例共享命令路由 → 冲突 | 中（LUN>1 前必修） | v0.34 遗留；pfr 中 scan_write_pointer 硬编码 ch/ce=0 同源 |
 | F7 | **写失败 Super Block 空洞的显式回滚** | 依赖「写失败不计 VPC + GC 自然跳过」 | 空洞页数据悬空，GC 前读到旧 L2P 指向的页仍可能触发 RR | 低 | 可选：失败写后该页显式标记 / journal 补偿；现状可运行 |
 | F8 | **journal 空间不足的紧急 checkpoint 回切校验** | `journal_truncate` 简化实现（擦除非当前 block）；`checkpoint_is_emergency` 有但触发面未验证 | Journal 满时依赖 checkpoint 水位线，简化截断在极端写模式下的正确性未测 | 中（测试为主） | 上板高压写验证；`journal_flush_page` 满页回切逻辑已实现 |

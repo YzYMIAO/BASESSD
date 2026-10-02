@@ -4,6 +4,7 @@
 #include "ftl/ftl.h"
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/gc.h"
+#include "ftl/read_recovery.h" /* rr_predictive_scan / rr_retire_block */
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
@@ -315,6 +316,57 @@ int wl_execute(struct ftl_context *ftl)
     }
 
     return wl_relocate(ftl, &victim);
+}
+
+int wl_predictive_relocate(struct ftl_context *ftl)
+{
+    uint16_t     gblock;
+    uint16_t     closed_idx;
+    wl_victim_t  victim;
+    uint8_t      plane;
+    ftl_block_t *b;
+
+    if (ftl == NULL)
+    {
+        return 0;
+    }
+
+    if (!rr_predictive_scan(&ftl->alloc, &gblock))
+    {
+        return 0;
+    }
+
+    b = &ftl->alloc.blocks[gblock];
+
+    /* 反查 Super Block：慢死块必须在 closed_sb_list 中（scan 已保证 CLOSED） */
+    closed_idx = ftl_block_sb_id(b);
+    if (closed_idx >= ftl->alloc.closed_sb_count)
+    {
+        return 0; /* 防御：索引异常则跳过 */
+    }
+
+    /* 组装 victim（wl_relocate 只用 plane_blocks，其余字段无消费） */
+    memset(&victim, 0, sizeof(victim));
+    victim.found = 1U;
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        victim.plane_blocks[plane] =
+            ftl->alloc.closed_sb_list[closed_idx].plane_blocks[plane];
+    }
+
+    /* 整 SB 搬移（读有效页 → 冷块写入 → L2P/Journal → 擦除归还）。
+     * wl_relocate 内部已走 gc_erase_and_free → allocator_remove_closed_sb
+     * （gc.c:277-280 按 plane_blocks[0] 自动定位移除 closed 条目），无需外部再清。 */
+    (void)wl_relocate(ftl, &victim);
+
+    /* 搬完后双 plane 块退役：不再分配新数据（RESERVED），不标坏（仍可读） */
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        ftl_block_t *retired = &ftl->alloc.blocks[ftl_gblock(plane, victim.plane_blocks[plane])];
+        rr_retire_block(retired);
+    }
+
+    return 1;
 }
 
 uint32_t wl_max_erase(const struct ftl_context *ftl)

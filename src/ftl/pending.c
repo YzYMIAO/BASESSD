@@ -13,7 +13,8 @@ void pending_init(void)
 
 int pending_add(uint16_t cmd_id, const ftl_io_request_t *io,
                 nand_pba_t old_pba, nand_pba_t new_pba,
-                ftl_context_t *ftl, uint8_t cache_intermediate)
+                nand_pba_t old_pba1, ftl_context_t *ftl,
+                uint8_t cache_intermediate)
 {
     uint8_t i;
 
@@ -31,6 +32,7 @@ int pending_add(uint16_t cmd_id, const ftl_io_request_t *io,
             g_pending[i].io                 = *io; /* 按值拷贝整个 IO 请求描述 */
             g_pending[i].old_pba            = old_pba;
             g_pending[i].new_pba            = new_pba;
+            g_pending[i].old_pba1           = old_pba1;
             g_pending[i].ftl                = ftl;
             g_pending[i].cache_intermediate = cache_intermediate;
             return FTL_OK;
