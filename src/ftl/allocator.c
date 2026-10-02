@@ -346,6 +346,61 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
 
 /* 说明：allocator_mark_bad 已删除——坏块标记统一走 bbt_mark_bad（BBT 单数据源）。 */
 
+uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
+                                 const uint16_t plane_blocks[PLANE_NUM],
+                                 uint8_t          temperature)
+{
+    super_block_t sb;
+    uint8_t        plane;
+
+    if ((alloc == NULL) || (plane_blocks == NULL))
+    {
+        return UINT16_MAX;
+    }
+
+    /* 列表满：重建阶段不应发生（好块数远小于 1024），防御返回 */
+    if (alloc->closed_sb_count >= SUPER_BLOCK_LIST_MAX)
+    {
+        return UINT16_MAX;
+    }
+
+    /* 组装条目（next_page=64=满；valid=0=Closed，gc_select_victim 依赖） */
+    memset(&sb, 0, sizeof(sb));
+    sb.topo.ch  = alloc->ch;
+    sb.topo.ce  = alloc->ce;
+    sb.topo.lun = alloc->lun;
+    sb.plane_blocks[0] = plane_blocks[0];
+    sb.plane_blocks[1] = plane_blocks[1];
+    sb.next_page       = (uint8_t)PAGES_PER_BLOCK;
+    sb.temperature     = temperature;
+    sb.valid           = 0U;
+
+    /* 双 Plane 置 CLOSED（清 FREE/OPEN）+ 温度 + 反向索引 = closed 列表索引 */
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, plane_blocks[plane])];
+
+        ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_OPEN);
+        ftl_block_state_set(b, FTL_BLOCK_STATE_CLOSED);
+        ftl_block_set_temp(b, temperature);
+        ftl_block_set_sb(b, alloc->closed_sb_count);
+    }
+
+    alloc->closed_sb_list[alloc->closed_sb_count++] = sb;
+
+    return (uint16_t)(alloc->closed_sb_count - 1U);
+}
+
+void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock)
+{
+    if (alloc == NULL)
+    {
+        return;
+    }
+
+    (void)allocator_pool_remove(alloc, gblock);
+}
+
 int allocator_needs_gc(const ftl_allocator_t *alloc)
 {
     if (alloc == NULL)

@@ -8,6 +8,7 @@
 #include "ftl/allocator.h"
 #include "ftl/bst.h"
 #include "ftl/ftl.h"
+#include "ftl/metadata.h"
 #include "ftl/power_failure_recovery.h"
 // #include "led.h"
 #include "mpu.h"
@@ -117,14 +118,23 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         return -1;
     }
 
-    /* free pool 回填：遍历 BST 非坏块（bad 位已由 bbt_init 标好） */
+    /* free pool 回填：遍历 BST 非坏块（bad 位已由 bbt_init 标好）。
+     * 固定/动态元数据块（L2P/anchor/BBT/checkpoint/journal）不进 free pool——
+     * 否则开机后可能被 allocator 当作空白块复用（覆盖未擦除的半满元数据块）。
+     * 用户数据 written 块仍回填（时序安全：boot_recovery 的 F2 重建会把它们拉出）。 */
     for (gblock = 0U; gblock < FTL_BLOCK_TOTAL; gblock++)
     {
-        if (!ftl_block_is_bad(&g_blocks[ch][ce][lun][gblock]))
+        if (ftl_block_is_bad(&g_blocks[ch][ce][lun][gblock]))
         {
-            allocator_free_block(&g_ftl[ch][ce][lun].alloc, gblock);
-            free_n++;
+            continue;
         }
+        if (ftl_is_metadata_block(&g_ftl[ch][ce][lun].metadata_dir,
+                                  (uint16_t)(gblock % BLOCKS_PER_PLANE)))
+        {
+            continue;
+        }
+        allocator_free_block(&g_ftl[ch][ce][lun].alloc, gblock);
+        free_n++;
     }
     SSD_LOGI("[FTL] instance ch=%u ce=%u lun=%u free blocks=%u\r\n",
              ch, ce, lun, (unsigned)free_n);

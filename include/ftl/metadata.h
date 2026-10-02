@@ -165,4 +165,23 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir);
  */
 nand_paa_t metadata_dir_anchor_paa(uint8_t idx);
 
+/*
+ * ftl_is_metadata_block - 判断物理 Block 是否属于固定/动态元数据区
+ *
+ * 掉电恢复重建 closed_sb_list 时，L2P Table（固定 0..31 + 动态 region）、
+ * Anchor、BBT、Checkpoint、Journal 等元数据块可能写满 64 页（尤其 Journal
+ * 环形回切），逐页判空会把它们误判为满 Super Block。本谓词统一排除：
+ *
+ *   固定块：L2P Table（0..L2P_BLOCKS_PER_LUN-1 + lun 偏移）、Anchor 33/34(+stride)、
+ *           BBT 36/39、Checkpoint 37/38、Journal 40/41
+ *   动态块：Metadata Directory 中登记的 L2P region 块（>= 32，扫 entries）
+ *
+ * free pool 回填（main.c）与重建（ftl_rebuild_closed_sb_list）共用同一判据。
+ *
+ * @param md_dir Metadata Directory cache（可为 NULL：仅固定块区间判断）
+ * @param block  物理 Block 号（per-plane 号，0..BLOCKS_PER_PLANE-1）
+ * @return 1 = 元数据块，0 = 用户数据块
+ */
+int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint16_t block);
+
 #endif /* FTL_METADATA_H */

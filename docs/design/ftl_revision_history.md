@@ -1209,6 +1209,40 @@ F7（ftl_revision_history F 清单）：写失败路径原只 `bbt_mark_bad` 标
 - controller 传参的 `g_ftl_ptrs` 显式指针表（避免 -Wincompatible-pointer-types）；若后续 controller 头改收数组退化形式（`ftl_context_t (*ftl)[CE][LUN]`）可去掉
 - write 路径 pending 完成依赖 completion_table_drain 泵（非同步释放）——pending 槽位只在完成回调释放，submit 失败路径已配对 remove；无显式泄漏（UART 层尚未接 pending 通知，上板前关注）
 
+## v0.40 — F2 掉电重建 closed_sb_list（全 NAND 扫描）
+
+**日期**：2026-10-02
+
+### 背景
+
+F2（ftl_revision_history F 清单）：`closed_sb_list` 是纯 RAM 态（SRAM2 NOLOAD），掉电即失；`allocator_init` 只清 `closed_sb_count`，不从 NAND 重建。掉电恢复 `ftl_boot_power_failure` 只扫 2 个 Open SB 写指针（且被 `hot_sb.valid!=0` 门控恒假 → 实际没扫），closed 列表完全没碰；BST 里已满块 state 停在 `allocator_init` 统一置的 FREE。结果：掉电重启后已满 SB 全部消失 → GC/WL/rr_predictive_scan 看不到 → 容量泄漏（不丢数据但衰减）；且这些块还被 free pool 回填，可能复用未擦除半满块。
+
+### 关键决策
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| 重建时机 | **开机 recovery 阶段同步全扫**（Clean/Power Failure 两分支都重建） | fresh 全 NAND 未写白扫；clean 掉电前 closed 块同样在 free pool，同一根因；同步扫逻辑集中（用户确认） |
+| 判定写过 | `sync_read_page_raw`（LDPC_RAW）+ 全 0xFF 检测（逐 plane） | FC 层无独立 OOB 接口，全库统一判据 |
+| 判定有效 | `gc_read_page_with_lba` 取 LBA（META CW0）→ `l2p_cache_read` 反查 PBA==本页才置 valid | 覆盖/torn 页不置位 → GC victim 判据不虚高，迁移不搬幽灵页 |
+| 部分写块 | 前 2 对恢复 Open SB（Hot/Cold），多余强制 Closed（GC 迁移自动清 torn） | 替代原被 valid!=0 门控恒假的 scan_write_pointer；torn 页靠 GC L2P 反查丢弃（不丢已确认写） |
+| 固定元数据块排除 | `ftl_is_metadata_block` 统一谓词（固定区间 + md_dir 动态 region），rebuild 与 free pool 回填共用 | Journal/L2P 可写满 64 页，逐页判空会误判为满 SB；main.c 回填误纳元数据块问题同链修复（用户确认） |
+| erase_count | F2 范围外不修（无持久化表） | WL 开机初期 max_ec-min_ec=0 退化为全平局，GC VPC 判据不受影响，写进文档 |
+
+### 实现
+
+1. **`include/ftl/metadata.h` + `src/ftl/metadata.c`**：新增 `ftl_is_metadata_block(md_dir, block)` —— 固定块区间（L2P 0..L2P_BLOCKS_PER_LUN-1 / Anchor 33/34+stride / BBT 36/39 / Checkpoint 37/38 / Journal 40/41）+ md_dir 动态 L2P region 块（扫 entries）。
+2. **`include/ftl/allocator.h` + `src/ftl/allocator.c`**：新增 `allocator_add_closed_sb(alloc, plane_blocks, temperature)`（仿 close_sb 后半段：置 CLOSED/清 FREE/温度/sb_id + 追加列表，valid=0）与 `allocator_remove_from_free(alloc, gblock)`（对 static allocator_pool_remove 的公共薄包装）。
+3. **`src/ftl/power_failure_recovery.c`**：新增 `ftl_rebuild_closed_sb_list(ftl, stats)` + 3 个 static helper（`page_is_blank` / `scan_block_write_pointer` / `recover_open_sb` / `close_full_block`）；`ftl_boot_clean_start` 与 `ftl_boot_power_failure` 各加调用；顺带修 `ftl_boot_scan_write_pointer` 遗留的 buf[16] 传给 2048B 拷贝的栈溢出（新代码统一 `uint8_t raw_buf[PAGE_SIZE]`）。
+4. **`src/main.c`**：free pool 回填加 `ftl_is_metadata_block` 谓词排除（时序安全：回填在前、boot_recovery 重建在后，中间无 allocator_alloc）。
+5. **`docs/design/ftl_revision_history.md`**：v0.40 条目 + F 清单 F2 标"✅ v0.40 已实现"。
+
+### 验证
+
+- make debug / release / tests 均**零错误零新增警告**（仅剩余既有 usart.c:321 死代码 + controller/host `#warning` 桩）
+- 上板验证（待 FTL 完工统一做）：写若干 SB（满/部分/覆盖留空洞）→ 断电重启 → 断言 closed_sb_count/valid_count、`gc_select_victim` 可选中满 SB、`gc_migrate_sb` 后 L2P 命中页全迁移、满块经 `gc_erase_and_free` 后 free pool 归还
+
+- **已知代价**：Clean Start 重建的 L2P 反查触发按需 region 加载（cache 空，从 NAND 读 L2P 表），开机比 Power Failure 分支慢；另 erase_count 无持久化表，开机后 WL 短暂退化为全平局。
+
 ### FTL 层未实现清单（后续实现参考）
 
 > 本清单汇总「FTL 层边界内」的真实缺口（与上文遗留对应，按优先级排序）。
@@ -1217,7 +1251,7 @@ F7（ftl_revision_history F 清单）：写失败路径原只 `bbt_mark_bad` 标
 | # | 项 | 现状 | 影响 | 工作量 | 入口/依赖 |
 |---|----|------|------|--------|-----------|
 | F1 | **CP/GC 定时触发接线 + 平台 time_us 钩子** | ✅ **v0.38 已实现** — `stm32_platform_time_us`（HAL_GetTick×1000）注册 `ssd_platform_ops_t`；ftl.c `ftl_now_ms()` 计算真实 elapsed；`cp_timer_start`/`gc_timer_start` 触发后回写；`cp.timestamp` 填真实时间戳 | T3 定时 checkpoint（10s）/GC 定时（500ms）首次真正生效 | 小（半天内） | 见 v0.38 条目 |
-| F2 | **掉电重建 closed_sb_list** | `power_failure_recovery.c` 只重建 open SB 写指针；closed 列表掉电后为空 | 掉电重启后已满 SB 不回收 → GC 空间泄漏（不丢数据，但容量衰减） | 大（独立立项） | v0.32 二期项；需扫全 NAND 判有效页分组（复用 ftl_block_is_valid / sync_read_page） |
+| F2 | **掉电重建 closed_sb_list** | ✅ **v0.40 已实现** — `ftl_rebuild_closed_sb_list`（power_failure_recovery）：全 NAND 扫描，逐 plane LDPC_RAW 判空 + `gc_read_page_with_lba` 取 LBA + `l2p_cache_read` 反查回填 valid_map；满块进 closed_sb_list（`allocator_add_closed_sb`）、前 2 部分写对恢复 Open、其余强制 Closed；free pool 拉出写过块；clean/PF 两分支都接线 | 掉电重启后已满 SB 正确重建 → GC 回收 + 不丢数据；顺带修复 free pool 回填误纳元数据块 | 大（独立立项） | 见 v0.40 条目 |
 | F3 | **predictive 搬移（read disturb / 慢死）** | ✅ **v0.38 已实现** — `wl_predictive_relocate`（并入 wear_leveling）：`rr_predictive_scan` 扫 Closed 块 health≥CRITICAL → sb_id 反查 SB → `wl_relocate` 整 SB 搬移 → 双 plane `rr_retire_block` 退役（RESERVED，不标坏）；ftl_service_idle 带 1s 节流接入 | CRITICAL/DYING 块主动搬移 + 退役，不再靠读到坏兜底 | 中 | 见 v0.38 条目 |
 | F4 | **checkpoint 增量（region_bitmap）** | 全量写 6 页（region_bitmap 恒全 1，恢复不消费）；`journal_sequence` 与 `sequence` 同值 | 每次 checkpoint 写全表，容量/寿命开销大 | 大 | 增量需跟踪 dirty region（l2p cache DIRTY 行 → bitmap）+ 恢复按 bitmap 局部加载 |
 | F5 | **写 Multi-Plane 真双页（VPC/空洞侧）** | ✅ **v0.38 已实现** — allocator 同号双 plane（industry super block）+ completion 对 plane1 页对称簿记（set_valid/L2P io.lba+1/Journal/清旧页）；pending 加 `old_pba1` | 跨 plane 写 VPC/映射/GC 搬移完整闭环，修复"plane1 烧错块"根因 | 中 | 见 v0.38 条目 |

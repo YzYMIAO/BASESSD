@@ -1227,7 +1227,7 @@ bit8  EMERGENCY  bit9-15 预留
 | 坏块 | 置 BAD + clear_valid + bad_reason（PROGRAM/ERASE/READ/GC_MOVE） |
 | 分配 | 置 OPEN + TEMP + sb_id |
 | 写满关闭 | 置 CLOSED + sb_id → closed 索引 |
-| 掉电恢复 | open SB 扫描重建 bitmap + 置 OPEN（closed 重建二期） |
+| 掉电恢复 | open SB 扫描重建 bitmap + 置 OPEN（closed 重建 v0.40 已实现：`ftl_rebuild_closed_sb_list` 全扫 + L2P 反查） |
 
 全部经 `ftl_block_set/clr_valid`、`ftl_block_state_set/clr` 等访问器单点更新，防 VPC 与位图漂移。
 
@@ -2184,7 +2184,7 @@ int boot_clean_start(ftl_context_t *ftl, l2p_checkpoint_header_t *cp) {
 
     /* ② Allocator 初始化 */
     allocator_init(&ftl->alloc, &params);      // 扫描 BBT（v0.30 结构体传参）
-    allocator_rebuild_sb_list(&ftl->alloc);    // 重建 Super Block 列表
+    allocator_rebuild_sb_list(&ftl->alloc);    // 重建 Super Block 列表  → v0.40 落地为 ftl_rebuild_closed_sb_list
     allocator_recover_write_pointer(&ftl->alloc);  // 恢复写指针
 
     /* ③ BBT 加载 */
@@ -2224,8 +2224,8 @@ int boot_power_failure_recovery(ftl_context_t *ftl,
 
     /* ③ Allocator 初始化 + 写指针扫描恢复 */
     allocator_init(&ftl->alloc, &params);      // v0.30 结构体传参
-    allocator_rebuild_sb_list(&ftl->alloc);
-    allocator_scan_write_pointer(&ftl->alloc);   // 异常掉电需扫描 NAND
+    allocator_rebuild_sb_list(&ftl->alloc);    // → v0.40 落地为 ftl_rebuild_closed_sb_list
+    allocator_scan_write_pointer(&ftl->alloc);   // 异常掉电需扫描 NAND（v0.40 由重建一并完成）
 
     /* ④ Controller → Ready */
     ftl->cp_sequence = cp->sequence;

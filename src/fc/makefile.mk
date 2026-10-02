@@ -13,6 +13,8 @@ TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level1.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level2.c
 # Level 3: 全链路测试
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level3.c
+# F2 掉电重建 closed_sb_list 簿记（allocator + metadata 谓词，纯 RAM）
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_rebuild.c
 MODULE_INCS += $(PROJECT_ROOT)/tests/unit
 # 测试统一入口
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ut_main.c

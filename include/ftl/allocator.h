@@ -189,6 +189,39 @@ ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature
  */
 void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx);
 
+/*
+ * allocator_add_closed_sb - 掉电恢复重建时，把双 Plane 对直接塞进 Closed 列表
+ *
+ * 重建（ftl_rebuild_closed_sb_list）扫描 NAND 判出已满 Super Block 后，
+ * 不能复用 allocator_close_sb（那是 Open SB 的关闭流程，前半段只清 OPEN
+ * 不清 FREE，而重建块的 RAM 态是 FREE）。本函数仿照 close_sb 的后半段：
+ *
+ *   sb = { topo=alloc 维度, plane_blocks=入参, next_page=PAGES_PER_BLOCK,
+ *          temperature=入参, valid=0 }
+ *   双 Plane 置 CLOSED（清 FREE/OPEN）+ 温度 + sb_id = closed 列表索引
+ *   追加进 closed_sb_list，closed_sb_count++
+ *
+ * @param alloc          Allocator 上下文
+ * @param plane_blocks   双 Plane 同号 Block 号（plane0/plane1）
+ * @param temperature    FTL_TEMP_HOT / FTL_TEMP_COLD（掉电无落盘，调用方给默认）
+ * @return 塞入的 closed 列表索引；列表满返回 UINT16_MAX
+ */
+uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
+                                 const uint16_t plane_blocks[PLANE_NUM],
+                                 uint8_t          temperature);
+
+/*
+ * allocator_remove_from_free - 从 Free Pool 移除一个 Block（掉电重建用）
+ *
+ * 对内部 allocator_pool_remove 的公共薄包装（后者为 static）。重建扫描发现
+ * 写过（非全 FF）的块必须从 Free Pool 拉出，防止开机后被当作空白块重新分配
+ * （覆盖未擦除的半满块）。
+ *
+ * @param alloc   Allocator 上下文
+ * @param gblock 全局 Block 号（0..FTL_BLOCK_TOTAL-1）
+ */
+void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock);
+
 /* 说明：allocator_mark_bad 已删除——坏块标记统一走 bbt_mark_bad（BBT 单数据源），
  * BBT 内部将 is_bad 位写入 ftl_block_t.state 并维护 alloc->bad_count。 */
 

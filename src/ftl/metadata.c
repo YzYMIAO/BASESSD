@@ -2,7 +2,10 @@
 
 #include "common/boot_policy.h"
 #include "fc/fc.h"
+#include "ftl/bbt.h"
+#include "ftl/checkpoint.h"
 #include "ftl/ftl_fc_interface.h"
+#include "ftl/journal.h"
 #include "ftl/l2p_cache.h"
 #include "nand/onfi_1_0.h"
 
@@ -493,4 +496,57 @@ nand_paa_t metadata_dir_anchor_paa(uint8_t idx)
     /* lun 由调用侧（anchor_page_addr / 各模块 topo）带出——此处仅固定块/页/plane，
      * 调用点用 anchor_page_addr(dir->topo.ch, dir->topo.ce, dir->topo.lun, i) 展开。 */
     return paa_make(page, plane, block, 0, 0);
+}
+
+int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint16_t block)
+{
+    uint16_t i;
+
+    /* ── 固定元数据块区间（每 (ch,ce,lun) 独立一套，block 为 per-plane 号）── */
+
+    /* L2P Table：本 LUN 固定表区（block < 32），动态 region 也可能落在 >= 32，
+     * 由下方 md_dir entries 兜底；表区本身恒为元数据。 */
+    if (block < L2P_BLOCKS_PER_LUN)
+    {
+        return 1;
+    }
+
+    /* Anchor（33/34，跨 LUN 错开 ANCHOR_BLOCK_STRIDE） */
+    {
+        uint16_t lun;
+        for (lun = 0U; lun < LUN_NUM; lun++)
+        {
+            uint16_t base = (uint16_t)(ANCHOR_BLOCK0 + (lun * ANCHOR_BLOCK_STRIDE));
+            if ((block == base) || (block == (uint16_t)(base + 1U)))
+            {
+                return 1;
+            }
+        }
+    }
+
+    /* BBT（36 + 备份 39）、Checkpoint（37/38）、Journal（40/41） */
+    if ((block == BBT_BLOCK) || (block == BBT_BLOCK_BACKUP) ||
+        (block == CHECKPOINT_BLOCK0) || (block == CHECKPOINT_BLOCK1) ||
+        (block == JOURNAL_BLOCK0) || (block == JOURNAL_BLOCK1))
+    {
+        return 1;
+    }
+
+    /* ── 动态元数据块：Metadata Directory 登记的 L2P region 物理位置 ──
+     * L2P region 首写落在固定表区（block < 32，上面已短路），之后从 Free
+     * Pool 动态取块（block >= 32，flushed region）。这些块写满 64 页，逐页
+     * 判空会误判为满 SB，必须排除。 */
+    if (md_dir != NULL)
+    {
+        for (i = 0U; i < md_dir->count; i++)
+        {
+            if ((md_dir->entries[i].type == METADATA_TYPE_L2P_REGION) &&
+                (paa_to_block(md_dir->entries[i].paa) == block))
+            {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
 }
