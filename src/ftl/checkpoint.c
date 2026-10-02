@@ -6,8 +6,27 @@
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/metadata.h"
 #include "nand/onfi_1_0.h"
+#include "platform/platform.h"
 
 #include <string.h>
+
+/* ── 内部辅助 ── */
+
+/*
+ * checkpoint_now_ms - 当前单调毫秒（经平台抽象 time_us 换算）。
+ * 平台未注册时返回 0，checkpoint 头部时间戳退化为 0（行为同接线前）。
+ */
+static uint32_t checkpoint_now_ms(const ftl_context_t *ftl)
+{
+    const ssd_platform_ops_t *platform = ssd_platform_get();
+
+    (void)ftl;
+    if ((platform == NULL) || (platform->time_us == NULL))
+    {
+        return 0U;
+    }
+    return (uint32_t)(platform->time_us() / 1000U);
+}
 
 /* Checkpoint CRC 覆盖的字节数（从开头到 crc 字段） */
 #define CHECKPOINT_CRC_SIZE   (sizeof(uint32_t) * 6)                        /* magic+seq+ts+rc+bitmap[64]+js = 6 fields before crc */
@@ -166,7 +185,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
     memset(&cp, 0, sizeof(cp));
     cp.magic            = CHECKPOINT_MAGIC;
     cp.sequence         = ftl->journal.sequence_counter; /* 用 journal 最新 sequence */
-    cp.timestamp        = 0U;                            /* timer_get_ms 暂不可用，填 0 */
+    cp.timestamp        = checkpoint_now_ms(ftl);         /* 平台 time_us 换算 ms 快照 */
     cp.region_count     = L2P_REGIONS_TOTAL;             /* 全量 checkpoint */
     cp.journal_sequence = ftl->journal.sequence_counter; /* 截断到此 seq */
 

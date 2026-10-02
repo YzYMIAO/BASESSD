@@ -10,10 +10,28 @@
 #include "ftl/power_failure_recovery.h"
 #include "ftl/wear_leveling.h"
 #include "nand/onfi_1_0.h"
+#include "platform/platform.h"
 
 #include <string.h>
 
 /* ── 内部辅助 ── */
+
+/*
+ * ftl_now_ms - 当前单调毫秒（经平台抽象 time_us 换算）。
+ *
+ * 平台未注册（time_us 缺失）时返回 0：此时 elapsed = 0 - start < 阈值，
+ * T3 定时恒不触发，行为与接线前一致（不误触发、不破坏启动）。
+ */
+static uint32_t ftl_now_ms(void)
+{
+    const ssd_platform_ops_t *platform = ssd_platform_get();
+
+    if ((platform == NULL) || (platform->time_us == NULL))
+    {
+        return 0U;
+    }
+    return (uint32_t)(platform->time_us() / 1000U);
+}
 
 /*
  * ftl_handle_completion - 处理 FC 命令完成回调（默认 handler）
@@ -265,10 +283,16 @@ static void ftl_service_idle(ftl_context_t *ftl)
     /* BBT 持久化（攒批写 NAND BBT） */
     (void)bbt_flush(&ftl->alloc);
 
-    /* Checkpoint 检查 */
-    if (checkpoint_check_trigger(ftl, 0U))
+    /* Checkpoint 检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed） */
     {
-        (void)checkpoint_create(ftl);
+        uint32_t now_ms   = ftl_now_ms();
+        uint32_t elapsed  = now_ms - ftl->cp_timer_start;
+
+        if (checkpoint_check_trigger(ftl, elapsed))
+        {
+            (void)checkpoint_create(ftl);
+            ftl->cp_timer_start = now_ms;
+        }
     }
 }
 
@@ -285,14 +309,20 @@ static void ftl_service_normal(ftl_context_t *ftl)
         }
     }
 
-    /* 检查 GC */
-    if (gc_check_trigger(&ftl->alloc, ftl->total_writes, 500U))
+    /* 检查 GC（pre_cond 水位 / 写入量 / 定时 elapsed） */
     {
-        super_block_t *victim;
-        if (gc_select_victim(&ftl->alloc, &victim))
+        uint32_t now_ms  = ftl_now_ms();
+        uint32_t elapsed = now_ms - ftl->gc_timer_start;
+
+        if (gc_check_trigger(&ftl->alloc, ftl->total_writes, elapsed))
         {
-            (void)gc_migrate_sb(&ftl->alloc, &ftl->cache, &ftl->journal, victim);
-            gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
+            super_block_t *victim;
+            if (gc_select_victim(&ftl->alloc, &victim))
+            {
+                (void)gc_migrate_sb(&ftl->alloc, &ftl->cache, &ftl->journal, victim);
+                gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
+            }
+            ftl->gc_timer_start = now_ms;
         }
     }
 
@@ -306,9 +336,15 @@ static void ftl_service_normal(ftl_context_t *ftl)
     (void)bbt_flush(&ftl->alloc);
 
     /* Checkpoint 检查（NORMAL 模式也执行） */
-    if (checkpoint_check_trigger(ftl, 0U))
     {
-        (void)checkpoint_create(ftl);
+        uint32_t now_ms   = ftl_now_ms();
+        uint32_t elapsed  = now_ms - ftl->cp_timer_start;
+
+        if (checkpoint_check_trigger(ftl, elapsed))
+        {
+            (void)checkpoint_create(ftl);
+            ftl->cp_timer_start = now_ms;
+        }
     }
 }
 
