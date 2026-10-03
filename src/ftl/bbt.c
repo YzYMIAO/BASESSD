@@ -374,7 +374,10 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock, uint8_t reaso
     alloc->bad_count++;
     g_bbt_dirty = 1;
 
-    /* 不再同步调 bbt_save() — NAND BBT 持久化由后台 bbt_flush 批量执行 */
+    /* 不再同步调 bbt_save() — NAND BBT 持久化由后台 bbt_flush 批量执行。
+     * 坏块替换：从 Spare Pool 取块补 free pool（保容量水位，ADR-11 Block Sparing）。
+     * 失败（Spare 耗尽）不影响标坏，容量自然下降。 */
+    (void)bbt_spare_pool_refill(alloc);
 
     return FTL_OK;
 }
@@ -514,13 +517,19 @@ ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence,
 
 ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc)
 {
-    (void)alloc;
-
     /*
-     * Spare Pool 的 Block 由上层管理（出厂时从 OP 池预留）。
-     * 当前实现：Spare Pool 耗尽时返回 -1，不影响正常工作。
-     *
-     * 完整实现待 allocator 扩展 spare_pool_blocks[] 数组后接入。
+     * Spare Pool 坏块替换：出厂时 main.c 已预留 FTL_SPARE_POOL_SIZE=50 个
+     * 好块到 alloc->spare_blocks。运行时 bbt_mark_bad 标坏一块后，从这里
+     * 取一个好块 allocator_free_block 补进 free pool，保用户容量水位。
+     * 只出不进，Spare Pool 耗尽后返回 FTL_ERROR（容量自然下降）。
      */
-    return FTL_ERROR;
+    if ((alloc == NULL) || (alloc->spare_blocks == NULL) || (alloc->spare_count == 0U))
+    {
+        return FTL_ERROR;
+    }
+
+    alloc->spare_count--;
+    allocator_free_block(alloc, alloc->spare_blocks[alloc->spare_count]);
+
+    return FTL_OK;
 }

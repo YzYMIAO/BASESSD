@@ -66,6 +66,10 @@ typedef struct
     ftl_topology_t  topo;           /* 本 FTL 绑定的 NAND 芯片路由 */
     uint16_t       *free_blocks;    /* free block 数组（全局 Block 号，由调用者提供） */
     uint16_t        free_count;     /* free block 数 */
+    uint16_t       *op_blocks;      /* OP 预留 block 数组（容量不动：GC 缓冲池，由调用者提供） */
+    uint16_t        op_count;       /* OP 池 Block 数 */
+    uint16_t       *spare_blocks;   /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
+    uint16_t        spare_count;    /* Spare Pool 初始 Block 数 */
     ftl_block_t    *blocks;         /* Block State Table（由调用者提供，容量 FTL_BLOCK_TOTAL） */
     super_block_t  *closed_sb_list; /* closed Super Block 数组（由调用者提供） */
 } ftl_init_params_t;
@@ -114,6 +118,12 @@ typedef struct
     uint16_t  pre_cond_count;  /* 预擦除池 Block 数 */
     uint16_t  emergency_count; /* 紧急池 Block 数 */
 
+    /* ── OP / Spare Pool（容量不动） ── */
+    uint16_t *op_blocks;       /* OP 预留 block 数组（GC 缓冲池，由调用者提供） */
+    uint16_t  op_count;        /* OP 池剩余 Block 数 */
+    uint16_t *spare_blocks;    /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
+    uint16_t  spare_count;     /* Spare Pool 剩余 Block 数 */
+
     /* ── Open Super Block（每温度一个） ── */
     super_block_t hot_sb;  /* Hot Open Super Block */
     super_block_t cold_sb; /* Cold Open Super Block */
@@ -125,7 +135,6 @@ typedef struct
     /* ── Block State Table（统一 per-Block 状态） ── */
     ftl_block_t *blocks;        /* 每 Block 状态数组（由调用者提供） */
     uint16_t     bad_count;     /* 坏 Block 数 */
-    uint16_t     spare_pool_count; /* Spare Pool 剩余 Block 数 */
 } ftl_allocator_t;
 
 /* ── 接口函数 ── */

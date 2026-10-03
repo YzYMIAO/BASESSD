@@ -29,6 +29,12 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
     alloc->pre_cond_count  = 0U;
     alloc->emergency_count = 0U;
 
+    /* OP / Spare Pool（容量不动） */
+    alloc->op_blocks     = params->op_blocks;
+    alloc->op_count      = params->op_count;
+    alloc->spare_blocks  = params->spare_blocks;
+    alloc->spare_count   = params->spare_count;
+
     /* Open Super Block（暂无效，首次 alloc 时分配） */
     memset(&alloc->hot_sb, 0, sizeof(alloc->hot_sb));
     memset(&alloc->cold_sb, 0, sizeof(alloc->cold_sb));
@@ -42,7 +48,6 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
     /* Block State Table（每 Block 状态统一承载；由调用者提供存储） */
     alloc->blocks           = params->blocks;
     alloc->bad_count        = 0U;
-    alloc->spare_pool_count = 0U;
 
     /* 状态机初始：未坏块默认 FREE（坏块由 bbt_init 置 BAD） */
     if (alloc->blocks != NULL)
@@ -79,6 +84,24 @@ static uint8_t allocator_pool_remove(ftl_allocator_t *alloc, uint16_t gblock)
         }
     }
     return 0U;
+}
+
+/*
+ * 从 OP 池取一个 Block 归还 Free Pool（容量不动语义：OP 是 GC 缓冲池）。
+ * 分配器 free pool 耗尽时由 allocator_alloc 回退调用。
+ * @return 1 成功取块，0 OP 池空
+ */
+static uint8_t allocator_pull_from_op(ftl_allocator_t *alloc)
+{
+    if ((alloc == NULL) || (alloc->op_blocks == NULL) || (alloc->op_count == 0U))
+    {
+        return 0U;
+    }
+
+    alloc->op_count--;
+    allocator_free_block(alloc, alloc->op_blocks[alloc->op_count]);
+
+    return 1U;
 }
 
 /*
@@ -255,11 +278,23 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
             /*
              * Free Pool 无可配对 block（耗尽 / 单 plane 坏块残留）。
              *
-             * 返回 NAND_PBA_INVALID，调用者（ftl_submit_write）需触发紧急 GC
-             * 回收 Closed Super Block 后重试。
-             * pre_cond_count 和 emergency_count 已反映当前 free pool 状态。
+             * 容量不动语义：回退到 OP 池——从 OP 预留块取一对补充 free pool
+             * （OP 是 GC 缓冲池，擦除即用），再重试一次 Free Pool 配对。
+             * 真无空间（OP 池也空）才返回 NAND_PBA_INVALID，调用者触发紧急 GC。
              */
-            return NAND_PBA_INVALID;
+            if (allocator_pull_from_op(alloc) == 0U)
+            {
+                return NAND_PBA_INVALID;
+            }
+            if (allocator_pull_from_op(alloc) == 0U)
+            {
+                return NAND_PBA_INVALID;
+            }
+            block0 = allocator_select_block(alloc);
+            if (block0 == UINT16_MAX)
+            {
+                return NAND_PBA_INVALID;
+            }
         }
         block1 = block0; /* 双 plane 同号：plane 由 gblock 位域区分 */
 
@@ -279,7 +314,8 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
         sb->topo.ce  = alloc->ce;
         sb->topo.lun = alloc->lun;
 
-        /* 状态机：两物理块置 OPEN（清 FREE/CLOSED）+ 记录温度流 + 反向索引 sb_id
+        /* 状态机：两物理块置 OPEN（清 FREE/CLOSED/PRE_COND——块被 Open SB 占用，
+         * 从预擦除池取走）+ 记录温度流 + 反向索引 sb_id
          * （OPEN 时 sb_id 占位 NO_SB，关闭后由 allocator_close_sb 写 closed 索引） */
         {
             uint8_t plane;
@@ -288,7 +324,8 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
                 uint16_t    gblock = ftl_gblock(plane, (plane == 0U) ? block0 : block1);
                 ftl_block_t *b     = &alloc->blocks[gblock];
 
-                ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED);
+                ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED |
+                                       FTL_BLOCK_STATE_PRE_COND);
                 ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
                 ftl_block_set_temp(b, temperature);
                 ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
@@ -333,14 +370,17 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
         alloc->free_blocks[alloc->free_count++] = gblock;
     }
 
-    /* 状态机：置 FREE（清 OPEN/CLOSED/TEMP），清反向索引 */
+    /* 状态机：置 FREE + PRE_COND（预擦除池语义——free pool 所有块都是已擦除态，
+     * GC 擦除/OP 补池/Spare 补池/rebuild 拉回全走本入口，故全置 PRE_COND）。
+     * 清 OPEN/CLOSED/TEMP，保留 PRE_COND 不清（alloc 取走时再清）。清反向索引。 */
     b = &alloc->blocks[gblock];
     ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
                            FTL_BLOCK_TEMP_MASK);
-    ftl_block_state_set(b, FTL_BLOCK_STATE_FREE);
+    ftl_block_state_set(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_PRE_COND);
     ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 
-    /* 所有 Free Pool 中的 Block 都已擦除 → pre_cond_count = free_count */
+    /* pre_cond_count = free pool 中 PRE_COND 块数（本函数只增 free_count，
+     * 且每块都置 PRE_COND → pre_cond_count 恒等于 free_count） */
     alloc->pre_cond_count = alloc->free_count;
 }
 

@@ -79,6 +79,10 @@ static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM];                       /* 13
 static ftl_block_t   g_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL];   /* 56B×4096=224KB → AXI_RAM */
 static uint16_t      g_free_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* 8KB → SRAM2 */
     __attribute__((section(".sram2_data")));
+static uint16_t      g_op_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* OP 预留池，容量不动 → SRAM2 */
+    __attribute__((section(".sram2_data")));
+static uint16_t      g_spare_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_SPARE_POOL_SIZE] /* 坏块替换池 → SRAM2 */
+    __attribute__((section(".sram2_data")));
 static super_block_t g_closed_sb_list[CH_NUM][CE_NUM][LUN_NUM][SUPER_BLOCK_LIST_MAX] /* 16KB → SRAM2 */
     __attribute__((section(".sram2_data")));
 static ssd_controller_t g_ctrl;   /* controller 路由表（收 g_ftl 三维指针） */
@@ -111,6 +115,10 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     params.blocks         = g_blocks[ch][ce][lun];
     params.free_blocks    = g_free_blocks[ch][ce][lun];
     params.free_count     = 0U;
+    params.op_blocks      = g_op_blocks[ch][ce][lun];
+    params.op_count       = 0U;
+    params.spare_blocks   = g_spare_blocks[ch][ce][lun];
+    params.spare_count    = 0U;
     params.closed_sb_list = g_closed_sb_list[ch][ce][lun];
 
     if (ftl_init(&g_ftl[ch][ce][lun], &params) != FTL_OK)
@@ -122,9 +130,18 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     /* free pool 回填：遍历 BST 非坏块（bad 位已由 bbt_init 标好）。
      * 固定/动态元数据块（L2P/anchor/BBT/checkpoint/journal）不进 free pool——
      * 否则开机后可能被 allocator 当作空白块复用（覆盖未擦除的半满元数据块）。
-     * 用户数据 written 块仍回填（时序安全：boot_recovery 的 F2 重建会把它们拉出）。 */
+     * 用户数据 written 块仍回填（时序安全：boot_recovery 的 F2 重建会把它们拉出）。
+     *
+     * OP 10% + Spare Pool（容量不动语义，ftl_design §3.6/ADR-8）：
+     *   先扣 FTL_SPARE_POOL_SIZE=50 入 Spare Pool（坏块替换池，只出不进，
+     *   耗尽后容量自然下降），再按 FTL_OP_PERCENT=10% 扣入 OP 池（GC 缓冲池），
+     *   其余才进 free pool。L2P region 数 / FTL_LBA_MAX 不变 → 用户容量 512MiB 不变。
+     */
     for (gblock = 0U; gblock < FTL_BLOCK_TOTAL; gblock++)
     {
+        uint16_t spare_idx;
+        uint16_t op_idx;
+
         if (ftl_block_is_bad(&g_blocks[ch][ce][lun][gblock]))
         {
             continue;
@@ -134,11 +151,33 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         {
             continue;
         }
+
+        /* ① 前 50 个好块入 Spare Pool（坏块替换池） */
+        spare_idx = g_ftl[ch][ce][lun].alloc.spare_count;
+        if (spare_idx < FTL_SPARE_POOL_SIZE)
+        {
+            g_spare_blocks[ch][ce][lun][spare_idx] = gblock;
+            g_ftl[ch][ce][lun].alloc.spare_count++;
+            continue;
+        }
+
+        /* ② 前 10% 好块入 OP 池（GC 缓冲池） */
+        op_idx = g_ftl[ch][ce][lun].alloc.op_count;
+        if (op_idx < (uint16_t)((uint16_t)(FTL_BLOCK_TOTAL / 2U) * FTL_OP_PERCENT / 100U))
+        {
+            g_op_blocks[ch][ce][lun][op_idx] = gblock;
+            g_ftl[ch][ce][lun].alloc.op_count++;
+            continue;
+        }
+
         allocator_free_block(&g_ftl[ch][ce][lun].alloc, gblock);
         free_n++;
     }
-    SSD_LOGI("[FTL] instance ch=%u ce=%u lun=%u free blocks=%u\r\n",
-             ch, ce, lun, (unsigned)free_n);
+    SSD_LOGI("[FTL] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
+             ch, ce, lun,
+             (unsigned)free_n,
+             (unsigned)g_ftl[ch][ce][lun].alloc.op_count,
+             (unsigned)g_ftl[ch][ce][lun].alloc.spare_count);
 
     if (ftl_boot_recovery(&g_ftl[ch][ce][lun], &result) != FTL_OK)
     {

@@ -1384,3 +1384,46 @@ Explore 调研另发现一个超出 F10 原描述的**真数据损坏窗口**：
 
 | # | 项 | 现状 | 影响 | 工作量 | 入口/依赖 |
 |---|----|------|------|--------|-----------|
+
+---
+
+## v0.44 — FTL 未落地项体检 + A 档落地（OP 10% + Spare Pool + 三级 Free Pool 状态位）
+
+**日期**：2026-10-03
+
+### 背景
+
+对 FTL 层做全量体检（对照设计文档/变更历史/记忆点逐项 grep 验证），发现设计承诺但代码零消费的缺口：
+- **A 档**：`FTL_OP_PERCENT(10)`/`FTL_SPARE_POOL_SIZE(50)` 只定义不消费；`spare_pool_count` 仅 init 赋 0；`bbt_spare_pool_refill` 是 `return FTL_ERROR` 桩；`FTL_BLOCK_STATE_PRE_COND/EMERGENCY` 全库从未 set/clr → 容量语义实际 = 全好块进 free pool（OP 0%）。
+- **B 档**（下阶段）：journal 水位分母错、checkpoint/emergency 标志永不复位、ftl_service 模式代理、GC/WL 读不记录 ECC、read_count 只写不读。
+- **C 档**（下阶段）：controller state_machine/scheduler + NVMe host 全是编译进来的 `#warning` 桩；`SSD_REQUEST_FLUSH` 返回 NOT_SUPPORTED。
+
+### 关键决策
+
+| 项 | 决策 | 理由 |
+|----|------|------|
+| OP/Spare 容量语义 | **容量不动**（512MiB 不变）：OP 10% + Spare 50 只做 GC 缓冲池 + 坏块替换池，不进用户分配路径 | 用户已确认；L2P region 数/metadata 布局/FTL_LBA_MAX 全部不动，广告容量不变 |
+| Spare 池分配 | **前 50 好块入 Spare 池**（坏块替换池，只出不进，耗尽后容量自然下降） | ADR-11 Block Sparing：坏块替换专用 |
+| OP 池分配 | **前 10% 好块入 OP 池**（GC 缓冲池），free pool 耗尽时回退 OP 取双 plane 块 | ADR-8：GC 缓冲 + 性能保速 |
+| PRE_COND 状态位 | `allocator_free_block` 置（归还即预擦除态）、`allocator_alloc` 清（取走占用） | free pool 唯一归还入口，全块预擦除态，`pre_cond_count` 从 free_count 别名升为真实预擦除计数 |
+| EMERGENCY 状态位 | 保留枚举定义，不 set（无物理 Emergency 池） | `FREE_POOL_EMERGENCY` 阈值由 `allocator_needs_gc` 的 `free_count==0` 兜底 |
+
+### 实现
+
+1. **`include/ftl/allocator.h`**：`ftl_init_params_t` + `ftl_allocator_t` 增 `op_blocks/spare_blocks/op_count/spare_count`；删 `spare_pool_count` 别名。
+2. **`src/main.c`**：`g_op_blocks`/`g_spare_blocks` 落 SRAM2；boot 回填三分流（前 50 → Spare → 前 10% → OP → 其余 → free pool）；日志 `free/op/spare`。
+3. **`src/ftl/allocator.c`**：`allocator_init` 读新 params；新增 `allocator_pull_from_op`；`allocator_alloc` free 耗尽回退 OP 取块；`allocator_free_block` 置 `PRE_COND`、`allocator_alloc` 清 `PRE_COND`。
+4. **`src/ftl/bbt.c`**：`bbt_spare_pool_refill` 桩改真实现（`spare_blocks` 取块补 free pool）；`bbt_mark_bad` 后调用。
+
+### 验证
+
+- `make debug / release / FC_NAND_TEST_ENABLE=1` 全零错误零新增警告
+- SRAM：AXI 374.7KB/384KB、SRAM2 28.1KB/128KB（新增 op+spare 数组，不溢出）
+- 上板预期：`[FTL] instance ... free=N op=~400 spare=50`；PRE_COND 状态位随 alloc/free set/clr
+- 上板高压写：OP 池耗尽回退分配、坏块触发 Spare 补池
+
+### 待办（B/C 档，见 docs/design/ftl_full_landing_plan_20261003.md）
+
+- **B 档**：B1 journal 水位分母（`PAGES_PER_BLOCK`→`JOURNAL_BLOCK_COUNT×PAGES_PER_BLOCK`）、B2 checkpoint/emergency 标志复位、B3 ftl_service 模式基于 pending 占用、B4 GC/WL 搬移读记录 ECC + read_count++、B5 read_count 消费（predictive scan/WL victim）。
+- **C 档**：C1 controller state_machine 完整状态机、C1b scheduler 优先级调度、C2 NVMe host（nvme_io/admin/SQ/CQ/nvme_controller 全量）、C3 `SSD_REQUEST_FLUSH` 全实例 flush。
+- **F8/F9**：依赖上板（紧急 CP 回切校验 / CQ·SQ 深度实测）。
