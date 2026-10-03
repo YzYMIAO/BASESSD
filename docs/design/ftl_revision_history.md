@@ -1468,3 +1468,34 @@ v0.44 体检确认的 B 档 5 项语义缺口（FTL 层正确性）全部落地�
 
 - C1 controller state_machine 完整状态机、C1b scheduler 优先级调度、C2 NVMe host（nvme_io/admin/SQ/CQ/nvme_controller 全量）、C3 `SSD_REQUEST_FLUSH` 全实例 flush。
 - **F8/F9**：依赖上板（紧急 CP 回切校验 / CQ·SQ 深度实测）。
+
+---
+
+## v0.46 — B 档复查修复（B1 水位分子口径 + B4 死变量清理）
+
+**日期**：2026-10-03
+
+### 背景
+
+v0.45 B 档落地后逐 diff 复查，发现 2 处问题（编译验证盲区——逻辑错误 make 检不出）：
+
+1. **B1 真 bug（分子口径错）**：v0.45 只把 `checkpoint_journal_watermark` 分母 `PAGES_PER_BLOCK(64)` 改成 `JOURNAL_BLOCK_COUNT×PAGES_PER_BLOCK(128)`，但**分子仍是 `current_page`（0..63）**。分母 128 + 分子最大 63 → `used` 最大 ≈ 49%，**85%/95% 永远不触发**（比旧实现更糟，水位线整体失效）。
+2. **B4 死变量**：`gc_migrate_sb` 加了 `now_writes = 0U` 恒 0（本函数无 total_writes 入参），`rr_record_ecc` 传 0 使 `last_update` 无意义。
+
+### 修复
+
+1. **`src/ftl/checkpoint.c`**：`checkpoint_journal_watermark` 分子分母都按双块 128 页全局口径：
+   ```
+   used = (current_block×64 + current_page)×100 / (2×64) + entry 项
+   ```
+   分子含 `current_block×PAGES_PER_BLOCK`（双块环形全局页偏移）。85% 在全局页≈108（留 19 页）、95% 在全局页≈122（留 6 页≈768 条），与 §7.5.2 对齐。
+2. **`src/ftl/gc.c`**：删 `now_writes` 死变量，`rr_record_ecc(&src->rr, ecc, 0U)` + 注释"不追踪时间维度，rising_count/health 只用 ecc_bits 本身"。
+
+### 验证
+
+- `make debug / release / FC_NAND_TEST_ENABLE=1` 全零错误零新增警告
+- **上板验证（必要）**：`checkpoint_journal_watermark` 只在 host 读 completion 调用，编译无法验证 85%/95% 触发时序——上板高压写观察 journal 水位 / emergency 复位。这是编译验证盲区的直接教训。
+
+### 教训
+
+`make` 只保证编译通过，不保证逻辑正确。纯逻辑改动（水位公式/标志复位）必须**上板验证触发时序**，不能以"编译零警告"作为完成标准。

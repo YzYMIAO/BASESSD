@@ -400,17 +400,27 @@ void checkpoint_journal_watermark(l2p_journal_t *journal)
     }
 
     /*
-     * 计算 Journal 使用率：
-     *   used% = (current_page × 100 + current_entry × 100 / JOURNAL_ENTRIES_PER_PAGE)
-     *           / (JOURNAL_BLOCK_COUNT × PAGES_PER_BLOCK)
+     * 计算 Journal 使用率（双块环形全局口径）：
+     *   used% = (current_block × PAGES_PER_BLOCK + current_page) × 100
+     *           + current_entry × 100 / JOURNAL_ENTRIES_PER_PAGE
+     *           ──────────────────────────────────────────────────────
+     *           (JOURNAL_BLOCK_COUNT × PAGES_PER_BLOCK)
      *
-     * 注意分母是「双块总页数」= JOURNAL_BLOCK_COUNT × PAGES_PER_BLOCK = 2×64 = 128，
-     * 而非单块 PAGES_PER_BLOCK=64（旧实现按单块算，85%/95% 实际在 page≈55/61 就触发，
-     * 紧急水位离写满只剩 3 页≈384 条，远小于 §7.5.2 推导的 768 条余量）。
+     * 分子必须是「全局页偏移」= current_block×64 + current_page（双块环形），
+     * 而非单块内 current_page（0..63）。旧实现两处都错：
+     *   ① 分母用 PAGES_PER_BLOCK=64（单块）→ 85%/95% 在 page≈55/61 就触发，
+     *      紧急水位离写满只剩 3 页≈384 条
+     *   ② 若只改分母 128 而分子仍用 current_page → used 最大 63×100/128≈49%，
+     *      85%/95% 永远不触发（更糟）
+     * 现分子分母都按双块 128 页口径：85%（JOURNAL_FULL_THRESHOLD）在全局
+     * 页≈108（留 19 页）、95%（JOURNAL_CRITICAL）在全局页≈122（留 6 页≈768 条），
+     * 与 §7.5.2 推导对齐。
      */
-    used = ((uint32_t)journal->current_page * 100U +
-            (uint32_t)journal->current_entry * 100U / JOURNAL_ENTRIES_PER_PAGE) /
-           ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK);
+    used = ((uint32_t)journal->current_block * PAGES_PER_BLOCK +
+            (uint32_t)journal->current_page) * 100U
+           / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK)
+           + ((uint32_t)journal->current_entry * 100U / JOURNAL_ENTRIES_PER_PAGE
+              / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK));
 
     if (used >= JOURNAL_CRITICAL)
     {

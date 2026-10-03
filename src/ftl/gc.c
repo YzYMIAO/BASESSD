@@ -359,7 +359,6 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
 {
     uint8_t  plane;
     uint32_t migrated = 0U;
-    uint32_t now_writes = 0U;
 
     if ((alloc == NULL) || (cache == NULL) || (victim == NULL))
     {
@@ -400,11 +399,14 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
                         continue; /* 读失败，跳过 */
                     }
 
-                    /* B4：GC 搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环） */
+                    /* B4：GC 搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环）。
+                     * rr_record_ecc 的 last_update 传 victim 平均擦除后的单调写入
+                     * 时间戳近似值不可得（本函数无 total_writes），传 0 表示
+                     * "不追踪时间维度"——rising_count/health 判定只用 ecc_bits 本身。 */
                     if (rc != 0U)
                     {
                         ftl_block_t *src = &alloc->blocks[gblock_src];
-                        rr_record_ecc(&src->rr, ecc, now_writes);
+                        rr_record_ecc(&src->rr, ecc, 0U);
                         src->read_count++;
                     }
                 }
