@@ -217,7 +217,7 @@ LDFLAGS = $(BASE_LDFLAGS) $(TYPE_LDFLAGS) $(LDLIBS)
 # ----------------------------------------------------------------------------
 # 6. 模块列表（按依赖顺序：被依赖的在前）
 # ----------------------------------------------------------------------------
-MODULES = common controller fc ftl host nand platform
+MODULES = common controller fc ftl nand platform
 
 # ============================================================================
 # 注意：MODULE_SRCS 和 MODULE_INCS 的收集在顶层 Makefile 中完成
