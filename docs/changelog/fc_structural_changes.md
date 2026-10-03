@@ -1210,3 +1210,83 @@ FMC NAND 只能走 **PIO 逐字节访问**。这在工业产品中是真实可�
 #### `has_data=1, data_length=0` 含义
 
 `has_data=1` 使 fc_command_configure_descriptors() 分配 desc chain，提供 per-CW PAA 映射给 nand_dispatch。但 internal move OP 的 data 不走 host buffer（data_length=0），nand_fc_request_t 的 data=NULL 且 data_length=0，NAND 引擎跳过 DATA_IN/DATA_OUT uop。desc chain 仅用于"行走 PAA 空间"——dispatch 需要知道每个 CW 映射到哪个物理 page/block。`
+
+---
+
+## Phase S: nand_dispatch_poll 按企业后端分层拆分
+
+**日期**: 2026-10-04
+
+### 背景
+
+`nand_dispatch_poll()` 单函数 350 行（旧 `src/nand/nand_dispatch.c:347-696`），把企业主控里本来分开的两个模块焊死在一起：
+
+- **Arbiter / Scheduler**（决定"轮到哪个 die"）：Phase 2 出队 + `g_nand_channel_cursor` round-robin
+- **Per-die FSM**（决定"这个 die 走到哪一步"）：`chain->phase` 相位机 + ISSUE/ISSUED/FETCH 推进
+
+外加 Data path（CW chaining、三种拆页）与 Completion 聚合。后果：8 个局部变量作用域横跨 350 行，"构建 request → `nand_fc_start` → 置相位"在 4 处逐字重复，读不懂、改不动。
+
+### 改动
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `src/nand/nand_dispatch.c` | 新增 3 个结果枚举 + 1 个 ctx 结构体 + 11 个 `static` 辅助函数 | poll 压到 71 行（只留两阶段循环 + 返回值分派） |
+| `src/nand/nand_dispatch_internal.h` | `nand_dispatch_lun_chain_t` 注释补 `count` 双语义说明 | 见下方"既有隐患显式化" |
+| `docs/design/fc_nand_design.md` | 图 9 改为分层表 + 带函数名的流程图 | 企业模块 ↔ helper 名一一对应 |
+
+**纯重构，零行为变化**。不新建文件——`g_nand_dispatch_chains` / `g_nand_channel_queues` / `g_nand_channel_cursor` 都是本文件 `static`，拆到新 `.c` 要把它们改成非 static + 加 extern，风险大于收益。
+
+### 分层映射
+
+| 企业模块 | 职责 | 拆到哪个函数 | 原行号 |
+|---|---|---|---|
+| **Command issue** | 构造请求 + 发起事务 | `nand_dispatch_task_build_request` / `task_fc_start` / `task_start` | 4 处去重 |
+| **Arbiter / Scheduler** | 选 (ch,ce,lun)，轮转 | `nand_dispatch_queue_consume_match` / `phase2_dequeue` | :459, :622 |
+| **Per-die FSM** | 单 die 状态推进 | `nand_dispatch_issued_advance` / `lun_drive` / `chain_advance` / `phase1_lun` | :382, :426, :579, :366 |
+| **Data path** | CW 链式续读、页缓冲拆页 | `nand_dispatch_task_cw_chain` / `scatter_page_buffer` | :498, :536 |
+| **Completion Aggregator** | 每 CW 状态 → 命令级 | `nand_dispatch_tables.c`（已独立，未动） | — |
+
+Sequencer（`g_nand_operation_map[].uops` + `nand_engine.c`）已经独立，本次不碰。
+
+### 三个结果枚举（拆分的语义骨架）
+
+```c
+/* Per-die FSM 单步推进结果 */
+NAND_DISPATCH_LUN_WAIT      /* 本轮无进展，跳到下一 LUN */
+NAND_DISPATCH_LUN_CONTINUE  /* 链已推进到下一命令，继续内层 while */
+NAND_DISPATCH_LUN_DONE      /* 拿到可返回的 completion */
+NAND_DISPATCH_LUN_ERROR     /* req 构建失败，调用方须 abort poll */
+
+/* 命令发起结果——必须把 req_table 失败与 nand_fc_start 自身错误码分开 */
+NAND_DISPATCH_START_REQ_ERROR  /* req_table 构建失败 → abort poll */
+NAND_DISPATCH_START_ASYNC      /* nand_fc_start 返回 NOT_READY，待下轮 step */
+NAND_DISPATCH_START_SYNC       /* 同步完成或返回错误码，*fc_result 有效 */
+
+/* CW 链式续读结果（无 ERROR 出口：链内 start 错误仍走完成路径） */
+NAND_DISPATCH_CW_ASYNC / NAND_DISPATCH_CW_DONE
+```
+
+### 拆分中必须原样保留的语义陷阱
+
+1. **`req_table` 失败 ≠ `nand_fc_start` 失败**。前者致命（清 `count` + poll 立即返回 `INVALID_ARGUMENT`）；后者是"带错误状态的完成"，继续走完成处理链。这是 `start_outcome_t` 存在的唯一理由。
+2. **`CONTINUE` 出口不能省**。链推进后 `continue`（继续 while）与启动异步后 `break`（离开 while）必须用不同枚举值，否则要么死循环要么提前退出。
+3. **ISSUE→ISSUED 转换归 `lun_drive`**，不属于 cw_chain。放错会让 ISSUE 段继续跑 CW 链。
+4. **Phase 2 日志点位置**：`SSD_LOGD` 必须夹在 `req_table` 与 `nand_fc_start` 之间，所以单独拆出 `task_build_request`。
+5. **`nand_completion` 是每 LUN 迭代的局部量**，`active==0` 分支读它依赖同轮先写。ctx 必须每 LUN 重新构造。
+6. **两处 DONE 不对称**：Phase 1 链尾重置 `phase=IDLE` + 更新 `g_nand_channel_cursor`；Phase 2 单命令立即完成**都不做**。不能合并成同一个"结束链" helper。
+7. **abort 时只清 `chain->count`**，不碰 `phase`/`cursor`/`started`/队列。
+8. **ctx 不缓存 `task` 指针**——`chain->cursor++` 后旧指针失效，一律由 `&chain->tasks[chain->cursor]` 现取。
+
+### 既有隐患显式化（只加注释，逻辑未动）
+
+`chain->count` 双语义：既是链深，也是 LUN 忙标志（poll 没有独立 busy 位）。存在一条"命令已离开队列、尚未完成"的中间态——Phase 2 出队后若 `nand_fc_start` 返回异步，队列 entry 已被消费（`queue->count--`），但 `count` 仍 >0、`tasks[0].started` 已置 1，命令不在任何队列里，靠 Phase 1 下一轮按 `started`/`transaction->active` 接管推进。
+
+在 `nand_dispatch_internal.h` 的结构体注释里写为正典说明，`phase2_dequeue` 注释指向它。**"队列空 + count>0"是正常中间态，不是命令丢失。**
+
+### 验证
+
+- **机械等价性比对**：原 poll（348-696 行）与新 11 个 helper（381-931 行）去注释、归一化空白后做多重集比对，并逐项数关键副作用出现次数——`chain->count = 0U` 6=6、`task_complete` 3=3、`nand_fc_start` 6=6、`delay_dwt` 3=3、`req_table` 调用点 4=4、`NOT_READY` 判断 7=7。无一条语句凭空消失。
+- **出口逐条映射**：原函数 15 个出口（含 4 个 abort、6 个 WAIT、2 个 DONE、3 个 Phase 2 `continue`）全部有对应落点。
+- **终止性**：`phase1_lun` 的 `while(1)` 唯一 `continue` 在 `chain_advance` 之后，必 `cursor++`，`count ≤ NAND_DISPATCH_CHAIN_DEPTH(4)`，最多 4 圈必达链尾。
+- **编译**：`make` / `make tests` 均零警告零错误；二进制 86936 字节，与拆分前一致。
+- **上板回归**：待用户执行（重点：单命令读写、多 CW 普通读、多 plane 读、擦除 ISSUE→ISSUED + `min_busy_us`、Read Retry 链）。当前无 nand_dispatch 专项 UT，FC 测试经 `fc_submit → nand_dispatch_poll` 间接覆盖。

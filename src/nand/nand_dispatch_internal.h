@@ -66,6 +66,13 @@ typedef struct
  * 链中所有命令均在同一 ch/ce/lun 上，预加载完成后由 poll 自动推进 cursor，
  * 不清 LUN busy，直到 cursor==count-1 时返回 completion。
  *
+ * 注意：count 是双语义的——既是链深，也是 LUN 忙标志。poll 只靠 count!=0 判断
+ *   该 LUN 被占用，没有独立的 busy 位。因此存在一条"命令已离开队列、尚未完成"
+ *   的中间态：Phase 2 出队后若 nand_fc_start 返回异步，队列 entry 已被消费
+ *   （queue->count--），但 count 仍 >0、tasks[0].started 已置 1；此时该命令不在
+ *   任何队列里，完全由本结构持有，等 Phase 1 下一轮按 started/transaction->active
+ *   认出并接管推进。所以"通道队列空 + 该 LUN count>0"是正常中间态，不是命令丢失。
+ *
  * Phase V 扩展：
  *   phase — LUN_PHASE_*，跟踪相位转换
  *   wait_start_cycles — ISSUE 完成时的 DWT 时间戳，用于最小等待时间控制

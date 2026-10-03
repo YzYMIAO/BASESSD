@@ -774,58 +774,84 @@ FC (fc_service)
 
 ### 流程图：nand_dispatch poll 两阶段（图 9）
 
-`nand_dispatch_poll()`（round-robin 遍历通道，从上次游标续走）：
+`nand_dispatch_poll()` 只保留骨架（round-robin 遍历通道 + 两阶段分派），
+具体推进逻辑按**企业主控 Flash 后端的分层**拆成 static 辅助函数：
+
+| 企业模块 | 函数 | 职责 |
+|---|---|---|
+| **Arbiter / Scheduler** | `nand_dispatch_phase2_dequeue` | 从通道 FIFO 出队并选 LUN 启动 |
+| | `nand_dispatch_queue_consume_match` | 同步完成时消费 head entry |
+| **Per-die FSM** | `nand_dispatch_phase1_lun` | 单 LUN 驱动循环 |
+| | `nand_dispatch_issued_advance` | ISSUED 忙期 gate + pair_op 切换 |
+| | `nand_dispatch_lun_drive` | started/step 单步推进 + ISSUE→ISSUED |
+| | `nand_dispatch_chain_advance` | cursor++ 并启动下一命令 |
+| **Command issue** | `nand_dispatch_task_start` | 构建 request + 发起事务 |
+| | `nand_dispatch_task_fc_start` | `nand_fc_start` + 置初始相位 |
+| | `nand_dispatch_task_build_request` | 调 req_table 构建 request |
+| **Data path** | `nand_dispatch_task_cw_chain` | 多 CW READ 链式续读 |
+| | `nand_dispatch_scatter_page_buffer` | 三种拆页合并分派 |
 
 ```text
+nand_dispatch_poll(completion)          ← 骨架：round-robin + 两阶段分派
 for channel = cursor..(cursor+CH_NUM-1)
   │
-  ├─ Phase 1：推进本通道各 CE/LUN 的活跃 chain（每 LUN 一 chain）
+  ├─ Phase 1：phase1_lun() —— 推进本通道各 CE/LUN 的活跃 chain
   │    for ce, for lun:
   │      chain = &chains[ch][ce][lun];  chain->count==0 → 跳过
-  │      task = chain->tasks[chain->cursor]
+  │      ctx = { completion, queue, chain, ch/ce/lun }
   │
-  │      ── phase == ISSUED（LUN 内部操作中）──
-  │         min_busy_us 未到 → continue（等最短忙期）
+  │      ── issued_advance()：phase == ISSUED（LUN 内部操作中）──
+  │         min_busy_us 未到 → WAIT（等最短忙期）
   │         到点 → pair_op 切换（LOAD→FETCH / ISSUE→WAIT）
-  │               → req_table[op](task) → nand_fc_start → phase=FETCH
+  │               → task_start() → phase=FETCH
   │
-  │      ── 内层 while(1)（started 判定）──
-  │         started==0 → req_table 构建 request → nand_fc_start
+  │      ── lun_drive()：started 判定 ──
+  │         started==0 → task_start()（req_table 构建 + nand_fc_start）
   │                      （ISSUE 型置 phase=ISSUE；否则 FETCH）
-  │                      NOT_READY → break；同步完成则消费队列 entry
+  │                      ASYNC → WAIT；同步完成则 consume_match() 消费 entry
   │         started!=0 → transaction.active ? nand_fc_step
   │                                     : 用已存的 execution_status
-  │         NOT_READY → break（等下一轮）
-  │
-  │      ── 命令完成后的处理链 ──
+  │         ASYNC → WAIT（等下一轮）
   │         phase==ISSUE → task_complete → phase=ISSUED
-  │                        → 记 DWT 起点 → break（不清 LUN busy）
-  │         CW chaining（多 CW READ）→ task_complete
-  │           若 (普通读/OTP读/随机读) 且还有下一 CW：
-  │             cw_index++ → operation=OP_RANDOM_DATA_READ
-  │             → 列地址 = cw_index×(PAGE_SIZE/4) → nand_fc_start
-  │         page_buffer 拆回（CACHE 读 / OP_READ_PAGE_FETCH /
-  │                         MP_WITH_DATA_OUT 三种拆页）
-  │         chain->cursor+1 < chain->count → cursor++ → 构建+start 下一命令
-  │                                        （不清 LUN busy！）
-  │         整链结束 → *completion = task->completion
-  │                    chain->count=0, phase=IDLE → 返回（有完成）
+  │                        → 记 DWT 起点 → WAIT（不清 LUN busy）
   │
-  ├─ Phase 2：从本通道 FIFO 出队新命令
+  │      ── task_cw_chain()：CW chaining（多 CW READ）→ task_complete
+  │         若 (普通读/OTP读/随机读) 且还有下一 CW：
+  │           cw_index++ → operation=OP_RANDOM_DATA_READ
+  │           → 列地址 = cw_index×(PAGE_SIZE/4) → nand_fc_start
+  │         ASYNC → 本轮到此为止
+  │
+  │      ── scatter_page_buffer()：page_buffer 拆回
+  │         （CACHE 读 / OP_READ_PAGE_FETCH / MP_WITH_DATA_OUT）
+  │
+  │      ── chain_advance()：chain->cursor+1 < chain->count ──
+  │         cursor++ → task_start() 下一命令（不清 LUN busy！）
+  │         CONTINUE → 回到驱动循环顶部
+  │
+  │      ── 整链结束 → *completion = task->completion
+  │                    chain->count=0, phase=IDLE,
+  │                    g_nand_channel_cursor 前进 → DONE（有完成）
+  │
+  ├─ Phase 2：phase2_dequeue() —— 从本通道 FIFO 出队新命令
   │    queue->count!=0：
   │      取 head entry（command_id/ce/lun）
-  │      目标 chain 忙 → continue（entry 留队）
+  │      目标 chain 忙 → WAIT（entry 留队）
   │      出队 → task 已由 submit 预加载
-  │           → req_table 构建 → nand_fc_start → 置相位
+  │           → build_request → SSD_LOGD → fc_start → 置相位
   │           同步完成 → task_complete
   │           phase==ISSUE → 切 ISSUED，不返回 completion
   │           count>1（链）→ 交给 Phase 1
-  │           单命令立即完成 → 返回 completion（返回点之二）
+  │           单命令立即完成 → DONE（返回点之二，不重置 phase/游标）
   │
   └─ 全部遍历完无完成 → 返回 NOT_READY
 ```
 
 **要点**：Phase 1 每轮先推进已有事务，Phase 2 才启动新命令。链执行期间 LUN busy，HSQ 无法插入（保证 Read Retry 原子性）。
+
+**重构注意**：`nand_dispatch_poll` 的返回值分派依赖三个 outcome 枚举——`nand_dispatch_lun_outcome_t`
+（WAIT / CONTINUE / DONE / ERROR）、`nand_dispatch_start_outcome_t`（REQ_ERROR / ASYNC / SYNC）、
+`nand_dispatch_cw_outcome_t`（ASYNC / DONE）。其中 **REQ_ERROR 与 nand_fc_start 自身的错误码必须区分**：
+前者是致命的（清 `chain->count` 并中止 poll），后者只是"带错误状态的完成"，要继续走完成处理链。
 
 ### 4.4 接口
 
