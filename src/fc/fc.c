@@ -20,6 +20,7 @@
  */
 
 #include "fc.h"
+#include "fc_internal.h"
 
 #include "common/ssd_log.h"
 #include "fc_crc_engine.h"
@@ -32,6 +33,9 @@
 #if CONFIG_FC_RAID
 #    include "fc_raid_engine.h"
 #endif
+
+/* fc_complete_internal() 前向声明：供 fc_complete_from_nand 调用 */
+fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *completion);
 
 /*
  * 判断 operation 是否为带 ECC 编码数据的 Page Read。
@@ -82,82 +86,14 @@ static uint8_t fc_is_page_write(uint8_t operation)
 #include <stddef.h>
 #include <string.h>
 
-/* FC 硬件模型仅属于实现层；FTL 不能取得或修改该控制器上下文。 */
-typedef enum
-{
-    FC_COMMAND_STATE_FREE = 0U,      /* 空闲 */
-    FC_COMMAND_STATE_ALLOCATED,      /* 已分配（可配置 desc/buffer） */
-    FC_COMMAND_STATE_QUEUED,         /* 已提交到 SQ/HSQ */
-    FC_COMMAND_STATE_ACTIVE,         /* 已出队，NAND 执行中 */
-    FC_COMMAND_STATE_COMPLETED       /* 完成项已入 CQ（可释放） */
-} fc_command_state_t;
-
-#if CONFIG_FC_RAID
-/* ── 跨 Plane Stripe RAID 积累状态 ──
+/* ── 静态资源区：FC 控制面固定资源，当前位于默认 .bss（AXI SRAM）。
+ *    不使用动态内存。后续根据 DMA/Cache 和 Buffer Pool 设计，
+ *    可将各数组分别放入指定链接段。
  *
- * 当前 PLANE_NUM=2，FC_STRIPE_DATA_MAX=1，单命令即满 stripe，
- * fc_stripe_submit() 在 fc_poll_internal() 中直接处理，不经过 accumulator。
- *
- * fc_stripe_accum_t 和 stripe_accum[] 为 PLANE_NUM>=4 预留扩展：
- * 当需要跨多次 fc_service() 调用积累多条数据命令后统一提交 parity 时，
- * 由 fc_poll_stripe_accumulate()（待实现）管理。 */
-
-/* 单组 stripe 的最大数据命令数 = PLANE_NUM - 1 */
-#    define FC_STRIPE_DATA_MAX ((uint8_t)(PLANE_NUM - 1U))
-
-/* 每个 LUN 的 stripe 积累状态（PLANE_NUM>=4 扩展预留） */
-typedef struct
-{
-    uint8_t         active;                       /* 0=空闲, 1=积累中 */
-    uint8_t         ch, ce, lun;                  /* 目标 LUN */
-    uint8_t         count;                        /* 已积累的数据命令数 */
-    fc_command_id_t data_ids[FC_STRIPE_DATA_MAX]; /* 已积累的数据命令 ID */
-    fc_command_id_t parity_id;                    /* 已分配的 parity 命令 ID */
-} fc_stripe_accum_t;
-#endif /* CONFIG_FC_RAID */
-
-typedef struct
-{
-    fc_registers_t        registers;
-    fc_submission_queue_t sq;
-    fc_submission_queue_t hsq;
-    fc_completion_queue_t cq;
-    fc_scheduler_t        scheduler;
-    fc_command_t         *command_pool;
-    fc_descriptor_t      *descriptor_pool;
-    uint8_t (*buffer_pool)[FC_BUFFER_POOL_CW_SIZE];
-    fc_command_id_t *descriptor_owner;
-    uint8_t         *command_state;
-    fc_command_id_t *command_free_next;
-    uint16_t        *descriptor_free_next;
-    uint16_t        *descriptor_owned_next;
-    uint16_t        *buffer_free_next;
-    uint8_t         *buffer_state;
-    uint16_t        *command_descriptor_head;
-    fc_command_id_t  command_free_head;
-    uint16_t         descriptor_free_head;
-    uint16_t         buffer_free_head;
-    fc_command_id_t  active_handle;
-    uint8_t          active_valid;
-
-    /* ── Stripe RAID 积累状态 ── */
-#if CONFIG_FC_RAID
-    fc_stripe_accum_t stripe_accum[LUN_NUM];                         /* 每 LUN stripe 积累 */
-    fc_command_id_t   stripe_parity_for_data[FC_COMMAND_POOL_DEPTH]; /* 数据命令 ID → parity 命令 ID 映射 */
-#endif                                                               /* CONFIG_FC_RAID */
-} fc_t;
-
-/* fc_complete_from_nand() is defined before the internal completion implementation. */
-static fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *completion);
-
-/*
- * FC 控制面固定资源区。当前位于默认 .bss（AXI SRAM）；不使用动态内存。
- * 后续根据 DMA/Cache 和 Buffer Pool 设计，可将各数组分别放入指定链接段。
- *
- * 池布局：
- *   command_pool / descriptor_pool / buffer_pool —— 三池本体
- *   descriptor_owner[desc] —— desc 归属的命令 ID
- *   command_state / command_free_next —— 命令状态 + 空闲链表
+ *    池布局：
+ *      command_pool / descriptor_pool / buffer_pool —— 三池本体
+ *      descriptor_owner[desc] —— desc 归属的命令 ID
+ *      command_state / command_free_next —— 命令状态 + 空闲链表
  *   descriptor_free_next / descriptor_owned_next —— desc 空闲/归属链表
  *   buffer_free_next / buffer_state —— buffer 空闲链表 + 占用状态
  *   command_descriptor_head[cmd] —— 命令的 desc 链头（回滚/释放用）
@@ -176,7 +112,44 @@ static uint16_t            g_fc_descriptor_owned_next[FC_DESCRIPTOR_POOL_DEPTH];
 static uint16_t            g_fc_buffer_free_next[FC_BUFFER_POOL_DEPTH];
 static uint8_t             g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
 static uint16_t            g_fc_command_descriptor_head[FC_COMMAND_POOL_DEPTH];
-static fc_t                g_fc_controller;
+
+/* 全局单例控制器：对 API 薄壳（fc_interface.c）可见，FTL 不可见 */
+fc_t                       g_fc_controller;
+
+/* ── 资源统计读取器（fc_get_resource_stats 用，fc_interface.c 调用） ── */
+uint16_t fc_get_sq_count(const fc_t *controller)  { return controller->sq.count; }
+uint16_t fc_get_hsq_count(const fc_t *controller) { return controller->hsq.count; }
+uint16_t fc_get_cq_count(const fc_t *controller)  { return controller->cq.count; }
+uint8_t  fc_command_state_get(const fc_t *controller, fc_command_id_t command_id)
+{
+    return (command_id < FC_COMMAND_POOL_DEPTH) ? controller->command_state[command_id] : FC_COMMAND_STATE_FREE;
+}
+fc_command_id_t fc_descriptor_owner_get(const fc_t *controller, uint16_t descriptor_id)
+{
+    return (descriptor_id < FC_DESCRIPTOR_POOL_DEPTH) ? controller->descriptor_owner[descriptor_id] : FC_COMMAND_ID_INVALID;
+}
+uint8_t fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id)
+{
+    return (buffer_id < FC_BUFFER_POOL_DEPTH) ? controller->buffer_state[buffer_id] : 0U;
+}
+
+/* ── 命令/描述符 ID → 指针（越界返回 NULL，fc_interface.c 校验用） ── */
+fc_command_t *fc_command_id_to_command_internal(fc_t *controller, uint16_t command_id)
+{
+    if (command_id >= FC_COMMAND_POOL_DEPTH)
+    {
+        return NULL;
+    }
+    return &controller->command_pool[command_id];
+}
+fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, uint16_t descriptor_id)
+{
+    if (descriptor_id >= FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        return NULL;
+    }
+    return &controller->descriptor_pool[descriptor_id];
+}
 
 /* 命令 ID 有效性（< 池深度） */
 static uint8_t fc_command_id_is_valid(fc_command_id_t command_id)
@@ -184,61 +157,19 @@ static uint8_t fc_command_id_is_valid(fc_command_id_t command_id)
     return (uint8_t)(command_id < FC_COMMAND_POOL_DEPTH);
 }
 
-/* buffer ID 有效性（< 池深度且已占用） */
-static uint8_t fc_buffer_id_is_valid(const fc_t *controller, fc_buffer_id_t buffer_id)
-{
-    return (uint8_t)((buffer_id < FC_BUFFER_POOL_DEPTH) &&
-                     (controller->buffer_state[buffer_id] != 0U));
-}
-
 /* 内部：直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移 */
-static uint8_t *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id)
+uint8_t *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
     return controller->buffer_pool[buffer_id];
 }
 
-/* 内部：线性扫描找 buffer 指针对应的 ID（外部指针需先回退 USER 偏移） */
-static fc_buffer_id_t fc_real_buffer_to_buffer_id_internal(fc_t *controller, const uint8_t *buffer)
-{
-    uint16_t index;
-
-    for (index = 0U; index < FC_BUFFER_POOL_DEPTH; index++)
-    {
-        if (buffer == controller->buffer_pool[index])
-        {
-            return (fc_buffer_id_t)index;
-        }
-    }
-    return FC_BUFFER_ID_INVALID;
-}
-
 /* 内部：释放 buffer（状态清零 + 挂回空闲链表头） */
-static fc_status_t fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id)
+fc_status_t fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
     controller->buffer_state[buffer_id]     = 0U;
     controller->buffer_free_next[buffer_id] = controller->buffer_free_head;
     controller->buffer_free_head            = buffer_id;
     return FC_STATUS_OK;
-}
-
-/* 命令指针 → 池索引（指针算术，前提：指针属于 command_pool） */
-static uint8_t fc_command_to_id(const fc_t *controller, const fc_command_t *command, fc_command_id_t *command_id)
-{
-    uint16_t index;
-
-    if ((controller == NULL) || (command == NULL) || (command_id == NULL))
-    {
-        return 0U;
-    }
-    for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
-    {
-        if (command == &controller->command_pool[index])
-        {
-            *command_id = (fc_command_id_t)index;
-            return 1U;
-        }
-    }
-    return 0U;
 }
 
 /* 命令的 CW 数（desc_id 有效时 = config.cw+1，否则 0） */
@@ -248,7 +179,7 @@ static uint8_t fc_command_descriptor_count(const fc_command_t *command)
 }
 
 /* 校验命令的 desc 链是否全部归该命令所有（所有权一致性） */
-static uint8_t fc_command_descriptors_owned(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command)
+uint8_t fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command)
 {
     fc_descriptor_id_t     descriptor_id = (fc_descriptor_id_t)command->desc_id;
     const fc_descriptor_t *descriptor;
@@ -276,23 +207,6 @@ static uint8_t fc_command_descriptors_owned(const fc_t *controller, fc_command_i
         descriptor_id = (fc_descriptor_id_t)descriptor->next_id;
     }
     return 1U;
-}
-
-/* CQ 中是否仍包含该命令（release 前置检查，防未取完成就释放） */
-static uint8_t fc_cq_contains_command(const fc_t *controller, const fc_command_t *command)
-{
-    uint16_t index = controller->cq.head;
-    uint16_t count;
-
-    for (count = 0U; count < controller->cq.count; count++)
-    {
-        if ((command != NULL) && (controller->cq.entries[index].command_id == command->command_id))
-        {
-            return 1U;
-        }
-        index = (uint16_t)((index + 1U) % controller->cq.depth);
-    }
-    return 0U;
 }
 
 /* 把内部队列/命令状态汇总到 fc_registers 的状态位（对外可见） */
@@ -352,7 +266,7 @@ static void fc_register_queue_state(fc_t *controller)
  *     - 初始化 SQ/HSQ/CQ/调度器 + nand_dispatch_init()。
  *     - 初始化 RAID 引擎上下文（每 LUN）、CRC 硬件、stripe 积累状态。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_init_internal(fc_t *controller)
+fc_status_t fc_init_internal(fc_t *controller)
 {
     fc_status_t result;
     uint16_t    index;
@@ -460,7 +374,7 @@ static fc_status_t fc_init_internal(fc_t *controller)
  *   返回：命令指针；池空返回 NULL。
  *   实现要点：清零 + command_id 置入 + desc_id=INVALID（未配置描述符）。
  * -------------------------------------------------------------------- */
-static fc_command_t *fc_command_alloc_internal(fc_t *controller)
+fc_command_t *fc_command_alloc_internal(fc_t *controller)
 {
     fc_command_id_t command_id;
 
@@ -511,7 +425,7 @@ static fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_comman
  *   参数：controller —— FC 控制器。
  *   返回：buffer ID；池空返回 FC_BUFFER_ID_INVALID。
  * -------------------------------------------------------------------- */
-static fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
+fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
 {
     uint16_t buffer_index;
 
@@ -523,11 +437,6 @@ static fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
     controller->buffer_free_head           = controller->buffer_free_next[buffer_index];
     controller->buffer_state[buffer_index] = 1U;
     return (fc_buffer_id_t)buffer_index;
-}
-
-static fc_status_t fc_buffer_release_internal_api(fc_t *controller, fc_buffer_id_t buffer_id)
-{
-    return fc_buffer_release_internal(controller, buffer_id);
 }
 
 /* --------------------------------------------------------------------
@@ -636,7 +545,7 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
  *     - 前驱 desc 的 next_id 串联；首 desc 记入 command->desc_id。
  *     - 任一 desc 配置失败 → fc_command_resources_rollback 整体回滚。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_command_t *command)
+fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_command_t *command)
 {
     fc_command_id_t  command_id;
     fc_descriptor_t *previous = NULL;
@@ -709,7 +618,7 @@ static fc_status_t fc_submit_to_queue(fc_t *controller, fc_submission_queue_t *q
  *   返回：FC_STATUS_OK / QUEUE_FULL。
  *   实现要点：投递后刷新寄存器状态位。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_submit_internal(fc_t *controller, fc_command_t *command)
+fc_status_t fc_submit_internal(fc_t *controller, fc_command_t *command)
 {
     fc_status_t result;
 
@@ -1107,7 +1016,7 @@ stripe_error:
  *     - "Submission only occupies the target LUN. Completion is advanced
  *        by a later fc_service() call."
  * -------------------------------------------------------------------- */
-static fc_status_t fc_poll_internal(fc_t *controller)
+fc_status_t fc_poll_internal(fc_t *controller)
 {
     fc_status_t                result;
     fc_command_id_t            command_id;
@@ -1535,13 +1444,8 @@ static fc_status_t fc_poll_internal(fc_t *controller)
     return result;
 }
 
-/* --------------------------------------------------------------------
- * fc_complete_internal
- *   功能：完成项入 CQ，命令状态置 COMPLETED。
- *   参数：controller —— FC 控制器；completion —— 完成项。
- *   返回：FC_STATUS_OK / QUEUE_FULL（CQ 满）。
- * -------------------------------------------------------------------- */
-static fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *completion)
+/* 完成项入 CQ，命令状态置 COMPLETED（供 fc_complete_from_nand 使用，前向声明见下） */
+fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *completion)
 {
     fc_status_t     result;
     fc_command_id_t command_id;
@@ -1562,7 +1466,7 @@ static fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *c
  *   参数：controller —— FC 控制器；completion —— 输出。
  *   返回：FC_STATUS_OK / QUEUE_EMPTY。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_status_t *completion)
+fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_status_t *completion)
 {
     fc_status_t result;
 
@@ -1580,7 +1484,7 @@ static fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_stat
  *         命令槽位置 FREE 回池。调用方（公共接口）已保证状态合法、
  *         命令不在 CQ 中。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *command)
+fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *command)
 {
     uint16_t        descriptor_index;
     uint16_t        next_descriptor_index;
@@ -1606,422 +1510,3 @@ static fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_
     return FC_STATUS_OK;
 }
 
-/* ── 公共 API（单例控制器 g_fc_controller 的薄包装） ── */
-
-/* 初始化全局控制器 */
-fc_status_t fc_init(void)
-{
-    return fc_init_internal(&g_fc_controller);
-}
-
-/* 分配命令槽位 */
-fc_command_t *fc_command_alloc(void)
-{
-    return fc_command_alloc_internal(&g_fc_controller);
-}
-
-/* 命令 ID → 命令指针（越界返回 NULL） */
-fc_command_t *fc_command_id_to_command(uint16_t command_id)
-{
-    if (command_id >= FC_COMMAND_POOL_DEPTH)
-    {
-        return NULL;
-    }
-    return &g_fc_controller.command_pool[command_id];
-}
-
-/* 描述符 ID → 描述符指针（越界返回 NULL） */
-fc_descriptor_t *fc_descriptor_id_to_descriptor(uint16_t descriptor_id)
-{
-    if (descriptor_id >= FC_DESCRIPTOR_POOL_DEPTH)
-    {
-        return NULL;
-    }
-    return &g_fc_controller.descriptor_pool[descriptor_id];
-}
-
-/* 配置命令 desc 链（仅 ALLOCATED 且尚未配置时合法） */
-fc_status_t fc_command_configure_descriptors(fc_command_t *command)
-{
-    fc_command_id_t command_id;
-
-    if ((command == NULL) || (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
-        (g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) ||
-        (command->desc_id != FC_DESCRIPTOR_ID_INVALID))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    return fc_command_configure_descriptors_internal(&g_fc_controller, command);
-}
-
-/* 分配 buffer */
-fc_buffer_id_t fc_buffer_alloc(void)
-{
-    return fc_buffer_alloc_internal(&g_fc_controller);
-}
-
-/* 释放 buffer（须已占用） */
-fc_status_t fc_buffer_release(fc_buffer_id_t buffer_id)
-{
-    if (fc_buffer_id_is_valid(&g_fc_controller, buffer_id) == 0U)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    return fc_buffer_release_internal_api(&g_fc_controller, buffer_id);
-}
-
-/* 对外：返回 USER 数据区指针（跳过 META+CRC 8 字节） */
-uint8_t *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
-{
-    uint8_t *base;
-
-    if (fc_buffer_id_is_valid(&g_fc_controller, buffer_id) == 0U)
-    {
-        return NULL;
-    }
-    base = fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
-    if (base == NULL)
-    {
-        return NULL;
-    }
-    /* 对外只暴露 USER 数据区，跳过 META(4) + CRC(4) */
-    return base + FC_BUFFER_USER_OFFSET;
-}
-
-/* FC 内部：返回 CW 基址（528B，含 META/CRC/PARITY，数据路径用） */
-uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id)
-{
-    if (fc_buffer_id_is_valid(&g_fc_controller, buffer_id) == 0U)
-    {
-        return NULL;
-    }
-    return fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
-}
-
-/* 返回命令第 cw_index 个 CW 的 META 指针（校验物理地址用） */
-uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index)
-{
-    if (command == NULL)
-    {
-        return NULL;
-    }
-    fc_descriptor_id_t did = (fc_descriptor_id_t)command->desc_id;
-    uint8_t            idx = 0U;
-    while (did != FC_DESCRIPTOR_ID_INVALID)
-    {
-        if (idx == cw_index)
-        {
-            fc_descriptor_t *d = (did < FC_DESCRIPTOR_POOL_DEPTH) ? &g_fc_controller.descriptor_pool[did] : NULL;
-            if (d == NULL)
-            {
-                return NULL;
-            }
-            return (d->buffer_id != FC_BUFFER_ID_INVALID)
-                       ? fc_buffer_id_to_real_buffer_internal(&g_fc_controller, d->buffer_id)
-                       : NULL;
-        }
-        did = (did < FC_DESCRIPTOR_POOL_DEPTH) ? (fc_descriptor_id_t)g_fc_controller.descriptor_pool[did].next_id : FC_DESCRIPTOR_ID_INVALID;
-        idx++;
-    }
-    return NULL;
-}
-
-/* 外部 USER 指针 → buffer ID（先回退 8 字节到 CW 基址再线性扫描） */
-fc_buffer_id_t fc_real_buffer_to_buffer_id(const uint8_t *buffer)
-{
-    if (buffer == NULL)
-    {
-        return FC_BUFFER_ID_INVALID;
-    }
-    /* 外部拿到的是 USER 区域指针，回退 8 字节到 CW 基址再比对 */
-    return fc_real_buffer_to_buffer_id_internal(&g_fc_controller, buffer - FC_BUFFER_USER_OFFSET);
-}
-
-/* 便利：把外部数据按 CW 顺序写入命令 buffer（不足填 0xFF dummy） */
-fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t length)
-{
-    fc_command_id_t    command_id;
-    fc_descriptor_id_t desc_id;
-    uint8_t            cw_count;
-    uint8_t            i;
-    const uint8_t     *src;
-
-    if ((command == NULL) || (data == NULL) ||
-        (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
-        (g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) ||
-        (command->desc_id == FC_DESCRIPTOR_ID_INVALID))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-
-    cw_count = (uint8_t)(command->config.cw + 1U);
-    src      = (const uint8_t *)data;
-    desc_id  = (fc_descriptor_id_t)command->desc_id;
-
-    for (i = 0U; i < cw_count; i++)
-    {
-        fc_descriptor_t *descriptor;
-        uint8_t         *buf;
-        uint32_t         copy_len;
-
-        if (desc_id >= FC_DESCRIPTOR_POOL_DEPTH)
-        {
-            return FC_STATUS_INVALID_ARGUMENT;
-        }
-        descriptor = &g_fc_controller.descriptor_pool[desc_id];
-        if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
-        {
-            return FC_STATUS_INVALID_ARGUMENT;
-        }
-        buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
-
-        if (length > 0U)
-        {
-            copy_len = (length >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : length;
-            (void)memcpy(buf, src, copy_len);
-            src += copy_len;
-            length -= copy_len;
-
-            /* 当前 buffer 未填满部分用 0xFF dummy 填充 */
-            if (copy_len < FC_BUFFER_USER_SIZE)
-            {
-                (void)memset(buf + copy_len, 0xFF, (size_t)(FC_BUFFER_USER_SIZE - copy_len));
-            }
-        }
-        else
-        {
-            /* 数据已耗尽，整 buffer 填充 0xFF dummy */
-            (void)memset(buf, 0xFF, FC_BUFFER_POOL_CW_SIZE);
-        }
-
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
-    }
-
-    return FC_STATUS_OK;
-}
-
-/* --------------------------------------------------------------------
- * fc_read_cmd_data
- *   功能：便利——从命令 buffer 按 CW 顺序读取用户数据到外部缓冲。
- *   参数：command —— 命令；data —— 输出；length —— 字节数。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / IO_ERROR。
- * -------------------------------------------------------------------- */
-fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length)
-{
-    fc_command_id_t    command_id;
-    fc_descriptor_id_t desc_id;
-    uint8_t            i;
-    uint8_t            cw_count;
-    uint8_t           *dst;
-    uint32_t           remaining;
-
-    if ((command == NULL) || (data == NULL) ||
-        (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
-        (command->desc_id == FC_DESCRIPTOR_ID_INVALID))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-
-    cw_count  = (uint8_t)(command->config.cw + 1U);
-    dst       = (uint8_t *)data;
-    remaining = length;
-    desc_id   = (fc_descriptor_id_t)command->desc_id;
-
-    for (i = 0U; (i < cw_count) && (remaining > 0U); i++)
-    {
-        fc_descriptor_t *descriptor;
-        uint8_t         *buf;
-
-        if (desc_id >= FC_DESCRIPTOR_POOL_DEPTH)
-        {
-            return FC_STATUS_IO_ERROR;
-        }
-        descriptor = &g_fc_controller.descriptor_pool[desc_id];
-        if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
-        {
-            return FC_STATUS_IO_ERROR;
-        }
-
-        buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
-        if (buf == NULL)
-        {
-            return FC_STATUS_IO_ERROR;
-        }
-
-        {
-            uint32_t copy_len = (remaining >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : remaining;
-            (void)memcpy(dst, buf, copy_len);
-            dst += copy_len;
-            remaining -= copy_len;
-        }
-
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
-    }
-
-    return FC_STATUS_OK;
-}
-
-/* --------------------------------------------------------------------
- * fc_get_cmd_data_ptr
- *   功能：获取命令第 cw_index 个 CW 的 USER 数据指针（读后使用）。
- *   参数：command —— 命令；cw_index —— CW 索引。
- *   返回：USER 指针 / NULL（越界或 buffer 无效）。
- * -------------------------------------------------------------------- */
-uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
-{
-    fc_command_id_t    command_id;
-    fc_descriptor_id_t desc_id;
-    uint8_t            i;
-
-    if ((command == NULL) ||
-        (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
-        (command->desc_id == FC_DESCRIPTOR_ID_INVALID) ||
-        (cw_index > command->config.cw))
-    {
-        return NULL;
-    }
-
-    desc_id = (fc_descriptor_id_t)command->desc_id;
-    for (i = 0U; i <= cw_index; i++)
-    {
-        fc_descriptor_t *descriptor;
-
-        if (desc_id >= FC_DESCRIPTOR_POOL_DEPTH)
-        {
-            return NULL;
-        }
-        descriptor = &g_fc_controller.descriptor_pool[desc_id];
-        if (i == cw_index)
-        {
-            if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
-            {
-                return NULL;
-            }
-            return fc_buffer_id_to_real_buffer(descriptor->buffer_id);
-        }
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
-    }
-
-    return NULL;
-}
-
-/* --------------------------------------------------------------------
- * fc_submit
- *   功能：命令投递到 SQ/HSQ（公共接口）。
- *   参数：command —— 已配置好的命令。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / QUEUE_FULL。
- *   实现要点：状态须 ALLOCATED、validate 通过、desc 链所有权完整。
- * -------------------------------------------------------------------- */
-fc_status_t fc_submit(fc_command_t *command)
-{
-    fc_command_id_t command_id;
-
-    if ((command == NULL) || (fc_command_to_id(&g_fc_controller, command, &command_id) == 0U) ||
-        (g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) ||
-        (fc_command_validate(command) != FC_STATUS_OK) ||
-        (fc_command_descriptors_owned(&g_fc_controller, command_id, command) == 0U))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    return fc_submit_internal(&g_fc_controller, command);
-}
-
-/* --------------------------------------------------------------------
- * fc_service
- *   功能：服务主循环单步（公共入口）。
- *   返回：FC_STATUS_OK / IO_ERROR / NOT_READY（无命令可推进）。
- * -------------------------------------------------------------------- */
-fc_status_t fc_service(void)
-{
-    return fc_poll_internal(&g_fc_controller);
-}
-
-/* 从 CQ 取完成项 */
-fc_status_t fc_poll_completion(fc_command_status_t *completion)
-{
-    if (completion == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    return fc_poll_completion_internal(&g_fc_controller, completion);
-}
-
-/* --------------------------------------------------------------------
- * fc_command_release
- *   功能：释放命令全部资源（公共接口）。
- *   参数：command —— 命令。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / NOT_READY（仍在 CQ 中）。
- *   实现要点：仅 ALLOCATED 或 COMPLETED 可释放；命令须不在 CQ 中
- *         （FTL 应已 poll_completion 取走完成项）。
- * -------------------------------------------------------------------- */
-fc_status_t fc_command_release(fc_command_t *command)
-{
-    fc_command_id_t command_id;
-
-    if (command == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-
-    command_id = command->command_id;
-    if ((command_id >= FC_COMMAND_POOL_DEPTH) ||
-        (&g_fc_controller.command_pool[command_id] != command))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-
-    if ((g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_ALLOCATED) &&
-        (g_fc_controller.command_state[command_id] != FC_COMMAND_STATE_COMPLETED))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    if (fc_cq_contains_command(&g_fc_controller, command) != 0U)
-    {
-        return FC_STATUS_NOT_READY;
-    }
-    return fc_command_release_internal_api(&g_fc_controller, command);
-}
-
-/* --------------------------------------------------------------------
- * fc_get_resource_stats
- *   功能：统计当前各资源池使用量（监控/测试）。
- *   参数：stats —— 输出。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT。
- * -------------------------------------------------------------------- */
-fc_status_t fc_get_resource_stats(fc_resource_stats_t *stats)
-{
-    uint16_t index;
-
-    if (stats == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    stats->sq_used         = g_fc_controller.sq.count;
-    stats->hsq_used        = g_fc_controller.hsq.count;
-    stats->cq_used         = g_fc_controller.cq.count;
-    stats->command_used    = 0U;
-    stats->descriptor_used = 0U;
-    stats->buffer_used     = 0U;
-    for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
-    {
-        if (g_fc_controller.command_state[index] != FC_COMMAND_STATE_FREE)
-        {
-            stats->command_used++;
-        }
-    }
-    for (index = 0U; index < FC_DESCRIPTOR_POOL_DEPTH; index++)
-    {
-        if (g_fc_controller.descriptor_owner[index] != FC_COMMAND_ID_INVALID)
-        {
-            stats->descriptor_used++;
-        }
-    }
-    for (index = 0U; index < FC_BUFFER_POOL_DEPTH; index++)
-    {
-        if (g_fc_controller.buffer_state[index] != 0U)
-        {
-            stats->buffer_used++;
-        }
-    }
-    return FC_STATUS_OK;
-}

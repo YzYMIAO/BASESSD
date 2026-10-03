@@ -19,7 +19,24 @@
  * buffer 布局（528B CW）：
  *   [META:4][CRC:4][USER:512][PARITY:8]
  *   对外只暴露 USER 区（fc_buffer_id_to_real_buffer 返回 offset=8 处）。
+ *
+ * 文件分工：
+ *   fc.h（本文件）        ：类型、宏、资源池配置、功能开关、资源统计结构
+ *   fc_interface.h        ：对外函数声明（本文件 include 之，二者合一对外）
+ *   fc_interface.c        ：对外函数实现（单例 g_fc_controller 的薄壳）
+ *   fc_internal.h         ：fc.c ↔ fc_interface.c 共享的内部签名（FTL 不得 include）
+ *
+ * 接口分组（全部声明在 fc_interface.h）：
+ *   ① 初始化      fc_init
+ *   ② 命令生命周期 fc_command_alloc / configure_descriptors / submit /
+ *                  service / poll_completion / command_release
+ *   ③ buffer 访问 fc_buffer_alloc / release / id_to_real_buffer / get_base / get_meta
+ *   ④ 数据便利    fc_write_cmd_data / fc_read_cmd_data / fc_get_cmd_data_ptr
+ *   ⑤ 查询工具    fc_command_id_to_command / fc_descriptor_id_to_descriptor /
+ *                  fc_get_resource_stats
  */
+
+#include "fc_interface.h"
 
 /* ── 功能特性开关 ── */
 
@@ -53,61 +70,5 @@
 #define FC_HSQ_DEPTH          (16U)
 #define FC_CQ_DEPTH           (64U)
 
-/* 资源使用统计（测试/监控用） */
-typedef struct
-{
-    uint16_t sq_used;
-    uint16_t hsq_used;
-    uint16_t cq_used;
-    uint16_t command_used;
-    uint16_t descriptor_used;
-    uint16_t buffer_used;
-} fc_resource_stats_t;
-
-/* ── 初始化 ── */
-fc_status_t fc_init(void);
-
-/* ── Command / Descriptor / Buffer Pool 分配与查询 ── */
-fc_command_t      *fc_command_alloc(void);
-fc_command_t      *fc_command_id_to_command(uint16_t command_id);
-fc_descriptor_t   *fc_descriptor_id_to_descriptor(uint16_t descriptor_id);
-fc_status_t        fc_command_configure_descriptors(fc_command_t *command);
-fc_descriptor_id_t fc_descriptor_alloc(fc_command_t *command);
-fc_buffer_id_t     fc_buffer_alloc(void);
-fc_status_t        fc_buffer_release(fc_buffer_id_t buffer_id);
-uint8_t           *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id);
-fc_buffer_id_t     fc_real_buffer_to_buffer_id(const uint8_t *buffer);
-
-/* FC 内部使用：返回 CW 基址（META 开头，528B 完整 CW）。
-   数据路径（加扰/ECC/RAID）使用此接口。 */
-uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id);
-
-/* 返回 CW 中 META 字段指针（4 字节，位于 CW 基址偏移 0）。
-   META 包含 FAA/PAA 信息，由 FC 在 program 前自动填写。
-   FTL/Test 在 read 完成后可通过此接口验证物理地址一致性。 */
-uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index);
-
-/* 便利函数：将外部数据按 CW 大小依次拷贝到命令的所有 desc buffer 中。
- * 数据不够时剩余部分用 0xFF dummy 填充。 */
-fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t length);
-
-/* 便利函数：从命令的所有 desc buffer 按 CW 顺序读取用户数据。
- * 与 fc_write_cmd_data 对称，用于读完成后的数据提取。 */
-fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length);
-
-/* 便利函数：获取命令中指定 CW 索引的 buffer 指针（读操作后使用）。 */
-uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index);
-
-/* ── 提交 / 服务 / 完成 ── */
-/* high_priority=0 提交 SQ；high_priority=1 提交 HSQ。 */
-fc_status_t fc_submit(fc_command_t *command);
-
-/* 每次最多处理 budget 条已提交命令；budget=0 不执行任何命令。 */
-fc_status_t fc_service(void);
-
-/* FTL 从 CQ 取完成项后，可根据状态决定何时回收 Command/Descriptor/Buffer。 */
-fc_status_t fc_poll_completion(fc_command_status_t *completion);
-fc_status_t fc_command_release(fc_command_t *command);
-fc_status_t fc_get_resource_stats(fc_resource_stats_t *stats);
-
+/* 资源使用统计（测试/监控用）：定义见 fc_types.h */
 #endif /* FC_H */

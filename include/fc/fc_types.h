@@ -34,6 +34,17 @@ typedef uint16_t fc_buffer_id_t;
 #define FC_DESCRIPTOR_ID_INVALID ((fc_descriptor_id_t)0xFFFFU)
 #define FC_BUFFER_ID_INVALID     ((fc_buffer_id_t)0xFFFFU)
 
+/* 资源使用统计（测试/监控用） */
+typedef struct
+{
+    uint16_t sq_used;
+    uint16_t hsq_used;
+    uint16_t cq_used;
+    uint16_t command_used;
+    uint16_t descriptor_used;
+    uint16_t buffer_used;
+} fc_resource_stats_t;
+
 /* 前向声明：完整定义在 fc_command.h */
 typedef struct fc_command_t        fc_command_t;
 typedef struct fc_descriptor_t     fc_descriptor_t;

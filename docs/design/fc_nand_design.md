@@ -34,7 +34,9 @@
 │  FTL / Controller / NVMe                         │  ← 上层调用者
 ├─────────────────────────────────────────────────┤
 │  FC 模块 (Flash Controller)                       │  ← 命令配置、队列、调度
-│  fc.h  ─ 对上层提供的统一接口                      │
+│  fc.h  ─ 对上层提供的统一接口（类型/宏，include fc_interface.h）│
+│  ├── fc_interface.h/c  对外接口声明 + 实现（薄壳，单例控制器） │
+│  ├── fc_internal.h     fc.c ↔ fc_interface.c 共享内部签名     │
 │  ├── fc_command.c/h   命令 & Descriptor 结构定义    │
 │  ├── fc_queue.c/h     SQ / HSQ / CQ 环形队列       │
 │  ├── fc_scheduler.c/h HSQ 优先调度器               │
@@ -43,7 +45,7 @@
 │  ├── fc_random_engine 加扰/解扰引擎                │
 │  ├── fc_ldpc_engine   LDPC 编解码引擎              │
 │  ├── fc_raid_engine   RAID XOR 引擎               │
-│  └── fc.c             核心：资源池、生命周期管理     │
+│  └── fc.c             核心：资源池、生命周期、服务主循环     │
 ├─────────────────────────────────────────────────┤
 │  NAND Dispatch (调度桥接层)                        │
 │  nand_dispatch.c/h ─ 通道 FIFO，FC→NAND 命令路由    │
@@ -65,7 +67,7 @@
 
 1. **固定资源池 + 空闲链表**：所有资源（Command、Descriptor、Buffer）在 .bss 中静态分配，使用空闲链表实现 O(1) 分配释放，不使用动态内存。
 2. **ID 引用代替指针**：对外暴露 16-bit 资源 ID，内部通过 ID→指针转换函数访问，避免指针悬挂和跨模块直接访问。
-3. **FC 封装内部状态**：`fc_t` 结构体仅在 `fc.c` 内部可见，对外只提供函数接口。
+3. **FC 封装内部状态**：`fc_t` 结构体定义在 `fc_internal.h`，仅 `fc.c`/`fc_interface.c` 内部可见，对外只提供函数接口。
 4. **异步非阻塞**：提交命令立即返回，通过 `fc_service()` 轮询推进，`fc_poll_completion()` 获取结果。
 
 ### 流程图：分层架构与数据流总览（图 0）
@@ -293,7 +295,18 @@ typedef struct {
 
 ### 2.9 对外接口 (fc.h)
 
+对外接口分两个头文件，`fc.h` include `fc_interface.h`，外部只 `#include "fc/fc.h"`：
+
+| 文件 | 内容 |
+|------|------|
+| `include/fc/fc.h` | 类型、宏、资源池配置、功能开关、资源统计结构 + `#include "fc_interface.h"` |
+| `include/fc/fc_interface.h` | 对外函数声明（18 个，6 组：①初始化 ②命令生命周期 ③buffer 访问 ④数据便利 ⑤查询工具 ⑥服务入口） |
+| `include/fc/fc_internal.h` | fc.c ↔ fc_interface.c 共享内部签名（`fc_t` 定义、`g_fc_controller` extern、`fc_*_internal` 声明）——FTL 不得 include |
+| `src/fc/fc.c` | 核心实现：三池、生命周期状态机、`fc_poll_internal` 服务主循环、`fc_complete_from_nand`、Stripe RAID（全部 `_internal`） |
+| `src/fc/fc_interface.c` | 对外函数实现：薄壳（参数校验 + 转发 internal） |
+
 ```c
+/* 全部声明见 fc_interface.h，此处仅示意签名 */
 fc_status_t   fc_init(void);                           // 初始化所有资源池和队列
 fc_command_t *fc_command_alloc(void);                   // 申请命令，失败返回 NULL
 fc_command_t *fc_command_id_to_command(uint16_t id);    // ID→指针转换
@@ -302,14 +315,19 @@ fc_status_t   fc_command_configure_descriptors(fc_command_t *cmd); // 自动遍�
 fc_buffer_id_t fc_buffer_alloc(void);                   // 申请 Buffer（返 ID）
 fc_status_t   fc_buffer_release(fc_buffer_id_t id);     // 释放 Buffer
 uint8_t      *fc_buffer_id_to_real_buffer(fc_buffer_id_t); // ID→指针，返回 USER 数据区首地址（跳过 META+CRC 共 8B）
-fc_buffer_id_t fc_real_buffer_to_buffer_id(const uint8_t *); // 指针→ID（自动回退 8B 偏移到 CW 基址后比对）
 uint8_t      *fc_buffer_get_base(fc_buffer_id_t);       // ID→指针，返回 CW 基址（META 开头，FC 数据路径内部使用）
+uint8_t      *fc_buffer_get_meta(fc_command_t *, uint8_t cw_index); // 指定 CW 的 META 指针（地址校验）
+fc_status_t   fc_write_cmd_data(fc_command_t *cmd, const void *, uint32_t); // 数据便利：写命令 buffer
+fc_status_t   fc_read_cmd_data(fc_command_t *cmd, void *, uint32_t);        // 数据便利：读命令 buffer
+uint8_t      *fc_get_cmd_data_ptr(fc_command_t *cmd, uint8_t cw_index);     // 指定 CW 的 USER 指针
 fc_status_t   fc_submit(fc_command_t *cmd);             // 提交到 SQ 或 HSQ（根据 high_priority）
 fc_status_t   fc_service(void);                         // 调度执行（上层 while(1) 轮询）
 fc_status_t   fc_poll_completion(fc_command_status_t *); // 从 CQ 取完成项
 fc_status_t   fc_command_release(fc_command_t *cmd);    // 释放命令及关联 Descriptor 链
 fc_status_t   fc_get_resource_stats(fc_resource_stats_t *); // 资源使用统计
 ```
+
+> **移除**：`fc_real_buffer_to_buffer_id()`（指针→ID 反向转换）——FC 数据引用统一走 buffer_id，无调用者，连同其 internal 一并删除。`fc_descriptor_alloc()`（孤儿声明）同步删除。`fc_buffer_alloc()` 保留但标注"⚠️ 手动分配接口，常规路径走 `fc_command_configure_descriptors()`"。
 
 ### 2.10 命令生命周期
 
@@ -1382,7 +1400,8 @@ typedef struct {
 | `fc_buffer_alloc()` | 从 FC Buffer Pool 分配 |
 | `fc_buffer_release(id)` | 释放回 Pool |
 | `fc_buffer_id_to_real_buffer(id)` | ID → 指针 |
-| `fc_real_buffer_to_buffer_id(ptr)` | 指针 → ID |
+
+> **注**：`fc_real_buffer_to_buffer_id(ptr)`（指针 → ID）已随对外接口拆分移除——FC 数据引用统一走 buffer_id，无调用者（详见 §2.9 移除说明）。
 
 #### 12.4.2 FTL 使用流程
 
@@ -1445,7 +1464,7 @@ typedef struct {
 - `fc_buffer_alloc()`
 - `fc_buffer_release()`
 - `fc_buffer_id_to_real_buffer()`
-- `fc_real_buffer_to_buffer_id()`
+- `fc_real_buffer_to_buffer_id()`（已随拆分移除，见 §2.9）
 
 **接口总数从 14 个减少到 10 个。**
 
