@@ -25,35 +25,35 @@ typedef uint8_t (*nand_fmc_wait_ready_t)(void *context, uint16_t timeout_us);
  */
 typedef struct
 {
-    uint16_t t_adl_ns;    /* 地址→数据加载延时 */
-    uint16_t t_alh_ns;    /* ALE 保持 */
-    uint16_t t_als_ns;    /* ALE 建立 */
-    uint16_t t_ch_ns;     /* CE 保持 */
-    uint16_t t_clh_ns;    /* CLE 保持 */
-    uint16_t t_cls_ns;    /* CLE 建立 */
-    uint16_t t_cs_ns;     /* CE 建立 */
-    uint16_t t_dh_ns;     /* 数据保持 */
-    uint16_t t_ds_ns;     /* 数据建立 */
-    uint16_t t_wc_ns;     /* 写周期 */
-    uint16_t t_wh_ns;     /* WE 高电平宽度 */
-    uint16_t t_wp_ns;     /* WE 低电平宽度 */
-    uint16_t t_ar_ns;     /* ALE→RE 延时 */
+    uint16_t t_adl_ns;     /* 地址→数据加载延时 */
+    uint16_t t_alh_ns;     /* ALE 保持 */
+    uint16_t t_als_ns;     /* ALE 建立 */
+    uint16_t t_ch_ns;      /* CE 保持 */
+    uint16_t t_clh_ns;     /* CLE 保持 */
+    uint16_t t_cls_ns;     /* CLE 建立 */
+    uint16_t t_cs_ns;      /* CE 建立 */
+    uint16_t t_dh_ns;      /* 数据保持 */
+    uint16_t t_ds_ns;      /* 数据建立 */
+    uint16_t t_wc_ns;      /* 写周期 */
+    uint16_t t_wh_ns;      /* WE 高电平宽度 */
+    uint16_t t_wp_ns;      /* WE 低电平宽度 */
+    uint16_t t_ar_ns;      /* ALE→RE 延时 */
     uint16_t t_cea_max_ns; /* CE→输出有效（max） */
     uint16_t t_chz_max_ns; /* CE→输出高阻（max） */
-    uint16_t t_clr_ns;    /* CLE→RE 延时 */
-    uint16_t t_coh_ns;    /* CE 高→输出保持 */
-    uint16_t t_ir_ns;     /* 命令→数据输出间隔 */
-    uint16_t t_rc_ns;     /* 读周期 */
+    uint16_t t_clr_ns;     /* CLE→RE 延时 */
+    uint16_t t_coh_ns;     /* CE 高→输出保持 */
+    uint16_t t_ir_ns;      /* 命令→数据输出间隔 */
+    uint16_t t_rc_ns;      /* 读周期 */
     uint16_t t_rea_max_ns; /* RE→输出有效（max） */
-    uint16_t t_reh_ns;    /* RE 高电平宽度 */
-    uint16_t t_rhoh_ns;   /* RE 高→输出保持 */
-    uint16_t t_rhw_ns;    /* RE→WE 延时 */
+    uint16_t t_reh_ns;     /* RE 高电平宽度 */
+    uint16_t t_rhoh_ns;    /* RE 高→输出保持 */
+    uint16_t t_rhw_ns;     /* RE→WE 延时 */
     uint16_t t_rhz_max_ns; /* RE→输出高阻（max） */
-    uint16_t t_rloh_ns;   /* RE 低→输出保持 */
-    uint16_t t_rp_ns;     /* RE 低电平宽度 */
-    uint16_t t_rr_ns;     /* 读命令→读命令间隔 */
-    uint16_t t_wb_max_ns; /* WE 高→busy（max） */
-    uint16_t t_whr_ns;    /* 状态→RE 高延时 */
+    uint16_t t_rloh_ns;    /* RE 低→输出保持 */
+    uint16_t t_rp_ns;      /* RE 低电平宽度 */
+    uint16_t t_rr_ns;      /* 读命令→读命令间隔 */
+    uint16_t t_wb_max_ns;  /* WE 高→busy（max） */
+    uint16_t t_whr_ns;     /* 状态→RE 高延时 */
 } nand_fmc_timing_t;
 
 /*

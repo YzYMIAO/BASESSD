@@ -18,9 +18,9 @@
  */
 
 #include "fc_interface.h"
-#include "fc_internal.h"
 
 #include "fc_command.h"
+#include "fc_internal.h"
 #include "fc_registers.h"
 
 #include <stddef.h>

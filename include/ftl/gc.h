@@ -50,8 +50,7 @@
  * @param read_count_out 输出：1=本次读成功（调用方 ++ 该块 read_count，可为 NULL）
  * @return 0 成功, -1 失败
  */
-ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out,
-                                   uint8_t *ecc_out, uint8_t *read_count_out);
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out, uint8_t *ecc_out, uint8_t *read_count_out);
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block

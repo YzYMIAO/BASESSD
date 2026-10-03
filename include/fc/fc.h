@@ -66,9 +66,9 @@
 #define FC_BUFFER_DATA_SIZE   (520U) /* META+CRC+USER = 加扰/ECC 处理的数据区大小 */
 
 /* 队列深度 */
-#define FC_SQ_DEPTH           (64U)
-#define FC_HSQ_DEPTH          (16U)
-#define FC_CQ_DEPTH           (64U)
+#define FC_SQ_DEPTH  (64U)
+#define FC_HSQ_DEPTH (16U)
+#define FC_CQ_DEPTH  (64U)
 
 /* 资源使用统计（测试/监控用）：定义见 fc_types.h */
 #endif /* FC_H */

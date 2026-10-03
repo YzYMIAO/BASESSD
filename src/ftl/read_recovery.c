@@ -8,8 +8,7 @@
 #include <string.h>
 
 /* ── 内部同步读页（原 ftl_internal_read_page 内联化，CRC/Random 使能 + LBA META）── */
-static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length,
-                                   uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
+static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
@@ -178,7 +177,7 @@ static int rr_exec_retry(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buffer, u
      */
     {
         nand_addr_t raddr = addr_from_pba(pba);
-        ret = sync_read_page(raddr, buffer, length, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, lba);
+        ret               = sync_read_page(raddr, buffer, length, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, lba);
     }
     if (ret == 0)
     {
@@ -273,7 +272,7 @@ static int rr_neighbor_assist(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buff
              */
             {
                 nand_addr_t raddr = addr_from_pba(pba);
-                ret = sync_read_page(raddr, buffer, length, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, lba);
+                ret               = sync_read_page(raddr, buffer, length, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, lba);
             }
             if (ret == 0)
             {
@@ -415,13 +414,12 @@ void rr_retire_block(ftl_block_t *b)
     }
 
     /* 退役：不再分配新数据（RESERVED = Spare Pool 语义），不标坏（BBT 不删、仍可读） */
-    ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
-                           FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);
+    ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);
     ftl_block_state_set(b, FTL_BLOCK_STATE_RESERVED);
     ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 
     /* 健康复位：块仍活着，ECC 趋势重计（read_count 归零，read disturb 重计） */
-    b->rr.health      = (uint8_t)RR_BLOCK_HEALTHY;
+    b->rr.health       = (uint8_t)RR_BLOCK_HEALTHY;
     b->rr.rising_count = 0U;
     (void)memset(b->rr.ecc_history, 0, sizeof(b->rr.ecc_history));
     b->read_count = 0U;

@@ -17,8 +17,8 @@
  *   PBA 的 page 字段由 allocator 管理，block/plane 从 Free Pool 分配。
  */
 
-#include "ftl/bst.h"         /* ftl_block_t, FTL_BLOCK_TOTAL, ftl_gblock, ftl_block_is_bad */
-#include "ftl/ftl_type.h"   /* ftl_status_t, ftl_topology_t */
+#include "ftl/bst.h"          /* ftl_block_t, FTL_BLOCK_TOTAL, ftl_gblock, ftl_block_is_bad */
+#include "ftl/ftl_type.h"     /* ftl_status_t, ftl_topology_t */
 #include "nand/nand_config.h" /* nand_pba_t, nand_addr_t, nand_paa_t, PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
 
 #include <stdint.h>
@@ -47,11 +47,11 @@
 
 typedef struct
 {
-    ftl_topology_t topo;                  /* 本 Super Block 绑定的 NAND 芯片路由（ch/ce/lun） */
-    uint16_t plane_blocks[PLANE_NUM];     /* Plane 0 和 Plane 1 的 Block 号 */
-    uint8_t  next_page;                   /* 当前写入页（0~63，双 Plane 同步） */
-    uint8_t  temperature;                 /* FTL_TEMP_HOT / FTL_TEMP_COLD */
-    uint8_t  valid;                       /* 1=正在使用（Open），0=已关闭 */
+    ftl_topology_t topo;                    /* 本 Super Block 绑定的 NAND 芯片路由（ch/ce/lun） */
+    uint16_t       plane_blocks[PLANE_NUM]; /* Plane 0 和 Plane 1 的 Block 号 */
+    uint8_t        next_page;               /* 当前写入页（0~63，双 Plane 同步） */
+    uint8_t        temperature;             /* FTL_TEMP_HOT / FTL_TEMP_COLD */
+    uint8_t        valid;                   /* 1=正在使用（Open），0=已关闭 */
 } super_block_t;
 
 /* ── 初始化参数（ftl_init / allocator_init 共用）──
@@ -63,15 +63,15 @@ typedef struct
  */
 typedef struct
 {
-    ftl_topology_t  topo;           /* 本 FTL 绑定的 NAND 芯片路由 */
-    uint16_t       *free_blocks;    /* free block 数组（全局 Block 号，由调用者提供） */
-    uint16_t        free_count;     /* free block 数 */
-    uint16_t       *op_blocks;      /* OP 预留 block 数组（容量不动：GC 缓冲池，由调用者提供） */
-    uint16_t        op_count;       /* OP 池 Block 数 */
-    uint16_t       *spare_blocks;   /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
-    uint16_t        spare_count;    /* Spare Pool 初始 Block 数 */
-    ftl_block_t    *blocks;         /* Block State Table（由调用者提供，容量 FTL_BLOCK_TOTAL） */
-    super_block_t  *closed_sb_list; /* closed Super Block 数组（由调用者提供） */
+    ftl_topology_t topo;           /* 本 FTL 绑定的 NAND 芯片路由 */
+    uint16_t      *free_blocks;    /* free block 数组（全局 Block 号，由调用者提供） */
+    uint16_t       free_count;     /* free block 数 */
+    uint16_t      *op_blocks;      /* OP 预留 block 数组（容量不动：GC 缓冲池，由调用者提供） */
+    uint16_t       op_count;       /* OP 池 Block 数 */
+    uint16_t      *spare_blocks;   /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
+    uint16_t       spare_count;    /* Spare Pool 初始 Block 数 */
+    ftl_block_t   *blocks;         /* Block State Table（由调用者提供，容量 FTL_BLOCK_TOTAL） */
+    super_block_t *closed_sb_list; /* closed Super Block 数组（由调用者提供） */
 } ftl_init_params_t;
 
 /* 返回 Super Block 中指定 Plane/Page 的展开地址（ch/ce/lun 取自 sb->topo） */
@@ -79,13 +79,13 @@ static inline nand_addr_t super_block_page_addr(const super_block_t *sb, uint8_t
 {
     nand_addr_t addr;
 
-    addr.ch     = sb->topo.ch;
-    addr.ce     = sb->topo.ce;
-    addr.lun    = sb->topo.lun;
-    addr.block  = sb->plane_blocks[plane];
-    addr.plane  = plane;
-    addr.page   = page;
-    addr.cw     = 0U; /* 0 = 整页（页级操作基址） */
+    addr.ch    = sb->topo.ch;
+    addr.ce    = sb->topo.ce;
+    addr.lun   = sb->topo.lun;
+    addr.block = sb->plane_blocks[plane];
+    addr.plane = plane;
+    addr.page  = page;
+    addr.cw    = 0U; /* 0 = 整页（页级操作基址） */
 
     return addr;
 }
@@ -94,8 +94,8 @@ static inline nand_addr_t super_block_page_addr(const super_block_t *sb, uint8_t
 static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const super_block_t *sb, uint8_t plane, uint8_t page)
 {
     nand_addr_t addr = super_block_page_addr(sb, plane, page);
-    addr.ch = ch; /* 显式覆盖，保持旧语义（调用点自带的 ch/ce） */
-    addr.ce = ce;
+    addr.ch          = ch; /* 显式覆盖，保持旧语义（调用点自带的 ch/ce） */
+    addr.ce          = ce;
     return pba_from_addr(&addr);
 }
 
@@ -119,10 +119,10 @@ typedef struct
     uint16_t  emergency_count; /* 紧急池 Block 数 */
 
     /* ── OP / Spare Pool（容量不动） ── */
-    uint16_t *op_blocks;       /* OP 预留 block 数组（GC 缓冲池，由调用者提供） */
-    uint16_t  op_count;        /* OP 池剩余 Block 数 */
-    uint16_t *spare_blocks;    /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
-    uint16_t  spare_count;     /* Spare Pool 剩余 Block 数 */
+    uint16_t *op_blocks;    /* OP 预留 block 数组（GC 缓冲池，由调用者提供） */
+    uint16_t  op_count;     /* OP 池剩余 Block 数 */
+    uint16_t *spare_blocks; /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
+    uint16_t  spare_count;  /* Spare Pool 剩余 Block 数 */
 
     /* ── Open Super Block（每温度一个） ── */
     super_block_t hot_sb;  /* Hot Open Super Block */
@@ -133,8 +133,8 @@ typedef struct
     uint16_t       closed_sb_count; /* 已关闭 Super Block 数 */
 
     /* ── Block State Table（统一 per-Block 状态） ── */
-    ftl_block_t *blocks;        /* 每 Block 状态数组（由调用者提供） */
-    uint16_t     bad_count;     /* 坏 Block 数 */
+    ftl_block_t *blocks;    /* 每 Block 状态数组（由调用者提供） */
+    uint16_t     bad_count; /* 坏 Block 数 */
 } ftl_allocator_t;
 
 /* ── 接口函数 ── */
@@ -216,7 +216,7 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx);
  * @return 塞入的 closed 列表索引；列表满返回 UINT16_MAX
  */
 uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
-                                 const uint16_t plane_blocks[PLANE_NUM],
+                                 const uint16_t   plane_blocks[PLANE_NUM],
                                  uint8_t          temperature);
 
 /*

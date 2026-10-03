@@ -16,9 +16,9 @@
  * 写回策略：Write-back（Dirty 标记，延迟写回 NAND）
  */
 
-#include "ftl/allocator.h"  /* ftl_allocator_t */
-#include "ftl/ftl_type.h"   /* lba_t */
-#include "ftl/metadata.h"   /* metadata_dir_cache_t */
+#include "ftl/allocator.h"    /* ftl_allocator_t */
+#include "ftl/ftl_type.h"     /* lba_t */
+#include "ftl/metadata.h"     /* metadata_dir_cache_t */
 #include "nand/nand_config.h" /* nand_pba_t */
 
 #include <stddef.h>
@@ -38,15 +38,15 @@
  *   偶 Region → Plane 0, 奇 Region → Plane 1（双 Plane 交错）
  *   每 LUN 表占 L2P_REGIONS_PER_LUN / 64 个 Block，跨 LUN 依次错开。
  */
-#define L2P_BASE_BLOCK   (0U)   /* L2P 起始 Block */
-#define L2P_BLOCKS_PER_LUN (L2P_REGIONS_PER_LUN / 64U)                    /* 每 LUN 表块数（1: 32, 2: 16） */
+#define L2P_BASE_BLOCK     (0U)                        /* L2P 起始 Block */
+#define L2P_BLOCKS_PER_LUN (L2P_REGIONS_PER_LUN / 64U) /* 每 LUN 表块数（1: 32, 2: 16） */
 
 /* 固定位置映射：Region r → PBA（lun 维度参与 block 错位） */
 static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t region_id)
 {
-    uint8_t  plane = (uint8_t)(region_id & 1U);                                            /* 偶 P0, 奇 P1 */
+    uint8_t  plane = (uint8_t)(region_id & 1U);                                                  /* 偶 P0, 奇 P1 */
     uint16_t block = (uint16_t)(L2P_BASE_BLOCK + (lun * L2P_BLOCKS_PER_LUN) + (region_id >> 6)); /* /64 + lun 错位 */
-    uint8_t  page  = (uint8_t)(region_id & 0x3FU);                                         /* %64 */
+    uint8_t  page  = (uint8_t)(region_id & 0x3FU);                                               /* %64 */
     return pba_make(ch, ce, page, plane, block, lun, 0);
 }
 
@@ -142,9 +142,9 @@ typedef struct
  * @param md_dir Metadata Directory 指针（来自 ftl_context_t）
  * @param alloc  Allocator 指针（来自 ftl_context_t，用于 Region 动态分配）
  */
-static inline void l2p_cache_set_md_dir(l2p_cache_t *cache,
-                                         metadata_dir_cache_t *md_dir,
-                                         ftl_allocator_t *alloc)
+static inline void l2p_cache_set_md_dir(l2p_cache_t          *cache,
+                                        metadata_dir_cache_t *md_dir,
+                                        ftl_allocator_t      *alloc)
 {
     if (cache != NULL)
     {

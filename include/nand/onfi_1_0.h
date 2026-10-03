@@ -399,21 +399,21 @@
 
 typedef struct
 {
-    uint8_t                 operation;  /* OP_* 码（== 数组下标） */
-    const char             *name;       /* 可读名（日志用） */
-    uint8_t                 command_1;  /* 命令值 1（如读页 00h / 编程 80h；无则 0） */
-    uint8_t                 command_2;  /* 命令值 2（如读页 30h / 编程 10h；无则 0） */
-    uint8_t                 address_cycles; /* 地址周期数（列+行；多 plane 为两倍） */
-    uint8_t                 data_input_cycles; /* DATA_IN 段数（写类操作） */
+    uint8_t                 operation;                     /* OP_* 码（== 数组下标） */
+    const char             *name;                          /* 可读名（日志用） */
+    uint8_t                 command_1;                     /* 命令值 1（如读页 00h / 编程 80h；无则 0） */
+    uint8_t                 command_2;                     /* 命令值 2（如读页 30h / 编程 10h；无则 0） */
+    uint8_t                 address_cycles;                /* 地址周期数（列+行；多 plane 为两倍） */
+    uint8_t                 data_input_cycles;             /* DATA_IN 段数（写类操作） */
     uint8_t                 valid_while_selected_lun_busy; /* 本 LUN busy 时可否下发 */
     uint8_t                 valid_while_other_lun_busy;    /* 其他 LUN busy 时可否下发（多 LUN 准入） */
-    uint8_t                 has_data;   /* 是否涉及用户数据传输（需 descriptor+buffer） */
-    uint16_t                data_length; /* 数据传输字节数 */
-    uint8_t                 op_type : 2; /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
-    uint8_t                 pair_op;     /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
-    uint16_t                min_busy_us; /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ 带余量） */
-    const nand_uop_t       *uops;        /* UOP 序列（onfi_1_0.c 定义） */
-    nand_operation_timing_t timing;      /* 操作时序参数（twb/trst/twh/busy_timeout） */
+    uint8_t                 has_data;                      /* 是否涉及用户数据传输（需 descriptor+buffer） */
+    uint16_t                data_length;                   /* 数据传输字节数 */
+    uint8_t                 op_type : 2;                   /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
+    uint8_t                 pair_op;                       /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
+    uint16_t                min_busy_us;                   /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ 带余量） */
+    const nand_uop_t       *uops;                          /* UOP 序列（onfi_1_0.c 定义） */
+    nand_operation_timing_t timing;                        /* 操作时序参数（twb/trst/twh/busy_timeout） */
 } nand_operation_map_t;
 
 /* OP_* 可直接作为下标访问，不需要命令表扫描或操作码解析。 */

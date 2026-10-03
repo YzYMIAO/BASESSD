@@ -22,7 +22,7 @@
 
 #include "common/ssd_types.h"
 #include "ftl/allocator.h"
-#include "ftl/checkpoint.h"     /* l2p_checkpoint_header_t */
+#include "ftl/checkpoint.h" /* l2p_checkpoint_header_t */
 #include "ftl/journal.h"
 #include "ftl/l2p_cache.h"
 
@@ -34,10 +34,10 @@ struct ftl_context;
 /* ── 掉电重建闭环的标志量（上板验证用，UART 可读） ── */
 typedef struct
 {
-    uint16_t sb_rebuilt;      /* 重建的 Closed Super Block 数 */
-    uint16_t partial_pairs;   /* 扫描到的部分写 Super Block 对数 */
-    uint16_t valid_pages;     /* 重建回填的有效页总数 */
-    uint16_t open_restored;   /* 恢复的 Open Super Block 数（0/1/2） */
+    uint16_t sb_rebuilt;    /* 重建的 Closed Super Block 数 */
+    uint16_t partial_pairs; /* 扫描到的部分写 Super Block 对数 */
+    uint16_t valid_pages;   /* 重建回填的有效页总数 */
+    uint16_t open_restored; /* 恢复的 Open Super Block 数（0/1/2） */
 } ftl_rebuild_stats_t;
 
 /* ── 启动类型 ── */
@@ -119,9 +119,9 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
  * @param result 输出：回放的 entry 数
  * @return FTL_OK 成功，FTL_ERROR 失败
  */
-ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
-                           const l2p_checkpoint_header_t *cp,
-                           ftl_boot_result_t  *result);
+ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
+                                    const l2p_checkpoint_header_t *cp,
+                                    ftl_boot_result_t             *result);
 
 /*
  * ftl_boot_scan_write_pointer - 写指针扫描恢复
@@ -165,7 +165,7 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
  * @param stats  输出：重建统计（可为 NULL）
  * @return FTL_OK 成功，FTL_ERROR 失败
  */
-ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context *ftl,
+ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
                                         ftl_rebuild_stats_t *stats);
 
 #endif /* FTL_POWER_FAILURE_RECOVERY_H */

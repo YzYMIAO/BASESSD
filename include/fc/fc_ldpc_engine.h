@@ -45,7 +45,6 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
  *   @param err_bits  out，非 NULL 时返回本 CW 解码纠正的错误 bit 数（BCH t=4 → 0..4）；
  *                  IO_ERROR/失败时为 0。无需该信息时传 NULL。
  */
-fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length,
-                           uint8_t *err_bits);
+fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length, uint8_t *err_bits);
 
 #endif /* FC_LDPC_ENGINE_H */

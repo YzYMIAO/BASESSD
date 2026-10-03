@@ -15,7 +15,8 @@
  */
 
 #include "fc/fc_command.h" /* fc_command_status_t */
-#include "ftl/ftl_type.h"   /* ftl_status_t */
+#include "ftl/ftl_type.h"  /* ftl_status_t */
+
 #include <stdint.h>
 
 /* ── 前向声明（ftl_context_t 在 ftl.h 中定义）── */
@@ -24,11 +25,11 @@ struct ftl_context;
 /* ── Completion 路由表项 ── */
 
 typedef void (*completion_handler_fn_t)(const fc_command_status_t *completion,
-                                         void                     *ctx);
+                                        void                      *ctx);
 
 typedef struct
 {
-    uint16_t                used : 1;    /* 1=槽位占用 */
+    uint16_t                used   : 1;  /* 1=槽位占用 */
     uint16_t                cmd_id : 15; /* FC command_id */
     completion_handler_fn_t handler;     /* 完成回调 */
     void                   *ctx;         /* 回调上下文 */
@@ -38,14 +39,14 @@ typedef struct
 
 /* ── 路由表 API ── */
 
-void                         completion_table_init(void);
-ftl_status_t                 completion_table_add(uint16_t                   cmd_id,
-                                                  completion_handler_fn_t    handler,
-                                                  void                      *ctx);
-void                         completion_table_remove(uint16_t cmd_id);
-completion_entry_t          *completion_table_lookup(uint16_t cmd_id);
-void                         completion_table_set_default(completion_handler_fn_t handler,
-                                                           void                  *ctx);
+void                completion_table_init(void);
+ftl_status_t        completion_table_add(uint16_t                cmd_id,
+                                         completion_handler_fn_t handler,
+                                         void                   *ctx);
+void                completion_table_remove(uint16_t cmd_id);
+completion_entry_t *completion_table_lookup(uint16_t cmd_id);
+void                completion_table_set_default(completion_handler_fn_t handler,
+                                                 void                   *ctx);
 
 /*
  * completion_table_count - 当前占用（未决）的 completion 表项数
@@ -87,9 +88,9 @@ void completion_table_drain(void);
 
 typedef struct
 {
-    uint16_t             cmd_id;     /* 等待的 command_id */
-    uint8_t              done;       /* handler 设置此标志 */
-    fc_command_status_t  completion; /* handler 保存的完整 completion 信息 */
+    uint16_t            cmd_id;     /* 等待的 command_id */
+    uint8_t             done;       /* handler 设置此标志 */
+    fc_command_status_t completion; /* handler 保存的完整 completion 信息 */
 } ftl_sync_waiter_t;
 
 /*
@@ -106,6 +107,6 @@ void ftl_sync_waiter_handler(const fc_command_status_t *completion, void *ctx);
  * 同 ftl_sync_waiter_handler，但额外调用 fc_command_release。
  */
 void ftl_sync_waiter_handler_with_release(const fc_command_status_t *completion,
-                                          void                     *ctx);
+                                          void                      *ctx);
 
 #endif /* FTL_COMPLETION_TABLE_H */

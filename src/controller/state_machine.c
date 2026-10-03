@@ -10,7 +10,7 @@
  */
 #include "controller/controller.h"
 
-void ssd_controller_state_transition(ssd_controller_t *controller,
+void ssd_controller_state_transition(ssd_controller_t      *controller,
                                      ssd_controller_state_t next_state)
 {
     if (controller == NULL)

@@ -13,8 +13,8 @@
  * NAND 持久化仍用紧凑 bad_map[512] 格式（bbt_header_t，一字不改），
  * bbt_save 时从 BST 重建 bitmap。
  */
-static uint32_t g_bbt_sequence = 0U;           /* 当前 sequence */
-static int      g_bbt_dirty    = 0;            /* 是否有未写回 NAND 的变更 */
+static uint32_t g_bbt_sequence = 0U; /* 当前 sequence */
+static int      g_bbt_dirty    = 0;  /* 是否有未写回 NAND 的变更 */
 
 /* BBT CRC 覆盖的字节数（从开头到 crc 字段） */
 #define BBT_CRC_SIZE (sizeof(uint32_t) * 4 + sizeof(uint32_t) * 3 + BBT_BITMAP_SIZE)
@@ -203,13 +203,13 @@ static nand_addr_t bbt_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint8_t i)
 {
     nand_addr_t addr;
 
-    addr.ch     = ch;
-    addr.ce     = ce;
-    addr.lun    = lun;
-    addr.plane  = (uint8_t)((i & 1U) & 1U);
-    addr.page   = (uint8_t)((i < BBT_REDUNDANCY) ? i : (i - BBT_REDUNDANCY));
-    addr.block  = (uint8_t)((i < BBT_REDUNDANCY) ? BBT_BLOCK : BBT_BLOCK_BACKUP);
-    addr.cw     = 0U;
+    addr.ch    = ch;
+    addr.ce    = ce;
+    addr.lun   = lun;
+    addr.plane = (uint8_t)((i & 1U) & 1U);
+    addr.page  = (uint8_t)((i < BBT_REDUNDANCY) ? i : (i - BBT_REDUNDANCY));
+    addr.block = (uint8_t)((i < BBT_REDUNDANCY) ? BBT_BLOCK : BBT_BLOCK_BACKUP);
+    addr.cw    = 0U;
 
     return addr;
 }
@@ -232,8 +232,8 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
     {
         uint8_t tmp_bad_map[BBT_BITMAP_SIZE];
 
-        ftl_topology_t topo = { .ch = alloc->ch, .ce = alloc->ce, .lun = alloc->lun };
-        ret = bbt_load(tmp_bad_map, &loaded_bad_count, &seq, topo);
+        ftl_topology_t topo = {.ch = alloc->ch, .ce = alloc->ce, .lun = alloc->lun};
+        ret                 = bbt_load(tmp_bad_map, &loaded_bad_count, &seq, topo);
         if (ret == 0)
         {
             uint16_t gblock;
@@ -252,7 +252,7 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
                                              (uint8_t)FTL_BLOCK_BAD_FACTORY);
                     ftl_block_state_clr(&alloc->blocks[gblock],
                                         FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
-                                        FTL_BLOCK_STATE_FREE);
+                                            FTL_BLOCK_STATE_FREE);
                     ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
                     bad_idx++;
                 }
@@ -306,9 +306,9 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
 
         /* 尝试读 Page 0（全局号 → 各 Plane 的物理块号） */
         {
-            uint8_t plane = (uint8_t)(gblock / BLOCKS_PER_PLANE);
+            uint8_t  plane = (uint8_t)(gblock / BLOCKS_PER_PLANE);
             uint16_t block = (uint16_t)(gblock % BLOCKS_PER_PLANE);
-            page_addr0 = addr_from_paa(alloc->ch, alloc->ce, paa_make(0U, plane, block, 0U, 0U));
+            page_addr0     = addr_from_paa(alloc->ch, alloc->ce, paa_make(0U, plane, block, 0U, 0U));
         }
 
         memset(raw_buf, 0xFF, sizeof(raw_buf));
@@ -338,7 +338,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
                                      (uint8_t)FTL_BLOCK_BAD_FACTORY);
             ftl_block_state_clr(&alloc->blocks[gblock],
                                 FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
-                                FTL_BLOCK_STATE_FREE);
+                                    FTL_BLOCK_STATE_FREE);
             ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
             bad_idx++;
         }
@@ -369,7 +369,7 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock, uint8_t reaso
     ftl_block_clear_valid(&alloc->blocks[gblock]);
     ftl_block_state_clr(&alloc->blocks[gblock],
                         FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
-                        FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);
+                            FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);
     ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
     alloc->bad_count++;
     g_bbt_dirty = 1;

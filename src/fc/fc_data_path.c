@@ -440,7 +440,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
         if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
         {
             uint8_t ecc_bits = 0U;
-            result = fc_ldpc_decode(&ldpc_config, buffer, FC_BUFFER_DATA_SIZE, &ecc_bits);
+            result           = fc_ldpc_decode(&ldpc_config, buffer, FC_BUFFER_DATA_SIZE, &ecc_bits);
 
             if (result == FC_STATUS_IO_ERROR)
             {
@@ -451,7 +451,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             else if ((result == FC_STATUS_OK) || (result == FC_STATUS_NOT_SUPPORTED))
             {
                 /* ECC 成功（或跳过）：desc status 置 READY，记录纠正的 bit 数 */
-                desc->status = FC_CW_STATUS_READY;
+                desc->status   = FC_CW_STATUS_READY;
                 desc->ecc_bits = ecc_bits;
             }
         }

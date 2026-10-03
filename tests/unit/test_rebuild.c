@@ -9,13 +9,12 @@
  * 不触碰 NAND I/O（gc_read_page_with_lba / l2p_cache_read 不在此测）。
  */
 
-#include "munit.h"
-
 #include "ftl/allocator.h"
-#include "ftl/metadata.h"
-#include "ftl/checkpoint.h"
 #include "ftl/bbt.h"
+#include "ftl/checkpoint.h"
 #include "ftl/journal.h"
+#include "ftl/metadata.h"
+#include "munit.h"
 #include "nand/nand_config.h"
 
 #include <string.h>
@@ -28,10 +27,10 @@
 
 typedef struct
 {
-    ftl_block_t     blocks[FTL_BLOCK_TOTAL];
-    uint16_t        free_blocks[FTL_BLOCK_TOTAL];
-    super_block_t   closed_sb_list[SUPER_BLOCK_LIST_MAX];
-    ftl_allocator_t alloc;
+    ftl_block_t          blocks[FTL_BLOCK_TOTAL];
+    uint16_t             free_blocks[FTL_BLOCK_TOTAL];
+    super_block_t        closed_sb_list[SUPER_BLOCK_LIST_MAX];
+    ftl_allocator_t      alloc;
     metadata_dir_cache_t md_dir;
 } rebuild_fixture_t;
 
@@ -43,7 +42,7 @@ static void fixture_init(rebuild_fixture_t *fx)
     /* 全块非坏，全 FREE（allocator_init 会再置一遍，这里只需清坏位） */
     memset(fx->blocks, 0, sizeof(fx->blocks));
 
-    params.topo           = (ftl_topology_t){ .ch = 0, .ce = 0, .lun = 0 };
+    params.topo           = (ftl_topology_t){.ch = 0, .ce = 0, .lun = 0};
     params.blocks         = fx->blocks;
     params.free_blocks    = fx->free_blocks;
     params.free_count     = 0;
@@ -69,8 +68,8 @@ static void push_free(rebuild_fixture_t *fx, uint16_t gblock)
 static MunitResult test_add_closed_sb_basic(const MunitParameter params[], void *data)
 {
     (void)params;
-    rebuild_fixture_t *fx = (rebuild_fixture_t *)data;
-    const uint16_t     pair[PLANE_NUM] = { 100U, 100U }; /* 同号双 plane */
+    rebuild_fixture_t *fx              = (rebuild_fixture_t *)data;
+    const uint16_t     pair[PLANE_NUM] = {100U, 100U}; /* 同号双 plane */
     uint16_t           idx;
     ftl_block_t       *b0;
     ftl_block_t       *b1;
@@ -106,8 +105,8 @@ static MunitResult test_add_closed_sb_basic(const MunitParameter params[], void 
 static MunitResult test_add_closed_sb_full(const MunitParameter params[], void *data)
 {
     (void)params;
-    rebuild_fixture_t *fx = (rebuild_fixture_t *)data;
-    const uint16_t     pair[PLANE_NUM] = { 5U, 5U };
+    rebuild_fixture_t *fx              = (rebuild_fixture_t *)data;
+    const uint16_t     pair[PLANE_NUM] = {5U, 5U};
     uint16_t           i;
 
     /* 塞满 SUPER_BLOCK_LIST_MAX 条（1024 个不同 block，双 plane 各 1024 块足够） */
@@ -119,7 +118,7 @@ static MunitResult test_add_closed_sb_full(const MunitParameter params[], void *
         {
             break; /* 防御：fixture 块有限，不至于走满 */
         }
-        idx = allocator_add_closed_sb(&fx->alloc, (const uint16_t[PLANE_NUM]){ b, b }, FTL_TEMP_COLD);
+        idx = allocator_add_closed_sb(&fx->alloc, (const uint16_t[PLANE_NUM]){b, b}, FTL_TEMP_COLD);
         munit_assert_int(idx, ==, i);
     }
 
@@ -184,8 +183,8 @@ static MunitResult test_remove_closed_sb_sbid_fix(const MunitParameter params[],
     uint16_t           idx_b;
 
     /* 两个 closed SB：block 50 与 60 */
-    idx_a = allocator_add_closed_sb(&fx->alloc, (const uint16_t[PLANE_NUM]){ 50U, 50U }, FTL_TEMP_HOT);
-    idx_b = allocator_add_closed_sb(&fx->alloc, (const uint16_t[PLANE_NUM]){ 60U, 60U }, FTL_TEMP_COLD);
+    idx_a = allocator_add_closed_sb(&fx->alloc, (const uint16_t[PLANE_NUM]){50U, 50U}, FTL_TEMP_HOT);
+    idx_b = allocator_add_closed_sb(&fx->alloc, (const uint16_t[PLANE_NUM]){60U, 60U}, FTL_TEMP_COLD);
     munit_assert_int(idx_a, ==, 0);
     munit_assert_int(idx_b, ==, 1);
     munit_assert_int(ftl_block_sb_id(&fx->blocks[ftl_gblock(0U, 60U)]), ==, 1);
@@ -253,13 +252,11 @@ static MunitResult test_is_metadata_block_dynamic(const MunitParameter params[],
     munit_assert_int(ftl_is_metadata_block(&fx->md_dir, 200U), ==, 0);
 
     /* 登记 region 5 到 block 200（page/plane 随便） */
-    metadata_dir_update(&fx->md_dir, METADATA_TYPE_L2P_REGION, 5U,
-                        paa_make(0U, 0U, 200U, 0U, 0U));
+    metadata_dir_update(&fx->md_dir, METADATA_TYPE_L2P_REGION, 5U, paa_make(0U, 0U, 200U, 0U, 0U));
     munit_assert_int(ftl_is_metadata_block(&fx->md_dir, 200U), ==, 1);
 
     /* 同 block 其他 L2P region 也命中 */
-    metadata_dir_update(&fx->md_dir, METADATA_TYPE_L2P_REGION, 6U,
-                        paa_make(0U, 0U, 201U, 0U, 0U));
+    metadata_dir_update(&fx->md_dir, METADATA_TYPE_L2P_REGION, 6U, paa_make(0U, 0U, 201U, 0U, 0U));
     munit_assert_int(ftl_is_metadata_block(&fx->md_dir, 201U), ==, 1);
 
     /* NULL md_dir：固定区间仍命中，动态不适用 */
@@ -292,11 +289,11 @@ static void rebuild_teardown(void *fixture)
 }
 
 MunitTest g_rebuild_tests[] = {
-    {   "add_closed_sb_basic", test_add_closed_sb_basic, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {    "add_closed_sb_full",  test_add_closed_sb_full, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {      "remove_from_free",   test_remove_from_free, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {  "remove_closed_sbid_fix", test_remove_closed_sb_sbid_fix, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {    "is_metadata_block", test_is_metadata_block, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"is_metadata_block_dyn", test_is_metadata_block_dynamic, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                       NULL,                     NULL,         NULL,             NULL,                        MUNIT_TEST_OPTION_NONE, NULL},
+    {   "add_closed_sb_basic",       test_add_closed_sb_basic, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    "add_closed_sb_full",        test_add_closed_sb_full, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      "remove_from_free",          test_remove_from_free, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"remove_closed_sbid_fix", test_remove_closed_sb_sbid_fix, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     "is_metadata_block",         test_is_metadata_block, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { "is_metadata_block_dyn", test_is_metadata_block_dynamic, rebuild_setup, rebuild_teardown, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                    NULL,                           NULL,          NULL,             NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

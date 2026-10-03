@@ -171,7 +171,7 @@ static void bch_encode_unaligned(struct fc_bch_control *bch,
     {
         uint8_t tmp = swap_bits(bch, *data++);
         /* 最高字节 ⊕ 输入字节 → 查表，表项与其余校验字异或移位 */
-        p           = bch->mod8_tab + (unsigned int)(l + 1) * (((ecc[0] >> 24) ^ (uint32_t)tmp) & 0xFFU);
+        p = bch->mod8_tab + (unsigned int)(l + 1) * (((ecc[0] >> 24) ^ (uint32_t)tmp) & 0xFFU);
         for (i = 0; i < l; i++)
         {
             ecc[i] = ((ecc[i] << 8) | (ecc[i + 1] >> 24)) ^ (*p++);

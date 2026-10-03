@@ -75,19 +75,19 @@ static int stm32_uart_log_flush_sink(uint32_t timeout_ms)
  *
  *   AXI_RAM ≈355.5KB（剩 11.5KB）、SRAM2 ≈24KB（剩 104KB），不溢出。
  * ══════════════════════════════════════════════════════════════════ */
-static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM];                       /* 131.5KB → AXI_RAM */
-static ftl_block_t   g_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL];   /* 56B×4096=224KB → AXI_RAM */
+static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM];                         /* 131.5KB → AXI_RAM */
+static ftl_block_t   g_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL];     /* 56B×4096=224KB → AXI_RAM */
 static uint16_t      g_free_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* 8KB → SRAM2 */
     __attribute__((section(".sram2_data")));
-static uint16_t      g_op_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* OP 预留池，容量不动 → SRAM2 */
+static uint16_t g_op_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* OP 预留池，容量不动 → SRAM2 */
     __attribute__((section(".sram2_data")));
-static uint16_t      g_spare_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_SPARE_POOL_SIZE] /* 坏块替换池 → SRAM2 */
+static uint16_t g_spare_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_SPARE_POOL_SIZE] /* 坏块替换池 → SRAM2 */
     __attribute__((section(".sram2_data")));
 static super_block_t g_closed_sb_list[CH_NUM][CE_NUM][LUN_NUM][SUPER_BLOCK_LIST_MAX] /* 16KB → SRAM2 */
     __attribute__((section(".sram2_data")));
-ssd_controller_t g_ctrl;   /* controller 路由表（收 g_ftl 三维指针）；非 static：
-                            * UART CLI（usart.c）经 extern 引用，见 usart.h */
-static int              g_ftl_ready; /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
+ssd_controller_t g_ctrl; /* controller 路由表（收 g_ftl 三维指针）；非 static：
+                          * UART CLI（usart.c）经 extern 引用，见 usart.h */
+static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
  * 编译器不认可 static 数组直接退化为匹配指针数组参数（GCC 10.3 起
@@ -112,7 +112,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     uint16_t          free_n = 0U;
 
     memset(&params, 0, sizeof(params));
-    params.topo           = (ftl_topology_t){ .ch = ch, .ce = ce, .lun = lun };
+    params.topo           = (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun};
     params.blocks         = g_blocks[ch][ce][lun];
     params.free_blocks    = g_free_blocks[ch][ce][lun];
     params.free_count     = 0U;
@@ -175,7 +175,9 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         free_n++;
     }
     SSD_LOGI("[FTL] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
-             ch, ce, lun,
+             ch,
+             ce,
+             lun,
              (unsigned)free_n,
              (unsigned)g_ftl[ch][ce][lun].alloc.op_count,
              (unsigned)g_ftl[ch][ce][lun].alloc.spare_count);
@@ -199,7 +201,7 @@ static void ssd_ftl_boot_all(void)
     uint8_t ch;
     uint8_t ce;
     uint8_t lun;
-    int     boot_ok  = 1;
+    int     boot_ok = 1;
     int     ctrl_ret;
 
     for (ch = 0U; ch < CH_NUM; ch++)

@@ -54,9 +54,9 @@ typedef struct
 /* 通道 FIFO 数组（CH_NUM 个），submit 入队、poll Phase 2 出队 */
 static nand_channel_queue_t g_nand_channel_queues[CH_NUM];
 /* round-robin 游标：poll 从上次返回通道的下一个通道续走，保证各通道公平 */
-static uint8_t              g_nand_channel_cursor;
+static uint8_t g_nand_channel_cursor;
 /* 设备就绪门控：仅 submit 准入检查，poll 不检查 */
-static uint8_t              g_nand_device_ready;
+static uint8_t g_nand_device_ready;
 
 /* 每 LUN 链状态：原 g_nand_dispatch_tasks[ch][ce][lun] 的一维扩展。
  * 单命令：count=1，tasks[0] 预加载。
@@ -65,7 +65,7 @@ static uint8_t              g_nand_device_ready;
 static nand_dispatch_lun_chain_t g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
 /* 通道页缓冲：置于 noncacheable_buffer 段（DMA/FMC 直访，D-Cache 关闭）。
  * 多 plane 时拼接双页（plane stride = PAGE_SIZE），poll 三处 memcpy 拆页依赖它。 */
-uint8_t                          g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
+uint8_t g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
 
 /* ======================================================================
  * 辅助函数
@@ -511,13 +511,13 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
                         }
                         task->cw_index++;
                         task->operation = OP_RANDOM_DATA_READ; /* 链中后续 CW 统一改用随机读 */
-                        task->started   = 1U;                   /* 复用 start 路径但标记已启动 */
+                        task->started   = 1U;                  /* 复用 start 路径但标记已启动 */
                         {
                             nand_paa_t cw_paa    = task->cw_paa[0][task->cw_index];
                             uint8_t   *cw_buffer = task->cw_buffers[0][task->cw_index];
                             /* 列地址 = CW 偏移 × 528B（PAGE_SIZE/4，页缓冲按 CW 等分，4=CW_NUM） */
-                            uint16_t   cw_column = (uint16_t)(task->cw_index * (PAGE_SIZE / 4U));
-                            task->request        = (nand_fc_request_t){.column = cw_column, .row = {paa_to_nand_row(cw_paa)}, .data = cw_buffer, .data_length = (uint16_t)(PAGE_SIZE / 4U)};
+                            uint16_t cw_column = (uint16_t)(task->cw_index * (PAGE_SIZE / 4U));
+                            task->request      = (nand_fc_request_t){.column = cw_column, .row = {paa_to_nand_row(cw_paa)}, .data = cw_buffer, .data_length = (uint16_t)(PAGE_SIZE / 4U)};
                         }
                         result = nand_fc_start(&task->transaction, task->operation, &task->request);
                         if (result == NAND_RESULT_NOT_READY)

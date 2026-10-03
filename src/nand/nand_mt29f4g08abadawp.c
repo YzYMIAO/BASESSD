@@ -80,35 +80,35 @@ static const nand_fmc_timing_t g_nand_timing_slow = {
  * -------------------------------------------------------------------- */
 #if (CONFIG_NAND_TIMING_MODE_4 != 0U)
 static const nand_fmc_timing_t g_nand_timing_fast = {
-    20U,  /* tADL */
-    5U,   /* tALH */
-    5U,   /* tALS */
-    5U,   /* tCH */
-    5U,   /* tCLH */
-    5U,   /* tCLS */
-    10U,  /* tCS */
-    5U,   /* tDH */
-    5U,   /* tDS */
-    10U,  /* tWC */
-    5U,   /* tWH */
-    5U,   /* tWP */
-    10U,  /* tAR */
-    20U,  /* tCEA（max） */
-    30U,  /* tCHZ（max） */
-    10U,  /* tCLR */
-    10U,  /* tCOH */
-    0U,   /* tIR */
-    10U,  /* tRC */
-    12U,  /* tREA（max） */
-    5U,   /* tREH */
-    5U,   /* tRHOH */
-    50U,  /* tRHW */
-    50U,  /* tRHZ（max） */
-    5U,   /* tRLOH */
-    5U,   /* tRP */
-    20U,  /* tRR */
-    50U,  /* tWB（max） */
-    30U,  /* tWHR */
+    20U, /* tADL */
+    5U,  /* tALH */
+    5U,  /* tALS */
+    5U,  /* tCH */
+    5U,  /* tCLH */
+    5U,  /* tCLS */
+    10U, /* tCS */
+    5U,  /* tDH */
+    5U,  /* tDS */
+    10U, /* tWC */
+    5U,  /* tWH */
+    5U,  /* tWP */
+    10U, /* tAR */
+    20U, /* tCEA（max） */
+    30U, /* tCHZ（max） */
+    10U, /* tCLR */
+    10U, /* tCOH */
+    0U,  /* tIR */
+    10U, /* tRC */
+    12U, /* tREA（max） */
+    5U,  /* tREH */
+    5U,  /* tRHOH */
+    50U, /* tRHW */
+    50U, /* tRHZ（max） */
+    5U,  /* tRLOH */
+    5U,  /* tRP */
+    20U, /* tRR */
+    50U, /* tWB（max） */
+    30U, /* tWHR */
 };
 #endif /* CONFIG_NAND_TIMING_MODE_4 */
 
@@ -477,7 +477,9 @@ uint8_t nand_init(void)
                     if (nand_fmc_init_instance(fmc_ch, fmc_ce, fmc_lun, &fmc_config) != NAND_RESULT_OK)
                     {
                         SSD_LOGE("nand: FMC backend configure failed ch=%u ce=%u lun=%u\r\n",
-                                 (unsigned)fmc_ch, (unsigned)fmc_ce, (unsigned)fmc_lun);
+                                 (unsigned)fmc_ch,
+                                 (unsigned)fmc_ce,
+                                 (unsigned)fmc_lun);
                         return NAND_RESULT_OPERATION_FAILED;
                     }
                 }
@@ -570,7 +572,9 @@ uint8_t nand_init(void)
                         if (nand_fmc_init_instance(fmc_ch2, fmc_ce2, fmc_lun2, &fast_fmc) != NAND_RESULT_OK)
                         {
                             SSD_LOGE("nand: FMC backend configure (Mode 4) failed ch=%u ce=%u lun=%u\r\n",
-                                     (unsigned)fmc_ch2, (unsigned)fmc_ce2, (unsigned)fmc_lun2);
+                                     (unsigned)fmc_ch2,
+                                     (unsigned)fmc_ce2,
+                                     (unsigned)fmc_lun2);
                             return NAND_RESULT_OPERATION_FAILED;
                         }
                     }

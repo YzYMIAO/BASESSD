@@ -53,7 +53,7 @@ typedef struct
     uint8_t  rising_count;                      /* 连续上升计数 */
     uint8_t  health;                            /* rr_block_health_t */
     uint32_t last_update;                       /* 上次更新（写入次数/时间戳） */
-} rr_ecc_track_t;                              /* 16B */
+} rr_ecc_track_t;                               /* 16B */
 
 /* ── ftl_block_t 状态位（bitmask 宏，非 C 位域——
  *   嵌入式可移植（位域布局实现定义），支持位运算，配访问器） ── */
@@ -71,10 +71,10 @@ enum
 };
 
 /* 全部状态位掩码（bit0..8） */
-#define FTL_BLOCK_STATE_MASK      (0x01FFU)
+#define FTL_BLOCK_STATE_MASK (0x01FFU)
 
 /* 温度掩码/提取（bit5-6，显式两 bit，可扩展多温区） */
-#define FTL_BLOCK_TEMP_MASK       (FTL_BLOCK_STATE_TEMP_HOT | FTL_BLOCK_STATE_TEMP_COLD)
+#define FTL_BLOCK_TEMP_MASK (FTL_BLOCK_STATE_TEMP_HOT | FTL_BLOCK_STATE_TEMP_COLD)
 
 /* ── 坏块原因（独立 1B 字段 bad_reason） ── */
 enum
@@ -120,24 +120,24 @@ enum
 typedef struct
 {
     /* ── 磨损 ── */
-    uint32_t       erase_count;          /* 4B  @0   擦除次数 */
-    uint32_t       last_pe_ts;           /* 4B  @4   最近擦除时间戳（WL 冷热避聚） */
-    uint16_t       read_count;           /* 2B  @8   read disturb 计数 */
-    uint16_t       program_count;        /* 2B  @10  program 计数（健康模型） */
+    uint32_t erase_count;   /* 4B  @0   擦除次数 */
+    uint32_t last_pe_ts;    /* 4B  @4   最近擦除时间戳（WL 冷热避聚） */
+    uint16_t read_count;    /* 2B  @8   read disturb 计数 */
+    uint16_t program_count; /* 2B  @10  program 计数（健康模型） */
 
     /* ── 有效页 + 状态 ── */
-    uint16_t       valid_count;          /* 2B  @12  双 Plane 合计有效页 0..128 */
-    uint16_t       state;                /* 2B  @14  状态机+温度（bitmask 宏 + 访问器） */
-    uint8_t        bad_reason;           /* 1B  @16  坏块原因（独立字段） */
-    uint8_t        gc_generation;        /* 1B  @17  GC 搬移代数 */
-    uint16_t       sb_id;                /* 2B  @18  block→SB 反向索引（UINT16_MAX=无） */
-    uint16_t       _pad;                 /* 2B  @20  对齐补 */
+    uint16_t valid_count;   /* 2B  @12  双 Plane 合计有效页 0..128 */
+    uint16_t state;         /* 2B  @14  状态机+温度（bitmask 宏 + 访问器） */
+    uint8_t  bad_reason;    /* 1B  @16  坏块原因（独立字段） */
+    uint8_t  gc_generation; /* 1B  @17  GC 搬移代数 */
+    uint16_t sb_id;         /* 2B  @18  block→SB 反向索引（UINT16_MAX=无） */
+    uint16_t _pad;          /* 2B  @20  对齐补 */
 
     /* ── 逐页有效位图 ── */
-    uint64_t       valid_map[PLANE_NUM]; /* 16B @24  per-Plane 逐页有效位图 */
+    uint64_t valid_map[PLANE_NUM]; /* 16B @24  per-Plane 逐页有效位图 */
 
     /* ── ECC 健康 ── */
-    rr_ecc_track_t rr;                   /* 16B @40  ECC 健康历史 */
+    rr_ecc_track_t rr; /* 16B @40  ECC 健康历史 */
 } ftl_block_t;
 
 /* ── 全局 Block 号转换（单点，修复 per-plane 碰撞的关键）── */
@@ -232,7 +232,7 @@ static inline void ftl_block_set_bad_reason(ftl_block_t *b, uint8_t reason)
 }
 
 /* 反向索引 sb_id（UINT16_MAX = 未归属任何 SB） */
-#define FTL_BLOCK_NO_SB  (UINT16_MAX)
+#define FTL_BLOCK_NO_SB (UINT16_MAX)
 
 static inline uint16_t ftl_block_sb_id(const ftl_block_t *b)
 {

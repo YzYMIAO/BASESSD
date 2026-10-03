@@ -14,7 +14,7 @@
 
 #include "common/ftl_types.h" /* ftl_io_request_t */
 #include "common/ssd_types.h"
-#include "ftl/allocator.h"    /* ftl_init_params_t, super_block_t */
+#include "ftl/allocator.h" /* ftl_init_params_t, super_block_t */
 #include "ftl/checkpoint.h"
 #include "ftl/gc.h"
 #include "ftl/journal.h"
@@ -39,7 +39,7 @@
 
 /* 最大有效 LBA（全局） = 每 (ch,ce,lun) region 数 × entry × 设备维度数。
  * LUN_NUM/CH_NUM/CE_NUM=1 时 = 2048×512 = 1,048,576（单 LUN 满容量，总量不变）。 */
-#define FTL_LBA_MAX        ((uint64_t)L2P_REGIONS_PER_LUN * L2P_ENTRIES_PER_REGION * CH_NUM * CE_NUM * LUN_NUM)
+#define FTL_LBA_MAX ((uint64_t)L2P_REGIONS_PER_LUN * L2P_ENTRIES_PER_REGION * CH_NUM * CE_NUM * LUN_NUM)
 
 /* ── FTL 主上下文 ── */
 

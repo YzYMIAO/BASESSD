@@ -1,5 +1,4 @@
 #include "platform/platform.h"
-
 #include "sys.h"
 
 /*

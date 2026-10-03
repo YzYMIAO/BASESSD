@@ -243,11 +243,11 @@ static uint8_t g_wr_buf[FTL_READ_USER_SIZE * CW_NUM * PLANE_NUM] /* 16KB → SRA
  * 非阻塞 pending 表语义；主循环的 ftl_service 完成请求）。 */
 typedef struct
 {
-    uint8_t             busy;         /* 1=有未决 CLI 请求 */
-    ssd_request_t       req;          /* 未决请求（controller 拆分子请求跟踪其 complete_flag） */
-    uint8_t             compare;      /* rd: 1=compare 模式，0=hex dump */
-    uint64_t            lba;          /* 本次请求起始 LBA（结果打印用） */
-    uint32_t            nblocks;      /* 本次请求块数 */
+    uint8_t       busy;    /* 1=有未决 CLI 请求 */
+    ssd_request_t req;     /* 未决请求（controller 拆分子请求跟踪其 complete_flag） */
+    uint8_t       compare; /* rd: 1=compare 模式，0=hex dump */
+    uint64_t      lba;     /* 本次请求起始 LBA（结果打印用） */
+    uint32_t      nblocks; /* 本次请求块数 */
 } uart_cli_pending_t;
 
 static uart_cli_pending_t g_cli_pending;
@@ -255,10 +255,10 @@ static uart_cli_pending_t g_cli_pending;
 /* 预填 g_wr_buf pattern（.sram2_data NOLOAD，必须主动初始化） */
 static void uart_cli_pattern_init(void)
 {
-    uint32_t     i;
-    uint32_t     words_per_half = (uint32_t)((FTL_READ_USER_SIZE * CW_NUM) / sizeof(uint32_t)); /* 8KB/4 = 2048 */
-    uint32_t    *plane0 = (uint32_t *)(void *)g_wr_buf;
-    uint32_t    *plane1 = (uint32_t *)(void *)(g_wr_buf + FTL_READ_USER_SIZE * CW_NUM);
+    uint32_t  i;
+    uint32_t  words_per_half = (uint32_t)((FTL_READ_USER_SIZE * CW_NUM) / sizeof(uint32_t)); /* 8KB/4 = 2048 */
+    uint32_t *plane0         = (uint32_t *)(void *)g_wr_buf;
+    uint32_t *plane1         = (uint32_t *)(void *)(g_wr_buf + FTL_READ_USER_SIZE * CW_NUM);
 
     for (i = 0U; i < words_per_half; i++)
     {
@@ -286,7 +286,7 @@ static int uart_cli_lba_range_ok(uint64_t lba, uint32_t n)
 /* 解析十进制/十六进制数。成功且全部消费返回 0；失败/残留返回 -1。 */
 static int uart_cli_parse_uint(const char *text, uint64_t *out)
 {
-    char  *end = NULL;
+    char    *end = NULL;
     uint64_t value;
 
     if ((text == NULL) || (text[0] == '\0'))
@@ -307,10 +307,10 @@ static int uart_cli_parse_uint(const char *text, uint64_t *out)
 
 static int uart_cli_wr(int argc, char *argv[])
 {
-    uint64_t    lba;
-    uint64_t    n_parsed;
-    uint32_t    n;
-    char       *end = NULL;
+    uint64_t lba;
+    uint64_t n_parsed;
+    uint32_t n;
+    char    *end = NULL;
 
     (void)argc;
 
@@ -353,17 +353,16 @@ static int uart_cli_wr(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    (void)uart_log_printf(UART_LOG_INFO, "wr submit ok lba=%llu n=%lu, waiting...\r\n",
-                          (unsigned long long)lba, (unsigned long)n);
+    (void)uart_log_printf(UART_LOG_INFO, "wr submit ok lba=%llu n=%lu, waiting...\r\n", (unsigned long long)lba, (unsigned long)n);
     return FUNC_STATUS_SUCCESS;
 }
 
 static int uart_cli_rd(int argc, char *argv[])
 {
-    uint64_t    lba;
-    uint64_t    n_parsed;
-    uint32_t    n;
-    char       *end = NULL;
+    uint64_t lba;
+    uint64_t n_parsed;
+    uint32_t n;
+    char    *end = NULL;
 
     if (g_cli_pending.busy != 0U)
     {
@@ -404,9 +403,7 @@ static int uart_cli_rd(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    (void)uart_log_printf(UART_LOG_INFO, "rd submit ok lba=%llu n=%lu%s, waiting...\r\n",
-                          (unsigned long long)lba, (unsigned long)n,
-                          g_cli_pending.compare ? " c" : "");
+    (void)uart_log_printf(UART_LOG_INFO, "rd submit ok lba=%llu n=%lu%s, waiting...\r\n", (unsigned long long)lba, (unsigned long)n, g_cli_pending.compare ? " c" : "");
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -499,9 +496,7 @@ static int uart_cli_info(int argc, char *argv[])
 
     if (g_ctrl.state <= SSD_CONTROLLER_FAILED)
     {
-        (void)uart_log_printf(UART_LOG_INFO, "controller state=%s lba_max=%llu\r\n",
-                              state_names[g_ctrl.state],
-                              (unsigned long long)FTL_LBA_MAX);
+        (void)uart_log_printf(UART_LOG_INFO, "controller state=%s lba_max=%llu\r\n", state_names[g_ctrl.state], (unsigned long long)FTL_LBA_MAX);
     }
 
     for (ch = 0U; ch < CH_NUM; ch++)
@@ -518,7 +513,9 @@ static int uart_cli_info(int argc, char *argv[])
                 }
                 (void)uart_log_printf(UART_LOG_INFO,
                                       "ftl[%u][%u][%u] free=%u op=%u spare=%u pre_cond=%u bad=%u closed=%u\r\n",
-                                      (unsigned)ch, (unsigned)ce, (unsigned)lun,
+                                      (unsigned)ch,
+                                      (unsigned)ce,
+                                      (unsigned)lun,
                                       (unsigned)ftl->alloc.free_count,
                                       (unsigned)ftl->alloc.op_count,
                                       (unsigned)ftl->alloc.spare_count,
@@ -540,21 +537,28 @@ static void uart_cli_rd_report(void)
     if (g_cli_pending.compare == 0U)
     {
         /* hex dump 前 64B 防刷屏 */
-        (void)uart_log_printf(UART_LOG_INFO, "rd ok n=%lu, first 64 bytes:\r\n",
-                              (unsigned long)g_cli_pending.nblocks);
+        (void)uart_log_printf(UART_LOG_INFO, "rd ok n=%lu, first 64 bytes:\r\n", (unsigned long)g_cli_pending.nblocks);
         for (offset = 0U; (offset < 64U) && (offset < total_bytes); offset += 16U)
         {
             (void)uart_log_printf(UART_LOG_INFO,
                                   "%08lx: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
                                   (unsigned long)offset,
-                                  (unsigned)g_wr_buf[offset], (unsigned)g_wr_buf[offset + 1U],
-                                  (unsigned)g_wr_buf[offset + 2U], (unsigned)g_wr_buf[offset + 3U],
-                                  (unsigned)g_wr_buf[offset + 4U], (unsigned)g_wr_buf[offset + 5U],
-                                  (unsigned)g_wr_buf[offset + 6U], (unsigned)g_wr_buf[offset + 7U],
-                                  (unsigned)g_wr_buf[offset + 8U], (unsigned)g_wr_buf[offset + 9U],
-                                  (unsigned)g_wr_buf[offset + 10U], (unsigned)g_wr_buf[offset + 11U],
-                                  (unsigned)g_wr_buf[offset + 12U], (unsigned)g_wr_buf[offset + 13U],
-                                  (unsigned)g_wr_buf[offset + 14U], (unsigned)g_wr_buf[offset + 15U]);
+                                  (unsigned)g_wr_buf[offset],
+                                  (unsigned)g_wr_buf[offset + 1U],
+                                  (unsigned)g_wr_buf[offset + 2U],
+                                  (unsigned)g_wr_buf[offset + 3U],
+                                  (unsigned)g_wr_buf[offset + 4U],
+                                  (unsigned)g_wr_buf[offset + 5U],
+                                  (unsigned)g_wr_buf[offset + 6U],
+                                  (unsigned)g_wr_buf[offset + 7U],
+                                  (unsigned)g_wr_buf[offset + 8U],
+                                  (unsigned)g_wr_buf[offset + 9U],
+                                  (unsigned)g_wr_buf[offset + 10U],
+                                  (unsigned)g_wr_buf[offset + 11U],
+                                  (unsigned)g_wr_buf[offset + 12U],
+                                  (unsigned)g_wr_buf[offset + 13U],
+                                  (unsigned)g_wr_buf[offset + 14U],
+                                  (unsigned)g_wr_buf[offset + 15U]);
         }
         return;
     }
@@ -568,8 +572,7 @@ static void uart_cli_rd_report(void)
         memcpy(&actual, &g_wr_buf[offset], sizeof(actual));
         if (actual != expect)
         {
-            (void)uart_log_printf(UART_LOG_ERROR, "rd FAIL at byte %lu: got %08lx expect %08lx\r\n",
-                                  (unsigned long)offset, (unsigned long)actual, (unsigned long)expect);
+            (void)uart_log_printf(UART_LOG_ERROR, "rd FAIL at byte %lu: got %08lx expect %08lx\r\n", (unsigned long)offset, (unsigned long)actual, (unsigned long)expect);
             return;
         }
     }
@@ -591,22 +594,16 @@ static void uart_cli_pending_poll(void)
     switch (g_cli_pending.req.opcode)
     {
         case SSD_REQUEST_WRITE:
-            (void)uart_log_printf(UART_LOG_INFO, "wr done lba=%llu n=%lu status=%d\r\n",
-                                  (unsigned long long)g_cli_pending.lba,
-                                  (unsigned long)g_cli_pending.nblocks,
-                                  (int)g_cli_pending.req.completion_status);
+            (void)uart_log_printf(UART_LOG_INFO, "wr done lba=%llu n=%lu status=%d\r\n", (unsigned long long)g_cli_pending.lba, (unsigned long)g_cli_pending.nblocks, (int)g_cli_pending.req.completion_status);
             break;
         case SSD_REQUEST_READ:
             uart_cli_rd_report();
             break;
         case SSD_REQUEST_TRIM:
-            (void)uart_log_printf(UART_LOG_INFO, "tr done lba=%llu status=%d\r\n",
-                                  (unsigned long long)g_cli_pending.lba,
-                                  (int)g_cli_pending.req.completion_status);
+            (void)uart_log_printf(UART_LOG_INFO, "tr done lba=%llu status=%d\r\n", (unsigned long long)g_cli_pending.lba, (int)g_cli_pending.req.completion_status);
             break;
         case SSD_REQUEST_FLUSH:
-            (void)uart_log_printf(UART_LOG_INFO, "fl done status=%d\r\n",
-                                  (int)g_cli_pending.req.completion_status);
+            (void)uart_log_printf(UART_LOG_INFO, "fl done status=%d\r\n", (int)g_cli_pending.req.completion_status);
             break;
         default:
             break;
@@ -623,12 +620,12 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
     { "status",                                                  "status", "show UART error and queue counters", 1U,  1U,  uart_cli_status},
     {"version",                                                 "version",      "show firmware console version", 1U,  1U, uart_cli_version},
     {    "log",                       "log level <error|warn|info|debug>",              "set runtime log level", 3U,  3U,     uart_cli_log},
-    /* UART CLI 驱动 FTL（C 档，D10）：wr/rd/tr/fl/info 模拟 NVMe host IO */
-    {    "wr",                                        "wr <lba> <n>",    "write n blocks with fixed pattern", 3U,  3U,     uart_cli_wr},
-    {    "rd",                              "rd <lba> <n> [c]", "read n blocks (c=compare pattern)", 3U,  4U,     uart_cli_rd},
-    {    "tr",                                        "tr <lba>",                       "trim one lba", 2U,  2U,     uart_cli_tr},
-    {    "fl",                                                "fl",   "flush dirty L2P + journal to NAND", 1U,  1U,     uart_cli_fl},
-    {  "info",                                                "info",        "show controller + FTL statistics", 1U,  1U,   uart_cli_info},
+ /* UART CLI 驱动 FTL（C 档，D10）：wr/rd/tr/fl/info 模拟 NVMe host IO */
+    {     "wr",                                            "wr <lba> <n>",  "write n blocks with fixed pattern", 3U,  3U,      uart_cli_wr},
+    {     "rd",                                        "rd <lba> <n> [c]",  "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
+    {     "tr",                                                "tr <lba>",                       "trim one lba", 2U,  2U,      uart_cli_tr},
+    {     "fl",                                                      "fl",  "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
+    {   "info",                                                    "info",   "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
 #if defined(FC_NAND_TEST_ENABLE)
   /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
   /* { "nand", ... }, */

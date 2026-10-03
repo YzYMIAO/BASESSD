@@ -20,11 +20,11 @@
  */
 
 #include "fc.h"
-#include "fc_internal.h"
 
 #include "common/ssd_log.h"
 #include "fc_crc_engine.h"
 #include "fc_data_path.h"
+#include "fc_internal.h"
 #include "fc_queue.h"
 #include "fc_registers.h"
 #include "fc_scheduler.h"
@@ -114,13 +114,22 @@ static uint8_t             g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
 static uint16_t            g_fc_command_descriptor_head[FC_COMMAND_POOL_DEPTH];
 
 /* 全局单例控制器：对 API 薄壳（fc_interface.c）可见，FTL 不可见 */
-fc_t                       g_fc_controller;
+fc_t g_fc_controller;
 
 /* ── 资源统计读取器（fc_get_resource_stats 用，fc_interface.c 调用） ── */
-uint16_t fc_get_sq_count(const fc_t *controller)  { return controller->sq.count; }
-uint16_t fc_get_hsq_count(const fc_t *controller) { return controller->hsq.count; }
-uint16_t fc_get_cq_count(const fc_t *controller)  { return controller->cq.count; }
-uint8_t  fc_command_state_get(const fc_t *controller, fc_command_id_t command_id)
+uint16_t fc_get_sq_count(const fc_t *controller)
+{
+    return controller->sq.count;
+}
+uint16_t fc_get_hsq_count(const fc_t *controller)
+{
+    return controller->hsq.count;
+}
+uint16_t fc_get_cq_count(const fc_t *controller)
+{
+    return controller->cq.count;
+}
+uint8_t fc_command_state_get(const fc_t *controller, fc_command_id_t command_id)
 {
     return (command_id < FC_COMMAND_POOL_DEPTH) ? controller->command_state[command_id] : FC_COMMAND_STATE_FREE;
 }
@@ -505,10 +514,10 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
 
     if (command->config.multi_plane > 0U)
     {
-        uint8_t  plane        = index / CW_NUM;
-        uint8_t  cw_idx       = index % CW_NUM;
-        uint32_t blk          = paa_to_block(command->paa);
-        uint32_t pg           = paa_to_page(command->paa);
+        uint8_t  plane  = index / CW_NUM;
+        uint8_t  cw_idx = index % CW_NUM;
+        uint32_t blk    = paa_to_block(command->paa);
+        uint32_t pg     = paa_to_page(command->paa);
         /* 保留 command->paa 的 LUN 字段（多 LUN 并发必需：desc PAA/META/随机种子/ECC 都依赖它） */
         descriptor->paa       = paa_make(pg, plane, blk, paa_to_lun(command->paa), cw_idx);
         descriptor->config    = command->config;
@@ -1509,4 +1518,3 @@ fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *comm
     controller->command_free_head                   = command_id;
     return FC_STATUS_OK;
 }
-

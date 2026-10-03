@@ -4,8 +4,8 @@
 #include "ftl/bbt.h"
 #include "ftl/checkpoint.h"
 #include "ftl/completion_table.h"
-#include "ftl/gc.h"        /* gc_select_victim / gc_migrate_sb / gc_erase_and_free（紧急 GC） */
 #include "ftl/ftl_fc_interface.h"
+#include "ftl/gc.h" /* gc_select_victim / gc_migrate_sb / gc_erase_and_free（紧急 GC） */
 #include "ftl/pending.h"
 #include "ftl/power_failure_recovery.h"
 #include "ftl/wear_leveling.h"
@@ -55,8 +55,8 @@ static uint32_t ftl_now_ms(void)
 static void ftl_handle_completion(const fc_command_status_t *completion,
                                   void                      *ctx)
 {
-    ftl_context_t *ftl      = (ftl_context_t *)ctx;
-    uint16_t       cmd_id   = (uint16_t)completion->command_id;
+    ftl_context_t *ftl    = (ftl_context_t *)ctx;
+    uint16_t       cmd_id = (uint16_t)completion->command_id;
     fc_command_t  *cmd;
 
     cmd = fc_command_id_to_command(cmd_id);
@@ -93,8 +93,7 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                         if (pending->io.buffer != NULL)
                         {
                             /* 读成功：拷贝数据到 caller buffer */
-                            (void)ftl_cmd_read_data(cmd, pending->io.buffer,
-                                                    data_size);
+                            (void)ftl_cmd_read_data(cmd, pending->io.buffer, data_size);
 
                             /* Read Recovery：记录本次读的 ECC 纠正 bit 数（取 4 CW 最大值），
                              * 用于慢死预测（连续上升 → WARNING → 主动搬移）。
@@ -104,10 +103,10 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                                 uint8_t  ecc    = 0U;
                                 for (uint8_t k = 0U; k < 4U; k++)
                                 {
-                                    uint8_t b = (k == 0U) ? (uint8_t)completion->ecc_bit0
-                                              : (k == 1U) ? (uint8_t)completion->ecc_bit1
-                                              : (k == 2U) ? (uint8_t)completion->ecc_bit2
-                                                          : (uint8_t)completion->ecc_bit3;
+                                    uint8_t b = (k == 0U)   ? (uint8_t)completion->ecc_bit0
+                                                : (k == 1U) ? (uint8_t)completion->ecc_bit1
+                                                : (k == 2U) ? (uint8_t)completion->ecc_bit2
+                                                            : (uint8_t)completion->ecc_bit3;
                                     if (b > ecc)
                                     {
                                         ecc = b;
@@ -166,14 +165,14 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                             /* pages=2 Multi-Plane：plane1 页（io.lba+1）同样簿记 */
                             if (pending->io.pages == 2U)
                             {
-                                nand_pba_t pba1 = pba_make(pba_to_ch(pending->new_pba),
+                                nand_pba_t   pba1 = pba_make(pba_to_ch(pending->new_pba),
                                                            pba_to_ce(pending->new_pba),
                                                            pba_to_page(pending->new_pba),
                                                            1U, /* plane1 */
                                                            pba_to_block(pending->new_pba),
                                                            pba_to_lun(pending->new_pba),
                                                            0U);
-                                ftl_block_t *nb1 = &ftl->alloc.blocks[ftl_pba_gblock(pba1)];
+                                ftl_block_t *nb1  = &ftl->alloc.blocks[ftl_pba_gblock(pba1)];
 
                                 ftl_block_set_valid(nb1, 1U, (uint8_t)pba_to_page(pba1));
                                 nb1->program_count++;
@@ -184,7 +183,8 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                                                 pba1);
                                 journal_append(&ftl->journal,
                                                (lba_t)(pending->io.lba + 1U),
-                                               pending->old_pba1, pba1);
+                                               pending->old_pba1,
+                                               pba1);
 
                                 /* 覆盖写：plane1 旧页失效 */
                                 if (pending->old_pba1 != NAND_PBA_INVALID)
@@ -210,10 +210,13 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                             /* 读失败：先尝试 Read Recovery 恢复，恢复成功则数据已就位 */
                             uint8_t retry_count = 0U;
                             int     recovered   = rr_recover_read(&ftl->rr,
-                                                                  ftl->topo.ch, ftl->topo.ce,
-                                                                  cmd->paa,
-                                                                  pending->io.buffer, data_size,
-                                                                  pending->io.lba, &retry_count);
+                                                            ftl->topo.ch,
+                                                            ftl->topo.ce,
+                                                            cmd->paa,
+                                                            pending->io.buffer,
+                                                            data_size,
+                                                            pending->io.lba,
+                                                            &retry_count);
                             if (recovered == 0)
                             {
                                 /* Read recovery 成功：恢复好的数据已写入 caller buffer */
@@ -351,8 +354,8 @@ static void ftl_service_idle(ftl_context_t *ftl)
 
     /* Checkpoint 检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed） */
     {
-        uint32_t now_ms   = ftl_now_ms();
-        uint32_t elapsed  = now_ms - ftl->cp_timer_start;
+        uint32_t now_ms  = ftl_now_ms();
+        uint32_t elapsed = now_ms - ftl->cp_timer_start;
 
         if (checkpoint_check_trigger(ftl, elapsed))
         {
@@ -403,8 +406,8 @@ static void ftl_service_normal(ftl_context_t *ftl)
 
     /* Checkpoint 检查（NORMAL 模式也执行） */
     {
-        uint32_t now_ms   = ftl_now_ms();
-        uint32_t elapsed  = now_ms - ftl->cp_timer_start;
+        uint32_t now_ms  = ftl_now_ms();
+        uint32_t elapsed = now_ms - ftl->cp_timer_start;
 
         if (checkpoint_check_trigger(ftl, elapsed))
         {
@@ -622,14 +625,14 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
         cmd->config.operation   = OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT;
         cmd->config.multi_plane = 2U;
     }
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = FC_CRC_ENABLE;
-    cmd->config.random      = FC_RANDOM_ENABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = FC_COMMAND_MODULE_FTL;
-    cmd->meta               = (DWORD)internal_lba;
+    cmd->config.cw        = 3U;
+    cmd->config.crc       = FC_CRC_ENABLE;
+    cmd->config.random    = FC_RANDOM_ENABLE;
+    cmd->config.ldpc      = FC_ECC_MODE_BCH;
+    cmd->config.chain     = FC_CHAIN_END;
+    cmd->config.page_type = FC_PAGE_TYPE_LP;
+    cmd->module           = FC_COMMAND_MODULE_FTL;
+    cmd->meta             = (DWORD)internal_lba;
 
     /* ④ 配置 PBA + desc 链 */
     ret = ftl_cmd_setup_ppa(cmd, pba);
@@ -640,8 +643,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     }
 
     /* ⑤ 注册 pending（必须早于 submit，避免竞态；io 按值嵌入） */
-    ret = pending_add(ftl, cmd->command_id, req,
-                      NAND_PBA_INVALID, NAND_PBA_INVALID, NAND_PBA_INVALID, 0U);
+    ret = pending_add(ftl, cmd->command_id, req, NAND_PBA_INVALID, NAND_PBA_INVALID, NAND_PBA_INVALID, 0U);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
@@ -729,14 +731,14 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
         cmd->config.operation   = OP_PROGRAM_PAGE_MULTI_PLANE;
         cmd->config.multi_plane = 2U;
     }
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = FC_CRC_ENABLE;
-    cmd->config.random      = FC_RANDOM_ENABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = FC_COMMAND_MODULE_FTL;
-    cmd->meta               = (DWORD)internal_lba;
+    cmd->config.cw        = 3U;
+    cmd->config.crc       = FC_CRC_ENABLE;
+    cmd->config.random    = FC_RANDOM_ENABLE;
+    cmd->config.ldpc      = FC_ECC_MODE_BCH;
+    cmd->config.chain     = FC_CHAIN_END;
+    cmd->config.page_type = FC_PAGE_TYPE_LP;
+    cmd->module           = FC_COMMAND_MODULE_FTL;
+    cmd->meta             = (DWORD)internal_lba;
 
     /* ④ 配置 PBA + desc 链 + 写入数据 */
     ret = ftl_cmd_setup_ppa(cmd, new_pba);
@@ -754,8 +756,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
     }
 
     /* ⑤ 注册 pending（io 按值嵌入 + old/new_pba；实例即上下文，无需再存 ftl） */
-    ret = pending_add(ftl, cmd->command_id, req,
-                      old_pba, new_pba, old_pba1, 0U);
+    ret = pending_add(ftl, cmd->command_id, req, old_pba, new_pba, old_pba1, 0U);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);

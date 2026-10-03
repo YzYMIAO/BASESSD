@@ -136,14 +136,14 @@ static nand_addr_t anchor_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint8_t
 {
     nand_addr_t addr;
 
-    addr.ch     = ch;
-    addr.ce     = ce;
-    addr.lun    = lun;
-    addr.plane  = (uint8_t)((i & 1U) & 1U);
-    addr.page   = (uint8_t)((i < ANCHOR_REDUNDANCY) ? i : (i - ANCHOR_REDUNDANCY));
-    addr.block  = (uint8_t)(((i < ANCHOR_REDUNDANCY) ? ANCHOR_BLOCK0 : ANCHOR_BLOCK1) +
-                            (lun * ANCHOR_BLOCK_STRIDE));
-    addr.cw     = 0U;
+    addr.ch    = ch;
+    addr.ce    = ce;
+    addr.lun   = lun;
+    addr.plane = (uint8_t)((i & 1U) & 1U);
+    addr.page  = (uint8_t)((i < ANCHOR_REDUNDANCY) ? i : (i - ANCHOR_REDUNDANCY));
+    addr.block = (uint8_t)(((i < ANCHOR_REDUNDANCY) ? ANCHOR_BLOCK0 : ANCHOR_BLOCK1) +
+                           (lun * ANCHOR_BLOCK_STRIDE));
+    addr.cw    = 0U;
 
     return addr;
 }
@@ -339,7 +339,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         for (i = 0U; i < ANCHOR_REDUNDANCY; i++)
         {
             nand_addr_t aaddr = anchor_page_addr(dir->topo.ch, dir->topo.ce, dir->topo.lun, i);
-            ret = sync_write_page(aaddr, &anchor, sizeof(anchor));
+            ret               = sync_write_page(aaddr, &anchor, sizeof(anchor));
             if (ret != 0)
             {
                 /* 单份写失败不影响整体（有冗余） */
@@ -351,7 +351,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         for (i = 0U; i < ANCHOR_REDUNDANCY; i++)
         {
             nand_addr_t aaddr = anchor_page_addr(dir->topo.ch, dir->topo.ce, dir->topo.lun, (uint8_t)(i + ANCHOR_REDUNDANCY));
-            ret = sync_write_page(aaddr, &anchor, sizeof(anchor));
+            ret               = sync_write_page(aaddr, &anchor, sizeof(anchor));
             if (ret != 0)
             {
                 continue;

@@ -44,7 +44,7 @@ ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, uint64_t
 }
 
 int ssd_controller_init(ssd_controller_t *controller,
-                        ftl_context_t *ftl[CH_NUM][CE_NUM][LUN_NUM])
+                        ftl_context_t    *ftl[CH_NUM][CE_NUM][LUN_NUM])
 {
     uint8_t ch;
     uint8_t ce;
@@ -98,7 +98,7 @@ uint8_t ssd_controller_is_complete(const ssd_request_t *request)
 
 int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
 {
-    int    ret;
+    int            ret;
     ftl_context_t *ftl;
 
     if ((controller == NULL) || (request == NULL) || (controller->state != SSD_CONTROLLER_READY))

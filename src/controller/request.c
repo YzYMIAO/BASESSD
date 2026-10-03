@@ -83,11 +83,10 @@ static uint32_t ssd_split_count(ssd_controller_t *controller, ssd_request_t *req
     uint32_t i;
     uint32_t count = 0U;
 
-    for (i = 0U; i < request->block_count; )
+    for (i = 0U; i < request->block_count;)
     {
         count++;
-        if (ssd_split_use_multi_plane(controller, request->start_lba + i,
-                                      (uint32_t)(i + 1U < request->block_count)) != 0U)
+        if (ssd_split_use_multi_plane(controller, request->start_lba + i, (uint32_t)(i + 1U < request->block_count)) != 0U)
         {
             i += 2U;
         }
@@ -117,7 +116,7 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
     }
 
     /* 子请求公共字段（循环内复用 io 模板，仅改 lba/buffer/pages） */
-    request->io.complete_flag   = NULL;               /* 子请求用 on_complete 聚合 */
+    request->io.complete_flag   = NULL; /* 子请求用 on_complete 聚合 */
     request->io.status_out      = &request->completion_status;
     request->io.on_complete     = on_sub_complete;
     request->io.on_complete_ctx = request;
@@ -131,9 +130,9 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
              * 连续 LBA 路由到同一 FTL 实例才配对，跨实例（region 边界）
              * 降级为两个单 Plane 子请求，各路由各的实例。
              */
-            for (i = 0U; i < request->block_count; )
+            for (i = 0U; i < request->block_count;)
             {
-                uint8_t      *buf = (uint8_t *)request->buffer + (i * FTL_READ_USER_SIZE);
+                uint8_t       *buf = (uint8_t *)request->buffer + (i * FTL_READ_USER_SIZE);
                 ftl_context_t *ftl;
 
                 /* 路由前先赋值 io.lba：路由即按本次子请求的 LBA 选实例 */
@@ -148,8 +147,7 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                     return SSD_STATUS_IO_ERROR;
                 }
 
-                if (ssd_split_use_multi_plane(controller, request->io.lba,
-                                              (uint32_t)(i + 1U < request->block_count)) != 0U)
+                if (ssd_split_use_multi_plane(controller, request->io.lba, (uint32_t)(i + 1U < request->block_count)) != 0U)
                 {
                     /* 双 Plane Multi-Plane 读（连续 LBA 同实例） */
                     request->io.pages = 2U;
@@ -183,10 +181,10 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
              * 剩余的奇数个走单 Plane 写（pages=1）。
              * 与读拆分同构：连续 LBA 同实例才配对，跨实例降级单 Plane。
              */
-            for (i = 0U; i < request->block_count; )
+            for (i = 0U; i < request->block_count;)
             {
                 const uint8_t *data = (const uint8_t *)request->buffer + (i * FTL_READ_USER_SIZE);
-                ftl_context_t  *ftl;
+                ftl_context_t *ftl;
 
                 request->io.lba    = request->start_lba + i;
                 request->io.buffer = (void *)data;
@@ -199,8 +197,7 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                     return SSD_STATUS_NO_SPACE;
                 }
 
-                if (ssd_split_use_multi_plane(controller, request->io.lba,
-                                              (uint32_t)(i + 1U < request->block_count)) != 0U)
+                if (ssd_split_use_multi_plane(controller, request->io.lba, (uint32_t)(i + 1U < request->block_count)) != 0U)
                 {
                     /* 双 Plane Multi-Plane 写（连续 LBA 同实例） */
                     request->io.pages = 2U;

@@ -132,13 +132,13 @@ static nand_addr_t journal_page_addr(const ftl_context_t *ftl, uint8_t b, uint8_
 {
     nand_addr_t addr;
 
-    addr.ch     = ftl->topo.ch;
-    addr.ce     = ftl->topo.ce;
-    addr.lun    = ftl->topo.lun;
-    addr.block  = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
-    addr.plane  = (uint8_t)(page & 1U);
-    addr.page   = page;
-    addr.cw     = 0U;
+    addr.ch    = ftl->topo.ch;
+    addr.ce    = ftl->topo.ce;
+    addr.lun   = ftl->topo.lun;
+    addr.block = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
+    addr.plane = (uint8_t)(page & 1U);
+    addr.page  = page;
+    addr.cw    = 0U;
 
     return addr;
 }
@@ -314,7 +314,7 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
  * 必须在 journal_replay 之后调用（replay 前 cache 刚 init，所有 line
  * region_id=0，先强制会误匹配全部行）。
  */
-static void ftl_boot_apply_region_bitmap(ftl_context_t *ftl,
+static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
                                          const l2p_checkpoint_header_t *cp)
 {
     uint16_t i;
@@ -336,8 +336,8 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t *ftl,
             continue; /* ① 回放数据，保持 DIRTY 待后台 flush */
         }
 
-        word     = cp->region_bitmap[line->region_id / 32U];
-        mask     = (1UL << (line->region_id & 31U));
+        word      = cp->region_bitmap[line->region_id / 32U];
+        mask      = (1UL << (line->region_id & 31U));
         in_bitmap = ((word & mask) != 0U);
 
         if (in_bitmap)
@@ -345,7 +345,7 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t *ftl,
             /* ② 预载 bitmap 区（仅 CLEAN/INVALID 行；DIRTY 已在上方跳过） */
             if (line->state != L2P_CACHE_CLEAN)
             {
-                nand_paa_t region_paa = NAND_PBA_INVALID;
+                nand_paa_t  region_paa = NAND_PBA_INVALID;
                 nand_addr_t region_addr;
 
                 if (ftl->cache.md_dir != NULL)
@@ -357,8 +357,7 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t *ftl,
 
                 if (region_paa != NAND_PBA_INVALID)
                 {
-                    region_addr = addr_from_paa(ftl->cache.ch, ftl->cache.ce,
-                                                region_paa);
+                    region_addr = addr_from_paa(ftl->cache.ch, ftl->cache.ce, region_paa);
                 }
                 else
                 {
@@ -368,8 +367,7 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t *ftl,
                                                                line->region_id));
                 }
 
-                if (sync_read_page(region_addr, line->entries,
-                                   L2P_REGION_SIZE) == FTL_OK)
+                if (sync_read_page(region_addr, line->entries, L2P_REGION_SIZE) == FTL_OK)
                 {
                     line->state = L2P_CACHE_CLEAN;
                 }
@@ -388,9 +386,9 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t *ftl,
     }
 }
 
-ftl_status_t ftl_boot_power_failure(struct ftl_context *ftl,
+ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
                                     const l2p_checkpoint_header_t *cp,
-                                    ftl_boot_result_t  *result)
+                                    ftl_boot_result_t             *result)
 {
     uint32_t entry_count;
     uint32_t cp_sequence;
@@ -532,8 +530,8 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
             /* 非空页：写指针之前的数据页，重建 BST 有效位图 + 置 OPEN 状态 */
             if (alloc->blocks != NULL)
             {
-                uint16_t    gblock = ftl_gblock(plane, sb->plane_blocks[plane]);
-                ftl_block_t *b     = &alloc->blocks[gblock];
+                uint16_t     gblock = ftl_gblock(plane, sb->plane_blocks[plane]);
+                ftl_block_t *b      = &alloc->blocks[gblock];
 
                 ftl_block_set_valid(b, plane, page);
                 if (!ftl_block_is_bad(b))
@@ -600,13 +598,13 @@ static uint8_t scan_block_write_pointer(const ftl_context_t *ftl, uint8_t plane,
     for (page = 0U; page < PAGES_PER_BLOCK; page++)
     {
         nand_addr_t addr;
-        addr.ch     = ftl->topo.ch;
-        addr.ce     = ftl->topo.ce;
-        addr.lun    = ftl->topo.lun;
-        addr.block  = block;
-        addr.plane  = plane;
-        addr.page   = page;
-        addr.cw     = 0U;
+        addr.ch    = ftl->topo.ch;
+        addr.ce    = ftl->topo.ce;
+        addr.lun   = ftl->topo.lun;
+        addr.block = block;
+        addr.plane = plane;
+        addr.page  = page;
+        addr.cw    = 0U;
 
         if (page_is_blank(&addr, raw_buf))
         {
@@ -620,21 +618,21 @@ static uint8_t scan_block_write_pointer(const ftl_context_t *ftl, uint8_t plane,
 /* 把部分写块恢复为 Open Super Block（保留写指针前页 + 重建 bitmap，不判 L2P——
  * 镜像现有 ftl_boot_scan_write_pointer 语义，torn 页后续被 GC 迁移反查清掉）。 */
 static void recover_open_sb(ftl_allocator_t *alloc,
-                            uint16_t          block,
-                            uint8_t           next_page,
-                            uint8_t           temperature)
+                            uint16_t         block,
+                            uint8_t          next_page,
+                            uint8_t          temperature)
 {
-    uint8_t  plane;
-    uint8_t  page;
-    uint16_t gblock;
-    ftl_block_t *b;
+    uint8_t        plane;
+    uint8_t        page;
+    uint16_t       gblock;
+    ftl_block_t   *b;
     super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
     /* 置 OPEN（清 FREE/CLOSED）+ 温度 + 写指针 + valid=1 */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        gblock  = ftl_gblock(plane, block);
-        b       = &alloc->blocks[gblock];
+        gblock = ftl_gblock(plane, block);
+        b      = &alloc->blocks[gblock];
         ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED);
         ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
         ftl_block_set_temp(b, temperature);
@@ -662,9 +660,9 @@ static void recover_open_sb(ftl_allocator_t *alloc,
 }
 
 /* 满块：进 Closed 列表 + 逐页 L2P 双校验回填 valid_map（只置真有效页） */
-static void close_full_block(ftl_context_t *ftl,
-                             uint16_t        block,
-                             uint8_t         temperature,
+static void close_full_block(ftl_context_t       *ftl,
+                             uint16_t             block,
+                             uint8_t              temperature,
                              ftl_rebuild_stats_t *stats)
 {
     ftl_allocator_t *alloc = &ftl->alloc;
@@ -672,7 +670,7 @@ static void close_full_block(ftl_context_t *ftl,
     uint8_t          plane;
     uint8_t          page;
 
-    sb_idx = allocator_add_closed_sb(alloc, (const uint16_t[PLANE_NUM]){ block, block }, temperature);
+    sb_idx = allocator_add_closed_sb(alloc, (const uint16_t[PLANE_NUM]){block, block}, temperature);
     if (sb_idx == UINT16_MAX)
     {
         return; /* 列表满（防御，不应发生） */
@@ -694,8 +692,7 @@ static void close_full_block(ftl_context_t *ftl,
             lba_t      lba;
             nand_pba_t cur;
 
-            pba = super_block_page_pba(alloc->ch, alloc->ce,
-                                       &alloc->closed_sb_list[sb_idx], plane, page);
+            pba = super_block_page_pba(alloc->ch, alloc->ce, &alloc->closed_sb_list[sb_idx], plane, page);
 
             /* 读失败 / LBA 提取失败 → 该页不可用，跳过 */
             if (gc_read_page_with_lba(pba, NULL, &lba, NULL, NULL) != FTL_OK)
@@ -716,7 +713,7 @@ static void close_full_block(ftl_context_t *ftl,
     }
 }
 
-ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context *ftl,
+ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
                                         ftl_rebuild_stats_t *stats)
 {
     uint8_t          raw_buf[PAGE_SIZE];
@@ -742,12 +739,12 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context *ftl,
 
     for (block = 0U; block < BLOCKS_PER_PLANE; block++)
     {
-        uint16_t    g0 = ftl_gblock(0U, block);
-        uint16_t    g1 = ftl_gblock(1U, block);
+        uint16_t     g0 = ftl_gblock(0U, block);
+        uint16_t     g1 = ftl_gblock(1U, block);
         ftl_block_t *b0 = &alloc->blocks[g0];
         ftl_block_t *b1 = &alloc->blocks[g1];
-        uint8_t     np0;
-        uint8_t     np1;
+        uint8_t      np0;
+        uint8_t      np1;
 
         /* ① 坏块 / 元数据块跳过 */
         if (ftl_block_is_bad(b0) || ftl_block_is_bad(b1) ||

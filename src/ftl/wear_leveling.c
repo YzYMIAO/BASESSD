@@ -10,8 +10,7 @@
 #include <string.h>
 
 /* ── 内部同步写页（原 ftl_internal_write_page 内联化，随机地址 → addr 直填）── */
-static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length,
-                                    uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
+static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
@@ -169,14 +168,14 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
          * 风险高 → 优先搬移；read_count 来自 host 读 + GC/WL 搬移读累加）。
          */
         {
-            uint16_t valid = 0U;
+            uint16_t valid  = 0U;
             uint32_t rc_sum = 0U;
             uint8_t  p;
 
             for (p = 0U; p < PLANE_NUM; p++)
             {
                 const ftl_block_t *blk = &ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])];
-                valid  = (uint16_t)(valid + blk->valid_count);
+                valid                  = (uint16_t)(valid + blk->valid_count);
                 rc_sum += blk->read_count;
             }
 
@@ -220,8 +219,8 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
     /* Step 1: 遍历双 Plane 有效页位图，只搬置位页（免 NAND 读无效页） */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        uint16_t    gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
-        uint64_t    valid_map  = ftl->alloc.blocks[gblock_src].valid_map[plane];
+        uint16_t gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
+        uint64_t valid_map  = ftl->alloc.blocks[gblock_src].valid_map[plane];
 
         while (valid_map != 0ULL)
         {
@@ -276,9 +275,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
                 /* 写入新位置 */
                 {
                     nand_addr_t waddr = addr_from_pba(new_pba);
-                    ret = sync_write_page(waddr, buf, FTL_READ_USER_SIZE,
-                                          FC_CRC_ENABLE, FC_RANDOM_ENABLE,
-                                          FC_COMMAND_MODULE_GC, lba);
+                    ret               = sync_write_page(waddr, buf, FTL_READ_USER_SIZE, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_GC, lba);
                 }
                 if (ret != 0)
                 {
@@ -315,7 +312,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
 
         tmp_sb.plane_blocks[0] = victim->plane_blocks[0];
         tmp_sb.plane_blocks[1] = victim->plane_blocks[1];
-        tmp_sb.valid = 0U; /* gc_erase_and_free 要求 valid==0 */
+        tmp_sb.valid           = 0U; /* gc_erase_and_free 要求 valid==0 */
 
         gc_erase_and_free(&ftl->alloc, &tmp_sb, ftl->total_writes);
     }

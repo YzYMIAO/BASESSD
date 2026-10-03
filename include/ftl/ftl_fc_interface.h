@@ -51,8 +51,7 @@ static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *add
     cmd->config.ch  = (DWORD)addr->ch;
     cmd->config.ce  = (DWORD)addr->ce;
     cmd->config.lun = (DWORD)addr->lun;
-    cmd->paa        = (DWORD)paa_make(addr->page, addr->plane,
-                                      addr->block, addr->lun, addr->cw);
+    cmd->paa        = (DWORD)paa_make(addr->page, addr->plane, addr->block, addr->lun, addr->cw);
 
     return FTL_OK;
 }

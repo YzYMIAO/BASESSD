@@ -30,10 +30,10 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
     alloc->emergency_count = 0U;
 
     /* OP / Spare Pool（容量不动） */
-    alloc->op_blocks     = params->op_blocks;
-    alloc->op_count      = params->op_count;
-    alloc->spare_blocks  = params->spare_blocks;
-    alloc->spare_count   = params->spare_count;
+    alloc->op_blocks    = params->op_blocks;
+    alloc->op_count     = params->op_count;
+    alloc->spare_blocks = params->spare_blocks;
+    alloc->spare_count  = params->spare_count;
 
     /* Open Super Block（暂无效，首次 alloc 时分配） */
     memset(&alloc->hot_sb, 0, sizeof(alloc->hot_sb));
@@ -46,8 +46,8 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
     alloc->closed_sb_count = 0U;
 
     /* Block State Table（每 Block 状态统一承载；由调用者提供存储） */
-    alloc->blocks           = params->blocks;
-    alloc->bad_count        = 0U;
+    alloc->blocks    = params->blocks;
+    alloc->bad_count = 0U;
 
     /* 状态机初始：未坏块默认 FREE（坏块由 bbt_init 置 BAD） */
     if (alloc->blocks != NULL)
@@ -128,11 +128,11 @@ static uint16_t allocator_select_block(ftl_allocator_t *alloc)
 
     for (b = 0U; b < BLOCKS_PER_PLANE; b++)
     {
-        uint16_t    g0 = ftl_gblock(0U, b);
-        uint16_t    g1 = ftl_gblock(1U, b);
+        uint16_t     g0   = ftl_gblock(0U, b);
+        uint16_t     g1   = ftl_gblock(1U, b);
         ftl_block_t *blk0 = &alloc->blocks[g0];
         ftl_block_t *blk1 = &alloc->blocks[g1];
-        uint32_t    sum;
+        uint32_t     sum;
 
         /* 双 plane 都必须空闲且非坏（坏块不参与配对） */
         if ((!ftl_block_state_is(blk0, FTL_BLOCK_STATE_FREE)) ||
@@ -162,7 +162,7 @@ static uint16_t allocator_select_block(ftl_allocator_t *alloc)
  */
 static void allocator_close_sb(ftl_allocator_t *alloc, super_block_t *sb)
 {
-    uint8_t plane;
+    uint8_t  plane;
     uint16_t closed_idx = alloc->closed_sb_count;
 
     /* 写满关闭：两物理块置 CLOSED（清 OPEN），记录反向索引 = closed 列表索引 */
@@ -216,7 +216,7 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
     if (closed_idx != alloc->closed_sb_count)
     {
         super_block_t *moved = &alloc->closed_sb_list[closed_idx];
-        *moved              = alloc->closed_sb_list[alloc->closed_sb_count];
+        *moved               = alloc->closed_sb_list[alloc->closed_sb_count];
 
         for (plane = 0U; plane < PLANE_NUM; plane++)
         {
@@ -321,11 +321,10 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
             uint8_t plane;
             for (plane = 0U; plane < PLANE_NUM; plane++)
             {
-                uint16_t    gblock = ftl_gblock(plane, (plane == 0U) ? block0 : block1);
-                ftl_block_t *b     = &alloc->blocks[gblock];
+                uint16_t     gblock = ftl_gblock(plane, (plane == 0U) ? block0 : block1);
+                ftl_block_t *b      = &alloc->blocks[gblock];
 
-                ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED |
-                                       FTL_BLOCK_STATE_PRE_COND);
+                ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_PRE_COND);
                 ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
                 ftl_block_set_temp(b, temperature);
                 ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
@@ -374,8 +373,7 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
      * GC 擦除/OP 补池/Spare 补池/rebuild 拉回全走本入口，故全置 PRE_COND）。
      * 清 OPEN/CLOSED/TEMP，保留 PRE_COND 不清（alloc 取走时再清）。清反向索引。 */
     b = &alloc->blocks[gblock];
-    ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
-                           FTL_BLOCK_TEMP_MASK);
+    ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_TEMP_MASK);
     ftl_block_state_set(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_PRE_COND);
     ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 
@@ -387,11 +385,11 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
 /* 说明：allocator_mark_bad 已删除——坏块标记统一走 bbt_mark_bad（BBT 单数据源）。 */
 
 uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
-                                 const uint16_t plane_blocks[PLANE_NUM],
+                                 const uint16_t   plane_blocks[PLANE_NUM],
                                  uint8_t          temperature)
 {
     super_block_t sb;
-    uint8_t        plane;
+    uint8_t       plane;
 
     if ((alloc == NULL) || (plane_blocks == NULL))
     {
@@ -406,9 +404,9 @@ uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
 
     /* 组装条目（next_page=64=满；valid=0=Closed，gc_select_victim 依赖） */
     memset(&sb, 0, sizeof(sb));
-    sb.topo.ch  = alloc->ch;
-    sb.topo.ce  = alloc->ce;
-    sb.topo.lun = alloc->lun;
+    sb.topo.ch         = alloc->ch;
+    sb.topo.ce         = alloc->ce;
+    sb.topo.lun        = alloc->lun;
     sb.plane_blocks[0] = plane_blocks[0];
     sb.plane_blocks[1] = plane_blocks[1];
     sb.next_page       = (uint8_t)PAGES_PER_BLOCK;

@@ -32,7 +32,7 @@
  */
 
 #include "ftl/allocator.h"
-#include "ftl/bst.h"        /* rr_ecc_track_t, rr_block_health_t, RR_ECC_HISTORY_DEPTH, ftl_block_t */
+#include "ftl/bst.h" /* rr_ecc_track_t, rr_block_health_t, RR_ECC_HISTORY_DEPTH, ftl_block_t */
 #include "ftl/ftl_type.h"
 #include "ftl/l2p_cache.h"
 #include "nand/nand_config.h"

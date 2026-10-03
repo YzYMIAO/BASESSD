@@ -34,8 +34,7 @@ static uint32_t checkpoint_now_ms(const ftl_context_t *ftl)
 /* = 24 + 256 = 280 bytes covered by CRC */
 
 /* ── 内部同步写页（原 ftl_internal_write_page 内联化，固定地址直填）── */
-static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length,
-                                    uint8_t module)
+static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length, uint8_t module)
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
@@ -93,8 +92,7 @@ static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t
 }
 
 /* ── 内部同步读页（原 ftl_internal_read_page 内联化）── */
-static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length,
-                                   uint8_t module)
+static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length, uint8_t module)
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
@@ -156,13 +154,13 @@ static nand_addr_t checkpoint_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uin
 {
     nand_addr_t addr;
 
-    addr.ch     = ch;
-    addr.ce     = ce;
-    addr.lun    = lun;
-    addr.plane  = (uint8_t)((i & 1U) & 1U); /* 页号奇偶 → P1/P0（双 Plane 交错） */
-    addr.page   = (uint8_t)((i < 3U) ? i : (i - 3U));
-    addr.block  = (uint8_t)((i < 3U) ? CHECKPOINT_BLOCK0 : CHECKPOINT_BLOCK1);
-    addr.cw     = 0U;
+    addr.ch    = ch;
+    addr.ce    = ce;
+    addr.lun   = lun;
+    addr.plane = (uint8_t)((i & 1U) & 1U); /* 页号奇偶 → P1/P0（双 Plane 交错） */
+    addr.page  = (uint8_t)((i < 3U) ? i : (i - 3U));
+    addr.block = (uint8_t)((i < 3U) ? CHECKPOINT_BLOCK0 : CHECKPOINT_BLOCK1);
+    addr.cw    = 0U;
 
     return addr;
 }
@@ -214,7 +212,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
 {
     l2p_checkpoint_header_t cp;
     uint8_t                 i;
-    int                     ret_total = 0;
+    int                     ret_total    = 0;
     uint32_t                region_words = 0U;
 
     if (ftl == NULL)
@@ -224,8 +222,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
 
     /* ① 快照 region 脏标记 → 构造 Header（先快照后 flush：flush 会清位） */
     memset(&cp, 0, sizeof(cp));
-    memcpy(cp.region_bitmap, ftl->cache.region_dirty_bitmap,
-           sizeof(cp.region_bitmap));
+    memcpy(cp.region_bitmap, ftl->cache.region_dirty_bitmap, sizeof(cp.region_bitmap));
 
     /* region_count = 置位 word 数（无消费方，仅信息量；多 LUN 时高位 word 恒 0） */
     for (i = 0U; i < 64U; i++)
@@ -249,7 +246,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
     /* ③ 完成 Header 剩余字段 */
     cp.magic            = CHECKPOINT_MAGIC;
     cp.sequence         = ftl->journal.sequence_counter; /* 用 journal 最新 sequence */
-    cp.timestamp        = checkpoint_now_ms(ftl);         /* 平台 time_us 换算 ms 快照 */
+    cp.timestamp        = checkpoint_now_ms(ftl);        /* 平台 time_us 换算 ms 快照 */
     cp.journal_sequence = ftl->journal.sequence_counter; /* 截断到此 seq */
 
     /* CRC */
@@ -417,10 +414,9 @@ void checkpoint_journal_watermark(l2p_journal_t *journal)
      * 与 §7.5.2 推导对齐。
      */
     used = ((uint32_t)journal->current_block * PAGES_PER_BLOCK +
-            (uint32_t)journal->current_page) * 100U
-           / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK)
-           + ((uint32_t)journal->current_entry * 100U / JOURNAL_ENTRIES_PER_PAGE
-              / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK));
+            (uint32_t)journal->current_page) *
+               100U / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK) +
+           ((uint32_t)journal->current_entry * 100U / JOURNAL_ENTRIES_PER_PAGE / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK));
 
     if (used >= JOURNAL_CRITICAL)
     {

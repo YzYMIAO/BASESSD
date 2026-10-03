@@ -1,9 +1,9 @@
 #ifndef COMMON_FTL_TYPES_H
 #define COMMON_FTL_TYPES_H
 
-#include "common/ssd_types.h"  /* ssd_status_t */
-#include "ftl/ftl_type.h"      /* lba_t, ftl_status_t, ftl_topology_t */
-#include "nand/nand_config.h"  /* nand_addr_t, nand_pba_t, NAND_PBA_INVALID */
+#include "common/ssd_types.h" /* ssd_status_t */
+#include "ftl/ftl_type.h"     /* lba_t, ftl_status_t, ftl_topology_t */
+#include "nand/nand_config.h" /* nand_addr_t, nand_pba_t, NAND_PBA_INVALID */
 
 #include <stdint.h>
 
@@ -38,13 +38,13 @@ typedef void (*pending_cb_t)(void *ctx);
  */
 typedef struct
 {
-    uint64_t             lba;             /* Host 逻辑地址（NVMe 协议宽度） */
-    void                *buffer;          /* 读：caller 数据 buffer（数据写回处）；写：数据源 */
-    uint32_t             pages;           /* 页数：1=单 Plane，2=双 Plane Multi-Plane */
-    volatile uint8_t    *complete_flag;   /* 非 NULL 时 NAND 完成后置 1（异步跟踪） */
-    volatile ssd_status_t *status_out;    /* 非 NULL 时完成 handler 写入 SSD_STATUS_OK/IO_ERROR */
-    pending_cb_t         on_complete;     /* 完成后回调（可选，Controller 子请求聚合） */
-    void                *on_complete_ctx; /* 回调上下文（ssd_request_t*） */
+    uint64_t               lba;             /* Host 逻辑地址（NVMe 协议宽度） */
+    void                  *buffer;          /* 读：caller 数据 buffer（数据写回处）；写：数据源 */
+    uint32_t               pages;           /* 页数：1=单 Plane，2=双 Plane Multi-Plane */
+    volatile uint8_t      *complete_flag;   /* 非 NULL 时 NAND 完成后置 1（异步跟踪） */
+    volatile ssd_status_t *status_out;      /* 非 NULL 时完成 handler 写入 SSD_STATUS_OK/IO_ERROR */
+    pending_cb_t           on_complete;     /* 完成后回调（可选，Controller 子请求聚合） */
+    void                  *on_complete_ctx; /* 回调上下文（ssd_request_t*） */
 } ftl_io_request_t;
 
 #endif /* COMMON_FTL_TYPES_H */

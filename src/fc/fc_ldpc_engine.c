@@ -129,8 +129,7 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
  *       错误，按位翻转纠正；err_bits = 纠正数（0..t）。
  *     - LDPC 分支：qc_decode 内部按 528B 码字直接操作。
  * -------------------------------------------------------------------- */
-fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length,
-                           uint8_t *err_bits)
+fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length, uint8_t *err_bits)
 {
     (void)config;
 

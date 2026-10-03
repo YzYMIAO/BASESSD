@@ -20,13 +20,13 @@
 
 /* 通道页缓冲大小：单 plane 操作只用 PAGE_SIZE，多 plane 操作需要双倍缓冲。 */
 #define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM)
-#define PAGE_MAIN_SIZE   (2048)   /* 主区字节数 */
-#define PAGE_SPARE_SIZE  (64)     /* 备区字节数 */
+#define PAGE_MAIN_SIZE   (2048) /* 主区字节数 */
+#define PAGE_SPARE_SIZE  (64)   /* 备区字节数 */
 #define PAGES_PER_BLOCK  (64)
 #define BLOCKS_PER_PLANE (2048)
 #define PLANE_NUM        (2)
 #define DIE_NUM          (1)
-#define LUN_NUM          (1)   /* 每片选 LUN 数（MT29F4G08 单 die；换多 die 芯片只改此宏） */
+#define LUN_NUM          (1) /* 每片选 LUN 数（MT29F4G08 单 die；换多 die 芯片只改此宏） */
 #define CH_NUM           (1)
 #define CE_NUM           (1)
 #define CW_NUM           (4U)
@@ -418,20 +418,19 @@ static inline uint8_t pba_is_valid(nand_pba_t pba)
 
 typedef struct
 {
-    uint8_t  ch;       /* Channel */
-    uint8_t  ce;       /* Chip Enable */
-    uint8_t  lun;      /* LUN (Die) */
-    uint16_t block;    /* Block number (0..2047) */
-    uint8_t  plane;    /* Plane (0/1) */
-    uint8_t  page;     /* Page in block (0..63) */
-    uint8_t  cw;       /* Code Word (0..3, 0=全部) */
+    uint8_t  ch;    /* Channel */
+    uint8_t  ce;    /* Chip Enable */
+    uint8_t  lun;   /* LUN (Die) */
+    uint16_t block; /* Block number (0..2047) */
+    uint8_t  plane; /* Plane (0/1) */
+    uint8_t  page;  /* Page in block (0..63) */
+    uint8_t  cw;    /* Code Word (0..3, 0=全部) */
 } nand_addr_t;
 
 /* nand_addr_t → nand_pba_t */
 static inline nand_pba_t pba_from_addr(const nand_addr_t *addr)
 {
-    return pba_make(addr->ch, addr->ce, addr->page, addr->plane,
-                    addr->block, addr->lun, addr->cw);
+    return pba_make(addr->ch, addr->ce, addr->page, addr->plane, addr->block, addr->lun, addr->cw);
 }
 
 /* nand_pba_t → nand_addr_t（展开）。allocator/L2P 返回紧凑 PBA，
@@ -440,13 +439,13 @@ static inline nand_addr_t addr_from_pba(nand_pba_t pba)
 {
     nand_addr_t addr;
 
-    addr.ch     = (uint8_t)pba_to_ch(pba);
-    addr.ce     = (uint8_t)pba_to_ce(pba);
-    addr.lun    = (uint8_t)pba_to_lun(pba);
-    addr.block  = (uint16_t)pba_to_block(pba);
-    addr.plane  = (uint8_t)pba_to_plane(pba);
-    addr.page   = (uint8_t)pba_to_page(pba);
-    addr.cw     = (uint8_t)pba_to_cw(pba);
+    addr.ch    = (uint8_t)pba_to_ch(pba);
+    addr.ce    = (uint8_t)pba_to_ce(pba);
+    addr.lun   = (uint8_t)pba_to_lun(pba);
+    addr.block = (uint16_t)pba_to_block(pba);
+    addr.plane = (uint8_t)pba_to_plane(pba);
+    addr.page  = (uint8_t)pba_to_page(pba);
+    addr.cw    = (uint8_t)pba_to_cw(pba);
 
     return addr;
 }
@@ -456,13 +455,13 @@ static inline nand_addr_t addr_from_paa(uint8_t ch, uint8_t ce, nand_paa_t paa)
 {
     nand_addr_t addr;
 
-    addr.ch     = ch;
-    addr.ce     = ce;
-    addr.lun    = (uint8_t)paa_to_lun(paa);
-    addr.block  = (uint16_t)paa_to_block(paa);
-    addr.plane  = (uint8_t)paa_to_plane(paa);
-    addr.page   = (uint8_t)paa_to_page(paa);
-    addr.cw     = (uint8_t)paa_to_cw(paa);
+    addr.ch    = ch;
+    addr.ce    = ce;
+    addr.lun   = (uint8_t)paa_to_lun(paa);
+    addr.block = (uint16_t)paa_to_block(paa);
+    addr.plane = (uint8_t)paa_to_plane(paa);
+    addr.page  = (uint8_t)paa_to_page(paa);
+    addr.cw    = (uint8_t)paa_to_cw(paa);
 
     return addr;
 }

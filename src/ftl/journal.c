@@ -11,8 +11,7 @@
  * 固定地址直填：由 nand_addr_t 构造 → addr_to_cmd，不再 pba_make 打包。
  * 元数据页写入固定位置，不依赖 allocator。
  */
-static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length,
-                                    uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
+static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
@@ -70,8 +69,7 @@ static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t
 }
 
 /* ── 内部同步读页（原 ftl_internal_read_page 内联化）── */
-static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length,
-                                   uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
+static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
@@ -186,13 +184,13 @@ static nand_addr_t journal_page_addr(const l2p_journal_t *journal, uint8_t b, ui
 {
     nand_addr_t addr;
 
-    addr.ch     = journal->topo.ch;
-    addr.ce     = journal->topo.ce;
-    addr.lun    = journal->topo.lun;
-    addr.block  = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
-    addr.plane  = (uint8_t)(page & 1U); /* 偶页 P0, 奇页 P1（双 Plane 交错） */
-    addr.page   = page;
-    addr.cw     = 0U; /* 0 = 整页 */
+    addr.ch    = journal->topo.ch;
+    addr.ce    = journal->topo.ce;
+    addr.lun   = journal->topo.lun;
+    addr.block = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
+    addr.plane = (uint8_t)(page & 1U); /* 偶页 P0, 奇页 P1（双 Plane 交错） */
+    addr.page  = page;
+    addr.cw    = 0U; /* 0 = 整页 */
 
     return addr;
 }
@@ -201,13 +199,13 @@ static nand_addr_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
 {
     nand_addr_t addr;
 
-    addr.ch     = journal->topo.ch;
-    addr.ce     = journal->topo.ce;
-    addr.lun    = journal->topo.lun;
-    addr.block  = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
-    addr.plane  = 0U;
-    addr.page   = 0U;
-    addr.cw     = 0U;
+    addr.ch    = journal->topo.ch;
+    addr.ce    = journal->topo.ce;
+    addr.lun   = journal->topo.lun;
+    addr.block = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
+    addr.plane = 0U;
+    addr.page  = 0U;
+    addr.cw    = 0U;
 
     return addr;
 }
@@ -298,9 +296,7 @@ void journal_flush_page(l2p_journal_t *journal)
      * 同步写 Journal 页到 NAND。
      * CRC/Random DISABLED：Journal 有自身四层保护（ECC/CRC/entry_count/sequence）。
      */
-    (void)sync_write_page(waddr, journal->page_buf, JOURNAL_PAGE_SIZE,
-                          FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                          FC_COMMAND_MODULE_METADATA, 0U);
+    (void)sync_write_page(waddr, journal->page_buf, JOURNAL_PAGE_SIZE, FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
 
     /* 推进指针 */
     journal->current_page++;
@@ -318,8 +314,7 @@ void journal_flush_page(l2p_journal_t *journal)
     memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
 }
 
-ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache,
-                            uint32_t cp_sequence)
+ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence)
 {
     uint8_t  b, page;
     uint32_t max_sequence = 0U;
@@ -360,9 +355,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache,
             raddr = journal_page_addr(journal, b, (uint8_t)page);
 
             memset(page_data, 0xFF, sizeof(page_data));
-            ret = sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE,
-                                 FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                 FC_COMMAND_MODULE_METADATA, 0U);
+            ret = sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
             if (ret != 0)
             {
                 continue; /* 读失败，跳过本页 */
@@ -451,13 +444,10 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache,
             nand_addr_t raddr;
             int         ret;
 
-            raddr = journal_page_addr(journal, replay_pages[i].block,
-                                      replay_pages[i].page);
+            raddr = journal_page_addr(journal, replay_pages[i].block, replay_pages[i].page);
 
             memset(page_data, 0xFF, sizeof(page_data));
-            ret = sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE,
-                                 FC_CRC_DISABLE, FC_RANDOM_DISABLE,
-                                 FC_COMMAND_MODULE_METADATA, 0U);
+            ret = sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
             if (ret != 0)
             {
                 continue; /* 页已失效，跳过（应用顺序其余页不受影响） */
@@ -473,8 +463,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache,
                                       sizeof(l2p_journal_entry_t) * k;
                     memcpy(&entry_lba, page_data + offset + 0, 4);
                     memcpy(&entry_new_pba, page_data + offset + 8, 4);
-                    l2p_cache_write(cache, (lba_t)entry_lba,
-                                    (nand_pba_t)entry_new_pba);
+                    l2p_cache_write(cache, (lba_t)entry_lba, (nand_pba_t)entry_new_pba);
                 }
             }
         }

@@ -10,8 +10,7 @@
 #include <string.h>
 
 /* ── 内部同步写页（原 ftl_internal_write_page 内联化，随机地址 → addr 直填）── */
-static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length,
-                                    uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
+static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
@@ -139,8 +138,7 @@ static ftl_status_t sync_erase_block(nand_addr_t addr)
  * @param read_count_out 输出：1=本次读成功（调用方 ++ 该块 read_count，可为 NULL）
  * @return 0 成功, -1 失败
  */
-ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out,
-                                   uint8_t *ecc_out, uint8_t *read_count_out)
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out, uint8_t *ecc_out, uint8_t *read_count_out)
 {
     fc_command_t *cmd;
     uint32_t      meta_cw0;
@@ -197,10 +195,10 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
             uint8_t k;
             for (k = 0U; k < 4U; k++)
             {
-                uint8_t b = (k == 0U) ? (uint8_t)completion.ecc_bit0
-                          : (k == 1U) ? (uint8_t)completion.ecc_bit1
-                          : (k == 2U) ? (uint8_t)completion.ecc_bit2
-                                      : (uint8_t)completion.ecc_bit3;
+                uint8_t b = (k == 0U)   ? (uint8_t)completion.ecc_bit0
+                            : (k == 1U) ? (uint8_t)completion.ecc_bit1
+                            : (k == 2U) ? (uint8_t)completion.ecc_bit2
+                                        : (uint8_t)completion.ecc_bit3;
                 if (b > ecc_max)
                 {
                     ecc_max = b;
@@ -252,7 +250,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
 
 void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t now)
 {
-    uint8_t plane;
+    uint8_t  plane;
     uint16_t closed_idx;
 
     if ((alloc == NULL) || (victim == NULL) || (victim->valid != 0U))
@@ -367,8 +365,8 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
 
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        uint16_t    gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
-        uint64_t    valid_map  = alloc->blocks[gblock_src].valid_map[plane];
+        uint16_t gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
+        uint64_t valid_map  = alloc->blocks[gblock_src].valid_map[plane];
 
         /*
          * 直接扫有效页位图：只搬置位页，跳过无效页（空洞/已覆盖）。
@@ -430,7 +428,7 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
                 /* 写用户数据到新位置 */
                 {
                     nand_addr_t waddr = addr_from_pba(new_pba);
-                    ret = sync_write_page(waddr, buf, sizeof(buf), FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_GC, (lba_t)lba);
+                    ret               = sync_write_page(waddr, buf, sizeof(buf), FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_GC, (lba_t)lba);
                 }
                 if (ret != 0)
                 {

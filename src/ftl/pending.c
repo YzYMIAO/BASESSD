@@ -1,6 +1,6 @@
 #include "ftl/pending.h"
 
-#include "ftl/ftl.h"   /* ftl_context_t */
+#include "ftl/ftl.h" /* ftl_context_t */
 
 #include <string.h>
 
@@ -14,9 +14,7 @@ void pending_init(ftl_context_t *ftl)
     memset(ftl->pending, 0, sizeof(ftl->pending));
 }
 
-int pending_add(ftl_context_t *ftl, uint16_t cmd_id, const ftl_io_request_t *io,
-                nand_pba_t old_pba, nand_pba_t new_pba,
-                nand_pba_t old_pba1, uint8_t cache_intermediate)
+int pending_add(ftl_context_t *ftl, uint16_t cmd_id, const ftl_io_request_t *io, nand_pba_t old_pba, nand_pba_t new_pba, nand_pba_t old_pba1, uint8_t cache_intermediate)
 {
     uint8_t i;
 

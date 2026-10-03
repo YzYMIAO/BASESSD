@@ -32,10 +32,10 @@ typedef struct
  * @param ftl        FTL 实例三维数组 ftl[CH_NUM][CE_NUM][LUN_NUM]
  * @return SSD_STATUS_OK 成功，SSD_STATUS_INVALID_ARGUMENT 入参非法/槽位缺失/拓扑不符
  */
-int      ssd_controller_init(ssd_controller_t *controller,
-                             ftl_context_t *ftl[CH_NUM][CE_NUM][LUN_NUM]);
-int      ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
-uint8_t  ssd_controller_is_complete(const ssd_request_t *request);
+int     ssd_controller_init(ssd_controller_t *controller,
+                            ftl_context_t    *ftl[CH_NUM][CE_NUM][LUN_NUM]);
+int     ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
+uint8_t ssd_controller_is_complete(const ssd_request_t *request);
 
 /*
  * ssd_controller_state_transition - Controller 最小状态机（C1，state_machine.c）
@@ -47,7 +47,7 @@ uint8_t  ssd_controller_is_complete(const ssd_request_t *request);
  * @param controller Controller 上下文
  * @param next_state 目标状态
  */
-void ssd_controller_state_transition(ssd_controller_t *controller,
+void ssd_controller_state_transition(ssd_controller_t      *controller,
                                      ssd_controller_state_t next_state);
 
 /*

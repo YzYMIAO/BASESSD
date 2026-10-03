@@ -1,7 +1,7 @@
 #include "ftl/completion_table.h"
 
 #include "fc/fc.h"
-#include "ftl/ftl.h"      /* ftl_context_t（route 表） */
+#include "ftl/ftl.h" /* ftl_context_t（route 表） */
 #include "ftl/ftl_type.h"
 #include "nand/nand_config.h" /* CH_NUM/CE_NUM/LUN_NUM */
 
@@ -26,9 +26,9 @@ void completion_table_init(void)
     memset(g_route, 0, sizeof(g_route));
 }
 
-ftl_status_t completion_table_add(uint16_t                  cmd_id,
-                         completion_handler_fn_t   handler,
-                         void                     *ctx)
+ftl_status_t completion_table_add(uint16_t                cmd_id,
+                                  completion_handler_fn_t handler,
+                                  void                   *ctx)
 {
     uint8_t i;
 
@@ -146,7 +146,7 @@ void completion_table_drain(void)
     while (fc_poll_completion(&completion) == FC_STATUS_OK)
     {
         completion_entry_t *entry = completion_table_lookup(
-                                        (uint16_t)completion.command_id);
+            (uint16_t)completion.command_id);
 
         if (entry != NULL)
         {
@@ -182,7 +182,7 @@ void ftl_sync_waiter_handler(const fc_command_status_t *completion, void *ctx)
 }
 
 void ftl_sync_waiter_handler_with_release(const fc_command_status_t *completion,
-                                          void                     *ctx)
+                                          void                      *ctx)
 {
     fc_command_t *cmd;
 

@@ -134,8 +134,8 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
         return;
     }
 
-    cache->ch = ch;
-    cache->ce = ce;
+    cache->ch  = ch;
+    cache->ce  = ce;
     cache->lun = lun;
 
     /* Region 级脏标记：开机全清（F4） */
@@ -296,7 +296,7 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
      * CRC/Random DISABLED：Region 数据不经过 CRC/Random，只保护 ECC。
      */
     {
-        nand_paa_t region_paa = NAND_PBA_INVALID;
+        nand_paa_t  region_paa = NAND_PBA_INVALID;
         nand_addr_t region_addr;
 
         if (cache->md_dir != NULL)
@@ -426,8 +426,8 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
         {
             /* 未分配 → 通过 Directory 动态分配新位置 */
             region_paa = metadata_dir_alloc_region(cache->md_dir,
-                                                    cache->alloc,
-                                                    line->region_id);
+                                                   cache->alloc,
+                                                   line->region_id);
             if (region_paa != NAND_PBA_INVALID)
             {
                 region_addr = addr_from_paa(cache->ch, cache->ce, region_paa);
