@@ -2,9 +2,11 @@
 
 #include "common/common.h"
 #include "dma.h"
+#include "ftl/ftl.h"
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(FC_NAND_TEST_ENABLE)
@@ -215,9 +217,402 @@ static int uart_cli_help(int argc, char *argv[]);
 static int uart_cli_status(int argc, char *argv[]);
 static int uart_cli_version(int argc, char *argv[]);
 static int uart_cli_log(int argc, char *argv[]);
+static int uart_cli_wr(int argc, char *argv[]);
+static int uart_cli_rd(int argc, char *argv[]);
+static int uart_cli_tr(int argc, char *argv[]);
+static int uart_cli_fl(int argc, char *argv[]);
+static int uart_cli_info(int argc, char *argv[]);
 #if defined(FC_NAND_TEST_ENABLE)
 static int uart_cli_test(int argc, char *argv[]);
 #endif
+
+/*
+ * UART CLI 驱动 FTL（C 档，设计文档 §13.4 D10：Host 命令来源 = UART CLI）。
+ *
+ * 固定 pattern 写 buffer：16KB = 2048B（FTL_READ_USER_SIZE）× 4 CW × 2 Plane，
+ * 落 SRAM2（.sram2_data 为 NOLOAD 段，上电不清零 → usart_init 主动预填）。
+ *   plane0 区（每页前 2048B）= 0x55555555，plane1 区（后 2048B）= 0xAAAAAAAA。
+ * Multi-Plane 写（pages=2）时前 2048B 进 plane0（LBA n）、后 2048B 进 plane1
+ * （LBA n+1）——写后读回一眼可确认双页簿记正确。
+ */
+static uint8_t g_wr_buf[FTL_READ_USER_SIZE * CW_NUM * PLANE_NUM] /* 16KB → SRAM2 */
+    __attribute__((section(".sram2_data")));
+
+/* wr/rd 两段式：handler 只提交请求到 controller（异步），结果由
+ * uart_service_poll 每轮末尾检查 ssd_controller_is_complete 打印（D11
+ * 非阻塞 pending 表语义；主循环的 ftl_service 完成请求）。 */
+typedef struct
+{
+    uint8_t             busy;         /* 1=有未决 CLI 请求 */
+    ssd_request_t       req;          /* 未决请求（controller 拆分子请求跟踪其 complete_flag） */
+    uint8_t             compare;      /* rd: 1=compare 模式，0=hex dump */
+    uint64_t            lba;          /* 本次请求起始 LBA（结果打印用） */
+    uint32_t            nblocks;      /* 本次请求块数 */
+} uart_cli_pending_t;
+
+static uart_cli_pending_t g_cli_pending;
+
+/* 预填 g_wr_buf pattern（.sram2_data NOLOAD，必须主动初始化） */
+static void uart_cli_pattern_init(void)
+{
+    uint32_t     i;
+    uint32_t     words_per_half = (uint32_t)((FTL_READ_USER_SIZE * CW_NUM) / sizeof(uint32_t)); /* 8KB/4 = 2048 */
+    uint32_t    *plane0 = (uint32_t *)(void *)g_wr_buf;
+    uint32_t    *plane1 = (uint32_t *)(void *)(g_wr_buf + FTL_READ_USER_SIZE * CW_NUM);
+
+    for (i = 0U; i < words_per_half; i++)
+    {
+        plane0[i] = 0x55555555U;
+        plane1[i] = 0xAAAAAAAAU;
+    }
+}
+
+/* 从 g_wr_buf 对应 plane 区取期望 pattern 值（compare 模式用） */
+static uint32_t uart_cli_expect_word(uint32_t byte_offset)
+{
+    return (byte_offset < (uint32_t)(FTL_READ_USER_SIZE * CW_NUM))
+               ? 0x55555555U
+               : 0xAAAAAAAAU;
+}
+
+/* 提交前的 LBA 范围检查（lba+n ≤ FTL_LBA_MAX） */
+static int uart_cli_lba_range_ok(uint64_t lba, uint32_t n)
+{
+    uint64_t end = lba + (uint64_t)n;
+
+    return (lba < FTL_LBA_MAX) && (end <= FTL_LBA_MAX);
+}
+
+/* 解析十进制/十六进制数。成功且全部消费返回 0；失败/残留返回 -1。 */
+static int uart_cli_parse_uint(const char *text, uint64_t *out)
+{
+    char  *end = NULL;
+    uint64_t value;
+
+    if ((text == NULL) || (text[0] == '\0'))
+    {
+        return -1;
+    }
+    value = strtoull(text, &end, 0);
+    if ((end == NULL) || (*end != '\0'))
+    {
+        return -1; /* 有非法字符残留 */
+    }
+    if (out != NULL)
+    {
+        *out = value;
+    }
+    return 0;
+}
+
+static int uart_cli_wr(int argc, char *argv[])
+{
+    uint64_t    lba;
+    uint64_t    n_parsed;
+    uint32_t    n;
+    char       *end = NULL;
+
+    (void)argc;
+
+    if (g_cli_pending.busy != 0U)
+    {
+        (void)uart_log_write("error: busy, pending request\r\n", 29U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    lba = strtoull(argv[1], &end, 0);
+    if ((end == NULL) || (*end != '\0') || (uart_cli_parse_uint(argv[2], &n_parsed) != 0) ||
+        (n_parsed == 0U) || (n_parsed > 0xFFFFFFFFU))
+    {
+        (void)uart_log_write("error: invalid lba/n\r\n", 22U);
+        return FUNC_STATUS_ERROR;
+    }
+    n = (uint32_t)n_parsed;
+    if (!uart_cli_lba_range_ok(lba, n))
+    {
+        (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    g_cli_pending.busy    = 1U;
+    g_cli_pending.compare = 0U;
+    g_cli_pending.lba     = lba;
+    g_cli_pending.nblocks = n;
+
+    memset(&g_cli_pending.req, 0, sizeof(g_cli_pending.req));
+    g_cli_pending.req.opcode      = SSD_REQUEST_WRITE;
+    g_cli_pending.req.start_lba   = lba;
+    g_cli_pending.req.block_count = n;
+    g_cli_pending.req.buffer      = (void *)g_wr_buf;
+    g_cli_pending.req.buffer_size = (size_t)n * FTL_READ_USER_SIZE;
+
+    if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
+    {
+        g_cli_pending.busy = 0U;
+        (void)uart_log_write("error: submit failed\r\n", 23U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    (void)uart_log_printf(UART_LOG_INFO, "wr submit ok lba=%llu n=%lu, waiting...\r\n",
+                          (unsigned long long)lba, (unsigned long)n);
+    return FUNC_STATUS_SUCCESS;
+}
+
+static int uart_cli_rd(int argc, char *argv[])
+{
+    uint64_t    lba;
+    uint64_t    n_parsed;
+    uint32_t    n;
+    char       *end = NULL;
+
+    if (g_cli_pending.busy != 0U)
+    {
+        (void)uart_log_write("error: busy, pending request\r\n", 29U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    lba = strtoull(argv[1], &end, 0);
+    if ((end == NULL) || (*end != '\0') || (uart_cli_parse_uint(argv[2], &n_parsed) != 0) ||
+        (n_parsed == 0U) || (n_parsed > 0xFFFFFFFFU))
+    {
+        (void)uart_log_write("error: invalid lba/n\r\n", 22U);
+        return FUNC_STATUS_ERROR;
+    }
+    n = (uint32_t)n_parsed;
+    if (!uart_cli_lba_range_ok(lba, n))
+    {
+        (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    g_cli_pending.busy    = 1U;
+    g_cli_pending.compare = (argc >= 4) && (strcmp(argv[3], "c") == 0) ? 1U : 0U;
+    g_cli_pending.lba     = lba;
+    g_cli_pending.nblocks = n;
+
+    memset(&g_cli_pending.req, 0, sizeof(g_cli_pending.req));
+    g_cli_pending.req.opcode      = SSD_REQUEST_READ;
+    g_cli_pending.req.start_lba   = lba;
+    g_cli_pending.req.block_count = n;
+    g_cli_pending.req.buffer      = (void *)g_wr_buf; /* 读数据覆盖 pattern；compare 模式直接与 pattern 比对 */
+    g_cli_pending.req.buffer_size = (size_t)n * FTL_READ_USER_SIZE;
+
+    if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
+    {
+        g_cli_pending.busy = 0U;
+        (void)uart_log_write("error: submit failed\r\n", 23U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    (void)uart_log_printf(UART_LOG_INFO, "rd submit ok lba=%llu n=%lu%s, waiting...\r\n",
+                          (unsigned long long)lba, (unsigned long)n,
+                          g_cli_pending.compare ? " c" : "");
+    return FUNC_STATUS_SUCCESS;
+}
+
+static int uart_cli_tr(int argc, char *argv[])
+{
+    uint64_t lba;
+
+    (void)argc;
+
+    if (g_cli_pending.busy != 0U)
+    {
+        (void)uart_log_write("error: busy, pending request\r\n", 29U);
+        return FUNC_STATUS_ERROR;
+    }
+    if (uart_cli_parse_uint(argv[1], &lba) != 0)
+    {
+        (void)uart_log_write("error: invalid lba\r\n", 19U);
+        return FUNC_STATUS_ERROR;
+    }
+    if (!uart_cli_lba_range_ok(lba, 1U))
+    {
+        (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    g_cli_pending.busy    = 1U;
+    g_cli_pending.compare = 0U;
+    g_cli_pending.lba     = lba;
+    g_cli_pending.nblocks = 1U;
+
+    memset(&g_cli_pending.req, 0, sizeof(g_cli_pending.req));
+    g_cli_pending.req.opcode      = SSD_REQUEST_TRIM;
+    g_cli_pending.req.start_lba   = lba;
+    g_cli_pending.req.block_count = 1U;
+    g_cli_pending.req.buffer      = (void *)g_wr_buf;
+
+    if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
+    {
+        g_cli_pending.busy = 0U;
+        (void)uart_log_write("error: submit failed\r\n", 23U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    (void)uart_log_write("tr submit ok\r\n", 14U);
+    return FUNC_STATUS_SUCCESS;
+}
+
+static int uart_cli_fl(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    if (g_cli_pending.busy != 0U)
+    {
+        (void)uart_log_write("error: busy, pending request\r\n", 29U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    g_cli_pending.busy    = 1U;
+    g_cli_pending.compare = 0U;
+    g_cli_pending.lba     = 0U;
+    g_cli_pending.nblocks = 1U;
+
+    memset(&g_cli_pending.req, 0, sizeof(g_cli_pending.req));
+    g_cli_pending.req.opcode      = SSD_REQUEST_FLUSH;
+    g_cli_pending.req.start_lba   = 0U;
+    g_cli_pending.req.block_count = 1U;
+    g_cli_pending.req.buffer      = (void *)g_wr_buf;
+
+    if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
+    {
+        g_cli_pending.busy = 0U;
+        (void)uart_log_write("error: submit failed\r\n", 23U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    (void)uart_log_write("fl submit ok\r\n", 14U);
+    return FUNC_STATUS_SUCCESS;
+}
+
+static int uart_cli_info(int argc, char *argv[])
+{
+    static const char *const state_names[] = {"RESET", "INITIALIZING", "READY", "FAILED"};
+    uint8_t                  ch;
+    uint8_t                  ce;
+    uint8_t                  lun;
+
+    (void)argc;
+    (void)argv;
+
+    if (g_ctrl.state <= SSD_CONTROLLER_FAILED)
+    {
+        (void)uart_log_printf(UART_LOG_INFO, "controller state=%s lba_max=%llu\r\n",
+                              state_names[g_ctrl.state],
+                              (unsigned long long)FTL_LBA_MAX);
+    }
+
+    for (ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (lun = 0U; lun < LUN_NUM; lun++)
+            {
+                const ftl_context_t *ftl = g_ctrl.ftl[ch][ce][lun];
+
+                if (ftl == NULL)
+                {
+                    continue;
+                }
+                (void)uart_log_printf(UART_LOG_INFO,
+                                      "ftl[%u][%u][%u] free=%u op=%u spare=%u pre_cond=%u bad=%u closed=%u\r\n",
+                                      (unsigned)ch, (unsigned)ce, (unsigned)lun,
+                                      (unsigned)ftl->alloc.free_count,
+                                      (unsigned)ftl->alloc.op_count,
+                                      (unsigned)ftl->alloc.spare_count,
+                                      (unsigned)ftl->alloc.pre_cond_count,
+                                      (unsigned)ftl->alloc.bad_count,
+                                      (unsigned)ftl->alloc.closed_sb_count);
+            }
+        }
+    }
+    return FUNC_STATUS_SUCCESS;
+}
+
+/* rd 完成：compare 模式与 g_wr_buf pattern 比对，报 PASS / 首个不一致偏移 */
+static void uart_cli_rd_report(void)
+{
+    uint32_t total_bytes = g_cli_pending.nblocks * FTL_READ_USER_SIZE;
+    uint32_t offset;
+
+    if (g_cli_pending.compare == 0U)
+    {
+        /* hex dump 前 64B 防刷屏 */
+        (void)uart_log_printf(UART_LOG_INFO, "rd ok n=%lu, first 64 bytes:\r\n",
+                              (unsigned long)g_cli_pending.nblocks);
+        for (offset = 0U; (offset < 64U) && (offset < total_bytes); offset += 16U)
+        {
+            (void)uart_log_printf(UART_LOG_INFO,
+                                  "%08lx: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
+                                  (unsigned long)offset,
+                                  (unsigned)g_wr_buf[offset], (unsigned)g_wr_buf[offset + 1U],
+                                  (unsigned)g_wr_buf[offset + 2U], (unsigned)g_wr_buf[offset + 3U],
+                                  (unsigned)g_wr_buf[offset + 4U], (unsigned)g_wr_buf[offset + 5U],
+                                  (unsigned)g_wr_buf[offset + 6U], (unsigned)g_wr_buf[offset + 7U],
+                                  (unsigned)g_wr_buf[offset + 8U], (unsigned)g_wr_buf[offset + 9U],
+                                  (unsigned)g_wr_buf[offset + 10U], (unsigned)g_wr_buf[offset + 11U],
+                                  (unsigned)g_wr_buf[offset + 12U], (unsigned)g_wr_buf[offset + 13U],
+                                  (unsigned)g_wr_buf[offset + 14U], (unsigned)g_wr_buf[offset + 15U]);
+        }
+        return;
+    }
+
+    /* compare：按 4B 粒度与期望 pattern 比对（plane0=0x55555555 / plane1=0xAAAAAAAA） */
+    for (offset = 0U; offset + sizeof(uint32_t) <= total_bytes; offset += sizeof(uint32_t))
+    {
+        uint32_t expect = uart_cli_expect_word(offset);
+        uint32_t actual;
+
+        memcpy(&actual, &g_wr_buf[offset], sizeof(actual));
+        if (actual != expect)
+        {
+            (void)uart_log_printf(UART_LOG_ERROR, "rd FAIL at byte %lu: got %08lx expect %08lx\r\n",
+                                  (unsigned long)offset, (unsigned long)actual, (unsigned long)expect);
+            return;
+        }
+    }
+    (void)uart_log_write("rd PASS\r\n", 8U);
+}
+
+/* uart_service_poll 每轮末尾调：检查未决 CLI 请求是否被主循环 ftl_service 完成 */
+static void uart_cli_pending_poll(void)
+{
+    if (g_cli_pending.busy == 0U)
+    {
+        return;
+    }
+    if (ssd_controller_is_complete(&g_cli_pending.req) == 0U)
+    {
+        return;
+    }
+
+    switch (g_cli_pending.req.opcode)
+    {
+        case SSD_REQUEST_WRITE:
+            (void)uart_log_printf(UART_LOG_INFO, "wr done lba=%llu n=%lu status=%d\r\n",
+                                  (unsigned long long)g_cli_pending.lba,
+                                  (unsigned long)g_cli_pending.nblocks,
+                                  (int)g_cli_pending.req.completion_status);
+            break;
+        case SSD_REQUEST_READ:
+            uart_cli_rd_report();
+            break;
+        case SSD_REQUEST_TRIM:
+            (void)uart_log_printf(UART_LOG_INFO, "tr done lba=%llu status=%d\r\n",
+                                  (unsigned long long)g_cli_pending.lba,
+                                  (int)g_cli_pending.req.completion_status);
+            break;
+        case SSD_REQUEST_FLUSH:
+            (void)uart_log_printf(UART_LOG_INFO, "fl done status=%d\r\n",
+                                  (int)g_cli_pending.req.completion_status);
+            break;
+        default:
+            break;
+    }
+    g_cli_pending.busy = 0U;
+}
 
 /*
  * 第一版只注册只读诊断和日志等级控制。危险操作应按产品生命周期、认证状态和权限
@@ -228,6 +623,12 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
     { "status",                                                  "status", "show UART error and queue counters", 1U,  1U,  uart_cli_status},
     {"version",                                                 "version",      "show firmware console version", 1U,  1U, uart_cli_version},
     {    "log",                       "log level <error|warn|info|debug>",              "set runtime log level", 3U,  3U,     uart_cli_log},
+    /* UART CLI 驱动 FTL（C 档，D10）：wr/rd/tr/fl/info 模拟 NVMe host IO */
+    {    "wr",                                        "wr <lba> <n>",    "write n blocks with fixed pattern", 3U,  3U,     uart_cli_wr},
+    {    "rd",                              "rd <lba> <n> [c]", "read n blocks (c=compare pattern)", 3U,  4U,     uart_cli_rd},
+    {    "tr",                                        "tr <lba>",                       "trim one lba", 2U,  2U,     uart_cli_tr},
+    {    "fl",                                                "fl",   "flush dirty L2P + journal to NAND", 1U,  1U,     uart_cli_fl},
+    {  "info",                                                "info",        "show controller + FTL statistics", 1U,  1U,   uart_cli_info},
 #if defined(FC_NAND_TEST_ENABLE)
   /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
   /* { "nand", ... }, */
@@ -508,6 +909,9 @@ void usart_init(uint32_t baudrate)
     USART_UX->CR1 |= USART_CR1_RXNEIE_RXFNEIE | USART_CR1_PEIE;
     USART_UX->CR3 |= USART_CR3_EIE;
     g_usart_ready = 1U;
+
+    /* UART CLI 驱动 FTL：g_wr_buf 落 NOLOAD SRAM2 段，上电不清零 → 主动预填 pattern */
+    uart_cli_pattern_init();
 }
 
 void HAL_UART_MspInit(UART_HandleTypeDef *huart)
@@ -843,4 +1247,7 @@ void uart_service_poll(void)
             }
         }
     }
+
+    /* 两段式完成轮询：wr/rd/tr/fl 已提交到 controller，主循环 ftl_service 完成后在此报告 */
+    uart_cli_pending_poll();
 }

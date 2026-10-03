@@ -1,5 +1,8 @@
 #include "controller/controller.h"
 
+#include "ftl/journal.h"
+#include "ftl/l2p_cache.h"
+
 #include <stddef.h>
 
 /* 外部：request.c — 拆分多块请求 */
@@ -52,7 +55,10 @@ int ssd_controller_init(ssd_controller_t *controller,
         return SSD_STATUS_INVALID_ARGUMENT;
     }
 
-    /* 逐槽校验并绑定 FTL 实例：任一槽位缺失或槽位与实例 topo 不符即失败 */
+    /* 逐槽校验并绑定 FTL 实例：任一槽位缺失或槽位与实例 topo 不符即失败。
+     * 状态机（C1）：入口 RESET → INITIALIZING，校验结果驱动 READY/FAILED。 */
+    ssd_controller_state_transition(controller, SSD_CONTROLLER_INITIALIZING);
+
     for (ch = 0U; ch < CH_NUM; ch++)
     {
         for (ce = 0U; ce < CE_NUM; ce++)
@@ -61,6 +67,7 @@ int ssd_controller_init(ssd_controller_t *controller,
             {
                 if (ftl[ch][ce][lun] == NULL)
                 {
+                    ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
                     return SSD_STATUS_INVALID_ARGUMENT;
                 }
                 /* 槽位索引必须等于实例绑定拓扑：保证 LBA 路由与芯片定位语义一致 */
@@ -68,6 +75,7 @@ int ssd_controller_init(ssd_controller_t *controller,
                     (ftl[ch][ce][lun]->topo.ce != ce) ||
                     (ftl[ch][ce][lun]->topo.lun != lun))
                 {
+                    ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
                     return SSD_STATUS_INVALID_ARGUMENT;
                 }
                 controller->ftl[ch][ce][lun] = ftl[ch][ce][lun];
@@ -75,8 +83,7 @@ int ssd_controller_init(ssd_controller_t *controller,
         }
     }
 
-    controller->state = SSD_CONTROLLER_INITIALIZING;
-    controller->state = SSD_CONTROLLER_READY;
+    ssd_controller_state_transition(controller, SSD_CONTROLLER_READY);
     return SSD_STATUS_OK;
 }
 
@@ -98,6 +105,9 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
     {
         return SSD_STATUS_INVALID_ARGUMENT;
     }
+
+    /* C1b：host IO 到来 → 后台让路（scheduler 钩子；实际预算由 ftl_service B3 判定） */
+    (void)ssd_controller_schedule(controller, 1);
 
     /* 清零完成标志 */
     request->complete_flag     = 0U;
@@ -149,6 +159,37 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
                 break;
 
             case SSD_REQUEST_FLUSH:
+                /* C3：FLUSH 落地 — 对全部 (ch,ce,lun) 实例刷 dirty L2P cache 到
+                 * NAND + 强制 Journal buffer 落盘。两个原语均同步阻塞（内部
+                 * ftl_internal_sync_wait 泵完），完成标志可直接同步置 1，
+                 * 无需走 pending 异步。 */
+                {
+                    uint8_t fch;
+                    uint8_t fce;
+                    uint8_t flun;
+
+                    for (fch = 0U; fch < CH_NUM; fch++)
+                    {
+                        for (fce = 0U; fce < CE_NUM; fce++)
+                        {
+                            for (flun = 0U; flun < LUN_NUM; flun++)
+                            {
+                                ftl_context_t *fftl = controller->ftl[fch][fce][flun];
+
+                                if (fftl == NULL)
+                                {
+                                    continue; /* 防御：槽位绑定后恒非空 */
+                                }
+                                (void)l2p_cache_flush_all(&fftl->cache);
+                                journal_flush_page(&fftl->journal);
+                            }
+                        }
+                    }
+                    request->completion_status = SSD_STATUS_OK;
+                    request->complete_flag     = 1U;
+                }
+                break;
+
             default:
                 request->completion_status = SSD_STATUS_NOT_SUPPORTED;
                 request->complete_flag     = 1U;

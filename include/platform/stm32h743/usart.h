@@ -3,6 +3,7 @@
 #ifndef __USART_H
 #define __USART_H
 
+#include "controller/controller.h"
 #include "sys.h"
 
 #include <stdint.h>
@@ -73,6 +74,10 @@ typedef struct
 } uart_stats_t;
 
 extern UART_HandleTypeDef g_uart1_handle;
+
+/* UART CLI 驱动 FTL（C 档，D10）：main.c 定义的 controller 路由表。
+ * wr/rd/tr/fl/info 命令经它 ssd_controller_submit 驱动 FTL 全链路。 */
+extern ssd_controller_t g_ctrl;
 
 void usart_init(uint32_t baudrate);
 

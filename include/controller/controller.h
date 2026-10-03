@@ -37,4 +37,30 @@ int      ssd_controller_init(ssd_controller_t *controller,
 int      ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
 uint8_t  ssd_controller_is_complete(const ssd_request_t *request);
 
+/*
+ * ssd_controller_state_transition - Controller 最小状态机（C1，state_machine.c）
+ *
+ * 合法转换表：RESET→INITIALIZING（boot）、INITIALIZING→READY/FAILED
+ * （槽位校验结果）、READY→FAILED（运行时致命错误，预留）。
+ * 非法转换直接忽略（保持现态）；FAILED 为终态。
+ *
+ * @param controller Controller 上下文
+ * @param next_state 目标状态
+ */
+void ssd_controller_state_transition(ssd_controller_t *controller,
+                                     ssd_controller_state_t next_state);
+
+/*
+ * ssd_controller_schedule - Controller 优先级调度钩子（C1b，scheduler.c）
+ *
+ * host IO 到来（ssd_controller_submit 每次提交）时调用本函数，
+ * 返回 0 = 后台让路（host IO 优先）；空闲时返回 1 = 全力后台。
+ * 实际后台预算由 ftl_service 的 B3 空闲度判定承担，本钩子只做观测点。
+ *
+ * @param controller     Controller 上下文
+ * @param host_io_active 1=有 host IO 提交，0=空闲
+ * @return 后台预算指示：0=最小后台，1=全力后台
+ */
+int ssd_controller_schedule(ssd_controller_t *controller, int host_io_active);
+
 #endif /* SSD_CONTROLLER_H */

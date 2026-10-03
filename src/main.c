@@ -85,7 +85,8 @@ static uint16_t      g_spare_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_SPARE_POOL_SIZE
     __attribute__((section(".sram2_data")));
 static super_block_t g_closed_sb_list[CH_NUM][CE_NUM][LUN_NUM][SUPER_BLOCK_LIST_MAX] /* 16KB → SRAM2 */
     __attribute__((section(".sram2_data")));
-static ssd_controller_t g_ctrl;   /* controller 路由表（收 g_ftl 三维指针） */
+ssd_controller_t g_ctrl;   /* controller 路由表（收 g_ftl 三维指针）；非 static：
+                            * UART CLI（usart.c）经 extern 引用，见 usart.h */
 static int              g_ftl_ready; /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
