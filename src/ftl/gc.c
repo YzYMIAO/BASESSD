@@ -4,6 +4,7 @@
 #include "ftl/bbt.h"
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/journal.h"
+#include "ftl/read_recovery.h" /* rr_record_ecc（B4：GC 搬移读记 ECC/read disturb） */
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
@@ -126,15 +127,24 @@ static ftl_status_t sync_erase_block(nand_addr_t addr)
  * 内部管理 FC 命令生命周期：
  *   alloc → config → submit → sync_wait → read_data → get_meta → release
  *
- * @param pba         物理地址
- * @param buffer      输出：用户数据 buffer（2048 字节，可为 NULL）
- * @param lba_out     输出：从 META 提取的 LBA（可为 NULL）
+ * B4：本函数是 GC/WL 搬移读（gc_migrate_sb / wl_relocate）与掉电重建
+ * （ftl_rebuild_closed_sb_list 反查）的唯一读入口。此前不记录 ECC/read_count，
+ * 慢死预测（rr_record_ecc / read_count++）只挂 host 读 completion，导致
+ * GC/WL 搬移读成为 read disturb 盲区。现加 ecc_out / read_count_out 输出。
+ *
+ * @param pba            物理地址
+ * @param buffer         输出：用户数据 buffer（2048 字节，可为 NULL）
+ * @param lba_out        输出：从 META 提取的 LBA（可为 NULL）
+ * @param ecc_out        输出：本次读 4 CW 最大 ECC 纠正 bit 数（0..4，可为 NULL）
+ * @param read_count_out 输出：1=本次读成功（调用方 ++ 该块 read_count，可为 NULL）
  * @return 0 成功, -1 失败
  */
-ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out)
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out,
+                                   uint8_t *ecc_out, uint8_t *read_count_out)
 {
     fc_command_t *cmd;
     uint32_t      meta_cw0;
+    uint8_t       ecc_max = 0U;
     int           ret;
 
     cmd = fc_command_alloc();
@@ -180,6 +190,23 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
             (void)fc_command_release(cmd);
             return FTL_ERROR;
         }
+
+        /* B4：取 4 CW 最大 ECC 纠正 bit 数（与 host 读 completion 同口径，
+         * ftl.c:107-119 的 rr_record_ecc 聚合逻辑一致） */
+        {
+            uint8_t k;
+            for (k = 0U; k < 4U; k++)
+            {
+                uint8_t b = (k == 0U) ? (uint8_t)completion.ecc_bit0
+                          : (k == 1U) ? (uint8_t)completion.ecc_bit1
+                          : (k == 2U) ? (uint8_t)completion.ecc_bit2
+                                      : (uint8_t)completion.ecc_bit3;
+                if (b > ecc_max)
+                {
+                    ecc_max = b;
+                }
+            }
+        }
     }
 
     /* 读取用户数据 */
@@ -210,6 +237,14 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
     {
         /* META[0:1] = cw_index, 高位 = LBA 基址 */
         *lba_out = (lba_t)(meta_cw0 & ~3UL);
+    }
+    if (ecc_out != NULL)
+    {
+        *ecc_out = ecc_max;
+    }
+    if (read_count_out != NULL)
+    {
+        *read_count_out = 1U; /* 读成功，调用方 ++ 该块 read_count */
     }
 
     return FTL_OK;
@@ -324,6 +359,7 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
 {
     uint8_t  plane;
     uint32_t migrated = 0U;
+    uint32_t now_writes = 0U;
 
     if ((alloc == NULL) || (cache == NULL) || (victim == NULL))
     {
@@ -356,9 +392,21 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
 
                 /* 读页 + 获取 LBA + 验证有效性（bitmap 已保证置位，此处只取 LBA） */
                 memset(buf, 0, sizeof(buf));
-                if (gc_read_page_with_lba(pba, buf, &lba) != 0)
                 {
-                    continue; /* 读失败，跳过 */
+                    uint8_t ecc;
+                    uint8_t rc;
+                    if (gc_read_page_with_lba(pba, buf, &lba, &ecc, &rc) != 0)
+                    {
+                        continue; /* 读失败，跳过 */
+                    }
+
+                    /* B4：GC 搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环） */
+                    if (rc != 0U)
+                    {
+                        ftl_block_t *src = &alloc->blocks[gblock_src];
+                        rr_record_ecc(&src->rr, ecc, now_writes);
+                        src->read_count++;
+                    }
                 }
 
                 /* 查 L2P：当前映射是否仍指向本 PBA（bitmap 与 L2P 双校验） */

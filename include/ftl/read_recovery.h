@@ -46,6 +46,12 @@
 #define RR_MAX_RETRY            (8U)  /* 最大 read retry 次数 */
 #define RR_NEIGHBOR_ATTEMPTS    (2U)  /* 邻近页辅助尝试次数 */
 
+/* B5：read disturb 慢死阈值——单块累计读次数超此值即视为慢死候选。
+ * read_count 由 host 读 completion（ftl.c）与 GC/WL 搬移读（B4，gc.c/wear_leveling.c）
+ * 共同累加；取 SLC MT29F4G08 读干扰容忍度量级（NAND 读寿命 ~10^5 次，保守取
+ * 每块 1000 次触发搬移，远早于数据损坏）。 */
+#define RR_READ_DISTURB_THRESHOLD (1000U)
+
 /* ── Read Retry ONFI Feature Address ── */
 #define RR_FEATURE_READ_RETRY      (0x89U) /* Micron/ONFI Read Retry */
 #define RR_FEATURE_READ_RETRY_MODE (0x00U) /* Mode 0 = normal, 1-7 = retry modes */

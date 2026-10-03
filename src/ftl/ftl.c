@@ -513,6 +513,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params)
 void ftl_service(ftl_context_t *ftl)
 {
     uint32_t submitted = 0U;
+    uint16_t inflight;
 
     if (ftl == NULL)
     {
@@ -532,18 +533,28 @@ void ftl_service(ftl_context_t *ftl)
     /* Phase 2: 统一完成泵 — 替代原有 fc_poll_completion 循环 */
     completion_table_drain();
 
-    /* Phase 3: 三级后台模式 */
-    if (submitted == 0U)
+    /* Phase 3: 三级后台模式（B3：空闲度基于未决命令数，非"本轮有无提交 NAND"代理）
+     *
+     * 旧实现用 submitted（本轮 fc_service 提交了几条）判定，host 无 IO 时
+     * fc_service 也可能返回非 0（后台命令推进）→ 误判 NORMAL/BUSY，GC/WL/CP 全推迟。
+     * 现在用 pending（host IO 未决）+ completion_table（同步/后台命令未决）占用
+     * 近似系统空闲度：两者都空 = 真空闲 → IDLE 全力后台；仅 pending 占用高 = host
+     * IO 繁忙 → BUSY 最少后台；中间 → NORMAL 按需后台。
+     *
+     * 近似方案（文档标注）：pending/completion 是"占用快照"，不含队列里排队未 submit
+     * 的 host 请求（controller 层不回报其深度）。单实例 LUN_NUM=1 下够用。 */
+    inflight = (uint16_t)(pending_count(ftl) + completion_table_count());
+    if (inflight == 0U)
     {
         ftl_service_idle(ftl);
     }
-    else if (submitted <= (NAND_SUBMIT_BUDGET / 2U))
+    else if (pending_count(ftl) > (FTL_PENDING_MAX / 2U))
     {
-        ftl_service_normal(ftl);
+        ftl_service_busy(ftl);
     }
     else
     {
-        ftl_service_busy(ftl);
+        ftl_service_normal(ftl);
     }
 }
 

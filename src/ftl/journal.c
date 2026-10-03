@@ -536,6 +536,12 @@ void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
 
     (void)sync_erase_block(journal_block_addr(journal, b));
 
+    /* 截断后水位清零：对方 Block 已擦除，当前 Block 继续写入直到回切。
+     * 复位 watermark 标志（设计 §7.5.4）——truncate 即水位已清，
+     * 双保险兜底 checkpoint_create 的复位（后者在 journal_truncate 之后）。 */
+    journal->emergency         = 0U;
+    journal->checkpoint_needed = 0U;
+
     /* 如果当前 Block 的 current_page 已推进，对方 Block 已擦除，
      * 当前 Block 继续写入，直到写满后回切到已擦除的对方 Block。 */
 }

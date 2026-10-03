@@ -1427,3 +1427,44 @@ Explore 调研另发现一个超出 F10 原描述的**真数据损坏窗口**：
 - **B 档**：B1 journal 水位分母（`PAGES_PER_BLOCK`→`JOURNAL_BLOCK_COUNT×PAGES_PER_BLOCK`）、B2 checkpoint/emergency 标志复位、B3 ftl_service 模式基于 pending 占用、B4 GC/WL 搬移读记录 ECC + read_count++、B5 read_count 消费（predictive scan/WL victim）。
 - **C 档**：C1 controller state_machine 完整状态机、C1b scheduler 优先级调度、C2 NVMe host（nvme_io/admin/SQ/CQ/nvme_controller 全量）、C3 `SSD_REQUEST_FLUSH` 全实例 flush。
 - **F8/F9**：依赖上板（紧急 CP 回切校验 / CQ·SQ 深度实测）。
+
+---
+
+## v0.45 — B 档落地（journal 水位修复 + 标志复位 + ftl_service 空闲度 + GC/WL 读记 ECC + read_count 消费）
+
+**日期**：2026-10-03
+
+### 背景
+
+v0.44 体检确认的 B 档 5 项语义缺口（FTL 层正确性）全部落地：
+
+| # | 缺口 | 修复 |
+|----|------|------|
+| B1 | `checkpoint_journal_watermark` 分母用 `PAGES_PER_BLOCK(64)`（单块），容量实为双块 128 页 → 85%/95% 在 page≈55/61 触发，紧急水位离写满只剩 3 页≈384 条（设计预算 768 条） | 分母改 `JOURNAL_BLOCK_COUNT×PAGES_PER_BLOCK(128)`：85%→page≈108（留 19 页）、95%→page≈122（留 6 页≈768 条），与 §7.5.2 对齐 |
+| B2 | `journal.checkpoint_needed/emergency` 只有 init 置 0、append 置 1，永不复位 → T1 永久命中（每圈必 CP）+ emergency 置位后 BUSY 每圈强制 CP | `checkpoint_create` 成功末尾 + `journal_truncate` 双处 `=0` 复位（设计 §7.5.4） |
+| B3 | `ftl_service` 三级模式 = `submitted==0→IDLE/≤2→NORMAL/else→BUSY`（"本轮有无提交 NAND"代理），host 无 IO 时 fc_service 也可能非 0 → 误判 NORMAL/BUSY 推迟后台 | 新增 `pending_count()`/`completion_table_count()`，模式改 `inflight==0→IDLE / pending>16→BUSY / 其余→NORMAL`（基于未决命令占用近似空闲度） |
+| B4 | GC/WL 搬移读 `gc_read_page_with_lba` 不记录 ECC/read_count（`rr_record_ecc` 只在 host 读 completion）→ 搬移读 read disturb 盲区 | `gc_read_page_with_lba` 加 `ecc_out`/`read_count_out`；`gc_migrate_sb`/`wl_relocate` 成功读 → `rr_record_ecc` + `read_count++` |
+| B5 | `read_count/program_count` 只写不读 | `rr_predictive_scan` 加 `read_count≥RR_READ_DISTURB_THRESHOLD(1000)` 判据；`wl_victim_t` 加 `read_count` 字段，同有效页数下 read 多冷块优先 |
+
+### 实现
+
+1. **`src/ftl/checkpoint.c`**（B1/B2）：`checkpoint_journal_watermark` 分母改 `(uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK`；`checkpoint_create` 末尾复位 `emergency/checkpoint_needed`。
+2. **`src/ftl/journal.c`**（B2）：`journal_truncate` 擦除对方块后复位两标志（双保险）。
+3. **`include/ftl/pending.h` + `src/ftl/pending.c`**（B3）：新增 `pending_count(ftl)`。
+4. **`include/ftl/completion_table.h` + `src/ftl/completion_table.c`**（B3）：新增 `completion_table_count()`。
+5. **`src/ftl/ftl.c`**（B3）：`ftl_service` Phase 3 改 `inflight==0→IDLE / pending>16→BUSY / 其余→NORMAL`。
+6. **`include/ftl/gc.h` + `src/ftl/gc.c`**（B4）：`gc_read_page_with_lba` 签名加 `ecc_out`/`read_count_out`（4 CW 最大 ECC，与 host 读 completion 同口径）；`gc_migrate_sb` 搬移读后 `rr_record_ecc` + `read_count++`。
+7. **`src/ftl/wear_leveling.c`**（B4/B5）：`wl_relocate` 搬移读后 `rr_record_ecc` + `read_count++`；`wl_select_victim` 加 read_count 权重（`wl_victim_t` 加字段）。
+8. **`include/ftl/read_recovery.h` + `src/ftl/read_recovery.c`**（B5）：`RR_READ_DISTURB_THRESHOLD(1000)`；`rr_predictive_scan` 加 read_count 判据。
+9. **`src/ftl/power_failure_recovery.c`**（B4 签名波及）：掉电重建反查传 `NULL,NULL`（重建非搬移读，不记录）。
+
+### 验证
+
+- `make debug / release / FC_NAND_TEST_ENABLE=1` 全零错误零新增警告
+- SRAM 无变化（纯逻辑改动）
+- 上板预期：journal 85%/95% 水位按双块 128 页正确触发；T1 不永久命中；emergency 复位后 BUSY 不再每圈强制 CP；高压写/搬移后 read_count 与 ECC 历史真实增长，predictive scan 能命中 read disturb 慢死块
+
+### 待办（C 档，见 docs/design/ftl_full_landing_plan_20261003.md）
+
+- C1 controller state_machine 完整状态机、C1b scheduler 优先级调度、C2 NVMe host（nvme_io/admin/SQ/CQ/nvme_controller 全量）、C3 `SSD_REQUEST_FLUSH` 全实例 flush。
+- **F8/F9**：依赖上板（紧急 CP 回切校验 / CQ·SQ 深度实测）。

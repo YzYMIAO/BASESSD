@@ -39,12 +39,19 @@
  * 内部管理 FC 命令生命周期，无需调用者关心 alloc/submit/release。
  * 可被 GC、WL 等需要读 NAND + 取 LBA 的模块复用。
  *
- * @param pba         物理地址
- * @param buffer      输出：用户数据 buffer（2048 字节，可为 NULL）
- * @param lba_out     输出：从 META 提取的 LBA（可为 NULL）
+ * B4：同步返回本次读的 4 CW 最大 ECC 纠正 bit 数与"读成功"标志——
+ * GC/WL 搬移读是 read disturb 盲区（旧实现不记录 ECC/read_count），
+ * 调用方据此 rr_record_ecc + read_count++（慢死预测闭环）。
+ *
+ * @param pba            物理地址
+ * @param buffer         输出：用户数据 buffer（2048 字节，可为 NULL）
+ * @param lba_out        输出：从 META 提取的 LBA（可为 NULL）
+ * @param ecc_out        输出：本次读 4 CW 最大 ECC 纠正 bit 数（0..4，可为 NULL）
+ * @param read_count_out 输出：1=本次读成功（调用方 ++ 该块 read_count，可为 NULL）
  * @return 0 成功, -1 失败
  */
-ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out);
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out,
+                                   uint8_t *ecc_out, uint8_t *read_count_out);
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block

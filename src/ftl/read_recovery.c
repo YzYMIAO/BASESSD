@@ -394,7 +394,10 @@ int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
             continue;
         }
 
-        if (b->rr.health >= RR_BLOCK_CRITICAL)
+        /* B5：ECC 趋势（连续上升 ≥RISING / 单次 ≥HIGH_WATER）或 read disturb
+         * 高水位（read_count 超阈值，慢死第一信号）都触发搬移。 */
+        if ((b->rr.health >= RR_BLOCK_CRITICAL) ||
+            (b->read_count >= RR_READ_DISTURB_THRESHOLD))
         {
             *gblock = i;
             return 1;

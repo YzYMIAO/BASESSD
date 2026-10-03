@@ -48,6 +48,15 @@ void                         completion_table_set_default(completion_handler_fn_
                                                            void                  *ctx);
 
 /*
+ * completion_table_count - 当前占用（未决）的 completion 表项数
+ *
+ * B3：ftl_service 三级模式判定用它近似 NAND 命令忙闲——表占用高
+ * = 同步等待/后台命令在飞（GC/CP/BBT sync_wait），host IO 空闲度低。
+ * @return 占用槽位数（0..COMPLETION_TABLE_SIZE）
+ */
+uint16_t completion_table_count(void);
+
+/*
  * completion_table_set_route - 设置实例路由表（F6）
  *
  * 全局 completion 表保持单一（FC CQ 全局、cmd_id 全局唯一），默认 handler

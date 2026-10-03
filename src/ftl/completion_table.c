@@ -87,6 +87,22 @@ void completion_table_set_default(completion_handler_fn_t handler, void *ctx)
     g_default_ctx     = ctx;
 }
 
+uint16_t completion_table_count(void)
+{
+    uint8_t  i;
+    uint16_t count = 0U;
+
+    for (i = 0U; i < COMPLETION_TABLE_SIZE; i++)
+    {
+        if (g_table[i].used != 0U)
+        {
+            count++;
+        }
+    }
+
+    return count;
+}
+
 void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
 {
     uint8_t ch;

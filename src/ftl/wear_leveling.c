@@ -165,14 +165,19 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
         /*
          * 有效页 = 双 Plane 各物理块 VPC 之和（真实计数）。
          * 有效页越多（越冷）越优先。
+         * B5：同一有效页数下，read_count 越高的冷块越优先（read disturb
+         * 风险高 → 优先搬移；read_count 来自 host 读 + GC/WL 搬移读累加）。
          */
         {
             uint16_t valid = 0U;
+            uint32_t rc_sum = 0U;
             uint8_t  p;
 
             for (p = 0U; p < PLANE_NUM; p++)
             {
-                valid = (uint16_t)(valid + ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])].valid_count);
+                const ftl_block_t *blk = &ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])];
+                valid  = (uint16_t)(valid + blk->valid_count);
+                rc_sum += blk->read_count;
             }
 
             if (valid < min_valid_pages)
@@ -180,11 +185,13 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
                 continue;
             }
 
-            if (valid > best.valid_pages)
+            if ((valid > best.valid_pages) ||
+                ((valid == best.valid_pages) && (rc_sum > best.read_count)))
             {
                 best.found           = 1U;
                 best.avg_erase       = sb_ec;
                 best.valid_pages     = valid;
+                best.read_count      = rc_sum;
                 best.plane_blocks[0] = sb->plane_blocks[0];
                 best.plane_blocks[1] = sb->plane_blocks[1];
             }
@@ -233,9 +240,21 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
 
                 /* 读页 + 从 META 提取 LBA（复用 GC 辅助函数） */
                 memset(buf, 0, sizeof(buf));
-                if (gc_read_page_with_lba(pba, buf, &lba) != 0)
                 {
-                    continue; /* 读失败，跳过 */
+                    uint8_t ecc;
+                    uint8_t rc;
+                    if (gc_read_page_with_lba(pba, buf, &lba, &ecc, &rc) != 0)
+                    {
+                        continue; /* 读失败，跳过 */
+                    }
+
+                    /* B4：WL 搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环） */
+                    if (rc != 0U)
+                    {
+                        ftl_block_t *src = &ftl->alloc.blocks[gblock_src];
+                        rr_record_ecc(&src->rr, ecc, ftl->total_writes);
+                        src->read_count++;
+                    }
                 }
 
                 /* 查 L2P：当前映射是否仍指向本 PBA */

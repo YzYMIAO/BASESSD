@@ -698,7 +698,7 @@ static void close_full_block(ftl_context_t *ftl,
                                        &alloc->closed_sb_list[sb_idx], plane, page);
 
             /* 读失败 / LBA 提取失败 → 该页不可用，跳过 */
-            if (gc_read_page_with_lba(pba, NULL, &lba) != FTL_OK)
+            if (gc_read_page_with_lba(pba, NULL, &lba, NULL, NULL) != FTL_OK)
             {
                 continue;
             }

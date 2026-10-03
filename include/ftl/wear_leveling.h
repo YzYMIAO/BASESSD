@@ -44,6 +44,7 @@ typedef struct
     uint16_t plane_blocks[PLANE_NUM]; /* 双 Plane Block 号 */
     uint32_t avg_erase;               /* victim 平均擦除次数 */
     uint16_t valid_pages;             /* 有效页数（双 Plane VPC 之和） */
+    uint32_t read_count;              /* 双 Plane read disturb 计数之和（B5 冷块优先权重） */
 } wl_victim_t;
 
 /* ── 接口 ── */

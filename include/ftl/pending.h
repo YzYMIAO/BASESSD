@@ -87,4 +87,15 @@ ftl_pending_req_t *pending_lookup_by_lba(ftl_context_t *ftl, lba_t lba);
  */
 void pending_remove(ftl_context_t *ftl, uint16_t cmd_id);
 
+/*
+ * pending_count - 本实例当前未决（占用）的 pending 项数
+ *
+ * B3：ftl_service 三级模式判定用它近似 host IO 空闲度——
+ * pending 占用高 = host IO 繁忙 → BUSY；占用低 = 空闲 → IDLE。
+ *
+ * @param ftl  FTL 上下文
+ * @return 占用槽位数（0..FTL_PENDING_MAX）
+ */
+uint16_t pending_count(const ftl_context_t *ftl);
+
 #endif /* FTL_PENDING_H */

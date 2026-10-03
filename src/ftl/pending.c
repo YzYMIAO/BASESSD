@@ -100,3 +100,24 @@ void pending_remove(ftl_context_t *ftl, uint16_t cmd_id)
         req->used = 0U;
     }
 }
+
+uint16_t pending_count(const ftl_context_t *ftl)
+{
+    uint16_t count = 0U;
+    uint8_t  i;
+
+    if (ftl == NULL)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < FTL_PENDING_MAX; i++)
+    {
+        if (ftl->pending[i].used != 0U)
+        {
+            count++;
+        }
+    }
+
+    return count;
+}

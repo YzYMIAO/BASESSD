@@ -277,6 +277,13 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
     /* ⑤ 截断 Journal（间接入口：纯 RAM 测试构建可用弱桩替换 journal_truncate） */
     journal_truncate(&ftl->journal, cp.journal_sequence);
 
+    /* ⑥ 复位 Journal 水位标志（设计 §7.5.4：checkpoint 完成后 j->emergency /
+     *    checkpoint_needed 置 false——本次 CP 已把 sequence ≤ cp_seq 的条目 flush 进
+     *    NAND L2P 表并截断 journal，水位已清零。不复位会导致 T1 永久命中（每圈必 CP）
+     *    且 emergency 置位后 BUSY 模式每圈强制 CP（ftl_service_busy）。 */
+    ftl->journal.emergency         = 0U;
+    ftl->journal.checkpoint_needed = 0U;
+
     return ret_total;
 }
 
@@ -395,11 +402,15 @@ void checkpoint_journal_watermark(l2p_journal_t *journal)
     /*
      * 计算 Journal 使用率：
      *   used% = (current_page × 100 + current_entry × 100 / JOURNAL_ENTRIES_PER_PAGE)
-     *           / PAGES_PER_BLOCK
+     *           / (JOURNAL_BLOCK_COUNT × PAGES_PER_BLOCK)
+     *
+     * 注意分母是「双块总页数」= JOURNAL_BLOCK_COUNT × PAGES_PER_BLOCK = 2×64 = 128，
+     * 而非单块 PAGES_PER_BLOCK=64（旧实现按单块算，85%/95% 实际在 page≈55/61 就触发，
+     * 紧急水位离写满只剩 3 页≈384 条，远小于 §7.5.2 推导的 768 条余量）。
      */
     used = ((uint32_t)journal->current_page * 100U +
             (uint32_t)journal->current_entry * 100U / JOURNAL_ENTRIES_PER_PAGE) /
-           PAGES_PER_BLOCK;
+           ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK);
 
     if (used >= JOURNAL_CRITICAL)
     {
