@@ -3013,7 +3013,7 @@ nand_paa_t ftl_write_data(lba_t lba, const uint8_t *data, uint32_t len) {
 
 | 缩写 | 全称 | 阶段 | 用途 | 你的代码中对应 |
 |------|------|------|------|--------------|
-| LAA | Logical Application Address | Host → Controller | 应用程序下发的原始逻辑地址 | UART CLI 的 `lba` 参数（NVMe 场景 LAA = LBA）|
+| LAA | Logical Application Address | Host → Controller | 应用程序下发的原始逻辑地址 | UART CLI 的 `lba` 参数（本项目 Host 为 UART CLI，无 NVMe）|
 | LBA | Logical Block Address | L2P 索引 | 行业标准逻辑地址，`cmd->lba` 用于 META 校验 | `cmd->lba` |
 | PBA | Physical Block Address | L2P 映射值 | 完整物理地址，含拓扑路由（CH/CE/LUN）+ 芯片内地址（PAA）| FTl 层 `pba_t`（需新增）|
 | PAA | Physical Array Address | NAND 芯片寻址 | 芯片内地址（Block + Plane + Page + CW），不含拓扑 | `nand_paa_t` |
@@ -3337,9 +3337,9 @@ Step 12 — Wear Leveling
 
 | 模块 | 文件 | 说明 |
 |------|------|------|
-| Controller 层 | `state_machine.c` / `scheduler.c` | 状态机、优先级调度（`request.c` 已在 v0.23/v0.36 实现——拆分 + 跨实例路由，非桩） |
+| Controller 层 | `state_machine.c` / `scheduler.c` | 状态机、优先级调度（`request.c` 已在 v0.23/v0.36 实现——拆分 + 跨实例路由，非桩）→ ✅ v0.47 已落地（最小状态机 + 调度钩子） |
 | Platform BSP | `timer.c` / `uart.c` / `cache.c` / `dma.c` / `interrupt.c` | 硬件外设驱动（已有 soc.h + DWT 实现）|
-| NVMe Host | `nvme_admin.c` / `nvme_io.c` / `submission_queue.c` / `completion_queue.c` | NVMe 协议层（当前用 UART CLI，v0.30 P-B 立项）|
+| NVMe Host | ~~`nvme_admin.c` / `nvme_io.c` / `submission_queue.c` / `completion_queue.c`~~ | ~~NVMe 协议层~~ **已删除（v0.47）**：学习主控不实现（D10），Host 命令来源 = UART CLI（`usart.c` wr/rd/tr/fl/info） |
 | 平台计时钩子 | `ssd_platform_ops_t.time_us`（platform.h 已定义，stm32h743 未注册） | Checkpoint T3 定时 + GC 定时 + cp.timestamp 接线（见 v0.37 遗留）|
 
 **FTL 层 22 个源文件，0 个 `#warning` 核心桩。全部模块已实现并通过编译。**
@@ -3540,6 +3540,8 @@ void ftl_service(ftl_context_t *ftl)
 **行业使用**：Samsung、Phison 企业级主控中常见，通常结合 Per-command credit 系统。
 
 #### 方案 ④：主机级流控（NVMe doorbell backpressure）
+
+> **本项目不实现**（v0.47 删 NVMe，Host = UART CLI；UART CLI 天然两段式等待完成，无需 doorbell 背压）。留档作行业对照。
 
 **原理**：在 Host 协议层控制入侵。NVMe 协议原生支持 SQ doorbell 管理——Controller 固件可以指示 host "暂停提交新命令"。
 
@@ -3862,11 +3864,11 @@ if (NAND_SUCCESS && buffer == NULL)   // 写完成
 | 任务 | 说明 | 状态 |
 |------|------|------|
 | P-B.1 | Controller 请求拆分（`request.c`） | ✅ 已实现 — `ssd_request_split` + `on_sub_complete` 回调聚合 |
-| P-B.2 | 优先级调度（`scheduler.c`） | ⚠️ `#warning` |
-| P-B.3 | 状态机管理（`state_machine.c`） | ⚠️ `#warning` |
-| P-B.4 | NVMe Admin 命令（`nvme_admin.c`） | ⚠️ `#warning` |
-| P-B.5 | NVMe IO 命令（`nvme_io.c`） | ⚠️ `#warning` |
-| P-B.6 | Submission/Completion Queue（`submission_queue.c` / `completion_queue.c`） | ⚠️ `#warning` |
+| P-B.2 | 优先级调度（`scheduler.c`） | ✅ v0.47 — `ssd_controller_schedule` 轻量钩子（host IO 优先，后台预算由 `ftl_service` B3 空闲度承担） |
+| P-B.3 | 状态机管理（`state_machine.c`） | ✅ v0.47 — `ssd_controller_state_transition` 最小状态机（INITIALIZING→READY/FAILED） |
+| P-B.4 | NVMe Admin 命令（`nvme_admin.c`） | ✅ v0.47 删除 — 学习主控不实现（D10：UART CLI 驱动 FTL） |
+| P-B.5 | NVMe IO 命令（`nvme_io.c`） | ✅ v0.47 删除 — 同上 |
+| P-B.6 | Submission/Completion Queue（`submission_queue.c` / `completion_queue.c`） | ✅ v0.47 删除 — 同上 |
 
 #### P-C：优化
 

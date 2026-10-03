@@ -807,10 +807,10 @@ src/ftl/
 
 ```
                  ┌───────────────────────────────────┐
-                 │         Host / NVMe 层              │
-                 │   nvme_process_command()            │
+                 │         Host / UART CLI 层          │   ← D10：学习主控 Host 命令来源
+                 │   uart_cli_wr/rd/tr/fl/info()      │      （NVMe 已删除，v0.47）
                  │   ———————————————                  │
-                 │   SLBA + NLB → ssd_request_t        │
+                 │   lba + n → ssd_request_t           │
                  └──────────────┬────────────────────┘
                                 │ ssd_controller_submit()
                     ┌───────────▼──────────────────────────┐

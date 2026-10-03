@@ -126,8 +126,8 @@ FTL 层剩余 5 个模块全部实现，21 个源文件 0 个 `#warning` 核心�
 **零错误零警告**。FTL 层 21 个源文件全部通过。Binary size: 58368 bytes。
 
 ### 剩余 #warning（非 FTL 层）
-- Controller 层：`scheduler.c` `state_machine.c` — 主机请求调度/状态机（`request.c` 已在 v0.23/v0.36 实现，非桩）
-- NVMe 层：`nvme_admin.c` `nvme_io.c` `submission_queue.c` `completion_queue.c` — 当前用 UART CLI，5 个桩文件（含 nvme_controller.c 返回 NOT_SUPPORTED）
+- Controller 层：`scheduler.c` `state_machine.c` — 主机请求调度/状态机（`request.c` 已在 v0.23/v0.36 实现，非桩）→ ✅ **v0.47 已落地**（最小状态机 + 调度钩子，见 v0.47 条目）
+- NVMe 层：`nvme_admin.c` `nvme_io.c` `submission_queue.c` `completion_queue.c` — 当前用 UART CLI，5 个桩文件（含 nvme_controller.c 返回 NOT_SUPPORTED）→ ✅ **v0.47 已删除**（C2 砍掉，UART CLI 驱动 FTL，D10）
 - Platform BSP：`timer.c` `uart.c` `cache.c` `dma.c` `pcie.c` `interrupt.c` — 已有 soc.h + DWT 实现
 
 ---
@@ -576,12 +576,12 @@ SQ 深度 64、Command Pool 64、Pending 表 32 各层资源构成多层漏斗�
 - SQ/池满几乎不会发生：实际并发 << 深度
 - pending 表满时 `pending_add()` → `FTL_ERROR` → fc_submit 之前就拒绝
 - SRAM 是 DRAM-less 最贵的资源，不设 retry queue（方案②）
-- NVMe 实现后自然过渡到方案④（主机级流控）
+- NVMe 实现后自然过渡到方案④（主机级流控）→ **v0.47 删 NVMe（学习主控 UART CLI 驱动）后不适用**；UART CLI 两段式天然免背压
 
 **不采用**：
 - 方案②（内部排队重试）：需额外 SRAM，与 DRAM-less 设计相悖
 - 方案③（动态 budget）：当前资源深度足够，预算固定即可
-- 方案④（主机级流控）：NVMe 层还没实现
+- 方案④（主机级流控）：NVMe 层还没实现 → v0.47 后不适用（Host = UART CLI）
 
 ### 波及的文件
 
@@ -905,7 +905,7 @@ ftl_init(&ftl, &params);
 ### 下一步
 
 - P-A：pending 表扩展 8 → 16/32（✅ v0.31 已做）
-- P-B：scheduler / state_machine / NVMe 层（`#warning` 桩，6 文件）
+- P-B：scheduler / state_machine / NVMe 层（`#warning` 桩，6 文件）→ ✅ v0.47 落地/删除（最小状态机 + 调度钩子 + NVMe 删除，见 v0.47 条目）
 - P-C.5：反向映射 bitmap（✅ v0.32 已做——`ftl_block_t.valid_map`）
 - PFR closed_sb_list 掉电重建（v0.32 二期项）
 - CP/GC 定时触发接线（`checkpoint_check_trigger(ftl, 0U)` / `gc_check_trigger(..., 500U)` 硬编码 elapsed；`cp_timestamp` 恒 0——需平台 `time_us` 钩子）
@@ -1425,7 +1425,7 @@ Explore 调研另发现一个超出 F10 原描述的**真数据损坏窗口**：
 ### 待办（B/C 档，见 docs/design/ftl_full_landing_plan_20261003.md）
 
 - **B 档**：B1 journal 水位分母（`PAGES_PER_BLOCK`→`JOURNAL_BLOCK_COUNT×PAGES_PER_BLOCK`）、B2 checkpoint/emergency 标志复位、B3 ftl_service 模式基于 pending 占用、B4 GC/WL 搬移读记录 ECC + read_count++、B5 read_count 消费（predictive scan/WL victim）。
-- **C 档**：C1 controller state_machine 完整状态机、C1b scheduler 优先级调度、C2 NVMe host（nvme_io/admin/SQ/CQ/nvme_controller 全量）、C3 `SSD_REQUEST_FLUSH` 全实例 flush。
+- **C 档**：C1 controller state_machine 完整状态机、C1b scheduler 优先级调度、C2 NVMe host（nvme_io/admin/SQ/CQ/nvme_controller 全量）、C3 `SSD_REQUEST_FLUSH` 全实例 flush。（**已在 v0.47 落地**：C2 NVMe 按学习主控定位砍掉，改 UART CLI 驱动 FTL，见 v0.47 条目）
 - **F8/F9**：依赖上板（紧急 CP 回切校验 / CQ·SQ 深度实测）。
 
 ---
@@ -1464,9 +1464,9 @@ v0.44 体检确认的 B 档 5 项语义缺口（FTL 层正确性）全部落地�
 - SRAM 无变化（纯逻辑改动）
 - 上板预期：journal 85%/95% 水位按双块 128 页正确触发；T1 不永久命中；emergency 复位后 BUSY 不再每圈强制 CP；高压写/搬移后 read_count 与 ECC 历史真实增长，predictive scan 能命中 read disturb 慢死块
 
-### 待办（C 档，见 docs/design/ftl_full_landing_plan_20261003.md）
+### 待办（C 档，见 docs/design/ftl_full_landing_plan_20261003.md）→ ✅ v0.47 已落地
 
-- C1 controller state_machine 完整状态机、C1b scheduler 优先级调度、C2 NVMe host（nvme_io/admin/SQ/CQ/nvme_controller 全量）、C3 `SSD_REQUEST_FLUSH` 全实例 flush。
+- C1 controller state_machine 完整状态机、C1b scheduler 优先级调度、C2 NVMe host（nvme_io/admin/SQ/CQ/nvme_controller 全量）、C3 `SSD_REQUEST_FLUSH` 全实例 flush。（落地：C1 最小状态机 / C1b 调度钩子 / C3 FLUSH / C2 砍掉改 UART CLI，见 v0.47 条目）
 - **F8/F9**：依赖上板（紧急 CP 回切校验 / CQ·SQ 深度实测）。
 
 ---
@@ -1499,3 +1499,52 @@ v0.45 B 档落地后逐 diff 复查，发现 2 处问题（编译验证盲区—
 ### 教训
 
 `make` 只保证编译通过，不保证逻辑正确。纯逻辑改动（水位公式/标志复位）必须**上板验证触发时序**，不能以"编译零警告"作为完成标准。
+
+---
+
+## v0.47 — C 档落地（最小状态机 + host IO 优先调度 + FLUSH + UART CLI 驱动 FTL；NVMe 删除）
+
+**日期**：2026-10-03
+
+### 背景
+
+C 档按学习主控定位（stm32h743 + MT29F4G08，非真存储主控）重新规划（设计文档 §13.4 **D10：Host 命令来源 = UART Shell CLI**，§16 NVMe 标未实现）。NVMe 是 PCIe 协议壳、无硬件对手件，纯桩无验证价值 → **C2 砍掉**，UART CLI 作为 host 层完整驱动 FTL。
+
+### 落地
+
+**C1 最小状态机**（`src/controller/state_machine.c` + `include/controller/controller.h`）
+- `ssd_controller_state_transition`：RESET→INITIALIZING（boot 入口）→READY/FAILED（槽位校验结果），READY→FAILED 预留，FAILED 终态；非法转换忽略
+- `ssd_controller_init`（controller.c）改走状态机：任一槽位缺失/拓扑不符 → `transition(FAILED)` + 返回 `INVALID_ARGUMENT`；全过 → `transition(READY)`
+
+**C1b host IO 优先调度**（`src/controller/scheduler.c` + `controller.h`）
+- `ssd_controller_schedule(controller, host_io_active)` 轻量钩子：`ssd_controller_submit` 每次提交调一次（host_io_active=1）返回 0=后台让路；空闲返回 1=全力后台
+- 真正后台预算由 `ftl_service` B3 空闲度（pending+completion_table 占用 → IDLE/NORMAL/BUSY）承担，scheduler 不重复实现队列（学习主控单 LUN，全量优先级调度收益有限）
+
+**C3 FLUSH**（`src/controller/controller.c`）
+- `SSD_REQUEST_FLUSH`：对全部 `controller->ftl[ch][ce][lun]` 同步 `l2p_cache_flush_all(&ftl->cache)` + `journal_flush_page(&ftl->journal)`（两个原语内部 `ftl_internal_sync_wait` 阻塞泵完）→ `completion_status=OK` + `complete_flag=1`
+- 多块 FLUSH（block_count≥2）仍走 `ssd_request_split` default → `NOT_SUPPORTED`（FLUSH 是全局操作，不按 LBA 路由，命令表 `fl` 用 block_count=1）
+
+**UART CLI 驱动 FTL**（`src/platform/stm32h743/usart.c`，D10 核心，+367 行）
+- `g_wr_buf[FTL_READ_USER_SIZE×CW_NUM×PLANE_NUM]=16KB` 落 SRAM2（`.sram2_data` NOLOAD → `usart_init` 主动预填）：plane0 区（前 8KB）=`0x55555555`、plane1 区（后 8KB）=`0xAAAAAAAA`
+  - Multi-Plane 写（pages=2）时前 2048B 进 plane0（LBA n）、后 2048B 进 plane1（LBA n+1）——写后读回一眼可确认双页簿记正确
+- 命令表 5 条（`wr <lba> <n>` / `rd <lba> <n> [c]` / `tr <lba>` / `fl` / `info`）：
+  - `rd` 无 `c` → hex dump 前 64B；有 `c` → 与 pattern 按 4B 粒度比对，报 `PASS` / `FAIL at byte <off>: got.. expect..`
+  - `tr`/`fl` 单块提交；`info` 打印 controller 状态机名 + 每 (ch,ce,lun) `free/op/spare/pre_cond/bad/closed`
+- **两段式**（D11 非阻塞 pending 语义）：handler 只 `ssd_controller_submit` 立即返回（打印 `submit ok, waiting...`），`uart_service_poll` 每轮末尾 `uart_cli_pending_poll()` 检查 `ssd_controller_is_complete` 打印结果——主循环 `ftl_service` 异步完成，CLI 不阻塞主循环
+- `g_ctrl` 去 static（main.c）+ `usart.h` `extern ssd_controller_t g_ctrl;`
+
+**NVMe 删除**（C2 砍掉落地）
+- 删 `src/host/nvme/*.c`（5 桩）、`include/host/nvme/nvme.h`、`src/host/makefile.mk`；`config.mk` MODULES 移除 `host`
+- 零引用零编译（wildcard 收集，无文件 include nvme.h）；`make debug/release/tests` 全零警告零错误（4 个 NVMe `#warning` 彻底消失）
+
+### 验证
+
+- `make debug / release / tests(FC_NAND_TEST_ENABLE=1)` 全零错误零警告
+- SRAM2 44.1KB/128KB（+16KB g_wr_buf，不溢出）；AXI_RAM 377KB/384KB
+- 上板序列（真 NAND）：`info`（state=READY + free/op/spare 计数）→ `wr 0 2` → `rd 0 2 c`（PASS 确认双 plane pattern）→ `tr 0` → `fl` → `info`（free 回补）
+- **F8/F9 仍依赖上板**（紧急 CP 回切校验 / CQ·SQ 深度实测），本轮不改
+
+### 备注
+
+- `FC_COMMAND_MODULE_HOST_IO` 枚举保留零使用（F8/F9 上板后视需要再接线）
+- stm32h7r3 平台 usart.c 未动
