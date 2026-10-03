@@ -4,6 +4,8 @@
 
 本文档记录 soft_ssd 项目中 FC（Flash Controller）模块和 NAND 底层驱动模块的完整设计方案，包括设计理念、模块架构、数据结构、接口约定、命令生命周期以及各子模块的职责划分。
 
+> **📊 流程图说明**：本文档在各关键章节内嵌了 14 张流程图（标注「图 N」），覆盖命令生命周期、数据路径编解码、nand_engine 微码状态机、dispatch poll 两阶段、LUN 相位机、调度器、Stripe RAID 与完成回写。建议按文末 [附录 B 阅读顺序](#附录-b建议阅读顺序) 学习；图 → 源码定位见 [附录 A](#附录-a图--源码-grep-对照)。
+>
 > 本文档覆盖的变更历史：
 > - **Phase A**: buffer_id 便捷接口（`fc_write_cmd_data` / `fc_get_cmd_data_ptr`）
 > - **Phase B**: 核心结构重组（status/descriptor/ECC/dispatch 边界）
@@ -65,6 +67,51 @@
 2. **ID 引用代替指针**：对外暴露 16-bit 资源 ID，内部通过 ID→指针转换函数访问，避免指针悬挂和跨模块直接访问。
 3. **FC 封装内部状态**：`fc_t` 结构体仅在 `fc.c` 内部可见，对外只提供函数接口。
 4. **异步非阻塞**：提交命令立即返回，通过 `fc_service()` 轮询推进，`fc_poll_completion()` 获取结果。
+
+### 流程图：分层架构与数据流总览（图 0）
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│  FTL / Controller / NVMe  （上层调用者）                      │
+│    alloc → 配参 → configure_descriptors → submit → poll      │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ fc_command_t*（ID 引用，非裸指针）
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  FC 模块（firmware 层：命令池 / desc 链 / buffer 池）          │
+│    fc_command.c     命令与 Descriptor 结构                    │
+│    fc_queue.c       SQ / HSQ / CQ 环形队列                    │
+│    fc_scheduler.c   HSQ 优先 + 读饥饿保护 + 链收集             │
+│    fc_data_path.c   写: META→CRC→加扰→ECC→Stripe RAID        │
+│                    读: ECC→解扰→CRC→META (+ RAID 恢复)       │
+│    fc_random/ldpc/raid/crc_engine.c  软件引擎                 │
+└──────────────┬──────────────────────────────────────────────┘
+               │ nand_dispatch_request_t（预解析，字段穿越防火墙）
+               ▼
+┌─────────────────────────────────────────────────────────────┐
+│  nand_dispatch（调度桥接层）                                  │
+│    submit / submit_chain 入队 → poll 出队 + 推进              │
+│    g_nand_dispatch_chains[ch][ce][lun]  per-LUN 链缓冲        │
+│    g_nand_channel_page_buffer[ch]     多 plane 拼接页缓冲     │
+└──────────────┬──────────────────────────────────────────────┘
+               │ nand_fc_start / nand_fc_step（异步非阻塞）
+               ▼
+┌─────────────────────────────────────────────────────────────┐
+│  nand_engine（UOP 微码解释器，软件 micro-sequencer）           │
+│    step() 逐条执行 UOP 数组；JUMP 由引擎直接处理               │
+└──────────────┬──────────────────────────────────────────────┘
+               │ handler(uop, request, timing, completion)
+               ▼
+┌─────────────────────────────────────────────────────────────┐
+│  nand_fmc（FMC 硬件后端：15 个 UOP handler 的函数指针表）       │
+│    data / command / address 三个 volatile 窗口                │
+│    PIO 逐字节 或 DMA（CONFIG_NAND_DMA）                       │
+└──────────────┬──────────────────────────────────────────────┘
+               ▼
+        ┌── FMC 并行总线 → MT29F4G08 NAND（1ch × 1CE × 1LUN × 2plane）
+```
+
+**阅读要点**：越往下越贴近硬件；`nand_dispatch_request_t` 是 FC firmware 与 NAND 硬件引擎之间的"防火墙"，只有硬件要消费的字段才跨越（§13）。上层完全异步：`fc_submit()` 立即返回，推进全部发生在 `fc_service()` 轮询里。
 
 ---
 
@@ -278,6 +325,75 @@ fc_status_t   fc_get_resource_stats(fc_resource_stats_t *); // 资源使用统�
 8. fc_command_release(command)   → 回收 Command + Descriptor 链 + Buffer
 ```
 
+### 流程图：命令生命周期（图 1）与 fc_service() 主循环（图 2）
+
+**图 1 — 命令生命周期（FTL 视角）**
+
+```text
+FTL 调用                    FC 内部                         NAND 层
+─────────────────────────────────────────────────────────────────────
+fc_command_alloc()
+  └─ 取 command_pool 空槽，状态 ALLOCATED
+FTL 填字段: operation/ch/ce/lun/cw/meta/paa
+  └─ 如配置 config.high_priority = 1 → 走 HSQ
+fc_command_configure_descriptors()
+  └─ 按 config.cw 自动分配 (cw+1) 个 desc + buffer，串联链表
+fc_write_cmd_data(cmd, data, len)   ← 便捷接口（可选，避免手遍历）
+  └─ 遍历 desc 链 memcpy 数据到各 buffer USER 区
+fc_submit(cmd)
+  └─ fc_submit_internal → 入队 SQ 或 HSQ（不执行）
+      ┌────────────── while(1) { fc_service(); } ──────────────┐
+      │  单次 fc_service():                                    │
+      │    ① nand_dispatch_poll 推进 NAND                      │
+      │    ② fc_scheduler_select_chain 取命令                  │
+      │    ③ fc_data_path_encode（写命令）                     │
+      │    ④ 构建 request → nand_dispatch_submit              │
+      └────────────────────────────────────────────────────────┘
+fc_poll_completion(&status)
+  └─ 从 CQ 取完成项（12B：id/desc_id/module/ecc_bit/status）
+FTL 按 status.module 路由处理；遍历 desc 链读每 CW 状态/ECC
+fc_command_release(cmd)
+  └─ 回收 command + desc 链 + buffer（挂回空闲链表）
+```
+
+命令状态机：`FREE → ALLOCATED → QUEUED → ACTIVE → COMPLETED → FREE`（越界直接出错）。
+
+**图 2 — fc_service() 主循环单步**（`fc.c::fc_poll_internal`，每次调用先推进 NAND 再补充新命令）
+
+```text
+fc_service()
+  │
+  ├─ ① nand_dispatch_poll(&nand_completion)
+  │     └─ 有命令完成？（返回 != NOT_READY）
+  │          ├─ YES → fc_complete_from_nand()     ← 回写 desc + 数据路径 + CQ
+  │          │         [CONFIG_FC_RAID] 若完成的是 stripe 数据命令
+  │          │           → fc_stripe_release_parity()
+  │          │         返回
+  │          └─ NO  → 继续 ②
+  │
+  ├─ ② fc_scheduler_select_chain(&sched_chain)    ← HSQ 优先 / 读饥饿保护
+  │     └─ 无命令可取 → 返回（调用方稍后重试）
+  │     └─ 取到 → 按 count 分派：
+  │
+  ├─ 分支 A：count == 1（单命令）
+  │     ├─ 校验 QUEUED → 置 ACTIVE
+  │     ├─ page write → 写 PAA 到 CW META 区 → fc_data_path_encode()
+  │     ├─ raid=ENCODE → fc_stripe_submit()        ← 图 12
+  │     ├─ 预解析 desc 链 → request：
+  │     │    ├─ 单 plane：cws[0][cw] 顺序填
+  │     │    ├─ multi_plane：按 desc.paa 的 plane 分桶填
+  │     │    ├─ ERASE：只填 cws[0][0].paa, buffer=NULL
+  │     │    └─ SET/GET_FEATURES：buffer = &command->parameter0
+  │     └─ nand_dispatch_submit(&request)          ← 入队即返回
+  │
+  └─ 分支 B：count >= 2（链式命令）
+        ├─ 逐条：校验 / 置 ACTIVE / page write 则 encode
+        ├─ 构建 reqs[0..count-1]
+        └─ nand_dispatch_submit_chain(reqs, count) ← 原子入队
+```
+
+**要点**：一次 `fc_service()` 要么推进完成并立即返回，要么提交一批新命令——两件事不交叉。提交只占住目标 LUN，完成由后续 `fc_service()` 推进。
+
 ---
 
 ## 3. NAND 底层模块详细设计
@@ -423,6 +539,56 @@ nand_engine_start()    —— 异步模式，初始化状态机
 nand_engine_step()     —— 异步模式，推进一步，返回 NOT_READY 表示需继续轮询
 ```
 
+### 流程图：nand_engine 微码状态机（图 6）
+
+`nand_engine_step()` 的核心循环（每 step 可消费多个 UOP）：
+
+```text
+step(state)
+  │
+  └─ for(; uop_index < MAX_UOPS(64);)
+       │
+       ├─ uop.type == END
+       │    └─ 置 active=0，返回 transfer_status（命令结果）
+       │
+       ├─ uop.type >= UOP_COUNT → INVALID_ARGUMENT
+       │
+       ├─ uop.type == JUMP_IF_NOT_READY（引擎直接处理，不经 handler）
+       │    ├─ nand_status & READY bit6 → uop_index++（推进）
+       │    └─ busy → 双超时判定：
+       │         DWT elapsed > busy_timeout_us  或
+       │         wait_polls ≥ busy_timeout_us
+       │           ├─ 超时 → active=0，返回 TIMEOUT
+       │           └─ 未超时 → uop_index -= operand（回跳），返回 NOT_READY
+       │
+       ├─ 其余 UOP → handler = backend->handlers[uop->type]
+       │    ├─ handler == NULL → INVALID_ARGUMENT
+       │    └─ WAIT_READY 首次进入：记录 DWT 起点（与 JUMP 共用计时）
+       │         result = handler(...)
+       │           ├─ OK → uop_index++，清零 wait 状态，continue（一步多推进）
+       │           ├─ NOT_READY → WAIT_READY 额外双超时检测；让出
+       │           └─ 其他 → active=0，返回错误
+       │
+       └─ 循环跑满无 END → 非法序列
+```
+
+**协作式让出**：`NOT_READY` 是"让出点"——引擎不阻塞，上层 `while(NOT_READY) step()`（同步 `nand_engine_execute`）或由 dispatch 轮询推进（异步 `start/step`）。
+
+### 流程图：70h 状态轮询循环（图 7）
+
+几乎所有 uop 序列开头都是这个循环，`operand=3` 表示跳回 3 步前重发：
+
+```text
+步 N+0: { COMMAND          0x70 }    ← 发 70h（读状态寄存器）
+步 N+1: { DELAY_US           1U }    ← tWHR（70h → DQ 有效）
+步 N+2: { DATA_OUT_STATUS   0U  }    ← 读状态字节（含 READY bit6 / FAIL bit0）
+步 N+3: { JUMP_IF_NOT_READY 3U  }    ← busy → uop_index -= 3 回跳 N+0
+                                        ready → 推进到下一 UOP
+        （循环期间 DWT + 轮询计数双超时，超时返回 TIMEOUT）
+```
+
+读命令 30h 后的页加载、编程 10h 后的 tPROG、擦除 D0h 后的 tBERS 都靠这个循环轮询到 ready；`CHECK_FAIL` 检查 FAIL bit 失败即终止序列（图 6 的 OPERATION_FAILED 路径）。
+
 ### 3.2 FMC 硬件后端 (nand_fmc)
 
 实现全部 15 个 UOP handler，通过函数指针表挂载到 `nand_engine_backend_t`。
@@ -449,6 +615,42 @@ DATA_IN（CPU→FMC→NAND，PROGRAM 方向）和 DATA_OUT（NAND→FMC→CPU，
 | DMA（可选） | `CONFIG_NAND_DMA=1` | 三态非阻塞：①done→OK ②busy→NOT_READY ③首次→启动DMA_IT |
 
 运行态可通过 `g_nand_dma_enable` 全局变量切换（PIO↔DMA，NAND 空闲时安全）。
+
+### 流程图：FMC 后端 UOP 执行（图 8）
+
+`g_nand_fmc_handlers[NAND_UOP_COUNT]` 函数指针表（`src/nand/nand_fmc.c`）：
+
+```text
+┌───────────────────────────────────────────────────────────────┐
+│ [WAIT_READY]      nand_fmc_exec_wait_ready  RB# GPIO spin-wait │
+│ [COMMAND]         nand_fmc_exec_command     写 FMC 命令窗口     │
+│ [COLUMN_0/1]      nand_fmc_exec_column_x    写列地址（低/高字节）│
+│ [ROW_0/1/2]       nand_fmc_exec_row_x       写行地址（operand   │
+│                                               = row[] 索引，多  │
+│                                               plane 时选 plane）│
+│ [DATA_IN]         nand_fmc_exec_data_in     CPU→FMC→NAND 数据   │
+│ [DATA_OUT]        nand_fmc_exec_data_out    NAND→FMC→CPU 数据   │
+│ [DATA_OUT_STATUS] nand_fmc_exec_data_out_status 直读 70h 状态   │
+│ [JUMP_IF_NOT_READY] NULL（由引擎直接处理，见图 6/7）            │
+│ [CHECK_FAIL]      nand_fmc_exec_check_fail  检查 FAIL bit       │
+│ [DELAY_US]        nand_fmc_exec_delay_us    delay_us(operand)   │
+│ [END]             （无 handler，引擎处理）                       │
+└───────────────────────────────────────────────────────────────┘
+         ▲
+         │ handler 通过三个 volatile 窗口访问 FMC：
+         │   *config->data / *config->command / *config->address
+         └── 上下文 nand_fmc_config_t（Phase V 已数组化 per (ch,ce,lun)）
+
+WAIT_READY handler 细节（图 6 与之共用超时字段）：
+  读 RB# GPIO
+    ├─ LOW  → while LOW: polls++；polls ≥ busy_timeout_us 超时；delay_us(1)
+    └─ HIGH → 直接返回 OK（极短 busy / 无 busy）
+  tWB 保护不在 handler 内——由 uop 序列中 CONFIRM 后的 {DELAY_US, 1} 显式保证
+
+DATA_IN / DATA_OUT 双模：
+  PIO（默认）   CPU 逐字节写/读 FMC 窗口
+  DMA（可选）   三态非阻塞：①done→OK ②busy→NOT_READY ③首次→启动 DMA_IT
+```
 
 **DMA 不可用结论**：STM32H743 的 FMC NAND 控制器**没有专用 DMA 请求线**（DMAMUX1 映射表 0~137 中无 FMC/NAND 条目）。DMA memory-to-memory 模式下 DMA2 无法与 FMC NAND 等待状态握手（FMC 在 AXI 域，DMA2 在 AHB 域）。FMC NAND 只能走 PIO 逐字节访问。如需 DMA + 硬件 ECC NAND 控制器，建议换 NXP i.MX RT 系列（GPMI 控制器内置 DMA + BCH）。
 
@@ -552,6 +754,61 @@ FC (fc_service)
 2. CW1~3：发送 `OP_RANDOM_DATA_READ`（05h-列地址-E0h），逐次读取剩余 CW
 3. 每个 CW 的数据写入对应 Descriptor 的 Buffer
 
+### 流程图：nand_dispatch poll 两阶段（图 9）
+
+`nand_dispatch_poll()`（round-robin 遍历通道，从上次游标续走）：
+
+```text
+for channel = cursor..(cursor+CH_NUM-1)
+  │
+  ├─ Phase 1：推进本通道各 CE/LUN 的活跃 chain（每 LUN 一 chain）
+  │    for ce, for lun:
+  │      chain = &chains[ch][ce][lun];  chain->count==0 → 跳过
+  │      task = chain->tasks[chain->cursor]
+  │
+  │      ── phase == ISSUED（LUN 内部操作中）──
+  │         min_busy_us 未到 → continue（等最短忙期）
+  │         到点 → pair_op 切换（LOAD→FETCH / ISSUE→WAIT）
+  │               → req_table[op](task) → nand_fc_start → phase=FETCH
+  │
+  │      ── 内层 while(1)（started 判定）──
+  │         started==0 → req_table 构建 request → nand_fc_start
+  │                      （ISSUE 型置 phase=ISSUE；否则 FETCH）
+  │                      NOT_READY → break；同步完成则消费队列 entry
+  │         started!=0 → transaction.active ? nand_fc_step
+  │                                     : 用已存的 execution_status
+  │         NOT_READY → break（等下一轮）
+  │
+  │      ── 命令完成后的处理链 ──
+  │         phase==ISSUE → task_complete → phase=ISSUED
+  │                        → 记 DWT 起点 → break（不清 LUN busy）
+  │         CW chaining（多 CW READ）→ task_complete
+  │           若 (普通读/OTP读/随机读) 且还有下一 CW：
+  │             cw_index++ → operation=OP_RANDOM_DATA_READ
+  │             → 列地址 = cw_index×(PAGE_SIZE/4) → nand_fc_start
+  │         page_buffer 拆回（CACHE 读 / OP_READ_PAGE_FETCH /
+  │                         MP_WITH_DATA_OUT 三种拆页）
+  │         chain->cursor+1 < chain->count → cursor++ → 构建+start 下一命令
+  │                                        （不清 LUN busy！）
+  │         整链结束 → *completion = task->completion
+  │                    chain->count=0, phase=IDLE → 返回（有完成）
+  │
+  ├─ Phase 2：从本通道 FIFO 出队新命令
+  │    queue->count!=0：
+  │      取 head entry（command_id/ce/lun）
+  │      目标 chain 忙 → continue（entry 留队）
+  │      出队 → task 已由 submit 预加载
+  │           → req_table 构建 → nand_fc_start → 置相位
+  │           同步完成 → task_complete
+  │           phase==ISSUE → 切 ISSUED，不返回 completion
+  │           count>1（链）→ 交给 Phase 1
+  │           单命令立即完成 → 返回 completion（返回点之二）
+  │
+  └─ 全部遍历完无完成 → 返回 NOT_READY
+```
+
+**要点**：Phase 1 每轮先推进已有事务，Phase 2 才启动新命令。链执行期间 LUN busy，HSQ 无法插入（保证 Read Retry 原子性）。
+
 ### 4.4 接口
 
 ```c
@@ -643,6 +900,54 @@ FTL 只提交 PLANE_NUM-1 条数据命令（config.raid=2），FC 内部自动�
 RAID XOR 在 ECC 编码之后进行，保证了 parity CW 同样经过 ECC 保护。所有步骤在 FC 内部完成。
 META（LBA）和 CRC 在加扰前写入，受后续加扰和 ECC 的完整保护。
 
+### 流程图：CW 布局与数据处理范围（图 3）
+
+每个 Page（2112B）= 4 个 CW × 528B。Buffer Pool 里每个 CW 分层管理：
+
+```text
+┌─────────────────────────── 528 字节 CW ───────────────────────────┐
+│ [0:4]    [4:8]    [8:520]            [520:528]                    │
+│  META     CRC     USER（512B）          PARITY                    │
+│ FC 管理   CRC-32   FTL 可见区          ECC 引擎生成               │
+└──────────────────────────────────────────────────────────────────┘
+   ▲                  ▲                    ▲
+   fc_buffer_get_base  fc_buffer_id_to_real_buffer   （对 FTL 透明）
+   （数据路径入口）      （对外接口，+8B 偏移）
+
+模块处理范围：
+  CRC    → 512B  [8:520]     算 CRC 写 [4:8]（只保护 USER）
+  加扰   → 520B  [0:520]     LFSR 全数据区（ECC 会覆盖 parity，加扰它白做）
+  ECC    → 520B→8B parity    读 [0:520]，写 [520:528]（BCH m=13 t=4）
+  RAID   → 528B 全 CW        跨命令 XOR（需保护 parity 自身）
+```
+
+**为什么**：ECC 输入是 520B（META+CRC+USER），parity 总是写在 `data + data_length`。加扰作用域不含 parity——因为 ECC 编码后 parity 才生成，加扰了 parity 在解码前会被 ECC 覆盖。
+
+### 流程图：写路径编码（图 4，Page Pack）
+
+`fc_data_path_encode()`（FC 内部，NAND Program 提交前，对 FTL 透明）：
+
+```text
+FTL 数据填入各 CW buffer USER 区 [8:520]
+  │
+  ├─ Stage 0  META：desc->meta（LBA 派生）memcpy 到 buffer[0:4]
+  ├─ Stage 1  CRC：对 USER 512B 算 CRC-32 → 写 buffer[4:8]
+  ├─ Stage 1  加扰：seed = f(PAA)，LFSR 变换 buffer[0:520]
+  ├─ Stage 2  ECC：BCH 编码 520B → 8B parity → 写 buffer[520:528]
+  └─ (Stage 3 RAID 由 stripe 路径单独处理，不在此函数内)
+        │
+        ▼
+   数据命令累积到 PLANE_NUM-1 条（raid=ENCODE 时）
+        │
+        ├─ fc_data_path_generate_stripe_parity()    ← 图 12
+        │    XOR 各数据命令对应 CW 的 [0:520]（scrambled domain）
+        │    → parity buffer → ECC 编码 parity
+        └─ fc_stripe_submit()：数据命令 + parity 命令拼成一个
+             Multi-Plane PROGRAM 提交 nand_dispatch
+```
+
+**要点**：META 和 CRC 在加扰前写入，因此受加扰+ECC 的完整保护；parity CW 的 META 是 XOR 结果，只靠 ECC 保护完整性，不重算 CRC/加扰。
+
 ### 5.2 解码流程 (Page Unpack)
 
 ```
@@ -670,6 +975,37 @@ NAND 读取完成
       │
       └─ 仍失败 → BBT / read retry / 其他恢复策略
 ```
+
+### 流程图：读路径解码（图 5，Page Unpack）
+
+两阶段，以 CQ 为分界：
+
+```text
+NAND 读取完成
+  │
+  ├─ Stage 1 / FC 内部（CQ push 前）：fc_data_path_process_read()
+  │   Pass 1  ECC 解码每个 CW：
+  │     ├─ 全部成功 → 各 desc->status = READY，记录 ecc_bits
+  │     └─ 有 CW 不可纠 → desc->status = UNC，
+  │                       保持 ECC-corrected + scrambled（供 RAID 恢复）
+  │                       提前返回 IO_ERROR，跳过 Pass 2~4
+  │   Pass 2  解扰所有 CW（seed = f(PAA)）
+  │   Pass 3  CRC 校验 → 不匹配置 CRC_ERROR
+  │   Pass 4  META 读回校验（lba_to_cw_meta 对比）→ 不匹配置 MATA_ERROR
+  │
+  ├─ 完成状态经 fc_complete_from_nand() 聚合进 CQ（status/desc_id/ECC）
+  │
+  └─ Stage 2 / FTL 触发：fc_data_path_raid_recover()（status==UNC 时）
+        ├─ fc_collect_decode_buffers 收集全 CW buffer+PAA
+        ├─ fc_raid_recover：XOR 重建 failed CW（scrambled domain 内）
+        ├─ ECC 重试：重建后仍不可纠 → 返回 IO_ERROR（硬件不可恢复）
+        ├─ 解扰所有 CW
+        └─ 全部 desc->status = READY
+              │
+              └─ 仍失败 → BBT / read retry / 其他恢复策略
+```
+
+**关键约束**：RAID XOR 在 scrambled domain 进行——ECC 失败时其余 CW 处于"已纠错但仍加扰"，重建结果与被恢复 CW 同 domain，重建后再统一解扰。加解扰对 FTL 完全透明。
 
 **关键设计约束**：
 - RAID XOR 在 scrambled domain 进行：ECC 失败时，其他 CW 处于 "ECC 已纠正但仍加扰" 状态，XOR 重建的结果与被恢复 CW 处于同一 domain，重建后 ECC 解码再统一解扰
@@ -1582,6 +1918,48 @@ nand_dispatch_completion_t (跨边界字段):
 └────────────────┴─────────────────────────────────────────┘
 ```
 
+### 流程图：完成回写与 CQ 组装（图 13）
+
+`fc_complete_from_nand()`（NAND 完成 → FC 侧收尾）：
+
+```text
+nand_dispatch_completion_t（command_id / execution_status / nand_status /
+                            cw_status[4] / ecc_bit_count[4] / failed_desc_id）
+  │
+  ├─ Step 1：回写 descriptor（双重交付之一）
+  │     command->desc_id != INVALID 时：
+  │     遍历 desc 链（total_cw = multi_plane? plane×cw : cw+1）：
+  │       desc->status   = cw_status[cw]
+  │       desc->ecc_bits = ecc_bit_count[cw]
+  │       desc_id = desc->next_id
+  │
+  ├─ Step 2：数据路径（仅 Page Read 命令）
+  │     fc_is_page_read() → fc_data_path_process_read()   ← 图 5
+  │     （即使 IO_ERROR，已解码的 desc status 已更新）
+  │
+  ├─ Step 3：组装 fc_command_status_t（12B CQ 条目）
+  │     command_id = nand completion 的 command_id
+  │     desc_id    = failed_descriptor_id（首个 UNC 的 desc_id）
+  │     module     = command->module（直接路由，无需查命令）
+  │     Page Read → 从 descriptor 读 ECC 解码后的 status/ecc
+  │                 （前 4 CW 填 slot；多 plane 后续 CW 累加 OR）
+  │     （非 Page Read → 直接透传 NAND 状态）
+  │
+  └─ Step 4：fc_complete_internal → CQ 入队
+        CQ 满 → 强制标记 COMPLETED 防泄漏 + 返回 IO_ERROR（fatal 背压）
+```
+
+**为什么双重交付（CQ 快照 + Descriptor 回写）**：
+
+| 场景 | 需要 Desc 回写的原因 |
+|------|---------------------|
+| Read Retry | 要知道哪个 CW 失败 → desc_id 标记 + status |
+| RAID Recovery | 逐 CW 检查解码状态（CQ 只有命令级） |
+| 长链命令完成，CQ 已出队 | CQ 状态丢失，Descriptor 保留状态 |
+| 错误注入/调试 | 状态持续可查 |
+
+`module` 字段覆盖全部 FC 使用者：HOST_IO / FTL / GC / READ_RECOVERY / METADATA / BBT / CHECKPOINT / WEAR_LEVELING。
+
 ### 13.6 内存开销分析
 
 | 结构 | 变更 | 单条大小 | 数量 | 总量变化 |
@@ -2184,14 +2562,43 @@ fc_command_submit(&command_C);
 
 ### 16.10 与 Phase D (函数指针表) 的关系
 
-Phase D 包含了 §15（函数指针表重构）和 §16（命令链执行）两个子阶段：
-
 | 子阶段 | §15 函数指针表 | §16 命令链 |
 |--------|---------------|-----------|
 | 状态 | ✅ 已完成代码+文档 | ✅ 已完成代码+文档 |
 | 解决的问题 | if-else 链 → O(1) 查表 | 命令原子性 + HSQ 防插入 |
 | 改动范围 | nand_dispatch 内部 | nand_dispatch + fc_scheduler + fc |
 | 代码编译 | ✅ 通过 | ✅ 通过 |
+
+### 流程图：命令链执行（图 11 配套：调度器 select_chain）
+
+`fc_scheduler_select_chain()` 每次取一批命令（chain）交给 `fc_poll_internal`：
+
+```text
+select_chain(scheduler, chain)
+  │
+  ├─ Phase 1：HSQ 非空？
+  │    遍历 HSQ 找目标 (ch,ce,lun) 不忙的命令
+  │      ├─ 找到 → pop → chain.count=1（HSQ 不参与链式）→ 返回
+  │      └─ 全忙 → 返回 NOT_READY
+  │
+  └─ Phase 2：普通 SQ
+       前置扫描：consecutive_write_count ≥ 预算(3) 时
+                  扫描 SQ 是否存在读命令（sq_has_read）
+                  （全写队列 → 不触发保护 → 避免死锁）
+       for index in SQ:
+         目标忙 → 旋转到队尾，继续
+         读饥饿保护：写计数 ≥3 且队头非读且 sq_has_read → 旋转，继续
+         pop 队头 → chain.ids[0]；更新写计数（读→0 / 非读→++）
+         config.chain==0 → chain.count=1 → 返回
+         config.chain==1 → 收集链：
+           while chain_len < 4：
+             peek 队头
+             不同 ch/ce/lun → 截断（回退单命令）
+             同 target → pop 加入；chain==0 → 结束；chain==1 → 继续
+       queue 空 → QUEUE_EMPTY / 全忙 → NOT_READY
+```
+
+**旋转语义**：`pop(队头)+push(队尾)` 只动 head/tail 指针，Command Pool 内容不变，被旋转的命令一圈后回到队头——是轮转调度，不是丢弃。
 
 
 ---
@@ -2436,6 +2843,50 @@ NORMAL_PROGRAM_PAGE 虽然也是单页操作，但 NAND 不支持 80h 后逐个 
 | `src/nand/nand_dispatch_tables.c` | 新增 5 个 req handler + completion handler + 两张函数指针表各加 5 项 |
 | `src/fc/fc.c` | `cws[plane][cw]` 适配新维度 |
 
+### 流程图：Stripe RAID 写提交（图 12，raid=ENCODE 的 page write）
+
+`fc_stripe_submit()`（PLANE_NUM=2：单数据命令 + 单 parity 命令）：
+
+```text
+FC 拿到 raid=ENCODE 的 page write 命令（config.raid=2）
+  │
+  ├─ ① fc_command_alloc_internal → parity 命令
+  │      配置：op=OP_PROGRAM_PAGE_MULTI_PLANE, raid=NORMAL
+  │      PAA：同 page/block/lun/cw，plane = PLANE_NUM-1
+  │
+  ├─ ② fc_command_configure_descriptors_internal(parity)
+  │      分配 parity desc 链 + buffer
+  │
+  ├─ ③ parity desc.meta ← 数据命令对应 CW 的 meta
+  │
+  ├─ ④ fc_data_path_generate_stripe_parity(data_ptrs, 1, parity)
+  │      逐 CW：parity_buf = XOR(各数据命令该 CW 的 [0:520])
+  │      先 memcpy 作初值，再按 32-bit 字异或
+  │      然后 ECC 编码 parity buffer（[520:528] 由 ECC 生成）
+  │
+  ├─ ⑤ 构建 Multi-Plane dispatch request：
+  │      op=OP_PROGRAM_PAGE_MULTI_PLANE, plane_count=2
+  │      cws[0][cw] = 数据命令 desc（PAA+buffer 基址）
+  │      cws[1][cw] = parity 命令 desc
+  │      command_id = 数据命令 id（完成路由回数据命令）
+  │
+  ├─ ⑥ controller->stripe_parity_for_data[data_id] = parity_id
+  │
+  └─ ⑦ nand_dispatch_submit(mp_req)
+           │
+           ▼  Multi-Plane PROGRAM uop 序列：
+           80h+地址+Din(P0) → 11h(tADL) → 80h+地址+Din(P1) → 10h → tWB
+           → tPROG → 70h 轮询 → CHECK_FAIL
+           （双 plane 数据在 page_buffer 拼接：P0@[0..2111]、P1@[2112..4223]）
+           │
+           ▼
+        完成 → fc_complete_from_nand 识别数据命令
+              → fc_stripe_release_parity(parity_id)  ← 自动回收 parity 资源
+              FTL 只感知数据命令的 completion
+```
+
+失败路径：任何一步失败 → `fc_stripe_release_parity()` 回滚已分配资源 + 数据命令以 error completion 返回。
+
 ---
 
 ## 18. 多通道支持现状与硬件限制
@@ -2631,6 +3082,49 @@ WAIT/FETCH 型 OP 的 UOP 序列只包含 WAIT_READY + 70h 轮询 + DATA_OUT + C
 | **OP 码层** | ✅ Phase V | 新增 6 个 ISSUE/WAIT/FETCH OP 码 + uop 序列 |
 | **调度器层** | ✅ Phase V | poll phase 机（ISSUE→ISSUED→FETCH）+ LUN 状态切换 |
 | **FMC 后端** | ✅ Phase V | per-(CH,CE,LUN) 实例数组化 |
+
+### 流程图：LUN 相位机（图 10，Phase V 多 LUN 并发）
+
+```text
+        submit / Phase 1 启动
+        （ISSUE 型命令）
+                │
+                ▼
+        ┌───────────────┐
+        │   LUN_PHASE_IDLE    │  count==0 空闲
+        └───────┬───────────┘
+                │ started==0 → nand_fc_start（ISSUE uop）
+                ▼
+        ┌───────────────┐
+        │ LUN_PHASE_ISSUE    │  发完命令+地址(+数据)+CONFIRM，立即返回
+        └───────┬───────────┘  （µs 级，不阻塞总线）
+                │ step 完成 → task_complete → 记录 DWT 起点
+                ▼
+        ┌───────────────┐
+        │ LUN_PHASE_ISSUED   │  LUN 内部操作中（tR 25µs / tPROG 200µs /
+        └───────┬───────────┘   tBERS ~1ms）。此时 dispatch 可切其他 LUN！
+                │ min_busy_us 到点（DWT elapsed）→ pair_op 切换
+                ▼
+        ┌───────────────┐
+        │ LUN_PHASE_FETCH    │  执行配对 WAIT/FETCH：WAIT_READY + DATA_OUT
+        └───────┬───────────┘   + 70h 轮询 + CHECK_FAIL
+                │ step 完成 → task_complete → 整链结束？
+                ▼
+            count=0（IDLE）→ 返回 completion，LUN 空闲
+```
+
+并发收益示例（双 LUN）：
+
+```text
+时间 ──────────────────────────────────────────────────────▶
+LUN 0: ISSUE(00h-addr-30h) → [tR 25µs]          ← 总线释放，可切 LUN
+LUN 1:                       ISSUE(00h-addr-30h) → [tR 25µs]
+LUN 0:                                               ← FETCH(Dout)
+LUN 1:                                                   ← FETCH(Dout)
+总耗时 ≈ tR + FETCH，而非 2×(tR+FETCH)
+```
+
+配对 OP 码（`nand_operation_map_t.pair_op`）：LOAD↔FETCH、ISSUE↔WAIT；原子 OP 的 pair_op 取自身（不切分）。多 LUN 场景 `fc_poll_internal` 自动把 splittable 命令拆成 ISSUE（`nand_operation_is_splittable`）。
 
 ### 17.10 设计演进
 
@@ -2866,3 +3360,34 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
 > **"用 MCU 软件模拟企业级 SSD 主控架构的教学/研究实现"**——验证 FTL/FC/NAND 分层、命令并发、数据路径、ECC/RAID 的完整软件闭环；性能与真正的 SSD 主控不在一个数量级，但在架构正确性和功能完整性上是自洽的。
 
 这正是"退而求其次"的必然：**形似而神不似，功能完整而性能有限**。
+
+---
+
+## 附录 A：图 → 源码 grep 对照
+
+| 图 | 内容 | 定位方法 |
+|----|------|---------|
+| 图 0 | 分层架构与数据流总览 | `grep -rn "nand_dispatch_submit" src/fc/fc.c` |
+| 图 1 | 命令生命周期 | `grep -n "fc_command_alloc\|fc_submit\|fc_command_release" include/fc/fc.h` |
+| 图 2 | fc_service() 主循环 | `grep -n "fc_poll_internal" src/fc/fc.c` |
+| 图 3 | CW 布局与数据处理范围 | `grep -n "FC_BUFFER_USER_OFFSET\|fc_buffer_get_base" include/fc/fc.h src/fc/fc.c` |
+| 图 4 | 写路径编码（Page Pack） | `grep -n "fc_data_path_encode" src/fc/fc_data_path.c` |
+| 图 5 | 读路径解码（Page Unpack） | `grep -n "fc_data_path_process_read\|fc_data_path_raid_recover" src/fc/fc_data_path.c` |
+| 图 6 | nand_engine 微码状态机 | `grep -n "nand_engine_step" src/nand/nand_engine.c` |
+| 图 7 | 70h 状态轮询循环 | `grep -n "JUMP_IF_NOT_READY" src/nand/onfi_1_0.c` |
+| 图 8 | FMC 后端 UOP 执行 | `grep -n "g_nand_fmc_handlers" src/nand/nand_fmc.c` |
+| 图 9 | nand_dispatch poll 两阶段 | `grep -n "nand_dispatch_poll" src/nand/nand_dispatch.c` |
+| 图 10 | LUN 相位机（Phase V） | `grep -n "LUN_PHASE_" src/nand/nand_dispatch_internal.h src/nand/nand_dispatch.c` |
+| 图 11 | 调度器 select_chain | `grep -n "fc_scheduler_select_chain" src/fc/fc_scheduler.c` |
+| 图 12 | Stripe RAID 写提交 | `grep -n "fc_stripe_submit" src/fc/fc.c` |
+| 图 13 | 完成回写与 CQ 组装 | `grep -n "fc_complete_from_nand" src/fc/fc.c` |
+
+## 附录 B：建议阅读顺序
+
+```
+第一步（整体）  图 0 → 图 1 → 图 2
+第二步（数据）  图 3 → 图 4 → 图 5
+第三步（硬件）  图 6 → 图 7 → 图 8
+第四步（并发）  图 9 → 图 10 → 图 11
+第五步（进阶）  图 12 → 图 13
+```
