@@ -31,44 +31,17 @@
 
 #include <stddef.h>
 
-/* 前向声明：handler 需注册进 g_nand_fmc_handlers 表，故先声明为 used */
-static __attribute__((used)) nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-static __attribute__((used)) nand_result_t nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
-
 /* --------------------------------------------------------------------
- * g_nand_fmc_handlers — UOP → handler 调度表
+ * g_nand_fmc_handlers — UOP → handler 调度表（定义在本文件末尾）
  *   下标为 NAND_UOP_* 枚举；设计初始化器，与枚举顺序解耦。
  *   [NAND_UOP_JUMP_IF_NOT_READY] = NULL：该微指令由 nand_engine 直接
  *   处理（条件跳转不经过 FMC 后端），此处刻意留空；若误以为漏实现
  *   而补 handler，会导致引擎两条跳转路径并存。
  *   新增 NAND_UOP_* 时须同步本表长度（NAND_UOP_COUNT）。
+ *   表定义放在各 handler 之后：handler 定义即声明，省掉 12 条长签名
+ *   前向声明，也就无需 __attribute__((used))。
  * -------------------------------------------------------------------- */
-static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
-    {
-        [NAND_UOP_WAIT_READY]        = nand_fmc_exec_wait_ready,
-        [NAND_UOP_COMMAND]           = nand_fmc_exec_command,
-        [NAND_UOP_COLUMN_0]          = nand_fmc_exec_column_0,
-        [NAND_UOP_COLUMN_1]          = nand_fmc_exec_column_1,
-        [NAND_UOP_ROW_0]             = nand_fmc_exec_row_0,
-        [NAND_UOP_ROW_1]             = nand_fmc_exec_row_1,
-        [NAND_UOP_ROW_2]             = nand_fmc_exec_row_2,
-        [NAND_UOP_DATA_IN]           = nand_fmc_exec_data_in,
-        [NAND_UOP_DATA_OUT]          = nand_fmc_exec_data_out,
-        [NAND_UOP_DATA_OUT_STATUS]   = nand_fmc_exec_data_out_status,
-        [NAND_UOP_JUMP_IF_NOT_READY] = NULL,
-        [NAND_UOP_CHECK_FAIL]        = nand_fmc_exec_check_fail,
-        [NAND_UOP_DELAY_US]          = nand_fmc_exec_delay_us,
-};
+static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT];
 
 /* ── Phase V: per-(CH,CE,LUN) 实例数组 ──
  * 每 (通道, 片选, LUN) 一个独立 FMC 后端实例（config + handler 表），
@@ -233,7 +206,6 @@ static nand_result_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, c
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
-    (void)uop;
     (void)timing;
     (void)completion;
     *config->address = (uint8_t)request->row[uop->operand];
@@ -251,7 +223,6 @@ static nand_result_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, c
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
-    (void)uop;
     (void)timing;
     (void)completion;
     *config->address = (uint8_t)(request->row[uop->operand] >> 8U);
@@ -269,7 +240,6 @@ static nand_result_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, c
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
-    (void)uop;
     (void)timing;
     (void)completion;
     *config->address = (uint8_t)(request->row[uop->operand] >> 16U);
@@ -495,3 +465,24 @@ static nand_result_t nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop
     delay_us(uop->operand);
     return NAND_RESULT_OK;
 }
+
+/* --------------------------------------------------------------------
+ * g_nand_fmc_handlers — UOP → handler 调度表
+ *   说明与注意事项见文件开头的前向声明处。
+ * -------------------------------------------------------------------- */
+static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
+    {
+        [NAND_UOP_WAIT_READY]        = nand_fmc_exec_wait_ready,
+        [NAND_UOP_COMMAND]           = nand_fmc_exec_command,
+        [NAND_UOP_COLUMN_0]          = nand_fmc_exec_column_0,
+        [NAND_UOP_COLUMN_1]          = nand_fmc_exec_column_1,
+        [NAND_UOP_ROW_0]             = nand_fmc_exec_row_0,
+        [NAND_UOP_ROW_1]             = nand_fmc_exec_row_1,
+        [NAND_UOP_ROW_2]             = nand_fmc_exec_row_2,
+        [NAND_UOP_DATA_IN]           = nand_fmc_exec_data_in,
+        [NAND_UOP_DATA_OUT]          = nand_fmc_exec_data_out,
+        [NAND_UOP_DATA_OUT_STATUS]   = nand_fmc_exec_data_out_status,
+        [NAND_UOP_JUMP_IF_NOT_READY] = NULL,
+        [NAND_UOP_CHECK_FAIL]        = nand_fmc_exec_check_fail,
+        [NAND_UOP_DELAY_US]          = nand_fmc_exec_delay_us,
+};

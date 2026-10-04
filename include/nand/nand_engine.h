@@ -149,12 +149,17 @@ nand_result_t nand_engine_execute(const nand_engine_backend_t *backend, const na
 
 /* --------------------------------------------------------------------
  * nand_engine_start
- *   功能：初始化引擎状态并立即推进一步（异步事务发起）。
- *   参数：state —— 引擎游标（调用方提供）；其余同 execute。
+ *   功能：复位引擎游标并立即推进一步（异步事务发起）。
+ *   参数：state —— 引擎状态（调用方提供）。调用前必须已绑定
+ *         state->backend / state->request / state->completion 三个指针
+ *         （随事务固定，如 nand_dispatch_task_load 所做）；
+ *         uops —— UOP 序列；timing —— 时序参数。
  *   返回：NAND_RESULT_OK（无 busy 阶段，start 内即完成，active 已清）/
  *         NOT_READY（有 busy 阶段，需 step 推进）/ 错误码。
+ *   实现要点：只复位游标/超时/active 字段，不整体清零——已绑定的
+ *         backend/request/completion 必须原样保留。
  * -------------------------------------------------------------------- */
-nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion);
+nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uops, const nand_operation_timing_t *timing);
 
 /* --------------------------------------------------------------------
  * nand_engine_step

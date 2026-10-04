@@ -32,14 +32,15 @@ typedef struct
     uint8_t nand_status;      /* Raw 70h status value after command completion. */
 } nand_fc_completion_t;
 
-/* 异步事务：封装引擎状态 + 命令数据 + per-LUN backend（Phase V）。 */
+/* 异步事务：引擎状态 + 命令数据存储体。
+ * per-LUN backend 与 active 不在这里另存——统一走 engine.backend / engine.active，
+ * 避免同一状态存两份、靠手工同步。engine.request / engine.completion 指向下面两个
+ * 存储体，由 nand_dispatch_task_load 在命令装载时一次性绑定，地址随事务固定。 */
 typedef struct
 {
-    nand_engine_state_t          engine;
-    nand_command_request_t       request;
-    nand_command_completion_t    completion;
-    const nand_engine_backend_t *backend; /* per-LUN backend (Phase V) */
-    uint8_t                      active;
+    nand_engine_state_t       engine;
+    nand_command_request_t    request;
+    nand_command_completion_t completion;
 } nand_fc_transaction_t;
 
 #endif /* NAND_FC_INTERFACE_H */

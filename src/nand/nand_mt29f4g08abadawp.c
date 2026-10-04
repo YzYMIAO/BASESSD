@@ -254,7 +254,7 @@ nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *reques
  *         NOT_READY（有 busy 阶段，需 nand_fc_step 推进）/ 错误码。
  *   实现要点：
  *     - 先清 DMA 残留完成标志，防 DATA_IN/OUT 误判。
- *     - Phase V：transaction->backend 为空时回退 (0,0,0) 后端。
+ *     - Phase V：engine.backend 为空时回退 (0,0,0) 后端。
  *     - nand_engine_start 末尾即 step 一次：无 busy 阶段命令直接完成。
  * -------------------------------------------------------------------- */
 nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operation, const nand_fc_request_t *request)
@@ -287,22 +287,22 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
           request->data, request->data_length
     };
     transaction->completion = (nand_command_completion_t){0};
-    transaction->active     = 1U;
-    /* Phase V: 用 transaction->backend，未设置时默认回退 */
-    if (transaction->backend == NULL)
+    /* Phase V: engine.backend 由 nand_dispatch_task_load 按 ch/ce/lun 绑定，未绑定时回退默认后端 */
+    if (transaction->engine.backend == NULL)
     {
-        transaction->backend = nand_fmc_backend_get();
+        transaction->engine.backend = nand_fmc_backend_get();
     }
-    result = nand_engine_start(&transaction->engine, transaction->backend, map->uops, &map->timing, &transaction->request, &transaction->completion);
-    if ((result != NAND_RESULT_OK) && (result != NAND_RESULT_NOT_READY))
+    result = nand_engine_start(&transaction->engine, map->uops, &map->timing);
+    if (result != NAND_RESULT_NOT_READY)
     {
-        SSD_LOGE("nand: start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result, transaction->completion.nand_status);
-        transaction->active = 0U;
-    }
-    else if (result == NAND_RESULT_OK)
-    {
-        /* Commands without a ready/busy phase complete during nand_engine_start(). */
-        transaction->active = 0U;
+        /* 命令完成（OK：无 busy 阶段，start 内即跑完）或出错，两种都不该留在 active。
+         * 引擎在 END 分支已清 active，但入参校验 / 非法 UOP 码 / handler 缺失这三条
+         * 错误路径不清，这里统一兜底（OK 时重复清一次无副作用）。 */
+        transaction->engine.active = 0U;
+        if (result != NAND_RESULT_OK)
+        {
+            SSD_LOGE("nand: start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result, transaction->completion.nand_status);
+        }
     }
     return result;
 }
@@ -319,7 +319,7 @@ nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completio
 {
     uint8_t result;
 
-    if ((transaction == NULL) || (completion == NULL) || (transaction->active == 0U))
+    if ((transaction == NULL) || (completion == NULL) || (transaction->engine.active == 0U))
     {
         return NAND_RESULT_INVALID_ARGUMENT;
     }
@@ -329,7 +329,7 @@ nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completio
         completion->execution_status = result;
         completion->nand_status      = transaction->completion.nand_status;
         SSD_LOGD("nand: complete, op=%u result=0x%02X status=0x%02X\r\n", transaction->request.operation, result, completion->nand_status);
-        transaction->active = 0U;
+        transaction->engine.active = 0U;
     }
     return result;
 }

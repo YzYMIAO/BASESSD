@@ -61,6 +61,19 @@ typedef struct
 #define LUN_PHASE_FETCH  (3U) /* 正在执行 WAIT/FETCH uop */
 
 /*
+ * 相位写入点 / 读取点（均在 src/nand/nand_dispatch.c）——读相位机代码先看这张表：
+ *   写入：IDLE   ← submit / submit_chain / phase1_lun（整链结束）
+ *         ISSUE  ← 仅 nand_dispatch_task_fc_start（ISSUE 型 OP 启动时）
+ *         ISSUED ← lun_drive（Phase 1）/ phase2_dequeue（Phase 2）的 ISSUE→ISSUED 转场
+ *         FETCH  ← nand_dispatch_task_fc_start（非 ISSUE 型 OP 启动时）
+ *   读取：ISSUE  → lun_drive / phase2_dequeue，判"只是发完了，别报完成"
+ *         ISSUED → phase1_lun，判"走 issued_advance 等最短忙期"
+ *         FETCH  → 无显式读；落到驱动循环继续 step 即是 FETCH 语义
+ *
+ * 注意：ISSUE 只有一个写入点，且藏在 task_fc_start 内部。读 lun_drive /
+ *   phase2_dequeue 里那句 `if (phase == LUN_PHASE_ISSUE)` 时，该值是同一调用链
+ *   上方 task_fc_start 刚写进去的，不是别处遗留的状态。
+ *
  * Per-LUN 链状态。
  * count=0 表示 LUN 空闲；count>0 时 cursor 指示当前执行的 task 索引。
  * 链中所有命令均在同一 ch/ce/lun 上，预加载完成后由 poll 自动推进 cursor，
@@ -70,7 +83,7 @@ typedef struct
  *   该 LUN 被占用，没有独立的 busy 位。因此存在一条"命令已离开队列、尚未完成"
  *   的中间态：Phase 2 出队后若 nand_fc_start 返回异步，队列 entry 已被消费
  *   （queue->count--），但 count 仍 >0、tasks[0].started 已置 1；此时该命令不在
- *   任何队列里，完全由本结构持有，等 Phase 1 下一轮按 started/transaction->active
+ *   任何队列里，完全由本结构持有，等 Phase 1 下一轮按 started/engine.active
  *   认出并接管推进。所以"通道队列空 + 该 LUN count>0"是正常中间态，不是命令丢失。
  *
  * Phase V 扩展：

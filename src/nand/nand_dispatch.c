@@ -121,8 +121,9 @@ static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t resu
  *   返回：无。
  *   实现要点：
  *     - 复位 cw_index=0 / started=0（poll 的启动判断依赖 started==0）。
- *     - Phase V：绑定 per-LUN backend 到 task->backend 并同步到
- *       transaction->backend（供 nand_fc_start 使用，两指针必须一致）。
+ *     - Phase V：绑定 per-LUN backend，并一次性绑定引擎上下文三指针——
+ *       backend/request/completion 随 transaction 固定（指向 transaction 自己的
+ *       存储，地址不变），nand_engine_start 只收 uops/timing。
  *     - 双层数组 cw_paa/cw_buffers[plane][cw] 按 request->cws 逐 CW 搬运；
  *       plane 下标写死 0/1（双 plane 上限）。
  * -------------------------------------------------------------------- */
@@ -146,9 +147,11 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->parameter[2] = request->parameter[2];
     task->parameter[3] = request->parameter[3];
     task->feature_addr = request->feature_addr;
-    /* Phase V: 绑定 per-LUN backend */
-    task->backend             = nand_fmc_backend_get_ext(request->ch, request->ce, request->lun);
-    task->transaction.backend = task->backend; /* 同步到 transaction，供 nand_fc_start 使用 */
+    /* Phase V: 绑定 per-LUN backend + 引擎上下文三指针（地址随事务固定，只在此绑一次） */
+    task->backend                       = nand_fmc_backend_get_ext(request->ch, request->ce, request->lun);
+    task->transaction.engine.backend    = task->backend;
+    task->transaction.engine.request    = &task->transaction.request;
+    task->transaction.engine.completion = &task->transaction.completion;
     for (cw = 0U; cw < request->cw_count; cw++)
     {
         task->cw_paa[0][cw]     = request->cws[0][cw].paa;
@@ -510,8 +513,8 @@ static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lu
  *   实现要点：
  *     - started==0：submit 已预加载但未启动，走 task_start；同步完成才消费
  *       队列 entry（异步时 entry 留待下轮）。
- *     - started!=0：transaction->active 为 0 说明命令已在 start() 中同步完成
- *       （如 FETCH WAIT_READY 已 ready），直接取已存的 execution_status，
+ *     - started!=0：transaction.engine.active 为 0 说明命令已在 start() 中同步
+ *       完成（如 FETCH WAIT_READY 已 ready），直接取已存的 execution_status，
  *       不再 step（nand_fc_step 对 active==0 会返回 INVALID_ARGUMENT）。
  *     - ISSUE 段完成 → task_complete + 转 ISSUED + 记 DWT 起点，不清 LUN busy。
  * -------------------------------------------------------------------- */
@@ -535,7 +538,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx
         ctx->nand_completion.nand_status      = task->transaction.completion.nand_status;
         nand_dispatch_queue_consume_match(ctx->queue, ctx->ce, ctx->lun);
     }
-    else if (task->transaction.active != 0U)
+    else if (task->transaction.engine.active != 0U)
     {
         result = nand_fc_step(&task->transaction, &ctx->nand_completion);
         if (result == NAND_RESULT_NOT_READY)
@@ -550,6 +553,9 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx
 
     ctx->result = result;
 
+    /* 相位由上方 task_fc_start 置入（ISSUE 型 OP → ISSUE，其余 → FETCH）。
+     * 命中即"命令只发完了前半段"：task_complete 已调用、task->completion 已填好，
+     * 但 LUN 还在 tR/tPROG/tBERS，绝不能往下走 DONE 把结果当命令完成报出去。 */
     if (ctx->chain->phase == LUN_PHASE_ISSUE)
     {
         nand_dispatch_task_complete(task, result, &ctx->nand_completion);
@@ -704,6 +710,8 @@ static nand_dispatch_lun_outcome_t nand_dispatch_phase1_lun(nand_dispatch_lun_ct
     nand_dispatch_lun_outcome_t out;
     nand_dispatch_task_t       *task;
 
+    /* ISSUED 由 lun_drive / phase2_dequeue 的 ISSUE→ISSUED 转场置入。
+     * 只在进入驱动循环前判一次（与原实现一致）：本轮先进 issued_advance 等最短忙期。 */
     if (ctx->chain->phase == LUN_PHASE_ISSUED)
     {
         out = nand_dispatch_issued_advance(ctx);
@@ -830,7 +838,10 @@ static nand_dispatch_lun_outcome_t nand_dispatch_phase2_dequeue(uint8_t         
     nand_completion.nand_status      = task->transaction.completion.nand_status;
     nand_dispatch_task_complete(task, result, &nand_completion);
 
-    /* Phase V: ISSUE 段同步完成 → 切 ISSUED，不返回 completion */
+    /* Phase V: ISSUE 段同步完成 → 切 ISSUED，不返回 completion。
+     * 相位由上方 task_fc_start 置入（ISSUE 型 OP → ISSUE）；task_complete 已在上
+     * 面无条件调用、task->completion 已填好，但 LUN 还在 tR/tPROG/tBERS，这里必须
+     * 拦下，否则会把"只发完前半段"的结果当命令完成报给上层。 */
     if (chain->phase == LUN_PHASE_ISSUE)
     {
         chain->phase = LUN_PHASE_ISSUED;
@@ -890,7 +901,7 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
 
                 if (chain->count == 0U)
                 {
-                    continue; /* 该 LUN 空闲，跳过 */
+                    continue; /* 该 LUN 无在途任务，跳过 */
                 }
 
                 ctx.completion      = completion;
