@@ -16,6 +16,7 @@
  *   - submit / chain 阶段经 req_table[task->operation](task) 构建请求
  */
 
+#include "common/assertion.h"
 #include "common/log.h"
 #include "nand_config.h"
 #include "nand_dispatch_internal.h"
@@ -165,10 +166,8 @@ static uint8_t req_program_page(nand_dispatch_task_t *task)
     memset(page_buffer, 0xFF, PAGE_SIZE);
     for (cw = 0U; cw < task->cw_count; cw++)
     {
-        if (task->cw_buffers[0][cw] == NULL)
-        {
-            return NAND_RESULT_INVALID_ARGUMENT;
-        }
+        /* CW 缓冲由 FC 数据路径填满，链上指针恒非空 */
+        ASSERT(task->cw_buffers[0][cw] != NULL);
         memcpy(&page_buffer[cw * (PAGE_SIZE / 4U)], task->cw_buffers[0][cw], PAGE_SIZE / 4U);
     }
     task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->cw_paa[0][0])}, .data = page_buffer, .data_length = PAGE_SIZE};
@@ -187,10 +186,9 @@ static uint8_t req_program_page(nand_dispatch_task_t *task)
 static uint8_t req_read_page(nand_dispatch_task_t *task)
 {
     uint8_t *cw_buffer = task->cw_buffers[0][0];
-    if (cw_buffer == NULL)
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+
+    /* CW0 缓冲由 FC 数据路径填满，恒非空 */
+    ASSERT(cw_buffer != NULL);
     task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->cw_paa[0][0])}, .data = cw_buffer, .data_length = (uint16_t)(PAGE_SIZE / 4U)};
     return NAND_RESULT_OK;
 }
@@ -212,10 +210,8 @@ static uint8_t req_fetch_page(nand_dispatch_task_t *task)
 
     for (cw = 0U; cw < task->cw_count; cw++)
     {
-        if (task->cw_buffers[0][cw] == NULL)
-        {
-            return NAND_RESULT_INVALID_ARGUMENT;
-        }
+        /* CW 缓冲由 FC 数据路径填满，链上指针恒非空 */
+        ASSERT(task->cw_buffers[0][cw] != NULL);
     }
     memset(page_buffer, 0x00, PAGE_SIZE);
     task->request = (nand_fc_request_t){
@@ -242,10 +238,8 @@ static uint8_t req_cache_read(nand_dispatch_task_t *task)
 
     for (cw = 0U; cw < task->cw_count; cw++)
     {
-        if (task->cw_buffers[0][cw] == NULL)
-        {
-            return NAND_RESULT_INVALID_ARGUMENT;
-        }
+        /* CW 缓冲由 FC 数据路径填满，链上指针恒非空 */
+        ASSERT(task->cw_buffers[0][cw] != NULL);
     }
     memset(page_buffer, 0x00, PAGE_SIZE);
     task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->cw_paa[0][0])}, .data = page_buffer, .data_length = PAGE_SIZE};
@@ -365,10 +359,8 @@ static uint8_t req_multi_plane_program(nand_dispatch_task_t *task)
     {
         for (cw = 0U; cw < task->cw_count; cw++)
         {
-            if (task->cw_buffers[plane][cw] == NULL)
-            {
-                return NAND_RESULT_INVALID_ARGUMENT;
-            }
+            /* CW 缓冲由 FC 数据路径填满，链上指针恒非空 */
+            ASSERT(task->cw_buffers[plane][cw] != NULL);
             memcpy(&page_buffer[plane * PAGE_SIZE + cw * (PAGE_SIZE / CW_NUM)],
                    task->cw_buffers[plane][cw],
                    PAGE_SIZE / CW_NUM);

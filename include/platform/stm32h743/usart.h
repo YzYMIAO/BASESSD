@@ -47,14 +47,6 @@
 #define USART_CLI_LINE_CAPACITY 128U
 #define UART_LOG_FLUSH_FOREVER  0U
 
-typedef enum
-{
-    UART_LOG_ERROR = 0,
-    UART_LOG_WARNING,
-    UART_LOG_INFO,
-    UART_LOG_DEBUG
-} uart_log_level_t;
-
 /*
  * 单调递增的诊断计数。它们不在读取后自动清零，复位后才开始新的观测周期。
  * status CLI 用这些值区分“协议处理慢造成的软件队列满”和“IRQ 响应慢造成的硬件 ORE”。
@@ -92,11 +84,8 @@ void usart_irq_handler(void);
  * 等待 DMA/USART IRQ 推进 tail，形成反压，不短写、不丢弃。不得从 ISR、持有不可等待
  * 锁的临界区或中断已屏蔽的上下文调用；这些调用返回 -1 并累计 tx_context_errors。
  */
-int              uart_log_write(const char *data, uint32_t length);
-int              uart_log_printf(uart_log_level_t level, const char *format, ...);
-void             uart_log_set_level(uart_log_level_t level);
-uart_log_level_t uart_log_get_level(void);
-void             uart_get_stats(uart_stats_t *stats);
+int  uart_log_write(const char *data, uint32_t length);
+void uart_get_stats(uart_stats_t *stats);
 
 /* Wait until the TX queue is empty, DMA is idle, and USART TC confirms the final stop bit left TX. */
 int uart_log_flush(uint32_t timeout_ms);

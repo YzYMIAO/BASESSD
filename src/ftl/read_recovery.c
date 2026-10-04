@@ -1,5 +1,7 @@
 #include "ftl/read_recovery.h"
 
+#include "common/assertion.h"
+#include "common/log.h"
 #include "fc/fc.h"
 #include "fc/fc_command.h"
 #include "ftl/ftl_fc_interface.h"
@@ -67,10 +69,8 @@ static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t leng
 
 void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits)
 {
-    if (track == NULL)
-    {
-        return;
-    }
+    /* 层内接口：调用者一律传 &ftl_block_t.rr（BST 常驻，恒非 NULL） */
+    ASSERT(track != NULL);
 
     /* 趋势：与上一次读数比较（last_ecc 即上次值），连续上升计数 */
     if (ecc_bits > track->last_ecc)
@@ -282,10 +282,9 @@ int rr_recover_read(ftl_read_recovery_t *rr,
     uint8_t attempt;
     int     ret;
 
-    if ((rr == NULL) || (buffer == NULL))
-    {
-        return -1;
-    }
+    /* 层内接口：唯一调用者 ftl_handle_completion 传 &ftl->rr 与已判非空的 io.buffer */
+    ASSERT(rr != NULL);
+    ASSERT(buffer != NULL);
 
     rr->retry_count = 0U;
 
@@ -363,10 +362,10 @@ int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
 {
     uint16_t i;
 
-    if ((alloc == NULL) || (alloc->blocks == NULL) || (gblock == NULL))
-    {
-        return 0;
-    }
+    /* 层内接口：唯一调用者 wl_predictive_relocate 传 &ftl->alloc 与局部 gblock */
+    ASSERT(alloc != NULL);
+    ASSERT(alloc->blocks != NULL);
+    ASSERT(gblock != NULL);
 
     for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
@@ -393,10 +392,8 @@ int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
 
 void rr_retire_block(ftl_block_t *b)
 {
-    if (b == NULL)
-    {
-        return;
-    }
+    /* 层内接口：唯一调用者 wl_predictive_relocate 传 &ftl->alloc.blocks[gblock] */
+    ASSERT(b != NULL);
 
     /* 退役：不再分配新数据（RESERVED = Spare Pool 语义），不标坏（BBT 不删、仍可读） */
     ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);

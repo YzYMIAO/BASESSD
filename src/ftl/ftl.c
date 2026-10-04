@@ -1,5 +1,6 @@
 #include "ftl/ftl.h"
 
+#include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/bbt.h"
 #include "ftl/checkpoint.h"
@@ -235,6 +236,9 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                                  * （RR Stage 3 XOR/RAID 恢复属后续阶段，当前不做。） */
                                 memset(pending->io.buffer, 0, data_size);
                                 (void)retry_count; /* 恢复失败，重试次数无意义 */
+                                LOGE("[FTL] read unrecoverable lba=%lu gblock=%u\r\n",
+                                     (unsigned long)pending->io.lba,
+                                     (unsigned)ftl_pba_gblock(cmd->paa));
                                 (void)bbt_mark_bad(&ftl->alloc,
                                                    ftl_pba_gblock(cmd->paa),
                                                    (uint8_t)FTL_BLOCK_BAD_READ);
@@ -255,6 +259,9 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                              * ③ L2P 不动 → 自动回滚到 old_pba，旧数据完好
                              * ④ GC 回收时：好 plane 擦除回 free pool；坏 plane 擦除失败再标坏
                              */
+                            LOGE("[FTL] program failed lba=%lu gblock=%u\r\n",
+                                 (unsigned long)pending->io.lba,
+                                 (unsigned)ftl_pba_gblock(pending->new_pba));
                             (void)allocator_close_open_sb(&ftl->alloc,
                                                           (uint8_t)FTL_TEMP_HOT);
                             (void)bbt_mark_bad(&ftl->alloc,
@@ -466,6 +473,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params)
      * 的统一承载，read recovery 也靠它供电。未提供则初始化失败。 */
     if (params->blocks == NULL)
     {
+        LOGE("[FTL] init failed: params->blocks is NULL\r\n");
         return FTL_ERROR;
     }
     memset(params->blocks, 0, sizeof(ftl_block_t) * FTL_BLOCK_TOTAL);
@@ -579,6 +587,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     /* LBA 越界检查（全局 LBA 空间） */
     if (req->lba >= FTL_LBA_MAX)
     {
+        LOGE("[FTL] read lba out of range lba=%lu\r\n", (unsigned long)req->lba);
         return FTL_ERROR;
     }
     /* 全局 LBA → 本 FTL（ch/ce/lun）的片内 local LBA（交错路由，见 l2p_cache.h）。
@@ -611,6 +620,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     cmd = fc_command_alloc();
     if (cmd == NULL)
     {
+        LOGE("[FTL] read: FC command pool exhausted\r\n");
         return FTL_ERROR;
     }
 
@@ -682,9 +692,12 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
     /* LBA 越界检查（全局 LBA 空间） */
     if (req->lba >= FTL_LBA_MAX)
     {
+        LOGE("[FTL] write lba out of range lba=%lu\r\n", (unsigned long)req->lba);
         return FTL_ERROR;
     }
-    /* 全局 LBA → 本 FTL（ch/ce/lun）的片内 local LBA（交错路由，见 l2p_cache.h）。 */
+
+    /* 全局 LBA → 本 FTL（ch/ce/lun）的片内 local LBA（交错路由，见 l2p_cache.h）。
+     * 本 FTL 上下文已绑定固定 (ch,ce,lun)；LUN_NUM=1 时折叠为原值。 */
     internal_lba = lba_to_local(req->lba);
 
     /* ① Allocator 分配新 PBA
@@ -703,6 +716,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
         new_pba = allocator_alloc(&ftl->alloc, FTL_TEMP_HOT);
         if (new_pba == NAND_PBA_INVALID)
         {
+            LOGE("[FTL] write: no free block after GC\r\n");
             return FTL_ERROR; /* 无 victim 可回收 / GC 未归还空间 */
         }
     }
@@ -718,6 +732,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
     cmd = fc_command_alloc();
     if (cmd == NULL)
     {
+        LOGE("[FTL] write: FC command pool exhausted\r\n");
         return FTL_ERROR;
     }
 

@@ -1,5 +1,6 @@
 #include "ftl/power_failure_recovery.h"
 
+#include "common/assertion.h"
 #include "fc/fc.h"
 #include "ftl/checkpoint.h"
 #include "ftl/ftl.h"
@@ -671,10 +672,8 @@ static void close_full_block(ftl_context_t       *ftl,
     uint8_t          page;
 
     sb_idx = allocator_add_closed_sb(alloc, (const uint16_t[PLANE_NUM]){block, block}, temperature);
-    if (sb_idx == UINT16_MAX)
-    {
-        return; /* 列表满（防御，不应发生） */
-    }
+    /* allocator_add_closed_sb 内部已断言列表未满，恒返回有效索引 */
+    ASSERT(sb_idx != UINT16_MAX);
 
     if (stats != NULL)
     {

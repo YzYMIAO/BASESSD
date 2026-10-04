@@ -1,5 +1,7 @@
 #include "ftl/allocator.h"
 
+#include "common/assertion.h"
+
 #include <string.h>
 
 /*
@@ -396,11 +398,8 @@ uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
         return UINT16_MAX;
     }
 
-    /* 列表满：重建阶段不应发生（好块数远小于 1024），防御返回 */
-    if (alloc->closed_sb_count >= SUPER_BLOCK_LIST_MAX)
-    {
-        return UINT16_MAX;
-    }
+    /* 列表满在重建阶段不应发生（好块数远小于 1024）——满了说明块账本已破坏 */
+    ASSERT(alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX);
 
     /* 组装条目（next_page=64=满；valid=0=Closed，gc_select_victim 依赖） */
     memset(&sb, 0, sizeof(sb));

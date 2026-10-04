@@ -1,0 +1,87 @@
+# 非 FC 层断言落地 + 统一日志设施
+
+**日期**: 2026-10-05
+**分支**: main
+**涉及模块**: `src/nand/`、`src/ftl/`、`src/controller/`、`src/platform/stm32h743/usart.c` + `include/platform/stm32h743/usart.h`、`docs/design/assertion_guidelines.md`（新增）
+**设施前置**: `common/assertion.h` / `common/log.h` 已由 `fd2a0d9` 建成，FC 层已先行落地（`docs/design/fc_nand_design.md` §24）
+**现状**: 编译验证通过（`make debug` / `make tests` / `make release` 零告警零错误、`make format-check` 通过）；**上板验证未做**（断言在 tests 构建里是活的，必须上板跑套件）
+
+---
+
+## 背景
+
+`fd2a0d9` 把断言/日志设施从 FC 层独立成 `src/common/` 模块，FC 层按四条判据落地了 41 处 `ASSERT`。本轮把同一套设施推广到**全部非 FC 层**，并把 platform 里并行的第二套日志等级设施并入 `common/log.h`。
+
+判据的完整表述独立成文于 `docs/design/assertion_guidelines.md`（四条判据 + 三条辨析 + 落地注意），FC 层 §24 改为指向它。
+
+## 一、断言落地
+
+模式：`if (<前置条件不成立>) { return <错误码>; }` → `ASSERT(<前置条件>);`，删掉恢复/降级分支，并在注释里保留原判据语义。
+
+### Tier 1（计划内确定项）
+
+| 层 | 文件 | 转换点 |
+|---|---|---|
+| `nand/` | `nand_engine.c` | UOP 流非法（`uop->type >= NAND_UOP_COUNT`） |
+| | `nand_dispatch_tables.c` | 5 个 `req_*` 的 `cw_buffers == NULL`（CW 缓冲由 FC 数据路径填满） |
+| | `nand_fmc.c` | DATA_IN / DATA_OUT handler 的 `request->buffer` / `data_length` |
+| | `nand_dispatch.c` | `default:` 分支 → `ASSERT_UNREACHABLE()` |
+| `ftl/` | `allocator.c` | closed-SB 列表满（重建阶段不应发生） |
+| | `power_failure_recovery.c` | `allocator_add_closed_sb` 返回的 `sb_idx` |
+| | `wear_leveling.c` | `closed_idx < closed_sb_count` |
+| `controller/` | `controller.c` | `route` 的 ch/ce/lun 越界、route 后 `ftl == NULL`、FLUSH 循环 `fftl == NULL` |
+| | `request.c` | route 失败降级、读/写循环里的 `ftl == NULL` |
+
+### Tier 2（逐点核对调用链后转）
+
+| 文件 | 转换点 | 依据 |
+|---|---|---|
+| `nand_engine.c` | `nand_engine_start` / `nand_engine_step` 全部入参前置条件 | 头文件已文档化前置条件；两个调用者（`nand_fc_execute`/`nand_fc_start`/`nand_fc_step`）均可证 |
+| `pending.c` | 6 处 `ftl == NULL` | 层内接口，唯一调用者 `ftl.c` 已判过 |
+| `read_recovery.c` | `rr_record_ecc` / `rr_predictive_scan` / `rr_retire_block` / `rr_recover_read` | 调用者一律传 `&ftl->alloc.blocks[i].rr` 或已判非空 |
+
+**全工程 0 处 `ASSUME`**（无 LTO，`__builtin_unreachable()` 换不来代码生成收益；`ASSERT` 现场更可定位）。
+
+### 刻意不转断言
+
+| 位置 | 理由 |
+|---|---|
+| `journal.c` 整个文件 | 回放时读的是 **NAND 上不可信的持久化数据**，损坏是掉电的预期情形 → 返回错误码走恢复流程，属判据 3。计划原列的 5 处经核对不是守卫（4 处是页/块翻转控制流，1 处是介质数据校验） |
+| `crash.c` 的 `crash_copy(source == NULL)` | 故障路径禁止断言（同 `fault.c` / `assertion.c` / `syscalls.c`），健壮性 > 不变量 |
+| 所有 `fc_command_alloc()` 后的 `cmd == NULL` | 资源类（判据 3） |
+| `status_out` / `optional-out` 判空 | 语义分支（辨析 B） |
+
+## 二、补日志（FTL / controller）
+
+这两层原先**一条日志都没有**。策略：只在**层边界与阶段跃迁**处加 `LOGE/LOGW`，不逐分支加（FTL 有 40+ 个 `return FTL_ERROR`，全加会淹没串口）。
+
+- **FTL**：`ftl_init` 失败、`ftl_submit_read/write` 校验失败、FC 命令池耗尽、GC 后无空闲块、`ftl_handle_completion` 读不可恢复 + 写失败标坏、`wl_predictive_relocate` 慢死退役。
+- **controller**：`ssd_controller_init` 失败（槽位为空 / topo 不匹配）、`ssd_controller_submit` 未就绪拒绝、状态跃迁到 `FAILED`。
+
+`ssd_controller_init` 里的 `LOGE` 安全：`main.c` 在 `ssd_ftl_boot_all` 之前已 `log_set_sink`。
+
+## 三、`uart_log_*` 双栈并入 `common/log.h`
+
+`src/platform/stm32h743/usart.c` 里曾并存两套等级日志设施：`log.h` 栈（`log_printf` → `g_log_level` → sink `stm32_uart_log_sink` → `uart_log_write`）与 `usart.c` 自己的栈（`uart_log_printf` → `g_uart_log_level`）。本轮合并：
+
+- 13 处 `uart_log_printf(UART_LOG_*, fmt, ...)` → `LOGE/LOGW/LOGI(fmt, ...)`（**保留格式串末尾 `\r\n`**：sink 路径不经过 `_write`，没有 CRLF 归一化）。
+- `uart_cli_log` 的 4 个 `uart_log_set_level(UART_LOG_*)` → `log_set_level(LOG_ERROR/WARNING/INFO/DEBUG)`。
+- 删除 `uart_log_printf` / `uart_log_set_level` / `uart_log_get_level` / `uart_log_level_name` / `g_uart_log_level`，以及 header 的 `uart_log_level_t` 枚举与三个声明。
+- **保留** `UART_LOG_FLUSH_FOREVER`、sink 用的 `uart_log_write` / `uart_log_flush`，以及裸 `uart_log_write` 的**终端 I/O**（prompt / 回显 / 退格 / `rd PASS` / `error: ...` / `version` / `log level updated` / `tr|fl submit ok`）——这些不是带等级的日志，加 `[ERR] ` 前缀反而改变 CLI 观感。
+
+> 遗留不一致（**原代码就有，刻意保留**）：`tr submit ok` / `fl submit ok` 是裸写，而 `wr submit ok` / `rd submit ok` 走 `LOGI`。两者对 `log level` 的响应不同。若要统一，应把 tr/fl 也改为 `LOGI`。
+
+`src/platform/stm32h7r3/` 未动（该板不参与编译）。
+
+## 四、验证
+
+| 项 | 结果 |
+|---|---|
+| `make debug` | 零告警零错误（148768 B） |
+| `make tests` | 零告警零错误（202700 B） |
+| `make release` | 零告警零错误（87316 B） |
+| `make format-check` | 通过 |
+| `grep -rn 'ASSUME(' src/` | 0（全工程） |
+| 上板三套 munit + CLI 冒烟 | **待做** |
+
+> ⚠️ `build/firmware/debug` 被 `make debug` 与 `make tests` 共用（`config.mk:44` 的 `BUILD_DIR` 不含 `FC_NAND_TEST_ENABLE`）。先跑 debug 再跑 tests 会复用陈旧对象，**必须 `make clean`**。

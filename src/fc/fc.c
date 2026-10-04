@@ -34,6 +34,7 @@
 
 #include "fc.h"
 
+#include "common/assertion.h"
 #include "common/log.h"
 #include "fc_crc_engine.h"
 #include "fc_data_path.h"
@@ -160,21 +161,17 @@ uint8_t fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id)
     return (buffer_id < FC_BUFFER_POOL_DEPTH) ? controller->buffer_state[buffer_id] : 0U;
 }
 
-/* ── 命令/描述符 ID → 指针（越界返回 NULL，fc_interface.c 校验用） ── */
+/* ── 命令/描述符 ID → 指针（范围由公共壳 fc_interface.c 校验） ── */
 fc_command_t *fc_command_id_to_command_internal(fc_t *controller, uint16_t command_id)
 {
-    if (command_id >= FC_COMMAND_POOL_DEPTH)
-    {
-        return NULL;
-    }
+    /* 公共壳 fc_command_id_to_command() 已判过 command_id < FC_COMMAND_POOL_DEPTH */
+    ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
     return &controller->command_pool[command_id];
 }
 fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, uint16_t descriptor_id)
 {
-    if (descriptor_id >= FC_DESCRIPTOR_POOL_DEPTH)
-    {
-        return NULL;
-    }
+    /* 公共壳 fc_descriptor_id_to_descriptor() 已判过 descriptor_id < FC_DESCRIPTOR_POOL_DEPTH */
+    ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
     return &controller->descriptor_pool[descriptor_id];
 }
 
@@ -595,10 +592,8 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
     fc_buffer_id_t   buffer_id;
     uint8_t          cw;
 
-    if (configured_descriptor == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 唯一调用者 fc_command_configure_descriptors_internal 传的是栈上 &descriptor */
+    ASSERT(configured_descriptor != NULL);
     descriptor = fc_descriptor_alloc_internal(controller, command);
     buffer_id  = fc_buffer_alloc_internal(controller);
     if ((descriptor == NULL) || (buffer_id == FC_BUFFER_ID_INVALID))
@@ -624,11 +619,8 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
     else
     {
         cw = (uint8_t)(paa_to_cw(command->paa) + index);
-        if (cw >= CW_NUM)
-        {
-            (void)fc_buffer_release_internal(controller, buffer_id);
-            return FC_STATUS_INVALID_ARGUMENT;
-        }
+        /* 单 plane 命令的 CW 数不超过一页；由 configure 流程的 index 范围保证 */
+        ASSERT(cw < CW_NUM);
         descriptor->paa       = (command->paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
         descriptor->config    = command->config;
         descriptor->config.cw = cw;
@@ -776,10 +768,9 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     fc_command_status_t completion;
     fc_command_t       *command;
 
-    if ((nand_completion == NULL) || (nand_completion->command_id >= FC_COMMAND_POOL_DEPTH))
-    {
-        return FC_STATUS_IO_ERROR;
-    }
+    /* 完成项由 nand_dispatch 侧产出，command_id 必在池范围内 */
+    ASSERT(nand_completion != NULL);
+    ASSERT(nand_completion->command_id < FC_COMMAND_POOL_DEPTH);
 
     command = &controller->command_pool[nand_completion->command_id];
 
@@ -1177,8 +1168,10 @@ static void fc_fill_cw_meta_paa(fc_t *controller, fc_command_t *command)
 
     for (mw = 0U; mw < meta_total; mw++)
     {
-        fc_descriptor_t *md = (mid < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[mid] : NULL;
-        if ((md != NULL) && (md->buffer_id != FC_BUFFER_ID_INVALID))
+        /* desc 链长度 = multi_plane×(cw+1) = meta_total，mid 在循环内始终有效 */
+        ASSERT(mid < FC_DESCRIPTOR_POOL_DEPTH);
+        fc_descriptor_t *md = &controller->descriptor_pool[mid];
+        if (md->buffer_id != FC_BUFFER_ID_INVALID)
         {
             uint8_t   *cw_base  = fc_buffer_id_to_real_buffer_internal(controller, md->buffer_id);
             nand_paa_t meta_paa = md->paa;
@@ -1187,7 +1180,7 @@ static void fc_fill_cw_meta_paa(fc_t *controller, fc_command_t *command)
             cw_base[2]          = (uint8_t)(meta_paa >> 16U);
             cw_base[3]          = (uint8_t)(meta_paa >> 24U);
         }
-        mid = (mid < FC_DESCRIPTOR_POOL_DEPTH) ? (fc_descriptor_id_t)controller->descriptor_pool[mid].next_id : FC_DESCRIPTOR_ID_INVALID;
+        mid = (fc_descriptor_id_t)md->next_id;
     }
 }
 
@@ -1271,16 +1264,12 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
             uint8_t idx;
             for (idx = 0U; idx < total_cw; idx++)
             {
-                const fc_descriptor_t *descriptor =
-                    (desc_id < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[desc_id] : NULL;
-                if (descriptor == NULL)
-                {
-                    fc_poll_fail_command(controller, command_id);
-                    return FC_STATUS_IO_ERROR;
-                }
-                uint8_t plane                 = (uint8_t)paa_to_plane(descriptor->paa);
-                uint8_t cw_s                  = (uint8_t)paa_to_cw(descriptor->paa);
-                request->cws[plane][cw_s].paa = descriptor->paa;
+                /* desc 链长度 = multi_plane×cw_count，循环内 desc_id 始终有效 */
+                ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
+                const fc_descriptor_t *descriptor = &controller->descriptor_pool[desc_id];
+                uint8_t                plane      = (uint8_t)paa_to_plane(descriptor->paa);
+                uint8_t                cw_s       = (uint8_t)paa_to_cw(descriptor->paa);
+                request->cws[plane][cw_s].paa     = descriptor->paa;
                 if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
                 {
                     /* Page read/write 需要 CW 基址（ECC 在完整 528B CW 上处理）；
@@ -1305,14 +1294,10 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
             /* Single-plane: existing path */
             for (cw = 0U; cw < request->cw_count; cw++)
             {
-                const fc_descriptor_t *descriptor =
-                    (desc_id < FC_DESCRIPTOR_POOL_DEPTH) ? &controller->descriptor_pool[desc_id] : NULL;
+                /* desc 链长度 = cw_count，循环内 desc_id 始终有效 */
+                ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
+                const fc_descriptor_t *descriptor = &controller->descriptor_pool[desc_id];
 
-                if (descriptor == NULL)
-                {
-                    fc_poll_fail_command(controller, command_id);
-                    return FC_STATUS_IO_ERROR;
-                }
                 request->cws[0][cw].paa = descriptor->paa;
                 if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
                 {
@@ -1525,10 +1510,8 @@ fc_status_t fc_poll_internal(fc_t *controller)
     result = fc_scheduler_select_chain(&controller->scheduler, &sched_chain);
     if (result == FC_STATUS_OK)
     {
-        if (sched_chain.count == 0U)
-        {
-            return FC_STATUS_IO_ERROR;
-        }
+        /* select_chain 返回 OK 前必置 count≥1（fc_scheduler.c 先置 1U，while 只增） */
+        ASSERT(sched_chain.count != 0U);
 
         /* 单命令走 submit，链式走 submit_chain。
          * 两条路径内部各自刷新寄存器状态（与拆分前一致：校验失败早退的那条不刷新）。 */

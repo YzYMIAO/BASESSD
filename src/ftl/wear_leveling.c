@@ -1,5 +1,7 @@
 #include "ftl/wear_leveling.h"
 
+#include "common/assertion.h"
+#include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/ftl.h"
 #include "ftl/ftl_fc_interface.h"
@@ -363,10 +365,7 @@ int wl_predictive_relocate(struct ftl_context *ftl)
 
     /* 反查 Super Block：慢死块必须在 closed_sb_list 中（scan 已保证 CLOSED） */
     closed_idx = ftl_block_sb_id(b);
-    if (closed_idx >= ftl->alloc.closed_sb_count)
-    {
-        return 0; /* 防御：索引异常则跳过 */
-    }
+    ASSERT(closed_idx < ftl->alloc.closed_sb_count);
 
     /* 组装 victim（wl_relocate 只用 plane_blocks，其余字段无消费） */
     memset(&victim, 0, sizeof(victim));
@@ -388,6 +387,11 @@ int wl_predictive_relocate(struct ftl_context *ftl)
         ftl_block_t *retired = &ftl->alloc.blocks[ftl_gblock(plane, victim.plane_blocks[plane])];
         rr_retire_block(retired);
     }
+
+    /* 慢死预测命中：整 SB 已搬空并退役，属生命周期跃迁，留痕一次 */
+    LOGW("[FTL] predictive relocate retired p0=%u p1=%u\r\n",
+         (unsigned)victim.plane_blocks[0],
+         (unsigned)victim.plane_blocks[1]);
 
     return 1;
 }

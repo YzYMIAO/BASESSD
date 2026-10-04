@@ -1,5 +1,7 @@
 #include "controller/controller.h"
 
+#include "common/assertion.h"
+#include "common/log.h"
 #include "ftl/journal.h"
 #include "ftl/l2p_cache.h"
 
@@ -15,9 +17,9 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request);
  * 后续换哈希策略只改此处。CH_NUM=CE_NUM=LUN_NUM=1 时恒返回 ftl[0][0][0]。
  * 非 static：request.c 拆分循环共用（前向声明在 request.c），不暴露进公共头。
  *
- * @param controller Controller 上下文（可为 NULL，返回 NULL）
+ * @param controller Controller 上下文（调用者保证非 NULL）
  * @param lba        Host 全局 LBA（uint64_t）
- * @return 路由到的 FTL 实例指针；入参非法或索引越界返回 NULL
+ * @return 路由到的 FTL 实例指针
  */
 ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, uint64_t lba)
 {
@@ -25,20 +27,17 @@ ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, uint64_t
     uint32_t ce;
     uint32_t lun;
 
-    if (controller == NULL)
-    {
-        return NULL;
-    }
+    /* 唯一调用者 ssd_controller_submit / ssd_request_split 均已判过 controller */
+    ASSERT(controller != NULL);
 
     ch  = lba_route_ch(lba);
     ce  = lba_route_ce(lba);
     lun = lba_route_lun(lba);
 
-    /* 防御性索引越界：路由取模结果本应在 [0,N) 内，宏配置错误时兜底返回 NULL */
-    if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
-    {
-        return NULL;
-    }
+    /* 路由取模结果本应在 [0,N) 内；越界只可能是 CH_NUM/CE_NUM/LUN_NUM 宏配置错误 */
+    ASSERT(ch < CH_NUM);
+    ASSERT(ce < CE_NUM);
+    ASSERT(lun < LUN_NUM);
 
     return controller->ftl[ch][ce][lun];
 }
@@ -67,6 +66,7 @@ int ssd_controller_init(ssd_controller_t *controller,
             {
                 if (ftl[ch][ce][lun] == NULL)
                 {
+                    LOGE("[CTRL] init failed: null FTL slot ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
                     ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
                     return SSD_STATUS_INVALID_ARGUMENT;
                 }
@@ -75,6 +75,7 @@ int ssd_controller_init(ssd_controller_t *controller,
                     (ftl[ch][ce][lun]->topo.ce != ce) ||
                     (ftl[ch][ce][lun]->topo.lun != lun))
                 {
+                    LOGE("[CTRL] init failed: topo mismatch slot ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
                     ssd_controller_state_transition(controller, SSD_CONTROLLER_FAILED);
                     return SSD_STATUS_INVALID_ARGUMENT;
                 }
@@ -103,6 +104,10 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
 
     if ((controller == NULL) || (request == NULL) || (controller->state != SSD_CONTROLLER_READY))
     {
+        if ((controller != NULL) && (controller->state != SSD_CONTROLLER_READY))
+        {
+            LOGW("[CTRL] submit rejected: state=%d\r\n", (int)controller->state);
+        }
         return SSD_STATUS_INVALID_ARGUMENT;
     }
 
@@ -127,18 +132,15 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
         request->io.pages  = 1U;
 
         ftl = ssd_controller_route(controller, request->io.lba);
-        if (ftl == NULL)
-        {
-            request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
-            request->complete_flag     = 1U;
-            return SSD_STATUS_INVALID_ARGUMENT;
-        }
+        /* state==READY 意味着 init 已把全部槽位绑满非空实例 */
+        ASSERT(ftl != NULL);
 
         switch (request->opcode)
         {
             case SSD_REQUEST_READ:
                 if (ftl_submit_read(ftl, &request->io) != FTL_OK)
                 {
+                    LOGE("[CTRL] read submit failed lba=%lu\r\n", (unsigned long)request->io.lba);
                     request->completion_status = SSD_STATUS_IO_ERROR;
                     request->complete_flag     = 1U;
                 }
@@ -147,6 +149,7 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
             case SSD_REQUEST_WRITE:
                 if (ftl_submit_write(ftl, &request->io) != FTL_OK)
                 {
+                    LOGE("[CTRL] write submit failed lba=%lu\r\n", (unsigned long)request->io.lba);
                     request->completion_status = SSD_STATUS_NO_SPACE;
                     request->complete_flag     = 1U;
                 }
@@ -176,10 +179,8 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
                             {
                                 ftl_context_t *fftl = controller->ftl[fch][fce][flun];
 
-                                if (fftl == NULL)
-                                {
-                                    continue; /* 防御：槽位绑定后恒非空 */
-                                }
+                                /* 槽位由 ssd_controller_init 绑满，恒非空 */
+                                ASSERT(fftl != NULL);
                                 (void)l2p_cache_flush_all(&fftl->cache);
                                 journal_flush_page(&fftl->journal);
                             }

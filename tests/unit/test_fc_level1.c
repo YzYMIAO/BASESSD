@@ -412,46 +412,6 @@ static MunitResult test_queue_empty_full(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
-static MunitResult test_queue_init_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_submission_queue_init(NULL, NULL, 0U), ==, FC_STATUS_INVALID_ARGUMENT);
-    return MUNIT_OK;
-}
-
-static MunitResult test_queue_push_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_submission_queue_push(NULL, 0x01U), ==, FC_STATUS_INVALID_ARGUMENT);
-    return MUNIT_OK;
-}
-
-static MunitResult test_queue_pop_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_submission_queue_pop(NULL, NULL), ==, FC_STATUS_INVALID_ARGUMENT);
-    return MUNIT_OK;
-}
-
-static MunitResult test_queue_peek_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_uint32(fc_submission_queue_peek(NULL, 0U), ==, FC_COMMAND_ID_INVALID);
-    return MUNIT_OK;
-}
-
-static MunitResult test_queue_pop_n_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    fc_submission_queue_pop_n(NULL, NULL, 3U);
-    return MUNIT_OK;
-}
-
 /**************************************************************************
  *  Part 2b: fc_completion_queue 测试
  *
@@ -472,14 +432,6 @@ static MunitResult test_cqueue_init(const MunitParameter params[], void *data)
     munit_assert_uint32(q.depth, ==, TEST_CQ_DEPTH);
     munit_assert_uint32(q.count, ==, 0U);
 
-    return MUNIT_OK;
-}
-
-static MunitResult test_cqueue_init_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_completion_queue_init(NULL, NULL, 0U), ==, FC_STATUS_INVALID_ARGUMENT);
     return MUNIT_OK;
 }
 
@@ -535,17 +487,6 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
 
     entry.command_id = 0xFFU;
     munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_QUEUE_FULL);
-
-    return MUNIT_OK;
-}
-
-static MunitResult test_cqueue_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    munit_assert_int(fc_completion_queue_push(NULL, NULL), ==, FC_STATUS_INVALID_ARGUMENT);
-    munit_assert_int(fc_completion_queue_pop(NULL, NULL), ==, FC_STATUS_INVALID_ARGUMENT);
 
     return MUNIT_OK;
 }
@@ -1040,25 +981,18 @@ MunitTest g_fc_command_tests[] = {
 };
 
 MunitTest g_fc_queue_tests[] = {
-    {        "push_pop",    test_queue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {     "wrap_around", test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        "overflow",    test_queue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {            "peek",        test_queue_peek, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {      "peek_empty",  test_queue_peek_empty, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           "pop_n",       test_queue_pop_n, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {      "empty_full",  test_queue_empty_full, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {       "init_null",   test_queue_init_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {       "push_null",   test_queue_push_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        "pop_null",    test_queue_pop_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {       "peek_null",   test_queue_peek_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {      "pop_n_null",  test_queue_pop_n_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       "push_pop",    test_queue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    "wrap_around", test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       "overflow",    test_queue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {           "peek",        test_queue_peek, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     "peek_empty",  test_queue_peek_empty, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {          "pop_n",       test_queue_pop_n, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     "empty_full",  test_queue_empty_full, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
  /* completion queue */
-    {     "cqueue_init",       test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"cqueue_init_null",  test_cqueue_init_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    { "cqueue_push_pop",   test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    { "cqueue_overflow",   test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {     "cqueue_null",       test_cqueue_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {              NULL,                   NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {    "cqueue_init",       test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"cqueue_push_pop",   test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"cqueue_overflow",   test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {             NULL,                   NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };
 
 MunitTest g_fc_scheduler_tests[] = {

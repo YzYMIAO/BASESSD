@@ -14,6 +14,7 @@
 
 #include "fc_scheduler.h"
 
+#include "common/assertion.h"
 #include "fc.h"
 #include "onfi_1_0.h"
 
@@ -77,17 +78,15 @@ fc_status_t fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *
  * fc_scheduler_target_is_busy
  *   功能：查询命令目标 (ch,ce,lun) 是否忙。
  *   参数：scheduler —— 调度器；command_id —— 命令 ID。
- *   返回：1=忙（或命令无效），0=不忙。
+ *   返回：1=忙，0=不忙。
  * -------------------------------------------------------------------- */
 static uint8_t fc_scheduler_target_is_busy(const fc_scheduler_t *scheduler, fc_command_id_t command_id)
 {
     const fc_command_t *command;
 
+    /* 队列里只存 fc_command_alloc() 产出的 ID，映射必然成功 */
     command = fc_command_id_to_command(command_id);
-    if (command == NULL)
-    {
-        return 1U;
-    }
+    ASSERT(command != NULL);
     return scheduler->busy[command->config.ch][command->config.ce][command->config.lun];
 }
 
@@ -177,13 +176,9 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
         for (index = 0U; index < scheduler->hsq->count; index++)
         {
             head_id = scheduler->hsq->entries[scheduler->hsq->head];
-            cmd     = fc_command_id_to_command(head_id);
-            if (cmd == NULL)
-            {
-                fc_command_id_t null_id;
-                (void)fc_submission_queue_pop(scheduler->hsq, &null_id);
-                continue;
-            }
+            /* 队列里只存 fc_command_alloc() 产出的 ID，映射必然成功 */
+            cmd = fc_command_id_to_command(head_id);
+            ASSERT(cmd != NULL);
             if (fc_scheduler_target_is_busy(scheduler, head_id) == 0U)
             {
                 (void)fc_submission_queue_pop(scheduler->hsq, &head_id);
@@ -213,7 +208,8 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
         {
             fc_command_id_t scan_id  = scheduler->sq->entries[(uint16_t)(scheduler->sq->head + scan) % scheduler->sq->depth];
             fc_command_t   *scan_cmd = fc_command_id_to_command(scan_id);
-            if ((scan_cmd != NULL) && (fc_scheduler_op_is_read((uint8_t)scan_cmd->config.operation) != 0U))
+            ASSERT(scan_cmd != NULL);
+            if (fc_scheduler_op_is_read((uint8_t)scan_cmd->config.operation) != 0U)
             {
                 sq_has_read = 1U;
                 break;
@@ -224,12 +220,9 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
     for (index = 0U; index < scheduler->sq->count; index++)
     {
         head_id = scheduler->sq->entries[scheduler->sq->head];
-        cmd     = fc_command_id_to_command(head_id);
-        if (cmd == NULL)
-        {
-            (void)fc_submission_queue_pop(scheduler->sq, &head_id);
-            continue;
-        }
+        /* 队列里只存 fc_command_alloc() 产出的 ID，映射必然成功 */
+        cmd = fc_command_id_to_command(head_id);
+        ASSERT(cmd != NULL);
         if (fc_scheduler_target_is_busy(scheduler, head_id))
         {
             /* 目标忙：旋转到队尾 */
@@ -286,11 +279,9 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
             {
                 break;
             }
+            /* 队列里只存 fc_command_alloc() 产出的 ID，映射必然成功 */
             cmd = fc_command_id_to_command(next_id);
-            if (cmd == NULL)
-            {
-                break;
-            }
+            ASSERT(cmd != NULL);
 
             /* 连续性校验：必须同一 target */
             if ((cmd->config.ch != ch) || (cmd->config.ce != ce) || (cmd->config.lun != lun))

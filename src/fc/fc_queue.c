@@ -11,20 +11,28 @@
 
 #include "fc_queue.h"
 
+#include "common/assertion.h"
+
 #include <stddef.h>
+
+/*
+ * 判据（见 docs/design/fc_nand_design.md §24）：
+ *   指针判空 → ASSERT —— 传空指针是调用者的编程错误，不变量破坏就该留下现场；
+ *   值域校验 → 返回码 —— QUEUE_FULL / QUEUE_EMPTY / 越界 offset 是预期内的运行结果，
+ *              必须返回给上层（fc.c:709 就靠 QUEUE_FULL 做背压判断）。
+ */
 
 /* --------------------------------------------------------------------
  * fc_submission_queue_init
  *   功能：初始化 SQ 环形队列（storage 由调用方提供）。
  *   参数：queue —— 队列；storage —— 槽位数组；depth —— 容量。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT（空指针或 depth=0）。
+ *   返回：FC_STATUS_OK（空指针 / depth=0 由断言拦截）。
  * -------------------------------------------------------------------- */
 fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, uint16_t depth)
 {
-    if ((queue == NULL) || (storage == NULL) || (depth == 0U))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT(queue != NULL);
+    ASSERT(storage != NULL);
+    ASSERT(depth != 0U);
     *queue = (fc_submission_queue_t){storage, depth, 0U, 0U, 0U};
     return FC_STATUS_OK;
 }
@@ -33,14 +41,13 @@ fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id
  * fc_completion_queue_init
  *   功能：初始化 CQ 环形队列（storage 由调用方提供）。
  *   参数：queue —— 队列；storage —— 完成项数组；depth —— 容量。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT。
+ *   返回：FC_STATUS_OK（空指针 / depth=0 由断言拦截）。
  * -------------------------------------------------------------------- */
 fc_status_t fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, uint16_t depth)
 {
-    if ((queue == NULL) || (storage == NULL) || (depth == 0U))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT(queue != NULL);
+    ASSERT(storage != NULL);
+    ASSERT(depth != 0U);
     *queue = (fc_completion_queue_t){storage, depth, 0U, 0U, 0U};
     return FC_STATUS_OK;
 }
@@ -49,11 +56,13 @@ fc_status_t fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_st
  * fc_submission_queue_push
  *   功能：命令 ID 入队尾。
  *   参数：queue —— 队列；command_id —— Command Pool 槽位号。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / QUEUE_FULL。
+ *   返回：FC_STATUS_OK / INVALID_ARGUMENT（INVALID 哨兵）/ QUEUE_FULL。
  * -------------------------------------------------------------------- */
 fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id)
 {
-    if ((queue == NULL) || (command_id == FC_COMMAND_ID_INVALID))
+    ASSERT(queue != NULL);
+    /* 值域校验保留返回码：INVALID 哨兵不得入队 */
+    if (command_id == FC_COMMAND_ID_INVALID)
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
@@ -71,14 +80,12 @@ fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id
  * fc_submission_queue_pop
  *   功能：从队头弹出命令 ID。
  *   参数：queue —— 队列；command_id —— 输出。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / QUEUE_EMPTY。
+ *   返回：FC_STATUS_OK / QUEUE_EMPTY。
  * -------------------------------------------------------------------- */
 fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id)
 {
-    if ((queue == NULL) || (command_id == NULL))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT(queue != NULL);
+    ASSERT(command_id != NULL);
     if (queue->count == 0U)
     {
         return FC_STATUS_QUEUE_EMPTY;
@@ -93,14 +100,12 @@ fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_
  * fc_completion_queue_push
  *   功能：完成项入队尾（整个 fc_command_status_t 拷贝）。
  *   参数：queue —— 队列；completion —— 待入队完成项。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / QUEUE_FULL。
+ *   返回：FC_STATUS_OK / QUEUE_FULL。
  * -------------------------------------------------------------------- */
 fc_status_t fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion)
 {
-    if ((queue == NULL) || (completion == NULL))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT(queue != NULL);
+    ASSERT(completion != NULL);
     if (queue->count == queue->depth)
     {
         return FC_STATUS_QUEUE_FULL;
@@ -115,14 +120,12 @@ fc_status_t fc_completion_queue_push(fc_completion_queue_t *queue, const fc_comm
  * fc_completion_queue_pop
  *   功能：从队头弹出完成项。
  *   参数：queue —— 队列；completion —— 输出。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / QUEUE_EMPTY。
+ *   返回：FC_STATUS_OK / QUEUE_EMPTY。
  * -------------------------------------------------------------------- */
 fc_status_t fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion)
 {
-    if ((queue == NULL) || (completion == NULL))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT(queue != NULL);
+    ASSERT(completion != NULL);
     if (queue->count == 0U)
     {
         return FC_STATUS_QUEUE_EMPTY;
@@ -141,7 +144,9 @@ fc_status_t fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_sta
  * -------------------------------------------------------------------- */
 fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, uint16_t offset)
 {
-    if ((queue == NULL) || (offset >= queue->count))
+    ASSERT(queue != NULL);
+    /* 值域校验保留返回码：offset 越界返回 INVALID 哨兵（调用方按哨兵判链尾） */
+    if (offset >= queue->count)
     {
         return FC_COMMAND_ID_INVALID;
     }
@@ -161,10 +166,7 @@ void fc_submission_queue_pop_n(fc_submission_queue_t *queue, fc_command_id_t *id
     fc_command_id_t cmd;
     uint16_t        i;
 
-    if (queue == NULL)
-    {
-        return;
-    }
+    ASSERT(queue != NULL);
     for (i = 0U; i < count; i++)
     {
         (void)fc_submission_queue_pop(queue, (ids != NULL) ? &ids[i] : &cmd);

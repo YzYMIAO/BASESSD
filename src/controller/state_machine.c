@@ -8,15 +8,20 @@
  * SHUTDOWN 不在枚举内（学习主控无热移除/优雅掉电退出路径），注释保留；
  * 若后续加枚举值，只扩展本文件的转换表，不动调用方。
  */
+#include "common/log.h"
 #include "controller/controller.h"
 
 void ssd_controller_state_transition(ssd_controller_t      *controller,
                                      ssd_controller_state_t next_state)
 {
+    ssd_controller_state_t prev_state;
+
     if (controller == NULL)
     {
         return;
     }
+
+    prev_state = controller->state;
 
     switch (controller->state)
     {
@@ -49,5 +54,11 @@ void ssd_controller_state_transition(ssd_controller_t      *controller,
         default:
             /* FAILED 为终态，不响应任何转换 */
             break;
+    }
+
+    /* FAILED 是终态，进入即宣告 controller 不可用；在此单点留痕 */
+    if ((prev_state != SSD_CONTROLLER_FAILED) && (controller->state == SSD_CONTROLLER_FAILED))
+    {
+        LOGE("[CTRL] state -> FAILED\r\n");
     }
 }

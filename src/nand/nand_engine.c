@@ -21,6 +21,7 @@
 
 #include "nand_engine.h"
 
+#include "common/assertion.h"
 #include "common/log.h"
 #include "delay.h"
 #include "nand/nand_debug.h"
@@ -72,11 +73,16 @@ nand_result_t nand_engine_execute(const nand_engine_backend_t *backend, const na
  * -------------------------------------------------------------------- */
 nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uops, const nand_operation_timing_t *timing)
 {
-    if ((state == NULL) || (state->backend == NULL) || (state->backend->handlers == NULL) ||
-        (state->request == NULL) || (state->completion == NULL) || (uops == NULL) || (timing == NULL))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    /* 前置条件由调用者保证（见 nand_engine.h）：state->backend/request/completion 三指针
+     * 随事务固定（nand_dispatch_task_load / nand_fc_start 绑定），uops/timing 取自
+     * g_nand_operation_map[operation]（调用者已判 map->uops != NULL）。 */
+    ASSERT(state != NULL);
+    ASSERT(state->backend != NULL);
+    ASSERT(state->backend->handlers != NULL);
+    ASSERT(state->request != NULL);
+    ASSERT(state->completion != NULL);
+    ASSERT(uops != NULL);
+    ASSERT(timing != NULL);
 
     state->uops                        = uops;
     state->timing                      = timing;
@@ -191,12 +197,17 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
     nand_uop_handler_t handler;
     uint8_t            result;
 
-    if ((state == NULL) || (state->active == 0U) || (state->backend == NULL) ||
-        (state->backend->handlers == NULL) || (state->uops == NULL) || (state->timing == NULL) ||
-        (state->request == NULL) || (state->completion == NULL))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    /* 前置条件由调用者保证（见 nand_engine.h）：active==0 后不得再调；游标字段由
+     * nand_engine_start 填好。nand_fc_step 已先判 active，nand_engine_execute 的
+     * 循环与 start 内部调用也都在 active==1 时进入。 */
+    ASSERT(state != NULL);
+    ASSERT(state->active != 0U);
+    ASSERT(state->backend != NULL);
+    ASSERT(state->backend->handlers != NULL);
+    ASSERT(state->uops != NULL);
+    ASSERT(state->timing != NULL);
+    ASSERT(state->request != NULL);
+    ASSERT(state->completion != NULL);
 
     for (; state->uop_index < NAND_ENGINE_MAX_UOPS;)
     {
@@ -208,10 +219,8 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
             return state->completion->transfer_status;
         }
 
-        if (uop->type >= NAND_UOP_COUNT)
-        {
-            return NAND_RESULT_INVALID_ARGUMENT;
-        }
+        /* UOP 流来自 nand_dispatch_tables.c 的静态表，type 必然 < NAND_UOP_COUNT */
+        ASSERT(uop->type < NAND_UOP_COUNT);
 
         /* ── NAND_UOP_JUMP_IF_NOT_READY：引擎直接处理的条件跳转微指令 ── */
         if (uop->type == NAND_UOP_JUMP_IF_NOT_READY)

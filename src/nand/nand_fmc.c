@@ -22,6 +22,7 @@
 
 #include "nand_fmc.h"
 
+#include "common/assertion.h"
 #include "common/log.h"
 #include "delay.h"
 #include "nand/nand_debug.h"
@@ -268,10 +269,9 @@ static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
 
     (void)timing;
 
-    if ((request->buffer == NULL) || (request->data_length == 0U))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    /* 请求由 nand_dispatch_tables.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
+    ASSERT(request->buffer != NULL);
+    ASSERT(request->data_length != 0U);
 
     /* uop->operand 作为 buffer 偏移量（用于 Multi-Plane Program 第二 Plane） */
     const uint8_t *src = request->buffer + uop->operand;
@@ -337,10 +337,9 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
 
     (void)timing;
 
-    if ((request->buffer == NULL) || (request->data_length == 0U))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    /* 请求由 nand_dispatch_tables.c 的 req_* 构建，DATA_IN/OUT 必带缓冲与长度 */
+    ASSERT(request->buffer != NULL);
+    ASSERT(request->data_length != 0U);
 
     /* uop->operand 作为 buffer 偏移量（用于 Multi-Plane Read 的第二 Plane） */
     uint8_t *dst = request->buffer + uop->operand;

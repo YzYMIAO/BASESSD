@@ -1,5 +1,7 @@
 /* 验证主机请求，并把多块请求拆分为 FTL 子请求。 */
 
+#include "common/assertion.h"
+#include "common/log.h"
 #include "controller/controller.h"
 #include "ftl/ftl.h"
 
@@ -57,11 +59,9 @@ static uint8_t ssd_split_use_multi_plane(ssd_controller_t *controller,
     ftl      = ssd_controller_route(controller, lba_i);
     ftl_next = ssd_controller_route(controller, lba_i + 1U);
 
-    /* 任一路由失败（防御性，正常不可达）→ 不配对，由 submit 循环单独报错 */
-    if ((ftl == NULL) || (ftl_next == NULL))
-    {
-        return 0U;
-    }
+    /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
+    ASSERT(ftl != NULL);
+    ASSERT(ftl_next != NULL);
     return (uint8_t)(ftl == ftl_next);
 }
 
@@ -140,12 +140,8 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                 request->io.buffer = buf;
 
                 ftl = ssd_controller_route(controller, request->io.lba);
-                if (ftl == NULL)
-                {
-                    request->completion_status = SSD_STATUS_IO_ERROR;
-                    request->complete_flag     = 1U;
-                    return SSD_STATUS_IO_ERROR;
-                }
+                /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
+                ASSERT(ftl != NULL);
 
                 if (ssd_split_use_multi_plane(controller, request->io.lba, (uint32_t)(i + 1U < request->block_count)) != 0U)
                 {
@@ -153,6 +149,7 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                     request->io.pages = 2U;
                     if (ftl_submit_read(ftl, &request->io) != FTL_OK)
                     {
+                        LOGE("[CTRL] split read submit failed lba=%lu\r\n", (unsigned long)request->io.lba);
                         request->completion_status = SSD_STATUS_IO_ERROR;
                         request->complete_flag     = 1U;
                         return SSD_STATUS_IO_ERROR;
@@ -165,6 +162,7 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                     request->io.pages = 1U;
                     if (ftl_submit_read(ftl, &request->io) != FTL_OK)
                     {
+                        LOGE("[CTRL] split read submit failed lba=%lu\r\n", (unsigned long)request->io.lba);
                         request->completion_status = SSD_STATUS_IO_ERROR;
                         request->complete_flag     = 1U;
                         return SSD_STATUS_IO_ERROR;
@@ -190,12 +188,8 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                 request->io.buffer = (void *)data;
 
                 ftl = ssd_controller_route(controller, request->io.lba);
-                if (ftl == NULL)
-                {
-                    request->completion_status = SSD_STATUS_NO_SPACE;
-                    request->complete_flag     = 1U;
-                    return SSD_STATUS_NO_SPACE;
-                }
+                /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
+                ASSERT(ftl != NULL);
 
                 if (ssd_split_use_multi_plane(controller, request->io.lba, (uint32_t)(i + 1U < request->block_count)) != 0U)
                 {
@@ -203,6 +197,7 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                     request->io.pages = 2U;
                     if (ftl_submit_write(ftl, &request->io) != FTL_OK)
                     {
+                        LOGE("[CTRL] split write submit failed lba=%lu\r\n", (unsigned long)request->io.lba);
                         request->completion_status = SSD_STATUS_NO_SPACE;
                         request->complete_flag     = 1U;
                         return SSD_STATUS_NO_SPACE;
@@ -215,6 +210,7 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                     request->io.pages = 1U;
                     if (ftl_submit_write(ftl, &request->io) != FTL_OK)
                     {
+                        LOGE("[CTRL] split write submit failed lba=%lu\r\n", (unsigned long)request->io.lba);
                         request->completion_status = SSD_STATUS_NO_SPACE;
                         request->complete_flag     = 1U;
                         return SSD_STATUS_NO_SPACE;

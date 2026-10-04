@@ -1,10 +1,10 @@
 #include "usart.h"
 
 #include "common/common.h"
+#include "common/log.h"
 #include "dma.h"
 #include "ftl/ftl.h"
 
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,12 +58,11 @@ static volatile uint8_t  g_tx_dma_active;
 static uint8_t           g_tx_dma_ready;
 static volatile uint8_t  g_tx_transport_fault;
 
-static uart_stats_t     g_uart_stats;
-static uart_log_level_t g_uart_log_level = UART_LOG_INFO;
-static char             g_cli_line[USART_CLI_LINE_CAPACITY];
-static uint16_t         g_cli_length;
-static uint8_t          g_cli_discarding;
-static uint8_t          g_usart_ready;
+static uart_stats_t g_uart_stats;
+static char         g_cli_line[USART_CLI_LINE_CAPACITY];
+static uint16_t     g_cli_length;
+static uint8_t      g_cli_discarding;
+static uint8_t      g_usart_ready;
 
 /*
  * 命令表把“命令字符串 -> 参数约束 -> 处理函数”的关系集中管理。
@@ -80,13 +79,6 @@ typedef struct
     uint8_t            max_argc;
     uart_cli_handler_t handler;
 } uart_cli_command_t;
-
-static const char *uart_log_level_name(uart_log_level_t level)
-{
-    static const char *const names[] = {"ERR", "WRN", "INF", "DBG"};
-
-    return (level <= UART_LOG_DEBUG) ? names[level] : "UNK";
-}
 
 static uint8_t uart_rx_dequeue(uint8_t *byte)
 {
@@ -208,18 +200,17 @@ static void uart_print_status(void)
     uart_stats_t stats;
 
     uart_get_stats(&stats);
-    (void)uart_log_printf(UART_LOG_INFO,
-                          "uart: rx_ovf=%lu tx_drop=%lu tx_ctx=%lu flush_to=%lu dma_err=%lu tx_fault=%lu ore=%lu fe=%lu ne=%lu pe=%lu\r\n",
-                          (unsigned long)stats.rx_overflow,
-                          (unsigned long)stats.tx_dropped,
-                          (unsigned long)stats.tx_context_errors,
-                          (unsigned long)stats.tx_flush_timeouts,
-                          (unsigned long)stats.tx_dma_errors,
-                          (unsigned long)stats.tx_transport_errors,
-                          (unsigned long)stats.overrun_errors,
-                          (unsigned long)stats.framing_errors,
-                          (unsigned long)stats.noise_errors,
-                          (unsigned long)stats.parity_errors);
+    (void)LOGI("uart: rx_ovf=%lu tx_drop=%lu tx_ctx=%lu flush_to=%lu dma_err=%lu tx_fault=%lu ore=%lu fe=%lu ne=%lu pe=%lu\r\n",
+               (unsigned long)stats.rx_overflow,
+               (unsigned long)stats.tx_dropped,
+               (unsigned long)stats.tx_context_errors,
+               (unsigned long)stats.tx_flush_timeouts,
+               (unsigned long)stats.tx_dma_errors,
+               (unsigned long)stats.tx_transport_errors,
+               (unsigned long)stats.overrun_errors,
+               (unsigned long)stats.framing_errors,
+               (unsigned long)stats.noise_errors,
+               (unsigned long)stats.parity_errors);
 }
 
 static int uart_cli_help(int argc, char *argv[]);
@@ -362,7 +353,7 @@ static int uart_cli_wr(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    (void)uart_log_printf(UART_LOG_INFO, "wr submit ok lba=%lu n=%lu, waiting...\r\n", (unsigned long)lba, (unsigned long)n);
+    (void)LOGI("wr submit ok lba=%lu n=%lu, waiting...\r\n", (unsigned long)lba, (unsigned long)n);
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -412,7 +403,7 @@ static int uart_cli_rd(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    (void)uart_log_printf(UART_LOG_INFO, "rd submit ok lba=%lu n=%lu%s, waiting...\r\n", (unsigned long)lba, (unsigned long)n, g_cli_pending.compare ? " c" : "");
+    (void)LOGI("rd submit ok lba=%lu n=%lu%s, waiting...\r\n", (unsigned long)lba, (unsigned long)n, g_cli_pending.compare ? " c" : "");
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -505,7 +496,7 @@ static int uart_cli_info(int argc, char *argv[])
 
     if (g_ctrl.state <= SSD_CONTROLLER_FAILED)
     {
-        (void)uart_log_printf(UART_LOG_INFO, "controller state=%s lba_max=%lu\r\n", state_names[g_ctrl.state], (unsigned long)FTL_LBA_MAX);
+        (void)LOGI("controller state=%s lba_max=%lu\r\n", state_names[g_ctrl.state], (unsigned long)FTL_LBA_MAX);
     }
 
     for (ch = 0U; ch < CH_NUM; ch++)
@@ -520,17 +511,16 @@ static int uart_cli_info(int argc, char *argv[])
                 {
                     continue;
                 }
-                (void)uart_log_printf(UART_LOG_INFO,
-                                      "ftl[%u][%u][%u] free=%u op=%u spare=%u pre_cond=%u bad=%u closed=%u\r\n",
-                                      (unsigned)ch,
-                                      (unsigned)ce,
-                                      (unsigned)lun,
-                                      (unsigned)ftl->alloc.free_count,
-                                      (unsigned)ftl->alloc.op_count,
-                                      (unsigned)ftl->alloc.spare_count,
-                                      (unsigned)ftl->alloc.pre_cond_count,
-                                      (unsigned)ftl->alloc.bad_count,
-                                      (unsigned)ftl->alloc.closed_sb_count);
+                (void)LOGI("ftl[%u][%u][%u] free=%u op=%u spare=%u pre_cond=%u bad=%u closed=%u\r\n",
+                           (unsigned)ch,
+                           (unsigned)ce,
+                           (unsigned)lun,
+                           (unsigned)ftl->alloc.free_count,
+                           (unsigned)ftl->alloc.op_count,
+                           (unsigned)ftl->alloc.spare_count,
+                           (unsigned)ftl->alloc.pre_cond_count,
+                           (unsigned)ftl->alloc.bad_count,
+                           (unsigned)ftl->alloc.closed_sb_count);
             }
         }
     }
@@ -546,28 +536,27 @@ static void uart_cli_rd_report(void)
     if (g_cli_pending.compare == 0U)
     {
         /* hex dump 前 64B 防刷屏 */
-        (void)uart_log_printf(UART_LOG_INFO, "rd ok n=%lu, first 64 bytes:\r\n", (unsigned long)g_cli_pending.nblocks);
+        (void)LOGI("rd ok n=%lu, first 64 bytes:\r\n", (unsigned long)g_cli_pending.nblocks);
         for (offset = 0U; (offset < 64U) && (offset < total_bytes); offset += 16U)
         {
-            (void)uart_log_printf(UART_LOG_INFO,
-                                  "%08lx: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
-                                  (unsigned long)offset,
-                                  (unsigned)g_wr_buf[offset],
-                                  (unsigned)g_wr_buf[offset + 1U],
-                                  (unsigned)g_wr_buf[offset + 2U],
-                                  (unsigned)g_wr_buf[offset + 3U],
-                                  (unsigned)g_wr_buf[offset + 4U],
-                                  (unsigned)g_wr_buf[offset + 5U],
-                                  (unsigned)g_wr_buf[offset + 6U],
-                                  (unsigned)g_wr_buf[offset + 7U],
-                                  (unsigned)g_wr_buf[offset + 8U],
-                                  (unsigned)g_wr_buf[offset + 9U],
-                                  (unsigned)g_wr_buf[offset + 10U],
-                                  (unsigned)g_wr_buf[offset + 11U],
-                                  (unsigned)g_wr_buf[offset + 12U],
-                                  (unsigned)g_wr_buf[offset + 13U],
-                                  (unsigned)g_wr_buf[offset + 14U],
-                                  (unsigned)g_wr_buf[offset + 15U]);
+            (void)LOGI("%08lx: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
+                       (unsigned long)offset,
+                       (unsigned)g_wr_buf[offset],
+                       (unsigned)g_wr_buf[offset + 1U],
+                       (unsigned)g_wr_buf[offset + 2U],
+                       (unsigned)g_wr_buf[offset + 3U],
+                       (unsigned)g_wr_buf[offset + 4U],
+                       (unsigned)g_wr_buf[offset + 5U],
+                       (unsigned)g_wr_buf[offset + 6U],
+                       (unsigned)g_wr_buf[offset + 7U],
+                       (unsigned)g_wr_buf[offset + 8U],
+                       (unsigned)g_wr_buf[offset + 9U],
+                       (unsigned)g_wr_buf[offset + 10U],
+                       (unsigned)g_wr_buf[offset + 11U],
+                       (unsigned)g_wr_buf[offset + 12U],
+                       (unsigned)g_wr_buf[offset + 13U],
+                       (unsigned)g_wr_buf[offset + 14U],
+                       (unsigned)g_wr_buf[offset + 15U]);
         }
         return;
     }
@@ -581,7 +570,7 @@ static void uart_cli_rd_report(void)
         memcpy(&actual, &g_wr_buf[offset], sizeof(actual));
         if (actual != expect)
         {
-            (void)uart_log_printf(UART_LOG_ERROR, "rd FAIL at byte %lu: got %08lx expect %08lx\r\n", (unsigned long)offset, (unsigned long)actual, (unsigned long)expect);
+            (void)LOGE("rd FAIL at byte %lu: got %08lx expect %08lx\r\n", (unsigned long)offset, (unsigned long)actual, (unsigned long)expect);
             return;
         }
     }
@@ -603,16 +592,16 @@ static void uart_cli_pending_poll(void)
     switch (g_cli_pending.req.opcode)
     {
         case SSD_REQUEST_WRITE:
-            (void)uart_log_printf(UART_LOG_INFO, "wr done lba=%lu n=%lu status=%d\r\n", (unsigned long)g_cli_pending.lba, (unsigned long)g_cli_pending.nblocks, (int)g_cli_pending.req.completion_status);
+            (void)LOGI("wr done lba=%lu n=%lu status=%d\r\n", (unsigned long)g_cli_pending.lba, (unsigned long)g_cli_pending.nblocks, (int)g_cli_pending.req.completion_status);
             break;
         case SSD_REQUEST_READ:
             uart_cli_rd_report();
             break;
         case SSD_REQUEST_TRIM:
-            (void)uart_log_printf(UART_LOG_INFO, "tr done lba=%lu status=%d\r\n", (unsigned long)g_cli_pending.lba, (int)g_cli_pending.req.completion_status);
+            (void)LOGI("tr done lba=%lu status=%d\r\n", (unsigned long)g_cli_pending.lba, (int)g_cli_pending.req.completion_status);
             break;
         case SSD_REQUEST_FLUSH:
-            (void)uart_log_printf(UART_LOG_INFO, "fl done status=%d\r\n", (int)g_cli_pending.req.completion_status);
+            (void)LOGI("fl done status=%d\r\n", (int)g_cli_pending.req.completion_status);
             break;
         default:
             break;
@@ -652,7 +641,7 @@ static int uart_cli_help(int argc, char *argv[])
     {
         const uart_cli_command_t *command = &g_uart_cli_commands[index];
 
-        (void)uart_log_printf(UART_LOG_INFO, "%-38s %s\r\n", command->usage, command->description);
+        (void)LOGI("%-38s %s\r\n", command->usage, command->description);
     }
     return FUNC_STATUS_SUCCESS;
 }
@@ -687,19 +676,19 @@ static int uart_cli_log(int argc, char *argv[])
 
     if (strcmp(argv[2], "error") == 0)
     {
-        uart_log_set_level(UART_LOG_ERROR);
+        log_set_level(LOG_ERROR);
     }
     else if (strcmp(argv[2], "warn") == 0)
     {
-        uart_log_set_level(UART_LOG_WARNING);
+        log_set_level(LOG_WARNING);
     }
     else if (strcmp(argv[2], "info") == 0)
     {
-        uart_log_set_level(UART_LOG_INFO);
+        log_set_level(LOG_INFO);
     }
     else if (strcmp(argv[2], "debug") == 0)
     {
-        uart_log_set_level(UART_LOG_DEBUG);
+        log_set_level(LOG_DEBUG);
     }
     else
     {
@@ -797,7 +786,7 @@ static void uart_execute_command(char *line)
         if (((uint32_t)argc < command->min_argc) || ((uint32_t)argc > command->max_argc) ||
             (command->handler(argc, argv) != 0))
         {
-            (void)uart_log_printf(UART_LOG_ERROR, "usage: %s\r\n", command->usage);
+            (void)LOGE("usage: %s\r\n", command->usage);
         }
         return;
     }
@@ -1142,53 +1131,6 @@ int uart_log_flush(uint32_t timeout_ms)
             __WFE();
         }
     }
-}
-
-int uart_log_printf(uart_log_level_t level, const char *format, ...)
-{
-    char    message[192];
-    int     prefix_length;
-    int     message_length;
-    va_list args;
-
-    if ((format == NULL) || (level > g_uart_log_level))
-    {
-        return FUNC_STATUS_SUCCESS;
-    }
-
-    prefix_length = snprintf(message, sizeof(message), "[%s] ", uart_log_level_name(level));
-    if ((prefix_length < 0) || ((uint32_t)prefix_length >= sizeof(message)))
-    {
-        return FUNC_STATUS_SUCCESS;
-    }
-
-    va_start(args, format);
-    message_length = vsnprintf(message + prefix_length, sizeof(message) - (uint32_t)prefix_length, format, args);
-    va_end(args);
-
-    if (message_length < 0)
-    {
-        return FUNC_STATUS_SUCCESS;
-    }
-    if ((uint32_t)message_length >= (sizeof(message) - (uint32_t)prefix_length))
-    {
-        message_length = (int)(sizeof(message) - (uint32_t)prefix_length - 1U);
-    }
-
-    return uart_log_write(message, (uint32_t)(prefix_length + message_length));
-}
-
-void uart_log_set_level(uart_log_level_t level)
-{
-    if (level <= UART_LOG_DEBUG)
-    {
-        g_uart_log_level = level;
-    }
-}
-
-uart_log_level_t uart_log_get_level(void)
-{
-    return g_uart_log_level;
 }
 
 void uart_get_stats(uart_stats_t *stats)

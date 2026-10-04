@@ -1,15 +1,14 @@
 #include "ftl/pending.h"
 
+#include "common/assertion.h"
 #include "ftl/ftl.h" /* ftl_context_t */
 
 #include <string.h>
 
 void pending_init(ftl_context_t *ftl)
 {
-    if (ftl == NULL)
-    {
-        return;
-    }
+    /* 层内接口：唯一调用者 ftl_init 已在入口判过 ftl != NULL */
+    ASSERT(ftl != NULL);
 
     memset(ftl->pending, 0, sizeof(ftl->pending));
 }
@@ -18,10 +17,9 @@ int pending_add(ftl_context_t *ftl, uint16_t cmd_id, const ftl_io_request_t *io,
 {
     uint8_t i;
 
-    if ((ftl == NULL) || (io == NULL))
-    {
-        return FTL_ERROR;
-    }
+    /* 层内接口：调用者 ftl_submit_read/write 已在入口判过 ftl / req 非 NULL */
+    ASSERT(ftl != NULL);
+    ASSERT(io != NULL);
 
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -45,10 +43,7 @@ ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, uint16_t cmd_id)
 {
     uint8_t i;
 
-    if (ftl == NULL)
-    {
-        return NULL;
-    }
+    ASSERT(ftl != NULL);
 
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -66,10 +61,7 @@ ftl_pending_req_t *pending_lookup_by_lba(ftl_context_t *ftl, lba_t lba)
 {
     uint8_t i;
 
-    if (ftl == NULL)
-    {
-        return NULL;
-    }
+    ASSERT(ftl != NULL);
 
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -87,10 +79,7 @@ void pending_remove(ftl_context_t *ftl, uint16_t cmd_id)
 {
     ftl_pending_req_t *req;
 
-    if (ftl == NULL)
-    {
-        return;
-    }
+    ASSERT(ftl != NULL);
 
     req = pending_lookup(ftl, cmd_id);
     if (req != NULL)
@@ -104,10 +93,7 @@ uint16_t pending_count(const ftl_context_t *ftl)
     uint16_t count = 0U;
     uint8_t  i;
 
-    if (ftl == NULL)
-    {
-        return 0U;
-    }
+    ASSERT(ftl != NULL);
 
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {

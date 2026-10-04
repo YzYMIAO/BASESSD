@@ -28,6 +28,7 @@
 
 #include "fc_data_path.h"
 
+#include "common/assertion.h"
 #include "fc.h"
 #include "fc_crc_engine.h"
 #include "fc_ldpc_engine.h"
@@ -106,11 +107,9 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
         for (desc_id = (fc_descriptor_id_t)command->desc_id;
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
+            /* desc_id 来自 command->desc_id 链，链上 ID 必在池范围内 */
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL)
-            {
-                return FC_STATUS_INVALID_ARGUMENT;
-            }
+            ASSERT(desc != NULL);
 
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
@@ -127,11 +126,9 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
         for (desc_id = (fc_descriptor_id_t)command->desc_id;
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
+            /* desc_id 来自 command->desc_id 链，链上 ID 必在池范围内 */
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL)
-            {
-                return FC_STATUS_INVALID_ARGUMENT;
-            }
+            ASSERT(desc != NULL);
 
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
@@ -150,11 +147,9 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
         for (desc_id = (fc_descriptor_id_t)command->desc_id;
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
+            /* desc_id 来自 command->desc_id 链，链上 ID 必在池范围内 */
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL)
-            {
-                return FC_STATUS_INVALID_ARGUMENT;
-            }
+            ASSERT(desc != NULL);
 
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
@@ -178,11 +173,9 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
         for (desc_id = (fc_descriptor_id_t)command->desc_id;
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
+            /* desc_id 来自 command->desc_id 链，链上 ID 必在池范围内 */
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL)
-            {
-                return FC_STATUS_INVALID_ARGUMENT;
-            }
+            ASSERT(desc != NULL);
 
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
@@ -240,18 +233,15 @@ fc_status_t fc_data_path_generate_stripe_parity(
     fc_descriptor_id_t desc_id;
     uint8_t            d;
 
-    if ((data_cmds == NULL) || (data_cmds[0] == NULL) ||
-        (parity_cmd == NULL) || (data_count == 0U))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参由 fc_stripe_submit 组装（stripe 路径），非外部输入 */
+    ASSERT(data_cmds != NULL);
+    ASSERT(data_cmds[0] != NULL);
+    ASSERT(parity_cmd != NULL);
+    ASSERT(data_count != 0U);
 
     /* parity 命令的 CW 数量必须与数据命令一致 */
     cw_count = (uint8_t)(data_cmds[0]->config.cw + 1U);
-    if ((uint8_t)(parity_cmd->config.cw + 1U) != cw_count)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT((uint8_t)(parity_cmd->config.cw + 1U) == cw_count);
 
     /*
      * 逐 CW 做 XOR：
@@ -425,17 +415,13 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
 
     for (cw = 0U; cw < total_desc; cw++)
     {
+        /* desc 链长度 = total_desc，循环内 desc_id 始终有效 */
         desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL)
-        {
-            return FC_STATUS_INVALID_ARGUMENT;
-        }
+        ASSERT(desc != NULL);
 
+        /* configure 流程为每个 desc 分配了 buffer，buffer_id 必有效 */
         buffer = fc_buffer_get_base(desc->buffer_id);
-        if (buffer == NULL)
-        {
-            return FC_STATUS_INVALID_ARGUMENT;
-        }
+        ASSERT(buffer != NULL);
 
         if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
         {

@@ -18,6 +18,7 @@
  * 对外接口：nand_dispatch_init / submit / submit_chain / poll / set_device_ready。
  */
 
+#include "common/assertion.h"
 #include "common/log.h"
 #include "delay.h"
 #include "fc/fc_command.h"
@@ -841,8 +842,11 @@ static nand_dispatch_lun_outcome_t nand_dispatch_phase2_dequeue(uint8_t         
     {
         case NAND_DISPATCH_START_ASYNC:
             return NAND_DISPATCH_LUN_WAIT; /* entry 已出队，命令留在 task，由 Phase 1 下轮接管 */
+        case NAND_DISPATCH_START_SYNC:
+            break; /* 同步完成或错误码：落到下方 completion 收尾 */
         default:
-            break; /* START_SYNC；REQ_ERROR 不会出现（上面已构建成功） */
+            /* nand_dispatch_task_fc_start 只返回 ASYNC/SYNC 两值，第三态不存在 */
+            ASSERT_UNREACHABLE();
     }
 
     nand_completion.execution_status = result;
