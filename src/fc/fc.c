@@ -164,13 +164,13 @@ uint8_t fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id)
 /* ── 命令/描述符 ID → 指针（范围由公共壳 fc_interface.c 校验） ── */
 fc_command_t *fc_command_id_to_command_internal(fc_t *controller, uint16_t command_id)
 {
-    /* 公共壳 fc_command_id_to_command() 已判过 command_id < FC_COMMAND_POOL_DEPTH */
+    /* 公共壳 fc_command_id_to_command() 已断言过 command_id < FC_COMMAND_POOL_DEPTH */
     ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
     return &controller->command_pool[command_id];
 }
 fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, uint16_t descriptor_id)
 {
-    /* 公共壳 fc_descriptor_id_to_descriptor() 已判过 descriptor_id < FC_DESCRIPTOR_POOL_DEPTH */
+    /* 公共壳 fc_descriptor_id_to_descriptor() 已断言过 descriptor_id < FC_DESCRIPTOR_POOL_DEPTH */
     ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
     return &controller->descriptor_pool[descriptor_id];
 }
@@ -918,10 +918,9 @@ static void fc_stripe_release_parity(fc_t *controller, fc_command_id_t parity_id
     uint16_t descriptor_index;
     uint16_t next_descriptor_index;
 
-    if (parity_id >= FC_COMMAND_POOL_DEPTH)
-    {
-        return;
-    }
+    /* 层内 helper：唯一调用者是完成路径的 stripe 清理，parity_id 取自
+     * stripe_parity_for_data[]（注册时即 fc_command_alloc() 铸出的池内 ID）。 */
+    ASSERT(parity_id < FC_COMMAND_POOL_DEPTH);
 
     /* 释放 parity 命令的 desc 链 + buffer */
     descriptor_index = controller->command_descriptor_head[parity_id];
@@ -1491,8 +1490,9 @@ fc_status_t fc_poll_internal(fc_t *controller)
 #if CONFIG_FC_RAID
         {
             fc_command_id_t completed_id = (fc_command_id_t)nand_completion.command_id;
-            if ((completed_id < FC_COMMAND_POOL_DEPTH) &&
-                (controller->stripe_parity_for_data[completed_id] != FC_COMMAND_ID_INVALID))
+            /* command_id 是 FC 投递给 NAND 的池内 ID，fc_complete_from_nand 已断言过范围 */
+            ASSERT(completed_id < FC_COMMAND_POOL_DEPTH);
+            if (controller->stripe_parity_for_data[completed_id] != FC_COMMAND_ID_INVALID)
             {
                 fc_command_id_t parity_id                        = controller->stripe_parity_for_data[completed_id];
                 controller->stripe_parity_for_data[completed_id] = FC_COMMAND_ID_INVALID;

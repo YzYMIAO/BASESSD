@@ -19,6 +19,7 @@
 
 #include "fc_interface.h"
 
+#include "common/assertion.h"
 #include "fc_command.h"
 #include "fc_internal.h"
 #include "fc_registers.h"
@@ -30,10 +31,11 @@ static uint8_t fc_command_to_id(const fc_command_t *command, fc_command_id_t *co
 {
     uint16_t index;
 
-    if ((command == NULL) || (command_id == NULL))
-    {
-        return 0U;
-    }
+    /* 层内 helper：调用者（fc_command_configure_descriptors / fc_submit）已判过
+     * command 非空，command_id 是本文件局部地址——传空是调用者编程错误。 */
+    ASSERT(command != NULL);
+    ASSERT(command_id != NULL);
+
     for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
     {
         if (command == fc_command_id_to_command(index))
@@ -267,10 +269,8 @@ fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t 
         uint8_t         *buf;
         uint32_t         copy_len;
 
-        if (desc_id >= FC_DESCRIPTOR_POOL_DEPTH)
-        {
-            return FC_STATUS_INVALID_ARGUMENT;
-        }
+        /* desc 链由 fc_command_configure_descriptors 构建，ID 必在池内 */
+        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
         descriptor = fc_descriptor_id_to_descriptor(desc_id);
         if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
         {
@@ -333,10 +333,8 @@ fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length)
         fc_descriptor_t *descriptor;
         uint8_t         *buf;
 
-        if (desc_id >= FC_DESCRIPTOR_POOL_DEPTH)
-        {
-            return FC_STATUS_IO_ERROR;
-        }
+        /* desc 链由 fc_command_configure_descriptors 构建，ID 必在池内 */
+        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
         descriptor = fc_descriptor_id_to_descriptor(desc_id);
         if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
         {
@@ -385,10 +383,8 @@ uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
     {
         fc_descriptor_t *descriptor;
 
-        if (desc_id >= FC_DESCRIPTOR_POOL_DEPTH)
-        {
-            return NULL;
-        }
+        /* desc 链由 fc_command_configure_descriptors 构建，ID 必在池内 */
+        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
         descriptor = fc_descriptor_id_to_descriptor(desc_id);
         if (i == cw_index)
         {
@@ -408,23 +404,20 @@ uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
  * ⑤ 查询工具
  * ══════════════════════════════════════════════════════════ */
 
-/* 命令 ID → 命令指针（越界返回 NULL） */
+/* 命令 ID → 命令指针（ID 恒为池内 ID，越界是调用者编程错误） */
 fc_command_t *fc_command_id_to_command(uint16_t command_id)
 {
-    if (command_id >= FC_COMMAND_POOL_DEPTH)
-    {
-        return NULL;
-    }
+    /* command_id 只来自 fc_command_alloc() 铸出的 ID（队列里只存分配产出的 ID），
+     * 任何调用者都不可能传入越界值——越界即不变量破坏，留现场。 */
+    ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
     return fc_command_id_to_command_internal(&g_fc_controller, command_id);
 }
 
-/* 描述符 ID → 描述符指针（越界返回 NULL） */
+/* 描述符 ID → 描述符指针（ID 恒为池内 ID，越界是调用者编程错误） */
 fc_descriptor_t *fc_descriptor_id_to_descriptor(uint16_t descriptor_id)
 {
-    if (descriptor_id >= FC_DESCRIPTOR_POOL_DEPTH)
-    {
-        return NULL;
-    }
+    /* descriptor_id 只来自命令 desc 链（configure_descriptors 铸出），恒在池内。 */
+    ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
     return fc_descriptor_id_to_descriptor_internal(&g_fc_controller, descriptor_id);
 }
 

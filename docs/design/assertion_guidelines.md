@@ -54,7 +54,20 @@
 
 **结论：`journal.c` 整个文件不转断言。**
 
-## 七、落地记录（2026-10-05）
+## 七、辨析 D：FC 自铸句柄的越界检查是判据 2，不是判据 1
+
+判据 1 的"公共 API 参数校验"针对的是**外部输入**——host 的 opcode/LBA、CLI 参数、介质读回的字节。但 `fc_interface.h` 里有一类入口，收到的是 **FC 自己铸出来的句柄**：
+
+- `fc_command_id_to_command(command_id)` 的 `command_id` 只来自 `fc_command_alloc()`（队列里只存分配产出的 ID）；
+- `fc_descriptor_id_to_descriptor(descriptor_id)` 的 `descriptor_id` 只来自命令的 desc 链（`fc_command_configure_descriptors` 铸出）。
+
+调用者**不可能**传入越界值——越界即不变量破坏。因此这类"句柄越界 → 返回 NULL/错误码"的守卫按判据 2 转 `ASSERT`，并同步修掉头文件里"越界返回 NULL"的契约描述。同理，FC 内部对句柄的越界检查（`fc_stripe_release_parity` 的 `parity_id`、完成路径的 `completed_id`、desc 链遍历里的 `desc_id`）一律转 `ASSERT`。
+
+**保留判据 1 的部分**：`fc_command_configure_descriptors` / `fc_submit` / `fc_command_release` 这三个**顶层生命周期入口**仍保留 `FC_STATUS_INVALID_ARGUMENT` 返回——它们校验的是"这个指针是不是本池的命令"（指针身份 + 生命周期状态），是有文档契约的入口校验；`fc_command_release` 的 `command_id >= FC_COMMAND_POOL_DEPTH` 因此也保留（它在调用 `fc_command_id_to_command()` 之前先挡一道，避免后者断言）。
+
+> 判据 1 原先把"`fc_interface.h` 的全部入口"整体划为边界，属**过度概括**；本轮按句柄来源细分：外部输入（host / CLI / 介质）→ 判据 1，FC 自铸句柄 → 判据 2。
+
+## 八、落地记录（2026-10-05）
 
 设施 `fd2a0d9` 建好后，先在 FC 层落地（§24，见 `fc_nand_design.md`），本轮推广到**全部非 FC 层**：
 
@@ -67,4 +80,13 @@
 
 - **全工程 0 处 `ASSUME`**。
 - 刻意**不**转断言的：`journal.c` 整个文件（辨析 C）、`crash.c`（故障路径）、所有 `fc_command_alloc()` 后的 `cmd == NULL`（资源类）、`status_out`/`optional-out` 判空（辨析 B）。
+
+**补扫（辨析 D，同日）**：非 FC 层落地后回扫 FC 层，把"FC 自铸句柄越界"的守卫转 `ASSERT`：
+
+| 文件 | 转换点 |
+|---|---|
+| `fc_interface.c` | `fc_command_to_id` 两处 NULL（静态 helper，调用者已判）、`fc_write_cmd_data`/`fc_read_cmd_data`/`fc_get_cmd_data_ptr` 的 `desc_id >= FC_DESCRIPTOR_POOL_DEPTH`、`fc_command_id_to_command`/`fc_descriptor_id_to_descriptor` 的越界 → NULL |
+| `fc.c` | `fc_stripe_release_parity` 的 `parity_id` 越界、完成路径 `completed_id` 的冗余范围检查（`fc_complete_from_nand` 已断言） |
+
+顶层生命周期入口（`fc_command_configure_descriptors`/`fc_submit`/`fc_command_release`）的句柄校验**保留返回码**（有文档契约），理由见 §七。
 - 与断言同批：FTL / controller 补齐错误路径日志（层边界与阶段跃迁处 `LOGE/LOGW`，不逐分支）；platform 里并行的 `uart_log_*` 等级栈并入 `common/log.h`（`uart_log_printf`→`LOGE/LOGW/LOGI`，`uart_log_set_level`→`log_set_level`），裸 `uart_log_write` 的终端 I/O 保留。

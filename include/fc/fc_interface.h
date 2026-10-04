@@ -93,10 +93,10 @@ extern "C"
     uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index);
 
     /* ═══════ ⑤ 查询工具 ═══════ */
-    /* ID→指针转换（越界返回 NULL） */
+    /* ID→指针转换。前置条件：command_id 为 fc_command_alloc() 铸出的池内 ID。 */
     fc_command_t *fc_command_id_to_command(uint16_t command_id);
 
-    /* ID→指针转换（越界返回 NULL） */
+    /* ID→指针转换。前置条件：descriptor_id 为命令 desc 链中的池内 ID。 */
     fc_descriptor_t *fc_descriptor_id_to_descriptor(uint16_t descriptor_id);
 
     /* 资源使用统计（测试/监控用） */

@@ -73,13 +73,30 @@
 
 `src/platform/stm32h7r3/` 未动（该板不参与编译）。
 
-## 四、验证
+## 四、FC 层自铸句柄补扫（辨析 D）
+
+非 FC 层落地后回扫 FC 层，发现 `fc_interface.c` 里仍有一类"不可能"守卫没转：**对 FC 自铸句柄的越界检查**。判据 1 原先把 `fc_interface.h` 全部入口整体划为外部边界，属过度概括——按句柄来源细分后（见 `assertion_guidelines.md` §七）：
+
+- `command_id` 只来自 `fc_command_alloc()`，`descriptor_id` 只来自命令 desc 链，调用者**不可能**传越界值 → 越界即不变量破坏 → `ASSERT`。
+
+转换点：
+
+| 文件 | 转换点 |
+|---|---|
+| `fc_interface.c` | `fc_command_to_id` 两处 NULL（静态 helper，两个调用者都已判过 `command`）、`fc_write_cmd_data` / `fc_read_cmd_data` / `fc_get_cmd_data_ptr` 的 `desc_id >= FC_DESCRIPTOR_POOL_DEPTH`、`fc_command_id_to_command` / `fc_descriptor_id_to_descriptor` 的越界 → NULL |
+| `fc.c` | `fc_stripe_release_parity` 的 `parity_id` 越界、完成路径 `completed_id` 的冗余范围检查（`fc_complete_from_nand` 已断言过） |
+
+**保留返回码**：`fc_command_configure_descriptors` / `fc_submit` / `fc_command_release` 三个顶层生命周期入口的句柄校验（指针身份 + 生命周期状态，有 `FC_STATUS_INVALID_ARGUMENT` 文档契约）。`fc_command_release` 的 `command_id >= FC_COMMAND_POOL_DEPTH` 保留，因它在调用 `fc_command_id_to_command()` 之前先挡一道。
+
+头文件 `fc_interface.h` 的两条"越界返回 NULL"注释同步改为前置条件描述。
+
+## 五、验证
 
 | 项 | 结果 |
 |---|---|
-| `make debug` | 零告警零错误（148768 B） |
-| `make tests` | 零告警零错误（202700 B） |
-| `make release` | 零告警零错误（87316 B） |
+| `make debug` | 零告警零错误（149156 B） |
+| `make tests` | 零告警零错误（203084 B） |
+| `make release` | 零告警零错误（87284 B） |
 | `make format-check` | 通过 |
 | `grep -rn 'ASSUME(' src/` | 0（全工程） |
 | 上板三套 munit + CLI 冒烟 | **待做** |

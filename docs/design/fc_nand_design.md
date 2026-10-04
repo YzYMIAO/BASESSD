@@ -3740,7 +3740,9 @@ fc_scheduler_select_chain(&sched_chain)
 
 断言设施见 `include/common/assertion.h`。FC 层从 v0.50 起按以下四条判据决定"守卫写成断言还是返回状态码"：
 
-1. **公共 API 保留返回码**——`fc_interface.h` 的全部入口是外部边界（FTL / UART CLI `wr/rd/tr/fl` 的输入），参数校验必须返回 `FC_STATUS_INVALID_ARGUMENT` 等错误码，不转断言。
+1. **公共 API 保留返回码**——`fc_interface.h` 的入口是外部边界（FTL / UART CLI `wr/rd/tr/fl` 的输入），参数校验必须返回 `FC_STATUS_INVALID_ARGUMENT` 等错误码，不转断言。
+
+   > **边界修正（辨析 D）**：判据 1 保护的是**外部输入**（host / CLI / 介质）。`fc_interface.h` 里那些只收 **FC 自铸句柄**的入口（`fc_command_id_to_command` / `fc_descriptor_id_to_descriptor` 的命令/描述符 ID，只来自 `fc_command_alloc()` 与 desc 链）不属此类——越界即不变量破坏，已转 `ASSERT`。`fc_command_configure_descriptors` / `fc_submit` / `fc_command_release` 这三个顶层生命周期入口的句柄校验保留返回码。详见 `assertion_guidelines.md` §七。
 2. **内部函数的前置条件转断言**——`static` 函数与 `fc_internal.h` / `fc_queue.h` / `fc_scheduler.h` / `fc_data_path.h` 里的内部接口，前置条件由调用者保证。守卫一律写成 `ASSERT(条件)`，并删掉原来的 `return` 与恢复/降级分支（"跳过坏 ID 继续找"、"回滚分配再返回"这类）。
 
    **FC 层不用 `ASSUME`。** 起初按"守卫带恢复分支 → `ASSUME`"划分，后来取消：恢复分支既然已经手工删掉，`ASSUME` 的 `__builtin_unreachable()` 就换不来额外代码生成收益（工程未开 LTO，`fc_command_id_to_command()` 这类跨 TU 调用点无从利用该假设）；而它会把"违反即 UB"引入一条本来只会 HardFault 的路径——同样是崩，`ASSERT` 的现场更可定位。`ASSUME` 宏保留在 `assertion.h` 里，留给将来确有热路径需要向编译器证明的场合。
