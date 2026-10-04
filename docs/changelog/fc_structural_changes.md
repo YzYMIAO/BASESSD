@@ -1462,3 +1462,45 @@ result = nand_engine_start(&transaction->engine, transaction->backend, map->uops
 - `fc_register_queue_state()` 调用点计数：改动前后均为 **13**（逐点对齐的机器核对）。
 - `clang-format-15 -i src/fc/fc.c` 已跑，diff 只含结构性移动。
 - **上板回归**：`make tests` 烧写 → UART CLI `test` → `ut_run_all()`；重点覆盖单命令读/写（META/PAA 预填）、多 plane 读写、擦除、Read Retry 链（`submit_chain`）、RAID encode（`fc_stripe_submit`）。
+
+---
+
+## Phase Y: 初始化 / 运行时全链路走读 + 源码关键路径注释补全
+
+**日期**: 2026-10-04
+
+### 背景
+
+作者反馈 fc-nand 层代码"还是有点看不懂"，希望注释更详细并补流程图解，尤其是**初始化**和**运行时**两条主线。体检发现三个缺口：
+
+1. **文档没有初始化图**：`fc_nand_design.md` 已有图 0–13，但**没有一张讲"上电后按什么顺序把 FC/NAND/FTL 立起来"**；初始化只散落在 §2.9 的 API 表与 §19.5 的 `nand_init` 代码块里。
+2. **运行时缺贯通主线**：图 1/2/9/10/11/13 都是单点视角，没有"从 `main()` 到一条命令跑完"的端到端视图。
+3. **一个会误导读者的事实**：§16 + 图 11 花大篇幅讲"命令链执行"，但 FTL 运行时**从不使用命令链**——所有命令 `config.chain = FC_CHAIN_END`（`src/ftl/` 共 23 处），运行时 `count` 恒为 1，只有 `fc_poll_dispatch_single` 是活路径；Read Retry 也是三条独立同步等待命令、非原子 `submit_chain`。
+4. **源码注释**：文件头/函数 doc-block 质量尚可，但**函数体内关键跳转点注释稀疏**；`main.c` 甚至没有文件头块。
+
+### 改动
+
+| 文件 | 变更 |
+|------|------|
+| `docs/design/fc_nand_design.md` | 新增 **§22 初始化全流程**（图 14 分层调用时序 / 图 15 资源装配 / 图 16 NAND 芯片初始化 + 三条硬约束表 + 上电走读 + 编译期开关表）；新增 **§23 运行时全流程**（图 17 端到端生命周期 / 图 18 命令生命周期状态机 / 图 19 `fc_service` 单步全景 / 图 20 相位机状态机 / 图 21 多 LUN 时序波形 / 图 22 调度器取命令决策 + 运行时走读 + §23.9 澄清不走链）；头部图数 14 → **23**（图 0–22）并登记 Phase Y；附录 A 增 图 14–22 共 9 行锚点；附录 B 阅读顺序 5 → **7 步**（新增第六步初始化 / 第七步运行时） |
+| `docs/design/fc_nand_design.md` §16 | §16 开头加「运行时未启用命令链」警示框并指向 §23.9；§16.9 加历史示例与实现不符的警示（Read Retry 实为三条独立同步命令） |
+| `src/main.c` | 新增文件头块（职责/调用链/关键约定/生命周期）；`main()` 初始化级联补「全系统初始化顺序 + else-if 级联会整段跳过」注释；`ssd_ftl_boot_all` 补 ①–⑤ 步骤标记；superloop 补「无 ISR 参与、驱动源唯一」注释 |
+| `src/fc/fc.c` | `fc_init_internal` 函数体补 ①–⑧ 编号块注释（三池 memset / 指针挂载 / 队列 / 调度器 / `nand_dispatch_init` 唯一 NAND 依赖 / CRC / 空闲链 `0→1→…→N→INVALID` 图 / 末尾寄存器快照）；`fc_poll_internal` doc-block 修正「寄存器统一刷新」的过时表述为**逐点刷新**，并加「FTL 恒 chain=END → 只有 single 是活路径」注；`fc_poll_dispatch_single`/`_chain` 各加一行活路径/仅单测注 |
+| `src/nand/nand_mt29f4g08abadawp.c` | `nand_init` 补 Step 1–8 分段标记（FMC 句柄 / HAL+Msp / EXTI / per-LUN 后端 / DMA / RESET / READ_ID / Mode 4），并注明 **RESET/READ_ID 绕过 dispatch 直连 engine** |
+| `src/nand/nand_dispatch.c` | 文件头相位机块补「写/读点总表见 internal.h + 本文件内 `── 相位 X → Y ──` 标记」说明；`lun_drive` / `phase1_lun` / `phase2_dequeue` 的相位分支加 `── 相位 ISSUE → ISSUED ──`、`── 相位 ISSUED 预检 ──`、`── 驱动循环 ──`、`── 整链收尾 ──` 标记；`nand_dispatch_init` 补调用链注 |
+
+### 设计要点
+
+- **纯注释 / 纯文档，零逻辑改动**：不触碰任何控制流、数据结构与头文件声明。
+- **遵守既有约定：源码内不放框图**。源码只用 `→` 箭头链与 `── 标题 ──` / `── 相位 X → Y ──` 标记；方框 ASCII 图只进设计文档。已核实 `src/fc/*.c`、`src/nand/*.c`、`src/main.c` 改动前后均无 `┌│└` 方框字符。
+- **图号与既有图的关系**：图 14–22 为**新增**，不改动图 0–13 的编号；图 19 扩展图 2、图 20 扩展图 10、图 21 取代图 10 末尾的时序简例，均在正文显式标注"扩展/配套"关系，不重复画既有内容。
+- **单 LUN 事实必须标注**：图 21 在标题与图内两处声明 `CH_NUM = CE_NUM = LUN_NUM = 1`、相位机当前退化为单 LUN 顺序执行，避免读者误以为并发已实测。
+- **行号漂移防护**：§22/§23 正文以**函数名**为主定位，行号仅辅助，并在章首注明"行号随重构漂移、以函数名为准"；附录 A 一律给 grep 锚点而非裸行号。
+
+### 验证
+
+- `make` / `make tests` 零警告零错误。
+- 固件二进制 **85960 字节**（与 Phase X 完全一致）——纯注释改动不改变编译产物。
+- `make format-check`（clang-format-15）通过。
+- 文档自检：图号连续无重复（图 0–22 共 23 张）、头部计数与实际图数一致、附录 A 共 23 行且新增 9 条锚点 `grep` 实测均命中、附录 B 七步顺序与图号一致。
+- **上板回归（待执行）**：`make tests` 烧写 → UART CLI `test` → `ut_run_all()`，确认注释改动无副作用。

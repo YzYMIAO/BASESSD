@@ -415,6 +415,18 @@ nand_result_t nand_fc_erase_block(const nand_fc_request_t *request, nand_fc_comp
  *     - CONFIG_NAND_TIMING_MODE_4 时：SET_FEATURES(01h,4) 切 Mode 4，
  *       重新算 PCC 周期数并重配 FMC + 后端时序。
  *     - DMA 初始化失败仅回退 PIO，非致命。
+ *   步骤编号（与函数体内 Step 标记一一对应）：
+ *     Step 1 FMC 句柄 + PCC 时序（纯软件填结构体）
+ *     Step 2 HAL_NAND_Init → MspInit（时钟/GPIO/NCE）★首次碰硬件
+ *     Step 3 R/B# EXTI6 中断
+ *     Step 4 per-[ch][ce][lun] FMC 后端实例
+ *     Step 5 DMA（本配置 no-op，失败仅回退 PIO）
+ *     Step 6 RESET（FFh）★启动命令绕过 dispatch，直连 engine
+ *     Step 7 READ_ID + 厂商 ID 校验
+ *     Step 8 Mode 4 切换（CONFIG_NAND_TIMING_MODE_4=0 时整段编掉）
+ *   调用链：main.c:320 → nand_init → {HAL_NAND_Init, nand_rb_interrupt_init,
+ *          nand_fmc_init_instance, nand_fc_reset, nand_fc_read_id}
+ *   流程图见 docs/design/fc_nand_design.md §22（图 16）。
  * -------------------------------------------------------------------- */
 uint8_t nand_init(void)
 {
@@ -424,6 +436,8 @@ uint8_t nand_init(void)
     uint8_t                    id[5];
     uint8_t                    result;
 
+    /* ── Step 1: FMC 句柄 + PCC 时序（纯软件，尚未碰硬件）──
+     * Bank3 / 8 位总线 / ECC 关闭；时序先给 power-on 默认 Mode 0 的保守值。 */
     g_nand_handle.Instance             = FMC_NAND_DEVICE;
     g_nand_handle.Init.NandBank        = FMC_NAND_BANK3;
     g_nand_handle.Init.Waitfeature     = FMC_NAND_PCC_WAIT_FEATURE_DISABLE;
@@ -442,6 +456,8 @@ uint8_t nand_init(void)
     common_timing.HiZSetupTime  = 3U;
     attribute_timing            = common_timing;
 
+    /* ── Step 2: 首次碰硬件。HAL_NAND_Init 内部回调 HAL_NAND_MspInit
+     *    （使能 FMC/GPIO 时钟 + 配 PD6=R/B#、PG9=NCE、数据总线 AF12）。── */
     if (HAL_NAND_Init(&g_nand_handle, &common_timing, &attribute_timing) != HAL_OK)
     {
         SSD_LOGE("nand: HAL_NAND_Init failed\r\n");
@@ -451,11 +467,12 @@ uint8_t nand_init(void)
              (unsigned int)HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT,
                                             MT29F4G08ABADAWP_RB_GPIO_PIN));
 
-    /* 初始化 R/B# EXTI6 中断（在首次 NAND 命令前完成） */
+    /* ── Step 3: R/B# EXTI6 中断（在首次 NAND 命令前完成）── */
     nand_rb_interrupt_init();
 
     {
-        /* 低速 FMC 后端：数据/命令/地址窗口 = FMC_BASE | 0 / A16 / A17。
+        /* ── Step 4: per-[ch][ce][lun] FMC 后端实例 ──
+         * 低速 FMC 后端：数据/命令/地址窗口 = FMC_BASE | 0 / A16 / A17。
          * Phase V: 同一 FMC 窗口/时序对全部 [CH][CE][LUN] 实例有效，
          * 循环初始化 per-LUN backend（硬件单 die 时退化为一次调用）。 */
         const nand_fmc_config_t fmc_config = {
@@ -486,6 +503,7 @@ uint8_t nand_init(void)
             }
         }
 
+        /* ── Step 5: DMA（CONFIG_NAND_DMA=0 时为 no-op；失败仅回退 PIO）── */
         if (nand_dma_init() != 0U)
         {
             SSD_LOGE("nand: DMA init failed, falling back to PIO\r\n");
@@ -493,7 +511,10 @@ uint8_t nand_init(void)
         }
     }
 
-    /* Datasheet power-on rule: allow R/B# to become valid before the first FFh command. */
+    /* ── Step 6: RESET（FFh）──
+     * Datasheet power-on rule: allow R/B# to become valid before the first FFh command.
+     * ★ 启动命令经 nand_fc_execute 直连 nand_engine，绕过 fc / nand_dispatch
+     *   命令队列——此刻 g_nand_device_ready 仍为 0，nand_dispatch_submit 会拒收。 */
     delay_ms(1U);
     result = nand_fc_reset(&completion);
     if (result != NAND_RESULT_OK)
@@ -506,6 +527,7 @@ uint8_t nand_init(void)
         return result;
     }
     SSD_LOGI("nand: reset complete, status=0x%02X\r\n", (unsigned int)completion.nand_status);
+    /* ── Step 7: READ_ID + 厂商 ID 校验 ── */
     result = nand_fc_read_id(id, &completion);
     if (result != NAND_RESULT_OK)
     {
@@ -523,7 +545,7 @@ uint8_t nand_init(void)
     }
 
 #if CONFIG_NAND_TIMING_MODE_4
-    /* ── 高速模式：切 NAND 到 Mode 4 + 更新 FMC 硬件时序 ── */
+    /* ── Step 8: 高速模式：切 NAND 到 Mode 4 + 更新 FMC 硬件时序 ── */
     {
         const uint8_t              mode_4[4] = {4U, 0U, 0U, 0U};
         FMC_NAND_PCC_TimingTypeDef fast_pcc  = {0};
@@ -583,7 +605,7 @@ uint8_t nand_init(void)
         }
     }
 #else
-    /* ── 低速模式：跳过 Mode 4 切换，NAND 和 FMC 都运行在默认慢速时序 ── */
+    /* ── Step 8（编掉）：低速模式：跳过 Mode 4 切换，NAND 和 FMC 都运行在默认慢速时序 ── */
     SSD_LOGI("nand: keeping NAND at default timing (CONFIG_NAND_TIMING_MODE_4=0)\r\n");
 #endif /* CONFIG_NAND_TIMING_MODE_4 */
 

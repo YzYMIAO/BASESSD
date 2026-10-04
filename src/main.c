@@ -1,3 +1,25 @@
+/* ======================================================================
+ * main.c — 启动入口与裸机主循环
+ *
+ * 职责：全系统初始化顺序编排 + superloop 驱动源。
+ * 调用链：
+ *   main() → sys_init → ssd_log 绑定 → fc_init → nand_init
+ *          → nand_dispatch_set_device_ready(1) → stm32_platform_register
+ *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
+ *          → while(1) { uart_service_poll; ftl_service | fc_service;
+ *                       btim_scheduler_poll; }
+ * 关键约定：
+ *   - 初始化是**严格 if/else-if 级联**：前一步失败会整段跳过后面的，
+ *     因此 fc_init 失败时 NAND 根本不会被初始化。
+ *   - FC/NAND/FTL 的推进**全部在非 ISR 上下文**：没有任何中断调用
+ *     fc_service / ftl_service，superloop 是唯一驱动源。
+ *   - NAND 启动命令（RESET/READ_ID）在 nand_init 内绕过命令队列，
+ *     直连 nand_engine_execute。
+ * 生命周期：ssd_ftl_boot_all 成功 → g_ftl_ready=1，主循环由 fc_service
+ *          切换到 ftl_service（后者内部会先跑 fc_service）。
+ * 文件结构：日志 sink 绑定 → FTL 实例存储 → ssd_ftl_boot(_all) → main()。
+ * 流程图见 docs/design/fc_nand_design.md §22（图 14）/ §23（图 18）。
+ * ====================================================================== */
 
 #include "btim.h"
 #include "common/ssd_crash.h"
@@ -195,7 +217,14 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     return 0;
 }
 
-/* 完整初始化 FTL：全实例 boot + controller 绑定（boot_ok 才置 g_ftl_ready） */
+/* 完整初始化 FTL：全实例 boot + controller 绑定（boot_ok 才置 g_ftl_ready）
+ *
+ *   ① 逐 (ch,ce,lun) boot —— 任一失败则 boot_ok=0，整体回退 fc_service。
+ *   ② 建 g_ftl_ptrs 三维指针表 —— 精确类型匹配 ssd_controller_init 形参。
+ *   ③ completion_table_set_route(g_ftl_ptrs) —— 全局完成表的实例路由。
+ *   ④ ssd_controller_init(&g_ctrl, g_ftl_ptrs) —— 对外 controller 就绪。
+ *   ⑤ g_ftl_ready = 1 —— 主循环切换到 ftl_service。
+ */
 static void ssd_ftl_boot_all(void)
 {
     uint8_t ch;
@@ -204,6 +233,7 @@ static void ssd_ftl_boot_all(void)
     int     boot_ok = 1;
     int     ctrl_ret;
 
+    /* ① 逐实例 boot */
     for (ch = 0U; ch < CH_NUM; ch++)
     {
         for (ce = 0U; ce < CE_NUM; ce++)
@@ -224,7 +254,7 @@ static void ssd_ftl_boot_all(void)
         return;
     }
 
-    /* 填 g_ftl_ptrs 三维指针表 → ssd_controller_init（类型精确匹配） */
+    /* ② 填 g_ftl_ptrs 三维指针表 → ssd_controller_init（类型精确匹配） */
     for (ch = 0U; ch < CH_NUM; ch++)
     {
         for (ce = 0U; ce < CE_NUM; ce++)
@@ -236,11 +266,12 @@ static void ssd_ftl_boot_all(void)
         }
     }
 
-    /* F6：全局 completion 表的实例路由表 = 全部实例 boot 完成后的 g_ftl_ptrs。
+    /* ③ F6：全局 completion 表的实例路由表 = 全部实例 boot 完成后的 g_ftl_ptrs。
      * 必须在所有 ftl_init 之后、首次 ftl_service 之前设置（路由表是全局的，
      * 补进哪个实例都行，一次设置覆盖全部）。 */
     completion_table_set_route(g_ftl_ptrs);
 
+    /* ④ controller 就绪 */
     ctrl_ret = ssd_controller_init(&g_ctrl, g_ftl_ptrs);
     if (ctrl_ret != SSD_STATUS_OK)
     {
@@ -248,6 +279,7 @@ static void ssd_ftl_boot_all(void)
         return;
     }
 
+    /* ⑤ 主循环切换点：此后走 ftl_service（内部先跑 fc_service） */
     g_ftl_ready = 1;
     SSD_LOGI("[FTL] controller ready, lba_max=%llu\r\n",
              (unsigned long long)FTL_LBA_MAX);
@@ -301,6 +333,18 @@ int main(void)
     /* VBAT 未供电时 BKPSRAM 无法保持；调试阶段暂不读取 Crash Record。 */
     /* stm32_report_previous_crash(); */
     SSD_LOGI("soft_ssd debug revision=%lu\r\n", (unsigned long)SSD_FIRMWARE_DEBUG_REVISION);
+
+    /* ── 全系统初始化顺序（严格 if/else-if 级联：前一步失败会整段跳过后面的）──
+     *   ① fc_init()            —— FC 控制面：三池 + SQ/HSQ/CQ + 调度器 + CRC。
+     *                             内部会调 nand_dispatch_init()（纯 memset，不碰硬件），
+     *                             所以 FC 可以先于 NAND 硬件初始化。
+     *   ② nand_init()          —— NAND 芯片：HAL/FMC + R/B# EXTI + per-(ch,ce,lun) 后端
+     *                             + RESET + READ_ID 校验。其 boot 命令直接走
+     *                             nand_engine_execute，绕过 fc / nand_dispatch 命令队列。
+     *   ③ set_device_ready(1)  —— 放行 nand_dispatch_submit（此前一律返回 NOT_READY）。
+     *   ④ platform_register()  —— 注册 time_us，供 FTL 的 T3 定时触发（CP/GC）使用。
+     *   ⑤ ssd_ftl_boot_all()   —— FTL 全实例 boot + controller 绑定 → 置 g_ftl_ready=1。
+     *   详见 docs/design/fc_nand_design.md §22「初始化全流程」。 */
     if (fc_init() != FC_STATUS_OK)
     {
         SSD_LOGE("fc init failed\r\n");
@@ -341,9 +385,15 @@ int main(void)
     SSD_LOGI("btim task table ready, IWDG disabled for debug\r\n");
 #endif
     uart_service_poll();
+    /* ── 主循环（裸机 superloop，无中断参与）──
+     *   g_ftl_ready == 0：只跑 fc_service()，保持 FC/NAND 裸路径活着（可跑 CLI 自检命令）。
+     *   g_ftl_ready == 1：改跑 ftl_service()，它内部会先调用 fc_service() ≤4 次
+     *                     （NAND_SUBMIT_BUDGET）再 drain 完成表。
+     *   uart_service_poll()   —— CLI 解析（含 `test` 单元测试入口）。
+     *   btim_scheduler_poll() —— 1ms 任务表（看门狗喂狗等）。
+     *   All command parsing and scheduled storage work remain outside ISR context. */
     while (1)
     {
-        /* All command parsing and scheduled storage work remain outside ISR context. */
         uart_service_poll();
         if (g_ftl_ready)
         {

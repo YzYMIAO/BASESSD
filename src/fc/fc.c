@@ -296,18 +296,26 @@ static void fc_register_queue_state(fc_t *controller)
  *   功能：初始化 FC 控制面（三池清零 + 空闲链表建立 + 队列/调度器/NAND）。
  *   参数：controller —— FC 控制器。
  *   返回：FC_STATUS_OK / 子初始化错误。
- *   实现要点：
- *     - 所有静态池 memset 清零，再把池指针挂到 controller。
- *     - 空闲链表串接：command_free_next / descriptor_free_next /
- *       buffer_free_next 各自串成链，head 指向 0 号。
- *     - 初始化 SQ/HSQ/CQ/调度器 + nand_dispatch_init()。
- *     - 初始化 RAID 引擎上下文（每 LUN）、CRC 硬件、stripe 积累状态。
+ *   实现要点（步骤编号与函数体内注释一一对应）：
+ *     ① 三池本体 + 队列存储 + 命令状态位图 memset 归零（数组地址不变）。
+ *     ② controller 清零后挂上各静态数组指针。
+ *     ③ SQ/HSQ/CQ 三条环形队列 init。
+ *     ④ 调度器绑定 SQ/HSQ + 清 busy/饥饿计数。
+ *     ⑤ nand_dispatch_init()——本函数唯一的 NAND 依赖，纯 memset 不碰硬件，
+ *        因此 fc_init 可以先于 nand_init 执行（见 main.c 的级联顺序）。
+ *     ⑥ CRC 硬件、⑦ stripe 积累状态（CONFIG_FC_RAID 时）。
+ *     ⑧ 串三张空闲链表 + 置 free head；末尾刷新软件寄存器影子。
+ *   幂等：可重复调用以重置（不释放任何硬件资源）。
+ *   流程图见 docs/design/fc_nand_design.md §22（图 15）。
  * -------------------------------------------------------------------- */
 fc_status_t fc_init_internal(fc_t *controller)
 {
     fc_status_t result;
     uint16_t    index;
 
+    /* ── ① 清底：三池本体 + 三条队列的存储 + 命令状态位图全部归零。
+     *    这些数组都是文件作用域 static（见 §1 静态资源），此处只清内容，
+     *    数组地址不变——DMA 看到的物理地址在整个固件生命周期内固定。 ── */
     memset(g_fc_command_pool, 0, sizeof(g_fc_command_pool));
     memset(g_fc_descriptor_pool, 0, sizeof(g_fc_descriptor_pool));
     memset(g_fc_buffer_pool, 0, sizeof(g_fc_buffer_pool));
@@ -315,6 +323,9 @@ fc_status_t fc_init_internal(fc_t *controller)
     memset(g_fc_hsq_storage, 0, sizeof(g_fc_hsq_storage));
     memset(g_fc_cq_storage, 0, sizeof(g_fc_cq_storage));
     memset(g_fc_command_state, 0, sizeof(g_fc_command_state));
+
+    /* ── ② 把池地址挂进 controller。三池本体与各簿记数组是 static，
+     *    fc_t 只存指针——这样 fc_t 可以整体赋值/传递而不搬运大数组。 ── */
     *controller                         = (fc_t){0};
     controller->command_pool            = g_fc_command_pool;
     controller->descriptor_pool         = g_fc_descriptor_pool;
@@ -327,7 +338,11 @@ fc_status_t fc_init_internal(fc_t *controller)
     controller->buffer_free_next        = g_fc_buffer_free_next;
     controller->buffer_state            = g_fc_buffer_state;
     controller->command_descriptor_head = g_fc_command_descriptor_head;
+    /* 软件寄存器影子复位（status = READY）；之后由 fc_register_queue_state() 持续刷新 */
     fc_registers_reset(&controller->registers);
+
+    /* ── ③ 三条环形队列：SQ 64（普通命令）/ HSQ 16（高优先，如 read retry）/
+     *    CQ 64（完成项）。init 只登记存储与深度，head/tail/count 归零。 ── */
     result = fc_submission_queue_init(&controller->sq, g_fc_sq_storage, FC_SQ_DEPTH);
     if (result != FC_STATUS_OK)
     {
@@ -343,11 +358,16 @@ fc_status_t fc_init_internal(fc_t *controller)
     {
         return result;
     }
+    /* ── ④ 调度器绑定 SQ/HSQ 指针，并清零 busy[ch][ce][lun] 与读饥饿计数 ── */
     result = fc_scheduler_init(&controller->scheduler, &controller->sq, &controller->hsq);
     if (result != FC_STATUS_OK)
     {
         return result;
     }
+
+    /* ── ⑤ 本函数里唯一的 NAND 依赖：只清 NAND 侧的通道队列与 per-LUN 链状态
+     *    （纯 memset，不碰 FMC 硬件）。硬件那半由 nand_init() 负责，且在 main()
+     *    里排在 fc_init() 之后——正因为这里不碰硬件，FC 才能先初始化。 ── */
     if (nand_dispatch_init() != NAND_RESULT_OK)
     {
         return FC_STATUS_IO_ERROR;
@@ -361,7 +381,7 @@ fc_status_t fc_init_internal(fc_t *controller)
     }
 #endif /* CONFIG_FC_RAID */
 
-    /* 初始化 CRC 引擎 */
+    /* ── ⑥ CRC 硬件（STM32H743 CRC 外设）：写路径编码时给每个 CW 算 CRC ── */
     fc_crc_init();
 
     /* 初始化 Stripe RAID 积累状态 */
@@ -376,7 +396,12 @@ fc_status_t fc_init_internal(fc_t *controller)
     }
 #endif /* CONFIG_FC_RAID */
 
-    /* 串接命令空闲链表 + 初始化 desc 链头 */
+    /* ── ⑦ 串空闲链表。三张链都是"下标即 ID"的静态链，分配 = 取 head 并把
+     *    head 推到 next，释放 = 头插（见 §4 资源分配 / 回滚 / 释放）：
+     *      command_free_next    : 0→1→…→63 →INVALID   （head=0）
+     *      descriptor_free_next : 0→1→…→255→UINT16_MAX（head=0）
+     *      buffer_free_next     : 0→1→…→127→UINT16_MAX（head=0）
+     *    同时初始化 desc 链头 command_descriptor_head[cmd]（每命令一条 desc 链）。 ── */
     for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
     {
         controller->command_free_next[index]       = ((index + 1U) < FC_COMMAND_POOL_DEPTH) ? (fc_command_id_t)(index + 1U) : FC_COMMAND_ID_INVALID;
@@ -400,6 +425,8 @@ fc_status_t fc_init_internal(fc_t *controller)
     controller->descriptor_free_head = 0U;
     controller->buffer_free_head     = 0U;
     controller->active_handle        = FC_COMMAND_ID_INVALID;
+
+    /* 首次刷新软件寄存器影子：此刻三池全空 → status 只剩 READY 位 */
     fc_register_queue_state(controller);
     return FC_STATUS_OK;
 }
@@ -1323,6 +1350,7 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
  *     - raid=ENCODE 的 page write 走 fc_stripe_submit（Multi-Plane）。
  *     - 其余构建 request → nand_dispatch_submit；失败注 NAND_FAIL 完成。
  *     - 只负责占用目标 LUN；完成由后续 fc_service() 推进。
+ *     - **运行时唯一活提交路径**（FTL 恒 chain=END，count 恒 1）。
  * -------------------------------------------------------------------- */
 static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_chain_t *chain)
 {
@@ -1391,6 +1419,7 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
  *       与单命令路径的既有差异，勿统一）→ 构建 requests[i]。
  *     - 全部构建完成后一次 nand_dispatch_submit_chain。
  *     - 任一步失败 → 对应/整链命令注 NAND_FAIL 完成并返回 IO_ERROR。
+ *     - 运行时不会命中：FTL 恒 chain=END（count==1），本路径仅单测覆盖。
  * -------------------------------------------------------------------- */
 static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_chain_t *chain)
 {
@@ -1451,7 +1480,12 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
  *       （并清理 stripe parity），OK 直接返回。
  *     - 无完成 → 调度器取链/单命令 → 分派 fc_poll_dispatch_single /
  *       fc_poll_dispatch_chain。
- *     - 队列状态寄存器在此统一刷新（fc_register_queue_state 幂等）。
+ *     - 队列状态寄存器由两个 dispatch helper **逐点刷新**（fc_register_queue_state
+ *       幂等，但早退路径不刷，见 helpers 内注释），非在本函数统一刷新。
+ *   运行时事实（勿被 §16/图 11 误导）：FTL 所有命令 config.chain=FC_CHAIN_END，
+ *   运行时 count 恒为 1 → **只有 fc_poll_dispatch_single 是活路径**；
+ *   fc_poll_dispatch_chain 仅单元测试覆盖。详见设计文档 §23.8。
+ *   调用方：ftl_service()（ftl.c）/ ftl_internal_sync_wait() / main.c 的裸 fc_service。
  * -------------------------------------------------------------------- */
 fc_status_t fc_poll_internal(fc_t *controller)
 {

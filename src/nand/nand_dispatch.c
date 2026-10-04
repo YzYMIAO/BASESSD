@@ -171,6 +171,8 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
  *   参数：无。
  *   返回：恒 NAND_RESULT_OK。
  *   实现要点：仅清软件状态，不碰 FMC 硬件（见 nand_dispatch.h）。
+ *   调用链：fc_init_internal() → 本函数。因为纯 memset，FC 可以先于
+ *          nand_init()（碰 FMC 硬件）执行，见 main.c 的初始化级联。
  * -------------------------------------------------------------------- */
 nand_result_t nand_dispatch_init(void)
 {
@@ -332,6 +334,10 @@ nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests
  *   ISSUE：发完命令即返回，LUN 进入 tR/tPROG/tBERS
  *   ISSUED：DWT 计时最短忙期，到点后启动配对 WAIT/FETCH
  *   FETCH：执行 WAIT_READY + 数据 + 状态检查
+ *
+ * 每个相位的写点/读点总表见 nand_dispatch_internal.h 的 nand_dispatch_lun_chain_t
+ * 注释；下文函数体内的 `── 相位 X → Y ──` 标记指出该分支属于哪次转场。
+ * 完整状态机图见 docs/design/fc_nand_design.md §23（图 20）。
  *
  * 本段函数按企业后端分层组织：
  *   Command issue  —— task_build_request / task_fc_start / task_start
@@ -553,7 +559,8 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx
 
     ctx->result = result;
 
-    /* 相位由上方 task_fc_start 置入（ISSUE 型 OP → ISSUE，其余 → FETCH）。
+    /* ── 相位 ISSUE → ISSUED ──
+     * 相位由上方 task_fc_start 置入（ISSUE 型 OP → ISSUE，其余 → FETCH）。
      * 命中即"命令只发完了前半段"：task_complete 已调用、task->completion 已填好，
      * 但 LUN 还在 tR/tPROG/tBERS，绝不能往下走 DONE 把结果当命令完成报出去。 */
     if (ctx->chain->phase == LUN_PHASE_ISSUE)
@@ -710,7 +717,8 @@ static nand_dispatch_lun_outcome_t nand_dispatch_phase1_lun(nand_dispatch_lun_ct
     nand_dispatch_lun_outcome_t out;
     nand_dispatch_task_t       *task;
 
-    /* ISSUED 由 lun_drive / phase2_dequeue 的 ISSUE→ISSUED 转场置入。
+    /* ── 相位 ISSUED 预检（只判一次）──
+     * ISSUED 由 lun_drive / phase2_dequeue 的 ISSUE→ISSUED 转场置入。
      * 只在进入驱动循环前判一次（与原实现一致）：本轮先进 issued_advance 等最短忙期。 */
     if (ctx->chain->phase == LUN_PHASE_ISSUED)
     {
@@ -726,6 +734,9 @@ static nand_dispatch_lun_outcome_t nand_dispatch_phase1_lun(nand_dispatch_lun_ct
         }
     }
 
+    /* ── 驱动循环（FETCH / 链推进）──
+     * 逐个 task 推进，直到本轮无进展（WAIT）或整链结束（DONE）。
+     * 每个出口返回前必须已提交全部持久状态，见上方实现要点。 */
     while (1)
     {
         task = &ctx->chain->tasks[ctx->chain->cursor];
@@ -762,7 +773,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_phase1_lun(nand_dispatch_lun_ct
             continue; /* 链未结束，回到驱动循环顶部 */
         }
 
-        /* 整链结束 → 返回 completion */
+        /* ── 相位 FETCH 尾段结束 → 整链收尾，phase 复位 IDLE，通道游标前移 ── */
         *ctx->completion      = task->completion;
         ctx->chain->count     = 0U;
         ctx->chain->phase     = LUN_PHASE_IDLE;
@@ -838,7 +849,8 @@ static nand_dispatch_lun_outcome_t nand_dispatch_phase2_dequeue(uint8_t         
     nand_completion.nand_status      = task->transaction.completion.nand_status;
     nand_dispatch_task_complete(task, result, &nand_completion);
 
-    /* Phase V: ISSUE 段同步完成 → 切 ISSUED，不返回 completion。
+    /* ── 相位 ISSUE → ISSUED（同步完成路径）──
+     * Phase V: ISSUE 段同步完成 → 切 ISSUED，不返回 completion。
      * 相位由上方 task_fc_start 置入（ISSUE 型 OP → ISSUE）；task_complete 已在上
      * 面无条件调用、task->completion 已填好，但 LUN 还在 tR/tPROG/tBERS，这里必须
      * 拦下，否则会把"只发完前半段"的结果当命令完成报给上层。 */
