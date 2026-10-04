@@ -2,7 +2,12 @@
 #include "munit.h"
 
 #include "common/common.h"
+#include "common/ssd_crash.h"
+#include "common/ssd_log.h"
 #include "fc/fc.h"
+
+/* 断言失败后等待异步日志排空的上限（ms）；超时也要继续走 dump，不能卡在 flush。 */
+#define MUNIT_FAIL_FLUSH_TIMEOUT_MS 1000U
 
 #if defined(MUNIT_ENABLE_TIMING)
 #    include "sys.h"
@@ -173,13 +178,17 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...)
     /* PC 环境编译（munit 运行器平台适配）：失败直接退出；嵌入式卡死保留现场 */
     exit(EXIT_FAILURE);
 #else
-    // abort();
-    //  ===== 嵌入式环境：打印信息后卡死 =====
-    while (1)
+    /*
+     * ===== 嵌入式环境：先把输出排空，再落记录，最后停机保留现场 =====
+     * 这里曾经直接 while(1)：失败信息还在异步 UART 队列里就停机，队列再也不会
+     * 被 DMA/IRQ 排空，表现就是「断函数却什么都没打印」。必须先 flush。
+     */
+    (void)ssd_log_flush(MUNIT_FAIL_FLUSH_TIMEOUT_MS);
+    ssd_crash_record_assert(format, filename, (uint32_t)line);
+    ssd_crash_platform_report(ssd_crash_record_get());
+    for (;;)
     {
-        // 程序停在这里
-        // 现场（寄存器、堆栈、内存）全部保留
-        // 连接调试器可以查看所有状态
+        /* 程序停在这里：现场（寄存器、堆栈、内存）全部保留，接调试器可查看。 */
     }
 #endif
 }

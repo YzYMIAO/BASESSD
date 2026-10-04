@@ -194,10 +194,19 @@ ssd> test --seed 0x1234 /fc-nand/command/validate_null
 ### 3.3 断言失败处理
 
 ```
-断言失败 → munit_errorf_ex → 打印 ERROR 日志 → while(1) 挂起
+断言失败 → munit_errorf_ex
+          → 打印 ERROR 日志 + [RES] FC 资源快照
+          → ssd_log_flush(1000ms)          ← 关键：把异步 UART 队列排空
+          → ssd_crash_record_assert()      ← 写 .noinit 崩溃记录（kind=ASSERT）
+          → ssd_crash_platform_report()    ← 平台轮询 UART dump 同一份记录
+          → while(1) 挂起
 ```
 
 裸机没有 fork/abort 机制。断言失败后 CPU 进入 `while(1)` 循环，保留完整寄存器/堆栈现场，供 JTAG/SWD 调试器检查。
+
+**为什么必须先 flush**：`fprintf(stderr, ...)` 经 `_write()` 落到 UART 的**异步** TX 环形队列，由 DMA/USART 中断慢慢排出。原实现打印完直接 `while(1)`，中断停了、队列再也不会被排空 —— 失败信息留在队列里发不出去，现场看起来就是"断函数却什么都没打印"。先 `ssd_log_flush()` 把队列排空再停机，这条信息才不会丢。
+
+**崩溃记录**：`ssd_crash_platform_report()` 由 `src/platform/stm32h743/fault.c` 提供强符号（弱默认在 `src/common/crash.c` 里是空实现，host 构建安全）。它关掉 TX DMA/中断、独占 UART 轮询输出，因此**必须在 flush 之后**调用。详见 `docs/design/fault_capture.md`。
 
 ### 3.4 无 fork 隔离的约束
 
@@ -242,6 +251,22 @@ ssd> test --seed 0x1234 /fc-nand/command/validate_null
 | # | 文件 | 位置 | 改动 |
 |---|---|---|---|
 | 14 | `munit.c` | `--list` | `show_params=1` → `show_params=0`；新增 `--list-params` 分支 |
+
+### v1.1 (2026-10-04) — 失败路径接入故障捕获
+
+#### Bug 修复
+
+| # | 文件 | 位置 | 问题 | 修复 |
+|---|---|---|---|---|
+| 1 | `munit.c` | `munit_errorf_ex` 嵌入式分支 | 打印后直接 `while(1)`，异步 UART 队列不再被排空，失败信息丢失（"断函数却什么都没打印"） | `while(1)` 前先 `ssd_log_flush(1000ms)` |
+
+#### 功能变更
+
+| # | 文件 | 位置 | 改动 |
+|---|---|---|---|
+| 2 | `munit.c` | `munit_errorf_ex` 嵌入式分支 | flush 后写 `.noinit` 崩溃记录（`kind=ASSERT`，含 format/file/line）并调 `ssd_crash_platform_report()` 轮询 dump |
+
+见 `docs/design/fault_capture.md`。
 
 ### 修订历史条目格式
 

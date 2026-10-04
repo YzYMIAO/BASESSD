@@ -22,7 +22,6 @@
  * ====================================================================== */
 
 #include "btim.h"
-#include "common/ssd_crash.h"
 #include "common/ssd_log.h"
 #include "controller/controller.h"
 #include "delay.h"
@@ -41,6 +40,7 @@
 /* TODO: 待重构为 munit UT 框架后移除 */
 /* #include "test_fc_nand.h" */
 #endif
+#include "platform/stm32h743/fault.h"
 #include "platform/stm32h743/platform_ops.h"
 #include "stm32h7xx_hal.h"
 #include "sys.h"
@@ -281,30 +281,11 @@ static void ssd_ftl_boot_all(void)
 
     /* ⑤ 主循环切换点：此后走 ftl_service（内部先跑 fc_service） */
     g_ftl_ready = 1;
-    SSD_LOGI("[FTL] controller ready, lba_max=%llu\r\n",
-             (unsigned long long)FTL_LBA_MAX);
+    /* %lu 而非 %llu：newlib-nano 不支持 long long 格式化，见 usart.c 的 _Static_assert。 */
+    SSD_LOGI("[FTL] controller ready, lba_max=%lu\r\n",
+             (unsigned long)FTL_LBA_MAX);
 }
 
-#if 0
-static void stm32_report_previous_crash(void)
-{
-    const ssd_crash_record_t *record = ssd_crash_record_get();
-
-    if (record == NULL)
-    {
-        return;
-    }
-
-    SSD_LOGE("previous assert: %s (%s:%lu)\r\n",
-             record->expression,
-             record->file,
-             (unsigned long)record->line);
-    if (ssd_log_flush(1000U) == 0)
-    {
-        ssd_crash_record_clear();
-    }
-}
-#endif
 /* Newlib-nano calls this hook from __libc_init_array when no CRT provides it. */
 void _init(void)
 {
@@ -330,9 +311,12 @@ int main(void)
     ssd_log_set_flush_sink(stm32_uart_log_flush_sink);
     ssd_log_set_level(SSD_LOG_INFO);
     SSD_LOGD("debug logging enabled\r\n");
-    /* VBAT 未供电时 BKPSRAM 无法保持；调试阶段暂不读取 Crash Record。 */
-    /* stm32_report_previous_crash(); */
     SSD_LOGI("soft_ssd debug revision=%lu\r\n", (unsigned long)SSD_FIRMWARE_DEBUG_REVISION);
+    /*
+     * 复位原因 + 上次崩溃记录。必须在 sink 绑定之后调用：它走异步日志，
+     * 且 .noinit 记录可跨软复位保留（VBAT 未供电时 BKPSRAM 不可用）。
+     */
+    fault_report_boot();
 
     /* ── 全系统初始化顺序（严格 if/else-if 级联：前一步失败会整段跳过后面的）──
      *   ① fc_init()            —— FC 控制面：三池 + SQ/HSQ/CQ + 调度器 + CRC。

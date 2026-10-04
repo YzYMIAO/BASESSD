@@ -1,6 +1,11 @@
 # FTL 层 munit 单元测试设计方案（纯 RAM 层，单文件组织）
 
 > **状态：设计文档（供审查）。实施（测试文件/makefile 接线）在审查通过后进行。**
+>
+> **2026-10-04 事实更新（本文正文数字尚未按此重算，实施前需重新核算 SRAM 预算）**：
+> - `_sbrk` 已有实现：`src/platform/stm32h743/syscalls.c`（带实时 MSP 上界守卫 + 1KB 保留），§2 表中「全树无 `_sbrk` 实现」已过时；`_Min_Heap_Size` 仍是 512B。见 `debug_sbrk_heap_stack_20261004.md`。
+> - `test_rebuild.c` **已从板端构建摘除**（`src/fc/makefile.mk` + `tests/unit/ut_main.c`），§3「顺带修复」与 §7 中「实施：malloc→静态 fixture」两项暂缓。见 `fault_capture.md` §7。
+> - `ftl_block_t` **56B → 40B**（v0.48，`d8fe6d1`）：§2 表的 224KB / AXI 377KB 等数字按旧尺寸算的，需按 40B 重算。
 
 ## 1. 背景与目标
 

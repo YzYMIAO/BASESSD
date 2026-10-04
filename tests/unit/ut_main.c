@@ -20,11 +20,8 @@ extern MunitTest g_fc_data_path_tests[];
 /* Level 3: 全链路测试 */
 extern MunitTest g_fc_lifecycle_tests[];
 
-/* Level 2: 数据路径测试 */
-/* Level 3: 全链路测试 */
-
-/* F2 掉电重建 closed_sb_list 簿记（allocator + metadata 谓词，纯 RAM） */
-extern MunitTest g_rebuild_tests[];
+/* F2 掉电重建套件（g_rebuild_tests）暂时摘除：夹具超 DTCM 堆，
+ * 见 src/fc/makefile.mk 与 docs/design/fault_capture.md。 */
 
 static MunitSuite g_fc_nand_suite =
     {
@@ -41,9 +38,6 @@ static MunitSuite g_fc_nand_suite =
 
                        /* Level 3 */
                        {(char *)"lifecycle", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-
-                       /* F2 掉电重建簿记 */
-                       {(char *)"rebuild", g_rebuild_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
                        {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                        },

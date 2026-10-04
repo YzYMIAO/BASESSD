@@ -26,6 +26,15 @@
 #    error "USART_TX_RING_CAPACITY must be a power of two"
 #endif
 
+/*
+ * CLI 打印 lba / FTL_LBA_MAX 一律用 %lu，不用 %llu：
+ * 本工具链的 newlib-nano（-specs=nano.specs，newlib 3.3.0）不带 long long
+ * 格式化支持，%llu 会把 "lu" 当字面量原样打出来（`lba_max=%llu` → `lba_max=lu`），
+ * 而 GCC 的 -Wformat 按标准语义检查，编译期不会报。这些值都受
+ * uart_cli_lba_range_ok() 约束在 FTL_LBA_MAX 以内，装得下 32 位才安全。
+ */
+_Static_assert(FTL_LBA_MAX <= 0xFFFFFFFFUL, "FTL_LBA_MAX 超出 32 位，CLI 的 %lu 打印会截断");
+
 UART_HandleTypeDef g_uart1_handle = {0};
 
 /*
@@ -353,7 +362,7 @@ static int uart_cli_wr(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    (void)uart_log_printf(UART_LOG_INFO, "wr submit ok lba=%llu n=%lu, waiting...\r\n", (unsigned long long)lba, (unsigned long)n);
+    (void)uart_log_printf(UART_LOG_INFO, "wr submit ok lba=%lu n=%lu, waiting...\r\n", (unsigned long)lba, (unsigned long)n);
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -403,7 +412,7 @@ static int uart_cli_rd(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    (void)uart_log_printf(UART_LOG_INFO, "rd submit ok lba=%llu n=%lu%s, waiting...\r\n", (unsigned long long)lba, (unsigned long)n, g_cli_pending.compare ? " c" : "");
+    (void)uart_log_printf(UART_LOG_INFO, "rd submit ok lba=%lu n=%lu%s, waiting...\r\n", (unsigned long)lba, (unsigned long)n, g_cli_pending.compare ? " c" : "");
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -496,7 +505,7 @@ static int uart_cli_info(int argc, char *argv[])
 
     if (g_ctrl.state <= SSD_CONTROLLER_FAILED)
     {
-        (void)uart_log_printf(UART_LOG_INFO, "controller state=%s lba_max=%llu\r\n", state_names[g_ctrl.state], (unsigned long long)FTL_LBA_MAX);
+        (void)uart_log_printf(UART_LOG_INFO, "controller state=%s lba_max=%lu\r\n", state_names[g_ctrl.state], (unsigned long)FTL_LBA_MAX);
     }
 
     for (ch = 0U; ch < CH_NUM; ch++)
@@ -594,13 +603,13 @@ static void uart_cli_pending_poll(void)
     switch (g_cli_pending.req.opcode)
     {
         case SSD_REQUEST_WRITE:
-            (void)uart_log_printf(UART_LOG_INFO, "wr done lba=%llu n=%lu status=%d\r\n", (unsigned long long)g_cli_pending.lba, (unsigned long)g_cli_pending.nblocks, (int)g_cli_pending.req.completion_status);
+            (void)uart_log_printf(UART_LOG_INFO, "wr done lba=%lu n=%lu status=%d\r\n", (unsigned long)g_cli_pending.lba, (unsigned long)g_cli_pending.nblocks, (int)g_cli_pending.req.completion_status);
             break;
         case SSD_REQUEST_READ:
             uart_cli_rd_report();
             break;
         case SSD_REQUEST_TRIM:
-            (void)uart_log_printf(UART_LOG_INFO, "tr done lba=%llu status=%d\r\n", (unsigned long long)g_cli_pending.lba, (int)g_cli_pending.req.completion_status);
+            (void)uart_log_printf(UART_LOG_INFO, "tr done lba=%lu status=%d\r\n", (unsigned long)g_cli_pending.lba, (int)g_cli_pending.req.completion_status);
             break;
         case SSD_REQUEST_FLUSH:
             (void)uart_log_printf(UART_LOG_INFO, "fl done status=%d\r\n", (int)g_cli_pending.req.completion_status);

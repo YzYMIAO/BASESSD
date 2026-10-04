@@ -3,9 +3,15 @@
 #include <string.h>
 
 #define SSD_CRASH_MAGIC   0x43524153U
-#define SSD_CRASH_VERSION 1U
+#define SSD_CRASH_VERSION 2U /* v2：增加 kind + fault 负载；存储段改 .noinit */
 
-static volatile ssd_crash_record_t g_ssd_crash_record __attribute__((section(".bkpsram_data")));
+/*
+ * 崩溃记录放在 .noinit：NOLOAD、启动不清零，可跨软复位保留。
+ * （原 .bkpsram_data 因 VBPSRAM 依赖 VBAT、本板 VBAT 未供电而无法保持，
+ * 见 docs/design/debug_sbrk_heap_stack_20261004.md。）
+ * volatile：记录在本轮只写不读，靠它阻止编译器把写优化掉。
+ */
+static volatile ssd_crash_record_t g_ssd_crash_record __attribute__((section(".noinit")));
 
 static void ssd_crash_copy(char *destination, const char *source)
 {
@@ -18,46 +24,112 @@ static void ssd_crash_copy(char *destination, const char *source)
     destination[SSD_CRASH_TEXT_CAPACITY - 1U] = '\0';
 }
 
-void ssd_crash_record_assert(const char *expression, const char *file, uint32_t line)
+/* 校验和覆盖 version/kind/line + 文本 + fault 负载（不含 magic/checksum 自身）。
+ * 逐字段显式折叠：记录是 volatile，避免对整块结构体取址造成的限定符丢失。 */
+static uint32_t ssd_crash_checksum(void)
 {
-    uint32_t checksum;
+    uint32_t checksum = SSD_CRASH_VERSION ^ g_ssd_crash_record.kind ^ g_ssd_crash_record.line;
+    uint32_t index;
 
-    g_ssd_crash_record.magic   = 0U;
-    g_ssd_crash_record.version = SSD_CRASH_VERSION;
-    g_ssd_crash_record.line    = line;
-    ssd_crash_copy((char *)g_ssd_crash_record.expression, expression);
-    ssd_crash_copy((char *)g_ssd_crash_record.file, file);
-    checksum = SSD_CRASH_VERSION ^ line;
-    for (uint32_t index = 0U; index < SSD_CRASH_TEXT_CAPACITY; index++)
+    for (index = 0U; index < SSD_CRASH_TEXT_CAPACITY; index++)
     {
         checksum = (checksum << 5) | (checksum >> 27);
         checksum ^= (uint8_t)g_ssd_crash_record.expression[index];
         checksum ^= (uint8_t)g_ssd_crash_record.file[index];
     }
-    g_ssd_crash_record.checksum = checksum;
+
+    checksum = (checksum << 5) | (checksum >> 27);
+    checksum ^= g_ssd_crash_record.fault.fault_kind;
+    checksum = (checksum << 5) | (checksum >> 27);
+    checksum ^= g_ssd_crash_record.fault.pc;
+    checksum = (checksum << 5) | (checksum >> 27);
+    checksum ^= g_ssd_crash_record.fault.lr;
+    checksum = (checksum << 5) | (checksum >> 27);
+    checksum ^= g_ssd_crash_record.fault.sp;
+    checksum = (checksum << 5) | (checksum >> 27);
+    checksum ^= g_ssd_crash_record.fault.xpsr;
+    checksum = (checksum << 5) | (checksum >> 27);
+    checksum ^= g_ssd_crash_record.fault.cfsr;
+    checksum = (checksum << 5) | (checksum >> 27);
+    checksum ^= g_ssd_crash_record.fault.hfsr;
+    checksum = (checksum << 5) | (checksum >> 27);
+    checksum ^= g_ssd_crash_record.fault.mmfar;
+    checksum = (checksum << 5) | (checksum >> 27);
+    checksum ^= g_ssd_crash_record.fault.bfar;
+
+    return checksum;
+}
+
+static void ssd_crash_commit(void)
+{
+    g_ssd_crash_record.checksum = ssd_crash_checksum();
     __asm volatile("" ::
                        : "memory");
     g_ssd_crash_record.magic = SSD_CRASH_MAGIC;
 }
 
+void ssd_crash_record_assert(const char *expression, const char *file, uint32_t line)
+{
+    g_ssd_crash_record.magic   = 0U;
+    g_ssd_crash_record.version = SSD_CRASH_VERSION;
+    g_ssd_crash_record.kind    = (uint32_t)SSD_CRASH_KIND_ASSERT;
+    g_ssd_crash_record.line    = line;
+
+    g_ssd_crash_record.fault.fault_kind = 0U;
+    g_ssd_crash_record.fault.pc         = 0U;
+    g_ssd_crash_record.fault.lr         = 0U;
+    g_ssd_crash_record.fault.sp         = 0U;
+    g_ssd_crash_record.fault.xpsr       = 0U;
+    g_ssd_crash_record.fault.cfsr       = 0U;
+    g_ssd_crash_record.fault.hfsr       = 0U;
+    g_ssd_crash_record.fault.mmfar      = 0U;
+    g_ssd_crash_record.fault.bfar       = 0U;
+
+    ssd_crash_copy((char *)g_ssd_crash_record.expression, expression);
+    ssd_crash_copy((char *)g_ssd_crash_record.file, file);
+    ssd_crash_commit();
+}
+
+void ssd_crash_record_fault(const ssd_fault_record_t *fault)
+{
+    if (fault == NULL)
+    {
+        return;
+    }
+
+    g_ssd_crash_record.magic   = 0U;
+    g_ssd_crash_record.version = SSD_CRASH_VERSION;
+    g_ssd_crash_record.kind    = (uint32_t)SSD_CRASH_KIND_FAULT;
+    g_ssd_crash_record.line    = 0U;
+
+    g_ssd_crash_record.fault = *fault;
+
+    ssd_crash_copy((char *)g_ssd_crash_record.expression, "cpu-fault");
+    ssd_crash_copy((char *)g_ssd_crash_record.file, "");
+    ssd_crash_commit();
+}
+
 const ssd_crash_record_t *ssd_crash_record_get(void)
 {
-    uint32_t checksum = SSD_CRASH_VERSION ^ g_ssd_crash_record.line;
-
-    if ((g_ssd_crash_record.magic != SSD_CRASH_MAGIC) || (g_ssd_crash_record.version != SSD_CRASH_VERSION))
+    if ((g_ssd_crash_record.magic != SSD_CRASH_MAGIC) ||
+        (g_ssd_crash_record.version != SSD_CRASH_VERSION))
     {
         return NULL;
     }
-    for (uint32_t index = 0U; index < SSD_CRASH_TEXT_CAPACITY; index++)
+    if (ssd_crash_checksum() != g_ssd_crash_record.checksum)
     {
-        checksum = (checksum << 5) | (checksum >> 27);
-        checksum ^= (uint8_t)g_ssd_crash_record.expression[index];
-        checksum ^= (uint8_t)g_ssd_crash_record.file[index];
+        return NULL;
     }
-    return (checksum == g_ssd_crash_record.checksum) ? (const ssd_crash_record_t *)&g_ssd_crash_record : NULL;
+    return (const ssd_crash_record_t *)&g_ssd_crash_record;
 }
 
 void ssd_crash_record_clear(void)
 {
     g_ssd_crash_record.magic = 0U;
+}
+
+/* 弱默认：host/非固件构建下无轮询控制台，静默即可。 */
+__attribute__((weak)) void ssd_crash_platform_report(const ssd_crash_record_t *record)
+{
+    (void)record;
 }

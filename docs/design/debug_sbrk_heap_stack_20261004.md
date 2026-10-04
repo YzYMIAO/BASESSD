@@ -4,7 +4,7 @@
 > **涉及模块**: `src/platform/stm32h743/syscalls.c`（新增）、`linker/stm32h743xx_flash.ld`（只读确认）、`tests/unit/test_rebuild.c`（触发点，未改动）
 > **触发测试**: 板端 UART CLI `test` → `ut_run_all()`，跑到 `rebuild` 套件时 HardFault
 > **芯片**: STM32H743II + MT29F4G08ABADAWP NAND
-> **现状**: `_sbrk` 守卫已落地并**编译验证通过**（`make tests` 零告警零错误；map 确认 `_sbrk` 解析到 `syscalls.o`，`libnosys.a(sbrk.o)` 未被拉入）；**上板验证未做**。rebuild 套件夹具超容问题**未解决**，见 §5
+> **现状**: `_sbrk` 守卫已落地并**编译验证通过**（`make tests` 零告警零错误；map 确认 `_sbrk` 解析到 `syscalls.o`，`libnosys.a(sbrk.o)` 未被拉入）；**上板验证未做**。rebuild 套件夹具超容问题**暂以「从构建摘除」处理**，见 §5
 
 ---
 
@@ -142,17 +142,27 @@ void *_sbrk(ptrdiff_t incr)
 - [ ] `arm-none-eabi-nm build/firmware/debug/bin/debug.elf | grep _sbrk` —— 地址应指向 `platform/stm32h743` 的目标文件，不再是 libnosys
 - [ ] 上板：`test` 跑到 rebuild 时**不再 HardFault**（预期变为 setup 失败，见 §5）
 
-## 5. 遗留：rebuild 套件夹具放不下（未解决）
+## 5. 遗留：rebuild 套件夹具放不下（暂以摘除处理）
 
 `rebuild_fixture_t` ≈ **245 KB**，而堆 = DTCM = **128 KB**（栈还共用这块）。**245 KB > 128 KB，物理上装不下**，与 `_sbrk` 有无守卫无关。
 
 加守卫后 `malloc` 返回 NULL → `rebuild_setup` 返回 NULL → **是否干净失败取决于 vendored munit 对「setup 返回 NULL」的处理**：若它把 NULL 当 fixture 传给测试体，测试体里的 `fx->...` 会再次空指针解引用 → 换地址再崩。**此项待确认。**
 
-真正的修法（`test_rebuild.c` 属测试源文件，按项目规则由作者自建）：
+**2026-10-04 决策（故障捕获机制同期）**：当前调试重心在 FC-NAND 层，先按下面第 3 条**把 rebuild 套件从板端构建摘除**，把"跑 UT 就 HardFault"从根上挪开，让故障捕获机制先落地可观测：
 
-1. 夹具改 `static` 并放到 AXI_RAM（384 KB，够）—— 改动最小，推荐。
+- `src/fc/makefile.mk`：`test_rebuild.c` 那行注释掉（保留说明）
+- `tests/unit/ut_main.c`：删掉 `g_rebuild_tests` 的 extern 与子套件条目（否则链接期未定义符号）
+
+`test_rebuild.c` 文件本身**未删除、未改动**（属测试源文件，按项目规则由作者自建）。
+
+真正的修法（仍未定，恢复套件前必须先定）：
+
+1. 夹具改 `static` 并放到 AXI_RAM —— 但实测 AXI_RAM 仅剩约 71 KB 空闲（`g_blocks` 160 KB + `g_ftl` 134 KB 已占），**装不下 245 KB**，此路不通。
 2. 测试构建下缩小 `FTL_BLOCK_TOTAL` —— 编译期常量，影响面大。
-3. 把 rebuild 套件从板端 munit 摘掉，只在纯 RAM 环境跑。
+3. 把 rebuild 套件从板端 munit 摘掉，只在纯 RAM 环境跑 —— **本次采用**。
+4. SDRAM —— `sdram_init()` 当前零调用且未上板验证，不引入。
+
+另见 `docs/design/fault_capture.md`。
 
 ## 6. 附带发现（未修）
 

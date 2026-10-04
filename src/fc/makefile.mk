@@ -14,7 +14,9 @@ TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level2.c
 # Level 3: 全链路测试
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level3.c
 # F2 掉电重建 closed_sb_list 簿记（allocator + metadata 谓词，纯 RAM）
-TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_rebuild.c
+# 暂时摘除：其 ~176KB malloc 夹具超过 DTCM 128KB 堆，是跑 UT 时 HardFault 的直接来源。
+# 夹具落地区域（SDRAM / 静态段 / 优雅跳过）确定后恢复，见 docs/design/fault_capture.md。
+# TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_rebuild.c
 MODULE_INCS += $(PROJECT_ROOT)/tests/unit
 # 测试统一入口
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ut_main.c

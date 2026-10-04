@@ -1,6 +1,7 @@
 #include "sys.h"
 
 #include "delay.h"
+#include "fault.h"
 #include "usart.h"
 
 static const MPU_Region_InitTypeDef g_sys_mpu_regions[] = {
@@ -180,6 +181,8 @@ void sys_init(void)
     }
     delay_init(0U);
     usart_init(115200U);
+    /* 使能可配置故障（MemManage/BusFault/UsageFault），避免全部升级成 HardFault。 */
+    fault_init();
 }
 
 #ifdef USE_FULL_ASSERT
