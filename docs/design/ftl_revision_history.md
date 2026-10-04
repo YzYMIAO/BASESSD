@@ -1548,3 +1548,52 @@ C 档按学习主控定位（stm32h743 + MT29F4G08，非真存储主控）重新
 
 - `FC_COMMAND_MODULE_HOST_IO` 枚举保留零使用（F8/F9 上板后视需要再接线）
 - stm32h7r3 平台 usart.c 未动
+
+---
+
+## v0.48 — Block State Table 瘦身（ftl_block_t 56B → 40B）
+
+**日期**：2026-10-04
+
+### 背景
+
+AXI_RAM 使用率已达 98.2%（377.1KB/384KB），内存压力真实出现。逐字段审计 `ftl_block_t` 12 个字段后确认：**问题不是"该搬到 NAND"，而是"胖 + 字段顺序浪费对齐"**。行业对标（设计文档 §4.9.3）显示本方案 56B/项 是消费级 DRAM-less 基准（4~16B）的 3~14 倍。
+
+### 落地
+
+**① `rr` ECC 健康 16B → 3B**（`include/ftl/bst.h`、`src/ftl/read_recovery.c`）
+- 删 `ecc_history[8]` + `history_idx` + `last_update`，改单字节 `last_ecc`
+- 8 深度环形缓冲的**唯一用途**是供给趋势比较的 `prev` 一个值 → 单字节足够
+- **顺带修复 bug**：原 `prev = ecc_history[history_idx]` 取的是环形缓冲里**将被覆盖的最老格**（8 次读之前的值），与注释「上一次值」不符；`last_ecc` 语义即真正的上一次读数
+- 顺带清掉 `last_update`（4B，`gc.c:401` 写点有、读点零，且 `gc.c:407` 调用时已在传 `0U` 假值）
+- `rr_record_ecc` 签名去掉 `total_writes` 形参，3 个调用点同步（`ftl.c:115` / `gc.c:407` / `wear_leveling.c:254`）
+
+**② 字段重排**（`include/ftl/bst.h`）
+- `rr` 从 `valid_map` **之后**移到**之前**
+- 原因：`valid_map` 是 `uint64_t[PLANE_NUM]` 需 8 字节对齐；`rr` 只有 3B，留在数组之后会被尾部对齐从 40B 撑到 **48B**（白丢 8B/块 = 32KB）
+- 新增 `_Static_assert(sizeof(ftl_block_t) == 40, ...)` 编译期守卫（此前无任何尺寸断言）
+
+### 审计发现（本次保留，未处理）
+
+| 类别 | 明细 | 规模 |
+|---|---|---|
+| 死字段（写了无人读） | `last_pe_ts`、`program_count`、`bad_reason`、`gc_generation` | 8B/块 = 32KB |
+| 只写不读的状态位 | `OPEN`、`RESERVED`、`TEMP_HOT`、`TEMP_COLD`、`PRE_COND`；`EMERGENCY` 全库零引用 | — |
+| 跨重启不持久化 | `erase_count` / `read_count` / `rr` 每次 `ftl_init` 被 `memset` 归零（`ftl.c:471`）；`METADATA_TYPE_ERASE_COUNT` 定义了但零引用 | — |
+
+死字段成因：v0.32 建 BST 时按「行业 Block Info Table 标准形态」一次性把字段铺全（`c74f1ca`），标注「为后续预留」，但消费方一直未写。
+
+**持久化缺口是独立的功能问题**——磨损均衡（`erase_count`）与 read disturb（`read_count`）、慢死预测（`rr`）跨重启全部失效，需单独排期，不属于结构体重构范畴。
+
+### 验证
+
+- `make tests` 零告警零错误；`_Static_assert` 通过
+- `.bss.g_blocks`：`0x38000`(224KB) → **`0x28000`(160KB)**，精确命中预期
+- AXI_RAM：98.2% → **81.5%**（377.1KB → 313.1KB，-64KB）；总 SRAM 55.8% → 48.6%
+- **上板验证未做**（按项目规则由用户执行）
+
+### 备注
+
+- **SB 索引粒度已评估，本次不做**：`allocator.c:299` 的 `block1 = block0` 使 SB 永远配对同号物理块，两 plane 的 `erase_count`/`state`/`sb_id`/`valid_count` 天然相同，per-block 存是重复的 → 改按 SB 索引可再省 96KB（160KB → 64KB）。但 `ftl_gblock()` 是所有索引的单一入口，改动覆盖整个 FTL，且丢 per-plane 分辨率（`read_count`/`rr`）、与 BBT 的 per-physical-block 粒度不一致。设计文档 §4.9.5 选项 C 早已评估并否决，理由一致。
+- **关联问题**：`block1 = block0` 本身是简化而非行业做法（真实主控允许 SB 内每 plane 用不同物理块号）。当前同号约束导致 plane0 的坏块连坐浪费 plane1 的同号好块。与索引粒度强相关，应合并评估。
+- **rebuild 套件夹具超容未解决**：`tests/unit/test_rebuild.c` 的 245KB 夹具超 128KB DTCM 堆，本次结构体缩小不解决该独立缺陷。

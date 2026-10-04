@@ -112,7 +112,7 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                                         ecc = b;
                                     }
                                 }
-                                rr_record_ecc(&ftl->alloc.blocks[gblock].rr, ecc, ftl->total_writes);
+                                rr_record_ecc(&ftl->alloc.blocks[gblock].rr, ecc);
 
                                 /* read disturb 计数：读成功累加（周期归零由上层维护） */
                                 ftl->alloc.blocks[gblock].read_count++;

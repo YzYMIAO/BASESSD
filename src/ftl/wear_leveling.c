@@ -251,7 +251,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
                     if (rc != 0U)
                     {
                         ftl_block_t *src = &ftl->alloc.blocks[gblock_src];
-                        rr_record_ecc(&src->rr, ecc, ftl->total_writes);
+                        rr_record_ecc(&src->rr, ecc);
                         src->read_count++;
                     }
                 }

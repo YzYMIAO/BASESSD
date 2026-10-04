@@ -65,51 +65,36 @@ static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t leng
     return FTL_OK;
 }
 
-void rr_record_ecc(rr_ecc_track_t *track,
-                   uint8_t         ecc_bits,
-                   uint32_t        total_writes)
+void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits)
 {
     if (track == NULL)
     {
         return;
     }
 
-    /*
-     * 环形 buffer 写入当前 ECC bit 数。
-     * 比较新值与上一次值判断趋势。
-     */
+    /* 趋势：与上一次读数比较（last_ecc 即上次值），连续上升计数 */
+    if (ecc_bits > track->last_ecc)
     {
-        uint8_t prev = track->ecc_history[track->history_idx];
-        uint8_t idx;
+        track->rising_count++;
+    }
+    else
+    {
+        track->rising_count = 0U; /* 不上升就清空连续计数 */
+    }
+    track->last_ecc = ecc_bits;
 
-        track->ecc_history[track->history_idx] = ecc_bits;
-        idx                                    = (uint8_t)((track->history_idx + 1U) % RR_ECC_HISTORY_DEPTH);
-        track->history_idx                     = idx;
-        track->last_update                     = total_writes;
-
-        /* 趋势：连续上升计数 */
-        if (ecc_bits > prev)
-        {
-            track->rising_count++;
-        }
-        else
-        {
-            track->rising_count = 0U; /* 不上升就清空连续计数 */
-        }
-
-        /* 健康状态升级 */
-        if (track->rising_count >= RR_ECC_RISING_THRESHOLD)
-        {
-            track->health = RR_BLOCK_WARNING;
-        }
-        if (ecc_bits >= RR_ECC_HIGH_WATER)
-        {
-            track->health = RR_BLOCK_CRITICAL;
-        }
-        if (ecc_bits >= RR_ECC_MAX)
-        {
-            track->health = RR_BLOCK_DYING;
-        }
+    /* 健康状态升级 */
+    if (track->rising_count >= RR_ECC_RISING_THRESHOLD)
+    {
+        track->health = RR_BLOCK_WARNING;
+    }
+    if (ecc_bits >= RR_ECC_HIGH_WATER)
+    {
+        track->health = RR_BLOCK_CRITICAL;
+    }
+    if (ecc_bits >= RR_ECC_MAX)
+    {
+        track->health = RR_BLOCK_DYING;
     }
 }
 
@@ -421,6 +406,6 @@ void rr_retire_block(ftl_block_t *b)
     /* 健康复位：块仍活着，ECC 趋势重计（read_count 归零，read disturb 重计） */
     b->rr.health       = (uint8_t)RR_BLOCK_HEALTHY;
     b->rr.rising_count = 0U;
-    (void)memset(b->rr.ecc_history, 0, sizeof(b->rr.ecc_history));
-    b->read_count = 0U;
+    b->rr.last_ecc     = 0U;
+    b->read_count      = 0U;
 }

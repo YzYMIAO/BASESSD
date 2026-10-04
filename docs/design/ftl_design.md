@@ -168,7 +168,7 @@ BAST（Block Associative Sector Translation）和 FAST（Fully Associative Secto
 ### 2.3 SRAM 预算
 
 > **v0.32 更新**：Block State Table（BST）统一 per-block 承载后，FTL 元数据从 ~45KB 增至 ~220KB
-> （56B × 4096 = 224KB BST，含逐页有效位图 valid_map 64KB + ECC 历史 rr 64KB + 状态机/温度/计数等）。
+> （40B × 4096 = 160KB BST，含逐页有效位图 valid_map 64KB + ECC 健康 rr 12KB + 状态机/温度/计数等）。
 > 全常驻 SRAM（功能优先），剩余 ~537KB；DRAM-less 产品化裁剪路径（档三：核心 SRAM + 扩展 NAND）见 §19。
 
 | 占用方 | 大小 | 占比 |
@@ -1145,7 +1145,8 @@ TLC（3000~5000 P/E，~400GB 容量）：
 
 ## 4.9 Block State Table（BST）— 统一 per-block 结构体数组
 
-> **v0.32 新增**。实现：`include/ftl/bst.h`，`ftl_block_t[4096]`（56B/项 = 224KB，全常驻 SRAM）。
+> **v0.32 新增**。实现：`include/ftl/bst.h`，`ftl_block_t[4096]`（v0.32 为 56B/项 = 224KB；
+> v0.48 瘦身为 40B/项 = 160KB，见 §4.9.6）。全常驻 SRAM。
 
 ### 4.9.1 背景：分散 per-block 元数据的统一
 
@@ -1181,10 +1182,10 @@ typedef struct {
     uint8_t        bad_reason;           /* 1B  @16  坏块原因 */
     uint8_t        gc_generation;        /* 1B  @17  GC 搬移代数 */
     uint16_t       sb_id;                /* 2B  @18  block→SB 反向索引 */
-    uint16_t       _pad;                 /* 2B  @20  对齐 */
+    rr_ecc_track_t rr;                   /* 3B  @20  ECC 健康（last_ecc/rising/health） */
+    uint8_t        _pad;                 /* 1B  @23  对齐（valid_map 需 8B 对齐） */
     uint64_t       valid_map[PLANE_NUM]; /* 16B @24  per-Plane 逐页有效位图 */
-    rr_ecc_track_t rr;                   /* 16B @40  ECC 健康历史 */
-} ftl_block_t;                           /* 56B → 4096×56 = 224KB */
+} ftl_block_t;                           /* 40B → 4096×40 = 160KB */
 ```
 
 **`state` 位域**（bitmask 宏 + 访问器，非 C 位域——嵌入式可移植）：
@@ -1208,12 +1209,12 @@ bit8  EMERGENCY  bit9-15 预留
 | 温度 | block 级 HOT/COLD 位 | block 级温区位 | 多级温度流 |
 | read disturb | `read_count` 2B（预铺） | 部分有 | 有（读计数触发搬移） |
 | 反向索引 | `sb_id` | 有（SB→block + block→SB） | 有 |
-| ECC 健康 | `rr` 8 深度历史 | 健康度等级 | 全历史落 DRAM |
-| 每项内存 | 56B | 4~16B（压缩版） | 数百 B（DRAM 不心疼） |
+| ECC 健康 | `rr` 上次值 + 趋势计数（3B） | 健康度等级 | 全历史落 DRAM |
+| 每项内存 | 40B | 4~16B（压缩版） | 数百 B（DRAM 不心疼） |
 | 存储 | **全常驻 SRAM** | 核心 SRAM + 扩展 NAND | 全 DRAM 常驻 |
 
 **选择理由**：行业 BIT 字段全、粒度物理块、VPC+bitmap 双承载；本方案全字段对齐，
-但当前**全常驻 SRAM**（功能优先，224KB 放得下）。产品化裁剪路径见 §19（档三）。
+但当前**全常驻 SRAM**（功能优先；v0.48 瘦身后 160KB）。产品化裁剪路径见 §19（档三）。
 
 ### 4.9.4 维护点（全真值，缺一不可）
 
@@ -1240,6 +1241,29 @@ bit8  EMERGENCY  bit9-15 预留
 | C：按 Super Block 组织 | SB 级语义集中 | 擦除/坏块/ECC 是物理块级事实，需重映射全部索引；改动最大 |
 
 **结论**：A 符合行业 BIT（物理块粒度）与 DRAM-less 单数据源纪律。
+
+### 4.9.6 v0.48 瘦身（56B → 40B）
+
+逐字段审计后只做两件事，收益 224KB → 160KB（AXI_RAM 98.2% → 81.5%）：
+
+**① `rr` 16B → 3B**：8 深度环形缓冲的唯一用途是供给趋势比较的 `prev` 一个值，
+改成单字节 `last_ecc` 即可。**顺带修复一个 bug**——原 `prev = ecc_history[history_idx]`
+取的是环形缓冲里**将被覆盖的最老格**（8 次读之前的值），与注释「上一次值」不符；
+`last_ecc` 语义即真正的上一次读数。同时清掉 `last_update`（4B，写点有、读点零）。
+
+**② 字段重排**：`rr` 移到 `valid_map` **之前**。`valid_map` 是 `uint64_t[PLANE_NUM]`，
+需 8 字节对齐；`rr` 只有 3B，若留在数组之后会被尾部对齐从 40B 撑到 48B（白丢 8B/块 = 32KB）。
+
+**审计发现（本次保留，未处理）**：
+
+| 类别 | 明细 |
+|---|---|
+| 死字段（写了无人读） | `last_pe_ts`(4B)、`program_count`(2B)、`bad_reason`(1B)、`gc_generation`(1B) |
+| 只写不读的状态位 | `OPEN`、`RESERVED`、`TEMP_HOT`、`TEMP_COLD`、`PRE_COND`；`EMERGENCY` 全库零引用 |
+| 跨重启不持久化 | `erase_count` / `read_count` / `rr` 每次 `ftl_init` 被 `memset` 归零（`ftl.c:471`）；`METADATA_TYPE_ERASE_COUNT` 定义了但零引用 |
+
+若后续砍掉 4 个死字段，可再降 8B/块 → 32B → 128KB。
+持久化缺口是**独立的功能问题**（磨损均衡与 read disturb 跨重启失效），需单独排期。
 
 ---
 
@@ -3898,7 +3922,7 @@ if (NAND_SUCCESS && buffer == NULL)   // 写完成
 
 | 项 | 现状（全常驻） | 产品化（档三） |
 |---|---|---|
-| SRAM BST | 224KB | ~100KB（核心 40KB + valid_map 64KB） |
+| SRAM BST | 160KB（v0.48 瘦身后） | ~100KB（核心 40KB + valid_map 64KB） |
 | 扩展字段 | SRAM 常驻 | NAND 持久化 |
 | 适用 | 功能验证阶段 | 产品化裁剪 |
 
@@ -3908,7 +3932,8 @@ if (NAND_SUCCESS && buffer == NULL)   // 写完成
 SRAM 核心（~40KB）：erase_count + valid_count + state + bad_reason + sb_id + read_count
 SRAM valid_map（64KB，保持性能）：GC 迁移免 NAND 读（P-C.5）
 NAND 扩展表（ftl_block_ext_t[]，SRAM 不占）：
-    program_count + last_pe_ts + gc_generation + rr 完整历史
+    program_count + last_pe_ts + gc_generation
+    （rr 已于 v0.48 瘦身为 3B，无需外置）
 ```
 
 ```c

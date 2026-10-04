@@ -40,20 +40,19 @@ typedef enum
     RR_BLOCK_DYING    = 3, /* 预计即将坏块，准备搬移 */
 } rr_block_health_t;
 
-/* ECC 历史深度（自 read_recovery.h 迁入的常量） */
-#define RR_ECC_HISTORY_DEPTH (8U) /* 每个 Block 追踪最近 8 次 ECC */
-
-/* ── ECC 历史记录（per-Block，自 read_recovery.h 迁入）──
+/* ── ECC 健康记录（per-Block，自 read_recovery.h 迁入）──
  * 消费方：ftl_handle_completion 读成功后 rr_record_ecc；
- *         rr_check_predictive / rr_get_health 查询健康度。 */
+ *         rr_check_predictive / rr_get_health 查询健康度。
+ *
+ * 只保留「上一次 ECC bit 数」而非 N 深度环形缓冲：趋势判定（连续上升）
+ * 只需与上一次比较，8 格环形缓冲实际供给的是最老那格的值（本次一并修复）。
+ * 16B → 3B，4096 块省 52KB。 */
 typedef struct
 {
-    uint8_t  ecc_history[RR_ECC_HISTORY_DEPTH]; /* 最近 N 次 ECC bit 计数 */
-    uint8_t  history_idx;                       /* 环形 buffer 写指针 */
-    uint8_t  rising_count;                      /* 连续上升计数 */
-    uint8_t  health;                            /* rr_block_health_t */
-    uint32_t last_update;                       /* 上次更新（写入次数/时间戳） */
-} rr_ecc_track_t;                               /* 16B */
+    uint8_t last_ecc;     /* 最近一次读的 ECC bit 数 */
+    uint8_t rising_count; /* 连续上升计数（不上升即清零） */
+    uint8_t health;       /* rr_block_health_t */
+} rr_ecc_track_t;         /* 3B */
 
 /* ── ftl_block_t 状态位（bitmask 宏，非 C 位域——
  *   嵌入式可移植（位域布局实现定义），支持位运算，配访问器） ── */
@@ -104,7 +103,7 @@ enum
  *   valid_map     per-Plane 逐页有效位图（bit p = 该 plane 第 p 页有效），
  *                 GC/WL 迁移直接扫置位页搬移，免 NAND 读——落地
  *                 设计文档 P-C.5「反向映射 bitmap」。
- *   rr            ECC 健康历史（合并 rr_block_track，read recovery 供电）
+ *   rr            ECC 健康（last_ecc + rising_count + health，read recovery 供电）
  *
  *   维护点（全真值）：
  *     ① 写成功：新页置位 + VPC++；覆盖写清旧页（old_pba）+ VPC--；program_count++
@@ -115,7 +114,11 @@ enum
  *     ⑥ 坏块：置 BAD + clear_valid + bad_reason
  *     ⑦ 掉电恢复：写指针扫描重建 bitmap（power_failure_recovery）
  *
- *   sizeof = 56B → 4096 项 = 224KB（全常驻 SRAM；档三分层见文档）。
+ *   字段顺序：rr 必须排在 valid_map **之前**。valid_map 是 uint64_t 数组，
+ *   需要 8 字节对齐；rr 只有 3B，若留在数组之后，结构体会被尾部对齐从 40B
+ *   撑到 48B（白丢 8B/块 = 32KB）。前移后 valid_map 仍落在 @24。
+ *
+ *   sizeof = 40B → 4096 项 = 160KB（全常驻 SRAM；档三分层见文档 §19）。
  */
 typedef struct
 {
@@ -131,14 +134,17 @@ typedef struct
     uint8_t  bad_reason;    /* 1B  @16  坏块原因（独立字段） */
     uint8_t  gc_generation; /* 1B  @17  GC 搬移代数 */
     uint16_t sb_id;         /* 2B  @18  block→SB 反向索引（UINT16_MAX=无） */
-    uint16_t _pad;          /* 2B  @20  对齐补 */
+
+    /* ── ECC 健康（必须在 valid_map 之前，见上方字段顺序说明）── */
+    rr_ecc_track_t rr;   /* 3B  @20  ECC 健康 */
+    uint8_t        _pad; /* 1B  @23  对齐补（valid_map 需 8B 对齐） */
 
     /* ── 逐页有效位图 ── */
     uint64_t valid_map[PLANE_NUM]; /* 16B @24  per-Plane 逐页有效位图 */
-
-    /* ── ECC 健康 ── */
-    rr_ecc_track_t rr; /* 16B @40  ECC 健康历史 */
 } ftl_block_t;
+
+/* 布局守卫：字段顺序/类型漂移会让结构体悄悄变大，编译期拦住。 */
+_Static_assert(sizeof(ftl_block_t) == 40, "ftl_block_t 布局漂移（期望 40B）");
 
 /* ── 全局 Block 号转换（单点，修复 per-plane 碰撞的关键）── */
 

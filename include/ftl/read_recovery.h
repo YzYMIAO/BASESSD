@@ -32,7 +32,7 @@
  */
 
 #include "ftl/allocator.h"
-#include "ftl/bst.h" /* rr_ecc_track_t, rr_block_health_t, RR_ECC_HISTORY_DEPTH, ftl_block_t */
+#include "ftl/bst.h" /* rr_ecc_track_t, rr_block_health_t, ftl_block_t */
 #include "ftl/ftl_type.h"
 #include "ftl/l2p_cache.h"
 #include "nand/nand_config.h"
@@ -71,16 +71,13 @@ typedef struct
 /*
  * rr_record_ecc - 记录一次读取的 ECC bit 数，更新趋势
  *
- * 企业级做法：每次 read 完成后记录 ecc_bits，
+ * 每次 read 完成后记录 ecc_bits，与上一次读数比较：
  * 连续上升 → warning → critical → 触发搬移。
  *
- * @param track       per-Block ECC 追踪（&ftl->alloc.blocks[gblock].rr）
- * @param ecc_bits    本次读取的 ECC 纠正 bit 数（取 4 CW 中的最大值）
- * @param total_writes 当前写入总次数（用于时间戳）
+ * @param track    per-Block ECC 追踪（&ftl->alloc.blocks[gblock].rr）
+ * @param ecc_bits 本次读取的 ECC 纠正 bit 数（取 4 CW 中的最大值）
  */
-void rr_record_ecc(rr_ecc_track_t *track,
-                   uint8_t         ecc_bits,
-                   uint32_t        total_writes);
+void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits);
 
 /*
  * rr_recover_read - 读取失败后的恢复尝试
@@ -148,7 +145,7 @@ int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock);
  * 有效数据已由调用方搬走，本函数：
  *   - 状态机：清 OPEN/CLOSED/FREE/TEMP，置 RESERVED（Spare Pool 语义）
  *   - 清反向索引 sb_id → NO_SB
- *   - 复位 rr 健康（health=HEALTHY、rising_count=0、ecc_history 清 0、read_count=0）
+ *   - 复位 rr 健康（health=HEALTHY、rising_count=0、last_ecc=0、read_count=0）
  *     块仍可读（ECC 能纠），只是不再当新块分配。
  *
  * @param b 目标物理块
