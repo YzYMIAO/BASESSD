@@ -302,7 +302,7 @@ typedef struct {
 | `include/fc/fc.h` | 类型、宏、资源池配置、功能开关、资源统计结构 + `#include "fc_interface.h"` |
 | `include/fc/fc_interface.h` | 对外函数声明（18 个，6 组：①初始化 ②命令生命周期 ③buffer 访问 ④数据便利 ⑤查询工具 ⑥服务入口） |
 | `include/fc/fc_internal.h` | fc.c ↔ fc_interface.c 共享内部签名（`fc_t` 定义、`g_fc_controller` extern、`fc_*_internal` 声明）——FTL 不得 include |
-| `src/fc/fc.c` | 核心实现：三池、生命周期状态机、`fc_poll_internal` 服务主循环、`fc_complete_from_nand`、Stripe RAID（全部 `_internal`） |
+| `src/fc/fc.c` | 核心实现：三池、生命周期状态机、`fc_poll_internal` 服务主循环（拆为 `fc_poll_dispatch_single` / `fc_poll_dispatch_chain` + `fc_build_dispatch_request` / `fc_fill_cw_meta_paa` / `fc_poll_fail_command` 五个 static helper）、`fc_complete_from_nand`、Stripe RAID（全部 `_internal`） |
 | `src/fc/fc_interface.c` | 对外函数实现：薄壳（参数校验 + 转发 internal） |
 
 ```c
@@ -393,24 +393,24 @@ fc_service()
   │     └─ 无命令可取 → 返回（调用方稍后重试）
   │     └─ 取到 → 按 count 分派：
   │
-  ├─ 分支 A：count == 1（单命令）
+  ├─ 分支 A：count == 1 → fc_poll_dispatch_single()
   │     ├─ 校验 QUEUED → 置 ACTIVE
-  │     ├─ page write → 写 PAA 到 CW META 区 → fc_data_path_encode()
+  │     ├─ page write → fc_fill_cw_meta_paa() → fc_data_path_encode()
   │     ├─ raid=ENCODE → fc_stripe_submit()        ← 图 12
-  │     ├─ 预解析 desc 链 → request：
+  │     ├─ fc_build_dispatch_request() → request：
   │     │    ├─ 单 plane：cws[0][cw] 顺序填
   │     │    ├─ multi_plane：按 desc.paa 的 plane 分桶填
   │     │    ├─ ERASE：只填 cws[0][0].paa, buffer=NULL
   │     │    └─ SET/GET_FEATURES：buffer = &command->parameter0
   │     └─ nand_dispatch_submit(&request)          ← 入队即返回
   │
-  └─ 分支 B：count >= 2（链式命令）
+  └─ 分支 B：count >= 2 → fc_poll_dispatch_chain()
         ├─ 逐条：校验 / 置 ACTIVE / page write 则 encode
-        ├─ 构建 reqs[0..count-1]
+        ├─ 逐条 fc_build_dispatch_request() → reqs[0..count-1]
         └─ nand_dispatch_submit_chain(reqs, count) ← 原子入队
 ```
 
-**要点**：一次 `fc_service()` 要么推进完成并立即返回，要么提交一批新命令——两件事不交叉。提交只占住目标 LUN，完成由后续 `fc_service()` 推进。
+**要点**：一次 `fc_service()` 要么推进完成并立即返回，要么提交一批新命令——两件事不交叉。提交只占住目标 LUN，完成由后续 `fc_service()` 推进。两条分支的失败兜底统一走 `fc_poll_fail_command()`（合成 NAND_FAIL 完成项）。队列状态寄存器 `fc_register_queue_state()` **逐点刷新**（各分支内联调用，与拆分前位置一一对应，共 13 处）——注意**校验失败早退的那条不刷新**：`fc_scheduler_select_chain()` 成功时已把命令从 HSQ/SQ 弹出，此处寄存器保持陈旧值，属既有行为，不可"顺手统一"。行为不对称：META/PAA 预填只在单命令路径（分支 A），链式路径不做。
 
 ---
 
@@ -553,7 +553,7 @@ CHECK_FAIL 检查 `completion->nand_status & 0x01`（NAND 状态寄存器的 FAI
 
 ```
 nand_engine_execute()  —— 同步模式，阻塞直到完成
-nand_engine_start()    —— 异步模式，初始化状态机
+nand_engine_start()    —— 异步模式，复位游标并推进第一步（state 须先绑定 backend/request/completion）
 nand_engine_step()     —— 异步模式，推进一步，返回 NOT_READY 表示需继续轮询
 ```
 
@@ -573,7 +573,7 @@ step(state)
        │
        ├─ uop.type == JUMP_IF_NOT_READY（引擎直接处理，不经 handler）
        │    ├─ nand_status & READY bit6 → uop_index++（推进）
-       │    └─ busy → 双超时判定：
+       │    └─ busy → wait_latch() 锁存起点 → wait_timeout() 双超时判定：
        │         DWT elapsed > busy_timeout_us  或
        │         wait_polls ≥ busy_timeout_us
        │           ├─ 超时 → active=0，返回 TIMEOUT
@@ -581,14 +581,16 @@ step(state)
        │
        ├─ 其余 UOP → handler = backend->handlers[uop->type]
        │    ├─ handler == NULL → INVALID_ARGUMENT
-       │    └─ WAIT_READY 首次进入：记录 DWT 起点（与 JUMP 共用计时）
+       │    └─ WAIT_READY 首次进入：wait_latch() 记录 DWT 起点（与 JUMP 共用计时）
        │         result = handler(...)
-       │           ├─ OK → uop_index++，清零 wait 状态，continue（一步多推进）
-       │           ├─ NOT_READY → WAIT_READY 额外双超时检测；让出
+       │           ├─ OK → uop_log_ok() 白名单日志；uop_index++，清零 wait 状态，continue
+       │           ├─ NOT_READY → WAIT_READY 额外 wait_timeout() 检测；让出
        │           └─ 其他 → active=0，返回错误
        │
        └─ 循环跑满无 END → 非法序列
 ```
+
+**三个 static helper**（`nand_engine.c`）：`wait_latch` 一次性锁存 DWT 起点（JUMP 与 WAIT_READY 共用）、`wait_timeout` 饱和递增 `wait_polls` 后判双条件、`uop_log_ok` 按类型白名单打成功日志。抽出的目的是让 `step` 只留解释器骨架——END / JUMP 是控制流（不查表），其余一律走 handler 表；同时也消掉了原先 JUMP 与 WAIT_READY 两处逐字重复的锁存/超时块。
 
 **协作式让出**：`NOT_READY` 是"让出点"——引擎不阻塞，上层 `while(NOT_READY) step()`（同步 `nand_engine_execute`）或由 dispatch 轮询推进（异步 `start/step`）。
 
@@ -724,11 +726,12 @@ typedef struct {
 } nand_fc_completion_t;
 
 // 事务状态（异步模式）
+// backend / active 不另存，统一走 engine.backend / engine.active；
+// engine.request / engine.completion 由 nand_dispatch_task_load 一次性绑定到下面两个存储体
 typedef struct {
     nand_engine_state_t engine;
     nand_command_request_t request;
     nand_command_completion_t completion;
-    uint8_t active;
 } nand_fc_transaction_t;
 ```
 
@@ -809,7 +812,7 @@ for channel = cursor..(cursor+CH_NUM-1)
   │         started==0 → task_start()（req_table 构建 + nand_fc_start）
   │                      （ISSUE 型置 phase=ISSUE；否则 FETCH）
   │                      ASYNC → WAIT；同步完成则 consume_match() 消费 entry
-  │         started!=0 → transaction.active ? nand_fc_step
+  │         started!=0 → transaction.engine.active ? nand_fc_step
   │                                     : 用已存的 execution_status
   │         ASYNC → WAIT（等下一轮）
   │         phase==ISSUE → task_complete → phase=ISSUED
@@ -2099,7 +2102,7 @@ if ((nand_operation_has_data((uint8_t)command->config.operation) == 0U) ||
 }
 ```
 
-`fc_poll_internal()` (fc.c) — 构造 dispatch request 时直接指向 command parameter 地址：
+`fc_build_dispatch_request()` (fc.c) — 构造 dispatch request 时直接指向 command parameter 地址：
 
 ```c
 request.parameter[0] = (uint8_t)command->parameter0;
@@ -2420,11 +2423,11 @@ fc_scheduler_select_chain():
   4. 一次性弹出整链 → chain={ids: [A, B, C], count=3}
                               │
                               ▼
-fc_poll_internal():
+fc_poll_internal() → fc_poll_dispatch_chain():
   for i=0..2:
-    fc_command_validate(command_i)  → 合法性检查
-    resolve descriptor chain        → 预解析 PAA/buffer
-    reqs[i] = { … }
+    校验 QUEUED → 置 ACTIVE
+    page write 则 fc_data_path_encode()   ← 注意：链式路径不做 META/PAA 预填
+    fc_build_dispatch_request(cmd_i) → reqs[i] = { … }
   nand_dispatch_submit_chain(reqs, 3)
                               │
                               ▼
@@ -3027,7 +3030,7 @@ FMC 总线 (地址/数据/控制线共用)
 | `nand_engine_backend_t` 数组化 | `backend[CH_NUM]`，每通道独立 handler table | ✅ 已完成（`nand_fmc_init_instance` 每实例一份 backend） |
 | `nand_fmc_exec_wait_ready` 多实例 | 每个 backend 有独立 RB 中断资源 | 中（需多 EXTI） |
 | DMA 资源化 | 每通道独立 DMA Stream 或排队传输 | 中 |
-| `nand_engine_state_t` 加通道 id | step 中知道自己操作的通道 | 小（现依赖 transaction->backend 透传） |
+| `nand_engine_state_t` 加通道 id | step 中知道自己操作的通道 | 小（现依赖 engine.backend 透传） |
 | FMC 总线仲裁 | 多通道共享总线时的冲突避免 | 大（需加锁或排队） |
 
 ### 18.6 验证结论
@@ -3040,7 +3043,7 @@ FMC 总线 (地址/数据/控制线共用)
 | FMC 后端 | ✅ 已数组化（仅 (0,0,0) 实例配置） | ❌ 多实例无法（单 NAND） |
 | RB 中断 | ❌ 单 EXTI | ❌ 无法 |
 | DMA | ❌ 单对 Stream | ❌ 无法 |
-| 引擎状态机 | ⚠️ 无通道 id，靠 transaction->backend 透传 | ⚠️ 单通道可运行 |
+| 引擎状态机 | ⚠️ 无通道 id，靠 engine.backend 透传 | ⚠️ 单通道可运行 |
 
 **结论**：调度层和 dispatch 层的多通道架构是真实的。FMC/NAND 引擎层需要改造才能真正支持多通道。
 
@@ -3169,7 +3172,7 @@ LUN 1:                                                   ← FETCH(Dout)
 总耗时 ≈ tR + FETCH，而非 2×(tR+FETCH)
 ```
 
-配对 OP 码（`nand_operation_map_t.pair_op`）：LOAD↔FETCH、ISSUE↔WAIT；原子 OP 的 pair_op 取自身（不切分）。多 LUN 场景 `fc_poll_internal` 自动把 splittable 命令拆成 ISSUE（`nand_operation_is_splittable`）。
+配对 OP 码（`nand_operation_map_t.pair_op`）：LOAD↔FETCH、ISSUE↔WAIT；原子 OP 的 pair_op 取自身（不切分）。多 LUN 场景 `fc_build_dispatch_request()` 在填完 request 后自动把 splittable 命令拆成 ISSUE（`nand_operation_is_splittable`），单命令与链式两条路径共用这一处转换。
 
 ### 17.10 设计演进
 
@@ -3414,7 +3417,7 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
 |----|------|---------|
 | 图 0 | 分层架构与数据流总览 | `grep -rn "nand_dispatch_submit" src/fc/fc.c` |
 | 图 1 | 命令生命周期 | `grep -n "fc_command_alloc\|fc_submit\|fc_command_release" include/fc/fc.h` |
-| 图 2 | fc_service() 主循环 | `grep -n "fc_poll_internal" src/fc/fc.c` |
+| 图 2 | fc_service() 主循环 | `grep -n "fc_poll_internal\|fc_poll_dispatch_\|fc_build_dispatch_request" src/fc/fc.c` |
 | 图 3 | CW 布局与数据处理范围 | `grep -n "FC_BUFFER_USER_OFFSET\|fc_buffer_get_base" include/fc/fc.h src/fc/fc.c` |
 | 图 4 | 写路径编码（Page Pack） | `grep -n "fc_data_path_encode" src/fc/fc_data_path.c` |
 | 图 5 | 读路径解码（Page Unpack） | `grep -n "fc_data_path_process_read\|fc_data_path_raid_recover" src/fc/fc_data_path.c` |
