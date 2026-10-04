@@ -1290,3 +1290,175 @@ NAND_DISPATCH_CW_ASYNC / NAND_DISPATCH_CW_DONE
 - **终止性**：`phase1_lun` 的 `while(1)` 唯一 `continue` 在 `chain_advance` 之后，必 `cursor++`，`count ≤ NAND_DISPATCH_CHAIN_DEPTH(4)`，最多 4 圈必达链尾。
 - **编译**：`make` / `make tests` 均零警告零错误；二进制 86936 字节，与拆分前一致。
 - **上板回归**：待用户执行（重点：单命令读写、多 CW 普通读、多 plane 读、擦除 ISSUE→ISSUED + `min_busy_us`、Read Retry 链）。当前无 nand_dispatch 专项 UT，FC 测试经 `fc_submit → nand_dispatch_poll` 间接覆盖。
+
+---
+
+## Phase T: 引擎上下文三指针上收 — nand_engine_start 6 参 → 3 参
+
+**日期**: 2026-10-04
+
+### 背景
+
+`nand_fc_start` 里这行调用有 6 个参数，读起来费劲：
+
+```c
+result = nand_engine_start(&transaction->engine, transaction->backend, map->uops, &map->timing,
+                           &transaction->request, &transaction->completion);
+```
+
+根因不在"参数多"，而在**状态存了两份**：`nand_fc_transaction_t` 内嵌了一个 `nand_engine_state_t`，却又在自己身上平铺了 `backend` / `active` 两个字段，与 `engine.backend` / `engine.active` 完全重复，全靠手工同步（`nand_fc_start` 里 `transaction->active = 1U`、`task_load` 里 `transaction->backend = task->backend`）。6 个参数里有 4 个是"把重复字段再传回引擎"。
+
+### 改动
+
+| 文件 | 变更 |
+|------|------|
+| `include/nand/nand_fc_interface.h` | 删 `nand_fc_transaction_t.backend` / `.active` 两个重复字段 |
+| `include/nand/nand_engine.h` | `nand_engine_start(state, backend, uops, timing, request, completion)` → `(state, uops, timing)` |
+| `src/nand/nand_engine.c` | `start` 不再 `*state = {0}` 整体清零，改为逐个复位游标/超时/active，保留已绑定的 backend/request/completion；`nand_engine_execute` 改用指定初始化器自行绑定三指针 |
+| `src/nand/nand_mt29f4g08abadawp.c` | `nand_fc_start` / `nand_fc_step` 的 `transaction->active` → `transaction->engine.active`；`transaction->backend` → `transaction->engine.backend` |
+| `src/nand/nand_dispatch.c` | `nand_dispatch_task_load` 一次性绑定 `engine.backend/request/completion`（地址随事务固定，只绑一次） |
+| `docs/design/fc_nand_design.md` | 结构体定义、流程图、多通道差距表同步 |
+
+### 设计要点
+
+- **指针归属**：`engine.request` / `engine.completion` 指向 transaction 自己的两个存储体，`engine.backend` 指向 per-LUN 后端。三者在 `nand_dispatch_task_load` 绑定一次，地址随 task slot 固定，之后 `start` 只管复位游标。
+- **清零语义必须改**：原实现 `*state = (nand_engine_state_t){0}` 会把调用方刚绑好的三指针一起清掉，所以 start 必须先接后清。现在改为**显式逐个复位** 8 个游标/超时/active 字段——与原整体清零等价（原清零的 11 个字段里，另 3 个正是保留项）。
+- **`active` 兜底清除保留**：`nand_engine_step` 的 6 条返回路径里有 3 条（入参校验 / 非法 UOP 码 / handler 缺失）不清 `active`，故 `nand_fc_start` 在 `result != NOT_READY` 时统一清一次——把原来的 if/else-if 两支合并成单支，语义不变（OK 时重复清一次无副作用）。
+- **`nand_engine_execute`（@deprecated，仅 nand_init 用）** 用指定初始化器补上三指针，其余字段由 C 的零初始化补齐，行为与原来一致。
+
+### 验证
+
+- `make` / `make tests` 零警告零错误；固件二进制 86936 → **86904 字节**（-32，去掉重复字段的赋值与存储）。
+- 行为等价性：三处 API 变更均为"把已存在的状态换个存放位置"，未改任何判定条件；`active` 的读写点一一对应平移。
+- **上板回归待执行**：本次动到 `active` 的语义归属，上板时重点看 `nand_fc_step` 的 active 判定路径（单命令读/写、擦除 ISSUE→ISSUED、多 CW 读、Read Retry 链）。
+
+---
+
+## Phase U: nand_engine_step 忙等/日志装饰抽 helper
+
+**日期**: 2026-10-04
+
+### 背景
+
+`nand_engine_step()` 的**主分派本来就是表驱动**（`state->backend->handlers[uop->type]`，14 个 UOP 类型一张表）。"判断太多"的观感来自另外三类混在循环体里的东西：
+
+| 分支 | 性质 | 处理 |
+|------|------|------|
+| `END` → 终止循环返回状态 | 引擎控制流 | **保留**（表项是"干活"的，这个是"结束"） |
+| `type >= NAND_UOP_COUNT` | 边界检查 | 保留 |
+| `JUMP_IF_NOT_READY` → 改 `uop_index` | 引擎控制流 | 保留 |
+| `handler == NULL` | 防御性检查 | 保留（给非 FMC 后端留的） |
+| WAIT_READY 调前锁存 DWT 起点 | 类型特化装饰 | → `wait_latch()` |
+| OK 时的日志白名单 | 类型特化装饰 | → `uop_log_ok()` |
+| NOT_READY 时 WAIT_READY 超时 | 类型特化装饰 | → `wait_timeout()` |
+
+前四行是解释器骨架，换任何写法都消不掉——除非让 handler 返回控制码（CONTINUE/JUMP/TERMINATE），但那只是把 switch 从"按类型"挪到"按返回码"，分支数不变，还把控制流藏进间接调用里，上板调试更难。
+
+**未采用方案**：再加一张 `g_nand_uop_attrs[NAND_UOP_COUNT]` 属性位表。三个特化只涉及 2 个类型（WAIT_READY 独占 2 个），且属性表**漏填 = 静默无标志**（handler 表漏填会被 `handler == NULL` 当场抓住）——把"编译期/上电即查的错"换成"上板才炸的错"，不划算。
+
+### 改动
+
+`src/nand/nand_engine.c` 新增 3 个 `static`，`nand_engine_step` 循环体只剩骨架：
+
+| helper | 职责 | 消掉的重复 |
+|--------|------|-----------|
+| `nand_engine_wait_latch(state)` | 一次性锁存 DWT 起点 + `wait_polls` 清零；已锁存则直接 OK | JUMP 与 WAIT_READY 两处**逐字重复的 8 行** |
+| `nand_engine_wait_timeout(state, op_name)` | `wait_polls` 饱和 +1 后判 DWT/计数双条件；超时清 `active` | 两处几乎相同的双条件超时块（原只差日志文案） |
+| `nand_engine_uop_log_ok(state)` | 按类型白名单打 OK 日志 | 循环体内的 11 行白名单 |
+
+顺带修掉一处**死条件**：原白名单里的 `NAND_UOP_END` 永远不成立——`END` 在进入 handler 之前就无条件 `return` 了，到不了成功分支。
+
+### 设计要点
+
+- **零语义变化**：三处全是纯提取，判定条件、执行顺序、副作用一一对应。`wait_timeout` 的 `op_name` 参数只为日志文案，拼出的字符串与原来逐字相同（`"nand: JUMP_IF_NOT_READY timeout ..."` / `"nand: WAIT_READY timeout ..."`）。
+- **锁存顺序保持**：`wait_latch`（可能清 `wait_polls`）必须在 `wait_timeout`（递增 `wait_polls`）之前，两处调用点顺序一致。
+- **`active` 兜底清除保留**：`wait_latch` 失败时清 `active` 后返回 `INVALID_ARGUMENT`，与原两处一致。
+
+### 验证
+
+- `make` / `make tests` 零警告零错误。
+- 固件二进制 86904 → **86840 字节**（-64，重复的锁存/超时块合并）。
+- **上板回归待执行**：本次动到忙等超时路径，重点看擦除/编程的 `WAIT_READY` 超时判定与 70h 轮询循环（`JUMP_IF_NOT_READY`）。
+
+---
+
+## Phase W: nand_fmc.c 长签名前向声明清理
+
+**日期**: 2026-10-04
+
+> 跳号说明：字母 V 已被代码里的 **"Phase V"（多 LUN 并发）** 概念占用（`nand_dispatch_internal.h` / `nand_fmc.h` / `fc.c` 等 10+ 处注释），故本节用 W，避免与既有概念撞名。
+
+### 背景
+
+`nand_fmc.c` 里 12 个 UOP handler 共用同一个 `nand_uop_handler_t` 契约（5 个参数）。其中两个纯外观瑕疵：
+
+1. **12 条前向声明**（原 `:35-46`）只是为了在 `:56` 的调度表里引用它们，每条都是 198 字符的长签名，还要挂 `__attribute__((used))`。
+2. **`row_0` / `row_1` / `row_2` 里的 `(void)uop;` 是死语句**——这三个函数紧接着就用 `uop->operand` 当 plane 下标。
+
+### 改动
+
+| 位置 | 变更 |
+|------|------|
+| 文件开头 | 删 12 条 handler 前向声明（含 `__attribute__((used))`），换成 **1 条调度表前向声明** |
+| 文件末尾 | `g_nand_fmc_handlers` 表定义从开头移到最后一个 handler（`nand_fmc_exec_delay_us`）之后 |
+| `row_0/1/2` | 删 3 行死的 `(void)uop;` |
+
+净减 **11 条 198 字符长签名**。
+
+### 设计要点
+
+- **为什么可以后置定义**：表定义在 handler 之后，handler 的**定义即声明**，编译器此时已见过全部 12 个符号，不再需要前向声明；也因此不需要 `__attribute__((used))`（符号被表引用，本来就不会判"未使用"）。
+- **为什么开头还留一条表前向声明**：`nand_fmc_init_instance()`（`inst->backend.handlers = g_nand_fmc_handlers;`）在 handler 定义之前就要用这张表，所以表本身仍需前置声明。这是 `static const` 的**暂定定义**（tentative definition）+ 后置带初始化器的定义，C 标准允许；已确认在项目全部警告开关（含 `-Wredundant-decls`）下零警告。
+- **表长度不变**：`nm` 实测符号 `g_nand_fmc_handlers` = **0x38 = 56 字节 = 14 × 4**，与枚举 `NAND_UOP_COUNT` 一致，`[JUMP_IF_NOT_READY] = NULL` 保留。
+
+### 验证
+
+- `make` / `make tests` 零警告零错误。
+- 固件二进制 **86840 字节，与改动前完全一致**——纯搬运 + 删死语句，零代码变化。
+- 反汇编抽查：`nand_fmc_exec_row_0` 机器码逐字节不变（`ldr r3,[r0,#8] / ldr r1,[r1,#4] / add.w r2,r2,r1,lsl#2 / ldrb r2,[r2,#4] / strb r2,[r3,#0] / movs r0,#0 / bx lr`）。
+- 顺带补上文件末尾缺失的换行符。
+
+---
+
+## Phase X: fc.c 按职责重排 + fc_poll_internal 拆分
+
+**日期**: 2026-10-04
+
+### 背景
+
+`src/fc/fc.c` 1520 行，函数按"写入时间"而非"职责"排列，且 `fc_poll_internal` 单函数 **425 行**。两个具体问题：
+
+1. **顺序混乱**
+   - `#include <stddef.h>/<string.h>` 落在第 86-87 行——夹在 `fc_is_page_write` 和静态资源区之间，两个函数之后。
+   - `fc_command_id_is_valid` 孤悬在 ID→指针转换器中间；getter 簇楔在静态数据区与 ID 转换器之间。
+   - `fc_command_release_internal_api`（`:1496`）与其同类 `fc_command_resources_rollback`（`:459`）相隔 1000 行。
+   - `fc_complete_internal`（`:1457`）定义在 `fc_complete_from_nand`（`:652`）**之后 800 行**，靠 `:37-38` 一条前向声明兜着。
+2. **poll 过长**：单命令路径（`:1076-1279`）与链式路径（`:1280-1447`）各有一份**近似重复**的 request 构建（约 130 行 ×2），外加 6 处逐字重复的"合成失败完成项"。
+
+### 改动
+
+| 位置 | 变更 |
+|------|------|
+| 文件开头 | `#include <stddef.h>/<string.h>` 上移并入 include 块；删 `fc_complete_internal` 前向声明；补 10 个分区 banner + 文件结构说明 |
+| 全文 | 按 10 个职责分区重排：静态资源 / 查询转换工具 / 初始化 / 资源分配回滚 / 命令配置 / 提交 / 完成 / Stripe RAID / 调度轮询 / CQ 出口。**定义顺序 = 依赖顺序**，全文件零前向声明 |
+| `fc_poll_internal` | 425 行 → **~60 行骨架**；两条提交路径拆成 `fc_poll_dispatch_single()` / `fc_poll_dispatch_chain()` |
+| 新增 static | `fc_build_dispatch_request()`（合并两份重复的 request 构建）、`fc_fill_cw_meta_paa()`、`fc_poll_fail_command()`（6 处失败兜底合一） |
+| 寄存器刷新 | `fc_register_queue_state()` **保持逐点调用**（13 处，与改动前一一对应），未收敛 |
+| 文档同步 | `docs/design/fc_nand_design.md`：图 2 重绘（5 个 helper 名 + META/PAA 不对称注记）、§16.3 链式示意图改为经 `fc_poll_dispatch_chain()`/`fc_build_dispatch_request()`、§2 文件表与 §17.9 splittable 说明的函数归属改为 `fc_build_dispatch_request()`、附录 A 图 2 锚点补 helper 名 |
+
+### 设计要点
+
+- **零行为变化**：脚本核对（花括号配对抽函数体逐字节比对）确认 31 个既有函数体**逐字节不变**，唯一被改写的是 `fc_poll_internal` 本身。
+- **删掉前向声明的办法**：把 `fc_complete_internal` 前移到 `fc_complete_from_nand` 之前。全文件按依赖 DAG 排序后不再需要任何前向声明。
+- **`fc_register_queue_state` 未收敛的原因（自查后回退）**：初版把散落的调用收敛到骨架末尾，理由是它是纯状态快照、幂等。复查发现该推理有漏洞——`fc_scheduler_select_chain()` 成功时会**从 HSQ/SQ 弹出**已选中的命令，于是"命令 id 非法/状态非 QUEUED"的早退路径上，队列计数已被弹掉而寄存器尚未刷新。改动前这些路径**不刷新**寄存器（保持陈旧值），收敛版却会刷新，属于可观测行为差异。故回退为逐点调用，位置与改动前严格一致，并在两处早退点加注释 `与拆分前一致：此校验失败早退，不刷新寄存器`。
+- **splittable→ISSUE 转换收进 `fc_build_dispatch_request` 末尾**：原单命令路径在 cws 填充之后做转换，链式路径在 cws 填充**之前**做；但两处的 cws 分支读的都是 `command->config.operation` 而非 `request.operation`，故转换位置对结果无影响，可安全统一到 helper 末尾。
+- **保留的 4 条行为不对称**（拆 helper 时未"顺手统一"）：① META/PAA 预填只在单命令路径；② 链式 desc 链断裂时从 `for` 循环体内直接返回、放弃整条链；③ 链式 submit 失败对整链逐个注失败完成项、不提前返回；④ `sched_chain.count == 0` 直接返回且不刷寄存器。
+
+### 验证
+
+- `make` / `make tests` 零警告零错误。
+- 固件二进制 **86840 → 85960 字节**：两份重复的 request 构建被 GCC 保留为**单个 out-of-line 函数**，净省 ~880 字节（纯去重带来的体积收益）。
+- 函数体逐字节比对：31 个既有函数全部与改动前一致（`fc_poll_internal` 除外），新增 5 个 static helper。
+- `fc_register_queue_state()` 调用点计数：改动前后均为 **13**（逐点对齐的机器核对）。
+- `clang-format-15 -i src/fc/fc.c` 已跑，diff 只含结构性移动。
+- **上板回归**：`make tests` 烧写 → UART CLI `test` → `ut_run_all()`；重点覆盖单命令读/写（META/PAA 预填）、多 plane 读写、擦除、Read Retry 链（`submit_chain`）、RAID encode（`fc_stripe_submit`）。
