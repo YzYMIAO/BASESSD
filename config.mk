@@ -140,7 +140,7 @@ BASE_FLAGS  = $(WARN_FLAGS) $(INC_FLAGS) $(FIRMWARE_CFLAGS)
 
 # 4.4 调试/优化选项（根据BUILD_TYPE）
 ifeq ($(BUILD_TYPE), debug)
-    OPT_FLAGS   = -O -g3 -ggdb3
+    OPT_FLAGS   = -O0 -g3 -ggdb3
     DBG_FLAGS   = -DDEBUG -D_DEBUG
     APP_SUFFIX  = _debug
 else ifeq ($(BUILD_TYPE), release)
