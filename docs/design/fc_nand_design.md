@@ -841,7 +841,7 @@ for channel = cursor..(cursor+CH_NUM-1)
   │      取 head entry（command_id/ce/lun）
   │      目标 chain 忙 → WAIT（entry 留队）
   │      出队 → task 已由 submit 预加载
-  │           → build_request → SSD_LOGD → fc_start → 置相位
+  │           → build_request → LOGD → fc_start → 置相位
   │           同步完成 → task_complete
   │           phase==ISSUE → 切 ISSUED，不返回 completion
   │           count>1（链）→ 交给 Phase 1
@@ -3427,7 +3427,7 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
 `main()`（`src/main.c`）的初始化是一条**严格 if/else-if 级联**，不是循环：
 
 ```
-sys_init → ssd_log 绑定 → fc_init → nand_init
+sys_init → log 绑定 → fc_init → nand_init
         → nand_dispatch_set_device_ready(1) → stm32_platform_register
         → ssd_ftl_boot_all → while(1) { ... }
 ```
@@ -3449,7 +3449,7 @@ sys_init → ssd_log 绑定 → fc_init → nand_init
 main() (src/main.c)          fc_init()                  nand_init()             ssd_ftl_boot_all()
   │
   ├─ sys_init()
-  ├─ ssd_log_set_sink / set_flush_sink / set_level
+  ├─ log_set_sink / set_flush_sink / set_level
   │
   ├─ fc_init() ──────────────▶ fc_interface.c（薄壳）→ fc_init_internal(fc.c)
   │                              ├ ① 三池 + 队列存储 + 命令状态位图 memset 归零
@@ -3524,7 +3524,7 @@ nand_init()
 
 | 跳 | 位置（函数为主） | 这一步之后…… |
 |----|------------------|----------------|
-| 1 | `main` → `sys_init` / `ssd_log_set_*` | 时钟、UART 日志通道可用，但 FC/NAND 尚不存在 |
+| 1 | `main` → `sys_init` / `log_set_*` | 时钟、UART 日志通道可用，但 FC/NAND 尚不存在 |
 | 2 | `fc_init` → `fc_init_internal` ①②③ | 三池、三条环形队列、寄存器影子就绪；命令可以 alloc/configure 但还提交不了 |
 | 3 | `fc_init_internal` ④⑤⑥⑦ | 调度器、CRC、空闲链表就绪；`nand_dispatch_init` 已清空软件调度状态（NAND 硬件仍未初始化） |
 | 4 | `nand_init` Step1–5 | FMC 引脚/时钟、R/B# EXTI、per-LUN 后端、DMA 就绪；此时 `g_nand_device_ready` 仍为 0 |

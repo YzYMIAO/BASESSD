@@ -191,22 +191,31 @@ ssd> test --seed 0x1234 /fc-nand/command/validate_null
   → munit_suite_main(&g_fc_nand_suite, NULL, 4, argv)
 ```
 
-### 3.3 断言失败处理
+### 3.3 断言失败处理（v1.2 起：munit 回归上游，终端路径由断言设施承接）
+
+v1.2 起 `munit.c` 不再内联项目专有逻辑，`munit_errorf_ex` 只做上游的「打印 + `abort()`」：
 
 ```
 断言失败 → munit_errorf_ex
-          → 打印 ERROR 日志 + [RES] FC 资源快照
-          → ssd_log_flush(1000ms)          ← 关键：把异步 UART 队列排空
-          → ssd_crash_record_assert()      ← 写 .noinit 崩溃记录（kind=ASSERT）
-          → ssd_crash_platform_report()    ← 平台轮询 UART dump 同一份记录
-          → while(1) 挂起
+          → munit_logf_exv(...) 打印 ERROR 日志（异步 UART 队列）
+          → abort()                          ← 固件里被 assertion.c 重定向
+              → crash_record_abort()      ← 写 .noinit 崩溃记录（kind=ABORT）
+              → assertion_terminate():
+                  assertion_platform_context() ← 弱钩子：FC 追加 [RES] 资源快照
+                  log_flush(1000ms)        ← 关键：把异步 UART 队列排空
+                  crash_platform_report()  ← 平台轮询 UART dump 同一份记录
+                  while(1) 挂起
 ```
 
-裸机没有 fork/abort 机制。断言失败后 CPU 进入 `while(1)` 循环，保留完整寄存器/堆栈现场，供 JTAG/SWD 调试器检查。
+裸机没有 fork。断言失败后 CPU 进入 `while(1)` 循环，保留完整寄存器/堆栈现场，供 JTAG/SWD 调试器检查。
 
-**为什么必须先 flush**：`fprintf(stderr, ...)` 经 `_write()` 落到 UART 的**异步** TX 环形队列，由 DMA/USART 中断慢慢排出。原实现打印完直接 `while(1)`，中断停了、队列再也不会被排空 —— 失败信息留在队列里发不出去，现场看起来就是"断函数却什么都没打印"。先 `ssd_log_flush()` 把队列排空再停机，这条信息才不会丢。
+**为什么必须先 flush**：`fprintf(stderr, ...)` 经 `_write()` 落到 UART 的**异步** TX 环形队列，由 DMA/USART 中断慢慢排出。早期实现打印完直接 `while(1)`，中断停了、队列再也不会被排空 —— 失败信息留在队列里发不出去，现场看起来就是"断函数却什么都没打印"。现在 `assertion_terminate()` 先 `log_flush()` 把队列排空再停机，这条信息才不会丢。
 
-**崩溃记录**：`ssd_crash_platform_report()` 由 `src/platform/stm32h743/fault.c` 提供强符号（弱默认在 `src/common/crash.c` 里是空实现，host 构建安全）。它关掉 TX DMA/中断、独占 UART 轮询输出，因此**必须在 flush 之后**调用。详见 `docs/design/fault_capture.md`。
+**为什么走 `abort()` 重定向**：这样 `munit.c` 能保持近上游（只调标准 `abort()`），而项目专有的 flush + 崩溃记录 + dump 全部收敛到断言设施 `src/common/assertion.c` 的固件 `abort()` 覆盖里，两者双向无牵扯。
+
+**崩溃记录**：`crash_platform_report()` 由 `src/platform/stm32h743/fault.c` 提供强符号（弱默认在 `src/common/crash.c` 里是空实现，host 构建安全）。它关掉 TX DMA/中断、独占 UART 轮询输出，因此**必须在 flush 之后**调用。详见 `docs/design/fault_capture.md`。
+
+**`[RES]` FC 资源快照**：原内联在 `munit.c` 里（反向依赖 `fc_get_resource_stats`）。v1.2 迁到 `src/fc/fc_assert_context.c`，覆盖断言设施的弱钩子 `assertion_platform_context()`——依赖方向变为 FC → assertion。
 
 ### 3.4 无 fork 隔离的约束
 
@@ -258,15 +267,49 @@ ssd> test --seed 0x1234 /fc-nand/command/validate_null
 
 | # | 文件 | 位置 | 问题 | 修复 |
 |---|---|---|---|---|
-| 1 | `munit.c` | `munit_errorf_ex` 嵌入式分支 | 打印后直接 `while(1)`，异步 UART 队列不再被排空，失败信息丢失（"断函数却什么都没打印"） | `while(1)` 前先 `ssd_log_flush(1000ms)` |
+| 1 | `munit.c` | `munit_errorf_ex` 嵌入式分支 | 打印后直接 `while(1)`，异步 UART 队列不再被排空，失败信息丢失（"断函数却什么都没打印"） | `while(1)` 前先 `log_flush(1000ms)` |
 
 #### 功能变更
 
 | # | 文件 | 位置 | 改动 |
 |---|---|---|---|
-| 2 | `munit.c` | `munit_errorf_ex` 嵌入式分支 | flush 后写 `.noinit` 崩溃记录（`kind=ASSERT`，含 format/file/line）并调 `ssd_crash_platform_report()` 轮询 dump |
+| 2 | `munit.c` | `munit_errorf_ex` 嵌入式分支 | flush 后写 `.noinit` 崩溃记录（`kind=ASSERT`，含 format/file/line）并调 `crash_platform_report()` 轮询 dump |
 
 见 `docs/design/fault_capture.md`。
+
+### v1.2 (2026-10-04) — 移植件迁出，munit 回归近上游
+
+#### 背景
+
+断言系统重建为独立设施 `include/common/assertion.h` + `src/common/assertion.c`（生产断言 `ASSERT`/`ASSUME` + 富断言集 `ASSERT_*`）。为让 `munit.c/.h` 与项目双向无牵扯，把此前 graft 进 munit 的项目专有内容全部迁出。
+
+#### 迁出（munit 侧删除）
+
+| # | 文件 | 位置 | 原内容 | 去向 |
+|---|---|---|---|---|
+| 1 | `munit.c` | 顶部 include | `common/common.h`、`common/crash.h`、`common/log.h`、`fc/fc.h` | 删除；只留 `munit.h` + `<stdio.h>` + `<time.h>` |
+| 2 | `munit.c` | `MUNIT_FAIL_FLUSH_TIMEOUT_MS` | 项目专有常量 | 删除（改用 `assertion.c` 的 `ASSERTION_FLUSH_TIMEOUT_MS`） |
+| 3 | `munit.c` | `munit_errorf_ex` | `[RES]` FC 资源快照 | `src/fc/fc_assert_context.c`（覆盖弱钩子 `assertion_platform_context()`） |
+| 4 | `munit.c` | `munit_errorf_ex` | 嵌入式 `log_flush` + `crash_record_assert` + `crash_platform_report` + `while(1)`；host `exit()` | 收敛到 `src/common/assertion.c` 的固件 `abort()` 重定向 |
+
+#### 回归上游（恢复原版行为）
+
+| # | 文件 | 位置 | 改动 |
+|---|---|---|---|
+| 5 | `munit.c` | `munit_logf_ex` | 恢复 `if (level >= munit_log_level_fatal) abort();`（撤销 v1.0 适配 #11） |
+| 6 | `munit.c` | `munit_errorf_ex` | 恢复为 `munit_logf_exv(...); abort();` |
+
+保留：bug 修复 #1–#10、裸机入口适配 #12/#13、`--list`/`--list-params` #14、`MUNIT_ENABLE_TIMING` 计时增强。
+
+#### 影响
+
+- 测试文件仍使用 `munit_assert_*`（本轮不迁移）；断言文本经异步 UART 打印后由 `abort()` 重定向的 `assertion_terminate()` flush 排空，v1.1 修复的能力不变。
+- 崩溃记录 kind 由 `ASSERT` 变为 `ABORT`（`CRASH_KIND_ABORT`），dump 可区分「产品断言」与「测试 abort」。
+- 后续轮次再把测试文件从 `munit_assert_*` 迁到 `ASSERT_*`，munit 断言部分逐步退役。
+
+### v1.3 (2026-10-05) — 诊断模块去 `ssd_` 前缀
+
+`src/common/` 里的诊断基础设施命名对齐已去前缀的 `assertion`：`ssd_log_*` → `log_*`、`ssd_crash_*` → `crash_*`，头文件 `include/common/{ssd_log.h,ssd_crash.h}` → `{log.h,crash.h}`。纯改名，等级枚举数值、`[ERR]/[WRN]/[INF]/[DBG]` 输出前缀、`.noinit` 记录的 magic/version/checksum 布局均不变。§3.3 链路图中的 `crash_record_abort` / `log_flush` / `crash_platform_report` 即新名。
 
 ### 修订历史条目格式
 

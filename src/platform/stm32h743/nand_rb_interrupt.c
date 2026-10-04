@@ -1,6 +1,6 @@
 #include "nand_rb_interrupt.h"
 
-#include "common/ssd_log.h"
+#include "common/log.h"
 #include "stm32h743xx.h"
 #include "stm32h7xx_hal.h"
 
@@ -84,9 +84,9 @@ void nand_rb_interrupt_arm(uint32_t timeout_us)
     EXTI->IMR1 |= EXTI_IMR1_IM6;
     HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-    SSD_LOGD("rb_arm timeout=%lu pin=%u\r\n",
-             (unsigned long)timeout_us,
-             (unsigned)HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_6));
+    LOGD("rb_arm timeout=%lu pin=%u\r\n",
+         (unsigned long)timeout_us,
+         (unsigned)HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_6));
 
     /*
      * ★ tWB 等待 + GPIO 确认
@@ -118,12 +118,12 @@ void nand_rb_interrupt_arm(uint32_t timeout_us)
         }
     }
     uint8_t pin_1us = HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_6);
-    SSD_LOGD("rb_arm tWB done pin_before=%u pin_after=%u\r\n", (unsigned)pin_after, (unsigned)pin_1us);
+    LOGD("rb_arm tWB done pin_before=%u pin_after=%u\r\n", (unsigned)pin_after, (unsigned)pin_1us);
 
     if (pin_1us == GPIO_PIN_RESET)
     {
         /* 引脚为 LOW → NAND 忙碌中，等待 EXTI 上升沿中断 */
-        SSD_LOGD("rb_arm pin LOW, waiting for EXTI rising edge\r\n");
+        LOGD("rb_arm pin LOW, waiting for EXTI rising edge\r\n");
     }
     else
     {
@@ -133,7 +133,7 @@ void nand_rb_interrupt_arm(uint32_t timeout_us)
          * 2. FMC posted write 尚未完成，命令还没到达 NAND
          * 无论哪种情况都不做短路，让超时回退 GPIO 轮询做最终确认。
          */
-        SSD_LOGD("rb_arm pin HIGH, no short-circuit, will timeout->poll\r\n");
+        LOGD("rb_arm pin HIGH, no short-circuit, will timeout->poll\r\n");
     }
 }
 
@@ -181,7 +181,7 @@ void nand_rb_interrupt_handler(void)
         /* 清除 pending 标志 */
         EXTI->PR1 = EXTI_PR1_PR6;
 
-        SSD_LOGD("rb_irq FIRED!\r\n");
+        LOGD("rb_irq FIRED!\r\n");
 
         /* 标记触发 */
         g_rb_int.triggered = 1U;

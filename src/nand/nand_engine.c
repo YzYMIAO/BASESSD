@@ -21,7 +21,7 @@
 
 #include "nand_engine.h"
 
-#include "common/ssd_log.h"
+#include "common/log.h"
 #include "delay.h"
 #include "nand/nand_debug.h"
 #include "onfi_1_0.h"
@@ -133,11 +133,11 @@ static uint8_t nand_engine_wait_timeout(nand_engine_state_t *state, const char *
     if (delay_dwt_elapsed_us(state->wait_start_cycles, state->timing->busy_timeout_us) ||
         (state->wait_polls >= state->timing->busy_timeout_us))
     {
-        SSD_LOGE("nand: %s timeout op=%u polls=%u timeout_us=%u\r\n",
-                 op_name,
-                 state->request->operation,
-                 state->wait_polls,
-                 state->timing->busy_timeout_us);
+        LOGE("nand: %s timeout op=%u polls=%u timeout_us=%u\r\n",
+             op_name,
+             state->request->operation,
+             state->wait_polls,
+             state->timing->busy_timeout_us);
         state->active = 0U;
         return 1U;
     }
@@ -160,12 +160,12 @@ static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
     if ((type == NAND_UOP_DATA_IN) || (type == NAND_UOP_DATA_OUT) || (type == NAND_UOP_WAIT_READY) ||
         (type == NAND_UOP_CHECK_FAIL))
     {
-        SSD_LOGD("nand: uop[%u]=%u OK op=%u nand_st=0x%02X polls=%u\r\n",
-                 (unsigned)state->uop_index,
-                 (unsigned)type,
-                 (unsigned)state->request->operation,
-                 (unsigned)state->completion->nand_status,
-                 (unsigned)state->debug_polls);
+        LOGD("nand: uop[%u]=%u OK op=%u nand_st=0x%02X polls=%u\r\n",
+             (unsigned)state->uop_index,
+             (unsigned)type,
+             (unsigned)state->request->operation,
+             (unsigned)state->completion->nand_status,
+             (unsigned)state->debug_polls);
     }
 }
 
@@ -274,10 +274,10 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
             if ((state->request->operation == OP_NORMAL_PROGRAM_PAGE) &&
                 ((state->debug_polls == 1U) || ((state->debug_polls % 1000U) == 0U)))
             {
-                SSD_LOGD("nand: program pending uop=%u status=0x%02X wait=%u\r\n",
-                         state->uop_index,
-                         state->completion->nand_status,
-                         state->debug_polls);
+                LOGD("nand: program pending uop=%u status=0x%02X wait=%u\r\n",
+                     state->uop_index,
+                     state->completion->nand_status,
+                     state->debug_polls);
             }
             if (uop->type == NAND_UOP_WAIT_READY)
             {

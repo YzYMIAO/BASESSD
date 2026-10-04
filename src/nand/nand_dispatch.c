@@ -18,7 +18,7 @@
  * 对外接口：nand_dispatch_init / submit / submit_chain / poll / set_device_ready。
  */
 
-#include "common/ssd_log.h"
+#include "common/log.h"
 #include "delay.h"
 #include "fc/fc_command.h"
 #include "nand/nand_debug.h"
@@ -393,7 +393,7 @@ typedef struct
  *   参数：task —— 目标任务。
  *   返回：req handler 的返回码。
  *   实现要点：单独成函数是为了保住 Phase 2 的日志点位置——
- *         SSD_LOGD 必须夹在"构建 request"与"nand_fc_start"之间。
+ *         LOGD 必须夹在"构建 request"与"nand_fc_start"之间。
  * -------------------------------------------------------------------- */
 static uint8_t nand_dispatch_task_build_request(nand_dispatch_task_t *task)
 {
@@ -830,12 +830,12 @@ static nand_dispatch_lun_outcome_t nand_dispatch_phase2_dequeue(uint8_t         
         return NAND_DISPATCH_LUN_ERROR;
     }
 
-    SSD_LOGD("nand: FC dispatch op=%u buffer=%p length=%u column=0x%04X row=0x%06lX\r\n",
-             task->operation,
-             (void *)task->request.data,
-             task->request.data_length,
-             task->request.column,
-             (unsigned long)task->request.row[0]);
+    LOGD("nand: FC dispatch op=%u buffer=%p length=%u column=0x%04X row=0x%06lX\r\n",
+         task->operation,
+         (void *)task->request.data,
+         task->request.data_length,
+         task->request.column,
+         (unsigned long)task->request.row[0]);
 
     switch (nand_dispatch_task_fc_start(chain, task, &result))
     {

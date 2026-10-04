@@ -34,7 +34,7 @@
 
 #include "fc.h"
 
-#include "common/ssd_log.h"
+#include "common/log.h"
 #include "fc_crc_engine.h"
 #include "fc_data_path.h"
 #include "fc_internal.h"
@@ -1394,11 +1394,11 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
 
     if (nand_dispatch_submit(&request) != NAND_RESULT_OK)
     {
-        SSD_LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_count=%u plane_count=%u\r\n",
-                 (unsigned)command->config.operation,
-                 (unsigned)command_id,
-                 (unsigned)request.cw_count,
-                 (unsigned)request.plane_count);
+        LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_count=%u plane_count=%u\r\n",
+             (unsigned)command->config.operation,
+             (unsigned)command_id,
+             (unsigned)request.cw_count,
+             (unsigned)request.plane_count);
         fc_poll_fail_command(controller, command_id);
         fc_register_queue_state(controller);
         return FC_STATUS_IO_ERROR;

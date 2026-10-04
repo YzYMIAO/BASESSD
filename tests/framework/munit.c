@@ -1,13 +1,8 @@
 
 #include "munit.h"
 
-#include "common/common.h"
-#include "common/ssd_crash.h"
-#include "common/ssd_log.h"
-#include "fc/fc.h"
-
-/* 断言失败后等待异步日志排空的上限（ms）；超时也要继续走 dump，不能卡在 flush。 */
-#define MUNIT_FAIL_FLUSH_TIMEOUT_MS 1000U
+#include <stdio.h>
+#include <time.h>
 
 #if defined(MUNIT_ENABLE_TIMING)
 #    include "sys.h"
@@ -138,8 +133,10 @@ void munit_logf_ex(MunitLogLevel level, const char *filename, int line, const ch
     munit_logf_exv(level, stderr, filename, line, format, ap);
     va_end(ap);
 
-    /* 嵌入式环境没有 fork，不能通过 abort() 实现测试隔离。
-     * 断言失败由 munit_errorf_ex 中的 while(1) 处理，此处仅做日志输出。 */
+    if (level >= munit_log_level_fatal)
+    {
+        abort();
+    }
 }
 
 MUNIT_PRINTF(3, 4)
@@ -165,32 +162,7 @@ void munit_errorf_ex(const char *filename, int line, const char *format, ...)
     munit_logf_exv(MUNIT_LOG_ERROR, stderr, filename, line, format, ap);
     va_end(ap);
 
-    /* 打印 FC 资源使用情况 */
-    {
-        fc_resource_stats_t stats;
-        if (fc_get_resource_stats(&stats) == FC_STATUS_OK)
-        {
-            fprintf(stderr, "[RES] cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n", (unsigned)stats.command_used, (unsigned)FC_COMMAND_POOL_DEPTH, (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH, (unsigned)stats.buffer_used, (unsigned)FC_BUFFER_POOL_DEPTH, (unsigned)stats.sq_used, (unsigned)stats.hsq_used, (unsigned)stats.cq_used);
-        }
-    }
-
-#if defined(__linux__) || defined(__unix__)
-    /* PC 环境编译（munit 运行器平台适配）：失败直接退出；嵌入式卡死保留现场 */
-    exit(EXIT_FAILURE);
-#else
-    /*
-     * ===== 嵌入式环境：先把输出排空，再落记录，最后停机保留现场 =====
-     * 这里曾经直接 while(1)：失败信息还在异步 UART 队列里就停机，队列再也不会
-     * 被 DMA/IRQ 排空，表现就是「断函数却什么都没打印」。必须先 flush。
-     */
-    (void)ssd_log_flush(MUNIT_FAIL_FLUSH_TIMEOUT_MS);
-    ssd_crash_record_assert(format, filename, (uint32_t)line);
-    ssd_crash_platform_report(ssd_crash_record_get());
-    for (;;)
-    {
-        /* 程序停在这里：现场（寄存器、堆栈、内存）全部保留，接调试器可查看。 */
-    }
-#endif
+    abort();
 }
 /*** 内存分配 ***/
 /* 内存申请 */

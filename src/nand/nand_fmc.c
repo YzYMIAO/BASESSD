@@ -22,7 +22,7 @@
 
 #include "nand_fmc.h"
 
-#include "common/ssd_log.h"
+#include "common/log.h"
 #include "delay.h"
 #include "nand/nand_debug.h"
 #include "nand/nand_mt29f4g08abadawp.h"
@@ -355,13 +355,13 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
             nand_dma_cache_invalidate(dst, request->data_length);
             if (request->operation == OP_READ_ID)
             {
-                SSD_LOGI("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
-                         request->buffer[0],
-                         request->buffer[1],
-                         request->buffer[2],
-                         request->buffer[3],
-                         request->buffer[4],
-                         (void *)request->buffer);
+                LOGI("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
+                     request->buffer[0],
+                     request->buffer[1],
+                     request->buffer[2],
+                     request->buffer[3],
+                     request->buffer[4],
+                     (void *)request->buffer);
             }
             completion->transfer_status = NAND_RESULT_OK;
             return NAND_RESULT_OK;
@@ -395,13 +395,13 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
 
     if (request->operation == OP_READ_ID)
     {
-        SSD_LOGI("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
-                 request->buffer[0],
-                 request->buffer[1],
-                 request->buffer[2],
-                 request->buffer[3],
-                 request->buffer[4],
-                 (void *)request->buffer);
+        LOGI("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
+             request->buffer[0],
+             request->buffer[1],
+             request->buffer[2],
+             request->buffer[3],
+             request->buffer[4],
+             (void *)request->buffer);
     }
 
     completion->transfer_status = NAND_RESULT_OK;

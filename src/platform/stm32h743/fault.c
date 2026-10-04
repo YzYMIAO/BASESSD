@@ -1,7 +1,7 @@
 #include "fault.h"
 
-#include "common/ssd_crash.h"
-#include "common/ssd_log.h"
+#include "common/crash.h"
+#include "common/log.h"
 #include "stm32h7xx_hal.h"
 
 #include <stdint.h>
@@ -349,7 +349,7 @@ static void fault_dump_ctx(const fault_ctx_t *ctx)
 
 /* ─────────────────────── 崩溃记录打印（断言/开机共用） ─────────────────────── */
 
-static void fault_dump_record(const ssd_crash_record_t *record)
+static void fault_dump_record(const crash_record_t *record)
 {
     if (record == NULL)
     {
@@ -358,7 +358,7 @@ static void fault_dump_record(const ssd_crash_record_t *record)
     }
 
     fault_puts("\r\n=== CRASH RECORD ===\r\n");
-    if (record->kind == (uint32_t)SSD_CRASH_KIND_FAULT)
+    if (record->kind == (uint32_t)CRASH_KIND_FAULT)
     {
         fault_puts("kind   : FAULT ");
         fault_puts(fault_kind_name(record->fault.fault_kind));
@@ -380,12 +380,13 @@ static void fault_dump_record(const ssd_crash_record_t *record)
     }
     else
     {
-        fault_puts("kind   : ASSERT\r\n");
+        fault_puts("kind   : ");
+        fault_puts((record->kind == (uint32_t)CRASH_KIND_ABORT) ? "ABORT\r\n" : "ASSERT\r\n");
         fault_puts("expr   : ");
-        fault_puts_n(record->expression, SSD_CRASH_TEXT_CAPACITY);
+        fault_puts_n(record->expression, CRASH_TEXT_CAPACITY);
         fault_puts("\r\n");
         fault_puts("file   : ");
-        fault_puts_n(record->file, SSD_CRASH_TEXT_CAPACITY);
+        fault_puts_n(record->file, CRASH_TEXT_CAPACITY);
         fault_putc(':');
         fault_dec(record->line);
         fault_puts("\r\n");
@@ -431,8 +432,8 @@ FAULT_ENTRY(UsageFault_Handler)
 void fault_handler_c(uint32_t *frame, uint32_t exc_return) __attribute__((used, noinline));
 void fault_handler_c(uint32_t *frame, uint32_t exc_return)
 {
-    fault_ctx_t        ctx;
-    ssd_fault_record_t record;
+    fault_ctx_t          ctx;
+    crash_fault_record_t record;
 
     ctx.kind       = __get_IPSR();
     ctx.sp         = (uint32_t)(uintptr_t)frame;
@@ -469,7 +470,7 @@ void fault_handler_c(uint32_t *frame, uint32_t exc_return)
     record.hfsr       = ctx.hfsr;
     record.mmfar      = ctx.mmfar;
     record.bfar       = ctx.bfar;
-    ssd_crash_record_fault(&record);
+    crash_record_fault(&record);
 
     fault_hook(&ctx);
 
@@ -501,10 +502,10 @@ static uint32_t fault_append_text(char *buffer, uint32_t capacity, uint32_t leng
 
 void fault_report_boot(void)
 {
-    char                      reason[64];
-    uint32_t                  length = 0U;
-    uint32_t                  flags  = RCC->RSR;
-    const ssd_crash_record_t *record = ssd_crash_record_get();
+    char                  reason[64];
+    uint32_t              length = 0U;
+    uint32_t              flags  = RCC->RSR;
+    const crash_record_t *record = crash_record_get();
 
     if ((flags & RCC_RSR_PORRSTF) != 0U)
     {
@@ -540,25 +541,29 @@ void fault_report_boot(void)
     }
     (void)length;
 
-    SSD_LOGI("[FAULT] reset reason:%s (rsr=0x%08lx)\r\n", reason, (unsigned long)flags);
+    LOGI("[FAULT] reset reason:%s (rsr=0x%08lx)\r\n", reason, (unsigned long)flags);
 
     if (record != NULL)
     {
-        if (record->kind == (uint32_t)SSD_CRASH_KIND_FAULT)
+        if (record->kind == (uint32_t)CRASH_KIND_FAULT)
         {
-            SSD_LOGE("[FAULT] previous crash: %s PC=0x%08lx LR=0x%08lx CFSR=0x%08lx HFSR=0x%08lx\r\n",
-                     fault_kind_name(record->fault.fault_kind),
-                     (unsigned long)record->fault.pc,
-                     (unsigned long)record->fault.lr,
-                     (unsigned long)record->fault.cfsr,
-                     (unsigned long)record->fault.hfsr);
+            LOGE("[FAULT] previous crash: %s PC=0x%08lx LR=0x%08lx CFSR=0x%08lx HFSR=0x%08lx\r\n",
+                 fault_kind_name(record->fault.fault_kind),
+                 (unsigned long)record->fault.pc,
+                 (unsigned long)record->fault.lr,
+                 (unsigned long)record->fault.cfsr,
+                 (unsigned long)record->fault.hfsr);
+        }
+        else if (record->kind == (uint32_t)CRASH_KIND_ABORT)
+        {
+            LOGE("[FAULT] previous abort (assertion/test terminal)\r\n");
         }
         else
         {
-            SSD_LOGE("[FAULT] previous assert: %s (%s:%lu)\r\n",
-                     record->expression,
-                     record->file,
-                     (unsigned long)record->line);
+            LOGE("[FAULT] previous assert: %s (%s:%lu)\r\n",
+                 record->expression,
+                 record->file,
+                 (unsigned long)record->line);
         }
     }
 
@@ -567,7 +572,7 @@ void fault_report_boot(void)
 }
 
 /* 强符号：覆盖 common/crash.c 的弱默认，让断言路径也走同一份轮询 dump。 */
-void ssd_crash_platform_report(const ssd_crash_record_t *record)
+void crash_platform_report(const crash_record_t *record)
 {
     fault_console_init();
     fault_dump_record(record);

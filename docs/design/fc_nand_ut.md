@@ -438,6 +438,8 @@ static MunitResult test_fc_queue_push_pop(const MunitParameter params[], void *d
 
 `fc_command_pool` / `fc_descriptor_pool` / `fc_buffer_pool` 是全局静态池。Level 1 测试涉及纯逻辑函数时不直接依赖池内容；Level 3 测试需要 `fc_init()` 预先初始化。
 
+**调试注意（2026-10-04 补充）**：命令池/描述符池**没有 section 属性**，落默认 `.bss` → `AXI_RAM`（基址 `0x24000000`），MPU region 3（`src/platform/stm32h743/sys.c:14`）是 **Normal Write-Back 可缓存**。Cortex-M7 的 D-Cache 与调试器**不一致**——SWD 读内存绕过 D-Cache，所以**调试器 watch / memory 窗口读到的池内容可能是陈旧的**（CPU 看到 cache 新值，调试器看到 SRAM 旧值）。要确认字段真实值，用 CPU 侧打印，或在观察点前 `SCB_CleanDCache()` 再读。详见 `debug_cmd_operation_rewrite_20261004.md`。
+
 ### 6.3 CQ entry slot 限制
 
 CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slot 应填 `FC_CW_STATUS_UNUSED`。
@@ -448,12 +450,19 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 - 一个测试文件内建议的测试粒度为**一个 test 函数只验证一个行为**
 - 使用 `--fatal-failures` 可以遇错即停（裸机下这是默认行为）
 
+### 6.5 生命周期插桩（默认关闭）
+
+`test_fc_level3.c` 的 `run_lifecycle` 上方有一段 `#if 0` 块（`cmd_snapshot` / `cmd_diff_report` / `CMD_FIELD_U`）：提交前给 `cmd` 拍快照、release 前逐字段比对并打印差异，用于排查"命令提交后被谁改写"。`run_lifecycle` 内两处调用已注释并指向该块。整块默认不编译。
+
+`setup_level3()` 的 `[RES] L3_start: cmd=…/64 desc=…/256 …` 资源快照行同样已注释，排查池泄漏时再打开。
+
 ---
 
 ## 7. 修订历史
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-04 | v1.6 | §6.2 补命令池/描述符池可缓存性与调试器 D-Cache 不一致注意；新增 §6.5 生命周期插桩（`#if 0` 默认关闭）+ `[RES] L3_start` 资源行已注释；见 `debug_cmd_operation_rewrite_20261004.md` |
 | 2026-09-22 | v1.5 | 消除全部编译警告：munit.h/c `const` 限定符修复（MunitTest/MunitParameter/MunitSuite 等），test_fc_level3.c `g_op_names` const 修复 |
 | 2026-09-22 | v1.4 | 最终审视修复：饥饿保护测试改为 select_chain、补 completion_queue 测试、补 submit/poll/configure NULL 测试、补 starvation 测试。Level 1 从 31→45 测试。上传代码提交 Phase P |
 | 2026-09-22 | v1.3 | Level 3 实现：34 个 OP 全生命周期测试编译通过 |

@@ -1,7 +1,7 @@
 # 企业级故障捕获机制（Cortex-M7 HardFault 全链路诊断）
 
 > **落地日期**: 2026-10-04
-> **涉及模块**: `src/platform/stm32h743/fault.c`（新增）、`include/platform/stm32h743/fault.h`（新增）、`src/common/crash.c` + `include/common/ssd_crash.h`（重写）、`src/common/assert.c`、`tests/framework/munit.c`、`linker/stm32h743xx_flash.ld`、`src/platform/stm32h743/sys.c`、`src/platform/stm32h743/stm32h7rsxx_it.c`、`src/main.c`
+> **涉及模块**: `src/platform/stm32h743/fault.c`（新增）、`include/platform/stm32h743/fault.h`（新增）、`src/common/crash.c` + `include/common/crash.h`（重写）、`src/common/assertion.c` + `include/common/assertion.h`、`src/fc/fc_assert_context.c`、`linker/stm32h743xx_flash.ld`、`src/platform/stm32h743/sys.c`、`src/platform/stm32h743/stm32h7rsxx_it.c`、`src/main.c`
 > **芯片**: STM32H743II + MT29F4G08ABADAWP NAND
 > **现状**: 编译验证通过（`make tests` / `make debug` 零告警零错误、`make format-check` 通过、向量表与蹦床反汇编已核对）；**上板部分验证**：复位原因打印正确、FC-NAND 三套件 59/59 全通过无 HardFault；人工触发故障/断言/跨复位三项 dump 未做
 
@@ -12,7 +12,7 @@
 跑板端 UT（UART CLI `test`）时经常"进系统级错误、断函数"，但串口上**什么都没打印**。原因有两层：
 
 1. **异常处理器是空的**。`src/platform/stm32h743/stm32h7rsxx_it.c` 里 5 个 CPU 异常处理器全是裸 `while(1) {}` —— 无任何诊断输出，只能接 SWD 看寄存器。
-2. **断言失败信息会丢**。`tests/framework/munit.c` 的 `munit_errorf_ex` 打印后**不 flush 就 `while(1)`**；日志走的是异步 UART TX 队列，由 DMA/中断排出，停机后队列再也不会被排空 —— 失败信息就卡在队列里，表现同样是"什么都没打印就断了"。
+2. **断言失败信息会丢**。断言路径打印后**不 flush 就停机**；日志走的是异步 UART TX 队列，由 DMA/中断排出，停机后队列再也不会被排空 —— 失败信息就卡在队列里，表现同样是"什么都没打印就断了"。修复后这一顺序收敛到断言设施 `assertion_terminate()` 里（`munit_errorf_ex` 经 `abort()` 重定向进入同一路径，见 `docs/design/munit_adapter.md` v1.2）。
 
 ## 2. 目标与范围
 
@@ -21,7 +21,7 @@
 | 项 | 范围 |
 |----|------|
 | CPU 异常 | NMI / HardFault / MemManage / BusFault / UsageFault |
-| 断言 | `ssd_assert_fail()`（产品代码）+ munit 断言失败（测试代码） |
+| 断言 | `ASSERT` / `ASSUME`（产品代码）+ munit 断言失败（测试代码，经 `abort()` 重定向） |
 | 输出 | 轮询 UART（绕开 DMA/IRQ），不依赖 libc 格式化 |
 | 持久化 | `.noinit` 崩溃记录，软复位后仍可读 |
 | 停机语义 | dump 后 `while(1)` **保留现场**交给 SWD；IWDG 若开启则超时复位 |
@@ -47,9 +47,9 @@ fault_handler_c(frame, exc_return)          [src/platform/stm32h743/fault.c]
       ├─ 写崩溃记录（kind=FAULT）→ .noinit
       └─ weak fault_hook() → while(1) 停机
 
-断言失败 (ssd_assert_fail)  ─┐
-munit 断言失败 (munit_errorf)─┴─→ 同一 ssd_crash_record_t + 同一 dump 格式
-                                   （先 flush 异步日志，再轮询 dump）
+ASSERT/ASSUME 失败 (assertion_fail) ─┐
+munit 断言失败 → abort() 重定向 ──────┴─→ 同一 crash_record_t + 同一 dump 格式
+                                          （先 flush 异步日志，再轮询 dump）
 
 开机：fault_report_boot() → RCC->RSR 复位原因 + 上次崩溃记录（走异步日志）
 ```
@@ -60,10 +60,11 @@ munit 断言失败 (munit_errorf)─┴─→ 同一 ssd_crash_record_t + 同一
 |------|------|
 | `include/platform/stm32h743/fault.h` | `fault_kind_t`、`fault_ctx_t`、`fault_init/fault_report_boot/fault_hook` 声明 |
 | `src/platform/stm32h743/fault.c` | 5 个 naked 入口 + 蹦床 + 主处理 + 轮询控制台 + 解码 + 开机报告 |
-| `include/common/ssd_crash.h` | `ssd_crash_kind_t{NONE,ASSERT,FAULT}`、`ssd_fault_record_t`、`ssd_crash_record_t`、`ssd_crash_platform_report()` |
-| `src/common/crash.c` | `.noinit` 记录存储 + 校验和 + 弱默认 `ssd_crash_platform_report()`（空实现，host 安全） |
-| `src/common/assert.c` | 写记录 → 异步日志 → `ssd_log_flush` → `ssd_crash_platform_report` → 停机 |
-| `tests/framework/munit.c` | 同上顺序（先 flush，这是"断函数无输出"的直接修复） |
+| `include/common/crash.h` | `crash_kind_t{NONE,ASSERT,FAULT,ABORT}`、`crash_fault_record_t`、`crash_record_t`、`crash_platform_report()` |
+| `src/common/crash.c` | `.noinit` 记录存储 + 校验和 + 弱默认 `crash_platform_report()`（空实现，host 安全） |
+| `include/common/assertion.h` | 生产断言 `ASSERT`/`ASSUME` + 富断言集 `ASSERT_*` + 失败入口声明 |
+| `src/common/assertion.c` | 写记录 → 异步日志 → `assertion_terminate`（flush → 平台上下文 → `crash_platform_report` → 停机）；固件 `abort()` 重定向 |
+| `src/fc/fc_assert_context.c` | 覆盖弱钩子 `assertion_platform_context()`，停机前追加 `[RES]` FC 资源快照 |
 | `linker/stm32h743xx_flash.ld` | 新增 `.noinit (NOLOAD)` 段，落 DTCM |
 | `src/platform/stm32h743/sys.c` | `sys_init()` 末尾调 `fault_init()` |
 | `src/platform/stm32h743/stm32h7rsxx_it.c` | 删除 5 个裸 `while(1)` 处理器（改由 fault.c 提供） |
@@ -175,7 +176,7 @@ FPU 扩展帧（S0-S15/FPSCR/保留字）**排在**基本帧（R0-R3,R12,LR,PC,x
 
 为什么不用 BKPSRAM：`sys.c` 里已记录，本板 VBAT 未供电，备份稳压器永远无法就绪，使能它会卡死。
 
-记录带 `magic + version + checksum`，`ssd_crash_record_get()` 三者都过才返回，否则视为脏数据。`version=2` 起 `checksum` 覆盖 `version/kind/line + 两段文本 + fault 负载全部字段`。
+记录带 `magic + version + checksum`，`crash_record_get()` 三者都过才返回，否则视为脏数据。`version=2` 起 `checksum` 覆盖 `version/kind/line + 两段文本 + fault 负载全部字段`。
 
 > 构建产物确认：`.noinit 248 0x20000000`（248 B = 5×4 + 96 + 96 + 9×4）。
 

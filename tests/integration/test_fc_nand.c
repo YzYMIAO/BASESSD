@@ -1,6 +1,6 @@
 #include "test_fc_nand.h"
 
-#include "common/ssd_log.h"
+#include "common/log.h"
 #include "delay.h"
 #include "nand/nand_mt29f4g08abadawp.h"
 #include "nand/onfi_1_0.h"
@@ -29,21 +29,21 @@ static void fc_nand_test_log_resource_stats(const char *phase, uint32_t complete
     {
         return;
     }
-    SSD_LOGI("[FC TEST] pool %s done=%lu next=%lu inflight=%lu SQ=%u/%u CQ=%u/%u CMD=%u/%u DESC=%u/%u BUF=%u/%u\r\n",
-             phase,
-             (unsigned long)completed,
-             (unsigned long)next_page,
-             (unsigned long)outstanding,
-             stats.sq_used,
-             (unsigned int)FC_SQ_DEPTH,
-             stats.cq_used,
-             (unsigned int)FC_CQ_DEPTH,
-             stats.command_used,
-             (unsigned int)FC_COMMAND_POOL_DEPTH,
-             stats.descriptor_used,
-             (unsigned int)FC_DESCRIPTOR_POOL_DEPTH,
-             stats.buffer_used,
-             (unsigned int)FC_BUFFER_POOL_DEPTH);
+    LOGI("[FC TEST] pool %s done=%lu next=%lu inflight=%lu SQ=%u/%u CQ=%u/%u CMD=%u/%u DESC=%u/%u BUF=%u/%u\r\n",
+         phase,
+         (unsigned long)completed,
+         (unsigned long)next_page,
+         (unsigned long)outstanding,
+         stats.sq_used,
+         (unsigned int)FC_SQ_DEPTH,
+         stats.cq_used,
+         (unsigned int)FC_CQ_DEPTH,
+         stats.command_used,
+         (unsigned int)FC_COMMAND_POOL_DEPTH,
+         stats.descriptor_used,
+         (unsigned int)FC_DESCRIPTOR_POOL_DEPTH,
+         stats.buffer_used,
+         (unsigned int)FC_BUFFER_POOL_DEPTH);
 }
 
 static uint8_t fc_nand_test_pattern_byte(uint16_t index)
@@ -92,23 +92,23 @@ static fc_status_t fc_nand_test_wait_completion(fc_command_t *command)
         result         = fc_poll_completion(&completion);
         if ((service_count != 0U) && ((service_count % 100000U) == 0U))
         {
-            SSD_LOGI("[FC TEST] wait service=%lu service_result=%d poll_result=%d\r\n",
-                     (unsigned long)service_count,
-                     (int)service_result,
-                     (int)result);
+            LOGI("[FC TEST] wait service=%lu service_result=%d poll_result=%d\r\n",
+                 (unsigned long)service_count,
+                 (int)service_result,
+                 (int)result);
         }
         if (result == FC_STATUS_OK)
         {
-            SSD_LOGD("[FC TEST] completion cmd=0x%04X desc=0x%04X status=0x%02X\r\n",
-                     completion.command_id,
-                     completion.desc_id,
-                     completion.status);
+            LOGD("[FC TEST] completion cmd=0x%04X desc=0x%04X status=0x%02X\r\n",
+                 completion.command_id,
+                 completion.desc_id,
+                 completion.status);
             if ((completion.command_id != command->command_id) ||
                 (fc_nand_test_completion_is_success(&completion, (uint8_t)(command->config.cw + 1U)) == 0U))
             {
-                SSD_LOGE("[FC TEST] completion failed: status=0x%02X desc=0x%04X\r\n",
-                         completion.status,
-                         completion.desc_id);
+                LOGE("[FC TEST] completion failed: status=0x%02X desc=0x%04X\r\n",
+                     completion.status,
+                     completion.desc_id);
                 return FC_STATUS_IO_ERROR;
             }
             return FC_STATUS_OK;
@@ -116,15 +116,15 @@ static fc_status_t fc_nand_test_wait_completion(fc_command_t *command)
         if ((service_result != FC_STATUS_OK) && (service_result != FC_STATUS_NOT_READY) &&
             (service_result != FC_STATUS_QUEUE_EMPTY))
         {
-            SSD_LOGE("[FC TEST] service failed: result=%d cmd=0x%04X desc=0x%04X op=%u ch=%u ce=%u lun=%u cw=%u\r\n",
-                     (int)service_result,
-                     (unsigned int)command->command_id,
-                     (unsigned int)command->desc_id,
-                     (unsigned int)command->config.operation,
-                     (unsigned int)command->config.ch,
-                     (unsigned int)command->config.ce,
-                     (unsigned int)command->config.lun,
-                     (unsigned int)command->config.cw);
+            LOGE("[FC TEST] service failed: result=%d cmd=0x%04X desc=0x%04X op=%u ch=%u ce=%u lun=%u cw=%u\r\n",
+                 (int)service_result,
+                 (unsigned int)command->command_id,
+                 (unsigned int)command->desc_id,
+                 (unsigned int)command->config.operation,
+                 (unsigned int)command->config.ch,
+                 (unsigned int)command->config.ce,
+                 (unsigned int)command->config.lun,
+                 (unsigned int)command->config.cw);
             return service_result;
         }
         if ((result != FC_STATUS_QUEUE_EMPTY) && (result != FC_STATUS_NOT_READY))
@@ -314,11 +314,11 @@ static fc_status_t fc_nand_test_process_batch_completion(const fc_command_status
             {
                 if (words[index] != 0x55555555UL)
                 {
-                    SSD_LOGE("[FC TEST] READ mismatch: page=%lu cw=%u word=%u actual=%08lX expected=55555555\r\n",
-                             (unsigned long)slot->page,
-                             descriptor->config.cw,
-                             index,
-                             (unsigned long)words[index]);
+                    LOGE("[FC TEST] READ mismatch: page=%lu cw=%u word=%u actual=%08lX expected=55555555\r\n",
+                         (unsigned long)slot->page,
+                         descriptor->config.cw,
+                         index,
+                         (unsigned long)words[index]);
                     fc_nand_test_release_command_resources(command);
                     slot->command = NULL;
                     slot->active  = 0U;
@@ -344,7 +344,7 @@ static fc_status_t fc_nand_test_run_block_pipeline(nand_paa_t test_paa, uint8_t 
     uint32_t            service_count = 0U;
     fc_status_t         result;
 
-    SSD_LOGI("[FC TEST] %s begin, block=%lu plane=%lu lun=%lu pages=%u window=%u\r\n", name, (unsigned long)paa_to_block(test_paa), (unsigned long)paa_to_plane(test_paa), (unsigned long)paa_to_lun(test_paa), (unsigned int)PAGES_PER_BLOCK, (unsigned int)FC_NAND_TEST_PAGE_WINDOW);
+    LOGI("[FC TEST] %s begin, block=%lu plane=%lu lun=%lu pages=%u window=%u\r\n", name, (unsigned long)paa_to_block(test_paa), (unsigned long)paa_to_plane(test_paa), (unsigned long)paa_to_lun(test_paa), (unsigned int)PAGES_PER_BLOCK, (unsigned int)FC_NAND_TEST_PAGE_WINDOW);
     fc_nand_test_log_resource_stats("begin", completed, next_page, outstanding);
     while (completed < PAGES_PER_BLOCK)
     {
@@ -363,11 +363,11 @@ static fc_status_t fc_nand_test_run_block_pipeline(nand_paa_t test_paa, uint8_t 
                     slots[index].page = next_page++;
                     outstanding++;
                     submitted = 1U;
-                    SSD_LOGD("[FC TEST] %s page=%lu submitted inflight=%lu\r\n", name, (unsigned long)slots[index].page, (unsigned long)outstanding);
+                    LOGD("[FC TEST] %s page=%lu submitted inflight=%lu\r\n", name, (unsigned long)slots[index].page, (unsigned long)outstanding);
                 }
                 else if (result != FC_STATUS_RESOURCE_EMPTY)
                 {
-                    SSD_LOGE("[FC TEST] %s submit failed: page=%lu result=%d\r\n", name, (unsigned long)next_page, (int)result);
+                    LOGE("[FC TEST] %s submit failed: page=%lu result=%d\r\n", name, (unsigned long)next_page, (int)result);
                     goto fail;
                 }
             }
@@ -381,7 +381,7 @@ static fc_status_t fc_nand_test_run_block_pipeline(nand_paa_t test_paa, uint8_t 
         if ((result != FC_STATUS_OK) && (result != FC_STATUS_NOT_READY) &&
             (result != FC_STATUS_QUEUE_EMPTY))
         {
-            SSD_LOGE("[FC TEST] %s service failed: result=%d\r\n", name, (int)result);
+            LOGE("[FC TEST] %s service failed: result=%d\r\n", name, (int)result);
             goto fail;
         }
         while (fc_poll_completion(&completion) == FC_STATUS_OK)
@@ -392,7 +392,7 @@ static fc_status_t fc_nand_test_run_block_pipeline(nand_paa_t test_paa, uint8_t 
 
             if (completed_slot == NULL)
             {
-                SSD_LOGE("[FC TEST] %s completion command not found: cmd=0x%04X\r\n", name, (unsigned int)completion.command_id);
+                LOGE("[FC TEST] %s completion command not found: cmd=0x%04X\r\n", name, (unsigned int)completion.command_id);
                 result = FC_STATUS_IO_ERROR;
                 goto fail;
             }
@@ -400,15 +400,15 @@ static fc_status_t fc_nand_test_run_block_pipeline(nand_paa_t test_paa, uint8_t 
             result         = fc_nand_test_process_batch_completion(&completion, slots, FC_NAND_TEST_PAGE_WINDOW, operation);
             if (result != FC_STATUS_OK)
             {
-                SSD_LOGE("[FC TEST] %s completion failed: page result=%d\r\n", name, (int)result);
+                LOGE("[FC TEST] %s completion failed: page result=%d\r\n", name, (int)result);
                 goto fail;
             }
             completed++;
             outstanding--;
-            SSD_LOGI("[FC TEST] %s page=%lu completed inflight=%lu\r\n", name, (unsigned long)completed_page, (unsigned long)outstanding);
+            LOGI("[FC TEST] %s page=%lu completed inflight=%lu\r\n", name, (unsigned long)completed_page, (unsigned long)outstanding);
             if ((completed % FC_NAND_TEST_PROGRESS_PAGES) == 0U || completed == PAGES_PER_BLOCK)
             {
-                SSD_LOGI("[FC TEST] %s progress: %lu/%u pages\r\n", name, (unsigned long)completed, (unsigned int)PAGES_PER_BLOCK);
+                LOGI("[FC TEST] %s progress: %lu/%u pages\r\n", name, (unsigned long)completed, (unsigned int)PAGES_PER_BLOCK);
             }
             if ((completed % FC_NAND_TEST_STATS_INTERVAL) == 0U || completed == PAGES_PER_BLOCK)
             {
@@ -426,7 +426,7 @@ static fc_status_t fc_nand_test_run_block_pipeline(nand_paa_t test_paa, uint8_t 
         }
     }
     fc_nand_test_log_resource_stats("end", completed, next_page, outstanding);
-    SSD_LOGI("[FC TEST] %s passed\r\n", name);
+    LOGI("[FC TEST] %s passed\r\n", name);
     return FC_STATUS_OK;
 
 fail:
@@ -453,7 +453,7 @@ fc_status_t fc_nand_test_read_id(void)
     {
         return FC_STATUS_RESOURCE_EMPTY;
     }
-    SSD_LOGI("[FC TEST] READ_ID submit\r\n");
+    LOGI("[FC TEST] READ_ID submit\r\n");
     fc_nand_test_command_configure(command, OP_READ_ID, 0U, 1U);
     result = fc_command_configure_descriptors(command);
     if (result != FC_STATUS_OK)
@@ -470,7 +470,7 @@ fc_status_t fc_nand_test_read_id(void)
     if (result == FC_STATUS_OK)
     {
         id = buffer;
-        SSD_LOGI("[FC TEST] READ_ID=%02X %02X %02X %02X %02X\r\n", id[0], id[1], id[2], id[3], id[4]);
+        LOGI("[FC TEST] READ_ID=%02X %02X %02X %02X %02X\r\n", id[0], id[1], id[2], id[3], id[4]);
         if ((id[0] != FC_NAND_TEST_MANUFACTURER_ID) || (id[1] != FC_NAND_TEST_DEVICE_ID))
         {
             result = FC_STATUS_IO_ERROR;
@@ -502,7 +502,7 @@ fc_status_t fc_nand_test_erase_block(nand_paa_t test_paa)
     {
         return FC_STATUS_RESOURCE_EMPTY;
     }
-    SSD_LOGI("[FC TEST] ERASE submit, paa=0x%08lX\r\n", (unsigned long)test_paa);
+    LOGI("[FC TEST] ERASE submit, paa=0x%08lX\r\n", (unsigned long)test_paa);
     fc_nand_test_command_configure(command, OP_ERASE_BLOCK, test_paa, 1U);
     command->desc_id = FC_DESCRIPTOR_ID_INVALID;
     result           = fc_nand_test_wait_completion(command);
@@ -525,7 +525,7 @@ static __attribute__((unused)) fc_status_t fc_nand_test_program_page(nand_paa_t 
     {
         return FC_STATUS_RESOURCE_EMPTY;
     }
-    SSD_LOGD("[FC TEST] PROGRAM submit, paa=0x%08lX\r\n", (unsigned long)test_paa);
+    LOGD("[FC TEST] PROGRAM submit, paa=0x%08lX\r\n", (unsigned long)test_paa);
     fc_nand_test_command_configure(command, OP_NORMAL_PROGRAM_PAGE, test_paa, CW_NUM);
     result = fc_command_configure_descriptors(command);
     if (result != FC_STATUS_OK)
@@ -544,7 +544,7 @@ static __attribute__((unused)) fc_status_t fc_nand_test_program_page(nand_paa_t 
         }
     }
     result = fc_nand_test_wait_completion(command);
-    SSD_LOGD("[FC TEST] PROGRAM completion result=%d\r\n", (int)result);
+    LOGD("[FC TEST] PROGRAM completion result=%d\r\n", (int)result);
     for (fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id; descriptor_id != FC_DESCRIPTOR_ID_INVALID;)
     {
         fc_descriptor_t *descriptor = fc_nand_test_descriptor(descriptor_id);
@@ -577,7 +577,7 @@ static __attribute__((unused)) fc_status_t fc_nand_test_read_page(nand_paa_t tes
     {
         return FC_STATUS_RESOURCE_EMPTY;
     }
-    SSD_LOGD("[FC TEST] READ submit, paa=0x%08lX\r\n", (unsigned long)test_paa);
+    LOGD("[FC TEST] READ submit, paa=0x%08lX\r\n", (unsigned long)test_paa);
     fc_nand_test_command_configure(command, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, test_paa, CW_NUM);
     result = fc_command_configure_descriptors(command);
     if (result != FC_STATUS_OK)
@@ -588,7 +588,7 @@ static __attribute__((unused)) fc_status_t fc_nand_test_read_page(nand_paa_t tes
     result = fc_nand_test_wait_completion(command);
     if (result == FC_STATUS_OK)
     {
-        SSD_LOGD("[FC TEST] READ_DATA (0x55 pattern expected)\r\n");
+        LOGD("[FC TEST] READ_DATA (0x55 pattern expected)\r\n");
         for (fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id; descriptor_id != FC_DESCRIPTOR_ID_INVALID;)
         {
             fc_descriptor_t *descriptor = fc_nand_test_descriptor(descriptor_id);
@@ -597,19 +597,19 @@ static __attribute__((unused)) fc_status_t fc_nand_test_read_page(nand_paa_t tes
 
             if (words == NULL)
             {
-                SSD_LOGE("[FC TEST] READ buffer invalid: cw=%u id=%u\r\n", descriptor->config.cw, descriptor->buffer_id);
+                LOGE("[FC TEST] READ buffer invalid: cw=%u id=%u\r\n", descriptor->config.cw, descriptor->buffer_id);
                 result = FC_STATUS_IO_ERROR;
                 break;
             }
-            SSD_LOGD("[FC TEST] READ CW%u buffer_id=%u data=%08lX %08lX %08lX %08lX\r\n", descriptor->config.cw, descriptor->buffer_id, (unsigned long)words[0], (unsigned long)words[1], (unsigned long)words[2], (unsigned long)words[3]);
+            LOGD("[FC TEST] READ CW%u buffer_id=%u data=%08lX %08lX %08lX %08lX\r\n", descriptor->config.cw, descriptor->buffer_id, (unsigned long)words[0], (unsigned long)words[1], (unsigned long)words[2], (unsigned long)words[3]);
             for (index = 0U; index < (FC_BUFFER_POOL_CW_SIZE / sizeof(uint32_t)); index++)
             {
                 if (words[index] != 0x55555555UL)
                 {
-                    SSD_LOGE("[FC TEST] READ mismatch: cw=%u word=%u actual=%08lX expected=55555555\r\n",
-                             descriptor->config.cw,
-                             index,
-                             (unsigned long)words[index]);
+                    LOGE("[FC TEST] READ mismatch: cw=%u word=%u actual=%08lX expected=55555555\r\n",
+                         descriptor->config.cw,
+                         index,
+                         (unsigned long)words[index]);
                     result = FC_STATUS_IO_ERROR;
                 }
             }
@@ -646,7 +646,7 @@ fc_status_t fc_nand_test_reset(void)
     {
         return FC_STATUS_RESOURCE_EMPTY;
     }
-    SSD_LOGI("[FC TEST] RESET submit\r\n");
+    LOGI("[FC TEST] RESET submit\r\n");
     fc_nand_test_command_configure(command, OP_RESET, 0U, 0U);
     command->desc_id = FC_DESCRIPTOR_ID_INVALID;
     result           = fc_nand_test_wait_completion(command);
@@ -668,7 +668,7 @@ fc_status_t fc_nand_test_read_status(void)
     {
         return FC_STATUS_RESOURCE_EMPTY;
     }
-    SSD_LOGI("[FC TEST] READ_STATUS submit\r\n");
+    LOGI("[FC TEST] READ_STATUS submit\r\n");
     fc_nand_test_command_configure(command, OP_READ_STATUS, 0U, 1U);
     result = fc_command_configure_descriptors(command);
     if (result != FC_STATUS_OK)
@@ -684,10 +684,10 @@ fc_status_t fc_nand_test_read_status(void)
     result = fc_nand_test_wait_completion(command);
     if (result == FC_STATUS_OK)
     {
-        SSD_LOGI("[FC TEST] READ_STATUS=0x%02X (READY=%u FAIL=%u)\r\n",
-                 buffer[0],
-                 (unsigned int)((buffer[0] & NAND_STATUS_READY) != 0U),
-                 (unsigned int)((buffer[0] & NAND_STATUS_FAIL) != 0U));
+        LOGI("[FC TEST] READ_STATUS=0x%02X (READY=%u FAIL=%u)\r\n",
+             buffer[0],
+             (unsigned int)((buffer[0] & NAND_STATUS_READY) != 0U),
+             (unsigned int)((buffer[0] & NAND_STATUS_FAIL) != 0U));
         if ((buffer[0] & NAND_STATUS_READY) == 0U)
         {
             result = FC_STATUS_IO_ERROR;
@@ -721,7 +721,7 @@ fc_status_t fc_nand_test_set_get_features(void)
     {
         return FC_STATUS_RESOURCE_EMPTY;
     }
-    SSD_LOGI("[FC TEST] SET_FEATURES submit\r\n");
+    LOGI("[FC TEST] SET_FEATURES submit\r\n");
     fc_nand_test_command_configure(set_cmd, OP_SET_FEATURES, 0U, 1U);
     /* 无 descriptor 分配 — 数据以内联方式传递 */
     set_cmd->feature_addr = 0x01U;
@@ -732,11 +732,11 @@ fc_status_t fc_nand_test_set_get_features(void)
     result                = fc_nand_test_wait_completion(set_cmd);
     if (result != FC_STATUS_OK)
     {
-        SSD_LOGE("[FC TEST] SET_FEATURES failed: %d\r\n", (int)result);
+        LOGE("[FC TEST] SET_FEATURES failed: %d\r\n", (int)result);
         (void)fc_nand_test_release_command(set_cmd);
         return result;
     }
-    SSD_LOGI("[FC TEST] SET_FEATURES passed\r\n");
+    LOGI("[FC TEST] SET_FEATURES passed\r\n");
 
     /* GET_FEATURES: 回读 feature 地址 0x01. */
     get_cmd = fc_command_alloc();
@@ -745,27 +745,27 @@ fc_status_t fc_nand_test_set_get_features(void)
         (void)fc_nand_test_release_command(set_cmd);
         return FC_STATUS_RESOURCE_EMPTY;
     }
-    SSD_LOGI("[FC TEST] GET_FEATURES submit\r\n");
+    LOGI("[FC TEST] GET_FEATURES submit\r\n");
     fc_nand_test_command_configure(get_cmd, OP_GET_FEATURES, 0U, 1U);
     get_cmd->feature_addr = 0x01U;
     result                = fc_nand_test_wait_completion(get_cmd);
     if (result == FC_STATUS_OK)
     {
-        SSD_LOGI("[FC TEST] GET_FEATURES(0x01)=%02X %02X %02X %02X\r\n",
-                 get_cmd->parameter0,
-                 get_cmd->parameter1,
-                 get_cmd->parameter2,
-                 get_cmd->parameter3);
+        LOGI("[FC TEST] GET_FEATURES(0x01)=%02X %02X %02X %02X\r\n",
+             get_cmd->parameter0,
+             get_cmd->parameter1,
+             get_cmd->parameter2,
+             get_cmd->parameter3);
         if ((get_cmd->parameter0 != 0x40U) || (get_cmd->parameter1 != 0x00U) ||
             (get_cmd->parameter2 != 0x00U) || (get_cmd->parameter3 != 0x00U))
         {
-            SSD_LOGE("[FC TEST] GET_FEATURES mismatch\r\n");
+            LOGE("[FC TEST] GET_FEATURES mismatch\r\n");
             result = FC_STATUS_IO_ERROR;
         }
     }
     else
     {
-        SSD_LOGE("[FC TEST] GET_FEATURES failed: %d\r\n", (int)result);
+        LOGE("[FC TEST] GET_FEATURES failed: %d\r\n", (int)result);
     }
 
     (void)fc_nand_test_release_command(get_cmd);
@@ -782,31 +782,31 @@ fc_status_t fc_nand_test_run_all(nand_paa_t test_paa)
     {
         return result;
     }
-    SSD_LOGI("[FC TEST] RESET passed\r\n");
+    LOGI("[FC TEST] RESET passed\r\n");
     result = fc_nand_test_read_id();
     if (result != FC_STATUS_OK)
     {
         return result;
     }
-    SSD_LOGI("[FC TEST] READ_ID passed\r\n");
+    LOGI("[FC TEST] READ_ID passed\r\n");
     result = fc_nand_test_read_status();
     if (result != FC_STATUS_OK)
     {
         return result;
     }
-    SSD_LOGI("[FC TEST] READ_STATUS passed\r\n");
+    LOGI("[FC TEST] READ_STATUS passed\r\n");
     result = fc_nand_test_set_get_features();
     if (result != FC_STATUS_OK)
     {
         return result;
     }
-    SSD_LOGI("[FC TEST] SET/GET_FEATURES passed\r\n");
+    LOGI("[FC TEST] SET/GET_FEATURES passed\r\n");
     result = fc_nand_test_erase_block(test_paa);
     if (result != FC_STATUS_OK)
     {
         return result;
     }
-    SSD_LOGI("[FC TEST] ERASE passed\r\n");
+    LOGI("[FC TEST] ERASE passed\r\n");
     result = fc_nand_test_program_block(test_paa);
     if (result != FC_STATUS_OK)
     {
@@ -815,7 +815,7 @@ fc_status_t fc_nand_test_run_all(nand_paa_t test_paa)
     result = fc_nand_test_read_block(test_paa);
     if (result == FC_STATUS_OK)
     {
-        SSD_LOGI("[FC TEST] READ_BLOCK passed\r\n");
+        LOGI("[FC TEST] READ_BLOCK passed\r\n");
     }
     return result;
 }

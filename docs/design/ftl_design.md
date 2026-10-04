@@ -1047,7 +1047,7 @@ wl_victim_t wl_select_victim(ftl_context_t *ftl) {
 
 ```c
 void wl_relocate(ftl_context_t *ftl, wl_victim_t *victim) {
-    SSD_LOGI("[WL] relocating SB, erase=%u, valid=%d/%d",
+    LOGI("[WL] relocating SB, erase=%u, valid=%d/%d",
              victim->avg_erase, victim->valid_pages, PLANE_NUM * PAGES_PER_BLOCK);
 
     /* Step 1: 遍历双 Plane 所有有效页，搬移到 Cold Super Block */
@@ -1934,7 +1934,7 @@ void ftl_checkpoint(ftl_context_t *ftl) {
     // journal_truncate 内部处理擦除
 
     ftl->cp_sequence = cp.sequence;
-    SSD_LOGI("[CP] seq=%u done", cp.sequence);
+    LOGI("[CP] seq=%u done", cp.sequence);
 }
 ```
 
@@ -2220,7 +2220,7 @@ int boot_clean_start(ftl_context_t *ftl, l2p_checkpoint_header_t *cp) {
     /* ⑤ Controller → Ready */
     ftl->cp_sequence = cp->sequence;
 
-    SSD_LOGI("[Boot] clean: free=%u, SB next_page=%d",
+    LOGI("[Boot] clean: free=%u, SB next_page=%d",
              ftl->alloc.free_count, ftl->alloc.open_sb.next_page);
     return SSD_STATUS_OK;
 }
@@ -2255,7 +2255,7 @@ int boot_power_failure_recovery(ftl_context_t *ftl,
     ftl->cp_sequence = cp->sequence;
 
     /* Cache 中的 DIRTY lines 由后台 flush 逐步写回 NAND L2P 表 */
-    SSD_LOGI("[Boot] power failure: %u journal entries replayed",
+    LOGI("[Boot] power failure: %u journal entries replayed",
              ftl->journal.replayed_count);
     return SSD_STATUS_OK;
 }
@@ -2297,7 +2297,7 @@ int journal_replay_batched(l2p_journal_t *journal, l2p_cache_t *cache,
         }
     }
 
-    SSD_LOGI("[Journal] batch replay: %d entries in ~%d regions",
+    LOGI("[Journal] batch replay: %d entries in ~%d regions",
              count, count / 32 + 1);
     return count;
 }
@@ -2324,7 +2324,7 @@ void allocator_scan_write_pointer(ftl_allocator_t *alloc) {
             if (is_all_ff(page_buf, 16)) {
                 /* 找到第一个空白页 */
                 sb->next_page = page;
-                SSD_LOGI("[Boot] write pointer: SB next_page=%d", page);
+                LOGI("[Boot] write pointer: SB next_page=%d", page);
                 return;
             }
         }

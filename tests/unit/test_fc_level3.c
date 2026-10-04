@@ -21,7 +21,7 @@
  *   ssd> test --list
  */
 
-#include "common/ssd_log.h"
+#include "common/log.h"
 #include "fc/fc.h"
 #include "fc/fc_command.h"
 #include "fc/fc_queue.h"
@@ -47,10 +47,12 @@ static void *setup_level3(const MunitParameter params[], void *user_data)
     /* 恢复 device_ready——Level 1/2 的 fc_init() 在 setup 阶段将其重置为 0。 */
     nand_dispatch_set_device_ready(1U);
 
+    /* 套件级资源快照，排查池泄漏时打开；正常跑保持静默。 */
+    /*
     fc_resource_stats_t stats;
     if (fc_get_resource_stats(&stats) == FC_STATUS_OK)
     {
-        SSD_LOGI("[RES] L3_start: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
+        LOGI("[RES] L3_start: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
                  (unsigned)stats.command_used,
                  (unsigned)FC_COMMAND_POOL_DEPTH,
                  (unsigned)stats.descriptor_used,
@@ -61,6 +63,7 @@ static void *setup_level3(const MunitParameter params[], void *user_data)
                  (unsigned)stats.hsq_used,
                  (unsigned)stats.cq_used);
     }
+    */
     return NULL;
 }
 
@@ -341,6 +344,110 @@ next_desc:
 
 #define SERVICE_LOOP_MAX (5000U)
 
+/**************************************************************************
+ *  辅助：命令结构体快照 + 逐字段差异对比
+ *
+ *  run_lifecycle 在 submit 前给 cmd 拍一份快照，release 前逐字段比对，
+ *  把发生变化的字段打到串口——用于定位"命令提交后被谁改写"这类问题。
+ *  正常生命周期内 fc_command_t 的全部字段都应保持不变，所以只要出现差异
+ *  就说明有代码在命令在飞的时候动了它。
+ **************************************************************************/
+
+/* 命令结构体快照 / 逐字段比对。排查"命令提交后被谁改写"时把下面整块打开，
+ * 并在 run_lifecycle 里恢复 cmd_snapshot + cmd_diff_report 两处调用。
+ *
+ * 注意：想直接比对 fc_cmd_conf_t 原始字的话，先确认 sizeof(fc_cmd_conf_t) == 4，
+ * 否则整字兜底比对不成立。
+ */
+#if 0
+static void cmd_snapshot(const fc_command_t *cmd, fc_command_t *snapshot)
+{
+    *snapshot = *cmd;
+}
+
+/*
+ * 无条件逐字段打印 before/after 全部字段（不只差异行），差异行尾追加 <== DIFF。
+ * 依赖当前作用域的 before / after / diffs / checked 四个名字——由本函数与宏
+ * 约定，勿在别处复用本宏。
+ * checked 用来做分母，所以新增字段只要加一行 CMD_FIELD_U 即可，计数自动同步。
+ */
+#    define CMD_FIELD_U(field)                                   \
+        do                                                       \
+        {                                                        \
+            unsigned before_v = (unsigned)(before->field);       \
+            unsigned after_v  = (unsigned)(after->field);        \
+            uint32_t changed  = (before_v != after_v) ? 1U : 0U; \
+            diffs += changed;                                    \
+            checked++;                                           \
+            LOGW("[DBG]   %-18s %-10u -> %-10u%s\r\n",           \
+                 #field,                                         \
+                 before_v,                                       \
+                 after_v,                                        \
+                 (changed != 0U) ? "  <== DIFF" : "");           \
+        } while (0)
+
+static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *after, const char *tag)
+{
+    uint32_t diffs      = 0U;
+    uint32_t checked    = 0U;
+    uint32_t word_front = 0U;
+    uint32_t word_back  = 0U;
+
+    LOGW("[DBG] %s: cmd=%p id=%u op=%u\r\n",
+             tag,
+             (const void *)after,
+             (unsigned)after->command_id,
+             (unsigned)after->config.operation);
+
+    CMD_FIELD_U(command_id);
+    CMD_FIELD_U(reserved0);
+    CMD_FIELD_U(desc_id);
+    CMD_FIELD_U(high_priority);
+    CMD_FIELD_U(module);
+    CMD_FIELD_U(feature_addr);
+    CMD_FIELD_U(reserved1);
+    CMD_FIELD_U(meta);
+    CMD_FIELD_U(paa);
+
+    CMD_FIELD_U(config.operation);
+    CMD_FIELD_U(config.ch);
+    CMD_FIELD_U(config.ce);
+    CMD_FIELD_U(config.lun);
+    CMD_FIELD_U(config.cw);
+    CMD_FIELD_U(config.crc);
+    CMD_FIELD_U(config.ldpc);
+    CMD_FIELD_U(config.raid);
+    CMD_FIELD_U(config.random);
+    CMD_FIELD_U(config.chain);
+    CMD_FIELD_U(config.page_type);
+    CMD_FIELD_U(config.multi_plane);
+    CMD_FIELD_U(config.reserved);
+
+    CMD_FIELD_U(parameter0);
+    CMD_FIELD_U(parameter1);
+    CMD_FIELD_U(parameter2);
+    CMD_FIELD_U(parameter3);
+
+    /* 兜底：整字比对 config，捕捉上面逐个字段漏掉的位（含未命名填充）。 */
+    (void)memcpy(&word_front, &before->config, sizeof(word_front));
+    (void)memcpy(&word_back, &after->config, sizeof(word_back));
+    {
+        uint32_t changed = (word_front != word_back) ? 1U : 0U;
+        diffs += changed;
+        checked++;
+        LOGW("[DBG]   %-18s 0x%08lx -> 0x%08lx%s\r\n",
+                 "config(raw)",
+                 (unsigned long)word_front,
+                 (unsigned long)word_back,
+                 (changed != 0U) ? "  <== DIFF" : "");
+    }
+
+    LOGW("[DBG] %s: %lu/%lu fields changed\r\n", tag, (unsigned long)diffs, (unsigned long)checked);
+
+    return diffs;
+}
+#endif
+
 static void run_lifecycle(fc_command_t *cmd)
 {
     fc_command_status_t completion;
@@ -370,6 +477,9 @@ static void run_lifecycle(fc_command_t *cmd)
     /* --- 3. 验证 completion --- */
     munit_assert_uint32(completed, ==, 1U);
     munit_assert_uint32(completion.command_id, ==, cmd->command_id);
+
+    /* --- 3.5 结构体一致性检查（排查命令被改写时打开，见文件上方 #if 0 块） --- */
+    /* (void)cmd_diff_report(&snapshot, cmd, "lifecycle"); */
 
     /* --- 4. release --- */
     release_command_buffers(cmd);

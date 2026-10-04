@@ -11,7 +11,7 @@
  * 唯一链接依赖：g_nand_operation_map（.rodata, onfi_1_0.o）
  */
 
-#include "common/ssd_log.h"
+#include "common/log.h"
 #include "fc/fc.h"
 #include "fc/fc_command.h"
 #include "fc/fc_queue.h"
@@ -569,17 +569,17 @@ static void print_resource_stats(const char *tag)
     fc_resource_stats_t stats;
     if (fc_get_resource_stats(&stats) == FC_STATUS_OK)
     {
-        SSD_LOGI("[RES] %s: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
-                 tag,
-                 (unsigned)stats.command_used,
-                 (unsigned)FC_COMMAND_POOL_DEPTH,
-                 (unsigned)stats.descriptor_used,
-                 (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
-                 (unsigned)stats.buffer_used,
-                 (unsigned)FC_BUFFER_POOL_DEPTH,
-                 (unsigned)stats.sq_used,
-                 (unsigned)stats.hsq_used,
-                 (unsigned)stats.cq_used);
+        LOGI("[RES] %s: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
+             tag,
+             (unsigned)stats.command_used,
+             (unsigned)FC_COMMAND_POOL_DEPTH,
+             (unsigned)stats.descriptor_used,
+             (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
+             (unsigned)stats.buffer_used,
+             (unsigned)FC_BUFFER_POOL_DEPTH,
+             (unsigned)stats.sq_used,
+             (unsigned)stats.hsq_used,
+             (unsigned)stats.cq_used);
     }
 }
 

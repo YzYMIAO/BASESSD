@@ -22,7 +22,7 @@
  * ====================================================================== */
 
 #include "btim.h"
-#include "common/ssd_log.h"
+#include "common/log.h"
 #include "controller/controller.h"
 #include "delay.h"
 #include "fc/fc.h"
@@ -146,7 +146,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
 
     if (ftl_init(&g_ftl[ch][ce][lun], &params) != FTL_OK)
     {
-        SSD_LOGE("[FTL] init failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
+        LOGE("[FTL] init failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return -1;
     }
 
@@ -196,23 +196,23 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         allocator_free_block(&g_ftl[ch][ce][lun].alloc, gblock);
         free_n++;
     }
-    SSD_LOGI("[FTL] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
-             ch,
-             ce,
-             lun,
-             (unsigned)free_n,
-             (unsigned)g_ftl[ch][ce][lun].alloc.op_count,
-             (unsigned)g_ftl[ch][ce][lun].alloc.spare_count);
+    LOGI("[FTL] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
+         ch,
+         ce,
+         lun,
+         (unsigned)free_n,
+         (unsigned)g_ftl[ch][ce][lun].alloc.op_count,
+         (unsigned)g_ftl[ch][ce][lun].alloc.spare_count);
 
     if (ftl_boot_recovery(&g_ftl[ch][ce][lun], &result) != FTL_OK)
     {
-        SSD_LOGE("[FTL] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
+        LOGE("[FTL] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return -1;
     }
-    SSD_LOGI("[FTL] boot type=%d cp_seq=%lu journal_entries=%lu\r\n",
-             (int)result.boot_type,
-             (unsigned long)result.cp_sequence,
-             (unsigned long)result.journal_entries);
+    LOGI("[FTL] boot type=%d cp_seq=%lu journal_entries=%lu\r\n",
+         (int)result.boot_type,
+         (unsigned long)result.cp_sequence,
+         (unsigned long)result.journal_entries);
 
     return 0;
 }
@@ -250,7 +250,7 @@ static void ssd_ftl_boot_all(void)
 
     if (!boot_ok)
     {
-        SSD_LOGE("[FTL] boot failed, fallback to fc_service\r\n");
+        LOGE("[FTL] boot failed, fallback to fc_service\r\n");
         return;
     }
 
@@ -275,15 +275,15 @@ static void ssd_ftl_boot_all(void)
     ctrl_ret = ssd_controller_init(&g_ctrl, g_ftl_ptrs);
     if (ctrl_ret != SSD_STATUS_OK)
     {
-        SSD_LOGE("[FTL] controller init failed: %d\r\n", ctrl_ret);
+        LOGE("[FTL] controller init failed: %d\r\n", ctrl_ret);
         return;
     }
 
     /* ⑤ 主循环切换点：此后走 ftl_service（内部先跑 fc_service） */
     g_ftl_ready = 1;
     /* %lu 而非 %llu：newlib-nano 不支持 long long 格式化，见 usart.c 的 _Static_assert。 */
-    SSD_LOGI("[FTL] controller ready, lba_max=%lu\r\n",
-             (unsigned long)FTL_LBA_MAX);
+    LOGI("[FTL] controller ready, lba_max=%lu\r\n",
+         (unsigned long)FTL_LBA_MAX);
 }
 
 /* Newlib-nano calls this hook from __libc_init_array when no CRT provides it. */
@@ -307,11 +307,11 @@ int main(void)
     uint8_t nand_init_result;
 
     sys_init();
-    ssd_log_set_sink(stm32_uart_log_sink);
-    ssd_log_set_flush_sink(stm32_uart_log_flush_sink);
-    ssd_log_set_level(SSD_LOG_INFO);
-    SSD_LOGD("debug logging enabled\r\n");
-    SSD_LOGI("soft_ssd debug revision=%lu\r\n", (unsigned long)SSD_FIRMWARE_DEBUG_REVISION);
+    log_set_sink(stm32_uart_log_sink);
+    log_set_flush_sink(stm32_uart_log_flush_sink);
+    log_set_level(LOG_INFO);
+    LOGD("debug logging enabled\r\n");
+    LOGI("soft_ssd debug revision=%lu\r\n", (unsigned long)SSD_FIRMWARE_DEBUG_REVISION);
     /*
      * 复位原因 + 上次崩溃记录。必须在 sink 绑定之后调用：它走异步日志，
      * 且 .noinit 记录可跨软复位保留（VBAT 未供电时 BKPSRAM 不可用）。
@@ -331,42 +331,42 @@ int main(void)
      *   详见 docs/design/fc_nand_design.md §22「初始化全流程」。 */
     if (fc_init() != FC_STATUS_OK)
     {
-        SSD_LOGE("fc init failed\r\n");
+        LOGE("fc init failed\r\n");
     }
     else if ((nand_init_result = nand_init()) != NAND_RESULT_OK)
     {
-        SSD_LOGE("nand init failed: 0x%02X\r\n", (unsigned int)nand_init_result);
+        LOGE("nand init failed: 0x%02X\r\n", (unsigned int)nand_init_result);
     }
     else
     {
         nand_dispatch_set_device_ready(1U);
-        SSD_LOGI("fc and nand raw path ready\r\n");
+        LOGI("fc and nand raw path ready\r\n");
         /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
          * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */
         if (stm32_platform_register() != 0)
         {
-            SSD_LOGE("platform register failed; T3 timers disabled\r\n");
+            LOGE("platform register failed; T3 timers disabled\r\n");
         }
         ssd_ftl_boot_all();
     }
     /* APB1=100 MHz and APB1 prescaler=2, so TIM6 kernel clock is 200 MHz. */
     btim_timx_int_init(1000 - 1, 200 - 1);
-    SSD_LOGI("soft_ssd console ready\r\n");
-    SSD_LOGI("type 'help' for commands\r\n");
+    LOGI("soft_ssd console ready\r\n");
+    LOGI("type 'help' for commands\r\n");
 #if (SSD_WATCHDOG_ENABLE != 0U)
     if (!storage_wdg_init(&g_storage_wdg_config))
     {
-        SSD_LOGE("watchdog supervisor init failed\r\n");
+        LOGE("watchdog supervisor init failed\r\n");
     }
     else
     {
         /* 固定任务已在 btim.c 的 g_btim_tasks 中注册；这里只启动其运行态。 */
         btim_scheduler_init();
-        SSD_LOGI("btim task table ready, IWDG nominal=30s, period=100ms\r\n");
+        LOGI("btim task table ready, IWDG nominal=30s, period=100ms\r\n");
     }
 #else
     btim_scheduler_init();
-    SSD_LOGI("btim task table ready, IWDG disabled for debug\r\n");
+    LOGI("btim task table ready, IWDG disabled for debug\r\n");
 #endif
     uart_service_poll();
     /* ── 主循环（裸机 superloop，无中断参与）──

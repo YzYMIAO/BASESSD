@@ -16,7 +16,7 @@
  *   - submit / chain 阶段经 req_table[task->operation](task) 构建请求
  */
 
-#include "common/ssd_log.h"
+#include "common/log.h"
 #include "nand_config.h"
 #include "nand_dispatch_internal.h"
 

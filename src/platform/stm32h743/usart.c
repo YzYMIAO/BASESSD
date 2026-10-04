@@ -812,7 +812,7 @@ static void uart_execute_command(char *line)
  * 行尾归一化：裸机串口终端（PuTTY/minicom 等）要求 \r\n 才能正确换行。
  * printf/puts/fprintf 在 newlib-nano 中只输出 \n，此处扫描 buffer，
  * 在裸 \n（前面不是 \r）前插入 \r，同时避免已有 \r\n 被重复加 \r。
- * 所有走 printf 的输出（SSD_LOGI/munit 测试报告等）自动受益，
+ * 所有走 printf 的输出（LOGI/munit 测试报告等）自动受益，
  * 直接调 uart_log_write() 的不受影响。
  */
 int _write(int file, char *buffer, int length)

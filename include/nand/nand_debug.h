@@ -20,7 +20,7 @@
 #ifndef NAND_DEBUG_H
 #define NAND_DEBUG_H
 
-#include "common/ssd_log.h"
+#include "common/log.h"
 
 #include <stdint.h>
 
@@ -66,57 +66,57 @@
 /* ======================================================================
  * 宏封装
  *
- * 注意：开了的层用 SSD_LOGI 而非 SSD_LOGD，因为 main.c 默认
- * ssd_log_set_level(SSD_LOG_INFO) 会滤掉 DEBUG 级别。
+ * 注意：开了的层用 LOGI 而非 LOGD，因为 main.c 默认
+ * log_set_level(LOG_INFO) 会滤掉 DEBUG 级别。
  * 编译时 NAND_DBG_*=0 时完全裁剪，无运行时开销。
  *
  * 每层日志前缀（见文件头说明）：[FC]/[SCH]/[DSP]/[ENG]/[FMC]/[DAT]/[TIM]/[RES]。
  * ====================================================================== */
 
 #if NAND_DBG_FC
-#    define FC_LOGD(...) SSD_LOGI("[FC] " __VA_ARGS__)
+#    define FC_LOGD(...) LOGI("[FC] " __VA_ARGS__)
 #else
 #    define FC_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_SCHED
-#    define SCHED_LOGD(...) SSD_LOGI("[SCH] " __VA_ARGS__)
+#    define SCHED_LOGD(...) LOGI("[SCH] " __VA_ARGS__)
 #else
 #    define SCHED_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_DISPATCH
-#    define DISP_LOGD(...) SSD_LOGI("[DSP] " __VA_ARGS__)
+#    define DISP_LOGD(...) LOGI("[DSP] " __VA_ARGS__)
 #else
 #    define DISP_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_ENGINE
-#    define ENG_LOGD(...) SSD_LOGI("[ENG] " __VA_ARGS__)
+#    define ENG_LOGD(...) LOGI("[ENG] " __VA_ARGS__)
 #else
 #    define ENG_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_FMC
-#    define FMC_LOGD(...) SSD_LOGI("[FMC] " __VA_ARGS__)
+#    define FMC_LOGD(...) LOGI("[FMC] " __VA_ARGS__)
 #else
 #    define FMC_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_DATA
-#    define DATA_LOGD(...) SSD_LOGI("[DAT] " __VA_ARGS__)
+#    define DATA_LOGD(...) LOGI("[DAT] " __VA_ARGS__)
 #else
 #    define DATA_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_TIMING
-#    define TIM_LOGD(...) SSD_LOGI("[TIM] " __VA_ARGS__)
+#    define TIM_LOGD(...) LOGI("[TIM] " __VA_ARGS__)
 #else
 #    define TIM_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_RES
-#    define RES_LOGD(...) SSD_LOGI("[RES] " __VA_ARGS__)
+#    define RES_LOGD(...) LOGI("[RES] " __VA_ARGS__)
 #else
 #    define RES_LOGD(...) ((void)0U)
 #endif
