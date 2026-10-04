@@ -4,7 +4,7 @@
 > 所有环境搭建、工具链配置、链路故障排查，均以本文档为准。
 > 遇到任何环境问题，先查本文档，更新也只改本文档。
 >
-> 最后更新: 2026-09-26 | 从 portproxy/LocalHostOnly 切换到 -LocalHostOnly 0 直连方案
+> 最后更新: 2026-10-04 | §5.3 同步为当前 4 步直连脚本；新增「portproxy 残留抢占 2331」故障（§7.2 #8）
 
 ---
 
@@ -93,11 +93,18 @@ netsh advfirewall firewall add rule name="JLink 2331" dir=in action=allow protoc
 
 确认输出：`Ok.`
 
-### 2.3 Windows 端口转发（portproxy）— ⚠️ 已废弃
+### 2.3 Windows 端口转发（portproxy）— ⚠️ 已废弃，且必须删除残留
 
 > **2026-09-26：已切换到 `-LocalHostOnly 0` 直连方案，不再需要 portproxy。保留此节仅作历史参考。**
 
-以**管理员身份**执行一次，重启后持续生效：
+> **⚠️ 若曾按旧方案配置过 portproxy，务必删除这条规则。** 它会让 Windows 内核（svchost）持续监听 `0.0.0.0:2331`，与新方案 JLink（`-LocalHostOnly 0` 也绑 `0.0.0.0:2331`）**抢占同一端口**：JLink 绑不上、启动即退出（`Failed to open listener port 2331`），脚本会卡在「等待 JLink 进程」直到 30 秒超时。删除（管理员 PowerShell，一次即可）：
+>
+> ```powershell
+> netsh interface portproxy delete v4tov4 listenport=2331 listenaddress=0.0.0.0
+> netsh interface portproxy show v4tov4      # 确认 2331 那条已消失
+> ```
+
+以**管理员身份**执行一次，重启后持续生效（**旧方案，勿再使用**）：
 
 ```cmd
 netsh interface portproxy add v4tov4 listenport=2331 listenaddress=0.0.0.0 connectport=2331 connectaddress=127.0.0.1
@@ -149,8 +156,6 @@ JLinkGDBServer 默认只绑定 `127.0.0.1`（不接受外部连接）。portprox
 > **portproxy + WSL2 内建转发方案已废弃（2026-09-26）。保留此节作为历史参考，不再使用。**
 
 之前的双层 fallback 方案依赖 portproxy（Windows 内核 NAT）和 WSL2 内建转发 (wslrelay)，但 portproxy 反复出现 zombie rule 失效，WSL2 内建转发也同步不可用。详见 §8.11。
-
-### 3.3 转发方案选择
 
 ### 3.3 端口分配
 
@@ -208,7 +213,7 @@ cd ~/projects/soft_ssd
 ```bash
 # 1. Windows 手动启动 JLinkGDBServer（保持窗口可见）
 #    PowerShell:
-#    & "D:\StudyTool\Develop\JLink_V972\JLinkGDBServerCL.exe" -device STM32H743II -if SWD -speed 4000 -port 2331
+#    & "D:\StudyTool\Develop\JLink_V972\JLinkGDBServerCL.exe" -device STM32H743II -if SWD -speed 4000 -port 2331 -LocalHostOnly 0
 
 # 2. WSL 启动 socat
 WINDOWS_IP=$(ip route show default | awk '{print $3}')
@@ -217,7 +222,7 @@ socat TCP-LISTEN:2331,reuseaddr,fork TCP:$WINDOWS_IP:2331 &
 # 3. VS Code F5 调试
 ```
 
-### 4.3 运行单元测试
+### 4.4 运行单元测试
 
 ```bash
 # 全跑三级 UT
@@ -235,14 +240,14 @@ test --list                    # 列出所有套件
 test --seed 0x1234             # 指定随机种子
 ```
 
-### 4.4 修改代码后
+### 4.5 修改代码后
 
 ```bash
 make tests    # 重新编译
 # VS Code 按 F5（或 Restart）重新烧录
 ```
 
-### 4.5 目标板掉电/上电恢复
+### 4.6 目标板掉电/上电恢复
 
 如果调试过程中目标板断电（或手动复位后 JLink 连接异常）：
 
@@ -275,7 +280,10 @@ make tests    # 重新编译
 
 > **关于 portproxy**：脚本不再管理 portproxy。portproxy 是 §2.3 中配置的永久系统级 NAT 规则，重启后持续生效，与 JLink 在同一端口 2331 上共存（内核 NAT + 应用层 socket，不同层级不冲突）。
 
-### 5.3 脚本内容（当前版本，2026-09-26）
+### 5.3 脚本内容（当前版本，2026-10-04）
+
+> 与仓库中的 `sh/debug_env.sh` **保持一致**；改动脚本后请同步本节。
+> 注意：历史版本（含 portproxy / WSL2 内建转发双层 fallback 的 6 步版）已废弃，勿再参考。
 
 ```bash
 #!/bin/bash
@@ -316,57 +324,25 @@ echo "============================================"
 echo ""
 
 # ========== Step 1: 清干净所有旧进程 ==========
-echo "[1/6] 全清理旧进程..."
+echo "[1/4] 全清理旧进程..."
 
 # 杀 WSL 侧的 socat（避免端口占用）
 pkill -9 -f "socat.*$PORT" 2>/dev/null || true
 sleep 1
 
-# 杀 Windows 侧的 JLinkGDBServer（确保下次启动绑定正确的端口）
+# 杀 Windows 侧的 JLinkGDBServer（确保下次启动绑定正确的端口 + -LocalHostOnly 0）
 powershell.exe "taskkill /F /IM JLinkGDBServerCL.exe" 2>/dev/null || true
 sleep 2
 
-# 三重清理：查端口 2331 还绑着谁，逐个杀掉
-for i in 1 2 3; do
-    pid=$(powershell.exe "netstat -ano | findstr ':$PORT ' | findstr LISTENING" 2>/dev/null | awk '{print $NF}' | tr -d '\r')
-    if [ -n "$pid" ]; then
-        echo "  [清理] 端口 $PORT 被 PID=$pid 占用，杀掉..."
-        powershell.exe "taskkill /F /PID $pid" 2>/dev/null || true
-        sleep 2
-    else
-        break
-    fi
-done
-
 echo "  所有旧进程已清理"
 
-# ========== Step 2: 检查 portproxy ==========
-echo "[2/6] 检查 Windows portproxy..."
-pp=$(powershell.exe "netsh interface portproxy show v4tov4 | findstr '0.0.0.0.*$PORT'" 2>/dev/null | tr -d '\r')
-if [ -z "$pp" ]; then
-    echo "  portproxy 缺失，请以管理员身份在 PowerShell 执行："
-    echo "     netsh interface portproxy add v4tov4 listenport=$PORT listenaddress=0.0.0.0 connectport=$PORT connectaddress=127.0.0.1"
-    read -p "  按回车键继续..."
-else
-    echo "  portproxy: 0.0.0.0:$PORT -> 127.0.0.1:$PORT"
-fi
+# ========== Step 2: 启动 JLink（-LocalHostOnly 0 直接绑定 0.0.0.0）==========
+echo "[2/4] 启动 Windows JLinkGDBServer..."
 
-# ========== Step 3: 检查防火墙 ==========
-echo "[3/6] 检查 Windows 防火墙..."
-fw=$(powershell.exe "netsh advfirewall firewall show rule name='JLink $PORT'" 2>/dev/null | grep "Rule Name" | tr -d '\r')
-if [ -z "$fw" ]; then
-    echo "  防火墙规则缺失，请以管理员身份在 PowerShell 执行："
-    echo "     netsh advfirewall firewall add rule name=\"JLink $PORT\" dir=in action=allow protocol=tcp localport=$PORT"
-    read -p "  按回车键继续..."
-else
-    echo "  防火墙规则就绪"
-fi
-
-# ========== Step 4: 启动 JLink ==========
-echo "[4/6] 启动 Windows JLinkGDBServer..."
-
-echo "  $JLINK_EXE -device $DEVICE -if SWD -speed 4000 -port $PORT"
-powershell.exe -Command "Start-Process -WindowStyle Normal -FilePath '$JLINK_EXE' -ArgumentList '-device $DEVICE -if SWD -speed 4000 -port $PORT'" > /dev/null 2>&1 || true
+echo "  $JLINK_EXE -device $DEVICE -if SWD -speed 4000 -port $PORT -LocalHostOnly 0"
+# -LocalHostOnly 0: JLink 绑定 0.0.0.0（所有网络接口），
+#                   不再需要 portproxy / WSL2 内建转发
+powershell.exe -Command "Start-Process -WindowStyle Normal -FilePath '$JLINK_EXE' -ArgumentList '-device $DEVICE -if SWD -speed 4000 -port $PORT -LocalHostOnly 0'" > /dev/null 2>&1 || true
 
 echo "  等待 JLink 绑定端口 $PORT..."
 JLINK_READY=false
@@ -377,10 +353,14 @@ for i in $(seq 1 30); do
         echo "  等待 JLink 进程... (${i}s)"
         continue
     fi
-    # JLink V9.72 绑定 127.0.0.1（不是 0.0.0.0），netstat 必须查 127.0.0.1
-    bind_info=$(powershell.exe "netstat -ano | findstr '127.0.0.1:$PORT ' | findstr LISTENING" 2>/dev/null | head -1 | tr -d '\r')
+    # JLink 带 -LocalHostOnly 0 时会绑定 0.0.0.0:PORT
+    # 先查 0.0.0.0，再查 127.0.0.1（兼容旧 JLink 版本）
+    bind_info=$(powershell.exe "netstat -ano | findstr '0.0.0.0:$PORT ' | findstr LISTENING" 2>/dev/null | head -1 | tr -d '\r')
+    if [ -z "$bind_info" ]; then
+        bind_info=$(powershell.exe "netstat -ano | findstr '127.0.0.1:$PORT ' | findstr LISTENING" 2>/dev/null | head -1 | tr -d '\r')
+    fi
     if [ -n "$bind_info" ]; then
-        echo "  JLink 已绑定 127.0.0.1:$PORT (${i}s)"
+        echo "  JLink 已绑定 (${i}s)"
         JLINK_READY=true
         break
     fi
@@ -389,82 +369,38 @@ done
 
 if [ "$JLINK_READY" = false ]; then
     echo "  自动启动失败，请手动打开 Windows -> 启动 JLinkGDBServer:"
-    echo "     & \"$JLINK_EXE\" -device $DEVICE -if SWD -speed 4000 -port $PORT"
+    echo "     & \"$JLINK_EXE\" -device $DEVICE -if SWD -speed 4000 -port $PORT -LocalHostOnly 0"
     echo "  启动后按回车键继续..."
     read -p "  按回车键继续..."
 fi
 
-# ========== Step 5: 验证链路 & 启动 socat ==========
-echo "[5/6] 验证链路 & 启动 socat 隧道..."
+# ========== Step 3: socat 直连 Windows_IP ==========
+echo "[3/4] 启动 socat 隧道（直连 Windows_IP）..."
 
 pkill -9 -f "socat.*$PORT" 2>/dev/null || true
 sleep 1
 
-# 策略（双层 fallback）:
-#   首选: WSL2 内建转发 (wslrelay) — socat -> 127.0.0.1
-#   回退: portproxy (Windows 内核 NAT) — socat -> Windows_IP
-#
-# ⚠️ 关键教训（2026-09-25）:
-#   不能先启动 socat 再测 nc -zv localhost —— 那测的是 socat 的 listen 端口，
-#   不是转发是否可达。必须先测目标地址、确认通、再启动 socat。
+echo "  启动 socat: localhost:$PORT -> $WINDOWS_IP:$PORT"
+socat TCP-LISTEN:$PORT,reuseaddr,fork TCP:$WINDOWS_IP:$PORT &
+SOCAT_PID=$!
+sleep 2
 
-SOCAT_TARGET=""
-SOCAT_LABEL=""
-
-# 首选: 测 WSL2 内建转发
-echo "  测试 WSL2 内建转发: 127.0.0.1:$PORT ..."
-if nc -zv -w2 127.0.0.1 $PORT 2>/dev/null; then
-    SOCAT_TARGET="127.0.0.1:$PORT"
-    SOCAT_LABEL="WSL2 内建转发 (wslrelay)"
-    echo "  127.0.0.1:$PORT 可达 -> WSL2 内建转发"
-fi
-
-# 回退: 测 portproxy
-if [ -z "$SOCAT_TARGET" ]; then
-    echo "  测试 portproxy: $WINDOWS_IP:$PORT ..."
-    if nc -zv -w2 $WINDOWS_IP $PORT 2>/dev/null; then
-        SOCAT_TARGET="$WINDOWS_IP:$PORT"
-        SOCAT_LABEL="portproxy (Windows 内核 NAT)"
-        echo "  $WINDOWS_IP:$PORT 可达 -> portproxy"
-    fi
-fi
-
-# 启动 socat
-if [ -n "$SOCAT_TARGET" ]; then
-    echo "  启动 socat: localhost:$PORT -> $SOCAT_TARGET ($SOCAT_LABEL)"
-    socat TCP-LISTEN:$PORT,reuseaddr,fork TCP:$SOCAT_TARGET &
-    SOCAT_PID=$!
-    sleep 2
-
-    # 最终验证: 用 /dev/tcp 做真实连接测试
-    if timeout 3 bash -c "echo >/dev/tcp/localhost/$PORT" 2>/dev/null; then
-        echo "  socat 运行中 (PID: $SOCAT_PID, localhost:$PORT -> $SOCAT_TARGET, $SOCAT_LABEL)"
-    else
-        echo "  socat 启动了但连接测试失败，请手动检查:"
-        echo "     ss -tlnp | grep $PORT"
-        echo "     nc -zv localhost $PORT"
-    fi
+# 最终验证: 用 /dev/tcp 做真实连接测试
+# nc -zv localhost 只能测 socat 的 listen fd 是否打开，
+# 不能测 socat fork 出的子进程能否连上下游（2026-09-25 §8.8 教训）。
+# /dev/tcp 是 bash 内建的 TCP 连接，模拟 GDB 的真实连接行为。
+if timeout 3 bash -c "echo >/dev/tcp/localhost/$PORT" 2>/dev/null; then
+    echo "  socat 运行中 (PID: $SOCAT_PID, localhost:$PORT -> $WINDOWS_IP:$PORT)"
 else
-    # 两条链路都不通，给出完整排查指引
-    # 常见原因: portproxy zombie rule（show 正常但转发失效）
-    echo "  所有链路不通！请逐个排查:"
-    echo "     1. JLinkGDBServer 是否在 Windows 运行（端口 $PORT）"
-    echo "     2. portproxy 是否配置: netsh interface portproxy show v4tov4"
-    echo "     3. 防火墙规则: netsh advfirewall firewall show rule name='JLink $PORT'"
-    echo "     4. WSL 网络: ip route show default"
-    echo ""
-    echo "  以上都正常但还是不通 -> portproxy zombie rule:"
-    echo "  在 Windows 管理员 PowerShell 执行:"
-    echo "    net stop iphlpsvc; net start iphlpsvc"
-    echo "    netsh interface portproxy add v4tov4 listenport=$PORT connectaddress=127.0.0.1 connectport=$PORT listenaddress=0.0.0.0"
-    echo "  然后重新跑本脚本"
-    echo ""
-    echo "  手动启动 socat 后按 F5:"
-    echo "    socat TCP-LISTEN:$PORT,reuseaddr,fork TCP:$WINDOWS_IP:$PORT &"
+    echo "  socat 启动了但连接测试失败。请检查:"
+    echo "     1. JLinkGDBServer 是否在 Windows 运行（带 -LocalHostOnly 0）"
+    echo "     2. WSL 到 Windows 网络: nc -zv $WINDOWS_IP $PORT"
+    echo "     3. 如不通，手动启动 socat 后按 F5:"
+    echo "        socat TCP-LISTEN:$PORT,reuseaddr,fork TCP:$WINDOWS_IP:$PORT &"
 fi
 
-# ========== Step 6: 更新 launch.json ==========
-echo "[6/6] 更新 launch.json..."
+# ========== Step 4: 更新 launch.json ==========
+echo "[4/4] 更新 launch.json..."
 LAUNCH_FILE="$(cd "$(dirname "$0")/.." && pwd)/.vscode/launch.json"
 if [ -f "$LAUNCH_FILE" ]; then
     sed -i "s/\"gdbTarget\": \"localhost:[0-9]*\"/\"gdbTarget\": \"localhost:$PORT\"/" "$LAUNCH_FILE"
@@ -477,6 +413,7 @@ echo "  调试环境就绪！请按 F5 开始调试"
 echo "============================================"
 echo ""
 
+# 捕获 Ctrl+C 只杀 socat，不影响 Windows 上的 JLink 窗口
 trap "echo '正在退出（不影响 JLink 窗口）'; kill $SOCAT_PID 2>/dev/null; true" INT TERM
 wait $SOCAT_PID
 ```
@@ -593,6 +530,7 @@ wait $SOCAT_PID
 | 5 | 烧录后程序不运行 | `monitor reset` 后没有 halt | `postLaunchCommands` 已配好 `monitor halt` |
 | 6 | WSL IP 变动 | WSL 重启后虚拟网卡 IP 变化 | 脚本自动获取：`ip route show default` |
 | 7 | socat 启动后 /dev/tcp 验证失败 | WSL→Windows 网络不通，或 JLink 未正确绑定 | `nc -zv $WINDOWS_IP 2331` 手动测可达性，检查 JLink 窗口 |
+| 8 | 脚本卡在「等待 JLink 进程」直到 30s 超时；`Get-Process *JLink*` 为空，但 `netstat :2331` 显示 **svchost** 在 LISTEN | 旧方案遗留的 portproxy 规则（`0.0.0.0:2331 → 127.0.0.1:2331`）抢占端口，JLink 带 `-LocalHostOnly 0` 绑不上、启动即退出 | 管理员 PowerShell：`netsh interface portproxy delete v4tov4 listenport=2331 listenaddress=0.0.0.0`，再重跑 `sh/debug_env.sh`（详见 §2.3） |
 
 ### 7.3 常用诊断命令速查
 
@@ -610,6 +548,9 @@ powershell.exe "netstat -ano | findstr ':2331'"               # 查看端口占�
 powershell.exe "netstat -ano | findstr '0.0.0.0:2331 ' | findstr LISTENING"  # 确认 JLink 绑 0.0.0.0
 powershell.exe "Get-Process JLinkGDBServerCL"                 # 查看 JLink 进程
 powershell.exe "taskkill /F /IM JLinkGDBServerCL.exe"         # 杀 JLink
+powershell.exe "netsh interface portproxy show v4tov4"        # 查 portproxy 残留（2331 那条必须删）
+# 删残留（需管理员 PowerShell，非 WSL）:
+#   netsh interface portproxy delete v4tov4 listenport=2331 listenaddress=0.0.0.0
 ```
 
 ---
@@ -779,7 +720,7 @@ GDB → localhost:2331 → socat → 172.29.32.1:2331
    - 通哪个用哪个做 socat 目标
    - 都不通 → 报错退出并给出排查指引
 2. 启动后改用 `echo >/dev/tcp/localhost/$PORT` 做真实连接测试
-3. 文档新增 §4.5 掉电/上电恢复步骤
+3. 文档新增掉电/上电恢复步骤（现 §4.6）
 
 **教训**：
 - `nc -zv localhost` 在 socat 场景下**只能说明 socat 在监听**，不能说明"链路通"
@@ -959,6 +900,7 @@ ipconfig                # → vEthernet (WSL) 适配器 IP
 
 | 日期 | 变更 | 作者 |
 |------|------|------|
+| 2026-10-04 | §5.3 脚本同步为当前 4 步直连版（直接从 `sh/debug_env.sh` 生成）；§2.3 补充 portproxy 残留必须删除的说明与命令；§7.2 新增故障 #8（portproxy 抢占 2331）；§4.3 手动命令补 `-LocalHostOnly 0`；§7.3 补查/删 portproxy 命令 | Claude Code |
 | 2026-09-26 | 切换到 -LocalHostOnly 0 直连方案；移除 portproxy/WSL2 内建转发双层 fallback；脚本 6→4 步；新增 §8.11 | Claude Code |
 | 2026-09-25 | 终版修复：脚本不再管理 portproxy，回归一次性配置原则；修正 §8.5 中"JLink 绑 0.0.0.0"的误判；新增 §8.6 全链路排查记录 | Claude Code |
 | 2026-09-24 | 重写全文：增加链路架构、故障排查实录、历史问题追踪、一键脚本完整内容 | Claude Code |
