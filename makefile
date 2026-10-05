@@ -117,7 +117,12 @@ tests:
 # 主目标
 # ============================================================================
 .PHONY: all
-all: $(ANALYSIS_FILES)
+# format 作为 all 的前置目标：每次构建先强制格式化（format 是 .PHONY，恒执行）。
+# 串行 make 下 format 先于编译跑；干净树时 clang-format 不改 mtime（零开销、不触发
+# 重编译），有未格式化改动时先改盘再编译，保证产物与源码一致。
+# 注意：本工程按串行 make 构建；若用 -j，format 会与编译并发，需改为在编译规则上
+# 挂 order-only 前置（见 rules_common.mk）。
+all: format $(ANALYSIS_FILES)
 
 .PHONY: reall
 reall: clean all
