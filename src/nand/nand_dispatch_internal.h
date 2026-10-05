@@ -32,19 +32,56 @@ typedef struct
     uint8_t  reserved  : 6;
     uint8_t  cw_index;    /* Current CW being processed (0-based, within current plane). */
     uint8_t  cw_count;    /* CW count per plane. */
-    uint8_t  plane_count; /* Plane count (1 for single-plane, 2+ for multi-plane). */
-    uint8_t  started;     /* 0=未启动；1=已 nand_fc_start（含 start 内同步完成） */
-    uint8_t  parameter[4];
-    uint8_t  feature_addr;
+    uint8_t  plane_count; /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
+                           * 见 nand_dispatch.h 同名字段的完整说明。 */
+    uint8_t started;      /* 0=未启动；1=已 nand_fc_start（含 start 内同步完成） */
+    uint8_t parameter[4];
+    uint8_t feature_addr;
 
-    /* Pre-resolved per-CW per-plane data. cw_count × plane_count entries valid. */
+    /* Pre-resolved per-CW per-plane data. cw_count × plane_count entries valid.
+     * 定容数组：容量 = PLANE_NUM×CW_NUM = 2×4，实际有效条数由 cw_count / plane_count
+     * 给出——本项目无动态内存，一律按硬件上限预留。
+     * 单 plane 命令时 plane 1 整行是确定性零值：FC 侧 fc_build_dispatch_request() 先
+     * *request = {0} 再只填 cws[0][*]，而 task_load 无条件照拷两个 plane，故
+     * cw_paa[1][*] == 0 / cw_buffers[1][*] == NULL，不是未初始化内存。
+     * 只有 multi-plane handler 读 [1][*]，而它们只在 plane_count == PLANE_NUM 时被选中。 */
     nand_paa_t cw_paa[PLANE_NUM][CW_NUM];
     uint8_t   *cw_buffers[PLANE_NUM][CW_NUM];
 
-    const nand_engine_backend_t *backend; /* Phase V: per-LUN backend */
+    /* ── 引擎上下文四件套（Phase V）──
+     * 全部随 task slot 常驻，跨多次 poll 调用存活；生产/消费阶段见各字段。 */
 
-    nand_fc_request_t          request;
-    nand_fc_transaction_t      transaction;
+    /* per-LUN 后端（handler 表 + context）。
+     * 生产：nand_dispatch_task_load() 按 ch/ce/lun 经 nand_fmc_backend_get_ext() 绑定（唯一写点）。
+     * 消费：同一函数下一行转交 transaction.engine.backend —— task 自身路径此后不再读它；
+     *       真正的消费者是引擎（nand_fc_start 判空回退默认后端，nand_engine_start 经
+     *       engine->backend 取 handler）。 */
+    const nand_engine_backend_t *backend;
+
+    /* 本次 ONFI 事务的请求参数（column/row/data/data_length）。
+     * 生产：nand_dispatch_task_start() → nand_dispatch_task_build_request() 经
+     *       g_nand_dispatch_req_table[operation] 分派，各 req_* handler 在
+     *       nand_dispatch_tables.c 里整块赋值；CW 链续读时由 nand_dispatch_task_cw_chain()
+     *       覆写（改用 OP_RANDOM_DATA_READ + CW 偏移列地址）。
+     * 消费：nand_fc_start() —— 拷入 transaction->request 后交给引擎。 */
+    nand_fc_request_t request;
+
+    /* 引擎侧事务状态（UOP 游标 + 三指针 + 引擎完成项）。
+     * 生产：nand_dispatch_task_load() 一次性绑定 engine 三指针（地址随事务固定，只绑一次）；
+     *       nand_fc_start() 重置 transaction->request/completion 并 nand_engine_start()；
+     *       此后由 nand_engine_step() 逐 uop 推进。
+     * 消费：nand_fc_step() 推进；engine.active 判"start 内同步完成"；
+     *       transaction.completion.nand_status 逐处抄进 ctx->nand_completion。
+     * 这是 ISSUE 发完即返回后、tR/tPROG/tBERS 期间"记住发到哪了"的唯一载体。 */
+    nand_fc_transaction_t transaction;
+
+    /* 调度层完成项（对 FC 上报的最终结果）。
+     * 生产：nand_dispatch_task_load() 初始化；nand_dispatch_task_complete() 写
+     *       execution_status/nand_status 后按 operation 分派 completion handler 填 CW 位。
+     * 消费：整链收尾 *ctx->completion = task->completion；chain_advance 里
+     *       *completion = task->completion。
+     * 注意：与 transaction.completion（引擎层 nand_command_completion_t）是两个不同对象，
+     *       仅名字撞车——本字段才是给上层的。 */
     nand_dispatch_completion_t completion;
 } nand_dispatch_task_t;
 

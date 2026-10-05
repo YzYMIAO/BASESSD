@@ -30,13 +30,17 @@ typedef struct
  */
 typedef struct
 {
-    uint16_t                command_id;             /* FC command pool slot for completion correlation. */
-    uint8_t                 operation;              /* OP_* constant. */
-    uint8_t                 ch;                     /* Channel. */
-    uint8_t                 ce;                     /* Chip-enable. */
-    uint8_t                 lun;                    /* LUN. */
-    uint8_t                 cw_count;               /* CW count per plane (1 .. CW_NUM). */
-    uint8_t                 plane_count;            /* Plane count (1 = single, 2+ = multi-plane). */
+    uint16_t command_id;                            /* FC command pool slot for completion correlation. */
+    uint8_t  operation;                             /* OP_* constant. */
+    uint8_t  ch;                                    /* Channel. */
+    uint8_t  ce;                                    /* Chip-enable. */
+    uint8_t  lun;                                   /* LUN. */
+    uint8_t  cw_count;                              /* CW count per plane (1 .. CW_NUM). */
+    uint8_t  plane_count;                           /* Plane count. 实测语义：0 = 单 plane（FC 只对 multi-plane 分支赋值），
+                                                     * N = multi-plane（= command->config.multi_plane）。
+                                                     * ⚠ 原注释写 "1 = single" 与实现不符。
+                                                     * ⚠ 当前 NAND 层只有 nand_dispatch_scatter_page_buffer() 读它；
+                                                     *   multi-plane handler 一律写死 PLANE_NUM 遍历，见 nand_dispatch_tables.c。 */
     uint8_t                 page_type : 2;          /* LP/MP/UP/TP — LDPC engine needs this for decode threshold. */
     uint8_t                 reserved  : 6;          /* Reserved for future data-path bits. */
     uint8_t                 parameter[4];           /* ≤4-byte inline parameter data. */

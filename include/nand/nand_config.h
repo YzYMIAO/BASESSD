@@ -31,8 +31,15 @@
 #define CE_NUM           (1)
 #define CW_NUM           (4U)
 
-/* 最大支持的 Plane 数（行地址数组深度）。当前硬件 PLANE_NUM=2，
- * NAND_PLANE_MAX=4 为未来 4Plane/6Plane NAND 预留扩展空间。 */
+/* 行地址数组深度（nand_fc_request_t.row[] 的长度）。与 PLANE_NUM 是两个独立维度：
+ *   PLANE_NUM      —— 当前芯片实际 plane 数（MT29F4G08 = 2），是数据模型的"宽度"，
+ *                     牵动 CW_TOTAL_MAX / PAGE_BUFFER_SIZE / cw_paa 的 plane 维 /
+ *                     FTL 的 valid_map[] 与 plane_blocks[]。
+ *   NAND_PLANE_MAX —— 行地址数组的静态预留深度，只影响 row[] 的容量。
+ * ⚠ 改 plane 数时两处都要动，别只改一个。
+ * ⚠ 当前 NAND_PLANE_MAX(4) > PLANE_NUM(2)，row[2..3] 是永久未用槽位
+ *   （nand_mt29f4g08abadawp.c 只拷前 2 个 plane）。
+ * ⚠ 深度 4 覆盖不了 6Plane NAND —— 原注释写"为 4Plane/6Plane 预留"与取值自相矛盾，已更正。 */
 #define NAND_PLANE_MAX (4U)
 
 /* 多 plane 操作时 CW 总数上限 = max plane × CW per plane */

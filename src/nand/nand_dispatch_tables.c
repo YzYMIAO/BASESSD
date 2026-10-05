@@ -127,6 +127,8 @@ static void completion_multi_plane(nand_dispatch_task_t *task, uint8_t result, c
     uint8_t plane, cw, flat_idx;
 
     (void)nand_completion;
+    /* ⚠ 上界写死 PLANE_NUM，不看 task->plane_count：本 handler 只由 multi-plane OP
+     *   选中，那条路径上 plane_count 恒 = PLANE_NUM。改 plane 语义时两处要一起动。 */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
         for (cw = 0U; cw < task->cw_count; cw++)
@@ -355,6 +357,8 @@ static uint8_t req_multi_plane_program(nand_dispatch_task_t *task)
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch];
 
     memset(page_buffer, 0xFF, PAGE_BUFFER_SIZE);
+    /* ⚠ 上界写死 PLANE_NUM，不看 task->plane_count：本 handler 只由 multi-plane OP
+     *   选中，那条路径上 plane_count 恒 = PLANE_NUM。改 plane 语义时两处要一起动。 */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
         for (cw = 0U; cw < task->cw_count; cw++)

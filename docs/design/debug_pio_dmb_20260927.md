@@ -62,13 +62,61 @@ for (index = 0U; index < request->data_length; index++)
 
 ### 机制解释
 
-MPU Region 10 已将 0x80000000（FMC NAND Bank3）配置为 Device-nGnRnE（TEX=0, C=0, B=0），ARMv7-M 保证 Device memory 的 store 不合并。但 **STM32H743 AXI bus matrix 内部 write buffer 不受 MPU 控制**——这是该 MCU 的已知设计特性。
+MPU Region 10 已将 0x80000000（FMC NAND Bank3）配置为 Device 内存（`sys.c:26`：TEX=0 / C=0 `NOT_CACHEABLE` / B=0 `NOT_BUFFERABLE` / S=1 `SHAREABLE`，按 ARMv7-M 编码即 **Shareable Device**），ARMv7-M 保证 Device memory 的 store 不合并。但 **STM32H743 AXI bus matrix 内部 write buffer 不受 MPU 控制**——这是该 MCU 的已知设计特性。
+
+> **勘误（2026-10-05）**：原文写作 "Device-nGnRnE（TEX=0, C=0, B=0）"。但 nGnRnE 要求 S=0，而 Region 10 的 `IsShareable` 是 `MPU_ACCESS_SHAREABLE`（HAL 把它写进 `MPU_RASR_S` 位，见 `stm32h7xx_hal_cortex.c:355`），故实际是 **Shareable Device**。两者对"禁止推测访问"的保证相同，不影响本节的结论。
 
 `__DMB()` 通过 drain 所有 pending store，确保每个 STRB 独立到达 FMC 控制器，NAND 正确接收完整写入周期。
 
-### DATA_OUT 路径已有 __DMB()
+### 勘误：DATA_OUT 路径并没有 __DMB()
 
-`nand_fmc_exec_data_out()` 在 line 311 已包含 `__DMB()`，所以读方向不需要额外修改。
+> **2026-10-05 更正**：原文此处写 "`nand_fmc_exec_data_out()` 在 line 311 已包含 `__DMB()`，所以读方向不需要额外修改"——**这句与事实不符**。
+>
+> 证据：`git log -S "__DMB" -- src/nand/nand_fmc.c` 只有两个提交——`dbfe745`（唯一的修复提交）往 `nand_fmc_exec_data_in()` 加了**一处** `__DMB()`；`8b7c374` 只给它补了行尾注释。**`nand_fmc_exec_data_out()` 从来没有过 `__DMB()`**，全仓 `grep -rn __DMB src/` 至今也只有 `nand_fmc.c:317` 一处（另加 `:263` 的注释）。
+>
+> 当时多半是把 DATA_IN 那段（那时行号约 311/317）误看成 DATA_OUT 的了。
+>
+> **结论不变**（读方向确实不需要屏障），但理由必须重写——见下一节。
+
+---
+
+## 读方向为什么不需要 __DMB()
+
+写方向翻车是"**总线合并 store**"；读方向没有对应机制。分四层看：
+
+| 层 | 写方向 DATA_IN | 读方向 DATA_OUT |
+|---|---|---|
+| 编译器 | `volatile uint8_t *data`（`nand_fmc.h:68`）已挡住合并/重排 | 同上，已挡住 |
+| CPU | Cortex-M7 不重排 Device 访问 | **不推测** Device 读 ← 读侧最大风险被架构禁止 |
+| 总线 | ⚠ AXI write buffer 合并 STRB → 需要 `__DMB()` | 总线**不合并读** |
+| 缓存 | Region 10 非缓存 | Region 10 非缓存 |
+
+### 读方向的风险清单，逐条为什么被排除
+
+1. **推测读 / prefetch —— 读方向真正的杀手。**
+   FMC 数据窗口是 **FIFO**：每读一次，NAND 弹出下一个字节。CPU 若提前多读几个字节（预取），整个数据流就错位了。
+   **ARMv7-M 明确禁止对 Device / Strongly-ordered 内存的推测访问**——这是写进架构手册的硬规则，不是"应该没事"。Region 10 是 Device 区，所以推测读在硬件上不可能发生。
+2. **读合并。** 合并读会直接改变返回值语义（两次读必须返回两个不同字节），任何总线都不会做。写合并只是延迟/批量化，读合并是改变语义——性质不同。
+3. **读乱序。** Cortex-M7 对 Device 内存的访问保序。
+4. **陈旧缓存。** Region 10 非缓存。（对比：DMA 路径需要 `nand_dma_cache_invalidate`，那是**另一个**机制——CPU D-Cache 一致性，与总线无关。）
+5. **编译器重排。** `volatile` 已挡住。
+
+### 这个论证的边界（诚实说明）
+
+写方向的教训恰恰是"架构手册说应该没问题"被这颗 MCU 的**未文档化总线行为**推翻了。所以不能说"架构上安全 ⇒ 绝对安全"：
+
+- **机制上**：读侧没有已知的对应物。"禁止推测"是硬保证；"总线不合并读"是从语义推的。
+- **经验上**：`nand_fmc_exec_data_out` 从项目开始就没有 `__DMB()`，而**当初抓出写方向损坏的那个测试**——`internal_data_move` 的 64 页全量 `read_block_verify`——一直通过。读方向若有对称问题，会以完全相同的方式暴露。
+- **但这是弱证据**：写方向当初也是"前 63 页全对，第 63 页才炸"。跑一遍没坏 ≠ 证明安全。
+
+### 如果将来想要保险
+
+给 `nand_fmc_exec_data_out` 的 PIO 循环也加 `__DMB()` 是**语义安全**的——对读循环它只起"排空 pending store"的作用，不会改变读的结果，代价是性能。
+
+代价不小：`CONFIG_NAND_DMA` **默认是 0**（`nand_config.h:87`），也就是说 **PIO 是默认路径，不是回退**。每页 2112 字节 × 一次 `__DMB()`，读方向的开销与写方向同量级——而写方向已经在付这个代价了。
+
+**当前决定：不加。** 保持"写侧有、读侧无"的不对称。
+建议（**未执行**）：在 `nand_fmc_exec_data_out` 的 PIO 循环上方留一行注释指向本节，下次有人问同样的问题时代码里就有答案。
 
 ---
 
@@ -115,8 +163,9 @@ MPU Region 10 已将 0x80000000（FMC NAND Bank3）配置为 Device-nGnRnE（TEX
 |------|------|
 | 校验函数必须有语义 | 旧 `expected_byte` 用 block/page 做 seed 但被 uint8_t 截断 → block 参数完全无效 |
 | 写后必须全量验证 | 只验 page 0 掩盖了 page 1~63 的写入损坏 |
-| PIO 到 FMC 必须有 DMB | 即使 MPU 配了 Device-nGnRnE，AXI write buffer 仍可能合并连续 STRB |
+| PIO 到 FMC 的**写**方向必须有 DMB | 即使 MPU 配了非缓存 Device 区，AXI write buffer 仍可能合并连续 STRB；**读**方向无对应机制，见"读方向为什么不需要 __DMB()" |
 | 不要假设"内部搬移不走 DATA_IN" | 即使 uop 序列没有 DATA_IN，前一步的 write_block 已经写坏了源数据 |
+| 文档里的"已验证"也要可追溯 | "DATA_OUT 已有 __DMB()" 是误记，一周后才被 `git log -S` 推翻。写进调试记录的结论要附 commit / 行号，否则后人会去"恢复"一个从来不存在的东西 |
 
 ---
 
@@ -126,3 +175,4 @@ MPU Region 10 已将 0x80000000（FMC NAND Bank3）配置为 Device-nGnRnE（TEX
 |------|------|----------|
 | 2026-09-27 | v1.0 | 初始版本，page=63 边界条件排查记录 |
 | 2026-09-28 | v2.0 | 全面重写：根因确认为 DATA_IN AXI write merging，修正验证函数，全量验证通过 |
+| 2026-10-05 | v3.0 | 勘误两处：① DATA_OUT **从未**有过 `__DMB()`（原记录误记，附 `git log -S` 证据）；② Region 10 属性名 Device-nGnRnE → Shareable Device（S=1）。新增"读方向为什么不需要 __DMB()"一节（四层分析 + 风险清单 + 论证边界）。**仅改文档，未动代码** |

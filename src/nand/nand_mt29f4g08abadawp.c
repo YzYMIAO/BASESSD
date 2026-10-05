@@ -445,9 +445,28 @@ uint8_t nand_init(void)
     /* Start with the board-vendor's conservative timings before switching NAND to Mode 4. */
     g_nand_handle.Init.TCLRSetupTime = 8U;
     g_nand_handle.Init.TARSetupTime  = 8U;
+    /*
+     * TCLR/TAR 单位是 FMC 内核时钟周期（fmc_ker_ck，见 sys.c PLL2 = 220 MHz，
+     * T ≈ 4.55 ns），不是 ns。取值下限由数据手册最小建立时间决定：
+     *     周期数 = ceil(t_min_ns / T_fmc)
+     * MT29F4G08ABADAWP：tCLR = 10 ns、tAR = 10 ns（见 g_nand_timing_slow）
+     *     → 理论下限 = ceil(10 / 4.55) = 3 周期
+     * 这里填 8 是板厂给的保守值（≈ 36 ns，约 3.6× 余量），并非按公式推得；
+     * Mode 4 分支再收紧到 4（≈ 18 ns，仍 ≥ 10 ns 下限）。
+     */
 
-    /* FMC kernel clock=220 MHz. These values are valid at NAND power-on default timing.
-     * 直接给寄存器周期数（Setup/Wait/Hold/HiZ），与 Mode 4 走换算路径两套并存。 */
+    /*
+     * FMC PCC 时序 → PMEM(通用空间)/PATT(属性空间) 寄存器，单位同为
+     * fmc_ker_ck 周期（220 MHz，≈ 4.55 ns）。四字段 = NAND 访问三相 + Hi-Z：
+     *     SetupTime     = max(tCLS, tALS, tCS)        命令/地址建立窗口
+     *     WaitSetupTime = max(tRP, tWP)               RE/WE 低电平脉宽
+     *     HoldSetupTime = max(tCH, tALH, tCLH, tDH)   控制/数据保持
+     *     HiZSetupTime  = tRHZ                        数据总线高阻窗口
+     * 这四个是核心板厂商的保守初值（非按上表公式推），Mode 0 下限 / 本值：
+     *     Setup 15 → 18 ns、Wait 10 → 27 ns、Hold 5 → 9 ns，均满足；
+     *     HiZ tRHZ(max) 100 → 14 ns 偏小，与 §19.4 公式（应≈ 20 周期）不符，
+     *     该字段语义待核对。Mode 4 分支改由 nand_fmc_timing_to_pcc() 按公式重算。
+     */
     common_timing.SetupTime     = 4U;
     common_timing.WaitSetupTime = 6U;
     common_timing.HoldSetupTime = 2U;
