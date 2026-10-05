@@ -3222,14 +3222,21 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi,
                                     FMC_NAND_PCC_TimingTypeDef *pcc);
 ```
 
-| FMC 寄存器 | ONFI 参数 | 公式 |
-|-----------|-----------|------|
-| `SetupTime` | max(tCLS, tALS, tCS) | /5ns 向上取整 |
-| `WaitSetupTime` | max(tRP, tWP) | /5ns 向上取整 |
-| `HoldSetupTime` | max(tCH, tALH, tCLH, tDH) | /5ns 向上取整 |
-| `HiZSetupTime` | tRHZ | /5ns 向上取整 |
+| FMC 寄存器 | 含义 | 近似式（`nand_fmc_timing_to_pcc()` 实现，按 5ns 向上取整） |
+|-----------|------|------|
+| `SetupTime` | 命令/地址建立 | max(tCLS, tALS, tCS) / 5ns |
+| `WaitSetupTime` | RE/WE 低电平脉宽 | max(tRP, tWP) / 5ns |
+| `HoldSetupTime` | 控制/数据保持 | max(tCH, tALH, tCLH, tDH) / 5ns |
+| `HiZSetupTime` | **写方向**总线高阻窗口 | [max(tCS, tCLS, tALS) + (tWP − tDS)] / 5ns |
 
 FMC kernel clock = 220 MHz，tHCLK ≈ 4.55ns，取整为 5ns 计算。
+
+> ⚠ **本表是近似式**。ST 官方知识库给的精确式多 `±1` 与 `−tWP` 项：
+> `(SET+1)·tHCLK ≥ max(tCS,tCLS,tALS,tCLR,tAR) − tWP`、`(WAIT+1)·tHCLK ≥ max(tWP,tRP)`、
+> `HOLD·tHCLK ≥ max(tCH,tCLH,tALH)`、`HiZ·tHCLK ≥ max(tCS,tCLS,tALS) + (tWP − tDS)`。
+> 近似式在前三项上更保守（无害）。
+>
+> ⚠ **`HiZSetupTime` 早期误用读方向的 `tRHZ`，2026-10-05 更正为写方向公式**：`MEMHIZ` 是**写访问**期间"地址有效 → 数据被驱动"的总线高阻时长，与读方向的 `RE#↑ → 输出高阻`（`tRHZ`）是**两个方向相反、互不相关的量**。据此 slow 表算得 HiZ 下限 = ceil(18/4.545) = 4，`nand_init` 初值已由 3 上调为 4。
 
 ### 19.5 nand_init() 双路径
 

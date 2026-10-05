@@ -177,8 +177,23 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
         pcc->HoldSetupTime = (uint8_t)CEIL_DIV(max_ns, hclk_ns);
     }
 
-    /* HiZSetupTime = tRHZ / tHCLK：输出高阻窗口 */
-    pcc->HiZSetupTime = (uint8_t)CEIL_DIV(onfi->t_rhz_max_ns, hclk_ns);
+    /* HiZSetupTime：写方向总线高阻窗口。ST 官方式：
+     *     HiZ × tHCLK ≥ max(tCS, tCLS, tALS) + (tWP − tDS)
+     * ⚠ 与读方向的 tRHZ 无关（早期误用 tRHZ，已更正）。 */
+    {
+        uint32_t max_ns = onfi->t_cs_ns;
+        uint32_t wp_ds  = (onfi->t_wp_ns > onfi->t_ds_ns) ? ((uint32_t)onfi->t_wp_ns - (uint32_t)onfi->t_ds_ns) : 0U;
+
+        if (onfi->t_cls_ns > max_ns)
+        {
+            max_ns = onfi->t_cls_ns;
+        }
+        if (onfi->t_als_ns > max_ns)
+        {
+            max_ns = onfi->t_als_ns;
+        }
+        pcc->HiZSetupTime = (uint8_t)CEIL_DIV(max_ns + wp_ds, hclk_ns);
+    }
 
 #    undef CEIL_DIV
 }
@@ -431,20 +446,22 @@ uint8_t nand_init(void)
 
     /*
      * FMC PCC 时序 → PMEM(通用空间)/PATT(属性空间) 寄存器，单位同为
-     * fmc_ker_ck 周期（220 MHz，≈ 4.55 ns）。四字段 = NAND 访问三相 + Hi-Z：
-     *     SetupTime     = max(tCLS, tALS, tCS)        命令/地址建立窗口
-     *     WaitSetupTime = max(tRP, tWP)               RE/WE 低电平脉宽
-     *     HoldSetupTime = max(tCH, tALH, tCLH, tDH)   控制/数据保持
-     *     HiZSetupTime  = tRHZ                        数据总线高阻窗口
-     * 这四个是核心板厂商的保守初值（非按上表公式推），Mode 0 下限 / 本值：
-     *     Setup 15 → 18 ns、Wait 10 → 27 ns、Hold 5 → 9 ns，均满足；
-     *     HiZ tRHZ(max) 100 → 14 ns 偏小，与 §19.4 公式（应≈ 20 周期）不符，
-     *     该字段语义待核对。Mode 4 分支改由 nand_fmc_timing_to_pcc() 按公式重算。
+     * fmc_ker_ck 周期（220 MHz，≈ 4.55 ns）。四字段 = NAND 访问三相 + 写向 HiZ：
+     *     SetupTime     = max(tCLS, tALS, tCS)          命令/地址建立窗口
+     *     WaitSetupTime = max(tRP, tWP)                 RE/WE 低电平脉宽
+     *     HoldSetupTime = max(tCH, tALH, tCLH, tDH)     控制/数据保持
+     *     HiZSetupTime  = max(tCS,tCLS,tALS)+(tWP−tDS)  写方向总线高阻窗口
+     *                    （⚠ 与读方向的 tRHZ 无关；§19.4 早期误映射已更正）
+     * 初值多为核心板厂商的保守值，按 ST 官方精确式核算（slow 表）：
+     *     SET ≥ 1、WAIT ≥ 2、HOLD ≥ 2 → 本值 4/6/2 均有富余；
+     *     HiZ 需 ≥ ceil(18/4.545) = 4 → 原厂商值 3 差 1 周期（疑似按 ~166 MHz
+     *     时钟算得），已上调为 4。HiZ 属写方向，需上板写压力测试复核。
+     * Mode 4 分支改由 nand_fmc_timing_to_pcc() 按同一公式重算。
      */
     common_timing.SetupTime     = 4U;
     common_timing.WaitSetupTime = 6U;
     common_timing.HoldSetupTime = 2U;
-    common_timing.HiZSetupTime  = 3U;
+    common_timing.HiZSetupTime  = 4U;
     attribute_timing            = common_timing;
 
     /* ── Step 2: 首次碰硬件。HAL_NAND_Init 内部回调 HAL_NAND_MspInit
