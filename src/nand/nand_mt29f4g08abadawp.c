@@ -2,7 +2,7 @@
  * nand_mt29f4g08abadawp.c — Micron MT29F4G08ABADAWP NAND 驱动
  *
  * 职责：
- *   - 芯片初始化（FMC 硬件 + R/B# 中断 + DMA + RESET + READ_ID 校验）
+ *   - 芯片初始化（FMC 硬件 + DMA + RESET + READ_ID 校验）
  *   - FMC 时序换算（ONFI ns → PCC 寄存器周期数）
  *   - ONFI 操作表（g_nand_operation_map，定义于 onfi_1_0.c）的执行入口：
  *       nand_fc_execute/start/step → nand_engine → UOP → FMC 后端
@@ -23,7 +23,6 @@
 #include "nand_config.h"
 #include "nand_fmc.h"
 #include "platform/stm32h743/nand_dma.h"
-#include "platform/stm32h743/nand_rb_interrupt.h"
 
 #include <stddef.h>
 
@@ -184,30 +183,6 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
 #    undef CEIL_DIV
 }
 #endif /* CONFIG_NAND_TIMING_MODE_4 */
-
-/* --------------------------------------------------------------------
- * nand_fmc_wait_ready
- *   功能：轮询 RB# GPIO 等待 NAND ready（config.wait_ready 回调，旧式）。
- *   参数：context —— 不使用；timeout_us —— 超时上限（微秒）。
- *   返回：0U = ready；1U = 超时。
- *   实现要点：每 1µs 读一次 RB#，elapsed 兼作超时计数；
- *         与 UOP 层 nand_fmc_exec_wait_ready（nand_fmc.c）功能重叠。
- * -------------------------------------------------------------------- */
-static uint8_t nand_fmc_wait_ready(void *context, uint16_t timeout_us)
-{
-    uint16_t elapsed_us;
-
-    (void)context;
-    for (elapsed_us = 0U; elapsed_us < timeout_us; elapsed_us++)
-    {
-        if (HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT, MT29F4G08ABADAWP_RB_GPIO_PIN) == GPIO_PIN_SET)
-        {
-            return 0U;
-        }
-        delay_us(1U);
-    }
-    return 1U;
-}
 
 /* --------------------------------------------------------------------
  * nand_fc_execute
@@ -402,7 +377,7 @@ nand_result_t nand_fc_erase_block(const nand_fc_request_t *request, nand_fc_comp
 
 /* --------------------------------------------------------------------
  * nand_init
- *   功能：NAND 芯片全初始化（FMC 硬件 + MSP + R/B# 中断 + DMA +
+ *   功能：NAND 芯片全初始化（FMC 硬件 + MSP + DMA +
  *         RESET + READ_ID 校验 + 可选 Mode 4 切换）。
  *   参数：无。
  *   返回：NAND_RESULT_OK / 错误码。
@@ -416,13 +391,12 @@ nand_result_t nand_fc_erase_block(const nand_fc_request_t *request, nand_fc_comp
  *   步骤编号（与函数体内 Step 标记一一对应）：
  *     Step 1 FMC 句柄 + PCC 时序（纯软件填结构体）
  *     Step 2 HAL_NAND_Init → MspInit（时钟/GPIO/NCE）★首次碰硬件
- *     Step 3 R/B# EXTI6 中断
- *     Step 4 per-[ch][ce][lun] FMC 后端实例
- *     Step 5 DMA（本配置 no-op，失败仅回退 PIO）
- *     Step 6 RESET（FFh）★启动命令绕过 dispatch，直连 engine
- *     Step 7 READ_ID + 厂商 ID 校验
- *     Step 8 Mode 4 切换（CONFIG_NAND_TIMING_MODE_4=0 时整段编掉）
- *   调用链：main.c:320 → nand_init → {HAL_NAND_Init, nand_rb_interrupt_init,
+ *     Step 3 per-[ch][ce][lun] FMC 后端实例
+ *     Step 4 DMA（本配置 no-op，失败仅回退 PIO）
+ *     Step 5 RESET（FFh）★启动命令绕过 dispatch，直连 engine
+ *     Step 6 READ_ID + 厂商 ID 校验
+ *     Step 7 Mode 4 切换（CONFIG_NAND_TIMING_MODE_4=0 时整段编掉）
+ *   调用链：main.c:320 → nand_init → {HAL_NAND_Init,
  *          nand_fmc_init_instance, nand_fc_reset, nand_fc_read_id}
  *   流程图见 docs/design/fc_nand_design.md §22（图 16）。
  * -------------------------------------------------------------------- */
@@ -484,21 +458,16 @@ uint8_t nand_init(void)
          (unsigned int)HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT,
                                         MT29F4G08ABADAWP_RB_GPIO_PIN));
 
-    /* ── Step 3: R/B# EXTI6 中断（在首次 NAND 命令前完成）── */
-    nand_rb_interrupt_init();
-
     {
-        /* ── Step 4: per-[ch][ce][lun] FMC 后端实例 ──
+        /* ── Step 3: per-[ch][ce][lun] FMC 后端实例 ──
          * 低速 FMC 后端：数据/命令/地址窗口 = FMC_BASE | 0 / A16 / A17。
          * Phase V: 同一 FMC 窗口/时序对全部 [CH][CE][LUN] 实例有效，
          * 循环初始化 per-LUN backend（硬件单 die 时退化为一次调用）。 */
         const nand_fmc_config_t fmc_config = {
-            .data       = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
-            .command    = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_CMD_OFFSET),
-            .address    = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_ADDR_OFFSET),
-            .timing     = g_nand_timing_slow,
-            .wait_ready = nand_fmc_wait_ready,
-            .context    = NULL,
+            .data    = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
+            .command = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_CMD_OFFSET),
+            .address = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_ADDR_OFFSET),
+            .timing  = g_nand_timing_slow,
         };
         uint8_t fmc_ch, fmc_ce, fmc_lun;
 
@@ -520,7 +489,7 @@ uint8_t nand_init(void)
             }
         }
 
-        /* ── Step 5: DMA（CONFIG_NAND_DMA=0 时为 no-op；失败仅回退 PIO）── */
+        /* ── Step 4: DMA（CONFIG_NAND_DMA=0 时为 no-op；失败仅回退 PIO）── */
         if (nand_dma_init() != 0U)
         {
             LOGE("nand: DMA init failed, falling back to PIO\r\n");
@@ -528,7 +497,7 @@ uint8_t nand_init(void)
         }
     }
 
-    /* ── Step 6: RESET（FFh）──
+    /* ── Step 5: RESET（FFh）──
      * Datasheet power-on rule: allow R/B# to become valid before the first FFh command.
      * ★ 启动命令经 nand_fc_execute 直连 nand_engine，绕过 fc / nand_dispatch
      *   命令队列——此刻 g_nand_device_ready 仍为 0，nand_dispatch_submit 会拒收。 */
@@ -544,7 +513,7 @@ uint8_t nand_init(void)
         return result;
     }
     LOGI("nand: reset complete, status=0x%02X\r\n", (unsigned int)completion.nand_status);
-    /* ── Step 7: READ_ID + 厂商 ID 校验 ── */
+    /* ── Step 6: READ_ID + 厂商 ID 校验 ── */
     result = nand_fc_read_id(id, &completion);
     if (result != NAND_RESULT_OK)
     {
@@ -562,7 +531,7 @@ uint8_t nand_init(void)
     }
 
 #if CONFIG_NAND_TIMING_MODE_4
-    /* ── Step 8: 高速模式：切 NAND 到 Mode 4 + 更新 FMC 硬件时序 ── */
+    /* ── Step 7: 高速模式：切 NAND 到 Mode 4 + 更新 FMC 硬件时序 ── */
     {
         const uint8_t              mode_4[4] = {4U, 0U, 0U, 0U};
         FMC_NAND_PCC_TimingTypeDef fast_pcc  = {0};
@@ -593,12 +562,10 @@ uint8_t nand_init(void)
          * Phase V: 循环更新全部 [CH][CE][LUN] 实例（与低速分支一致）。 */
         {
             nand_fmc_config_t fast_fmc = {
-                .data       = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
-                .command    = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_CMD_OFFSET),
-                .address    = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_ADDR_OFFSET),
-                .timing     = g_nand_timing_fast,
-                .wait_ready = nand_fmc_wait_ready,
-                .context    = NULL,
+                .data    = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
+                .command = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_CMD_OFFSET),
+                .address = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_ADDR_OFFSET),
+                .timing  = g_nand_timing_fast,
             };
             uint8_t fmc_ch2, fmc_ce2, fmc_lun2;
 
@@ -622,7 +589,7 @@ uint8_t nand_init(void)
         }
     }
 #else
-    /* ── Step 8（编掉）：低速模式：跳过 Mode 4 切换，NAND 和 FMC 都运行在默认慢速时序 ── */
+    /* ── Step 7（编掉）：低速模式：跳过 Mode 4 切换，NAND 和 FMC 都运行在默认慢速时序 ── */
     LOGI("nand: keeping NAND at default timing (CONFIG_NAND_TIMING_MODE_4=0)\r\n");
 #endif /* CONFIG_NAND_TIMING_MODE_4 */
 

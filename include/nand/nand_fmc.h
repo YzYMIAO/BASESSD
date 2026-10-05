@@ -13,9 +13,6 @@
  * Bank3 内存窗口访问（命令/地址/数据窗口别名，见 nand_mt29f4g08abadawp.h）。
  */
 
-/* wait_ready 回调：轮询 RB#，返回 0=ready、1=超时（与 nand_fmc.c 实现对应） */
-typedef uint8_t (*nand_fmc_wait_ready_t)(void *context, uint16_t timeout_us);
-
 /*
  * FMC NAND 时序参数（29 个 uint16_t，单位 ns）。
  *
@@ -61,20 +58,17 @@ typedef struct
  *   data/command/address 是 volatile 指针，指向 FMC NAND Bank3 内存
  *   窗口的三个别名地址（base / base|A16 / base|A17），写入即产生
  *   对应的命令/地址/数据周期。
- *   timing 内嵌 29 字段；wait_ready 为可选轮询回调；context 透传。
+ *   timing 内嵌 29 字段。
  */
 typedef struct
 {
-    volatile uint8_t     *data;
-    volatile uint8_t     *command;
-    volatile uint8_t     *address;
-    nand_fmc_timing_t     timing;
-    nand_fmc_wait_ready_t wait_ready;
-    void                 *context;
+    volatile uint8_t *data;
+    volatile uint8_t *command;
+    volatile uint8_t *address;
+    nand_fmc_timing_t timing;
 } nand_fmc_config_t;
 
-/* ── 旧式单 LUN 接口（未迁移代码使用） ── */
-nand_result_t                nand_fmc_configure(const nand_fmc_config_t *config);
+/* ── 默认 (0,0,0) 后端访问器（同步路径 + NULL 兜底用） ── */
 const nand_engine_backend_t *nand_fmc_backend_get(void);
 
 /* ── Phase V: per-(CH,CE,LUN) 后端实例 ── */

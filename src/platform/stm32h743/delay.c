@@ -5,9 +5,7 @@
 static uint32_t g_core_clock_hz;
 static bool     g_delay_initialized;
 static uint32_t g_dwt_cycles_per_us;
-/* NAND RB 中断模块使用的 DWT 周期/微秒值（在 delay_init 中同步设定） */
-uint32_t    g_dwt_cyccnt_per_us;
-static bool g_dwt_initialized;
+static bool     g_dwt_initialized;
 
 #if !DELAY_USE_DWT
 static uint32_t g_systick_cycles_per_us;
@@ -86,7 +84,6 @@ void delay_init(uint32_t core_clock_hz)
     g_core_clock_hz = delay_resolve_clock(core_clock_hz);
     /* CYCCNT follows the Cortex-M7 core clock, not the AHB/SysTick clock. */
     g_dwt_cycles_per_us = HAL_RCC_GetSysClockFreq() / 1000000U;
-    g_dwt_cyccnt_per_us = g_dwt_cycles_per_us;
     g_dwt_initialized   = (g_dwt_cycles_per_us != 0U) && delay_enable_dwt();
 
 #if DELAY_USE_DWT

@@ -51,17 +51,10 @@ static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT];
 nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM][LUN_NUM];
 
 /*
- * 向后兼容接口。
- * nand_fmc_configure() 等价于 nand_fmc_init_instance(0,0,0, config)。
- * nand_fmc_backend_get() 返回 (0,0,0) 实例的 backend。
- * nand_init() 已改用 nand_fmc_init_instance()，这些接口仅供未迁移的外部代码使用。
+ * 默认 (0,0,0) 后端访问器。
+ * 同步路径 nand_fc_execute() 与 nand_fc_start() 的 NULL 兜底用它取默认后端；
+ * nand_init() 的多实例配置走 nand_fmc_init_instance()，不经此函数。
  */
-nand_result_t nand_fmc_configure(const nand_fmc_config_t *config)
-{
-    return nand_fmc_init_instance(0U, 0U, 0U, config);
-}
-
-/* 返回 (0,0,0) 实例的 backend 指针（旧式单 LUN 访问入口） */
 const nand_engine_backend_t *nand_fmc_backend_get(void)
 {
     return &g_nand_fmc_instances[0][0][0].backend;
@@ -103,7 +96,6 @@ const nand_engine_backend_t *nand_fmc_backend_get_ext(uint8_t ch, uint8_t ce, ui
  *   实现要点：tWB 已由上游 DELAY_US 保证，此处只做纯 spin-wait；
  *         轮询次数兼作超时微秒（每次 delay_us(1)，polls≥busy_timeout_us
  *         即超时）；首读即 HIGH 视为 ready（极短 busy 或无 busy）。
- *   注：与 config 层的 nand_fmc_wait_ready 回调功能重叠（另一套轮询）。
  * -------------------------------------------------------------------- */
 static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
