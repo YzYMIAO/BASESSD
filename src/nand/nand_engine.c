@@ -255,10 +255,10 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
 
         handler = state->backend->handlers[uop->type];
 
-        if (handler == NULL)
-        {
-            return NAND_RESULT_INVALID_ARGUMENT;
-        }
+        /* 控制流 UOP（JUMP_IF_NOT_READY / END）已在上方拦截，不会走到查表；
+         * 其余类型的 handler 表覆盖枚举全部非控制流项，查得 NULL 即表与枚举
+         * 失配的编程错误（返回错误码会把固件 bug 伪装成 NAND 命令失败）。 */
+        ASSERT(handler != NULL);
 
         /* WAIT_READY 首次进入：记录 DWT 起点（用独立 wait 状态） */
         if (uop->type == NAND_UOP_WAIT_READY)

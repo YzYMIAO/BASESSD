@@ -69,6 +69,13 @@ nand_result_t nand_dispatch_init(void);
 /* NAND/FMC initialisation succeeded; FC may submit media commands after this. */
 void nand_dispatch_set_device_ready(uint8_t ready);
 
+/*
+ * 查询设备就绪门控位（归一化 0/1）。
+ * 供 NAND 驱动层的同步入口 nand_fc_execute 断言"仅初始化阶段可调"的契约：
+ * device_ready 置位后必须走 nand_fc_start/step 异步路径，否则阻塞式执行会卡住调度器。
+ */
+uint8_t nand_dispatch_is_device_ready(void);
+
 /* Submit one pre-resolved command to the channel FIFO. */
 nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request);
 

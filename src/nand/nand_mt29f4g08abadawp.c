@@ -21,6 +21,7 @@
 #include "common/log.h"
 #include "delay.h"
 #include "nand_config.h"
+#include "nand_dispatch.h"
 #include "nand_fmc.h"
 #include "platform/stm32h743/nand_dma.h"
 
@@ -208,6 +209,7 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
  *   实现要点：经 g_nand_operation_map[operation] 取 UOP 序列，
  *         手工展开 request（row 只拷前 2 个 plane，NAND_PLANE_MAX=4 深度）
  *         后调用 nand_engine_execute 阻塞执行。
+ *         契约：仅初始化阶段（device_ready==0）可调，见下 ASSERT。
  * -------------------------------------------------------------------- */
 nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *request, nand_fc_completion_t *completion)
 {
@@ -220,6 +222,9 @@ nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *reques
     ASSERT(operation < OP_COUNT);
     ASSERT(request != NULL);
     ASSERT(completion != NULL);
+    /* 同步入口契约：仅 nand_init 阶段（device_ready==0）可调。device_ready 置位后
+     * 必须走 nand_fc_start/step 异步路径——此处阻塞式执行会卡住整个调度器。 */
+    ASSERT(nand_dispatch_is_device_ready() == 0U);
 
     map = &g_nand_operation_map[operation];
     if (map->uops == NULL)
@@ -290,10 +295,7 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
          * 引擎在 END 分支已清 active，但入参校验 / 非法 UOP 码 / handler 缺失这三条
          * 错误路径不清，这里统一兜底（OK 时重复清一次无副作用）。 */
         transaction->engine.active = 0U;
-        if (result != NAND_RESULT_OK)
-        {
-            LOGE("nand: start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result, transaction->completion.nand_status);
-        }
+        LOGE_IF(result != NAND_RESULT_OK, "nand: start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result, transaction->completion.nand_status);
     }
     return result;
 }
