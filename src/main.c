@@ -343,10 +343,7 @@ int main(void)
         LOGI("fc and nand raw path ready\r\n");
         /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
          * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */
-        if (stm32_platform_register() != 0)
-        {
-            LOGE("platform register failed; T3 timers disabled\r\n");
-        }
+        LOGE_IF(stm32_platform_register() != 0, "platform register failed; T3 timers disabled\r\n");
         ssd_ftl_boot_all();
     }
     /* APB1=100 MHz and APB1 prescaler=2, so TIM6 kernel clock is 200 MHz. */

@@ -46,4 +46,28 @@ uint32_t    log_get_write_failure_count(void);
 #    define LOGD(...) ((void)0)
 #endif
 
+/*
+ * 条件日志：仅当 cond 为真时输出。格式参数写在 if 内部，cond 为假时完全不求值，
+ * 成本模型与 LOGx(...) 一致（无多余格式化）。
+ * 用途：分支体**只有日志**的场合（如"失败才打"），免去显式 if 块。
+ * 注意：若分支体还有 return / 回退等语句，显式 if 必须保留，只把日志那句换成本宏。
+ */
+#define LOG_IF(level, cond, format, ...)              \
+    do                                                \
+    {                                                 \
+        if (cond)                                     \
+        {                                             \
+            log_printf(level, format, ##__VA_ARGS__); \
+        }                                             \
+    } while (0)
+
+#define LOGE_IF(cond, format, ...) LOG_IF(LOG_ERROR, cond, "[ERR] " format, ##__VA_ARGS__)
+#define LOGW_IF(cond, format, ...) LOG_IF(LOG_WARNING, cond, "[WRN] " format, ##__VA_ARGS__)
+#define LOGI_IF(cond, format, ...) LOG_IF(LOG_INFO, cond, "[INF] " format, ##__VA_ARGS__)
+#if defined(DEBUG)
+#    define LOGD_IF(cond, format, ...) LOG_IF(LOG_DEBUG, cond, "[DBG] " format, ##__VA_ARGS__)
+#else
+#    define LOGD_IF(cond, ...) ((void)0)
+#endif
+
 #endif /* LOG_H */

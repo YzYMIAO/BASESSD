@@ -57,8 +57,5 @@ void ssd_controller_state_transition(ssd_controller_t      *controller,
     }
 
     /* FAILED 是终态，进入即宣告 controller 不可用；在此单点留痕 */
-    if ((prev_state != SSD_CONTROLLER_FAILED) && (controller->state == SSD_CONTROLLER_FAILED))
-    {
-        LOGE("[CTRL] state -> FAILED\r\n");
-    }
+    LOGE_IF((prev_state != SSD_CONTROLLER_FAILED) && (controller->state == SSD_CONTROLLER_FAILED), "[CTRL] state -> FAILED\r\n");
 }
