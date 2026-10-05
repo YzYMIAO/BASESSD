@@ -25,7 +25,7 @@
  * 传入参数即可。适用于 L2P region R/W、Journal flush、GC 等内部操作。
  */
 
-#include "fc/fc_command.h"
+#include "fc/fc_interface.h"
 #include "ftl/ftl_type.h"
 #include "nand/nand_config.h"
 
@@ -38,7 +38,10 @@
  *   ch/ce/lun  → cmd->config 位域
  *   block/plane/page/cw → paa
  *
- * 等价于 ftl_cmd_setup_ppa(cmd, pba_from_addr(addr))，但省去打包拆包。
+ * 与 ftl_cmd_setup_ppa(cmd, pba_from_addr(addr)) 等价（省去打包拆包）：
+ * 地址填好后**必须配置 desc 链**——否则命令无 buffer，fc_write/read_cmd_data
+ * 无从搬运，fc_submit 也会被 fc_command_validate 以 desc_id == INVALID 拒绝。
+ * 无数据操作（ERASE / RESET 等）由 configure 内部短路为 desc_id = INVALID。
  * 随机 IO 路径（从 L2P 拿到 PBA）仍走 ftl_cmd_setup_ppa（保留）。
  */
 static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *addr)
@@ -53,7 +56,7 @@ static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *add
     cmd->config.lun = (DWORD)addr->lun;
     cmd->paa        = (DWORD)paa_make(addr->page, addr->plane, addr->block, addr->lun, addr->cw);
 
-    return FTL_OK;
+    return (fc_command_configure_descriptors(cmd) == FC_STATUS_OK) ? FTL_OK : FTL_ERROR;
 }
 
 /* ── PBA helper（已实现）── */
