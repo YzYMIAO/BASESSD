@@ -17,6 +17,7 @@
 
 #include "nand_mt29f4g08abadawp.h"
 
+#include "common/assertion.h"
 #include "common/log.h"
 #include "delay.h"
 #include "nand_config.h"
@@ -225,10 +226,11 @@ nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *reques
     nand_command_completion_t   command_completion;
     uint8_t                     status;
 
-    if ((operation >= OP_COUNT) || (request == NULL) || (completion == NULL))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（本文件内 typed 包装 / nand_init） */
+    ASSERT(operation < OP_COUNT);
+    ASSERT(request != NULL);
+    ASSERT(completion != NULL);
+
     map = &g_nand_operation_map[operation];
     if (map->uops == NULL)
     {
@@ -262,10 +264,11 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
     const nand_operation_map_t *map;
     uint8_t                     result;
 
-    if ((transaction == NULL) || (operation >= OP_COUNT) || (request == NULL))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（nand_dispatch 由已校验的 task 发起） */
+    ASSERT(transaction != NULL);
+    ASSERT(operation < OP_COUNT);
+    ASSERT(request != NULL);
+
     map = &g_nand_operation_map[operation];
     if (map->uops == NULL)
     {
@@ -319,10 +322,11 @@ nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completio
 {
     uint8_t result;
 
-    if ((transaction == NULL) || (completion == NULL) || (transaction->engine.active == 0U))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    /* 调用者只在事务 active 时推进（nand_dispatch.c 已先判 active） */
+    ASSERT(transaction != NULL);
+    ASSERT(completion != NULL);
+    ASSERT(transaction->engine.active != 0U);
+
     result = nand_engine_step(&transaction->engine);
     if (result != NAND_RESULT_NOT_READY)
     {
@@ -356,10 +360,7 @@ nand_result_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion)
 {
     const nand_fc_request_t request = {.column = 0U, .row = {0U}, .data = id, .data_length = 5U};
 
-    if (id == NULL)
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    ASSERT(id != NULL);
     return nand_fc_execute(OP_READ_ID, &request, completion);
 }
 
@@ -374,10 +375,7 @@ nand_result_t nand_fc_set_features(uint8_t feature_address, const uint8_t featur
 {
     const nand_fc_request_t request = {.column = feature_address, .row = {0U}, .data = (uint8_t *)feature_data, .data_length = 4U};
 
-    if (feature_data == NULL)
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    ASSERT(feature_data != NULL);
     return nand_fc_execute(OP_SET_FEATURES, &request, completion);
 }
 

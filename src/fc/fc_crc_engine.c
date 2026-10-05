@@ -27,6 +27,7 @@
 
 #include "fc_crc_engine.h"
 
+#include "common/assertion.h"
 #include "common/common.h"
 
 #include <stddef.h>
@@ -106,7 +107,9 @@ uint32_t fc_crc_compute(const uint8_t *user_data)
     uint32_t word;
     uint16_t i;
 
-    if ((user_data == NULL) || (g_crc_ready == 0U))
+    /* user_data 前置条件由调用者保证；g_crc_ready 是硬件初始化状态（运行时），保留返回码 */
+    ASSERT(user_data != NULL);
+    if (g_crc_ready == 0U)
     {
         return 0U;
     }
@@ -137,10 +140,8 @@ uint32_t fc_crc_compute(const uint8_t *user_data)
  * -------------------------------------------------------------------- */
 uint8_t fc_crc_verify(const uint8_t *user_data, uint32_t stored_crc)
 {
-    if (user_data == NULL)
-    {
-        return FC_CRC_RESULT_ERROR;
-    }
+    /* user_data 前置条件由调用者保证 */
+    ASSERT(user_data != NULL);
 
     return (fc_crc_compute(user_data) == stored_crc) ? FC_CRC_RESULT_OK : FC_CRC_RESULT_ERROR;
 }

@@ -1,5 +1,6 @@
 #include "fc_raid_engine.h"
 
+#include "common/assertion.h"
 #include "fc.h"
 #include "nand/nand_config.h"
 
@@ -30,11 +31,11 @@ static fc_raid_context_t g_raid_shadow[LUN_NUM];
 /* 初始化指定 LUN 的 RAID 上下文 */
 void fc_raid_init_ctx(uint8_t lun)
 {
-    if (lun < LUN_NUM)
-    {
-        memset(&g_raid_ctx[lun], 0, sizeof(fc_raid_context_t));
-        memset(&g_raid_shadow[lun], 0, sizeof(fc_raid_context_t));
-    }
+    /* 前置条件由调用者保证（fc.c 按 LUN_NUM 循环传入） */
+    ASSERT(lun < LUN_NUM);
+
+    memset(&g_raid_ctx[lun], 0, sizeof(fc_raid_context_t));
+    memset(&g_raid_shadow[lun], 0, sizeof(fc_raid_context_t));
 }
 
 /* --------------------------------------------------------------------
@@ -45,10 +46,10 @@ void fc_raid_init_ctx(uint8_t lun)
  * -------------------------------------------------------------------- */
 fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total)
 {
-    if ((lun >= LUN_NUM) || (cw_buffer == NULL) || (total == 0U))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证 */
+    ASSERT(lun < LUN_NUM);
+    ASSERT(cw_buffer != NULL);
+    ASSERT(total != 0U);
 
     fc_raid_context_t *ctx = &g_raid_ctx[lun];
 
@@ -77,10 +78,9 @@ fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer)
     uint32_t       *acc32;
     const uint32_t *buf32;
 
-    if ((lun >= LUN_NUM) || (cw_buffer == NULL))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证 */
+    ASSERT(lun < LUN_NUM);
+    ASSERT(cw_buffer != NULL);
 
     fc_raid_context_t *ctx = &g_raid_ctx[lun];
 
@@ -114,10 +114,9 @@ fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer)
  * -------------------------------------------------------------------- */
 fc_status_t fc_raid_end(uint8_t lun, uint8_t *parity_buffer)
 {
-    if ((lun >= LUN_NUM) || (parity_buffer == NULL))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证 */
+    ASSERT(lun < LUN_NUM);
+    ASSERT(parity_buffer != NULL);
 
     fc_raid_context_t *ctx = &g_raid_ctx[lun];
 
@@ -170,11 +169,12 @@ void fc_raid_recover(uint8_t *recovered,
     uint32_t *rec32    = (uint32_t *)(void *)recovered;
     uint16_t  word_len = length / sizeof(uint32_t);
 
-    if ((recovered == NULL) || (buffers == NULL) || (count == 0U) ||
-        (failed_idx >= count) || (length == 0U))
-    {
-        return;
-    }
+    /* 入参前置条件由调用者保证（fc_data_path 传入全 CW 收集结果） */
+    ASSERT(recovered != NULL);
+    ASSERT(buffers != NULL);
+    ASSERT(count != 0U);
+    ASSERT(failed_idx < count);
+    ASSERT(length != 0U);
 
     memset(recovered, 0, length);
 

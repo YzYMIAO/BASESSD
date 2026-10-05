@@ -1,5 +1,7 @@
 #include "fc_ldpc_qc_engine.h"
 
+#include "common/assertion.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -235,7 +237,10 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
     uint32_t threshold;
     uint32_t max_iter;
 
-    if (!qc || !data || !g_initialized)
+    /* qc/data 为入参前置条件；g_initialized 是运行时初始化状态，保留返回码 */
+    ASSERT(qc != NULL);
+    ASSERT(data != NULL);
+    if (!g_initialized)
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }

@@ -102,14 +102,6 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
 
 /* ── fc_command_status_init ── */
 
-static MunitResult test_command_status_init_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    fc_command_status_init(NULL, NULL);
-    return MUNIT_OK;
-}
-
 static MunitResult test_command_status_init_cw1(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -185,30 +177,6 @@ static MunitResult test_command_status_set_cw_valid(const MunitParameter params[
     munit_assert_uint32(cq_entry.status, ==, (uint8_t)(FC_CW_STATUS_SUCCESS | FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_UNC));
     munit_assert_uint32(cq_entry.desc_id, ==, 0x20U); /* 保留第一个错误的 desc_id */
 
-    return MUNIT_OK;
-}
-
-static MunitResult test_command_status_set_cw_overflow(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    fc_command_status_t cq_entry = {0};
-
-    fc_command_status_set_cw(&cq_entry, 4U, FC_CW_STATUS_NAND_FAIL, 0x50U);
-    munit_assert_uint32(cq_entry.status, ==, 0U);
-
-    fc_command_status_set_cw(&cq_entry, 255U, FC_CW_STATUS_NAND_FAIL, 0x60U);
-    munit_assert_uint32(cq_entry.status, ==, 0U);
-
-    return MUNIT_OK;
-}
-
-static MunitResult test_command_status_set_cw_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    fc_command_status_set_cw(NULL, 0U, FC_CW_STATUS_SUCCESS, 0U);
     return MUNIT_OK;
 }
 
@@ -505,6 +473,8 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
 
 static int g_scheduler_inited = 0;
 
+/* 资源统计打印已注释（套件 setup 每个用例都打一次，刷屏）。
+ * 函数体保留备查——需要时取消注释，并恢复 setup_scheduler_suite 里的调用。
 static void print_resource_stats(const char *tag)
 {
     fc_resource_stats_t stats;
@@ -523,6 +493,7 @@ static void print_resource_stats(const char *tag)
              (unsigned)stats.cq_used);
     }
 }
+*/
 
 static void *setup_scheduler_suite(const MunitParameter params[], void *user_data)
 {
@@ -534,7 +505,7 @@ static void *setup_scheduler_suite(const MunitParameter params[], void *user_dat
         fc_init();
         g_scheduler_inited = 1;
     }
-    print_resource_stats("L1_sched");
+    /* print_resource_stats("L1_sched"); */ /* 已注释：每用例打一次刷屏 */
     return NULL;
 }
 
@@ -559,19 +530,6 @@ static MunitResult test_scheduler_init(const MunitParameter params[], void *data
     munit_assert_ptr_equal(scheduler.hsq, &hsq);
     munit_assert_uint32(scheduler.consecutive_write_count, ==, 0U);
     munit_assert_uint32(scheduler.busy[0][0][0], ==, 0U);
-
-    return MUNIT_OK;
-}
-
-static MunitResult test_scheduler_init_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    fc_submission_queue_t sq, hsq;
-
-    munit_assert_int(fc_scheduler_init(NULL, NULL, NULL), ==, FC_STATUS_INVALID_ARGUMENT);
-    munit_assert_int(fc_scheduler_init(NULL, &sq, &hsq), ==, FC_STATUS_INVALID_ARGUMENT);
 
     return MUNIT_OK;
 }
@@ -761,16 +719,6 @@ static MunitResult test_scheduler_select_busy_skip(const MunitParameter params[]
     return MUNIT_OK;
 }
 
-/* ── select 参数校验 ── */
-
-static MunitResult test_scheduler_select_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_scheduler_select(NULL, NULL), ==, FC_STATUS_INVALID_ARGUMENT);
-    return MUNIT_OK;
-}
-
 /* ── 读饥饿保护（select_chain 实现） ── */
 
 static MunitResult test_scheduler_starvation(const MunitParameter params[], void *data)
@@ -930,32 +878,6 @@ static MunitResult test_scheduler_select_chain_multi(const MunitParameter params
     return MUNIT_OK;
 }
 
-/* ── fc_submit / fc_poll_completion / fc_command_configure_descriptors NULL 测试 ── */
-
-static MunitResult test_submit_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_submit(NULL), ==, FC_STATUS_INVALID_ARGUMENT);
-    return MUNIT_OK;
-}
-
-static MunitResult test_poll_completion_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_poll_completion(NULL), ==, FC_STATUS_INVALID_ARGUMENT);
-    return MUNIT_OK;
-}
-
-static MunitResult test_configure_descriptors_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_command_configure_descriptors(NULL), ==, FC_STATUS_INVALID_ARGUMENT);
-    return MUNIT_OK;
-}
-
 /**************************************************************************
  *  套件定义
  *
@@ -963,21 +885,14 @@ static MunitResult test_configure_descriptors_null(const MunitParameter params[]
  **************************************************************************/
 
 MunitTest g_fc_command_tests[] = {
-    {             "validate_null",            test_command_validate_null,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {         "validate_op_range",        test_command_validate_op_range,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {      "validate_desc_needed",     test_command_validate_desc_needed,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {  "validate_set_get_no_desc", test_command_validate_set_get_no_desc,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {          "status_init_null",         test_command_status_init_null,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           "status_init_cw1",          test_command_status_init_cw1,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           "status_init_cw4",          test_command_status_init_cw4,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {       "status_set_cw_valid",      test_command_status_set_cw_valid,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {    "status_set_cw_overflow",   test_command_status_set_cw_overflow,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        "status_set_cw_null",       test_command_status_set_cw_null,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
- /* fc_submit / fc_poll_completion NULL 测试（需要 fc_init） */
-    {               "submit_null",                      test_submit_null, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {      "poll_completion_null",             test_poll_completion_null, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"configure_descriptors_null",       test_configure_descriptors_null, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                        NULL,                                  NULL,                  NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {           "validate_null",            test_command_validate_null, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       "validate_op_range",        test_command_validate_op_range, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    "validate_desc_needed",     test_command_validate_desc_needed, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"validate_set_get_no_desc", test_command_validate_set_get_no_desc, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "status_init_cw1",          test_command_status_init_cw1, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "status_init_cw4",          test_command_status_init_cw4, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     "status_set_cw_valid",      test_command_status_set_cw_valid, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                      NULL,                                  NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };
 
 MunitTest g_fc_queue_tests[] = {
@@ -997,13 +912,11 @@ MunitTest g_fc_queue_tests[] = {
 
 MunitTest g_fc_scheduler_tests[] = {
     {               "init",                test_scheduler_init,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {          "init_null",           test_scheduler_init_null,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {     "set_clear_busy",      test_scheduler_set_clear_busy,                  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {       "select_empty",        test_scheduler_select_empty, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {   "select_hsq_first",    test_scheduler_select_hsq_first, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {    "select_sq_order",     test_scheduler_select_sq_order, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {   "select_busy_skip",    test_scheduler_select_busy_skip, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {        "select_null",         test_scheduler_select_null, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {         "starvation",          test_scheduler_starvation, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {"select_chain_single", test_scheduler_select_chain_single, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     { "select_chain_multi",  test_scheduler_select_chain_multi, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},

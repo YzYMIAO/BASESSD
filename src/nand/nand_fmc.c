@@ -71,10 +71,12 @@ nand_result_t nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun, const 
 {
     nand_fmc_instance_t *inst;
 
-    if ((config == NULL) || (ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    /* 前置条件由调用者保证（nand_init 的三维循环内恒在界内） */
+    ASSERT(config != NULL);
+    ASSERT(ch < CH_NUM);
+    ASSERT(ce < CE_NUM);
+    ASSERT(lun < LUN_NUM);
+
     inst                   = &g_nand_fmc_instances[ch][ce][lun];
     inst->config           = *config;
     inst->backend.handlers = g_nand_fmc_handlers;
@@ -84,10 +86,11 @@ nand_result_t nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun, const 
 
 const nand_engine_backend_t *nand_fmc_backend_get_ext(uint8_t ch, uint8_t ce, uint8_t lun)
 {
-    if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
-    {
-        return NULL;
-    }
+    /* 前置条件由调用者保证（nand_dispatch_task_load 传入已校验的 request 三维） */
+    ASSERT(ch < CH_NUM);
+    ASSERT(ce < CE_NUM);
+    ASSERT(lun < LUN_NUM);
+
     return &g_nand_fmc_instances[ch][ce][lun].backend;
 }
 

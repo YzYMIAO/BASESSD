@@ -90,6 +90,39 @@
 
 头文件 `fc_interface.h` 的两条"越界返回 NULL"注释同步改为前置条件描述。
 
+## 四之二、FC + NAND "全部入口守卫"补扫
+
+辨析 D 只处理了 FC 自铸句柄的越界。用户随后指出 `fc_command_status_set_cw` / `fc_scheduler_select_chain` / `nand_dispatch_poll` 等**入参 NULL/值域**守卫也还是返回码，要求把 FC + NAND 两层的入口守卫一次性扫干净。
+
+**判据 1 再次收窄**（`assertion_guidelines.md` §一）：边界判定标准从"函数声明在哪个头文件"改为"**值从哪来**"——调用者自己铸出/自己算出/自己持有的值 → 判据 2 转 `ASSERT`，即使该函数声明在 `nand_dispatch.h` / `fc_interface.h` 这类边界头里。唯一例外是 host / CLI / 介质读回的**外部输入**，以及"指针身份 + 生命周期状态"这类文档化入口契约。
+
+转换点（FC）：
+
+| 文件 | 转换点 |
+|---|---|
+| `fc_command.c` | `fc_command_status_init` 的 `status`、`fc_command_status_set_cw` 的 `status`/`cw` |
+| `fc_scheduler.c` | `fc_scheduler_init`（scheduler/sq/hsq）、`fc_scheduler_select`（scheduler/command_id）、`fc_scheduler_select_chain`（scheduler/chain） |
+| `fc_registers.c` | `fc_registers_reset` 的 `registers` |
+| `fc_raid_engine.c` | `fc_raid_init_ctx` 的 `lun`；`fc_raid_start/accumulate/end` 的 `lun`/`cw_buffer`/`parity_buffer`/`total`；`fc_raid_recover` 的 `recovered`/`buffers`/`count`/`failed_idx`/`length` |
+| `fc_random_engine.c` | 三种 `fc_random_transform_impl` 的 `data`；XORSHIFT 的 `seed == 0U`（种子生成器保证非零） |
+| `fc_crc_engine.c` | `fc_crc_compute`/`fc_crc_verify` 的 `user_data`（保留 `g_crc_ready`） |
+| `fc_ldpc_engine.c` | `fc_ldpc_encode/decode` 的 `data`/`data_length`/`data_length < 8U`（保留 `err_bits` 语义分支、`g_bch/g_qc` 惰性初始化） |
+| `fc_ldpc_qc_engine.c` | `fc_ldpc_qc_decode` 的 `qc`/`data`（保留 `g_initialized`） |
+| `fc_data_path.c` | `fc_data_path_encode`/`process_read`/`raid_recover` 的 `command`/`cmd`/`desc_id`/`failed_cw_idx` |
+| `fc_interface.c` | 三个顶层生命周期入口的 `command == NULL`（保留身份/状态返回码）、`fc_poll_completion` 的 `completion`、`fc_buffer_get_meta` 的 `command`、`fc_write_cmd_data`/`fc_read_cmd_data` 的 `command`/`data`/`desc_id`、`fc_get_cmd_data_ptr` 的 `command`/`desc_id`、`fc_get_resource_stats` 的 `stats` |
+
+转换点（NAND）：
+
+| 文件 | 转换点 |
+|---|---|
+| `nand_dispatch.c` | `nand_dispatch_submit` 的 `request`/`ch`/`ce`/`lun`/`cw_count`（保留 `g_nand_device_ready` 闸门）、`nand_dispatch_submit_chain` 的 `requests`/`count`/`ch`/`ce`/`lun`、`nand_dispatch_poll` 的 `completion` |
+| `nand_fmc.c` | `nand_fmc_init_instance` 的 `config`/`ch`/`ce`/`lun`、`nand_fmc_backend_get_ext` 的 `ch`/`ce`/`lun` |
+| `nand_mt29f4g08abadawp.c` | `nand_fc_execute`/`nand_fc_start`/`nand_fc_step` 的 `transaction`/`operation`/`request`/`completion`/`active`（保留 `map->uops == NULL` 表缺项）、`nand_fc_read_id` 的 `id`、`nand_fc_set_features` 的 `feature_data` |
+
+**保留返回码**：`fc_command_validate`（校验器）、`fc_queue.c` 的哨兵值域、`fc_command_alloc_internal`/`fc_descriptor_alloc_internal` 的池空、`fc_buffer_is_occupied`/`fc_buffer_release` 的生命周期、`g_nand_device_ready`/`g_crc_ready`/`g_initialized`/`ctx->active` 运行时状态、`map->uops`/`handler` 表完整性、`err_bits`/`command`/`pop_n(ids)` 的 NULL 语义分支、desc 链遍历带 `break`/`return` 的降级、`fc_bch_init` 的 `m`/`t` 值域。
+
+**删用例**：`test_fc_level1.c` 删 `status_init_null`/`status_set_cw_overflow`/`status_set_cw_null`/`scheduler init_null`/`scheduler select_null`/`submit_null`/`poll_completion_null`/`configure_descriptors_null`；`test_fc_level2.c` 删 `encode_null`/`process_read_null`/`raid_recover_null`。
+
 ## 五、验证
 
 | 项 | 结果 |

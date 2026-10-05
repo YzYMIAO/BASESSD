@@ -85,7 +85,9 @@ fc_status_t fc_command_configure_descriptors(fc_command_t *command)
 {
     fc_command_id_t command_id;
 
-    if ((command == NULL) || (fc_command_to_id(command, &command_id) == 0U) ||
+    /* command 非空是前置条件；指针身份 + 生命周期状态是文档化入口契约，保留返回码 */
+    ASSERT(command != NULL);
+    if ((fc_command_to_id(command, &command_id) == 0U) ||
         (fc_command_state_get(&g_fc_controller, command_id) != FC_COMMAND_STATE_ALLOCATED) ||
         (fc_command_id_to_command(command_id)->desc_id != FC_DESCRIPTOR_ID_INVALID))
     {
@@ -105,7 +107,9 @@ fc_status_t fc_submit(fc_command_t *command)
 {
     fc_command_id_t command_id;
 
-    if ((command == NULL) || (fc_command_to_id(command, &command_id) == 0U) ||
+    /* command 非空是前置条件；指针身份 + 生命周期 + 校验结果是文档化入口契约，保留返回码 */
+    ASSERT(command != NULL);
+    if ((fc_command_to_id(command, &command_id) == 0U) ||
         (fc_command_state_get(&g_fc_controller, command_id) != FC_COMMAND_STATE_ALLOCATED) ||
         (fc_command_validate(command) != FC_STATUS_OK) ||
         (fc_command_descriptors_owned_internal(&g_fc_controller, command_id, command) == 0U))
@@ -128,10 +132,8 @@ fc_status_t fc_service(void)
 /* 从 CQ 取完成项 */
 fc_status_t fc_poll_completion(fc_command_status_t *completion)
 {
-    if (completion == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* completion 为出参前置条件 */
+    ASSERT(completion != NULL);
     return fc_poll_completion_internal(&g_fc_controller, completion);
 }
 
@@ -147,10 +149,8 @@ fc_status_t fc_command_release(fc_command_t *command)
 {
     fc_command_id_t command_id;
 
-    if (command == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* command 非空是前置条件；指针身份校验是文档化入口契约（辨析 D），保留返回码 */
+    ASSERT(command != NULL);
 
     command_id = command->command_id;
     if ((command_id >= FC_COMMAND_POOL_DEPTH) ||
@@ -216,10 +216,9 @@ uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index)
     fc_descriptor_id_t did;
     uint8_t            idx;
 
-    if (command == NULL)
-    {
-        return NULL;
-    }
+    /* command 非空是前置条件（gc.c 传入有效命令）；未找到 CW 仍按契约返回 NULL */
+    ASSERT(command != NULL);
+
     did = (fc_descriptor_id_t)command->desc_id;
     idx = 0U;
     while (did != FC_DESCRIPTOR_ID_INVALID)
@@ -253,11 +252,10 @@ fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t 
     uint8_t            i;
     const uint8_t     *src;
 
-    if ((command == NULL) || (data == NULL) ||
-        (command->desc_id == FC_DESCRIPTOR_ID_INVALID))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（FTL 传入已配置 desc 链的命令） */
+    ASSERT(command != NULL);
+    ASSERT(data != NULL);
+    ASSERT(command->desc_id != FC_DESCRIPTOR_ID_INVALID);
 
     cw_count = (uint8_t)(command->config.cw + 1U);
     src      = (const uint8_t *)data;
@@ -317,11 +315,10 @@ fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length)
     uint8_t           *dst;
     uint32_t           remaining;
 
-    if ((command == NULL) || (data == NULL) ||
-        (command->desc_id == FC_DESCRIPTOR_ID_INVALID))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（FTL 传入已配置 desc 链的命令） */
+    ASSERT(command != NULL);
+    ASSERT(data != NULL);
+    ASSERT(command->desc_id != FC_DESCRIPTOR_ID_INVALID);
 
     cw_count  = (uint8_t)(command->config.cw + 1U);
     dst       = (uint8_t *)data;
@@ -371,9 +368,10 @@ uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
     fc_descriptor_id_t desc_id;
     uint8_t            i;
 
-    if ((command == NULL) ||
-        (command->desc_id == FC_DESCRIPTOR_ID_INVALID) ||
-        (cw_index > command->config.cw))
+    /* command/desc 链非空是前置条件；cw_index 越界仍按查询语义返回 NULL */
+    ASSERT(command != NULL);
+    ASSERT(command->desc_id != FC_DESCRIPTOR_ID_INVALID);
+    if (cw_index > command->config.cw)
     {
         return NULL;
     }
@@ -431,10 +429,9 @@ fc_status_t fc_get_resource_stats(fc_resource_stats_t *stats)
 {
     uint16_t index;
 
-    if (stats == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* stats 为出参前置条件（调用者恒传有效指针） */
+    ASSERT(stats != NULL);
+
     stats->sq_used         = fc_get_sq_count(&g_fc_controller);
     stats->hsq_used        = fc_get_hsq_count(&g_fc_controller);
     stats->cq_used         = fc_get_cq_count(&g_fc_controller);

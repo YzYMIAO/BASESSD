@@ -63,10 +63,11 @@ static uint8_t fc_scheduler_op_is_read(uint8_t operation)
  * -------------------------------------------------------------------- */
 fc_status_t fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq)
 {
-    if ((scheduler == NULL) || (sq == NULL) || (hsq == NULL))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（fc.c 传入本池的调度器与两条队列） */
+    ASSERT(scheduler != NULL);
+    ASSERT(sq != NULL);
+    ASSERT(hsq != NULL);
+
     scheduler->sq                      = sq;
     scheduler->hsq                     = hsq;
     scheduler->consecutive_write_count = 0U;
@@ -103,10 +104,10 @@ fc_status_t fc_scheduler_select(fc_scheduler_t *scheduler, fc_command_id_t *comm
 {
     uint16_t index;
 
-    if ((scheduler == NULL) || (command_id == NULL))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（fc.c） */
+    ASSERT(scheduler != NULL);
+    ASSERT(command_id != NULL);
+
     /* HSQ 优先 */
     if (scheduler->hsq->count != 0U)
     {
@@ -163,10 +164,10 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
     uint16_t        index;
     uint8_t         chain_len;
 
-    if ((scheduler == NULL) || (chain == NULL))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（fc.c） */
+    ASSERT(scheduler != NULL);
+    ASSERT(chain != NULL);
+
     *chain = (fc_scheduler_chain_t){0};
 
     /* ── Phase 1: HSQ 优先 ──

@@ -97,10 +97,8 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
     uint8_t           *buffer;
     fc_status_t        result;
 
-    if (command == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（fc.c 写路径传入有效命令） */
+    ASSERT(command != NULL);
 
     /* ── Stage 0: META 写入 — 每个 CW 的 FAA 存入 buffer[0..4] ── */
     {
@@ -395,10 +393,8 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
     uint8_t            all_ok = 1U;
     uint8_t            cw;
 
-    if (command == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（fc.c 读路径 Stage 1） */
+    ASSERT(command != NULL);
 
     const uint8_t total_desc = (command->config.multi_plane > 0U)
                                    ? (uint8_t)((uint8_t)(command->config.cw + 1U) * command->config.multi_plane)
@@ -587,18 +583,15 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
     fc_descriptor_id_t desc_id;
     uint8_t            i;
 
-    if ((cmd == NULL) || (cmd->desc_id == FC_DESCRIPTOR_ID_INVALID))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（FTL 仅在带 desc 链的命令 ECC 失败时触发） */
+    ASSERT(cmd != NULL);
+    ASSERT(cmd->desc_id != FC_DESCRIPTOR_ID_INVALID);
 
     /* ── 收集所有 buffer 指针 + PAA（索引对齐 desc 链位置） ── */
     count = fc_collect_decode_buffers(cmd, buffers, buffer_paa, CW_TOTAL_MAX);
 
-    if (failed_cw_idx >= count)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* failed_cw_idx 由 FTL 沿同一条 desc 链定位，必在 [0, count) */
+    ASSERT(failed_cw_idx < count);
 
     /* ── RAID XOR 重建 failed CW ── */
     {

@@ -3736,22 +3736,20 @@ fc_scheduler_select_chain(&sched_chain)
 
 ## 24. FC 层断言判据（ASSERT / ASSUME）
 
-> **全工程判据已独立成文：`docs/design/assertion_guidelines.md`。** 本节保留 FC 层特有的例外说明，四条判据的完整表述与"两条辨析"以该文档为准。
+> **全工程判据已独立成文：`docs/design/assertion_guidelines.md`。** 本节保留 FC 层特有的例外说明，四条判据的完整表述与辨析以该文档为准（特别是 §一"值从哪来"的边界标准、§七辨析 D、§九第二轮补扫）。
 
 断言设施见 `include/common/assertion.h`。FC 层从 v0.50 起按以下四条判据决定"守卫写成断言还是返回状态码"：
 
-1. **公共 API 保留返回码**——`fc_interface.h` 的入口是外部边界（FTL / UART CLI `wr/rd/tr/fl` 的输入），参数校验必须返回 `FC_STATUS_INVALID_ARGUMENT` 等错误码，不转断言。
+1. **外部输入校验保留返回码**——只有来自**外部**的输入（host 的 opcode/LBA、UART CLI `wr/rd/tr/fl` 的参数、介质读回的字节）才返回 `FC_STATUS_INVALID_ARGUMENT` 等错误码。**判定标准是"值从哪来"，不是"声明在哪个头文件"**：调用者自己铸出的句柄/算出的索引/持有的指针，即使经过 `fc_interface.h` 入口，也按判据 2 转断言。
 
-   > **边界修正（辨析 D）**：判据 1 保护的是**外部输入**（host / CLI / 介质）。`fc_interface.h` 里那些只收 **FC 自铸句柄**的入口（`fc_command_id_to_command` / `fc_descriptor_id_to_descriptor` 的命令/描述符 ID，只来自 `fc_command_alloc()` 与 desc 链）不属此类——越界即不变量破坏，已转 `ASSERT`。`fc_command_configure_descriptors` / `fc_submit` / `fc_command_release` 这三个顶层生命周期入口的句柄校验保留返回码。详见 `assertion_guidelines.md` §七。
-2. **内部函数的前置条件转断言**——`static` 函数与 `fc_internal.h` / `fc_queue.h` / `fc_scheduler.h` / `fc_data_path.h` 里的内部接口，前置条件由调用者保证。守卫一律写成 `ASSERT(条件)`，并删掉原来的 `return` 与恢复/降级分支（"跳过坏 ID 继续找"、"回滚分配再返回"这类）。
+   > **边界修正（辨析 D + 第二轮补扫）**：判据 1 原先把"`fc_interface.h` 的全部入口"整体划为边界，属过度概括。按来源细分后：FC 自铸句柄（`fc_command_id_to_command` / `fc_descriptor_id_to_descriptor` 的 ID）、纯参数前置条件（`command == NULL` 等）转 `ASSERT`；`fc_command_configure_descriptors` / `fc_submit` / `fc_command_release` 里"这个指针是不是本池的命令 + 生命周期阶段"的**身份/状态**校验保留返回码。详见 `assertion_guidelines.md` §七、§九。
+2. **调用者已保证的前置条件转断言**——`static` 函数、内部头（`fc_internal.h` / `fc_queue.h` / `fc_scheduler.h` / `fc_data_path.h` 等）里的接口，以及跨层入口中调用者必然传有效值的指针/索引参数，守卫一律写成 `ASSERT(条件)`，并删掉原来的 `return` 与恢复/降级分支（"跳过坏 ID 继续找"、"回滚分配再返回"这类）。
 
    **FC 层不用 `ASSUME`。** 起初按"守卫带恢复分支 → `ASSUME`"划分，后来取消：恢复分支既然已经手工删掉，`ASSUME` 的 `__builtin_unreachable()` 就换不来额外代码生成收益（工程未开 LTO，`fc_command_id_to_command()` 这类跨 TU 调用点无从利用该假设）；而它会把"违反即 UB"引入一条本来只会 HardFault 的路径——同样是崩，`ASSERT` 的现场更可定位。`ASSUME` 宏保留在 `assertion.h` 里，留给将来确有热路径需要向编译器证明的场合。
-3. **资源类结果保留返回码**——池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、CQ 满背压（`FC_STATUS_IO_ERROR`）、NAND 报告的错误（`FC_STATUS_IO_ERROR`）都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。
-4. **单测固化为契约的守卫保留返回码**——这是判据 2 的例外，也是最容易踩的坑：`tests/` 会**故意**拿非法参数调内部函数验证错误返回。`fc_command_validate` / `fc_command_status_*`（本身就是校验器，返回判决是它的职责）、`fc_scheduler_init/select/select_chain` 的入参判空、`set_busy/clear_busy` 的越界忽略（**文档化特性**，不是 bug）、`fc_data_path_encode/process_read/raid_recover` 的**入口**判空，都属此类——测试就是它们的调用者，且不保证前置条件，因此按判据 1 处理。
+3. **资源类结果与运行时状态保留返回码**——池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、CQ 满背压（`FC_STATUS_IO_ERROR`）、NAND 报告的错误（`FC_STATUS_IO_ERROR`）、`g_crc_ready == 0U` / `ctx->active == 0U` / `fc_buffer_is_occupied(...) == 0U` 这类"此刻能不能做"的状态，都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。
+4. **单测固化为契约的守卫保留返回码**——判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**：`fc_command_validate`（校验器，返回判决是职责）、`set_busy/clear_busy` 的越界忽略（**文档化特性**）、`test_rebuild.c` 的 `allocator_remove_from_free(..., 越界)`（文档化 no-op）等保留。反之，**只有测试会走"传非法参数"分支**的（`fc_command_status_set_cw` 的 `cw >= 4`、`fc_scheduler_init(NULL,…)`、`fc_submit(NULL)`、`fc_data_path_encode(NULL)` 等），按判据 2 转 `ASSERT` 并**删掉对应用例**。
 
-> `fc_data_path_raid_recover()` 虽然声明在内部头 `fc_data_path.h` 里，但设计上是 **[FTL 触发]** 的对外接口（见该头文件注释），所以它的入口判空按判据 1 保留，不按判据 2 转断言。
-
-**判据 4 的边界：什么时候可以删用例而不是保留守卫。** 判据 4 只适用于"这个函数在别的场景下确实需要优雅返回"的情况。反例是 `fc_queue.c` 的指针判空：`fc_submission_queue_*` / `fc_completion_queue_*` 的生产调用者只有 `fc.c` 与 `fc_scheduler.c`，**全部传有效指针**——唯一会传 `NULL` 的就是测试自己。也就是说这些守卫存在的唯一理由就是被测试覆盖。这种"只有测试会走的分支"应当按判据 2 转 `ASSERT`，并**删掉对应用例**（它们验证的行为届时已不存在，留着反而是错的），而不是为了让用例继续通过而保留返回码。本轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例。
+**判据 4 的边界：什么时候可以删用例而不是保留守卫。** 反例是 `fc_queue.c` 的指针判空：`fc_submission_queue_*` / `fc_completion_queue_*` 的生产调用者只有 `fc.c` 与 `fc_scheduler.c`，**全部传有效指针**——唯一会传 `NULL` 的就是测试自己。这种"只有测试会走的分支"应当按判据 2 转 `ASSERT`，并**删掉对应用例**（它们验证的行为届时已不存在，留着反而是错的）。两轮补扫共删除 `test_fc_level1.c` 的 13 个 `*_null`/越界用例与 `test_fc_level2.c` 的 3 个。
 
 > `make tests` 走 `BUILD_TYPE=debug`（无 `NDEBUG`），断言在板上测试固件里是**活的**：任何一条误判都会让板子停机而不是报失败。因此改动这些守卫后必须上板跑三套 munit 套件。
 

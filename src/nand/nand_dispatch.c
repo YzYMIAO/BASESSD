@@ -216,12 +216,18 @@ nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request)
     nand_channel_queue_t      *queue;
     nand_dispatch_lun_chain_t *chain;
 
-    if ((g_nand_device_ready == 0U) || (request == NULL) || (request->ch >= CH_NUM) ||
-        (request->ce >= CE_NUM) || (request->lun >= LUN_NUM) ||
-        (request->cw_count > CW_NUM))
+    /* 设备未就绪是运行时状态（非调用者编程错误），保留返回码 */
+    if (g_nand_device_ready == 0U)
     {
         return NAND_RESULT_INVALID_ARGUMENT;
     }
+
+    /* 入参前置条件由调用者（fc.c 提交路径）保证 */
+    ASSERT(request != NULL);
+    ASSERT(request->ch < CH_NUM);
+    ASSERT(request->ce < CE_NUM);
+    ASSERT(request->lun < LUN_NUM);
+    ASSERT(request->cw_count <= CW_NUM);
 
     chain = &g_nand_dispatch_chains[request->ch][request->ce][request->lun];
     if (chain->count != 0U)
@@ -279,14 +285,12 @@ nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests
     nand_dispatch_lun_chain_t *chain;
     uint8_t                    i;
 
-    if ((requests == NULL) || (count == 0U) || (count > NAND_DISPATCH_CHAIN_DEPTH))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
-    if ((requests[0U].ch >= CH_NUM) || (requests[0U].ce >= CE_NUM) || (requests[0U].lun >= LUN_NUM))
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者（fc.c 链式提交路径）保证 */
+    ASSERT(requests != NULL);
+    ASSERT((count != 0U) && (count <= NAND_DISPATCH_CHAIN_DEPTH));
+    ASSERT(requests[0U].ch < CH_NUM);
+    ASSERT(requests[0U].ce < CE_NUM);
+    ASSERT(requests[0U].lun < LUN_NUM);
 
     chain = &g_nand_dispatch_chains[requests[0U].ch][requests[0U].ce][requests[0U].lun];
     if (chain->count != 0U)
@@ -893,10 +897,8 @@ nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion)
 {
     uint8_t count;
 
-    if (completion == NULL)
-    {
-        return NAND_RESULT_INVALID_ARGUMENT;
-    }
+    /* 出参前置条件由调用者保证（fc.c 轮询路径恒传有效 completion） */
+    ASSERT(completion != NULL);
 
     for (count = 0U; count < CH_NUM; count++)
     {

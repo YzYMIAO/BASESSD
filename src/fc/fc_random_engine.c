@@ -1,5 +1,6 @@
 #include "fc_random_engine.h"
 
+#include "common/assertion.h"
 #include "nand/nand_config.h"
 
 #include <stddef.h>
@@ -164,10 +165,8 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
 {
     uint16_t index;
 
-    if (data == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* data 前置条件由调用者保证（fc_data_path 传入 CW 缓冲） */
+    ASSERT(data != NULL);
 
     /* 用 seed 初始化为非零 LFSR 状态 */
     uint32_t lfsr_state = (seed & 0xFFFFU);
@@ -203,10 +202,8 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
     uint8_t  i;
     uint16_t index;
 
-    if (data == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* data 前置条件由调用者保证（fc_data_path 传入 CW 缓冲） */
+    ASSERT(data != NULL);
 
     /* 用 seed 生成 64 字节 pattern */
     for (i = 0U; i < FC_SIMPLE_XOR_PATTERN_LEN; i++)
@@ -237,10 +234,10 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
 {
     uint16_t index;
 
-    if ((data == NULL) || (seed == 0U))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* data 前置条件由调用者保证；seed 由 fc_random_seed_from_paa 保证非零 */
+    ASSERT(data != NULL);
+    ASSERT(seed != 0U);
+
     for (index = 0U; index < length; index++)
     {
         seed ^= seed << 13U;

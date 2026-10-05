@@ -38,6 +38,8 @@
 
 static int g_level2_inited = 0;
 
+/* 资源统计打印已注释（套件 setup 每个用例都打一次，刷屏）。
+ * 函数体保留备查——需要时取消注释，并恢复 setup_level2 里的调用。
 static void print_resource_stats(const char *tag)
 {
     fc_resource_stats_t stats;
@@ -46,6 +48,7 @@ static void print_resource_stats(const char *tag)
         fprintf(stderr, "[RES] %s: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\n", tag, (unsigned)stats.command_used, (unsigned)FC_COMMAND_POOL_DEPTH, (unsigned)stats.descriptor_used, (unsigned)FC_DESCRIPTOR_POOL_DEPTH, (unsigned)stats.buffer_used, (unsigned)FC_BUFFER_POOL_DEPTH, (unsigned)stats.sq_used, (unsigned)stats.hsq_used, (unsigned)stats.cq_used);
     }
 }
+*/
 
 static void *setup_level2(const MunitParameter params[], void *user_data)
 {
@@ -56,7 +59,7 @@ static void *setup_level2(const MunitParameter params[], void *user_data)
         fc_init();
         g_level2_inited = 1;
     }
-    print_resource_stats("L2");
+    /* print_resource_stats("L2"); */ /* 已注释：每用例打一次刷屏 */
     return NULL;
 }
 
@@ -416,14 +419,6 @@ static MunitResult test_encode_single_cw(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
-static MunitResult test_encode_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_data_path_encode(NULL), ==, FC_STATUS_INVALID_ARGUMENT);
-    return MUNIT_OK;
-}
-
 /**************************************************************************
  *  fc_data_path_process_read 测试
  *
@@ -572,14 +567,6 @@ static MunitResult test_process_read_single_cw(const MunitParameter params[], vo
     return MUNIT_OK;
 }
 
-static MunitResult test_process_read_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_data_path_process_read(NULL), ==, FC_STATUS_INVALID_ARGUMENT);
-    return MUNIT_OK;
-}
-
 /**************************************************************************
  *  fc_data_path_raid_recover 测试
  *
@@ -669,14 +656,6 @@ static MunitResult test_raid_recover_no_random(const MunitParameter params[], vo
     (void)params;
     (void)data;
     do_raid_recover_test(FC_RANDOM_DISABLE, 1U);
-    return MUNIT_OK;
-}
-
-static MunitResult test_raid_recover_null(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-    munit_assert_int(fc_data_path_raid_recover(NULL, 0U), ==, FC_STATUS_INVALID_ARGUMENT);
     return MUNIT_OK;
 }
 
@@ -832,14 +811,12 @@ MunitTest g_fc_data_path_tests[] = {
     {            "encode_raid_on",             test_encode_raid_on, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 #endif
     {          "encode_single_cw",           test_encode_single_cw, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {               "encode_null",                test_encode_null, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
  /* ── process_read ── */
     { "process_read_ok_random_on",  test_process_read_ok_random_on, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {"process_read_ok_random_off", test_process_read_ok_random_off, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {          "process_read_unc",           test_process_read_unc, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {    "process_read_single_cw",     test_process_read_single_cw, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {         "process_read_null",          test_process_read_null, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
  /* ── raid_recover ── */
 #if CONFIG_FC_RAID
@@ -847,7 +824,6 @@ MunitTest g_fc_data_path_tests[] = {
     {          "raid_recover_mid",           test_raid_recover_mid, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {         "raid_recover_last",          test_raid_recover_last, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {    "raid_recover_no_random",     test_raid_recover_no_random, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {         "raid_recover_null",          test_raid_recover_null, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
  /* ── stripe parity ── */
     {    "generate_stripe_parity",     test_generate_stripe_parity, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},

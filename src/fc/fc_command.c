@@ -9,6 +9,7 @@
 
 #include "fc_command.h"
 
+#include "common/assertion.h"
 #include "nand/onfi_1_0.h"
 #include "onfi_1_0.h"
 
@@ -65,10 +66,9 @@ void fc_command_status_init(fc_command_status_t *status, const fc_command_t *com
 {
     uint8_t count;
 
-    if (status == NULL)
-    {
-        return;
-    }
+    /* status 为出参前置条件；command 可为 NULL 是有意语义（辨析 B），保留分支 */
+    ASSERT(status != NULL);
+
     *status            = (fc_command_status_t){0};
     status->command_id = (command != NULL) ? command->command_id : FC_COMMAND_ID_INVALID;
     status->desc_id    = (command != NULL) ? command->desc_id : FC_DESCRIPTOR_ID_INVALID;
@@ -94,10 +94,10 @@ void fc_command_status_init(fc_command_status_t *status, const fc_command_t *com
  * -------------------------------------------------------------------- */
 void fc_command_status_set_cw(fc_command_status_t *status, uint8_t cw, uint8_t cw_status, fc_descriptor_id_t descriptor_id)
 {
-    if ((status == NULL) || (cw >= 4U))
-    {
-        return;
-    }
+    /* status/cw 为前置条件（cw 索引恒 < CW_NUM=4，调用者按 desc 链枚举） */
+    ASSERT(status != NULL);
+    ASSERT(cw < 4U);
+    (void)cw; /* release（NDEBUG）下 ASSERT 被裁掉，cw 仅用于前置条件 */
 
     /* OR per-CW status bits into the aggregated command-level status. */
     status->status |= cw_status;

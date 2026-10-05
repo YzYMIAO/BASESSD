@@ -1,5 +1,6 @@
 #include "fc_ldpc_engine.h"
 
+#include "common/assertion.h"
 #include "fc_bch_engine.h"
 #include "fc_ldpc_qc_engine.h"
 
@@ -66,10 +67,9 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
 {
     (void)config;
 
-    if ((data == NULL) || (data_length == 0U))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（fc_data_path 恒传 CW 缓冲 + FC_BUFFER_DATA_SIZE） */
+    ASSERT(data != NULL);
+    ASSERT(data_length != 0U);
 
 #if (FC_ECC_ALGO == FC_ECC_ALGO_BCH)
 
@@ -82,10 +82,8 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
     {
         uint8_t ecc_buf[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
-        if (data_length < 8U)
-        {
-            return FC_STATUS_INVALID_ARGUMENT;
-        }
+        /* data_length 恒 ≥ 8（520），parity 尾区足够 */
+        ASSERT(data_length >= 8U);
 
         fc_bch_encode(g_bch, data, data_length, ecc_buf);
         memcpy(data + data_length, ecc_buf, 8U);
@@ -138,10 +136,10 @@ fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16
         *err_bits = 0U;
     }
 
-    if ((data == NULL) || (data_length == 0U))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    /* 入参前置条件由调用者保证（fc_data_path 恒传 CW 缓冲 + FC_BUFFER_DATA_SIZE）；
+     * err_bits 可为 NULL（辨析 B），保留上方语义分支 */
+    ASSERT(data != NULL);
+    ASSERT(data_length != 0U);
 
 #if (FC_ECC_ALGO == FC_ECC_ALGO_BCH)
 
@@ -157,10 +155,8 @@ fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16
         int          nerr;
         uint16_t     i;
 
-        if (data_length < 8U)
-        {
-            return FC_STATUS_INVALID_ARGUMENT;
-        }
+        /* data_length 恒 ≥ 8（520），parity 尾区足够 */
+        ASSERT(data_length >= 8U);
 
         nerr = fc_bch_decode(g_bch, data, data_length, recv_ecc, NULL, NULL, errloc);
 
