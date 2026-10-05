@@ -246,7 +246,7 @@ nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *reques
  *         NOT_READY（有 busy 阶段，需 nand_fc_step 推进）/ 错误码。
  *   实现要点：
  *     - 先清 DMA 残留完成标志，防 DATA_IN/OUT 误判。
- *     - Phase V：engine.backend 为空时回退 (0,0,0) 后端。
+ *     - engine.backend 由调用者（nand_dispatch_task_load）绑定，恒非空（前置条件断言）。
  *     - nand_engine_start 末尾即 step 一次：无 busy 阶段命令直接完成。
  * -------------------------------------------------------------------- */
 nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operation, const nand_fc_request_t *request)
@@ -280,11 +280,9 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
           request->data, request->data_length
     };
     transaction->completion = (nand_command_completion_t){0};
-    /* Phase V: engine.backend 由 nand_dispatch_task_load 按 ch/ce/lun 绑定，未绑定时回退默认后端 */
-    if (transaction->engine.backend == NULL)
-    {
-        transaction->engine.backend = nand_fmc_backend_get();
-    }
+    /* engine.backend 由 nand_dispatch_task_load 随事务绑定（全工程唯一写点，恒非空）；
+     * 未绑定属调用者违约，按断言纪律转 ASSERT 而非静默回退 */
+    ASSERT(transaction->engine.backend != NULL);
     result = nand_engine_start(&transaction->engine, map->uops, &map->timing);
     if (result != NAND_RESULT_NOT_READY)
     {
@@ -367,27 +365,6 @@ nand_result_t nand_fc_set_features(uint8_t feature_address, const uint8_t featur
 
     ASSERT(feature_data != NULL);
     return nand_fc_execute(OP_SET_FEATURES, &request, completion);
-}
-
-/* --------------------------------------------------------------------
- * nand_fc_read_page / nand_fc_program_page / nand_fc_erase_block
- *   功能：读写页 / 擦除块的 typed 包装（同步）。
- *   参数：request —— 目标地址 + 数据；completion —— 状态。
- *   返回：NAND_RESULT_OK / 错误码。
- * -------------------------------------------------------------------- */
-nand_result_t nand_fc_read_page(const nand_fc_request_t *request, nand_fc_completion_t *completion)
-{
-    return nand_fc_execute(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, request, completion);
-}
-
-nand_result_t nand_fc_program_page(const nand_fc_request_t *request, nand_fc_completion_t *completion)
-{
-    return nand_fc_execute(OP_NORMAL_PROGRAM_PAGE, request, completion);
-}
-
-nand_result_t nand_fc_erase_block(const nand_fc_request_t *request, nand_fc_completion_t *completion)
-{
-    return nand_fc_execute(OP_ERASE_BLOCK, request, completion);
 }
 
 /* --------------------------------------------------------------------

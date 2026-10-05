@@ -83,15 +83,18 @@ nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uo
     ASSERT(state->completion != NULL);
     ASSERT(uops != NULL);
     ASSERT(timing != NULL);
+    /* busy_timeout_us 为 0 会让忙等双条件首次即判超时（elapsed>=0 恒真），属时序表配置错误 */
+    ASSERT(timing->busy_timeout_us > 0U);
 
     state->uops                        = uops;
     state->timing                      = timing;
     state->uop_index                   = 0U;
-    state->wait_start_cycles           = 0U;
-    state->wait_polls                  = 0U;
     state->debug_polls                 = 0U;
-    state->wait_started                = 0U;
     state->active                      = 1U;
+    state->wait.started                = 0U;
+    state->wait.polls                  = 0U;
+    state->jump.started                = 0U;
+    state->jump.polls                  = 0U;
     state->completion->nand_status     = 0U;
     state->completion->transfer_status = NAND_RESULT_OK;
     return nand_engine_step(state);
@@ -100,49 +103,48 @@ nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uo
 /* --------------------------------------------------------------------
  * nand_engine_wait_latch
  *   功能：一次性锁存忙等起点（DWT 时间戳 + 轮询计数清零）。
- *   参数：state —— 引擎状态。
+ *   参数：state —— 引擎状态；w —— 该忙等所属的超时状态（wait / jump）。
  *   返回：NAND_RESULT_OK（本次锁存成功，或之前已锁存）/ INVALID_ARGUMENT（DWT 不可用）。
- *   实现要点：JUMP_IF_NOT_READY 与 WAIT_READY 共用同一组 wait_start_cycles /
- *         wait_polls，故两者走同一入口；失败时清 active，调用方直接返回。
+ *   实现要点：WAIT_READY 与 JUMP_IF_NOT_READY 各持一组状态、走同一入口；
+ *         失败时清 active，调用方直接返回。
  * -------------------------------------------------------------------- */
-static uint8_t nand_engine_wait_latch(nand_engine_state_t *state)
+static uint8_t nand_engine_wait_latch(nand_engine_state_t *state, nand_engine_wait_t *w)
 {
-    if (state->wait_started != 0U)
+    if (w->started != 0U)
     {
         return NAND_RESULT_OK;
     }
-    if (!delay_dwt_cycles_now(&state->wait_start_cycles))
+    if (!delay_dwt_cycles_now(&w->start_cycles))
     {
         state->active = 0U;
         return NAND_RESULT_INVALID_ARGUMENT;
     }
-    state->wait_started = 1U;
-    state->wait_polls   = 0U;
+    w->started = 1U;
+    w->polls   = 0U;
     return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
  * nand_engine_wait_timeout
  *   功能：忙等超时检测——轮询计数 +1 后判双条件。
- *   参数：state —— 引擎状态；op_name —— 日志用的微指令名。
+ *   参数：state —— 引擎状态；w —— 该忙等所属的超时状态；op_name —— 日志用的微指令名。
  *   返回：1 = 已超时（active 已清）；0 = 未超时。
  *   实现要点：DWT 周期预算与轮询计数任一超限即判超时（DWT 防计数单位误解，
- *         计数防 DWT 不可用/漂移）；wait_polls 饱和递增防回绕。
+ *         计数防 DWT 不可用/漂移）；polls 饱和递增防回绕。
  * -------------------------------------------------------------------- */
-static uint8_t nand_engine_wait_timeout(nand_engine_state_t *state, const char *op_name)
+static uint8_t nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wait_t *w, const char *op_name)
 {
-    if (state->wait_polls < UINT16_MAX)
+    if (w->polls < UINT16_MAX)
     {
-        state->wait_polls++;
+        w->polls++;
     }
 
-    if (delay_dwt_elapsed_us(state->wait_start_cycles, state->timing->busy_timeout_us) ||
-        (state->wait_polls >= state->timing->busy_timeout_us))
+    if (delay_dwt_elapsed_us(w->start_cycles, state->timing->busy_timeout_us) || (w->polls >= state->timing->busy_timeout_us))
     {
         LOGE("nand: %s timeout op=%u polls=%u timeout_us=%u\r\n",
              op_name,
              state->request->operation,
-             state->wait_polls,
+             w->polls,
              state->timing->busy_timeout_us);
         state->active = 0U;
         return 1U;
@@ -227,17 +229,21 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
         {
             if ((state->completion->nand_status & NAND_STATUS_READY) != 0U)
             {
-                /* NAND ready（状态字节 bit6）→ 推进到下一 UOP */
+                /* NAND ready（状态字节 bit6）→ 复位本组忙等状态，推进到下一 UOP。
+                 * 复位是必需的：否则同一序列中后续 JUMP 会复用上一轮的陈旧 DWT 起点。 */
+                state->jump.started = 0U;
+                state->jump.polls   = 0U;
                 state->uop_index++;
                 continue;
             }
 
-            /* NAND busy → 锁存起点 + 双条件超时检测 */
-            if (nand_engine_wait_latch(state) != NAND_RESULT_OK)
+            /* NAND busy → 锁存起点 + 双条件超时检测（用独立 jump 状态，
+             * 不被回跳体内返回 OK 的 UOP 复位） */
+            if (nand_engine_wait_latch(state, &state->jump) != NAND_RESULT_OK)
             {
                 return NAND_RESULT_INVALID_ARGUMENT;
             }
-            if (nand_engine_wait_timeout(state, "JUMP_IF_NOT_READY") != 0U)
+            if (nand_engine_wait_timeout(state, &state->jump, "JUMP_IF_NOT_READY") != 0U)
             {
                 return NAND_RESULT_TIMEOUT;
             }
@@ -254,10 +260,10 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
             return NAND_RESULT_INVALID_ARGUMENT;
         }
 
-        /* WAIT_READY 首次进入：记录 DWT 起点（与 JUMP 共用 wait_start_cycles） */
+        /* WAIT_READY 首次进入：记录 DWT 起点（用独立 wait 状态） */
         if (uop->type == NAND_UOP_WAIT_READY)
         {
-            if (nand_engine_wait_latch(state) != NAND_RESULT_OK)
+            if (nand_engine_wait_latch(state, &state->wait) != NAND_RESULT_OK)
             {
                 return NAND_RESULT_INVALID_ARGUMENT;
             }
@@ -269,8 +275,8 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
         {
             nand_engine_uop_log_ok(state);
             state->uop_index++;
-            state->wait_started = 0U;
-            state->wait_polls   = 0U;
+            state->wait.started = 0U; /* 复位 WAIT_READY 忙等，供下一次等待重新锁存 */
+            state->wait.polls   = 0U;
             continue; /* OK 后可继续消费下一 UOP（一步多推进） */
         }
 
@@ -290,7 +296,7 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
             }
             if (uop->type == NAND_UOP_WAIT_READY)
             {
-                if (nand_engine_wait_timeout(state, "WAIT_READY") != 0U)
+                if (nand_engine_wait_timeout(state, &state->wait, "WAIT_READY") != 0U)
                 {
                     return NAND_RESULT_TIMEOUT;
                 }

@@ -582,7 +582,7 @@ step(state)
        │
        ├─ 其余 UOP → handler = backend->handlers[uop->type]
        │    ├─ handler == NULL → INVALID_ARGUMENT
-       │    └─ WAIT_READY 首次进入：wait_latch() 记录 DWT 起点（与 JUMP 共用计时）
+       │    └─ WAIT_READY 首次进入：wait_latch() 记录 DWT 起点（用独立 wait 状态）
        │         result = handler(...)
        │           ├─ OK → uop_log_ok() 白名单日志；uop_index++，清零 wait 状态，continue
        │           ├─ NOT_READY → WAIT_READY 额外 wait_timeout() 检测；让出
@@ -591,7 +591,9 @@ step(state)
        └─ 循环跑满无 END → 非法序列
 ```
 
-**三个 static helper**（`nand_engine.c`）：`wait_latch` 一次性锁存 DWT 起点（JUMP 与 WAIT_READY 共用）、`wait_timeout` 饱和递增 `wait_polls` 后判双条件、`uop_log_ok` 按类型白名单打成功日志。抽出的目的是让 `step` 只留解释器骨架——END / JUMP 是控制流（不查表），其余一律走 handler 表；同时也消掉了原先 JUMP 与 WAIT_READY 两处逐字重复的锁存/超时块。
+**三个 static helper**（`nand_engine.c`）：`wait_latch` 一次性锁存 DWT 起点（入参指定 `wait` / `jump` 状态组）、`wait_timeout` 饱和递增计数后判双条件、`uop_log_ok` 按类型白名单打成功日志。抽出的目的是让 `step` 只留解释器骨架——END / JUMP 是控制流（不查表），其余一律走 handler 表；同时也消掉了原先 JUMP 与 WAIT_READY 两处逐字重复的锁存/超时块。
+
+> **为什么 JUMP 与 WAIT_READY 用两组独立状态**（`wait` / `jump`，`nand_engine_wait_t`）：JUMP 回跳体会重跑若干**返回 OK** 的 UOP（70h / DELAY_US / DATA_OUT_STATUS），而引擎 OK 分支会清零 `wait`；若二者共用同一组，`jump` 的计数每轮回跳都被清零、DWT 起点也被重新锁存，双条件超时永不触发（NAND 卡忙时死循环）。`wait` 归 WAIT_READY——该 UOP 未就绪时原地重入、无前置 OK-UOP 复位，计数可正常累加。
 
 **协作式让出**：`NOT_READY` 是"让出点"——引擎不阻塞，上层 `while(NOT_READY) step()`（同步 `nand_engine_execute`）或由 dispatch 轮询推进（异步 `start/step`）。
 
@@ -701,9 +703,6 @@ typedef struct {
 uint8_t nand_fc_execute(operation, &request, &completion);  // 同步
 uint8_t nand_fc_start(transaction, operation, &request);    // 异步 start
 uint8_t nand_fc_step(transaction, &completion);             // 异步 step
-uint8_t nand_fc_read_page(&request, &completion);           // 类型化包装
-uint8_t nand_fc_program_page(&request, &completion);
-uint8_t nand_fc_erase_block(&request, &completion);
 uint8_t nand_fc_read_id(id[5], &completion);
 uint8_t nand_fc_reset(&completion);
 ```

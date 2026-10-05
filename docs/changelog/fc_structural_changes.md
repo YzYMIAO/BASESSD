@@ -1549,3 +1549,39 @@ Phase V 为"多 LUN 并发各持独立时序/上下文"引入了三维实例数�
 - `make format-check`（clang-format-15）通过。
 - 残留引用核对：`src/`、`include/`、`tests/`、`docs/design/` 内无 `nand_fmc_init_instance`/`nand_fmc_backend_get_ext`/`g_nand_fmc_instances` 残留（`fc_nand_design.md` §18.5 一处为**刻意保留的移除说明**）。
 - **上板回归（待执行）**：`make tests` 烧写 → CLI 冒烟 `info → wr 0 2 → rd 0 2 c → tr 0 → fl → info`。
+
+---
+
+## Phase AA: 引擎忙等超时状态分离 + nand_fc_start 死回退转断言
+
+**日期**: 2026-10-05
+
+### 背景
+
+NAND 层走读发现两处问题：
+
+1. **`JUMP_IF_NOT_READY` 忙等超时被架空**：引擎 OK 分支（`nand_engine.c`）每次 UOP 成功都清零 `wait_started`/`wait_polls`；而 JUMP 回跳体（operand 全表恒 3）是 `{COMMAND 70h, DELAY_US, DATA_OUT_STATUS}` 三条**恒返回 OK** 的 UOP。于是每轮 `step()` 重入都从循环顶开始，三条 OK 把计数清零、`wait_latch` 在 JUMP 处重新锁存 DWT 起点 → `wait_polls` 恒 ≤1、`elapsed` 恒 ≈0，双条件超时**永不触发**。NAND 卡忙时同步路径（`nand_engine_execute`，`nand_init` 走此路）死循环、异步路径任务永不完成。对照组 `WAIT_READY` 正常：它未就绪时原地重入（uop_index 不变），无前置 OK-UOP 复位。
+2. **`nand_fc_start` 的 NULL-backend 回退是死分支**：`engine.backend` 全工程唯一写点是 `nand_dispatch_task_load`（`nand_dispatch.c:153`，`nand_fmc_backend_get()` 恒非空），`nand_fc_start` 两处调用者都必经 `task_load`。回退分支不可达，且与项目断言纪律（§24：内部前置条件转 ASSERT）矛盾。
+
+### 改动
+
+| 文件 | 变更 |
+|------|------|
+| `include/nand/nand_engine.h` | 新增 `nand_engine_wait_t {start_cycles, polls, started}`；`nand_engine_state_t` 的 `wait_start_cycles/wait_polls/wait_started` 三字段 → `wait` / `jump` **两组独立** `nand_engine_wait_t` |
+| `src/nand/nand_engine.c` | `wait_latch`/`wait_timeout` 增加 `nand_engine_wait_t *w` 入参；JUMP 用 `&state->jump`、WAIT_READY 用 `&state->wait`；JUMP ready 分支复位 `jump`（防后续 JUMP 复用陈旧起点）；OK 分支只复位 `wait`；`start` 复位两组；`start` 新增 `ASSERT(timing->busy_timeout_us > 0)`（0 会让忙等首次即判超时） |
+| `src/nand/nand_mt29f4g08abadawp.c` | `nand_fc_start` 的 NULL-backend 回退 → `ASSERT(transaction->engine.backend != NULL);`；函数头注释同步 |
+| `docs/design/fc_nand_design.md` | 图 6 流程 + helper 说明改为"两组独立状态"，并加框注解释为何不能共用 |
+
+### 设计要点
+
+- **修法取"独立状态"而非"回跳体内跳过复位"**：引擎无法从 UOP 类型判断自己是否处于 JUMP 回跳体，独立字段是唯一不引入额外循环感知状态的解。
+- **两组语义分工**：`wait` 归 WAIT_READY（原地重入，计数天然累加）；`jump` 归 JUMP（回跳体含返回 OK 的 UOP，必须与 OK 复位解耦）。
+- **JUMP ready 时显式复位 `jump`**：同一序列可能含多个 JUMP（预检 + 命令后复检），不复位则第二个 JUMP 会复用第一个的陈旧 DWT 起点而立即误判超时。
+- **断言而非回退**：与 Phase Z 后 `nand_fmc_backend_get()` 单例化一致——回退值与 `task_load` 绑定的是同一对象，保留分支只掩盖调用者违约。
+
+### 验证
+
+- `make debug` / `make tests` / `make release`：零告警零错误。
+- `make format-check`（clang-format-15）通过。
+- 残留引用核对：`src/`、`include/` 内无 `wait_start_cycles`/`wait_polls`/`wait_started` 旧字段名残留。
+- **上板回归（待执行）**：`make tests` 烧写跑三套 munit 套件 + CLI 冒烟 `info → wr 0 2 → rd 0 2 c → tr 0 → fl → info`（超时修复需构造 NAND 卡忙场景才能正向验证，常规冒烟只证不回归）。

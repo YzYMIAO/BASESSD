@@ -110,13 +110,24 @@ typedef struct
     void                     *context;
 } nand_engine_backend_t;
 
+/* 忙等超时状态：started 一次性锁存 DWT 起点 start_cycles，polls 轮询计数
+ * （饱和递增）；两者任一超限即判超时。 */
+typedef struct
+{
+    uint32_t start_cycles; /* DWT 起点 */
+    uint16_t polls;        /* 轮询计数 */
+    uint8_t  started;      /* 起点已锁存 */
+} nand_engine_wait_t;
+
 /*
  * Persistent UOP cursor. One instance belongs to one active CH/CE/LUN transaction.
  *
- * wait_start_cycles / wait_polls / wait_started：
- *   JUMP_IF_NOT_READY 与 WAIT_READY 共用的超时状态——
- *   wait_started 一次性锁存 DWT 起点，wait_polls 轮询计数，
- *   两者任一超限即判超时。
+ * wait / jump：两组**独立**的忙等超时状态。
+ *   - wait 归 WAIT_READY：该 UOP 未就绪时原地重入（uop_index 不变），
+ *     无前置 OK-UOP 复位，计数可正常累加。
+ *   - jump 归 JUMP_IF_NOT_READY：其回跳体会重跑若干**返回 OK** 的 UOP
+ *     （COMMAND 70h / DELAY_US / DATA_OUT_STATUS），而引擎 OK 分支会清零
+ *     wait——若与 wait 共用，计数每轮被清零，超时永不触发。故独立。
  * debug_polls 仅调试用（program pending 日志）。
  */
 typedef struct
@@ -127,11 +138,10 @@ typedef struct
     const nand_command_request_t  *request;
     nand_command_completion_t     *completion;
     uint16_t                       uop_index;
-    uint32_t                       wait_start_cycles;
-    uint16_t                       wait_polls;
     uint16_t                       debug_polls;
-    uint8_t                        wait_started;
     uint8_t                        active;
+    nand_engine_wait_t             wait; /* WAIT_READY 忙等状态 */
+    nand_engine_wait_t             jump; /* JUMP_IF_NOT_READY 忙等状态 */
 } nand_engine_state_t;
 
 /* --------------------------------------------------------------------
@@ -153,7 +163,7 @@ nand_result_t nand_engine_execute(const nand_engine_backend_t *backend, const na
  *   参数：state —— 引擎状态（调用方提供）。调用前必须已绑定
  *         state->backend / state->request / state->completion 三个指针
  *         （随事务固定，如 nand_dispatch_task_load 所做）；
- *         uops —— UOP 序列；timing —— 时序参数。
+ *         uops —— UOP 序列；timing —— 时序参数（busy_timeout_us 须 > 0）。
  *   返回：NAND_RESULT_OK（无 busy 阶段，start 内即完成，active 已清）/
  *         NOT_READY（有 busy 阶段，需 step 推进）/ 错误码。
  *   实现要点：只复位游标/超时/active 字段，不整体清零——已绑定的
