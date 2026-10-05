@@ -79,7 +79,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 
 | 层 | Tier 1（计划内确定项） | Tier 2（逐点核对调用链后转） |
 |---|---|---|
-| `nand/` | `nand_engine.c`（UOP type）、`nand_dispatch_tables.c`（5×`cw_buffers`）、`nand_fmc.c`（DATA_IN/OUT）、`nand_dispatch.c`（default → `ASSERT_UNREACHABLE()`） | `nand_engine_start`/`step`（头文件已文档化前置条件） |
+| `nand/` | `nand_engine.c`（UOP type）、`nand_dispatch_tables.c`（5×`cw_buffers`，索引后由 `[0]` 改为 `[task->plane]`，计数不变）、`nand_fmc.c`（DATA_IN/OUT）、`nand_dispatch.c`（default → `ASSERT_UNREACHABLE()`） | `nand_engine_start`/`step`（头文件已文档化前置条件） |
 | `ftl/` | `allocator.c`、`power_failure_recovery.c`、`wear_leveling.c` | `pending.c`（6×`ftl == NULL`）、`read_recovery.c`（`rr_record_ecc`/`rr_predictive_scan`/`rr_retire_block`/`rr_recover_read`） |
 | `controller/` | `controller.c`、`request.c`（route 越界、ftl 槽位恒非空） | — |
 | `common/` | 无（`crash.c` 属故障路径，见 §五） | — |

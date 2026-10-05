@@ -95,7 +95,7 @@
 │  nand_dispatch（调度桥接层）                                  │
 │    submit / submit_chain 入队 → poll 出队 + 推进              │
 │    g_nand_dispatch_chains[ch][ce][lun]  per-LUN 链缓冲        │
-│    g_nand_channel_page_buffer[ch]     多 plane 拼接页缓冲     │
+│    g_nand_channel_page_buffer[ch][ce][lun] 多 plane 拼接缓冲  │
 └──────────────┬──────────────────────────────────────────────┘
                │ nand_fc_start / nand_fc_step（异步非阻塞）
                ▼
@@ -399,10 +399,10 @@ fc_service()
   │     ├─ page write → fc_fill_cw_meta_paa() → fc_data_path_encode()
   │     ├─ raid=ENCODE → fc_stripe_submit()        ← 图 12
   │     ├─ fc_build_dispatch_request() → request：
-  │     │    ├─ 单 plane：cws[0][cw] 顺序填
-  │     │    ├─ multi_plane：按 desc.paa 的 plane 分桶填
-  │     │    ├─ ERASE：只填 cws[0][0].paa, buffer=NULL
-  │     │    └─ SET/GET_FEATURES：buffer = &command->parameter0
+  │     │    ├─ 单 plane：按 command->paa 的 plane 落位填 cws[plane][cw]
+  │     │    ├─ multi_plane：按 desc.paa 的 plane 分桶填 cws[0]/cws[1]
+  │     │    ├─ ERASE：只填 cws[plane][0].paa, buffer=NULL
+  │     │    └─ SET/GET_FEATURES：buffer = &command->parameter0 → cws[plane][0]
   │     └─ nand_dispatch_submit(&request)          ← 入队即返回
   │
   └─ 分支 B：count >= 2 → fc_poll_dispatch_chain()
@@ -2058,14 +2058,14 @@ SET_FEATURES:
 ─────────────
 command->feature_addr ──► request.feature_addr ──► task.feature_addr ──► nand_fc_request_t.column (= 0x01)
 command->parameter[0..3] ──► request.parameter[0..3] ──► task.parameter[0..3]
-                                │ (cw_buffers[0] = &command->parameter0)
+                                │ (cw_buffers[task->plane] = &command->parameter0，feature 无 PAA 故 plane 恒 0)
                                 ▼
                            NAND 从 command->parameter0 读取 4 字节发送至寄存器
 
 GET_FEATURES:
 ─────────────
 command->feature_addr ──► (同上) ──► column (= 0x01)
-                                │ (cw_buffers[0] = &command->parameter0)
+                                │ (cw_buffers[task->plane] = &command->parameter0，plane 恒 0)
                                 ▼
                            NAND 回写 4 字节直接写入 command->parameter[0..3]
                                 │
@@ -2114,7 +2114,8 @@ request.feature_addr = (uint8_t)command->feature_addr;
 else if ((command->config.operation == OP_SET_FEATURES) ||
          (command->config.operation == OP_GET_FEATURES))
 {
-    request.cws[0U].buffer = (uint8_t*)&command->parameter0;
+    /* feature 无 PAA，plane 恒 0（此处保留 plane 维以维持"单 plane 数据恒在 cws[plane][*]"） */
+    request.cws[request->plane].buffer = (uint8_t*)&command->parameter0;
 }
 ```
 
@@ -2133,11 +2134,11 @@ task->feature_addr = request->feature_addr;
 else if ((task->operation == OP_SET_FEATURES) || (task->operation == OP_GET_FEATURES))
 {
     task->request = (nand_fc_request_t){(uint16_t)task->feature_addr, 0U,
-                                        task->cw_buffers[0U], 4U};
+                                        task->cw_buffers[task->plane], 4U};
 }
 ```
 
-> **说明**：此处 cw_buffers[0] 已经通过 `nand_dispatch_submit()` 从 request.cws[0].buffer（即 `&command->parameter0`）拷贝，直接指向 FC Command Pool 中的稳定内存。GET_FEATURES 的回写数据通过此通道直接写入 command->parameter[0..3]。
+> **说明**：此处 cw_buffers[task->plane] 已经通过 `nand_dispatch_submit()` 从 request.cws[plane].buffer（即 `&command->parameter0`）拷贝，直接指向 FC Command Pool 中的稳定内存。feature 寄存器是 die 级、无 plane 语义，`command->paa` 从不设置，故 plane 恒 0，`cw_buffers[task->plane]` 即 `cw_buffers[0]`。GET_FEATURES 的回写数据通过此通道直接写入 command->parameter[0..3]。
 
 #### 完成路径 — 无需特殊处理
 
@@ -2149,7 +2150,7 @@ else if ((task->operation == OP_SET_FEATURES) || (task->operation == OP_GET_FEAT
 
 **修复方案**：去掉重定向。buffer 始终指向 command->parameter0（FC Command Pool 中的稳定内存）。这要求：
 1. `parameter[0..3]` 从位域改为 `uint8_t`（可取地址）
-2. `nand_dispatch_submit()` 保持 cw_buffers[0] = request.cws[0].buffer（即 `&command->parameter0`）
+2. `nand_dispatch_submit()` 保持 cw_buffers[plane] = request.cws[plane].buffer（即 `&command->parameter0`；feature 无 PAA，plane 恒 0）
 
 ### 14.6 资源节省
 
@@ -2195,11 +2196,11 @@ else if ((task->operation == OP_SET_FEATURES) || (task->operation == OP_GET_FEAT
 
 | Handler | 覆盖的 OP | 行为 |
 |---------|----------|------|
-| `req_program_page` | NORMAL_PROGRAM_PAGE, OTP_DATA_PROGRAM, PROGRAM_PAGE_CACHE | 将各 CW buffer 拼接到 `g_nand_channel_page_buffer[task->ch]`，request.data_length = PAGE_SIZE |
-| `req_read_page` | NORMAL_READ_PAGE, OTP_DATA_READ | 仅 CW0：request = (column=0, row, buffer=cw_buffers[0], length=PAGE_SIZE/4) |
+| `req_program_page` | NORMAL_PROGRAM_PAGE, OTP_DATA_PROGRAM, PROGRAM_PAGE_CACHE | 将各 CW buffer 拼接到 `g_nand_channel_page_buffer[task->ch][task->ce][task->lun]`，request.data_length = PAGE_SIZE |
+| `req_read_page` | NORMAL_READ_PAGE, OTP_DATA_READ | 仅 CW0：request = (column=0, row, buffer=cw_buffers[task->plane], length=PAGE_SIZE/4) |
 | `req_cache_read` | READ_PAGE_CACHE_SEQ/RANDOM/LAST | 一次性读 full page：request = (0, row, page_buffer, PAGE_SIZE) |
 | `req_erase` | ERASE_BLOCK | 纯地址：request = (0, row, NULL, 0) |
-| `req_feature` | SET_FEATURES, GET_FEATURES | column = feature_addr：request = (feature_addr, 0, cw_buffers[0], 4) |
+| `req_feature` | SET_FEATURES, GET_FEATURES | column = feature_addr：request = (feature_addr, 0, cw_buffers[task->plane], 4)（plane 恒 0） |
 | `req_single` | READ_ID, READ_PARAM_PAGE, READ_UNIQUE_ID, READ_STATUS, READ_STATUS_ENH, RANDOM_DATA_READ, RANDOM_DATA_INPUT 等 | 通用固定长度：length 从 `g_nand_operation_map[op].data_length` 读取 |
 | `req_no_data` | RESET, READ_MODE, BLOCK_LOCK, BLOCK_UNLOCK 等 | 无数据传输，纯 row 地址 |
 
@@ -2662,6 +2663,8 @@ MT29F4G08ABADAWP 支持 2 Plane 操作（Multi-Plane READ/PROGRAM/ERASE），但
 
 同时，`nand_command_request_t.row` 为单值 `uint32_t`，Multi-Plane 操作需要发送两组行地址（Plane 0 和 Plane 1），而地址周期中的 plane bit 差异仅在于 BA6。
 
+> **注（Phase E 之后的修订）**：Phase E 引入 `[PLANE_NUM][CW_NUM]` 时，第一维在**单 plane** 命令下仍恒取 `[0]`（"第几组槽位"语义），只有 multi-plane 命令按物理 plane 落位。后续修订把第一维统一为**物理 plane 索引**：新增 `nand_dispatch_request_t.plane` / `nand_dispatch_task_t.plane`，单 plane 命令按 `command->paa` 的 plane 落位到 `cws[plane][*]` / `cw_paa[plane][*]`。本节其余内容（含 `plane_count` 的 `{0, 2}` 语义）为 Phase E 历史记录，未随该修订重写。
+
 ### 17.2 数据维度扩展
 
 #### 方案对比
@@ -2821,8 +2824,12 @@ PROGRAM 和 ERASE 不存在"延迟执行"场景，故不分拆。
 
 ```c
 #define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM)  // 4224 字节
-static uint8_t g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
+uint8_t g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE];
 ```
+
+按 (ch, ce, lun) 各持一块：同一通道的多个 LUN 由 Phase 1 轮流驱动，而 `request.data`
+一旦指向本缓冲就跨多次 poll 存活（program ISSUE 常被 70h 忙轮询挡下，数据已拼好却要
+等下一轮才 DATA_IN）——全通道共用一块会被后驱动的 LUN 覆盖。
 
 单 Plane 操作只用首 `PAGE_SIZE` 字节，多 Plane 操作写入 `PAGE_BUFFER_SIZE` 字节。
 
@@ -2848,10 +2855,10 @@ NAND 读写操作根据输出/输入方式不同，采用中转或直写两种�
 NORMAL_READ_PAGE_WITH_DATA_OUT 利用 NAND 的 `05h-E0h` 随机列读能力实现无中转的 CW 级读取：
 
 ```
-第1步: 00h-addr-30h → DATA_OUT(528B, CW0) → 直接送入 cw_buffers[0][0]
-第2步: 05h-col(528)-E0h → DATA_OUT(528B, CW1) → 直接送入 cw_buffers[0][1]
-第3步: 05h-col(1056)-E0h → DATA_OUT(528B, CW2) → 直接送入 cw_buffers[0][2]
-第4步: 05h-col(1584)-E0h → DATA_OUT(528B, CW3) → 直接送入 cw_buffers[0][3]
+第1步: 00h-addr-30h → DATA_OUT(528B, CW0) → 直接送入 cw_buffers[task->plane][0]
+第2步: 05h-col(528)-E0h → DATA_OUT(528B, CW1) → 直接送入 cw_buffers[task->plane][1]
+第3步: 05h-col(1056)-E0h → DATA_OUT(528B, CW2) → 直接送入 cw_buffers[task->plane][2]
+第4步: 05h-col(1584)-E0h → DATA_OUT(528B, CW3) → 直接送入 cw_buffers[task->plane][3]
 ```
 
 每次 DATA_OUT 只有 528 字节（一个 CW），`req_read_page` 将 `data_length` 设为 `PAGE_SIZE / CW_NUM`，poll 中的 chaining 循环自动将后续 CW 的 operation 改为 `OP_RANDOM_DATA_READ`（05h-E0h），逐个 CW 读取到各自 buffer。
@@ -2888,8 +2895,8 @@ NORMAL_PROGRAM_PAGE 虽然也是单页操作，但 NAND 不支持 80h 后逐个 
 | `src/nand/onfi_1_0.c` | 新增 5 组 uop 序列 + 映射表 5 项 |
 | `src/nand/nand_fmc.c` | ROW_0/1/2 handler 通过 `uop->operand` 索引 `row[]` |
 | `src/nand/nand_mt29f4g08abadawp.c` | 默认读接口改为 `WITH_DATA_OUT` 版本 |
-| `include/nand/nand_dispatch.h` | `cws[CW_NUM]` → `cws[PLANE_NUM][CW_NUM]`；`cw_status[4]` → `[CW_TOTAL_MAX]`；新增 `plane_count` |
-| `src/nand/nand_dispatch_internal.h` | `cw_paa/buffers[CW_NUM]` → `[PLANE_NUM][CW_NUM]`；新增 `plane_count` |
+| `include/nand/nand_dispatch.h` | `cws[CW_NUM]` → `cws[PLANE_NUM][CW_NUM]`；`cw_status[4]` → `[CW_TOTAL_MAX]`；新增 `plane_count`（后续修订另加 `plane`，见 §17.1 注） |
+| `src/nand/nand_dispatch_internal.h` | `cw_paa/buffers[CW_NUM]` → `[PLANE_NUM][CW_NUM]`；新增 `plane_count`（后续修订另加 `plane`） |
 | `src/nand/nand_dispatch.c` | `page_buffer` 尺寸扩展；`nand_dispatch_task_load()` 适配双 plane 拷贝；`completion_init` 适配 `CW_TOTAL_MAX`；CW chaining 条件增加 `WITHOUT_DATA_OUT` |
 | `src/nand/nand_dispatch_tables.c` | 新增 5 个 req handler + completion handler + 两张函数指针表各加 5 项 |
 | `src/fc/fc.c` | `cws[plane][cw]` 适配新维度 |
@@ -2964,7 +2971,7 @@ STM32H743 FMC 总线（单条并行总线）
 // nand_dispatch.c — 各维度数组
 static nand_channel_queue_t       g_nand_channel_queues[CH_NUM];
 static nand_dispatch_lun_chain_t  g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
-static uint8_t                    g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE];
+static uint8_t                    g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE];
 
 // fc_scheduler.c — per-LUN busy 表
 uint8_t busy[CH_NUM][CE_NUM][LUN_NUM];
@@ -3185,6 +3192,7 @@ LUN 1:                                                   ← FETCH(Dout)
 | v2 | 展平后丢失 plane 语义，`cw_count` 意义模糊 | 加 plane 维度 `cw_paa[PLANE_NUM][CW_NUM]` |
 | v3 | ROW_0/1/2 handler 固定读 `request->row`，多 plane 发第二组地址需新 uop | `row`→`row[NAND_PLANE_MAX]`，operand 选索引 |
 | v4 | 读命令只有一种：30h 后必出数据 | 拆为 WITH/WITHOUT_DATA_OUT 双版本 |
+| v5 | 第一维单 plane 恒 `[0]`，名不副实（"槽位"vs"plane 索引"），单 plane 打 plane 1 时依赖无断言守卫的隐式约定 | 第一维统一为物理 plane 索引：新增 `plane` 字段贯穿 request→task，单 plane 命令落位 `cws[plane][*]`；`plane_count` 语义不变 |
 
 ---
 
@@ -3396,7 +3404,7 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
 - **行业**：控制器内部 SRAM 页缓冲 + 硬件页拼接（multi-plane 数据自动拼接）。
 - **硬件限制**：FMC 是并行总线，无 NAND 控制器页缓冲硬件。
 - **无奈选择**：软件 `g_nand_channel_page_buffer`（noncacheable 段）+ req_* handler 手动拼接/拆页（见 §17.7a）。
-- **代价**：多 plane 数据要 CPU memcpy 拼接/拆回；占用 SRAM（4224B/通道）。
+- **代价**：多 plane 数据要 CPU memcpy 拼接/拆回；占用 SRAM（4224B/(通道×CE×LUN)）。
 
 ### 21.4 汇总：哪些是"不可逾越"的硬件限制
 
@@ -3583,7 +3591,7 @@ nand_init()
   │         pair_op → OP_READ_PAGE_FETCH → nand_fc_start
   ▼
 [engine]   WAIT_READY + 70h 轮询（图 7）+ DATA_OUT（PIO/DMA）+ CHECK_FAIL
-  │         scatter_page_buffer：把通道页缓冲拆回各 CW buffer
+  │         scatter_page_buffer：把页缓冲拆回各 CW buffer
   ▼
 [FC]       nand_dispatch_poll 返回 completion → fc_complete_from_nand（图 13）
   │         写 cw_status/ecc_bits 回 desc；fc_data_path_process_read（解扰 / ECC / RAID，图 5）
@@ -3720,7 +3728,7 @@ fc_scheduler_select_chain(&sched_chain)
 | 8 | `nand_engine_start/step` | UOP 解释：00h / addr / 30h / CONFIRM → END |
 | 9 | Phase 1 `phase1_lun` → ISSUED → `issued_advance` | 等 tR 到点，`pair_op` 切 FETCH |
 | 10 | `nand_fc_start`（FETCH）→ `nand_engine_step` | WAIT_READY + 70h 轮询 + DATA_OUT + CHECK_FAIL |
-| 11 | `scatter_page_buffer` | 通道页缓冲拆回各 CW buffer |
+| 11 | `scatter_page_buffer` | 页缓冲拆回各 CW buffer |
 | 12 | 返回 completion → `fc_complete_from_nand` | 写 cw_status/ecc_bits 回 desc；`fc_data_path_process_read` 解扰/ECC/RAID |
 | 13 | `fc_complete_internal` | CQ push；状态 COMPLETED |
 | 14 | `completion_table_drain` → `fc_poll_completion` → FTL 回调 | FTL 拿到数据 |

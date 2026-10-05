@@ -64,9 +64,12 @@ static uint8_t g_nand_device_ready;
  * 链式命令：count=N，tasks[0..N-1] 预加载，poll 从 cursor=0 推进到 N-1。
  * count 双语义：既是链深又是"LUN 忙"标志（count!=0 即忙）。 */
 static nand_dispatch_lun_chain_t g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
-/* 通道页缓冲：置于 noncacheable_buffer 段（DMA/FMC 直访，D-Cache 关闭）。
- * 多 plane 时拼接双页（plane stride = PAGE_SIZE），poll 三处 memcpy 拆页依赖它。 */
-uint8_t g_nand_channel_page_buffer[CH_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
+/* 页缓冲：置于 noncacheable_buffer 段（DMA/FMC 直访，D-Cache 关闭）。
+ * 按 (ch, ce, lun) 各持一块——同通道各 LUN 由 Phase 1 轮流驱动，且 request.data
+ * 指针会跨多次 poll 存活（如 program ISSUE 卡在 70h 忙轮询），共享一块会被后驱动的
+ * LUN 覆盖（详见 nand_dispatch_tables.c 顶部注释）。
+ * 多 plane 时拼接双页（plane stride = PAGE_SIZE），scatter 拆页依赖它。 */
+uint8_t g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
 
 /* ======================================================================
  * 辅助函数
@@ -125,12 +128,14 @@ static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t resu
  *     - Phase V：绑定 per-LUN backend，并一次性绑定引擎上下文三指针——
  *       backend/request/completion 随 transaction 固定（指向 transaction 自己的
  *       存储，地址不变），nand_engine_start 只收 uops/timing。
- *     - 双层数组 cw_paa/cw_buffers[plane][cw] 按 request->cws 逐 CW 搬运；
- *       plane 下标写死 0/1（双 plane 上限）。
+ *     - 双层数组 cw_paa/cw_buffers[plane][cw] 按 request->cws 逐 plane 逐 CW 搬运，
+ *       plane 维恒为物理 plane 索引（不再写死 0/1）。plane 字段必须无条件赋值——
+ *       task slot 会被链内后续命令复用，本函数不做整体 memset。
  * -------------------------------------------------------------------- */
 static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispatch_request_t *request)
 {
     uint8_t cw;
+    uint8_t plane;
 
     nand_dispatch_completion_init(&task->completion, request->command_id);
     task->command_id                    = request->command_id;
@@ -142,6 +147,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->cw_index                      = 0U;
     task->cw_count                      = request->cw_count;
     task->plane_count                   = request->plane_count;
+    task->plane                         = request->plane;
     task->started                       = 0U;
     task->parameter[0]                  = request->parameter[0];
     task->parameter[1]                  = request->parameter[1];
@@ -153,12 +159,26 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->transaction.engine.backend    = task->backend;
     task->transaction.engine.request    = &task->transaction.request;
     task->transaction.engine.completion = &task->transaction.completion;
-    for (cw = 0U; cw < request->cw_count; cw++)
+    /* 无条件照拷 PLANE_NUM 行：request 已 {0} 初始化，FC 只填有效行（单 plane 填
+     * cws[plane][*]，multi-plane 填 cws[0]/cws[1]），未写行确定性为零（PAA=0 / buffer=NULL）。
+     * 不能按 plane_count 循环——单 plane 的 plane_count == 0，会拷 0 行。 */
+    for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        task->cw_paa[0][cw]     = request->cws[0][cw].paa;
-        task->cw_buffers[0][cw] = request->cws[0][cw].buffer;
-        task->cw_paa[1][cw]     = request->cws[1][cw].paa;
-        task->cw_buffers[1][cw] = request->cws[1][cw].buffer;
+        for (cw = 0U; cw < request->cw_count; cw++)
+        {
+            task->cw_paa[plane][cw]     = request->cws[plane][cw].paa;
+            task->cw_buffers[plane][cw] = request->cws[plane][cw].buffer;
+        }
+    }
+    /* 单 plane 命令的有效行必须确实属于 plane 字段指向的 plane——producer（FC 按
+     * command->paa 落位）与 consumer（req_* 读 cw_paa[task->plane][*]）错位时立即断言，
+     * 而不是静默读到全零行、把行地址算成 0 去误操作 plane0/block0/page0。
+     * 排除无 PAA 语义的命令：SET/GET_FEATURES 只填 buffer 不填 paa（cws[plane][0].paa 恒 0），
+     * 本检查不适用。 */
+    if ((request->plane_count == 0U) && (request->cw_count > 0U) && (request->operation != OP_SET_FEATURES) &&
+        (request->operation != OP_GET_FEATURES))
+    {
+        ASSERT(paa_to_plane(request->cws[request->plane][0U].paa) == request->plane);
     }
 }
 
@@ -625,8 +645,8 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
         task->operation = OP_RANDOM_DATA_READ; /* 链中后续 CW 统一改用随机读 */
         task->started   = 1U;                  /* 复用 start 路径但标记已启动 */
         {
-            nand_paa_t cw_paa    = task->cw_paa[0][task->cw_index];
-            uint8_t   *cw_buffer = task->cw_buffers[0][task->cw_index];
+            nand_paa_t cw_paa    = task->cw_paa[task->plane][task->cw_index];
+            uint8_t   *cw_buffer = task->cw_buffers[task->plane][task->cw_index];
             /* 列地址 = CW 偏移 × 528B（PAGE_SIZE/4，页缓冲按 CW 等分，4=CW_NUM） */
             uint16_t cw_column   = (uint16_t)(task->cw_index * (PAGE_SIZE / 4U));
             task->request        = (nand_fc_request_t){.column = cw_column, .row = {paa_to_nand_row(cw_paa)}, .data = cw_buffer, .data_length = (uint16_t)(PAGE_SIZE / 4U)};
@@ -646,28 +666,28 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
 
 /* --------------------------------------------------------------------
  * nand_dispatch_scatter_page_buffer
- *   功能：把通道页缓冲的整页数据拆回各 CW buffer。
- *   参数：task —— 已完成任务；channel —— 通道号（定位页缓冲）。
+ *   功能：把页缓冲的整页数据拆回各 CW buffer。
+ *   参数：task —— 已完成任务（自带 ch/ce/lun，定位页缓冲）。
  *   返回：无。
- *   实现要点：三种操作的数据落在通道页缓冲而非各 CW buffer（FMC 数据路径约定）：
+ *   实现要点：三种操作的数据落在页缓冲而非各 CW buffer（FMC 数据路径约定）：
  *     - Cache 读（SEQ/RANDOM/LAST）与 OP_READ_PAGE_FETCH：单 plane，
  *       offset = cw × (PAGE_SIZE/CW_NUM)。
  *     - Multi-Plane WITH_DATA_OUT：双 plane 数据按 plane 顺序拼接，
  *       offset = plane × PAGE_SIZE + cw × (PAGE_SIZE/CW_NUM)。
+ *     页缓冲按 (ch, ce, lun) 各持一块，故索引一律取自 task 自身。
  * -------------------------------------------------------------------- */
-static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task, uint8_t channel)
+static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
 {
-    uint8_t cw;
-    uint8_t plane;
+    uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
+    uint8_t  cw;
+    uint8_t  plane;
 
     if ((task->operation == OP_READ_PAGE_CACHE_SEQ) || (task->operation == OP_READ_PAGE_CACHE_RANDOM) ||
         (task->operation == OP_READ_PAGE_CACHE_LAST) || (task->operation == OP_READ_PAGE_FETCH))
     {
         for (cw = 0U; cw < task->cw_count; cw++)
         {
-            memcpy(task->cw_buffers[0][cw],
-                   &g_nand_channel_page_buffer[channel][cw * (PAGE_SIZE / 4U)],
-                   PAGE_SIZE / 4U);
+            memcpy(task->cw_buffers[task->plane][cw], &page_buffer[cw * (PAGE_SIZE / 4U)], PAGE_SIZE / 4U);
         }
     }
 
@@ -677,7 +697,7 @@ static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task, 
         {
             for (cw = 0U; cw < task->cw_count; cw++)
             {
-                uint8_t *src = &g_nand_channel_page_buffer[channel][plane * PAGE_SIZE + cw * (PAGE_SIZE / CW_NUM)];
+                uint8_t *src = &page_buffer[plane * PAGE_SIZE + cw * (PAGE_SIZE / CW_NUM)];
                 memcpy(task->cw_buffers[plane][cw], src, PAGE_SIZE / CW_NUM);
             }
         }
@@ -773,7 +793,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_phase1_lun(nand_dispatch_lun_ct
             break;
         }
 
-        nand_dispatch_scatter_page_buffer(task, ctx->channel);
+        nand_dispatch_scatter_page_buffer(task);
 
         if ((uint8_t)(ctx->chain->cursor + 1U) < ctx->chain->count)
         {

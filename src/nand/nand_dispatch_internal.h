@@ -34,17 +34,26 @@ typedef struct
     uint8_t  cw_count;    /* CW count per plane. */
     uint8_t  plane_count; /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
                            * 见 nand_dispatch.h 同名字段的完整说明。 */
+    uint8_t plane;        /* 本命令目标物理 plane 索引（cw_paa/cw_buffers 第一维的语义）。
+                           * 单 plane：= request->plane，所有单 plane req_* handler / cw_chain /
+                           *   scatter 一律读 cw_paa[plane][*] / cw_buffers[plane][*]。
+                           * multi-plane：恒 0；multi-plane handler 不读本字段，仍写死 [0]/[1]。
+                           * ⚠ 必须无条件赋值：task slot 会被链内后续命令复用（task_load 不做整体
+                           *   memset），漏赋值会读到上一条命令的残值。 */
     uint8_t started;      /* 0=未启动；1=已 nand_fc_start（含 start 内同步完成） */
     uint8_t parameter[4];
     uint8_t feature_addr;
 
-    /* Pre-resolved per-CW per-plane data. cw_count × plane_count entries valid.
+    /* Pre-resolved per-CW data. 第一维 = 物理 plane 索引（不是"第几组槽位"）。
      * 定容数组：容量 = PLANE_NUM×CW_NUM = 2×4，实际有效条数由 cw_count / plane_count
      * 给出——本项目无动态内存，一律按硬件上限预留。
-     * 单 plane 命令时 plane 1 整行是确定性零值：FC 侧 fc_build_dispatch_request() 先
-     * *request = {0} 再只填 cws[0][*]，而 task_load 无条件照拷两个 plane，故
-     * cw_paa[1][*] == 0 / cw_buffers[1][*] == NULL，不是未初始化内存。
-     * 只有 multi-plane handler 读 [1][*]，而它们只在 plane_count == PLANE_NUM 时被选中。 */
+     * 单 plane 命令只填 cw_paa[plane][*] / cw_buffers[plane][*]；其余行是确定性零值：
+     * FC 侧 fc_build_dispatch_request() 先 *request = {0} 再按 plane 落位，而 task_load
+     * 无条件照拷全部 PLANE_NUM 行，故非目标行的 cw_paa == 0 / cw_buffers == NULL，
+     * 不是未初始化内存。multi-plane 命令两行都有效（plane 恒 0，uop 硬编码 row[0]/row[1]）。
+     * ⚠ 不要与 nand_dispatch_completion_t.cw_status[] 的索引混同：后者是**desc 链序号**
+     *   （plane-major，由 fc.c 的 plane = index/CW_NUM 保证），与这里的物理 plane 索引
+     *   是两套独立坐标。单 plane 打 plane 1 时二者概念分叉（值上仍是 0..cw_count-1）。 */
     nand_paa_t cw_paa[PLANE_NUM][CW_NUM];
     uint8_t   *cw_buffers[PLANE_NUM][CW_NUM];
 

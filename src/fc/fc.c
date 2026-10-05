@@ -1047,6 +1047,7 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     mp_req.ce          = (uint8_t)data_cmd->config.ce;
     mp_req.lun         = (uint8_t)data_cmd->config.lun;
     mp_req.plane_count = PLANE_NUM;
+    mp_req.plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
     mp_req.cw_count    = cw_count;
     mp_req.page_type   = (uint8_t)data_cmd->config.page_type;
 
@@ -1193,11 +1194,16 @@ static void fc_fill_cw_meta_paa(fc_t *controller, fc_command_t *command)
  *   实现要点：
  *     - 填 ch/ce/lun/page_type/parameter/feature_addr，再按操作类型
  *       填 cw_count 与 cws[][]：
- *         * ERASE_BLOCK：单 cws[0][0]，无 buffer；
+ *         * ERASE_BLOCK：单 cws[plane][0]（plane = paa_to_plane(command->paa)），无 buffer；
  *         * ERASE_BLOCK_MULTI_PLANE：两 plane 各一个 cws，无 buffer；
- *         * SET/GET_FEATURES：cws[0][0].buffer 指向内联 parameter0；
- *         * 其余带数据命令：沿 desc 链填 cws[plane][cw]（multi_plane>0
- *           时按 PAA 的 plane/cw 落位，否则单 plane 顺序填）。
+ *         * SET/GET_FEATURES：cws[plane][0].buffer 指向内联 parameter0（plane 恒 0，
+ *           feature 寄存器是 die 级、无 plane 语义）；
+ *         * 其余带数据命令：沿 desc 链填 cws[plane][cw]（multi_plane>0 时按 PAA 的
+ *           plane/cw 落位，否则单 plane 按 command->paa 的 plane 落位）。
+ *     - **cws 第一维恒为物理 plane 索引**（不是"第几组槽位"）：单 plane 命令只填
+ *       cws[request->plane][*]，multi-plane 填 cws[0][*]/cws[1][*]（request->plane 恒 0）。
+ *       未写的行由上面的 {0} 初始化保证为确定性零值。行地址始终由 paa_to_nand_row()
+ *       从 PAA 值算出，与数组下标无关——故本次落位规则是行为中性的。
  *     - page read/write 用 CW 基址（ECC 处理完整 528B），非 page 用 USER 区。
  *     - 末尾做 Phase V splittable → ISSUE 转换（仅 LUN_NUM>1）。
  *   注意：本函数不做 META/PAA 预填——那是单命令路径独有的步骤，
@@ -1236,12 +1242,16 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
 
     if (command->config.operation == OP_ERASE_BLOCK)
     {
-        request->cws[0U][0U].paa    = command->paa;
-        request->cws[0U][0U].buffer = NULL;
+        /* 单 plane 擦除：目标 plane 取自 command->paa（本分支无 desc 可用）。
+         * 行地址由 paa_to_nand_row() 从 PAA 值算出，与数组下标无关。 */
+        request->plane                          = (uint8_t)paa_to_plane(command->paa);
+        request->cws[request->plane][0U].paa    = command->paa;
+        request->cws[request->plane][0U].buffer = NULL;
     }
     else if (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)
     {
         request->plane_count        = PLANE_NUM;
+        request->plane              = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
         request->cw_count           = 1U;
         request->cws[0U][0U].paa    = paa_make(paa_to_page(command->paa), 0U, paa_to_block(command->paa), 0U, 0U);
         request->cws[1U][0U].paa    = paa_make(paa_to_page(command->paa), 1U, paa_to_block(command->paa), 0U, 0U);
@@ -1251,7 +1261,11 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
     else if ((command->config.operation == OP_SET_FEATURES) ||
              (command->config.operation == OP_GET_FEATURES))
     {
-        request->cws[0U][0U].buffer = (uint8_t *)&command->parameter0;
+        /* Feature 寄存器是 die 级、无 plane 语义，command->paa 从不设置（fc_command_alloc_internal
+         * 做 (fc_command_t){0}），故 plane 恒 0。仍按 plane 落位，以保住"单 plane 数据恒在
+         * cws[request->plane][*]"这条无例外的规则。 */
+        request->plane                          = (uint8_t)paa_to_plane(command->paa);
+        request->cws[request->plane][0U].buffer = (uint8_t *)&command->parameter0;
     }
     else if (request->cw_count > 0U)
     {
@@ -1287,20 +1301,27 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
                 desc_id = (fc_descriptor_id_t)descriptor->next_id;
             }
             request->plane_count = (uint8_t)command->config.multi_plane;
+            request->plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
         }
         else
         {
-            /* Single-plane: existing path */
+            /* Single-plane：目标 plane 取自 command->paa，数据落位 cws[plane][*]（不再恒为 [0]）。
+             * 不变式：本命令所有 desc 的 plane 位相同——fc_command_configure_descriptor_internal()
+             * 单 plane 分支只改 CW 位（descriptor->paa = (command->paa & ~CW_MASK) | cw），保留
+             * plane 位，故一次取值即对全部 desc 成立；下面的 ASSERT 把该不变式显式化。 */
+            uint8_t plane  = (uint8_t)paa_to_plane(command->paa);
+            request->plane = plane;
             for (cw = 0U; cw < request->cw_count; cw++)
             {
                 /* desc 链长度 = cw_count，循环内 desc_id 始终有效 */
                 ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
                 const fc_descriptor_t *descriptor = &controller->descriptor_pool[desc_id];
+                ASSERT(paa_to_plane(descriptor->paa) == plane);
 
-                request->cws[0][cw].paa = descriptor->paa;
+                request->cws[plane][cw].paa = descriptor->paa;
                 if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
                 {
-                    request->cws[0][cw].buffer =
+                    request->cws[plane][cw].buffer =
                         (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
                                 (fc_is_page_write((uint8_t)command->config.operation) != 0U)
                             ? fc_buffer_get_base(descriptor->buffer_id)
@@ -1308,7 +1329,7 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
                 }
                 else
                 {
-                    request->cws[0][cw].buffer = NULL;
+                    request->cws[plane][cw].buffer = NULL;
                 }
                 desc_id = (fc_descriptor_id_t)descriptor->next_id;
             }

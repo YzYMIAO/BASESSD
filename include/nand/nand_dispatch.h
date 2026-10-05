@@ -41,11 +41,19 @@ typedef struct
                                                      * ⚠ 原注释写 "1 = single" 与实现不符。
                                                      * ⚠ 当前 NAND 层只有 nand_dispatch_scatter_page_buffer() 读它；
                                                      *   multi-plane handler 一律写死 PLANE_NUM 遍历，见 nand_dispatch_tables.c。 */
+    uint8_t plane;                                  /* 本命令目标物理 plane 索引（cws 第一维的语义）。
+                                                     * 单 plane：= paa_to_plane(command->paa)，有效数据行恒在 cws[plane][*]。
+                                                     * multi-plane：恒 0 —— 多 plane uop 硬编码 row[0]/row[1]
+                                                     *   （onfi_1_0.c），plane 维从 0 起。
+                                                     * 行为中性：行地址始终由 paa_to_nand_row() 从 PAA 值算出，与下标无关。 */
     uint8_t                 page_type : 2;          /* LP/MP/UP/TP — LDPC engine needs this for decode threshold. */
     uint8_t                 reserved  : 6;          /* Reserved for future data-path bits. */
     uint8_t                 parameter[4];           /* ≤4-byte inline parameter data. */
     uint8_t                 feature_addr;           /* Feature register addr for SET/GET_FEATURES (column). */
-    nand_dispatch_cw_info_t cws[PLANE_NUM][CW_NUM]; /* Pre-resolved per-CW per-plane data. */
+    nand_dispatch_cw_info_t cws[PLANE_NUM][CW_NUM]; /* Pre-resolved per-CW data. 第一维 = 物理 plane 索引
+                                                     * （非"第几组槽位"）：单 plane 命令只填 cws[plane][*]，
+                                                     * 其余行由本结构整体 {0} 初始化保证为确定性零值；
+                                                     * multi-plane 命令填 cws[0][*] 与 cws[1][*]。 */
 } nand_dispatch_request_t;
 
 typedef struct
