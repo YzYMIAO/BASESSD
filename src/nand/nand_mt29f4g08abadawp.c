@@ -412,7 +412,7 @@ nand_result_t nand_fc_erase_block(const nand_fc_request_t *request, nand_fc_comp
  *     Step 6 READ_ID + 厂商 ID 校验
  *     Step 7 Mode 4 切换（CONFIG_NAND_TIMING_MODE_4=0 时整段编掉）
  *   调用链：main.c:320 → nand_init → {HAL_NAND_Init,
- *          nand_fmc_init_instance, nand_fc_reset, nand_fc_read_id}
+ *          nand_fmc_init, nand_fc_reset, nand_fc_read_id}
  *   流程图见 docs/design/fc_nand_design.md §22（图 16）。
  * -------------------------------------------------------------------- */
 uint8_t nand_init(void)
@@ -476,34 +476,21 @@ uint8_t nand_init(void)
                                         MT29F4G08ABADAWP_RB_GPIO_PIN));
 
     {
-        /* ── Step 3: per-[ch][ce][lun] FMC 后端实例 ──
-         * 低速 FMC 后端：数据/命令/地址窗口 = FMC_BASE | 0 / A16 / A17。
-         * Phase V: 同一 FMC 窗口/时序对全部 [CH][CE][LUN] 实例有效，
-         * 循环初始化 per-LUN backend（硬件单 die 时退化为一次调用）。 */
+        /* ── Step 3: FMC 后端实例（单 bank：全 LUN 共享窗口/时序） ──
+         * 数据/命令/地址窗口 = FMC_BASE | 0 / A16 / A17。
+         * FMC 时序寄存器是 bank 级，同 bank 各 LUN 共享窗口与时序，
+         * 故一个后端实例即够——无需按 [CH][CE][LUN] 循环分化。 */
         const nand_fmc_config_t fmc_config = {
             .data    = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
             .command = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_CMD_OFFSET),
             .address = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_ADDR_OFFSET),
             .timing  = g_nand_timing_slow,
         };
-        uint8_t fmc_ch, fmc_ce, fmc_lun;
 
-        for (fmc_ch = 0U; fmc_ch < CH_NUM; fmc_ch++)
+        if (nand_fmc_init(&fmc_config) != NAND_RESULT_OK)
         {
-            for (fmc_ce = 0U; fmc_ce < CE_NUM; fmc_ce++)
-            {
-                for (fmc_lun = 0U; fmc_lun < LUN_NUM; fmc_lun++)
-                {
-                    if (nand_fmc_init_instance(fmc_ch, fmc_ce, fmc_lun, &fmc_config) != NAND_RESULT_OK)
-                    {
-                        LOGE("nand: FMC backend configure failed ch=%u ce=%u lun=%u\r\n",
-                             (unsigned)fmc_ch,
-                             (unsigned)fmc_ce,
-                             (unsigned)fmc_lun);
-                        return NAND_RESULT_OPERATION_FAILED;
-                    }
-                }
-            }
+            LOGE("nand: FMC backend configure failed\r\n");
+            return NAND_RESULT_OPERATION_FAILED;
         }
 
         /* ── Step 4: DMA（CONFIG_NAND_DMA=0 时为 no-op；失败仅回退 PIO）── */
@@ -576,7 +563,7 @@ uint8_t nand_init(void)
         LOGI("nand: FMC timing updated for Mode 4\r\n");
 
         /* 更新 FMC 后端时序，供 UOP handler 使用。
-         * Phase V: 循环更新全部 [CH][CE][LUN] 实例（与低速分支一致）。 */
+         * 单 bank：同一实例直接覆盖（无需按 [CH][CE][LUN] 循环）。 */
         {
             nand_fmc_config_t fast_fmc = {
                 .data    = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
@@ -584,24 +571,11 @@ uint8_t nand_init(void)
                 .address = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_ADDR_OFFSET),
                 .timing  = g_nand_timing_fast,
             };
-            uint8_t fmc_ch2, fmc_ce2, fmc_lun2;
 
-            for (fmc_ch2 = 0U; fmc_ch2 < CH_NUM; fmc_ch2++)
+            if (nand_fmc_init(&fast_fmc) != NAND_RESULT_OK)
             {
-                for (fmc_ce2 = 0U; fmc_ce2 < CE_NUM; fmc_ce2++)
-                {
-                    for (fmc_lun2 = 0U; fmc_lun2 < LUN_NUM; fmc_lun2++)
-                    {
-                        if (nand_fmc_init_instance(fmc_ch2, fmc_ce2, fmc_lun2, &fast_fmc) != NAND_RESULT_OK)
-                        {
-                            LOGE("nand: FMC backend configure (Mode 4) failed ch=%u ce=%u lun=%u\r\n",
-                                 (unsigned)fmc_ch2,
-                                 (unsigned)fmc_ce2,
-                                 (unsigned)fmc_lun2);
-                            return NAND_RESULT_OPERATION_FAILED;
-                        }
-                    }
-                }
+                LOGE("nand: FMC backend configure (Mode 4) failed\r\n");
+                return NAND_RESULT_OPERATION_FAILED;
             }
         }
     }

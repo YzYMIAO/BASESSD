@@ -148,8 +148,8 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->parameter[2] = request->parameter[2];
     task->parameter[3] = request->parameter[3];
     task->feature_addr = request->feature_addr;
-    /* Phase V: 绑定 per-LUN backend + 引擎上下文三指针（地址随事务固定，只在此绑一次） */
-    task->backend                       = nand_fmc_backend_get_ext(request->ch, request->ce, request->lun);
+    /* 绑定 FMC 后端（单 bank 全 LUN 共享）+ 引擎上下文三指针（地址随事务固定，只在此绑一次） */
+    task->backend                       = nand_fmc_backend_get();
     task->transaction.engine.backend    = task->backend;
     task->transaction.engine.request    = &task->transaction.request;
     task->transaction.engine.completion = &task->transaction.completion;

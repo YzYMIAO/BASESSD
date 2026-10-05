@@ -2992,11 +2992,11 @@ DWORD lun : 2;   /* 目标 LUN 号 */
 
 ### 18.3 当前不支持多通道的模块
 
-以下模块在**多通道维度**的现状（FMC 后端已 Phase V 数组化，但仅 (0,0,0) 实例被使用）：
+以下模块在**多通道维度**的现状：
 
 | 模块 | 现状 | 问题 |
 |------|------|------|
-| `nand_fmc.c` — FMC 后端 | ✅ 已数组化 `g_nand_fmc_instances[CH][CE][LUN]` + `nand_fmc_init_instance()`（Phase V） | 仅 (0,0,0) 实例被 `nand_init()` 配置；第二片 NAND 需额外 CE 引脚配置 |
+| `nand_fmc.c` — FMC 后端 | ✅ 单例 `g_nand_fmc_instance` + `nand_fmc_init()`：单 bank 下窗口/时序对全 LUN 一致，一个后端共享 | 多 bank/多通道需 per-通道 base 表 + 各 bank 单独 `HAL_NAND_Init` + MPU 区；第二片 NAND 另需 CE 引脚 |
 | ~~`nand_rb_interrupt.c` — RB 中断~~ | **已移除**：原单 EXTI6（PD6），第二片 NAND 的 RB 引脚没有 EXTI 通道可接 | — |
 | `nand_dma.c` — DMA | 单对 `DMA2_Stream0/1` | 两个通道同时传输时无额外 Stream 可用 |
 | `nand_engine_state_t` — 引擎状态 | 不含 `ch`/`ce`/`lun` 字段 | step 推进时不知道自己在哪个通道上（依赖 transaction 的 backend 透传） |
@@ -3030,8 +3030,8 @@ FMC 总线 (地址/数据/控制线共用)
 
 | 改动项 | 说明 | 工作量 |
 |--------|------|--------|
-| `nand_fmc_config_t` 数组化 | `config[CH_NUM]`，每通道独立 FMC 地址 + CE + RB | ✅ 已完成（Phase V `g_nand_fmc_instances[CH][CE][LUN]`，但仅 (0,0,0) 实例使用） |
-| `nand_engine_backend_t` 数组化 | `backend[CH_NUM]`，每通道独立 handler table | ✅ 已完成（`nand_fmc_init_instance` 每实例一份 backend） |
+| `nand_fmc_config_t` 数组化 | `config[CH_NUM]`，每通道独立 FMC 地址 + CE + RB | ⚠️ 原 `g_nand_fmc_instances[CH][CE][LUN]` 已**移除**：同 bank 各 LUN 窗口/时序同值，N 份拷贝零载荷。多通道需 **per-通道 base 表**（非 N 份同值 config） |
+| `nand_engine_backend_t` 数组化 | `backend[CH_NUM]`，每通道独立 handler table | ⚠️ 已收敛为**单例共享** `g_nand_fmc_instance`（backend 只读，多 LUN 并发共享安全）；多通道需 per-通道 handler/context |
 | ~~`nand_fmc_exec_wait_ready` 多实例~~ | **已不需要**：WAIT_READY 为纯 GPIO 轮询，无中断资源依赖 | — |
 | DMA 资源化 | 每通道独立 DMA Stream 或排队传输 | 中 |
 | `nand_engine_state_t` 加通道 id | step 中知道自己操作的通道 | 小（现依赖 engine.backend 透传） |
@@ -3044,7 +3044,7 @@ FMC 总线 (地址/数据/控制线共用)
 | FC 调度器 + busy 表 | ✅ 代码完整，改 `CH_NUM` 即可 | ❌ 单通道硬件 |
 | dispatch 队列 + chain buffer | ✅ 代码完整 | ❌ 单通道硬件 |
 | dispatch poll 遍历 | ✅ 代码完整 | ❌ 单通道硬件 |
-| FMC 后端 | ✅ 已数组化（仅 (0,0,0) 实例配置） | ❌ 多实例无法（单 NAND） |
+| FMC 后端 | ✅ 单例共享（`g_nand_fmc_instance`，窗口/时序与坐标无关） | ❌ 多 bank 需重构（单 NAND） |
 | RB 中断 | 已移除（单 EXTI6 无法扩展到多 LUN） | — |
 | DMA | ❌ 单对 Stream | ❌ 无法 |
 | 引擎状态机 | ⚠️ 无通道 id，靠 engine.backend 透传 | ⚠️ 单通道可运行 |
@@ -3250,7 +3250,7 @@ HAL_NAND_Init(保守) → RESET/READ_ID/校验 → 跳过 Mode 4 → 完成
 高速模式：
 ```
 HAL_NAND_Init(保守) → RESET/READ_ID/校验 → SET_FEATURES(Mode 4)
-  → nand_fmc_timing_to_pcc(fast) → HAL_NAND_Init(快速) → nand_fmc_init_instance(fast) ×(CH·CE·LUN) → 完成
+  → nand_fmc_timing_to_pcc(fast) → HAL_NAND_Init(快速) → nand_fmc_init(fast) → 完成
   NAND: Mode 4（tRC=20ns）
   FMC:  快速时序
 ```
@@ -3469,7 +3469,7 @@ main() (src/main.c)          fc_init()                  nand_init()             
   ├─ else if nand_init() ─────────────────────────────▶ nand_init(mt29*.c)
   │                              Step1 FMC 句柄 + PCC 时序（Mode 0 保守值）
   │                              Step2 HAL_NAND_Init → MspInit（时钟 / GPIO / NCE）
-  │                              Step3 nand_fmc_init_instance ×(CH·CE·LUN)
+  │                              Step3 nand_fmc_init（单 bank 后端）
   │                              Step4 nand_dma_init（本配置 no-op）
   │                              Step5 nand_fc_reset      ★绕过 dispatch，直连 engine
   │                              Step6 nand_fc_read_id + ID 校验
@@ -3515,7 +3515,7 @@ nand_init()
   │            ├ PD6 = R/B#（上拉输入）
   │            ├ PG9 = FMC NCE（AF12）
   │            └ PD8/11/12/14/15 + PE7/8/9/10 = D0~D7（AF12）
-  ├─ Step3  per-[ch][ce][lun] nand_fmc_init_instance
+  ├─ Step3  nand_fmc_init（单 bank：全 LUN 共享窗口/时序）
   │            └ 绑 FMC 后端句柄（data/cmd/addr 窗口 = FMC_BASE | 0 / A16 / A17）+ handler 表
   ├─ Step4  nand_dma_init（CONFIG_NAND_DMA=0 → no-op；失败仅回退 PIO，非致命）
   ├─ Step5  delay_ms(1) → nand_fc_reset(FFh)      ★经 nand_fc_execute 直连 engine，绕过 dispatch
@@ -3779,7 +3779,7 @@ fc_scheduler_select_chain(&sched_chain)
 | 图 13 | 完成回写与 CQ 组装 | `grep -n "fc_complete_from_nand" src/fc/fc.c` |
 | 图 14 | 上电初始化分层调用时序 | `grep -n "fc_init\|nand_init\|ssd_ftl_boot_all" src/main.c` |
 | 图 15 | FC 控制面资源装配 | `grep -n "controller->command_pool\|controller->sq\|nand_dispatch_init" src/fc/fc.c src/nand/nand_dispatch.c` |
-| 图 16 | NAND 芯片初始化 | `grep -n "HAL_NAND_Init\|nand_fmc_init_instance\|nand_fc_reset\|nand_fc_read_id" src/nand/nand_mt29f4g08abadawp.c` |
+| 图 16 | NAND 芯片初始化 | `grep -n "HAL_NAND_Init\|nand_fmc_init\|nand_fc_reset\|nand_fc_read_id" src/nand/nand_mt29f4g08abadawp.c` |
 | 图 17 | 一条命令的端到端生命周期 | `grep -n "fc_poll_dispatch_single\|nand_dispatch_submit\|fc_complete_from_nand" src/fc/fc.c src/nand/nand_dispatch.c` |
 | 图 18 | 命令生命周期状态机 | `grep -n "FC_COMMAND_STATE_\|fc_command_alloc_internal\|fc_complete_internal" include/fc/fc_internal.h src/fc/fc.c` |
 | 图 19 | fc_service() 单步全景 | `grep -n "fc_poll_internal\|fc_poll_fail_command\|fc_register_queue_state" src/fc/fc.c` |

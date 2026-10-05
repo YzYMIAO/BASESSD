@@ -68,20 +68,19 @@ typedef struct
     nand_fmc_timing_t timing;
 } nand_fmc_config_t;
 
-/* ── 默认 (0,0,0) 后端访问器（同步路径 + NULL 兜底用） ── */
+/* ── 后端访问器（同步路径 + 多 LUN 共享，单 bank 下与坐标无关） ── */
 const nand_engine_backend_t *nand_fmc_backend_get(void);
 
-/* ── Phase V: per-(CH,CE,LUN) 后端实例 ── */
+/* ── FMC 后端实例 ──
+ * 单 bank：数据/命令/地址窗口与时序对全部 LUN 一致（FMC 时序寄存器是
+ * bank 级，同 bank 各 LUN 共享窗口），故无需按 (CH,CE,LUN) 分化，一个即够。 */
 typedef struct
 {
     nand_fmc_config_t     config;
     nand_engine_backend_t backend;
 } nand_fmc_instance_t;
 
-/* ── Phase V 接口（多 LUN 并发用） ── */
-nand_result_t                nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun, const nand_fmc_config_t *config);
-const nand_engine_backend_t *nand_fmc_backend_get_ext(uint8_t ch, uint8_t ce, uint8_t lun);
-
-extern nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM][LUN_NUM];
+/* ── 后端初始化：填唯一实例的 config + handler 表（nand_init 调用） ── */
+nand_result_t nand_fmc_init(const nand_fmc_config_t *config);
 
 #endif /* PLATFORM_STM32H743_NAND_FMC_H */

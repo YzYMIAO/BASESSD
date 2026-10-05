@@ -51,8 +51,8 @@ typedef struct
     /* ── 引擎上下文四件套（Phase V）──
      * 全部随 task slot 常驻，跨多次 poll 调用存活；生产/消费阶段见各字段。 */
 
-    /* per-LUN 后端（handler 表 + context）。
-     * 生产：nand_dispatch_task_load() 按 ch/ce/lun 经 nand_fmc_backend_get_ext() 绑定（唯一写点）。
+    /* FMC 后端（handler 表 + context，单 bank 全 LUN 共享）。
+     * 生产：nand_dispatch_task_load() 经 nand_fmc_backend_get() 绑定（唯一写点）。
      * 消费：同一函数下一行转交 transaction.engine.backend —— task 自身路径此后不再读它；
      *       真正的消费者是引擎（nand_fc_start 判空回退默认后端，nand_engine_start 经
      *       engine->backend 取 handler）。 */

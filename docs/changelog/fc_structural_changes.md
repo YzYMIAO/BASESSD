@@ -1504,3 +1504,48 @@ result = nand_engine_start(&transaction->engine, transaction->backend, map->uops
 - `make format-check`（clang-format-15）通过。
 - 文档自检：图号连续无重复（图 0–22 共 23 张）、头部计数与实际图数一致、附录 A 共 23 行且新增 9 条锚点 `grep` 实测均命中、附录 B 七步顺序与图号一致。
 - **上板回归（待执行）**：`make tests` 烧写 → UART CLI `test` → `ut_run_all()`，确认注释改动无副作用。
+
+---
+
+## Phase Z: FMC 后端单例化 — 去掉假的 per-(CH,CE,LUN) config 分化
+
+**日期**: 2026-10-05
+
+### 背景
+
+Phase V 为"多 LUN 并发各持独立时序/上下文"引入了三维实例数组 `g_nand_fmc_instances[CH][CE][LUN]`、`nand_fmc_init_instance(ch,ce,lun,cfg)` 与 `nand_fmc_backend_get_ext(ch,ce,lun)`。复核发现这套分化**没有载荷**：
+
+1. **窗口指针全坐标同值**：`data/command/address = FMC_BASE | 0 / A16 / A17` 由单一 `MT29F4G08ABADAWP_FMC_BASE_ADDR` 导出，同 bank 各 LUN 共享。
+2. **时序是 bank 级**：FMC 的 `PMEM`/`PATT` 寄存器**每个 bank 一份**，STM32 FMC **没有 per-LUN 时序寄存器**。哪怕真做多 LUN，同 bank 各 LUN 时序也必然相同——这个循环**没有能力**让它们分化。
+3. **backend 是只读共享**：`handlers` 是全实例共用的 const 表，`context` 指向 config（只读，handler 内一律 `const nand_fmc_config_t *`）；每事务可变状态（UOP 游标、超时计数）在 `nand_engine_state_t`，**不在 backend**。故多 LUN **并发**共享一个 backend 也安全——数组并非并发所必需。
+4. `CH_NUM=CE_NUM=LUN_NUM=1` → `[1][1][1]` 字面即"一个"；`extern g_nand_fmc_instances` 被导出但 `src/` 内**无人使用**。
+
+> 注：真上多 bank/多通道时，正确的形状是"**共享 config + per-通道 base 表**"，不是"数组存 N 份同值 config"。本收敛不挡未来扩展。
+
+### 改动
+
+| 文件 | 变更 |
+|------|------|
+| `include/nand/nand_fmc.h` | 删 `extern nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM][LUN_NUM]`；删 `nand_fmc_backend_get_ext(ch,ce,lun)` 声明；`nand_fmc_init_instance(ch,ce,lun,config)` → `nand_fmc_init(config)` |
+| `src/nand/nand_fmc.c` | `g_nand_fmc_instances[CH][CE][LUN]` → `static nand_fmc_instance_t g_nand_fmc_instance`（单例，收为内部链接）；`nand_fmc_backend_get()` 返回单例；`nand_fmc_init()` 填唯一实例；删 `nand_fmc_backend_get_ext()` |
+| `src/nand/nand_mt29f4g08abadawp.c` | Step 3 的 `[CH][CE][LUN]` 三重循环 → 单次 `nand_fmc_init(&fmc_config)`；Mode 4 分支（原 `fmc_ch2/ce2/lun2` 三重循环）同样收敛为单次调用 |
+| `src/nand/nand_dispatch.c` | `nand_dispatch_task_load` 内 `nand_fmc_backend_get_ext(request->ch, request->ce, request->lun)` → `nand_fmc_backend_get()`；注释同步 |
+| `src/nand/nand_dispatch_internal.h` | `task->backend` 字段注释由"per-LUN 后端 / get_ext 绑定"改为"FMC 后端（单 bank 全 LUN 共享）/ backend_get 绑定" |
+| `docs/design/fc_nand_design.md` | §18.3 现状表、§18.5 多通道计划表两行、§18.6 验证结论表、§22 图 16 两处 ASCII 与图 16 grep 锚点、§22 高速路径伪代码：全部改为单例表述 |
+| `docs/design/assertion_guidelines.md` | 跨层入口清单 `nand_fmc_init_instance/backend_get_ext` → `nand_fmc_init/backend_get`；断言表 `nand_fmc.c` 行改为仅 `nand_fmc_init` 的 `config` |
+
+### 设计要点
+
+- **零行为变化**：单例 `g_nand_fmc_instance` 与原 `g_nand_fmc_instances[0][0][0]` 是**同一个后端对象**，`backend_get()` 返回值等价；`context` 仍指向 static 存储期的 config 副本（不是 `nand_init` 的栈上临时量），持久性要求不变。
+- **两个 accessor 合并**：`get()` 与 `get_ext()` 本就返回同一对象（`[0][0][0]`），合并后只剩 `nand_fmc_backend_get()`。
+- **坐标校验不丢**：原 `get_ext` 的 `ch/ce/lun < *_NUM` 断言由 `nand_dispatch_submit`（`nand_dispatch.c:227-229`）覆盖（`task_load` 在其后执行），删之属冗余清理而非卸防护。
+- **dispatch 层照旧按坐标**：`g_nand_dispatch_chains[ch][ce][lun]`、`g_nand_channel_queues[ch]` 存的是**真 per-LUN 状态**（各自的命令链 + 忙标志），必须保留——本次只收敛 FMC 层那个无载荷的假坐标。
+- **命名去"instance"**：`nand_fmc_init_instance` 在单例下"instance"名不副实，改名 `nand_fmc_init`。
+
+### 验证
+
+- `make debug` / `make tests` / `make release`：零告警零错误。
+- `CONFIG_NAND_TIMING_MODE_4=1` 变体（临时打开再还原）：零告警。
+- `make format-check`（clang-format-15）通过。
+- 残留引用核对：`src/`、`include/`、`tests/`、`docs/design/` 内无 `nand_fmc_init_instance`/`nand_fmc_backend_get_ext`/`g_nand_fmc_instances` 残留（`fc_nand_design.md` §18.5 一处为**刻意保留的移除说明**）。
+- **上板回归（待执行）**：`make tests` 烧写 → CLI 冒烟 `info → wr 0 2 → rd 0 2 c → tr 0 → fl → info`。

@@ -44,47 +44,32 @@
  * -------------------------------------------------------------------- */
 static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT];
 
-/* ── Phase V: per-(CH,CE,LUN) 实例数组 ──
- * 每 (通道, 片选, LUN) 一个独立 FMC 后端实例（config + handler 表），
- * 供多 LUN 并发时各 LUN 独立持有自己的时序/上下文。
- * 当前拓扑 CH_NUM=CE_NUM=LUN_NUM=1，实际只用到 [0][0][0]。 */
-nand_fmc_instance_t g_nand_fmc_instances[CH_NUM][CE_NUM][LUN_NUM];
+/* ── FMC 后端实例（单例）──
+ * 数据/命令/地址窗口 + 时序对全部 LUN 一致：FMC 时序寄存器（PMEM/PATT）
+ * 是 bank 级，同 bank 各 LUN 共享窗口，硬件层面无法按 LUN 分化。
+ * backend 只读共享——handlers 是 const 表，context 指向本实例 config；
+ * 每事务可变状态在 nand_engine_state_t，不在 backend，故多 LUN 并发安全。 */
+static nand_fmc_instance_t g_nand_fmc_instance;
 
 /*
- * 默认 (0,0,0) 后端访问器。
- * 同步路径 nand_fc_execute() 与 nand_fc_start() 的 NULL 兜底用它取默认后端；
- * nand_init() 的多实例配置走 nand_fmc_init_instance()，不经此函数。
+ * 后端访问器。
+ * 同步路径 nand_fc_execute()/nand_fc_start() 与 nand_dispatch_task_load()
+ * 都取这唯一后端（单 bank 拓扑下与坐标无关）。
  */
 const nand_engine_backend_t *nand_fmc_backend_get(void)
 {
-    return &g_nand_fmc_instances[0][0][0].backend;
+    return &g_nand_fmc_instance.backend;
 }
 
-nand_result_t nand_fmc_init_instance(uint8_t ch, uint8_t ce, uint8_t lun, const nand_fmc_config_t *config)
+nand_result_t nand_fmc_init(const nand_fmc_config_t *config)
 {
-    nand_fmc_instance_t *inst;
-
-    /* 前置条件由调用者保证（nand_init 的三维循环内恒在界内） */
+    /* 前置条件由调用者保证（nand_init 传入模块内 const config） */
     ASSERT(config != NULL);
-    ASSERT(ch < CH_NUM);
-    ASSERT(ce < CE_NUM);
-    ASSERT(lun < LUN_NUM);
 
-    inst                   = &g_nand_fmc_instances[ch][ce][lun];
-    inst->config           = *config;
-    inst->backend.handlers = g_nand_fmc_handlers;
-    inst->backend.context  = &inst->config; /* context 指向实例内 config 副本，handler 据此转换合法 */
+    g_nand_fmc_instance.config           = *config;
+    g_nand_fmc_instance.backend.handlers = g_nand_fmc_handlers;
+    g_nand_fmc_instance.backend.context  = &g_nand_fmc_instance.config; /* 指向实例内持久副本，handler 据此转换合法 */
     return NAND_RESULT_OK;
-}
-
-const nand_engine_backend_t *nand_fmc_backend_get_ext(uint8_t ch, uint8_t ce, uint8_t lun)
-{
-    /* 前置条件由调用者保证（nand_dispatch_task_load 传入已校验的 request 三维） */
-    ASSERT(ch < CH_NUM);
-    ASSERT(ce < CE_NUM);
-    ASSERT(lun < LUN_NUM);
-
-    return &g_nand_fmc_instances[ch][ce][lun].backend;
 }
 
 /* --------------------------------------------------------------------
