@@ -411,8 +411,8 @@ uint8_t nand_init(void)
     g_nand_handle.Init.EccComputation  = FMC_NAND_ECC_DISABLE;
     g_nand_handle.Init.ECCPageSize     = FMC_NAND_ECC_PAGE_SIZE_512BYTE;
     /* Start with the board-vendor's conservative timings before switching NAND to Mode 4. */
-    g_nand_handle.Init.TCLRSetupTime = 8U;
-    g_nand_handle.Init.TARSetupTime  = 8U;
+    g_nand_handle.Init.TCLRSetupTime   = 8U;
+    g_nand_handle.Init.TARSetupTime    = 8U;
     /*
      * TCLR/TAR 单位是 FMC 内核时钟周期（fmc_ker_ck，见 sys.c PLL2 = 220 MHz，
      * T ≈ 4.55 ns），不是 ns。取值下限由数据手册最小建立时间决定：

@@ -116,7 +116,7 @@ bool storage_wdg_init(const storage_wdg_config_t *config)
         g_storage_wwdg.Init.Counter   = config->wwdg_counter;
         g_storage_wwdg.Init.Window    = config->wwdg_window;
         /* EWI 只用于诊断：回调记录故障，绝不自动 refresh，否则会掩盖主循环死锁。 */
-        g_storage_wwdg.Init.EWIMode = WWDG_EWI_ENABLE;
+        g_storage_wwdg.Init.EWIMode   = WWDG_EWI_ENABLE;
         if (HAL_WWDG_Init(&g_storage_wwdg) != HAL_OK)
         {
             g_storage_wdg_status.iwdg_feeding = false;

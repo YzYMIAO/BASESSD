@@ -607,10 +607,10 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
 
     if (command->config.multi_plane > 0U)
     {
-        uint8_t  plane  = index / CW_NUM;
-        uint8_t  cw_idx = index % CW_NUM;
-        uint32_t blk    = paa_to_block(command->paa);
-        uint32_t pg     = paa_to_page(command->paa);
+        uint8_t  plane        = index / CW_NUM;
+        uint8_t  cw_idx       = index % CW_NUM;
+        uint32_t blk          = paa_to_block(command->paa);
+        uint32_t pg           = paa_to_page(command->paa);
         /* 保留 command->paa 的 LUN 字段（多 LUN 并发必需：desc PAA/META/随机种子/ECC 都依赖它） */
         descriptor->paa       = paa_make(pg, plane, blk, paa_to_lun(command->paa), cw_idx);
         descriptor->config    = command->config;

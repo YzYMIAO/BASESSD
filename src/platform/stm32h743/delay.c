@@ -81,7 +81,7 @@ static delay_status_t delay_systick_us_busy(uint32_t us)
 
 void delay_init(uint32_t core_clock_hz)
 {
-    g_core_clock_hz = delay_resolve_clock(core_clock_hz);
+    g_core_clock_hz     = delay_resolve_clock(core_clock_hz);
     /* CYCCNT follows the Cortex-M7 core clock, not the AHB/SysTick clock. */
     g_dwt_cycles_per_us = HAL_RCC_GetSysClockFreq() / 1000000U;
     g_dwt_initialized   = (g_dwt_cycles_per_us != 0U) && delay_enable_dwt();

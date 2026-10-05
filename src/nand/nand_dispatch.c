@@ -133,21 +133,21 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     uint8_t cw;
 
     nand_dispatch_completion_init(&task->completion, request->command_id);
-    task->command_id   = request->command_id;
-    task->ch           = request->ch;
-    task->ce           = request->ce;
-    task->lun          = request->lun;
-    task->operation    = request->operation;
-    task->page_type    = request->page_type;
-    task->cw_index     = 0U;
-    task->cw_count     = request->cw_count;
-    task->plane_count  = request->plane_count;
-    task->started      = 0U;
-    task->parameter[0] = request->parameter[0];
-    task->parameter[1] = request->parameter[1];
-    task->parameter[2] = request->parameter[2];
-    task->parameter[3] = request->parameter[3];
-    task->feature_addr = request->feature_addr;
+    task->command_id                    = request->command_id;
+    task->ch                            = request->ch;
+    task->ce                            = request->ce;
+    task->lun                           = request->lun;
+    task->operation                     = request->operation;
+    task->page_type                     = request->page_type;
+    task->cw_index                      = 0U;
+    task->cw_count                      = request->cw_count;
+    task->plane_count                   = request->plane_count;
+    task->started                       = 0U;
+    task->parameter[0]                  = request->parameter[0];
+    task->parameter[1]                  = request->parameter[1];
+    task->parameter[2]                  = request->parameter[2];
+    task->parameter[3]                  = request->parameter[3];
+    task->feature_addr                  = request->feature_addr;
     /* 绑定 FMC 后端（单 bank 全 LUN 共享）+ 引擎上下文三指针（地址随事务固定，只在此绑一次） */
     task->backend                       = nand_fmc_backend_get();
     task->transaction.engine.backend    = task->backend;
@@ -628,8 +628,8 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
             nand_paa_t cw_paa    = task->cw_paa[0][task->cw_index];
             uint8_t   *cw_buffer = task->cw_buffers[0][task->cw_index];
             /* 列地址 = CW 偏移 × 528B（PAGE_SIZE/4，页缓冲按 CW 等分，4=CW_NUM） */
-            uint16_t cw_column = (uint16_t)(task->cw_index * (PAGE_SIZE / 4U));
-            task->request      = (nand_fc_request_t){.column = cw_column, .row = {paa_to_nand_row(cw_paa)}, .data = cw_buffer, .data_length = (uint16_t)(PAGE_SIZE / 4U)};
+            uint16_t cw_column   = (uint16_t)(task->cw_index * (PAGE_SIZE / 4U));
+            task->request        = (nand_fc_request_t){.column = cw_column, .row = {paa_to_nand_row(cw_paa)}, .data = cw_buffer, .data_length = (uint16_t)(PAGE_SIZE / 4U)};
         }
         result = nand_fc_start(&task->transaction, task->operation, &task->request);
         if (result == NAND_RESULT_NOT_READY)

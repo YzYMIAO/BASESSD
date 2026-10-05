@@ -450,12 +450,12 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
     [OP_PROGRAM_PAGE_MULTI_PLANE]               = completion_multi_plane,
     [OP_ERASE_BLOCK_MULTI_PLANE]                = completion_multi_plane,
     /* Phase V: ISSUE/WAIT/FETCH completion */
-    [OP_READ_PAGE_LOAD]     = completion_single,
-    [OP_READ_PAGE_FETCH]    = completion_per_cw,
-    [OP_PROGRAM_PAGE_ISSUE] = completion_all_cws,
-    [OP_PROGRAM_PAGE_WAIT]  = completion_all_cws,
-    [OP_ERASE_BLOCK_ISSUE]  = completion_all_cws,
-    [OP_ERASE_BLOCK_WAIT]   = completion_all_cws,
+    [OP_READ_PAGE_LOAD]                         = completion_single,
+    [OP_READ_PAGE_FETCH]                        = completion_per_cw,
+    [OP_PROGRAM_PAGE_ISSUE]                     = completion_all_cws,
+    [OP_PROGRAM_PAGE_WAIT]                      = completion_all_cws,
+    [OP_ERASE_BLOCK_ISSUE]                      = completion_all_cws,
+    [OP_ERASE_BLOCK_WAIT]                       = completion_all_cws,
 };
 
 /* --------------------------------------------------------------------
@@ -507,10 +507,10 @@ const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
     [OP_PROGRAM_PAGE_MULTI_PLANE]               = req_multi_plane_program,
     [OP_ERASE_BLOCK_MULTI_PLANE]                = req_multi_plane_erase,
     /* Phase V: ISSUE/WAIT/FETCH request */
-    [OP_READ_PAGE_LOAD]     = req_read_page,
-    [OP_READ_PAGE_FETCH]    = req_fetch_page,
-    [OP_PROGRAM_PAGE_ISSUE] = req_program_page,
-    [OP_PROGRAM_PAGE_WAIT]  = req_no_data,
-    [OP_ERASE_BLOCK_ISSUE]  = req_erase,
-    [OP_ERASE_BLOCK_WAIT]   = req_no_data,
+    [OP_READ_PAGE_LOAD]                         = req_read_page,
+    [OP_READ_PAGE_FETCH]                        = req_fetch_page,
+    [OP_PROGRAM_PAGE_ISSUE]                     = req_program_page,
+    [OP_PROGRAM_PAGE_WAIT]                      = req_no_data,
+    [OP_ERASE_BLOCK_ISSUE]                      = req_erase,
+    [OP_ERASE_BLOCK_WAIT]                       = req_no_data,
 };

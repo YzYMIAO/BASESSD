@@ -178,7 +178,7 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
         {
             head_id = scheduler->hsq->entries[scheduler->hsq->head];
             /* 队列里只存 fc_command_alloc() 产出的 ID，映射必然成功 */
-            cmd = fc_command_id_to_command(head_id);
+            cmd     = fc_command_id_to_command(head_id);
             ASSERT(cmd != NULL);
             if (fc_scheduler_target_is_busy(scheduler, head_id) == 0U)
             {
@@ -222,7 +222,7 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
     {
         head_id = scheduler->sq->entries[scheduler->sq->head];
         /* 队列里只存 fc_command_alloc() 产出的 ID，映射必然成功 */
-        cmd = fc_command_id_to_command(head_id);
+        cmd     = fc_command_id_to_command(head_id);
         ASSERT(cmd != NULL);
         if (fc_scheduler_target_is_busy(scheduler, head_id))
         {

@@ -64,7 +64,8 @@ AlignOperands: Align
 AlignArrayOfStructures: Right
 # 连续变量声明、赋值、宏和位域进行对齐。
 AlignConsecutiveDeclarations: true
-AlignConsecutiveAssignments: true
+# 赋值跨注释行继续对齐（空行仍断开）：避免静态表里的分段注释打断整表对齐。
+AlignConsecutiveAssignments: AcrossComments
 AlignConsecutiveMacros: true
 AlignConsecutiveBitFields: true
 

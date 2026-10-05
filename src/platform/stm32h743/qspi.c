@@ -45,8 +45,8 @@ uint8_t qspi_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime)
  */
 uint8_t qspi_init(void)
 {
-    g_qspi_handle.Instance            = QUADSPI;                            /* QSPI */
-    g_qspi_handle.Init.ClockPrescaler = 1;                                  /* QPSI分频比，W25Q256最大频率为133M，
+    g_qspi_handle.Instance                = QUADSPI;                        /* QSPI */
+    g_qspi_handle.Init.ClockPrescaler     = 1;                              /* QPSI分频比，W25Q256最大频率为133M，
                                                                              * 所以此处应该为2，QSPI频率就为200/(1+1)=100MHZ
                                                                              */
     g_qspi_handle.Init.FifoThreshold      = 4;                              /* FIFO阈值为4个字节 */

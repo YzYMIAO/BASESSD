@@ -185,9 +185,9 @@ static uint8_t hyperram_memory_mapped(void)
     xspi_hyperbus_cmd_struct.AddressSpace = HAL_XSPI_MEMORY_ADDRESS_SPACE;
     xspi_hyperbus_cmd_struct.AddressWidth = HAL_XSPI_ADDRESS_32_BITS;
     /* Memory-Mapped mode does not use DLR, but HAL requires a legal value. */
-    xspi_hyperbus_cmd_struct.DataLength = 1U;
-    xspi_hyperbus_cmd_struct.DQSMode    = HAL_XSPI_DQS_ENABLE;
-    xspi_hyperbus_cmd_struct.DataMode   = HAL_XSPI_DATA_8_LINES;
+    xspi_hyperbus_cmd_struct.DataLength   = 1U;
+    xspi_hyperbus_cmd_struct.DQSMode      = HAL_XSPI_DQS_ENABLE;
+    xspi_hyperbus_cmd_struct.DataMode     = HAL_XSPI_DATA_8_LINES;
     if (HAL_XSPI_HyperbusCmd(&g_xspi_handle, &xspi_hyperbus_cmd_struct, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
     {
         return FUNC_STATUS_ERROR;

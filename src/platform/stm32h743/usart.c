@@ -140,7 +140,7 @@ static void uart_tx_dma_start_locked(void)
         g_uart_stats.tx_transport_errors++;
         g_tx_transport_fault = 1U;
         /* No tail movement occurred; the TXE fallback drains the retained bytes. */
-        g_tx_dma_ready = 0U;
+        g_tx_dma_ready       = 0U;
         USART_UX->CR1 |= USART_CR1_TXEIE_TXFNFIE;
         __SEV();
         return;
@@ -183,7 +183,7 @@ static void uart_tx_dma_error(DMA_HandleTypeDef *dma_handle)
     g_uart_stats.tx_transport_errors++;
     g_tx_transport_fault = 1U;
     /* The transferred prefix has reached the UART FIFO; TXE sends only the remainder. */
-    g_tx_dma_ready = 0U;
+    g_tx_dma_ready       = 0U;
     USART_UX->CR1 |= USART_CR1_TXEIE_TXFNFIE;
     __SEV();
 }
@@ -919,7 +919,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
         return;
     }
 
-    rcc_periph_clk_init_struct.PeriphClockSelection = RCC_PERIPHCLK_USART1;
+    rcc_periph_clk_init_struct.PeriphClockSelection  = RCC_PERIPHCLK_USART1;
     /* USART1/6 时钟源=PCLK2=100 MHz；UART 波特率由该内核时钟分频得到。 */
     rcc_periph_clk_init_struct.Usart16ClockSelection = RCC_USART16CLKSOURCE_PCLK2;
     (void)HAL_RCCEx_PeriphCLKConfig(&rcc_periph_clk_init_struct);
