@@ -287,11 +287,13 @@ CQ 条目 12 字节，64 条 CQ 共 768 字节。
 **v8（per-LUN FIFO，2026-10-06）**：调度规则改为「填充 pass」——`fc_poll_fill()`（在 `src/fc/fc.c`）
 一次扫描 HSQ/SQ，按 LUN 保序把能放下的命令（含链）提交进 NAND 侧 per-LUN FIFO：
 
-- **HSQ 优先**：先扫 HSQ（HSQ 命令不参与链，逐条），再扫 SQ。
+- **HSQ 优先**：先扫 HSQ，再扫 SQ；两个队列走同一套扫描逻辑（HSQ 同样参与链）。
 - **按 LUN 保序 + room 判定**：命令 `need` = 链长（链头 = 连续 `chain=1` 段长度，否则 1）；
   `nand_dispatch_lun_free(lun) >= need` 才取，否则该 LUN 本轮挂起，后续同 LUN 命令一律跳过。
 - **一次扫描**：按本轮 HSQ/SQ 快照数量扫描，扫完即止；取不走的命令 pop 后回推队尾
   （整轮等价一次旋转，未取出命令的相对顺序不变）。
+- **共享挂起表**：HSQ 挂起某 LUN 后，SQ 本轮也跳过该 LUN——否则同 LUN 的 SQ 命令会插到
+  HSQ 命令之前下发，优先级倒挂。
 
 `fc_scheduler_t` 只剩 `{sq, hsq}`；旧的 per-LUN busy 表（`set/clear_busy`、`target_is_busy`）
 与读饥饿保护（`consecutive_write_count`）已删除——"忙"改由 NAND 侧 `nand_dispatch_lun_free()`
@@ -412,8 +414,9 @@ fc_service()
   │          └─ 无完成（返回 0）→ 继续 ②
   │
   ├─ ② fc_poll_fill(controller)                   ← 一次填充 pass（v8）
-  │     ├─ 快照 HSQ 数 → 扫 HSQ（need=1）→ room 够则 submit，否则该 LUN 挂起
-  │     ├─ 快照 SQ 数  → 扫 SQ（need = 链长）→ room 够则 submit/submit_chain，否则挂起 + 回推
+  │     ├─ 快照 HSQ 数 → 扫 HSQ（need = 链长）→ room 够则 submit/submit_chain，否则挂起 + 回推
+  │     ├─ 快照 SQ 数  → 扫 SQ （need = 链长）→ room 够则 submit/submit_chain，否则挂起 + 回推
+  │     │                （HSQ/SQ 共用同一张挂起表：HSQ 挂起的 LUN，SQ 本轮也跳过）
   │     └─ 两条队列皆空 → QUEUE_EMPTY；无 room → NOT_READY
   │
   ├─ 分支 A：单命令 → fc_poll_dispatch_single()
@@ -2680,12 +2683,14 @@ fc_poll_fill(controller)                ← 一次 pass（v8）
   │
   ├─ 快照 HSQ 数 / SQ 数
   │
-  ├─ 扫 HSQ（快照数，HSQ 不参与链，need = 1）
+  ├─ 扫 HSQ（快照数，HSQ 与 SQ 同一套链逻辑）
+  │    need = fc_poll_chain_length(hsq, head)   // 链头：连续 chain=1 段，≤ CHAIN_MAX(4)
   │    room = nand_dispatch_lun_free(ch,ce,lun)
-  │    room >= 1 → 取出 → submit；否则该 LUN 本轮挂起（同 LUN 后续跳过）
+  │    room >= need → 取出 need 条（链则整条）→ submit / submit_chain
+  │    否则 → 该 LUN 本轮挂起（同 LUN 后续跳过，含 SQ）
   │
   └─ 扫 SQ（快照数）
-       need = fc_poll_chain_length(sq, head)   // 链头：连续 chain=1 段，≤ CHAIN_MAX(4)
+       need = fc_poll_chain_length(sq, head)
        room = nand_dispatch_lun_free(ch,ce,lun)
        room >= need → 取出 need 条（链则整条）→ submit / submit_chain
        否则 → 该 LUN 本轮挂起，命令回推队尾（保序）
@@ -3781,9 +3786,10 @@ dispatch 轮询：lun_step 逐个 LUN 推进（每 LUN 每轮一条）；ISSUED 
 ```text
 fc_poll_fill()   ← 一次填充 pass（快照 HSQ/SQ 数量后各扫一遍）
   │
-  ├─ 先扫 HSQ（快照数）：HSQ 命令不参与链，need = 1
+  ├─ 先扫 HSQ（快照数）：与 SQ 同一套链逻辑（HSQ 同样参与链）
+  │     need = fc_poll_chain_length(hsq, head)   // 链头：连续 chain=1 段，上限 CHAIN_MAX=4
   │     nand_dispatch_lun_free(ch,ce,lun) ≥ need ? → 取出提交
-  │     否则该 LUN 本轮挂起（后续同 LUN 命令跳过）
+  │     否则该 LUN 本轮挂起（后续同 LUN 命令跳过，含 SQ）
   │
   └─ 再扫 SQ（快照数）：
         need = fc_poll_chain_length(sq, head)   // 链头：连续 chain=1 段，上限 CHAIN_MAX=4
@@ -3795,6 +3801,7 @@ fc_poll_fill()   ← 一次填充 pass（快照 HSQ/SQ 数量后各扫一遍）
 ```
 
 要点：**HSQ 优先只体现在扫描顺序**——它不抢已进 FIFO 的命令（FIFO 严格先进先出）；
+HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避免优先级倒挂）；
 "忙"由 `nand_dispatch_lun_free()` 表达，不再有 FC 侧 busy 表；读饥饿保护已删除。
 
 ### 23.8 运行时走读：一条读命令
@@ -3804,7 +3811,7 @@ fc_poll_fill()   ← 一次填充 pass（快照 HSQ/SQ 数量后各扫一遍）
 | 1 | FTL：`fc_command_alloc` → `configure_descriptors` → `fc_submit` | 分配 command/desc/buffer，入 SQ；状态 QUEUED |
 | 2 | `main while(1)` → `ftl_service` → `fc_service` ×≤4 | 主循环驱动 |
 | 3 | `fc_poll_internal` ① `nand_dispatch_poll` | 先推进 NAND（首轮无完成） |
-| 4 | `fc_poll_internal` ② `fc_poll_fill` | 一次扫描 HSQ/SQ，按 LUN room 取命令，need==1 |
+| 4 | `fc_poll_internal` ② `fc_poll_fill` → `fc_poll_fill_queue` | 一次扫描 HSQ/SQ，按 LUN room 取命令，need==1 |
 | 5 | `fc_poll_dispatch_single` → `fc_build_dispatch_request` | 置 ACTIVE；构建 request |
 | 6 | `nand_dispatch_submit` | 门控通过 → `nand_dispatch_enqueue` 追加槽 → `task_load` 绑 backend/buffer |
 | 7 | 下一轮 `nand_dispatch_poll` → `lun_step` → `nand_dispatch_task_start` → `nand_fc_start` | READ_PAGE_LOAD（ISSUE 型）→ phase=ISSUE → 异步 WAIT |

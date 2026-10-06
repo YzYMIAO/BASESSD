@@ -1582,19 +1582,20 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
 
 /* --------------------------------------------------------------------
  * fc_poll_chain_length
- *   功能：计算 SQ 队头命令所属链的长度（链头已弹出，peek 从队头看后续）。
- *   参数：sq —— 普通提交队列（队头已是链头之后的下一条）；head —— 已弹出的链头命令。
+ *   功能：计算队头命令所属链的长度（链头已弹出，peek 从队头看后续）。
+ *   参数：queue —— 提交队列，HSQ/SQ 通用（队头已是链头之后的下一条）；
+ *         head  —— 已弹出的链头命令。
  *   返回：链长（1..FC_SCHEDULER_CHAIN_MAX）。
  *   实现要点：
  *     - head->config.chain == FC_CHAIN_END → 单命令，返回 1。
  *     - 否则 peek 后续，收集同一 (ch,ce,lun) 的连续命令，直到 chain==END 或链满。
- *     - 只 peek 不消耗——真正弹出在 fc_poll_fill 里，链放不下时可原样留在队列。
+ *     - 只 peek 不消耗——真正弹出在 fc_poll_fill_queue 里，链放不下时可原样留在队列。
  * -------------------------------------------------------------------- */
-static uint8_t fc_poll_chain_length(const fc_submission_queue_t *sq, const fc_command_t *head)
+static uint8_t fc_poll_chain_length(const fc_submission_queue_t *queue, const fc_command_t *head)
 {
     uint8_t need = 1U;
 
-    ASSERT(sq != NULL);
+    ASSERT(queue != NULL);
     ASSERT(head != NULL);
 
     if (head->config.chain == FC_CHAIN_END)
@@ -1604,7 +1605,7 @@ static uint8_t fc_poll_chain_length(const fc_submission_queue_t *sq, const fc_co
 
     while (need < FC_SCHEDULER_CHAIN_MAX)
     {
-        fc_command_id_t     next_id = fc_submission_queue_peek(sq, (uint16_t)(need - 1U));
+        fc_command_id_t     next_id = fc_submission_queue_peek(queue, (uint16_t)(need - 1U));
         const fc_command_t *next;
 
         if (next_id == FC_COMMAND_ID_INVALID)
@@ -1628,20 +1629,111 @@ static uint8_t fc_poll_chain_length(const fc_submission_queue_t *sq, const fc_co
 }
 
 /* --------------------------------------------------------------------
+ * fc_poll_fill_queue
+ *   功能：扫描单个提交队列一趟，把能放下的命令（含链）提交进 NAND per-LUN FIFO。
+ *   参数：controller —— FC 控制器；
+ *         queue      —— 待扫描队列（HSQ 或 SQ）；
+ *         suspended  —— 本轮已挂起 LUN 表（HSQ/SQ 共享，见 fc_poll_fill）；
+ *         dispatched —— 累计已提交条数（进出）。
+ *   返回：FC_STATUS_OK / IO_ERROR（提交失败，剩余命令留在队列）。
+ *   实现要点：
+ *     - **按 LUN 保序**：命令 need = 链长；nand_dispatch_lun_free(lun) >= need 才取，
+ *       否则该 LUN 本轮挂起（suspended），后续同 LUN 命令一律跳过。
+ *     - **一次扫描**：按进入时的队列快照数量扫描，扫完即止。
+ *     - **顺序保持**：取不走的命令 pop 后回推队尾——扫完整轮等价于一次旋转，
+ *       未取出命令的相对顺序不变（同 LUN 的命令因 LUN 挂起必然一起回推，顺序不破）。
+ *       链成员连续且逐个回推，链头永远排在成员之前，链序不破。
+ *     - 提交失败即中止本轮，剩余命令仍在队列里（未被取出），下轮重试。
+ * -------------------------------------------------------------------- */
+static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *queue, uint8_t suspended[CH_NUM][CE_NUM][LUN_NUM], uint8_t *dispatched)
+{
+    uint16_t total;
+    uint16_t k;
+
+    ASSERT(queue != NULL);
+    ASSERT(dispatched != NULL);
+
+    total = queue->count;
+
+    for (k = 0U; k < total; k++)
+    {
+        fc_command_id_t      id;
+        fc_command_t        *cmd;
+        fc_scheduler_chain_t chain;
+        fc_status_t          dispatch_status;
+        uint8_t              ch;
+        uint8_t              ce;
+        uint8_t              lun;
+        uint8_t              need;
+        uint8_t              j;
+
+        (void)fc_submission_queue_pop(queue, &id);
+        cmd = fc_command_id_to_command(id);
+        ASSERT(cmd != NULL);
+
+        ch  = (uint8_t)cmd->config.ch;
+        ce  = (uint8_t)cmd->config.ce;
+        lun = (uint8_t)cmd->config.lun;
+        /* 路由字段越界是编程错误：值由 FTL 从 PBA 经 pba_to_ch/ce/lun 灌入，
+         * PBA 已过 pba_is_valid() 校验。此处必须断言而非防御——suspended[] 按
+         * [ch][ce][lun] 直接索引，放行即栈越界写；且越界命令会因
+         * nand_dispatch_lun_free()==0 被永久回推（静默活锁），比当场停机更难定位。 */
+        ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
+        if (suspended[ch][ce][lun] != 0U)
+        {
+            (void)fc_submission_queue_push(queue, id);
+            continue;
+        }
+
+        need = fc_poll_chain_length(queue, cmd);
+        if (nand_dispatch_lun_free(ch, ce, lun) < need)
+        {
+            /* 剩余槽放不下整条链：本轮挂起该 LUN，链头回推（成员后续轮次一并回推） */
+            suspended[ch][ce][lun] = 1U;
+            (void)fc_submission_queue_push(queue, id);
+            continue;
+        }
+
+        chain.count   = need;
+        chain.ids[0U] = id;
+        for (j = 1U; j < need; j++)
+        {
+            (void)fc_submission_queue_pop(queue, &chain.ids[j]);
+        }
+        k = (uint16_t)(k + need - 1U); /* 跳过已取出的链成员 */
+
+        /* 单命令走 single，链走 chain——按 need 分流（不写成条件里的三目，
+         * 两个分支都是带副作用的提交，塞进 if 里读不出"做了什么事"） */
+        if (need == 1U)
+        {
+            dispatch_status = fc_poll_dispatch_single(controller, &chain);
+        }
+        else
+        {
+            dispatch_status = fc_poll_dispatch_chain(controller, &chain);
+        }
+
+        if (dispatch_status != FC_STATUS_OK)
+        {
+            return FC_STATUS_IO_ERROR;
+        }
+        (*dispatched)++;
+    }
+
+    return FC_STATUS_OK;
+}
+
+/* --------------------------------------------------------------------
  * fc_poll_fill
  *   功能：一次填充 pass——扫描 HSQ/SQ，把可下发的命令（含链）提交进 NAND per-LUN FIFO。
  *   参数：controller —— FC 控制器。
  *   返回：FC_STATUS_OK（本轮至少提交了一条）/ IO_ERROR（提交失败，剩余命令留在队列）/
  *         QUEUE_EMPTY / NOT_READY（无可提交，供 ftl_service 结束本轮 fc_service 循环）。
  *   实现要点：
- *     - **HSQ 优先**：先扫 HSQ（HSQ 命令不参与链，逐条），再扫 SQ。
- *     - **按 LUN 保序**：命令 need = 链长；nand_dispatch_lun_free(lun) >= need 才取，
- *       否则该 LUN 本轮挂起（suspended），后续同 LUN 命令一律跳过。
- *     - **一次扫描**：按本轮快照数量扫描（HSQ/SQ 各一份），扫完即止。
- *     - **顺序保持**：取不走的命令 pop 后回推队尾——扫完整轮等价于一次旋转，
- *       未取出命令的相对顺序不变（同 LUN 的命令因 LUN 挂起必然一起回推，顺序不破）。
- *       链成员连续且逐个回推，链头永远排在成员之前，链序不破。
- *     - 提交失败即中止本轮，剩余命令仍在队列里（未被取出），下轮重试。
+ *     - **HSQ 优先**：先扫 HSQ，再扫 SQ；两个队列走同一套扫描逻辑（含链）。
+ *     - **共享 suspended**：HSQ 因 room 不足挂起某 LUN 后，SQ 本轮也跳过该 LUN——
+ *       否则同 LUN 的 SQ 命令会插到 HSQ 命令之前下发，优先级倒挂。
+ *     - 扫描细节见 fc_poll_fill_queue()。
  * -------------------------------------------------------------------- */
 static fc_status_t fc_poll_fill(fc_t *controller)
 {
@@ -1651,116 +1743,14 @@ static fc_status_t fc_poll_fill(fc_t *controller)
 
     memset(suspended, 0, sizeof(suspended));
 
-    /* ── HSQ 优先：HSQ 命令不参与链，逐条下发 ── */
+    /* ── HSQ 优先：先扫 HSQ，再扫 SQ；同一套扫描逻辑，共享同一张 suspended 表 ── */
+    if (fc_poll_fill_queue(controller, scheduler->hsq, suspended, &dispatched) != FC_STATUS_OK)
     {
-        uint16_t total = scheduler->hsq->count;
-        uint16_t k;
-
-        for (k = 0U; k < total; k++)
-        {
-            fc_command_id_t      id;
-            fc_command_t        *cmd;
-            fc_scheduler_chain_t chain;
-            uint8_t              ch;
-            uint8_t              ce;
-            uint8_t              lun;
-
-            (void)fc_submission_queue_pop(scheduler->hsq, &id);
-            cmd = fc_command_id_to_command(id);
-            ASSERT(cmd != NULL);
-
-            ch  = (uint8_t)cmd->config.ch;
-            ce  = (uint8_t)cmd->config.ce;
-            lun = (uint8_t)cmd->config.lun;
-            /* 路由字段越界是编程错误：值由 FTL 从 PBA 经 pba_to_ch/ce/lun 灌入，
-             * PBA 已过 pba_is_valid() 校验。此处必须断言而非防御——suspended[] 按
-             * [ch][ce][lun] 直接索引，放行即栈越界写；且越界命令会因
-             * nand_dispatch_lun_free()==0 被永久回推（静默活锁），比当场停机更难定位。 */
-            ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
-            if ((suspended[ch][ce][lun] != 0U) || (nand_dispatch_lun_free(ch, ce, lun) < 1U))
-            {
-                /* 该 LUN 本轮已挂起或 FIFO 满：挂起并原样回推 */
-                suspended[ch][ce][lun] = 1U;
-                (void)fc_submission_queue_push(scheduler->hsq, id);
-                continue;
-            }
-
-            chain.count   = 1U;
-            chain.ids[0U] = id;
-            if (fc_poll_dispatch_single(controller, &chain) != FC_STATUS_OK)
-            {
-                return FC_STATUS_IO_ERROR;
-            }
-            dispatched++;
-        }
+        return FC_STATUS_IO_ERROR;
     }
-
-    /* ── SQ：按 LUN 保序，链整条取出 ── */
+    if (fc_poll_fill_queue(controller, scheduler->sq, suspended, &dispatched) != FC_STATUS_OK)
     {
-        uint16_t total = scheduler->sq->count;
-        uint16_t k;
-
-        for (k = 0U; k < total; k++)
-        {
-            fc_command_id_t      id;
-            fc_command_t        *cmd;
-            fc_scheduler_chain_t chain;
-            fc_status_t          dispatch_status;
-            uint8_t              ch;
-            uint8_t              ce;
-            uint8_t              lun;
-            uint8_t              need;
-            uint8_t              j;
-
-            (void)fc_submission_queue_pop(scheduler->sq, &id);
-            cmd = fc_command_id_to_command(id);
-            ASSERT(cmd != NULL);
-
-            ch  = (uint8_t)cmd->config.ch;
-            ce  = (uint8_t)cmd->config.ce;
-            lun = (uint8_t)cmd->config.lun;
-            /* 同 HSQ 分支：路由字段越界是编程错误，断言而非防御（栈越界写 / 静默活锁） */
-            ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
-            if (suspended[ch][ce][lun] != 0U)
-            {
-                (void)fc_submission_queue_push(scheduler->sq, id);
-                continue;
-            }
-
-            need = fc_poll_chain_length(scheduler->sq, cmd);
-            if (nand_dispatch_lun_free(ch, ce, lun) < need)
-            {
-                /* 剩余槽放不下整条链：本轮挂起该 LUN，链头回推（成员后续轮次一并回推） */
-                suspended[ch][ce][lun] = 1U;
-                (void)fc_submission_queue_push(scheduler->sq, id);
-                continue;
-            }
-
-            chain.count   = need;
-            chain.ids[0U] = id;
-            for (j = 1U; j < need; j++)
-            {
-                (void)fc_submission_queue_pop(scheduler->sq, &chain.ids[j]);
-            }
-            k = (uint16_t)(k + need - 1U); /* 跳过已取出的链成员 */
-
-            /* 单命令走 single，链走 chain——按 need 分流（不写成条件里的三目，
-             * 两个分支都是带副作用的提交，塞进 if 里读不出"做了什么事"） */
-            if (need == 1U)
-            {
-                dispatch_status = fc_poll_dispatch_single(controller, &chain);
-            }
-            else
-            {
-                dispatch_status = fc_poll_dispatch_chain(controller, &chain);
-            }
-
-            if (dispatch_status != FC_STATUS_OK)
-            {
-                return FC_STATUS_IO_ERROR;
-            }
-            dispatched++;
-        }
+        return FC_STATUS_IO_ERROR;
     }
 
     if (dispatched != 0U)
