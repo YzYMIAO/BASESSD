@@ -19,7 +19,6 @@
 
 #include "fc.h"
 #include "fc_queue.h"
-#include "fc_registers.h"
 #include "fc_scheduler.h"
 
 #ifdef __cplusplus
@@ -51,11 +50,11 @@ extern "C"
     } fc_stripe_accum_t;
 #endif /* CONFIG_FC_RAID */
 
-    /* ── FC 控制器：命令状态机 + 三池引用 + 队列/调度器 + 寄存器 ──
-     * 仅内部实现可见；对外通过 fc_interface.h 的 API 访问。 */
+    /* ── FC 控制器：命令状态机 + 三池引用 + 队列/调度器 ──
+     * 仅内部实现可见；对外通过 fc_interface.h 的 API 访问。
+     * 队列头尾/计数直接读 sq/hsq/cq 字段（v10 起不再有独立的寄存器影子结构）。 */
     typedef struct fc_t
     {
-        fc_registers_t        registers;
         fc_submission_queue_t sq;
         fc_submission_queue_t hsq;
         fc_completion_queue_t cq;

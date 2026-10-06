@@ -107,7 +107,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 |---|---|
 | `fc_command.c` | `fc_command_status_init` 的 `status == NULL`、`fc_command_status_set_cw` 的 `status/cw` |
 | `fc_scheduler.c` | `fc_scheduler_init`（scheduler/sq/hsq）、`fc_scheduler_select`（scheduler/command_id）、`fc_scheduler_select_chain`（scheduler/chain） |
-| `fc_registers.c` | `fc_registers_reset` 的 `registers` |
+| `fc_registers.c` | `fc_registers_reset` 的 `registers`（该模块已于 v10 整体删除，此行成历史记录） |
 | `fc_raid_engine.c` | `fc_raid_init_ctx` 的 `lun`、`fc_raid_start/accumulate/end` 的 `lun/buffer/total`、`fc_raid_recover` 的 `recovered/buffers/count/failed_idx/length` |
 | `fc_random_engine.c` | 三种算法 `fc_random_transform_impl` 的 `data`；XORSHIFT 分支的 `seed == 0U`（种子生成器已保证非零） |
 | `fc_crc_engine.c` | `fc_crc_compute`/`fc_crc_verify` 的 `user_data` |

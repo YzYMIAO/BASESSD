@@ -24,6 +24,8 @@
 > - **Phase X**: FC-NAND 全模块注释补全 + 行业方案对比补全（§21）
 > - **Phase Y**: 初始化 / 运行时全链路走读章节（§22/§23，图 14–22）+ 源码关键路径注释补全
 > - **v8 (2026-10-06)**: FC→NAND 分发重构为 **per-LUN FIFO（深 4，每槽 = 一条命令）**——删 per-channel FIFO / Phase 1 / Phase 2 / busy 表 / Phase I 读饥饿保护；FC 侧改填充 pass（§2.7、§4.2/4.3、§16、§20、§23.5–23.9）
+> - **v9 (2026-10-06)**: CW 索引空间统一为 **flat 绝对号 `n = plane*CW_NUM + cw`**——删 `cw_count[]`/`cws[][]`/`cw_paa[][]`/`slot_to_plane_cw`，新增 `plane_paa[PLANE_NUM]`（§25.11、§13–§14、§23.8）
+> - **v10 (2026-10-07)**: 删除**软件寄存器影子** `fc_registers` / `fc_register_queue_state()`——字段重复 + 零读者，队列用量改由 `fc_get_*_count` / `fc_get_resource_stats()` 提供（§2.8）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
 
@@ -42,7 +44,6 @@
 │  ├── fc_command.c/h   命令 & Descriptor 结构定义    │
 │  ├── fc_queue.c/h     SQ / HSQ / CQ 环形队列       │
 │  ├── fc_scheduler.c/h HSQ 优先调度器               │
-│  ├── fc_registers.c/h 软件寄存器模型               │
 │  ├── fc_data_path.c/h 数据路径编排（Random→LDPC→RAID）│
 │  ├── fc_random_engine 加扰/解扰引擎                │
 │  ├── fc_ldpc_engine   LDPC 编解码引擎              │
@@ -299,21 +300,22 @@ CQ 条目 12 字节，64 条 CQ 共 768 字节。
 与读饥饿保护（`consecutive_write_count`）已删除——"忙"改由 NAND 侧 `nand_dispatch_lun_free()`
 表达。详见 `docs/changelog/fc_nand_per_lun_fifo.md`。
 
-### 2.8 软件寄存器 (fc_registers_t)
+### 2.8 软件寄存器（**v10 已删除**）
 
-```c
-typedef struct {
-    uint32_t config;            // 功能使能（RANDOM/LDPC/RAID）
-    uint32_t status;            // 状态（READY/BUSY/SQ_HSQ_CQ_NOT_EMPTY/ERROR）
-    uint16_t sq_head/tail;     // SQ 头尾指针
-    uint16_t hsq_head/tail;    // HSQ 头尾指针
-    uint16_t cq_head/tail;     // CQ 头尾指针
-    uint32_t interrupt_enable;  // 中断使能
-    uint32_t interrupt_status;  // 中断状态
-} fc_registers_t;
-```
+曾有一套 `fc_registers_t` 影子结构（`config`/`status`/三对 head-tail/`interrupt_*`），
+由 `fc_register_queue_state()` 在 11 个点刷新，"模拟硬件寄存器风格"。**v10 整体删除**：
 
-模拟硬件寄存器风格，方便未来硬件化。
+- 10 个字段里 6 个（三对 head/tail）与 `fc_t` 的 `sq`/`hsq`/`cq` 字段**逐字节重复**；
+  3 个（`config`、`interrupt_enable`、`interrupt_status`）**全仓零读零写**；
+  只剩 `status` 是派生量，缓存着 controller 里已有的信息。
+- 全仓无任何读者。
+- "模拟硬件"的理由不成立：真硬件寄存器每次访问都读当前值，而这个影子只在 11 个点刷新，
+  早退路径上还**故意保留陈旧值**（见 `docs/changelog/fc_structural_changes.md`），
+  比"读时计算"更不像硬件，也无法服务异步 DMA 读者。
+
+队列用量改由 `fc_get_sq_count()` / `fc_get_hsq_count()` / `fc_get_cq_count()`（`fc.c`）
+与聚合的 `fc_get_resource_stats()`（`fc_interface.c`，读 controller 实时值）提供。
+详见 `docs/changelog/fc_registers_removal.md`。
 
 ### 2.9 对外接口 (fc.h)
 
@@ -436,7 +438,7 @@ fc_service()
         └─ nand_dispatch_submit_chain(reqs, count) ← 整链原子追加
 ```
 
-**要点**：一次 `fc_service()` 要么把本轮所有完成抽干（`nand_dispatch_poll` 全遍历 + sink 逐条消费），要么走一次填充 pass——两件事不交叉。填充只把命令放进目标 LUN 的 FIFO，实际执行由后续 `fc_service()` 的 `nand_dispatch_poll()` 逐 LUN 推进（每个 LUN 每轮恰好 step 一次，完成经 sink 逐条回一份 completion）。两条分支的失败兜底统一走 `fc_poll_fail_command()`（合成 NAND_FAIL 完成项）；**`nand_dispatch_submit*` 因填充前已查 room，生产路径上不会返回 `NOT_READY`（出现即 `ASSERT`）**，`NOT_READY` 的"忙"语义改由 `nand_dispatch_lun_free()` 前置表达。队列状态寄存器 `fc_register_queue_state()` **逐点刷新**（各分支内联调用，与拆分前位置一一对应，共 13 处）——注意**校验失败早退的那条不刷新**，属既有行为，不可"顺手统一"。行为不对称：META/PAA 预填只在单命令路径（分支 A），链式路径不做。
+**要点**：一次 `fc_service()` 要么把本轮所有完成抽干（`nand_dispatch_poll` 全遍历 + sink 逐条消费），要么走一次填充 pass——两件事不交叉。填充只把命令放进目标 LUN 的 FIFO，实际执行由后续 `fc_service()` 的 `nand_dispatch_poll()` 逐 LUN 推进（每个 LUN 每轮恰好 step 一次，完成经 sink 逐条回一份 completion）。两条分支的失败兜底统一走 `fc_poll_fail_command()`（合成 NAND_FAIL 完成项）；**`nand_dispatch_submit*` 因填充前已查 room，生产路径上不会返回 `NOT_READY`（出现即 `ASSERT`）**，`NOT_READY` 的"忙"语义改由 `nand_dispatch_lun_free()` 前置表达。行为不对称：META/PAA 预填只在单命令路径（分支 A），链式路径不做。
 
 ---
 
@@ -3561,11 +3563,11 @@ main() (src/main.c)          fc_init()                  nand_init()             
   ├─ fc_init() ──────────────▶ fc_interface.c（薄壳）→ fc_init_internal(fc.c)
   │                              ├ ① 三池 + 队列存储 + 命令状态位图 memset 归零
   │                              ├ ② *controller = {0} 后挂各静态数组指针
-  │                              ├ ③ fc_registers_reset + SQ(64)/HSQ(16)/CQ(64) init
+  │                              ├ ③ SQ(64)/HSQ(16)/CQ(64) init
   │                              ├ ④ fc_scheduler_init(sq,hsq) + 清 busy/饥饿计数
   │                              ├ ⑤ nand_dispatch_init()  ★本函数唯一 NAND 依赖（纯 memset）
   │                              ├ ⑥ fc_crc_init()
-  │                              └ ⑦ 串三条空闲链表 + fc_register_queue_state 首次快照
+  │                              └ ⑦ 串三条空闲链表
   │
   ├─ else if nand_init() ─────────────────────────────▶ nand_init(mt29*.c)
   │                              Step1 FMC 句柄 + PCC 时序（Mode 0 保守值）
@@ -3600,7 +3602,6 @@ g_fc_*_free_next[]       ───▶ 三张「下标即 ID」静态链：0→1�
 g_fc_sq_storage[64]      ───▶ controller->sq    ◀─ fc_submit_to_queue（HSQ 优先门控）
 g_fc_hsq_storage[16]     ───▶ controller->hsq   ◀─ config.high_priority 命令
 g_fc_cq_storage[64]      ───▶ controller->cq    ◀─ fc_complete_internal → FTL completion_table_drain
-                              末尾 fc_register_queue_state() 首次刷新软件寄存器影子（三池全空 → 只剩 READY 位）
 ```
 
 要点：三池与队列存储都是**文件作用域静态数组**，地址在链接期固定；`fc_t` 只存指向它们的**指针**。因此三池的 DMA 物理地址在 `fc_init` 之后恒定不变——这是"先 `memset` 归零、后挂指针"这一顺序的原因。
@@ -3630,7 +3631,7 @@ nand_init()
 | 跳 | 位置（函数为主） | 这一步之后…… |
 |----|------------------|----------------|
 | 1 | `main` → `sys_init` / `log_set_*` | 时钟、UART 日志通道可用，但 FC/NAND 尚不存在 |
-| 2 | `fc_init` → `fc_init_internal` ①②③ | 三池、三条环形队列、寄存器影子就绪；命令可以 alloc/configure 但还提交不了 |
+| 2 | `fc_init` → `fc_init_internal` ①②③ | 三池、三条环形队列就绪；命令可以 alloc/configure 但还提交不了 |
 | 3 | `fc_init_internal` ④⑤⑥⑦ | 调度器、CRC、空闲链表就绪；`nand_dispatch_init` 已清空软件调度状态（NAND 硬件仍未初始化） |
 | 4 | `nand_init` Step1–4 | FMC 引脚/时钟、per-LUN 后端、DMA 就绪；此时 `g_nand_dispatch_armed` 仍为 0 |
 | 5 | `nand_init` Step5–6 | NAND 已复位、ID 已核对，芯片可用；但启动命令是绕过队列直接跑的 |
@@ -3743,10 +3744,7 @@ fc_service() → fc_poll_internal
         ├─ 两队列皆空 → QUEUE_EMPTY；无 room → NOT_READY（稍后重试）
         ├─ 单命令 → fc_poll_dispatch_single（运行时唯一活路径）
         └─ 链 → fc_poll_dispatch_chain（仅单测覆盖，见 §23.9）
-              ├─ 失败兜底统一走 fc_poll_fail_command
-              └─ fc_register_queue_state() 在各分支内**逐点刷新**（13 处）
-                   ⚠ 校验失败早退的那条**不刷新**——命令已从 HSQ/SQ 弹出，
-                     此处寄存器保持陈旧值，属既有行为，不可"顺手统一"（见图 2 要点）
+              └─ 失败兜底统一走 fc_poll_fail_command
 ```
 
 ### 23.5 流程图：`nand_dispatch` 相位机状态机（图 20，扩展图 10）
@@ -4196,7 +4194,7 @@ uint8_t   *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_mask 有效 */
 | 图 16 | NAND 芯片初始化 | `grep -n "HAL_NAND_Init\|nand_fmc_init\|nand_fc_reset\|nand_fc_read_id" src/nand/nand_mt29f4g08abadawp.c` |
 | 图 17 | 一条命令的端到端生命周期 | `grep -n "fc_poll_dispatch_single\|nand_dispatch_submit\|fc_complete_from_nand" src/fc/fc.c src/nand/nand_dispatch.c` |
 | 图 18 | 命令生命周期状态机 | `grep -n "FC_COMMAND_STATE_\|fc_command_alloc_internal\|fc_complete_internal" include/fc/fc_internal.h src/fc/fc.c` |
-| 图 19 | fc_service() 单步全景 | `grep -n "fc_poll_internal\|fc_poll_fail_command\|fc_register_queue_state" src/fc/fc.c` |
+| 图 19 | fc_service() 单步全景 | `grep -n "fc_poll_internal\|fc_poll_fail_command" src/fc/fc.c` |
 | 图 20 | nand_dispatch 相位机状态机 | `grep -n "LUN_PHASE_\|nand_dispatch_issued_advance\|nand_operation_is_issue" src/nand/nand_dispatch_internal.h src/nand/nand_dispatch.c` |
 | 图 21 | 多 LUN ISSUE/WAIT/FETCH 时序波形 | `grep -n "wait_start_cycles\|min_busy_us\|delay_dwt_cycles_now" src/nand/nand_dispatch.c src/nand/nand_dispatch_tables.c` |
 | 图 22 | 调度器填充 pass 决策 | `grep -n "fc_poll_fill\|fc_poll_chain_length\|nand_dispatch_lun_free" src/fc/fc.c` |

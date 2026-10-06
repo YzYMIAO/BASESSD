@@ -14,7 +14,7 @@
  * 文件结构（按职责分区，函数定义顺序即依赖顺序，无前向声明）：
  *    1. 静态资源        三池 + 链表数组 + g_fc_controller
  *    2. 查询/转换小工具 is_page_read/write、getter、ID→指针、buffer 工具
- *    3. 初始化          fc_register_queue_state、fc_init_internal
+ *    3. 初始化          fc_init_internal
  *    4. 资源分配/回滚   command/descriptor/buffer alloc、rollback、release
  *    5. 命令配置        fc_command_configure_descriptor(s)_internal
  *    6. 提交            fc_submit_to_queue、fc_submit_internal
@@ -41,7 +41,6 @@
 #include "fc_data_path.h"
 #include "fc_internal.h"
 #include "fc_queue.h"
-#include "fc_registers.h"
 #include "fc_scheduler.h"
 #include "nand/nand_dispatch.h"
 
@@ -242,57 +241,6 @@ uint8_t fc_command_descriptors_owned_internal(const fc_t *controller, fc_command
  * ══════════════════════════════════════════════════════════ */
 
 /* --------------------------------------------------------------------
- * fc_register_queue_state
- *   功能：把 SQ/HSQ/CQ 计数 + ACTIVE 命令数汇总进 fc_registers 的状态位（对外可见）。
- *   参数：controller —— FC 控制器。
- *   返回：无。
- *   实现要点：纯状态快照（由当前 state 重算，无副作用），可重复调用。
- * -------------------------------------------------------------------- */
-static void fc_register_queue_state(fc_t *controller)
-{
-    uint32_t status = controller->registers.status & ~(FC_STATUS_READY | FC_STATUS_BUSY | FC_STATUS_SQ_NOT_EMPTY | FC_STATUS_HSQ_NOT_EMPTY | FC_STATUS_CQ_NOT_EMPTY);
-    uint16_t index;
-    uint8_t  active_found = 0U;
-
-    for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
-    {
-        if (controller->command_state[index] == FC_COMMAND_STATE_ACTIVE)
-        {
-            active_found = 1U;
-            break;
-        }
-    }
-    if (active_found != 0U)
-    {
-        status |= FC_STATUS_BUSY;
-    }
-    else
-    {
-        status |= FC_STATUS_READY;
-    }
-    if (controller->sq.count != 0U)
-    {
-        status |= FC_STATUS_SQ_NOT_EMPTY;
-    }
-    if (controller->hsq.count != 0U)
-    {
-        status |= FC_STATUS_HSQ_NOT_EMPTY;
-    }
-    if (controller->cq.count != 0U)
-    {
-        status |= FC_STATUS_CQ_NOT_EMPTY;
-    }
-
-    controller->registers.status   = status;
-    controller->registers.sq_head  = controller->sq.head;
-    controller->registers.sq_tail  = controller->sq.tail;
-    controller->registers.hsq_head = controller->hsq.head;
-    controller->registers.hsq_tail = controller->hsq.tail;
-    controller->registers.cq_head  = controller->cq.head;
-    controller->registers.cq_tail  = controller->cq.tail;
-}
-
-/* --------------------------------------------------------------------
  * fc_init_internal
  *   功能：初始化 FC 控制面（三池清零 + 空闲链表建立 + 队列/调度器/NAND）。
  *   参数：controller —— FC 控制器。
@@ -340,8 +288,6 @@ fc_status_t fc_init_internal(fc_t *controller)
     controller->buffer_free_next        = g_fc_buffer_free_next;
     controller->buffer_state            = g_fc_buffer_state;
     controller->command_descriptor_head = g_fc_command_descriptor_head;
-    /* 软件寄存器影子复位（status = READY）；之后由 fc_register_queue_state() 持续刷新 */
-    fc_registers_reset(&controller->registers);
 
     /* ── ③ 三条环形队列：SQ 64（普通命令）/ HSQ 16（高优先，如 read retry）/
      *    CQ 64（完成项）。init 只登记存储与深度，head/tail/count 归零。 ── */
@@ -428,8 +374,6 @@ fc_status_t fc_init_internal(fc_t *controller)
     controller->buffer_free_head     = 0U;
     controller->active_handle        = FC_COMMAND_ID_INVALID;
 
-    /* 首次刷新软件寄存器影子：此刻三池全空 → status 只剩 READY 位 */
-    fc_register_queue_state(controller);
     return FC_STATUS_OK;
 }
 
@@ -799,7 +743,6 @@ fc_status_t fc_submit_internal(fc_t *controller, fc_command_t *command)
     fc_status_t result;
 
     result = fc_submit_to_queue(controller, (command->high_priority != 0U) ? &controller->hsq : &controller->sq, command);
-    fc_register_queue_state(controller);
     return result;
 }
 
@@ -819,7 +762,6 @@ fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *completi
     {
         controller->command_state[command_id] = FC_COMMAND_STATE_COMPLETED;
     }
-    fc_register_queue_state(controller);
     return result;
 }
 
@@ -1488,7 +1430,6 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
         (command->config.raid == FC_RAID_MODE_ENCODE))
     {
         fc_status_t stripe_result = fc_stripe_submit(controller, command, command_id);
-        fc_register_queue_state(controller);
         return stripe_result; /* 成功/失败均已在 fc_stripe_submit 中处理 */
     }
 #endif /* CONFIG_FC_RAID */
@@ -1508,12 +1449,10 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
              (unsigned)request.cw_mask,
              (unsigned)request.plane_count);
         fc_poll_fail_command(controller, command_id);
-        fc_register_queue_state(controller);
         return FC_STATUS_IO_ERROR;
     }
 
     /* Submission only occupies the target LUN. Completion is advanced by a later fc_service() call. */
-    fc_register_queue_state(controller);
     return FC_STATUS_OK;
 }
 
@@ -1566,12 +1505,10 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
         {
             fc_poll_fail_command(controller, chain->ids[i]);
         }
-        fc_register_queue_state(controller);
         return FC_STATUS_IO_ERROR;
     }
 
     /* Submission only occupies the target LUN. Completion is advanced by a later fc_service() call. */
-    fc_register_queue_state(controller);
     return FC_STATUS_OK;
 }
 
@@ -1766,8 +1703,6 @@ static fc_status_t fc_poll_fill(fc_t *controller)
  *       一次调用把本轮所有完成抽干（NAND 命令自身的失败不算 FC 故障——状态已在 CQ entry 里）。
  *     - 无完成 → fc_poll_fill()：一次扫描把能放下的命令（含链）提交进 NAND
  *       per-LUN FIFO（按 LUN 保序、HSQ 优先、room 判定）。
- *     - 队列状态寄存器由两个 dispatch helper **逐点刷新**（fc_register_queue_state
- *       幂等，但早退路径不刷，见 helpers 内注释），非在本函数统一刷新。
  *   运行时事实（勿被 §16/图 11 误导）：FTL 所有命令 config.chain=FC_CHAIN_END，
  *   运行时 count 恒为 1 → **只有 fc_poll_dispatch_single 是活路径**；
  *   fc_poll_dispatch_chain 仅单元测试覆盖。详见设计文档 §23.8。
@@ -1825,13 +1760,11 @@ fc_status_t fc_poll_internal(fc_t *controller)
         {
             return FC_STATUS_IO_ERROR;
         }
-        fc_register_queue_state(controller);
         return FC_STATUS_OK;
     }
 
     /* 无完成 → 填充 pass：一次扫描把可下发命令（含链）提交进 NAND per-LUN FIFO。 */
     result = fc_poll_fill(controller);
-    fc_register_queue_state(controller);
     return result;
 }
 
@@ -1850,6 +1783,5 @@ fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_status_t *c
     fc_status_t result;
 
     result = fc_completion_queue_pop(&controller->cq, completion);
-    fc_register_queue_state(controller);
     return result;
 }
