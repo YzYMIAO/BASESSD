@@ -18,10 +18,10 @@
 /* 页大小：2112 = 主区 2048 + 备区 64 */
 #define PAGE_SIZE (2112)
 
-/* 通道页缓冲大小：单 plane 操作只用 PAGE_SIZE，多 plane 操作需要双倍缓冲。 */
-#define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM)
-#define PAGE_MAIN_SIZE   (2048) /* 主区字节数 */
-#define PAGE_SPARE_SIZE  (64)   /* 备区字节数 */
+/* 通道页缓冲大小：单 plane 操作只用 PAGE_SIZE，多 plane 操作需要 PLANE_NUM 倍缓冲。 */
+#define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM) /* 2112×2=4224 */
+#define PAGE_MAIN_SIZE   (2048)                  /* 主区字节数 */
+#define PAGE_SPARE_SIZE  (64)                    /* 备区字节数 */
 #define PAGES_PER_BLOCK  (64)
 #define BLOCKS_PER_PLANE (2048)
 #define PLANE_NUM        (2)
@@ -30,6 +30,10 @@
 #define CH_NUM           (1)
 #define CE_NUM           (1)
 #define CW_NUM           (4U)
+
+/* 单 CW 字节数：整页缓冲按 CW 等分（CW 偏移 → 列地址、CW 拼接/拆分的步长）。
+ * 528 = [META:4][CRC:4][USER:512][ECC:8]，布局见 include/fc/fc.h。 */
+#define CW_SIZE (PAGE_SIZE / CW_NUM) /* 2112/4 = 528 */
 
 /* 行地址数组深度（nand_fc_request_t.row[] 的长度）。与 PLANE_NUM 是两个独立维度：
  *   PLANE_NUM      —— 当前芯片实际 plane 数（MT29F4G08 = 2），是数据模型的"宽度"，
@@ -44,10 +48,6 @@
 
 /* 多 plane 操作时 CW 总数上限 = max plane × CW per plane */
 #define CW_TOTAL_MAX (CW_NUM * PLANE_NUM) /* 4×2=8 */
-
-/* 通道页缓冲大小：多 plane 操作需要 PLANE_NUM 倍缓冲。
- * ⚠ 与上面第 9 行重复定义（后者覆盖），保留为兼容既有引用。 */
-#define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM) /* 2112×2=4224 */
 
 /*
  * ONFI 时序模式控制

@@ -55,7 +55,7 @@
 #define FC_COMMAND_POOL_DEPTH    (64U)
 #define FC_DESCRIPTOR_POOL_DEPTH (256U)
 #define FC_BUFFER_POOL_DEPTH     (128U)
-#define FC_BUFFER_POOL_CW_SIZE   (PAGE_SIZE / 4U) /* 528B = 每 CW 缓冲大小 */
+#define FC_BUFFER_POOL_CW_SIZE   (CW_SIZE) /* 528B = 每 CW 缓冲大小（= NAND 侧 CW_SIZE） */
 
 /*
  * CW 布局: [META:4][CRC:4][USER:512][PARITY:8] = 528B
