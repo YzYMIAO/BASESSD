@@ -1,5 +1,6 @@
 #include "ftl/completion_table.h"
 
+#include "common/assertion.h"
 #include "fc/fc.h"
 #include "ftl/ftl.h" /* ftl_context_t（route 表） */
 #include "ftl/ftl_type.h"
@@ -123,10 +124,10 @@ void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
 
 struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun)
 {
-    if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
-    {
-        return NULL;
-    }
+    /* ch/ce/lun 来自命令自身的 config（ftl_handle_completion 传 cmd->config.*），
+     * 由 FTL 从 PBA 灌入并经 pba_is_valid() 校验——越界是编程错误，断言。 */
+    ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
+    /* g_route 在 set_route 之前全为 NULL：运行时状态，保留返回 NULL。 */
     return g_route[ch][ce][lun];
 }
 
@@ -189,8 +190,6 @@ void ftl_sync_waiter_handler_with_release(const fc_command_status_t *completion,
     ftl_sync_waiter_handler(completion, ctx);
 
     cmd = fc_command_id_to_command((uint16_t)completion->command_id);
-    if (cmd != NULL)
-    {
-        (void)fc_command_release(cmd);
-    }
+    ASSERT(cmd != NULL); /* 同 ftl_handle_completion：ID 恒在池内，壳已断言 */
+    (void)fc_command_release(cmd);
 }

@@ -27,7 +27,7 @@
 
 /* ── 宏 ── */
 
-#define NAND_SUBMIT_BUDGET    (4U)     /* 每轮最多提交 4 条 */
+#define NAND_SUBMIT_BUDGET    (4U)     /* 每轮 fc_service 最多跑 4 次（首轮抽干完成，余为填充 pass） */
 #define BG_NORMAL_FLUSH_COUNT (4U)     /* NORMAL 模式下最多 flush 4 line */
 #define BG_BUSY_FLUSH_COUNT   (1U)     /* BUSY 模式下最多 flush 1 line */
 #define BG_NORMAL_GC_PAGES    (4U)     /* NORMAL 模式下 GC 搬 4 页 */

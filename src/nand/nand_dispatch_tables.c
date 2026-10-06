@@ -195,12 +195,11 @@ static void completion_multi_plane(nand_dispatch_task_t *task, uint8_t result, c
  *   功能：将 task 的各 CW buffer 拼接到 page_buffer，一次性写入。
  *   参数：task —— 预解析完成的 nand_dispatch_task_t，cw_buffers[task->plane][cw]
  *         已由 nand_dispatch_task_load() 填好；cw_count 指示 CW 数。
- *   返回：NAND_RESULT_OK；任一 CW buffer 为 NULL 时返回
- *         NAND_RESULT_INVALID_ARGUMENT。
+ *   返回：无。
  *   实现要点：拼接偏移 = cw * CW_SIZE；先 memset 0xFF 使未填充
  *         CW 位保持擦除态；request 行地址取 cw_paa[task->plane][0]（单 plane 的目标 plane）。
  * -------------------------------------------------------------------- */
-static uint8_t req_program_page(nand_dispatch_task_t *task)
+static void req_program_page(nand_dispatch_task_t *task)
 {
     uint8_t  cw;
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
@@ -215,15 +214,13 @@ static uint8_t req_program_page(nand_dispatch_task_t *task)
         memcpy(&page_buffer[paa_to_cw(task->cw_paa[task->plane][cw]) * CW_SIZE], task->cw_buffers[task->plane][cw], CW_SIZE);
     }
     task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->cw_paa[task->plane][0])}, .data = page_buffer, .data_length = PAGE_SIZE};
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
  * req_read_page
  *   功能：构建整页加载请求（把目标页搬进 NAND 页缓冲）。
  *   参数：task —— 预解析完成的任务，cw_paa[task->plane][0] 给行地址。
- *   返回：NAND_RESULT_OK；cw_buffers[task->plane][0] 为 NULL 时返回
- *         NAND_RESULT_INVALID_ARGUMENT。
+ *   返回：无。
  *   实现要点：同时服务两个 op：
  *     - OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT（读路径统一后的加载 op）：
  *       uop 序列无 DATA_OUT，data/data_length 被忽略，数据留在页缓冲，随后由
@@ -231,27 +228,25 @@ static uint8_t req_program_page(nand_dispatch_task_t *task)
  *     - OP_NORMAL_READ_PAGE_WITH_DATA_OUT / OP_OTP_DATA_READ（旧语义，直接下发）：
  *       CW0 由本次 DATA_OUT 一次取回，后续 CW 再由 chaining 逐个随机读。
  * -------------------------------------------------------------------- */
-static uint8_t req_read_page(nand_dispatch_task_t *task)
+static void req_read_page(nand_dispatch_task_t *task)
 {
     uint8_t *cw_buffer = task->cw_buffers[task->plane][0];
 
     /* CW0 缓冲由 FC 数据路径填满，恒非空 */
     ASSERT(cw_buffer != NULL);
     task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->cw_paa[task->plane][0])}, .data = cw_buffer, .data_length = (uint16_t)CW_SIZE};
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
  * req_fetch_page
  *   功能：将整页读入 page_buffer，构建 FETCH 请求。
  *   参数：task —— 预解析完成的任务；cw_buffers[task->plane][cw] 为后续拆回目标。
- *   返回：NAND_RESULT_OK；任一 CW buffer 为 NULL 时返回
- *         NAND_RESULT_INVALID_ARGUMENT。
+ *   返回：无。
  *   实现要点：与 req_read_page 不同——FETCH 无后续 CW chaining，
  *         必须一次性读完整页（data_length = PAGE_SIZE），再由 poll()
  *         拆回各 CW buffer；memset 0x00 先清零整页缓冲。
  * -------------------------------------------------------------------- */
-static uint8_t req_fetch_page(nand_dispatch_task_t *task)
+static void req_fetch_page(nand_dispatch_task_t *task)
 {
     uint8_t  cw;
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
@@ -267,19 +262,17 @@ static uint8_t req_fetch_page(nand_dispatch_task_t *task)
         .row         = {paa_to_nand_row(task->cw_paa[task->plane][0])},
         .data        = page_buffer,
         .data_length = PAGE_SIZE};
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
  * req_cache_read
  *   功能：将整页读入 page_buffer，构建 CACHE 读请求。
  *   参数：task —— 预解析完成的任务；cw_buffers[task->plane][cw] 为后续拆回目标。
- *   返回：NAND_RESULT_OK；任一 CW buffer 为 NULL 时返回
- *         NAND_RESULT_INVALID_ARGUMENT。
+ *   返回：无。
  *   实现要点：覆盖 READ_PAGE_CACHE_SEQ/RANDOM/LAST 三种 OP，均整页
  *         读入 page_buffer（data_length = PAGE_SIZE）后由 poll() 拆回。
  * -------------------------------------------------------------------- */
-static uint8_t req_cache_read(nand_dispatch_task_t *task)
+static void req_cache_read(nand_dispatch_task_t *task)
 {
     uint8_t  cw;
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
@@ -291,20 +284,18 @@ static uint8_t req_cache_read(nand_dispatch_task_t *task)
     }
     memset(page_buffer, 0x00, PAGE_SIZE);
     task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->cw_paa[task->plane][0])}, .data = page_buffer, .data_length = PAGE_SIZE};
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
  * req_erase
  *   功能：构建块擦除请求（无数据传输）。
  *   参数：task —— 预解析完成的任务，cw_paa[task->plane][0] 提供块行地址。
- *   返回：恒为 NAND_RESULT_OK。
+ *   返回：无。
  *   实现要点：data 为 NULL、data_length 为 0，仅携带行地址。
  * -------------------------------------------------------------------- */
-static uint8_t req_erase(nand_dispatch_task_t *task)
+static void req_erase(nand_dispatch_task_t *task)
 {
     task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->cw_paa[task->plane][0])}, .data = NULL, .data_length = 0U};
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
@@ -313,25 +304,24 @@ static uint8_t req_erase(nand_dispatch_task_t *task)
  *   参数：task —— 预解析完成的任务；feature_addr 为 Feature 寄存器地址；
  *         cw_buffers[task->plane][0] 已由 FC 重定向到 g_fc_return_staging[command_id]
  *         （控制器级 4 字节暂存，返回值最终经 CQ 的 param 联合体交回）。
- *   返回：恒为 NAND_RESULT_OK。
+ *   返回：无。
  *   实现要点：column = feature_addr，data_length 固定 4 字节
  *         （ONFI Feature 寄存器宽度）。
  * -------------------------------------------------------------------- */
-static uint8_t req_feature(nand_dispatch_task_t *task)
+static void req_feature(nand_dispatch_task_t *task)
 {
     task->request = (nand_fc_request_t){.column = (uint16_t)task->feature_addr, .row = {0U}, .data = task->cw_buffers[task->plane][0], .data_length = 4U};
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
  * req_single
  *   功能：构建固定长度数据传输请求（READ_ID/PARAMETER_PAGE/RANDOM 等）。
  *   参数：task —— 预解析完成的任务；operation 决定数据长度。
- *   返回：恒为 NAND_RESULT_OK。
+ *   返回：无。
  *   实现要点：数据长度取自 g_nand_operation_map[operation].data_length；
  *         行地址仅当本命令 plane 存在 CW（cw_count[plane]!=0）时填充，否则为 0。
  * -------------------------------------------------------------------- */
-static uint8_t req_single(nand_dispatch_task_t *task)
+static void req_single(nand_dispatch_task_t *task)
 {
     uint16_t data_length = g_nand_operation_map[task->operation].data_length;
 
@@ -340,14 +330,13 @@ static uint8_t req_single(nand_dispatch_task_t *task)
         .row         = {(task->cw_count[task->plane] != 0U) ? paa_to_nand_row(task->cw_paa[task->plane][0]) : 0U},
         .data        = task->cw_buffers[task->plane][0],
         .data_length = data_length};
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
  * req_random_read
  *   功能：构建页缓冲随机读请求（05h-E0h / 06h-E0h），按列地址取单个 CW。
  *   参数：task —— 预解析完成的任务；cw_paa[task->plane][0] 指明目标 CW。
- *   返回：恒为 NAND_RESULT_OK。
+ *   返回：无。
  *   实现要点：**列地址 = CW 号 × CW_SIZE，CW 号从 PAA 取（paa_to_cw）**——
  *         desc 链的槽位序号与 CW 号已解耦（fc_command_t.cw_mask），
  *         用槽位当 CW 号会读到错误的列。行地址由 paa_to_nand_row() 从同一 PAA 算出，
@@ -355,7 +344,7 @@ static uint8_t req_single(nand_dispatch_task_t *task)
  *         链式取数路径（nand_dispatch_task_cw_chain）自行构建同样的请求，不走本 handler；
  *         本 handler 服务于直接下发 OP_RANDOM_DATA_READ 的场景。
  * -------------------------------------------------------------------- */
-static uint8_t req_random_read(nand_dispatch_task_t *task)
+static void req_random_read(nand_dispatch_task_t *task)
 {
     nand_paa_t cw_paa = task->cw_paa[task->plane][0];
 
@@ -364,32 +353,30 @@ static uint8_t req_random_read(nand_dispatch_task_t *task)
         .row         = {paa_to_nand_row(cw_paa)},
         .data        = task->cw_buffers[task->plane][0],
         .data_length = (uint16_t)CW_SIZE};
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
  * req_no_data
  *   功能：构建无数据传输请求（RESET/块锁/块解锁等）。
  *   参数：task —— 预解析完成的任务。
- *   返回：恒为 NAND_RESULT_OK。
+ *   返回：无。
  *   实现要点：data 为 NULL、data_length 为 0；行地址与 req_single
  *         相同规则（有 CW 才填充）。
  * -------------------------------------------------------------------- */
-static uint8_t req_no_data(nand_dispatch_task_t *task)
+static void req_no_data(nand_dispatch_task_t *task)
 {
     task->request = (nand_fc_request_t){
         .column      = 0U,
         .row         = {(task->cw_count[task->plane] != 0U) ? paa_to_nand_row(task->cw_paa[task->plane][0]) : 0U},
         .data        = NULL,
         .data_length = 0U};
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
  * req_multi_plane_read
  *   功能：构建多 plane 整页加载请求（两个 plane 一起搬进各自页缓冲）。
  *   参数：task —— 预解析完成的任务，cw_paa[plane][0] 为各 plane 行地址。
- *   返回：恒为 NAND_RESULT_OK。
+ *   返回：无。
  *   实现要点：request.row 按 plane 遍历填 PLANE_NUM 个行地址。
  *     - OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT（读路径统一后的加载 op）：
  *       uop 序列无 DATA_OUT，数据留在各 plane 页缓冲，随后由 poll() 的 chaining
@@ -398,7 +385,7 @@ static uint8_t req_no_data(nand_dispatch_task_t *task)
  *     - OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT（旧语义，直接下发）：单条原子 uop
  *       内含 06h-E0h + DATA_OUT operand=PAGE_SIZE 分两次读，data_length = PAGE_SIZE。
  * -------------------------------------------------------------------- */
-static uint8_t req_multi_plane_read(nand_dispatch_task_t *task)
+static void req_multi_plane_read(nand_dispatch_task_t *task)
 {
     uint8_t  plane;
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
@@ -416,7 +403,6 @@ static uint8_t req_multi_plane_read(nand_dispatch_task_t *task)
     {
         task->request.row[plane] = paa_to_nand_row(task->cw_paa[plane][0]);
     }
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
@@ -424,12 +410,11 @@ static uint8_t req_multi_plane_read(nand_dispatch_task_t *task)
  *   功能：将各 plane 各 CW buffer 拼接到 page_buffer，构建多 plane 写请求。
  *   参数：task —— 预解析完成的任务；cw_buffers[plane][cw] 已填好；
  *         plane 与 cw 均由 task 提供。
- *   返回：NAND_RESULT_OK；任一 plane 任一 CW buffer 为 NULL 时返回
- *         NAND_RESULT_INVALID_ARGUMENT。
+ *   返回：无。
  *   实现要点：拼接偏移 = plane * PAGE_SIZE + cw * CW_SIZE；
  *         memset 0xFF 保证未填充 CW 位保持擦除态；行地址按 plane 遍历填 PLANE_NUM 个。
  * -------------------------------------------------------------------- */
-static uint8_t req_multi_plane_program(nand_dispatch_task_t *task)
+static void req_multi_plane_program(nand_dispatch_task_t *task)
 {
     uint8_t  plane, cw;
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
@@ -457,17 +442,16 @@ static uint8_t req_multi_plane_program(nand_dispatch_task_t *task)
     {
         task->request.row[plane] = paa_to_nand_row(task->cw_paa[plane][0]);
     }
-    return NAND_RESULT_OK;
 }
 
 /* --------------------------------------------------------------------
  * req_multi_plane_erase
  *   功能：构建多 plane 块擦除请求（无数据传输，双行地址）。
  *   参数：task —— 预解析完成的任务，cw_paa[plane][0] 为各 plane 的块行地址。
- *   返回：恒为 NAND_RESULT_OK。
+ *   返回：无。
  *   实现要点：data 为 NULL、data_length 为 0；行地址按 plane 遍历填 PLANE_NUM 个。
  * -------------------------------------------------------------------- */
-static uint8_t req_multi_plane_erase(nand_dispatch_task_t *task)
+static void req_multi_plane_erase(nand_dispatch_task_t *task)
 {
     uint8_t plane;
 
@@ -480,7 +464,6 @@ static uint8_t req_multi_plane_erase(nand_dispatch_task_t *task)
     {
         task->request.row[plane] = paa_to_nand_row(task->cw_paa[plane][0]);
     }
-    return NAND_RESULT_OK;
 }
 
 /* ======================================================================

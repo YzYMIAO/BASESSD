@@ -16,7 +16,7 @@
 
 3. **资源类结果保留返回码**
    池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、队列满背压（`QUEUE_FULL` / `IO_ERROR`）、`fc_command_alloc()` 返回 `NULL`、`mem_alloc` 返回 `NULL`、NAND 报告的错误——都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。
-   同理**运行时状态**保留返回码：`g_nand_device_ready == 0U`（设备未就绪）、`g_crc_ready == 0U`、`g_initialized == 0U`（惰性初始化未完成）、`ctx->active == 0U`、`fc_buffer_is_occupied(...) == 0U`（生命周期）、`map->uops == NULL`（操作表缺项）——这些是"此刻能不能做"，不是"调用者传错"。
+   同理**运行时状态**保留返回码：`g_nand_dispatch_armed == 0U`（异步路径未放行）、`g_crc_ready == 0U`、`g_initialized == 0U`（惰性初始化未完成）、`ctx->active == 0U`、`fc_buffer_is_occupied(...) == 0U`（生命周期）、`map->uops == NULL`（操作表缺项）——这些是"此刻能不能做"，不是"调用者传错"。
 
 4. **单测固化为契约的守卫保留返回码**
    这是判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**。`tests/` 里拿**文档化合法输入**调内部函数验证行为（如 `test_rebuild.c` 的 `allocator_remove_from_free(..., 越界)` 是文档化的 no-op、`ftl_is_metadata_block(NULL,…)` 是文档化分类）的，按判据 1 保留返回码。
@@ -115,7 +115,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 | `fc_ldpc_qc_engine.c` | `fc_ldpc_qc_decode` 的 `qc`/`data` |
 | `fc_data_path.c` | `fc_data_path_encode`/`process_read`/`raid_recover` 的 `command`/`cmd`/`desc_id`/`failed_cw_idx` |
 | `fc_interface.c` | `fc_command_configure_descriptors`/`fc_submit`/`fc_command_release` 的 `command == NULL`（保留身份/状态返回码）、`fc_poll_completion` 的 `completion`、`fc_buffer_get_meta` 的 `command`、`fc_write_cmd_data`/`fc_read_cmd_data` 的 `command`/`data`/`desc_id`、`fc_get_cmd_data_ptr` 的 `command`/`desc_id`、`fc_get_resource_stats` 的 `stats` |
-| `nand_dispatch.c` | `nand_dispatch_submit` 的 `request`/`ch`/`ce`/`lun`/`cw_count`（保留 `g_nand_device_ready`）、`nand_dispatch_submit_chain` 的 `requests`/`count`/`ch`/`ce`/`lun`、`nand_dispatch_poll` 的 `completion` |
+| `nand_dispatch.c` | `nand_dispatch_submit` 的 `request`/`ch`/`ce`/`lun`/`cw_count`（保留 `g_nand_dispatch_armed`）、`nand_dispatch_submit_chain` 的 `requests`/`count`/`ch`/`ce`/`lun`、`nand_dispatch_poll` 的 `sink` |
 | `nand_fmc.c` | `nand_fmc_init` 的 `config` |
 | `nand_mt29f4g08abadawp.c` | `nand_fc_execute`/`nand_fc_start`/`nand_fc_step` 的 `transaction`/`operation`/`request`/`completion`/`active`（保留 `map->uops == NULL` 表缺项）、`nand_fc_read_id` 的 `id`、`nand_fc_set_features` 的 `feature_data` |
 
@@ -127,10 +127,51 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 | `fc_queue.c` 的 `FC_COMMAND_ID_INVALID` / `offset >= count` | 哨兵值域 |
 | `fc_command_alloc_internal` / `fc_descriptor_alloc_internal` 的池空 NULL | 资源类 |
 | `fc_buffer_is_occupied(...) == 0U` / `fc_buffer_release` 未占用 | 生命周期状态 |
-| `g_nand_device_ready == 0U` / `g_crc_ready == 0U` / `g_initialized == 0U` / `ctx->active == 0U` | 运行时状态 |
+| `g_nand_dispatch_armed == 0U` / `g_crc_ready == 0U` / `g_initialized == 0U` / `ctx->active == 0U` | 运行时状态 |
 | `map->uops == NULL` / `nand_engine` 的 `handler == NULL` / UOP 无 END | 表完整性 |
 | `fc_ldpc_decode(..., err_bits)` / `fc_command_status_init(..., command)` / `pop_n(ids)` 的 NULL | 辨析 B 语义分支 |
 | desc 链遍历里带 `break` / `return 错误码` 的"链损坏"降级 | 降级语义（非纯 fence） |
 | `fc_bch_init` 的 `m`/`t` 值域 | 库构造函数文档化合法范围 |
 
 删除的对应用例见 §四。
+
+## 十、第三轮：per-LUN FIFO 重构后的同类补扫（2026-10-06）
+
+v8（`f8c005c`）把 `fc_poll_fill` 里 ch/ce/lun 的防御性回推改成 `ASSERT` 后，同类的「防御分支」还剩若干——它们的共同点是：**守卫的值与已断言过的值同源，守卫本身不可达；而一旦真的走到，后果是静默降级（活锁 / 丢 completion / 丢链语义）而非停机**。
+
+| 文件 | 转换点 | 原防御的后果 |
+|---|---|---|
+| `nand_dispatch.c` | `nand_dispatch_lun_free` 的 ch/ce/lun 越界 | 返回 0 → 该 LUN 在 `fc_poll_fill` 里永久挂起（静默活锁） |
+| `nand_dispatch.c` | `nand_dispatch_enqueue` 的逐条前置校验：**扩到整批**（原只查 `requests[0]`），并新增「链成员同 ch/ce/lun」 | 链成员异 LUN 时队列按 `requests[0]` 选错 LUN，`cw_count` 越界则在 `completion_multi_plane` 越界写 `cw_status[]` |
+| `completion_table.c` | `completion_table_route` 的 ch/ce/lun 越界 | 返回 NULL → 上层释放命令后静默丢弃该 completion |
+| `completion_table.c` | `ftl_sync_waiter_handler_with_release` 的 `cmd != NULL` | 静默不释放命令 |
+| `ftl.c` | `ftl_handle_completion` 的 `cmd == NULL` | 静默吞 completion，命令永不完成也不报错 |
+| `fc.c` | `fc_command_configure_descriptors_internal` 的 `plane_count > PLANE_NUM` | 与紧邻的 `ASSERT` 重复；release 下由返回码兜底（本次删除，接受 UB） |
+| `fc.c` | `fc_poll_chain_length` 的「链成员同 target」`break` | 静默把一条链截成两条，链语义丢失 |
+| `fc.c` | `fc_poll_dispatch_single` / `fc_poll_dispatch_chain` 的 `is_valid` + `command_state == QUEUED` | 命令已出队却未置 ACTIVE/未回推 → **永久泄漏** |
+
+连带删除：`fc.c` 的 `fc_command_id_is_valid()`——两处调用点都进了 `ASSERT`，而 `ASSERT` 在 `NDEBUG` 下整体裁剪为空，静态函数会变成无引用（`-Wunused-function`）；故改为内联 `command_id < FC_COMMAND_POOL_DEPTH` 并删除该包装。
+
+**仍然保留返回码**（本次核实后**不改**）：
+
+| 位置 | 类别 |
+|---|---|
+| `completion_table_route` 的「`g_route[..] == NULL`（`set_route` 之前）」 | 运行时状态（判据 3）；调用方 `ftl.c` 据此释放命令 |
+| `fc_data_path.c` 11 处 `desc/dsc == NULL`、`fc.c` 的 `desc_id < POOL_DEPTH ? … : NULL` | 链遍历降级（§九 已裁定） |
+| `fc_interface.c` 的 `buffer_id == FC_BUFFER_ID_INVALID` | 生命周期状态 |
+| `fc_interface.c` / `fc.c` 的 `*_get` 查询函数越界哨兵 | 查询 API 契约 |
+| `fc_poll_chain_length` 的 `next_id == FC_COMMAND_ID_INVALID` / `chain == FC_CHAIN_END` 两处 `break` | 合法终止（队列尾 / 链尾），非契约违反 |
+
+**未纳入**：`fc_raid_engine.c` 的 `fc_raid_save/restore` 越界守卫——该对函数全仓零调用者（Phase Z 撤销 FMC 数组化后悬空），属死 API，去留待定。
+
+**§十附：同源守卫的两种收法（本次同时出现，可作为下次的模板）**
+
+同一道守卫在多个入口重复时，先判断它是不是**恒真**：
+
+1. **恒真 → 删**。`nand_dispatch_task_load` 里曾有一条「单 plane 有效行的 plane 必须等于 `request->plane`」的断言——但 `cws` 第一维正是从同一个 PAA 值算出的（见 `fc_build_request_data_planes`），断言把同一条表达式算了两遍。更糟的是它**防不住自己注释里写的失败模式**：真错位时数据落到别的行、`cw_count[plane]` 变 0，恰好被它自己的 `cw_count > 0` 前置条件跳过；而那个场景已由生产者侧更强的 `ASSERT(cw_count[plane] == fc_command_descriptor_count(...))` 拦下。**判据：一段守卫若与它要防的对象同源，且其前置条件恰好跳过了真正出错的取值，就是纯噪声，删。**
+
+2. **不恒真但重复 → 收敛到共用漏斗，不要逐个入口复制**。异步提交的放行闩锁（`g_nand_dispatch_armed`，原 `g_nand_device_ready`）曾只在 `nand_dispatch_submit` 里检查、`submit_chain` 漏掉——两个入口各自实现队列逻辑时漏搬的，不是有意取舍。收进两者共用的 `nand_dispatch_enqueue()` 之后结构上不可能再分叉。**判据：守卫属于「这件事能不能做」，而两个入口最终都走同一个函数时，门就装在漏斗上。**
+
+3. **整条失败路径不存在 → 连返回码一起删，不留「表契约」的壳**。`nand_dispatch_req_table` 的 12 个 `req_*` handler 原签名 `uint8_t (*)(task)`，每个都无条件 `return NAND_RESULT_OK;`；调用点仍写着 `if (handler(task) != NAND_RESULT_OK) return REQ_ERROR;`，上层再 `switch` 把 `REQ_ERROR` 映射成 `LUN_ERROR`（丢弃该 LUN 队列 + 返回 `INVALID_ARGUMENT`）。三层守卫守的是同一件不可能的事：handler 的输入在 `nand_dispatch_task_load()` 时已就绪且不变量已断言，构建**没有**失败路径。**判据：当一个函数的返回值被证明恒为某常量时，「保留返回码当作表的扩展点」不是保守而是负担——它让每个调用点都要写一条永远不走的错误分支，并连带虚构出 `REQ_ERROR`/`LUN_ERROR` 两个枚举成员和 poll 里一段死丢弃逻辑。改 `void`、删三层，才是真实契约。**（与判据 2 的差别：判据 2 是守卫**可达**但重复，要收敛位置；本条是守卫**不可达**，要整条删掉。若某天真要引入会失败的 handler，那时再引入一个显式的 `nand_result_t` 出口即可。）
+
+> 命名提示：`g_nand_device_ready` 已改名 `g_nand_dispatch_armed`——旧名与 ONFI 的 "device ready"（R/B# / status bit 6，**per-die 且瞬态**）撞名，而此闩锁是 boot 期一次性的全局属性（"FMC 已由同步初始化路径移交给异步 dispatch"）。per-LUN 的运行时就绪由 `nand_dispatch_lun_free()`（软件容量）+ 引擎 WAIT_READY（现查 R/B#）承担，**不需要**缓存成标志。

@@ -153,8 +153,9 @@ typedef struct
  * ====================================================================== */
 
 /* 异步 request 构建 handler：用 task 的预解析数据组装 nand_fc_request_t。
- * 返回 NAND_RESULT_OK 或 NAND_RESULT_INVALID_ARGUMENT。 */
-typedef uint8_t (*nand_dispatch_req_handler_t)(nand_dispatch_task_t *task);
+ * 无返回码——task 的字段在 nand_dispatch_task_load() 时已全部就绪且不变量已断言，
+ * 构建不存在失败路径；调用点因此可以无条件接续 nand_fc_start。 */
+typedef void (*nand_dispatch_req_handler_t)(nand_dispatch_task_t *task);
 
 /* Completion 策略 handler：根据不同操作类型设置 cw_status 和 failed_descriptor_id。 */
 typedef void (*nand_dispatch_completion_handler_t)(

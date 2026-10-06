@@ -69,7 +69,7 @@ uint16_t completion_table_count(void);
 void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM]);
 
 /*
- * completion_table_route - 按 (ch,ce,lun) 取实例（越界/未设置返回 NULL）
+ * completion_table_route - 按 (ch,ce,lun) 取实例（未设置返回 NULL；越界断言）
  */
 struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun);
 

@@ -4,7 +4,7 @@
  * 职责：全系统初始化顺序编排 + superloop 驱动源。
  * 调用链：
  *   main() → sys_init → ssd_log 绑定 → fc_init → nand_init
- *          → nand_dispatch_set_device_ready(1) → stm32_platform_register
+ *          → nand_dispatch_set_armed(1) → stm32_platform_register
  *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
  *          → while(1) { uart_service_poll; ftl_service | fc_service;
  *                       btim_scheduler_poll; }
@@ -325,7 +325,8 @@ int main(void)
      *   ② nand_init()          —— NAND 芯片：HAL/FMC + R/B# EXTI + per-(ch,ce,lun) 后端
      *                             + RESET + READ_ID 校验。其 boot 命令直接走
      *                             nand_engine_execute，绕过 fc / nand_dispatch 命令队列。
-     *   ③ set_device_ready(1)  —— 放行 nand_dispatch_submit（此前一律返回 NOT_READY）。
+     *   ③ set_armed(1)         —— 放行 nand_dispatch_submit / submit_chain
+     *                             （此前一律返回 INVALID_ARGUMENT）。
      *   ④ platform_register()  —— 注册 time_us，供 FTL 的 T3 定时触发（CP/GC）使用。
      *   ⑤ ssd_ftl_boot_all()   —— FTL 全实例 boot + controller 绑定 → 置 g_ftl_ready=1。
      *   详见 docs/design/fc_nand_design.md §22「初始化全流程」。 */
@@ -339,7 +340,7 @@ int main(void)
     }
     else
     {
-        nand_dispatch_set_device_ready(1U);
+        nand_dispatch_set_armed(1U);
         LOGI("fc and nand raw path ready\r\n");
         /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
          * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */

@@ -401,13 +401,15 @@ fc_command_release(cmd)
 ```text
 fc_service()
   │
-  ├─ ① nand_dispatch_poll(&nand_completion)
-  │     └─ 有命令完成？（返回 != NOT_READY）
-  │          ├─ YES → fc_complete_from_nand()     ← 回写 desc + 数据路径 + CQ
-  │          │         [CONFIG_FC_RAID] 若完成的是 stripe 数据命令
-  │          │           → fc_stripe_release_parity()
-  │          │         返回
-  │          └─ NO  → 继续 ②
+  ├─ ① nand_dispatch_poll(fc_nand_completion_sink, &sink_ctx)
+  │     └─ 遍历全部 (ch,ce,lun)，每 LUN 每轮恰好 step 一次；每产出一条完成就回调 sink
+  │          ├─ 有完成（返回条数 != 0）→ sink 内逐条当场消费：
+  │          │     fc_complete_from_nand()          ← 回写 desc + 数据路径 + CQ
+  │          │     [CONFIG_FC_RAID] 若完成的是 stripe 数据命令
+  │          │       → fc_stripe_release_parity()
+  │          │     抽干后返回（仅 CQ 满这一 FC 侧故障才报 IO_ERROR；
+  │          │     NAND 命令自身失败不算——状态已在 CQ entry 里）
+  │          └─ 无完成（返回 0）→ 继续 ②
   │
   ├─ ② fc_poll_fill(controller)                   ← 一次填充 pass（v8）
   │     ├─ 快照 HSQ 数 → 扫 HSQ（need=1）→ room 够则 submit，否则该 LUN 挂起
@@ -431,7 +433,7 @@ fc_service()
         └─ nand_dispatch_submit_chain(reqs, count) ← 整链原子追加
 ```
 
-**要点**：一次 `fc_service()` 要么推进完成并立即返回，要么走一次填充 pass——两件事不交叉。填充只把命令放进目标 LUN 的 FIFO，实际执行由后续 `fc_service()` 的 `nand_dispatch_poll()` 逐 LUN 推进（每 LUN 每轮一条，完成一条回一份 completion）。两条分支的失败兜底统一走 `fc_poll_fail_command()`（合成 NAND_FAIL 完成项）；**`nand_dispatch_submit*` 因填充前已查 room，生产路径上不会返回 `NOT_READY`（出现即 `ASSERT`）**，`NOT_READY` 的"忙"语义改由 `nand_dispatch_lun_free()` 前置表达。队列状态寄存器 `fc_register_queue_state()` **逐点刷新**（各分支内联调用，与拆分前位置一一对应，共 13 处）——注意**校验失败早退的那条不刷新**，属既有行为，不可"顺手统一"。行为不对称：META/PAA 预填只在单命令路径（分支 A），链式路径不做。
+**要点**：一次 `fc_service()` 要么把本轮所有完成抽干（`nand_dispatch_poll` 全遍历 + sink 逐条消费），要么走一次填充 pass——两件事不交叉。填充只把命令放进目标 LUN 的 FIFO，实际执行由后续 `fc_service()` 的 `nand_dispatch_poll()` 逐 LUN 推进（每个 LUN 每轮恰好 step 一次，完成经 sink 逐条回一份 completion）。两条分支的失败兜底统一走 `fc_poll_fail_command()`（合成 NAND_FAIL 完成项）；**`nand_dispatch_submit*` 因填充前已查 room，生产路径上不会返回 `NOT_READY`（出现即 `ASSERT`）**，`NOT_READY` 的"忙"语义改由 `nand_dispatch_lun_free()` 前置表达。队列状态寄存器 `fc_register_queue_state()` **逐点刷新**（各分支内联调用，与拆分前位置一一对应，共 13 处）——注意**校验失败早退的那条不刷新**，属既有行为，不可"顺手统一"。行为不对称：META/PAA 预填只在单命令路径（分支 A），链式路径不做。
 
 ---
 
@@ -796,7 +798,7 @@ FC (fc_service)
 ### 流程图：nand_dispatch poll 遍历模型（图 9）
 
 **v8 起无 Phase 1 / Phase 2 之分**：`nand_dispatch_poll()` 只保留骨架
-（round-robin 遍历通道 → CE → LUN），每 LUN 单步推进一条命令（完成一条即回一份 completion），
+（全遍历通道 → CE → LUN），每 LUN 每轮恰好单步推进一条命令（完成经 sink 逐条回一份 completion），
 具体逻辑拆成 static 辅助函数：
 
 | 职责 | 函数 | 说明 |
@@ -814,12 +816,13 @@ FC (fc_service)
 `nand_dispatch_task_build_request`（并入 `task_start`）。
 
 ```text
-nand_dispatch_poll(completion)          ← 骨架：round-robin 遍历 + 每 LUN 单步
-for channel = cursor..(cursor+CH_NUM-1)
+nand_dispatch_poll(sink, ctx)            ← 骨架：全遍历 + 每 LUN 单步（不早退）
+for channel = 0..CH_NUM-1
   for ce, for lun:
       queue = &g_nand_dispatch_queues[ch][ce][lun];  count==0 → 跳过
-      ctx = { completion, queue, ch/ce/lun }
-      out = lun_step(ctx)                            ← 每 LUN 只推进一步
+      lun_ctx = { &completion, queue }               ← completion 槽复用
+      out = lun_step(&lun_ctx)                       ← 每 LUN 只推进一步
+      out == DONE → sink(&completion, ctx)           ← 完成当场交出，不缓存批量
 
 nand_dispatch_lun_step(ctx)             ← 单命令推进（一次调用只处理 tasks[head]）
   │
@@ -848,30 +851,31 @@ nand_dispatch_lun_step(ctx)             ← 单命令推进（一次调用只处
   │
   └─ 本条命令完成 → *completion = tasks[head].completion
                     head++（模 DEPTH）, count--, phase=IDLE
-                    g_nand_channel_cursor 前进 → DONE（有完成）
+                    → DONE（有完成，交给 sink）
 
-全部遍历完无完成 → 返回 NOT_READY
+全部遍历完 → 返回完成条数（0 = 无完成）
 ```
 
 **要点**：一条命令在 FIFO 里"占住队头"直到它自己完成——链因此天然不可被同 LUN 的后续命令插入
-（后续命令排在链后，FIFO 严格顺序）。每次 poll 每 LUN 最多完成一条，与旧"每轮一条完成"语义一致；
-但**每条命令各回一份 completion**（旧模型整链只回链尾一份，中间命令泄漏）。
+（后续命令排在链后，FIFO 严格顺序）。每个 LUN 每轮最多完成一条；poll **不早退**，每个 LUN 每轮
+恰好 step 一次，完成经 sink 逐条交出。但**每条命令各回一份 completion**（旧模型整链只回链尾一份，中间命令泄漏）。
 
-**重构注意**：`nand_dispatch_lun_step` 的返回值依赖两个 outcome 枚举——`nand_dispatch_lun_outcome_t`
-（WAIT / DONE / ERROR）、`nand_dispatch_start_outcome_t`（REQ_ERROR / ASYNC / SYNC）、
-`nand_dispatch_cw_outcome_t`（ASYNC / DONE）。其中 **REQ_ERROR 与 nand_fc_start 自身的错误码必须区分**：
-前者是致命的（poll 丢弃该 LUN 队列并返回 INVALID_ARGUMENT），后者只是"带错误状态的完成"，
-要继续走完成处理链。
+**重构注意**：`nand_dispatch_lun_step` 的返回值依赖三个 outcome 枚举——`nand_dispatch_lun_outcome_t`
+（WAIT / DONE）、`nand_dispatch_start_outcome_t`（ASYNC / SYNC）、
+`nand_dispatch_cw_outcome_t`（ASYNC / DONE）。req 构建 handler 无返回码（构建不存在失败路径），
+故 `start_outcome_t` 只需区分"启动即返回"（ASYNC）与"start 内同步完成"（SYNC）；
+`nand_fc_start` 自身的错误码不是失败出口，而是"带错误状态的完成"，继续走完成处理链。
 
 ### 4.4 接口
 
 ```c
 uint8_t nand_dispatch_init(void);
-void    nand_dispatch_set_device_ready(uint8_t ready);
+void    nand_dispatch_set_armed(uint8_t armed);            /* 放行异步提交（nand_init 成功后置 1） */
 uint8_t nand_dispatch_submit(const nand_dispatch_request_t *request);                       /* 单命令：按 room 追加到 LUN FIFO */
 uint8_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count); /* 链：整批原子追加，room 不足则无副作用返回 NOT_READY */
 uint8_t nand_dispatch_lun_free(uint8_t ch, uint8_t ce, uint8_t lun);                        /* 查询 LUN FIFO 剩余槽数（0..DEPTH） */
-uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion);
+typedef void (*nand_dispatch_sink_t)(const nand_dispatch_completion_t *completion, void *ctx);
+uint8_t nand_dispatch_poll(nand_dispatch_sink_t sink, void *ctx);  /* 全遍历，每完成回调一次；返回条数 */
 ```
 
 `nand_dispatch_request_t` 是 FC → NAND 的完整请求结构，包含命令 ID、操作码、通道路由、page_type、参数和预解析的 CW 信息：
@@ -894,7 +898,8 @@ typedef struct {
 **v8 提交语义**：NAND 侧不再有"忙"的拒收——`submit`/`submit_chain` 只在 FIFO 装不下（`count + N > DEPTH`）时
 返回 `NAND_RESULT_NOT_READY`，**且无副作用**（一个槽都不写）。FC 填充前先查 `nand_dispatch_lun_free()`，
 因此生产路径上 `NOT_READY` 不会出现（出现即 `ASSERT`）；它保留是给"链放不下"的重试语义兜底。
-`nand_dispatch_submit` 仍先检查 `g_nand_device_ready`（未就绪返回 `INVALID_ARGUMENT`），`submit_chain` 不查。
+`submit` / `submit_chain` 先经 `nand_dispatch_enqueue` 检查放行闩锁 `g_nand_dispatch_armed`（未放行返回 `INVALID_ARGUMENT`）——
+两个入口共用同一道门，不再有单命令/整链的不对称。
 
 `nand_dispatch_completion_t` 包含命令 ID、执行状态、NAND 状态、per-CW 状态、per-CW ECC 纠正比特数和失败 Descriptor ID：
 
@@ -2222,7 +2227,7 @@ desc_id = FC_DESCRIPTOR_ID_INVALID，自动跳过回写。GET_FEATURES 的返回
 
 | 表 | 类型 | 用途 | 替代目标 |
 |----|------|------|---------|
-| `g_nand_dispatch_req_table[OP_COUNT]` | `uint8_t (*)(nand_dispatch_task_t *)` | 从 task 预解析数据构造 `nand_fc_request_t` | `nand_dispatch_poll()` 中的 ~90 行 if-else 链 |
+| `g_nand_dispatch_req_table[OP_COUNT]` | `void (*)(nand_dispatch_task_t *)` | 从 task 预解析数据构造 `nand_fc_request_t` | `nand_dispatch_poll()` 中的 ~90 行 if-else 链 |
 | `g_nand_dispatch_completion_table[OP_COUNT]` | `void (*)(nand_dispatch_task_t *, uint8_t, const nand_fc_completion_t *)` | 设置 cw_status 和 failed_descriptor_id | `nand_dispatch_task_complete()` 中的 if-else 链 |
 
 ### 15.3 Request 构建 handler
@@ -2266,7 +2271,7 @@ if (op == OP_NORMAL_PROGRAM_PAGE || op == OP_OTP_DATA_PROGRAM || ...) {
 **重构后**（1 行）：
 
 ```c
-result = g_nand_dispatch_req_table[task->operation](task);
+g_nand_dispatch_req_table[task->operation](task);
 ```
 
 ### 15.6 `nand_operation_map_t` 协议属性增强
@@ -3039,13 +3044,14 @@ static nand_dispatch_lun_queue_t g_nand_dispatch_queues[CH_NUM][CE_NUM][LUN_NUM]
 static uint8_t                   g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE];
 ```
 
-`nand_dispatch_poll()` 遍历所有通道 → CE → LUN，每 LUN 单步推进一条：
+`nand_dispatch_poll()` 全遍历通道 → CE → LUN，每个 LUN 每轮恰好单步推进一条（不早退，
+完成经 sink 逐条交出）：
 ```c
-for (count = 0; count < CH_NUM; count++) {
-    channel = (uint8_t)((g_nand_channel_cursor + count) % CH_NUM);
+for (channel = 0; channel < CH_NUM; channel++)
     for (ce = 0; ce < CE_NUM; ce++)
-        for (lun_idx = 0; lun_idx < LUN_NUM; lun_idx++) { ... lun_step(ctx); ... }
-}
+        for (lun_idx = 0; lun_idx < LUN_NUM; lun_idx++) {
+            ... out = lun_step(&lun_ctx); if (out == DONE) sink(&completion, ctx); ...
+        }
 ```
 
 FC 命令包含通道字段：
@@ -3512,7 +3518,7 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
 
 ```
 sys_init → log 绑定 → fc_init → nand_init
-        → nand_dispatch_set_device_ready(1) → stm32_platform_register
+        → nand_dispatch_set_armed(1) → stm32_platform_register
         → ssd_ftl_boot_all → while(1) { ... }
 ```
 
@@ -3520,11 +3526,11 @@ sys_init → log 绑定 → fc_init → nand_init
 |---|------|------|
 | ① | `fc_init()` 必须先于 `nand_init()` | `fc_init_internal()` 里**唯一的 NAND 依赖**是 `nand_dispatch_init()`，它只是 memset 软件调度状态、**不碰 FMC 硬件**（见 `nand_dispatch.h`） |
 | ② | `else if` 级联：`fc_init` 失败 → `nand_init` 整段跳过 | 没有 FC 控制面，NAND 裸路径也无意义；后续 `platform_register` / `ssd_ftl_boot_all` 同样被跳过，主循环退化为裸 `fc_service()` |
-| ③ | `nand_dispatch_set_device_ready(1)` 必须在 `nand_init()` 之后 | `nand_dispatch_submit()` 用 `g_nand_device_ready` 门控；而 `nand_init` 内部的 RESET/READ_ID 走 `nand_fc_execute` **直连 engine**、绕过 fc/dispatch，所以初始化期间该门控必须为 0 |
+| ③ | `nand_dispatch_set_armed(1)` 必须在 `nand_init()` 之后 | `nand_dispatch_submit()`/`submit_chain()` 经 `nand_dispatch_enqueue()` 用 `g_nand_dispatch_armed` 门控；而 `nand_init` 内部的 RESET/READ_ID 走 `nand_fc_execute` **直连 engine**、绕过 fc/dispatch，所以初始化期间该门控必须为 0 |
 
 两个门控位的语义不要混淆：
 
-- **`g_nand_device_ready`**（`nand_dispatch.c`）——只门控 `nand_dispatch_submit()`，`nand_dispatch_poll()` 不检查。
+- **`g_nand_dispatch_armed`**（`nand_dispatch.c`）——只在 `nand_dispatch_enqueue()` 一处门控（`submit`/`submit_chain` 共用），`nand_dispatch_poll()` 不检查。
 - **`g_ftl_ready`**（`main.c`）——主循环守卫，决定走 `ftl_service()` 还是裸 `fc_service()`，由 `ssd_ftl_boot_all()` 末尾置位。
 
 ### 22.2 流程图：上电初始化分层调用时序（图 14）
@@ -3553,7 +3559,7 @@ main() (src/main.c)          fc_init()                  nand_init()             
   │                              Step6 nand_fc_read_id + ID 校验
   │                              Step7 Mode 4（CONFIG_NAND_TIMING_MODE_4=0 → 整段编掉）
   │
-  ├─ else nand_dispatch_set_device_ready(1)  ★放行 submit
+  ├─ else nand_dispatch_set_armed(1)        ★放行 submit/submit_chain
   ├─ stm32_platform_register()               （注册 time_us，FTL 的 T3 定时器依赖）
   └─ ssd_ftl_boot_all() ───────────────────────────────────────────────────▶ (main.c)
                                 ① 逐实例 ssd_ftl_boot → ftl_init / boot_recovery
@@ -3609,9 +3615,9 @@ nand_init()
 | 1 | `main` → `sys_init` / `log_set_*` | 时钟、UART 日志通道可用，但 FC/NAND 尚不存在 |
 | 2 | `fc_init` → `fc_init_internal` ①②③ | 三池、三条环形队列、寄存器影子就绪；命令可以 alloc/configure 但还提交不了 |
 | 3 | `fc_init_internal` ④⑤⑥⑦ | 调度器、CRC、空闲链表就绪；`nand_dispatch_init` 已清空软件调度状态（NAND 硬件仍未初始化） |
-| 4 | `nand_init` Step1–4 | FMC 引脚/时钟、per-LUN 后端、DMA 就绪；此时 `g_nand_device_ready` 仍为 0 |
+| 4 | `nand_init` Step1–4 | FMC 引脚/时钟、per-LUN 后端、DMA 就绪；此时 `g_nand_dispatch_armed` 仍为 0 |
 | 5 | `nand_init` Step5–6 | NAND 已复位、ID 已核对，芯片可用；但启动命令是绕过队列直接跑的 |
-| 6 | `nand_dispatch_set_device_ready(1)` | `nand_dispatch_submit` 放行——从现在起 FC 才能向 NAND 派发命令 |
+| 6 | `nand_dispatch_set_armed(1)` | `nand_dispatch_submit`/`submit_chain` 放行——从现在起 FC 才能向 NAND 派发命令 |
 | 7 | `stm32_platform_register` | FTL 的 `time_us` 就绪，T3 定时触发（CP / GC）才有依据 |
 | 8 | `ssd_ftl_boot_all` ①–④ | 每个 (ch,ce,lun) 完成 `ftl_init` + `boot_recovery`；controller 绑定 FTL 实例 |
 | 9 | `ssd_ftl_boot_all` ⑤ `g_ftl_ready=1` | 主循环切换到 `ftl_service()`，系统进入可服务状态 |

@@ -1,5 +1,6 @@
 #include "ftl/ftl.h"
 
+#include "common/assertion.h"
 #include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/bbt.h"
@@ -60,11 +61,10 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
     uint16_t       cmd_id = (uint16_t)completion->command_id;
     fc_command_t  *cmd;
 
+    /* command_id 由 NAND 从本命令回填（submit 时铸出）；fc_command_id_to_command
+     * 的公共壳已断言 ID 在池内且恒返回非空指针——此处防御不可达，且会静默吞 completion。 */
     cmd = fc_command_id_to_command(cmd_id);
-    if (cmd == NULL)
-    {
-        return;
-    }
+    ASSERT(cmd != NULL);
 
     switch (completion->module)
     {
@@ -521,7 +521,9 @@ void ftl_service(ftl_context_t *ftl)
         return;
     }
 
-    /* Phase 1: fc_service 推进 NAND */
+    /* Phase 1: fc_service 推进 NAND。
+     * 第 1 次调用即把本轮所有完成抽干（nand_dispatch_poll 全遍历 + sink 逐条消费），
+     * 之后几次走填充 pass；预算因此封顶的是"本轮跑几次 fc_service"，不是完成条数。 */
     for (uint8_t i = 0U; i < NAND_SUBMIT_BUDGET; i++)
     {
         if (fc_service() != FC_STATUS_OK)

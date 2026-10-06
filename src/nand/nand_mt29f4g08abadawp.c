@@ -209,7 +209,7 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
  *   实现要点：经 g_nand_operation_map[operation] 取 UOP 序列，
  *         手工展开 request（row 只拷前 2 个 plane，NAND_PLANE_MAX=4 深度）
  *         后调用 nand_engine_execute 阻塞执行。
- *         契约：仅初始化阶段（device_ready==0）可调，见下 ASSERT。
+ *         契约：仅初始化阶段（armed==0）可调，见下 ASSERT。
  * -------------------------------------------------------------------- */
 nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *request, nand_fc_completion_t *completion)
 {
@@ -222,9 +222,9 @@ nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *reques
     ASSERT(operation < OP_COUNT);
     ASSERT(request != NULL);
     ASSERT(completion != NULL);
-    /* 同步入口契约：仅 nand_init 阶段（device_ready==0）可调。device_ready 置位后
+    /* 同步入口契约：仅 nand_init 阶段（armed==0）可调。放行闩锁置位后
      * 必须走 nand_fc_start/step 异步路径——此处阻塞式执行会卡住整个调度器。 */
-    ASSERT(nand_dispatch_is_device_ready() == 0U);
+    ASSERT(nand_dispatch_is_armed() == 0U);
 
     map = &g_nand_operation_map[operation];
     if (map->uops == NULL)
@@ -483,7 +483,7 @@ uint8_t nand_init(void)
     /* ── Step 5: RESET（FFh）──
      * Datasheet power-on rule: allow R/B# to become valid before the first FFh command.
      * ★ 启动命令经 nand_fc_execute 直连 nand_engine，绕过 fc / nand_dispatch
-     *   命令队列——此刻 g_nand_device_ready 仍为 0，nand_dispatch_submit 会拒收。 */
+     *   命令队列——此刻 g_nand_dispatch_armed 仍为 0，nand_dispatch_submit 会拒收。 */
     delay_ms(1U);
     result = nand_fc_reset(&completion);
     if (result != NAND_RESULT_OK)

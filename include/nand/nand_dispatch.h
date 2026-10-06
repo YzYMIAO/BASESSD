@@ -81,15 +81,17 @@ typedef struct
 /* Initialize fixed Channel Dispatch Queues. This function does not initialize FMC hardware. */
 nand_result_t nand_dispatch_init(void);
 
-/* NAND/FMC initialisation succeeded; FC may submit media commands after this. */
-void nand_dispatch_set_device_ready(uint8_t ready);
+/* NAND/FMC initialisation succeeded; FC may submit media commands after this.
+ * ⚠ 这不是 ONFI 的 "device ready"（R/B# / status bit 6，per-die 且瞬态）——
+ *   那由引擎 WAIT_READY 现查。此闩锁表示"FMC 已由同步初始化路径移交给异步 dispatch"。 */
+void nand_dispatch_set_armed(uint8_t armed);
 
 /*
- * 查询设备就绪门控位（归一化 0/1）。
+ * 查询异步路径放行闩锁（归一化 0/1）。
  * 供 NAND 驱动层的同步入口 nand_fc_execute 断言"仅初始化阶段可调"的契约：
- * device_ready 置位后必须走 nand_fc_start/step 异步路径，否则阻塞式执行会卡住调度器。
+ * 放行后必须走 nand_fc_start/step 异步路径，否则阻塞式执行会卡住调度器。
  */
-uint8_t nand_dispatch_is_device_ready(void);
+uint8_t nand_dispatch_is_armed(void);
 
 /* Submit one pre-resolved command to its LUN FIFO (count = 1). */
 nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request);
@@ -97,18 +99,26 @@ nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request);
 /*
  * 原子提交整条命令链到目标 LUN 的 FIFO（追加 count 槽）。
  * requests[0..count-1] 必须在同一 ch/ce/lun。
+ * 异步路径未放行（nand_dispatch_set_armed 之前）返回 INVALID_ARGUMENT。
  * LUN FIFO 剩余深度不足整链时返回 NOT_READY，无副作用。
  * 追加后链占据连续槽位、按 FIFO 顺序执行，中间不可被后续命令插入。
  * 每条命令各回一份 completion（由 poll 逐条返回）。
  */
 nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count);
 
-/* Execute one pending command from one LUN FIFO through ONFI -> NAND Engine -> FMC. */
-nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion);
+/* 完成回调：poll 每产出一条完成就调用一次，调用方在回调里当场消费即可，无需缓存。 */
+typedef void (*nand_dispatch_sink_t)(const nand_dispatch_completion_t *completion, void *ctx);
+
+/*
+ * 推进全部 (ch, ce, lun)：每个 LUN 每轮恰好 step 一次，完成经 sink 逐条交出。
+ * 返回本轮产出的完成条数（0 = 无完成，上限 CH_NUM×CE_NUM×LUN_NUM）。
+ * 不早退——公平性依赖"每个 LUN 每轮都被走到"（见 nand_dispatch.c 实现要点）。
+ */
+uint8_t nand_dispatch_poll(nand_dispatch_sink_t sink, void *ctx);
 
 /*
  * 查询目标 LUN FIFO 的剩余槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。
- * 供 FC 填充时判断能否放下整条链；越界参数返回 0。
+ * 供 FC 填充时判断能否放下整条链；ch/ce/lun 越界是调用者编程错误（断言）。
  */
 uint8_t nand_dispatch_lun_free(uint8_t ch, uint8_t ce, uint8_t lun);
 

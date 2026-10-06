@@ -24,7 +24,7 @@
  *   10. CQ 出口         fc_poll_completion_internal
  *
  * 服务主循环（fc_poll_internal）：
- *   ① nand_dispatch_poll() 推进 NAND 层，有完成 → fc_complete_from_nand()
+ *   ① nand_dispatch_poll() 推进 NAND 层全部 LUN，每完成经 sink 当场 fc_complete_from_nand()
  *   ② 无完成 → fc_poll_fill() 一次扫描 HSQ/SQ，按 LUN 保序把能放下的命令（含链）
  *      提交进 NAND per-LUN FIFO（分派 fc_poll_dispatch_single() /
  *      fc_poll_dispatch_chain()；后者内部构建 request → submit/submit_chain，
@@ -181,12 +181,6 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, uint1
     /* 公共壳 fc_descriptor_id_to_descriptor() 已断言过 descriptor_id < FC_DESCRIPTOR_POOL_DEPTH */
     ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
     return &controller->descriptor_pool[descriptor_id];
-}
-
-/* 命令 ID 有效性（< 池深度） */
-static uint8_t fc_command_id_is_valid(fc_command_id_t command_id)
-{
-    return (uint8_t)(command_id < FC_COMMAND_POOL_DEPTH);
 }
 
 /* 内部：直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移 */
@@ -707,10 +701,6 @@ fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_comma
     /* ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与 cws[PLANE_NUM][CW_NUM] 都按 PLANE_NUM 定尺。
      *   改 plane 语义时这里与 nand_dispatch_tables.c 的 multi-plane handler 要一起动。 */
     ASSERT(plane_count <= PLANE_NUM);
-    if (plane_count > PLANE_NUM)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
 
     /* 命令能触及的平面位段 [plane_first, plane_last)：
      *   multi-plane：从 plane 0 起，覆盖 plane_count 个 plane；
@@ -1254,19 +1244,133 @@ static void fc_fill_cw_meta_paa(fc_t *controller, fc_command_t *command)
 }
 
 /* --------------------------------------------------------------------
+ * fc_build_request_data_planes
+ *   功能：沿 desc 链把 CW 落位到 request 的 cws[plane][slot]（带数据命令专用）。
+ *   参数：controller —— FC 控制器；command —— 命令；
+ *         request —— 输出（header 已填、全零）。
+ *   实现要点：
+ *     - slot = 该 plane 内已落位的 CW 数，同时充当 cw_count[plane] 的计数器；
+ *       **链长度即 CW 数**（不由 config.cw 推导）。
+ *     - ⚠ slot 是**链槽位**（该 plane 内第几个待访问 CW），不是 CW 号——mask 不满时
+ *       两者不同（如 mask=0b1011 的 plane 内槽位 0/1/2 对应 CW 0/1/3）。
+ *       CW 号由 PAA 携带（paa_to_cw），下游 req_* 与 cw_chain 一律从 PAA 取。
+ *     - 只由 fc_build_dispatch_request 的"带数据命令"分支调用。
+ * -------------------------------------------------------------------- */
+static void fc_build_request_data_planes(const fc_t *controller, const fc_command_t *command, nand_dispatch_request_t *request)
+{
+    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)command->desc_id;
+
+    while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        const fc_descriptor_t *descriptor = &controller->descriptor_pool[desc_id];
+        uint8_t                plane      = (uint8_t)paa_to_plane(descriptor->paa);
+        uint8_t                slot;
+
+        ASSERT(plane < PLANE_NUM);
+        slot = request->cw_count[plane];
+        ASSERT(slot < CW_NUM);
+
+        request->cws[plane][slot].paa = descriptor->paa;
+        if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
+        {
+            /* Page read/write 需要 CW 基址（ECC 在完整 528B CW 上处理）；
+             * 非 page 命令数据直接写入 USER 区域，test/FTL 通过
+             * fc_buffer_id_to_real_buffer 直接读取。 */
+            request->cws[plane][slot].buffer =
+                (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
+                        (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                    ? fc_buffer_get_base(descriptor->buffer_id)
+                    : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+        }
+        else
+        {
+            request->cws[plane][slot].buffer = NULL;
+        }
+        request->cw_count[plane] = (uint8_t)(slot + 1U);
+        desc_id                  = (fc_descriptor_id_t)descriptor->next_id;
+    }
+
+    if (command->config.multi_plane > 0U)
+    {
+        uint8_t plane;
+
+        request->plane_count = (uint8_t)command->config.multi_plane;
+        request->plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
+        /* ⚠ flat 掩码下某 plane 可以是 **0 个 CW**（如只读 plane 1 = 0xF0），但多 plane
+         *   加载/编程的行地址取自 cw_paa[plane][0]（uop 硬编码 row[0]/row[1]）——空 plane
+         *   不显式填 PAA 会退化成 block0/page0，静默误操作。故对命令 plane 集合里的
+         *   **每个** plane 都补一条 CW=0 的 PAA（行地址只用 page/block/lun，CW 位被
+         *   paa_to_nand_row() 丢掉，故 CW=0 不影响取数）。 */
+        for (plane = 0U; plane < request->plane_count; plane++)
+        {
+            if (request->cw_count[plane] == 0U)
+            {
+                request->cws[plane][0U].paa    = paa_make(paa_to_page(command->paa), plane, paa_to_block(command->paa), paa_to_lun(command->paa), 0U);
+                request->cws[plane][0U].buffer = NULL;
+            }
+        }
+    }
+    else
+    {
+        /* Single-plane：目标 plane 取自 command->paa，数据落位 cws[plane][*]（不再恒为 [0]）。
+         * 不变式：本命令所有 desc 的 plane 位相同——fc_command_configure_descriptor_internal()
+         * 单 plane 分支只改 CW 位（descriptor->paa = (command->paa & ~CW_MASK) | cw），保留
+         * plane 位，故一次取值即对全部 desc 成立；下面的 ASSERT 把该不变式显式化。 */
+        request->plane = (uint8_t)paa_to_plane(command->paa);
+        ASSERT(request->cw_count[request->plane] == fc_command_descriptor_count(controller, command));
+    }
+}
+
+/* --------------------------------------------------------------------
+ * fc_dispatch_rewrite_operation
+ *   功能：下发前对 request->operation 做两处改写（读语义 + Phase V 拆分）。
+ *   参数：request —— 已构建完成的 dispatch 请求。
+ *   实现要点：
+ *     - ⚠ **两处改写有顺序依赖**：读改写必须排在 splittable 判定之前。读改写把
+ *       WITH_DATA_OUT 换成 WITHOUT_DATA_OUT，而后者在 g_nand_operation_map 里
+ *       op_type=ATOMIC / pair_op=0，于是不再 splittable。当前 LUN_NUM=1 该拆分本就不
+ *       生效，但启用多 LUN 前必须把 LOAD/FETCH 拆分与逐 CW 取数模型重新对齐。
+ *     - 由 fc_build_dispatch_request 末尾调用；单命令与链式路径共用。
+ * -------------------------------------------------------------------- */
+static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
+{
+    /* ── 读命令统一为「加载 + 逐 CW 取数」──
+     * FC 层命令保持 WITH_DATA_OUT 语义（desc 建链、fc_is_page_read、数据路径、
+     * 完成项判定都用它），但下发给 NAND 的是对应的「只加载、不输出」op：
+     * 整页先搬进 NAND 页缓冲，数据随后由 nand_dispatch_task_cw_chain 用
+     * 05h（单 plane）/ 06h（多 plane）按 mask 逐 CW 取回（见 nand_dispatch.c）。
+     * 这样任意 CW 子集（含不含 CW0）走同一条路径。 */
+    if (request->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT)
+    {
+        request->operation = OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT;
+    }
+    else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
+    {
+        request->operation = OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT;
+    }
+
+    /* Phase V: splittable 原子命令自动拆为 ISSUE（仅 LUN_NUM>1 时生效；
+     * 拆分后由 dispatch Phase 机异步接续 WAIT/FETCH）。 */
+    if ((LUN_NUM > 1U) && nand_operation_is_splittable(request->operation))
+    {
+        request->operation = nand_operation_to_issue(request->operation);
+    }
+}
+
+/* --------------------------------------------------------------------
  * fc_build_dispatch_request
  *   功能：由一条已 ACTIVE 的命令构建自包含的 NAND dispatch 请求。
  *   参数：controller —— FC 控制器；command —— 命令；
  *         command_id —— 命令 ID；request —— 输出请求。
- *   返回：FC_STATUS_OK；desc 链断裂时该命令注 NAND_FAIL 完成并返回
- *         FC_STATUS_IO_ERROR。
+ *   返回：无（构建不可失败：desc 链遍历按池深截断，不产生错误路径）。
  *   实现要点：
  *     - 填 ch/ce/lun/page_type/feature_addr，再按操作类型填 cw_count[plane] 与 cws[][]：
  *         * ERASE_BLOCK：单 cws[plane][0]（plane = paa_to_plane(command->paa)），无 buffer；
  *         * ERASE_BLOCK_MULTI_PLANE：两 plane 各一个 cws，无 buffer；
  *         * SET/GET_FEATURES：cws[plane][0].buffer 指向控制器侧暂存 g_fc_return_staging
  *           （plane 恒 0，feature 寄存器是 die 级、无 plane 语义）；
- *         * 其余带数据命令：沿 desc 链落位 cws[plane][slot]，slot 按 plane 内递增。
+ *         * 其余带数据命令：沿 desc 链落位 cws[plane][slot]，slot 按 plane 内递增
+ *           （见 fc_build_request_data_planes）。
  *     - **cws 第一维恒为物理 plane 索引**（不是"第几组槽位"）：单 plane 命令只填
  *       cws[request->plane][*]，multi-plane 填 cws[0][*]/cws[1][*]（request->plane 恒 0）。
  *       未写的行由上面的 {0} 初始化保证为确定性零值。行地址始终由 paa_to_nand_row()
@@ -1274,14 +1378,12 @@ static void fc_fill_cw_meta_paa(fc_t *controller, fc_command_t *command)
  *     - **cw_count 是每-plane 数组**：flat CW 掩码下两 plane 的 CW 数可以不同、甚至为 0
  *       （如只选 plane 1）。数据命令由链落位循环按 plane 计数得出，不由 config.cw 推导。
  *     - page read/write 用 CW 基址（ECC 处理完整 528B），非 page 用 USER 区。
- *     - 末尾做 Phase V splittable → ISSUE 转换（仅 LUN_NUM>1）。
+ *     - 末尾调 fc_dispatch_rewrite_operation()：读语义改写 + Phase V splittable → ISSUE。
  *   注意：本函数不做 META/PAA 预填——那是单命令路径独有的步骤，
  *         见 fc_fill_cw_meta_paa。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *command, fc_command_id_t command_id, nand_dispatch_request_t *request)
+static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, fc_command_id_t command_id, nand_dispatch_request_t *request)
 {
-    fc_descriptor_id_t desc_id;
-
     /* Pre-resolve descriptor-chain data into a self-contained dispatch request. */
     *request              = (nand_dispatch_request_t){0};
     request->command_id   = (uint16_t)command_id;
@@ -1340,102 +1442,15 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
     }
     else if (nand_operation_has_data((uint8_t)command->config.operation))
     {
-        /* 沿 desc 链落位：cws[plane][slot] 的 slot = 该 plane 内已落位的 CW 数，
-         * 同时充当 cw_count[plane] 的计数器。**链长度即 CW 数**（不由 config.cw 推导）。
-         * ⚠ slot 是**链槽位**（该 plane 内第几个待访问 CW），不是 CW 号——mask 不满时
-         *   两者不同（如 mask=0b1011 的 plane 内槽位 0/1/2 对应 CW 0/1/3）。
-         *   CW 号由 PAA 携带（paa_to_cw），下游 req_* 与 cw_chain 一律从 PAA 取。 */
-        desc_id = (fc_descriptor_id_t)command->desc_id;
-        while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
-        {
-            const fc_descriptor_t *descriptor = &controller->descriptor_pool[desc_id];
-            uint8_t                plane      = (uint8_t)paa_to_plane(descriptor->paa);
-            uint8_t                slot;
-
-            ASSERT(plane < PLANE_NUM);
-            slot = request->cw_count[plane];
-            ASSERT(slot < CW_NUM);
-
-            request->cws[plane][slot].paa = descriptor->paa;
-            if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
-            {
-                /* Page read/write 需要 CW 基址（ECC 在完整 528B CW 上处理）；
-                 * 非 page 命令数据直接写入 USER 区域，test/FTL 通过
-                 * fc_buffer_id_to_real_buffer 直接读取。 */
-                request->cws[plane][slot].buffer =
-                    (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
-                            (fc_is_page_write((uint8_t)command->config.operation) != 0U)
-                        ? fc_buffer_get_base(descriptor->buffer_id)
-                        : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
-            }
-            else
-            {
-                request->cws[plane][slot].buffer = NULL;
-            }
-            request->cw_count[plane] = (uint8_t)(slot + 1U);
-            desc_id                  = (fc_descriptor_id_t)descriptor->next_id;
-        }
-
-        if (command->config.multi_plane > 0U)
-        {
-            uint8_t plane;
-
-            request->plane_count = (uint8_t)command->config.multi_plane;
-            request->plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
-            /* ⚠ flat 掩码下某 plane 可以是 **0 个 CW**（如只读 plane 1 = 0xF0），但多 plane
-             *   加载/编程的行地址取自 cw_paa[plane][0]（uop 硬编码 row[0]/row[1]）——空 plane
-             *   不显式填 PAA 会退化成 block0/page0，静默误操作。故对命令 plane 集合里的
-             *   **每个** plane 都补一条 CW=0 的 PAA（行地址只用 page/block/lun，CW 位被
-             *   paa_to_nand_row() 丢掉，故 CW=0 不影响取数）。 */
-            for (plane = 0U; plane < request->plane_count; plane++)
-            {
-                if (request->cw_count[plane] == 0U)
-                {
-                    request->cws[plane][0U].paa    = paa_make(paa_to_page(command->paa), plane, paa_to_block(command->paa), paa_to_lun(command->paa), 0U);
-                    request->cws[plane][0U].buffer = NULL;
-                }
-            }
-        }
-        else
-        {
-            /* Single-plane：目标 plane 取自 command->paa，数据落位 cws[plane][*]（不再恒为 [0]）。
-             * 不变式：本命令所有 desc 的 plane 位相同——fc_command_configure_descriptor_internal()
-             * 单 plane 分支只改 CW 位（descriptor->paa = (command->paa & ~CW_MASK) | cw），保留
-             * plane 位，故一次取值即对全部 desc 成立；下面的 ASSERT 把该不变式显式化。 */
-            request->plane = (uint8_t)paa_to_plane(command->paa);
-            ASSERT(request->cw_count[request->plane] == fc_command_descriptor_count(controller, command));
-        }
+        fc_build_request_data_planes(controller, command, request);
     }
     else
     {
         /* 其余无数据命令（RESET / BLOCK_LOCK / READ_STATUS 等）：cw_count 保持全 0 */
     }
 
-    /* ── 读命令统一为「加载 + 逐 CW 取数」──
-     * FC 层命令保持 WITH_DATA_OUT 语义（desc 建链、fc_is_page_read、数据路径、
-     * 完成项判定都用它），但下发给 NAND 的是对应的「只加载、不输出」op：
-     * 整页先搬进 NAND 页缓冲，数据随后由 nand_dispatch_task_cw_chain 用
-     * 05h（单 plane）/ 06h（多 plane）按 mask 逐 CW 取回（见 nand_dispatch.c）。
-     * 这样任意 CW 子集（含不含 CW0）走同一条路径。
-     * ⚠ LUN_NUM>1 时本转换会让这两个 op 不再命中下面的 Phase V splittable 拆分
-     *   （ISSUE/WAIT 多 LUN 重叠随之失效）；启用多 LUN 前需要把 LOAD/FETCH 拆分
-     *   与逐 CW 取数模型重新对齐。当前 LUN_NUM=1，该拆分本就不生效。 */
-    if (request->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT)
-    {
-        request->operation = OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT;
-    }
-    else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
-    {
-        request->operation = OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT;
-    }
-
-    /* Phase V: splittable 原子命令自动拆为 ISSUE（仅 LUN_NUM>1 时生效；
-     * 拆分后由 dispatch Phase 机异步接续 WAIT/FETCH）。单命令与链式路径共用。 */
-    if ((LUN_NUM > 1U) && nand_operation_is_splittable(request->operation))
-    {
-        request->operation = nand_operation_to_issue(request->operation);
-    }
-    return FC_STATUS_OK;
+    /* 读语义改写 + Phase V 拆分（顺序敏感，见 helper 头注释） */
+    fc_dispatch_rewrite_operation(request);
 }
 
 /* --------------------------------------------------------------------
@@ -1456,12 +1471,10 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
     fc_command_t           *command;
     nand_dispatch_request_t request;
 
-    if ((fc_command_id_is_valid(command_id) == 0U) ||
-        (controller->command_state[command_id] != FC_COMMAND_STATE_QUEUED))
-    {
-        /* 与拆分前一致：此校验失败早退，不刷新寄存器 */
-        return FC_STATUS_IO_ERROR;
-    }
+    /* 命令刚从 SQ/HSQ 弹出：id 恒为池内铸出值，状态恒 QUEUED（fc_submit_to_queue 置位）。
+     * 旧写法 return IO_ERROR 时命令已出队且未置 ACTIVE/未回推 → 永久泄漏，比停机更难查。 */
+    ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
+    ASSERT(controller->command_state[command_id] == FC_COMMAND_STATE_QUEUED);
     controller->command_state[command_id] = FC_COMMAND_STATE_ACTIVE;
     command                               = &controller->command_pool[command_id];
 
@@ -1484,11 +1497,7 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
     }
 #endif /* CONFIG_FC_RAID */
 
-    if (fc_build_dispatch_request(controller, command, command_id, &request) != FC_STATUS_OK)
-    {
-        fc_register_queue_state(controller);
-        return FC_STATUS_IO_ERROR;
-    }
+    fc_build_dispatch_request(controller, command, command_id, &request);
 
     const uint8_t submit_result = nand_dispatch_submit(&request);
 
@@ -1497,10 +1506,11 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
     ASSERT(submit_result != NAND_RESULT_NOT_READY);
     if (submit_result != NAND_RESULT_OK)
     {
-        LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_count=%u plane_count=%u\r\n",
+        LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_count=%u/%u plane_count=%u\r\n",
              (unsigned)command->config.operation,
              (unsigned)command_id,
-             (unsigned)request.cw_count,
+             (unsigned)request.cw_count[0U],
+             (unsigned)request.cw_count[1U],
              (unsigned)request.plane_count);
         fc_poll_fail_command(controller, command_id);
         fc_register_queue_state(controller);
@@ -1535,12 +1545,9 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
         fc_command_id_t command_id = chain->ids[i];
         fc_command_t   *command;
 
-        if ((fc_command_id_is_valid(command_id) == 0U) ||
-            (controller->command_state[command_id] != FC_COMMAND_STATE_QUEUED))
-        {
-            /* 与拆分前一致：此校验失败早退，不刷新寄存器 */
-            return FC_STATUS_IO_ERROR;
-        }
+        /* 同 fc_poll_dispatch_single：id 恒在池内、状态恒 QUEUED（队列成员不变量） */
+        ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
+        ASSERT(controller->command_state[command_id] == FC_COMMAND_STATE_QUEUED);
         controller->command_state[command_id] = FC_COMMAND_STATE_ACTIVE;
         command                               = &controller->command_pool[command_id];
 
@@ -1551,11 +1558,7 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
             (void)fc_data_path_encode(command);
         }
 
-        if (fc_build_dispatch_request(controller, command, command_id, &reqs[i]) != FC_STATUS_OK)
-        {
-            fc_register_queue_state(controller);
-            return FC_STATUS_IO_ERROR;
-        }
+        fc_build_dispatch_request(controller, command, command_id, &reqs[i]);
     }
 
     const uint8_t submit_result = nand_dispatch_submit_chain(reqs, chain_count);
@@ -1611,11 +1614,10 @@ static uint8_t fc_poll_chain_length(const fc_submission_queue_t *sq, const fc_co
         next = fc_command_id_to_command(next_id);
         ASSERT(next != NULL);
 
-        /* 连续性校验：必须同一 target（链成员同 LUN，由 FTL 保证） */
-        if ((next->config.ch != head->config.ch) || (next->config.ce != head->config.ce) || (next->config.lun != head->config.lun))
-        {
-            break;
-        }
+        /* 链成员必须同一 target（FTL 保证）；不满足即链构造错误，
+         * 此处 break 会静默把一条链截成两条、丢失链语义，故断言。 */
+        ASSERT((next->config.ch == head->config.ch) && (next->config.ce == head->config.ce) &&
+               (next->config.lun == head->config.lun));
         need++;
         if (next->config.chain == FC_CHAIN_END)
         {
@@ -1703,6 +1705,7 @@ static fc_status_t fc_poll_fill(fc_t *controller)
             fc_command_id_t      id;
             fc_command_t        *cmd;
             fc_scheduler_chain_t chain;
+            fc_status_t          dispatch_status;
             uint8_t              ch;
             uint8_t              ce;
             uint8_t              lun;
@@ -1741,7 +1744,18 @@ static fc_status_t fc_poll_fill(fc_t *controller)
             }
             k = (uint16_t)(k + need - 1U); /* 跳过已取出的链成员 */
 
-            if (((need == 1U) ? fc_poll_dispatch_single(controller, &chain) : fc_poll_dispatch_chain(controller, &chain)) != FC_STATUS_OK)
+            /* 单命令走 single，链走 chain——按 need 分流（不写成条件里的三目，
+             * 两个分支都是带副作用的提交，塞进 if 里读不出"做了什么事"） */
+            if (need == 1U)
+            {
+                dispatch_status = fc_poll_dispatch_single(controller, &chain);
+            }
+            else
+            {
+                dispatch_status = fc_poll_dispatch_chain(controller, &chain);
+            }
+
+            if (dispatch_status != FC_STATUS_OK)
             {
                 return FC_STATUS_IO_ERROR;
             }
@@ -1762,8 +1776,9 @@ static fc_status_t fc_poll_fill(fc_t *controller)
  *   参数：controller —— FC 控制器。
  *   返回：FC_STATUS_OK / IO_ERROR / QUEUE_EMPTY / NOT_READY。
  *   实现要点：
- *     - 先 nand_dispatch_poll() 推进 NAND；有完成 → fc_complete_from_nand
- *       （并清理 stripe parity），OK 直接返回（一次调用处理一条完成）。
+ *     - 先 nand_dispatch_poll() 推进 NAND 全部 LUN；每条完成经 sink 回调**当场消费**
+ *       （fc_complete_from_nand + 清 stripe parity），故一个 sink 上下文即可，无需缓存批量。
+ *       一次调用把本轮所有完成抽干（NAND 命令自身的失败不算 FC 故障——状态已在 CQ entry 里）。
  *     - 无完成 → fc_poll_fill()：一次扫描把能放下的命令（含链）提交进 NAND
  *       per-LUN FIFO（按 LUN 保序、HSQ 优先、room 判定）。
  *     - 队列状态寄存器由两个 dispatch helper **逐点刷新**（fc_register_queue_state
@@ -1773,38 +1788,60 @@ static fc_status_t fc_poll_fill(fc_t *controller)
  *   fc_poll_dispatch_chain 仅单元测试覆盖。详见设计文档 §23.8。
  *   调用方：ftl_service()（ftl.c）/ ftl_internal_sync_wait() / main.c 的裸 fc_service。
  * -------------------------------------------------------------------- */
+
+/* ── NAND 完成回调上下文 + sink ──
+ * nand_dispatch_poll 每产出一条完成就调一次 fc_nand_completion_sink；每条当场消费
+ * （写 desc/ECC、跑数据路径、组 CQ 项、清 stripe parity），不跨条缓存。 */
+typedef struct
+{
+    fc_t   *controller;
+    uint8_t failed; /* fc_complete_from_nand 返回非 OK（CQ 满强制 COMPLETED 防泄漏）时置位 */
+} fc_nand_sink_ctx_t;
+
+static void fc_nand_completion_sink(const nand_dispatch_completion_t *nand_completion, void *ctx)
+{
+    fc_nand_sink_ctx_t *sink_ctx = (fc_nand_sink_ctx_t *)ctx;
+
+    if (fc_complete_from_nand(sink_ctx->controller, nand_completion) != FC_STATUS_OK)
+    {
+        sink_ctx->failed = 1U;
+    }
+
+    /* ── Stripe parity 清理 ──
+     * 如果完成的命令是 stripe 数据命令，释放内部 parity 命令资源。 */
+#if CONFIG_FC_RAID
+    {
+        fc_command_id_t completed_id = (fc_command_id_t)nand_completion->command_id;
+        /* command_id 是 FC 投递给 NAND 的池内 ID，fc_complete_from_nand 已断言过范围 */
+        ASSERT(completed_id < FC_COMMAND_POOL_DEPTH);
+        if (sink_ctx->controller->stripe_parity_for_data[completed_id] != FC_COMMAND_ID_INVALID)
+        {
+            fc_command_id_t parity_id                                  = sink_ctx->controller->stripe_parity_for_data[completed_id];
+            sink_ctx->controller->stripe_parity_for_data[completed_id] = FC_COMMAND_ID_INVALID;
+            fc_stripe_release_parity(sink_ctx->controller, parity_id);
+        }
+    }
+#endif /* CONFIG_FC_RAID */
+}
+
 fc_status_t fc_poll_internal(fc_t *controller)
 {
-    fc_status_t                result;
-    nand_dispatch_completion_t nand_completion;
+    fc_status_t        result;
+    fc_nand_sink_ctx_t sink_ctx;
 
-    const uint8_t nand_result = nand_dispatch_poll(&nand_completion);
+    sink_ctx.controller = controller;
+    sink_ctx.failed     = 0U;
 
-    if (nand_result != NAND_RESULT_NOT_READY)
+    if (nand_dispatch_poll(fc_nand_completion_sink, &sink_ctx) != 0U)
     {
-        if (fc_complete_from_nand(controller, &nand_completion) != FC_STATUS_OK)
+        /* 完成已全部消费。只有 CQ 满（FC 侧故障）才报 IO_ERROR；
+         * NAND 命令自身的失败不是故障——状态已随 completion 进了 CQ entry。 */
+        if (sink_ctx.failed != 0U)
         {
             return FC_STATUS_IO_ERROR;
         }
-
-        /* ── Stripe parity 清理 ──
-         * 如果完成的命令是 stripe 数据命令，释放内部 parity 命令资源。 */
-#if CONFIG_FC_RAID
-        {
-            fc_command_id_t completed_id = (fc_command_id_t)nand_completion.command_id;
-            /* command_id 是 FC 投递给 NAND 的池内 ID，fc_complete_from_nand 已断言过范围 */
-            ASSERT(completed_id < FC_COMMAND_POOL_DEPTH);
-            if (controller->stripe_parity_for_data[completed_id] != FC_COMMAND_ID_INVALID)
-            {
-                fc_command_id_t parity_id                        = controller->stripe_parity_for_data[completed_id];
-                controller->stripe_parity_for_data[completed_id] = FC_COMMAND_ID_INVALID;
-                fc_stripe_release_parity(controller, parity_id);
-            }
-        }
-#endif /* CONFIG_FC_RAID */
-
         fc_register_queue_state(controller);
-        return (nand_result == NAND_RESULT_OK) ? FC_STATUS_OK : FC_STATUS_IO_ERROR;
+        return FC_STATUS_OK;
     }
 
     /* 无完成 → 填充 pass：一次扫描把可下发命令（含链）提交进 NAND per-LUN FIFO。 */

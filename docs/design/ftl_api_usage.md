@@ -295,7 +295,7 @@ typedef struct {
 /* 系统启动（v0.37 生产路径：见 src/main.c ssd_ftl_boot / ssd_ftl_boot_all） */
 fc_init();                              // ① FC 初始化
 nand_init();                            // ② NAND 初始化
-nand_dispatch_set_device_ready(1U);     // ③ 使能 NAND 命令分发
+nand_dispatch_set_armed(1U);            // ③ 放行 NAND 异步提交（submit / submit_chain）
 
 /* 每 (ch,ce,lun) 一个 FTL 实例（多维声明，宏改动即扩展；v0.35 多维化） */
 static ftl_context_t     g_ftl[CH_NUM][CE_NUM][LUN_NUM];
