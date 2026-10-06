@@ -1638,6 +1638,7 @@ static uint8_t fc_poll_chain_length(const fc_submission_queue_t *sq, const fc_co
  *     - **一次扫描**：按本轮快照数量扫描（HSQ/SQ 各一份），扫完即止。
  *     - **顺序保持**：取不走的命令 pop 后回推队尾——扫完整轮等价于一次旋转，
  *       未取出命令的相对顺序不变（同 LUN 的命令因 LUN 挂起必然一起回推，顺序不破）。
+ *       链成员连续且逐个回推，链头永远排在成员之前，链序不破。
  *     - 提交失败即中止本轮，剩余命令仍在队列里（未被取出），下轮重试。
  * -------------------------------------------------------------------- */
 static fc_status_t fc_poll_fill(fc_t *controller)
@@ -1669,12 +1670,11 @@ static fc_status_t fc_poll_fill(fc_t *controller)
             ch  = (uint8_t)cmd->config.ch;
             ce  = (uint8_t)cmd->config.ce;
             lun = (uint8_t)cmd->config.lun;
-            /* 越界是编程错误（submit 路径已 ASSERT），此处防御性原样回推 */
-            if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
-            {
-                (void)fc_submission_queue_push(scheduler->hsq, id);
-                continue;
-            }
+            /* 路由字段越界是编程错误：值由 FTL 从 PBA 经 pba_to_ch/ce/lun 灌入，
+             * PBA 已过 pba_is_valid() 校验。此处必须断言而非防御——suspended[] 按
+             * [ch][ce][lun] 直接索引，放行即栈越界写；且越界命令会因
+             * nand_dispatch_lun_free()==0 被永久回推（静默活锁），比当场停机更难定位。 */
+            ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
             if ((suspended[ch][ce][lun] != 0U) || (nand_dispatch_lun_free(ch, ce, lun) < 1U))
             {
                 /* 该 LUN 本轮已挂起或 FIFO 满：挂起并原样回推 */
@@ -1716,11 +1716,8 @@ static fc_status_t fc_poll_fill(fc_t *controller)
             ch  = (uint8_t)cmd->config.ch;
             ce  = (uint8_t)cmd->config.ce;
             lun = (uint8_t)cmd->config.lun;
-            if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
-            {
-                (void)fc_submission_queue_push(scheduler->sq, id);
-                continue;
-            }
+            /* 同 HSQ 分支：路由字段越界是编程错误，断言而非防御（栈越界写 / 静默活锁） */
+            ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
             if (suspended[ch][ce][lun] != 0U)
             {
                 (void)fc_submission_queue_push(scheduler->sq, id);

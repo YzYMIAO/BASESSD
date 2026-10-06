@@ -94,9 +94,15 @@ typedef struct
   `NOT_READY` 不再被当失败标 `NAND_FAIL`。
 - **保序实现**：把队头 pop 后按需回推队尾（`pop+push` 只动 head/tail 指针，池内容不变）。**一次完整 pass 等价于一次轮转**，未取出命令的相对顺序不变；同 LUN 的命令因 LUN 挂起必然一起回推，链头连链不被拆散。
 
-### 4. 防御性边界
+### 4. 路由字段越界：断言而非防御
 
-`fc_command_validate` **不校验 ch/ce/lun 范围**，旧调度器却用 `busy[config.ch][config.ce][config.lun]` 无保护索引。`fc_poll_fill` 因此对越界的命令**原样回推**（不索引数组），避免引入新的越界写。
+`fc_command_validate()` **不校验 ch/ce/lun 范围**（只查 operation / desc_id / cw_mask），旧调度器却用 `busy[config.ch][config.ce][config.lun]` 无保护索引。`fc_poll_fill` 的 `suspended[][][]` 同样是直接索引，`ch:2` 位域在 `CH_NUM=1` 下可表示 1..3。
+
+这里**刻意用 `ASSERT`**（两个扫描分支各一处）而不是防御性回推：
+
+- 值由 FTL 从 PBA 经 `pba_to_ch/ce/lun` 灌入（`ftl_fc_interface.c`），PBA 已过 `pba_is_valid()` 校验 → 属判据 2「调用者已保证的前置条件」，不是外部输入。
+- 旧写法把越界命令原样回推，实际后果是**静默活锁**：`nand_dispatch_lun_free()` 对越界返回 0 → 该 LUN 永久挂起 → 命令永不完成也不报错。断言停机比它好定位。
+- `NDEBUG`（release）下 `ASSERT` 裁剪为空，届时越界即栈越界写——与全工程一贯取舍一致，非本次新增风险。
 
 ## 风险
 
