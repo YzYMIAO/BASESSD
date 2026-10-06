@@ -4,7 +4,7 @@
 
 本文档记录 soft_ssd 项目中 FC（Flash Controller）模块和 NAND 底层驱动模块的完整设计方案，包括设计理念、模块架构、数据结构、接口约定、命令生命周期以及各子模块的职责划分。
 
-> **📊 流程图说明**：本文档在各关键章节内嵌了 23 张流程图（图 0–图 22），覆盖命令生命周期、数据路径编解码、nand_engine 微码状态机、dispatch poll 两阶段、LUN 相位机、调度器、Stripe RAID、完成回写，以及新增的**初始化全流程（图 14–16，§22）**与**运行时全流程（图 17–22，§23）**。建议按文末 [附录 B 阅读顺序](#附录-b建议阅读顺序) 学习；图 → 源码定位见 [附录 A](#附录-a图--源码-grep-对照)。
+> **📊 流程图说明**：本文档在各关键章节内嵌了 23 张流程图（图 0–图 22），覆盖命令生命周期、数据路径编解码、nand_engine 微码状态机、dispatch poll 遍历模型（per-LUN FIFO）、LUN 相位机、调度器、Stripe RAID、完成回写，以及新增的**初始化全流程（图 14–16，§22）**与**运行时全流程（图 17–22，§23）**。建议按文末 [附录 B 阅读顺序](#附录-b建议阅读顺序) 学习；图 → 源码定位见 [附录 A](#附录-a图--源码-grep-对照)。
 >
 > 本文档覆盖的变更历史：
 > - **Phase A**: buffer_id 便捷接口（`fc_write_cmd_data` / `fc_get_cmd_data_ptr`）
@@ -23,6 +23,7 @@
 > - **Phase V**: 多 LUN 并发 ISSUE/WAIT/FETCH 拆分 + FMC 后端数组化 + 调度器 phase 机（§18.7 完整实现）
 > - **Phase X**: FC-NAND 全模块注释补全 + 行业方案对比补全（§21）
 > - **Phase Y**: 初始化 / 运行时全链路走读章节（§22/§23，图 14–22）+ 源码关键路径注释补全
+> - **v8 (2026-10-06)**: FC→NAND 分发重构为 **per-LUN FIFO（深 4，每槽 = 一条命令）**——删 per-channel FIFO / Phase 1 / Phase 2 / busy 表 / Phase I 读饥饿保护；FC 侧改填充 pass（§2.7、§4.2/4.3、§16、§20、§23.5–23.9）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
 
@@ -49,7 +50,7 @@
 │  └── fc.c             核心：资源池、生命周期、服务主循环     │
 ├─────────────────────────────────────────────────┤
 │  NAND Dispatch (调度桥接层)                        │
-│  nand_dispatch.c/h ─ 通道 FIFO，FC→NAND 命令路由    │
+│  nand_dispatch.c/h ─ per-LUN FIFO，FC→NAND 命令路由 │
 ├─────────────────────────────────────────────────┤
 │  NAND 底层驱动                                    │
 │  ├── nand_engine      UOP 微操作引擎（start/step）  │
@@ -84,7 +85,7 @@
 │  FC 模块（firmware 层：命令池 / desc 链 / buffer 池）          │
 │    fc_command.c     命令与 Descriptor 结构                    │
 │    fc_queue.c       SQ / HSQ / CQ 环形队列                    │
-│    fc_scheduler.c   HSQ 优先 + 读饥饿保护 + 链收集             │
+│    fc_scheduler.c   调度器状态（SQ/HSQ 绑定；填充 pass 在 fc.c）│
 │    fc_data_path.c   写: META→CRC→加扰→ECC→Stripe RAID        │
 │                    读: ECC→解扰→CRC→META (+ RAID 恢复)       │
 │    fc_random/ldpc/raid/crc_engine.c  软件引擎                 │
@@ -93,8 +94,8 @@
                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  nand_dispatch（调度桥接层）                                  │
-│    submit / submit_chain 入队 → poll 出队 + 推进              │
-│    g_nand_dispatch_chains[ch][ce][lun]  per-LUN 链缓冲        │
+│    submit / submit_chain 入队 → poll 逐 LUN 出队 + 推进       │
+│    g_nand_dispatch_queues[ch][ce][lun]  per-LUN FIFO（深 4）  │
 │    g_nand_channel_page_buffer[ch][ce][lun] 多 plane 拼接缓冲  │
 └──────────────┬──────────────────────────────────────────────┘
                │ nand_fc_start / nand_fc_step（异步非阻塞）
@@ -283,7 +284,18 @@ CQ 条目 12 字节，64 条 CQ 共 768 字节。
 
 ### 2.7 调度器 (fc_scheduler_t)
 
-第一版调度规则：HSQ 优先级高于 SQ。从 HSQ 取命令，为空则从 SQ 取。当前不处理 LUN busy / CE 冲突 / chain 锁定（后期扩展）。
+**v8（per-LUN FIFO，2026-10-06）**：调度规则改为「填充 pass」——`fc_poll_fill()`（在 `src/fc/fc.c`）
+一次扫描 HSQ/SQ，按 LUN 保序把能放下的命令（含链）提交进 NAND 侧 per-LUN FIFO：
+
+- **HSQ 优先**：先扫 HSQ（HSQ 命令不参与链，逐条），再扫 SQ。
+- **按 LUN 保序 + room 判定**：命令 `need` = 链长（链头 = 连续 `chain=1` 段长度，否则 1）；
+  `nand_dispatch_lun_free(lun) >= need` 才取，否则该 LUN 本轮挂起，后续同 LUN 命令一律跳过。
+- **一次扫描**：按本轮 HSQ/SQ 快照数量扫描，扫完即止；取不走的命令 pop 后回推队尾
+  （整轮等价一次旋转，未取出命令的相对顺序不变）。
+
+`fc_scheduler_t` 只剩 `{sq, hsq}`；旧的 per-LUN busy 表（`set/clear_busy`、`target_is_busy`）
+与读饥饿保护（`consecutive_write_count`）已删除——"忙"改由 NAND 侧 `nand_dispatch_lun_free()`
+表达。详见 `docs/changelog/fc_nand_per_lun_fifo.md`。
 
 ### 2.8 软件寄存器 (fc_registers_t)
 
@@ -371,7 +383,7 @@ fc_submit(cmd)
       ┌────────────── while(1) { fc_service(); } ──────────────┐
       │  单次 fc_service():                                    │
       │    ① nand_dispatch_poll 推进 NAND                      │
-      │    ② fc_scheduler_select_chain 取命令                  │
+      │    ② fc_poll_fill 取命令（填充 NAND per-LUN FIFO）      │
       │    ③ fc_data_path_encode（写命令）                     │
       │    ④ 构建 request → nand_dispatch_submit              │
       └────────────────────────────────────────────────────────┘
@@ -397,11 +409,12 @@ fc_service()
   │          │         返回
   │          └─ NO  → 继续 ②
   │
-  ├─ ② fc_scheduler_select_chain(&sched_chain)    ← HSQ 优先 / 读饥饿保护
-  │     └─ 无命令可取 → 返回（调用方稍后重试）
-  │     └─ 取到 → 按 count 分派：
+  ├─ ② fc_poll_fill(controller)                   ← 一次填充 pass（v8）
+  │     ├─ 快照 HSQ 数 → 扫 HSQ（need=1）→ room 够则 submit，否则该 LUN 挂起
+  │     ├─ 快照 SQ 数  → 扫 SQ（need = 链长）→ room 够则 submit/submit_chain，否则挂起 + 回推
+  │     └─ 两条队列皆空 → QUEUE_EMPTY；无 room → NOT_READY
   │
-  ├─ 分支 A：count == 1 → fc_poll_dispatch_single()
+  ├─ 分支 A：单命令 → fc_poll_dispatch_single()
   │     ├─ 校验 QUEUED → 置 ACTIVE
   │     ├─ page write → fc_fill_cw_meta_paa() → fc_data_path_encode()
   │     ├─ raid=ENCODE → fc_stripe_submit()        ← 图 12
@@ -410,15 +423,15 @@ fc_service()
   │     │    ├─ multi_plane：按 desc.paa 的 plane 分桶填 cws[0]/cws[1]；空 plane 也填 cws[plane][0].paa
   │     │    ├─ ERASE：只填 cws[plane][0].paa, buffer=NULL
   │     │    └─ SET/GET_FEATURES：buffer = g_fc_return_staging[command_id] → cws[plane][0]
-  │     └─ nand_dispatch_submit(&request)          ← 入队即返回
+  │     └─ nand_dispatch_submit(&request)          ← 按 room 追加一槽即返回
   │
-  └─ 分支 B：count >= 2 → fc_poll_dispatch_chain()
+  └─ 分支 B：链（count >= 2）→ fc_poll_dispatch_chain()
         ├─ 逐条：校验 / 置 ACTIVE / page write 则 encode
         ├─ 逐条 fc_build_dispatch_request() → reqs[0..count-1]
-        └─ nand_dispatch_submit_chain(reqs, count) ← 原子入队
+        └─ nand_dispatch_submit_chain(reqs, count) ← 整链原子追加
 ```
 
-**要点**：一次 `fc_service()` 要么推进完成并立即返回，要么提交一批新命令——两件事不交叉。提交只占住目标 LUN，完成由后续 `fc_service()` 推进。两条分支的失败兜底统一走 `fc_poll_fail_command()`（合成 NAND_FAIL 完成项）。队列状态寄存器 `fc_register_queue_state()` **逐点刷新**（各分支内联调用，与拆分前位置一一对应，共 13 处）——注意**校验失败早退的那条不刷新**：`fc_scheduler_select_chain()` 成功时已把命令从 HSQ/SQ 弹出，此处寄存器保持陈旧值，属既有行为，不可"顺手统一"。行为不对称：META/PAA 预填只在单命令路径（分支 A），链式路径不做。
+**要点**：一次 `fc_service()` 要么推进完成并立即返回，要么走一次填充 pass——两件事不交叉。填充只把命令放进目标 LUN 的 FIFO，实际执行由后续 `fc_service()` 的 `nand_dispatch_poll()` 逐 LUN 推进（每 LUN 每轮一条，完成一条回一份 completion）。两条分支的失败兜底统一走 `fc_poll_fail_command()`（合成 NAND_FAIL 完成项）；**`nand_dispatch_submit*` 因填充前已查 room，生产路径上不会返回 `NOT_READY`（出现即 `ASSERT`）**，`NOT_READY` 的"忙"语义改由 `nand_dispatch_lun_free()` 前置表达。队列状态寄存器 `fc_register_queue_state()` **逐点刷新**（各分支内联调用，与拆分前位置一一对应，共 13 处）——注意**校验失败早退的那条不刷新**，属既有行为，不可"顺手统一"。行为不对称：META/PAA 预填只在单命令路径（分支 A），链式路径不做。
 
 ---
 
@@ -746,126 +759,118 @@ typedef struct {
 ### 4.1 设计目的
 
 在 FC 和 NAND 底层之间建立调度桥接，负责：
-- 按 Channel/CE/LUN 路由命令到对应物理通道
-- 管理每个 Channel 的命令 FIFO 队列
-- 处理多 CW 命令的分段执行
+- 按 Channel/CE/LUN 路由命令到对应物理 LUN
+- 管理每个 LUN 的**待处理 FIFO**（深 `NAND_DISPATCH_CHAIN_DEPTH` = 4，每槽 = 一条命令）
+- 处理多 CW 命令的分段执行（命令内 CW 链，与命令链无关）
 - 将 NAND 完成状态转换为 FC 完成状态
 
 ### 4.2 架构
 
+**v8（per-LUN FIFO，2026-10-06）**：
+
 ```
 FC (fc_service)
   │
-  ├─ fc_scheduler_select()      → 从 SQ/HSQ 取 command
+  ├─ fc_poll_fill()               → 一次扫描 SQ/HSQ，按 LUN 保序挑出可下发命令（含链）
   ├─ 预解析 desc 链为自包含请求
   │     PAA、buffer 指针在 FC 侧解析
-  ├─ nand_dispatch_submit()     → 路由到对应通道 FIFO（不再回调 FC）
-  └─ nand_dispatch_poll()       → 推进各通道/LUN 上的活跃事务
+  ├─ nand_dispatch_submit()/_chain() → 按 room 追加到目标 LUN FIFO（不再回调 FC）
+  └─ nand_dispatch_poll()         → 遍历各 LUN FIFO，每 LUN 推进一条
        │
-       ├─ 从 FIFO 取命令 → 分配 task
-       ├─ nand_fc_start() → nand_engine_start() → nand_fmc UOP
-       ├─ nand_fc_step()  → nand_engine_step()  → 非阻塞推进
-       └─ 完成 → 构建 nand_dispatch_completion_t
+       ├─ 队头未启动 → nand_fc_start() → nand_engine_start() → nand_fmc UOP
+       ├─ 已启动     → nand_fc_step()  → nand_engine_step()  → 非阻塞推进
+       └─ 完成 → 构建 nand_dispatch_completion_t + 出队（head++/count--）
 ```
 
 ### 4.3 多 CW 处理策略
 
 **PROGRAM（写）**：
-1. 首次执行：遍历 Descriptor 链，将所有 CW 的 Buffer 数据拷贝到 Channel Page Buffer
+1. 首次执行：遍历 Descriptor 链，将所有 CW 的 Buffer 数据拷贝到 LUN Page Buffer
 2. 发送 `OP_NORMAL_PROGRAM_PAGE`（80h-地址-数据-10h）
 
 **READ（读）**：
-1. CW0：发送 `OP_NORMAL_READ_PAGE`（00h-地址-30h），读取 528B 到 Buffer
-2. CW1~3：发送 `OP_RANDOM_DATA_READ`（05h-列地址-E0h），逐次读取剩余 CW
+1. 整页先「只加载、不输出」进 NAND 页缓冲（`OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT`）
+2. 再按 CW 掩码逐 CW 取数（`OP_RANDOM_DATA_READ` 05h-列-E0h；多 plane 用 06h 版）
 3. 每个 CW 的数据写入对应 Descriptor 的 Buffer
 
-### 流程图：nand_dispatch poll 两阶段（图 9）
+### 流程图：nand_dispatch poll 遍历模型（图 9）
 
-`nand_dispatch_poll()` 只保留骨架（round-robin 遍历通道 + 两阶段分派），
-具体推进逻辑按**企业主控 Flash 后端的分层**拆成 static 辅助函数：
+**v8 起无 Phase 1 / Phase 2 之分**：`nand_dispatch_poll()` 只保留骨架
+（round-robin 遍历通道 → CE → LUN），每 LUN 单步推进一条命令（完成一条即回一份 completion），
+具体逻辑拆成 static 辅助函数：
 
-| 企业模块 | 函数 | 职责 |
+| 职责 | 函数 | 说明 |
 |---|---|---|
-| **Arbiter / Scheduler** | `nand_dispatch_phase2_dequeue` | 从通道 FIFO 出队并选 LUN 启动 |
-| | `nand_dispatch_queue_consume_match` | 同步完成时消费 head entry |
-| **Per-die FSM** | `nand_dispatch_phase1_lun` | 单 LUN 驱动循环 |
+| **Per-LUN FSM** | `nand_dispatch_lun_step` | 单步：ISSUED 预检 → 驱动 → CW 链 → scatter → 出队回完成 |
 | | `nand_dispatch_issued_advance` | ISSUED 忙期 gate + pair_op 切换 |
 | | `nand_dispatch_lun_drive` | started/step 单步推进 + ISSUE→ISSUED |
-| | `nand_dispatch_chain_advance` | cursor++ 并启动下一命令 |
-| **Command issue** | `nand_dispatch_task_start` | 构建 request + 发起事务 |
+| **Command issue** | `nand_dispatch_task_start` | 构建 request + 日志 + 发起事务 |
 | | `nand_dispatch_task_fc_start` | `nand_fc_start` + 置初始相位 |
-| | `nand_dispatch_task_build_request` | 调 req_table 构建 request |
-| **Data path** | `nand_dispatch_task_cw_chain` | 多 CW READ 链式续读 |
+| **Data path** | `nand_dispatch_task_cw_chain` | 命令内多 CW 链式续读 |
 | | `nand_dispatch_scatter_page_buffer` | 三种拆页合并分派 |
 
+**删除**：per-channel FIFO（`g_nand_channel_queues`）、Phase 2 Arbiter（`phase2_dequeue`）、
+`nand_dispatch_queue_consume_match`、`nand_dispatch_chain_advance`、`nand_dispatch_phase1_lun`、
+`nand_dispatch_task_build_request`（并入 `task_start`）。
+
 ```text
-nand_dispatch_poll(completion)          ← 骨架：round-robin + 两阶段分派
+nand_dispatch_poll(completion)          ← 骨架：round-robin 遍历 + 每 LUN 单步
 for channel = cursor..(cursor+CH_NUM-1)
+  for ce, for lun:
+      queue = &g_nand_dispatch_queues[ch][ce][lun];  count==0 → 跳过
+      ctx = { completion, queue, ch/ce/lun }
+      out = lun_step(ctx)                            ← 每 LUN 只推进一步
+
+nand_dispatch_lun_step(ctx)             ← 单命令推进（一次调用只处理 tasks[head]）
   │
-  ├─ Phase 1：phase1_lun() —— 推进本通道各 CE/LUN 的活跃 chain
-  │    for ce, for lun:
-  │      chain = &chains[ch][ce][lun];  chain->count==0 → 跳过
-  │      ctx = { completion, queue, chain, ch/ce/lun }
+  ├─ phase == ISSUED 时先过 issued_advance()：
+  │     min_busy_us 未到 → WAIT（等最短忙期）
+  │     到点 → pair_op 切换（LOAD→FETCH / ISSUE→WAIT）→ task_start() → phase=FETCH
   │
-  │      ── issued_advance()：phase == ISSUED（LUN 内部操作中）──
-  │         min_busy_us 未到 → WAIT（等最短忙期）
-  │         到点 → pair_op 切换（LOAD→FETCH / ISSUE→WAIT）
-  │               → task_start() → phase=FETCH
+  ├─ lun_drive()：started 判定
+  │     started==0 → task_start()（req_table 构建 + LOGD + nand_fc_start）
+  │                  （ISSUE 型置 phase=ISSUE；否则 FETCH）
+  │                  ASYNC → WAIT
+  │     started!=0 → transaction.engine.active ? nand_fc_step
+  │                                 : 用已存的 execution_status
+  │     ASYNC → WAIT（等下一轮）
+  │     phase==ISSUE → task_complete → phase=ISSUED
+  │                    → 记 DWT 起点 → WAIT（LUN 仍在内部操作）
   │
-  │      ── lun_drive()：started 判定 ──
-  │         started==0 → task_start()（req_table 构建 + nand_fc_start）
-  │                      （ISSUE 型置 phase=ISSUE；否则 FETCH）
-  │                      ASYNC → WAIT；同步完成则 consume_match() 消费 entry
-  │         started!=0 → transaction.engine.active ? nand_fc_step
-  │                                     : 用已存的 execution_status
-  │         ASYNC → WAIT（等下一轮）
-  │         phase==ISSUE → task_complete → phase=ISSUED
-  │                        → 记 DWT 起点 → WAIT（不清 LUN busy）
+  ├─ task_cw_chain()：CW chaining（多 CW READ）→ task_complete
+  │     若 (普通读/OTP读/随机读) 且还有下一 CW：
+  │       cw_index++ → operation=OP_RANDOM_DATA_READ
+  │       → 列地址 = cw_index×(PAGE_SIZE/4) → nand_fc_start
+  │     ASYNC → WAIT（本轮到此为止，仍占着 tasks[head]）
   │
-  │      ── task_cw_chain()：CW chaining（多 CW READ）→ task_complete
-  │         若 (普通读/OTP读/随机读) 且还有下一 CW：
-  │           cw_index++ → operation=OP_RANDOM_DATA_READ
-  │           → 列地址 = cw_index×(PAGE_SIZE/4) → nand_fc_start
-  │         ASYNC → 本轮到此为止
+  ├─ scatter_page_buffer()：page_buffer 拆回
+  │     （CACHE 读 / OP_READ_PAGE_FETCH / MP_WITH_DATA_OUT）
   │
-  │      ── scatter_page_buffer()：page_buffer 拆回
-  │         （CACHE 读 / OP_READ_PAGE_FETCH / MP_WITH_DATA_OUT）
-  │
-  │      ── chain_advance()：chain->cursor+1 < chain->count ──
-  │         cursor++ → task_start() 下一命令（不清 LUN busy！）
-  │         CONTINUE → 回到驱动循环顶部
-  │
-  │      ── 整链结束 → *completion = task->completion
-  │                    chain->count=0, phase=IDLE,
-  │                    g_nand_channel_cursor 前进 → DONE（有完成）
-  │
-  ├─ Phase 2：phase2_dequeue() —— 从本通道 FIFO 出队新命令
-  │    queue->count!=0：
-  │      取 head entry（command_id/ce/lun）
-  │      目标 chain 忙 → WAIT（entry 留队）
-  │      出队 → task 已由 submit 预加载
-  │           → build_request → LOGD → fc_start → 置相位
-  │           同步完成 → task_complete
-  │           phase==ISSUE → 切 ISSUED，不返回 completion
-  │           count>1（链）→ 交给 Phase 1
-  │           单命令立即完成 → DONE（返回点之二，不重置 phase/游标）
-  │
-  └─ 全部遍历完无完成 → 返回 NOT_READY
+  └─ 本条命令完成 → *completion = tasks[head].completion
+                    head++（模 DEPTH）, count--, phase=IDLE
+                    g_nand_channel_cursor 前进 → DONE（有完成）
+
+全部遍历完无完成 → 返回 NOT_READY
 ```
 
-**要点**：Phase 1 每轮先推进已有事务，Phase 2 才启动新命令。链执行期间 LUN busy，HSQ 无法插入（保证 Read Retry 原子性）。
+**要点**：一条命令在 FIFO 里"占住队头"直到它自己完成——链因此天然不可被同 LUN 的后续命令插入
+（后续命令排在链后，FIFO 严格顺序）。每次 poll 每 LUN 最多完成一条，与旧"每轮一条完成"语义一致；
+但**每条命令各回一份 completion**（旧模型整链只回链尾一份，中间命令泄漏）。
 
-**重构注意**：`nand_dispatch_poll` 的返回值分派依赖三个 outcome 枚举——`nand_dispatch_lun_outcome_t`
-（WAIT / CONTINUE / DONE / ERROR）、`nand_dispatch_start_outcome_t`（REQ_ERROR / ASYNC / SYNC）、
+**重构注意**：`nand_dispatch_lun_step` 的返回值依赖两个 outcome 枚举——`nand_dispatch_lun_outcome_t`
+（WAIT / DONE / ERROR）、`nand_dispatch_start_outcome_t`（REQ_ERROR / ASYNC / SYNC）、
 `nand_dispatch_cw_outcome_t`（ASYNC / DONE）。其中 **REQ_ERROR 与 nand_fc_start 自身的错误码必须区分**：
-前者是致命的（清 `chain->count` 并中止 poll），后者只是"带错误状态的完成"，要继续走完成处理链。
+前者是致命的（poll 丢弃该 LUN 队列并返回 INVALID_ARGUMENT），后者只是"带错误状态的完成"，
+要继续走完成处理链。
 
 ### 4.4 接口
 
 ```c
 uint8_t nand_dispatch_init(void);
 void    nand_dispatch_set_device_ready(uint8_t ready);
-uint8_t nand_dispatch_submit(const nand_dispatch_request_t *request);
+uint8_t nand_dispatch_submit(const nand_dispatch_request_t *request);                       /* 单命令：按 room 追加到 LUN FIFO */
+uint8_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count); /* 链：整批原子追加，room 不足则无副作用返回 NOT_READY */
+uint8_t nand_dispatch_lun_free(uint8_t ch, uint8_t ce, uint8_t lun);                        /* 查询 LUN FIFO 剩余槽数（0..DEPTH） */
 uint8_t nand_dispatch_poll(nand_dispatch_completion_t *completion);
 ```
 
@@ -876,13 +881,20 @@ typedef struct {
     uint16_t command_id;
     uint8_t  operation;
     uint8_t  ch, ce, lun;
-    uint8_t  cw_count;
-    uint8_t  page_type   : 2;   // LP/MP/UP/TP — LDPC 引擎需此选择解码阈值
+    uint8_t  cw_count[PLANE_NUM];                   // 每 plane 的 CW 数（v7 起按 plane 分列，可只选一个 plane）
+    uint8_t  plane_count;                           // 0 = 单 plane；N = multi-plane
+    uint8_t  plane;                                 // 本命令目标物理 plane 索引（cws 第一维语义）
+    uint8_t  page_type   : 2;                       // LP/MP/UP/TP — LDPC 引擎需此选择解码阈值
     uint8_t  reserved    : 6;
-    uint8_t  parameter[4];
-    nand_dispatch_cw_info_t cws[CW_NUM];
+    uint8_t  feature_addr;                          // SET/GET_FEATURES 寄存器地址
+    nand_dispatch_cw_info_t cws[PLANE_NUM][CW_NUM]; // 第一维 = 物理 plane 索引
 } nand_dispatch_request_t;
 ```
+
+**v8 提交语义**：NAND 侧不再有"忙"的拒收——`submit`/`submit_chain` 只在 FIFO 装不下（`count + N > DEPTH`）时
+返回 `NAND_RESULT_NOT_READY`，**且无副作用**（一个槽都不写）。FC 填充前先查 `nand_dispatch_lun_free()`，
+因此生产路径上 `NOT_READY` 不会出现（出现即 `ASSERT`）；它保留是给"链放不下"的重试语义兜底。
+`nand_dispatch_submit` 仍先检查 `g_nand_device_ready`（未就绪返回 `INVALID_ARGUMENT`），`submit_chain` 不查。
 
 `nand_dispatch_completion_t` 包含命令 ID、执行状态、NAND 状态、per-CW 状态、per-CW ECC 纠正比特数和失败 Descriptor ID：
 
@@ -2367,6 +2379,14 @@ RANDOM_DATA_READ（05h-C1-C2-E0h）等命令的数据传输长度不由命令码
 ## 16. 命令链执行设计 (Phase D — 续)
 
 > ⚠ **运行时状态提示**：命令链是「**能力已实现、但 FTL 运行时未启用**」的路径。FTL 所有命令恒设 `config.chain = FC_CHAIN_END`（`src/ftl/` 共 23 处），运行时 `count` 恒为 1，实际只走**单命令路径**（`fc_poll_dispatch_single`）。本章讲的是链式执行的设计与单测覆盖；运行时主干请见 [§23.9「澄清：运行时其实不走命令链」](#239-澄清运行时其实不走命令链)。
+>
+> 🔁 **v8 语义变更（2026-10-06，per-LUN FIFO）**：本章 16.2 起的方案描述**已被取代**。链不再是"执行中的 chain 对象 + cursor"，而是 **per-LUN 待处理 FIFO 里的连续 N 槽**（每槽 = 一条命令）：
+> - **原子**：`nand_dispatch_submit_chain()` 先判 `room >= N`，不足则整批拒收、无副作用；
+> - **不可插入**：连续槽 + FIFO 严格顺序，同 LUN 的后续命令（含 HSQ）只能排在链后；
+> - **逐条完成**：每条命令各回一份 completion（旧模型只在链尾回一份，中间命令的 `cw_status[]` 被吞）；
+> - NAND 侧**无链标记**，`chain->cursor` / `chain_advance` 已删除。
+>
+> 详见 `docs/changelog/fc_nand_per_lun_fifo.md`；本节余下内容保留为历史设计记录。
 
 ### 16.1 问题背景
 
@@ -2644,9 +2664,36 @@ fc_command_submit(&command_C);
 | 改动范围 | nand_dispatch 内部 | nand_dispatch + fc_scheduler + fc |
 | 代码编译 | ✅ 通过 | ✅ 通过 |
 
-### 流程图：命令链执行（图 11 配套：调度器 select_chain）
+### 流程图：命令链执行（图 11 配套：调度器填充 pass）
 
-`fc_scheduler_select_chain()` 每次取一批命令（chain）交给 `fc_poll_internal`：
+> 🔁 **v8 起本节已取代**：`fc_scheduler_select_chain` / `fc_scheduler_select` 与 busy 表、读饥饿保护全部删除。
+> 选择逻辑搬进 `src/fc/fc.c` 的 `fc_poll_fill()`——一次扫描 HSQ/SQ，按 LUN 保序把能放下的命令（含链）提交进
+> NAND 的 per-LUN FIFO。下方为**旧实现**的历史记录，保留以对照语义变化。
+
+```text
+fc_poll_fill(controller)                ← 一次 pass（v8）
+  │
+  ├─ 快照 HSQ 数 / SQ 数
+  │
+  ├─ 扫 HSQ（快照数，HSQ 不参与链，need = 1）
+  │    room = nand_dispatch_lun_free(ch,ce,lun)
+  │    room >= 1 → 取出 → submit；否则该 LUN 本轮挂起（同 LUN 后续跳过）
+  │
+  └─ 扫 SQ（快照数）
+       need = fc_poll_chain_length(sq, head)   // 链头：连续 chain=1 段，≤ CHAIN_MAX(4)
+       room = nand_dispatch_lun_free(ch,ce,lun)
+       room >= need → 取出 need 条（链则整条）→ submit / submit_chain
+       否则 → 该 LUN 本轮挂起，命令回推队尾（保序）
+       扫完即止（不因回推的命令再入队）
+
+返回：有下发 → OK；下发失败 → IO_ERROR；两队列空 → QUEUE_EMPTY；无 room → NOT_READY
+```
+
+**旋转语义**：`pop(队头)+push(队尾)` 只动 head/tail 指针，Command Pool 内容不变；一次完整 pass 等价于一轮轮转，
+未下发的命令保持相对顺序。
+
+<details>
+<summary>旧实现（v7 及以前，历史记录）</summary>
 
 ```text
 select_chain(scheduler, chain)
@@ -2673,7 +2720,7 @@ select_chain(scheduler, chain)
        queue 空 → QUEUE_EMPTY / 全忙 → NOT_READY
 ```
 
-**旋转语义**：`pop(队头)+push(队尾)` 只动 head/tail 指针，Command Pool 内容不变，被旋转的命令一圈后回到队头——是轮转调度，不是丢弃。
+</details>
 
 
 ---
@@ -2846,7 +2893,7 @@ PROGRAM 和 ERASE 不存在"延迟执行"场景，故不分拆。
 uint8_t g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE];
 ```
 
-按 (ch, ce, lun) 各持一块：同一通道的多个 LUN 由 Phase 1 轮流驱动，而 `request.data`
+按 (ch, ce, lun) 各持一块：同一通道的多个 LUN 由 `lun_step` 轮流驱动，而 `request.data`
 一旦指向本缓冲就跨多次 poll 存活（program ISSUE 常被 70h 忙轮询挡下，数据已拼好却要
 等下一轮才 DATA_IN）——全通道共用一块会被后驱动的 LUN 覆盖。
 
@@ -2987,21 +3034,17 @@ STM32H743 FMC 总线（单条并行总线）
 #define CE_NUM (1U)
 #define LUN_NUM (1U)
 
-// nand_dispatch.c — 各维度数组
-static nand_channel_queue_t       g_nand_channel_queues[CH_NUM];
-static nand_dispatch_lun_chain_t  g_nand_dispatch_chains[CH_NUM][CE_NUM][LUN_NUM];
-static uint8_t                    g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE];
-
-// fc_scheduler.c — per-LUN busy 表
-uint8_t busy[CH_NUM][CE_NUM][LUN_NUM];
+// nand_dispatch.c — 各维度数组（v8：per-LUN FIFO 取代通道 FIFO + 链缓冲）
+static nand_dispatch_lun_queue_t g_nand_dispatch_queues[CH_NUM][CE_NUM][LUN_NUM];
+static uint8_t                   g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE];
 ```
 
-`nand_dispatch_poll()` 遍历所有通道：
+`nand_dispatch_poll()` 遍历所有通道 → CE → LUN，每 LUN 单步推进一条：
 ```c
 for (count = 0; count < CH_NUM; count++) {
     channel = (uint8_t)((g_nand_channel_cursor + count) % CH_NUM);
     for (ce = 0; ce < CE_NUM; ce++)
-        for (lun_idx = 0; lun_idx < LUN_NUM; lun_idx++) { ... }
+        for (lun_idx = 0; lun_idx < LUN_NUM; lun_idx++) { ... lun_step(ctx); ... }
 }
 ```
 
@@ -3066,8 +3109,8 @@ FMC 总线 (地址/数据/控制线共用)
 
 | 层面 | 多通道支持程度 | 能否验证 |
 |------|--------------|---------|
-| FC 调度器 + busy 表 | ✅ 代码完整，改 `CH_NUM` 即可 | ❌ 单通道硬件 |
-| dispatch 队列 + chain buffer | ✅ 代码完整 | ❌ 单通道硬件 |
+| FC 填充 pass（`fc_poll_fill`） | ✅ 代码完整，改 `CH_NUM` 即可（"忙"查 `nand_dispatch_lun_free`） | ❌ 单通道硬件 |
+| dispatch per-LUN FIFO | ✅ 代码完整 | ❌ 单通道硬件 |
 | dispatch poll 遍历 | ✅ 代码完整 | ❌ 单通道硬件 |
 | FMC 后端 | ✅ 单例共享（`g_nand_fmc_instance`，窗口/时序与坐标无关） | ❌ 多 bank 需重构（单 NAND） |
 | RB 中断 | 已移除（单 EXTI6 无法扩展到多 LUN） | — |
@@ -3145,30 +3188,30 @@ WAIT/FETCH 型 OP 的 UOP 序列只包含 WAIT_READY + 70h 轮询 + DATA_OUT + C
 
 | 层面 | 改动 |
 |------|------|
-| dispatch_poll Phase 1 | 执行完 ISSUE 后不清 LUN busy，记录"等待完成"状态，继续其他 LUN |
-| dispatch_poll Phase 1 | WAIT/FETCH 只对"等待完成"的 LUN 执行，ready 后清除 LUN busy |
-| fc_scheduler | 需识别 ISSUE/Wait/FETCH 类型，ISSUE 型不排队直接插入 |
-| chain buffer | 同 LUN 的 ISSUE→WAIT 自动组成链，中间不可被其他命令插入 |
+| dispatch lun_step | 执行完 ISSUE 后不报完成，切 ISSUED 相位，继续其他 LUN |
+| dispatch lun_step | ISSUED 到点后走配对 WAIT/FETCH，完成才出队 |
+| fc_poll_fill | 按 LUN room 填充（v8：无 ISSUE/Wait/FETCH 类型识别，靠相位机内部处理） |
+| per-LUN FIFO | 同 LUN 的命令严格先进先出，链 = 连续槽，中间不可被其他命令插入 |
 
 #### 18.7.6 当前是否支持并发（→ Phase V 已实现）
 
 | 层面 | 支持程度 | 原因 |
 |------|---------|------|
-| dispatch 数据结构 | ✅ 就绪 | `g_nand_dispatch_chains[CH][CE][LUN]` 多维 |
+| dispatch 数据结构 | ✅ 就绪 | `g_nand_dispatch_queues[CH][CE][LUN]` 多维（v8 per-LUN FIFO） |
 | FMC 硬件总线 | ⚠️ 命令级可切 | 发完命令释放总线，WAIT_READY 卡住（硬件限制） |
 | **OP 码层** | ✅ Phase V | 新增 6 个 ISSUE/WAIT/FETCH OP 码 + uop 序列 |
 | **调度器层** | ✅ Phase V | poll phase 机（ISSUE→ISSUED→FETCH）+ LUN 状态切换 |
-| **FMC 后端** | ✅ Phase V | per-(CH,CE,LUN) 实例数组化 |
+| **FMC 后端** | ⚠️ 单例 | Phase V 曾数组化，Phase Z（22707cb）撤销回单例 `g_nand_fmc_instance`；多通道需 per-bank base 表 |
 
 ### 流程图：LUN 相位机（图 10，Phase V 多 LUN 并发）
 
 ```text
-        submit / Phase 1 启动
+        submit 追加槽 / lun_step 完成一条后复位
         （ISSUE 型命令）
                 │
                 ▼
         ┌───────────────┐
-        │   LUN_PHASE_IDLE    │  count==0 空闲
+        │   LUN_PHASE_IDLE    │  队头槽待启动
         └───────┬───────────┘
                 │ started==0 → nand_fc_start（ISSUE uop）
                 ▼
@@ -3185,9 +3228,10 @@ WAIT/FETCH 型 OP 的 UOP 序列只包含 WAIT_READY + 70h 轮询 + DATA_OUT + C
         ┌───────────────┐
         │ LUN_PHASE_FETCH    │  执行配对 WAIT/FETCH：WAIT_READY + DATA_OUT
         └───────┬───────────┘   + 70h 轮询 + CHECK_FAIL
-                │ step 完成 → task_complete → 整链结束？
+                │ step 完成 → task_complete → 本条命令完成
                 ▼
-            count=0（IDLE）→ 返回 completion，LUN 空闲
+            出队（head++/count--）+ phase=IDLE → 返回 completion
+            （FIFO 里还有槽 → 下一轮 lun_step 处理下一条）
 ```
 
 并发收益示例（双 LUN）：
@@ -3290,6 +3334,12 @@ HAL_NAND_Init(保守) → RESET/READ_ID/校验 → SET_FEATURES(Mode 4)
 ---
 
 ## 20. 读饥饿保护（Read Starvation Protection / QoS）
+
+> 🗑 **v8 起本章机制已删除（2026-10-06）**。`FC_SCHEDULER_READ_PRIORITY_WRITE_BUDGET`、
+> `fc_scheduler_op_is_read()`、`consecutive_write_count` 与相关旋转逻辑随 per-LUN FIFO 重构一并移除：
+> 填充 pass（`fc_poll_fill`）改为「HSQ 优先 + 按 LUN 保序」，不再做读写计数与读优先旋转。
+> 在 `CH_NUM=CE_NUM=LUN_NUM=1` 的当前平台上该保护本就近乎无效（见 20.x 备注）。
+> 本章保留为设计记录，供未来多 LUN/多通道 QoS 重启时参考。详见 `docs/changelog/fc_nand_per_lun_fifo.md`。
 
 ### 20.1 问题
 
@@ -3597,18 +3647,18 @@ nand_init()
   │
   ▼   fc_service() → fc_poll_internal
   ├─ ① nand_dispatch_poll（先推进 NAND，见 图 9/图 20）
-  └─ ② 无完成 → fc_scheduler_select_chain（图 22）→ count==1
+  └─ ② 无完成 → fc_poll_fill（图 22）→ 取到命令（need==1）
         └─ fc_poll_dispatch_single：置 ACTIVE
              ├─ page write → fc_fill_cw_meta_paa + fc_data_path_encode（图 4）
              ├─ fc_build_dispatch_request → request.cws[plane][cw]
-             └─ nand_dispatch_submit（门控 + task_load 绑 backend/buffer + 入通道 FIFO）
+             └─ nand_dispatch_submit（门控 + enqueue 追加槽 + task_load 绑 backend/buffer）
   ▼
-[dispatch] nand_dispatch_poll Phase 2 → phase2_dequeue → nand_fc_start（READ_PAGE_LOAD，ISSUE 型）
+[dispatch] nand_dispatch_poll → lun_step → nand_dispatch_task_start → nand_fc_start（READ_PAGE_LOAD，ISSUE 型）
   │         → phase = ISSUE → 异步返回 WAIT
   ▼
 [engine]   nand_engine_step（图 6）：00h / addr / 30h / CONFIRM → END
   ▼
-[dispatch] Phase 1 → phase1_lun → 转 ISSUED → issued_advance 等 tR
+[dispatch] lun_step → 转 ISSUED → issued_advance 等 tR
   │         pair_op → OP_READ_PAGE_FETCH → nand_fc_start
   ▼
 [engine]   WAIT_READY + 70h 轮询（图 7）+ DATA_OUT（PIO/DMA）+ CHECK_FAIL
@@ -3666,44 +3716,44 @@ fc_service() → fc_poll_internal
   ├─ ① nand_dispatch_poll
   │     ├─ 有完成 → fc_complete_from_nand → [RAID] fc_stripe_release_parity → 返回
   │     └─ 无完成 → ②
-  └─ ② fc_scheduler_select_chain（图 22）
-        ├─ 无命令可取 → 返回（稍后重试）
-        ├─ count == 1 → fc_poll_dispatch_single（运行时唯一活路径）
-        └─ count >= 2 → fc_poll_dispatch_chain（仅单测覆盖，见 §23.9）
+  └─ ② fc_poll_fill（图 22）
+        ├─ 两队列皆空 → QUEUE_EMPTY；无 room → NOT_READY（稍后重试）
+        ├─ 单命令 → fc_poll_dispatch_single（运行时唯一活路径）
+        └─ 链 → fc_poll_dispatch_chain（仅单测覆盖，见 §23.9）
               ├─ 失败兜底统一走 fc_poll_fail_command
               └─ fc_register_queue_state() 在各分支内**逐点刷新**（13 处）
-                   ⚠ 校验失败早退的那条**不刷新**——select_chain 成功时已把命令从 HSQ/SQ 弹出，
+                   ⚠ 校验失败早退的那条**不刷新**——命令已从 HSQ/SQ 弹出，
                      此处寄存器保持陈旧值，属既有行为，不可"顺手统一"（见图 2 要点）
 ```
 
 ### 23.5 流程图：`nand_dispatch` 相位机状态机（图 20，扩展图 10）
 
-图 9 是 Phase1/Phase2 的**横向**两阶段视图，图 10 是 LUN 相位机的初版。本图给出**每个相位的进入/退出条件、写点/读点、由谁置位**：
+图 9 是 per-LUN FIFO 的**横向**遍历视图，图 10 是 LUN 相位机的初版。本图给出**每个相位的进入/退出条件、写点/读点、由谁置位**（v8：相位挂在 FIFO 队头槽上）：
 
 ```text
-[IDLE]  count == 0
-  │ submit / submit_chain 预加载 tasks[0]；整链结束由 phase1_lun 复位
+[IDLE]  phase == IDLE
+  │ submit / submit_chain 追加槽；lun_step 完成一条命令后复位为 IDLE
   ▼
 [ISSUE]  （仅 ISSUE 型 OP）
   │ task_fc_start 判 nand_operation_is_issue → 置 ISSUE
-  │ lun_drive / phase2_dequeue 命中 ISSUE 分支：
+  │ lun_drive 命中 ISSUE 分支：
   │   task_complete + phase=ISSUED + delay_dwt_cycles_now() + return WAIT
   │   ⚠ 不报完成：LUN 还在 tR / tPROG / tBERS
   ▼
 [ISSUED] wait_start_cycles = DWT 起点
-  │ issued_advance 判 elapsed ≥ min_busy_us（tR=38µs / tPROG=700µs / tBERS=5000µs）
+  │ lun_step 先调 issued_advance 判 elapsed ≥ min_busy_us（tR=38µs / tPROG=700µs / tBERS=5000µs）
   │ pair_op 切换：LOAD↔FETCH / ISSUE↔WAIT / 原子 OP pair==自身则跳过
   ▼
 [FETCH]  step 到 END → task_complete
-  │ 整链结束 → count=0 → 返回 completion → 回 [IDLE]
+  │ 本条命令结束 → *completion 返回 + head++/count-- + phase=IDLE
   ▼
 [IDLE]
 
 非 ISSUE 型 OP：task_fc_start 直接置 FETCH（跳过 ISSUE / ISSUED）
-相位写点/读点总表：src/nand/nand_dispatch_internal.h（nand_dispatch_lun_chain_t 注释）
+相位写点/读点总表：src/nand/nand_dispatch_internal.h（nand_dispatch_lun_queue_t 注释）
 ```
 
-关键护栏：**ISSUE 段完成 ≠ 命令完成**。`lun_drive` 与 `phase2_dequeue` 两处 `phase == LUN_PHASE_ISSUE` 分支都只做"切相位 + 记 DWT 起点 + return WAIT"，绝不下沉到 DONE 把结果当命令完成报出去。
+关键护栏：**ISSUE 段完成 ≠ 命令完成**。`lun_drive` 的 `phase == LUN_PHASE_ISSUE` 分支只做"切相位 + 记 DWT 起点 + return WAIT"，绝不下沉到 DONE 把结果当命令完成报出去；相位属于**当前队头槽**，命令出队即随 `phase=IDLE` 复位。
 
 ### 23.6 流程图：多 LUN ISSUE/WAIT/FETCH 并发时序波形（图 21）
 
@@ -3713,7 +3763,7 @@ LUN0 ──[00h..CONFIRM]──────────── ISSUED ───�
               │ 总线空闲，可切 LUN                    ▲ issued_advance 到点
 LUN1 ─────────┴──[00h..CONFIRM]──────────── ISSUED ─────────────▶ [WAIT / Dout / status]──
                                                                     ▲
-dispatch 轮询：phase1_lun 逐个 LUN 推进；ISSUED 段只做 DWT 比较，不占总线
+dispatch 轮询：lun_step 逐个 LUN 推进（每 LUN 每轮一条）；ISSUED 段只做 DWT 比较，不占总线
 设计目标：总耗时 ≈ tR + FETCH，而非 2×(tR + FETCH)
 
 ⚠ 当前 CH_NUM = CE_NUM = LUN_NUM = 1：没有第二个 LUN，相位机退化为单 LUN 顺序
@@ -3723,17 +3773,23 @@ dispatch 轮询：phase1_lun 逐个 LUN 推进；ISSUED 段只做 DWT 比较，�
 ### 23.7 流程图：调度器取命令决策（图 22）
 
 ```text
-fc_scheduler_select_chain(&sched_chain)
+fc_poll_fill()   ← 一次填充 pass（快照 HSQ/SQ 数量后各扫一遍）
   │
-  ├─ HSQ 非空？ ── 是 ──▶ 取 HSQ 命令，**不组链**（count=1）
+  ├─ 先扫 HSQ（快照数）：HSQ 命令不参与链，need = 1
+  │     nand_dispatch_lun_free(ch,ce,lun) ≥ need ? → 取出提交
+  │     否则该 LUN 本轮挂起（后续同 LUN 命令跳过）
   │
-  └─ 否 → SQ
-        ├─ 读饥饿预扫描：连续写计数 ≥ FC_SCHEDULER_READ_PRIORITY_WRITE_BUDGET(=3)
-        │     → 优先选一条读命令（读饥饿保护，§20）
-        └─ 组链：仅当命令 config.chain != 0 才收集后续命令（count ≥ 2）
-              ⚠ FTL 运行时恒 chain = FC_CHAIN_END → 永不组链 → count 恒 1
-                （链收集分支仅单测覆盖，见 §23.9）
+  └─ 再扫 SQ（快照数）：
+        need = fc_poll_chain_length(sq, head)   // 链头：连续 chain=1 段，上限 CHAIN_MAX=4
+        nand_dispatch_lun_free(ch,ce,lun) ≥ need ?
+          → 是：单命令 submit / 链 submit_chain（原子追加 need 槽）
+          → 否：该 LUN 本轮挂起 + 命令回推队尾（保序）
+        ⚠ FTL 运行时恒 chain = FC_CHAIN_END → need 恒 1
+          （链收集分支仅单测覆盖，见 §23.9）
 ```
+
+要点：**HSQ 优先只体现在扫描顺序**——它不抢已进 FIFO 的命令（FIFO 严格先进先出）；
+"忙"由 `nand_dispatch_lun_free()` 表达，不再有 FC 侧 busy 表；读饥饿保护已删除。
 
 ### 23.8 运行时走读：一条读命令
 
@@ -3742,12 +3798,12 @@ fc_scheduler_select_chain(&sched_chain)
 | 1 | FTL：`fc_command_alloc` → `configure_descriptors` → `fc_submit` | 分配 command/desc/buffer，入 SQ；状态 QUEUED |
 | 2 | `main while(1)` → `ftl_service` → `fc_service` ×≤4 | 主循环驱动 |
 | 3 | `fc_poll_internal` ① `nand_dispatch_poll` | 先推进 NAND（首轮无完成） |
-| 4 | `fc_poll_internal` ② `fc_scheduler_select_chain` | 取到命令，count==1 |
+| 4 | `fc_poll_internal` ② `fc_poll_fill` | 一次扫描 HSQ/SQ，按 LUN room 取命令，need==1 |
 | 5 | `fc_poll_dispatch_single` → `fc_build_dispatch_request` | 置 ACTIVE；构建 request |
-| 6 | `nand_dispatch_submit` | 门控通过 → `task_load` 绑 backend/buffer → 入通道 FIFO |
-| 7 | 下一轮 `nand_dispatch_poll` Phase 2 `phase2_dequeue` → `nand_fc_start` | READ_PAGE_LOAD（ISSUE 型）→ phase=ISSUE → 异步 WAIT |
+| 6 | `nand_dispatch_submit` | 门控通过 → `nand_dispatch_enqueue` 追加槽 → `task_load` 绑 backend/buffer |
+| 7 | 下一轮 `nand_dispatch_poll` → `lun_step` → `nand_dispatch_task_start` → `nand_fc_start` | READ_PAGE_LOAD（ISSUE 型）→ phase=ISSUE → 异步 WAIT |
 | 8 | `nand_engine_start/step` | UOP 解释：00h / addr / 30h / CONFIRM → END |
-| 9 | Phase 1 `phase1_lun` → ISSUED → `issued_advance` | 等 tR 到点，`pair_op` 切 FETCH |
+| 9 | `lun_step` → `issued_advance` | 等 tR 到点，`pair_op` 切 FETCH |
 | 10 | `nand_fc_start`（FETCH）→ `nand_engine_step` | WAIT_READY + 70h 轮询 + DATA_OUT + CHECK_FAIL |
 | 11 | `scatter_page_buffer` | 页缓冲拆回各 CW buffer |
 | 12 | 返回 completion → `fc_complete_from_nand` | 写 cw_status/ecc_bits 回 desc；`fc_data_path_process_read` 解扰/ECC/RAID |
@@ -3764,6 +3820,14 @@ fc_scheduler_select_chain(&sched_chain)
 
 结论：把图 11 的链收集分支理解为"**能力存在但运行时未启用**"，主干是单命令路径（图 17/图 19）。链式执行的设计与验证保留在 §16，供单测与未来扩展参考。
 
+> 🔁 **v8 更新（2026-10-06，per-LUN FIFO）**：上面的结论不变（FTL 仍恒 `FC_CHAIN_END`，运行时仍走单命令路径），但**单命令路径本身换了模型**：
+> - 调度不再是 FC 侧 busy 表 + `fc_scheduler_select`，而是 `fc_poll_fill()` 一次扫描 HSQ/SQ，按 LUN 保序把能放下的命令（含链）提交进 NAND 的 per-LUN FIFO（深 4）；
+> - NAND 侧不再有 per-channel FIFO / Phase 1 / Phase 2，`nand_dispatch_poll()` 遍历各 LUN FIFO、每 LUN 每轮推进一条、完成一条回一份 completion；
+> - "忙"由 `nand_dispatch_lun_free()` 表达，`NOT_READY` 不再被 FC 当失败标 `NAND_FAIL`；
+> - `fc_scheduler_set_busy` / `clear_busy` / `busy[][][]` / `consecutive_write_count` 均已删除（见 [§24](#24-fc-层断言判据assert--assume) 判据 4 的历史条目）。
+>
+> 图 9（§4.3）已重绘为遍历模型；图 11 的链收集分支语义改为"连续槽 + 逐条完成"。详见 `docs/changelog/fc_nand_per_lun_fifo.md`。
+
 ---
 
 ## 24. FC 层断言判据（ASSERT / ASSUME）
@@ -3779,7 +3843,7 @@ fc_scheduler_select_chain(&sched_chain)
 
    **FC 层不用 `ASSUME`。** 起初按"守卫带恢复分支 → `ASSUME`"划分，后来取消：恢复分支既然已经手工删掉，`ASSUME` 的 `__builtin_unreachable()` 就换不来额外代码生成收益（工程未开 LTO，`fc_command_id_to_command()` 这类跨 TU 调用点无从利用该假设）；而它会把"违反即 UB"引入一条本来只会 HardFault 的路径——同样是崩，`ASSERT` 的现场更可定位。`ASSUME` 宏保留在 `assertion.h` 里，留给将来确有热路径需要向编译器证明的场合。
 3. **资源类结果与运行时状态保留返回码**——池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、CQ 满背压（`FC_STATUS_IO_ERROR`）、NAND 报告的错误（`FC_STATUS_IO_ERROR`）、`g_crc_ready == 0U` / `ctx->active == 0U` / `fc_buffer_is_occupied(...) == 0U` 这类"此刻能不能做"的状态，都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。
-4. **单测固化为契约的守卫保留返回码**——判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**：`fc_command_validate`（校验器，返回判决是职责）、`set_busy/clear_busy` 的越界忽略（**文档化特性**）、`test_rebuild.c` 的 `allocator_remove_from_free(..., 越界)`（文档化 no-op）等保留。反之，**只有测试会走"传非法参数"分支**的（`fc_command_status_set_cw` 的 `cw >= 4`、`fc_scheduler_init(NULL,…)`、`fc_submit(NULL)`、`fc_data_path_encode(NULL)` 等），按判据 2 转 `ASSERT` 并**删掉对应用例**。
+4. **单测固化为契约的守卫保留返回码**——判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**：`fc_command_validate`（校验器，返回判决是职责）、`test_rebuild.c` 的 `allocator_remove_from_free(..., 越界)`（文档化 no-op）等保留。（原条目还列了 `fc_scheduler_set_busy/clear_busy` 的越界忽略——**v8 起该 API 与 busy 表已整体删除**，见 §23.9。）反之，**只有测试会走"传非法参数"分支**的（`fc_command_status_set_cw` 的 `cw >= 4`、`fc_scheduler_init(NULL,…)`、`fc_submit(NULL)`、`fc_data_path_encode(NULL)` 等），按判据 2 转 `ASSERT` 并**删掉对应用例**。
 
 **判据 4 的边界：什么时候可以删用例而不是保留守卫。** 反例是 `fc_queue.c` 的指针判空：`fc_submission_queue_*` / `fc_completion_queue_*` 的生产调用者只有 `fc.c` 与 `fc_scheduler.c`，**全部传有效指针**——唯一会传 `NULL` 的就是测试自己。这种"只有测试会走的分支"应当按判据 2 转 `ASSERT`，并**删掉对应用例**（它们验证的行为届时已不存在，留着反而是错的）。两轮补扫共删除 `test_fc_level1.c` 的 13 个 `*_null`/越界用例与 `test_fc_level2.c` 的 3 个。
 
@@ -4000,9 +4064,9 @@ else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
 | 图 6 | nand_engine 微码状态机 | `grep -n "nand_engine_step" src/nand/nand_engine.c` |
 | 图 7 | 70h 状态轮询循环 | `grep -n "JUMP_IF_NOT_READY" src/nand/onfi_1_0.c` |
 | 图 8 | FMC 后端 UOP 执行 | `grep -n "g_nand_fmc_handlers" src/nand/nand_fmc.c` |
-| 图 9 | nand_dispatch poll 两阶段 | `grep -n "nand_dispatch_poll" src/nand/nand_dispatch.c` |
+| 图 9 | nand_dispatch poll 遍历模型（per-LUN FIFO） | `grep -n "nand_dispatch_poll\|nand_dispatch_lun_step" src/nand/nand_dispatch.c` |
 | 图 10 | LUN 相位机（Phase V） | `grep -n "LUN_PHASE_" src/nand/nand_dispatch_internal.h src/nand/nand_dispatch.c` |
-| 图 11 | 调度器 select_chain | `grep -n "fc_scheduler_select_chain" src/fc/fc_scheduler.c` |
+| 图 11 | 调度器填充 pass（fc_poll_fill） | `grep -n "fc_poll_fill\|nand_dispatch_lun_free" src/fc/fc.c src/nand/nand_dispatch.c` |
 | 图 12 | Stripe RAID 写提交 | `grep -n "fc_stripe_submit" src/fc/fc.c` |
 | 图 13 | 完成回写与 CQ 组装 | `grep -n "fc_complete_from_nand" src/fc/fc.c` |
 | 图 14 | 上电初始化分层调用时序 | `grep -n "fc_init\|nand_init\|ssd_ftl_boot_all" src/main.c` |
@@ -4013,7 +4077,7 @@ else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
 | 图 19 | fc_service() 单步全景 | `grep -n "fc_poll_internal\|fc_poll_fail_command\|fc_register_queue_state" src/fc/fc.c` |
 | 图 20 | nand_dispatch 相位机状态机 | `grep -n "LUN_PHASE_\|nand_dispatch_issued_advance\|nand_operation_is_issue" src/nand/nand_dispatch_internal.h src/nand/nand_dispatch.c` |
 | 图 21 | 多 LUN ISSUE/WAIT/FETCH 时序波形 | `grep -n "wait_start_cycles\|min_busy_us\|delay_dwt_cycles_now" src/nand/nand_dispatch.c src/nand/nand_dispatch_tables.c` |
-| 图 22 | 调度器取命令决策 | `grep -n "fc_scheduler_select_chain\|FC_SCHEDULER_READ_PRIORITY_WRITE_BUDGET" src/fc/fc_scheduler.c` |
+| 图 22 | 调度器填充 pass 决策 | `grep -n "fc_poll_fill\|fc_poll_chain_length\|nand_dispatch_lun_free" src/fc/fc.c` |
 
 ## 附录 B：建议阅读顺序
 

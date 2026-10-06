@@ -7,15 +7,16 @@
 
 #include <stdint.h>
 
-/* One fixed FIFO is attached to each physical NAND channel. */
-#define NAND_CHANNEL_QUEUE_DEPTH (64U)
+/* One fixed per-LUN FIFO (depth NAND_DISPATCH_CHAIN_DEPTH) is attached to each LUN. */
+#define NAND_DISPATCH_CHAIN_DEPTH (4U)
 
 /*
- * 链式命令最大深度（每个 LUN 可连续缓存的命令数）。
- * 当前设计用于 Read Retry 序列（SET_FEATURES + READ + SET_FEATURES = 3 条）。
- * 增大以支持 RAID 恢复等更长序列。
+ * 每个 LUN 一个待处理 FIFO，深度 = NAND_DISPATCH_CHAIN_DEPTH。
+ * **每槽 = 一条命令**：NAND 侧看不到「链」，一条链 = 连续 N 槽。
+ * FC 用 nand_dispatch_submit_chain() 把整链原子批量追加（空间不足则整体拒收），
+ * poll 遍历每 LUN FIFO，先进先出，每轮每 LUN 推进一条、完成一条即回一份 completion。
+ * 因此每条命令各有一份 completion，链中间命令的状态不再被吞掉。
  */
-#define NAND_DISPATCH_CHAIN_DEPTH (4U)
 
 typedef struct
 {
@@ -90,18 +91,25 @@ void nand_dispatch_set_device_ready(uint8_t ready);
  */
 uint8_t nand_dispatch_is_device_ready(void);
 
-/* Submit one pre-resolved command to the channel FIFO. */
+/* Submit one pre-resolved command to its LUN FIFO (count = 1). */
 nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request);
 
 /*
- * 原子提交整条命令链到指定 LUN 的 chain buffer + 通道队列。
+ * 原子提交整条命令链到目标 LUN 的 FIFO（追加 count 槽）。
  * requests[0..count-1] 必须在同一 ch/ce/lun。
- * 队列空间无法容纳整链或 LUN chain buffer 非空闲时返回 NOT_READY，无副作用。
- * 链中命令按序执行（由 poll 自动推进 cursor），中间不可被 HSQ 打断。
+ * LUN FIFO 剩余深度不足整链时返回 NOT_READY，无副作用。
+ * 追加后链占据连续槽位、按 FIFO 顺序执行，中间不可被后续命令插入。
+ * 每条命令各回一份 completion（由 poll 逐条返回）。
  */
 nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count);
 
-/* Execute one pending command from one Channel FIFO through ONFI -> NAND Engine -> FMC. */
+/* Execute one pending command from one LUN FIFO through ONFI -> NAND Engine -> FMC. */
 nand_result_t nand_dispatch_poll(nand_dispatch_completion_t *completion);
+
+/*
+ * 查询目标 LUN FIFO 的剩余槽数（0 .. NAND_DISPATCH_CHAIN_DEPTH）。
+ * 供 FC 填充时判断能否放下整条链；越界参数返回 0。
+ */
+uint8_t nand_dispatch_lun_free(uint8_t ch, uint8_t ce, uint8_t lun);
 
 #endif /* NAND_DISPATCH_H */

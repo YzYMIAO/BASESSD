@@ -7,21 +7,18 @@
 
 /*
  * 调度器：HSQ 优先于普通 SQ。
- * 维护 per-(CH,CE,LUN) 的 busy 状态，跳过忙碌目标的命令。
  *
- * 链式命令扩展：fc_scheduler_select_chain() 识别 config.chain==1 的连续命令，
- * 收集同 ch/ce/lun 的整条链一次性弹出给 FC 做 submit_chain。
+ * 本模块只承载调度器状态与"命令链"描述类型；**选择逻辑在 fc.c 的填充 pass**
+ * （fc_poll_fill）——它需要把选中的命令立即交给 fc_poll_dispatch_single/chain，
+ * 与 FC 提交路径同文件。
+ *
+ * "忙" 不再是 FC 侧的软件标记（旧 busy[][][] 表与 set/clear_busy 已删）：
+ * 一个 LUN 能否接收命令，查 NAND 侧 per-LUN FIFO 的剩余槽
+ * （nand_dispatch_lun_free）；填充时按此判断能否放下整条链。
  */
 
-/* 最长命令链：与 nand_dispatch 的 chain buffer 深度一致 */
+/* 最长命令链：与 nand_dispatch 的 per-LUN FIFO 深度一致 */
 #define FC_SCHEDULER_CHAIN_MAX NAND_DISPATCH_CHAIN_DEPTH
-
-/*
- * 读饥饿保护：连续执行 N 条非读命令（PROGRAM/ERASE 等）后，
- * 调度器将跳过后续非读命令，优先调度读命令。
- * 执行一条读命令后计数器清零。
- */
-#define FC_SCHEDULER_READ_PRIORITY_WRITE_BUDGET (3U)
 
 typedef struct
 {
@@ -33,26 +30,8 @@ typedef struct
 {
     fc_submission_queue_t *sq;
     fc_submission_queue_t *hsq;
-    uint8_t                busy[CH_NUM][CE_NUM][LUN_NUM];
-    uint8_t                consecutive_write_count; /* 读饥饿保护：连续非读命令计数 */
 } fc_scheduler_t;
 
 fc_status_t fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq);
-
-/* 从 HSQ 或 SQ 选一条目标不忙的可执行命令。保留原语义。 */
-fc_status_t fc_scheduler_select(fc_scheduler_t *scheduler, fc_command_id_t *command_id);
-
-/*
- * 链式选择：从 HSQ 或 SQ 选取目标不忙的命令。
- * - HSQ 命令不参与链，count=1。
- * - SQ 命令检测 config.chain：chain=0 时 count=1（单命令），
- *   chain=1 时连续收集同 ch/ce/lun 的后续命令直到 chain=0。
- *   收集到的整条链从 SQ 一次性弹出到 chain->ids[0..count-1]。
- */
-fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_chain_t *chain);
-
-/* 标记/清除指定目标 busy */
-void fc_scheduler_set_busy(fc_scheduler_t *scheduler, uint8_t ch, uint8_t ce, uint8_t lun);
-void fc_scheduler_clear_busy(fc_scheduler_t *scheduler, uint8_t ch, uint8_t ce, uint8_t lun);
 
 #endif /* FC_SCHEDULER_H */

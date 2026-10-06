@@ -25,8 +25,9 @@
  *
  * 服务主循环（fc_poll_internal）：
  *   ① nand_dispatch_poll() 推进 NAND 层，有完成 → fc_complete_from_nand()
- *   ② fc_scheduler_select_chain() 取可执行命令 → 分派 fc_poll_dispatch_single()
- *      / fc_poll_dispatch_chain()（后者内部构建 request → submit/submit_chain；
+ *   ② 无完成 → fc_poll_fill() 一次扫描 HSQ/SQ，按 LUN 保序把能放下的命令（含链）
+ *      提交进 NAND per-LUN FIFO（分派 fc_poll_dispatch_single() /
+ *      fc_poll_dispatch_chain()；后者内部构建 request → submit/submit_chain，
  *      raid=ENCODE 走 fc_stripe_submit）
  *
  * 状态机：FREE → ALLOCATED → QUEUED → ACTIVE → COMPLETED。
@@ -365,7 +366,7 @@ fc_status_t fc_init_internal(fc_t *controller)
     {
         return result;
     }
-    /* ── ④ 调度器绑定 SQ/HSQ 指针，并清零 busy[ch][ce][lun] 与读饥饿计数 ── */
+    /* ── ④ 调度器绑定 SQ/HSQ 指针（"忙"查 NAND 侧 nand_dispatch_lun_free，无 busy 表） ── */
     result = fc_scheduler_init(&controller->scheduler, &controller->sq, &controller->hsq);
     if (result != FC_STATUS_OK)
     {
@@ -1489,7 +1490,12 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
         return FC_STATUS_IO_ERROR;
     }
 
-    if (nand_dispatch_submit(&request) != NAND_RESULT_OK)
+    const uint8_t submit_result = nand_dispatch_submit(&request);
+
+    /* 填充 pass（fc_poll_fill）已按 nand_dispatch_lun_free() 预留槽位，
+     * 此处不应再遇到 NOT_READY；其余失败（设备未就绪等）才是真错误。 */
+    ASSERT(submit_result != NAND_RESULT_NOT_READY);
+    if (submit_result != NAND_RESULT_OK)
     {
         LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_count=%u plane_count=%u\r\n",
              (unsigned)command->config.operation,
@@ -1552,7 +1558,11 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
         }
     }
 
-    if (nand_dispatch_submit_chain(reqs, chain_count) != NAND_RESULT_OK)
+    const uint8_t submit_result = nand_dispatch_submit_chain(reqs, chain_count);
+
+    /* 填充 pass 已按 nand_dispatch_lun_free() 预留整链槽位，此处不应再遇到 NOT_READY。 */
+    ASSERT(submit_result != NAND_RESULT_NOT_READY);
+    if (submit_result != NAND_RESULT_OK)
     {
         for (i = 0U; i < chain_count; i++)
         {
@@ -1568,15 +1578,197 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
 }
 
 /* --------------------------------------------------------------------
+ * fc_poll_chain_length
+ *   功能：计算 SQ 队头命令所属链的长度（链头已弹出，peek 从队头看后续）。
+ *   参数：sq —— 普通提交队列（队头已是链头之后的下一条）；head —— 已弹出的链头命令。
+ *   返回：链长（1..FC_SCHEDULER_CHAIN_MAX）。
+ *   实现要点：
+ *     - head->config.chain == FC_CHAIN_END → 单命令，返回 1。
+ *     - 否则 peek 后续，收集同一 (ch,ce,lun) 的连续命令，直到 chain==END 或链满。
+ *     - 只 peek 不消耗——真正弹出在 fc_poll_fill 里，链放不下时可原样留在队列。
+ * -------------------------------------------------------------------- */
+static uint8_t fc_poll_chain_length(const fc_submission_queue_t *sq, const fc_command_t *head)
+{
+    uint8_t need = 1U;
+
+    ASSERT(sq != NULL);
+    ASSERT(head != NULL);
+
+    if (head->config.chain == FC_CHAIN_END)
+    {
+        return 1U;
+    }
+
+    while (need < FC_SCHEDULER_CHAIN_MAX)
+    {
+        fc_command_id_t     next_id = fc_submission_queue_peek(sq, (uint16_t)(need - 1U));
+        const fc_command_t *next;
+
+        if (next_id == FC_COMMAND_ID_INVALID)
+        {
+            break; /* 队列尾 */
+        }
+        next = fc_command_id_to_command(next_id);
+        ASSERT(next != NULL);
+
+        /* 连续性校验：必须同一 target（链成员同 LUN，由 FTL 保证） */
+        if ((next->config.ch != head->config.ch) || (next->config.ce != head->config.ce) || (next->config.lun != head->config.lun))
+        {
+            break;
+        }
+        need++;
+        if (next->config.chain == FC_CHAIN_END)
+        {
+            break; /* chain=0：链结束 */
+        }
+    }
+    return need;
+}
+
+/* --------------------------------------------------------------------
+ * fc_poll_fill
+ *   功能：一次填充 pass——扫描 HSQ/SQ，把可下发的命令（含链）提交进 NAND per-LUN FIFO。
+ *   参数：controller —— FC 控制器。
+ *   返回：FC_STATUS_OK（本轮至少提交了一条）/ IO_ERROR（提交失败，剩余命令留在队列）/
+ *         QUEUE_EMPTY / NOT_READY（无可提交，供 ftl_service 结束本轮 fc_service 循环）。
+ *   实现要点：
+ *     - **HSQ 优先**：先扫 HSQ（HSQ 命令不参与链，逐条），再扫 SQ。
+ *     - **按 LUN 保序**：命令 need = 链长；nand_dispatch_lun_free(lun) >= need 才取，
+ *       否则该 LUN 本轮挂起（suspended），后续同 LUN 命令一律跳过。
+ *     - **一次扫描**：按本轮快照数量扫描（HSQ/SQ 各一份），扫完即止。
+ *     - **顺序保持**：取不走的命令 pop 后回推队尾——扫完整轮等价于一次旋转，
+ *       未取出命令的相对顺序不变（同 LUN 的命令因 LUN 挂起必然一起回推，顺序不破）。
+ *     - 提交失败即中止本轮，剩余命令仍在队列里（未被取出），下轮重试。
+ * -------------------------------------------------------------------- */
+static fc_status_t fc_poll_fill(fc_t *controller)
+{
+    fc_scheduler_t *scheduler = &controller->scheduler;
+    uint8_t         suspended[CH_NUM][CE_NUM][LUN_NUM];
+    uint8_t         dispatched = 0U;
+
+    memset(suspended, 0, sizeof(suspended));
+
+    /* ── HSQ 优先：HSQ 命令不参与链，逐条下发 ── */
+    {
+        uint16_t total = scheduler->hsq->count;
+        uint16_t k;
+
+        for (k = 0U; k < total; k++)
+        {
+            fc_command_id_t      id;
+            fc_command_t        *cmd;
+            fc_scheduler_chain_t chain;
+            uint8_t              ch;
+            uint8_t              ce;
+            uint8_t              lun;
+
+            (void)fc_submission_queue_pop(scheduler->hsq, &id);
+            cmd = fc_command_id_to_command(id);
+            ASSERT(cmd != NULL);
+
+            ch  = (uint8_t)cmd->config.ch;
+            ce  = (uint8_t)cmd->config.ce;
+            lun = (uint8_t)cmd->config.lun;
+            /* 越界是编程错误（submit 路径已 ASSERT），此处防御性原样回推 */
+            if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
+            {
+                (void)fc_submission_queue_push(scheduler->hsq, id);
+                continue;
+            }
+            if ((suspended[ch][ce][lun] != 0U) || (nand_dispatch_lun_free(ch, ce, lun) < 1U))
+            {
+                /* 该 LUN 本轮已挂起或 FIFO 满：挂起并原样回推 */
+                suspended[ch][ce][lun] = 1U;
+                (void)fc_submission_queue_push(scheduler->hsq, id);
+                continue;
+            }
+
+            chain.count   = 1U;
+            chain.ids[0U] = id;
+            if (fc_poll_dispatch_single(controller, &chain) != FC_STATUS_OK)
+            {
+                return FC_STATUS_IO_ERROR;
+            }
+            dispatched++;
+        }
+    }
+
+    /* ── SQ：按 LUN 保序，链整条取出 ── */
+    {
+        uint16_t total = scheduler->sq->count;
+        uint16_t k;
+
+        for (k = 0U; k < total; k++)
+        {
+            fc_command_id_t      id;
+            fc_command_t        *cmd;
+            fc_scheduler_chain_t chain;
+            uint8_t              ch;
+            uint8_t              ce;
+            uint8_t              lun;
+            uint8_t              need;
+            uint8_t              j;
+
+            (void)fc_submission_queue_pop(scheduler->sq, &id);
+            cmd = fc_command_id_to_command(id);
+            ASSERT(cmd != NULL);
+
+            ch  = (uint8_t)cmd->config.ch;
+            ce  = (uint8_t)cmd->config.ce;
+            lun = (uint8_t)cmd->config.lun;
+            if ((ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
+            {
+                (void)fc_submission_queue_push(scheduler->sq, id);
+                continue;
+            }
+            if (suspended[ch][ce][lun] != 0U)
+            {
+                (void)fc_submission_queue_push(scheduler->sq, id);
+                continue;
+            }
+
+            need = fc_poll_chain_length(scheduler->sq, cmd);
+            if (nand_dispatch_lun_free(ch, ce, lun) < need)
+            {
+                /* 剩余槽放不下整条链：本轮挂起该 LUN，链头回推（成员后续轮次一并回推） */
+                suspended[ch][ce][lun] = 1U;
+                (void)fc_submission_queue_push(scheduler->sq, id);
+                continue;
+            }
+
+            chain.count   = need;
+            chain.ids[0U] = id;
+            for (j = 1U; j < need; j++)
+            {
+                (void)fc_submission_queue_pop(scheduler->sq, &chain.ids[j]);
+            }
+            k = (uint16_t)(k + need - 1U); /* 跳过已取出的链成员 */
+
+            if (((need == 1U) ? fc_poll_dispatch_single(controller, &chain) : fc_poll_dispatch_chain(controller, &chain)) != FC_STATUS_OK)
+            {
+                return FC_STATUS_IO_ERROR;
+            }
+            dispatched++;
+        }
+    }
+
+    if (dispatched != 0U)
+    {
+        return FC_STATUS_OK;
+    }
+    return ((scheduler->sq->count == 0U) && (scheduler->hsq->count == 0U)) ? FC_STATUS_QUEUE_EMPTY : FC_STATUS_NOT_READY;
+}
+
+/* --------------------------------------------------------------------
  * fc_poll_internal
  *   功能：FC 服务主循环单步——推进 NAND + 取命令提交。
  *   参数：controller —— FC 控制器。
- *   返回：FC_STATUS_OK / IO_ERROR / 调度器结果（NOT_READY 等）。
+ *   返回：FC_STATUS_OK / IO_ERROR / QUEUE_EMPTY / NOT_READY。
  *   实现要点：
  *     - 先 nand_dispatch_poll() 推进 NAND；有完成 → fc_complete_from_nand
- *       （并清理 stripe parity），OK 直接返回。
- *     - 无完成 → 调度器取链/单命令 → 分派 fc_poll_dispatch_single /
- *       fc_poll_dispatch_chain。
+ *       （并清理 stripe parity），OK 直接返回（一次调用处理一条完成）。
+ *     - 无完成 → fc_poll_fill()：一次扫描把能放下的命令（含链）提交进 NAND
+ *       per-LUN FIFO（按 LUN 保序、HSQ 优先、room 判定）。
  *     - 队列状态寄存器由两个 dispatch helper **逐点刷新**（fc_register_queue_state
  *       幂等，但早退路径不刷，见 helpers 内注释），非在本函数统一刷新。
  *   运行时事实（勿被 §16/图 11 误导）：FTL 所有命令 config.chain=FC_CHAIN_END，
@@ -1618,20 +1810,8 @@ fc_status_t fc_poll_internal(fc_t *controller)
         return (nand_result == NAND_RESULT_OK) ? FC_STATUS_OK : FC_STATUS_IO_ERROR;
     }
 
-    /* 从调度器获取可执行命令（可能为单命令或链）。 */
-    fc_scheduler_chain_t sched_chain;
-    result = fc_scheduler_select_chain(&controller->scheduler, &sched_chain);
-    if (result == FC_STATUS_OK)
-    {
-        /* select_chain 返回 OK 前必置 count≥1（fc_scheduler.c 先置 1U，while 只增） */
-        ASSERT(sched_chain.count != 0U);
-
-        /* 单命令走 submit，链式走 submit_chain。
-         * 两条路径内部各自刷新寄存器状态（与拆分前一致：校验失败早退的那条不刷新）。 */
-        return (sched_chain.count == 1U)
-                   ? fc_poll_dispatch_single(controller, &sched_chain)
-                   : fc_poll_dispatch_chain(controller, &sched_chain);
-    }
+    /* 无完成 → 填充 pass：一次扫描把可下发命令（含链）提交进 NAND per-LUN FIFO。 */
+    result = fc_poll_fill(controller);
     fc_register_queue_state(controller);
     return result;
 }
