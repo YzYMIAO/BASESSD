@@ -25,7 +25,7 @@
  * 判断 operation 是否为读操作。
  * 读操作包括：标准 Page Read、Multi-Plane Read、Cache Read、
  * Random Data Read、Internal Data Move Read、READ_ID、
- * READ_PARAMETER_PAGE、READ_STATUS、READ_MODE 等。
+ * READ_PARAMETER_PAGE、READ_STATUS 等。
  * PROGRAM/ERASE/SET_FEATURES 等非读操作受读饥饿保护约束。
  */
 static uint8_t fc_scheduler_op_is_read(uint8_t operation)
@@ -40,6 +40,7 @@ static uint8_t fc_scheduler_op_is_read(uint8_t operation)
         case OP_READ_PAGE_CACHE_RANDOM:
         case OP_READ_PAGE_CACHE_LAST:
         case OP_RANDOM_DATA_READ:
+        case OP_RANDOM_DATA_READ_MULTI_PLANE: /* 多 plane 页缓冲随机读单 CW */
         case OP_READ_FOR_INTERNAL_DATA_MOVE:
         case OP_READ_ID:
         case OP_READ_PARAMETER_PAGE:

@@ -612,44 +612,108 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx
 }
 
 /* --------------------------------------------------------------------
+ * nand_dispatch_is_load_op / nand_dispatch_is_fetch_op
+ *   功能：CW 链的 op 分类（决定链如何推进）。
+ *   参数：operation —— OP_*。
+ *   返回：1 = 是；0 = 否。
+ *   实现要点：
+ *     - load：只把整页搬进 NAND 页缓冲、自身不输出数据；完成后从槽位 0 起取数。
+ *     - fetch：从页缓冲按列地址取单个 CW；每完成一个推进一个槽位。
+ * -------------------------------------------------------------------- */
+static uint8_t nand_dispatch_is_load_op(uint8_t operation)
+{
+    return ((operation == OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) ||
+            (operation == OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT))
+               ? 1U
+               : 0U;
+}
+
+static uint8_t nand_dispatch_is_fetch_op(uint8_t operation)
+{
+    return ((operation == OP_RANDOM_DATA_READ) || (operation == OP_RANDOM_DATA_READ_MULTI_PLANE)) ? 1U : 0U;
+}
+
+/* --------------------------------------------------------------------
  * nand_dispatch_task_cw_chain
- *   功能：CW 级 chaining——多 CW READ 的 RANDOM_DATA_READ 链式续读。
+ *   功能：CW 级 chaining——「加载进页缓冲 + 逐 CW 取数」的链式推进。
  *   参数：ctx —— 单 LUN 上下文。
  *   返回：CW_ASYNC（下一 CW 异步启动，本轮到此为止）/ CW_DONE。
  *   实现要点：
- *     - 每 CW 先 task_complete，再判断是否可续读。
- *     - chaining 条件：整页读入页缓冲型操作 + 还有下一 CW
- *       （仅普通读/OTP 读/随机读这几类可按 CW 链式续读）。
- *     - 链中后续 CW 统一改用 OP_RANDOM_DATA_READ，列地址 = cw_index × 528B
- *       （PAGE_SIZE/4，页缓冲按 CW 等分，4=CW_NUM）。
+ *     - 每步先 task_complete，再判断是否可续读。
+ *     - **加载型 op**（WITHOUT_DATA_OUT 两种）完成后不推进槽位，直接从槽位 0 起发取数 op；
+ *       失败则链在此终止（completion_load 已把失败刷满全部槽位）。
+ *     - **取数 op** 每完成一个推进一个槽位，直到链尾。
+ *     - **旧语义 op**（WITH_DATA_OUT 普通读 / OTP 读）：CW0 已由 DATA_OUT 取回，
+ *       其余 CW 逐 CW 随机读——保留原行为（FC 已把普通读转成加载型，此路只剩直接下发场景）。
+ *     - 取数 op 按 plane 选：单 plane → OP_RANDOM_DATA_READ（05h-列-E0h）；
+ *       多 plane → OP_RANDOM_DATA_READ_MULTI_PLANE（06h-列-行-E0h，行地址带 plane 位）。
+ *     - 多 plane 槽位按 plane-major 展开：slot = plane × cw_count + cw，与 FC 的
+ *       desc 链序、cw_status[] 下标三者一致。
+ *     - 列地址 = **paa_to_cw(PAA) × CW_SIZE**：CW 号一律从 PAA 取，不用槽位号
+ *       （fc_command_t.cw_mask 使两者解耦）。
  *     - 链内 start 的错误码仍走完成路径，只有 NOT_READY 才中止本轮。
  * -------------------------------------------------------------------- */
 static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_ctx_t *ctx)
 {
     nand_dispatch_task_t *task   = &ctx->chain->tasks[ctx->chain->cursor];
     uint8_t               result = ctx->result;
+    /* 链槽位总数：单 plane = cw_count；多 plane = plane_count × cw_count（plane-major） */
+    uint8_t total_slots          = (task->plane_count > 0U) ? (uint8_t)(task->plane_count * task->cw_count) : task->cw_count;
 
     for (;;)
     {
+        uint8_t plane;
+        uint8_t cw;
+
         nand_dispatch_task_complete(task, result, &ctx->nand_completion);
-        if ((result != NAND_RESULT_OK) ||
-            ((task->operation != OP_NORMAL_READ_PAGE_WITH_DATA_OUT) &&
-             (task->operation != OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) &&
-             (task->operation != OP_OTP_DATA_READ) &&
-             (task->operation != OP_RANDOM_DATA_READ)) ||
-            (task->cw_index + 1U >= task->cw_count))
+        if (result != NAND_RESULT_OK)
         {
             break;
         }
-        task->cw_index++;
-        task->operation = OP_RANDOM_DATA_READ; /* 链中后续 CW 统一改用随机读 */
-        task->started   = 1U;                  /* 复用 start 路径但标记已启动 */
+
+        if (nand_dispatch_is_load_op(task->operation) != 0U)
         {
-            nand_paa_t cw_paa    = task->cw_paa[task->plane][task->cw_index];
-            uint8_t   *cw_buffer = task->cw_buffers[task->plane][task->cw_index];
-            /* 列地址 = CW 偏移 × 528B（PAGE_SIZE/4，页缓冲按 CW 等分，4=CW_NUM） */
-            uint16_t cw_column   = (uint16_t)(task->cw_index * (PAGE_SIZE / 4U));
-            task->request        = (nand_fc_request_t){.column = cw_column, .row = {paa_to_nand_row(cw_paa)}, .data = cw_buffer, .data_length = (uint16_t)(PAGE_SIZE / 4U)};
+            /* 加载完成：数据已在页缓冲，从槽位 0 起取（不改 cw_index，恒为 0） */
+            if (total_slots == 0U)
+            {
+                break;
+            }
+            plane = (task->plane_count > 0U) ? 0U : task->plane;
+            cw    = 0U;
+        }
+        else if (nand_dispatch_is_fetch_op(task->operation) != 0U)
+        {
+            /* 取数：推进到下一槽位，链尾则结束 */
+            if ((uint8_t)(task->cw_index + 1U) >= total_slots)
+            {
+                break;
+            }
+            task->cw_index++;
+            plane = (task->plane_count > 0U) ? (uint8_t)(task->cw_index / task->cw_count) : task->plane;
+            cw    = (task->plane_count > 0U) ? (uint8_t)(task->cw_index % task->cw_count) : task->cw_index;
+        }
+        else if (((task->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT) ||
+                  (task->operation == OP_OTP_DATA_READ)) &&
+                 ((uint8_t)(task->cw_index + 1U) < task->cw_count))
+        {
+            /* 旧语义：CW0 已由加载 op 的 DATA_OUT 取回，其余逐 CW 随机读 */
+            task->cw_index++;
+            plane = task->plane;
+            cw    = task->cw_index;
+        }
+        else
+        {
+            break;
+        }
+
+        task->operation = (task->plane_count > 0U) ? (uint8_t)OP_RANDOM_DATA_READ_MULTI_PLANE : (uint8_t)OP_RANDOM_DATA_READ;
+        task->started   = 1U; /* 复用 start 路径但标记已启动 */
+        {
+            nand_paa_t cw_paa    = task->cw_paa[plane][cw];
+            uint8_t   *cw_buffer = task->cw_buffers[plane][cw];
+            /* 列地址 = CW 号 × CW_SIZE（CW 号从 PAA 取，槽位与 CW 号已解耦） */
+            uint16_t cw_column   = (uint16_t)(paa_to_cw(cw_paa) * CW_SIZE);
+            task->request        = (nand_fc_request_t){.column = cw_column, .row = {paa_to_nand_row(cw_paa)}, .data = cw_buffer, .data_length = (uint16_t)CW_SIZE};
         }
         result = nand_fc_start(&task->transaction, task->operation, &task->request);
         if (result == NAND_RESULT_NOT_READY)
@@ -671,23 +735,26 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
  *   返回：无。
  *   实现要点：三种操作的数据落在页缓冲而非各 CW buffer（FMC 数据路径约定）：
  *     - Cache 读（SEQ/RANDOM/LAST）与 OP_READ_PAGE_FETCH：单 plane，
- *       offset = cw × (PAGE_SIZE/CW_NUM)。
+ *       offset = CW 号 × CW_SIZE。
  *     - Multi-Plane WITH_DATA_OUT：双 plane 数据按 plane 顺序拼接，
- *       offset = plane × PAGE_SIZE + cw × (PAGE_SIZE/CW_NUM)。
+ *       offset = plane × PAGE_SIZE + CW 号 × CW_SIZE。
+ *     **页缓冲内的偏移一律用 paa_to_cw(PAA) 取 CW 号，不能用槽位号**：cw_mask 使
+ *     链槽位与 CW 号解耦（见 nand_dispatch_task_cw_chain）。
  *     页缓冲按 (ch, ce, lun) 各持一块，故索引一律取自 task 自身。
  * -------------------------------------------------------------------- */
 static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
 {
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
-    uint8_t  cw;
+    uint8_t  slot;
     uint8_t  plane;
 
     if ((task->operation == OP_READ_PAGE_CACHE_SEQ) || (task->operation == OP_READ_PAGE_CACHE_RANDOM) ||
         (task->operation == OP_READ_PAGE_CACHE_LAST) || (task->operation == OP_READ_PAGE_FETCH))
     {
-        for (cw = 0U; cw < task->cw_count; cw++)
+        for (slot = 0U; slot < task->cw_count; slot++)
         {
-            memcpy(task->cw_buffers[task->plane][cw], &page_buffer[cw * (PAGE_SIZE / 4U)], PAGE_SIZE / 4U);
+            uint8_t cw_num = (uint8_t)paa_to_cw(task->cw_paa[task->plane][slot]);
+            memcpy(task->cw_buffers[task->plane][slot], &page_buffer[cw_num * CW_SIZE], CW_SIZE);
         }
     }
 
@@ -695,10 +762,11 @@ static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
     {
         for (plane = 0U; plane < task->plane_count; plane++)
         {
-            for (cw = 0U; cw < task->cw_count; cw++)
+            for (slot = 0U; slot < task->cw_count; slot++)
             {
-                uint8_t *src = &page_buffer[plane * PAGE_SIZE + cw * (PAGE_SIZE / CW_NUM)];
-                memcpy(task->cw_buffers[plane][cw], src, PAGE_SIZE / CW_NUM);
+                uint8_t  cw_num = (uint8_t)paa_to_cw(task->cw_paa[plane][slot]);
+                uint8_t *src    = &page_buffer[plane * PAGE_SIZE + cw_num * CW_SIZE];
+                memcpy(task->cw_buffers[plane][slot], src, CW_SIZE);
             }
         }
     }

@@ -83,20 +83,39 @@ CQ 条目包含命令 ID、module（直接路由）、per-CW ECC 纠正比特数
 
 ```c
 struct fc_command_status_t {
-    DWORD command_id : 16;
-    DWORD desc_id    : 16;
-    DWORD module     : 4;   // 发起者模块，直接路由用
-    DWORD ecc_bit0   : 8;   // CW0 ECC 纠正比特数
-    DWORD ecc_bit1   : 8;   // CW1
-    DWORD ecc_bit2   : 8;   // CW2
-    DWORD ecc_bit3   : 8;   // CW3
-    DWORD reserved   : 4;
-    DWORD status0    : 8;   // CW0 状态
-    DWORD status1    : 8;   // CW1
-    DWORD status2    : 8;   // CW2
-    DWORD status3    : 8;   // CW3
+    DWORD command_id     : 16;
+    DWORD desc_id        : 16;  // 出错时更新为第一个失败的 desc
+    DWORD module         : 4;   // 发起者模块，直接路由用
+    DWORD ecc_bit0       : 8;   // CW0 ECC 纠正比特数
+    DWORD ecc_bit1       : 8;   // CW1
+    DWORD ecc_bit2       : 8;   // CW2
+    DWORD ecc_bit3       : 8;   // CW3
+    DWORD status         : 8;   // 命令级聚合状态（各 CW 的 FC_CW_STATUS_* 位 OR）
+    DWORD failed_cw_mask : 4;   // bit n = CW n 解码失败（UNC / CRC_ERROR）；0 = 全通过
+    DWORD reserved       : 16;
 };
 ```
+
+`failed_cw_mask` 按 **CW 号**（不是 desc 链走位）置位，因此配合 `fc_command_t.cw_mask` 做非满 mask 读时，
+可以直接定位是哪几个 CW 失败、无需再查 desc 链。仅 page read 填充，其余命令恒 0。
+
+### 读命令的 CW 子集选择（fc_command_t.cw_mask）
+
+`fc_command_t` 新增 `cw_mask : 4`（bit n = CW n），用于只读一页中**任意 CW 子集**（读恢复场景：ECC 只挂了
+2~3 个 CW 时只重读失败的那几个，不必重读整页）：
+
+```c
+fc_command_t *cmd = fc_command_alloc();
+cmd->config.operation = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+cmd->config.cw        = 3U;      // 满页 4 个 CW（mask=0 时按此字段取连续 0..cw）
+cmd->cw_mask          = 0b1011U; // 只读 CW0 / CW1 / CW3
+// configure 时按 cw_mask 置位建 desc 链，并把 config.cw 回写为"置位数减一"（此处 2）
+```
+
+`cw_mask = 0` 表示未指定，退化为"连续 `0..config.cw`"——所有既有调用点都是这个取值，行为不变。
+该字段**仅读类命令有效**；写路径仍按连续 CW 处理。
+
+**不在本次范围**：FTL 读恢复流程（`src/ftl/read_recovery.c`）对 `failed_cw_mask` / `cw_mask` 的接线。
 
 ### 使用 module 直接路由完成通知
 

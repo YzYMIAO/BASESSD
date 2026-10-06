@@ -538,7 +538,10 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
                 uint32_t read_meta;
                 (void)memcpy(&read_meta, buffer, FC_CRC_META_SIZE);
                 desc->meta        = read_meta;
-                uint32_t expected = lba_to_cw_meta(command->meta, cw);
+                /* META 由写入侧的 CW 号派生（见 fc_command_configure_descriptor_internal），
+                 * 故这里必须用 paa_to_cw(desc->paa) 而不是链走位 cw —— cw_mask 不满时两者
+                 * 不同，用链走位会误报 FC_CW_STATUS_MATA_ERROR。满 mask 时等值。 */
+                uint32_t expected = lba_to_cw_meta(command->meta, (uint8_t)paa_to_cw(desc->paa));
                 if (read_meta != expected)
                 {
                     desc->status |= FC_CW_STATUS_MATA_ERROR;

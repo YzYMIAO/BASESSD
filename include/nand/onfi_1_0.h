@@ -37,7 +37,6 @@
 #define NAND_CMD_RANDOM_DATA_READ_TWO_PLANE 0x06U
 #define NAND_CMD_RANDOM_DATA_READ_END       0xE0U
 #define NAND_CMD_RANDOM_DATA_INPUT          0x85U
-#define NAND_CMD_READ_MODE                  0x00U
 #define NAND_CMD_READ_PAGE_CACHE_SEQ        0x31U
 #define NAND_CMD_READ_PAGE_CACHE_LAST       0x3FU
 #define NAND_CMD_PROGRAM_PAGE_CACHE         0x15U
@@ -122,7 +121,19 @@
  */
 #define OP_RANDOM_DATA_READ (8U)
 
-/* ═══ 2. 内部数据搬移（copy-back / 单字节替换） ═══ */
+/* OP_RANDOM_DATA_READ_MULTI_PLANE
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 06 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< E0 > ~~~~ < Dout1 >-< Doutn >
+ * ----------------------------------------------------------------------------------------------
+ * 06h = Random Data Read Two Plane：在已完成多 plane 读（数据已驻留各 plane 页缓冲）之后，
+ * 按行地址的 plane 位选择目标 plane 的页缓冲，再从列地址取单个 CW。
+ * 是 05h 的多 plane 版本，区别是**带 3 个行地址周期**（plane 位在行地址里，由 paa_to_nand_row() 编码），
+ * 05h 只有列地址周期。与 OP_RANDOM_DATA_READ 配对使用：多 plane 读的逐 CW 取数走本 op。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_RANDOM_DATA_READ_MULTI_PLANE (41U)
+
+/* ═══ 2. 内部数据搬移（copy-back） ═══ */
 
 /* 操作码 9 已删除（原 OP_RANDOM_DATA_INPUT），
  * 功能由 OP_PROGRAM_FOR_INTERNAL_DATA_MOVE 完整覆盖。 */
@@ -132,12 +143,14 @@
 
 /* OP_PROGRAM_FOR_INTERNAL_DATA_MOVE
  * ----------------------------------------------------------------------------------------------
- * < 70 >-< Status >-< 85 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< Din(1B) >-< 10 >~~~~~< 70 >-< Status >
+ * < 70 >-< Status >-< 85 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< 10 >~~~~~< 70 >-< Status >
  *
- * ONFI 内部搬移的"替换写入"模式：85h + 地址 + 1 字节数据后发 10h 确认，
- * 将单字节写入页缓冲中指定位置，然后写入 NAND。不同于纯 copy-back
- * （OP_PROGRAM_FOR_INTERNAL_MOVE），它允许在搬移过程中替换 1 字节数据
- * （如 ECC 纠正后的单字节修正），然后 10h 触发 tPROG 写入 NAND。
+ * ONFI 内部搬移编程（copy-back 目标页写入）：源页已由
+ * OP_READ_FOR_INTERNAL_DATA_MOVE 读入 NAND 内部缓存，本操作把缓存内容直接编程到
+ * 目标页，数据全程不过 host 总线。85h 提供目标列/行地址，10h 触发 tPROG。
+ *
+ * 无 DATA_IN 段：data_length = 0，has_data = 1（仍需 desc chain 提供 PAA 映射）。
+ * 若要在搬移中改写页内数据，走普通读 + 普通写路径（GC 已如此），不在此 op 上加 DATA_IN。
  * ----------------------------------------------------------------------------------------------
  */
 #define OP_PROGRAM_FOR_INTERNAL_DATA_MOVE (10U)
@@ -228,12 +241,8 @@
  */
 #define OP_READ_FOR_INTERNAL_DATA_MOVE (19U)
 
-/* OP_PROGRAM_FOR_INTERNAL_MOVE
- * ----------------------------------------------------------------------------------------------
- * < 85 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< 10 >
- * ----------------------------------------------------------------------------------------------
- */
-#define OP_PROGRAM_FOR_INTERNAL_MOVE (20U)
+/* 操作码 20 已删除（原 OP_PROGRAM_FOR_INTERNAL_MOVE），
+ * 与 OP_PROGRAM_FOR_INTERNAL_DATA_MOVE 功能完全重复，只保留后者。 */
 
 /* BLOCK LOCK OPERATIONS */
 /* OP_BLOCK_UNLOCK_LOW
@@ -387,7 +396,7 @@
  * 无数据传输。与 OP_ERASE_BLOCK_ISSUE 配对。 */
 #define OP_ERASE_BLOCK_WAIT (40U)
 
-#define OP_COUNT (41U) /* 0..40 inclusive */
+#define OP_COUNT (42U) /* 0..41 inclusive */
 
 /* ── Phase V: OP 类型枚举 ── */
 #define OP_TYPE_ATOMIC (0U) /* 原原子 OP 码 */
@@ -420,7 +429,7 @@ typedef struct
 extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
 
 /* 判断 operation 是否涉及用户数据传输（即是否需要 descriptor + buffer）。
- * NO_DATA 类操作（RESET、LOCK、READ_MODE 等）和 ERASE 返回 0。
+ * NO_DATA 类操作（RESET、LOCK 等）和 ERASE 返回 0。
  * 推荐直接读 g_nand_operation_map[op].has_data。 */
 #define nand_operation_has_data(op) \
     ((op) < OP_COUNT ? g_nand_operation_map[(op)].has_data : 0U)

@@ -575,25 +575,50 @@ fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *comm
  * ══════════════════════════════════════════════════════════ */
 
 /* --------------------------------------------------------------------
+ * fc_cw_mask_popcount
+ *   功能：统计 4 位 CW mask 的置位数（bit n = CW n）。
+ *   参数：mask —— CW 集合掩码。
+ *   返回：置位数（0..CW_NUM）。
+ *   实现要点：CW_NUM=4，逐位循环即最优，不引 __builtin_popcount
+ *         （避免 libgcc __popcountsi2 依赖）。
+ * -------------------------------------------------------------------- */
+static uint8_t fc_cw_mask_popcount(uint8_t mask)
+{
+    uint8_t count = 0U;
+    uint8_t bit;
+
+    for (bit = 0U; bit < CW_NUM; bit++)
+    {
+        if ((mask & (uint8_t)(1U << bit)) != 0U)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
+/* --------------------------------------------------------------------
  * fc_command_configure_descriptor_internal
- *   功能：配置命令的第 index 个描述符（分配 desc+buffer，填 PAA/config/meta）。
- *   参数：controller —— FC 控制器；command —— 命令；index —— desc 序号；
- *         configured_descriptor —— 输出。
+ *   功能：为命令配置一个 (plane, cw) 描述符（分配 desc+buffer，填 PAA/config/meta）。
+ *   参数：controller —— FC 控制器；command —— 命令；plane —— 目标 plane；
+ *         cw —— 目标 CW 号；configured_descriptor —— 输出。
  *   返回：FC_STATUS_OK / RESOURCE_EMPTY（池空）/ INVALID_ARGUMENT。
  *   实现要点：
- *     - multi_plane>0：plane=index/CW_NUM、cw=index%CW_NUM，
- *       PAA 用 command->paa 的 block/page + plane 组装。
- *     - 单 plane：cw = paa_to_cw(command->paa)+index，超过 CW_NUM 报错。
+ *     - multi_plane>0：PAA 用 command->paa 的 block/page/lun + 传入的 plane/cw 组装。
+ *     - 单 plane：保留 command->paa 的 plane/block/page/lun，只改写 CW 位（plane 参数不用）。
+ *     - CW 号由调用方给出（来自 mask 枚举），不再由 desc 序号推导——见
+ *       fc_command_configure_descriptors_internal 的"链走位 vs CW 号解耦"说明。
  *     - meta = lba_to_cw_meta(command->meta, cw)。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc_command_t *command, uint8_t index, fc_descriptor_t **configured_descriptor)
+static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, fc_descriptor_t **configured_descriptor)
 {
     fc_descriptor_t *descriptor;
     fc_buffer_id_t   buffer_id;
-    uint8_t          cw;
 
     /* 唯一调用者 fc_command_configure_descriptors_internal 传的是栈上 &descriptor */
     ASSERT(configured_descriptor != NULL);
+    /* 单 plane 命令的 CW 数不超过一页；多 plane 由 mask 保证 */
+    ASSERT(cw < CW_NUM);
     descriptor = fc_descriptor_alloc_internal(controller, command);
     buffer_id  = fc_buffer_alloc_internal(controller);
     if ((descriptor == NULL) || (buffer_id == FC_BUFFER_ID_INVALID))
@@ -607,40 +632,38 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
 
     if (command->config.multi_plane > 0U)
     {
-        uint8_t  plane        = index / CW_NUM;
-        uint8_t  cw_idx       = index % CW_NUM;
-        uint32_t blk          = paa_to_block(command->paa);
-        uint32_t pg           = paa_to_page(command->paa);
+        uint32_t blk    = paa_to_block(command->paa);
+        uint32_t pg     = paa_to_page(command->paa);
         /* 保留 command->paa 的 LUN 字段（多 LUN 并发必需：desc PAA/META/随机种子/ECC 都依赖它） */
-        descriptor->paa       = paa_make(pg, plane, blk, paa_to_lun(command->paa), cw_idx);
-        descriptor->config    = command->config;
-        descriptor->config.cw = cw_idx;
+        descriptor->paa = paa_make(pg, plane, blk, paa_to_lun(command->paa), cw);
     }
     else
     {
-        cw = (uint8_t)(paa_to_cw(command->paa) + index);
-        /* 单 plane 命令的 CW 数不超过一页；由 configure 流程的 index 范围保证 */
-        ASSERT(cw < CW_NUM);
-        descriptor->paa       = (command->paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
-        descriptor->config    = command->config;
-        descriptor->config.cw = cw;
+        descriptor->paa = (command->paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
     }
+    descriptor->config     = command->config;
+    descriptor->config.cw  = cw;
     descriptor->buffer_id  = buffer_id;
     descriptor->next_id    = FC_DESCRIPTOR_ID_INVALID;
-    descriptor->meta       = lba_to_cw_meta(command->meta, (uint8_t)descriptor->config.cw);
+    descriptor->meta       = lba_to_cw_meta(command->meta, cw);
     *configured_descriptor = descriptor;
     return FC_STATUS_OK;
 }
 
 /* --------------------------------------------------------------------
  * fc_command_configure_descriptors_internal
- *   功能：为命令配置整条 desc 链（每 CW 一个描述符）。
+ *   功能：为命令配置整条 desc 链（每个待访问 CW 一个描述符）。
  *   参数：controller —— FC 控制器；command —— 命令。
  *   返回：FC_STATUS_OK / RESOURCE_EMPTY（池空，已回滚）。
  *   实现要点：
- *     - NO_DATA 操作（RESET/LOCK/READ_MODE 等）与 ERASE 无数据，
+ *     - NO_DATA 操作（RESET/LOCK 等）与 ERASE 无数据，
  *       不需要描述符；SET/GET_FEATURES 用内联 parameter 代替。
- *     - desc 总数 = multi_plane × (cw+1)。
+ *     - CW 集合由 command->cw_mask 决定（bit n = CW n）；mask 为 0 时退化为
+ *       "连续 0..config.cw"（现有调用点的行为，零回归）。config.cw 回写为
+ *       "置位数减一"，使所有下游 `config.cw + 1` 数学继续成立。
+ *     - 链序：plane-major（先 plane 0 的全部置位 CW，再 plane 1）。
+ *       **链走位（desc 序号）与 CW 号自此解耦**：所有按链走位索引的地方不动，
+ *       CW 号一律从 paa_to_cw(desc->paa) 取。
  *     - 前驱 desc 的 next_id 串联；首 desc 记入 command->desc_id。
  *     - 任一 desc 配置失败 → fc_command_resources_rollback 整体回滚。
  * -------------------------------------------------------------------- */
@@ -648,9 +671,13 @@ fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_comma
 {
     fc_command_id_t  command_id;
     fc_descriptor_t *previous = NULL;
-    uint8_t          index;
+    uint8_t          mask;
+    uint8_t          cw_count;
+    uint8_t          plane_count;
+    uint8_t          plane;
+    uint8_t          cw;
 
-    /* NO_DATA operations (RESET, BLOCK_LOCK, READ_MODE, etc.) and ERASE have no
+    /* NO_DATA operations (RESET, BLOCK_LOCK, etc.) and ERASE have no
      * data payload — they do not need descriptors or buffers.
      * SET/GET_FEATURES use inline parameter[0..3] + feature_addr instead. */
     if ((nand_operation_has_data((uint8_t)command->config.operation) == 0U) ||
@@ -661,32 +688,50 @@ fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_comma
         return FC_STATUS_OK;
     }
 
-    uint8_t total_desc = (command->config.multi_plane > 0U)
-                             ? (uint8_t)(command->config.multi_plane * (uint8_t)(command->config.cw + 1U))
-                             : (uint8_t)(command->config.cw + 1U);
+    /* mask==0（未指定）→ 连续 0..config.cw，与旧行为完全一致 */
+    mask     = (command->cw_mask != 0U) ? (uint8_t)command->cw_mask
+                                        : (uint8_t)((1U << (command->config.cw + 1U)) - 1U);
+    cw_count = fc_cw_mask_popcount(mask);
+    ASSERT(cw_count > 0U);
+    /* 回写"CW 数减一"：链长、完成项折叠、fc_build_dispatch_request 的 cw_count
+     * 都按这个字段算，必须与实际 desc 数一致。 */
+    command->config.cw = (uint8_t)(cw_count - 1U);
+
+    plane_count = (command->config.multi_plane > 0U) ? (uint8_t)command->config.multi_plane : 1U;
+    /* ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与 cws[PLANE_NUM][CW_NUM] 都按 PLANE_NUM 定尺。
+     *   改 plane 语义时这里与 nand_dispatch_tables.c 的 multi-plane handler 要一起动。 */
+    ASSERT(plane_count <= PLANE_NUM);
 
     command_id = (fc_command_id_t)(command - controller->command_pool);
-    for (index = 0U; index < total_desc; index++)
+    for (plane = 0U; plane < plane_count; plane++)
     {
-        fc_descriptor_t *descriptor = NULL;
-        fc_status_t      result     = fc_command_configure_descriptor_internal(controller, command, index, &descriptor);
+        for (cw = 0U; cw < CW_NUM; cw++)
+        {
+            fc_descriptor_t *descriptor = NULL;
+            fc_status_t      result;
 
-        if (result != FC_STATUS_OK)
-        {
-            fc_command_resources_rollback(controller, command_id);
-            command->desc_id = FC_DESCRIPTOR_ID_INVALID;
-            return result;
+            if ((mask & (uint8_t)(1U << cw)) == 0U)
+            {
+                continue; /* 该 CW 不在本次访问集合内 */
+            }
+            result = fc_command_configure_descriptor_internal(controller, command, plane, cw, &descriptor);
+            if (result != FC_STATUS_OK)
+            {
+                fc_command_resources_rollback(controller, command_id);
+                command->desc_id = FC_DESCRIPTOR_ID_INVALID;
+                return result;
+            }
+            if (previous == NULL)
+            {
+                command->desc_id = (fc_descriptor_id_t)(descriptor - controller->descriptor_pool);
+            }
+            else
+            {
+                previous->config.chain = 1U;
+                previous->next_id      = (fc_descriptor_id_t)(descriptor - controller->descriptor_pool);
+            }
+            previous = descriptor;
         }
-        if (previous == NULL)
-        {
-            command->desc_id = (fc_descriptor_id_t)(descriptor - controller->descriptor_pool);
-        }
-        else
-        {
-            previous->config.chain = 1U;
-            previous->next_id      = (fc_descriptor_id_t)(descriptor - controller->descriptor_pool);
-        }
-        previous = descriptor;
     }
     return FC_STATUS_OK;
 }
@@ -810,9 +855,10 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     }
 
     /* ── Step 3: Populate completion entry ── */
-    completion.command_id = nand_completion->command_id;
-    completion.desc_id    = nand_completion->failed_descriptor_id;
-    completion.module     = command->module;
+    completion.command_id     = nand_completion->command_id;
+    completion.desc_id        = nand_completion->failed_descriptor_id;
+    completion.module         = command->module;
+    completion.failed_cw_mask = 0U;
 
     if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) &&
         (fc_is_page_read((uint8_t)command->config.operation) != 0U))
@@ -833,17 +879,20 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
             if ((did < FC_DESCRIPTOR_POOL_DEPTH) &&
                 (i < 4U || command->config.multi_plane > 0U))
             {
-                const fc_descriptor_t *d = &controller->descriptor_pool[did];
-                /* 将前 4 个 CW 的 ECC 和 status 填入 completion slot；
-                 * 后续 CW（多 plane）仅累加 status。 */
-                if (i < 4U)
+                const fc_descriptor_t *d      = &controller->descriptor_pool[did];
+                uint8_t                cw_num = (uint8_t)paa_to_cw(d->paa);
+
+                /* 按 **CW 号**（不是链走位 i）折叠：cw_mask 不满时两者会分叉
+                 * （如 mask=0b1011 的链走位 2 对应 CW3）。满 mask 时两者一致，
+                 * 与旧行为逐字节等价。plane 1 的 CW 折进同一 slot（OR），
+                 * ECC 计数只取 plane 0（与旧行为一致）。 */
+                if (cw_num < 4U)
                 {
-                    status_slot[i] = d->status;
-                    ecc_slot[i]    = d->ecc_bits;
-                }
-                else
-                {
-                    status_slot[i - 4U] |= d->status;
+                    status_slot[cw_num] |= d->status;
+                    if (paa_to_plane(d->paa) == 0U)
+                    {
+                        ecc_slot[cw_num] = d->ecc_bits;
+                    }
                 }
                 /* 更新 failed_descriptor_id 指向 ECC 解码后第一个 UNC 的 desc */
                 if ((found_unc == 0U) && (d->status == FC_CW_STATUS_UNC))
@@ -851,15 +900,18 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
                     completion.desc_id = did;
                     found_unc          = 1U;
                 }
+                /* 失败 CW 掩码：UNC / CRC_ERROR 记为失败 */
+                if ((d->status & (FC_CW_STATUS_UNC | FC_CW_STATUS_CRC_ERROR)) != 0U)
+                {
+                    completion.failed_cw_mask |= (uint8_t)(1U << cw_num);
+                }
                 did = (fc_descriptor_id_t)d->next_id;
             }
             else
             {
-                if (i < 4U)
-                {
-                    status_slot[i] = FC_CW_STATUS_UNUSED;
-                    ecc_slot[i]    = 0U;
-                }
+                /* 链提前结束（desc_id 失效 / 多 plane 越界）：未访问到的 CW 槽位保持
+                 * 声明时的 0，即 FC_CW_STATUS_UNUSED，无需显式赋值。
+                 * 注意这里不能用链走位 i 当槽位号——cw_mask 不满时两者分叉。 */
                 break;
             }
         }
@@ -871,7 +923,7 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     }
     else
     {
-        /* 非 page read：直接透传 NAND completion 状态 */
+        /* 非 page read：直接透传 NAND completion 状态（无 per-CW 解码，掩码恒 0） */
         completion.ecc_bit0 = nand_completion->ecc_bit_count[0];
         completion.ecc_bit1 = nand_completion->ecc_bit_count[1];
         completion.ecc_bit2 = nand_completion->ecc_bit_count[2];
@@ -1272,8 +1324,12 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
         desc_id = (fc_descriptor_id_t)command->desc_id;
         if (command->config.multi_plane > 0U)
         {
-            /* Multi-plane: walk full desc chain, sort into cws[plane][cw] */
-            uint8_t total_cw = (uint8_t)(command->config.multi_plane * request->cw_count);
+            /* Multi-plane: walk full desc chain, 按 plane 顺序填入 cws[plane][slot]。
+             * ⚠ 下标是**槽位**（该 plane 内第几个待访问 CW），不是 CW 号——mask 不满时
+             *   两者不同（如 mask=0b1011 的 plane 内槽位 0/1/2 对应 CW 0/1/3）。
+             *   CW 号由 PAA 携带（paa_to_cw），下游 req_* 与 cw_chain 一律从 PAA 取。 */
+            uint8_t total_cw        = (uint8_t)(command->config.multi_plane * request->cw_count);
+            uint8_t slot[PLANE_NUM] = {0U, 0U};
             uint8_t idx;
             for (idx = 0U; idx < total_cw; idx++)
             {
@@ -1281,14 +1337,18 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
                 ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
                 const fc_descriptor_t *descriptor = &controller->descriptor_pool[desc_id];
                 uint8_t                plane      = (uint8_t)paa_to_plane(descriptor->paa);
-                uint8_t                cw_s       = (uint8_t)paa_to_cw(descriptor->paa);
-                request->cws[plane][cw_s].paa     = descriptor->paa;
+                uint8_t                s;
+
+                ASSERT(plane < PLANE_NUM);
+                s = slot[plane]++;
+                ASSERT(s < request->cw_count);
+                request->cws[plane][s].paa = descriptor->paa;
                 if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
                 {
                     /* Page read/write 需要 CW 基址（ECC 在完整 528B CW 上处理）；
                      * 非 page 命令数据直接写入 USER 区域，test/FTL 通过
                      * fc_buffer_id_to_real_buffer 直接读取。 */
-                    request->cws[plane][cw_s].buffer =
+                    request->cws[plane][s].buffer =
                         (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
                                 (fc_is_page_write((uint8_t)command->config.operation) != 0U)
                             ? fc_buffer_get_base(descriptor->buffer_id)
@@ -1296,7 +1356,7 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
                 }
                 else
                 {
-                    request->cws[plane][cw_s].buffer = NULL;
+                    request->cws[plane][s].buffer = NULL;
                 }
                 desc_id = (fc_descriptor_id_t)descriptor->next_id;
             }
@@ -1334,6 +1394,24 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
                 desc_id = (fc_descriptor_id_t)descriptor->next_id;
             }
         }
+    }
+
+    /* ── 读命令统一为「加载 + 逐 CW 取数」──
+     * FC 层命令保持 WITH_DATA_OUT 语义（desc 建链、fc_is_page_read、数据路径、
+     * 完成项判定都用它），但下发给 NAND 的是对应的「只加载、不输出」op：
+     * 整页先搬进 NAND 页缓冲，数据随后由 nand_dispatch_task_cw_chain 用
+     * 05h（单 plane）/ 06h（多 plane）按 mask 逐 CW 取回（见 nand_dispatch.c）。
+     * 这样任意 CW 子集（含不含 CW0）走同一条路径。
+     * ⚠ LUN_NUM>1 时本转换会让这两个 op 不再命中下面的 Phase V splittable 拆分
+     *   （ISSUE/WAIT 多 LUN 重叠随之失效）；启用多 LUN 前需要把 LOAD/FETCH 拆分
+     *   与逐 CW 取数模型重新对齐。当前 LUN_NUM=1，该拆分本就不生效。 */
+    if (request->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT)
+    {
+        request->operation = OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT;
+    }
+    else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
+    {
+        request->operation = OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT;
     }
 
     /* Phase V: splittable 原子命令自动拆为 ISSUE（仅 LUN_NUM>1 时生效；

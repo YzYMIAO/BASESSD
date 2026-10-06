@@ -35,7 +35,7 @@ Level 2: Data Path ──── 需 BCH 堆初始化，无 NAND 硬件
     └── fc_data_path_raid_recover (XOR 重建 + ECC 重试)
 
 Level 3: FC Lifecycle ── 真实 NAND 硬件执行
-    └── 34 个 OP 码 × user-specified block → alloc → configure → submit → service → poll → release
+    └── 39 个 OP 码 × user-specified block → alloc → configure → submit → service → poll → release
 ```
 
 ### 2.1 Level 1 — 纯逻辑测试
@@ -138,7 +138,7 @@ _(CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
 
 ### 2.3 Level 3 — FC 全链路测试
 
-**测试目标**：FC 命令完整生命周期（alloc → configure → submit → service → poll → release）在真实 NAND 硬件上执行，覆盖全部 34 个 OP 码。
+**测试目标**：FC 命令完整生命周期（alloc → configure → submit → service → poll → release）在真实 NAND 硬件上执行，覆盖全部 39 个 OP 码。
 
 Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证 FC 层命令编排的正确性：
 - 每个 OP 码的命令能完整走完 FC 生命周期
@@ -150,7 +150,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 
 | 参数 | 来源 | 说明 |
 |---|---|---|
-| `operation` | munit 参数化展开 | 34 个 OP 码（笛卡尔积） |
+| `operation` | munit 参数化展开 | 39 个 OP 码（笛卡尔积） |
 | `block` | CLI `--param block N` | 测试用 Block 号，默认 block=10 |
 
 #### PAA 约定
@@ -179,7 +179,7 @@ test_lifecycle_op — 参数化，每个 (operation, block) 组合执行一次�
 
 部分 OP 有 NAND 状态机前置依赖（如 `RANDOM_DATA_READ` 前需要 READ 先加载页缓冲）。表中 `standalone=0` 的 OP 在独立执行时 NAND 可能返回错误，但 FC 生命周期仍应正常完成。
 
-#### 34 个 OP 覆盖表
+#### 39 个 OP 覆盖表
 
 | 值 | 宏名称 | standalone | 说明 |
 |---|---|---|---|
@@ -192,9 +192,7 @@ test_lifecycle_op — 参数化，每个 (operation, block) 组合执行一次�
 | 6 | `OP_READ_STATUS` | ✅ | 读状态 |
 | 7 | `OP_READ_STATUS_ENHANCED` | ✅ | 增强读状态 |
 | 8 | `OP_RANDOM_DATA_READ` | ❌ | 随机列读 |
-| 9 | `OP_RANDOM_DATA_INPUT` | ❌ | 随机列输入 |
 | 10 | `OP_PROGRAM_FOR_INTERNAL_DATA_MOVE` | ❌ | 内部搬移编程 |
-| 11 | `OP_READ_MODE` | ✅ | 读模式 |
 | 12 | `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` | ✅ | 标准读（有数据输出） |
 | 13 | `OP_READ_PAGE_CACHE_SEQ` | ❌ | 缓存读顺序 |
 | 14 | `OP_READ_PAGE_CACHE_RANDOM` | ❌ | 缓存读随机 |
@@ -203,7 +201,6 @@ test_lifecycle_op — 参数化，每个 (operation, block) 组合执行一次�
 | 17 | `OP_PROGRAM_PAGE_CACHE` | ❌ | 缓存编程 |
 | 18 | `OP_ERASE_BLOCK` | ✅ | 擦除 Block |
 | 19 | `OP_READ_FOR_INTERNAL_DATA_MOVE` | ❌ | 内部搬移读 |
-| 20 | `OP_PROGRAM_FOR_INTERNAL_MOVE` | ❌ | 内部搬移写 |
 | 21 | `OP_BLOCK_UNLOCK_LOW` | ✅ | 解锁低段 |
 | 22 | `OP_BLOCK_UNLOCK_HIGH` | ✅ | 解锁高段 |
 | 23 | `OP_BLOCK_LOCK` | ✅ | 锁定 |
@@ -217,6 +214,14 @@ test_lifecycle_op — 参数化，每个 (operation, block) 组合执行一次�
 | 31 | `OP_PROGRAM_PAGE_MULTI_PLANE` | ❌ | 多 Plane 编程 |
 | 32 | `OP_ERASE_BLOCK_MULTI_PLANE` | ❌ | 多 Plane 擦除 |
 | 33 | `OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT` | ✅ | 标准读（无数据输出） |
+| 34 | `OP_READ_PAGE_CACHE_START` | ❌ | 缓存读启动（cache 管线） |
+| 35 | `OP_READ_PAGE_LOAD` | ❌ | 多 LUN 读 ISSUE 段（Phase V） |
+| 36 | `OP_READ_PAGE_FETCH` | ❌ | 多 LUN 读 FETCH 段（Phase V） |
+| 37 | `OP_PROGRAM_PAGE_ISSUE` | ❌ | 多 LUN 编程 ISSUE 段 |
+| 38 | `OP_PROGRAM_PAGE_WAIT` | ❌ | 多 LUN 编程 WAIT 段 |
+| 39 | `OP_ERASE_BLOCK_ISSUE` | ❌ | 多 LUN 擦除 ISSUE 段 |
+| 40 | `OP_ERASE_BLOCK_WAIT` | ❌ | 多 LUN 擦除 WAIT 段 |
+| 41 | `OP_RANDOM_DATA_READ_MULTI_PLANE` | ❌ | 多 Plane 页缓冲随机读单 CW（06h-E0h） |
 
 ---
 
@@ -462,6 +467,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-06 | v1.7 | OP 覆盖表补齐 34~41（Phase V ISSUE/WAIT/FETCH + `OP_READ_PAGE_CACHE_START` + 新增 `OP_RANDOM_DATA_READ_MULTI_PLANE`），计数 34→39（`OP_COUNT` 现为 42，含 9/11/20 三个空位）。**待补用例**：`cw_mask` 非满 mask 读（见 `fc_nand_design.md` §25） |
 | 2026-10-04 | v1.6 | §6.2 补命令池/描述符池可缓存性与调试器 D-Cache 不一致注意；新增 §6.5 生命周期插桩（`#if 0` 默认关闭）+ `[RES] L3_start` 资源行已注释；见 `debug_cmd_operation_rewrite_20261004.md` |
 | 2026-09-22 | v1.5 | 消除全部编译警告：munit.h/c `const` 限定符修复（MunitTest/MunitParameter/MunitSuite 等），test_fc_level3.c `g_op_names` const 修复 |
 | 2026-09-22 | v1.4 | 最终审视修复：饥饿保护测试改为 select_chain、补 completion_queue 测试、补 submit/poll/configure NULL 测试、补 starvation 测试。Level 1 从 31→45 测试。上传代码提交 Phase P |

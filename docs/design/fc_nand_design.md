@@ -533,12 +533,10 @@ CHECK_FAIL 检查 `completion->nand_status & 0x01`（NAND 状态寄存器的 FAI
 |-------------|------|
 | GET_FEATURES / READ_ID / READ_PARAM_PAGE / READ_UNIQUE_ID | 读芯片信息/寄存器，不触发内部操作，无"失败"概念 |
 | RANDOM_DATA_READ | 05h-E0h 读已加载的页缓冲，不触发 NAND 内部操作 |
-| RANDOM_DATA_INPUT | 85h 只写页缓冲，无 CONFIRM，写缓冲不会失败 |
 | READ_STATUS / READ_STATUS_ENHANCED | 读状态寄存器本身，查自己无意义 |
-| READ_MODE | 发 00h 设置读模式，无内部操作 |
 | BLOCK_UNLOCK/LOCK/LOCK_TIGHT/LOCK_STATUS | 锁操作由 NAND 内部逻辑完成，不通过 FAIL bit 报告 |
 
-**例外**：PROGRAM_FOR_INTERNAL_DATA_MOVE 有 CHECK_FAIL，因为它含 85h-addr-1B-10h 的完整编程序列（有 10h CONFIRM）。而 PROGRAM_FOR_INTERNAL_MOVE 是纯 copy-back（无 DATA_IN ），同样有 10h CONFIRM，也有 CHECK_FAIL。
+**例外**：PROGRAM_FOR_INTERNAL_DATA_MOVE 有 CHECK_FAIL，因为它是 85h-addr-10h 的完整编程序列（有 10h CONFIRM）。
 
 #### 隐式延时显式化
 
@@ -2201,8 +2199,8 @@ else if ((task->operation == OP_SET_FEATURES) || (task->operation == OP_GET_FEAT
 | `req_cache_read` | READ_PAGE_CACHE_SEQ/RANDOM/LAST | 一次性读 full page：request = (0, row, page_buffer, PAGE_SIZE) |
 | `req_erase` | ERASE_BLOCK | 纯地址：request = (0, row, NULL, 0) |
 | `req_feature` | SET_FEATURES, GET_FEATURES | column = feature_addr：request = (feature_addr, 0, cw_buffers[task->plane], 4)（plane 恒 0） |
-| `req_single` | READ_ID, READ_PARAM_PAGE, READ_UNIQUE_ID, READ_STATUS, READ_STATUS_ENH, RANDOM_DATA_READ, RANDOM_DATA_INPUT 等 | 通用固定长度：length 从 `g_nand_operation_map[op].data_length` 读取 |
-| `req_no_data` | RESET, READ_MODE, BLOCK_LOCK, BLOCK_UNLOCK 等 | 无数据传输，纯 row 地址 |
+| `req_single` | READ_ID, READ_PARAM_PAGE, READ_UNIQUE_ID, READ_STATUS, READ_STATUS_ENH, RANDOM_DATA_READ 等 | 通用固定长度：length 从 `g_nand_operation_map[op].data_length` 读取 |
+| `req_no_data` | RESET, BLOCK_LOCK, BLOCK_UNLOCK 等 | 无数据传输，纯 row 地址 |
 
 ### 15.4 Completion 策略 handler
 
@@ -2778,6 +2776,8 @@ PROGRAM 和 ERASE 不存在"延迟执行"场景，故不分拆。
 |-------|----|---------|-------------|
 | `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` | 12 | 70h轮询→00h→C1C2R1R2R3→30h→tWB→tR→Dout→70h轮询→CHECK_FAIL | PAGE_SIZE |
 | `OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT` | 33 | 70h轮询→00h→C1C2R1R2R3→30h→tWB→tR→70h轮询→CHECK_FAIL | PAGE_SIZE |
+| `OP_RANDOM_DATA_READ` | 8 | 70h轮询→05h→C1C2→E0h→tR→Dout→70h轮询 | CW_SIZE |
+| `OP_RANDOM_DATA_READ_MULTI_PLANE` | 41 | 70h轮询→06h→C1C2→R1R2R3→E0h→tR→Dout→70h轮询 | CW_SIZE |
 | `OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT` | 29 | 70h轮询→00h→C1C2R1R2R3(P0)→00h→C1C2R1R2R3(P1)→30h→tWB→tR→70h轮询→CHECK_FAIL | PAGE_BUFFER_SIZE |
 | `OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT` | 30 | 70h轮询→00h→C1C2R1R2R3(P0)→00h→C1C2R1R2R3(P1)→30h→tR→06h→C1C2R1R2R3(P0)→E0h→Dout(P0)→06h→C1C2R1R2R3(P1)→E0h→Dout(P1)→70h轮询→CHECK_FAIL | PAGE_BUFFER_SIZE |
 | `OP_PROGRAM_PAGE_MULTI_PLANE` | 31 | 70h轮询→80h→C1C2R1R2R3(P0)→Din(P0)→**11h→tADL→80h**→C1C2R1R2R3(P1)→Din(P1)→10h→tWB→tPROG→70h轮询→CHECK_FAIL | PAGE_BUFFER_SIZE |
@@ -2791,24 +2791,18 @@ PROGRAM 和 ERASE 不存在"延迟执行"场景，故不分拆。
 
 ```
 00h + addr → 35h         // READ_FOR_INTERNAL_DATA_MOVE：源页读入缓存，tR 后 ready
-85h + addr → 10h         // PROGRAM_FOR_INTERNAL_MOVE：缓存数据写入目标页，tPROG 后 ready
-两种场景均有三个 OP 码支持内部操作：
+85h + addr → 10h         // PROGRAM_FOR_INTERNAL_DATA_MOVE：缓存数据写入目标页，tPROG 后 ready
+两个 OP 码成对支持内部操作：
 
 | OP 码 | 值 | uop 序列 | 说明 |
 |-------|----|---------|------|
 | `OP_READ_FOR_INTERNAL_DATA_MOVE` | 19 | `70h→Status→00h→C1C2R1R2R3→35h→tR→70h→Status` | 源页读入 NAND 内部缓存 |
-| `OP_PROGRAM_FOR_INTERNAL_MOVE` | 20 | `70h→Status→85h→C1C2R1R2R3→10h→tPROG→70h→Status` | 纯 copy-back，无 DATA_IN（NAND 内部转发） |
-| `OP_PROGRAM_FOR_INTERNAL_DATA_MOVE` | 10 | `70h→Status→85h→C1C2R1R2R3→1B Data→10h→tPROG→70h→Status` | 写 1 字节替换后写回（含 DATA_IN） |
+| `OP_PROGRAM_FOR_INTERNAL_DATA_MOVE` | 10 | `70h→Status→85h→C1C2R1R2R3→10h→tPROG→70h→Status` | 纯 copy-back，无 DATA_IN（NAND 内部转发） |
 
-关键区别：
+> 操作码 20（原 `OP_PROGRAM_FOR_INTERNAL_MOVE`）已删除：它与上面 op 10 功能完全重复，只保留 ONFI 标准命名的那一个。
 
-| 特性 | `PROGRAM_FOR_INTERNAL_MOVE` | `PROGRAM_FOR_INTERNAL_DATA_MOVE` |
-|------|---------------------------|--------------------------------|
-| DATA_IN | 无 | 1 字节 |
-| 用途 | GC 纯搬移 | GC + ECC 纠正（替换损坏 CW 数据） |
-| 等效可拆解 | 不可拆（移即是原子） | RANDOM_DATA_INPUT + 10h |
-| `has_data` | 1（分配 desc chain 提供 PAA 映射） | 1 |
-| `data_length` | 0 | 1 |
+`has_data` 均为 1（分配 desc chain 提供 PAA 映射），`data_length` 均为 0。
+若要在搬移中改写页内数据，走普通读 + 普通写路径（GC 已如此），不在这两个 op 上加 DATA_IN。
 
 ### 17.7 关键命令码：11h
 
@@ -3193,6 +3187,7 @@ LUN 1:                                                   ← FETCH(Dout)
 | v3 | ROW_0/1/2 handler 固定读 `request->row`，多 plane 发第二组地址需新 uop | `row`→`row[NAND_PLANE_MAX]`，operand 选索引 |
 | v4 | 读命令只有一种：30h 后必出数据 | 拆为 WITH/WITHOUT_DATA_OUT 双版本 |
 | v5 | 第一维单 plane 恒 `[0]`，名不副实（"槽位"vs"plane 索引"），单 plane 打 plane 1 时依赖无断言守卫的隐式约定 | 第一维统一为物理 plane 索引：新增 `plane` 字段贯穿 request→task，单 plane 命令落位 `cws[plane][*]`；`plane_count` 语义不变 |
+| v6 | 读命令只能读"前 N 个 CW"（`config.cw` 是"CW 数减一"），表达不了 `{0,1,3}` 这种子集，读恢复只能重读整页 | 加 `fc_command_t.cw_mask`：建链按 mask 置位逐 CW 建 desc；**链槽位与 CW 号解耦**（CW 号一律 `paa_to_cw(desc->paa)`）；读路径统一为「加载进页缓冲 + 逐 CW 取数」，新增 `OP_RANDOM_DATA_READ_MULTI_PLANE`；完成项加 `failed_cw_mask`。详见 §25 |
 
 ---
 
@@ -3763,6 +3758,155 @@ fc_scheduler_select_chain(&sched_chain)
 **判据 4 的边界：什么时候可以删用例而不是保留守卫。** 反例是 `fc_queue.c` 的指针判空：`fc_submission_queue_*` / `fc_completion_queue_*` 的生产调用者只有 `fc.c` 与 `fc_scheduler.c`，**全部传有效指针**——唯一会传 `NULL` 的就是测试自己。这种"只有测试会走的分支"应当按判据 2 转 `ASSERT`，并**删掉对应用例**（它们验证的行为届时已不存在，留着反而是错的）。两轮补扫共删除 `test_fc_level1.c` 的 13 个 `*_null`/越界用例与 `test_fc_level2.c` 的 3 个。
 
 > `make tests` 走 `BUILD_TYPE=debug`（无 `NDEBUG`），断言在板上测试固件里是**活的**：任何一条误判都会让板子停机而不是报失败。因此改动这些守卫后必须上板跑三套 munit 套件。
+
+---
+
+## 25. 按 CW 子集读（Read Recovery 的 FC 层支持）
+
+### 25.1 动机
+
+读恢复（read recovery）的场景是：一页 4 个 CW 里 ECC 只挂了其中 2 个或 3 个，恢复流程只需要**重读失败的那几个 CW**，不必重读整页。
+
+但改动前的 FC 表达不了这件事：
+
+- `fc_cmd_conf_t.cw : 2` 的语义是 **"CW 数减一"**，只能表达"前 N 个 CW"，表达不了 `{0,1,3}`。
+- 建链处单 plane 的 CW 号是 `paa_to_cw(command->paa) + index`——从命令 PAA 的 CW 位起**连续递增**。
+- 读路径把 `column` 写死 0，靠首个 `00h-30h` 的 DATA_OUT 取 CW0，再用 `05h-列-E0h` 续读 CW1..3；而 `paa_to_nand_row()` **丢掉 CW 位**，命令 PAA 里的 CW 是被静默忽略的。
+
+**本次范围**：FC 层 + 它驱动的 NAND dispatch 层。**不含** `src/ftl/read_recovery.c` / `ftl.c` 的恢复流程接线。
+
+### 25.2 三项设计决策
+
+| # | 决策 | 取值 |
+|---|------|------|
+| 1 | 掩码入口 | `fc_command_t` 新增 `cw_mask : 4`（占 `reserved0` 的 4 位） |
+| 2 | 读流程 | **严格统一**：所有读命令都拆成「加载进 cache」+「按 mask 逐 CW `05h/06h-E0h`」，**CW0 也走逐 CW 取**（不与加载融合） |
+| 3 | 范围与输出 | 单 plane + 多 plane 一并支持；失败 CW 掩码一并从 FC 暴露 |
+
+### 25.3 核心不变量：链槽位与 CW 号解耦
+
+这是本次改动最容易出错的地方。
+
+```
+mask = 0b1011（CW0/CW1/CW3）单 plane 读
+  desc 链：  desc#0 → desc#1 → desc#2        （链槽位 0,1,2）
+  desc->paa 里的 CW 号：      0      1      3   （CW 号从 PAA 取）
+```
+
+- **链槽位（chain position）** 是 desc 在链中的走位，决定 `cw_status[]` / `cws[plane][slot]` 的下标、以及 `failed_descriptor_id`。
+- **CW 号** 决定 NAND 侧列地址（`column = paa_to_cw(paa) × CW_SIZE`）与页缓冲内偏移。
+
+满 mask 时两者相等，改动前后逐字节等价；非满 mask 时**必须**一律从 PAA 取 CW 号。消费点共 5 处，漏改任一处数据就落到错误的列：
+
+| # | 位置 | 作用 |
+|---|------|------|
+| 1 | `fc.c` `fc_build_dispatch_request`（multi-plane 分支） | 按 plane 内的**槽位**填 `cws[plane][slot]` |
+| 2 | `nand_dispatch.c` `nand_dispatch_task_cw_chain` | 列地址（唯一的 CW 号真值来源） |
+| 3 | `nand_dispatch.c` `nand_dispatch_scatter_page_buffer` | 页缓冲内偏移 |
+| 4 | `nand_dispatch_tables.c` `req_program_page` / `req_multi_plane_program` | 写侧拼接偏移（写侧 mask 恒 0，等价，统一以防日后误用） |
+| 5 | `fc_data_path.c` Pass 4 META 校验 | `lba_to_cw_meta(command->meta, paa_to_cw(desc->paa))` |
+
+静态审计口径：`src/nand/` 里不应再出现用槽位当 CW 号的偏移表达式，只剩 `paa_to_cw(...) * CW_SIZE`。
+
+### 25.4 建链
+
+`fc_command_configure_descriptors_internal`：
+
+```c
+/* mask==0（未指定）→ 连续 0..config.cw，与旧行为完全一致 */
+mask     = (command->cw_mask != 0U) ? (uint8_t)command->cw_mask
+                                    : (uint8_t)((1U << (command->config.cw + 1U)) - 1U);
+cw_count = fc_cw_mask_popcount(mask);
+command->config.cw = (uint8_t)(cw_count - 1U);   /* 回写"CW 数减一" */
+```
+
+`config.cw` 的**回写**是关键：链长、完成项折叠、`fc_build_dispatch_request` 的 `cw_count` 都按这个字段算，必须与实际 desc 数一致。回写后所有下游 `config.cw + 1` 数学继续成立。
+
+链序为 **plane-major**（先 plane 0 的全部置位 CW，再 plane 1）。`fc_cw_mask_popcount` 手写 4 位循环，不引 `__builtin_popcount`（避免 libgcc `__popcountsi2` 依赖）。
+
+`fc_command_configure_descriptor_internal` 的签名从 `index` 改为显式的 `(plane, cw)`——CW 号由调用方按 mask 枚举给出，不再由 desc 序号推导。
+
+### 25.5 读路径统一
+
+FC 层命令**保持 `WITH_DATA_OUT` 语义**（desc 建链、`fc_is_page_read`、数据路径、完成项判定都用它），但下发给 NAND 的是对应的「只加载、不输出」op。转换点位于 `fc_build_dispatch_request` 末尾：
+
+```c
+if (request->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT)
+    request->operation = OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT;
+else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
+    request->operation = OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT;
+```
+
+这样任意 CW 子集（含不含 CW0）走同一条路径。链推进逻辑（`nand_dispatch_task_cw_chain`）随之从「加载型 op 完成后 `cw_index++` 再发 `05h`」改成：
+
+| 当前 op | 完成后动作 |
+|---------|-----------|
+| **加载型**（两种 `WITHOUT_DATA_OUT`） | **不推进槽位**，从槽位 0 起发取数 op；失败则链终止 |
+| **取数型**（`OP_RANDOM_DATA_READ` / `_MULTI_PLANE`） | 推进一个槽位，直到链尾 |
+| **旧语义**（`WITH_DATA_OUT` 普通读 / OTP 读） | CW0 已由 DATA_OUT 取回，其余逐 CW 随机读（保留给直接下发场景） |
+
+取数 op 按 plane 选：单 plane → `OP_RANDOM_DATA_READ`（`05h-列-E0h`）；多 plane → `OP_RANDOM_DATA_READ_MULTI_PLANE`（`06h-列-行-E0h`，行地址带 plane 位，由 `paa_to_nand_row()` 编码）。
+
+多 plane 槽位按 plane-major 展开：`slot = plane × cw_count + cw`，与 FC 的 desc 链序、`cw_status[]` 下标三者一致。
+
+**cache 读族不动**（`OP_READ_PAGE_CACHE_SEQ` / `_RANDOM` / `_LAST` / `OP_READ_PAGE_FETCH`）——它们是 cache 管线机制，不是"加载进 cache"。
+
+### 25.6 新增 op：`OP_RANDOM_DATA_READ_MULTI_PLANE`
+
+`06h` 此前只**内联**在 `g_nand_multi_plane_read_with_data_out_uops` 里（多 plane 读后分 plane 取 cache），没有独立 OP 码。本次为逐 CW 取数把它提成独立 op：
+
+```
+70h轮询 → 06h → C1 → C2 → R1 → R2 → R3 → E0h → tR → Dout → 70h轮询
+```
+
+| 字段 | 值 |
+|------|-----|
+| OP 码 | 41（`OP_COUNT` 41 → 42） |
+| `address_cycles` | 5（文档性字段，代码不消费） |
+| `data_length` | `CW_SIZE` |
+| `has_data` | 1 |
+| uop 数组 | `g_nand_random_read_multi_plane_uops` |
+
+与 `OP_RANDOM_DATA_READ`（`05h`）的唯一区别是命令字节 `06h` + E0h 前的 3 个行地址周期。**协议命令常量 `NAND_CMD_RANDOM_DATA_READ_TWO_PLANE`（`0x06U`）不改名**——那是 ONFI 协议命令自身的名字（Micron 文档里 06h 就叫 Random Data Read Two Plane）。
+
+### 25.7 完成项
+
+**NAND 侧**：新增 `completion_load` 策略，两种加载型 op 用它——**成功时不写任何 `cw_status`**（各槽位由后续逐 CW 取数逐个填入），失败时把失败状态刷满 8 槽（加载失败后取数链不会再启动，没有其它来源能反映这次失败）。
+
+**FC 侧** `fc_complete_from_nand` 第 3 步：
+
+- status/ECC 折叠从「链走位 `i`」改成「按 **CW 号** `paa_to_cw(d->paa)`」，plane 1 的 CW 折进同一 slot（OR），ECC 计数只取 plane 0。满 mask 时与旧行为逐字节等价。
+- 新增 `completion.failed_cw_mask |= (1U << cw_num)`（条件：`FC_CW_STATUS_UNC | FC_CW_STATUS_CRC_ERROR`）。
+
+### 25.8 风险
+
+| # | 风险 | 说明 |
+|---|------|------|
+| 1 | **热路径改变（最高）** | 严格统一后，每次整页读多一轮 `70h + 05h-列-E0h + WAIT_READY`（原来 CW0 靠 `00h` 的 DATA_OUT 一次拿到）；多 plane 整页读从 1 条原子事务变成 1 次加载 + `2 × cw_count` 条事务。**必须重新上板验证**。若不可接受，退回方案是「含 CW0 时把 CW0 融进加载」——局部改动 |
+| 2 | **`06h` 的 plane 语义** | 项目内既有实践（`onfi_1_0.c` 多 plane 读已在用），但**未对 MT29F4G08 datasheet 逐条核对** `06h` 的地址周期构成与 plane 选择规则。上板前按 datasheet 复核一次 |
+| 3 | **producer/consumer 索引不一致** | 链槽位与 CW 号解耦后，§25.3 的 5 个消费点必须一次改齐 |
+| 4 | **`LUN_NUM>1` 的 ISSUE/WAIT 拆分** | 转换后的两个加载 op 不再命中 Phase V splittable 拆分，多 LUN 重叠会失效。当前 `LUN_NUM=1` 本就不生效；启用多 LUN 前需重新对齐 |
+
+### 25.9 文件变更
+
+| 文件 | 改动 |
+|------|------|
+| `include/fc/fc_command.h` | `fc_command_t` 加 `cw_mask:4`（`reserved0` 16→12）；`fc_command_status_t` 加 `failed_cw_mask:4`（`reserved` 20→16） |
+| `src/fc/fc.c` | 新增 `fc_cw_mask_popcount`；建链按 mask 枚举 + `config.cw` 回写；desc 配置签名 `index`→`(plane, cw)`；`fc_build_dispatch_request` 多 plane 分支按槽位落位 + 末尾读 op 转换；`fc_complete_from_nand` 按 CW 号折叠 + 填 `failed_cw_mask` |
+| `src/fc/fc_data_path.c` | Pass 4 META 校验改用 `paa_to_cw(desc->paa)` |
+| `src/fc/fc_scheduler.c` | `fc_scheduler_op_is_read` 补 `OP_RANDOM_DATA_READ_MULTI_PLANE` |
+| `include/nand/onfi_1_0.h` | 新增 `OP_RANDOM_DATA_READ_MULTI_PLANE (41U)`；`OP_COUNT` → 42 |
+| `src/nand/onfi_1_0.c` | 新增 `g_nand_random_read_multi_plane_uops[]` + op 表项 |
+| `src/nand/nand_dispatch_tables.c` | 新增 `completion_load` / `req_random_read`；op 41 的 completion/req 表项；`WITHOUT_DATA_OUT` 两种加载 op 的 completion 改 `completion_load`；写侧偏移改用 `paa_to_cw`；头注释同步 |
+| `src/nand/nand_dispatch.c` | 新增 `nand_dispatch_is_load_op` / `nand_dispatch_is_fetch_op`；重写 `nand_dispatch_task_cw_chain`；`nand_dispatch_scatter_page_buffer` 偏移改用 `paa_to_cw` |
+
+### 25.10 验证状态
+
+- `make format` + `make debug` / `make tests` / `make release` 三档**零警告**通过（153412 / — / 87660 字节）。
+- 静态审计通过：`src/` 里已无用槽位当 CW 号的偏移表达式。
+- **上板未验证**（按平台规则由用户执行）。回归护栏：现有全部读用例必须通过。
+- **新语义用例未加**：建议 FC 层加一条「写满 4 CW 后，用 `cw_mask = 0b1011` 读回，校验取回的是 CW0/CW1/CW3 且内容正确」；测试源文件由用户决定是否新增。
+- **datasheet 复核未做**（风险 2）。
 
 ---
 

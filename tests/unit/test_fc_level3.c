@@ -8,7 +8,7 @@
  *   4. 写 + 读：NORMAL_PROGRAM_PAGE → NORMAL_READ_PAGE_WITH_DATA_OUT（全 block）
  *   5. Random 列读：READ → RANDOM_DATA_READ（依赖于前置 READ）
  *   6. Cache 读序列：CACHE_RANDOM → CACHE_SEQ × N → CACHE_LAST
- *   7. 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_MOVE
+ *   7. 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE
  *   8. 多 Plane：MP_ERASE / MP_PROGRAM / MP_READ
  *   9. 擦除验证：ERASE → 全 0xFF 验证
  *   10. 紧锁定验证：BLOCK_LOCK_TIGHT（必须最后执行）
@@ -1068,7 +1068,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
  *    1. 擦除 block 100 + 101
  *    2. 写 block 100（64 pages，独立 pattern）
  *    3. 对每 page 执行 READ_FOR_INTERNAL_DATA_MOVE
- *    4. 对每 page 执行 PROGRAM_FOR_INTERNAL_MOVE（搬移到 block 102）
+ *    4. 对每 page 执行 PROGRAM_FOR_INTERNAL_DATA_MOVE（搬移到 block 102）
  *    5. 读 block 101 page 0 验证数据一致性
  *
  *  验证点：
@@ -1093,7 +1093,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
         read_block_verify(BLOCK_TEST, 0U);
     }
 
-    /* Step 3+4: 逐 page 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_MOVE */
+    /* Step 3+4: 逐 page 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE */
     {
         for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
         {
@@ -1118,11 +1118,11 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
                 run_lifecycle(cmd);
             }
 
-            /* 3b: PROGRAM_FOR_INTERNAL_MOVE (85h-10h) — 将内部缓存数据写入目标 block page */
+            /* 3b: PROGRAM_FOR_INTERNAL_DATA_MOVE (85h-10h) — 将内部缓存数据写入目标 block page */
             {
                 fc_command_t *cmd = fc_command_alloc();
                 munit_assert_not_null(cmd);
-                cmd->config.operation = OP_PROGRAM_FOR_INTERNAL_MOVE;
+                cmd->config.operation = OP_PROGRAM_FOR_INTERNAL_DATA_MOVE;
                 cmd->config.ch        = 0U;
                 cmd->config.ce        = 0U;
                 cmd->config.lun       = 0U;

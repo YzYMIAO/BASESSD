@@ -155,8 +155,12 @@ struct fc_descriptor_t
  */
 struct fc_command_t
 {
-    DWORD         command_id    : 16; /* Command Pool ID; 0xFFFF means invalid. */
-    DWORD         reserved0     : 16; /* Reserved for Command Pool metadata. */
+    DWORD command_id : 16;            /* Command Pool ID; 0xFFFF means invalid. */
+    DWORD cw_mask    : 4;             /* 本命令要访问的 CW 集合（bit n = CW n），仅读类命令有效。
+                                       * 0 = 未指定，退化为"连续 0..config.cw"（向后兼容，也是所有
+                                       * 现有调用点的取值）。非 0 时建链按置位升序逐 CW 建 desc，
+                                       * 并把 config.cw 回写为"置位数减一"。 */
+    DWORD         reserved0     : 12; /* Reserved for Command Pool metadata. */
     DWORD         desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
     DWORD         high_priority : 1;  /* 0=SQ, 1=HSQ. */
     DWORD         module        : 4;  /* Completion route owner; FC does not invoke callbacks. */
@@ -176,15 +180,18 @@ struct fc_command_t
  * 聚合 status 用 FC_CW_STATUS_* 位（READY=0x40、NAND_FAIL=0x01、TIMEOUT=0x02…）。 */
 struct fc_command_status_t
 {
-    DWORD command_id : 16; /* Completed Command Pool ID. */
-    DWORD desc_id    : 16; /* First Descriptor ID; 0xFFFF means invalid. Updated to first-failing desc on error. */
-    DWORD module     : 4;  /* Copy of command->module for direct routing without ID lookup. */
-    DWORD ecc_bit0   : 8;  /* CW0 ECC corrected bit count */
-    DWORD ecc_bit1   : 8;  /* CW1 ECC corrected bit count */
-    DWORD ecc_bit2   : 8;  /* CW2 ECC corrected bit count */
-    DWORD ecc_bit3   : 8;  /* CW3 ECC corrected bit count */
-    DWORD status     : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
-    DWORD reserved   : 20; /* Was: status0:8, status1:8, status2:8, status3:8 */
+    DWORD command_id     : 16; /* Completed Command Pool ID. */
+    DWORD desc_id        : 16; /* First Descriptor ID; 0xFFFF means invalid. Updated to first-failing desc on error. */
+    DWORD module         : 4;  /* Copy of command->module for direct routing without ID lookup. */
+    DWORD ecc_bit0       : 8;  /* CW0 ECC corrected bit count */
+    DWORD ecc_bit1       : 8;  /* CW1 ECC corrected bit count */
+    DWORD ecc_bit2       : 8;  /* CW2 ECC corrected bit count */
+    DWORD ecc_bit3       : 8;  /* CW3 ECC corrected bit count */
+    DWORD status         : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
+    DWORD failed_cw_mask : 4;  /* bit n = CW n 解码失败（UNC / CRC_ERROR）；0 = 全部通过。
+                                * 仅 page read 填充；其余命令恒 0。掩码按 CW 号（不是 desc 链走位），
+                                * 故非满 mask 读（fc_command_t.cw_mask）下可直接定位失败 CW。 */
+    DWORD reserved : 16;       /* Was: status0:8, status1:8, status2:8, status3:8 */
 };
 
 fc_status_t fc_command_validate(const fc_command_t *command);
