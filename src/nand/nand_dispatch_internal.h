@@ -18,6 +18,35 @@
 
 #include <stdint.h>
 
+/* ── CW 掩码遍历 ──
+ * flat CW 掩码（bit n = plane*CW_NUM + cw）是"哪些 CW 要访问"的唯一依据，
+ * 也是推进顺序的唯一依据。两个小工具被 nand_dispatch.c 与 nand_dispatch_tables.c 共用，
+ * 故放头文件里 inline（无外部链接、无未使用告警）。 */
+
+/* mask 中 ≥ n 的第一个置位的绝对编号；没有则返回 CW_TOTAL_MAX（哨兵，越界即"到头"）。
+ * 用法：`for (k = nand_dispatch_cw_next(mask, 0U); k < CW_TOTAL_MAX; k = nand_dispatch_cw_next(mask, k + 1U))`。 */
+static inline uint8_t nand_dispatch_cw_next(uint32_t cw_mask, uint8_t n)
+{
+    while (n < CW_TOTAL_MAX)
+    {
+        if ((cw_mask & (1UL << n)) != 0UL)
+        {
+            return n;
+        }
+        n++;
+    }
+    return (uint8_t)CW_TOTAL_MAX;
+}
+
+/* mask 最低位的绝对编号；mask 为空（退化命令）时返回 0 —— 只用于"取一个不越界的下标"，
+ * 需要区分"空掩码"时用 nand_dispatch_cw_next() 的哨兵。 */
+static inline uint8_t nand_dispatch_cw_first(uint32_t cw_mask)
+{
+    uint8_t n = nand_dispatch_cw_next(cw_mask, 0U);
+
+    return (n < CW_TOTAL_MAX) ? n : 0U;
+}
+
 /* ── dispatch task：一次预解析后的命令实例 ──
  * 由 nand_dispatch_task_load() 从 nand_dispatch_request_t 填充，
  * poll 依此驱动 nand_fc_start/step。 */
@@ -30,33 +59,31 @@ typedef struct
     uint8_t  lun;           /* LUN — needed for routing. */
     uint8_t  page_type : 2; /* Copy from dispatch request for LDPC engine. */
     uint8_t  reserved  : 6;
-    uint8_t  cw_index;            /* 链槽位游标（0-based，跨 plane 的 plane-major 展开位），不是 CW 号。 */
-    uint8_t  cw_count[PLANE_NUM]; /* 每 plane 的 CW 数（0 .. CW_NUM）。flat 掩码下可不对称、可为 0。
-                                   * 槽位 → (plane, ordinal) 由 nand_dispatch_slot_to_plane_cw() 在
-                                   * 本数组上走减得出（不再用除法/取模）。 */
-    uint8_t plane_count;          /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
-                                   * 见 nand_dispatch.h 同名字段的完整说明。 */
-    uint8_t plane;                /* 本命令目标物理 plane 索引（cw_paa/cw_buffers 第一维的语义）。
-                                   * 单 plane：= request->plane，所有单 plane req_* handler / cw_chain /
-                                   *   scatter 一律读 cw_paa[plane][*] / cw_buffers[plane][*]。
-                                   * multi-plane：恒 0；multi-plane handler 不读本字段，仍写死 [0]/[1]。
-                                   * ⚠ 必须无条件赋值：task slot 会被链内后续命令复用（task_load 不做整体
-                                   *   memset），漏赋值会读到上一条命令的残值。 */
-    uint8_t started;              /* 0=未启动；1=已 nand_fc_start（含 start 内同步完成） */
-    uint8_t feature_addr;         /* SET/GET_FEATURES 的寄存器地址（column）。内联数据走 cw_buffers，不走本层。 */
+    uint32_t cw_mask;     /* 选中的 CW 集合：bit n = plane*CW_NUM + cw（flat 绝对编号）。
+                           * 与 request->cw_mask 同一值；是 cw_buffers / cw_index 的唯一依据
+                           * （"本任务有几个 CW"= popcount(mask)，"第 k 个"= 第 k 个置位）。 */
+    uint8_t cw_index;     /* 当前 CW 的 **flat 绝对编号 n**（∈ cw_mask），不是密排槽位。
+                           * 生产：task_load 置为掩码最低位；cw_chain 每取完一个推进到下一个置位。
+                           * 消费：completion_per_cw 用它当下标写 cw_status[n]，
+                           *   并把它作为 failed_descriptor_id 上报。 */
+    uint8_t plane_count;  /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
+                           * 见 nand_dispatch.h 同名字段的完整说明。 */
+    uint8_t plane;        /* 本命令目标物理 plane 索引。
+                           * 单 plane：= request->plane，所有单 plane req_* handler / cw_chain /
+                           *   scatter 一律读 plane_paa[plane]。
+                           * multi-plane：恒 0；multi-plane handler 不读本字段，仍写死 [0]/[1]。
+                           * ⚠ 必须无条件赋值：task slot 会被链内后续命令复用（task_load 不做整体
+                           *   memset），漏赋值会读到上一条命令的残值。 */
+    uint8_t started;      /* 0=未启动；1=已 nand_fc_start（含 start 内同步完成） */
+    uint8_t feature_addr; /* SET/GET_FEATURES 的寄存器地址（column）。内联数据走 cw_buffers，不走本层。 */
 
-    /* Pre-resolved per-CW data. 第一维 = 物理 plane 索引（不是"第几组槽位"）。
-     * 定容数组：容量 = PLANE_NUM×CW_NUM = 2×4，实际有效条数由 cw_count / plane_count
-     * 给出——本项目无动态内存，一律按硬件上限预留。
-     * 单 plane 命令只填 cw_paa[plane][*] / cw_buffers[plane][*]；其余行是确定性零值：
-     * FC 侧 fc_build_dispatch_request() 先 *request = {0} 再按 plane 落位，而 task_load
-     * 无条件照拷全部 PLANE_NUM 行，故非目标行的 cw_paa == 0 / cw_buffers == NULL，
-     * 不是未初始化内存。multi-plane 命令两行都有效（plane 恒 0，uop 硬编码 row[0]/row[1]）。
-     * ⚠ 不要与 nand_dispatch_completion_t.cw_status[] 的索引混同：后者是**desc 链序号**
-     *   （plane-major 链走位，flat 掩码下每 plane 的 CW 数可不同），与这里的物理 plane 索引
-     *   是两套独立坐标。单 plane 打 plane 1 时二者概念分叉。 */
-    nand_paa_t cw_paa[PLANE_NUM][CW_NUM];
-    uint8_t   *cw_buffers[PLANE_NUM][CW_NUM];
+    /* Pre-resolved per-CW data（定容数组，容量 = 硬件上限 CW_TOTAL_MAX = PLANE_NUM×CW_NUM）。
+     * ⚠ 下标是 **flat 绝对 CW 号 n = plane*CW_NUM + cw**，与 cw_mask 的 bit 号、
+     *   completion.cw_status[] 的下标三者同一空间——"哪些格有效"完全由 cw_mask 决定，
+     *   不在掩码里的格是确定性零值（request 整体 {0} 初始化后只填掩码内的格）。
+     *   物理 plane 由 n / CW_NUM 得出，CW 号由 n % CW_NUM 得出，不再各存一份。 */
+    nand_paa_t plane_paa[PLANE_NUM];     /* 各 plane 的行地址承载 PAA（CW 位被 paa_to_nand_row 丢弃）。 */
+    uint8_t   *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_mask 有效。 */
 
     /* ── 引擎上下文四件套（Phase V）──
      * 全部随 task slot 常驻，跨多次 poll 调用存活；生产/消费阶段见各字段。 */

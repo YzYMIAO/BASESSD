@@ -37,7 +37,7 @@
 
 /* 行地址数组深度（nand_fc_request_t.row[] 的长度）。与 PLANE_NUM 是两个独立维度：
  *   PLANE_NUM      —— 当前芯片实际 plane 数（MT29F4G08 = 2），是数据模型的"宽度"，
- *                     牵动 CW_TOTAL_MAX / PAGE_BUFFER_SIZE / cw_paa 的 plane 维 /
+ *                     牵动 CW_TOTAL_MAX / PAGE_BUFFER_SIZE / plane_paa 的长度 /
  *                     FTL 的 valid_map[] 与 plane_blocks[]。
  *   NAND_PLANE_MAX —— 行地址数组的静态预留深度，只影响 row[] 的容量。
  * ⚠ 改 plane 数时两处都要动，别只改一个。

@@ -18,49 +18,48 @@
  * 因此每条命令各有一份 completion，链中间命令的状态不再被吞掉。
  */
 
-typedef struct
-{
-    nand_paa_t paa;    /* CW-level PAA resolved by FC before dispatch. */
-    uint8_t   *buffer; /* Pre-resolved buffer pointer; NULL if no data. */
-} nand_dispatch_cw_info_t;
-
 /*
  * Self-contained request struct. FC resolves all descriptor-chain data
- * (PAA, buffer pointers) at submit time. nand_dispatch never calls back
- * into FC after receiving this struct.
+ * (CW mask, per-plane row PAA, buffer pointers) at submit time.
+ * nand_dispatch never calls back into FC after receiving this struct.
+ *
+ * ── 唯一索引空间：flat 绝对 CW 号 ──
+ * n = plane * CW_NUM + cw（0 .. CW_TOTAL_MAX-1）。
+ * cw_mask 的 bit n、cw_buffers[n]、completion.cw_status[n] / ecc_bit_count[n]
+ * 全部用这一个编号，且与 FC 侧 fc_command_t.param.cw_mask、CQ 回传的
+ * param.cw_mask 同一空间。链序、plane-major 密排槽位等中间坐标已全部取消。
+ * 行地址不参与该空间：它是 per-plane 的，走 plane_paa[plane]。
  */
 typedef struct
 {
-    uint16_t command_id;                            /* FC command pool slot for completion correlation. */
-    uint8_t  operation;                             /* OP_* constant. */
-    uint8_t  ch;                                    /* Channel. */
-    uint8_t  ce;                                    /* Chip-enable. */
-    uint8_t  lun;                                   /* LUN. */
-    uint8_t  cw_count[PLANE_NUM];                   /* 每 plane 的 CW 数（0 .. CW_NUM）。
-                                                     * flat CW 掩码下两 plane 可以不同，甚至某 plane 为 0
-                                                     * （只选另一个 plane）。总槽位数 = 各 plane 之和。 */
-    uint8_t plane_count;                            /* Plane count. 实测语义：0 = 单 plane（FC 只对 multi-plane 分支赋值），
-                                                     * N = multi-plane（= command->config.multi_plane）。
-                                                     * ⚠ 原注释写 "1 = single" 与实现不符。
-                                                     * ⚠ 当前 NAND 层只有 nand_dispatch_scatter_page_buffer() 读它；
-                                                     *   multi-plane handler 一律写死 PLANE_NUM 遍历，见 nand_dispatch_tables.c。 */
-    uint8_t plane;                                  /* 本命令目标物理 plane 索引（cws 第一维的语义）。
-                                                     * 单 plane：= paa_to_plane(command->paa)，有效数据行恒在 cws[plane][*]。
-                                                     * multi-plane：恒 0 —— 多 plane uop 硬编码 row[0]/row[1]
-                                                     *   （onfi_1_0.c），plane 维从 0 起。
-                                                     * 行为中性：行地址始终由 paa_to_nand_row() 从 PAA 值算出，与下标无关。 */
-    uint8_t page_type : 2;                          /* LP/MP/UP/TP — LDPC engine needs this for decode threshold. */
-    uint8_t reserved  : 6;                          /* Reserved for future data-path bits. */
-    uint8_t feature_addr;                           /* Feature register addr for SET/GET_FEATURES (column).
-                                                     * 内联数据不走本结构：FC 把 cws[plane][0].buffer 指向
-                                                     * 控制器侧暂存（g_fc_return_staging），见 fc.c。 */
-    nand_dispatch_cw_info_t cws[PLANE_NUM][CW_NUM]; /* Pre-resolved per-CW data. 第一维 = 物理 plane 索引
-                                                     * （非"第几组槽位"）：单 plane 命令只填 cws[plane][*]，
-                                                     * 其余行由本结构整体 {0} 初始化保证为确定性零值；
-                                                     * multi-plane 命令填 cws[0][*] 与 cws[1][*]。
-                                                     * ⚠ FC 为命令 plane 集合内**每个** plane 填 cws[plane][0].paa
-                                                     *   （承载行地址/BA6），即使该 plane 的 cw_count 为 0
-                                                     *   （flat 掩码可只选 plane1）；槽位 0 由 task_load 无条件照拷。 */
+    uint16_t command_id;               /* FC command pool slot for completion correlation. */
+    uint8_t  operation;                /* OP_* constant. */
+    uint8_t  ch;                       /* Channel. */
+    uint8_t  ce;                       /* Chip-enable. */
+    uint8_t  lun;                      /* LUN. */
+    uint32_t cw_mask;                  /* 选中的 CW 集合：bit n = plane*CW_NUM + cw。
+                                        * 命令 plane 集合外的位恒 0；稀疏（可只选 CW1/CW3）。
+                                        * 空掩码（无 desc 的退化命令）合法：无 CW 可访问。 */
+    uint8_t plane_count;               /* Plane count. 实测语义：0 = 单 plane（FC 只对 multi-plane 分支赋值），
+                                        * N = multi-plane（= command->config.multi_plane）。
+                                        * ⚠ 原注释写 "1 = single" 与实现不符。
+                                        * ⚠ 当前 NAND 层只有 nand_dispatch_scatter_page_buffer() 读它；
+                                        *   multi-plane handler 一律写死 PLANE_NUM 遍历，见 nand_dispatch_tables.c。 */
+    uint8_t plane;                     /* 本命令目标物理 plane 索引。
+                                        * 单 plane：= paa_to_plane(command->paa)，该 plane 的掩码段非空。
+                                        * multi-plane：恒 0 —— 多 plane uop 硬编码 row[0]/row[1]
+                                        *   （onfi_1_0.c），plane 维从 0 起。 */
+    uint8_t page_type : 2;             /* LP/MP/UP/TP — LDPC engine needs this for decode threshold. */
+    uint8_t reserved  : 6;             /* Reserved for future data-path bits. */
+    uint8_t feature_addr;              /* Feature register addr for SET/GET_FEATURES (column).
+                                        * 内联数据不走本结构：FC 把 cw_buffers[plane*CW_NUM] 指向
+                                        * 控制器侧暂存（g_fc_return_staging），见 fc.c。 */
+    nand_paa_t plane_paa[PLANE_NUM];   /* 各 plane 的行地址承载 PAA（CW 位由 paa_to_nand_row 丢弃）。
+                                        * FC 为命令 plane 集合内**每个** plane 填一条，即使该 plane
+                                        * 一个 CW 都没选中（如只读 plane1）——多 plane op 的 uop 硬编码
+                                        * row[0]/row[1]，空 plane 不填会退化成 block0/page0。
+                                        * 未使用的格为确定性零值（结构整体 {0} 初始化）。 */
+    uint8_t *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_mask 有效；NULL = 该 CW 无数据。 */
 } nand_dispatch_request_t;
 
 typedef struct
@@ -68,8 +67,8 @@ typedef struct
     uint16_t command_id;
     uint8_t  execution_status;
     uint8_t  nand_status;
-    uint8_t  cw_status[CW_TOTAL_MAX];     /* Per-CW status: single-plane = 4, multi-plane = 8 */
-    uint8_t  ecc_bit_count[CW_TOTAL_MAX]; /* Per-CW ECC count */
+    uint8_t  cw_status[CW_TOTAL_MAX];     /* [n]，n = plane*CW_NUM + cw（与请求掩码同空间）。 */
+    uint8_t  ecc_bit_count[CW_TOTAL_MAX]; /* [n]，同上。 */
     uint16_t failed_descriptor_id;
 } nand_dispatch_completion_t;
 
