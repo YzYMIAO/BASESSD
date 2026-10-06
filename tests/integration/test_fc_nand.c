@@ -74,7 +74,9 @@ static nand_paa_t fc_nand_test_page_paa(nand_paa_t block_paa, uint32_t page)
     return paa_make(page, paa_to_plane(block_paa), paa_to_block(block_paa), paa_to_lun(block_paa), 0U);
 }
 
-static fc_status_t fc_nand_test_wait_completion(fc_command_t *command)
+/* 等待命令完成；completion_out 非空时回传 CQ 条目（GET_FEATURES 的返回值在
+ * completion.param 里，不再原地回填命令体——见 fc_command.h「SQ 不可变」）。 */
+static fc_status_t fc_nand_test_wait_completion_ex(fc_command_t *command, fc_command_status_t *completion_out)
 {
     fc_command_status_t completion;
     fc_status_t         result;
@@ -111,6 +113,10 @@ static fc_status_t fc_nand_test_wait_completion(fc_command_t *command)
                      completion.desc_id);
                 return FC_STATUS_IO_ERROR;
             }
+            if (completion_out != NULL)
+            {
+                *completion_out = completion;
+            }
             return FC_STATUS_OK;
         }
         if ((service_result != FC_STATUS_OK) && (service_result != FC_STATUS_NOT_READY) &&
@@ -134,6 +140,11 @@ static fc_status_t fc_nand_test_wait_completion(fc_command_t *command)
         delay_us(1U);
     }
     return FC_STATUS_NOT_READY;
+}
+
+static fc_status_t fc_nand_test_wait_completion(fc_command_t *command)
+{
+    return fc_nand_test_wait_completion_ex(command, NULL);
 }
 
 static void fc_nand_test_command_configure(fc_command_t *command, uint8_t operation, nand_paa_t paa, uint8_t descriptor_count)
@@ -711,9 +722,10 @@ fc_status_t fc_nand_test_read_status(void)
 
 fc_status_t fc_nand_test_set_get_features(void)
 {
-    fc_command_t *set_cmd;
-    fc_command_t *get_cmd;
-    fc_status_t   result;
+    fc_command_t       *set_cmd;
+    fc_command_t       *get_cmd;
+    fc_command_status_t get_completion;
+    fc_status_t         result;
 
     /* SET_FEATURES: 设置 feature 地址 0x01 的值为 [0x40, 0x00, 0x00, 0x00]. */
     set_cmd = fc_command_alloc();
@@ -724,12 +736,12 @@ fc_status_t fc_nand_test_set_get_features(void)
     LOGI("[FC TEST] SET_FEATURES submit\r\n");
     fc_nand_test_command_configure(set_cmd, OP_SET_FEATURES, 0U, 1U);
     /* 无 descriptor 分配 — 数据以内联方式传递 */
-    set_cmd->feature_addr = 0x01U;
-    set_cmd->parameter0   = 0x40U; /* Enable ECC, enable "NORMAL" parameter page */
-    set_cmd->parameter1   = 0x00U;
-    set_cmd->parameter2   = 0x00U;
-    set_cmd->parameter3   = 0x00U;
-    result                = fc_nand_test_wait_completion(set_cmd);
+    set_cmd->feature_addr     = 0x01U;
+    set_cmd->param.parameter0 = 0x40U; /* Enable ECC, enable "NORMAL" parameter page */
+    set_cmd->param.parameter1 = 0x00U;
+    set_cmd->param.parameter2 = 0x00U;
+    set_cmd->param.parameter3 = 0x00U;
+    result                    = fc_nand_test_wait_completion(set_cmd);
     if (result != FC_STATUS_OK)
     {
         LOGE("[FC TEST] SET_FEATURES failed: %d\r\n", (int)result);
@@ -738,7 +750,9 @@ fc_status_t fc_nand_test_set_get_features(void)
     }
     LOGI("[FC TEST] SET_FEATURES passed\r\n");
 
-    /* GET_FEATURES: 回读 feature 地址 0x01. */
+    /* GET_FEATURES: 回读 feature 地址 0x01.
+     * 返回值经 CQ 的 param 联合体交回（completion.param.parameter0..3），
+     * 命令体提交后不再被写——见 fc_command.h「SQ 不可变」。 */
     get_cmd = fc_command_alloc();
     if (get_cmd == NULL)
     {
@@ -748,16 +762,16 @@ fc_status_t fc_nand_test_set_get_features(void)
     LOGI("[FC TEST] GET_FEATURES submit\r\n");
     fc_nand_test_command_configure(get_cmd, OP_GET_FEATURES, 0U, 1U);
     get_cmd->feature_addr = 0x01U;
-    result                = fc_nand_test_wait_completion(get_cmd);
+    result                = fc_nand_test_wait_completion_ex(get_cmd, &get_completion);
     if (result == FC_STATUS_OK)
     {
         LOGI("[FC TEST] GET_FEATURES(0x01)=%02X %02X %02X %02X\r\n",
-             get_cmd->parameter0,
-             get_cmd->parameter1,
-             get_cmd->parameter2,
-             get_cmd->parameter3);
-        if ((get_cmd->parameter0 != 0x40U) || (get_cmd->parameter1 != 0x00U) ||
-            (get_cmd->parameter2 != 0x00U) || (get_cmd->parameter3 != 0x00U))
+             get_completion.param.parameter0,
+             get_completion.param.parameter1,
+             get_completion.param.parameter2,
+             get_completion.param.parameter3);
+        if ((get_completion.param.parameter0 != 0x40U) || (get_completion.param.parameter1 != 0x00U) ||
+            (get_completion.param.parameter2 != 0x00U) || (get_completion.param.parameter3 != 0x00U))
         {
             LOGE("[FC TEST] GET_FEATURES mismatch\r\n");
             result = FC_STATUS_IO_ERROR;

@@ -12,7 +12,7 @@
  *   - Command（fc_command_t）      ：一条 NVMe/FTL 提交的命令，对应 SQ 槽位。
  *   - Descriptor（fc_descriptor_t）：一个 CW 的数据描述（PAA + buffer + ECC 状态），
  *                                    命令经 descriptor 链串联（next_id 链接）。
- *   - CQ 完成项（fc_command_status_t）：命令级聚合状态 + 各 CW ECC 计数。
+ *   - CQ 完成项（fc_command_status_t）：命令级聚合状态 + 命令级返回段（fc_param_t）。
  *
  * 三池深度见 fc.h（FC_COMMAND_POOL_DEPTH / FC_DESCRIPTOR_POOL_DEPTH /
  * FC_BUFFER_POOL_DEPTH）。命令/描述符用 16 位 Pool ID 互相关联，
@@ -115,25 +115,27 @@ typedef enum
 /* Command 与 Descriptor 共用 32 位操作配置（位域布局见下） */
 typedef struct fc_cmd_conf_t
 {
-    DWORD operation   : 8; /* ONFI operation macro (OP_*). */
-    DWORD ch          : 2; /* NAND channel number. */
-    DWORD ce          : 2; /* NAND chip-enable number. */
-    DWORD lun         : 2; /* NAND LUN number. */
-    DWORD cw          : 2; /* Command: CW count minus one; Descriptor: CW index. */
+    DWORD operation : 8;   /* ONFI operation macro (OP_*). */
+    DWORD ch        : 2;   /* NAND channel number. */
+    DWORD ce        : 2;   /* NAND chip-enable number. */
+    DWORD lun       : 2;   /* NAND LUN number. */
+    DWORD cw        : 2;   /* Command: 每-plane CW 数减一，仅当 param.cw_mask == 0 时被读（输入提示）；
+                            * Descriptor: 本 desc 在 plane 内是第几个 CW（0..CW_NUM-1）。 */
     DWORD crc         : 1; /* FC_CRC_ENABLE / FC_CRC_DISABLE. */
     DWORD ldpc        : 2; /* fc_ecc_mode_t: BCH/LDPC_HARD/LDPC_SOFT/LDPC_RAW. */
     DWORD raid        : 3; /* fc_raid_mode_t: NORMAL/DECODE/ENCODE/RECOVER/CHECK. */
     DWORD random      : 1; /* FC_RANDOM_ENABLE / FC_RANDOM_DISABLE. */
     DWORD chain       : 1; /* FC_CHAIN_END / FC_CHAIN_MORE. */
     DWORD page_type   : 2; /* fc_page_type_t: LP/MP/UP/TP. */
-    DWORD multi_plane : 3; /* 0=single; N=N-plane → total desc = multi_plane * (cw+1) */
+    DWORD multi_plane : 3; /* 0=single; N=N-plane。总 desc 数以 desc 链长度为真值，不由本字段推导。 */
     DWORD reserved    : 3; /* Reserved for future configuration. */
 } fc_cmd_conf_t;
 
 /*
  * 单 CW 描述符：物理地址 + 配置 + 缓冲 ID + 链 ID + 状态 + ECC 信息。
- * 一条命令的 desc 链 = 按 (multi_plane × cw_count) 数量排列的 descriptor 数组，
- * next_id 串联；0xFFFF 终止。
+ * 一条命令的 desc 链 = 本次要访问的 CW 逐条排列（plane-major），next_id 串联；
+ * 0xFFFF 终止。**链长度即真值**：uniform 命令 = multi_plane × 每-plane CW 数，
+ * flat 掩码命令 = 掩码置位数。凡需要"这条命令有几个 CW / 每 plane 几个"一律走链。
  */
 struct fc_descriptor_t
 {
@@ -150,17 +152,36 @@ struct fc_descriptor_t
 };
 
 /*
+ * 4 字节命令参数 / 返回段，SQ 与 CQ 共用。按 operation 解释：
+ *   parameter0..3 / bytes[4]：SET/GET_FEATURES 的内联数据（SQ）/ 读回的寄存器值（CQ）
+ *   cw_mask                ：flat CW 掩码，bit n = plane * CW_NUM + cw
+ *                            SQ = 请求集（0 = 未指定）；CQ = 失败集（UNC/CRC_ERROR）
+ * 小端（Cortex-M7）下 cw_mask 的 bit0 == parameter0 的 bit0。
+ * 同一时刻只按一种解释使用——读命令不用 parameter0..3，FEATURES 命令不用 cw_mask。
+ */
+typedef union
+{
+    struct
+    {
+        uint8_t parameter0; /* Command parameter byte 0. */
+        uint8_t parameter1; /* Command parameter byte 1. */
+        uint8_t parameter2; /* Command parameter byte 2. */
+        uint8_t parameter3; /* Command parameter byte 3. */
+    };
+    uint8_t  bytes[4]; /* 内联数据的字节视图。 */
+    uint32_t cw_mask;  /* flat CW 掩码：bit n = plane * CW_NUM + cw（绝对编号，非每-plane 低 4 位）。 */
+} fc_param_t;
+
+/*
  * SQ 命令：被 FC 持有直至完成。command_id = Command Pool 槽位号，
  * desc_id = 首个 Descriptor ID（0xFFFF = 无描述符）。
+ *
+ * ⚠ SQ 在 configure 完成后即不可变：命令配置完就算完成，运行期返回值一律走 CQ。
  */
 struct fc_command_t
 {
-    DWORD command_id : 16;            /* Command Pool ID; 0xFFFF means invalid. */
-    DWORD cw_mask    : 4;             /* 本命令要访问的 CW 集合（bit n = CW n），仅读类命令有效。
-                                       * 0 = 未指定，退化为"连续 0..config.cw"（向后兼容，也是所有
-                                       * 现有调用点的取值）。非 0 时建链按置位升序逐 CW 建 desc，
-                                       * 并把 config.cw 回写为"置位数减一"。 */
-    DWORD         reserved0     : 12; /* Reserved for Command Pool metadata. */
+    DWORD         command_id    : 16; /* Command Pool ID; 0xFFFF means invalid. */
+    DWORD         reserved0     : 16; /* Reserved for Command Pool metadata. */
     DWORD         desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
     DWORD         high_priority : 1;  /* 0=SQ, 1=HSQ. */
     DWORD         module        : 4;  /* Completion route owner; FC does not invoke callbacks. */
@@ -169,32 +190,25 @@ struct fc_command_t
     DWORD         meta;               /* META 值，写入 NAND CW buffer[0..3]；当前为 LBA，未来可扩展。 */
     DWORD         paa;                /* Operation-dependent target; data commands use Descriptor PAA values. */
     fc_cmd_conf_t config;             /* Operation, NAND location, CW and data-path configuration. */
-    uint8_t       parameter0;         /* Command parameter byte 0. */
-    uint8_t       parameter1;         /* Command parameter byte 1. */
-    uint8_t       parameter2;         /* Command parameter byte 2. */
-    uint8_t       parameter3;         /* Command parameter byte 3. */
+    fc_param_t    param;              /* 读：请求掩码 param.cw_mask；FEATURES：内联数据 param.bytes。 */
 };
 
-/* CQ 完成项：命令级聚合状态 + 各 CW ECC 计数。
- * Per-CW 细节（status/ecc_bits）在 descriptor 链中；
+/* CQ 完成项：命令级聚合状态 + 命令级返回段。
+ * Per-CW 细节（status/ecc_bits）只留在 descriptor 链中，聚合 ECC 用 fc_get_cmd_ecc_max()；
  * 聚合 status 用 FC_CW_STATUS_* 位（READY=0x40、NAND_FAIL=0x01、TIMEOUT=0x02…）。 */
 struct fc_command_status_t
 {
-    DWORD command_id     : 16; /* Completed Command Pool ID. */
-    DWORD desc_id        : 16; /* First Descriptor ID; 0xFFFF means invalid. Updated to first-failing desc on error. */
-    DWORD module         : 4;  /* Copy of command->module for direct routing without ID lookup. */
-    DWORD ecc_bit0       : 8;  /* CW0 ECC corrected bit count */
-    DWORD ecc_bit1       : 8;  /* CW1 ECC corrected bit count */
-    DWORD ecc_bit2       : 8;  /* CW2 ECC corrected bit count */
-    DWORD ecc_bit3       : 8;  /* CW3 ECC corrected bit count */
-    DWORD status         : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
-    DWORD failed_cw_mask : 4;  /* bit n = CW n 解码失败（UNC / CRC_ERROR）；0 = 全部通过。
-                                * 仅 page read 填充；其余命令恒 0。掩码按 CW 号（不是 desc 链走位），
-                                * 故非满 mask 读（fc_command_t.cw_mask）下可直接定位失败 CW。 */
-    DWORD reserved : 16;       /* Was: status0:8, status1:8, status2:8, status3:8 */
+    DWORD      command_id : 16; /* Completed Command Pool ID. */
+    DWORD      desc_id    : 16; /* First Descriptor ID; 0xFFFF means invalid. Updated to first-failing desc on error. */
+    DWORD      module     : 4;  /* Copy of command->module for direct routing without ID lookup. */
+    DWORD      status     : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
+    DWORD      reserved   : 20; /* Reserved. */
+    fc_param_t param;           /* 命令级返回：读 = 失败掩码 param.cw_mask（bit n = plane*CW_NUM + cw）；
+                                 * GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0。 */
 };
 
 fc_status_t fc_command_validate(const fc_command_t *command);
+uint8_t     fc_cw_mask_is_plane_symmetric(uint32_t mask);
 void        fc_command_status_init(fc_command_status_t *status, const fc_command_t *command);
 void        fc_command_status_set_cw(fc_command_status_t *status, uint8_t cw, uint8_t cw_status, fc_descriptor_id_t descriptor_id);
 

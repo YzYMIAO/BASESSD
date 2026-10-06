@@ -100,6 +100,40 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
     return MUNIT_OK;
 }
 
+/* flat CW 掩码校验（v7）：位宽越界 / 命令 plane 位段外置位 → 拒绝 */
+static MunitResult test_command_validate_cw_mask(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    fc_command_t cmd = {0};
+
+    cmd.config.operation = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    cmd.desc_id          = 0U;
+
+    /* 多 plane：0xFF 合法，bit8 越界 */
+    cmd.config.multi_plane = 2U;
+    cmd.paa                = paa_make(0U, 0U, 0U, 0U, 0U);
+    cmd.param.cw_mask      = 0xFFU;
+    munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_OK);
+    cmd.param.cw_mask = 0x100U;
+    munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_INVALID_ARGUMENT);
+
+    /* 单 plane 打 plane 1：掩码必须落在 plane1 位段（0xF0），bit0..3 越出 */
+    cmd.config.multi_plane = 0U;
+    cmd.paa                = paa_make(0U, 1U, 0U, 0U, 0U);
+    cmd.param.cw_mask      = 0xF0U;
+    munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_OK);
+    cmd.param.cw_mask = 0x0FU;
+    munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_INVALID_ARGUMENT);
+
+    /* 掩码 0 = 未指定，恒合法 */
+    cmd.param.cw_mask = 0U;
+    munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_OK);
+
+    return MUNIT_OK;
+}
+
 /* ── fc_command_status_init ── */
 
 static MunitResult test_command_status_init_cw1(const MunitParameter params[], void *data)
@@ -123,10 +157,9 @@ static MunitResult test_command_status_init_cw1(const MunitParameter params[], v
 
     munit_assert_uint32(cq_entry.status, ==, FC_CW_STATUS_READY);
 
-    munit_assert_uint32(cq_entry.ecc_bit0, ==, 0U);
-    munit_assert_uint32(cq_entry.ecc_bit1, ==, FC_CW_STATUS_UNUSED);
-    munit_assert_uint32(cq_entry.ecc_bit2, ==, FC_CW_STATUS_UNUSED);
-    munit_assert_uint32(cq_entry.ecc_bit3, ==, FC_CW_STATUS_UNUSED);
+    /* CQ 的 param 是命令级返回段（读命令=失败掩码 / FEATURES=寄存器值），
+     * 由完成路径填；status_init 只清零，不预置 per-CW ECC（已从 CQ 删除）。 */
+    munit_assert_uint32(cq_entry.param.cw_mask, ==, 0U);
 
     return MUNIT_OK;
 }
@@ -148,10 +181,7 @@ static MunitResult test_command_status_init_cw4(const MunitParameter params[], v
 
     munit_assert_uint32(cq_entry.status, ==, FC_CW_STATUS_READY);
 
-    munit_assert_uint32(cq_entry.ecc_bit0, ==, 0U);
-    munit_assert_uint32(cq_entry.ecc_bit1, ==, 0U);
-    munit_assert_uint32(cq_entry.ecc_bit2, ==, 0U);
-    munit_assert_uint32(cq_entry.ecc_bit3, ==, 0U);
+    munit_assert_uint32(cq_entry.param.cw_mask, ==, 0U);
 
     return MUNIT_OK;
 }
@@ -889,6 +919,7 @@ MunitTest g_fc_command_tests[] = {
     {       "validate_op_range",        test_command_validate_op_range, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {    "validate_desc_needed",     test_command_validate_desc_needed, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {"validate_set_get_no_desc", test_command_validate_set_get_no_desc, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {        "validate_cw_mask",         test_command_validate_cw_mask, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {         "status_init_cw1",          test_command_status_init_cw1, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {         "status_init_cw4",          test_command_status_init_cw4, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
     {     "status_set_cw_valid",      test_command_status_set_cw_valid, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},

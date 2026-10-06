@@ -35,8 +35,10 @@ typedef struct
     uint8_t  ch;                                    /* Channel. */
     uint8_t  ce;                                    /* Chip-enable. */
     uint8_t  lun;                                   /* LUN. */
-    uint8_t  cw_count;                              /* CW count per plane (1 .. CW_NUM). */
-    uint8_t  plane_count;                           /* Plane count. 实测语义：0 = 单 plane（FC 只对 multi-plane 分支赋值），
+    uint8_t  cw_count[PLANE_NUM];                   /* 每 plane 的 CW 数（0 .. CW_NUM）。
+                                                     * flat CW 掩码下两 plane 可以不同，甚至某 plane 为 0
+                                                     * （只选另一个 plane）。总槽位数 = 各 plane 之和。 */
+    uint8_t plane_count;                            /* Plane count. 实测语义：0 = 单 plane（FC 只对 multi-plane 分支赋值），
                                                      * N = multi-plane（= command->config.multi_plane）。
                                                      * ⚠ 原注释写 "1 = single" 与实现不符。
                                                      * ⚠ 当前 NAND 层只有 nand_dispatch_scatter_page_buffer() 读它；
@@ -46,14 +48,18 @@ typedef struct
                                                      * multi-plane：恒 0 —— 多 plane uop 硬编码 row[0]/row[1]
                                                      *   （onfi_1_0.c），plane 维从 0 起。
                                                      * 行为中性：行地址始终由 paa_to_nand_row() 从 PAA 值算出，与下标无关。 */
-    uint8_t                 page_type : 2;          /* LP/MP/UP/TP — LDPC engine needs this for decode threshold. */
-    uint8_t                 reserved  : 6;          /* Reserved for future data-path bits. */
-    uint8_t                 parameter[4];           /* ≤4-byte inline parameter data. */
-    uint8_t                 feature_addr;           /* Feature register addr for SET/GET_FEATURES (column). */
+    uint8_t page_type : 2;                          /* LP/MP/UP/TP — LDPC engine needs this for decode threshold. */
+    uint8_t reserved  : 6;                          /* Reserved for future data-path bits. */
+    uint8_t feature_addr;                           /* Feature register addr for SET/GET_FEATURES (column).
+                                                     * 内联数据不走本结构：FC 把 cws[plane][0].buffer 指向
+                                                     * 控制器侧暂存（g_fc_return_staging），见 fc.c。 */
     nand_dispatch_cw_info_t cws[PLANE_NUM][CW_NUM]; /* Pre-resolved per-CW data. 第一维 = 物理 plane 索引
                                                      * （非"第几组槽位"）：单 plane 命令只填 cws[plane][*]，
                                                      * 其余行由本结构整体 {0} 初始化保证为确定性零值；
-                                                     * multi-plane 命令填 cws[0][*] 与 cws[1][*]。 */
+                                                     * multi-plane 命令填 cws[0][*] 与 cws[1][*]。
+                                                     * ⚠ FC 为命令 plane 集合内**每个** plane 填 cws[plane][0].paa
+                                                     *   （承载行地址/BA6），即使该 plane 的 cw_count 为 0
+                                                     *   （flat 掩码可只选 plane1）；槽位 0 由 task_load 无条件照拷。 */
 } nand_dispatch_request_t;
 
 typedef struct

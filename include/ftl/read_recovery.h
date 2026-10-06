@@ -75,7 +75,7 @@ typedef struct
  * 连续上升 → warning → critical → 触发搬移。
  *
  * @param track    per-Block ECC 追踪（&ftl->alloc.blocks[gblock].rr）
- * @param ecc_bits 本次读取的 ECC 纠正 bit 数（取 4 CW 中的最大值）
+ * @param ecc_bits 本次读取的 ECC 纠正 bit 数（取 desc 链全链 CW 的最大值，见 fc_get_cmd_ecc_max）
  */
 void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits);
 

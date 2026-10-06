@@ -798,6 +798,144 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
 #endif /* CONFIG_FC_RAID */
 
 /**************************************************************************
+ *  flat CW 掩码建链（v7）
+ *
+ *  纯 FC 层（fc_command_configure_descriptors），不碰 NAND：
+ *    - 掩码按 **flat 绝对编号**（bit n = plane*CW_NUM + cw）逐位建 desc
+ *    - 链序 plane-major
+ *    - mask == 0 时对**每个** plane 展开连续 0..config.cw
+ **************************************************************************/
+
+/* 走 desc 链，返回条数；plane_out / cw_out 非空时逐条回填 (plane, cw) */
+static uint8_t collect_chain(const fc_command_t *cmd, uint8_t *plane_out, uint8_t *cw_out)
+{
+    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    uint8_t            count   = 0U;
+
+    while ((desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (count < CW_TOTAL_MAX))
+    {
+        fc_descriptor_t *d = fc_descriptor_id_to_descriptor(desc_id);
+        munit_assert_not_null(d);
+        if (plane_out != NULL)
+        {
+            plane_out[count] = (uint8_t)paa_to_plane(d->paa);
+        }
+        if (cw_out != NULL)
+        {
+            cw_out[count] = (uint8_t)paa_to_cw(d->paa);
+        }
+        desc_id = (fc_descriptor_id_t)d->next_id;
+        count++;
+    }
+    return count;
+}
+
+/* 掩码 0x29：plane0 取 {CW0,CW3} + plane1 取 {CW1} → 3 条 desc（plane-major） */
+static MunitResult test_cw_mask_flat_mixed(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    fc_command_t *cmd = fc_command_alloc();
+    munit_assert_not_null(cmd);
+
+    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    cmd->config.multi_plane = 2U;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->paa                = paa_make(0U, 0U, 0U, 0U, 0U);
+    cmd->param.cw_mask      = 0x29U; /* 0b0010_1001 */
+
+    munit_assert_int(fc_command_configure_descriptors(cmd), ==, FC_STATUS_OK);
+
+    uint8_t plane_out[CW_TOTAL_MAX];
+    uint8_t cw_out[CW_TOTAL_MAX];
+    uint8_t n = collect_chain(cmd, plane_out, cw_out);
+
+    munit_assert_uint32(n, ==, 3U);
+    munit_assert_uint32(plane_out[0], ==, 0U);
+    munit_assert_uint32(cw_out[0], ==, 0U);
+    munit_assert_uint32(plane_out[1], ==, 0U);
+    munit_assert_uint32(cw_out[1], ==, 3U);
+    munit_assert_uint32(plane_out[2], ==, 1U);
+    munit_assert_uint32(cw_out[2], ==, 1U);
+
+    /* config.cw 不回写（纯输入提示，configure 后无下游读者） */
+    munit_assert_uint32(cmd->config.cw, ==, 0U);
+
+    release_cmd_buffers(cmd);
+    fc_command_release(cmd);
+    return MUNIT_OK;
+}
+
+/* 掩码 0xF0：只选 plane 1 的 4 个 CW（绝对编号，不是 0x0F）→ 4 条 desc 全在 plane 1 */
+static MunitResult test_cw_mask_plane1_only(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    fc_command_t *cmd = fc_command_alloc();
+    munit_assert_not_null(cmd);
+
+    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    cmd->config.multi_plane = 2U;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->paa                = paa_make(0U, 0U, 0U, 0U, 0U);
+    cmd->param.cw_mask      = 0xF0U;
+
+    munit_assert_int(fc_command_configure_descriptors(cmd), ==, FC_STATUS_OK);
+
+    uint8_t plane_out[CW_TOTAL_MAX];
+    uint8_t cw_out[CW_TOTAL_MAX];
+    uint8_t n = collect_chain(cmd, plane_out, cw_out);
+
+    munit_assert_uint32(n, ==, 4U);
+    for (uint8_t i = 0U; i < n; i++)
+    {
+        munit_assert_uint32(plane_out[i], ==, 1U);
+        munit_assert_uint32(cw_out[i], ==, i);
+    }
+
+    release_cmd_buffers(cmd);
+    fc_command_release(cmd);
+    return MUNIT_OK;
+}
+
+/* mask == 0 回归：multi_plane=2 + config.cw=3 必须建出 8 条 desc（不是 4 条）
+ * —— 钉住"mask==0 展开必须逐 plane 平移"这条不变量。 */
+static MunitResult test_cw_mask_zero_multi_plane(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    fc_command_t *cmd = fc_command_alloc();
+    munit_assert_not_null(cmd);
+
+    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+    cmd->config.multi_plane = 2U;
+    cmd->config.cw          = 3U; /* 每 plane 4 CW */
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->paa                = paa_make(0U, 0U, 0U, 0U, 0U);
+    cmd->param.cw_mask      = 0U; /* 未指定 */
+
+    munit_assert_int(fc_command_configure_descriptors(cmd), ==, FC_STATUS_OK);
+
+    uint8_t plane_out[CW_TOTAL_MAX];
+    uint8_t cw_out[CW_TOTAL_MAX];
+    uint8_t n = collect_chain(cmd, plane_out, cw_out);
+
+    munit_assert_uint32(n, ==, 8U);
+    for (uint8_t i = 0U; i < n; i++)
+    {
+        munit_assert_uint32(plane_out[i], ==, (i < CW_NUM) ? 0U : 1U);
+        munit_assert_uint32(cw_out[i], ==, (uint8_t)(i % CW_NUM));
+    }
+
+    release_cmd_buffers(cmd);
+    fc_command_release(cmd);
+    return MUNIT_OK;
+}
+
+/**************************************************************************
  *  套件定义
  *
  *  所有 Level 2 测试共享 setup_level2 suite 级 setup（一次性 fc_init）
@@ -828,6 +966,11 @@ MunitTest g_fc_data_path_tests[] = {
  /* ── stripe parity ── */
     {    "generate_stripe_parity",     test_generate_stripe_parity, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 #endif  /* CONFIG_FC_RAID */
+
+  /* ── flat CW 掩码建链（v7）── */
+    {        "cw_mask_flat_mixed",         test_cw_mask_flat_mixed, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {       "cw_mask_plane1_only",        test_cw_mask_plane1_only, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {  "cw_mask_zero_multi_plane",   test_cw_mask_zero_multi_plane, setup_level2, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
     {                        NULL,                            NULL,         NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

@@ -189,22 +189,9 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
             return FTL_ERROR;
         }
 
-        /* B4：取 4 CW 最大 ECC 纠正 bit 数（与 host 读 completion 同口径，
-         * ftl.c:107-119 的 rr_record_ecc 聚合逻辑一致） */
-        {
-            uint8_t k;
-            for (k = 0U; k < 4U; k++)
-            {
-                uint8_t b = (k == 0U)   ? (uint8_t)completion.ecc_bit0
-                            : (k == 1U) ? (uint8_t)completion.ecc_bit1
-                            : (k == 2U) ? (uint8_t)completion.ecc_bit2
-                                        : (uint8_t)completion.ecc_bit3;
-                if (b > ecc_max)
-                {
-                    ecc_max = b;
-                }
-            }
-        }
+        /* B4：取 desc 链最大 ECC 纠正 bit 数（与 host 读路径同口径，走 fc_get_cmd_ecc_max）。
+         * ⚠ 须在 fc_command_release(cmd) 之前调用——desc 释放后失效。 */
+        ecc_max = fc_get_cmd_ecc_max(cmd);
     }
 
     /* 读取用户数据 */

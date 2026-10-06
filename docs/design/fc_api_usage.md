@@ -79,43 +79,62 @@ FC（Flash Controller）模块对外暴露以下 16 个公接口（声明于 `in
 
 ### 完成状态结构（fc_command_status_t）
 
-CQ 条目包含命令 ID、module（直接路由）、per-CW ECC 纠正比特数和 per-CW 状态：
+CQ 条目只携带**命令级聚合状态 + 命令级返回段**。Per-CW 细节（status / ecc_bits）留在 descriptor 链中，
+聚合 ECC 走 `fc_get_cmd_ecc_max()`：
 
 ```c
 struct fc_command_status_t {
-    DWORD command_id     : 16;
-    DWORD desc_id        : 16;  // 出错时更新为第一个失败的 desc
-    DWORD module         : 4;   // 发起者模块，直接路由用
-    DWORD ecc_bit0       : 8;   // CW0 ECC 纠正比特数
-    DWORD ecc_bit1       : 8;   // CW1
-    DWORD ecc_bit2       : 8;   // CW2
-    DWORD ecc_bit3       : 8;   // CW3
-    DWORD status         : 8;   // 命令级聚合状态（各 CW 的 FC_CW_STATUS_* 位 OR）
-    DWORD failed_cw_mask : 4;   // bit n = CW n 解码失败（UNC / CRC_ERROR）；0 = 全通过
-    DWORD reserved       : 16;
+    DWORD command_id : 16;
+    DWORD desc_id    : 16;  // 出错时更新为第一个失败的 desc
+    DWORD module     : 4;   // 发起者模块，直接路由用
+    DWORD status     : 8;   // 命令级聚合状态（各 CW 的 FC_CW_STATUS_* 位 OR）
+    DWORD reserved   : 20;
+    fc_param_t param;       // 命令级返回段（见下）
 };
 ```
 
-`failed_cw_mask` 按 **CW 号**（不是 desc 链走位）置位，因此配合 `fc_command_t.cw_mask` 做非满 mask 读时，
-可以直接定位是哪几个 CW 失败、无需再查 desc 链。仅 page read 填充，其余命令恒 0。
+`param` 是与 SQ 共用的 4 字节联合体 `fc_param_t`：
 
-### 读命令的 CW 子集选择（fc_command_t.cw_mask）
+```c
+typedef union {
+    struct { uint8_t parameter0, parameter1, parameter2, parameter3; };
+    uint8_t  bytes[4];
+    uint32_t cw_mask;   // flat CW 掩码：bit n = plane * CW_NUM + cw
+} fc_param_t;
+```
 
-`fc_command_t` 新增 `cw_mask : 4`（bit n = CW n），用于只读一页中**任意 CW 子集**（读恢复场景：ECC 只挂了
-2~3 个 CW 时只重读失败的那几个，不必重读整页）：
+- **读命令**：`param.cw_mask` = 失败集（`UNC | CRC_ERROR` 的 CW 按 **flat 绝对编号**置位）；
+  与请求掩码同一编号空间，故 `请求集 & 失败集` 直接得到最小重读集。仅 page read 填充，其余命令恒 0。
+- **GET_FEATURES**：`param.bytes` = 读回的 4 字节寄存器值。SQ 命令体提交后不再被写
+  （值经控制器级暂存 `g_fc_return_staging` 中转进 CQ）。
+- **SET_FEATURES**：内联数据由 SQ 的 `command->param.bytes` 携带。
+
+### 读命令的 CW 子集选择（fc_command_t.param.cw_mask）
+
+`fc_command_t.param.cw_mask` 是 **flat 32 位掩码**（bit `n = plane * CW_NUM + cw`，覆盖
+`CW_TOTAL_MAX = 8` 位），用于只读一页中**任意 CW 子集**（读恢复场景：ECC 只挂了 2~3 个 CW 时只重读
+失败的那几个，不必重读整页）。编号是**绝对**的，不是"每 plane 各自的低 4 位"：
+
+| 选择 | 掩码 |
+|---|---|
+| 两个 plane 各 4 CW（满读） | `0x0F \| 0xF0 = 0xFF` |
+| **只读 plane 1 的 4 个 CW** | **`0xF0`**（不是 `0x0F`） |
+| plane 0 取 {CW0,CW3} + plane 1 取 {CW1} | `0b0010_1001 = 0x29` |
 
 ```c
 fc_command_t *cmd = fc_command_alloc();
 cmd->config.operation = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-cmd->config.cw        = 3U;      // 满页 4 个 CW（mask=0 时按此字段取连续 0..cw）
-cmd->cw_mask          = 0b1011U; // 只读 CW0 / CW1 / CW3
-// configure 时按 cw_mask 置位建 desc 链，并把 config.cw 回写为"置位数减一"（此处 2）
+cmd->config.cw        = 3U;      // mask=0 时按此字段对**每个 plane** 取连续 0..cw
+cmd->param.cw_mask    = 0x29U;   // 只读 plane0{CW0,CW3} + plane1{CW1}
+// configure 时按掩码置位建 desc 链（plane-major 序）；config.cw 不回写，长度一律走链
 ```
 
-`cw_mask = 0` 表示未指定，退化为"连续 `0..config.cw`"——所有既有调用点都是这个取值，行为不变。
-该字段**仅读类命令有效**；写路径仍按连续 CW 处理。
+`cw_mask = 0` 表示未指定，退化为"对命令的每个 plane 取连续 `0..config.cw`"——所有既有调用点都是这个
+取值，行为不变。掩码越出本命令 plane 位段（或位宽超过 `PLANE_NUM * CW_NUM`）时 `fc_command_validate`
+返回 `FC_STATUS_INVALID_ARGUMENT`。RAID / stripe 命令要求两 plane 的 CW 集合相同（XOR 按 CW 配对），
+非对称掩码会被 ASSERT 拒绝。
 
-**不在本次范围**：FTL 读恢复流程（`src/ftl/read_recovery.c`）对 `failed_cw_mask` / `cw_mask` 的接线。
+**不在本次范围**：FTL 读恢复流程（`src/ftl/read_recovery.c`）对失败掩码的接线。
 
 ### 使用 module 直接路由完成通知
 

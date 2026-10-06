@@ -129,6 +129,14 @@
  * 按行地址的 plane 位选择目标 plane 的页缓冲，再从列地址取单个 CW。
  * 是 05h 的多 plane 版本，区别是**带 3 个行地址周期**（plane 位在行地址里，由 paa_to_nand_row() 编码），
  * 05h 只有列地址周期。与 OP_RANDOM_DATA_READ 配对使用：多 plane 读的逐 CW 取数走本 op。
+ *
+ * 前置约束：
+ *   ① 06h 必须紧跟 TWO-PLANE PAGE READ（00h-00h-30h）之后，即本项目的
+ *      OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT。
+ *   ② two-plane 命令族（本 op / OP_PROGRAM_PAGE_MULTI_PLANE / OP_READ_PAGE_MULTI_PLANE_*）
+ *      要求器件内部 on-die ECC 关闭（Micron datasheet Note 4）。本项目从不写 ECC feature
+ *      寄存器（0x90），内部 ECC 保持默认关闭，故可用；若日后启用 on-die ECC，多 plane 路径
+ *      整体失效。Note 4 出处待逐字核对，见 fc_nand_design.md §25.8 风险 2。
  * ----------------------------------------------------------------------------------------------
  */
 #define OP_RANDOM_DATA_READ_MULTI_PLANE (41U)
@@ -320,7 +328,7 @@
  * ----------------------------------------------------------------------------------------------
  * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1_P0 >-< R2_P0 >-< R3_P0 >-< 00 >-< C1 >-< C2 >-< R1_P1 >-< R2_P1 >-< R3_P1 >-< 30 >~~~~~< 70 >-< Status >
  * 30h 后 tR 将两个 Plane 数据加载到各 Plane 页缓冲中，但不输出到总线。
- * 数据留在 NAND 内部，后续通过 RANDOM_DATA_READ (05h-E0h) 逐 CW 读取。
+ * 数据留在 NAND 内部，后续通过 RANDOM_DATA_READ_MULTI_PLANE (06h-E0h，行地址带 plane 位) 逐 CW 读取。
  * 适用于需要先完成其他操作再回读数据的场景。
  * ----------------------------------------------------------------------------------------------
  */

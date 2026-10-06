@@ -237,7 +237,12 @@ fc_status_t fc_data_path_generate_stripe_parity(
     ASSERT(parity_cmd != NULL);
     ASSERT(data_count != 0U);
 
-    /* parity 命令的 CW 数量必须与数据命令一致 */
+    /* RAID XOR 按 CW 配对：两 plane 必须访问同一组 CW，flat 掩码（不对称）不兼容 */
+    ASSERT(fc_cw_mask_is_plane_symmetric(data_cmds[0]->param.cw_mask));
+    ASSERT(fc_cw_mask_is_plane_symmetric(parity_cmd->param.cw_mask));
+
+    /* parity 命令的 CW 数量必须与数据命令一致（stripe 命令 plane 对称，
+     * 故 config.cw+1 即**每-plane** CW 数） */
     cw_count = (uint8_t)(data_cmds[0]->config.cw + 1U);
     ASSERT((uint8_t)(parity_cmd->config.cw + 1U) == cw_count);
 
@@ -396,9 +401,17 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
     /* 入参前置条件由调用者保证（fc.c 读路径 Stage 1） */
     ASSERT(command != NULL);
 
-    const uint8_t total_desc = (command->config.multi_plane > 0U)
-                                   ? (uint8_t)((uint8_t)(command->config.cw + 1U) * command->config.multi_plane)
-                                   : (uint8_t)(command->config.cw + 1U);
+    /* 链长度即 CW 数（不再由 config.cw / multi_plane 推导；flat 掩码下两者会分叉） */
+    uint8_t total_desc = 0U;
+    {
+        fc_descriptor_id_t did = (fc_descriptor_id_t)command->desc_id;
+
+        while ((did < FC_DESCRIPTOR_POOL_DEPTH) && (total_desc < CW_TOTAL_MAX))
+        {
+            total_desc++;
+            did = (fc_descriptor_id_t)fc_descriptor_id_to_descriptor(did)->next_id;
+        }
+    }
 
     const fc_ldpc_config_t ldpc_config = {
         .codeword_bytes = FC_BUFFER_DATA_SIZE,

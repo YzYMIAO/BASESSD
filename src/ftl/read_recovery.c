@@ -135,10 +135,10 @@ static int rr_exec_retry(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buffer, u
     cmd->module             = FC_COMMAND_MODULE_READ_RECOVERY;
     cmd->meta               = 0U;
     cmd->feature_addr       = RR_FEATURE_READ_RETRY;
-    cmd->parameter0         = retry_mode;
-    cmd->parameter1         = 0U;
-    cmd->parameter2         = 0U;
-    cmd->parameter3         = 0U;
+    cmd->param.parameter0   = retry_mode;
+    cmd->param.parameter1   = 0U;
+    cmd->param.parameter2   = 0U;
+    cmd->param.parameter3   = 0U;
 
     if (fc_submit(cmd) != FC_STATUS_OK)
     {
@@ -188,10 +188,10 @@ static int rr_exec_retry(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buffer, u
     cmd->module             = FC_COMMAND_MODULE_READ_RECOVERY;
     cmd->meta               = 0U;
     cmd->feature_addr       = RR_FEATURE_READ_RETRY;
-    cmd->parameter0         = 0U; /* Mode 0 = normal */
-    cmd->parameter1         = 0U;
-    cmd->parameter2         = 0U;
-    cmd->parameter3         = 0U;
+    cmd->param.parameter0   = 0U; /* Mode 0 = normal */
+    cmd->param.parameter1   = 0U;
+    cmd->param.parameter2   = 0U;
+    cmd->param.parameter3   = 0U;
 
     if (fc_submit(cmd) != FC_STATUS_OK)
     {

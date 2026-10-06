@@ -210,32 +210,27 @@ uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id)
     return fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
 }
 
-/* 返回命令第 cw_index 个 CW 的 META 指针（校验物理地址用） */
+/* 返回命令中 **CW 号 == cw_index** 的 CW 的 META 指针（校验物理地址用）。
+ * 按 paa_to_cw(desc->paa) 匹配，不是链走位——flat CW 掩码下两者会分叉。 */
 uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index)
 {
     fc_descriptor_id_t did;
-    uint8_t            idx;
 
     /* command 非空是前置条件（gc.c 传入有效命令）；未找到 CW 仍按契约返回 NULL */
     ASSERT(command != NULL);
 
     did = (fc_descriptor_id_t)command->desc_id;
-    idx = 0U;
-    while (did != FC_DESCRIPTOR_ID_INVALID)
+    while (did < FC_DESCRIPTOR_POOL_DEPTH)
     {
-        if (idx == cw_index)
+        fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
+
+        if ((uint8_t)paa_to_cw(d->paa) == cw_index)
         {
-            fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
-            if (d == NULL)
-            {
-                return NULL;
-            }
             return (d->buffer_id != FC_BUFFER_ID_INVALID)
                        ? fc_buffer_id_to_real_buffer_internal(&g_fc_controller, d->buffer_id)
                        : NULL;
         }
-        did = fc_descriptor_id_to_descriptor(did)->next_id;
-        idx++;
+        did = (fc_descriptor_id_t)d->next_id;
     }
     return NULL;
 }
@@ -248,8 +243,6 @@ uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index)
 fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t length)
 {
     fc_descriptor_id_t desc_id;
-    uint8_t            cw_count;
-    uint8_t            i;
     const uint8_t     *src;
 
     /* 入参前置条件由调用者保证（FTL 传入已配置 desc 链的命令） */
@@ -257,11 +250,11 @@ fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t 
     ASSERT(data != NULL);
     ASSERT(command->desc_id != FC_DESCRIPTOR_ID_INVALID);
 
-    cw_count = (uint8_t)(command->config.cw + 1U);
-    src      = (const uint8_t *)data;
-    desc_id  = (fc_descriptor_id_t)command->desc_id;
+    /* 遍历界走 desc 链（链长度是 CW 数的唯一真值，见 fc_command.h） */
+    src     = (const uint8_t *)data;
+    desc_id = (fc_descriptor_id_t)command->desc_id;
 
-    for (i = 0U; i < cw_count; i++)
+    while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
         fc_descriptor_t *descriptor;
         uint8_t         *buf;
@@ -310,8 +303,6 @@ fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t 
 fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length)
 {
     fc_descriptor_id_t desc_id;
-    uint8_t            i;
-    uint8_t            cw_count;
     uint8_t           *dst;
     uint32_t           remaining;
 
@@ -320,12 +311,12 @@ fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length)
     ASSERT(data != NULL);
     ASSERT(command->desc_id != FC_DESCRIPTOR_ID_INVALID);
 
-    cw_count  = (uint8_t)(command->config.cw + 1U);
+    /* 遍历界走 desc 链（链长度是 CW 数的唯一真值，见 fc_command.h） */
     dst       = (uint8_t *)data;
     remaining = length;
     desc_id   = (fc_descriptor_id_t)command->desc_id;
 
-    for (i = 0U; (i < cw_count) && (remaining > 0U); i++)
+    while ((desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (remaining > 0U))
     {
         fc_descriptor_t *descriptor;
         uint8_t         *buf;
@@ -359,32 +350,26 @@ fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length)
 
 /* --------------------------------------------------------------------
  * fc_get_cmd_data_ptr
- *   功能：获取命令第 cw_index 个 CW 的 USER 数据指针（读后使用）。
- *   参数：command —— 命令；cw_index —— CW 索引。
- *   返回：USER 指针 / NULL（越界或 buffer 无效）。
+ *   功能：获取命令中 **CW 号 == cw_index** 的那个 CW 的 USER 数据指针。
+ *   参数：command —— 命令；cw_index —— CW 号（0..CW_NUM-1）。
+ *   返回：USER 指针 / NULL（该 CW 不在链上或 buffer 无效）。
+ *   实现要点：按 `paa_to_cw(desc->paa)` 匹配，**不是**链走位——flat CW 掩码下
+ *         两者会分叉（见 fc_command.h 不变量 2）。uniform 命令下等价。
  * -------------------------------------------------------------------- */
 uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
 {
     fc_descriptor_id_t desc_id;
-    uint8_t            i;
 
-    /* command/desc 链非空是前置条件；cw_index 越界仍按查询语义返回 NULL */
+    /* command/desc 链非空是前置条件；cw_index 不在链上仍按查询语义返回 NULL */
     ASSERT(command != NULL);
     ASSERT(command->desc_id != FC_DESCRIPTOR_ID_INVALID);
-    if (cw_index > command->config.cw)
-    {
-        return NULL;
-    }
 
     desc_id = (fc_descriptor_id_t)command->desc_id;
-    for (i = 0U; i <= cw_index; i++)
+    while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
-        fc_descriptor_t *descriptor;
+        fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
 
-        /* desc 链由 fc_command_configure_descriptors 构建，ID 必在池内 */
-        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
-        descriptor = fc_descriptor_id_to_descriptor(desc_id);
-        if (i == cw_index)
+        if ((uint8_t)paa_to_cw(descriptor->paa) == cw_index)
         {
             if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
             {
@@ -396,6 +381,37 @@ uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
     }
 
     return NULL;
+}
+
+/* --------------------------------------------------------------------
+ * fc_get_cmd_ecc_max
+ *   功能：命令级聚合 ECC——desc 链上所有 CW 的 ecc_bits 最大值。
+ *   参数：command —— 已完成的命令（须仍持有 desc 链）。
+ *   返回：最大纠正 bit 数；无 desc 时 0。
+ *   实现要点：**取全链**（含两个 plane）——fc_complete_from_nand 的 per-CW ECC
+ *         只对 plane 0 折叠，flat 掩码下"只取 plane 0"会恒为 0；
+ *         desc->ecc_bits 由该函数对链上**每个** desc 填写，全链取值无损。
+ *         调用者须在 fc_command_release() 之前调用（desc 释放后失效）。
+ * -------------------------------------------------------------------- */
+uint8_t fc_get_cmd_ecc_max(const fc_command_t *command)
+{
+    fc_descriptor_id_t desc_id;
+    uint8_t            ecc_max = 0U;
+
+    ASSERT(command != NULL);
+
+    desc_id = (fc_descriptor_id_t)command->desc_id;
+    while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        const fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+
+        if (descriptor->ecc_bits > ecc_max)
+        {
+            ecc_max = (uint8_t)descriptor->ecc_bits;
+        }
+        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+    }
+    return ecc_max;
 }
 
 /* ══════════════════════════════════════════════════════════

@@ -423,10 +423,8 @@ static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *
     CMD_FIELD_U(config.multi_plane);
     CMD_FIELD_U(config.reserved);
 
-    CMD_FIELD_U(parameter0);
-    CMD_FIELD_U(parameter1);
-    CMD_FIELD_U(parameter2);
-    CMD_FIELD_U(parameter3);
+    /* param 是 4 字节联合体：cw_mask 视图覆盖全部 4 字节（parameter0..3 亦然）。 */
+    CMD_FIELD_U(param.cw_mask);
 
     /* 兜底：整字比对 config，捕捉上面逐个字段漏掉的位（含未命名填充）。 */
     (void)memcpy(&word_front, &before->config, sizeof(word_front));
@@ -896,7 +894,8 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
 
-    /* Step 4: GET_FEATURES (address 0x01) — 验证在 parameter0 中返回 */
+    /* Step 4: GET_FEATURES (address 0x01) — 寄存器值经 CQ 的 param 联合体返回
+     * （completion.param.parameter0..3），不再原地回填命令体。 */
     {
         fc_command_t *cmd = fc_command_alloc();
         munit_assert_not_null(cmd);
@@ -994,7 +993,7 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
  *  test_status_query — 状态查询
  *
  *  流程：
- *    1. READ_STATUS — 读取基本状态（parameter0 返回 nand_status）
+ *    1. READ_STATUS — 读取基本状态（nand_status 经 completion.status 返回）
  *    2. READ_STATUS_ENHANCED — 读取增强状态
  *
  *  验证点：
@@ -1007,7 +1006,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    /* Step 1: READ_STATUS — 在 release 前验证 parameter0 */
+    /* Step 1: READ_STATUS — 在 release 前验证 completion.status */
     {
         fc_command_t *cmd = fc_command_alloc();
         munit_assert_not_null(cmd);

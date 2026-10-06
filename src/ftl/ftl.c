@@ -96,24 +96,14 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                             /* 读成功：拷贝数据到 caller buffer */
                             (void)ftl_cmd_read_data(cmd, pending->io.buffer, data_size);
 
-                            /* Read Recovery：记录本次读的 ECC 纠正 bit 数（取 4 CW 最大值），
+                            /* Read Recovery：记录本次读的 ECC 纠正 bit 数（desc 链最大值），
                              * 用于慢死预测（连续上升 → WARNING → 主动搬移）。
-                             * ECC 历史存于 BST（ftl->alloc.blocks[].rr）。 */
+                             * ECC 历史存于 BST（ftl->alloc.blocks[].rr）。
+                             * ⚠ 须在 fc_command_release(cmd) 之前调用——desc 释放后失效。 */
                             {
                                 uint16_t gblock = ftl_pba_gblock(cmd->paa);
-                                uint8_t  ecc    = 0U;
-                                for (uint8_t k = 0U; k < 4U; k++)
-                                {
-                                    uint8_t b = (k == 0U)   ? (uint8_t)completion->ecc_bit0
-                                                : (k == 1U) ? (uint8_t)completion->ecc_bit1
-                                                : (k == 2U) ? (uint8_t)completion->ecc_bit2
-                                                            : (uint8_t)completion->ecc_bit3;
-                                    if (b > ecc)
-                                    {
-                                        ecc = b;
-                                    }
-                                }
-                                rr_record_ecc(&ftl->alloc.blocks[gblock].rr, ecc);
+
+                                rr_record_ecc(&ftl->alloc.blocks[gblock].rr, fc_get_cmd_ecc_max(cmd));
 
                                 /* read disturb 计数：读成功累加（周期归零由上层维护） */
                                 ftl->alloc.blocks[gblock].read_count++;

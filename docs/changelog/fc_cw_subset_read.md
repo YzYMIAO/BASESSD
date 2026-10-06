@@ -118,6 +118,8 @@ else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
 
 命名说明：**协议命令常量 `NAND_CMD_RANDOM_DATA_READ_TWO_PLANE`（`0x06U`）不改名**——那是 ONFI 协议命令自身的名字（Micron 文档里 06h 就叫 Random Data Read Two Plane），且该定义早于本次改动就存在；改的只是本项目 OP 的命名。
 
+**前置约束**：`06h` 必须紧跟 TWO-PLANE PAGE READ（`00h-00h-30h`）之后；plane 由行地址 **BA6** 选择；two-plane 命令族要求器件内部 on-die ECC 关闭（datasheet **Note 4**）。详见「风险」2。
+
 ### 6. 完成项
 
 | 侧 | 改动 |
@@ -135,7 +137,7 @@ else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
 ## 风险
 
 1. **热路径改变（最高）**：严格统一后，**每次整页读多一轮 `70h + 05h-列-E0h + WAIT_READY`**（原来 CW0 靠 `00h` 的 DATA_OUT 一次拿到）；多 plane 整页读从 1 条原子事务变成 1 次加载 + `2 × cw_count` 条事务。所有现有读用例语义上应等价，但**必须重新上板验证**。若上板发现延迟或行为不可接受，退回"CW0 融进加载"是局部改动。
-2. **`06h` 的 plane 语义**：项目内既有实践（`onfi_1_0.c` 多 plane 读已在用），但**未对 MT29F4G08 datasheet 逐条核对** `06h` 的地址周期构成与"读哪个 plane 的 cache"的规则。上板前按 datasheet 复核一次。
+2. **`06h` 的 plane 语义**：已按 Micron 4Gb/8Gb/16Gb x8/x16 datasheet 核对——5 地址周期（2 列 + 3 行）、plane 由行地址 **BA6** 选择、`06h` 必须紧跟 TWO-PLANE PAGE READ（`00h-00h-30h`）、two-plane 命令族要求器件内部 **on-die ECC 关闭**（datasheet **Note 4**）——四项均与本实现一致。**注意**：此为 datasheet 二手摘要（PDF 未逐字打开），且上板未验；on-board 行为仍是最终判据。
 3. **producer/consumer 索引不一致**：链槽位与 CW 号解耦后，上面 5 个消费点必须一次改齐。
 4. **`LUN_NUM>1` 的 ISSUE/WAIT 拆分**：转换后的两个加载 op 不再命中 Phase V splittable 拆分，多 LUN 重叠随之失效。当前 `LUN_NUM=1`，该拆分本就不生效；启用多 LUN 前需把 LOAD/FETCH 拆分与逐 CW 取数模型重新对齐。
 
