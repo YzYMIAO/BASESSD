@@ -41,6 +41,7 @@ FC（Flash Controller）模块对外暴露以下 18 个公接口（声明于 `in
 | `fc_command_release(cmd)` | 资源回收 | 释放 command 及其关联的 descriptor 链 |
 | `fc_buffer_release(buffer_id)` | 资源回收 | 手动释放 buffer |
 | `fc_command_id_to_command(id)` | ID 查找 | command_id → `fc_command_t*` |
+| `fc_command_to_id(cmd, &id)` | 反查 | 指针 → command_id（返回 0 = 指针不在池内） |
 | `fc_descriptor_id_to_descriptor(id)` | ID 查找 | descriptor_id → `fc_descriptor_t*` |
 | `fc_buffer_id_to_real_buffer(id)` | ID 查找 | buffer_id → 真实 buffer 指针（USER 数据区首地址） |
 | `fc_get_resource_stats(&stats)` | 监控 | 查看 pool/queue 使用率 |
@@ -76,19 +77,27 @@ FC（Flash Controller）模块对外暴露以下 18 个公接口（声明于 `in
 | `fc_get_cmd_data_ptr()` | `command==NULL`、不在 pool 中、无 desc 链、cw_index 超过 CW 范围 |
 | `fc_submit()` | `command==NULL`、不在 pool 中、state 不是 ALLOCATED、`fc_command_validate()` 失败、descriptor 所有权不完整 |
 | `fc_poll_completion()` | `completion==NULL` |
-| `fc_command_release()` | `command==NULL`、不在 pool 中、state 不是 ALLOCATED/COMPLETED、仍在 CQ 中未取出 |
+| `fc_command_release()` | `command==NULL`、不在 pool 中；**幂等**——已在 FREE 直接返回 OK（判活只能看 `command_state[]`，结构体释放后被整体清零） |
 | `fc_command_id_to_command()` | command_id 超范围 |
 | `fc_descriptor_id_to_descriptor()` | descriptor_id 超范围 |
 | `fc_get_resource_stats()` | `stats==NULL` |
 
-### 内部函数优化
+### 命令 ID 由指针派生
 
-3 个内部函数改用指针算术 `command - controller->command_pool` 直接计算 command_id，替代 `fc_command_to_id()` 的线性查找：
-- `fc_descriptor_alloc_internal()`
-- `fc_submit_to_queue()`
-- `fc_command_release_internal_api()`
+命令池 ID **不是 `fc_command_t` 里的字段**（v15 删除 `command_id` / `reserved0`，结构体 24 → 20 字节），
+而是 `command - command_pool` 的差值。全仓只有一份实现：
 
-（原先第 4 项 `fc_command_configure_descriptors_internal()` 已于 v13 删除——掩码枚举上移 FTL。）
+| 函数 | 位置 | 检查 |
+|---|---|---|
+| `fc_command_to_id_internal(controller, command)` | `fc.c` | 仅 `ASSERT`（前置条件：指针属本池） |
+| `fc_command_to_id(command, &id)` | `fc_interface.c` | 真运行时区间检查，返回 0 = 指针不在池内 |
+
+内部三处（`fc_descriptor_alloc_internal` / `fc_submit_to_queue` / `fc_command_release_internal_api`）
+与 FTL 侧（`ftl_cmd_id()`，见 `include/ftl/ftl_fc_interface.h`）都走这两个函数。
+
+⚠ 减法**不能放进 `ASSERT`**：`NDEBUG` 会把赋值一起裁掉，留下未初始化变量。
+
+（原先 `fc_command_configure_descriptors_internal()` 已于 v13 删除——掩码枚举上移 FTL。）
 
 ---
 

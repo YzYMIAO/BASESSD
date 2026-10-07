@@ -5,7 +5,7 @@
  * fc_internal.h — FC 核心内部接口（仅 fc.c ↔ fc_interface.c 共享）
  *
  * 背景：
- *   FC 对外 API（fc_interface.h 的 20 个函数）是单例控制器 g_fc_controller
+ *   FC 对外 API（fc_interface.h 的 19 个函数）是单例控制器 g_fc_controller
  *   的薄壳，在 fc_interface.c 中实现；真正逻辑（池管理/生命周期/服务主循环）
  *   在 fc.c 中以 static 实现。本头只在这两个文件间共享：
  *     - fc_t 控制器结构定义 + g_fc_controller 单例
@@ -66,10 +66,8 @@ extern "C"
         uint8_t         *command_state;
         fc_command_id_t *command_free_next;
         uint16_t        *descriptor_free_next;
-        uint16_t        *descriptor_owned_next;
         uint16_t        *buffer_free_next;
         uint8_t         *buffer_state;
-        uint16_t        *command_descriptor_head;
         fc_command_id_t  command_free_head;
         uint16_t         descriptor_free_head;
         uint16_t         buffer_free_head;
@@ -138,6 +136,9 @@ extern "C"
     /* 命令/描述符 ID → 指针（越界返回 NULL）——薄壳校验与便利函数使用 */
     fc_command_t    *fc_command_id_to_command_internal(fc_t *controller, uint16_t command_id);
     fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, uint16_t descriptor_id);
+
+    /* 指针 → 命令池索引（**唯一一份实现**；前置条件：command 属于 controller->command_pool） */
+    fc_command_id_t fc_command_to_id_internal(const fc_t *controller, const fc_command_t *command);
 
     /* 校验命令的 desc 链是否全部归该命令所有（所有权一致性，fc_submit 使用） */
     uint8_t fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command);

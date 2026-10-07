@@ -88,7 +88,7 @@ static int rr_exec_retry(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buffer, u
         return -1;
     }
 
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    ret = ftl_internal_sync_wait(ftl_cmd_id(cmd), &completion, 0U);
     (void)fc_command_release(cmd);
     if (ret != 0)
     {
@@ -141,7 +141,7 @@ static int rr_exec_retry(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buffer, u
         return -1;
     }
 
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+    ret = ftl_internal_sync_wait(ftl_cmd_id(cmd), &completion, 0U);
     (void)fc_command_release(cmd);
     if (ret != 0)
     {

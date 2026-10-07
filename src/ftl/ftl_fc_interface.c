@@ -359,7 +359,7 @@ static int sync_page_submit_wait(fc_command_t *cmd, fc_command_status_t *complet
     {
         return -1;
     }
-    if (ftl_internal_sync_wait(cmd->command_id, completion, timeout_us) != 0)
+    if (ftl_internal_sync_wait(ftl_cmd_id(cmd), completion, timeout_us) != 0)
     {
         return -1;
     }

@@ -180,15 +180,17 @@ typedef union
 } fc_param_t;
 
 /*
- * SQ 命令：被 FC 持有直至完成。command_id = Command Pool 槽位号，
- * desc_id = 首个 Descriptor ID（0xFFFF = 无描述符）。
+ * SQ 命令：被 FC 持有直至完成。desc_id = 首个 Descriptor ID（0xFFFF = 无描述符）。
+ *
+ * **本结构刻意不携带自己的命令池 ID**：ID 由「指针 − command_pool 基址」导出
+ * （fc_command_to_id / fc_command_id_to_command 互为逆）。缓存的副本会在
+ * fc_command_release 把结构体整体清零时失效，派生值不会；而指针本来就在调用者手里，
+ * 再存一份只会带来"两份真值不一致"的机会。
  *
  * ⚠ SQ 在 configure 完成后即不可变：命令配置完就算完成，运行期返回值一律走 CQ。
  */
 struct fc_command_t
 {
-    DWORD         command_id    : 16; /* Command Pool ID; 0xFFFF means invalid. */
-    DWORD         reserved0     : 16; /* Reserved for Command Pool metadata. */
     DWORD         desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
     DWORD         high_priority : 1;  /* 0=SQ, 1=HSQ. */
     DWORD         module        : 4;  /* Completion route owner; FC does not invoke callbacks. */

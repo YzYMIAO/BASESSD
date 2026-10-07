@@ -10,6 +10,7 @@
 #include "fc_command.h"
 
 #include "common/assertion.h"
+#include "fc_interface.h"
 #include "nand/onfi_1_0.h"
 #include "onfi_1_0.h"
 
@@ -89,14 +90,23 @@ fc_status_t fc_command_validate(const fc_command_t *command)
  *   实现要点：
  *     - 整体清零：per-CW 细节不再进 CQ（只留在 desc 链），返回段 param 归零。
  *     - 初始 status = READY（FC_CW_STATUS_SUCCESS）。
+ *     - command_id 由指针派生（fc_command_t 里不再有该字段）：NULL 或池外指针
+ *       （栈上的 fc_command_t）都得不到 ID，落 FC_COMMAND_ID_INVALID。
  * -------------------------------------------------------------------- */
 void fc_command_status_init(fc_command_status_t *status, const fc_command_t *command)
 {
+    fc_command_id_t command_id = FC_COMMAND_ID_INVALID;
+
     /* status 为出参前置条件；command 可为 NULL 是有意语义（辨析 B），保留分支 */
     ASSERT(status != NULL);
 
+    if (command != NULL)
+    {
+        (void)fc_command_to_id(command, &command_id);
+    }
+
     *status            = (fc_command_status_t){0};
-    status->command_id = (command != NULL) ? command->command_id : FC_COMMAND_ID_INVALID;
+    status->command_id = command_id;
     status->desc_id    = (command != NULL) ? command->desc_id : FC_DESCRIPTOR_ID_INVALID;
     status->module     = (command != NULL) ? command->module : 0U;
     status->status     = FC_CW_STATUS_READY;

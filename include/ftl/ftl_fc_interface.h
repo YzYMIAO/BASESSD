@@ -24,6 +24,9 @@
  *      （共 18 份、逐字节相同，只差 crc/random/module/lba 四个字段），
  *      此处收敛为 4 个公共函数 + ftl_page_cfg_t 配置结构。
  *
+ * 【命令身份】
+ *   ⑨ ftl_cmd_id() — 命令指针 → FC 命令池 ID（由指针派生，见 fc_command.h）。
+ *
  * 为什么这些在本层（v13）：FC 定位为**硬件 FCC 的软件替身**——只提供槽位/描述符/
  * 队列/数据路径，不含策略。而「访问哪些 CW」（掩码枚举）与「数据怎么搬」（拷贝）
  * 在行业里都是**固件侧**的事（硬件 FCC 既不提供「按掩码建链」寄存器，也不提供
@@ -40,6 +43,22 @@
 /* ── desc 链组装共用小工具 ──
  *   plane 段规则用 fc_command.h 的 fc_command_plane_span（唯一一份定义，
  *   FC 的越段校验与 FTL 的掩码展开共用）。 */
+
+/*
+ * ftl_cmd_id - 命令指针 → FC 命令池 ID。
+ *
+ * fc_command_t 里**没有** command_id 字段：ID 由「指针 − command_pool 基址」导出
+ * （见 fc_command.h）。本层调用者手里的 cmd 恒来自 fc_command_alloc()，故 ID 必然有效；
+ * 池外指针（栈上的 fc_command_t）得到 FC_COMMAND_ID_INVALID——那是编程错误，
+ * 调用方（pending_add / sync_wait）会因查不到而失败，不会静默串命令。
+ */
+static inline uint16_t ftl_cmd_id(const fc_command_t *cmd)
+{
+    fc_command_id_t command_id = FC_COMMAND_ID_INVALID;
+
+    (void)fc_command_to_id(cmd, &command_id);
+    return (uint16_t)command_id;
+}
 
 /*
  * ftl_cmd_needs_desc_chain - 该操作是否需要 desc 链（即是否携带数据）

@@ -33,8 +33,8 @@
  *                  service / poll_completion / command_release
  *   ③ buffer 访问 fc_buffer_alloc / release / id_to_real_buffer / get_base / get_meta
  *   ④ 数据查询    fc_get_cmd_data_ptr / fc_get_cmd_ecc_max
- *   ⑤ 查询工具    fc_command_id_to_command / fc_descriptor_id_to_descriptor /
- *                  fc_get_resource_stats
+ *   ⑤ 查询工具    fc_command_id_to_command / fc_command_to_id /
+ *                  fc_descriptor_id_to_descriptor / fc_get_resource_stats
  */
 
 #include "fc_interface.h"

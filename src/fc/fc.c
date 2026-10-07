@@ -61,11 +61,17 @@
  *
  *   池布局：
  *     command_pool / descriptor_pool / buffer_pool —— 三池本体
- *     descriptor_owner[desc] —— desc 归属的命令 ID
+ *     descriptor_owner[desc] —— desc 归属的命令 ID（O(1) 反查）
  *     command_state / command_free_next —— 命令状态 + 空闲链表
- *     descriptor_free_next / descriptor_owned_next —— desc 空闲/归属链表
+ *     descriptor_free_next —— desc 空闲链表
  *     buffer_free_next / buffer_state —— buffer 空闲链表 + 占用状态
- *     command_descriptor_head[cmd] —— 命令的 desc 链头（回滚/释放用）
+ *
+ *   ⚠ 「一条命令拥有哪些 desc」**只有一份真值**：命令的 desc 链
+ *     （command->desc_id + descriptor_pool[].next_id）。v15 之前另有一条
+ *     「所有权链」（descriptor_owned_next[] + command_descriptor_head[]）为
+ *     「desc 已分配但尚未挂进数据链」的中间态兜底；那个中间态已由
+ *     fc_command_configure_descriptor_internal 的失败路径就地回滚消除，
+ *     故整条链连同 640B 一起删除。
  * ══════════════════════════════════════════════════════════ */
 
 static fc_command_t        g_fc_command_pool[FC_COMMAND_POOL_DEPTH];
@@ -78,16 +84,14 @@ static fc_command_id_t     g_fc_descriptor_owner[FC_DESCRIPTOR_POOL_DEPTH];
 static uint8_t             g_fc_command_state[FC_COMMAND_POOL_DEPTH];
 static fc_command_id_t     g_fc_command_free_next[FC_COMMAND_POOL_DEPTH];
 static uint16_t            g_fc_descriptor_free_next[FC_DESCRIPTOR_POOL_DEPTH];
-static uint16_t            g_fc_descriptor_owned_next[FC_DESCRIPTOR_POOL_DEPTH];
 static uint16_t            g_fc_buffer_free_next[FC_BUFFER_POOL_DEPTH];
 static uint8_t             g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
-static uint16_t            g_fc_command_descriptor_head[FC_COMMAND_POOL_DEPTH];
 
 /* GET/SET_FEATURES 的 4 字节内联数据暂存，按 command_id（= 命令池槽位号）索引。
  * 为什么需要：SQ 命令提交后不可写（见 fc_command.h「SQ 不可变」），而引擎需要一个
  * 稳定的 4 字节落点写回寄存器值；返回值唯一的归宿是 CQ 的 param 联合体，
- * 故这里只做提交→完成之间的中转。command_id 恒 < FC_COMMAND_POOL_DEPTH（fc.c 里
- * command_pool[index].command_id = index），索引安全。 */
+ * 故这里只做提交→完成之间的中转。索引用的 command_id 是「指针 − command_pool 基址」
+ * 派生出来的池内下标，恒 < FC_COMMAND_POOL_DEPTH。 */
 static uint8_t g_fc_return_staging[FC_COMMAND_POOL_DEPTH][4];
 
 /* 全局单例控制器：对 API 薄壳（fc_interface.c）可见，FTL 不可见 */
@@ -169,13 +173,27 @@ uint8_t fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id)
     return (buffer_id < FC_BUFFER_POOL_DEPTH) ? controller->buffer_state[buffer_id] : 0U;
 }
 
-/* ── 命令/描述符 ID → 指针（范围由公共壳 fc_interface.c 校验） ── */
+/* ── 命令/描述符 ID ↔ 指针（范围由公共壳 fc_interface.c 校验） ── */
 fc_command_t *fc_command_id_to_command_internal(fc_t *controller, uint16_t command_id)
 {
     /* 公共壳 fc_command_id_to_command() 已断言过 command_id < FC_COMMAND_POOL_DEPTH */
     ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
     return &controller->command_pool[command_id];
 }
+
+/* 指针 → 池索引。**全仓唯一一份实现**：此前该减法在 fc_descriptor_alloc_internal /
+ * fc_command_release_internal_api / fc_submit_to_queue 三处各内联一遍，外加公共壳
+ * 里一份 O(256) 线性扫描。
+ * 前置条件：command 属于本控制器的 command_pool（公共壳已校验区间）。 */
+fc_command_id_t fc_command_to_id_internal(const fc_t *controller, const fc_command_t *command)
+{
+    ASSERT(controller != NULL);
+    ASSERT(command != NULL);
+    ASSERT((command >= controller->command_pool) && (command < &controller->command_pool[FC_COMMAND_POOL_DEPTH]));
+
+    return (fc_command_id_t)(command - controller->command_pool);
+}
+
 fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, uint16_t descriptor_id)
 {
     /* 公共壳 fc_descriptor_id_to_descriptor() 已断言过 descriptor_id < FC_DESCRIPTOR_POOL_DEPTH */
@@ -277,18 +295,16 @@ fc_status_t fc_init_internal(fc_t *controller)
 
     /* ── ② 把池地址挂进 controller。三池本体与各簿记数组是 static，
      *    fc_t 只存指针——这样 fc_t 可以整体赋值/传递而不搬运大数组。 ── */
-    *controller                         = (fc_t){0};
-    controller->command_pool            = g_fc_command_pool;
-    controller->descriptor_pool         = g_fc_descriptor_pool;
-    controller->buffer_pool             = g_fc_buffer_pool;
-    controller->descriptor_owner        = g_fc_descriptor_owner;
-    controller->command_state           = g_fc_command_state;
-    controller->command_free_next       = g_fc_command_free_next;
-    controller->descriptor_free_next    = g_fc_descriptor_free_next;
-    controller->descriptor_owned_next   = g_fc_descriptor_owned_next;
-    controller->buffer_free_next        = g_fc_buffer_free_next;
-    controller->buffer_state            = g_fc_buffer_state;
-    controller->command_descriptor_head = g_fc_command_descriptor_head;
+    *controller                      = (fc_t){0};
+    controller->command_pool         = g_fc_command_pool;
+    controller->descriptor_pool      = g_fc_descriptor_pool;
+    controller->buffer_pool          = g_fc_buffer_pool;
+    controller->descriptor_owner     = g_fc_descriptor_owner;
+    controller->command_state        = g_fc_command_state;
+    controller->command_free_next    = g_fc_command_free_next;
+    controller->descriptor_free_next = g_fc_descriptor_free_next;
+    controller->buffer_free_next     = g_fc_buffer_free_next;
+    controller->buffer_state         = g_fc_buffer_state;
 
     /* ── ③ 三条环形队列：SQ 64（普通命令）/ HSQ 16（高优先，如 read retry）/
      *    CQ 64（完成项）。init 只登记存储与深度，head/tail/count 归零。 ── */
@@ -349,20 +365,16 @@ fc_status_t fc_init_internal(fc_t *controller)
      *    head 推到 next，释放 = 头插（见 §4 资源分配 / 回滚 / 释放）：
      *      command_free_next    : 0→1→…→63 →INVALID   （head=0）
      *      descriptor_free_next : 0→1→…→255→UINT16_MAX（head=0）
-     *      buffer_free_next     : 0→1→…→127→UINT16_MAX（head=0）
-     *    同时初始化 desc 链头 command_descriptor_head[cmd]（每命令一条 desc 链）。 ── */
+     *      buffer_free_next     : 0→1→…→127→UINT16_MAX（head=0） ── */
     for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
     {
-        controller->command_free_next[index]       = ((index + 1U) < FC_COMMAND_POOL_DEPTH) ? (fc_command_id_t)(index + 1U) : FC_COMMAND_ID_INVALID;
-        controller->command_descriptor_head[index] = UINT16_MAX;
-        controller->command_pool[index].command_id = index;
+        controller->command_free_next[index] = ((index + 1U) < FC_COMMAND_POOL_DEPTH) ? (fc_command_id_t)(index + 1U) : FC_COMMAND_ID_INVALID;
     }
-    /* 串接描述符空闲/归属链表 */
+    /* 串接描述符空闲链表 + 清归属表 */
     for (index = 0U; index < FC_DESCRIPTOR_POOL_DEPTH; index++)
     {
-        controller->descriptor_owner[index]      = FC_COMMAND_ID_INVALID;
-        controller->descriptor_free_next[index]  = ((index + 1U) < FC_DESCRIPTOR_POOL_DEPTH) ? (uint16_t)(index + 1U) : UINT16_MAX;
-        controller->descriptor_owned_next[index] = UINT16_MAX;
+        controller->descriptor_owner[index]     = FC_COMMAND_ID_INVALID;
+        controller->descriptor_free_next[index] = ((index + 1U) < FC_DESCRIPTOR_POOL_DEPTH) ? (uint16_t)(index + 1U) : UINT16_MAX;
     }
     /* 串接 buffer 空闲链表 + 清占用态 */
     for (index = 0U; index < FC_BUFFER_POOL_DEPTH; index++)
@@ -387,7 +399,8 @@ fc_status_t fc_init_internal(fc_t *controller)
  *   功能：从空闲链表分配一个命令槽位并置 ALLOCATED。
  *   参数：controller —— FC 控制器。
  *   返回：命令指针；池空返回 NULL。
- *   实现要点：清零 + command_id 置入 + desc_id=INVALID（未配置描述符）。
+ *   实现要点：清零 + desc_id=INVALID（未配置描述符）。**不清 command_id**——
+ *         结构体里根本没有这个字段，ID 由指针派生。
  * -------------------------------------------------------------------- */
 fc_command_t *fc_command_alloc_internal(fc_t *controller)
 {
@@ -398,11 +411,10 @@ fc_command_t *fc_command_alloc_internal(fc_t *controller)
     {
         return NULL;
     }
-    controller->command_free_head                   = controller->command_free_next[command_id];
-    controller->command_pool[command_id]            = (fc_command_t){0};
-    controller->command_pool[command_id].command_id = command_id;
-    controller->command_pool[command_id].desc_id    = FC_DESCRIPTOR_ID_INVALID;
-    controller->command_state[command_id]           = FC_COMMAND_STATE_ALLOCATED;
+    controller->command_free_head                = controller->command_free_next[command_id];
+    controller->command_pool[command_id]         = (fc_command_t){0};
+    controller->command_pool[command_id].desc_id = FC_DESCRIPTOR_ID_INVALID;
+    controller->command_state[command_id]        = FC_COMMAND_STATE_ALLOCATED;
     return &controller->command_pool[command_id];
 }
 
@@ -411,27 +423,42 @@ fc_command_t *fc_command_alloc_internal(fc_t *controller)
  *   功能：从空闲链表分配一个描述符并挂到命令的 desc 链头。
  *   参数：controller —— FC 控制器；command —— 归属命令。
  *   返回：描述符指针；池空返回 NULL。
- *   实现要点：descriptor_owner[desc]=command_id；
- *         owned_next 把新 desc 插到 command_descriptor_head[cmd] 链头。
+ *   实现要点：descriptor_owner[desc]=command_id（O(1) 反查表）。
+ *         **不挂任何链**——desc 何时进入命令的数据链由调用者
+ *         （fc_command_chain_append）决定，本函数只负责出池。
  * -------------------------------------------------------------------- */
 static fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_command_t *command)
 {
     uint16_t        descriptor_index;
     fc_command_id_t command_id;
 
-    /* Derive command_id from pointer arithmetic (already validated at public API). */
-    command_id       = (fc_command_id_t)(command - controller->command_pool);
+    command_id       = fc_command_to_id_internal(controller, command);
     descriptor_index = controller->descriptor_free_head;
     if (descriptor_index == UINT16_MAX)
     {
         return NULL;
     }
-    controller->descriptor_free_head                    = controller->descriptor_free_next[descriptor_index];
-    controller->descriptor_pool[descriptor_index]       = (fc_descriptor_t){0};
-    controller->descriptor_owner[descriptor_index]      = command_id;
-    controller->descriptor_owned_next[descriptor_index] = controller->command_descriptor_head[command_id];
-    controller->command_descriptor_head[command_id]     = descriptor_index;
+    controller->descriptor_free_head               = controller->descriptor_free_next[descriptor_index];
+    controller->descriptor_pool[descriptor_index]  = (fc_descriptor_t){0};
+    controller->descriptor_owner[descriptor_index] = command_id;
     return &controller->descriptor_pool[descriptor_index];
+}
+
+/* --------------------------------------------------------------------
+ * fc_descriptor_release_internal
+ *   功能：把描述符还回空闲链（清归属、清本体、头插空闲链）。
+ *   参数：controller —— FC 控制器；descriptor_index —— 池内下标。
+ *   返回：无。
+ *   实现要点：**不碰数据链**——调用者负责先把该 desc 从链上摘掉（或本来就是
+ *         链外半成品）。两种用法：① configure 失败时就地回滚刚分配的 desc
+ *         （此时它还没进链）；② release 遍历数据链时逐条摘。
+ * -------------------------------------------------------------------- */
+static void fc_descriptor_release_internal(fc_t *controller, uint16_t descriptor_index)
+{
+    controller->descriptor_pool[descriptor_index]      = (fc_descriptor_t){0};
+    controller->descriptor_owner[descriptor_index]     = FC_COMMAND_ID_INVALID;
+    controller->descriptor_free_next[descriptor_index] = controller->descriptor_free_head;
+    controller->descriptor_free_head                   = descriptor_index;
 }
 
 /* --------------------------------------------------------------------
@@ -454,72 +481,51 @@ fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
     return (fc_buffer_id_t)buffer_index;
 }
 
-/* --------------------------------------------------------------------
- * fc_command_resources_rollback
- *   功能：回滚命令已分配的全部描述符 + buffer（配置失败时调用）。
- *   参数：controller —— FC 控制器；command_id —— 命令。
- *   返回：无。
- *   实现要点：沿 command_descriptor_head[cmd] 链逐个释放 buffer、
- *         描述符挂回空闲链，最后清链头。
- *   说明：唯一调用者在 CONFIG_FC_RAID 块内（fc_stripe_submit 的 parity 建链失败路径），
- *         故 RAID 关闭时本函数无引用——标 __attribute__((unused)) 避免 -Wunused-function
- *         （同 fc_command_cw_attached 的先例）。
- * -------------------------------------------------------------------- */
-static void __attribute__((unused)) fc_command_resources_rollback(fc_t *controller, fc_command_id_t command_id)
-{
-    uint16_t descriptor_index = controller->command_descriptor_head[command_id];
-
-    while (descriptor_index != UINT16_MAX)
-    {
-        const uint16_t       next_descriptor_index = controller->descriptor_owned_next[descriptor_index];
-        const fc_buffer_id_t buffer_id             = controller->descriptor_pool[descriptor_index].buffer_id;
-
-        if (buffer_id != FC_BUFFER_ID_INVALID)
-        {
-            (void)fc_buffer_release_internal(controller, buffer_id);
-        }
-        controller->descriptor_pool[descriptor_index]       = (fc_descriptor_t){0};
-        controller->descriptor_owner[descriptor_index]      = FC_COMMAND_ID_INVALID;
-        controller->descriptor_owned_next[descriptor_index] = UINT16_MAX;
-        controller->descriptor_free_next[descriptor_index]  = controller->descriptor_free_head;
-        controller->descriptor_free_head                    = descriptor_index;
-        descriptor_index                                    = next_descriptor_index;
-    }
-    controller->command_descriptor_head[command_id] = UINT16_MAX;
-}
+/* fc_command_resources_rollback（只放 desc、不放命令槽的中间态回滚）已删除：
+ * 它唯一调用者（fc_stripe_submit 的 parity 建链失败路径）后面紧跟一次
+ * fc_command_release_internal_api()，而后者把「desc 链 + buffer + 命令槽位」
+ * 一并做完，前者纯属冗余。至此 desc 链释放只有 fc_command_release_internal_api
+ * 一份实现（此前共三份：它自己 / resources_rollback / fc_stripe_release_parity）。 */
 
 /* --------------------------------------------------------------------
  * fc_command_release_internal_api
  *   功能：释放命令全部资源（desc 链 + buffer + command 槽位）。
  *   参数：controller —— FC 控制器；command —— 命令。
  *   返回：恒 FC_STATUS_OK。
- *   实现要点：沿 command_descriptor_head[cmd] 链释放 desc+buffer，
- *         命令槽位置 FREE 回池。调用方（公共接口）已保证状态合法、
- *         命令不在 CQ 中。
+ *   实现要点：沿命令的 desc 链（command->desc_id + next_id）释放 desc+buffer，
+ *         命令槽位置 FREE 回池。**幂等**：已 FREE 的命令直接返回 OK——这一步
+ *         必须挡在最前面，因为释放会把命令结构体整体清零，desc_id 归 0
+ *         （是个合法 desc 号），重复释放会顺着别人的链把别人的 desc 释放掉。
+ *         调用方（公共接口）已保证指针在池内、命令不在 CQ 中。
  * -------------------------------------------------------------------- */
 fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *command)
 {
-    uint16_t        descriptor_index;
-    uint16_t        next_descriptor_index;
-    fc_command_id_t command_id;
+    fc_command_id_t    command_id;
+    fc_descriptor_id_t descriptor_id;
+    uint8_t            remaining;
 
-    command_id       = (fc_command_id_t)(command - controller->command_pool);
-    descriptor_index = controller->command_descriptor_head[command_id];
-    while (descriptor_index != UINT16_MAX)
+    command_id = fc_command_to_id_internal(controller, command);
+
+    if (controller->command_state[command_id] == FC_COMMAND_STATE_FREE)
     {
-        next_descriptor_index                               = controller->descriptor_owned_next[descriptor_index];
-        controller->descriptor_pool[descriptor_index]       = (fc_descriptor_t){0};
-        controller->descriptor_owner[descriptor_index]      = FC_COMMAND_ID_INVALID;
-        controller->descriptor_owned_next[descriptor_index] = UINT16_MAX;
-        controller->descriptor_free_next[descriptor_index]  = controller->descriptor_free_head;
-        controller->descriptor_free_head                    = descriptor_index;
-        descriptor_index                                    = next_descriptor_index;
+        return FC_STATUS_OK;
     }
-    controller->command_descriptor_head[command_id] = UINT16_MAX;
-    controller->command_pool[command_id]            = (fc_command_t){0};
-    controller->command_state[command_id]           = FC_COMMAND_STATE_FREE;
-    controller->command_free_next[command_id]       = controller->command_free_head;
-    controller->command_free_head                   = command_id;
+
+    /* 链长上界 CW_TOTAL_MAX 是防损坏链成环的安全网（合法链恒 ≤ 它），
+     * 与 fc_command_descriptor_count 同一判据。释放路径死循环比早停更糟。 */
+    descriptor_id = (fc_descriptor_id_t)command->desc_id;
+    for (remaining = 0U; (descriptor_id < FC_DESCRIPTOR_POOL_DEPTH) && (remaining < CW_TOTAL_MAX); remaining++)
+    {
+        const fc_descriptor_id_t next_descriptor_id = (fc_descriptor_id_t)controller->descriptor_pool[descriptor_id].next_id;
+
+        fc_descriptor_release_internal(controller, descriptor_id);
+        descriptor_id = next_descriptor_id;
+    }
+
+    controller->command_pool[command_id]      = (fc_command_t){0};
+    controller->command_state[command_id]     = FC_COMMAND_STATE_FREE;
+    controller->command_free_next[command_id] = controller->command_free_head;
+    controller->command_free_head             = command_id;
     return FC_STATUS_OK;
 }
 
@@ -562,6 +568,13 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
     buffer_id  = fc_buffer_alloc_internal(controller);
     if ((descriptor == NULL) || (buffer_id == FC_BUFFER_ID_INVALID))
     {
+        /* 就地回滚，不留「已出池但未挂链」的半成品——release 只沿数据链走，
+         * 链外的 desc 它够不到。buffer 池（128）比 desc 池（256）小，
+         * 所以 descriptor 成功而 buffer 失败是这里最现实的路径。 */
+        if (descriptor != NULL)
+        {
+            fc_descriptor_release_internal(controller, (uint16_t)(descriptor - controller->descriptor_pool));
+        }
         if (buffer_id != FC_BUFFER_ID_INVALID)
         {
             (void)fc_buffer_release_internal(controller, buffer_id);
@@ -656,8 +669,9 @@ static void fc_command_chain_append(fc_t *controller, fc_command_t *command, fc_
  *       策略层传 command->paa 派生的同页地址，故对现有路径逐字节中性。
  *     - 同一 n 被追加两次 = 链构造错误（掩码是集合，重复置位会静默丢数据）→ ASSERT，
  *       与 fc_build_request_data_planes 的同源断言一致。
- *     - RESOURCE_EMPTY 时不动已挂好的前序 desc：那条半成品 desc 仍在所有权链上，
- *       由 fc_command_release / fc_command_resources_rollback 统一回收。
+ *     - RESOURCE_EMPTY 时不动已挂好的前序 desc：它们都在数据链上，
+ *       由 fc_command_release（或其内部版 fc_command_release_internal_api）沿链回收；
+ *       失败的那条半成品已在 configure 内就地回滚，不会留在链外。
  * -------------------------------------------------------------------- */
 fc_status_t fc_command_attach_cw_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
 {
@@ -696,7 +710,7 @@ static fc_status_t fc_submit_to_queue(fc_t *controller, fc_submission_queue_t *q
 {
     fc_command_id_t command_id;
 
-    command_id = (fc_command_id_t)(command - controller->command_pool);
+    command_id = fc_command_to_id_internal(controller, command);
     if (fc_submission_queue_push(queue, command_id) == FC_STATUS_OK)
     {
         controller->command_state[command_id] = FC_COMMAND_STATE_QUEUED;
@@ -888,42 +902,13 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
  * -------------------------------------------------------------------- */
 static void fc_stripe_release_parity(fc_t *controller, fc_command_id_t parity_id)
 {
-    uint16_t descriptor_index;
-    uint16_t next_descriptor_index;
-
     /* 层内 helper：唯一调用者是完成路径的 stripe 清理，parity_id 取自
      * stripe_parity_for_data[]（注册时即 fc_command_alloc() 铸出的池内 ID）。 */
     ASSERT(parity_id < FC_COMMAND_POOL_DEPTH);
 
-    /* 释放 parity 命令的 desc 链 + buffer */
-    descriptor_index = controller->command_descriptor_head[parity_id];
-    while (descriptor_index != UINT16_MAX)
-    {
-        next_descriptor_index = controller->descriptor_owned_next[descriptor_index];
-
-        /* 释放 buffer */
-        fc_buffer_id_t buf_id = controller->descriptor_pool[descriptor_index].buffer_id;
-        if (buf_id != FC_BUFFER_ID_INVALID)
-        {
-            (void)fc_buffer_release_internal(controller, buf_id);
-        }
-
-        /* 释放 descriptor */
-        controller->descriptor_pool[descriptor_index]       = (fc_descriptor_t){0};
-        controller->descriptor_owner[descriptor_index]      = FC_COMMAND_ID_INVALID;
-        controller->descriptor_owned_next[descriptor_index] = UINT16_MAX;
-        controller->descriptor_free_next[descriptor_index]  = controller->descriptor_free_head;
-        controller->descriptor_free_head                    = descriptor_index;
-
-        descriptor_index = next_descriptor_index;
-    }
-    controller->command_descriptor_head[parity_id] = UINT16_MAX;
-
-    /* 返回 command slot 到空闲池 */
-    controller->command_pool[parity_id]      = (fc_command_t){0};
-    controller->command_state[parity_id]     = FC_COMMAND_STATE_FREE;
-    controller->command_free_next[parity_id] = controller->command_free_head;
-    controller->command_free_head            = parity_id;
+    /* 与 fc_command_release_internal_api 完全同义（desc 链 + buffer + 命令槽位），
+     * 原先这里有一份逐行拷贝。 */
+    (void)fc_command_release_internal_api(controller, &controller->command_pool[parity_id]);
 }
 
 /*
@@ -962,7 +947,7 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     {
         goto stripe_error;
     }
-    parity_id = parity_cmd->command_id;
+    parity_id = fc_command_to_id_internal(controller, parity_cmd);
 
     /* ② 配置 parity command */
     parity_cmd->config           = data_cmd->config;
@@ -995,13 +980,9 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
         {
             if (fc_command_attach_cw_internal(controller, parity_cmd, parity_plane, pcw, parity_row) != FC_STATUS_OK)
             {
-                /* 回滚已挂的半成品链（含 buffer）+ 释放 parity 命令槽位 */
-                fc_command_resources_rollback(controller, parity_id);
-                parity_cmd->desc_id                      = FC_DESCRIPTOR_ID_INVALID;
-                controller->command_pool[parity_id]      = (fc_command_t){0};
-                controller->command_state[parity_id]     = FC_COMMAND_STATE_FREE;
-                controller->command_free_next[parity_id] = controller->command_free_head;
-                controller->command_free_head            = parity_id;
+                /* 回滚半成品：release_internal_api 一次做完 desc 链 + buffer + 命令槽位
+                 * （此前这里是 resources_rollback + 手写槽位回收两条，纯冗余）。 */
+                (void)fc_command_release_internal_api(controller, parity_cmd);
                 goto stripe_error;
             }
         }

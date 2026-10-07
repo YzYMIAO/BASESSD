@@ -65,7 +65,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
 
     {
         fc_command_status_t completion;
-        ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
+        ret = ftl_internal_sync_wait(ftl_cmd_id(cmd), &completion, 0U);
         if (ret != 0)
         {
             (void)fc_command_release(cmd);

@@ -25,25 +25,23 @@
 
 #include <stddef.h>
 
-/* 命令指针 → 池索引（指针算术，前提：指针属于 command_pool） */
-static uint8_t fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
+/* 命令指针 → 池索引。区间检查 + 减法，O(1)（原为 O(256) 线性扫描）。
+ * 返回 0 = 指针不落在命令池区间内（例如栈上的 fc_command_t），没有对应 ID。 */
+uint8_t fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
 {
-    uint16_t index;
+    const fc_command_t *pool = g_fc_controller.command_pool;
 
-    /* 层内 helper：调用者（fc_command_attach_cw / fc_submit）已判过
+    /* 层内 helper：调用者（fc_command_attach_cw / fc_command_release）已判过
      * command 非空，command_id 是本文件局部地址——传空是调用者编程错误。 */
     ASSERT(command != NULL);
     ASSERT(command_id != NULL);
 
-    for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
+    if ((command < pool) || (command >= &pool[FC_COMMAND_POOL_DEPTH]))
     {
-        if (command == fc_command_id_to_command(index))
-        {
-            *command_id = (fc_command_id_t)index;
-            return 1U;
-        }
+        return 0U;
     }
-    return 0U;
+    *command_id = fc_command_to_id_internal(&g_fc_controller, command);
+    return 1U;
 }
 
 /* buffer ID 有效性（< 池深度且已占用） */
@@ -142,8 +140,9 @@ fc_status_t fc_poll_completion(fc_command_status_t *completion)
  * fc_command_release
  *   功能：释放命令全部资源（公共接口）。
  *   参数：command —— 命令。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / NOT_READY（仍在 CQ 中）。
- *   实现要点：仅 ALLOCATED 或 COMPLETED 可释放；命令须不在 CQ 中
+ *   返回：FC_STATUS_OK / INVALID_ARGUMENT（指针不在命令池内）。
+ *   实现要点：**幂等**——命令已在 FREE 状态（空闲链上）时直接返回 OK，
+ *         调用者不必自己判断"还活着吗"。命令须不在 CQ 中
  *         （FTL 应已 poll_completion 取走完成项）。
  * -------------------------------------------------------------------- */
 fc_status_t fc_command_release(fc_command_t *command)
@@ -153,13 +152,13 @@ fc_status_t fc_command_release(fc_command_t *command)
     /* command 非空是前置条件；指针身份校验是文档化入口契约（辨析 D），保留返回码 */
     ASSERT(command != NULL);
 
-    command_id = command->command_id;
-    if ((command_id >= FC_COMMAND_POOL_DEPTH) ||
-        (fc_command_id_to_command(command_id) != command))
+    /* 指针不在池内（栈上的 fc_command_t）→ 没有对应命令可释放 */
+    if (fc_command_to_id(command, &command_id) == 0U)
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
 
+    /* 幂等性（已 FREE 直接返回 OK）由 internal 版统一负责，此处不重复判 */
     return fc_command_release_internal_api(&g_fc_controller, command);
 }
 

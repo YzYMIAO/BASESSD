@@ -287,20 +287,12 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
         case FC_COMMAND_MODULE_GC:
         case FC_COMMAND_MODULE_CHECKPOINT:
         case FC_COMMAND_MODULE_BBT:
-            /* 元数据类操作完成后 release
-             * 如果同步等待 handler 已提前 release，此处 fc_command_release
-             * 会返回错误，忽略即可 */
-            if (cmd->command_id != FC_COMMAND_ID_INVALID)
-            {
-                (void)fc_command_release(cmd);
-            }
-            break;
-
         default:
-            if (cmd->command_id != FC_COMMAND_ID_INVALID)
-            {
-                (void)fc_command_release(cmd);
-            }
+            /* 元数据类操作完成后 release。同步等待的 handler 可能已提前释放，
+             * 但 fc_command_release 幂等（已在 FREE 直接返回 OK），无需自行判活
+             * ——原先那句 `cmd->command_id != FC_COMMAND_ID_INVALID` 恒真：
+             * 释放把结构体整体清零，该字段归 0 而不是 0xFFFF。 */
+            (void)fc_command_release(cmd);
             break;
     }
 }
@@ -651,7 +643,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     }
 
     /* ⑤ 注册 pending（必须早于 submit，避免竞态；io 按值嵌入） */
-    ret = pending_add(ftl, cmd->command_id, req, NAND_PBA_INVALID, NAND_PBA_INVALID, NAND_PBA_INVALID, NAND_PBA_INVALID, 0U);
+    ret = pending_add(ftl, ftl_cmd_id(cmd), req, NAND_PBA_INVALID, NAND_PBA_INVALID, NAND_PBA_INVALID, NAND_PBA_INVALID, 0U);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
@@ -661,7 +653,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     /* ⑥ 异步提交 */
     if (fc_submit(cmd) != FC_STATUS_OK)
     {
-        pending_remove(ftl, cmd->command_id);
+        pending_remove(ftl, ftl_cmd_id(cmd));
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
@@ -768,7 +760,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
 
     /* ⑤ 注册 pending（io 按值嵌入 + old/new PBA；实例即上下文，无需再存 ftl）。
      * 单页请求 plane1 字段传 INVALID。 */
-    ret = pending_add(ftl, cmd->command_id, req, old_pba, new_pba[0], old_pba1, (req->pages == 2U) ? new_pba[1] : NAND_PBA_INVALID, 0U);
+    ret = pending_add(ftl, ftl_cmd_id(cmd), req, old_pba, new_pba[0], old_pba1, (req->pages == 2U) ? new_pba[1] : NAND_PBA_INVALID, 0U);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
@@ -778,7 +770,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
     /* ⑥ 异步提交到 NAND */
     if (fc_submit(cmd) != FC_STATUS_OK)
     {
-        pending_remove(ftl, cmd->command_id);
+        pending_remove(ftl, ftl_cmd_id(cmd));
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }

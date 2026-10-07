@@ -69,7 +69,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 
 调用者**不可能**传入越界值——越界即不变量破坏。因此这类"句柄越界 → 返回 NULL/错误码"的守卫按判据 2 转 `ASSERT`，并同步修掉头文件里"越界返回 NULL"的契约描述。同理，FC 内部对句柄的越界检查（`fc_stripe_release_parity` 的 `parity_id`、完成路径的 `completed_id`、desc 链遍历里的 `desc_id`）一律转 `ASSERT`。
 
-**保留返回码的部分**：`fc_command_attach_cw` / `fc_submit` / `fc_command_release` 这三个**顶层生命周期入口**里，`fc_command_to_id()` 返回 0（指针不在本池）、状态非 `ALLOCATED`、desc 链未配置这类检查仍返回 `FC_STATUS_INVALID_ARGUMENT`——它们校验的是"这个指针是不是本池的命令 + 生命周期阶段"（指针身份 + 状态），是有文档契约的入口校验；`fc_command_release` 的 `command_id >= FC_COMMAND_POOL_DEPTH` 因此也保留（它在调用 `fc_command_id_to_command()` 之前先挡一道，避免后者断言）。**但同一入口里的 `command == NULL` 是纯参数前置条件，转 `ASSERT`**（第二轮补扫，见 §九）。
+**保留返回码的部分**：`fc_command_attach_cw` / `fc_submit` / `fc_command_release` 这三个**顶层生命周期入口**里，`fc_command_to_id()` 返回 0（指针不在本池）、状态非 `ALLOCATED`、desc 链未配置这类检查仍返回 `FC_STATUS_INVALID_ARGUMENT`——它们校验的是"这个指针是不是本池的命令 + 生命周期阶段"（指针身份 + 状态），是有文档契约的入口校验。**但同一入口里的 `command == NULL` 是纯参数前置条件，转 `ASSERT`**（第二轮补扫，见 §九）。
 （v13 前这三个入口是 `fc_command_configure_descriptors` / `fc_submit` / `fc_command_release`；前者已上移 FTL，FC 侧建链入口变成 `fc_command_attach_cw`，它沿用同一套"保留身份/状态返回码"的契约。）
 
 > 判据 1 原先把"`fc_interface.h` 的全部入口"整体划为边界，属**过度概括**；按句柄来源细分：外部输入（host / CLI / 介质）→ 判据 1，FC 自铸句柄 → 判据 2。
@@ -92,7 +92,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 
 | 文件 | 转换点 |
 |---|---|
-| `fc_interface.c` | `fc_command_to_id` 两处 NULL（静态 helper，调用者已判）、`fc_write_cmd_data`/`fc_read_cmd_data`/`fc_get_cmd_data_ptr` 的 `desc_id >= FC_DESCRIPTOR_POOL_DEPTH`、`fc_command_id_to_command`/`fc_descriptor_id_to_descriptor` 的越界 → NULL |
+| `fc_interface.c` | `fc_command_to_id` 两处 NULL（入参/出参前置条件，调用者已判）、`fc_get_cmd_data_ptr` 的 `desc_id >= FC_DESCRIPTOR_POOL_DEPTH`、`fc_command_id_to_command`/`fc_descriptor_id_to_descriptor` 的越界 → NULL |
 | `fc.c` | `fc_stripe_release_parity` 的 `parity_id` 越界、完成路径 `completed_id` 的冗余范围检查（`fc_complete_from_nand` 已断言） |
 
 顶层生命周期入口（`fc_command_attach_cw`/`fc_submit`/`fc_command_release`，v13 前第一项为 `fc_command_configure_descriptors`）的句柄校验**保留返回码**（有文档契约），理由见 §七。

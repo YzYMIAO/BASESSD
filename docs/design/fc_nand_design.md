@@ -168,12 +168,26 @@ RAID XOR 使用 `FC_BUFFER_POOL_CW_SIZE(528)`，读全 CW。
 - 256 个 Descriptor：每个 Command 最多 4 个 CW，64 × 4 = 256
 - 128 个 Buffer：至少支持与 Descriptor 1:2 的比例，确保读写并发
 
+池外还有若干**旁路簿记数组**（`fc_t` 里存指针，本体是 `fc.c` 的 static 数组）：
+
+| 数组 | 尺寸 | 用途 |
+|------|------|------|
+| `descriptor_free_next[]` / `buffer_free_next[]` / `command_free_next[]` | 256/128/64 | 三条空闲链的 next（下标即 ID） |
+| `command_state[]` / `buffer_state[]` | 64 / 128 | 状态位 |
+| `descriptor_owner[]` | 256 | **desc → 归属命令 ID 的 O(1) 反查表**：`fc_submit` 校验 desc 链所有权（`fc_command_descriptors_owned_internal`）+ `fc_get_resource_stats` 计数 |
+
+> **v15：「一条命令拥有哪些 desc」只有一份真值**——命令的 desc 链本身
+> （`command->desc_id` + `descriptor_pool[].next_id`）。此前另有一条「所有权链」
+> （`descriptor_owned_next[256]` + `command_descriptor_head[64]`，共 640B），
+> 专门为「desc 已出池但尚未挂进数据链」的中间态兜底；该中间态已由
+> `fc_command_configure_descriptor_internal()` 的失败路径**就地回滚**消除
+> （buffer 池 128 < desc 池 256，所以「desc 成功而 buffer 失败」是最现实的路径），
+> 故整条链删除。不变量：**desc 出池 ⟺ 立刻挂进数据链，或立刻回滚**。
+
 ### 2.2 命令结构 (fc_command_t)
 
 ```c
 struct fc_command_t {
-    DWORD command_id : 16;     // Command Pool 槽位编号
-    DWORD reserved0  : 16;     // 保留（Command Pool 元数据预留）
     DWORD desc_id    : 16;     // 首个 Descriptor ID；0xFFFF=无 Descriptor
     DWORD high_priority : 1;  // 0=SQ, 1=HSQ
     DWORD module     : 4;     // 完成回调路由（HOST_IO/FTL/GC/READ_RECOVERY/METADATA/BBT/CHECKPOINT/WEAR_LEVELING）
@@ -190,8 +204,15 @@ struct fc_command_t {
 > - `feature_addr:8` 取代原 `reserved1:11` 中的 8 位，专用于 SET/GET_FEATURES 的寄存器地址（通过 COLUMN_0 uop 发送）。
 > - `parameter0..3` 从 `DWORD : 8`（位域）改为 `uint8_t`（纯字节），原因是 SET/GET_FEATURES 内联路径需要取 `&parameter0` 地址作为 buffer 指针。位域不能取地址，故以 4 字节空间换地址能力。Command Pool（64 条）总量增加 256 字节。
 > - **v7**：4 个散装字节合并为 `fc_param_t` 联合体（`parameter0..3` / `bytes[4]` / `cw_mask`），SQ 与 CQ 共用。
->   `cw_mask` 是 flat CW 掩码（bit `n = plane*CW_NUM + cw`）。`fc_command_t` 尺寸仍 24 字节。
+>   `cw_mask` 是 flat CW 掩码（bit `n = plane*CW_NUM + cw`）。
 >   ⚠ **SQ 提交后不可变**：命令配置完即算完成，运行期返回值一律走 CQ（见 §25）。
+> - **v15**：删除 `command_id : 16` + `reserved0 : 16`（结构体 **24 → 20 字节**，64 槽省 256B）。
+>   命令池 ID 不再是缓存字段，而由 **指针派生**：`fc_command_to_id()` /
+>   `fc_command_to_id_internal()` 做 `command - command_pool`。理由：缓存的副本在
+>   `fc_command_release()` 把结构体整体清零后失效（归 0 而非 0xFFFF，判不出来），派生值不会；
+>   而指针本来就在调用者手里，再存一份只是多一个不一致的机会。
+>   派生的 ID 喂给 `nand_dispatch_request_t.command_id` 与 CQ 的 `command_id`，上层要回命令指针走
+>   `fc_command_id_to_command()`。见 `docs/changelog/fc_command_identity_convergence.md`。
 
 `fc_param_t` 联合体：
 
@@ -327,7 +348,7 @@ CQ 条目 12 字节，64 条 CQ 共 768 字节。
 | 文件 | 内容 |
 |------|------|
 | `include/fc/fc.h` | 类型、宏、资源池配置、功能开关、资源统计结构 + `#include "fc_interface.h"` |
-| `include/fc/fc_interface.h` | 对外函数声明（18 个，6 组：①初始化 ②命令生命周期 ③buffer 访问 ④数据查询 ⑤查询工具 ⑥服务入口） |
+| `include/fc/fc_interface.h` | 对外函数声明（19 个，6 组：①初始化 ②命令生命周期 ③buffer 访问 ④数据查询 ⑤查询工具 ⑥服务入口） |
 | `include/fc/fc_internal.h` | fc.c ↔ fc_interface.c 共享内部签名（`fc_t` 定义、`g_fc_controller` extern、`fc_*_internal` 声明）——FTL 不得 include |
 | `src/fc/fc.c` | 核心实现：三池、生命周期状态机、`fc_poll_internal` 服务主循环（拆为 `fc_poll_dispatch_single` / `fc_poll_dispatch_chain` + `fc_build_dispatch_request` / `fc_fill_cw_meta_paa` / `fc_poll_fail_command` 五个 static helper）、`fc_complete_from_nand`、Stripe RAID（全部 `_internal`） |
 | `src/fc/fc_interface.c` | 对外函数实现：薄壳（参数校验 + 转发 internal） |
@@ -337,6 +358,7 @@ CQ 条目 12 字节，64 条 CQ 共 768 字节。
 fc_status_t   fc_init(void);                           // 初始化所有资源池和队列
 fc_command_t *fc_command_alloc(void);                   // 申请命令，失败返回 NULL
 fc_command_t *fc_command_id_to_command(uint16_t id);    // ID→指针转换
+uint8_t       fc_command_to_id(const fc_command_t *, fc_command_id_t *); // 指针→ID（逆转换；返回 0=指针不在池内，如栈上的 fc_command_t）
 fc_descriptor_t *fc_descriptor_id_to_descriptor(uint16_t id);
 fc_status_t   fc_command_attach_cw(fc_command_t *cmd, uint8_t plane, uint8_t cw, nand_paa_t row_paa); // 逐条追加一个 CW 到链尾（**建链的唯一入口**，行地址由调用者按 plane 给出）
 fc_buffer_id_t fc_buffer_alloc(void);                   // 申请 Buffer（返 ID）
@@ -4377,7 +4399,7 @@ FC 不能整体下沉到 FTL（这条约束排除了"FC 只留三池、其余全
 
 > 拿 FC 的每一个对外函数去比对**硬件 FCC 的寄存器表**——**有对应项则保留，无对应项则剔除。**
 
-按此判据过一遍 FC 的全部对外接口（v13 后的 18 个）：
+按此判据过一遍 FC 的全部对外接口（v15 后的 19 个）：
 
 | 对外函数 | 硬件 FCC 的对应物 | 判定 |
 |---|---|---|
@@ -4391,7 +4413,7 @@ FC 不能整体下沉到 FTL（这条约束排除了"FC 只留三池、其余全
 | `fc_get_cmd_data_ptr` | 读第 n 条描述符取缓冲地址 | 保留 |
 | `fc_get_cmd_cw_mask` | 读描述符链（v13 新增，仅供 RAID 断言） | 保留 |
 | `fc_get_cmd_ecc_max` | 完成聚合寄存器（ECC 纠错计数） | 保留 |
-| `fc_command_id_to_command` / `fc_descriptor_id_to_descriptor` | ID→指针（软件模拟必需） | 保留 |
+| `fc_command_id_to_command` / `fc_command_to_id` / `fc_descriptor_id_to_descriptor` | ID↔指针（软件模拟必需；ID 由指针派生，见 §2.2） | 保留 |
 | `fc_get_resource_stats` | 状态寄存器 | 保留 |
 | ~~`fc_command_configure_descriptors`~~ | **无此寄存器**（描述符链是固件填的） | **v13 上移 FTL** |
 | ~~`fc_write_cmd_data` / `fc_read_cmd_data`~~ | **无此寄存器**（数据是固件 DMA 搬的） | **v13 上移 FTL** |

@@ -17,8 +17,8 @@
  *   ③ buffer 访问       fc_buffer_alloc / release / id_to_real_buffer /
  *                        fc_buffer_get_base / fc_buffer_get_meta
  *   ④ 数据查询          fc_get_cmd_data_ptr / fc_get_cmd_ecc_max
- *   ⑤ 查询工具          fc_command_id_to_command / fc_descriptor_id_to_descriptor /
- *                        fc_get_resource_stats
+ *   ⑤ 查询工具          fc_command_id_to_command / fc_command_to_id /
+ *                        fc_descriptor_id_to_descriptor / fc_get_resource_stats
  *   ⑥ 服务入口          fc_service
  *
  * 生命周期（对 FTL）：
@@ -110,8 +110,14 @@ extern "C"
     uint8_t fc_get_cmd_ecc_max(const fc_command_t *command);
 
     /* ═══════ ⑤ 查询工具 ═══════ */
-    /* ID→指针转换。前置条件：command_id 为 fc_command_alloc() 铸出的池内 ID。 */
+    /* ID→指针转换。前置条件：command_id 为 fc_command_alloc() 分配出的池内槽位号。 */
     fc_command_t *fc_command_id_to_command(uint16_t command_id);
+
+    /* 指针→ID 转换（fc_command_id_to_command 的逆）。返回 0 = command 不在命令池内
+     * （例如栈上的 fc_command_t），*command_id 未定义。
+     * ⚠ 命令 ID 由「指针 − command_pool 基址」导出，**不是 fc_command_t 的字段**
+     *   （见 fc_command.h）——命令释放、结构体整体清零之后，本函数依然能算出 ID。 */
+    uint8_t fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id);
 
     /* ID→指针转换。前置条件：descriptor_id 为命令 desc 链中的池内 ID。 */
     fc_descriptor_t *fc_descriptor_id_to_descriptor(uint16_t descriptor_id);
