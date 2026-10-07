@@ -59,8 +59,20 @@ extern "C"
      * plane 必须落在本命令的 plane 段内（单 plane = paa_to_plane(command->paa) 那一个；
      * multi-plane = [0, multi_plane)）。
      * 前置：命令处于 ALLOCATED。
-     * 返回：OK / RESOURCE_EMPTY（池空，本条半成品由 release 统一回收）/ INVALID_ARGUMENT（坐标越界）。 */
+     * 返回：OK / RESOURCE_EMPTY（池空）/ INVALID_ARGUMENT（坐标越界）。
+     * **失败时链上可能已有 desc（含本条）**：本层不回滚，「已分配的 desc 全部在链上」
+     * 是不变量，调用方沿链释放即完整回收（见下两个函数）。 */
     fc_status_t fc_command_attach_cw(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa);
+
+    /* 释放链头那一个 desc（含其 buffer），返回新链头；空链（head 越界）原样返回。
+     * 传链头 ID 而非命令：command->desc_id 是位域取不了地址，故按值传入、按值取回。
+     * 用法：command->desc_id = fc_descriptor_chain_release_head(command->desc_id); */
+    fc_descriptor_id_t fc_descriptor_chain_release_head(fc_descriptor_id_t head);
+
+    /* 沿链释放全部 desc + buffer，返回 FC_DESCRIPTOR_ID_INVALID（恒为空链头）。
+     * 建链中途失败的回滚入口——释放后命令只剩命令槽位，由 fc_command_release 收尾。
+     * 用法：command->desc_id = fc_descriptor_chain_release_all(command->desc_id); */
+    fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head);
 
     /* 提交到 SQ 或 HSQ（根据 high_priority），入队即返回 */
     fc_status_t fc_submit(fc_command_t *command);
@@ -71,7 +83,7 @@ extern "C"
     /* 从 CQ 取完成项 */
     fc_status_t fc_poll_completion(fc_command_status_t *completion);
 
-    /* 释放命令及关联 Descriptor 链（须已 COMPLETED 或 ALLOCATED 且不在 CQ 中） */
+    /* 释放命令及关联 Descriptor 链 + 各 CW buffer（须已 COMPLETED 或 ALLOCATED 且不在 CQ 中） */
     fc_status_t fc_command_release(fc_command_t *command);
 
     /* ═══════ ③ buffer 访问 ═══════ */

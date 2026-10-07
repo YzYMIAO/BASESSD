@@ -95,6 +95,22 @@ fc_status_t fc_command_attach_cw(fc_command_t *command, uint8_t plane, uint8_t c
     return fc_command_attach_cw_internal(&g_fc_controller, command, plane, cw, row_paa);
 }
 
+/* 释放链头那一个 desc（含其 buffer），返回新链头。
+ * 传值/取回而非传指针：command->desc_id 是位域，&command->desc_id 取不了地址。 */
+fc_descriptor_id_t fc_descriptor_chain_release_head(fc_descriptor_id_t head)
+{
+    fc_descriptor_chain_release_head_internal(&g_fc_controller, &head);
+    return head;
+}
+
+/* 沿链释放全部 desc + buffer，返回 FC_DESCRIPTOR_ID_INVALID。
+ * 建链中途失败的回滚入口；释放后命令只剩命令槽位（由 fc_command_release 收尾）。 */
+fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head)
+{
+    fc_descriptor_chain_release_all_internal(&g_fc_controller, &head);
+    return head;
+}
+
 /* --------------------------------------------------------------------
  * fc_submit
  *   功能：命令投递到 SQ/HSQ（公共接口）。

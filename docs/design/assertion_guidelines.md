@@ -209,3 +209,24 @@ v13 把 FC 的"策略层"（按掩码建链 + 数据搬运）上移 FTL，**断�
 （`fc_command_descriptor_count` 不受影响——`fc_command_release` 等仍在用）。
 
 > 详见 `docs/changelog/fc_plane_span_consolidation.md`。
+
+### §十二附：v16 建链失败语义与 `fc_command_cw_attached` 判据更正（2026-10-07）
+
+**① `fc_command_attach_cw` 失败不再回滚。** v16 起 desc **出池即挂链**
+（`fc_command_configure_descriptor_internal`：分配 desc → 填字段 → 挂链 → 分配 buffer），
+故「已分配的 desc 全部在命令的数据链上」恒成立。`RESOURCE_EMPTY` 时链上可能已有若干 desc
+（含刚挂上、尚无 buffer 的那个），**全部在链上**——调用方沿链释放即完整回收
+（`fc_descriptor_chain_release_all` / `fc_command_release`）。FC 层不再有任何就地回滚。
+
+**② `fc_command_resources_rollback` 删除**（第 191 行的记录已作废）。它唯一调用者后面紧跟一次
+`fc_command_release_internal_api()`，后者把 desc 链 + buffer + 命令槽位一并做完，前者纯属冗余。
+删除后 desc 链释放只剩 `fc_descriptor_chain_release_all_internal` 一份实现。
+
+**③ `fc_command_cw_attached` 保留，但理由更正。** §十一附说它「覆盖单/多 plane 全部路径」——
+这是对的；但**「掩码迭代可能产生重复」不成立**：掩码是集合，枚举不会重复置位。
+真正可达的重复路径是 `ftl_cmd_setup_ppa_pair`：plane 号取自 `pba_to_plane(pba[i])`
+（L2P 查表结果），两个 LBA 可能解析到**同一个 plane** → 重复 `(plane, cw)`。
+该断言因此**仍应保留**（在污染点就炸、定位准）。⚠ 但 release 构建下无任何守卫这条
+数据驱动的违规——留待后续（可改为返回码而非仅 ASSERT）。
+
+> 详见 `docs/changelog/fc_chain_ownership_v16.md`。

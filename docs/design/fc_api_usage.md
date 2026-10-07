@@ -19,26 +19,32 @@
 > FC 侧建链现在**只有** `fc_command_attach_cw(cmd, plane, cw, row_paa)` 一个入口。
 > 详见 `docs/changelog/fc_policy_layer_uplift.md`。
 >
+> **v16 补充**：建链失败的回滚入口是 `fc_descriptor_chain_release_all(head)`
+> （单个是 `fc_descriptor_chain_release_head(head)`）；`fc_command_release()` 现在
+> **真的**会回收各 CW buffer（此前一直漏着）。详见 `docs/changelog/fc_chain_ownership_v16.md`。
+>
 > 本文件更早的过时项（未随版本同步）：`fc_real_buffer_to_buffer_id()` 已于 v10 删除；
-> "16 个公接口"现为 18 个；§内部函数优化 里的 `fc_command_configure_descriptors_internal` 已不存在。
+> §内部函数优化 里的 `fc_command_configure_descriptors_internal` 已不存在。
 
 ---
 
 ## FC 对外接口一览
 
-FC（Flash Controller）模块对外暴露以下 18 个公接口（声明于 `include/fc/fc_interface.h`）：
+FC（Flash Controller）模块对外暴露以下 21 个公接口（声明于 `include/fc/fc_interface.h`）：
 
 | 接口 | 类型 | 说明 |
 |---|---|---|
 | `fc_init()` | 初始化 | 启动时调用一次，初始化 Pool、SQ/HSQ/CQ、调度器 |
 | `fc_command_alloc()` | 资源分配 | 从 command pool 分配一个 `fc_command_t` |
-| `fc_command_attach_cw(cmd, plane, cw, row_paa)` | 资源分配 | **建链的唯一入口**：分配一条 desc + buffer 并挂到链尾。上层按自己算出的 CW 集合循环调用（FTL 侧封装见 `ftl_cmd_configure_descriptors()`） |
+| `fc_command_attach_cw(cmd, plane, cw, row_paa)` | 资源分配 | **建链的唯一入口**：分配一条 desc + buffer 并挂到链尾。上层按自己算出的 CW 集合循环调用（FTL 侧封装见 `ftl_cmd_configure_descriptors()`）。**失败时链上可能已有 desc**（含本条）——FC 不回滚，调用方用下面两个函数沿链释放 |
+| `fc_descriptor_chain_release_head(head)` | 资源回收 | 释放链头那一个 desc + 其 buffer，返回新链头。传值/取回而非传指针：`cmd->desc_id` 是位域取不了地址 |
+| `fc_descriptor_chain_release_all(head)` | 资源回收 | 沿链释放全部 desc + buffer，返回 `FC_DESCRIPTOR_ID_INVALID`。**建链中途失败的回滚入口**：`cmd->desc_id = fc_descriptor_chain_release_all(cmd->desc_id);` |
 | `fc_buffer_alloc()` | 资源分配 | 手动从 buffer pool 分配一个 buffer |
 | `fc_get_cmd_data_ptr(cmd, cw_index)` | 数据读取 | 获取指定 CW 索引的 buffer 指针（读操作后使用） |
 | `fc_submit(cmd)` | 命令下发 | 提交到 SQ 或 HSQ（取决于 `cmd->high_priority`） |
 | `fc_service()` | 驱动调度 | 主循环中持续调用，调度并执行命令，提交给 NAND |
 | `fc_poll_completion(&completion)` | 状态查询 | 从 CQ 取出已完成命令的状态 |
-| `fc_command_release(cmd)` | 资源回收 | 释放 command 及其关联的 descriptor 链 |
+| `fc_command_release(cmd)` | 资源回收 | 释放 command + descriptor 链 + **各 CW buffer** |
 | `fc_buffer_release(buffer_id)` | 资源回收 | 手动释放 buffer |
 | `fc_command_id_to_command(id)` | ID 查找 | command_id → `fc_command_t*` |
 | `fc_command_to_id(cmd, &id)` | 反查 | 指针 → command_id（返回 0 = 指针不在池内） |
@@ -71,13 +77,15 @@ FC（Flash Controller）模块对外暴露以下 18 个公接口（声明于 `in
 
 | 公接口 | 验证项 |
 |---|---|
-| `fc_command_attach_cw()` | `command==NULL`、不在 pool 中、state 不是 ALLOCATED、plane/cw 越界（越段返回 `INVALID_ARGUMENT`） |
+| `fc_command_attach_cw()` | `command==NULL`、不在 pool 中、state 不是 ALLOCATED、plane/cw 越界（越段返回 `INVALID_ARGUMENT`）；**失败时链上可能已挂上本条 desc**（v16：desc 出池即挂链，无回滚窗口），调用方须 `fc_descriptor_chain_release_all(cmd->desc_id)` |
+| `fc_descriptor_chain_release_head(head)` | head 越界（空链）→ 无操作、原样返回 |
+| `fc_descriptor_chain_release_all(head)` | head 越界 → 置 `FC_DESCRIPTOR_ID_INVALID` 返回 |
 | `fc_buffer_release()` | buffer_id 不在范围内、buffer 未分配 |
 | `fc_buffer_id_to_real_buffer()` | buffer_id 不在范围内、buffer 未分配 |
 | `fc_get_cmd_data_ptr()` | `command==NULL`、不在 pool 中、无 desc 链、cw_index 超过 CW 范围 |
 | `fc_submit()` | `command==NULL`、不在 pool 中、state 不是 ALLOCATED、`fc_command_validate()` 失败、descriptor 所有权不完整 |
 | `fc_poll_completion()` | `completion==NULL` |
-| `fc_command_release()` | `command==NULL`、不在 pool 中；**幂等**——已在 FREE 直接返回 OK（判活只能看 `command_state[]`，结构体释放后被整体清零） |
+| `fc_command_release()` | `command==NULL`、不在 pool 中；**幂等**——已在 FREE 直接返回 OK（判活只能看 `command_state[]`，结构体释放后被整体清零）；**释放 desc 链 + 各 CW buffer**（v16 修复：此前只放 desc，buffer 一直漏） |
 | `fc_command_id_to_command()` | command_id 超范围 |
 | `fc_descriptor_id_to_descriptor()` | descriptor_id 超范围 |
 | `fc_get_resource_stats()` | `stats==NULL` |
@@ -262,10 +270,14 @@ cmd->config.lun       = 0;
 cmd->config.cw        = 1;   // CW 数量 - 1（此处表示 2 个 CW）
 cmd->paa              = target_paa;
 
-// ③ 建 desc 链 + buffer（FTL 侧封装：按 param.cw_mask 展开后逐条 attach_cw）
-ftl_cmd_configure_descriptors(cmd);
+// ③ 只建 desc 链 + buffer（FTL 侧封装：按 param.cw_mask 展开后逐条 attach_cw）
+//    不搬数据——搬数据是④，且只有写操作才做。建链失败时链已回滚，此处再还命令槽位。
+if (ftl_cmd_configure_descriptors(cmd) != FTL_OK) {
+    fc_command_release(cmd);   // desc 链已由 ftl_cmd_* 沿链释放（v16）
+    return;
+}
 
-// ④ 写入数据（FTL 侧遍历 desc 链，buffer_id → pointer → memcpy）
+// ④ 写入数据（仅写操作；FTL 侧遍历 desc 链，buffer_id → pointer → memcpy）
 ftl_cmd_write_data(cmd, source_data, (cmd->config.cw + 1) * CW_SIZE);
 
 // ⑤ 提交到硬件队列
@@ -348,6 +360,10 @@ fc_command_t *done = fc_command_id_to_command(completion.command_id);
 uint8_t *buffer = fc_get_cmd_data_ptr(done, 0);  // CW0 的数据
 // 从 buffer 读取数据...
 ```
+
+> 读操作**不调** `ftl_cmd_write_data()`（没有要搬进去的数据）；取数据除了上面的
+> `fc_get_cmd_data_ptr()` 逐 CW 手动读，也可用 `ftl_cmd_read_data(cmd, buf, len)`
+> 一次性按链序拷出。两者都在 `fc_command_release()` **之前**调用。
 
 ---
 

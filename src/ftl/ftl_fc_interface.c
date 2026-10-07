@@ -14,13 +14,16 @@
  *   参数：cmd —— 命令（须已设 config.operation / multi_plane / cw / paa）。
  *   返回：FTL_OK / FTL_ERROR（掩码越出本命令 plane 段、池空或坐标非法）。
  *   实现要点：
+ *     - **只建链，不搬数据**：数据由 ftl_cmd_write_data 在链建好之后、且仅对写操作执行。
+ *       搬数据放在这里会让「建链失败 → 整链释放」白做一遍拷贝。
  *     - 无数据操作（ERASE / RESET 等）与 SET/GET_FEATURES 不建链，desc_id 置 INVALID。
  *     - cw_mask = 0 → 本命令每个 plane 取连续 0..config.cw；非 0 → 必须落在本命令
  *       plane 段内（越段 = 编程错误）。离散读 plane1 的 CW0/CW2 即
  *       cmd->param.cw_mask = (1U << 4) | (1U << 6)。
  *     - 行地址所有 plane 共用 cmd->paa（同页语义）；两 plane 不同块（Policy B）
  *       走 ftl_cmd_setup_ppa_pair()，本函数不适用。
- *     - 半成品链由调用者 fc_command_release 统一回收。
+ *     - **失败时本函数自己回滚整条链**（desc + buffer 全部还池，desc_id 复位 INVALID），
+ *       调用者只需再 fc_command_release 还命令槽位。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd)
 {
@@ -73,6 +76,7 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd)
             }
             if (fc_command_attach_cw(cmd, plane, cw, row_paa) != FC_STATUS_OK)
             {
+                cmd->desc_id = fc_descriptor_chain_release_all(cmd->desc_id);
                 return FTL_ERROR;
             }
         }
@@ -134,7 +138,8 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
         {
             if (fc_command_attach_cw(cmd, plane, cw, row) != FC_STATUS_OK)
             {
-                /* 半成品链由调用者 fc_command_release 统一回收 */
+                /* 回滚整条链（desc + buffer 还池，desc_id 复位）；命令槽位由调用者释放 */
+                cmd->desc_id = fc_descriptor_chain_release_all(cmd->desc_id);
                 return FTL_ERROR;
             }
         }

@@ -124,6 +124,12 @@ extern "C"
     /* 释放命令全部资源（desc 链 + buffer + command 槽位）；调用方须已保证状态合法 */
     fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *command);
 
+    /* 释放链头那一个 desc（含其 buffer），*head 前移到后继；*head 越界（空链）无操作 */
+    void fc_descriptor_chain_release_head_internal(fc_t *controller, fc_descriptor_id_t *head);
+
+    /* 沿链释放全部 desc + buffer，*head 置 FC_DESCRIPTOR_ID_INVALID */
+    void fc_descriptor_chain_release_all_internal(fc_t *controller, fc_descriptor_id_t *head);
+
     /* 从空闲链表分配一个 buffer 槽位并置占用 */
     fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller);
 

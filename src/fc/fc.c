@@ -69,9 +69,14 @@
  *   ⚠ 「一条命令拥有哪些 desc」**只有一份真值**：命令的 desc 链
  *     （command->desc_id + descriptor_pool[].next_id）。v15 之前另有一条
  *     「所有权链」（descriptor_owned_next[] + command_descriptor_head[]）为
- *     「desc 已分配但尚未挂进数据链」的中间态兜底；那个中间态已由
- *     fc_command_configure_descriptor_internal 的失败路径就地回滚消除，
- *     故整条链连同 640B 一起删除。
+ *     「desc 已分配但尚未挂进数据链」的中间态兜底，已整条删除（640B）。
+ *
+ *   ⚠ **desc 出池即挂链**：fc_command_configure_descriptor_internal 分配 desc 后
+ *     先把字段填好、立刻 append，再分配 buffer。于是「已分配 desc 全部在链上」
+ *     恒成立，失败时沿链释放即完备——不需要任何「链外半成品」的回滚逻辑
+ *     （v15 曾用就地回滚打补丁，v16 改为消除中间态本身）。代价：链上允许存在
+ *     buffer_id == FC_BUFFER_ID_INVALID 的 desc（buffer 池 128 < desc 池 256，
+ *     这是最现实的失败点），所有走链的读者都要容忍它。
  * ══════════════════════════════════════════════════════════ */
 
 static fc_command_t        g_fc_command_pool[FC_COMMAND_POOL_DEPTH];
@@ -420,12 +425,15 @@ fc_command_t *fc_command_alloc_internal(fc_t *controller)
 
 /* --------------------------------------------------------------------
  * fc_descriptor_alloc_internal
- *   功能：从空闲链表分配一个描述符并挂到命令的 desc 链头。
+ *   功能：从空闲链表分配一个描述符（出池即自洽，但不挂链）。
  *   参数：controller —— FC 控制器；command —— 归属命令。
  *   返回：描述符指针；池空返回 NULL。
  *   实现要点：descriptor_owner[desc]=command_id（O(1) 反查表）。
  *         **不挂任何链**——desc 何时进入命令的数据链由调用者
- *         （fc_command_chain_append）决定，本函数只负责出池。
+ *         （fc_command_configure_descriptor_internal）决定，本函数只负责出池。
+ *         但**出池的 desc 必须自洽**：整体清零会把 next_id/buffer_id 都变成 0
+ *         （两个 0 都是合法号——链会走进 desc 0，释放会误放别人的 buffer 0），
+ *         故显式置哨兵。
  * -------------------------------------------------------------------- */
 static fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_command_t *command)
 {
@@ -438,9 +446,11 @@ static fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_comman
     {
         return NULL;
     }
-    controller->descriptor_free_head               = controller->descriptor_free_next[descriptor_index];
-    controller->descriptor_pool[descriptor_index]  = (fc_descriptor_t){0};
-    controller->descriptor_owner[descriptor_index] = command_id;
+    controller->descriptor_free_head                        = controller->descriptor_free_next[descriptor_index];
+    controller->descriptor_pool[descriptor_index]           = (fc_descriptor_t){0};
+    controller->descriptor_pool[descriptor_index].next_id   = FC_DESCRIPTOR_ID_INVALID;
+    controller->descriptor_pool[descriptor_index].buffer_id = FC_BUFFER_ID_INVALID;
+    controller->descriptor_owner[descriptor_index]          = command_id;
     return &controller->descriptor_pool[descriptor_index];
 }
 
@@ -449,9 +459,8 @@ static fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_comman
  *   功能：把描述符还回空闲链（清归属、清本体、头插空闲链）。
  *   参数：controller —— FC 控制器；descriptor_index —— 池内下标。
  *   返回：无。
- *   实现要点：**不碰数据链**——调用者负责先把该 desc 从链上摘掉（或本来就是
- *         链外半成品）。两种用法：① configure 失败时就地回滚刚分配的 desc
- *         （此时它还没进链）；② release 遍历数据链时逐条摘。
+ *   实现要点：**不碰数据链、不碰 buffer**——只把 desc 本体还池。调用者负责
+ *         先把该 desc 从链上摘掉（见 fc_descriptor_chain_release_head_internal）。
  * -------------------------------------------------------------------- */
 static void fc_descriptor_release_internal(fc_t *controller, uint16_t descriptor_index)
 {
@@ -459,6 +468,55 @@ static void fc_descriptor_release_internal(fc_t *controller, uint16_t descriptor
     controller->descriptor_owner[descriptor_index]     = FC_COMMAND_ID_INVALID;
     controller->descriptor_free_next[descriptor_index] = controller->descriptor_free_head;
     controller->descriptor_free_head                   = descriptor_index;
+}
+
+/* --------------------------------------------------------------------
+ * fc_descriptor_chain_release_head_internal
+ *   功能：释放链头这一个 desc（含其 buffer），*head 前移到后继。
+ *   参数：controller —— FC 控制器；head —— 链头 ID 的地址（就地更新）。
+ *   返回：无。*head 越界（空链）直接返回。
+ *   实现要点：**先读 next_id 再释放**——释放会把 desc 整体清零。
+ *         buffer_id == FC_BUFFER_ID_INVALID 是合法态（buffer 池比 desc 池小，
+ *         分配失败时 desc 已挂链但无 buffer），跳过 buffer 释放。
+ * -------------------------------------------------------------------- */
+void fc_descriptor_chain_release_head_internal(fc_t *controller, fc_descriptor_id_t *head)
+{
+    fc_descriptor_id_t descriptor_id;
+    fc_buffer_id_t     buffer_id;
+
+    if (*head >= FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        return;
+    }
+    descriptor_id = *head;
+    buffer_id     = (fc_buffer_id_t)controller->descriptor_pool[descriptor_id].buffer_id;
+    *head         = (fc_descriptor_id_t)controller->descriptor_pool[descriptor_id].next_id;
+
+    if (buffer_id != FC_BUFFER_ID_INVALID)
+    {
+        (void)fc_buffer_release_internal(controller, buffer_id);
+    }
+    fc_descriptor_release_internal(controller, descriptor_id);
+}
+
+/* --------------------------------------------------------------------
+ * fc_descriptor_chain_release_all_internal
+ *   功能：沿链释放全部 desc + buffer，*head 置 FC_DESCRIPTOR_ID_INVALID。
+ *   参数：controller —— FC 控制器；head —— 链头 ID 的地址（就地清空）。
+ *   返回：无。
+ *   实现要点：循环上界 CW_TOTAL_MAX 是防损坏链成环的安全网（合法链恒 ≤ 它），
+ *         与 fc_command_descriptor_count 同一判据。释放路径死循环比早停更糟，
+ *         故超界后强制把 *head 清成 INVALID，不留悬空链头。
+ * -------------------------------------------------------------------- */
+void fc_descriptor_chain_release_all_internal(fc_t *controller, fc_descriptor_id_t *head)
+{
+    uint8_t remaining;
+
+    for (remaining = 0U; (*head < FC_DESCRIPTOR_POOL_DEPTH) && (remaining < CW_TOTAL_MAX); remaining++)
+    {
+        fc_descriptor_chain_release_head_internal(controller, head);
+    }
+    *head = FC_DESCRIPTOR_ID_INVALID;
 }
 
 /* --------------------------------------------------------------------
@@ -484,8 +542,9 @@ fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
 /* fc_command_resources_rollback（只放 desc、不放命令槽的中间态回滚）已删除：
  * 它唯一调用者（fc_stripe_submit 的 parity 建链失败路径）后面紧跟一次
  * fc_command_release_internal_api()，而后者把「desc 链 + buffer + 命令槽位」
- * 一并做完，前者纯属冗余。至此 desc 链释放只有 fc_command_release_internal_api
- * 一份实现（此前共三份：它自己 / resources_rollback / fc_stripe_release_parity）。 */
+ * 一并做完，前者纯属冗余。至此 desc 链释放只有 fc_descriptor_chain_release_all_internal
+ * 一份实现（此前共三份：release_internal_api 自己 / resources_rollback /
+ * fc_stripe_release_parity）。 */
 
 /* --------------------------------------------------------------------
  * fc_command_release_internal_api
@@ -501,8 +560,7 @@ fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
 fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *command)
 {
     fc_command_id_t    command_id;
-    fc_descriptor_id_t descriptor_id;
-    uint8_t            remaining;
+    fc_descriptor_id_t head;
 
     command_id = fc_command_to_id_internal(controller, command);
 
@@ -511,16 +569,10 @@ fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *comm
         return FC_STATUS_OK;
     }
 
-    /* 链长上界 CW_TOTAL_MAX 是防损坏链成环的安全网（合法链恒 ≤ 它），
-     * 与 fc_command_descriptor_count 同一判据。释放路径死循环比早停更糟。 */
-    descriptor_id = (fc_descriptor_id_t)command->desc_id;
-    for (remaining = 0U; (descriptor_id < FC_DESCRIPTOR_POOL_DEPTH) && (remaining < CW_TOTAL_MAX); remaining++)
-    {
-        const fc_descriptor_id_t next_descriptor_id = (fc_descriptor_id_t)controller->descriptor_pool[descriptor_id].next_id;
-
-        fc_descriptor_release_internal(controller, descriptor_id);
-        descriptor_id = next_descriptor_id;
-    }
+    /* 沿链释放 desc + buffer（buffer 的归还此前一直漏着，v16 补上）。
+     * desc_id 是位域取不了地址，故用局部头变量中转——清空后本就不再需要。 */
+    head = (fc_descriptor_id_t)command->desc_id;
+    fc_descriptor_chain_release_all_internal(controller, &head);
 
     controller->command_pool[command_id]      = (fc_command_t){0};
     controller->command_state[command_id]     = FC_COMMAND_STATE_FREE;
@@ -533,13 +585,16 @@ fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *comm
  * 5. 命令配置
  * ══════════════════════════════════════════════════════════ */
 
+/* 前向声明：挂链原语定义在本节末尾，但 configure 要在填完字段后立刻调用它
+ * （出池即挂链，见下）。 */
+static void fc_command_chain_append(fc_t *controller, fc_command_t *command, fc_descriptor_t *descriptor);
+
 /* --------------------------------------------------------------------
  * fc_command_configure_descriptor_internal
- *   功能：为命令配置一个 (plane, cw) 描述符（分配 desc+buffer，填 PAA/config/meta）。
+ *   功能：为命令配置一个 (plane, cw) 描述符（分配 desc → 挂链 → 分配 buffer）。
  *   参数：controller —— FC 控制器；command —— 命令；plane —— 目标 plane；
- *         cw —— 目标 CW 号；row_paa —— 该 plane 的行地址（page/block/lun）；
- *         configured_descriptor —— 输出。
- *   返回：FC_STATUS_OK / RESOURCE_EMPTY（池空）/ INVALID_ARGUMENT。
+ *         cw —— 目标 CW 号；row_paa —— 该 plane 的行地址（page/block/lun）。
+ *   返回：FC_STATUS_OK / RESOURCE_EMPTY（desc 池或 buffer 池空）。
  *   实现要点：
  *     - **行地址来自实参 row_paa，不再从 command->paa 推导**：multi-plane 命令一个
  *       DWORD 装不下两个 plane 的行地址（Policy B：两 plane 的 block 可以不同）。
@@ -550,38 +605,33 @@ fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *comm
  *       **不由 desc 序号推导**——链走位（desc 序号）与 CW 号解耦：所有按链走位索引的
  *       地方不动，CW 号一律从 paa_to_cw(desc->paa) 取。
  *     - meta = lba_to_cw_meta(command->meta, cw)。
- *     - **只负责"分配 + 填字段"，不挂链**——挂链由 fc_command_chain_append 单独完成，
- *       两者组合成机制原语 fc_command_attach_cw_internal。
+ *     - **顺序：分配 desc → 填字段 → 挂链 → 分配 buffer**。
+ *       先挂链是为了让「已分配的 desc 全部在链上」恒成立——这样任何一步失败后，
+ *       调用方沿链释放即完整回收，不需要「链外半成品」的就地回滚。
+ *       代价是链上会短暂/长期存在 buffer_id == FC_BUFFER_ID_INVALID 的 desc
+ *       （buffer 池 128 < desc 池 256，buffer 分配失败是最现实的路径），
+ *       走链的读者（释放 / count / 掩码重建）都要容忍——释放侧已按此实现。
+ *     - **不搬数据**：数据搬运由上层（FTL）在链建好之后、且仅对写操作执行，
+ *       见 ftl_cmd_write_data。放这里会让「建链失败→整链释放」白做一遍拷贝。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa, fc_descriptor_t **configured_descriptor)
+static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
 {
     fc_descriptor_t *descriptor;
     fc_buffer_id_t   buffer_id;
 
-    /* 调用者（fc_command_attach_cw_internal）传的是栈上 &descriptor */
-    ASSERT(configured_descriptor != NULL);
     /* 单 plane 命令的 CW 数不超过一页；多 plane 的 CW 集合由上层（FTL 掩码）保证 */
     ASSERT(cw < CW_NUM);
     /* row_paa 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
     ASSERT((uint8_t)paa_to_plane(row_paa) == plane);
+
     descriptor = fc_descriptor_alloc_internal(controller, command);
-    buffer_id  = fc_buffer_alloc_internal(controller);
-    if ((descriptor == NULL) || (buffer_id == FC_BUFFER_ID_INVALID))
+    if (descriptor == NULL)
     {
-        /* 就地回滚，不留「已出池但未挂链」的半成品——release 只沿数据链走，
-         * 链外的 desc 它够不到。buffer 池（128）比 desc 池（256）小，
-         * 所以 descriptor 成功而 buffer 失败是这里最现实的路径。 */
-        if (descriptor != NULL)
-        {
-            fc_descriptor_release_internal(controller, (uint16_t)(descriptor - controller->descriptor_pool));
-        }
-        if (buffer_id != FC_BUFFER_ID_INVALID)
-        {
-            (void)fc_buffer_release_internal(controller, buffer_id);
-        }
         return FC_STATUS_RESOURCE_EMPTY;
     }
 
+    /* 先把除 buffer_id 外的字段全部填好，再挂链：desc 一进链就能被任何
+     * 走链的读者正确解释（paa/config/meta 均已有效，next_id 已终止）。 */
     if (command->config.multi_plane > 0U)
     {
         /* 行地址取自实参 row_paa（每 plane 独立）；保留其 LUN 字段（多 LUN 并发必需：
@@ -592,12 +642,21 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
     {
         descriptor->paa = (row_paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
     }
-    descriptor->config     = command->config;
-    descriptor->config.cw  = cw;
-    descriptor->buffer_id  = buffer_id;
-    descriptor->next_id    = FC_DESCRIPTOR_ID_INVALID;
-    descriptor->meta       = lba_to_cw_meta(command->meta, cw);
-    *configured_descriptor = descriptor;
+    descriptor->config    = command->config;
+    descriptor->config.cw = cw;
+    descriptor->next_id   = FC_DESCRIPTOR_ID_INVALID;
+    descriptor->meta      = lba_to_cw_meta(command->meta, cw);
+
+    fc_command_chain_append(controller, command, descriptor);
+
+    /* buffer 池比 desc 池小，这里是最现实的失败点。失败**不回滚**：desc 已在链上、
+     * buffer_id 保持 INVALID，调用方沿链释放时自然跳过 buffer、回收 desc。 */
+    buffer_id = fc_buffer_alloc_internal(controller);
+    if (buffer_id == FC_BUFFER_ID_INVALID)
+    {
+        return FC_STATUS_RESOURCE_EMPTY;
+    }
+    descriptor->buffer_id = buffer_id;
     return FC_STATUS_OK;
 }
 
@@ -669,16 +728,15 @@ static void fc_command_chain_append(fc_t *controller, fc_command_t *command, fc_
  *       策略层传 command->paa 派生的同页地址，故对现有路径逐字节中性。
  *     - 同一 n 被追加两次 = 链构造错误（掩码是集合，重复置位会静默丢数据）→ ASSERT，
  *       与 fc_build_request_data_planes 的同源断言一致。
- *     - RESOURCE_EMPTY 时不动已挂好的前序 desc：它们都在数据链上，
- *       由 fc_command_release（或其内部版 fc_command_release_internal_api）沿链回收；
- *       失败的那条半成品已在 configure 内就地回滚，不会留在链外。
+ *     - RESOURCE_EMPTY 时链上可能已有若干 desc（含本次刚挂上去的那个，它没有
+ *       buffer）：**全部都在数据链上**，调用方沿链释放即完整回收
+ *       （fc_descriptor_chain_release_all / fc_command_release）。
+ *       本层不做任何回滚——「已分配的 desc 全部在链上」是 configure 保证的不变量。
  * -------------------------------------------------------------------- */
 fc_status_t fc_command_attach_cw_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
 {
-    uint8_t          plane_first;
-    uint8_t          plane_last;
-    fc_descriptor_t *descriptor = NULL;
-    fc_status_t      result;
+    uint8_t plane_first;
+    uint8_t plane_last;
 
     (void)fc_command_plane_span(command, &plane_first, &plane_last);
     if ((cw >= CW_NUM) || (plane < plane_first) || (plane >= plane_last))
@@ -687,13 +745,7 @@ fc_status_t fc_command_attach_cw_internal(fc_t *controller, fc_command_t *comman
     }
     ASSERT(fc_command_cw_attached(controller, command, plane, cw) == 0U);
 
-    result = fc_command_configure_descriptor_internal(controller, command, plane, cw, row_paa, &descriptor);
-    if (result != FC_STATUS_OK)
-    {
-        return result;
-    }
-    fc_command_chain_append(controller, command, descriptor);
-    return FC_STATUS_OK;
+    return fc_command_configure_descriptor_internal(controller, command, plane, cw, row_paa);
 }
 
 /* ══════════════════════════════════════════════════════════
