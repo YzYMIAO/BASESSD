@@ -188,9 +188,24 @@ v13 把 FC 的"策略层"（按掩码建链 + 数据搬运）上移 FTL，**断�
 | `fc_command_attach_cw` 成为 FC 唯一建链入口 | 沿用"顶层生命周期入口"契约：身份/状态返回码保留，`command == NULL` 转 `ASSERT` |
 | 新增 `fc_get_cmd_cw_mask` | 从 desc 链重建掩码（无 desc → 0）。只服务 RAID 断言；`command` 转 `ASSERT` |
 | `fc_command_validate` 删掩码段校验 | 掩码不再是 FC 的输入概念；`param.cw_mask` 在 FC 内既无写入者也无读者 |
-| `fc_command_resources_rollback` | 唯一调用者移入 `#if CONFIG_FC_RAID` → 标 `__attribute__((unused))`（与 `fc_cw_mask_popcount` / `fc_command_cw_attached` 同法） |
+| `fc_command_resources_rollback` | 唯一调用者移入 `#if CONFIG_FC_RAID` → 标 `__attribute__((unused))`（与 `fc_command_cw_attached` 同法） |
 
 §八 / §九 表格里出现的 `fc_command_configure_descriptors(_internal)`、`fc_write_cmd_data`/`fc_read_cmd_data`
 是**当时的落地记录**，保留不改——它们描述的是 v13 之前的形态。
 
 > 详见 `docs/changelog/fc_policy_layer_uplift.md`。
+
+### §十一附：v13.1 删掉一条同源查重断言（2026-10-07）
+
+按 **§十附判据 1**（同源 → 删）：`fc_build_request_data_planes` 单 plane 分支曾有一条
+`ASSERT(fc_cw_mask_popcount(request->cw_mask) == fc_command_descriptor_count(...))`，
+查的是「没有两个 desc 落在同一个 `n`」。但 `request->cw_mask` 正是从同一条 desc 链按
+`plane*CW_NUM + cw` OR 出来的——与它要防的对象**同源**（同一条表达式算两遍）；而且它只覆盖
+单 plane 路径，多 plane 根本不查，覆盖面反而不对称。
+
+真正该留的是 `fc_command_attach_cw_internal` 的 attach 侧
+`ASSERT(fc_command_cw_attached(controller, command, plane, cw) == 0U)`：在**污染点**就炸，
+定位更准，且覆盖单/多 plane 全部路径。故保留后者，前者连同 `fc_cw_mask_popcount` 删除
+（`fc_command_descriptor_count` 不受影响——`fc_command_release` 等仍在用）。
+
+> 详见 `docs/changelog/fc_plane_span_consolidation.md`。

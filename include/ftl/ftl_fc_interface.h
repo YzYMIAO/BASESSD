@@ -31,29 +31,9 @@
 
 #include <stdint.h>
 
-/* ── desc 链组装共用小工具 ── */
-
-/*
- * ftl_cmd_plane_span - 命令能触及的 plane 段 [*first, *last)
- *
- * 规则与 FC 内部 fc_command_plane_span 一致（FTL 侧独立持有一份）：
- *   multi-plane → 从 plane 0 起，覆盖 multi_plane 个；
- *   单 plane     → 只覆盖 paa_to_plane(cmd->paa) 那一个——掩码是绝对编号，
- *                 plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
- *
- * ⚠ 这份规则与 src/fc/fc.c 的 fc_command_plane_span 是同一语义的两份实现，
- *   改 plane 语义时必须同步（见 docs/changelog/fc_policy_layer_uplift.md）。
- *
- * @return 段内 plane 数（= multi_plane，单 plane 时为 1）
- */
-static inline uint8_t ftl_cmd_plane_span(const fc_command_t *cmd, uint8_t *first, uint8_t *last)
-{
-    const uint8_t count = (cmd->config.multi_plane > 0U) ? (uint8_t)cmd->config.multi_plane : 1U;
-
-    *first = (count == 1U) ? (uint8_t)paa_to_plane(cmd->paa) : 0U;
-    *last  = (uint8_t)(*first + count);
-    return count;
-}
+/* ── desc 链组装共用小工具 ──
+ *   plane 段规则用 fc_command.h 的 fc_command_plane_span（唯一一份定义，
+ *   FC 的越段校验与 FTL 的掩码展开共用）。 */
 
 /*
  * ftl_cmd_needs_desc_chain - 该操作是否需要 desc 链（即是否携带数据）

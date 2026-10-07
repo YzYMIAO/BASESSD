@@ -463,7 +463,7 @@ fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
  *         描述符挂回空闲链，最后清链头。
  *   说明：唯一调用者在 CONFIG_FC_RAID 块内（fc_stripe_submit 的 parity 建链失败路径），
  *         故 RAID 关闭时本函数无引用——标 __attribute__((unused)) 避免 -Wunused-function
- *         （同 fc_cw_mask_popcount / fc_command_cw_attached 的先例）。
+ *         （同 fc_command_cw_attached 的先例）。
  * -------------------------------------------------------------------- */
 static void __attribute__((unused)) fc_command_resources_rollback(fc_t *controller, fc_command_id_t command_id)
 {
@@ -526,52 +526,6 @@ fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *comm
 /* ══════════════════════════════════════════════════════════
  * 5. 命令配置
  * ══════════════════════════════════════════════════════════ */
-
-/* --------------------------------------------------------------------
- * fc_cw_mask_popcount
- *   功能：统计 flat CW 掩码的置位数（bit n = plane*CW_NUM + cw）。
- *   参数：mask —— flat CW 集合掩码（uint32_t，覆盖 CW_TOTAL_MAX = 8 位）。
- *   返回：置位数（0..CW_TOTAL_MAX）。
- *   实现要点：CW_TOTAL_MAX=8，逐位循环即最优，不引 __builtin_popcount
- *         （避免 libgcc __popcountsi2 依赖）。
- * -------------------------------------------------------------------- */
-static uint8_t __attribute__((unused)) fc_cw_mask_popcount(uint32_t mask)
-{
-    uint8_t count = 0U;
-    uint8_t bit;
-
-    for (bit = 0U; bit < CW_TOTAL_MAX; bit++)
-    {
-        if ((mask & (uint32_t)(1U << bit)) != 0U)
-        {
-            count++;
-        }
-    }
-    return count;
-}
-
-/* --------------------------------------------------------------------
- * fc_command_plane_span
- *   功能：给出命令能触及的 plane 段 [*plane_first, *plane_last)。
- *   参数：command —— 命令；plane_first/plane_last —— 输出（调用者保证非空）。
- *   返回：段内 plane 数（= multi_plane，单 plane 时为 1）。
- *   实现要点：
- *     - multi-plane：从 plane 0 起，覆盖 plane_count 个 plane；
- *     - 单 plane：**只覆盖 paa_to_plane(command->paa) 那一个**——掩码是绝对编号，
- *       plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
- * -------------------------------------------------------------------- */
-static uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t *plane_first, uint8_t *plane_last)
-{
-    const uint8_t plane_count = (command->config.multi_plane > 0U) ? (uint8_t)command->config.multi_plane : 1U;
-
-    /* ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM] 都按 PLANE_NUM 定尺。
-     *   改 plane 语义时这里与 nand_dispatch_tables.c 的 multi-plane handler 要一起动。 */
-    ASSERT(plane_count <= PLANE_NUM);
-
-    *plane_first = (plane_count == 1U) ? (uint8_t)paa_to_plane(command->paa) : 0U;
-    *plane_last  = (uint8_t)(*plane_first + plane_count);
-    return plane_count;
-}
 
 /* --------------------------------------------------------------------
  * fc_command_configure_descriptor_internal
@@ -641,7 +595,7 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
  *   返回：1 = 已挂；0 = 未挂。
  *   实现要点：链长 ≤ CW_TOTAL_MAX，线性走 next_id 即可。
  *         仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
- *         否则触发 -Wunused-function，同 fc_cw_mask_popcount）。
+ *         否则触发 -Wunused-function）。
  * -------------------------------------------------------------------- */
 static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_t *controller, const fc_command_t *command, uint8_t plane, uint8_t cw)
 {
@@ -1315,11 +1269,12 @@ static void fc_build_request_data_planes(const fc_t *controller, const fc_comman
     {
         /* Single-plane：地址取自 command->paa（ftl_cmd_setup_ppa 单 plane 路径直接写它，
          * GC/WL 的单 plane 写也走这条），desc 链只负责 CW 落位。
-         * 不变式：本命令所有 desc 的 plane 位相同、行地址与 command->paa 一致——下面两条
-         * ASSERT 把它显式化（掩码位数 == 链上 desc 数；有 desc 时链上地址 == command->paa）。 */
+         * 不变式：本命令所有 desc 的 plane 位相同、行地址与 command->paa 一致——下面这条
+         * ASSERT 把它显式化（有 desc 时链上地址 == command->paa）。
+         * 「无重复 n」（掩码位数 == 链长）由 fc_command_attach_cw_internal 的 attach 侧
+         * ASSERT(fc_command_cw_attached(...)) 在污染点拦下，此处不再复核。 */
         request->plane                     = (uint8_t)paa_to_plane(command->paa);
         request->plane_paa[request->plane] = command->paa;
-        ASSERT(fc_cw_mask_popcount(request->cw_mask) == fc_command_descriptor_count(controller, command));
         ASSERT(((planes_with_desc & (uint8_t)(1U << request->plane)) == 0U) ||
                ((paa_to_block(plane_row[request->plane]) == paa_to_block(command->paa)) &&
                 (paa_to_page(plane_row[request->plane]) == paa_to_page(command->paa))));

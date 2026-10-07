@@ -148,7 +148,7 @@ FC 层仍可测（三池、desc 链、队列、数据路径、ISSUE/WAIT/FETCH �
 
 | # | 风险 | 说明 |
 |---|------|------|
-| 1 | **plane 段规则有两份实现** | `src/fc/fc.c` 的 `fc_command_plane_span` 与 `include/ftl/ftl_fc_interface.h` 的 `ftl_cmd_plane_span` 是同语义的两份代码。**改 plane 语义（如 PLANE_NUM、BA6 含义）时必须同步改两处**——已在两处注释里互相标注 |
+| 1 | ~~**plane 段规则有两份实现**~~ | **v13.1 已解决**：`fc_command_plane_span` 上移 `include/fc/fc_command.h`（`static inline`），FC 的越段校验与 FTL 的掩码展开共用一份定义；`ftl_cmd_plane_span` 删除。见 `fc_plane_span_consolidation.md` |
 | 2 | 掩码越段校验移到了 FTL | FC 侧 `fc_command_validate` 不再校验 `param.cw_mask`。若将来有 FC 内部路径直接写 `param.cw_mask`，越段不再被拦。当前无此类写入者 |
 | 3 | `ftl_cmd_configure_descriptors` 的失败语义 | 越段返回 `FTL_ERROR`（原 FC 返回 `FC_STATUS_INVALID_ARGUMENT`），且**不再自动回滚**已挂的半成品链——由调用者 `fc_command_release` 统一回收（与 `ftl_cmd_setup_ppa_pair` 一致） |
 | 4 | `fc_get_cmd_cw_mask` 只服务 RAID 断言 | RAID 关闭（`CONFIG_FC_RAID = 0`）时是"编译进去但无调用者"的公共函数。公共函数不触发 `-Wunused-function`，无警告 |

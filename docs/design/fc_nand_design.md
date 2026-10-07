@@ -3991,7 +3991,8 @@ if (mask == 0U) {
 
 链序为 **plane-major**（先 plane 0 的全部置位 CW，再 plane 1）——这只是 desc 的**建立顺序**，
 v9 起不再被任何消费点当作坐标使用（落位按 `n` 独立进行，链序无关紧要）。`fc_cw_mask_popcount`
-手写循环到 `CW_TOTAL_MAX`，不引 `__builtin_popcount`（避免 libgcc `__popcountsi2` 依赖）。
+手写循环到 `CW_TOTAL_MAX`，不引 `__builtin_popcount`（避免 libgcc `__popcountsi2` 依赖）；
+**该函数在 v13.1 随其唯一调用点（同源查重 ASSERT）一并删除**（见 §25.4 v13.1）。
 
 `fc_command_configure_descriptor_internal` 的签名从 `index` 改为显式的 `(plane, cw)`——CW 号由调用方按 mask 枚举给出，不再由 desc 序号推导。
 
@@ -4074,7 +4075,7 @@ FC 的对外函数按"硬件 FCC 寄存器表"判据过了一遍（见 §26）�
 | 项 | v12 | v13 |
 |---|---|---|
 | 掩码枚举 | `fc_command_configure_descriptors_internal`（`fc.c`，`_internal`） | `ftl_cmd_configure_descriptors()`（`src/ftl/ftl_fc_interface.c`），**读同一个 `cmd->param.cw_mask`** |
-| plane 段规则 | `fc_command_plane_span`（`fc.c` static） | 同规则另有一份 `ftl_cmd_plane_span`（`ftl_fc_interface.h` static inline）——**两份实现，改 plane 语义必须同步** |
+| plane 段规则 | `fc_command_plane_span`（`fc.c` static） | 同规则另有一份 `ftl_cmd_plane_span`（`ftl_fc_interface.h` static inline）——两份实现（**v13.1 起合并为一份，见下**） |
 | 掩码越段校验 | `fc_command_validate` 内 | `ftl_cmd_configure_descriptors` 内（FC 不再校验 `param.cw_mask`） |
 | 无数据命令短路 | `fc_command_configure_descriptors_internal` 内 | `ftl_cmd_needs_desc_chain()`（`ftl_fc_interface.h` static inline） |
 | 数据搬运 | `fc_write_cmd_data` / `fc_read_cmd_data`（`fc_interface.c`） | `ftl_cmd_write_data` / `ftl_cmd_read_data`（`ftl_fc_interface.c`），走公共访问器 `fc_descriptor_id_to_descriptor` + `fc_buffer_id_to_real_buffer` |
@@ -4096,6 +4097,25 @@ FC 的对外函数按"硬件 FCC 寄存器表"判据过了一遍（见 §26）�
 再调 `ftl_cmd_configure_descriptors()` 即得离散链——能力与 v12 逐字节相同，只是发起者在 FTL。
 
 > 详细落地见 `docs/changelog/fc_policy_layer_uplift.md`。
+
+#### v13.1：建链收敛（plane 段规则合并 + 删冗余断言）
+
+v13 留下了两处可收敛的冗余，v13.1 一并处理，**行为中性**（产出给 NAND 的 `nand_dispatch_request_t` 逐字节不变）：
+
+1. **plane 段规则合并为一份**。`fc_command_plane_span` 上移到 `include/fc/fc_command.h` 作 `static inline`
+   （它只读 `command->config.multi_plane` / `command->paa`，不碰 `fc_t`，故不受"FTL 看不到 `fc_t`"约束），
+   FC 的越段校验与 FTL 的掩码展开**共用同一份定义**；`ftl_cmd_plane_span`（`ftl_fc_interface.h`）删除。
+   改 plane 语义（`PLANE_NUM` / BA6 含义 / 单 plane 起点）从此只需动一处。
+   ⚠ FC 侧的越段校验（`fc_command_attach_cw_internal` 里 `plane` 不在 `[first, last)` 返回 `INVALID_ARGUMENT`）
+   **保留**——它挡的是"desc 落到 `plane_paa[]` 覆盖范围之外"这个静默腐坏，不是重复实现。
+
+2. **同源查重断言二选一**。"无重复 `n`"（掩码位数 == 链长）原先在两层各查一次：
+   `fc_command_attach_cw_internal` 的 attach 侧（`fc_command_cw_attached`，覆盖单/多 plane 全部路径）
+   与 `fc_build_request_data_planes` 单 plane 分支（`fc_cw_mask_popcount(mask) == fc_command_descriptor_count(...)`）。
+   保留前者——它在**污染点**（attach）就炸，定位更准，且覆盖完整；后者连同 `fc_cw_mask_popcount` 删除。
+   `fc_command_descriptor_count` 不受影响（`fc_command_release` 等仍在用）。
+
+> 详细落地见 `docs/changelog/fc_plane_span_consolidation.md`。
 
 ### 25.5 读路径统一
 

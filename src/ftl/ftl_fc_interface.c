@@ -43,7 +43,7 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd)
         return FTL_OK;
     }
 
-    plane_count = ftl_cmd_plane_span(cmd, &plane_first, &plane_last);
+    plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
     allowed     = ((uint32_t)((1U << (plane_count * CW_NUM)) - 1U)) << ((uint32_t)plane_first * CW_NUM);
 
     mask = cmd->param.cw_mask;
@@ -107,7 +107,7 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
     }
 
     /* 拓扑取 pba[0]（同一命令两 plane 必属同一 ch/ce/lun）；command->paa 也写 pba[0]——
-     * 它是 ftl_cmd_plane_span 定 plane 段的输入，各 plane 的实际行地址逐条由 row 决定。 */
+     * 它是 fc_command_plane_span 定 plane 段的输入，各 plane 的实际行地址逐条由 row 决定。 */
     cmd->config.ch  = (DWORD)pba_to_ch(pba[0]);
     cmd->config.ce  = (DWORD)pba_to_ce(pba[0]);
     cmd->config.lun = (DWORD)pba_to_lun(pba[0]);

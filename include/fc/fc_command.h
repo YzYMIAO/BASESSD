@@ -1,6 +1,7 @@
 #ifndef FC_COMMAND_H
 #define FC_COMMAND_H
 
+#include "common/assertion.h"
 #include "fc_types.h"
 
 #include <stdint.h>
@@ -213,6 +214,33 @@ struct fc_command_status_t
     fc_param_t param;           /* 命令级返回：读 = 失败掩码 param.cw_mask（bit n = plane*CW_NUM + cw）；
                                  * GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0。 */
 };
+
+/* --------------------------------------------------------------------
+ * fc_command_plane_span
+ *   功能：给出命令能触及的 plane 段 [*plane_first, *plane_last)。
+ *   参数：command —— 命令；plane_first/plane_last —— 输出（调用者保证非空）。
+ *   返回：段内 plane 数（= multi_plane，单 plane 时为 1）。
+ *   实现要点：
+ *     - multi-plane：从 plane 0 起，覆盖 plane_count 个 plane；
+ *     - 单 plane：**只覆盖 paa_to_plane(command->paa) 那一个**——掩码是绝对编号，
+ *       plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
+ *
+ *   放在头文件（唯一一份定义）：这是 fc_command_t 的结构属性——FC 侧用它做
+ *   attach 的越段校验，FTL 侧用它做掩码展开。两份实现会让改 plane 语义时漏改。
+ *   ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM]
+ *     都按 PLANE_NUM 定尺。改 plane 语义时这里与 nand_dispatch_tables.c 的
+ *     multi-plane handler 要一起动。
+ * -------------------------------------------------------------------- */
+static inline uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t *plane_first, uint8_t *plane_last)
+{
+    const uint8_t plane_count = (command->config.multi_plane > 0U) ? (uint8_t)command->config.multi_plane : 1U;
+
+    ASSERT(plane_count <= PLANE_NUM);
+
+    *plane_first = (plane_count == 1U) ? (uint8_t)paa_to_plane(command->paa) : 0U;
+    *plane_last  = (uint8_t)(*plane_first + plane_count);
+    return plane_count;
+}
 
 fc_status_t fc_command_validate(const fc_command_t *command);
 uint8_t     fc_cw_mask_is_plane_symmetric(uint32_t mask);
