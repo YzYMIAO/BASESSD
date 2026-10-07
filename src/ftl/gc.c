@@ -248,10 +248,12 @@ void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t n
     closed_idx = 0U;
     if (alloc->closed_sb_count > 0U)
     {
-        /* 定位 victim 在 closed_sb_list 中的索引（通过 plane_blocks[0] 比对） */
+        /* 定位 victim 在 closed_sb_list 中的索引。**两 plane 都比对**：Policy B 下
+         * 退化单 plane 条目的 plane_blocks[0] 是哨兵，只比 plane0 会命中另一条同哨兵条目。 */
         for (closed_idx = 0U; closed_idx < alloc->closed_sb_count; closed_idx++)
         {
-            if (alloc->closed_sb_list[closed_idx].plane_blocks[0] == victim->plane_blocks[0])
+            if ((alloc->closed_sb_list[closed_idx].plane_blocks[0] == victim->plane_blocks[0]) &&
+                (alloc->closed_sb_list[closed_idx].plane_blocks[1] == victim->plane_blocks[1]))
             {
                 break;
             }
@@ -273,6 +275,10 @@ void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t n
         nand_addr_t block_addr;
         int         ret;
 
+        if (super_block_has_plane(victim, plane) == 0U)
+        {
+            continue; /* 退化单 plane 条目：该 plane 无块可擦 */
+        }
         gblock     = ftl_gblock(plane, victim->plane_blocks[plane]);
         block_addr = super_block_page_addr(victim, plane, 0U);
 
@@ -322,10 +328,15 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
             continue;
         }
 
-        /* 有效页数 = 双 Plane 各物理块 VPC 之和（真实计数，替代 next_page 近似） */
+        /* 有效页数 = 各 plane 物理块 VPC 之和（真实计数，替代 next_page 近似）。
+         * 退化单 plane 条目（重建产物）跳过哨兵 plane。 */
         valid = 0U;
         for (p = 0U; p < PLANE_NUM; p++)
         {
+            if (super_block_has_plane(sb, p) == 0U)
+            {
+                continue;
+            }
             valid = (uint16_t)(valid + alloc->blocks[ftl_gblock(p, sb->plane_blocks[p])].valid_count);
         }
 
@@ -352,8 +363,15 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
 
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        uint16_t gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
-        uint64_t valid_map  = alloc->blocks[gblock_src].valid_map[plane];
+        uint16_t gblock_src;
+        uint64_t valid_map;
+
+        if (super_block_has_plane(victim, plane) == 0U)
+        {
+            continue; /* 退化单 plane 条目：该 plane 无块 */
+        }
+        gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
+        valid_map  = alloc->blocks[gblock_src].valid_map[plane];
 
         /*
          * 直接扫有效页位图：只搬置位页，跳过无效页（空洞/已覆盖）。

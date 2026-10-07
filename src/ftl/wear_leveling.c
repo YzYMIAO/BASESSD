@@ -145,16 +145,23 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
             continue;
         }
 
-        /* 计算该 Super Block 的平均擦除次数（全局 Block 号索引 BST） */
+        /* 计算该 Super Block 的平均擦除次数（全局 Block 号索引 BST）。
+         * 退化单 plane 条目（重建产物）跳过哨兵 plane，按实际 plane 数取平均。 */
         {
             uint32_t ec_sum = 0U;
             uint8_t  p;
+            uint8_t  n = 0U;
 
             for (p = 0U; p < PLANE_NUM; p++)
             {
+                if (super_block_has_plane(sb, p) == 0U)
+                {
+                    continue;
+                }
                 ec_sum += ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])].erase_count;
+                n++;
             }
-            sb_ec = ec_sum / PLANE_NUM;
+            sb_ec = (n > 0U) ? (ec_sum / n) : 0U;
         }
 
         /* 不在低擦除区 → 跳过（擦除够多了） */
@@ -176,8 +183,14 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 
             for (p = 0U; p < PLANE_NUM; p++)
             {
-                const ftl_block_t *blk = &ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])];
-                valid                  = (uint16_t)(valid + blk->valid_count);
+                const ftl_block_t *blk;
+
+                if (super_block_has_plane(sb, p) == 0U)
+                {
+                    continue; /* 退化单 plane 条目 */
+                }
+                blk   = &ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])];
+                valid = (uint16_t)(valid + blk->valid_count);
                 rc_sum += blk->read_count;
             }
 
@@ -221,8 +234,15 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
     /* Step 1: 遍历双 Plane 有效页位图，只搬置位页（免 NAND 读无效页） */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        uint16_t gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
-        uint64_t valid_map  = ftl->alloc.blocks[gblock_src].valid_map[plane];
+        uint16_t gblock_src;
+        uint64_t valid_map;
+
+        if (victim->plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
+        {
+            continue; /* 退化单 plane 条目：该 plane 无块 */
+        }
+        gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
+        valid_map  = ftl->alloc.blocks[gblock_src].valid_map[plane];
 
         while (valid_map != 0ULL)
         {
@@ -381,10 +401,17 @@ int wl_predictive_relocate(struct ftl_context *ftl)
      * （gc.c:277-280 按 plane_blocks[0] 自动定位移除 closed 条目），无需外部再清。 */
     (void)wl_relocate(ftl, &victim);
 
-    /* 搬完后双 plane 块退役：不再分配新数据（RESERVED），不标坏（仍可读） */
+    /* 搬完后各 plane 块退役：不再分配新数据（RESERVED），不标坏（仍可读）。
+     * 退化单 plane 条目跳过哨兵 plane。 */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        ftl_block_t *retired = &ftl->alloc.blocks[ftl_gblock(plane, victim.plane_blocks[plane])];
+        ftl_block_t *retired;
+
+        if (victim.plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
+        {
+            continue;
+        }
+        retired = &ftl->alloc.blocks[ftl_gblock(plane, victim.plane_blocks[plane])];
         rr_retire_block(retired);
     }
 

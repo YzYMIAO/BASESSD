@@ -5,7 +5,8 @@
  * Wear Leveling — 动态 + 静态磨损均衡
  *
  * 动态磨损均衡（Dynamic WL）：
- *   allocator_select_block() 每次从 Free Pool 选擦除次数最少的 Block，
+ *   allocator_select_plane_block() 每次为**每个 plane 各自**从 Free Pool 选该 plane
+ *   擦除次数最少的 Block（Policy B：两 plane 独立分配，不再要求 block 同号），
  *   确保新分配的 Block 磨损均匀。已在 allocator 中实现。
  *
  * 静态磨损均衡（Static WL）：

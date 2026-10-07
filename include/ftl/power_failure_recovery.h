@@ -34,10 +34,9 @@ struct ftl_context;
 /* ── 掉电重建闭环的标志量（上板验证用，UART 可读） ── */
 typedef struct
 {
-    uint16_t sb_rebuilt;    /* 重建的 Closed Super Block 数 */
-    uint16_t partial_pairs; /* 扫描到的部分写 Super Block 对数 */
-    uint16_t valid_pages;   /* 重建回填的有效页总数 */
-    uint16_t open_restored; /* 恢复的 Open Super Block 数（0/1/2） */
+    uint16_t blocks_rebuilt; /* 重建的 Closed 条目数（= 扫到的写过物理块数，per-plane） */
+    uint16_t partial_blocks; /* 其中部分写块数（写指针 < PAGES_PER_BLOCK，整块交 GC） */
+    uint16_t valid_pages;    /* 重建回填的有效页总数（L2P 反查确认） */
 } ftl_rebuild_stats_t;
 
 /* ── 启动类型 ── */
@@ -146,14 +145,15 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
  * 已写满的 Super Block 不在列表里 → GC/WL/rr_predictive_scan 看不到 → 容量
  * 泄漏；且这些块还被 free pool 回填，可能被复用（覆盖未擦除半满块）。
  *
- * 本函数同步扫描全 NAND：
+ * 本函数同步扫描全 NAND（**逐 plane 独立**，Policy B：两 plane 块不再同号）：
  *   ① 坏块 / 元数据块（ftl_is_metadata_block）跳过
- *   ② 逐 Plane 判空找写指针（LDPC_RAW + 全 0xFF）
+ *   ② 判空找写指针（LDPC_RAW + 全 0xFF）
  *   ③ 未写过（全 FF）→ 保持 FREE，跳过
- *   ④ 满块（双 Plane 全非空）→ allocator_add_closed_sb 进 Closed 列表，
- *      逐页 gc_read_page_with_lba 取 LBA + l2p_cache_read 反查回填 valid_map
- *      （只置 L2P 仍指向本页的真有效页，覆盖/torn 页不置位）
- *   ⑤ 部分写块 → 前 2 对恢复 Open SB，其余强制 Closed（GC 迁移自动清 torn）
+ *   ④ 写过的块 → allocator_add_closed_sb 进 Closed 列表（另一 plane 记
+ *      FTL_BLOCK_NO_PLANE 哨兵），逐页 gc_read_page_with_lba 取 LBA +
+ *      l2p_cache_read 反查回填 valid_map（只置 L2P 仍指向本页的真有效页）
+ *   ⑤ 部分写块（掉电时未写满的 Open SB）同样进 Closed，交 GC 迁移——不再恢复 Open SB
+ *      （per-block 下无法确定两个部分写块是否曾是一对）
  *   ⑥ 结尾重同步 pre_cond_count = free_count（拉出写过的块后）
  *
  * 调用时机（ftl_boot_recovery 内）：

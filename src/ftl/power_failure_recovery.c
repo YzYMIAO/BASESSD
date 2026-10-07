@@ -562,7 +562,9 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
  *   ① GC/WL/rr_predictive_scan 看不到这些块 → 容量泄漏
  *   ② main.c free pool 回填把它们当空白块 → 复用未擦除半满块
  *
- * 本函数逐 Block 扫描 NAND，判空 + L2P 反查，重建 closed 列表与 BST 有效位图。
+ * 本函数逐 plane 逐 Block 扫描 NAND，判空 + L2P 反查，重建 closed 列表与 BST 有效位图。
+ * Policy B：两 plane 的块独立分配、不再同号，故按**单物理块**建 Closed 条目（另一
+ * plane 记 FTL_BLOCK_NO_PLANE 哨兵），配对无需恢复。
  * ══════════════════════════════════════════════════════════════════ */
 
 /* 判一页是否为全 0xFF 空白页。buffer 复用单个大缓冲，避免 16B 栈溢出（既有
@@ -616,97 +618,60 @@ static uint8_t scan_block_write_pointer(const ftl_context_t *ftl, uint8_t plane,
     return (uint8_t)PAGES_PER_BLOCK; /* 全写满 */
 }
 
-/* 把部分写块恢复为 Open Super Block（保留写指针前页 + 重建 bitmap，不判 L2P——
- * 镜像现有 ftl_boot_scan_write_pointer 语义，torn 页后续被 GC 迁移反查清掉）。 */
-static void recover_open_sb(ftl_allocator_t *alloc,
-                            uint16_t         block,
-                            uint8_t          next_page,
-                            uint8_t          temperature)
-{
-    uint8_t        plane;
-    uint8_t        page;
-    uint16_t       gblock;
-    ftl_block_t   *b;
-    super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
-
-    /* 置 OPEN（清 FREE/CLOSED）+ 温度 + 写指针 + valid=1 */
-    for (plane = 0U; plane < PLANE_NUM; plane++)
-    {
-        gblock = ftl_gblock(plane, block);
-        b      = &alloc->blocks[gblock];
-        ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED);
-        ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
-        ftl_block_set_temp(b, temperature);
-        ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
-    }
-
-    sb->plane_blocks[0] = block;
-    sb->plane_blocks[1] = block;
-    sb->next_page       = next_page;
-    sb->temperature     = temperature;
-    sb->valid           = 1U;
-    sb->topo.ch         = alloc->ch;
-    sb->topo.ce         = alloc->ce;
-    sb->topo.lun        = alloc->lun;
-
-    /* 写指针前的非空页重建有效位图（双 Plane 同步写入，next_page 已含两者） */
-    for (plane = 0U; plane < PLANE_NUM; plane++)
-    {
-        b = &alloc->blocks[ftl_gblock(plane, block)];
-        for (page = 0U; page < next_page; page++)
-        {
-            ftl_block_set_valid(b, plane, page);
-        }
-    }
-}
-
-/* 满块：进 Closed 列表 + 逐页 L2P 双校验回填 valid_map（只置真有效页） */
+/* 写过的物理块：进 Closed 列表（退化单 plane 条目）+ 逐页 L2P 双校验回填 valid_map
+ * （只置 L2P 仍指向本页的真有效页，覆盖/torn 页不置位）。
+ *
+ * Policy B 下配对不再需要被恢复——两 plane 的块各自独立归位即可，故本函数按
+ * **单个物理块** 建一条 Closed 条目，另一 plane 记 FTL_BLOCK_NO_PLANE 哨兵。 */
 static void close_full_block(ftl_context_t       *ftl,
+                             uint8_t              plane,
                              uint16_t             block,
                              uint8_t              temperature,
                              ftl_rebuild_stats_t *stats)
 {
     ftl_allocator_t *alloc = &ftl->alloc;
     uint16_t         sb_idx;
-    uint8_t          plane;
-    uint8_t          page;
+    uint16_t         page;
+    uint16_t         plane_blocks[PLANE_NUM];
+    ftl_block_t     *b;
 
-    sb_idx = allocator_add_closed_sb(alloc, (const uint16_t[PLANE_NUM]){block, block}, temperature);
+    /* 退化单 plane 条目：本 plane 记块号，另一 plane 记哨兵 */
+    plane_blocks[0]     = FTL_BLOCK_NO_PLANE;
+    plane_blocks[1]     = FTL_BLOCK_NO_PLANE;
+    plane_blocks[plane] = block;
+
+    sb_idx = allocator_add_closed_sb(alloc, plane_blocks, temperature);
     /* allocator_add_closed_sb 内部已断言列表未满，恒返回有效索引 */
     ASSERT(sb_idx != UINT16_MAX);
 
     if (stats != NULL)
     {
-        stats->sb_rebuilt++;
+        stats->blocks_rebuilt++;
     }
 
     /* 逐页：LDPC_RAW 判空 + gc_read_page_with_lba 取 LBA + l2p 反查 */
-    for (plane = 0U; plane < PLANE_NUM; plane++)
+    b = &alloc->blocks[ftl_gblock(plane, block)];
+    for (page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, block)];
+        nand_pba_t pba;
+        lba_t      lba;
+        nand_pba_t cur;
 
-        for (page = 0U; page < PAGES_PER_BLOCK; page++)
+        pba = super_block_page_pba(alloc->ch, alloc->ce, &alloc->closed_sb_list[sb_idx], plane, page);
+
+        /* 读失败 / LBA 提取失败 → 该页不可用，跳过 */
+        if (gc_read_page_with_lba(pba, NULL, &lba, NULL, NULL) != FTL_OK)
         {
-            nand_pba_t pba;
-            lba_t      lba;
-            nand_pba_t cur;
+            continue;
+        }
 
-            pba = super_block_page_pba(alloc->ch, alloc->ce, &alloc->closed_sb_list[sb_idx], plane, page);
-
-            /* 读失败 / LBA 提取失败 → 该页不可用，跳过 */
-            if (gc_read_page_with_lba(pba, NULL, &lba, NULL, NULL) != FTL_OK)
+        cur = l2p_cache_read(&ftl->cache, lba);
+        if ((cur != FTL_PBA_INVALID) && (cur == pba))
+        {
+            ftl_block_set_valid(b, plane, page);
+            if (stats != NULL)
             {
-                continue;
-            }
-
-            cur = l2p_cache_read(&ftl->cache, lba);
-            if ((cur != FTL_PBA_INVALID) && (cur == pba))
-            {
-                ftl_block_set_valid(b, plane, page);
-                if (stats != NULL)
-                {
-                    stats->valid_pages++;
-                }
+                stats->valid_pages++;
             }
         }
     }
@@ -717,8 +682,8 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
 {
     uint8_t          raw_buf[PAGE_SIZE];
     ftl_allocator_t *alloc;
+    uint8_t          plane;
     uint16_t         block;
-    uint8_t          open_restored = 0U;
 
     if (ftl == NULL)
     {
@@ -736,66 +701,51 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
         memset(stats, 0, sizeof(*stats));
     }
 
-    for (block = 0U; block < BLOCKS_PER_PLANE; block++)
+    /* Policy B：**逐 plane 独立扫描**——两 plane 的块不再同号。配对只在写入时由
+     * allocator 创建，之后从不被查找（multi-plane 读的两个 PBA 各自从 L2P 查；
+     * GC/WL 逐 plane 工作），故重建只需把"写过的物理块各自归位"，无需、也无法
+     * 恢复"哪两块曾是一对"（配对取决于 GC 历史，不在任何持久化位图里）。 */
+    for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        uint16_t     g0 = ftl_gblock(0U, block);
-        uint16_t     g1 = ftl_gblock(1U, block);
-        ftl_block_t *b0 = &alloc->blocks[g0];
-        ftl_block_t *b1 = &alloc->blocks[g1];
-        uint8_t      np0;
-        uint8_t      np1;
-
-        /* ① 坏块 / 元数据块跳过 */
-        if (ftl_block_is_bad(b0) || ftl_block_is_bad(b1) ||
-            ftl_is_metadata_block(&ftl->metadata_dir, block))
+        for (block = 0U; block < BLOCKS_PER_PLANE; block++)
         {
-            continue;
-        }
+            uint16_t     g = ftl_gblock(plane, block);
+            ftl_block_t *b = &alloc->blocks[g];
+            uint8_t      np;
 
-        /* ② 逐 Plane 判空找写指针 */
-        np0 = scan_block_write_pointer(ftl, 0U, block, raw_buf);
-        np1 = scan_block_write_pointer(ftl, 1U, block, raw_buf);
-
-        /* ③ 未写过（双 Plane 全 FF）→ 保持 FREE */
-        if ((np0 == 0U) && (np1 == 0U))
-        {
-            continue;
-        }
-
-        /* 写过：从 free pool 拉出（防止开机后当作空白块复用覆盖） */
-        allocator_remove_from_free(alloc, g0);
-        allocator_remove_from_free(alloc, g1);
-
-        /* ④ 满块（双 Plane 全非空）→ Closed + 双校验回填 */
-        if ((np0 == PAGES_PER_BLOCK) && (np1 == PAGES_PER_BLOCK))
-        {
-            close_full_block(ftl, block, FTL_TEMP_HOT, stats);
-            continue;
-        }
-
-        /* ⑤ 部分写块：前 2 对恢复 Open SB，其余强制 Closed（GC 清 torn） */
-        if (open_restored < PLANE_NUM) /* 最多 2 个 Open（Hot/Cold） */
-        {
-            uint8_t temp = (open_restored == 0U) ? FTL_TEMP_HOT : FTL_TEMP_COLD;
-            uint8_t np   = (np0 < np1) ? np0 : np1;
-
-            recover_open_sb(alloc, block, np, temp);
-            open_restored++;
-            if (stats != NULL)
+            /* ① 坏块 / 元数据块跳过（判据与 main.c free pool 回填一致，per-plane 块号） */
+            if (ftl_block_is_bad(b) || ftl_is_metadata_block(&ftl->metadata_dir, block))
             {
-                stats->open_restored = open_restored;
+                continue;
             }
-            continue;
-        }
 
-        close_full_block(ftl, block, FTL_TEMP_HOT, stats);
-        if (stats != NULL)
-        {
-            stats->partial_pairs++;
+            /* ② 判空找写指针（第一个全 FF 页） */
+            np = scan_block_write_pointer(ftl, plane, block, raw_buf);
+
+            /* ③ 未写过（全 FF）→ 保持 FREE */
+            if (np == 0U)
+            {
+                continue;
+            }
+
+            /* 写过：从 free pool 拉出（防止开机后当作空白块复用覆盖） */
+            allocator_remove_from_free(alloc, g);
+
+            /* ④ 写过的块一律进 Closed——含写满块与掉电时的部分写块。
+             *    部分写块不再"续写"（旧 recover_open_sb 行为）：per-block 下无法确定两个
+             *    部分写块是否曾是一对，强行恢复 Open SB 会让后续 multi-plane 写落到错误的
+             *    plane1 块。整块交 GC 迁移其有效页——安全性等价（块不会被当空白复用），
+             *    代价是掉电后多一次 GC 搬移。 */
+            close_full_block(ftl, plane, block, FTL_TEMP_HOT, stats);
+
+            if ((stats != NULL) && (np < PAGES_PER_BLOCK))
+            {
+                stats->partial_blocks++;
+            }
         }
     }
 
-    /* ⑥ 重同步：已从 free pool 拉出写过的块 */
+    /* ⑤ 重同步：已从 free pool 拉出写过的块 */
     alloc->pre_cond_count = alloc->free_count;
 
     return FTL_OK;
