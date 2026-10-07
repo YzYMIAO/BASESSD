@@ -6,179 +6,6 @@
 
 #include <string.h>
 
-/* ── 内部同步写页（原 ftl_internal_write_page 内联化）──
- *
- * 固定地址直填：由 nand_addr_t 构造 → addr_to_cmd，不再 pba_make 打包。
- * 元数据页写入固定位置，不依赖 allocator。
- */
-static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = (DWORD)crc;
-    cmd->config.random      = (DWORD)random;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = (DWORD)module;
-    cmd->meta               = (DWORD)lba;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if ((data != NULL) && (length > 0U))
-    {
-        (void)ftl_cmd_write_data(cmd, data, length);
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
-/* ── 内部同步读页（原 ftl_internal_read_page 内联化）── */
-static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = (DWORD)crc;
-    cmd->config.random      = (DWORD)random;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = (DWORD)module;
-    cmd->meta               = (DWORD)lba;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if ((buffer != NULL) && (length > 0U))
-    {
-        (void)ftl_cmd_read_data(cmd, buffer, length);
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
-/* ── 内部同步擦除（原 ftl_internal_erase_block 内联化，20ms 超时）── */
-static ftl_status_t sync_erase_block(nand_addr_t addr)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_ERASE_BLOCK;
-    cmd->config.cw          = 0U;
-    cmd->config.crc         = FC_CRC_DISABLE;
-    cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = FC_COMMAND_MODULE_METADATA;
-    cmd->meta               = 0U;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 20000U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
 /* ── Journal Block 页地址辅助 ── */
 static nand_addr_t journal_page_addr(const l2p_journal_t *journal, uint8_t b, uint8_t page)
 {
@@ -296,7 +123,7 @@ void journal_flush_page(l2p_journal_t *journal)
      * 同步写 Journal 页到 NAND。
      * CRC/Random DISABLED：Journal 有自身四层保护（ECC/CRC/entry_count/sequence）。
      */
-    (void)sync_write_page(waddr, journal->page_buf, JOURNAL_PAGE_SIZE, FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
+    (void)ftl_sync_write_page(waddr, journal->page_buf, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
 
     /* 推进指针 */
     journal->current_page++;
@@ -307,7 +134,7 @@ void journal_flush_page(l2p_journal_t *journal)
         journal->current_page  = 0U;
 
         /* 擦除目标 Block（已存在的旧数据）*/
-        (void)sync_erase_block(journal_block_addr(journal, (uint8_t)journal->current_block));
+        (void)ftl_sync_erase_block(journal_block_addr(journal, (uint8_t)journal->current_block));
     }
 
     journal->current_entry = 0U;
@@ -355,7 +182,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
             raddr = journal_page_addr(journal, b, (uint8_t)page);
 
             memset(page_data, 0xFF, sizeof(page_data));
-            ret = sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
+            ret = ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
             if (ret != 0)
             {
                 continue; /* 读失败，跳过本页 */
@@ -447,7 +274,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
             raddr = journal_page_addr(journal, replay_pages[i].block, replay_pages[i].page);
 
             memset(page_data, 0xFF, sizeof(page_data));
-            ret = sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_COMMAND_MODULE_METADATA, 0U);
+            ret = ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
             if (ret != 0)
             {
                 continue; /* 页已失效，跳过（应用顺序其余页不受影响） */
@@ -523,7 +350,7 @@ void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
     /* 擦除非当前 Block（对方 Block 中所有 entry 的 seq ≤ cp_seq，可安全擦除） */
     b = (journal->current_block == 0U) ? 1U : 0U;
 
-    (void)sync_erase_block(journal_block_addr(journal, b));
+    (void)ftl_sync_erase_block(journal_block_addr(journal, b));
 
     /* 截断后水位清零：对方 Block 已擦除，当前 Block 继续写入直到回切。
      * 复位 watermark 标志（设计 §7.5.4）——truncate 即水位已清，

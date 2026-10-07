@@ -15,122 +15,6 @@
 #define METADATA_DIR_CRC_OFFSET (sizeof(uint32_t) * 3 + sizeof(metadata_entry_t) * METADATA_DIR_ENTRIES)
 /* = 4 + 4 + 4 + 896 = 908 */
 
-/* ── 内部同步写页（原 ftl_internal_write_page 内联化，固定地址直填）── */
-static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = FC_CRC_DISABLE;
-    cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = FC_COMMAND_MODULE_METADATA;
-    cmd->meta               = 0U;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if ((data != NULL) && (length > 0U))
-    {
-        (void)ftl_cmd_write_data(cmd, data, length);
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
-/* ── 内部同步读页（原 ftl_internal_read_page 内联化）── */
-static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = FC_CRC_DISABLE;
-    cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = FC_COMMAND_MODULE_METADATA;
-    cmd->meta               = 0U;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if ((buffer != NULL) && (length > 0U))
-    {
-        (void)ftl_cmd_read_data(cmd, buffer, length);
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
 /* ── Anchor 固定位置页地址（Block0/Block1 各 3 页）── */
 static nand_addr_t anchor_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint8_t i)
 {
@@ -339,7 +223,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         for (i = 0U; i < ANCHOR_REDUNDANCY; i++)
         {
             nand_addr_t aaddr = anchor_page_addr(dir->topo.ch, dir->topo.ce, dir->topo.lun, i);
-            ret               = sync_write_page(aaddr, &anchor, sizeof(anchor));
+            ret               = ftl_sync_write_page(aaddr, &anchor, sizeof(anchor), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
             if (ret != 0)
             {
                 /* 单份写失败不影响整体（有冗余） */
@@ -351,7 +235,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         for (i = 0U; i < ANCHOR_REDUNDANCY; i++)
         {
             nand_addr_t aaddr = anchor_page_addr(dir->topo.ch, dir->topo.ce, dir->topo.lun, (uint8_t)(i + ANCHOR_REDUNDANCY));
-            ret               = sync_write_page(aaddr, &anchor, sizeof(anchor));
+            ret               = ftl_sync_write_page(aaddr, &anchor, sizeof(anchor), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
             if (ret != 0)
             {
                 continue;
@@ -388,7 +272,7 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
         pba = addr_from_paa(dir->topo.ch, dir->topo.ce, paa_with_lun(metadata_dir_anchor_paa(i), dir->topo.lun));
         memset(&candidates[i], 0, sizeof(candidates[i]));
 
-        ret = sync_read_page(pba, &candidates[i], sizeof(candidates[i]));
+        ret = ftl_sync_read_page(pba, &candidates[i], sizeof(candidates[i]), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
         if (ret != 0)
         {
             continue; /* 读失败，跳过 */

@@ -6,125 +6,6 @@
 
 #include <string.h>
 
-/* ── 内部同步读页（原 ftl_internal_read_page 内联化，元数据路径）──
- *
- * L2P Region 读写走固定位置或 Directory 查到的 PAA，均用展开地址直填。
- */
-static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = FC_CRC_DISABLE;
-    cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = FC_COMMAND_MODULE_METADATA;
-    cmd->meta               = 0U;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if ((buffer != NULL) && (length > 0U))
-    {
-        (void)ftl_cmd_read_data(cmd, buffer, length);
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
-/* ── 内部同步写页（原 ftl_internal_write_page 内联化，元数据路径）── */
-static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = FC_CRC_DISABLE;
-    cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = FC_COMMAND_MODULE_METADATA;
-    cmd->meta               = 0U;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if ((data != NULL) && (length > 0U))
-    {
-        (void)ftl_cmd_write_data(cmd, data, length);
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
 void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
 {
     uint16_t i;
@@ -317,7 +198,7 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
             region_addr = addr_from_pba(l2p_region_pba(cache->ch, cache->ce, cache->lun, region_id));
         }
 
-        int ret = sync_read_page(region_addr, line->entries, L2P_REGION_SIZE);
+        int ret = ftl_sync_read_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
         if (ret == 0)
         {
             line->state = L2P_CACHE_CLEAN;
@@ -449,7 +330,7 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
      * 同步写 Region 到 NAND L2P Table。
      * CRC/Random DISABLED（元数据不走加扰/CRC），仅 BCH ECC 保护。
      */
-    ret = sync_write_page(region_addr, line->entries, L2P_REGION_SIZE);
+    ret = ftl_sync_write_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
 
     if (ret == 0)
     {

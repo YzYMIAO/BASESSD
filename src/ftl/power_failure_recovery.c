@@ -11,123 +11,6 @@
 
 #include <string.h>
 
-/* ── 内部同步读页（原 ftl_internal_read_page 内联化，元数据路径）── */
-static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = FC_CRC_DISABLE;
-    cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = FC_COMMAND_MODULE_METADATA;
-    cmd->meta               = 0U;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if ((buffer != NULL) && (length > 0U))
-    {
-        (void)ftl_cmd_read_data(cmd, buffer, length);
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
-/* ── 内部同步读全页（原 ftl_internal_read_page_raw 内联化，LDPC_RAW）── */
-static ftl_status_t sync_read_page_raw(nand_addr_t addr, void *buffer)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-    uint8_t             cw;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = FC_CRC_DISABLE;
-    cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_LDPC_RAW;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = FC_COMMAND_MODULE_BBT;
-    cmd->meta               = 0U;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    for (cw = 0U; cw < CW_NUM; cw++)
-    {
-        uint8_t *src = fc_get_cmd_data_ptr(cmd, cw);
-        if (src != NULL)
-        {
-            memcpy((uint8_t *)buffer + (uint32_t)cw * FC_BUFFER_POOL_CW_SIZE,
-                   src,
-                   FC_BUFFER_USER_SIZE);
-        }
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
 /* ── Journal Block 页地址辅助（双 Block 双 Plane 交错）── */
 static nand_addr_t journal_page_addr(const ftl_context_t *ftl, uint8_t b, uint8_t page)
 {
@@ -194,7 +77,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
 
                     pba = journal_page_addr(ftl, b, page);
 
-                    ret = sync_read_page(pba, page_data, sizeof(page_data));
+                    ret = ftl_sync_read_page(pba, page_data, sizeof(page_data), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
                     if (ret != 0)
                     {
                         continue;
@@ -368,7 +251,7 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
                                                                line->region_id));
                 }
 
-                if (sync_read_page(region_addr, line->entries, L2P_REGION_SIZE) == FTL_OK)
+                if (ftl_sync_read_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) == FTL_OK)
                 {
                     line->state = L2P_CACHE_CLEAN;
                 }
@@ -497,7 +380,7 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
              * 用 LDPC_RAW 模式读（跳过 ECC，获得原始数据）。
              * 如果完全全 0xFF → 空页。
              */
-            ret = sync_read_page_raw(pba, buf);
+            ret = ftl_sync_read_page_raw(pba, buf, FC_COMMAND_MODULE_BBT);
 
             /*
              * 即使 LDPC_RAW 返回失败，也检查数据是否全 FF。
@@ -568,14 +451,14 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
  * ══════════════════════════════════════════════════════════════════ */
 
 /* 判一页是否为全 0xFF 空白页。buffer 复用单个大缓冲，避免 16B 栈溢出（既有
- * ftl_boot_scan_write_pointer 的 buf[16] 传给按 2048B 拷贝的 sync_read_page_raw）。 */
+ * ftl_boot_scan_write_pointer 的 buf[16] 传给按 2048B 拷贝的 ftl_sync_read_page_raw）。 */
 static uint8_t page_is_blank(const nand_addr_t *addr, uint8_t *raw_buf)
 {
     uint8_t i;
     uint8_t j;
 
     memset(raw_buf, 0xFF, PAGE_SIZE);
-    (void)sync_read_page_raw(*addr, raw_buf); /* 读失败也不影响：数据非全 FF 即判非空 */
+    (void)ftl_sync_read_page_raw(*addr, raw_buf, FC_COMMAND_MODULE_BBT); /* 读失败也不影响：数据非全 FF 即判非空 */
 
     /* 每 CW 的 META(4B)+CRC(4B)+前 8B 数据，共 16B。全 FF 页 META/CRC 也全 FF。 */
     for (i = 0U; i < CW_NUM; i++)

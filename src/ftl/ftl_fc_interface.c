@@ -308,3 +308,189 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
 
     return FTL_OK;
 }
+
+/* ── 页级同步原语（18 份内联 → 4 份公共）──
+ *
+ * 四个函数共用同一模板：alloc → 填配置 → addr_to_cmd（建链）→ 可选搬数据 →
+ * submit → sync_wait → 判 NAND 成败 → release。差异只在：
+ *   · operation（PROGRAM / READ / ERASE）
+ *   · 配置（crc / random / ldpc / module / lba）
+ *   · 数据方向（写：submit 前搬入；读：完成后搬出）
+ *   · 是否判 NAND 失败（RAW 读刻意不判）
+ *   · 超时（擦除 20ms，其余默认）
+ */
+
+/* 分配命令 + 填配置 + 建链。失败返回 NULL（命令已回收）。 */
+static fc_command_t *sync_page_prepare(nand_addr_t addr, uint8_t operation, uint8_t cw, const ftl_page_cfg_t *cfg)
+{
+    fc_command_t *cmd = fc_command_alloc();
+
+    if (cmd == NULL)
+    {
+        return NULL;
+    }
+
+    cmd->config.operation   = (DWORD)operation;
+    cmd->config.cw          = (DWORD)cw;
+    cmd->config.crc         = (DWORD)cfg->crc;
+    cmd->config.random      = (DWORD)cfg->random;
+    cmd->config.ldpc        = (DWORD)cfg->ldpc;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = (DWORD)cfg->module;
+    cmd->meta               = (DWORD)cfg->lba;
+
+    if (addr_to_cmd(cmd, &addr) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return NULL;
+    }
+
+    return cmd;
+}
+
+/* 提交并等待完成。返回 0 = 命令完成（不论 NAND 成败）；-1 = 提交或等待失败。
+ * ⚠ 不判定 NAND_FAIL —— RAW 读刻意忽略它（坏页也要拿原始数据），
+ *    故成败判定留在调用者。命令不在此释放。 */
+static int sync_page_submit_wait(fc_command_t *cmd, fc_command_status_t *completion, uint32_t timeout_us)
+{
+    if (fc_submit(cmd) != FC_STATUS_OK)
+    {
+        return -1;
+    }
+    if (ftl_internal_sync_wait(cmd->command_id, completion, timeout_us) != 0)
+    {
+        return -1;
+    }
+    return 0;
+}
+
+ftl_status_t ftl_sync_write_page(nand_addr_t addr, const void *data, uint32_t length, const ftl_page_cfg_t *cfg)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = sync_page_prepare(addr, OP_NORMAL_PROGRAM_PAGE, 3U, cfg);
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    if ((data != NULL) && (length > 0U))
+    {
+        (void)ftl_cmd_write_data(cmd, data, length);
+    }
+
+    ret = sync_page_submit_wait(cmd, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+ftl_status_t ftl_sync_read_page(nand_addr_t addr, void *buffer, uint32_t length, const ftl_page_cfg_t *cfg)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = sync_page_prepare(addr, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, 3U, cfg);
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    ret = sync_page_submit_wait(cmd, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if ((buffer != NULL) && (length > 0U))
+    {
+        (void)ftl_cmd_read_data(cmd, buffer, length);
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+ftl_status_t ftl_sync_read_page_raw(nand_addr_t addr, void *buffer, uint8_t module)
+{
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_LDPC_RAW, module, 0U};
+    fc_command_t        *cmd;
+    fc_command_status_t  completion;
+    uint8_t              cw;
+
+    cmd = sync_page_prepare(addr, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, 3U, &cfg);
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    if (sync_page_submit_wait(cmd, &completion, 0U) != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    /* 不判 NAND 失败：整页 4 个 CW 无条件拷出 */
+    for (cw = 0U; cw < CW_NUM; cw++)
+    {
+        uint8_t *src = fc_get_cmd_data_ptr(cmd, cw);
+
+        if (src != NULL)
+        {
+            memcpy((uint8_t *)buffer + (uint32_t)cw * FC_BUFFER_POOL_CW_SIZE, src, FC_BUFFER_USER_SIZE);
+        }
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+ftl_status_t ftl_sync_erase_block(nand_addr_t addr)
+{
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, FC_COMMAND_MODULE_METADATA, 0U};
+    fc_command_t        *cmd;
+    fc_command_status_t  completion;
+    int                  ret;
+
+    cmd = sync_page_prepare(addr, OP_ERASE_BLOCK, 0U, &cfg);
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    ret = sync_page_submit_wait(cmd, &completion, 20000U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}

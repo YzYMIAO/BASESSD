@@ -9,64 +9,6 @@
 
 #include <string.h>
 
-/* ── 内部同步读页（原 ftl_internal_read_page 内联化，CRC/Random 使能 + LBA META）── */
-static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length, uint8_t crc, uint8_t random, uint8_t module, lba_t lba)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = (DWORD)crc;
-    cmd->config.random      = (DWORD)random;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = (DWORD)module;
-    cmd->meta               = (DWORD)lba;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if ((buffer != NULL) && (length > 0U))
-    {
-        (void)ftl_cmd_read_data(cmd, buffer, length);
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
 void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits)
 {
     /* 层内接口：调用者一律传 &ftl_block_t.rr（BST 常驻，恒非 NULL） */
@@ -162,7 +104,7 @@ static int rr_exec_retry(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buffer, u
      */
     {
         nand_addr_t raddr = addr_from_pba(pba);
-        ret               = sync_read_page(raddr, buffer, length, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, lba);
+        ret               = ftl_sync_read_page(raddr, buffer, length, FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_READ_RECOVERY, lba));
     }
     if (ret == 0)
     {
@@ -248,7 +190,7 @@ static int rr_neighbor_assist(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buff
         neighbor_addr = addr_from_paa(ch, ce, paa_make(neighbors[i], plane, block, 0U, 0U));
 
         memset(neighbor_buf, 0, sizeof(neighbor_buf));
-        ret = sync_read_page(neighbor_addr, neighbor_buf, sizeof(neighbor_buf), FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, 0U);
+        ret = ftl_sync_read_page(neighbor_addr, neighbor_buf, sizeof(neighbor_buf), FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_READ_RECOVERY, 0U));
         if (ret == 0)
         {
             /*
@@ -257,7 +199,7 @@ static int rr_neighbor_assist(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buff
              */
             {
                 nand_addr_t raddr = addr_from_pba(pba);
-                ret               = sync_read_page(raddr, buffer, length, FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_COMMAND_MODULE_READ_RECOVERY, lba);
+                ret               = ftl_sync_read_page(raddr, buffer, length, FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_READ_RECOVERY, lba));
             }
             if (ret == 0)
             {

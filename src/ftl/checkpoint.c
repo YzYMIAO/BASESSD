@@ -33,122 +33,6 @@ static uint32_t checkpoint_now_ms(const ftl_context_t *ftl)
 #define CHECKPOINT_CRC_OFFSET (CHECKPOINT_CRC_SIZE + sizeof(uint32_t) * 64) /* + region_bitmap[64] */
 /* = 24 + 256 = 280 bytes covered by CRC */
 
-/* ── 内部同步写页（原 ftl_internal_write_page 内联化，固定地址直填）── */
-static ftl_status_t sync_write_page(nand_addr_t addr, const void *data, uint32_t length, uint8_t module)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = FC_CRC_DISABLE;
-    cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = (DWORD)module;
-    cmd->meta               = 0U;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if ((data != NULL) && (length > 0U))
-    {
-        (void)ftl_cmd_write_data(cmd, data, length);
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
-/* ── 内部同步读页（原 ftl_internal_read_page 内联化）── */
-static ftl_status_t sync_read_page(nand_addr_t addr, void *buffer, uint32_t length, uint8_t module)
-{
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-    int                 ret;
-
-    cmd = fc_command_alloc();
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw          = 3U;
-    cmd->config.crc         = FC_CRC_DISABLE;
-    cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = (DWORD)module;
-    cmd->meta               = 0U;
-
-    if (addr_to_cmd(cmd, &addr) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    ret = ftl_internal_sync_wait(cmd->command_id, &completion, 0U);
-    if (ret != 0)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if (completion.status & FC_CW_STATUS_NAND_FAIL)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    if ((buffer != NULL) && (length > 0U))
-    {
-        (void)ftl_cmd_read_data(cmd, buffer, length);
-    }
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
-
 /* ── Checkpoint 固定位置页地址（Block0/Block1 各 3 页）── */
 static nand_addr_t checkpoint_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint8_t i)
 {
@@ -261,7 +145,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
 
         pba = checkpoint_page_addr(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, i);
 
-        ret = sync_write_page(pba, &cp, sizeof(cp), FC_COMMAND_MODULE_CHECKPOINT);
+        ret = ftl_sync_write_page(pba, &cp, sizeof(cp), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT));
         if (ret != 0)
         {
             ret_total = -1; /* 单份失败不影响整体，有冗余 */
@@ -305,7 +189,7 @@ ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t 
 
         pba = checkpoint_page_addr(topo.ch, topo.ce, topo.lun, i);
 
-        ret = sync_read_page(pba, &candidates[i], sizeof(candidates[i]), FC_COMMAND_MODULE_CHECKPOINT);
+        ret = ftl_sync_read_page(pba, &candidates[i], sizeof(candidates[i]), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT));
         if (ret != 0)
         {
             continue;
