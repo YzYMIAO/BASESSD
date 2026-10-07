@@ -2987,8 +2987,8 @@ nand_paa_t ftl_write_data(lba_t lba, const uint8_t *data, uint32_t len) {
     cmd->paa                 = new_paa;           // allocator 分配
     cmd->lba                 = lba;               // 写入 META
 
-    fc_command_configure_descriptors(cmd);
-    fc_write_cmd_data(cmd, data, len);
+    ftl_cmd_configure_descriptors(cmd);   // v13 前为 fc_command_configure_descriptors
+    ftl_cmd_write_data(cmd, data, len);   // v13 前为 fc_write_cmd_data
 
     fc_submit(cmd);                               // → SQ
     // ftl_service() 中 fc_poll_completion 会拿到完成状态
@@ -3005,7 +3005,7 @@ nand_paa_t ftl_write_data(lba_t lba, const uint8_t *data, uint32_t len) {
 ❌ 直接调用 nand_read_page() / nand_program_page()
 ❌ 直接操作 NAND 引擎状态机
 ❌ 直接读写 NAND 寄存器（SET/GET_FEATURES 通过 FC 完成）
-❌ 绕过 fc_command_configure_descriptors 手动分配 desc
+❌ 绕过 ftl_cmd_configure_descriptors 手动分配 desc
 
 ✅ 通过 CQ + completion 获取 per-CW 状态
 ✅ 通过 fc_data_path_raid_recover() 触发 RAID 恢复（未来）

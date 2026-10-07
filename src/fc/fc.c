@@ -7,16 +7,17 @@
  *   - Buffer Pool（128）：528B CW 缓冲，DMA 直访（noncacheable 段）
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc() → 填 config/参数 → fc_command_configure_descriptors()
- *   → fc_write_cmd_data() → fc_submit() → fc_service()（后台推进）
+ *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_attach_cw() 组装 desc 链
+ *   → fc_submit() → fc_service()（后台推进）
  *   → fc_poll_completion() 取完成 → fc_command_release() 回收。
+ *   （掩码建链与数据搬运在 FTL 侧：ftl_cmd_configure_descriptors / ftl_cmd_write_data）
  *
  * 文件结构（按职责分区，函数定义顺序即依赖顺序，无前向声明）：
  *    1. 静态资源        三池 + 链表数组 + g_fc_controller
  *    2. 查询/转换小工具 is_page_read/write、getter、ID→指针、buffer 工具
  *    3. 初始化          fc_init_internal
  *    4. 资源分配/回滚   command/descriptor/buffer alloc、rollback、release
- *    5. 命令配置        fc_command_configure_descriptor(s)_internal
+ *    5. 命令配置        fc_command_attach_cw_internal + fc_command_configure_descriptor_internal
  *    6. 提交            fc_submit_to_queue、fc_submit_internal
  *    7. 完成            fc_complete_internal、fc_complete_from_nand
  *    8. Stripe RAID     fc_stripe_release_parity、fc_stripe_submit
@@ -460,8 +461,11 @@ fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
  *   返回：无。
  *   实现要点：沿 command_descriptor_head[cmd] 链逐个释放 buffer、
  *         描述符挂回空闲链，最后清链头。
+ *   说明：唯一调用者在 CONFIG_FC_RAID 块内（fc_stripe_submit 的 parity 建链失败路径），
+ *         故 RAID 关闭时本函数无引用——标 __attribute__((unused)) 避免 -Wunused-function
+ *         （同 fc_cw_mask_popcount / fc_command_cw_attached 的先例）。
  * -------------------------------------------------------------------- */
-static void fc_command_resources_rollback(fc_t *controller, fc_command_id_t command_id)
+static void __attribute__((unused)) fc_command_resources_rollback(fc_t *controller, fc_command_id_t command_id)
 {
     uint16_t descriptor_index = controller->command_descriptor_head[command_id];
 
@@ -582,9 +586,9 @@ static uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t *plane
  *       plane 位由实参 plane 决定，row_paa 的 plane 位被忽略（调用方经 ASSERT 保证一致）。
  *     - multi_plane>0：PAA = row_paa 的 block/page/lun + 传入的 plane/cw。
  *     - 单 plane：row_paa 已完整描述该 plane 的地址，只改写 CW 位。
- *     - CW 号由调用方给出（来自 mask 枚举或 fc_command_attach_cw_internal 的实参），
- *       不再由 desc 序号推导——见 fc_command_configure_descriptors_internal 的
- *       "链走位 vs CW 号解耦"说明。
+ *     - CW 号由调用方给出（FTL 侧的掩码枚举，或 fc_command_attach_cw_internal 的实参），
+ *       **不由 desc 序号推导**——链走位（desc 序号）与 CW 号解耦：所有按链走位索引的
+ *       地方不动，CW 号一律从 paa_to_cw(desc->paa) 取。
  *     - meta = lba_to_cw_meta(command->meta, cw)。
  *     - **只负责"分配 + 填字段"，不挂链**——挂链由 fc_command_chain_append 单独完成，
  *       两者组合成机制原语 fc_command_attach_cw_internal。
@@ -594,9 +598,9 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
     fc_descriptor_t *descriptor;
     fc_buffer_id_t   buffer_id;
 
-    /* 调用者（attach / 策略循环）传的是栈上 &descriptor */
+    /* 调用者（fc_command_attach_cw_internal）传的是栈上 &descriptor */
     ASSERT(configured_descriptor != NULL);
-    /* 单 plane 命令的 CW 数不超过一页；多 plane 由 mask 保证 */
+    /* 单 plane 命令的 CW 数不超过一页；多 plane 的 CW 集合由上层（FTL 掩码）保证 */
     ASSERT(cw < CW_NUM);
     /* row_paa 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
     ASSERT((uint8_t)paa_to_plane(row_paa) == plane);
@@ -721,100 +725,6 @@ fc_status_t fc_command_attach_cw_internal(fc_t *controller, fc_command_t *comman
         return result;
     }
     fc_command_chain_append(controller, command, descriptor);
-    return FC_STATUS_OK;
-}
-
-/* --------------------------------------------------------------------
- * fc_command_configure_descriptors_internal
- *   功能：为命令配置整条 desc 链（每个待访问 CW 一个描述符）。
- *   参数：controller —— FC 控制器；command —— 命令。
- *   返回：FC_STATUS_OK / RESOURCE_EMPTY（池空，已回滚）。
- *   实现要点：
- *     - NO_DATA 操作（RESET/LOCK 等）与 ERASE 无数据，
- *       不需要描述符；SET/GET_FEATURES 用内联 param.bytes 代替。
- *     - CW 集合由 command->param.cw_mask 决定，掩码是 **flat 绝对编号**
- *       （bit n = plane*CW_NUM + cw，覆盖 CW_TOTAL_MAX = 8 位）；mask 为 0 时
- *       退化为"对命令的每个 plane 取连续 0..config.cw"（现有调用点的行为，零回归）。
- *     - **config.cw 不回写**：它只是 mask==0 时的输入提示，configure 之后没有任何
- *       下游读者（长度一律走 desc 链）。见 fc_command.h「链长度即真值」。
- *     - 链序：plane-major（先 plane 0 的全部置位 CW，再 plane 1）。
- *       **链走位（desc 序号）与 CW 号自此解耦**：所有按链走位索引的地方不动，
- *       CW 号一律从 paa_to_cw(desc->paa) 取。
- *     - **策略层**：本函数只决定"访问哪些 CW"，实际分配/挂链交给机制层
- *       fc_command_attach_cw_internal()。要让上层自己决定集合，用公共入口
- *       fc_command_attach_cw() 循环调用即可（链序即数据布局顺序）。
- *     - 任一 desc 配置失败 → fc_command_resources_rollback 整体回滚。
- * -------------------------------------------------------------------- */
-fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_command_t *command)
-{
-    fc_command_id_t command_id;
-    uint32_t        mask;
-    uint32_t        allowed;
-    uint8_t         plane_count;
-    uint8_t         plane_first;
-    uint8_t         plane_last;
-    uint8_t         plane;
-    uint8_t         cw;
-
-    /* NO_DATA operations (RESET, BLOCK_LOCK, etc.) and ERASE have no
-     * data payload — they do not need descriptors or buffers.
-     * SET/GET_FEATURES use inline param.bytes + feature_addr instead. */
-    if ((nand_operation_has_data((uint8_t)command->config.operation) == 0U) ||
-        (command->config.operation == OP_SET_FEATURES) ||
-        (command->config.operation == OP_GET_FEATURES))
-    {
-        command->desc_id = FC_DESCRIPTOR_ID_INVALID;
-        return FC_STATUS_OK;
-    }
-
-    plane_count = fc_command_plane_span(command, &plane_first, &plane_last);
-    allowed     = ((uint32_t)((1U << (plane_count * CW_NUM)) - 1U)) << (plane_first * CW_NUM);
-
-    mask = command->param.cw_mask;
-    if (mask == 0U)
-    {
-        /* 未指定 → 对命令的**每个** plane 取连续 0..config.cw。
-         * ⚠ 必须逐 plane 平移到该 plane 的绝对位段：照抄单 plane 的
-         *   (1 << (config.cw+1)) - 1 只会点亮 plane 0，多 plane 命令会静默退化。 */
-        uint32_t per_plane = (uint32_t)((1U << (command->config.cw + 1U)) - 1U);
-
-        for (plane = plane_first; plane < plane_last; plane++)
-        {
-            mask |= per_plane << (plane * CW_NUM);
-        }
-    }
-    else if ((mask & ~allowed) != 0U)
-    {
-        /* 掩码越出本命令的 plane 位段（单 plane：不得点亮别的 plane 的位） */
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    ASSERT(fc_cw_mask_popcount(mask) > 0U);
-
-    command_id = (fc_command_id_t)(command - controller->command_pool);
-    for (plane = plane_first; plane < plane_last; plane++)
-    {
-        /* 策略层：本命令所有 plane 共用 command->paa 的行地址（同页语义），只把 plane 位
-         * 换成目标 plane——与 v11 及以前逐字节相同。要每 plane 不同行地址（Policy B），
-         * 用公共入口 fc_command_attach_cw() 自行组装。 */
-        const nand_paa_t row_paa = paa_make(paa_to_page(command->paa), plane, paa_to_block(command->paa), paa_to_lun(command->paa), 0U);
-
-        for (cw = 0U; cw < CW_NUM; cw++)
-        {
-            fc_status_t result;
-
-            if ((mask & (uint32_t)(1U << (plane * CW_NUM + cw))) == 0U)
-            {
-                continue; /* 该 CW 不在本次访问集合内 */
-            }
-            result = fc_command_attach_cw_internal(controller, command, plane, cw, row_paa);
-            if (result != FC_STATUS_OK)
-            {
-                fc_command_resources_rollback(controller, command_id);
-                command->desc_id = FC_DESCRIPTOR_ID_INVALID;
-                return result;
-            }
-        }
-    }
     return FC_STATUS_OK;
 }
 
@@ -1089,8 +999,8 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
 
     /* RAID/stripe 的 XOR 按 CW 配对：两个 plane 必须访问**同一组 CW**，
      * flat 掩码（plane 不对称）与 stripe 语义不兼容，直接断言拒绝。
-     * mask == 0（未指定）视为对称。 */
-    ASSERT(fc_cw_mask_is_plane_symmetric(data_cmd->param.cw_mask));
+     * 掩码由 **desc 链重建**（v13：链是 CW 集合的唯一真值，不回读 FTL 的输入字段）。 */
+    ASSERT(fc_cw_mask_is_plane_symmetric(fc_get_cmd_cw_mask(data_cmd)));
 
     /* ① 分配 parity command */
     parity_cmd = fc_command_alloc_internal(controller);
@@ -1116,15 +1026,31 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
         parity_cmd->paa = paa_make(page, (uint32_t)(PLANE_NUM - 1U), block, plun, 0U);
     }
 
-    /* ③ 分配 parity desc + buffer */
-    if (fc_command_configure_descriptors_internal(controller, parity_cmd) != FC_STATUS_OK)
+    /* ③ 分配 parity desc + buffer
+     *    parity 命令是**单 plane**（plane = PLANE_NUM-1），CW 集合 = 连续 0..config.cw。
+     *    v13 起「按掩码建链」已上移 FTL，FC 内不再有掩码枚举；RAID 是 FC 内部机制，
+     *    这里直接用机制原语 fc_command_attach_cw_internal 逐条挂链（与 FTL 侧
+     *    ftl_cmd_configure_descriptors 在 mask==0 时的展开结果一致）。
+     *    行地址：同一 plane 内所有 CW 共用 parity_cmd->paa 的 page/block/lun。 */
     {
-        /* release parity command slot (no desc/buffer allocated yet, but alloc_internal consumed slot) */
-        controller->command_pool[parity_id]      = (fc_command_t){0};
-        controller->command_state[parity_id]     = FC_COMMAND_STATE_FREE;
-        controller->command_free_next[parity_id] = controller->command_free_head;
-        controller->command_free_head            = parity_id;
-        goto stripe_error;
+        const uint8_t    parity_plane = (uint8_t)paa_to_plane(parity_cmd->paa);
+        const nand_paa_t parity_row   = paa_make(paa_to_page(parity_cmd->paa), parity_plane, paa_to_block(parity_cmd->paa), paa_to_lun(parity_cmd->paa), 0U);
+        uint8_t          pcw;
+
+        for (pcw = 0U; pcw <= (uint8_t)parity_cmd->config.cw; pcw++)
+        {
+            if (fc_command_attach_cw_internal(controller, parity_cmd, parity_plane, pcw, parity_row) != FC_STATUS_OK)
+            {
+                /* 回滚已挂的半成品链（含 buffer）+ 释放 parity 命令槽位 */
+                fc_command_resources_rollback(controller, parity_id);
+                parity_cmd->desc_id                      = FC_DESCRIPTOR_ID_INVALID;
+                controller->command_pool[parity_id]      = (fc_command_t){0};
+                controller->command_state[parity_id]     = FC_COMMAND_STATE_FREE;
+                controller->command_free_next[parity_id] = controller->command_free_head;
+                controller->command_free_head            = parity_id;
+                goto stripe_error;
+            }
+        }
     }
 
     /* 写入 parity descriptors 的 meta（与数据命令对应 CW 一致） */

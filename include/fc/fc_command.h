@@ -119,7 +119,9 @@ typedef struct fc_cmd_conf_t
     DWORD ch        : 2;   /* NAND channel number. */
     DWORD ce        : 2;   /* NAND chip-enable number. */
     DWORD lun       : 2;   /* NAND LUN number. */
-    DWORD cw        : 2;   /* Command: 每-plane CW 数减一，仅当 param.cw_mask == 0 时被读（输入提示）；
+    DWORD cw        : 2;   /* Command: 每-plane CW 数减一（param.cw_mask == 0 时展开的输入提示；
+                            *          v13 起读它的是 FTL —— ftl_cmd_configure_descriptors，
+                            *          FC 内只余 stripe 的 cw_count 一处读）；
                             * Descriptor: 本 desc 在 plane 内是第几个 CW（0..CW_NUM-1）。 */
     DWORD crc         : 1; /* FC_CRC_ENABLE / FC_CRC_DISABLE. */
     DWORD ldpc        : 2; /* fc_ecc_mode_t: BCH/LDPC_HARD/LDPC_SOFT/LDPC_RAW. */
@@ -158,6 +160,10 @@ struct fc_descriptor_t
  *                            SQ = 请求集（0 = 未指定）；CQ = 失败集（UNC/CRC_ERROR）
  * 小端（Cortex-M7）下 cw_mask 的 bit0 == parameter0 的 bit0。
  * 同一时刻只按一种解释使用——读命令不用 parameter0..3，FEATURES 命令不用 cw_mask。
+ *
+ * ⚠ SQ 侧 cw_mask（请求集）的**读者是 FTL，不是 FC**（v13）：FC 只认 desc 链，
+ *   「访问哪些 CW」由 ftl_cmd_configure_descriptors() 读本字段后逐条 attach_cw 展开。
+ *   FC 内没有写入者，也没有读者——fc_command_validate 不再校验它。
  */
 typedef union
 {
@@ -190,7 +196,8 @@ struct fc_command_t
     DWORD         meta;               /* META 值，写入 NAND CW buffer[0..3]；当前为 LBA，未来可扩展。 */
     DWORD         paa;                /* Operation-dependent target; data commands use Descriptor PAA values. */
     fc_cmd_conf_t config;             /* Operation, NAND location, CW and data-path configuration. */
-    fc_param_t    param;              /* 读：请求掩码 param.cw_mask；FEATURES：内联数据 param.bytes。 */
+    fc_param_t    param;              /* 读：请求掩码 param.cw_mask（v13 起读者是 FTL，FC 不解释）；
+                                       * FEATURES：内联数据 param.bytes。 */
 };
 
 /* CQ 完成项：命令级聚合状态 + 命令级返回段。

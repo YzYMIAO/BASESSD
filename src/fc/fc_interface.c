@@ -30,7 +30,7 @@ static uint8_t fc_command_to_id(const fc_command_t *command, fc_command_id_t *co
 {
     uint16_t index;
 
-    /* 层内 helper：调用者（fc_command_configure_descriptors / fc_submit）已判过
+    /* 层内 helper：调用者（fc_command_attach_cw / fc_submit）已判过
      * command 非空，command_id 是本文件局部地址——传空是调用者编程错误。 */
     ASSERT(command != NULL);
     ASSERT(command_id != NULL);
@@ -79,25 +79,9 @@ fc_command_t *fc_command_alloc(void)
     return fc_command_alloc_internal(&g_fc_controller);
 }
 
-/* 配置命令 desc 链（仅 ALLOCATED 且尚未配置时合法） */
-fc_status_t fc_command_configure_descriptors(fc_command_t *command)
-{
-    fc_command_id_t command_id;
-
-    /* command 非空是前置条件；指针身份 + 生命周期状态是文档化入口契约，保留返回码 */
-    ASSERT(command != NULL);
-    if ((fc_command_to_id(command, &command_id) == 0U) ||
-        (fc_command_state_get(&g_fc_controller, command_id) != FC_COMMAND_STATE_ALLOCATED) ||
-        (fc_command_id_to_command(command_id)->desc_id != FC_DESCRIPTOR_ID_INVALID))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    return fc_command_configure_descriptors_internal(&g_fc_controller, command);
-}
-
 /* 逐条追加一个 (plane, cw) 到命令 desc 链尾（仅 ALLOCATED 时合法）。
- * 与 fc_command_configure_descriptors 并列：后者按掩码一次性建链（策略），
- * 本函数把"机制"（分配 desc+buffer + 挂链）交给上层自行组装。
+ * **建链的唯一入口**（v13：按掩码一次性建链的策略层已上移 FTL，见
+ * ftl_cmd_configure_descriptors()）——上层自行组装 CW 集合，循环调用本函数即可。
  * row_paa 由调用者按 plane 给出，故 multi-plane 命令两个 plane 可指向不同 block。 */
 fc_status_t fc_command_attach_cw(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
 {
@@ -253,117 +237,10 @@ uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index)
 }
 
 /* ══════════════════════════════════════════════════════════
- * ④ 数据便利
+ * ④ 数据查询
+ *   数据搬运已上移 FTL（见 ftl_cmd_write_data / ftl_cmd_read_data）——
+ *   硬件 FCC 不提供「按 CW 拷贝数据」的寄存器，数据是固件 DMA 填的。
  * ══════════════════════════════════════════════════════════ */
-
-/* 便利：把外部数据按 CW 顺序写入命令 buffer（不足填 0xFF dummy） */
-fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t length)
-{
-    fc_descriptor_id_t desc_id;
-    const uint8_t     *src;
-
-    /* 入参前置条件由调用者保证（FTL 传入已配置 desc 链的命令） */
-    ASSERT(command != NULL);
-    ASSERT(data != NULL);
-    ASSERT(command->desc_id != FC_DESCRIPTOR_ID_INVALID);
-
-    /* 遍历界走 desc 链（链长度是 CW 数的唯一真值，见 fc_command.h） */
-    src     = (const uint8_t *)data;
-    desc_id = (fc_descriptor_id_t)command->desc_id;
-
-    while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
-    {
-        fc_descriptor_t *descriptor;
-        uint8_t         *buf;
-        uint32_t         copy_len;
-
-        /* desc 链由 fc_command_configure_descriptors 构建，ID 必在池内 */
-        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
-        descriptor = fc_descriptor_id_to_descriptor(desc_id);
-        if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
-        {
-            return FC_STATUS_INVALID_ARGUMENT;
-        }
-        buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
-
-        if (length > 0U)
-        {
-            copy_len = (length >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : length;
-            (void)memcpy(buf, src, copy_len);
-            src += copy_len;
-            length -= copy_len;
-
-            /* 当前 buffer 未填满部分用 0xFF dummy 填充 */
-            if (copy_len < FC_BUFFER_USER_SIZE)
-            {
-                (void)memset(buf + copy_len, 0xFF, (size_t)(FC_BUFFER_USER_SIZE - copy_len));
-            }
-        }
-        else
-        {
-            /* 数据已耗尽，整 buffer 填充 0xFF dummy */
-            (void)memset(buf, 0xFF, FC_BUFFER_POOL_CW_SIZE);
-        }
-
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
-    }
-
-    return FC_STATUS_OK;
-}
-
-/* --------------------------------------------------------------------
- * fc_read_cmd_data
- *   功能：便利——从命令 buffer 按 CW 顺序读取用户数据到外部缓冲。
- *   参数：command —— 命令；data —— 输出；length —— 字节数。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / IO_ERROR。
- * -------------------------------------------------------------------- */
-fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length)
-{
-    fc_descriptor_id_t desc_id;
-    uint8_t           *dst;
-    uint32_t           remaining;
-
-    /* 入参前置条件由调用者保证（FTL 传入已配置 desc 链的命令） */
-    ASSERT(command != NULL);
-    ASSERT(data != NULL);
-    ASSERT(command->desc_id != FC_DESCRIPTOR_ID_INVALID);
-
-    /* 遍历界走 desc 链（链长度是 CW 数的唯一真值，见 fc_command.h） */
-    dst       = (uint8_t *)data;
-    remaining = length;
-    desc_id   = (fc_descriptor_id_t)command->desc_id;
-
-    while ((desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (remaining > 0U))
-    {
-        fc_descriptor_t *descriptor;
-        uint8_t         *buf;
-
-        /* desc 链由 fc_command_configure_descriptors 构建，ID 必在池内 */
-        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
-        descriptor = fc_descriptor_id_to_descriptor(desc_id);
-        if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
-        {
-            return FC_STATUS_IO_ERROR;
-        }
-
-        buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
-        if (buf == NULL)
-        {
-            return FC_STATUS_IO_ERROR;
-        }
-
-        {
-            uint32_t copy_len = (remaining >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : remaining;
-            (void)memcpy(dst, buf, copy_len);
-            dst += copy_len;
-            remaining -= copy_len;
-        }
-
-        desc_id = (fc_descriptor_id_t)descriptor->next_id;
-    }
-
-    return FC_STATUS_OK;
-}
 
 /* --------------------------------------------------------------------
  * fc_get_cmd_data_ptr
@@ -398,6 +275,38 @@ uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
     }
 
     return NULL;
+}
+
+/* --------------------------------------------------------------------
+ * fc_get_cmd_cw_mask
+ *   功能：从命令的 desc 链重建 flat CW 掩码（bit n = plane*CW_NUM + cw）。
+ *   参数：command —— 命令（desc_id == INVALID → 返回 0）。
+ *   返回：掩码；无 desc 时 0。
+ *   实现要点：**链是 CW 集合的唯一真值**（v13 起 FC 内不再有掩码输入，
+ *         command->param.cw_mask 的读者是 FTL）。凡需要"掩码形状"的判定
+ *         （如 RAID 的 plane 对称性）一律先在此按链重建，不再回读输入字段。
+ *         调用者须在 fc_command_release() 之前调用（desc 释放后失效）。
+ * -------------------------------------------------------------------- */
+uint32_t fc_get_cmd_cw_mask(const fc_command_t *command)
+{
+    fc_descriptor_id_t desc_id;
+    uint32_t           mask = 0U;
+
+    ASSERT(command != NULL);
+
+    desc_id = (fc_descriptor_id_t)command->desc_id;
+    while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        const fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        const uint8_t          plane      = (uint8_t)paa_to_plane(descriptor->paa);
+        const uint8_t          n          = (uint8_t)(plane * CW_NUM + paa_to_cw(descriptor->paa));
+
+        /* 与 fc_build_request_data_planes 的同源断言一致：链上的 CW 编号必须在 flat 空间内 */
+        ASSERT(n < CW_TOTAL_MAX);
+        mask |= (uint32_t)(1U << n);
+        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+    }
+    return mask;
 }
 
 /* --------------------------------------------------------------------

@@ -237,9 +237,11 @@ fc_status_t fc_data_path_generate_stripe_parity(
     ASSERT(parity_cmd != NULL);
     ASSERT(data_count != 0U);
 
-    /* RAID XOR 按 CW 配对：两 plane 必须访问同一组 CW，flat 掩码（不对称）不兼容 */
-    ASSERT(fc_cw_mask_is_plane_symmetric(data_cmds[0]->param.cw_mask));
-    ASSERT(fc_cw_mask_is_plane_symmetric(parity_cmd->param.cw_mask));
+    /* RAID XOR 按 CW 配对：两 plane 必须访问同一组 CW，flat 掩码（不对称）不兼容。
+     * 掩码由 **desc 链重建**（v13：链是 CW 集合的唯一真值，不回读 FTL 的输入字段）——
+     * parity 链此时已在 fc_stripe_submit ③ 挂好，故重建结果即其真实访问集合。 */
+    ASSERT(fc_cw_mask_is_plane_symmetric(fc_get_cmd_cw_mask(data_cmds[0])));
+    ASSERT(fc_cw_mask_is_plane_symmetric(fc_get_cmd_cw_mask(parity_cmd)));
 
     /* parity 命令的 CW 数量必须与数据命令一致（stripe 命令 plane 对称，
      * 故 config.cw+1 即**每-plane** CW 数） */

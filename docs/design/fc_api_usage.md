@@ -1,20 +1,39 @@
 # FC 模块接口使用指南
 
-**日期**: 2026-09-21
+**日期**: 2026-09-21（**v13 部分过时，见下方横幅**）
+
+---
+
+> ## ⚠ v13 变更横幅（2026-10-07）
+>
+> 本文件成文于 v13 之前，其中若干条目已不反映当前接口。**以
+> `include/fc/fc_interface.h` + `docs/design/fc_nand_design.md` §2.9 / §26 为准。**
+>
+> v13 把 FC 的策略层上移 FTL（判据：硬件 FCC 寄存器表）：
+>
+> | 已删除（FC 侧） | 现在的等价物（FTL 侧） |
+> |---|---|
+> | `fc_command_configure_descriptors(cmd)` | `ftl_cmd_configure_descriptors(cmd)`（`include/ftl/ftl_fc_interface.h`） |
+> | `fc_write_cmd_data()` / `fc_read_cmd_data()` | `ftl_cmd_write_data()` / `ftl_cmd_read_data()`（同上） |
+>
+> FC 侧建链现在**只有** `fc_command_attach_cw(cmd, plane, cw, row_paa)` 一个入口。
+> 详见 `docs/changelog/fc_policy_layer_uplift.md`。
+>
+> 本文件更早的过时项（未随版本同步）：`fc_real_buffer_to_buffer_id()` 已于 v10 删除；
+> "16 个公接口"现为 18 个；§内部函数优化 里的 `fc_command_configure_descriptors_internal` 已不存在。
 
 ---
 
 ## FC 对外接口一览
 
-FC（Flash Controller）模块对外暴露以下 16 个公接口（声明于 `include/fc/fc.h`）：
+FC（Flash Controller）模块对外暴露以下 18 个公接口（声明于 `include/fc/fc_interface.h`）：
 
 | 接口 | 类型 | 说明 |
 |---|---|---|
 | `fc_init()` | 初始化 | 启动时调用一次，初始化 Pool、SQ/HSQ/CQ、调度器 |
 | `fc_command_alloc()` | 资源分配 | 从 command pool 分配一个 `fc_command_t` |
-| `fc_command_configure_descriptors(cmd)` | 资源分配 | 根据 cmd 的 cw 数量自动分配 descriptor 链 + buffer；SET/GET_FEATURES 操作跳过此步（见 §SET/GET_FEATURES 特殊流程） |
+| `fc_command_attach_cw(cmd, plane, cw, row_paa)` | 资源分配 | **建链的唯一入口**：分配一条 desc + buffer 并挂到链尾。上层按自己算出的 CW 集合循环调用（FTL 侧封装见 `ftl_cmd_configure_descriptors()`） |
 | `fc_buffer_alloc()` | 资源分配 | 手动从 buffer pool 分配一个 buffer |
-| `fc_write_cmd_data(cmd, data, length)` | 数据填充 | 将外部数据一次性写入命令关联的所有 desc buffer（内部遍历 desc 链） |
 | `fc_get_cmd_data_ptr(cmd, cw_index)` | 数据读取 | 获取指定 CW 索引的 buffer 指针（读操作后使用） |
 | `fc_submit(cmd)` | 命令下发 | 提交到 SQ 或 HSQ（取决于 `cmd->high_priority`） |
 | `fc_service()` | 驱动调度 | 主循环中持续调用，调度并执行命令，提交给 NAND |
@@ -23,8 +42,7 @@ FC（Flash Controller）模块对外暴露以下 16 个公接口（声明于 `in
 | `fc_buffer_release(buffer_id)` | 资源回收 | 手动释放 buffer |
 | `fc_command_id_to_command(id)` | ID 查找 | command_id → `fc_command_t*` |
 | `fc_descriptor_id_to_descriptor(id)` | ID 查找 | descriptor_id → `fc_descriptor_t*` |
-| `fc_buffer_id_to_real_buffer(id)` | ID 查找 | buffer_id → 真实 buffer 指针 |
-| `fc_real_buffer_to_buffer_id(ptr)` | ID 查找 | 真实 buffer 指针 → buffer_id |
+| `fc_buffer_id_to_real_buffer(id)` | ID 查找 | buffer_id → 真实 buffer 指针（USER 数据区首地址） |
 | `fc_get_resource_stats(&stats)` | 监控 | 查看 pool/queue 使用率 |
 
 ---
@@ -52,11 +70,9 @@ FC（Flash Controller）模块对外暴露以下 16 个公接口（声明于 `in
 
 | 公接口 | 验证项 |
 |---|---|
-| `fc_command_configure_descriptors()` | `command==NULL`、不在 pool 中、state 不是 ALLOCATED、已配置过 des |
+| `fc_command_attach_cw()` | `command==NULL`、不在 pool 中、state 不是 ALLOCATED、plane/cw 越界（越段返回 `INVALID_ARGUMENT`） |
 | `fc_buffer_release()` | buffer_id 不在范围内、buffer 未分配 |
 | `fc_buffer_id_to_real_buffer()` | buffer_id 不在范围内、buffer 未分配 |
-| `fc_real_buffer_to_buffer_id()` | `buffer==NULL` |
-| `fc_write_cmd_data()` | `command==NULL`、`data==NULL`、不在 pool 中、state 不是 ALLOCATED、无 desc 链 |
 | `fc_get_cmd_data_ptr()` | `command==NULL`、不在 pool 中、无 desc 链、cw_index 超过 CW 范围 |
 | `fc_submit()` | `command==NULL`、不在 pool 中、state 不是 ALLOCATED、`fc_command_validate()` 失败、descriptor 所有权不完整 |
 | `fc_poll_completion()` | `completion==NULL` |
@@ -67,11 +83,12 @@ FC（Flash Controller）模块对外暴露以下 16 个公接口（声明于 `in
 
 ### 内部函数优化
 
-4 个内部函数改用指针算术 `command - controller->command_pool` 直接计算 command_id，替代 `fc_command_to_id()` 的线性查找：
+3 个内部函数改用指针算术 `command - controller->command_pool` 直接计算 command_id，替代 `fc_command_to_id()` 的线性查找：
 - `fc_descriptor_alloc_internal()`
-- `fc_command_configure_descriptors_internal()`
 - `fc_submit_to_queue()`
 - `fc_command_release_internal_api()`
+
+（原先第 4 项 `fc_command_configure_descriptors_internal()` 已于 v13 删除——掩码枚举上移 FTL。）
 
 ---
 
@@ -236,17 +253,18 @@ cmd->config.lun       = 0;
 cmd->config.cw        = 1;   // CW 数量 - 1（此处表示 2 个 CW）
 cmd->paa              = target_paa;
 
-// ③ 自动分配 descriptor 链 + buffer
-fc_command_configure_descriptors(cmd);
+// ③ 建 desc 链 + buffer（FTL 侧封装：按 param.cw_mask 展开后逐条 attach_cw）
+ftl_cmd_configure_descriptors(cmd);
 
-// ④ 写入数据（FC 内部遍历 desc 链，buffer_id → pointer → memcpy）
-fc_write_cmd_data(cmd, source_data, (cmd->config.cw + 1) * CW_SIZE);
+// ④ 写入数据（FTL 侧遍历 desc 链，buffer_id → pointer → memcpy）
+ftl_cmd_write_data(cmd, source_data, (cmd->config.cw + 1) * CW_SIZE);
 
 // ⑤ 提交到硬件队列
 fc_submit(cmd);
 ```
 
-> **注意**：步骤④也可以还原为手动遍历 desc 链方式（详见下方的"标准使用流程—数据遍历"），`fc_write_cmd_data()` 是一个便捷封装。
+> **注意**：`ftl_cmd_write_data()` 内部就是"遍历 desc 链逐 CW memcpy"的封装，
+> 想手动控制时用 `fc_get_cmd_data_ptr(cmd, cw_index)` 取指针自己写。
 
 ### SET/GET_FEATURES 特殊流程
 
@@ -262,7 +280,7 @@ cmd->config.ch        = 0;
 cmd->config.ce        = 0;
 cmd->config.lun       = 0;
 
-// ③ 跳过 fc_command_configure_descriptors() — SET/GET_FEATURES 内联传递
+// ③ 跳过建链（ftl_cmd_configure_descriptors() 会短路为 desc_id = INVALID）— SET/GET_FEATURES 内联传递
 
 // ④ 设置寄存器地址和数据（feature_addr = 寄存器地址，parameter[0..3] = 4 字节数据）
 cmd->feature_addr = 0x01;      // 目标寄存器地址（例：Feature Register 0x01）
@@ -275,15 +293,15 @@ cmd->parameter3   = 0x00;      // 写：数据字节 3；读：完成后从此�
 fc_submit(cmd);
 
 // 完成后，GET_FEATURES 结果直接从 parameter0..3 读取
-// 注意：无需 fc_command_configure_descriptors()，也无需 fc_command_release() 释放 desc/buffer
+// 注意：无需建链，也无需 fc_command_release() 释放 desc/buffer
 ```
 
 **关键区别**：
 
 | 步骤 | 普通数据命令 | SET/GET_FEATURES |
 |------|------------|-----------------|
-| descriptor 分配 | `fc_command_configure_descriptors()` | 跳过（FC 内部自动识别） |
-| 数据写入 | `fc_write_cmd_data()` | `cmd->parameter[0..3]` 直接赋值 |
+| descriptor 分配 | `ftl_cmd_configure_descriptors()` | 短路为 `desc_id = INVALID`（`ftl_cmd_needs_desc_chain()`） |
+| 数据写入 | `ftl_cmd_write_data()` | `cmd->parameter[0..3]` 直接赋值 |
 | 数据读取（读操作） | `fc_get_cmd_data_ptr()` | `cmd->parameter[0..3]` 直接读取 |
 | 资源释放 | `fc_command_release()` 自动释放 desc+buffer | `fc_command_release()` 仅释放 command |
 
@@ -313,7 +331,7 @@ while (1) {
 fc_command_t *cmd = fc_command_alloc();
 cmd->config.operation = ONFI_PAGE_READ;
 // ... 其他配置 ...
-fc_command_configure_descriptors(cmd);
+ftl_cmd_configure_descriptors(cmd);
 fc_submit(cmd);
 
 // 完成后直接获取指定 CW 的 buffer 指针

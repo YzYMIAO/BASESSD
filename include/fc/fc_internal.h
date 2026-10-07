@@ -106,12 +106,10 @@ extern "C"
     /* 从空闲链表分配命令槽位，置 ALLOCATED */
     fc_command_t *fc_command_alloc_internal(fc_t *controller);
 
-    /* 为命令配置整条 desc 链（每 CW 一个 desc + buffer，next_id 串联）——策略层：
-     * 决定访问哪些 CW；机制层由下面的 attach 原语承担 */
-    fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_command_t *command);
-
     /* 追加一个 (plane, cw) 到命令 desc 链尾（分配 desc + buffer 并串联）——机制层原语，
-     * 供 fc_command_attach_cw（上层自组装）与上面的策略循环共用。
+     * 供 fc_command_attach_cw（上层自组装）与 fc.c 内部 RAID parity 建链共用。
+     * 「按掩码一次性建链」的策略层 v13 起在 FTL 侧（ftl_cmd_configure_descriptors），
+     * 循环调用本原语实现，FC 内不再有掩码枚举。
      * row_paa = 该 plane 的行地址（Policy B：multi-plane 命令两 plane 的 block 可不同），
      * 其 plane 位必须等于 plane。 */
     fc_status_t fc_command_attach_cw_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa);

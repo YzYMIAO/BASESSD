@@ -12,8 +12,8 @@
  *   - Buffer Pool（FC_BUFFER_POOL_DEPTH=128）：CW 数据缓冲
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc() → 填 config/参数 → fc_command_configure_descriptors()
- *   （或按需自组装：fc_command_attach_cw() 逐条追加 CW）
+ *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_attach_cw() 组装 desc 链
+ *   （FTL 侧「按掩码一次性建链」见 ftl_cmd_configure_descriptors()）
  *   → fc_submit() → fc_service()（后台推进）→ fc_poll_completion() 取完成
  *   → fc_command_release() 回收。
  *
@@ -29,10 +29,10 @@
  *
  * 接口分组（全部声明在 fc_interface.h）：
  *   ① 初始化      fc_init
- *   ② 命令生命周期 fc_command_alloc / configure_descriptors / submit /
+ *   ② 命令生命周期 fc_command_alloc / attach_cw / submit /
  *                  service / poll_completion / command_release
  *   ③ buffer 访问 fc_buffer_alloc / release / id_to_real_buffer / get_base / get_meta
- *   ④ 数据便利    fc_write_cmd_data / fc_read_cmd_data / fc_get_cmd_data_ptr
+ *   ④ 数据查询    fc_get_cmd_data_ptr / fc_get_cmd_ecc_max
  *   ⑤ 查询工具    fc_command_id_to_command / fc_descriptor_id_to_descriptor /
  *                  fc_get_resource_stats
  */

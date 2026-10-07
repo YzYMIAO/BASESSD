@@ -12,20 +12,23 @@
  *
  * 对外接口分组：
  *   ① 初始化            fc_init
- *   ② 命令生命周期       fc_command_alloc / configure_descriptors / attach_cw /
- *                        fc_submit / fc_poll_completion / fc_command_release
+ *   ② 命令生命周期       fc_command_alloc / attach_cw / fc_submit /
+ *                        fc_poll_completion / fc_command_release
  *   ③ buffer 访问       fc_buffer_alloc / release / id_to_real_buffer /
  *                        fc_buffer_get_base / fc_buffer_get_meta
- *   ④ 数据便利          fc_write_cmd_data / fc_read_cmd_data / fc_get_cmd_data_ptr
+ *   ④ 数据查询          fc_get_cmd_data_ptr / fc_get_cmd_ecc_max
  *   ⑤ 查询工具          fc_command_id_to_command / fc_descriptor_id_to_descriptor /
  *                        fc_get_resource_stats
  *   ⑥ 服务入口          fc_service
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc() → 填 config/参数 → fc_command_configure_descriptors()
- *   （或按需自组装：fc_command_attach_cw() 逐条追加 CW）
- *   → fc_write_cmd_data() → fc_submit() → fc_service()（后台推进）
+ *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_attach_cw() 组装 desc 链
+ *   （FTL 侧「按掩码一次性建链」见 ftl_cmd_configure_descriptors()）
+ *   → fc_submit() → fc_service()（后台推进）
  *   → fc_poll_completion() 取完成 → fc_command_release() 回收。
+ *
+ * 边界（v13）：FC = 硬件 FCC 的软件替身。**不含策略**——「访问哪些 CW」由 FTL 决定，
+ *   「数据搬运」由 FTL 做（fc_command_attach_cw + 自己的拷贝），FC 只提供槽位/描述符/队列/数据路径。
  */
 
 #include "fc.h"
@@ -45,12 +48,11 @@ extern "C"
     /* 申请命令，失败返回 NULL */
     fc_command_t *fc_command_alloc(void);
 
-    /* 自动遍历 CW 数量配置 Descriptor 链（分配 desc + buffer 并串联） */
-    fc_status_t fc_command_configure_descriptors(fc_command_t *command);
-
     /* 逐条追加一个 (plane, cw) 到命令的 desc 链尾（分配 desc + buffer、填 PAA/config/meta）。
-     * 供上层自行组装 CW 集合（例如只读离散 CW），代替 fc_command_configure_descriptors()：
-     * 按自己算出的集合循环调用即可，**链序即 fc_read_cmd_data / fc_write_cmd_data 的数据布局顺序**。
+     * **建链的唯一入口**（v13：按掩码一次性建链的策略层已上移 FTL，见
+     * ftl_cmd_configure_descriptors()）。上层自行组装 CW 集合（例如只读离散 CW）：
+     * 按自己算出的集合循环调用即可，
+     * **链序即数据布局顺序**（FTL 侧拷贝按此顺序遍历链，见 ftl_cmd_read_data）。
      * row_paa = 该 plane 的行地址（page/block/lun，CW 位被忽略），其 plane 位必须等于 plane。
      * 由此 multi-plane 命令的**两个 plane 可以指向不同 block**（Policy B：每 plane 独立分配块 +
      * 坏块替换）——每个 plane 传自己的 row_paa 即可；同一 plane 的所有 CW 必须传同一 row_paa。
@@ -74,8 +76,7 @@ extern "C"
 
     /* ═══════ ③ buffer 访问 ═══════ */
     /* 申请 Buffer（返回 ID），失败返回 FC_BUFFER_ID_INVALID。
-     * ⚠️ 手动分配接口：常规路径请用 fc_command_configure_descriptors()
-     *    （它内部会为每个 CW 自动分配 desc + buffer）。 */
+     * ⚠️ 手动分配接口：常规路径由 fc_command_attach_cw() 为每个 CW 自动分配 desc + buffer。 */
     fc_buffer_id_t fc_buffer_alloc(void);
 
     /* 释放 Buffer（须已占用） */
@@ -94,18 +95,15 @@ extern "C"
        cw_index 是 **CW 号**（按 paa_to_cw(desc->paa) 匹配），不是链走位。 */
     uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index);
 
-    /* ═══════ ④ 数据便利 ═══════ */
-    /* 便利函数：将外部数据按 CW 大小依次拷贝到命令的所有 desc buffer 中。
-     * 数据不够时剩余部分用 0xFF dummy 填充。遍历界走 desc 链。 */
-    fc_status_t fc_write_cmd_data(fc_command_t *command, const void *data, uint32_t length);
-
-    /* 便利函数：从命令的所有 desc buffer 按 CW 顺序读取用户数据。
-     * 与 fc_write_cmd_data 对称，用于读完成后的数据提取。遍历界走 desc 链。 */
-    fc_status_t fc_read_cmd_data(fc_command_t *command, void *data, uint32_t length);
-
-    /* 便利函数：获取命令中 **CW 号 == cw_index** 的 CW 的 buffer 指针（读操作后使用）。
+    /* ═══════ ④ 数据查询 ═══════ */
+    /* 获取命令中 **CW 号 == cw_index** 的 CW 的 buffer 指针（读操作后使用）。
      * 不在链上返回 NULL。 */
     uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index);
+
+    /* 从 desc 链重建命令的 flat CW 掩码（bit n = plane*CW_NUM + cw；无 desc 时 0）。
+     * **链是 CW 集合的唯一真值**——v13 起 FC 内不再有掩码输入，需要"掩码形状"的
+     * 判定（如 RAID 的 plane 对称性）一律走这里按链重建，不回读 command->param.cw_mask。 */
+    uint32_t fc_get_cmd_cw_mask(const fc_command_t *command);
 
     /* 命令级聚合 ECC：desc 链上所有 CW 的 ecc_bits 最大值（替代 CQ 已删除的
      * ecc_bit0..3）。须在 fc_command_release() 之前调用（desc 释放后失效）。 */
