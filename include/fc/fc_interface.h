@@ -12,7 +12,7 @@
  *
  * 对外接口分组：
  *   ① 初始化            fc_init
- *   ② 命令生命周期       fc_command_alloc / configure_descriptors /
+ *   ② 命令生命周期       fc_command_alloc / configure_descriptors / attach_cw /
  *                        fc_submit / fc_poll_completion / fc_command_release
  *   ③ buffer 访问       fc_buffer_alloc / release / id_to_real_buffer /
  *                        fc_buffer_get_base / fc_buffer_get_meta
@@ -23,6 +23,7 @@
  *
  * 生命周期（对 FTL）：
  *   fc_command_alloc() → 填 config/参数 → fc_command_configure_descriptors()
+ *   （或按需自组装：fc_command_attach_cw() 逐条追加 CW）
  *   → fc_write_cmd_data() → fc_submit() → fc_service()（后台推进）
  *   → fc_poll_completion() 取完成 → fc_command_release() 回收。
  */
@@ -46,6 +47,18 @@ extern "C"
 
     /* 自动遍历 CW 数量配置 Descriptor 链（分配 desc + buffer 并串联） */
     fc_status_t fc_command_configure_descriptors(fc_command_t *command);
+
+    /* 逐条追加一个 (plane, cw) 到命令的 desc 链尾（分配 desc + buffer、填 PAA/config/meta）。
+     * 供上层自行组装 CW 集合（例如只读离散 CW），代替 fc_command_configure_descriptors()：
+     * 按自己算出的集合循环调用即可，**链序即 fc_read_cmd_data / fc_write_cmd_data 的数据布局顺序**。
+     * row_paa = 该 plane 的行地址（page/block/lun，CW 位被忽略），其 plane 位必须等于 plane。
+     * 由此 multi-plane 命令的**两个 plane 可以指向不同 block**（Policy B：每 plane 独立分配块 +
+     * 坏块替换）——每个 plane 传自己的 row_paa 即可；同一 plane 的所有 CW 必须传同一 row_paa。
+     * plane 必须落在本命令的 plane 段内（单 plane = paa_to_plane(command->paa) 那一个；
+     * multi-plane = [0, multi_plane)）。
+     * 前置：命令处于 ALLOCATED。
+     * 返回：OK / RESOURCE_EMPTY（池空，本条半成品由 release 统一回收）/ INVALID_ARGUMENT（坐标越界）。 */
+    fc_status_t fc_command_attach_cw(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa);
 
     /* 提交到 SQ 或 HSQ（根据 high_priority），入队即返回 */
     fc_status_t fc_submit(fc_command_t *command);

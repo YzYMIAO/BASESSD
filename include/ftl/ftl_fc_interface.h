@@ -62,6 +62,25 @@ static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *add
 /* ── PBA helper（已实现）── */
 
 ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
+
+/*
+ * ftl_cmd_setup_ppa_pair - 按**每 plane 各自**的 PBA 建 desc 链（Policy B）
+ *
+ * 与 ftl_cmd_setup_ppa 的区别：后者把单一 PBA 填进 command->paa，由 FC 策略层
+ * 「复制行地址 + 替换 plane 位」展开到各 plane——隐含「两 plane 同 block」。
+ * Policy B 下两 plane 独立分配物理块，故本函数逐 plane 调
+ * fc_command_attach_cw(cmd, plane, cw, pba_to_paa(pba[plane]))，把每个 plane 自己的
+ * 行地址写进该 plane 的 desc。
+ *
+ * 遍历范围：multi_plane 命令覆盖 [0, multi_plane) 个 plane，单 plane 命令只覆盖
+ * plane 0；每个 plane 覆盖 cw ∈ [0, config.cw]（与 ftl_cmd_setup_ppa 的默认掩码一致）。
+ *
+ * @param cmd  FC 命令（须已设 config.operation / multi_plane / cw / meta 等）
+ * @param pba  [PLANE_NUM] 每 plane 的 PBA（ch/ce/lun 取 pba[0]）
+ * @return FTL_OK / FTL_ERROR（越界或池空；调用者负责 fc_command_release 回收半成品链）
+ */
+ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM]);
+
 ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t length);
 ftl_status_t ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length);
 

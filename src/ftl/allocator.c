@@ -107,53 +107,120 @@ static uint8_t allocator_pull_from_op(ftl_allocator_t *alloc)
 }
 
 /*
- * 内部工具：从 Free Pool 选一个 Super Block 的 block 号（磨损均衡）
+ * 内部工具：从 Free Pool 选该 plane 的一个空闲 block 号（磨损均衡）
  *
- * 行业标准：Super Block 的 plane0/plane1 用同一 block 号（NAND 行地址 plane
- * 只差 BA6 位，block 必须同号），Multi-Plane 命令一次写双 plane 同号页。
- * 遍历 block 号 b in 0..BLOCKS_PER_PLANE-1，两 plane 的 gblock 都必须
- * 在 Free Pool（state & FREE）且非坏；寿命取双 plane 平均擦除次数（Super
- * Block 整体寿命 = 两 plane 共同），选平均最小。
+ * Policy B：两个 plane **各自独立选块**，不再要求 block 同号——同号是旧策略的取舍，
+ * 不是 NAND 约束（multi-plane 行地址每个 plane 各带自己的 block 位）。
+ * 遍历 block 号 b in 0..BLOCKS_PER_PLANE-1，取该 plane 的 gblock 在 Free Pool
+ * （state & FREE）且非坏者中 erase_count 最小的一块。
  *
- * 若 free_count 为 0 或无可配对 block 则返回 UINT16_MAX
+ * 若 free_count 为 0 或该 plane 无可选 block 则返回 UINT16_MAX
  */
-static uint16_t allocator_select_block(ftl_allocator_t *alloc)
+static uint16_t allocator_select_plane_block(ftl_allocator_t *alloc, uint8_t plane)
 {
     uint16_t b;
     uint16_t best_block = UINT16_MAX;
     uint32_t min_erase  = UINT32_MAX;
 
-    if ((alloc == NULL) || (alloc->blocks == NULL) || (alloc->free_count == 0U))
+    if ((alloc == NULL) || (alloc->blocks == NULL) || (alloc->free_count == 0U) || (plane >= PLANE_NUM))
     {
         return UINT16_MAX;
     }
 
     for (b = 0U; b < BLOCKS_PER_PLANE; b++)
     {
-        uint16_t     g0   = ftl_gblock(0U, b);
-        uint16_t     g1   = ftl_gblock(1U, b);
-        ftl_block_t *blk0 = &alloc->blocks[g0];
-        ftl_block_t *blk1 = &alloc->blocks[g1];
-        uint32_t     sum;
+        ftl_block_t *blk = &alloc->blocks[ftl_gblock(plane, b)];
 
-        /* 双 plane 都必须空闲且非坏（坏块不参与配对） */
-        if ((!ftl_block_state_is(blk0, FTL_BLOCK_STATE_FREE)) ||
-            (!ftl_block_state_is(blk1, FTL_BLOCK_STATE_FREE)) ||
-            ftl_block_is_bad(blk0) || ftl_block_is_bad(blk1))
+        /* 必须空闲且非坏（坏块不进 Free Pool，这里兜底再判一次） */
+        if ((!ftl_block_state_is(blk, FTL_BLOCK_STATE_FREE)) || ftl_block_is_bad(blk))
         {
             continue;
         }
 
-        /* 寿命取双 plane 平均擦除次数；比较用和（均值单调同序） */
-        sum = (uint32_t)blk0->erase_count + (uint32_t)blk1->erase_count;
-        if (sum < min_erase)
+        if (blk->erase_count < min_erase)
         {
-            min_erase  = sum;
+            min_erase  = blk->erase_count;
             best_block = b;
         }
     }
 
     return best_block;
+}
+
+/*
+ * 内部工具：为 Open SB 槽位分配一对物理块（两 plane 各自独立选块）。
+ *
+ * 每个 plane 独立取块；某 plane 拿不到时空闲池耗尽 → 从 OP 池补（容量不动语义：
+ * OP 是 GC 缓冲池，擦除即用），最多补 PLANE_NUM 次再重试该 plane。
+ * 全部就位后：两 gblock 从 Free Pool 移除、置 OPEN、绑拓扑。
+ *
+ * 返回 1 成功，0 失败（调用者触发紧急 GC）。
+ */
+static uint8_t allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint8_t temperature)
+{
+    uint16_t block[PLANE_NUM];
+    uint8_t  plane;
+
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        uint8_t tries;
+
+        block[plane] = allocator_select_plane_block(alloc, plane);
+        for (tries = 0U; (block[plane] == UINT16_MAX) && (tries < PLANE_NUM); tries++)
+        {
+            if (allocator_pull_from_op(alloc) == 0U)
+            {
+                break; /* OP 池也空 */
+            }
+            block[plane] = allocator_select_plane_block(alloc, plane);
+        }
+        if (block[plane] == UINT16_MAX)
+        {
+            /* 该 plane 真无空间；已选的 plane 还没移出 Free Pool，无需回滚 */
+            return 0U;
+        }
+    }
+
+    /* 从 Free Pool 移除两 plane 的 gblock（swap-remove），并写入 SB */
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        (void)allocator_pool_remove(alloc, ftl_gblock(plane, block[plane]));
+        sb->plane_blocks[plane] = block[plane];
+    }
+    sb->next_page   = 0U;
+    sb->temperature = temperature;
+    sb->valid       = 1U;
+
+    /* 绑定真实拓扑（Phase V: 多 LUN 时 Super Block 必须知道所属 ch/ce/lun，
+     * super_block_page_addr 由此展开地址——此前 sb->topo 恒为零） */
+    sb->topo.ch  = alloc->ch;
+    sb->topo.ce  = alloc->ce;
+    sb->topo.lun = alloc->lun;
+
+    /* 状态机：两物理块置 OPEN（清 FREE/CLOSED/PRE_COND——块被 Open SB 占用，
+     * 从预擦除池取走）+ 记录温度流 + 反向索引 sb_id
+     * （OPEN 时 sb_id 占位 NO_SB，关闭后由 allocator_close_sb 写 closed 索引） */
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, block[plane])];
+
+        ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_PRE_COND);
+        ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
+        ftl_block_set_temp(b, temperature);
+        ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+    }
+
+    /* 同步 pre_cond_count：已从 Free Pool 取走 PLANE_NUM 个 Block */
+    if (alloc->pre_cond_count > PLANE_NUM)
+    {
+        alloc->pre_cond_count -= PLANE_NUM;
+    }
+    else
+    {
+        alloc->pre_cond_count = 0U;
+    }
+
+    return 1U;
 }
 
 /*
@@ -170,7 +237,13 @@ static void allocator_close_sb(ftl_allocator_t *alloc, super_block_t *sb)
     /* 写满关闭：两物理块置 CLOSED（清 OPEN），记录反向索引 = closed 列表索引 */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, sb->plane_blocks[plane])];
+        ftl_block_t *b;
+
+        if (sb->plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
+        {
+            continue; /* 退化单 plane 条目（掉电重建产物） */
+        }
+        b = &alloc->blocks[ftl_gblock(plane, sb->plane_blocks[plane])];
         ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN);
         ftl_block_state_set(b, FTL_BLOCK_STATE_CLOSED);
         ftl_block_set_sb(b, closed_idx);
@@ -205,8 +278,13 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
      * 这里兜底再清一次索引，避免残留） */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        ftl_block_t *b = &alloc->blocks[ftl_gblock(plane,
-                                                   alloc->closed_sb_list[closed_idx].plane_blocks[plane])];
+        ftl_block_t *b;
+
+        if (alloc->closed_sb_list[closed_idx].plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
+        {
+            continue; /* 退化单 plane 条目 */
+        }
+        b = &alloc->blocks[ftl_gblock(plane, alloc->closed_sb_list[closed_idx].plane_blocks[plane])];
         if (ftl_block_sb_id(b) == closed_idx)
         {
             ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
@@ -222,7 +300,13 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
 
         for (plane = 0U; plane < PLANE_NUM; plane++)
         {
-            ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, moved->plane_blocks[plane])];
+            ftl_block_t *b;
+
+            if (moved->plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
+            {
+                continue; /* 退化单 plane 条目 */
+            }
+            b = &alloc->blocks[ftl_gblock(plane, moved->plane_blocks[plane])];
             if (ftl_block_sb_id(b) == alloc->closed_sb_count)
             {
                 ftl_block_set_sb(b, closed_idx);
@@ -251,14 +335,12 @@ ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature
     return FTL_OK;
 }
 
-nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
+nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nand_pba_t out[PLANE_NUM])
 {
     super_block_t *sb;
-    uint16_t       block0;
-    uint16_t       block1;
-    nand_pba_t     pba;
+    uint8_t        plane;
 
-    if (alloc == NULL)
+    if ((alloc == NULL) || (out == NULL))
     {
         return NAND_PBA_INVALID;
     }
@@ -272,85 +354,35 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
         {
             allocator_close_sb(alloc, sb);
         }
-
-        /* 行业标准：Super Block 双 plane 同号 block（Multi-Plane 命令要求） */
-        block0 = allocator_select_block(alloc);
-        if (block0 == UINT16_MAX)
+        if (allocator_open_sb(alloc, sb, temperature) == 0U)
         {
-            /*
-             * Free Pool 无可配对 block（耗尽 / 单 plane 坏块残留）。
-             *
-             * 容量不动语义：回退到 OP 池——从 OP 预留块取一对补充 free pool
-             * （OP 是 GC 缓冲池，擦除即用），再重试一次 Free Pool 配对。
-             * 真无空间（OP 池也空）才返回 NAND_PBA_INVALID，调用者触发紧急 GC。
-             */
-            if (allocator_pull_from_op(alloc) == 0U)
-            {
-                return NAND_PBA_INVALID;
-            }
-            if (allocator_pull_from_op(alloc) == 0U)
-            {
-                return NAND_PBA_INVALID;
-            }
-            block0 = allocator_select_block(alloc);
-            if (block0 == UINT16_MAX)
-            {
-                return NAND_PBA_INVALID;
-            }
-        }
-        block1 = block0; /* 双 plane 同号：plane 由 gblock 位域区分 */
-
-        /* 从 Free Pool 移除双 plane 两个 gblock（swap-remove） */
-        (void)allocator_pool_remove(alloc, ftl_gblock(0U, block0));
-        (void)allocator_pool_remove(alloc, ftl_gblock(1U, block1));
-
-        sb->plane_blocks[0] = block0;
-        sb->plane_blocks[1] = block1;
-        sb->next_page       = 0U;
-        sb->temperature     = temperature;
-        sb->valid           = 1U;
-
-        /* 绑定真实拓扑（Phase V: 多 LUN 时 Super Block 必须知道所属 ch/ce/lun，
-         * super_block_page_addr 由此展开地址——此前 sb->topo 恒为零） */
-        sb->topo.ch  = alloc->ch;
-        sb->topo.ce  = alloc->ce;
-        sb->topo.lun = alloc->lun;
-
-        /* 状态机：两物理块置 OPEN（清 FREE/CLOSED/PRE_COND——块被 Open SB 占用，
-         * 从预擦除池取走）+ 记录温度流 + 反向索引 sb_id
-         * （OPEN 时 sb_id 占位 NO_SB，关闭后由 allocator_close_sb 写 closed 索引） */
-        {
-            uint8_t plane;
-            for (plane = 0U; plane < PLANE_NUM; plane++)
-            {
-                uint16_t     gblock = ftl_gblock(plane, (plane == 0U) ? block0 : block1);
-                ftl_block_t *b      = &alloc->blocks[gblock];
-
-                ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_PRE_COND);
-                ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
-                ftl_block_set_temp(b, temperature);
-                ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
-            }
-        }
-
-        /* 同步 pre_cond_count：已从 Free Pool 取走 2 个 Block */
-        if (alloc->pre_cond_count > 2U)
-        {
-            alloc->pre_cond_count -= 2U;
-        }
-        else
-        {
-            alloc->pre_cond_count = 0U;
+            return NAND_PBA_INVALID; /* Free/OP 池都拿不出某个 plane 的块 → 调用者触发紧急 GC */
         }
     }
 
-    /* 返回当前写入页的 PBA（Plane 0） */
-    pba = super_block_page_pba(alloc->ch, alloc->ce, sb, 0U, sb->next_page);
+    /* 两 plane 同一页：multi-plane 写一次烧两个 plane 的同页 */
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        out[plane] = super_block_page_pba(alloc->ch, alloc->ce, sb, plane, sb->next_page);
+    }
 
     /* 推进写指针 */
     sb->next_page++;
 
-    return pba;
+    return out[0];
+}
+
+nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
+{
+    nand_pba_t pair[PLANE_NUM];
+
+    if (allocator_alloc_pair(alloc, temperature, pair) == NAND_PBA_INVALID)
+    {
+        return NAND_PBA_INVALID;
+    }
+
+    /* 单 plane 便捷：返回 plane 0 的那一半（GC / WL / metadata 的单 plane 写路径） */
+    return pair[0];
 }
 
 void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
@@ -412,11 +444,17 @@ uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
     sb.temperature     = temperature;
     sb.valid           = 0U;
 
-    /* 双 Plane 置 CLOSED（清 FREE/OPEN）+ 温度 + 反向索引 = closed 列表索引 */
+    /* 双 Plane 置 CLOSED（清 FREE/OPEN）+ 温度 + 反向索引 = closed 列表索引。
+     * plane_blocks[plane] 允许为 FTL_BLOCK_NO_PLANE（重建产生的退化单 plane 条目）。 */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, plane_blocks[plane])];
+        ftl_block_t *b;
 
+        if (plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
+        {
+            continue;
+        }
+        b = &alloc->blocks[ftl_gblock(plane, plane_blocks[plane])];
         ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_OPEN);
         ftl_block_state_set(b, FTL_BLOCK_STATE_CLOSED);
         ftl_block_set_temp(b, temperature);

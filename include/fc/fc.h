@@ -13,6 +13,7 @@
  *
  * 生命周期（对 FTL）：
  *   fc_command_alloc() → 填 config/参数 → fc_command_configure_descriptors()
+ *   （或按需自组装：fc_command_attach_cw() 逐条追加 CW）
  *   → fc_submit() → fc_service()（后台推进）→ fc_poll_completion() 取完成
  *   → fc_command_release() 回收。
  *

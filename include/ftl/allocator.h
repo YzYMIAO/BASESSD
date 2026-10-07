@@ -17,6 +17,7 @@
  *   PBA 的 page 字段由 allocator 管理，block/plane 从 Free Pool 分配。
  */
 
+#include "common/assertion.h" /* ASSERT（退化单 plane 条目展开地址是编码错误） */
 #include "ftl/bst.h"          /* ftl_block_t, FTL_BLOCK_TOTAL, ftl_gblock, ftl_block_is_bad */
 #include "ftl/ftl_type.h"     /* ftl_status_t, ftl_topology_t */
 #include "nand/nand_config.h" /* nand_pba_t, nand_addr_t, nand_paa_t, PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
@@ -37,6 +38,13 @@
 /* ── Closed Super Block 列表最大容量 ── */
 #define SUPER_BLOCK_LIST_MAX (1024U)
 
+/* ── Closed 条目「退化单 plane」哨兵 ──
+ * Policy B 下 SB 两 plane 是**独立分配**的物理块（不再同号）。掉电重建按物理块逐个归位
+ * （见 power_failure_recovery.c），无法、也不需要恢复「哪两块曾是一对」，故 closed_sb_list
+ * 条目允许只含一个 plane：另一个 plane 记本哨兵。Open SB（hot_sb/cold_sb，multi-plane 写的
+ * 单元）恒为双 plane，不受影响。凡按 plane 展开地址的读者都要先判哨兵。 */
+#define FTL_BLOCK_NO_PLANE (UINT16_MAX)
+
 /* ── Super Block ──
  *
  * Super Block 是跨双 Plane 的逻辑写入单元。
@@ -48,7 +56,7 @@
 typedef struct
 {
     ftl_topology_t topo;                    /* 本 Super Block 绑定的 NAND 芯片路由（ch/ce/lun） */
-    uint16_t       plane_blocks[PLANE_NUM]; /* Plane 0 和 Plane 1 的 Block 号 */
+    uint16_t       plane_blocks[PLANE_NUM]; /* 各 Plane 的 Block 号；可为 FTL_BLOCK_NO_PLANE（退化单 plane 条目） */
     uint8_t        next_page;               /* 当前写入页（0~63，双 Plane 同步） */
     uint8_t        temperature;             /* FTL_TEMP_HOT / FTL_TEMP_COLD */
     uint8_t        valid;                   /* 1=正在使用（Open），0=已关闭 */
@@ -74,11 +82,20 @@ typedef struct
     super_block_t *closed_sb_list; /* closed Super Block 数组（由调用者提供） */
 } ftl_init_params_t;
 
+/* 该 plane 是否持有物理块（Policy B：Closed 条目允许退化单 plane，另一 plane 记哨兵）。
+ * 凡按 plane 展开地址 / 索引 BST / 擦除的读者都要先判——哨兵不是合法块号。 */
+static inline uint8_t super_block_has_plane(const super_block_t *sb, uint8_t plane)
+{
+    return (sb->plane_blocks[plane] != FTL_BLOCK_NO_PLANE) ? 1U : 0U;
+}
+
 /* 返回 Super Block 中指定 Plane/Page 的展开地址（ch/ce/lun 取自 sb->topo） */
 static inline nand_addr_t super_block_page_addr(const super_block_t *sb, uint8_t plane, uint8_t page)
 {
     nand_addr_t addr;
 
+    /* 退化单 plane 条目的哨兵 plane 不可展开（plane_blocks[plane] 是哨兵，非块号） */
+    ASSERT(super_block_has_plane(sb, plane) != 0U);
     addr.ch    = sb->topo.ch;
     addr.ce    = sb->topo.ce;
     addr.lun   = sb->topo.lun;
@@ -152,13 +169,27 @@ typedef struct
 ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *params);
 
 /*
- * allocator_alloc - 分配一个 PBA（一页，4 CW）
+ * allocator_alloc_pair - 分配一页的**两个 plane** PBA（Multi-Plane 写用）
  *
  * 内部：
  *   ① 从对应温度的 Open Super Block 取当前写入位置
  *   ② Super Block 已写满 → 关闭它（→ Closed），从 Free Pool 分配新的 Super Block
- *   ③ 返回当前页的 PBA，next_page++
+ *      （**两 plane 各自独立选块**——Policy B：不再要求 block 同号）
+ *   ③ out[plane] 填当前页在两 plane 的 PBA，next_page++
  *   ④ Free Pool 耗尽 → 返回 NAND_PBA_INVALID（write 路径触发紧急 GC 重试）
+ *
+ * @param alloc       Allocator 上下文
+ * @param temperature FTL_TEMP_HOT / FTL_TEMP_COLD
+ * @param out         输出：out[plane] = 该 plane 当前页 PBA（调用者保证 PLANE_NUM 长）
+ *
+ * @return out[0]（= plane 0 的 PBA），NAND_PBA_INVALID 表示分配失败
+ */
+nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nand_pba_t out[PLANE_NUM]);
+
+/*
+ * allocator_alloc - 分配一个 PBA（一页，4 CW）——单 plane 便捷
+ *
+ * = allocator_alloc_pair() 取 plane 0 的那一半。GC / WL / metadata 的单 plane 写路径用它。
  *
  * @param alloc       Allocator 上下文
  * @param temperature FTL_TEMP_HOT / FTL_TEMP_COLD
@@ -180,7 +211,8 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
  *
  * 行业坏块替换流程：Super Block 中某 plane PROGRAM 失败后，①关闭该 SB
  * （不再写入新数据）→ 进 closed_sb_list → GC 优先回收（VPC 低）。坏块
- * 标记仍由 bbt_mark_bad 完成（标 block 号，同号双 plane 下两 plane 一起退役）。
+ * 标记仍由 bbt_mark_bad 完成（标 block 号）。Policy B 下两 plane 是独立物理块，
+ * 只退役真正失败的那个 plane 的块；另一 plane 块随 Closed SB 进 GC，擦除后复用。
  *
  * @param alloc      Allocator 上下文
  * @param temperature 要关闭的 Open SB 温度（FTL_TEMP_HOT / FTL_TEMP_COLD）
@@ -199,19 +231,20 @@ ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature
 void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx);
 
 /*
- * allocator_add_closed_sb - 掉电恢复重建时，把双 Plane 对直接塞进 Closed 列表
+ * allocator_add_closed_sb - 掉电恢复重建时，把已写过的块直接塞进 Closed 列表
  *
- * 重建（ftl_rebuild_closed_sb_list）扫描 NAND 判出已满 Super Block 后，
+ * 重建（ftl_rebuild_closed_sb_list）逐 plane 扫描 NAND 判出写过的物理块后，
  * 不能复用 allocator_close_sb（那是 Open SB 的关闭流程，前半段只清 OPEN
  * 不清 FREE，而重建块的 RAM 态是 FREE）。本函数仿照 close_sb 的后半段：
  *
  *   sb = { topo=alloc 维度, plane_blocks=入参, next_page=PAGES_PER_BLOCK,
  *          temperature=入参, valid=0 }
- *   双 Plane 置 CLOSED（清 FREE/OPEN）+ 温度 + sb_id = closed 列表索引
+ *   各 plane 的块置 CLOSED（清 FREE/OPEN）+ 温度 + sb_id = closed 列表索引
  *   追加进 closed_sb_list，closed_sb_count++
  *
  * @param alloc          Allocator 上下文
- * @param plane_blocks   双 Plane 同号 Block 号（plane0/plane1）
+ * @param plane_blocks   [PLANE_NUM] 每 plane 的 Block 号；Policy B 下逐 plane 独立分配，
+ *                       重建产生的**退化单 plane 条目**把另一 plane 记 FTL_BLOCK_NO_PLANE
  * @param temperature    FTL_TEMP_HOT / FTL_TEMP_COLD（掉电无落盘，调用方给默认）
  * @return 塞入的 closed 列表索引；列表满返回 UINT16_MAX
  */

@@ -30,9 +30,10 @@ typedef struct
     uint16_t         command_id; /* FC command_id */
     ftl_io_request_t io;         /* ★ 嵌入请求描述（lba/buffer/pages/通知/回调），按值拷贝 */
     /* ↓↓↓ 写完成确认/回滚（写专用，读请求时无效） ↓↓↓ */
-    nand_pba_t old_pba;            /* 写前旧 PBA（journal/回滚用） */
-    nand_pba_t new_pba;            /* 新分配的 PBA（坏块标记用，Multi-Plane 时 = plane0） */
+    nand_pba_t old_pba;            /* 写前旧 PBA（journal/回滚用，plane0） */
+    nand_pba_t new_pba;            /* 新分配的 PBA（坏块标记用，plane0） */
     nand_pba_t old_pba1;           /* pages=2 时 plane1 写前旧 PBA（Multi-Plane 双页簿记） */
+    nand_pba_t new_pba1;           /* pages=2 时 plane1 新分配 PBA（Policy B：plane1 块独立，不可由 plane0 派生） */
     uint8_t    cache_intermediate; /* 1: Cache Program 中间页（15h），completion 时不更新 L2P/Journal */
 } ftl_pending_req_t;
 
@@ -54,10 +55,11 @@ void pending_init(ftl_context_t *ftl);
  * @param old_pba            写前旧 PBA（写请求用，读传 NAND_PBA_INVALID）
  * @param new_pba            新分配的 PBA（写请求用，读传 NAND_PBA_INVALID）
  * @param old_pba1           pages=2 时 plane1 写前旧 PBA（单页请求传 NAND_PBA_INVALID）
+ * @param new_pba1           pages=2 时 plane1 新分配 PBA（单页请求传 NAND_PBA_INVALID）
  * @param cache_intermediate Cache Program 中间页标志（1=中间页跳过 L2P/Journal 更新）
  * @return FTL_OK 成功，FTL_ERROR 表满
  */
-int pending_add(ftl_context_t *ftl, uint16_t cmd_id, const ftl_io_request_t *io, nand_pba_t old_pba, nand_pba_t new_pba, nand_pba_t old_pba1, uint8_t cache_intermediate);
+int pending_add(ftl_context_t *ftl, uint16_t cmd_id, const ftl_io_request_t *io, nand_pba_t old_pba, nand_pba_t new_pba, nand_pba_t old_pba1, nand_pba_t new_pba1, uint8_t cache_intermediate);
 
 /*
  * pending_lookup - 按 command_id 查找本实例 pending 项

@@ -130,10 +130,11 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                             /* VPC/bitmap 维护：新页置位 + 覆盖写清旧页（单点更新防漂移）
                              *
                              * plane0（new_pba 所在 plane）簿记保留。
-                             * pages=2 的 Multi-Plane 写：FC 层按「同 block/page + plane=1」派生
-                             * plane1 desc（allocator 同号双 plane 后即实际烧录位置），
-                             * 这里对 plane1 页做同样簿记（set_valid + L2P + Journal），
-                             * 避免 plane1 成为无映射幽灵页（GC 不搬 → 擦除丢数据）。 */
+                             * pages=2 的 Multi-Plane 写：plane1 的实际烧录位置是写入时分配的
+                             * pending->new_pba1（Policy B：两 plane 独立选块，**不可**由 plane0
+                             * 「同 block + plane=1」派生）。这里对 plane1 页做同样簿记
+                             * （set_valid + L2P + Journal），避免 plane1 成为无映射幽灵页
+                             * （GC 不搬 → 擦除丢数据）。 */
                             {
                                 ftl_block_t *nb = &ftl->alloc.blocks[ftl_pba_gblock(pending->new_pba)];
                                 ftl_block_set_valid(nb,
@@ -156,16 +157,12 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                             /* pages=2 Multi-Plane：plane1 页（io.lba+1）同样簿记 */
                             if (pending->io.pages == 2U)
                             {
-                                nand_pba_t   pba1 = pba_make(pba_to_ch(pending->new_pba),
-                                                           pba_to_ce(pending->new_pba),
-                                                           pba_to_page(pending->new_pba),
-                                                           1U, /* plane1 */
-                                                           pba_to_block(pending->new_pba),
-                                                           pba_to_lun(pending->new_pba),
-                                                           0U);
-                                ftl_block_t *nb1  = &ftl->alloc.blocks[ftl_pba_gblock(pba1)];
+                                const nand_pba_t pba1 = pending->new_pba1;
+                                ftl_block_t     *nb1  = &ftl->alloc.blocks[ftl_pba_gblock(pba1)];
 
-                                ftl_block_set_valid(nb1, 1U, (uint8_t)pba_to_page(pba1));
+                                ftl_block_set_valid(nb1,
+                                                    (uint8_t)pba_to_plane(pba1),
+                                                    (uint8_t)pba_to_page(pba1));
                                 nb1->program_count++;
 
                                 /* L2P：io.lba+1 → plane1 页 */
@@ -244,8 +241,11 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                              *
                              * ① 关闭当前 Open Super Block（不再写入新数据）→ 进 closed_sb_list
                              *    → GC 优先回收（该 SB VPC 偏低：失败页不置 valid + 旧页被覆盖清位）
-                             * ② bbt_mark_bad（RAM only，后台 bbt_flush 持久化）——标 block 号，
-                             *    同号双 plane 下两 plane 一起退役（同号语义固有粒度）
+                             * ② bbt_mark_bad（RAM only，后台 bbt_flush 持久化）——标 plane0 的 block 号。
+                             *    Policy B 下两 plane 是独立块，**只退失败的那个 plane**：plane1 块仍
+                             *    好，随 Closed SB 进 GC，擦除后回 free pool 复用（不再被同号语义连坐）。
+                             *    若失败的是 plane1（本层拿不到逐 CW 状态，只知整命令失败），
+                             *    其块会在 GC 擦除失败时被标坏（见 ④）。
                              * ③ L2P 不动 → 自动回滚到 old_pba，旧数据完好
                              * ④ GC 回收时：好 plane 擦除回 free pool；坏 plane 擦除失败再标坏
                              */
@@ -564,7 +564,7 @@ void ftl_service(ftl_context_t *ftl)
 ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
 {
     fc_command_t *cmd;
-    nand_pba_t    pba;
+    nand_pba_t    pba[PLANE_NUM];
     uint32_t      data_size;
     int           ret;
     lba_t         internal_lba;
@@ -586,8 +586,14 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
      * 本 FTL 上下文已绑定固定 (ch,ce,lun)；LUN_NUM=1 时折叠为原值。 */
     internal_lba = lba_to_local(req->lba);
 
-    pba = l2p_cache_read(&ftl->cache, internal_lba);
-    if (pba == FTL_PBA_INVALID)
+    /* ① 查 L2P：pages=2 时两 plane 的物理位置**各自独立**（Policy B：SB 两 plane 不再同号），
+     * 必须查两次。任一未映射 → 整请求按全零返回（与单页未映射的既有语义一致）——
+     * 部分映射的 multi-plane 读无法只读一半 plane，且混读会把未写页的残值当数据返回。 */
+    pba[0] = l2p_cache_read(&ftl->cache, internal_lba);
+    pba[1] = (req->pages == 2U) ? l2p_cache_read(&ftl->cache, (lba_t)(internal_lba + 1U))
+                                : NAND_PBA_INVALID;
+    if ((pba[0] == FTL_PBA_INVALID) ||
+        ((req->pages == 2U) && (pba[1] == FTL_PBA_INVALID)))
     {
         memset(req->buffer, 0, data_size);
 
@@ -636,8 +642,8 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     cmd->module           = FC_COMMAND_MODULE_FTL;
     cmd->meta             = (DWORD)internal_lba;
 
-    /* ④ 配置 PBA + desc 链 */
-    ret = ftl_cmd_setup_ppa(cmd, pba);
+    /* ④ 配置 PBA + desc 链（逐 plane 各自的 PBA） */
+    ret = ftl_cmd_setup_ppa_pair(cmd, pba);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
@@ -645,7 +651,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     }
 
     /* ⑤ 注册 pending（必须早于 submit，避免竞态；io 按值嵌入） */
-    ret = pending_add(ftl, cmd->command_id, req, NAND_PBA_INVALID, NAND_PBA_INVALID, NAND_PBA_INVALID, 0U);
+    ret = pending_add(ftl, cmd->command_id, req, NAND_PBA_INVALID, NAND_PBA_INVALID, NAND_PBA_INVALID, NAND_PBA_INVALID, 0U);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
@@ -667,7 +673,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
 {
     fc_command_t *cmd;
-    nand_pba_t    new_pba;
+    nand_pba_t    new_pba[PLANE_NUM];
     nand_pba_t    old_pba;
     nand_pba_t    old_pba1 = NAND_PBA_INVALID;
     uint32_t      data_size;
@@ -692,11 +698,10 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
      * 本 FTL 上下文已绑定固定 (ch,ce,lun)；LUN_NUM=1 时折叠为原值。 */
     internal_lba = lba_to_local(req->lba);
 
-    /* ① Allocator 分配新 PBA
+    /* ① Allocator 分配新 PBA（**逐 plane 独立选块**——Policy B：SB 两 plane 不再同号）。
      * Free Pool 耗尽 → 同步跑一轮紧急 GC（回收 1 个 Super Block = 2 个 Block，
      * 足够一个 2-page 请求），归还后再重试一次分配。真无空间才返回失败。 */
-    new_pba = allocator_alloc(&ftl->alloc, FTL_TEMP_HOT);
-    if (new_pba == NAND_PBA_INVALID)
+    if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) == NAND_PBA_INVALID)
     {
         super_block_t *victim;
 
@@ -705,8 +710,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
             (void)gc_migrate_sb(&ftl->alloc, &ftl->cache, &ftl->journal, victim);
             gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
         }
-        new_pba = allocator_alloc(&ftl->alloc, FTL_TEMP_HOT);
-        if (new_pba == NAND_PBA_INVALID)
+        if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) == NAND_PBA_INVALID)
         {
             LOGE("[FTL] write: no free block after GC\r\n");
             return FTL_ERROR; /* 无 victim 可回收 / GC 未归还空间 */
@@ -747,8 +751,8 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
     cmd->module           = FC_COMMAND_MODULE_FTL;
     cmd->meta             = (DWORD)internal_lba;
 
-    /* ④ 配置 PBA + desc 链 + 写入数据 */
-    ret = ftl_cmd_setup_ppa(cmd, new_pba);
+    /* ④ 配置 PBA + desc 链 + 写入数据（逐 plane 各自的 PBA） */
+    ret = ftl_cmd_setup_ppa_pair(cmd, new_pba);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
@@ -762,8 +766,9 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
         return FTL_ERROR;
     }
 
-    /* ⑤ 注册 pending（io 按值嵌入 + old/new_pba；实例即上下文，无需再存 ftl） */
-    ret = pending_add(ftl, cmd->command_id, req, old_pba, new_pba, old_pba1, 0U);
+    /* ⑤ 注册 pending（io 按值嵌入 + old/new PBA；实例即上下文，无需再存 ftl）。
+     * 单页请求 plane1 字段传 INVALID。 */
+    ret = pending_add(ftl, cmd->command_id, req, old_pba, new_pba[0], old_pba1, (req->pages == 2U) ? new_pba[1] : NAND_PBA_INVALID, 0U);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);

@@ -95,6 +95,24 @@ fc_status_t fc_command_configure_descriptors(fc_command_t *command)
     return fc_command_configure_descriptors_internal(&g_fc_controller, command);
 }
 
+/* 逐条追加一个 (plane, cw) 到命令 desc 链尾（仅 ALLOCATED 时合法）。
+ * 与 fc_command_configure_descriptors 并列：后者按掩码一次性建链（策略），
+ * 本函数把"机制"（分配 desc+buffer + 挂链）交给上层自行组装。
+ * row_paa 由调用者按 plane 给出，故 multi-plane 命令两个 plane 可指向不同 block。 */
+fc_status_t fc_command_attach_cw(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
+{
+    fc_command_id_t command_id;
+
+    /* command 非空是前置条件；指针身份 + 生命周期状态是文档化入口契约，保留返回码 */
+    ASSERT(command != NULL);
+    if ((fc_command_to_id(command, &command_id) == 0U) ||
+        (fc_command_state_get(&g_fc_controller, command_id) != FC_COMMAND_STATE_ALLOCATED))
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
+    return fc_command_attach_cw_internal(&g_fc_controller, command, plane, cw, row_paa);
+}
+
 /* --------------------------------------------------------------------
  * fc_submit
  *   功能：命令投递到 SQ/HSQ（公共接口）。

@@ -547,27 +547,59 @@ static uint8_t __attribute__((unused)) fc_cw_mask_popcount(uint32_t mask)
 }
 
 /* --------------------------------------------------------------------
+ * fc_command_plane_span
+ *   功能：给出命令能触及的 plane 段 [*plane_first, *plane_last)。
+ *   参数：command —— 命令；plane_first/plane_last —— 输出（调用者保证非空）。
+ *   返回：段内 plane 数（= multi_plane，单 plane 时为 1）。
+ *   实现要点：
+ *     - multi-plane：从 plane 0 起，覆盖 plane_count 个 plane；
+ *     - 单 plane：**只覆盖 paa_to_plane(command->paa) 那一个**——掩码是绝对编号，
+ *       plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
+ * -------------------------------------------------------------------- */
+static uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t *plane_first, uint8_t *plane_last)
+{
+    const uint8_t plane_count = (command->config.multi_plane > 0U) ? (uint8_t)command->config.multi_plane : 1U;
+
+    /* ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM] 都按 PLANE_NUM 定尺。
+     *   改 plane 语义时这里与 nand_dispatch_tables.c 的 multi-plane handler 要一起动。 */
+    ASSERT(plane_count <= PLANE_NUM);
+
+    *plane_first = (plane_count == 1U) ? (uint8_t)paa_to_plane(command->paa) : 0U;
+    *plane_last  = (uint8_t)(*plane_first + plane_count);
+    return plane_count;
+}
+
+/* --------------------------------------------------------------------
  * fc_command_configure_descriptor_internal
  *   功能：为命令配置一个 (plane, cw) 描述符（分配 desc+buffer，填 PAA/config/meta）。
  *   参数：controller —— FC 控制器；command —— 命令；plane —— 目标 plane；
- *         cw —— 目标 CW 号；configured_descriptor —— 输出。
+ *         cw —— 目标 CW 号；row_paa —— 该 plane 的行地址（page/block/lun）；
+ *         configured_descriptor —— 输出。
  *   返回：FC_STATUS_OK / RESOURCE_EMPTY（池空）/ INVALID_ARGUMENT。
  *   实现要点：
- *     - multi_plane>0：PAA 用 command->paa 的 block/page/lun + 传入的 plane/cw 组装。
- *     - 单 plane：保留 command->paa 的 plane/block/page/lun，只改写 CW 位（plane 参数不用）。
- *     - CW 号由调用方给出（来自 mask 枚举），不再由 desc 序号推导——见
- *       fc_command_configure_descriptors_internal 的"链走位 vs CW 号解耦"说明。
+ *     - **行地址来自实参 row_paa，不再从 command->paa 推导**：multi-plane 命令一个
+ *       DWORD 装不下两个 plane 的行地址（Policy B：两 plane 的 block 可以不同）。
+ *       plane 位由实参 plane 决定，row_paa 的 plane 位被忽略（调用方经 ASSERT 保证一致）。
+ *     - multi_plane>0：PAA = row_paa 的 block/page/lun + 传入的 plane/cw。
+ *     - 单 plane：row_paa 已完整描述该 plane 的地址，只改写 CW 位。
+ *     - CW 号由调用方给出（来自 mask 枚举或 fc_command_attach_cw_internal 的实参），
+ *       不再由 desc 序号推导——见 fc_command_configure_descriptors_internal 的
+ *       "链走位 vs CW 号解耦"说明。
  *     - meta = lba_to_cw_meta(command->meta, cw)。
+ *     - **只负责"分配 + 填字段"，不挂链**——挂链由 fc_command_chain_append 单独完成，
+ *       两者组合成机制原语 fc_command_attach_cw_internal。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, fc_descriptor_t **configured_descriptor)
+static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa, fc_descriptor_t **configured_descriptor)
 {
     fc_descriptor_t *descriptor;
     fc_buffer_id_t   buffer_id;
 
-    /* 唯一调用者 fc_command_configure_descriptors_internal 传的是栈上 &descriptor */
+    /* 调用者（attach / 策略循环）传的是栈上 &descriptor */
     ASSERT(configured_descriptor != NULL);
     /* 单 plane 命令的 CW 数不超过一页；多 plane 由 mask 保证 */
     ASSERT(cw < CW_NUM);
+    /* row_paa 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
+    ASSERT((uint8_t)paa_to_plane(row_paa) == plane);
     descriptor = fc_descriptor_alloc_internal(controller, command);
     buffer_id  = fc_buffer_alloc_internal(controller);
     if ((descriptor == NULL) || (buffer_id == FC_BUFFER_ID_INVALID))
@@ -581,14 +613,13 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
 
     if (command->config.multi_plane > 0U)
     {
-        uint32_t blk    = paa_to_block(command->paa);
-        uint32_t pg     = paa_to_page(command->paa);
-        /* 保留 command->paa 的 LUN 字段（多 LUN 并发必需：desc PAA/META/随机种子/ECC 都依赖它） */
-        descriptor->paa = paa_make(pg, plane, blk, paa_to_lun(command->paa), cw);
+        /* 行地址取自实参 row_paa（每 plane 独立）；保留其 LUN 字段（多 LUN 并发必需：
+         * desc PAA/META/随机种子/ECC 都依赖它）。 */
+        descriptor->paa = paa_make(paa_to_page(row_paa), plane, paa_to_block(row_paa), paa_to_lun(row_paa), cw);
     }
     else
     {
-        descriptor->paa = (command->paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
+        descriptor->paa = (row_paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
     }
     descriptor->config     = command->config;
     descriptor->config.cw  = cw;
@@ -596,6 +627,100 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
     descriptor->next_id    = FC_DESCRIPTOR_ID_INVALID;
     descriptor->meta       = lba_to_cw_meta(command->meta, cw);
     *configured_descriptor = descriptor;
+    return FC_STATUS_OK;
+}
+
+/* --------------------------------------------------------------------
+ * fc_command_cw_attached
+ *   功能：判断 (plane, cw) 是否已在命令的 desc 链上（按 desc 自己的 PAA 算 n 匹配）。
+ *   参数：controller —— FC 控制器；command —— 命令；plane/cw —— 目标 CW 坐标。
+ *   返回：1 = 已挂；0 = 未挂。
+ *   实现要点：链长 ≤ CW_TOTAL_MAX，线性走 next_id 即可。
+ *         仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
+ *         否则触发 -Wunused-function，同 fc_cw_mask_popcount）。
+ * -------------------------------------------------------------------- */
+static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_t *controller, const fc_command_t *command, uint8_t plane, uint8_t cw)
+{
+    fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id;
+
+    while (descriptor_id < FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        const fc_descriptor_t *descriptor = &controller->descriptor_pool[descriptor_id];
+
+        if (((uint8_t)paa_to_plane(descriptor->paa) == plane) && ((uint8_t)paa_to_cw(descriptor->paa) == cw))
+        {
+            return 1U;
+        }
+        descriptor_id = (fc_descriptor_id_t)descriptor->next_id;
+    }
+    return 0U;
+}
+
+/* --------------------------------------------------------------------
+ * fc_command_chain_append
+ *   功能：把已填好的 descriptor 追加到命令 desc 链的尾部。
+ *   参数：controller —— FC 控制器；command —— 命令；descriptor —— 待挂 desc（属本命令）。
+ *   返回：无。
+ *   实现要点：
+ *     - 走 next_id 找链尾（链长 ≤ CW_TOTAL_MAX，O(N) 可接受，且不必让调用方维护 previous）。
+ *     - 空链时本条即链头（记入 command->desc_id）；否则前驱 next_id 串上并置 config.chain = MORE。
+ *     - 末条保持 FC_CHAIN_END（desc 分配时已整体清零），无需回改。
+ * -------------------------------------------------------------------- */
+static void fc_command_chain_append(fc_t *controller, fc_command_t *command, fc_descriptor_t *descriptor)
+{
+    const fc_descriptor_id_t new_id = (fc_descriptor_id_t)(descriptor - controller->descriptor_pool);
+    fc_descriptor_id_t       tail   = (fc_descriptor_id_t)command->desc_id;
+
+    if (tail == FC_DESCRIPTOR_ID_INVALID)
+    {
+        command->desc_id = new_id; /* 空链：本条即链头 */
+        return;
+    }
+    while (controller->descriptor_pool[tail].next_id != FC_DESCRIPTOR_ID_INVALID)
+    {
+        tail = (fc_descriptor_id_t)controller->descriptor_pool[tail].next_id;
+    }
+    controller->descriptor_pool[tail].config.chain = 1U;
+    controller->descriptor_pool[tail].next_id      = new_id;
+}
+
+/* --------------------------------------------------------------------
+ * fc_command_attach_cw_internal
+ *   功能：把一个 (plane, cw) 追加到命令 desc 链尾（分配 desc+buffer 并串联）。
+ *   参数：controller —— FC 控制器；command —— 命令；plane/cw —— 目标 CW 坐标；
+ *         row_paa —— 该 plane 的行地址（其 plane 位须等于 plane）。
+ *   返回：FC_STATUS_OK / INVALID_ARGUMENT（cw ≥ CW_NUM 或 plane 越出本命令 plane 段）
+ *         / RESOURCE_EMPTY（池空）。
+ *   实现要点：
+ *     - **机制层**：只做"分配 + 挂链"，不解释掩码、不决定访问集合（那是策略层的事）。
+ *       上层可据此自行组装任意 CW 子集，见 fc_command_attach_cw（公共入口）。
+ *     - 行地址由调用者按 plane 给出（Policy B：multi-plane 命令两 plane 的 block 可不同）。
+ *       策略层传 command->paa 派生的同页地址，故对现有路径逐字节中性。
+ *     - 同一 n 被追加两次 = 链构造错误（掩码是集合，重复置位会静默丢数据）→ ASSERT，
+ *       与 fc_build_request_data_planes 的同源断言一致。
+ *     - RESOURCE_EMPTY 时不动已挂好的前序 desc：那条半成品 desc 仍在所有权链上，
+ *       由 fc_command_release / fc_command_resources_rollback 统一回收。
+ * -------------------------------------------------------------------- */
+fc_status_t fc_command_attach_cw_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
+{
+    uint8_t          plane_first;
+    uint8_t          plane_last;
+    fc_descriptor_t *descriptor = NULL;
+    fc_status_t      result;
+
+    (void)fc_command_plane_span(command, &plane_first, &plane_last);
+    if ((cw >= CW_NUM) || (plane < plane_first) || (plane >= plane_last))
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
+    ASSERT(fc_command_cw_attached(controller, command, plane, cw) == 0U);
+
+    result = fc_command_configure_descriptor_internal(controller, command, plane, cw, row_paa, &descriptor);
+    if (result != FC_STATUS_OK)
+    {
+        return result;
+    }
+    fc_command_chain_append(controller, command, descriptor);
     return FC_STATUS_OK;
 }
 
@@ -615,20 +740,21 @@ static fc_status_t fc_command_configure_descriptor_internal(fc_t *controller, fc
  *     - 链序：plane-major（先 plane 0 的全部置位 CW，再 plane 1）。
  *       **链走位（desc 序号）与 CW 号自此解耦**：所有按链走位索引的地方不动，
  *       CW 号一律从 paa_to_cw(desc->paa) 取。
- *     - 前驱 desc 的 next_id 串联；首 desc 记入 command->desc_id。
+ *     - **策略层**：本函数只决定"访问哪些 CW"，实际分配/挂链交给机制层
+ *       fc_command_attach_cw_internal()。要让上层自己决定集合，用公共入口
+ *       fc_command_attach_cw() 循环调用即可（链序即数据布局顺序）。
  *     - 任一 desc 配置失败 → fc_command_resources_rollback 整体回滚。
  * -------------------------------------------------------------------- */
 fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_command_t *command)
 {
-    fc_command_id_t  command_id;
-    fc_descriptor_t *previous = NULL;
-    uint32_t         mask;
-    uint32_t         allowed;
-    uint8_t          plane_count;
-    uint8_t          plane_first;
-    uint8_t          plane_last;
-    uint8_t          plane;
-    uint8_t          cw;
+    fc_command_id_t command_id;
+    uint32_t        mask;
+    uint32_t        allowed;
+    uint8_t         plane_count;
+    uint8_t         plane_first;
+    uint8_t         plane_last;
+    uint8_t         plane;
+    uint8_t         cw;
 
     /* NO_DATA operations (RESET, BLOCK_LOCK, etc.) and ERASE have no
      * data payload — they do not need descriptors or buffers.
@@ -641,17 +767,7 @@ fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_comma
         return FC_STATUS_OK;
     }
 
-    plane_count = (command->config.multi_plane > 0U) ? (uint8_t)command->config.multi_plane : 1U;
-    /* ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM] 都按 PLANE_NUM 定尺。
-     *   改 plane 语义时这里与 nand_dispatch_tables.c 的 multi-plane handler 要一起动。 */
-    ASSERT(plane_count <= PLANE_NUM);
-
-    /* 命令能触及的平面位段 [plane_first, plane_last)：
-     *   multi-plane：从 plane 0 起，覆盖 plane_count 个 plane；
-     *   单 plane：**只覆盖 paa_to_plane(command->paa) 那一个**——掩码是绝对编号，
-     *     plane 1 的单 plane 命令掩码是 0xF0 而不是 0x0F。 */
-    plane_first = (plane_count == 1U) ? (uint8_t)paa_to_plane(command->paa) : 0U;
-    plane_last  = (uint8_t)(plane_first + plane_count);
+    plane_count = fc_command_plane_span(command, &plane_first, &plane_last);
     allowed     = ((uint32_t)((1U << (plane_count * CW_NUM)) - 1U)) << (plane_first * CW_NUM);
 
     mask = command->param.cw_mask;
@@ -677,32 +793,26 @@ fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_comma
     command_id = (fc_command_id_t)(command - controller->command_pool);
     for (plane = plane_first; plane < plane_last; plane++)
     {
+        /* 策略层：本命令所有 plane 共用 command->paa 的行地址（同页语义），只把 plane 位
+         * 换成目标 plane——与 v11 及以前逐字节相同。要每 plane 不同行地址（Policy B），
+         * 用公共入口 fc_command_attach_cw() 自行组装。 */
+        const nand_paa_t row_paa = paa_make(paa_to_page(command->paa), plane, paa_to_block(command->paa), paa_to_lun(command->paa), 0U);
+
         for (cw = 0U; cw < CW_NUM; cw++)
         {
-            fc_descriptor_t *descriptor = NULL;
-            fc_status_t      result;
+            fc_status_t result;
 
             if ((mask & (uint32_t)(1U << (plane * CW_NUM + cw))) == 0U)
             {
                 continue; /* 该 CW 不在本次访问集合内 */
             }
-            result = fc_command_configure_descriptor_internal(controller, command, plane, cw, &descriptor);
+            result = fc_command_attach_cw_internal(controller, command, plane, cw, row_paa);
             if (result != FC_STATUS_OK)
             {
                 fc_command_resources_rollback(controller, command_id);
                 command->desc_id = FC_DESCRIPTOR_ID_INVALID;
                 return result;
             }
-            if (previous == NULL)
-            {
-                command->desc_id = (fc_descriptor_id_t)(descriptor - controller->descriptor_pool);
-            }
-            else
-            {
-                previous->config.chain = 1U;
-                previous->next_id      = (fc_descriptor_id_t)(descriptor - controller->descriptor_pool);
-            }
-            previous = descriptor;
         }
     }
     return FC_STATUS_OK;
@@ -1201,11 +1311,15 @@ static void fc_fill_cw_meta_paa(fc_t *controller, fc_command_t *command)
  *       （掩码是集合），故不再有"槽位计数器"，也不再有链序 == plane-major 的不变量。
  *     - **链长度即 CW 数**（不由 config.cw 推导）：popcount(cw_mask)。
  *     - 行地址不在这里逐 CW 存：它是 per-plane 的，由下面按 plane 集合填 plane_paa[]。
+ *       每 plane 的行地址**取自链上该 plane 的第一条 desc**（链即真值，与 cw_mask 同源），
+ *       而不是从 command->paa 复制——Policy B 下两个 plane 的 block/page 可以不同。
  *     - 只由 fc_build_dispatch_request 的"带数据命令"分支调用。
  * -------------------------------------------------------------------- */
 static void fc_build_request_data_planes(const fc_t *controller, const fc_command_t *command, nand_dispatch_request_t *request)
 {
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)command->desc_id;
+    fc_descriptor_id_t desc_id          = (fc_descriptor_id_t)command->desc_id;
+    uint8_t            planes_with_desc = 0U; /* bit p = plane p 链上有 desc */
+    nand_paa_t         plane_row[PLANE_NUM];  /* 各 plane 的行地址（链上第一条 desc） */
 
     while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
@@ -1217,6 +1331,20 @@ static void fc_build_request_data_planes(const fc_t *controller, const fc_comman
         ASSERT(n < CW_TOTAL_MAX);
         /* 同一个 CW 被两条 desc 覆盖 = desc 链构造错误（掩码是集合，重复置位会丢数据） */
         ASSERT((request->cw_mask & (uint32_t)(1UL << n)) == 0UL);
+
+        if ((planes_with_desc & (uint8_t)(1U << plane)) == 0U)
+        {
+            /* 该 plane 的行地址取链上第一条 desc（CW 位丢掉：行地址只含 page/block/lun+plane） */
+            plane_row[plane] = paa_make(paa_to_page(descriptor->paa), plane, paa_to_block(descriptor->paa), paa_to_lun(descriptor->paa), 0U);
+            planes_with_desc |= (uint8_t)(1U << plane);
+        }
+        else
+        {
+            /* 同一 plane 的所有 desc 必须指向同一物理位置——一个 plane 一次只访问一个块/页 */
+            ASSERT(paa_to_block(descriptor->paa) == paa_to_block(plane_row[plane]));
+            ASSERT(paa_to_page(descriptor->paa) == paa_to_page(plane_row[plane]));
+            ASSERT(paa_to_lun(descriptor->paa) == paa_to_lun(plane_row[plane]));
+        }
 
         request->cw_mask |= (uint32_t)(1UL << n);
         if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
@@ -1246,22 +1374,29 @@ static void fc_build_request_data_planes(const fc_t *controller, const fc_comman
         /* 行地址按 plane 逐个填（行地址只含 page/block/lun + plane 位，CW 位被
          * paa_to_nand_row() 丢掉）：命令 plane 集合里**每个** plane 都要填，
          * 即使它一个 CW 都没选中（如只读 plane1 = 0xF0）——多 plane uop 硬编码
-         * row[0]/row[1]，空 plane 不填会退化成 block0/page0，静默误操作。 */
+         * row[0]/row[1]，空 plane 不填会退化成 block0/page0，静默误操作。
+         * 有 desc 的 plane 取链上地址（Policy B：两 plane 可不同块）；空 plane 无从得知，
+         * 回退到 command->paa 的同页地址（= v11 及以前的行为）。 */
         for (plane = 0U; plane < request->plane_count; plane++)
         {
-            request->plane_paa[plane] = paa_make(paa_to_page(command->paa), plane, paa_to_block(command->paa), paa_to_lun(command->paa), 0U);
+            request->plane_paa[plane] =
+                ((planes_with_desc & (uint8_t)(1U << plane)) != 0U)
+                    ? plane_row[plane]
+                    : paa_make(paa_to_page(command->paa), plane, paa_to_block(command->paa), paa_to_lun(command->paa), 0U);
         }
     }
     else
     {
-        /* Single-plane：目标 plane 取自 command->paa。
-         * 不变式：本命令所有 desc 的 plane 位相同——fc_command_configure_descriptor_internal()
-         * 单 plane 分支只改 CW 位（descriptor->paa = (command->paa & ~CW_MASK) | cw），保留
-         * plane 位，故一次取值即对全部 desc 成立；下面的 ASSERT 把该不变式显式化
-         * （掩码位数 == 链上 desc 数，多一条或少一条都说明有 desc 落到了别的 plane）。 */
+        /* Single-plane：地址取自 command->paa（ftl_cmd_setup_ppa 单 plane 路径直接写它，
+         * GC/WL 的单 plane 写也走这条），desc 链只负责 CW 落位。
+         * 不变式：本命令所有 desc 的 plane 位相同、行地址与 command->paa 一致——下面两条
+         * ASSERT 把它显式化（掩码位数 == 链上 desc 数；有 desc 时链上地址 == command->paa）。 */
         request->plane                     = (uint8_t)paa_to_plane(command->paa);
         request->plane_paa[request->plane] = command->paa;
         ASSERT(fc_cw_mask_popcount(request->cw_mask) == fc_command_descriptor_count(controller, command));
+        ASSERT(((planes_with_desc & (uint8_t)(1U << request->plane)) == 0U) ||
+               ((paa_to_block(plane_row[request->plane]) == paa_to_block(command->paa)) &&
+                (paa_to_page(plane_row[request->plane]) == paa_to_page(command->paa))));
     }
 }
 

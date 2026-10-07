@@ -128,16 +128,16 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req);
  * （总长度 = FTL_READ_USER_SIZE × req->pages 字节）。
  *
  * 内部：
- *   ① allocator_alloc(FTL_TEMP_HOT) → new_pba
- *   ② l2p_cache_read(lba) → old_pba（journal 用）
- *   ③ FC 命令构造 + submit（异步写 NAND）
+ *   ① allocator_alloc_pair(FTL_TEMP_HOT) → new_pba[0]/new_pba[1]（两 plane 各自独立选块）
+ *   ② l2p_cache_read(lba / lba+1) → old_pba / old_pba1（journal 用）
+ *   ③ FC 命令构造（逐 plane 各自的 PBA 建 desc 链）+ submit（异步写 NAND）
  *   ④ 注册 pending（complete_flag 在 NAND PROGRAM 完成后置 1）
  *   ⑤ Journal + L2P 在 completion handler 中确认 NAND PROGRAM 成功后执行
  *
  * @param ftl  FTL 上下文
  * @param req  IO 请求描述（pages=2 时 io.lba 与 io.lba+1 是两个连续 LBA，分别
- *             映射 plane0/plane1 页，与奇偶无关；allocator 同号双 plane 保证
- *             Multi-Plane 命令烧录位置与簿记一致）
+ *             映射 plane0/plane1 页，与奇偶无关；Policy B 下两 plane 独立选块，
+ *             plane1 的实际烧录位置由 pending->new_pba1 记录，不从 plane0 派生）
  * @return FTL_OK 成功提交，FTL_ERROR 失败
  */
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);

@@ -5,7 +5,7 @@
  * fc_internal.h — FC 核心内部接口（仅 fc.c ↔ fc_interface.c 共享）
  *
  * 背景：
- *   FC 对外 API（fc_interface.h 的 19 个函数）是单例控制器 g_fc_controller
+ *   FC 对外 API（fc_interface.h 的 20 个函数）是单例控制器 g_fc_controller
  *   的薄壳，在 fc_interface.c 中实现；真正逻辑（池管理/生命周期/服务主循环）
  *   在 fc.c 中以 static 实现。本头只在这两个文件间共享：
  *     - fc_t 控制器结构定义 + g_fc_controller 单例
@@ -106,8 +106,15 @@ extern "C"
     /* 从空闲链表分配命令槽位，置 ALLOCATED */
     fc_command_t *fc_command_alloc_internal(fc_t *controller);
 
-    /* 为命令配置整条 desc 链（每 CW 一个 desc + buffer，next_id 串联） */
+    /* 为命令配置整条 desc 链（每 CW 一个 desc + buffer，next_id 串联）——策略层：
+     * 决定访问哪些 CW；机制层由下面的 attach 原语承担 */
     fc_status_t fc_command_configure_descriptors_internal(fc_t *controller, fc_command_t *command);
+
+    /* 追加一个 (plane, cw) 到命令 desc 链尾（分配 desc + buffer 并串联）——机制层原语，
+     * 供 fc_command_attach_cw（上层自组装）与上面的策略循环共用。
+     * row_paa = 该 plane 的行地址（Policy B：multi-plane 命令两 plane 的 block 可不同），
+     * 其 plane 位必须等于 plane。 */
+    fc_status_t fc_command_attach_cw_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa);
 
     /* 按优先级把命令投递到 HSQ（high_priority）或 SQ，置 QUEUED */
     fc_status_t fc_submit_internal(fc_t *controller, fc_command_t *command);
