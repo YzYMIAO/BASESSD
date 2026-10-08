@@ -701,7 +701,7 @@ fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *completi
  *     - Step 1：把 nand_completion 的 per-CW status/ecc_bits 写回 desc。
  *     - Step 2：Page Read 命令做 data path（ECC 解码 + 条件解扰）。
  *     - Step 3：组装完成项——page read 从 desc 读 ECC 解码后状态
- *       （聚合 status + 前 4 CW ECC + 首个 UNC 的 desc_id），
+ *       （聚合 status + 前 4 CW ECC + 首个失败 CW 的 desc_id，见 FC_CW_STATUS_ERROR_MASK），
  *       非 page read 直接透传 NAND 状态。
  *     - CQ 满 → 强制 COMPLETED（数据路径已跑，CQ entry 丢失是 fatal）。
  * -------------------------------------------------------------------- */
@@ -760,19 +760,23 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         (fc_is_page_read((uint8_t)command->config.operation) != 0U))
     {
         /* 走 desc 链聚合：status 全链 OR；失败掩码按 **flat 绝对编号** 置位 */
-        fc_descriptor_id_t did       = (fc_descriptor_id_t)command->desc_id;
-        uint8_t            found_unc = 0U;
+        fc_descriptor_id_t did        = (fc_descriptor_id_t)command->desc_id;
+        uint8_t            found_fail = 0U;
 
         while (did < FC_DESCRIPTOR_POOL_DEPTH)
         {
             const fc_descriptor_t *d = &controller->descriptor_pool[did];
 
             completion.status |= d->status;
-            /* 更新 desc_id 指向 ECC 解码后第一个 UNC 的 desc */
-            if ((found_unc == 0U) && (d->status == FC_CW_STATUS_UNC))
+            /* 更新 desc_id 指向**首个失败 CW** 的 desc——契约见 fc_command_status_t.desc_id
+             * （"first-failing desc on error"）。失败位取 FC_CW_STATUS_ERROR_MASK 全集，
+             * 不只 UNC：ECC 纠错成功但 CRC/META 校验失败的 CW 同样是失败 CW（其 status 为
+             * READY|CRC_ERROR / READY|MATA_ERROR），此前只认 UNC 会让这类命令的 desc_id
+             * 停留在 NAND 层透传值（读成功时即 INVALID），与契约不符。 */
+            if ((found_fail == 0U) && ((d->status & FC_CW_STATUS_ERROR_MASK) != 0U))
             {
                 completion.desc_id = did;
-                found_unc          = 1U;
+                found_fail         = 1U;
             }
             /* 失败 CW 掩码：bit = plane*CW_NUM + cw（与请求掩码同编号空间，
              * 可直接做"请求集 & 失败集"求最小重读集） */

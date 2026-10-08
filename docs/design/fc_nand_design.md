@@ -2092,7 +2092,9 @@ nand_dispatch_completion_t（command_id / execution_status / nand_status /
   │
   ├─ Step 3：组装 fc_command_status_t（12B CQ 条目）
   │     command_id = nand completion 的 command_id
-  │     desc_id    = failed_descriptor_id（首个 UNC 的 desc_id）
+  │     desc_id    = failed_descriptor_id（初值；实为 flat CW 编号）
+  │                 Page Read 再覆盖为首个**失败** CW 的 desc_id
+  │                 （失败 = FC_CW_STATUS_ERROR_MASK 全集，不只 UNC）
   │     module     = command->module（直接路由，无需查命令）
   │     Page Read → 走链全链 OR status；失败掩码 param.cw_mask
   │                 |= 1 << (plane*CW_NUM + cw)（UNC|CRC_ERROR）

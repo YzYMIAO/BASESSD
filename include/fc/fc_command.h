@@ -113,6 +113,14 @@ typedef enum
 #define FC_CW_STATUS_UNUSED     (0U)
 #define FC_CW_STATUS_SUCCESS    (FC_CW_STATUS_READY)
 
+/* 「失败位」的规范集合——上表六个错误位的并集（READY / PROTECTED / UNUSED 不算失败）。
+ * 唯一读者：fc_complete_from_nand()（fc.c）用它挑出**首个失败 CW** 的 desc_id，
+ * 以兑现 fc_command_status_t.desc_id 的契约（"first-failing desc on error"）。
+ * 判「CW 是否失败」时一律用它，不要就地重列位——六位散落多处时漏一位不会有编译错误。 */
+#define FC_CW_STATUS_ERROR_MASK                                                                  \
+    (FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_TIMEOUT | FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_UNC | \
+     FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_RAID_ERROR)
+
 /* Command 与 Descriptor 共用 32 位操作配置（位域布局见下） */
 typedef struct fc_cmd_conf_t
 {
@@ -206,11 +214,19 @@ struct fc_command_t
 
 /* CQ 完成项：命令级聚合状态 + 命令级返回段。
  * Per-CW 细节（status/ecc_bits）只留在 descriptor 链中，聚合 ECC 用 fc_get_cmd_ecc_max()；
- * 聚合 status 用 FC_CW_STATUS_* 位（READY=0x40、NAND_FAIL=0x01、TIMEOUT=0x02…）。 */
+ * 聚合 status 用 FC_CW_STATUS_* 位（READY=0x40、NAND_FAIL=0x01、TIMEOUT=0x02…）。
+ *
+ * desc_id 的取值（fc_complete_from_nand 组装）：
+ *   初值 = NAND 层透传的 failed_descriptor_id（无失败时即 FC_DESCRIPTOR_ID_INVALID）。
+ *   ⚠ 该透传值实为 **flat CW 编号 n**（见 nand_dispatch_tables.c 的 completion_per_cw），
+ *     与 desc id 不同空间——只对"哪个 CW 失败"这一含义有效，勿当 desc 下标用。
+ *   Page Read 且带 desc 链时，再按链序覆盖为**首个失败 CW 的 descriptor id**，
+ *   失败判据是 FC_CW_STATUS_ERROR_MASK 全集（不只 UNC）；全链无失败位则保持初值。
+ * ⚠ 目前 FTL 侧尚无读者；失败 CW 更精确的定位应走 param.cw_mask（flat 掩码）。 */
 struct fc_command_status_t
 {
     DWORD      command_id : 16; /* Completed Command Pool ID. */
-    DWORD      desc_id    : 16; /* First Descriptor ID; 0xFFFF means invalid. Updated to first-failing desc on error. */
+    DWORD      desc_id    : 16; /* 首个失败 CW 的 descriptor id；0xFFFF = 无失败。详见上方说明。 */
     DWORD      module     : 4;  /* Copy of command->module for direct routing without ID lookup. */
     DWORD      status     : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
     DWORD      reserved   : 20; /* Reserved. */

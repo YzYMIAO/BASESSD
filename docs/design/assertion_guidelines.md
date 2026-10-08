@@ -429,7 +429,7 @@ Level 1 用例数 16 → **11**；三个子套件至此**零 `setup`**（`setup_
 同理可推：§十四 / §十五 / §十六 里那些"转成 ASSERT 后只被测试调用"的守卫，
 以及本节删掉的函数，都是同一模式的产物。
 
-### 删前必查：`set_cw` 与生产内联版的语义分叉
+### 删前必查：`set_cw` 与生产内联版的语义分叉（**已闭合**）
 
 `fc_command_status_set_cw` 记录的是「**任一**错误位（NAND_FAIL / TIMEOUT / CRC / UNC /
 MATA / RAID）的首个 `desc_id`」；而生产内联版（`fc.c` 的 `fc_complete_from_nand`，:772-776）
@@ -439,8 +439,18 @@ MATA / RAID）的首个 `desc_id`」；而生产内联版（`fc.c` 的 `fc_compl
 if ((found_unc == 0U) && (d->status == FC_CW_STATUS_UNC)) { completion.desc_id = did; ... }
 ```
 
-两者语义分叉——删掉前者等于删掉"正确语义"的唯一书面记录。本次按用户决定照删，
-但**该分叉本身未闭合**（内联版"只认 UNC"是有意还是当年搬内联时漏了，未判），记此备查。
+两者语义分叉——删掉前者等于删掉"正确语义"的唯一书面记录。本次按用户决定照删。
+
+**2026-10-08 后续闭合**：判据取「多数方」——`fc_command_status_t.desc_id` 的头文件契约写的是
+"first-failing desc on error"，被删的 `set_cw` 也是全集口径，只有内联循环是少数派，
+故**改内联版去对齐契约**，而不是改文档：
+
+- `include/fc/fc_command.h` 新增 `FC_CW_STATUS_ERROR_MASK`（六个错误位的规范并集），
+  把原先只存在于 `set_cw` 里的那份"失败位集合"固化成唯一一份命名定义；
+- `fc.c` 的完成项聚合循环改用该掩码判失败（`found_unc` → `found_fail`）；
+- 顺带把 `desc_id` 的字段注释补全：初值来自 NAND 透传的 `failed_descriptor_id`
+  （**实为 flat CW 编号**，与 desc id 不同空间），page read 才被覆盖为 desc id，
+  FTL 侧目前无读者。
 
 ### 验证
 
