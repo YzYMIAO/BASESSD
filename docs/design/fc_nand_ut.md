@@ -171,7 +171,7 @@ test_lifecycle_op — 参数化，每个 (operation, block) 组合执行一次�
 | OP 类别 | 配置方式 |
 |---|---|
 | SET/GET_FEATURES | 内联数据（parameter0..3），不配置 desc chain |
-| has_data 且非 SET/GET | `fc_command_attach_cw()` 逐条分配 desc + buffer（v13 前为 `fc_command_configure_descriptors()`），填 pattern |
+| has_data 且非 SET/GET | `fc_command_configure_descriptor()` 逐条分配 desc + buffer（v13 前为 `fc_command_configure_descriptors()`，v13~v16 为 `fc_command_attach_cw()`），填 pattern |
 | 无数据 + needs_paa | `desc_id=INVALID`，设置 PAA |
 | 无数据 + 不需 PAA | `desc_id=INVALID`，PAA=0 |
 

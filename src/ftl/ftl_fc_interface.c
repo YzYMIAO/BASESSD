@@ -74,7 +74,7 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd)
             {
                 continue;
             }
-            if (fc_command_attach_cw(cmd, plane, cw, row_paa) != FC_STATUS_OK)
+            if (fc_command_configure_descriptor(cmd, plane, cw, row_paa) != FC_STATUS_OK)
             {
                 cmd->desc_id = fc_descriptor_chain_release_all(cmd->desc_id);
                 return FTL_ERROR;
@@ -136,7 +136,7 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
 
         for (cw = 0U; cw <= (uint8_t)cmd->config.cw; cw++)
         {
-            if (fc_command_attach_cw(cmd, plane, cw, row) != FC_STATUS_OK)
+            if (fc_command_configure_descriptor(cmd, plane, cw, row) != FC_STATUS_OK)
             {
                 /* 回滚整条链（desc + buffer 还池，desc_id 复位）；命令槽位由调用者释放 */
                 cmd->desc_id = fc_descriptor_chain_release_all(cmd->desc_id);

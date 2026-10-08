@@ -7,12 +7,12 @@
  * 与 fc.h 的分工：
  *   fc.h             ：类型、宏、资源池配置、功能开关、资源统计结构
  *   fc_interface.h   ：对外函数声明（本文件）
- *   fc_interface.c   ：对外函数实现（单例 g_fc_controller 的薄壳）
+ *   fc_interface.c   ：对外函数实现（单例 g_fc_controller；建链机制体在此）
  *   fc_internal.h    ：fc.c ↔ fc_interface.c 共享的内部签名（FTL 不得 include）
  *
  * 对外接口分组：
  *   ① 初始化            fc_init
- *   ② 命令生命周期       fc_command_alloc / attach_cw / fc_submit /
+ *   ② 命令生命周期       fc_command_alloc / configure_descriptor / fc_submit /
  *                        fc_poll_completion / fc_command_release
  *   ③ buffer 访问       fc_buffer_alloc / release / id_to_real_buffer /
  *                        fc_buffer_get_base / fc_buffer_get_meta
@@ -22,13 +22,13 @@
  *   ⑥ 服务入口          fc_service
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_attach_cw() 组装 desc 链
+ *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_configure_descriptor() 组装 desc 链
  *   （FTL 侧「按掩码一次性建链」见 ftl_cmd_configure_descriptors()）
  *   → fc_submit() → fc_service()（后台推进）
  *   → fc_poll_completion() 取完成 → fc_command_release() 回收。
  *
  * 边界（v13）：FC = 硬件 FCC 的软件替身。**不含策略**——「访问哪些 CW」由 FTL 决定，
- *   「数据搬运」由 FTL 做（fc_command_attach_cw + 自己的拷贝），FC 只提供槽位/描述符/队列/数据路径。
+ *   「数据搬运」由 FTL 做（fc_command_configure_descriptor + 自己的拷贝），FC 只提供槽位/描述符/队列/数据路径。
  */
 
 #include "fc.h"
@@ -50,7 +50,9 @@ extern "C"
 
     /* 逐条追加一个 (plane, cw) 到命令的 desc 链尾（分配 desc + buffer、填 PAA/config/meta）。
      * **建链的唯一入口**（v13：按掩码一次性建链的策略层已上移 FTL，见
-     * ftl_cmd_configure_descriptors()）。上层自行组装 CW 集合（例如只读离散 CW）：
+     * ftl_cmd_configure_descriptors()；v17：原先 fc.c 内的 attach_cw_internal /
+     * configure_descriptor_internal 两层已并入本函数，本函数即机制体）。
+     * 上层自行组装 CW 集合（例如只读离散 CW）：
      * 按自己算出的集合循环调用即可，
      * **链序即数据布局顺序**（FTL 侧拷贝按此顺序遍历链，见 ftl_cmd_read_data）。
      * row_paa = 该 plane 的行地址（page/block/lun，CW 位被忽略），其 plane 位必须等于 plane。
@@ -62,14 +64,16 @@ extern "C"
      * 返回：OK / RESOURCE_EMPTY（池空）/ INVALID_ARGUMENT（坐标越界）。
      * **失败时链上可能已有 desc（含本条）**：本层不回滚，「已分配的 desc 全部在链上」
      * 是不变量，调用方沿链释放即完整回收（见下两个函数）。 */
-    fc_status_t fc_command_attach_cw(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa);
+    fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa);
 
     /* 释放链头那一个 desc（含其 buffer），返回新链头；空链（head 越界）原样返回。
      * 传链头 ID 而非命令：command->desc_id 是位域取不了地址，故按值传入、按值取回。
      * 用法：command->desc_id = fc_descriptor_chain_release_head(command->desc_id); */
     fc_descriptor_id_t fc_descriptor_chain_release_head(fc_descriptor_id_t head);
 
-    /* 沿链释放全部 desc + buffer，返回 FC_DESCRIPTOR_ID_INVALID（恒为空链头）。
+    /* 沿链释放**这条命令**的全部 desc + buffer，返回 FC_DESCRIPTOR_ID_INVALID（恒为空链头）。
+     * "all" 指**本命令的 desc 链**（= 该命令已申请的全部资源），**不是**清空 desc/buffer 池，
+     * 也不触及别的命令——链本身就是这条命令的资源集合（v15 起唯一真值）。
      * 建链中途失败的回滚入口——释放后命令只剩命令槽位，由 fc_command_release 收尾。
      * 用法：command->desc_id = fc_descriptor_chain_release_all(command->desc_id); */
     fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head);
@@ -88,7 +92,7 @@ extern "C"
 
     /* ═══════ ③ buffer 访问 ═══════ */
     /* 申请 Buffer（返回 ID），失败返回 FC_BUFFER_ID_INVALID。
-     * ⚠️ 手动分配接口：常规路径由 fc_command_attach_cw() 为每个 CW 自动分配 desc + buffer。 */
+     * ⚠️ 手动分配接口：常规路径由 fc_command_configure_descriptor() 为每个 CW 自动分配 desc + buffer。 */
     fc_buffer_id_t fc_buffer_alloc(void);
 
     /* 释放 Buffer（须已占用） */

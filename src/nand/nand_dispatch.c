@@ -157,7 +157,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     /* 单 plane 有效行的归属由生产者保证，此处不再复核：掩码位 n 由 desc 的 PAA 本身
      * 算出（见 fc_build_request_data_planes / ERASE 分支），"在 n 位写了 buffer"与
      * "该 desc 的 plane/cw 位是 n"是同一条表达式。真正可能错位的情形（desc plane 位
-     * 与 command->paa 不一致）在造链时就被 fc_command_attach_cw_internal 的 plane 段
+     * 与 command->paa 不一致）在造链时就被 fc_command_configure_descriptor 的 plane 段
      * 校验（越段返回 INVALID_ARGUMENT）拦下，不会走到这里。 */
 }
 

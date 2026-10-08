@@ -12,7 +12,7 @@
  *   - Buffer Pool（FC_BUFFER_POOL_DEPTH=128）：CW 数据缓冲
  *
  * 生命周期（对 FTL）：
- *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_attach_cw() 组装 desc 链
+ *   fc_command_alloc() → 填 config/参数 → 逐条 fc_command_configure_descriptor() 组装 desc 链
  *   （FTL 侧「按掩码一次性建链」见 ftl_cmd_configure_descriptors()）
  *   → fc_submit() → fc_service()（后台推进）→ fc_poll_completion() 取完成
  *   → fc_command_release() 回收。
@@ -24,12 +24,12 @@
  * 文件分工：
  *   fc.h（本文件）        ：类型、宏、资源池配置、功能开关、资源统计结构
  *   fc_interface.h        ：对外函数声明（本文件 include 之，二者合一对外）
- *   fc_interface.c        ：对外函数实现（单例 g_fc_controller 的薄壳）
+ *   fc_interface.c        ：对外函数实现（单例 g_fc_controller；建链机制体在此）
  *   fc_internal.h         ：fc.c ↔ fc_interface.c 共享的内部签名（FTL 不得 include）
  *
  * 接口分组（全部声明在 fc_interface.h）：
  *   ① 初始化      fc_init
- *   ② 命令生命周期 fc_command_alloc / attach_cw / submit /
+ *   ② 命令生命周期 fc_command_alloc / configure_descriptor / submit /
  *                  service / poll_completion / command_release
  *   ③ buffer 访问 fc_buffer_alloc / release / id_to_real_buffer / get_base / get_meta
  *   ④ 数据查询    fc_get_cmd_data_ptr / fc_get_cmd_ecc_max

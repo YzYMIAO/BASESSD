@@ -5,11 +5,11 @@
  * fc_internal.h — FC 核心内部接口（仅 fc.c ↔ fc_interface.c 共享）
  *
  * 背景：
- *   FC 对外 API（fc_interface.h 的 19 个函数）是单例控制器 g_fc_controller
- *   的薄壳，在 fc_interface.c 中实现；真正逻辑（池管理/生命周期/服务主循环）
- *   在 fc.c 中以 static 实现。本头只在这两个文件间共享：
+ *   FC 对外 API（fc_interface.h 的函数）固定使用单例控制器 g_fc_controller，在
+ *   fc_interface.c 中实现；池管理/生命周期/服务主循环等真正逻辑在 fc.c 中以 static
+ *   实现。本头只在这两个文件间共享：
  *     - fc_t 控制器结构定义 + g_fc_controller 单例
- *     - fc_interface.c 薄壳需要调用的内部函数声明
+ *     - fc.c 的池/链原语与内部函数声明（供 fc_interface.c 的对外 API 与建链入口调用）
  *   FTL/上层不得 include 本头（用 fc_interface.h / fc.h 即可）。
  *
  * 命名约定：
@@ -104,13 +104,21 @@ extern "C"
     /* 从空闲链表分配命令槽位，置 ALLOCATED */
     fc_command_t *fc_command_alloc_internal(fc_t *controller);
 
-    /* 追加一个 (plane, cw) 到命令 desc 链尾（分配 desc + buffer 并串联）——机制层原语，
-     * 供 fc_command_attach_cw（上层自组装）与 fc.c 内部 RAID parity 建链共用。
-     * 「按掩码一次性建链」的策略层 v13 起在 FTL 侧（ftl_cmd_configure_descriptors），
-     * 循环调用本原语实现，FC 内不再有掩码枚举。
-     * row_paa = 该 plane 的行地址（Policy B：multi-plane 命令两 plane 的 block 可不同），
-     * 其 plane 位必须等于 plane。 */
-    fc_status_t fc_command_attach_cw_internal(fc_t *controller, fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa);
+    /* ── 池/链原语（v17 起跨文件：建链入口在 fc_interface.c）──
+     * fc_command_configure_descriptor（fc_interface.c 的公共入口）用这两个原语编排
+     * 一次建链；「按掩码一次性建链」的策略层自 v13 起在 FTL 侧
+     * （ftl_cmd_configure_descriptors），循环调公共入口实现。 */
+
+    /* 从空闲链表分配一个描述符（出池即自洽：next_id/buffer_id 显式置哨兵）。
+     * **不挂链**——desc 何时进入命令的数据链由调用者决定。
+     * ⚠ **调用者契约**：分配后必须立刻 fc_command_chain_append，否则会产生
+     *   「已分配但不在任何链上」的游离 desc，破坏「失败即沿链完整回收」不变量
+     *   （v17 起该不变量由 fc_interface.c 的建链入口保证，不再由本原语保证）。 */
+    fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_command_t *command);
+
+    /* 把已填好的 descriptor 追加到命令 desc 链尾（空链则本条即链头，前驱置 chain=MORE）。
+     * 调用者须保证 desc 的 paa/config/meta/next_id 均已填好。 */
+    void fc_command_chain_append(fc_t *controller, fc_command_t *command, fc_descriptor_t *descriptor);
 
     /* 按优先级把命令投递到 HSQ（high_priority）或 SQ，置 QUEUED */
     fc_status_t fc_submit_internal(fc_t *controller, fc_command_t *command);

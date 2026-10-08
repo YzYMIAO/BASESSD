@@ -82,7 +82,7 @@ static inline uint8_t ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
  *
  * cw_mask 是 flat 绝对编号（bit n = plane*CW_NUM + cw）；为 0 时退化为
  * 「本命令每个 plane 取连续 0..config.cw」。置位的每个 CW 逐条调
- * fc_command_attach_cw()，故链序 = plane-major、plane 内 CW 递增。
+ * fc_command_configure_descriptor()，故链序 = plane-major、plane 内 CW 递增。
  * 想只读离散 CW（例如 plane1 的 CW0/CW2）：cmd->param.cw_mask = (1U<<4)|(1U<<6)。
  *
  * 行地址：所有 plane 共用 cmd->paa 的行地址（同页语义）。**两 plane 不同块
@@ -103,7 +103,7 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
  *
  * 与 ftl_cmd_setup_ppa 的区别：后者把单一 PBA 填进 command->paa 后展开到各 plane，
  * 隐含「两 plane 同 block」。Policy B 下两 plane 独立分配物理块，故本函数逐条调
- * fc_command_attach_cw(cmd, plane, cw, pba_to_paa(pba[i]))，把每个 PBA 自己的
+ * fc_command_configure_descriptor(cmd, plane, cw, pba_to_paa(pba[i]))，把每个 PBA 自己的
  * 行地址写进对应 plane 的 desc。
  *
  * ⚠ **plane 号取自每个 PBA 自己的 plane 位，不是数组下标**：读路径的 pba[]

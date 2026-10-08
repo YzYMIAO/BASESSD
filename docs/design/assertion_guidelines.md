@@ -12,7 +12,7 @@
 2. **调用者已保证的前置条件转断言**
    `static` 函数、层内模块头里的接口，以及**跨层入口中调用者必然传有效值的指针/索引参数**，前置条件由调用者保证。守卫一律写成 `ASSERT(条件)`，并**删掉原来的 `return` 与恢复/降级分支**（"跳过坏 ID 继续找"、"回滚分配再返回"、"防御性降级"这类）。
    层内模块头指：`include/nand/nand_engine.h`、`nand_fmc.h`；`include/ftl/*.h`（除 `ftl.h` 外，含 `allocator.h`/`gc.h`/`bbt.h`/`journal.h`/`metadata.h`/`l2p_cache.h`/`checkpoint.h`/`pending.h`/`read_recovery.h`/`wear_leveling.h`/`completion_table.h`/`bst.h`）。
-   **跨层入口一并适用**：`nand_dispatch_submit/submit_chain/poll`、`nand_fmc_init/backend_get`、`nand_fc_execute/start/step/read_id/set_features`、`fc_submit`、`fc_command_attach_cw`、`fc_command_release`、`fc_data_path_*`、`fc_scheduler_*`、`fc_command_status_*`、`fc_ldpc_*`、`fc_crc_*`、`fc_random_*`、`fc_raid_*`、`ftl_cmd_write/read_data`（v13 由 FC 上移）、`fc_get_cmd_data_ptr`、`fc_get_cmd_cw_mask`、`fc_get_resource_stats` 的**指针/索引参数**。唯一的调用者都是层内代码（FTL/controller/fc.c），且已持有有效值。
+   **跨层入口一并适用**：`nand_dispatch_submit/submit_chain/poll`、`nand_fmc_init/backend_get`、`nand_fc_execute/start/step/read_id/set_features`、`fc_submit`、`fc_command_configure_descriptor`、`fc_command_release`、`fc_data_path_*`、`fc_scheduler_*`、`fc_command_status_*`、`fc_ldpc_*`、`fc_crc_*`、`fc_random_*`、`fc_raid_*`、`ftl_cmd_write/read_data`（v13 由 FC 上移）、`fc_get_cmd_data_ptr`、`fc_get_cmd_cw_mask`、`fc_get_resource_stats` 的**指针/索引参数**。唯一的调用者都是层内代码（FTL/controller/fc.c），且已持有有效值。
 
 3. **资源类结果保留返回码**
    池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、队列满背压（`QUEUE_FULL` / `IO_ERROR`）、`fc_command_alloc()` 返回 `NULL`、`mem_alloc` 返回 `NULL`、NAND 报告的错误——都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。
@@ -65,12 +65,12 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 判据 1 的"公共 API 参数校验"针对的是**外部输入**——host 的 opcode/LBA、CLI 参数、介质读回的字节。但 `fc_interface.h` 里有一类入口，收到的是 **FC 自己铸出来的句柄**：
 
 - `fc_command_id_to_command(command_id)` 的 `command_id` 只来自 `fc_command_alloc()`（队列里只存分配产出的 ID）；
-- `fc_descriptor_id_to_descriptor(descriptor_id)` 的 `descriptor_id` 只来自命令的 desc 链（`fc_command_attach_cw` 铸出）。
+- `fc_descriptor_id_to_descriptor(descriptor_id)` 的 `descriptor_id` 只来自命令的 desc 链（`fc_command_configure_descriptor` 铸出）。
 
 调用者**不可能**传入越界值——越界即不变量破坏。因此这类"句柄越界 → 返回 NULL/错误码"的守卫按判据 2 转 `ASSERT`，并同步修掉头文件里"越界返回 NULL"的契约描述。同理，FC 内部对句柄的越界检查（`fc_stripe_release_parity` 的 `parity_id`、完成路径的 `completed_id`、desc 链遍历里的 `desc_id`）一律转 `ASSERT`。
 
-**保留返回码的部分**：`fc_command_attach_cw` / `fc_submit` / `fc_command_release` 这三个**顶层生命周期入口**里，`fc_command_to_id()` 返回 0（指针不在本池）、状态非 `ALLOCATED`、desc 链未配置这类检查仍返回 `FC_STATUS_INVALID_ARGUMENT`——它们校验的是"这个指针是不是本池的命令 + 生命周期阶段"（指针身份 + 状态），是有文档契约的入口校验。**但同一入口里的 `command == NULL` 是纯参数前置条件，转 `ASSERT`**（第二轮补扫，见 §九）。
-（v13 前这三个入口是 `fc_command_configure_descriptors` / `fc_submit` / `fc_command_release`；前者已上移 FTL，FC 侧建链入口变成 `fc_command_attach_cw`，它沿用同一套"保留身份/状态返回码"的契约。）
+**保留返回码的部分**：`fc_command_configure_descriptor` / `fc_submit` / `fc_command_release` 这三个**顶层生命周期入口**里，`fc_command_to_id()` 返回 0（指针不在本池）、状态非 `ALLOCATED`、desc 链未配置这类检查仍返回 `FC_STATUS_INVALID_ARGUMENT`——它们校验的是"这个指针是不是本池的命令 + 生命周期阶段"（指针身份 + 状态），是有文档契约的入口校验。**但同一入口里的 `command == NULL` 是纯参数前置条件，转 `ASSERT`**（第二轮补扫，见 §九）。
+（v13 前这三个入口是 `fc_command_configure_descriptors` / `fc_submit` / `fc_command_release`；前者已上移 FTL，FC 侧建链入口变成 `fc_command_attach_cw`，v17 再收敛为 `fc_command_configure_descriptor`，它沿用同一套"保留身份/状态返回码"的契约。）
 
 > 判据 1 原先把"`fc_interface.h` 的全部入口"整体划为边界，属**过度概括**；按句柄来源细分：外部输入（host / CLI / 介质）→ 判据 1，FC 自铸句柄 → 判据 2。
 
@@ -95,7 +95,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 | `fc_interface.c` | `fc_command_to_id` 两处 NULL（入参/出参前置条件，调用者已判）、`fc_get_cmd_data_ptr` 的 `desc_id >= FC_DESCRIPTOR_POOL_DEPTH`、`fc_command_id_to_command`/`fc_descriptor_id_to_descriptor` 的越界 → NULL |
 | `fc.c` | `fc_stripe_release_parity` 的 `parity_id` 越界、完成路径 `completed_id` 的冗余范围检查（`fc_complete_from_nand` 已断言） |
 
-顶层生命周期入口（`fc_command_attach_cw`/`fc_submit`/`fc_command_release`，v13 前第一项为 `fc_command_configure_descriptors`）的句柄校验**保留返回码**（有文档契约），理由见 §七。
+顶层生命周期入口（`fc_command_configure_descriptor`/`fc_submit`/`fc_command_release`，v13 前第一项为 `fc_command_configure_descriptors`，v13~v16 为 `fc_command_attach_cw`）的句柄校验**保留返回码**（有文档契约），理由见 §七。
 - 与断言同批：FTL / controller 补齐错误路径日志（层边界与阶段跃迁处 `LOGE/LOGW`，不逐分支）；platform 里并行的 `uart_log_*` 等级栈并入 `common/log.h`（`uart_log_printf`→`LOGE/LOGW/LOGI`，`uart_log_set_level`→`log_set_level`），裸 `uart_log_write` 的终端 I/O 保留。
 
 ## 九、第二轮：FC + NAND "全部入口守卫"补扫（2026-10-05）
@@ -195,6 +195,15 @@ v13 把 FC 的"策略层"（按掩码建链 + 数据搬运）上移 FTL，**断�
 
 > 详见 `docs/changelog/fc_policy_layer_uplift.md`。
 
+### §十一附 2：v17 建链入口改名（2026-10-08）
+
+v17 把 FC 建链从三层接力收敛为一条：`fc_command_attach_cw` → `_internal` → `_internal`
+合并为 **`fc_command_configure_descriptor`（单数）**，实现在 `src/fc/fc_interface.c`。
+§十一表里 `fc_command_attach_cw` 那一行是 v13 当时的名字，**契约不变**——它仍是"顶层
+生命周期入口"（身份/状态返回码保留，`command == NULL` 转 `ASSERT`）。**新增的不变量**：
+全部校验（指针身份 / 生命周期 / plane 段 / CW 范围）都在出池之前，非法实参不污染池子。
+详见 `docs/changelog/fc_build_chain_convergence_v17.md`。
+
 ### §十一附：v13.1 删掉一条同源查重断言（2026-10-07）
 
 按 **§十附判据 1**（同源 → 删）：`fc_build_request_data_planes` 单 plane 分支曾有一条
@@ -207,13 +216,15 @@ v13 把 FC 的"策略层"（按掩码建链 + 数据搬运）上移 FTL，**断�
 `ASSERT(fc_command_cw_attached(controller, command, plane, cw) == 0U)`：在**污染点**就炸，
 定位更准，且覆盖单/多 plane 全部路径。故保留后者，前者连同 `fc_cw_mask_popcount` 删除
 （`fc_command_descriptor_count` 不受影响——`fc_command_release` 等仍在用）。
+（v17 后该断言随建链入口一并移入 `fc_command_configure_descriptor`，函数名见 §十一附 2。）
 
 > 详见 `docs/changelog/fc_plane_span_consolidation.md`。
 
 ### §十二附：v16 建链失败语义与 `fc_command_cw_attached` 判据更正（2026-10-07）
 
 **① `fc_command_attach_cw` 失败不再回滚。** v16 起 desc **出池即挂链**
-（`fc_command_configure_descriptor_internal`：分配 desc → 填字段 → 挂链 → 分配 buffer），
+（`fc_command_configure_descriptor_internal`：分配 desc → 填字段 → 挂链 → 分配 buffer；
+v17 后该机制体即 `fc_command_configure_descriptor`，见 §十一附 2），
 故「已分配的 desc 全部在命令的数据链上」恒成立。`RESOURCE_EMPTY` 时链上可能已有若干 desc
 （含刚挂上、尚无 buffer 的那个），**全部在链上**——调用方沿链释放即完整回收
 （`fc_descriptor_chain_release_all` / `fc_command_release`）。FC 层不再有任何就地回滚。

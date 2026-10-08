@@ -1,19 +1,22 @@
 /*
- * fc_interface.c — FC 对外接口实现（单例 g_fc_controller 的薄壳）
+ * fc_interface.c — FC 对外接口实现（单例 g_fc_controller）+ 建链机制体
  *
  * 职责：
- *   只做参数校验 + 转发到 fc.c 的 fc_*_internal()（参数化控制器实现）。
- *   不含任何池/调度/数据路径逻辑——那些留在 fc.c（核心）中。
+ *   对外 API：参数校验 + 转发到 fc.c 的 fc_*_internal()（参数化控制器实现）。
+ *   建链入口：fc_command_configure_descriptor —— **唯一一条**建链函数，含机制体
+ *             （出池 desc/buffer、填 PAA/config/meta、挂链尾）。v17 由 fc.c 收敛至此。
+ *   除建链编排外不含任何池/调度/数据路径逻辑——那些留在 fc.c（核心）中；
+ *   建链函数只调用 fc.c 的池/链原语，不直接读写池内部字段。
  *
  * 与 fc.c 的分工：
- *   fc.c            ：核心实现（池、生命周期状态机、服务主循环 fc_poll_internal、
- *                     完成回写 fc_complete_from_nand、Stripe RAID）——全部 internal。
- *   fc_interface.c  ：对外 API 薄壳，固定使用单例 g_fc_controller。
+ *   fc.c            ：核心实现（三池本体与池/链原语、生命周期状态机、服务主循环
+ *                     fc_poll_internal、完成回写 fc_complete_from_nand、Stripe RAID）。
+ *   fc_interface.c  ：对外 API，固定使用单例 g_fc_controller；建链机制体在此。
  *   fc_internal.h   ：两个文件共享的 internal 签名（FTL 不得 include）。
  *
- * 设计说明（为什么薄壳单独成文件）：
+ * 设计说明（为什么本文件单独存在）：
  *   - fc.c 专注核心路径，对外入口一目了然（本文件）。
- *   - 对外 API 全部是无状态转发 + 参数校验，无逻辑，可读性集中于一处。
+ *   - 对外 API 多为无状态转发 + 参数校验，无逻辑，可读性集中于一处。
  *   - 新增对外接口 = 改 fc.h（或 fc_interface.h）+ 本文件，不影响核心。
  */
 
@@ -31,7 +34,7 @@ uint8_t fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_i
 {
     const fc_command_t *pool = g_fc_controller.command_pool;
 
-    /* 层内 helper：调用者（fc_command_attach_cw / fc_command_release）已判过
+    /* 层内 helper：调用者（fc_command_configure_descriptor / fc_command_release）已判过
      * command 非空，command_id 是本文件局部地址——传空是调用者编程错误。 */
     ASSERT(command != NULL);
     ASSERT(command_id != NULL);
@@ -77,22 +80,128 @@ fc_command_t *fc_command_alloc(void)
     return fc_command_alloc_internal(&g_fc_controller);
 }
 
-/* 逐条追加一个 (plane, cw) 到命令 desc 链尾（仅 ALLOCATED 时合法）。
- * **建链的唯一入口**（v13：按掩码一次性建链的策略层已上移 FTL，见
- * ftl_cmd_configure_descriptors()）——上层自行组装 CW 集合，循环调用本函数即可。
- * row_paa 由调用者按 plane 给出，故 multi-plane 命令两个 plane 可指向不同 block。 */
-fc_status_t fc_command_attach_cw(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
+/* --------------------------------------------------------------------
+ * fc_command_cw_attached
+ *   功能：判断 (plane, cw) 是否已在命令的 desc 链上（按 desc 自己的 PAA 算 n 匹配）。
+ *   参数：command —— 命令；plane/cw —— 目标 CW 坐标。
+ *   返回：1 = 已挂；0 = 未挂。
+ *   实现要点：链长 ≤ CW_TOTAL_MAX，线性走 next_id 即可。
+ *         仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
+ *         否则触发 -Wunused-function）。
+ * -------------------------------------------------------------------- */
+static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t *command, uint8_t plane, uint8_t cw)
 {
-    fc_command_id_t command_id;
+    fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id;
 
-    /* command 非空是前置条件；指针身份 + 生命周期状态是文档化入口契约，保留返回码 */
+    while (descriptor_id < FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        const fc_descriptor_t *descriptor = &g_fc_controller.descriptor_pool[descriptor_id];
+
+        if (((uint8_t)paa_to_plane(descriptor->paa) == plane) && ((uint8_t)paa_to_cw(descriptor->paa) == cw))
+        {
+            return 1U;
+        }
+        descriptor_id = (fc_descriptor_id_t)descriptor->next_id;
+    }
+    return 0U;
+}
+
+/* --------------------------------------------------------------------
+ * fc_command_configure_descriptor
+ *   功能：把一个 (plane, cw) 追加到命令 desc 链尾——**唯一的建链入口**（v17）。
+ *         分配 desc + buffer、填 PAA/config/meta、挂链尾。
+ *   参数：command —— 命令；plane —— 目标 plane；cw —— 目标 CW 号；
+ *         row_paa —— 该 plane 的行地址（page/block/lun）。
+ *   返回：FC_STATUS_OK / INVALID_ARGUMENT（坐标越界或生命周期不符）
+ *         / RESOURCE_EMPTY（desc 池或 buffer 池空）。
+ *   实现要点：
+ *     - **v17 起本函数即机制体**：原先「公共壳 → attach_cw_internal →
+ *       configure_descriptor_internal」三层接力（三层签名相同、中间层纯直通）
+ *       收敛为这一条。上层自行组装 CW 集合（例如只读离散 CW），循环调用即可。
+ *     - **校验段在机制段之前**：任何非法实参都在出池之前返回，不污染池子——
+ *       否则会先分配一个 desc 再失败，破坏「失败即沿链完整回收」的干净语义。
+ *     - **行地址来自实参 row_paa，不从 command->paa 推导**：multi-plane 命令一个
+ *       DWORD 装不下两个 plane 的行地址（Policy B：两 plane 的 block 可以不同）。
+ *       plane 位由实参 plane 决定，row_paa 的 plane 位被忽略（经 ASSERT 保证一致）。
+ *     - multi_plane>0：PAA = row_paa 的 block/page/lun + 传入的 plane/cw。
+ *     - 单 plane：row_paa 已完整描述该 plane 的地址，只改写 CW 位。
+ *     - CW 号由调用方给出（FTL 侧的掩码枚举），**不由 desc 序号推导**——链走位
+ *       （desc 序号）与 CW 号解耦：按链走位索引的地方不动，CW 号一律从
+ *       paa_to_cw(desc->paa) 取。
+ *     - meta = lba_to_cw_meta(command->meta, cw)。
+ *     - **顺序：分配 desc → 填字段 → 挂链 → 分配 buffer**。先挂链是为了让
+ *       「已分配的 desc 全部在链上」恒成立——任何一步失败后调用方沿链释放即完整
+ *       回收，不需要「链外半成品」的就地回滚。代价是链上会短暂/长期存在
+ *       buffer_id == FC_BUFFER_ID_INVALID 的 desc（buffer 池 128 < desc 池 256，
+ *       buffer 分配失败是最现实的路径），走链的读者（释放 / count / 掩码重建）
+ *       都要容忍——释放侧已按此实现。
+ *     - **不搬数据**：数据搬运由上层（FTL）在链建好之后、且仅对写操作执行，
+ *       见 ftl_cmd_write_data。放这里会让「建链失败→整链释放」白做一遍拷贝。
+ *     - 失败时链上可能已有 desc（含本条）：本层不回滚，「已分配的 desc 全部在链上」
+ *       是不变量，调用方沿链释放即完整回收（fc_descriptor_chain_release_all）。
+ * -------------------------------------------------------------------- */
+fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
+{
+    fc_command_id_t  command_id;
+    uint8_t          plane_first;
+    uint8_t          plane_last;
+    fc_descriptor_t *descriptor;
+    fc_buffer_id_t   buffer_id;
+
+    /* ── 校验段：不得触碰任何池 ── */
     ASSERT(command != NULL);
+    /* 指针身份 + 生命周期状态是文档化入口契约，保留返回码 */
     if ((fc_command_to_id(command, &command_id) == 0U) ||
         (fc_command_state_get(&g_fc_controller, command_id) != FC_COMMAND_STATE_ALLOCATED))
     {
         return FC_STATUS_INVALID_ARGUMENT;
     }
-    return fc_command_attach_cw_internal(&g_fc_controller, command, plane, cw, row_paa);
+    /* plane 必须落在本命令的 plane 段内，CW 号必须在页内 */
+    (void)fc_command_plane_span(command, &plane_first, &plane_last);
+    if ((cw >= CW_NUM) || (plane < plane_first) || (plane >= plane_last))
+    {
+        return FC_STATUS_INVALID_ARGUMENT;
+    }
+    /* 同一 n 被追加两次 = 链构造错误（掩码是集合，重复置位会静默丢数据） */
+    ASSERT(fc_command_cw_attached(command, plane, cw) == 0U);
+    /* row_paa 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
+    ASSERT((uint8_t)paa_to_plane(row_paa) == plane);
+
+    /* ── 机制段 ── */
+    descriptor = fc_descriptor_alloc_internal(&g_fc_controller, command);
+    if (descriptor == NULL)
+    {
+        return FC_STATUS_RESOURCE_EMPTY;
+    }
+
+    /* 先把除 buffer_id 外的字段全部填好，再挂链：desc 一进链就能被任何
+     * 走链的读者正确解释（paa/config/meta 均已有效，next_id 已终止）。 */
+    if (command->config.multi_plane > 0U)
+    {
+        /* 行地址取自实参 row_paa（每 plane 独立）；保留其 LUN 字段（多 LUN 并发必需：
+         * desc PAA/META/随机种子/ECC 都依赖它）。 */
+        descriptor->paa = paa_make(paa_to_page(row_paa), plane, paa_to_block(row_paa), paa_to_lun(row_paa), cw);
+    }
+    else
+    {
+        descriptor->paa = (row_paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
+    }
+    descriptor->config    = command->config;
+    descriptor->config.cw = cw;
+    descriptor->next_id   = FC_DESCRIPTOR_ID_INVALID;
+    descriptor->meta      = lba_to_cw_meta(command->meta, cw);
+
+    fc_command_chain_append(&g_fc_controller, command, descriptor); /* 出池即挂链 */
+
+    /* buffer 池比 desc 池小，这里是最现实的失败点。失败**不回滚**：desc 已在链上、
+     * buffer_id 保持 INVALID，调用方沿链释放时自然跳过 buffer、回收 desc。 */
+    buffer_id = fc_buffer_alloc_internal(&g_fc_controller);
+    if (buffer_id == FC_BUFFER_ID_INVALID)
+    {
+        return FC_STATUS_RESOURCE_EMPTY;
+    }
+    descriptor->buffer_id = buffer_id;
+    return FC_STATUS_OK;
 }
 
 /* 释放链头那一个 desc（含其 buffer），返回新链头。

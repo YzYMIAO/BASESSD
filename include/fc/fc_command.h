@@ -163,7 +163,8 @@ struct fc_descriptor_t
  * 同一时刻只按一种解释使用——读命令不用 parameter0..3，FEATURES 命令不用 cw_mask。
  *
  * ⚠ SQ 侧 cw_mask（请求集）的**读者是 FTL，不是 FC**（v13）：FC 只认 desc 链，
- *   「访问哪些 CW」由 ftl_cmd_configure_descriptors() 读本字段后逐条 attach_cw 展开。
+ *   「访问哪些 CW」由 ftl_cmd_configure_descriptors() 读本字段后逐条
+ *   fc_command_configure_descriptor 展开。
  *   FC 内没有写入者，也没有读者——fc_command_validate 不再校验它。
  */
 typedef union
@@ -228,7 +229,8 @@ struct fc_command_status_t
  *       plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
  *
  *   放在头文件（唯一一份定义）：这是 fc_command_t 的结构属性——FC 侧用它做
- *   attach 的越段校验，FTL 侧用它做掩码展开。两份实现会让改 plane 语义时漏改。
+ *   建链入口（fc_interface.c 的 fc_command_configure_descriptor）的越段校验，
+ *   FTL 侧用它做掩码展开。两份实现会让改 plane 语义时漏改。
  *   ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM]
  *     都按 PLANE_NUM 定尺。改 plane 语义时这里与 nand_dispatch_tables.c 的
  *     multi-plane handler 要一起动。
