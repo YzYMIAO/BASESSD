@@ -1,25 +1,34 @@
 /*
  * test_fc_level1.c — Level 1 纯逻辑测试：fc_command + fc_queue + fc_scheduler
  *
- * 所有 Level 1 测试汇总在一个文件中，共 16 个测试函数。
+ * 共 11 个测试函数，全部是纯 RAM 逻辑：不碰 NAND、不需要 fc_init()、
+ * 不依赖任何池，每个用例自带全部夹具（栈上队列 / 栈上命令）。
  *
- * 资源需求：
- *   - fc_queue：全部 stack 分配，零初始化依赖
- *   - fc_command 的 status_init 用例：需要 fc_init() 初始化 command pool
- *     （suite 级一次性初始化，通过 setup_fc_suite 控制）
+ * 覆盖范围：
+ *   Part 1  fc_command_validate  —— 合法输入放行（冒烟性质，见下）
+ *   Part 2  fc_submission_queue  —— SQ 环形 FIFO：顺序 / 回绕 / 满 / peek
+ *   Part 2b fc_completion_queue  —— CQ 环形 FIFO：初始化 / 顺序 / 满
+ *   Part 3  fc_scheduler         —— init 绑定 SQ/HSQ
  *
- * 唯一链接依赖：g_nand_operation_map（.rodata, onfi_1_0.o）
+ * 唯一链接依赖：g_nand_operation_map（.rodata, onfi_1_0.o）——经 fc_command_validate()
+ * 的 nand_operation_has_data() 宏引用。
  *
- * 注（v8 / v13 / v15 / v20 之后）：
+ * 历史注（v8 / v13 / v15 / v20 / 2026-10-08）：
  *   - 调度器的选择逻辑（HSQ 优先 / 按 LUN 保序 / 链打包 / per-LUN FIFO 挂起）
  *     已搬进 fc.c 的 static fc_poll_fill，只能经 fc_service() 触达（会推真 NAND），
  *     不再属 Level 1 纯逻辑范畴——相关用例移至 Level 2/3。
- *   - fc_command_validate 的负向守卫全部转 ASSERT；param.cw_mask 由 FTL 读，
- *     FC 侧不再校验。
+ *   - fc_command_validate 的负向守卫全部转 ASSERT（v20）；param.cw_mask 的读者
+ *     是 FTL，FC 侧不再校验（v13）。负向用例随之删除，只留正向冒烟。
  *   - fc_command_t 不再携带 command_id（v15），ID 由指针派生。
+ *   - 删除 5 条用例（2026-10-08），判据统一为「被测代码还有没有生产调用者」：
+ *       status_init_pool_cmd / status_init_stack_cmd / status_set_cw_valid
+ *         —— fc_command_status_init / _set_cw 自 2026-09-20 起零生产调用者
+ *            （CQ 完成项改由 fc_complete_from_nand() 内联组装），函数连同用例一并删除；
+ *       pop_n —— fc_submission_queue_pop_n 零生产调用者（调度器走逐条 pop）；
+ *       empty_full —— 断言集是 peek_empty ∪ overflow 的子集，零增量覆盖。
+ *     随之删除 setup_fc_suite（其唯一用途是给 status_init 两条用例初始化命令池）。
  */
 
-#include "fc/fc.h"
 #include "fc/fc_command.h"
 #include "fc/fc_queue.h"
 #include "fc/fc_scheduler.h"
@@ -29,33 +38,26 @@
 /**************************************************************************
  *  Part 1: fc_command 测试
  *
- *  fc_command_validate（v20 起恒返回 FC_STATUS_OK）：
- *   三条守卫（command==NULL / operation>=OP_COUNT / 数据操作无 desc 链）
- *   已全部转 ASSERT —— 负向用例随之删除，只保留正向「合法 OP 恒 OK」。
- *   注：v13 起 param.cw_mask 的读者是 FTL，FC 侧不再校验它。
+ *  只覆盖 fc_command_validate 的**正向**面。v20 起该函数三条守卫
+ *  （command==NULL / operation>=OP_COUNT / 数据操作无 desc 链）全转 ASSERT，
+ *  函数体只剩 `return FC_STATUS_OK`，因此这里的断言是**恒真**的——用例的性质
+ *  从「验证返回值」转为「冒烟」：用合法输入把内层断言跑一遍，拦住以后有人
+ *  加了过严的断言。这一层是否值得保留，取决于内层断言是否还会变。
  *
- *  fc_command_status_init / set_cw：
- *   验证 CQ entry 初始化、command_id 由指针派生（v15）、逐 CW 状态聚合。
+ *  注：v13 起 param.cw_mask 的读者是 FTL，FC 侧不再校验它。
  **************************************************************************/
 
-/* status_init 的两个用例要经 fc_command_to_id 反查命令池，需先 fc_init()。 */
-static int g_fc_inited = 0;
-
-static void *setup_fc_suite(const MunitParameter params[], void *user_data)
-{
-    (void)params;
-    (void)user_data;
-
-    if (!g_fc_inited)
-    {
-        fc_init();
-        g_fc_inited = 1;
-    }
-    return NULL;
-}
-
-/* ── fc_command_validate ── */
-
+/* --------------------------------------------------------------------
+ * test_command_validate_op_range
+ *   功能：确认 fc_command_validate 对全部合法 operation 放行。
+ *   测什么：op 遍历 0 .. OP_COUNT-1，每次都断言返回 FC_STATUS_OK。
+ *   设计思路：返回值这一维已不可能失败（见 Part 1 头注），真实价值是冒烟——
+ *         遍历**全部** op 而非抽一个，是因为「数据操作必须有 desc 链」那条断言
+ *         是按 operation 分类的，抽一个样本覆盖不到分类边界。
+ *         desc_id 故意填 0（合法描述符号）而不是 INVALID：填 INVALID 会让
+ *         「有数据的操作必须有链」那条断言对数据类 op 立刻响，用例就变成
+ *         在测断言本身而不是测放行。
+ * -------------------------------------------------------------------- */
 static MunitResult test_command_validate_op_range(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -74,6 +76,18 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
     return MUNIT_OK;
 }
 
+/* --------------------------------------------------------------------
+ * test_command_validate_set_get_no_desc
+ *   功能：确认 SET/GET_FEATURES 在**没有** desc 链时仍被放行。
+ *   测什么：desc_id = INVALID 时，两个 FEATURES 操作都返回 FC_STATUS_OK。
+ *   设计思路：这两条操作的数据走 SQ/CQ 的 param.bytes 内联段，不经 NAND 数据
+ *         路径，所以「有数据的操作必须有 desc 链」那条断言必须对它们短路。
+ *         用例就是钉住这个短路分支——它一旦被改坏（例如断言的布尔条件顺序
+ *         调整、或 nand_operation_has_data 的分类变了），FEATURES 会在提交时
+ *         直接停机，而这是 FTL 读写 BBT / 元数据要走的路径。
+ *         desc_id 设成 INVALID 是本用例与上一条的唯一区别，两条例合用例
+ *         共同把那条断言的**两个方向**都钉住。
+ * -------------------------------------------------------------------- */
 static MunitResult test_command_validate_set_get_no_desc(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -92,100 +106,28 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
     return MUNIT_OK;
 }
 
-/* ── fc_command_status_init ── */
-
-/* 池内命令：command_id 由指针派生（v15 起 fc_command_t 不再有该字段）。 */
-static MunitResult test_command_status_init_pool_cmd(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    fc_command_status_t cq_entry;
-    fc_command_id_t     expect_id = FC_COMMAND_ID_INVALID;
-
-    fc_command_t *cmd = fc_command_alloc();
-    munit_assert_not_null(cmd);
-
-    cmd->desc_id = 0x02U;
-    cmd->module  = FC_COMMAND_MODULE_FTL;
-
-    munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
-
-    fc_command_status_init(&cq_entry, cmd);
-
-    munit_assert_uint32(cq_entry.command_id, ==, expect_id);
-    munit_assert_uint32(cq_entry.desc_id, ==, 0x02U);
-    munit_assert_uint32(cq_entry.module, ==, FC_COMMAND_MODULE_FTL);
-
-    munit_assert_uint32(cq_entry.status, ==, FC_CW_STATUS_READY);
-
-    /* CQ 的 param 是命令级返回段（读命令=失败掩码 / FEATURES=寄存器值），
-     * 由完成路径填；status_init 只清零，不预置 per-CW ECC（已从 CQ 删除）。 */
-    munit_assert_uint32(cq_entry.param.cw_mask, ==, 0U);
-
-    fc_command_release(cmd);
-
-    return MUNIT_OK;
-}
-
-/* 栈上命令不在命令池内 → 派生不出 ID，落哨兵。 */
-static MunitResult test_command_status_init_stack_cmd(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    fc_command_status_t cq_entry;
-    fc_command_t        cmd = {0};
-
-    cmd.desc_id = 0x02U;
-    cmd.module  = FC_COMMAND_MODULE_FTL;
-
-    fc_command_status_init(&cq_entry, &cmd);
-
-    munit_assert_uint32(cq_entry.command_id, ==, FC_COMMAND_ID_INVALID);
-    munit_assert_uint32(cq_entry.desc_id, ==, 0x02U);
-    munit_assert_uint32(cq_entry.module, ==, FC_COMMAND_MODULE_FTL);
-    munit_assert_uint32(cq_entry.status, ==, FC_CW_STATUS_READY);
-    munit_assert_uint32(cq_entry.param.cw_mask, ==, 0U);
-
-    return MUNIT_OK;
-}
-
-/* ── fc_command_status_set_cw ── */
-
-static MunitResult test_command_status_set_cw_valid(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    fc_command_status_t cq_entry = {0};
-
-    fc_command_status_set_cw(&cq_entry, 0U, FC_CW_STATUS_SUCCESS, 0x10U);
-    munit_assert_uint32(cq_entry.status, ==, FC_CW_STATUS_SUCCESS);
-    munit_assert_uint32(cq_entry.desc_id, ==, 0U); /* success 不记录 desc_id */
-
-    fc_command_status_set_cw(&cq_entry, 1U, FC_CW_STATUS_NAND_FAIL, 0x20U);
-    munit_assert_uint32(cq_entry.status, ==, (uint8_t)(FC_CW_STATUS_SUCCESS | FC_CW_STATUS_NAND_FAIL));
-    munit_assert_uint32(cq_entry.desc_id, ==, 0x20U); /* 错误位记录 desc_id */
-
-    fc_command_status_set_cw(&cq_entry, 3U, FC_CW_STATUS_UNC, 0x40U);
-    munit_assert_uint32(cq_entry.status, ==, (uint8_t)(FC_CW_STATUS_SUCCESS | FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_UNC));
-    munit_assert_uint32(cq_entry.desc_id, ==, 0x20U); /* 保留第一个错误的 desc_id */
-
-    return MUNIT_OK;
-}
-
 /**************************************************************************
- *  Part 2: fc_queue 测试
+ *  Part 2: fc_submission_queue 测试
  *
- *  测试环形 FIFO 的核心操作：push / pop / peek / pop_n，
- *  以及边界条件：空、满、环绕、NULL 输入。
+ *  测试环形 FIFO 的核心操作：push / pop / peek，以及边界条件：空、满、环绕。
+ *
+ *  深度用 TEST_Q_DEPTH=8 而不是生产深度 64：夹具小到能一眼看出「入队-出队」
+ *  的对应关系，且让每个用例只盯一件事（顺序 / 回绕 / 满 / 空各自独立，
+ *  不互相掩盖）。
  **************************************************************************/
 
 #define TEST_Q_DEPTH (8U)
 
-/* ── 基础 FIFO 顺序 ── */
-
+/* --------------------------------------------------------------------
+ * test_queue_push_pop
+ *   功能：验证 SQ 的 FIFO 顺序（先进先出）。
+ *   测什么：连 push 3 条后逐条 pop，断言出队顺序与入队一致；再 pop 一次
+ *         断言 QUEUE_EMPTY。
+ *   设计思路：顺序是队列最核心的契约——错了命令会以错误次序下发到 NAND，
+ *         而且不会崩、只会错数据，属于最难查的一类。用固定期望值（0x01/0x02/0x03）
+ *         而非「再 pop 一遍对比」：后者会被同一个 bug 掩盖。
+ *         本用例刻意不触发环绕（3 < 8），把回绕留给下一条单独测。
+ * -------------------------------------------------------------------- */
 static MunitResult test_queue_push_pop(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -213,8 +155,18 @@ static MunitResult test_queue_push_pop(const MunitParameter params[], void *data
     return MUNIT_OK;
 }
 
-/* ── 环形缓冲环绕 ── */
-
+/* --------------------------------------------------------------------
+ * test_queue_wrap_around
+ *   功能：验证环形缓冲 head / tail 的回绕。
+ *   测什么：填满 8 条 → pop 1 条（head 前进到 1）→ 再 push 1 条（tail 回绕到 0）
+ *         → 断言剩余顺序恰为 0x11..0x17, 0xAA，最后 QUEUE_EMPTY。
+ *   设计思路：回绕是环形队列唯一容易写错的算术（两处 `% depth`）。用例刻意
+ *         把 head / tail 摆到环的两侧（head=1, tail=0），只要有一处回绕写错，
+ *         这个断言序列就会错位。期望值写死成字面量而不是「先 pop 完再比对」，
+ *         同样是为了让错误立刻可读。
+ *         末条 0xAA 是**越过回绕点**写入的元素，专门验证 tail 回绕后写入的位置
+ *         没有覆盖还在队列里的旧元素。
+ * -------------------------------------------------------------------- */
 static MunitResult test_queue_wrap_around(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -250,8 +202,15 @@ static MunitResult test_queue_wrap_around(const MunitParameter params[], void *d
     return MUNIT_OK;
 }
 
-/* ── 队列满 ── */
-
+/* --------------------------------------------------------------------
+ * test_queue_overflow
+ *   功能：验证满队列的背压语义。
+ *   测什么：填满 8 条 → 再 push 断言 QUEUE_FULL → pop 一条 → push 断言恢复 OK。
+ *   设计思路：QUEUE_FULL 是 FC 对 FTL 的背压信号（fc_submit 的**唯一**合法失败），
+ *         必须真的被拒绝，而不是静默覆盖队头。
+ *         后半段「pop 后恢复可用」才是这条用例的重点：只测前半段的话，
+ *         count 没正确回退、或满判定写成 `head == tail` 的实现都能蒙混过关。
+ * -------------------------------------------------------------------- */
 static MunitResult test_queue_overflow(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -278,8 +237,17 @@ static MunitResult test_queue_overflow(const MunitParameter params[], void *data
     return MUNIT_OK;
 }
 
-/* ── peek ── */
-
+/* --------------------------------------------------------------------
+ * test_queue_peek
+ *   功能：验证 peek 按偏移随机访问、且**不消耗**队列。
+ *   测什么：push 3 条后 peek(0) 连查两次、再查 peek(1) / peek(2)，
+ *         断言取到对应的队内元素。
+ *   设计思路：peek 是生产路径上唯一被调用的只读原语——fc.c 的链打包用它
+ *         预判「队头起第 need-1 条是否同链」（fc_poll_fill_queue），判错了
+ *         会把不该打包的命令塞进同一次下发。
+ *         重点因此有两个：偏移算对（0/1/2 各自命中），以及**连查两次结果相同**
+ *         ——后者证明 peek 没有推进 head，否则调用方每探一次就吃掉一条命令。
+ * -------------------------------------------------------------------- */
 static MunitResult test_queue_peek(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -302,6 +270,16 @@ static MunitResult test_queue_peek(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* --------------------------------------------------------------------
+ * test_queue_peek_empty
+ *   功能：验证空队列 peek 的哨兵返回。
+ *   测什么：刚 init 的队列 peek(0) 断言 FC_COMMAND_ID_INVALID。
+ *   设计思路：peek 的调用方（fc.c 链打包）正是靠这个哨兵判链尾，返回 0 或
+ *         越界读都会让打包循环走错方向。空队列踩的是 `offset >= count` 这条
+ *         边界，是哨兵契约最容易漏的一格，故单独用例钉住。
+ *         与 test_queue_overflow 里那条 peek 断言不同：这里队列**始终**是空的，
+ *         不掺入任何 push/pop 干扰。
+ * -------------------------------------------------------------------- */
 static MunitResult test_queue_peek_empty(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -316,73 +294,25 @@ static MunitResult test_queue_peek_empty(const MunitParameter params[], void *da
     return MUNIT_OK;
 }
 
-/* ── pop_n ── */
-
-static MunitResult test_queue_pop_n(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    fc_command_id_t       storage[TEST_Q_DEPTH];
-    fc_submission_queue_t q;
-    fc_command_id_t       ids[5];
-    fc_command_id_t       val;
-    uint16_t              i;
-
-    munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
-
-    for (i = 0U; i < 5U; i++)
-    {
-        munit_assert_int(fc_submission_queue_push(&q, (fc_command_id_t)(0x10U + i)), ==, FC_STATUS_OK);
-    }
-
-    fc_submission_queue_pop_n(&q, ids, 3U);
-    munit_assert_uint32(ids[0], ==, 0x10U);
-    munit_assert_uint32(ids[1], ==, 0x11U);
-    munit_assert_uint32(ids[2], ==, 0x12U);
-
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
-    munit_assert_uint32(val, ==, 0x13U);
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
-    munit_assert_uint32(val, ==, 0x14U);
-    munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_QUEUE_EMPTY);
-
-    return MUNIT_OK;
-}
-
-/* ── 空/满 │ NULL 输入 ── */
-
-static MunitResult test_queue_empty_full(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    fc_command_id_t       storage[TEST_Q_DEPTH];
-    fc_submission_queue_t q;
-    uint16_t              i;
-
-    munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
-
-    munit_assert_uint32(fc_submission_queue_peek(&q, 0U), ==, FC_COMMAND_ID_INVALID);
-
-    for (i = 0U; i < TEST_Q_DEPTH; i++)
-    {
-        munit_assert_int(fc_submission_queue_push(&q, (fc_command_id_t)i), ==, FC_STATUS_OK);
-    }
-
-    munit_assert_int(fc_submission_queue_push(&q, 0xFFU), ==, FC_STATUS_QUEUE_FULL);
-
-    return MUNIT_OK;
-}
-
 /**************************************************************************
  *  Part 2b: fc_completion_queue 测试
  *
- *  CQ 存储 fc_command_status_t，FIFO 语义与 submission_queue 相同。
+ *  CQ 存 fc_command_status_t（整项拷贝），FIFO 语义与 SQ 相同，但存储类型
+ *  与深度不同，故单独一组。CQ 的生产路径是 fc_complete_from_nand()（push）
+ *  与 fc_poll_completion_internal()（pop）。
  **************************************************************************/
 
 #define TEST_CQ_DEPTH (8U)
 
+/* --------------------------------------------------------------------
+ * test_cqueue_init
+ *   功能：验证 CQ 初始化的字段落位。
+ *   测什么：init 后断言 depth 被记录、count == 0。
+ *   设计思路：CQ 是完成项的搬运通道，init 漏清零会让「满/空」判定从一开始
+ *         就错。只断言这两个字段，是因为 head / tail 的初值属实现细节——
+ *         钉死它们会让以后改成绝对序号之类的重构无谓地失败，而 depth/count
+ *         是调用方（fc.c）真正读的契约。
+ * -------------------------------------------------------------------- */
 static MunitResult test_cqueue_init(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -398,6 +328,16 @@ static MunitResult test_cqueue_init(const MunitParameter params[], void *data)
     return MUNIT_OK;
 }
 
+/* --------------------------------------------------------------------
+ * test_cqueue_push_pop
+ *   功能：验证 CQ 的 FIFO 顺序与整项拷贝。
+ *   测什么：push 两条（command_id = 0x01 / 0x02）后逐条 pop，断言 command_id
+ *         顺序一致；再 pop 一次断言 QUEUE_EMPTY。
+ *   设计思路：CQ 存的是 fc_command_status_t **整体**而不是句柄，所以顺序之外
+ *         还隐含「拷贝而非引用」——用两个不同的 command_id 区分，顺序错了
+ *         立刻可见。语义与 SQ 相同但存储类型不同（结构体 vs 16 位 ID），
+ *         拷贝路径是另一段代码，不能靠 SQ 的用例代为覆盖。
+ * -------------------------------------------------------------------- */
 static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -428,6 +368,15 @@ static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *dat
     return MUNIT_OK;
 }
 
+/* --------------------------------------------------------------------
+ * test_cqueue_overflow
+ *   功能：验证 CQ 满时的背压。
+ *   测什么：填满 TEST_CQ_DEPTH 条 → 再 push 断言 QUEUE_FULL。
+ *   设计思路：CQ 满在 fc_complete_from_nand() 里是 fatal（完成项一旦丢失，
+ *         FTL 再也等不到这条命令），所以「满了必须拒绝而不是覆盖」是硬契约。
+ *         与 SQ 的 overflow 不同，这里**不**测「pop 后恢复」——CQ 的消费方是
+ *         FTL 的完成处理，本用例不模拟消费节奏，只钉住满判定本身。
+ * -------------------------------------------------------------------- */
 static MunitResult test_cqueue_overflow(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -467,8 +416,15 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
 
 #define SCHED_Q_DEPTH (16U)
 
-/* ── init ── */
-
+/* --------------------------------------------------------------------
+ * test_scheduler_init
+ *   功能：验证 fc_scheduler_init 绑定 SQ / HSQ 两个队列指针。
+ *   测什么：用两个栈上队列 init 调度器，断言 scheduler.sq / .hsq 指向传入对象。
+ *   设计思路：断言**指针相等**而不是断言内部状态，是因为「不复制队列、只持有
+ *         引用」正是它的契约——队列存储由调用方提供（见 fc_queue.h 头注）。
+ *         若实现改成按值拷贝，指针断言会立刻失败，而状态断言可能仍然通过。
+ *         生产调用点是 fc.c 的 fc_init_internal（init 时一次）。
+ * -------------------------------------------------------------------- */
 static MunitResult test_scheduler_init(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -493,34 +449,36 @@ static MunitResult test_scheduler_init(const MunitParameter params[], void *data
 /**************************************************************************
  *  套件定义
  *
- *  按模块分三个子套件，全部挂在 /fc-nand/ 根套件下。
+ *  单个子套件 logic，挂在 /fc-nand/ 根套件下，与 Level 2（data_path）/
+ *  Level 3（lifecycle）一致——**一个文件一个套件**。
+ *  原先按模块切成的 command / queue / scheduler 三个子套件已合并：合并后
+ *  command 只剩 2 条、scheduler 只剩 1 条，过滤粒度已细到等于「单跑一条用例」，
+ *  而 Level 1 全部 11 条都是纯 RAM 微秒级，按模块过滤省不出任何东西。
+ *  真正需要过滤的边界是**依赖面**（零依赖 / 需池 / 需真 NAND），那由根套件的
+ *  Level 1/2/3 三层保住。
+ *
+ *  套件不需要 setup/teardown——Level 1 全部用例自带夹具，零全局状态。
  **************************************************************************/
 
-MunitTest g_fc_command_tests[] = {
-    {       "validate_op_range",        test_command_validate_op_range,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"validate_set_get_no_desc", test_command_validate_set_get_no_desc,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {    "status_init_pool_cmd",     test_command_status_init_pool_cmd, setup_fc_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {   "status_init_stack_cmd",    test_command_status_init_stack_cmd, setup_fc_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {     "status_set_cw_valid",      test_command_status_set_cw_valid,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {                      NULL,                                  NULL,           NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
-};
+MunitTest g_fc_logic_tests[] = {
+  /* Part 1: fc_command */
+    {       "validate_op_range",        test_command_validate_op_range, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"validate_set_get_no_desc", test_command_validate_set_get_no_desc, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
-MunitTest g_fc_queue_tests[] = {
-    {       "push_pop",    test_queue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {    "wrap_around", test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {       "overflow",    test_queue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {           "peek",        test_queue_peek, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {     "peek_empty",  test_queue_peek_empty, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {          "pop_n",       test_queue_pop_n, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {     "empty_full",  test_queue_empty_full, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
- /* completion queue */
-    {    "cqueue_init",       test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"cqueue_push_pop",   test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"cqueue_overflow",   test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {             NULL,                   NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
-};
+ /* Part 2: fc_submission_queue */
+    {                "push_pop",                   test_queue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {             "wrap_around",                test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                "overflow",                   test_queue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                    "peek",                       test_queue_peek, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {              "peek_empty",                 test_queue_peek_empty, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
-MunitTest g_fc_scheduler_tests[] = {
-    {"init", test_scheduler_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {  NULL,                NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+ /* Part 2b: fc_completion_queue */
+    {             "cqueue_init",                      test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "cqueue_push_pop",                  test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "cqueue_overflow",                  test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+
+ /* Part 3: fc_scheduler */
+    {          "scheduler_init",                   test_scheduler_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+
+    {                      NULL,                                  NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

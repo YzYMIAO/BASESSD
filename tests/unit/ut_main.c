@@ -10,9 +10,7 @@
 #include "munit.h"
 
 /* Level 1: 纯逻辑测试 */
-extern MunitTest g_fc_command_tests[];
-extern MunitTest g_fc_queue_tests[];
-extern MunitTest g_fc_scheduler_tests[];
+extern MunitTest g_fc_logic_tests[];
 
 /* Level 2: 数据路径测试 */
 extern MunitTest g_fc_data_path_tests[];
@@ -29,9 +27,7 @@ static MunitSuite g_fc_nand_suite =
         NULL,
         (MunitSuite[]){
                        /* Level 1 */
-                       {(char *)"command", g_fc_command_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {(char *)"queue", g_fc_queue_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
-                       {(char *)"scheduler", g_fc_scheduler_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                       {(char *)"logic", g_fc_logic_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
 
                        /* Level 2 */
                        {(char *)"data_path", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},

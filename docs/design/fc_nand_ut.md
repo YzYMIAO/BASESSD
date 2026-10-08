@@ -25,8 +25,8 @@
 
 ```
 Level 1: Pure Logic ──── 零硬件依赖，纯函数测试
-    ├── fc_command status_init / status_set_cw / validate（合法输入）
-    ├── fc_queue push / pop / peek / pop_n / full / empty / completion queue
+    ├── fc_command validate（合法输入，冒烟性质）
+    ├── fc_queue push / pop / peek / full / empty / completion queue
     └── fc_scheduler init（选择逻辑已不在本层，见下）
 
 Level 2: Data Path ──── 需 fc_init() 初始化池，无 NAND 硬件
@@ -44,31 +44,29 @@ Level 3: FC Lifecycle ── 真实 NAND 硬件执行
 > - **调度器选择逻辑不可达**：v8 起 SQ/HSQ 选择搬进 `fc.c` 的 `static fc_poll_fill`，只能经 `fc_service()` 驱动真 NAND 才走到，Level 1 不再能覆盖 `select / select_chain / busy / starvation` 等 8 条，已删。
 > - **`fc_command_t.command_id` 于 v15 删除**（ID 改指针派生），断言改用 `fc_command_to_id()`。
 > - **建链入口于 v13 上移 FTL**：`fc_command_configure_descriptors`（复数）不复存在，测试改调 `ftl_cmd_configure_descriptors()`。
+> - **2026-10-08 删 5 条**（判据：被测代码还有没有生产调用者）——`status_init_pool_cmd` / `status_init_stack_cmd` / `status_set_cw_valid`（`fc_command_status_init` / `_set_cw` 自 2026-09-20 起零生产调用者，CQ 完成项改由 `fc_complete_from_nand()` 内联组装，函数连同用例一并删）、`pop_n`（`fc_submission_queue_pop_n` 零生产调用者，调度器走逐条 `pop`）、`empty_full`（断言集是 `peek_empty` ∪ `overflow` 的子集）。Level 1 16→**11**，套件至此**零 setup**（不再需要 `fc_init()`）。
 
 ### 2.1 Level 1 — 纯逻辑测试
 
-**测试目标**：`fc_command.c`、`fc_queue.c`、`fc_scheduler.c` 中的纯逻辑函数，不依赖任何硬件或动态内存（`status_init` 两例需先 `fc_init()` 以提供命令池）。
+**测试目标**：`fc_command.c`、`fc_queue.c`、`fc_scheduler.c` 中的纯逻辑函数。全部用例自带夹具（栈上队列 / 栈上命令），不依赖任何硬件、动态内存或资源池。
+
+> **用例性质说明**：`validate_*` 两条是**冒烟**而非返回值验证——`fc_command_validate` v20 起函数体只剩 `return FC_STATUS_OK`，断言恒真；它们的价值是用合法输入把内层 ASSERT 跑一遍，拦住「以后有人加了过严的断言」。其余 9 条是真正的行为验证。
 
 | 测试函数 | 被测函数 | 验证点 |
 |---|---|---|
-| `test_command_validate_op_range` | `fc_command_validate` | 0..OP_COUNT-1 全部合法（恒 OK） |
-| `test_command_validate_set_get_no_desc` | `fc_command_validate` | SET/GET_FEATURES 内联例外 |
-| `test_command_status_init_pool_cmd` | `fc_command_status_init` | 池内命令 → `cq_entry.command_id` == `fc_command_to_id()` 派生值；status=READY、cw_mask=0 |
-| `test_command_status_init_stack_cmd` | `fc_command_status_init` | 栈上命令（非池内）→ `command_id` == `FC_COMMAND_ID_INVALID` |
-| `test_command_status_set_cw_valid` | `fc_command_status_set_cw` | 各 CW slot + 错误位记录 desc_id |
+| `test_command_validate_op_range` | `fc_command_validate` | 0..OP_COUNT-1 全部合法（恒 OK，冒烟） |
+| `test_command_validate_set_get_no_desc` | `fc_command_validate` | SET/GET_FEATURES 无 desc 链的内联例外（钉住断言短路分支） |
 | `test_queue_push_pop` | fc_submission_queue push/pop | FIFO 顺序正确 |
-| `test_queue_wrap_around` | fc_submission_queue push/pop | 环形环绕后 FIFO 正确 |
-| `test_queue_overflow` | fc_submission_queue_push | 满队列返回 QUEUE_FULL |
-| `test_queue_peek` | fc_submission_queue_peek | 不消耗元素 |
-| `test_queue_peek_empty` | fc_submission_queue_peek | 空队列返回 INVALID |
-| `test_queue_pop_n` | fc_submission_queue_pop_n | 批量弹出 N 个 |
-| `test_queue_empty_full` | fc_submission_queue 状态 | peek 空 / push 满 |
-| `test_cqueue_init` | fc_completion_queue_init | 初始化后状态正确 |
-| `test_cqueue_push_pop` | fc_completion_queue push/pop | FIFO 顺序正确 |
+| `test_queue_wrap_around` | fc_submission_queue push/pop | head/tail 回绕后 FIFO 正确（head=1, tail=0 跨环两侧） |
+| `test_queue_overflow` | fc_submission_queue_push | 满队列返回 QUEUE_FULL，且 pop 后恢复可用 |
+| `test_queue_peek` | fc_submission_queue_peek | 按偏移取到对应元素，且连查两次不消耗 |
+| `test_queue_peek_empty` | fc_submission_queue_peek | 空队列返回 INVALID（`offset >= count` 边界） |
+| `test_cqueue_init` | fc_completion_queue_init | depth 记录正确、count == 0 |
+| `test_cqueue_push_pop` | fc_completion_queue push/pop | FIFO 顺序 + 整项拷贝 |
 | `test_cqueue_overflow` | fc_completion_queue_push | 满队列返回 QUEUE_FULL |
-| `test_scheduler_init` | `fc_scheduler_init` | sq / hsq 指针绑定正确 |
+| `test_scheduler_init` | `fc_scheduler_init` | sq / hsq 指针绑定（断言指针相等 = 只持引用不拷贝） |
 
-**共计 16 个测试函数。**（command 5 + queue 10 + scheduler 1）
+**共计 11 个测试函数。**（合并前按模块分 command 2 + queue 8 + scheduler 1，现统一挂在单个 `logic` 套件下，见 §3）
 
 ### 2.2 Level 2 — 数据路径测试
 
@@ -220,44 +218,36 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 ## 3. 测试套件组织
 
 ```c
-/* test_fc_level1.c — 三个子套件，共 16 个测试 */
+/* test_fc_level1.c — 单个子套件 logic，共 11 个测试，全部零 setup */
 
-static MunitTest g_fc_command_tests[] = {
-    {       "validate_op_range",        test_command_validate_op_range,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "validate_set_get_no_desc", test_command_validate_set_get_no_desc,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {     "status_init_pool_cmd",      test_command_status_init_pool_cmd, setup_fc_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {    "status_init_stack_cmd",     test_command_status_init_stack_cmd, setup_fc_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {      "status_set_cw_valid",       test_command_status_set_cw_valid,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {                       NULL,                                   NULL,           NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL },
-};
+static MunitTest g_fc_logic_tests[] = {
+  /* Part 1: fc_command */
+    {       "validate_op_range",        test_command_validate_op_range, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"validate_set_get_no_desc", test_command_validate_set_get_no_desc, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
-static MunitTest g_fc_queue_tests[] = {
-    {       "push_pop",    test_queue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {    "wrap_around", test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {       "overflow",    test_queue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {           "peek",        test_queue_peek, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {     "peek_empty",  test_queue_peek_empty, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {          "pop_n",       test_queue_pop_n, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {     "empty_full",  test_queue_empty_full, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
- /* completion queue */
-    {    "cqueue_init",       test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "cqueue_push_pop",  test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "cqueue_overflow",  test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    {             NULL,                  NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL },
-};
+ /* Part 2: fc_submission_queue */
+    {                "push_pop",                   test_queue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {             "wrap_around",                test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                "overflow",                   test_queue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {                    "peek",                       test_queue_peek, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {              "peek_empty",                 test_queue_peek_empty, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
-static MunitTest g_fc_scheduler_tests[] = {
-    {"init", test_scheduler_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {  NULL,                NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL },
+ /* Part 2b: fc_completion_queue */
+    {             "cqueue_init",                      test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "cqueue_push_pop",                  test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {         "cqueue_overflow",                  test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+
+ /* Part 3: fc_scheduler */
+    {          "scheduler_init",                   test_scheduler_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+
+    {                      NULL,                                  NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };
 
 static MunitSuite g_fc_nand_suite = {
     (char *)"/fc-nand/",
     NULL,
     (MunitSuite[]){
-        { (char *)"command",   g_fc_command_tests,   NULL, 1, MUNIT_SUITE_OPTION_NONE },
-        { (char *)"queue",     g_fc_queue_tests,     NULL, 1, MUNIT_SUITE_OPTION_NONE },
-        { (char *)"scheduler", g_fc_scheduler_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+        { (char *)"logic",     g_fc_logic_tests,     NULL, 1, MUNIT_SUITE_OPTION_NONE },
         { (char *)"data_path", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
         { (char *)"lifecycle", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
         { NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE },
@@ -266,6 +256,15 @@ static MunitSuite g_fc_nand_suite = {
     MUNIT_SUITE_OPTION_NONE,
 };
 ```
+
+> **2026-10-08 合并**：Level 1 原先按模块切成 `command`(2) / `queue`(8) / `scheduler`(1)
+> 三个子套件，现合并为单个 `logic`——**一个文件一个套件**，与 Level 2（`data_path`）/
+> Level 3（`lifecycle`）一致。合并理由：合并后 `command` 只剩 2 条、`scheduler` 只剩 1 条，
+> 过滤粒度已细到等于「单跑一条用例」；而 Level 1 全部 11 条都是纯 RAM 微秒级，按模块过滤
+> 省不出任何东西。真正需要过滤的边界是**依赖面**（零依赖 / 需池 / 需真 NAND），那由根套件的
+> Level 1/2/3 三层保住。合并后单条用例仍可按全路径跑（`/fc-nand/logic/push_pop`）。
+> 套件名 `logic` 取自本层别名「纯逻辑测试」（§2.1），与 `data_path` / `lifecycle` 同属
+> 描述性命名的风格。
 
 ```c
 /* test_fc_level2.c — data_path 子套件，共 10 个测试（CONFIG_FC_RAID=1 时 16 个） */
@@ -286,18 +285,14 @@ extern MunitTest g_fc_lifecycle_tests[];
 ```c
 #include "munit.h"
 
-extern MunitTest g_fc_command_tests[];
-extern MunitTest g_fc_queue_tests[];
-extern MunitTest g_fc_scheduler_tests[];
+extern MunitTest g_fc_logic_tests[];
 extern MunitTest g_fc_data_path_tests[];
 extern MunitTest g_fc_lifecycle_tests[];
 
 static MunitSuite g_fc_nand_suite = {
     (char *)"/fc-nand/", NULL,
     (MunitSuite[]){
-        { (char *)"command",   g_fc_command_tests,   NULL, 1, MUNIT_SUITE_OPTION_NONE },
-        { (char *)"queue",     g_fc_queue_tests,     NULL, 1, MUNIT_SUITE_OPTION_NONE },
-        { (char *)"scheduler", g_fc_scheduler_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+        { (char *)"logic",     g_fc_logic_tests,     NULL, 1, MUNIT_SUITE_OPTION_NONE },
         { (char *)"data_path", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
         { (char *)"lifecycle", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
         { NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE },
@@ -335,7 +330,7 @@ static int uart_cli_test(int argc, char *argv[])
 UART 串口输入示例：
 
 ```
-ssd> test --seed 0x1234 /fc-nand/command/validate_op_range
+ssd> test --seed 0x1234 /fc-nand/logic/validate_op_range
 ssd> test --list
 ssd> test --list-params
 ssd> test
@@ -372,7 +367,7 @@ tests/
 ├── unit/
 │   ├── ut_main.c          # 裸机统一入口
 │   ├── ut_main.h          # 入口声明（供 usart.c 包含）
-│   ├── test_fc_level1.c   # Level 1: 16 个测试（command + queue + scheduler）
+│   ├── test_fc_level1.c   # Level 1: 11 个测试（logic 单套件）
 │   ├── test_fc_level2.c   # Level 2: 10 个测试（data_path encode/process_read/raid_recover + cw_mask）
 │   └── test_fc_level3.c   # Level 3: 9 个 block 级场景（真实 NAND）
 ├── integration/
@@ -446,6 +441,8 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-08 | v1.10 | **Level 1 套件合并：`command` / `queue` / `scheduler` 三子套件 → 单个 `logic`**（11 条用例不变）。理由：Level 2/3 已是「一个文件一个套件」，Level 1 是唯一例外；合并后 `command`(2) / `scheduler`(1) 的过滤粒度已细到等于「单跑一条用例」，而本层全部用例是纯 RAM 微秒级，按模块过滤无收益；真正需要过滤的边界是**依赖面**，由根套件 Level 1/2/3 三层保住。`test_scheduler_init` 用例名 `init` → `scheduler_init`（合并后去歧义）。改动：`tests/unit/test_fc_level1.c`（3 数组→1）、`tests/unit/ut_main.c`（3 extern + 3 表项 → 1 + 1）、本文档 §2.1/§3/§5.1/§4.2、`munit_adapter.md`、`wsl_debug_environment.md` 的 CLI 示例路径 `/fc-nand/command/...` → `/fc-nand/logic/...`。单条用例仍可按全路径跑（`/fc-nand/logic/push_pop`） |
+| 2026-10-08 | v1.9 | **Level 1 清理：删 5 条用例 + 对应死代码，16→11**。判据统一为「被测代码还有没有生产调用者」：`fc_command_status_init` / `fc_command_status_set_cw` 自 2026-09-20 起零调用者（CQ 完成项由 `fc_complete_from_nand()` 内联组装）→ **函数 + 头声明 + 3 条用例一并删**；`fc_submission_queue_pop_n` 零调用者（调度器走逐条 `pop`）→ 函数 + 声明 + 用例删；`test_queue_empty_full` 断言集是 `peek_empty` ∪ `overflow` 子集 → 删。套件至此零 `setup`（`setup_fc_suite` 随 `status_init` 两条用例删除），文件不再 include `fc/fc.h`。同时给保留的 11 条逐个补「功能 / 测什么 / 设计思路」注释。四档 0 error 0 warning、`make tests` 链接通过（193956 B）、format-check 过；上板未验 |
 | 2026-10-08 | v1.8 | **三级 UT 适配 v13~v21 的接口/策略收敛**（见 `docs/changelog/fc_ut_adapt_v13_v21.md`）：Level 1 45→**16**（删 `validate_*` 3 条——`fc_command_validate` v20 整函数转 ASSERT；删 `scheduler_select_*` 8 条——选择逻辑 v8 起搬进 `static fc_poll_fill`，Level 1 不可达；`status_init` 改池内/栈上两例走 `fc_command_to_id`）；Level 2 15→**10**（+RAID 16），建链改 `ftl_cmd_configure_descriptors`、补 `cw_mask_*` 三条说明、删手动 buffer 释放；Level 3 由「39 OP 参数化」改为 **9 个 block 级场景**，OP 表降为附录；`make tests` 由 29 error/7 warning → **0/0 链接通过** |
 | 2026-10-06 | v1.7 | OP 覆盖表补齐 34~41（Phase V ISSUE/WAIT/FETCH + `OP_READ_PAGE_CACHE_START` + 新增 `OP_RANDOM_DATA_READ_MULTI_PLANE`），计数 34→39（`OP_COUNT` 现为 42，含 9/11/20 三个空位）。**待补用例**：`cw_mask` 非满 mask 读（见 `fc_nand_design.md` §25） |
 | 2026-10-04 | v1.6 | §6.2 补命令池/描述符池可缓存性与调试器 D-Cache 不一致注意；新增 §6.5 生命周期插桩（`#if 0` 默认关闭）+ `[RES] L3_start` 资源行已注释；见 `debug_cmd_operation_rewrite_20261004.md` |

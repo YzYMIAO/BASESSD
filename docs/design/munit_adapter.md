@@ -118,7 +118,7 @@ int ut_run_fixed(void)
 
 ### 2.3 命令行选项
 
-通过在 UART 串口输入（如 `ssd> test --seed 0x1234 /fc-nand/command/validate_op_range`）可以传递以下选项：
+通过在 UART 串口输入（如 `ssd> test --seed 0x1234 /fc-nand/logic/validate_op_range`）可以传递以下选项：
 
 | 选项 | 用途 |
 |---|---|
@@ -186,8 +186,8 @@ munit 的 `MUNIT_OUTPUT_FILE`（默认 stdout）自动走此路径。
 UART CLI 框架（`uart_cli_tokenize()` + `uart_execute_command()`）负责将串口输入切分为 args，注册 `test` 命令后直接调用 `munit_suite_main`：
 
 ```
-ssd> test --seed 0x1234 /fc-nand/command/validate_op_range
-  → argv = {"test", "--seed", "0x1234", "/fc-nand/command/validate_op_range"}
+ssd> test --seed 0x1234 /fc-nand/logic/validate_op_range
+  → argv = {"test", "--seed", "0x1234", "/fc-nand/logic/validate_op_range"}
   → munit_suite_main(&g_fc_nand_suite, NULL, 4, argv)
 ```
 

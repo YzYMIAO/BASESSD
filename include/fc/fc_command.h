@@ -248,7 +248,5 @@ static inline uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t
 
 fc_status_t fc_command_validate(const fc_command_t *command);
 uint8_t     fc_cw_mask_is_plane_symmetric(uint32_t mask);
-void        fc_command_status_init(fc_command_status_t *status, const fc_command_t *command);
-void        fc_command_status_set_cw(fc_command_status_t *status, uint8_t cw, uint8_t cw_status, fc_descriptor_id_t descriptor_id);
 
 #endif /* FC_COMMAND_H */

@@ -28,7 +28,7 @@
 来自 `fc_command_alloc()` / `mem_alloc` 的是**资源**（判据 3，保留）；来自函数入参的才是**前置条件**（判据 2，转断言）。FTL 里满屏的 `cmd == NULL` 绝大多数是前者。
 
 **辨析 B：语义分支不是前置条件。**
-用 `NULL` 表达"这个可选参数没给"的，是有意设计的语义，不是调用者的编程错误。例：`ds_deque.c` 的 `cp == NULL`（浅拷贝选择器）、`ftl_is_metadata_block(md_dir == NULL, …)`（固定区间照常分类）、`fc_submission_queue_pop_n(ids == NULL)`（仅消耗队列）、`fc_ldpc_decode(..., err_bits == NULL)`（不取纠正位数）、`fc_command_status_init(status, command == NULL)`（无命令来源时填哨兵值）。
+用 `NULL` 表达"这个可选参数没给"的，是有意设计的语义，不是调用者的编程错误。例：`ds_deque.c` 的 `cp == NULL`（浅拷贝选择器）、`ftl_is_metadata_block(md_dir == NULL, …)`（固定区间照常分类）、`fc_ldpc_decode(..., err_bits == NULL)`（不取纠正位数）。~~`fc_submission_queue_pop_n(ids == NULL)`（仅消耗队列）、`fc_command_status_init(status, command == NULL)`（无命令来源时填哨兵值）~~ **（2026-10-08：两函数因零生产调用者被整体删除，见 §十七）**。
 
 ## 三、`ASSUME` 的取舍
 
@@ -108,7 +108,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 
 | 文件 | 转换点 |
 |---|---|
-| `fc_command.c` | `fc_command_status_init` 的 `status == NULL`、`fc_command_status_set_cw` 的 `status/cw` |
+| `fc_command.c` | `fc_command_status_init` 的 `status == NULL`、`fc_command_status_set_cw` 的 `status/cw`（两函数已于 2026-10-08 整体删除，此行成历史记录，见 §十七） |
 | `fc_scheduler.c` | `fc_scheduler_init`（scheduler/sq/hsq）、`fc_scheduler_select`（scheduler/command_id）、`fc_scheduler_select_chain`（scheduler/chain） |
 | `fc_registers.c` | `fc_registers_reset` 的 `registers`（该模块已于 v10 整体删除，此行成历史记录） |
 | `fc_raid_engine.c` | `fc_raid_init_ctx` 的 `lun`、`fc_raid_start/accumulate/end` 的 `lun/buffer/total`、`fc_raid_recover` 的 `recovered/buffers/count/failed_idx/length` |
@@ -132,7 +132,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 | ~~`fc_buffer_is_occupied(...) == 0U` / `fc_buffer_release` 未占用~~ **（2026-10-08 撤销：未占用 = 配置错误 → `ASSERT`，见 §十四）** | ~~生命周期状态~~ |
 | `g_nand_dispatch_armed == 0U` / `g_crc_ready == 0U` / `g_initialized == 0U` / `ctx->active == 0U` | 运行时状态 |
 | `map->uops == NULL` / `nand_engine` 的 `handler == NULL` / UOP 无 END | 表完整性 |
-| `fc_ldpc_decode(..., err_bits)` / `fc_command_status_init(..., command)` / `pop_n(ids)` 的 NULL | 辨析 B 语义分支 |
+| `fc_ldpc_decode(..., err_bits)` 的 NULL（~~`fc_command_status_init(..., command)` / `pop_n(ids)`~~ 两函数已于 2026-10-08 整体删除，见 §十七） | 辨析 B 语义分支 |
 | desc 链遍历里带 `break` / `return 错误码` 的"链损坏"降级 | 降级语义（非纯 fence） |
 | `fc_bch_init` 的 `m`/`t` 值域 | 库构造函数文档化合法范围 |
 
@@ -349,7 +349,7 @@ v18 / v19（§十三 / §十四）清完了 FC 的**公开 API 壳**。本轮（
 
 | 文件:位置 | 缺口 | 改动后 |
 |---|---|---|
-| `fc_queue.c` `fc_submission_queue_pop_n` | `count` 无上界（`count > queue->count` 静默少弹） | `ASSERT(count <= queue->count)` |
+| `fc_queue.c` `fc_submission_queue_pop_n` | `count` 无上界（`count > queue->count` 静默少弹） | `ASSERT(count <= queue->count)`（该函数 2026-10-08 因零生产调用者被删除，见 §十七） |
 | `fc.c` `fc_command_state_get` | `command_id` 越界 → 静默回退 `FC_COMMAND_STATE_FREE` | `ASSERT(command_id < FC_COMMAND_POOL_DEPTH)` |
 | `fc.c` `fc_descriptor_owner_get` | `descriptor_id` 越界 → 静默回退 `FC_COMMAND_ID_INVALID` | `ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH)` |
 | `fc.c` `fc_buffer_state_get` | `buffer_id` 越界 → 静默回退 `0U` | `ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH)` |
@@ -377,7 +377,7 @@ v18 / v19（§十三 / §十四）清完了 FC 的**公开 API 壳**。本轮（
 
 ### 辨析（不动）
 
-- `pop_n(ids == NULL)` / `fc_bch_encode(..., ecc == NULL)` / `fc_ldpc_decode(..., err_bits == NULL)`：**有意的可选参数语义**（辨析 B），不是调用者错误，保留。
+- ~~`pop_n(ids == NULL)`~~（函数 2026-10-08 因零生产调用者删除，见 §十七） / `fc_bch_encode(..., ecc == NULL)` / `fc_ldpc_decode(..., err_bits == NULL)`：**有意的可选参数语义**（辨析 B），不是调用者错误，保留。
 - `fc_ldpc_qc_encode` 的 `g_initialized` 静默返回：运行时状态（判据 3），且 void 返回无从给码。
 - `fc_ldpc_qc_encode` 的 `qc` 参数 vestigial（编码只用文件内 `g_col_weight` / `g_col_to_check`）本身另议——本轮只补断言做契约对称，**不动其"未用"**。
 
@@ -395,3 +395,54 @@ v18 / v19（§十三 / §十四）清完了 FC 的**公开 API 壳**。本轮（
 四档（debug / release / RAID=1 debug / RAID=1 release）**0 warning 0 error**；`-DFC_ECC_ALGO=FC_ECC_ALGO_LDPC` 补 include 后 0 error（余 1 条 pre-existing `fc_ecc_init_bch defined but not used`，属该实验分支既有、非本轮）；`make -k tests` 29 error / 7 warning 与基线逐项一致（全在 `tests/`）；`make format-check` passed；上板未做。
 
 > 详见 `docs/changelog/fc_c_tier_missing_guard_v21.md`。
+
+---
+
+## 十七、Level 1 清理："失去生产调用者"的代码与其用例（2026-10-08）
+
+**背景**：走读 Level 1 单测时发现，v13~v21 的接口/策略收敛让**一批被测代码失去了生产
+调用者**，但用例还在——于是测试不再"验证代码"，而是"养着代码"。据此补一条判据：
+
+> **判据 5：用例的被测函数在 `src/` 里已无生产调用者时，函数与用例一并处置**
+> （删函数 + 删头声明 + 删用例），而不是保留用例替它续命。
+
+### 删除清单
+
+| 函数 | 何时失去调用者 | 处置 |
+|---|---|---|
+| `fc_command_status_init` | 2026-09-20（`83fe922`：CQ 完成项改由 `fc_complete_from_nand()` 内联组装，此前由 `a4013dd` 的 `fc.c:532` 调用） | 函数 + 头声明 + 2 条用例删 |
+| `fc_command_status_set_cw` | 同上（原 `fc.c:537`） | 函数 + 头声明 + 1 条用例删 |
+| `fc_submission_queue_pop_n` | 从未有过（调度器一直走逐条 `fc_submission_queue_pop`） | 函数 + 头声明 + 1 条用例删 |
+
+另删 1 条**零增量覆盖**的用例 `test_queue_empty_full`——其断言集是 `test_queue_peek_empty` ∪
+`test_queue_overflow` 的真子集（后者还多测了"pop 后恢复可用"）。
+
+Level 1 用例数 16 → **11**；三个子套件至此**零 `setup`**（`setup_fc_suite` 随 `status_init`
+两条用例删除，测试文件不再 include `fc/fc.h`）。
+
+### 与 §十六 的关系
+
+§十六 清的是"配置错误既不返回码也不 ASSERT"（C 档形态三）。本节清的是**另一种反向病**：
+守卫 / API 本身没问题，但**没人调用了**——它既不破坏不变量，也不产生运行时开销，
+只是让"用例数"这个指标失真，并让后来者误以为该函数是活的。
+
+同理可推：§十四 / §十五 / §十六 里那些"转成 ASSERT 后只被测试调用"的守卫，
+以及本节删掉的函数，都是同一模式的产物。
+
+### 删前必查：`set_cw` 与生产内联版的语义分叉
+
+`fc_command_status_set_cw` 记录的是「**任一**错误位（NAND_FAIL / TIMEOUT / CRC / UNC /
+MATA / RAID）的首个 `desc_id`」；而生产内联版（`fc.c` 的 `fc_complete_from_nand`，:772-776）
+**只认 UNC**：
+
+```c
+if ((found_unc == 0U) && (d->status == FC_CW_STATUS_UNC)) { completion.desc_id = did; ... }
+```
+
+两者语义分叉——删掉前者等于删掉"正确语义"的唯一书面记录。本次按用户决定照删，
+但**该分叉本身未闭合**（内联版"只认 UNC"是有意还是当年搬内联时漏了，未判），记此备查。
+
+### 验证
+
+四档（debug / release / RAID=1 debug / RAID=1 release）**0 warning 0 error**；
+`make tests` 0 error 0 warning、链接通过（**193956 B**，改前 197468 B）；`make format-check` passed；上板未做。

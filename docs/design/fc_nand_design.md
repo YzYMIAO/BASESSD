@@ -3935,7 +3935,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 
    **FC 层不用 `ASSUME`。** 起初按"守卫带恢复分支 → `ASSUME`"划分，后来取消：恢复分支既然已经手工删掉，`ASSUME` 的 `__builtin_unreachable()` 就换不来额外代码生成收益（工程未开 LTO，`fc_command_id_to_command()` 这类跨 TU 调用点无从利用该假设）；而它会把"违反即 UB"引入一条本来只会 HardFault 的路径——同样是崩，`ASSERT` 的现场更可定位。`ASSUME` 宏保留在 `assertion.h` 里，留给将来确有热路径需要向编译器证明的场合。
 3. **资源类结果与运行时状态保留返回码**——池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、CQ 满背压（`FC_STATUS_IO_ERROR`）、NAND 报告的错误（`FC_STATUS_IO_ERROR`）、`g_crc_ready == 0U` / `ctx->active == 0U` / `fc_buffer_is_occupied(...) == 0U` 这类"此刻能不能做"的状态，都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。
-4. **单测固化为契约的守卫保留返回码**——判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**：`fc_command_validate`（校验器，返回判决是职责）、`test_rebuild.c` 的 `allocator_remove_from_free(..., 越界)`（文档化 no-op）等保留。（原条目还列了 `fc_scheduler_set_busy/clear_busy` 的越界忽略——**v8 起该 API 与 busy 表已整体删除**，见 §23.9。）反之，**只有测试会走"传非法参数"分支**的（`fc_command_status_set_cw` 的 `cw >= 4`、`fc_scheduler_init(NULL,…)`、`fc_submit(NULL)`、`fc_data_path_encode(NULL)` 等），按判据 2 转 `ASSERT` 并**删掉对应用例**。
+4. **单测固化为契约的守卫保留返回码**——判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**：`fc_command_validate`（校验器，返回判决是职责）、`test_rebuild.c` 的 `allocator_remove_from_free(..., 越界)`（文档化 no-op）等保留。（原条目还列了 `fc_scheduler_set_busy/clear_busy` 的越界忽略——**v8 起该 API 与 busy 表已整体删除**，见 §23.9。）反之，**只有测试会走"传非法参数"分支**的（`fc_command_status_set_cw` 的 `cw >= 4`（该函数 2026-10-08 因零生产调用者整体删除）、`fc_scheduler_init(NULL,…)`、`fc_submit(NULL)`、`fc_data_path_encode(NULL)` 等），按判据 2 转 `ASSERT` 并**删掉对应用例**。
 
 **判据 4 的边界：什么时候可以删用例而不是保留守卫。** 反例是 `fc_queue.c` 的指针判空：`fc_submission_queue_*` / `fc_completion_queue_*` 的生产调用者只有 `fc.c` 与 `fc_scheduler.c`，**全部传有效指针**——唯一会传 `NULL` 的就是测试自己。这种"只有测试会走的分支"应当按判据 2 转 `ASSERT`，并**删掉对应用例**（它们验证的行为届时已不存在，留着反而是错的）。两轮补扫共删除 `test_fc_level1.c` 的 13 个 `*_null`/越界用例与 `test_fc_level2.c` 的 3 个。
 

@@ -153,25 +153,3 @@ fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, uin
     uint16_t index = (uint16_t)((queue->head + offset) % queue->depth);
     return queue->entries[index];
 }
-
-/* --------------------------------------------------------------------
- * fc_submission_queue_pop_n
- *   功能：从队头一次弹出 count 条命令到 ids[0..count-1]。
- *   参数：queue —— 队列；ids —— 输出（可为 NULL 仅消耗）；count —— 条数。
- *   返回：无。
- *   实现要点：用于调度器整链弹出；ids 为 NULL 时仅推进队列。
- *         前置（违反一律 ASSERT）：count ≤ queue->count —— count 是调用者算出的值，
- *         超出即调用者 bug（v21：原先不校验，超 count 会静默少弹）。
- * -------------------------------------------------------------------- */
-void fc_submission_queue_pop_n(fc_submission_queue_t *queue, fc_command_id_t *ids, uint16_t count)
-{
-    fc_command_id_t cmd;
-    uint16_t        i;
-
-    ASSERT(queue != NULL);
-    ASSERT(count <= queue->count);
-    for (i = 0U; i < count; i++)
-    {
-        (void)fc_submission_queue_pop(queue, (ids != NULL) ? &ids[i] : &cmd);
-    }
-}

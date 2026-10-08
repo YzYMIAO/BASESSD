@@ -229,9 +229,7 @@ socat TCP-LISTEN:2331,reuseaddr,fork TCP:$WINDOWS_IP:2331 &
 test --param block 10
 
 # 分层运行
-test /fc-nand/command/        # Level 1
-test /fc-nand/queue/          # Level 1
-test /fc-nand/scheduler/      # Level 1
+test /fc-nand/logic/          # Level 1（11 条：command + queue + cqueue + scheduler）
 test /fc-nand/data_path/      # Level 2
 test --param block 10 /fc-nand/lifecycle/   # Level 3
 
