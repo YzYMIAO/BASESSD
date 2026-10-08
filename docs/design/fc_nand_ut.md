@@ -78,47 +78,54 @@ Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的�
 
 | 函数 | 功能 | 读取的 config 字段 |
 |---|---|---|
-| `fc_data_path_encode` | 写路径：Random 加扰 → ECC 编码 → RAID XOR | `random`, `ldpc`, `raid`, `cw` |
-| `fc_data_path_process_read` | 读路径 Stage1：ECC 解码 → 条件解扰 | `ldpc`, `random`, `cw` |
+| `fc_data_path_encode` | 写路径：META → CRC? → Random 加扰? → ECC 编码 | `crc`, `random`, `ldpc` |
+| `fc_data_path_process_read` | 读路径 Stage1：ECC 解码 → 条件解扰 → CRC 校验 → META 校验 | `ldpc`, `random`, `crc` |
 | `fc_data_path_raid_recover` | 读路径 Stage2：RAID XOR 重建 → ECC 重试 → 解扰 | `ldpc`, `random` |
 
 > **注意**：实现过程中发现 `fc_data_path.c` 原有的 encode/decode/raid_recover 三处 ECC 调用**没有读取 `config.ldpc` 字段**，始终执行 ECC。已在实现时补上 `ldpc == FC_ECC_MODE_LDPC_RAW` 时的跳过逻辑。
+>
+> **`config.raid` 数据路径不读**：encode 的 Stage 3（RAID XOR）已移除（`fc_data_path.c:191`），跨命令 stripe RAID 走独立的 `fc_data_path_generate_stripe_parity()`。全仓 `config.raid` 唯一读者是 `fc.c` 的分派钩子（决定走不走 `fc_stripe_submit`）。因此 `alloc_cmd_full()` 的 `raid_mode` 形参对本层是被动的——传 NORMAL / ENCODE 无差别。
 
 ### 参数组合
-
-`config.ldpc` 字段影响 ECC 路径（BCH / LDPC_RAW 跳过），但并不作为测试参数化维度（当前编译配置默认 BCH）。
 
 | 字段 | 有效取值 | 影响 |
 |---|---|---|
 | `random` | `FC_RANDOM_ENABLE(0)` / `FC_RANDOM_DISABLE(1)` | 是否加扰/解扰 |
-| `raid` | `FC_RAID_MODE_NORMAL(0)` / `FC_RAID_MODE_ENCODE(2)` | encode 是否做 RAID XOR |
+| `crc` | `FC_CRC_ENABLE(0)` / `FC_CRC_DISABLE(1)` | encode 是否写 CRC 字段、读侧 Pass 3 是否校验 |
+| `ldpc` | `FC_ECC_MODE_BCH(0)` / `FC_ECC_MODE_LDPC_RAW(3)` | LDPC_RAW 时两端都跳过 ECC |
+| `multi_plane` + `cw_mask` | `0` + `0`（单 plane 连续）/ `2` + 非 0 掩码 | desc 链的 CW 集合与几何 |
 | `cw` | 0 (1CW) / 3 (4CW) | desc 链长度，多 CW 边界 |
 | ECC 结果 | 全部成功 / 有 UNC | process_read 是否走解扰 |
+| 校验结果 | 全通过 / META 不符 / CRC 不符 | Pass 3 / Pass 4 是否置位 |
+
+> **⚠ 命令 fixture 必须给真实页地址**（v1.11）：`alloc_cmd_full()` 统一设 `paa = paa_make(32, 0, 50, 0, 0)`。早期 fixture 不设 `paa`（保持 `{0}` 清零），单 plane 建链分支（`fc_interface.c:189`）会把 `desc->paa` 落成 `cw` 本身，BASIC 种子随之退化成 `seed == cw` → `{1,1,2,3}`，LFSR 低 16 位取这几个小值后 **keystream 除 byte0 外全 0**——加扰形同虚设，`random=ON` 的用例全部是空转。故 random=ON 的用例另加一条「encode 后 USER 区 ≠ 明文」断言自证加扰真的发生了。
 
 ### 测试用例
 
 | 测试函数 | 参数组合 | 验证策略 |
 |---|---|---|
-| `encode_random_off` | random=off, 4CW, raid=normal | ECC 编码后末 8B parity 非零；round-trip decode 恢复原文 |
-| `encode_random_on` | random=on, 4CW, raid=normal | 加扰 + ECC；decode + 解扰后恢复原文 |
-| `encode_raid_on` | random=on, 4CW, raid=encode | 全路径编码；清空 CW0 → RAID recover → 恢复 |
-_(CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
-| `encode_single_cw` | random=off, 1CW, raid=normal | 单 CW 边界 |
-| `encode_null` | command=NULL | NULL 输入 |
-| `process_read_ok_random_on` | random=on, 4CW, 全 OK | 解码 + 解扰后原文恢复 |
-| `process_read_ok_random_off` | random=off, 4CW, 全 OK | 只解码，不涉及解扰 |
+| `encode_random_off` | random=off, 4CW | META + CRC + ECC；末 8B parity 非零；round-trip decode 恢复原文 |
+| `encode_random_on` | random=on, 4CW | 加扰 + ECC；**先证 USER 区已非明文**，再 decode + 解扰恢复原文 |
+| `encode_single_cw` | random=off, 1CW | 单 CW 边界 |
+| `encode_crc_disabled` | crc=off, 4CW | encode 不写 CRC 字段（哨兵保留）；读侧 Pass 3 跳过 → 全 READY |
+| `process_read_ok_random_on` | random=on, 4CW, 全 OK | 解码 + 解扰后原文恢复，且 **desc status 全 = READY** |
+| `process_read_ok_random_off` | random=off, 4CW, 全 OK | 只解码，不涉及解扰；全 READY |
 | `process_read_unc` | random=on, 4CW, CW1 损坏 | 返回 IO_ERROR；desc status CW1=UNC, 其余=READY |
-| `process_read_single_cw` | random=on, 1CW, 全 OK | 单 CW 边界 |
-| `process_read_null` | command=NULL | NULL 输入 |
-| `raid_recover_first` | random=on, 4CW, failed_idx=0 | 恢复首个 CW |
-| `raid_recover_mid` | random=on, 4CW, failed_idx=1 | 恢复中间 CW |
-| `raid_recover_last` | random=on, 4CW, failed_idx=3 | 恢复末位 parity CW |
-| `raid_recover_no_random` | random=off, 4CW, failed_idx=1 | 无加扰恢复 |
-| `raid_recover_null` | cmd=NULL | NULL 输入 |
-_(以上 raid_recover 测试仅在 CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
+| `process_read_single_cw` | random=on, 1CW, 全 OK | 单 CW 边界；全 READY |
+| `process_read_masked_chain` | random=on, multi_plane=2, mask=0x05 | 链位 0,1 ↔ CW 0,2；**专钉 Pass 4 用 `paa_to_cw(desc->paa)` 而非链走位**——若改用链走位，第 2 条会假报 MATA_ERROR |
+| `process_read_mata_error` | random=off, mask=0x05, encode 后改 `cmd->meta` | 返回值仍 OK，但每个 CW 置 `MATA_ERROR`（Pass 4） |
+| `process_read_crc_error` | crc 写关读开, 4CW, [4,8) 预置哨兵 | 返回值仍 OK，但每个 CW 置 `CRC_ERROR`（Pass 3）；ECC 未扰动，触发确定 |
+| `process_read_ldpc_raw` | ldpc=LDPC_RAW, 4CW | 两端跳过 ECC，数据原样往返，全 READY |
 
-| `generate_stripe_parity` | random=on, 2cmd×4CW | 跨命令 stripe XOR parity 验证 |
-_(CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
+> **「返回值仍 OK」是刻意的**：`fc_data_path_process_read` 在 Pass 3/Pass 4 标脏后**不改返回值**（`fc_data_path.c:551` 恒返回 `FC_STATUS_OK`），所以判「读成功」必须查 `desc->status == FC_CW_STATUS_READY`，只看返回值会漏掉 CRC / META 校验回归。
+
+| 测试函数 | 参数组合 | 验证策略 |
+|---|---|---|
+| `raid_recover_no_random` | random=off, 4CW, failed_idx=1 | 无加扰恢复（见下方局限说明） |
+| `generate_stripe_parity` | random=on, 2cmd×4CW | 跨命令 stripe XOR parity 验证（真 stripe） |
+_(以上两条仅在 CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
+
+> **RAID 组只剩 2 条（v1.11）**：删掉了 `encode_raid_on` 与 `raid_recover_first` / `_mid` / `_last`。原因是它们**构造不出被测函数的真实前置条件**——`fc_data_path_raid_recover` 只收集单条命令的 desc 链（`fc_data_path.c:591`），而 parity CW 在另一条命令的链上（`fc.c:888/924-933`），跨命令适配是 `include/fc/fc_raid_engine.h:22` 的未办事项。那 4 条只能靠「无 parity + pattern 异或恰为 0（`0x10^0x11^0x12^0x13`）+ keystream 退化」三重巧合通过；修好 fixture 后 random=ON 的变体必然挂。保留的 `raid_recover_no_random` 走 random=OFF（无加扰，退化 stripe 成立），真 stripe 覆盖由 `generate_stripe_parity` 承担。判据见 `assertion_guidelines.md` §十七·判据 6。
 
 ### flat CW 掩码建链（v7，v1.8 改为走 FTL 建链入口）
 
@@ -130,7 +137,7 @@ _(CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
 
 三条用例验证的是 **desc 链几何**（plane / CW 展开与链序），不是 NAND 行为，故留在 Level 2，只调 `ftl_cmd_configure_descriptors()` 后直接走链核对。
 
-**共计 10 个测试函数（默认构建）。（CONFIG_FC_RAID=1 时额外含 `encode_raid_on` + raid_recover ×4 + stripe parity，共 16 个）**
+**共计 15 个测试函数（默认构建）。（CONFIG_FC_RAID=1 时额外含 `raid_recover_no_random` + `generate_stripe_parity`，共 17 个）**
 
 ### 2.3 Level 3 — FC 全链路测试
 
@@ -267,7 +274,7 @@ static MunitSuite g_fc_nand_suite = {
 > 描述性命名的风格。
 
 ```c
-/* test_fc_level2.c — data_path 子套件，共 10 个测试（CONFIG_FC_RAID=1 时 16 个） */
+/* test_fc_level2.c — data_path 子套件，共 15 个测试（CONFIG_FC_RAID=1 时 17 个） */
 extern MunitTest g_fc_data_path_tests[];
 
 /* test_fc_level3.c — lifecycle 子套件，9 个 block 级场景用例 */
@@ -368,7 +375,7 @@ tests/
 │   ├── ut_main.c          # 裸机统一入口
 │   ├── ut_main.h          # 入口声明（供 usart.c 包含）
 │   ├── test_fc_level1.c   # Level 1: 11 个测试（logic 单套件）
-│   ├── test_fc_level2.c   # Level 2: 10 个测试（data_path encode/process_read/raid_recover + cw_mask）
+│   ├── test_fc_level2.c   # Level 2: 15 个测试（data_path encode/process_read/raid_recover + cw_mask）
 │   └── test_fc_level3.c   # Level 3: 9 个 block 级场景（真实 NAND）
 ├── integration/
 │   ├── test_fc_nand.c     # 旧硬件集成测试（**未编入 `tests` 目标**；仍引用已删的复数建链入口，待废弃）
@@ -441,6 +448,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-08 | v1.11 | **Level 2 重构：fixture 修正 + RAID 退化用例清理 + 覆盖补齐，10→15（RAID=1 时 17）**（见 `docs/changelog/fc_ut_level2_rework_v22.md`）。① **fixture 修正**：新增 `alloc_cmd_full()` 统一建链并设 `paa = paa_make(32, 0, 50, 0, 0)`——原 fixture 不设 `paa`，BASIC 种子退化成 `{1,1,2,3}`、keystream 除 byte0 外全 0，所有 `random=ON` 用例的加扰是空转；random=ON 用例补「encode 后 USER 区 ≠ 明文」自证断言。② **RAID 组删 4 留 2**：删 `encode_raid_on` / `raid_recover_first` / `_mid` / `_last`（构造不出真 stripe，只靠三重巧合通过；判据见 `assertion_guidelines.md` §十七·判据 6），保留 `raid_recover_no_random` 与真 stripe 的 `generate_stripe_parity`。③ **覆盖补齐 5 条**：`encode_crc_disabled`、`process_read_masked_chain`（专钉 Pass 4 的 `paa_to_cw`）、`process_read_mata_error`、`process_read_crc_error`、`process_read_ldpc_raw`。④ **断言加强**：`process_read_ok_*` / `_single_cw` 补 `desc->status == READY`（process_read 标脏后仍返回 OK）。⑤ **去冗余**：删 `fill_pattern` 包装与 `print_resource_stats` 注释块，`get_cw_buffer` / `get_cw_base` / `get_cw_count` 收敛到 `cw_desc()` 之上。⚠ 本 fork 的 `MunitSuite` 结构体没有 `setup` 字段，套件级 setup 不存在，故仍逐用例挂 `setup_level2`（靠 `g_level2_inited` 幂等）。`make -k tests` 0 error/0 warning、链接 197344 B；RAID=1 档 0/0、204328 B；format-check 过；上板未验 |
 | 2026-10-08 | v1.10 | **Level 1 套件合并：`command` / `queue` / `scheduler` 三子套件 → 单个 `logic`**（11 条用例不变）。理由：Level 2/3 已是「一个文件一个套件」，Level 1 是唯一例外；合并后 `command`(2) / `scheduler`(1) 的过滤粒度已细到等于「单跑一条用例」，而本层全部用例是纯 RAM 微秒级，按模块过滤无收益；真正需要过滤的边界是**依赖面**，由根套件 Level 1/2/3 三层保住。`test_scheduler_init` 用例名 `init` → `scheduler_init`（合并后去歧义）。改动：`tests/unit/test_fc_level1.c`（3 数组→1）、`tests/unit/ut_main.c`（3 extern + 3 表项 → 1 + 1）、本文档 §2.1/§3/§5.1/§4.2、`munit_adapter.md`、`wsl_debug_environment.md` 的 CLI 示例路径 `/fc-nand/command/...` → `/fc-nand/logic/...`。单条用例仍可按全路径跑（`/fc-nand/logic/push_pop`） |
 | 2026-10-08 | v1.9 | **Level 1 清理：删 5 条用例 + 对应死代码，16→11**。判据统一为「被测代码还有没有生产调用者」：`fc_command_status_init` / `fc_command_status_set_cw` 自 2026-09-20 起零调用者（CQ 完成项由 `fc_complete_from_nand()` 内联组装）→ **函数 + 头声明 + 3 条用例一并删**；`fc_submission_queue_pop_n` 零调用者（调度器走逐条 `pop`）→ 函数 + 声明 + 用例删；`test_queue_empty_full` 断言集是 `peek_empty` ∪ `overflow` 子集 → 删。套件至此零 `setup`（`setup_fc_suite` 随 `status_init` 两条用例删除），文件不再 include `fc/fc.h`。同时给保留的 11 条逐个补「功能 / 测什么 / 设计思路」注释。四档 0 error 0 warning、`make tests` 链接通过（193956 B）、format-check 过；上板未验 |
 | 2026-10-08 | v1.8 | **三级 UT 适配 v13~v21 的接口/策略收敛**（见 `docs/changelog/fc_ut_adapt_v13_v21.md`）：Level 1 45→**16**（删 `validate_*` 3 条——`fc_command_validate` v20 整函数转 ASSERT；删 `scheduler_select_*` 8 条——选择逻辑 v8 起搬进 `static fc_poll_fill`，Level 1 不可达；`status_init` 改池内/栈上两例走 `fc_command_to_id`）；Level 2 15→**10**（+RAID 16），建链改 `ftl_cmd_configure_descriptors`、补 `cw_mask_*` 三条说明、删手动 buffer 释放；Level 3 由「39 OP 参数化」改为 **9 个 block 级场景**，OP 表降为附录；`make tests` 由 29 error/7 warning → **0/0 链接通过** |

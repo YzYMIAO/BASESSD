@@ -398,7 +398,12 @@ v18 / v19（§十三 / §十四）清完了 FC 的**公开 API 壳**。本轮（
 
 ---
 
-## 十七、Level 1 清理："失去生产调用者"的代码与其用例（2026-10-08）
+## 十七、用例清理："名不副实"的用例与其代码（2026-10-08）
+
+本节收两条同源判据——都在回答「**一条用例什么时候不该再留着**」。判据 5 是**被测代码**失效
+（没人调用），判据 6 是**用例自己**失效（构造不出真实前置条件）。
+
+### 判据 5（Level 1）：被测函数失去生产调用者
 
 **背景**：走读 Level 1 单测时发现，v13~v21 的接口/策略收敛让**一批被测代码失去了生产
 调用者**，但用例还在——于是测试不再"验证代码"，而是"养着代码"。据此补一条判据：
@@ -452,7 +457,45 @@ if ((found_unc == 0U) && (d->status == FC_CW_STATUS_UNC)) { completion.desc_id =
   （**实为 flat CW 编号**，与 desc id 不同空间），page read 才被覆盖为 desc id，
   FTL 侧目前无读者。
 
+### 判据 6（Level 2）：用例构造不出被测函数的真实前置条件
+
+> **判据 6：当一条用例**构造不出**被测函数的真实前置条件时，退化的用例应**删**，
+> 而不是留着"续命"——尤其当它能通过只是靠若干巧合的乘积时。**
+
+**背景**：走读 Level 2 时发现 RAID 组 5 条用例里有 4 条属于此类。`fc_data_path_raid_recover`
+**结构上只收集单条命令的 desc 链**（`fc_data_path.c:591`），而 parity CW 在**另一条**命令的
+链上（`fc.c:888/924-933`）——跨命令 buffer 收集是 `include/fc/fc_raid_engine.h:22` 明写的
+未办事项。也就是说这个函数在本层**根本拿不到 parity**。
+
+那 4 条（`encode_raid_on` / `raid_recover_first` / `_mid` / `_last`）之所以长期通过，靠的是
+三个巧合相乘：
+
+1. 退化 fixture 让加扰变成空操作（`paa=0` → keystream 除 byte0 外全 0，见判据 6 的连带发现）；
+2. 4 个 CW 的 pattern 恰好异或为 0（`0x10^0x11^0x12^0x13 == 0`），于是"没有 parity 的 XOR"
+   也能还原被擦 CW；
+3. BCH 是线性的，ECC 奇偶区跟着一起异或也不会破坏码字有效性。
+
+**处置**：删 4 条，只留 `raid_recover_no_random`（random=OFF → 巧合 1 不参与，退化 stripe 在
+无加扰下成立）与真 stripe 的 `generate_stripe_parity`（parity 命令真实参与 XOR）。
+
+**与判据 5 的差别**：判据 5 删的是"**被测代码**已死"的用例；判据 6 删的是"**用例**自己
+构造不出场景"的用例——被测函数活得好好的，只是本层喂不出它要的输入。后者更隐蔽：它
+不但不失败，还会把「三个巧合的乘积」伪装成「一条通过的用例」，从而在有人修好 fixture 时
+突然炸掉（本次即是如此：改 `cmd->paa` 后 random=ON 的 4 条必挂）。
+
+**连带发现（同一次走读）**：Level 2 的 fixture 从不设 `cmd->paa`，命令结构体被 `{0}` 清零
+→ `paa=0` → 单 plane 建链分支（`fc_interface.c:189`）把 `desc->paa` 落成 `cw` 本身 →
+BASIC 种子退化成 `seed == cw` → `{1,1,2,3}`，LFSR 低 16 位取这几个小值后 **keystream 除
+byte0 外全 0**。于是所有 `random=ON` 用例的加扰都是空转，"encode→decode 还原原文"照样通过。
+**修 fixture 之外还补了自证断言**（"encode 后 USER 区 ≠ 明文"）——否则下次 fixture 再退化，
+仍然无人察觉。
+
 ### 验证
 
 四档（debug / release / RAID=1 debug / RAID=1 release）**0 warning 0 error**；
 `make tests` 0 error 0 warning、链接通过（**193956 B**，改前 197468 B）；`make format-check` passed；上板未做。
+
+判据 6 的 Level 2 改动：`make -k tests` 0 error 0 warning、链接 **197344 B**；RAID=1 档
+（`CFLAGS_EXTRA="-DMUNIT_ENABLE_TIMING -DCONFIG_FC_RAID=1"`）0/0、**204328 B**，`nm` 确认
+`test_raid_recover_no_random` / `test_generate_stripe_parity` 在、被删的 4 个测试符号消失；
+`make format-check` passed；上板未做。
