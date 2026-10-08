@@ -25,35 +25,37 @@
 
 ```
 Level 1: Pure Logic ──── 零硬件依赖，纯函数测试
-    ├── fc_command validate / status
-    ├── fc_queue push / pop / peek / pop_n / full / empty
-    └── fc_scheduler init / select / select_chain / busy
+    ├── fc_command status_init / status_set_cw / validate（合法输入）
+    ├── fc_queue push / pop / peek / pop_n / full / empty / completion queue
+    └── fc_scheduler init（选择逻辑已不在本层，见下）
 
-Level 2: Data Path ──── 需 BCH 堆初始化，无 NAND 硬件
+Level 2: Data Path ──── 需 fc_init() 初始化池，无 NAND 硬件
     ├── fc_data_path_encode (random/ecc/raid on/off 组合)
     ├── fc_data_path_process_read (全 OK / 有 UNC)
-    └── fc_data_path_raid_recover (XOR 重建 + ECC 重试)
+    ├── fc_data_path_raid_recover (XOR 重建 + ECC 重试)
+    └── flat CW 掩码建链几何（cw_mask_*，走 FTL 建链入口）
 
 Level 3: FC Lifecycle ── 真实 NAND 硬件执行
-    └── 39 个 OP 码 × user-specified block → alloc → configure → submit → service → poll → release
+    └── 9 个 block 级场景（init / feature / status / 内部搬移 / 擦写读 / cache / 多 plane / 随机列读）
 ```
+
+> **适配说明（v1.8）**：本层测试在 v13~v21 的接口/策略收敛后做过一轮适配，见 §7 修订历史与 `docs/changelog/fc_ut_adapt_v13_v21.md`。要点：
+> - **校验类测试退场**：`fc_command_validate` 于 v20 整函数转 ASSERT（配置错误不再返回码），`validate_null` / `validate_desc_needed` / `validate_cw_mask` 无返回码可测，已删；`validate_op_range` 只保留「合法 OP 恒 OK」。
+> - **调度器选择逻辑不可达**：v8 起 SQ/HSQ 选择搬进 `fc.c` 的 `static fc_poll_fill`，只能经 `fc_service()` 驱动真 NAND 才走到，Level 1 不再能覆盖 `select / select_chain / busy / starvation` 等 8 条，已删。
+> - **`fc_command_t.command_id` 于 v15 删除**（ID 改指针派生），断言改用 `fc_command_to_id()`。
+> - **建链入口于 v13 上移 FTL**：`fc_command_configure_descriptors`（复数）不复存在，测试改调 `ftl_cmd_configure_descriptors()`。
 
 ### 2.1 Level 1 — 纯逻辑测试
 
-**测试目标**：`fc_command.c`、`fc_queue.c`、`fc_scheduler.c` 中的纯逻辑函数，不依赖任何硬件或动态内存。
+**测试目标**：`fc_command.c`、`fc_queue.c`、`fc_scheduler.c` 中的纯逻辑函数，不依赖任何硬件或动态内存（`status_init` 两例需先 `fc_init()` 以提供命令池）。
 
 | 测试函数 | 被测函数 | 验证点 |
 |---|---|---|
-| `test_command_validate_null` | `fc_command_validate` | NULL → INVALID_ARGUMENT |
-| `test_command_validate_op_range` | `fc_command_validate` | 0..OP_COUNT-1 合法，≥OP_COUNT 拒绝 |
-| `test_command_validate_desc_needed` | `fc_command_validate` | has_data + desc_id=INVALID → 拒绝 |
+| `test_command_validate_op_range` | `fc_command_validate` | 0..OP_COUNT-1 全部合法（恒 OK） |
 | `test_command_validate_set_get_no_desc` | `fc_command_validate` | SET/GET_FEATURES 内联例外 |
-| `test_command_status_init_null` | `fc_command_status_init` | status=NULL 不崩溃 |
-| `test_command_status_init_cw1` | `fc_command_status_init` | 1 CW → status1/2/3=UNUSED |
-| `test_command_status_init_cw4` | `fc_command_status_init` | 4 CW → 全部 READY |
+| `test_command_status_init_pool_cmd` | `fc_command_status_init` | 池内命令 → `cq_entry.command_id` == `fc_command_to_id()` 派生值；status=READY、cw_mask=0 |
+| `test_command_status_init_stack_cmd` | `fc_command_status_init` | 栈上命令（非池内）→ `command_id` == `FC_COMMAND_ID_INVALID` |
 | `test_command_status_set_cw_valid` | `fc_command_status_set_cw` | 各 CW slot + 错误位记录 desc_id |
-| `test_command_status_set_cw_overflow` | `fc_command_status_set_cw` | cw≥4 不写入 |
-| `test_command_status_set_cw_null` | `fc_command_status_set_cw` | status=NULL 不崩溃 |
 | `test_queue_push_pop` | fc_submission_queue push/pop | FIFO 顺序正确 |
 | `test_queue_wrap_around` | fc_submission_queue push/pop | 环形环绕后 FIFO 正确 |
 | `test_queue_overflow` | fc_submission_queue_push | 满队列返回 QUEUE_FULL |
@@ -61,32 +63,18 @@ Level 3: FC Lifecycle ── 真实 NAND 硬件执行
 | `test_queue_peek_empty` | fc_submission_queue_peek | 空队列返回 INVALID |
 | `test_queue_pop_n` | fc_submission_queue_pop_n | 批量弹出 N 个 |
 | `test_queue_empty_full` | fc_submission_queue 状态 | peek 空 / push 满 |
-| `test_queue_init_null` | fc_submission_queue_init | NULL 输入返回错误 |
-| `test_queue_push_null` | fc_submission_queue_push | NULL 输入返回错误 |
-| `test_queue_pop_null` | fc_submission_queue_pop | NULL 输入返回错误 |
-| `test_queue_peek_null` | fc_submission_queue_peek | NULL 返回 INVALID |
-| `test_queue_pop_n_null` | fc_submission_queue_pop_n | queue=NULL 不崩溃 |
-| `test_scheduler_init` | `fc_scheduler_init` | 初始化后状态正确 |
-| `test_scheduler_init_null` | `fc_scheduler_init` | NULL 输入返回错误 |
-| `test_scheduler_set_clear_busy` | `fc_scheduler_set/clear_busy` | set→clear 状态切换 |
-| `test_scheduler_select_empty` | `fc_scheduler_select` | 空队列返回 QUEUE_EMPTY |
-| `test_scheduler_select_hsq_first` | `fc_scheduler_select` | HSQ 优先于 SQ |
-| `test_scheduler_select_sq_order` | `fc_scheduler_select` | SQ FIFO 顺序 |
-| `test_scheduler_select_busy_skip` | `fc_scheduler_select` | LUN 忙 → 旋转 → NOT_READY |
-| `test_scheduler_starvation` | `fc_scheduler_select_chain` | 连续 3 个非读后触发饥饿保护，读优先 |
-| `test_scheduler_select_chain_single` | `fc_scheduler_select_chain` | 单命令 chain |
-| `test_scheduler_select_chain_multi` | `fc_scheduler_select_chain` | 3 命令链收集 |
-| `test_scheduler_select_null` | `fc_scheduler_select` | NULL 输入返回错误 |
+| `test_cqueue_init` | fc_completion_queue_init | 初始化后状态正确 |
+| `test_cqueue_push_pop` | fc_completion_queue push/pop | FIFO 顺序正确 |
+| `test_cqueue_overflow` | fc_completion_queue_push | 满队列返回 QUEUE_FULL |
+| `test_scheduler_init` | `fc_scheduler_init` | sq / hsq 指针绑定正确 |
 
-**command 子套件额外包含**：`submit_null` / `poll_completion_null` / `configure_descriptors_null`
-
-**queue 子套件额外包含**：`cqueue_init` / `cqueue_init_null` / `cqueue_push_pop` / `cqueue_overflow` / `cqueue_null`
-
-**共计 45 个测试函数。**（command 13 + queue 17 + scheduler 12 + fc_api 3）
+**共计 16 个测试函数。**（command 5 + queue 10 + scheduler 1）
 
 ### 2.2 Level 2 — 数据路径测试
 
 **测试目标**：`fc_data_path.c` 中的编解码管线。需要 `fc_init()` 初始化资源池，但不需要 NAND 硬件——全部在 buffer 层面做 round-trip 验证。
+
+> **建链与释放（v1.8）**：本层建链走 FTL 策略层 `ftl_cmd_configure_descriptors()`（v13 起「按掩码建整条链」属 FTL，FC 只剩单数逐条入口 `fc_command_configure_descriptor`）。释放一律 `fc_command_release()` 收尾——v16 起它沿 desc 链把 desc + buffer 一起还池；**不要再手动 `fc_buffer_release`**，那会二次释放同一 buffer 并使空闲链成环。
 
 Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的数据变换逻辑。三个被测函数：
 
@@ -134,52 +122,56 @@ _(以上 raid_recover 测试仅在 CONFIG_FC_RAID=1 时编译，默认 0 不执�
 | `generate_stripe_parity` | random=on, 2cmd×4CW | 跨命令 stripe XOR parity 验证 |
 _(CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
 
-**共计 15 个测试函数。（CONFIG_FC_RAID=1 时额外含 raid_recover + stripe parity，约 +6 个）**
+### flat CW 掩码建链（v7，v1.8 改为走 FTL 建链入口）
+
+| 测试函数 | 掩码 | 验证策略 |
+|---|---|---|
+| `cw_mask_flat_mixed` | 0x29 | plane0 取 {CW0,CW3} + plane1 取 {CW1} → 3 条 desc（plane-major） |
+| `cw_mask_plane1_only` | 0xF0 | 只选 plane1 的 CW0..3（flat 绝对编号，非 0x0F 段） |
+| `cw_mask_zero_multi_plane` | 0（未指定） | multi_plane=2 + cw=3 → 逐 plane 平移展开出 8 条 desc（钉住不变量） |
+
+三条用例验证的是 **desc 链几何**（plane / CW 展开与链序），不是 NAND 行为，故留在 Level 2，只调 `ftl_cmd_configure_descriptors()` 后直接走链核对。
+
+**共计 10 个测试函数（默认构建）。（CONFIG_FC_RAID=1 时额外含 `encode_raid_on` + raid_recover ×4 + stripe parity，共 16 个）**
 
 ### 2.3 Level 3 — FC 全链路测试
 
-**测试目标**：FC 命令完整生命周期（alloc → configure → submit → service → poll → release）在真实 NAND 硬件上执行，覆盖全部 39 个 OP 码。
+**测试目标**：FC 命令完整生命周期（alloc → configure → submit → service → poll → release）在真实 NAND 硬件上执行。
 
 Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证 FC 层命令编排的正确性：
-- 每个 OP 码的命令能完整走完 FC 生命周期
-- 各阶段状态转换正确（不崩溃、不泄漏）
-- completion->command_id 与提交的命令匹配
-- 资源（command/descriptor/buffer）无泄漏
+- 命令能完整走完 FC 生命周期（不崩溃、不泄漏）
+- 各阶段状态转换正确、`completion->command_id` 与提交的命令匹配
+- 资源（command / descriptor / buffer）无泄漏
 
-#### 参数化维度
+> **形态变更（v1.8）**：早期设计是「39 个 OP 码参数化展开 × user-specified block」的 `test_lifecycle_op`。现文件已改为 **9 个手写 block 级场景用例**（见下表），OP 覆盖表降级为参考附录。每个用例自带前置状态准备（擦除 / 写入 / 加载页缓冲），因此不再需要 standalone 参数。
 
-| 参数 | 来源 | 说明 |
+#### 依赖与约定
+
+- **NAND 硬件**：走 `fc_submit → fc_service → nand_fc_start/step` 异步路径；`setup_level3()` 里幂等重申 `nand_dispatch_set_armed(1)`（v1.8：旧 `nand_dispatch_set_device_ready` 已整体改名为 armed 闩锁）。
+- **建链**：走 FTL 策略层 `ftl_cmd_configure_descriptors()`（v13 起）。
+- **释放**：只需 `fc_command_release()`（v16 起一并回收 desc + buffer）。
+- **ID 断言**：`fc_command_t` 无 `command_id` 字段（v15 删），断言用 `fc_command_to_id(cmd, &expect_id)` 反查。
+- **PAA 约定**：`ch=0 ce=0 lun=0`，block 固定 `BLOCK_TEST=100`（内部搬移目标 `BLOCK_DEST=102`），page=0..63，plane 0/1。
+
+#### 测试用例（9 个）
+
+| 测试函数 | 场景 | 验证点 |
 |---|---|---|
-| `operation` | munit 参数化展开 | 39 个 OP 码（笛卡尔积） |
-| `block` | CLI `--param block N` | 测试用 Block 号，默认 block=10 |
+| `init_sequence` | RESET → READ_ID → READ_PARAMETER_PAGE | 初始化序列各步生命周期完成；READ_ID 前 5B / 参数页 ONFI 签名 |
+| `feature_write_read` | SET_FEATURES → GET_FEATURES | Feature 写回一致 |
+| `status_query` | READ_STATUS / READ_STATUS_ENHANCED | 状态查询生命周期 + CW status |
+| `internal_data_move` | READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE | 源 block → 目标 block 搬移后 64 页逐字节一致 |
+| `block_erase_verify` | ERASE → 全 0xFF 校验 | 擦除后逐页全 0xFF |
+| `block_write_read` | PROGRAM → READ 全 block | 写读数据一致 |
+| `block_cache_ops` | CACHE_RANDOM → CACHE_SEQ ×N → CACHE_LAST | cache 读管线（31h/3Fh 等） |
+| `block_multi_plane` | MP_ERASE → MP_PROGRAM → MP_READ | 两 plane 各自 pattern 独立验证（desc 0..3=plane0，4..7=plane1） |
+| `block_random_data` | READ + RANDOM_DATA_READ 抽样 | 抽 5 页 × CW1/CW3 随机列读，验证列地址解码 |
 
-#### PAA 约定
+> `block_lock_tight`（紧锁定，不可逆锁死整片 NAND）实现保留但以 `#if 0` 隔开、不注册；`unlock_erase` 同样 `#if 0` 停用。
 
-```
-ch=0 ce=0 lun=0 plane=0 block=<user> page=0 cw=0
-多 Plane 操作使用 plane=0/1 双 Plane 地址
-```
+#### OP 覆盖参考表（附录）
 
-#### 测试用例
-
-```c
-test_lifecycle_op — 参数化，每个 (operation, block) 组合执行一次生命周期
-```
-
-`test_lifecycle_op` 在运行时根据 OP 属性做不同配置：
-
-| OP 类别 | 配置方式 |
-|---|---|
-| SET/GET_FEATURES | 内联数据（parameter0..3），不配置 desc chain |
-| has_data 且非 SET/GET | `fc_command_configure_descriptor()` 逐条分配 desc + buffer（v13 前为 `fc_command_configure_descriptors()`，v13~v16 为 `fc_command_attach_cw()`），填 pattern |
-| 无数据 + needs_paa | `desc_id=INVALID`，设置 PAA |
-| 无数据 + 不需 PAA | `desc_id=INVALID`，PAA=0 |
-
-#### 前置状态依赖
-
-部分 OP 有 NAND 状态机前置依赖（如 `RANDOM_DATA_READ` 前需要 READ 先加载页缓冲）。表中 `standalone=0` 的 OP 在独立执行时 NAND 可能返回错误，但 FC 生命周期仍应正常完成。
-
-#### 39 个 OP 覆盖表
+下表列出各 OP 是否有 NAND 状态机前置依赖（`standalone=❌` 表示独立执行时 NAND 可能返回错误，需前置 READ/PROGRAM）。当前 9 个用例各自准备前置状态，不直接依赖本表。
 
 | 值 | 宏名称 | standalone | 说明 |
 |---|---|---|---|
@@ -228,49 +220,35 @@ test_lifecycle_op — 参数化，每个 (operation, block) 组合执行一次�
 ## 3. 测试套件组织
 
 ```c
-/* test_fc_level1.c — 三个子套件，共 31 个测试 */
+/* test_fc_level1.c — 三个子套件，共 16 个测试 */
 
 static MunitTest g_fc_command_tests[] = {
-    { "validate_null",           test_command_validate_null,        NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "validate_op_range",       test_command_validate_op_range,    NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "validate_desc_needed",    test_command_validate_desc_needed, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "validate_set_get_no_desc", test_command_validate_set_get_no_desc, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_init_null",        test_command_status_init_null,     NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_init_cw1",         test_command_status_init_cw1,      NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_init_cw4",         test_command_status_init_cw4,      NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_set_cw_valid",     test_command_status_set_cw_valid,  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_set_cw_overflow",  test_command_status_set_cw_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "status_set_cw_null",      test_command_status_set_cw_null,   NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    {       "validate_op_range",        test_command_validate_op_range,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    { "validate_set_get_no_desc", test_command_validate_set_get_no_desc,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {     "status_init_pool_cmd",      test_command_status_init_pool_cmd, setup_fc_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {    "status_init_stack_cmd",     test_command_status_init_stack_cmd, setup_fc_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {      "status_set_cw_valid",       test_command_status_set_cw_valid,           NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {                       NULL,                                   NULL,           NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL },
 };
 
 static MunitTest g_fc_queue_tests[] = {
-    { "push_pop",    test_queue_push_pop,    NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "wrap_around", test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "overflow",    test_queue_overflow,    NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "peek",        test_queue_peek,        NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "peek_empty",  test_queue_peek_empty,  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "pop_n",       test_queue_pop_n,       NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "empty_full",  test_queue_empty_full,  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "init_null",   test_queue_init_null,   NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "push_null",   test_queue_push_null,   NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "pop_null",    test_queue_pop_null,    NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "peek_null",   test_queue_peek_null,   NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "pop_n_null",  test_queue_pop_n_null,  NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    {       "push_pop",    test_queue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {    "wrap_around", test_queue_wrap_around, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {       "overflow",    test_queue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {           "peek",        test_queue_peek, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {     "peek_empty",  test_queue_peek_empty, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {          "pop_n",       test_queue_pop_n, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {     "empty_full",  test_queue_empty_full, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+ /* completion queue */
+    {    "cqueue_init",       test_cqueue_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    { "cqueue_push_pop",  test_cqueue_push_pop, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    { "cqueue_overflow",  test_cqueue_overflow, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    {             NULL,                  NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL },
 };
 
 static MunitTest g_fc_scheduler_tests[] = {
-    { "init",              test_scheduler_init,              NULL,                  NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "init_null",         test_scheduler_init_null,         NULL,                  NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "set_clear_busy",    test_scheduler_set_clear_busy,    NULL,                  NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_empty",      test_scheduler_select_empty,      setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_hsq_first",  test_scheduler_select_hsq_first,  setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_sq_order",   test_scheduler_select_sq_order,   setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_busy_skip",  test_scheduler_select_busy_skip,  setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_chain_single", test_scheduler_select_chain_single, setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { "select_chain_multi",  test_scheduler_select_chain_multi,  setup_scheduler_suite, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
-    { NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+    {"init", test_scheduler_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {  NULL,                NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL },
 };
 
 static MunitSuite g_fc_nand_suite = {
@@ -290,11 +268,12 @@ static MunitSuite g_fc_nand_suite = {
 ```
 
 ```c
-/* test_fc_level2.c — data_path 子套件，共 15 个测试 */
+/* test_fc_level2.c — data_path 子套件，共 10 个测试（CONFIG_FC_RAID=1 时 16 个） */
 extern MunitTest g_fc_data_path_tests[];
 
-/* test_fc_level3.c — lifecycle 子套件，1 个参数化测试展开为 34 个 OP */
+/* test_fc_level3.c — lifecycle 子套件，9 个 block 级场景用例 */
 extern MunitTest g_fc_lifecycle_tests[];
+```
 
 ---
 
@@ -356,7 +335,7 @@ static int uart_cli_test(int argc, char *argv[])
 UART 串口输入示例：
 
 ```
-ssd> test --seed 0x1234 /fc-nand/command/validate_null
+ssd> test --seed 0x1234 /fc-nand/command/validate_op_range
 ssd> test --list
 ssd> test --list-params
 ssd> test
@@ -393,11 +372,11 @@ tests/
 ├── unit/
 │   ├── ut_main.c          # 裸机统一入口
 │   ├── ut_main.h          # 入口声明（供 usart.c 包含）
-│   ├── test_fc_level1.c   # Level 1: 31 个测试（command + queue + scheduler）
-│   ├── test_fc_level2.c   # Level 2: 15 个测试（data_path encode/process_read/raid_recover）
-│   └── test_fc_level3.c   # Level 3: 1 个参数化测试（34 OP 全生命周期真实 NAND）
+│   ├── test_fc_level1.c   # Level 1: 16 个测试（command + queue + scheduler）
+│   ├── test_fc_level2.c   # Level 2: 10 个测试（data_path encode/process_read/raid_recover + cw_mask）
+│   └── test_fc_level3.c   # Level 3: 9 个 block 级场景（真实 NAND）
 ├── integration/
-│   ├── test_fc_nand.c     # 旧硬件集成测试（暂保留，待废弃）
+│   ├── test_fc_nand.c     # 旧硬件集成测试（**未编入 `tests` 目标**；仍引用已删的复数建链入口，待废弃）
 │   └── test_fc_nand.h
 ```
 
@@ -467,6 +446,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-08 | v1.8 | **三级 UT 适配 v13~v21 的接口/策略收敛**（见 `docs/changelog/fc_ut_adapt_v13_v21.md`）：Level 1 45→**16**（删 `validate_*` 3 条——`fc_command_validate` v20 整函数转 ASSERT；删 `scheduler_select_*` 8 条——选择逻辑 v8 起搬进 `static fc_poll_fill`，Level 1 不可达；`status_init` 改池内/栈上两例走 `fc_command_to_id`）；Level 2 15→**10**（+RAID 16），建链改 `ftl_cmd_configure_descriptors`、补 `cw_mask_*` 三条说明、删手动 buffer 释放；Level 3 由「39 OP 参数化」改为 **9 个 block 级场景**，OP 表降为附录；`make tests` 由 29 error/7 warning → **0/0 链接通过** |
 | 2026-10-06 | v1.7 | OP 覆盖表补齐 34~41（Phase V ISSUE/WAIT/FETCH + `OP_READ_PAGE_CACHE_START` + 新增 `OP_RANDOM_DATA_READ_MULTI_PLANE`），计数 34→39（`OP_COUNT` 现为 42，含 9/11/20 三个空位）。**待补用例**：`cw_mask` 非满 mask 读（见 `fc_nand_design.md` §25） |
 | 2026-10-04 | v1.6 | §6.2 补命令池/描述符池可缓存性与调试器 D-Cache 不一致注意；新增 §6.5 生命周期插桩（`#if 0` 默认关闭）+ `[RES] L3_start` 资源行已注释；见 `debug_cmd_operation_rewrite_20261004.md` |
 | 2026-09-22 | v1.5 | 消除全部编译警告：munit.h/c `const` 限定符修复（MunitTest/MunitParameter/MunitSuite 等），test_fc_level3.c `g_op_names` const 修复 |

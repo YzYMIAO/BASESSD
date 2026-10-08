@@ -16,6 +16,12 @@
  * PAA 约定：ch=0 ce=0 lun=0 plane=0 block=<test> page=0..63 cw=0
  *           多 Plane 操作使用 plane=0/1，双 Plane 地址
  *
+ * 依赖：
+ *   - NAND 硬件（走 fc_submit → fc_service → nand_fc_start/step 异步路径）
+ *   - 建链走 FTL 策略层 ftl_cmd_configure_descriptors()——「按掩码建整条链」
+ *     自 v13 起属 FTL（FC 只剩单数逐条入口 fc_command_configure_descriptor）
+ *   - 释放只需 fc_command_release()（v16 起沿 desc 链把 desc + buffer 一起还池）
+ *
  * 用法：
  *   ssd> test /fc-nand/lifecycle/
  *   ssd> test --list
@@ -26,6 +32,7 @@
 #include "fc/fc_command.h"
 #include "fc/fc_queue.h"
 #include "fc/fc_scheduler.h"
+#include "ftl/ftl_fc_interface.h"
 #include "munit.h"
 #include "nand/nand_config.h"
 #include "nand/nand_dispatch.h"
@@ -44,8 +51,9 @@ static void *setup_level3(const MunitParameter params[], void *user_data)
     (void)params;
     (void)user_data;
 
-    /* 恢复 device_ready——Level 1/2 的 fc_init() 在 setup 阶段将其重置为 0。 */
-    nand_dispatch_set_device_ready(1U);
+    /* 置位异步 dispatch 放行闩锁（main.c 在 NAND 初始化后已置 1，此处幂等重申）。
+     * 本套件走 fc_service() → nand_fc_start/step 异步路径，闩锁必须为 1。 */
+    nand_dispatch_set_armed(1U);
 
     /* 套件级资源快照，排查池泄漏时打开；正常跑保持静默。 */
     /*
@@ -165,8 +173,7 @@ static uint8_t cmd_configure_and_fill(fc_command_t *cmd, uint16_t block, uint8_t
     cmd->config.cw = CW_NUM - 1U;
     cmd->paa       = make_paa(block, plane, page);
 
-    fc_status_t result = fc_command_configure_descriptors(cmd);
-    munit_assert_int(result, ==, FC_STATUS_OK);
+    munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
     /* 遍历 desc chain，填充 pattern */
     fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
@@ -217,40 +224,13 @@ static uint8_t verify_cw_status_all_success(fc_command_t *cmd)
 }
 
 /**************************************************************************
- *  辅助：释放命令关联的所有 buffer
+ *  说明：本文件不手动释放 buffer
  *
- *  fc_command_release() 释放 command 和 descriptor，但不释放 buffer。
- *  在 block 级测试中，用完数据后必须显式释放 buffer，否则 128 个
- *  buffer 在 32 pages（每 page 4 CW）后耗尽。
+ *  fc_command_release()（v16 起）沿 desc 链把 desc + buffer 一起还池，
+ *  故测试只需 fc_command_release() 收尾。切勿再手动 fc_buffer_release——
+ *  那会二次释放同一 buffer，使空闲链成环（fc_buffer_release_internal 无
+ *  占用检查）。
  **************************************************************************/
-
-static void release_command_buffers(fc_command_t *cmd)
-{
-    fc_descriptor_id_t desc_id;
-    uint8_t            iter;
-
-    if ((cmd == NULL) || (cmd->desc_id == FC_DESCRIPTOR_ID_INVALID))
-    {
-        return;
-    }
-
-    desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    iter    = 0U;
-    while ((desc_id != FC_DESCRIPTOR_ID_INVALID) && (iter < CW_TOTAL_MAX))
-    {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL)
-        {
-            break;
-        }
-        if (desc->buffer_id != FC_BUFFER_ID_INVALID)
-        {
-            (void)fc_buffer_release(desc->buffer_id);
-        }
-        desc_id = (fc_descriptor_id_t)desc->next_id;
-        iter++;
-    }
-}
 
 /**************************************************************************
  *  辅助：读回 desc chain buffer，与预期 pattern 逐字节对比
@@ -474,13 +454,16 @@ static void run_lifecycle(fc_command_t *cmd)
 
     /* --- 3. 验证 completion --- */
     munit_assert_uint32(completed, ==, 1U);
-    munit_assert_uint32(completion.command_id, ==, cmd->command_id);
+
+    /* cmd 无缓存 id（v15 起由指针派生）；completion 里的是建链时算好的快照。 */
+    fc_command_id_t expect_id = FC_COMMAND_ID_INVALID;
+    munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
+    munit_assert_uint32(completion.command_id, ==, expect_id);
 
     /* --- 3.5 结构体一致性检查（排查命令被改写时打开，见文件上方 #if 0 块） --- */
     /* (void)cmd_diff_report(&snapshot, cmd, "lifecycle"); */
 
     /* --- 4. release --- */
-    release_command_buffers(cmd);
     result = fc_command_release(cmd);
     munit_assert_int(result, ==, FC_STATUS_OK);
 }
@@ -491,7 +474,7 @@ static void run_lifecycle(fc_command_t *cmd)
  *  执行 submit -> service loop -> poll，返回 completion。
  *  调用者可在 release 前检查 cmd 中的 completion 数据
  *  （如 parameter0、status、buffer 内容等），然后自行调用
- *  release_command_buffers() + fc_command_release()。
+ *  fc_command_release()（v16 起一并回收 desc + buffer）。
  **************************************************************************/
 
 static void run_submit_poll(fc_command_t *cmd, fc_command_status_t *completion)
@@ -519,7 +502,10 @@ static void run_submit_poll(fc_command_t *cmd, fc_command_status_t *completion)
     }
 
     munit_assert_uint32(completed, ==, 1U);
-    munit_assert_uint32(completion->command_id, ==, cmd->command_id);
+
+    fc_command_id_t expect_id = FC_COMMAND_ID_INVALID;
+    munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
+    munit_assert_uint32(completion->command_id, ==, expect_id);
 }
 
 /**************************************************************************
@@ -631,8 +617,7 @@ static fc_command_t *read_page(uint16_t block, uint8_t page, uint8_t plane)
     cmd->config.cw = CW_NUM - 1U;
     cmd->paa       = make_paa(block, plane, page);
 
-    fc_status_t result = fc_command_configure_descriptors(cmd);
-    munit_assert_int(result, ==, FC_STATUS_OK);
+    munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
     /* 读前 buffer memset 为 0xCC，方便区分"读失败残留"和"NAND 实际数据"。 */
     {
@@ -733,13 +718,15 @@ static void read_block_verify(uint16_t block, uint8_t plane)
         }
 
         munit_assert_uint32(completed, ==, 1U);
-        munit_assert_uint32(completion.command_id, ==, cmd->command_id);
+
+        fc_command_id_t expect_id = FC_COMMAND_ID_INVALID;
+        munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
+        munit_assert_uint32(completion.command_id, ==, expect_id);
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
 
         /* 逐字节验证数据 */
         munit_assert_uint8(verify_page_data(cmd, plane), ==, 1U);
 
-        release_command_buffers(cmd);
         result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
@@ -777,13 +764,15 @@ static void read_block_verify_erased(uint16_t block, uint8_t plane)
         }
 
         munit_assert_uint32(completed, ==, 1U);
-        munit_assert_uint32(completion.command_id, ==, cmd->command_id);
+
+        fc_command_id_t expect_id = FC_COMMAND_ID_INVALID;
+        munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
+        munit_assert_uint32(completion.command_id, ==, expect_id);
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
 
         /* 验证擦除后全 0xFF */
         munit_assert_uint8(verify_page_erased(cmd, page), ==, 1U);
 
-        release_command_buffers(cmd);
         result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
@@ -838,8 +827,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
         cmd->paa              = make_paa(0U, 0U, 0U);
 
-        fc_status_t result = fc_command_configure_descriptors(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
         fc_command_status_t completion;
         run_submit_poll(cmd, &completion);
@@ -856,8 +844,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         /* NAND 制造商 ID 应为 0x2C（Micron） */
         munit_assert_uint8(buf[0], ==, 0x2CU);
 
-        release_command_buffers(cmd);
-        result = fc_command_release(cmd);
+        fc_status_t result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
 
@@ -875,8 +862,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
         cmd->paa              = make_paa(0U, 0U, 0U);
 
-        fc_status_t result = fc_command_configure_descriptors(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
         fc_command_status_t completion;
         run_submit_poll(cmd, &completion);
@@ -889,8 +875,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         munit_assert_not_null(buf);
         munit_assert_uint8(buf[0], ==, 0x4FU); /* 'O' */
 
-        release_command_buffers(cmd);
-        result = fc_command_release(cmd);
+        fc_status_t result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
 
@@ -1019,14 +1004,14 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
 
-        fc_status_t result = fc_command_configure_descriptors(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        fc_status_t result;
+
+        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
         fc_command_status_t completion;
         run_submit_poll(cmd, &completion);
         munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
 
-        release_command_buffers(cmd);
         result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
@@ -1045,14 +1030,14 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
         cmd->paa              = make_paa(0U, 0U, 0U);
 
-        fc_status_t result = fc_command_configure_descriptors(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        fc_status_t result;
+
+        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
         fc_command_status_t completion;
         run_submit_poll(cmd, &completion);
         munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
 
-        release_command_buffers(cmd);
         result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
@@ -1111,8 +1096,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
                 cmd->paa              = make_paa(BLOCK_TEST, 0U, page);
 
                 /* 分配 desc chain（提供 CW 级 PAA 映射给 dispatch） */
-                fc_status_t ret = fc_command_configure_descriptors(cmd);
-                munit_assert_int(ret, ==, FC_STATUS_OK);
+                munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
                 run_lifecycle(cmd);
             }
@@ -1132,8 +1116,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
                 cmd->paa              = make_paa(BLOCK_DEST, 0U, page);
 
                 /* 分配 desc chain（提供 CW 级 PAA 映射给 dispatch） */
-                fc_status_t ret = fc_command_configure_descriptors(cmd);
-                munit_assert_int(ret, ==, FC_STATUS_OK);
+                munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
                 run_lifecycle(cmd);
             }
@@ -1307,8 +1290,7 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         cmd->config.cw        = CW_NUM - 1U;
         cmd->paa              = make_paa(BLOCK_TEST, 0U, 0U);
 
-        result = fc_command_configure_descriptors(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
         result = fc_submit(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
@@ -1327,7 +1309,6 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         munit_assert_uint32(completed, ==, 1U);
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
         /* CACHE_START 不输出数据，跳过 buffer 验证 */
-        release_command_buffers(cmd);
         result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
@@ -1349,8 +1330,7 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         cmd->config.cw        = CW_NUM - 1U;
         cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
 
-        result = fc_command_configure_descriptors(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
         memset_read_buffer(cmd);
 
@@ -1372,7 +1352,6 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
         /* 31h 输出的数据是 CACHE_START/上一轮 31h 加载的页，即 page-1 */
         munit_assert_uint8(verify_page_data(cmd, 0U), ==, 1U);
-        release_command_buffers(cmd);
         result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
@@ -1393,8 +1372,7 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         cmd->config.cw        = CW_NUM - 1U;
         cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
 
-        result = fc_command_configure_descriptors(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
         memset_read_buffer(cmd);
 
@@ -1416,7 +1394,6 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
         /* 3Fh 输出最后一页数据 */
         munit_assert_uint8(verify_page_data(cmd, 0U), ==, 1U);
-        release_command_buffers(cmd);
         result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
@@ -1463,8 +1440,7 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
         cmd->config.multi_plane = PLANE_NUM;                      /* = 2 */
         cmd->paa                = make_paa(BLOCK_TEST, 0U, page); /* base PAA: plane 0 */
 
-        fc_status_t result = fc_command_configure_descriptors(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
         /* Fill desc[0..3] = plane 0 pattern, desc[4..7] = plane 1 pattern */
         {
@@ -1497,6 +1473,8 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
         fc_command_t *cmd = fc_command_alloc();
         munit_assert_not_null(cmd);
 
+        fc_status_t result;
+
         cmd->config.operation   = OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT;
         cmd->config.ch          = 0U;
         cmd->config.ce          = 0U;
@@ -1509,8 +1487,7 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
         cmd->config.multi_plane = PLANE_NUM;
         cmd->paa                = make_paa(BLOCK_TEST, 0U, page);
 
-        fc_status_t result = fc_command_configure_descriptors(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
         /* Pre-fill with 0xCC to detect incomplete reads */
         memset_read_buffer(cmd);
@@ -1575,7 +1552,6 @@ mp_desc_next:
             }
         }
 
-        release_command_buffers(cmd);
         result = fc_command_release(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
     }
@@ -1636,7 +1612,6 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             }
             munit_assert_uint32(completed, ==, 1U);
             munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
-            release_command_buffers(cmd);
             result = fc_command_release(cmd);
             munit_assert_int(result, ==, FC_STATUS_OK);
         }
@@ -1658,8 +1633,9 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             cmd->config.cw        = 0U; /* 1 个 desc */
             cmd->paa              = paa_make(page, 0U, BLOCK_TEST, 0U, cw);
 
-            fc_status_t result = fc_command_configure_descriptors(cmd);
-            munit_assert_int(result, ==, FC_STATUS_OK);
+            fc_status_t result;
+
+            munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
             memset_read_buffer(cmd);
 
@@ -1708,7 +1684,6 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
                 }
             }
 rand_page_done:
-            release_command_buffers(cmd);
             result = fc_command_release(cmd);
             munit_assert_int(result, ==, FC_STATUS_OK);
         }

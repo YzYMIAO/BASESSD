@@ -8,6 +8,8 @@
  *
  * 依赖：需要 fc_init() 初始化 Pool（suite 级一次性）
  *       不需要 NAND 硬件，全部在 buffer 层面验证
+ *       建链走 FTL 的 ftl_cmd_configure_descriptors()——「按掩码建整条链」的
+ *       策略层自 v13 起属 FTL（FC 只剩单数逐条入口 fc_command_configure_descriptor）
  *
  * 参数组合覆盖：
  *   random  : FC_RANDOM_ENABLE / FC_RANDOM_DISABLE
@@ -15,6 +17,9 @@
  *   cw      : 0 (1 CW) / 3 (4 CW)
  *   ecc_结果: 全部成功 / 有 UNC
  *   failed_idx: 首位 / 中间 / 末位
+ *
+ * 释放：一律 fc_command_release() 收尾——v16 起它沿 desc 链把 desc + buffer
+ *       一起还池；不要再手动 fc_buffer_release（会二次释放、空闲链成环）。
  */
 
 #include "fc/fc.h"
@@ -22,6 +27,7 @@
 #include "fc/fc_data_path.h"
 #include "fc/fc_ldpc_engine.h"
 #include "fc/fc_random_engine.h"
+#include "ftl/ftl_fc_interface.h"
 #include "munit.h"
 #include "nand/nand_config.h"
 #include "nand/onfi_1_0.h"
@@ -67,24 +73,6 @@ static void *setup_level2(const MunitParameter params[], void *user_data)
  *  辅助函数
  **************************************************************************/
 
-static void release_cmd_buffers(fc_command_t *cmd)
-{
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    while (desc_id != FC_DESCRIPTOR_ID_INVALID)
-    {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL)
-        {
-            break;
-        }
-        if (desc->buffer_id != FC_BUFFER_ID_INVALID)
-        {
-            (void)fc_buffer_release(desc->buffer_id);
-        }
-        desc_id = (fc_descriptor_id_t)desc->next_id;
-    }
-}
-
 /* 用固定 pattern 填充 buffer（每个 CW 对应一个 desc buffer） */
 static void fill_pattern(uint8_t *buffer, uint16_t length, uint8_t pattern)
 {
@@ -119,8 +107,8 @@ static fc_command_t *alloc_cmd(uint8_t cw_count, uint8_t random_mode, uint8_t ra
     cmd->config.raid      = raid_mode;
     cmd->config.ldpc      = FC_ECC_MODE_BCH; /* BCH 为默认 ECC */
 
-    fc_status_t result = fc_command_configure_descriptors(cmd);
-    munit_assert_int(result, ==, FC_STATUS_OK);
+    ftl_status_t result = ftl_cmd_configure_descriptors(cmd);
+    munit_assert_int(result, ==, FTL_OK);
 
     return cmd;
 }
@@ -271,7 +259,6 @@ static MunitResult test_encode_random_off(const MunitParameter params[], void *d
         }
     }
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -318,7 +305,6 @@ static MunitResult test_encode_random_on(const MunitParameter params[], void *da
         }
     }
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -387,7 +373,6 @@ static MunitResult test_encode_raid_on(const MunitParameter params[], void *data
         }
     }
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -414,7 +399,6 @@ static MunitResult test_encode_single_cw(const MunitParameter params[], void *da
     munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
     munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -464,7 +448,6 @@ static MunitResult test_process_read_ok_random_on(const MunitParameter params[],
         munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
     }
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -492,7 +475,6 @@ static MunitResult test_process_read_ok_random_off(const MunitParameter params[]
         munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x55U + i)), ==, 1U);
     }
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -542,7 +524,6 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
         }
     }
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -562,7 +543,6 @@ static MunitResult test_process_read_single_cw(const MunitParameter params[], vo
     munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
     munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, 0x55U), ==, 1U);
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -623,7 +603,6 @@ static void do_raid_recover_test(uint8_t random_mode, uint8_t failed_idx)
         munit_assert_uint32(check_pattern(buf, FC_BUFFER_USER_SIZE, (uint8_t)(0x10U + i)), ==, 1U);
     }
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
 }
 
@@ -677,7 +656,6 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
     fc_command_t *data_cmd;
     fc_command_t *parity_cmd;
     uint8_t       cw_count;
-    uint8_t       cw;
 
     /* 分配数据命令（4 CW, random=ON, raid=NORMAL — 不再在 encode 里做 XOR） */
     data_cmd = alloc_cmd(4U, FC_RANDOM_ENABLE, FC_RAID_MODE_NORMAL);
@@ -788,8 +766,6 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
         }
     }
 
-    release_cmd_buffers(data_cmd);
-    release_cmd_buffers(parity_cmd);
     fc_command_release(data_cmd);
     fc_command_release(parity_cmd);
     return MUNIT_OK;
@@ -800,10 +776,14 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
 /**************************************************************************
  *  flat CW 掩码建链（v7）
  *
- *  纯 FC 层（fc_command_configure_descriptors），不碰 NAND：
+ *  建链走 FTL 策略层（ftl_cmd_configure_descriptors），不碰 NAND：
  *    - 掩码按 **flat 绝对编号**（bit n = plane*CW_NUM + cw）逐位建 desc
  *    - 链序 plane-major
  *    - mask == 0 时对**每个** plane 展开连续 0..config.cw
+ *
+ *  「按掩码建整条链」是策略，v13 起属 FTL（FC 只剩单数逐条入口
+ *  fc_command_configure_descriptor）。这三条用例仍留在 Level 2，
+ *  因为验证的是 desc 链的几何（plane/cw 展开），而非 NAND 行为。
  **************************************************************************/
 
 /* 走 desc 链，返回条数；plane_out / cw_out 非空时逐条回填 (plane, cw) */
@@ -845,7 +825,7 @@ static MunitResult test_cw_mask_flat_mixed(const MunitParameter params[], void *
     cmd->paa                = paa_make(0U, 0U, 0U, 0U, 0U);
     cmd->param.cw_mask      = 0x29U; /* 0b0010_1001 */
 
-    munit_assert_int(fc_command_configure_descriptors(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
     uint8_t plane_out[CW_TOTAL_MAX];
     uint8_t cw_out[CW_TOTAL_MAX];
@@ -862,7 +842,6 @@ static MunitResult test_cw_mask_flat_mixed(const MunitParameter params[], void *
     /* config.cw 不回写（纯输入提示，configure 后无下游读者） */
     munit_assert_uint32(cmd->config.cw, ==, 0U);
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -882,7 +861,7 @@ static MunitResult test_cw_mask_plane1_only(const MunitParameter params[], void 
     cmd->paa                = paa_make(0U, 0U, 0U, 0U, 0U);
     cmd->param.cw_mask      = 0xF0U;
 
-    munit_assert_int(fc_command_configure_descriptors(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
     uint8_t plane_out[CW_TOTAL_MAX];
     uint8_t cw_out[CW_TOTAL_MAX];
@@ -895,7 +874,6 @@ static MunitResult test_cw_mask_plane1_only(const MunitParameter params[], void 
         munit_assert_uint32(cw_out[i], ==, i);
     }
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
@@ -917,7 +895,7 @@ static MunitResult test_cw_mask_zero_multi_plane(const MunitParameter params[], 
     cmd->paa                = paa_make(0U, 0U, 0U, 0U, 0U);
     cmd->param.cw_mask      = 0U; /* 未指定 */
 
-    munit_assert_int(fc_command_configure_descriptors(cmd), ==, FC_STATUS_OK);
+    munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
     uint8_t plane_out[CW_TOTAL_MAX];
     uint8_t cw_out[CW_TOTAL_MAX];
@@ -930,7 +908,6 @@ static MunitResult test_cw_mask_zero_multi_plane(const MunitParameter params[], 
         munit_assert_uint32(cw_out[i], ==, (uint8_t)(i % CW_NUM));
     }
 
-    release_cmd_buffers(cmd);
     fc_command_release(cmd);
     return MUNIT_OK;
 }
