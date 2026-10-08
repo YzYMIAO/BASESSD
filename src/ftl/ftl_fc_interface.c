@@ -9,16 +9,44 @@
 #include <string.h>
 
 /* --------------------------------------------------------------------
+ * ftl_cmd_resolve_cw_mask
+ *   功能：把 cmd->param.cw_mask 解析成「本命令实际要访问的 CW 集合」（flat 绝对编号）。
+ *   参数：cmd —— 命令；plane_first / plane_count —— 本命令的 plane 段
+ *         （由 fc_command_plane_span 给出）。
+ *   返回：解析后的掩码（非 0——段内至少有一个 CW）。
+ *   实现要点：
+ *     - cw_mask == 0 → **本命令 plane 段内的全部 CW**。这是「0 = 全部」的唯一定义处，
+ *       两个建链入口（configure_descriptors / setup_ppa_pair）共用（v23）。
+ *     - cw_mask != 0 → 原值，必须落在段内；越段是调用者编程错误 → ASSERT
+ *       （判据见 assertion_guidelines §十三：建链入口的坐标越界一律 ASSERT）。
+ *       ⚠ 该检查不能省：下面的枚举只走段内的 plane × cw，段外的高位 bit 根本不会被枚举到，
+ *         不检查就是**静默忽略**（机制层 fc_command_configure_descriptor 的越段 ASSERT 也拦不到）。
+ * -------------------------------------------------------------------- */
+static uint32_t ftl_cmd_resolve_cw_mask(const fc_command_t *cmd, uint8_t plane_first, uint8_t plane_count)
+{
+    const uint32_t allowed = ((uint32_t)((1U << ((uint32_t)plane_count * CW_NUM)) - 1U)) << ((uint32_t)plane_first * CW_NUM);
+    const uint32_t mask    = cmd->param.cw_mask;
+
+    if (mask == 0U)
+    {
+        return allowed; /* 0 = 本命令 plane 段内的全部 CW */
+    }
+    ASSERT((mask & ~allowed) == 0U);
+    return mask;
+}
+
+/* --------------------------------------------------------------------
  * ftl_cmd_configure_descriptors
  *   功能：按 cmd->param.cw_mask 组装整条 desc 链（v13 由 FC 策略层上移）。
- *   参数：cmd —— 命令（须已设 config.operation / multi_plane / cw / paa）。
- *   返回：FTL_OK / FTL_ERROR（掩码越出本命令 plane 段、池空或坐标非法）。
+ *   参数：cmd —— 命令（须已设 config.operation / multi_plane / paa）。
+ *   返回：FTL_OK / FTL_ERROR（池空或坐标非法）。
  *   实现要点：
  *     - **只建链，不搬数据**：数据由 ftl_cmd_write_data 在链建好之后、且仅对写操作执行。
  *       搬数据放在这里会让「建链失败 → 整链释放」白做一遍拷贝。
  *     - 无数据操作（ERASE / RESET 等）与 SET/GET_FEATURES 不建链，desc_id 置 INVALID。
- *     - cw_mask = 0 → 本命令每个 plane 取连续 0..config.cw；非 0 → 必须落在本命令
- *       plane 段内（越段 = 编程错误）。离散读 plane1 的 CW0/CW2 即
+ *     - cw_mask == 0 → **本命令 plane 段内的全部 CW**（v23；此前是"每个 plane 取连续
+ *       0..config.cw"）；非 0 → 必须落在本命令 plane 段内（越段 = 编程错误 → ASSERT，
+ *       见 ftl_cmd_resolve_cw_mask）。离散读 plane1 的 CW0/CW2 即
  *       cmd->param.cw_mask = (1U << 4) | (1U << 6)。
  *     - 行地址所有 plane 共用 cmd->paa（同页语义）；两 plane 不同块（Policy B）
  *       走 ftl_cmd_setup_ppa_pair()，本函数不适用。
@@ -28,7 +56,6 @@
 ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd)
 {
     uint32_t mask;
-    uint32_t allowed;
     uint8_t  plane_count;
     uint8_t  plane_first;
     uint8_t  plane_last;
@@ -47,22 +74,7 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd)
     }
 
     plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
-    allowed     = ((uint32_t)((1U << (plane_count * CW_NUM)) - 1U)) << ((uint32_t)plane_first * CW_NUM);
-
-    mask = cmd->param.cw_mask;
-    if (mask == 0U)
-    {
-        const uint32_t per_plane = (uint32_t)((1U << (cmd->config.cw + 1U)) - 1U);
-
-        for (plane = plane_first; plane < plane_last; plane++)
-        {
-            mask |= per_plane << ((uint32_t)plane * CW_NUM);
-        }
-    }
-    else if ((mask & ~allowed) != 0U)
-    {
-        return FTL_ERROR;
-    }
+    mask        = ftl_cmd_resolve_cw_mask(cmd, plane_first, plane_count);
 
     for (plane = plane_first; plane < plane_last; plane++)
     {
@@ -102,8 +114,11 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba)
 
 ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM])
 {
-    uint8_t plane_count;
-    uint8_t i;
+    uint32_t mask;
+    uint8_t  plane_count;
+    uint8_t  plane_first;
+    uint8_t  plane_last;
+    uint8_t  i;
 
     if ((cmd == NULL) || (pba == NULL))
     {
@@ -123,7 +138,12 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
         return FTL_OK;
     }
 
-    plane_count = (cmd->config.multi_plane > 0U) ? (uint8_t)cmd->config.multi_plane : 1U;
+    /* v23：plane 段与掩码展开规则与 ftl_cmd_configure_descriptors **完全一致**（同一个
+     * ftl_cmd_resolve_cw_mask）。本函数与它的唯一差别只是**行地址逐 plane 各自取**（Policy B），
+     * 而不是"两个入口各认一个旋钮"——此前这里读 config.cw、那边读 param.cw_mask，
+     * 于是 param.cw_mask 这条通道主数据路径根本不看。 */
+    plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
+    mask        = ftl_cmd_resolve_cw_mask(cmd, plane_first, plane_count);
 
     for (i = 0U; i < plane_count; i++)
     {
@@ -134,8 +154,12 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
         const nand_paa_t row   = pba_to_paa(pba[i]);
         uint8_t          cw;
 
-        for (cw = 0U; cw <= (uint8_t)cmd->config.cw; cw++)
+        for (cw = 0U; cw < CW_NUM; cw++)
         {
+            if ((mask & ((uint32_t)1U << ((uint32_t)plane * CW_NUM + cw))) == 0U)
+            {
+                continue;
+            }
             if (fc_command_configure_descriptor(cmd, plane, cw, row) != FC_STATUS_OK)
             {
                 /* 回滚整条链（desc + buffer 还池，desc_id 复位）；命令槽位由调用者释放 */
@@ -325,8 +349,9 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
  *   · 超时（擦除 20ms，其余默认）
  */
 
-/* 分配命令 + 填配置 + 建链。失败返回 NULL（命令已回收）。 */
-static fc_command_t *sync_page_prepare(nand_addr_t addr, uint8_t operation, uint8_t cw, const ftl_page_cfg_t *cfg)
+/* 分配命令 + 填配置 + 建链。失败返回 NULL（命令已回收）。
+ * v23：不再填 config.cw —— 建链只认 param.cw_mask，0 = 本命令 plane 段内全部 CW。 */
+static fc_command_t *sync_page_prepare(nand_addr_t addr, uint8_t operation, const ftl_page_cfg_t *cfg)
 {
     fc_command_t *cmd = fc_command_alloc();
 
@@ -336,7 +361,6 @@ static fc_command_t *sync_page_prepare(nand_addr_t addr, uint8_t operation, uint
     }
 
     cmd->config.operation   = (DWORD)operation;
-    cmd->config.cw          = (DWORD)cw;
     cmd->config.crc         = (DWORD)cfg->crc;
     cmd->config.random      = (DWORD)cfg->random;
     cmd->config.ldpc        = (DWORD)cfg->ldpc;
@@ -377,7 +401,7 @@ ftl_status_t ftl_sync_write_page(nand_addr_t addr, const void *data, uint32_t le
     fc_command_status_t completion;
     int                 ret;
 
-    cmd = sync_page_prepare(addr, OP_NORMAL_PROGRAM_PAGE, 3U, cfg);
+    cmd = sync_page_prepare(addr, OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
@@ -410,7 +434,7 @@ ftl_status_t ftl_sync_read_page(nand_addr_t addr, void *buffer, uint32_t length,
     fc_command_status_t completion;
     int                 ret;
 
-    cmd = sync_page_prepare(addr, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, 3U, cfg);
+    cmd = sync_page_prepare(addr, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
@@ -444,7 +468,7 @@ ftl_status_t ftl_sync_read_page_raw(nand_addr_t addr, void *buffer, uint8_t modu
     fc_command_status_t  completion;
     uint8_t              cw;
 
-    cmd = sync_page_prepare(addr, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, 3U, &cfg);
+    cmd = sync_page_prepare(addr, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, &cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
@@ -478,7 +502,7 @@ ftl_status_t ftl_sync_erase_block(nand_addr_t addr)
     fc_command_status_t  completion;
     int                  ret;
 
-    cmd = sync_page_prepare(addr, OP_ERASE_BLOCK, 0U, &cfg);
+    cmd = sync_page_prepare(addr, OP_ERASE_BLOCK, &cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;

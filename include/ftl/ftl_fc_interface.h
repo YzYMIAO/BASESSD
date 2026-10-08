@@ -11,6 +11,11 @@
  *   ③ ftl_cmd_setup_ppa_pair() — 每 plane 各自的 PBA → 建链（Policy B）
  *   ④ addr_to_cmd() — nand_addr_t 直填 + 建链（遍历路径，省打包拆包）
  *
+ *   v23：①③ 共用同一套掩码规则——`param.cw_mask == 0` 表示**本命令 plane 段内的
+ *   全部 CW**（不再是"每 plane 连续 0..config.cw"）。规则唯一定义在
+ *   ftl_cmd_resolve_cw_mask()（static，见 ftl_fc_interface.c）。config.cw 自此
+ *   退出建链（仍被 FC 的 RAID stripe 读取，见 fc_command.h 的 config.cw 注释）。
+ *
  * 【数据搬运】
  *   ⑤ ftl_cmd_write_data() — 用户数据写入 desc 链各 CW 的 USER 区
  *   ⑥ ftl_cmd_read_data() — 从 desc 链各 CW 的 USER 区拷出
@@ -80,17 +85,16 @@ static inline uint8_t ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
 /*
  * ftl_cmd_configure_descriptors - 按 cmd->param.cw_mask 组装整条 desc 链
  *
- * cw_mask 是 flat 绝对编号（bit n = plane*CW_NUM + cw）；为 0 时退化为
- * 「本命令每个 plane 取连续 0..config.cw」。置位的每个 CW 逐条调
+ * cw_mask 是 flat 绝对编号（bit n = plane*CW_NUM + cw）；**为 0 时表示「本命令 plane
+ * 段内的全部 CW」**（v23；此前是"每个 plane 取连续 0..config.cw"）。置位的每个 CW 逐条调
  * fc_command_configure_descriptor()，故链序 = plane-major、plane 内 CW 递增。
  * 想只读离散 CW（例如 plane1 的 CW0/CW2）：cmd->param.cw_mask = (1U<<4)|(1U<<6)。
  *
  * 行地址：所有 plane 共用 cmd->paa 的行地址（同页语义）。**两 plane 不同块
  * （Policy B）请用 ftl_cmd_setup_ppa_pair()**，本函数不适用。
  *
- * @param cmd  须已设 config.operation / multi_plane / cw / paa
- * @return FTL_OK / FTL_ERROR（掩码越出本命令 plane 段、池空或坐标非法；
- *         半成品链由调用者 fc_command_release 统一回收）
+ * @param cmd  须已设 config.operation / multi_plane / paa（config.cw 已不读）
+ * @return FTL_OK / FTL_ERROR（池空；掩码越出 plane 段是编程错误 → ASSERT）
  */
 ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd);
 
@@ -110,12 +114,15 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
  *   是按 LBA 查出来的，plane 取决于当初怎么写进去（例如 `wr 0 2` 之后
  *   lba 1 映射到 plane 1），下标与 plane 号并不总相等。
  *
- * 遍历范围：pba[0..multi_plane-1]；单 plane 命令只取 pba[0]（其 plane 位决定
- * 落哪个 plane 段）；每个 plane 覆盖 cw ∈ [0, config.cw]。
+ * 遍历范围：pba[0..plane_count-1]（plane 段由 fc_command_plane_span 定）；单 plane 命令
+ * 只取 pba[0]（其 plane 位决定落哪个 plane 段）；**覆盖哪些 CW 与
+ * ftl_cmd_configure_descriptors 同规则**——`param.cw_mask == 0` = 本命令 plane 段内
+ * 全部 CW，非 0 则按掩码位枚举（v23；此前只认 config.cw、完全不读掩码）。
  *
- * @param cmd  FC 命令（须已设 config.operation / multi_plane / cw / meta 等）
+ * @param cmd  FC 命令（须已设 config.operation / multi_plane / meta 等）
  * @param pba  [PLANE_NUM] 每 plane 的 PBA（ch/ce/lun 取 pba[0]）
- * @return FTL_OK / FTL_ERROR（坐标越界或池空；调用者负责 fc_command_release 回收半成品链）
+ * @return FTL_OK / FTL_ERROR（池空；掩码越出 plane 段是编程错误 → ASSERT；
+ *         调用者负责 fc_command_release 回收半成品链）
  */
 ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM]);
 

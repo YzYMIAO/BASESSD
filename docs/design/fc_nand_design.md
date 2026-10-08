@@ -30,7 +30,8 @@
 > - **v12 (2026-10-07)**: **per-plane 行地址**——`fc_command_attach_cw()` 增 `row_paa` 形参（该 plane 的行地址），`fc_build_request_data_planes` 的 `plane_paa[]` 改为从 desc 链推导。multi-plane 命令的两个 plane 自此可指向**不同 block**（Policy B：每 plane 独立分配块 + 坏块替换）。策略层传 `command->paa` 派生的同页地址，对 v11 及以前**逐字节中性**（§2.9、§25.4、§25.12）
 > - **v13 (2026-10-07)**: **FC 定位下沉——策略层上移 FTL**。按「硬件 FCC 寄存器表」判据（§26）删除 FC 的 `fc_command_configure_descriptors()`（掩码枚举）与 `fc_write_cmd_data()` / `fc_read_cmd_data()`（数据搬运），改由 FTL 侧 `ftl_cmd_configure_descriptors()` / `ftl_cmd_write_data()` / `ftl_cmd_read_data()` 承担；FC 侧建链只剩 `fc_command_attach_cw()` 一个入口，新增 `fc_get_cmd_cw_mask()`（从链重建掩码，供 RAID 断言）。顺带修掉 v12 的 `ftl_cmd_setup_ppa_pair` plane 下标回归（§2.9、§25.4、§26）
 > - **v17 (2026-10-08)**: **建链收敛——三层接力 → 一条公共入口**。`fc_command_attach_cw`（公共壳）→ `fc_command_attach_cw_internal`（段校验）→ `fc_command_configure_descriptor_internal`（机制体）三层合并为**唯一一条** `fc_command_configure_descriptor`（**单数**），实现在 `src/fc/fc_interface.c`；后两条删除，`fc.c` 只留池/链原语（`fc_descriptor_alloc_internal` / `fc_command_chain_append` 去 `static` 进 `fc_internal.h`）。Stripe RAID parity 建链改调公共入口。校验全部前置于出池，非法实参不污染池子（§2.9、§2.10、§25.4；changelog `fc_build_chain_convergence_v17.md`）
->   （v14~v16 见各自 changelog 及 §2.10 内联注记——本列表未逐条回填。）
+> - **v23 (2026-10-08)**: **FTL 建链收敛为「单一掩码旋钮」**。`param.cw_mask == 0` 重定义为「**本命令 plane 段内的全部 CW**」（v7~v22 是"每 plane 连续 `0..config.cw`"），两个建链入口（`ftl_cmd_configure_descriptors` / `ftl_cmd_setup_ppa_pair`）共用唯一定义处 `ftl_cmd_resolve_cw_mask()`；`config.cw` 自此退出建链（读者只剩 FC 内 RAID stripe 的 `cw_count`），`sync_page_prepare` 的 `cw` 死参数删除；掩码越段由 `FTL_ERROR` 改 `ASSERT`（§2.10、§25.2、§25.4；changelog `ftl_cw_mask_single_knob_v23.md`）
+>   （v14~v16、v18~v22 见各自 changelog 及 §2.10 内联注记——本列表未逐条回填。）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
 
@@ -245,7 +246,7 @@ typedef union {
 | ch | 2 | 目标通道号 |
 | ce | 2 | 目标片选号 |
 | lun | 2 | 目标 LUN 号 |
-| cw | 2 | Command：每-plane CW 数减一（仅 `param.cw_mask == 0` 时被读，输入提示）；Descriptor：本 desc 在 plane 内的 CW 序号 |
+| cw | 2 | Command：每-plane CW 数减一（**v23 起建链不读它**，读者只剩 FC 内 RAID stripe 的 `cw_count`）；Descriptor：本 desc 在 plane 内的 CW 序号 |
 | crc | 1 | CRC 使能（0=enable, 1=disable） |
 | ldpc | 2 | LDPC 模式（0=full, 1=hard, 2=soft, 3=raw） |
 | raid | 3 | RAID 模式（0=normal, 1=decode, 2=encode, 3=recover） |
@@ -419,10 +420,10 @@ fc_status_t   fc_get_resource_stats(fc_resource_stats_t *); // 资源使用统�
 
 ```
 1. fc_command_alloc()           → 获取 fc_command_t*
-2. 上层配置 command 字段         → 设置 operation/ch/ce/lun/cw/ldpc/random/raid 等
+2. 上层配置 command 字段         → 设置 operation/ch/ce/lun/ldpc/random/raid 等（**v23 起 config.cw 与建链无关**）
 3. 建 desc 链（v13：策略层在 FTL）
    · ftl_cmd_configure_descriptors() → 按 cw_mask 展开 N 条 fc_command_configure_descriptor()，申请 N 个 Descriptor + Buffer 并串联
-     （N = popcount(mask)；mask == 0 时退化为每个 plane 取连续 0..config.cw）
+     （N = popcount(mask)；mask == 0 时展开为**本命令 plane 段内的全部 CW**——v23，此前是每 plane 连续 0..config.cw）
      · 任一条失败 → 本函数**自己回滚整条链**（desc+buffer 还池，desc_id 复位 INVALID）→ 返回 FTL_ERROR
    · 或 直接逐条 fc_command_configure_descriptor(plane, cw, row_paa) → 上层自己决定访问集合 + 每 plane 行地址，链序即数据布局序
 3b.（仅写操作）ftl_cmd_write_data(cmd, data, len) → 遍历链把数据搬进各 CW 的 buffer USER 区
@@ -1882,7 +1883,7 @@ NAND Engine → [nand_dispatch_completion_t] → FC (firmware) → FTL
 | `ch` | 2 | **✅ 通过** | 通道路由，硬件必须知道 |
 | `ce` | 2 | **✅ 通过** | 片选路由，硬件必须知道 |
 | `lun` | 2 | **✅ 通过** | LUN 路由，硬件必须知道 |
-| `cw` | 2 | **→ cw_mask**（`mask==0` 时展开） | 硬件需要知道访问哪些 CW；`mask==0` 退化为「每个 plane 取连续 `0..cw`」 |
+| `cw` | 2 | **❌ 不过**（v23） | 硬件只知道 `cw_mask`；`cw_mask == 0` 展开为「本命令 plane 段内的全部 CW」，与 `config.cw` 无关（此前 `mask==0` 退化为「每个 plane 取连续 `0..cw`」） |
 | `crc` | 1 | **❌ 不过** | CRC 校验由 FC 在 firmware 层面完成（写入前附加 CRC，读出后校验），硬件不感知 |
 | `ldpc` | 2 | **❌ 不过** | LDPC 编码/解码模式是 FC firmware 控制数据路径的参数。硬件 LDPC 引擎在解码时通过 `page_type` 选择阈值，不需要知道 `ldpc_mode` |
 | `raid` | 3 | **❌ 不过** | RAID 是 FC 内部功能。Start XOR / Continue XOR / End XOR 由 FC 处理，dispatch 只看到标准 PROGRAM。End XOR 的 parity 写入哪个 plane 由 FC 推导 PAA |
@@ -3970,8 +3971,10 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 > **flat 编号要点**：只读 plane 1 的 4 个 CW 是 `0xF0`（不是 `0x0F`）；plane 0 取 {CW0,CW3} + plane 1 取 {CW1} 是
 > `0b0010_1001 = 0x29`。单 plane 命令同理——plane 1 的单 plane 命令掩码也是 `0xF0`，bit 落在
 > `paa_to_plane(command->paa)` 那个 plane 的区间；建链处 `allowed` 掩码挡住越出命令 plane 位段的位。
-> `mask == 0` 表示未指定，退化为"对命令的**每个** plane 取连续 `0..config.cw`"（逐 plane 平移，
-> 不能照抄单 plane 的 `(1 << (config.cw+1)) - 1`——那只会点亮 plane 0）。
+> `mask == 0` 表示**未指定 → 本命令 plane 段内的全部 CW**（**v23**；v7~v22 是"对命令的**每个**
+> plane 取连续 `0..config.cw`"，逐 plane 平移，不能照抄单 plane 的 `(1 << (config.cw+1)) - 1`——
+> 那只会点亮 plane 0）。展开规则唯一定义在 `ftl_cmd_resolve_cw_mask()`（`src/ftl/ftl_fc_interface.c`，
+> static），两个建链入口共用。
 
 ### 25.3 核心不变量：唯一索引空间 = flat 绝对 CW 号
 
@@ -4027,19 +4030,21 @@ allowed     = ((1U << (plane_count * CW_NUM)) - 1U) << (plane_first * CW_NUM);
 
 mask = command->param.cw_mask;
 if (mask == 0U) {
-    /* 未指定 → 对**每个** plane 取连续 0..config.cw（逐 plane 平移到绝对位段） */
-    per_plane = (1U << (command->config.cw + 1U)) - 1U;
-    for (plane = plane_first; plane < plane_last; plane++)
-        mask |= per_plane << (plane * CW_NUM);
-} else if ((mask & ~allowed) != 0U) {
-    return FTL_ERROR;                    /* 越出本命令 plane 位段（v13 前返回 FC_STATUS_INVALID_ARGUMENT） */
+    /* 未指定 → 本命令 plane 段内的**全部** CW（v23）
+     * v7~v22 此处是「对每个 plane 取连续 0..config.cw」的逐 plane 平移 */
+    return allowed;
 }
+ASSERT((mask & ~allowed) == 0U);         /* 越出本命令 plane 位段 = 编程错误
+                                          * （v13 前返回 FC_STATUS_INVALID_ARGUMENT，v13~v22 返回 FTL_ERROR） */
+return mask;
 ```
 
-**`config.cw` 不回写**：它只是 `mask==0` 时的输入提示，展开之后**没有任何下游读者**——链长、
-完成项折叠、`fc_build_dispatch_request` 的落位掩码一律走 desc 链（v9 前是 `cw_count`，同一个道理）。uniform 命令下与旧的
-"回写 `popcount - 1`"逐字节等价（回写值恰等于调用者原值），flat 命令下保持调用者原值，不伪造一个
-误导性的数。`fc_descriptor_t.config.cw` 语义不变 = 本 desc 在 plane 内是第几个 CW。
+**`config.cw` 不参与建链**（v23 起；v7~v22 是"`mask==0` 时的输入提示"）：链长、完成项折叠、
+`fc_build_dispatch_request` 的落位掩码一律走 desc 链（v9 前是 `cw_count`，同一个道理）。uniform 命令下
+新语义与旧的逐 plane 展开**逐位相同**（生产 `config.cw` 恒为 3 → `0x0F` / `0xFF`），flat 命令下掩码原样返回。
+`config.cw` 本身**不回写**——保持调用者原值，不伪造一个误导性的数；当前唯一的生产读者是 FC 内 RAID
+stripe 的 `cw_count`（`fc.c` 的 `fc_stripe_submit` / parity 建链，默认不编译）。
+`fc_descriptor_t.config.cw` 语义不变 = 本 desc 在 plane 内是第几个 CW。
 
 链序为 **plane-major**（先 plane 0 的全部置位 CW，再 plane 1）——这只是 desc 的**建立顺序**，
 v9 起不再被任何消费点当作坐标使用（落位按 `n` 独立进行，链序无关紧要）。`fc_cw_mask_popcount`
@@ -4139,7 +4144,8 @@ FC 的对外函数按"硬件 FCC 寄存器表"判据过了一遍（见 §26）�
 - `fc_command_resources_rollback` 的唯一剩余调用者在 `#if CONFIG_FC_RAID` 块内（`fc_stripe_submit` 的 parity 建链失败路径），
   RAID 关闭时无引用 → 标 `__attribute__((unused))`。
 - `fc_stripe_submit` 的 parity 建链（原第 ③ 步调 `configure_descriptors_internal`）改为直接循环 `fc_command_attach_cw_internal`——
-  parity 是单 plane（`PLANE_NUM-1`）命令、CW 集合 = 连续 `0..config.cw`，与 FTL 侧 `mask == 0` 的展开结果一致。
+  parity 是单 plane（`PLANE_NUM-1`）命令、CW 集合 = 连续 `0..config.cw`，与 FTL 侧 `mask == 0` 的展开结果一致
+  （**v23 起** FTL 侧的展开是"本命令 plane 段内的全部 CW"，plane 段 = `[PLANE_NUM-1, PLANE_NUM)` → 仍是同一个集合）。
 - 三处 `fc_cw_mask_is_plane_symmetric` 断言（`fc.c` 的 `fc_stripe_submit`、`fc_data_path.c` 的 stripe parity 两处）
   原来读 `command->param.cw_mask`（v13 前该字段在 `src/` 里**从无写入者**，故三处恒真）。
   现改为读 **`fc_get_cmd_cw_mask(cmd)`**——从 desc 链重建掩码再断言，与"链是 CW 集合的唯一真值"一致，
@@ -4200,6 +4206,36 @@ v13 留下了两处可收敛的冗余，v13.1 一并处理，**行为中性**（
   （该路径由此硬绑单例 `g_fc_controller`——当前全仓只有一个 `fc_t` 实例，多实例时须改回 `controller` 参数化入口）。
 
 详见 `docs/changelog/fc_build_chain_convergence_v17.md`。
+
+#### v23：FTL 建链收敛为「单一掩码旋钮」（2026-10-08）
+
+**问题**：`mask == 0` 的展开规则有两份实现，两个入口各认一个旋钮——
+
+| 入口 | 调用者 | v22 前认哪个旋钮 |
+|---|---|---|
+| `ftl_cmd_configure_descriptors`（`ftl_fc_interface.c`） | GC / 同步原语 / 测试 | `param.cw_mask`，0 时退回 `config.cw` |
+| `ftl_cmd_setup_ppa_pair`（同文件） | **host 读写**（`ftl.c`） | 只认 `config.cw`，**完全不读 `param.cw_mask`** |
+
+即 `param.cw_mask` 这条通道**主数据路径根本不看它**。今天没出事只因为生产路径从不设它
+（`src/` 内语义写入者为 0），而 `config.cw` 在生产恒为 3。
+
+**改动**：把 `0` 定义成「**本命令 plane 段内的全部 CW**」，两个入口共用同一个
+`ftl_cmd_resolve_cw_mask()`（`src/ftl/ftl_fc_interface.c`，static）。`config.cw` 自此
+**退出建链**（写入者保留；读者只剩 FC 内 RAID stripe 的 `cw_count`，默认不编译）。
+越段掩码由 `return FTL_ERROR` 改为 **`ASSERT`**（判据见 `assertion_guidelines.md` §十三，
+v18 只收了 FC 侧入口，FTL 侧这一处是同判据的漏网）。
+
+**行为中性**：生产 `config.cw` 恒为 3 → 旧的逐 plane 展开得 `0x0F`（单 plane）/ `0xFF`（双 plane），
+与新语义"段内全部 CW"**逐位相同**；`ftl_cmd_setup_ppa_pair` 的唯一生产调用者不设
+`param.cw_mask`（恒 0）→ 链几何逐字不变。`sync_page_prepare` 的 `cw` 死参数（唯一用途是喂建链）
+随之删除。
+
+**两层 0 方向相反是结构性的，不在本次消除范围**：`cmd->param.cw_mask`（FC 命令层，FTL 唯一读者）
+是**意图**，0 = 未指定；`request->cw_mask`（NAND 层）是**已解析结果**，0 = **合法空集**
+（`cw_buffers[]` 由掩码自身决定填不填，`nand_dispatch.h` 契约）。两者共用 flat 编号但值不相等，
+FC 按链/按操作重新铸出后者。
+
+详见 `docs/changelog/ftl_cw_mask_single_knob_v23.md`。
 
 ### 25.5 读路径统一
 
@@ -4279,7 +4315,7 @@ plane 与 CW 号都从这一个 `n` 算出，不再有"槽位 → (plane, ordina
 | 2 | **`06h` 的 plane 语义** | 已按 Micron 4Gb/8Gb/16Gb x8/x16 datasheet 核对：5 地址周期（2 列 + 3 行）、plane 由行地址 **BA6** 选择、`06h` 必须跟在 TWO-PLANE PAGE READ 后、two-plane 命令族要求 on-die ECC 关闭（Note 4）——四项均与本实现一致。**注意**：此为 datasheet 二手摘要（PDF 未逐字打开），且上板未验；on-board 行为仍是最终判据 |
 | 3 | **producer/consumer 索引不一致** | v6 把链槽位与 CW 号解耦后，消费点必须一次改齐；**v9 起两套坐标合一，本条风险随之消失**（见 §25.3 历史注 / §25.11） |
 | 4 | **`LUN_NUM>1` 的 ISSUE/WAIT 拆分** | 转换后的两个加载 op 不再命中 Phase V splittable 拆分，多 LUN 重叠会失效。当前 `LUN_NUM=1` 本就不生效；启用多 LUN 前需重新对齐 |
-| 5 | **`mask == 0` 展开必须逐 plane 平移（v7，最高）** | 照抄单 plane 的 `(1 << (config.cw+1)) - 1` 只会点亮 plane 0，**所有 FTL 多 plane 命令当场退化**。这是唯一一条"改错了现有全部功能都不对"的点 |
+| 5 | **`mask == 0` 的展开规则（v7 起为最高，v23 已重定义）** | v7~v22：必须逐 plane 平移，照抄单 plane 的 `(1 << (config.cw+1)) - 1` 只会点亮 plane 0 → 所有 FTL 多 plane 命令当场退化。**v23 起**规则改为「0 = 本命令 plane 段内的全部 CW」，与 `config.cw` 解耦，该陷阱随之消失（见 §25.4 v23） |
 | 6 | **空 plane 的行地址（v7，flat 独有）** | 只读 plane 1（`0xF0`）时 plane 0 计数为 0，但多 plane 加载的行地址取自 `cw_paa[plane][0]`；FC 必须为命令 plane 集合内每个 plane 填槽位 0 的 PAA，否则行地址退化成 block0/page0 静默误操作。**uniform 命令下完全测不出来** |
 | 7 | **链长度真值切换（v7）** | 把 `multi_plane*(config.cw+1)` 换成走链，漏改一处就在 flat 命令下算错长度；uniform 命令（全部 FTL 现状）必须逐字节等价 |
 

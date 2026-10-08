@@ -16,8 +16,8 @@
  *   random     : FC_RANDOM_ENABLE / FC_RANDOM_DISABLE
  *   crc        : FC_CRC_ENABLE / FC_CRC_DISABLE
  *   ldpc       : FC_ECC_MODE_BCH / FC_ECC_MODE_LDPC_RAW
- *   multi_plane: 0 = 单 plane 连续；2 = 按 cw_mask 在 plane 段内选 CW
- *   cw_mask    : 0 = 每 plane 连续 0..config.cw；非 0 = flat 绝对编号掩码
+ *   multi_plane: 0 = 单 plane；2 = 两 plane（plane 段 = [0, 2)）
+ *   cw_mask    : 0 = **本命令 plane 段内的全部 CW**（v23）；非 0 = flat 绝对编号掩码
  *   raid       : 形参保留但**数据路径不读**——config.raid 全仓唯一读者是 fc.c 的
  *                分派钩子（决定走不走 fc_stripe_submit），见 alloc_cmd_full 注释
  *   ecc 结果   : 全部成功 / 有 UNC / 有 CRC_ERROR / 有 MATA_ERROR
@@ -174,8 +174,10 @@ static uint8_t collect_chain(const fc_command_t *cmd, uint8_t *plane_out, uint8_
 }
 
 /* 分配 command 并按掩码建链。
- *   multi_plane == 0 → 单 plane 连续建链（每 plane config.cw+1 个 CW，由 cw_count 推得）
- *   multi_plane >  0 → CW 集合由 cw_mask 决定（mask == 0 时每 plane 连续 0..cw_count-1）
+ *   CW 集合**只由 cw_mask 决定**（v23；config.cw 已不参与建链）：
+ *   mask == 0 → 本命令 plane 段内的全部 CW；非 0 → 按掩码位枚举。
+ *   multi_plane == 0 → plane 段 = [paa 的 plane, +1)；multi_plane > 0 → 段 = [0, multi_plane)。
+ *   cw_count 只写进 config.cw（v23 起建链不读它，仅保留以贴近真实命令）。
  * raid_mode 仅落进 config.raid：数据路径函数不读它，全仓唯一读者是 fc.c 的分派钩子
  * （决定走不走 fc_stripe_submit）——本层不经过分派，故传 NORMAL / ENCODE 无差别。 */
 static fc_command_t *alloc_cmd_full(uint8_t multi_plane, uint8_t cw_count, uint32_t cw_mask, uint8_t random_mode, uint8_t raid_mode)
@@ -201,10 +203,13 @@ static fc_command_t *alloc_cmd_full(uint8_t multi_plane, uint8_t cw_count, uint3
     return cmd;
 }
 
-/* 单 plane 连续建链的简写（等价 alloc_cmd_full(0, cw_count, 0, random, raid)） */
+/* 单 plane 建链的简写。
+ * v23：cw_mask == 0 不再表示"前 cw_count 个 CW"而是"本命令 plane 段内的**全部** CW"，
+ * 故整页（cw_count == CW_NUM）仍传 0（走真实的生产形态），子集则显式给掩码。
+ * 两者建出的 desc 数逐字不变（4 → 4，1 → 1）。 */
 static fc_command_t *alloc_cmd(uint8_t cw_count, uint8_t random_mode, uint8_t raid_mode)
 {
-    return alloc_cmd_full(0U, cw_count, 0U, random_mode, raid_mode);
+    return alloc_cmd_full(0U, cw_count, (cw_count >= CW_NUM) ? 0U : ((1U << cw_count) - 1U), random_mode, raid_mode);
 }
 
 /**************************************************************************
@@ -806,7 +811,8 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
  *  建链走 FTL 策略层（ftl_cmd_configure_descriptors），不碰 NAND：
  *    - 掩码按 **flat 绝对编号**（bit n = plane*CW_NUM + cw）逐位建 desc
  *    - 链序 plane-major
- *    - mask == 0 时对**每个** plane 展开连续 0..config.cw
+ *    - mask == 0 时展开成**本命令 plane 段内的全部 CW**（v23；此前是每 plane 连续
+ *      0..config.cw —— 单 plane 段内两者逐位相同，multi_plane 下也只差"段外不展开"）
  *
  *  「按掩码建整条链」是策略，v13 起属 FTL（FC 只剩单数逐条入口
  *  fc_command_configure_descriptor）。这三条用例仍留在 Level 2，
@@ -835,7 +841,7 @@ static MunitResult test_cw_mask_flat_mixed(const MunitParameter params[], void *
     munit_assert_uint32(plane_out[2], ==, 1U);
     munit_assert_uint32(cw_out[2], ==, 1U);
 
-    /* config.cw 不回写（纯输入提示，configure 后无下游读者） */
+    /* config.cw 不回写（v23 起它连建链都不参与，纯残留字段） */
     munit_assert_uint32(cmd->config.cw, ==, 0U);
 
     fc_command_release(cmd);
@@ -865,15 +871,17 @@ static MunitResult test_cw_mask_plane1_only(const MunitParameter params[], void 
     return MUNIT_OK;
 }
 
-/* mask == 0 回归：multi_plane=2 + config.cw=3 必须建出 8 条 desc（不是 4 条）
- * —— 钉住"mask==0 展开必须逐 plane 平移"这条不变量。 */
+/* mask == 0 回归（v23 的核心正向用例）：multi_plane=2 + mask=0 必须建出 8 条 desc
+ * —— 钉住"0 = 本命令 plane 段内的全部 CW"这条不变量（不是 4 条，也不是 0 条）。
+ * ⚠ 本用例**不再**断言 config.cw 参与推导：v23 起 0 的展开与 config.cw 无关，
+ *   故把 config.cw 写成 0（"没给提示"）也必须得到 8 条。 */
 static MunitResult test_cw_mask_zero_multi_plane(const MunitParameter params[], void *data)
 {
     (void)params;
     (void)data;
 
-    fc_command_t *cmd = alloc_cmd_full(2U, 4U, 0U /* 未指定 */, FC_RANDOM_DISABLE, FC_RAID_MODE_NORMAL);
-    munit_assert_uint32(cmd->config.cw, ==, 3U); /* 每 plane 4 CW */
+    fc_command_t *cmd = alloc_cmd_full(2U, 0U, 0U /* 未指定 = 全部 */, FC_RANDOM_DISABLE, FC_RAID_MODE_NORMAL);
+    munit_assert_uint32(cmd->config.cw, ==, 0U); /* 建链不读它 */
 
     uint8_t plane_out[CW_TOTAL_MAX];
     uint8_t cw_out[CW_TOTAL_MAX];

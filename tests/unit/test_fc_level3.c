@@ -20,6 +20,8 @@
  *   - NAND 硬件（走 fc_submit → fc_service → nand_fc_start/step 异步路径）
  *   - 建链走 FTL 策略层 ftl_cmd_configure_descriptors()——「按掩码建整条链」
  *     自 v13 起属 FTL（FC 只剩单数逐条入口 fc_command_configure_descriptor）
+ *     ⚠ v23：cw_mask == 0 表示「本命令 plane 段内的**全部** CW」，config.cw 已不参与
+ *       建链。本文件里凡"只要 1 条 desc"的用例必须显式写 cmd->param.cw_mask = 0x01U。
  *   - 释放只需 fc_command_release()（v16 起沿 desc 链把 desc + buffer 一起还池）
  *
  * 用法：
@@ -825,6 +827,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         cmd->config.random    = FC_RANDOM_DISABLE;
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
+        cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——READ_ID 只有 5 字节 */
         cmd->paa              = make_paa(0U, 0U, 0U);
 
         munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
@@ -860,6 +863,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         cmd->config.random    = FC_RANDOM_DISABLE;
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
+        cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——参数页只看前几字节 */
         cmd->paa              = make_paa(0U, 0U, 0U);
 
         munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
@@ -1003,6 +1007,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
         cmd->config.random    = FC_RANDOM_DISABLE;
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
+        cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——状态字仅 1 字节 */
 
         fc_status_t result;
 
@@ -1028,6 +1033,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
         cmd->config.random    = FC_RANDOM_DISABLE;
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
+        cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——状态字仅 1 字节 */
         cmd->paa              = make_paa(0U, 0U, 0U);
 
         fc_status_t result;
@@ -1630,7 +1636,8 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             cmd->config.random    = FC_RANDOM_DISABLE;
             cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
             cmd->config.raid      = FC_RAID_MODE_NORMAL;
-            cmd->config.cw        = 0U; /* 1 个 desc */
+            cmd->config.cw        = 0U;
+            cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 个 desc）——逐 CW 随机读 */
             cmd->paa              = paa_make(page, 0U, BLOCK_TEST, 0U, cw);
 
             fc_status_t result;

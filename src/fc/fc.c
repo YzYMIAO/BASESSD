@@ -1315,7 +1315,12 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
     }
     else
     {
-        /* 其余无数据命令（RESET / BLOCK_LOCK / READ_STATUS 等）：掩码保持 0 */
+        /* 其余命令（RESET / BLOCK_LOCK / BLOCK_UNLOCK / OTP_DATA_LOCK 等 has_data == 0
+         * 且无 desc 链的）：掩码保持 0 = **合法空集**（无 CW 可访问），不是"全部"。
+         * ⚠ 别把 READ_STATUS / READ_STATUS_ENHANCED 列进来——两者的 has_data 都是 1
+         *   （onfi_1_0.c:820/821），实际走上面的 fc_build_request_data_planes 分支；
+         *   它们只是从不由 FC 提交（引擎 WAIT_READY 内部直接用 70h/78h uop）。
+         * ⚠ ERASE 也不在这里（上面两个 ERASE 分支已各自置位）。 */
     }
 
     /* 读语义改写 + Phase V 拆分（顺序敏感，见 helper 头注释） */

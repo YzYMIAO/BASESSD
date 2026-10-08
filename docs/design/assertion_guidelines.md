@@ -499,3 +499,39 @@ byte0 外全 0**。于是所有 `random=ON` 用例的加扰都是空转，"encod
 （`CFLAGS_EXTRA="-DMUNIT_ENABLE_TIMING -DCONFIG_FC_RAID=1"`）0/0、**204328 B**，`nm` 确认
 `test_raid_recover_no_random` / `test_generate_stripe_parity` 在、被删的 4 个测试符号消失；
 `make format-check` passed；上板未做。
+
+## 十八、v23：FTL 建链掩码越段 → ASSERT（§十三 判据的 FTL 侧漏网，2026-10-08）
+
+**背景**：v23 把 `param.cw_mask == 0` 重定义为「本命令 plane 段内的全部 CW」，并让两个建链入口
+（`ftl_cmd_configure_descriptors` / `ftl_cmd_setup_ppa_pair`）共用同一个 static
+`ftl_cmd_resolve_cw_mask()`。这次合并暴露出一处**同判据的漏网**：
+
+| 层 | 入口 | v22 前对"掩码越出 plane 段"的处置 |
+|---|---|---|
+| FC（机制） | `fc_command_configure_descriptor` | v18 起 `ASSERT`（§十三） |
+| FTL（策略） | `ftl_cmd_configure_descriptors` | **`return FTL_ERROR`** ← 漏网 |
+
+**处置**：FTL 侧改为 `ASSERT((mask & ~allowed) == 0U)`。依据就是 §十三 那一行
+「plane 段 / CW 范围：`return INVALID_ARGUMENT` → **`ASSERT`**」——同判据、同一类实参
+（调用者自己铸出的掩码），不该因为"落在另一个文件"就退化成返回码。
+
+**为什么这处检查不能省**（比 FC 侧那条更关键）：FTL 的枚举循环只走
+`plane_first..plane_last` × `cw 0..CW_NUM-1`，**段外的高位 bit 根本不会被枚举到**——
+不检查就是**静默忽略**，而机制层的越段 ASSERT 只在"逐条调用时"生效，同样拦不到段外那些
+从未被枚举的位。所以 `ftl_cmd_resolve_cw_mask()` 是这类越段的**唯一检测点**。
+
+**保留返回码的部分**：`FTL_ERROR` 仍保留在 `cmd == NULL`、`pba == NULL` 与 desc/buffer
+池空（`RESOURCE_EMPTY` 语义）三条路径上——按判据 3，池空是"模仿硬件行为"，在意料之中。
+
+**连带**：`ftl_cmd_setup_ppa_pair` 此前**完全不读** `param.cw_mask`（只认 `config.cw`），
+本轮改为读掩码；其越段检查同样由 `ftl_cmd_resolve_cw_mask` 承担，未另加"plane 落在段内"
+的断言——`PLANE_NUM = 2` 时该断言恒真，属 §十七 判据 5 要清的死代码。
+
+**release 注意**：`allowed` 同时参与 `mask == 0` 的返回路径，不依赖 `ASSERT`，
+NDEBUG 下无 `-Wunused-variable` 风险（与 §十三 的 `command_id` 情形不同）。
+
+**验证**：debug / release / tests / RAID=1 四档 0 warning 0 error；`make -k tests` 链接
+197388 B（改前 197344 B，+44 B）；`nm` 确认 `ftl_cmd_resolve_cw_mask` 是 **local（`t`）**，
+未引入新的外部链接符号；`make format-check` passed；上板未做。
+
+> 详见 `docs/changelog/ftl_cw_mask_single_knob_v23.md`。

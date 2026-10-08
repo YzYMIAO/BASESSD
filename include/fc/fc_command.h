@@ -128,9 +128,10 @@ typedef struct fc_cmd_conf_t
     DWORD ch        : 2;   /* NAND channel number. */
     DWORD ce        : 2;   /* NAND chip-enable number. */
     DWORD lun       : 2;   /* NAND LUN number. */
-    DWORD cw        : 2;   /* Command: 每-plane CW 数减一（param.cw_mask == 0 时展开的输入提示；
-                            *          v13 起读它的是 FTL —— ftl_cmd_configure_descriptors，
-                            *          FC 内只余 stripe 的 cw_count 一处读）；
+    DWORD cw        : 2;   /* Command: 每-plane CW 数减一。**v23 起 FTL 建链不再读它**
+                            *          （链长只由 param.cw_mask 决定，0 = 本命令 plane 段内
+                            *          全部 CW）；当前读者只剩 FC 内 RAID stripe 的 cw_count
+                            *          与测试，写者保留；
                             * Descriptor: 本 desc 在 plane 内是第几个 CW（0..CW_NUM-1）。 */
     DWORD crc         : 1; /* FC_CRC_ENABLE / FC_CRC_DISABLE. */
     DWORD ldpc        : 2; /* fc_ecc_mode_t: BCH/LDPC_HARD/LDPC_SOFT/LDPC_RAW. */
@@ -166,14 +167,20 @@ struct fc_descriptor_t
  * 4 字节命令参数 / 返回段，SQ 与 CQ 共用。按 operation 解释：
  *   parameter0..3 / bytes[4]：SET/GET_FEATURES 的内联数据（SQ）/ 读回的寄存器值（CQ）
  *   cw_mask                ：flat CW 掩码，bit n = plane * CW_NUM + cw
- *                            SQ = 请求集（0 = 未指定）；CQ = 失败集（UNC/CRC_ERROR）
+ *                            SQ = 请求集（0 = **本命令 plane 段内的全部 CW**）；
+ *                            CQ = 失败集（UNC/CRC_ERROR，0 = 无失败）
  * 小端（Cortex-M7）下 cw_mask 的 bit0 == parameter0 的 bit0。
  * 同一时刻只按一种解释使用——读命令不用 parameter0..3，FEATURES 命令不用 cw_mask。
  *
  * ⚠ SQ 侧 cw_mask（请求集）的**读者是 FTL，不是 FC**（v13）：FC 只认 desc 链，
- *   「访问哪些 CW」由 ftl_cmd_configure_descriptors() 读本字段后逐条
- *   fc_command_configure_descriptor 展开。
+ *   「访问哪些 CW」由 ftl_cmd_configure_descriptors() / ftl_cmd_setup_ppa_pair()
+ *   读本字段后逐条 fc_command_configure_descriptor 展开（v23 起两个入口共用同一套
+ *   展开规则，见 ftl_cmd_resolve_cw_mask）。
  *   FC 内没有写入者，也没有读者——fc_command_validate 不再校验它。
+ *
+ * ⚠ 别与 NAND 层的 request->cw_mask 混淆：两者共用同一套 flat 编号，但**值不相等**。
+ *   本字段是**意图**（输入，0 = 未指定 → 展开），FC 按链/按操作重新铸出 request->cw_mask
+ *   后交给 NAND，那里的 0 是**合法空集**（无 CW 可访问），不是"全部"。
  */
 typedef union
 {

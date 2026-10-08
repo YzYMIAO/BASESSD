@@ -68,7 +68,6 @@ static int rr_exec_retry(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buffer, u
     }
 
     cmd->config.operation   = OP_SET_FEATURES;
-    cmd->config.cw          = 0U;
     cmd->config.crc         = FC_CRC_DISABLE;
     cmd->config.random      = FC_RANDOM_DISABLE;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
@@ -121,7 +120,6 @@ static int rr_exec_retry(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buffer, u
     }
 
     cmd->config.operation   = OP_SET_FEATURES;
-    cmd->config.cw          = 0U;
     cmd->config.crc         = FC_CRC_DISABLE;
     cmd->config.random      = FC_RANDOM_DISABLE;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
