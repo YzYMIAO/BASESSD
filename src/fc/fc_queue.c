@@ -19,7 +19,9 @@
  * 判据（见 docs/design/fc_nand_design.md §24）：
  *   指针判空 → ASSERT —— 传空指针是调用者的编程错误，不变量破坏就该留下现场；
  *   值域校验 → 返回码 —— QUEUE_FULL / QUEUE_EMPTY / 越界 offset 是预期内的运行结果，
- *              必须返回给上层（fc.c:709 就靠 QUEUE_FULL 做背压判断）。
+ *              必须返回给上层（fc.c:709 就靠 QUEUE_FULL 做背压判断）；
+ *   INVALID 哨兵入队 → ASSERT（v20，见 docs/design/assertion_guidelines.md §十五）
+ *              —— 入队 ID 由 FC 自铸，传哨兵是调用者 bug，非运行结果。
  */
 
 /* --------------------------------------------------------------------
@@ -56,16 +58,14 @@ fc_status_t fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_st
  * fc_submission_queue_push
  *   功能：命令 ID 入队尾。
  *   参数：queue —— 队列；command_id —— Command Pool 槽位号。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT（INVALID 哨兵）/ QUEUE_FULL。
+ *   返回：FC_STATUS_OK / QUEUE_FULL。
+ *   实现要点：INVALID 哨兵入队 = 调用者 bug（入队 ID 全由 FC 自铸，见 fc.c），
+ *             按判据 2 转 ASSERT（v20）；只有「队列满」才是预期内的运行结果。
  * -------------------------------------------------------------------- */
 fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id)
 {
     ASSERT(queue != NULL);
-    /* 值域校验保留返回码：INVALID 哨兵不得入队 */
-    if (command_id == FC_COMMAND_ID_INVALID)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT(command_id != FC_COMMAND_ID_INVALID);
     if (queue->count == queue->depth)
     {
         return FC_STATUS_QUEUE_FULL;
@@ -160,6 +160,8 @@ fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, uin
  *   参数：queue —— 队列；ids —— 输出（可为 NULL 仅消耗）；count —— 条数。
  *   返回：无。
  *   实现要点：用于调度器整链弹出；ids 为 NULL 时仅推进队列。
+ *         前置（违反一律 ASSERT）：count ≤ queue->count —— count 是调用者算出的值，
+ *         超出即调用者 bug（v21：原先不校验，超 count 会静默少弹）。
  * -------------------------------------------------------------------- */
 void fc_submission_queue_pop_n(fc_submission_queue_t *queue, fc_command_id_t *ids, uint16_t count)
 {
@@ -167,6 +169,7 @@ void fc_submission_queue_pop_n(fc_submission_queue_t *queue, fc_command_id_t *id
     uint16_t        i;
 
     ASSERT(queue != NULL);
+    ASSERT(count <= queue->count);
     for (i = 0U; i < count; i++)
     {
         (void)fc_submission_queue_pop(queue, (ids != NULL) ? &ids[i] : &cmd);

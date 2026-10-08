@@ -44,40 +44,31 @@ uint8_t fc_cw_mask_is_plane_symmetric(uint32_t mask)
  * fc_command_validate
  *   功能：校验命令配置合法性。
  *   参数：command —— FC 命令。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT。
- *   实现要点：
- *     - operation 必须 < OP_COUNT。
- *     - 非 SET/GET_FEATURES 且涉及数据传输（has_data）的操作，
- *       必须已配置 desc 链（desc_id 有效）——无 buffer 无法搬运数据。
- *     - has_data 覆盖数据输出型操作（READ_STATUS/READ_ID 等），
- *       它们也需要 buffer；data_input_cycles>0 只是其子集。
+ *   返回：恒 FC_STATUS_OK。
+ *   实现要点（v20：整函数转 ASSERT）：
+ *     - 三处前置违反——command 为空 / operation ≥ OP_COUNT / 数据操作无 desc 链——
+ *       全是**调用者 bug**：`operation` 全仓都是 FTL 的硬编码常量（见
+ *       ftl_fc_interface.c 的 sync_page_prepare 实参），**从不是 host 输入**，
+ *       属判据 2，故一律 ASSERT（配置错误绝不发到硬件，§十三 定调）。
+ *     - 本函数退化为「恒 OK」的校验钩子：debug 下跑内层断言；release 下调用点
+ *       fc_submit 的 ASSERT(... == OK) 整条裁空，无运行时开销。
+ *     - has_data 覆盖数据输出型操作（READ_STATUS/READ_ID 等），它们也需要
+ *       buffer；data_input_cycles>0 只是其子集。
  *     - **不再校验 param.cw_mask**（v13）：掩码是 FTL 的输入概念，FC 只认 desc 链
  *       （链长度即真值）。掩码越段的检查已随枚举逻辑一并上移 FTL，见
  *       ftl_cmd_configure_descriptors()。本函数只确认「有数据的命令必须已有链」。
  * -------------------------------------------------------------------- */
 fc_status_t fc_command_validate(const fc_command_t *command)
 {
-    const nand_operation_map_t *op;
-
-    if (command == NULL)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    if (command->config.operation >= OP_COUNT)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    op = &g_nand_operation_map[command->config.operation];
-    if ((command->config.operation != OP_SET_FEATURES) &&
-        (command->config.operation != OP_GET_FEATURES) &&
-        nand_operation_has_data((uint8_t)command->config.operation) &&
-        (command->desc_id == FC_DESCRIPTOR_ID_INVALID))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
-    /* data_input_cycles > 0 is a subset of nand_operation_has_data() — the latter also
-     * includes data-output operations (READ_STATUS, READ_ID, etc.) that need a buffer. */
-    (void)op;
+    ASSERT(command != NULL);
+    ASSERT(command->config.operation < OP_COUNT);
+    /* 非 SET/GET_FEATURES 且涉及数据传输的操作，必须已配置 desc 链（无 buffer 无法搬运数据） */
+    ASSERT((command->config.operation == OP_SET_FEATURES) ||
+           (command->config.operation == OP_GET_FEATURES) ||
+           !nand_operation_has_data((uint8_t)command->config.operation) ||
+           (command->desc_id != FC_DESCRIPTOR_ID_INVALID));
+    /* NDEBUG 下断言整段裁空 → command 变未用形参，吞掉（同 fc_submit 的 (void)command_id;） */
+    (void)command;
 
     return FC_STATUS_OK;
 }

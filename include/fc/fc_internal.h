@@ -141,10 +141,12 @@ extern "C"
     /* 从空闲链表分配一个 buffer 槽位并置占用 */
     fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller);
 
-    /* 释放 buffer（状态清零 + 挂回空闲链表头） */
+    /* 释放 buffer（状态清零 + 挂回空闲链表头）。
+     * buffer_id 越界一律 ASSERT（调用者已先校验占用）。 */
     fc_status_t fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id);
 
-    /* 直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移 */
+    /* 直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移。
+     * buffer_id 越界一律 ASSERT（调用者已先校验占用）。 */
     uint8_t *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id);
 
     /* 命令/描述符 ID → 指针（越界返回 NULL）——薄壳校验与便利函数使用 */
@@ -157,7 +159,9 @@ extern "C"
     /* 校验命令的 desc 链是否全部归该命令所有（所有权一致性，fc_submit 使用） */
     uint8_t fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command);
 
-    /* 资源统计读取器（fc_get_resource_stats 使用） */
+    /* 资源统计读取器（fc_get_resource_stats 使用）。
+     * 三个状态读取器的 ID 恒由池派生或循环上界保证在范围内，越界一律 ASSERT
+     * （原先静默回退默认值，v21 改）。 */
     uint16_t        fc_get_sq_count(const fc_t *controller);
     uint16_t        fc_get_hsq_count(const fc_t *controller);
     uint16_t        fc_get_cq_count(const fc_t *controller);

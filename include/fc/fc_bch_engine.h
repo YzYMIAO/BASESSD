@@ -36,13 +36,17 @@ void fc_bch_free(fc_bch_control_t *bch);
  * BCH 编码：计算 data 的 ECC 校验码。
  * @ecc 缓冲区大小应为 bch->ecc_bytes 字节。
  *       首次调用前必须清零，支持增量计算。
+ *       ecc 可为 NULL（增量计算语义）。
+ * bch / data 非空为前置条件（违反一律 ASSERT）。
  */
 void fc_bch_encode(fc_bch_control_t *bch, const uint8_t *data, unsigned int len, uint8_t *ecc);
 
 /*
  * BCH 解码：检测并定位 data+recv_ecc 中的错误。
  * @errloc 输出错误位置数组（至少 t 个元素）。
- * @return  错误数量（≥0），失败返回 -1。
+ * @return  错误数量（≥0），不可纠返回 -1。
+ *          入参前置违反（len 超码长 / data·recv_ecc 为空）一律 ASSERT，不走 -1
+ *          （避免与"不可纠"哨兵撞车，见 assertion_guidelines.md §十五）。
  *          对于返回的错误位置 errloc[i]：
  *            errloc[i] < 8*len → 数据区错误
  *            errloc[i] >= 8*len → ECC 区错误

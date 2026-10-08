@@ -36,6 +36,8 @@ typedef struct
     uint8_t  max_iterations;
 } fc_ldpc_config_t;
 
+/* data_length 恒为 FC_BUFFER_DATA_SIZE（520，CW 缓冲 528B 减去 8B parity 尾区）；
+ * 前置：data 非空、data_length ∈ [8, FC_BUFFER_DATA_SIZE]（违反一律 ASSERT）。 */
 fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length);
 
 /*

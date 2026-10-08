@@ -69,8 +69,10 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 
 调用者**不可能**传入越界值——越界即不变量破坏。因此这类"句柄越界 → 返回 NULL/错误码"的守卫按判据 2 转 `ASSERT`，并同步修掉头文件里"越界返回 NULL"的契约描述。同理，FC 内部对句柄的越界检查（`fc_stripe_release_parity` 的 `parity_id`、完成路径的 `completed_id`、desc 链遍历里的 `desc_id`）一律转 `ASSERT`。
 
-**保留返回码的部分**：`fc_command_configure_descriptor` / `fc_submit` / `fc_command_release` 这三个**顶层生命周期入口**里，`fc_command_to_id()` 返回 0（指针不在本池）、状态非 `ALLOCATED`、desc 链未配置这类检查仍返回 `FC_STATUS_INVALID_ARGUMENT`——它们校验的是"这个指针是不是本池的命令 + 生命周期阶段"（指针身份 + 状态），是有文档契约的入口校验。**但同一入口里的 `command == NULL` 是纯参数前置条件，转 `ASSERT`**（第二轮补扫，见 §九）。
-（v13 前这三个入口是 `fc_command_configure_descriptors` / `fc_submit` / `fc_command_release`；前者已上移 FTL，FC 侧建链入口变成 `fc_command_attach_cw`，v17 再收敛为 `fc_command_configure_descriptor`，它沿用同一套"保留身份/状态返回码"的契约。）
+**保留返回码的部分（⚠️ 已于 2026-10-08 全部撤销，见 §十四）**：`fc_submit` / `fc_command_release` 这两个**顶层生命周期入口**里，`fc_command_to_id()` 返回 0（指针不在本池）、状态非 `ALLOCATED`、desc 链未配置这类检查曾返回 `FC_STATUS_INVALID_ARGUMENT`——校验的是"这个指针是不是本池的命令 + 生命周期阶段"（指针身份 + 状态）。**同一入口里的 `command == NULL` 是纯参数前置条件，转 `ASSERT`**（第二轮补扫，见 §九）。
+> ⚠️ **2026-10-08 修订**：`fc_command_configure_descriptor`（原 `fc_command_attach_cw`）已**退出**本例外——它只保留 `RESOURCE_EMPTY`，身份/生命周期/坐标等**配置错误一律 `ASSERT`**。判据见 §十三。
+> ⚠️ **2026-10-08 修订（二）**：`fc_submit` / `fc_command_release` 亦**全部退出**本例外（本轮 v19）——`fc_submit` 只留 `OK`/`QUEUE_FULL`，`fc_command_release` 恒 `OK`。§七 的"顶层生命周期入口保留返回码"例外**至此清零**。见 §十四。
+（v13 前这三个入口是 `fc_command_configure_descriptors` / `fc_submit` / `fc_command_release`；前者已上移 FTL，FC 侧建链入口变成 `fc_command_attach_cw`，v17 再收敛为 `fc_command_configure_descriptor`。v17 时它沿用"保留身份/状态返回码"的契约；**该契约已于 2026-10-08 撤销**，见 §十三。）
 
 > 判据 1 原先把"`fc_interface.h` 的全部入口"整体划为边界，属**过度概括**；按句柄来源细分：外部输入（host / CLI / 介质）→ 判据 1，FC 自铸句柄 → 判据 2。
 
@@ -124,10 +126,10 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 
 | 位置 | 类别 |
 |---|---|
-| `fc_command_validate` 整个函数 | 校验器（输入可能来自 host） |
-| `fc_queue.c` 的 `FC_COMMAND_ID_INVALID` / `offset >= count` | 哨兵值域 |
+| ~~`fc_command_validate` 整个函数~~ **（2026-10-08 撤销：`operation` 全仓都是 FTL 硬编码常量、从不是 host 输入，三处前置违反皆判据 2 → `ASSERT`，见 §十五）** | ~~校验器（输入可能来自 host）~~ |
+| `fc_queue.c` 的 ~~`FC_COMMAND_ID_INVALID`~~ **（2026-10-08 撤销：入队 ID 由 FC 自铸，传哨兵是调用者 bug → `ASSERT`，见 §十五）** / `offset >= count` | 哨兵值域 |
 | `fc_command_alloc_internal` / `fc_descriptor_alloc_internal` 的池空 NULL | 资源类 |
-| `fc_buffer_is_occupied(...) == 0U` / `fc_buffer_release` 未占用 | 生命周期状态 |
+| ~~`fc_buffer_is_occupied(...) == 0U` / `fc_buffer_release` 未占用~~ **（2026-10-08 撤销：未占用 = 配置错误 → `ASSERT`，见 §十四）** | ~~生命周期状态~~ |
 | `g_nand_dispatch_armed == 0U` / `g_crc_ready == 0U` / `g_initialized == 0U` / `ctx->active == 0U` | 运行时状态 |
 | `map->uops == NULL` / `nand_engine` 的 `handler == NULL` / UOP 无 END | 表完整性 |
 | `fc_ldpc_decode(..., err_bits)` / `fc_command_status_init(..., command)` / `pop_n(ids)` 的 NULL | 辨析 B 语义分支 |
@@ -200,7 +202,8 @@ v13 把 FC 的"策略层"（按掩码建链 + 数据搬运）上移 FTL，**断�
 v17 把 FC 建链从三层接力收敛为一条：`fc_command_attach_cw` → `_internal` → `_internal`
 合并为 **`fc_command_configure_descriptor`（单数）**，实现在 `src/fc/fc_interface.c`。
 §十一表里 `fc_command_attach_cw` 那一行是 v13 当时的名字，**契约不变**——它仍是"顶层
-生命周期入口"（身份/状态返回码保留，`command == NULL` 转 `ASSERT`）。**新增的不变量**：
+生命周期入口"（身份/状态返回码保留，`command == NULL` 转 `ASSERT`；**该身份/状态返回码
+契约已于 2026-10-08 撤销，见 §十三**）。**新增的不变量**：
 全部校验（指针身份 / 生命周期 / plane 段 / CW 范围）都在出池之前，非法实参不污染池子。
 详见 `docs/changelog/fc_build_chain_convergence_v17.md`。
 
@@ -241,3 +244,154 @@ v17 后该机制体即 `fc_command_configure_descriptor`，见 §十一附 2）�
 数据驱动的违规——留待后续（可改为返回码而非仅 ASSERT）。
 
 > 详见 `docs/changelog/fc_chain_ownership_v16.md`。
+
+## 十三、v18：建链入口的"配置错误 → ASSERT"定调（2026-10-08）
+
+**背景**：用户指出建链入口 `fc_command_configure_descriptor` 的失败模式应当二分：
+
+- **申请不到**（desc / buffer 池空 → `RESOURCE_EMPTY`）：这是**模仿硬件的行为**，返回码在意料之中 → **保留返回码**（判据 3）。
+- **配置出错**（句柄非法 / 生命周期不符 / 坐标越界 / 重复挂同一 n / `row_paa` 的 plane 与实参不符）：**调用者 bug，绝不允许带着错配置发到硬件** → **一律 `ASSERT`**（判据 2）。
+
+**据此撤销 §七 对 `fc_command_configure_descriptor` 的"保留身份/状态返回码"例外**：该入口不再返回 `INVALID_ARGUMENT`，只返回 `OK` / `RESOURCE_EMPTY`。
+
+| 守卫 | 改动前 | 改动后 |
+|---|---|---|
+| `command != NULL` | `ASSERT` | 不变 |
+| 指针身份（`fc_command_to_id`）/ 生命周期（`ALLOCATED`） | `return INVALID_ARGUMENT` | **`ASSERT`** |
+| plane 段 / CW 范围 | `return INVALID_ARGUMENT` | **`ASSERT`** |
+| 重复 n（`fc_command_cw_attached`） | `ASSERT` | 不变 |
+| `paa_to_plane(row_paa) == plane` | `ASSERT` | 不变 |
+| desc / buffer 池空 | `return RESOURCE_EMPTY` | 不变（模仿硬件行为） |
+
+**判据来源**：§一"值从哪来"——这些实参全是调用者（FTL / RAID）自己铸出的句柄、自己算出的坐标，属判据 2；§七 的例外只是"文档契约"，而该契约无调用者区分消费（三处调用点都是 `!= FC_STATUS_OK → 沿链释放`），且配置错误本就该在污染点炸而非优雅退出。
+
+**release 注意**：`command_id` 仅用于 `ASSERT`，NDEBUG 下被裁空 → 触发 `-Wunused-variable`，用 `(void)command_id;` 吞掉（与 `fc_command.c` 的 `(void)cw;` 同法）。
+
+**未跟进项**：`fc_submit` 的身份/状态检查按同一判据也应转 `ASSERT`（其"队列满"等资源结果仍保留返回码）；`fc_command_release` 的幂等早退是**运行时分支**（对已 FREE 的命令释放是合法 no-op），不是配置错误，**不转 ASSERT**。
+> ⚠️ **2026-10-08 已跟进（v19，见 §十四）**：`fc_submit` 的身份/状态检查已转 `ASSERT`（只留 `OK`/`QUEUE_FULL`）；`fc_command_release` 的**指针身份**检查（栈上 `fc_command_t`）亦转 `ASSERT`（恒 `OK`），**幂等早退仍保留在 internal 版**，未转。
+
+> 详见 `docs/changelog/fc_configure_guard_assert_v18.md`。
+
+## 十四、v19：FC 公开 API 壳的"配置错误 → ASSERT"（2026-10-08）
+
+v18（§十三）只改了 `fc_command_configure_descriptor` 一个入口。按同一判据回扫 `src/fc/` 的**公开 API 壳**，发现五个入口仍把「调用者自铸句柄 / ID 非法」当返回码。本轮（A 档）全部收敛：
+
+| 入口 | 守卫 | 改动前 | 改动后 |
+|---|---|---|---|
+| `fc_submit` | 指针身份 / 状态 `ALLOCATED` / `validate` / desc 链所有权 | `return INVALID_ARGUMENT` | **四条 `ASSERT`**；只留 `OK` / `QUEUE_FULL`（队列满 = 资源） |
+| `fc_command_release` | 指针不在命令池内 | `return INVALID_ARGUMENT` | **`ASSERT`**；恒 `OK`（幂等早退在 internal 版） |
+| `fc_buffer_release` | buffer 未占用 | `return INVALID_ARGUMENT` | **`ASSERT`**；恒 `OK` |
+| `fc_buffer_id_to_real_buffer` | buffer 未占用（+ 内部恒不返 NULL 的死判） | `return NULL` | **`ASSERT`**；删死判 |
+| `fc_buffer_get_base` | buffer 未占用 | `return NULL` | **`ASSERT`** |
+
+**判据**：§一"值从哪来"——这些实参全是调用者自铸/自持的值（`fc_command_alloc` 铸出的指针、它自己设的状态、它自己填的 config、`fc_command_configure_descriptor` 分配的 buffer_id），属判据 2。§七 的"顶层生命周期入口保留返回码"例外、§九 的"buffer 生命周期状态"保留项**据此撤销**——至此 §七 例外表清零。
+
+**release 陷阱**：`fc_submit` / `fc_command_release` 的 `command_id` 仅用于 ASSERT → `(void)command_id;`；`fc_buffer_is_occupied` 转纯 ASSERT 用途后，static 且零调用者 → 加 `__attribute__((unused))`（与 `fc_command_cw_attached` 同法）。
+
+**未跟进（B / C 档，另议）**：
+
+- **B 档**（同类返回码，内部 / 数据路径）：`fc_data_path_generate_stripe_parity` 的 7× `desc==NULL` 死守卫、`fc_bch_engine.c:918/927` 的 `-1` 与"不可纠"哨兵撞车、`fc_command_validate` 的 `desc_id==INVALID`、`fc_queue.c` 的 `command_id==INVALID`。
+  > ⚠️ **2026-10-08 已跟进（v20，见 §十五）**：以上 B 档四处全部转 `ASSERT`；并顺带清掉 RAID-off 侧同类死守卫（`fc_data_path_generate_stripe_parity` 7 处、`fc_raid_engine.c` 超累加、`fc.c` stripe_submit 两处 desc 越界）。
+- **C 档**（反向病：静默忽略）：`fc_data_path_encode` 的 `if (buffer != NULL)` 静默跳过 META/CRC/加扰/ECC（形态一，**保留**）。
+  > ⚠️ **2026-10-08 部分跟进（v21，见 §十六）**：C 档拆成三形态后，**形态三（完全不校验）**已清——`fc.c` 三个 state getter 的越界静默 clamp、`pop_n` 不校验 `count`、`fc_bch_engine.c` / `fc_ldpc_qc_engine.c` 缺入参 ASSERT、`fc_ldpc_engine.c` 的 `data_length` 无上界全部转断言。**形态一 / 二仍保留**。
+- **遗留**：本改后 `fc_data_path.c` 里对 `fc_buffer_get_base` 的 `if (buffer != NULL)`（:113/132/153/179 等）**恒真**，成死守卫——归 C 档。
+
+> 详见 `docs/changelog/fc_shell_guard_assert_v19.md`。
+
+## 十五、v20：FC 内部 / 数据路径 / 引擎的"配置错误 → ASSERT"（B 档，2026-10-08）
+
+v18 / v19（§十三 / §十四）清完了 FC 的**公开 API 壳**。本轮（B 档）按同一判据扫**内部函数 / 数据路径 / 引擎**里同类毛病——把「调用者自铸值非法」当返回码。用户定夺三个岔路：RAID-off 死代码一并转、BCH 库的 `-1` 转 ASSERT、`fc_command_validate` 整函数转。
+
+### 默认构建（`CONFIG_FC_RAID=0`）
+
+| 文件:位置 | 守卫 | 改动前 | 改动后 |
+|---|---|---|---|
+| `fc_command.c` `fc_command_validate` | `command==NULL` / `operation ≥ OP_COUNT` / 数据操作无 desc 链 | 三处 `return INVALID_ARGUMENT` | **三条 `ASSERT`**；恒返回 `OK` |
+| `fc_queue.c` `fc_submission_queue_push` | `command_id == FC_COMMAND_ID_INVALID` | `return INVALID_ARGUMENT` | **`ASSERT`**；只留 `OK` / `QUEUE_FULL` |
+| `fc_bch_engine.c` `fc_bch_decode` | `8*len > n - ecc_bits` / `!data \|\| !recv_ecc` | 两处 `return -1` | **三条 `ASSERT`** |
+
+**要点**
+
+- **`fc_command_validate`**：撤销 §九 的保留理由——查证 `operation` **全仓都是 FTL 硬编码常量**（`sync_page_prepare` 的实参是 `OP_NORMAL_PROGRAM_PAGE` / `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` / `OP_ERASE_BLOCK` 等），**从不是 host 输入**，三处皆判据 2。函数退化为「恒 OK」的校验钩子；debug 跑内层断言，release 下调用点 `fc_submit` 的 `ASSERT(... == OK)` 整条裁空。
+- **`fc_bch_decode`**：`-1` 既是「不可纠」哨兵又是参数错误返回——**撞车**会让参数错误被 `fc_ldpc_engine` 误判为不可纠、CW 静默置 UNC。转 `ASSERT` 后哨兵语义唯一。`:927` 的 `ASSERT(recv_ecc != NULL)` 只在该分支成立（另一分支的 `if (recv_ecc)` 是可选语义，不受影响）。
+
+### RAID-off（`#if CONFIG_FC_RAID`，默认不编译）
+
+| 文件:位置 | 守卫 | 改动后 |
+|---|---|---|
+| `fc_data_path.c` `fc_data_path_generate_stripe_parity` | 5× `desc/dsc == NULL` + 2× `buf == NULL` → `return INVALID_ARGUMENT` | 逐处 **`ASSERT(x != NULL)`**（函数不再返回 `INVALID_ARGUMENT`） |
+| `fc_raid_engine.c` `fc_raid_accumulate` | `processed >= total` → `return NOT_READY` | **`ASSERT(processed < total)`** |
+| `fc.c` `fc_stripe_submit` | desc 越界 → `NULL` → `release + goto stripe_error` | **`ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH)`**，直取池指针 |
+
+**判据**：`fc_data_path` 的 NULL 判是**死守卫**——`fc_descriptor_id_to_descriptor`（链内 id 恒在池内）与 `fc_buffer_get_base`（恒已占用）内部已各自 ASSERT，外层判不可能为真；`fc_raid_accumulate` 的 `total` 由 `fc_raid_start` 给定，超累加 = 计数 bug；`fc_stripe_submit` 的 `desc_id` 由链遍历产生，越界即链损坏。全部属判据 2。
+
+**保留不动**：`fc_raid_start` 的 `active != 0` → `NOT_READY`、`fc_raid_accumulate` / `fc_raid_end` 的 `active == 0` → `INVALID_ARGUMENT`——运行时状态，判据 3。
+
+**release 陷阱**：`fc_command_validate` 的 `command` 转纯 ASSERT 用途后 NDEBUG 下变未用形参 → `-Wunused-parameter`；用 `(void)command;` 吞掉（同 `fc_submit` 的 `(void)command_id;`）。`fc_bch_engine.c` 需新增 `#include "common/assertion.h"`。
+
+**验证**：debug / release / RAID=1 debug / RAID=1 release 四档 0 warning 0 error（RAID=1 档用 `make <tier> CFLAGS_EXTRA=-DCONFIG_FC_RAID=1`，并 `nm` 确认 `fc_raid_accumulate` 等符号真的进了目标文件）；`make format-check` passed；`make -k tests` 29 error / 7 warning 与基线逐项一致（全在 `tests/`）；上板未做。
+
+> 详见 `docs/changelog/fc_internal_guard_assert_v20.md`。
+
+## 十六、v21：FC 层 C 档·形态三"缺失的入参/边界校验"（2026-10-08）
+
+§十三~§十五（A / B 档）清的是「**有**守卫但把配置错误当返回码」。C 档是**反向病**——配置错误**既不返回码也不 ASSERT**，静默吞掉。按病灶拆成三形态：
+
+| 形态 | 表现 | 例 |
+|---|---|---|
+| 一 · 静默跳过 | `if (x != NULL) { ... }` 把该做的活整段略过 | `fc_data_path_encode` 的 META/CRC/加扰/ECC 分支 |
+| 二 · 静默降级 | 出问题就 `break` / 回退默认值继续跑 | `if (desc == NULL) break;`、三元 NULL |
+| 三 · **完全不校验** | 拿调用者给的 id/size **直接用**，一个守卫都没有 | 本轮 |
+
+本轮只清**形态三**（判据最清楚，且唯一含真内存破坏点）。形态一 / 二另议。
+
+### 改动清单
+
+| 文件:位置 | 缺口 | 改动后 |
+|---|---|---|
+| `fc_queue.c` `fc_submission_queue_pop_n` | `count` 无上界（`count > queue->count` 静默少弹） | `ASSERT(count <= queue->count)` |
+| `fc.c` `fc_command_state_get` | `command_id` 越界 → 静默回退 `FC_COMMAND_STATE_FREE` | `ASSERT(command_id < FC_COMMAND_POOL_DEPTH)` |
+| `fc.c` `fc_descriptor_owner_get` | `descriptor_id` 越界 → 静默回退 `FC_COMMAND_ID_INVALID` | `ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH)` |
+| `fc.c` `fc_buffer_state_get` | `buffer_id` 越界 → 静默回退 `0U` | `ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH)` |
+| `fc.c` `fc_buffer_id_to_real_buffer_internal` | `buffer_id` 零校验直接索引 `buffer_pool[]` | `ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH)` |
+| `fc.c` `fc_buffer_release_internal` | `buffer_id` 零校验直接索引 `buffer_state[]` | `ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH)` |
+| `fc_bch_engine.c` `fc_bch_encode` | `bch` / `data` 零校验（`BCH_ECC_WORDS(bch)` 即解引用 `bch`） | 两条 `ASSERT`，**前置**于任何解引用 |
+| `fc_ldpc_qc_engine.c` `fc_ldpc_qc_encode` | `qc` / `data_in` / `data_out` 零校验 | 三条 `ASSERT`（`qc` 为 vestigial，纯契约对称） |
+| `fc_ldpc_engine.c` `fc_ldpc_encode` / `fc_ldpc_decode` | `data_length` 无上界 | `ASSERT(data_length <= FC_BUFFER_DATA_SIZE)` |
+
+**对称补齐**：`fc_bch_decode` 也补 `ASSERT(bch != NULL)`（原先只查 `data` / `recv_ecc`，而 `bch` 在 `BCH_ECC_WORDS(bch)` 处早已被解引用——断言写在解引用之后等于没有，故**必须置于函数体首条语句**）。
+
+### 判据
+
+全部判据 2（"值从哪来"）——实参都是调用者自铸/池派生的值，不是 host 输入：
+
+- 三个 getter 的 6 个调用点**全在范围内**：3 处 `fc_command_to_id` 派生（`fc_interface.c:162/242`）、3 处 `index < DEPTH` 循环上界（`:503/510/517`）、1 处先过 `fc_buffer_id_is_valid`（`:62`）。clamp 分支是**死代码**；且 `FC_COMMAND_STATE_FREE` 回退尤其误导——把"没有这个槽位"说成"槽位空闲可用"。同文件兄弟 `fc_command_id_to_command_internal` / `fc_descriptor_id_to_descriptor_internal` 正是这么写的。
+- 两个 buffer 内部函数的调用者都已先校验：公共壳 `ASSERT(fc_buffer_is_occupied(...))`、`fc_get_cmd_data_ptr` 与 `fc_descriptor_chain_release_head_internal` 都先判 `!= FC_BUFFER_ID_INVALID`。
+- `pop_n` 的 `count` 是调用者算的值；生产调用者为**零**（调度器走逐条 `fc_submission_queue_pop`），唯一调用者是测试常量 `3U`（队列 `count == 5`）——不受影响。
+
+### 唯一的内存破坏点
+
+`fc_ldpc_*` 的 `data_length` 无上界是 C 档里**唯一真会写坏内存**的：encode 的 LDPC 分支 `uint8_t tmp[FC_BUFFER_POOL_CW_SIZE]`(528) + `memcpy(tmp, data, data_length + 8)` → `data_length > 520` 即**栈溢出**；BCH 分支 `memcpy(data + data_length, ecc_buf, 8U)` → **写穿 CW buffer**；decode BCH 分支 `recv_ecc = data + data_length` 后读 8B → 同样越界。
+
+⚠ **`fc_bch_decode` 内新加的 `8*len <= n - ecc_bits` 挡不住它**：BCH(m=13, t=4) 下 `n - ecc_bits = 8139`，`8 × 521 = 4168 < 8139` 照样通过。所以必须在 `fc_ldpc_*` 入口加 `<= 520`。
+
+### 辨析（不动）
+
+- `pop_n(ids == NULL)` / `fc_bch_encode(..., ecc == NULL)` / `fc_ldpc_decode(..., err_bits == NULL)`：**有意的可选参数语义**（辨析 B），不是调用者错误，保留。
+- `fc_ldpc_qc_encode` 的 `g_initialized` 静默返回：运行时状态（判据 3），且 void 返回无从给码。
+- `fc_ldpc_qc_encode` 的 `qc` 参数 vestigial（编码只用文件内 `g_col_weight` / `g_col_to_check`）本身另议——本轮只补断言做契约对称，**不动其"未用"**。
+
+### 连带发现（顺带修）
+
+`fc_ldpc_engine.c` **未 include `fc.h`**——而 LDPC 分支的 `uint8_t tmp[FC_BUFFER_POOL_CW_SIZE]`（该分支默认不编译）与新增的 `FC_BUFFER_DATA_SIZE` 同出 `fc.h`。补 `#include "fc.h"` 后 LDPC 分支（`-DFC_ECC_ALGO=FC_ECC_ALGO_LDPC`）首次可编译。
+
+### release 陷阱
+
+- `fc_ldpc_qc_encode` 的 `qc` 在 NDEBUG 下断言裁空 → `-Wunused-parameter`；用 `(void)qc;` 吞掉。
+- 三个 getter / 两个 buffer 内部函数的参数在 **return 表达式**里使用；`pop_n` 的 `count` 在 for 循环里用——均不产生 unused。
+
+### 验证
+
+四档（debug / release / RAID=1 debug / RAID=1 release）**0 warning 0 error**；`-DFC_ECC_ALGO=FC_ECC_ALGO_LDPC` 补 include 后 0 error（余 1 条 pre-existing `fc_ecc_init_bch defined but not used`，属该实验分支既有、非本轮）；`make -k tests` 29 error / 7 warning 与基线逐项一致（全在 `tests/`）；`make format-check` passed；上板未做。
+
+> 详见 `docs/changelog/fc_c_tier_missing_guard_v21.md`。

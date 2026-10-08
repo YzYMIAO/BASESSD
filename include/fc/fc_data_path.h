@@ -53,6 +53,9 @@ fc_status_t fc_data_path_encode(const fc_command_t *command);
  * parity_cmd:  已分配 desc+buffer 的 parity 命令
  *
  * FC 内部在 stripe 累积完成后、提交 dispatch 前自动调用。
+ *
+ * @return FC_STATUS_OK；ECC 编码失败时透传其返回码。
+ *         参数 / desc 链损坏的前置违反一律 ASSERT（不再返回 INVALID_ARGUMENT）。
  */
 fc_status_t fc_data_path_generate_stripe_parity(
     const fc_command_t *data_cmds[],

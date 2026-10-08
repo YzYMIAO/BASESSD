@@ -75,7 +75,8 @@ fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total);
  *
  * @param lun       LUN 编号
  * @param cw_buffer 当前 CW 的数据
- * @return          FC_STATUS_OK 或 FC_STATUS_INVALID_ARGUMENT
+ * @return          FC_STATUS_OK 或 FC_STATUS_INVALID_ARGUMENT（序列未开始）。
+ *                  超出 total 的累加属调用者计数 bug → ASSERT。
  */
 fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer);
 

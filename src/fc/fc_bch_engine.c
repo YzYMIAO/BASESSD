@@ -1,5 +1,7 @@
 #include "fc_bch_engine.h"
 
+#include "common/assertion.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -227,9 +229,13 @@ static void store_ecc8(struct fc_bch_control *bch, uint8_t *dst, const uint32_t 
  *   返回：无。
  *   实现要点：4 查找表并行（每输入 32bit 分 4 字节查表异或），
  *         首尾非对齐段用 bch_encode_unaligned 兜底。
+ *         入参前置违反（bch/data 为空）一律 ASSERT（v21）；ecc 可为 NULL 是
+ *         有意的可选参数语义（增量计算），保留。
  * -------------------------------------------------------------------- */
 void fc_bch_encode(struct fc_bch_control *bch, const uint8_t *data, unsigned int len, uint8_t *ecc)
 {
+    ASSERT(bch != NULL);
+    ASSERT(data != NULL);
     const unsigned int    l = BCH_ECC_WORDS(bch) - 1;
     unsigned int          i, mlen;
     unsigned long         m;
@@ -902,6 +908,9 @@ static int find_poly_roots(struct fc_bch_control *bch, unsigned int k, struct gf
  *         syn —— 预计算综合式（可 NULL）；errloc —— 输出错误位置数组。
  *   返回：纠正的错误数（≥0）；不可纠返回 -1。
  *   实现要点：
+ *     - 入参前置违反（len 超码长 / data·recv_ecc 为空）一律 ASSERT（v20）：
+ *       它们由调用者保证（fc_ldpc_engine 传常量 len=FC_BUFFER_DATA_SIZE），
+ *       若走 -1 会与"不可纠"哨兵撞车，被上游误判为不可纠、CW 静默置 UNC。
  *     - 无 calc_ecc/syn 时：先编码 data 得预期校验，与 recv_ecc 异或
  *       （= 错误综合式），全零则无错返回 0。
  *     - BM 求 σ；求根得 errloc；errloc 换算为 bit 位置
@@ -910,24 +919,20 @@ static int find_poly_roots(struct fc_bch_control *bch, unsigned int k, struct gf
  * -------------------------------------------------------------------- */
 int fc_bch_decode(struct fc_bch_control *bch, const uint8_t *data, unsigned int len, const uint8_t *recv_ecc, const uint8_t *calc_ecc, const unsigned int *syn, unsigned int *errloc)
 {
+    ASSERT(bch != NULL);
     const unsigned int ecc_words = BCH_ECC_WORDS(bch);
     unsigned int       nbits;
     int                i, err, nroots;
     uint32_t           sum;
 
-    if (8U * len > (bch->n - bch->ecc_bits))
-    {
-        return -1;
-    }
+    ASSERT(8U * len <= (bch->n - bch->ecc_bits));
 
     if (!syn)
     {
         if (!calc_ecc)
         {
-            if (!data || !recv_ecc)
-            {
-                return -1;
-            }
+            ASSERT(data != NULL);
+            ASSERT(recv_ecc != NULL);
             fc_bch_encode(bch, data, len, NULL);
         }
         else

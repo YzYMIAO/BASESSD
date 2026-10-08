@@ -175,6 +175,8 @@ static void qc_expand_links(void)
  *   返回：无（未初始化静默返回）。
  *   实现要点：阶梯结构编码——数据位为 1 时异或其关联的校验位
  *         （parity 初始为 0，逐数据位累加即得校验向量）。
+ *         入参前置违反（qc/data_in/data_out 为空）一律 ASSERT（v21，与同文件
+ *         fc_ldpc_qc_decode 的写法一致）；g_initialized 是运行时状态，保留静默返回。
  * -------------------------------------------------------------------- */
 void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
                        const uint8_t      *data_in,
@@ -183,7 +185,11 @@ void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
     uint8_t  parity[8];
     uint32_t bit_pos, i;
 
-    (void)qc;
+    ASSERT(qc != NULL);
+    ASSERT(data_in != NULL);
+    ASSERT(data_out != NULL);
+
+    (void)qc; /* qc 本实现未用（校验矩阵为文件内静态表）；NDEBUG 下断言裁空后靠它消警告 */
 
     if (!g_initialized)
     {

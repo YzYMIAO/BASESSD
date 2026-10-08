@@ -39,6 +39,7 @@ fc_ldpc_qc_t *fc_ldpc_qc_init(uint8_t max_iter);
  * QC-LDPC 编码
  * data_in[0..519] → 520B 用户数据
  * data_out[0..527] → 528B 码字（520B data + 8B parity）
+ * qc/data_in/data_out 非空为前置条件（违反一律 ASSERT）；未初始化时静默返回。
  */
 void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
                        const uint8_t      *data_in,

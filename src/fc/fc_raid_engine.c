@@ -69,7 +69,8 @@ fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total)
  * fc_raid_accumulate
  *   功能：累加一个 CW：acc_buf ^= cw_buffer。
  *   参数：lun —— LUN；cw_buffer —— 当前 CW。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / NOT_READY（已超 total）。
+ *   返回：FC_STATUS_OK / INVALID_ARGUMENT（序列未开始，运行时状态）。
+ *         已超 total 属调用者计数 bug，转 ASSERT（v20）。
  *   实现要点：按 32 位字对齐 XOR（528B / 4 = 132 字）。
  * -------------------------------------------------------------------- */
 fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer)
@@ -89,10 +90,8 @@ fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer)
         return FC_STATUS_INVALID_ARGUMENT;
     }
 
-    if (ctx->processed >= ctx->total)
-    {
-        return FC_STATUS_NOT_READY;
-    }
+    /* 超累加 = 调用者计数 bug（total 由 fc_raid_start 给定）→ ASSERT（v20） */
+    ASSERT(ctx->processed < ctx->total);
 
     /* 32 位对齐 XOR */
     acc32 = (uint32_t *)(void *)ctx->acc_buf;

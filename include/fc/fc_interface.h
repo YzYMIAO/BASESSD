@@ -60,8 +60,9 @@ extern "C"
      * 坏块替换）——每个 plane 传自己的 row_paa 即可；同一 plane 的所有 CW 必须传同一 row_paa。
      * plane 必须落在本命令的 plane 段内（单 plane = paa_to_plane(command->paa) 那一个；
      * multi-plane = [0, multi_plane)）。
-     * 前置：命令处于 ALLOCATED。
-     * 返回：OK / RESOURCE_EMPTY（池空）/ INVALID_ARGUMENT（坐标越界）。
+     * 前置（违反一律 ASSERT，不返回错误码）：命令处于 ALLOCATED；plane 落在本命令 plane 段内；
+     * CW 号 < CW_NUM；row_paa 的 plane 位 == plane。配置错误绝不发到硬件。
+     * 返回：OK / RESOURCE_EMPTY（desc 或 buffer 池空）——只有「申请不到」才走返回码（模仿硬件行为）。
      * **失败时链上可能已有 desc（含本条）**：本层不回滚，「已分配的 desc 全部在链上」
      * 是不变量，调用方沿链释放即完整回收（见下两个函数）。 */
     fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa);
@@ -78,7 +79,10 @@ extern "C"
      * 用法：command->desc_id = fc_descriptor_chain_release_all(command->desc_id); */
     fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head);
 
-    /* 提交到 SQ 或 HSQ（根据 high_priority），入队即返回 */
+    /* 提交到 SQ 或 HSQ（根据 high_priority），入队即返回。
+     * 前置（违反一律 ASSERT，不返回错误码）：指针在命令池内；状态 ALLOCATED；
+     * validate 通过；desc 链所有权完整。配置错误绝不发到硬件。
+     * 返回：OK / QUEUE_FULL（队列满 = 资源，模仿硬件行为）。 */
     fc_status_t fc_submit(fc_command_t *command);
 
     /* 调度执行（上层 while(1) 轮询调用） */
@@ -87,7 +91,9 @@ extern "C"
     /* 从 CQ 取完成项 */
     fc_status_t fc_poll_completion(fc_command_status_t *completion);
 
-    /* 释放命令及关联 Descriptor 链 + 各 CW buffer（须已 COMPLETED 或 ALLOCATED 且不在 CQ 中） */
+    /* 释放命令及关联 Descriptor 链 + 各 CW buffer（须已 COMPLETED 或 ALLOCATED 且不在 CQ 中）。
+     * 前置（违反一律 ASSERT）：指针落在命令池内。**幂等**——已 FREE 时直接返回 OK。
+     * 返回：恒 FC_STATUS_OK。 */
     fc_status_t fc_command_release(fc_command_t *command);
 
     /* ═══════ ③ buffer 访问 ═══════ */
@@ -95,14 +101,16 @@ extern "C"
      * ⚠️ 手动分配接口：常规路径由 fc_command_configure_descriptor() 为每个 CW 自动分配 desc + buffer。 */
     fc_buffer_id_t fc_buffer_alloc(void);
 
-    /* 释放 Buffer（须已占用） */
+    /* 释放 Buffer。前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT）。返回：恒 OK。 */
     fc_status_t fc_buffer_release(fc_buffer_id_t buffer_id);
 
-    /* ID→指针，返回 USER 数据区首地址（跳过 META+CRC 共 8B）；无效 ID 返回 NULL */
+    /* ID→指针，返回 USER 数据区首地址（跳过 META+CRC 共 8B）。
+     * 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。 */
     uint8_t *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id);
 
     /* FC 内部使用：返回 CW 基址（META 开头，528B 完整 CW）。
-       数据路径（加扰/ECC/RAID）使用此接口。 */
+       数据路径（加扰/ECC/RAID）使用此接口。
+       前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。 */
     uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id);
 
     /* 返回 CW 中 META 字段指针（4 字节，位于 CW 基址偏移 0）。

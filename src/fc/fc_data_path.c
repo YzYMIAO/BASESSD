@@ -214,7 +214,8 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
  *   功能：跨命令 XOR 生成 parity 并对其做 ECC 编码。
  *   参数：data_cmds —— 数据命令数组；data_count —— 数据命令数；
  *         parity_cmd —— parity 命令（desc+buffer 已分配）。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT（参数/desc 链损坏）。
+ *   返回：FC_STATUS_OK；ECC 编码失败时透传其返回码。
+ *         参数/desc 链损坏的前置违反一律 ASSERT（v20，见 §十五）。
  *   实现要点：
  *     - parity 的 CW 数须与数据命令一致（跨命令按 CW 对齐）。
  *     - 数据区 FC_BUFFER_DATA_SIZE=520B 参与 XOR；ECC parity 区
@@ -260,28 +261,21 @@ fc_status_t fc_data_path_generate_stripe_parity(
         uint8_t *parity_buf;
         uint8_t  first = 1U;
 
-        /* 获取 parity 命令第 cw 个 CW 的 buffer 基址 */
+        /* 获取 parity 命令第 cw 个 CW 的 buffer 基址。
+         * 链内 id 由 fc_descriptor_id_to_descriptor 内部断言（恒在池内），buffer 由
+         * fc_buffer_get_base 内部断言（恒已占用）——两处 NULL 判都是死守卫，转 ASSERT（v20）。 */
         desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
         for (uint8_t s = 0U; s < cw; s++)
         {
             fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(desc_id);
-            if (dsc == NULL)
-            {
-                return FC_STATUS_INVALID_ARGUMENT;
-            }
+            ASSERT(dsc != NULL);
             desc_id = (fc_descriptor_id_t)dsc->next_id;
         }
         {
             fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(desc_id);
-            if (dsc == NULL)
-            {
-                return FC_STATUS_INVALID_ARGUMENT;
-            }
+            ASSERT(dsc != NULL);
             parity_buf = fc_buffer_get_base(dsc->buffer_id);
-            if (parity_buf == NULL)
-            {
-                return FC_STATUS_INVALID_ARGUMENT;
-            }
+            ASSERT(parity_buf != NULL);
         }
 
         /* XOR 所有数据命令的对应 CW 数据区 */
@@ -294,23 +288,14 @@ fc_status_t fc_data_path_generate_stripe_parity(
             for (uint8_t s = 0U; s < cw; s++)
             {
                 fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(data_desc_id);
-                if (dsc == NULL)
-                {
-                    return FC_STATUS_INVALID_ARGUMENT;
-                }
+                ASSERT(dsc != NULL);
                 data_desc_id = (fc_descriptor_id_t)dsc->next_id;
             }
             {
                 fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(data_desc_id);
-                if (dsc == NULL)
-                {
-                    return FC_STATUS_INVALID_ARGUMENT;
-                }
+                ASSERT(dsc != NULL);
                 data_buf = fc_buffer_get_base(dsc->buffer_id);
-                if (data_buf == NULL)
-                {
-                    return FC_STATUS_INVALID_ARGUMENT;
-                }
+                ASSERT(data_buf != NULL);
             }
 
             if (first != 0U)
@@ -345,10 +330,7 @@ fc_status_t fc_data_path_generate_stripe_parity(
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL)
-            {
-                return FC_STATUS_INVALID_ARGUMENT;
-            }
+            ASSERT(desc != NULL);
 
             uint8_t *buf = fc_buffer_get_base(desc->buffer_id);
             if (buf != NULL)

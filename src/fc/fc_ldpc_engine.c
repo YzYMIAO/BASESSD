@@ -1,6 +1,7 @@
 #include "fc_ldpc_engine.h"
 
 #include "common/assertion.h"
+#include "fc.h" /* FC_BUFFER_DATA_SIZE / FC_BUFFER_POOL_CW_SIZE（入口上界与 LDPC 分支用） */
 #include "fc_bch_engine.h"
 #include "fc_ldpc_qc_engine.h"
 
@@ -70,6 +71,8 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
     /* 入参前置条件由调用者保证（fc_data_path 恒传 CW 缓冲 + FC_BUFFER_DATA_SIZE） */
     ASSERT(data != NULL);
     ASSERT(data_length != 0U);
+    /* 上界：parity 尾区占 data[data_length..data_length+7]，CW 缓冲恒 528B（v21 补） */
+    ASSERT(data_length <= FC_BUFFER_DATA_SIZE);
 
 #if (FC_ECC_ALGO == FC_ECC_ALGO_BCH)
 
@@ -140,6 +143,8 @@ fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16
      * err_bits 可为 NULL（辨析 B），保留上方语义分支 */
     ASSERT(data != NULL);
     ASSERT(data_length != 0U);
+    /* 上界：recv_ecc = data + data_length 起读 8B，CW 缓冲恒 528B（v21 补） */
+    ASSERT(data_length <= FC_BUFFER_DATA_SIZE);
 
 #if (FC_ECC_ALGO == FC_ECC_ALGO_BCH)
 

@@ -166,17 +166,23 @@ uint16_t fc_get_cq_count(const fc_t *controller)
 {
     return controller->cq.count;
 }
+/* 三个状态读取器：ID 恒由池派生（fc_command_to_id）或循环上界保证在范围内，
+ * 越界即不变量破坏——原先静默回退默认值（v21 改断言），尤其 FC_COMMAND_STATE_FREE
+ * 会把"没有这个槽位"说成"槽位空闲可用"。与同文件 fc_command_id_to_command_internal 同法。 */
 uint8_t fc_command_state_get(const fc_t *controller, fc_command_id_t command_id)
 {
-    return (command_id < FC_COMMAND_POOL_DEPTH) ? controller->command_state[command_id] : FC_COMMAND_STATE_FREE;
+    ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
+    return controller->command_state[command_id];
 }
 fc_command_id_t fc_descriptor_owner_get(const fc_t *controller, uint16_t descriptor_id)
 {
-    return (descriptor_id < FC_DESCRIPTOR_POOL_DEPTH) ? controller->descriptor_owner[descriptor_id] : FC_COMMAND_ID_INVALID;
+    ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
+    return controller->descriptor_owner[descriptor_id];
 }
 uint8_t fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id)
 {
-    return (buffer_id < FC_BUFFER_POOL_DEPTH) ? controller->buffer_state[buffer_id] : 0U;
+    ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
+    return controller->buffer_state[buffer_id];
 }
 
 /* ── 命令/描述符 ID ↔ 指针（范围由公共壳 fc_interface.c 校验） ── */
@@ -207,15 +213,19 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, uint1
     return &controller->descriptor_pool[descriptor_id];
 }
 
-/* 内部：直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移 */
+/* 内部：直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移。
+ * buffer_id 恒由池派生、且调用者已先校验占用（公共壳 ASSERT 占用 / 链释放前判
+ * != FC_BUFFER_ID_INVALID）——越界即不变量破坏，v21 补断言（同 fc_command_id_to_command_internal）。 */
 uint8_t *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
+    ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
     return controller->buffer_pool[buffer_id];
 }
 
 /* 内部：释放 buffer（状态清零 + 挂回空闲链表头） */
 fc_status_t fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
+    ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
     controller->buffer_state[buffer_id]     = 0U;
     controller->buffer_free_next[buffer_id] = controller->buffer_free_head;
     controller->buffer_free_head            = buffer_id;
@@ -970,15 +980,10 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     desc_id = (fc_descriptor_id_t)data_cmd->desc_id;
     for (cw = 0U; cw < cw_count; cw++)
     {
-        const fc_descriptor_t *desc = (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
-                                          ? &controller->descriptor_pool[desc_id]
-                                          : NULL;
+        /* desc_id 由链遍历产生，恒在池内——越界即链损坏 = 调用者 bug，转 ASSERT（v20） */
+        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
+        const fc_descriptor_t *desc = &controller->descriptor_pool[desc_id];
 
-        if (desc == NULL)
-        {
-            fc_stripe_release_parity(controller, parity_id);
-            goto stripe_error;
-        }
         mp_req.cw_buffers[cw] = (desc->buffer_id != FC_BUFFER_ID_INVALID)
                                     ? fc_buffer_get_base(desc->buffer_id)
                                     : NULL;
@@ -989,15 +994,9 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
     for (cw = 0U; cw < cw_count; cw++)
     {
-        const fc_descriptor_t *desc = (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
-                                          ? &controller->descriptor_pool[desc_id]
-                                          : NULL;
+        ASSERT(desc_id < FC_DESCRIPTOR_POOL_DEPTH);
+        const fc_descriptor_t *desc = &controller->descriptor_pool[desc_id];
 
-        if (desc == NULL)
-        {
-            fc_stripe_release_parity(controller, parity_id);
-            goto stripe_error;
-        }
         mp_req.cw_buffers[CW_NUM + cw] = (desc->buffer_id != FC_BUFFER_ID_INVALID)
                                              ? fc_buffer_get_base(desc->buffer_id)
                                              : NULL;

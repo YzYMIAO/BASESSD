@@ -53,8 +53,10 @@ static uint8_t fc_buffer_id_is_valid(fc_buffer_id_t buffer_id)
     return (uint8_t)(buffer_id < FC_BUFFER_POOL_DEPTH);
 }
 
-/* 是否占用（供 fc_buffer_release / id_to_real_buffer 校验） */
-static uint8_t fc_buffer_is_occupied(fc_buffer_id_t buffer_id)
+/* 是否占用（供 fc_buffer_release / id_to_real_buffer / get_base 的前置 ASSERT 用）。
+ * 仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
+ * 否则触发 -Wunused-function）——与 fc_command_cw_attached 同法。 */
+static uint8_t __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_id)
 {
     return (fc_buffer_id_is_valid(buffer_id) != 0U) &&
            (fc_buffer_state_get(&g_fc_controller, buffer_id) != 0U);
@@ -112,8 +114,9 @@ static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t
  *         分配 desc + buffer、填 PAA/config/meta、挂链尾。
  *   参数：command —— 命令；plane —— 目标 plane；cw —— 目标 CW 号；
  *         row_paa —— 该 plane 的行地址（page/block/lun）。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT（坐标越界或生命周期不符）
- *         / RESOURCE_EMPTY（desc 池或 buffer 池空）。
+ *   返回：FC_STATUS_OK / RESOURCE_EMPTY（desc 池或 buffer 池空）。
+ *         配置错误（句柄非法 / 生命周期不符 / 坐标越界 / 重复挂同一 n）一律 ASSERT——
+ *         绝不允许带着错配置发到硬件；只有「申请不到」才走返回码（模仿硬件行为）。
  *   实现要点：
  *     - **v17 起本函数即机制体**：原先「公共壳 → attach_cw_internal →
  *       configure_descriptor_internal」三层接力（三层签名相同、中间层纯直通）
@@ -148,20 +151,19 @@ fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane
     fc_descriptor_t *descriptor;
     fc_buffer_id_t   buffer_id;
 
-    /* ── 校验段：不得触碰任何池 ── */
+    /* ── 校验段：不得触碰任何池 ──
+     * 本函数**只有一种**合法失败：资源申请不到（desc / buffer 池空）→ RESOURCE_EMPTY，
+     * 这是模仿硬件的行为，返回码在意料之中。
+     * 其余一律是**配置错误**——句柄非法 / 生命周期不符 / 坐标越界 / 重复挂同一 n /
+     * row_paa 的 plane 与实参不符——都是调用者 bug，绝不能带着错配置发到硬件，
+     * 故全部 ASSERT（不再返回 INVALID_ARGUMENT）。 */
     ASSERT(command != NULL);
-    /* 指针身份 + 生命周期状态是文档化入口契约，保留返回码 */
-    if ((fc_command_to_id(command, &command_id) == 0U) ||
-        (fc_command_state_get(&g_fc_controller, command_id) != FC_COMMAND_STATE_ALLOCATED))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT(fc_command_to_id(command, &command_id) != 0U);
+    ASSERT(fc_command_state_get(&g_fc_controller, command_id) == FC_COMMAND_STATE_ALLOCATED);
+    (void)command_id; /* release（NDEBUG）下上面两条 ASSERT 被裁掉，command_id 仅用于前置条件 */
     /* plane 必须落在本命令的 plane 段内，CW 号必须在页内 */
     (void)fc_command_plane_span(command, &plane_first, &plane_last);
-    if ((cw >= CW_NUM) || (plane < plane_first) || (plane >= plane_last))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT((cw < CW_NUM) && (plane >= plane_first) && (plane < plane_last));
     /* 同一 n 被追加两次 = 链构造错误（掩码是集合，重复置位会静默丢数据） */
     ASSERT(fc_command_cw_attached(command, plane, cw) == 0U);
     /* row_paa 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
@@ -224,22 +226,24 @@ fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head)
  * fc_submit
  *   功能：命令投递到 SQ/HSQ（公共接口）。
  *   参数：command —— 已配置好的命令。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT / QUEUE_FULL。
- *   实现要点：状态须 ALLOCATED、validate 通过、desc 链所有权完整。
+ *   返回：FC_STATUS_OK / QUEUE_FULL（队列满 = 资源，模仿硬件行为）。
+ *   前置（违反一律 ASSERT，不返回错误码）：指针在命令池内；状态 ALLOCATED；
+ *         validate 通过；desc 链所有权完整。配置错误绝不发到硬件。
  * -------------------------------------------------------------------- */
 fc_status_t fc_submit(fc_command_t *command)
 {
     fc_command_id_t command_id;
 
-    /* command 非空是前置条件；指针身份 + 生命周期 + 校验结果是文档化入口契约，保留返回码 */
+    /* ── 校验段：全是调用者自铸值（它持有的句柄 / 它设的状态 / 它填的 config）——
+     *    属配置错误，绝不带错配置发到硬件，故一律 ASSERT，不再返回 INVALID_ARGUMENT。
+     *    本函数唯一合法失败是队列满（资源），由 fc_submit_internal 返回 QUEUE_FULL。 ── */
     ASSERT(command != NULL);
-    if ((fc_command_to_id(command, &command_id) == 0U) ||
-        (fc_command_state_get(&g_fc_controller, command_id) != FC_COMMAND_STATE_ALLOCATED) ||
-        (fc_command_validate(command) != FC_STATUS_OK) ||
-        (fc_command_descriptors_owned_internal(&g_fc_controller, command_id, command) == 0U))
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT(fc_command_to_id(command, &command_id) != 0U);
+    ASSERT(fc_command_state_get(&g_fc_controller, command_id) == FC_COMMAND_STATE_ALLOCATED);
+    ASSERT(fc_command_validate(command) == FC_STATUS_OK);
+    ASSERT(fc_command_descriptors_owned_internal(&g_fc_controller, command_id, command) != 0U);
+    (void)command_id; /* release（NDEBUG）下上面 ASSERT 被裁掉，command_id 仅用于前置条件 */
+
     return fc_submit_internal(&g_fc_controller, command);
 }
 
@@ -265,7 +269,9 @@ fc_status_t fc_poll_completion(fc_command_status_t *completion)
  * fc_command_release
  *   功能：释放命令全部资源（公共接口）。
  *   参数：command —— 命令。
- *   返回：FC_STATUS_OK / INVALID_ARGUMENT（指针不在命令池内）。
+ *   返回：恒 FC_STATUS_OK。
+ *   前置（违反一律 ASSERT）：command 非空且指针落在命令池内——栈上的 fc_command_t
+ *         是配置错误（没有对应命令可释放）。
  *   实现要点：**幂等**——命令已在 FREE 状态（空闲链上）时直接返回 OK，
  *         调用者不必自己判断"还活着吗"。命令须不在 CQ 中
  *         （FTL 应已 poll_completion 取走完成项）。
@@ -274,14 +280,10 @@ fc_status_t fc_command_release(fc_command_t *command)
 {
     fc_command_id_t command_id;
 
-    /* command 非空是前置条件；指针身份校验是文档化入口契约（辨析 D），保留返回码 */
+    /* 指针身份是配置错误（栈上的 fc_command_t 没有对应命令可释放）→ ASSERT，不返回 INVALID_ARGUMENT */
     ASSERT(command != NULL);
-
-    /* 指针不在池内（栈上的 fc_command_t）→ 没有对应命令可释放 */
-    if (fc_command_to_id(command, &command_id) == 0U)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT(fc_command_to_id(command, &command_id) != 0U);
+    (void)command_id; /* release（NDEBUG）下上面 ASSERT 被裁掉，command_id 仅用于前置条件 */
 
     /* 幂等性（已 FREE 直接返回 OK）由 internal 版统一负责，此处不重复判 */
     return fc_command_release_internal_api(&g_fc_controller, command);
@@ -297,41 +299,33 @@ fc_buffer_id_t fc_buffer_alloc(void)
     return fc_buffer_alloc_internal(&g_fc_controller);
 }
 
-/* 释放 buffer（须已占用） */
+/* 释放 buffer。前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不返回 INVALID_ARGUMENT）。
+ * 返回：恒 FC_STATUS_OK。 */
 fc_status_t fc_buffer_release(fc_buffer_id_t buffer_id)
 {
-    if (fc_buffer_is_occupied(buffer_id) == 0U)
-    {
-        return FC_STATUS_INVALID_ARGUMENT;
-    }
+    ASSERT(fc_buffer_is_occupied(buffer_id) != 0U);
     return fc_buffer_release_internal(&g_fc_controller, buffer_id);
 }
 
-/* 对外：返回 USER 数据区指针（跳过 META+CRC 8 字节） */
+/* 对外：返回 USER 数据区指针（跳过 META+CRC 8 字节）。
+ * 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。 */
 uint8_t *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
 {
     uint8_t *base;
 
-    if (fc_buffer_is_occupied(buffer_id) == 0U)
-    {
-        return NULL;
-    }
+    ASSERT(fc_buffer_is_occupied(buffer_id) != 0U);
+    /* 占用即保证池内指针非空（_internal 只做数组下标），无需再判 NULL */
     base = fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
-    if (base == NULL)
-    {
-        return NULL;
-    }
+
     /* 对外只暴露 USER 数据区，跳过 META(4) + CRC(4) */
     return base + FC_BUFFER_USER_OFFSET;
 }
 
-/* FC 内部：返回 CW 基址（528B，含 META/CRC/PARITY，数据路径用） */
+/* FC 内部：返回 CW 基址（528B，含 META/CRC/PARITY，数据路径用）。
+ * 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。 */
 uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id)
 {
-    if (fc_buffer_is_occupied(buffer_id) == 0U)
-    {
-        return NULL;
-    }
+    ASSERT(fc_buffer_is_occupied(buffer_id) != 0U);
     return fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
 }
 
