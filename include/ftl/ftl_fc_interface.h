@@ -128,7 +128,7 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
 
 /* ── 地址直填：nand_addr_t → FC 命令 ──
  *
- * 遍历路径（GC 搬移、元数据扫描、Checkpoint）不再 pba_make 打包 → 拆包，
+ * 遍历路径（GC 搬移、元数据扫描、Checkpoint）不再打包 → 拆包，
  * 直接用展开地址填入 FC 命令：
  *   ch/ce/lun  → cmd->config 位域
  *   block/plane/page/cw → pba
@@ -148,7 +148,7 @@ static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *add
     cmd->config.ch  = (DWORD)addr->ch;
     cmd->config.ce  = (DWORD)addr->ce;
     cmd->config.lun = (DWORD)addr->lun;
-    cmd->pba        = (DWORD)pba_make(addr->ch, addr->ce, addr->page, addr->plane, addr->block, addr->lun, addr->cw);
+    cmd->pba        = (DWORD)pba_from_addr(addr);
 
     return ftl_cmd_configure_descriptors(cmd);
 }

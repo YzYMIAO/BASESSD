@@ -132,7 +132,7 @@ static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t
  *         desc->paa       = pba_to_paa((row_pba     & ~PLANE_CW_MASK) | plane_cw)
  *         desc->meta      =            (command->meta & ~PLANE_CW_MASK) | plane_cw
  *       基值不同（物理 PBA vs 逻辑 LBA），公式同一。此前分叉成 multi_plane 的
- *       paa_make 与单 plane 的掩码改写两条分支——单 plane 时
+ *       行地址重排与单 plane 的掩码改写两条分支——单 plane 时
  *       `plane == pba_to_plane(row_pba)` ⇒ 两分支逐位等价，合并为一条。
  *     - CW 号由调用方给出（FTL 侧的掩码枚举），**不由 desc 序号推导**——链走位
  *       （desc 序号）与 CW 号解耦：按链走位索引的地方不动，CW 号一律从

@@ -286,7 +286,7 @@ struct fc_descriptor_t {
   desc->meta =            (command->meta & ~PLANE_CW_MASK) | plane_cw;  /* 逻辑基值 */
   ```
 - **为什么 PBA 的 plane 在 page 之下**（与 PAA 相反）：FTL 的页号 `internal_lba` 里 plane 就是最低位（`ftl.c` 的 `l2p_cache_read(internal_lba + 1)` 取 plane1）。取 `LBA >> CW_WIDTH` 必须**逐位等于**今天的 `internal_lba`，否则 plane1 会变成 `internal_lba + 64`，L2P 编号、journal / checkpoint 的页号、所有 `+1` 约定全要改。选 `[page][plane]` 而不是跟 PAA 的 `[plane][page]` 就是**为了这一点**。
-- **PAA 不动**：19 处 `paa_make`、`paa_to_nand_row`、器件行地址编码 `PA[5:0] | BA6<<6 | BA[17:7]` 全部保持原样。`pba_to_paa()` / `paa_to_pba()` 是**真正的字段重排**（不是掩码截取）——旧版 `PAA_FROM_PBA_MASK` 掩码宏已删除。
+- **PAA 布局不动**：`paa_to_nand_row`、器件行地址编码 `PA[5:0] | BA6<<6 | BA[17:7]` 保持原样，`paa_make` 的全部调用点字段值逐位不变（v25 只把形参序换成 `nand_addr_t` 具名字段，见 §6.2）。`pba_to_paa()` / `paa_to_pba()` 是**真正的字段重排**（不是掩码截取）——旧版 `PAA_FROM_PBA_MASK` 掩码宏已删除。
 - **低 3 位是共享编码**：`PLANE_CW_MASK = 0x7`（`[plane:1][cw:2]`），PBA 与 LBA 共用，所以 `desc->meta` 的低 3 位与 `desc->paa` 的 plane/cw 天然一致，Pass 4 才能拿它做自洽校验。
 
 设计决策：
@@ -1233,10 +1233,17 @@ static inline uint32_t paa_to_page(nand_paa_t paa);
 static inline uint32_t paa_to_plane(nand_paa_t paa);
 static inline uint32_t paa_to_block(nand_paa_t paa);
 static inline uint32_t paa_to_lun(nand_paa_t paa);
-static inline nand_paa_t paa_make(page, plane, block, lun, cw);
-static inline uint8_t    paa_is_valid(page, plane, block, lun, cw);
-static inline uint32_t   paa_to_nand_row(nand_paa_t paa);  // 转换为 NAND 行地址
+static inline nand_paa_t paa_from_addr(const nand_addr_t *addr);  // 展开地址 → PAA
+static inline uint8_t    paa_is_valid_addr(const nand_addr_t *addr);
+static inline uint32_t   paa_to_nand_row(nand_paa_t paa);         // 转换为 NAND 行地址
 ```
+
+**构造入口一律走 `nand_addr_t` 具名字段**（v25）：`paa_from_addr()` / `pba_from_addr()` 是展开 → 打包，
+`addr_from_paa()` / `addr_from_pba()` 是打包 → 展开。PAA / PBA / LBA 三套地址都以 `nand_addr_t` 为
+唯一构造入口，不再有位置形参版本——七个同型小整数按位置传参写反了仍落在合法值域内（`page<64`、
+`plane<2`、`block<2048`），会静默算出错地址；具名字段把这类错误变成编译错误。
+（v25 前为 5 形参 `paa_make(page, plane, block, lun, cw)` / 7 形参
+`pba_make(ch, ce, page, plane, block, lun, cw)`，字段顺序与 `nand_addr_t` 恰好相反。）
 
 `paa_to_nand_row()` 将 PAA 转换为 MT29F4G08 的三周期行地址编码：PA[5:0]→bit[5:0]、BA6(Plane)→bit[6]、BA[17:7]→bit[17:7]。
 
@@ -1371,7 +1378,7 @@ typedef enum {
 | 1 | FuncStatus 语义统一 | `0U`/`1U` → `FUNC_STATUS_SUCCESS`/`FUNC_STATUS_ERROR` | ✅ |
 | 2 | command_handle → command_id | 统一命名 | ✅ |
 | 3 | fc_command_configure_descriptors | 合并 descriptor 分配+配置为单接口（v13 上移 FTL，见 §26） | ✅ |
-| 4 | paa_make() | PAA 地址合成函数（LUN→Block→Plane→Page→CW） | ✅ |
+| 4 | paa_from_addr() | PAA 地址合成函数（由 `nand_addr_t` 具名字段打包；v25 前为 5 形参 `paa_make`） | ✅ |
 | 5 | 条件判断宏封装 | 复合条件拆为独立命名宏 | ✅ |
 | 6 | 资源 ID 双向查询 | 每种资源提供 id↔指针 双向转换函数 | ✅ |
 | 7 | 冗余 NULL 检查移除 | 内部函数移除 controller/command 等 NULL 检查 | ✅ |
@@ -4128,8 +4135,8 @@ fc_status_t fc_command_attach_cw(fc_command_t *cmd, uint8_t plane, uint8_t cw, n
 ```c
 fc_command_t *cmd = fc_command_alloc();
 /* 填 config；各 plane 传自己的行地址（此处同页，故只有 plane 位不同） */
-nand_paa_t row0 = paa_make(page, 0, block, lun, 0);
-nand_paa_t row1 = paa_make(page, 1, block, lun, 0);
+nand_paa_t row0 = paa_from_addr(&(nand_addr_t){.lun = lun, .block = block, .plane = 0, .page = page});
+nand_paa_t row1 = paa_from_addr(&(nand_addr_t){.lun = lun, .block = block, .plane = 1, .page = page});
 fc_command_attach_cw(cmd, 0, 0, row0);
 fc_command_attach_cw(cmd, 0, 3, row0);
 fc_command_attach_cw(cmd, 1, 1, row1);

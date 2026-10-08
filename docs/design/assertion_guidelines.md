@@ -603,3 +603,60 @@ debug / release / tests / RAID=1 四档 0 warning 0 error（149920 / 84988 / 197
 六条加扰判据 + 四条布局判据离线自证全过（见 changelog）；**上板未验**。
 
 > 详见 `docs/changelog/fc_scrambler_lba_seed_v24.md`。
+
+---
+
+## 二十、v25：同一个头文件里的两种调用约定 = 隐患（2026-10-08）
+
+**新判据**：
+
+> **同一个头文件里，同一个操作存在两种调用约定（同义不同序），本身就是隐患，应收敛为一种。**
+> 判据不是"形参太多"——形参多只是症状；病根是**同一组字段出现了两套顺序**，
+> 而编译器**不检查这两套顺序是否一致**。
+
+**首个案例**：`include/nand/nand_config.h` 里
+
+```c
+static inline nand_pba_t pba_make(uint32_t ch, uint32_t ce, uint32_t page, uint32_t plane,
+                                  uint32_t block, uint32_t lun, uint32_t cw);
+static inline nand_pba_t pba_from_addr(const nand_addr_t *addr);   /* 体内就是上一行 */
+```
+
+`pba_from_addr` 的函数体**逐字**就是 `pba_make(addr->ch, addr->ce, addr->page, addr->plane,
+addr->block, addr->lun, addr->cw)`——**它们是同一个函数的两种调用约定**，而不是两个函数。
+之所以要有 `pba_from_addr`，唯一原因就是 `nand_addr_t` 的字段序（`ch, ce, lun, block, plane,
+page, cw`）与 `paa_make` / `pba_make` 的形参序（`…, page, plane, block, lun, …`）**恰好相反**。
+
+**为什么这是隐患而不是风格问题**：七个**同型小整数**，写反了
+
+- **依然编译通过**（全是 `uint32_t` 形参，无 `-Wconversion` 之外的任何提示）；
+- **依然落在合法值域内**（`page < 64`、`plane < 2`、`block < 2048` 全都成立）；
+- ⇒ **静默算出错地址**，直到上板读到错页才发现。
+
+对照 §十三/§十四：那两条判据解决的是"配置错误该 ASSERT 还是返回码"；本条解决的是
+**让配置错误根本写不出来**——`nand_addr_t` 具名字段（`.page = p, .plane = q`）把"顺序写反"
+从**静默错地址**变成**编译错误**。这比任何 ASSERT 都早一步。
+
+**推广到同类**：判断方法不是数形参，而是问——**这组形参里有没有两个以上同类型、可互换的字段？**
+有，且另一个入口用的是另一种顺序 ⇒ 收敛。本轮 `paa_make` / `pba_make` 删除，13 处生产调用点
+迁到 `paa_from_addr` / `pba_from_addr`；`pba_to_paa` / `paa_to_pba` / `addr_to_cmd` 三处原本
+**为跨这两套顺序而存在的拆包再打包**随之消失。
+
+**保留项（对 §十七 判据 5 的显式例外，勿"清理"）**：本轮 3 个零调用者函数
+`paa_is_valid_addr`（原 `paa_is_valid`）/ `paa_to_pba` / `pba_to_nand_row` **按用户要求保留**。
+注意 `paa_is_valid` 的**形参序本身就是**被消灭的那一套，所以它即便保留也必须换成
+`nand_addr_t` 版本——**"保留函数"不等于"保留隐患"**。
+
+**未跟进**：`nand_addr_t` 刻意保持**普通字段**而非位域（`include/common/ftl_types.h:20-22`
+的既有设计原则）——理由五条见 `docs/changelog/nand_config_addr_ctor_v25.md`，其中两条是硬约束：
+本构建 `LUN_ADDR_WIDTH == 0`，而 C11 6.7.2.1p4 规定 0 宽位域不得有声明符（具名 `lun : 0`
+直接编译不过）；位域布局是 implementation-defined 且 `offsetof` 非法 ⇒ **没有任何静态断言**
+能证明它与 `PBA_*_SHIFT` 宏一致。
+
+**验证**：debug / release / RAID=1 三档 0 warning 0 error（150028 / 84944 / 154372 B）；
+`make format-check` passed；`nm` 确认 `paa_from_addr` / `pba_from_addr` 只有 local（`t`）符号、
+`paa_make` / `pba_make` 全局消失；**离线等价性自证**（本轮唯一强判据）——旧实现抄成参照，
+1,048,576 组 × 7 条判据 + 2,097,152 组 × 1 条判据，**0 mismatch**；**上板未验**。
+（`make tests` 本轮未跑——测试源由用户同步重构中。）
+
+> 详见 `docs/changelog/nand_config_addr_ctor_v25.md`。

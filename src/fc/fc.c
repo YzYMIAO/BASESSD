@@ -906,7 +906,12 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
         uint32_t block = pba_to_block(data_cmd->pba);
         uint32_t plun  = pba_to_lun(data_cmd->pba);
 
-        parity_cmd->pba = pba_make(pba_to_ch(data_cmd->pba), pba_to_ce(data_cmd->pba), page, (uint32_t)(PLANE_NUM - 1U), block, plun, 0U);
+        parity_cmd->pba = pba_from_addr(&(nand_addr_t){.ch    = (uint8_t)pba_to_ch(data_cmd->pba),
+                                                       .ce    = (uint8_t)pba_to_ce(data_cmd->pba),
+                                                       .lun   = (uint8_t)plun,
+                                                       .block = (uint16_t)block,
+                                                       .plane = (uint8_t)(PLANE_NUM - 1U),
+                                                       .page  = (uint8_t)page});
     }
 
     /* ③ 分配 parity desc + buffer
@@ -919,7 +924,12 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
      *    行地址：同一 plane 内所有 CW 共用 parity_cmd->pba 的 ch/ce/page/block/lun。 */
     {
         const uint8_t    parity_plane = (uint8_t)pba_to_plane(parity_cmd->pba);
-        const nand_pba_t parity_row   = pba_make(pba_to_ch(parity_cmd->pba), pba_to_ce(parity_cmd->pba), pba_to_page(parity_cmd->pba), parity_plane, pba_to_block(parity_cmd->pba), pba_to_lun(parity_cmd->pba), 0U);
+        const nand_pba_t parity_row   = pba_from_addr(&(nand_addr_t){.ch    = (uint8_t)pba_to_ch(parity_cmd->pba),
+                                                                     .ce    = (uint8_t)pba_to_ce(parity_cmd->pba),
+                                                                     .lun   = (uint8_t)pba_to_lun(parity_cmd->pba),
+                                                                     .block = (uint16_t)pba_to_block(parity_cmd->pba),
+                                                                     .plane = parity_plane,
+                                                                     .page  = (uint8_t)pba_to_page(parity_cmd->pba)});
         uint8_t          pcw;
 
         for (pcw = 0U; pcw <= (uint8_t)parity_cmd->config.cw; pcw++)
@@ -1100,8 +1110,9 @@ static void fc_build_request_data_planes(const fc_t *controller, const fc_comman
 
         if ((planes_with_desc & (uint8_t)(1U << plane)) == 0U)
         {
-            /* 该 plane 的行地址取链上第一条 desc（CW 位丢掉：行地址只含 page/block/lun+plane） */
-            plane_row[plane] = paa_make(paa_to_page(descriptor->paa), plane, paa_to_block(descriptor->paa), paa_to_lun(descriptor->paa), 0U);
+            /* 该 plane 的行地址取链上第一条 desc（行地址只含 page/block/lun+plane，CW 位丢掉）：
+             * paa_page_base 清 CW 位、paa_with_plane 换 plane —— 与逐字段重排逐位等价。 */
+            plane_row[plane] = paa_with_plane(paa_page_base(descriptor->paa), plane);
             planes_with_desc |= (uint8_t)(1U << plane);
         }
         else

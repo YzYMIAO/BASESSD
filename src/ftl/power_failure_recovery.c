@@ -372,7 +372,7 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
             nand_addr_t pba;
             int         ret;
 
-            pba = addr_from_paa(ch, ce, paa_make(page, plane, sb->plane_blocks[plane], 0U, 0U));
+            pba = addr_from_paa(ch, ce, paa_from_addr(&(nand_addr_t){.block = sb->plane_blocks[plane], .plane = plane, .page = page}));
 
             memset(buf, 0xFF, sizeof(buf));
 

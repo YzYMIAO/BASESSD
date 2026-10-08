@@ -57,7 +57,7 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
 
         dir->entries[dir->count].type = METADATA_TYPE_L2P_REGION;
         dir->entries[dir->count].id   = i;
-        dir->entries[dir->count].paa  = paa_make(page, plane, block, dir->topo.lun, 0);
+        dir->entries[dir->count].paa  = paa_from_addr(&(nand_addr_t){.lun = dir->topo.lun, .block = block, .plane = plane, .page = page});
         dir->count++;
     }
 
@@ -167,7 +167,7 @@ nand_paa_t metadata_dir_alloc_region(metadata_dir_cache_t *dir,
     page  = dir->cur_metadata_page;
     block = dir->cur_metadata_block;
 
-    paa = paa_make(page, plane, block, dir->topo.lun, 0);
+    paa = paa_from_addr(&(nand_addr_t){.lun = dir->topo.lun, .block = block, .plane = plane, .page = page});
 
     /* 更新 Directory */
     metadata_dir_update(dir, METADATA_TYPE_L2P_REGION, region_id, paa);
@@ -379,7 +379,7 @@ nand_paa_t metadata_dir_anchor_paa(uint8_t idx)
 
     /* lun 由调用侧（anchor_page_addr / 各模块 topo）带出——此处仅固定块/页/plane，
      * 调用点用 anchor_page_addr(dir->topo.ch, dir->topo.ce, dir->topo.lun, i) 展开。 */
-    return paa_make(page, plane, block, 0, 0);
+    return paa_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page});
 }
 
 int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint16_t block)

@@ -47,7 +47,7 @@ static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uin
     uint8_t  plane = (uint8_t)(region_id & 1U);                                                  /* 偶 P0, 奇 P1 */
     uint16_t block = (uint16_t)(L2P_BASE_BLOCK + (lun * L2P_BLOCKS_PER_LUN) + (region_id >> 6)); /* /64 + lun 错位 */
     uint8_t  page  = (uint8_t)(region_id & 0x3FU);                                               /* %64 */
-    return pba_make(ch, ce, page, plane, block, lun, 0);
+    return pba_from_addr(&(nand_addr_t){.ch = ch, .ce = ce, .lun = lun, .block = block, .plane = plane, .page = page});
 }
 
 /* ── Region 分解 ── */

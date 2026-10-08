@@ -46,8 +46,8 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 
     journal->topo = topo;
 
-    journal->block_pba[0] = pba_make(topo.ch, topo.ce, 0, 0, JOURNAL_BLOCK0, 0, 0);
-    journal->block_pba[1] = pba_make(topo.ch, topo.ce, 0, 0, JOURNAL_BLOCK1, 0, 0);
+    journal->block_pba[0] = pba_from_addr(&(nand_addr_t){.ch = topo.ch, .ce = topo.ce, .block = JOURNAL_BLOCK0});
+    journal->block_pba[1] = pba_from_addr(&(nand_addr_t){.ch = topo.ch, .ce = topo.ce, .block = JOURNAL_BLOCK1});
 
     journal->current_block    = 0U;
     journal->current_page     = 0U;

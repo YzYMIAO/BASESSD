@@ -634,7 +634,7 @@ int ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length);
 
 ### 5.2 地址直填 Helper（Step 1/2 新增）
 
-见 `include/ftl/ftl_fc_interface.h`。遍历路径不再 `pba_make` 打包 → `ftl_cmd_setup_ppa` 拆包，
+见 `include/ftl/ftl_fc_interface.h`。遍历路径不再打包 → `ftl_cmd_setup_ppa` 拆包，
 直接用展开地址（`nand_addr_t`，定义于 `include/nand/nand_config.h`）填入 FC 命令：
 
 ```c

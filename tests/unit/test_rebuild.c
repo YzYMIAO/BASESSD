@@ -252,11 +252,11 @@ static MunitResult test_is_metadata_block_dynamic(const MunitParameter params[],
     munit_assert_int(ftl_is_metadata_block(&fx->md_dir, 200U), ==, 0);
 
     /* 登记 region 5 到 block 200（page/plane 随便） */
-    metadata_dir_update(&fx->md_dir, METADATA_TYPE_L2P_REGION, 5U, paa_make(0U, 0U, 200U, 0U, 0U));
+    metadata_dir_update(&fx->md_dir, METADATA_TYPE_L2P_REGION, 5U, paa_from_addr(&(nand_addr_t){.block = 200U}));
     munit_assert_int(ftl_is_metadata_block(&fx->md_dir, 200U), ==, 1);
 
     /* 同 block 其他 L2P region 也命中 */
-    metadata_dir_update(&fx->md_dir, METADATA_TYPE_L2P_REGION, 6U, paa_make(0U, 0U, 201U, 0U, 0U));
+    metadata_dir_update(&fx->md_dir, METADATA_TYPE_L2P_REGION, 6U, paa_from_addr(&(nand_addr_t){.block = 201U}));
     munit_assert_int(ftl_is_metadata_block(&fx->md_dir, 201U), ==, 1);
 
     /* NULL md_dir：固定区间仍命中，动态不适用 */

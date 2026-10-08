@@ -118,6 +118,35 @@
 #define PAA_BLOCK_MASK         NAND_FIELD_MASK(BLOCK_ADDR_WIDTH)
 #define PAA_LUN_MASK           NAND_FIELD_MASK(LUN_ADDR_WIDTH)
 
+/* ══════════════════════════════════════════════════════════════
+ * nand_addr_t — 展开式地址（具名字段）
+ *
+ * 三套打包地址（PAA / PBA / LBA）都以它为**唯一的构造入口**：
+ *   paa_from_addr() / pba_from_addr()   展开 → 打包
+ *   addr_from_paa() / addr_from_pba()   打包 → 展开
+ *
+ * 为什么用具名字段而不是位置形参：三个打包地址的字段都是同型小整数，
+ * 位置形参写反了**依然编译通过、依然落在合法值域内**（page<64、plane<2、
+ * block<2048 全都成立）⇒ 静默算出错地址。具名字段把这类错误变成编译错误。
+ *
+ * 为什么定义在此处（而非文件末尾）：paa_from_addr() 定义在 PAA 段内。
+ *
+ * 为什么用普通字段而不是位域：① 访问更快；② C 编译器无位域可移植性问题
+ * （设计原则见 include/common/ftl_types.h）；③ 本构建 LUN_ADDR_WIDTH == 0，
+ * 而 C11 6.7.2.1p4 规定 0 宽位域不得有声明符 ⇒ 具名 `lun : 0` 直接编译不过。
+ * ══════════════════════════════════════════════════════════════ */
+
+typedef struct
+{
+    uint8_t  ch;    /* Channel */
+    uint8_t  ce;    /* Chip Enable */
+    uint8_t  lun;   /* LUN (Die) */
+    uint16_t block; /* Block number (0..2047) */
+    uint8_t  plane; /* Plane (0/1) */
+    uint8_t  page;  /* Page in block (0..63) */
+    uint8_t  cw;    /* Code Word (0..3, 0=全部) */
+} nand_addr_t;
+
 typedef uint32_t nand_paa_t;
 
 static inline uint32_t paa_to_page(nand_paa_t paa)
@@ -140,19 +169,24 @@ static inline uint32_t paa_to_lun(nand_paa_t paa)
     return (paa >> PAA_LUN_SHIFT) & PAA_LUN_MASK;
 }
 
-static inline nand_paa_t paa_make(uint32_t page, uint32_t plane, uint32_t block, uint32_t lun, uint32_t cw)
+/* 由展开地址构造 PAA（芯片内地址）。
+ * ⚠ PAA 不含 CH/CE —— 片选是命令级信息，不属于芯片内地址，
+ *   故本函数**忽略 addr->ch / addr->ce**。 */
+static inline nand_paa_t paa_from_addr(const nand_addr_t *addr)
 {
-    return ((cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT) |
-           ((page & PAA_PAGE_MASK) << PAA_PAGE_SHIFT) |
-           ((plane & PAA_PLANE_MASK) << PAA_PLANE_SHIFT) |
-           ((block & PAA_BLOCK_MASK) << PAA_BLOCK_SHIFT) |
-           ((lun & PAA_LUN_MASK) << PAA_LUN_SHIFT);
+    return ((nand_paa_t)(addr->cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT) |
+           ((nand_paa_t)(addr->page & PAA_PAGE_MASK) << PAA_PAGE_SHIFT) |
+           ((nand_paa_t)(addr->plane & PAA_PLANE_MASK) << PAA_PLANE_SHIFT) |
+           ((nand_paa_t)(addr->block & PAA_BLOCK_MASK) << PAA_BLOCK_SHIFT) |
+           ((nand_paa_t)(addr->lun & PAA_LUN_MASK) << PAA_LUN_SHIFT);
 }
 
-static inline uint8_t paa_is_valid(uint32_t page, uint32_t plane, uint32_t block, uint32_t lun, uint32_t cw)
+/* 展开地址的各字段是否在芯片规格范围内（nand_addr_t 版本）。
+ * 打包版本见下方 paa_is_valid_paa()。 */
+static inline uint8_t paa_is_valid_addr(const nand_addr_t *addr)
 {
-    return (uint8_t)((page < PAGES_PER_BLOCK) && (plane < PLANE_NUM) && (block < BLOCKS_PER_PLANE) &&
-                     (lun < LUN_NUM) && (cw < CW_NUM));
+    return (uint8_t)((addr->page < PAGES_PER_BLOCK) && (addr->plane < PLANE_NUM) && (addr->block < BLOCKS_PER_PLANE) &&
+                     (addr->lun < LUN_NUM) && (addr->cw < CW_NUM));
 }
 
 /* MT29F4G08 行地址：PA[5:0] -> bit[5:0]，Plane/BA6 -> bit[6]，BA[17:7] -> bit[17:7]。 */
@@ -325,7 +359,11 @@ static inline uint16_t pba_to_cw(nand_pba_t pba)
 /* 从 PBA 提取芯片内地址（PAA）。两套位序不同 ⇒ **真正的字段重排**，不是掩码截取。 */
 static inline nand_paa_t pba_to_paa(nand_pba_t pba)
 {
-    return paa_make(pba_to_page(pba), pba_to_plane(pba), pba_to_block(pba), pba_to_lun(pba), pba_to_cw(pba));
+    return paa_from_addr(&(nand_addr_t){.lun   = (uint8_t)pba_to_lun(pba),
+                                        .block = (uint16_t)pba_to_block(pba),
+                                        .plane = (uint8_t)pba_to_plane(pba),
+                                        .page  = (uint8_t)pba_to_page(pba),
+                                        .cw    = (uint8_t)pba_to_cw(pba)});
 }
 
 static inline uint32_t pba_to_nand_row(nand_pba_t pba)
@@ -333,16 +371,16 @@ static inline uint32_t pba_to_nand_row(nand_pba_t pba)
     return paa_to_nand_row(pba_to_paa(pba));
 }
 
-/* 构造 PBA（按 PBA 位序打包，**不经 paa_make**）。签名与旧版一致。 */
-static inline nand_pba_t pba_make(uint32_t ch, uint32_t ce, uint32_t page, uint32_t plane, uint32_t block, uint32_t lun, uint32_t cw)
+/* 由展开地址构造 PBA（按 PBA 位序打包，不经 PAA）。逆函数见下方 addr_from_pba()。 */
+static inline nand_pba_t pba_from_addr(const nand_addr_t *addr)
 {
-    return ((nand_pba_t)(cw & NAND_FIELD_MASK(CW_WIDTH)) << PBA_CW_SHIFT) |
-           ((nand_pba_t)(plane & PBA_PLANE_MASK) << PBA_PLANE_SHIFT) |
-           ((nand_pba_t)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT) |
-           ((nand_pba_t)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT) |
-           ((nand_pba_t)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT) |
-           ((nand_pba_t)(ce & PBA_CE_MASK) << PBA_CE_SHIFT) |
-           ((nand_pba_t)(ch & PBA_CH_MASK) << PBA_CH_SHIFT);
+    return ((nand_pba_t)(addr->cw & NAND_FIELD_MASK(CW_WIDTH)) << PBA_CW_SHIFT) |
+           ((nand_pba_t)(addr->plane & PBA_PLANE_MASK) << PBA_PLANE_SHIFT) |
+           ((nand_pba_t)(addr->page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT) |
+           ((nand_pba_t)(addr->block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT) |
+           ((nand_pba_t)(addr->lun & PBA_LUN_MASK) << PBA_LUN_SHIFT) |
+           ((nand_pba_t)(addr->ce & PBA_CE_MASK) << PBA_CE_SHIFT) |
+           ((nand_pba_t)(addr->ch & PBA_CH_MASK) << PBA_CH_SHIFT);
 }
 
 /* ── 便利构造 ── */
@@ -350,7 +388,13 @@ static inline nand_pba_t pba_make(uint32_t ch, uint32_t ce, uint32_t page, uint3
 /* 从芯片内地址 PAA + CH/CE 构造 PBA（字段重排，pba_to_paa 的逆） */
 static inline nand_pba_t paa_to_pba(uint32_t ch, uint32_t ce, nand_paa_t paa)
 {
-    return pba_make(ch, ce, paa_to_page(paa), paa_to_plane(paa), paa_to_block(paa), paa_to_lun(paa), paa_to_cw(paa));
+    return pba_from_addr(&(nand_addr_t){.ch    = (uint8_t)ch,
+                                        .ce    = (uint8_t)ce,
+                                        .lun   = (uint8_t)paa_to_lun(paa),
+                                        .block = (uint16_t)paa_to_block(paa),
+                                        .plane = (uint8_t)paa_to_plane(paa),
+                                        .page  = (uint8_t)paa_to_page(paa),
+                                        .cw    = (uint8_t)paa_to_cw(paa)});
 }
 
 /* ── LBA → CW META ──
@@ -440,32 +484,17 @@ static inline uint8_t pba_is_valid(nand_pba_t pba)
 }
 
 /* ══════════════════════════════════════════════════════════════
- * nand_addr_t — 展开的芯片内地址（遍历/迭代用）
+ * 打包地址 → 展开地址 的转换器
  *
  * 存储主控内部地址分两层：
- *   nand_addr_t（展开） — 遍历路径用，字段直接访问不需要 shift
+ *   nand_addr_t（展开）  — 定义于文件开头；遍历路径用，字段直接访问不需要 shift
  *   nand_pba_t  (packed) — L2P 表存储接口用，32-bit 紧凑
  *
- * 遍历路径不再先 pba_make 打包再 ftl_cmd_setup_ppa 拆包，
+ * 反向的 paa_from_addr() / pba_from_addr() 分别定义在 PAA / PBA 段内。
+ *
+ * 遍历路径不再先打包再 ftl_cmd_setup_ppa 拆包，
  * 而是直接用 addr_to_cmd（定义于 ftl_fc_interface.h）填入 FC 命令。
  * ══════════════════════════════════════════════════════════════ */
-
-typedef struct
-{
-    uint8_t  ch;    /* Channel */
-    uint8_t  ce;    /* Chip Enable */
-    uint8_t  lun;   /* LUN (Die) */
-    uint16_t block; /* Block number (0..2047) */
-    uint8_t  plane; /* Plane (0/1) */
-    uint8_t  page;  /* Page in block (0..63) */
-    uint8_t  cw;    /* Code Word (0..3, 0=全部) */
-} nand_addr_t;
-
-/* nand_addr_t → nand_pba_t */
-static inline nand_pba_t pba_from_addr(const nand_addr_t *addr)
-{
-    return pba_make(addr->ch, addr->ce, addr->page, addr->plane, addr->block, addr->lun, addr->cw);
-}
 
 /* nand_pba_t → nand_addr_t（展开）。allocator/L2P 返回紧凑 PBA，
  * 遍历路径填 FC 命令前展开一次。 */

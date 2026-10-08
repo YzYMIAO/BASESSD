@@ -185,7 +185,7 @@ static int rr_neighbor_assist(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buff
         uint8_t     neighbor_buf[FC_BUFFER_USER_SIZE * CW_NUM];
         int         ret;
 
-        neighbor_addr = addr_from_paa(ch, ce, paa_make(neighbors[i], plane, block, 0U, 0U));
+        neighbor_addr = addr_from_paa(ch, ce, paa_from_addr(&(nand_addr_t){.plane = (uint8_t)plane, .block = (uint16_t)block, .page = neighbors[i]}));
 
         memset(neighbor_buf, 0, sizeof(neighbor_buf));
         ret = ftl_sync_read_page(neighbor_addr, neighbor_buf, sizeof(neighbor_buf), FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_READ_RECOVERY, 0U));

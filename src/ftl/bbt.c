@@ -129,7 +129,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
         {
             uint8_t  plane = (uint8_t)(gblock / BLOCKS_PER_PLANE);
             uint16_t block = (uint16_t)(gblock % BLOCKS_PER_PLANE);
-            page_addr0     = addr_from_paa(alloc->ch, alloc->ce, paa_make(0U, plane, block, 0U, 0U));
+            page_addr0     = addr_from_paa(alloc->ch, alloc->ce, paa_from_addr(&(nand_addr_t){.plane = (uint8_t)plane, .block = (uint16_t)block}));
         }
 
         memset(raw_buf, 0xFF, sizeof(raw_buf));

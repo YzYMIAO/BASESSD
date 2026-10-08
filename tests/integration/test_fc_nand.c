@@ -71,7 +71,10 @@ static uint8_t fc_nand_test_completion_is_success(const fc_command_status_t *com
 /* The caller selects the target LUN/Plane/Block; block tests always start at CW0 of each Page. */
 static nand_paa_t fc_nand_test_page_paa(nand_paa_t block_paa, uint32_t page)
 {
-    return paa_make(page, paa_to_plane(block_paa), paa_to_block(block_paa), paa_to_lun(block_paa), 0U);
+    return paa_from_addr(&(nand_addr_t){.lun   = (uint8_t)paa_to_lun(block_paa),
+                                        .block = (uint16_t)paa_to_block(block_paa),
+                                        .plane = (uint8_t)paa_to_plane(block_paa),
+                                        .page  = (uint8_t)page});
 }
 
 /* 等待命令完成；completion_out 非空时回传 CQ 条目（GET_FEATURES 的返回值在
