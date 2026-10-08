@@ -49,7 +49,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     cmd->module             = FC_COMMAND_MODULE_GC;
-    cmd->meta               = 0U;
+    cmd->meta               = FC_META_UNKNOWN; /* 不知道 LBA——正是要从页内 META 读回来（v24） */
 
     if (ftl_cmd_setup_ppa(cmd, pba) != 0)
     {
@@ -89,9 +89,9 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
         (void)ftl_cmd_read_data(cmd, buffer, 2048U);
     }
 
-    /* 从 META 提取 LBA
-     * CW0 的 META = lba_to_cw_meta(lba, 0) = (lba & ~3) | 0
-     * 所以 lba = meta_cw0 & ~3 */
+    /* 从 META 提取**页** LBA（v24）
+     * CW0 的 META = 本 CW 的**扇区** LBA = (页 LBA << CW_WIDTH) | [plane][cw=0]
+     * 所以 页 LBA = meta_cw0 >> CW_WIDTH（低 3 位 [plane][cw] 丢掉，得到页粒度地址） */
     {
         uint8_t *meta_ptr = fc_buffer_get_meta(cmd, 0U);
         if (meta_ptr != NULL)
@@ -109,8 +109,8 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
 
     if (lba_out != NULL)
     {
-        /* META[0:1] = cw_index, 高位 = LBA 基址 */
-        *lba_out = (lba_t)(meta_cw0 & ~3UL);
+        /* META 低 3 位 = [plane][cw]，高位 = 页 LBA */
+        *lba_out = (lba_t)(meta_cw0 >> CW_WIDTH);
     }
     if (ecc_out != NULL)
     {

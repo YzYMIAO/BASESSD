@@ -535,3 +535,71 @@ NDEBUG 下无 `-Wunused-variable` 风险（与 §十三 的 `command_id` 情形�
 未引入新的外部链接符号；`make format-check` passed；上板未做。
 
 > 详见 `docs/changelog/ftl_cw_mask_single_knob_v23.md`。
+
+---
+
+## 十九、v24：地址布局统一 + 加扰器重做（2026-10-08）
+
+v24 把 PBA 从"与 PAA 共用位序"改为"与 LBA 逐位同构"，并把加扰种子从物理地址改为逻辑地址。
+**本轮没有新增断言判据**——涉及的断言全部落在既有条目上，这里只记两则"沿用既有判据"的处置。
+
+### 沿用 §十三：`fc_command_configure_descriptor` 的 row 校验
+
+v24 把该入口的第三个形参由 `nand_paa_t row_paa` 改为 `nand_pba_t row_pba`，原有那一条
+
+```c
+ASSERT((uint8_t)pba_to_plane(row_pba) == plane);
+```
+
+**只是换了访问器，判据与位置不变**——"调用者自己铸出的实参"（§十三 判据 2）依旧是 `ASSERT`，
+不因为地址空间改名而回到返回码。这是 §十三 的直接延续，不另立条目。
+
+### 沿用 §十七 判据 5：两个地址比较函数删除
+
+| 函数 | 问题 | 处置 |
+|---|---|---|
+| `paa_same_block(a, b)` | 直接 `a & PAA_BLOCK_MASK` 而**没有先右移**——本来就是错的（block 字段不在低位） | **删除** |
+| `pba_same_block(a, b)` | 同源同病 | **删除** |
+| `fc_fill_cw_meta_paa()` | 写 `md->paa` 到 `buffer[0..3]`，被 `fc_data_path_encode` 的 Stage 0 用 `desc->meta` 覆盖同一 4 字节 ⇒ **零可观测效果**；内容已错（PAA ≠ META）；遍历终止条件还是 v17 前的池深式 | **删除** |
+
+判据 5 的原文是"被测函数失去生产调用者"。这里是它的**生产侧版本**：函数**从来没有**生产调用者
+（grep 全仓零引用），且实现本身就错——**零调用者 + 实现错误 = 不需要先"修好再观察"，直接删**。
+（对比 §十六 的"形态三"：那是**缺**校验，要补；这是**多**一个错误函数，要删。）
+
+`fc_fill_cw_meta_paa` 是判据 5 的一个**变体**：它有调用者（`fc_poll_dispatch_single`），
+但**效果被下游整段覆盖**——即"有调用者、无效果"。判据要扩充一句：
+
+> **有调用者但效果被下游完全覆盖的函数，与无调用者等价**——尤其当它的**内容**也已被后续
+> 重构改错时（本例：v24 把 `buffer[0..3]` 的语义从 PAA 改成 META，函数没跟）。
+> 判断方法不是看调用图，而是问"删掉它，有没有任何一条路径的输出会变"。
+
+删除后 `fc_poll_dispatch_single` 的 page write 分支与 `fc_poll_dispatch_chain` **完全一致**，
+原注释里那条"行为不对称（既有，勿统一）"随之消失——**这本身就是判据的旁证**：
+不对称若只是冗余步骤造成的，删掉冗余就对称了，不需要"保留差异"。
+
+### 新则：哨兵值不得取合法值
+
+v24 引入 `FC_META_UNKNOWN`（`include/fc/fc_command.h`），用来表达"本命令不知道 LBA"
+（GC / 掉电重建路径——它们**正是要从页内 META 读回** LBA）。
+
+```c
+#define FC_META_UNKNOWN (0xFFFFFFFFU)   /* 不是 0 */
+```
+
+**为什么不能用 0**：`command->meta` 在 v24 起是**扇区 LBA**，而 0 是**合法值**
+（页 0 / plane 0 / CW 0，板上第一页就是这个地址）。用 0 当哨兵会把"未指定"与"就是第 0 扇区"
+混为一谈——GC 路径本该跳过"读错页"校验，却会因为 `command->meta == 0` 与 `read_meta` 不等而
+**误报 `MATA_ERROR`**（这正是修前的既有行为，GC 只看 `NAND_FAIL` 所以一直无害）。
+
+**推广**：本工程凡引入"无值 / 未知"哨兵，一律取该类型**不可能出现的值**，
+并在定义处写清"为什么不是 0"。同类先例：`FC_DESCRIPTOR_ID_INVALID = 0xFFFF`、
+`FTL_BLOCK_NO_PLANE`（v12）。反例参照 `request->cw_mask` 的 0 = 合法空集——
+那是**合法值**，所以它不能当哨兵，只能靠文档说清（v23 §十八 的辨析）。
+
+### 验证
+
+debug / release / tests / RAID=1 四档 0 warning 0 error（149920 / 84988 / 197088 / 204252 B）；
+`make format-check` passed；`nm` 确认 `pba_to_paa` / `lba_to_meta` / `paa_to_pba` 无全局符号；
+六条加扰判据 + 四条布局判据离线自证全过（见 changelog）；**上板未验**。
+
+> 详见 `docs/changelog/fc_scrambler_lba_seed_v24.md`。

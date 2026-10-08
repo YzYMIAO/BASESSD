@@ -123,15 +123,21 @@ static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t
  *       收敛为这一条。上层自行组装 CW 集合（例如只读离散 CW），循环调用即可。
  *     - **校验段在机制段之前**：任何非法实参都在出池之前返回，不污染池子——
  *       否则会先分配一个 desc 再失败，破坏「失败即沿链完整回收」的干净语义。
- *     - **行地址来自实参 row_paa，不从 command->paa 推导**：multi-plane 命令一个
+ *     - **行地址来自实参 row_pba，不从 command->pba 推导**：multi-plane 命令一个
  *       DWORD 装不下两个 plane 的行地址（Policy B：两 plane 的 block 可以不同）。
- *       plane 位由实参 plane 决定，row_paa 的 plane 位被忽略（经 ASSERT 保证一致）。
- *     - multi_plane>0：PAA = row_paa 的 block/page/lun + 传入的 plane/cw。
- *     - 单 plane：row_paa 已完整描述该 plane 的地址，只改写 CW 位。
+ *       plane/cw 位由实参决定，row_pba 的对应位被忽略（plane 位经 ASSERT 保证一致）。
+ *     - **一条公式造出两个值**（v24）：PBA 与 LBA 的低 3 位是同一套编码
+ *       （`[plane:1][cw:2]` = PLANE_CW_MASK），故
+ *         plane_cw        = (plane << PBA_PLANE_SHIFT) | cw
+ *         desc->paa       = pba_to_paa((row_pba     & ~PLANE_CW_MASK) | plane_cw)
+ *         desc->meta      =            (command->meta & ~PLANE_CW_MASK) | plane_cw
+ *       基值不同（物理 PBA vs 逻辑 LBA），公式同一。此前分叉成 multi_plane 的
+ *       paa_make 与单 plane 的掩码改写两条分支——单 plane 时
+ *       `plane == pba_to_plane(row_pba)` ⇒ 两分支逐位等价，合并为一条。
  *     - CW 号由调用方给出（FTL 侧的掩码枚举），**不由 desc 序号推导**——链走位
  *       （desc 序号）与 CW 号解耦：按链走位索引的地方不动，CW 号一律从
  *       paa_to_cw(desc->paa) 取。
- *     - meta = lba_to_cw_meta(command->meta, cw)。
+ *     - meta = lba_to_meta(command->meta, plane, cw)（即上面的公式）。
  *     - **顺序：分配 desc → 填字段 → 挂链 → 分配 buffer**。先挂链是为了让
  *       「已分配的 desc 全部在链上」恒成立——任何一步失败后调用方沿链释放即完整
  *       回收，不需要「链外半成品」的就地回滚。代价是链上会短暂/长期存在
@@ -143,13 +149,14 @@ static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t
  *     - 失败时链上可能已有 desc（含本条）：本层不回滚，「已分配的 desc 全部在链上」
  *       是不变量，调用方沿链释放即完整回收（fc_descriptor_chain_release_all）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
+fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_pba_t row_pba)
 {
     fc_command_id_t  command_id;
     uint8_t          plane_first;
     uint8_t          plane_last;
     fc_descriptor_t *descriptor;
     fc_buffer_id_t   buffer_id;
+    uint32_t         plane_cw;
 
     /* ── 校验段：不得触碰任何池 ──
      * 本函数**只有一种**合法失败：资源申请不到（desc / buffer 池空）→ RESOURCE_EMPTY，
@@ -166,8 +173,8 @@ fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane
     ASSERT((cw < CW_NUM) && (plane >= plane_first) && (plane < plane_last));
     /* 同一 n 被追加两次 = 链构造错误（掩码是集合，重复置位会静默丢数据） */
     ASSERT(fc_command_cw_attached(command, plane, cw) == 0U);
-    /* row_paa 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
-    ASSERT((uint8_t)paa_to_plane(row_paa) == plane);
+    /* row_pba 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
+    ASSERT((uint8_t)pba_to_plane(row_pba) == plane);
 
     /* ── 机制段 ── */
     descriptor = fc_descriptor_alloc_internal(&g_fc_controller, command);
@@ -178,20 +185,16 @@ fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane
 
     /* 先把除 buffer_id 外的字段全部填好，再挂链：desc 一进链就能被任何
      * 走链的读者正确解释（paa/config/meta 均已有效，next_id 已终止）。 */
-    if (command->config.multi_plane > 0U)
-    {
-        /* 行地址取自实参 row_paa（每 plane 独立）；保留其 LUN 字段（多 LUN 并发必需：
-         * desc PAA/META/随机种子/ECC 都依赖它）。 */
-        descriptor->paa = paa_make(paa_to_page(row_paa), plane, paa_to_block(row_paa), paa_to_lun(row_paa), cw);
-    }
-    else
-    {
-        descriptor->paa = (row_paa & ~NAND_FIELD_MASK(CW_WIDTH)) | cw;
-    }
+
+    /* 一条公式造出两个值（v24）：PBA 与 LBA 的低 3 位（PLANE_CW_MASK）是同一套编码，
+     * 只是基值不同——物理 PBA vs 逻辑 LBA。行地址取自实参 row_pba（每 plane 独立，
+     * 保留其 ch/ce/lun，多 LUN 并发必需）；meta 高位取自 command->meta（本命令扇区 LBA）。 */
+    plane_cw              = ((uint32_t)plane << PBA_PLANE_SHIFT) | (uint32_t)cw;
+    descriptor->paa       = pba_to_paa((row_pba & ~PLANE_CW_MASK) | plane_cw);
     descriptor->config    = command->config;
     descriptor->config.cw = cw;
     descriptor->next_id   = FC_DESCRIPTOR_ID_INVALID;
-    descriptor->meta      = lba_to_cw_meta(command->meta, cw);
+    descriptor->meta      = (command->meta & ~PLANE_CW_MASK) | plane_cw;
 
     fc_command_chain_append(&g_fc_controller, command, descriptor); /* 出池即挂链 */
 

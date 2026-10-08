@@ -101,7 +101,7 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                              * ECC 历史存于 BST（ftl->alloc.blocks[].rr）。
                              * ⚠ 须在 fc_command_release(cmd) 之前调用——desc 释放后失效。 */
                             {
-                                uint16_t gblock = ftl_pba_gblock(cmd->paa);
+                                uint16_t gblock = ftl_pba_gblock(cmd->pba);
 
                                 rr_record_ecc(&ftl->alloc.blocks[gblock].rr, fc_get_cmd_ecc_max(cmd));
 
@@ -200,7 +200,7 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                             int     recovered   = rr_recover_read(&ftl->rr,
                                                             ftl->topo.ch,
                                                             ftl->topo.ce,
-                                                            cmd->paa,
+                                                            cmd->pba,
                                                             pending->io.buffer,
                                                             data_size,
                                                             pending->io.lba,
@@ -225,9 +225,9 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                                 (void)retry_count; /* 恢复失败，重试次数无意义 */
                                 LOGE("[FTL] read unrecoverable lba=%lu gblock=%u\r\n",
                                      (unsigned long)pending->io.lba,
-                                     (unsigned)ftl_pba_gblock(cmd->paa));
+                                     (unsigned)ftl_pba_gblock(cmd->pba));
                                 (void)bbt_mark_bad(&ftl->alloc,
-                                                   ftl_pba_gblock(cmd->paa),
+                                                   ftl_pba_gblock(cmd->pba),
                                                    (uint8_t)FTL_BLOCK_BAD_READ);
                                 if (pending->io.status_out != NULL)
                                 {
@@ -632,7 +632,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     cmd->config.chain     = FC_CHAIN_END;
     cmd->config.page_type = FC_PAGE_TYPE_LP;
     cmd->module           = FC_COMMAND_MODULE_FTL;
-    cmd->meta             = (DWORD)internal_lba;
+    cmd->meta             = (DWORD)(internal_lba << CW_WIDTH); /* 扇区 LBA（v24） */
 
     /* ④ 配置 PBA + desc 链（逐 plane 各自的 PBA） */
     ret = ftl_cmd_setup_ppa_pair(cmd, pba);
@@ -741,7 +741,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
     cmd->config.chain     = FC_CHAIN_END;
     cmd->config.page_type = FC_PAGE_TYPE_LP;
     cmd->module           = FC_COMMAND_MODULE_FTL;
-    cmd->meta             = (DWORD)internal_lba;
+    cmd->meta             = (DWORD)(internal_lba << CW_WIDTH); /* 扇区 LBA（v24） */
 
     /* ④ 配置 PBA + desc 链 + 写入数据（逐 plane 各自的 PBA） */
     ret = ftl_cmd_setup_ppa_pair(cmd, new_pba);

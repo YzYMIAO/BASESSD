@@ -9,12 +9,13 @@
  * NAND 加扰算法选择（编译期配置）
  *
  * FC_RANDOM_ALGO_LFSR  (默认)
- *   16 级线性反馈移位寄存器，多项式 x¹⁶ + x¹⁴ + x¹³ + x¹¹ + 1
- *   ONFI 标准加扰算法，消费级 SSD 最主流的方案，硬件实现只需要几个寄存器 + 异或门。
+ *   16 级线性反馈移位寄存器，多项式 x¹⁶ + x¹⁴ + x¹³ + x¹¹ + 1（最大长度，周期 65535）。
+ *   主控加扰最主流的方案，硬件实现只需几个寄存器 + 异或门。
+ *   ⚠ 本多项式是本工程的选择，**不是 ONFI 规定**——ONFI 不规定加扰器。
  *
  * FC_RANDOM_ALGO_XORSHIFT
  *   XOR-shift 32 三步递推：seed ^= seed<<13; seed ^= seed>>17; seed ^= seed<<5
- *   周期 2³²-1，硬件开销极小，三星等厂商消费级方案同类。
+ *   周期 2³²-1，硬件开销极小。
  *
  * FC_RANDOM_ALGO_SIMPLE_XOR
  *   固定伪随机模式重复，低端方案。不需要种子递推，每 CW 用固定 pattern 异或。
@@ -28,30 +29,19 @@
 #endif
 
 /*
- * 种子生成策略选择（编译期配置）
+ * 加扰种子（v24）：**本 CW 的逻辑地址**，即该 CW 的 META 字段（扇区 LBA）。
  *
- * FC_RANDOM_SEED_BASIC（默认）
- *   当前实现：program_sequence ^ PAA 各字段简单混合。
+ * 为什么是逻辑地址而不是物理地址：GC 搬页后逻辑地址不变 ⇒ 密文不变，
+ * 不需要「解扰再按新物理地址重加扰」。这是存储主控的通行做法
+ * （见 docs/changelog/fc_scrambler_lba_seed_v24.md 的出处）。
  *
- * FC_RANDOM_SEED_ENHANCED
- *   各字段独立左移到不同 bit 位置再 XOR，避免字段间 bit 重叠。
- *   加入黄金分割常数 * program_sequence 做扩散。
- *   加入 CW 维度，使同一 page 内不同 CW 有不同种子。
+ * 粒度 = 被寻址逻辑单元：本工程一个 CW（512B 用户数据）= 一个扇区 = 一个逻辑单元，
+ * 故每条 CW 用自己那条扇区 LBA 当种子。
  *
- * FC_RANDOM_SEED_PROGRAM_SEQUENCE_WEIGHTED
- *   与 ENHANCED 结构相同，但 program_sequence 的影响权重更高
- *  （左移更多位 + 乘法），随写入次数增加 seed 变化更快。
+ * ⚠ 调用方（fc_data_path.c）必须传**该 CW 的扇区 LBA**（desc->meta / 从页内读回的
+ *   明文 META），而不是 command->meta（那是本命令的页级基值）。
  */
-#define FC_RANDOM_SEED_BASIC                     (0U)
-#define FC_RANDOM_SEED_ENHANCED                  (1U)
-#define FC_RANDOM_SEED_PROGRAM_SEQUENCE_WEIGHTED (2U)
-
-#ifndef FC_RANDOM_SEED_STRATEGY
-#    define FC_RANDOM_SEED_STRATEGY FC_RANDOM_SEED_BASIC
-#endif
-
-/* 从 PAA 和 program_sequence 生成加扰种子 */
-uint32_t fc_random_seed_from_paa(nand_paa_t paa, uint32_t program_sequence);
+uint32_t fc_random_seed_from_meta(uint32_t cw_meta);
 
 /*
  * 对 data[0..length-1] 进行加扰/解扰。
@@ -62,8 +52,5 @@ fc_status_t fc_random_transform(uint8_t *data, uint16_t length, uint32_t seed);
 
 /* 获取当前使用的加扰算法名称（调试用） */
 const char *fc_random_algo_name(void);
-
-/* 获取当前使用的种子策略名称（调试用） */
-const char *fc_random_seed_strategy_name(void);
 
 #endif /* FC_RANDOM_ENGINE_H */

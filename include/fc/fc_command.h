@@ -18,6 +18,16 @@
  * 三池深度见 fc.h（FC_COMMAND_POOL_DEPTH / FC_DESCRIPTOR_POOL_DEPTH /
  * FC_BUFFER_POOL_DEPTH）。命令/描述符用 16 位 Pool ID 互相关联，
  * 0xFFFF = 无效句柄。
+ *
+ * ── 三套地址（v24；权威定义与位序表见 nand/nand_config.h）──
+ *
+ *   LBA  逻辑地址      [CH][CE][LUN][BLOCK][PAGE][PLANE][CW]  FTL 用
+ *   PBA  系统物理地址  与 LBA **逐位同构**                       FTL → FC 边界传它
+ *   PAA  芯片内地址    [CW][PAGE][PLANE][BLOCK][LUN]（BA6/PA 规则）FC → NAND 传它
+ *
+ * 分界：**FTL 交 LBA + PBA，FC 层转成 PAA 喂 NAND**。PBA 与 LBA 同构的收益是
+ * 建链时 `desc->paa` 与 `desc->meta` 可用**同一个 plane_cw 公式**造出（基值不同）。
+ * 三者的低 3 位（PLANE_CW_MASK）是同一套编码 [plane:1][cw:2]。
  */
 
 /* ECC 解码模式（配置写入 fc_cmd_conf_t.ldpc） */
@@ -151,14 +161,17 @@ typedef struct fc_cmd_conf_t
  */
 struct fc_descriptor_t
 {
-    DWORD         paa;            /* Physical NAND address; valid for this Descriptor's CW. */
+    DWORD paa;                    /* 本 CW 的**芯片内地址（PAA）**；建链时由 row_pba + plane/cw 造出，
+                                   * 直接喂 NAND 请求。⚠ 与 command->pba 不同空间（PAA vs PBA）。 */
     fc_cmd_conf_t config;         /* Copy of Command configuration; config.cw is this CW index. */
     DWORD         buffer_id : 16; /* Buffer Pool ID; 0xFFFF means invalid. */
     DWORD         next_id   : 16; /* Next Descriptor ID; 0xFFFF terminates the chain. */
-    DWORD         meta;           /* CW META 值：写时从 command->meta 转换填入，读后存放 NAND 读回的 META 值。 */
+    DWORD         meta;           /* 本 CW 的**扇区 LBA**（v24）：建链时由 command->meta 的高位 +
+                                   * 本 desc 的 plane/cw 造出（见 fc_command_configure_descriptor）；
+                                   * 加扰种子取自它，读后存放 NAND 读回的 META 值。 */
 
-    /* 注意：meta 字段的内容由 lba_to_cw_meta() 从 command->meta + cw_index 转换得到；
-     * command->meta 保持不变，始终是 Host LBA（当前语义）。 */
+    /* 注意：meta 的高位来自 command->meta（本命令的扇区 LBA），低 3 位
+     * [plane][cw] 由本 desc 决定——两者同一套编码（PLANE_CW_MASK）。 */
     DWORD status   : 8; /* CW status, using FC_CW_STATUS_* bits. */
     DWORD ecc_bits : 8; /* ECC corrected bit count from last completion; 0 if no error. */
 };
@@ -205,18 +218,33 @@ typedef union
  *
  * ⚠ SQ 在 configure 完成后即不可变：命令配置完就算完成，运行期返回值一律走 CQ。
  */
+
+/* command->meta 的「本命令无已知 LBA」哨兵（v24）。
+ *
+ * 数据命令的 meta 是本命令的**扇区 LBA**；FC 侧 Pass 4 用它交叉校验读回的页内 META
+ * （读到了别的页 ⇒ MATA_ERROR）。但 GC / 掉电重建**不知道** LBA——正是要从页内 META
+ * 读回来，故它们把 meta 置成本哨兵，FC 跳过「读错页」那一项校验（META 自洽性仍校验）。
+ * 不用 0 当哨兵：0 是合法的扇区 LBA（页 0 / plane 0 / CW 0）。 */
+#define FC_META_UNKNOWN (0xFFFFFFFFU)
+
 struct fc_command_t
 {
-    DWORD         desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
-    DWORD         high_priority : 1;  /* 0=SQ, 1=HSQ. */
-    DWORD         module        : 4;  /* Completion route owner; FC does not invoke callbacks. */
-    DWORD         feature_addr  : 8;  /* SET/GET_FEATURES register address, sent via COLUMN_0. */
-    DWORD         reserved1     : 3;  /* Reserved for future Command control. */
-    DWORD         meta;               /* META 值，写入 NAND CW buffer[0..3]；当前为 LBA，未来可扩展。 */
-    DWORD         paa;                /* Operation-dependent target; data commands use Descriptor PAA values. */
-    fc_cmd_conf_t config;             /* Operation, NAND location, CW and data-path configuration. */
-    fc_param_t    param;              /* 读：请求掩码 param.cw_mask（v13 起读者是 FTL，FC 不解释）；
-                                       * FEATURES：内联数据 param.bytes。 */
+    DWORD desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
+    DWORD high_priority : 1;  /* 0=SQ, 1=HSQ. */
+    DWORD module        : 4;  /* Completion route owner; FC does not invoke callbacks. */
+    DWORD feature_addr  : 8;  /* SET/GET_FEATURES register address, sent via COLUMN_0. */
+    DWORD reserved1     : 3;  /* Reserved for future Command control. */
+    DWORD meta;               /* META 值（本命令的**扇区 LBA**，v24 起），写入各 CW buffer[0..3]。
+                               * 每条 desc 取其高位 + 自己的 plane/cw 得本 CW 的 meta，
+                               * 见 fc_command_configure_descriptor 的 plane_cw 公式。 */
+    DWORD pba;                /* 本命令的**系统物理地址（PBA）**，v24 起由 FTL 直接交 PBA
+                               * （此前传 PAA，ch/ce 在边界上蒸发）。数据命令的逐 CW 行地址
+                               * 仍走 desc 链（Policy B：两 plane 可不同块）；本字段供
+                               * 单 plane / 擦除 / Feature 等无逐 CW 地址的命令取行地址，
+                               * 以及 fc_command_plane_span 定 plane 段。 */
+    fc_cmd_conf_t config;     /* Operation, NAND location, CW and data-path configuration. */
+    fc_param_t    param;      /* 读：请求掩码 param.cw_mask（v13 起读者是 FTL，FC 不解释）；
+                               * FEATURES：内联数据 param.bytes。 */
 };
 
 /* CQ 完成项：命令级聚合状态 + 命令级返回段。
@@ -248,7 +276,7 @@ struct fc_command_status_t
  *   返回：段内 plane 数（= multi_plane，单 plane 时为 1）。
  *   实现要点：
  *     - multi-plane：从 plane 0 起，覆盖 plane_count 个 plane；
- *     - 单 plane：**只覆盖 paa_to_plane(command->paa) 那一个**——掩码是绝对编号，
+ *     - 单 plane：**只覆盖 pba_to_plane(command->pba) 那一个**——掩码是绝对编号，
  *       plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
  *
  *   放在头文件（唯一一份定义）：这是 fc_command_t 的结构属性——FC 侧用它做
@@ -264,7 +292,7 @@ static inline uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t
 
     ASSERT(plane_count <= PLANE_NUM);
 
-    *plane_first = (plane_count == 1U) ? (uint8_t)paa_to_plane(command->paa) : 0U;
+    *plane_first = (plane_count == 1U) ? (uint8_t)pba_to_plane(command->pba) : 0U;
     *plane_last  = (uint8_t)(*plane_first + plane_count);
     return plane_count;
 }

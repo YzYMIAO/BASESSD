@@ -90,10 +90,10 @@ static inline uint8_t ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
  * fc_command_configure_descriptor()，故链序 = plane-major、plane 内 CW 递增。
  * 想只读离散 CW（例如 plane1 的 CW0/CW2）：cmd->param.cw_mask = (1U<<4)|(1U<<6)。
  *
- * 行地址：所有 plane 共用 cmd->paa 的行地址（同页语义）。**两 plane 不同块
+ * 行地址：所有 plane 共用 cmd->pba 的行地址（同页语义）。**两 plane 不同块
  * （Policy B）请用 ftl_cmd_setup_ppa_pair()**，本函数不适用。
  *
- * @param cmd  须已设 config.operation / multi_plane / paa（config.cw 已不读）
+ * @param cmd  须已设 config.operation / multi_plane / pba（config.cw 已不读）
  * @return FTL_OK / FTL_ERROR（池空；掩码越出 plane 段是编程错误 → ASSERT）
  */
 ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd);
@@ -105,9 +105,9 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
 /*
  * ftl_cmd_setup_ppa_pair - 按**每 plane 各自**的 PBA 建 desc 链（Policy B）
  *
- * 与 ftl_cmd_setup_ppa 的区别：后者把单一 PBA 填进 command->paa 后展开到各 plane，
+ * 与 ftl_cmd_setup_ppa 的区别：后者把单一 PBA 填进 command->pba 后展开到各 plane，
  * 隐含「两 plane 同 block」。Policy B 下两 plane 独立分配物理块，故本函数逐条调
- * fc_command_configure_descriptor(cmd, plane, cw, pba_to_paa(pba[i]))，把每个 PBA 自己的
+ * fc_command_configure_descriptor(cmd, plane, cw, pba[i])，把每个 PBA 自己的
  * 行地址写进对应 plane 的 desc。
  *
  * ⚠ **plane 号取自每个 PBA 自己的 plane 位，不是数组下标**：读路径的 pba[]
@@ -131,7 +131,7 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
  * 遍历路径（GC 搬移、元数据扫描、Checkpoint）不再 pba_make 打包 → 拆包，
  * 直接用展开地址填入 FC 命令：
  *   ch/ce/lun  → cmd->config 位域
- *   block/plane/page/cw → paa
+ *   block/plane/page/cw → pba
  *
  * 与 ftl_cmd_setup_ppa(cmd, pba_from_addr(addr)) 等价（省去打包拆包）：
  * 地址填好后**必须建 desc 链**——否则命令无 buffer，数据无从搬运，
@@ -148,7 +148,7 @@ static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *add
     cmd->config.ch  = (DWORD)addr->ch;
     cmd->config.ce  = (DWORD)addr->ce;
     cmd->config.lun = (DWORD)addr->lun;
-    cmd->paa        = (DWORD)paa_make(addr->page, addr->plane, addr->block, addr->lun, addr->cw);
+    cmd->pba        = (DWORD)pba_make(addr->ch, addr->ce, addr->page, addr->plane, addr->block, addr->lun, addr->cw);
 
     return ftl_cmd_configure_descriptors(cmd);
 }
@@ -199,7 +199,7 @@ typedef struct
     uint8_t random; /* FC_RANDOM_ENABLE / FC_RANDOM_DISABLE */
     uint8_t ldpc;   /* FC_ECC_MODE_BCH / FC_ECC_MODE_LDPC_RAW */
     uint8_t module; /* FC_COMMAND_MODULE_*；同步路径下不做路由，仅诊断标签 */
-    lba_t   lba;    /* META 源；元数据页传 0 */
+    lba_t   lba;    /* META 源：**页** LBA（建链时 << CW_WIDTH 成扇区 LBA）；元数据页传 0 */
 } ftl_page_cfg_t;
 
 #define FTL_PAGE_CFG_META(module)      (&(const ftl_page_cfg_t){FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, (uint8_t)(module), 0U})

@@ -12,9 +12,10 @@
  *       策略层自 v13 起属 FTL（FC 只剩单数逐条入口 fc_command_configure_descriptor）
  *
  * 命令 fixture（alloc_cmd / alloc_cmd_full 统一构造）：
- *   paa        : paa_make(32, 0, 50, 0, 0) —— 真实页地址，**不可为 0**（见 L2_PAA_PAGE 注释）
+ *   pba        : pba_make(0, 0, 32, 0, 50, 0, 0) —— 真实页地址（v24 起传 PBA）
+ *   meta       : L2_META_LBA —— 非零扇区 LBA，加扰种子的来源，**不可为 0**（见下）
  *   random     : FC_RANDOM_ENABLE / FC_RANDOM_DISABLE
- *   crc        : FC_CRC_ENABLE / FC_CRC_DISABLE
+ *   crc        : FC_CRC_ENABLE(=0，alloc 默认) / FC_CRC_DISABLE
  *   ldpc       : FC_ECC_MODE_BCH / FC_ECC_MODE_LDPC_RAW
  *   multi_plane: 0 = 单 plane；2 = 两 plane（plane 段 = [0, 2)）
  *   cw_mask    : 0 = **本命令 plane 段内的全部 CW**（v23）；非 0 = flat 绝对编号掩码
@@ -22,10 +23,10 @@
  *                分派钩子（决定走不走 fc_stripe_submit），见 alloc_cmd_full 注释
  *   ecc 结果   : 全部成功 / 有 UNC / 有 CRC_ERROR / 有 MATA_ERROR
  *
- * ⚠ 数据路径用例必须给命令真实页地址。paa=0 时 BASIC 种子（fc_random_engine.c）
- *   退化成 seed == cw → {1,1,2,3}，LFSR 低 16 位取这几个小值后 keystream 除 byte0
- *   外全 0 → 加扰形同虚设，"encode→decode 还原原文"照样通过。故 random=ON 的用例
- *   另加一条「encode 后 USER 区 ≠ 明文」断言自证加扰真的发生了。
+ * ⚠ 加扰种子（v24）= 本 CW 的 **META（扇区 LBA）**，由 command->meta 的高位 + 本 desc
+ *   的 plane/cw 造出。若 meta == 0，4 条 CW 的种子只由 cw(0..3) 派生，仍互异但都来自
+ *   小 LBA——故 fixture 显式给一个非零 LBA，让「种子随 LBA 变」这条性质真的被测到。
+ *   另有 random=ON 用例加「encode 后 USER 区 ≠ 明文」断言自证加扰确实发生。
  *
  * 释放：一律 fc_command_release() 收尾——v16 起它沿 desc 链把 desc + buffer
  *       一起还池；不要再手动 fc_buffer_release（会二次释放、空闲链成环）。
@@ -48,11 +49,13 @@
 
 #include <string.h>
 
-/* 真实页地址。⚠ 不可用 paa=0（理由见文件头）：取 (page=32, block=50) 使 4 个 CW 的
- * BASIC 种子 = 0x6468..0x646B，互异且远离小值，LFSR 才能跑出满周期 keystream。
- * page=32 < 64、block=50 < 2048，满足 paa_is_valid。 */
+/* 真实页地址。⚠ 不可用全零（理由见文件头）：page=32 < 64、block=50 < 2048，合法。 */
 #define L2_PAA_PAGE  (32U)
 #define L2_PAA_BLOCK (50U)
+
+/* 命令的扇区 LBA（= 页 LBA 32 << CW_WIDTH = 128）。非零——它是加扰种子的来源，
+ * 让「种子随 LBA 变」可测（见文件头）。 */
+#define L2_META_LBA (0x80U)
 
 /**************************************************************************
  *  Suite 级 setup：fc_init() 一次性初始化 Pool
@@ -129,12 +132,13 @@ static uint8_t *cw_base(const fc_command_t *cmd, uint8_t idx)
     return fc_buffer_get_base(desc->buffer_id);
 }
 
-/* 第 idx 个 CW 的加扰种子——与 encode / process_read 内部同源（由该 desc 的 PAA 派生） */
+/* 第 idx 个 CW 的加扰种子——与 encode / process_read 内部同源（v24：由该 desc 的
+ * META（扇区 LBA）派生，与物理地址无关）。 */
 static uint32_t cw_seed(const fc_command_t *cmd, uint8_t idx)
 {
     fc_descriptor_t *desc = cw_desc(cmd, idx);
     munit_assert_not_null(desc);
-    return fc_random_seed_from_paa(desc->paa, 0U);
+    return fc_random_seed_from_meta(desc->meta);
 }
 
 /* desc 链长度（= 本次访问的 CW 数） */
@@ -194,7 +198,8 @@ static fc_command_t *alloc_cmd_full(uint8_t multi_plane, uint8_t cw_count, uint3
     cmd->config.raid        = raid_mode;
     cmd->config.ldpc        = FC_ECC_MODE_BCH; /* BCH 为默认 ECC */
     cmd->config.multi_plane = multi_plane;
-    cmd->paa                = paa_make(L2_PAA_PAGE, 0U, L2_PAA_BLOCK, 0U, 0U);
+    cmd->pba                = pba_make(0U, 0U, L2_PAA_PAGE, 0U, L2_PAA_BLOCK, 0U, 0U);
+    cmd->meta               = L2_META_LBA;
     cmd->param.cw_mask      = cw_mask;
 
     ftl_status_t result = ftl_cmd_configure_descriptors(cmd);
@@ -309,8 +314,8 @@ static MunitResult test_encode_random_on(const MunitParameter params[], void *da
         {
             uint8_t *base = cw_base(cmd, i);
             munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
-            /* ECC 解码后数据仍在加扰状态，需解扰恢复原文 */
-            (void)fc_random_transform(base, FC_BUFFER_DATA_SIZE, cw_seed(cmd, i));
+            /* ECC 解码后数据仍在加扰状态，需解扰恢复原文（加扰区 = USER，META/CRC 明文） */
+            (void)fc_random_transform(base + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, cw_seed(cmd, i));
             munit_assert_uint32(check_pattern(cw_user(cmd, i), FC_BUFFER_USER_SIZE, 0xAAU), ==, 1U);
         }
     }
@@ -557,8 +562,8 @@ static MunitResult test_process_read_masked_chain(const MunitParameter params[],
 }
 
 /* Pass 4（META 校验）触发：encode 后改掉 command->meta，
- * 期望值 lba_to_cw_meta(command->meta, cw) 随之中变 → 每个 CW 置 MATA_ERROR。
- * 返回值仍为 OK。 */
+ * 期望值 lba_to_meta(command->meta, plane, cw) 随之中变（META 自洽性仍过）→ 每个 CW
+ * 置 MATA_ERROR（「读到了别的页」）。返回值仍为 OK。 */
 static MunitResult test_process_read_mata_error(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -573,8 +578,9 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
     }
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
-    /* desc->meta 已在 configure 时按 command->meta(=0) 定死并写入 buffer[0..4)；
-     * 现在改 command->meta，读侧期望值随之改变 → 读回 META 与期望不符 */
+    /* desc->meta 已在 configure 时按 command->meta(=L2_META_LBA) 定死并写入 buffer[0..4)；
+     * 现在改 command->meta（高位不同 → 期望 LBA 不同），读侧期望值随之改变 →
+     * 读回 META 与期望不符（低 3 位自洽性仍过，故命中的是第二项校验） */
     cmd->meta = 0x10U;
 
     munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
@@ -661,9 +667,11 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
  *    的退化 stripe」，靠 pattern 异或为 0 还原被擦 CW。真 stripe 覆盖见
  *    test_generate_stripe_parity。
  *
- *  参数组合：random=OFF（无加扰，退化 stripe 成立）。
- *            random=ON 的变体在修好 fixture 后不成立——被擦 CW 的加扰种子无处可取，
- *            故不保留（详见 docs/changelog/fc_ut_level2_rework_v22.md）。
+ *  参数组合：random=OFF（无加扰，退化 stripe 成立：4 条 CW 异或恰好为 0——
+ *            META_i = (base | i) 异或为 0、CRC 线性、ECC 线性、USER 明文异或为 0）。
+ *            random=ON 不成立——各 CW keystream 不同，4 条编码后 CW 的异或不为 0，
+ *            退化 stripe 的前提就破了。（v24 起被擦 CW 的种子本身可从 XOR 还原的明文
+ *            META 取回，但那不改变前提不成立这件事。）
  *
  *  编译开关：CONFIG_FC_RAID
  **************************************************************************/
@@ -793,7 +801,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
             uint8_t *base = buffers[i];
 
             munit_assert_int(fc_ldpc_decode(&cfg, base, FC_BUFFER_DATA_SIZE, NULL), ==, FC_STATUS_OK);
-            (void)fc_random_transform(base, FC_BUFFER_DATA_SIZE, cw_seed(data_cmd, i));
+            (void)fc_random_transform(base + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, cw_seed(data_cmd, i));
             munit_assert_uint32(check_pattern(cw_user(data_cmd, i), FC_BUFFER_USER_SIZE, (uint8_t)(0x20U + i)), ==, 1U);
         }
     }

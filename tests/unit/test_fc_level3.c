@@ -13,8 +13,9 @@
  *   9. 擦除验证：ERASE → 全 0xFF 验证
  *   10. 紧锁定验证：BLOCK_LOCK_TIGHT（必须最后执行）
  *
- * PAA 约定：ch=0 ce=0 lun=0 plane=0 block=<test> page=0..63 cw=0
+ * PBA 约定：ch=0 ce=0 lun=0 plane=0 block=<test> page=0..63 cw=0
  *           多 Plane 操作使用 plane=0/1，双 Plane 地址
+ *           （v24：命令携带的是 PBA，不是 PAA——两者位序不同，见 make_pba）
  *
  * 依赖：
  *   - NAND 硬件（走 fc_submit → fc_service → nand_fc_start/step 异步路径）
@@ -92,14 +93,17 @@ static void *setup_level3(const MunitParameter params[], void *user_data)
 #define BLOCK_DEST (102U) /* 内部搬移目标 block */
 
 /**************************************************************************
- *  PAA 辅助
+ *  PBA 辅助（v24：FTL 交 PBA，FC-NAND 侧再 pba_to_paa 落到芯片地址）
  *
  *  约定：ch=0, ce=0, lun=0
+ *  ⚠ PBA 布局是 [cw:2][plane:1][page:6][block:11]…（plane 在 page 之下），
+ *    与 PAA 的 [cw:2][page:6][plane:1][block:11]… **不是**同一套位序，
+ *    故这里必须走 pba_make 而不是 paa_make。
  **************************************************************************/
 
-static nand_paa_t make_paa(uint16_t block, uint8_t plane, uint8_t page)
+static nand_pba_t make_pba(uint16_t block, uint8_t plane, uint8_t page)
 {
-    return paa_make(page, plane, block, 0U, 0U);
+    return pba_make(0U, 0U, page, plane, block, 0U, 0U);
 }
 
 /**************************************************************************
@@ -173,7 +177,7 @@ static void memset_read_buffer(fc_command_t *cmd)
 static uint8_t cmd_configure_and_fill(fc_command_t *cmd, uint16_t block, uint8_t page, uint8_t plane)
 {
     cmd->config.cw = CW_NUM - 1U;
-    cmd->paa       = make_paa(block, plane, page);
+    cmd->pba       = make_pba(block, plane, page);
 
     munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
@@ -382,14 +386,13 @@ static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *
              (unsigned)after->config.operation);
 
     CMD_FIELD_U(command_id);
-    CMD_FIELD_U(reserved0);
     CMD_FIELD_U(desc_id);
     CMD_FIELD_U(high_priority);
     CMD_FIELD_U(module);
     CMD_FIELD_U(feature_addr);
     CMD_FIELD_U(reserved1);
     CMD_FIELD_U(meta);
-    CMD_FIELD_U(paa);
+    CMD_FIELD_U(pba);
 
     CMD_FIELD_U(config.operation);
     CMD_FIELD_U(config.ch);
@@ -531,7 +534,7 @@ static void __attribute__((unused)) unlock_block(uint16_t block)
     cmd_low->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
     cmd_low->config.raid      = FC_RAID_MODE_NORMAL;
     cmd_low->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-    cmd_low->paa              = make_paa(block, 0U, 0U);
+    cmd_low->pba              = make_pba(block, 0U, 0U);
 
     run_lifecycle(cmd_low);
 
@@ -547,7 +550,7 @@ static void __attribute__((unused)) unlock_block(uint16_t block)
     cmd_high->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
     cmd_high->config.raid      = FC_RAID_MODE_NORMAL;
     cmd_high->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-    cmd_high->paa              = make_paa(block, 0U, 0U);
+    cmd_high->pba              = make_pba(block, 0U, 0U);
 
     run_lifecycle(cmd_high);
 }
@@ -571,7 +574,7 @@ static void erase_block(uint16_t block, uint8_t multi_plane)
     cmd->desc_id            = FC_DESCRIPTOR_ID_INVALID;
     cmd->config.cw          = 0U;
     cmd->config.multi_plane = multi_plane ? PLANE_NUM : 0U;
-    cmd->paa                = make_paa(block, 0U, 0U);
+    cmd->pba                = make_pba(block, 0U, 0U);
 
     run_lifecycle(cmd);
 }
@@ -617,7 +620,7 @@ static fc_command_t *read_page(uint16_t block, uint8_t page, uint8_t plane)
     cmd->config.raid      = FC_RAID_MODE_NORMAL;
 
     cmd->config.cw = CW_NUM - 1U;
-    cmd->paa       = make_paa(block, plane, page);
+    cmd->pba       = make_pba(block, plane, page);
 
     munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
@@ -828,7 +831,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
         cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——READ_ID 只有 5 字节 */
-        cmd->paa              = make_paa(0U, 0U, 0U);
+        cmd->pba              = make_pba(0U, 0U, 0U);
 
         munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
@@ -864,7 +867,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
         cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——参数页只看前几字节 */
-        cmd->paa              = make_paa(0U, 0U, 0U);
+        cmd->pba              = make_pba(0U, 0U, 0U);
 
         munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
@@ -1034,7 +1037,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
         cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——状态字仅 1 字节 */
-        cmd->paa              = make_paa(0U, 0U, 0U);
+        cmd->pba              = make_pba(0U, 0U, 0U);
 
         fc_status_t result;
 
@@ -1099,9 +1102,9 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
                 cmd->config.random    = FC_RANDOM_DISABLE;
                 cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
                 cmd->config.raid      = FC_RAID_MODE_NORMAL;
-                cmd->paa              = make_paa(BLOCK_TEST, 0U, page);
+                cmd->pba              = make_pba(BLOCK_TEST, 0U, page);
 
-                /* 分配 desc chain（提供 CW 级 PAA 映射给 dispatch） */
+                /* 分配 desc chain（提供 CW 级 PBA 映射给 dispatch） */
                 munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
                 run_lifecycle(cmd);
@@ -1119,9 +1122,9 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
                 cmd->config.random    = FC_RANDOM_DISABLE;
                 cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
                 cmd->config.raid      = FC_RAID_MODE_NORMAL;
-                cmd->paa              = make_paa(BLOCK_DEST, 0U, page);
+                cmd->pba              = make_pba(BLOCK_DEST, 0U, page);
 
-                /* 分配 desc chain（提供 CW 级 PAA 映射给 dispatch） */
+                /* 分配 desc chain（提供 CW 级 PBA 映射给 dispatch） */
                 munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
                 run_lifecycle(cmd);
@@ -1294,7 +1297,7 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
         cmd->config.crc       = FC_CRC_DISABLE;
         cmd->config.cw        = CW_NUM - 1U;
-        cmd->paa              = make_paa(BLOCK_TEST, 0U, 0U);
+        cmd->pba              = make_pba(BLOCK_TEST, 0U, 0U);
 
         munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
@@ -1444,7 +1447,7 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
         cmd->config.crc         = FC_CRC_DISABLE;
         cmd->config.cw          = CW_NUM - 1U;                    /* per-plane CW count - 1 */
         cmd->config.multi_plane = PLANE_NUM;                      /* = 2 */
-        cmd->paa                = make_paa(BLOCK_TEST, 0U, page); /* base PAA: plane 0 */
+        cmd->pba                = make_pba(BLOCK_TEST, 0U, page); /* base PBA: plane 0 */
 
         munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
@@ -1491,7 +1494,7 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
         cmd->config.crc         = FC_CRC_DISABLE;
         cmd->config.cw          = CW_NUM - 1U;
         cmd->config.multi_plane = PLANE_NUM;
-        cmd->paa                = make_paa(BLOCK_TEST, 0U, page);
+        cmd->pba                = make_pba(BLOCK_TEST, 0U, page);
 
         munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
 
@@ -1638,7 +1641,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             cmd->config.raid      = FC_RAID_MODE_NORMAL;
             cmd->config.cw        = 0U;
             cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 个 desc）——逐 CW 随机读 */
-            cmd->paa              = paa_make(page, 0U, BLOCK_TEST, 0U, cw);
+            cmd->pba              = pba_make(0U, 0U, page, 0U, BLOCK_TEST, 0U, cw);
 
             fc_status_t result;
 
@@ -1664,7 +1667,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             munit_assert_uint32(completed, ==, 1U);
             munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
 
-            /* 逐字节验证 — 使用 PAA 编码的 CW 编号计算偏移 */
+            /* 逐字节验证 — 按 CW 索引计算偏移 */
             {
                 fc_descriptor_id_t did  = (fc_descriptor_id_t)cmd->desc_id;
                 fc_descriptor_t   *desc = fc_descriptor_id_to_descriptor(did);

@@ -48,7 +48,7 @@ static uint32_t ftl_cmd_resolve_cw_mask(const fc_command_t *cmd, uint8_t plane_f
  *       0..config.cw"）；非 0 → 必须落在本命令 plane 段内（越段 = 编程错误 → ASSERT，
  *       见 ftl_cmd_resolve_cw_mask）。离散读 plane1 的 CW0/CW2 即
  *       cmd->param.cw_mask = (1U << 4) | (1U << 6)。
- *     - 行地址所有 plane 共用 cmd->paa（同页语义）；两 plane 不同块（Policy B）
+ *     - 行地址所有 plane 共用 cmd->pba（同页语义）；两 plane 不同块（Policy B）
  *       走 ftl_cmd_setup_ppa_pair()，本函数不适用。
  *     - **失败时本函数自己回滚整条链**（desc + buffer 全部还池，desc_id 复位 INVALID），
  *       调用者只需再 fc_command_release 还命令槽位。
@@ -78,7 +78,7 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd)
 
     for (plane = plane_first; plane < plane_last; plane++)
     {
-        const nand_paa_t row_paa = paa_make(paa_to_page(cmd->paa), plane, paa_to_block(cmd->paa), paa_to_lun(cmd->paa), 0U);
+        const nand_pba_t row_pba = (cmd->pba & ~PLANE_CW_MASK) | ((uint32_t)plane << PBA_PLANE_SHIFT);
 
         for (cw = 0U; cw < CW_NUM; cw++)
         {
@@ -86,7 +86,7 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd)
             {
                 continue;
             }
-            if (fc_command_configure_descriptor(cmd, plane, cw, row_paa) != FC_STATUS_OK)
+            if (fc_command_configure_descriptor(cmd, plane, cw, row_pba) != FC_STATUS_OK)
             {
                 cmd->desc_id = fc_descriptor_chain_release_all(cmd->desc_id);
                 return FTL_ERROR;
@@ -107,7 +107,7 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba)
     cmd->config.ch  = (DWORD)pba_to_ch(pba);
     cmd->config.ce  = (DWORD)pba_to_ce(pba);
     cmd->config.lun = (DWORD)pba_to_lun(pba);
-    cmd->paa        = pba_to_paa(pba);
+    cmd->pba        = pba;
 
     return ftl_cmd_configure_descriptors(cmd);
 }
@@ -125,12 +125,12 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
         return FTL_ERROR;
     }
 
-    /* 拓扑取 pba[0]（同一命令两 plane 必属同一 ch/ce/lun）；command->paa 也写 pba[0]——
+    /* 拓扑取 pba[0]（同一命令两 plane 必属同一 ch/ce/lun）；command->pba 也写 pba[0]——
      * 它是 fc_command_plane_span 定 plane 段的输入，各 plane 的实际行地址逐条由 row 决定。 */
     cmd->config.ch  = (DWORD)pba_to_ch(pba[0]);
     cmd->config.ce  = (DWORD)pba_to_ce(pba[0]);
     cmd->config.lun = (DWORD)pba_to_lun(pba[0]);
-    cmd->paa        = pba_to_paa(pba[0]);
+    cmd->pba        = pba[0];
 
     if (ftl_cmd_needs_desc_chain(cmd) == 0U)
     {
@@ -151,7 +151,7 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
          *   plane 取决于当初怎么写进去（`wr 0 2` 之后 lba 1 映射到 plane 1），下标与 plane 号
          *   并不总相等。链序仍按 pba[] 顺序 → ftl_cmd_read_data 拷出的布局与调用者期望一致。 */
         const uint8_t    plane = (uint8_t)pba_to_plane(pba[i]);
-        const nand_paa_t row   = pba_to_paa(pba[i]);
+        const nand_pba_t row   = pba[i];
         uint8_t          cw;
 
         for (cw = 0U; cw < CW_NUM; cw++)
@@ -368,7 +368,7 @@ static fc_command_t *sync_page_prepare(nand_addr_t addr, uint8_t operation, cons
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     cmd->module             = (DWORD)cfg->module;
-    cmd->meta               = (DWORD)cfg->lba;
+    cmd->meta               = (DWORD)(cfg->lba << CW_WIDTH); /* 页 LBA → 扇区 LBA（v24） */
 
     if (addr_to_cmd(cmd, &addr) != FTL_OK)
     {

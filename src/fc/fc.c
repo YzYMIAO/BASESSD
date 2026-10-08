@@ -900,12 +900,13 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     parity_cmd->module           = data_cmd->module;
     parity_cmd->meta             = data_cmd->meta;
 
-    /* 调整 PAA：same page/block/lun/cw，plane = PLANE_NUM-1 */
+    /* 调整 PBA：same ch/ce/page/block/lun/cw，plane = PLANE_NUM-1 */
     {
-        uint32_t page   = paa_to_page(data_cmd->paa);
-        uint32_t block  = paa_to_block(data_cmd->paa);
-        uint32_t plun   = paa_to_lun(data_cmd->paa);
-        parity_cmd->paa = paa_make(page, (uint32_t)(PLANE_NUM - 1U), block, plun, 0U);
+        uint32_t page  = pba_to_page(data_cmd->pba);
+        uint32_t block = pba_to_block(data_cmd->pba);
+        uint32_t plun  = pba_to_lun(data_cmd->pba);
+
+        parity_cmd->pba = pba_make(pba_to_ch(data_cmd->pba), pba_to_ce(data_cmd->pba), page, (uint32_t)(PLANE_NUM - 1U), block, plun, 0U);
     }
 
     /* ③ 分配 parity desc + buffer
@@ -915,10 +916,10 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
      *    （与 FTL 侧 ftl_cmd_configure_descriptors 在 mask==0 时的展开结果一致）。
      *    ⚠ 该入口固定使用单例 g_fc_controller；RAID 暂未启用（CONFIG_FC_RAID=0），
      *      将来启用多实例前需先把这条路径改回 controller 参数化入口。
-     *    行地址：同一 plane 内所有 CW 共用 parity_cmd->paa 的 page/block/lun。 */
+     *    行地址：同一 plane 内所有 CW 共用 parity_cmd->pba 的 ch/ce/page/block/lun。 */
     {
-        const uint8_t    parity_plane = (uint8_t)paa_to_plane(parity_cmd->paa);
-        const nand_paa_t parity_row   = paa_make(paa_to_page(parity_cmd->paa), parity_plane, paa_to_block(parity_cmd->paa), paa_to_lun(parity_cmd->paa), 0U);
+        const uint8_t    parity_plane = (uint8_t)pba_to_plane(parity_cmd->pba);
+        const nand_pba_t parity_row   = pba_make(pba_to_ch(parity_cmd->pba), pba_to_ce(parity_cmd->pba), pba_to_page(parity_cmd->pba), parity_plane, pba_to_block(parity_cmd->pba), pba_to_lun(parity_cmd->pba), 0U);
         uint8_t          pcw;
 
         for (pcw = 0U; pcw <= (uint8_t)parity_cmd->config.cw; pcw++)
@@ -973,7 +974,7 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
      * 两 plane 访问同一组 CW → 掩码 = 两组相同的低位。 */
     for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
-        mp_req.plane_paa[p] = paa_make(paa_to_page(data_cmd->paa), p, paa_to_block(data_cmd->paa), paa_to_lun(data_cmd->paa), 0U);
+        mp_req.plane_paa[p] = pba_to_paa((data_cmd->pba & ~PLANE_CW_MASK) | ((uint32_t)p << PBA_PLANE_SHIFT));
         for (cw = 0U; cw < cw_count; cw++)
         {
             mp_req.cw_mask |= (uint32_t)(1UL << (p * CW_NUM + cw));
@@ -1044,7 +1045,6 @@ stripe_error:
  * 失败兜底统一走 fc_poll_fail_command。
  *
  * 行为不对称（既有，勿统一）：
- *   - META/PAA 预填（fc_fill_cw_meta_paa）只在单命令路径。
  *   - 链式路径 desc 链断裂时从循环体内直接返回，放弃整条链。
  * ══════════════════════════════════════════════════════════ */
 
@@ -1067,35 +1067,6 @@ static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
 }
 
 /* --------------------------------------------------------------------
- * fc_fill_cw_meta_paa
- *   功能：encode 前把每个 CW 的 PAA 写入其 buffer 的 META 字段 [0..3]。
- *   参数：controller —— FC 控制器；command —— page write 命令。
- *   返回：无。
- *   实现要点：沿 desc 链遍历全部 CW（链长度是 CW 数的唯一真值）；仅单命令路径
- *         调用（链式路径不做此预填，为既有行为差异，勿统一）。
- * -------------------------------------------------------------------- */
-static void fc_fill_cw_meta_paa(fc_t *controller, fc_command_t *command)
-{
-    fc_descriptor_id_t mid = (fc_descriptor_id_t)command->desc_id;
-
-    while (mid < FC_DESCRIPTOR_POOL_DEPTH)
-    {
-        fc_descriptor_t *md = &controller->descriptor_pool[mid];
-
-        if (md->buffer_id != FC_BUFFER_ID_INVALID)
-        {
-            uint8_t   *cw_base  = fc_buffer_id_to_real_buffer_internal(controller, md->buffer_id);
-            nand_paa_t meta_paa = md->paa;
-            cw_base[0]          = (uint8_t)(meta_paa >> 0U);
-            cw_base[1]          = (uint8_t)(meta_paa >> 8U);
-            cw_base[2]          = (uint8_t)(meta_paa >> 16U);
-            cw_base[3]          = (uint8_t)(meta_paa >> 24U);
-        }
-        mid = (fc_descriptor_id_t)md->next_id;
-    }
-}
-
-/* --------------------------------------------------------------------
  * fc_build_request_data_planes
  *   功能：沿 desc 链把 CW 落位到 request 的 cw_mask / cw_buffers[]（带数据命令专用）。
  *   参数：controller —— FC 控制器；command —— 命令；
@@ -1107,7 +1078,7 @@ static void fc_fill_cw_meta_paa(fc_t *controller, fc_command_t *command)
  *     - **链长度即 CW 数**（不由 config.cw 推导）：popcount(cw_mask)。
  *     - 行地址不在这里逐 CW 存：它是 per-plane 的，由下面按 plane 集合填 plane_paa[]。
  *       每 plane 的行地址**取自链上该 plane 的第一条 desc**（链即真值，与 cw_mask 同源），
- *       而不是从 command->paa 复制——Policy B 下两个 plane 的 block/page 可以不同。
+ *       而不是从 command->pba 复制——Policy B 下两个 plane 的 block/page 可以不同。
  *     - 只由 fc_build_dispatch_request 的"带数据命令"分支调用。
  * -------------------------------------------------------------------- */
 static void fc_build_request_data_planes(const fc_t *controller, const fc_command_t *command, nand_dispatch_request_t *request)
@@ -1171,28 +1142,28 @@ static void fc_build_request_data_planes(const fc_t *controller, const fc_comman
          * 即使它一个 CW 都没选中（如只读 plane1 = 0xF0）——多 plane uop 硬编码
          * row[0]/row[1]，空 plane 不填会退化成 block0/page0，静默误操作。
          * 有 desc 的 plane 取链上地址（Policy B：两 plane 可不同块）；空 plane 无从得知，
-         * 回退到 command->paa 的同页地址（= v11 及以前的行为）。 */
+         * 回退到 command->pba 的同页地址（= v11 及以前的行为）。 */
         for (plane = 0U; plane < request->plane_count; plane++)
         {
             request->plane_paa[plane] =
                 ((planes_with_desc & (uint8_t)(1U << plane)) != 0U)
                     ? plane_row[plane]
-                    : paa_make(paa_to_page(command->paa), plane, paa_to_block(command->paa), paa_to_lun(command->paa), 0U);
+                    : pba_to_paa((command->pba & ~PLANE_CW_MASK) | ((uint32_t)plane << PBA_PLANE_SHIFT));
         }
     }
     else
     {
-        /* Single-plane：地址取自 command->paa（ftl_cmd_setup_ppa 单 plane 路径直接写它，
+        /* Single-plane：地址取自 command->pba（ftl_cmd_setup_ppa 单 plane 路径直接写它，
          * GC/WL 的单 plane 写也走这条），desc 链只负责 CW 落位。
-         * 不变式：本命令所有 desc 的 plane 位相同、行地址与 command->paa 一致——下面这条
-         * ASSERT 把它显式化（有 desc 时链上地址 == command->paa）。
+         * 不变式：本命令所有 desc 的 plane 位相同、行地址与 command->pba 一致——下面这条
+         * ASSERT 把它显式化（有 desc 时链上地址 == command->pba）。
          * 「无重复 n」（掩码位数 == 链长）由 fc_command_configure_descriptor 的 attach 侧
          * ASSERT(fc_command_cw_attached(...)) 在污染点拦下，此处不再复核。 */
-        request->plane                     = (uint8_t)paa_to_plane(command->paa);
-        request->plane_paa[request->plane] = command->paa;
+        request->plane                     = (uint8_t)pba_to_plane(command->pba);
+        request->plane_paa[request->plane] = pba_to_paa(command->pba);
         ASSERT(((planes_with_desc & (uint8_t)(1U << request->plane)) == 0U) ||
-               ((paa_to_block(plane_row[request->plane]) == paa_to_block(command->paa)) &&
-                (paa_to_page(plane_row[request->plane]) == paa_to_page(command->paa))));
+               ((paa_to_block(plane_row[request->plane]) == pba_to_block(command->pba)) &&
+                (paa_to_page(plane_row[request->plane]) == pba_to_page(command->pba))));
     }
 }
 
@@ -1251,8 +1222,8 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
  *       （哪怕它没有选中任何 CW）。行地址始终由 paa_to_nand_row() 从 PAA 值算出。
  *     - page read/write 用 CW 基址（ECC 处理完整 528B），非 page 用 USER 区。
  *     - 末尾调 fc_dispatch_rewrite_operation()：读语义改写 + Phase V splittable → ISSUE。
- *   注意：本函数不做 META/PAA 预填——那是单命令路径独有的步骤，
- *         见 fc_fill_cw_meta_paa。
+ *   注意：本函数不做 META 预填——buffer[0..3] 的 META 由
+ *         fc_data_path_encode 的 Stage 0 写（两条派发路径都经 encode）。
  * -------------------------------------------------------------------- */
 static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, fc_command_id_t command_id, nand_dispatch_request_t *request)
 {
@@ -1268,11 +1239,11 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
 
     if (command->config.operation == OP_ERASE_BLOCK)
     {
-        /* 单 plane 擦除：目标 plane 取自 command->paa（本分支无 desc 可用）。
+        /* 单 plane 擦除：目标 plane 取自 command->pba（本分支无 desc 可用）。
          * 掩码只置该 plane 的 CW0 位——擦除无逐 CW 数据，这一位的作用是给
          * completion_all_cws 一个写 cw_status[] 的格（否则 CQ 聚合读不到失败状态）。 */
-        request->plane                     = (uint8_t)paa_to_plane(command->paa);
-        request->plane_paa[request->plane] = command->paa;
+        request->plane                     = (uint8_t)pba_to_plane(command->pba);
+        request->plane_paa[request->plane] = pba_to_paa(command->pba);
         request->cw_mask                   = (uint32_t)(1UL << (request->plane * CW_NUM));
     }
     else if (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)
@@ -1283,21 +1254,21 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
         request->plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
         for (plane = 0U; plane < PLANE_NUM; plane++)
         {
-            request->plane_paa[plane] = paa_make(paa_to_page(command->paa), plane, paa_to_block(command->paa), paa_to_lun(command->paa), 0U);
+            request->plane_paa[plane] = pba_to_paa((command->pba & ~PLANE_CW_MASK) | ((uint32_t)plane << PBA_PLANE_SHIFT));
             request->cw_mask |= (uint32_t)(1UL << (plane * CW_NUM));
         }
     }
     else if ((command->config.operation == OP_SET_FEATURES) ||
              (command->config.operation == OP_GET_FEATURES))
     {
-        /* Feature 寄存器是 die 级、无 plane 语义，command->paa 从不设置（fc_command_alloc_internal
+        /* Feature 寄存器是 die 级、无 plane 语义，command->pba 从不设置（fc_command_alloc_internal
          * 做 (fc_command_t){0}），故 plane 恒 0。仍按 plane 落位，以保住"数据恒在
          * cw_buffers[plane*CW_NUM]"这条无例外的规则。
          * 内联数据落**控制器侧暂存**（不再指向 command->param）——SQ 命令体提交后不可写；
          * SET 先把命令里的字节拷进暂存，GET 由引擎写回，完成时再拷进 CQ 的 param。
          * 掩码只置该 plane 的 CW0 位：Feature 恒为 4 字节单次传输，与 config.cw 无关
          * （旧实现用 config.cw+1 个槽位，但只有槽位 0 承载数据，其余是零值摆设）。 */
-        request->plane                               = (uint8_t)paa_to_plane(command->paa);
+        request->plane                               = (uint8_t)pba_to_plane(command->pba);
         request->cw_mask                             = (uint32_t)(1UL << (request->plane * CW_NUM));
         request->cw_buffers[request->plane * CW_NUM] = g_fc_return_staging[command_id];
         if (command->config.operation == OP_SET_FEATURES)
@@ -1333,7 +1304,7 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
  *   参数：controller —— FC 控制器；chain —— 调度器链（count==1）。
  *   返回：FC_STATUS_OK / IO_ERROR / fc_stripe_submit 结果。
  *   实现要点：
- *     - page write 先 fc_fill_cw_meta_paa + fc_data_path_encode。
+ *     - page write 先 fc_data_path_encode（内含 Stage 0 写 META）。
  *     - raid=ENCODE 的 page write 走 fc_stripe_submit（Multi-Plane）。
  *     - 其余构建 request → nand_dispatch_submit；失败注 NAND_FAIL 完成。
  *     - 只负责占用目标 LUN；完成由后续 fc_service() 推进。
@@ -1356,7 +1327,6 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
      * 在 NAND 编程前对 buffer 数据做编码，对 FTL 完全透明。 */
     if (fc_is_page_write((uint8_t)command->config.operation) != 0U)
     {
-        fc_fill_cw_meta_paa(controller, command);
         (void)fc_data_path_encode(command);
     }
 

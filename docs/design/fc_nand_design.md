@@ -31,6 +31,7 @@
 > - **v13 (2026-10-07)**: **FC 定位下沉——策略层上移 FTL**。按「硬件 FCC 寄存器表」判据（§26）删除 FC 的 `fc_command_configure_descriptors()`（掩码枚举）与 `fc_write_cmd_data()` / `fc_read_cmd_data()`（数据搬运），改由 FTL 侧 `ftl_cmd_configure_descriptors()` / `ftl_cmd_write_data()` / `ftl_cmd_read_data()` 承担；FC 侧建链只剩 `fc_command_attach_cw()` 一个入口，新增 `fc_get_cmd_cw_mask()`（从链重建掩码，供 RAID 断言）。顺带修掉 v12 的 `ftl_cmd_setup_ppa_pair` plane 下标回归（§2.9、§25.4、§26）
 > - **v17 (2026-10-08)**: **建链收敛——三层接力 → 一条公共入口**。`fc_command_attach_cw`（公共壳）→ `fc_command_attach_cw_internal`（段校验）→ `fc_command_configure_descriptor_internal`（机制体）三层合并为**唯一一条** `fc_command_configure_descriptor`（**单数**），实现在 `src/fc/fc_interface.c`；后两条删除，`fc.c` 只留池/链原语（`fc_descriptor_alloc_internal` / `fc_command_chain_append` 去 `static` 进 `fc_internal.h`）。Stripe RAID parity 建链改调公共入口。校验全部前置于出池，非法实参不污染池子（§2.9、§2.10、§25.4；changelog `fc_build_chain_convergence_v17.md`）
 > - **v23 (2026-10-08)**: **FTL 建链收敛为「单一掩码旋钮」**。`param.cw_mask == 0` 重定义为「**本命令 plane 段内的全部 CW**」（v7~v22 是"每 plane 连续 `0..config.cw`"），两个建链入口（`ftl_cmd_configure_descriptors` / `ftl_cmd_setup_ppa_pair`）共用唯一定义处 `ftl_cmd_resolve_cw_mask()`；`config.cw` 自此退出建链（读者只剩 FC 内 RAID stripe 的 `cw_count`），`sync_page_prepare` 的 `cw` 死参数删除；掩码越段由 `FTL_ERROR` 改 `ASSERT`（§2.10、§25.2、§25.4；changelog `ftl_cw_mask_single_knob_v23.md`）
+> - **v24 (2026-10-08)**: **地址布局统一（LBA / PBA / PAA）+ 加扰器对齐存储主控**。三套地址各自定位：**PAA** 是芯片地址（MT29F4G08 的 BA6/PA 规则决定，**一个字节都没动**）、**PBA** 是系统物理地址、**LBA** 是逻辑地址；PBA 与 LBA 改为**逐位同构**的 `[ch:ce:lun:block:page:plane:cw]`（plane 在 page 之下），PAA 保持 `[cw:page:plane:block:lun]` 不动。于是建链时 `desc->paa` 与 `desc->meta` 用**同一个公式**（基值不同）算出。加扰种子由物理地址 PAA 改为**本 CW 的逻辑地址**（`desc->meta`，即扇区 LBA），并**删除 `FC_RANDOM_SEED_STRATEGY` 三选一旋钮**；加扰范围由 `[0,520)` 收窄到 `[8,520)`，**META/CRC 保持明文**，使读路径能从页内明文 META 自举出种子（GC / 掉电重建不再需要为取种子而改）。顺带修掉 LFSR 抽头错误（状态空间坍缩到周期 63，见 §21.3.5）（§2.2、§2.3、§2.9、§21.3.5；changelog `fc_scrambler_lba_seed_v24.md`）
 >   （v14~v16、v18~v22 见各自 changelog 及 §2.10 内联注记——本列表未逐条回填。）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
@@ -258,22 +259,43 @@ typedef union {
 
 ```c
 struct fc_descriptor_t {
-    DWORD paa;               // 物理 NAND 地址（含 CW 编码）
+    DWORD paa;               // 芯片物理地址 PAA（pba_to_paa(本 desc 的 PBA)）
     fc_cmd_conf_t config;    // 继承命令配置，config.cw 表示当前 CW 索引
     DWORD buffer_id : 16;   // Buffer Pool ID，0xFFFF=无效
     DWORD next_id   : 16;   // 下一个 Descriptor ID，0xFFFF=链表结束
-    DWORD meta;              // META 值：写时从 command->meta 转换填入，读后存放 NAND 读回的 META 值。
+    DWORD meta;              // 本 CW 的**扇区 LBA**（v24）；读后存放 NAND 读回的 META 值。
     DWORD status    : 8;    // CW 状态（FC_CW_STATUS_*），完成时由 FC 回写
     DWORD ecc_bits  : 8;    // ECC 纠正比特数，完成时由 FC 回写（0=无错误）
 };
 ```
+
+#### 2.3.1 三套地址空间（v24 定稿）
+
+同一颗芯片上有三套地址，**位序刻意不同**，各司其职（定义见 `include/nand/nand_config.h`）：
+
+| | 低位优先布局 | 用途 | 谁定义 |
+|---|---|---|---|
+| **PAA** | `[cw:2][page:6][plane:1][block:11][lun]` | **芯片地址**——喂给 `paa_to_nand_row()` 编成器件行地址 | MT29F4G08 的 BA6/PA 规则，**不可改** |
+| **PBA** | `[cw:2][plane:1][page:6][block:11][lun][ce:2][ch:2]` | **系统物理地址**——FTL 交给 FC-NAND 的行地址 | 本工程自定 |
+| **LBA** | `[ch:ce:lun:block:page:plane:cw]` | **逻辑地址**——主机寻址单位 = 512 B 扇区 | 本工程自定 |
+
+- **PBA 与 LBA 逐位同构**（除 PBA 多出的 cw 字段语义：LBA 里 cw 也是低 2 位）。这是 v24 的核心收益：建链时两个值用**同一个公式**造出，只是基值不同——
+  ```c
+  const uint32_t plane_cw = ((uint32_t)plane << PBA_PLANE_SHIFT) | cw;
+  desc->paa  = pba_to_paa((row_pba     & ~PLANE_CW_MASK) | plane_cw);  /* 物理基值 */
+  desc->meta =            (command->meta & ~PLANE_CW_MASK) | plane_cw;  /* 逻辑基值 */
+  ```
+- **为什么 PBA 的 plane 在 page 之下**（与 PAA 相反）：FTL 的页号 `internal_lba` 里 plane 就是最低位（`ftl.c` 的 `l2p_cache_read(internal_lba + 1)` 取 plane1）。取 `LBA >> CW_WIDTH` 必须**逐位等于**今天的 `internal_lba`，否则 plane1 会变成 `internal_lba + 64`，L2P 编号、journal / checkpoint 的页号、所有 `+1` 约定全要改。选 `[page][plane]` 而不是跟 PAA 的 `[plane][page]` 就是**为了这一点**。
+- **PAA 不动**：19 处 `paa_make`、`paa_to_nand_row`、器件行地址编码 `PA[5:0] | BA6<<6 | BA[17:7]` 全部保持原样。`pba_to_paa()` / `paa_to_pba()` 是**真正的字段重排**（不是掩码截取）——旧版 `PAA_FROM_PBA_MASK` 掩码宏已删除。
+- **低 3 位是共享编码**：`PLANE_CW_MASK = 0x7`（`[plane:1][cw:2]`），PBA 与 LBA 共用，所以 `desc->meta` 的低 3 位与 `desc->paa` 的 plane/cw 天然一致，Pass 4 才能拿它做自洽校验。
 
 设计决策：
 - **Descriptor 中 CW 字段为"当前 CW 索引"**，不同于 Command 中 CW 为"数量减一"
 - **Buffer 与 Descriptor 解耦**：通过 buffer_id 引用，Buffer 可独立释放（如 UNC 时释放 buffer 保留 descriptor 信息）
 - **linked list 链式连接**：通过 next_id 遍历，无需 Command 中维护 descriptor_count
 - **状态 & ECC 回写**：NAND 完成时 FC 将 `cw_status` 和 `ecc_bit_count` 回写至 descriptor 的 `status` 和 `ecc_bits` 字段。FTL 遍历 desc 链即可获取每 CW 详细状态，无需 CQ 查询。这对 Read Retry、RAID 恢复路径至关重要。
-- **per-CW META**：`meta` 替代原 `reserved:16`，每个 Descriptor 拥有独立的 META 值。建链时（`fc_command_configure_descriptor()`，v17 前为 `fc_command_attach_cw()` → `fc_command_configure_descriptor_internal()`）通过 `lba_to_cw_meta(command->meta, cw_index)` 自动计算 `desc->meta`，encode 时写入 `buffer[0..4]`（META 区），用于读回时的端到端地址校验。FC 在 decode 路径中自动对比 desc->meta 与读回值，不匹配时置 MATA_ERROR。
+- **per-CW META**：`meta` 替代原 `reserved:16`，每个 Descriptor 拥有独立的 META 值。建链时（`fc_command_configure_descriptor()`，v17 前为 `fc_command_attach_cw()` → `fc_command_configure_descriptor_internal()`）用 `lba_to_meta(command->meta, plane, cw)` 自动计算 `desc->meta`，encode 时写入 `buffer[0..4]`（META 区），用于读回时的端到端地址校验。FC 在 decode 路径中自动对比 desc->meta 与读回值，不匹配时置 MATA_ERROR。
+  - **v24 起**：`command->meta` 是**扇区 LBA**（`页 LBA << CW_WIDTH`），`desc->meta` 是该 CW 的完整扇区 LBA（不再是"页 LBA 低 2 位塞 CW 号"）；`lba_to_meta(lba, plane, cw)` 同时把 **plane** 写进低 3 位，使 plane0/plane1 的 4 条 CW 各有唯一 meta（旧编码里 plane1 的 desc 会拿到 plane0 的 meta，两条 desc 撞值）。低 3 位编码与 PBA 的 `[plane:1][cw:2]` **同一套**（`PLANE_CW_MASK` / `PBA_PLANE_SHIFT`）。
 
 ### 2.4 CW 状态位
 
@@ -364,7 +386,7 @@ CQ 条目 12 字节，64 条 CQ 共 768 字节。
 | `include/fc/fc.h` | 类型、宏、资源池配置、功能开关、资源统计结构 + `#include "fc_interface.h"` |
 | `include/fc/fc_interface.h` | 对外函数声明（21 个，6 组：①初始化 ②命令生命周期 ③buffer 访问 ④数据查询 ⑤查询工具 ⑥服务入口） |
 | `include/fc/fc_internal.h` | fc.c ↔ fc_interface.c 共享内部签名（`fc_t` 定义、`g_fc_controller` extern、`fc_*_internal` 声明）——FTL 不得 include |
-| `src/fc/fc.c` | 核心实现：三池、生命周期状态机、`fc_poll_internal` 服务主循环（拆为 `fc_poll_dispatch_single` / `fc_poll_dispatch_chain` + `fc_build_dispatch_request` / `fc_fill_cw_meta_paa` / `fc_poll_fail_command` 五个 static helper）、`fc_complete_from_nand`、Stripe RAID（全部 `_internal`） |
+| `src/fc/fc.c` | 核心实现：三池、生命周期状态机、`fc_poll_internal` 服务主循环（拆为 `fc_poll_dispatch_single` / `fc_poll_dispatch_chain` + `fc_build_dispatch_request` / `fc_poll_fail_command` 四个 static helper）、`fc_complete_from_nand`、Stripe RAID（全部 `_internal`） |
 | `src/fc/fc_interface.c` | 对外函数实现（单例 `g_fc_controller`）+ **建链机制体**（v17 起 `fc_command_configure_descriptor` 在此；除建链编排外为参数校验 + 转发 internal） |
 
 ```c
@@ -492,7 +514,7 @@ fc_service()
   │
   ├─ 分支 A：单命令 → fc_poll_dispatch_single()
   │     ├─ 校验 QUEUED → 置 ACTIVE
-  │     ├─ page write → fc_fill_cw_meta_paa() → fc_data_path_encode()
+  │     ├─ page write → fc_data_path_encode()（Stage 0 写 META）
   │     ├─ raid=ENCODE → fc_stripe_submit()        ← 图 12
   │     ├─ fc_build_dispatch_request() → request：
   │     │    ├─ 单 plane：按 desc.paa 置 cw_mask 的 bit(plane*CW_NUM+cw) + 填 cw_buffers[n]（n = flat 号）
@@ -1080,9 +1102,10 @@ META（LBA）和 CRC 在加扰前写入，受后续加扰和 ECC 的完整保护
 ```text
 FTL 数据填入各 CW buffer USER 区 [8:520]
   │
-  ├─ Stage 0  META：desc->meta（LBA 派生）memcpy 到 buffer[0:4]
+  ├─ Stage 0  META：desc->meta（本 CW 的扇区 LBA）memcpy 到 buffer[0:4]
   ├─ Stage 1  CRC：对 USER 512B 算 CRC-32 → 写 buffer[4:8]
-  ├─ Stage 1  加扰：seed = f(PAA)，LFSR 变换 buffer[0:520]
+  ├─ Stage 1  加扰：seed = fc_random_seed_from_meta(desc->meta)，LFSR 变换 buffer[8:520]
+  │           （v24：META/CRC 明文，不进加扰区）
   ├─ Stage 2  ECC：BCH 编码 520B → 8B parity → 写 buffer[520:528]
   └─ (Stage 3 RAID 由 stripe 路径单独处理，不在此函数内)
         │
@@ -1139,14 +1162,17 @@ NAND 读取完成
   │     └─ 有 CW 不可纠 → desc->status = UNC，
   │                       保持 ECC-corrected + scrambled（供 RAID 恢复）
   │                       提前返回 IO_ERROR，跳过 Pass 2~4
-  │   Pass 2  解扰所有 CW（seed = f(PAA)）
+  │   Pass 2  解扰所有 CW（v24：seed 从页内**明文 META** 自举，范围 [8,520)）
   │   Pass 3  CRC 校验 → 不匹配置 CRC_ERROR
-  │   Pass 4  META 读回校验（lba_to_cw_meta 对比）→ 不匹配置 MATA_ERROR
+  │   Pass 4  META 读回：自洽（低 3 位 == 本 desc 的 plane/cw）+ 交叉校验
+  │           （lba_to_meta(command->meta, plane, cw) 对比，command->meta == FC_META_UNKNOWN 时跳过后者）
+  │           → 不匹配置 MATA_ERROR
   │
   ├─ 完成状态经 fc_complete_from_nand() 聚合进 CQ（status/desc_id/ECC）
   │
   └─ Stage 2 / FTL 触发：fc_data_path_raid_recover()（status==UNC 时）
-        ├─ fc_collect_decode_buffers 收集全 CW buffer+PAA
+        ├─ fc_collect_decode_buffers 收集全 CW buffer（v24：不再输出 PAA，
+        │  解扰种子从各 buffer 的明文 META 自举）
         ├─ fc_raid_recover：XOR 重建 failed CW（scrambled domain 内）
         ├─ ECC 重试：重建后仍不可纠 → 返回 IO_ERROR（硬件不可恢复）
         ├─ 解扰所有 CW
@@ -1313,6 +1339,12 @@ make BUILD_TARGET=firmware FIRMWARE_PLATFORM=stm32h743 tests
 
 ## 11. 接口重构策略与落地清单
 
+> **⚠ 历史章节（v13 前的接口）**：本章记录的是 FC 侧还持有"掩码建链 + 数据搬运"时的重构过程。
+> 本章出现的 `fc_command_configure_descriptors()`（**复数**）已在 v13 上移 FTL 并删除，现名
+> `ftl_cmd_configure_descriptors()`；`fc_write_cmd_data()` / `fc_read_cmd_data()` 同理改为
+> `ftl_cmd_write_data()` / `ftl_cmd_read_data()`。FC 侧如今只有**单数**的
+> `fc_command_configure_descriptor()`（逐条建链机制）。判据见 §26。
+
 ### 11.1 设计原则
 
 **参数校验分层：**
@@ -1338,7 +1370,7 @@ typedef enum {
 |---|------|------|------|
 | 1 | FuncStatus 语义统一 | `0U`/`1U` → `FUNC_STATUS_SUCCESS`/`FUNC_STATUS_ERROR` | ✅ |
 | 2 | command_handle → command_id | 统一命名 | ✅ |
-| 3 | fc_command_configure_descriptors | 合并 descriptor 分配+配置为单接口 | ✅ |
+| 3 | fc_command_configure_descriptors | 合并 descriptor 分配+配置为单接口（v13 上移 FTL，见 §26） | ✅ |
 | 4 | paa_make() | PAA 地址合成函数（LUN→Block→Plane→Page→CW） | ✅ |
 | 5 | 条件判断宏封装 | 复合条件拆为独立命名宏 | ✅ |
 | 6 | 资源 ID 双向查询 | 每种资源提供 id↔指针 双向转换函数 | ✅ |
@@ -1367,6 +1399,10 @@ fc_status_t fc_command_configure_descriptors(fc_command_t *command);
 | `BLOCK_NUM` | `BLOCKS_PER_PLANE` | `nand_config.h` |
 
 ## 12. 数据 Buffer 方案设计讨论
+
+> **⚠ 历史章节（v13 前的接口）**：本章代码示例里的 `fc_command_configure_descriptors()`（**复数**）与
+> `fc_write_cmd_data()` 已随 v13 策略层上移改由 FTL 侧 `ftl_cmd_configure_descriptors()` /
+> `ftl_cmd_write_data()` 承担。方案比较的**结论**（buffer_id 方案胜出）不受影响，只是调用方换了层。
 
 ### 12.1 问题背景
 
@@ -3550,8 +3586,31 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
 
 - **行业**：DMA 引擎内硬件 inline 加扰/解扰（企业级强制 AES-XTS 加密后数据天然随机）。
 - **硬件限制**：无。
-- **无奈选择**：软件 LFSR（x¹⁶+x¹⁴+x¹³+x¹¹+1）/ XOR-shift / 简单 XOR，编码前 CPU 逐字节异或。
+- **无奈选择**：软件 LFSR（x¹⁶+x¹⁴+x¹³+x¹¹+1，周期 65535）/ XOR-shift / 简单 XOR，编码前 CPU 逐字节异或。
 - **代价**：占用 CPU 周期；无 AES 加密（消费/企业级数据安全要求未覆盖）。
+
+**v24 的两处修正**（都在 `src/fc/fc_random_engine.c`）：
+
+1. **抽头错误导致状态空间坍缩**。原实现是右移 LFSR（输出 bit0、反馈进 bit15），却照抄了左移写法的抽头
+   `bit15^bit13^bit12^bit10`——新状态的 16 位**全部只依赖旧 bit1..bit15**，被移出的 bit0 没有反馈回去，
+   映射不可逆（`1 → 0` 是吸收态），状态空间坍缩到**周期 63**。后果：520 字节的 CW = 63 字节图案重复
+   8.25 遍，写 `0101…` 进去出来仍是周期 63 字节的图案，加扰等于没做。正确抽头是多项式的**镜像**
+   `{0,2,3,5}`（`fb = bit0 ^ bit2 ^ bit3 ^ bit5`）。
+2. **种子从物理地址改为逻辑地址**。原 `fc_random_seed_from_paa(desc->paa, 0U)` 用物理地址当种子：
+   ① GC 搬页后物理地址变 ⇒ 密文变，正是业界要避免的（业界做法是**种子 = 被写页的逻辑地址**，
+   搬页后逻辑地址不变 ⇒ 不需要"解扰再重加扰"）；② 第二个形参 `program_sequence` 恒传 `0U`，该维度从未接上。
+   现改为 `fc_random_seed_from_meta(desc->meta)`（本 CW 的扇区 LBA），并**删除 `FC_RANDOM_SEED_STRATEGY`
+   三选一旋钮**（种子来源只剩这一种，不再需要策略开关）。
+
+**为什么必须同时把 META 移出加扰范围**：种子既然取自 META，读路径就需要 META 才能解扰——但 GC 与掉电重建
+**不知道** LBA，只能从页内 META 读回来。若 META 仍在加扰区内，就构成"要 META 才能解扰 / 要解扰才能拿 META"
+的循环依赖；强行改种子会让 GC 解出垃圾 LBA → L2P 查不到 → 源块有效页被逐个标记无效却从未搬迁 →
+静默数据丢失。故加扰范围由 `[0,520)` 收窄到 `[8,520)`（`FC_CRC_USER_OFFSET` 起、`FC_BUFFER_USER_SIZE` 长），
+**META 与 CRC 保持明文**，读路径 Pass 2 直接读明文 META 自举种子。
+
+> 加扰粒度 = **被寻址逻辑单元**。本工程一个 CW（512 B 用户数据）= 一个扇区 = 一个逻辑单元，故每条 CW 用
+> 自己那条扇区 LBA 当种子；这正是业界"种子 = 被寻址逻辑单元的地址"（一个逻辑块由若干 512 B–2 kB 的
+> ECC 码字组成，块内码字共用该逻辑块的种子）。详见 `docs/changelog/fc_scrambler_lba_seed_v24.md`。
 
 #### 21.3.6 无硬件 XOR → 软件 RAID
 
@@ -3745,7 +3804,7 @@ nand_init()
   ├─ ① nand_dispatch_poll（先推进 NAND，见 图 9/图 20）
   └─ ② 无完成 → fc_poll_fill（图 22）→ 取到命令（need==1）
         └─ fc_poll_dispatch_single：置 ACTIVE
-             ├─ page write → fc_fill_cw_meta_paa + fc_data_path_encode（图 4）
+             ├─ page write → fc_data_path_encode（Stage 0 写 META，图 4）
              ├─ fc_build_dispatch_request → request.cw_mask / cw_buffers[n] / plane_paa[]
              └─ nand_dispatch_submit（门控 + enqueue 追加槽 + task_load 绑 backend/buffer）
   ▼

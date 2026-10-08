@@ -41,17 +41,15 @@
 #if CONFIG_FC_RAID
 /* --------------------------------------------------------------------
  * fc_collect_decode_buffers
- *   功能：沿 desc 链收集命令所有 CW 的 buffer 基址与 PAA。
- *   参数：cmd —— 命令；buffers —— 输出指针数组；buffer_paa —— 输出 PAA 数组；
- *         max_count —— 容量上限（CW_TOTAL_MAX）。
+ *   功能：沿 desc 链收集命令所有 CW 的 buffer 基址。
+ *   参数：cmd —— 命令；buffers —— 输出指针数组；max_count —— 容量上限（CW_TOTAL_MAX）。
  *   返回：收集到的 CW 数量。
  *   实现要点：解码路径需操作全 CW，用 fc_buffer_get_base 取 528B 完整 CW
  *         基址（含 META/CRC/PARITY），索引与 desc 链位置对齐。
+ *   ⚠ 不再输出 PAA 数组（v24）：解扰种子改为从 buffer 内的**明文 META** 自举，
+ *     PAA 这个唯一用途消失（§十七 判据 5）。
  * -------------------------------------------------------------------- */
-static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd,
-                                         uint8_t            *buffers[],
-                                         nand_paa_t          buffer_paa[],
-                                         uint8_t             max_count)
+static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd, uint8_t *buffers[], uint8_t max_count)
 {
     fc_descriptor_id_t desc_id;
     uint8_t            count = 0U;
@@ -66,8 +64,7 @@ static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd,
         }
 
         /* 解码路径需要操作全 CW，取基址 */
-        buffers[count]    = fc_buffer_get_base(desc->buffer_id);
-        buffer_paa[count] = desc->paa;
+        buffers[count] = fc_buffer_get_base(desc->buffer_id);
         count++;
         desc_id = (fc_descriptor_id_t)desc->next_id;
     }
@@ -87,7 +84,9 @@ static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd,
  *   实现要点：
  *     - Stage 0：META 写入——每个 CW 的 meta 拷贝到 buffer[0..4]。
  *     - Stage 1：CRC 编码（config.crc 使能时）——对 USER 区算 CRC 存 buffer[4..8]。
- *     - Stage 1：加扰（config.random 使能时）——seed 由 PAA 派生。
+ *     - Stage 1：加扰（config.random 使能时）——seed 由本 CW 的 **META（扇区 LBA）** 派生；
+ *       加扰区 [FC_CRC_USER_OFFSET, FC_BUFFER_DATA_SIZE) —— **META/CRC 保持明文**，
+ *       读路径才能从页内 META 自举出种子（GC / 掉电重建不知道 LBA）。
  *     - Stage 2：ECC 编码（非 LDPC_RAW 模式）——对 520B 数据区编码，8B parity 写入。
  *     - Stage 3 已被移除：跨命令 stripe RAID 在 generate_stripe_parity() 单独处理。
  * -------------------------------------------------------------------- */
@@ -152,8 +151,12 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
             {
-                uint32_t seed = fc_random_seed_from_paa(desc->paa, 0U);
-                (void)fc_random_transform(buffer, FC_BUFFER_DATA_SIZE, seed);
+                /* 种子 = 本 CW 的逻辑地址（META 字段），与物理位置解耦：
+                 * GC 搬页后逻辑地址不变 ⇒ 密文不变，无需解扰再重加扰。
+                 * 加扰区 [8, 520)：META/CRC 保持明文（读路径靠它自举种子）。 */
+                (void)fc_random_transform(buffer + FC_CRC_USER_OFFSET,
+                                          FC_BUFFER_USER_SIZE,
+                                          fc_random_seed_from_meta(desc->meta));
             }
             desc_id = (fc_descriptor_id_t)desc->next_id;
         }
@@ -368,10 +371,11 @@ fc_status_t fc_data_path_generate_stripe_parity(
  *   实现要点：
  *     - Pass 1：逐 CW ECC 解码；失败置 UNC 并记录 all_ok=0。
  *     - 有失败直接返回 IO_ERROR（不解扰，供 FTL RAID 在 scrambled domain 恢复）。
- *     - Pass 2：全部成功才解扰（seed 由 PAA 派生）。
+ *     - Pass 2：全部成功才解扰——seed **从页内明文 META 自举**（META 在加扰区之外，
+ *       v24），故 GC / 掉电重建不必预先知道 LBA。
  *     - Pass 3：CRC 校验（使能时）——失败置 CRC_ERROR 位。
- *     - Pass 4：META 读回并与 lba_to_cw_meta(command->meta, cw) 比对——
- *       不一致置 MATA_ERROR 位。
+ *     - Pass 4：META 读回 + 两项校验（v24）：① 自洽（低 3 位 == 本 desc 的 plane/cw）；
+ *       ② 与本命令的 LBA 比对（command->meta 为 FC_META_UNKNOWN 时跳过）。任一不符置 MATA_ERROR。
  * -------------------------------------------------------------------- */
 fc_status_t fc_data_path_process_read(const fc_command_t *command)
 {
@@ -467,8 +471,13 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
             {
-                uint32_t seed = fc_random_seed_from_paa(desc->paa, 0U);
-                (void)fc_random_transform(buffer, FC_BUFFER_DATA_SIZE, seed);
+                /* 种子**自举**：META 在加扰区之外、保持明文，直接读回本 CW 的扇区 LBA
+                 * 当种子——GC / 掉电重建因此不必预先知道 LBA（v24）。 */
+                uint32_t cw_meta;
+                (void)memcpy(&cw_meta, buffer, FC_CRC_META_SIZE);
+                (void)fc_random_transform(buffer + FC_CRC_USER_OFFSET,
+                                          FC_BUFFER_USER_SIZE,
+                                          fc_random_seed_from_meta(cw_meta));
             }
 
             desc_id = (fc_descriptor_id_t)desc->next_id;
@@ -534,14 +543,29 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             {
                 uint32_t read_meta;
                 (void)memcpy(&read_meta, buffer, FC_CRC_META_SIZE);
-                desc->meta        = read_meta;
-                /* META 由写入侧的 CW 号派生（见 fc_command_configure_descriptor），
-                 * 故这里必须用 paa_to_cw(desc->paa) 而不是链走位 cw —— cw_mask 不满时两者
-                 * 不同，用链走位会误报 FC_CW_STATUS_MATA_ERROR。满 mask 时等值。 */
-                uint32_t expected = lba_to_cw_meta(command->meta, (uint8_t)paa_to_cw(desc->paa));
-                if (read_meta != expected)
+                desc->meta = read_meta;
+
+                /* 自洽校验：META 低 3 位必须就是本 desc 的 plane/cw。**先抓这个**——
+                 * 种子取自 META（Pass 2），META 损坏 ⇒ 种子也错 ⇒ 解出的 USER 是垃圾，
+                 * 而 ECC/CRC 都查不出来（CRC 在加扰区外、是明文，但它保护的是 USER，
+                 * 种子错时 CRC 必然不过——不过那已被记成 CRC_ERROR，语义不如这里直接）。
+                 * ⚠ 必须用 paa_to_plane/paa_to_cw(desc->paa) 而非链走位：cw_mask 不满时
+                 *   两者不同（v22 已确立）。 */
                 {
-                    desc->status |= FC_CW_STATUS_MATA_ERROR;
+                    const uint32_t expected_low =
+                        ((uint32_t)paa_to_plane(desc->paa) << PBA_PLANE_SHIFT) | (uint32_t)paa_to_cw(desc->paa);
+
+                    if ((read_meta & PLANE_CW_MASK) != expected_low)
+                    {
+                        desc->status |= FC_CW_STATUS_MATA_ERROR;
+                    }
+                    else if ((command->meta != FC_META_UNKNOWN) &&
+                             (read_meta != lba_to_meta(command->meta, (uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa))))
+                    {
+                        /* 自洽但与本命令的 LBA 不符 = 读到了别的页（GC 路径 meta 为
+                         * FC_META_UNKNOWN，跳过本项，只做上面的自洽校验）。 */
+                        desc->status |= FC_CW_STATUS_MATA_ERROR;
+                    }
                 }
             }
             desc_id = (fc_descriptor_id_t)desc->next_id;
@@ -572,13 +596,12 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
  *   实现要点：
  *     - 收集全 CW buffer+PAA，XOR 重建 failed CW（scrambled domain 内）。
  *     - ECC 重试：重建后仍不可纠 → 返回 IO_ERROR。
- *     - 解扰所有 CW（seed 由各 CW PAA 派生）。
+ *     - 解扰所有 CW（seed 从各 CW 的明文 META 自举）。
  *     - 沿 desc 链把所有 desc status 置 READY。
  * -------------------------------------------------------------------- */
 fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw_idx)
 {
     uint8_t           *buffers[CW_TOTAL_MAX];
-    nand_paa_t         buffer_paa[CW_TOTAL_MAX];
     uint8_t            count;
     fc_descriptor_id_t desc_id;
     uint8_t            i;
@@ -587,8 +610,8 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
     ASSERT(cmd != NULL);
     ASSERT(cmd->desc_id != FC_DESCRIPTOR_ID_INVALID);
 
-    /* ── 收集所有 buffer 指针 + PAA（索引对齐 desc 链位置） ── */
-    count = fc_collect_decode_buffers(cmd, buffers, buffer_paa, CW_TOTAL_MAX);
+    /* ── 收集所有 buffer 指针（索引对齐 desc 链位置） ── */
+    count = fc_collect_decode_buffers(cmd, buffers, CW_TOTAL_MAX);
 
     /* failed_cw_idx 由 FTL 沿同一条 desc 链定位，必在 [0, count) */
     ASSERT(failed_cw_idx < count);
@@ -628,8 +651,13 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
         {
             if (buffers[i] != NULL)
             {
-                uint32_t seed = fc_random_seed_from_paa(buffer_paa[i], 0U);
-                (void)fc_random_transform(buffers[i], FC_BUFFER_DATA_SIZE, seed);
+                /* 种子自举：META 明文（加扰区外）。重建出的 CW 其 META 由 XOR 线性还原，
+                 * 与其它 CW 一样可直接读回（v24）。 */
+                uint32_t cw_meta;
+                (void)memcpy(&cw_meta, buffers[i], FC_CRC_META_SIZE);
+                (void)fc_random_transform(buffers[i] + FC_CRC_USER_OFFSET,
+                                          FC_BUFFER_USER_SIZE,
+                                          fc_random_seed_from_meta(cw_meta));
             }
         }
     }
