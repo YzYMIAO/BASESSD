@@ -7,6 +7,8 @@ ifeq ($(FC_NAND_TEST_ENABLE),1)
 # munit 单元测试框架
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/framework/munit.c
 MODULE_INCS += $(PROJECT_ROOT)/tests/framework
+# 共享夹具：setup/teardown + 读写擦 helper（Level 2 / Level 3 共用）
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/fc_test_common.c
 # Level 1: 纯逻辑测试
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_fc_level1.c
 # Level 2: 数据路径测试

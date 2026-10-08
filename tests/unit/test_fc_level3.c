@@ -15,14 +15,15 @@
  *
  * PBA 约定：ch=0 ce=0 lun=0 plane=0 block=<test> page=0..63 cw=0
  *           多 Plane 操作使用 plane=0/1，双 Plane 地址
- *           （v24：命令携带的是 PBA，不是 PAA——两者位序不同，见 make_pba）
+ *           （v24/v25：命令携带的是 PBA，不是 PAA；地址一律用具名字段构造，
+ *             见 nand_config.h 的 pba_from_addr / paa_from_addr）
  *
  * 依赖：
  *   - NAND 硬件（走 fc_submit → fc_service → nand_fc_start/step 异步路径）
  *   - 建链走 FTL 策略层 ftl_cmd_configure_descriptors()——「按掩码建整条链」
  *     自 v13 起属 FTL（FC 只剩单数逐条入口 fc_command_configure_descriptor）
  *     ⚠ v23：cw_mask == 0 表示「本命令 plane 段内的**全部** CW」，config.cw 已不参与
- *       建链。本文件里凡"只要 1 条 desc"的用例必须显式写 cmd->param.cw_mask = 0x01U。
+ *       建链。凡"只要 1 条 desc"的用例必须显式给出该 CW 的位（如 1U << cw）。
  *   - 释放只需 fc_command_release()（v16 起沿 desc 链把 desc + buffer 一起还池）
  *
  * 用法：
@@ -35,312 +36,177 @@
 #include "fc/fc_command.h"
 #include "fc/fc_queue.h"
 #include "fc/fc_scheduler.h"
+#include "fc_test_common.h"
 #include "ftl/ftl_fc_interface.h"
 #include "munit.h"
 #include "nand/nand_config.h"
-#include "nand/nand_dispatch.h"
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
 
 /**************************************************************************
- *  Suite 级 setup
+ *  夹具
  *
- *  fc_init() 和 NAND init 由 main.c 在 UART CLI 之前完成。
+ *  setup / teardown、读写擦原语、源数据比对、desc 链小工具全部来自共享模块
+ *  fc_test_common（Level 2 / Level 3 共用一份，见 tests/unit/fc_test_common.h）。
+ *  本文件只保留 block 级与场景级的薄封装。
+ *
+ *  与改造前的三处**有意**差别：
+ *    ① 数据源从「4 字节周期 pattern」换成「按 (plane, cw) 区分的源表」
+ *       g_source_data —— 旧 pattern 的 4 字节周期使 cw*512 恒为 4 的倍数，
+ *       **读错 CW / 读错 plane 在旧判据下永远通过**（新判据第一次能抓到）。
+ *    ② cmd->meta 从「隐式 0」换成页 LBA（page << CW_WIDTH）：页号因此进了 META，
+ *       数据路径 Pass 4 ② 能抓到「读到了别的页」。
+ *    ③ 建链统一走 test_page_cmd() / test_page_cmd_ex()（FTL 策略层
+ *       ftl_cmd_configure_descriptors），不再手写 config.cw。
+ *
+ *  setup / teardown 见套件表：test_setup / test_tear_down。
  **************************************************************************/
 
-static void *setup_level3(const MunitParameter params[], void *user_data)
+/* 本套件用到的 block 号 */
+#define BLOCK_TEST (TEST_BLOCK)
+#define BLOCK_DEST (TEST_BLOCK_DEST)
+
+/* 裸页读写沿用改造前的 CRC 设定：改造前的 program_page / read_page 都不显式设
+ * config.crc，而 FC_CRC_ENABLE == 0 ⇒ 实际是**开**。这里显式写出来，免得读代码
+ * 时误以为关了。cache 路径与 multi-plane 路径改造前显式关 CRC（纯 RAW 数据比对）。 */
+#define L3_CRC_PAGE (FC_CRC_ENABLE)
+#define L3_CRC_RAW  (FC_CRC_DISABLE)
+
+/**************************************************************************
+ *  辅助：写一页（建链 → 设 config → 填源数据 → 提交 → 释放）
+ **************************************************************************/
+
+static void write_page(uint16_t block, uint8_t page, uint8_t plane, uint8_t operation, uint8_t crc)
 {
-    (void)params;
-    (void)user_data;
+    fc_command_t *cmd = test_page_cmd_ex(block, page, TEST_PLANE_BM(plane), 0U, operation, 0U, (DWORD)page << CW_WIDTH);
 
-    /* 置位异步 dispatch 放行闩锁（main.c 在 NAND 初始化后已置 1，此处幂等重申）。
-     * 本套件走 fc_service() → nand_fc_start/step 异步路径，闩锁必须为 1。 */
-    nand_dispatch_set_armed(1U);
+    cmd->config.crc = crc;
+    test_fill_user_from_source(cmd);
+    test_run_lifecycle(cmd);
+}
 
-    /* 套件级资源快照，排查池泄漏时打开；正常跑保持静默。 */
-    /*
-    fc_resource_stats_t stats;
-    if (fc_get_resource_stats(&stats) == FC_STATUS_OK)
+/**************************************************************************
+ *  辅助：读一页并校验
+ *
+ *  裸页读（NORMAL_READ_PAGE_WITH_DATA_OUT，plane 段内全部 CW）的 config 形态
+ *  恰好就是共享夹具的默认值（LDPC_RAW + 不加扰 + CRC 开）⇒ 直接用
+ *  test_read_page() 一步到位（建链 → 0xCC 预填 → 提交）。
+ *
+ *  erased == 0：逐字节与源表比对；erased != 0：逐字节必须是 0xFF。
+ *  ⚠ 擦除页的 META 是 0xFF…，Pass 4 ①（自洽）必然不过 ⇒ 该 CW 带 MATA_ERROR 位；
+ *    但 FC_CW_STATUS_SUCCESS == FC_CW_STATUS_READY 是**另一个位**，仍置位，
+ *    故 SUCCESS 判据照旧成立（与改造前一致，不是本轮引入的）。
+ **************************************************************************/
+
+static void read_page_verify(uint16_t block, uint8_t page, uint8_t plane, uint8_t erased)
+{
+    fc_command_t *cmd = test_read_page(block, page, TEST_PLANE_BM(plane), 0U);
+
+    munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
+
+    if (erased != 0U)
     {
-        LOGI("[RES] L3_start: cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
-                 (unsigned)stats.command_used,
-                 (unsigned)FC_COMMAND_POOL_DEPTH,
-                 (unsigned)stats.descriptor_used,
-                 (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
-                 (unsigned)stats.buffer_used,
-                 (unsigned)FC_BUFFER_POOL_DEPTH,
-                 (unsigned)stats.sq_used,
-                 (unsigned)stats.hsq_used,
-                 (unsigned)stats.cq_used);
+        test_verify_erased(cmd);
     }
-    */
-    return NULL;
-}
-
-/**************************************************************************
- *  NAND 几何参数（固定值，用于 block 级验证）
- *
- *  block 100（plane 0）：
- *    每 page = 4 CW x 512B user data = 2048B
- *    每 block = 64 pages
- *    全 block user data = 128 KB
- *
- *  block 101：内部搬移目标
- **************************************************************************/
-
-#define BLOCK_TEST (100U) /* 固定测试 block */
-#define BLOCK_DEST (102U) /* 内部搬移目标 block */
-
-/**************************************************************************
- *  PBA 辅助（v24：FTL 交 PBA，FC-NAND 侧再 pba_to_paa 落到芯片地址）
- *
- *  约定：ch=0, ce=0, lun=0
- *  ⚠ PBA 布局是 [cw:2][plane:1][page:6][block:11]…（plane 在 page 之下），
- *    与 PAA 的 [cw:2][page:6][plane:1][block:11]… **不是**同一套位序，
- *    故这里必须走 pba_make 而不是 paa_make。
- **************************************************************************/
-
-static nand_pba_t make_pba(uint16_t block, uint8_t plane, uint8_t page)
-{
-    return pba_make(0U, 0U, page, plane, block, 0U, 0U);
-}
-
-/**************************************************************************
- *  Buffer pattern 辅助（固定 pattern，不依赖 block/page）
- *
- *  Plane 0: 0x12345678 循环填充（小端：78 56 34 12）
- *  Plane 1: 0x87654321 循环填充（小端：21 43 65 87）
- *
- *  固定 pattern 的好处：
- *    1. 一眼可识别（0x12/0x34/0x56/0x78 不会是随机噪声）
- *    2. 各 page / CW 数据一致，校验函数简单直接
- *    3. 内部搬移验证无需区分源/目标 block 参数
- **************************************************************************/
-
-static uint32_t page_pattern(uint8_t plane)
-{
-    return (plane == 0U) ? 0x12345678UL : 0x87654321UL;
-}
-
-static void fill_page_pattern(uint8_t *buf, uint8_t plane)
-{
-    const uint32_t pattern = page_pattern(plane);
-    const uint8_t *pp      = (const uint8_t *)&pattern;
-
-    for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
+    else
     {
-        buf[i] = pp[i % 4U];
+        test_verify_against_source(cmd);
     }
-}
 
-/* 直接用 pattern 返回预期字节，不经过 block/page 运算 */
-static uint8_t expected_byte(uint8_t plane, uint32_t offset)
-{
-    const uint32_t pattern = page_pattern(plane);
-    return ((const uint8_t *)&pattern)[offset % 4U];
+    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
 }
 
 /**************************************************************************
- *  辅助：读命令 buffer 全部 memset 为 0xCC
- *
- *  在 submit 前调用，确保 buffer 没有残留数据。
- *  如果 NAND 读不完全填满 buffer，剩余位置保留 0xCC，方便 debug。
+ *  辅助：全 block 写（64 pages，NORMAL_PROGRAM_PAGE）
  **************************************************************************/
 
-static void memset_read_buffer(fc_command_t *cmd)
+static void write_block(uint16_t block, uint8_t plane)
 {
-    fc_descriptor_id_t did = cmd->desc_id;
-    while (did != FC_DESCRIPTOR_ID_INVALID)
+    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
-        if (d == NULL)
-        {
-            break;
-        }
-        uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
-        if (buf != NULL)
-        {
-            memset(buf, 0xCC, FC_BUFFER_USER_SIZE);
-        }
-        did = d->next_id;
+        write_page(block, page, plane, (uint8_t)OP_NORMAL_PROGRAM_PAGE, L3_CRC_PAGE);
     }
 }
 
 /**************************************************************************
- *  辅助：配置 desc chain，返回 desc 数量
+ *  辅助：全 block 写（64 pages，PROGRAM_PAGE_CACHE）
  *
- *  配置命令的 desc chain（CW_NUM 个 desc），并为每个 desc buffer 填充
- *  pattern。适用于有数据输入/输出的 OP。
+ *  前 63 pages 用 OP_PROGRAM_PAGE_CACHE（80h-addr-data-15h），
+ *  最后 1 page 用 OP_NORMAL_PROGRAM_PAGE（80h-addr-data-10h）确认收尾。
  **************************************************************************/
 
-static uint8_t cmd_configure_and_fill(fc_command_t *cmd, uint16_t block, uint8_t page, uint8_t plane)
+static void write_block_cache(uint16_t block, uint8_t plane)
 {
-    cmd->config.cw = CW_NUM - 1U;
-    cmd->pba       = make_pba(block, plane, page);
-
-    munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-    /* 遍历 desc chain，填充 pattern */
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            cw_idx  = 0U;
-    while (desc_id != FC_DESCRIPTOR_ID_INVALID)
+    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL)
-        {
-            break;
-        }
-        uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
-        if (buf != NULL)
-        {
-            fill_page_pattern(buf, plane);
-        }
-        desc_id = (fc_descriptor_id_t)desc->next_id;
-        cw_idx++;
+        const uint8_t operation =
+            (page < (PAGES_PER_BLOCK - 1U)) ? (uint8_t)OP_PROGRAM_PAGE_CACHE : (uint8_t)OP_NORMAL_PROGRAM_PAGE;
+
+        write_page(block, page, plane, operation, L3_CRC_RAW);
     }
-    return cw_idx;
 }
 
 /**************************************************************************
- *  辅助：验证 desc chain 中各 CW 的 status 均为 SUCCESS
+ *  辅助：全 block 读回验证（与源表逐字节比对）
  **************************************************************************/
 
-static uint8_t verify_cw_status_all_success(fc_command_t *cmd)
+static void read_block_verify(uint16_t block, uint8_t plane)
 {
-    uint8_t            all_ok  = 1U;
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            cw_idx  = 0U;
-    while (desc_id != FC_DESCRIPTOR_ID_INVALID)
+    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL)
-        {
-            break;
-        }
-        if ((desc->status & FC_CW_STATUS_SUCCESS) == 0U)
-        {
-            munit_errorf("CW %u status=0x%02X expected FC_CW_STATUS_SUCCESS", cw_idx, (unsigned)desc->status);
-            all_ok = 0U;
-        }
-        desc_id = (fc_descriptor_id_t)desc->next_id;
-        cw_idx++;
+        read_page_verify(block, page, plane, 0U);
     }
-    return all_ok;
 }
 
 /**************************************************************************
- *  说明：本文件不手动释放 buffer
+ *  辅助：全 block 读回验证擦除（全 0xFF）
+ **************************************************************************/
+
+static void read_block_verify_erased(uint16_t block, uint8_t plane)
+{
+    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
+    {
+        read_page_verify(block, page, plane, 1U);
+    }
+}
+
+/**************************************************************************
+ *  辅助：解锁 block（OP_BLOCK_UNLOCK_LOW + OP_BLOCK_UNLOCK_HIGH）
  *
- *  fc_command_release()（v16 起）沿 desc 链把 desc + buffer 一起还池，
- *  故测试只需 fc_command_release() 收尾。切勿再手动 fc_buffer_release——
- *  那会二次释放同一 buffer，使空闲链成环（fc_buffer_release_internal 无
- *  占用检查）。
+ *  仅用于 BLOCK_LOCK 后的解锁恢复。正常情况下 NAND 上电后所有 block 默认解锁。
+ *  当前唯一调用者 test_unlock_erase 在 #if 0 里，故标 unused。
  **************************************************************************/
 
-/**************************************************************************
- *  辅助：读回 desc chain buffer，与预期 pattern 逐字节对比
- **************************************************************************/
-
-static uint8_t verify_page_data(fc_command_t *cmd, uint8_t plane)
+static void __attribute__((unused)) unlock_block(uint16_t block)
 {
-    uint8_t            all_ok  = 1U;
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            cw_idx  = 0U;
-    while (desc_id != FC_DESCRIPTOR_ID_INVALID)
+    static const uint8_t unlock_ops[2] = {(uint8_t)OP_BLOCK_UNLOCK_LOW, (uint8_t)OP_BLOCK_UNLOCK_HIGH};
+
+    for (uint8_t i = 0U; i < 2U; i++)
     {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL)
-        {
-            break;
-        }
-        uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
-        if (buf != NULL)
-        {
-            for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
-            {
-                uint8_t exp = expected_byte(plane, (uint32_t)cw_idx * FC_BUFFER_USER_SIZE + i);
-                if (buf[i] != exp)
-                {
-                    munit_errorf("cw=%u offset=%u: got 0x%02X expected 0x%02X",
-                                 (unsigned)cw_idx,
-                                 (unsigned)i,
-                                 (unsigned)buf[i],
-                                 (unsigned)exp);
-                    all_ok = 0U;
-                    goto next_desc;
-                }
-            }
-        }
-next_desc:
-        desc_id = (fc_descriptor_id_t)desc->next_id;
-        cw_idx++;
+        fc_command_t *cmd = fc_command_alloc();
+
+        munit_assert_not_null(cmd);
+
+        cmd->config.operation = (DWORD)unlock_ops[i];
+        cmd->config.random    = FC_RANDOM_DISABLE;
+        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
+        cmd->config.raid      = FC_RAID_MODE_NORMAL;
+        cmd->pba              = pba_from_addr(&(nand_addr_t){.block = block});
+
+        test_run_lifecycle(cmd);
     }
-    return all_ok;
 }
-
-/**************************************************************************
- *  辅助：读回 desc chain buffer，验证每个 byte == 0xFF（擦除后）
- **************************************************************************/
-
-static uint8_t verify_page_erased(fc_command_t *cmd, uint8_t page)
-{
-    uint8_t            all_ok  = 1U;
-    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
-    uint8_t            cw_idx  = 0U;
-    while (desc_id != FC_DESCRIPTOR_ID_INVALID)
-    {
-        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-        if (desc == NULL)
-        {
-            break;
-        }
-        uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
-        if (buf != NULL)
-        {
-            for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
-            {
-                if (buf[i] != 0xFFU)
-                {
-                    munit_errorf("page=%u cw=%u offset=%u: got 0x%02X expected 0xFF (erased)",
-                                 (unsigned)page,
-                                 (unsigned)cw_idx,
-                                 (unsigned)i,
-                                 (unsigned)buf[i]);
-                    all_ok = 0U;
-                    goto next_desc;
-                }
-            }
-        }
-next_desc:
-        desc_id = (fc_descriptor_id_t)desc->next_id;
-        cw_idx++;
-    }
-    return all_ok;
-}
-
-/**************************************************************************
- *  辅助：执行命令生命周期（submit + poll + release）
- *
- *  对给定的 command 执行 submit -> service loop -> poll -> release。
- *  适用于不需要检查 completion 数据的场景。
- *  如需检查 completion 数据（status、parameter0、buffer 数据等），
- *  请使用 run_submit_poll() + 手动 release。
- **************************************************************************/
-
-#define SERVICE_LOOP_MAX (5000U)
 
 /**************************************************************************
  *  辅助：命令结构体快照 + 逐字段差异对比
  *
- *  run_lifecycle 在 submit 前给 cmd 拍一份快照，release 前逐字段比对，
- *  把发生变化的字段打到串口——用于定位"命令提交后被谁改写"这类问题。
- *  正常生命周期内 fc_command_t 的全部字段都应保持不变，所以只要出现差异
- *  就说明有代码在命令在飞的时候动了它。
+ *  在 submit 前给 cmd 拍一份快照，release 前逐字段比对，把发生变化的字段打到
+ *  串口——用于定位"命令提交后被谁改写"这类问题。正常生命周期内 fc_command_t
+ *  的全部字段都应保持不变，所以只要出现差异就说明有代码在命令在飞的时候动了它。
  **************************************************************************/
 
-/* 命令结构体快照 / 逐字段比对。排查"命令提交后被谁改写"时把下面整块打开，
- * 并在 run_lifecycle 里恢复 cmd_snapshot + cmd_diff_report 两处调用。
+/* 命令结构体快照 / 逐字段比对。排查"命令提交后被谁改写"时把下面整块打开。
  *
  * 注意：想直接比对 fc_cmd_conf_t 原始字的话，先确认 sizeof(fc_cmd_conf_t) == 4，
  * 否则整字兜底比对不成立。
@@ -431,358 +297,6 @@ static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *
 }
 #endif
 
-static void run_lifecycle(fc_command_t *cmd)
-{
-    fc_command_status_t completion;
-    fc_status_t         result;
-    uint32_t            service_count;
-    uint8_t             completed = 0U;
-
-    munit_assert_not_null(cmd);
-
-    /* --- 1. submit --- */
-    result = fc_submit(cmd);
-    munit_assert_int(result, ==, FC_STATUS_OK);
-
-    /* --- 2. service loop -- 驱动 NAND 执行 --- */
-    for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
-    {
-        (void)fc_service();
-
-        result = fc_poll_completion(&completion);
-        if (result == FC_STATUS_OK)
-        {
-            completed = 1U;
-            break;
-        }
-    }
-
-    /* --- 3. 验证 completion --- */
-    munit_assert_uint32(completed, ==, 1U);
-
-    /* cmd 无缓存 id（v15 起由指针派生）；completion 里的是建链时算好的快照。 */
-    fc_command_id_t expect_id = FC_COMMAND_ID_INVALID;
-    munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
-    munit_assert_uint32(completion.command_id, ==, expect_id);
-
-    /* --- 3.5 结构体一致性检查（排查命令被改写时打开，见文件上方 #if 0 块） --- */
-    /* (void)cmd_diff_report(&snapshot, cmd, "lifecycle"); */
-
-    /* --- 4. release --- */
-    result = fc_command_release(cmd);
-    munit_assert_int(result, ==, FC_STATUS_OK);
-}
-
-/**************************************************************************
- *  辅助：submit + poll（不 release）
- *
- *  执行 submit -> service loop -> poll，返回 completion。
- *  调用者可在 release 前检查 cmd 中的 completion 数据
- *  （如 parameter0、status、buffer 内容等），然后自行调用
- *  fc_command_release()（v16 起一并回收 desc + buffer）。
- **************************************************************************/
-
-static void run_submit_poll(fc_command_t *cmd, fc_command_status_t *completion)
-{
-    fc_status_t result;
-    uint32_t    service_count;
-    uint8_t     completed = 0U;
-
-    munit_assert_not_null(cmd);
-    munit_assert_not_null(completion);
-
-    result = fc_submit(cmd);
-    munit_assert_int(result, ==, FC_STATUS_OK);
-
-    for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
-    {
-        (void)fc_service();
-
-        result = fc_poll_completion(completion);
-        if (result == FC_STATUS_OK)
-        {
-            completed = 1U;
-            break;
-        }
-    }
-
-    munit_assert_uint32(completed, ==, 1U);
-
-    fc_command_id_t expect_id = FC_COMMAND_ID_INVALID;
-    munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
-    munit_assert_uint32(completion->command_id, ==, expect_id);
-}
-
-/**************************************************************************
- *  辅助：解锁 block（OP_BLOCK_UNLOCK_LOW + OP_BLOCK_UNLOCK_HIGH）
- *
- *  仅用于 BLOCK_LOCK 后的解锁恢复。
- *  正常情况下 NAND 上电后所有 block 默认解锁，无需调用。
- **************************************************************************/
-
-static void __attribute__((unused)) unlock_block(uint16_t block)
-{
-    fc_command_t *cmd_low = fc_command_alloc();
-    munit_assert_not_null(cmd_low);
-
-    cmd_low->config.operation = OP_BLOCK_UNLOCK_LOW;
-    cmd_low->config.ch        = 0U;
-    cmd_low->config.ce        = 0U;
-    cmd_low->config.lun       = 0U;
-    cmd_low->config.cw        = 0U;
-    cmd_low->config.random    = FC_RANDOM_DISABLE;
-    cmd_low->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-    cmd_low->config.raid      = FC_RAID_MODE_NORMAL;
-    cmd_low->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-    cmd_low->pba              = make_pba(block, 0U, 0U);
-
-    run_lifecycle(cmd_low);
-
-    fc_command_t *cmd_high = fc_command_alloc();
-    munit_assert_not_null(cmd_high);
-
-    cmd_high->config.operation = OP_BLOCK_UNLOCK_HIGH;
-    cmd_high->config.ch        = 0U;
-    cmd_high->config.ce        = 0U;
-    cmd_high->config.lun       = 0U;
-    cmd_high->config.cw        = 0U;
-    cmd_high->config.random    = FC_RANDOM_DISABLE;
-    cmd_high->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-    cmd_high->config.raid      = FC_RAID_MODE_NORMAL;
-    cmd_high->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-    cmd_high->pba              = make_pba(block, 0U, 0U);
-
-    run_lifecycle(cmd_high);
-}
-
-/**************************************************************************
- *  辅助：全 block 擦除
- **************************************************************************/
-
-static void erase_block(uint16_t block, uint8_t multi_plane)
-{
-    fc_command_t *cmd = fc_command_alloc();
-    munit_assert_not_null(cmd);
-
-    cmd->config.operation   = multi_plane ? OP_ERASE_BLOCK_MULTI_PLANE : OP_ERASE_BLOCK;
-    cmd->config.ch          = 0U;
-    cmd->config.ce          = 0U;
-    cmd->config.lun         = 0U;
-    cmd->config.random      = FC_RANDOM_DISABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_LDPC_RAW;
-    cmd->config.raid        = FC_RAID_MODE_NORMAL;
-    cmd->desc_id            = FC_DESCRIPTOR_ID_INVALID;
-    cmd->config.cw          = 0U;
-    cmd->config.multi_plane = multi_plane ? PLANE_NUM : 0U;
-    cmd->pba                = make_pba(block, 0U, 0U);
-
-    run_lifecycle(cmd);
-}
-
-/**************************************************************************
- *  辅助：program 单 page
- *
- *  使用 normal program page，填充 page pattern。
- **************************************************************************/
-
-static fc_command_t *program_page(uint16_t block, uint8_t page, uint8_t plane)
-{
-    fc_command_t *cmd = fc_command_alloc();
-    munit_assert_not_null(cmd);
-
-    cmd->config.operation = OP_NORMAL_PROGRAM_PAGE;
-    cmd->config.ch        = 0U;
-    cmd->config.ce        = 0U;
-    cmd->config.lun       = 0U;
-    cmd->config.random    = FC_RANDOM_DISABLE;
-    cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-    cmd->config.raid      = FC_RAID_MODE_NORMAL;
-
-    (void)cmd_configure_and_fill(cmd, block, page, plane);
-    return cmd;
-}
-
-/**************************************************************************
- *  辅助：read 单 page（带数据输出）
- **************************************************************************/
-
-static fc_command_t *read_page(uint16_t block, uint8_t page, uint8_t plane)
-{
-    fc_command_t *cmd = fc_command_alloc();
-    munit_assert_not_null(cmd);
-
-    cmd->config.operation = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.ch        = 0U;
-    cmd->config.ce        = 0U;
-    cmd->config.lun       = 0U;
-    cmd->config.random    = FC_RANDOM_DISABLE;
-    cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-    cmd->config.raid      = FC_RAID_MODE_NORMAL;
-
-    cmd->config.cw = CW_NUM - 1U;
-    cmd->pba       = make_pba(block, plane, page);
-
-    munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-    /* 读前 buffer memset 为 0xCC，方便区分"读失败残留"和"NAND 实际数据"。 */
-    {
-        fc_descriptor_id_t did = cmd->desc_id;
-        while (did != FC_DESCRIPTOR_ID_INVALID)
-        {
-            fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
-            if (d == NULL)
-            {
-                break;
-            }
-            uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
-            if (buf != NULL)
-            {
-                memset(buf, 0xCC, FC_BUFFER_USER_SIZE);
-            }
-            did = d->next_id;
-        }
-    }
-
-    return cmd;
-}
-
-/**************************************************************************
- *  辅助：全 block 写（64 pages），使用 PROGRAM_PAGE_CACHE
- *
- *  前 63 pages 用 OP_PROGRAM_PAGE_CACHE（80h-addr-data-15h），
- *  最后 1 page 用 OP_NORMAL_PROGRAM_PAGE（80h-addr-data-10h）确认收尾。
- **************************************************************************/
-
-static void write_block_cache(uint16_t block, uint8_t plane)
-{
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
-    {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
-
-        if (page < PAGES_PER_BLOCK - 1U)
-        {
-            cmd->config.operation = OP_PROGRAM_PAGE_CACHE;
-        }
-        else
-        {
-            /* 最后 page 用 NORMAL 10h 确认 */
-            cmd->config.operation = OP_NORMAL_PROGRAM_PAGE;
-        }
-        cmd->config.ch     = 0U;
-        cmd->config.ce     = 0U;
-        cmd->config.lun    = 0U;
-        cmd->config.random = FC_RANDOM_DISABLE;
-        cmd->config.ldpc   = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid   = FC_RAID_MODE_NORMAL;
-        cmd->config.crc    = FC_CRC_DISABLE;
-
-        (void)cmd_configure_and_fill(cmd, block, page, plane);
-        run_lifecycle(cmd);
-    }
-}
-
-static void write_block(uint16_t block, uint8_t plane)
-{
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
-    {
-        fc_command_t *cmd = program_page(block, page, plane);
-        run_lifecycle(cmd);
-    }
-}
-
-/**************************************************************************
- *  辅助：全 block 读回验证
- **************************************************************************/
-
-static void read_block_verify(uint16_t block, uint8_t plane)
-{
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
-    {
-        fc_command_t *cmd = read_page(block, page, plane);
-
-        fc_command_status_t completion;
-        fc_status_t         result;
-        uint32_t            service_count;
-        uint8_t             completed = 0U;
-
-        munit_assert_not_null(cmd);
-
-        result = fc_submit(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
-
-        for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
-        {
-            (void)fc_service();
-            result = fc_poll_completion(&completion);
-            if (result == FC_STATUS_OK)
-            {
-                completed = 1U;
-                break;
-            }
-        }
-
-        munit_assert_uint32(completed, ==, 1U);
-
-        fc_command_id_t expect_id = FC_COMMAND_ID_INVALID;
-        munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
-        munit_assert_uint32(completion.command_id, ==, expect_id);
-        munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
-
-        /* 逐字节验证数据 */
-        munit_assert_uint8(verify_page_data(cmd, plane), ==, 1U);
-
-        result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
-    }
-}
-
-/**************************************************************************
- *  辅助：全 block 读回验证擦除（全 0xFF）
- **************************************************************************/
-
-static void read_block_verify_erased(uint16_t block, uint8_t plane)
-{
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
-    {
-        fc_command_t *cmd = read_page(block, page, plane);
-
-        fc_command_status_t completion;
-        fc_status_t         result;
-        uint32_t            service_count;
-        uint8_t             completed = 0U;
-
-        munit_assert_not_null(cmd);
-
-        result = fc_submit(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
-
-        for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
-        {
-            (void)fc_service();
-            result = fc_poll_completion(&completion);
-            if (result == FC_STATUS_OK)
-            {
-                completed = 1U;
-                break;
-            }
-        }
-
-        munit_assert_uint32(completed, ==, 1U);
-
-        fc_command_id_t expect_id = FC_COMMAND_ID_INVALID;
-        munit_assert_uint32(fc_command_to_id(cmd, &expect_id), ==, 1U);
-        munit_assert_uint32(completion.command_id, ==, expect_id);
-        munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
-
-        /* 验证擦除后全 0xFF */
-        munit_assert_uint8(verify_page_erased(cmd, page), ==, 1U);
-
-        result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
-    }
-}
-
 /**************************************************************************
  *  test_init_sequence — 初始化序列
  *
@@ -802,112 +316,68 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    /* Step 1: RESET */
+    /* Step 1: RESET —— 无数据负载，不需要 desc 链（pba 全 0，命令池清零即默认） */
     {
         fc_command_t *cmd = fc_command_alloc();
+
         munit_assert_not_null(cmd);
-        cmd->config.operation = OP_RESET;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.cw        = 0U;
+
+        cmd->config.operation = (DWORD)OP_RESET;
         cmd->config.random    = FC_RANDOM_DISABLE;
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-        run_lifecycle(cmd);
+
+        test_run_lifecycle(cmd);
     }
 
-    /* Step 2: READ_ID — 在 release 前验证 buffer 数据 */
+    /* Step 2: READ_ID — 在 release 前验证 buffer 数据。
+     * READ_ID 只返回 5 字节 ⇒ 只取 CW0（1 条 desc）。 */
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
-        cmd->config.operation = OP_READ_ID;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.cw        = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——READ_ID 只有 5 字节 */
-        cmd->pba              = make_pba(0U, 0U, 0U);
+        fc_command_t *cmd = test_page_cmd_ex(0U, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_ID, 0x01U, 0U);
 
-        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-        fc_command_status_t completion;
-        run_submit_poll(cmd, &completion);
+        test_submit_wait(cmd);
 
         /* 验证 CW 状态正常 */
-        munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
+        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
 
         /* 验证 desc chain buffer 有 5 字节 ID 数据（在 release 前） */
-        fc_descriptor_t *d = fc_descriptor_id_to_descriptor((fc_descriptor_id_t)cmd->desc_id);
-        munit_assert_not_null(d);
-        uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
+        uint8_t *buf = test_cw_user(cmd, 0U);
+
         munit_assert_not_null(buf);
-        munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
         /* NAND 制造商 ID 应为 0x2C（Micron） */
         munit_assert_uint8(buf[0], ==, 0x2CU);
 
-        fc_status_t result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
-    /* Step 3: READ_PARAMETER_PAGE — 在 release 前验证 buffer 非 0xFF */
+    /* Step 3: READ_PARAMETER_PAGE — 在 release 前验证 buffer 非 0xFF。
+     * 参数页只看前几字节 ⇒ 只取 CW0（1 条 desc）。 */
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
-        cmd->config.operation = OP_READ_PARAMETER_PAGE;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.cw        = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——参数页只看前几字节 */
-        cmd->pba              = make_pba(0U, 0U, 0U);
+        fc_command_t *cmd = test_page_cmd_ex(0U, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_PARAMETER_PAGE, 0x01U, 0U);
 
-        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-        fc_command_status_t completion;
-        run_submit_poll(cmd, &completion);
+        test_submit_wait(cmd);
 
         /* 验证参数页前 4 字节含 ONFI 签名 "ONFI"（0x4F 0x4E 0x46 0x49）
          * 数据由 PIO 写入 USER 区域（fc_buffer_id_to_real_buffer 指向的位置）。 */
-        fc_descriptor_t *d = fc_descriptor_id_to_descriptor((fc_descriptor_id_t)cmd->desc_id);
-        munit_assert_not_null(d);
-        uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
+        uint8_t *buf = test_cw_user(cmd, 0U);
+
         munit_assert_not_null(buf);
         munit_assert_uint8(buf[0], ==, 0x4FU); /* 'O' */
 
-        fc_status_t result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
     /* Step 4: GET_FEATURES (address 0x01) — 寄存器值经 CQ 的 param 联合体返回
-     * （completion.param.parameter0..3），不再原地回填命令体。 */
+     * （completion.param.parameter0..3），不再原地回填命令体。
+     * GET_FEATURES 不建链（ftl_cmd_needs_desc_chain 排除），pba 与掩码都不看。 */
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
-        cmd->config.operation = OP_GET_FEATURES;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.cw        = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-        cmd->feature_addr     = 0x01U;
+        fc_command_t *cmd = test_page_cmd_ex(0U, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_GET_FEATURES, 0U, 0U);
 
-        fc_command_status_t completion;
-        run_submit_poll(cmd, &completion);
-        munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+        cmd->feature_addr = 0x01U;
 
-        fc_status_t result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_uint32(test_submit_wait(cmd).status, ==, FC_CW_STATUS_SUCCESS);
+
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
     return MUNIT_OK;
@@ -929,53 +399,21 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
 
 static MunitResult test_feature_write_read(const MunitParameter params[], void *data)
 {
+    static const uint8_t feature_addrs[2] = {0x01U, 0x81U};
+
     (void)params;
     (void)data;
 
-    /* Step 1: GET_FEATURES(addr=0x01) */
+    for (uint8_t i = 0U; i < 2U; i++)
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
-        cmd->config.operation = OP_GET_FEATURES;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.cw        = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-        cmd->feature_addr     = 0x01U;
+        /* GET_FEATURES 不建链（ftl_cmd_needs_desc_chain 排除），pba / 掩码都不看。 */
+        fc_command_t *cmd = test_page_cmd_ex(0U, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_GET_FEATURES, 0U, 0U);
 
-        fc_command_status_t completion;
-        run_submit_poll(cmd, &completion);
-        munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+        cmd->feature_addr = feature_addrs[i];
 
-        fc_status_t result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
-    }
+        munit_assert_uint32(test_submit_wait(cmd).status, ==, FC_CW_STATUS_SUCCESS);
 
-    /* Step 2: GET_FEATURES(addr=0x81) */
-    {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
-        cmd->config.operation = OP_GET_FEATURES;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.cw        = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-        cmd->feature_addr     = 0x81U;
-
-        fc_command_status_t completion;
-        run_submit_poll(cmd, &completion);
-        munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
-
-        fc_status_t result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
     return MUNIT_OK;
@@ -995,60 +433,20 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
 
 static MunitResult test_status_query(const MunitParameter params[], void *data)
 {
+    static const uint8_t status_ops[2] = {(uint8_t)OP_READ_STATUS, (uint8_t)OP_READ_STATUS_ENHANCED};
+
     (void)params;
     (void)data;
 
-    /* Step 1: READ_STATUS — 在 release 前验证 completion.status */
+    for (uint8_t i = 0U; i < 2U; i++)
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
-        cmd->config.operation = OP_READ_STATUS;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.cw        = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——状态字仅 1 字节 */
+        /* 状态字仅 1 字节 ⇒ 只取 CW0（1 条 desc）；状态查询不是 page read，
+         * 数据路径不介入，nand_status 经 completion.status 返回。 */
+        fc_command_t *cmd = test_page_cmd_ex(0U, 0U, TEST_PLANE_BM(0), 0U, status_ops[i], 0x01U, 0U);
 
-        fc_status_t result;
+        munit_assert_uint32(test_submit_wait(cmd).status, ==, FC_CW_STATUS_SUCCESS);
 
-        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-        fc_command_status_t completion;
-        run_submit_poll(cmd, &completion);
-        munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
-
-        result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
-    }
-
-    /* Step 2: READ_STATUS_ENHANCED */
-    {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
-        cmd->config.operation = OP_READ_STATUS_ENHANCED;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.cw        = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 条 desc）——状态字仅 1 字节 */
-        cmd->pba              = make_pba(0U, 0U, 0U);
-
-        fc_status_t result;
-
-        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-        fc_command_status_t completion;
-        run_submit_poll(cmd, &completion);
-        munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
-
-        result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
     return MUNIT_OK;
@@ -1075,61 +473,26 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     (void)data;
 
     /* Step 1: 擦除源 + 目标 block */
-    erase_block(BLOCK_TEST, 0U);
-    erase_block(BLOCK_DEST, 0U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), 0U);
+    test_erase_block(BLOCK_DEST, TEST_PLANE_BM(0), 0U);
 
-    /* Step 2: 写源 block（64 pages，独立 pattern） */
+    /* Step 2: 写源 block（64 pages） */
     write_block(BLOCK_TEST, 0U);
 
-    /* Step 2.5: 用普通读（00h-30h）验证 block 100 全部 64 pages 正确，排除写阶段问题 */
+    /* Step 2.5: 用普通读（00h-30h）验证源 block 全部 64 pages 正确，排除写阶段问题 */
+    read_block_verify(BLOCK_TEST, 0U);
+
+    /* Step 3+4: 逐 page 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE
+     * ⚠ 这两个 op 都**不是** page read/write（fc_is_page_read / fc_is_page_write 都不含），
+     *   数据路径不介入：搬的是 NAND 内部缓存，页内 META 原样跟着走。
+     *   故目标页读回时，源页写入时铸的 META（page << CW_WIDTH）仍然自洽。 */
+    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        read_block_verify(BLOCK_TEST, 0U);
-    }
+        /* 3a: READ_FOR_INTERNAL_DATA_MOVE (00h-35h) — 将源 block page 读到 NAND 内部缓存 */
+        test_run_lifecycle(test_page_cmd_ex(BLOCK_TEST, page, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_FOR_INTERNAL_DATA_MOVE, 0U, (DWORD)page << CW_WIDTH));
 
-    /* Step 3+4: 逐 page 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE */
-    {
-        for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
-        {
-            /* 3a: READ_FOR_INTERNAL_DATA_MOVE (00h-35h) — 将源 block page 读到 NAND 内部缓存 */
-            {
-                fc_command_t *cmd = fc_command_alloc();
-                munit_assert_not_null(cmd);
-                cmd->config.operation = OP_READ_FOR_INTERNAL_DATA_MOVE;
-                cmd->config.ch        = 0U;
-                cmd->config.ce        = 0U;
-                cmd->config.lun       = 0U;
-                cmd->config.cw        = CW_NUM - 1U;
-                cmd->config.random    = FC_RANDOM_DISABLE;
-                cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-                cmd->config.raid      = FC_RAID_MODE_NORMAL;
-                cmd->pba              = make_pba(BLOCK_TEST, 0U, page);
-
-                /* 分配 desc chain（提供 CW 级 PBA 映射给 dispatch） */
-                munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-                run_lifecycle(cmd);
-            }
-
-            /* 3b: PROGRAM_FOR_INTERNAL_DATA_MOVE (85h-10h) — 将内部缓存数据写入目标 block page */
-            {
-                fc_command_t *cmd = fc_command_alloc();
-                munit_assert_not_null(cmd);
-                cmd->config.operation = OP_PROGRAM_FOR_INTERNAL_DATA_MOVE;
-                cmd->config.ch        = 0U;
-                cmd->config.ce        = 0U;
-                cmd->config.lun       = 0U;
-                cmd->config.cw        = CW_NUM - 1U;
-                cmd->config.random    = FC_RANDOM_DISABLE;
-                cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-                cmd->config.raid      = FC_RAID_MODE_NORMAL;
-                cmd->pba              = make_pba(BLOCK_DEST, 0U, page);
-
-                /* 分配 desc chain（提供 CW 级 PBA 映射给 dispatch） */
-                munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-                run_lifecycle(cmd);
-            }
-        }
+        /* 3b: PROGRAM_FOR_INTERNAL_DATA_MOVE (85h-10h) — 将内部缓存数据写入目标 block page */
+        test_run_lifecycle(test_page_cmd_ex(BLOCK_DEST, page, TEST_PLANE_BM(0), 0U, (uint8_t)OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, 0U, (DWORD)page << CW_WIDTH));
     }
 
     /* Step 5: 读回目标 block 64 pages 全部验证 */
@@ -1176,14 +539,14 @@ static MunitResult test_unlock_erase(const MunitParameter params[], void *data)
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
         cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-        run_lifecycle(cmd);
+        test_run_lifecycle(cmd);
     }
 
     /* Phase 2: UNLOCK_LOW + UNLOCK_HIGH */
     unlock_block(block);
 
     /* Phase 3: 擦除 */
-    erase_block(block, 0U);
+    test_erase_block(block, TEST_PLANE_BM(0), 0U);
 
     /* Phase 4: 验证擦除 */
     read_block_verify_erased(block, 0U);
@@ -1213,7 +576,7 @@ static MunitResult test_block_write_read(const MunitParameter params[], void *da
     (void)data;
 
     /* Phase 1: 擦除 */
-    erase_block(BLOCK_TEST, 0U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), 0U);
 
     /* Phase 2: 写全 block 64 pages */
     write_block(BLOCK_TEST, 0U);
@@ -1242,7 +605,7 @@ static MunitResult test_block_erase_verify(const MunitParameter params[], void *
     (void)params;
     (void)data;
 
-    erase_block(BLOCK_TEST, 0U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), 0U);
     read_block_verify_erased(BLOCK_TEST, 0U);
 
     return MUNIT_OK;
@@ -1271,140 +634,57 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
     (void)data;
 
     /* Phase 0: 擦除 */
-    erase_block(BLOCK_TEST, 0U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), 0U);
 
     /* Phase 1: 用 PROGRAM_PAGE_CACHE 写全 block */
     write_block_cache(BLOCK_TEST, 0U);
 
-    /* Phase 2: Cache 读序列 */
-    uint8_t             page;
-    fc_command_status_t completion;
-    fc_status_t         result;
-    uint32_t            service_count;
-    uint8_t             completed;
+    /* Phase 2: Cache 读序列。
+     *
+     * 31h/3Fh 输出的数据是**上一轮加载的页**，不是本命令地址所指的页——所以
+     * meta 必须给「真正输出的那一页」的 LBA，Pass 4 ②（META == 本命令 LBA）
+     * 才成为一条真正的页身份判据（写错的页 / 读串了页都会当场显形）。
+     * 3Fh 语义上是「输出 cache 中最后一页」，与 31h 相同：meta = 63 页。 */
 
     /* page 0: OP_READ_PAGE_CACHE_START (00h-addr-30h, 无 Dout) — 初始化 Cache 读管线 */
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
+        fc_command_t *cmd = test_page_cmd_ex(BLOCK_TEST, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_PAGE_CACHE_START, 0U, 0U);
 
-        cmd->config.operation = OP_READ_PAGE_CACHE_START;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->config.crc       = FC_CRC_DISABLE;
-        cmd->config.cw        = CW_NUM - 1U;
-        cmd->pba              = make_pba(BLOCK_TEST, 0U, 0U);
-
-        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-        result = fc_submit(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
-
-        completed = 0U;
-        for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
-        {
-            (void)fc_service();
-            result = fc_poll_completion(&completion);
-            if (result == FC_STATUS_OK)
-            {
-                completed = 1U;
-                break;
-            }
-        }
-        munit_assert_uint32(completed, ==, 1U);
-        munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
+        cmd->config.crc = L3_CRC_RAW;
+        test_submit_wait(cmd);
+        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
         /* CACHE_START 不输出数据，跳过 buffer 验证 */
-        result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
     /* page 1..63: OP_READ_PAGE_CACHE_SEQ (31h → Dout 上一页 + 加载下一页) */
-    for (page = 1U; page < PAGES_PER_BLOCK; page++)
+    for (uint8_t page = 1U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
+        fc_command_t *cmd = test_page_cmd_ex(BLOCK_TEST, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_PAGE_CACHE_SEQ, 0U, (DWORD)(page - 1U) << CW_WIDTH);
 
-        cmd->config.operation = OP_READ_PAGE_CACHE_SEQ;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->config.crc       = FC_CRC_DISABLE;
-        cmd->config.cw        = CW_NUM - 1U;
-        cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
+        cmd->config.crc = L3_CRC_RAW;
+        test_memset_read_buffer(cmd);
+        test_submit_wait(cmd);
 
-        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-        memset_read_buffer(cmd);
-
-        result = fc_submit(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
-
-        completed = 0U;
-        for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
-        {
-            (void)fc_service();
-            result = fc_poll_completion(&completion);
-            if (result == FC_STATUS_OK)
-            {
-                completed = 1U;
-                break;
-            }
-        }
-        munit_assert_uint32(completed, ==, 1U);
-        munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
+        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
         /* 31h 输出的数据是 CACHE_START/上一轮 31h 加载的页，即 page-1 */
-        munit_assert_uint8(verify_page_data(cmd, 0U), ==, 1U);
-        result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        test_verify_against_source(cmd);
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
     /* page 63: OP_READ_PAGE_CACHE_LAST (3Fh → Dout 最后一页) */
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
+        fc_command_t *cmd =
+            test_page_cmd_ex(BLOCK_TEST, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_PAGE_CACHE_LAST, 0U, (DWORD)(PAGES_PER_BLOCK - 1U) << CW_WIDTH);
 
-        cmd->config.operation = OP_READ_PAGE_CACHE_LAST;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->config.crc       = FC_CRC_DISABLE;
-        cmd->config.cw        = CW_NUM - 1U;
-        cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
+        cmd->config.crc = L3_CRC_RAW;
+        test_memset_read_buffer(cmd);
+        test_submit_wait(cmd);
 
-        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-        memset_read_buffer(cmd);
-
-        result = fc_submit(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
-
-        completed = 0U;
-        for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
-        {
-            (void)fc_service();
-            result = fc_poll_completion(&completion);
-            if (result == FC_STATUS_OK)
-            {
-                completed = 1U;
-                break;
-            }
-        }
-        munit_assert_uint32(completed, ==, 1U);
-        munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
+        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
         /* 3Fh 输出最后一页数据 */
-        munit_assert_uint8(verify_page_data(cmd, 0U), ==, 1U);
-        result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        test_verify_against_source(cmd);
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
     return MUNIT_OK;
@@ -1429,140 +709,33 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
     (void)data;
 
     /* Step 1: Multi-plane erase block 100 (both planes) */
-    erase_block(BLOCK_TEST, 1U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM_ALL, 1U);
 
-    /* Step 2: Multi-plane program — 64 pages */
+    /* Step 2: Multi-plane program — 64 pages。
+     * 数据源按 (plane, cw) 取槽 ⇒ plane 0/1 的图案天然不同，读串 plane 必被抓到。 */
     for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
+        fc_command_t *cmd =
+            test_page_cmd_ex(BLOCK_TEST, page, TEST_PLANE_BM_ALL, 1U, (uint8_t)OP_PROGRAM_PAGE_MULTI_PLANE, 0U, (DWORD)page << CW_WIDTH);
 
-        cmd->config.operation   = OP_PROGRAM_PAGE_MULTI_PLANE;
-        cmd->config.ch          = 0U;
-        cmd->config.ce          = 0U;
-        cmd->config.lun         = 0U;
-        cmd->config.random      = FC_RANDOM_DISABLE;
-        cmd->config.ldpc        = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid        = FC_RAID_MODE_NORMAL;
-        cmd->config.crc         = FC_CRC_DISABLE;
-        cmd->config.cw          = CW_NUM - 1U;                    /* per-plane CW count - 1 */
-        cmd->config.multi_plane = PLANE_NUM;                      /* = 2 */
-        cmd->pba                = make_pba(BLOCK_TEST, 0U, page); /* base PBA: plane 0 */
-
-        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-        /* Fill desc[0..3] = plane 0 pattern, desc[4..7] = plane 1 pattern */
-        {
-            fc_descriptor_id_t did = (fc_descriptor_id_t)cmd->desc_id;
-            uint8_t            idx = 0U;
-            while (did != FC_DESCRIPTOR_ID_INVALID)
-            {
-                fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
-                if (d == NULL)
-                {
-                    break;
-                }
-                uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
-                if (buf != NULL)
-                {
-                    uint8_t p = idx / CW_NUM; /* plane 0 or 1 */
-                    fill_page_pattern(buf, p);
-                }
-                did = (fc_descriptor_id_t)d->next_id;
-                idx++;
-            }
-        }
-
-        run_lifecycle(cmd);
+        cmd->config.crc = L3_CRC_RAW;
+        test_fill_user_from_source(cmd);
+        test_run_lifecycle(cmd);
     }
 
     /* Step 3: Multi-plane read back — verify both planes */
     for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
+        fc_command_t *cmd = test_page_cmd(BLOCK_TEST, page, TEST_PLANE_BM_ALL, 1U, TEST_OP_READ);
 
-        fc_status_t result;
+        cmd->config.crc = L3_CRC_RAW;
+        test_memset_read_buffer(cmd);
+        test_submit_wait(cmd);
 
-        cmd->config.operation   = OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT;
-        cmd->config.ch          = 0U;
-        cmd->config.ce          = 0U;
-        cmd->config.lun         = 0U;
-        cmd->config.random      = FC_RANDOM_DISABLE;
-        cmd->config.ldpc        = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid        = FC_RAID_MODE_NORMAL;
-        cmd->config.crc         = FC_CRC_DISABLE;
-        cmd->config.cw          = CW_NUM - 1U;
-        cmd->config.multi_plane = PLANE_NUM;
-        cmd->pba                = make_pba(BLOCK_TEST, 0U, page);
+        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
+        test_verify_against_source(cmd);
 
-        munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-        /* Pre-fill with 0xCC to detect incomplete reads */
-        memset_read_buffer(cmd);
-
-        /* Submit + poll */
-        {
-            fc_command_status_t completion;
-            uint32_t            service_count;
-            uint8_t             completed = 0U;
-
-            result = fc_submit(cmd);
-            munit_assert_int(result, ==, FC_STATUS_OK);
-
-            for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
-            {
-                (void)fc_service();
-                result = fc_poll_completion(&completion);
-                if (result == FC_STATUS_OK)
-                {
-                    completed = 1U;
-                    break;
-                }
-            }
-            munit_assert_uint32(completed, ==, 1U);
-        }
-
-        /* Verify data plane-by-plane using pattern */
-        {
-            fc_descriptor_id_t did = (fc_descriptor_id_t)cmd->desc_id;
-            uint8_t            idx = 0U;
-            while (did != FC_DESCRIPTOR_ID_INVALID)
-            {
-                fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
-                if (d == NULL)
-                {
-                    break;
-                }
-                uint8_t *buf = fc_buffer_id_to_real_buffer(d->buffer_id);
-                if (buf != NULL)
-                {
-                    uint8_t p  = idx / CW_NUM;
-                    uint8_t cw = idx % CW_NUM;
-                    for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
-                    {
-                        uint8_t exp = expected_byte(p, (uint32_t)cw * FC_BUFFER_USER_SIZE + i);
-                        if (buf[i] != exp)
-                        {
-                            munit_errorf("multi_plane page=%u plane=%u cw=%u offset=%u: got 0x%02X expected 0x%02X",
-                                         (unsigned)page,
-                                         (unsigned)p,
-                                         (unsigned)cw,
-                                         (unsigned)i,
-                                         (unsigned)buf[i],
-                                         (unsigned)exp);
-                            goto mp_desc_next;
-                        }
-                    }
-                }
-mp_desc_next:
-                did = (fc_descriptor_id_t)d->next_id;
-                idx++;
-            }
-        }
-
-        result = fc_command_release(cmd);
-        munit_assert_int(result, ==, FC_STATUS_OK);
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
     return MUNIT_OK;
@@ -1588,114 +761,40 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
     (void)params;
     (void)data;
 
-    erase_block(BLOCK_TEST, 0U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), 0U);
     write_block(BLOCK_TEST, 0U);
 
     const uint8_t sample_pages[] = {0U, 15U, 31U, 47U, 63U};
     const uint8_t sample_cws[]   = {1U, 3U};
-    uint8_t       si, ci;
 
-    for (si = 0U; si < (uint8_t)sizeof(sample_pages); si++)
+    for (uint8_t si = 0U; si < (uint8_t)sizeof(sample_pages); si++)
     {
-        uint8_t page = sample_pages[si];
+        const uint8_t page = sample_pages[si];
 
-        /* Normal read page — 加载 NAND 页缓冲 */
+        /* Normal read page — 加载 NAND 页缓冲（顺带校验整页） */
+        read_page_verify(BLOCK_TEST, page, 0U, 0U);
+
+        for (uint8_t ci = 0U; ci < (uint8_t)sizeof(sample_cws); ci++)
         {
-            fc_command_t       *cmd = read_page(BLOCK_TEST, page, 0U);
-            fc_command_status_t completion;
-            fc_status_t         result;
-            uint32_t            service_count;
-            uint8_t             completed = 0U;
+            const uint8_t cw = sample_cws[ci];
 
-            result = fc_submit(cmd);
-            munit_assert_int(result, ==, FC_STATUS_OK);
-            for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
-            {
-                (void)fc_service();
-                result = fc_poll_completion(&completion);
-                if (result == FC_STATUS_OK)
-                {
-                    completed = 1U;
-                    break;
-                }
-            }
-            munit_assert_uint32(completed, ==, 1U);
-            munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
-            result = fc_command_release(cmd);
-            munit_assert_int(result, ==, FC_STATUS_OK);
-        }
+            /* 随机列读：只抽 1 个 CW ⇒ cw_mask 必须是**被抽样那个 CW 的位**。
+             * ⚠ 这里曾经写死 0x01U（= 只取 CW0），而期望值按抽样 cw 算——因为
+             *   链是按掩码位枚举 cw 的（cmd->pba 的 cw 字段会被枚举值覆盖），
+             *   于是 desc 落在 CW0、期望值取 CW1/CW3，两者对不上。
+             *   旧 pattern 是 4 字节周期、cw*512 又是 4 的倍数 ⇒ 四个 CW 期望值
+             *   完全相同，这条错误一直被掩盖（v22 changelog 记录过同类问题）。 */
+            fc_command_t *cmd = test_page_cmd_ex(BLOCK_TEST, page, TEST_PLANE_BM(0), 0U, (uint8_t)OP_RANDOM_DATA_READ, (uint32_t)1U << cw, (DWORD)page << CW_WIDTH);
 
-        for (ci = 0U; ci < (uint8_t)sizeof(sample_cws); ci++)
-        {
-            uint8_t cw = sample_cws[ci];
+            cmd->config.crc = L3_CRC_PAGE;
+            test_memset_read_buffer(cmd);
+            test_submit_wait(cmd);
 
-            fc_command_t *cmd = fc_command_alloc();
-            munit_assert_not_null(cmd);
+            munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
+            munit_assert_uint8(test_cw_count(cmd), ==, 1U); /* 掩码只选中 1 个 CW */
+            test_verify_against_source(cmd);
 
-            cmd->config.operation = OP_RANDOM_DATA_READ;
-            cmd->config.ch        = 0U;
-            cmd->config.ce        = 0U;
-            cmd->config.lun       = 0U;
-            cmd->config.random    = FC_RANDOM_DISABLE;
-            cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-            cmd->config.raid      = FC_RAID_MODE_NORMAL;
-            cmd->config.cw        = 0U;
-            cmd->param.cw_mask    = 0x01U; /* v23：只取 CW0（1 个 desc）——逐 CW 随机读 */
-            cmd->pba              = pba_make(0U, 0U, page, 0U, BLOCK_TEST, 0U, cw);
-
-            fc_status_t result;
-
-            munit_assert_int(ftl_cmd_configure_descriptors(cmd), ==, FTL_OK);
-
-            memset_read_buffer(cmd);
-
-            result = fc_submit(cmd);
-            munit_assert_int(result, ==, FC_STATUS_OK);
-
-            uint8_t             completed = 0U;
-            fc_command_status_t completion;
-            for (uint32_t i = 0U; i < SERVICE_LOOP_MAX; i++)
-            {
-                (void)fc_service();
-                result = fc_poll_completion(&completion);
-                if (result == FC_STATUS_OK)
-                {
-                    completed = 1U;
-                    break;
-                }
-            }
-            munit_assert_uint32(completed, ==, 1U);
-            munit_assert_uint8(verify_cw_status_all_success(cmd), ==, 1U);
-
-            /* 逐字节验证 — 按 CW 索引计算偏移 */
-            {
-                fc_descriptor_id_t did  = (fc_descriptor_id_t)cmd->desc_id;
-                fc_descriptor_t   *desc = fc_descriptor_id_to_descriptor(did);
-                if (desc != NULL)
-                {
-                    uint8_t *buf = fc_buffer_id_to_real_buffer(desc->buffer_id);
-                    if (buf != NULL)
-                    {
-                        for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
-                        {
-                            uint8_t exp = expected_byte(0U, (uint32_t)cw * FC_BUFFER_USER_SIZE + i);
-                            if (buf[i] != exp)
-                            {
-                                munit_errorf("random_data page=%u cw=%u off=%u: got 0x%02X exp 0x%02X",
-                                             (unsigned)page,
-                                             (unsigned)cw,
-                                             (unsigned)i,
-                                             (unsigned)buf[i],
-                                             (unsigned)exp);
-                                goto rand_page_done;
-                            }
-                        }
-                    }
-                }
-            }
-rand_page_done:
-            result = fc_command_release(cmd);
-            munit_assert_int(result, ==, FC_STATUS_OK);
+            munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
         }
     }
 
@@ -1736,14 +835,14 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
     cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
     cmd->config.cw        = 0U;
 
-    run_lifecycle(cmd);
+    test_run_lifecycle(cmd);
 
     /* Phase 2: 尝试擦除 + 写 + 读一个 page -- 预期失败 */
     erase_block(BLOCK_TEST, 0U);
 
     page = 0U;
     cmd = program_page(BLOCK_TEST, page, 0U);
-    run_lifecycle(cmd);
+    test_run_lifecycle(cmd);
 
     cmd = read_page(BLOCK_TEST, page, 0U);
     {
@@ -1757,7 +856,7 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
         result = fc_submit(cmd);
         munit_assert_int(result, ==, FC_STATUS_OK);
 
-        for (service_count = 0U; service_count < SERVICE_LOOP_MAX; service_count++)
+        for (service_count = 0U; service_count < TEST_SERVICE_LOOP_MAX; service_count++)
         {
             (void)fc_service();
             result = fc_poll_completion(&completion);
@@ -1818,17 +917,17 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
  **************************************************************************/
 
 MunitTest g_fc_lifecycle_tests[] = {
-    {     "init_sequence",      test_init_sequence, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"feature_write_read", test_feature_write_read, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {      "status_query",       test_status_query, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"internal_data_move", test_internal_data_move, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"block_erase_verify", test_block_erase_verify, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {  "block_write_read",   test_block_write_read, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {   "block_cache_ops",    test_block_cache_ops, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    { "block_multi_plane",  test_block_multi_plane, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    { "block_random_data",  test_block_random_data, setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     "init_sequence",      test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"feature_write_read", test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      "status_query",       test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"internal_data_move", test_internal_data_move, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"block_erase_verify", test_block_erase_verify, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {  "block_write_read",   test_block_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {   "block_cache_ops",    test_block_cache_ops, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { "block_multi_plane",  test_block_multi_plane, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { "block_random_data",  test_block_random_data, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 #if 0  /* block_lock_tight 被 #if 0 隔开，此处不注册 */
-    { "block_lock_tight",    test_block_lock_tight,    setup_level3, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
+    { "block_lock_tight",    test_block_lock_tight,    test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 #endif
-    {                NULL,                    NULL,         NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                NULL,                    NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };
