@@ -232,7 +232,15 @@ void test_prog_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_co
 void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
 
 /* ── cache 整块读写（ONFI cache 序列）──
- * **只有单 plane 变体**（ONFI 无 multi-plane cache 读 / 编程）⇒ plane_bitmap 必须恰好一个 plane。
+ * **只有单 plane 变体** ⇒ plane_bitmap 必须恰好一个 plane。依据分两层，别混：
+ *   · **ONFI 1.0 根本没有 multi-plane**——Rev 1.0 Table 14 命令集里 cache 只有单 plane 的
+ *     `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program`
+ *     80h-15h；全文 `plane` 一词出现 **0 次**（1.0 唯一的"多设备"是 multiple LUN，走 D1h / 11h 的
+ *     `Interleaved`）。multi-plane 是器件/后续修订版才有的。
+ *   · **本器件（Micron MT29F4G08）确实有 two-plane cache 编程**——datasheet Table 7
+ *     `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`；但**没有 two-plane cache 读**
+ *     （读侧只有单 plane 31h / 3Fh）。
+ * 本项目 op 表两种都没有 ⇒ 本 helper 只做单 plane。⚠ 别把「ONFI 1.0 没有」和「器件没有」当同一句。
  * config 只提供模式位（crc / random / ldpc / …）；**operation 被逐步覆盖**，调用者填什么都被忽略。
  *
  * test_prog_block_cache：前 PAGES_PER_BLOCK-1 页 OP_PROGRAM_PAGE_CACHE（80h-addr-data-15h），
