@@ -20,12 +20,12 @@
  *
  * 依赖：
  *   - NAND 硬件（走 fc_submit → fc_service → nand_fc_start/step 异步路径）
- *   - 建链走 FTL 策略层 ftl_cmd_configure_descriptors()——「按掩码建整条链」
- *     自 v13 起属 FTL（FC 只剩单数逐条入口 fc_command_configure_descriptor）
- *     ⚠ v27：cw_bitmap 是**字面位图**（置 1 = 要访问该 CW，0 = 空集），v23~v26 的
- *       「0 = 本命令 plane 段内的全部 CW」重载已取消。凡"只要 1 条 desc"的用例必须
- *       显式给出该 CW 的位（如 1U << cw）；整段访问用 fc_command_plane_span_cw_bitmap。
- *       config.cw 自 v23 起不参与建链。
+ *   - 建链走共享夹具的 test_cmd_build()（FTL 策略层 ftl_cmd_configure_descriptors，
+ *     「按掩码建整条链」，自 v13 起属 FTL）或建立在它之上的页 / block helper。
+ *     ⚠ cw_bitmap 是**字面位图**（置 1 = 要访问该 CW，0 = 空集），v23~v26 的
+ *       「0 = 本命令 plane 段内的全部 CW」重载已取消（v27）。凡"只要 1 条 desc"
+ *       的用例必须显式给出该 CW 的位（如 1U << cw）；整段访问用
+ *       test_plane_cw_bitmap(plane_bitmap)。config.cw 自 v23 起不参与建链。
  *   - 释放只需 fc_command_release()（v16 起沿 desc 链把 desc + buffer 一起还池）
  *
  * 用法：
@@ -59,7 +59,7 @@
  *       **读错 CW / 读错 plane 在旧判据下永远通过**（新判据第一次能抓到）。
  *    ② cmd->meta 从「隐式 0」换成页 LBA（page << CW_WIDTH）：页号因此进了 META，
  *       数据路径 Pass 4 ② 能抓到「读到了别的页」。
- *    ③ 建链统一走 test_page_cmd() / test_page_cmd_ex()（FTL 策略层
+ *    ③ 建链统一走共享夹具的 test_cmd_build()（FTL 策略层
  *       ftl_cmd_configure_descriptors），不再手写 config.cw。
  *
  *  setup / teardown 见套件表：test_setup / test_tear_down。
@@ -69,41 +69,79 @@
 #define BLOCK_TEST (TEST_BLOCK)
 #define BLOCK_DEST (TEST_BLOCK_DEST)
 
-/* 裸页读写沿用改造前的 CRC 设定：改造前的 program_page / read_page 都不显式设
- * config.crc，而 FC_CRC_ENABLE == 0 ⇒ 实际是**开**。这里显式写出来，免得读代码
- * 时误以为关了。cache 路径与 multi-plane 路径改造前显式关 CRC（纯 RAW 数据比对）。 */
-#define L3_CRC_PAGE (FC_CRC_ENABLE)
-#define L3_CRC_RAW  (FC_CRC_DISABLE)
+/* ── Level 3 的「裸页」config ──
+ * 与改造前 program_page / read_page / erase_block 的字段逐字一致：
+ *   不加扰（FC_RANDOM_DISABLE）、LDPC RAW（不做 ECC）、不 RAID。
+ * crc 逐处给——改造前的裸页读写都不设 config.crc，而 FC_CRC_ENABLE == 0 是池清零
+ * 后的默认 ⇒ 实际是**开**；cache 与 multi-plane 路径改造前显式关 CRC（纯 RAW 比对）。
+ * ch/ce/lun 由 test_cmd_build 从 addr 覆盖，multi_plane 由 operation 派生
+ * （见 fc_test_common.h「二」），故本宏不写这两组字段。
+ * 用法：`&L3_CONF(OP_READ_ID, FC_CRC_ENABLE)`（复合字面量，可取地址）。
+ * ⚠ cache helper 只取本 config 的模式位，operation 被逐步覆盖（填什么都行）。 */
+#define L3_CONF(operation_, crc_)                             \
+    ((const fc_cmd_conf_t){.operation = (DWORD)(operation_),  \
+                           .crc       = (crc_),               \
+                           .random    = FC_RANDOM_DISABLE,    \
+                           .ldpc      = FC_ECC_MODE_LDPC_RAW, \
+                           .raid      = FC_RAID_MODE_NORMAL})
 
 /**************************************************************************
- *  辅助：写一页（建链 → 设 config → 填源数据 → 提交 → 释放）
+ *  辅助：提交 → 轮询 → 释放（不关心完成项的命令）
  **************************************************************************/
 
-static void write_page(uint16_t block, uint8_t page, uint8_t plane, uint8_t operation, uint8_t crc)
+static void run_lifecycle(fc_command_t *cmd)
 {
-    fc_command_t *cmd = test_page_cmd_ex(block, page, TEST_PLANE_BM(plane), 0U, operation, 0U, (DWORD)page << CW_WIDTH);
-
-    cmd->config.crc = crc;
-    test_fill_user_from_source(cmd);
-    test_run_lifecycle(cmd);
+    (void)test_submit_wait(cmd);
+    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
 }
 
 /**************************************************************************
- *  辅助：读一页并校验
+ *  辅助：逐 desc 校验 USER 区 == 该 desc 自己的 PAA 重复（链驱动）
  *
- *  裸页读（NORMAL_READ_PAGE_WITH_DATA_OUT，plane 段内全部 CW）的 config 形态
- *  恰好就是共享夹具的默认值（LDPC_RAW + 不加扰 + CRC 开）⇒ 直接用
- *  test_read_page() 一步到位（建链 → 0xCC 预填 → 提交）。
- *
- *  erased == 0：逐字节与源表比对；erased != 0：逐字节必须是 0xFF。
- *  ⚠ 擦除页的 META 是 0xFF…，Pass 4 ①（自洽）必然不过 ⇒ 该 CW 带 MATA_ERROR 位；
- *    但 FC_CW_STATUS_SUCCESS == FC_CW_STATUS_READY 是**另一个位**，仍置位，
- *    故 SUCCESS 判据照旧成立（与改造前一致，不是本轮引入的）。
+ *  与 test_verify_page_paa 的分工：
+ *    · test_verify_page_paa 按 (block, page, plane_bitmap) **重算**期望，覆盖
+ *      plane_bitmap 内的全部 CW —— 适合整段读；
+ *    · 本函数只看**链上实际有的** desc —— 适合部分掩码读（如 RANDOM_DATA_READ 只抽
+ *      1 个 CW），此时 plane_bitmap 里其余 CW 的源槽根本没被这次读填过。
+ *  期望值取 desc->paa 本身（写路径填源槽用的就是它），因此天然含 block/page 维度。
  **************************************************************************/
 
-static void read_page_verify(uint16_t block, uint8_t page, uint8_t plane, uint8_t erased)
+static void verify_chain_paa(const fc_command_t *cmd)
 {
-    fc_command_t *cmd = test_read_page(block, page, TEST_PLANE_BM(plane), 0U);
+    const uint8_t n = test_cw_count(cmd);
+
+    for (uint8_t i = 0U; i < n; i++)
+    {
+        const fc_descriptor_t *desc = test_cw_desc(cmd, i);
+        const uint8_t         *user = test_cw_user(cmd, i);
+
+        munit_assert_not_null(desc);
+        munit_assert_not_null(user);
+        munit_assert_uint8(test_check_paa(user, desc->paa), ==, 1U);
+    }
+}
+
+/**************************************************************************
+ *  辅助：读一页 + 校验
+ *
+ *  meta 取页 LBA（page << CW_WIDTH），与写路径同口径 ⇒ Pass 4 ② 能抓到「读错页」。
+ *  erased == 0：逐 desc 与「该 desc 的 PAA」比对；erased != 0：逐 desc USER 区全 0xFF。
+ *
+ *  ⚠ 擦除页的 META 是 0xFF…，数据路径 Pass 4 ①（自洽）必然不过 ⇒ 该 CW 带 MATA_ERROR
+ *    位；但 FC_CW_STATUS_SUCCESS 是**另一个位**，仍置位，故「逐 CW SUCCESS」判据照旧
+ *    成立（与改造前一致，不是本轮引入的）。也正因如此，擦除路径不能用聚合 status 的
+ *    错误掩码当判据——那是 test_prog_block / test_read_block 的判据。
+ **************************************************************************/
+
+static void read_page_verify(uint16_t block, uint16_t page, uint8_t plane_bitmap, uint8_t erased, const fc_cmd_conf_t *config)
+{
+    fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = block, .plane = test_first_plane(plane_bitmap), .page = page},
+                                       test_plane_cw_bitmap(plane_bitmap),
+                                       (DWORD)page << CW_WIDTH,
+                                       config);
+
+    test_memset_read_buffer(cmd);
+    (void)test_submit_wait(cmd);
 
     munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
 
@@ -113,63 +151,41 @@ static void read_page_verify(uint16_t block, uint8_t page, uint8_t plane, uint8_
     }
     else
     {
-        test_verify_against_source(cmd);
+        verify_chain_paa(cmd);
     }
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
 }
 
 /**************************************************************************
- *  辅助：全 block 写（64 pages，NORMAL_PROGRAM_PAGE）
+ *  辅助：全 block 写 / 读回验证
  **************************************************************************/
 
 static void write_block(uint16_t block, uint8_t plane)
 {
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
-    {
-        write_page(block, page, plane, (uint8_t)OP_NORMAL_PROGRAM_PAGE, L3_CRC_PAGE);
-    }
+    test_prog_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL);
 }
 
-/**************************************************************************
- *  辅助：全 block 写（64 pages，PROGRAM_PAGE_CACHE）
- *
- *  前 63 pages 用 OP_PROGRAM_PAGE_CACHE（80h-addr-data-15h），
- *  最后 1 page 用 OP_NORMAL_PROGRAM_PAGE（80h-addr-data-10h）确认收尾。
- **************************************************************************/
-
+/* 前 63 pages 用 OP_PROGRAM_PAGE_CACHE（80h-addr-data-15h），最后 1 page 用
+ * OP_NORMAL_PROGRAM_PAGE（80h-addr-data-10h）确认收尾——这条由夹具逐步覆盖 operation。 */
 static void write_block_cache(uint16_t block, uint8_t plane)
 {
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
-    {
-        const uint8_t operation =
-            (page < (PAGES_PER_BLOCK - 1U)) ? (uint8_t)OP_PROGRAM_PAGE_CACHE : (uint8_t)OP_NORMAL_PROGRAM_PAGE;
-
-        write_page(block, page, plane, operation, L3_CRC_RAW);
-    }
+    test_prog_block_cache(block, TEST_PLANE_BM(plane), &L3_CONF(OP_PROGRAM_PAGE_CACHE, FC_CRC_DISABLE), NULL);
 }
-
-/**************************************************************************
- *  辅助：全 block 读回验证（与源表逐字节比对）
- **************************************************************************/
 
 static void read_block_verify(uint16_t block, uint8_t plane)
 {
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
+    for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        read_page_verify(block, page, plane, 0U);
+        read_page_verify(block, page, TEST_PLANE_BM(plane), 0U, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
     }
 }
 
-/**************************************************************************
- *  辅助：全 block 读回验证擦除（全 0xFF）
- **************************************************************************/
-
 static void read_block_verify_erased(uint16_t block, uint8_t plane)
 {
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
+    for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        read_page_verify(block, page, plane, 1U);
+        read_page_verify(block, page, TEST_PLANE_BM(plane), 1U, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
     }
 }
 
@@ -196,7 +212,7 @@ static void __attribute__((unused)) unlock_block(uint16_t block)
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
         cmd->pba              = pba_from_addr(&(nand_addr_t){.block = block});
 
-        test_run_lifecycle(cmd);
+        run_lifecycle(cmd);
     }
 }
 
@@ -318,26 +334,15 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
-    /* Step 1: RESET —— 无数据负载，不需要 desc 链（pba 全 0，命令池清零即默认） */
-    {
-        fc_command_t *cmd = fc_command_alloc();
-
-        munit_assert_not_null(cmd);
-
-        cmd->config.operation = (DWORD)OP_RESET;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-
-        test_run_lifecycle(cmd);
-    }
+    /* Step 1: RESET —— 无数据负载，不需要 desc 链（cw_bitmap = 0 走短路分支） */
+    run_lifecycle(test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_RESET, FC_CRC_ENABLE)));
 
     /* Step 2: READ_ID — 在 release 前验证 buffer 数据。
-     * READ_ID 只返回 5 字节 ⇒ 只取 CW0（1 条 desc）。 */
+     * READ_ID 只返回 5 字节 ⇒ 只取 CW0（1 条 desc，位图 0x01）。 */
     {
-        fc_command_t *cmd = test_page_cmd_ex(0U, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_ID, 0x01U, 0U);
+        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_ID, FC_CRC_ENABLE));
 
-        test_submit_wait(cmd);
+        (void)test_submit_wait(cmd);
 
         /* 验证 CW 状态正常 */
         munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
@@ -353,11 +358,11 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
     }
 
     /* Step 3: READ_PARAMETER_PAGE — 在 release 前验证 buffer 非 0xFF。
-     * 参数页只看前几字节 ⇒ 只取 CW0（1 条 desc）。 */
+     * 参数页只看前几字节 ⇒ 只取 CW0（1 条 desc，位图 0x01）。 */
     {
-        fc_command_t *cmd = test_page_cmd_ex(0U, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_PARAMETER_PAGE, 0x01U, 0U);
+        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_PARAMETER_PAGE, FC_CRC_ENABLE));
 
-        test_submit_wait(cmd);
+        (void)test_submit_wait(cmd);
 
         /* 验证参数页前 4 字节含 ONFI 签名 "ONFI"（0x4F 0x4E 0x46 0x49）
          * 数据由 PIO 写入 USER 区域（fc_buffer_id_to_real_buffer 指向的位置）。 */
@@ -371,9 +376,10 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
 
     /* Step 4: GET_FEATURES (address 0x01) — 寄存器值经 CQ 的 param 联合体返回
      * （completion.param.parameter0..3），不再原地回填命令体。
-     * GET_FEATURES 不建链（ftl_cmd_needs_desc_chain 排除），pba 与掩码都不看。 */
+     * GET_FEATURES 不建链（ftl_cmd_needs_desc_chain 排除），pba 与掩码都不看
+     * ⇒ cw_bitmap = 0。feature_addr 由调用者建链后自行覆盖。 */
     {
-        fc_command_t *cmd = test_page_cmd_ex(0U, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_GET_FEATURES, 0U, 0U);
+        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_GET_FEATURES, FC_CRC_ENABLE));
 
         cmd->feature_addr = 0x01U;
 
@@ -409,7 +415,7 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
     for (uint8_t i = 0U; i < 2U; i++)
     {
         /* GET_FEATURES 不建链（ftl_cmd_needs_desc_chain 排除），pba / 掩码都不看。 */
-        fc_command_t *cmd = test_page_cmd_ex(0U, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_GET_FEATURES, 0U, 0U);
+        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_GET_FEATURES, FC_CRC_ENABLE));
 
         cmd->feature_addr = feature_addrs[i];
 
@@ -443,8 +449,10 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
     for (uint8_t i = 0U; i < 2U; i++)
     {
         /* 状态字仅 1 字节 ⇒ 只取 CW0（1 条 desc）；状态查询不是 page read，
-         * 数据路径不介入，nand_status 经 completion.status 返回。 */
-        fc_command_t *cmd = test_page_cmd_ex(0U, 0U, TEST_PLANE_BM(0), 0U, status_ops[i], 0x01U, 0U);
+         * 数据路径不介入，nand_status 经 completion.status 返回。
+         * operation 逐轮不同 ⇒ config 需可变，先按基线拷一份再改。 */
+        fc_cmd_conf_t conf = L3_CONF(status_ops[i], FC_CRC_ENABLE);
+        fc_command_t *cmd  = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
 
         munit_assert_uint32(test_submit_wait(cmd).status, ==, FC_CW_STATUS_SUCCESS);
 
@@ -475,8 +483,8 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     (void)data;
 
     /* Step 1: 擦除源 + 目标 block */
-    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), 0U);
-    test_erase_block(BLOCK_DEST, TEST_PLANE_BM(0), 0U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
+    test_erase_block(BLOCK_DEST, TEST_PLANE_BM(0), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
 
     /* Step 2: 写源 block（64 pages） */
     write_block(BLOCK_TEST, 0U);
@@ -488,13 +496,19 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
      * ⚠ 这两个 op 都**不是** page read/write（fc_is_page_read / fc_is_page_write 都不含），
      *   数据路径不介入：搬的是 NAND 内部缓存，页内 META 原样跟着走。
      *   故目标页读回时，源页写入时铸的 META（page << CW_WIDTH）仍然自洽。 */
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
+    for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
         /* 3a: READ_FOR_INTERNAL_DATA_MOVE (00h-35h) — 将源 block page 读到 NAND 内部缓存 */
-        test_run_lifecycle(test_page_cmd_ex(BLOCK_TEST, page, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_FOR_INTERNAL_DATA_MOVE, 0U, (DWORD)page << CW_WIDTH));
+        run_lifecycle(test_cmd_build(&(nand_addr_t){.block = BLOCK_TEST, .plane = 0U, .page = page},
+                                     test_plane_cw_bitmap(TEST_PLANE_BM(0)),
+                                     (DWORD)page << CW_WIDTH,
+                                     &L3_CONF(OP_READ_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE)));
 
         /* 3b: PROGRAM_FOR_INTERNAL_DATA_MOVE (85h-10h) — 将内部缓存数据写入目标 block page */
-        test_run_lifecycle(test_page_cmd_ex(BLOCK_DEST, page, TEST_PLANE_BM(0), 0U, (uint8_t)OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, 0U, (DWORD)page << CW_WIDTH));
+        run_lifecycle(test_cmd_build(&(nand_addr_t){.block = BLOCK_DEST, .plane = 0U, .page = page},
+                                     test_plane_cw_bitmap(TEST_PLANE_BM(0)),
+                                     (DWORD)page << CW_WIDTH,
+                                     &L3_CONF(OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE)));
     }
 
     /* Step 5: 读回目标 block 64 pages 全部验证 */
@@ -578,7 +592,7 @@ static MunitResult test_block_write_read(const MunitParameter params[], void *da
     (void)data;
 
     /* Phase 1: 擦除 */
-    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), 0U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
 
     /* Phase 2: 写全 block 64 pages */
     write_block(BLOCK_TEST, 0U);
@@ -607,7 +621,7 @@ static MunitResult test_block_erase_verify(const MunitParameter params[], void *
     (void)params;
     (void)data;
 
-    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), 0U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
     read_block_verify_erased(BLOCK_TEST, 0U);
 
     return MUNIT_OK;
@@ -636,58 +650,17 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
     (void)data;
 
     /* Phase 0: 擦除 */
-    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), 0U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
 
     /* Phase 1: 用 PROGRAM_PAGE_CACHE 写全 block */
     write_block_cache(BLOCK_TEST, 0U);
 
     /* Phase 2: Cache 读序列。
      *
-     * 31h/3Fh 输出的数据是**上一轮加载的页**，不是本命令地址所指的页——所以
-     * meta 必须给「真正输出的那一页」的 LBA，Pass 4 ②（META == 本命令 LBA）
-     * 才成为一条真正的页身份判据（写错的页 / 读串了页都会当场显形）。
-     * 3Fh 语义上是「输出 cache 中最后一页」，与 31h 相同：meta = 63 页。 */
-
-    /* page 0: OP_READ_PAGE_CACHE_START (00h-addr-30h, 无 Dout) — 初始化 Cache 读管线 */
-    {
-        fc_command_t *cmd = test_page_cmd_ex(BLOCK_TEST, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_PAGE_CACHE_START, 0U, 0U);
-
-        cmd->config.crc = L3_CRC_RAW;
-        test_submit_wait(cmd);
-        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
-        /* CACHE_START 不输出数据，跳过 buffer 验证 */
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
-    }
-
-    /* page 1..63: OP_READ_PAGE_CACHE_SEQ (31h → Dout 上一页 + 加载下一页) */
-    for (uint8_t page = 1U; page < PAGES_PER_BLOCK; page++)
-    {
-        fc_command_t *cmd = test_page_cmd_ex(BLOCK_TEST, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_PAGE_CACHE_SEQ, 0U, (DWORD)(page - 1U) << CW_WIDTH);
-
-        cmd->config.crc = L3_CRC_RAW;
-        test_memset_read_buffer(cmd);
-        test_submit_wait(cmd);
-
-        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
-        /* 31h 输出的数据是 CACHE_START/上一轮 31h 加载的页，即 page-1 */
-        test_verify_against_source(cmd);
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
-    }
-
-    /* page 63: OP_READ_PAGE_CACHE_LAST (3Fh → Dout 最后一页) */
-    {
-        fc_command_t *cmd =
-            test_page_cmd_ex(BLOCK_TEST, 0U, TEST_PLANE_BM(0), 0U, (uint8_t)OP_READ_PAGE_CACHE_LAST, 0U, (DWORD)(PAGES_PER_BLOCK - 1U) << CW_WIDTH);
-
-        cmd->config.crc = L3_CRC_RAW;
-        test_memset_read_buffer(cmd);
-        test_submit_wait(cmd);
-
-        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
-        /* 3Fh 输出最后一页数据 */
-        test_verify_against_source(cmd);
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
-    }
+     * START(p0) → SEQ ×63 → LAST 整段由夹具编排：31h / 3Fh 无地址周期（设备自增），
+     * 且 31h 输出的是**上一轮加载的页**，meta 必须给「真正输出的那一页」的 LBA ——
+     * 这条约定封装在 test_read_block_cache 里（见 fc_test_common.h「cache 整块读写」）。 */
+    test_read_block_cache(BLOCK_TEST, TEST_PLANE_BM(0), &L3_CONF(OP_READ_PAGE_CACHE_SEQ, FC_CRC_DISABLE), NULL);
 
     return MUNIT_OK;
 }
@@ -711,33 +684,18 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
     (void)data;
 
     /* Step 1: Multi-plane erase block 100 (both planes) */
-    test_erase_block(BLOCK_TEST, TEST_PLANE_BM_ALL, 1U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM_ALL, &L3_CONF(OP_ERASE_BLOCK_MULTI_PLANE, FC_CRC_DISABLE));
 
     /* Step 2: Multi-plane program — 64 pages。
-     * 数据源按 (plane, cw) 取槽 ⇒ plane 0/1 的图案天然不同，读串 plane 必被抓到。 */
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
-    {
-        fc_command_t *cmd =
-            test_page_cmd_ex(BLOCK_TEST, page, TEST_PLANE_BM_ALL, 1U, (uint8_t)OP_PROGRAM_PAGE_MULTI_PLANE, 0U, (DWORD)page << CW_WIDTH);
-
-        cmd->config.crc = L3_CRC_RAW;
-        test_fill_user_from_source(cmd);
-        test_run_lifecycle(cmd);
-    }
+     * 数据源按 (plane, cw) 取槽 ⇒ plane 0/1 的图案天然不同，读串 plane 必被抓到。
+     * plane 段 = 两个 plane ⇒ plane_bitmap 必须是 TEST_PLANE_BM_ALL
+     * （multi-plane 的覆盖面断言在夹具里，见 fc_test_common.h「三」）。 */
+    test_prog_block(BLOCK_TEST, TEST_PLANE_BM_ALL, &L3_CONF(OP_PROGRAM_PAGE_MULTI_PLANE, FC_CRC_DISABLE), NULL);
 
     /* Step 3: Multi-plane read back — verify both planes */
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
+    for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_command_t *cmd = test_page_cmd(BLOCK_TEST, page, TEST_PLANE_BM_ALL, 1U, TEST_OP_READ);
-
-        cmd->config.crc = L3_CRC_RAW;
-        test_memset_read_buffer(cmd);
-        test_submit_wait(cmd);
-
-        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
-        test_verify_against_source(cmd);
-
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        read_page_verify(BLOCK_TEST, page, TEST_PLANE_BM_ALL, 0U, &L3_CONF(OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT, FC_CRC_DISABLE));
     }
 
     return MUNIT_OK;
@@ -763,7 +721,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
     (void)params;
     (void)data;
 
-    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), 0U);
+    test_erase_block(BLOCK_TEST, TEST_PLANE_BM(0), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
     write_block(BLOCK_TEST, 0U);
 
     const uint8_t sample_pages[] = {0U, 15U, 31U, 47U, 63U};
@@ -771,10 +729,10 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
 
     for (uint8_t si = 0U; si < (uint8_t)sizeof(sample_pages); si++)
     {
-        const uint8_t page = sample_pages[si];
+        const uint16_t page = sample_pages[si];
 
         /* Normal read page — 加载 NAND 页缓冲（顺带校验整页） */
-        read_page_verify(BLOCK_TEST, page, 0U, 0U);
+        read_page_verify(BLOCK_TEST, page, TEST_PLANE_BM(0), 0U, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
 
         for (uint8_t ci = 0U; ci < (uint8_t)sizeof(sample_cws); ci++)
         {
@@ -786,15 +744,19 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
              *   于是 desc 落在 CW0、期望值取 CW1/CW3，两者对不上。
              *   旧 pattern 是 4 字节周期、cw*512 又是 4 的倍数 ⇒ 四个 CW 期望值
              *   完全相同，这条错误一直被掩盖（v22 changelog 记录过同类问题）。 */
-            fc_command_t *cmd = test_page_cmd_ex(BLOCK_TEST, page, TEST_PLANE_BM(0), 0U, (uint8_t)OP_RANDOM_DATA_READ, (uint32_t)1U << cw, (DWORD)page << CW_WIDTH);
+            fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = BLOCK_TEST, .plane = 0U, .page = page},
+                                               (uint32_t)1U << cw,
+                                               (DWORD)page << CW_WIDTH,
+                                               &L3_CONF(OP_RANDOM_DATA_READ, FC_CRC_ENABLE));
 
-            cmd->config.crc = L3_CRC_PAGE;
             test_memset_read_buffer(cmd);
-            test_submit_wait(cmd);
+            (void)test_submit_wait(cmd);
 
             munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
             munit_assert_uint8(test_cw_count(cmd), ==, 1U); /* 掩码只选中 1 个 CW */
-            test_verify_against_source(cmd);
+            /* 链驱动校验：只有被抽样的那个 CW 在链上，test_verify_page_paa 会连
+             * plane 段内其余 CW 一起查（那些槽这次没被填过）⇒ 用 verify_chain_paa。 */
+            verify_chain_paa(cmd);
 
             munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
         }

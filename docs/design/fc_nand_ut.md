@@ -203,8 +203,8 @@ BCH 允许误纠（实测约 0.28% 返回 OK 但数据是错的），故**不钉
 > `test_plane_cw_bitmap(plane_bitmap)`（原 `test_plane_cw_mask`）。
 > **v28 起位图作 `ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 的实参**——夹具里
 > `cmd->param.cw_bitmap = test_plane_cw_bitmap(...)` 改成把值直接传给建链入口。
-> **Level 2 的迁移已完成**（v26 起建链走 `test_cmd_build()`）；**Level 3 待迁**（仍在引用已删的
-> `test_page_cmd_ex` 等旧符号，见 `docs/changelog/fc_data_path_step_primitives_v29.md`「未跟进」）。
+> **Level 2 / Level 3 的迁移均已完成**（v26 起建链走 `test_cmd_build()`；Level 3 于 v31 迁完，
+> 见 `docs/changelog/fc_ut_level3_migration_v31.md`）。
 >
 > `plane1-only` 的段必须是**单 plane 且 `addr.plane = 1`**：用 multi-plane op 配只覆盖 plane 1 的
 > 位图会被 `test_cmd_build` 的「逐 plane 覆盖」断言挡下——那正是静默编程未覆盖 plane 的形态。
@@ -234,6 +234,11 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 - **释放**：只需 `fc_command_release()`（v16 起一并回收 desc + buffer）。
 - **ID 断言**：`fc_command_t` 无 `command_id` 字段（v15 删），断言用 `fc_command_to_id(cmd, &expect_id)` 反查。
 - **PAA 约定**：`ch=0 ce=0 lun=0`，block 固定 `BLOCK_TEST=100`（内部搬移目标 `BLOCK_DEST=102`），page=0..63，plane 0/1。
+- **cache 整块读写**：夹具新增 `test_prog_block_cache()` / `test_read_block_cache()`（**单 plane**；`config` 只提供模式位，`operation` 由 helper 逐步覆盖，调用者填什么都被忽略）。写侧前 63 页 `OP_PROGRAM_PAGE_CACHE`（15h）、末页 `OP_NORMAL_PROGRAM_PAGE`（10h）收尾。读侧**不能**由 `test_read_page` 循环拼出——31h / 3Fh 无地址周期（设备自增），且 31h 输出的是**上一轮加载的页**，故 helper 显式编排 `START(p0) → SEQ ×63 → LAST`，`meta` 取**真正输出页**的 LBA（第 i 次 SEQ 取 `(i-1) << CW_WIDTH`）；共 65 条命令输出 64 页。两者都是同步逐条提交 ⇒ 只验数据正确性（cache 命令序列走得通、编码管线不串），**不验流水线收益**。
+- **裸页 config**：本文件用 `L3_CONF(operation, crc)` 复合字面量给出「裸页」形态——与改造前 `program_page` / `read_page` / `erase_block` 字段逐字一致（**不加扰** + **LDPC RAW** + **不 RAID**；crc 逐处给，裸页读写沿用池默认的 `FC_CRC_ENABLE`，cache 与 multi-plane 路径显式 `FC_CRC_DISABLE`）。`ch/ce/lun` 由 `test_cmd_build` 从 addr 覆盖，`multi_plane` 由 operation 派生。
+- **不走页 helper 的命令**（READ_ID / GET_FEATURES / 状态查询 / 内部搬移 / RANDOM_DATA_READ）用夹具的三件零件自己拼：`test_cmd_build()`（建链）+ `test_submit_wait()`（提交轮询，**命令仍归调用者**）+ `fc_command_release()`；平面段位图用 `test_plane_cw_bitmap(plane_bitmap)` 正推，`addr.plane` 用 `test_first_plane(plane_bitmap)`。
+- **读回校验分两档**：整段读用 `test_verify_page_paa(data, block, page, plane_bitmap)`（按地址**重算**期望，覆盖段内全部 CW）；部分掩码读（如 RANDOM_DATA_READ 只抽 1 个 CW）用本文件的 `verify_chain_paa(cmd)`（只看**链上实际有的** desc，期望取 `desc->paa`）——此时段内其余 CW 的源槽根本没被这次读填过。
+- **擦除页的判据只能是逐 CW `FC_CW_STATUS_SUCCESS`**：擦除页 META = 0xFF…，Pass 4 ① 自洽必然不过 ⇒ 该 CW 带 `MATA_ERROR`，**聚合 status 的错误掩码非零**。故 `read_block_verify_erased` 走本文件的 `read_page_verify(..., erased=1)`（在 release 前逐 CW 查 SUCCESS 位），不能用 `test_read_block` 的聚合判据。
 
 #### 测试用例（9 个）
 
@@ -245,7 +250,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 | `internal_data_move` | READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE | 源 block → 目标 block 搬移后 64 页逐字节一致 |
 | `block_erase_verify` | ERASE → 全 0xFF 校验 | 擦除后逐页全 0xFF |
 | `block_write_read` | PROGRAM → READ 全 block | 写读数据一致 |
-| `block_cache_ops` | CACHE_RANDOM → CACHE_SEQ ×N → CACHE_LAST | cache 读管线（31h/3Fh 等） |
+| `block_cache_ops` | CACHE_START(p0) → CACHE_SEQ ×63 → CACHE_LAST | cache 读管线（30h/31h/3Fh）；写侧前 63 页 15h + 末页 10h |
 | `block_multi_plane` | MP_ERASE → MP_PROGRAM → MP_READ | 两 plane 各自 pattern 独立验证（desc 0..3=plane0，4..7=plane1） |
 | `block_random_data` | READ + RANDOM_DATA_READ 抽样 | 抽 5 页 × CW1/CW3 随机列读，验证列地址解码 |
 
@@ -555,6 +560,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-09 | v1.14 | **Level 3 迁移到共享夹具——v27~v30 遗留的编译阻塞点闭合**（见 `docs/changelog/fc_ut_level3_migration_v31.md`）。`test_fc_level3.c` 曾引用夹具里已删的 7 个符号（`test_page_cmd_ex` / `test_page_cmd` / `test_run_lifecycle` / `test_fill_user_from_source` / `test_verify_against_source` / `TEST_OP_READ` / `test_write_page`），`make tests` 编不过。本轮：① 建链一律走 `test_cmd_build()`，页 helper 参数对齐（`test_read_page` 补 config、`test_erase_block` 的 `0U` → `L3_CONF(...)`）；② 夹具新导出三件零件 `test_submit_wait()`（提交轮询，**命令仍归调用者**）/ `test_plane_cw_bitmap()`（plane 段 → flat CW 位图）/ `test_first_plane()`，供 READ_ID / GET_FEATURES / 状态查询 / 内部搬移 / RANDOM_DATA_READ 等**形态对不上页 helper** 的用例自拼；③ `L3_CONF(operation, crc)` 复合字面量给出与改造前逐字一致的「裸页」形态（不加扰 + LDPC RAW + 不 RAID）；④ 新 `verify_chain_paa()` 取代 `test_verify_against_source`——**链驱动**逐 desc 查 `desc->paa`（旧函数比的是**与页无关**的源表，「读错页」不可见；且部分掩码读（RANDOM_DATA_READ 只抽 1 CW）不能用 `test_verify_page_paa`，段内未捕获的槽是陈旧值）；⑤ 新 `read_page_verify(..., erased)` 把「逐 CW `FC_CW_STATUS_SUCCESS`」与「聚合错误掩码」分开——擦除页 META=0xFF… 必然带 `MATA_ERROR`，聚合判据不可用；⑥ `block_cache_ops` 的 Phase 2 换成夹具的 `test_read_block_cache()`（31h/3Fh 无地址周期、31h 输出上一轮加载页，无法由 `test_read_page` 循环拼出）。9 条场景数不变。`make format-check` 过、`-fsyntax-only` 全部 unit 测试文件 0/0；**未编译、上板未验** |
 | 2026-10-09 | v1.13 | **Level 2 三组用例按判据 7 参数化**（承接 v1.12 的 §二十三）。① `encode_random_off` / `_random_on` / `_single_cw` → 单条参数化 `encode`（3 case）；② `process_read_ok_random_on` / `_random_off` / `_single_cw` → 单条参数化 `process_read_ok`（3 case）；③ `cw_bitmap_flat_mixed` / `_plane1_only` / `_span_multi_plane` → 单条参数化 `cw_bitmap`（3 case，期望链以显式表给出，原「循环 + 公式」形态换成逐位比表）。判据：①② 断言集相同、只有期望不同；③ 差异全在**段宽 / `addr.plane` / 位图**三个字段。`unc` / `masked_chain` / `mata_error` / `crc_error` / `ldpc_raw` **刻意不并**——各自断言不同的可观测量。Level 2 计数 18→**12**（RAID=1 时 20→**14**；参数化展开后实际跑 31 个用例，与合并前一致）。顺带修正表中两条陈旧参数（`masked_chain` 实为**单 plane 段**、`mata_error` 实为 4CW）与两处 `§二十二`→`§二十三` 的引用。⚠ 仍**未编译**（Level 3 在旧符号上），上板未验 |
 | 2026-10-09 | v1.12 | **Level 2 步骤级用例 + 参数化 + munit 移植修复的文档同步**（见 `docs/changelog/fc_data_path_step_primitives_v29.md`）。① §2.2 补「两种形态」（**步骤级** 调单 CW 原语 / **管线级** 建链走 config 位）与**步骤级用例**小节：`crc_step_detect`（参数化 4 case，含 `meta-1` / `parity-1` 两条**负例**——钉 CRC 只覆盖 USER `[8,520)`，META 与 parity 在覆盖外）、`ecc_step`（参数化 11 case）、`scramble_whiten`；② Level 2 计数 15→**18**（RAID=1 时 17→**20**）；③ §1 / §5.4 补参数化机制：`munit_parameters_get()` 是 v29 补回的上游漏移植函数（另修 `run_test_wild` 递归实参、`runner->suite->iterations`），CLI `--param name value` 一直是通的；④ §5.1 文件树补 `fc_test_common.{c,h}`；⑤ v27/v28 的 `cw_mask`→`cw_bitmap` 改名与「位图作建链实参」已同步（§2.2 参数组合表、建链几何表）。⚠ **Level 3 仍在旧符号上**（`test_page_cmd_ex` 等），`make tests` 编不过——v27/v28/v29 三版共同的遗留中间态 |
 | 2026-10-08 | v1.11 | **Level 2 重构：fixture 修正 + RAID 退化用例清理 + 覆盖补齐，10→15（RAID=1 时 17）**（见 `docs/changelog/fc_ut_level2_rework_v22.md`）。① **fixture 修正**：新增 `alloc_cmd_full()` 统一建链并设 `paa = paa_make(32, 0, 50, 0, 0)`——原 fixture 不设 `paa`，BASIC 种子退化成 `{1,1,2,3}`、keystream 除 byte0 外全 0，所有 `random=ON` 用例的加扰是空转；random=ON 用例补「encode 后 USER 区 ≠ 明文」自证断言。② **RAID 组删 4 留 2**：删 `encode_raid_on` / `raid_recover_first` / `_mid` / `_last`（构造不出真 stripe，只靠三重巧合通过；判据见 `assertion_guidelines.md` §十七·判据 6），保留 `raid_recover_no_random` 与真 stripe 的 `generate_stripe_parity`。③ **覆盖补齐 5 条**：`encode_crc_disabled`、`process_read_masked_chain`（专钉 Pass 4 的 `paa_to_cw`）、`process_read_mata_error`、`process_read_crc_error`、`process_read_ldpc_raw`。④ **断言加强**：`process_read_ok_*` / `_single_cw` 补 `desc->status == READY`（process_read 标脏后仍返回 OK）。⑤ **去冗余**：删 `fill_pattern` 包装与 `print_resource_stats` 注释块，`get_cw_buffer` / `get_cw_base` / `get_cw_count` 收敛到 `cw_desc()` 之上。⚠ 本 fork 的 `MunitSuite` 结构体没有 `setup` 字段，套件级 setup 不存在，故仍逐用例挂 `setup_level2`（靠 `g_level2_inited` 幂等）。`make -k tests` 0 error/0 warning、链接 197344 B；RAID=1 档 0/0、204328 B；format-check 过；上板未验 |
