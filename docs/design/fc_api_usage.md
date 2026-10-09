@@ -13,7 +13,7 @@
 >
 > | 已删除（FC 侧） | 现在的等价物（FTL 侧） |
 > |---|---|
-> | `fc_command_configure_descriptors(cmd)` | `ftl_cmd_configure_descriptors(cmd)`（`include/ftl/ftl_fc_interface.h`） |
+> | `fc_command_configure_descriptors(cmd)` | `ftl_cmd_configure_descriptors(cmd, cw_bitmap)`（`include/ftl/ftl_fc_interface.h`；v28 起位图是形参） |
 > | `fc_write_cmd_data()` / `fc_read_cmd_data()` | `ftl_cmd_write_data()` / `ftl_cmd_read_data()`（同上） |
 >
 > FC 侧建链现在**只有** `fc_command_configure_descriptor(cmd, plane, cw, row_paa)` 一个入口。
@@ -137,24 +137,26 @@ struct fc_command_status_t {
 ```c
 typedef union {
     struct { uint8_t parameter0, parameter1, parameter2, parameter3; };
-    uint8_t  bytes[4];
-    uint32_t cw_mask;   // flat CW 掩码：bit n = plane * CW_NUM + cw
+    uint8_t  bytes[4];  // 内联数据的字节视图
+    // v28：删除 cw_bitmap 视图——CW 集合改作建链形参（见下节），CQ 侧不再聚合失败集
 } fc_param_t;
 ```
 
-- **读命令**：`param.cw_mask` = 失败集（`UNC | CRC_ERROR` 的 CW 按 **flat 绝对编号**置位）；
-  与请求掩码同一编号空间，故 `请求集 & 失败集` 直接得到最小重读集。仅 page read 填充，其余命令恒 0。
 - **GET_FEATURES**：`param.bytes` = 读回的 4 字节寄存器值。SQ 命令体提交后不再被写
   （值经控制器级暂存 `g_fc_return_staging` 中转进 CQ）。
 - **SET_FEATURES**：内联数据由 SQ 的 `command->param.bytes` 携带。
+- **其余命令恒 0**（v28 起不再回传失败 CW 位图；上层要定位失败 CW，遍历 desc 链 OR 各
+  `desc->status` 自取）。
 
-### 读命令的 CW 子集选择（fc_command_t.param.cw_mask）
+### 读命令的 CW 子集选择（建链形参 `cw_bitmap`）
 
-`fc_command_t.param.cw_mask` 是 **flat 32 位掩码**（bit `n = plane * CW_NUM + cw`，覆盖
+CW 子集是 **flat 32 位位图**（bit `n = plane * CW_NUM + cw`，覆盖
 `CW_TOTAL_MAX = 8` 位），用于只读一页中**任意 CW 子集**（读恢复场景：ECC 只挂了 2~3 个 CW 时只重读
-失败的那几个，不必重读整页）。编号是**绝对**的，不是"每 plane 各自的低 4 位"：
+失败的那几个，不必重读整页）。编号是**绝对**的，不是"每 plane 各自的低 4 位"。
+**v28 起它是 `ftl_cmd_configure_descriptors()` 的形参**，不再是命令结构体的字段
+（v13~v27 为 `cmd->param.cw_bitmap`）：
 
-| 选择 | 掩码 |
+| 选择 | 位图 |
 |---|---|
 | 两个 plane 各 4 CW（满读） | `0x0F \| 0xF0 = 0xFF` |
 | **只读 plane 1 的 4 个 CW** | **`0xF0`**（不是 `0x0F`） |
@@ -163,17 +165,32 @@ typedef union {
 ```c
 fc_command_t *cmd = fc_command_alloc();
 cmd->config.operation = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-cmd->config.cw        = 3U;      // mask=0 时按此字段对**每个 plane** 取连续 0..cw
-cmd->param.cw_mask    = 0x29U;   // 只读 plane0{CW0,CW3} + plane1{CW1}
-// configure 时按掩码置位建 desc 链（plane-major 序）；config.cw 不回写，长度一律走链
+cmd->config.cw        = 3U;      // 已退出建链（v23）；读者只剩 FC 内 RAID stripe 的 cw_count
+// v28：位图作实参传给建链入口，不再是命令字段
+ftl_cmd_configure_descriptors(cmd, 0x29U);   // 只读 plane0{CW0,CW3} + plane1{CW1}
+// 按位图置位建 desc 链（plane-major 序）；长度一律走链
 ```
 
-`cw_mask = 0` 表示未指定，退化为"对命令的每个 plane 取连续 `0..config.cw`"——所有既有调用点都是这个
-取值，行为不变。掩码越出本命令 plane 位段（或位宽超过 `PLANE_NUM * CW_NUM`）时 `fc_command_validate`
-返回 `FC_STATUS_INVALID_ARGUMENT`。RAID / stripe 命令要求两 plane 的 CW 集合相同（XOR 按 CW 配对），
-非对称掩码会被 ASSERT 拒绝。
+⚠ **`cw_bitmap` 是字面位图（v27）**：置 1 的位 = 要访问的 CW，**全 0 = 一个都不访问**。
+v23~v26 期间 `0` 曾被重载为"本命令 plane 段内的全部 CW"，该重载**已取消**——
+「生产者忘了填」与「有意访问 0 个 CW」必须可区分。
 
-**不在本次范围**：FTL 读恢复流程（`src/ftl/read_recovery.c`）对失败掩码的接线。
+**想整段访问**（绝大多数调用者的意图）：不要手写 `0xFF`/`0xF0`，用
+
+```c
+ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));  // 须在 pba 与 multi_plane 写好之后
+```
+
+它按 `cmd->pba` 的 plane 位与 `config.multi_plane` 算出"段内全部 CW"（plane1 单 plane ⇒ `0xF0`，
+双 plane ⇒ `0xFF`）。三个语义为"整段访问"的 FTL 入口（`addr_to_cmd` / `ftl_cmd_setup_ppa` /
+`ftl_cmd_setup_ppa_pair`）**自己替你调**，不必管；只有 `ftl_cmd_configure_descriptors()` 需要你给位图。
+
+**校验**：位图越出本命令 plane 位段（或位宽超过 `PLANE_NUM * CW_NUM`）由
+`ftl_cmd_resolve_cw_bitmap()` 的 `ASSERT` 拦下（v23 起由返回码改 ASSERT）；
+全 0 同样被该函数的第一条 `ASSERT` 拦下。⚠ 两条 ASSERT 在 release 下会被裁掉。
+RAID / stripe 命令要求两 plane 的 CW 集合相同（XOR 按 CW 配对），非对称位图会被 ASSERT 拒绝。
+
+**不在本次范围**：FTL 读恢复流程（`src/ftl/read_recovery.c`）对失败位图的接线。
 
 ### 使用 module 直接路由完成通知
 
@@ -268,22 +285,22 @@ fc_init();
 fc_command_t *cmd = fc_command_alloc();
 
 // ② 填充命令字段
-cmd->config.operation = ONFI_PAGE_PROGRAM;
+cmd->config.operation = OP_NORMAL_PROGRAM_PAGE;
 cmd->config.ch        = 0;
 cmd->config.ce        = 0;
 cmd->config.lun       = 0;
-cmd->config.cw        = 1;   // CW 数量 - 1（此处表示 2 个 CW）
-cmd->paa              = target_paa;
+cmd->pba              = target_pba;
 
-// ③ 只建 desc 链 + buffer（FTL 侧封装：按 param.cw_mask 展开后逐条 attach_cw）
+// ③ 只建 desc 链 + buffer（FTL 侧封装：按形参 cw_bitmap 展开后逐条 configure_descriptor）
+//    v28：整段访问的位图作实参算好传进去（须在 pba 与 multi_plane 写好之后）
 //    不搬数据——搬数据是④，且只有写操作才做。建链失败时链已回滚，此处再还命令槽位。
-if (ftl_cmd_configure_descriptors(cmd) != FTL_OK) {
+if (ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd)) != FTL_OK) {
     fc_command_release(cmd);   // desc 链已由 ftl_cmd_* 沿链释放（v16）
     return;
 }
 
 // ④ 写入数据（仅写操作；FTL 侧遍历 desc 链，buffer_id → pointer → memcpy）
-ftl_cmd_write_data(cmd, source_data, (cmd->config.cw + 1) * CW_SIZE);
+ftl_cmd_write_data(cmd, source_data, user_length);   // 逐 desc 按链序搬；长度由调用者按业务给
 
 // ⑤ 提交到硬件队列
 fc_submit(cmd);
@@ -357,7 +374,7 @@ while (1) {
 fc_command_t *cmd = fc_command_alloc();
 cmd->config.operation = ONFI_PAGE_READ;
 // ... 其他配置 ...
-ftl_cmd_configure_descriptors(cmd);
+ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));
 fc_submit(cmd);
 
 // 完成后直接获取指定 CW 的 buffer 指针

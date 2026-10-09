@@ -510,6 +510,25 @@ munit_parameters_add(size_t *params_size, MunitParameter *params[*params_size], 
     return MUNIT_OK;
 }
 
+/* 按 name 取参数值（params 为 NULL 结尾数组）。查不到返回 NULL。
+ * 上游 munit 逐字同名同实现——本 fork 之前漏移植，补回。
+ * 注意 fork 的 MunitParameter.value 是 const char*，直接返回即可，无需转型。 */
+const char *
+munit_parameters_get(const MunitParameter params[], const char *key)
+{
+    const MunitParameter *param;
+
+    for (param = params; param != NULL && param->name != NULL; param++)
+    {
+        if (strcmp(param->name, key) == 0)
+        {
+            return param->value;
+        }
+    }
+
+    return NULL;
+}
+
 static const MunitArgument *
 munit_arguments_find(const MunitArgument arguments[], const char *name)
 {
@@ -690,7 +709,7 @@ static MunitResult munit_test_runner_exec(MunitTestRunner *runner, const MunitTe
     }
     else if (iterations == 0)
     {
-        iterations = runner->iterations;
+        iterations = runner->suite->iterations;
     }
 
     munit_rand_seed(runner->seed);
@@ -978,7 +997,7 @@ static void munit_test_runner_run_test_wild(MunitTestRunner *runner, const Munit
         }
         else
         {
-            munit_test_runner_run_test_wild(runner, test, test_name, params, p);
+            munit_test_runner_run_test_wild(runner, test, test_name, params, next);
         }
 
         if (runner->fatal_failures && (runner->report.failed != 0 || runner->report.errored != 0))

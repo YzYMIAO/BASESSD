@@ -18,14 +18,14 @@
 #include <stddef.h>
 
 /* --------------------------------------------------------------------
- * fc_cw_mask_is_plane_symmetric
+ * fc_cw_bitmap_is_plane_symmetric
  *   功能：判断 flat CW 掩码在**每个 plane 上的 CW 集合是否相同**。
  *   参数：mask —— flat 掩码（bit n = plane*CW_NUM + cw）。
  *   返回：1 = 对称（mask == 0 视为对称）；0 = 不对称。
  *   用途：RAID / stripe 的 XOR 按 CW 配对，要求两 plane 同集合
  *         （见 fc_data_path_generate_stripe_parity 的前置断言）。
  * -------------------------------------------------------------------- */
-uint8_t fc_cw_mask_is_plane_symmetric(uint32_t mask)
+uint8_t fc_cw_bitmap_is_plane_symmetric(uint32_t mask)
 {
     const uint32_t plane_bits = (uint32_t)((1U << CW_NUM) - 1U);
     const uint32_t low        = mask & plane_bits;
@@ -55,8 +55,8 @@ uint8_t fc_cw_mask_is_plane_symmetric(uint32_t mask)
  *       fc_submit 的 ASSERT(... == OK) 整条裁空，无运行时开销。
  *     - has_data 覆盖数据输出型操作（READ_STATUS/READ_ID 等），它们也需要
  *       buffer；data_input_cycles>0 只是其子集。
- *     - **不再校验 param.cw_mask**（v13）：掩码是 FTL 的输入概念，FC 只认 desc 链
- *       （链长度即真值）。掩码越段的检查已随枚举逻辑一并上移 FTL，见
+ *     - **不校验 CW 集合**（v13，v28 起集合甚至不在命令里）：它是 FTL 的建链输入，
+ *       FC 只认 desc 链（链长度即真值）。越段检查随枚举逻辑一并上移 FTL，见
  *       ftl_cmd_configure_descriptors()。本函数只确认「有数据的命令必须已有链」。
  * -------------------------------------------------------------------- */
 fc_status_t fc_command_validate(const fc_command_t *command)

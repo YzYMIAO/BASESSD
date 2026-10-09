@@ -9,51 +9,56 @@
 #include <string.h>
 
 /* --------------------------------------------------------------------
- * ftl_cmd_resolve_cw_mask
- *   功能：把 cmd->param.cw_mask 解析成「本命令实际要访问的 CW 集合」（flat 绝对编号）。
- *   参数：cmd —— 命令；plane_first / plane_count —— 本命令的 plane 段
- *         （由 fc_command_plane_span 给出）。
- *   返回：解析后的掩码（非 0——段内至少有一个 CW）。
- *   实现要点：
- *     - cw_mask == 0 → **本命令 plane 段内的全部 CW**。这是「0 = 全部」的唯一定义处，
- *       两个建链入口（configure_descriptors / setup_ppa_pair）共用（v23）。
- *     - cw_mask != 0 → 原值，必须落在段内；越段是调用者编程错误 → ASSERT
- *       （判据见 assertion_guidelines §十三：建链入口的坐标越界一律 ASSERT）。
+ * ftl_cmd_resolve_cw_bitmap
+ *   功能：校验建链形参 cw_bitmap —— 「本命令要访问哪些 CW」的唯一定义处。
+ *   参数：bitmap —— 调用者给的 flat 字面位图（v28：形参，非命令字段）；
+ *         plane_first / plane_count —— 本命令的 plane 段（由 fc_command_plane_span 给出）。
+ *   返回：位图原值（**非 0**——段内至少有一个 CW 被选中）。
+ *   实现要点（v27 起 cw_bitmap 是**字面位图**）：
+ *     - **没有 0 的隐式展开**：v23~v26 把 0 重载为「本命令 plane 段内的全部 CW」，
+ *       现取消。名字叫 bitmap 就必须逐位字面：0 = 一个 CW 都不访问，那不是合法的
+ *       数据命令（建链会产出空链 → desc_id = INVALID → 提交后**静默不搬任何数据**）。
+ *       整段访问由调用者用 fc_command_plane_span_cw_bitmap() 显式算 —— 见
+ *       addr_to_cmd / ftl_cmd_setup_ppa / ftl_cmd_setup_ppa_pair。
+ *       ⚠ 这两条 ASSERT 就是「生产者忘填」的唯一拦网，且 ASSERT 在 release 下会被裁掉，
+ *         故「忘了填」的代价是**编译期无声、release 下静默空操作**——新增建链调用点时
+ *         必须显式给位图（§十三：建链入口的配置错误一律 ASSERT）。
+ *     - 位图必须落在段内；越段是调用者编程错误 → ASSERT。
  *       ⚠ 该检查不能省：下面的枚举只走段内的 plane × cw，段外的高位 bit 根本不会被枚举到，
  *         不检查就是**静默忽略**（机制层 fc_command_configure_descriptor 的越段 ASSERT 也拦不到）。
  * -------------------------------------------------------------------- */
-static uint32_t ftl_cmd_resolve_cw_mask(const fc_command_t *cmd, uint8_t plane_first, uint8_t plane_count)
+static uint32_t ftl_cmd_resolve_cw_bitmap(uint32_t bitmap, uint8_t plane_first, uint8_t plane_count)
 {
     const uint32_t allowed = ((uint32_t)((1U << ((uint32_t)plane_count * CW_NUM)) - 1U)) << ((uint32_t)plane_first * CW_NUM);
-    const uint32_t mask    = cmd->param.cw_mask;
 
-    if (mask == 0U)
-    {
-        return allowed; /* 0 = 本命令 plane 段内的全部 CW */
-    }
-    ASSERT((mask & ~allowed) == 0U);
-    return mask;
+    ASSERT(bitmap != 0U);              /* 字面位图：0 = 空集 = 调用者忘了给（v27 起无隐式展开） */
+    ASSERT((bitmap & ~allowed) == 0U); /* 越出本命令 plane 段 = 编程错误 */
+    return bitmap;
 }
 
 /* --------------------------------------------------------------------
  * ftl_cmd_configure_descriptors
- *   功能：按 cmd->param.cw_mask 组装整条 desc 链（v13 由 FC 策略层上移）。
- *   参数：cmd —— 命令（须已设 config.operation / multi_plane / paa）。
+ *   功能：按形参 cw_bitmap 组装整条 desc 链（v13 由 FC 策略层上移）。
+ *   参数：cmd —— 命令（须已设 config.operation / multi_plane / pba）；
+ *         cw_bitmap —— 本次建链要访问的 CW（flat 字面位图，v28 起为形参）。
  *   返回：FTL_OK / FTL_ERROR（池空或坐标非法）。
  *   实现要点：
  *     - **只建链，不搬数据**：数据由 ftl_cmd_write_data 在链建好之后、且仅对写操作执行。
  *       搬数据放在这里会让「建链失败 → 整链释放」白做一遍拷贝。
- *     - 无数据操作（ERASE / RESET 等）与 SET/GET_FEATURES 不建链，desc_id 置 INVALID。
- *     - cw_mask == 0 → **本命令 plane 段内的全部 CW**（v23；此前是"每个 plane 取连续
- *       0..config.cw"）；非 0 → 必须落在本命令 plane 段内（越段 = 编程错误 → ASSERT，
- *       见 ftl_cmd_resolve_cw_mask）。离散读 plane1 的 CW0/CW2 即
- *       cmd->param.cw_mask = (1U << 4) | (1U << 6)。
+ *     - 无数据操作（ERASE / RESET 等）与 SET/GET_FEATURES 不建链，desc_id 置 INVALID
+ *       （此路径**不看 cw_bitmap**，故擦除命令传什么都不会炸）。
+ *     - cw_bitmap 是**字面位图**（v27，0 = 空集，无隐式展开；整段访问用
+ *       fc_command_plane_span_cw_bitmap() 算）。它必须落在本命令 plane 段内
+ *       （越段 = 编程错误 → ASSERT，见 ftl_cmd_resolve_cw_bitmap）。
+ *       离散读 plane1 的 CW0/CW2 即传 (1U << 4) | (1U << 6)。
+ *       ⚠ 想「整段访问」不要传 0 —— 那是空集。用 ftl_cmd_setup_ppa(_pair)，
+ *         或显式传 fc_command_plane_span_cw_bitmap(cmd)。
  *     - 行地址所有 plane 共用 cmd->pba（同页语义）；两 plane 不同块（Policy B）
  *       走 ftl_cmd_setup_ppa_pair()，本函数不适用。
  *     - **失败时本函数自己回滚整条链**（desc + buffer 全部还池，desc_id 复位 INVALID），
  *       调用者只需再 fc_command_release 还命令槽位。
  * -------------------------------------------------------------------- */
-ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd)
+ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap)
 {
     uint32_t mask;
     uint8_t  plane_count;
@@ -74,7 +79,7 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd)
     }
 
     plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
-    mask        = ftl_cmd_resolve_cw_mask(cmd, plane_first, plane_count);
+    mask        = ftl_cmd_resolve_cw_bitmap(cw_bitmap, plane_first, plane_count);
 
     for (plane = plane_first; plane < plane_last; plane++)
     {
@@ -108,8 +113,9 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba)
     cmd->config.ce  = (DWORD)pba_to_ce(pba);
     cmd->config.lun = (DWORD)pba_to_lun(pba);
     cmd->pba        = pba;
-
-    return ftl_cmd_configure_descriptors(cmd);
+    /* v27/v28：位图是字面位图（0 = 空集），「整段访问」不再有隐式默认值。本入口语义
+     * 就是「整段」——自己算好当实参传，调用者不必管。须在 pba 写好之后算。 */
+    return ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));
 }
 
 ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM])
@@ -138,12 +144,14 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
         return FTL_OK;
     }
 
-    /* v23：plane 段与掩码展开规则与 ftl_cmd_configure_descriptors **完全一致**（同一个
-     * ftl_cmd_resolve_cw_mask）。本函数与它的唯一差别只是**行地址逐 plane 各自取**（Policy B），
-     * 而不是"两个入口各认一个旋钮"——此前这里读 config.cw、那边读 param.cw_mask，
-     * 于是 param.cw_mask 这条通道主数据路径根本不看。 */
+    /* v23：plane 段与位图展开规则与 ftl_cmd_configure_descriptors **完全一致**（同一个
+     * ftl_cmd_resolve_cw_bitmap）。本函数与它的唯一差别只是**行地址逐 plane 各自取**（Policy B），
+     * 而不是"两个入口各认一个旋钮"——此前这里读 config.cw、那边读 param.cw_bitmap，
+     * 于是 param.cw_bitmap 这条通道主数据路径根本不看。
+     * v27/v28：位图是字面位图（0 = 空集），本入口语义就是「整段」——自己算好当实参
+     * 交给下面的 ftl_cmd_resolve_cw_bitmap（须在 pba 写好之后算）。 */
     plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
-    mask        = ftl_cmd_resolve_cw_mask(cmd, plane_first, plane_count);
+    mask        = ftl_cmd_resolve_cw_bitmap(fc_command_plane_span_cw_bitmap(cmd), plane_first, plane_count);
 
     for (i = 0U; i < plane_count; i++)
     {
@@ -350,7 +358,9 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
  */
 
 /* 分配命令 + 填配置 + 建链。失败返回 NULL（命令已回收）。
- * v23：不再填 config.cw —— 建链只认 param.cw_mask，0 = 本命令 plane 段内全部 CW。 */
+ * v23：不再填 config.cw —— 建链只认 cw_bitmap。
+ * v27：cw_bitmap 是字面位图（无隐式展开）；v28 起由 addr_to_cmd 算出「本命令 plane
+ *      段内全部 CW」并作实参传给建链入口，不再存进命令结构体。 */
 static fc_command_t *sync_page_prepare(nand_addr_t addr, uint8_t operation, const ftl_page_cfg_t *cfg)
 {
     fc_command_t *cmd = fc_command_alloc();

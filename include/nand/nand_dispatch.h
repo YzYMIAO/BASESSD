@@ -25,9 +25,9 @@
  *
  * ── 唯一索引空间：flat 绝对 CW 号 ──
  * n = plane * CW_NUM + cw（0 .. CW_TOTAL_MAX-1）。
- * cw_mask 的 bit n、cw_buffers[n]、completion.cw_status[n] / ecc_bit_count[n]
- * 全部用这一个编号，且与 FC 侧 fc_command_t.param.cw_mask、CQ 回传的
- * param.cw_mask 同一空间。链序、plane-major 密排槽位等中间坐标已全部取消。
+ * cw_bitmap 的 bit n、cw_buffers[n]、completion.cw_status[n] / ecc_bit_count[n]
+ * 全部用这一个编号（FC 侧的 desc 链序也按同一公式展开）。链序、plane-major
+ * 密排槽位等中间坐标已全部取消。
  * 行地址不参与该空间：它是 per-plane 的，走 plane_paa[plane]。
  */
 typedef struct
@@ -37,9 +37,10 @@ typedef struct
     uint8_t  ch;                       /* Channel. */
     uint8_t  ce;                       /* Chip-enable. */
     uint8_t  lun;                      /* LUN. */
-    uint32_t cw_mask;                  /* 选中的 CW 集合：bit n = plane*CW_NUM + cw。
+    uint32_t cw_bitmap;                /* 选中的 CW 集合：bit n = plane*CW_NUM + cw。
                                         * 命令 plane 集合外的位恒 0；稀疏（可只选 CW1/CW3）。
-                                        * 空掩码（无 desc 的退化命令）合法：无 CW 可访问。 */
+                                        * **字面位图**：0 = 空集（无 desc 的退化命令，合法；
+                                        * 擦除即空集，v28 起不再伪造 CW0 位）。 */
     uint8_t plane_count;               /* Plane count. 实测语义：0 = 单 plane（FC 只对 multi-plane 分支赋值），
                                         * N = multi-plane（= command->config.multi_plane）。
                                         * ⚠ 原注释写 "1 = single" 与实现不符。
@@ -59,7 +60,7 @@ typedef struct
                                         * 一个 CW 都没选中（如只读 plane1）——多 plane op 的 uop 硬编码
                                         * row[0]/row[1]，空 plane 不填会退化成 block0/page0。
                                         * 未使用的格为确定性零值（结构整体 {0} 初始化）。 */
-    uint8_t *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_mask 有效；NULL = 该 CW 无数据。 */
+    uint8_t *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_bitmap 有效；NULL = 该 CW 无数据。 */
 } nand_dispatch_request_t;
 
 typedef struct

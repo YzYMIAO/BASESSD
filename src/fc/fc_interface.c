@@ -399,16 +399,16 @@ uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
 }
 
 /* --------------------------------------------------------------------
- * fc_get_cmd_cw_mask
+ * fc_get_cmd_cw_bitmap
  *   功能：从命令的 desc 链重建 flat CW 掩码（bit n = plane*CW_NUM + cw）。
  *   参数：command —— 命令（desc_id == INVALID → 返回 0）。
  *   返回：掩码；无 desc 时 0。
- *   实现要点：**链是 CW 集合的唯一真值**（v13 起 FC 内不再有掩码输入，
- *         command->param.cw_mask 的读者是 FTL）。凡需要"掩码形状"的判定
- *         （如 RAID 的 plane 对称性）一律先在此按链重建，不再回读输入字段。
+ *   实现要点：**链是 CW 集合的唯一真值**（v13 起 FC 内不再有掩码输入；v28 起该字段
+ *         已从命令结构体删除）。凡需要"掩码形状"的判定（如 RAID 的 plane 对称性）
+ *         一律先在此按链重建。
  *         调用者须在 fc_command_release() 之前调用（desc 释放后失效）。
  * -------------------------------------------------------------------- */
-uint32_t fc_get_cmd_cw_mask(const fc_command_t *command)
+uint32_t fc_get_cmd_cw_bitmap(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
     uint32_t           mask = 0U;

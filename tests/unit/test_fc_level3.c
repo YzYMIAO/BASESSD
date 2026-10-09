@@ -22,8 +22,10 @@
  *   - NAND 硬件（走 fc_submit → fc_service → nand_fc_start/step 异步路径）
  *   - 建链走 FTL 策略层 ftl_cmd_configure_descriptors()——「按掩码建整条链」
  *     自 v13 起属 FTL（FC 只剩单数逐条入口 fc_command_configure_descriptor）
- *     ⚠ v23：cw_mask == 0 表示「本命令 plane 段内的**全部** CW」，config.cw 已不参与
- *       建链。凡"只要 1 条 desc"的用例必须显式给出该 CW 的位（如 1U << cw）。
+ *     ⚠ v27：cw_bitmap 是**字面位图**（置 1 = 要访问该 CW，0 = 空集），v23~v26 的
+ *       「0 = 本命令 plane 段内的全部 CW」重载已取消。凡"只要 1 条 desc"的用例必须
+ *       显式给出该 CW 的位（如 1U << cw）；整段访问用 fc_command_plane_span_cw_bitmap。
+ *       config.cw 自 v23 起不参与建链。
  *   - 释放只需 fc_command_release()（v16 起沿 desc 链把 desc + buffer 一起还池）
  *
  * 用法：
@@ -274,8 +276,8 @@ static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *
     CMD_FIELD_U(config.multi_plane);
     CMD_FIELD_U(config.reserved);
 
-    /* param 是 4 字节联合体：cw_mask 视图覆盖全部 4 字节（parameter0..3 亦然）。 */
-    CMD_FIELD_U(param.cw_mask);
+    /* param 是 4 字节联合体：cw_bitmap 视图覆盖全部 4 字节（parameter0..3 亦然）。 */
+    CMD_FIELD_U(param.cw_bitmap);
 
     /* 兜底：整字比对 config，捕捉上面逐个字段漏掉的位（含未命名填充）。 */
     (void)memcpy(&word_front, &before->config, sizeof(word_front));
@@ -778,7 +780,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
         {
             const uint8_t cw = sample_cws[ci];
 
-            /* 随机列读：只抽 1 个 CW ⇒ cw_mask 必须是**被抽样那个 CW 的位**。
+            /* 随机列读：只抽 1 个 CW ⇒ cw_bitmap 必须是**被抽样那个 CW 的位**。
              * ⚠ 这里曾经写死 0x01U（= 只取 CW0），而期望值按抽样 cw 算——因为
              *   链是按掩码位枚举 cw 的（cmd->pba 的 cw 字段会被枚举值覆盖），
              *   于是 desc 落在 CW0、期望值取 CW1/CW3，两者对不上。

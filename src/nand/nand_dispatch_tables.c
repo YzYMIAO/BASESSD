@@ -55,6 +55,9 @@ extern uint8_t g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_S
  *         遍历掩码置位、按 flat 绝对编号写 cw_status[n]——单 plane 与 multi-plane
  *         在此完全同构（旧实现里 multi-plane 走单独的 plane-major 走位版本，
  *         统一索引空间后两者逐字节等价，已合并）。
+ *         **掩码为空时写 cw_status[0]**（与 completion_single 同口径）——v28 起
+ *         ERASE 不再由 FC 伪造一个 CW0 位，擦除请求的位图是**合法空集**；FC 的非 page
+ *         read 聚合分支是全表 OR，靠这一格读到擦除成败（否则失败被静默吞掉）。
  * -------------------------------------------------------------------- */
 static void completion_all_cws(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
 {
@@ -64,8 +67,17 @@ static void completion_all_cws(nand_dispatch_task_t *task, uint8_t result, const
     uint8_t n;
 
     (void)nand_completion;
-    for (n = nand_dispatch_cw_next(task->cw_mask, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_mask, (uint8_t)(n + 1U)))
+    if (task->cw_bitmap == 0U)
+    {
+        task->completion.cw_status[0] = status;
+        if (result != NAND_RESULT_OK)
+        {
+            task->completion.failed_descriptor_id = 0U;
+        }
+        return;
+    }
+    for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
+         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
     {
         task->completion.cw_status[n] = status;
     }
@@ -120,13 +132,13 @@ static void completion_single(nand_dispatch_task_t *task, uint8_t result, const 
     uint8_t n;
 
     (void)nand_completion;
-    if (task->cw_mask == 0U)
+    if (task->cw_bitmap == 0U)
     {
         task->completion.cw_status[0] = status;
         return;
     }
-    for (n = nand_dispatch_cw_next(task->cw_mask, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_mask, (uint8_t)(n + 1U)))
+    for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
+         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
     {
         task->completion.cw_status[n] = status;
     }
@@ -168,7 +180,7 @@ static void completion_load(nand_dispatch_task_t *task, uint8_t result, const na
  * req_program_page
  *   功能：将 task 的各 CW buffer 拼接到 page_buffer，一次性写入。
  *   参数：task —— 预解析完成的 nand_dispatch_task_t，cw_buffers[n]
- *         已由 nand_dispatch_task_load() 填好；cw_mask 指示要写哪些 CW。
+ *         已由 nand_dispatch_task_load() 填好；cw_bitmap 指示要写哪些 CW。
  *   返回：无。
  *   实现要点：拼接偏移 = cw * CW_SIZE；先 memset 0xFF 使未填充
  *         CW 位保持擦除态；request 行地址取 plane_paa[task->plane]（单 plane 的目标 plane）。
@@ -179,8 +191,8 @@ static void req_program_page(nand_dispatch_task_t *task)
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
 
     memset(page_buffer, 0xFF, PAGE_SIZE);
-    for (n = nand_dispatch_cw_next(task->cw_mask, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_mask, (uint8_t)(n + 1U)))
+    for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
+         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
     {
         /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
         ASSERT(task->cw_buffers[n] != NULL);
@@ -206,7 +218,7 @@ static void req_program_page(nand_dispatch_task_t *task)
 static void req_read_page(nand_dispatch_task_t *task)
 {
     /* 掩码最低位 = 本 plane 第一个要访问的 CW（其缓冲由 FC 数据路径填满，恒非空） */
-    uint8_t *cw_buffer = task->cw_buffers[nand_dispatch_cw_first(task->cw_mask)];
+    uint8_t *cw_buffer = task->cw_buffers[nand_dispatch_cw_first(task->cw_bitmap)];
 
     ASSERT(cw_buffer != NULL);
     task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->plane_paa[task->plane])}, .data = cw_buffer, .data_length = (uint16_t)CW_SIZE};
@@ -226,8 +238,8 @@ static void req_fetch_page(nand_dispatch_task_t *task)
     uint8_t  n;
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
 
-    for (n = nand_dispatch_cw_next(task->cw_mask, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_mask, (uint8_t)(n + 1U)))
+    for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
+         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
     {
         /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
         ASSERT(task->cw_buffers[n] != NULL);
@@ -253,8 +265,8 @@ static void req_cache_read(nand_dispatch_task_t *task)
     uint8_t  n;
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
 
-    for (n = nand_dispatch_cw_next(task->cw_mask, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_mask, (uint8_t)(n + 1U)))
+    for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
+         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
     {
         /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
         ASSERT(task->cw_buffers[n] != NULL);
@@ -308,7 +320,7 @@ static void req_single(nand_dispatch_task_t *task)
     task->request = (nand_fc_request_t){
         .column      = 0U,
         .row         = {paa_to_nand_row(task->plane_paa[task->plane])},
-        .data        = task->cw_buffers[nand_dispatch_cw_first(task->cw_mask)],
+        .data        = task->cw_buffers[nand_dispatch_cw_first(task->cw_bitmap)],
         .data_length = data_length};
 }
 
@@ -325,7 +337,7 @@ static void req_single(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_random_read(nand_dispatch_task_t *task)
 {
-    uint8_t n = nand_dispatch_cw_first(task->cw_mask);
+    uint8_t n = nand_dispatch_cw_first(task->cw_bitmap);
 
     task->request = (nand_fc_request_t){
         .column      = (uint16_t)((n % CW_NUM) * CW_SIZE),
@@ -399,8 +411,8 @@ static void req_multi_plane_program(nand_dispatch_task_t *task)
     uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
 
     memset(page_buffer, 0xFF, PAGE_BUFFER_SIZE);
-    for (n = nand_dispatch_cw_next(task->cw_mask, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_mask, (uint8_t)(n + 1U)))
+    for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
+         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
     {
         /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
         ASSERT(task->cw_buffers[n] != NULL);

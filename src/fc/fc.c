@@ -750,16 +750,18 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     /* ── Step 3: Populate completion entry ──
      * CQ 只带命令级聚合：status + 返回段 param。per-CW ECC 只留在 desc 链，
      * 聚合 ECC 走 fc_get_cmd_ecc_max()（须在 fc_command_release() 前调用）。 */
-    completion.command_id    = nand_completion->command_id;
-    completion.desc_id       = nand_completion->failed_descriptor_id;
-    completion.module        = command->module;
-    completion.status        = 0U;
-    completion.param.cw_mask = 0U; /* 联合体整体清零（4 字节） */
+    completion.command_id = nand_completion->command_id;
+    completion.desc_id    = nand_completion->failed_descriptor_id;
+    completion.module     = command->module;
+    completion.status     = 0U;
+    completion.param      = (fc_param_t){0}; /* 联合体整体清零（4 字节）；仅 GET_FEATURES 会再填 */
 
     if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) &&
         (fc_is_page_read((uint8_t)command->config.operation) != 0U))
     {
-        /* 走 desc 链聚合：status 全链 OR；失败掩码按 **flat 绝对编号** 置位 */
+        /* 走 desc 链聚合：status 全链 OR；首个失败 CW 的 desc_id。
+         * v28：**不再**聚合失败 CW 位图——上层要定位失败 CW，遍历 desc 链 OR 各 desc->status
+         * 即可（desc 链本来就完整留在池里直到 fc_command_release），FC 不必代为派生。 */
         fc_descriptor_id_t did        = (fc_descriptor_id_t)command->desc_id;
         uint8_t            found_fail = 0U;
 
@@ -778,19 +780,12 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
                 completion.desc_id = did;
                 found_fail         = 1U;
             }
-            /* 失败 CW 掩码：bit = plane*CW_NUM + cw（与请求掩码同编号空间，
-             * 可直接做"请求集 & 失败集"求最小重读集） */
-            if ((d->status & (FC_CW_STATUS_UNC | FC_CW_STATUS_CRC_ERROR)) != 0U)
-            {
-                completion.param.cw_mask |=
-                    (uint32_t)(1U << ((uint8_t)paa_to_plane(d->paa) * CW_NUM + (uint8_t)paa_to_cw(d->paa)));
-            }
             did = (fc_descriptor_id_t)d->next_id;
         }
     }
     else
     {
-        /* 非 page read：直接透传 NAND completion 状态（无 per-CW 解码，掩码恒 0）。
+        /* 非 page read：直接透传 NAND completion 状态（无 per-CW 解码）。
          * 未用到的槽位由 nand_dispatch_completion_init() 预置 FC_CW_STATUS_UNUSED(=0)。 */
         uint8_t slot;
 
@@ -882,7 +877,7 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     /* RAID/stripe 的 XOR 按 CW 配对：两个 plane 必须访问**同一组 CW**，
      * flat 掩码（plane 不对称）与 stripe 语义不兼容，直接断言拒绝。
      * 掩码由 **desc 链重建**（v13：链是 CW 集合的唯一真值，不回读 FTL 的输入字段）。 */
-    ASSERT(fc_cw_mask_is_plane_symmetric(fc_get_cmd_cw_mask(data_cmd)));
+    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(data_cmd)));
 
     /* ① 分配 parity command */
     parity_cmd = fc_command_alloc_internal(controller);
@@ -918,7 +913,7 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
      *    parity 命令是**单 plane**（plane = PLANE_NUM-1），CW 集合 = 连续 0..config.cw。
      *    v13 起「按掩码建链」已上移 FTL，FC 内不再有掩码枚举；RAID 是 FC 内部机制，
      *    v17 起建链只剩公共入口 fc_command_configure_descriptor，这里逐条调它挂链
-     *    （与 FTL 侧 ftl_cmd_configure_descriptors 在 mask==0 时的展开结果一致）。
+     *    （parity 恒为连续 0..config.cw，等价于 FTL 侧整段位图 fc_command_plane_span_cw_bitmap）。
      *    ⚠ 该入口固定使用单例 g_fc_controller；RAID 暂未启用（CONFIG_FC_RAID=0），
      *      将来启用多实例前需先把这条路径改回 controller 参数化入口。
      *    行地址：同一 plane 内所有 CW 共用 parity_cmd->pba 的 ch/ce/page/block/lun。 */
@@ -987,7 +982,7 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
         mp_req.plane_paa[p] = pba_to_paa((data_cmd->pba & ~PLANE_CW_MASK) | ((uint32_t)p << PBA_PLANE_SHIFT));
         for (cw = 0U; cw < cw_count; cw++)
         {
-            mp_req.cw_mask |= (uint32_t)(1UL << (p * CW_NUM + cw));
+            mp_req.cw_bitmap |= (uint32_t)(1UL << (p * CW_NUM + cw));
         }
     }
 
@@ -1078,16 +1073,16 @@ static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
 
 /* --------------------------------------------------------------------
  * fc_build_request_data_planes
- *   功能：沿 desc 链把 CW 落位到 request 的 cw_mask / cw_buffers[]（带数据命令专用）。
+ *   功能：沿 desc 链把 CW 落位到 request 的 cw_bitmap / cw_buffers[]（带数据命令专用）。
  *   参数：controller —— FC 控制器；command —— 命令；
  *         request —— 输出（header 已填、全零）。
  *   实现要点：
  *     - 每个 desc 落位到 **flat 绝对 CW 号 n = plane*CW_NUM + cw** 那一格：
- *       置 request->cw_mask 的 bit n、写 request->cw_buffers[n]。落位顺序无关紧要
+ *       置 request->cw_bitmap 的 bit n、写 request->cw_buffers[n]。落位顺序无关紧要
  *       （掩码是集合），故不再有"槽位计数器"，也不再有链序 == plane-major 的不变量。
- *     - **链长度即 CW 数**（不由 config.cw 推导）：popcount(cw_mask)。
+ *     - **链长度即 CW 数**（不由 config.cw 推导）：popcount(cw_bitmap)。
  *     - 行地址不在这里逐 CW 存：它是 per-plane 的，由下面按 plane 集合填 plane_paa[]。
- *       每 plane 的行地址**取自链上该 plane 的第一条 desc**（链即真值，与 cw_mask 同源），
+ *       每 plane 的行地址**取自链上该 plane 的第一条 desc**（链即真值，与 cw_bitmap 同源），
  *       而不是从 command->pba 复制——Policy B 下两个 plane 的 block/page 可以不同。
  *     - 只由 fc_build_dispatch_request 的"带数据命令"分支调用。
  * -------------------------------------------------------------------- */
@@ -1106,7 +1101,7 @@ static void fc_build_request_data_planes(const fc_t *controller, const fc_comman
         ASSERT(plane < PLANE_NUM);
         ASSERT(n < CW_TOTAL_MAX);
         /* 同一个 CW 被两条 desc 覆盖 = desc 链构造错误（掩码是集合，重复置位会丢数据） */
-        ASSERT((request->cw_mask & (uint32_t)(1UL << n)) == 0UL);
+        ASSERT((request->cw_bitmap & (uint32_t)(1UL << n)) == 0UL);
 
         if ((planes_with_desc & (uint8_t)(1U << plane)) == 0U)
         {
@@ -1123,7 +1118,7 @@ static void fc_build_request_data_planes(const fc_t *controller, const fc_comman
             ASSERT(paa_to_lun(descriptor->paa) == paa_to_lun(plane_row[plane]));
         }
 
-        request->cw_mask |= (uint32_t)(1UL << n);
+        request->cw_bitmap |= (uint32_t)(1UL << n);
         if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
         {
             /* Page read/write 需要 CW 基址（ECC 在完整 528B CW 上处理）；
@@ -1221,9 +1216,10 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
  *         command_id —— 命令 ID；request —— 输出请求。
  *   返回：无（构建不可失败：desc 链遍历按池深截断，不产生错误路径）。
  *   实现要点：
- *     - 填 ch/ce/lun/page_type/feature_addr，再按操作类型填 cw_mask / cw_buffers[] / plane_paa[]：
- *         * ERASE_BLOCK：掩码置本 plane 的 CW0 位（只为让 completion 有格可写），无 buffer；
- *         * ERASE_BLOCK_MULTI_PLANE：两 plane 各置 CW0 位，无 buffer；
+ *     - 填 ch/ce/lun/page_type/feature_addr，再按操作类型填 cw_bitmap / cw_buffers[] / plane_paa[]：
+ *         * ERASE_BLOCK：只填 plane_paa[本 plane]，**不置掩码**（v28：擦除无逐 CW 数据，
+ *           请求位图是合法空集，completion 的空集分支会写 cw_status[0]），无 buffer；
+ *         * ERASE_BLOCK_MULTI_PLANE：填 plane_paa[0..1]，同样不置掩码（v28）；
  *         * SET/GET_FEATURES：cw_buffers[plane*CW_NUM] 指向控制器侧暂存 g_fc_return_staging
  *           （plane 恒 0，feature 寄存器是 die 级、无 plane 语义）；
  *         * 其余带数据命令：沿 desc 链落位（见 fc_build_request_data_planes）。
@@ -1251,11 +1247,10 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
     if (command->config.operation == OP_ERASE_BLOCK)
     {
         /* 单 plane 擦除：目标 plane 取自 command->pba（本分支无 desc 可用）。
-         * 掩码只置该 plane 的 CW0 位——擦除无逐 CW 数据，这一位的作用是给
-         * completion_all_cws 一个写 cw_status[] 的格（否则 CQ 聚合读不到失败状态）。 */
+         * v28：**不置 cw_bitmap**——擦除无逐 CW 数据，请求位图是合法空集；
+         * completion_all_cws 对空集写 cw_status[0]，CQ 聚合照样读得到擦除成败。 */
         request->plane                     = (uint8_t)pba_to_plane(command->pba);
         request->plane_paa[request->plane] = pba_to_paa(command->pba);
-        request->cw_mask                   = (uint32_t)(1UL << (request->plane * CW_NUM));
     }
     else if (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)
     {
@@ -1266,8 +1261,9 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
         for (plane = 0U; plane < PLANE_NUM; plane++)
         {
             request->plane_paa[plane] = pba_to_paa((command->pba & ~PLANE_CW_MASK) | ((uint32_t)plane << PBA_PLANE_SHIFT));
-            request->cw_mask |= (uint32_t)(1UL << (plane * CW_NUM));
         }
+        /* v28：不置 cw_bitmap（同单 plane 擦除）——多 plane 擦除的 plane 集合由
+         * plane_count/plane_paa[] 表达，与 CW 位图无关。 */
     }
     else if ((command->config.operation == OP_SET_FEATURES) ||
              (command->config.operation == OP_GET_FEATURES))
@@ -1280,7 +1276,7 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
          * 掩码只置该 plane 的 CW0 位：Feature 恒为 4 字节单次传输，与 config.cw 无关
          * （旧实现用 config.cw+1 个槽位，但只有槽位 0 承载数据，其余是零值摆设）。 */
         request->plane                               = (uint8_t)pba_to_plane(command->pba);
-        request->cw_mask                             = (uint32_t)(1UL << (request->plane * CW_NUM));
+        request->cw_bitmap                           = (uint32_t)(1UL << (request->plane * CW_NUM));
         request->cw_buffers[request->plane * CW_NUM] = g_fc_return_staging[command_id];
         if (command->config.operation == OP_SET_FEATURES)
         {
@@ -1298,11 +1294,11 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
     else
     {
         /* 其余命令（RESET / BLOCK_LOCK / BLOCK_UNLOCK / OTP_DATA_LOCK 等 has_data == 0
-         * 且无 desc 链的）：掩码保持 0 = **合法空集**（无 CW 可访问），不是"全部"。
+         * 且无 desc 链的）：位图保持 0 = **合法空集**（无 CW 可访问）。擦除也走这条口径
+         * （上面两个 ERASE 分支只填 plane_paa[]，不再伪造 CW 位）。
          * ⚠ 别把 READ_STATUS / READ_STATUS_ENHANCED 列进来——两者的 has_data 都是 1
          *   （onfi_1_0.c:820/821），实际走上面的 fc_build_request_data_planes 分支；
-         *   它们只是从不由 FC 提交（引擎 WAIT_READY 内部直接用 70h/78h uop）。
-         * ⚠ ERASE 也不在这里（上面两个 ERASE 分支已各自置位）。 */
+         *   它们只是从不由 FC 提交（引擎 WAIT_READY 内部直接用 70h/78h uop）。 */
     }
 
     /* 读语义改写 + Phase V 拆分（顺序敏感，见 helper 头注释） */
@@ -1360,10 +1356,10 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
     ASSERT(submit_result != NAND_RESULT_NOT_READY);
     if (submit_result != NAND_RESULT_OK)
     {
-        LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_mask=0x%02X plane_count=%u\r\n",
+        LOGW("fc: nand_dispatch_submit failed for op=%u cmd_id=%u cw_bitmap=0x%02X plane_count=%u\r\n",
              (unsigned)command->config.operation,
              (unsigned)command_id,
-             (unsigned)request.cw_mask,
+             (unsigned)request.cw_bitmap,
              (unsigned)request.plane_count);
         fc_poll_fail_command(controller, command_id);
         return FC_STATUS_IO_ERROR;

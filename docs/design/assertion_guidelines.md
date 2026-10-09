@@ -12,7 +12,7 @@
 2. **调用者已保证的前置条件转断言**
    `static` 函数、层内模块头里的接口，以及**跨层入口中调用者必然传有效值的指针/索引参数**，前置条件由调用者保证。守卫一律写成 `ASSERT(条件)`，并**删掉原来的 `return` 与恢复/降级分支**（"跳过坏 ID 继续找"、"回滚分配再返回"、"防御性降级"这类）。
    层内模块头指：`include/nand/nand_engine.h`、`nand_fmc.h`；`include/ftl/*.h`（除 `ftl.h` 外，含 `allocator.h`/`gc.h`/`bbt.h`/`journal.h`/`metadata.h`/`l2p_cache.h`/`checkpoint.h`/`pending.h`/`read_recovery.h`/`wear_leveling.h`/`completion_table.h`/`bst.h`）。
-   **跨层入口一并适用**：`nand_dispatch_submit/submit_chain/poll`、`nand_fmc_init/backend_get`、`nand_fc_execute/start/step/read_id/set_features`、`fc_submit`、`fc_command_configure_descriptor`、`fc_command_release`、`fc_data_path_*`、`fc_scheduler_*`、`fc_command_status_*`、`fc_ldpc_*`、`fc_crc_*`、`fc_random_*`、`fc_raid_*`、`ftl_cmd_write/read_data`（v13 由 FC 上移）、`fc_get_cmd_data_ptr`、`fc_get_cmd_cw_mask`、`fc_get_resource_stats` 的**指针/索引参数**。唯一的调用者都是层内代码（FTL/controller/fc.c），且已持有有效值。
+   **跨层入口一并适用**：`nand_dispatch_submit/submit_chain/poll`、`nand_fmc_init/backend_get`、`nand_fc_execute/start/step/read_id/set_features`、`fc_submit`、`fc_command_configure_descriptor`、`fc_command_release`、`fc_data_path_*`、`fc_scheduler_*`、`fc_command_status_*`、`fc_ldpc_*`、`fc_crc_*`、`fc_random_*`、`fc_raid_*`、`ftl_cmd_write/read_data`（v13 由 FC 上移）、`fc_get_cmd_data_ptr`、`fc_get_cmd_cw_bitmap`、`fc_get_resource_stats` 的**指针/索引参数**。唯一的调用者都是层内代码（FTL/controller/fc.c），且已持有有效值。
 
 3. **资源类结果保留返回码**
    池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、队列满背压（`QUEUE_FULL` / `IO_ERROR`）、`fc_command_alloc()` 返回 `NULL`、`mem_alloc` 返回 `NULL`、NAND 报告的错误——都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。
@@ -185,11 +185,11 @@ v13 把 FC 的"策略层"（按掩码建链 + 数据搬运）上移 FTL，**断�
 
 | 变化 | 说明 |
 |---|---|
-| `fc_command_configure_descriptors` 删除 | 掩码枚举 → `ftl_cmd_configure_descriptors`（`src/ftl/ftl_fc_interface.c`）。它是 FTL 侧入口，按**判据 1**（外部输入：`cmd->param.cw_mask` 由 FTL 上层给）处理，越段返回 `FTL_ERROR` |
+| `fc_command_configure_descriptors` 删除 | 掩码枚举 → `ftl_cmd_configure_descriptors`（`src/ftl/ftl_fc_interface.c`）。它是 FTL 侧入口，按**判据 1**（外部输入：`cmd->param.cw_bitmap` 由 FTL 上层给）处理，越段返回 `FTL_ERROR`（**v23 起改 ASSERT**，见 §十八） |
 | `fc_write_cmd_data` / `fc_read_cmd_data` 删除 | → `ftl_cmd_write_data` / `ftl_cmd_read_data`。原 FC 侧 `desc_id` 的 `ASSERT` 一并搬过去 |
 | `fc_command_attach_cw` 成为 FC 唯一建链入口 | 沿用"顶层生命周期入口"契约：身份/状态返回码保留，`command == NULL` 转 `ASSERT` |
-| 新增 `fc_get_cmd_cw_mask` | 从 desc 链重建掩码（无 desc → 0）。只服务 RAID 断言；`command` 转 `ASSERT` |
-| `fc_command_validate` 删掩码段校验 | 掩码不再是 FC 的输入概念；`param.cw_mask` 在 FC 内既无写入者也无读者 |
+| 新增 `fc_get_cmd_cw_bitmap` | 从 desc 链重建位图（无 desc → 0）。只服务 RAID 断言；`command` 转 `ASSERT`（v13 时名 `fc_get_cmd_cw_mask`） |
+| `fc_command_validate` 删掩码段校验 | 掩码不再是 FC 的输入概念；`param.cw_bitmap` 在 FC 内既无写入者也无读者 |
 | `fc_command_resources_rollback` | 唯一调用者移入 `#if CONFIG_FC_RAID` → 标 `__attribute__((unused))`（与 `fc_command_cw_attached` 同法） |
 
 §八 / §九 表格里出现的 `fc_command_configure_descriptors(_internal)`、`fc_write_cmd_data`/`fc_read_cmd_data`
@@ -210,8 +210,8 @@ v17 把 FC 建链从三层接力收敛为一条：`fc_command_attach_cw` → `_i
 ### §十一附：v13.1 删掉一条同源查重断言（2026-10-07）
 
 按 **§十附判据 1**（同源 → 删）：`fc_build_request_data_planes` 单 plane 分支曾有一条
-`ASSERT(fc_cw_mask_popcount(request->cw_mask) == fc_command_descriptor_count(...))`，
-查的是「没有两个 desc 落在同一个 `n`」。但 `request->cw_mask` 正是从同一条 desc 链按
+`ASSERT(fc_cw_mask_popcount(request->cw_bitmap) == fc_command_descriptor_count(...))`，
+查的是「没有两个 desc 落在同一个 `n`」。但 `request->cw_bitmap` 正是从同一条 desc 链按
 `plane*CW_NUM + cw` OR 出来的——与它要防的对象**同源**（同一条表达式算两遍）；而且它只覆盖
 单 plane 路径，多 plane 根本不查，覆盖面反而不对称。
 
@@ -502,6 +502,10 @@ byte0 外全 0**。于是所有 `random=ON` 用例的加扰都是空转，"encod
 
 ## 十八、v23：FTL 建链掩码越段 → ASSERT（§十三 判据的 FTL 侧漏网，2026-10-08）
 
+> ⚠ **已被 v27 部分取代**：`cw_mask` 改名 `cw_bitmap`、`ftl_cmd_resolve_cw_mask` 改名
+> `ftl_cmd_resolve_cw_bitmap`，且「`0` = 段内全部 CW」这条重载**已取消**（`0` 现在是空集）。
+> 本节保留 v23 当时的记述；当前语义见 **§二十一**。
+
 **背景**：v23 把 `param.cw_mask == 0` 重定义为「本命令 plane 段内的全部 CW」，并让两个建链入口
 （`ftl_cmd_configure_descriptors` / `ftl_cmd_setup_ppa_pair`）共用同一个 static
 `ftl_cmd_resolve_cw_mask()`。这次合并暴露出一处**同判据的漏网**：
@@ -593,7 +597,7 @@ v24 引入 `FC_META_UNKNOWN`（`include/fc/fc_command.h`），用来表达"本�
 
 **推广**：本工程凡引入"无值 / 未知"哨兵，一律取该类型**不可能出现的值**，
 并在定义处写清"为什么不是 0"。同类先例：`FC_DESCRIPTOR_ID_INVALID = 0xFFFF`、
-`FTL_BLOCK_NO_PLANE`（v12）。反例参照 `request->cw_mask` 的 0 = 合法空集——
+`FTL_BLOCK_NO_PLANE`（v12）。反例参照 `request->cw_bitmap` 的 0 = 合法空集——
 那是**合法值**，所以它不能当哨兵，只能靠文档说清（v23 §十八 的辨析）。
 
 ### 验证
@@ -660,3 +664,176 @@ page, cw`）与 `paa_make` / `pba_make` 的形参序（`…, page, plane, block,
 （`make tests` 本轮未跑——测试源由用户同步重构中。）
 
 > 详见 `docs/changelog/nand_config_addr_ctor_v25.md`。
+
+---
+
+## 二十一、v27：取消「0 = 全部」重载后的唯一拦网（2026-10-09）
+
+**新判据**：
+
+> **字段一旦叫 `bitmap`，就必须逐位字面：置 1 的位 = 选中，全 0 = 一个都没选。**
+> 把 `0` 重载成"未指定 → 展开为默认集合"是**借用了另一个字段的语义**（v7~v22 借
+> `config.cw`，v23~v26 借"plane 段"），代价是同一层内出现两个 0 方向相反的口径，
+> 且"生产者忘了填"与"有意选中空集"不可区分。
+
+**改动**：`cw_mask` → `cw_bitmap`（FC 侧 `fc_command_t.param.cw_bitmap`、NAND 侧
+`nand_dispatch_request_t.cw_bitmap`），v23~v26 的「`0` = 本命令 plane 段内全部 CW」取消。
+
+**由此产生的 ASSERT 及它的边界**（本节的核心）：
+
+```c
+/* src/ftl/ftl_fc_interface.c :: ftl_cmd_resolve_cw_bitmap */
+ASSERT(bitmap != 0U);              /* ← 新增：0 = 空集 = 生产者忘了填 */
+ASSERT((bitmap & ~allowed) == 0U); /* ← §十八 既有条目 */
+```
+
+第一条是 §十三 判据 2 的直接应用（"调用者自己铸出的实参"→ `ASSERT`），但**必须记下它的失效面**：
+
+| | debug / tests | release（NDEBUG） |
+|---|---|---|
+| 越段位图（第二条） | 当场 ASSERT | **静默**（段外的位不被枚举） |
+| 全 0 位图（第一条） | 当场 ASSERT | **静默空操作**（建出空链，命令照发） |
+
+即：**忘填位图的代价在 release 下是无声的**——这不同于 §十三~§二十 各条（那些是"配置错误
+不再返回码"，错误本身仍会以某种形式显形）。本轮接受了这个代价，理由与备选方案：
+
+- 备选一：`config.reserved` 里放一个 "bitmap_valid" 标志 ⇒ **引入第二个旋钮**，正是 §十八
+  批判的形态（两个入口各认一个旋钮）。
+- 备选二：保留 `0` = 全部，另加一个"显式空集"的哨兵值 ⇒ 又造了一个不可达状态。
+- 结论：**字面语义 + 显式整段写法**（`fc_command_plane_span_cw_bitmap()`）比"隐式默认值"
+  更少歧义，代价是忘填时 release 无守卫。**整段入口自己填位图**（`addr_to_cmd` /
+`ftl_cmd_setup_ppa` / `ftl_cmd_setup_ppa_pair`）就是为了把"忘填"从调用者手里拿走。
+
+**易错点（写代码时注意）**：`fc_command_plane_span_cw_bitmap(cmd)` 读的是 `cmd->pba` 与
+`config.multi_plane`，**必须在两者都写好之后**调用。段算小了不会触发越段 ASSERT
+（少访问几个 CW 全部落在 `allowed` 内）⇒ 属静默错，无守卫。
+
+**连带消除**：v23~v26 期间 FC 侧 `param.cw_bitmap`（0 = 全部）与 NAND 侧
+`request->cw_bitmap`（0 = 合法空集）**方向相反**，是结构性的、只能靠文档说清。v27 起
+SQ 请求集 / CQ 失败集 / NAND 请求集**三处同口径**（0 = 空集），该条说明作废。
+
+**保留项**：NAND 层 `request->cw_bitmap == 0` 仍是**合法空集**（无 desc 的退化命令，
+`cw_buffers[]` 由位图自身决定填不填）——这条契约**不变**，且现在与 FC 侧同向。
+
+**验证**：`clang-format-15` + `make format-check` passed（101 文件）。**未编译**——本轮处于
+测试代码重构期（Level 2/3 尚引用旧夹具符号），`make tests` / `make debug` / `make release`
+与上板验证均留到调用点迁移完成之后。
+
+> 详见 `docs/changelog/fc_cw_bitmap_literal_v27.md`。
+
+---
+
+## §二十二 CW 集合退出命令结构体（v28）——「派生量不进结构体」的判据应用
+
+**日期**：2026-10-09　**前置**：§十三（建链入口配置错误 → ASSERT）、§十八（FTL 侧漏网）、
+§二十一（字面位图）
+
+### 判据
+
+> **一个字段若「写入后只在同一个函数的同一次调用里被读一次」，它就不该住在共享结构体里。**
+
+`cmd->param.cw_bitmap`（v27 时的形态）正是这种字段：唯一写入者是 FTL 的建链调用点，
+唯一读者是 `ftl_cmd_resolve_cw_bitmap()`——就在建链那一刻把它取出来用掉，之后再无回读。
+它是**建链的输入**，不是命令的属性。把它留在命令里，代价是：
+
+1. **多一处可被误读的真值**（`fc_command_validate` 要不要校验它？RAID 断言该读字段还是读链？——
+   两个问题都因此产生过）。
+2. **命令结构体对"访问哪些 CW"这件事撒了两个谎**：字段值（意图）与 desc 链（事实）可以不一致，
+   而事实由链决定。
+
+⇒ **改作形参** `ftl_cmd_configure_descriptors(cmd, cw_bitmap)`。字段删除。
+
+### 同判据的第二处：CQ 的失败位图
+
+`completion.param.cw_bitmap`（失败 CW 集）是**纯派生量**：它就是「desc 链上
+`status & (UNC|CRC_ERROR)` 的那些 desc 的 `n`」。上层要它，遍历链 OR 一次就有
+（链保留到 `fc_command_release()`）。FC 代为聚合只省了上层一个循环，却多维护了一份
+与链可能不一致的快照 ⇒ **删除聚合，不删 `param` 字段**（GET_FEATURES 的寄存器回读仍需要它）。
+
+### 第三处：擦除的「假 CW 位」（v7~v27）
+
+FC 的 ERASE 分支给请求位图硬置一个 CW0 位，唯一目的是让 `completion_all_cws` 的
+`cw_next(bitmap, 0)` 循环至少跑一次、把 `cw_status[]` 写上——否则 FC 的非 page read 聚合分支
+（全表 OR）读不到擦除成败。这是**为 completion 服务的假数据**：位图本该只表达"访问哪些 CW"。
+
+⇒ 移到 NAND 侧：`completion_all_cws` 补一条 `bitmap == 0 ⇒ 写 cw_status[0]` 分支
+（与 `completion_single` 早已有的一条**同口径**）。**空集语义统一**，FC 不再伪造。
+
+### 新增/扩大的失效面（写代码时注意）
+
+| 面 | 变化 | 守卫 |
+|---|---|---|
+| `ftl_cmd_configure_descriptors` 的位图 | 由命令字段改为**形参** | 两条 ASSERT 照旧（§二十一）：`bitmap != 0`、位图落在段内 |
+| `request->cw_bitmap == 0` 的消费点 | 擦除加入（此前只有 RESET/STATUS/块锁等） | `nand_dispatch_task_load` 对空掩码一格都不搬 `cw_buffers[]`（残留旧值）；**`req_erase` 只用 `plane_paa[]` 不读 `cw_buffers[]`** ⇒ 安全。**新增无数据 op 时须复核这一点** |
+| `completion_all_cws` 空集分支 | 新增 | 与 `completion_single` 同口径，非新语义 |
+
+⚠ **"空掩码 = 无 buffer 可读"这条契约现在依赖消费点真的不读**——`task_load` 的
+`cw_buffers[]` 不清零（slot 复用），掩码外的格是残留指针。这条已写进 `nand_dispatch.c` 的
+`task_load` 注释。
+
+### 验证
+
+`clang-format-15` + `make format-check` passed（101 文件）。**未编译**——测试代码重构期
+（Level 2/3 尚引用旧夹具符号），`make tests` / `make debug` / `make release` 与上板验证
+留到调用点迁移完成之后。
+
+> 详见 `docs/changelog/fc_cw_bitmap_param_v28.md`。
+
+## 二十三、v29：步骤级用例的形态选择——参数化 vs 迭代（2026-10-09）
+
+本轮**不新增生产侧断言**（数据路径步骤函数化是**纯提取**，行为逐字不变），但确立了两条**用例形态**
+判据——它们回答「同一条用例，多个场景该怎么摆」与「边界该怎么钉」。判据编号接 §十七 的判据 5/6。
+
+### 判据 7：不同分支/期望 → 参数化；同一断言、不同输入 → 迭代
+
+> **判据 7：一组场景若**期望不同**（走不同分支、断言不同的值），用**参数化**（munit 的
+> `MunitTest.parameters`，每组一次独立 `setup`/`tear_down`，运行器在测试名下打印 `case=…`）；
+> 若**断言相同、只是输入不同**，用**迭代**（`--iterations N`，同一段代码多抽几次）。
+> 把后者硬做成参数化会造出一堆重复项；把前者做成迭代则会让「某次恰好没抽到该分支」变成**覆盖漏洞**。
+
+正例与反例（`tests/unit/test_fc_level2.c` 的三条步骤级用例）：
+
+| 用例 | 形态 | 理由 |
+|---|---|---|
+| `crc_step_detect` | **参数化** 4 case | 4 个 case 的**期望不同**——`user-1`/`crc-field-1` 必检出，`meta-1`/`parity-1` **必不检出**，是四个分支 |
+| `ecc_step` | **参数化** 11 case | 1..4 bit 错「精确纠正」与 ≥5 bit 的 BOUND 是**两种期望** |
+| `scramble_whiten` | 内部 `kind = 0..2` 循环 | 三种输入（全 0x00 / 全 0xFF / PAA 重复）走**同一组断言**，只是输入不同 |
+
+**只有 `case` 一个维度**，不是 k×region 的笛卡尔积——后者会造出一堆重复/无意义的组合（§2.2 已记）。
+
+### 判据 8：负例钉的是**覆盖边界**，不是「没坏就行」
+
+`crc_step_detect` 的两条负例（`meta-1` / `parity-1` 必须**不**被 CRC 检出）来自
+`fc_data_path_crc_check` 的结构：存的 CRC 读自 `cw[4..8)`，算的 CRC 吃 `cw[8..520)`
+（`FC_CRC_USER_SIZE = 512`）。META 与 parity **结构性**在覆盖之外。
+
+> **判据 8：当被测函数的**覆盖范围**小于它操作的缓冲区时，边界**两侧**都要有用例。
+> 只验「范围内的坏了会被抓到」是不够的——一个「把整块 buffer 都拿去算」的**错误实现**照样能过。
+> 负例（范围外必须**不**被抓到）才把覆盖范围钉死。
+
+同一条也适用于 ECC：`ecc_step` 的 `parity-1` / `parity-4` 场景验的是「校验位坏了会被记入
+`ecc_bits` 但**不**被纠正」（`fc_ldpc_decode` 只翻 `bit_pos < data_length * 8` 的位）——同样是边界两侧。
+
+### 连带：munit 的三处移植分歧（v29 修复，对照上游 nemequ/munit）
+
+| 位置 | 症状 | 修复 |
+|---|---|---|
+| `munit_parameters_get()` 缺失 | 参数化用例只能自己手写 ~8 行扫描 `params[]` 的循环 | 补回（上游逐字同名同实现） |
+| `run_test_wild` 递归传 `p` | **≥2 个参数枚举**时在同一参数上无限递归 | 传 `next` |
+| `munit_test_runner_exec` 的 `runner->iterations` | 套件级 `iterations` 字段失效（自赋值） | `runner->suite->iterations` |
+
+**只有第一条会挡住写参数化用例**——runner 早已把 `params[]` 填好，缺的只是按名取值的函数。
+后两条是潜伏 bug：全仓此前零个用例带参数（`tests/unit` 有 48 处 `(void)params;`、零个消费者），
+所以没人踩到。第三条**当前观测不到差别**——所有套件的 `iterations` 都是 1，而 `iterations == 0` 时
+`do-while` 也正好只跑一遍。
+
+⚠ `--param name value` 的值**不做合法性校验**，原样塞进 `params[]` ⇒ 参数化用例必须自己挡表外的
+名字（`munit_assert_true(case_find(...) != NULL)`），否则打错场景名会**静默跑一个不存在的场景**。
+
+### 验证
+
+`clang-format-15` + `make format-check` passed（101 文件）；`-fsyntax-only`（makefile 全量告警集）
+对 `test_fc_level2.c` 与 `munit.c` 均 0 warning 0 error。**未编译**——`make tests` 因
+`test_fc_level3.c` 仍引用旧夹具符号而编不过（v27/v28/v29 共同的遗留中间态），上板未验。
+
+> 详见 `docs/changelog/fc_data_path_step_primitives_v29.md`。

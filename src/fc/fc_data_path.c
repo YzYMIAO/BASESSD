@@ -73,6 +73,115 @@ static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd, uint8_t *buffe
 #endif /* CONFIG_FC_RAID */
 
 /* ══════════════════════════════════════════════════════════
+ * 单 CW 步骤原语 — 管线与单测共用
+ *
+ * 每个函数只碰一块 528B 的裸 CW buffer（[META:4][CRC:4][USER:512][ECC:8]），
+ * 不认识 command / descriptor / 链。下面的 encode / process_read 是这些步骤的
+ * 编排；单测（Level 2）直接调它们，于是「调了哪些步骤」= 「开了哪些功能」。
+ * ══════════════════════════════════════════════════════════ */
+
+/* LDPC 参数全仓唯一一份——原先在 encode / process_read / stripe_parity /
+ * raid_recover 各写了一遍字面量 {520, 8, 4}。 */
+static const fc_ldpc_config_t FC_DATA_PATH_LDPC_CFG = {
+    .codeword_bytes = FC_BUFFER_DATA_SIZE,
+    .parity_bytes   = 8U,
+    .max_iterations = 4U,
+};
+
+void fc_data_path_meta_write(uint8_t *cw, uint32_t meta)
+{
+    ASSERT(cw != NULL);
+    (void)memcpy(cw, &meta, FC_CRC_META_SIZE);
+}
+
+void fc_data_path_crc_write(uint8_t *cw)
+{
+    uint32_t crc;
+
+    ASSERT(cw != NULL);
+
+    /* 对 [META+CRC+USER] 的 USER 部分（512 字节）计算 CRC，存入 CRC 字段 */
+    crc = fc_crc_compute(cw + FC_CRC_USER_OFFSET);
+    (void)memcpy(cw + FC_CRC_META_SIZE, &crc, FC_CRC_FIELD_SIZE);
+}
+
+void fc_data_path_scramble(uint8_t *cw, uint32_t seed)
+{
+    ASSERT(cw != NULL);
+
+    /* 加扰区 [8, 520)：META/CRC 保持明文（读路径靠它自举种子）。
+     * 加解扰是同一个 XOR 变换（自反），故只有一个函数。 */
+    (void)fc_random_transform(cw + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, seed);
+}
+
+fc_status_t fc_data_path_ecc_encode(uint8_t *cw)
+{
+    fc_status_t result;
+
+    ASSERT(cw != NULL);
+
+    result = fc_ldpc_encode(&FC_DATA_PATH_LDPC_CFG, cw, FC_BUFFER_DATA_SIZE);
+
+    /* 引擎未实现（NOT_SUPPORTED）视为跳过——与管线原行为一致，不当作错误 */
+    return (result == FC_STATUS_NOT_SUPPORTED) ? FC_STATUS_OK : result;
+}
+
+fc_status_t fc_data_path_ecc_decode(uint8_t *cw, uint8_t *ecc_bits)
+{
+    ASSERT(cw != NULL);
+
+    /* 不吞 NOT_SUPPORTED：调用者（Pass 1）要把它当「成功但零纠正」处理 */
+    return fc_ldpc_decode(&FC_DATA_PATH_LDPC_CFG, cw, FC_BUFFER_DATA_SIZE, ecc_bits);
+}
+
+uint8_t fc_data_path_crc_check(const uint8_t *cw)
+{
+    uint32_t stored_crc;
+    uint32_t computed_crc;
+
+    ASSERT(cw != NULL);
+
+    /* 读取之前编码时写入的 CRC 值 [4..8]，重算 USER 数据的 CRC 比对 */
+    (void)memcpy(&stored_crc, cw + FC_CRC_META_SIZE, FC_CRC_FIELD_SIZE);
+    computed_crc = fc_crc_compute(cw + FC_CRC_USER_OFFSET);
+
+    return (computed_crc == stored_crc) ? 1U : 0U;
+}
+
+uint32_t fc_data_path_meta_check(const uint8_t *cw, uint32_t command_meta, nand_paa_t paa)
+{
+    uint32_t read_meta;
+    uint32_t expected_low;
+
+    ASSERT(cw != NULL);
+
+    (void)memcpy(&read_meta, cw, FC_CRC_META_SIZE);
+
+    /* 自洽校验：META 低 3 位必须就是本 CW 的 plane/cw。**先抓这个**——
+     * 种子取自 META（Pass 2），META 损坏 ⇒ 种子也错 ⇒ 解出的 USER 是垃圾，
+     * 而 ECC/CRC 都查不出来（CRC 在加扰区外、是明文，但它保护的是 USER，
+     * 种子错时 CRC 必然不过——不过那已被记成 CRC_ERROR，语义不如这里直接）。
+     * ⚠ 必须用 paa_to_plane/paa_to_cw 而非链走位：cw_bitmap 不满时
+     *   两者不同（v22 已确立）。 */
+    expected_low = ((uint32_t)paa_to_plane(paa) << PBA_PLANE_SHIFT) | (uint32_t)paa_to_cw(paa);
+
+    if ((read_meta & PLANE_CW_MASK) != expected_low)
+    {
+        return FC_CW_STATUS_MATA_ERROR;
+    }
+
+    /* 自洽但与本命令的 LBA 不符 = 读到了别的页（GC 路径 meta 为
+     * FC_META_UNKNOWN，跳过本项，只做上面的自洽校验）。 */
+    if ((command_meta != FC_META_UNKNOWN) &&
+        (read_meta != lba_to_meta(command_meta, (uint8_t)paa_to_plane(paa), (uint8_t)paa_to_cw(paa))))
+    {
+        return FC_CW_STATUS_MATA_ERROR;
+    }
+
+    return 0U;
+}
+
+/* ══════════════════════════════════════════════════════════
  * 编码 — FC 内部调用
  * ══════════════════════════════════════════════════════════ */
 
@@ -111,7 +220,7 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
             {
-                (void)memcpy(buffer, &desc->meta, FC_CRC_META_SIZE);
+                fc_data_path_meta_write(buffer, desc->meta);
             }
             desc_id = (fc_descriptor_id_t)desc->next_id;
         }
@@ -130,9 +239,7 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
             {
-                /* 对 [META+CRC+USER] 的 USER 部分（512 字节）计算 CRC，存入 CRC 字段 */
-                uint32_t crc = fc_crc_compute(buffer + FC_CRC_USER_OFFSET);
-                (void)memcpy(buffer + FC_CRC_META_SIZE, &crc, FC_CRC_FIELD_SIZE);
+                fc_data_path_crc_write(buffer);
             }
             desc_id = (fc_descriptor_id_t)desc->next_id;
         }
@@ -152,11 +259,8 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
             if (buffer != NULL)
             {
                 /* 种子 = 本 CW 的逻辑地址（META 字段），与物理位置解耦：
-                 * GC 搬页后逻辑地址不变 ⇒ 密文不变，无需解扰再重加扰。
-                 * 加扰区 [8, 520)：META/CRC 保持明文（读路径靠它自举种子）。 */
-                (void)fc_random_transform(buffer + FC_CRC_USER_OFFSET,
-                                          FC_BUFFER_USER_SIZE,
-                                          fc_random_seed_from_meta(desc->meta));
+                 * GC 搬页后逻辑地址不变 ⇒ 密文不变，无需解扰再重加扰。 */
+                fc_data_path_scramble(buffer, fc_random_seed_from_meta(desc->meta));
             }
             desc_id = (fc_descriptor_id_t)desc->next_id;
         }
@@ -165,12 +269,6 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
     /* ── Stage 2: ECC 编码 ── */
     if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
     {
-        const fc_ldpc_config_t ldpc_config = {
-            .codeword_bytes = FC_BUFFER_DATA_SIZE,
-            .parity_bytes   = 8U,
-            .max_iterations = 4U,
-        };
-
         for (desc_id = (fc_descriptor_id_t)command->desc_id;
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
@@ -181,8 +279,8 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
             {
-                result = fc_ldpc_encode(&ldpc_config, buffer, FC_BUFFER_DATA_SIZE);
-                if ((result != FC_STATUS_OK) && (result != FC_STATUS_NOT_SUPPORTED))
+                result = fc_data_path_ecc_encode(buffer);
+                if (result != FC_STATUS_OK)
                 {
                     return result;
                 }
@@ -244,8 +342,8 @@ fc_status_t fc_data_path_generate_stripe_parity(
     /* RAID XOR 按 CW 配对：两 plane 必须访问同一组 CW，flat 掩码（不对称）不兼容。
      * 掩码由 **desc 链重建**（v13：链是 CW 集合的唯一真值，不回读 FTL 的输入字段）——
      * parity 链此时已在 fc_stripe_submit ③ 挂好，故重建结果即其真实访问集合。 */
-    ASSERT(fc_cw_mask_is_plane_symmetric(fc_get_cmd_cw_mask(data_cmds[0])));
-    ASSERT(fc_cw_mask_is_plane_symmetric(fc_get_cmd_cw_mask(parity_cmd)));
+    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(data_cmds[0])));
+    ASSERT(fc_cw_bitmap_is_plane_symmetric(fc_get_cmd_cw_bitmap(parity_cmd)));
 
     /* parity 命令的 CW 数量必须与数据命令一致（stripe 命令 plane 对称，
      * 故 config.cw+1 即**每-plane** CW 数） */
@@ -323,12 +421,6 @@ fc_status_t fc_data_path_generate_stripe_parity(
     /* ── ECC 编码 parity 命令的 buffer ── */
     if (parity_cmd->config.ldpc != FC_ECC_MODE_LDPC_RAW)
     {
-        const fc_ldpc_config_t ldpc_config = {
-            .codeword_bytes = FC_BUFFER_DATA_SIZE,
-            .parity_bytes   = 8U,
-            .max_iterations = 4U,
-        };
-
         for (desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
              desc_id != FC_DESCRIPTOR_ID_INVALID;)
         {
@@ -339,8 +431,8 @@ fc_status_t fc_data_path_generate_stripe_parity(
             if (buf != NULL)
             {
                 fc_status_t result;
-                result = fc_ldpc_encode(&ldpc_config, buf, FC_BUFFER_DATA_SIZE);
-                if ((result != FC_STATUS_OK) && (result != FC_STATUS_NOT_SUPPORTED))
+                result = fc_data_path_ecc_encode(buf);
+                if (result != FC_STATUS_OK)
                 {
                     return result;
                 }
@@ -401,12 +493,6 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
         }
     }
 
-    const fc_ldpc_config_t ldpc_config = {
-        .codeword_bytes = FC_BUFFER_DATA_SIZE,
-        .parity_bytes   = 8U,
-        .max_iterations = 4U,
-    };
-
     /* ── Pass 1: ECC 解码所有 CW ── */
     desc_id = (fc_descriptor_id_t)command->desc_id;
 
@@ -423,7 +509,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
         if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
         {
             uint8_t ecc_bits = 0U;
-            result           = fc_ldpc_decode(&ldpc_config, buffer, FC_BUFFER_DATA_SIZE, &ecc_bits);
+            result           = fc_data_path_ecc_decode(buffer, &ecc_bits);
 
             if (result == FC_STATUS_IO_ERROR)
             {
@@ -475,9 +561,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
                  * 当种子——GC / 掉电重建因此不必预先知道 LBA（v24）。 */
                 uint32_t cw_meta;
                 (void)memcpy(&cw_meta, buffer, FC_CRC_META_SIZE);
-                (void)fc_random_transform(buffer + FC_CRC_USER_OFFSET,
-                                          FC_BUFFER_USER_SIZE,
-                                          fc_random_seed_from_meta(cw_meta));
+                fc_data_path_scramble(buffer, fc_random_seed_from_meta(cw_meta));
             }
 
             desc_id = (fc_descriptor_id_t)desc->next_id;
@@ -485,46 +569,33 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
     }
 
     /* ── Pass 3: CRC 校验 ── */
+    if (command->config.crc == FC_CRC_ENABLE)
     {
-        uint32_t stored_crc;
-        uint32_t computed_crc;
-        uint8_t  crc_ok;
+        desc_id = (fc_descriptor_id_t)command->desc_id;
 
-        if (command->config.crc == FC_CRC_ENABLE)
+        for (cw = 0U; cw < total_desc; cw++)
         {
-            desc_id = (fc_descriptor_id_t)command->desc_id;
-
-            for (cw = 0U; cw < total_desc; cw++)
+            desc = fc_descriptor_id_to_descriptor(desc_id);
+            if (desc == NULL)
             {
-                desc = fc_descriptor_id_to_descriptor(desc_id);
-                if (desc == NULL)
-                {
-                    break;
-                }
-
-                buffer = fc_buffer_get_base(desc->buffer_id);
-                if (buffer != NULL)
-                {
-                    /* 读取之前编码时写入的 CRC 值 [4..8] */
-                    (void)memcpy(&stored_crc, buffer + FC_CRC_META_SIZE, FC_CRC_FIELD_SIZE);
-
-                    /* 重算 USER 数据的 CRC */
-                    computed_crc = fc_crc_compute(buffer + FC_CRC_USER_OFFSET);
-                    crc_ok       = (computed_crc == stored_crc) ? 1U : 0U;
-
-                    if (crc_ok == 0U)
-                    {
-                        /*
-                         * CRC 校验失败：标记 desc status。
-                         * 虽然 ECC 纠错成功且解扰完成，但数据内容不正确，
-                         * 可能是 ECC 误纠或数据路径逻辑错误。
-                         */
-                        desc->status |= FC_CW_STATUS_CRC_ERROR;
-                    }
-                }
-
-                desc_id = (fc_descriptor_id_t)desc->next_id;
+                break;
             }
+
+            buffer = fc_buffer_get_base(desc->buffer_id);
+            if (buffer != NULL)
+            {
+                /*
+                 * CRC 校验失败：标记 desc status。
+                 * 虽然 ECC 纠错成功且解扰完成，但数据内容不正确，
+                 * 可能是 ECC 误纠或数据路径逻辑错误。
+                 */
+                if (fc_data_path_crc_check(buffer) == 0U)
+                {
+                    desc->status |= FC_CW_STATUS_CRC_ERROR;
+                }
+            }
+
+            desc_id = (fc_descriptor_id_t)desc->next_id;
         }
     }
 
@@ -545,28 +616,9 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
                 (void)memcpy(&read_meta, buffer, FC_CRC_META_SIZE);
                 desc->meta = read_meta;
 
-                /* 自洽校验：META 低 3 位必须就是本 desc 的 plane/cw。**先抓这个**——
-                 * 种子取自 META（Pass 2），META 损坏 ⇒ 种子也错 ⇒ 解出的 USER 是垃圾，
-                 * 而 ECC/CRC 都查不出来（CRC 在加扰区外、是明文，但它保护的是 USER，
-                 * 种子错时 CRC 必然不过——不过那已被记成 CRC_ERROR，语义不如这里直接）。
-                 * ⚠ 必须用 paa_to_plane/paa_to_cw(desc->paa) 而非链走位：cw_mask 不满时
-                 *   两者不同（v22 已确立）。 */
-                {
-                    const uint32_t expected_low =
-                        ((uint32_t)paa_to_plane(desc->paa) << PBA_PLANE_SHIFT) | (uint32_t)paa_to_cw(desc->paa);
-
-                    if ((read_meta & PLANE_CW_MASK) != expected_low)
-                    {
-                        desc->status |= FC_CW_STATUS_MATA_ERROR;
-                    }
-                    else if ((command->meta != FC_META_UNKNOWN) &&
-                             (read_meta != lba_to_meta(command->meta, (uint8_t)paa_to_plane(desc->paa), (uint8_t)paa_to_cw(desc->paa))))
-                    {
-                        /* 自洽但与本命令的 LBA 不符 = 读到了别的页（GC 路径 meta 为
-                         * FC_META_UNKNOWN，跳过本项，只做上面的自洽校验）。 */
-                        desc->status |= FC_CW_STATUS_MATA_ERROR;
-                    }
-                }
+                /* 两项校验（自洽 + 与本命令 LBA 比对）见 fc_data_path_meta_check；
+                 * 返回 0（通过）时 OR 进去是空操作。 */
+                desc->status |= fc_data_path_meta_check(buffer, command->meta, desc->paa);
             }
             desc_id = (fc_descriptor_id_t)desc->next_id;
         }
@@ -629,14 +681,9 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
     /* ── ECC 重试 ── */
     if (cmd->config.ldpc != FC_ECC_MODE_LDPC_RAW)
     {
-        const fc_ldpc_config_t ldpc_config = {
-            .codeword_bytes = FC_BUFFER_DATA_SIZE,
-            .parity_bytes   = 8U,
-            .max_iterations = 4U,
-        };
         fc_status_t ecc_result;
 
-        ecc_result = fc_ldpc_decode(&ldpc_config, buffers[failed_cw_idx], FC_BUFFER_DATA_SIZE, NULL);
+        ecc_result = fc_data_path_ecc_decode(buffers[failed_cw_idx], NULL);
         if (ecc_result == FC_STATUS_IO_ERROR)
         {
             /* RAID 重建后 ECC 仍失败 → 硬件层面不可恢复 */
@@ -655,9 +702,7 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
                  * 与其它 CW 一样可直接读回（v24）。 */
                 uint32_t cw_meta;
                 (void)memcpy(&cw_meta, buffers[i], FC_CRC_META_SIZE);
-                (void)fc_random_transform(buffers[i] + FC_CRC_USER_OFFSET,
-                                          FC_BUFFER_USER_SIZE,
-                                          fc_random_seed_from_meta(cw_meta));
+                fc_data_path_scramble(buffers[i], fc_random_seed_from_meta(cw_meta));
             }
         }
     }

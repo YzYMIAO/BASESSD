@@ -576,8 +576,14 @@ static int solve_linear_system(struct fc_bch_control *bch, unsigned int *rows, u
             unsigned int x = rows[r] & (tmp | 1U);
             x ^= x >> 1;
             x ^= x >> 2;
-            x   = (x & 0x11111111U) * 0x11111111U;
-            tmp = (tmp << 1) | ((x >> 28) & 1U);
+            x = (x & 0x11111111U) * 0x11111111U;
+            /* 第 r 行的解位落在 bit(m-r)。回代用的 tmp 里，解位一律比它的实际
+             * 位号高 1（故末行 sol = tmp >> 1），这是 upstream 的约定。
+             * ⚠ 写成 `tmp = (tmp << 1) | bit` 会把它放到 bit(m-1-r)——错一位，
+             *   而 tmp|1 又要参与下一次回代 ⇒ 整个解向量错位，不是最后差一位。
+             *   后果：BCH(m=13,t=4) 实际只有 t=2（3 bit 错一律当不可纠、4 bit 错
+             *   约 7% 被"纠"成另一个码字且返回 OK）。见 test_ecc_step_correct。 */
+            tmp |= (unsigned int)((x >> 28) & 1U) << (unsigned int)(m - r);
         }
         sol[p] = tmp >> 1;
     }

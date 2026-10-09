@@ -127,8 +127,8 @@ extern "C"
 
     /* 从 desc 链重建命令的 flat CW 掩码（bit n = plane*CW_NUM + cw；无 desc 时 0）。
      * **链是 CW 集合的唯一真值**——v13 起 FC 内不再有掩码输入，需要"掩码形状"的
-     * 判定（如 RAID 的 plane 对称性）一律走这里按链重建，不回读 command->param.cw_mask。 */
-    uint32_t fc_get_cmd_cw_mask(const fc_command_t *command);
+     * 判定（如 RAID 的 plane 对称性）一律走这里按链重建。 */
+    uint32_t fc_get_cmd_cw_bitmap(const fc_command_t *command);
 
     /* 命令级聚合 ECC：desc 链上所有 CW 的 ecc_bits 最大值（替代 CQ 已删除的
      * ecc_bit0..3）。须在 fc_command_release() 之前调用（desc 释放后失效）。 */

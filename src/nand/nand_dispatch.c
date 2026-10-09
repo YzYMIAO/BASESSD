@@ -114,9 +114,11 @@ static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t resu
  *     - Phase V：绑定 per-LUN backend，并一次性绑定引擎上下文三指针——
  *       backend/request/completion 随 transaction 固定（指向 transaction 自己的
  *       存储，地址不变），nand_engine_start 只收 uops/timing。
- *     - cw_buffers 按 **flat 绝对 CW 号 n** 逐格搬运：只搬 cw_mask 里的位，其余格
- *       保持零值。plane_paa 无条件照拷 PLANE_NUM 格。plane 字段必须无条件赋值——
- *       task slot 会被 FIFO 复用，本函数不做整体 memset。
+ *     - cw_buffers 按 **flat 绝对 CW 号 n** 逐格搬运：只搬 cw_bitmap 里的位。
+ *       ⚠ 掩码外的格**不清零**（本函数不做整体 memset，task slot 会被 FIFO 复用）——
+ *         它们保持上一次占用该 slot 的残留指针。"掩码外无有效 buffer"由**消费点**保证：
+ *         所有取 buffer 的循环都按 cw_bitmap 走，空掩码（擦除）的消费点不读 cw_buffers。
+ *       plane_paa 无条件照拷 PLANE_NUM 格。plane 字段必须无条件赋值。
  * -------------------------------------------------------------------- */
 static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispatch_request_t *request)
 {
@@ -130,7 +132,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->lun                           = request->lun;
     task->operation                     = request->operation;
     task->page_type                     = request->page_type;
-    task->cw_mask                       = request->cw_mask;
+    task->cw_bitmap                     = request->cw_bitmap;
     task->plane_count                   = request->plane_count;
     task->plane                         = request->plane;
     task->started                       = 0U;
@@ -143,10 +145,10 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     /* 当前 CW = 掩码最低位：直接下发的取数 op（OP_RANDOM_DATA_READ）靠它定位自己那一位，
      * 加载型 op 靠它定首次取数的起点。空掩码（退化命令）退化为 0，保证
      * completion_per_cw 的下标不越界。 */
-    task->cw_index                      = nand_dispatch_cw_first(request->cw_mask);
+    task->cw_index                      = nand_dispatch_cw_first(request->cw_bitmap);
     /* 逐格搬掩码内的 CW buffer；不在掩码里的格保持零值。 */
-    for (n = nand_dispatch_cw_next(request->cw_mask, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(request->cw_mask, (uint8_t)(n + 1U)))
+    for (n = nand_dispatch_cw_next(request->cw_bitmap, 0U); n < CW_TOTAL_MAX;
+         n = nand_dispatch_cw_next(request->cw_bitmap, (uint8_t)(n + 1U)))
     {
         task->cw_buffers[n] = request->cw_buffers[n];
     }
@@ -155,10 +157,13 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
         task->plane_paa[plane] = request->plane_paa[plane];
     }
     /* 单 plane 有效行的归属由生产者保证，此处不再复核：掩码位 n 由 desc 的 PAA 本身
-     * 算出（见 fc_build_request_data_planes / ERASE 分支），"在 n 位写了 buffer"与
+     * 算出（见 fc_build_request_data_planes），"在 n 位写了 buffer"与
      * "该 desc 的 plane/cw 位是 n"是同一条表达式。真正可能错位的情形（desc plane 位
      * 与 command->pba 不一致）在造链时就被 fc_command_configure_descriptor 的 plane 段
-     * 校验（越段 → ASSERT）拦下，不会走到这里。 */
+     * 校验（越段 → ASSERT）拦下，不会走到这里。
+     * ⚠ 擦除（v28 起）位图为空 ⇒ 上面这个循环一格都不搬，cw_buffers[] 保持上一次占用
+     * 该 slot 的残留值。擦除路径不读 cw_buffers[]（req_erase 只用 plane_paa），故安全；
+     * 但"空掩码 = 无 buffer 可读"这条契约**依赖消费点真的不读**——新增无数据 op 时注意。 */
 }
 
 /* ======================================================================
@@ -266,7 +271,7 @@ static nand_result_t nand_dispatch_enqueue(const nand_dispatch_request_t *reques
         ASSERT(requests[i].lun < LUN_NUM);
         ASSERT((requests[i].ch == requests[0U].ch) && (requests[i].ce == requests[0U].ce) &&
                (requests[i].lun == requests[0U].lun));
-        ASSERT((requests[i].cw_mask & ~((uint32_t)((1UL << CW_TOTAL_MAX) - 1UL))) == 0UL);
+        ASSERT((requests[i].cw_bitmap & ~((uint32_t)((1UL << CW_TOTAL_MAX) - 1UL))) == 0UL);
     }
 
     queue = &g_nand_dispatch_queues[requests[0U].ch][requests[0U].ce][requests[0U].lun];
@@ -584,7 +589,7 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
         if (nand_dispatch_is_load_op(task->operation) != 0U)
         {
             /* 加载完成：数据已在页缓冲，从掩码最低位起取 */
-            n = nand_dispatch_cw_next(task->cw_mask, 0U);
+            n = nand_dispatch_cw_next(task->cw_bitmap, 0U);
             if (n == CW_TOTAL_MAX)
             {
                 break;
@@ -594,7 +599,7 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
         else if (nand_dispatch_is_fetch_op(task->operation) != 0U)
         {
             /* 取数：推进到下一个置位，链尾则结束 */
-            n = nand_dispatch_cw_next(task->cw_mask, (uint8_t)(task->cw_index + 1U));
+            n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(task->cw_index + 1U));
             if (n == CW_TOTAL_MAX)
             {
                 break;
@@ -603,7 +608,7 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
         }
         else if (((task->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT) ||
                   (task->operation == OP_OTP_DATA_READ)) &&
-                 ((n = nand_dispatch_cw_next(task->cw_mask, (uint8_t)(task->cw_index + 1U))) != CW_TOTAL_MAX))
+                 ((n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(task->cw_index + 1U))) != CW_TOTAL_MAX))
         {
             /* 旧语义：最低位那个 CW 已由加载 op 的 DATA_OUT 取回，其余逐 CW 随机读 */
             task->cw_index = n;
@@ -657,8 +662,8 @@ static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
     if ((task->operation == OP_READ_PAGE_CACHE_SEQ) || (task->operation == OP_READ_PAGE_CACHE_RANDOM) ||
         (task->operation == OP_READ_PAGE_CACHE_LAST) || (task->operation == OP_READ_PAGE_FETCH))
     {
-        for (n = nand_dispatch_cw_next(task->cw_mask, 0U); n < CW_TOTAL_MAX;
-             n = nand_dispatch_cw_next(task->cw_mask, (uint8_t)(n + 1U)))
+        for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
+             n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
         {
             uint8_t cw_num = (uint8_t)(n % CW_NUM);
             memcpy(task->cw_buffers[n], &page_buffer[cw_num * CW_SIZE], CW_SIZE);
@@ -667,8 +672,8 @@ static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
 
     if (task->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
     {
-        for (n = nand_dispatch_cw_next(task->cw_mask, 0U); n < CW_TOTAL_MAX;
-             n = nand_dispatch_cw_next(task->cw_mask, (uint8_t)(n + 1U)))
+        for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
+             n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
         {
             uint8_t  plane  = (uint8_t)(n / CW_NUM);
             uint8_t  cw_num = (uint8_t)(n % CW_NUM);

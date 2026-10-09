@@ -403,6 +403,10 @@ typedef struct Munit_Parameter_s
     const char *value; // 参数值
 } MunitParameter;
 
+/* 取参数值：按 name 在 params 里查，查不到返回 NULL。
+ * 上游 munit 同名同签名（munit.h）；参数化用例用它读自己那组参数。 */
+const char *munit_parameters_get(const MunitParameter params[], const char *key);
+
 // 测试函数类型定义
 typedef MunitResult (*MunitTestFunc)(const MunitParameter params[], void *user_data_or_fixture);
 typedef void *(*MunitTestSetup)(const MunitParameter params[], void *user_data);
@@ -447,6 +451,35 @@ typedef struct Munit_Suite_s
     unsigned int     iterations; // 默认迭代次数
     MunitSuiteOption options;    // 套件选项
 } MunitSuite;
+
+/*** 随机数 ***
+ *
+ * 与运行器共用同一份 PRNG 状态：`munit_test_runner_exec` 在**每个用例开头**
+ * 用 `runner.seed` 重新播种（`munit.c`），迭代循环推进状态 ⇒ 同一个种子下，
+ * 第 N 次迭代与单跑第 N 次的结果一致，用例之间互不干扰。
+ *
+ * 运行器启动时打印 `Running test suite with seed 0x%08x...`；失败后可用
+ * `--seed 0x…` 原样重放（`--iterations N` 则重放整个 N 次序列）。
+ * ⇒ 用例里的随机取值**天然可复现**，不必自己另开一路 PRNG。
+ *
+ * ⚠ `munit_rand_int_range` 是**闭区间**。
+ * ⚠ `munit_rand_at_most` 在 munit.c 里是 static（上游如此），不对外暴露——
+ *   要 [0,max] 闭区间请用 `munit_rand_int_range(0, (int)max)`。 */
+
+/* 重新播种（运行器自己用；用例一般不需要） */
+void munit_rand_seed(uint32_t seed);
+
+/* 均匀 32 位随机数 */
+uint32_t munit_rand_uint32(void);
+
+/* 用随机字节填充 data[0..size) */
+void munit_rand_memory(size_t size, uint8_t data[size]);
+
+/* [min, max] 闭区间内的均匀随机整数（min > max 时自动交换） */
+int munit_rand_int_range(int min, int max);
+
+/* [0.0, 1.0) 内的均匀随机浮点 */
+double munit_rand_double(void);
 
 /* 前向声明：测试运行器上下文，用于裸机直接调用的入口。 */
 typedef struct Munit_Test_Runner_s MunitTestRunner;

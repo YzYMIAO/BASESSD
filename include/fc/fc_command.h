@@ -139,9 +139,8 @@ typedef struct fc_cmd_conf_t
     DWORD ce        : 2;   /* NAND chip-enable number. */
     DWORD lun       : 2;   /* NAND LUN number. */
     DWORD cw        : 2;   /* Command: 每-plane CW 数减一。**v23 起 FTL 建链不再读它**
-                            *          （链长只由 param.cw_mask 决定，0 = 本命令 plane 段内
-                            *          全部 CW）；当前读者只剩 FC 内 RAID stripe 的 cw_count
-                            *          与测试，写者保留；
+                            *          （链长只由建链形参 cw_bitmap 的置位数决定）；当前读者只剩
+                            *          FC 内 RAID stripe 的 cw_count 与测试，写者保留；
                             * Descriptor: 本 desc 在 plane 内是第几个 CW（0..CW_NUM-1）。 */
     DWORD crc         : 1; /* FC_CRC_ENABLE / FC_CRC_DISABLE. */
     DWORD ldpc        : 2; /* fc_ecc_mode_t: BCH/LDPC_HARD/LDPC_SOFT/LDPC_RAW. */
@@ -177,23 +176,20 @@ struct fc_descriptor_t
 };
 
 /*
- * 4 字节命令参数 / 返回段，SQ 与 CQ 共用。按 operation 解释：
- *   parameter0..3 / bytes[4]：SET/GET_FEATURES 的内联数据（SQ）/ 读回的寄存器值（CQ）
- *   cw_mask                ：flat CW 掩码，bit n = plane * CW_NUM + cw
- *                            SQ = 请求集（0 = **本命令 plane 段内的全部 CW**）；
- *                            CQ = 失败集（UNC/CRC_ERROR，0 = 无失败）
- * 小端（Cortex-M7）下 cw_mask 的 bit0 == parameter0 的 bit0。
- * 同一时刻只按一种解释使用——读命令不用 parameter0..3，FEATURES 命令不用 cw_mask。
+ * 4 字节命令参数 / 返回段，SQ 与 CQ 共用。只有一种解释：
+ *   parameter0..3 / bytes[4]：SET_FEATURES 的内联数据（SQ）/ GET_FEATURES 读回的寄存器值（CQ）
+ * 小端（Cortex-M7）下 parameter0 是最低字节。
  *
- * ⚠ SQ 侧 cw_mask（请求集）的**读者是 FTL，不是 FC**（v13）：FC 只认 desc 链，
- *   「访问哪些 CW」由 ftl_cmd_configure_descriptors() / ftl_cmd_setup_ppa_pair()
- *   读本字段后逐条 fc_command_configure_descriptor 展开（v23 起两个入口共用同一套
- *   展开规则，见 ftl_cmd_resolve_cw_mask）。
- *   FC 内没有写入者，也没有读者——fc_command_validate 不再校验它。
+ * 历史（v28 删除）：本联合体曾另有 `uint32_t cw_bitmap` 视图（flat CW 位图，
+ * bit n = plane*CW_NUM + cw）——SQ 侧作「请求集」（FTL 想让本命令访问哪些 CW）、
+ * CQ 侧作「失败集」（UNC / CRC_ERROR 置位）。两者均已删除，因为**它们都是派生量**：
+ *   · 请求集：读者只有 FTL，且它是**建链的输入**⇒ 改由 ftl_cmd_configure_descriptors()
+ *     的形参承载，命令结构体里不再留副本（v28）。
+ *   · 失败集：读者只有上层，而上层本来就能遍历 desc 链 OR 各 desc->status ⇒
+ *     FC 不再代为聚合（v28，见 fc_complete_from_nand）。
  *
- * ⚠ 别与 NAND 层的 request->cw_mask 混淆：两者共用同一套 flat 编号，但**值不相等**。
- *   本字段是**意图**（输入，0 = 未指定 → 展开），FC 按链/按操作重新铸出 request->cw_mask
- *   后交给 NAND，那里的 0 是**合法空集**（无 CW 可访问），不是"全部"。
+ * ⚠ 别与 NAND 层的 request->cw_bitmap 混淆：那是 **NAND 真正访问的集合**，
+ *   由 FC 按 desc 链重新铸出（fc_build_request_data_planes）；本联合体与它无关。
  */
 typedef union
 {
@@ -204,8 +200,7 @@ typedef union
         uint8_t parameter2; /* Command parameter byte 2. */
         uint8_t parameter3; /* Command parameter byte 3. */
     };
-    uint8_t  bytes[4]; /* 内联数据的字节视图。 */
-    uint32_t cw_mask;  /* flat CW 掩码：bit n = plane * CW_NUM + cw（绝对编号，非每-plane 低 4 位）。 */
+    uint8_t bytes[4]; /* 内联数据的字节视图。 */
 } fc_param_t;
 
 /*
@@ -243,8 +238,9 @@ struct fc_command_t
                                * 单 plane / 擦除 / Feature 等无逐 CW 地址的命令取行地址，
                                * 以及 fc_command_plane_span 定 plane 段。 */
     fc_cmd_conf_t config;     /* Operation, NAND location, CW and data-path configuration. */
-    fc_param_t    param;      /* 读：请求掩码 param.cw_mask（v13 起读者是 FTL，FC 不解释）；
-                               * FEATURES：内联数据 param.bytes。 */
+    fc_param_t    param;      /* 仅 FEATURES 命令使用：SET_FEATURES 的内联数据 / GET_FEATURES 的读回值
+                               * （param.bytes）。「本命令访问哪些 CW」**不在命令里**（v28）——
+                               * 它由 FTL 在建链时作形参交给 ftl_cmd_configure_descriptors()。 */
 };
 
 /* CQ 完成项：命令级聚合状态 + 命令级返回段。
@@ -257,7 +253,8 @@ struct fc_command_t
  *     与 desc id 不同空间——只对"哪个 CW 失败"这一含义有效，勿当 desc 下标用。
  *   Page Read 且带 desc 链时，再按链序覆盖为**首个失败 CW 的 descriptor id**，
  *   失败判据是 FC_CW_STATUS_ERROR_MASK 全集（不只 UNC）；全链无失败位则保持初值。
- * ⚠ 目前 FTL 侧尚无读者；失败 CW 更精确的定位应走 param.cw_mask（flat 掩码）。 */
+ * ⚠ 目前 FTL 侧尚无读者；要定位失败 CW，由上层遍历 desc 链 OR 各 desc->status（v28 起
+ *   FC 不再代为聚合失败位图）。 */
 struct fc_command_status_t
 {
     DWORD      command_id : 16; /* Completed Command Pool ID. */
@@ -265,8 +262,8 @@ struct fc_command_status_t
     DWORD      module     : 4;  /* Copy of command->module for direct routing without ID lookup. */
     DWORD      status     : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
     DWORD      reserved   : 20; /* Reserved. */
-    fc_param_t param;           /* 命令级返回：读 = 失败掩码 param.cw_mask（bit n = plane*CW_NUM + cw）；
-                                 * GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0。 */
+    fc_param_t param;           /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0
+                                 * （失败 CW 的定位走 desc 链，v28 起不在此聚合）。 */
 };
 
 /* --------------------------------------------------------------------
@@ -281,7 +278,7 @@ struct fc_command_status_t
  *
  *   放在头文件（唯一一份定义）：这是 fc_command_t 的结构属性——FC 侧用它做
  *   建链入口（fc_interface.c 的 fc_command_configure_descriptor）的越段校验，
- *   FTL 侧用它做掩码展开。两份实现会让改 plane 语义时漏改。
+ *   FTL 侧用它做位图展开。两份实现会让改 plane 语义时漏改。
  *   ⚠ 上界写死 PLANE_NUM：desc PAA 的 plane 位与请求的 plane_paa[PLANE_NUM]
  *     都按 PLANE_NUM 定尺。改 plane 语义时这里与 nand_dispatch_tables.c 的
  *     multi-plane handler 要一起动。
@@ -297,7 +294,26 @@ static inline uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t
     return plane_count;
 }
 
+/* --------------------------------------------------------------------
+ * fc_command_plane_span_cw_bitmap
+ *   功能：本命令 plane 段内**全部** CW 的 flat 位图——「整段访问」的显式写法。
+ *   参数：command —— 命令（须已设 config.multi_plane 与 pba，本函数按它们定段）。
+ *   返回：段内每个 CW 一位置 1（plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF）。
+ *   用途：产出 **ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段
+ *         路径（addr_to_cmd / ftl_cmd_setup_ppa / _pair）一律先调本函数算出位图，再作为
+ *         形参交给建链入口。（v27 前它写进 cmd->param.cw_bitmap；v28 起该字段已删。）
+ *   ⚠ 必须在 pba 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
+ * -------------------------------------------------------------------- */
+static inline uint32_t fc_command_plane_span_cw_bitmap(const fc_command_t *command)
+{
+    uint8_t plane_first;
+    uint8_t plane_last;
+
+    (void)fc_command_plane_span(command, &plane_first, &plane_last);
+    return (uint32_t)((1U << ((uint32_t)(plane_last - plane_first) * CW_NUM)) - 1U) << ((uint32_t)plane_first * CW_NUM);
+}
+
 fc_status_t fc_command_validate(const fc_command_t *command);
-uint8_t     fc_cw_mask_is_plane_symmetric(uint32_t mask);
+uint8_t     fc_cw_bitmap_is_plane_symmetric(uint32_t mask);
 
 #endif /* FC_COMMAND_H */

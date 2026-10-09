@@ -4,60 +4,127 @@
 /*
  * fc_test_common.h — FC-NAND 单元测试共享夹具（Level 2 / Level 3 共用）
  *
- * 本模块把「测试用的读写擦」收敛成一份，形如 src/ftl/ftl_fc_interface.c 的
- * ftl_sync_* 页级原语，但多了两件测试才需要的东西：
+ * 本模块只做两件事：
+ *   ① 把「测试用的读写擦」塌缩成 5 个按语义命名的页 helper；
+ *   ② 给它们一套「数据即地址」的源数据约定，使读错 CW / plane / page / block
+ *      当场显形。
  *
- *   ① 全局源数据 g_source_data：test_setup() 里 malloc 一块
- *      FC_BUFFER_USER_SIZE × CW_NUM × PLANE_NUM 的数组，每个 (plane, cw) 一个
- *      512B 槽，槽内图案按槽号区分；test_tear_down() 释放。
- *      用例把「将要写下去的各个 PAA」对应的槽填进各 CW 的 USER 区，
- *      读回后再按 PAA 逐字节比对 —— 于是「读回了别的 CW / 别的 plane」
- *      一定会被抓到。
- *      （旧夹具是 4 字节周期且不含 CW 维度的图案，而 cw × 512 是 4 的倍数
- *        ⇒ CW 偏移在旧判据里完全不可见。）
+ * ══════════════════════════════════════════════════════════════════════
+ *  一、5 个页 helper
+ * ══════════════════════════════════════════════════════════════════════
  *
- *   ② 命令交回调用者：helper 只 submit + service + poll，**不 release**，
- *      测试函数拿回 cmd 后可继续读 desc 链的 buffer / status。
+ *   fc_command_status_t test_erase_block(block, plane_bitmap, config);
+ *   fc_command_status_t test_prog_page  (block, plane_bitmap, page, config, &data);
+ *   fc_command_status_t test_read_page  (block, plane_bitmap, page, config, &data);
+ *   void                test_prog_block (block, plane_bitmap, config, &data);
+ *   void                test_read_block (block, plane_bitmap, config, &data);
  *
- * ── 建 / 跑两段式 ──
- *   test_page_cmd()  只建链、不提交（地址在此时就定死进 desc->paa）
- *   test_submit_wait() 提交 + 推进 + 取完成（不 release）
- * 为什么必须分开：desc->paa 在建链那一刻由 cmd->pba 铸出
- * （fc_interface.c 的 fc_command_configure_descriptor），之后改 cmd->pba 不会
- * 回写 desc。而 fc_data_path_encode 又必须插在「建链之后、提交之前」——
- * 两段式是唯一能同时满足这两条的形态。
+ * 每个 helper 自己走完整条生命周期，**不把命令交回调用者**：
  *
- * **两段式还带来一条约定**：建链与「设 config」互不依赖——config 只在
- * encode / process_read / dispatch 改写时被读，desc->config 那份快照没有人回读。
- * 所以调用者可以在 test_page_cmd*() 返回之后、test_submit_wait() 之前自由覆盖
- * cmd->config.{crc,random,ldpc,raid}（本模块的默认值是「裸页」：CRC 开、
- * 不加扰、LDPC_RAW、不 RAID）。
+ *   fc_command_alloc → 拷 config → 定 pba → 建链 → 搬数据
+ *     → fc_submit → fc_service 轮询 → 取完成 → fc_command_release
  *
- * ── meta 的语义（v24/v25 契约）──
+ * 返回 fc_command_status_t（= CQ 完成项，聚合 status / param 都在里面）。
+ * 要检查每 CW 细节请在 release 之前由 helper 内部做（见「校验」）。
+ *
+ * 不走页路径的用例（RESET / READ_ID / GET_FEATURES / cache 序列 / 内部搬移 /
+ * RANDOM_DATA_READ，以及 Level 2 的 buffer 级用例）走下面的 `test_cmd_build()`——
+ * 它只建链、不提交，调用者拿到命令后自行 `fc_data_path_*` 或提交。
+ * 5 个页 helper 本身就建立在它之上。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ *  二、config 由调用者给，multi_plane 由 operation 派生
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ * config 类型就是 fc_command_t.config 的类型 fc_cmd_conf_t（fc_command.h），
+ * 不是新造的类型。`test_cmd_build` 做 `cmd->config = *config` 后**只覆盖**几个
+ * 字段：ch/ce/lun（取自 addr）、module（固定 HOST_IO），以及
+ *
+ *     cmd->config.multi_plane = test_is_multi_op(operation) ? PLANE_NUM : 0;
+ *
+ * 即「multi-plane 与否由 operation 本身决定」——调用者只要选对 op 变体
+ * （OP_PROGRAM_PAGE_MULTI_PLANE / OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT /
+ *   OP_ERASE_BLOCK_MULTI_PLANE 为 multi，其余为单 plane），不必自己填 multi_plane。
+ * 页 helper 与 buffer 级用例共用这一处派生（`test_is_multi_op` 只有一份实现）。
+ *
+ * ⚠ enum 反极性：FC_CRC_ENABLE == 0、FC_RANDOM_ENABLE == 0（**0 是「开」**）；
+ *   FC_ECC_MODE_BCH == 0、FC_RAID_MODE_NORMAL == 0、FC_CHAIN_END == 0、
+ *   FC_PAGE_TYPE_LP == 0。fc_command_alloc 把结构体整体清零，所以 config 里
+ *   不填的位域默认就是「CRC 开 / 加扰开 / BCH / 不 RAID / 单 plane / LP」。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ *  三、plane_bitmap 与 cw_bitmap
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ *   multi-plane op：plane_bitmap 必须 == TEST_PLANE_BM_ALL，命令 plane 段 = [0, PLANE_NUM)。
+ *   单 plane op   ：plane_bitmap 必须**只有一位**，命令 plane 段 = [该 plane, +1)。
+ *
+ * 后者这条断言挡的是「multi_plane = 2 配只覆盖 plane 0 的位图」——那种组合会让
+ * fc_build_request_data_planes 给未覆盖的 plane 补一条同行回退地址，写路径于是
+ * **静默**给该 plane 编一页全 0xFF。
+ *
+ * v27 起 cw_bitmap 是**字面位图**（置 1 的位 = 要访问的 CW，0 = 一个都不访问），
+ * v23~v26 的「0 = 本命令 plane 段内全部 CW」重载已取消 ⇒ 整段访问必须**显式**算出来。
+ * v28 起它**不再存进命令结构体**，而是 ftl_cmd_configure_descriptors(cmd, cw_bitmap)
+ * 的**形参**（建链的输入，用完即弃）。helper 按 plane_bitmap 算出「选中 plane 段内的
+ * 全部 CW」（plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF）当实参传进去。好处是它与 helper
+ * 自己推出的 multi_plane / pba.plane 互为**交叉检查**——两者不一致时
+ * ftl_cmd_resolve_cw_bitmap 的越段断言当场炸，而不是静默访问错的 plane。
+ *
+ * 要访问**离散** CW（如 RANDOM_DATA_READ 只读某个 cw）的用例直接调 test_cmd_build，
+ * 自己传 `(uint32_t)1U << cw`。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ *  四、源数据约定：每个 CW 的 USER 区 = 该 CW 自己的 PAA 重复 128 次
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ *   g_source_data —— test_setup() 里 malloc 一块
+ *   FC_BUFFER_USER_SIZE × CW_NUM × PLANE_NUM 的数组，每个 (plane, cw) 一个 512B 槽；
+ *   test_tear_down() 释放。槽内**初始无内容**——内容由写路径填。
+ *
+ *   写（test_prog_page / test_prog_block）：
+ *       逐 desc：槽 ← test_fill_paa(slot, desc->paa)    （128 个 dword 全是本 CW 的 PAA）
+ *                desc 的 USER 区 ← 槽                    （明文）
+ *       提交后 FC 自己跑 fc_data_path_encode（原地把 META/CRC/加扰/ECC 写进 CW），
+ *       所以 **desc buffer 里此后不再是明文**，而 g_source_data 槽保持明文不变
+ *       —— 这就是 `*data` 必须指向槽、不能从 buffer 拷回的原因。
+ *
+ *   读（test_read_page / test_read_block）：
+ *       提交前把 desc 的 USER 区预填 0xCC（残留可见）；
+ *       提交后 FC 自己跑 fc_data_path_process_read（原地解码），desc 的 USER 区
+ *       就是明文；
+ *       逐 desc：槽 ← desc 的 USER 区；`*data` 指回 g_source_data。
+ *
+ *   于是「读回来逐 dword 与期望 PAA 比」就同时验了 block / plane / page / cw 四维。
+ *   （旧夹具是 4 字节周期且不含 CW 维度，而 cw × 512 是 4 的倍数 ⇒ CW 偏移在旧判据里
+ *    完全不可见。）
+ *
+ *   校验入口：
+ *     test_verify_page_paa(data, block, page, plane_bitmap) —— data 是 helper 交回的
+ *        指针；按 plane_bitmap × CW_NUM 逐槽比「该 (block, page, plane, cw) 的 PAA」。
+ *     test_check_paa(slot, paa) —— 单槽版，内联用例用。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ *  五、FC 会自己跑数据路径（重要）
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ *   fc_poll_dispatch_single() 对 page write 调 fc_data_path_encode，
+ *   fc_complete_from_nand()    对 page read  调 fc_data_path_process_read。
+ *   ⇒ **提交出去的命令绝不能再手工调这两个函数**（会重复编码 / 重复解扰）。
+ *     要单测数据路径的错误分支，另建一条命令、**不提交**，自行调用。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ *  六、meta 的语义（v24/v25 契约）
+ * ══════════════════════════════════════════════════════════════════════
+ *
  *   desc->meta = (command->meta & ~PLANE_CW_MASK) | plane_cw，在建链那一刻铸出。
  *   它是本 CW 的**扇区 LBA**，同时是加扰种子（fc_random_seed_from_meta）与
- *   读回校验基准（fc_data_path 的 Pass 4 ②：META 与本命令 LBA 不符 = 读到了别的页）。
- *   - test_page_cmd()：meta = page << CW_WIDTH（页 LBA）——写读同页自然一致，
- *     且**页号进了 META**，于是「读错页」会被 Pass 4 抓到。
- *   - test_page_cmd_ex()：meta **原样使用**，不做任何派生。想跳过 Pass 4 ②
- *     就传 FC_META_UNKNOWN（不知道 LBA 的路径，如 cache 读序列的中间项）。
- *     ⚠ 写路径不能用 FC_META_UNKNOWN——Stage 0 会把它原样写进 NAND，
- *       读回时 Pass 4 ①（自洽：低 3 位 == plane_cw）当场不过。
- *
- * ── FC 会自己跑数据路径（重要）──
- *   fc_poll_dispatch_single() 对 page write 调 fc_data_path_encode，
- *   fc_complete_from_nand() 对 page read 调 fc_data_path_process_read。
- *   所以**走本模块提交的命令不要再手工调这两个函数**（会重复编码/重复解扰）。
- *   要直接单测数据路径的错误分支，请另建命令、不提交，自行调用。
- *
- * ── multi_flag 与 plane_bitmap 的契约 ──
- *   multi_flag == 0：plane_bitmap 必须**只有一位**，即该 plane；命令 plane 段
- *                    = [该 plane, +1)，op 用单 plane 变体。
- *   multi_flag != 0：plane_bitmap 必须**全 plane**（TEST_PLANE_BM_ALL），
- *                    config.multi_plane = PLANE_NUM，op 用 *_MULTI_PLANE 变体。
- *   后者这条断言是为了挡「multi_plane=2 + 只覆盖 plane 1 的掩码」——
- *   那种组合会让 fc_build_request_data_planes 给未覆盖的 plane 补一条同行回退
- *   地址，写路径于是给该 plane 静默编一页全 0xFF。
+ *   读回校验基准（Pass 4 ②：META 与本命令 LBA 不符 = 读到了别的页）。
+ *   页 helper 一律取 `meta = page << CW_WIDTH` —— 写读同页自然一致，且**页号进了
+ *   META**，于是「读错页」会被 Pass 4 抓到。
+ *   内联用例想跳过 Pass 4 ② 可传 FC_META_UNKNOWN（不知道 LBA 的路径）。
+ *   ⚠ 写路径不能用 FC_META_UNKNOWN——Stage 0 会把它原样写进 NAND，
+ *     读回时 Pass 4 ①（自洽：低 3 位 == plane_cw）当场不过。
  */
 
 #include "common/assertion.h"
@@ -81,15 +148,6 @@
 
 #define TEST_SERVICE_LOOP_MAX (5000U)
 
-/* 页级操作种类：helper 按 multi_flag 自动选 multi / normal 变体
- * （对应请求里「multi_flag 使能即使用 multi 类型的 op」）。 */
-typedef enum
-{
-    TEST_OP_PROGRAM = 0U, /* OP_NORMAL_PROGRAM_PAGE / OP_PROGRAM_PAGE_MULTI_PLANE */
-    TEST_OP_READ    = 1U, /* OP_NORMAL_READ_PAGE_WITH_DATA_OUT / OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT */
-    TEST_OP_ERASE   = 2U, /* OP_ERASE_BLOCK / OP_ERASE_BLOCK_MULTI_PLANE */
-} test_page_op_t;
-
 /* ── 全局源数据（setup 分配 / teardown 释放） ── */
 
 extern uint8_t *g_source_data;
@@ -105,48 +163,76 @@ static inline uint8_t *test_source_slot(uint8_t plane, uint8_t cw)
 /* ── setup / teardown（逐用例挂到 MunitTest 的 setup / tear_down 槽） ──
  * 本 fork 的 MunitSuite 没有 setup 字段（tests/framework/munit.h），故只能逐用例挂。 */
 
-void *test_setup(const MunitParameter params[], void *user_data); /* fc_init 一次 + set_armed + malloc + 填图案 */
+void *test_setup(const MunitParameter params[], void *user_data); /* fc_init 一次 + set_armed + malloc */
 void  test_tear_down(void *fixture);                              /* free(g_source_data) */
 
-/* ── 命令构造（建链，不提交） ── */
-
-/* 主入口：按 multi_flag 选 op 变体，meta 由 page 派生（page << CW_WIDTH），
- * cw_mask = 0（= 本命令 plane 段内的全部 CW，v23）。 */
-fc_command_t *test_page_cmd(uint16_t block_index, uint8_t page, uint8_t plane_bitmap, uint8_t multi_flag, test_page_op_t operation);
-
-/* 逃逸口：operation 显式给定（cache / 内部搬移 / 随机列读等无 multi 变体的操作），
- * 且可显式给 cw_mask（非连续掩码、cw_mask == 0 回归）与 meta（**原样使用**）。 */
-fc_command_t *test_page_cmd_ex(uint16_t block_index, uint8_t page, uint8_t plane_bitmap, uint8_t multi_flag, uint8_t operation, uint32_t cw_mask, uint32_t meta);
-
-/* ── 提交 / 一步到位 ── */
-
-/* submit + fc_service 循环 + poll + 校验 command_id。**不 release**。
- * 返回完成项本身（不需要的调用者直接忽略返回值）——聚合 status / param 在它里面。 */
-fc_command_status_t test_submit_wait(fc_command_t *cmd);
-
-/* submit + wait + release（不需要检查 completion 数据时用）。 */
-void test_run_lifecycle(fc_command_t *cmd);
-
-/* 建链 → 0xCC 预填 → 提交（普通读页 op）。返回 cmd（调用者负责 fc_command_release）。
+/* ── 步骤级 CW 暂存区 ──
  *
- * 只提供读侧的「一步到位」，**不提供写侧的**：写路径的 config 形态逐用例不同
- * （加扰 / CRC / 内部搬移 op / cache op），一律要在「建链之后、提交之前」改
- * cmd->config 或换 op，一步到位的封装反而挡路。读侧所有调用者要的形态恰好就是
- * 本模块的默认值（LDPC_RAW + 不加扰 + CRC 开），故封得住。 */
-fc_command_t *test_read_page(uint16_t block_index, uint8_t page, uint8_t plane_bitmap, uint8_t multi_flag);
+ * 一块夹具分配的 CW 缓冲区（FC_BUFFER_POOL_CW_SIZE 字节，528B），setup 分配、
+ * teardown 释放，内容**不预填**（用例自己负责）。
+ *
+ * 步骤级用例（直接调 fc_data_path_* 单 CW 原语，见 include/fc/fc_data_path.h）
+ * 拿它当被测对象——不需要命令 / desc / 链，也不需要任何 config 位：
+ * **调了哪些原语就是开了哪些功能**。
+ *   ⚠ 不能放用例栈上：一个 CW 528B、多块就上千字节，嵌入式用例栈帧吃不消。
+ *
+ * idx < CW_TOTAL_MAX（8）；越界 ASSERT。 */
+uint8_t *test_cw_scratch(uint8_t idx);
 
-/* 建链 → 提交 → release（无数据链）。 */
-void test_erase_block(uint16_t block_index, uint8_t plane_bitmap, uint8_t multi_flag);
+/* ── 只建链、不提交的原语 ──
+ * buffer 级用例（数据路径单测）与不走页 helper 的命令（RESET / READ_ID /
+ * GET_FEATURES / cache 序列 / 内部搬移 / RANDOM_DATA_READ）用它拿一条**已建好
+ * desc 链、尚未提交**的命令，之后自行调 fc_data_path_* 或提交。
+ *   · 地址走 nand_addr_t（block/plane/page + ch/ce/lun）。addr->cw **必须为 0**——
+ *     链上每条 desc 的 CW 由 cw_bitmap 逐位铸出，地址里不带。
+ *   · operation 与全部模式位走 config（const，可传 static 常量）。
+ *   · **multi_plane 由 operation 派生**（三个 MULTI 变体 op ⇒ PLANE_NUM，其余 ⇒ 0），
+ *     config 里填的值被覆盖——与 5 个页 helper 同一条规则，只有这一处实现。
+ *   · meta 原样写进命令（写读同页须一致；mata 用例正需要「同页不同 LBA」）。
+ *   · 无 desc 链的 op（ERASE / RESET / SET·GET_FEATURES）传 cw_bitmap = 0：
+ *     ftl_cmd_needs_desc_chain 短路，desc_id 置 INVALID。
+ *   · cmd->module 固定 HOST_IO、cmd->feature_addr 不设——需要时调用者自行覆盖。
+ *   ⚠ 返回的命令**未提交**。写命令别先手工 fc_data_path_encode 再提交（FC 会再编一次，
+ *     见「五」）。 */
+fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config);
 
-/* ── 数据搬运 / 校验（按 desc->paa 的 plane/cw 索引源数据槽） ── */
+/* ── 5 个页 helper（建立在 test_cmd_build 之上） ──
+ * 内部 alloc / 建链 / 搬数据 / 提交 / 轮询 / 拷回 / 释放，命令不交回调用者。
+ * 返回 CQ 完成项；`data` 为出参（可传 NULL），读回 / 写下的明文在 g_source_data 里。 */
 
-void    test_fill_user_from_source(fc_command_t *cmd);
-void    test_verify_against_source(fc_command_t *cmd);
-void    test_verify_erased(fc_command_t *cmd);      /* 逐 desc 断言 USER 区全 0xFF */
-void    test_memset_read_buffer(fc_command_t *cmd); /* 逐 desc USER 区预填 0xCC */
-uint8_t test_verify_cw_status_all_success(fc_command_t *cmd);
+fc_command_status_t test_erase_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config);
 
-/* ── desc 链小工具 ── */
+fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config, uint8_t **data);
+
+fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config, uint8_t **data);
+
+/* 遍历整块：逐页调对应页 helper（页间自然轮询）。
+ * test_read_block 逐页读并在**页内**校验 PAA 图案（否则 g_source_data 只剩最后一页可比）；
+ * 擦除态（全 0xFF）的整块校验不由它承担——用例自己循环 test_read_page + 逐槽比 0xFFFFFFFF。 */
+void test_prog_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
+void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
+
+/* ── 数据搬运 / 校验 ── */
+
+/* 单槽版：把 512B 槽填成 FC_BUFFER_USER_SIZE/4 个 paa。 */
+void test_fill_paa(uint8_t *slot, nand_paa_t paa);
+/* 单槽版：1 = 槽内 FC_BUFFER_USER_SIZE/4 个 dword 全等 paa。 */
+uint8_t test_check_paa(const uint8_t *slot, nand_paa_t paa);
+
+/* 活链版（内联用例用）：
+ * test_fill_user_paa —— 逐 desc 填槽 + 拷进 desc 的 USER 区（写路径的「搬数据」那一步）；
+ * test_memset_read_buffer —— 逐 desc 把 USER 区预填 0xCC（读路径的残留哨兵）。 */
+void test_fill_user_paa(fc_command_t *cmd);
+void test_memset_read_buffer(fc_command_t *cmd);
+
+/* 按 (block, page, plane_bitmap) 逐槽校验 data 里的 PAA 图案——页 helper 的读回判据。 */
+void test_verify_page_paa(const uint8_t *data, uint16_t block_index, uint16_t page_index, uint8_t plane_bitmap);
+
+/* 活链版：逐 desc 断言 USER 区全 0xFF（擦除态） / 每 CW 的 status 含 FC_CW_STATUS_SUCCESS。 */
+void    test_verify_erased(const fc_command_t *cmd);
+uint8_t test_verify_cw_status_all_success(const fc_command_t *cmd);
+
+/* ── desc 链小工具（内联用例用） ── */
 
 fc_descriptor_t *test_cw_desc(const fc_command_t *cmd, uint8_t idx); /* 链上第 idx 条；越界 NULL */
 uint8_t         *test_cw_user(const fc_command_t *cmd, uint8_t idx); /* 第 idx 条的 USER 区（512B） */

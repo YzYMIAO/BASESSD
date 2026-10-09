@@ -16,6 +16,7 @@
 | **stdout 重定向** | `_write()` → `uart_log_write()` 经 UART 输出，`printf` / `fprintf` 自动走串口 |
 | **argc/argv 输入** | UART CLI 的 `uart_cli_tokenize()` 解析串口输入为 argv，调用 `munit_suite_main` |
 | **无 `abort()`** | `munit_logf_ex` 中移除 `abort()`，断言失败的统一由 `while(1)` 处理 |
+| **参数化（v29 补齐）** | 机器一直齐备（`MunitTest.parameters` + 笛卡尔积展开 + CLI `--param` / `--list-params` / `--single`），但漏移植了取值函数 `munit_parameters_get()`；`run_test_wild` 的递归实参另有误（≥2 个枚举时无限递归）。v29 一并修掉，见 `docs/changelog/fc_data_path_step_primitives_v29.md` §E |
 
 ---
 
@@ -30,10 +31,9 @@ Level 1: Pure Logic ──── 零硬件依赖，纯函数测试
     └── fc_scheduler init（选择逻辑已不在本层，见下）
 
 Level 2: Data Path ──── 需 fc_init() 初始化池，无 NAND 硬件
-    ├── fc_data_path_encode (random/ecc/raid on/off 组合)
-    ├── fc_data_path_process_read (全 OK / 有 UNC)
-    ├── fc_data_path_raid_recover (XOR 重建 + ECC 重试)
-    └── flat CW 掩码建链几何（cw_mask_*，走 FTL 建链入口）
+    ├── 步骤级：单 CW 原语（crc_step / ecc_step / scramble）——不建链、不用 config 位
+    ├── 管线级：fc_data_path_encode / process_read / raid_recover
+    └── flat CW 位图建链几何（cw_bitmap_*，走 FTL 建链入口）
 
 Level 3: FC Lifecycle ── 真实 NAND 硬件执行
     └── 9 个 block 级场景（init / feature / status / 内部搬移 / 擦写读 / cache / 多 plane / 随机列读）
@@ -72,9 +72,20 @@ Level 3: FC Lifecycle ── 真实 NAND 硬件执行
 
 **测试目标**：`fc_data_path.c` 中的编解码管线。需要 `fc_init()` 初始化资源池，但不需要 NAND 硬件——全部在 buffer 层面做 round-trip 验证。
 
-> **建链与释放（v1.8）**：本层建链走 FTL 策略层 `ftl_cmd_configure_descriptors()`（v13 起「按掩码建整条链」属 FTL，FC 只剩单数逐条入口 `fc_command_configure_descriptor`）。释放一律 `fc_command_release()` 收尾——v16 起它沿 desc 链把 desc + buffer 一起还池；**不要再手动 `fc_buffer_release`**，那会二次释放同一 buffer 并使空闲链成环。
+> **建链与释放（v1.8）**：本层建链走 FTL 策略层 `ftl_cmd_configure_descriptors()`（v13 起「按位图建整条链」属 FTL，FC 只剩单数逐条入口 `fc_command_configure_descriptor`）。释放一律 `fc_command_release()` 收尾——v16 起它沿 desc 链把 desc + buffer 一起还池；**不要再手动 `fc_buffer_release`**，那会二次释放同一 buffer 并使空闲链成环。
 
-Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的数据变换逻辑。三个被测函数：
+> **两种形态（v29）**：本层用例分两类——
+> - **步骤级**：直接调 `fc_data_path_*` 的**单 CW 原语**（`fc_data_path.h` 的「单 CW 步骤原语」段），
+>   只碰 `test_cw_scratch()` 给的一块 528B buffer。**不建链、不需要任何 config 位**——
+>   「调了哪些原语」= 「开了哪些功能」。例如「只开 CRC」就是只调 `meta_write` + `crc_write`，
+>   不必把 `config.ldpc` 设成 `LDPC_RAW` 去让 ECC 别把注入的 bit 纠回去。
+> - **管线级**：建链后调 `fc_data_path_encode` / `process_read` / `raid_recover`，
+>   用 `cmd->config` 的位组合表达「开哪些步骤」，验整条编排（gate 分支 / 链遍历 / `desc->status` 写回）。
+>
+> 判据：**验算法本身 → 步骤级；验编排 → 管线级**。前者不依赖 fixture 的建链正确性，是后者的地基。
+> ⚠ 步骤级原语**绝不可**对已提交的命令手工调用——FC 自己会跑整条管线（见 §6.2 与 `fc_test_common.h`「五」）。
+
+Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的数据变换逻辑。管线级三个被测函数：
 
 | 函数 | 功能 | 读取的 config 字段 |
 |---|---|---|
@@ -93,12 +104,12 @@ Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的�
 | `random` | `FC_RANDOM_ENABLE(0)` / `FC_RANDOM_DISABLE(1)` | 是否加扰/解扰 |
 | `crc` | `FC_CRC_ENABLE(0)` / `FC_CRC_DISABLE(1)` | encode 是否写 CRC 字段、读侧 Pass 3 是否校验 |
 | `ldpc` | `FC_ECC_MODE_BCH(0)` / `FC_ECC_MODE_LDPC_RAW(3)` | LDPC_RAW 时两端都跳过 ECC |
-| `multi_plane` + `cw_mask` | `0` + `0`（单 plane 连续）/ `2` + 非 0 掩码 | desc 链的 CW 集合与几何 |
+| `multi_plane` + `cw_bitmap` | `0` + 单 plane 段位图 / `2` + 双 plane 段位图 | desc 链的 CW 集合与几何（v27：位图是**字面**的，0 = 空集，整段须显式给；v28：位图作 `ftl_cmd_configure_descriptors()` 的**实参**，不再是命令字段） |
 | `cw` | 0 (1CW) / 3 (4CW) | desc 链长度，多 CW 边界 |
 | ECC 结果 | 全部成功 / 有 UNC | process_read 是否走解扰 |
 | 校验结果 | 全通过 / META 不符 / CRC 不符 | Pass 3 / Pass 4 是否置位 |
 
-> **⚠ 命令 fixture 必须给真实页地址**（v1.11）：`alloc_cmd_full()` 统一设 `paa = paa_make(32, 0, 50, 0, 0)`。早期 fixture 不设 `paa`（保持 `{0}` 清零），单 plane 建链分支（`fc_interface.c:189`）会把 `desc->paa` 落成 `cw` 本身，BASIC 种子随之退化成 `seed == cw` → `{1,1,2,3}`，LFSR 低 16 位取这几个小值后 **keystream 除 byte0 外全 0**——加扰形同虚设，`random=ON` 的用例全部是空转。故 random=ON 的用例另加一条「encode 后 USER 区 ≠ 明文」断言自证加扰真的发生了。
+> **⚠ 命令 fixture 必须给真实页地址**（v1.11）：`alloc_cmd_full()` 统一设一个真实 `paa`/`pba`（v25 起形如 `paa_from_addr(&(nand_addr_t){.block = 50})`；v25 前是 `paa_make(32, 0, 50, 0, 0)`）。早期 fixture 不设地址（保持 `{0}` 清零），单 plane 建链分支会把 `desc->paa` 落成 `cw` 本身，BASIC 种子随之退化成 `seed == cw` → `{1,1,2,3}`，LFSR 低 16 位取这几个小值后 **keystream 除 byte0 外全 0**——加扰形同虚设，`random=ON` 的用例全部是空转。故 random=ON 的用例另加一条「encode 后 USER 区 ≠ 明文」断言自证加扰真的发生了。
 
 ### 测试用例
 
@@ -127,17 +138,58 @@ _(以上两条仅在 CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
 
 > **RAID 组只剩 2 条（v1.11）**：删掉了 `encode_raid_on` 与 `raid_recover_first` / `_mid` / `_last`。原因是它们**构造不出被测函数的真实前置条件**——`fc_data_path_raid_recover` 只收集单条命令的 desc 链（`fc_data_path.c:591`），而 parity CW 在另一条命令的链上（`fc.c:888/924-933`），跨命令适配是 `include/fc/fc_raid_engine.h:22` 的未办事项。那 4 条只能靠「无 parity + pattern 异或恰为 0（`0x10^0x11^0x12^0x13`）+ keystream 退化」三重巧合通过；修好 fixture 后 random=ON 的变体必然挂。保留的 `raid_recover_no_random` 走 random=OFF（无加扰，退化 stripe 成立），真 stripe 覆盖由 `generate_stripe_parity` 承担。判据见 `assertion_guidelines.md` §十七·判据 6。
 
-### flat CW 掩码建链（v7，v1.8 改为走 FTL 建链入口）
+### 步骤级用例（v29）
 
-| 测试函数 | 掩码 | 验证策略 |
+只调 `fc_data_path.h` 的单 CW 原语，**不建链**、不占 desc/buffer 池，只借 `test_cw_scratch(idx)` 的
+528B 暂存区。三条用例全部 `MUNIT_TEST_OPTION_NONE` ⇒ 可用 `--iterations N` 多抽注入位置。
+
+| 测试函数 | 形态 | 覆盖 |
 |---|---|---|
-| `cw_mask_flat_mixed` | 0x29 | plane0 取 {CW0,CW3} + plane1 取 {CW1} → 3 条 desc（plane-major） |
-| `cw_mask_plane1_only` | 0xF0 | 只选 plane1 的 CW0..3（flat 绝对编号，非 0x0F 段） |
-| `cw_mask_zero_multi_plane` | 0（未指定） | multi_plane=2 + cw=3 → 逐 plane 平移展开出 8 条 desc（钉住不变量） |
+| `crc_step_detect` | **参数化** 4 case（`--param case <名>`） | CRC 的**覆盖边界** |
+| `ecc_step` | **参数化** 11 case | BCH(m=13, t=4) 的纠错能力 |
+| `scramble_whiten` | 单函数内 `kind = 0..2` 循环 | 加扰白化度 + 自反性 |
 
-三条用例验证的是 **desc 链几何**（plane / CW 展开与链序），不是 NAND 行为，故留在 Level 2，只调 `ftl_cmd_configure_descriptors()` 后直接走链核对。
+`crc_step_detect` 的 4 个 case——依据 `fc_data_path_crc_check`：存的 CRC 读自 `cw[4..8)`，
+算的 CRC 吃 `cw[8..520)`（`FC_CRC_USER_SIZE = 512`）。META 与 parity 两头**结构性**在覆盖之外：
 
-**共计 15 个测试函数（默认构建）。（CONFIG_FC_RAID=1 时额外含 `raid_recover_no_random` + `generate_stripe_parity`，共 17 个）**
+| case | 注入区间（CW 内偏移） | 期望 `crc_check` | 说明 |
+|---|---|---|---|
+| `user-1` | `[8, 520)` | `0` 必检出 | 被校验的数据 |
+| `crc-field-1` | `[4, 8)` | `0` 必检出 | 坏的是**存的值**，不是数据 |
+| `meta-1` | `[0, 4)` | `1` **必不检出** | 负例 |
+| `parity-1` | `[520, 528)` | `1` **必不检出** | 负例 |
+
+> **两条负例是重点**：没有它们，一个「把整块 528B 都拿去算 CRC」的错误实现照样能过。
+> 区域内偏移由框架 PRNG 取（运行器打印 seed，失败可 `--seed` 原样重放）。
+
+`ecc_step` 的 11 个 case：1..4 bit 错必**精确纠正**（钉在 t=4 上）；`beyond-5` 单列 BOUND——
+BCH 允许误纠（实测约 0.28% 返回 OK 但数据是错的），故**不钉结果**，只钉两条恒成立的不变量
+（失败必须原子 / 纠正数不得超过 t）。`scramble_whiten` 的三种输入（全 0x00 / 全 0xFF / PAA 重复）
+走**同一组断言**，属迭代而非参数化。
+
+> **参数化 vs 迭代的判据**（见 `assertion_guidelines.md` §二十二）：
+> **不同分支 / 不同期望 → 参数化**（每个 case 一次独立 setup/tear_down，运行器在测试名下打印 `case=…`）；
+> **同一断言、不同输入 → 迭代**（`--iterations N`，同一段代码多抽几次）。
+
+### flat CW 位图建链（v7，v1.8 改为走 FTL 建链入口）
+
+| 测试函数 | 位图 | 验证策略 |
+|---|---|---|
+| `cw_bitmap_flat_mixed` | 0x29 | plane0 取 {CW0,CW3} + plane1 取 {CW1} → 3 条 desc（plane-major） |
+| `cw_bitmap_plane1_only` | 0xF0 | 只选 plane1 的 CW0..3（flat 绝对编号，非 0x0F 段） |
+| `cw_bitmap_span_multi_plane` | `0xFF`（整段） | multi_plane=2 → 8 条 desc（钉住「段内全部」的显式写法；v26 前此用例传 `0` 借"0 = 未指定"重载，v27 取消该重载后改为显式 `0xFF`） |
+
+> ⚠ **v27 起位图是字面位图**（置 1 = 访问该 CW，**0 = 空集**）——上面三行的第三行即由这一条驱动改名
+> （`cw_mask_zero_multi_plane` → `cw_bitmap_span_multi_plane`）。夹具侧对应
+> `test_plane_cw_bitmap(plane_bitmap)`（原 `test_plane_cw_mask`）。
+> **v28 起位图作 `ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 的实参**——夹具里
+> `cmd->param.cw_bitmap = test_plane_cw_bitmap(...)` 改成把值直接传给建链入口。
+> **Level 2 的迁移已完成**（v26 起建链走 `test_cmd_build()`）；**Level 3 待迁**（仍在引用已删的
+> `test_page_cmd_ex` 等旧符号，见 `docs/changelog/fc_data_path_step_primitives_v29.md`「未跟进」）。
+
+三条用例验证的是 **desc 链几何**（plane / CW 展开与链序），不是 NAND 行为，故留在 Level 2，只调 `ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 后直接走链核对。
+
+**共计 18 个测试函数（默认构建）。（CONFIG_FC_RAID=1 时额外含 `raid_recover_no_random` + `generate_stripe_parity`，共 20 个）**
 
 ### 2.3 Level 3 — FC 全链路测试
 
@@ -274,7 +326,7 @@ static MunitSuite g_fc_nand_suite = {
 > 描述性命名的风格。
 
 ```c
-/* test_fc_level2.c — data_path 子套件，共 15 个测试（CONFIG_FC_RAID=1 时 17 个） */
+/* test_fc_level2.c — data_path 子套件，共 18 个测试（CONFIG_FC_RAID=1 时 20 个） */
 extern MunitTest g_fc_data_path_tests[];
 
 /* test_fc_level3.c — lifecycle 子套件，9 个 block 级场景用例 */
@@ -374,8 +426,10 @@ tests/
 ├── unit/
 │   ├── ut_main.c          # 裸机统一入口
 │   ├── ut_main.h          # 入口声明（供 usart.c 包含）
+│   ├── fc_test_common.c   # Level 2/3 共享夹具（setup/teardown、test_cmd_build、源数据表、页 helper）
+│   ├── fc_test_common.h   # 夹具对外声明（含「调了哪些原语 = 开了哪些功能」的步骤级契约）
 │   ├── test_fc_level1.c   # Level 1: 11 个测试（logic 单套件）
-│   ├── test_fc_level2.c   # Level 2: 15 个测试（data_path encode/process_read/raid_recover + cw_mask）
+│   ├── test_fc_level2.c   # Level 2: 18 个测试（步骤级 + encode/process_read/raid_recover + cw_bitmap）
 │   └── test_fc_level3.c   # Level 3: 9 个 block 级场景（真实 NAND）
 ├── integration/
 │   ├── test_fc_nand.c     # 旧硬件集成测试（**未编入 `tests` 目标**；仍引用已删的复数建链入口，待废弃）
@@ -411,6 +465,34 @@ static MunitResult test_fc_queue_push_pop(const MunitParameter params[], void *d
 - 测试函数使用 `static` 链接属性
 - 参数/返回值使用 `void`，除非需要 fixture
 - 成功返回 `MUNIT_OK`，失败通过断言宏或显式返回 `MUNIT_FAIL`
+
+### 5.4 参数化测试
+
+`MunitTest.parameters` 挂 `MunitParameterEnum[]`（`{name, values}` 的 NULL 结尾数组，`values` 也是
+NULL 结尾），runner 对每个参数**做笛卡尔积展开**，每组一次独立的 `setup` / `tear_down`。
+用例体内用 `munit_parameters_get(params, "name")` 取本组的值（查不到返回 NULL）。
+
+```c
+static const char *l2_crc_case_names[] = {"user-1", "crc-field-1", "meta-1", "parity-1", NULL};
+
+/* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 枚举数组不能声明成 const */
+static MunitParameterEnum l2_crc_params[] = {{"case", l2_crc_case_names}, {NULL, NULL}};
+
+static MunitResult test_crc_step_detect(const MunitParameter params[], void *data)
+{
+    const l2_crc_case_t *c = l2_crc_case_find(munit_parameters_get(params, "case"));
+
+    munit_assert_true(c != NULL); /* --param 传了表外的名字 ⇒ 显式失败 */
+    ...
+}
+```
+
+- 值**只能是字符串**（`MunitParameterEnum.values` 是 `const char **`）——名字类参数直接 `strcmp`；
+  数值参数得自己 `strtoul`。
+- **`--param` 的值不做合法性校验**，原样塞进 `params[]` ⇒ 用例必须自己挡表外的名字（见上面的断言）。
+- 板子上钉单个场景：`test --param case meta-1`；列全部参数：`--list-params`。
+- **什么时候参数化**：不同**分支 / 期望**才参数化；同一断言、不同输入用迭代（`--iterations N`）。
+  判据见 `assertion_guidelines.md` §二十二。
 
 ---
 
@@ -448,6 +530,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-09 | v1.12 | **Level 2 步骤级用例 + 参数化 + munit 移植修复的文档同步**（见 `docs/changelog/fc_data_path_step_primitives_v29.md`）。① §2.2 补「两种形态」（**步骤级** 调单 CW 原语 / **管线级** 建链走 config 位）与**步骤级用例**小节：`crc_step_detect`（参数化 4 case，含 `meta-1` / `parity-1` 两条**负例**——钉 CRC 只覆盖 USER `[8,520)`，META 与 parity 在覆盖外）、`ecc_step`（参数化 11 case）、`scramble_whiten`；② Level 2 计数 15→**18**（RAID=1 时 17→**20**）；③ §1 / §5.4 补参数化机制：`munit_parameters_get()` 是 v29 补回的上游漏移植函数（另修 `run_test_wild` 递归实参、`runner->suite->iterations`），CLI `--param name value` 一直是通的；④ §5.1 文件树补 `fc_test_common.{c,h}`；⑤ v27/v28 的 `cw_mask`→`cw_bitmap` 改名与「位图作建链实参」已同步（§2.2 参数组合表、建链几何表）。⚠ **Level 3 仍在旧符号上**（`test_page_cmd_ex` 等），`make tests` 编不过——v27/v28/v29 三版共同的遗留中间态 |
 | 2026-10-08 | v1.11 | **Level 2 重构：fixture 修正 + RAID 退化用例清理 + 覆盖补齐，10→15（RAID=1 时 17）**（见 `docs/changelog/fc_ut_level2_rework_v22.md`）。① **fixture 修正**：新增 `alloc_cmd_full()` 统一建链并设 `paa = paa_make(32, 0, 50, 0, 0)`——原 fixture 不设 `paa`，BASIC 种子退化成 `{1,1,2,3}`、keystream 除 byte0 外全 0，所有 `random=ON` 用例的加扰是空转；random=ON 用例补「encode 后 USER 区 ≠ 明文」自证断言。② **RAID 组删 4 留 2**：删 `encode_raid_on` / `raid_recover_first` / `_mid` / `_last`（构造不出真 stripe，只靠三重巧合通过；判据见 `assertion_guidelines.md` §十七·判据 6），保留 `raid_recover_no_random` 与真 stripe 的 `generate_stripe_parity`。③ **覆盖补齐 5 条**：`encode_crc_disabled`、`process_read_masked_chain`（专钉 Pass 4 的 `paa_to_cw`）、`process_read_mata_error`、`process_read_crc_error`、`process_read_ldpc_raw`。④ **断言加强**：`process_read_ok_*` / `_single_cw` 补 `desc->status == READY`（process_read 标脏后仍返回 OK）。⑤ **去冗余**：删 `fill_pattern` 包装与 `print_resource_stats` 注释块，`get_cw_buffer` / `get_cw_base` / `get_cw_count` 收敛到 `cw_desc()` 之上。⚠ 本 fork 的 `MunitSuite` 结构体没有 `setup` 字段，套件级 setup 不存在，故仍逐用例挂 `setup_level2`（靠 `g_level2_inited` 幂等）。`make -k tests` 0 error/0 warning、链接 197344 B；RAID=1 档 0/0、204328 B；format-check 过；上板未验 |
 | 2026-10-08 | v1.10 | **Level 1 套件合并：`command` / `queue` / `scheduler` 三子套件 → 单个 `logic`**（11 条用例不变）。理由：Level 2/3 已是「一个文件一个套件」，Level 1 是唯一例外；合并后 `command`(2) / `scheduler`(1) 的过滤粒度已细到等于「单跑一条用例」，而本层全部用例是纯 RAM 微秒级，按模块过滤无收益；真正需要过滤的边界是**依赖面**，由根套件 Level 1/2/3 三层保住。`test_scheduler_init` 用例名 `init` → `scheduler_init`（合并后去歧义）。改动：`tests/unit/test_fc_level1.c`（3 数组→1）、`tests/unit/ut_main.c`（3 extern + 3 表项 → 1 + 1）、本文档 §2.1/§3/§5.1/§4.2、`munit_adapter.md`、`wsl_debug_environment.md` 的 CLI 示例路径 `/fc-nand/command/...` → `/fc-nand/logic/...`。单条用例仍可按全路径跑（`/fc-nand/logic/push_pop`） |
 | 2026-10-08 | v1.9 | **Level 1 清理：删 5 条用例 + 对应死代码，16→11**。判据统一为「被测代码还有没有生产调用者」：`fc_command_status_init` / `fc_command_status_set_cw` 自 2026-09-20 起零调用者（CQ 完成项由 `fc_complete_from_nand()` 内联组装）→ **函数 + 头声明 + 3 条用例一并删**；`fc_submission_queue_pop_n` 零调用者（调度器走逐条 `pop`）→ 函数 + 声明 + 用例删；`test_queue_empty_full` 断言集是 `peek_empty` ∪ `overflow` 子集 → 删。套件至此零 `setup`（`setup_fc_suite` 随 `status_init` 两条用例删除），文件不再 include `fc/fc.h`。同时给保留的 11 条逐个补「功能 / 测什么 / 设计思路」注释。四档 0 error 0 warning、`make tests` 链接通过（193956 B）、format-check 过；上板未验 |

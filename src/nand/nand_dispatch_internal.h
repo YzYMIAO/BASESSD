@@ -25,11 +25,11 @@
 
 /* mask 中 ≥ n 的第一个置位的绝对编号；没有则返回 CW_TOTAL_MAX（哨兵，越界即"到头"）。
  * 用法：`for (k = nand_dispatch_cw_next(mask, 0U); k < CW_TOTAL_MAX; k = nand_dispatch_cw_next(mask, k + 1U))`。 */
-static inline uint8_t nand_dispatch_cw_next(uint32_t cw_mask, uint8_t n)
+static inline uint8_t nand_dispatch_cw_next(uint32_t cw_bitmap, uint8_t n)
 {
     while (n < CW_TOTAL_MAX)
     {
-        if ((cw_mask & (1UL << n)) != 0UL)
+        if ((cw_bitmap & (1UL << n)) != 0UL)
         {
             return n;
         }
@@ -40,9 +40,9 @@ static inline uint8_t nand_dispatch_cw_next(uint32_t cw_mask, uint8_t n)
 
 /* mask 最低位的绝对编号；mask 为空（退化命令）时返回 0 —— 只用于"取一个不越界的下标"，
  * 需要区分"空掩码"时用 nand_dispatch_cw_next() 的哨兵。 */
-static inline uint8_t nand_dispatch_cw_first(uint32_t cw_mask)
+static inline uint8_t nand_dispatch_cw_first(uint32_t cw_bitmap)
 {
-    uint8_t n = nand_dispatch_cw_next(cw_mask, 0U);
+    uint8_t n = nand_dispatch_cw_next(cw_bitmap, 0U);
 
     return (n < CW_TOTAL_MAX) ? n : 0U;
 }
@@ -59,10 +59,10 @@ typedef struct
     uint8_t  lun;           /* LUN — needed for routing. */
     uint8_t  page_type : 2; /* Copy from dispatch request for LDPC engine. */
     uint8_t  reserved  : 6;
-    uint32_t cw_mask;     /* 选中的 CW 集合：bit n = plane*CW_NUM + cw（flat 绝对编号）。
-                           * 与 request->cw_mask 同一值；是 cw_buffers / cw_index 的唯一依据
+    uint32_t cw_bitmap;   /* 选中的 CW 集合：bit n = plane*CW_NUM + cw（flat 绝对编号）。
+                           * 与 request->cw_bitmap 同一值；是 cw_buffers / cw_index 的唯一依据
                            * （"本任务有几个 CW"= popcount(mask)，"第 k 个"= 第 k 个置位）。 */
-    uint8_t cw_index;     /* 当前 CW 的 **flat 绝对编号 n**（∈ cw_mask），不是密排槽位。
+    uint8_t cw_index;     /* 当前 CW 的 **flat 绝对编号 n**（∈ cw_bitmap），不是密排槽位。
                            * 生产：task_load 置为掩码最低位；cw_chain 每取完一个推进到下一个置位。
                            * 消费：completion_per_cw 用它当下标写 cw_status[n]，
                            *   并把它作为 failed_descriptor_id 上报。 */
@@ -78,12 +78,12 @@ typedef struct
     uint8_t feature_addr; /* SET/GET_FEATURES 的寄存器地址（column）。内联数据走 cw_buffers，不走本层。 */
 
     /* Pre-resolved per-CW data（定容数组，容量 = 硬件上限 CW_TOTAL_MAX = PLANE_NUM×CW_NUM）。
-     * ⚠ 下标是 **flat 绝对 CW 号 n = plane*CW_NUM + cw**，与 cw_mask 的 bit 号、
-     *   completion.cw_status[] 的下标三者同一空间——"哪些格有效"完全由 cw_mask 决定，
+     * ⚠ 下标是 **flat 绝对 CW 号 n = plane*CW_NUM + cw**，与 cw_bitmap 的 bit 号、
+     *   completion.cw_status[] 的下标三者同一空间——"哪些格有效"完全由 cw_bitmap 决定，
      *   不在掩码里的格是确定性零值（request 整体 {0} 初始化后只填掩码内的格）。
      *   物理 plane 由 n / CW_NUM 得出，CW 号由 n % CW_NUM 得出，不再各存一份。 */
     nand_paa_t plane_paa[PLANE_NUM];     /* 各 plane 的行地址承载 PAA（CW 位被 paa_to_nand_row 丢弃）。 */
-    uint8_t   *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_mask 有效。 */
+    uint8_t   *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_bitmap 有效。 */
 
     /* ── 引擎上下文四件套（Phase V）──
      * 全部随 task slot 常驻，跨多次 poll 调用存活；生产/消费阶段见各字段。 */
