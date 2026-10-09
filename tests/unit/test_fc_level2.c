@@ -757,78 +757,94 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
  *  这几条**只 encode、不 process_read**：查的是编码产物本身。
  *  往返（encode→process_read→明文）由下一节的用例承担。
  *
- *  参数组合：
- *     random  crc      cw    说明
- *     off     on       4CW   仅 META + CRC + ECC
- *     on      on       4CW   加扰 + ECC（另证 USER 区确已非明文）
- *     off     on       1CW   单 CW 边界
- *     off     off      4CW   CRC 关闭 → CRC 字段不被写（哨兵保留）
+ *  场景表（参数化，`--param case <name>` 可单跑）：
+ *     case            random  crc     cw    期望 USER 区
+ *     random-off-4cw  off     on      4CW   仍为明文
+ *     random-on-4cw   on      on      4CW   **已非明文**（自证加扰真的发生）
+ *     single-cw       off     on      1CW   仍为明文
+ *
+ *  三条断言集完全相同（cw_count / meta / crc / parity / USER 区），只有两列期望不同
+ *  （cw 数、USER 区是否仍是明文）⇒ 判据 7「期望不同 → 参数化」。
+ *  crc 关闭是**另一套断言**（查 [4,8) 哨兵未被写、无 parity / USER 断言）⇒ 独立成条。
  **************************************************************************/
 
-static MunitResult test_encode_random_off(const MunitParameter params[], void *data)
+typedef struct
 {
-    (void)params;
-    (void)data;
+    const char *name;
+    uint32_t    cw_bitmap;
+    uint8_t     random_mode;
+    uint8_t     crc_mode;
+    uint8_t     n_cw;         /* 期望链上 desc 数 */
+    uint8_t     expect_plain; /* 1 = encode 后 USER 区仍等于明文 */
+} l2_enc_case_t;
 
-    fc_command_t *enc = l2_cmd(L2_BM_PLANE0_ALL, L2_META, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
+static const l2_enc_case_t l2_enc_cases[] = {
+    {"random-off-4cw", L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE, CW_NUM, 1U},
+    { "random-on-4cw", L2_BM_PLANE0_ALL,  FC_RANDOM_ENABLE, FC_CRC_ENABLE, CW_NUM, 0U},
+    {     "single-cw",            0x01U, FC_RANDOM_DISABLE, FC_CRC_ENABLE,     1U, 1U},
+};
 
-    munit_assert_uint32(test_cw_count(enc), ==, CW_NUM);
+/* 场景名（munit 要 NULL 结尾的 const char**），与 l2_enc_cases 一一对应——
+ * 下面一条 _Static_assert 把两表数量钉死，改名/增删时不会漏。 */
+static const char *l2_enc_case_names[] = {
+    "random-off-4cw",
+    "random-on-4cw",
+    "single-cw",
+    NULL,
+};
 
-    test_fill_user_paa(enc);
-    munit_assert_int(fc_data_path_encode(enc), ==, FC_STATUS_OK);
+_Static_assert((sizeof(l2_enc_case_names) / sizeof(l2_enc_case_names[0]) - 1U) == (sizeof(l2_enc_cases) / sizeof(l2_enc_cases[0])),
+               "l2_enc_case_names 与 l2_enc_cases 数量不符");
 
-    /* 加扰关闭 ⇒ USER 区仍是明文（[0,8) 是 META + CRC，不属于 USER 区） */
-    munit_assert_uint8(l2_user_matches_source(enc), ==, 1U);
+/* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
+static MunitParameterEnum l2_enc_params[] = {
+    {"case", l2_enc_case_names},
+    {  NULL,              NULL},
+};
 
-    l2_verify_meta_written(enc);
-    l2_verify_crc_written(enc);
-    l2_verify_parity_nonzero(enc);
+static const l2_enc_case_t *l2_enc_case_find(const char *name)
+{
+    uint32_t i;
 
-    munit_assert_int(fc_command_release(enc), ==, FC_STATUS_OK);
-    return MUNIT_OK;
+    if (name == NULL)
+    {
+        return NULL;
+    }
+
+    for (i = 0U; i < (sizeof(l2_enc_cases) / sizeof(l2_enc_cases[0])); i++)
+    {
+        if (strcmp(l2_enc_cases[i].name, name) == 0)
+        {
+            return &l2_enc_cases[i];
+        }
+    }
+
+    return NULL;
 }
 
-static MunitResult test_encode_random_on(const MunitParameter params[], void *data)
+static MunitResult test_encode(const MunitParameter params[], void *data)
 {
-    (void)params;
+    const l2_enc_case_t *c;
+    fc_command_t        *enc;
+
     (void)data;
 
-    fc_command_t *enc = l2_cmd(L2_BM_PLANE0_ALL, L2_META, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
+    c = l2_enc_case_find(munit_parameters_get(params, "case"));
+    munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
 
-    munit_assert_uint32(test_cw_count(enc), ==, CW_NUM);
+    enc = l2_cmd(c->cw_bitmap, L2_META, c->random_mode, c->crc_mode);
+    munit_assert_uint32(test_cw_count(enc), ==, c->n_cw);
 
     test_fill_user_paa(enc);
     munit_assert_int(fc_data_path_encode(enc), ==, FC_STATUS_OK);
 
-    /* 自证加扰真的发生了：encode 后 USER 区应已不是明文。
-     * 否则 fixture 一旦退化（例如 seed 恒 0 使 keystream 整片为 0），
-     * 下面"解扰后等于明文"的恒等式会把问题原样盖过去。 */
-    munit_assert_uint8(l2_user_matches_source(enc), ==, 0U);
+    /* random=ON ⇒ encode 后 USER 区应已不是明文（[0,8) 是 META + CRC，不属于 USER 区）。
+     * 这条是自证：fixture 一旦退化（例如 seed 恒 0 使 keystream 整片为 0），
+     * 往返恒等式会把问题原样盖过去。 */
+    munit_assert_uint8(l2_user_matches_source(enc), ==, c->expect_plain);
 
     l2_verify_meta_written(enc);
     l2_verify_crc_written(enc); /* CRC 对明文算 ⇒ 与 USER 是否已加扰无关 */
-    l2_verify_parity_nonzero(enc);
-
-    munit_assert_int(fc_command_release(enc), ==, FC_STATUS_OK);
-    return MUNIT_OK;
-}
-
-static MunitResult test_encode_single_cw(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    /* 只取 plane0 的 CW0（1 条 desc） */
-    fc_command_t *enc = l2_cmd(0x01U, L2_META, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
-
-    munit_assert_uint32(test_cw_count(enc), ==, 1U);
-
-    test_fill_user_paa(enc);
-    munit_assert_int(fc_data_path_encode(enc), ==, FC_STATUS_OK);
-
-    munit_assert_uint8(l2_user_matches_source(enc), ==, 1U);
-    l2_verify_meta_written(enc);
-    l2_verify_crc_written(enc);
     l2_verify_parity_nonzero(enc);
 
     munit_assert_int(fc_command_release(enc), ==, FC_STATUS_OK);
@@ -883,34 +899,79 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
  *  ⚠ process_read 是**原地解码**的：对同一个 buffer 跑两遍，第二遍面对的是已解扰的
  *    数据区，ECC 校验子整体失配。故错误注入一律「**先破坏、只读一次**」。
  *
- *  参数组合：
- *     random  ecc/crc/meta  cw / mask      说明
- *     on      全 OK         4CW            解码成功 → 解扰 → 全 READY
- *     off     全 OK         4CW            只解码
- *     on      有 UNC        4CW            不解扰，返回 IO_ERROR
- *     on      全 OK         1CW            单 CW 边界
- *     on      全 OK         2CW / 0x05     非连续掩码：链位 0,1 ↔ cw 0,2
- *     off     META 不符     4CW            写 LBA=A 读 LBA=B → MATA_ERROR
- *     off     CRC 不符      4CW            写关 CRC 读开 CRC → CRC_ERROR
- *     off     全 OK         4CW            LDPC_RAW：跳过 ECC 编码/解码
+ *  用例划分：
+ *     process_read_ok          参数化 3 case（random-on-4cw / random-off-4cw / single-cw）——
+ *                              三条只是 l2_buffer_round_trip 的三组入参、断言完全相同
+ *     process_read_unc         有 UNC → 不解扰，返回 IO_ERROR
+ *     process_read_masked_chain 2CW / 0x05 非连续掩码：链位 0,1 ↔ cw 0,2
+ *     process_read_mata_error  META 不符 → MATA_ERROR
+ *     process_read_crc_error   CRC 不符 → CRC_ERROR
+ *     process_read_ldpc_raw    LDPC_RAW：跳过 ECC 编码/解码
  **************************************************************************/
 
-static MunitResult test_process_read_ok_random_on(const MunitParameter params[], void *data)
+/* 三条 OK 往返的入参恰好就是 l2_buffer_round_trip 的三个形参，断言全在 helper 里
+ * ⇒ 判据 7「同一断言、不同输入」。这里仍用**参数化**而非用例内循环：失败时 munit
+ * 会把 case 名带进报错，且 `--param case single-cw` 能单跑（补 munit_parameters_get
+ * 换来的能力）。 */
+typedef struct
 {
-    (void)params;
-    (void)data;
+    const char *name;
+    uint32_t    cw_bitmap;
+    uint8_t     random_mode;
+    uint8_t     crc_mode;
+} l2_rt_case_t;
 
-    l2_buffer_round_trip(L2_BM_PLANE0_ALL, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
+static const l2_rt_case_t l2_rt_cases[] = {
+    { "random-on-4cw", L2_BM_PLANE0_ALL,  FC_RANDOM_ENABLE, FC_CRC_ENABLE},
+    {"random-off-4cw", L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE},
+    {     "single-cw",            0x01U,  FC_RANDOM_ENABLE, FC_CRC_ENABLE},
+};
 
-    return MUNIT_OK;
+/* 场景名（munit 要 NULL 结尾的 const char**），与 l2_rt_cases 一一对应。 */
+static const char *l2_rt_case_names[] = {
+    "random-on-4cw",
+    "random-off-4cw",
+    "single-cw",
+    NULL,
+};
+
+_Static_assert((sizeof(l2_rt_case_names) / sizeof(l2_rt_case_names[0]) - 1U) == (sizeof(l2_rt_cases) / sizeof(l2_rt_cases[0])),
+               "l2_rt_case_names 与 l2_rt_cases 数量不符");
+
+/* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
+static MunitParameterEnum l2_rt_params[] = {
+    {"case", l2_rt_case_names},
+    {  NULL,             NULL},
+};
+
+static const l2_rt_case_t *l2_rt_case_find(const char *name)
+{
+    uint32_t i;
+
+    if (name == NULL)
+    {
+        return NULL;
+    }
+
+    for (i = 0U; i < (sizeof(l2_rt_cases) / sizeof(l2_rt_cases[0])); i++)
+    {
+        if (strcmp(l2_rt_cases[i].name, name) == 0)
+        {
+            return &l2_rt_cases[i];
+        }
+    }
+
+    return NULL;
 }
 
-static MunitResult test_process_read_ok_random_off(const MunitParameter params[], void *data)
+static MunitResult test_process_read_ok(const MunitParameter params[], void *data)
 {
-    (void)params;
+    const l2_rt_case_t *c = l2_rt_case_find(munit_parameters_get(params, "case"));
+
     (void)data;
 
-    l2_buffer_round_trip(L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
+    munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
+    l2_buffer_round_trip(c->cw_bitmap, c->random_mode, c->crc_mode);
 
     return MUNIT_OK;
 }
@@ -955,16 +1016,6 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
     munit_assert_uint8(test_check_paa(test_cw_user(cmd, 0U), test_cw_desc(cmd, 0U)->paa), ==, 0U);
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
-    return MUNIT_OK;
-}
-
-static MunitResult test_process_read_single_cw(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    l2_buffer_round_trip(0x01U, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
-
     return MUNIT_OK;
 }
 
@@ -1289,7 +1340,12 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
  *  且它们都**不提交**（半掩码组合正是「未覆盖 plane 被静默编程」的陷阱形态）。
  *
  *  这里直接调 test_cmd_build（不经 l2_cmd）：段的宽度由 **op 变体**决定，
- *  而"单 plane 段配 plane1 的位图"正是 test_cw_bitmap_plane1_only 要验的形态。
+ *  而"单 plane 段配 plane1 的位图"正是 plane1-only 场景要验的形态。
+ *
+ *  场景表（参数化，`--param case <名>`）：三条共用「建链 → 收链 → 断言 n → 逐条
+ *  断言 (plane, cw)」的骨架，差异全在 **段宽 / addr.plane / 位图** 三个字段 ⇒ 判据 7。
+ *  期望链以显式表给出——原 plane1-only / span 的「循环 + 公式」换成逐位比表，
+ *  不变量（plane-major、cw 循环）记在场景表的注释里。
  **************************************************************************/
 
 /* 整段访问用的两种 config：multi-plane 变体（段 = [0,2)）/ 单 plane 变体（段 = [plane,+1)）。 */
@@ -1307,90 +1363,103 @@ static const fc_cmd_conf_t L2_PROG_SINGLE = {
     .ldpc      = FC_ECC_MODE_BCH,
 };
 
-/* 掩码 0x29：plane0 取 {CW0,CW3} + plane1 取 {CW1} → 3 条 desc（plane-major） */
-static MunitResult test_cw_bitmap_flat_mixed(const MunitParameter params[], void *data)
+/* 期望链（逐 desc 的 plane / cw），与下面 l2_bm_cases 的行一一对应。 */
+static const uint8_t l2_bm_mixed_plane[] = {0U, 0U, 1U};
+static const uint8_t l2_bm_mixed_cw[]    = {0U, 3U, 1U};
+static const uint8_t l2_bm_p1_plane[]    = {1U, 1U, 1U, 1U};
+static const uint8_t l2_bm_p1_cw[]       = {0U, 1U, 2U, 3U};
+static const uint8_t l2_bm_span_plane[]  = {0U, 0U, 0U, 0U, 1U, 1U, 1U, 1U};
+static const uint8_t l2_bm_span_cw[]     = {0U, 1U, 2U, 3U, 0U, 1U, 2U, 3U};
+
+typedef struct
 {
-    (void)params;
-    (void)data;
+    const char          *name;
+    uint8_t              addr_plane; /* 段内 plane（配合 conf 决定段 = [plane, plane+1) 或 [0,2)） */
+    uint32_t             bitmap;     /* flat 绝对编号位图（v27 起字面量，0 = 空集） */
+    const fc_cmd_conf_t *conf;
+    uint8_t              n;         /* 期望链上 desc 数 */
+    const uint8_t       *plane_exp; /* 期望链：逐 desc 的 plane */
+    const uint8_t       *cw_exp;    /* 期望链：逐 desc 的 cw */
+} l2_bm_case_t;
 
-    fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = TEST_BLOCK, .plane = 0U, .page = TEST_PAGE},
-                                       0x29U /* 0b0010_1001 */,
-                                       L2_META,
-                                       &L2_PROG_MULTI);
+static const l2_bm_case_t l2_bm_cases[] = {
+  /* 0x29 = plane0 取 {CW0,CW3} + plane1 取 {CW1} → 3 条 desc（plane-major） */
+    {      "flat-mixed", 0U, 0x29U,  &L2_PROG_MULTI, 3U, l2_bm_mixed_plane, l2_bm_mixed_cw},
+ /* 0xF0 = 只选 plane 1 的 4 个 CW（绝对编号，不是 0x0F）→ 4 条 desc 全在 plane 1。
+  * 段必须是**单 plane 且 addr.plane = 1**：用 multi-plane op 配只覆盖 plane 1 的位图
+  * 会被 test_cmd_build 的「逐 plane 覆盖」断言挡下——那正是静默编程未覆盖 plane 的形态。 */
+    {     "plane1-only", 1U, 0xF0U, &L2_PROG_SINGLE, 4U,    l2_bm_p1_plane,    l2_bm_p1_cw},
+ /* 0xFF = 整段 → 8 条 desc，钉住「段内每个 plane × 每个 CW 都有一条」这条不变量。
+  * ⚠ 位图必须显式给（v27 起 0 是空集，不再展开）；config.cw 不参与推导（v23 起）。 */
+    {"span-multi-plane", 0U, 0xFFU,  &L2_PROG_MULTI, 8U,  l2_bm_span_plane,  l2_bm_span_cw},
+};
 
-    uint8_t plane_out[CW_TOTAL_MAX];
-    uint8_t cw_out[CW_TOTAL_MAX];
-    uint8_t n = test_collect_chain(cmd, plane_out, cw_out);
+/* 场景名（munit 要 NULL 结尾的 const char**），与 l2_bm_cases 一一对应。 */
+static const char *l2_bm_case_names[] = {
+    "flat-mixed",
+    "plane1-only",
+    "span-multi-plane",
+    NULL,
+};
 
-    munit_assert_uint32(n, ==, 3U);
-    munit_assert_uint32(plane_out[0], ==, 0U);
-    munit_assert_uint32(cw_out[0], ==, 0U);
-    munit_assert_uint32(plane_out[1], ==, 0U);
-    munit_assert_uint32(cw_out[1], ==, 3U);
-    munit_assert_uint32(plane_out[2], ==, 1U);
-    munit_assert_uint32(cw_out[2], ==, 1U);
+_Static_assert((sizeof(l2_bm_case_names) / sizeof(l2_bm_case_names[0]) - 1U) == (sizeof(l2_bm_cases) / sizeof(l2_bm_cases[0])),
+               "l2_bm_case_names 与 l2_bm_cases 数量不符");
 
-    /* config.cw 不回写（v23 起它连建链都不参与，纯残留字段） */
-    munit_assert_uint32(cmd->config.cw, ==, 0U);
+/* MunitTest.parameters 是**非 const** 指针（munit.h:432）⇒ 本数组不能声明成 const。 */
+static MunitParameterEnum l2_bm_params[] = {
+    {"case", l2_bm_case_names},
+    {  NULL,             NULL},
+};
 
-    fc_command_release(cmd);
-    return MUNIT_OK;
-}
-
-/* 掩码 0xF0：只选 plane 1 的 4 个 CW（绝对编号，不是 0x0F）→ 4 条 desc 全在 plane 1。
- * 段必须是**单 plane 且 addr.plane = 1**（段 = [1,2)）：用 multi-plane op 配只覆盖
- * plane 1 的位图会被 test_cmd_build 的「逐 plane 覆盖」断言挡下——那正是静默编程
- * 未覆盖 plane 的形态。 */
-static MunitResult test_cw_bitmap_plane1_only(const MunitParameter params[], void *data)
+static const l2_bm_case_t *l2_bm_case_find(const char *name)
 {
-    (void)params;
-    (void)data;
+    uint32_t i;
 
-    fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = TEST_BLOCK, .plane = 1U, .page = TEST_PAGE},
-                                       0xF0U,
-                                       L2_META,
-                                       &L2_PROG_SINGLE);
-
-    uint8_t plane_out[CW_TOTAL_MAX];
-    uint8_t cw_out[CW_TOTAL_MAX];
-    uint8_t n = test_collect_chain(cmd, plane_out, cw_out);
-
-    munit_assert_uint32(n, ==, 4U);
-    for (uint8_t i = 0U; i < n; i++)
+    if (name == NULL)
     {
-        munit_assert_uint32(plane_out[i], ==, 1U);
-        munit_assert_uint32(cw_out[i], ==, i);
+        return NULL;
     }
 
-    fc_command_release(cmd);
-    return MUNIT_OK;
+    for (i = 0U; i < (sizeof(l2_bm_cases) / sizeof(l2_bm_cases[0])); i++)
+    {
+        if (strcmp(l2_bm_cases[i].name, name) == 0)
+        {
+            return &l2_bm_cases[i];
+        }
+    }
+
+    return NULL;
 }
 
-/* 整段位图回归（v27 由 v23 的 "mask==0" 用例改写而来）：multi_plane=2 + 整段位图
- * 必须建出 8 条 desc —— 钉住「段内每个 plane × 每个 CW 都有一条」这条不变量。
- * ⚠ 位图由调用者显式给（fc_command_plane_span_cw_bitmap 或 test_plane_cw_bitmap）：
- *   v27 起 0 是**空集**，不再展开。config.cw 不参与推导（v23 起），故写成 0 也必须 8 条。 */
-static MunitResult test_cw_bitmap_span_multi_plane(const MunitParameter params[], void *data)
+static MunitResult test_cw_bitmap(const MunitParameter params[], void *data)
 {
-    (void)params;
+    const l2_bm_case_t *c;
+    fc_command_t       *cmd;
+    uint8_t             plane_out[CW_TOTAL_MAX];
+    uint8_t             cw_out[CW_TOTAL_MAX];
+    uint8_t             n;
+    uint8_t             i;
+
     (void)data;
 
-    fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = TEST_BLOCK, .plane = 0U, .page = TEST_PAGE},
-                                       0xFFU /* 整段 */,
-                                       L2_META,
-                                       &L2_PROG_MULTI);
+    c = l2_bm_case_find(munit_parameters_get(params, "case"));
+    munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
 
-    munit_assert_uint32(cmd->config.cw, ==, 0U); /* 建链不读它 */
+    cmd = test_cmd_build(&(nand_addr_t){.block = TEST_BLOCK, .plane = c->addr_plane, .page = TEST_PAGE},
+                         c->bitmap,
+                         L2_META,
+                         c->conf);
 
-    uint8_t plane_out[CW_TOTAL_MAX];
-    uint8_t cw_out[CW_TOTAL_MAX];
-    uint8_t n = test_collect_chain(cmd, plane_out, cw_out);
+    /* config.cw 不回写（v23 起它连建链都不参与，纯残留字段）——三条场景同判据。 */
+    munit_assert_uint32(cmd->config.cw, ==, 0U);
 
-    munit_assert_uint32(n, ==, 8U);
-    for (uint8_t i = 0U; i < n; i++)
+    n = test_collect_chain(cmd, plane_out, cw_out);
+    munit_assert_uint32(n, ==, c->n);
+
+    for (i = 0U; i < n; i++)
     {
-        munit_assert_uint32(plane_out[i], ==, (i < CW_NUM) ? 0U : 1U);
-        munit_assert_uint32(cw_out[i], ==, (uint8_t)(i % CW_NUM));
+        munit_assert_uint32(plane_out[i], ==, c->plane_exp[i]);
+        munit_assert_uint32(cw_out[i], ==, c->cw_exp[i]);
     }
 
     fc_command_release(cmd);
@@ -1406,38 +1475,32 @@ static MunitResult test_cw_bitmap_span_multi_plane(const MunitParameter params[]
 
 MunitTest g_fc_data_path_tests[] = {
   /* ── 步骤级（单 CW 原语）── */
-    {           "crc_step_detect",            test_crc_step_detect, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_crc_params},
-    {           "scramble_whiten",            test_scramble_whiten, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,          NULL},
-    {                  "ecc_step",                   test_ecc_step, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_ecc_params},
+    {          "crc_step_detect",           test_crc_step_detect, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_crc_params},
+    {          "scramble_whiten",           test_scramble_whiten, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,          NULL},
+    {                 "ecc_step",                  test_ecc_step, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_ecc_params},
 
  /* ── encode ── */
-    {         "encode_random_off",          test_encode_random_off, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {          "encode_random_on",           test_encode_random_on, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {          "encode_single_cw",           test_encode_single_cw, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {       "encode_crc_disabled",        test_encode_crc_disabled, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {                   "encode",                    test_encode, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l2_enc_params},
+    {      "encode_crc_disabled",       test_encode_crc_disabled, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
 
  /* ── process_read ── */
-    { "process_read_ok_random_on",  test_process_read_ok_random_on, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {"process_read_ok_random_off", test_process_read_ok_random_off, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {          "process_read_unc",           test_process_read_unc, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {    "process_read_single_cw",     test_process_read_single_cw, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    { "process_read_masked_chain",  test_process_read_masked_chain, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {   "process_read_mata_error",    test_process_read_mata_error, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {    "process_read_crc_error",     test_process_read_crc_error, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {     "process_read_ldpc_raw",      test_process_read_ldpc_raw, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {          "process_read_ok",           test_process_read_ok, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,  l2_rt_params},
+    {         "process_read_unc",          test_process_read_unc, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {"process_read_masked_chain", test_process_read_masked_chain, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {  "process_read_mata_error",   test_process_read_mata_error, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {   "process_read_crc_error",    test_process_read_crc_error, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {    "process_read_ldpc_raw",     test_process_read_ldpc_raw, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
 
  /* ── raid_recover ── */
 #if CONFIG_FC_RAID
-    {    "raid_recover_no_random",     test_raid_recover_no_random, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {   "raid_recover_no_random",    test_raid_recover_no_random, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
 
  /* ── stripe parity ── */
-    {    "generate_stripe_parity",     test_generate_stripe_parity, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {   "generate_stripe_parity",    test_generate_stripe_parity, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
 #endif  /* CONFIG_FC_RAID */
 
   /* ── flat CW 掩码建链（v7）── */
-    {      "cw_bitmap_flat_mixed",       test_cw_bitmap_flat_mixed, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {     "cw_bitmap_plane1_only",      test_cw_bitmap_plane1_only, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
-    {"cw_bitmap_span_multi_plane", test_cw_bitmap_span_multi_plane, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,          NULL},
+    {                "cw_bitmap",                 test_cw_bitmap, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,  l2_bm_params},
 
-    {                        NULL,                            NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE,          NULL},
+    {                       NULL,                           NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE,          NULL},
 };

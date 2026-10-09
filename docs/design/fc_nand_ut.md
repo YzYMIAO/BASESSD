@@ -115,18 +115,33 @@ Level 2 不关心 OP 码（operation 字段），只测试 data_path 内部的�
 
 | 测试函数 | 参数组合 | 验证策略 |
 |---|---|---|
-| `encode_random_off` | random=off, 4CW | META + CRC + ECC；末 8B parity 非零；round-trip decode 恢复原文 |
-| `encode_random_on` | random=on, 4CW | 加扰 + ECC；**先证 USER 区已非明文**，再 decode + 解扰恢复原文 |
-| `encode_single_cw` | random=off, 1CW | 单 CW 边界 |
+| `encode` | **参数化** 3 case（`--param case <名>`） | 查**编码产物本身**（只 encode、不 process_read）；三条断言集相同、仅期望不同 ⇒ 参数化，见下 |
 | `encode_crc_disabled` | crc=off, 4CW | encode 不写 CRC 字段（哨兵保留）；读侧 Pass 3 跳过 → 全 READY |
-| `process_read_ok_random_on` | random=on, 4CW, 全 OK | 解码 + 解扰后原文恢复，且 **desc status 全 = READY** |
-| `process_read_ok_random_off` | random=off, 4CW, 全 OK | 只解码，不涉及解扰；全 READY |
+| `process_read_ok` | **参数化** 3 case | `l2_buffer_round_trip`：encode → process_read → 全 READY + 原文恢复；三条断言全在 helper 内 ⇒ 参数化，见下 |
 | `process_read_unc` | random=on, 4CW, CW1 损坏 | 返回 IO_ERROR；desc status CW1=UNC, 其余=READY |
-| `process_read_single_cw` | random=on, 1CW, 全 OK | 单 CW 边界；全 READY |
-| `process_read_masked_chain` | random=on, multi_plane=2, mask=0x05 | 链位 0,1 ↔ CW 0,2；**专钉 Pass 4 用 `paa_to_cw(desc->paa)` 而非链走位**——若改用链走位，第 2 条会假报 MATA_ERROR |
-| `process_read_mata_error` | random=off, mask=0x05, encode 后改 `cmd->meta` | 返回值仍 OK，但每个 CW 置 `MATA_ERROR`（Pass 4） |
+| `process_read_masked_chain` | random=on, **单 plane 段**, mask=0x05 | 链位 0,1 ↔ CW 0,2；**专钉 Pass 4 用 `paa_to_cw(desc->paa)` 而非链走位**——若改用链走位，第 2 条会假报 MATA_ERROR |
+| `process_read_mata_error` | random=off, 4CW, encode 后改 `cmd->meta` | 返回值仍 OK，但每个 CW 置 `MATA_ERROR`（Pass 4） |
 | `process_read_crc_error` | crc 写关读开, 4CW, [4,8) 预置哨兵 | 返回值仍 OK，但每个 CW 置 `CRC_ERROR`（Pass 3）；ECC 未扰动，触发确定 |
 | `process_read_ldpc_raw` | ldpc=LDPC_RAW, 4CW | 两端跳过 ECC，数据原样往返，全 READY |
+
+`encode` 的 3 个 case（三条都查：`cw_count` / META 已写 / CRC 已写 / parity 非零）：
+
+| case | random | cw | 期望 USER 区 |
+|---|---|---|---|
+| `random-off-4cw` | off | 4CW | 仍为明文 |
+| `random-on-4cw` | on | 4CW | **已非明文**（自证加扰真的发生，见 §2.2 的 fixture 教训） |
+| `single-cw` | off | 1CW | 仍为明文 |
+
+`process_read_ok` 的 3 个 case：`random-on-4cw` / `random-off-4cw` / `single-cw`——轴与 `encode` 相同，
+但断言全在 `l2_buffer_round_trip()` 内（encode → process_read → 全 READY + 原文恢复）。
+
+> **为什么这两组参数化、其余 5 条不**（判据见 `assertion_guidelines.md` §二十三）：参数化的前提是
+> **同一套断言、只有期望值不同**。`encode` 三条只有两列期望不同（cw 数、USER 区是否仍是明文）；
+> `process_read_ok` 三条的断言完全在 helper 里。而 `unc` / `masked_chain` / `mata_error` /
+> `crc_error` / `ldpc_raw` 各自断言**不同的可观测量**（返回码 / 不同的 `status` 位 / 不同的哨兵区），
+> 合并只能靠给每行挂 setup 回调——收益不足，保留独立。
+> `mata_error` 与 `crc_error` 断言形状相同（逐 CW 查一个 `status` 位）但 setup 机制不同
+> （改 `cmd->meta` vs 翻 `config.crc` + 预置哨兵），同样不并。
 
 > **「返回值仍 OK」是刻意的**：`fc_data_path_process_read` 在 Pass 3/Pass 4 标脏后**不改返回值**（`fc_data_path.c:551` 恒返回 `FC_STATUS_OK`），所以判「读成功」必须查 `desc->status == FC_CW_STATUS_READY`，只看返回值会漏掉 CRC / META 校验回归。
 
@@ -167,29 +182,39 @@ BCH 允许误纠（实测约 0.28% 返回 OK 但数据是错的），故**不钉
 （失败必须原子 / 纠正数不得超过 t）。`scramble_whiten` 的三种输入（全 0x00 / 全 0xFF / PAA 重复）
 走**同一组断言**，属迭代而非参数化。
 
-> **参数化 vs 迭代的判据**（见 `assertion_guidelines.md` §二十二）：
+> **参数化 vs 迭代的判据**（见 `assertion_guidelines.md` §二十三）：
 > **不同分支 / 不同期望 → 参数化**（每个 case 一次独立 setup/tear_down，运行器在测试名下打印 `case=…`）；
 > **同一断言、不同输入 → 迭代**（`--iterations N`，同一段代码多抽几次）。
 
 ### flat CW 位图建链（v7，v1.8 改为走 FTL 建链入口）
 
-| 测试函数 | 位图 | 验证策略 |
-|---|---|---|
-| `cw_bitmap_flat_mixed` | 0x29 | plane0 取 {CW0,CW3} + plane1 取 {CW1} → 3 条 desc（plane-major） |
-| `cw_bitmap_plane1_only` | 0xF0 | 只选 plane1 的 CW0..3（flat 绝对编号，非 0x0F 段） |
-| `cw_bitmap_span_multi_plane` | `0xFF`（整段） | multi_plane=2 → 8 条 desc（钉住「段内全部」的显式写法；v26 前此用例传 `0` 借"0 = 未指定"重载，v27 取消该重载后改为显式 `0xFF`） |
+`cw_bitmap` 是**参数化**用例（3 case，`--param case <名>`）——三条场景共用「建链 → 收链 →
+断言 desc 数 → 逐条断言 (plane, cw)」的骨架，差异全在 **段宽 / `addr.plane` / 位图** 三个字段
+⇒ 判据 7。期望链以显式表给出（原「循环 + 公式」形态换成逐位比表）：
 
-> ⚠ **v27 起位图是字面位图**（置 1 = 访问该 CW，**0 = 空集**）——上面三行的第三行即由这一条驱动改名
-> （`cw_mask_zero_multi_plane` → `cw_bitmap_span_multi_plane`）。夹具侧对应
+| case | conf（段宽） | addr.plane | 位图 | 期望链 (plane, cw) |
+|---|---|---|---|---|
+| `flat-mixed` | MULTI | 0 | `0x29` | (0,0)(0,3)(1,1) |
+| `plane1-only` | SINGLE | 1 | `0xF0` | (1,0)(1,1)(1,2)(1,3) |
+| `span-multi-plane` | MULTI | 0 | `0xFF` | (0,0)…(0,3)(1,0)…(1,3) |
+
+> ⚠ **v27 起位图是字面位图**（置 1 = 访问该 CW，**0 = 空集**）——`span-multi-plane` 一行的前身
+> `cw_mask_zero_multi_plane` 即由这一条驱动改名。夹具侧对应
 > `test_plane_cw_bitmap(plane_bitmap)`（原 `test_plane_cw_mask`）。
 > **v28 起位图作 `ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 的实参**——夹具里
 > `cmd->param.cw_bitmap = test_plane_cw_bitmap(...)` 改成把值直接传给建链入口。
 > **Level 2 的迁移已完成**（v26 起建链走 `test_cmd_build()`）；**Level 3 待迁**（仍在引用已删的
 > `test_page_cmd_ex` 等旧符号，见 `docs/changelog/fc_data_path_step_primitives_v29.md`「未跟进」）。
+>
+> `plane1-only` 的段必须是**单 plane 且 `addr.plane = 1`**：用 multi-plane op 配只覆盖 plane 1 的
+> 位图会被 `test_cmd_build` 的「逐 plane 覆盖」断言挡下——那正是静默编程未覆盖 plane 的形态。
 
-三条用例验证的是 **desc 链几何**（plane / CW 展开与链序），不是 NAND 行为，故留在 Level 2，只调 `ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 后直接走链核对。
+验证的是 **desc 链几何**（plane / CW 展开与链序），不是 NAND 行为，故留在 Level 2，只调
+`ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 后直接走链核对。
 
-**共计 18 个测试函数（默认构建）。（CONFIG_FC_RAID=1 时额外含 `raid_recover_no_random` + `generate_stripe_parity`，共 20 个）**
+**共计 12 个测试函数（默认构建）——其中 `crc_step_detect` / `ecc_step` / `encode` /
+`process_read_ok` / `cw_bitmap` 五条是参数化，展开后实际跑 31 个用例。（CONFIG_FC_RAID=1 时
+额外含 `raid_recover_no_random` + `generate_stripe_parity`，共 14 个）**
 
 ### 2.3 Level 3 — FC 全链路测试
 
@@ -326,7 +351,7 @@ static MunitSuite g_fc_nand_suite = {
 > 描述性命名的风格。
 
 ```c
-/* test_fc_level2.c — data_path 子套件，共 18 个测试（CONFIG_FC_RAID=1 时 20 个） */
+/* test_fc_level2.c — data_path 子套件，共 12 个测试（CONFIG_FC_RAID=1 时 14 个） */
 extern MunitTest g_fc_data_path_tests[];
 
 /* test_fc_level3.c — lifecycle 子套件，9 个 block 级场景用例 */
@@ -429,7 +454,7 @@ tests/
 │   ├── fc_test_common.c   # Level 2/3 共享夹具（setup/teardown、test_cmd_build、源数据表、页 helper）
 │   ├── fc_test_common.h   # 夹具对外声明（含「调了哪些原语 = 开了哪些功能」的步骤级契约）
 │   ├── test_fc_level1.c   # Level 1: 11 个测试（logic 单套件）
-│   ├── test_fc_level2.c   # Level 2: 18 个测试（步骤级 + encode/process_read/raid_recover + cw_bitmap）
+│   ├── test_fc_level2.c   # Level 2: 12 个测试（步骤级 + encode/process_read/raid_recover + cw_bitmap）
 │   └── test_fc_level3.c   # Level 3: 9 个 block 级场景（真实 NAND）
 ├── integration/
 │   ├── test_fc_nand.c     # 旧硬件集成测试（**未编入 `tests` 目标**；仍引用已删的复数建链入口，待废弃）
@@ -492,7 +517,7 @@ static MunitResult test_crc_step_detect(const MunitParameter params[], void *dat
 - **`--param` 的值不做合法性校验**，原样塞进 `params[]` ⇒ 用例必须自己挡表外的名字（见上面的断言）。
 - 板子上钉单个场景：`test --param case meta-1`；列全部参数：`--list-params`。
 - **什么时候参数化**：不同**分支 / 期望**才参数化；同一断言、不同输入用迭代（`--iterations N`）。
-  判据见 `assertion_guidelines.md` §二十二。
+  判据见 `assertion_guidelines.md` §二十三。
 
 ---
 
@@ -530,6 +555,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-09 | v1.13 | **Level 2 三组用例按判据 7 参数化**（承接 v1.12 的 §二十三）。① `encode_random_off` / `_random_on` / `_single_cw` → 单条参数化 `encode`（3 case）；② `process_read_ok_random_on` / `_random_off` / `_single_cw` → 单条参数化 `process_read_ok`（3 case）；③ `cw_bitmap_flat_mixed` / `_plane1_only` / `_span_multi_plane` → 单条参数化 `cw_bitmap`（3 case，期望链以显式表给出，原「循环 + 公式」形态换成逐位比表）。判据：①② 断言集相同、只有期望不同；③ 差异全在**段宽 / `addr.plane` / 位图**三个字段。`unc` / `masked_chain` / `mata_error` / `crc_error` / `ldpc_raw` **刻意不并**——各自断言不同的可观测量。Level 2 计数 18→**12**（RAID=1 时 20→**14**；参数化展开后实际跑 31 个用例，与合并前一致）。顺带修正表中两条陈旧参数（`masked_chain` 实为**单 plane 段**、`mata_error` 实为 4CW）与两处 `§二十二`→`§二十三` 的引用。⚠ 仍**未编译**（Level 3 在旧符号上），上板未验 |
 | 2026-10-09 | v1.12 | **Level 2 步骤级用例 + 参数化 + munit 移植修复的文档同步**（见 `docs/changelog/fc_data_path_step_primitives_v29.md`）。① §2.2 补「两种形态」（**步骤级** 调单 CW 原语 / **管线级** 建链走 config 位）与**步骤级用例**小节：`crc_step_detect`（参数化 4 case，含 `meta-1` / `parity-1` 两条**负例**——钉 CRC 只覆盖 USER `[8,520)`，META 与 parity 在覆盖外）、`ecc_step`（参数化 11 case）、`scramble_whiten`；② Level 2 计数 15→**18**（RAID=1 时 17→**20**）；③ §1 / §5.4 补参数化机制：`munit_parameters_get()` 是 v29 补回的上游漏移植函数（另修 `run_test_wild` 递归实参、`runner->suite->iterations`），CLI `--param name value` 一直是通的；④ §5.1 文件树补 `fc_test_common.{c,h}`；⑤ v27/v28 的 `cw_mask`→`cw_bitmap` 改名与「位图作建链实参」已同步（§2.2 参数组合表、建链几何表）。⚠ **Level 3 仍在旧符号上**（`test_page_cmd_ex` 等），`make tests` 编不过——v27/v28/v29 三版共同的遗留中间态 |
 | 2026-10-08 | v1.11 | **Level 2 重构：fixture 修正 + RAID 退化用例清理 + 覆盖补齐，10→15（RAID=1 时 17）**（见 `docs/changelog/fc_ut_level2_rework_v22.md`）。① **fixture 修正**：新增 `alloc_cmd_full()` 统一建链并设 `paa = paa_make(32, 0, 50, 0, 0)`——原 fixture 不设 `paa`，BASIC 种子退化成 `{1,1,2,3}`、keystream 除 byte0 外全 0，所有 `random=ON` 用例的加扰是空转；random=ON 用例补「encode 后 USER 区 ≠ 明文」自证断言。② **RAID 组删 4 留 2**：删 `encode_raid_on` / `raid_recover_first` / `_mid` / `_last`（构造不出真 stripe，只靠三重巧合通过；判据见 `assertion_guidelines.md` §十七·判据 6），保留 `raid_recover_no_random` 与真 stripe 的 `generate_stripe_parity`。③ **覆盖补齐 5 条**：`encode_crc_disabled`、`process_read_masked_chain`（专钉 Pass 4 的 `paa_to_cw`）、`process_read_mata_error`、`process_read_crc_error`、`process_read_ldpc_raw`。④ **断言加强**：`process_read_ok_*` / `_single_cw` 补 `desc->status == READY`（process_read 标脏后仍返回 OK）。⑤ **去冗余**：删 `fill_pattern` 包装与 `print_resource_stats` 注释块，`get_cw_buffer` / `get_cw_base` / `get_cw_count` 收敛到 `cw_desc()` 之上。⚠ 本 fork 的 `MunitSuite` 结构体没有 `setup` 字段，套件级 setup 不存在，故仍逐用例挂 `setup_level2`（靠 `g_level2_inited` 幂等）。`make -k tests` 0 error/0 warning、链接 197344 B；RAID=1 档 0/0、204328 B；format-check 过；上板未验 |
 | 2026-10-08 | v1.10 | **Level 1 套件合并：`command` / `queue` / `scheduler` 三子套件 → 单个 `logic`**（11 条用例不变）。理由：Level 2/3 已是「一个文件一个套件」，Level 1 是唯一例外；合并后 `command`(2) / `scheduler`(1) 的过滤粒度已细到等于「单跑一条用例」，而本层全部用例是纯 RAM 微秒级，按模块过滤无收益；真正需要过滤的边界是**依赖面**，由根套件 Level 1/2/3 三层保住。`test_scheduler_init` 用例名 `init` → `scheduler_init`（合并后去歧义）。改动：`tests/unit/test_fc_level1.c`（3 数组→1）、`tests/unit/ut_main.c`（3 extern + 3 表项 → 1 + 1）、本文档 §2.1/§3/§5.1/§4.2、`munit_adapter.md`、`wsl_debug_environment.md` 的 CLI 示例路径 `/fc-nand/command/...` → `/fc-nand/logic/...`。单条用例仍可按全路径跑（`/fc-nand/logic/push_pop`） |

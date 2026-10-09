@@ -801,6 +801,26 @@ FC 的 ERASE 分支给请求位图硬置一个 CW0 位，唯一目的是让 `com
 
 **只有 `case` 一个维度**，不是 k×region 的笛卡尔积——后者会造出一堆重复/无意义的组合（§2.2 已记）。
 
+**追加应用（同轮）**：`encode` / `process_read_ok` 两组原本各是 3 条独立用例
+（`encode_random_off` / `_random_on` / `_single_cw`；`process_read_ok_random_on` / `_random_off` /
+`_single_cw`），按判据 7 各收成**一条参数化用例**：
+
+| 用例 | 形态 | 理由 |
+|---|---|---|
+| `encode` | **参数化** 3 case | 三条断言集相同（`cw_count` / META / CRC / parity），只有两列**期望**不同：cw 数、USER 区是否仍是明文（`random-on-4cw` 期望**已非明文**，另两条期望仍为明文） |
+| `process_read_ok` | **参数化** 3 case | 三条的断言**全在 `l2_buffer_round_trip()` 内**，入参恰好就是 helper 的三个形参 |
+| `cw_bitmap` | **参数化** 3 case | 三条共用「建链 → 收链 → 断言 desc 数 → 逐条断言 (plane, cw)」骨架，差异全在**段宽 / `addr.plane` / 位图**三个字段；期望链以显式表给出 |
+
+> `cw_bitmap` 一组带一处**代价**：原 `plane1-only` / `span-multi-plane` 把期望写成**规则**
+> （`plane[i]==1 && cw[i]==i`、`plane[i]==(i<CW_NUM)?0:1 && cw[i]==i%CW_NUM`），规则本身是
+> 「plane-major」「cw 循环」两条不变量的代码表达；改显式表后不变量只剩注释在扛。仍合的理由是
+> 三行的 (段宽, `addr.plane`, 位图) 组合摆在一张表里、缺口一眼可见，且失败诊断不差。
+
+**反例（刻意不并）**：`process_read_unc` / `masked_chain` / `mata_error` / `crc_error` / `ldpc_raw`
+各自断言**不同的可观测量**（返回码 / 不同的 `status` 位 / 不同的哨兵区）——合表须给每行挂 setup
+回调，收益不足。`mata_error` 与 `crc_error` 断言形状相同（逐 CW 查一个 `status` 位）但 setup
+机制不同（改 `cmd->meta` vs 翻 `config.crc` + 预置哨兵），同样不并。
+
 ### 判据 8：负例钉的是**覆盖边界**，不是「没坏就行」
 
 `crc_step_detect` 的两条负例（`meta-1` / `parity-1` 必须**不**被 CRC 检出）来自
