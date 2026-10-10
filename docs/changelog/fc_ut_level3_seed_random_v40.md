@@ -218,7 +218,8 @@ test --log-visible info --seed 0x<上一轮打印的> /fc-nand/lifecycle/  # 复
 
 - 不动 `src/ftl/**`（一行不动）；其余 `src/**` 只改了 `usart.c` 的那行帮助串；
   不动 `tests/framework/munit.*`（不导出带盐 API——留在测试文件里，避免 fork 漂移）；
-  不动 `ut_main.c`；不翻 `CONFIG_FC_RAID`；不重写既有 changelog 正文。
+  不动 `ut_main.c`（**v40 自身不动**——随后 v41 只改了三个套件前缀字面量，
+  见 `docs/changelog/fc_ut_suite_prefix_slash_v41.md`）；不翻 `CONFIG_FC_RAID`；不重写既有 changelog 正文。
 
 ## 出处
 

@@ -392,15 +392,20 @@ static MunitSuite g_fc_nand_suite = {
     (char *)"/fc-nand/",
     NULL,
     (MunitSuite[]){
-        { (char *)"logic",     g_fc_logic_tests,     NULL, 1, MUNIT_SUITE_OPTION_NONE },
-        { (char *)"data_path", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
-        { (char *)"lifecycle", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+        { (char *)"logic/",     g_fc_logic_tests,     NULL, 1, MUNIT_SUITE_OPTION_NONE },
+        { (char *)"data_path/", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+        { (char *)"lifecycle/", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
         { NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE },
     },
     1,
     MUNIT_SUITE_OPTION_NONE,
 };
 ```
+
+> **⚠ 前缀必须以 `/` 结尾**：munit 把前缀与用例名**首尾相接**，不补分隔符
+> （`munit.c:1285` 下探子套件、`munit.c:1103` 拼用例名），而本仓的**用例名不带前导斜杠**。
+> 根前缀 `"/fc-nand/"` 已带尾斜杠，子套件漏了就会打印成
+> `/fc-nand/lifecycleblock_multi_plane`，且过滤串 `/fc-nand/lifecycle/…` **一条都匹配不上**。
 
 > **2026-10-08 合并**：Level 1 原先按模块切成 `command`(2) / `queue`(8) / `scheduler`(1)
 > 三个子套件，现合并为单个 `logic`——**一个文件一个套件**，与 Level 2（`data_path`）/
@@ -437,9 +442,9 @@ extern MunitTest g_fc_lifecycle_tests[];
 static MunitSuite g_fc_nand_suite = {
     (char *)"/fc-nand/", NULL,
     (MunitSuite[]){
-        { (char *)"logic",     g_fc_logic_tests,     NULL, 1, MUNIT_SUITE_OPTION_NONE },
-        { (char *)"data_path", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
-        { (char *)"lifecycle", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+        { (char *)"logic/",     g_fc_logic_tests,     NULL, 1, MUNIT_SUITE_OPTION_NONE },
+        { (char *)"data_path/", g_fc_data_path_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
+        { (char *)"lifecycle/", g_fc_lifecycle_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE },
         { NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE },
     },
     1, MUNIT_SUITE_OPTION_NONE,
@@ -482,7 +487,15 @@ ssd> test --log-visible info --iterations 5 /fc-nand/lifecycle/ # 每条抽 5 �
 ssd> test --seed 0x1a2b3c4d /fc-nand/lifecycle/                # 复现上一轮
 ssd> test --list-params /fc-nand/data_path/                    # Level 2 仍有参数化用例（case=…）
 ssd> test --single --param case meta-1 /fc-nand/data_path/     # CLI 值优先于随机挑值
-ssd> test
+ssd> test                                                      # 全套（**不加过滤串**才是全套）
+```
+
+> **过滤串的两条约束**（`munit_test_runner_run_suite`，`munit.c:1294-1306`）：
+> ① **套件名要带尾斜杠**——`/fc-nand/lifecycle/` ✅、`/fc-nand/lifecycle` ❌；
+> ② **根套件名单独用不了**——`/fc-nand/` **一条都不匹配**（过滤串比子套件路径短，`strncmp`
+> 撞上 `'\0'` 就判不等）。跑全套用**不带过滤串**的 `test`。
+> ② 是 fork 既有的匹配缺陷（与 `munit.c:1275` 自述的「按完整路径前缀匹配」不符），
+> 本轮**只记录不改**——修它要动 `tests/framework/munit.c`。
 
 ### 4.3 构建集成
 
@@ -782,6 +795,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-11 | v1.23 | **子套件前缀补尾斜杠：打印路径与过滤串修正**（`tests/unit/ut_main.c`，见 `docs/changelog/fc_ut_suite_prefix_slash_v41.md`）。munit 把套件前缀与用例名**首尾相接**（`munit.c:1285` 下探子套件、`:1103` 拼用例名），**不补分隔符**；根前缀 `"/fc-nand/"` 带尾斜杠，而三个子套件写成 `"logic"` / `"data_path"` / `"lifecycle"` ⇒ 打印成 `/fc-nand/lifecycleblock_multi_plane`，且**文档里一路写的过滤串 `/fc-nand/lifecycle/…` 一条都匹配不上**（本仓用例名不带前导斜杠）。改动 = 三个字面量补尾斜杠 + 一段警示注释，**测试代码零逻辑改动**（用例名 / 断言 / 用例数不变，仍 51）。⚠ 副作用：**不带**尾斜杠的套件过滤串（`/fc-nand/lifecycle`）由「匹配」变「不匹配」；`--single` 下参数按用例名哈希挑值（`munit.c:1198`）会因全路径变化而挑到不同的值（仅 `--single` 档可见）。⚠ 另一处**既有**缺陷只记录不改：`/fc-nand/`（根套件名）**一条都不匹配**（过滤串短于子套件路径 ⇒ `strncmp` 撞 `'\0'` 即判不等），跑全套要用**不带过滤串**的 `test`。`make format-check` 过、`make clean && make tests` 0 warning 0 error、链接 **219836 B**；**上板未验**（`test --list` 可一眼确认用例名） |
 | 2026-10-11 | v1.22 | **Level 3 地址随机化：用例体内 salted PRNG，窗口 30%~70%**（见 `docs/changelog/fc_ut_level3_seed_random_v40.md`）。① **去参数化**：删 `test_fc_level3.c` 的 `MunitParameterEnum`（`l3_blocks` `100`/`104`、`l3_planes`、`l3_samples` edges/spread/middle/dense）与取值函数 `l3_param_block` / `l3_param_plane` / `l3_sample_case_find`，以及 `#define L3_BLOCK_DEST_OFF (2U)`。② **改用例体内抽样**：新增窗口常数 `L3_BLOCK_LO` / `L3_BLOCK_HI`（编译期由 `BLOCKS_PER_PLANE` 算出 30%/70% ⇒ **614..1433**，避**固定**元数据区 0..41）与 `l3_hash`（DJB2，与 `munit.c:386` 逐字同）/ `l3_rand` / `l3_block_draw` / `l3_plane_draw` / `l3_dest_draw` / `l3_pages_draw` / `l3_cws_draw`。③ **为什么必须加盐**：munit 每 `exec` 前 reseed 回 `runner->seed`（`munit.c:774`）、导出的 `munit_rand_*` **不带 salt**（`munit_rand_at_most` 是 `static`，`munit.c:503`）⇒ 无盐时六条会抽到同一个块、整轮只有一个 plane。`l3_rand = munit_rand_uint32() ^ hash(用例名) ^ hash(用途标签)`。④ **随机化的量**：block、plane、内部搬移目标块（同窗口另抽，`src ≠ dest`，撞上则环移一格）、`block_random_data` 的页集（n∈[2,8]）与 CW 集（n∈[1,4]），拒绝采样；上限 8×4 = 32 探针 = 旧 `dense` 档最坏值 ⇒ 板上耗时上界不变。⑤ **覆盖旋钮改 `--iterations N`**（六条保留 `MUNIT_TEST_OPTION_NONE`）：用例数 **77 → 51**（Level 3 **35 → 9**；Level 1 = 11、Level 2 = 31 不变）。⑥ 证据打印补齐（`--log-visible info`）：`internal_data_move` / `block_erase_verify` / `block_cache_ops` / `block_random_data` 各打一句摘要，`block_random_data` 打 64 位页掩码（拆两个 `%08lX`）+ CW 掩码 + 探针数，掩码 popcount 自证互不重复。⑦ `usart.c` 的 `test` 帮助串补 `--iterations N`（**唯一的 `src/**` 改动**，其余 `src/ftl/**` 一行不动；帮助串变长 ⇒ AAS 重排整张 CLI 表，纯空白）。`make format-check` 过、`make clean && make tests` 0 warning 0 error、链接 **219836 B**；固件 `make` 0/0、**166108 B**；**上板未验** |
 | 2026-10-10 | v1.21 | **Level 2 用例审查：12 个函数补注释 + multi-plane 窄位图的生产侧守卫**（见 `docs/changelog/fc_multiplane_narrow_bitmap_v39.md`）。① **注释**（纯注释、零逻辑改动）：`test_fc_level2.c` 给 `l2_verify_parity_nonzero`、五张场景表的 `*_case_find`、`test_crc_step_detect`、`test_ecc_step`、`test_encode`、`test_process_read_ok`、`do_raid_recover_test`、`test_raid_recover_no_random`、`test_cw_bitmap` 共 12 个此前无注释的函数补「功能 / 测什么 / 为什么这么判」。② `test_process_read_masked_chain` 的 ⚠ 注释更新：那条「multi-plane 必须逐 plane 覆盖」的约束**此前只在夹具里**，v39 起 `fc_build_request_data_planes` 也守同一不变式 ⇒ 生产侧不再是裸奔。③ **生产侧新守卫**（`src/fc/fc.c`，本套唯一被它影响的路径是**测试夹具已挡掉的**非法输入）：multi-plane 命令的 desc 链没覆盖 plane 段里每个 plane 时，debug 档 `ASSERT` 停机、release 档返回 `FC_STATUS_INVALID_ARGUMENT` 拒绝，经 `fc_build_dispatch_request`（`void` → `fc_status_t`）透传到两条派发路径，`fc_poll_fail_command` 注 `NAND_FAIL` 完成项。**断言与用例数不变（77）**。`make format-check` 过、`make clean && make tests` 0/0、链接 **219484 B**；release 档 100884 B（2 处**既有**告警，均不在改动文件内）；**上板未验**。⚠ 新守卫**无单测覆盖**（夹具 `test_cmd_build` 在上游就挡住了非法输入），是代码走查确认的 |
 | 2026-10-10 | v1.19 | **把「加扰 = 统计独立」的理论写入设计文档 + 注释代码（纯文档，无逻辑改动）**（见 `docs/changelog/fc_scrambler_theory_v37.md`）。背景：一次关于 `scramble_whiten` 输出的讨论暴露了「加扰 = 追求 `0101…` 均衡」的误解。① 主设计文档 `fc_nand_design.md` 新增 **§5.4「加扰的目标：统计独立」**——**条件** 1/2（独立）vs **无条件** 1/2（均衡）、三种序列对照、`段数 ≈ n/2` 与几何分布 `P(len=k)=2^-k` 的推导、`0101…` 为何对 NAND 有害（零结构 / CCI 最坏 / 与阵列物理周期谐振 ⇒ 系统性错误，ECC 怕系统性）。② 本文档新增 **§5.6「游程统计判据的理论依据」**——`l2_bit01_analyze` 的状态机（`cur` 从首位初始化 / 循环后补收尾 / `≥16` 钳位）、`段数 ≈ n/2`、判据 ② **双侧**（低了 = 强制交替 / 高了 = 长游程），以及判据 ①②③ 的**盲区**（`00110011…` 三条全过却仍是周期图案）。③ 注释：`test_fc_level2.c` 给 `l2_bit01_analyze` 补前导注释、给 `test_scramble_whiten` 补理论依据；`fc_random_engine.{c,h}` 点明「目标是独立，均衡只是副产品」。**不改断言、不改用例数（77）、不改任何 `src/**` 逻辑**（`fc_random_engine.c` 只动注释）。`make format-check` 过、`make clean && make tests` 0/0、链接 **219012 B**（与 v36 逐字节同）；**纯文档 + 注释，无需上板** |

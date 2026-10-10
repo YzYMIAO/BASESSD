@@ -347,6 +347,56 @@ FC 单测的**证据打印**（`tests/unit/fc_test_common.c` 的 `test_trace_sum
 改动只有 3 行，**不改任何既有行为**：不碰默认可见级、不碰过滤顺序、不碰 `--log-fatal`。
 §2.4 补了该函数的语义与三个坑（默认 ERROR / 过滤在输出前 / 可见级跨 `munit_suite_main` 不重置）。
 
+### v1.5 (2026-10-11) — 套件路径的构造与过滤：前缀**必须带尾斜杠**
+
+**框架侧零改动**（`munit.c` / `munit.h` 一行未动），本轮只订正**使用者**的约定并记录一处**既有**匹配缺陷。
+
+#### 路径构造（照抄上游，无分隔符逻辑）
+
+`munit_maybe_concat`（`munit.c:314`）是**纯首尾相接**，不补任何分隔符；两处调用点：
+
+| 位置 | 拼接 |
+|---|---|
+| `munit.c:1285` | `pre = prefix + suite->prefix`（下探子套件） |
+| `munit.c:1103` | `test_name = pre + test->name`（拼用例名，`:1128` 打印 + `':'`） |
+
+⇒ **完整路径 = 各级 `prefix` 与用例名的逐字相加**。本仓**用例名不带前导斜杠**（`"block_multi_plane"`），
+所以**每一级套件前缀都必须自己带尾斜杠**。`ut_main.c` 的根前缀 `"/fc-nand/"` 一直是对的，
+三个子套件原先写成 `"logic"` / `"data_path"` / `"lifecycle"` ⇒ 打印成
+`/fc-nand/lifecycleblock_multi_plane`，且 `/fc-nand/lifecycle/…` 形式的过滤串**一条都匹配不上**。
+v41 补成 `"logic/"` / `"data_path/"` / `"lifecycle/"`（见 `docs/changelog/fc_ut_suite_prefix_slash_v41.md`）。
+
+#### 过滤匹配（`munit.c:1294-1306`）的两条约束
+
+```c
+(pre_len == 0 || strncmp(pre, *test_name, pre_len) == 0) &&
+strncmp(test->name, *test_name + pre_len, strlen(*test_name + pre_len)) == 0
+```
+
+即「过滤串的前 `pre_len` 字节 == 当前套件路径」**且**「过滤串余下的部分 == 用例名」。
+
+| 过滤串 | 结果 |
+|---|---|
+| `/fc-nand/lifecycle/` | ✅ 该套件全部用例 |
+| `/fc-nand/lifecycle/block_write_read` | ✅ 单条 |
+| `/fc-nand/lifecycle`（缺尾斜杠） | ❌ 余下部分为空串以外对不上（补斜杠**前**反而匹配，是本轮的**行为变更**） |
+| `/fc-nand/`（根套件名） | ❌ **一条都不匹配** |
+| 不传过滤串 | ✅ 全套 |
+
+#### 已知缺陷（**只记录，未修**）
+
+`/fc-nand/` 匹配不了任何用例：过滤串（9 字节）比子套件路径（如 `/fc-nand/lifecycle/`，19 字节）**短**，
+`strncmp(pre, filter, pre_len)` 走到 `filter` 的 `'\0'` 就判不等（`strncmp` 遇 `'\0'` 即停）。
+这与 `munit.c:1275` 自述的「用户指定的测试名与**完整路径**进行前缀匹配」**不符**——正确语义应是
+「用例完整路径以过滤串为前缀」。修它要动 `munit.c`（框架侧），本轮不做；**跑全套用不带过滤串的 `test`**。
+
+#### 副作用（如实记录）
+
+全路径变了 ⇒ `--single` 档下「参数按用例名哈希挑值」（`munit.c:1198` 的
+`munit_rand_at_most(munit_str_hash(test_name), …)`）会挑到**不同的值**。仅 `--single` 档可见；
+默认档是全组合枚举，不受影响。v40 的 Level 3 盐 `l3_rand(test, tag)` 用的是**裸用例名**字面量，
+与套件路径无关 ⇒ **不受影响**。
+
 ### 修订历史条目格式
 
 ```markdown

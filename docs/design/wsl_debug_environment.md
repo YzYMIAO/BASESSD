@@ -225,23 +225,27 @@ socat TCP-LISTEN:2331,reuseaddr,fork TCP:$WINDOWS_IP:2331 &
 ### 4.4 运行单元测试
 
 ```bash
-# 全跑三级 UT
-test --param block 10
+# 全跑三级 UT（**不加过滤串**才是全套）
+test
 
-# 分层运行
+# 分层运行（套件名**必须带尾斜杠**）
 test /fc-nand/logic/          # Level 1（11 条：command + queue + cqueue + scheduler）
 test /fc-nand/data_path/      # Level 2
-test --param block 10 /fc-nand/lifecycle/   # Level 3
+test /fc-nand/lifecycle/      # Level 3（地址随机化：--iterations N 是覆盖旋钮）
 
 # 其他
 test --list                    # 列出所有套件
 test --seed 0x1234             # 指定随机种子
 
 # 证据打印：开了才打「这条用例证明了什么」（默认档输出逐字不变）
-test --log-visible info  /fc-nand/                 # 每用例 1-3 行 [EV] 摘要
+test --log-visible info                            # 每用例 1-3 行 [EV] 摘要
 test --log-visible debug /fc-nand/lifecycle/block_write_read   # 单条用例逐页明细
 test --log-visible error                            # 改回默认（可见级跨 test 调用残留）
 ```
+
+> ⚠ **`/fc-nand/` 这个根套件名单独用不了**——`test /fc-nand/` **一条都不匹配**
+> （过滤串比子套件路径短，`strncmp` 撞上 `'\0'` 即判不等），跑全套请用**不带过滤串**的 `test`。
+> 套件名也**必须带尾斜杠**（`/fc-nand/lifecycle` ❌ / `/fc-nand/lifecycle/` ✅）。
 
 > ⚠ 别用 `--log-fatal info`——它与 `--log-visible` 共用取值解析，会让每条日志 `abort()`。
 > `debug` 档是阻塞式 UART 输出（≈11.5 KB/s），只对**单条**用例跑；开证据后 `[ N ms ]` 不再可信。
@@ -907,6 +911,7 @@ ipconfig                # → vEthernet (WSL) 适配器 IP
 
 | 日期 | 变更 | 作者 |
 |------|------|------|
+| 2026-10-11 | §4.2 的 `test` 示例修正：套件名补尾斜杠（`/fc-nand/logic/` 等，`ut_main.c` v41 起前缀带 `/`）；删掉已失效的 `--param block 10`（v40 起 Level 3 不再参数化）；`test --log-visible info /fc-nand/` → `test --log-visible info`（根套件名单独用不匹配任何用例）；补两条过滤串约束的警示 | Claude Code |
 | 2026-10-04 | §5.3 脚本同步为当前 4 步直连版（直接从 `sh/debug_env.sh` 生成）；§2.3 补充 portproxy 残留必须删除的说明与命令；§7.2 新增故障 #8（portproxy 抢占 2331）；§4.3 手动命令补 `-LocalHostOnly 0`；§7.3 补查/删 portproxy 命令 | Claude Code |
 | 2026-09-26 | 切换到 -LocalHostOnly 0 直连方案；移除 portproxy/WSL2 内建转发双层 fallback；脚本 6→4 步；新增 §8.11 | Claude Code |
 | 2026-09-25 | 终版修复：脚本不再管理 portproxy，回归一次性配置原则；修正 §8.5 中"JLink 绑 0.0.0.0"的误判；新增 §8.6 全链路排查记录 | Claude Code |
