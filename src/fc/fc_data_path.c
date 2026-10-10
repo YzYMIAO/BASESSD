@@ -162,7 +162,9 @@ uint32_t fc_data_path_meta_check(const uint8_t *cw, uint32_t command_meta, nand_
      * 而 ECC/CRC 都查不出来（CRC 在加扰区外、是明文，但它保护的是 USER，
      * 种子错时 CRC 必然不过——不过那已被记成 CRC_ERROR，语义不如这里直接）。
      * ⚠ 必须用 paa_to_plane/paa_to_cw 而非链走位：cw_bitmap 不满时
-     *   两者不同（v22 已确立）。 */
+     *   两者不同（v22 已确立）。
+     * ⚠ command_meta == FC_META_UNKNOWN 时第二项被跳过，本函数只剩这项 3 位自洽；
+     *   META 的其余保护来自「种子耦合」——见 fc_nand_design.md §5.3 的 META 保护矩阵。 */
     expected_low = ((uint32_t)paa_to_plane(paa) << PBA_PLANE_SHIFT) | (uint32_t)paa_to_cw(paa);
 
     if ((read_meta & PLANE_CW_MASK) != expected_low)

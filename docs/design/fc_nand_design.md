@@ -323,6 +323,14 @@ FC_CW_STATUS_PROTECTED   // 目标块受保护
 
 状态汇总规则：READY 需要所有有效 CW 就绪；失败位任意 CW 置位即置位。
 
+**谁在读这些失败位**：
+
+- **FC 侧**：`FC_CW_STATUS_ERROR_MASK`（六个错误位的并集，见 `fc_command.h`）用于挑出**首个失败 CW** 的
+  `desc_id`（`fc.c:778`），兑现 `fc_command_status_t.desc_id` 的契约（"first-failing desc on error"）。
+- **FTL 侧**：目前**只判 `FC_CW_STATUS_NAND_FAIL`**（`ftl.c:92`、`ftl_fc_interface.c:431/459/527`、
+  `gc.c:75`、`read_recovery.c:96`）⇒ `UNC` / `CRC_ERROR` / `MATA_ERROR` 被当成功。
+  **已检出的错误会以 `SSD_STATUS_OK` 交给主机**——见 §8.2。
+
 ### 2.5 完成状态 (fc_command_status_t)
 
 ```c
@@ -1204,6 +1212,16 @@ NAND 读取完成
               └─ 仍失败 → BBT / read retry / 其他恢复策略
 ```
 
+**三道校验各抓什么**（上面的流程图只列了「做了什么」，这里说「为什么三道都要」）：
+
+| 校验 | 抓什么 | 抓不到什么 |
+|---|---|---|
+| **Pass 1 ECC** | 介质里**随机散布**的位错（≤ t = 4） | **误纠**（报成功但解错，见 §21.3.3）；超能力 → `UNC` |
+| **Pass 3 CRC** | ECC **误纠**（落在 USER 那 512B 里的部分）+ **数据路径逻辑错**（buffer / 加扰 / 搬运任一环出错都会让 CRC 不过） | 只盖 `[8,520)`；对**系统性**错误图样有线性盲区（`g(x)` 的倍数是恒通过的） |
+| **Pass 4 META** | META 损坏——低 3 位**自洽**（== 本 desc 的 plane/cw）+ 与 `command->meta` **逐位精确比对** | `command->meta == FC_META_UNKNOWN` 时**跳过**精确比对（GC / 掉电重建不知道 LBA） |
+
+**加扰开启时还有一道隐式的**：Pass 2 的种子取自**页内明文 META**（`fc_random_seed_from_meta`），所以 META 错 ⇒ 种子错 ⇒ USER 解成垃圾 ⇒ Pass 3 必然失败。**这正是 GC 路径跳过 Pass 4 交叉校验仍然安全的原因**——但它是**隐式耦合**，一旦 `random=OFF` 就失效（见 §5.3）。
+
 ### 单 CW 步骤原语（v29）
 
 上面两条管线的每个算法步骤都拆成了**单 CW 原语**（`include/fc/fc_data_path.h` 的「单 CW 步骤原语」段），
@@ -1255,7 +1273,31 @@ FC 内部通过 fc_buffer_get_base() 获取 CW 基址（[0]），
 数据路径（加扰/ECC/RAID）操作全 528 字节。
 ```
 
-数据路径编码流程（加扰/ECC/RAID）：
+**每个字段由谁保护**：
+
+| 字段 | 范围 | 保护者 |
+|---|---|---|
+| META | `[0:4)` | **ECC**（在 `[0,520)` 码字内）+ Pass 4 自洽 / 精确比对 +（加扰开启时）种子耦合 |
+| CRC | `[4:8)` | **ECC**——CRC 字段本身不自我覆盖，靠 ECC 保证它没在存储 / 传输中损坏 |
+| USER | `[8:520)` | **ECC** + **CRC-32** |
+| PARITY | `[520:528)` | **ECC**（它本身就是 ECC 的产物，没有第二层） |
+
+**为什么「CRC 只盖 USER」是分工，不是漏**：CRC 在这里的职责是**抓 ECC 误纠**（§21.3.3）——误纠是**整码字**事件，可能落在 META 也可能落在 USER；落在 USER 的由 CRC 抓，落在 META 的由 Pass 4 抓。而 Pass 4 在**期望值已知**时用的是**逐位精确比对**，检出率 100%，**比 CRC-32 的 1−2⁻³² 更强**。
+
+**四条读取路径的 META 保护矩阵**：
+
+| 路径 | `random` | `crc` | `command->meta` | META 靠什么查 |
+|---|---|---|---|---|
+| 主机数据读（`FTL_PAGE_CFG_DATA`） | ON | ON | 已知 | Pass 4 **精确比对** |
+| GC / 搬移读（`gc.c:52`） | ON | ON | `FC_META_UNKNOWN` | Pass 4 自洽（3 位）+ **种子耦合 → CRC 失败** |
+| 元数据页读（`FTL_PAGE_CFG_META`） | OFF | OFF | `0`（期望值即 `plane_cw`） | Pass 4 **精确比对** |
+| RAW 读（`LDPC_RAW`） | OFF | OFF | — | 无——**刻意**（坏页也要原始数据） |
+
+**四条生产路径都能检出 META 损坏。**
+
+**行业对照**：这不是本工程的特例。T10 PI / DIF 的 guard 是 CRC-16，也**只盖逻辑块数据**；「地址对不对」靠 reference tag **与期望值比对**，不靠 CRC——与本工程 Pass 4 是同一个思路。判据不是「CRC 该盖哪些字节」，而是「**这个字段出错时，你能不能用别的手段发现**」：期望值已知 → 比对；期望值未知 → 需要**独立**校验；字段本身无冗余 → 只能靠 ECC。
+
+**⚠ 本工程的差异点**：GC / 掉电重建路径（期望值**未知**）靠的是**种子耦合**——它是加扰的一个**副产品**，没写进任何契约，且一旦 `random=OFF` 就失效。行业在这里会放一个**显式**校验（独立 CRC / 序号 / 冗余存储）。见 §8.2 与 §21.3.5。
 
 ### 5.4 加扰的目标：统计独立
 
@@ -1393,6 +1435,8 @@ static inline uint32_t   paa_to_nand_row(nand_paa_t paa);         // 转换为 N
 | 死代码 `flash_controller/` | 模块已删除 | ✅ 已解决 |
 | 桩文件清理 | `bad_block.c`, `ecc.c`, `nand_command.c`, `nand_timing.c` 已删除 | ✅ 已解决 |
 | 双完成结构转换 | `fc_complete_from_nand()` 简化为直接字段拷贝 | ✅ 已解决 |
+| **FTL 只判 `NAND_FAIL`** | FC 把 `UNC` / `CRC_ERROR` / `MATA_ERROR` 都 OR 进 `completion.status`（`fc.c:772` 全链聚合），但 FTL 五处判据只查 bit0 ⇒ **已检出的错误当成功交给主机**（`*status_out = SSD_STATUS_OK`）。本工程无 read retry / RAID 兜底（`CONFIG_FC_RAID=0`）⇒ 等效 UBER ≈ `P(误纠)` 而非 `P(误纠) × 2⁻³²`（理论见 §21.3.3）。**在 FTL 层，本次不改 `src/ftl/**`** | 📝 已文档化 |
+| **GC / 掉电重建路径 META 缺显式校验** | `command->meta == FC_META_UNKNOWN` 时 Pass 4 交叉校验被跳过，META 只剩 3 位自洽 + **种子耦合**（隐式，且依赖加扰开启）。行业在此放显式校验（独立 CRC / 序号 / 冗余）。见 §5.3 | 📝 已文档化 |
 
 ### 8.3 功能扩展规划
 
@@ -3681,6 +3725,43 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
   - 纠错能力弱：t=4（SLC 够用，TLC/QLC 远不够）；LDPC 硬判决在高码率下纠错有限，软判决未实现（stub）。
   - **每次读/写都要占用 CPU**，与数据搬移竞争 M7 周期。
 
+**⚠ 一个比「t 不够大」更本质的问题：ECC 的两种失败模式**
+
+上面「代价」说的是**量**（t=4 纠不动 TLC）。但 ECC 还有一个**质**的问题：**它报「成功」时，数据不一定对**。
+
+ECC 超能力时有**两种**表现，只有第一种是安全的：
+
+| 失败模式 | 表现 | 上层能否发现 |
+|---|---|---|
+| ① **不可纠** | 解码器报失败（`FC_CW_STATUS_UNC`） | ✅ 可检测——上层能重读 / 换页 / RAID 恢复 |
+| ② **误纠**（miscorrection） | 解码器**报成功**，但输出的是**另一个合法码字** | ❌ **不可检测**——静默错误 |
+
+迭代解码的三种收尾，只有中间那种是危险的：
+
+| 收尾 | 校验子 `H·c` | 报什么 | 可检测？ |
+|---|---|---|---|
+| 收敛到**正确**码字 | 0 | 成功 | — |
+| 收敛到**错误**码字 | **0** | **成功** | ❌ **误纠** |
+| 不收敛 / 停在非码字 | ≠0 | 失败 | ✅ |
+
+**LDPC 的 error floor 就是②**。迭代消息传递（BP / min-sum）在小的 **trapping set / absorbing set**（也叫 near-codeword）里会卡死：集合内部的校验节点连着**偶数个**错误 bit，校验和正好为 0，于是**满足**——文献里管这叫 "**deceptively satisfied**" checks；剩下少数不满足的校验节点**无法定位**错误分布，校验子权重不再下降，额外迭代提取不到新信息，解码器停在不动点，输出一个**校验子为零的错误码字**。这是 sub-optimal 迭代解码的**结构性**后果（码的 Tanner 图里存在小 trapping set），不是实现 bug。
+
+**BCH 也有同样的病，只是概率模型不同**：BCH 是**有界距离解码**，收到字落在某码字的距离 t 球内就纠过去；当错误数 ≥ t+1 **且**收到字落进**另一个**码字的 t 球内 → 误纠。
+
+一个反直觉的点：**LDPC 因为没有干净的距离保证，报「失败」的频率其实比 BCH 高；但一旦它报成功，仍然可能是错的**——「ECC 报成功」这个信号**本身不可信**。
+
+**推论：CRC 不是可选项。** 独立校验把②变成「可检测的失败」，行业指标 UBER（uncorrectable bit error rate，**纠错之后**的错误率）就是靠这个乘积达到的：
+
+```
+UE ≈ P(误纠) × P(CRC 漏检) ≈ P(误纠) × 2⁻³²
+```
+
+单靠 ECC 打不到 1e-15 / 1e-16 的 UBER 目标，**必须有 CRC 这一道**。本工程的读路径 Pass 3 就是它（见 §5.2）；「CRC 只覆盖 USER、不覆盖 META」是刻意的覆盖边界（见 §5.3）。
+
+> 出处：Koopman, *32-Bit Cyclic Redundancy Codes for Internet Applications*, DSN 2002；
+> *Error Characterization, Mitigation, and Recovery in Flash-Memory-Based SSDs*（arXiv:1706.08642）；
+> USENIX FAST'13 *LDPC-in-SSD: Making Advanced Error Correction Codes Work Effectively in Solid State Drives*。
+
 #### 21.3.4 无硬件数据搬移 → 单对 DMA + PIO 兜底
 
 - **行业**：每通道独立硬件 DMA，DMA 引擎内完成数据搬移 + ECC inline。
@@ -3717,6 +3798,10 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
 > 加扰粒度 = **被寻址逻辑单元**。本工程一个 CW（512 B 用户数据）= 一个扇区 = 一个逻辑单元，故每条 CW 用
 > 自己那条扇区 LBA 当种子；这正是业界"种子 = 被寻址逻辑单元的地址"（一个逻辑块由若干 512 B–2 kB 的
 > ECC 码字组成，块内码字共用该逻辑块的种子）。详见 `docs/changelog/fc_scrambler_lba_seed_v24.md`。
+
+**副作用（v38 记录）**：明文 META + 种子耦合还带来一个**隐式**的保护——**META 损坏会传染成 CRC 失败**
+（种子错 ⇒ USER 解成垃圾 ⇒ Pass 3 不过）。这是「期望值未知」路径（GC / 掉电重建）上 META 的**唯一动态保护**，
+但它没写进任何契约，且依赖 `random` 开启。详见 §5.3 的「四条读取路径 META 保护矩阵」。
 
 #### 21.3.6 无硬件 XOR → 软件 RAID
 
