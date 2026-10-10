@@ -69,7 +69,7 @@
  *    ① 数据源从「4 字节周期 pattern」换成「按 (plane, cw) 区分的源表」
  *       g_source_data —— 旧 pattern 的 4 字节周期使 cw*512 恒为 4 的倍数，
  *       **读错 CW / 读错 plane 在旧判据下永远通过**（新判据第一次能抓到）。
- *    ② cmd->meta 从「隐式 0」换成页 LBA（page << CW_WIDTH）：页号因此进了 META，
+ *    ② cmd->meta 从「隐式 0」换成页 PBA：页地址因此整体进了 META，
  *       数据路径 Pass 4 ② 能抓到「读到了别的页」。
  *    ③ 建链统一走共享夹具的 test_cmd_build()（FTL 策略层
  *       ftl_cmd_configure_descriptors），不再手写 config.cw。
@@ -236,7 +236,7 @@ static void verify_chain_paa(const fc_command_t *cmd)
 /**************************************************************************
  *  辅助：读一页 + 校验
  *
- *  meta 取页 LBA（page << CW_WIDTH），与写路径同口径 ⇒ Pass 4 ② 能抓到「读错页」。
+ *  meta 取本页 PBA，与写路径同口径 ⇒ Pass 4 ② 能抓到「读错页」。
  *  erased == 0：逐 desc 与「该 desc 的 PAA」比对；erased != 0：逐 desc USER 区全 0xFF。
  *
  *  ⚠ 擦除页的 META 是 0xFF…，数据路径 Pass 4 ①（自洽）必然不过 ⇒ 该 CW 带 MATA_ERROR
@@ -249,7 +249,9 @@ static void read_page_verify(uint16_t block, uint16_t page, uint8_t plane_bitmap
 {
     fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = block, .plane = test_first_plane(plane_bitmap), .page = page},
                                        test_plane_cw_bitmap(plane_bitmap),
-                                       (DWORD)page << CW_WIDTH,
+                                       (uint32_t)pba_from_addr(&(nand_addr_t){.block = block,
+                                                                              .plane = test_first_plane(plane_bitmap),
+                                                                              .page  = page}),
                                        config);
 
     test_memset_read_buffer(cmd);
@@ -609,14 +611,15 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     /* Step 4: 逐 page 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE
      * ⚠ 这两个 op 都**不是** page read/write（fc_is_page_read / fc_is_page_write 都不含），
      *   数据路径不介入：搬的是 NAND 内部缓存，页内 META 原样跟着走。
-     *   故目标页读回时，源页写入时铸的 META（page << CW_WIDTH）仍然自洽。 */
+     *   故目标页读回时，源页写入时铸的 META（源页 PBA）仍然自洽 —— 见 Step 5。
+     *   这两条命令的 meta 不参与编解码（无数据路径），填源页 PBA 只为表达「搬的是这一页」。 */
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
         /* 4a: READ_FOR_INTERNAL_DATA_MOVE (00h-35h) — 将源 block page 读到 NAND 内部缓存 */
         {
             fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = block, .plane = 0U, .page = page},
                                                test_plane_cw_bitmap(TEST_PLANE_BM(0)),
-                                               (DWORD)page << CW_WIDTH,
+                                               (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = 0U, .page = page}),
                                                &L3_CONF(OP_READ_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE));
 
             (void)test_submit_wait(cmd);
@@ -627,7 +630,7 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
         {
             fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = dest, .plane = 0U, .page = page},
                                                test_plane_cw_bitmap(TEST_PLANE_BM(0)),
-                                               (DWORD)page << CW_WIDTH,
+                                               (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = 0U, .page = page}),
                                                &L3_CONF(OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE));
 
             (void)test_submit_wait(cmd);
@@ -636,11 +639,15 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     }
 
     /* Step 5: 读回目标 block 64 pages，按**源块坐标**校验（理由见上方 ⚠）。
-     * 逐页读 + 就地比，与 test_read_block 同形，只把期望坐标换成源块。 */
+     * 逐页读 + 就地比，与 test_read_block 同形，只把期望坐标换成源块。
+     * ⚠ 读命令声明的 meta 必须是**源页 PBA**：META 存的是「内容的身份」，不是「内容现在
+     *   在哪」——搬移不经过数据路径，源页写入时铸的 PBA 原样跟到了目标块，声明目标页 PBA
+     *   反而会被 Pass 4 ② 判成「读到了别的页」。 */
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
+        const uint32_t      tag = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = 0U, .page = page});
         fc_command_status_t completion =
-            test_read_page(dest, TEST_PLANE_BM(0), page, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
+            test_read_page(dest, TEST_PLANE_BM(0), page, tag, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
 
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
         test_verify_page_paa(g_source_data, block, page, TEST_PLANE_BM(0));
@@ -892,7 +899,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
              *   完全相同，这条错误一直被掩盖（v22 changelog 记录过同类问题）。 */
             fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = block, .plane = plane, .page = page},
                                                (uint32_t)1U << cw,
-                                               (DWORD)page << CW_WIDTH,
+                                               (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page}),
                                                &L3_CONF(OP_RANDOM_DATA_READ, FC_CRC_ENABLE));
 
             test_memset_read_buffer(cmd);

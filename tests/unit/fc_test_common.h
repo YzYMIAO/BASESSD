@@ -114,15 +114,24 @@
  *     要单测数据路径的错误分支，另建一条命令、**不提交**，自行调用。
  *
  * ══════════════════════════════════════════════════════════════════════
- *  六、meta 的语义（v24/v25 契约）
+ *  六、meta 的语义（v24/v25 契约；**单测侧取页 PBA**）
  * ══════════════════════════════════════════════════════════════════════
  *
  *   desc->meta = (command->meta & ~PLANE_CW_MASK) | plane_cw，在建链那一刻铸出。
- *   它是本 CW 的**扇区 LBA**，同时是加扰种子（fc_random_seed_from_meta）与
- *   读回校验基准（Pass 4 ②：META 与本命令 LBA 不符 = 读到了别的页）。
- *   页 helper 一律取 `meta = page << CW_WIDTH` —— 写读同页自然一致，且**页号进了
- *   META**，于是「读错页」会被 Pass 4 抓到。
- *   内联用例想跳过 Pass 4 ② 可传 FC_META_UNKNOWN（不知道 LBA 的路径）。
+ *   它是本 CW 的**页 PBA**（pba_from_addr 打包；低 3 位天然是 plane/cw，与
+ *   PLANE_CW_MASK 同构），同时是加扰种子（fc_random_seed_from_meta）与读回校验
+ *   基准（Pass 4 ②：META 与本命令声明的 PBA 不符 = 读到了别的页）。
+ *
+ *   为什么是 PBA 而不是 LBA：本夹具只验 **FC 的机制**——「写进去的 tag 必须能原样
+ *   读回来」。PBA 是唯一地址、可查表，做这件事已经够用，且不必让单测假装知道 LBA
+ *   分配。（**生产路径仍是 LBA**：FTL 交 LBA 建链，见 include/fc/fc_command.h。）
+ *
+ *   页 helper 一律取 `meta = pba_from_addr(本页地址)` —— 写读同页自然一致，
+ *   且**页地址整体进了 META**，于是「读错页」会被 Pass 4 抓到。
+ *   ⚠ 唯一例外是 test_read_page：meta 提成了形参，因为**内部搬移**要让读命令声明
+ *     **源页** PBA（那页的 META 随数据一起搬到了目标块）。详见 test_fc_level3.c。
+ *
+ *   内联用例想跳过 Pass 4 ② 可传 FC_META_UNKNOWN（不知道页身份的路径）。
  *   ⚠ 写路径不能用 FC_META_UNKNOWN——Stage 0 会把它原样写进 NAND，
  *     读回时 Pass 4 ①（自洽：低 3 位 == plane_cw）当场不过。
  */
@@ -188,7 +197,7 @@ uint8_t *test_cw_scratch(uint8_t idx);
  *   · operation 与全部模式位走 config（const，可传 static 常量）。
  *   · **multi_plane 由 operation 派生**（三个 MULTI 变体 op ⇒ PLANE_NUM，其余 ⇒ 0），
  *     config 里填的值被覆盖——与 5 个页 helper 同一条规则，只有这一处实现。
- *   · meta 原样写进命令（写读同页须一致；mata 用例正需要「同页不同 LBA」）。
+ *   · meta 原样写进命令（写读同页须一致；mata 用例正需要「同页不同 PBA」）。
  *   · 无 desc 链的 op（ERASE / RESET / SET·GET_FEATURES）传 cw_bitmap = 0：
  *     ftl_cmd_needs_desc_chain 短路，desc_id 置 INVALID。
  *   · cmd->module 固定 HOST_IO、cmd->feature_addr 不设——需要时调用者自行覆盖。
@@ -223,7 +232,9 @@ fc_command_status_t test_erase_block(uint16_t block_index, uint8_t plane_bitmap,
 
 fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config, uint8_t **data);
 
-fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config, uint8_t **data);
+/* meta 是本命令**声明的页 PBA**。普通读传本页 PBA（pba_from_addr(本页地址)）；
+ * 内部搬移用例传**源页** PBA——目标块那页的 META 是源页写入时铸的。 */
+fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, uint32_t meta, const fc_cmd_conf_t *config, uint8_t **data);
 
 /* 遍历整块：逐页调对应页 helper（页间自然轮询）。
  * test_read_block 逐页读并在**页内**校验 PAA 图案（否则 g_source_data 只剩最后一页可比）；
@@ -245,14 +256,14 @@ void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_co
  *
  * test_prog_block_cache：前 PAGES_PER_BLOCK-1 页 OP_PROGRAM_PAGE_CACHE（80h-addr-data-15h），
  *   末页 OP_NORMAL_PROGRAM_PAGE（10h）收尾——15h 编的是 cache 寄存器里的当前内容，没有末页的
- *   10h 就没有最后一页真正落盘。meta 与普通写同口径（= 页 LBA）。
+ *   10h 就没有最后一页真正落盘。meta 与普通写同口径（= 本页 PBA）。
  *
  * test_read_block_cache：**不能**由 test_read_page 循环拼出——31h / 3Fh 无地址周期（设备自增），
  *   且 31h 输出的是**上一轮加载的页**，「命令地址 = 页、校验该页」的模型在此结构性不成立。
  *   故显式编排 START(p0) → SEQ ×(PAGES_PER_BLOCK-1) → LAST：
  *     · START（00h-addr-30h）把 page 0 载入 cache，**不输出数据**（cw_bitmap = 0，FC 不跑 process_read）；
  *     · 第 i 次 SEQ（i = 1..PAGES_PER_BLOCK-1）输出 page i-1、同时载入 page i ⇒ meta 取
- *       **(i-1) << CW_WIDTH**（真正输出的那页的 LBA）；命令地址页号对设备无意义，传 0；
+ *       **page i-1 的 PBA**（真正输出的那页）；命令地址页号对设备无意义，传 0；
  *     · LAST（3Fh）输出 cache 里最后一页（PAGES_PER_BLOCK-1）。
  *   共 65 条命令输出 64 页。`data` 收尾指向最后一页的明文。
  *

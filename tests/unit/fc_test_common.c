@@ -316,6 +316,7 @@ fc_command_status_t test_erase_block(uint16_t block_index, uint8_t plane_bitmap,
 
 fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config, uint8_t **data)
 {
+    nand_addr_t         addr;
     fc_command_t       *cmd;
     fc_command_status_t completion;
     uint8_t             is_multi;
@@ -337,13 +338,11 @@ fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, u
         ASSERT(test_plane_count(plane_bitmap) == 1U);
     }
 
-    /* meta = 页 LBA：写读同页自然一致，且页号进了 META ⇒「读错页」被 Pass 4 ② 抓到。
+    /* meta = 本页 PBA：写读同页自然一致，且**页地址整体进了 META** ⇒「读错页」被 Pass 4 ② 抓到。
      * cw_bitmap 由 plane_bitmap 正推（test_plane_cw_bitmap），与 test_cmd_build 内部
      * 按 cmd->pba/config.multi_plane 的段推导互为交叉检查。 */
-    cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page_index},
-                         test_plane_cw_bitmap(plane_bitmap),
-                         (DWORD)page_index << CW_WIDTH,
-                         config);
+    addr = (nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page_index};
+    cmd  = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&addr), config);
 
     /* 明文 PAA 图案：填 g_source_data 槽，同时拷进各 desc 的 USER 区。
      * 提交后 FC 会原地编码，desc buffer 不再可读作明文 ⇒ `*data` 只能指向槽。 */
@@ -360,7 +359,7 @@ fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, u
     return completion;
 }
 
-fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config, uint8_t **data)
+fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, uint32_t meta, const fc_cmd_conf_t *config, uint8_t **data)
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
@@ -383,10 +382,12 @@ fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, u
         ASSERT(test_plane_count(plane_bitmap) == 1U);
     }
 
-    /* meta / cw_bitmap 与 test_prog_page 同口径——写读同页必须一致，否则 Pass 4 ② 报错。 */
+    /* cw_bitmap 与 test_prog_page 同口径。meta 由调用者给：普通读传**本页 PBA**
+     * （与写路径一致，否则 Pass 4 ② 报错）；内部搬移用例要传**源页 PBA**——那页的
+     * META 是源页写入时铸的、随数据一起搬了过来（详见 test_fc_level3.c 的搬移用例）。 */
     cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page_index},
                          test_plane_cw_bitmap(plane_bitmap),
-                         (DWORD)page_index << CW_WIDTH,
+                         meta,
                          config);
 
     /* 读前 USER 区预填 0xCC：NAND 没填满时残留可见，便于区分「读失败」与「读到真数据」。 */
@@ -428,7 +429,9 @@ void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_co
      * **必须在页内校验**：g_source_data 每页都被覆写，攒到最后只剩最后一页可比。 */
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        fc_command_status_t completion = test_read_page(block_index, plane_bitmap, page, config, data);
+        /* 普通读：meta 取本页 PBA（与 test_prog_page 的写口径一致）。 */
+        uint32_t            meta       = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = page});
+        fc_command_status_t completion = test_read_page(block_index, plane_bitmap, page, meta, config, data);
 
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
         test_verify_page_paa(g_source_data, block_index, page, plane_bitmap);
@@ -459,7 +462,7 @@ void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
      * 的数据编入阵列、同时腾出 cache 寄存器接下一页。末页必须用普通编程（10h）收尾——15h 编的是
      * 「当前 cache 内容」，没有末页的 10h 就没有最后一页真正落盘。
      * 每页仍由 test_prog_page 提交 + 轮询到完成 ⇒ 命令间完全串行（cache 的流水线收益测不到，
-     * 这里验的是 cache 命令序列走得通、编码管线全程不串）。meta = 页 LBA，与普通写同口径。 */
+     * 这里验的是 cache 命令序列走得通、编码管线全程不串）。meta = 本页 PBA，与普通写同口径。 */
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
         fc_cmd_conf_t       conf = *config;
@@ -480,7 +483,8 @@ void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
 
 /* cache 读的一步（SEQ / LAST）：建链 → 预填 0xCC → 提交 → 轮询 → 拷回 → 释放。
  * output_page 是**本步真正输出的页**——SEQ 输出上一轮加载的页，故调用者要传 page-1；
- * 命令地址页号对设备无意义（31h / 3Fh 无地址周期），一律传 0。 */
+ * 命令地址页号对设备无意义（31h / 3Fh 无地址周期），一律传 0。
+ * meta 与命令地址**刻意解耦**：取 output_page 的 PBA（真正输出的那页），不是地址里的 0。 */
 static fc_command_status_t test_read_cache_step(uint16_t block_index, uint8_t plane_bitmap, uint16_t output_page, const fc_cmd_conf_t *config)
 {
     fc_command_t       *cmd;
@@ -488,7 +492,9 @@ static fc_command_status_t test_read_cache_step(uint16_t block_index, uint8_t pl
 
     cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = 0U},
                          test_plane_cw_bitmap(plane_bitmap),
-                         (DWORD)output_page << CW_WIDTH,
+                         (uint32_t)pba_from_addr(&(nand_addr_t){.block = block_index,
+                                                                .plane = test_first_plane(plane_bitmap),
+                                                                .page  = output_page}),
                          config);
 
     test_memset_read_buffer(cmd);
@@ -532,7 +538,7 @@ void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
 
     /* ② SEQ（31h）：无地址周期，设备自动递增；**输出的是上一轮加载的页**。
      *    第 i 次 SEQ（i = 1..PAGES_PER_BLOCK-1）输出 page i-1、同时把 page i 载入 cache
-     *    ⇒ meta 必须取 (i-1) << CW_WIDTH，否则 Pass 4 ② 拿「输出页的 META」对「加载页的 LBA」当场报错。 */
+     *    ⇒ meta 必须取 page i-1 的 PBA，否则 Pass 4 ② 拿「输出页的 META」对「加载页的 PBA」当场报错。 */
     conf           = *config;
     conf.operation = (DWORD)OP_READ_PAGE_CACHE_SEQ;
 

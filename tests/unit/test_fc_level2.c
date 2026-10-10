@@ -41,9 +41,9 @@
  *   raid       : 形参保留但**数据路径不读**——config.raid 全仓唯一读者是 fc.c 的
  *                分派钩子（决定走不走 fc_stripe_submit）
  *
- * ⚠ 加扰种子（v24）= 本 CW 的 **META（扇区 LBA）**，由 command->meta 的高位 + 本 desc
+ * ⚠ 加扰种子（v24）= 本 CW 的 **META（页 PBA）**，由 command->meta 的高位 + 本 desc
  *   的 plane/cw 造出。若 meta == 0，4 条 CW 的种子只由 cw(0..3) 派生，仍互异但都来自
- *   小 LBA——故 fixture 显式给一个非零 LBA，让「种子随 LBA 变」这条性质真的被测到。
+ *   小地址——故 fixture 显式给一个非零 PBA，让「种子随页地址变」这条性质真的被测到。
  *
  * 释放：一律 fc_command_release() 收尾——v16 起它沿 desc 链把 desc + buffer
  *       一起还池；不要再手动 fc_buffer_release（会二次释放、空闲链成环）。
@@ -66,9 +66,9 @@
 
 #include <string.h>
 
-/* 命令的扇区 LBA（= 页 LBA TEST_PAGE << CW_WIDTH）。非零——它是加扰种子的来源，
- * 让「种子随 LBA 变」可测（见文件头）。 */
-#define L2_META (DWORD)((DWORD)TEST_PAGE << CW_WIDTH)
+/* 命令声明的页 PBA（= TEST_BLOCK / TEST_PAGE 那一页）。非零——它是加扰种子的来源，
+ * 让「种子随页地址变」可测（见文件头）。与 l2_cmd 的建链地址同源，故写读同页自洽。 */
+#define L2_META ((DWORD)pba_from_addr(&(nand_addr_t){.block = TEST_BLOCK, .plane = 0U, .page = TEST_PAGE}))
 
 /* 本层多数用例只要 plane 0 的整段（4 个 CW）。v27 起位图是**字面**的，
  * 0 是空集（ftl_cmd_resolve_cw_bitmap 的断言会当场炸），故必须显式写出来。 */
@@ -430,17 +430,17 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
     {
         uint8_t *cw            = test_cw_scratch(0U);
         uint8_t *plain         = test_cw_scratch(1U);
-        /* 取合法地址：page 取 4 的倍数——meta 的低 3 位要留给 plane/cw，
+        /* 取一个完整合法地址：meta 直接取它的 PBA——低 3 位天然是 plane/cw，
          * 与建链时 desc->meta = (command->meta & ~PLANE_CW_MASK) | plane_cw 同构。 */
         const nand_addr_t addr = {
             .lun   = 0U,
             .block = (uint16_t)munit_rand_int_range(0, BLOCKS_PER_PLANE - 1),
             .plane = (uint8_t)munit_rand_int_range(0, PLANE_NUM - 1),
-            .page  = (uint8_t)(munit_rand_int_range(0, PAGES_PER_BLOCK - 1) & ~3),
+            .page  = (uint8_t)munit_rand_int_range(0, PAGES_PER_BLOCK - 1),
             .cw    = (uint8_t)munit_rand_int_range(0, CW_NUM - 1),
         };
         const nand_paa_t paa  = paa_from_addr(&addr);
-        const uint32_t   meta = lba_to_meta((uint32_t)addr.page << CW_WIDTH, addr.plane, addr.cw);
+        const uint32_t   meta = (uint32_t)pba_from_addr(&addr);
         const uint32_t   seed = fc_random_seed_from_meta(meta);
         l2_bit01_t       before;
         l2_bit01_t       after;
@@ -1071,10 +1071,13 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
     test_fill_user_paa(cmd);
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
-    /* 页内 META 此刻是 L2_META | plane_cw（encode Stage 0 写的）。把**命令声明的 LBA**
-     * 换成"下一页"：低 3 位（plane/cw）不变 ⇒ 自洽校验①仍过，命中的是第二项校验②
-     * ——它比的是 command->meta（fc_data_path.c:562），不是 desc->meta。 */
-    cmd->meta = (DWORD)(TEST_PAGE + 1U) << CW_WIDTH;
+    /* 页内 META 此刻是 L2_META | plane_cw（encode Stage 0 写的）。把**命令声明的页**
+     * 换成下一个 block 的同一页：低 3 位（plane/cw）不变 ⇒ 自洽校验①仍过，命中的是
+     * 第二项校验②——它比的是 command->meta（fc_data_path.c:562），不是 desc->meta。
+     * ⚠ 篡改点必须落在 PLANE_CW_MASK（0x7）**之上**：lba_to_meta() 会掩掉低 3 位再
+     *   OR 回真实 plane/cw，动低 3 位等于什么都没改（旧版用 `+1 页` ⇒ `+4` 正好落在
+     *   bit 2 的 plane 位上，被整段擦除，MATA_ERROR 恒不置位）。 */
+    cmd->meta = (DWORD)pba_from_addr(&(nand_addr_t){.block = TEST_BLOCK + 1U, .plane = 0U, .page = TEST_PAGE});
 
     munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
 
