@@ -81,8 +81,14 @@ v40 的记录里写「`test --iterations 20 /fc-nand/lifecycle/` ⇒ Level 3 跑
 
 ## 三、顺带观察（未处理）
 
-- **Level 2 仍有写死的块**：`scramble_whiten` 打印 `block=1328` / `block=2042`（`all-0x00` / `all-0xFF`
-  两条探针）。这正是 v40 给 Level 3 消掉的那类「固定选取」，但**Level 2 不在本轮范围**，只记录。
+- ~~**Level 2 仍有写死的块**：`scramble_whiten` 打印 `block=1328` / `block=2042`（`all-0x00` / `all-0xFF`
+  两条探针）。这正是 v40 给 Level 3 消掉的那类「固定选取」，但**Level 2 不在本轮范围**，只记录。~~
+  ⚠ **本条是错的，已撤回**（2026-10-11）：`scramble_whiten`（`test_fc_level2.c:502-508`）**早就**用
+  `munit_rand_int_range` 抽 block / plane / page / cw；日志里的 `1328` / `2042` / `1018` 是三条探针
+  **各抽一次**的**三个不同值**（`comtool3.0.log:417` / `:432` / `:449`），不是写死的常量。
+  真正写死的地址是 `TEST_BLOCK`(100) / `TEST_PAGE`(32) / plane 0（经 `L2_META` / `L2_PAA` / `l2_cmd`
+  服务 13 条用例），已在 **v43** 改成按种子抽样，见
+  `docs/changelog/fc_ut_level2_addr_random_v43.md`。
 - `--list` 只列 **32** 行而实跑 **51** 条——Level 2 的 5 条参数化用例（`crc_step_detect` 4 /
   `ecc_step` 11 / `encode` 3 / `process_read_ok` 3 / `cw_bitmap` 3 = 24 展开 + 7 非参数化 = 31）。
   不是缺陷，是 munit 的参数化模型，但容易让人以为「少跑了 19 条」。

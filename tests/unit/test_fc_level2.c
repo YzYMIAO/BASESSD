@@ -66,38 +66,104 @@
 
 #include <string.h>
 
-/* 命令声明的页 PBA（= TEST_BLOCK / TEST_PAGE 那一页）。非零——它是加扰种子的来源，
- * 让「种子随页地址变」可测（见文件头）。与 l2_cmd 的建链地址同源，故写读同页自洽。 */
-#define L2_META ((DWORD)pba_from_addr(&(nand_addr_t){.block = TEST_BLOCK, .plane = 0U, .page = TEST_PAGE}))
+/* ── 本层地址抽样（v1.25）──
+ * 改造前本层的命令地址恒为 TEST_BLOCK(100) / plane 0 / TEST_PAGE(32)——两个宏
+ * L2_META / L2_PAA 加 l2_cmd 的建链地址。现改成**按 munit 种子抽样**，与 v40 给
+ * Level 3 的做法同路。
+ *
+ * ⚠ 为什么必须加 salt：munit 每次 exec 前把 PRNG 重置回 runner->seed（munit.c:774），
+ *   而导出的 munit_rand_* **不带盐** ⇒ 用例体内的**第一次**抽样在所有用例之间取值完全
+ *   相同。故每次抽样异或进 `hash(用例名) ^ hash(用途标签)`：前者让**用例之间**互异，
+ *   后者让**同一用例内各用途**互异。复现契约 = (seed, 用例名, 第几次抽样)。
+ * ⚠ 本层**不碰介质**（见文件头）——地址只喂两样：**加扰种子**（fc_random_seed_from_meta）
+ *   与 **USER 区的 PAA 图案**（test_fill_user_paa）。所以收益是「13 条用例拿到 13 组不同的
+ *   种子 / 图案」，**不是** Level 3 那种「地址错值编译期无声」的风险。之所以仍值得做：本层
+ *   多数用例是 MUNIT_TEST_OPTION_SINGLE_ITERATION（munit.c:765-767 把迭代数硬压成 1）
+ *   ⇒ `--iterations N` 对它们无效，用例体内抽样是唯一的加量杠杆。
+ * ⚠ 不设窗口：Level 3 的 30%~70% 是为了避开固定元数据区，而本层不写介质、那理由不成立，
+ *   故用整段 [0, BLOCKS_PER_PLANE) / [0, PAGES_PER_BLOCK)，与 test_scramble_whiten 同口径。
+ *
+ * 抽样结果必须打出来（见 l2_addr_draw）——它是 (seed, 用例名) 的纯函数，不打就无从复现。 */
+
+/* DJB2，与 munit.c:386 的 munit_str_hash **逐字同实现**（那份是 static，只能照抄）。 */
+static uint32_t l2_hash(const char *s)
+{
+    uint32_t h = 5381U;
+
+    for (; *s != '\0'; s++)
+    {
+        h = (h << 5U) + h + (uint32_t)(uint8_t)*s;
+    }
+
+    return h;
+}
+
+/* 每次抽样 = munit 随机流 ^ 用例名哈希 ^ 用途标签哈希，再过一道终混。
+ *
+ * ⚠ 终混（murmur3 fmix32）**不是**装饰：DJB2 的**低位很弱**——h = h*33 + c 且 33 ≡ 1
+ *   (mod 32) ⇒ h 的低 5 位只等于各字符之和 mod 32。取 `% BLOCKS_PER_PLANE` / `% PAGES_PER_BLOCK`
+ *   时被截到低位，两个哈希只要**低位相同**就会撞。实测（宿主机复刻）：
+ *   `process_read_mata_error` 与 `process_read_ldpc_raw` 的哈希只在高位不同
+ *   （0xE9E586CA vs 0x0A6286CA，XOR = 0xE3870000）⇒ 四条种子下两条用例**逐位抽到同一个地址**。
+ *   终混让结果的每一位都受全 32 位影响，撞的概率回到 1/2^11 量级。 */
+static uint32_t l2_rand(const char *test, const char *tag)
+{
+    uint32_t h = munit_rand_uint32() ^ l2_hash(test) ^ l2_hash(tag);
+
+    h ^= h >> 16;
+    h *= 0x85EBCA6BU;
+    h ^= h >> 13;
+    h *= 0xC2B2AE35U;
+    h ^= h >> 16;
+
+    return h;
+}
+
+/* 抽一个完整合法地址：block / page 随机，plane 由调用者钉死，cw 恒 0
+ * （test_cmd_build 断言 cw == 0，见 fc_test_common.c:308）。
+ *
+ * 就地 emit 一条 test_trace_detail（debug 档）——一处覆盖全部用例，不必每个用例体各写一行。 */
+static nand_addr_t l2_addr_draw(const char *test, uint8_t plane)
+{
+    const nand_addr_t addr = {
+        .lun   = 0U,
+        .block = (uint16_t)(l2_rand(test, "block") % (uint32_t)BLOCKS_PER_PLANE),
+        .plane = plane,
+        .page  = (uint8_t)(l2_rand(test, "page") % (uint32_t)PAGES_PER_BLOCK),
+        .cw    = 0U,
+    };
+
+    test_trace_detail("addr block=%u page=%u plane=%u", (unsigned)addr.block, (unsigned)addr.page, (unsigned)addr.plane);
+    return addr;
+}
 
 /* 本层多数用例只要 plane 0 的整段（4 个 CW）。v27 起位图是**字面**的，
  * 0 是空集（ftl_cmd_resolve_cw_bitmap 的断言会当场炸），故必须显式写出来。 */
 #define L2_BM_PLANE0_ALL (0x0FU)
 
-/* 步骤级用例的 PAA（单 CW 原语没有 desc->paa）。取 plane 0 / cw 0 / 本层默认块页，
- * 非零——USER 区填出来才不是一片 0（"根本没写"与"写了 0"就分得开）。
- * 只用于 fc_data_path_meta_check 的自洽校验（低 3 位 = plane/cw = 0）。 */
-#define L2_PAA (paa_from_addr(&(nand_addr_t){.block = TEST_BLOCK, .plane = 0U, .page = TEST_PAGE}))
-
 /**************************************************************************
  *  本层专用的小封装
  **************************************************************************/
 
-/* 建一条 **plane 0 单 plane、TEST_PAGE 页、BCH 编解码** 的命令（未提交）。
- * operation 固定 OP_NORMAL_PROGRAM_PAGE：数据路径（encode / process_read）**不读**
- * config.operation（fc_data_path.c 全文无该字段的读者），本层驱动的就是"一个已编好码
- * 的页"这个状态。需要 multi-plane 段的几何用例直接调 test_cmd_build（见文末）。
- * 掩码与 meta 由调用者给。 */
-static fc_command_t *l2_cmd(uint32_t cw_bitmap, uint32_t meta, uint8_t random_mode, uint8_t crc_mode)
+/* 建一条 **单 plane、BCH 编解码** 的命令（未提交）。operation 固定 OP_NORMAL_PROGRAM_PAGE：
+ * 数据路径（encode / process_read）**不读** config.operation（fc_data_path.c 全文无该字段的
+ * 读者），本层驱动的就是"一个已编好码的页"这个状态。需要 multi-plane 段的几何用例直接调
+ * test_cmd_build（见文末）。掩码由调用者给。
+ *
+ * 地址由调用者传（v1.25 起不再是固定页，见「本层地址抽样」段）：命令的 **pba 与 meta 同源**
+ * ——两者都从 addr 派生。改造前调用者传的 meta 就是同一个固定地址的 PBA，故这里是等价替换。 */
+static fc_command_t *l2_cmd(const nand_addr_t *addr, uint32_t cw_bitmap, uint8_t random_mode, uint8_t crc_mode)
 {
     fc_cmd_conf_t config = {0};
+
+    ASSERT(addr != NULL);
 
     config.operation = (DWORD)OP_NORMAL_PROGRAM_PAGE;
     config.random    = random_mode;
     config.crc       = crc_mode;
     config.ldpc      = FC_ECC_MODE_BCH;
 
-    return test_cmd_build(&(nand_addr_t){.block = TEST_BLOCK, .plane = 0U, .page = TEST_PAGE}, cw_bitmap, meta, &config);
+    return test_cmd_build(addr, cw_bitmap, (uint32_t)pba_from_addr(addr), &config);
 }
 
 /* 要求每个 CW 的 status **恰好**是 READY（一个错误位都没有）。
@@ -206,9 +272,9 @@ static void l2_verify_parity_nonzero(const fc_command_t *cmd)
 /* buffer 级往返：建链 → 填明文 → encode → process_read → 校验。
  * **不提交**——FC 提交时会自己再跑一遍 encode / process_read，重复编码会让用例空转。
  * 返回链上的 CW 数，供调用者打证据摘要（避免调用者按位图 popcount 反推）。 */
-static uint8_t l2_buffer_round_trip(uint32_t cw_bitmap, uint8_t random_mode, uint8_t crc_mode)
+static uint8_t l2_buffer_round_trip(const nand_addr_t *addr, uint32_t cw_bitmap, uint8_t random_mode, uint8_t crc_mode)
 {
-    fc_command_t *cmd      = l2_cmd(cw_bitmap, L2_META, random_mode, crc_mode);
+    fc_command_t *cmd      = l2_cmd(addr, cw_bitmap, random_mode, crc_mode);
     uint8_t       cw_count = test_cw_count(cmd);
 
     test_fill_user_paa(cmd);
@@ -319,13 +385,18 @@ static MunitResult test_crc_step_detect(const MunitParameter params[], void *dat
 
     test_trace_begin();
 
+    /* 抽地址（在 test_trace_begin 之后——它的 detail 行要落在前缀行收尾之后）。 */
+    const nand_addr_t addr = l2_addr_draw("crc_step_detect", 0U);
+
     munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
 
     /* 残留哨兵：未写到的字节应能看见 0xCC，避免"其实没写"被当成通过 */
     (void)memset(cw, 0xCC, FC_BUFFER_POOL_CW_SIZE);
 
-    fc_data_path_meta_write(cw, L2_META);
-    test_fill_paa(cw + FC_CRC_USER_OFFSET, L2_PAA);
+    /* META 与 PAA 同源（都是抽到的那一页）；PAA 非零 ⇒ USER 区填出来不是一片 0，
+     * "根本没写"与"写了 0"分得开。低 3 位 = plane/cw = 0，与 meta_check 的自洽校验一致。 */
+    fc_data_path_meta_write(cw, (uint32_t)pba_from_addr(&addr));
+    test_fill_paa(cw + FC_CRC_USER_OFFSET, paa_from_addr(&addr));
     fc_data_path_crc_write(cw);
 
     /* 先自证：未注入时应通过（否则下面的"检出"没有意义） */
@@ -610,11 +681,13 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
 /* 造一块"写路径形态"的 CW：META + USER(PAA 明文) + CRC + ECC。
  * 不含加扰——加扰是正交的一步（见 test_scramble_whiten），ECC 覆盖整个 data[0..520)，
  * 与 USER 区是否已加扰无关。ref 非 NULL 时留一份基准副本（比对用）。 */
-static void l2_ecc_cw_build(uint8_t *cw, uint8_t *ref)
+static void l2_ecc_cw_build(const nand_addr_t *addr, uint8_t *cw, uint8_t *ref)
 {
+    ASSERT(addr != NULL);
+
     (void)memset(cw, 0xCC, FC_BUFFER_POOL_CW_SIZE); /* 残留哨兵：没被写到的字节可见 */
-    fc_data_path_meta_write(cw, L2_META);
-    test_fill_paa(cw + FC_CRC_USER_OFFSET, L2_PAA);
+    fc_data_path_meta_write(cw, (uint32_t)pba_from_addr(addr));
+    test_fill_paa(cw + FC_CRC_USER_OFFSET, paa_from_addr(addr));
     fc_data_path_crc_write(cw);
     munit_assert_int(fc_data_path_ecc_encode(cw), ==, FC_STATUS_OK);
 
@@ -784,11 +857,14 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
 
     test_trace_begin();
 
+    /* 抽地址（在 test_trace_begin 之后——它的 detail 行要落在前缀行收尾之后）。 */
+    const nand_addr_t addr = l2_addr_draw("ecc_step", 0U);
+
     munit_assert_true(c != NULL); /* 只有 --param case 传了表外的名字才会是 NULL */
     total = c->d_k + c->p_k;      /* 期望纠正数 = 数据区注入数 + parity 区注入数 */
 
     /* ① 造干净码字（META + USER + CRC + ECC），ref 留一份基准副本 */
-    l2_ecc_cw_build(cw, ref);
+    l2_ecc_cw_build(&addr, cw, ref);
 
     /* ② 注错。两段区间不重叠（数据区 [0,4160) / parity 区 [4160,4208)）。
      *    ⚠ d_k == 0 的场景 d_lo/d_hi 是占位 0，必须靠 d_k 跳过——否则会把 0 当区间
@@ -948,10 +1024,13 @@ static MunitResult test_encode(const MunitParameter params[], void *data)
 
     test_trace_begin();
 
+    /* 抽地址（在 test_trace_begin 之后——它的 detail 行要落在前缀行收尾之后）。 */
+    const nand_addr_t addr = l2_addr_draw("encode", 0U);
+
     c = l2_enc_case_find(munit_parameters_get(params, "case"));
     munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
 
-    enc = l2_cmd(c->cw_bitmap, L2_META, c->random_mode, c->crc_mode);
+    enc = l2_cmd(&addr, c->cw_bitmap, c->random_mode, c->crc_mode);
     munit_assert_uint32(test_cw_count(enc), ==, c->n_cw);
 
     test_fill_user_paa(enc);
@@ -980,7 +1059,8 @@ static MunitResult test_encode_crc_disabled(const MunitParameter params[], void 
 
     test_trace_begin();
 
-    fc_command_t *enc = l2_cmd(L2_BM_PLANE0_ALL, L2_META, FC_RANDOM_DISABLE, FC_CRC_DISABLE);
+    const nand_addr_t addr = l2_addr_draw("encode_crc_disabled", 0U);
+    fc_command_t     *enc  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_DISABLE);
 
     munit_assert_uint32(test_cw_count(enc), ==, CW_NUM);
 
@@ -1111,8 +1191,11 @@ static MunitResult test_process_read_ok(const MunitParameter params[], void *dat
 
     test_trace_begin();
 
+    /* 抽地址（在 test_trace_begin 之后——它的 detail 行要落在前缀行收尾之后）。 */
+    const nand_addr_t addr = l2_addr_draw("process_read_ok", 0U);
+
     munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
-    cw_count = l2_buffer_round_trip(c->cw_bitmap, c->random_mode, c->crc_mode);
+    cw_count = l2_buffer_round_trip(&addr, c->cw_bitmap, c->random_mode, c->crc_mode);
 
     /* 证据摘要（--log-visible info）：断言全在 helper 里，这里只把「证明了什么」打出来
      * ——链上实际 CW 数、比对字节数、以及「全部 READY + USER 回到源」这两个结论。 */
@@ -1134,7 +1217,8 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
 
     test_trace_begin();
 
-    fc_command_t *cmd = l2_cmd(L2_BM_PLANE0_ALL, L2_META, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
+    const nand_addr_t addr = l2_addr_draw("process_read_unc", 0U);
+    fc_command_t     *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
 
     test_fill_user_paa(cmd);
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
@@ -1187,7 +1271,8 @@ static MunitResult test_process_read_masked_chain(const MunitParameter params[],
     test_trace_begin();
 
     /* 0x05 = plane0 的 CW0 | CW2 */
-    fc_command_t *cmd = l2_cmd(0x05U, L2_META, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
+    const nand_addr_t addr = l2_addr_draw("process_read_masked_chain", 0U);
+    fc_command_t     *cmd  = l2_cmd(&addr, 0x05U, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
 
     munit_assert_uint32(test_cw_count(cmd), ==, 2U);
 
@@ -1228,18 +1313,26 @@ static MunitResult test_process_read_mata_error(const MunitParameter params[], v
 
     test_trace_begin();
 
-    fc_command_t *cmd = l2_cmd(L2_BM_PLANE0_ALL, L2_META, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
+    const nand_addr_t addr = l2_addr_draw("process_read_mata_error", 0U);
+    fc_command_t     *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
 
     test_fill_user_paa(cmd);
     munit_assert_int(fc_data_path_encode(cmd), ==, FC_STATUS_OK);
 
-    /* 页内 META 此刻是 L2_META | plane_cw（encode Stage 0 写的）。把**命令声明的页**
-     * 换成下一个 block 的同一页：低 3 位（plane/cw）不变 ⇒ 自洽校验①仍过，命中的是
-     * 第二项校验②——它比的是 command->meta（fc_data_path.c:562），不是 desc->meta。
+    /* 页内 META 此刻是「命令声明的页」| plane_cw（encode Stage 0 写的）。把**命令声明的页**
+     * 换成**同 page / 同 plane、block 环移一格**的那一页：低 3 位（plane/cw）不变 ⇒ 自洽
+     * 校验①仍过，命中的是第二项校验②——它比的是 command->meta（fc_data_path.c:562），
+     * 不是 desc->meta。
      * ⚠ 篡改点必须落在 PLANE_CW_MASK（0x7）**之上**：lba_to_meta() 会掩掉低 3 位再
      *   OR 回真实 plane/cw，动低 3 位等于什么都没改（旧版用 `+1 页` ⇒ `+4` 正好落在
-     *   bit 2 的 plane 位上，被整段擦除，MATA_ERROR 恒不置位）。 */
-    cmd->meta = (DWORD)pba_from_addr(&(nand_addr_t){.block = TEST_BLOCK + 1U, .plane = 0U, .page = TEST_PAGE});
+     *   bit 2 的 plane 位上，被整段擦除，MATA_ERROR 恒不置位）。PBA 里 block 是**最高**
+     *   字段，改它不动低 3 位——正是本用例要的「低位同、高位异」。环移保证 block 必变。 */
+    {
+        nand_addr_t tampered = addr;
+
+        tampered.block = (uint16_t)((addr.block + 1U) % (uint32_t)BLOCKS_PER_PLANE);
+        cmd->meta      = (DWORD)pba_from_addr(&tampered);
+    }
 
     munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_OK);
 
@@ -1275,7 +1368,8 @@ static MunitResult test_process_read_crc_error(const MunitParameter params[], vo
 
     test_trace_begin();
 
-    fc_command_t *cmd = l2_cmd(L2_BM_PLANE0_ALL, L2_META, FC_RANDOM_DISABLE, FC_CRC_DISABLE);
+    const nand_addr_t addr = l2_addr_draw("process_read_crc_error", 0U);
+    fc_command_t     *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_DISABLE);
 
     test_fill_user_paa(cmd);
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
@@ -1311,7 +1405,8 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
 
     test_trace_begin();
 
-    fc_command_t *cmd = l2_cmd(L2_BM_PLANE0_ALL, L2_META, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
+    const nand_addr_t addr = l2_addr_draw("process_read_ldpc_raw", 0U);
+    fc_command_t     *cmd  = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
 
     cmd->config.ldpc = FC_ECC_MODE_LDPC_RAW;
     test_fill_user_paa(cmd);
@@ -1378,9 +1473,9 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
  *      "救回来了"与"没把别的 CW 弄坏"要一起成立
  *
  * 两个用例共用本函数，只差 random_mode / failed_idx。 */
-static void do_raid_recover_test(uint8_t random_mode, uint8_t failed_idx)
+static void do_raid_recover_test(const nand_addr_t *addr, uint8_t random_mode, uint8_t failed_idx)
 {
-    fc_command_t *cmd   = l2_cmd(L2_BM_PLANE0_ALL, L2_META, random_mode, FC_CRC_ENABLE);
+    fc_command_t *cmd   = l2_cmd(addr, L2_BM_PLANE0_ALL, random_mode, FC_CRC_ENABLE);
     uint8_t       count = test_cw_count(cmd);
 
     munit_assert_uint32(count, >=, 3U);
@@ -1420,7 +1515,12 @@ static MunitResult test_raid_recover_no_random(const MunitParameter params[], vo
 {
     (void)params;
     (void)data;
-    do_raid_recover_test(FC_RANDOM_DISABLE, 1U);
+
+    {
+        const nand_addr_t addr = l2_addr_draw("raid_recover_no_random", 0U);
+
+        do_raid_recover_test(&addr, FC_RANDOM_DISABLE, 1U);
+    }
     return MUNIT_OK;
 }
 
@@ -1439,8 +1539,13 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
 {
     (void)params;
     (void)data;
+
+    /* data 与 parity 两条命令**必须同一地址**（下面把 data 的 desc->meta 同步给 parity），
+     * 故只抽一次，两处都传同一个 &addr。 */
+    const nand_addr_t addr = l2_addr_draw("generate_stripe_parity", 0U);
+
     /* 分配数据命令（4 CW, random=ON, raid=NORMAL — encode 里不做 XOR） */
-    fc_command_t *data_cmd = l2_cmd(L2_BM_PLANE0_ALL, L2_META, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
+    fc_command_t *data_cmd = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_ENABLE, FC_CRC_ENABLE);
     uint8_t       cw_cnt   = test_cw_count(data_cmd);
 
     munit_assert_uint32(cw_cnt, ==, 4U);
@@ -1455,7 +1560,7 @@ static MunitResult test_generate_stripe_parity(const MunitParameter params[], vo
     munit_assert_int(fc_data_path_encode(data_cmd), ==, FC_STATUS_OK);
 
     /* 分配 parity 命令（同 CW 数，random=OFF） */
-    fc_command_t *parity_cmd = l2_cmd(L2_BM_PLANE0_ALL, L2_META, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
+    fc_command_t *parity_cmd = l2_cmd(&addr, L2_BM_PLANE0_ALL, FC_RANDOM_DISABLE, FC_CRC_ENABLE);
 
     munit_assert_uint32(test_cw_count(parity_cmd), ==, cw_cnt);
 
@@ -1660,10 +1765,12 @@ static MunitResult test_cw_bitmap(const MunitParameter params[], void *data)
     c = l2_bm_case_find(munit_parameters_get(params, "case"));
     munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
 
-    cmd = test_cmd_build(&(nand_addr_t){.block = TEST_BLOCK, .plane = c->addr_plane, .page = TEST_PAGE},
-                         c->bitmap,
-                         L2_META,
-                         c->conf);
+    /* plane 由场景表钉死（那正是本条用例的判据，不能随机）；block / page 抽样。 */
+    {
+        const nand_addr_t addr = l2_addr_draw("cw_bitmap", c->addr_plane);
+
+        cmd = test_cmd_build(&addr, c->bitmap, (uint32_t)pba_from_addr(&addr), c->conf);
+    }
 
     /* config.cw 不回写（v23 起它连建链都不参与，纯残留字段）——三条场景同判据。 */
     munit_assert_uint32(cmd->config.cw, ==, 0U);
