@@ -8,9 +8,14 @@
 /*
  * fc_random_engine.c — NAND 数据加扰/解扰引擎
  *
- * 加扰目的：打散写入 NAND 的数据 pattern，避免长串 0/1 造成
- * 单元间干扰（Program Disturb / Read Disturb）恶化，也便于
- * 均衡各页误码率。加扰与解扰是同一操作（XOR 对称）。
+ * 加扰目的：让写入 NAND 的位串**统计独立**——P(bit=1 | 全部历史) = 1/2，即输出与
+ * 随机数无法区分。由此间接避免长串 0/1 造成单元间干扰（Program Disturb / Read
+ * Disturb）恶化，并均衡各页误码率。加扰与解扰是同一操作（XOR 对称）。
+ *
+ * ⚠ **目标是「独立」，不是「均衡」，更不是「尽量与上一位相反」**：
+ *   均衡（0/1 各占一半）只是独立的一个副产品，`0101…` 同样满足均衡却**最不随机**
+ *   （翻转率 100%、是固定周期图案，反而对 NAND 有害）。LFSR 的唯一设计目标就是造一条
+ *   「给定历史、下一位仍是 1/2」的伪随机序列。理论见 fc_nand_design.md §5.4。
  *
  * 种子（v24）：**本 CW 的逻辑地址**（META 字段，扇区 LBA）——见 fc_random_seed_from_meta。
  * 算法：FC_RANDOM_ALGO（LFSR / XORSHIFT / SIMPLE_XOR）。

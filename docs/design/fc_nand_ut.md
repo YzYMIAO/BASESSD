@@ -162,7 +162,7 @@ _(以上两条仅在 CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
 |---|---|---|
 | `crc_step_detect` | **参数化** 4 case（`--param case <名>`） | CRC 的**覆盖边界** |
 | `ecc_step` | **参数化** 11 case | BCH(m=13, t=4) 的纠错能力 |
-| `scramble_whiten` | 单函数内 `kind = 0..2` 循环 | 加扰白化度 + 自反性 |
+| `scramble_whiten` | 单函数内 `kind = 0..2` 循环 | 加扰白化度 + 自反性（判据依据见 §5.6） |
 
 `crc_step_detect` 的 4 个 case——依据 `fc_data_path_crc_check`：存的 CRC 读自 `cw[4..8)`，
 算的 CRC 吃 `cw[8..520)`（`FC_CRC_USER_SIZE = 512`）。META 与 parity 两头**结构性**在覆盖之外：
@@ -180,7 +180,7 @@ _(以上两条仅在 CONFIG_FC_RAID=1 时编译，默认 0 不执行)_|
 `ecc_step` 的 11 个 case：1..4 bit 错必**精确纠正**（钉在 t=4 上）；`beyond-5` 单列 BOUND——
 BCH 允许误纠（实测约 0.28% 返回 OK 但数据是错的），故**不钉结果**，只钉两条恒成立的不变量
 （失败必须原子 / 纠正数不得超过 t）。`scramble_whiten` 的三种输入（全 0x00 / 全 0xFF / PAA 重复）
-走**同一组断言**，属迭代而非参数化。
+走**同一组断言**，属迭代而非参数化；游程判据的**统计方法与概率依据**见 §5.6。
 
 > **参数化 vs 迭代的判据**（见 `assertion_guidelines.md` §二十三）：
 > **不同分支 / 不同期望 → 参数化**（每个 case 一次独立 setup/tear_down，运行器在测试名下打印 `case=…`）；
@@ -628,6 +628,68 @@ MUNIT_PRINTF(1, 2) void test_trace_detail(const char *format, ...);   /* DEBUG�
 | `--log-visible info` | 77/77 | 131 |
 | `--log-visible debug` | 77/77 | 4936（131 摘要 + 4805 明细） |
 
+### 5.6 游程统计判据的理论依据（v1.19）
+
+`scramble_whiten` 的判据 ①②③ 建立在「随机数据的游程该长什么样」之上。这里把统计方法与它的概率推导写清，
+既解释阈值从哪来，也标出判据的**盲区**。加扰「目标 = 统计独立」的理论背景见 `fc_nand_design.md` §5.4。
+
+#### 统计方法（`l2_bit01_analyze`，`test_fc_level2.c`）
+
+一趟**流式**扫描，不存 bit，只维护两个游标 `cur`（当前段的位值）/ `run`（当前段已累积长度）：
+
+- `cur` 从**首位**初始化（不是从 0）——否则首段是 1 时会漏计一次；
+- 每读一个 bit：与 `cur` 相同 → `run++`；不同 → **结算**旧段（`hist[cur][桶]++`、`runs++`），再 `cur = b; run = 1`；
+- **循环后必须补收尾**——最后一段没有后继，不补则段数恒少 1（游程编码的经典 off-by-one）；
+- `≥16` **钳位进第 15 桶，不丢弃**——全 0xFF 的明文就是**一个长度 4096 的游程**、PAA 重复有 128 个 `≥16` 的 0 游程，
+  正是加扰要治的病，丢掉等于把病灶从报告里抹了。
+
+派生量（都走**整数**，newlib-nano 没有 `%f`）：`mean_x100 = 总位数 × 100 ÷ 段数`（平均段长 ×100）、
+`bias = |ones − 总位数/2|`。
+
+#### 为什么段数 ≈ 位数的一半
+
+随机数据**每一步有 1/2 概率翻转**（相邻两位相同 / 不同各半）：
+
+```
+段数 = 1 + 翻转次数 ≈ 1 + (4096−1) × 1/2 ≈ 2048       （= 位数的一半）
+```
+
+等价地，**平均段长 = 4096 / 2048 = 2**。段长服从几何分布：
+
+| 段长 k | 概率 `2^-k` | 在 2048 段里约 |
+|---|---|---|
+| 1 | 1/2 | 1024 段 |
+| 2 | 1/4 | 512 段 |
+| 3 | 1/8 | 256 段 |
+| 4 | 1/16 | 128 段 |
+
+——**一半的段只有 1 个 bit**，所以 2048 这个数看着大，其实是碎片。三个极端对照：
+
+| 序列 | 翻转率 | 平均段长 | 段数 |
+|---|---|---|---|
+| 全 0 | 0% | 4096 | 1 |
+| **随机** | **50%** | **2.0** | **≈2048** |
+| `0101…` | 100% | 1.0 | 4096 |
+
+#### 判据 ② 是双侧的
+
+`mean_x100 ∈ [170, 240]`（中心 200 = 平均段长 2.0），**两边都是病**：
+
+- **低了**（如 `mean_x100 = 100`，平均段长 1.0）：被**强制交替**（周期 2）；
+- **高了**（> 240，平均段长 > 2.4）：**长游程**（偏置，加扰没起作用）。
+
+#### ⚠ 判据 ①②③ 检的是症状，有盲区
+
+三条判据都是**统计量**，测不出**周期性**。反例：`00110011…`（每段长度恒为 2）——
+
+- 判据 ①：`ones = 2048` ✅（均衡）；
+- 判据 ②：平均段长正好 **2.0** ✅；
+- 判据 ③：没有 `≥16` 的段 ✅。
+
+**三条全过，但它是一个周期 4 的固定图案。** 这不是 bug，而是有限统计量的固有边界——真正的病根
+（「独立」）无法被任何有限个统计量完全覆盖。实际不影响正确性：加扰器输出是 LFSR 驱动的，
+`all-0x00` 那一路的输出就是裸 LFSR 序列（最大长度伪随机），**不是** `00110011…`。
+
 ---
 
 ## 6. 注意事项
@@ -664,6 +726,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-10 | v1.19 | **把「加扰 = 统计独立」的理论写入设计文档 + 注释代码（纯文档，无逻辑改动）**（见 `docs/changelog/fc_scrambler_theory_v37.md`）。背景：一次关于 `scramble_whiten` 输出的讨论暴露了「加扰 = 追求 `0101…` 均衡」的误解。① 主设计文档 `fc_nand_design.md` 新增 **§5.4「加扰的目标：统计独立」**——**条件** 1/2（独立）vs **无条件** 1/2（均衡）、三种序列对照、`段数 ≈ n/2` 与几何分布 `P(len=k)=2^-k` 的推导、`0101…` 为何对 NAND 有害（零结构 / CCI 最坏 / 与阵列物理周期谐振 ⇒ 系统性错误，ECC 怕系统性）。② 本文档新增 **§5.6「游程统计判据的理论依据」**——`l2_bit01_analyze` 的状态机（`cur` 从首位初始化 / 循环后补收尾 / `≥16` 钳位）、`段数 ≈ n/2`、判据 ② **双侧**（低了 = 强制交替 / 高了 = 长游程），以及判据 ①②③ 的**盲区**（`00110011…` 三条全过却仍是周期图案）。③ 注释：`test_fc_level2.c` 给 `l2_bit01_analyze` 补前导注释、给 `test_scramble_whiten` 补理论依据；`fc_random_engine.{c,h}` 点明「目标是独立，均衡只是副产品」。**不改断言、不改用例数（77）、不改任何 `src/**` 逻辑**（`fc_random_engine.c` 只动注释）。`make format-check` 过、`make clean && make tests` 0/0、链接 **219012 B**（与 v36 逐字节同）；**纯文档 + 注释，无需上板** |
 | 2026-10-10 | v1.18 | **单测证据打印 + `feature_write_read` 改读-改-写回环**（见 `docs/changelog/fc_ut_evidence_trace_v36.md`）。① **证据打印**：新增 §5.5，`tests/unit/fc_test_common.{c,h}` 加 `test_trace_begin/summary(INFO)/detail(DEBUG)` 三个原语，**复用 munit fork 已有的 `test --log-visible info\|debug`**（框架侧只加 1 个只读访问器 `munit_log_visible()`，见 `munit_adapter.md` v1.4）；不走 `munit_logf`（每行加 `Info:文件:行号` 会把明细撑爆）而直接写 `MUNIT_OUTPUT_FILE`；可见性判断放最前 ⇒ **默认档输出逐字不变**；`test_trace_begin()` 的换行改**急切**，修掉 `init_sequence` 里 `[INF] nand: READ_ID` 粘在结果行上的既有缺陷（info/debug 档）。夹具 `test_prog_page` / `test_read_page` / `test_read_block_cache` / `verify_chain_paa` 带 DEBUG 明细，Level 3 九条自动获得逐页证据；Level 1 加 11 条摘要、Level 2 迁移既有 6 处 `munit_logf` + 给自证函数加摘要。② **`feature_write_read` 由「只 GET」改成回环**：Phase 1 只读手册 Table 13 的四个地址（`01h`/`80h`/`81h`/`90h`），Phase 2 在 **`01h`（Timing mode）** 上做读-改-写（Table 15 取值 `00h..05h`），还原的 SET 排在断言**之前**。⚠ 该用例第一版照抄 FTL `RR_FEATURE_READ_RETRY` 写 **`0x89`**——那是本器件的**保留地址**，上板直接红（`readback[0] == probe[0] (0 == 1)`）。③ `usart.c` 的 `test` 帮助串补 `--log-visible`。**生产代码 `src/**` 零改动**。断言与用例数不变（77）。`make format-check` 过、`make clean && make tests` 0/0、链接 **219012 B**；**上板已验**：默认/info/debug 三档各 **77/77**，回环 `原值 00 -> SET 01 -> GET 01 -> 还原 00` |
 | 2026-10-10 | v1.17 | **修 Level 3 两处 `cw_bitmap` 建链缺陷——v27 语义翻转的漏扫调用点**（见 `docs/changelog/fc_ut_level3_bitmap_v35.md`）。背景：v23~v26 的 `cw_bitmap == 0` = 「本 plane 段全部 CW」，v27 改为**字面位图**（0 = 空集）并加了两条断言（`ftl_cmd_resolve_cw_bitmap`），但**没回扫调用点**；受影响的 Level 3 自 v31 起只保证编译通过、从未上板，故潜伏至今。① `test_read_block_cache` 的 cache **START** 传 `0U` → 改 `test_plane_cw_bitmap(plane_bitmap)`：v31 注释「无数据阶段 ⇒ 无数据链」是错的——op 表里它的 `has_data = 1U`（与 `WITHOUT_DATA_OUT` 同口径，「加载型」也算占数据路径），而 `fc_command_validate` 断言「has_data ⇒ desc_id 有效」⇒ **必须建链**。② `block_random_data` 的随机列读位图 `1U << cw` → `1U << (plane * CW_NUM + cw)`：cw_bitmap 是 **flat 绝对编号**，plane 1 的 CW0 是 bit 4 不是 bit 0；plane=0 侥幸合法，参数化新增的 plane=1 用例才炸。③ `fc_test_common.h` §三 与 `test_fc_level3.c` 文件头的 `1U << cw` 写法一并改正。**生产代码 `src/**` 零改动**（两个 ASSERT 都是被测代码正确拦住了测试的错误）。用例数不变（77）。`make clean && make tests` 0/0、链接 **213156 B**；**上板已验：77/77 (100%) 全绿**——本套首次全套通过。另更正 v34 记录里「全套 FC UT 0 失败」一句（当时只单跑了 2 条用例） |
 | 2026-10-10 | v1.16 | **单测的 META 由「页索引（自造 LBA）」换成**页 PBA**（见 `docs/changelog/fc_ut_meta_pba_v34.md`）。① 夹具 `test_prog_page` / `test_read_cache_step` 的 meta 改 `pba_from_addr(本页地址)`；**`test_read_page` 加 `meta` 形参**（「命令声明自己期待读到哪一页」正是该 tag 的意义，故提到调用点可见；全仓仅两个调用点），`test_read_block` 内传本页 PBA。② `test_fc_level2.c` 的 `L2_META` 改 `pba_from_addr`（15 个使用点不动）；`test_scramble_whiten` 直接用 `addr` 的 PBA 并删掉 `& ~3`（该掩码原本为 `page << 2` 让出 plane/cw 位，PBA 自带低 3 位，理由消失）。③ `test_fc_level3.c` 的 `read_page_verify` / 两个内部搬移 op / `RANDOM_DATA_READ` 换 PBA；`internal_data_move` Step 5 读命令声明**源页 PBA**（见上）。④ **修既有 bug**：`process_read_mata_error` 原先用 `(TEST_PAGE + 1U) << CW_WIDTH`，`+4` 落在 `PLANE_CW_MASK` 的 **bit 2（plane 位）**，被 `lba_to_meta()` 掩掉重铸 ⇒ 断言恒不成立（上板必挂；v33 修好 CRC 后才跑得到这里）。改为篡改 block 维，宿主程序逐 CW 数值验证。**生产代码 `src/**` 零改动，FC/FTL 契约仍是 LBA**；`make clean && make tests` 0/0、链接 **213132 B**；**上板已验**（`process_read_mata_error` / `internal_data_move` 均过，全套 FC UT 0 失败） |
