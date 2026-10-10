@@ -614,20 +614,20 @@ static void uart_cli_pending_poll(void)
  * 单独注册，不能把 raw NAND 或任意内存访问默认暴露在量产 UART 上。
  */
 static const uart_cli_command_t g_uart_cli_commands[] = {
-    {   "help",                                                                                          "help",                  "show command list", 1U,  1U,    uart_cli_help},
-    { "status",                                                                                        "status", "show UART error and queue counters", 1U,  1U,  uart_cli_status},
-    {"version",                                                                                       "version",      "show firmware console version", 1U,  1U, uart_cli_version},
-    {    "log",                                                             "log level <error|warn|info|debug>",              "set runtime log level", 3U,  3U,     uart_cli_log},
+    {   "help",                                                                                                           "help",                  "show command list", 1U,  1U,    uart_cli_help},
+    { "status",                                                                                                         "status", "show UART error and queue counters", 1U,  1U,  uart_cli_status},
+    {"version",                                                                                                        "version",      "show firmware console version", 1U,  1U, uart_cli_version},
+    {    "log",                                                                              "log level <error|warn|info|debug>",              "set runtime log level", 3U,  3U,     uart_cli_log},
  /* UART CLI 驱动 FTL（C 档，D10）：wr/rd/tr/fl/info 模拟 NVMe host IO */
-    {     "wr",                                                                                  "wr <lba> <n>",  "write n blocks with fixed pattern", 3U,  3U,      uart_cli_wr},
-    {     "rd",                                                                              "rd <lba> <n> [c]",  "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
-    {     "tr",                                                                                      "tr <lba>",                       "trim one lba", 2U,  2U,      uart_cli_tr},
-    {     "fl",                                                                                            "fl",  "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
-    {   "info",                                                                                          "info",   "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
+    {     "wr",                                                                                                   "wr <lba> <n>",  "write n blocks with fixed pattern", 3U,  3U,      uart_cli_wr},
+    {     "rd",                                                                                               "rd <lba> <n> [c]",  "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
+    {     "tr",                                                                                                       "tr <lba>",                       "trim one lba", 2U,  2U,      uart_cli_tr},
+    {     "fl",                                                                                                             "fl",  "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
+    {   "info",                                                                                                           "info",   "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
 #if defined(FC_NAND_TEST_ENABLE)
   /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
   /* { "nand", ... }, */
-    {   "test", "test [--seed N] [--single] [--list] [--list-params] [--log-visible info|debug] [test_name...]",          "run munit unit test suite", 1U, 10U,    uart_cli_test},
+    {   "test", "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [test_name...]",          "run munit unit test suite", 1U, 10U,    uart_cli_test},
 #endif
 };
 

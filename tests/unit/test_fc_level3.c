@@ -13,20 +13,24 @@
  *   9. 擦除验证：ERASE → 全 0xFF 验证
  *   （10. 紧锁定验证 BLOCK_LOCK_TIGHT —— 不可逆锁死整片 NAND，用 #if 0 隔开且不注册）
  *
- * ── 参数化：随机性由 munit 的种子驱动 ──
- *   9 条注册里 6 条地址相关的挂了 MunitParameterEnum（block / plane / sample）：
- *     · `test --single /fc-nand/lifecycle/`  —— 每用例按种子**随机抽一组**参数
- *     · `test --single --seed 0x… /…`        —— 复现上一轮（开场打印 seed 值）
- *     · `test /fc-nand/lifecycle/`           —— 不加 --single ⇒ 全组合枚举（耗时长）
- *     · `test --single --param block 104 /…` —— CLI 给的参数**优先于**随机挑值
- *   取值一律在用例体里就地解析（l3_param_block / l3_param_plane / l3_sample_case_find），
- *   不建中间工厂。框架**不校验** --param 的值，故取值处必须自查。
- *   ⚠ 用例体内**不用** munit_rand_*：munit 在每次 exec 前把 PRNG 重置回 runner->seed
- *     （munit.c:715），而导出的 munit_rand_int_range 不带 salt ⇒ 两个用例体内的第一个
- *     随机数完全相同（带 salt 的 munit_rand_at_most 在 munit.c 里是 static）。
- *     随机性只走「参数取值」这一条路，框架用带 salt 的种子挑值（munit.c:1139）。
+ * ── 地址随机化：随机性由 munit 的种子驱动（v1.22）──
+ *   9 条注册里 6 条地址相关的**在用例体内**抽地址（block / plane / 页集 / CW 集 / 搬移目标块），
+ *   取值一律走本文件的 l3_*_draw（见「随机地址」段），不挂 MunitParameterEnum。
+ *     · `test --log-visible info /fc-nand/lifecycle/`        —— 每条抽一组，打印抽到的值
+ *     · `test --seed 0x… /fc-nand/lifecycle/`                —— 复现上一轮（开场打印 seed 值）
+ *     · `test --iterations N /fc-nand/lifecycle/`            —— 每条抽 N 组（覆盖旋钮）
+ *   ⚠ 为什么必须加 salt：munit 在每次 exec 前把 PRNG 重置回 runner->seed（munit.c:774），
+ *     而导出的 munit_rand_int_range **不带 salt**（带 salt 的 munit_rand_at_most 是 static，
+ *     munit.c:503）⇒ 用例体内的**第一次**抽样在所有用例之间取值完全相同（六条会撞在同一个
+ *     块上、整轮只有一个 plane）。故本文件的 l3_rand 把 `hash(用例名) ^ hash(用途标签)`
+ *     异或进每次抽样：前者让用例之间互异，后者让同一用例内各用途互异。
+ *     机制与 Level 2 的 test_scramble_whiten / test_crc_step_detect 同路（那两处直接用
+ *     munit_rand_int_range，因为只有一条用例在抽，撞不上）。
+ *   ⚠ 复现契约 = (seed, 用例名, 第几次抽样)：reseed 是**每用例一次**，故复现单条用例
+ *     不需要重放其它用例。抽到的值必须经 test_trace_summary 打出来（INFO 档），否则
+ *     有 seed 也对不上是哪个块。
  *
- * PBA 约定：ch=0 ce=0 lun=0；block / plane / page 由参数给出（见 l3_*_params）
+ * PBA 约定：ch=0 ce=0 lun=0；block / plane / page 由 l3_*_draw 抽（见「随机地址」段）
  *           （v24/v25：命令携带的是 PBA，不是 PAA；地址一律用具名字段构造，
  *             见 nand_config.h 的 pba_from_addr / paa_from_addr）
  *
@@ -42,8 +46,9 @@
  *   - 释放只需 fc_command_release()（v16 起沿 desc 链把 desc + buffer 一起还池）
  *
  * 用法：
- *   ssd> test --list-params /fc-nand/lifecycle/
- *   ssd> test --single /fc-nand/lifecycle/
+ *   ssd> test --log-visible info /fc-nand/lifecycle/               # 每条抽一组，打印抽到的地址
+ *   ssd> test --log-visible info --iterations 5 /fc-nand/lifecycle/ # 每条抽 5 组
+ *   ssd> test --seed 0x<上一轮打印的> /fc-nand/lifecycle/            # 复现同一组地址
  */
 
 #include "common/log.h"
@@ -78,19 +83,26 @@
  *  setup / teardown 见套件表：test_setup / test_tear_down。
  **************************************************************************/
 
-/* ── 测试块池 ──
- * 用例体的块号来自 block 参数（见下方 l3_blocks），只有两档 100 / 104；
- * 内部搬移的目标块恒 = 源块 + L3_BLOCK_DEST_OFF（⇒ 102 / 106）。
+/* ── 随机地址窗口（v1.22）──
+ * 地址里的 block 字段是 **per-plane** 号（0..BLOCKS_PER_PLANE-1）。窗口取每 plane 块数的
+ * 30%~70%，**编译期**从 BLOCKS_PER_PLANE 算出（2048 ⇒ 614..1433），不写死数字。
+ * 目的：避开**固定**元数据区 —— 本仓 per-plane 编号下它落在 0..41 一带
+ * （L2P 0..31 / Anchor 33,34 / BBT 36,39 / Checkpoint 37,38 / Journal 40,41，
+ *  见 src/ftl/metadata.c 的 ftl_is_metadata_block），L3_BLOCK_LO = 614 远在其上。
  *
- * ⚠ 块号**不能**放开到 BLOCKS_PER_PLANE：跑 UT 时 FTL 是活的（src/main.c 无条件
- *   ssd_ftl_boot_all()，test 命令从主循环的 uart_service_poll() 进来），free pool
- *   覆盖整片 device。这是**既有**问题（改造前就写 100/102），参数化只是多写了
- *   104/106，不引入新的风险面。 */
-#define L3_BLOCK_DEST_OFF (2U)
+ * ⚠ 窗口只保证避开**固定**区：跑 UT 时 FTL 是活的（src/main.c 无条件 ssd_ftl_boot_all()，
+ *   test 命令从主循环的 uart_service_poll() 进来），free / OP / spare 池覆盖整片 device
+ *   ⇒ **动态** L2P region 块（≥32 的任意块）与 FTL 用户数据块**拦不住**。这是**既有**风险
+ *   （改造前就写死 100/102），窗口只是把暴露面从 2 个块放大到 820 个。 */
+#define L3_BLOCK_LO ((uint16_t)(BLOCKS_PER_PLANE * 30U / 100U)) /* 2048 ⇒ 614 */
+#define L3_BLOCK_HI ((uint16_t)(BLOCKS_PER_PLANE * 70U / 100U)) /* 2048 ⇒ 1433 */
+
+_Static_assert(L3_BLOCK_LO < L3_BLOCK_HI, "随机窗口为空");
+_Static_assert(L3_BLOCK_HI < BLOCKS_PER_PLANE, "随机窗口越过本 plane 块数");
 
 /* 旧默认值，只服务本文件 #if 0 段——BLOCK_TEST 被 unlock_erase / block_lock_tight
  * 引用；BLOCK_DEST 连 #if 0 段也不引用，与 BLOCK_TEST 成对留着纯属历史。
- * 活代码一律走参数，不再用这两个宏。 */
+ * 活代码一律走 l3_*_draw，不再用这两个宏。 */
 #define BLOCK_TEST (TEST_BLOCK)
 #define BLOCK_DEST (TEST_BLOCK_DEST)
 
@@ -111,101 +123,129 @@
                            .raid      = FC_RAID_MODE_NORMAL})
 
 /**************************************************************************
- *  参数化
+ *  随机地址（v1.22）
  *
- *  值表是 NULL 结尾的 const char* 数组；MunitParameterEnum 数组**非 const**
- *  （munit.h:436 的 MunitTest.parameters 是非 const 指针）。本 fork 的
- *  MunitParameterEnum 是 `const char *name; const char **values;`（munit.h:423-427）
- *  ⇒ **不需要 (char*) 转换**，与 Level 2（test_fc_level2.c:235/241）同形。
+ *  六个地址相关的用例**在用例体内**抽地址，不挂 MunitParameterEnum —— 参数表是
+ *  NULL 结尾的 const char* 数组，表达不了 820 宽的窗口，只能写死几个候选值。
+ *
+ *  ⚠ 必须给每次抽样加盐，理由见文件头「地址随机化」段：munit 每 exec 前 reseed 回
+ *    runner->seed（munit.c:774），而导出的 munit_rand_* **不带盐**（带盐的
+ *    munit_rand_at_most 是 static，munit.c:503）⇒ 用例体内的第一次抽样在所有用例
+ *    之间取值完全相同。用例名让**用例之间**互异，标签让**同一用例内各用途**互异。
  **************************************************************************/
 
-static const char *l3_blocks[]  = {"100", "104", NULL};
-static const char *l3_planes[]  = {"0", "1", NULL};
-static const char *l3_samples[] = {"edges", "spread", "middle", "dense", NULL};
-
-static MunitParameterEnum l3_block_params[] = {
-    {"block", l3_blocks},
-    {   NULL,      NULL}
-};
-static MunitParameterEnum l3_block_plane_params[] = {
-    {"block", l3_blocks},
-    {"plane", l3_planes},
-    {   NULL,      NULL}
-};
-static MunitParameterEnum l3_rnd_params[] = {
-    { "block",  l3_blocks},
-    { "plane",  l3_planes},
-    {"sample", l3_samples},
-    {    NULL,       NULL}
-};
-
-/* 参数取值。框架不校验 --param 的值（munit.c:1102-1115 只按名字收下、原样转交），
- * 表外名字会直接进用例 ⇒ 这里必须自查。 */
-static uint16_t l3_param_block(const MunitParameter params[])
+/* DJB2，与 munit.c:386 的 munit_str_hash **逐字同实现**（那份是 static，只能照抄）。 */
+static uint32_t l3_hash(const char *s)
 {
-    const char *s = munit_parameters_get(params, "block");
+    uint32_t h = 5381U;
 
-    munit_assert_not_null(s);
-    munit_assert_true((strcmp(s, "100") == 0) || (strcmp(s, "104") == 0)); /* 获准池 */
-    return (uint16_t)((strcmp(s, "100") == 0) ? 100U : 104U);
-}
-
-static uint8_t l3_param_plane(const MunitParameter params[])
-{
-    const char *s = munit_parameters_get(params, "plane");
-
-    munit_assert_not_null(s);
-    munit_assert_true((strcmp(s, "0") == 0) || (strcmp(s, "1") == 0));
-    return (uint8_t)((strcmp(s, "0") == 0) ? 0U : 1U);
-}
-
-/* ── 抽样策略（test_block_random_data）──
- * 页集 + 列集。"spread" 逐字等于改造前的现状（页 0/15/31/47/63 + CW 1/3），
- * 留作回归基线；其余三档扩大页/列的覆盖形态。 */
-typedef struct
-{
-    const char    *name;
-    const uint8_t *pages;
-    uint8_t        page_count;
-    const uint8_t *cws;
-    uint8_t        cw_count;
-} l3_sample_case_t;
-
-static const uint8_t l3_pages_edges[]  = {0U, 63U};
-static const uint8_t l3_pages_spread[] = {0U, 15U, 31U, 47U, 63U};
-static const uint8_t l3_pages_middle[] = {30U, 31U, 32U};
-static const uint8_t l3_pages_dense[]  = {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U};
-
-static const uint8_t l3_cw_one[]  = {1U};
-static const uint8_t l3_cw_pair[] = {1U, 3U};
-static const uint8_t l3_cw_all[]  = {0U, 1U, 2U, 3U};
-
-static const l3_sample_case_t l3_sample_cases[] = {
-    { "edges",  l3_pages_edges, 2U, l3_cw_pair, 2U},
-    {"spread", l3_pages_spread, 5U, l3_cw_pair, 2U},
-    {"middle", l3_pages_middle, 3U,  l3_cw_one, 1U},
-    { "dense",  l3_pages_dense, 8U,  l3_cw_all, 4U},
-};
-
-_Static_assert((sizeof(l3_samples) / sizeof(l3_samples[0]) - 1U) == (sizeof(l3_sample_cases) / sizeof(l3_sample_cases[0])),
-               "l3_samples 与 l3_sample_cases 数量不符");
-
-static const l3_sample_case_t *l3_sample_case_find(const char *name)
-{
-    if (name == NULL)
+    for (; *s != '\0'; s++)
     {
-        return NULL;
+        h = (h << 5U) + h + (uint32_t)(uint8_t)*s;
     }
 
-    for (uint8_t i = 0U; i < (uint8_t)(sizeof(l3_sample_cases) / sizeof(l3_sample_cases[0])); i++)
+    return h;
+}
+
+/* 每次抽样 = munit 随机流 ^ 用例名哈希 ^ 用途标签哈希。
+ * 复现契约 = (seed, 用例名, 第几次抽样)：reseed 是**每用例一次**，故复现单条用例
+ * **不需要**重放其它用例（比旧的「参数按用例名哈希挑值」更强）。 */
+static uint32_t l3_rand(const char *test, const char *tag)
+{
+    return munit_rand_uint32() ^ l3_hash(test) ^ l3_hash(tag);
+}
+
+/* 窗口内抽一个块号（闭区间 [L3_BLOCK_LO, L3_BLOCK_HI]）。tag 区分同一用例内的不同用途。 */
+static uint16_t l3_block_in_window(const char *test, const char *tag)
+{
+    const uint32_t span = (uint32_t)(L3_BLOCK_HI - L3_BLOCK_LO) + 1U;
+
+    return (uint16_t)(L3_BLOCK_LO + (uint16_t)(l3_rand(test, tag) % span));
+}
+
+static uint16_t l3_block_draw(const char *test)
+{
+    return l3_block_in_window(test, "block");
+}
+
+/* 抽一个 plane。 */
+static uint8_t l3_plane_draw(const char *test)
+{
+    return (uint8_t)(l3_rand(test, "plane") % (uint32_t)PLANE_NUM);
+}
+
+/* 抽内部搬移的目标块：同窗口，撞上源块就**环移一格**（不额外抽 ⇒ 抽样次数固定，
+ * 「第 i 次迭代看到第 i 段随机流」这条复现契约才说得清）。窗口 span ≥ 2 ⇒ 环移后必 ≠ src。 */
+static uint16_t l3_dest_draw(const char *test, uint16_t src)
+{
+    uint16_t dest = l3_block_in_window(test, "dest");
+
+    if (dest == src)
     {
-        if (strcmp(l3_sample_cases[i].name, name) == 0)
+        dest = (uint16_t)((dest >= L3_BLOCK_HI) ? L3_BLOCK_LO : (dest + 1U));
+    }
+
+    return dest;
+}
+
+static uint8_t l3_arr_contains(const uint8_t *arr, uint8_t n, uint8_t v)
+{
+    for (uint8_t i = 0U; i < n; i++)
+    {
+        if (arr[i] == v)
         {
-            return &l3_sample_cases[i];
+            return 1U;
         }
     }
 
-    return NULL;
+    return 0U;
+}
+
+/* 抽 n 个**互不重复**的页（n ∈ [2,8]，页 ∈ [0, PAGES_PER_BLOCK)）与 CW（n ∈ [1,4]）。
+ * 个数也随机 —— 旧的 sample 参数本来就靠 2/5/3/8 页制造形态差异，只随机位置会**回退覆盖**。
+ * 拒绝采样，与 Level 2 的 l2_ecc_flip（test_fc_level2.c:638-653）同形。
+ * 上限 8×4 = 32 个探针 = 旧 dense 档的最坏值 ⇒ **板上耗时上界不变**。 */
+#define L3_PAGES_MIN (2U)
+#define L3_PAGES_MAX (8U)
+#define L3_CWS_MIN   (1U)
+#define L3_CWS_MAX   (CW_NUM) /* 4 */
+
+static uint8_t l3_pages_draw(const char *test, uint8_t pages[L3_PAGES_MAX])
+{
+    const uint8_t n = (uint8_t)(L3_PAGES_MIN + (l3_rand(test, "npages") % (uint32_t)(L3_PAGES_MAX - L3_PAGES_MIN + 1U)));
+
+    for (uint8_t i = 0U; i < n; i++)
+    {
+        uint8_t page;
+
+        do
+        {
+            page = (uint8_t)(l3_rand(test, "page") % (uint32_t)PAGES_PER_BLOCK);
+        } while (l3_arr_contains(pages, i, page) != 0U);
+
+        pages[i] = page;
+    }
+
+    return n;
+}
+
+static uint8_t l3_cws_draw(const char *test, uint8_t cws[L3_CWS_MAX])
+{
+    const uint8_t n = (uint8_t)(L3_CWS_MIN + (l3_rand(test, "ncws") % (uint32_t)(L3_CWS_MAX - L3_CWS_MIN + 1U)));
+
+    for (uint8_t i = 0U; i < n; i++)
+    {
+        uint8_t cw;
+
+        do
+        {
+            cw = (uint8_t)(l3_rand(test, "cw") % (uint32_t)CW_NUM);
+        } while (l3_arr_contains(cws, i, cw) != 0U);
+
+        cws[i] = cw;
+    }
+
+    return n;
 }
 
 /**************************************************************************
@@ -726,7 +766,7 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
  *  test_internal_data_move — 内部搬移验证
  *
  *  流程：
- *    1. 擦除源 block + 目标 block（目标 = 源 + L3_BLOCK_DEST_OFF）
+ *    1. 擦除源 block + 目标 block（源 / 目标都在窗口内随机抽，src ≠ dest）
  *    2. 写源 block（64 pages，每页数据 = 该页地址）
  *    3. 普通读回源 block 64 pages，排除写阶段问题
  *    4. 对每 page 执行 READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE
@@ -743,25 +783,29 @@ static MunitResult test_status_query(const MunitParameter params[], void *data)
  *     重算期望（fc_test_common.c:644-675）。数据路径侧照常通过：META 低 3 位 = plane/cw
  *     （源 / 目标同 plane、同 cw 枚举）、META 的 LBA 与命令 meta 同页 ⇒ Pass 4 两项都过；
  *     CRC 因 USER 原样搬过而一致。
+ *  ⚠ v1.22 起 dest 也是**抽出来的**（不再是 src + 常数）⇒ 上面这条更容易写错：Step 5 的
+ *     比对与读命令的 meta 都必须继续用**源块**坐标，顺手写成 dest 就会静默判错。
  **************************************************************************/
 
 static MunitResult test_internal_data_move(const MunitParameter params[], void *data)
 {
+    (void)params;
     (void)data;
-    const uint16_t block = l3_param_block(params);
-    const uint16_t dest  = (uint16_t)(block + L3_BLOCK_DEST_OFF);
+    const uint8_t  plane = l3_plane_draw("internal_data_move");
+    const uint16_t block = l3_block_draw("internal_data_move");
+    const uint16_t dest  = l3_dest_draw("internal_data_move", block);
 
     test_trace_begin();
 
     /* Step 1: 擦除源 + 目标 block */
-    test_erase_block(block, TEST_PLANE_BM(0), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
-    test_erase_block(dest, TEST_PLANE_BM(0), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
+    test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
+    test_erase_block(dest, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
 
     /* Step 2: 写源 block（64 pages） */
-    test_prog_block(block, TEST_PLANE_BM(0), &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL);
+    test_prog_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL);
 
     /* Step 3: 用普通读（00h-30h）验证源 block 全部 64 pages 正确，排除写阶段问题 */
-    test_read_block(block, TEST_PLANE_BM(0), &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
+    test_read_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
 
     /* Step 4: 逐 page 内部搬移：READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE
      * ⚠ 这两个 op 都**不是** page read/write（fc_is_page_read / fc_is_page_write 都不含），
@@ -772,9 +816,9 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     {
         /* 4a: READ_FOR_INTERNAL_DATA_MOVE (00h-35h) — 将源 block page 读到 NAND 内部缓存 */
         {
-            fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = block, .plane = 0U, .page = page},
-                                               test_plane_cw_bitmap(TEST_PLANE_BM(0)),
-                                               (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = 0U, .page = page}),
+            fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = block, .plane = plane, .page = page},
+                                               test_plane_cw_bitmap(TEST_PLANE_BM(plane)),
+                                               (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page}),
                                                &L3_CONF(OP_READ_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE));
 
             (void)test_submit_wait(cmd);
@@ -783,9 +827,9 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
 
         /* 4b: PROGRAM_FOR_INTERNAL_DATA_MOVE (85h-10h) — 将内部缓存数据写入目标 block page */
         {
-            fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = dest, .plane = 0U, .page = page},
-                                               test_plane_cw_bitmap(TEST_PLANE_BM(0)),
-                                               (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = 0U, .page = page}),
+            fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = dest, .plane = plane, .page = page},
+                                               test_plane_cw_bitmap(TEST_PLANE_BM(plane)),
+                                               (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page}),
                                                &L3_CONF(OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, FC_CRC_ENABLE));
 
             (void)test_submit_wait(cmd);
@@ -800,18 +844,19 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
      *   反而会被 Pass 4 ② 判成「读到了别的页」。 */
     for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        const uint32_t      tag = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = 0U, .page = page});
+        const uint32_t      tag = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page});
         fc_command_status_t completion =
-            test_read_page(dest, TEST_PLANE_BM(0), page, tag, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
+            test_read_page(dest, TEST_PLANE_BM(plane), page, tag, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
 
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
-        test_verify_page_paa(g_source_data, block, page, TEST_PLANE_BM(0));
+        test_verify_page_paa(g_source_data, block, page, TEST_PLANE_BM(plane));
     }
 
     /* 证据摘要（--log-visible info）：搬了多少页、目标块的 USER 是按**哪套坐标**比的。
      * 这一句是本用例的核心判据——「按源块坐标比」而不是按目标块，打出来才看得出
-     * Step 5 的期望值取对了（错取目标坐标会静默判成"数据错"，或更糟：恒真通过）。 */
-    test_trace_summary("move block=%u -> dest=%u: %u pages x %u CW; dest USER == 源块坐标 PAA (%lu B)", (unsigned)block, (unsigned)dest, (unsigned)PAGES_PER_BLOCK, (unsigned)CW_NUM, (unsigned long)PAGES_PER_BLOCK * (unsigned long)CW_NUM * (unsigned long)FC_BUFFER_USER_SIZE);
+     * Step 5 的期望值取对了（错取目标坐标会静默判成"数据错"，或更糟：恒真通过）。
+     * plane / src / dest 都是抽出来的 ⇒ 必须打出来，否则有 seed 也对不上是哪个块。 */
+    test_trace_summary("move plane=%u block=%u -> dest=%u (src≠dest): %u pages x %u CW; dest USER == 源块坐标 PAA (%lu B)", (unsigned)plane, (unsigned)block, (unsigned)dest, (unsigned)PAGES_PER_BLOCK, (unsigned)CW_NUM, (unsigned long)PAGES_PER_BLOCK * (unsigned long)CW_NUM * (unsigned long)FC_BUFFER_USER_SIZE);
 
     return MUNIT_OK;
 }
@@ -887,9 +932,10 @@ static MunitResult test_unlock_erase(const MunitParameter params[], void *data)
 
 static MunitResult test_block_write_read(const MunitParameter params[], void *data)
 {
+    (void)params;
     (void)data;
-    const uint16_t block = l3_param_block(params);
-    const uint8_t  plane = l3_param_plane(params);
+    const uint8_t  plane = l3_plane_draw("block_write_read");
+    const uint16_t block = l3_block_draw("block_write_read");
 
     test_trace_begin();
 
@@ -920,19 +966,23 @@ static MunitResult test_block_write_read(const MunitParameter params[], void *da
  *    - 擦除后 NAND 确实将全 block 数据位重置为 1
  *
  *  ⚠ 判据偏弱（既有，本轮只标注）：没有前置写，直接擦完读擦除态，依赖前序用例的
- *     残留状态；参数化后块池变大（100/104），顺序依赖更明显。
+ *     残留状态；地址随机化后块池更大（窗口 614..1433），顺序依赖更明显。
  **************************************************************************/
 
 static MunitResult test_block_erase_verify(const MunitParameter params[], void *data)
 {
+    (void)params;
     (void)data;
-    const uint16_t block = l3_param_block(params);
-    const uint8_t  plane = l3_param_plane(params);
+    const uint8_t  plane = l3_plane_draw("block_erase_verify");
+    const uint16_t block = l3_block_draw("block_erase_verify");
 
     test_trace_begin();
 
     test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
     read_block_verify_erased(block, TEST_PLANE_BM(plane));
+
+    /* 证据摘要（--log-visible info）：地址是抽出来的 ⇒ 必须打出来才能从 seed 复现。 */
+    test_trace_summary("erase_verify block=%u plane=%u: erase -> %u pages 全 0xFF", (unsigned)block, (unsigned)plane, (unsigned)PAGES_PER_BLOCK);
 
     return MUNIT_OK;
 }
@@ -959,9 +1009,10 @@ static MunitResult test_block_erase_verify(const MunitParameter params[], void *
 
 static MunitResult test_block_cache_ops(const MunitParameter params[], void *data)
 {
+    (void)params;
     (void)data;
-    const uint16_t block = l3_param_block(params);
-    const uint8_t  plane = l3_param_plane(params);
+    const uint8_t  plane = l3_plane_draw("block_cache_ops");
+    const uint16_t block = l3_block_draw("block_cache_ops");
 
     test_trace_begin();
 
@@ -977,6 +1028,9 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
      * 且 31h 输出的是**上一轮加载的页**，meta 必须给「真正输出的那一页」的 LBA ——
      * 这条约定封装在 test_read_block_cache 里（见 fc_test_common.h「cache 整块读写」）。 */
     test_read_block_cache(block, TEST_PLANE_BM(plane), &L3_CONF(OP_READ_PAGE_CACHE_SEQ, FC_CRC_DISABLE), NULL);
+
+    /* 证据摘要（--log-visible info）：地址是抽出来的 ⇒ 必须打出来才能从 seed 复现。 */
+    test_trace_summary("cache_ops block=%u plane=%u: cache prog -> 31h x63 -> 3Fh 全 block 数据一致", (unsigned)block, (unsigned)plane);
 
     return MUNIT_OK;
 }
@@ -999,8 +1053,9 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
 
 static MunitResult test_block_multi_plane(const MunitParameter params[], void *data)
 {
+    (void)params;
     (void)data;
-    const uint16_t block = l3_param_block(params);
+    const uint16_t block = l3_block_draw("block_multi_plane");
 
     test_trace_begin();
 
@@ -1030,8 +1085,8 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
  *  test_block_random_data — 随机列读验证
  *
  *  流程：
- *    1. 擦除 + 写全 block 基准数据（参数给出的 plane）
- *    2. 按 sample 参数取页集，每页：
+ *    1. 擦除 + 写全 block 基准数据（plane / block 都随机抽）
+ *    2. 随机抽页集（n ∈ [2,8] 个互不重复的页）与 CW 集（n ∈ [1,4] 个互不重复的 CW），每页：
  *       a. Normal read page 加载页缓冲
  *       b. RANDOM_DATA_READ 抽样页集里的每个 CW，验证数据
  *
@@ -1040,34 +1095,36 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
  *    - 跨页行地址切换后随机列读正确
  *    - 数据与原始写入一致
  *
- *  页集/列集由 sample 参数决定（"spread" 逐字等于改造前的现状，留作回归基线）。
+ *  ⚠ 抽样顺序固定为 ① plane ② block ③ 页集（先抽个数再抽元素）④ CW 集（同）
+ *     —— 顺序即复现契约；主循环（页 × CW 探针）**不再消耗随机流**。
  **************************************************************************/
 
 static MunitResult test_block_random_data(const MunitParameter params[], void *data)
 {
+    (void)params;
     (void)data;
-    const uint16_t          block  = l3_param_block(params);
-    const uint8_t           plane  = l3_param_plane(params);
-    const char             *sample = munit_parameters_get(params, "sample");
-    const l3_sample_case_t *sc     = l3_sample_case_find(sample);
-
-    munit_assert_not_null(sc); /* 挡表外 --param sample 值（框架不校验） */
+    const uint8_t  plane = l3_plane_draw("block_random_data");
+    const uint16_t block = l3_block_draw("block_random_data");
+    uint8_t        pages[L3_PAGES_MAX];
+    uint8_t        cws[L3_CWS_MAX];
+    const uint8_t  n_pages = l3_pages_draw("block_random_data", pages);
+    const uint8_t  n_cws   = l3_cws_draw("block_random_data", cws);
 
     test_trace_begin();
 
     test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
     test_prog_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL);
 
-    for (uint8_t si = 0U; si < sc->page_count; si++)
+    for (uint8_t si = 0U; si < n_pages; si++)
     {
-        const uint16_t page = sc->pages[si];
+        const uint16_t page = pages[si];
 
         /* Normal read page — 加载 NAND 页缓冲（顺带校验整页） */
         read_page_verify(block, page, TEST_PLANE_BM(plane), 0U, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
 
-        for (uint8_t ci = 0U; ci < sc->cw_count; ci++)
+        for (uint8_t ci = 0U; ci < n_cws; ci++)
         {
-            const uint8_t cw = sc->cws[ci];
+            const uint8_t cw = cws[ci];
 
             /* 随机列读：只抽 1 个 CW ⇒ cw_bitmap 必须是**被抽样那个 CW 的位**。
              * ⚠ 位图是 flat 绝对编号（bit n = plane*CW_NUM + cw，v9/v27）——**plane 1 的
@@ -1101,9 +1158,34 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
         }
     }
 
-    /* 证据摘要（--log-visible info）：抽样表 + 探测次数。页集/列集与 l3_sample_cases 表
-     * 对不上时（例如 plane 1 的 CW0 位算成 0x01）这一行会立刻显形。 */
-    test_trace_summary("random block=%u plane=%u sample=%s: %u pages x %u cw = %u probes, 逐 desc 对 desc->paa", (unsigned)block, (unsigned)plane, sample, (unsigned)sc->page_count, (unsigned)sc->cw_count, (unsigned)(sc->page_count * sc->cw_count));
+    /* 证据摘要（--log-visible info）：抽到的地址 + 页/列**掩码** + 探针数。
+     * 掩码由抽到的集合就地算出 ⇒ 它的 popcount **等于**打印的个数，顺带**自证互不重复**；
+     * 与下面 debug 档逐探针的 cw_bitmap 对不上（例如 plane 1 的 CW0 位算成 0x01）会立刻显形。
+     * ⚠ 页掩码是 64 位 ⇒ 拆两个 %08lX 打印 —— newlib-nano 不认 %llX（见 memory）。 */
+    {
+        uint32_t page_mask_lo = 0U;
+        uint32_t page_mask_hi = 0U;
+        uint32_t cw_mask      = 0U;
+
+        for (uint8_t i = 0U; i < n_pages; i++)
+        {
+            if (pages[i] < 32U)
+            {
+                page_mask_lo |= (uint32_t)1U << pages[i];
+            }
+            else
+            {
+                page_mask_hi |= (uint32_t)1U << (pages[i] - 32U);
+            }
+        }
+
+        for (uint8_t i = 0U; i < n_cws; i++)
+        {
+            cw_mask |= (uint32_t)1U << ((uint32_t)plane * CW_NUM + cws[i]);
+        }
+
+        test_trace_summary("random block=%u plane=%u: %u pages x %u cw = %u probes; page_mask=0x%08lX%08lX cw_mask=0x%08lX, 逐 desc 对 desc->paa", (unsigned)block, (unsigned)plane, (unsigned)n_pages, (unsigned)n_cws, (unsigned)(n_pages * n_cws), (unsigned long)page_mask_hi, (unsigned long)page_mask_lo, (unsigned long)cw_mask);
+    }
 
     return MUNIT_OK;
 }
@@ -1208,39 +1290,42 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
 /**************************************************************************
  *  套件定义
  *
- *  包含（前 3 条是定长命令序列，地址不参与，不参数化）：
+ *  包含（前 3 条是定长命令序列，地址不参与，不随机化）：
  *    - init_sequence（初始化序列：RESET -> READ_ID -> ...）
  *    - feature_write_read（Feature 写回验证）
  *    - status_query（状态查询）
- *  其余 6 条挂参数（block / plane / sample，见上方 l3_*_params）：
- *    - internal_data_move（片上内部搬移，block）
- *    - block_erase_verify（擦除后全 0xFF 验证，block×plane）
- *    - block_write_read（全 block 写读，block×plane）
- *    - block_cache_ops（cache 读序列数据验证，block×plane）
- *    - block_multi_plane（多 Plane 擦写读验证，block）
- *    - block_random_data（随机列读写验证，block×plane×sample）
+ *  其余 6 条**在用例体内**抽地址（见上方「随机地址」段）：
+ *    - internal_data_move（片上内部搬移，抽 plane / src / dest）
+ *    - block_erase_verify（擦除后全 0xFF 验证，抽 plane / block）
+ *    - block_write_read（全 block 写读，抽 plane / block）
+ *    - block_cache_ops（cache 读序列数据验证，抽 plane / block）
+ *    - block_multi_plane（多 Plane 擦写读验证，抽 block）
+ *    - block_random_data（随机列读写验证，抽 plane / block / 页集 / CW 集）
  *    - block_lock_tight（永久锁芯片验证，必须放在最后）
  *
- *  参数化行用 MUNIT_TEST_OPTION_NONE：不加 --single 时按参数表**全组合枚举**，
- *  加 --single 时每个参数枚举按种子随机抽一个值（munit.c:1139）。runner.iterations
- *  默认 0 ⇒ 迭代次数回落到套件级 iterations（ut_main.c 里 = 1），与是否带
- *  SINGLE_ITERATION 无关（munit.c:1375 / :706-709）。
+ *  六条随机化行用 MUNIT_TEST_OPTION_NONE（**保留**，不要换成 SINGLE_ITERATION）：
+ *  --iterations N 才是覆盖旋钮（每条抽 N 组）；换成 SINGLE_ITERATION 会把旋钮锁死。
+ *  runner.iterations 默认 0 ⇒ 迭代次数回落到套件级 iterations（ut_main.c 里 = 1），
+ *  与是否带 SINGLE_ITERATION 无关（munit.c:1375 / :706-709）。
+ *  ⚠ --iterations 是 **runner 级全局量**，且 runner->suite **恒指根套件**（munit.c:1359）
+ *    ⇒ 子套件自己的 iterations 字段无效，**别去改 ut_main.c**（改了会把 Level 1/2 也乘 N）。
+ *    它按调用范围生效：只跑 /fc-nand/lifecycle/ 就只乘 Level 3。
  *
  *  （unlock_erase 用 #if 0 隔开，暂不启用）
  **************************************************************************/
 
 MunitTest g_fc_lifecycle_tests[] = {
-    {     "init_sequence",      test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
-    {"feature_write_read", test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
-    {      "status_query",       test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION,                  NULL},
-    {"internal_data_move", test_internal_data_move, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,       l3_block_params},
-    {"block_erase_verify", test_block_erase_verify, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l3_block_plane_params},
-    {  "block_write_read",   test_block_write_read, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l3_block_plane_params},
-    {   "block_cache_ops",    test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, l3_block_plane_params},
-    { "block_multi_plane",  test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,       l3_block_params},
-    { "block_random_data",  test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE,         l3_rnd_params},
+    {     "init_sequence",      test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"feature_write_read", test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {      "status_query",       test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"internal_data_move", test_internal_data_move, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {"block_erase_verify", test_block_erase_verify, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {  "block_write_read",   test_block_write_read, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {   "block_cache_ops",    test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    { "block_multi_plane",  test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    { "block_random_data",  test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
 #if 0  /* block_lock_tight 被 #if 0 隔开，此处不注册 */
     { "block_lock_tight",    test_block_lock_tight,    test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 #endif
-    {                NULL,                    NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE,                  NULL},
+    {                NULL,                    NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

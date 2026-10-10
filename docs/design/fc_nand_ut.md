@@ -236,7 +236,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 - **建链**：走 FTL 策略层 `ftl_cmd_configure_descriptors()`（v13 起）。
 - **释放**：只需 `fc_command_release()`（v16 起一并回收 desc + buffer）。
 - **ID 断言**：`fc_command_t` 无 `command_id` 字段（v15 删），断言用 `fc_command_to_id(cmd, &expect_id)` 反查。
-- **PAA 约定**：`ch=0 ce=0 lun=0`，page=0..63，plane 0/1；**block / plane 由参数给出**（见下「参数化与随机种子」节，块池 `100`/`104`；内部搬移目标恒 = 源 + 2 ⇒ `102`/`106`）。
+- **PAA 约定**：`ch=0 ce=0 lun=0`，page=0..63，plane 0/1；**block / plane 在用例体内随机抽**（见下「随机地址与种子」节，窗口 = 每 plane 块数的 30%~70% ⇒ `614..1433`；内部搬移的目标块同窗口另抽，`src ≠ dest`）。
 - **cache 的 plane 边界**（决定 helper 为什么只做单 plane，两层依据别混）：**ONFI 1.0 根本没有 multi-plane**——Rev 1.0 Table 14 命令集里 cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，全文 `plane` 一词出现 **0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。而**本器件（Micron MT29F4G08）确实有 two-plane cache 编程**——datasheet Table 7 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`；但**没有 two-plane cache 读**（读侧只有单 plane 31h / 3Fh）。本项目 op 表两种都没有 ⇒ helper 只做单 plane。
 - **cache 整块读写**：夹具新增 `test_prog_block_cache()` / `test_read_block_cache()`（**单 plane**——依据见上「cache 的 plane 边界」；`config` 只提供模式位，`operation` 由 helper 逐步覆盖，调用者填什么都被忽略）。写侧前 63 页 `OP_PROGRAM_PAGE_CACHE`（15h）、末页 `OP_NORMAL_PROGRAM_PAGE`（10h）收尾。读侧**不能**由 `test_read_page` 循环拼出——31h / 3Fh 无地址周期（设备自增），且 31h 输出的是**上一轮加载的页**，故 helper 显式编排 `START(p0) → SEQ ×63 → LAST`，`meta` 取**真正输出页**的 PBA（第 i 次 SEQ 取 page i-1 的 PBA）；共 65 条命令输出 64 页。两者都是同步逐条提交 ⇒ 只验数据正确性（cache 命令序列走得通、编码管线不串），**不验流水线收益**。
 - **裸页 config**：本文件用 `L3_CONF(operation, crc)` 复合字面量给出「裸页」形态——与改造前 `program_page` / `read_page` / `erase_block` 字段逐字一致（**不加扰** + **LDPC RAW** + **不 RAID**；crc 逐处给，裸页读写沿用池默认的 `FC_CRC_ENABLE`，cache 与 multi-plane 路径显式 `FC_CRC_DISABLE`）。`ch/ce/lun` 由 `test_cmd_build` 从 addr 覆盖，`multi_plane` 由 operation 派生。
@@ -244,27 +244,42 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 - **读回校验分两档**：整段读用 `test_verify_page_paa(data, block, page, plane_bitmap)`（按地址**重算**期望，覆盖段内全部 CW）；部分掩码读（如 RANDOM_DATA_READ 只抽 1 个 CW）用本文件的 `verify_chain_paa(cmd)`（只看**链上实际有的** desc，期望取 `desc->paa`）——此时段内其余 CW 的源槽根本没被这次读填过。
 - **擦除页的判据只能是逐 CW `FC_CW_STATUS_SUCCESS`**：擦除页 META = 0xFF…，Pass 4 ① 自洽必然不过 ⇒ 该 CW 带 `MATA_ERROR`，**聚合 status 的错误掩码非零**。故 `read_block_verify_erased` 走本文件的 `read_page_verify(..., erased=1)`（在 release 前逐 CW 查 SUCCESS 位），不能用 `test_read_block` 的聚合判据。
 
-#### 参数化与随机种子（v1.15）
+#### 随机地址与种子（v1.22）
 
-6 条地址相关用例（`internal_data_move` / `block_erase_verify` / `block_write_read` / `block_cache_ops` / `block_multi_plane` / `block_random_data`）挂 `MunitParameterEnum`，参数词汇表：
+6 条地址相关用例（`internal_data_move` / `block_erase_verify` / `block_write_read` / `block_cache_ops` / `block_multi_plane` / `block_random_data`）**在用例体内**抽地址，**不挂 `MunitParameterEnum`**——参数表是 NULL 结尾的 `const char*` 数组，表达不了 820 宽的窗口，只能写死几个候选值（v1.15 就是 `100`/`104` 两档）。
 
-| 参数 | 取值 | 用在 |
+**窗口**（`test_fc_level3.c` 顶部，**编译期**从 `BLOCKS_PER_PLANE` 算出，不写死数字）：
+
+| 常数 | 值（`BLOCKS_PER_PLANE` = 2048） | 含义 |
 |---|---|---|
-| `block` | `100` / `104` | 除 multi-plane 外的地址相关用例 |
-| `plane` | `0` / `1` | `block_erase_verify` / `block_write_read` / `block_cache_ops` / `block_random_data` |
-| `sample` | `edges` / `spread` / `middle` / `dense` | 仅 `block_random_data`（页集 + 列集；`spread` 逐字等于改造前现状） |
+| `L3_BLOCK_LO` | `2048 * 30 / 100` = **614** | 窗口下界 |
+| `L3_BLOCK_HI` | `2048 * 70 / 100` = **1433** | 窗口上界 |
 
-其余 3 条（`init_sequence` / `feature_write_read` / `status_query`）是定长命令序列、地址不参与，**不参数化**（保持 `SINGLE_ITERATION` + `NULL`）。
+地址里的 `block` 字段是 **per-plane** 号，窗口取每 plane 块数的 30%~70% 以避开**固定**元数据区（本仓 per-plane 编号下落在 0..41 一带：L2P 0..31 / Anchor 33,34 / BBT 36,39 / Checkpoint 37,38 / Journal 40,41，见 `src/ftl/metadata.c` 的 `ftl_is_metadata_block`）。
 
-**随机性由 munit 的种子驱动，不落在用例体内**：
-- `--single` 让每个参数枚举**随机挑一个值**，salt 是**用例名哈希**（`munit.c:1139`）⇒ 同一轮里各用例挑到的组合互不相同；`runner.seed` 一次运行一个值（默认由 `time(NULL)` 派生、开场打印 `Running test suite with seed 0x…`，`--seed N` 可复现）。
-- 不加 `--single` ⇒ 按参数表**全组合枚举**（笛卡尔积，`munit.c:1160` 的 `run_test_wild` 递归展开）：`block` 档 2 组、`block×plane` 档 4 组、`block×plane×sample` 档 16 组。`--single` 下每条恒 1 组。
-- CLI `--param name value` **优先于**随机挑值（`munit.c:1102-1120`，`filled == 1` 先短路）；框架**不校验**值 ⇒ 表外名字直接进用例，取值处（`l3_param_block` / `l3_param_plane` / `l3_sample_case_find`）用断言兜底。
-- ⚠ **用例体内不要用 `munit_rand_*`**：`exec` 在用例体前把 PRNG 重置回 `runner->seed`（`munit.c:715`），而导出的 `munit_rand_int_range` 不带 salt（带 salt 的 `munit_rand_at_most` 在 `munit.c` 里是 `static`，不导出）⇒ 两个用例体内的**第一个**随机数完全相同。随机性只走「参数取值」这一条路。
+**抽样函数**（都在 `test_fc_level3.c`，用途标签区分同一用例内的不同抽取）：
+
+| 函数 | 抽什么 |
+|---|---|
+| `l3_block_draw(test)` | 窗口内一个块号（闭区间） |
+| `l3_plane_draw(test)` | `[0, PLANE_NUM)` 一个 plane |
+| `l3_dest_draw(test, src)` | 内部搬移目标块：同窗口另抽，撞上 `src` 就**环移一格**（不额外抽 ⇒ 抽样次数固定） |
+| `l3_pages_draw(test, out)` | n ∈ [2,8] 个**互不重复**的页（拒绝采样），返回 n |
+| `l3_cws_draw(test, out)` | n ∈ [1,4] 个**互不重复**的 CW（拒绝采样），返回 n |
+
+**抽样顺序即复现契约**（各用例体内依次）：`internal_data_move` ① plane ② block ③ dest；`block_erase_verify` / `block_write_read` / `block_cache_ops` ① plane ② block；`block_multi_plane` ① block（plane 由 multi-plane op 派生）；`block_random_data` ① plane ② block ③ 页集（先抽个数再抽元素）④ CW 集（同）——主循环（页 × CW 探针）**不再消耗随机流**。上限 8×4 = 32 个探针 = 旧 `dense` 档的最坏值 ⇒ **板上耗时上界不变**。
+
+**必须加 salt**：munit 在每次 `exec` 前把 PRNG 重置回 `runner->seed`（`munit.c:774`），而导出的 `munit_rand_*` **不带 salt**（带 salt 的 `munit_rand_at_most` 是 `static`，`munit.c:503`）⇒ 用例体内的**第一次**抽样在所有用例之间取值完全相同（六条会撞在同一个块上、整轮只有一个 plane）。故 `l3_rand(test, tag) = munit_rand_uint32() ^ l3_hash(test) ^ l3_hash(tag)`：**用例名**让用例之间互异，**用途标签**让同一用例内各用途互异。`l3_hash` 是 DJB2，与 `munit.c:386` 的 `munit_str_hash` 逐字同实现（那份是 `static`，只能照抄）。
+
+**复现契约 = (seed, 用例名, 第几次抽样)**：reseed 是**每用例一次**，故复现单条用例**不需要**重放其它用例。`runner.seed` 一次运行一个值（默认由 `time(NULL)` 派生、开场打印 `Running test suite with seed 0x…`，`--seed N` 可复现）；抽到的值一律经 `test_trace_summary` 打出来（`--log-visible info`），否则有 seed 也对不上是哪个块。
+
+**覆盖旋钮是 `--iterations N`**（不是参数表）：六条随机化行用 `MUNIT_TEST_OPTION_NONE`（**保留**，别换成 `SINGLE_ITERATION`，那会把旋钮锁死）。`test --iterations 20 /fc-nand/lifecycle/` ⇒ Level 3 跑 `3 + 6×20 = 123` 条。⚠ `--iterations` 是 **runner 级全局量**，且 `runner->suite` **恒指根套件**（`munit.c:1359`）⇒ 子套件自己的 `iterations` 字段无效，**别去改 `ut_main.c`**（改了会把 Level 1/2 也乘 N）；它按调用范围生效，只跑 `/fc-nand/lifecycle/` 就只乘 Level 3。
+
+**`internal_data_move` 的 Step 5 按源坐标比对**：copyback 搬的是源页内容——`READ_FOR_INTERNAL_DATA_MOVE` / `PROGRAM_FOR_INTERNAL_DATA_MOVE` 都**不是** page read/write，数据路径不介入、不重铸 ⇒ 目标页的 USER 仍是**源块坐标**的 PAA。故 Step 5 逐页 `test_read_page(dest, …, tag, …)` + `test_verify_page_paa(g_source_data, src, page, …)`（期望取**源块**），**不能**用 `test_read_block(dest)`——后者按入参 block 重算期望（`fc_test_common.c:644-675`）。数据路径侧照常通过：META 低 3 位 = plane/cw（源/目标同 plane、同 cw 枚举）、META 与命令 meta **同页** ⇒ Pass 4 两项都过；CRC 因 USER 原样搬过而一致。⚠ **v34 起 meta 是页 PBA**：读命令声明的 `tag` 必须是**源页 PBA**——META 存的是「内容的身份」而非「内容现在在哪」，搬移不经过数据路径，源页写入时铸的 PBA 原样跟到了目标块；声明目标页 PBA 反而会被 Pass 4 ② 判成「读到了别的页」。⚠ **v1.22 起 dest 也是抽出来的**（不再是 `src + 2`）⇒ 上面这条更容易写错。
 
 **`internal_data_move` 的 Step 5 按源坐标比对**：copyback 搬的是源页内容——`READ_FOR_INTERNAL_DATA_MOVE` / `PROGRAM_FOR_INTERNAL_DATA_MOVE` 都**不是** page read/write，数据路径不介入、不重铸 ⇒ 目标页的 USER 仍是**源块坐标**的 PAA。故 Step 5 逐页 `test_read_page(dest, …, tag, …)` + `test_verify_page_paa(g_source_data, src, page, …)`（期望取**源块**），**不能**用 `test_read_block(dest)`——后者按入参 block 重算期望（`fc_test_common.c:644-675`）。数据路径侧照常通过：META 低 3 位 = plane/cw（源/目标同 plane、同 cw 枚举）、META 与命令 meta **同页** ⇒ Pass 4 两项都过；CRC 因 USER 原样搬过而一致。⚠ **v34 起 meta 是页 PBA**：读命令声明的 `tag` 必须是**源页 PBA**——META 存的是「内容的身份」而非「内容现在在哪」，搬移不经过数据路径，源页写入时铸的 PBA 原样跟到了目标块；声明目标页 PBA 反而会被 Pass 4 ② 判成「读到了别的页」。
 
-#### 测试用例（9 个，其中 6 条参数化）
+#### 测试用例（9 个，其中 6 条地址随机化）
 
 | 测试函数 | 场景 | 验证点 |
 |---|---|---|
@@ -276,9 +291,9 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 | `block_write_read` | PROGRAM → READ 全 block | 写读数据一致 |
 | `block_cache_ops` | CACHE_START(p0) → CACHE_SEQ ×63 → CACHE_LAST | cache 读管线（30h/31h/3Fh）；写侧前 63 页 15h + 末页 10h |
 | `block_multi_plane` | MP_ERASE → MP_PROGRAM → MP_READ | 两 plane 各自 pattern 独立验证（desc 0..3=plane0，4..7=plane1） |
-| `block_random_data` | READ + RANDOM_DATA_READ 抽样 | 按 `sample` 取页集/列集随机列读，验证列地址解码 |
+| `block_random_data` | READ + RANDOM_DATA_READ 抽样 | 抽页集/列集后随机列读，验证列地址解码 |
 
-> 前 3 条（`init_sequence` / `feature_write_read` / `status_query`）不参数化；其余 6 条挂 `block` / `plane` / `sample`（见上「参数化与随机种子」节）。每条用例的 setup/teardown 与 Level 2 共用同一份 `test_setup` / `test_tear_down`（`fc_test_common.c`）。
+> 前 3 条（`init_sequence` / `feature_write_read` / `status_query`）是定长命令序列、地址不参与，**不随机化**（保持 `SINGLE_ITERATION` + `NULL`）；其余 6 条**在用例体内**抽地址（见上「随机地址与种子」节）。每条用例的 setup/teardown 与 Level 2 共用同一份 `test_setup` / `test_tear_down`（`fc_test_common.c`）。
 >
 > `block_lock_tight`（紧锁定，不可逆锁死整片 NAND）实现保留但以 `#if 0` 隔开、不注册；`unlock_erase` 同样 `#if 0` 停用。
 
@@ -462,12 +477,12 @@ UART 串口输入示例：
 ```
 ssd> test --seed 0x1234 /fc-nand/logic/validate_op_range
 ssd> test --list
-ssd> test --list-params /fc-nand/lifecycle/            # 看 Level 3 的参数词汇表
-ssd> test --single /fc-nand/lifecycle/                 # 每用例按种子随机抽一组参数
-ssd> test --single --seed 0x1a2b3c4d /fc-nand/lifecycle/
-ssd> test --single --param block 104 /fc-nand/lifecycle/  # CLI 值优先于随机挑值
+ssd> test --log-visible info /fc-nand/lifecycle/               # Level 3：每条抽一组地址，打印抽到的值
+ssd> test --log-visible info --iterations 5 /fc-nand/lifecycle/ # 每条抽 5 组（覆盖旋钮）
+ssd> test --seed 0x1a2b3c4d /fc-nand/lifecycle/                # 复现上一轮
+ssd> test --list-params /fc-nand/data_path/                    # Level 2 仍有参数化用例（case=…）
+ssd> test --single --param case meta-1 /fc-nand/data_path/     # CLI 值优先于随机挑值
 ssd> test
-```
 
 ### 4.3 构建集成
 
@@ -567,7 +582,9 @@ static MunitResult test_crc_step_detect(const MunitParameter params[], void *dat
 - 板子上钉单个场景：`test --param case meta-1`；列全部参数：`--list-params`。
 - **什么时候参数化**：不同**分支 / 期望**才参数化；同一断言、不同输入用迭代（`--iterations N`）。
   判据见 `assertion_guidelines.md` §二十三。
-- **随机化参数化（v1.15）**：`--single` 让每个参数枚举按种子**随机挑一个值**（salt = 用例名哈希，`munit.c:1139`），`--seed N` 复现上一轮；不加 `--single` 走全组合枚举。Level 3 的 6 条地址相关用例走这条路（见 §2.3「参数化与随机种子」）。⚠ 用例体内**不要**自己调 `munit_rand_*`——`exec` 会重置 PRNG（`munit.c:715`），且导出的取数函数不带 salt。
+- **随机化参数化（v1.15）**：`--single` 让每个参数枚举按种子**随机挑一个值**（salt = 用例名哈希，`munit.c:1198`），`--seed N` 复现上一轮；不加 `--single` 走全组合枚举。**Level 2 的参数化用例**（`case=…`）走这条路。
+- **用例体内随机（v1.22，与上一条并存）**：**Level 3 的 6 条地址相关用例**改在**用例体内**抽地址——参数表是 NULL 结尾的 `const char*` 数组，表达不了 820 宽的窗口（见 §2.3「随机地址与种子」）。机制：`l3_rand(test, tag) = munit_rand_uint32() ^ hash(用例名) ^ hash(用途标签)`。
+  ⚠ **必须自带 salt**：munit 在每次 `exec` 前把 PRNG 重置回 `runner->seed`（`munit.c:774`），而导出的 `munit_rand_int_range` / `munit_rand_uint32` **不带 salt**（带 salt 的 `munit_rand_at_most` 是 `static`，`munit.c:503`）⇒ 直接调用的话，**用例体内的第一次抽样在所有用例之间取值完全相同**。这不是「不能调 `munit_rand_*`」，而是「调了必须自己加盐」。Level 2 的 `test_scramble_whiten` / `test_crc_step_detect` 直接用 `munit_rand_int_range` 是因为只有那一条用例在抽，撞不上。
 
 ### 5.5 证据打印（v1.18）
 
@@ -618,18 +635,20 @@ MUNIT_PRINTF(1, 2) void test_trace_detail(const char *format, ...);   /* DEBUG�
    `munit_suite_main` 不重置 ⇒ 一旦 `test --log-visible info`，之后光打 `test` 也仍出证据，
    直到重启或 `--log-visible error`。
 3. **UART TX 是阻塞的**（环 4096 B / 115200 波特 ≈ 11.5 KB/s，`usart.c` 的 `__WFE()` 自旋，不丢字节）
-   ⇒ `--log-visible debug` 跑全套（77 case × 64 页）是**数十秒纯 TX**，
+   ⇒ `--log-visible debug` 跑全套（51 case × 64 页，v1.22 前是 77）是**数十秒纯 TX**，
    **debug 档只对单条用例跑**（`test --log-visible debug /fc-nand/lifecycle/block_write_read`）。
    另外 `make tests` 带 `-DMUNIT_ENABLE_TIMING`，证据打印在用例体内 ⇒
    **开证据后 `[ N ms ]` 被 UART 阻塞污染，不可再当性能基线**。
 
-#### 板上实测（2026-10-10）
+#### 板上实测（2026-10-10，v1.18 形态 = 77 case）
 
 | 档 | 结果 | 证据行 |
 |---|---|---|
 | 默认（`--log-visible error`） | 77/77，输出**逐字不变** | 0 |
 | `--log-visible info` | 77/77 | 131 |
 | `--log-visible debug` | 77/77 | 4936（131 摘要 + 4805 明细） |
+
+> ⚠ **v1.22 起用例数 77 → 51**（Level 3 由 35 → 9，参数化展开被用例体内随机取代；Level 1 = 11、Level 2 = 31 不变）。上表是 v1.18 形态的实测记录，**未重跑**；证据行数也随之变化（Level 3 的 6 条各多一句 `info` 摘要）。
 
 ### 5.6 游程统计判据的理论依据（v1.19）
 
@@ -763,6 +782,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-11 | v1.22 | **Level 3 地址随机化：用例体内 salted PRNG，窗口 30%~70%**（见 `docs/changelog/fc_ut_level3_seed_random_v40.md`）。① **去参数化**：删 `test_fc_level3.c` 的 `MunitParameterEnum`（`l3_blocks` `100`/`104`、`l3_planes`、`l3_samples` edges/spread/middle/dense）与取值函数 `l3_param_block` / `l3_param_plane` / `l3_sample_case_find`，以及 `#define L3_BLOCK_DEST_OFF (2U)`。② **改用例体内抽样**：新增窗口常数 `L3_BLOCK_LO` / `L3_BLOCK_HI`（编译期由 `BLOCKS_PER_PLANE` 算出 30%/70% ⇒ **614..1433**，避**固定**元数据区 0..41）与 `l3_hash`（DJB2，与 `munit.c:386` 逐字同）/ `l3_rand` / `l3_block_draw` / `l3_plane_draw` / `l3_dest_draw` / `l3_pages_draw` / `l3_cws_draw`。③ **为什么必须加盐**：munit 每 `exec` 前 reseed 回 `runner->seed`（`munit.c:774`）、导出的 `munit_rand_*` **不带 salt**（`munit_rand_at_most` 是 `static`，`munit.c:503`）⇒ 无盐时六条会抽到同一个块、整轮只有一个 plane。`l3_rand = munit_rand_uint32() ^ hash(用例名) ^ hash(用途标签)`。④ **随机化的量**：block、plane、内部搬移目标块（同窗口另抽，`src ≠ dest`，撞上则环移一格）、`block_random_data` 的页集（n∈[2,8]）与 CW 集（n∈[1,4]），拒绝采样；上限 8×4 = 32 探针 = 旧 `dense` 档最坏值 ⇒ 板上耗时上界不变。⑤ **覆盖旋钮改 `--iterations N`**（六条保留 `MUNIT_TEST_OPTION_NONE`）：用例数 **77 → 51**（Level 3 **35 → 9**；Level 1 = 11、Level 2 = 31 不变）。⑥ 证据打印补齐（`--log-visible info`）：`internal_data_move` / `block_erase_verify` / `block_cache_ops` / `block_random_data` 各打一句摘要，`block_random_data` 打 64 位页掩码（拆两个 `%08lX`）+ CW 掩码 + 探针数，掩码 popcount 自证互不重复。⑦ `usart.c` 的 `test` 帮助串补 `--iterations N`（**唯一的 `src/**` 改动**，其余 `src/ftl/**` 一行不动；帮助串变长 ⇒ AAS 重排整张 CLI 表，纯空白）。`make format-check` 过、`make clean && make tests` 0 warning 0 error、链接 **219836 B**；固件 `make` 0/0、**166108 B**；**上板未验** |
 | 2026-10-10 | v1.21 | **Level 2 用例审查：12 个函数补注释 + multi-plane 窄位图的生产侧守卫**（见 `docs/changelog/fc_multiplane_narrow_bitmap_v39.md`）。① **注释**（纯注释、零逻辑改动）：`test_fc_level2.c` 给 `l2_verify_parity_nonzero`、五张场景表的 `*_case_find`、`test_crc_step_detect`、`test_ecc_step`、`test_encode`、`test_process_read_ok`、`do_raid_recover_test`、`test_raid_recover_no_random`、`test_cw_bitmap` 共 12 个此前无注释的函数补「功能 / 测什么 / 为什么这么判」。② `test_process_read_masked_chain` 的 ⚠ 注释更新：那条「multi-plane 必须逐 plane 覆盖」的约束**此前只在夹具里**，v39 起 `fc_build_request_data_planes` 也守同一不变式 ⇒ 生产侧不再是裸奔。③ **生产侧新守卫**（`src/fc/fc.c`，本套唯一被它影响的路径是**测试夹具已挡掉的**非法输入）：multi-plane 命令的 desc 链没覆盖 plane 段里每个 plane 时，debug 档 `ASSERT` 停机、release 档返回 `FC_STATUS_INVALID_ARGUMENT` 拒绝，经 `fc_build_dispatch_request`（`void` → `fc_status_t`）透传到两条派发路径，`fc_poll_fail_command` 注 `NAND_FAIL` 完成项。**断言与用例数不变（77）**。`make format-check` 过、`make clean && make tests` 0/0、链接 **219484 B**；release 档 100884 B（2 处**既有**告警，均不在改动文件内）；**上板未验**。⚠ 新守卫**无单测覆盖**（夹具 `test_cmd_build` 在上游就挡住了非法输入），是代码走查确认的 |
 | 2026-10-10 | v1.19 | **把「加扰 = 统计独立」的理论写入设计文档 + 注释代码（纯文档，无逻辑改动）**（见 `docs/changelog/fc_scrambler_theory_v37.md`）。背景：一次关于 `scramble_whiten` 输出的讨论暴露了「加扰 = 追求 `0101…` 均衡」的误解。① 主设计文档 `fc_nand_design.md` 新增 **§5.4「加扰的目标：统计独立」**——**条件** 1/2（独立）vs **无条件** 1/2（均衡）、三种序列对照、`段数 ≈ n/2` 与几何分布 `P(len=k)=2^-k` 的推导、`0101…` 为何对 NAND 有害（零结构 / CCI 最坏 / 与阵列物理周期谐振 ⇒ 系统性错误，ECC 怕系统性）。② 本文档新增 **§5.6「游程统计判据的理论依据」**——`l2_bit01_analyze` 的状态机（`cur` 从首位初始化 / 循环后补收尾 / `≥16` 钳位）、`段数 ≈ n/2`、判据 ② **双侧**（低了 = 强制交替 / 高了 = 长游程），以及判据 ①②③ 的**盲区**（`00110011…` 三条全过却仍是周期图案）。③ 注释：`test_fc_level2.c` 给 `l2_bit01_analyze` 补前导注释、给 `test_scramble_whiten` 补理论依据；`fc_random_engine.{c,h}` 点明「目标是独立，均衡只是副产品」。**不改断言、不改用例数（77）、不改任何 `src/**` 逻辑**（`fc_random_engine.c` 只动注释）。`make format-check` 过、`make clean && make tests` 0/0、链接 **219012 B**（与 v36 逐字节同）；**纯文档 + 注释，无需上板** |
 | 2026-10-10 | v1.20 | **`ecc_step` 的覆盖边界与提高计划（纯文档，只记录不改测试）**。背景：一次「这样是不是确认算法没问题」的追问。① 新增 **§5.7**——点明 `ecc_step` 验的是 BCH(m=13,t=4) 的**实现**而非「算法对不对」（后者是代数保证：设计距离 d ≥ 2t+1 = 9，≤ t 个错唯一可译，不需要测）；列**六处覆盖缺口**（① 抽样非穷举 ② 抽样有偏 ③ `beyond-5` 不钉结果且 OK 分支不验数据 ⇒ 误纠被容忍 ④ parity 区只由计数背书、解码器刻意不回写 ⑤ 单一信道模型无突发错 ⑥ 同源编解码无 KAT）；给出**四步提高计划**（定向补 case → `--iterations` 加量 → KAT → CRC 判定接进 FTL），并标明第 4 步在 `src/ftl/**`、按硬规则暂不动。② §2.2 的 `ecc_step` 段加指针。**不改任何断言、不改用例数（77）、不改 `src/**`** |
