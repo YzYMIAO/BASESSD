@@ -158,7 +158,10 @@ _Static_assert(L3_BLOCK_HI < BLOCKS_PER_PLANE, "随机窗口越过本 plane 块�
 ## 五、代价（如实记录）
 
 1. **用例数 77 → 51**（Level 3 **35 → 9**）。默认一轮每条只抽一次；覆盖改由 `--iterations N` 给：
-   `test --iterations 20 /fc-nand/lifecycle/` ⇒ Level 3 = `3 + 6×20 = 123` 条。
+   `test --iterations 20 /fc-nand/lifecycle/` ⇒ 六条随机化用例的**用例体各跑 20 次**。
+   ⚠ **报告里的条数不变（仍 `9 of 9`）**——本版初稿在此写成「`3 + 6×20 = 123` 条」，是**错的**，
+   2026-10-11 上板后按 `munit.c:803` / `:989` 与实测订正，见
+   `docs/changelog/fc_ut_board_verify_v42.md`。
    ⚠ `--iterations` 是 **runner 级全局量**，且 `runner->suite` **恒指根套件**（`munit.c:1359`）
    ⇒ 子套件自己的 `iterations` 字段无效，**别去改 `ut_main.c`**（改了会把 Level 1/2 也乘 N）。
    它按调用范围生效：只跑 `/fc-nand/lifecycle/` 就只乘 Level 3。
@@ -207,7 +210,7 @@ make clean && make                 # 固件 0 warning 0 error；166108 B
 
 ```
 test --log-visible info /fc-nand/lifecycle/                        # 9 条，各自一个随机地址
-test --log-visible info --iterations 5 /fc-nand/lifecycle/         # 3 + 6×5 = 33 条
+test --log-visible info --iterations 5 /fc-nand/lifecycle/         # 六条各跑 5 次（报告仍 9 of 9）
 test --log-visible info --seed 0x<上一轮打印的> /fc-nand/lifecycle/  # 复现同一组地址
 ```
 
