@@ -214,7 +214,7 @@ fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32
  * 逐 CW 查 SUCCESS 位」）就用这套零件自己拼。 */
 
 /* plane_bitmap → flat CW 位图：选中 plane 段内的全部 CW（plane 1 单 plane ⇒ 0xF0）。
- * 与 test_cmd_build 内部按 cmd->pba/config.multi_plane 反推的段互为**交叉检查**。 */
+ * 与 test_cmd_build 内部按 cmd->paa/config.multi_plane 反推的段互为**交叉检查**。 */
 uint32_t test_plane_cw_bitmap(uint8_t plane_bitmap);
 
 /* plane_bitmap 里序号最小的被选中 plane（test_cmd_build 的 addr.plane 用）。
@@ -276,6 +276,49 @@ void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_co
  * 这里验的是**数据正确性**：cache 命令序列走得通、META / CRC / 加扰 / ECC 全程不串。 */
 void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
 void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
+
+/* test_read_cache_random：cache 读的「随机跳页」入口——OP_READ_PAGE_CACHE_RANDOM（00h-addr-31h）。
+ *
+ *   ⚠ **语义（v48 按手册订正）**：手册原文是「reads the specified block and page **into the
+ *   data register** while the **previous page is output from the cache register**」⇒
+ *   **地址页只进 data register（预取），当场输出的是 cache 寄存器里的「上一页」**，
+ *   即 **输出页 ≠ 地址页**；且该命令**必须在 00h-30h 或 00h-31h 之后**下发（die 地址须与
+ *   前一命令一致）⇒ 它等价于「带显式下一页地址的 31h」，**不能当独立入口单发**。
+ *   （v44 曾按「载入 + 输出合一、输出页 = 地址页」理解，上板当场 MATA_ERROR——已证伪。）
+ *
+ *   故本函数自建一段最小管线，把语义逐条钉死：
+ *     ① START(prev_page)   00h P 30h → cache = P，不输出
+ *     ② RANDOM(addr_page)  00h Q 31h → **输出 P**；Q 进 data register
+ *     ③ SEQ(31h)                     → **输出 Q**（这一步才证「地址页真的生效」）
+ *     ④ LAST(3Fh)                    → 输出 Q+1 并收尾
+ *   prev_page / addr_page 都不得是块尾（手册：cache 读不能跨块边界）。
+ *   ② 的 meta 取 **prev_page** 的 PBA；FC 侧本 op 在 fc_is_page_read 里（`fc.c:125`）
+ *   ⇒ 走 process_read，USER 区回来即明文，逐页 PAA 校验。 */
+void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t prev_page, uint16_t addr_page, const fc_cmd_conf_t *config);
+
+/* ── 加载 / 取数两段式（v45） ──
+ * 把生产读路径「先加载、再逐 CW 取数」拆成**两条可独立下发的 FC 命令**：
+ *
+ *   test_load_page        —— 纯加载：op 33（单 plane）/ op 29（多 plane），**不带 desc 链**
+ *                            （op 表 has_data = 0 ⇒ 无 host 数据搬运、无 CW 位图）。器件只把
+ *                            目标页搬进页缓冲，**不输出到总线**。config->operation 必须是
+ *                            二者之一（其余值 ASSERT）。
+ *   test_random_data_read —— 取数：op 8（单 plane，05h-E0h）/ op 41（多 plane，06h-E0h），
+ *                            **带整段掩码 desc 链**。单条命令由 NAND CW 链自动遍历掩码内所有
+ *                            CW（每完成一个取数 op 推进到下一个置位）。逐 CW PAA 校验。
+ *
+ * 两段必须**紧邻**：加载与取数是两条独立命令，中间若有别的命令碰器件页缓冲，取数会读到错页。
+ * 多 plane 段（op 29/41）plane_bitmap 必须 == TEST_PLANE_BM_ALL；单 plane 段（op 33/8）必须
+ * 恰一个 plane（05h 无 plane 位，06h 按行地址 plane 位选页缓冲）。 */
+void test_load_page(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config);
+void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t page_index, const fc_cmd_conf_t *config);
+
+/* ── META 只读回读（v46） ──
+ * test_read_meta：op 11（OP_READ_META，自带 00h-30h 页加载 + 4 字节输出），**不带 desc 链**
+ *   （op 表 has_data = 0）。回读指定页、指定 CW 的前 4 字节 META，从 CQ 的 param.bytes 取回，
+ *   写入 out[4]。cw 由 pba 携带 → FC 转成列地址（paa_to_cw(plane_paa[plane]) × CW_SIZE）。
+ *   单 plane（plane ∈ [0, PLANE_NUM)）。status 无错误位才继续（读失败 = 坏块信号）。 */
+void test_read_meta(uint16_t block_index, uint8_t plane, uint16_t page_index, uint8_t cw, uint8_t out[4]);
 
 /* ── 数据搬运 / 校验 ── */
 

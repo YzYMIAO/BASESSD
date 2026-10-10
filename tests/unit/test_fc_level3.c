@@ -364,7 +364,7 @@ static void __attribute__((unused)) unlock_block(uint16_t block)
         cmd->config.random    = FC_RANDOM_DISABLE;
         cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
         cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->pba              = pba_from_addr(&(nand_addr_t){.block = block});
+        cmd->paa              = paa_from_addr(&(nand_addr_t){.block = block});
 
         (void)test_submit_wait(cmd);
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
@@ -431,7 +431,7 @@ static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *
     CMD_FIELD_U(feature_addr);
     CMD_FIELD_U(reserved1);
     CMD_FIELD_U(meta);
-    CMD_FIELD_U(pba);
+    CMD_FIELD_U(paa);
 
     CMD_FIELD_U(config.operation);
     CMD_FIELD_U(config.ch);
@@ -993,12 +993,14 @@ static MunitResult test_block_erase_verify(const MunitParameter params[], void *
  *  流程：
  *    1. 擦除 block（参数给出）
  *    2. 用 PROGRAM_PAGE_CACHE 写该 plane 全 block（63 cache + 1 final 确认）
- *    3. Cache 读序列遍历所有 64 pages
+ *    3. Cache 读序列遍历所有 64 pages（START 入口：00h-addr-30h → 31h ×63 → 3Fh）
  *    4. 每 page 数据与预期 pattern 比对
+ *    5. Cache 读**随机跳页**（00h-addr-31h）：START(16) → 跳到 32，验 cache 管线的跳页入口
  *
  *  验证点：
  *    - Cache 写 + Cache 读数据一致性
  *    - Cache 读序列正确遍历多页
+ *    - Cache 读随机跳页（OP_READ_PAGE_CACHE_RANDOM）：输出的是**上一页**、地址页在下一步出
  *    - 各阶段 status 正确
  *
  *  ⚠️ CRC/LDPC/加扰/RAID 全部关闭（LDPC RAW 模式），纯 RAW 数据验证。
@@ -1029,8 +1031,22 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
      * 这条约定封装在 test_read_block_cache 里（见 fc_test_common.h「cache 整块读写」）。 */
     test_read_block_cache(block, TEST_PLANE_BM(plane), &L3_CONF(OP_READ_PAGE_CACHE_SEQ, FC_CRC_DISABLE), NULL);
 
+    /* Phase 3: Cache 读随机跳页（00h-addr-31h）—— cache 管线的「跳页」入口。
+     *
+     * ⚠ 语义（v48 按手册订正）：本命令把**地址页载入 data register（预取）**，同时输出
+     * cache 寄存器里的**上一页** ⇒ **输出页 ≠ 地址页**，且必须在 00h-30h / 00h-31h 之后下发。
+     * 故这里不是「随机读单页」，而是「START(16) → 跳到 32」：RANDOM 输出 16，
+     * 随后一条 31h 输出 32（这才证明跳页真的生效），最后 3Fh 收尾。
+     * 详见 test_read_cache_random（fc_test_common.h / .c）。 */
+    {
+        const uint16_t prev_page = (uint16_t)(PAGES_PER_BLOCK / 4U); /* 16 */
+        const uint16_t addr_page = (uint16_t)(PAGES_PER_BLOCK / 2U); /* 32 */
+
+        test_read_cache_random(block, TEST_PLANE_BM(plane), prev_page, addr_page, &L3_CONF(OP_READ_PAGE_CACHE_RANDOM, FC_CRC_DISABLE));
+    }
+
     /* 证据摘要（--log-visible info）：地址是抽出来的 ⇒ 必须打出来才能从 seed 复现。 */
-    test_trace_summary("cache_ops block=%u plane=%u: cache prog -> 31h x63 -> 3Fh 全 block 数据一致", (unsigned)block, (unsigned)plane);
+    test_trace_summary("cache_ops block=%u plane=%u: cache prog -> 31h x63 -> 3Fh 全 block 数据一致；00h-addr-31h 跳页入口（输出上一页、地址页下一步出）一致", (unsigned)block, (unsigned)plane);
 
     return MUNIT_OK;
 }
@@ -1131,7 +1147,7 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
              *   CW0 是 bit 4，不是 bit 0**。这里曾写 `1U << cw`（plane 盲）：plane=0 侥幸
              *   正确，plane=1 时位落在段外，被 ftl_cmd_resolve_cw_bitmap 的越段断言当场挡下。
              * ⚠ 更早还写死过 0x01U（= 只取 CW0），而期望值按抽样 cw 算——因为
-             *   链是按掩码位枚举 cw 的（cmd->pba 的 cw 字段会被枚举值覆盖），
+             *   链是按掩码位枚举 cw 的（cmd->paa 的 cw 字段会被枚举值覆盖），
              *   于是 desc 落在 CW0、期望值取 CW1/CW3，两者对不上。
              *   旧 pattern 是 4 字节周期、cw*512 又是 4 的倍数 ⇒ 四个 CW 期望值
              *   完全相同，这条错误一直被掩盖（v22 changelog 记录过同类问题）。 */
@@ -1185,6 +1201,128 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
         }
 
         test_trace_summary("random block=%u plane=%u: %u pages x %u cw = %u probes; page_mask=0x%08lX%08lX cw_mask=0x%08lX, 逐 desc 对 desc->paa", (unsigned)block, (unsigned)plane, (unsigned)n_pages, (unsigned)n_cws, (unsigned)(n_pages * n_cws), (unsigned long)page_mask_hi, (unsigned long)page_mask_lo, (unsigned long)cw_mask);
+    }
+
+    return MUNIT_OK;
+}
+
+/**************************************************************************
+ *  test_block_load_fetch — 「加载 / 取数两段式」显式下发验证（v1.27）
+ *
+ *  背景：生产读路径一直是「先加载、再逐 CW 取数」两段——
+ *    fc_dispatch_rewrite_operation 把 OP_NORMAL_READ_PAGE_WITH_DATA_OUT(12)
+ *    → OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT(33)，nand_dispatch_task_cw_chain 再对
+ *    加载型 op 逐 CW 发 OP_RANDOM_DATA_READ(8, 05h-E0h)。但 op 33/29/8/41 **从未作为
+ *    独立命令被点名过**——它们的 uop 序列、page-read 分类、页缓冲散落全无测试背书。
+ *
+ *  本用例把这两段**显式拆成两条 FC 命令**下发：
+ *    Phase 1（单 plane）：load op 33（**不带 desc**，只搬进页缓冲）
+ *                        → fetch op 8（带整段掩码 desc）→ 逐 CW 校验
+ *    Phase 2（双 plane）：load op 29（不带 desc）
+ *                        → fetch op 41（06h-E0h，带 desc）→ 两 plane 校验
+ *
+ *  验证点：
+ *    - op 33/29 可作**纯加载**命令独立下发（op 表 has_data = 0 ⇒ 不需 desc 链、无 CW 位图）
+ *    - op 8/41 可作**取数**命令带 desc 链取回页缓冲内容，ECC 解码后逐 CW 一致
+ *    - 两段紧邻时「加载 → 取数」的数据通路正确
+ *
+ *  ⚠ 加载与取数是两条**独立** FC 命令：中间若有别的命令碰器件页缓冲，取数会读到错页。
+ *     故本用例两段**紧邻**、中间不插任何命令。
+ *  ⚠ op 29/41 走 two-plane 命令族，要求器件内部 on-die ECC 关闭（onfi_1_0.h Note 4）；
+ *     本项目从不写 0x90 feature，保持默认关闭，故可用。
+ *  ⚠ 抽样顺序固定为 ① plane ② block ③ block_mp —— 顺序即复现契约。
+ **************************************************************************/
+
+static MunitResult test_block_load_fetch(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+    const uint8_t  plane    = l3_plane_draw("block_load_fetch");
+    const uint16_t block    = l3_block_draw("block_load_fetch");
+    const uint16_t block_mp = l3_block_in_window("block_load_fetch", "block_mp");
+
+    test_trace_begin();
+
+    /* ── Phase 1：单 plane 加载 + 取数 ── */
+    test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
+    test_prog_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL);
+
+    {
+        const uint16_t page = (uint16_t)(PAGES_PER_BLOCK / 2U);
+
+        /* 加载：op 33，**不带 desc** —— 器件只把该页搬进页缓冲、不输出。 */
+        test_load_page(block, TEST_PLANE_BM(plane), page, &L3_CONF(OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT, FC_CRC_ENABLE));
+        /* 取数：op 8（05h-E0h），整段掩码 ⇒ 单条命令由 CW 链遍历本 plane 全部 CW。 */
+        test_random_data_read(block, TEST_PLANE_BM(plane), page, &L3_CONF(OP_RANDOM_DATA_READ, FC_CRC_ENABLE));
+    }
+
+    /* ── Phase 2：双 plane 加载 + 取数 ── */
+    test_erase_block(block_mp, TEST_PLANE_BM_ALL, &L3_CONF(OP_ERASE_BLOCK_MULTI_PLANE, FC_CRC_DISABLE));
+    test_prog_block(block_mp, TEST_PLANE_BM_ALL, &L3_CONF(OP_PROGRAM_PAGE_MULTI_PLANE, FC_CRC_DISABLE), NULL);
+
+    {
+        const uint16_t page = (uint16_t)(PAGES_PER_BLOCK / 2U);
+
+        /* 加载：op 29（multi-plane），**不带 desc**。 */
+        test_load_page(block_mp, TEST_PLANE_BM_ALL, page, &L3_CONF(OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT, FC_CRC_DISABLE));
+        /* 取数：op 41（06h-E0h），整段掩码 ⇒ 链遍历两个 plane 的全部 CW。 */
+        test_random_data_read(block_mp, TEST_PLANE_BM_ALL, page, &L3_CONF(OP_RANDOM_DATA_READ_MULTI_PLANE, FC_CRC_DISABLE));
+    }
+
+    /* 证据摘要（--log-visible info）：地址是抽出来的 ⇒ 必须打出来才能从 seed 复现。 */
+    test_trace_summary("load_fetch b=%u plane=%u: op33(无desc)->op8 单 plane 一致；b=%u: op29(无desc)->op41 双 plane 一致", (unsigned)block, (unsigned)plane, (unsigned)block_mp);
+
+    return MUNIT_OK;
+}
+
+/**************************************************************************
+ *  test_block_read_meta — META 只读回读（OP_READ_META，v1.28）
+ *
+ *  背景：坏块扫描需要**只读**回读页内 META（CW 前 4 字节；布局 [META:4][CRC:4][USER:512][PARITY:8]，
+ *    META 在加扰区之前、明文）。op 11（OP_READ_META）自带 00h-30h 页加载 + 4 字节输出，
+ *    **无 desc 链**（has_data = 0），把回读值写进 CQ 的 param.bytes。
+ *
+ *  验证点：
+ *    - op 11 可作**独立只读命令**下发（无 desc 链、无 CW 位图）
+ *    - 由 pba.cw 选 CW（列地址 = CW 号 × CW_SIZE）——同一页不同 CW 回读到**不同** META
+ *    - 回读值 == FC 写路径写入的 META（每 CW 的 META = (command->meta & ~PLANE_CW_MASK)
+ *      | plane_cw，见 fc_interface.c:197；prog 的 command->meta = 本页 PBA）
+ *
+ *  ⚠ 抽样顺序固定为 ① plane ② block —— 顺序即复现契约。
+ **************************************************************************/
+
+static MunitResult test_block_read_meta(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+    const uint8_t  plane = l3_plane_draw("block_read_meta");
+    const uint16_t block = l3_block_draw("block_read_meta");
+
+    test_trace_begin();
+
+    test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
+    test_prog_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL);
+
+    {
+        const uint16_t page = (uint16_t)(PAGES_PER_BLOCK / 2U);
+        /* 写路径的 META 基值：prog 命令 command->meta = 本页 PBA（见 test_prog_page）。
+         * 每 CW 的 META = (base & ~PLANE_CW_MASK) | plane_cw。 */
+        const uint32_t base = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = (uint8_t)page});
+        uint8_t        got[4];
+
+        for (uint8_t cw = 0U; cw < CW_NUM; cw += 2U) /* CW0 与 CW2：不同 CW ⇒ 不同 META */
+        {
+            const uint32_t expected = (base & ~PLANE_CW_MASK) | ((uint32_t)plane << PBA_PLANE_SHIFT) | (uint32_t)cw;
+            uint32_t       got_meta;
+
+            test_read_meta(block, plane, page, cw, got);
+
+            got_meta = (uint32_t)got[0] | ((uint32_t)got[1] << 8U) | ((uint32_t)got[2] << 16U) | ((uint32_t)got[3] << 24U);
+
+            test_trace_summary("read_meta b=%u plane=%u page=%u cw=%u: got=0x%08lX expect=0x%08lX", (unsigned)block, (unsigned)plane, (unsigned)page, (unsigned)cw, (unsigned long)got_meta, (unsigned long)expected);
+
+            munit_assert_uint32(got_meta, ==, expected);
+        }
     }
 
     return MUNIT_OK;
@@ -1301,9 +1439,10 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
  *    - block_cache_ops（cache 读序列数据验证，抽 plane / block）
  *    - block_multi_plane（多 Plane 擦写读验证，抽 block）
  *    - block_random_data（随机列读写验证，抽 plane / block / 页集 / CW 集）
+ *    - block_load_fetch（加载/取数两段式显式下发，抽 plane / block / block_mp）
  *    - block_lock_tight（永久锁芯片验证，必须放在最后）
  *
- *  六条随机化行用 MUNIT_TEST_OPTION_NONE（**保留**，不要换成 SINGLE_ITERATION）：
+ *  七条随机化行用 MUNIT_TEST_OPTION_NONE（**保留**，不要换成 SINGLE_ITERATION）：
  *  --iterations N 才是覆盖旋钮（每条抽 N 组）；换成 SINGLE_ITERATION 会把旋钮锁死。
  *  runner.iterations 默认 0 ⇒ 迭代次数回落到套件级 iterations（ut_main.c 里 = 1），
  *  与是否带 SINGLE_ITERATION 无关（munit.c:1375 / :706-709）。
@@ -1324,6 +1463,8 @@ MunitTest g_fc_lifecycle_tests[] = {
     {   "block_cache_ops",    test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
     { "block_multi_plane",  test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
     { "block_random_data",  test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {  "block_load_fetch",   test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {   "block_read_meta",    test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
 #if 0  /* block_lock_tight 被 #if 0 隔开，此处不注册 */
     { "block_lock_tight",    test_block_lock_tight,    test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 #endif

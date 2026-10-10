@@ -101,10 +101,10 @@ static inline uint8_t ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
  * v28：位图是本函数的**形参**，不再是命令结构体的字段——它是"这次建链要建哪些 CW"
  * 的输入，用完即弃，没有留在命令里被回读的理由（读者只有本函数）。
  *
- * 行地址：所有 plane 共用 cmd->pba 的行地址（同页语义）。**两 plane 不同块
+ * 行地址：所有 plane 共用 cmd->paa 的行地址（同页语义）。**两 plane 不同块
  * （Policy B）请用 ftl_cmd_setup_ppa_pair()**，本函数不适用。
  *
- * @param cmd       须已设 config.operation / multi_plane / pba（config.cw 已不读）
+ * @param cmd       须已设 config.operation / multi_plane / paa（config.cw 已不读）
  * @param cw_bitmap flat 字面位图；无数据 op（ERASE / RESET / FEATURES）不读它
  * @return FTL_OK / FTL_ERROR（池空；位图 0 或越出 plane 段是编程错误 → ASSERT）
  */
@@ -117,10 +117,10 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
 /*
  * ftl_cmd_setup_ppa_pair - 按**每 plane 各自**的 PBA 建 desc 链（Policy B）
  *
- * 与 ftl_cmd_setup_ppa 的区别：后者把单一 PBA 填进 command->pba 后展开到各 plane，
+ * 与 ftl_cmd_setup_ppa 的区别：后者把单一 PBA 转成 PAA 填进 command->paa 后展开到各 plane，
  * 隐含「两 plane 同 block」。Policy B 下两 plane 独立分配物理块，故本函数逐条调
- * fc_command_configure_descriptor(cmd, plane, cw, pba[i])，把每个 PBA 自己的
- * 行地址写进对应 plane 的 desc。
+ * fc_command_configure_descriptor(cmd, plane, cw, pba_to_paa(pba[i]))，把每个 PBA 自己的
+ * 行地址（转成 PAA）写进对应 plane 的 desc。
  *
  * ⚠ **plane 号取自每个 PBA 自己的 plane 位，不是数组下标**：读路径的 pba[]
  *   是按 LBA 查出来的，plane 取决于当初怎么写进去（例如 `wr 0 2` 之后
@@ -130,7 +130,7 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
  * 只取 pba[0]（其 plane 位决定落哪个 plane 段）。
  *
  * v27/v28：本入口语义是「整段访问」——它把 fc_command_plane_span_cw_bitmap(cmd)
- * （在 cmd->pba 写好之后算）作为实参交给建链入口，**调用者没有位图可设**。
+ * （在 cmd->paa 写好之后算）作为实参交给建链入口，**调用者没有位图可设**。
  * 要访问 CW 子集请改用 ftl_cmd_configure_descriptors()。
  *
  * @param cmd  FC 命令（须已设 config.operation / multi_plane / meta 等）
@@ -145,7 +145,7 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
  * 遍历路径（GC 搬移、元数据扫描、Checkpoint）不再打包 → 拆包，
  * 直接用展开地址填入 FC 命令：
  *   ch/ce/lun  → cmd->config 位域
- *   block/plane/page/cw → pba
+ *   block/plane/page/cw → paa（v47：pba_from_addr 后立刻 pba_to_paa 转出）
  *
  * 与 ftl_cmd_setup_ppa(cmd, pba_from_addr(addr)) 等价（省去打包拆包）：
  * 地址填好后**必须建 desc 链**——否则命令无 buffer，数据无从搬运，
@@ -166,9 +166,11 @@ static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *add
     cmd->config.ch  = (DWORD)addr->ch;
     cmd->config.ce  = (DWORD)addr->ce;
     cmd->config.lun = (DWORD)addr->lun;
-    cmd->pba        = (DWORD)pba_from_addr(addr);
+    /* v47：PBA 在 FTL 侧就地转 PAA——FC 层只见 PAA，不再有 pba_to_paa 调用点。
+     * ⚠ 必须在建链之前转（下面 fc_command_plane_span_cw_bitmap 读 cmd->paa）。 */
+    cmd->paa        = pba_to_paa(pba_from_addr(addr));
     /* v28：位图不再存进命令结构体，直接算出来当实参传。
-     * 须在 pba 写好之后算（fc_command_plane_span_cw_bitmap 读 pba 与 multi_plane）。 */
+     * 须在 paa 写好之后算（fc_command_plane_span_cw_bitmap 读 paa 与 multi_plane）。 */
     return ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));
 }
 

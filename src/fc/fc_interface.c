@@ -123,17 +123,16 @@ static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t
  *       收敛为这一条。上层自行组装 CW 集合（例如只读离散 CW），循环调用即可。
  *     - **校验段在机制段之前**：任何非法实参都在出池之前返回，不污染池子——
  *       否则会先分配一个 desc 再失败，破坏「失败即沿链完整回收」的干净语义。
- *     - **行地址来自实参 row_pba，不从 command->pba 推导**：multi-plane 命令一个
+ *     - **行地址来自实参 row_paa，不从 command->paa 推导**：multi-plane 命令一个
  *       DWORD 装不下两个 plane 的行地址（Policy B：两 plane 的 block 可以不同）。
- *       plane/cw 位由实参决定，row_pba 的对应位被忽略（plane 位经 ASSERT 保证一致）。
- *     - **一条公式造出两个值**（v24）：PBA 与 LBA 的低 3 位是同一套编码
- *       （`[plane:1][cw:2]` = PLANE_CW_MASK），故
- *         plane_cw        = (plane << PBA_PLANE_SHIFT) | cw
- *         desc->paa       = pba_to_paa((row_pba     & ~PLANE_CW_MASK) | plane_cw)
- *         desc->meta      =            (command->meta & ~PLANE_CW_MASK) | plane_cw
- *       基值不同（物理 PBA vs 逻辑 LBA），公式同一。此前分叉成 multi_plane 的
- *       行地址重排与单 plane 的掩码改写两条分支——单 plane 时
- *       `plane == pba_to_plane(row_pba)` ⇒ 两分支逐位等价，合并为一条。
+ *       plane/cw 位由实参决定，row_paa 的对应位被忽略（plane 位经 ASSERT 保证一致）。
+ *     - **两条公式各造一个值**（v47 起；此前 v24~v46 是一条 plane_cw 公式）：
+ *         desc->paa  = paa_with_cw(paa_with_plane(row_paa, plane), cw)   —— PAA 空间
+ *         desc->meta = (command->meta & ~PLANE_CW_MASK) | plane_cw       —— LBA 空间
+ *       PAA 的 plane 与 cw **不相邻**（`[cw][page][plane][block]`），plane_cw 掩码技巧
+ *       只在 LBA/PBA 空间成立，故 desc->paa 改用 nand_config.h 的现成 helper；
+ *       desc->meta 仍是 LBA（plane/cw 低 3 位相邻，PLANE_CW_MASK 有效）。
+ *       代价：v24 的「一条公式造两个值」便利消失，换来 FC 层内 PBA 归零。
  *     - CW 号由调用方给出（FTL 侧的掩码枚举），**不由 desc 序号推导**——链走位
  *       （desc 序号）与 CW 号解耦：按链走位索引的地方不动，CW 号一律从
  *       paa_to_cw(desc->paa) 取。
@@ -149,7 +148,7 @@ static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t
  *     - 失败时链上可能已有 desc（含本条）：本层不回滚，「已分配的 desc 全部在链上」
  *       是不变量，调用方沿链释放即完整回收（fc_descriptor_chain_release_all）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_pba_t row_pba)
+fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
 {
     fc_command_id_t  command_id;
     uint8_t          plane_first;
@@ -173,8 +172,8 @@ fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane
     ASSERT((cw < CW_NUM) && (plane >= plane_first) && (plane < plane_last));
     /* 同一 n 被追加两次 = 链构造错误（掩码是集合，重复置位会静默丢数据） */
     ASSERT(fc_command_cw_attached(command, plane, cw) == 0U);
-    /* row_pba 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
-    ASSERT((uint8_t)pba_to_plane(row_pba) == plane);
+    /* row_paa 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
+    ASSERT((uint8_t)paa_to_plane(row_paa) == plane);
 
     /* ── 机制段 ── */
     descriptor = fc_descriptor_alloc_internal(&g_fc_controller, command);
@@ -186,11 +185,13 @@ fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane
     /* 先把除 buffer_id 外的字段全部填好，再挂链：desc 一进链就能被任何
      * 走链的读者正确解释（paa/config/meta 均已有效，next_id 已终止）。 */
 
-    /* 一条公式造出两个值（v24）：PBA 与 LBA 的低 3 位（PLANE_CW_MASK）是同一套编码，
-     * 只是基值不同——物理 PBA vs 逻辑 LBA。行地址取自实参 row_pba（每 plane 独立，
-     * 保留其 ch/ce/lun，多 LUN 并发必需）；meta 高位取自 command->meta（本命令扇区 LBA）。 */
+    /* 两条公式（v47）：PAA 与 LBA 的 plane/cw 位置不同，不能再用同一条 plane_cw 公式。
+     *   desc->paa  —— PAA 空间：plane 与 cw 不相邻，用 paa_with_plane/paa_with_cw 逐字段换；
+     *                 行地址取自实参 row_paa（每 plane 独立，Policy B 两 plane 可不同块）。
+     *   desc->meta —— LBA 空间：plane/cw 低 3 位相邻（PLANE_CW_MASK 有效），
+     *                 高位取自 command->meta（本命令扇区 LBA）。 */
     plane_cw              = ((uint32_t)plane << PBA_PLANE_SHIFT) | (uint32_t)cw;
-    descriptor->paa       = pba_to_paa((row_pba & ~PLANE_CW_MASK) | plane_cw);
+    descriptor->paa       = paa_with_cw(paa_with_plane(row_paa, plane), cw);
     descriptor->config    = command->config;
     descriptor->config.cw = cw;
     descriptor->next_id   = FC_DESCRIPTOR_ID_INVALID;

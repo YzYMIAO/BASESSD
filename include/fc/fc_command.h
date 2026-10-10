@@ -22,12 +22,16 @@
  * ── 三套地址（v24；权威定义与位序表见 nand/nand_config.h）──
  *
  *   LBA  逻辑地址      [CH][CE][LUN][BLOCK][PAGE][PLANE][CW]  FTL 用
- *   PBA  系统物理地址  与 LBA **逐位同构**                       FTL → FC 边界传它
+ *   PBA  系统物理地址  与 LBA **逐位同构**                       **FTL 内部**用（含 ch/ce）
  *   PAA  芯片内地址    [CW][PAGE][PLANE][BLOCK][LUN]（BA6/PA 规则）FC → NAND 传它
  *
- * 分界：**FTL 交 LBA + PBA，FC 层转成 PAA 喂 NAND**。PBA 与 LBA 同构的收益是
- * 建链时 `desc->paa` 与 `desc->meta` 可用**同一个 plane_cw 公式**造出（基值不同）。
- * 三者的低 3 位（PLANE_CW_MASK）是同一套编码 [plane:1][cw:2]。
+ * 分界（v47）：**FTL 交 LBA + PAA（PBA 在 FTL 侧 `pba_to_paa()` 一次转出），
+ * FC 层只认 PAA 喂 NAND**。PBA 不再跨进 FC——它带 ch/ce，而 FC 的路由本就独立走
+ * `config.ch/ce/lun`（见 fc_build_dispatch_request），两套编码并存只会制造静默算错地址的机会。
+ * ⚠ 代价：PBA 与 LBA 同构时「`desc->paa` 与 `desc->meta` 用同一个 plane_cw 公式」的便利消失——
+ * PAA 的 plane 与 cw **不相邻**（`[cw][page][plane][block]`），建链改用
+ * `paa_with_plane()` / `paa_with_cw()`；`PLANE_CW_MASK` 技巧只在 LBA/PBA 空间有效。
+ * 三者的低 3 位（PLANE_CW_MASK）仍是同一套编码 [plane:1][cw:2]。
  */
 
 /* ECC 解码模式（配置写入 fc_cmd_conf_t.ldpc） */
@@ -160,8 +164,9 @@ typedef struct fc_cmd_conf_t
  */
 struct fc_descriptor_t
 {
-    DWORD paa;                    /* 本 CW 的**芯片内地址（PAA）**；建链时由 row_pba + plane/cw 造出，
-                                   * 直接喂 NAND 请求。⚠ 与 command->pba 不同空间（PAA vs PBA）。 */
+    DWORD paa;                    /* 本 CW 的**芯片内地址（PAA）**；建链时由 row_paa + plane/cw 造出
+                                   * （`paa_with_cw(paa_with_plane(row_paa, plane), cw)`），
+                                   * 直接喂 NAND 请求。与 command->paa 同空间（都是 PAA）。 */
     fc_cmd_conf_t config;         /* Copy of Command configuration; config.cw is this CW index. */
     DWORD         buffer_id : 16; /* Buffer Pool ID; 0xFFFF means invalid. */
     DWORD         next_id   : 16; /* Next Descriptor ID; 0xFFFF terminates the chain. */
@@ -232,11 +237,12 @@ struct fc_command_t
     DWORD meta;               /* META 值（本命令的**扇区 LBA**，v24 起），写入各 CW buffer[0..3]。
                                * 每条 desc 取其高位 + 自己的 plane/cw 得本 CW 的 meta，
                                * 见 fc_command_configure_descriptor 的 plane_cw 公式。 */
-    DWORD pba;                /* 本命令的**系统物理地址（PBA）**，v24 起由 FTL 直接交 PBA
-                               * （此前传 PAA，ch/ce 在边界上蒸发）。数据命令的逐 CW 行地址
-                               * 仍走 desc 链（Policy B：两 plane 可不同块）；本字段供
-                               * 单 plane / 擦除 / Feature 等无逐 CW 地址的命令取行地址，
-                               * 以及 fc_command_plane_span 定 plane 段。 */
+    DWORD paa;                /* 本命令的**芯片内地址（PAA）**，v47 起由 FTL 在边界处
+                               * `pba_to_paa()` 转好后交来（v24~v46 此字段是 PBA，带 ch/ce）。
+                               * 数据命令的逐 CW 行地址仍走 desc 链（Policy B：两 plane 可不同块）；
+                               * 本字段供单 plane / 擦除 / Feature / READ_META 等无逐 CW 地址的
+                               * 命令取行地址，以及 fc_command_plane_span 定 plane 段。
+                               * ⚠ 路由（ch/ce/lun）**不在 PAA 里**——一律走 config。 */
     fc_cmd_conf_t config;     /* Operation, NAND location, CW and data-path configuration. */
     fc_param_t    param;      /* 仅 FEATURES 命令使用：SET_FEATURES 的内联数据 / GET_FEATURES 的读回值
                                * （param.bytes）。「本命令访问哪些 CW」**不在命令里**（v28）——
@@ -273,7 +279,7 @@ struct fc_command_status_t
  *   返回：段内 plane 数（= multi_plane，单 plane 时为 1）。
  *   实现要点：
  *     - multi-plane：从 plane 0 起，覆盖 plane_count 个 plane；
- *     - 单 plane：**只覆盖 pba_to_plane(command->pba) 那一个**——掩码是绝对编号，
+ *     - 单 plane：**只覆盖 paa_to_plane(command->paa) 那一个**——掩码是绝对编号，
  *       plane 1 的单 plane 命令落在 0xF0 段而不是 0x0F 段。
  *
  *   放在头文件（唯一一份定义）：这是 fc_command_t 的结构属性——FC 侧用它做
@@ -289,7 +295,7 @@ static inline uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t
 
     ASSERT(plane_count <= PLANE_NUM);
 
-    *plane_first = (plane_count == 1U) ? (uint8_t)pba_to_plane(command->pba) : 0U;
+    *plane_first = (plane_count == 1U) ? (uint8_t)paa_to_plane(command->paa) : 0U;
     *plane_last  = (uint8_t)(*plane_first + plane_count);
     return plane_count;
 }
@@ -297,12 +303,12 @@ static inline uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t
 /* --------------------------------------------------------------------
  * fc_command_plane_span_cw_bitmap
  *   功能：本命令 plane 段内**全部** CW 的 flat 位图——「整段访问」的显式写法。
- *   参数：command —— 命令（须已设 config.multi_plane 与 pba，本函数按它们定段）。
+ *   参数：command —— 命令（须已设 config.multi_plane 与 paa，本函数按它们定段）。
  *   返回：段内每个 CW 一位置 1（plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF）。
  *   用途：产出 **ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段
  *         路径（addr_to_cmd / ftl_cmd_setup_ppa / _pair）一律先调本函数算出位图，再作为
  *         形参交给建链入口。（v27 前它写进 cmd->param.cw_bitmap；v28 起该字段已删。）
- *   ⚠ 必须在 pba 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
+ *   ⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
  * -------------------------------------------------------------------- */
 static inline uint32_t fc_command_plane_span_cw_bitmap(const fc_command_t *command)
 {

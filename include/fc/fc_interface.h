@@ -55,18 +55,19 @@ extern "C"
      * 上层自行组装 CW 集合（例如只读离散 CW）：
      * 按自己算出的集合循环调用即可，
      * **链序即数据布局顺序**（FTL 侧拷贝按此顺序遍历链，见 ftl_cmd_read_data）。
-     * row_pba = 该 plane 的行地址（PBA：ch/ce/page/block/lun，plane/cw 位由实参决定），
-     * 其 plane 位必须等于 plane。
+     * row_paa = 该 plane 的行地址（**PAA**：page/block/lun，plane/cw 位由实参决定），
+     * 其 plane 位必须等于 plane。v47 起本入口收 PAA（此前收 PBA）——FC 层内不再有 PBA，
+     * 调用方（FTL）自行 `pba_to_paa()` 后传入。
      * 由此 multi-plane 命令的**两个 plane 可以指向不同 block**（Policy B：每 plane 独立分配块 +
-     * 坏块替换）——每个 plane 传自己的 row_pba 即可；同一 plane 的所有 CW 必须传同一 row_pba。
-     * plane 必须落在本命令的 plane 段内（单 plane = pba_to_plane(command->pba) 那一个；
+     * 坏块替换）——每个 plane 传自己的 row_paa 即可；同一 plane 的所有 CW 必须传同一 row_paa。
+     * plane 必须落在本命令的 plane 段内（单 plane = paa_to_plane(command->paa) 那一个；
      * multi-plane = [0, multi_plane)）。
      * 前置（违反一律 ASSERT，不返回错误码）：命令处于 ALLOCATED；plane 落在本命令 plane 段内；
-     * CW 号 < CW_NUM；row_pba 的 plane 位 == plane。配置错误绝不发到硬件。
+     * CW 号 < CW_NUM；row_paa 的 plane 位 == plane。配置错误绝不发到硬件。
      * 返回：OK / RESOURCE_EMPTY（desc 或 buffer 池空）——只有「申请不到」才走返回码（模仿硬件行为）。
      * **失败时链上可能已有 desc（含本条）**：本层不回滚，「已分配的 desc 全部在链上」
      * 是不变量，调用方沿链释放即完整回收（见下两个函数）。 */
-    fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_pba_t row_pba);
+    fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa);
 
     /* 释放链头那一个 desc（含其 buffer），返回新链头；空链（head 越界）原样返回。
      * 传链头 ID 而非命令：command->desc_id 是位域取不了地址，故按值传入、按值取回。

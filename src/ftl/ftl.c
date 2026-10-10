@@ -101,7 +101,7 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                              * ECC 历史存于 BST（ftl->alloc.blocks[].rr）。
                              * ⚠ 须在 fc_command_release(cmd) 之前调用——desc 释放后失效。 */
                             {
-                                uint16_t gblock = ftl_pba_gblock(cmd->pba);
+                                uint16_t gblock = ftl_paa_gblock(cmd->paa);
 
                                 rr_record_ecc(&ftl->alloc.blocks[gblock].rr, fc_get_cmd_ecc_max(cmd));
 
@@ -195,12 +195,16 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                     {
                         if (pending->io.buffer != NULL)
                         {
-                            /* 读失败：先尝试 Read Recovery 恢复，恢复成功则数据已就位 */
-                            uint8_t retry_count = 0U;
-                            int     recovered   = rr_recover_read(&ftl->rr,
+                            /* 读失败：先尝试 Read Recovery 恢复，恢复成功则数据已就位。
+                             * ⚠ rr_recover_read 的形参是 **PBA**（FTL 自己的地址空间，内部
+                             *   还要 addr_from_pba）——命令里只有 PAA（v47），此处用拓扑的
+                             *   ch/ce 还原，与当初 pba_to_paa() 前的值逐位相同。 */
+                            const nand_pba_t read_pba    = paa_to_pba(ftl->topo.ch, ftl->topo.ce, cmd->paa);
+                            uint8_t          retry_count = 0U;
+                            int              recovered   = rr_recover_read(&ftl->rr,
                                                             ftl->topo.ch,
                                                             ftl->topo.ce,
-                                                            cmd->pba,
+                                                            read_pba,
                                                             pending->io.buffer,
                                                             data_size,
                                                             pending->io.lba,
@@ -225,9 +229,9 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                                 (void)retry_count; /* 恢复失败，重试次数无意义 */
                                 LOGE("[FTL] read unrecoverable lba=%lu gblock=%u\r\n",
                                      (unsigned long)pending->io.lba,
-                                     (unsigned)ftl_pba_gblock(cmd->pba));
+                                     (unsigned)ftl_paa_gblock(cmd->paa));
                                 (void)bbt_mark_bad(&ftl->alloc,
-                                                   ftl_pba_gblock(cmd->pba),
+                                                   ftl_paa_gblock(cmd->paa),
                                                    (uint8_t)FTL_BLOCK_BAD_READ);
                                 if (pending->io.status_out != NULL)
                                 {

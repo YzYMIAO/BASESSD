@@ -53,7 +53,7 @@ static uint32_t ftl_cmd_resolve_cw_bitmap(uint32_t bitmap, uint8_t plane_first, 
  *       离散读 plane1 的 CW0/CW2 即传 (1U << 4) | (1U << 6)。
  *       ⚠ 想「整段访问」不要传 0 —— 那是空集。用 ftl_cmd_setup_ppa(_pair)，
  *         或显式传 fc_command_plane_span_cw_bitmap(cmd)。
- *     - 行地址所有 plane 共用 cmd->pba（同页语义）；两 plane 不同块（Policy B）
+ *     - 行地址所有 plane 共用 cmd->paa（同页语义）；两 plane 不同块（Policy B）
  *       走 ftl_cmd_setup_ppa_pair()，本函数不适用。
  *     - **失败时本函数自己回滚整条链**（desc + buffer 全部还池，desc_id 复位 INVALID），
  *       调用者只需再 fc_command_release 还命令槽位。
@@ -83,7 +83,9 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
 
     for (plane = plane_first; plane < plane_last; plane++)
     {
-        const nand_pba_t row_pba = (cmd->pba & ~PLANE_CW_MASK) | ((uint32_t)plane << PBA_PLANE_SHIFT);
+        /* 行地址逐 plane 换 plane 位：PAA 的 plane 与 cw 不相邻，不能再用 PBA 的
+         * plane_cw 掩码技巧（cmd->paa 已由调用者/上层入口转好）。 */
+        const nand_paa_t row_paa = paa_with_plane(cmd->paa, plane);
 
         for (cw = 0U; cw < CW_NUM; cw++)
         {
@@ -91,7 +93,7 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
             {
                 continue;
             }
-            if (fc_command_configure_descriptor(cmd, plane, cw, row_pba) != FC_STATUS_OK)
+            if (fc_command_configure_descriptor(cmd, plane, cw, row_paa) != FC_STATUS_OK)
             {
                 cmd->desc_id = fc_descriptor_chain_release_all(cmd->desc_id);
                 return FTL_ERROR;
@@ -112,9 +114,9 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba)
     cmd->config.ch  = (DWORD)pba_to_ch(pba);
     cmd->config.ce  = (DWORD)pba_to_ce(pba);
     cmd->config.lun = (DWORD)pba_to_lun(pba);
-    cmd->pba        = pba;
+    cmd->paa        = pba_to_paa(pba); /* v47：PBA 在此转 PAA 一次，FC 层不再见 PBA */
     /* v27/v28：位图是字面位图（0 = 空集），「整段访问」不再有隐式默认值。本入口语义
-     * 就是「整段」——自己算好当实参传，调用者不必管。须在 pba 写好之后算。 */
+     * 就是「整段」——自己算好当实参传，调用者不必管。须在 paa 写好之后算。 */
     return ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));
 }
 
@@ -131,12 +133,12 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
         return FTL_ERROR;
     }
 
-    /* 拓扑取 pba[0]（同一命令两 plane 必属同一 ch/ce/lun）；command->pba 也写 pba[0]——
+    /* 拓扑取 pba[0]（同一命令两 plane 必属同一 ch/ce/lun）；command->paa 写 pba[0] 转出的 PAA——
      * 它是 fc_command_plane_span 定 plane 段的输入，各 plane 的实际行地址逐条由 row 决定。 */
     cmd->config.ch  = (DWORD)pba_to_ch(pba[0]);
     cmd->config.ce  = (DWORD)pba_to_ce(pba[0]);
     cmd->config.lun = (DWORD)pba_to_lun(pba[0]);
-    cmd->pba        = pba[0];
+    cmd->paa        = pba_to_paa(pba[0]); /* v47：PBA→PAA 在 FTL 侧一次转出 */
 
     if (ftl_cmd_needs_desc_chain(cmd) == 0U)
     {
@@ -158,8 +160,8 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
         /* ⚠ plane 号取自 PBA 自己的 plane 位，不是下标 i：读路径的 pba[] 是按 LBA 查出来的，
          *   plane 取决于当初怎么写进去（`wr 0 2` 之后 lba 1 映射到 plane 1），下标与 plane 号
          *   并不总相等。链序仍按 pba[] 顺序 → ftl_cmd_read_data 拷出的布局与调用者期望一致。 */
-        const uint8_t    plane = (uint8_t)pba_to_plane(pba[i]);
-        const nand_pba_t row   = pba[i];
+        const uint8_t    plane   = (uint8_t)pba_to_plane(pba[i]);
+        const nand_paa_t row_paa = pba_to_paa(pba[i]); /* v47：PBA→PAA 在 FTL 侧转出 */
         uint8_t          cw;
 
         for (cw = 0U; cw < CW_NUM; cw++)
@@ -168,7 +170,7 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
             {
                 continue;
             }
-            if (fc_command_configure_descriptor(cmd, plane, cw, row) != FC_STATUS_OK)
+            if (fc_command_configure_descriptor(cmd, plane, cw, row_paa) != FC_STATUS_OK)
             {
                 /* 回滚整条链（desc + buffer 还池，desc_id 复位）；命令槽位由调用者释放 */
                 cmd->desc_id = fc_descriptor_chain_release_all(cmd->desc_id);

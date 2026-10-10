@@ -212,13 +212,26 @@ static void req_program_page(nand_dispatch_task_t *task)
  *     - OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT（读路径统一后的加载 op）：
  *       uop 序列无 DATA_OUT，data/data_length 被忽略，数据留在页缓冲，随后由
  *       poll() 的 chaining 循环经 OP_RANDOM_DATA_READ 逐 CW 取回（含掩码最低位那个）。
+ *       v45：命令**不带 desc** 直接下发（测试用）时掩码为空 ⇒ data 置 NULL，且 chaining
+ *       不启动（空掩码无 CW 可取），纯加载、不取数。
  *     - OP_NORMAL_READ_PAGE_WITH_DATA_OUT / OP_OTP_DATA_READ（旧语义，直接下发）：
  *       掩码最低位那个 CW 由本次 DATA_OUT 一次取回，后续 CW 再由 chaining 逐个随机读。
  * -------------------------------------------------------------------- */
 static void req_read_page(nand_dispatch_task_t *task)
 {
+    uint8_t *cw_buffer;
+
+    /* 空掩码 = 无 desc 的「纯加载」op（v45，op 33 直接下发）：uop 无 DATA_OUT，data 不被读，
+     * 且 cw_buffers[] 是上一次占用该 slot 的残留值（见 nand_dispatch_internal.h 的契约注释）
+     * ⇒ 显式置 NULL/0，不把残留指针挂到请求上。 */
+    if (task->cw_bitmap == 0U)
+    {
+        task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->plane_paa[task->plane])}, .data = NULL, .data_length = 0U};
+        return;
+    }
+
     /* 掩码最低位 = 本 plane 第一个要访问的 CW（其缓冲由 FC 数据路径填满，恒非空） */
-    uint8_t *cw_buffer = task->cw_buffers[nand_dispatch_cw_first(task->cw_bitmap)];
+    cw_buffer = task->cw_buffers[nand_dispatch_cw_first(task->cw_bitmap)];
 
     ASSERT(cw_buffer != NULL);
     task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->plane_paa[task->plane])}, .data = cw_buffer, .data_length = (uint16_t)CW_SIZE};
@@ -302,6 +315,29 @@ static void req_erase(nand_dispatch_task_t *task)
 static void req_feature(nand_dispatch_task_t *task)
 {
     task->request = (nand_fc_request_t){.column = (uint16_t)task->feature_addr, .row = {0U}, .data = task->cw_buffers[(uint8_t)(task->plane * CW_NUM)], .data_length = 4U};
+}
+
+/* --------------------------------------------------------------------
+ * req_meta_read
+ *   功能：构建 META 只读回读请求（OP_READ_META，自带 00h-30h 加载）。
+ *   参数：task —— 预解析完成的任务；plane_paa[task->plane] 携带目标页 + CW；
+ *         cw_buffers[task->plane * CW_NUM] 已由 FC 重定向到 g_fc_return_staging[command_id]
+ *         （控制器级 4 字节暂存，返回值最终经 CQ 的 param 联合体交回）。
+ *   返回：无。
+ *   实现要点：**列地址 = CW 号 × CW_SIZE = paa_to_cw(plane_paa[plane]) × CW_SIZE**
+ *         ——CW 由 command->paa 的 cw 字段选（PAA 原生含 cw），故从该 CW 起输出 4 字节。
+ *         行地址取同一 PAA（paa_to_nand_row 丢掉 cw，cw 只进列地址）。
+ *         4 字节落本 plane 的 CW0 那一格（掩码位 = plane*CW_NUM），与 req_feature 同口径。
+ * -------------------------------------------------------------------- */
+static void req_meta_read(nand_dispatch_task_t *task)
+{
+    const uint8_t plane = task->plane;
+
+    task->request = (nand_fc_request_t){
+        .column      = (uint16_t)(paa_to_cw(task->plane_paa[plane]) * CW_SIZE),
+        .row         = {paa_to_nand_row(task->plane_paa[plane])},
+        .data        = task->cw_buffers[(uint8_t)(plane * CW_NUM)],
+        .data_length = 4U};
 }
 
 /* --------------------------------------------------------------------
@@ -459,7 +495,7 @@ static void req_multi_plane_erase(nand_dispatch_task_t *task)
 /* --------------------------------------------------------------------
  * completion 表 g_nand_dispatch_completion_table
  *   每个 OP 的完成策略选择依据（与 onfi_1_0.h 的 OP 语义对应）：
- *     - completion_single    ：无 CW 概念（RESET/ID/STATUS/FEATURES/内部搬移/块锁等）
+ *     - completion_single    ：无 CW 概念（RESET/ID/STATUS/FEATURES/内部搬移/块锁/META 回读等）
  *     - completion_per_cw    ：逐 CW 独立状态（普通读/OTP 读/CACHE_SEQ/RANDOM/LAST/FETCH）
  *     - completion_load      ：加载型 op 不写状态，失败时刷满（WITHOUT_DATA_OUT 两种）
  *     - completion_all_cws   ：所有选中 CW 同状态（编程/擦除/ISSUE/WAIT/CACHE_START，
@@ -478,6 +514,7 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
     [OP_RANDOM_DATA_READ]                       = completion_per_cw,
     [OP_RANDOM_DATA_READ_MULTI_PLANE]           = completion_per_cw,
     [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = completion_single,
+    [OP_READ_META]                              = completion_single,
     [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = completion_per_cw,
     [OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT]      = completion_load,
     [OP_READ_PAGE_CACHE_SEQ]                    = completion_per_cw,
@@ -521,6 +558,7 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
  *     - req_program_page   ：单 plane 多 CW 拼接后一次写
  *     - req_multi_plane_read/program/erase：双 plane 行地址 / 双 plane 拼接写
  *     - req_feature        ：SET/GET_FEATURES（column=feature_addr, 4B）
+ *     - req_meta_read      ：META 只读回读（column = CW 号×CW_SIZE, 4B, 无 desc）
  *     - req_erase          ：擦除（无数据）
  *   下标 OP_* 不连续（含 Phase V 扩展 35..40），用设计初始化器定位。
  * -------------------------------------------------------------------- */
@@ -536,6 +574,7 @@ const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
     [OP_RANDOM_DATA_READ]                       = req_random_read,
     [OP_RANDOM_DATA_READ_MULTI_PLANE]           = req_random_read,
     [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = req_single,
+    [OP_READ_META]                              = req_meta_read,
     [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = req_read_page,
     [OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT]      = req_read_page,
     [OP_READ_PAGE_CACHE_SEQ]                    = req_cache_read,

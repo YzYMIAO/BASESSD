@@ -159,7 +159,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     /* 单 plane 有效行的归属由生产者保证，此处不再复核：掩码位 n 由 desc 的 PAA 本身
      * 算出（见 fc_build_request_data_planes），"在 n 位写了 buffer"与
      * "该 desc 的 plane/cw 位是 n"是同一条表达式。真正可能错位的情形（desc plane 位
-     * 与 command->pba 不一致）在造链时就被 fc_command_configure_descriptor 的 plane 段
+     * 与 command->paa 不一致）在造链时就被 fc_command_configure_descriptor 的 plane 段
      * 校验（越段 → ASSERT）拦下，不会走到这里。
      * ⚠ 擦除（v28 起）位图为空 ⇒ 上面这个循环一格都不搬，cw_buffers[] 保持上一次占用
      * 该 slot 的残留值。擦除路径不读 cw_buffers[]（req_erase 只用 plane_paa），故安全；

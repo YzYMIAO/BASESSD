@@ -3039,7 +3039,7 @@ nand_paa_t ftl_write_data(lba_t lba, const uint8_t *data, uint32_t len) {
 |------|------|------|------|--------------|
 | LAA | Logical Application Address | Host → Controller | 应用程序下发的原始逻辑地址 | UART CLI 的 `lba` 参数（本项目 Host 为 UART CLI，无 NVMe）|
 | LBA | Logical Block Address | L2P 索引 | 行业标准逻辑地址，`cmd->lba` 用于 META 校验 | `cmd->lba` |
-| PBA | Physical Block Address | L2P 映射值 | 完整物理地址，含拓扑路由（CH/CE/LUN）+ 芯片内地址（PAA）| FTl 层 `pba_t`（需新增）|
+| PBA | Physical Block Address | L2P 映射值 | 完整物理地址，含拓扑路由（CH/CE/LUN）+ 芯片内地址（PAA）| FTL 层 `nand_pba_t`（**只活在 FTL 内部**，v47 起不跨进 FC）|
 | PAA | Physical Array Address | NAND 芯片寻址 | 芯片内地址（Block + Plane + Page + CW），不含拓扑 | `nand_paa_t` |
 | FAA | （本项目曾用） | — | 原代码中 `cmd->faa` 曾用名，现统一为 LBA | 已废弃 |
 
@@ -3054,9 +3054,9 @@ FTL
   │ PBA(uint32_t) = [CH:?][CE:?][LUN:?][PAA]
   │                = [CH:?][CE:?][LUN:?][BLOCK:11][PLANE:1][PAGE:6][CW:2]
   │
-  │ FTL 从 PBA 拆出：
+  │ FTL 从 PBA 拆出（v47：转换全部发生在 **FTL 侧**，FC 层只认 PAA）：
   │   cmd->config.ch/ce/lun = PBA 高位（路由到哪个 NAND 芯片）
-  │   cmd->paa              = PBA & PAA_MASK = PAA（芯片内地址）
+  │   cmd->paa              = pba_to_paa(PBA)（芯片内地址；**字段重排**，不是掩码截取）
   ▼
 FC → NAND Dispatch → Engine → FMC
   │ cmd->config.ch/ce/lun → 选中目标 NAND 芯片
@@ -3077,7 +3077,7 @@ PBA(uint32_t):
   └──────────┴──────────┴──────────┴────┴──────┴──────┴──────┘
 
 cmd->lba = Host 逻辑地址（用于 META 校验，不参与地址路由）
-cmd->paa = PAA（芯片内地址）= PBA & PAA_MASK
+cmd->paa = PAA（芯片内地址）= pba_to_paa(PBA)   ← v47：FC 层唯一的物理地址字段
 ```
 
 #### 13.4.2 FTL 主循环形态

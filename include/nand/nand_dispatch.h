@@ -47,7 +47,7 @@ typedef struct
                                         * ⚠ 当前 NAND 层只有 nand_dispatch_scatter_page_buffer() 读它；
                                         *   multi-plane handler 一律写死 PLANE_NUM 遍历，见 nand_dispatch_tables.c。 */
     uint8_t plane;                     /* 本命令目标物理 plane 索引。
-                                        * 单 plane：= pba_to_plane(command->pba)，该 plane 的掩码段非空。
+                                        * 单 plane：= paa_to_plane(command->paa)，该 plane 的掩码段非空。
                                         * multi-plane：恒 0 —— 多 plane uop 硬编码 row[0]/row[1]
                                         *   （onfi_1_0.c），plane 维从 0 起。 */
     uint8_t page_type : 2;             /* LP/MP/UP/TP — LDPC engine needs this for decode threshold. */

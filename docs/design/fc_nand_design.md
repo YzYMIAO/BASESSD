@@ -36,6 +36,7 @@
 > - **v28 (2026-10-09)**: **CW 集合退出命令结构体——改为建链形参**。删除 `fc_param_t.cw_bitmap` 这个联合体视图：SQ 侧（请求集）改作 `ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 的**形参**（它是建链的输入、读者只有 FTL，没有留在命令里被回读的理由），CQ 侧（失败集）**整个删除**——上层要定位失败 CW，遍历 desc 链 OR 各 `desc->status` 即可（FC 不再代为派生）。`fc_command_status_t.param` **保留**（GET_FEATURES 的寄存器回读仍走它）。顺带删掉擦除的**假 CW 位**（v7~v27 给 ERASE 伪造一个 CW0 位，只为让 completion 有格可写）——擦除请求位图自此是**合法空集**，由 `completion_all_cws` 的空集分支写 `cw_status[0]` 兜住（§2.2、§25.4；changelog `fc_cw_bitmap_param_v28.md`）
 >   （v14~v16、v18~v22、v25~v26 见各自 changelog 及 §2.10 内联注记——本列表未逐条回填。）
 > - **v33 (2026-10-10)**: **CRC 引擎改走 STM32H743 HAL 驱动**（changelog `fc_crc_hal_driver_v33.md`）。原 `fc_crc_engine.c` 裸写外设寄存器，`FC_CRC_BASE` 写成了 **ADC3** 的 `0x58026000`（真值 `0x58024C00`）⇒ IDR 自检不过 ⇒ `g_crc_ready = 0`（「失败静默继续」）⇒ `fc_crc_compute()` 恒返 0 ⇒ **CRC 校验自始恒通过**。改为新增平台层 `src/platform/stm32h743/crc.{h,c}` 唯一持有 `CRC_HandleTypeDef`（地址由 CMSIS 宏保证）、管时钟、做 IDR 写读回环自检（失败转 `ASSERT`，删除 `g_crc_ready` 静默降级路径）；`src/fc/fc_crc_engine.c` 只留「对哪 512B 算、结果怎么判」，`src/fc/` 保持零 HAL 依赖。**介质格式变更**：此前写入的 CW 里 CRC 字段恒为 0，改后是真值。⚠ 两坑：`stm32h7xx_hal_crc_ex.c` 必须同编（`HAL_CRC_Init` 无条件调 `HAL_CRCEx_Polynomial_Set`）、`ASSERT(HAL_CRC_Init(...))` 在 release 下会把初始化整个裁掉（须先求值再断言）
+> - **v47 (2026-10-11)**: **`fc_command_t.pba` → `.paa`——PBA 退出 FC 层**。SQ 里的 PBA 会经 FC 接口一路带到 FC-NAND 层，而 FC 层在 10+ 处 `pba_to_paa()` 现场转换——PBA 与 PAA **位序不同**（`pba_to_paa` 是真正的字段重排），每处转换都是一次静默算错地址的机会。改为：**FTL 在自己的空间组合 PBA，在边界处 `pba_to_paa()` 一次，赋给 `cmd->paa`**；`src/fc/**` 里 `pba_to_paa()` / `pba_to_*()` 归零。建链入口 `fc_command_configure_descriptor()` 一并改收 `nand_paa_t row_paa`（FC 层最后一个收 PBA 的地方）；`desc->paa` 由 `paa_with_cw(paa_with_plane(row_paa, plane), cw)` 造出（PAA 的 plane 与 cw **不相邻**，v24 的 plane_cw 掩码技巧只在 LBA/PBA 空间有效），`desc->meta` 仍是 LBA 公式、不变。FTL 侧 `ftl_paa_gblock(cmd->paa)` 与旧 `ftl_pba_gblock(cmd->pba)` **逐位等价**（`bst.h` 里前者本就是后者的展开）。**PAA 无 ch/ce ⇒ 路由一律走 `config.ch/ce/lun`**（生产路径与测试本就如此，本版把它写死为结构不变式）。RAID 段（`#if CONFIG_FC_RAID`，恒关）一并机械改 PAA、**无法编译验证**。用例数不变（仍 53）；`make clean && make tests` 0 warning 0 error、链接 225212 B；固件 166708 B（§2.3.1、§6.1；changelog `fc_command_paa_v47.md`）
 > - **2026-10-09（协议查证，非代码版本）**: **multi-plane 不在 ONFI 1.0 里**。逐字读 ONFI 1.0（Rev 1.0, 2006-12-28）Table 14 命令集：cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，**全文 `plane` 一词出现 0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。multi-plane 全部来自器件侧。顺带逐字核对了 Micron「4Gb, 8Gb, and 16Gb x8 NAND Flash Memory」（MT29FxG08xAA, Rev B）的 Table 7 Two-Plane Command Set / §Two-Plane Addressing，并发现两处待办：① 「two-plane 命令族要求 on-die ECC 关闭（Note 4）」的出处对不上（该 PDF 全文无 `on-die`）；② 器件有 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`，本项目 op 表缺此 op（§25.6 前置约束 3、§25.8 风险 2 与风险 8）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
@@ -270,7 +271,7 @@ typedef union {
 
 ```c
 struct fc_descriptor_t {
-    DWORD paa;               // 芯片物理地址 PAA（pba_to_paa(本 desc 的 PBA)）
+    DWORD paa;               // 芯片物理地址 PAA（paa_with_cw(paa_with_plane(row_paa, plane), cw)，v47）
     fc_cmd_conf_t config;    // 继承命令配置，config.cw 表示当前 CW 索引
     DWORD buffer_id : 16;   // Buffer Pool ID，0xFFFF=无效
     DWORD next_id   : 16;   // 下一个 Descriptor ID，0xFFFF=链表结束
@@ -280,25 +281,30 @@ struct fc_descriptor_t {
 };
 ```
 
-#### 2.3.1 三套地址空间（v24 定稿）
+#### 2.3.1 三套地址空间（v24 定稿，v47 分界调整）
 
 同一颗芯片上有三套地址，**位序刻意不同**，各司其职（定义见 `include/nand/nand_config.h`）：
 
 | | 低位优先布局 | 用途 | 谁定义 |
 |---|---|---|---|
-| **PAA** | `[cw:2][page:6][plane:1][block:11][lun]` | **芯片地址**——喂给 `paa_to_nand_row()` 编成器件行地址 | MT29F4G08 的 BA6/PA 规则，**不可改** |
-| **PBA** | `[cw:2][plane:1][page:6][block:11][lun][ce:2][ch:2]` | **系统物理地址**——FTL 交给 FC-NAND 的行地址 | 本工程自定 |
+| **PAA** | `[cw:2][page:6][plane:1][block:11][lun]` | **芯片地址**——喂给 `paa_to_nand_row()` 编成器件行地址；**FC 层唯一的物理地址** | MT29F4G08 的 BA6/PA 规则，**不可改** |
+| **PBA** | `[cw:2][plane:1][page:6][block:11][lun][ce:2][ch:2]` | **系统物理地址**——**FTL 内部**地址；在 FTL 侧 `pba_to_paa()` 转出后交 FC | 本工程自定 |
 | **LBA** | `[ch:ce:lun:block:page:plane:cw]` | **逻辑地址**——主机寻址单位 = 512 B 扇区 | 本工程自定 |
 
-- **PBA 与 LBA 逐位同构**（除 PBA 多出的 cw 字段语义：LBA 里 cw 也是低 2 位）。这是 v24 的核心收益：建链时两个值用**同一个公式**造出，只是基值不同——
+- **v47 分界**：**FTL 交 LBA + PAA**（PBA 在 FTL 侧转出），`fc_command_t.paa` 是 FC 层唯一的物理地址字段——`src/fc/**` 里不再出现 `pba_to_paa()` / `pba_to_*()`。PBA 带 ch/ce，而 FC 的路由本就独立走 `config.ch/ce/lun`（见 `fc_build_dispatch_request`），两套编码并存只会制造静默算错地址的机会。
+- **PBA 与 LBA 逐位同构**（除 PBA 多出的 cw 字段语义：LBA 里 cw 也是低 2 位）。这是 v24 的核心收益（v47 起只在 FTL 侧有效）：LBA 空间里两个值可用**同一个公式**造出，只是基值不同——
   ```c
   const uint32_t plane_cw = ((uint32_t)plane << PBA_PLANE_SHIFT) | cw;
-  desc->paa  = pba_to_paa((row_pba     & ~PLANE_CW_MASK) | plane_cw);  /* 物理基值 */
-  desc->meta =            (command->meta & ~PLANE_CW_MASK) | plane_cw;  /* 逻辑基值 */
+  desc->meta = (command->meta & ~PLANE_CW_MASK) | plane_cw;  /* 逻辑基值（LBA 空间，v47 不变） */
   ```
+  **PAA 不参与这条公式**——它的 plane 与 cw **不相邻**（`[cw][page][plane][block]`），v47 起 `desc->paa` 改用现成 helper：
+  ```c
+  desc->paa = paa_with_cw(paa_with_plane(row_paa, plane), cw);  /* 物理基值（PAA 空间，v47） */
+  ```
+  代价：v24「一条公式造两个值」的便利消失，换来 FC 层内 PBA 归零。
 - **为什么 PBA 的 plane 在 page 之下**（与 PAA 相反）：FTL 的页号 `internal_lba` 里 plane 就是最低位（`ftl.c` 的 `l2p_cache_read(internal_lba + 1)` 取 plane1）。取 `LBA >> CW_WIDTH` 必须**逐位等于**今天的 `internal_lba`，否则 plane1 会变成 `internal_lba + 64`，L2P 编号、journal / checkpoint 的页号、所有 `+1` 约定全要改。选 `[page][plane]` 而不是跟 PAA 的 `[plane][page]` 就是**为了这一点**。
 - **PAA 布局不动**：`paa_to_nand_row`、器件行地址编码 `PA[5:0] | BA6<<6 | BA[17:7]` 保持原样，`paa_make` 的全部调用点字段值逐位不变（v25 只把形参序换成 `nand_addr_t` 具名字段，见 §6.2）。`pba_to_paa()` / `paa_to_pba()` 是**真正的字段重排**（不是掩码截取）——旧版 `PAA_FROM_PBA_MASK` 掩码宏已删除。
-- **低 3 位是共享编码**：`PLANE_CW_MASK = 0x7`（`[plane:1][cw:2]`），PBA 与 LBA 共用，所以 `desc->meta` 的低 3 位与 `desc->paa` 的 plane/cw 天然一致，Pass 4 才能拿它做自洽校验。
+- **低 3 位是共享编码**：`PLANE_CW_MASK = 0x7`（`[plane:1][cw:2]`），PBA 与 LBA 共用（PAA 不共用），所以 `desc->meta` 的低 3 位与 `desc->paa` 的 plane/cw 天然一致，Pass 4 才能拿它做自洽校验。
 
 设计决策：
 - **Descriptor 中 CW 字段为"当前 CW 索引"**，不同于 Command 中 CW 为"数量减一"
@@ -1426,6 +1432,8 @@ PAA bit layout (uint32_t, 低位优先):
 - LUN（0 bit）：当前单 LUN，预留扩展
 
 **注意**：Channel 和 CE 不在 PAA 内——它们属于命令级路由信息，保存在 `fc_cmd_conf_t` 的 ch/ce 字段中。
+
+**v47 起 `fc_command_t.paa` 是 FC 层唯一的物理地址字段**：PBA（带 ch/ce）不跨进 FC——FTL 在自己的空间里组合 PBA，在边界处 `pba_to_paa()` 一次，赋给 `cmd->paa`；`src/fc/**` 里 `pba_to_paa()` / `pba_to_*()` 归零。凡需要行地址的地方（erase / Feature / READ_META / 单 plane 数据 / 无 desc 加载）都从 `command->paa` 取，逐 plane 换 plane 位改用 `paa_with_plane()`。
 
 ### 6.2 内联函数
 
@@ -4281,7 +4289,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 
 > **flat 编号要点**：只读 plane 1 的 4 个 CW 是 `0xF0`（不是 `0x0F`）；plane 0 取 {CW0,CW3} + plane 1 取 {CW1} 是
 > `0b0010_1001 = 0x29`。单 plane 命令同理——plane 1 的单 plane 命令位图也是 `0xF0`，bit 落在
-> `pba_to_plane(command->pba)` 那个 plane 的区间；建链处 `allowed` 位图挡住越出命令 plane 位段的位。
+> `paa_to_plane(command->paa)` 那个 plane 的区间；建链处 `allowed` 位图挡住越出命令 plane 位段的位。
 >
 > **`bitmap == 0` 是空集，不是"全部"**（**v27**）。v23~v26 期间 `0` 被重载为「本命令 plane 段内的
 > 全部 CW」（v7~v22 更早是"对命令的**每个** plane 取连续 `0..config.cw`"，逐 plane 平移，不能照抄
@@ -4341,8 +4349,8 @@ bitmap = 0b1011（CW0/CW1/CW3）单 plane 读
 
 ```c
 /* 命令能触及的 plane 位段 [plane_first, plane_last)：
- *   multi-plane：从 plane 0 起覆盖 plane_count 个；单 plane：只覆盖 pba_to_plane(command->pba) 那一个 */
-plane_first = (plane_count == 1U) ? pba_to_plane(command->pba) : 0U;
+ *   multi-plane：从 plane 0 起覆盖 plane_count 个；单 plane：只覆盖 paa_to_plane(command->paa) 那一个 */
+plane_first = (plane_count == 1U) ? paa_to_plane(command->paa) : 0U;
 plane_last  = plane_first + plane_count;
 allowed     = ((1U << (plane_count * CW_NUM)) - 1U) << (plane_first * CW_NUM);
 
@@ -4433,7 +4441,7 @@ plane 都填 `plane_paa[plane]`（`paa_to_nand_row()` 丢掉 CW 位，故 PAA �
 > 走 `fc_poll_fail_command` 注一条 `NAND_FAIL` 完成项（FTL 的 pending 照常释放，不会挂死）。
 > 这是 `fc_build_dispatch_request` **唯一**的失败出口（此前它标注为"构建不可失败"）。
 > 想只访问某个 plane ⇒ 用**单 plane op**（`multi_plane = 0`），其 plane 段
-> 就是 `pba_to_plane(cmd->pba)` 那一个，窄位图合法。
+> 就是 `paa_to_plane(cmd->paa)` 那一个，窄位图合法。
 
 #### v12：per-plane 行地址（Policy B）
 
@@ -4594,11 +4602,11 @@ v18 只收了 FC 侧入口，FTL 侧这一处是同判据的漏网）。
 | 入口 | 调用者 | v27 起的位图来源 |
 |---|---|---|
 | `addr_to_cmd`（`ftl_fc_interface.h`） | `sync_page_prepare` → 四个 `ftl_sync_*` 页原语 | 入口自己填 `plane_span_cw_bitmap` |
-| `ftl_cmd_setup_ppa` | `gc.c` | 同上（**在 `cmd->pba` 写好之后**算） |
+| `ftl_cmd_setup_ppa` | `gc.c` | 同上（**在 `cmd->paa` 写好之后**算） |
 | `ftl_cmd_setup_ppa_pair` | **host 读写**（`ftl.c`） | 同上；**调用者先前设的位图会被丢弃** |
 | `ftl_cmd_configure_descriptors` | GC / 测试 / Read Recovery | **唯一**接受调用者给的部分位图 |
 
-⚠ `fc_command_plane_span_cw_bitmap` 读的是 `cmd->pba` 与 `config.multi_plane`，
+⚠ `fc_command_plane_span_cw_bitmap` 读的是 `cmd->paa` 与 `config.multi_plane`，
 **必须在两者都写好之后**调用；否则算出的段是错的（而段错时越段 ASSERT 可能不炸——段算小了
 只会少访问几个 CW，属于静默错）。
 
