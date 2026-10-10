@@ -356,6 +356,65 @@ CQ 条目 12 字节，64 条 CQ 共 768 字节。
 - **SQ 不可变**：GET_FEATURES 的寄存器值经控制器级暂存 `g_fc_return_staging[command_id]` 中转进
   CQ 的 `param.bytes`；SQ 命令体提交后不再被写。
 
+### FC 返回码 (fc_status_t)
+
+`include/fc/fc_types.h` 的返回码分三层——**成功 / 调用者写错 / 运行结果**。摆在一起看，
+`FC_STATUS_IO_ERROR` 的边界才清楚：
+
+```c
+FC_STATUS_OK               =  0    成功
+FC_STATUS_INVALID_ARGUMENT = -1    ← 调用者写错了（编程 bug）
+FC_STATUS_QUEUE_FULL       = -2    ← 状态类：此刻不行，条件会变
+FC_STATUS_QUEUE_EMPTY      = -3
+FC_STATUS_NOT_READY        = -4
+FC_STATUS_IO_ERROR         = -5    ← 数据 / 硬件层真的坏了
+FC_STATUS_NOT_SUPPORTED    = -6    ← 这条路没实现（≠ 失败）
+FC_STATUS_RESOURCE_EMPTY   = -7    ← 状态类
+```
+
+| 码 | 谁的问题 | 该怎么办 |
+|---|---|---|
+| `INVALID_ARGUMENT` | **调用者**写错 | 不重试，是 bug（判据见 §24 判据 1） |
+| `QUEUE_FULL` / `QUEUE_EMPTY` / `NOT_READY` / `RESOURCE_EMPTY` | 此刻不行，条件会变 | **可以等 / 重试** |
+| **`IO_ERROR`** | **数据 / 硬件**真的坏了 | 同一操作重试**没用**，得换手段（RAID / read retry / 换块） |
+| `NOT_SUPPORTED` | 这条路没实现 | **不是失败**——`fc_data_path_ecc_decode` 明确不吞它（`fc_data_path.c:133`），调用者当「成功但零纠正」处理 |
+
+> **一句话**：`IO_ERROR` = 「这次操作在数据 / 硬件层面真的失败了，重试同一次没有意义」。
+
+**本仓实际返回 `IO_ERROR` 的四类情形**：
+
+| 类 | 位置 | 情形 |
+|---|---|---|
+| **A. 介质 / ECC** | `fc_data_path.c:543` | `process_read` Pass 1 有 CW 不可纠 ⇒ **短路**返回（Pass 2/3/4 全没跑） |
+| | `fc_data_path.c:692` | `raid_recover`：RAID 重建后 ECC 仍失败 ⇒ 硬件不可恢复 |
+| | `fc_ldpc_engine.c:170` | BCH 找不到 ≤ t 的解 |
+| | `fc_ldpc_qc_engine.c:331` | LDPC 迭代到不动点仍不收敛 |
+| **B. NAND 驱动** | `fc.c:1365` / `:1421` | `nand_dispatch_submit` 非 OK ⇒ 命令根本没提交下去 |
+| | `fc.c:1038` | RAID stripe 提交失败：先给数据命令**合成**一条 `NAND_FAIL` completion 让 FTL 感知，再返回 |
+| **C. FC 基础设施** | `fc.c:817` | **CQ 满**——数据路径已处理、desc 已更新，但 CQ entry 塞不进去 ⇒ 上层永远看不到这条完成（注释称 "fatal 级系统背压错误"） |
+| | `fc.c:1674` | 同上。⚠ 但 **NAND 命令自身失败不算 `IO_ERROR`**——那种状态随 completion 进了 CQ entry |
+| | `fc.c:1563` / `:1594` / `:1598` | 调度状态机内部出错 |
+| | `fc.c:356` | `nand_dispatch_init()` 失败（初始化期） |
+| **D. 上一层** | `ftl.c:234` / `:263` | `SSD_STATUS_IO_ERROR = -3`——**另一套枚举**（`include/common/ssd_types.h`），FTL 给主机的码：读恢复全失败（标坏块）/ 写失败（关 SB + 标坏块） |
+
+**两个容易混的点**：
+
+1. **FC 的 `IO_ERROR` ≠ 主机的 `IO_ERROR`。** 中间隔着 FTL 的翻译。而 `ftl.c:92` 那条路上只查
+   `FC_CW_STATUS_NAND_FAIL`（bit 0），`UNC` 是 bit 3 ⇒ **读失败会被当成功**交给主机——见 §8.2。
+2. **数据路径的返回值在生产里是「被丢弃」的。** `fc.c:744`：
+
+   ```c
+   (void)fc_data_path_process_read(command);
+   /* 即使 process_read 返回 IO_ERROR（有 CW 不可纠），
+    * 已完成 ECC 解码的 desc->status 已更新。
+    * 后续 completion entry 将从 descriptor 读取最终 status。 */
+   ```
+
+   生产**不看返回值**，只看 `desc->status`（Step 3 全链 OR，`fc.c:772`）。所以单测里
+   `munit_assert_int(fc_data_path_process_read(cmd), ==, FC_STATUS_IO_ERROR)`（`test_fc_level2.c:1107`）
+   钉的是**函数契约**——它仍是唯一钉住「Pass 1 失败即短路」的地方（后续「不解扰」「CW1=UNC 其余 READY」
+   两条断言都依赖这个短路），但别把它当成「生产靠这个码判错」。
+
 ### 2.6 队列系统
 
 **SQ（Submission Queue）**：普通优先级命令，深度 64
@@ -4192,6 +4251,8 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 
 **判据 4 的边界：什么时候可以删用例而不是保留守卫。** 反例是 `fc_queue.c` 的指针判空：`fc_submission_queue_*` / `fc_completion_queue_*` 的生产调用者只有 `fc.c` 与 `fc_scheduler.c`，**全部传有效指针**——唯一会传 `NULL` 的就是测试自己。这种"只有测试会走的分支"应当按判据 2 转 `ASSERT`，并**删掉对应用例**（它们验证的行为届时已不存在，留着反而是错的）。两轮补扫共删除 `test_fc_level1.c` 的 13 个 `*_null`/越界用例与 `test_fc_level2.c` 的 3 个。
 
+**判据 2 的补丁（v39，全工程判据见 `assertion_guidelines.md` §二十四 判据 9）**：判据 2 假设「断言消失后坏状态会以别的方式暴露」。但有一类配置错误**不**满足——违反之后程序照常跑完、不报错，只是**悄悄写坏介质**（首例：multi-plane 窄位图，见 §25.4）。对这类错误，`ASSERT` 之外**必须**再补一道 release 档运行期拒绝（`return FC_STATUS_INVALID_ARGUMENT`，由调用者转成命令失败并注 `NAND_FAIL` 完成项），否则 release 档等于**没有守卫**。
+
 > `make tests` 走 `BUILD_TYPE=debug`（无 `NDEBUG`），断言在板上测试固件里是**活的**：任何一条误判都会让板子停机而不是报失败。因此改动这些守卫后必须上板跑三套 munit 套件。
 
 ---
@@ -4345,14 +4406,34 @@ fc_submit(cmd);
 **不回写 `param.cw_bitmap`**：机制层只动 desc 链，位图由 `fc_build_request_data_planes` 从链推导。
 **链序即数据布局**：FTL 侧的 `ftl_cmd_read_data` / `ftl_cmd_write_data` 按链序搬运（v13 前是 `fc_read_cmd_data` / `fc_write_cmd_data`），上层因此也拿到了布局控制权。
 
-**空 plane 的行地址（flat 独有）**：flat 位图下某 plane 可以是 0 个 CW（如只读 plane 1 = `0xF0`），
-但多 plane 加载 `00h(P0)-00h(P1)-30h` 是原子操作，两个行地址都必须带正确的 plane 位（BA6）。
-故 `fc_build_dispatch_request` 为命令 plane 集合里的**每个** plane 都填 `plane_paa[plane]`，
-与位图里该 plane 是否选中任何 CW 无关（`paa_to_nand_row()` 丢掉 CW 位，故 PAA 里的 CW 号不影响行地址）。
+**空 plane 的行地址（flat 独有）**：多 plane 加载 `00h(P0)-00h(P1)-30h` 是原子操作，两个行地址
+都必须带正确的 plane 位（BA6）。故 `fc_build_dispatch_request` 为命令 plane 集合里的**每个**
+plane 都填 `plane_paa[plane]`（`paa_to_nand_row()` 丢掉 CW 位，故 PAA 里的 CW 号不影响行地址）。
 
 > **v9 起这条风险消失了一半**：行地址不再寄居在某个"槽位 0"的 CW 项里，而是独立的一维数组
 > `plane_paa[PLANE_NUM]`——"空 plane 也得填"从"槽位 0 无条件照拷"这种隐式约定，变成一条直白的
 > 按 plane 遍历赋值。但**必须填**这个要求本身不变（不填 → 退化成 block0/page0）。
+
+> **v39 起「空 plane」在多 plane 命令里不再合法。** 本段此前写的是「flat 位图下某 plane 可以是
+> 0 个 CW（如只读 plane 1 = `0xF0`）」——**这个组合现在是调用者的编程错误**：NAND 侧的多 plane
+> handler **无条件遍历 `PLANE_NUM`** 下行地址，既不看掩码也不看 `plane_count`
+> （`nand_dispatch_tables.c` 的 `req_multi_plane_{program,read,erase}`），器件侧多 plane program
+> 会把点名过的 plane **全部编程**。未覆盖的 plane 既无数据（`cw_buffers[n]` 恒 `NULL`）也无地址，
+> 旧实现只能凭空造一条回退地址 ⇒ **静默给该 plane 编一页全 0xFF**（页缓冲 `memset 0xFF`、只填
+> 掩码内的 CW），调用者完全不知道。这条不变式此前**只在测试夹具里守着**
+> （`fc_test_common.c` 的 `test_cmd_build`），生产侧无守卫——`ftl_cmd_resolve_cw_bitmap` 只查
+> **越段**，部分位图对整段而言是"合法"的。
+>
+> 现在 `fc_build_request_data_planes` 对该组合**双档拦截**：debug 档 `ASSERT` 停机
+> （§24 判据 2 / §十三：配置错误 → 断言，不当返回码）；release 档 `ASSERT` 被裁空，故紧跟着
+> 返回 `FC_STATUS_INVALID_ARGUMENT`（新判据见 `assertion_guidelines.md` **§二十四 判据 9**：
+> 后果是**静默写坏介质**的配置错误，除 `ASSERT` 外必须再补一道运行期拒绝）——**命令被拒绝，绝不提交**。`fc_build_dispatch_request`
+> 返回 `FC_STATUS_INVALID_ARGUMENT`——**命令被拒绝，绝不提交**。`fc_build_dispatch_request`
+> 透传该状态，两条派发路径（`fc_poll_dispatch_single` / `fc_poll_dispatch_chain`）收到非 OK 就
+> 走 `fc_poll_fail_command` 注一条 `NAND_FAIL` 完成项（FTL 的 pending 照常释放，不会挂死）。
+> 这是 `fc_build_dispatch_request` **唯一**的失败出口（此前它标注为"构建不可失败"）。
+> 想只访问某个 plane ⇒ 用**单 plane op**（`multi_plane = 0`），其 plane 段
+> 就是 `pba_to_plane(cmd->pba)` 那一个，窄位图合法。
 
 #### v12：per-plane 行地址（Policy B）
 

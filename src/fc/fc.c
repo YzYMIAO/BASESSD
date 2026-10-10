@@ -1050,7 +1050,7 @@ stripe_error:
  * 失败兜底统一走 fc_poll_fail_command。
  *
  * 行为不对称（既有，勿统一）：
- *   - 链式路径 desc 链断裂时从循环体内直接返回，放弃整条链。
+ *   - 链式路径构建失败时从循环体内直接返回，放弃整条链。
  * ══════════════════════════════════════════════════════════ */
 
 /* --------------------------------------------------------------------
@@ -1076,6 +1076,7 @@ static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
  *   功能：沿 desc 链把 CW 落位到 request 的 cw_bitmap / cw_buffers[]（带数据命令专用）。
  *   参数：controller —— FC 控制器；command —— 命令；
  *         request —— 输出（header 已填、全零）。
+ *   返回：FC_STATUS_OK / FC_STATUS_INVALID_ARGUMENT（multi-plane 窄位图，见下）。
  *   实现要点：
  *     - 每个 desc 落位到 **flat 绝对 CW 号 n = plane*CW_NUM + cw** 那一格：
  *       置 request->cw_bitmap 的 bit n、写 request->cw_buffers[n]。落位顺序无关紧要
@@ -1084,9 +1085,11 @@ static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
  *     - 行地址不在这里逐 CW 存：它是 per-plane 的，由下面按 plane 集合填 plane_paa[]。
  *       每 plane 的行地址**取自链上该 plane 的第一条 desc**（链即真值，与 cw_bitmap 同源），
  *       而不是从 command->pba 复制——Policy B 下两个 plane 的 block/page 可以不同。
+ *     - **唯一的失败出口**：multi-plane 命令的 desc 链没覆盖 plane 段里的每一个 plane
+ *       （见分支内注释）。debug 档 ASSERT 停机，release 档返回 INVALID_ARGUMENT 拒绝。
  *     - 只由 fc_build_dispatch_request 的"带数据命令"分支调用。
  * -------------------------------------------------------------------- */
-static void fc_build_request_data_planes(const fc_t *controller, const fc_command_t *command, nand_dispatch_request_t *request)
+static fc_status_t fc_build_request_data_planes(const fc_t *controller, const fc_command_t *command, nand_dispatch_request_t *request)
 {
     fc_descriptor_id_t desc_id          = (fc_descriptor_id_t)command->desc_id;
     uint8_t            planes_with_desc = 0U; /* bit p = plane p 链上有 desc */
@@ -1139,17 +1142,46 @@ static void fc_build_request_data_planes(const fc_t *controller, const fc_comman
 
     if (command->config.multi_plane > 0U)
     {
-        uint8_t plane;
+        const uint8_t plane_count = (uint8_t)command->config.multi_plane;
+        const uint8_t all_planes  = (uint8_t)((1U << plane_count) - 1U);
+        uint8_t       plane;
 
-        request->plane_count = (uint8_t)command->config.multi_plane;
+        request->plane_count = plane_count;
         request->plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
+
+        /* 不变式：multi-plane 命令的 desc 链必须覆盖 plane 段 [0, plane_count) 里的
+         * **每一个** plane。违反 = 调用者的编程错误，按 §十三 判据一律 ASSERT（不当返回码
+         * 替代断言）；但 ASSERT 在 NDEBUG 下被裁空，故下面**再补一道 release 拒绝**。
+         *
+         * 为什么非炸不可：NAND 侧的多 plane handler **无条件遍历 PLANE_NUM** 下行地址，
+         * 既不看掩码也不看 plane_count（nand_dispatch_tables.c 的 req_multi_plane_{program,
+         * read,erase}），器件侧多 plane program 会把点名过的 plane **全部编程**。未覆盖的
+         * plane 既无数据（cw_buffers[n] 恒 NULL）也无地址，只能凭空造一个——写路径于是
+         * **静默**给该 plane 编一页全 0xFF（页缓冲 memset 0xFF、只填掩码内的 CW），
+         * 调用者完全不知道。
+         *
+         * 这条不变式此前只在测试夹具里守着（fc_test_common.c 的 test_cmd_build），生产侧
+         * 无守卫——ftl_cmd_resolve_cw_bitmap 只查**越段**，部分位图对整段而言是"合法"的。
+         * 生产路径不可达：FTL 唯一的多 plane 入口 ftl_cmd_setup_ppa_pair 自己传
+         * fc_command_plane_span_cw_bitmap() 的整段位图。踩进来 = 调用者直接调
+         * ftl_cmd_configure_descriptors(cmd, 部分位图) 配 multi_plane > 0。
+         * 想只访问某个 plane ⇒ 用**单 plane op**（multi_plane = 0），别用多 plane op 配窄位图。 */
+        ASSERT((planes_with_desc & all_planes) == all_planes);
+        /* release 侧**同步拒绝**（ASSERT 在 NDEBUG 下整条裁空）：宁可不发这条命令，也
+         * 不能让未覆盖 plane 的回退地址被凭空造出来、静默写进介质。走
+         * fc_poll_fail_command 注一条 NAND_FAIL 完成项，FTL 的 pending 照常释放
+         * （否则命令永不完成，表现为"挂死"，比报错更难查）。 */
+        if ((planes_with_desc & all_planes) != all_planes)
+        {
+            return FC_STATUS_INVALID_ARGUMENT;
+        }
+
         /* 行地址按 plane 逐个填（行地址只含 page/block/lun + plane 位，CW 位被
-         * paa_to_nand_row() 丢掉）：命令 plane 集合里**每个** plane 都要填，
-         * 即使它一个 CW 都没选中（如只读 plane1 = 0xF0）——多 plane uop 硬编码
-         * row[0]/row[1]，空 plane 不填会退化成 block0/page0，静默误操作。
-         * 有 desc 的 plane 取链上地址（Policy B：两 plane 可不同块）；空 plane 无从得知，
-         * 回退到 command->pba 的同页地址（= v11 及以前的行为）。 */
-        for (plane = 0U; plane < request->plane_count; plane++)
+         * paa_to_nand_row() 丢掉）：命令 plane 集合里每个 plane 都要填——空 plane 不填
+         * 会退化成 block0/page0，静默误操作。上面那条 ASSERT 已保证「每个 plane 都有
+         * desc」，故三元恒取 plane_row[plane]；else 支只在 NDEBUG 下可达，是**最后兜底**
+         * （回退到 command->pba 的同页地址 = v11 及以前的行为），生产不可达。 */
+        for (plane = 0U; plane < plane_count; plane++)
         {
             request->plane_paa[plane] =
                 ((planes_with_desc & (uint8_t)(1U << plane)) != 0U)
@@ -1171,6 +1203,8 @@ static void fc_build_request_data_planes(const fc_t *controller, const fc_comman
                ((paa_to_block(plane_row[request->plane]) == pba_to_block(command->pba)) &&
                 (paa_to_page(plane_row[request->plane]) == pba_to_page(command->pba))));
     }
+
+    return FC_STATUS_OK;
 }
 
 /* --------------------------------------------------------------------
@@ -1214,7 +1248,9 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
  *   功能：由一条已 ACTIVE 的命令构建自包含的 NAND dispatch 请求。
  *   参数：controller —— FC 控制器；command —— 命令；
  *         command_id —— 命令 ID；request —— 输出请求。
- *   返回：无（构建不可失败：desc 链遍历按池深截断，不产生错误路径）。
+ *   返回：FC_STATUS_OK / FC_STATUS_INVALID_ARGUMENT（multi-plane 窄位图——**唯一**的
+ *         失败出口，由 fc_build_request_data_planes 透传）。其余路径不可失败
+ *         （desc 链遍历按池深截断，不产生错误路径）。
  *   实现要点：
  *     - 填 ch/ce/lun/page_type/feature_addr，再按操作类型填 cw_bitmap / cw_buffers[] / plane_paa[]：
  *         * ERASE_BLOCK：只填 plane_paa[本 plane]，**不置掩码**（v28：擦除无逐 CW 数据，
@@ -1232,7 +1268,7 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
  *   注意：本函数不做 META 预填——buffer[0..3] 的 META 由
  *         fc_data_path_encode 的 Stage 0 写（两条派发路径都经 encode）。
  * -------------------------------------------------------------------- */
-static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, fc_command_id_t command_id, nand_dispatch_request_t *request)
+static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *command, fc_command_id_t command_id, nand_dispatch_request_t *request)
 {
     /* Pre-resolve descriptor-chain data into a self-contained dispatch request. */
     *request              = (nand_dispatch_request_t){0};
@@ -1289,7 +1325,13 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
     }
     else if (nand_operation_has_data((uint8_t)command->config.operation))
     {
-        fc_build_request_data_planes(controller, command, request);
+        const fc_status_t build_result = fc_build_request_data_planes(controller, command, request);
+        if (build_result != FC_STATUS_OK)
+        {
+            /* 唯一失败出口（multi-plane 窄位图）。request 只被写了一半，但调用者拿到
+             * 非 OK 就不会提交它——宁可不发，也不能让凭空造的回退地址写进介质。 */
+            return build_result;
+        }
     }
     else
     {
@@ -1303,6 +1345,8 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
 
     /* 读语义改写 + Phase V 拆分（顺序敏感，见 helper 头注释） */
     fc_dispatch_rewrite_operation(request);
+
+    return FC_STATUS_OK;
 }
 
 /* --------------------------------------------------------------------
@@ -1313,7 +1357,9 @@ static void fc_build_dispatch_request(fc_t *controller, fc_command_t *command, f
  *   实现要点：
  *     - page write 先 fc_data_path_encode（内含 Stage 0 写 META）。
  *     - raid=ENCODE 的 page write 走 fc_stripe_submit（Multi-Plane）。
- *     - 其余构建 request → nand_dispatch_submit；失败注 NAND_FAIL 完成。
+ *     - 其余构建 request → nand_dispatch_submit；**构建失败与 submit 失败同路兜底**
+ *       （注 NAND_FAIL 完成并返回 IO_ERROR）。构建失败只有 multi-plane 窄位图一种，
+ *       debug 档已在 fc_build_request_data_planes 的 ASSERT 处停机，此处只在 release 档可达。
  *     - 只负责占用目标 LUN；完成由后续 fc_service() 推进。
  *     - **运行时唯一活提交路径**（FTL 恒 chain=END，count 恒 1）。
  * -------------------------------------------------------------------- */
@@ -1347,7 +1393,18 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
     }
 #endif /* CONFIG_FC_RAID */
 
-    fc_build_dispatch_request(controller, command, command_id, &request);
+    const fc_status_t build_result = fc_build_dispatch_request(controller, command, command_id, &request);
+    if (build_result != FC_STATUS_OK)
+    {
+        /* 构建失败（multi-plane 窄位图）：debug 档上一条 ASSERT 已停机，这里只在 release
+         * 档可达——命令注 NAND_FAIL 完成项后了结，**绝不**把凭空造的回退地址提交给 NAND。 */
+        LOGW("fc: build request failed for op=%u cmd_id=%u status=%d\r\n",
+             (unsigned)command->config.operation,
+             (unsigned)command_id,
+             (int)build_result);
+        fc_poll_fail_command(controller, command_id);
+        return FC_STATUS_IO_ERROR;
+    }
 
     const uint8_t submit_result = nand_dispatch_submit(&request);
 
@@ -1386,6 +1443,7 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
     uint8_t                 chain_count = chain->count;
     nand_dispatch_request_t reqs[FC_SCHEDULER_CHAIN_MAX];
     uint8_t                 i;
+    uint8_t                 j;
 
     for (i = 0U; i < chain_count; i++)
     {
@@ -1405,7 +1463,22 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
             (void)fc_data_path_encode(command);
         }
 
-        fc_build_dispatch_request(controller, command, command_id, &reqs[i]);
+        const fc_status_t build_result = fc_build_dispatch_request(controller, command, command_id, &reqs[i]);
+        if (build_result != FC_STATUS_OK)
+        {
+            /* 构建失败（multi-plane 窄位图）→ 整链注 NAND_FAIL，与下面 submit 失败的兜底
+             * 口径一致：已置 ACTIVE 的前缀命令一并了结，不留半截链。 */
+            LOGW("fc: build request failed for cmd_id=%u (chain %u/%u) status=%d\r\n",
+                 (unsigned)command_id,
+                 (unsigned)i,
+                 (unsigned)chain_count,
+                 (int)build_result);
+            for (j = 0U; j < chain_count; j++)
+            {
+                fc_poll_fail_command(controller, chain->ids[j]);
+            }
+            return FC_STATUS_IO_ERROR;
+        }
     }
 
     const uint8_t submit_result = nand_dispatch_submit_chain(reqs, chain_count);

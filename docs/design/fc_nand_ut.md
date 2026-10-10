@@ -182,6 +182,9 @@ BCH 允许误纠（实测约 0.28% 返回 OK 但数据是错的），故**不钉
 （失败必须原子 / 纠正数不得超过 t）。`scramble_whiten` 的三种输入（全 0x00 / 全 0xFF / PAA 重复）
 走**同一组断言**，属迭代而非参数化；游程判据的**统计方法与概率依据**见 §5.6。
 
+> ⚠ `ecc_step` 全绿只说明**没复现出实现 bug**，不是「算法被证明没问题」——
+> 六处覆盖缺口与**四步提高计划**见 §5.7。
+
 > **参数化 vs 迭代的判据**（见 `assertion_guidelines.md` §二十三）：
 > **不同分支 / 不同期望 → 参数化**（每个 case 一次独立 setup/tear_down，运行器在测试名下打印 `case=…`）；
 > **同一断言、不同输入 → 迭代**（`--iterations N`，同一段代码多抽几次）。
@@ -690,6 +693,40 @@ MUNIT_PRINTF(1, 2) void test_trace_detail(const char *format, ...);   /* DEBUG�
 （「独立」）无法被任何有限个统计量完全覆盖。实际不影响正确性：加扰器输出是 LFSR 驱动的，
 `all-0x00` 那一路的输出就是裸 LFSR 序列（最大长度伪随机），**不是** `00110011…`。
 
+### 5.7 `ecc_step` 的覆盖边界与提高计划（v1.20）
+
+`ecc_step` 验的是 **BCH(m=13, t=4) 的实现**，不是「算法对不对」——后者是**代数保证**：t 纠错码的
+**设计距离** d ≥ 2t+1 = 9，故 ≤ t 个错的接收字落在**唯一**码字的 t 球内，译码结果唯一，**不需要测**。
+测试守的是实现——BM / Chien / Forney、位翻转落点、`errloc` 映射、parity 布局。这条不是空话：
+`fc_bch_engine.c:582-585` 就记着一个真实的坑（回代写成 `tmp = (tmp<<1)|bit` 会让 t=4 实际退化成 t=2）。
+
+在这个定位下，**当前形态全绿只应读作「在这些抽样下没复现出实现 bug」**。六处缺口：
+
+| # | 缺口 | 具体 |
+|---|---|---|
+| ① | **抽样非穷举** | 每 case 每轮只抽 **1 组**位置；空间 `C(4160,4) ≈ 10¹³` 量级 |
+| ② | **抽样有偏** | 单轮里 bit-within-byte 只覆盖少数偏移（实测只出现 `{0,1,2,5}`）⇒ 只错在 bit 7 的实现 bug 看不见 |
+| ③ | **`beyond-5` 不钉结果** | OK 分支只验 `ecc_bits ≤ 4`、**不验数据** ⇒ **误纠被测试容忍**，绿了也不说明「5 个错必被检出」 |
+| ④ | **parity 区是「软」的** | `p_k > 0` 时只比数据区 520B；解码器**刻意不回写** parity 字节（`fc_ldpc_engine.c:182` 只翻 `errloc < 4160`）⇒ parity 侧只由**计数**背书，没验它真被修好 |
+| ⑤ | **单一信道模型** | 只有「干净码字 + 均匀随机位错」，不含**突发 / 相关错**（真实介质错是相关的） |
+| ⑥ | **同源编解码** | `l2_ecc_cw_build` 用 `fc_data_path_ecc_encode` 造码字，与解码同族 ⇒ **共享约定的 bug 两边一起错仍能往返通过**，无独立参考向量 |
+
+> ⚠ 更要紧的一层：`beyond-5` 这类超能力场景下的**误纠**是 ECC **自己抓不到**的，要靠 Pass 3 的 CRC；
+> 而本工程 FTL 只判 `FC_CW_STATUS_NAND_FAIL`（见 `fc_nand_design.md` §8.2）⇒
+> **ECC 单测全绿 ≠ 主机读到的数据一定对**。
+
+**提高计划（四步，按性价比排序）**：
+
+| 步 | 动作 | 补哪个缺口 | 代价 |
+|---|---|---|---|
+| 1 | **定向补 case**：bit-within-byte 覆盖 `0..7` / 跨字节边界 / **突发错**（相邻位）/ t=4 全落 parity 区 / `errloc` 边界（bit 4159 / 4160 / 4207） | ②⑤ | 改 `l2_ecc_cases` 表 + 少量夹具；**抽样抽不到的边界直接穷举掉**，性价比最高 |
+| 2 | **`--iterations` 加量**：板子上 `test --iterations 200 /fc-nand/data_path/ecc_step` | ① | ≈0（该用例已是 `MUNIT_TEST_OPTION_NONE`） |
+| 3 | **已知答案向量（KAT）**：用**独立**实现（上游 Linux `bch.c` 的测试向量）比 parity 字节 | ⑥ | 需引一份外部向量表 |
+| 4 | **系统层**：把 CRC 判定接进 FTL | 「误纠到达主机」那一层 | ⚠ 在 `src/ftl/**`，**按硬规则暂不动** |
+
+> 本版**只记录，不改测试**：①②⑤ 的定向用例、③ 的 parity 回写语义、KAT 表都留待后续。
+> 其中 ④ 若要动，属 `fc_ldpc_engine.c` 的**契约变更**，不在测试层解决。
+
 ---
 
 ## 6. 注意事项
@@ -726,7 +763,9 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-10 | v1.21 | **Level 2 用例审查：12 个函数补注释 + multi-plane 窄位图的生产侧守卫**（见 `docs/changelog/fc_multiplane_narrow_bitmap_v39.md`）。① **注释**（纯注释、零逻辑改动）：`test_fc_level2.c` 给 `l2_verify_parity_nonzero`、五张场景表的 `*_case_find`、`test_crc_step_detect`、`test_ecc_step`、`test_encode`、`test_process_read_ok`、`do_raid_recover_test`、`test_raid_recover_no_random`、`test_cw_bitmap` 共 12 个此前无注释的函数补「功能 / 测什么 / 为什么这么判」。② `test_process_read_masked_chain` 的 ⚠ 注释更新：那条「multi-plane 必须逐 plane 覆盖」的约束**此前只在夹具里**，v39 起 `fc_build_request_data_planes` 也守同一不变式 ⇒ 生产侧不再是裸奔。③ **生产侧新守卫**（`src/fc/fc.c`，本套唯一被它影响的路径是**测试夹具已挡掉的**非法输入）：multi-plane 命令的 desc 链没覆盖 plane 段里每个 plane 时，debug 档 `ASSERT` 停机、release 档返回 `FC_STATUS_INVALID_ARGUMENT` 拒绝，经 `fc_build_dispatch_request`（`void` → `fc_status_t`）透传到两条派发路径，`fc_poll_fail_command` 注 `NAND_FAIL` 完成项。**断言与用例数不变（77）**。`make format-check` 过、`make clean && make tests` 0/0、链接 **219484 B**；release 档 100884 B（2 处**既有**告警，均不在改动文件内）；**上板未验**。⚠ 新守卫**无单测覆盖**（夹具 `test_cmd_build` 在上游就挡住了非法输入），是代码走查确认的 |
 | 2026-10-10 | v1.19 | **把「加扰 = 统计独立」的理论写入设计文档 + 注释代码（纯文档，无逻辑改动）**（见 `docs/changelog/fc_scrambler_theory_v37.md`）。背景：一次关于 `scramble_whiten` 输出的讨论暴露了「加扰 = 追求 `0101…` 均衡」的误解。① 主设计文档 `fc_nand_design.md` 新增 **§5.4「加扰的目标：统计独立」**——**条件** 1/2（独立）vs **无条件** 1/2（均衡）、三种序列对照、`段数 ≈ n/2` 与几何分布 `P(len=k)=2^-k` 的推导、`0101…` 为何对 NAND 有害（零结构 / CCI 最坏 / 与阵列物理周期谐振 ⇒ 系统性错误，ECC 怕系统性）。② 本文档新增 **§5.6「游程统计判据的理论依据」**——`l2_bit01_analyze` 的状态机（`cur` 从首位初始化 / 循环后补收尾 / `≥16` 钳位）、`段数 ≈ n/2`、判据 ② **双侧**（低了 = 强制交替 / 高了 = 长游程），以及判据 ①②③ 的**盲区**（`00110011…` 三条全过却仍是周期图案）。③ 注释：`test_fc_level2.c` 给 `l2_bit01_analyze` 补前导注释、给 `test_scramble_whiten` 补理论依据；`fc_random_engine.{c,h}` 点明「目标是独立，均衡只是副产品」。**不改断言、不改用例数（77）、不改任何 `src/**` 逻辑**（`fc_random_engine.c` 只动注释）。`make format-check` 过、`make clean && make tests` 0/0、链接 **219012 B**（与 v36 逐字节同）；**纯文档 + 注释，无需上板** |
+| 2026-10-10 | v1.20 | **`ecc_step` 的覆盖边界与提高计划（纯文档，只记录不改测试）**。背景：一次「这样是不是确认算法没问题」的追问。① 新增 **§5.7**——点明 `ecc_step` 验的是 BCH(m=13,t=4) 的**实现**而非「算法对不对」（后者是代数保证：设计距离 d ≥ 2t+1 = 9，≤ t 个错唯一可译，不需要测）；列**六处覆盖缺口**（① 抽样非穷举 ② 抽样有偏 ③ `beyond-5` 不钉结果且 OK 分支不验数据 ⇒ 误纠被容忍 ④ parity 区只由计数背书、解码器刻意不回写 ⑤ 单一信道模型无突发错 ⑥ 同源编解码无 KAT）；给出**四步提高计划**（定向补 case → `--iterations` 加量 → KAT → CRC 判定接进 FTL），并标明第 4 步在 `src/ftl/**`、按硬规则暂不动。② §2.2 的 `ecc_step` 段加指针。**不改任何断言、不改用例数（77）、不改 `src/**`** |
 | 2026-10-10 | v1.18 | **单测证据打印 + `feature_write_read` 改读-改-写回环**（见 `docs/changelog/fc_ut_evidence_trace_v36.md`）。① **证据打印**：新增 §5.5，`tests/unit/fc_test_common.{c,h}` 加 `test_trace_begin/summary(INFO)/detail(DEBUG)` 三个原语，**复用 munit fork 已有的 `test --log-visible info\|debug`**（框架侧只加 1 个只读访问器 `munit_log_visible()`，见 `munit_adapter.md` v1.4）；不走 `munit_logf`（每行加 `Info:文件:行号` 会把明细撑爆）而直接写 `MUNIT_OUTPUT_FILE`；可见性判断放最前 ⇒ **默认档输出逐字不变**；`test_trace_begin()` 的换行改**急切**，修掉 `init_sequence` 里 `[INF] nand: READ_ID` 粘在结果行上的既有缺陷（info/debug 档）。夹具 `test_prog_page` / `test_read_page` / `test_read_block_cache` / `verify_chain_paa` 带 DEBUG 明细，Level 3 九条自动获得逐页证据；Level 1 加 11 条摘要、Level 2 迁移既有 6 处 `munit_logf` + 给自证函数加摘要。② **`feature_write_read` 由「只 GET」改成回环**：Phase 1 只读手册 Table 13 的四个地址（`01h`/`80h`/`81h`/`90h`），Phase 2 在 **`01h`（Timing mode）** 上做读-改-写（Table 15 取值 `00h..05h`），还原的 SET 排在断言**之前**。⚠ 该用例第一版照抄 FTL `RR_FEATURE_READ_RETRY` 写 **`0x89`**——那是本器件的**保留地址**，上板直接红（`readback[0] == probe[0] (0 == 1)`）。③ `usart.c` 的 `test` 帮助串补 `--log-visible`。**生产代码 `src/**` 零改动**。断言与用例数不变（77）。`make format-check` 过、`make clean && make tests` 0/0、链接 **219012 B**；**上板已验**：默认/info/debug 三档各 **77/77**，回环 `原值 00 -> SET 01 -> GET 01 -> 还原 00` |
 | 2026-10-10 | v1.17 | **修 Level 3 两处 `cw_bitmap` 建链缺陷——v27 语义翻转的漏扫调用点**（见 `docs/changelog/fc_ut_level3_bitmap_v35.md`）。背景：v23~v26 的 `cw_bitmap == 0` = 「本 plane 段全部 CW」，v27 改为**字面位图**（0 = 空集）并加了两条断言（`ftl_cmd_resolve_cw_bitmap`），但**没回扫调用点**；受影响的 Level 3 自 v31 起只保证编译通过、从未上板，故潜伏至今。① `test_read_block_cache` 的 cache **START** 传 `0U` → 改 `test_plane_cw_bitmap(plane_bitmap)`：v31 注释「无数据阶段 ⇒ 无数据链」是错的——op 表里它的 `has_data = 1U`（与 `WITHOUT_DATA_OUT` 同口径，「加载型」也算占数据路径），而 `fc_command_validate` 断言「has_data ⇒ desc_id 有效」⇒ **必须建链**。② `block_random_data` 的随机列读位图 `1U << cw` → `1U << (plane * CW_NUM + cw)`：cw_bitmap 是 **flat 绝对编号**，plane 1 的 CW0 是 bit 4 不是 bit 0；plane=0 侥幸合法，参数化新增的 plane=1 用例才炸。③ `fc_test_common.h` §三 与 `test_fc_level3.c` 文件头的 `1U << cw` 写法一并改正。**生产代码 `src/**` 零改动**（两个 ASSERT 都是被测代码正确拦住了测试的错误）。用例数不变（77）。`make clean && make tests` 0/0、链接 **213156 B**；**上板已验：77/77 (100%) 全绿**——本套首次全套通过。另更正 v34 记录里「全套 FC UT 0 失败」一句（当时只单跑了 2 条用例） |
 | 2026-10-10 | v1.16 | **单测的 META 由「页索引（自造 LBA）」换成**页 PBA**（见 `docs/changelog/fc_ut_meta_pba_v34.md`）。① 夹具 `test_prog_page` / `test_read_cache_step` 的 meta 改 `pba_from_addr(本页地址)`；**`test_read_page` 加 `meta` 形参**（「命令声明自己期待读到哪一页」正是该 tag 的意义，故提到调用点可见；全仓仅两个调用点），`test_read_block` 内传本页 PBA。② `test_fc_level2.c` 的 `L2_META` 改 `pba_from_addr`（15 个使用点不动）；`test_scramble_whiten` 直接用 `addr` 的 PBA 并删掉 `& ~3`（该掩码原本为 `page << 2` 让出 plane/cw 位，PBA 自带低 3 位，理由消失）。③ `test_fc_level3.c` 的 `read_page_verify` / 两个内部搬移 op / `RANDOM_DATA_READ` 换 PBA；`internal_data_move` Step 5 读命令声明**源页 PBA**（见上）。④ **修既有 bug**：`process_read_mata_error` 原先用 `(TEST_PAGE + 1U) << CW_WIDTH`，`+4` 落在 `PLANE_CW_MASK` 的 **bit 2（plane 位）**，被 `lba_to_meta()` 掩掉重铸 ⇒ 断言恒不成立（上板必挂；v33 修好 CRC 后才跑得到这里）。改为篡改 block 维，宿主程序逐 CW 数值验证。**生产代码 `src/**` 零改动，FC/FTL 契约仍是 LBA**；`make clean && make tests` 0/0、链接 **213132 B**；**上板已验**（`process_read_mata_error` / `internal_data_move` 均过，全套 FC UT 0 失败） |

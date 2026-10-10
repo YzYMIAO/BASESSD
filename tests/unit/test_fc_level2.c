@@ -175,6 +175,10 @@ static void l2_verify_crc_written(const fc_command_t *cmd)
     }
 }
 
+/* ECC parity 区 [520,528) 必须**非全 0**——证明 Stage 2（ecc_encode）真写了它。
+ * 判据取"非全 0"而不是"等于某个期望值"：parity 是 BCH 生成多项式的余式，期望值得
+ * 另写一份编码器才算得出；而"整段全 0"正是"根本没编码"的指纹（未初始化 / 擦除态）。
+ * 哨兵思想与 meta / crc 两条一致，只是判据更弱——够用即可。 */
 static void l2_verify_parity_nonzero(const fc_command_t *cmd)
 {
     for (uint8_t i = 0U; i < test_cw_count(cmd); i++)
@@ -269,6 +273,9 @@ static MunitParameterEnum l2_crc_params[] = {
     {  NULL,              NULL},
 };
 
+/* 按 munit 的 `case` 形参名在场景表里查行；表外名字返回 NULL（调用者断言非 NULL）。
+ * 本文件五张场景表（crc / ecc / enc / rt / bm）各配一份同形 helper：munit 的 parameters
+ * 只传字符串，行索引靠名字查回来，避免"名字数组"与"场景表"两处错位。 */
 static const l2_crc_case_t *l2_crc_case_find(const char *name)
 {
     uint32_t i;
@@ -289,6 +296,18 @@ static const l2_crc_case_t *l2_crc_case_find(const char *name)
     return NULL;
 }
 
+/* ── 用例体：写 CRC → 自证干净 → 在场景区间注入 1 bit → 查判定 ──
+ *
+ * 四段：
+ *   ① 0xCC 铺满 528B 当残留哨兵——"没写到"与"写成了 0"才分得开
+ *   ② meta_write + 明文 USER + crc_write —— 只开 CRC，不调 scramble / ecc_encode
+ *   ③ **先自证**：未注入时 check 必须 == 1。否则下面那句"检出了"毫无意义
+ *   ④ 注入 1 bit，断言 check == c->expect_ok（user / crc-field 必检出，
+ *      meta / parity 必不检出，见场景表）；再翻回来断言必通过
+ *      —— 钉住"判定只看数据，不粘状态"
+ *
+ * 注入位置由框架 PRNG 在 c->lo..c->hi-1 内取（运行器打印 seed，失败可 --seed 原样重放）。
+ * 步骤级**不原地解码**，故直接翻回来即可，不依赖"解码不改 buffer"这类假设。 */
 static MunitResult test_crc_step_detect(const MunitParameter params[], void *data)
 {
     const l2_crc_case_t *c  = l2_crc_case_find(munit_parameters_get(params, "case"));
@@ -712,6 +731,7 @@ static MunitParameterEnum l2_ecc_params[] = {
     {  NULL,              NULL},
 };
 
+/* 场景表查行（同 l2_crc_case_find；表外名字返回 NULL，调用者断言非 NULL）。 */
 static const l2_ecc_case_t *l2_ecc_case_find(const char *name)
 {
     uint32_t i;
@@ -732,8 +752,24 @@ static const l2_ecc_case_t *l2_ecc_case_find(const char *name)
     return NULL;
 }
 
-/* 一个用例跑遍场景表：每组的 setup/tear_down 由运行器各跑一次，失败互不遮蔽。
- * ecc_bits 预置 0xAA 当哨兵——证明解码确实写了它，而不是"恰好为 0"。 */
+/* ── 用例体：造基准 → 注错 → 解码 → 判据 ──
+ *
+ * 四段（下面对应四处 ①②③④ 注释）：
+ *   ① l2_ecc_cw_build()          造一块"写路径形态"的干净 CW，另存一份基准 ref
+ *   ② l2_ecc_flip()              按场景表在指定 bit 区间翻 k 个**互不重复**的 bit
+ *   ③ fc_data_path_ecc_decode()  **被测函数**：唯一一次调用，之后 cw 就是"读回来"的样子
+ *   ④ 判据                       EXACT 逐字节回比 ref；BOUND 只钉两条不变式
+ *
+ * 三个 scratch 缓冲（test_cw_scratch，静态分配，用例之间不复用）：
+ *   cw  —— 工作副本，全程就地修改（注错 → 解码纠错）
+ *   ref —— 干净基准，只在 EXACT 判据里被读
+ *   inj —— 仅 BOUND 用：**注入后、解码前**的快照，用来验"失败必须原子"
+ *
+ * 一个用例跑遍场景表（`case` 参数选行）：每组一次独立的 setup/tear_down，失败互不遮蔽。
+ * ⚠ 运行器在**每条参数化用例**开头都用同一个 `runner->seed` 重置 PRNG（munit.c:774 / :1125）
+ *   ⇒ 本用例各 `case` 都从**同一段**随机流起抽 ⇒ 注入位置**逐 case 嵌套**（data-4 ⊇ data-3
+ *   ⊇ data-2，beyond-5 ⊇ data-4）。是"每次多一个错"的叠加，不是 N 组独立抽样。
+ * ecc_bits 预置 0xAA 当哨兵——证明解码**确实写了**它，而不是"恰好为 0"（哨兵取 0 就分不开）。 */
 static MunitResult test_ecc_step(const MunitParameter params[], void *data)
 {
     const l2_ecc_case_t *c        = l2_ecc_case_find(munit_parameters_get(params, "case"));
@@ -748,10 +784,15 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
 
     test_trace_begin();
 
-    munit_assert_true(c != NULL); /* --param case 传了表外的名字 */
-    total = c->d_k + c->p_k;
+    munit_assert_true(c != NULL); /* 只有 --param case 传了表外的名字才会是 NULL */
+    total = c->d_k + c->p_k;      /* 期望纠正数 = 数据区注入数 + parity 区注入数 */
 
+    /* ① 造干净码字（META + USER + CRC + ECC），ref 留一份基准副本 */
     l2_ecc_cw_build(cw, ref);
+
+    /* ② 注错。两段区间不重叠（数据区 [0,4160) / parity 区 [4160,4208)）。
+     *    ⚠ d_k == 0 的场景 d_lo/d_hi 是占位 0，必须靠 d_k 跳过——否则会把 0 当区间
+     *    传进 l2_ecc_flip，撞上它的 ASSERT(lo < hi)。 */
     if (c->d_k != 0U)
     {
         l2_ecc_flip(cw, c->d_lo, c->d_hi, c->d_k);
@@ -763,11 +804,14 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
 
     test_trace_summary("case=%s inject=%u", c->name, (unsigned)total);
 
+    /* BOUND 的"原子性"基准必须是**注入后**的状态：cw 本来就带 5 个错 bit，拿它跟干净的
+     * ref 比永远不等。EXACT 用不到 inj。 */
     if (c->expect == L2_ECC_BOUND)
     {
-        (void)memcpy(inj, cw, FC_BUFFER_POOL_CW_SIZE); /* 失败原子性的基准 = 解码前状态 */
+        (void)memcpy(inj, cw, FC_BUFFER_POOL_CW_SIZE);
     }
 
+    /* ③ 被测：唯一一次解码调用，就地纠错并回报纠正位数 */
     status = fc_data_path_ecc_decode(cw, &ecc_bits);
 
     if (c->expect == L2_ECC_BOUND)
@@ -775,7 +819,9 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
         /* 超能力：BCH 允许误纠 ⇒ 只钉两条**恒成立**的不变式，不钉结果。
          * ① 失败必须原子：IO_ERROR 时缓冲一字节不动（对照**注入后**快照 inj，
          *    **不是**干净码字 ref——cw 本来就带 5 个错 bit，跟 ref 比永远不等）、
-         *    且纠正数为 0（fc_ldpc_engine.c:168-171 在翻转循环**之前**就 return 了）。
+         *    且纠正数为 0——IO_ERROR 在翻转循环**之前**就 return（fc_ldpc_engine.c:168-170），
+         *    而 err_bits 早在 fc_ldpc_decode 入口就被置 0（fc_ldpc_engine.c:139）⇒
+         *    既没被写坏、也不是"没写"。
          * ② 纠正数不得超过 t=4：errloc[4] 定长，BM 至多 t 个根。 */
         if (status == FC_STATUS_IO_ERROR)
         {
@@ -790,6 +836,13 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
         return MUNIT_OK;
     }
 
+    /* ④b 能力内（k ≤ t=4）：必须**精确**纠正，三条一起钉——
+     *    · 状态 OK；
+     *    · 纠正数**恰好等于**注入数：多纠 = 纠到了没坏的位置，比漏纠更危险；
+     *    · 缓冲区逐字节回到基准（回比长度见下）。
+     * ⚠ 回比长度看 parity 有没有被动过：p_k == 0 ⇒ parity 是干净的，整块 528B 都要比；
+     *   p_k > 0 ⇒ 解码器只翻 errloc < 4160 的位（fc_ldpc_engine.c:182），parity 字节
+     *   **不回写**，只能比数据区 520B。 */
     munit_assert_int(status, ==, FC_STATUS_OK);
     munit_assert_uint8(ecc_bits, ==, (uint8_t)total);
     munit_assert_memory_equal((c->p_k == 0U) ? FC_BUFFER_POOL_CW_SIZE : FC_BUFFER_DATA_SIZE, cw, ref);
@@ -851,6 +904,7 @@ static MunitParameterEnum l2_enc_params[] = {
     {  NULL,              NULL},
 };
 
+/* 场景表查行（同 l2_crc_case_find；表外名字返回 NULL，调用者断言非 NULL）。 */
 static const l2_enc_case_t *l2_enc_case_find(const char *name)
 {
     uint32_t i;
@@ -871,6 +925,20 @@ static const l2_enc_case_t *l2_enc_case_find(const char *name)
     return NULL;
 }
 
+/* ── 用例体：建链 → 填明文 → encode → 自证编码产物 ──
+ *
+ * 只调 fc_data_path_encode，**不调 process_read**：本用例的靶子是"写路径真的按 config
+ * 位把该做的都做了"，往返正确性由 process_read_ok 负责，两处不重复。
+ *
+ * 判据两层：
+ *   ① l2_user_matches_source(enc) == c->expect_plain
+ *      random=ON ⇒ encode 后 USER 区**必须已不是明文**；random=OFF ⇒ 必须仍是明文。
+ *      这是**自证**：fixture 一旦退化（例如 seed 恒 0 使 keystream 整片为 0），
+ *      "encode 后 process_read 回到明文"这条往返恒等式会照样成立、把问题盖过去。
+ *   ② meta / crc / parity 三条产物自证（见文件头「产物自证」），分别钉 Stage 0 / 1 / 2
+ *      真写了各自的字段，而不是"恰好看不出来"。
+ *
+ * n_cw 一并钉住：建链几何错（多 / 少一条 desc）会先在这里露头。 */
 static MunitResult test_encode(const MunitParameter params[], void *data)
 {
     const l2_enc_case_t *c;
@@ -1003,6 +1071,7 @@ static MunitParameterEnum l2_rt_params[] = {
     {  NULL,             NULL},
 };
 
+/* 场景表查行（同 l2_crc_case_find；表外名字返回 NULL，调用者断言非 NULL）。 */
 static const l2_rt_case_t *l2_rt_case_find(const char *name)
 {
     uint32_t i;
@@ -1023,6 +1092,16 @@ static const l2_rt_case_t *l2_rt_case_find(const char *name)
     return NULL;
 }
 
+/* ── 用例体：正向往返（encode → process_read → 逐字节比对）──
+ *
+ * 断言全在 l2_buffer_round_trip 里：往返 USER 逐字节 == 源表、每个 CW **恰好** READY。
+ * 本函数只负责选行、把"证明了什么"打进证据摘要。
+ *
+ * 判据用 l2_verify_all_ready 而非夹具的 test_verify_cw_status_all_success：后者只看
+ * SUCCESS 位，而 FC_CW_STATUS_SUCCESS == FC_CW_STATUS_READY，CRC_ERROR / MATA_ERROR
+ * 会与它共存而不被发现 —— 正向用例要的是"一个错误位都没有"。
+ * ⚠ 全程**不提交**命令：提交后 FC 会自己再跑一遍 encode / process_read，重复编码会让
+ *   用例空转（见文件头「全部用例都是 buffer 级」）。 */
 static MunitResult test_process_read_ok(const MunitParameter params[], void *data)
 {
     const l2_rt_case_t *c = l2_rt_case_find(munit_parameters_get(params, "case"));
@@ -1097,7 +1176,9 @@ static MunitResult test_process_read_unc(const MunitParameter params[], void *da
  * 第 2 条 desc 会拿 cw=1 去算期望 META，假报 MATA_ERROR。
  * ⚠ 必须用**单 plane 段**（multi_plane=0，addr.plane=0）：掩码只覆盖 plane 0 时，
  *   multi-plane 写路径会给未覆盖的 plane 1 补一条同行回退地址、静默编一页全 0xFF。
- *   这条约束已由 test_cmd_build 的「multi-plane 必须逐 plane 覆盖」断言强制。 */
+ *   这条约束由 test_cmd_build 的「multi-plane 必须逐 plane 覆盖」断言强制；
+ *   v39 起 fc_build_request_data_planes 也守同一不变式（debug ASSERT + release 拒命令），
+ *   生产侧不再是裸奔。 */
 static MunitResult test_process_read_masked_chain(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1286,6 +1367,17 @@ static MunitResult test_process_read_ldpc_raw(const MunitParameter params[], voi
 
 #if CONFIG_FC_RAID
 
+/* 退化 stripe 的恢复流程（random=OFF 才成立，理由见上面的节头）：
+ *   ① 4 个 CW 的 USER 区各填**不同** pattern —— 相同 pattern 下"XOR 还原"与"根本没动"
+ *      分不开
+ *   ② encode —— META / CRC / ECC 都写齐（RAID XOR **不在** encode 里做，fc_data_path.c:191）
+ *   ③ 把 failed_idx 那条 CW 的**整 528B** 翻成 0xFF —— 远超 BCH 能力 ⇒ 必然不可纠，
+ *      保证走的是"XOR 重建"而不是"ECC 顺手纠回来"（后者会让用例假过）
+ *   ④ fc_data_path_raid_recover(cmd, failed_idx)：XOR 重建 → ECC 重试 → 解扰
+ *   ⑤ 断言**全部** CW 的 USER 区都回到各自 pattern —— 不只被救的那条：
+ *      "救回来了"与"没把别的 CW 弄坏"要一起成立
+ *
+ * 两个用例共用本函数，只差 random_mode / failed_idx。 */
 static void do_raid_recover_test(uint8_t random_mode, uint8_t failed_idx)
 {
     fc_command_t *cmd   = l2_cmd(L2_BM_PLANE0_ALL, L2_META, random_mode, FC_CRC_ENABLE);
@@ -1322,6 +1414,8 @@ static void do_raid_recover_test(uint8_t random_mode, uint8_t failed_idx)
     fc_command_release(cmd);
 }
 
+/* 退化 stripe 恢复：random=OFF（唯一成立的档，见节头）配 failed_idx = 1（中间那条 CW，
+ * 不是链首 / 链尾）。断言在 do_raid_recover_test 里。 */
 static MunitResult test_raid_recover_no_random(const MunitParameter params[], void *data)
 {
     (void)params;
@@ -1513,6 +1607,7 @@ static MunitParameterEnum l2_bm_params[] = {
     {  NULL,             NULL},
 };
 
+/* 场景表查行（同 l2_crc_case_find；表外名字返回 NULL，调用者断言非 NULL）。 */
 static const l2_bm_case_t *l2_bm_case_find(const char *name)
 {
     uint32_t i;
@@ -1533,6 +1628,22 @@ static const l2_bm_case_t *l2_bm_case_find(const char *name)
     return NULL;
 }
 
+/* ── 用例体：位图 → 实际 desc 链几何（建链层，不碰数据路径）──
+ *
+ * 用 test_cmd_build 直接建链（**不走 l2_cmd**——本用例要的正是 multi-plane 段），
+ * 再按**链序**把每条 desc 的 (plane, cw) 收出来，与场景表的期望数组逐条比。
+ *
+ * 钉三件事：
+ *   ① 位图是 **flat 绝对编号**（bit n = plane*CW_NUM + cw）。"plane1-only = 0xF0" 这一行
+ *      钉的就是"plane 1 的 CW0 是 bit 4 而不是 bit 0"——写成 0x0F 会越段。
+ *   ② 链序是 **plane-major**（同 plane 内 cw 升序），与场景表数组一一对应。
+ *   ③ `config.cw` **不回写**：v23 起它连建链都不参与，是纯残留字段 ⇒ 三条场景同判据 0。
+ *
+ * ⚠ 位图必须**显式**给（v27 起 0 是空集，不再展开）；multi-plane 行的位图必须**逐 plane
+ *   覆盖**，否则会被 test_cmd_build 的断言挡下——那正是"静默编程未覆盖 plane"的形态。
+ *
+ * 证据打印分两档（见 test_trace_summary / test_trace_detail）：摘要打位图 → desc 条数，
+ * detail 逐条打 (plane, cw)——flat 编号下 plane 1 的 CW0 是 bit 4 这件事，打出来才看得见。 */
 static MunitResult test_cw_bitmap(const MunitParameter params[], void *data)
 {
     const l2_bm_case_t *c;

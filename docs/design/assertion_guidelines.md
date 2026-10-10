@@ -857,3 +857,46 @@ FC 的 ERASE 分支给请求位图硬置一个 CW0 位，唯一目的是让 `com
 `test_fc_level3.c` 仍引用旧夹具符号而编不过（v27/v28/v29 共同的遗留中间态），上板未验。
 
 > 详见 `docs/changelog/fc_data_path_step_primitives_v29.md`。
+
+---
+
+## 二十四、v39：ASSERT 被 `NDEBUG` 裁空时——配置错误必须再补一道**运行期拒绝**（2026-10-10）
+
+判据 2 说「调用者已保证的前置条件转 `ASSERT`」。这条在**被断言路径的失败后果是崩溃 / 可检测错误**时
+是完备的：`NDEBUG` 下断言消失，代码继续跑，坏状态很快以别的方式暴露。但有一类配置错误**不**满足
+这个前提——违反之后程序**照常跑完、不报错、结果看不出来**，只是**悄悄写坏了介质**。对这类错误，
+只写 `ASSERT` 等于**在 release 档没有守卫**。
+
+> **判据 9：当配置错误的后果是**静默的数据 / 介质破坏**（不崩、不报错、上层无法检测）时，
+> 除了 debug 档的 `ASSERT`，**必须**紧跟一道 release 档的运行期拒绝
+> （`if (违反) return FC_STATUS_INVALID_ARGUMENT;`），由调用者转成命令失败。
+> 其余配置错误仍只写 `ASSERT`（判据 2 不变）。**
+
+**两档各管什么，不是二选一**：
+
+| 档 | 手段 | 给什么 |
+|---|---|---|
+| debug（`make tests`） | `ASSERT` | 最可定位的现场（判据 2 的理由不变）；板上任何误判停机而不是静默 |
+| release（`NDEBUG`） | 返回码拒绝 | 生产里「**宁可不发这条命令**」的出口 |
+
+拒绝**不是** `ASSERT` 的替代品——`ASSERT` 在 debug 档先停机，`return` 那行根本走不到；反过来，
+`return` 也换不来 debug 档的现场。**两条都要写。**
+
+**拒绝之后必须让调用链有个了结**：命令不能就这么丢掉。本工程的落地形态是
+`fc_poll_fail_command(controller, command_id)`——注一条 `NAND_FAIL` 完成项，FTL 的 pending 照常释放。
+不这么做的话，命令**永不完成**，上层表现为「挂死」，比报错难查得多。
+
+**首次应用（v39）**：`fc_build_request_data_planes` 的 multi-plane 窄位图检查
+（见 `fc_nand_design.md` §25.4 与 `docs/changelog/fc_multiplane_narrow_bitmap_v39.md`）。违反时
+NAND 侧多 plane handler 会**无条件遍历 `PLANE_NUM`** 下行地址，未覆盖的 plane 既无数据也无地址，
+旧实现凭空造一条回退地址 ⇒ **静默给该 plane 编一页全 0xFF**，调用者完全不知道。这正是判据 9 说的
+「静默写坏介质」。同时它让 `fc_build_dispatch_request` 从「构建不可失败」变成有**唯一**失败出口——
+函数头注释与两条派发路径的兜底注释都已同步。
+
+> **判据 10：被 `ASSERT` 守的变量，在 `NDEBUG` 下可能变成 unused——编译告警是唯一的信号。**
+> `ASSERT` 展开为空后，只为它服务的局部变量（如 `const uint8_t all_planes`）会留下
+> `unused variable` 告警。**release 档的告警要单独看一眼**：它同时是「这条断言在 release 下
+> 没有等价守卫」的提示。本仓已知一处：FTL 侧 `ftl_cmd_resolve_cw_bitmap` 的越段 `ASSERT`
+> （`assertion_guidelines.md` §十八）在 `NDEBUG` 下把 `allowed` 裁成 unused
+> （`src/ftl/ftl_fc_interface.c:32` 告警）⇒ **FTL 侧 release 档同样无守卫**。
+> 按硬规则本次**不动 `src/ftl/**`**，只记录。
