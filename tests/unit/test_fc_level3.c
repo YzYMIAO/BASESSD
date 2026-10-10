@@ -36,7 +36,8 @@
  *     「按掩码建整条链」，自 v13 起属 FTL）或建立在它之上的页 / block helper。
  *     ⚠ cw_bitmap 是**字面位图**（置 1 = 要访问该 CW，0 = 空集），v23~v26 的
  *       「0 = 本命令 plane 段内的全部 CW」重载已取消（v27）。凡"只要 1 条 desc"
- *       的用例必须显式给出该 CW 的位（如 1U << cw）；整段访问用
+ *       的用例必须显式给出该 CW 的位（flat 绝对编号：`1U << (plane * CW_NUM + cw)`，
+ *       不是 `1U << cw`）；整段访问用
  *       test_plane_cw_bitmap(plane_bitmap)。config.cw 自 v23 起不参与建链。
  *   - 释放只需 fc_command_release()（v16 起沿 desc 链把 desc + buffer 一起还池）
  *
@@ -892,13 +893,16 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             const uint8_t cw = sc->cws[ci];
 
             /* 随机列读：只抽 1 个 CW ⇒ cw_bitmap 必须是**被抽样那个 CW 的位**。
-             * ⚠ 这里曾经写死 0x01U（= 只取 CW0），而期望值按抽样 cw 算——因为
+             * ⚠ 位图是 flat 绝对编号（bit n = plane*CW_NUM + cw，v9/v27）——**plane 1 的
+             *   CW0 是 bit 4，不是 bit 0**。这里曾写 `1U << cw`（plane 盲）：plane=0 侥幸
+             *   正确，plane=1 时位落在段外，被 ftl_cmd_resolve_cw_bitmap 的越段断言当场挡下。
+             * ⚠ 更早还写死过 0x01U（= 只取 CW0），而期望值按抽样 cw 算——因为
              *   链是按掩码位枚举 cw 的（cmd->pba 的 cw 字段会被枚举值覆盖），
              *   于是 desc 落在 CW0、期望值取 CW1/CW3，两者对不上。
              *   旧 pattern 是 4 字节周期、cw*512 又是 4 的倍数 ⇒ 四个 CW 期望值
              *   完全相同，这条错误一直被掩盖（v22 changelog 记录过同类问题）。 */
             fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = block, .plane = plane, .page = page},
-                                               (uint32_t)1U << cw,
+                                               (uint32_t)1U << ((uint32_t)plane * CW_NUM + cw),
                                                (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page}),
                                                &L3_CONF(OP_RANDOM_DATA_READ, FC_CRC_ENABLE));
 

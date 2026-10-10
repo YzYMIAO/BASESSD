@@ -520,16 +520,22 @@ void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
     ASSERT(block_index < BLOCKS_PER_PLANE);
 
     /* ① START（00h-addr-30h）：把 page 0 载入 cache，**不输出数据**。
-     *    NAND 侧是 req_no_data（无数据阶段），FC 侧 OP_READ_PAGE_CACHE_START 不在 fc_is_page_read
-     *    里 ⇒ 不跑 process_read、不拷回。故 cw_bitmap = 0（无数据链）、meta 不参与。 */
+     *    NAND 侧数据阶段是 req_no_data、FC 侧 OP_READ_PAGE_CACHE_START 不在 fc_is_page_read
+     *    里 ⇒ 不跑 process_read、不拷回、meta 不参与（无 encode / 无 Pass 4）。
+     *    ⚠ 但它**必须建链**：g_nand_operation_map 里它的 has_data = 1U（「加载型」也算占数据
+     *    路径，与 WITHOUT_DATA_OUT 同口径），而 fc_command_validate 断言「has_data ⇒ desc_id 有效」。
+     *    所以 cw_bitmap 不能传 0——v27 起 0 是**空集**（不是"整段"），ftl_cmd_resolve_cw_bitmap
+     *    会当场 ASSERT。传本 plane 段的全位图，与写路径同口径；meta 仍给本页 PBA，
+     *    保持「meta 恒为页 PBA」这条无例外（值本身被忽略）。 */
     {
+        nand_addr_t         addr = {.block = block_index, .plane = test_first_plane(plane_bitmap), .page = 0U};
         fc_command_t       *cmd;
         fc_command_status_t completion;
 
         conf           = *config;
         conf.operation = (DWORD)OP_READ_PAGE_CACHE_START;
 
-        cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = 0U}, 0U, 0U, &conf);
+        cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&addr), &conf);
 
         completion = test_submit_wait(cmd);
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);

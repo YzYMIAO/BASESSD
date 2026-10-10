@@ -72,7 +72,8 @@
  * ftl_cmd_resolve_cw_bitmap 的越段断言当场炸，而不是静默访问错的 plane。
  *
  * 要访问**离散** CW（如 RANDOM_DATA_READ 只读某个 cw）的用例直接调 test_cmd_build，
- * 自己传 `(uint32_t)1U << cw`。
+ * 自己传该 CW 的 flat 绝对位 `(uint32_t)1U << ((uint32_t)plane * CW_NUM + cw)`
+ * （⚠ 不是 `1U << cw`——那是 plane 盲的，plane 1 会越段）。
  *
  * ══════════════════════════════════════════════════════════════════════
  *  四、源数据约定：每个 CW 的 USER 区 = 该 CW 自己的 PAA 重复 128 次
@@ -261,7 +262,8 @@ void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_co
  * test_read_block_cache：**不能**由 test_read_page 循环拼出——31h / 3Fh 无地址周期（设备自增），
  *   且 31h 输出的是**上一轮加载的页**，「命令地址 = 页、校验该页」的模型在此结构性不成立。
  *   故显式编排 START(p0) → SEQ ×(PAGES_PER_BLOCK-1) → LAST：
- *     · START（00h-addr-30h）把 page 0 载入 cache，**不输出数据**（cw_bitmap = 0，FC 不跑 process_read）；
+ *     · START（00h-addr-30h）把 page 0 载入 cache，**不输出数据**（FC 不跑 process_read），
+ *       但 op 表里 has_data = 1U ⇒ **仍要建链**（cw_bitmap = 本 plane 段全位图，不能传 0）；
  *     · 第 i 次 SEQ（i = 1..PAGES_PER_BLOCK-1）输出 page i-1、同时载入 page i ⇒ meta 取
  *       **page i-1 的 PBA**（真正输出的那页）；命令地址页号对设备无意义，传 0；
  *     · LAST（3Fh）输出 cache 里最后一页（PAGES_PER_BLOCK-1）。
