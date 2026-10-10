@@ -12,6 +12,8 @@ STM32H743_SRCS := \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal.c \
     $(STM32H743_DIR)/system_stm32h7xx.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_cortex.c \
+    $(STM32H743_HAL_SRC)/stm32h7xx_hal_crc.c \
+    $(STM32H743_HAL_SRC)/stm32h7xx_hal_crc_ex.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_dma.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_dma_ex.c \
     $(STM32H743_HAL_SRC)/stm32h7xx_hal_flash.c \

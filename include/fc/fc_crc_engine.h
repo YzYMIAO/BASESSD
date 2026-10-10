@@ -4,13 +4,15 @@
 #include <stdint.h>
 
 /*
- * CRC 引擎 - 使用 STM32H743 硬件 CRC 外设。
+ * CRC 引擎 - 使用 STM32H743 硬件 CRC 外设（经平台层 HAL 驱动封装）。
  *
  * CRC 覆盖范围：每个 CW 中 512 字节的 USER 数据区域（buffer offset 8..519）。
  * META 和 PARITY 不被 CRC 保护。
  *
  * 编码路径：先算 CRC 存到 buffer[4..8]，再走加扰 → ECC → RAID。
  * 解码路径：ECC → 解扰后，校验 CRC 与 buffer[4..8] 是否一致。
+ *
+ * 实现在 src/fc/fc_crc_engine.c；外设访问在 src/platform/stm32h743/crc.c。
  */
 
 /* CW 内各区域偏移/大小 */
@@ -25,20 +27,23 @@
 
 /**
  * @brief   初始化 STM32H743 CRC 硬件外设
- * @note    在 fc_init() 中调用一次
+ * @note    在 fc_init() 中调用一次。时钟使能与外设应答自检都在平台层，
+ *          自检不过一律 ASSERT（无静默降级路径）。
  */
 void fc_crc_init(void);
 
 /**
  * @brief   对 USER 数据（512 字节）计算 CRC-32
- * @param   user_data  指向 USER 数据的指针（buffer + 8），需 4 字节对齐
+ * @param   user_data  指向 USER 数据的指针（buffer + 8）
  * @return  CRC-32 值
+ * @note    user_data **必须 4 字节对齐**——硬性前置条件：硬件按 32 位字喂入，
+ *          HAL 直接按 uint32_t* 解引用。违反属未对齐访问。
  */
 uint32_t fc_crc_compute(const uint8_t *user_data);
 
 /**
  * @brief   校验 CRC：重算 USER 数据的 CRC 并与存储值比较
- * @param   user_data    指向 USER 数据的指针（buffer + 8）
+ * @param   user_data    指向 USER 数据的指针（buffer + 8），必须 4 字节对齐
  * @param   stored_crc   之前存储的 CRC 值（buffer[4..8] 读取）
  * @return  FC_CRC_RESULT_OK 或 FC_CRC_RESULT_ERROR
  */

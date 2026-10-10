@@ -1,0 +1,27 @@
+#ifndef PLATFORM_STM32H743_CRC_H
+#define PLATFORM_STM32H743_CRC_H
+
+#include <stdint.h>
+
+/*
+ * STM32H743 硬件 CRC 外设封装（走第三方 HAL 驱动）。
+ *
+ * 分层：本模块是唯一持有 CRC_HandleTypeDef、管时钟、做外设自检的地方；
+ * 上层（src/fc/fc_crc_engine.c）只决定「对哪段数据算、结果怎么判」。
+ *
+ * 刻意**不** include "sys.h"：唯一使用者 src/fc/fc_crc_engine.c 要保持零 HAL 依赖，
+ * 故本头只暴露两个裸类型签名，不泄漏任何 HAL 类型。
+ *
+ * 配置：IEEE 802.3 CRC-32 —— 默认多项式 0x04C11DB7、INIT 0xFFFFFFFF、
+ *       输入/输出均不反相、按 32 位字喂入。
+ */
+
+/* 初始化 CRC 外设（含时钟使能 + 外设应答自检）。
+ * 由 fc_init() 经 fc_crc_init() 调用一次。自检不过一律 ASSERT。 */
+void crc_init(void);
+
+/* 对 data 起 length_bytes 字节计算 CRC-32。
+ * 前置：data 非空、4 字节对齐；length_bytes 是 4 的倍数（违反一律 ASSERT）。 */
+uint32_t crc_compute(const uint8_t *data, uint32_t length_bytes);
+
+#endif /* PLATFORM_STM32H743_CRC_H */

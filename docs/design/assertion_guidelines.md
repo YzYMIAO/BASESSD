@@ -16,7 +16,7 @@
 
 3. **资源类结果保留返回码**
    池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、队列满背压（`QUEUE_FULL` / `IO_ERROR`）、`fc_command_alloc()` 返回 `NULL`、`mem_alloc` 返回 `NULL`、NAND 报告的错误——都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。
-   同理**运行时状态**保留返回码：`g_nand_dispatch_armed == 0U`（异步路径未放行）、`g_crc_ready == 0U`、`g_initialized == 0U`（惰性初始化未完成）、`ctx->active == 0U`、`fc_buffer_is_occupied(...) == 0U`（生命周期）、`map->uops == NULL`（操作表缺项）——这些是"此刻能不能做"，不是"调用者传错"。
+   同理**运行时状态**保留返回码：`g_nand_dispatch_armed == 0U`（异步路径未放行）、`g_initialized == 0U`（惰性初始化未完成）、`ctx->active == 0U`、`fc_buffer_is_occupied(...) == 0U`（生命周期）、`map->uops == NULL`（操作表缺项）——这些是"此刻能不能做"，不是"调用者传错"。（原条目还列了 `g_crc_ready == 0U`——**v33 起该标志随 CRC 改走 HAL 驱动整体删除**，CRC 自检失败转 `ASSERT`，不再有「静默降级」这条运行结果，见 `docs/changelog/fc_crc_hal_driver_v33.md`。）
 
 4. **单测固化为契约的守卫保留返回码**
    这是判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**。`tests/` 里拿**文档化合法输入**调内部函数验证行为（如 `test_rebuild.c` 的 `allocator_remove_from_free(..., 越界)` 是文档化的 no-op、`ftl_is_metadata_block(NULL,…)` 是文档化分类）的，按判据 1 保留返回码。
@@ -130,7 +130,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 | `fc_queue.c` 的 ~~`FC_COMMAND_ID_INVALID`~~ **（2026-10-08 撤销：入队 ID 由 FC 自铸，传哨兵是调用者 bug → `ASSERT`，见 §十五）** / `offset >= count` | 哨兵值域 |
 | `fc_command_alloc_internal` / `fc_descriptor_alloc_internal` 的池空 NULL | 资源类 |
 | ~~`fc_buffer_is_occupied(...) == 0U` / `fc_buffer_release` 未占用~~ **（2026-10-08 撤销：未占用 = 配置错误 → `ASSERT`，见 §十四）** | ~~生命周期状态~~ |
-| `g_nand_dispatch_armed == 0U` / `g_crc_ready == 0U` / `g_initialized == 0U` / `ctx->active == 0U` | 运行时状态 |
+| `g_nand_dispatch_armed == 0U` / `g_initialized == 0U` / `ctx->active == 0U`（~~`g_crc_ready == 0U`~~ 已于 v33 删除，见 `docs/changelog/fc_crc_hal_driver_v33.md`） | 运行时状态 |
 | `map->uops == NULL` / `nand_engine` 的 `handler == NULL` / UOP 无 END | 表完整性 |
 | `fc_ldpc_decode(..., err_bits)` 的 NULL（~~`fc_command_status_init(..., command)` / `pop_n(ids)`~~ 两函数已于 2026-10-08 整体删除，见 §十七） | 辨析 B 语义分支 |
 | desc 链遍历里带 `break` / `return 错误码` 的"链损坏"降级 | 降级语义（非纯 fence） |
