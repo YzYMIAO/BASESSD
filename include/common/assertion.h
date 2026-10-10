@@ -91,10 +91,15 @@ void assertion_platform_context(void);
  *
  * 说明：这套宏是测试语义——断言永远生效，失败即停机并保留现场。生产代码请用
  * ASSERT/ASSUME。刻意不提供 llong/ullong（"%ll" 在本平台不可用），64 位一律走
- * ASSERT_INT64 / ASSERT_UINT64。
+ * ASSERT_INT64 / ASSERT_UINT64（内部调 assertion_fail_{i,u}64）。
+ *
+ * 格式串限制（newlib-nano）：只允许长度修饰符 h/l/L 与转换字符 c d i n o p s u x X；
+ * hh/ll/j/z/t 会被当普通字符打出并错位可变参数（详见 tests/framework/munit.h 顶部）。
+ * 本平台 int32_t 即 long（用 %li/%lu）、size_t 即 unsigned int、char 无符号；
+ * 8/16 位提升后数值不变，去掉 hh/h 直接用 %i/%u。
  *
  * 浮点断言（ASSERT_FLOAT / ASSERT_DOUBLE / ASSERT_DOUBLE_EQUAL）依赖 printf 浮点
- * 支持；本工程未链接 _printf_float，故仅在明确启用浮点打印的构建里可用。
+ * 支持：本工程已在 config.mk 用 -Wl,--undefined=_printf_float 拉起 nano-vfprintf_float.o。
  */
 
 #define ASSERT_TRUE(expression)                                                 \
@@ -130,22 +135,22 @@ void assertion_platform_context(void);
 #define ASSERT_TYPE(T, fmt, a, op, b) \
     ASSERT_TYPE_FULL("", "", T, fmt, a, op, b)
 
-#define ASSERT_CHAR(a, op, b)   ASSERT_TYPE_FULL("'\\x", "'", char, "02hhx", a, op, b)
-#define ASSERT_UCHAR(a, op, b)  ASSERT_TYPE_FULL("'\\x", "'", unsigned char, "02hhx", a, op, b)
-#define ASSERT_SHORT(a, op, b)  ASSERT_TYPE(short, "hd", a, op, b)
-#define ASSERT_USHORT(a, op, b) ASSERT_TYPE(unsigned short, "hu", a, op, b)
+#define ASSERT_CHAR(a, op, b)   ASSERT_TYPE_FULL("'\\x", "'", char, "02x", a, op, b)
+#define ASSERT_UCHAR(a, op, b)  ASSERT_TYPE_FULL("'\\x", "'", unsigned char, "02x", a, op, b)
+#define ASSERT_SHORT(a, op, b)  ASSERT_TYPE(short, "d", a, op, b)
+#define ASSERT_USHORT(a, op, b) ASSERT_TYPE(unsigned short, "u", a, op, b)
 #define ASSERT_INT(a, op, b)    ASSERT_TYPE(int, "d", a, op, b)
 #define ASSERT_UINT(a, op, b)   ASSERT_TYPE(unsigned int, "u", a, op, b)
 #define ASSERT_LONG(a, op, b)   ASSERT_TYPE(long int, "ld", a, op, b)
 #define ASSERT_ULONG(a, op, b)  ASSERT_TYPE(unsigned long int, "lu", a, op, b)
-#define ASSERT_SIZE(a, op, b)   ASSERT_TYPE(size_t, "zu", a, op, b)
+#define ASSERT_SIZE(a, op, b)   ASSERT_TYPE(size_t, "u", a, op, b)
 
-#define ASSERT_INT8(a, op, b)   ASSERT_TYPE(int8_t, PRIi8, a, op, b)
-#define ASSERT_UINT8(a, op, b)  ASSERT_TYPE(uint8_t, PRIu8, a, op, b)
-#define ASSERT_INT16(a, op, b)  ASSERT_TYPE(int16_t, PRIi16, a, op, b)
-#define ASSERT_UINT16(a, op, b) ASSERT_TYPE(uint16_t, PRIu16, a, op, b)
-#define ASSERT_INT32(a, op, b)  ASSERT_TYPE(int32_t, PRIi32, a, op, b)
-#define ASSERT_UINT32(a, op, b) ASSERT_TYPE(uint32_t, PRIu32, a, op, b)
+#define ASSERT_INT8(a, op, b)   ASSERT_TYPE(int8_t, "i", a, op, b)
+#define ASSERT_UINT8(a, op, b)  ASSERT_TYPE(uint8_t, "u", a, op, b)
+#define ASSERT_INT16(a, op, b)  ASSERT_TYPE(int16_t, "i", a, op, b)
+#define ASSERT_UINT16(a, op, b) ASSERT_TYPE(uint16_t, "u", a, op, b)
+#define ASSERT_INT32(a, op, b)  ASSERT_TYPE(int32_t, "li", a, op, b)
+#define ASSERT_UINT32(a, op, b) ASSERT_TYPE(uint32_t, "lu", a, op, b)
 
 #define ASSERT_INT64(a, op, b)                                                                       \
     do                                                                                               \
@@ -214,36 +219,36 @@ void assertion_platform_context(void);
         }                                                                                                                          \
     } while (0)
 
-#define ASSERT_MEMORY_EQUAL(size, a, b)                                                                                \
-    do                                                                                                                 \
-    {                                                                                                                  \
-        const unsigned char *assertion_tmp_a_    = (const unsigned char *)(a);                                         \
-        const unsigned char *assertion_tmp_b_    = (const unsigned char *)(b);                                         \
-        const size_t         assertion_tmp_size_ = (size);                                                             \
-        if (ASSERT_UNLIKELY(memcmp(assertion_tmp_a_, assertion_tmp_b_, assertion_tmp_size_) != 0))                     \
-        {                                                                                                              \
-            size_t assertion_tmp_pos_;                                                                                 \
-            for (assertion_tmp_pos_ = 0; assertion_tmp_pos_ < assertion_tmp_size_; assertion_tmp_pos_++)               \
-            {                                                                                                          \
-                if (assertion_tmp_a_[assertion_tmp_pos_] != assertion_tmp_b_[assertion_tmp_pos_])                      \
-                {                                                                                                      \
-                    assertion_failf(__FILE__, __LINE__, "memory %s == %s, at offset %zu", #a, #b, assertion_tmp_pos_); \
-                    break;                                                                                             \
-                }                                                                                                      \
-            }                                                                                                          \
-        }                                                                                                              \
+#define ASSERT_MEMORY_EQUAL(size, a, b)                                                                               \
+    do                                                                                                                \
+    {                                                                                                                 \
+        const unsigned char *assertion_tmp_a_    = (const unsigned char *)(a);                                        \
+        const unsigned char *assertion_tmp_b_    = (const unsigned char *)(b);                                        \
+        const size_t         assertion_tmp_size_ = (size);                                                            \
+        if (ASSERT_UNLIKELY(memcmp(assertion_tmp_a_, assertion_tmp_b_, assertion_tmp_size_) != 0))                    \
+        {                                                                                                             \
+            size_t assertion_tmp_pos_;                                                                                \
+            for (assertion_tmp_pos_ = 0; assertion_tmp_pos_ < assertion_tmp_size_; assertion_tmp_pos_++)              \
+            {                                                                                                         \
+                if (assertion_tmp_a_[assertion_tmp_pos_] != assertion_tmp_b_[assertion_tmp_pos_])                     \
+                {                                                                                                     \
+                    assertion_failf(__FILE__, __LINE__, "memory %s == %s, at offset %u", #a, #b, assertion_tmp_pos_); \
+                    break;                                                                                            \
+                }                                                                                                     \
+            }                                                                                                         \
+        }                                                                                                             \
     } while (0)
 
-#define ASSERT_MEMORY_NOT_EQUAL(size, a, b)                                                                  \
-    do                                                                                                       \
-    {                                                                                                        \
-        const unsigned char *assertion_tmp_a_    = (const unsigned char *)(a);                               \
-        const unsigned char *assertion_tmp_b_    = (const unsigned char *)(b);                               \
-        const size_t         assertion_tmp_size_ = (size);                                                   \
-        if (ASSERT_UNLIKELY(memcmp(assertion_tmp_a_, assertion_tmp_b_, assertion_tmp_size_) == 0))           \
-        {                                                                                                    \
-            assertion_failf(__FILE__, __LINE__, "memory %s != %s (%zu bytes)", #a, #b, assertion_tmp_size_); \
-        }                                                                                                    \
+#define ASSERT_MEMORY_NOT_EQUAL(size, a, b)                                                                 \
+    do                                                                                                      \
+    {                                                                                                       \
+        const unsigned char *assertion_tmp_a_    = (const unsigned char *)(a);                              \
+        const unsigned char *assertion_tmp_b_    = (const unsigned char *)(b);                              \
+        const size_t         assertion_tmp_size_ = (size);                                                  \
+        if (ASSERT_UNLIKELY(memcmp(assertion_tmp_a_, assertion_tmp_b_, assertion_tmp_size_) == 0))          \
+        {                                                                                                   \
+            assertion_failf(__FILE__, __LINE__, "memory %s != %s (%u bytes)", #a, #b, assertion_tmp_size_); \
+        }                                                                                                   \
     } while (0)
 
 #endif /* ASSERTION_H */
