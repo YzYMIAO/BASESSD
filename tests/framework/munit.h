@@ -52,6 +52,11 @@ void munit_logf_ex(MunitLogLevel level, const char *filename, int line, const ch
 #define munit_logf(level, format, ...) \
     munit_logf_ex(level, __FILE__, __LINE__, format, __VA_ARGS__)
 
+/* 该等级当前是否会被 munit_logf 输出（即 >= 当前的 --log-visible）。
+ * 供测试夹具复用同一个开关来打印自己的输出，而不必走 munit_logf——
+ * munit_logf 会给每行都加 "Info:文件:行号" 前缀，逐页明细会被撑得过长。 */
+bool munit_log_visible(MunitLogLevel level);
+
 /* 构建一个只打印指定等级和字符串信息的日志函数 */
 #define munit_log(level, msg) \
     munit_logf(level, "%s", msg)

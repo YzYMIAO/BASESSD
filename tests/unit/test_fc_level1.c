@@ -10,8 +10,9 @@
  *   Part 2b fc_completion_queue  —— CQ 环形 FIFO：初始化 / 顺序 / 满
  *   Part 3  fc_scheduler         —— init 绑定 SQ/HSQ
  *
- * 唯一链接依赖：g_nand_operation_map（.rodata, onfi_1_0.o）——经 fc_command_validate()
- * 的 nand_operation_has_data() 宏引用。
+ * 链接依赖：g_nand_operation_map（.rodata, onfi_1_0.o）——经 fc_command_validate()
+ * 的 nand_operation_has_data() 宏引用；以及 fc_test_common.o 的证据打印原语
+ * test_trace_*（`--log-visible info|debug` 才输出，默认零字节）。
  *
  * 历史注（v8 / v13 / v15 / v20 / 2026-10-08）：
  *   - 调度器的选择逻辑（HSQ 优先 / 按 LUN 保序 / 链打包 / per-LUN FIFO 挂起）
@@ -32,6 +33,7 @@
 #include "fc/fc_command.h"
 #include "fc/fc_queue.h"
 #include "fc/fc_scheduler.h"
+#include "fc_test_common.h" /* 只为证据打印原语 test_trace_*（本文件不碰 NAND / 池） */
 #include "munit.h"
 #include "nand/onfi_1_0.h"
 
@@ -65,6 +67,8 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
 
     fc_command_t cmd = {0};
 
+    test_trace_begin();
+
     /* 合法 OP：0 .. OP_COUNT-1 恒 OK（非法 OP 现由 ASSERT 拦截，不再是返回码） */
     for (uint8_t op = 0U; op < OP_COUNT; op++)
     {
@@ -72,6 +76,10 @@ static MunitResult test_command_validate_op_range(const MunitParameter params[],
         cmd.desc_id          = 0U;
         munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_OK);
     }
+
+    /* 证据（--log-visible info）：遍历范围本身就是判据——按 operation 分类的那条断言
+     * 只有走遍全部 op 才覆盖得到分类边界。 */
+    test_trace_summary("validate: op 0..%u 全部放行（desc_id=0 合法）", (unsigned)(OP_COUNT - 1U));
 
     return MUNIT_OK;
 }
@@ -95,6 +103,8 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
 
     fc_command_t cmd = {0};
 
+    test_trace_begin();
+
     cmd.desc_id = FC_DESCRIPTOR_ID_INVALID;
 
     cmd.config.operation = OP_SET_FEATURES;
@@ -102,6 +112,10 @@ static MunitResult test_command_validate_set_get_no_desc(const MunitParameter pa
 
     cmd.config.operation = OP_GET_FEATURES;
     munit_assert_int(fc_command_validate(&cmd), ==, FC_STATUS_OK);
+
+    /* 证据（--log-visible info）：desc_id=INVALID 是这条用例的关键输入。 */
+    test_trace_summary("validate: SET/GET_FEATURES 在 desc_id=INVALID（0x%X）时仍放行——数据走 param 内联段",
+                       (unsigned)FC_DESCRIPTOR_ID_INVALID);
 
     return MUNIT_OK;
 }
@@ -133,6 +147,8 @@ static MunitResult test_queue_push_pop(const MunitParameter params[], void *data
     (void)params;
     (void)data;
 
+    test_trace_begin();
+
     fc_command_id_t       storage[TEST_Q_DEPTH];
     fc_submission_queue_t q;
     fc_command_id_t       val;
@@ -151,6 +167,9 @@ static MunitResult test_queue_push_pop(const MunitParameter params[], void *data
     munit_assert_uint32(val, ==, 0x03U);
 
     munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_QUEUE_EMPTY);
+
+    /* 证据（--log-visible info）：顺序是队列最核心的契约——错了不崩、只错数据。 */
+    test_trace_summary("SQ push 0x01/0x02/0x03 -> pop 顺序一致 -> 第 4 次 QUEUE_EMPTY (depth=%u)", (unsigned)TEST_Q_DEPTH);
 
     return MUNIT_OK;
 }
@@ -171,6 +190,8 @@ static MunitResult test_queue_wrap_around(const MunitParameter params[], void *d
 {
     (void)params;
     (void)data;
+
+    test_trace_begin();
 
     fc_command_id_t       storage[TEST_Q_DEPTH];
     fc_submission_queue_t q;
@@ -199,6 +220,9 @@ static MunitResult test_queue_wrap_around(const MunitParameter params[], void *d
     munit_assert_uint32(val, ==, 0xAAU);
     munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_QUEUE_EMPTY);
 
+    /* 证据（--log-visible info）：head=1 / tail=0 把两处回绕算术同时摆在环的两侧。 */
+    test_trace_summary("SQ 回绕: head=1 tail=0 -> 0x11..0x17, 0xAA -> EMPTY (depth=%u)", (unsigned)TEST_Q_DEPTH);
+
     return MUNIT_OK;
 }
 
@@ -215,6 +239,8 @@ static MunitResult test_queue_overflow(const MunitParameter params[], void *data
 {
     (void)params;
     (void)data;
+
+    test_trace_begin();
 
     fc_command_id_t       storage[TEST_Q_DEPTH];
     fc_submission_queue_t q;
@@ -233,6 +259,10 @@ static MunitResult test_queue_overflow(const MunitParameter params[], void *data
     fc_command_id_t val;
     munit_assert_int(fc_submission_queue_pop(&q, &val), ==, FC_STATUS_OK);
     munit_assert_int(fc_submission_queue_push(&q, 0xFFU), ==, FC_STATUS_OK);
+
+    /* 证据（--log-visible info）：后半段「pop 后恢复可用」才是重点——只测前半段的话，
+     * count 没回退、或满判定写成 head == tail 的实现都能蒙混过关。 */
+    test_trace_summary("SQ 满 %u 条 -> push QUEUE_FULL -> pop 1 条 -> push 恢复 OK", (unsigned)TEST_Q_DEPTH);
 
     return MUNIT_OK;
 }
@@ -253,6 +283,8 @@ static MunitResult test_queue_peek(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
+    test_trace_begin();
+
     fc_command_id_t       storage[TEST_Q_DEPTH];
     fc_submission_queue_t q;
 
@@ -266,6 +298,10 @@ static MunitResult test_queue_peek(const MunitParameter params[], void *data)
     munit_assert_uint32(fc_submission_queue_peek(&q, 0U), ==, 0x01U);
     munit_assert_uint32(fc_submission_queue_peek(&q, 1U), ==, 0x02U);
     munit_assert_uint32(fc_submission_queue_peek(&q, 2U), ==, 0x03U);
+
+    /* 证据（--log-visible info）：peek(0) 连查两次结果相同 ⇒ 证明它**没有**推进 head
+     * （否则调用方每探一次就吃掉一条命令）。 */
+    test_trace_summary("SQ peek: 0->0x01（连查两次不变）, 1->0x02, 2->0x03；队列未被消耗");
 
     return MUNIT_OK;
 }
@@ -285,11 +321,16 @@ static MunitResult test_queue_peek_empty(const MunitParameter params[], void *da
     (void)params;
     (void)data;
 
+    test_trace_begin();
+
     fc_command_id_t       storage[TEST_Q_DEPTH];
     fc_submission_queue_t q;
 
     munit_assert_int(fc_submission_queue_init(&q, storage, TEST_Q_DEPTH), ==, FC_STATUS_OK);
     munit_assert_uint32(fc_submission_queue_peek(&q, 0U), ==, FC_COMMAND_ID_INVALID);
+
+    /* 证据（--log-visible info）：fc.c 链打包正是靠这个哨兵判链尾。 */
+    test_trace_summary("SQ 空队列 peek(0) -> FC_COMMAND_ID_INVALID (0x%X)", (unsigned)FC_COMMAND_ID_INVALID);
 
     return MUNIT_OK;
 }
@@ -318,12 +359,17 @@ static MunitResult test_cqueue_init(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
+    test_trace_begin();
+
     fc_command_status_t   storage[TEST_CQ_DEPTH];
     fc_completion_queue_t q;
 
     munit_assert_int(fc_completion_queue_init(&q, storage, TEST_CQ_DEPTH), ==, FC_STATUS_OK);
     munit_assert_uint32(q.depth, ==, TEST_CQ_DEPTH);
     munit_assert_uint32(q.count, ==, 0U);
+
+    /* 证据（--log-visible info）：init 漏清零会让「满/空」判定从一开始就错。 */
+    test_trace_summary("CQ init: depth=%u count=%u", (unsigned)q.depth, (unsigned)q.count);
 
     return MUNIT_OK;
 }
@@ -342,6 +388,8 @@ static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *dat
 {
     (void)params;
     (void)data;
+
+    test_trace_begin();
 
     fc_command_status_t   storage[TEST_CQ_DEPTH];
     fc_completion_queue_t q;
@@ -365,6 +413,10 @@ static MunitResult test_cqueue_push_pop(const MunitParameter params[], void *dat
 
     munit_assert_int(fc_completion_queue_pop(&q, &popped), ==, FC_STATUS_QUEUE_EMPTY);
 
+    /* 证据（--log-visible info）：CQ 存整项而非句柄，用两个不同 command_id 区分
+     * ⇒ 顺序错或拷贝错立刻可见。 */
+    test_trace_summary("CQ push 0x01/0x02（整项拷贝）-> pop 顺序一致 -> EMPTY (depth=%u)", (unsigned)TEST_CQ_DEPTH);
+
     return MUNIT_OK;
 }
 
@@ -381,6 +433,8 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
 {
     (void)params;
     (void)data;
+
+    test_trace_begin();
 
     fc_command_status_t   storage[TEST_CQ_DEPTH];
     fc_completion_queue_t q;
@@ -399,6 +453,10 @@ static MunitResult test_cqueue_overflow(const MunitParameter params[], void *dat
 
     entry.command_id = 0xFFU;
     munit_assert_int(fc_completion_queue_push(&q, &entry), ==, FC_STATUS_QUEUE_FULL);
+
+    /* 证据（--log-visible info）：CQ 满在 fc_complete_from_nand() 里是 fatal
+     * （完成项丢了 FTL 就再也等不到）⇒「满了必须拒绝而不是覆盖」是硬契约。 */
+    test_trace_summary("CQ 满 %u 条 -> push QUEUE_FULL（拒绝而非覆盖队头）", (unsigned)TEST_CQ_DEPTH);
 
     return MUNIT_OK;
 }
@@ -430,6 +488,8 @@ static MunitResult test_scheduler_init(const MunitParameter params[], void *data
     (void)params;
     (void)data;
 
+    test_trace_begin();
+
     fc_command_id_t       sq_storage[SCHED_Q_DEPTH];
     fc_command_id_t       hsq_storage[SCHED_Q_DEPTH];
     fc_submission_queue_t sq, hsq;
@@ -442,6 +502,9 @@ static MunitResult test_scheduler_init(const MunitParameter params[], void *data
 
     munit_assert_ptr_equal(scheduler.sq, &sq);
     munit_assert_ptr_equal(scheduler.hsq, &hsq);
+
+    /* 证据（--log-visible info）：断言的是**指针相等**——契约是「不复制队列、只持引用」。 */
+    test_trace_summary("scheduler init: sq=%p hsq=%p（持有引用，不拷贝；depth=%u）", (void *)scheduler.sq, (void *)scheduler.hsq, (unsigned)SCHED_Q_DEPTH);
 
     return MUNIT_OK;
 }

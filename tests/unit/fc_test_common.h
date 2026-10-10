@@ -221,6 +221,9 @@ uint32_t test_plane_cw_bitmap(uint8_t plane_bitmap);
  * plane_bitmap 必须非 0（不可达时返回 0）。 */
 uint8_t test_first_plane(uint8_t plane_bitmap);
 
+/* plane_bitmap 里被选中的 plane 个数（1 或 PLANE_NUM）——算「本次覆盖多少字节」用。 */
+uint8_t test_plane_count(uint8_t plane_bitmap);
+
 /* 提交 + 轮询到完成，**命令仍归调用者**（返回 CQ 完成项）。
  * 用毕调用者自己 fc_command_release()——本函数不释放。 */
 fc_command_status_t test_submit_wait(fc_command_t *cmd);
@@ -303,5 +306,39 @@ uint8_t          test_cw_count(const fc_command_t *cmd);             /* 链长 *
 uint8_t          test_collect_chain(const fc_command_t *cmd, uint8_t *plane_out, uint8_t *cw_out);
 uint32_t         test_cw_seed(const fc_command_t *cmd, uint8_t idx); /* 该 CW 的加扰种子（= META 派生） */
 uint8_t          test_check_pattern(const uint8_t *buffer, uint16_t length, uint8_t pattern);
+
+/* ── 证据打印（evidence logging）──
+ *
+ * 单测只报 [ OK ] 时看不出「到底证明了什么」。这三个原语把用例**断言所依据的量**
+ * 打出来（页数、字节数、坐标、位图、实读到的 ID 字节……），于是绿灯本身可被核对。
+ *
+ * 开关复用 munit 的 `--log-visible`，**默认（error）一个字节都不输出**，报告格式不变：
+ *     test --log-visible info  /fc-nand/    → 每条用例 1-3 行摘要
+ *     test --log-visible debug /fc-nand/    → 再加逐页 / 逐 CW 明细
+ *
+ *   test_trace_begin()   —— **每个用例开头调一次**：证据档下立刻给 munit 那条没有换行的
+ *                           前缀行收尾（用例体内可能先冒出项目自己的 LOGI，如 nand 驱动的
+ *                           READ_ID 行）；默认档一个字节都不发。忘了调只是首行粘在补齐的
+ *                           前缀后面，不会出错。
+ *   test_trace_summary() —— MUNIT_LOG_INFO：这条用例证明了什么（汇总量）。
+ *   test_trace_detail()  —— MUNIT_LOG_DEBUG：逐页 / 逐 CW 明细。
+ *
+ * ⚠ 消息自带换行与 `[EV] ` 前缀，**调用者不要自己加 \n**。
+ * ⚠ 该 fork 关掉了 fork、无 stderr 捕获（munit.c），故用例内的输出立刻到 UART。
+ * ⚠ 证据打印走**阻塞式** UART（uart_log_write 环满自旋）⇒ 开了 debug 档后
+ *   `[ N ms ]` 的计时含 TX 时间，不可再当性能基线。
+ * ⚠ 整套跑 debug 时输出 ≈ 290 KB，链路（115200 8N1 ≈ 11.5 KB/s）被打满 ⇒ 整轮 25 s
+ *   几乎全是 TX。此时**上位机日志里会出现周期性折行**（约每 4 KB 一次，实测 0/1/80 次
+ *   对应 default/info/debug 三档）：**内容不丢**，被折断的行在下一行续完。读日志时别
+ *   把这种折行当成截断；要看明细请单跑一条用例
+ *   （`test --log-visible debug /fc-nand/lifecycle/block_write_read`）。 */
+
+void test_trace_begin(void);
+
+MUNIT_PRINTF(1, 2)
+void test_trace_summary(const char *format, ...);
+
+MUNIT_PRINTF(1, 2)
+void test_trace_detail(const char *format, ...);
 
 #endif /* FC_TEST_COMMON_H */

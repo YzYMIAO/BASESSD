@@ -178,6 +178,12 @@ static void munit_logf_exv(MunitLogLevel level, FILE *fp, const char *filename, 
     fputc('\n', fp);
 }
 
+/* 与 munit_logf_exv() 开头的过滤条件保持一致，供测试夹具复用同一个开关。 */
+bool munit_log_visible(MunitLogLevel level)
+{
+    return level >= munit_log_level_visible;
+}
+
 void munit_logf_ex(MunitLogLevel level, const char *filename, int line, const char *format, ...)
 {
     va_list ap;

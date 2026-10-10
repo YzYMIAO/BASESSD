@@ -236,7 +236,16 @@ test --param block 10 /fc-nand/lifecycle/   # Level 3
 # 其他
 test --list                    # 列出所有套件
 test --seed 0x1234             # 指定随机种子
+
+# 证据打印：开了才打「这条用例证明了什么」（默认档输出逐字不变）
+test --log-visible info  /fc-nand/                 # 每用例 1-3 行 [EV] 摘要
+test --log-visible debug /fc-nand/lifecycle/block_write_read   # 单条用例逐页明细
+test --log-visible error                            # 改回默认（可见级跨 test 调用残留）
 ```
+
+> ⚠ 别用 `--log-fatal info`——它与 `--log-visible` 共用取值解析，会让每条日志 `abort()`。
+> `debug` 档是阻塞式 UART 输出（≈11.5 KB/s），只对**单条**用例跑；开证据后 `[ N ms ]` 不再可信。
+> 细节见 `fc_nand_ut.md` §5.5。
 
 ### 4.5 修改代码后
 

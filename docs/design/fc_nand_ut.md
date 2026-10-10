@@ -266,7 +266,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 | 测试函数 | 场景 | 验证点 |
 |---|---|---|
 | `init_sequence` | RESET → READ_ID → READ_PARAMETER_PAGE | 初始化序列各步生命周期完成；READ_ID 前 5B / 参数页 ONFI 签名 |
-| `feature_write_read` | SET_FEATURES → GET_FEATURES | Feature 写回一致 |
+| `feature_write_read` | GET_FEATURES ×4 → 01h 读-改-写回环 | Feature 写进去的值读得回来（见下） |
 | `status_query` | READ_STATUS / READ_STATUS_ENHANCED | 状态查询生命周期 + CW status |
 | `internal_data_move` | READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE | 源 block → 目标 block 搬移后 64 页逐字节一致 |
 | `block_erase_verify` | ERASE → 全 0xFF 校验 | 擦除后逐页全 0xFF |
@@ -278,6 +278,21 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 > 前 3 条（`init_sequence` / `feature_write_read` / `status_query`）不参数化；其余 6 条挂 `block` / `plane` / `sample`（见上「参数化与随机种子」节）。每条用例的 setup/teardown 与 Level 2 共用同一份 `test_setup` / `test_tear_down`（`fc_test_common.c`）。
 >
 > `block_lock_tight`（紧锁定，不可逆锁死整片 NAND）实现保留但以 `#if 0` 隔开、不注册；`unlock_erase` 同样 `#if 0` 停用。
+
+**`feature_write_read` 的地址一律取自器件手册**（MT29F4G08ABADAWP Table 13）：
+`01h` Timing mode / `80h` 驱动强度 / `81h` R/B# 下拉 / `90h` Array operation mode；
+`00h`、`02h–7Fh`、`82h–FFh` 是**保留段**，读写皆未定义——**不得自造地址**
+（该用例第一版照抄 FTL `read_recovery.h` 的 `RR_FEATURE_READ_RETRY = 0x89`，落在保留段，上板直接红）。
+
+- **Phase 1**：对四个地址各 GET 一次，**只读**，一个器件状态都不动。
+- **Phase 2**：在 **`01h`** 上做读-改-写回环——`GET 原值(应 00h) → SET 模式 1(01h) → GET 校验 → SET 原值 → GET 校验`，
+  探针取 Table 15 给死的 `01h`（模式 0..5 = `00h..05h`，模式 0 是出厂默认）。
+- **为什么回环选 `01h` 而不是 `90h`**——取决于**还原失败的代价**。手册说 feature 断电才复位、
+  连 `RESET(FFh)` 都清不掉，所以还原失败必然把器件留在非默认态：停在**模式 1 是良性的**
+  （模式是「器件能接收的上限速度」，而主机 FMC 时序按模式 0 配、比器件上限慢，照常工作）；
+  停在 `90h` 的 `08h` 则**内部 ECC 一直开着**，后面所有裸页读写会静默出错。
+  `80h` / `81h` 一律**只读**（改驱动强度影响信号完整性；改 R/B# 下拉写重了 WAIT_READY 会读到超时）。
+- **还原的 SET 排在断言之前**，断言 abort 时也不会把器件留在非默认态。
 
 #### OP 覆盖参考表（附录）
 
@@ -430,7 +445,7 @@ int ut_run_all(int argc, char *argv[])
 static int uart_cli_test(int argc, char *argv[]);
 
 /* ... 命令表中注册 test 命令 ... */
-{ "test", "test [--seed N] [--list] [test_name...]", "run munit unit test suite", 1U, 10U, uart_cli_test },
+{ "test", "test [--seed N] [--log-visible info|debug] [--list] [test_name...]", "run munit unit test suite", 1U, 10U, uart_cli_test },
 
 static int uart_cli_test(int argc, char *argv[])
 {
@@ -551,6 +566,68 @@ static MunitResult test_crc_step_detect(const MunitParameter params[], void *dat
   判据见 `assertion_guidelines.md` §二十三。
 - **随机化参数化（v1.15）**：`--single` 让每个参数枚举按种子**随机挑一个值**（salt = 用例名哈希，`munit.c:1139`），`--seed N` 复现上一轮；不加 `--single` 走全组合枚举。Level 3 的 6 条地址相关用例走这条路（见 §2.3「参数化与随机种子」）。⚠ 用例体内**不要**自己调 `munit_rand_*`——`exec` 会重置 PRNG（`munit.c:715`），且导出的取数函数不带 salt。
 
+### 5.5 证据打印（v1.18）
+
+**要解决的问题**：跑完只看到一片 `[ OK ]`，**看不出这条用例到底证明了什么**。
+本套此前已经栽过两次「绿灯不可信」——v34 修掉一条恒真断言（篡改被 `lba_to_meta()` 整段擦除），
+v35 修掉两处 `cw_bitmap` 建链缺陷。所以需要一个**开关**，开了就打出断言所依据的**实际观测值**。
+
+#### 三个原语（`tests/unit/fc_test_common.{h,c}`）
+
+```c
+void test_trace_begin(void);                                  /* 每条用例开头调一次 */
+MUNIT_PRINTF(1, 2) void test_trace_summary(const char *format, ...);  /* INFO：这条用例证明了什么 */
+MUNIT_PRINTF(1, 2) void test_trace_detail(const char *format, ...);   /* DEBUG：逐页 / 逐 CW 明细 */
+```
+
+- `test_trace_begin()` **每用例显式调一次**，不挂 `test_setup`——Level 1 的 11 条用例
+  `setup == NULL`，靠 setup 会漏。它只做两件事：复位行首标志、在可见时先补一个换行（见下）。
+- `test_trace_summary` 打**摘要**（页数、字节数、实读字节、回环的每一步）；
+  `test_trace_detail` 打**明细**（夹具的逐页 prog/read、`verify_chain_paa` 的逐 desc）。
+  共享夹具里的明细让 Level 3 全部 9 条用例自动获得逐页证据。
+
+#### 开关：munit 的 `--log-visible info|debug`，**不用**项目自己的 `log.h`
+
+`include/common/log.h` 是另一套：`LOGI` **默认就开着**（`g_log_level = LOG_INFO`）会立刻刷屏，
+`LOGD` 被**编译期** `DEBUG` 宏闸住（运行时打不开），且 `g_log_level` 是**全局固件状态**，
+调完会一直留着影响 FTL/NAND 的生产日志。munit 的开关是 `test` 的一个参数、默认关、
+两级阈值天然对应 INFO/DEBUG、只作用于 munit 自己的输出。
+
+框架侧为此加了 1 个只读访问器 `munit_log_visible()`（见 `munit_adapter.md` §2.4）。
+
+#### 实现要点
+
+- **不走 `munit_logf`**：它会给**每一行**加 `Info:<文件>:<行号>` 前缀（`munit.c:147-178`），
+  逐页明细会被撑到 ~110 字符、UART 阻塞时间翻倍。证据行**直接写 `MUNIT_OUTPUT_FILE`**，自带紧凑前缀。
+- **默认档逐字不变是硬约束**：可见性判断放在函数**最前面**，
+  `if (!munit_log_visible(level)) return;` ⇒ 默认档（visible=`ERROR`）连那个换行都不输出。
+- **换行要「急切」**：munit 的参数前缀行（`    block=100, plane=0`）**不带换行**就开跑用例
+  （`munit.c:900-926`），用例体内任何输出都会插进结果行中间。`test_trace_begin()` 在可见时
+  **立刻**补一个 `'\n'`（不等第一条证据行），否则 `init_sequence` 里 nand 驱动打的
+  `[INF] nand: READ_ID ...` 会粘在结果行上。
+
+#### ⚠ 三个坑
+
+1. **`--log-fatal` 不是「可见级」的同义词**。它与 `--log-visible` 共用取值解析，
+   而 `munit_logf_ex` 在 `level >= fatal` 时 `abort()` ⇒ `--log-fatal info` 会让每条证据行 abort。
+   默认 `fatal = ERROR` 安全，别动。
+2. **可见级跨 `test` 调用残留**。`munit_log_level_visible` 是文件级 static，
+   `munit_suite_main` 不重置 ⇒ 一旦 `test --log-visible info`，之后光打 `test` 也仍出证据，
+   直到重启或 `--log-visible error`。
+3. **UART TX 是阻塞的**（环 4096 B / 115200 波特 ≈ 11.5 KB/s，`usart.c` 的 `__WFE()` 自旋，不丢字节）
+   ⇒ `--log-visible debug` 跑全套（77 case × 64 页）是**数十秒纯 TX**，
+   **debug 档只对单条用例跑**（`test --log-visible debug /fc-nand/lifecycle/block_write_read`）。
+   另外 `make tests` 带 `-DMUNIT_ENABLE_TIMING`，证据打印在用例体内 ⇒
+   **开证据后 `[ N ms ]` 被 UART 阻塞污染，不可再当性能基线**。
+
+#### 板上实测（2026-10-10）
+
+| 档 | 结果 | 证据行 |
+|---|---|---|
+| 默认（`--log-visible error`） | 77/77，输出**逐字不变** | 0 |
+| `--log-visible info` | 77/77 | 131 |
+| `--log-visible debug` | 77/77 | 4936（131 摘要 + 4805 明细） |
+
 ---
 
 ## 6. 注意事项
@@ -587,6 +664,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-10 | v1.18 | **单测证据打印 + `feature_write_read` 改读-改-写回环**（见 `docs/changelog/fc_ut_evidence_trace_v36.md`）。① **证据打印**：新增 §5.5，`tests/unit/fc_test_common.{c,h}` 加 `test_trace_begin/summary(INFO)/detail(DEBUG)` 三个原语，**复用 munit fork 已有的 `test --log-visible info\|debug`**（框架侧只加 1 个只读访问器 `munit_log_visible()`，见 `munit_adapter.md` v1.4）；不走 `munit_logf`（每行加 `Info:文件:行号` 会把明细撑爆）而直接写 `MUNIT_OUTPUT_FILE`；可见性判断放最前 ⇒ **默认档输出逐字不变**；`test_trace_begin()` 的换行改**急切**，修掉 `init_sequence` 里 `[INF] nand: READ_ID` 粘在结果行上的既有缺陷（info/debug 档）。夹具 `test_prog_page` / `test_read_page` / `test_read_block_cache` / `verify_chain_paa` 带 DEBUG 明细，Level 3 九条自动获得逐页证据；Level 1 加 11 条摘要、Level 2 迁移既有 6 处 `munit_logf` + 给自证函数加摘要。② **`feature_write_read` 由「只 GET」改成回环**：Phase 1 只读手册 Table 13 的四个地址（`01h`/`80h`/`81h`/`90h`），Phase 2 在 **`01h`（Timing mode）** 上做读-改-写（Table 15 取值 `00h..05h`），还原的 SET 排在断言**之前**。⚠ 该用例第一版照抄 FTL `RR_FEATURE_READ_RETRY` 写 **`0x89`**——那是本器件的**保留地址**，上板直接红（`readback[0] == probe[0] (0 == 1)`）。③ `usart.c` 的 `test` 帮助串补 `--log-visible`。**生产代码 `src/**` 零改动**。断言与用例数不变（77）。`make format-check` 过、`make clean && make tests` 0/0、链接 **219012 B**；**上板已验**：默认/info/debug 三档各 **77/77**，回环 `原值 00 -> SET 01 -> GET 01 -> 还原 00` |
 | 2026-10-10 | v1.17 | **修 Level 3 两处 `cw_bitmap` 建链缺陷——v27 语义翻转的漏扫调用点**（见 `docs/changelog/fc_ut_level3_bitmap_v35.md`）。背景：v23~v26 的 `cw_bitmap == 0` = 「本 plane 段全部 CW」，v27 改为**字面位图**（0 = 空集）并加了两条断言（`ftl_cmd_resolve_cw_bitmap`），但**没回扫调用点**；受影响的 Level 3 自 v31 起只保证编译通过、从未上板，故潜伏至今。① `test_read_block_cache` 的 cache **START** 传 `0U` → 改 `test_plane_cw_bitmap(plane_bitmap)`：v31 注释「无数据阶段 ⇒ 无数据链」是错的——op 表里它的 `has_data = 1U`（与 `WITHOUT_DATA_OUT` 同口径，「加载型」也算占数据路径），而 `fc_command_validate` 断言「has_data ⇒ desc_id 有效」⇒ **必须建链**。② `block_random_data` 的随机列读位图 `1U << cw` → `1U << (plane * CW_NUM + cw)`：cw_bitmap 是 **flat 绝对编号**，plane 1 的 CW0 是 bit 4 不是 bit 0；plane=0 侥幸合法，参数化新增的 plane=1 用例才炸。③ `fc_test_common.h` §三 与 `test_fc_level3.c` 文件头的 `1U << cw` 写法一并改正。**生产代码 `src/**` 零改动**（两个 ASSERT 都是被测代码正确拦住了测试的错误）。用例数不变（77）。`make clean && make tests` 0/0、链接 **213156 B**；**上板已验：77/77 (100%) 全绿**——本套首次全套通过。另更正 v34 记录里「全套 FC UT 0 失败」一句（当时只单跑了 2 条用例） |
 | 2026-10-10 | v1.16 | **单测的 META 由「页索引（自造 LBA）」换成**页 PBA**（见 `docs/changelog/fc_ut_meta_pba_v34.md`）。① 夹具 `test_prog_page` / `test_read_cache_step` 的 meta 改 `pba_from_addr(本页地址)`；**`test_read_page` 加 `meta` 形参**（「命令声明自己期待读到哪一页」正是该 tag 的意义，故提到调用点可见；全仓仅两个调用点），`test_read_block` 内传本页 PBA。② `test_fc_level2.c` 的 `L2_META` 改 `pba_from_addr`（15 个使用点不动）；`test_scramble_whiten` 直接用 `addr` 的 PBA 并删掉 `& ~3`（该掩码原本为 `page << 2` 让出 plane/cw 位，PBA 自带低 3 位，理由消失）。③ `test_fc_level3.c` 的 `read_page_verify` / 两个内部搬移 op / `RANDOM_DATA_READ` 换 PBA；`internal_data_move` Step 5 读命令声明**源页 PBA**（见上）。④ **修既有 bug**：`process_read_mata_error` 原先用 `(TEST_PAGE + 1U) << CW_WIDTH`，`+4` 落在 `PLANE_CW_MASK` 的 **bit 2（plane 位）**，被 `lba_to_meta()` 掩掉重铸 ⇒ 断言恒不成立（上板必挂；v33 修好 CRC 后才跑得到这里）。改为篡改 block 维，宿主程序逐 CW 数值验证。**生产代码 `src/**` 零改动，FC/FTL 契约仍是 LBA**；`make clean && make tests` 0/0、链接 **213132 B**；**上板已验**（`process_read_mata_error` / `internal_data_move` 均过，全套 FC UT 0 失败） |
 | 2026-10-10 | v1.15 | **Level 3 去转发层 + 随机化参数化（munit 种子驱动）**（见 `docs/changelog/fc_ut_level3_param_v32.md`）。① **去层**：删 `test_fc_level3.c` 里 4 个纯转发 helper——`write_block` / `write_block_cache` / `read_block_verify`（唯一附加值是把 `plane` 索引换成 `TEST_PLANE_BM(plane)` 位图 + 烘焙一个 `L3_CONF`，在夹具「一律位图」约定外引入第二套索引约定）、`run_lifecycle`（两行内联），调用点直接调夹具原语 `test_prog_block` / `test_prog_block_cache` / `test_read_block`。② **参数化**：6 条地址相关用例挂 `MunitParameterEnum`（`block` 100/104、`plane` 0/1、`sample` edges/spread/middle/dense），取值就地解析（`l3_param_block` / `l3_param_plane` / `l3_sample_case_find`，表外 `--param` 用断言挡）；**随机性全走 munit 种子**——`--single` 按用例名哈希挑值、`--seed` 复现、不加则全组合枚举；用例体内**不**调 `munit_rand_*`（`exec` 重播种 + 导出函数不带 salt）。③ **判据变更**（加强）：整段读从 `read_page_verify`（逐 CW READY 位 + 链驱动 PAA）换成 `test_read_block`（聚合 `FC_CW_STATUS_ERROR_MASK == 0` + 按坐标重算 `test_verify_page_paa`）；擦除态仍留在本文件（聚合判据不适用）。④ **修既有缺陷**：`internal_data_move` Step 5 原先期望取目标块坐标、而 copyback 保留源块坐标 ⇒ 必然对不上（v26「数据 = 地址」后暴露）；改为逐页 `test_read_page(dest)` + `test_verify_page_paa(g_source_data, src, …)` 按**源坐标**比对。⑤ `usart.c` 的 `test` 帮助串补 `--single`。`make format-check` 过（101 文件）、`make clean && make tests` 0 warning 0 error、链接 **201580 B**；RAID=1 档（直调子 make）0/0、**209180 B**；**上板未验** |

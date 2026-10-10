@@ -9,6 +9,7 @@
 #include "fc/fc_random_engine.h"
 #include "nand/nand_dispatch.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,6 +24,75 @@ uint8_t *g_source_data = NULL;
 /* 步骤级用例的 CW 暂存区（见 fc_test_common.h「test_cw_scratch」）。
  * 与 g_source_data 同处分配 / 释放；**不放栈上**（4KB+ 会撑爆用例栈帧）。 */
 static uint8_t *g_cw_scratch = NULL;
+
+/**************************************************************************
+ *  证据打印（接口与用法见 fc_test_common.h 末节）
+ **************************************************************************/
+
+/* 本次用例是否已经与 munit 的结果行断过行。
+ * munit 打印参数前缀（"    block=100, plane=0"）时**不带换行**并补齐到
+ * MUNIT_TEST_NAME_LEN(55)，随后才跑用例、最后才打 "[ OK ]"
+ * （munit.c:900-926 打印前缀，:935-982 打印结果）⇒ 用例体内的第一行输出会插进
+ * 结果行中间——崩溃时看到的就是 "    block=100, plane=0   [ERR] assertion failed"。
+ * 由 test_trace_begin() 在每个用例开头复位。 */
+static bool s_ev_line_started = false;
+
+void test_trace_begin(void)
+{
+    /* 证据档下**立刻**给 munit 那条没有换行的前缀行收尾，而不是等第一条证据行。
+     * 原因：用例体内还有别的写者——项目自己的 LOGI 会抢先输出（如 nand 驱动的
+     * "READ_ID data=2C DC 90 95 56"，见 test_init_sequence），它排在第一条 [EV] 之前，
+     * 于是会粘在结果行后面。这里先断行，那种行就落在自己的一行上。
+     *
+     * 判据用 INFO：DEBUG 可见 ⇒ INFO 也可见（阈值比较），所以这一条覆盖 info/debug 两档。
+     * 默认档（visible = error）恒为假 ⇒ 一个字节都不输出，报告格式与改造前逐字一致。 */
+    s_ev_line_started = munit_log_visible(MUNIT_LOG_INFO);
+
+    if (s_ev_line_started)
+    {
+        fputc('\n', MUNIT_OUTPUT_FILE);
+        (void)fflush(MUNIT_OUTPUT_FILE);
+    }
+}
+
+static void test_trace_emit(MunitLogLevel level, const char *tag, const char *format, va_list ap)
+{
+    /* 可见性判断放在**最前面**：默认档（visible = error）连下面那个 '\n' 都不输出，
+     * 于是报告格式与改造前逐字一致。 */
+    if (!munit_log_visible(level))
+    {
+        return;
+    }
+
+    if (!s_ev_line_started)
+    {
+        fputc('\n', MUNIT_OUTPUT_FILE); /* 给 munit 那条没有换行的前缀行收尾 */
+        s_ev_line_started = true;
+    }
+
+    fputs(tag, MUNIT_OUTPUT_FILE);
+    (void)vfprintf(MUNIT_OUTPUT_FILE, format, ap);
+    fputc('\n', MUNIT_OUTPUT_FILE);
+    (void)fflush(MUNIT_OUTPUT_FILE); /* 立刻出队，保证排在 [ OK ] 之前 */
+}
+
+void test_trace_summary(const char *format, ...)
+{
+    va_list ap;
+
+    va_start(ap, format);
+    test_trace_emit(MUNIT_LOG_INFO, "[EV] ", format, ap);
+    va_end(ap);
+}
+
+void test_trace_detail(const char *format, ...)
+{
+    va_list ap;
+
+    va_start(ap, format);
+    test_trace_emit(MUNIT_LOG_DEBUG, "[EV]   ", format, ap);
+    va_end(ap);
+}
 
 /**************************************************************************
  *  内部小工具
@@ -41,7 +111,7 @@ uint8_t test_first_plane(uint8_t plane_bitmap)
     return 0U; /* 不可达 */
 }
 
-static uint8_t test_plane_count(uint8_t plane_bitmap)
+uint8_t test_plane_count(uint8_t plane_bitmap)
 {
     uint8_t count = 0U;
 
@@ -355,6 +425,9 @@ fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, u
         *data = g_source_data;
     }
 
+    /* 证据明细（--log-visible debug）：这条命令实际写了哪一页 / 几个 CW / 什么状态。 */
+    test_trace_detail("prog p%02u PBA=0x%08lX bm=0x%02X cw=%u status=0x%X", page_index, (unsigned long)pba_from_addr(&addr), plane_bitmap, (unsigned)test_cw_count(cmd), (unsigned)completion.status);
+
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     return completion;
 }
@@ -403,6 +476,10 @@ fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, u
         *data = g_source_data;
     }
 
+    /* 证据明细（--log-visible debug）：打**本命令声明的 meta**（普通读 = 本页 PBA，
+     * 内部搬移 = 源页 PBA），它是 Pass 4 ② 比对 META 的基准。 */
+    test_trace_detail("read p%02u declared_meta=0x%08lX bm=0x%02X cw=%u status=0x%X", page_index, (unsigned long)meta, plane_bitmap, (unsigned)test_cw_count(cmd), (unsigned)completion.status);
+
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     return completion;
 }
@@ -416,6 +493,9 @@ void test_prog_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_co
 
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
     }
+
+    /* 证据摘要（--log-visible info）：证明「真的写了这么多」。 */
+    test_trace_summary("prog block=%u bm=0x%02X: %u pages x %u CW x %u B", (unsigned)block_index, (unsigned)plane_bitmap, (unsigned)PAGES_PER_BLOCK, (unsigned)(test_plane_count(plane_bitmap) * CW_NUM), (unsigned)FC_BUFFER_USER_SIZE);
 
     if (data != NULL)
     {
@@ -436,6 +516,10 @@ void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_co
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
         test_verify_page_paa(g_source_data, block_index, page, plane_bitmap);
     }
+
+    /* 证据摘要（--log-visible info）：页数 + **逐槽比过的字节数**——这是「读回真的
+     * 与写入一致」的实证（判据是每个 CW 的 USER 区等于该 CW 自己的 PAA）。 */
+    test_trace_summary("read block=%u bm=0x%02X: %u pages PAA-verified, %lu B compared", (unsigned)block_index, (unsigned)plane_bitmap, (unsigned)PAGES_PER_BLOCK, (unsigned long)PAGES_PER_BLOCK * (unsigned long)test_plane_count(plane_bitmap) * (unsigned long)CW_NUM * (unsigned long)FC_BUFFER_USER_SIZE);
 
     if (data != NULL)
     {
@@ -475,6 +559,9 @@ void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
     }
 
+    /* 证据摘要（--log-visible info）：证明 cache 序列真的走了这么多条命令。 */
+    test_trace_summary("cache prog block=%u bm=0x%02X: %u x 80h-15h + 1 x 10h = %u pages", (unsigned)block_index, (unsigned)plane_bitmap, (unsigned)(PAGES_PER_BLOCK - 1U), (unsigned)PAGES_PER_BLOCK);
+
     if (data != NULL)
     {
         *data = g_source_data; /* 最后一页的明文 */
@@ -503,6 +590,10 @@ static fc_command_status_t test_read_cache_step(uint16_t block_index, uint8_t pl
 
     /* FC 已跑过 process_read（原地解码），此刻 desc 的 USER 区是明文。 */
     test_capture_user_paa(cmd);
+
+    /* 证据明细（--log-visible debug）：命令地址页号恒为 0（31h/3Fh 无地址周期），
+     * 真正输出的是 output_page——打出来才看得出「地址与 meta 刻意解耦」这件事。 */
+    test_trace_detail("cache out=p%02u declared_meta=0x%08lX bm=0x%02X cw=%u status=0x%X", output_page, (unsigned long)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = output_page}), (unsigned)plane_bitmap, (unsigned)test_cw_count(cmd), (unsigned)completion.status);
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     return completion;
@@ -570,6 +661,10 @@ void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
         test_verify_page_paa(g_source_data, block_index, last_page, plane_bitmap);
     }
+
+    /* 证据摘要（--log-visible info）：START + (N-1) 次 SEQ + LAST 共 N+1 条命令，
+     * 输出 N 页并逐页校验。裸 [ OK ] 看不出序列真走了这么多步。 */
+    test_trace_summary("cache read block=%u bm=0x%02X: START + %u SEQ + LAST = %u commands, %u pages PAA-verified", (unsigned)block_index, (unsigned)plane_bitmap, (unsigned)(PAGES_PER_BLOCK - 1U), (unsigned)(PAGES_PER_BLOCK + 1U), (unsigned)PAGES_PER_BLOCK);
 
     if (data != NULL)
     {

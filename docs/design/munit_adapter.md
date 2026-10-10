@@ -142,9 +142,25 @@ void munit_logf(MunitLogLevel level, const char *format, ...);
 void munit_log(MunitLogLevel level, const char *msg);
 void munit_errorf(const char *format, ...);
 void munit_error(const char *msg);
+bool munit_log_visible(MunitLogLevel level);   /* v1.4：只读查询可见级 */
 ```
 
 日志等级：`MUNIT_LOG_DEBUG`、`MUNIT_LOG_INFO`、`MUNIT_LOG_WARNING`、`MUNIT_LOG_ERROR`
+
+**`munit_log_visible(level)`（v1.4 新增）** 返回该等级当前是否会真的被打印，
+供**框架外**的代码（如 `tests/unit/fc_test_common.c` 的证据打印）复用同一套开关。
+三条语义：
+
+- 默认可见级是 **`ERROR`**（`munit.c:136`）⇒ 不加 `--log-visible` 时 INFO/DEBUG 一律不可见。
+- **过滤发生在任何输出之前**（`munit.c:140-145` 的 `if (level < visible) return;`）⇒
+  判不可见时连一个字节都不产出。这是「默认档报告格式逐字不变」的根据。
+- 可见级是 **文件级 static，`munit_suite_main` 不重置**（`munit.c:136`、`:1601`）⇒
+  同一次上电内先跑 `test --log-visible info`、再光跑 `test`，**证据仍会打印**，
+  直到重启或显式 `--log-visible error` 改回。
+
+⚠ **`--log-fatal` 不是「可见级」的同义词**：它与 `--log-visible` 共用同一套取值解析，
+而 `munit_logf_ex` 在 `level >= fatal` 时 `abort()` ⇒ `--log-fatal info` 会让**每条 INFO 日志
+都 abort**。默认 `fatal = ERROR` 是安全的，别动。
 
 ### 2.5 内存分配
 
@@ -310,6 +326,26 @@ v1.2 起 `munit.c` 不再内联项目专有逻辑，`munit_errorf_ex` 只做上�
 ### v1.3 (2026-10-05) — 诊断模块去 `ssd_` 前缀
 
 `src/common/` 里的诊断基础设施命名对齐已去前缀的 `assertion`：`ssd_log_*` → `log_*`、`ssd_crash_*` → `crash_*`，头文件 `include/common/{ssd_log.h,ssd_crash.h}` → `{log.h,crash.h}`。纯改名，等级枚举数值、`[ERR]/[WRN]/[INF]/[DBG]` 输出前缀、`.noinit` 记录的 magic/version/checksum 布局均不变。§3.3 链路图中的 `crash_record_abort` / `log_flush` / `crash_platform_report` 即新名。
+
+### v1.4 (2026-10-10) — 新增日志可见级只读访问器 `munit_log_visible()`
+
+#### 功能变更
+
+| # | 文件 | 位置 | 改动 |
+|---|---|---|---|
+| 1 | `tests/framework/munit.c` | `munit_logf_exv` 之后 | 新增 `bool munit_log_visible(MunitLogLevel level)`，实现即 `munit.c:142` 那行判据的导出（`level >= munit_log_level_visible`） |
+| 2 | `tests/framework/munit.h` | `munit_logf` 宏之后 | 声明该函数 |
+
+#### 背景
+
+`munit_log_level_visible` 是 `munit.c` 的**文件级 static**，框架外的代码读不到，
+于是测试侧无法「跟着 munit 的开关一起开关自己的输出」。
+FC 单测的**证据打印**（`tests/unit/fc_test_common.c` 的 `test_trace_summary/detail`，
+见 `docs/design/fc_nand_ut.md` §5.5）需要这条查询——可见级为假时**一个字节都不能写**，
+否则会破坏「默认档报告格式逐字不变」这条硬约束。
+
+改动只有 3 行，**不改任何既有行为**：不碰默认可见级、不碰过滤顺序、不碰 `--log-fatal`。
+§2.4 补了该函数的语义与三个坑（默认 ERROR / 过滤在输出前 / 可见级跨 `munit_suite_main` 不重置）。
 
 ### 修订历史条目格式
 

@@ -231,6 +231,10 @@ static void verify_chain_paa(const fc_command_t *cmd)
         munit_assert_not_null(desc);
         munit_assert_not_null(user);
         munit_assert_uint8(test_check_paa(user, desc->paa), ==, 1U);
+
+        /* 证据明细（--log-visible debug）：逐条 desc 打出它自己声明的 plane / cw /
+         * PAA——「链槽位与 CW 号解耦」这件事只有打出来才看得见。 */
+        test_trace_detail("chain[%u] plane=%u cw=%u PAA=0x%08lX USER==PAA", (unsigned)i, (unsigned)((desc->paa >> 2U) & 1U), (unsigned)(desc->paa & 3U), (unsigned long)desc->paa);
     }
 }
 
@@ -269,6 +273,8 @@ static void read_page_verify(uint16_t block, uint16_t page, uint8_t plane_bitmap
         verify_chain_paa(cmd);
     }
 
+    test_trace_detail("read p%02u bm=0x%02X cw=%u %s", (unsigned)page, (unsigned)plane_bitmap, (unsigned)test_cw_count(cmd), (erased != 0U) ? "all-0xFF" : "PAA-verified");
+
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
 }
 
@@ -289,6 +295,12 @@ static void read_block_verify_erased(uint16_t block, uint8_t plane_bitmap)
     {
         read_page_verify(block, page, plane_bitmap, 1U, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
     }
+
+    /* 证据摘要（--log-visible info）：页数 + 逐槽比过的字节数。
+     * ⚠ 老实说清楚它证到了什么：判据是「读回的 USER 区全 0xFF」，而本块是**擦除后直接读**、
+     *   此前并未写过 ⇒ 它证明「擦除态读得回来」，**不**证明「擦除真的清掉了旧数据」
+     *   （写后擦再读才算）。把字节数打出来正是为了让这条判据的强弱一眼可见。 */
+    test_trace_summary("erased block=%u bm=0x%02X: %u pages, %lu B all 0xFF (逐 CW SUCCESS)", (unsigned)block, (unsigned)plane_bitmap, (unsigned)PAGES_PER_BLOCK, (unsigned long)PAGES_PER_BLOCK * (unsigned long)test_plane_count(plane_bitmap) * (unsigned long)CW_NUM * (unsigned long)FC_BUFFER_USER_SIZE);
 }
 
 /**************************************************************************
@@ -434,8 +446,13 @@ static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *
 
 static MunitResult test_init_sequence(const MunitParameter params[], void *data)
 {
+    uint8_t id_bytes[5]   = {0U, 0U, 0U, 0U, 0U};
+    uint8_t onfi_bytes[4] = {0U, 0U, 0U, 0U};
+
     (void)params;
     (void)data;
+
+    test_trace_begin();
 
     /* Step 1: RESET —— 无数据负载，不需要 desc 链（cw_bitmap = 0 走短路分支） */
     {
@@ -462,6 +479,11 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         /* NAND 制造商 ID 应为 0x2C（Micron） */
         munit_assert_uint8(buf[0], ==, 0x2CU);
 
+        for (uint8_t i = 0U; i < 5U; i++)
+        {
+            id_bytes[i] = buf[i]; /* 留作证据：把**实读到的 5 字节**打出来，而不是只报"成功" */
+        }
+
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
@@ -478,6 +500,11 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
 
         munit_assert_not_null(buf);
         munit_assert_uint8(buf[0], ==, 0x4FU); /* 'O' */
+
+        for (uint8_t i = 0U; i < 4U; i++)
+        {
+            onfi_bytes[i] = buf[i];
+        }
 
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
@@ -496,41 +523,155 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
+    /* 证据摘要（--log-visible info）：四条命令的**实读字节**。
+     * 裸 [ OK ] 只说明命令回来了；打出 ID / ONFI 签名才说明 NAND 真的答了话。 */
+    test_trace_summary("RESET ok; READ_ID=%02X %02X %02X %02X %02X; PARAM_PAGE=%02X %02X %02X %02X (%c%c%c%c); GET_FEATURES(0x01) ok",
+                       (unsigned)id_bytes[0],
+                       (unsigned)id_bytes[1],
+                       (unsigned)id_bytes[2],
+                       (unsigned)id_bytes[3],
+                       (unsigned)id_bytes[4],
+                       (unsigned)onfi_bytes[0],
+                       (unsigned)onfi_bytes[1],
+                       (unsigned)onfi_bytes[2],
+                       (unsigned)onfi_bytes[3],
+                       (char)onfi_bytes[0],
+                       (char)onfi_bytes[1],
+                       (char)onfi_bytes[2],
+                       (char)onfi_bytes[3]);
+
     return MUNIT_OK;
 }
 
+/* ── Feature 地址表（器件手册 Table 13）──
+ *   **本用例的地址一律取自这张表，不得自造。**
+ *   01h Timing mode                          可读写，Table 15 给死取值（见下）
+ *   80h Programmable output drive strength   可读写
+ *   81h Programmable RB# pull-down strength  可读写
+ *   90h Array operation mode                 可读写，且手册给死了取值：
+ *                                               P1 = 08h → 使能内部 ECC
+ *                                               P1 = 00h → 关闭内部 ECC（P2..P4 未用）
+ *   00h / 02h–7Fh / 82h–FFh                  保留，读写皆未定义
+ *
+ *  ⚠ 本用例此前用 0x89（照抄 FTL `read_recovery.h` 的 RR_FEATURE_READ_RETRY）——
+ *    **本器件手册里 0x89 落在 82h–FFh 保留段**，读回 0 是未定义行为，回环判据从根上不成立。
+ *
+ *  ⚠ 回环地址选 01h 而非 90h，**取决于还原失败的代价**。手册：feature 断电才复位，
+ *    连 RESET(FFh) 都清不掉 ⇒ 任何还原失败都会把器件留在非默认态，直到断电：
+ *      · 01h 停在模式 1：只是让器件按更快的上限接收命令/地址/数据，而本项目 FMC 时序
+ *        是按**模式 0**（最保守）配的，主机比器件上限慢 ⇒ 照常工作。
+ *      · 90h 停在 08h：内部 ECC 一直开着 ⇒ **后面所有裸页读写静默出错**。
+ *    80h / 81h 一律**只读**：改驱动强度影响信号完整性；改 R/B# 下拉写重了
+ *    WAIT_READY 会一直读到 busy 直到超时，把后面全部用例一起拖死。 */
+#define L3_FEATURE_TIMING_MODE    (0x01U)
+#define L3_FEATURE_DRIVE_STRENGTH (0x80U)
+#define L3_FEATURE_RB_PULLDOWN    (0x81U)
+#define L3_FEATURE_ARRAY_OP_MODE  (0x90U)
+/* Table 15（Feature Address 01h: Timing Mode）：P1 = 00h..05h → 模式 0..5，P2..P4 保留为 0。
+ * 模式 0 是出厂默认（"The default timing mode is mode 0"），模式 5 仅 3.3V 支持。 */
+#define L3_TIMING_MODE_0 (0x00U)
+#define L3_TIMING_MODE_1 (0x01U)
+
+/* GET_FEATURES(addr) → 4 字节出参。
+ * SET/GET 都不建链（ftl_cmd_needs_desc_chain 两者皆排除 ⇒ cw_bitmap 走 0U 的短路分支），
+ * pba / 掩码都不看。读回的值经 CQ 的 param 联合体返回，路径是
+ * 器件 → g_fc_return_staging（fc.c:1280 把它当 cw_buffers[0]）→ completion.param（fc.c:805）。 */
+static void l3_feature_get(uint8_t addr, uint8_t out[4])
+{
+    fc_command_t       *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_GET_FEATURES, FC_CRC_ENABLE));
+    fc_command_status_t completion;
+
+    cmd->feature_addr = addr;
+
+    completion = test_submit_wait(cmd);
+    munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+    (void)memcpy(out, completion.param.bytes, 4U);
+
+    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+}
+
+/* SET_FEATURES(addr, 4 字节)。写入值取自 cmd->param.bytes（fc.c:1283 在派发时拷进暂存，
+ * 再作为 cw_buffers[0] 交给 NAND）。 */
+static void l3_feature_set(uint8_t addr, const uint8_t in[4])
+{
+    fc_command_t       *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_SET_FEATURES, FC_CRC_ENABLE));
+    fc_command_status_t completion;
+
+    cmd->feature_addr = addr;
+    (void)memcpy(cmd->param.bytes, in, 4U);
+
+    completion = test_submit_wait(cmd);
+    munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+
+    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+}
+
 /**************************************************************************
- *  test_feature_write_read — Feature 读验证
+ *  test_feature_write_read — Feature 读 + 写回环
  *
  *  流程：
- *    1. GET_FEATURES(addr=0x01) — 读 Feature 寄存器
- *    2. GET_FEATURES(addr=0x81) — 读另一个 Feature 寄存器
+ *    1. GET_FEATURES × 4 —— 手册 Table 13 里全部可寻址寄存器各读一次（**只读，零风险**）
+ *    2. 01h（Timing mode）读-改-写回环：
+ *         GET 原值（应为模式 0）→ SET 模式 1 → GET 校验 → SET 原值 → GET 校验还原
  *
  *  验证点：
- *    - Feature 读取命令独立执行成功
- *    - 返回数据非全 0xFF（硬件在呼吸）
+ *    - Feature 读写命令各自执行成功
+ *    - **写进去的值读得回来**（只查 status 的版本证明不了这点：器件把寄存器恒读成 0
+ *      也照样过——这正是本用例从「只 GET」改成回环的原因）
+ *    - 回环结束后 01h 已还原为模式 0，器件时序回到默认（后面 8 条用例依赖裸页读写）
  *
- *  注意：本测试只读不写，避免意外切换 NAND 时序模式。
+ *  ⚠ 还原的 SET **排在断言之前**：手册明说 feature "remains active until the device is
+ *    power cycled"——连 RESET(FFh) 都清不掉。万一断言 abort 时它还停在模式 1，
+ *    器件会带着非默认时序继续跑，直到断电。
  **************************************************************************/
 
 static MunitResult test_feature_write_read(const MunitParameter params[], void *data)
 {
-    static const uint8_t feature_addrs[2] = {0x01U, 0x81U};
+    static const uint8_t addrs[4] = {L3_FEATURE_TIMING_MODE, L3_FEATURE_DRIVE_STRENGTH, L3_FEATURE_RB_PULLDOWN, L3_FEATURE_ARRAY_OP_MODE};
+    static const char   *names[4] = {"Timing mode", "Drive strength", "RB# pull-down", "Array op mode"};
+    uint8_t              original[4];
+    uint8_t              probe[4] = {L3_TIMING_MODE_1, 0U, 0U, 0U};
+    uint8_t              readback[4];
+    uint8_t              restored[4];
 
     (void)params;
     (void)data;
 
-    for (uint8_t i = 0U; i < 2U; i++)
+    test_trace_begin();
+
+    /* Phase 1：手册里的四个寄存器各读一次。只读 ⇒ 一个器件状态都不动。
+     * 证据打**实际字节**。
+     * ⚠ 板上实测四个地址都读回 00 00 00 00，**这不是搬运失败**：Phase 2 往 01h 写 01h
+     *   能原样读回，说明 4 字节双向都在走——GET 的暂存是先 memset(0)（fc.c:1287）再
+     *   交给引擎的，读回非 0 只可能来自器件。所以全 0 是器件在上电默认态下的**真实读数**。
+     *   （曾按「0x80 驱动强度的默认值不该是 0」下判据，板上证伪——那是没查手册的猜测。） */
+    for (uint8_t i = 0U; i < 4U; i++)
     {
-        /* GET_FEATURES 不建链（ftl_cmd_needs_desc_chain 排除），pba / 掩码都不看。 */
-        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_GET_FEATURES, FC_CRC_ENABLE));
-
-        cmd->feature_addr = feature_addrs[i];
-
-        munit_assert_uint32(test_submit_wait(cmd).status, ==, FC_CW_STATUS_SUCCESS);
-
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        l3_feature_get(addrs[i], readback);
+        test_trace_summary("GET_FEATURES 0x%02X (%s) -> %02X %02X %02X %02X", (unsigned)addrs[i], names[i], (unsigned)readback[0], (unsigned)readback[1], (unsigned)readback[2], (unsigned)readback[3]);
     }
+
+    /* Phase 2：01h（Timing mode）读-改-写回环。
+     * 探针取**手册 Table 15 给死的模式 1（01h）**，不编造值。 */
+    l3_feature_get(L3_FEATURE_TIMING_MODE, original);
+
+    /* 手册：「The default timing mode is mode 0」——先钉住这个前提，否则下面
+     * 「写 01h 再读回 01h」在器件本来就非模式 0 时是空转（探针恰好等于原值）。
+     * 本项目 CONFIG_NAND_TIMING_MODE_4 = 0，从不设它，所以这里必须是 00h。 */
+    munit_assert_uint8(original[0], ==, L3_TIMING_MODE_0);
+
+    l3_feature_set(L3_FEATURE_TIMING_MODE, probe);
+    l3_feature_get(L3_FEATURE_TIMING_MODE, readback);
+
+    /* 先还原，再断言——见文件头 ⚠。 */
+    l3_feature_set(L3_FEATURE_TIMING_MODE, original);
+    l3_feature_get(L3_FEATURE_TIMING_MODE, restored);
+
+    munit_assert_uint8(readback[0], ==, L3_TIMING_MODE_1);
+    munit_assert_uint8(restored[0], ==, original[0]);
+
+    /* 证据摘要（--log-visible info）：四个值一列排开，回环的每一步都可见。 */
+    test_trace_summary("0x01 回环: 原值 %02X -> SET %02X -> GET %02X -> 还原 %02X", (unsigned)original[0], (unsigned)probe[0], (unsigned)readback[0], (unsigned)restored[0]);
 
     return MUNIT_OK;
 }
@@ -549,20 +690,31 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
 
 static MunitResult test_status_query(const MunitParameter params[], void *data)
 {
-    static const uint8_t status_ops[2] = {(uint8_t)OP_READ_STATUS, (uint8_t)OP_READ_STATUS_ENHANCED};
+    /* ⚠ OP_READ_STATUS 是**本项目 op 表的下标**（onfi_1_0.h:107 = 6），不是线上命令字节。
+     * 证据里两个都要打——只打下标会被读成「ONFI 命令 0x06」，那是误导。 */
+    static const uint8_t status_ops[2]  = {(uint8_t)OP_READ_STATUS, (uint8_t)OP_READ_STATUS_ENHANCED};
+    static const uint8_t status_cmds[2] = {NAND_CMD_READ_STATUS, NAND_CMD_READ_STATUS_ENHANCED};
 
     (void)params;
     (void)data;
+
+    test_trace_begin();
 
     for (uint8_t i = 0U; i < 2U; i++)
     {
         /* 状态字仅 1 字节 ⇒ 只取 CW0（1 条 desc）；状态查询不是 page read，
          * 数据路径不介入，nand_status 经 completion.status 返回。
          * operation 逐轮不同 ⇒ config 需可变，先按基线拷一份再改。 */
-        fc_cmd_conf_t conf = L3_CONF(status_ops[i], FC_CRC_ENABLE);
-        fc_command_t *cmd  = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
+        fc_cmd_conf_t       conf = L3_CONF(status_ops[i], FC_CRC_ENABLE);
+        fc_command_t       *cmd  = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
+        fc_command_status_t completion;
 
-        munit_assert_uint32(test_submit_wait(cmd).status, ==, FC_CW_STATUS_SUCCESS);
+        completion = test_submit_wait(cmd);
+        munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+
+        /* 证据摘要（--log-visible info）：打出状态字的实际值。
+         * op_idx = 项目 op 表下标，onfi = 真正发到线上的命令字节（0x70 / 0x78）。 */
+        test_trace_summary("READ_STATUS op_idx=%u onfi=0x%02X -> completion.status=0x%X", (unsigned)status_ops[i], (unsigned)status_cmds[i], (unsigned)completion.status);
 
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
@@ -598,6 +750,8 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     (void)data;
     const uint16_t block = l3_param_block(params);
     const uint16_t dest  = (uint16_t)(block + L3_BLOCK_DEST_OFF);
+
+    test_trace_begin();
 
     /* Step 1: 擦除源 + 目标 block */
     test_erase_block(block, TEST_PLANE_BM(0), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
@@ -653,6 +807,11 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
         test_verify_page_paa(g_source_data, block, page, TEST_PLANE_BM(0));
     }
+
+    /* 证据摘要（--log-visible info）：搬了多少页、目标块的 USER 是按**哪套坐标**比的。
+     * 这一句是本用例的核心判据——「按源块坐标比」而不是按目标块，打出来才看得出
+     * Step 5 的期望值取对了（错取目标坐标会静默判成"数据错"，或更糟：恒真通过）。 */
+    test_trace_summary("move block=%u -> dest=%u: %u pages x %u CW; dest USER == 源块坐标 PAA (%lu B)", (unsigned)block, (unsigned)dest, (unsigned)PAGES_PER_BLOCK, (unsigned)CW_NUM, (unsigned long)PAGES_PER_BLOCK * (unsigned long)CW_NUM * (unsigned long)FC_BUFFER_USER_SIZE);
 
     return MUNIT_OK;
 }
@@ -732,6 +891,8 @@ static MunitResult test_block_write_read(const MunitParameter params[], void *da
     const uint16_t block = l3_param_block(params);
     const uint8_t  plane = l3_param_plane(params);
 
+    test_trace_begin();
+
     /* Phase 1: 擦除 */
     test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
 
@@ -740,6 +901,9 @@ static MunitResult test_block_write_read(const MunitParameter params[], void *da
 
     /* Phase 3: 读回全 block 64 pages 验证 */
     test_read_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
+
+    /* 证据摘要来自夹具的 prog / read 两行（页数 + 逐槽比过的字节数），此处只点明阶段。 */
+    test_trace_summary("write_read block=%u plane=%u: erase -> prog -> read 三段走通", (unsigned)block, (unsigned)plane);
 
     return MUNIT_OK;
 }
@@ -764,6 +928,8 @@ static MunitResult test_block_erase_verify(const MunitParameter params[], void *
     (void)data;
     const uint16_t block = l3_param_block(params);
     const uint8_t  plane = l3_param_plane(params);
+
+    test_trace_begin();
 
     test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
     read_block_verify_erased(block, TEST_PLANE_BM(plane));
@@ -796,6 +962,8 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
     (void)data;
     const uint16_t block = l3_param_block(params);
     const uint8_t  plane = l3_param_plane(params);
+
+    test_trace_begin();
 
     /* Phase 0: 擦除 */
     test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
@@ -834,6 +1002,8 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
     (void)data;
     const uint16_t block = l3_param_block(params);
 
+    test_trace_begin();
+
     /* Step 1: Multi-plane erase block (both planes) */
     test_erase_block(block, TEST_PLANE_BM_ALL, &L3_CONF(OP_ERASE_BLOCK_MULTI_PLANE, FC_CRC_DISABLE));
 
@@ -848,6 +1018,10 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
     {
         read_page_verify(block, page, TEST_PLANE_BM_ALL, 0U, &L3_CONF(OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT, FC_CRC_DISABLE));
     }
+
+    /* 证据摘要（--log-visible info）：两个 plane 的图案**天然不同**（源槽按 (plane, cw) 取）
+     * ⇒ 读串 plane 必被抓到；打出来才看得出覆盖了两个 plane 而不是同一个读了两遍。 */
+    test_trace_summary("multi_plane block=%u bm=0x%02X: %u pages x %u plane x %u CW x %u B, 两 plane 图案互异", (unsigned)block, (unsigned)TEST_PLANE_BM_ALL, (unsigned)PAGES_PER_BLOCK, (unsigned)PLANE_NUM, (unsigned)CW_NUM, (unsigned)FC_BUFFER_USER_SIZE);
 
     return MUNIT_OK;
 }
@@ -872,11 +1046,14 @@ static MunitResult test_block_multi_plane(const MunitParameter params[], void *d
 static MunitResult test_block_random_data(const MunitParameter params[], void *data)
 {
     (void)data;
-    const uint16_t          block = l3_param_block(params);
-    const uint8_t           plane = l3_param_plane(params);
-    const l3_sample_case_t *sc    = l3_sample_case_find(munit_parameters_get(params, "sample"));
+    const uint16_t          block  = l3_param_block(params);
+    const uint8_t           plane  = l3_param_plane(params);
+    const char             *sample = munit_parameters_get(params, "sample");
+    const l3_sample_case_t *sc     = l3_sample_case_find(sample);
 
     munit_assert_not_null(sc); /* 挡表外 --param sample 值（框架不校验） */
+
+    test_trace_begin();
 
     test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
     test_prog_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL);
@@ -901,10 +1078,15 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
              *   于是 desc 落在 CW0、期望值取 CW1/CW3，两者对不上。
              *   旧 pattern 是 4 字节周期、cw*512 又是 4 的倍数 ⇒ 四个 CW 期望值
              *   完全相同，这条错误一直被掩盖（v22 changelog 记录过同类问题）。 */
-            fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = block, .plane = plane, .page = page},
-                                               (uint32_t)1U << ((uint32_t)plane * CW_NUM + cw),
+            const uint32_t cw_bit = (uint32_t)1U << ((uint32_t)plane * CW_NUM + cw);
+            fc_command_t  *cmd    = test_cmd_build(&(nand_addr_t){.block = block, .plane = plane, .page = page},
+                                               cw_bit,
                                                (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = page}),
                                                &L3_CONF(OP_RANDOM_DATA_READ, FC_CRC_ENABLE));
+
+            /* 证据明细（--log-visible debug）：把**实际用的 flat 位**打出来——v35 的
+             * plane 盲位图缺陷（plane 1 的 CW0 写成 0x01 而非 0x10）正是靠这一类自证才能一眼看穿。 */
+            test_trace_detail("probe page=%u cw=%u cw_bitmap=0x%08lX (flat = plane*CW_NUM + cw)", (unsigned)page, (unsigned)cw, (unsigned long)cw_bit);
 
             test_memset_read_buffer(cmd);
             (void)test_submit_wait(cmd);
@@ -918,6 +1100,10 @@ static MunitResult test_block_random_data(const MunitParameter params[], void *d
             munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
         }
     }
+
+    /* 证据摘要（--log-visible info）：抽样表 + 探测次数。页集/列集与 l3_sample_cases 表
+     * 对不上时（例如 plane 1 的 CW0 位算成 0x01）这一行会立刻显形。 */
+    test_trace_summary("random block=%u plane=%u sample=%s: %u pages x %u cw = %u probes, 逐 desc 对 desc->paa", (unsigned)block, (unsigned)plane, sample, (unsigned)sc->page_count, (unsigned)sc->cw_count, (unsigned)(sc->page_count * sc->cw_count));
 
     return MUNIT_OK;
 }
