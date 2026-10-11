@@ -335,9 +335,9 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
             if (request->operation == OP_READ_ID)
             {
                 /* DEBUG 档：默认（log level info）不打印——同一次上电
-                 * nand_mt29f4g08abadawp.c 已有一条 [INF] "nand: ID=..."，字节相同。
+                 * nand_mt29f4g08abadawp.c 已有一条 [INF] "[NAND] ID=..."，字节相同。
                  * 提到 INFO 会在用例体内抢先写 UART，粘在 munit 的结果行中间。 */
-                LOGD("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
+                LOGD("[NAND] READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
                      request->buffer[0],
                      request->buffer[1],
                      request->buffer[2],
@@ -378,7 +378,7 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
     if (request->operation == OP_READ_ID)
     {
         /* 同 DMA 路径：DEBUG 档，默认 INFO 档不打印（见上）。 */
-        LOGD("nand: READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
+        LOGD("[NAND] READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
              request->buffer[0],
              request->buffer[1],
              request->buffer[2],

@@ -54,6 +54,16 @@ static uint8_t fc_ecc_init_ldpc(void)
 }
 #endif
 
+/* 活动 ECC 引擎名（诊断/开机横幅用）。字符串与上方 fc_bch_init(13, 4, …) 就地一致。 */
+const char *fc_ecc_algo_name(void)
+{
+#if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
+    return "LDPC";
+#else
+    return "BCH(13,4)";
+#endif
+}
+
 /* --------------------------------------------------------------------
  * fc_ldpc_encode
  *   功能：ECC 编码——data[0..len-1] 的校验码写入 data[len..len+7]。

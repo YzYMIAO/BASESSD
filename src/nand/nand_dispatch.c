@@ -419,7 +419,7 @@ static nand_dispatch_start_outcome_t nand_dispatch_task_start(nand_dispatch_lun_
 {
     g_nand_dispatch_req_table[task->operation](task);
 
-    LOGD("nand: FC dispatch op=%u buffer=%p length=%u column=0x%04X row=0x%06lX\r\n",
+    LOGD("[NAND] FC dispatch op=%u buffer=%p length=%u column=0x%04X row=0x%06lX\r\n",
          task->operation,
          (void *)task->request.data,
          task->request.data_length,

@@ -295,7 +295,7 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
          * 引擎在 END 分支已清 active，但入参校验 / 非法 UOP 码 / handler 缺失这三条
          * 错误路径不清，这里统一兜底（OK 时重复清一次无副作用）。 */
         transaction->engine.active = 0U;
-        LOGE_IF(result != NAND_RESULT_OK, "nand: start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result, transaction->completion.nand_status);
+        LOGE_IF(result != NAND_RESULT_OK, "[NAND] start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result, transaction->completion.nand_status);
     }
     return result;
 }
@@ -322,7 +322,7 @@ nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completio
     {
         completion->execution_status = result;
         completion->nand_status      = transaction->completion.nand_status;
-        LOGD("nand: complete, op=%u result=0x%02X status=0x%02X\r\n", transaction->request.operation, result, completion->nand_status);
+        LOGD("[NAND] complete, op=%u result=0x%02X status=0x%02X\r\n", transaction->request.operation, result, completion->nand_status);
         transaction->engine.active = 0U;
     }
     return result;
@@ -395,14 +395,20 @@ nand_result_t nand_fc_set_features(uint8_t feature_address, const uint8_t featur
  * -------------------------------------------------------------------- */
 static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
 {
-    LOGI("nand: ONFI sig=%c%c%c%c rev=0x%04X model=%s\r\n",
+    /* 器件总容量（MiB）= 页主区 × 页/块 × 块/单元 × 逻辑单元。
+     * 本器件 = 2^29 B；>4 GiB 器件在 32 位 unsigned long 下会溢出（本工程只跑 MT29F4G08）。 */
+    unsigned long capacity_mib = (unsigned long)info->data_bytes_per_page * info->pages_per_block * info->blocks_per_unit *
+                                 info->logical_units / (1024UL * 1024UL);
+
+    LOGI("[NAND] ONFI sig=%c%c%c%c rev=0x%04X model=%s\r\n",
          (int)info->signature[0],
          (int)info->signature[1],
          (int)info->signature[2],
          (int)info->signature[3],
          (unsigned int)info->revision,
          info->model);
-    LOGI("nand: ONFI page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X bitcell=%u\r\n",
+    LOGI("[NAND] ONFI %luMiB page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X bitcell=%u\r\n",
+         capacity_mib,
          (unsigned long)info->data_bytes_per_page,
          (unsigned int)info->spare_bytes_per_page,
          (unsigned long)info->data_bytes_per_partial_page,
@@ -412,7 +418,7 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
          (unsigned int)info->logical_units,
          (unsigned int)info->address_cycles,
          (unsigned int)info->bits_per_cell);
-    LOGI("nand: ONFI ecc=%ubit prog/pg=%u tprog=%u terase=%u tr=%u tccs=%u timingmodes=0x%04X\r\n",
+    LOGI("[NAND] ONFI ecc=%ubit prog/pg=%u tprog=%u terase=%u tr=%u tccs=%u timingmodes=0x%04X\r\n",
          (unsigned int)info->ecc_bits,
          (unsigned int)info->programs_per_page,
          (unsigned int)info->tprog_max,
@@ -502,10 +508,10 @@ uint8_t nand_init(void)
      *    （使能 FMC/GPIO 时钟 + 配 PD6=R/B#、PG9=NCE、数据总线 AF12）。── */
     if (HAL_NAND_Init(&g_nand_handle, &common_timing, &attribute_timing) != HAL_OK)
     {
-        LOGE("nand: HAL_NAND_Init failed\r\n");
+        LOGE("[NAND] HAL_NAND_Init failed\r\n");
         return NAND_RESULT_OPERATION_FAILED;
     }
-    LOGI("nand: FMC ready, R/B#=%u\r\n",
+    LOGI("[NAND] FMC ready, R/B#=%u\r\n",
          (unsigned int)HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT,
                                         MT29F4G08ABADAWP_RB_GPIO_PIN));
 
@@ -523,14 +529,14 @@ uint8_t nand_init(void)
 
         if (nand_fmc_init(&fmc_config) != NAND_RESULT_OK)
         {
-            LOGE("nand: FMC backend configure failed\r\n");
+            LOGE("[NAND] FMC backend configure failed\r\n");
             return NAND_RESULT_OPERATION_FAILED;
         }
 
         /* ── Step 4: DMA（CONFIG_NAND_DMA=0 时为 no-op；失败仅回退 PIO）── */
         if (nand_dma_init() != 0U)
         {
-            LOGE("nand: DMA init failed, falling back to PIO\r\n");
+            LOGE("[NAND] DMA init failed, falling back to PIO\r\n");
             /* DMA 失败不是致命错误，回退到 CPU 逐字节搬运 */
         }
     }
@@ -543,28 +549,28 @@ uint8_t nand_init(void)
     result = nand_fc_reset(&completion);
     if (result != NAND_RESULT_OK)
     {
-        LOGE("nand: reset failed, result=0x%02X status=0x%02X R/B#=%u\r\n",
+        LOGE("[NAND] reset failed, result=0x%02X status=0x%02X R/B#=%u\r\n",
              (unsigned int)result,
              (unsigned int)completion.nand_status,
              (unsigned int)HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT,
                                             MT29F4G08ABADAWP_RB_GPIO_PIN));
         return result;
     }
-    LOGI("nand: reset complete, status=0x%02X\r\n", (unsigned int)completion.nand_status);
+    LOGI("[NAND] reset complete, status=0x%02X\r\n", (unsigned int)completion.nand_status);
     /* ── Step 6: READ_ID + 厂商 ID 校验 ── */
     result = nand_fc_read_id(id, &completion);
     if (result != NAND_RESULT_OK)
     {
-        LOGE("nand: read ID failed, result=0x%02X status=0x%02X\r\n",
+        LOGE("[NAND] read ID failed, result=0x%02X status=0x%02X\r\n",
              (unsigned int)result,
              (unsigned int)completion.nand_status);
         return result;
     }
-    LOGI("nand: ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0], (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3], (unsigned int)id[4]);
+    LOGI("[NAND] ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0], (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3], (unsigned int)id[4]);
     /* 拼 id[1..4]（跳过厂商字节 id[0]=0x2C）与宏值比较，见 nand_mt29f4g08abadawp.h */
     if ((((uint32_t)id[1] << 24U) | ((uint32_t)id[2] << 16U) | ((uint32_t)id[3] << 8U) | id[4]) != MT29F4G08ABADAWP_ID)
     {
-        LOGE("nand: unexpected ID\r\n");
+        LOGE("[NAND] unexpected ID\r\n");
         return NAND_RESULT_OPERATION_FAILED;
     }
 
@@ -578,13 +584,13 @@ uint8_t nand_init(void)
         result = nand_fc_read_parameter_page(page, &completion);
         if (result != NAND_RESULT_OK)
         {
-            LOGW("nand: read parameter page failed, result=0x%02X status=0x%02X\r\n",
+            LOGW("[NAND] read parameter page failed, result=0x%02X status=0x%02X\r\n",
                  (unsigned int)result,
                  (unsigned int)completion.nand_status);
         }
         else if (nand_onfi_parameter_page_decode(page, &info) == 0U)
         {
-            LOGW("nand: parameter page signature mismatch (got %02X %02X %02X %02X)\r\n",
+            LOGW("[NAND] parameter page signature mismatch (got %02X %02X %02X %02X)\r\n",
                  (unsigned int)page[0],
                  (unsigned int)page[1],
                  (unsigned int)page[2],
@@ -606,12 +612,12 @@ uint8_t nand_init(void)
         result = nand_fc_set_features(0x01U, mode_4, &completion);
         if (result != NAND_RESULT_OK)
         {
-            LOGE("nand: set feature 01h (Mode 4) failed, result=0x%02X status=0x%02X\r\n",
+            LOGE("[NAND] set feature 01h (Mode 4) failed, result=0x%02X status=0x%02X\r\n",
                  (unsigned int)result,
                  (unsigned int)completion.nand_status);
             return result;
         }
-        LOGI("nand: switched NAND to ONFI Mode 4\r\n");
+        LOGI("[NAND] switched NAND to ONFI Mode 4\r\n");
 
         /* 根据 Mode 4 时序重新计算 FMC PCC 硬件参数 */
         nand_fmc_timing_to_pcc(&g_nand_timing_fast, &fast_pcc);
@@ -619,10 +625,10 @@ uint8_t nand_init(void)
         g_nand_handle.Init.TARSetupTime  = 4U; /* Mode 4 下 ALE→RE 延时收紧 */
         if (HAL_NAND_Init(&g_nand_handle, &fast_pcc, &fast_pcc) != HAL_OK)
         {
-            LOGE("nand: HAL_NAND_Init (Mode 4) failed\r\n");
+            LOGE("[NAND] HAL_NAND_Init (Mode 4) failed\r\n");
             return NAND_RESULT_OPERATION_FAILED;
         }
-        LOGI("nand: FMC timing updated for Mode 4\r\n");
+        LOGI("[NAND] FMC timing updated for Mode 4\r\n");
 
         /* 更新 FMC 后端时序，供 UOP handler 使用。
          * 单 bank：同一实例直接覆盖（无需按 [CH][CE][LUN] 循环）。 */
@@ -636,17 +642,17 @@ uint8_t nand_init(void)
 
             if (nand_fmc_init(&fast_fmc) != NAND_RESULT_OK)
             {
-                LOGE("nand: FMC backend configure (Mode 4) failed\r\n");
+                LOGE("[NAND] FMC backend configure (Mode 4) failed\r\n");
                 return NAND_RESULT_OPERATION_FAILED;
             }
         }
     }
 #else
     /* ── Step 7（编掉）：低速模式：跳过 Mode 4 切换，NAND 和 FMC 都运行在默认慢速时序 ── */
-    LOGI("nand: keeping NAND at default timing (CONFIG_NAND_TIMING_MODE_4=0)\r\n");
+    LOGI("[NAND] keeping NAND at default timing (CONFIG_NAND_TIMING_MODE_4=0)\r\n");
 #endif /* CONFIG_NAND_TIMING_MODE_4 */
 
-    LOGI("nand: init complete\r\n");
+    LOGI("[NAND] init complete\r\n");
     return NAND_RESULT_OK;
 }
 

@@ -29,6 +29,9 @@
 #    define FC_ECC_ALGO FC_ECC_ALGO_BCH
 #endif
 
+/* 活动 ECC 引擎名（诊断/开机横幅用）。与实现文件里的 fc_bch_init(13, 4, …) 就地一致。 */
+const char *fc_ecc_algo_name(void);
+
 typedef struct
 {
     uint16_t codeword_bytes;

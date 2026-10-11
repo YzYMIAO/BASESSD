@@ -141,7 +141,7 @@ static uint8_t nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_
 
     if (delay_dwt_elapsed_us(w->start_cycles, state->timing->busy_timeout_us) || (w->polls >= state->timing->busy_timeout_us))
     {
-        LOGE("nand: %s timeout op=%u polls=%u timeout_us=%u\r\n",
+        LOGE("[NAND] %s timeout op=%u polls=%u timeout_us=%u\r\n",
              op_name,
              state->request->operation,
              w->polls,
@@ -168,7 +168,7 @@ static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
     if ((type == NAND_UOP_DATA_IN) || (type == NAND_UOP_DATA_OUT) || (type == NAND_UOP_WAIT_READY) ||
         (type == NAND_UOP_CHECK_FAIL))
     {
-        LOGD("nand: uop[%u]=%u OK op=%u nand_st=0x%02X polls=%u\r\n",
+        LOGD("[NAND] uop[%u]=%u OK op=%u nand_st=0x%02X polls=%u\r\n",
              (unsigned)state->uop_index,
              (unsigned)type,
              (unsigned)state->request->operation,
@@ -289,7 +289,7 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
             if ((state->request->operation == OP_NORMAL_PROGRAM_PAGE) &&
                 ((state->debug_polls == 1U) || ((state->debug_polls % 1000U) == 0U)))
             {
-                LOGD("nand: program pending uop=%u status=0x%02X wait=%u\r\n",
+                LOGD("[NAND] program pending uop=%u status=0x%02X wait=%u\r\n",
                      state->uop_index,
                      state->completion->nand_status,
                      state->debug_polls);

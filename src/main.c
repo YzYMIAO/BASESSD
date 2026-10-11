@@ -51,8 +51,15 @@
 #include <string.h>
 
 /* 每次需要确认板上 ELF 是否更新时递增；仅用于开发阶段 UART 诊断。 */
-#define SSD_FIRMWARE_DEBUG_REVISION 24U
+#define SSD_FIRMWARE_DEBUG_REVISION 24
 #define SSD_WATCHDOG_ENABLE         0U
+
+/* 编译期字符串化：把版本号宏拼进开机横幅。 */
+#define SSD_STR_(x) #x
+#define SSD_STR(x)  SSD_STR_(x)
+
+/* 开机横幅（编译期常量；构建日期/时间由编译器注入 __DATE__ / __TIME__）。 */
+static const char g_boot_banner[] = "=========== soft_ssd rev=" SSD_STR(SSD_FIRMWARE_DEBUG_REVISION) " built " __DATE__ " " __TIME__ " ===========\r\n";
 
 #if (SSD_WATCHDOG_ENABLE != 0U)
 /*
@@ -85,6 +92,17 @@ static int stm32_uart_log_sink(const char *message, uint32_t length)
 static int stm32_uart_log_flush_sink(uint32_t timeout_ms)
 {
     return uart_log_flush(timeout_ms);
+}
+
+/*
+ * 分区标题（裸行，不带 [INF] 前缀）：把开机日志按
+ * system / nand / controller / ftl / console 分区，便于扫读。
+ */
+static void boot_section(const char *name)
+{
+    (void)uart_log_write("--- ", 4U);
+    (void)uart_log_write(name, (uint32_t)strlen(name));
+    (void)uart_log_write(" ---\r\n", 6U);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -147,7 +165,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
 
     if (ftl_init(&g_ftl[ch][ce][lun], &params) != FTL_OK)
     {
-        LOGE("[FTL] init failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
+        LOGE("[FTL ] init failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return -1;
     }
 
@@ -197,7 +215,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         allocator_free_block(&g_ftl[ch][ce][lun].alloc, gblock);
         free_n++;
     }
-    LOGI("[FTL] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
+    LOGI("[FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
          ch,
          ce,
          lun,
@@ -207,10 +225,10 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
 
     if (ftl_boot_recovery(&g_ftl[ch][ce][lun], &result) != FTL_OK)
     {
-        LOGE("[FTL] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
+        LOGE("[FTL ] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return -1;
     }
-    LOGI("[FTL] boot type=%d cp_seq=%lu journal_entries=%lu\r\n",
+    LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu\r\n",
          (int)result.boot_type,
          (unsigned long)result.cp_sequence,
          (unsigned long)result.journal_entries);
@@ -251,7 +269,7 @@ static void ssd_ftl_boot_all(void)
 
     if (!boot_ok)
     {
-        LOGE("[FTL] boot failed, fallback to fc_service\r\n");
+        LOGE("[FTL ] boot failed, fallback to fc_service\r\n");
         return;
     }
 
@@ -276,15 +294,16 @@ static void ssd_ftl_boot_all(void)
     ctrl_ret = ssd_controller_init(&g_ctrl, g_ftl_ptrs);
     if (ctrl_ret != SSD_STATUS_OK)
     {
-        LOGE("[FTL] controller init failed: %d\r\n", ctrl_ret);
+        LOGE("[FTL ] controller init failed: %d\r\n", ctrl_ret);
         return;
     }
 
     /* ⑤ 主循环切换点：此后走 ftl_service（内部先跑 fc_service） */
     g_ftl_ready = 1;
     /* %lu 而非 %llu：newlib-nano 不支持 long long 格式化，见 usart.c 的 _Static_assert。 */
-    LOGI("[FTL] controller ready, lba_max=%lu\r\n",
-         (unsigned long)FTL_LBA_MAX);
+    LOGI("[FTL ] controller ready, lba_max=%lu (%luMiB)\r\n",
+         (unsigned long)FTL_LBA_MAX,
+         (unsigned long)((unsigned long)FTL_LBA_MAX * FC_BUFFER_USER_SIZE / (1024UL * 1024UL)));
 }
 
 /* Newlib-nano calls this hook from __libc_init_array when no CRT provides it. */
@@ -305,7 +324,8 @@ void SysTick_Handler(void)
 
 int main(void)
 {
-    uint8_t nand_init_result;
+    uint8_t          nand_init_result;
+    sys_clock_tree_t clk;
 
     sys_init();
     cli_init(); /* 预填 CLI 固定 pattern buffer（.sram2_data NOLOAD） */
@@ -313,12 +333,45 @@ int main(void)
     log_set_flush_sink(stm32_uart_log_flush_sink);
     log_set_level(LOG_INFO);
     LOGD("debug logging enabled\r\n");
-    LOGI("soft_ssd debug revision=%lu\r\n", (unsigned long)SSD_FIRMWARE_DEBUG_REVISION);
+    /* 开机横幅（裸行）+ 系统身份（时钟 / Cache / MPU 区域数）。 */
+    (void)uart_log_write(g_boot_banner, sizeof(g_boot_banner) - 1U);
     /*
      * 复位原因 + 上次崩溃记录。必须在 sink 绑定之后调用：它走异步日志，
      * 且 .noinit 记录可跨软复位保留（VBAT 未供电时 BKPSRAM 不可用）。
      */
     fault_report_boot();
+    boot_section("system");
+    LOGI("[SYS ] CPU=%luMHz HCLK=%luMHz ICache=%s DCache=%s MPU=%lu\r\n",
+         (unsigned long)(delay_port_core_clock_hz() / 1000000U),
+         (unsigned long)(delay_port_hclk_hz() / 1000000U),
+         (get_icache_sta() != 0U) ? "on" : "off",
+         (get_dcache_sta() != 0U) ? "on" : "off",
+         (unsigned long)sys_mpu_region_count());
+    /* 时钟树：全部 HAL 实读。APB1/2/3/4 相等时压成一个 pclk，不等则四个全列。 */
+    sys_clock_tree_get(&clk);
+    if ((clk.pclk1_hz == clk.pclk2_hz) && (clk.pclk2_hz == clk.pclk3_hz) && (clk.pclk3_hz == clk.pclk4_hz))
+    {
+        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk=%lu fmc=%lu qspi=%lu uart=%lu\r\n",
+             (unsigned long)(clk.sysclk_hz / 1000000U),
+             (unsigned long)(clk.hclk_hz / 1000000U),
+             (unsigned long)(clk.pclk1_hz / 1000000U),
+             (unsigned long)(clk.fmc_hz / 1000000U),
+             (unsigned long)(clk.qspi_hz / 1000000U),
+             (unsigned long)(clk.uart_hz / 1000000U));
+    }
+    else
+    {
+        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk1/2/3/4=%lu/%lu/%lu/%lu fmc=%lu qspi=%lu uart=%lu\r\n",
+             (unsigned long)(clk.sysclk_hz / 1000000U),
+             (unsigned long)(clk.hclk_hz / 1000000U),
+             (unsigned long)(clk.pclk1_hz / 1000000U),
+             (unsigned long)(clk.pclk2_hz / 1000000U),
+             (unsigned long)(clk.pclk3_hz / 1000000U),
+             (unsigned long)(clk.pclk4_hz / 1000000U),
+             (unsigned long)(clk.fmc_hz / 1000000U),
+             (unsigned long)(clk.qspi_hz / 1000000U),
+             (unsigned long)(clk.uart_hz / 1000000U));
+    }
 
     /* ── 全系统初始化顺序（严格 if/else-if 级联：前一步失败会整段跳过后面的）──
      *   ① fc_init()            —— FC 控制面：三池 + SQ/HSQ/CQ + 调度器 + CRC。
@@ -336,23 +389,32 @@ int main(void)
     {
         LOGE("fc init failed\r\n");
     }
-    else if ((nand_init_result = nand_init()) != NAND_RESULT_OK)
-    {
-        LOGE("nand init failed: 0x%02X\r\n", (unsigned int)nand_init_result);
-    }
     else
     {
-        nand_dispatch_set_armed(1U);
-        LOGI("fc and nand raw path ready\r\n");
-        /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
-         * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */
-        LOGE_IF(stm32_platform_register() != 0, "platform register failed; T3 timers disabled\r\n");
-        ssd_ftl_boot_all();
+        boot_section("nand");
+        nand_init_result = nand_init();
+        if (nand_init_result != NAND_RESULT_OK)
+        {
+            LOGE("nand init failed: 0x%02X\r\n", (unsigned int)nand_init_result);
+        }
+        else
+        {
+            nand_dispatch_set_armed(1U);
+            /* controller 汇总在器件就绪后打印：pools / 拓扑 / 数据通路配置。 */
+            boot_section("controller");
+            fc_boot_report();
+            LOGI("[FC  ] raw path ready\r\n");
+            /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
+             * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */
+            LOGE_IF(stm32_platform_register() != 0, "platform register failed; T3 timers disabled\r\n");
+            boot_section("ftl");
+            ssd_ftl_boot_all();
+        }
     }
     /* APB1=100 MHz and APB1 prescaler=2, so TIM6 kernel clock is 200 MHz. */
     btim_timx_int_init(1000 - 1, 200 - 1);
-    LOGI("soft_ssd console ready\r\n");
-    LOGI("type 'help' for commands\r\n");
+    boot_section("console");
+    LOGI("[SYS ] console ready, type 'help' for commands\r\n");
 #if (SSD_WATCHDOG_ENABLE != 0U)
     if (!storage_wdg_init(&g_storage_wdg_config))
     {
@@ -362,11 +424,11 @@ int main(void)
     {
         /* 固定任务已在 btim.c 的 g_btim_tasks 中注册；这里只启动其运行态。 */
         btim_scheduler_init();
-        LOGI("btim task table ready, IWDG nominal=30s, period=100ms\r\n");
+        LOGI("[SYS ] btim task table ready, IWDG nominal=30s, period=100ms\r\n");
     }
 #else
     btim_scheduler_init();
-    LOGI("btim task table ready, IWDG disabled for debug\r\n");
+    LOGI("[SYS ] btim task table ready, IWDG disabled for debug\r\n");
 #endif
     cli_service_poll();
     /* ── 主循环（裸机 superloop，无中断参与）──

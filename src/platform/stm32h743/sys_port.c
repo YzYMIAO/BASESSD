@@ -61,6 +61,120 @@ uint8_t sys_port_dcache_enabled(void)
     return (uint8_t)((SCB->CCR >> 16U) & 1U);
 }
 
+uint32_t sys_port_mpu_region_count(void)
+{
+    return (uint32_t)(sizeof(g_sys_mpu_regions) / sizeof(g_sys_mpu_regions[0]));
+}
+
+/* per_ck：FMC / QSPI 的 CLKP 备选源（HSI/CSI/HSE）。 */
+static uint32_t sys_port_per_ck_hz(void)
+{
+    switch (__HAL_RCC_GET_CLKP_SOURCE())
+    {
+        case RCC_CLKPSOURCE_HSI:
+            return HSI_VALUE;
+        case RCC_CLKPSOURCE_CSI:
+            return CSI_VALUE;
+        case RCC_CLKPSOURCE_HSE:
+            return HSE_VALUE;
+        default:
+            return 0U;
+    }
+}
+
+/*
+ * 时钟树回读：sysclk/hclk/pclk1..4 由 HAL 直接给出，读的是「芯片实际处于什么
+ * 状态」而非本文件的配置常量。
+ *
+ * FMC / QSPI / USART1 三项 HAL 不给：本 HAL 的 HAL_RCCEx_GetPeriphCLKFreq 只覆盖
+ * ADC/FDCAN/SAI/SDMMC/SPI，对其余外设（含这三个）一律返回 0。故这里读各自的
+ * mux 位、再用 HAL 的 PLL getter 换算 —— 只做 mux 译码，不重算 PLL 参数。
+ */
+void sys_port_clock_tree_get(sys_clock_tree_t *out)
+{
+    PLL1_ClocksTypeDef pll1 = {0};
+    PLL2_ClocksTypeDef pll2 = {0};
+    PLL3_ClocksTypeDef pll3 = {0};
+    uint32_t           hclk;
+    uint32_t           per_ck;
+
+    HAL_RCCEx_GetPLL1ClockFreq(&pll1);
+    HAL_RCCEx_GetPLL2ClockFreq(&pll2);
+    HAL_RCCEx_GetPLL3ClockFreq(&pll3);
+    hclk   = HAL_RCC_GetHCLKFreq();
+    per_ck = sys_port_per_ck_hz();
+
+    out->sysclk_hz = HAL_RCC_GetSysClockFreq();
+    out->hclk_hz   = hclk;
+    out->pclk1_hz  = HAL_RCC_GetPCLK1Freq();
+    out->pclk2_hz  = HAL_RCC_GetPCLK2Freq();
+    out->pclk3_hz  = HAL_RCCEx_GetD1PCLK1Freq();
+    out->pclk4_hz  = HAL_RCCEx_GetD3PCLK1Freq();
+
+    switch (__HAL_RCC_GET_FMC_SOURCE())
+    {
+        case RCC_FMCCLKSOURCE_D1HCLK:
+            out->fmc_hz = hclk;
+            break;
+        case RCC_FMCCLKSOURCE_PLL:
+            out->fmc_hz = pll1.PLL1_Q_Frequency;
+            break;
+        case RCC_FMCCLKSOURCE_PLL2:
+            out->fmc_hz = pll2.PLL2_R_Frequency;
+            break;
+        case RCC_FMCCLKSOURCE_CLKP:
+            out->fmc_hz = per_ck;
+            break;
+        default:
+            out->fmc_hz = 0U;
+            break;
+    }
+
+    switch (__HAL_RCC_GET_QSPI_SOURCE())
+    {
+        case RCC_QSPICLKSOURCE_D1HCLK:
+            out->qspi_hz = hclk;
+            break;
+        case RCC_QSPICLKSOURCE_PLL:
+            out->qspi_hz = pll1.PLL1_Q_Frequency;
+            break;
+        case RCC_QSPICLKSOURCE_PLL2:
+            out->qspi_hz = pll2.PLL2_R_Frequency;
+            break;
+        case RCC_QSPICLKSOURCE_CLKP:
+            out->qspi_hz = per_ck;
+            break;
+        default:
+            out->qspi_hz = 0U;
+            break;
+    }
+
+    switch (__HAL_RCC_GET_USART1_SOURCE())
+    {
+        case RCC_USART1CLKSOURCE_D2PCLK2:
+            out->uart_hz = out->pclk2_hz;
+            break;
+        case RCC_USART1CLKSOURCE_PLL2:
+            out->uart_hz = pll2.PLL2_Q_Frequency;
+            break;
+        case RCC_USART1CLKSOURCE_PLL3:
+            out->uart_hz = pll3.PLL3_Q_Frequency;
+            break;
+        case RCC_USART1CLKSOURCE_HSI:
+            out->uart_hz = HSI_VALUE;
+            break;
+        case RCC_USART1CLKSOURCE_CSI:
+            out->uart_hz = CSI_VALUE;
+            break;
+        case RCC_USART1CLKSOURCE_LSE:
+            out->uart_hz = LSE_VALUE;
+            break;
+        default:
+            out->uart_hz = 0U;
+            break;
+    }
+}
+
 void sys_port_set_vector_table(uint32_t base_address, uint32_t offset)
 {
     SCB->VTOR = base_address | (offset & 0xFFFFFE00UL);

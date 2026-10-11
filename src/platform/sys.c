@@ -52,6 +52,16 @@ uint8_t get_dcache_sta(void)
     return sys_port_dcache_enabled();
 }
 
+uint32_t sys_mpu_region_count(void)
+{
+    return sys_port_mpu_region_count();
+}
+
+void sys_clock_tree_get(sys_clock_tree_t *out)
+{
+    sys_port_clock_tree_get(out);
+}
+
 void sys_nvic_set_vector_table(uint32_t base_address, uint32_t offset)
 {
     sys_port_set_vector_table(base_address, offset);

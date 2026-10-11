@@ -23,8 +23,12 @@
 #include "fc_interface.h"
 
 #include "common/assertion.h"
+#include "common/log.h"
+#include "dma.h" /* CONFIG_NAND_DMA：数据通路 PIO/DMA */
 #include "fc_command.h"
 #include "fc_internal.h"
+#include "fc_ldpc_engine.h"
+#include "fc_random_engine.h"
 
 #include <stddef.h>
 
@@ -570,4 +574,37 @@ fc_status_t fc_get_resource_stats(fc_resource_stats_t *stats)
         }
     }
     return FC_STATUS_OK;
+}
+
+/* --------------------------------------------------------------------
+ * fc_boot_report
+ *   功能：开机横幅——打印 FC 固定资源池/队列深度、通道拓扑与数据通路配置。
+ *   参数：无。
+ *   返回：无。
+ *   实现要点：全部编译期常量 + 两个只读引擎名 getter，无副作用。
+ *         与断言路径的 [RES] 现场行（fc_assert_context.c）互补：此处打「容量」，
+ *         那里打「占用」。
+ * -------------------------------------------------------------------- */
+void fc_boot_report(void)
+{
+#if CONFIG_NAND_DMA
+    const char *data_path = "DMA";
+#else
+    const char *data_path = "PIO";
+#endif
+
+    LOGI("[FC  ] cmd=%u desc=%u buf=%u sq=%u hsq=%u cq=%u\r\n",
+         (unsigned)FC_COMMAND_POOL_DEPTH,
+         (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
+         (unsigned)FC_BUFFER_POOL_DEPTH,
+         (unsigned)FC_SQ_DEPTH,
+         (unsigned)FC_HSQ_DEPTH,
+         (unsigned)FC_CQ_DEPTH);
+    LOGI("[FC  ] topology ch=%u ce=%u lun=%u plane=%u raid=%s\r\n",
+         (unsigned)CH_NUM,
+         (unsigned)CE_NUM,
+         (unsigned)LUN_NUM,
+         (unsigned)PLANE_NUM,
+         (CONFIG_FC_RAID != 0U) ? "on" : "off");
+    LOGI("[FC  ] data path=%s ecc=%s random=%s\r\n", data_path, fc_ecc_algo_name(), fc_random_algo_name());
 }
