@@ -201,3 +201,20 @@ FAULT_ENTRY(HardFault_Handler)
 FAULT_ENTRY(MemManage_Handler)
 FAULT_ENTRY(BusFault_Handler)
 FAULT_ENTRY(UsageFault_Handler)
+
+/*
+ * 内核系统异常入口（向量表名由 startup_stm32h743xx.s 固定）。
+ * SYS_SUPPORT_OS == 0，本仓裸机运行，这三个向量永不触发；保留空实现只为让向量表
+ * 有一个明确的 C 归属，与上面的故障入口同处一个 port 文件。
+ */
+void SVC_Handler(void)
+{
+}
+
+void DebugMon_Handler(void)
+{
+}
+
+void PendSV_Handler(void)
+{
+}

@@ -186,6 +186,17 @@ uint8_t sys_port_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sysc
     return FUNC_STATUS_SUCCESS;
 }
 
+/* ─────────────────────────── 向量表入口 ─────────────────────────── */
+
+/*
+ * SysTick 中断入口（向量表名由 startup_stm32h743xx.s 固定）。
+ * HAL_Init() 把 SysTick 配成 1 ms 节拍，本文件即该向量的归属地。
+ */
+void SysTick_Handler(void)
+{
+    HAL_IncTick();
+}
+
 #ifdef USE_FULL_ASSERT
 void assert_failed(uint8_t *file, uint32_t line)
 {

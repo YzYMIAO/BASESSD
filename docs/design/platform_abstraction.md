@@ -168,23 +168,24 @@ Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）�
 
 | 文件 | 行数 | 分类 | 说明 | 违反 |
 |---|---:|---|---|---|
-| `btim_port.c` | 52 | **p** | TIM6 句柄 + 中断使能 + `btim_port_irq_handler()`；回调转 `btim_scheduler_tick()` | — |
-| `watchdog_port.c` | 76 | **p** | IWDG/WWDG 句柄 + 6 个 port 函数 + 两个 HAL 回调转共享层 | — |
-| `fault_port.c` | 203 | **p** | USART1/DMA1 轮询控制台 + 5 个 naked 异常入口 + `fault_port_entry_c`（抓现场）+ `RCC->RSR` 复位原因解码 | — |
+| `btim_port.c` | 61 | **p** | TIM6 句柄 + 中断使能 + `btim_port_irq_handler()`；回调转 `btim_scheduler_tick()`；向量入口 `TIM6_DAC_IRQHandler` | — |
+| `watchdog_port.c` | 86 | **p** | IWDG/WWDG 句柄 + 6 个 port 函数 + 两个 HAL 回调转共享层；向量入口 `WWDG_IRQHandler` | — |
+| `fault_port.c` | 220 | **p** | USART1/DMA1 轮询控制台 + 5 个 naked 异常入口 + 3 个内核异常空入口（SVC/DebugMon/PendSV）+ `fault_port_entry_c`（抓现场）+ `RCC->RSR` 复位原因解码 | — |
 | `delay_port.c` | 61 | **p** | 7 个计数器/时钟查询函数（DWT、SysTick、HCLK/SYSCLK） | — |
-| `usart_port.c` | 251 | **p** | USART1 句柄 + HAL 初始化 + GPIO/DMA + `usart_port_irq_handler()` + 15 个 port 原语（寄存器/DMA/缓存/CMSIS 内建） | — |
+| `usart_port.c` | 271 | **p** | USART1 句柄 + HAL 初始化 + GPIO/DMA + `usart_port_irq_handler()` + 向量入口 `USART1_IRQHandler` + 15 个 port 原语（寄存器/DMA/缓存/CMSIS 内建） | — |
 | `crc_port.c` | 63 | **p** | CRC 句柄 + `HAL_CRC_Init` + `HAL_CRC_MspInit` + `__HAL_CRC_*` IDR + `HAL_CRC_Calculate` | — |
-| `dma_port.c` | 45 | **p** | DMA1_Stream0 → USART1 TX 的 HAL 配置 + `HAL_DMA_IRQHandler` | — |
+| `dma_port.c` | 54 | **p** | DMA1_Stream0 → USART1 TX 的 HAL 配置 + `HAL_DMA_IRQHandler` + 向量入口 `DMA1_Stream0_IRQHandler` | — |
 | `mpu_port.c` | 71 | **p** | 中性参数填进 `MPU_Region_InitTypeDef` + `HAL_MPU_ConfigRegion` | — |
 | `rng_port.c` | 52 | **p** | RNG 句柄 + `HAL_RNG_Init` + `HAL_RNG_MspInit` + `__HAL_RNG_GET_FLAG` + `HAL_RNG_GenerateRandomNumber` | — |
 | `qspi_port.c` | 269 | **p** | QUADSPI（W25Q256）句柄 + 引脚/时钟 + 命令模式位域→HAL 枚举解码 + HAL 收发 | — |
-| `sys_port.c` | 198 | **p** | MPU 区域表（SoC 内存映射）/ Cache / VTOR / WFI / PRIMASK / MSP 的 CMSIS 内建 + RCC-PLL 400 MHz | — |
-| `nand_dma.c` | 344 | b | DMA2 + FMC NAND 传输 + D-Cache 维护 | G3（Stage 3） |
-| `stm32h7rsxx_it.c` | 220 | b | 向量表 ISR（`TIM6_DAC_IRQHandler` 改为转 `btim_port_irq_handler()`） | — |
+| `sys_port.c` | 209 | **p** | MPU 区域表（SoC 内存映射）/ Cache / VTOR / WFI / PRIMASK / MSP 的 CMSIS 内建 + RCC-PLL 400 MHz + 向量入口 `SysTick_Handler` | — |
+| `nand_dma.c` | 364 | b | DMA2 + FMC NAND 传输 + D-Cache 维护 + 向量入口 `DMA2_Stream0/1_IRQHandler`（`#if CONFIG_NAND_DMA` 内） | G3（Stage 3） |
 | `bsp/sdram_w9825g6kh.c` | 207 | b | FMC SDRAM 初始化 | — |
 
 > 分类记号 **p** = port 适配层（只碰 HAL/MMIO，不含可移植逻辑）。
 > 另：`include/platform/stm32h743/bsp/` 还有 `led.h` / `norflash_w25q256.h` 两个**无实现**的头。
+> **Stage 2.7 起本目录不再有总装 `stm32h7rsxx_it.c`**：每个 ISR 直接定义在拥有该外设的
+> port 文件里（见 §5.5 的映射表）。
 
 ### 2.3 `src/platform/stm32h7r3/`
 
@@ -255,7 +256,7 @@ src/platform/<soc>/             ← 唯一实现目录（判据 A 的唯一合�
     <svc>_port.c                ← port 适配：只碰 HAL/MMIO
     btim_port.c  watchdog_port.c  fault_port.c  delay_port.c  usart_port.c
     crc_port.c  dma_port.c  mpu_port.c  qspi_port.c  rng_port.c  sys_port.c
-    nand_dma.c  stm32h7rsxx_it.c  bsp/              ← 本身即 port / 向量表（Stage 3 处理）
+    nand_dma.c  bsp/                                ← 本身即 port（Stage 3 处理）
 include/platform/<soc>/         ← 实现头（含 HAL 类型），只有 <soc> 目录自己 include
     btim_port.h  usart_port.h  qspi_port.h  sys_port.h（原 HAL 伞头 sys.h 改名）
 ```
@@ -426,6 +427,7 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
 | **Stage 2**（**已落地**，见 §5.2） | **共享源文件层**：`btim` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务的纯逻辑搬到 `src/platform/*.c`，`<soc>/` 只留 `*_port.c`（机制见 §1.5） | 判据 A/B/D/E 通过 + `make tests` 0 warning + 上板全套通过 |
 | **Stage 2.5**（**已落地**，见 §5.3） | **usart 拆分**：`src/platform/stm32h743/usart.c`（1204 行）拆成共享传输 `src/platform/usart.c` + port `stm32h743/usart_port.c` + CLI `src/controller/cli.c`（消除 G7 倒挂） | 判据 A/B/D/E 通过 + 上板全套通过 |
 | **Stage 2.6**（**已落地**，见 §5.4） | **剩余 7 服务补齐**：`platform_ops` / `crc` / `dma` / `mpu` / `qspi` / `rng` / `sys` 全部拆成共享源 + `*_port.c`（含只做一行转发的 `dma` / `mpu`），HAL 伞头 `sys.h` 改名 `sys_port.h` | 判据 A 归零、B/D 空、E 精确相等 + 0 warning + 上板全套通过 |
+| **Stage 2.7**（**已落地**，见 §5.5） | **ISR 分散化**：删总装 `stm32h7rsxx_it.c`，每个 ISR 搬进拥有该外设的 `*_port.c`；EXTI 死代码删除 | 0 warning + `.isr_vector` 664 B 不变 + 上板全套通过 |
 | **Stage 3**（需上板） | 把 `nand_mt29f4g08abadawp.c` 的 `HAL_NAND_MspInit` / `HAL_NAND_Init` / GPIO 与 `nand_fmc.c` 的 FMC MMIO 收进 `<soc>/`，NAND 层只留 `nand_device_t ops` 回调（`fc_nand_design.md §1` 已画出该 seam） | 上板全套通过 |
 | **Stage 4**（真换 target 时才做） | `stm32h7r3` 补齐缺失服务与 6 个 `*_port.c`（btim/watchdog/fault/delay/usart 及各自的头），使判据 C / E 成立；并拆 h7r3 单体 `usart.c` 以消除 `_write` 重复定义（§2.3） | 判据 C、E 通过 |
 
@@ -616,6 +618,36 @@ h7r3 单体 `usart.c` 也定义 `_write` / `uart_log_write` 等 ⇒ h7r3 解冻�
 
 **未做**：不接线死代码（`rng` / `qspi` / `mpu` 拆完**仍是零调用者**，本轮只做结构对齐）；
 不拆 `nand_dma.c`（Stage 3）、不动 h7r3、不扩 `ssd_platform_ops_t`、不碰 `stm32h7rsxx_it.c` 向量表。
+
+### 5.5 Stage 2.7 进度（2026-10-11，ISR 分散化，只做 `stm32h743`）
+
+**目标**：删掉总装文件 `src/platform/stm32h743/stm32h7rsxx_it.c`（220 行），把每个 ISR 搬进
+拥有该外设的 `*_port.c`，与 `fault_port.c` 早已采用的「port 文件即中断入口」模式对齐。
+ISR 名字由 `startup_stm32h743xx.s` 的向量表固定 ⇒ 任何 TU 定义同名符号都在链接期覆盖弱
+`Default_Handler`，位置可自由迁移，**无需改启动文件**。
+
+| ISR（向量表名） | 新归属 |
+|---|---|
+| `USART1_IRQHandler` | `usart_port.c` |
+| `DMA1_Stream0_IRQHandler` | `dma_port.c` |
+| `TIM6_DAC_IRQHandler` | `btim_port.c` |
+| `WWDG_IRQHandler` | `watchdog_port.c` |
+| `DMA2_Stream0/1_IRQHandler` | `nand_dma.c`（`#if CONFIG_NAND_DMA` 内） |
+| `SysTick_Handler` | `sys_port.c` |
+| `SVC_Handler` / `DebugMon_Handler` / `PendSV_Handler` | `fault_port.c`（空壳，`SYS_SUPPORT_OS==0` 永不触发） |
+| `EXTI0/2/3/15_10_IRQHandler` | **删除** —— h743 上是死代码（无 `HAL_GPIO_EXTI_Callback`、无按键初始化、无 NVIC 使能），向量回落到 `Default_Handler` |
+
+删除：`src/platform/stm32h743/stm32h7rsxx_it.c` + `include/platform/stm32h743/stm32h7rsxx_it.h`
+（后者全仓只有前者 include，向量表在 `.s` 里按名字引用 ⇒ 可整删；`makefile.mk` 是 `*.c` glob
+⇒ 无需改构建）。
+
+**验收**：`make format && make format-check` 通过；`make clean && make tests` **0 warning / 0 error**；
+`arm-none-eabi-nm` 逐个确认 handler 落在其模块 `.o`（`stm32h7rsxx_it.o` 已消失），
+`.isr_vector` 仍 **664 B**（向量表尺寸未变）。**上板由用户跑**（完整 `test`）。
+
+**登记**：`CONFIG_NAND_DMA` 默认 **0**（`include/platform/dma.h:36`）⇒ 当前固件里 `nand_dma.c`
+整体不参与编译，搬进 `#if` 后 `DMA2_Stream0/1` 向量**不再定义**、回落 `Default_Handler`。
+行为安全：该配置下 DMA2 从不使能、无中断到来。
 
 ---
 

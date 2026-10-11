@@ -49,6 +49,16 @@ void watchdog_port_wwdg_irq_handler(void)
     HAL_WWDG_IRQHandler(&g_storage_wwdg);
 }
 
+/*
+ * WWDG 提前唤醒中断入口（向量表名由 startup_stm32h743xx.s 固定）。
+ * 本文件即该向量的归属地。
+ * 不在这里刷新 WWDG；Supervisor 记录故障并让硬件完成复位。
+ */
+void WWDG_IRQHandler(void)
+{
+    storage_wdg_wwdg_irq_handler();
+}
+
 uint32_t watchdog_port_now_ms(void)
 {
     return HAL_GetTick();

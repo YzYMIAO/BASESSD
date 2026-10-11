@@ -25,8 +25,17 @@ void btim_timx_int_init(uint16_t arr, uint16_t psc)
 
 void btim_port_irq_handler(void)
 {
-    /* 句柄是 static 的，向量表侧（stm32h7rsxx_it.c）通过本入口转发。 */
+    /* 句柄是 static 的，由本文件的 TIM6_DAC_IRQHandler 转发进来。 */
     HAL_TIM_IRQHandler(&g_btimx_handle);
+}
+
+/*
+ * TIM6 中断入口（向量表名由 startup_stm32h743xx.s 固定）。
+ * 本文件即该向量的归属地：调度器毫秒心跳的中断从这里进来。
+ */
+void TIM6_DAC_IRQHandler(void)
+{
+    btim_port_irq_handler();
 }
 
 void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim)

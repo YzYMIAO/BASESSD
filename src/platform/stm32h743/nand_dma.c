@@ -264,8 +264,8 @@ void nand_dma_abort_in(void)
 }
 
 /*
- * DMA2_Stream0 传输完成 ISR（PROGRAM 方向：memory→FMC）。
- * 由 stm32h7rsxx_it.c 的 DMA2_Stream0_IRQHandler() 调用。
+ * DMA2_Stream0 传输完成处理（PROGRAM 方向：memory→FMC）。
+ * 由本文件的 DMA2_Stream0_IRQHandler() 调用。
  */
 void nand_dma_irq_handler_data_out(void)
 {
@@ -286,8 +286,8 @@ void nand_dma_irq_handler_data_out(void)
 }
 
 /*
- * DMA2_Stream1 传输完成 ISR（READ 方向：FMC→memory）。
- * 由 stm32h7rsxx_it.c 的 DMA2_Stream1_IRQHandler() 调用。
+ * DMA2_Stream1 传输完成处理（READ 方向：FMC→memory）。
+ * 由本文件的 DMA2_Stream1_IRQHandler() 调用。
  *
  * READ 方向需要在 ISR 中 Invalidate D-Cache，
  * 因为 DMA 写入 buffer 后 D-Cache 中的副本已过时，
@@ -304,6 +304,26 @@ void nand_dma_irq_handler_data_in(void)
     {
         g_dma_data_in_done = 1U;
     }
+}
+
+/* ─────────────────────────── 向量表入口 ─────────────────────────── */
+
+/*
+ * DMA2_Stream0 中断入口（向量表名由 startup_stm32h743xx.s 固定）。
+ * 本文件即该向量的归属地：NAND PROGRAM 方向（memory→FMC）的 DMA 完成。
+ */
+void DMA2_Stream0_IRQHandler(void)
+{
+    nand_dma_irq_handler_data_out();
+}
+
+/*
+ * DMA2_Stream1 中断入口（向量表名由 startup_stm32h743xx.s 固定）。
+ * 本文件即该向量的归属地：NAND READ 方向（FMC→memory）的 DMA 完成。
+ */
+void DMA2_Stream1_IRQHandler(void)
+{
+    nand_dma_irq_handler_data_in();
 }
 
 /* ══════════════════════════════════════════════════════════════════

@@ -91,6 +91,26 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     HAL_NVIC_EnableIRQ(USART_UX_IRQn);
 }
 
+/* ─────────────────────────── 向量表入口 ─────────────────────────── */
+
+/*
+ * USART1 中断入口（向量表名由 startup_stm32h743xx.s 固定）。
+ * 本文件即该向量的归属地：只把控制权交给下方的处理函数。
+ */
+void USART1_IRQHandler(void)
+{
+#if SYS_SUPPORT_OS
+    OSIntEnter();
+#endif
+
+    /* Keep the IRQ bounded: it only drains/fills FIFOs and records errors. */
+    usart_port_irq_handler();
+
+#if SYS_SUPPORT_OS
+    OSIntExit();
+#endif
+}
+
 void usart_port_irq_handler(void)
 {
     uint32_t status      = USART_UX->ISR;

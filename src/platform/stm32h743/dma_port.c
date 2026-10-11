@@ -43,3 +43,12 @@ void dma_port_uart_tx_irq_handler(void)
 {
     HAL_DMA_IRQHandler(&g_dma_handle);
 }
+
+/*
+ * DMA1_Stream0 中断入口（向量表名由 startup_stm32h743xx.s 固定）。
+ * 本文件即该向量的归属地：USART1 TX 方向的 DMA 完成/错误都从这里进来。
+ */
+void DMA1_Stream0_IRQHandler(void)
+{
+    uart_tx_dma_irq_handler();
+}
