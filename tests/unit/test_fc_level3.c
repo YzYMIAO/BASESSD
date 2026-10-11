@@ -1339,6 +1339,214 @@ static MunitResult test_block_lock_ops(const MunitParameter params[], void *data
     return MUNIT_OK;
 }
 
+/**************************************************************************
+ *  test_mixed_pipeline — 压力：批量提交 / 批量收取 / 读写擦交替（v1.32）
+ *
+ *  与其余用例「发一条 → poll 一条」不同，本条**先批量提交 W 条、再分批抽干**，
+ *  给调度器 / 队列加压。形状对齐真实主控的 SQ/CQ + CID 配对模型：
+ *    ① 提交 W 条（不轮询）→ ② 循环 { fc_service() 推进 ≤ CH*CE*LUN 条;
+ *       fc_poll_completions(buf, batch) 收取 ≤ batch 条 } 直到本轮收齐。
+ *
+ *  ── 拓扑无关 ──
+ *    batch = CH_NUM*CE_NUM*LUN_NUM 在**测试里**算、传给 fc_poll_completions ——
+ *    FC 侧不写死任何批量常量。本板 LUN_NUM=1 ⇒ batch=1、NAND 最多 1 条在途（串行）；
+ *    换多 die 器件同一份代码自动 batch>1 真并行。W = FC_SCHEDULER_CHAIN_MAX*2
+ *    （= per-LUN FIFO 深 × 2）⇒ 窗口大于 FIFO 深，SQ 里能压住命令、真正给调度器加压。
+ *
+ *  ── 交替且无数据冒险 ──
+ *    窗口内 op 按 PROGRAM/READ/ERASE 轮转，三种 op 各打**自己的专用块**：
+ *      blk_read 只被读（Phase 0 已写好内容）／blk_write 只被写／blk_erase 只被擦。
+ *    ⇒ 三种 op 同窗口在途互不影响，无数据冒险。读回逐 CW 校验 PAA 图案（硬判据）。
+ *
+ *  抽样顺序固定为 ① plane ② base block —— 顺序即复现契约。
+ **************************************************************************/
+
+#define L3_STRESS_WINDOW   (FC_SCHEDULER_CHAIN_MAX * 2U) /* 8；> FIFO 深(4) 才压得住 SQ */
+#define L3_STRESS_ROUNDS   (4U)
+#define L3_STRESS_PAGES    (16U) /* blk_read 预写的页数；读命令页号在此范围内循环 */
+#define L3_STRESS_OP_PROG  (0U)
+#define L3_STRESS_OP_READ  (1U)
+#define L3_STRESS_OP_ERASE (2U)
+#define L3_STRESS_OPS      (3U)
+#define L3_STRESS_BATCH    ((uint16_t)(CH_NUM * CE_NUM * LUN_NUM))
+#define L3_STRESS_BUDGET   (TEST_SERVICE_LOOP_MAX * L3_STRESS_WINDOW)
+
+typedef struct
+{
+    fc_command_t *cmd;
+    uint8_t       operation;
+    uint16_t      block;
+    uint8_t       plane;
+    uint16_t      page;
+} l3_stress_slot_t;
+
+/* 按 completion.command_id 找槽位（cmd 无缓存 id，v15 起由指针派生）。 */
+static l3_stress_slot_t *l3_stress_find(l3_stress_slot_t *slots, uint16_t count, uint16_t command_id)
+{
+    for (uint16_t i = 0U; i < count; i++)
+    {
+        fc_command_id_t id = FC_COMMAND_ID_INVALID;
+
+        if (slots[i].cmd == NULL)
+        {
+            continue;
+        }
+        if ((fc_command_to_id(slots[i].cmd, &id) != 0U) && ((uint16_t)id == command_id))
+        {
+            return &slots[i];
+        }
+    }
+    return NULL;
+}
+
+/* 建一条压力命令（**只建链、不提交**）。PROGRAM 填源数据 / READ 预填 0xCC 哨兵。 */
+static fc_command_t *l3_stress_build(uint8_t operation, uint16_t block, uint8_t plane, uint16_t page)
+{
+    const uint8_t plane_bm = TEST_PLANE_BM(plane);
+    nand_addr_t   addr     = (nand_addr_t){.block = block, .plane = plane, .page = (uint8_t)page};
+
+    switch (operation)
+    {
+        case L3_STRESS_OP_PROG:
+        {
+            fc_command_t *cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bm), (uint32_t)pba_from_addr(&addr), &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE));
+
+            test_fill_user_paa(cmd);
+            return cmd;
+        }
+        case L3_STRESS_OP_READ:
+        {
+            fc_command_t *cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bm), (uint32_t)pba_from_addr(&addr), &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
+
+            test_memset_read_buffer(cmd);
+            return cmd;
+        }
+        case L3_STRESS_OP_ERASE:
+            return test_cmd_build(&(nand_addr_t){.block = block, .plane = plane}, 0U, 0U, &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
+        default:
+            return NULL;
+    }
+}
+
+/* Phase 0 前置命令的硬判据：无错误位。 */
+static void l3_stress_expect_ok(fc_command_status_t completion)
+{
+    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+}
+
+static MunitResult test_mixed_pipeline(const MunitParameter params[], void *data)
+{
+    l3_stress_slot_t    slots[L3_STRESS_WINDOW] = {0};
+    fc_command_status_t batch_buf[L3_STRESS_BATCH];
+    const uint16_t      batch = L3_STRESS_BATCH;
+
+    (void)params;
+    (void)data;
+
+    const uint8_t  plane    = l3_plane_draw("mixed_pipeline");
+    const uint16_t b_base   = l3_block_draw("mixed_pipeline");
+    const uint32_t span     = (uint32_t)(L3_BLOCK_HI - L3_BLOCK_LO) + 1U;
+    const uint32_t off      = (uint32_t)(b_base - L3_BLOCK_LO);
+    const uint16_t b_read   = b_base; /* 1 次抽样，派生三个专用块 */
+    const uint16_t b_write  = (uint16_t)(L3_BLOCK_LO + ((off + 1U) % span));
+    const uint16_t b_erase  = (uint16_t)(L3_BLOCK_LO + ((off + 2U) % span));
+    const uint8_t  plane_bm = TEST_PLANE_BM(plane);
+    uint32_t       page_wr  = 0U;
+    uint32_t       page_rd  = 0U;
+    uint16_t       r;
+    uint16_t       k;
+
+    test_trace_begin();
+    test_trace_summary("mixed_pipeline plane=%u b_rd=%u b_wr=%u b_er=%u W=%u R=%u batch=%u", (unsigned)plane, (unsigned)b_read, (unsigned)b_write, (unsigned)b_erase, (unsigned)L3_STRESS_WINDOW, (unsigned)L3_STRESS_ROUNDS, (unsigned)batch);
+
+    /* ── Phase 0：前置（顺序）——三块各自就位，读块内容已知 ── */
+    l3_stress_expect_ok(test_erase_block(b_read, plane_bm, &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE)));
+    l3_stress_expect_ok(test_erase_block(b_write, plane_bm, &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE)));
+    l3_stress_expect_ok(test_erase_block(b_erase, plane_bm, &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE)));
+    for (k = 0U; k < L3_STRESS_PAGES; k++)
+    {
+        l3_stress_expect_ok(test_prog_page(b_read, plane_bm, k, &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL));
+        l3_stress_expect_ok(test_prog_page(b_erase, plane_bm, k, &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL));
+    }
+
+    /* ── Phase 1：压力轮 ── */
+    for (r = 0U; r < L3_STRESS_ROUNDS; r++)
+    {
+        uint16_t submitted = 0U;
+        uint16_t done      = 0U;
+        uint32_t guard     = 0U;
+
+        /* ① 批量提交 W 条（不轮询）——op 逐条轮转 */
+        for (k = 0U; k < L3_STRESS_WINDOW; k++)
+        {
+            const uint8_t op = (uint8_t)(((uint32_t)r * L3_STRESS_WINDOW + (uint32_t)k) % L3_STRESS_OPS);
+            uint16_t      block;
+            uint16_t      page = 0U;
+
+            if (op == L3_STRESS_OP_PROG)
+            {
+                block = b_write;
+                page  = (uint16_t)page_wr;
+                page_wr++;
+            }
+            else if (op == L3_STRESS_OP_READ)
+            {
+                block = b_read;
+                page  = (uint16_t)(page_rd % L3_STRESS_PAGES);
+                page_rd++;
+            }
+            else
+            {
+                block = b_erase;
+            }
+
+            slots[k].cmd       = l3_stress_build(op, block, plane, page);
+            slots[k].operation = op;
+            slots[k].block     = block;
+            slots[k].plane     = plane;
+            slots[k].page      = page;
+            munit_assert_not_null(slots[k].cmd);
+            munit_assert_int(fc_submit(slots[k].cmd), ==, FC_STATUS_OK);
+            submitted++;
+        }
+
+        /* ② 分批抽干：每轮 fc_service 推进 ≤ CH*CE*LUN，再收 ≤ batch 条 */
+        while ((done < submitted) && (guard < L3_STRESS_BUDGET))
+        {
+            uint16_t n = 0U;
+            uint16_t j;
+
+            (void)fc_service();
+            (void)fc_poll_completions(batch_buf, batch, &n);
+            for (j = 0U; j < n; j++)
+            {
+                l3_stress_slot_t *slot = l3_stress_find(slots, L3_STRESS_WINDOW, (uint16_t)batch_buf[j].command_id);
+
+                munit_assert_not_null(slot);
+                munit_assert_uint32(batch_buf[j].status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+                if (slot->operation == L3_STRESS_OP_READ)
+                {
+                    /* 批量读：先捕获（原地解码后的明文）→ 再逐 CW 校验 → 最后 release */
+                    test_capture_cmd(slot->cmd);
+                    test_verify_page_paa(g_source_data, slot->block, slot->page, TEST_PLANE_BM(slot->plane));
+                }
+                test_trace_detail("  slot op=%u b=%u page=%u status=0x%02X", (unsigned)slot->operation, (unsigned)slot->block, (unsigned)slot->page, (unsigned)batch_buf[j].status);
+                munit_assert_int(fc_command_release(slot->cmd), ==, FC_STATUS_OK);
+                slot->cmd = NULL;
+                done++;
+            }
+            guard++;
+        }
+
+        munit_assert_uint32(done, ==, submitted);
+        test_trace_summary("round %u/%u: submitted=%u drained=%u services=%lu", (unsigned)(r + 1U), (unsigned)L3_STRESS_ROUNDS, (unsigned)submitted, (unsigned)done, (unsigned long)guard);
+    }
+
+    test_trace_summary("mixed_pipeline b_rd=%u b_wr=%u b_er=%u: %u 轮 × %u 条（读写擦交替）全部完成、读回逐 CW 校验通过", (unsigned)b_read, (unsigned)b_write, (unsigned)b_erase, (unsigned)L3_STRESS_ROUNDS, (unsigned)L3_STRESS_WINDOW);
+
+    return MUNIT_OK;
+}
+
 #if 0 /* BLOCK_LOCK_TIGHT — 不可逆锁死整片 NAND，暂不启用 */
 
 /**************************************************************************
@@ -1476,6 +1684,7 @@ MunitTest g_fc_lifecycle_tests[] = {
     {  "block_load_fetch",   test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
     {   "block_read_meta",    test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
     {    "block_lock_ops",     test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {    "mixed_pipeline",     test_mixed_pipeline, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
 #if 0  /* block_lock_tight 被 #if 0 隔开，此处不注册 */
     { "block_lock_tight",    test_block_lock_tight,    test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 #endif

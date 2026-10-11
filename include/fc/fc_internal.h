@@ -129,6 +129,11 @@ extern "C"
     /* 从 CQ 取一条完成项 */
     fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_status_t *completion);
 
+    /* 从 CQ 批量取完成项：最多 max_count 条，实际条数写入 *count。
+     * 上限由调用方给（FC 不写死）；循环被 CQ 占用数天然封顶。
+     * 返回：取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY。 */
+    fc_status_t fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, uint16_t max_count, uint16_t *count);
+
     /* 释放命令全部资源（desc 链 + buffer + command 槽位）；调用方须已保证状态合法 */
     fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *command);
 

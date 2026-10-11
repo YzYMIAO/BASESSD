@@ -270,6 +270,21 @@ fc_status_t fc_poll_completion(fc_command_status_t *completion)
 }
 
 /* --------------------------------------------------------------------
+ * fc_poll_completions
+ *   功能：从 CQ 批量取完成项（公共入口）。最多取 max_count 条，实际条数写入 *count。
+ *   参数：completions —— 输出数组（容量 ≥ max_count）；max_count —— 本次上限（调用方定，
+ *         FC 不写死）；count —— 输出实际取到的条数。
+ *   返回：取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY（含 max_count==0）。
+ *   前置（违反一律 ASSERT）：completions、count 均非空。
+ * -------------------------------------------------------------------- */
+fc_status_t fc_poll_completions(fc_command_status_t *completions, uint16_t max_count, uint16_t *count)
+{
+    ASSERT(completions != NULL);
+    ASSERT(count != NULL);
+    return fc_poll_completions_internal(&g_fc_controller, completions, max_count, count);
+}
+
+/* --------------------------------------------------------------------
  * fc_command_release
  *   功能：释放命令全部资源（公共接口）。
  *   参数：command —— 命令。

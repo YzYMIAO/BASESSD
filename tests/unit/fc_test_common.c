@@ -194,8 +194,10 @@ fc_command_status_t test_submit_wait(fc_command_t *cmd)
 }
 
 /* 读路径收尾：FC 已在 fc_complete_from_nand 里跑过 process_read（原地解码），
- * 此刻 desc 的 USER 区是明文——逐 desc 拷回 g_source_data 槽，供调用者校验。 */
-static void test_capture_user_paa(const fc_command_t *cmd)
+ * 此刻 desc 的 USER 区是明文——逐 desc 拷回 g_source_data 槽，供调用者校验。
+ * 导出供**批量**路径使用：批量读要「先捕获、再校验、最后才 release」，
+ * 必须在提交-抽取循环里单独调用它（页 helper 内部收尾也走这里）。 */
+void test_capture_cmd(const fc_command_t *cmd)
 {
     fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
     uint8_t            idx     = 0U;
@@ -476,7 +478,7 @@ fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, u
     completion = test_submit_wait(cmd);
 
     /* FC 已跑过 process_read（原地解码），此刻 desc 的 USER 区是明文。 */
-    test_capture_user_paa(cmd);
+    test_capture_cmd(cmd);
 
     if (data != NULL)
     {
@@ -596,7 +598,7 @@ static fc_command_status_t test_read_cache_step(uint16_t block_index, uint8_t pl
     completion = test_submit_wait(cmd);
 
     /* FC 已跑过 process_read（原地解码），此刻 desc 的 USER 区是明文。 */
-    test_capture_user_paa(cmd);
+    test_capture_cmd(cmd);
 
     /* 证据明细（--log-visible debug）：命令地址页号恒为 0（31h/3Fh 无地址周期），
      * 真正输出的是 output_page——打出来才看得出「地址与 meta 刻意解耦」这件事。 */
@@ -747,7 +749,7 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
     completion = test_submit_wait(cmd);
 
     /* FC 已跑过 process_read（原地解码），此刻 desc 的 USER 区是明文。 */
-    test_capture_user_paa(cmd);
+    test_capture_cmd(cmd);
 
     /* 证据明细（--log-visible debug）：本 op 是**唯一**一条「命令地址 ≠ 输出页」的
      * cache 命令——地址打 addr_page、期望输出打 prev_page，一行里看出两者不是一回事。 */
@@ -867,7 +869,7 @@ void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t 
 
     completion = test_submit_wait(cmd);
 
-    test_capture_user_paa(cmd);
+    test_capture_cmd(cmd);
 
     test_trace_detail("random_data op=%u b=%u p=%u bm=0x%02X cw=%u status=0x%X", (unsigned)config->operation, (unsigned)block_index, (unsigned)page_index, (unsigned)plane_bitmap, (unsigned)test_cw_count(cmd), (unsigned)completion.status);
 

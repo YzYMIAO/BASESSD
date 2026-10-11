@@ -93,6 +93,14 @@ extern "C"
     /* 从 CQ 取完成项 */
     fc_status_t fc_poll_completion(fc_command_status_t *completion);
 
+    /* 从 CQ 批量取完成项：最多取 max_count 条，实际条数写入 *count。
+     * **上限由调用方给**（FC 不写死任何批量常量）——常见取值是 nand_dispatch_poll
+     * 的推进上限 CH_NUM×CE_NUM×LUN_NUM，与单轮调度对齐；也可是任意 K。
+     * 前置（违反一律 ASSERT）：completions 与 count 均非空。max_count 给多大都不会越界——
+     * 循环被 CQ 占用数（≤ FC_CQ_DEPTH）天然封顶。
+     * 返回：取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY（含 max_count==0）。 */
+    fc_status_t fc_poll_completions(fc_command_status_t *completions, uint16_t max_count, uint16_t *count);
+
     /* 释放命令及关联 Descriptor 链 + 各 CW buffer（须已 COMPLETED 或 ALLOCATED 且不在 CQ 中）。
      * 前置（违反一律 ASSERT）：指针落在命令池内。**幂等**——已 FREE 时直接返回 OK。
      * 返回：恒 FC_STATUS_OK。 */

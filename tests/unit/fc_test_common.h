@@ -343,6 +343,11 @@ uint8_t test_check_paa(const uint8_t *slot, nand_paa_t paa);
 void test_fill_user_paa(fc_command_t *cmd);
 void test_memset_read_buffer(fc_command_t *cmd);
 
+/* 读路径收尾（批量路径用）：FC 已原地解码，逐 desc 把 USER 区拷回 g_source_data 槽。
+ * 页 helper（test_read_page 等）内部收尾也走它；批量读须在 release 前显式调用，
+ * 之后再用 test_verify_page_paa 校验。 */
+void test_capture_cmd(const fc_command_t *cmd);
+
 /* 按 (block, page, plane_bitmap) 逐槽校验 data 里的 PAA 图案——页 helper 的读回判据。 */
 void test_verify_page_paa(const uint8_t *data, uint16_t block_index, uint16_t page_index, uint8_t plane_bitmap);
 

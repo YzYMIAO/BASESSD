@@ -23,7 +23,7 @@
  *    7. 完成            fc_complete_internal、fc_complete_from_nand
  *    8. Stripe RAID     fc_stripe_release_parity、fc_stripe_submit
  *    9. 调度/轮询       fc_poll_* 辅助 + fc_poll_internal
- *   10. CQ 出口         fc_poll_completion_internal
+ *   10. CQ 出口         fc_poll_completion_internal、fc_poll_completions_internal
  *
  * 服务主循环（fc_poll_internal）：
  *   ① nand_dispatch_poll() 推进 NAND 层全部 LUN，每完成经 sink 当场 fc_complete_from_nand()
@@ -1830,4 +1830,26 @@ fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_status_t *c
 
     result = fc_completion_queue_pop(&controller->cq, completion);
     return result;
+}
+
+/* --------------------------------------------------------------------
+ * fc_poll_completions_internal
+ *   功能：从 CQ 批量取完成项——弹到 max_count 条或队列空为止。
+ *   参数：controller —— FC 控制器；completions —— 输出数组（容量 ≥ max_count）；
+ *         max_count —— 本次上限（**调用方给**，FC 不写死）；count —— 输出实际条数。
+ *   返回：取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY（含 max_count==0）。
+ *   要点：循环被 CQ 占用数（≤ FC_CQ_DEPTH）天然封顶，max_count 给多大都不会越界；
+ *         语义与单条版一致（有取到 = OK / 一条没有 = QUEUE_EMPTY）。
+ * -------------------------------------------------------------------- */
+fc_status_t fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, uint16_t max_count, uint16_t *count)
+{
+    uint16_t n = 0U;
+
+    while ((n < max_count) && (fc_completion_queue_pop(&controller->cq, &completions[n]) == FC_STATUS_OK))
+    {
+        n++;
+    }
+    *count = n;
+
+    return (n != 0U) ? FC_STATUS_OK : FC_STATUS_QUEUE_EMPTY;
 }
