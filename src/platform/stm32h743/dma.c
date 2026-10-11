@@ -1,6 +1,7 @@
 #include "dma.h"
 
 #include "common/common.h"
+#include "sys.h" /* DMA_HandleTypeDef / DMA1_Stream0 / HAL_DMA_* —— 抽象 dma.h 已不再传递 */
 
 DMA_HandleTypeDef         g_dma_handle;
 extern UART_HandleTypeDef g_uart1_handle;

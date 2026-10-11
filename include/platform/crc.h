@@ -1,12 +1,12 @@
-#ifndef PLATFORM_STM32H743_CRC_H
-#define PLATFORM_STM32H743_CRC_H
+#ifndef PLATFORM_CRC_H
+#define PLATFORM_CRC_H
 
 #include <stdint.h>
 
 /*
- * STM32H743 硬件 CRC 外设封装（走第三方 HAL 驱动）。
+ * 平台 CRC-32 抽象接口（实现在 src/platform/<soc>/crc.c，走第三方 HAL CRC 驱动）。
  *
- * 分层：本模块是唯一持有 CRC_HandleTypeDef、管时钟、做外设自检的地方；
+ * 分层：实现目录是唯一持有厂商 HAL 的 CRC 句柄类型、管时钟、做外设自检的地方；
  * 上层（src/fc/fc_crc_engine.c）只决定「对哪段数据算、结果怎么判」。
  *
  * 刻意**不** include "sys.h"：唯一使用者 src/fc/fc_crc_engine.c 要保持零 HAL 依赖，
@@ -24,4 +24,4 @@ void crc_init(void);
  * 前置：data 非空、4 字节对齐；length_bytes 是 4 的倍数（违反一律 ASSERT）。 */
 uint32_t crc_compute(const uint8_t *data, uint32_t length_bytes);
 
-#endif /* PLATFORM_STM32H743_CRC_H */
+#endif /* PLATFORM_CRC_H */

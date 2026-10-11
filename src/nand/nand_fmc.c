@@ -25,10 +25,10 @@
 #include "common/assertion.h"
 #include "common/log.h"
 #include "delay.h"
+#include "dma.h"
 #include "nand/nand_debug.h"
 #include "nand/nand_mt29f4g08abadawp.h"
 #include "onfi_1_0.h"
-#include "platform/stm32h743/nand_dma.h"
 
 #include <stddef.h>
 

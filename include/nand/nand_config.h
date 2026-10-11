@@ -72,22 +72,6 @@
 #    define CONFIG_NAND_TIMING_MODE_4 (0U)
 #endif
 
-/* ── NAND 数据搬移模式 ──
- *
- * CONFIG_NAND_DMA
- *   0 = PIO（默认），CPU 逐字节读写 FMC 寄存器。
- *   1 = DMA，使用 FMC 专用 DMA 请求线（DMA_REQUEST_FMC），
- *       memory-to-peripheral / peripheral-to-memory 非阻塞模式。
- *
- * DMA 模式下 DATA_IN/DATA_OUT 阶段用 DMA 启动后 CPU 可处理其他事务，
- * engine step 轮询完成标志。Command/Address 阶段仍走 PIO。
- *
- * 运行时可通过全局变量 g_nand_dma_enable 动态切换。
- */
-#ifndef CONFIG_NAND_DMA
-#    define CONFIG_NAND_DMA (0U)
-#endif
-
 #define CW_WIDTH         (2U)  /* 4个codeword,各个cw的起始位置在4等分处。 */
 #define PAGE_ADDR_WIDTH  (6U)  /* PA0~PA5，每 Block 64 页。 */
 #define PLANE_ADDR_WIDTH (1U)  /* BA6，Plane 选择。 */

@@ -1,12 +1,17 @@
-#ifndef PLATFORM_STM32H743_DELAY_H
-#define PLATFORM_STM32H743_DELAY_H
-
-#include "sys.h"
+#ifndef PLATFORM_DELAY_H
+#define PLATFORM_DELAY_H
 
 #include <stdbool.h>
 #include <stdint.h>
 
-/* H743 默认使用 HAL 配置的 SysTick；设为 1 可改用 DWT CYCCNT。 */
+/*
+ * 平台延时/时钟抽象接口（实现在 src/platform/<soc>/delay.c）。
+ *
+ * 本头零 HAL 类型：核心模块（src/nand）以裸名 #include "delay.h" 消费，
+ * 具体 SoC 的 DWT/SysTick/系统节拍来源细节一律留在实现目录。
+ */
+
+/* 默认使用 HAL 配置的 SysTick；设为 1 可改用 DWT CYCCNT。 */
 #ifndef DELAY_USE_DWT
 #    define DELAY_USE_DWT 0U
 #endif
@@ -44,4 +49,4 @@ void delay_ms(uint32_t ms);
 uint32_t delay_now_ms(void);
 bool     delay_elapsed_ms(uint32_t start_ms, uint32_t timeout_ms);
 
-#endif /* PLATFORM_STM32H743_DELAY_H */
+#endif /* PLATFORM_DELAY_H */

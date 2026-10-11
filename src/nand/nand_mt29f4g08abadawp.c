@@ -20,10 +20,10 @@
 #include "common/assertion.h"
 #include "common/log.h"
 #include "delay.h"
+#include "dma.h"
 #include "nand_config.h"
 #include "nand_dispatch.h"
 #include "nand_fmc.h"
-#include "platform/stm32h743/nand_dma.h"
 
 #include <stddef.h>
 

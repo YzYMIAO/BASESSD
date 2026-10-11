@@ -5,6 +5,10 @@
 3. 设置 ARMv7-R `VBAR`，安装异常向量。
 4. 调用所选 BSP 的 `soc_early_init()`。
 5. 初始化 C 数据段和 BSS，并调用 `soc_memory_init()`。
+
+> ⚠ 上表为**目标**启动顺序：`soc_early_init()` / `soc_memory_init()` 目前**尚未实现**
+> （`docs/architecture.md` 曾引用的 `platform/soc.h` 亦不存在）。现状见
+> `docs/design/platform_abstraction.md`。
 6. 初始化中断控制器并进入 `main()`。
 
 STM32H743 固件从片内 Flash 启动，`Reset_Handler` 由 `stm32h743` 平台提供。

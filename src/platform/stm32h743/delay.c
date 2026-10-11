@@ -1,6 +1,7 @@
 #include "delay.h"
 
 #include "common/common.h"
+#include "sys.h" /* DWT / CoreDebug / HAL_RCC_GetHCLKFreq —— 抽象 delay.h 已不再传递 */
 
 static uint32_t g_core_clock_hz;
 static bool     g_delay_initialized;

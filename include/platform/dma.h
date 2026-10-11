@@ -1,9 +1,36 @@
-#ifndef PLATFORM_STM32H743_NAND_DMA_H
-#define PLATFORM_STM32H743_NAND_DMA_H
-
-#include "nand/nand_config.h"
+#ifndef PLATFORM_DMA_H
+#define PLATFORM_DMA_H
 
 #include <stdint.h>
+
+/*
+ * 平台 DMA 抽象接口。
+ *
+ * 实现在 src/platform/<soc>/：dma.c（UART1 TX）、nand_dma.c（NAND/FMC 数据搬移）。
+ * 本头零 HAL 类型：两段函数签名都只含裸类型，供核心模块（src/nand）与平台内部
+ * （usart.c）共同以裸名 #include "dma.h" 消费。
+ */
+
+/* ── UART TX DMA（USART1；平台内部使用）── */
+
+uint8_t uart_tx_dma_init(void);
+void    uart_tx_dma_irq_handler(void);
+
+/* ── NAND 数据搬移模式 ──
+ *
+ * CONFIG_NAND_DMA
+ *   0 = PIO（默认），CPU 逐字节读写 FMC 寄存器。
+ *   1 = DMA，使用 FMC 专用 DMA 请求线（DMA_REQUEST_FMC），
+ *       memory-to-peripheral / peripheral-to-memory 非阻塞模式。
+ *
+ * DMA 模式下 DATA_IN/DATA_OUT 阶段用 DMA 启动后 CPU 可处理其他事务，
+ * engine step 轮询完成标志。Command/Address 阶段仍走 PIO。
+ *
+ * 运行时可通过全局变量 g_nand_dma_enable 动态切换。
+ */
+#ifndef CONFIG_NAND_DMA
+#    define CONFIG_NAND_DMA (0U)
+#endif
 
 #if CONFIG_NAND_DMA
 
@@ -135,4 +162,4 @@ static inline void nand_dma_cache_invalidate(uint8_t *buffer, uint16_t length)
 
 #endif /* CONFIG_NAND_DMA */
 
-#endif /* PLATFORM_STM32H743_NAND_DMA_H */
+#endif /* PLATFORM_DMA_H */

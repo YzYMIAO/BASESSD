@@ -1,9 +1,8 @@
 #include "common/common.h"
-#include "nand/nand_config.h"
+#include "dma.h" /* 抽象头提供 CONFIG_NAND_DMA 默认值，必须在 #if 之前 */
 
 #if CONFIG_NAND_DMA
 
-#    include "nand_dma.h"
 #    include "stm32h743xx.h"
 #    include "stm32h7xx_hal.h"
 

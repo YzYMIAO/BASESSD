@@ -37,6 +37,9 @@ _Static_assert(FTL_LBA_MAX <= 0xFFFFFFFFUL, "FTL_LBA_MAX 超出 32 位，CLI 的
 
 UART_HandleTypeDef g_uart1_handle = {0};
 
+/* UART TX DMA 句柄定义在 dma.c；抽象 dma.h 只暴露裸签名，故在此本地声明。 */
+extern DMA_HandleTypeDef g_dma_handle;
+
 /*
  * RX 环形队列：USART IRQ 是唯一生产者，uart_service_poll() 是唯一消费者。
  * IRQ 只发布 g_rx_head，主循环只推进 g_rx_tail，这是无锁 SPSC 队列成立的前提。
