@@ -450,6 +450,7 @@ static uint32_t cmd_diff_report(const fc_command_t *before, const fc_command_t *
  *    2. READ_ID — 读取 NAND ID
  *    3. READ_PARAMETER_PAGE — 读取 ONFI 参数页
  *    4. GET_FEATURES — 读取默认 Feature 寄存器
+ *    5. READ_UNIQUE_ID — 读取出厂唯一 ID（EDh，v1.36 补测）
  *
  *  验证点：
  *    - 各命令独立执行，生命周期完整
@@ -460,6 +461,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
 {
     uint8_t id_bytes[5]   = {0U, 0U, 0U, 0U, 0U};
     uint8_t onfi_bytes[4] = {0U, 0U, 0U, 0U};
+    uint8_t uid_bytes[16] = {0U};
 
     (void)params;
     (void)data;
@@ -535,8 +537,32 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
-    /* 证据摘要（--log-visible info）：四条命令的**实读字节**。
-     * 裸 [ OK ] 只说明命令回来了；打出 ID / ONFI 签名才说明 NAND 真的答了话。 */
+    /* Step 5: READ_UNIQUE_ID (EDh) — 与参数页共用同一 UOP 模板，只换命令字节；
+     * 读 256B 进 CW0（只取 CW0，位图 0x01）。
+     * ⚠ 唯一 ID 是**出厂烧录的 16 字节**，本器件手册未给死取值 ⇒ **不假设内容**
+     *   （见「协议断言必须先查证」），硬判据只到「命令 + CW 状态全 SUCCESS」；
+     *   16 字节走证据行打出，供人工比对（全 0xFF 即视为器件未实现该 ID）。 */
+    {
+        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_UNIQUE_ID, FC_CRC_ENABLE));
+
+        (void)test_submit_wait(cmd);
+
+        munit_assert_uint8(test_verify_cw_status_all_success(cmd), ==, 1U);
+
+        uint8_t *buf = test_cw_user(cmd, 0U);
+
+        munit_assert_not_null(buf);
+
+        for (uint8_t i = 0U; i < 16U; i++)
+        {
+            uid_bytes[i] = buf[i];
+        }
+
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    }
+
+    /* 证据摘要（--log-visible info）：五条命令的**实读字节**。
+     * 裸 [ OK ] 只说明命令回来了；打出 ID / ONFI 签名 / 唯一 ID 才说明 NAND 真的答了话。 */
     test_trace_summary("RESET ok; READ_ID=%02X %02X %02X %02X %02X; PARAM_PAGE=%02X %02X %02X %02X (%c%c%c%c); GET_FEATURES(0x01) ok",
                        (unsigned)id_bytes[0],
                        (unsigned)id_bytes[1],
@@ -551,6 +577,24 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
                        (char)onfi_bytes[1],
                        (char)onfi_bytes[2],
                        (char)onfi_bytes[3]);
+
+    test_trace_summary("UNIQUE_ID(16B)=%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                       (unsigned)uid_bytes[0],
+                       (unsigned)uid_bytes[1],
+                       (unsigned)uid_bytes[2],
+                       (unsigned)uid_bytes[3],
+                       (unsigned)uid_bytes[4],
+                       (unsigned)uid_bytes[5],
+                       (unsigned)uid_bytes[6],
+                       (unsigned)uid_bytes[7],
+                       (unsigned)uid_bytes[8],
+                       (unsigned)uid_bytes[9],
+                       (unsigned)uid_bytes[10],
+                       (unsigned)uid_bytes[11],
+                       (unsigned)uid_bytes[12],
+                       (unsigned)uid_bytes[13],
+                       (unsigned)uid_bytes[14],
+                       (unsigned)uid_bytes[15]);
 
     return MUNIT_OK;
 }
@@ -1413,6 +1457,10 @@ static MunitResult test_block_load_fetch(const MunitParameter params[], void *da
  *    - 由 pba.cw 选 CW（列地址 = CW 号 × CW_SIZE）——同一页不同 CW 回读到**不同** META
  *    - 回读值 == FC 写路径写入的 META（每 CW 的 META = (command->meta & ~PLANE_CW_MASK)
  *      | plane_cw，见 fc_interface.c:197；prog 的 command->meta = 本页 PBA）
+ *    - **链内 META 复核（v1.36）**：另走一条**普通读**（有 desc 链），读回后从 CW 基址
+ *      offset 0 经 `fc_buffer_get_meta(cmd, cw)` 取 META，与上面 op 11 的结果逐位一致——
+ *      这正是 gc.c 的真实消费路径（读页 → get_meta(cmd,0) → 4 字节扇区地址 → >> CW_WIDTH）。
+ *      两条路径互为交叉检查：一条「无链只读回读」，一条「链内 buffer」。
  *
  *  ⚠ 抽样顺序固定为 ① plane ② block —— 顺序即复现契约。
  **************************************************************************/
@@ -1448,6 +1496,40 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
             test_trace_summary("read_meta b=%u plane=%u page=%u cw=%u: got=0x%08lX expect=0x%08lX", (unsigned)block, (unsigned)plane, (unsigned)page, (unsigned)cw, (unsigned long)got_meta, (unsigned long)expected);
 
             munit_assert_uint32(got_meta, ==, expected);
+        }
+
+        /* ── 链内 META 复核（v1.36）：普通读（有 desc 链）→ fc_buffer_get_meta ──
+         * 走 gc.c 的真实消费路径：读页完成后从 CW 基址 offset 0 取 META。与上面 op 11
+         * 的「无链只读」结果互为交叉检查；同一页、同一 expected 公式。 */
+        {
+            fc_command_t       *cmd        = test_cmd_build(&(nand_addr_t){.block = block, .plane = plane, .page = (uint8_t)page},
+                                               test_plane_cw_bitmap(TEST_PLANE_BM(plane)),
+                                               base,
+                                               &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
+            fc_command_status_t completion = test_submit_wait(cmd);
+
+            munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+
+            for (uint8_t cw = 0U; cw < CW_NUM; cw += 2U) /* CW0 与 CW2 */
+            {
+                const uint32_t expected = (base & ~PLANE_CW_MASK) | ((uint32_t)plane << PBA_PLANE_SHIFT) | (uint32_t)cw;
+                uint8_t       *meta_ptr = fc_buffer_get_meta(cmd, cw);
+                uint32_t       got_meta;
+
+                munit_assert_not_null(meta_ptr);
+
+                got_meta = (uint32_t)meta_ptr[0] | ((uint32_t)meta_ptr[1] << 8U) | ((uint32_t)meta_ptr[2] << 16U) | ((uint32_t)meta_ptr[3] << 24U);
+
+                test_trace_summary("buffer_get_meta b=%u plane=%u page=%u cw=%u: got=0x%08lX expect=0x%08lX", (unsigned)block, (unsigned)plane, (unsigned)page, (unsigned)cw, (unsigned long)got_meta, (unsigned long)expected);
+
+                munit_assert_uint32(got_meta, ==, expected);
+            }
+
+            /* 契约：cw_index 不在链上 → NULL（本命令只覆盖该 plane 的 CW 0..CW_NUM-1，
+             * 传 CW_NUM 必然落空）。 */
+            munit_assert_null(fc_buffer_get_meta(cmd, (uint8_t)CW_NUM));
+
+            munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
         }
     }
 
