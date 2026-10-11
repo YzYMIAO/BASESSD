@@ -1,11 +1,14 @@
+#ifndef PLATFORM_STM32H743_QSPI_PORT_H
+#define PLATFORM_STM32H743_QSPI_PORT_H
 
+/*
+ * qspi_port.h — stm32h743 QSPI port 头。
+ *
+ * 由原 include/platform/stm32h743/qspi.h 拆出：这里只留 QSPI 引脚/时钟宏
+ * （含 HAL 类型）；函数声明与 port 接口都在抽象 include/platform/qspi.h。
+ */
 
-#ifndef __QSPI_H
-#define __QSPI_H
-
-#include "sys.h"
-
-/******************************************************************************************/
+#include "sys_port.h"
 
 /* QSPI 相关 引脚 定义 */
 #define QSPI_BK1_CLK_GPIO_PORT GPIOB
@@ -62,12 +65,4 @@
         __HAL_RCC_GPIOF_CLK_ENABLE();  \
     } while (0) /* PF口时钟使能 */
 
-/******************************************************************************************/
-
-uint8_t qspi_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime);               /* QSPI等待某个状态 */
-uint8_t qspi_init(void);                                                          /* 初始化QSPI */
-uint8_t qspi_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmcycle); /* QSPI发送命令 */
-uint8_t qspi_receive(uint8_t *buf, uint32_t datalen);                             /* QSPI接收数据 */
-uint8_t qspi_transmit(uint8_t *buf, uint32_t datalen);                            /* QSPI发送数据 */
-
-#endif
+#endif /* PLATFORM_STM32H743_QSPI_PORT_H */

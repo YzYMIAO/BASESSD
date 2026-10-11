@@ -6,7 +6,7 @@
  *   main() → sys_init → ssd_log 绑定 → fc_init → nand_init
  *          → nand_dispatch_set_armed(1) → stm32_platform_register
  *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
- *          → while(1) { uart_service_poll; ftl_service | fc_service;
+ *          → while(1) { cli_service_poll; ftl_service | fc_service;
  *                       btim_scheduler_poll; }
  * 关键约定：
  *   - 初始化是**严格 if/else-if 级联**：前一步失败会整段跳过后面的，
@@ -23,6 +23,7 @@
 
 #include "btim.h"
 #include "common/log.h"
+#include "controller/cli.h"
 #include "controller/controller.h"
 #include "delay.h"
 #include "fc/fc.h"
@@ -41,7 +42,7 @@
 /* #include "test_fc_nand.h" */
 #endif
 #include "fault.h"
-#include "platform/stm32h743/platform_ops.h"
+#include "platform.h"
 #include "stm32h7xx_hal.h"
 #include "sys.h"
 #include "usart.h"
@@ -108,7 +109,7 @@ static uint16_t g_spare_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_SPARE_POOL_SIZE] /* 
 static super_block_t g_closed_sb_list[CH_NUM][CE_NUM][LUN_NUM][SUPER_BLOCK_LIST_MAX] /* 16KB → SRAM2 */
     __attribute__((section(".sram2_data")));
 ssd_controller_t g_ctrl; /* controller 路由表（收 g_ftl 三维指针）；非 static：
-                          * UART CLI（usart.c）经 extern 引用，见 usart.h */
+                          * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
 static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
@@ -307,6 +308,7 @@ int main(void)
     uint8_t nand_init_result;
 
     sys_init();
+    cli_init(); /* 预填 CLI 固定 pattern buffer（.sram2_data NOLOAD） */
     log_set_sink(stm32_uart_log_sink);
     log_set_flush_sink(stm32_uart_log_flush_sink);
     log_set_level(LOG_INFO);
@@ -366,17 +368,17 @@ int main(void)
     btim_scheduler_init();
     LOGI("btim task table ready, IWDG disabled for debug\r\n");
 #endif
-    uart_service_poll();
+    cli_service_poll();
     /* ── 主循环（裸机 superloop，无中断参与）──
      *   g_ftl_ready == 0：只跑 fc_service()，保持 FC/NAND 裸路径活着（可跑 CLI 自检命令）。
      *   g_ftl_ready == 1：改跑 ftl_service()，它内部会先调用 fc_service() ≤4 次
      *                     （NAND_SUBMIT_BUDGET）再 drain 完成表。
-     *   uart_service_poll()   —— CLI 解析（含 `test` 单元测试入口）。
+     *   cli_service_poll()    —— CLI 解析（含 `test` 单元测试入口）。
      *   btim_scheduler_poll() —— 1ms 任务表（看门狗喂狗等）。
      *   All command parsing and scheduled storage work remain outside ISR context. */
     while (1)
     {
-        uart_service_poll();
+        cli_service_poll();
         if (g_ftl_ready)
         {
             /* FTL 主循环（Phase 1 内部已含 fc_service ≤4 次） */

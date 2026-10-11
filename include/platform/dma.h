@@ -16,6 +16,10 @@
 uint8_t uart_tx_dma_init(void);
 void    uart_tx_dma_irq_handler(void);
 
+/* port 接口：由 src/platform/<soc>/dma_port.c 实现；共享 src/platform/dma.c 只转发。 */
+uint8_t dma_port_uart_tx_init(void);
+void    dma_port_uart_tx_irq_handler(void);
+
 /* ── NAND 数据搬移模式 ──
  *
  * CONFIG_NAND_DMA

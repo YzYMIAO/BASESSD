@@ -24,4 +24,14 @@ void crc_init(void);
  * 前置：data 非空、4 字节对齐；length_bytes 是 4 的倍数（违反一律 ASSERT）。 */
 uint32_t crc_compute(const uint8_t *data, uint32_t length_bytes);
 
+/* ─────────────────────────── port 接口 ───────────────────────────
+ * 由 src/platform/<soc>/crc_port.c 实现；共享 src/platform/crc.c 只做
+ * 自检策略与对齐契约，寄存器动作全在 port。
+ */
+
+void     crc_port_init(void);
+void     crc_port_set_idr(uint32_t value);
+uint32_t crc_port_get_idr(void);
+uint32_t crc_port_compute(const uint8_t *data, uint32_t length_bytes);
+
 #endif /* PLATFORM_CRC_H */

@@ -1,8 +1,14 @@
-#include "sys.h"
+/*
+ * sys_port.c — stm32h743 系统服务适配层
+ *
+ * 只做硬件相关的事：MPU 区域表、Cache/VTOR/WFI/PRIMASK/MSP 的内核内建、
+ * RCC/PLL 时钟树、HAL 初始化，以及 USE_FULL_ASSERT 钩子。启动编排与 sys_*
+ * 转发都在共享 src/platform/sys.c；本文件只实现 sys_port_* 接口。
+ */
 
-#include "delay.h"
-#include "fault.h"
-#include "usart.h"
+#include "sys_port.h"
+
+#include "common/common.h"
 
 static const MPU_Region_InitTypeDef g_sys_mpu_regions[] = {
   /* Flash: executable read-only firmware. */
@@ -28,7 +34,7 @@ static const MPU_Region_InitTypeDef g_sys_mpu_regions[] = {
     {.Enable = MPU_REGION_ENABLE, .Number = 11U, .BaseAddress = 0x24060000U, .Size = MPU_REGION_SIZE_128KB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL1, .AccessPermission = MPU_REGION_FULL_ACCESS, .DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE,     .IsShareable = MPU_ACCESS_SHAREABLE, .IsCacheable = MPU_ACCESS_NOT_CACHEABLE, .IsBufferable = MPU_ACCESS_NOT_BUFFERABLE},
 };
 
-void sys_mpu_config(void)
+void sys_port_mpu_config(void)
 {
     uint32_t index;
     HAL_MPU_Disable();
@@ -39,38 +45,50 @@ void sys_mpu_config(void)
     HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
 
-void sys_cache_enable(void)
+void sys_port_cache_enable(void)
 {
     SCB_EnableICache();
     SCB_EnableDCache();
 }
-uint8_t get_icache_sta(void)
+
+uint8_t sys_port_icache_enabled(void)
 {
     return (uint8_t)((SCB->CCR >> 17U) & 1U);
 }
-uint8_t get_dcache_sta(void)
+
+uint8_t sys_port_dcache_enabled(void)
 {
     return (uint8_t)((SCB->CCR >> 16U) & 1U);
 }
-void sys_nvic_set_vector_table(uint32_t base_address, uint32_t offset)
+
+void sys_port_set_vector_table(uint32_t base_address, uint32_t offset)
 {
     SCB->VTOR = base_address | (offset & 0xFFFFFE00UL);
 }
-void sys_wfi_set(void)
+
+void sys_port_wfi(void)
 {
     __WFI();
 }
-void sys_intx_disable(void)
+
+void sys_port_irq_disable(void)
 {
     __disable_irq();
 }
-void sys_intx_enable(void)
+
+void sys_port_irq_enable(void)
 {
     __enable_irq();
 }
-void sys_msr_msp(uint32_t address)
+
+void sys_port_set_msp(uint32_t address)
 {
     __set_MSP(address);
+}
+
+void sys_port_hal_init(void)
+{
+    HAL_Init();
 }
 
 /*
@@ -84,7 +102,7 @@ void sys_msr_msp(uint32_t address)
  *   PLL2R = 2 -> PLL2_R = 220 MHz（FMC 时钟源；SDRAM SDCLK=220/2=110 MHz）
  */
 
-uint8_t sys_stm32_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sysclk_div, uint32_t peripheral_div)
+uint8_t sys_port_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sysclk_div, uint32_t peripheral_div)
 {
     RCC_OscInitTypeDef       oscillator        = {0};
     RCC_ClkInitTypeDef       clocks            = {0};
@@ -116,7 +134,7 @@ uint8_t sys_stm32_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sys
     oscillator.PLL.PLLFRACN   = 0U;
     if (HAL_RCC_OscConfig(&oscillator) != HAL_OK)
     {
-        return ERROR;
+        return FUNC_STATUS_ERROR;
     }
 
     clocks.ClockType = RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_PCLK1 |
@@ -130,7 +148,7 @@ uint8_t sys_stm32_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sys
     clocks.APB4CLKDivider = RCC_APB4_DIV2;           /* PCLK4=100 MHz */
     if (HAL_RCC_ClockConfig(&clocks, FLASH_LATENCY_2) != HAL_OK)
     {
-        return ERROR;
+        return FUNC_STATUS_ERROR;
     }
 
     /*
@@ -149,7 +167,7 @@ uint8_t sys_stm32_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sys
     peripheral_clocks.PLL2.PLL2FRACN       = 0U;
     if (HAL_RCCEx_PeriphCLKConfig(&peripheral_clocks) != HAL_OK)
     {
-        return ERROR;
+        return FUNC_STATUS_ERROR;
     }
 
     (void)HAL_PWREx_EnableUSBVoltageDetector();
@@ -160,29 +178,12 @@ uint8_t sys_stm32_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sys
      * 使能它会导致卡死。调试阶段跳过。
      *
      *   __HAL_RCC_BKPRAM_CLK_ENABLE();
-     *   if (HAL_PWREx_EnableBkUpReg() != HAL_OK) { return ERROR; }
+     *   if (HAL_PWREx_EnableBkUpReg() != HAL_OK) { return FUNC_STATUS_ERROR; }
      */
     __HAL_RCC_CSI_ENABLE();
     __HAL_RCC_SYSCFG_CLK_ENABLE();
     HAL_EnableCompensationCell();
-    return SUCCESS;
-}
-
-void sys_init(void)
-{
-    sys_mpu_config();
-    sys_cache_enable();
-    HAL_Init();
-    if (sys_stm32_clock_init(5U, 160U, 2U, 4U) != SUCCESS)
-    {
-        while (1)
-        {
-        }
-    }
-    delay_init(0U);
-    usart_init(115200U);
-    /* 使能可配置故障（MemManage/BusFault/UsageFault），避免全部升级成 HardFault。 */
-    fault_init();
+    return FUNC_STATUS_SUCCESS;
 }
 
 #ifdef USE_FULL_ASSERT

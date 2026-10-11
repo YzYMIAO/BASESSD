@@ -102,8 +102,9 @@ src/platform/<soc>/<svc>_port.c   ← 适配：只碰 HAL/MMIO
   `src/platform/<soc>/<svc>_port.c` 提供定义。**不用 vtable、不用弱符号** —— 与 §1.4 的
   「编译期选目录」是同一套思路：签名固定、链接期解析、零间接调用开销。
 - **零构建改动**：`src/platform/makefile.mk:2` 的 `$(wildcard $(SRC_ROOT)/platform/*.c)`
-  **本来就**对每个 target 编译顶层 `src/platform/*.c`（`platform.c` 是此前唯一的抽象源文件）；
-  `<soc>/makefile.mk` 的平铺 wildcard 自动收新的 `<soc>/*_port.c`。两个 makefile 一行未改。
+  **本来就**对每个 target 编译顶层 `src/platform/*.c`（Stage 2 前只有 `platform.c` 一个抽象源文件，
+  现在有 13 个）；`<soc>/makefile.mk` 的平铺 wildcard 自动收新的 `<soc>/*_port.c`。
+  两个 makefile 一行未改。
 - **裸名解析**：`src/platform/makefile.mk:3` 在 include `<soc>/makefile.mk` **之前**加了
   `$(INC_ROOT)/platform`，`makefile:62` 的 `$(sort)` 后 `include/platform` 稳定排在前 ⇒ 裸名
   `"watchdog.h"` 落到抽象头。**前提是 `<soc>` 下的同名旧头必须删掉**（引号 include 先搜本文件
@@ -135,7 +136,13 @@ src/platform/<soc>/<svc>_port.c   ← 适配：只碰 HAL/MMIO
 
 | 文件 | 行数 | 分类 | 说明 | 违反 |
 |---|---:|---|---|---|
-| `platform.c` | 21 | a | `ssd_platform_ops_t` 注册表，无硬件 | — |
+| `platform.c` | 45 | a | `ssd_platform_ops_t` 注册表 + `stm32_platform_register()`（Stage 2.6 从 `<soc>/platform_ops.c` 搬来，只填 `time_us`），无硬件 | — |
+| `crc.c` | 46 | **a** | CRC 自检策略（IDR 回环 `ASSERT`）+ 对齐契约（Stage 2.6 搬来） | — |
+| `dma.c` | 19 | **a** | UART TX DMA 一行转发（Stage 2.6 搬来） | — |
+| `mpu.c` | 13 | **a** | `mpu_set_protection` 一行转发（Stage 2.6 搬来） | — |
+| `qspi.c` | 43 | **a** | 收发空参检查（`buf==NULL\|\|datalen==0`）后转发（Stage 2.6 搬来） | — |
+| `rng.c` | 43 | **a** | DRDY 重试循环 + `rng_get_random_range` 取模映射（Stage 2.6 搬来） | — |
+| `sys.c` | 83 | **a** | 上电初始化编排（顺序即契约）+ `sys_*` 一行转发（Stage 2.6 搬来） | — |
 | `btim.c` | 202 | **a** | 16 槽任务表调度器（Stage 2 从 `<soc>` 搬来，只留 `btim_scheduler_tick()` 供 port 的 ISR 回调调） | — |
 | `watchdog.c` | 230 | **a** | 健康域状态机 + 首故障锁存 + WWDG 窗口决策（Stage 2 搬来） | — |
 | `fault.c` | 439 | **a** | Cortex-M 故障解码 / 栈扫描 / 崩溃记录打印（Stage 2 搬来） | 见下注 |
@@ -152,30 +159,31 @@ src/platform/<soc>/<svc>_port.c   ← 适配：只碰 HAL/MMIO
 > port 接口（如 `fault_port_stack_top()` / `fault_port_is_code_address()`）。当前登记为**已知残留耦合**，
 > 文件内已就地注明。
 
-### 2.2 `src/platform/stm32h743/`（14 个 `.c` / 2911 行）
+### 2.2 `src/platform/stm32h743/`（13 个 `.c` / 1905 行）
 
-Stage 2 后本目录只放**本身就是 port** 的文件（薄 HAL 封装或向量表），加上 3 个新的
-`*_port.c`。`btim.c` / `watchdog.c` / `fault.c` / `delay.c` / `syscalls.c` **已迁出**（§2.1）。
+Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）。`btim.c` / `watchdog.c` /
+`fault.c` / `delay.c` / `syscalls.c` **已迁出**（§2.1）；`usart.c` 拆成 port（`usart_port.c`）
++ 共享传输（`src/platform/usart.c`）+ CLI（`src/controller/cli.c`，§5.3）；`platform_ops.c` /
+`crc.c` / `dma.c` / `mpu.c` / `rng.c` / `qspi.c` / `sys.c` **Stage 2.6 全部拆成共享源 + `*_port.c`**（§5.4）。
 
 | 文件 | 行数 | 分类 | 说明 | 违反 |
 |---|---:|---|---|---|
-| `platform_ops.c` | 27 | c | 抽象 seam 的实现；**只填 `time_us`**（`HAL_GetTick()*1000`），`log_write` / `memory_*` 为 NULL | G1 |
 | `btim_port.c` | 52 | **p** | TIM6 句柄 + 中断使能 + `btim_port_irq_handler()`；回调转 `btim_scheduler_tick()` | — |
 | `watchdog_port.c` | 76 | **p** | IWDG/WWDG 句柄 + 6 个 port 函数 + 两个 HAL 回调转共享层 | — |
 | `fault_port.c` | 203 | **p** | USART1/DMA1 轮询控制台 + 5 个 naked 异常入口 + `fault_port_entry_c`（抓现场）+ `RCC->RSR` 复位原因解码 | — |
 | `delay_port.c` | 61 | **p** | 7 个计数器/时钟查询函数（DWT、SysTick、HCLK/SYSCLK） | — |
-| `usart.c` | 1204 | **c** | **RX/TX 环形缓冲 + CLI + log sink 是纯逻辑**，寄存器部分是硬件 | G5、G7（反向依赖 FTL）—— 留下一批 |
-| `crc.c` | 78 | b | HAL CRC-32 外设封装 | G4（被 `fc_crc_engine.c` 裸名 include） |
-| `dma.c` | 39 | b | DMA1_Stream0 → USART1 TX | — |
-| `nand_dma.c` | 344 | b | DMA2 + FMC NAND 传输 + D-Cache 维护 | G3 |
-| `sys.c` | 197 | b | MPU 表 / Cache / VTOR / RCC-PLL 400 MHz | — |
-| `mpu.c` | 64 | b | `HAL_MPU_ConfigRegion` 封装 | — |
-| `rng.c` | 78 | b | HAL RNG 封装 | — |
-| `qspi.c` | 268 | b | QUADSPI（W25Q256）封装 | — |
+| `usart_port.c` | 251 | **p** | USART1 句柄 + HAL 初始化 + GPIO/DMA + `usart_port_irq_handler()` + 15 个 port 原语（寄存器/DMA/缓存/CMSIS 内建） | — |
+| `crc_port.c` | 63 | **p** | CRC 句柄 + `HAL_CRC_Init` + `HAL_CRC_MspInit` + `__HAL_CRC_*` IDR + `HAL_CRC_Calculate` | — |
+| `dma_port.c` | 45 | **p** | DMA1_Stream0 → USART1 TX 的 HAL 配置 + `HAL_DMA_IRQHandler` | — |
+| `mpu_port.c` | 71 | **p** | 中性参数填进 `MPU_Region_InitTypeDef` + `HAL_MPU_ConfigRegion` | — |
+| `rng_port.c` | 52 | **p** | RNG 句柄 + `HAL_RNG_Init` + `HAL_RNG_MspInit` + `__HAL_RNG_GET_FLAG` + `HAL_RNG_GenerateRandomNumber` | — |
+| `qspi_port.c` | 269 | **p** | QUADSPI（W25Q256）句柄 + 引脚/时钟 + 命令模式位域→HAL 枚举解码 + HAL 收发 | — |
+| `sys_port.c` | 198 | **p** | MPU 区域表（SoC 内存映射）/ Cache / VTOR / WFI / PRIMASK / MSP 的 CMSIS 内建 + RCC-PLL 400 MHz | — |
+| `nand_dma.c` | 344 | b | DMA2 + FMC NAND 传输 + D-Cache 维护 | G3（Stage 3） |
 | `stm32h7rsxx_it.c` | 220 | b | 向量表 ISR（`TIM6_DAC_IRQHandler` 改为转 `btim_port_irq_handler()`） | — |
 | `bsp/sdram_w9825g6kh.c` | 207 | b | FMC SDRAM 初始化 | — |
 
-> 分类记号 **p** = port 适配层（Stage 2 新增的第三类：只碰 HAL/MMIO，不含可移植逻辑）。
+> 分类记号 **p** = port 适配层（只碰 HAL/MMIO，不含可移植逻辑）。
 > 另：`include/platform/stm32h743/bsp/` 还有 `led.h` / `norflash_w25q256.h` 两个**无实现**的头。
 
 ### 2.3 `src/platform/stm32h7r3/`
@@ -184,6 +192,17 @@ Stage 2 后本目录只放**本身就是 port** 的文件（薄 HAL 封装或向
 **缺失服务**（判据 C 不成立）：`platform_ops.c`、`crc.c`、`dma.c`、`fault.c`、`nand_dma.c`、
 `qspi.c`、`rng.c`、`syscalls.c`。
 ⇒ 两个「移植」**并不对称**，H7R3 **不是** H743 的 drop-in 替换。
+
+> **Stage 2.6 追加登记（`crc`/`dma`/`mpu`/`qspi`/`rng`/`sys`/`platform`）**：h743 侧这 7 个服务
+> 已拆成共享源 + `*_port.c`；h7r3 侧仍是**单体** `crc.c`（若有）/ `sys.c` / `mpu.c`，且**没有**
+> 对应的 `*_port.c`。共享源对所有 target 编译一次 ⇒ h7r3 解冻时会与它自己的单体实现**重复定义**
+> （同 §2.3 的 `usart` 情形）。本阶段**不动** h7r3。
+
+> **Stage 3 追加登记（`usart`）**：h743 侧 `usart.c` 已拆为 `usart_port.c` + 共享 `usart.c` +
+> `controller/cli.c`；h7r3 侧仍是单体 `usart.c`（且自带 `_write` / `uart_log_write` 等定义）。
+> 共享 `src/platform/usart.c` **对所有 target 编译一次** ⇒ 一旦 h7r3 解冻，会与它自己的
+> `usart.c` **重复定义 `_write` 等符号**。这是 Stage 4（真换 target）必须先拆 h7r3 `usart.c`
+> 的原因，本阶段**不动** h7r3。
 
 > **Stage 2 登记：port 接口暂无第二 target 实现（有意冻结）。** h7r3 **今天编不过**，是抽象重构
 > 之前的遗留脚手架（`src/main.c` 硬编码 h743 板级头、`delay.h` 原型 `uint32_t`/`uint16_t` 冲突）。
@@ -197,23 +216,27 @@ Stage 2 后本目录只放**本身就是 port** 的文件（薄 HAL 封装或向
 
 | # | 缺口 | 证据 |
 |---|---|---|
-| **G1** | 文档点名的抽象头 `platform/soc.h` **不存在**；真实契约头是 `platform/platform.h`，且 4 个 op 只填 1 个 | `docs/architecture.md:12`；`include/platform/platform.h`；`src/platform/stm32h743/platform_ops.c` |
+| **G1** | 文档点名的抽象头 `platform/soc.h` **不存在**；真实契约头是 `platform/platform.h`，且 4 个 op 只填 1 个 | `docs/architecture.md:12`；`include/platform/platform.h`；~~`src/platform/stm32h743/platform_ops.c`~~（Stage 2.6 已并入共享 `src/platform/platform.c`） |
 | **G2** | `src/platform/bsp/`（8 个 `.c`，含 124 行 `nand_loader.c`）**是死代码**，`bsp/makefile.mk` 从未被 include | `config.mk:225` `MODULES = common controller fc ftl nand platform`；`src/platform/makefile.mk` 只 include `<soc>/makefile.mk`；全仓无任何文件 include `bsp/makefile.mk` |
 | **G3** | 核心模块**直接 include `<soc>` 路径** | `src/nand/nand_fmc.c:31`、`src/nand/nand_mt29f4g08abadawp.c:26` → `platform/stm32h743/nand_dma.h`；`src/main.c:43-45` → `fault.h` / `platform_ops.h` / `stm32h7xx_hal.h` |
 | **G4** | 核心模块**以裸名 include `<soc>` 头**（靠全局 `ALL_INCS` 才编译过） | `src/fc/fc_crc_engine.c:32` → `crc.h`；`src/nand/{nand_fmc,nand_engine,nand_dispatch,nand_mt29f4g08abadawp}.c` → `delay.h`；`include/nand/nand_mt29f4g08abadawp.h:5` → `sys.h`（连带把 HAL/CMSIS 灌进所有 includer） |
-| **G5** | 纯逻辑服务被埋在 SoC 目录（**本身不违规**，但使「服务」与「驱动」难以分开复用） | `btim.h` 的 `btim_scheduler_*`；`watchdog.h` 的 `storage_wdg_*`；`usart.c` 的环形缓冲 |
+| **G5** | 纯逻辑服务被埋在 SoC 目录（**本身不违规**，但使「服务」与「驱动」难以分开复用） | `btim.h` 的 `btim_scheduler_*`；`watchdog.h` 的 `storage_wdg_*`；~~`usart.c` 的环形缓冲~~（Stage 3 已迁出） |
 | **G6** | 两个 target **不对称**，抽象层无法真正换 target | §2.3 缺失服务清单 |
-| **G7** | **平台层反向依赖上层**（分层倒挂） | `src/platform/stm32h743/usart.c:6` → `ftl/ftl.h`；`include/platform/stm32h743/usart.h:6` → `controller/controller.h`；`nand_dma.{h,c}` → `nand/nand_config.h` |
+| **G7** | **平台层反向依赖上层**（分层倒挂） | ~~`src/platform/stm32h743/usart.c:6` → `ftl/ftl.h`；`include/platform/stm32h743/usart.h:6` → `controller/controller.h`~~（Stage 3 已消除：CLI 移出平台层）；`nand_dma.{h,c}` → `nand/nand_config.h`（已断） |
 
 > **本表是 Stage 0 基线。** 落地情况见 **§5.1 / §5.2**：
 >
 > - **G3 / G4 的 include 部分已收敛**（`delay.h` / `crc.h` / `dma.h` 走抽象头；
->   Stage 2 又把 `fault.h` 从 `main.c` 的 `<soc>` 路径改成裸名）⇒ **判据 A 的 grep 只剩
->   `src/main.c:44` 一处**（板级装配根，`platform_ops.h`），`fc_crc_engine.c` 的注释也已改写。
+>   Stage 2 又把 `fault.h` 从 `main.c` 的 `<soc>` 路径改成裸名）⇒ **判据 A 的 grep 归零**：
+>   Stage 2.6 把 `stm32_platform_register()` 声明从 `platform_ops.h` 搬进抽象 `platform.h`，
+>   `main.c` 改 include `"platform.h"`，最后一处例外消失。
 > - **G5 已闭合**：`btim` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务的纯逻辑已搬到
->   `src/platform/*.c`，`<soc>/` 只留 `*_port.c`。
+>   `src/platform/*.c`，`<soc>/` 只留 `*_port.c`；Stage 3 又把 `usart` 的传输逻辑搬到
+>   `src/platform/usart.c`；Stage 2.6 再把 `platform` / `crc` / `dma` / `mpu` / `qspi` /
+>   `rng` / `sys` 七个服务同样拆开（含只做一行转发的 `dma` / `mpu`）。
 > - **G7 的 nand 那一半已断**（`CONFIG_NAND_DMA` 已搬进 `include/platform/dma.h`），
->   `usart.c` 的两处倒挂未动。
+>   `usart.c` 的两处倒挂（`ftl/ftl.h` / `controller/controller.h`）**Stage 3 已消除**——
+>   CLI 整体移到 `src/controller/cli.c`，平台层不再 include 上层头。
 > - **G2**（`bsp/` 死代码）、**G6**（两 target 不对称）未动。
 
 ---
@@ -226,13 +249,23 @@ include/platform/<svc>.h        ← 抽象接口：判据 B（零 HAL 类型）
     delay.h  crc.h  dma.h  fault.h  usart.h
     btim.h  watchdog.h  mpu.h  rng.h  qspi.h  sys.h
 src/platform/<svc>.c            ← 共享逻辑：判据 D（零 SoC 头），跨 target 编译一次
-    platform.c  btim.c  watchdog.c  fault.c  delay.c  syscalls.c
+    platform.c  btim.c  watchdog.c  fault.c  delay.c  syscalls.c  usart.c
+    crc.c  dma.c  mpu.c  qspi.c  rng.c  sys.c        ← Stage 2.6
 src/platform/<soc>/             ← 唯一实现目录（判据 A 的唯一合法出口）
     <svc>_port.c                ← port 适配：只碰 HAL/MMIO
-    platform_ops.c  crc.c  dma.c  mpu.c  nand_dma.c  qspi.c  rng.c
-    sys.c  stm32h7rsxx_it.c  usart.c  bsp/
+    btim_port.c  watchdog_port.c  fault_port.c  delay_port.c  usart_port.c
+    crc_port.c  dma_port.c  mpu_port.c  qspi_port.c  rng_port.c  sys_port.c
+    nand_dma.c  stm32h7rsxx_it.c  bsp/              ← 本身即 port / 向量表（Stage 3 处理）
 include/platform/<soc>/         ← 实现头（含 HAL 类型），只有 <soc> 目录自己 include
+    btim_port.h  usart_port.h  qspi_port.h  sys_port.h（原 HAL 伞头 sys.h 改名）
 ```
+
+**`sys.h` 的伞头搬家（Stage 2.6）**：原 `include/platform/stm32h743/sys.h` **同时是 HAL 伞头**
+（`stm32h7xx.h` + `stm32h7xx_hal.h` + `SYS_SUPPORT_OS`），被 h743 侧 8 个文件裸名 include（含核心模块
+`include/nand/nand_mt29f4g08abadawp.h`）。拆 `sys.c` 需要一份零 HAL 的 `sys.h`，而该名字被占用 ⇒
+**伞头改名 `include/platform/stm32h743/sys_port.h`**，8 个 includer 的 `"sys.h"` → `"sys_port.h"`；
+`src/main.c` **不改**（它另有 `#include "stm32h7xx_hal.h"`，裸名 `"sys.h"` 自动落抽象头）。h7r3 侧 12 处
+不动（冻结，且 h7r3 自带 `include/platform/stm32h7r3/sys.h`，quote-include 先搜 includer 目录 ⇒ 不受影响）。
 
 **`dma.h` 是合并头**：一份 `include/platform/dma.h` 同时承载
 ① UART TX DMA（`uart_tx_dma_init` / `uart_tx_dma_irq_handler`，平台内部用）与
@@ -280,13 +313,107 @@ uint32_t delay_port_dwt_cycles(void);
 uint32_t delay_port_systick_load(void);
 uint32_t delay_port_systick_value(void);
 
+/* platform —— include/platform/platform.h */
+int      stm32_platform_register(void);                       /* 共享入口，名字被 main.c 冻结 */
+
+/* crc —— include/platform/crc.h（Stage 2.6） */
+void     crc_init(void);                                      /* 共享入口 */
+uint32_t crc_compute(const uint8_t *data, uint32_t length);   /* 共享入口 */
+void     crc_port_init(void);
+void     crc_port_set_idr(uint32_t value);
+uint32_t crc_port_get_idr(void);
+uint32_t crc_port_compute(const uint8_t *data, uint32_t length);
+
+/* dma —— include/platform/dma.h（Stage 2.6） */
+uint8_t  uart_tx_dma_init(void);                              /* 共享入口 */
+void     uart_tx_dma_irq_handler(void);                       /* 共享入口 */
+uint8_t  dma_port_uart_tx_init(void);
+void     dma_port_uart_tx_irq_handler(void);
+
+/* mpu —— include/platform/mpu.h（Stage 2.6） */
+void     mpu_set_protection(uint32_t baseaddr, uint32_t size, uint32_t rnum,
+                            uint8_t de, uint8_t ap, uint8_t sen, uint8_t cen, uint8_t ben);
+void     mpu_port_set_protection(uint32_t baseaddr, uint32_t size, uint32_t rnum,
+                                 uint8_t de, uint8_t ap, uint8_t sen, uint8_t cen, uint8_t ben);
+
+/* qspi —— include/platform/qspi.h（Stage 2.6） */
+uint8_t  qspi_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime);   /* 共享入口 */
+uint8_t  qspi_init(void);                                              /* 共享入口 */
+uint8_t  qspi_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmcycle); /* 共享入口 */
+uint8_t  qspi_receive(uint8_t *buf, uint32_t datalen);                 /* 共享入口（空参检查） */
+uint8_t  qspi_transmit(uint8_t *buf, uint32_t datalen);                /* 共享入口（空参检查） */
+uint8_t  qspi_port_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime);
+uint8_t  qspi_port_init(void);
+uint8_t  qspi_port_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmcycle);
+uint8_t  qspi_port_receive(uint8_t *buf, uint32_t datalen);
+uint8_t  qspi_port_transmit(uint8_t *buf, uint32_t datalen);
+
+/* rng —— include/platform/rng.h（Stage 2.6） */
+uint8_t  rng_init(void);                                      /* 共享入口（重试循环） */
+uint32_t rng_get_random_num(void);                            /* 共享入口 */
+int      rng_get_random_range(int min, int max);              /* 共享入口（取模映射） */
+uint8_t  rng_port_init(void);
+uint8_t  rng_port_data_ready(void);
+uint32_t rng_port_get_random(void);
+
+/* sys —— include/platform/sys.h（Stage 2.6） */
+void     sys_init(void);                                      /* 共享入口，名字被 main.c 冻结 */
+void     sys_mpu_config(void);
+void     sys_cache_enable(void);
+uint8_t  get_icache_sta(void);
+uint8_t  get_dcache_sta(void);
+void     sys_nvic_set_vector_table(uint32_t vtor, uint32_t offset);
+void     sys_wfi_set(void);
+void     sys_intx_disable(void);
+void     sys_intx_enable(void);
+void     sys_msr_msp(uint32_t addr);
+uint8_t  sys_stm32_clock_init(uint32_t plln, uint32_t pllm, uint32_t pllp, uint32_t pllq);
+/*   ↑ 共享入口；↓ port 接口（11 个） */
+void     sys_port_mpu_config(void);
+void     sys_port_cache_enable(void);
+uint8_t  sys_port_icache_enabled(void);
+uint8_t  sys_port_dcache_enabled(void);
+void     sys_port_set_vector_table(uint32_t vtor, uint32_t offset);
+void     sys_port_wfi(void);
+void     sys_port_irq_disable(void);
+void     sys_port_irq_enable(void);
+void     sys_port_set_msp(uint32_t addr);
+void     sys_port_hal_init(void);
+uint8_t  sys_port_clock_init(uint32_t plln, uint32_t pllm, uint32_t pllp, uint32_t pllq);
+
 /* syscalls —— 无 port（target 无关） */
+
+/* usart —— include/platform/usart.h（Stage 3） */
+void     usart_init(uint32_t baudrate);                       /* 共享入口，名字被 sys.c 冻结 */
+int      uart_log_write(const char *data, uint32_t length);   /* 共享 */
+int      uart_log_flush(uint32_t timeout_ms);                 /* 共享 */
+void     uart_get_stats(uart_stats_t *stats);                 /* 共享 */
+uint8_t  uart_rx_read(uint8_t *byte);                         /* 共享；cli.c 消费 */
+/*   ↑ 共享入口；↓ port 接口（15 个） */
+uint8_t  usart_port_hw_init(uint32_t baudrate);
+void     usart_port_irq_handler(void);
+int      usart_port_tx_dma_start(const uint8_t *buffer, uint32_t length);
+void     usart_port_tx_dma_detach(void);
+uint16_t usart_port_tx_dma_remaining(void);
+void     usart_port_tx_irq_enable(void);
+uint8_t  usart_port_tx_complete(void);
+uint32_t usart_port_now_ms(void);
+void     usart_port_memory_barrier(void);
+void     usart_port_event_signal(void);
+void     usart_port_event_wait(void);
+uint8_t  usart_port_context_is_atomic(void);
+uint32_t usart_port_irq_state(void);
+void     usart_port_irq_disable(void);
+void     usart_port_irq_restore(uint32_t state);
 ```
 
 **只在 port、绝不出现在抽象头**（HAL 签名固定，写进抽象头会违反判据 B）：
 `HAL_TIM_Base_MspInit` / `HAL_TIM_PeriodElapsedCallback` / `HAL_WWDG_MspInit` /
-`HAL_WWDG_EarlyWakeupCallback`，以及 `fault_trampoline` / `fault_port_entry_c` /
-5 个 `FAULT_ENTRY(...)_Handler`（naked asm）。
+`HAL_WWDG_EarlyWakeupCallback` / `HAL_UART_MspInit` / `HAL_CRC_MspInit` / `HAL_QSPI_MspInit` /
+`HAL_RNG_MspInit`，以及 `fault_trampoline` / `fault_port_entry_c` / 5 个
+`FAULT_ENTRY(...)_Handler`（naked asm）、USART 的 2 个 `DMA_HandleTypeDef *` 签名回调、
+QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef` 字段
+（`mpu_port_set_protection` 的形参是中性的 `uint32_t`/`uint8_t`，HAL 枚举只在 port 内部解码）。
 
 ---
 
@@ -297,8 +424,10 @@ uint32_t delay_port_systick_value(void);
 | **Stage 0**（已交付） | 本设计文档 + 订正失实文档（§六） | 文档结论可复算 |
 | **Stage 1**（**已部分落地**，见 §5.1） | ① 在 `include/platform/` 下为 `delay.h` / `crc.h` / `dma.h` 建抽象头（只搬声明，不搬实现；`nand_dma.h` 与 UART 的 `dma.h` 合并为一份 `dma.h`）；② `src/nand/*`、`src/fc/fc_crc_engine.c` 改 include 抽象头；③ 删 `src/platform/bsp/` 死代码（或接线）；④ 构建侧：核心模块的 `MODULE_INCS` 移除 `platform/<soc>` 目录 | 判据 A 的 grep 归零 + `make tests` 逐字不变 |
 | **Stage 2**（**已落地**，见 §5.2） | **共享源文件层**：`btim` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务的纯逻辑搬到 `src/platform/*.c`，`<soc>/` 只留 `*_port.c`（机制见 §1.5） | 判据 A/B/D/E 通过 + `make tests` 0 warning + 上板全套通过 |
+| **Stage 2.5**（**已落地**，见 §5.3） | **usart 拆分**：`src/platform/stm32h743/usart.c`（1204 行）拆成共享传输 `src/platform/usart.c` + port `stm32h743/usart_port.c` + CLI `src/controller/cli.c`（消除 G7 倒挂） | 判据 A/B/D/E 通过 + 上板全套通过 |
+| **Stage 2.6**（**已落地**，见 §5.4） | **剩余 7 服务补齐**：`platform_ops` / `crc` / `dma` / `mpu` / `qspi` / `rng` / `sys` 全部拆成共享源 + `*_port.c`（含只做一行转发的 `dma` / `mpu`），HAL 伞头 `sys.h` 改名 `sys_port.h` | 判据 A 归零、B/D 空、E 精确相等 + 0 warning + 上板全套通过 |
 | **Stage 3**（需上板） | 把 `nand_mt29f4g08abadawp.c` 的 `HAL_NAND_MspInit` / `HAL_NAND_Init` / GPIO 与 `nand_fmc.c` 的 FMC MMIO 收进 `<soc>/`，NAND 层只留 `nand_device_t ops` 回调（`fc_nand_design.md §1` 已画出该 seam） | 上板全套通过 |
-| **Stage 4**（真换 target 时才做） | `stm32h7r3` 补齐缺失服务与 5 个 `*_port.c`，使判据 C / E 成立 | 判据 C、E 通过 |
+| **Stage 4**（真换 target 时才做） | `stm32h7r3` 补齐缺失服务与 6 个 `*_port.c`（btim/watchdog/fault/delay/usart 及各自的头），使判据 C / E 成立；并拆 h7r3 单体 `usart.c` 以消除 `_write` 重复定义（§2.3） | 判据 C、E 通过 |
 
 ### 5.1 Stage 1 进度（2026-10-11，只做 `stm32h743`）
 
@@ -324,7 +453,7 @@ uint32_t delay_port_systick_value(void);
 ### 5.2 Stage 2 进度（2026-10-11，只做 `stm32h743`）
 
 **范围**：`btim` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务（用户拍板）。
-`usart` 本批**不做**（1204 行、头泄漏严重、带 `ftl/ftl.h` 反依赖）。
+`usart` 本批**不做**（1204 行、头泄漏严重、带 `ftl/ftl.h` 反依赖）—— 已由 **Stage 2.5**（§5.3）接手。
 
 **结果**：
 
@@ -380,9 +509,113 @@ uint32_t delay_port_systick_value(void);
   构建的 `.bin` 尺寸不同（实测 `/tmp/ssd-base` 240036 vs 本仓路径 240780，**差 744 B**）。
   跨目录比 `.bin` 尺寸会得到假结论。
 
-**未做**：`usart` 拆分；`h7r3`（保持冻结，§2.3 已登记）；`sys.c` / `mpu.c` / `crc.c` /
-`rng.c` / `qspi.c` / `dma.c` / `nand_dma.c` / `bsp/sdram_*` / `stm32h7rsxx_it.c`
-（它们本身就是 port，无可搬逻辑）；`ssd_platform_ops_t` 未扩张；`interrupt.h` 未动。
+**未做**：`usart` 拆分（已由 Stage 2.5 接手，见 §5.3）；`h7r3`（保持冻结，§2.3 已登记）；
+`sys.c` / `mpu.c` / `crc.c` / `rng.c` / `qspi.c` / `dma.c` / `nand_dma.c` / `bsp/sdram_*` /
+`stm32h7rsxx_it.c`（它们本身就是 port，无可搬逻辑）；`ssd_platform_ops_t` 未扩张；
+`interrupt.h` 未动。
+
+### 5.3 Stage 2.5 进度（2026-10-11，usart 拆分，只做 `stm32h743`）
+
+**目标**：把平台目录里最后一块含可移植逻辑的大文件 `src/platform/stm32h743/usart.c`
+（1204 行）按同一套三层模式拆开，并**消除唯一的平台层倒挂 G7**（`usart.c` → `ftl/ftl.h`、
+`usart.h` → `controller/controller.h`）。用户拍板：**传输层 + CLI 全拆开**，CLI 落
+`src/controller/cli.c`（controller 已在 `config.mk` 的 `MODULES` 里 ⇒ 零构建配置改动）。
+
+**结果**：
+
+| 层 | 文件 | 内容 |
+|---|---|---|
+| 抽象头 | `include/platform/usart.h`（新，147 行） | 传输 API + `uart_stats_t` + 8 个共享入口 + 15 个 `usart_port_*` 接口（零 HAL） |
+| 共享传输 | `src/platform/usart.c`（新，413 行） | RX/TX 环形队列、`_write` newlib 钩子、log sink、TX 状态机、诊断计数 |
+| port | `src/platform/stm32h743/usart_port.c`（新，251 行） | USART1 句柄 + HAL 初始化 + GPIO/DMA + `usart_port_irq_handler()` + 15 个原语 |
+| port 头 | `include/platform/stm32h743/usart_port.h`（新，43 行） | `g_uart1_handle` + USART1/GPIO/时钟宏 |
+| 应用层 CLI | `src/controller/cli.c`（新，728 行）+ `include/controller/cli.h` | 行编辑、命令表、help/status/version/log/wr/rd/tr/fl/info/test |
+
+删除：`src/platform/stm32h743/usart.c`、`include/platform/stm32h743/usart.h`
+（后者必须删，否则遮蔽抽象头 —— 裸名 `usart.h` 的 quote-include 先搜 includer 目录）。
+
+**TX 路径跨层 seam（本阶段最难点）**：TX 环形状态机**同时**被共享侧（`uart_log_write` 入队）
+与 port 侧（DMA 回调、ISR）触碰。**环形结构 + 状态机策略留共享侧，寄存器/DMA/缓存/CMSIS
+内建下沉 port**；两侧通过明确原语交互 —— 共享侧导出 `uart_tx_ring_pop` /
+`uart_tx_ring_is_empty` / `uart_tx_dma_ready` / `uart_tx_dma_complete_handler` /
+`uart_tx_dma_error_handler` / `uart_stats_count_rx_error` / `uart_rx_ring_push` 给 ISR，
+port 侧导出 15 个 `usart_port_*` 给共享层。
+
+**关键实测发现**：
+
+- **`__ALIGNED(32)` 是 CMSIS 宏**（`cmsis_gcc.h`，非本仓定义）⇒ 共享 `usart.c` 的
+  `g_tx_ring` 必须改写成裸 GCC 属性 `__attribute__((aligned(32)))`，否则零 CMSIS 的共享
+  文件编不过。
+- **`core_cm7.h` 无法单独包含**（Stage 2 已发现）⇒ 共享层零 CMSIS：`__DMB`/`__SEV`/`__WFE`/
+  `__get_IPSR`/`__get_PRIMASK`/`__set_PRIMASK`/`SCB_CleanDCache_by_Addr` 全部下沉为
+  `usart_port_*` 包装（与 Stage 2 的 `delay_port_*` 同策）。
+- `g_wr_buf` 的 `__attribute__((section(".sram2_data")))` 是 h743 linker 段名，随 `cli.c` 走
+  （登记为已知耦合，将来 h7r3 可移植再抽成宏）。
+- 其它非平台改动：`src/main.c` 加 `#include "controller/cli.h"` + `cli_init()`，
+  `uart_service_poll()` → `cli_service_poll()`（2 处）；`stm32h7rsxx_it.c:170`
+  `usart_irq_handler()` → `usart_port_irq_handler()`；`dma.c` 改从 `usart_port.h` 取
+  `g_uart1_handle`；`include/platform/stm32h743/mpu.h` 清掉 vestigial `#include "usart.h"`。
+
+**验收**：`make clean && make tests` ⇒ **0 warning / 0 error**（241300 B）；`make format-check`
+通过；判据 A 只剩 `src/main.c:45`（已知例外，行号因新增 include 上移）；判据 B / D 均为空；
+判据 E：15 个 `usart_port_*` 声明 ↔ 15 个定义，**精确相等**。**上板由用户跑**（完整 `test`
+⇒ 57 of 57；CLI 命令逐一可用且输出逐字一致）。
+
+**已知隐患（登记，本阶段不动）**：共享 `src/platform/usart.c` **对所有 target 编译一次**，
+h7r3 单体 `usart.c` 也定义 `_write` / `uart_log_write` 等 ⇒ h7r3 解冻时会**重复符号**
+（§2.3 已登记，Stage 4 处理）。
+
+### 5.4 Stage 2.6 进度（2026-10-11，剩余 7 服务，只做 `stm32h743`）
+
+**目标**：把 `src/platform/stm32h743/` 里**剩下的每个服务**都按同一套三层模式补齐
+——用户拍板：**即使共享源里的函数只有一行、只转发给 port 接口也接受**，要的是形式完整对齐。
+范围（用户点名）：`platform_ops.c` / `crc.c` / `dma.c` / `mpu.c` / `rng.c` / `qspi.c` / `sys.c`。
+
+**结果**：
+
+| 服务 | 抽象头 | 共享源（新） | port（新） | 逻辑上移内容 |
+|---|---|---|---|---|
+| platform | `platform.h`（补 `stm32_platform_register` 声明） | `platform.c`（扩展） | ——（复用 `delay_port_now_ms`） | `stm32_platform_register` + `time_us` 换算 |
+| crc | `crc.h`（补 4 个 port 接口） | `crc.c` | `crc_port.c` | IDR 回环自检策略 + 对齐契约 |
+| dma | `dma.h`（补 2 个 port 接口） | `dma.c` | `dma_port.c` | 一行转发 |
+| mpu | `mpu.h`（新） | `mpu.c` | `mpu_port.c` | 一行转发 |
+| qspi | `qspi.h`（新） | `qspi.c` | `qspi_port.c` + `qspi_port.h` | 收发空参检查 |
+| rng | `rng.h`（新） | `rng.c` | `rng_port.c` | DRDY 重试循环 + 范围取模映射 |
+| sys | `sys.h`（新，零 HAL） | `sys.c` | `sys_port.c` + `sys_port.h`（伞头搬家） | 上电初始化编排（顺序即契约） |
+
+删除：`src/platform/stm32h743/{platform_ops,crc,dma,rng,qspi,mpu,sys}.c`、
+`include/platform/stm32h743/{rng,qspi,mpu,sys}.h`（**后三者必删否则遮蔽抽象头**）、
+`include/platform/stm32h743/platform_ops.h`。
+
+**关键点 / 实测发现**：
+
+- **HAL 伞头改名**：`include/platform/stm32h743/sys.h` 同时是 HAL 伞头，被 h743 侧 8 个文件裸名
+  include（含核心模块 `include/nand/nand_mt29f4g08abadawp.h`）。拆 `sys.c` 要零 HAL 的 `sys.h`，
+  名字冲突 ⇒ 伞头改名 `sys_port.h`，8 个 includer 的 include 行改字；`src/main.c` **不改**
+  （它另有 `#include "stm32h7xx_hal.h"`，裸名 `"sys.h"` 自动落抽象头）。h7r3 侧 12 处不动（冻结）。
+- **`SUCCESS`/`ERROR` 是 CMSIS 宏**（`SUCCESS=1` / `ERROR=0`，与 `FUNC_STATUS_SUCCESS=0` **相反**）。
+  `sys_stm32_clock_init` 零外部调用者 ⇒ 统一改用 `FUNC_STATUS_SUCCESS`/`FUNC_STATUS_ERROR`（0/1），
+  `sys_init` 与之比较；失败即死循环的**行为不变**。
+- **零构建改动**：`src/platform/makefile.mk` glob `src/platform/*.c`；`stm32h743/makefile.mk`
+  glob `stm32h743/*.c`（flat，非递归）。裸名解析靠 `-I include/platform` 先于 `<soc>` 目录。
+- **判据 D 口径微调**：机械 grep 的黑名单里 `sys\.h` → `sys_port\.h`（旧 `sys.h` 当初入黑名单
+  只因它是 HAL 伞头；抽象 `sys.h` 现在零 HAL）。另修 `include/platform/platform.h` 注释里
+  `src/platform/<soc>/*_port.c` 的 `/*`（`-Wcomment` 警告）与 `src/platform/sys.c` 注释里的
+  `CMSIS` 字样（机械 grep 命中注释）。
+
+**验收（`stm32h743` 侧）**：
+
+- `make format && make format-check` 通过；`make clean && make tests` ⇒ **0 warning / 0 error**
+  （241584 B）。
+- 判据 A：**归零**（`stm32_platform_register` 声明搬进抽象 `platform.h`，`main.c` 改 include）。
+- 判据 B / D：**均为空**。
+- 判据 E：抽象头里 62 个 `*_port_*` 声明，**每个恰好 1 个定义**（无缺、无重复）。
+- **上板**：完整 `test` ⇒ **57 of 57 (100%)**、0 skipped、seed `0x5a4f21e4`、871.11 ms
+  （2026-10-11，rev=24）。开机 `[FAULT] reset reason: PIN SFT (rsr=0x01460000)` 与 Stage 2
+  逐字一致 ⇒ port 侧 `RCC->RSR` 解码路径与启动编排顺序未变。
+
+**未做**：不接线死代码（`rng` / `qspi` / `mpu` 拆完**仍是零调用者**，本轮只做结构对齐）；
+不拆 `nand_dma.c`（Stage 3）、不动 h7r3、不扩 `ssd_platform_ops_t`、不碰 `stm32h7rsxx_it.c` 向量表。
 
 ---
 
@@ -392,7 +625,8 @@ uint32_t delay_port_systick_value(void);
   共享源 / port 源），落地**仍是两个目录**：共享源直接放 `src/platform/` 顶层。
 - **不**用 vtable、**不**用弱符号做 port 绑定——一律「同名 port 函数 + 链接期解析」（§1.5）。
 - **不**把运行期 vtable 作为主机制——`ssd_platform_ops_t` 保留为**已存在的小 seam**，不扩张。
-- Stage 2 **不**拆 `usart`（1204 行、头泄漏、带 `ftl/ftl.h` 反依赖 G7）—— 留下一批。
+- Stage 2 **不**拆 `usart`（1204 行、头泄漏、带 `ftl/ftl.h` 反依赖 G7）—— 已由 Stage 2.5（§5.3）
+  完成：传输层留共享、CLI 移到 `src/controller/cli.c`，G7 倒挂消除。
 - **不动** `src/ftl/**`、`tests/integration/**`、`tests/framework/**`、`ut_main.c`。
 
 ---
@@ -402,7 +636,8 @@ uint32_t delay_port_systick_value(void);
 ```bash
 # 命令 A —— 判据 A：核心模块直连 <soc> 路径
 #   Stage 0 基线 5 处（G3 的 4 处 include + fc_crc_engine.c:24 注释）；
-#   Stage 1 后剩 3 处；Stage 2 后剩 1 处：main.c:44（板级装配根 platform_ops.h）
+#   Stage 1 后剩 3 处；Stage 2 后剩 1 处：main.c:44（板级装配根 platform_ops.h）；
+#   Stage 2.6 后归零（stm32_platform_register 声明搬进抽象 platform.h）
 grep -rn 'platform/stm32h743' src --include=*.c --include=*.h | grep -v '^src/platform/'
 
 # 命令 A' —— 判据 A 的补充：裸名 include（靠全局 ALL_INCS 解析，需人工判断落到哪个目录）
@@ -418,18 +653,19 @@ grep -rnE '#include "(delay|crc|sys|usart|btim|watchdog|mpu|rng|qspi|dma)\.h"' s
 grep -nE 'HAL_|__HAL_|stm32h7xx|CMSIS|HandleTypeDef' include/platform/*.h
 
 # 命令 C —— 判据 C：两 target 的实现对称性（对比文件清单）
-#   预期：h743 独有 btim_port.h/crc.h/dma.h/mpu.h/platform_ops.h/qspi.h/rng.h；
-#   h7r3 独有 btim.h/delay.h/delay_plus.h/spi_sdnand.h/watchdog.h（Stage 4 待收敛）
+#   预期：h743 独有 btim_port.h/qspi_port.h/sys_port.h/usart_port.h（port 头）；
+#   h7r3 独有 btim.h/delay.h/delay_plus.h/spi_sdnand.h/watchdog.h/sys.h（Stage 4 待收敛）
 ls include/platform/stm32h743/*.h | xargs -n1 basename | sort > /tmp/h743.txt
 ls include/platform/stm32h7r3/*.h  | xargs -n1 basename | sort > /tmp/h7r3.txt
 diff /tmp/h743.txt /tmp/h7r3.txt
 
 # 命令 D —— 判据 D：共享源零 HAL / 零 SoC 头（预期为空，注释也算）
 #   Stage 2 起口径比 §1.5 的原口径更严：连 CMSIS core 头都不许出现
-grep -nE 'HAL_|__HAL_|HandleTypeDef|stm32h7xx|CMSIS|core_cm7|sys\.h' src/platform/*.c
+#   Stage 2.6 起黑名单 sys\.h → sys_port\.h（旧 sys.h 是 HAL 伞头；抽象 sys.h 已零 HAL）
+grep -nE 'HAL_|__HAL_|HandleTypeDef|stm32h7xx|CMSIS|core_cm7|sys_port\.h|ftl/|controller/|nand/' src/platform/*.c
 
 # 命令 E —— 判据 E：抽象头里每个 *_port_* 声明恰好有一个定义
-#   预期：21 个名字，每个 defs=1
+#   预期：62 个名字，每个 defs=1（无缺、无重复）
 for f in $(grep -rhoE '[a-z_]+_port_[a-z_]+' include/platform/*.h | sort -u); do
   n=$(grep -rc "^[a-z_].*[ *]$f(" src/platform/*.c src/platform/stm32h743/*_port.c 2>/dev/null \
         | awk -F: '{s+=$2} END{print s+0}')

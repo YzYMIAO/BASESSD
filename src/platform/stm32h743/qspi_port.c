@@ -1,9 +1,16 @@
-#include "qspi.h"
+/*
+ * qspi_port.c — stm32h743 QSPI 适配层
+ *
+ * 只做硬件相关的事：QSPI 句柄、引脚/时钟、命令模式位域→HAL 枚举的解码、
+ * HAL 收发。共享 src/platform/qspi.c 只做空参检查后转发到本文件。
+ */
+
+#include "qspi_port.h"
 
 #include "common/common.h"
-#include "norflash_w25q256.h"
+#include "qspi.h"
 
-QSPI_HandleTypeDef g_qspi_handle; /* QSPI句柄 */
+static QSPI_HandleTypeDef g_qspi_handle; /* QSPI句柄 */
 
 /**
  * @brief       等待状态标志
@@ -12,7 +19,7 @@ QSPI_HandleTypeDef g_qspi_handle; /* QSPI句柄 */
  * @param       wtime: 等待时间
  * @retval      0, 等待成功; 1, 等待失败.
  */
-uint8_t qspi_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime)
+uint8_t qspi_port_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime)
 {
     uint8_t flagsta = 0;
 
@@ -43,7 +50,7 @@ uint8_t qspi_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime)
  * @param       无
  * @retval      0, 成功; 1, 失败.
  */
-uint8_t qspi_init(void)
+uint8_t qspi_port_init(void)
 {
     g_qspi_handle.Instance                = QUADSPI;                        /* QSPI */
     g_qspi_handle.Init.ClockPrescaler     = 1;                              /* QPSI分频比，W25Q256最大频率为133M，
@@ -137,7 +144,7 @@ void HAL_QSPI_MspInit(QSPI_HandleTypeDef *hqspi)
  * @param       dmcycle: 空指令周期数
  * @retval      无
  */
-uint8_t qspi_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmcycle)
+uint8_t qspi_port_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmcycle)
 {
     QSPI_CommandTypeDef qspi_command_handle = {0};
 
@@ -226,13 +233,10 @@ uint8_t qspi_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmcycle)
  * @param       buf     : 接收数据缓冲区首地址
  * @param       datalen : 要传输的数据长度
  * @retval      0, 成功; 其他, 错误代码.
+ * @note        空参检查在共享 src/platform/qspi.c。
  */
-uint8_t qspi_receive(uint8_t *buf, uint32_t datalen)
+uint8_t qspi_port_receive(uint8_t *buf, uint32_t datalen)
 {
-    if ((buf == NULL) || (datalen == 0U))
-    {
-        return FUNC_STATUS_ERROR;
-    }
     g_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
     if (HAL_QSPI_Receive(&g_qspi_handle, buf, 5000) == HAL_OK)
     {
@@ -249,13 +253,10 @@ uint8_t qspi_receive(uint8_t *buf, uint32_t datalen)
  * @param       buf     : 发送数据缓冲区首地址
  * @param       datalen : 要传输的数据长度
  * @retval      0, 成功; 其他, 错误代码.
+ * @note        空参检查在共享 src/platform/qspi.c。
  */
-uint8_t qspi_transmit(uint8_t *buf, uint32_t datalen)
+uint8_t qspi_port_transmit(uint8_t *buf, uint32_t datalen)
 {
-    if ((buf == NULL) || (datalen == 0U))
-    {
-        return FUNC_STATUS_ERROR;
-    }
     g_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
     if (HAL_QSPI_Transmit(&g_qspi_handle, buf, 5000) == HAL_OK)
     {

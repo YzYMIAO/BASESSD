@@ -19,4 +19,11 @@ typedef struct
 int                       ssd_platform_register(const ssd_platform_ops_t *ops);
 const ssd_platform_ops_t *ssd_platform_get(void);
 
+/*
+ * 注册本平台的 ssd_platform_ops_t 实现表。
+ * 名字被 src/main.c 冻结；实现表本身在共享 src/platform/platform.c，
+ * 其中的 time_us 由 port 侧毫秒计数换算（见 src/platform/<soc>/<svc>_port.c）。
+ */
+int stm32_platform_register(void);
+
 #endif /* SSD_PLATFORM_H */

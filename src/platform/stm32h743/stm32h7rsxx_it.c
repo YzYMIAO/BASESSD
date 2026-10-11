@@ -167,7 +167,7 @@ void USART1_IRQHandler(void)
 #endif
 
     /* Keep the IRQ bounded: it only drains/fills FIFOs and records errors. */
-    usart_irq_handler();
+    usart_port_irq_handler();
 
 #if SYS_SUPPORT_OS
     OSIntExit();

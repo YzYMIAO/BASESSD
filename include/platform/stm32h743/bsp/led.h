@@ -1,7 +1,7 @@
 #ifndef PLATFORM_STM32H743_LED_H
 #define PLATFORM_STM32H743_LED_H
 
-#include "sys.h"
+#include "sys_port.h"
 
 /* Apollo V2: LED0 (red) is PB1 and LED1 (green) is PB0; both are active low. */
 #define LED0_GPIO_PORT GPIOB

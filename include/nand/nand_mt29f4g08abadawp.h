@@ -2,7 +2,7 @@
 #define PLATFORM_STM32H743_NAND_MT29F4G08ABADAWP_H
 
 #include "nand/nand_fc_interface.h"
-#include "sys.h"
+#include "sys_port.h"
 
 /*
  * nand_mt29f4g08abadawp.h — Micron MT29F4G08ABADAWP 芯片定义

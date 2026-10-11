@@ -1,5 +1,12 @@
+/*
+ * mpu_port.c — stm32h743 MPU 适配层
+ *
+ * 只做硬件相关的事：把中性参数填进 HAL 的 MPU 区域结构体并配置/使能。
+ * 共享 src/platform/mpu.c 只转发 mpu_set_protection 到本文件。
+ */
 
 #include "mpu.h"
+#include "sys_port.h"
 
 /**
  * @brief   设置MPU区域保护
@@ -43,7 +50,7 @@
  * @arg     MPU_ACCESS_NOT_BUFFERABLE: 禁止缓冲
  * @retval  无
  */
-void mpu_set_protection(uint32_t baseaddr, uint32_t size, uint32_t rnum, uint8_t de, uint8_t ap, uint8_t sen, uint8_t cen, uint8_t ben)
+void mpu_port_set_protection(uint32_t baseaddr, uint32_t size, uint32_t rnum, uint8_t de, uint8_t ap, uint8_t sen, uint8_t cen, uint8_t ben)
 {
     MPU_Region_InitTypeDef mpu_region_init_struct = {0};
 

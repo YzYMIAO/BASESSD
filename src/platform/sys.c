@@ -1,0 +1,83 @@
+/*
+ * sys.c — 跨 target 共享的系统服务层
+ *
+ * 职责：上电初始化序列的编排（顺序即契约），以及 sys_* 公开接口到
+ * include/platform/sys.h 里 sys_port_* 接口的一行转发。所有寄存器 / 内核内建 /
+ * 时钟树 / MPU 区域表都在 src/platform/<soc>/sys_port.c。
+ *
+ * 本文件零 SoC 头、零内核头：SCB、PRIMASK、MSP、WFI 一律经 sys_port_* 下沉。
+ */
+
+#include "sys.h"
+
+#include "common/common.h"
+#include "delay.h"
+#include "fault.h"
+#include "usart.h"
+
+void sys_init(void)
+{
+    sys_mpu_config();
+    sys_cache_enable();
+    sys_port_hal_init();
+    if (sys_stm32_clock_init(5U, 160U, 2U, 4U) != FUNC_STATUS_SUCCESS)
+    {
+        while (1)
+        {
+        }
+    }
+    delay_init(0U);
+    usart_init(115200U);
+    /* 使能可配置故障（MemManage/BusFault/UsageFault），避免全部升级成 HardFault。 */
+    fault_init();
+}
+
+void sys_mpu_config(void)
+{
+    sys_port_mpu_config();
+}
+
+void sys_cache_enable(void)
+{
+    sys_port_cache_enable();
+}
+
+uint8_t get_icache_sta(void)
+{
+    return sys_port_icache_enabled();
+}
+
+uint8_t get_dcache_sta(void)
+{
+    return sys_port_dcache_enabled();
+}
+
+void sys_nvic_set_vector_table(uint32_t base_address, uint32_t offset)
+{
+    sys_port_set_vector_table(base_address, offset);
+}
+
+void sys_wfi_set(void)
+{
+    sys_port_wfi();
+}
+
+void sys_intx_disable(void)
+{
+    sys_port_irq_disable();
+}
+
+void sys_intx_enable(void)
+{
+    sys_port_irq_enable();
+}
+
+void sys_msr_msp(uint32_t address)
+{
+    sys_port_set_msp(address);
+}
+
+uint8_t sys_stm32_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sysclk_div, uint32_t peripheral_div)
+{
+    return sys_port_clock_init(pll_prediv, pll_mul, sysclk_div, peripheral_div);
+}

@@ -13,7 +13,7 @@
  */
 
 #include "delay.h"
-#include "sys.h"
+#include "sys_port.h"
 
 uint32_t delay_port_hclk_hz(void)
 {

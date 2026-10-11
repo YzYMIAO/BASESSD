@@ -1,12 +1,18 @@
-#include "dma.h"
+/*
+ * dma_port.c — stm32h743 DMA 适配层（USART1 TX）
+ *
+ * 只做硬件相关的事：DMA1_Stream0 句柄、HAL 配置、NVIC、IRQ 转发。
+ * 共享 src/platform/dma.c 只转发 uart_tx_dma_* 到本文件。
+ */
 
 #include "common/common.h"
-#include "sys.h" /* DMA_HandleTypeDef / DMA1_Stream0 / HAL_DMA_* —— 抽象 dma.h 已不再传递 */
+#include "dma.h"
+#include "sys_port.h"   /* DMA_HandleTypeDef / DMA1_Stream0 / HAL_DMA_* —— 抽象 dma.h 已不再传递 */
+#include "usart_port.h" /* g_uart1_handle（__HAL_LINKDMA 需要） */
 
-DMA_HandleTypeDef         g_dma_handle;
-extern UART_HandleTypeDef g_uart1_handle;
+DMA_HandleTypeDef g_dma_handle;
 
-uint8_t uart_tx_dma_init(void)
+uint8_t dma_port_uart_tx_init(void)
 {
     __HAL_RCC_DMA1_CLK_ENABLE();
     g_dma_handle.Instance                 = DMA1_Stream0;
@@ -33,7 +39,7 @@ uint8_t uart_tx_dma_init(void)
     return FUNC_STATUS_ERROR;
 }
 
-void uart_tx_dma_irq_handler(void)
+void dma_port_uart_tx_irq_handler(void)
 {
     HAL_DMA_IRQHandler(&g_dma_handle);
 }

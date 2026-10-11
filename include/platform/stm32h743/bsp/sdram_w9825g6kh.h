@@ -3,7 +3,7 @@
 #ifndef PLATFORM_STM32H743_BSP_SDRAM_W9825G6KH_H
 #define PLATFORM_STM32H743_BSP_SDRAM_W9825G6KH_H
 
-#include "sys.h"
+#include "sys_port.h"
 
 extern SDRAM_HandleTypeDef g_sdram_handle; /* SDRAM句柄 */
 

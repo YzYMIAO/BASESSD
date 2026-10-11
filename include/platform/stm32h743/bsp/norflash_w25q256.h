@@ -3,7 +3,7 @@
 #ifndef PLATFORM_STM32H743_BSP_NORFLASH_W25Q256_H
 #define PLATFORM_STM32H743_BSP_NORFLASH_W25Q256_H
 
-#include "sys.h"
+#include "sys_port.h"
 
 /* FLASH芯片列表 */
 #define W25Q80   0XEF13 /* W25Q80   芯片ID */
