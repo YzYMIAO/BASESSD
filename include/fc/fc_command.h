@@ -83,6 +83,26 @@ typedef enum
     FC_CHAIN_MORE = 1U, /* 链中间，后续还有命令 */
 } fc_chain_mode_t;
 
+/* buffer 归属（配置写入 fc_cmd_conf_t.buf_own）：本命令的数据 buffer **谁申请、谁释放**。
+ *
+ * bit1 = 申请方（0 = FC 申请，1 = 上层申请）；bit0 = 释放方（0 = 上层释放，1 = FC 释放）。
+ * 「上层释放」= 上层调 fc_command_release() 归还（desc 链即命令的资源集，FC 一并归还链上
+ * 所有未归还的 buffer）；「FC 释放」= FC 在命令完成时当场归还（并把 desc 的 buffer_id 抹成
+ * INVALID，故之后 fc_command_release 不会重复归还）。
+ *
+ * **`00` 是默认值 = 既有生产行为**（FC 建链时申请、上层 release 时归还）：命令出池整体清零
+ * ⇒ 未显式设置本字段的命令恒走 `00`，FTL 生产路径逐字不变。 */
+typedef enum
+{
+    FC_BUF_OWN_FC_ALLOC_UPPER_FREE    = 0U, /* 00：FC 申请，上层释放——读路径，上层拿 buffer 并掌控生命周期（默认） */
+    FC_BUF_OWN_FC_ALLOC_FC_FREE       = 1U, /* 01：FC 申请，FC 释放——读，只要命令状态 */
+    FC_BUF_OWN_UPPER_ALLOC_UPPER_FREE = 2U, /* 10：上层申请，上层释放——上层把控数据场景 */
+    FC_BUF_OWN_UPPER_ALLOC_FC_FREE    = 3U, /* 11：上层申请，FC 释放——写命令等，只要命令状态 */
+} fc_buf_own_t;
+
+#define FC_BUF_OWN_ALLOC_BY_UPPER (0x2U) /* bit1：1 = 上层申请（上层自行 fc_buffer_alloc 并传入） */
+#define FC_BUF_OWN_FREE_BY_FC     (0x1U) /* bit0：1 = FC 在完成时归还 */
+
 /* 命令优先级（选择写入 SQ 还是 HSQ） */
 typedef enum
 {
@@ -153,7 +173,9 @@ typedef struct fc_cmd_conf_t
     DWORD chain       : 1; /* FC_CHAIN_END / FC_CHAIN_MORE. */
     DWORD page_type   : 2; /* fc_page_type_t: LP/MP/UP/TP. */
     DWORD multi_plane : 3; /* 0=single; N=N-plane。总 desc 数以 desc 链长度为真值，不由本字段推导。 */
-    DWORD reserved    : 3; /* Reserved for future configuration. */
+    DWORD buf_own     : 2; /* fc_buf_own_t：本命令数据 buffer 的归属（bit1=申请方 0=FC 1=上层；
+                            *                 bit0=释放方 0=上层 1=FC）。默认 0 = 既有行为。 */
+    DWORD reserved : 1;    /* Reserved for future configuration. */
 } fc_cmd_conf_t;
 
 /*

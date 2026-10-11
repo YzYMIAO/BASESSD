@@ -109,11 +109,14 @@ static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t
 }
 
 /* --------------------------------------------------------------------
- * fc_command_configure_descriptor
+ * fc_command_configure_descriptor_with_buffer
  *   功能：把一个 (plane, cw) 追加到命令 desc 链尾——**唯一的建链入口**（v17）。
- *         分配 desc + buffer、填 PAA/config/meta、挂链尾。
+ *         分配 desc、按 config.buf_own 决定 buffer 从哪来、填 PAA/config/meta、挂链尾。
  *   参数：command —— 命令；plane —— 目标 plane；cw —— 目标 CW 号；
- *         row_paa —— 该 plane 的行地址（page/block/lun）。
+ *         row_paa —— 该 plane 的行地址（page/block/lun）；
+ *         buffer_id —— 上层申请（buf_own 的申请位 = 1，即 10/11）时由调用者
+ *                     fc_buffer_alloc() 取好传入，FC 不再申请；FC 申请（00/01，默认）
+ *                     时必须是 FC_BUFFER_ID_INVALID（带了 id = 配置错误 → ASSERT）。
  *   返回：FC_STATUS_OK / RESOURCE_EMPTY（desc 池或 buffer 池空）。
  *         配置错误（句柄非法 / 生命周期不符 / 坐标越界 / 重复挂同一 n）一律 ASSERT——
  *         绝不允许带着错配置发到硬件；只有「申请不到」才走返回码（模仿硬件行为）。
@@ -147,14 +150,17 @@ static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t
  *       见 ftl_cmd_write_data。放这里会让「建链失败→整链释放」白做一遍拷贝。
  *     - 失败时链上可能已有 desc（含本条）：本层不回滚，「已分配的 desc 全部在链上」
  *       是不变量，调用方沿链释放即完整回收（fc_descriptor_chain_release_all）。
+ *     - **buffer 从哪来由 config.buf_own 决定**（v53）：上层申请（申请位 = 1）时用调用者
+ *       传进来的 buffer_id（无失败路径）；FC 申请（默认）时保持既有的「挂链后申请、
+ *       池空 → RESOURCE_EMPTY、desc 留链上」语义。归属语义见 fc_buf_own_t。
  * -------------------------------------------------------------------- */
-fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
+fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa, fc_buffer_id_t buffer_id)
 {
     fc_command_id_t  command_id;
     uint8_t          plane_first;
     uint8_t          plane_last;
     fc_descriptor_t *descriptor;
-    fc_buffer_id_t   buffer_id;
+    fc_buffer_id_t   alloc_id;
     uint32_t         plane_cw;
 
     /* ── 校验段：不得触碰任何池 ──
@@ -174,6 +180,17 @@ fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane
     ASSERT(fc_command_cw_attached(command, plane, cw) == 0U);
     /* row_paa 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
     ASSERT((uint8_t)paa_to_plane(row_paa) == plane);
+    /* buffer 归属（buf_own）与 buffer_id 实参必须一致（v53）：
+     *   上层申请（10/11）⇒ 调用者已 fc_buffer_alloc，必须传一个池内 id；
+     *   FC 申请（00/01，默认）⇒ 不得自带 id，FC 建链时自己申请。 */
+    if ((command->config.buf_own & FC_BUF_OWN_ALLOC_BY_UPPER) != 0U)
+    {
+        ASSERT((buffer_id != FC_BUFFER_ID_INVALID) && (buffer_id < FC_BUFFER_POOL_DEPTH));
+    }
+    else
+    {
+        ASSERT(buffer_id == FC_BUFFER_ID_INVALID);
+    }
 
     /* ── 机制段 ── */
     descriptor = fc_descriptor_alloc_internal(&g_fc_controller, command);
@@ -199,15 +216,29 @@ fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane
 
     fc_command_chain_append(&g_fc_controller, command, descriptor); /* 出池即挂链 */
 
-    /* buffer 池比 desc 池小，这里是最现实的失败点。失败**不回滚**：desc 已在链上、
-     * buffer_id 保持 INVALID，调用方沿链释放时自然跳过 buffer、回收 desc。 */
-    buffer_id = fc_buffer_alloc_internal(&g_fc_controller);
-    if (buffer_id == FC_BUFFER_ID_INVALID)
+    /* 上层申请（buf_own 10/11）：buffer 由调用者 fc_buffer_alloc 好并传进来，无失败路径。 */
+    if ((command->config.buf_own & FC_BUF_OWN_ALLOC_BY_UPPER) != 0U)
+    {
+        descriptor->buffer_id = buffer_id;
+        return FC_STATUS_OK;
+    }
+
+    /* FC 申请（默认 00/01）：buffer 池比 desc 池小，这里是最现实的失败点。失败**不回滚**：
+     * desc 已在链上、buffer_id 保持 INVALID，调用方沿链释放时自然跳过 buffer、回收 desc。 */
+    alloc_id = fc_buffer_alloc_internal(&g_fc_controller);
+    if (alloc_id == FC_BUFFER_ID_INVALID)
     {
         return FC_STATUS_RESOURCE_EMPTY;
     }
-    descriptor->buffer_id = buffer_id;
+    descriptor->buffer_id = alloc_id;
     return FC_STATUS_OK;
+}
+
+/* 建链入口（FC 申请，默认路径）：等价于 _with_buffer(..., FC_BUFFER_ID_INVALID)。
+ * 4 参签名保持不变——FTL 的两个调用点、RAID parity 建链、既有单测都无需改动。 */
+fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
+{
+    return fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, FC_BUFFER_ID_INVALID);
 }
 
 /* 释放链头那一个 desc（含其 buffer），返回新链头。

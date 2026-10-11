@@ -1940,6 +1940,167 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
 #endif /* #if 0 — BLOCK_LOCK_TIGHT disabled (permanently locks the chip) */
 
 /**************************************************************************
+ *  buffer 归属位域（v53）：谁申请 / 谁释放
+ *
+ *  判据 = fc_get_resource_stats().buffer_used 的**增量**：建链 +1、归还回基线。
+ *  载体 = OP_READ_ID 单 CW 链（单 plane、has_data=1、无需建块，同 init_sequence Step 2）。
+ *  四档全覆盖：
+ *    00 FC 申请 / 上层释放（默认，既有生产行为，必须逐字不变）
+ *    01 FC 申请 / FC 释放
+ *    10 上层申请 / 上层释放
+ *    11 上层申请 / FC 释放
+ *  ⚠ 本用例只验**资源账**，不比对介质内容（数据正确性由 init_sequence 覆盖）。
+ **************************************************************************/
+
+/* 当前 buffer 池占用（满 = FC_BUFFER_POOL_DEPTH）。测试不 include fc_internal.h，
+ * 只能经公开统计接口观测。 */
+static uint16_t l3_buf_used(void)
+{
+    fc_resource_stats_t stats;
+
+    (void)fc_get_resource_stats(&stats);
+    return stats.buffer_used;
+}
+
+/* 模式 10/11 的建链：上层先 fc_buffer_alloc()，再把 id 传进 5 参入口。
+ * ⚠ 不能用 test_cmd_build —— 它走 ftl_cmd_configure_descriptors（4 参入口，即
+ *   buf_own = FC 申请那条路）。此处照 test_cmd_try_build 的样子手工建。 */
+static fc_command_t *l3_buf_own_build_upper(fc_buffer_id_t buffer_id, uint8_t buf_own)
+{
+    fc_command_t *cmd  = fc_command_alloc();
+    fc_cmd_conf_t conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
+
+    munit_assert_not_null(cmd);
+
+    conf.buf_own = (DWORD)buf_own;
+    cmd->config  = conf;
+
+    cmd->config.ch          = 0U;
+    cmd->config.ce          = 0U;
+    cmd->config.lun         = 0U;
+    cmd->config.multi_plane = 0U;
+    cmd->module             = FC_COMMAND_MODULE_HOST_IO;
+    cmd->paa                = paa_from_addr(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U});
+    cmd->meta               = 0U;
+
+    munit_assert_int(fc_command_configure_descriptor_with_buffer(cmd, 0U, 0U, cmd->paa, buffer_id), ==, FC_STATUS_OK);
+
+    return cmd;
+}
+
+static MunitResult test_buf_own_release(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+
+    test_trace_begin();
+
+    const uint16_t base = l3_buf_used();
+
+    /* ── Step 1：00（默认）——FC 申请，上层 fc_command_release 归还 ── */
+    {
+        fc_command_t *cmd = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &L3_CONF(OP_READ_ID, FC_CRC_ENABLE));
+
+        munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U)); /* 建链即申请 */
+        (void)test_submit_wait(cmd);
+        munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U)); /* 00 完成不自动归还 */
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_uint32(l3_buf_used(), ==, base); /* release 归还 */
+    }
+
+    /* ── Step 2：01 —— FC 申请，完成时 FC 当场归还（上层只要命令状态） ── */
+    {
+        fc_cmd_conf_t conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
+        fc_command_t *cmd;
+
+        conf.buf_own = (DWORD)FC_BUF_OWN_FC_ALLOC_FC_FREE;
+        cmd          = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
+
+        munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U));
+        (void)test_submit_wait(cmd);
+        munit_assert_uint32(l3_buf_used(), ==, base); /* 01 完成即归还 */
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_uint32(l3_buf_used(), ==, base); /* 幂等：不双重归还 */
+    }
+
+    /* ── Step 3：11 —— 上层申请（先 fc_buffer_alloc），完成时 FC 归还 ── */
+    {
+        fc_buffer_id_t ubuf = fc_buffer_alloc();
+        fc_command_t  *cmd;
+
+        munit_assert_uint32(ubuf, !=, (uint32_t)FC_BUFFER_ID_INVALID);
+        munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U));
+
+        cmd = l3_buf_own_build_upper(ubuf, (uint8_t)FC_BUF_OWN_UPPER_ALLOC_FC_FREE);
+        (void)test_submit_wait(cmd);
+        munit_assert_uint32(l3_buf_used(), ==, base); /* 11 完成即由 FC 归还上层的 buffer */
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_uint32(l3_buf_used(), ==, base);
+    }
+
+    /* ── Step 4：10 —— 上层申请，上层释放（完成不归还，读法 A 的回归守卫） ── */
+    {
+        fc_buffer_id_t ubuf = fc_buffer_alloc();
+        fc_command_t  *cmd;
+
+        munit_assert_uint32(ubuf, !=, (uint32_t)FC_BUFFER_ID_INVALID);
+        munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U));
+
+        cmd = l3_buf_own_build_upper(ubuf, (uint8_t)FC_BUF_OWN_UPPER_ALLOC_UPPER_FREE);
+        (void)test_submit_wait(cmd);
+        munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U)); /* 10 完成不归还 */
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_uint32(l3_buf_used(), ==, base); /* release 恒归还链上未归还的 buffer */
+    }
+
+    /* ── Step 5：建了链但**没提交** —— 模式 01 走 fc_command_release 也不泄漏 ── */
+    {
+        fc_cmd_conf_t conf = L3_CONF(OP_READ_ID, FC_CRC_ENABLE);
+        fc_command_t *cmd;
+
+        conf.buf_own = (DWORD)FC_BUF_OWN_FC_ALLOC_FC_FREE;
+        cmd          = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0x01U, 0U, &conf);
+
+        munit_assert_uint32(l3_buf_used(), ==, (uint32_t)(base + 1U));
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+        munit_assert_uint32(l3_buf_used(), ==, base);
+    }
+
+    /* ── Step 6：空闲链完整性守卫 —— 双重释放会让同一 id 被链入 free list 两次，
+     *            这里连续申请满池，断言 id 两两不同 ──
+     * 申请次数 = 池深 − 基线（本用例正常时基线为 0；用增量写是为了不受前面用例的
+     * 残留影响，让本用例独立成立）。 */
+    {
+        const uint32_t avail = (uint32_t)FC_BUFFER_POOL_DEPTH - (uint32_t)base;
+        fc_buffer_id_t ids[FC_BUFFER_POOL_DEPTH];
+
+        for (uint32_t i = 0U; i < avail; i++)
+        {
+            ids[i] = fc_buffer_alloc();
+            munit_assert_uint32(ids[i], !=, (uint32_t)FC_BUFFER_ID_INVALID);
+
+            for (uint32_t j = 0U; j < i; j++)
+            {
+                munit_assert_uint32(ids[i], !=, (uint32_t)ids[j]);
+            }
+        }
+
+        munit_assert_uint32(l3_buf_used(), ==, (uint32_t)FC_BUFFER_POOL_DEPTH);
+
+        for (uint32_t i = 0U; i < avail; i++)
+        {
+            munit_assert_int(fc_buffer_release(ids[i]), ==, FC_STATUS_OK);
+        }
+
+        munit_assert_uint32(l3_buf_used(), ==, base);
+    }
+
+    test_trace_summary("buf_own_release base=%u: 00 上层释放 / 01 FC释放 / 10 上层申请+释放 / 11 上层申请+FC释放 —— 四档账目全部闭合", (unsigned)base);
+
+    return MUNIT_OK;
+}
+
+/**************************************************************************
  *  套件定义
  *
  *  包含（前 3 条是定长命令序列，地址不参与，不随机化）：
@@ -1955,9 +2116,10 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
  *    - block_random_data（随机列读写验证，抽 plane / block / 页集 / CW 集）
  *    - block_load_fetch（加载/取数两段式显式下发，抽 plane / block / block_mp）
  *    - block_lock_ops（块锁族 21/22/23/25 合并用例，抽 plane / block）
+ *    - buf_own_release（buffer 归属位域 00/01/10/11，只验资源账，地址不参与，不随机化）
  *    - block_lock_tight（永久锁芯片验证，**被 #if 0 隔开**，不可逆故不启用）
  *
- *  八条随机化行用 MUNIT_TEST_OPTION_NONE（**保留**，不要换成 SINGLE_ITERATION）：
+ *  上面这些行（含 buf_own_release）用 MUNIT_TEST_OPTION_NONE（**保留**，不要换成 SINGLE_ITERATION）：
  *  --iterations N 才是覆盖旋钮（每条抽 N 组）；换成 SINGLE_ITERATION 会把旋钮锁死。
  *  runner.iterations 默认 0 ⇒ 迭代次数回落到套件级 iterations（ut_main.c 里 = 1），
  *  与是否带 SINGLE_ITERATION 无关（munit.c:1375 / :706-709）。
@@ -1981,6 +2143,7 @@ MunitTest g_fc_lifecycle_tests[] = {
     {    "block_read_meta",     test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
     {     "block_lock_ops",      test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
     {     "mixed_pipeline",      test_mixed_pipeline, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {    "buf_own_release",     test_buf_own_release, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
 #if 0  /* block_lock_tight 被 #if 0 隔开，此处不注册 */
     { "block_lock_tight",    test_block_lock_tight,    test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 #endif

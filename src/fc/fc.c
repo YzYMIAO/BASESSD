@@ -538,6 +538,37 @@ void fc_descriptor_chain_release_all_internal(fc_t *controller, fc_descriptor_id
 }
 
 /* --------------------------------------------------------------------
+ * fc_command_release_buffers_internal
+ *   功能：沿命令的 desc 链归还**全部 buffer**，并把各 desc 的 buffer_id 抹成
+ *         FC_BUFFER_ID_INVALID（**幂等**：已 INVALID 的跳过）。
+ *   参数：controller —— FC 控制器；command —— 命令。
+ *   返回：无。
+ *   实现要点：只动 buffer，**不动 desc 链、不动命令槽位**——它们仍由
+ *         fc_command_release 回收。唯一调用者：fc_complete_from_nand 在
+ *         「buf_own 的释放位 = FC 释放（01/11）」时当场归还（此时完成项已组装完毕，
+ *         之后没有任何读者碰 buffer）。抹 INVALID 是为了让随后的链释放自然跳过，
+ *         从而不双重归还；命令若没走到完成就释放，buffer 仍有效，链释放照常归还
+ *         ⇒ 不泄漏。归属语义见 fc_buf_own_t。
+ * -------------------------------------------------------------------- */
+static void fc_command_release_buffers_internal(fc_t *controller, fc_command_t *command)
+{
+    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)command->desc_id;
+
+    while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        fc_descriptor_t *descriptor = &controller->descriptor_pool[desc_id];
+        fc_buffer_id_t   buffer_id  = (fc_buffer_id_t)descriptor->buffer_id;
+
+        if (buffer_id != FC_BUFFER_ID_INVALID)
+        {
+            (void)fc_buffer_release_internal(controller, buffer_id);
+            descriptor->buffer_id = FC_BUFFER_ID_INVALID;
+        }
+        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+    }
+}
+
+/* --------------------------------------------------------------------
  * fc_buffer_alloc_internal
  *   功能：从空闲链表分配一个 buffer 槽位并置占用。
  *   参数：controller —— FC 控制器。
@@ -819,6 +850,16 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         }
     }
 
+    /* ── Step 4: buffer 归属 = FC 释放（buf_own bit0 = 1，即 01/11）时当场归还 ──
+     * 完成项已组装完毕（Step 3 之后没有任何读者碰 buffer），此处归还并把各 desc 的
+     * buffer_id 抹成 INVALID ⇒ 随后 fc_command_release 沿链释放时自然跳过，不双重归还。
+     * 00/10（上层释放）不在这里动，行为与今天逐字相同。放在 fc_complete_internal 之前，
+     * 顺带覆盖 CQ 满强制 COMPLETED 的 fatal 分支。 */
+    if ((command->config.buf_own & FC_BUF_OWN_FREE_BY_FC) != 0U)
+    {
+        fc_command_release_buffers_internal(controller, command);
+    }
+
     if (fc_complete_internal(controller, &completion) != FC_STATUS_OK)
     {
         /* CQ 满：强制标记 COMPLETED 防止命令泄漏。
@@ -903,6 +944,9 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     parity_cmd->config           = data_cmd->config;
     parity_cmd->config.raid      = FC_RAID_MODE_NORMAL;         /* parity 命令不需要 RAID */
     parity_cmd->config.operation = OP_PROGRAM_PAGE_MULTI_PLANE; /* 提交时走 Multi-Plane */
+    /* parity 是 FC 内部命令（buffer 由 FC 申请、FC 释放），不继承 data_cmd 的 buf_own——
+     * 否则 data_cmd 若是「上层申请」档，建链入口会因拿不到上层 buffer_id 而断言。 */
+    parity_cmd->config.buf_own   = FC_BUF_OWN_FC_ALLOC_FC_FREE;
     parity_cmd->high_priority    = data_cmd->high_priority;
     parity_cmd->module           = data_cmd->module;
     parity_cmd->meta             = data_cmd->meta;

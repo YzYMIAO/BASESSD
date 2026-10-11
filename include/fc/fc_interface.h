@@ -69,6 +69,13 @@ extern "C"
      * 是不变量，调用方沿链释放即完整回收（见下两个函数）。 */
     fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa);
 
+    /* 建链入口（**上层申请 buffer**）——与上一个的唯一差别是 buffer 从哪来。
+     * 仅当 command->config.buf_own 的申请位 = 上层申请（FC_BUF_OWN_ALLOC_BY_UPPER，即 10/11）
+     * 时合法：调用者须先 `fc_buffer_alloc()` 拿到 buffer_id 再传进来，FC 建链时**不再申请**。
+     * buf_own = FC 申请（00/01）时必须传 FC_BUFFER_ID_INVALID（否则是配置错误 → ASSERT）。
+     * 其余前置、返回码、失败语义与 fc_command_configure_descriptor 完全一致。 */
+    fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa, fc_buffer_id_t buffer_id);
+
     /* 释放链头那一个 desc（含其 buffer），返回新链头；空链（head 越界）原样返回。
      * 传链头 ID 而非命令：command->desc_id 是位域取不了地址，故按值传入、按值取回。
      * 用法：command->desc_id = fc_descriptor_chain_release_head(command->desc_id); */
