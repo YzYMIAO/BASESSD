@@ -38,6 +38,7 @@
 > - **v33 (2026-10-10)**: **CRC 引擎改走 STM32H743 HAL 驱动**（changelog `fc_crc_hal_driver_v33.md`）。原 `fc_crc_engine.c` 裸写外设寄存器，`FC_CRC_BASE` 写成了 **ADC3** 的 `0x58026000`（真值 `0x58024C00`）⇒ IDR 自检不过 ⇒ `g_crc_ready = 0`（「失败静默继续」）⇒ `fc_crc_compute()` 恒返 0 ⇒ **CRC 校验自始恒通过**。改为新增平台层 `src/platform/stm32h743/crc.{h,c}` 唯一持有 `CRC_HandleTypeDef`（地址由 CMSIS 宏保证）、管时钟、做 IDR 写读回环自检（失败转 `ASSERT`，删除 `g_crc_ready` 静默降级路径）；`src/fc/fc_crc_engine.c` 只留「对哪 512B 算、结果怎么判」，`src/fc/` 保持零 HAL 依赖。**介质格式变更**：此前写入的 CW 里 CRC 字段恒为 0，改后是真值。⚠ 两坑：`stm32h7xx_hal_crc_ex.c` 必须同编（`HAL_CRC_Init` 无条件调 `HAL_CRCEx_Polynomial_Set`）、`ASSERT(HAL_CRC_Init(...))` 在 release 下会把初始化整个裁掉（须先求值再断言）
 > - **v47 (2026-10-11)**: **`fc_command_t.pba` → `.paa`——PBA 退出 FC 层**。SQ 里的 PBA 会经 FC 接口一路带到 FC-NAND 层，而 FC 层在 10+ 处 `pba_to_paa()` 现场转换——PBA 与 PAA **位序不同**（`pba_to_paa` 是真正的字段重排），每处转换都是一次静默算错地址的机会。改为：**FTL 在自己的空间组合 PBA，在边界处 `pba_to_paa()` 一次，赋给 `cmd->paa`**；`src/fc/**` 里 `pba_to_paa()` / `pba_to_*()` 归零。建链入口 `fc_command_configure_descriptor()` 一并改收 `nand_paa_t row_paa`（FC 层最后一个收 PBA 的地方）；`desc->paa` 由 `paa_with_cw(paa_with_plane(row_paa, plane), cw)` 造出（PAA 的 plane 与 cw **不相邻**，v24 的 plane_cw 掩码技巧只在 LBA/PBA 空间有效），`desc->meta` 仍是 LBA 公式、不变。FTL 侧 `ftl_paa_gblock(cmd->paa)` 与旧 `ftl_pba_gblock(cmd->pba)` **逐位等价**（`bst.h` 里前者本就是后者的展开）。**PAA 无 ch/ce ⇒ 路由一律走 `config.ch/ce/lun`**（生产路径与测试本就如此，本版把它写死为结构不变式）。RAID 段（`#if CONFIG_FC_RAID`，恒关）一并机械改 PAA、**无法编译验证**。用例数不变（仍 53）；`make clean && make tests` 0 warning 0 error、链接 225212 B；固件 166708 B（§2.3.1、§6.1；changelog `fc_command_paa_v47.md`）
 > - **v52 (2026-10-11)**: **链锁——链未结束期间该 LUN 的填充权归链所在提交队列独占**。补上一处真实缺口：链长于 per-LUN FIFO 深（`FC_SCHEDULER_CHAIN_MAX = 4`）时被 `fc_poll_chain_length` 截成多批、分多次填充 pass 下发，而 `fc_poll_fill` 的 `suspended[]` 每趟 `memset` 清零 ⇒ **批与批之间无跨 pass 状态**，另一条提交队列（HSQ/SQ）的命令可插进链的已下发部分与未下发部分之间。`fc_scheduler_t` 新增跨 pass 持久的 `uint8_t chain_owner[CH_NUM][CE_NUM][LUN_NUM]`（取值 `fc_chain_owner_t` NONE/SQ/HSQ），`fc_poll_fill_queue` 加 `owner` 形参、三处规则：**准入**（`chain_owner != NONE && != 本队列` → 回推跳过，**不置 suspended**，否则把链自己的续批一并锁死）/ **更新**（下发成功后看**批尾** `chain.ids[need-1].config.chain`——`MORE` ⇒ 锁继续转本队列、`END` ⇒ 解锁）/ **失败清锁**（整链注 `NAND_FAIL` 时清，免留残锁）。锁的粒度是「**哪条提交队列能喂这个 LUN**」而非「LUN 不能用」：链所在队列照常能喂（续批正从这条队列取），另一条队列一律回推，直到链 END 下发。与既有「共享 `suspended` 防优先级倒挂」**正交**。**对生产路径零影响**：FTL 全仓恒 `FC_CHAIN_END` ⇒ `chain_owner` 恒 NONE ⇒ 准入判断恒假、更新恒写 NONE ⇒ 逐字不变（§2.7、§16.9、§23.7、§23.9；changelog `fc_chain_priority_lock_v52.md`）
+> - **v53 (2026-10-11)**: **命令级 buffer 归属位域 `fc_cmd_conf_t.buf_own : 2`——谁申请 / 谁释放**。用户要一个 2-bit 旋钮表达「这条命令的数据 buffer 由谁申请、由谁归还」，把上层（FTL）频繁的 buffer 申请/释放动作按需**下沉到 FC 层**。编码：**bit1 = 申请方**（0 = FC 申请，1 = 上层申请）、**bit0 = 释放方**（0 = 上层释放，1 = FC 释放），四档 `00` FC申请/上层释放 / `01` FC申请/FC释放 / `10` 上层申请/上层释放 / `11` 上层申请/FC释放。**编码刻意让 `00` = 今天的生产行为**（`fc_cmd_conf_t` 是 32 bit，取原 `reserved : 3` 中的 2 bit 放新字段，命令出池 `(fc_command_t){0}` 清零即得默认 `00`）⇒ **`src/ftl/**` 一行不动**。**机制**：建链机制体改名 `fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, buffer_id)`（5 参，上层申请时由调用者 `fc_buffer_alloc()` 后传入），原 4 参入口退化为 `_with_buffer(..., FC_BUFFER_ID_INVALID)` 薄包装（FTL 两个调用点 / RAID parity / 既有单测零改动）；`fc_complete_from_nand` 在 Step 3 组装完 CQ 条目之后、`fc_complete_internal` 之前加 **Step 4**——`buf_own` 释放位 = FC 释放（`01`/`11`）时沿 desc 链归还全部 buffer 并把各 desc 的 `buffer_id` 抹成 `FC_BUFFER_ID_INVALID`（**幂等**：随后的 `fc_command_release` 自然跳过，不双重归还；命令没走到完成就释放则 buffer 仍有效、链释放照常归还 ⇒ 不泄漏）。**释放原语一行不改**（读法 A）：「上层释放」= 上层调 `fc_command_release`，它恒归还链上所有未归还的 buffer，不管谁申请的——`10` 与 `00` 的差别**只在谁调 `fc_buffer_alloc()`**。RAID parity（`#if CONFIG_FC_RAID`，恒关、无法编译验证）补一行 `parity_cmd->config.buf_own = FC_BUF_OWN_FC_ALLOC_FC_FREE`（parity 是 FC 内部命令，不继承 data_cmd 的归属）。用例数 **56 → 57**（Level 3 新增 `buf_own_release`，四档账目闭合 + 空闲链完整性守卫）；`make clean && make tests` 0 warning 0 error、`.bin` **238980 B**（§12.10、§13.3.1；changelog `fc_buf_own_v53.md`）
 > - **2026-10-09（协议查证，非代码版本）**: **multi-plane 不在 ONFI 1.0 里**。逐字读 ONFI 1.0（Rev 1.0, 2006-12-28）Table 14 命令集：cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，**全文 `plane` 一词出现 0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。multi-plane 全部来自器件侧。顺带逐字核对了 Micron「4Gb, 8Gb, and 16Gb x8 NAND Flash Memory」（MT29FxG08xAA, Rev B）的 Table 7 Two-Plane Command Set / §Two-Plane Addressing，并发现两处待办：① 「two-plane 命令族要求 on-die ECC 关闭（Note 4）」的出处对不上（该 PDF 全文无 `on-die`）；② 器件有 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`，本项目 op 表缺此 op（§25.6 前置约束 3、§25.8 风险 2 与风险 8）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
@@ -2119,6 +2120,56 @@ fc_command_release(done);
 - **中期**：将 memcpy 替换为 DMA 传输（DMA: FTL buffer → FC Buffer Pool）
 - **长期**（如需零拷贝）：在双模或纯 data_ptr 方案上扩展，但保持接口层不变
 
+### 12.10 buffer 归属位域（v53 已落地）
+
+§12.6 的「双模」提出用 `own_buf : 1` 表达「buffer 是 FC Pool 的还是 FTL 自己给的」，§12.9 因
+UAF 风险否决了它的 `data_ptr` 那一半，只留 `buffer_id` 单一路径。**v53 把其中仍有价值的那半
+——「归属」——用 2 bit 显式化，且不引入裸指针**：
+
+```c
+DWORD buf_own : 2; /* fc_buf_own_t：bit1 = 申请方（0 = FC，1 = 上层）；bit0 = 释放方（0 = 上层，1 = FC） */
+```
+
+| 值 | 申请 | 释放 | 语义（用户定稿） |
+|---|---|---|---|
+| `00` | **FC** | 上层 | 读命令路径，需要拿到 buffer，**上层把控 buffer 生命周期**（**默认 = 既有生产行为**） |
+| `01` | FC | **FC** | 读命令，**不需要拿到 buffer**，只需要知道命令状态 |
+| `10` | 上层 | 上层 | 上层把控数据场景 |
+| `11` | 上层 | **FC** | 写命令等场景，只要命令状态 |
+
+**为什么 `00` 必须是默认值**：`fc_cmd_conf_t` 恰好 32 bit，新字段从原 `reserved : 3` 里取 2 bit
+（剩 `reserved : 1`），命令出池整体清零（`(fc_command_t){0}`）⇒ 未显式设置者恒为 `00`。
+而 `00` 正是今天的行为（FC 建链时申请、上层 `fc_command_release` 时归还）⇒ **生产路径逐字不变、
+`src/ftl/**` 一行不动**。这是本方案能上板验证的前提。
+
+**机制落点**（三处，均不改变既有档的行为）：
+
+| 位置 | 改动 |
+|---|---|
+| 建链入口 | 机制体 `fc_command_configure_descriptor_with_buffer(cmd, plane, cw, row_paa, buffer_id)`——申请位 = 上层时**用调用者传进来的 id**、不再自己申请；原 4 参 `fc_command_configure_descriptor()` 退化为 `_with_buffer(..., FC_BUFFER_ID_INVALID)` 薄包装（FTL 两个调用点 / RAID parity / 既有单测零改动） |
+| 完成路径 | `fc_complete_from_nand` 在 Step 3 组装完 CQ 条目之后、`fc_complete_internal` 之前加 **Step 4**：释放位 = FC 释放（`01`/`11`）时沿 desc 链归还全部 buffer 并把各 desc 的 `buffer_id` 抹成 `FC_BUFFER_ID_INVALID` |
+| 释放原语 | **一行不改**——`fc_command_release` 恒归还链上所有**未归还**的 buffer，不管谁申请的 |
+
+**为什么不需要 refcount**：真实主控内部的 buffer manager 通常带引用计数，因为同一个 buffer 会被
+流水线多级引用（ECC 引擎 / DMA 引擎 / 固件）。本项目的 buffer 是**单引用**（只有 desc 链持有它），
+所以「0/1 占用位 + 一次显式归还」就够。抹 `INVALID` 使归还**幂等**：
+
+- `01`/`11` 走完成：Step 4 已归还并抹 `INVALID` ⇒ 随后的 `fc_command_release` 沿链释放时跳过 ⇒ 不双重归还；
+- `01`/`11` 但命令**没走到完成**（建链中途失败 / 提交前主动 release）：buffer 仍有效 ⇒ 链释放照常归还 ⇒ 不泄漏；
+- `00`/`10`（上层释放）：完成路径不碰 ⇒ 与今天逐字相同。
+
+**「上层申请」怎么把 id 传进来**：调用者先 `fc_buffer_alloc()`，再调 5 参入口。`buf_own` 的申请位
+与实参 `buffer_id` 必须一致（上层申请却传 `INVALID`、或 FC 申请却自带 id）都是**配置错误 → ASSERT**
+（`crc.c` 有先例：申请/释放的判定必须是运行期 `if`，绝不放进 `ASSERT`——release 下会被裁掉）。
+
+**与行业方案的关系**：§12.2.1 的企业级 NVMe（有 DDR）里 host 给**物理地址**（PRP/SGL）、控制器
+从不 free ⇒ 对应 `10`；§12.2.3 的 DRAM-less 主控（本项目最接近）用**内部 SRAM Buffer Pool + ID**、
+控制器在命令 retire 时自己归还 free list ⇒ 对应 `01`/`11`。§12.9 选的方案④（buffer_id + 便捷接口）
+仍是默认路径，`buf_own` 只是把「谁申请 / 谁归还」显式化，**接口层不变**。
+
+**⚠ 契约**：`01`/`11` 档下，命令完成之后上层**不得**再调 `fc_get_cmd_data_ptr` / `fc_buffer_get_base`
+——buffer 已归还、`buffer_id` 已 `INVALID`，那些函数会返回 NULL（release 下则越界）。
+
 ---
 
 ## 13. 控制/状态位贯穿分析与 Dispatch 边界设计
@@ -2162,7 +2213,9 @@ NAND Engine → [nand_dispatch_completion_t] → FC (firmware) → FTL
 | `random` | 1 | **❌ 不过** | 加扰/解扰在 FC 数据路径中完成，对硬件透明 |
 | `chain` | 1 | **❌ 不过** | 命令链是 FC 调度器的概念，NAND 硬件单条执行 |
 | `page_type` | 2 | **✅ 通过** | TLC/QLC LDPC 引擎需要 LP/MP/UP/TP 信息选择解码阈值——硬件必须知道当前读取的页类型 |
-| `reserved` | 6 | — | 保留 |
+| `multi_plane` | 3 | **❌ 不过** | 「本命令覆盖几个 plane」是 FC 侧建链的输入，请求方向的 plane 集合由 **desc 链**（`plane_paa[]` / `cw_bitmap`）表达，硬件不需要重复一份 |
+| `buf_own` | 2 | **❌ 不过**（v53） | buffer 归属（谁申请 / 谁归还）是**纯 FC 侧资源策略**，硬件只看到一个已经解析成指针的 `cw_buffers[n]`（见 §13.3.2） |
+| `reserved` | 1 | — | 保留 |
 
 #### 13.3.2 fc_descriptor_t → Dispatch Request
 
