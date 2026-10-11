@@ -755,7 +755,7 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     completion.desc_id    = nand_completion->failed_descriptor_id;
     completion.module     = command->module;
     completion.status     = 0U;
-    completion.param      = (fc_param_t){0}; /* 联合体整体清零（4 字节）；仅 GET_FEATURES / OP_READ_META 会再填 */
+    completion.param      = (fc_param_t){0}; /* 联合体整体清零（4 字节）；仅 GET_FEATURES / OP_READ_META / BLOCK_LOCK_STATUS 会再填 */
 
     if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) &&
         (fc_is_page_read((uint8_t)command->config.operation) != 0U))
@@ -795,11 +795,20 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
             completion.status |= nand_completion->cw_status[slot];
         }
 
+        /* OP_BLOCK_LOCK_STATUS（v49）：7Ah 的状态字节由引擎**直读 DQ 总线**送进
+         * completion->nand_status（NAND_UOP_DATA_OUT_STATUS，见 nand_fmc.c 的
+         * nand_fmc_exec_data_out_status），**不经任何数据缓冲** ⇒ 只能从这里取。
+         * 字节位定义（MT29F4G08 手册）：I/O2 = Lock#（0 = 锁定，1 = 未锁）、
+         * I/O1 = LT#、I/O0 = LT（1 = 紧锁）。 */
+        if (command->config.operation == OP_BLOCK_LOCK_STATUS)
+        {
+            completion.param.bytes[0] = nand_completion->nand_status;
+        }
         /* GET_FEATURES / OP_READ_META：引擎把寄存器值 / 页内 META 写进控制器侧暂存，
          * 拷进 CQ 返回段（两者都用 4 字节暂存 g_fc_return_staging，见 fc_build_dispatch_request）。
          * ⚠ SQ 命令体提交后不再被写（见 fc_command.h「SQ 不可变」）。 */
-        if ((command->config.operation == OP_GET_FEATURES) ||
-            (command->config.operation == OP_READ_META))
+        else if ((command->config.operation == OP_GET_FEATURES) ||
+                 (command->config.operation == OP_READ_META))
         {
             uint8_t i;
 
@@ -1247,6 +1256,9 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
  *           （plane 恒 0，feature 寄存器是 die 级、无 plane 语义）；
  *         * OP_READ_META：无 desc 链，plane_paa[本 plane] 取自 command->paa（保留 cw 位 →
  *           NAND 侧列地址），cw_buffers[plane*CW_NUM] 指向同一暂存（回读的 4 字节 META）；
+ *         * 块锁族（BLOCK_UNLOCK_LOW/HIGH、BLOCK_LOCK(_TIGHT)、BLOCK_LOCK_STATUS，v49）：
+ *           无 desc 链、无 buffer，只填 plane_paa[本 plane]（23h/24h/7Ah 带 3 个地址周期，
+ *           行地址必须来自 command->paa；2Ah/2Ch 无地址周期，填了不下发）；
  *         * 其余带数据命令：沿 desc 链落位（见 fc_build_request_data_planes）。
  *     - **索引空间唯一**：掩码 bit n = plane*CW_NUM + cw（flat 绝对编号），cw_buffers[] 同下标；
  *       NAND 层不再有槽位/链序等第二套坐标。未写的格由上面的 {0} 初始化保证为确定性零值。
@@ -1353,6 +1365,23 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
         request->cw_bitmap                           = (uint32_t)(1UL << (request->plane * CW_NUM));
         request->cw_buffers[request->plane * CW_NUM] = g_fc_return_staging[command_id];
         (void)memset(g_fc_return_staging[command_id], 0, 4U);
+    }
+    else if ((command->config.operation == OP_BLOCK_UNLOCK_LOW) ||
+             (command->config.operation == OP_BLOCK_UNLOCK_HIGH) ||
+             (command->config.operation == OP_BLOCK_LOCK) ||
+             (command->config.operation == OP_BLOCK_LOCK_TIGHT) ||
+             (command->config.operation == OP_BLOCK_LOCK_STATUS))
+    {
+        /* 块锁族（v49）：**无 host 数据搬运**（op 表 has_data 全为 0），但 23h/24h/7Ah
+         * 都带 3 个地址周期（R1/R2/R3）⇒ 行地址**必须取自 command->paa**，否则退化为
+         * block 0（本分支之前这些命令落到末尾 else，plane_paa[] 保持 {0} 整体清零值，
+         * 而 ROW_0 的 uop 正是 *address = request->row[operand]，见 nand_fmc.c）。
+         * 2Ah/2Ch（BLOCK_LOCK / BLOCK_LOCK_TIGHT）无地址周期，纳入本分支只为把「块锁族」
+         * 记在一处——对它们只是多填一个不会被下发的行地址。
+         * 不置 cw_bitmap：7Ah 的状态字节走 DQ 总线直读（NAND_UOP_DATA_OUT_STATUS →
+         * completion->nand_status，不写 request->data），不经任何数据缓冲。 */
+        request->plane                     = (uint8_t)paa_to_plane(command->paa);
+        request->plane_paa[request->plane] = command->paa;
     }
     else if (nand_operation_has_data((uint8_t)command->config.operation))
     {

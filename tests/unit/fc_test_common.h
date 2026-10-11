@@ -320,6 +320,16 @@ void test_random_data_read(uint16_t block_index, uint8_t plane_bitmap, uint16_t 
  *   单 plane（plane ∈ [0, PLANE_NUM)）。status 无错误位才继续（读失败 = 坏块信号）。 */
 void test_read_meta(uint16_t block_index, uint8_t plane, uint16_t page_index, uint8_t cw, uint8_t out[4]);
 
+/* ── 块锁族（v49） ──
+ * test_block_lock_cmd —— op 21（23h）/ 22（24h）/ 23（2Ah）：**无 desc 链**（op 表 has_data = 0）、
+ *   不搬 host 数据，只下发命令并断言无错误位。config->operation 必须是三者之一。
+ * test_block_lock_status —— op 25（7Ah）：同无链，返回状态字节（从 CQ 的 param.bytes[0] 取）。
+ *   位定义（MT29F4G08 手册）：I/O2 = Lock#（0 = 锁定，1 = 未锁）、I/O1 = LT#、I/O0 = LT（1 = 紧锁）。
+ * 两者都按 (block, plane) 设 cmd->paa —— FC 的块锁族分支据此算行地址（23h/24h/7Ah 带 3 个
+ * 地址周期），给错会静默打到 block 0。 */
+void    test_block_lock_cmd(uint16_t block_index, uint8_t plane, const fc_cmd_conf_t *config);
+uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd_conf_t *config);
+
 /* ── 数据搬运 / 校验 ── */
 
 /* 单槽版：把 512B 槽填成 FC_BUFFER_USER_SIZE/4 个 paa。 */

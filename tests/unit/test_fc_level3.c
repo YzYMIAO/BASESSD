@@ -344,34 +344,6 @@ static void read_block_verify_erased(uint16_t block, uint8_t plane_bitmap)
 }
 
 /**************************************************************************
- *  辅助：解锁 block（OP_BLOCK_UNLOCK_LOW + OP_BLOCK_UNLOCK_HIGH）
- *
- *  仅用于 BLOCK_LOCK 后的解锁恢复。正常情况下 NAND 上电后所有 block 默认解锁。
- *  当前唯一调用者 test_unlock_erase 在 #if 0 里，故标 unused。
- **************************************************************************/
-
-static void __attribute__((unused)) unlock_block(uint16_t block)
-{
-    static const uint8_t unlock_ops[2] = {(uint8_t)OP_BLOCK_UNLOCK_LOW, (uint8_t)OP_BLOCK_UNLOCK_HIGH};
-
-    for (uint8_t i = 0U; i < 2U; i++)
-    {
-        fc_command_t *cmd = fc_command_alloc();
-
-        munit_assert_not_null(cmd);
-
-        cmd->config.operation = (DWORD)unlock_ops[i];
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->paa              = paa_from_addr(&(nand_addr_t){.block = block});
-
-        (void)test_submit_wait(cmd);
-        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
-    }
-}
-
-/**************************************************************************
  *  辅助：命令结构体快照 + 逐字段差异对比
  *
  *  在 submit 前给 cmd 拍一份快照，release 前逐字段比对，把发生变化的字段打到
@@ -861,60 +833,6 @@ static MunitResult test_internal_data_move(const MunitParameter params[], void *
     return MUNIT_OK;
 }
 
-#if 0
-/**************************************************************************
- *  test_unlock_erase — 解锁 + 擦除验证
- *
- *  流程：
- *    1. OP_BLOCK_UNLOCK_LOW — 解锁低段
- *    2. OP_BLOCK_UNLOCK_HIGH — 解锁高段
- *    3. OP_ERASE_BLOCK — 擦除 block
- *    4. READ_PAGE — 验证全 0xFF
- *
- *  验证点：
- *    - 锁机制操作正确
- *    - 解锁后擦除成功
- *
- *  ⚠️ 当前测试用 `#if 0` 隔开，确认稳定后启用。
- *     移除 `#if 0` / `#endif` 即可。
- **************************************************************************/
-
-static MunitResult test_unlock_erase(const MunitParameter params[], void *data)
-{
-    (void)params;
-    (void)data;
-
-    uint16_t block = BLOCK_TEST;
-
-    /* Phase 1: 执行 BLOCK_LOCK — 锁定全部 block */
-    {
-        fc_command_t *cmd = fc_command_alloc();
-        munit_assert_not_null(cmd);
-        cmd->config.operation = OP_BLOCK_LOCK;
-        cmd->config.ch        = 0U;
-        cmd->config.ce        = 0U;
-        cmd->config.lun       = 0U;
-        cmd->config.cw        = 0U;
-        cmd->config.random    = FC_RANDOM_DISABLE;
-        cmd->config.ldpc      = FC_ECC_MODE_LDPC_RAW;
-        cmd->config.raid      = FC_RAID_MODE_NORMAL;
-        cmd->desc_id          = FC_DESCRIPTOR_ID_INVALID;
-        test_run_lifecycle(cmd);
-    }
-
-    /* Phase 2: UNLOCK_LOW + UNLOCK_HIGH */
-    unlock_block(block);
-
-    /* Phase 3: 擦除 */
-    test_erase_block(block, TEST_PLANE_BM(0), 0U);
-
-    /* Phase 4: 验证擦除 */
-    read_block_verify_erased(block, 0U);
-
-    return MUNIT_OK;
-}
-#endif /* #if 0 — unlock_erase test disabled */
-
 /**************************************************************************
  *  test_block_write_read — 写 + 读核心验证
  *
@@ -1328,6 +1246,99 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
     return MUNIT_OK;
 }
 
+/**************************************************************************
+ *  test_block_lock_ops — 块锁族合并用例（op 21/22/23/25，**不含**永久锁 op 24）
+ *
+ *  覆盖：
+ *    - OP_BLOCK_LOCK_STATUS（25，7Ah）—— 读锁定状态字节（Lock# / LT# / LT）
+ *    - OP_BLOCK_LOCK（23，2Ah）—— 锁定（无地址周期 ⇒ 锁全片）
+ *    - OP_BLOCK_UNLOCK_LOW（21，23h）/ OP_BLOCK_UNLOCK_HIGH（22，24h）—— 按块地址解锁
+ *    - OP_BLOCK_LOCK_TIGHT（24，2Ch）**不做**：永久锁到断电、资源不可恢复（同 OTP 口径）
+ *
+ *  ⚠ 断言强度**刻意只到「可逆」**。手册（MT29F4G08）的 LOCK 引脚：上电为低则所有
+ *    BLOCK LOCK 命令被禁用；为高则默认锁死全部 block。本板现有用例一直能擦除 ⇒ 块未被
+ *    保护 ⇒ 引脚几乎肯定是**低** ⇒ 2Ah 大概率**空转**。故「LOCK 是否真的挡住擦除」
+ *    「状态字节前后怎么变」只**打印证据、不断言**——硬断言「LOCK 挡住擦除」在本板会当场红，
+ *    而红的原因不是代码错。**唯一硬判据 = 锁序列之后块仍然完全可用（擦/写/读全通过）**。
+ *
+ *  ⚠ 若本板 LOCK 引脚其实为高（块锁启用），2Ah 会锁死全器件：Phase 4 会看到擦除被拒
+ *    （正是要观察的现象），Phase 5 的 23h@block（解锁 0..block）+ 24h@block（解锁
+ *    block..末块）合起来把全器件恢复为未锁，Phase 7 应恢复通过。
+ *    **Phase 7 若红 ⇒「锁不可逆」是真结论，不绕过。**
+ *
+ *  抽样顺序固定为 ① plane ② block —— 顺序即复现契约。
+ **************************************************************************/
+
+/* 「块可用」判据：erase → prog 单页 → 读回 → 逐 CW PAA 校验，三段都硬断言无错误位。
+ * 它就是本用例「LOCK→UNLOCK 之后块仍然完全可用」这条唯一硬判据的载体。 */
+static void lock_verify_block_usable(uint16_t block, uint8_t plane, uint16_t page)
+{
+    const uint32_t      meta = (uint32_t)pba_from_addr(&(nand_addr_t){.block = block, .plane = plane, .page = (uint8_t)page});
+    fc_command_status_t completion;
+
+    completion = test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
+    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+
+    completion = test_prog_page(block, TEST_PLANE_BM(plane), page, &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL);
+    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+
+    completion = test_read_page(block, TEST_PLANE_BM(plane), page, meta, &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE), NULL);
+    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+
+    test_verify_page_paa(g_source_data, block, page, TEST_PLANE_BM(plane));
+}
+
+static MunitResult test_block_lock_ops(const MunitParameter params[], void *data)
+{
+    fc_command_status_t erase_st;
+    uint8_t             raw_before;
+    uint8_t             raw_locked;
+    uint8_t             raw_after;
+
+    (void)params;
+    (void)data;
+
+    const uint8_t  plane = l3_plane_draw("block_lock_ops");
+    const uint16_t block = l3_block_draw("block_lock_ops");
+    const uint16_t page  = (uint16_t)(PAGES_PER_BLOCK / 2U);
+
+    test_trace_begin();
+
+    /* Phase 0：基线——块可用、内容已知（Phase 7 与它对照） */
+    lock_verify_block_usable(block, plane, page);
+
+    /* Phase 1：锁定前状态（证据） */
+    raw_before = test_block_lock_status(block, plane, &L3_CONF(OP_BLOCK_LOCK_STATUS, FC_CRC_ENABLE));
+    test_trace_summary("lock_status b=%u plane=%u BEFORE: raw=0x%02X lock#=%u lt#=%u lt=%u", (unsigned)block, (unsigned)plane, (unsigned)raw_before, (unsigned)((raw_before >> 2) & 1U), (unsigned)((raw_before >> 1) & 1U), (unsigned)(raw_before & 1U));
+
+    /* Phase 2：BLOCK_LOCK（2Ah，无地址周期 ⇒ 锁全片） */
+    test_block_lock_cmd(block, plane, &L3_CONF(OP_BLOCK_LOCK, FC_CRC_ENABLE));
+
+    /* Phase 3：锁定后状态（证据） */
+    raw_locked = test_block_lock_status(block, plane, &L3_CONF(OP_BLOCK_LOCK_STATUS, FC_CRC_ENABLE));
+    test_trace_summary("lock_status b=%u plane=%u LOCKED: raw=0x%02X lock#=%u lt#=%u lt=%u", (unsigned)block, (unsigned)plane, (unsigned)raw_locked, (unsigned)((raw_locked >> 2) & 1U), (unsigned)((raw_locked >> 1) & 1U), (unsigned)(raw_locked & 1U));
+
+    /* Phase 4：LOCK 是否真的挡住擦除——**只观察、不断言**（见用例头注释） */
+    erase_st = test_erase_block(block, TEST_PLANE_BM(plane), &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
+    test_trace_summary("lock_status b=%u plane=%u LOCK 后擦除 status=0x%X => %s", (unsigned)block, (unsigned)plane, (unsigned)erase_st.status, ((erase_st.status & FC_CW_STATUS_ERROR_MASK) != 0U) ? "LOCK 生效（擦除被拒）" : "LOCK 空转（本板 LOCK 引脚为低）");
+
+    /* Phase 5：UNLOCK_LOW（23h）+ UNLOCK_HIGH（24h）——硬断言无错误位。
+     * 23h@block 解锁 0..block、24h@block 解锁 block..末块 ⇒ 合起来把全器件恢复为未锁。 */
+    test_block_lock_cmd(block, plane, &L3_CONF(OP_BLOCK_UNLOCK_LOW, FC_CRC_ENABLE));
+    test_block_lock_cmd(block, plane, &L3_CONF(OP_BLOCK_UNLOCK_HIGH, FC_CRC_ENABLE));
+
+    /* Phase 6：解锁后状态（证据） */
+    raw_after = test_block_lock_status(block, plane, &L3_CONF(OP_BLOCK_LOCK_STATUS, FC_CRC_ENABLE));
+    test_trace_summary("lock_status b=%u plane=%u AFTER UNLOCK: raw=0x%02X lock#=%u lt#=%u lt=%u", (unsigned)block, (unsigned)plane, (unsigned)raw_after, (unsigned)((raw_after >> 2) & 1U), (unsigned)((raw_after >> 1) & 1U), (unsigned)(raw_after & 1U));
+
+    /* Phase 7：可逆——块仍然完全可用（本用例唯一的硬判据） */
+    lock_verify_block_usable(block, plane, page);
+
+    test_trace_summary("block_lock_ops b=%u plane=%u: 21/22/23/25 走通，锁序列后块仍可用（可逆）", (unsigned)block, (unsigned)plane);
+
+    return MUNIT_OK;
+}
+
 #if 0 /* BLOCK_LOCK_TIGHT — 不可逆锁死整片 NAND，暂不启用 */
 
 /**************************************************************************
@@ -1440,17 +1451,16 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
  *    - block_multi_plane（多 Plane 擦写读验证，抽 block）
  *    - block_random_data（随机列读写验证，抽 plane / block / 页集 / CW 集）
  *    - block_load_fetch（加载/取数两段式显式下发，抽 plane / block / block_mp）
- *    - block_lock_tight（永久锁芯片验证，必须放在最后）
+ *    - block_lock_ops（块锁族 21/22/23/25 合并用例，抽 plane / block）
+ *    - block_lock_tight（永久锁芯片验证，**被 #if 0 隔开**，不可逆故不启用）
  *
- *  七条随机化行用 MUNIT_TEST_OPTION_NONE（**保留**，不要换成 SINGLE_ITERATION）：
+ *  八条随机化行用 MUNIT_TEST_OPTION_NONE（**保留**，不要换成 SINGLE_ITERATION）：
  *  --iterations N 才是覆盖旋钮（每条抽 N 组）；换成 SINGLE_ITERATION 会把旋钮锁死。
  *  runner.iterations 默认 0 ⇒ 迭代次数回落到套件级 iterations（ut_main.c 里 = 1），
  *  与是否带 SINGLE_ITERATION 无关（munit.c:1375 / :706-709）。
  *  ⚠ --iterations 是 **runner 级全局量**，且 runner->suite **恒指根套件**（munit.c:1359）
  *    ⇒ 子套件自己的 iterations 字段无效，**别去改 ut_main.c**（改了会把 Level 1/2 也乘 N）。
  *    它按调用范围生效：只跑 /fc-nand/lifecycle/ 就只乘 Level 3。
- *
- *  （unlock_erase 用 #if 0 隔开，暂不启用）
  **************************************************************************/
 
 MunitTest g_fc_lifecycle_tests[] = {
@@ -1465,6 +1475,7 @@ MunitTest g_fc_lifecycle_tests[] = {
     { "block_random_data",  test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
     {  "block_load_fetch",   test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
     {   "block_read_meta",    test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {    "block_lock_ops",     test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
 #if 0  /* block_lock_tight 被 #if 0 隔开，此处不注册 */
     { "block_lock_tight",    test_block_lock_tight,    test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 #endif

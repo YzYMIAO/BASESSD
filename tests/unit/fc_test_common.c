@@ -40,8 +40,9 @@ static bool s_ev_line_started = false;
 void test_trace_begin(void)
 {
     /* 证据档下**立刻**给 munit 那条没有换行的前缀行收尾，而不是等第一条证据行。
-     * 原因：用例体内还有别的写者——项目自己的 LOGI 会抢先输出（如 nand 驱动的
-     * "READ_ID data=2C DC 90 95 56"，见 test_init_sequence），它排在第一条 [EV] 之前，
+     * 原因：用例体内还有别的写者——项目自己的日志会抢先输出（如 nand 驱动的
+     * "READ_ID data=2C DC 90 95 56"，见 test_init_sequence；v49 已由 LOGI 降为 LOGD，
+     * 默认 INFO 档不再打印，但 debug 档仍会与第一条 [EV] 争行），它排在第一条 [EV] 之前，
      * 于是会粘在结果行后面。这里先断行，那种行就落在自己的一行上。
      *
      * 判据用 INFO：DEBUG 可见 ⇒ INFO 也可见（阈值比较），所以这一条覆盖 info/debug 两档。
@@ -905,6 +906,59 @@ void test_read_meta(uint16_t block_index, uint8_t plane, uint16_t page_index, ui
     munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
 
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+}
+
+/* 块锁族（v49）：op 21/22/23 与 op 25 的 op 表 has_data 全为 0 —— 不搬 host 数据、无 desc 链。
+ * 行地址取自 cmd->paa（FC 的块锁族分支），故 block/plane 必须给对，否则命令静默打到 block 0。 */
+
+void test_block_lock_cmd(uint16_t block_index, uint8_t plane, const fc_cmd_conf_t *config)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+
+    ASSERT(config != NULL);
+    ASSERT((config->operation == (DWORD)OP_BLOCK_UNLOCK_LOW) || (config->operation == (DWORD)OP_BLOCK_UNLOCK_HIGH) || (config->operation == (DWORD)OP_BLOCK_LOCK));
+    ASSERT(plane < PLANE_NUM);
+    ASSERT(block_index < BLOCKS_PER_PLANE);
+
+    /* cw_bitmap = 0 → ftl_cmd_needs_desc_chain 短路，desc_id 保持 INVALID。 */
+    cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = plane}, 0U, 0U, config);
+
+    completion = test_submit_wait(cmd);
+
+    test_trace_detail("block_lock op=%u b=%u plane=%u status=0x%X", (unsigned)config->operation, (unsigned)block_index, (unsigned)plane, (unsigned)completion.status);
+
+    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+
+    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+}
+
+uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd_conf_t *config)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    uint8_t             raw;
+
+    ASSERT(config != NULL);
+    ASSERT(config->operation == (DWORD)OP_BLOCK_LOCK_STATUS);
+    ASSERT(plane < PLANE_NUM);
+    ASSERT(block_index < BLOCKS_PER_PLANE);
+
+    cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = plane}, 0U, 0U, config);
+
+    completion = test_submit_wait(cmd);
+
+    /* 状态字节不经数据缓冲：引擎直读 DQ 总线 → nand_status → FC 拷进 CQ param.bytes[0]。
+     * ⚠ 必须在 fc_command_release **之前**取。 */
+    raw = completion.param.bytes[0];
+
+    test_trace_detail("lock_status b=%u plane=%u raw=0x%02X lock#=%u lt#=%u lt=%u status=0x%X", (unsigned)block_index, (unsigned)plane, (unsigned)raw, (unsigned)((raw >> 2) & 1U), (unsigned)((raw >> 1) & 1U), (unsigned)(raw & 1U), (unsigned)completion.status);
+
+    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+
+    munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+
+    return raw;
 }
 
 /**************************************************************************
