@@ -1,10 +1,15 @@
-#ifndef SSD_STM32H743_WATCHDOG_H
-#define SSD_STM32H743_WATCHDOG_H
-
-#include "sys.h"
+#ifndef PLATFORM_WATCHDOG_H
+#define PLATFORM_WATCHDOG_H
 
 #include <stdbool.h>
 #include <stdint.h>
+
+/*
+ * 存储主控看门狗抽象接口（共享逻辑在 src/platform/watchdog.c，SoC 适配在
+ * src/platform/<soc>/watchdog_port.c）。
+ *
+ * 本头零 HAL 类型：IWDG/WWDG 句柄、实例号与中断号一律留在 SoC 侧。
+ */
 
 /*
  * 存储主控的健康域。一个域只能在状态机发生“已验证的前进”后上报心跳，
@@ -70,7 +75,7 @@ typedef struct
     /*
      * 根据 PCLK1、prescaler、counter、window 算出的软件合法窗口，单位 ms。
      * service() 只会在 min <= elapsed <= max 时刷新 WWDG。min/max 应比理论窗口
-     * 略窄，为时钟误差、HAL tick 粒度和高优先级中断延迟预留余量。
+     * 略窄，为时钟误差、时间戳粒度和高优先级中断延迟预留余量。
      */
     uint32_t wwdg_refresh_min_ms;
     uint32_t wwdg_refresh_max_ms;
@@ -88,13 +93,13 @@ typedef struct
     uint32_t             recovery_attempts[STORAGE_WDG_DOMAIN_COUNT]; /* 每域本次启动的恢复请求次数。 */
 } storage_wdg_status_t;
 
-/* 配置 IWDG 与可选 WWDG，并以当前 HAL tick 作为所有域的初始心跳时刻。 */
+/* 配置 IWDG 与可选 WWDG，并以当前系统毫秒计数作为所有域的初始心跳时刻。 */
 bool storage_wdg_init(const storage_wdg_config_t *config);
 
 /* 在正常 I/O 开始前注册有界的局部恢复回调。 */
 void storage_wdg_set_recovery_hook(storage_wdg_recovery_hook_t hook);
 
-/* 在指定状态机确认前进时调用，用当前 HAL tick 更新该域心跳。 */
+/* 在指定状态机确认前进时调用，用当前毫秒计数更新该域心跳。 */
 void storage_wdg_report_progress(storage_wdg_domain_t domain);
 
 /* 单一 Supervisor 任务或主循环周期调用，执行全部健康判定和唯一的硬件喂狗。 */
@@ -109,7 +114,24 @@ void storage_watchdog_task(void *context, uint32_t now_ms);
 /* 获取状态快照，供 UART CLI、崩溃转储或遥测读取。 */
 void storage_wdg_get_status(storage_wdg_status_t *status);
 
-/* WWDG_IRQHandler 调用；它只分发 HAL 中断，不在 IRQ 上下文执行应用级恢复。 */
+/* WWDG_IRQHandler 调用；它只分发中断，不在 IRQ 上下文执行应用级恢复。 */
 void storage_wdg_wwdg_irq_handler(void);
 
-#endif /* SSD_STM32H743_WATCHDOG_H */
+/*
+ * ---- 共享入口：由 port 侧的中断回调调用 ----
+ */
+
+/* WWDG 提前唤醒中断的业务处理（enabled 判断 + 锁存故障）。 */
+void storage_wdg_wwdg_early_wakeup(void);
+
+/*
+ * ---- port 接口：由 src/platform/<soc>/watchdog_port.c 实现 ----
+ */
+bool     watchdog_port_iwdg_init(uint32_t prescaler, uint32_t reload);
+bool     watchdog_port_wwdg_init(uint32_t prescaler, uint32_t counter, uint32_t window);
+void     watchdog_port_iwdg_refresh(void);
+void     watchdog_port_wwdg_refresh(void);
+void     watchdog_port_wwdg_irq_handler(void);
+uint32_t watchdog_port_now_ms(void);
+
+#endif /* PLATFORM_WATCHDOG_H */

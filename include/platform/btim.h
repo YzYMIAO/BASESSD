@@ -1,19 +1,15 @@
-#ifndef SSD_STM32H743_BTIM_H
-#define SSD_STM32H743_BTIM_H
-
-#include "sys.h"
+#ifndef PLATFORM_BTIM_H
+#define PLATFORM_BTIM_H
 
 #include <stdbool.h>
 #include <stdint.h>
 
-/* TIM6 supplies the periodic hardware update event for the software scheduler. */
-#define BTIM_TIMX      TIM6
-#define BTIM_TIMX_IRQn TIM6_DAC_IRQn
-#define BTIM_TIMX_CLK_ENABLE()       \
-    do                               \
-    {                                \
-        __HAL_RCC_TIM6_CLK_ENABLE(); \
-    } while (0)
+/*
+ * 平台毫秒调度器抽象接口（共享逻辑在 src/platform/btim.c，SoC 适配在
+ * src/platform/<soc>/btim_port.c）。
+ *
+ * 本头零 HAL 类型：定时器句柄、中断号与时钟使能宏一律留在 SoC 侧。
+ */
 
 /* A fixed table keeps scheduling deterministic and avoids dynamic allocation in firmware. */
 #define BTIM_SCHEDULER_MAX_TASKS 16U
@@ -25,11 +21,9 @@
  */
 typedef void (*btim_task_callback_t)(void *context, uint32_t now_ms);
 
-extern TIM_HandleTypeDef g_btimx_handle;
-
 /*
- * With APB1=100 MHz and APB1 prescaler=2, TIM6 runs at 200 MHz. For a 1 ms
- * tick use arr=1000-1 and psc=200-1.
+ * 按给定时基启动硬件心跳（周期中断）并开始计时。
+ * 参数含义与具体定时器有关，例如「重装值 / 预分频」，由 SoC 侧解释。
  */
 void btim_timx_int_init(uint16_t arr, uint16_t psc);
 
@@ -49,14 +43,28 @@ bool btim_scheduler_enable(uint32_t task_id, bool enabled);
 /* Remove a task and return its static slot to the table. */
 bool btim_scheduler_remove(uint32_t task_id);
 
-/* Return the TIM6-derived monotonic millisecond time base. */
+/* Return the hardware-heartbeat-derived monotonic millisecond time base. */
 uint32_t btim_scheduler_now_ms(void);
 
 /*
  * Execute due tasks. Call frequently from the main loop or one scheduler task;
- * never call this from a TIM6 ISR. Each delayed periodic task runs at most once
+ * never call this from the heartbeat ISR. Each delayed periodic task runs at most once
  * per poll, preventing a long pause from producing an unsafe callback burst.
  */
 void btim_scheduler_poll(void);
 
-#endif /* SSD_STM32H743_BTIM_H */
+/*
+ * ---- 共享入口：由 port 侧的中断回调调用 ----
+ */
+
+/* 硬件心跳到来一次：推进共享毫秒计数（唯一写入者）。 */
+void btim_scheduler_tick(void);
+
+/*
+ * ---- port 接口：由 src/platform/<soc>/btim_port.c 实现 ----
+ */
+
+/* 定时器中断入口：共享逻辑不持有定时器句柄。 */
+void btim_port_irq_handler(void);
+
+#endif /* PLATFORM_BTIM_H */

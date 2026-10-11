@@ -1,32 +1,35 @@
+/*
+ * fault.c — Cortex-M 故障捕获（跨 target 共享逻辑）
+ *
+ * 本文件不 include 任何 SoC 头、不出现任何 HAL 类型：现场解码、寄存器位表、栈扫描、
+ * 崩溃记录打印与停机全在这里；异常入口蹦床（naked asm）、控制台外设、故障/复位
+ * 状态寄存器一律下沉到 src/platform/<soc>/fault_port.c。
+ *
+ * 目标：任何 CPU 故障（NMI/HardFault/MemManage/BusFault/UsageFault）都能在
+ * UART 上打出「可读原因 + 出错地址 + 寄存器现场」，并写一份跨软复位保留的
+ * 崩溃记录（common/crash 的 .noinit 记录）。
+ *
+ * 两个关键点：
+ *   ① 输出走轮询 UART，不依赖 DMA/中断/libc：故障发生时中断通路可能已不可用，
+ *      异步日志会静默丢弃，"断函数却什么都没打印" 正是这么来的。
+ *   ② 打印完停机保留现场（SWD 可继续查看），不主动复位。
+ */
+
 #include "fault.h"
 
 #include "common/crash.h"
 #include "common/log.h"
-#include "stm32h7xx_hal.h"
 
+#include <stddef.h>
 #include <stdint.h>
 
-/*
- * Cortex-M7 故障捕获实现 —— 设计见 docs/design/fault_capture.md
- *
- * 目标：任何 CPU 故障（NMI/HardFault/MemManage/BusFault/UsageFault）都能在
- * UART 上打出「可读原因 + 出错地址 + 寄存器现场」，并写一份跨软复位保留的
- * 崩溃记录（common/ssd_crash 的 .noinit 记录）。
- *
- * 三个关键点：
- *   ① 入口是 naked 蹦床：必须在任何 C 序言之前确定出错时用的是 MSP 还是 PSP，
- *      并原样保存 EXC_RETURN（bit4=0 表示叠加了 FPU 扩展帧，本工程硬浮点）。
- *   ② 输出走轮询 UART，不依赖 DMA/中断/libc：故障发生时中断通路可能已不可用，
- *      异步日志会静默丢弃，"断函数却什么都没打印" 正是这么来的。
- *   ③ 打印完停机保留现场（SWD 可继续查看），不主动复位。
- */
-
-#define FAULT_CONSOLE          USART1
-#define FAULT_TX_DMA           DMA1_Stream0
-#define FAULT_TX_GUARD         200000U /* 轮询 TXE/TC 的自旋上限，防挂死 */
-#define FAULT_DMA_GUARD        100000U /* 等 DMA 关闭的自旋上限 */
 #define FAULT_STACK_SCAN_WORDS 32U
 
+/*
+ * ⚠ 已知残留耦合：以下三个常量与 _estack 是 stm32h743 的内存映射（Flash 起止、
+ * DTCM 起点、链接脚本栈顶符号）。栈扫描目前留在共享层，换 target 时需下沉为
+ * port 接口（如 fault_port_stack_top()/fault_port_is_code_address()）。
+ */
 #define FAULT_FLASH_BEGIN 0x08000000U
 #define FAULT_FLASH_END   0x08200000U
 #define FAULT_DTCM_BEGIN  0x20000000U
@@ -34,48 +37,13 @@
 /* 栈顶符号由链接脚本提供（_estack = DTCM 末尾），用于给栈扫描设界。 */
 extern uint32_t _estack;
 
-/* 控制台是否可用：USART 未使能时（极早期故障）只写记录、不打印。 */
-static volatile uint8_t g_fault_console_ready;
-
 /* ────────────────────────────── 轮询控制台 ────────────────────────────── */
-
-/*
- * 抢占异步 TX 通路：关 TXE 中断、关 DMA 请求、abort DMA1_Stream0。
- * 此后 USART 的 TDR 由本文件独占，中断/DMA 不会再动它。
- */
-static void fault_console_init(void)
-{
-    uint32_t guard;
-
-    FAULT_CONSOLE->CR1 &= ~USART_CR1_TXEIE_TXFNFIE;
-    FAULT_CONSOLE->CR3 &= ~USART_CR3_DMAT;
-    FAULT_TX_DMA->CR &= ~DMA_SxCR_EN;
-    for (guard = 0U; (guard < FAULT_DMA_GUARD) && ((FAULT_TX_DMA->CR & DMA_SxCR_EN) != 0U); guard++)
-    {
-    }
-
-    g_fault_console_ready = ((FAULT_CONSOLE->CR1 & USART_CR1_UE) != 0U) ? 1U : 0U;
-}
-
-static void fault_putc(char character)
-{
-    uint32_t guard;
-
-    if (g_fault_console_ready == 0U)
-    {
-        return;
-    }
-    for (guard = 0U; (guard < FAULT_TX_GUARD) && ((FAULT_CONSOLE->ISR & USART_ISR_TXE_TXFNF) == 0U); guard++)
-    {
-    }
-    FAULT_CONSOLE->TDR = (uint32_t)(uint8_t)character;
-}
 
 static void fault_puts(const char *text)
 {
     while (*text != '\0')
     {
-        fault_putc(*text++);
+        fault_port_putc(*text++);
     }
 }
 
@@ -90,7 +58,7 @@ static void fault_puts_n(const char *text, uint32_t capacity)
         {
             break;
         }
-        fault_putc(text[index]);
+        fault_port_putc(text[index]);
     }
 }
 
@@ -102,7 +70,7 @@ static void fault_hex32(uint32_t value)
     fault_puts("0x");
     for (shift = 28; shift >= 0; shift -= 4)
     {
-        fault_putc(digits[(value >> (uint32_t)shift) & 0xFU]);
+        fault_port_putc(digits[(value >> (uint32_t)shift) & 0xFU]);
     }
 }
 
@@ -113,7 +81,7 @@ static void fault_dec(uint32_t value)
 
     if (value == 0U)
     {
-        fault_putc('0');
+        fault_port_putc('0');
         return;
     }
     while ((value != 0U) && (index < sizeof(buffer)))
@@ -123,21 +91,7 @@ static void fault_dec(uint32_t value)
     }
     while (index > 0U)
     {
-        fault_putc(buffer[--index]);
-    }
-}
-
-/* 等最后一个字节离开 TX 引脚（TC），否则停机后尾部字符会丢。 */
-static void fault_console_drain(void)
-{
-    uint32_t guard;
-
-    if (g_fault_console_ready == 0U)
-    {
-        return;
-    }
-    for (guard = 0U; (guard < FAULT_TX_GUARD) && ((FAULT_CONSOLE->ISR & USART_ISR_TC) == 0U); guard++)
-    {
+        fault_port_putc(buffer[--index]);
     }
 }
 
@@ -166,7 +120,7 @@ static void fault_bit(uint32_t value, uint32_t mask, const char *name)
 {
     if ((value & mask) != 0U)
     {
-        fault_putc(' ');
+        fault_port_putc(' ');
         fault_puts(name);
     }
 }
@@ -387,94 +341,40 @@ static void fault_dump_record(const crash_record_t *record)
         fault_puts("\r\n");
         fault_puts("file   : ");
         fault_puts_n(record->file, CRASH_TEXT_CAPACITY);
-        fault_putc(':');
+        fault_port_putc(':');
         fault_dec(record->line);
         fault_puts("\r\n");
     }
     fault_puts("====================\r\n");
 }
 
-/* ────────────────────────────── 异常入口 ────────────────────────────── */
+/* ────────────────────────────── 共享入口 ────────────────────────────── */
 
 /*
- * naked 蹦床：进入异常时 LR = EXC_RETURN。bit2 选栈（0=MSP / 1=PSP），
- * bit4=0 表示叠加了 FPU 扩展帧（硬浮点下常态）。必须在编译器插入任何序言
- * 之前读取，否则读到的就是异常栈而不是出错栈。
- */
-static void fault_trampoline(void) __attribute__((naked, used));
-static void fault_trampoline(void)
-{
-    __asm volatile("tst   lr, #4          \n"
-                   "ite   eq              \n"
-                   "mrseq r0, msp         \n"
-                   "mrsne r0, psp         \n"
-                   "mov   r1, lr          \n"
-                   "b     fault_handler_c \n");
-}
-
-#define FAULT_ENTRY(name)                         \
-    void name(void) __attribute__((naked, used)); \
-    void name(void)                               \
-    {                                             \
-        __asm volatile("b fault_trampoline \n");  \
-    }
-
-FAULT_ENTRY(NMI_Handler)
-FAULT_ENTRY(HardFault_Handler)
-FAULT_ENTRY(MemManage_Handler)
-FAULT_ENTRY(BusFault_Handler)
-FAULT_ENTRY(UsageFault_Handler)
-
-/*
- * 故障主处理：frame 指向硬件压栈帧，exc_return 为进入异常时的 LR。
+ * 由 port 侧的异常入口调用：ctx 已由 port 从硬件压栈帧与故障状态寄存器填好。
  * 不返回（打印 + 落记录 + hook + 停机）。
  */
-void fault_handler_c(uint32_t *frame, uint32_t exc_return) __attribute__((used, noinline));
-void fault_handler_c(uint32_t *frame, uint32_t exc_return)
+void fault_report_and_halt(const fault_ctx_t *ctx)
 {
-    fault_ctx_t          ctx;
     crash_fault_record_t record;
 
-    ctx.kind       = __get_IPSR();
-    ctx.sp         = (uint32_t)(uintptr_t)frame;
-    ctx.msp        = __get_MSP();
-    ctx.psp        = __get_PSP();
-    ctx.exc_return = exc_return;
-    ctx.fp_frame   = ((exc_return & 0x10U) == 0U) ? 1U : 0U;
+    fault_port_console_init();
+    fault_dump_ctx(ctx);
 
-    ctx.r0   = frame[0];
-    ctx.r1   = frame[1];
-    ctx.r2   = frame[2];
-    ctx.r3   = frame[3];
-    ctx.r12  = frame[4];
-    ctx.lr   = frame[5];
-    ctx.pc   = frame[6];
-    ctx.xpsr = frame[7];
-
-    ctx.cfsr  = SCB->CFSR;
-    ctx.hfsr  = SCB->HFSR;
-    ctx.mmfar = SCB->MMFAR;
-    ctx.bfar  = SCB->BFAR;
-    ctx.afsr  = SCB->AFSR;
-    ctx.shcsr = SCB->SHCSR;
-
-    fault_console_init();
-    fault_dump_ctx(&ctx);
-
-    record.fault_kind = ctx.kind;
-    record.pc         = ctx.pc;
-    record.lr         = ctx.lr;
-    record.sp         = ctx.sp;
-    record.xpsr       = ctx.xpsr;
-    record.cfsr       = ctx.cfsr;
-    record.hfsr       = ctx.hfsr;
-    record.mmfar      = ctx.mmfar;
-    record.bfar       = ctx.bfar;
+    record.fault_kind = ctx->kind;
+    record.pc         = ctx->pc;
+    record.lr         = ctx->lr;
+    record.sp         = ctx->sp;
+    record.xpsr       = ctx->xpsr;
+    record.cfsr       = ctx->cfsr;
+    record.hfsr       = ctx->hfsr;
+    record.mmfar      = ctx->mmfar;
+    record.bfar       = ctx->bfar;
     crash_record_fault(&record);
 
-    fault_hook(&ctx);
+    fault_hook(ctx);
 
-    fault_console_drain();
+    fault_port_console_drain();
     for (;;)
     {
     }
@@ -484,62 +384,16 @@ void fault_handler_c(uint32_t *frame, uint32_t exc_return)
 
 void fault_init(void)
 {
-    /* 使能三类可配置故障，否则它们会全部升级成 HardFault，丢失真因。 */
-    SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk | SCB_SHCSR_BUSFAULTENA_Msk | SCB_SHCSR_USGFAULTENA_Msk;
-    __DSB();
-    __ISB();
-}
-
-static uint32_t fault_append_text(char *buffer, uint32_t capacity, uint32_t length, const char *text)
-{
-    while ((*text != '\0') && (length < (capacity - 1U)))
-    {
-        buffer[length++] = *text++;
-    }
-    buffer[length] = '\0';
-    return length;
+    fault_port_enable_configurable_faults();
 }
 
 void fault_report_boot(void)
 {
     char                  reason[64];
-    uint32_t              length = 0U;
-    uint32_t              flags  = RCC->RSR;
+    uint32_t              flags  = fault_port_reset_flags();
     const crash_record_t *record = crash_record_get();
 
-    if ((flags & RCC_RSR_PORRSTF) != 0U)
-    {
-        length = fault_append_text(reason, sizeof(reason), length, " POR");
-    }
-    if ((flags & RCC_RSR_PINRSTF) != 0U)
-    {
-        length = fault_append_text(reason, sizeof(reason), length, " PIN");
-    }
-    if ((flags & RCC_RSR_BORRSTF) != 0U)
-    {
-        length = fault_append_text(reason, sizeof(reason), length, " BOR");
-    }
-    if ((flags & RCC_RSR_SFTRSTF) != 0U)
-    {
-        length = fault_append_text(reason, sizeof(reason), length, " SFT");
-    }
-    if ((flags & RCC_RSR_IWDG1RSTF) != 0U)
-    {
-        length = fault_append_text(reason, sizeof(reason), length, " IWDG");
-    }
-    if ((flags & RCC_RSR_WWDG1RSTF) != 0U)
-    {
-        length = fault_append_text(reason, sizeof(reason), length, " WWDG");
-    }
-    if ((flags & RCC_RSR_LPWRRSTF) != 0U)
-    {
-        length = fault_append_text(reason, sizeof(reason), length, " LPWR");
-    }
-    if (length == 0U)
-    {
-        length = fault_append_text(reason, sizeof(reason), length, " none");
-    }
-    (void)length;
+    fault_port_reset_reason_text(flags, reason, sizeof(reason));
 
     LOGI("[FAULT] reset reason:%s (rsr=0x%08lx)\r\n", reason, (unsigned long)flags);
 
@@ -568,15 +422,15 @@ void fault_report_boot(void)
     }
 
     /* 报告完再清标志，下次复位才看得出真实原因。 */
-    RCC->RSR |= RCC_RSR_RMVF;
+    fault_port_reset_flags_clear();
 }
 
 /* 强符号：覆盖 common/crash.c 的弱默认，让断言路径也走同一份轮询 dump。 */
 void crash_platform_report(const crash_record_t *record)
 {
-    fault_console_init();
+    fault_port_console_init();
     fault_dump_record(record);
-    fault_console_drain();
+    fault_port_console_drain();
 }
 
 __attribute__((weak)) void fault_hook(const fault_ctx_t *ctx)

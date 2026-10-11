@@ -21,9 +21,8 @@
  * ECC 保护全 CW（包括 CRC 字段和 PARITY），确保 CRC 值在存储/传输中不受损。
  *
  * 硬件访问说明：
- *   外设访问在平台层 src/platform/stm32h743/crc.c（走第三方 HAL CRC 驱动，
- *   基址由 CMSIS 设备头的 CRC 宏提供）。本文件只负责覆盖范围与判据，
- *   不接触任何 HAL 类型。
+ *   外设访问在平台层的 CRC 适配（走第三方 HAL CRC 驱动，基址由设备头宏提供）。
+ *   本文件只负责覆盖范围与判据，不接触任何 HAL 类型。
  */
 
 #include "fc_crc_engine.h"

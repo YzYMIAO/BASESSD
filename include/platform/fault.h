@@ -1,0 +1,90 @@
+#ifndef PLATFORM_FAULT_H
+#define PLATFORM_FAULT_H
+
+#include <stdint.h>
+
+/*
+ * Cortex-M 故障捕获抽象接口（共享逻辑在 src/platform/fault.c，SoC 适配在
+ * src/platform/<soc>/fault_port.c）—— 设计见 docs/design/fault_capture.md
+ *
+ * 覆盖启动文件里的弱默认异常处理器（Default_Handler 死循环），捕获
+ * NMI/HardFault/MemManage/BusFault/UsageFault 的现场并轮询控制台打印，
+ * 同时写入跨软复位保留的崩溃记录（common/crash）。
+ *
+ * 本头零 HAL 类型：控制台外设、故障状态寄存器与复位原因寄存器一律留在 SoC 侧。
+ */
+
+/* 异常种类，取值等于 IPSR 异常号。 */
+typedef enum
+{
+    FAULT_KIND_NMI        = 2,
+    FAULT_KIND_HARDFAULT  = 3,
+    FAULT_KIND_MEMMANAGE  = 4,
+    FAULT_KIND_BUSFAULT   = 5,
+    FAULT_KIND_USAGEFAULT = 6,
+} fault_kind_t;
+
+/* 捕获到的故障现场。 */
+typedef struct
+{
+    uint32_t kind;       /* fault_kind_t */
+    uint32_t sp;         /* 出错时使用的栈指针（MSP 或 PSP） */
+    uint32_t msp;        /* 当前 MSP */
+    uint32_t psp;        /* 当前 PSP */
+    uint32_t exc_return; /* 进入异常时的 LR */
+    uint32_t fp_frame;   /* 1 = 叠加了 FPU 扩展帧（EXC_RETURN bit4=0） */
+
+    /* 硬件压栈帧 */
+    uint32_t r0;
+    uint32_t r1;
+    uint32_t r2;
+    uint32_t r3;
+    uint32_t r12;
+    uint32_t lr;
+    uint32_t pc;
+    uint32_t xpsr;
+
+    /* 故障状态寄存器 */
+    uint32_t cfsr;
+    uint32_t hfsr;
+    uint32_t mmfar;
+    uint32_t bfar;
+    uint32_t afsr;
+    uint32_t shcsr;
+} fault_ctx_t;
+
+/* 使能 MemManage/BusFault/UsageFault，避免全部升级成 HardFault，便于区分。 */
+void fault_init(void);
+
+/* 开机报告：复位原因 + 上次崩溃记录。须在日志 sink 绑定之后调用。 */
+void fault_report_boot(void);
+
+/* 弱符号扩展点：故障捕获后、停机前调用（默认空实现）。 */
+void fault_hook(const fault_ctx_t *ctx);
+
+/*
+ * ---- 共享入口：由 port 侧的异常入口调用 ----
+ */
+
+/* 打印现场、落崩溃记录、调用 hook，然后停机（不返回）。 */
+void fault_report_and_halt(const fault_ctx_t *ctx);
+
+/*
+ * ---- port 接口：由 src/platform/<soc>/fault_port.c 实现 ----
+ */
+
+/* 抢占异步 TX 通路，改用轮询控制台（故障时中断/DMA 可能已不可用）。 */
+void fault_port_console_init(void);
+void fault_port_putc(char character);
+/* 等最后一个字节离开 TX 引脚，否则停机后尾部字符会丢。 */
+void fault_port_console_drain(void);
+
+/* 使能三类可配置故障，否则它们会全部升级成 HardFault，丢失真因。 */
+void fault_port_enable_configurable_faults(void);
+
+/* 复位原因：读原始标志位、把它翻成可读文本、报告后清标志。 */
+uint32_t fault_port_reset_flags(void);
+void     fault_port_reset_reason_text(uint32_t flags, char *buffer, uint32_t capacity);
+void     fault_port_reset_flags_clear(void);
+
+#endif /* PLATFORM_FAULT_H */

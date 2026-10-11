@@ -29,9 +29,20 @@
  *   ② _sbrk()          —— 带上下界检查的堆生长
  */
 
-#include "sys.h"
-
 #include <stddef.h>
+#include <stdint.h>
+
+/* 本文件是**跨 target 共享**的平台源文件（放这里而不是 src/platform/<soc>/）：
+ * 不 include 任何 SoC 头，也不出现 HAL 类型。唯一需要架构知识的是读 MSP ——
+ * 用内联汇编直接取，不走内核头（那会依赖设备头提供 IRQn_Type，裸包含编译不过）。 */
+static uint32_t syscalls_current_msp(void)
+{
+    uint32_t msp;
+
+    __asm__ volatile("mrs %0, msp"
+                     : "=r"(msp));
+    return msp;
+}
 
 /* 堆顶与实时 MSP 之间必须留出的余量（字节）。
  *
@@ -39,8 +50,13 @@
  * 只判「不越过 MSP」是不够的——放行的那一刻可能已经贴着栈顶了。留 1 KB 让本
  * 函数自身的帧 + _sbrk_r/malloc 的帧 + 少量余量都有落脚点。
  * 为什么不更大：DTCM 只有 128 KB，堆与栈共享；测试期栈峰值约 55 KB，余量给太大
- * 会把可用堆压到影响正常分配。1 KB 与 _Min_Stack_Size 量级一致。 */
-#define SBRK_STACK_GUARD (0x400U)
+ * 会把可用堆压到影响正常分配。1 KB 与 _Min_Stack_Size 量级一致。
+ *
+ * 本文件跨 target 共享，但余量取决于该 target 的 DTCM/堆栈布局 —— 允许目标用
+ * -DSBRK_STACK_GUARD=... 覆盖；今天的 stm32h743 取默认值，行为零变化。 */
+#ifndef SBRK_STACK_GUARD
+#    define SBRK_STACK_GUARD (0x400U)
+#endif
 
 /* --------------------------------------------------------------------
  * _sbrk
@@ -68,7 +84,7 @@ void *_sbrk(ptrdiff_t incr)
     }
 
     prev_heap_end = heap_end;
-    limit         = (char *)__get_MSP() - SBRK_STACK_GUARD;
+    limit         = (char *)syscalls_current_msp() - SBRK_STACK_GUARD;
 
     if ((heap_end + incr > limit) || (heap_end + incr < &end))
     {

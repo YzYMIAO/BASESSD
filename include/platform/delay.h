@@ -5,13 +5,14 @@
 #include <stdint.h>
 
 /*
- * 平台延时/时钟抽象接口（实现在 src/platform/<soc>/delay.c）。
+ * 平台延时/时钟抽象接口（共享逻辑在 src/platform/delay.c，SoC 适配在
+ * src/platform/<soc>/delay_port.c）。
  *
  * 本头零 HAL 类型：核心模块（src/nand）以裸名 #include "delay.h" 消费，
  * 具体 SoC 的 DWT/SysTick/系统节拍来源细节一律留在实现目录。
  */
 
-/* 默认使用 HAL 配置的 SysTick；设为 1 可改用 DWT CYCCNT。 */
+/* 默认用 SoC 侧已配置好的系统节拍；设为 1 可改用 DWT CYCCNT。 */
 #ifndef DELAY_USE_DWT
 #    define DELAY_USE_DWT 0U
 #endif
@@ -45,8 +46,21 @@ uint32_t       delay_max_busy_us(void);
 void delay_us(uint32_t us);
 void delay_ms(uint32_t ms);
 
-/* HAL Tick 的回绕安全超时工具。 */
+/* 毫秒计数的回绕安全超时工具。 */
 uint32_t delay_now_ms(void);
 bool     delay_elapsed_ms(uint32_t start_ms, uint32_t timeout_ms);
+
+/*
+ * ---- port 接口：由 src/platform/<soc>/delay_port.c 实现 ----
+ * 共享逻辑（src/platform/delay.c）只通过这几个函数触碰 SoC —— 它自己不 include
+ * 任何 SoC 头、不出现任何 HAL 类型，连 DWT/SysTick 寄存器都不直接读。
+ */
+uint32_t delay_port_hclk_hz(void);       /* delay_init(0) 的「读 HCLK」回退 */
+uint32_t delay_port_core_clock_hz(void); /* CYCCNT 速率（SYSCLK，非 HCLK） */
+uint32_t delay_port_now_ms(void);        /* 系统单调毫秒计数 */
+bool     delay_port_dwt_enable(void);    /* 使能 CYCCNT；返回硬件是否接受 */
+uint32_t delay_port_dwt_cycles(void);    /* DWT 自由运行周期计数器的当前值 */
+uint32_t delay_port_systick_load(void);  /* SysTick 重装值（一个周期的 tick 数） */
+uint32_t delay_port_systick_value(void); /* SysTick 当前计数值 */
 
 #endif /* PLATFORM_DELAY_H */

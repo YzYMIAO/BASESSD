@@ -40,7 +40,7 @@
 /* TODO: 待重构为 munit UT 框架后移除 */
 /* #include "test_fc_nand.h" */
 #endif
-#include "platform/stm32h743/fault.h"
+#include "fault.h"
 #include "platform/stm32h743/platform_ops.h"
 #include "stm32h7xx_hal.h"
 #include "sys.h"

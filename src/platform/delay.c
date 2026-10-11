@@ -1,7 +1,10 @@
 #include "delay.h"
 
 #include "common/common.h"
-#include "sys.h" /* DWT / CoreDebug / HAL_RCC_GetHCLKFreq —— 抽象 delay.h 已不再传递 */
+/* 本文件是**跨 target 共享**的平台源文件：不 include 任何 SoC 头，也不出现
+ * HAL 类型。计数器寄存器（DWT/SysTick）与时钟查询一律经 delay_port_* 下沉到
+ * src/platform/<soc>/delay_port.c —— 内核头无法单独使用（它依赖设备头提供
+ * IRQn_Type/__NVIC_PRIO_BITS），故共享层不能直接碰这些寄存器。 */
 
 static uint32_t g_core_clock_hz;
 static bool     g_delay_initialized;
@@ -14,23 +17,7 @@ static uint32_t g_systick_cycles_per_us;
 
 static uint32_t delay_resolve_clock(uint32_t core_clock_hz)
 {
-    return (core_clock_hz != 0U) ? core_clock_hz : HAL_RCC_GetHCLKFreq();
-}
-
-/**
- * @brief 启用 Cortex-M7 的 DWT 周期计数器。
- * @return true 表示 CYCCNT 已成功使能，false 表示硬件未接受使能位。
- * @note 实现原理是打开 CoreDebug->DEMCR 的 TRCENA 位，再打开 DWT->CTRL
- *       的 CYCCNTENA 位。该函数不关闭中断、不修改 SysTick 配置。
- */
-
-static bool delay_enable_dwt(void)
-{
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CYCCNT = 0U;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-
-    return (DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U;
+    return (core_clock_hz != 0U) ? core_clock_hz : delay_port_hclk_hz();
 }
 
 #if !DELAY_USE_DWT
@@ -51,13 +38,13 @@ static delay_status_t delay_systick_us_busy(uint32_t us)
         return DELAY_ERR_OUT_OF_RANGE;
     }
 
-    reload   = SysTick->LOAD;
+    reload   = delay_port_systick_load();
     ticks    = us * g_systick_cycles_per_us;
-    previous = SysTick->VAL;
+    previous = delay_port_systick_value();
 
     while (elapsed < ticks)
     {
-        current = SysTick->VAL;
+        current = delay_port_systick_value();
         if (current != previous)
         {
             elapsed += (current < previous) ? (previous - current)
@@ -84,14 +71,14 @@ void delay_init(uint32_t core_clock_hz)
 {
     g_core_clock_hz     = delay_resolve_clock(core_clock_hz);
     /* CYCCNT follows the Cortex-M7 core clock, not the AHB/SysTick clock. */
-    g_dwt_cycles_per_us = HAL_RCC_GetSysClockFreq() / 1000000U;
-    g_dwt_initialized   = (g_dwt_cycles_per_us != 0U) && delay_enable_dwt();
+    g_dwt_cycles_per_us = delay_port_core_clock_hz() / 1000000U;
+    g_dwt_initialized   = (g_dwt_cycles_per_us != 0U) && delay_port_dwt_enable();
 
 #if DELAY_USE_DWT
     g_delay_initialized = (g_core_clock_hz != 0U) && g_dwt_initialized;
 #else
     g_systick_cycles_per_us = g_core_clock_hz / 1000000U;
-    g_delay_initialized     = (g_systick_cycles_per_us != 0U) && (SysTick->LOAD != 0U);
+    g_delay_initialized     = (g_systick_cycles_per_us != 0U) && (delay_port_systick_load() != 0U);
 #endif
 }
 
@@ -127,7 +114,7 @@ bool delay_dwt_cycles_now(uint32_t *cycles)
     {
         return false;
     }
-    *cycles = DWT->CYCCNT;
+    *cycles = delay_port_dwt_cycles();
     return true;
 }
 
@@ -140,7 +127,7 @@ bool delay_dwt_elapsed_us(uint32_t start_cycles, uint16_t timeout_us)
         return false;
     }
     timeout_cycles = (uint64_t)timeout_us * g_dwt_cycles_per_us;
-    return (uint32_t)(DWT->CYCCNT - start_cycles) >= timeout_cycles;
+    return (uint32_t)(delay_port_dwt_cycles() - start_cycles) >= timeout_cycles;
 }
 /**
  * @brief 获取单次 DWT 忙等待允许的最大时长。
@@ -210,10 +197,10 @@ delay_status_t delay_us_busy(uint32_t us)
     }
 
     cycles = (uint32_t)cycles64;
-    start  = DWT->CYCCNT;
-    while ((uint32_t)(DWT->CYCCNT - start) < cycles)
+    start  = delay_port_dwt_cycles();
+    /* 空循环体即可：delay_port_dwt_cycles() 是外部函数，编译器不能把它提到循环外。 */
+    while ((uint32_t)(delay_port_dwt_cycles() - start) < cycles)
     {
-        __NOP();
     }
 
     return DELAY_OK;
@@ -264,15 +251,15 @@ void delay_ms(uint32_t ms)
 /**
  * @brief 读取系统单调毫秒计数。
  * @param 无。
- * @return HAL tick 当前值，单位毫秒。
+ * @return 当前毫秒计数。
  * @note 计数器为 uint32_t，持续运行约 49.7 天后回绕；调用者应使用
- *       delay_elapsed_ms() 进行差值比较，不要直接比较绝对大小。HAL
- *       tick 的中断更新由应用或 RTOS 负责，本模块不定义 SysTick_Handler。
+ *       delay_elapsed_ms() 进行差值比较，不要直接比较绝对大小。该计数的
+ *       硬件来源由 delay_port_now_ms() 提供，本模块不定义 SysTick_Handler。
  */
 
 uint32_t delay_now_ms(void)
 {
-    return HAL_GetTick();
+    return delay_port_now_ms();
 }
 
 /**

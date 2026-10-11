@@ -1,11 +1,16 @@
+/*
+ * btim.c — 毫秒级固定任务调度器（跨 target 共享逻辑）
+ *
+ * 本文件不 include 任何 SoC 头、不出现任何 HAL 类型：硬件心跳的来源（哪个定时器、
+ * 哪个中断号、时钟怎么开）全部下沉到 src/platform/<soc>/btim_port.c。
+ * 本文件只维护任务表与到期判定。
+ */
+
 #include "btim.h"
 
 #include "watchdog.h"
 
 #include <string.h>
-
-/* TIM6 is used only as the scheduler's millisecond hardware heartbeat. */
-TIM_HandleTypeDef g_btimx_handle = {0};
 
 /* 和 UART CLI 命令表一样，这是产品固定功能的只读注册描述。 */
 typedef struct
@@ -38,7 +43,7 @@ typedef struct
  *
  * 表在调度器模块内集中维护，便于审查一个产品镜像实际有哪些周期后台工作。
  * 每个功能模块只导出自己的 task callback：例如 watchdog.c 实现
- * storage_watchdog_task()，它不关心 TIM6、遍历顺序或其他任务。
+ * storage_watchdog_task()，它不关心硬件心跳来源、遍历顺序或其他任务。
  *
  * 未列出的槽位保持 callback=NULL，仍可由 btim_scheduler_add() 用于确实需要
  * 在运行中创建和撤销的临时任务。核心安全任务不使用动态槽位。
@@ -56,6 +61,15 @@ static uint8_t btim_time_due(uint32_t now_ms, uint32_t due_ms)
 {
     /* Signed difference makes deadline comparison work across uint32_t tick wrap. */
     return ((int32_t)(now_ms - due_ms) >= 0) ? 1U : 0U;
+}
+
+void btim_scheduler_tick(void)
+{
+    /*
+     * 硬件心跳的唯一后果就是把毫秒计数加一。ISR 的全部调度职责到此为止——
+     * 真正的到期扫描留给主循环的 btim_scheduler_poll()，避免在中断里跑回调。
+     */
+    g_btim_tick_ms++;
 }
 
 void btim_scheduler_init(void)
@@ -83,16 +97,6 @@ void btim_scheduler_init(void)
         runtime->period_ms   = config->period_ms;
         runtime->enabled     = 1U;
     }
-}
-
-void btim_timx_int_init(uint16_t arr, uint16_t psc)
-{
-    g_btimx_handle.Instance               = BTIM_TIMX;
-    g_btimx_handle.Init.Prescaler         = psc;
-    g_btimx_handle.Init.Period            = arr;
-    g_btimx_handle.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-    (void)HAL_TIM_Base_Init(&g_btimx_handle);
-    (void)HAL_TIM_Base_Start_IT(&g_btimx_handle);
 }
 
 bool btim_scheduler_add(btim_task_callback_t callback, void *context, uint32_t first_delay_ms, uint32_t period_ms, uint32_t *task_id)
@@ -194,27 +198,5 @@ void btim_scheduler_poll(void)
 
         task->runs++;
         task->callback(task->context, now_ms);
-    }
-}
-
-void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim)
-{
-    if (htim->Instance != BTIM_TIMX)
-    {
-        return;
-    }
-
-    BTIM_TIMX_CLK_ENABLE();
-    /* TIM6 only increments time; keep it below urgent data-plane interrupts. */
-    HAL_NVIC_SetPriority(BTIM_TIMX_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(BTIM_TIMX_IRQn);
-}
-
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-    if (htim->Instance == BTIM_TIMX)
-    {
-        /* The ISR's entire scheduler role is advancing a monotonically increasing tick. */
-        g_btim_tick_ms++;
     }
 }

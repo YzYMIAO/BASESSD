@@ -11,8 +11,11 @@ access MMIO registers directly; register access lives in
 > `src/nand/nand_mt29f4g08abadawp.c` defines `HAL_NAND_MspInit` / `HAL_NAND_Init`
 > directly. The NAND layer's **include coupling** did converge in Stage 1 — `delay` /
 > `crc` / `dma` now come from the abstract headers under `include/platform/`, and no
-> `platform/<soc>/` path remains in `src/nand/*.c` or `src/fc/fc_crc_engine.c`; the
-> raw MMIO and `HAL_NAND_*` usage above is what remains for Stage 2.
+> `platform/<soc>/` path remains in `src/nand/*.c` or `src/fc/fc_crc_engine.c`. **Stage 2**
+> then moved the portable logic of five platform services (`btim` / `watchdog` / `fault` /
+> `delay` / `syscalls`) into shared sources under `src/platform/*.c`, leaving only the
+> hardware adaptation in `src/platform/stm32h743/*_port.c`; the
+> raw MMIO and `HAL_NAND_*` usage above is what remains for Stage 3.
 > Also note `src/platform/bsp` is currently **dead code** (its
 > `makefile.mk` is not included by any build fragment). See
 > `docs/design/platform_abstraction.md` for the full audit and staged plan.

@@ -186,7 +186,8 @@ void DMA1_Stream0_IRQHandler(void)
  */
 void TIM6_DAC_IRQHandler(void)
 {
-    HAL_TIM_IRQHandler(&g_btimx_handle);
+    /* 定时器句柄由 btim_port.c 私有持有，这里只转发。 */
+    btim_port_irq_handler();
 }
 
 /**

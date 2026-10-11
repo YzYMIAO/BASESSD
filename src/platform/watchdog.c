@@ -1,17 +1,22 @@
-#include "watchdog.h"
+/*
+ * watchdog.c — 存储主控看门狗 Supervisor（跨 target 共享逻辑）
+ *
+ * 本文件不 include 任何 SoC 头、不出现任何 HAL 类型：健康域状态机、首故障锁存与
+ * WWDG 窗口决策全在这里；IWDG/WWDG 句柄与硬件调用全部下沉到
+ * src/platform/<soc>/watchdog_port.c。
+ *
+ * 设计要点：硬件喂狗是最终裁决，因此 service() 里所有健康检查与窗口检查都排在
+ * IWDG 刷新之前；一旦锁存故障就再也不喂狗，让独立时钟完成全芯片复位。
+ */
 
-#include "stm32h7xx_hal_iwdg.h"
-#include "stm32h7xx_hal_wwdg.h"
+#include "watchdog.h"
 
 #include <string.h>
 
-/* 两个 HAL handle 仅由本文件持有，禁止业务模块绕过 Supervisor 直接刷新硬件。 */
-static IWDG_HandleTypeDef          g_storage_iwdg;
-static WWDG_HandleTypeDef          g_storage_wwdg;
 static storage_wdg_config_t        g_storage_wdg_config;
 static storage_wdg_status_t        g_storage_wdg_status;
 static storage_wdg_recovery_hook_t g_storage_wdg_recovery_hook;
-/* 上一次成功刷新 WWDG 的 HAL tick，用来判断当前是否已进入允许刷新窗口。 */
+/* 上一次成功刷新 WWDG 的时刻，用来判断当前是否已进入允许刷新窗口。 */
 static uint32_t g_storage_wdg_last_wwdg_refresh_ms;
 
 static bool storage_wdg_domain_is_valid(storage_wdg_domain_t domain)
@@ -22,7 +27,7 @@ static bool storage_wdg_domain_is_valid(storage_wdg_domain_t domain)
 
 static bool storage_wdg_elapsed(uint32_t now_ms, uint32_t since_ms, uint32_t limit_ms)
 {
-    /* HAL_GetTick() 约 49 天回绕一次；无符号减法可正确表示短时间间隔。 */
+    /* 毫秒计数约 49 天回绕一次；无符号减法可正确表示短时间间隔。 */
     return ((uint32_t)(now_ms - since_ms) > limit_ms);
 }
 
@@ -93,17 +98,13 @@ bool storage_wdg_init(const storage_wdg_config_t *config)
     /* 初始化时给每个域一次启动宽限期，避免还未启动的状态机立即超时。 */
     memset(&g_storage_wdg_status, 0, sizeof(g_storage_wdg_status));
     g_storage_wdg_config = *config;
-    now_ms               = HAL_GetTick();
+    now_ms               = watchdog_port_now_ms();
     for (index = 0U; index < (uint32_t)STORAGE_WDG_DOMAIN_COUNT; index++)
     {
         g_storage_wdg_status.last_progress_ms[index] = now_ms;
     }
 
-    g_storage_iwdg.Instance       = IWDG1;
-    g_storage_iwdg.Init.Prescaler = config->iwdg_prescaler;
-    g_storage_iwdg.Init.Reload    = config->iwdg_reload;
-    g_storage_iwdg.Init.Window    = IWDG_WINDOW_DISABLE;
-    if (HAL_IWDG_Init(&g_storage_iwdg) != HAL_OK)
+    if (!watchdog_port_iwdg_init(config->iwdg_prescaler, config->iwdg_reload))
     {
         return false;
     }
@@ -111,13 +112,7 @@ bool storage_wdg_init(const storage_wdg_config_t *config)
     g_storage_wdg_status.iwdg_feeding = true;
     if (config->enable_wwdg)
     {
-        g_storage_wwdg.Instance       = WWDG1;
-        g_storage_wwdg.Init.Prescaler = config->wwdg_prescaler;
-        g_storage_wwdg.Init.Counter   = config->wwdg_counter;
-        g_storage_wwdg.Init.Window    = config->wwdg_window;
-        /* EWI 只用于诊断：回调记录故障，绝不自动 refresh，否则会掩盖主循环死锁。 */
-        g_storage_wwdg.Init.EWIMode   = WWDG_EWI_ENABLE;
-        if (HAL_WWDG_Init(&g_storage_wwdg) != HAL_OK)
+        if (!watchdog_port_wwdg_init(config->wwdg_prescaler, config->wwdg_counter, config->wwdg_window))
         {
             g_storage_wdg_status.iwdg_feeding = false;
             return false;
@@ -145,7 +140,7 @@ void storage_wdg_report_progress(storage_wdg_domain_t domain)
     /* 故障锁存后心跳不再生效，必须走受控复位路径，不能静默恢复。 */
     if (g_storage_wdg_status.fault == STORAGE_WDG_FAULT_NONE)
     {
-        g_storage_wdg_status.last_progress_ms[domain] = HAL_GetTick();
+        g_storage_wdg_status.last_progress_ms[domain] = watchdog_port_now_ms();
     }
 }
 
@@ -161,7 +156,7 @@ void storage_wdg_service(void)
         return;
     }
 
-    now_ms = HAL_GetTick();
+    now_ms = watchdog_port_now_ms();
     if (!storage_wdg_all_required_domains_healthy(now_ms, &timed_out_domain))
     {
         storage_wdg_latch_fault(timed_out_domain, STORAGE_WDG_FAULT_DOMAIN_TIMEOUT);
@@ -179,13 +174,13 @@ void storage_wdg_service(void)
         }
         if (since_wwdg_refresh_ms >= g_storage_wdg_config.wwdg_refresh_min_ms)
         {
-            (void)HAL_WWDG_Refresh(&g_storage_wwdg);
+            watchdog_port_wwdg_refresh();
             g_storage_wdg_last_wwdg_refresh_ms = now_ms;
         }
     }
 
     /* IWDG 刷新必须位于所有健康检查及 WWDG 窗口检查之后，保证它是最终裁决结果。 */
-    (void)HAL_IWDG_Refresh(&g_storage_iwdg);
+    watchdog_port_iwdg_refresh();
 }
 
 void storage_watchdog_task(void *context, uint32_t now_ms)
@@ -212,34 +207,24 @@ void storage_wdg_get_status(storage_wdg_status_t *status)
 
 void storage_wdg_wwdg_irq_handler(void)
 {
-    /* HAL 会在此路径中清 EWI 标志并调用下方的 EarlyWakeupCallback。 */
+    /* 具体的中断分发（清 EWI 标志）由 port 侧完成。 */
     if (g_storage_wdg_status.wwdg_enabled)
     {
-        HAL_WWDG_IRQHandler(&g_storage_wwdg);
+        watchdog_port_wwdg_irq_handler();
     }
 }
 
-/*
- * HAL_WWDG_Init() 调用此板级回调。它必须与统一 Supervisor 放在同一模块，
- * 确保没有旧驱动抢占 WWDG 时钟、NVIC 或 IRQ 所有权。
- */
-void HAL_WWDG_MspInit(WWDG_HandleTypeDef *hwwdg)
+void storage_wdg_wwdg_early_wakeup(void)
 {
-    (void)hwwdg;
-    __HAL_RCC_WWDG_CLK_ENABLE();
-    HAL_NVIC_SetPriority(WWDG_IRQn, 0, 0);
-    HAL_NVIC_EnableIRQ(WWDG_IRQn);
-}
-
-void HAL_WWDG_EarlyWakeupCallback(WWDG_HandleTypeDef *hwwdg)
-{
-    if ((g_storage_wdg_status.wwdg_enabled) && (hwwdg == &g_storage_wwdg))
+    if (!g_storage_wdg_status.wwdg_enabled)
     {
-        g_storage_wdg_status.wwdg_early_warning = true;
-        /*
-         * EWI 到来说明 WWDG 已接近下溢。这里只锁存最小诊断状态，不打印日志、
-         * 不做 NAND 操作、不刷新 WWDG；这些动作可能超出剩余窗口并破坏复位时序。
-         */
-        storage_wdg_latch_fault(STORAGE_WDG_DOMAIN_SCHEDULER, STORAGE_WDG_FAULT_WWDG_EARLY_WAKEUP);
+        return;
     }
+
+    g_storage_wdg_status.wwdg_early_warning = true;
+    /*
+     * EWI 到来说明 WWDG 已接近下溢。这里只锁存最小诊断状态，不打印日志、
+     * 不做 NAND 操作、不刷新 WWDG；这些动作可能超出剩余窗口并破坏复位时序。
+     */
+    storage_wdg_latch_fault(STORAGE_WDG_DOMAIN_SCHEDULER, STORAGE_WDG_FAULT_WWDG_EARLY_WAKEUP);
 }
