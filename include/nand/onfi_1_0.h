@@ -48,6 +48,11 @@
 #define NAND_CMD_BLOCK_LOCK_TIGHT           0x2CU
 #define NAND_CMD_BLOCK_LOCK_STATUS          0x7AU
 
+/* 90h 的地址段取值（手册 Figure 26 / Figure 27）：
+ *   00h → 5 字节厂商/器件 ID（OP_READ_ID）
+ *   20h → 4 字节 ONFI 签名 "ONFI"（OP_READ_ONFI_SIGNATURE） */
+#define NAND_READ_ID_ADDR_ONFI_SIGNATURE 0x20U
+
 /* 70h 状态字节位定义：bit6=READY、bit0=FAIL */
 #define NAND_STATUS_READY 0x40U
 #define NAND_STATUS_FAIL  0x01U
@@ -68,6 +73,22 @@
  * ----------------------------------------------------------------------------------------------
  */
 #define OP_READ_ID (1U)
+
+/* OP_READ_ONFI_SIGNATURE
+ * ----------------------------------------------------------------------------------------------
+ * < 90 >-< 20 > ~~~~ < Dout1 >-< Dout2 >-< Dout3 >-< Dout4 >
+ * ----------------------------------------------------------------------------------------------
+ * 手册 Figure 27：同一条 90h，地址段给 **20h**（不是 Figure 26 的 00h）⇒ 只回 4 字节
+ * `4Fh 4Eh 46h 49h` = "ONFI"，即 ONFI 签名，而非 5 字节厂商/器件 ID。
+ *
+ * ⚠ 与 OP_READ_PARAMETER_PAGE（ECh）的 "ONFI" **不是同一条路径**：EC 是独立命令、走 desc
+ *   链、字节落 USER 缓冲；本 op 是 90h 命令、**无 desc 链**、4 字节经控制器侧暂存
+ *   `g_fc_return_staging` 进 CQ 的 `param`（同 OP_GET_FEATURES / OP_READ_META）。
+ *
+ * 槽位 9 复用：原 OP_RANDOM_DATA_INPUT 已删除（功能由 OP_PROGRAM_FOR_INTERNAL_DATA_MOVE
+ * 完整覆盖）⇒ 9 是唯一可安全复用的空槽（槽位 20 是墓碑，**不得复用**）。OP_COUNT 不变。
+ */
+#define OP_READ_ONFI_SIGNATURE (9U)
 
 /* OP_READ_PARAMETER_PAGE
  * ----------------------------------------------------------------------------------------------
@@ -143,8 +164,8 @@
 
 /* ═══ 2. 内部数据搬移（copy-back） ═══ */
 
-/* 操作码 9 已删除（原 OP_RANDOM_DATA_INPUT），
- * 功能由 OP_PROGRAM_FOR_INTERNAL_DATA_MOVE 完整覆盖。 */
+/* 操作码 9 已复用为 OP_READ_ONFI_SIGNATURE（定义见 §1，与 OP_READ_ID 同族）——
+ * 原 OP_RANDOM_DATA_INPUT 的功能早已由 OP_PROGRAM_FOR_INTERNAL_DATA_MOVE 完整覆盖。 */
 
 /* 操作码 11 复用为 OP_READ_META（见 §3 页读 / Cache 读）。 */
 
@@ -489,5 +510,89 @@ extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
     ((op) < OP_COUNT ? g_nand_operation_map[(op)].pair_op : (op))
 #define nand_operation_get_pair(op) \
     ((op) < OP_COUNT ? g_nand_operation_map[(op)].pair_op : (op))
+
+/* ═══ 8. ONFI 参数页（Parameter Page，手册 Table 11） ═══
+ *
+ * 256 字节结构，由 ECh（OP_READ_PARAMETER_PAGE）读出；多字节字段一律**小端**。
+ * 手册 Table 11 的 bytes 256–511 / 512–767 是同一份内容的副本（续页），本层只解第一份。
+ *
+ * 只解「校验 / 开机打印」用得上的字段；保留段与 vendor-specific 段（141–253）不解。
+ * 偏移集中在此，避免解码函数里散落魔数。
+ */
+#define NAND_ONFI_PARAM_PAGE_SIZE (256U)
+#define NAND_ONFI_PARAM_MODEL_LEN (20U) /* bytes 44–63 的型号串长度（不含结尾 NUL） */
+
+/* 字段偏移（手册 Table 11；注释里的区间为闭区间）。 */
+#define NAND_ONFI_PARAM_OFF_SIGNATURE               0U   /* 0–3    "ONFI" = 4F 4E 46 49 */
+#define NAND_ONFI_PARAM_OFF_REVISION                4U   /* 4–5    小端 */
+#define NAND_ONFI_PARAM_OFF_FEATURES                6U   /* 6–7    小端 */
+#define NAND_ONFI_PARAM_OFF_MODEL                   44U  /* 44–63  型号串（ASCII） */
+#define NAND_ONFI_PARAM_OFF_MANUFACTURER_ID         64U  /* 64     厂商 ID（Micron = 2Ch） */
+#define NAND_ONFI_PARAM_OFF_DATA_BYTES_PER_PAGE     80U  /* 80–83  小端 */
+#define NAND_ONFI_PARAM_OFF_SPARE_BYTES_PER_PAGE    84U  /* 84–85  小端 */
+#define NAND_ONFI_PARAM_OFF_DATA_BYTES_PER_PARTIAL  86U  /* 86–89  小端 */
+#define NAND_ONFI_PARAM_OFF_SPARE_BYTES_PER_PARTIAL 90U  /* 90–91  小端 */
+#define NAND_ONFI_PARAM_OFF_PAGES_PER_BLOCK         92U  /* 92–95  小端 */
+#define NAND_ONFI_PARAM_OFF_BLOCKS_PER_UNIT         96U  /* 96–99  小端 */
+#define NAND_ONFI_PARAM_OFF_LOGICAL_UNITS           100U /* 100    小端 */
+#define NAND_ONFI_PARAM_OFF_ADDRESS_CYCLES          101U /* 101    小端（字节原值，不解读 nibble） */
+#define NAND_ONFI_PARAM_OFF_BITS_PER_CELL           102U /* 102    小端 */
+#define NAND_ONFI_PARAM_OFF_PROGRAMS_PER_PAGE       110U /* 110    小端 */
+#define NAND_ONFI_PARAM_OFF_ECC_BITS                112U /* 112    小端 */
+#define NAND_ONFI_PARAM_OFF_TIMING_MODE_SUPPORT     129U /* 129–130 位图：bit n = 支持 Mode n */
+#define NAND_ONFI_PARAM_OFF_PROGRAM_CACHE_TIMING    131U /* 131–132 小端 */
+#define NAND_ONFI_PARAM_OFF_TPROG_MAX               133U /* 133–134 小端 */
+#define NAND_ONFI_PARAM_OFF_TBERS_MAX               135U /* 135–136 小端 */
+#define NAND_ONFI_PARAM_OFF_TR_MAX                  137U /* 137–138 小端 */
+#define NAND_ONFI_PARAM_OFF_TCCS_MIN                139U /* 139–140 小端 */
+
+/* 小端读取（参数页多字节字段一律小端；全仓无现成 LE helper）。 */
+static inline uint16_t nand_onfi_le16(const uint8_t *p)
+{
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8U));
+}
+
+static inline uint32_t nand_onfi_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8U) | ((uint32_t)p[2] << 16U) | ((uint32_t)p[3] << 24U);
+}
+
+/* ONFI 参数页解码结果（只含校验 / 打印用得到的字段）。 */
+typedef struct
+{
+    uint8_t  signature[4];                          /* "ONFI" = 4F 4E 46 49 */
+    uint16_t revision;                              /* 版本号（小端原值） */
+    uint16_t features;                              /* 支持的特性位 */
+    char     model[NAND_ONFI_PARAM_MODEL_LEN + 1U]; /* 型号串（去尾部空格 + 补 NUL） */
+    uint8_t  manufacturer_id;                       /* 厂商 ID（Micron = 2Ch） */
+    uint32_t data_bytes_per_page;
+    uint16_t spare_bytes_per_page;
+    uint32_t data_bytes_per_partial_page;
+    uint16_t spare_bytes_per_partial_page;
+    uint32_t pages_per_block;
+    uint32_t blocks_per_unit;
+    uint8_t  logical_units;
+    uint8_t  address_cycles; /* 字节原值（Table 11 的 23h），不解读 nibble 含义 */
+    uint8_t  bits_per_cell;
+    uint8_t  programs_per_page;
+    uint8_t  ecc_bits;
+    uint16_t timing_mode_support; /* 位图：bit n = 支持 Mode n */
+    uint16_t program_cache_timing;
+    uint16_t tprog_max; /* 以下四项：量纲见手册 Table 11，仓库内未查证 ⇒ 只存原值、不打单位 */
+    uint16_t tbers_max;
+    uint16_t tr_max;
+    uint16_t tccs_min;
+} nand_onfi_param_info_t;
+
+/*
+ * nand_onfi_parameter_page_decode
+ *   功能：把 ECh 读到的 256 字节参数页解成 nand_onfi_param_info_t。
+ *   参数：page —— 至少 NAND_ONFI_PARAM_PAGE_SIZE 字节的原始页；
+ *         info —— 输出（**无论签名是否匹配都会填满**，供诊断打印）。
+ *   返回：1 = 签名是 "ONFI"；0 = 签名不符。
+ *   实现要点：纯函数——零 HAL / 零日志 / 零硬件 ⇒ 可纯 RAM 单测。
+ *         model 按 20 字节拷贝并补结尾 NUL（尾部空格填充**不裁剪**）。
+ */
+uint8_t nand_onfi_parameter_page_decode(const uint8_t page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_t *info);
 
 #endif /* PLATFORM_STM32H743_ONFI_1_0_H */

@@ -341,6 +341,28 @@ static void req_meta_read(nand_dispatch_task_t *task)
 }
 
 /* --------------------------------------------------------------------
+ * req_onfi_signature
+ *   功能：构建 ONFI 签名读请求（OP_READ_ONFI_SIGNATURE，90h + 地址 20h）。
+ *   参数：task —— 预解析完成的任务；cw_buffers[task->plane * CW_NUM] 已由 FC 重定向到
+ *         g_fc_return_staging[command_id]（控制器级 4 字节暂存，返回值最终经 CQ 的 param
+ *         联合体交回）。
+ *   返回：无。
+ *   实现要点：**列地址恒 0x20**（手册 Figure 27）——与 OP_READ_ID 共用 uop 序列
+ *         g_nand_read_id_uops，两者唯一的差别就是这里填的地址字节（00h vs 20h），
+ *         因为 NAND_UOP_COLUMN_0 的 handler 写的是 request->column 而非 uop->operand。
+ *         行地址恒 0：该 uop 序列无 ROW 段，填了也不下发（同 req_feature）。
+ *         4 字节落本 plane 的 CW0 那一格（掩码位 = plane*CW_NUM），与 req_feature 同口径。
+ * -------------------------------------------------------------------- */
+static void req_onfi_signature(nand_dispatch_task_t *task)
+{
+    task->request = (nand_fc_request_t){
+        .column      = NAND_READ_ID_ADDR_ONFI_SIGNATURE,
+        .row         = {0U},
+        .data        = task->cw_buffers[(uint8_t)(task->plane * CW_NUM)],
+        .data_length = 4U};
+}
+
+/* --------------------------------------------------------------------
  * req_single
  *   功能：构建固定长度数据传输请求（READ_ID/PARAMETER_PAGE/RANDOM 等）。
  *   参数：task —— 预解析完成的任务；operation 决定数据长度。
@@ -513,6 +535,7 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
     [OP_READ_STATUS_ENHANCED]                   = completion_single,
     [OP_RANDOM_DATA_READ]                       = completion_per_cw,
     [OP_RANDOM_DATA_READ_MULTI_PLANE]           = completion_per_cw,
+    [OP_READ_ONFI_SIGNATURE]                    = completion_single,
     [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = completion_single,
     [OP_READ_META]                              = completion_single,
     [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = completion_per_cw,
@@ -559,6 +582,7 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
  *     - req_multi_plane_read/program/erase：双 plane 行地址 / 双 plane 拼接写
  *     - req_feature        ：SET/GET_FEATURES（column=feature_addr, 4B）
  *     - req_meta_read      ：META 只读回读（column = CW 号×CW_SIZE, 4B, 无 desc）
+ *     - req_onfi_signature ：ONFI 签名读（90h + 地址 20h, 4B, 无 desc）
  *     - req_erase          ：擦除（无数据）
  *   下标 OP_* 不连续（含 Phase V 扩展 35..40），用设计初始化器定位。
  * -------------------------------------------------------------------- */
@@ -573,6 +597,7 @@ const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
     [OP_READ_STATUS_ENHANCED]                   = req_single,
     [OP_RANDOM_DATA_READ]                       = req_random_read,
     [OP_RANDOM_DATA_READ_MULTI_PLANE]           = req_random_read,
+    [OP_READ_ONFI_SIGNATURE]                    = req_onfi_signature,
     [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = req_single,
     [OP_READ_META]                              = req_meta_read,
     [OP_NORMAL_READ_PAGE_WITH_DATA_OUT]         = req_read_page,

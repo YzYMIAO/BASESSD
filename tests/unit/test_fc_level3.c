@@ -461,6 +461,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
 {
     uint8_t id_bytes[5]   = {0U, 0U, 0U, 0U, 0U};
     uint8_t onfi_bytes[4] = {0U, 0U, 0U, 0U};
+    uint8_t sig_bytes[4]  = {0U, 0U, 0U, 0U};
     uint8_t uid_bytes[16] = {0U};
 
     (void)params;
@@ -523,7 +524,29 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
-    /* Step 4: GET_FEATURES (address 0x01) — 寄存器值经 CQ 的 param 联合体返回
+    /* Step 4: READ_ONFI_SIGNATURE (90h + 地址 20h) — 与 Step 3 的 EC 路径**同名不同路**：
+     * Step 3 走 ECh、有 desc 链、字节落 USER 缓冲；本步走 90h、**无 desc 链**（has_data = 0
+     * ⇒ cw_bitmap = 0 走短路分支）、4 字节经控制器侧暂存 g_fc_return_staging 落 CQ 的 param。
+     * 列地址 0x20 由 NAND 侧 req_onfi_signature 硬编码（手册 Figure 27）。 */
+    {
+        fc_command_t       *cmd        = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &L3_CONF(OP_READ_ONFI_SIGNATURE, FC_CRC_ENABLE));
+        fc_command_status_t completion = test_submit_wait(cmd);
+
+        munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+        munit_assert_uint8(completion.param.bytes[0], ==, 0x4FU); /* 'O' */
+        munit_assert_uint8(completion.param.bytes[1], ==, 0x4EU); /* 'N' */
+        munit_assert_uint8(completion.param.bytes[2], ==, 0x46U); /* 'F' */
+        munit_assert_uint8(completion.param.bytes[3], ==, 0x49U); /* 'I' */
+
+        for (uint8_t i = 0U; i < 4U; i++)
+        {
+            sig_bytes[i] = completion.param.bytes[i];
+        }
+
+        munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    }
+
+    /* Step 5: GET_FEATURES (address 0x01) — 寄存器值经 CQ 的 param 联合体返回
      * （completion.param.parameter0..3），不再原地回填命令体。
      * GET_FEATURES 不建链（ftl_cmd_needs_desc_chain 排除），pba 与掩码都不看
      * ⇒ cw_bitmap = 0。feature_addr 由调用者建链后自行覆盖。 */
@@ -537,7 +560,7 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
-    /* Step 5: READ_UNIQUE_ID (EDh) — 与参数页共用同一 UOP 模板，只换命令字节；
+    /* Step 6: READ_UNIQUE_ID (EDh) — 与参数页共用同一 UOP 模板，只换命令字节；
      * 读 256B 进 CW0（只取 CW0，位图 0x01）。
      * ⚠ 唯一 ID 是**出厂烧录的 16 字节**，本器件手册未给死取值 ⇒ **不假设内容**
      *   （见「协议断言必须先查证」），硬判据只到「命令 + CW 状态全 SUCCESS」；
@@ -561,9 +584,10 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
         munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
     }
 
-    /* 证据摘要（--log-visible info）：五条命令的**实读字节**。
-     * 裸 [ OK ] 只说明命令回来了；打出 ID / ONFI 签名 / 唯一 ID 才说明 NAND 真的答了话。 */
-    test_trace_summary("RESET ok; READ_ID=%02X %02X %02X %02X %02X; PARAM_PAGE=%02X %02X %02X %02X (%c%c%c%c); GET_FEATURES(0x01) ok",
+    /* 证据摘要（--log-visible info）：六条命令的**实读字节**。
+     * 裸 [ OK ] 只说明命令回来了；打出 ID / ONFI 签名 / 唯一 ID 才说明 NAND 真的答了话。
+     * PARAM_PAGE 与 SIG 是**同一份签名的两条路径**（ECh 走 desc 链落 USER / 90h+20h 走 CQ param）。 */
+    test_trace_summary("RESET ok; READ_ID=%02X %02X %02X %02X %02X; PARAM_PAGE=%02X %02X %02X %02X (%c%c%c%c); GET_FEATURES(0x01) ok; SIG(90h+20h)=%02X %02X %02X %02X (%c%c%c%c)",
                        (unsigned)id_bytes[0],
                        (unsigned)id_bytes[1],
                        (unsigned)id_bytes[2],
@@ -576,7 +600,15 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
                        (char)onfi_bytes[0],
                        (char)onfi_bytes[1],
                        (char)onfi_bytes[2],
-                       (char)onfi_bytes[3]);
+                       (char)onfi_bytes[3],
+                       (unsigned)sig_bytes[0],
+                       (unsigned)sig_bytes[1],
+                       (unsigned)sig_bytes[2],
+                       (unsigned)sig_bytes[3],
+                       (char)sig_bytes[0],
+                       (char)sig_bytes[1],
+                       (char)sig_bytes[2],
+                       (char)sig_bytes[3]);
 
     test_trace_summary("UNIQUE_ID(16B)=%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
                        (unsigned)uid_bytes[0],

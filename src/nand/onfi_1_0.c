@@ -237,6 +237,10 @@ static const nand_uop_t g_nand_get_features_uops[] = {
  * Read ID is the board bring-up command. Keep it identical to the vendor reference:
  * wait for R/B#, then 90h -> 00h -> data. Do not prepend 70h status polling here,
  * because an all-identical result is otherwise indistinguishable from stale status data.
+ *
+ * 地址段字节由 request->column 给（NAND_UOP_COLUMN_0 的 handler 写的是它，**不是**
+ * uop->operand）⇒ 同一个数组同时服务 90h+00h（OP_READ_ID）与 90h+20h
+ * （OP_READ_ONFI_SIGNATURE）；两者只差 req builder 填的 column 与 data_length。
  */
 static const nand_uop_t g_nand_read_id_uops[] = {
     {NAND_UOP_WAIT_READY,               0U},
@@ -820,6 +824,7 @@ const nand_operation_map_t g_nand_operation_map[OP_COUNT] =
         [OP_READ_STATUS]                            = {                           .operation = OP_READ_STATUS,                    .name = "READ_STATUS",                .command_1 = NAND_CMD_READ_STATUS,                            .command_2 = 0U,  .address_cycles = 0U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 1U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                       .uops = g_nand_read_status_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
         [OP_READ_STATUS_ENHANCED]                   = {                  .operation = OP_READ_STATUS_ENHANCED,           .name = "READ_STATUS_ENHANCED",       .command_1 = NAND_CMD_READ_STATUS_ENHANCED,                            .command_2 = 0U,  .address_cycles = 3U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 1U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,              .uops = g_nand_read_status_enhanced_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
         [OP_RANDOM_DATA_READ]                       = {                      .operation = OP_RANDOM_DATA_READ,               .name = "RANDOM_DATA_READ",           .command_1 = NAND_CMD_RANDOM_DATA_READ, .command_2 = NAND_CMD_RANDOM_DATA_READ_END,  .address_cycles = 2U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,          .data_length = CW_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                       .uops = g_nand_random_read_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
+        [OP_READ_ONFI_SIGNATURE]                    = {                   .operation = OP_READ_ONFI_SIGNATURE,            .name = "READ_ONFI_SIGNATURE",                    .command_1 = NAND_CMD_READ_ID,                            .command_2 = 0U,  .address_cycles = 1U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 0U, .has_data = 0U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                           .uops = g_nand_read_id_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
         [OP_RANDOM_DATA_READ_MULTI_PLANE]           = {          .operation = OP_RANDOM_DATA_READ_MULTI_PLANE,   .name = "RANDOM_DATA_READ_MULTI_PLANE", .command_1 = NAND_CMD_RANDOM_DATA_READ_TWO_PLANE, .command_2 = NAND_CMD_RANDOM_DATA_READ_END,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,          .data_length = CW_SIZE,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,           .uops = g_nand_random_read_multi_plane_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
         [OP_PROGRAM_FOR_INTERNAL_DATA_MOVE]         = {        .operation = OP_PROGRAM_FOR_INTERNAL_DATA_MOVE, .name = "PROGRAM_FOR_INTERNAL_DATA_MOVE",          .command_1 = NAND_CMD_RANDOM_DATA_INPUT, .command_2 = NAND_CMD_PROGRAM_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 1U,               .data_length = 0U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_internal_program_uops,               .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TPROG_US}},
         [OP_READ_META]                              = {                             .operation = OP_READ_META,                      .name = "READ_META",            .command_1 = NAND_CMD_READ_PAGE_SETUP,    .command_2 = NAND_CMD_READ_PAGE_CONFIRM,  .address_cycles = 5U, .data_input_cycles = 0U, .valid_while_selected_lun_busy = 0U, .valid_while_other_lun_busy = 1U, .has_data = 0U,               .data_length = 4U,            .op_type = 0U,                    .pair_op = 0U,                 .min_busy_us = 0U,                  .uops = g_nand_normal_read_page_uops,                  .timing = {NAND_TIME_TWB_US, 0U, NAND_TIME_TWH_US, NAND_TIME_TR_US}},
@@ -856,3 +861,65 @@ const nand_operation_map_t g_nand_operation_map[OP_COUNT] =
 /* nand_operation_has_data / nand_operation_data_length 已由 onfi_1_0.h 中的宏替代，
  * 直接读 g_nand_operation_map[op].has_data / .data_length。
  * 删除前请确认所有外部引用已清理。 */
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * ONFI 参数页解码（手册 Table 11）
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* --------------------------------------------------------------------
+ * nand_onfi_parameter_page_decode
+ *   功能：把 ECh 读到的 256 字节参数页解成 nand_onfi_param_info_t（纯函数）。
+ *   参数：page —— 至少 NAND_ONFI_PARAM_PAGE_SIZE 字节；info —— 输出。
+ *   返回：1 = 签名是 "ONFI"；0 = 签名不符（info 仍被填满，供诊断打印）。
+ *   实现要点：零 HAL / 零日志 / 零硬件 ⇒ 纯 RAM 可单测。字段偏移见
+ *         onfi_1_0.h 的 NAND_ONFI_PARAM_OFF_*；多字节一律小端；
+ *         model 串按器件约定去尾部空格填充（解成可比的 C 串）。
+ * -------------------------------------------------------------------- */
+uint8_t nand_onfi_parameter_page_decode(const uint8_t page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_t *info)
+{
+    uint8_t i;
+    uint8_t signature_ok;
+
+    for (i = 0U; i < 4U; i++)
+    {
+        info->signature[i] = page[NAND_ONFI_PARAM_OFF_SIGNATURE + i];
+    }
+    signature_ok = (uint8_t)((info->signature[0] == 0x4FU) && (info->signature[1] == 0x4EU) &&
+                             (info->signature[2] == 0x46U) && (info->signature[3] == 0x49U));
+
+    info->revision = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_REVISION]);
+    info->features = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_FEATURES]);
+
+    /* 型号串 bytes 44–63：20 字节 ASCII，器件用空格（0x20）右填充 ⇒ 去掉尾部空格再补
+     * NUL，否则 %s 打印/比较会带一截尾空格（开机日志里肉眼可见）。 */
+    for (i = 0U; i < NAND_ONFI_PARAM_MODEL_LEN; i++)
+    {
+        info->model[i] = (char)page[NAND_ONFI_PARAM_OFF_MODEL + i];
+    }
+    while ((i > 0U) && (info->model[i - 1U] == ' '))
+    {
+        i--;
+    }
+    info->model[i] = '\0';
+
+    info->manufacturer_id              = page[NAND_ONFI_PARAM_OFF_MANUFACTURER_ID];
+    info->data_bytes_per_page          = nand_onfi_le32(&page[NAND_ONFI_PARAM_OFF_DATA_BYTES_PER_PAGE]);
+    info->spare_bytes_per_page         = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_SPARE_BYTES_PER_PAGE]);
+    info->data_bytes_per_partial_page  = nand_onfi_le32(&page[NAND_ONFI_PARAM_OFF_DATA_BYTES_PER_PARTIAL]);
+    info->spare_bytes_per_partial_page = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_SPARE_BYTES_PER_PARTIAL]);
+    info->pages_per_block              = nand_onfi_le32(&page[NAND_ONFI_PARAM_OFF_PAGES_PER_BLOCK]);
+    info->blocks_per_unit              = nand_onfi_le32(&page[NAND_ONFI_PARAM_OFF_BLOCKS_PER_UNIT]);
+    info->logical_units                = page[NAND_ONFI_PARAM_OFF_LOGICAL_UNITS];
+    info->address_cycles               = page[NAND_ONFI_PARAM_OFF_ADDRESS_CYCLES];
+    info->bits_per_cell                = page[NAND_ONFI_PARAM_OFF_BITS_PER_CELL];
+    info->programs_per_page            = page[NAND_ONFI_PARAM_OFF_PROGRAMS_PER_PAGE];
+    info->ecc_bits                     = page[NAND_ONFI_PARAM_OFF_ECC_BITS];
+    info->timing_mode_support          = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_TIMING_MODE_SUPPORT]);
+    info->program_cache_timing         = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_PROGRAM_CACHE_TIMING]);
+    info->tprog_max                    = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_TPROG_MAX]);
+    info->tbers_max                    = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_TBERS_MAX]);
+    info->tr_max                       = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_TR_MAX]);
+    info->tccs_min                     = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_TCCS_MIN]);
+
+    return signature_ok;
+}

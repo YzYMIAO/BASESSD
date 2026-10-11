@@ -1,7 +1,7 @@
 /*
  * test_fc_level1.c — Level 1 纯逻辑测试：fc_command + fc_queue + fc_scheduler
  *
- * 共 11 个测试函数，全部是纯 RAM 逻辑：不碰 NAND、不需要 fc_init()、
+ * 共 12 个测试函数，全部是纯 RAM 逻辑：不碰 NAND、不需要 fc_init()、
  * 不依赖任何池，每个用例自带全部夹具（栈上队列 / 栈上命令）。
  *
  * 覆盖范围：
@@ -9,6 +9,7 @@
  *   Part 2  fc_submission_queue  —— SQ 环形 FIFO：顺序 / 回绕 / 满 / peek
  *   Part 2b fc_completion_queue  —— CQ 环形 FIFO：初始化 / 顺序 / 满
  *   Part 3  fc_scheduler         —— init 绑定 SQ/HSQ
+ *   Part 4  ONFI 参数页解码       —— 合成页喂纯函数，逐字段断言（手册 Table 11）
  *
  * 链接依赖：g_nand_operation_map（.rodata, onfi_1_0.o）——经 fc_command_validate()
  * 的 nand_operation_has_data() 宏引用；以及 fc_test_common.o 的证据打印原语
@@ -510,13 +511,144 @@ static MunitResult test_scheduler_init(const MunitParameter params[], void *data
 }
 
 /**************************************************************************
+ *  Part 4: ONFI 参数页解码（手册 Table 11）
+ *
+ *  nand_onfi_parameter_page_decode() 是**纯函数**——零 HAL / 零日志 / 零硬件，
+ *  故可在 Level 1 用栈上合成页直接测，不碰 NAND。断言取的是「手册 Table 11
+ *  给死的值」（MT29F4G08ABADAWP 列），不是从代码反推的值。
+ **************************************************************************/
+
+/* 小端写入（合成参数页用；解码侧的小端读取在 onfi_1_0.h）。 */
+static void test_put_le16(uint8_t *p, uint16_t value)
+{
+    p[0] = (uint8_t)(value & 0xFFU);
+    p[1] = (uint8_t)((value >> 8U) & 0xFFU);
+}
+
+static void test_put_le32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value & 0xFFU);
+    p[1] = (uint8_t)((value >> 8U) & 0xFFU);
+    p[2] = (uint8_t)((value >> 16U) & 0xFFU);
+    p[3] = (uint8_t)((value >> 24U) & 0xFFU);
+}
+
+/* --------------------------------------------------------------------
+ * test_onfi_parameter_page_decode
+ *   功能：纯函数 nand_onfi_parameter_page_decode() 的字段解码验证。
+ *   测什么：合成一张按手册 Table 11（MT29F4G08ABADAWP 列）取值的 256 字节参数页，
+ *         逐字段断言；再破坏签名，断言返回 0 且字段仍被填满（供诊断打印）。
+ *   设计思路：解码函数纯 RAM ⇒ 无需真 NAND；偏移宏与解码函数共用一套
+ *         NAND_ONFI_PARAM_OFF_*，本用例不另写魔数。
+ * -------------------------------------------------------------------- */
+static MunitResult test_onfi_parameter_page_decode(const MunitParameter params[], void *data)
+{
+    static const char      model[] = "MT29F4G08ABADAWP";
+    uint8_t                page[NAND_ONFI_PARAM_PAGE_SIZE];
+    nand_onfi_param_info_t info;
+    uint16_t               i; /* 需装下 0..255 的整页计数（uint8_t 会让 i<PAGE_SIZE 恒真） */
+
+    (void)params;
+    (void)data;
+
+    test_trace_begin();
+
+    /* 合成参数页：全 0 → 逐字段按 Table 11 填值。 */
+    for (i = 0U; i < NAND_ONFI_PARAM_PAGE_SIZE; i++)
+    {
+        page[i] = 0x00U;
+    }
+
+    page[NAND_ONFI_PARAM_OFF_SIGNATURE + 0U] = 0x4FU; /* 'O' */
+    page[NAND_ONFI_PARAM_OFF_SIGNATURE + 1U] = 0x4EU; /* 'N' */
+    page[NAND_ONFI_PARAM_OFF_SIGNATURE + 2U] = 0x46U; /* 'F' */
+    page[NAND_ONFI_PARAM_OFF_SIGNATURE + 3U] = 0x49U; /* 'I' */
+    test_put_le16(&page[NAND_ONFI_PARAM_OFF_REVISION], 0x0002U);
+    test_put_le16(&page[NAND_ONFI_PARAM_OFF_FEATURES], 0x0018U);
+
+    /* 型号串：bytes 44–63 空格填充，前 16 字节是型号名。 */
+    for (i = 0U; i < NAND_ONFI_PARAM_MODEL_LEN; i++)
+    {
+        page[NAND_ONFI_PARAM_OFF_MODEL + i] = 0x20U;
+    }
+    for (i = 0U; i < (uint8_t)(sizeof(model) - 1U); i++)
+    {
+        page[NAND_ONFI_PARAM_OFF_MODEL + i] = (uint8_t)model[i];
+    }
+
+    page[NAND_ONFI_PARAM_OFF_MANUFACTURER_ID] = 0x2CU;
+    test_put_le32(&page[NAND_ONFI_PARAM_OFF_DATA_BYTES_PER_PAGE], 2048U);
+    test_put_le16(&page[NAND_ONFI_PARAM_OFF_SPARE_BYTES_PER_PAGE], 64U);
+    test_put_le32(&page[NAND_ONFI_PARAM_OFF_DATA_BYTES_PER_PARTIAL], 512U);
+    test_put_le16(&page[NAND_ONFI_PARAM_OFF_SPARE_BYTES_PER_PARTIAL], 16U);
+    test_put_le32(&page[NAND_ONFI_PARAM_OFF_PAGES_PER_BLOCK], 64U);
+    test_put_le32(&page[NAND_ONFI_PARAM_OFF_BLOCKS_PER_UNIT], 4096U);
+    page[NAND_ONFI_PARAM_OFF_LOGICAL_UNITS]     = 0x01U;
+    page[NAND_ONFI_PARAM_OFF_ADDRESS_CYCLES]    = 0x23U;
+    page[NAND_ONFI_PARAM_OFF_BITS_PER_CELL]     = 0x01U;
+    page[NAND_ONFI_PARAM_OFF_PROGRAMS_PER_PAGE] = 0x04U;
+    page[NAND_ONFI_PARAM_OFF_ECC_BITS]          = 0x04U;
+    test_put_le16(&page[NAND_ONFI_PARAM_OFF_TIMING_MODE_SUPPORT], 0x003FU);
+    test_put_le16(&page[NAND_ONFI_PARAM_OFF_PROGRAM_CACHE_TIMING], 0x003FU);
+    test_put_le16(&page[NAND_ONFI_PARAM_OFF_TPROG_MAX], 600U);
+    test_put_le16(&page[NAND_ONFI_PARAM_OFF_TBERS_MAX], 3000U);
+    test_put_le16(&page[NAND_ONFI_PARAM_OFF_TR_MAX], 25U);
+    test_put_le16(&page[NAND_ONFI_PARAM_OFF_TCCS_MIN], 100U);
+
+    /* 签名匹配 → 返回 1，逐字段断言。 */
+    munit_assert_uint8(nand_onfi_parameter_page_decode(page, &info), ==, 1U);
+    munit_assert_uint8(info.signature[0], ==, 0x4FU);
+    munit_assert_uint8(info.signature[1], ==, 0x4EU);
+    munit_assert_uint8(info.signature[2], ==, 0x46U);
+    munit_assert_uint8(info.signature[3], ==, 0x49U);
+    munit_assert_uint16(info.revision, ==, 0x0002U);
+    munit_assert_uint16(info.features, ==, 0x0018U);
+    munit_assert_string_equal(info.model, "MT29F4G08ABADAWP");
+    munit_assert_uint8(info.manufacturer_id, ==, 0x2CU);
+    munit_assert_uint32(info.data_bytes_per_page, ==, 2048U);
+    munit_assert_uint16(info.spare_bytes_per_page, ==, 64U);
+    munit_assert_uint32(info.data_bytes_per_partial_page, ==, 512U);
+    munit_assert_uint16(info.spare_bytes_per_partial_page, ==, 16U);
+    munit_assert_uint32(info.pages_per_block, ==, 64U);
+    munit_assert_uint32(info.blocks_per_unit, ==, 4096U);
+    munit_assert_uint8(info.logical_units, ==, 1U);
+    munit_assert_uint8(info.address_cycles, ==, 0x23U);
+    munit_assert_uint8(info.bits_per_cell, ==, 1U);
+    munit_assert_uint8(info.programs_per_page, ==, 4U);
+    munit_assert_uint8(info.ecc_bits, ==, 4U);
+    munit_assert_uint16(info.timing_mode_support, ==, 0x003FU);
+    munit_assert_uint16(info.program_cache_timing, ==, 0x003FU);
+    munit_assert_uint16(info.tprog_max, ==, 600U);
+    munit_assert_uint16(info.tbers_max, ==, 3000U);
+    munit_assert_uint16(info.tr_max, ==, 25U);
+    munit_assert_uint16(info.tccs_min, ==, 100U);
+
+    /* 证据（--log-visible info）：把解出的关键字段打出来。 */
+    test_trace_summary("ONFI param decode: model=%s page=%lu+%u block=%lup blocks=%lu ecc=%ubit timingmodes=0x%04X",
+                       info.model,
+                       (unsigned long)info.data_bytes_per_page,
+                       (unsigned int)info.spare_bytes_per_page,
+                       (unsigned long)info.pages_per_block,
+                       (unsigned long)info.blocks_per_unit,
+                       (unsigned int)info.ecc_bits,
+                       (unsigned int)info.timing_mode_support);
+
+    /* 破坏签名 → 返回 0，但字段仍被填满（解码函数如实报「签名不符」）。 */
+    page[NAND_ONFI_PARAM_OFF_SIGNATURE] = 0x00U;
+    munit_assert_uint8(nand_onfi_parameter_page_decode(page, &info), ==, 0U);
+    munit_assert_uint32(info.data_bytes_per_page, ==, 2048U);
+
+    return MUNIT_OK;
+}
+
+/**************************************************************************
  *  套件定义
  *
  *  单个子套件 logic，挂在 /fc-nand/ 根套件下，与 Level 2（data_path）/
  *  Level 3（lifecycle）一致——**一个文件一个套件**。
  *  原先按模块切成的 command / queue / scheduler 三个子套件已合并：合并后
  *  command 只剩 2 条、scheduler 只剩 1 条，过滤粒度已细到等于「单跑一条用例」，
- *  而 Level 1 全部 11 条都是纯 RAM 微秒级，按模块过滤省不出任何东西。
+ *  而 Level 1 全部 12 条都是纯 RAM 微秒级，按模块过滤省不出任何东西。
  *  真正需要过滤的边界是**依赖面**（零依赖 / 需池 / 需真 NAND），那由根套件的
  *  Level 1/2/3 三层保住。
  *
@@ -542,6 +674,9 @@ MunitTest g_fc_logic_tests[] = {
 
  /* Part 3: fc_scheduler */
     {          "scheduler_init",                   test_scheduler_init, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+
+ /* Part 4: ONFI 参数页解码 */
+    {  "onfi_param_page_decode",       test_onfi_parameter_page_decode, NULL, NULL, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
 
     {                      NULL,                                  NULL, NULL, NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

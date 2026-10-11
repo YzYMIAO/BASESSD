@@ -355,6 +355,21 @@ nand_result_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion)
 }
 
 /* --------------------------------------------------------------------
+ * nand_fc_read_parameter_page
+ *   功能：读 ONFI 参数页（ECh，256 字节，同步）。
+ *   参数：page —— 输出缓冲（≥ NAND_ONFI_PARAM_PAGE_SIZE 字节）；completion —— 状态。
+ *   返回：NAND_RESULT_OK / 错误码。
+ *   实现要点：column / row 恒 0——ECh 无地址语义（uop 序列只有 COLUMN_0 = 0）。
+ * -------------------------------------------------------------------- */
+nand_result_t nand_fc_read_parameter_page(uint8_t page[NAND_ONFI_PARAM_PAGE_SIZE], nand_fc_completion_t *completion)
+{
+    const nand_fc_request_t request = {.column = 0U, .row = {0U}, .data = page, .data_length = NAND_ONFI_PARAM_PAGE_SIZE};
+
+    ASSERT(page != NULL);
+    return nand_fc_execute(OP_READ_PARAMETER_PAGE, &request, completion);
+}
+
+/* --------------------------------------------------------------------
  * nand_fc_set_features
  *   功能：写 Feature 寄存器（SET_FEATURES，同步）。
  *   参数：feature_address —— 寄存器地址；feature_data —— 4 字节值。
@@ -367,6 +382,44 @@ nand_result_t nand_fc_set_features(uint8_t feature_address, const uint8_t featur
 
     ASSERT(feature_data != NULL);
     return nand_fc_execute(OP_SET_FEATURES, &request, completion);
+}
+
+/* --------------------------------------------------------------------
+ * nand_onfi_param_print
+ *   功能：把解码后的 ONFI 参数页打三行开机日志（设备信息）。
+ *   参数：info —— 已解码的参数页。
+ *   返回：无。
+ *   实现要点：每行必须 < 192 字符（src/common/log.c 的 message[192] 上限，超长会被
+ *         截断并打 "...[truncated]"）。时序字段只打原值、不打单位后缀——量纲见手册
+ *         Table 11，仓库内未查证。address_cycles 打字节原值（0x23），不解读 nibble 含义。
+ * -------------------------------------------------------------------- */
+static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
+{
+    LOGI("nand: ONFI sig=%c%c%c%c rev=0x%04X model=%s\r\n",
+         (int)info->signature[0],
+         (int)info->signature[1],
+         (int)info->signature[2],
+         (int)info->signature[3],
+         (unsigned int)info->revision,
+         info->model);
+    LOGI("nand: ONFI page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X bitcell=%u\r\n",
+         (unsigned long)info->data_bytes_per_page,
+         (unsigned int)info->spare_bytes_per_page,
+         (unsigned long)info->data_bytes_per_partial_page,
+         (unsigned int)info->spare_bytes_per_partial_page,
+         (unsigned long)info->pages_per_block,
+         (unsigned long)info->blocks_per_unit,
+         (unsigned int)info->logical_units,
+         (unsigned int)info->address_cycles,
+         (unsigned int)info->bits_per_cell);
+    LOGI("nand: ONFI ecc=%ubit prog/pg=%u tprog=%u terase=%u tr=%u tccs=%u timingmodes=0x%04X\r\n",
+         (unsigned int)info->ecc_bits,
+         (unsigned int)info->programs_per_page,
+         (unsigned int)info->tprog_max,
+         (unsigned int)info->tbers_max,
+         (unsigned int)info->tr_max,
+         (unsigned int)info->tccs_min,
+         (unsigned int)info->timing_mode_support);
 }
 
 /* --------------------------------------------------------------------
@@ -389,9 +442,11 @@ nand_result_t nand_fc_set_features(uint8_t feature_address, const uint8_t featur
  *     Step 4 DMA（本配置 no-op，失败仅回退 PIO）
  *     Step 5 RESET（FFh）★启动命令绕过 dispatch，直连 engine
  *     Step 6 READ_ID + 厂商 ID 校验
+ *     Step 6b 读 ONFI 参数页（Table 11）+ 打印设备信息（非致命，失败仅 LOGW）
  *     Step 7 Mode 4 切换（CONFIG_NAND_TIMING_MODE_4=0 时整段编掉）
  *   调用链：main.c:320 → nand_init → {HAL_NAND_Init,
- *          nand_fmc_init, nand_fc_reset, nand_fc_read_id}
+ *          nand_fmc_init, nand_fc_reset, nand_fc_read_id,
+ *          nand_fc_read_parameter_page}
  *   流程图见 docs/design/fc_nand_design.md §22（图 16）。
  * -------------------------------------------------------------------- */
 uint8_t nand_init(void)
@@ -511,6 +566,34 @@ uint8_t nand_init(void)
     {
         LOGE("nand: unexpected ID\r\n");
         return NAND_RESULT_OPERATION_FAILED;
+    }
+
+    /* ── Step 6b: 读 ONFI 参数页并打印设备信息（手册 Table 11，256 字节）──
+     * 同步路径（此刻 armed==0，契约允许）。**非致命**：读失败或签名不符只告警、
+     * 不阻断启动——ID 已匹配 ⇒ 器件是好的，参数页读打嗝不该 brick 开机。 */
+    {
+        uint8_t                page[NAND_ONFI_PARAM_PAGE_SIZE];
+        nand_onfi_param_info_t info;
+
+        result = nand_fc_read_parameter_page(page, &completion);
+        if (result != NAND_RESULT_OK)
+        {
+            LOGW("nand: read parameter page failed, result=0x%02X status=0x%02X\r\n",
+                 (unsigned int)result,
+                 (unsigned int)completion.nand_status);
+        }
+        else if (nand_onfi_parameter_page_decode(page, &info) == 0U)
+        {
+            LOGW("nand: parameter page signature mismatch (got %02X %02X %02X %02X)\r\n",
+                 (unsigned int)page[0],
+                 (unsigned int)page[1],
+                 (unsigned int)page[2],
+                 (unsigned int)page[3]);
+        }
+        else
+        {
+            nand_onfi_param_print(&info);
+        }
     }
 
 #if CONFIG_NAND_TIMING_MODE_4
