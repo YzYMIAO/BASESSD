@@ -36,7 +36,7 @@ Level 2: Data Path ──── 需 fc_init() 初始化池，无 NAND 硬件
     └── flat CW 位图建链几何（cw_bitmap_*，走 FTL 建链入口）
 
 Level 3: FC Lifecycle ── 真实 NAND 硬件执行
-    └── 10 个 block 级场景（init / feature / status / 内部搬移 / 擦写读 / cache / 多 plane / 随机列读 / 加载取数 / META 回读）
+    └── 14 个 block 级场景（init / feature / 链锁 / status / 内部搬移 / 擦写读 / cache / 多 plane / 随机列读 / 加载取数 / META 回读 / 块锁 / 背压流水线）
 ```
 
 > **适配说明（v1.8）**：本层测试在 v13~v21 的接口/策略收敛后做过一轮适配，见 §7 修订历史与 `docs/changelog/fc_ut_adapt_v13_v21.md`。要点：
@@ -321,12 +321,13 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 
 **`internal_data_move` 的 Step 5 按源坐标比对**：copyback 搬的是源页内容——`READ_FOR_INTERNAL_DATA_MOVE` / `PROGRAM_FOR_INTERNAL_DATA_MOVE` 都**不是** page read/write，数据路径不介入、不重铸 ⇒ 目标页的 USER 仍是**源块坐标**的 PAA。故 Step 5 逐页 `test_read_page(dest, …, tag, …)` + `test_verify_page_paa(g_source_data, src, page, …)`（期望取**源块**），**不能**用 `test_read_block(dest)`——后者按入参 block 重算期望（`fc_test_common.c:644-675`）。数据路径侧照常通过：META 低 3 位 = plane/cw（源/目标同 plane、同 cw 枚举）、META 与命令 meta **同页** ⇒ Pass 4 两项都过；CRC 因 USER 原样搬过而一致。⚠ **v34 起 meta 是页 PBA**：读命令声明的 `tag` 必须是**源页 PBA**——META 存的是「内容的身份」而非「内容现在在哪」，搬移不经过数据路径，源页写入时铸的 PBA 原样跟到了目标块；声明目标页 PBA 反而会被 Pass 4 ② 判成「读到了别的页」。
 
-#### 测试用例（13 个，其中 10 条地址随机化）
+#### 测试用例（14 个，其中 10 条地址随机化）
 
 | 测试函数 | 场景 | 验证点 |
 |---|---|---|
 | `init_sequence` | RESET → READ_ID → READ_PARAMETER_PAGE | 初始化序列各步生命周期完成；READ_ID 前 5B / 参数页 ONFI 签名 |
 | `feature_write_read` | GET_FEATURES ×4 → 01h 读-改-写回环 | Feature 写进去的值读得回来（见下） |
+| `chain_priority_lock` | SQ 8 命令链（前 7 MORE / 末条 END）+ 同 LUN HSQ 命令 | **链锁**：链未结束期间该 LUN 的填充权归链所在队列独占——HSQ 插不进链（终值 = HSQ 写的值）；对照 Step 2 证明 HSQ 平时**能**插队（见下） |
 | `status_query` | READ_STATUS / READ_STATUS_ENHANCED | 状态查询生命周期 + CW status |
 | `internal_data_move` | READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE | 源 block → 目标 block 搬移后 64 页逐字节一致 |
 | `block_erase_verify` | ERASE → 全 0xFF 校验 | 擦除后逐页全 0xFF |
@@ -339,13 +340,13 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 | `block_lock_ops` | LOCK_STATUS(25) → LOCK(23) → LOCK_STATUS → ERASE(证据) → UNLOCK_LOW(21) + UNLOCK_HIGH(22) → LOCK_STATUS → ERASE/PROGRAM/READ | 块锁族（**不含**永久锁 24）走通且**可逆**：各 op 无错误位，锁序列后块仍完全可用；「LOCK 是否真挡住擦除」「状态字节怎么变」只打印证据、不断言 |
 | `mixed_pipeline` | 整块先写后读（**流式提交 / 池满即抽干**）：Phase 0 multi-plane 擦块 → Phase 1 流式 PROGRAM 全块 64 页 → Phase 2 流式 READ 全块并逐 CW 校验 | **背压闭环**：连续下发不等完成，每成功下发 4 条（或本条失败）才 polling + 取 CQ，在途命令顶到池上限 ⇒ 建链失败 ⇒ 抽 CQ 腾资源 ⇒ **重试同一条**；每条完成项按 `command_id` 配回槽位、无错误位、READ 逐页一致；两 phase 收尾三池归零 |
 
-> 前 3 条（`init_sequence` / `feature_write_read` / `status_query`）是定长命令序列、地址不参与，**不随机化**（保持 `SINGLE_ITERATION` + `NULL`）；其余 10 条**在用例体内**抽地址（见上「随机地址与种子」节）。每条用例的 setup/teardown 与 Level 2 共用同一份 `test_setup` / `test_tear_down`（`fc_test_common.c`）。
+> 前 3 条（`init_sequence` / `feature_write_read` / `status_query`）是定长命令序列、地址不参与，**不随机化**（保持 `SINGLE_ITERATION` + `NULL`）；`chain_priority_lock` 也是**固定脚本**（feature 地址 `01h` 不参与抽样），用 `MUNIT_TEST_OPTION_NONE` 但体内不抽地址；其余 10 条**在用例体内**抽地址（见上「随机地址与种子」节）。每条用例的 setup/teardown 与 Level 2 共用同一份 `test_setup` / `test_tear_down`（`fc_test_common.c`）。
 >
 > `block_lock_tight`（紧锁定，不可逆锁死整片 NAND）实现保留但以 `#if 0` 隔开、不注册。
 
 #### 流式提交 / 池满即抽干（v1.32 起，v1.33 重写）
 
-前面 12 条用例一律「**发一条 → `fc_service` 轮询 → `fc_poll_completion` 只取一条 → 释放**」——简单、可复现，但**从不给流水线加压**：任何时刻 NAND 层最多 1 条在途。`mixed_pipeline` 换成**连续下发、不等完成**的形态，靠资源耗尽自然形成背压：
+绝大多数用例是「**发一条 → `fc_service` 轮询 → `fc_poll_completion` 只取一条 → 释放**」——简单、可复现，但**从不给流水线加压**：任何时刻 NAND 层最多 1 条在途（`chain_priority_lock` 例外，它一次连投一条 8 命令链以验链锁，但链内仍逐条串行推进）。`mixed_pipeline` 换成**连续下发、不等完成**的形态，靠资源耗尽自然形成背压：
 
 - **流式提交**：逐页 `fc_submit`，**不等完成**；只在「已成功下发 4 条」或「本条下发失败（池满 / SQ 满）」时才做一次 polling + 取 CQ。在途命令因此涨到池上限，完成项又不断回流腾资源——这是真实主控的背压节奏。
 - **粒度 = 整块先写后读**：Phase 0 擦块 → Phase 1 写全块 64 页 → **抽干** → Phase 2 读全块并逐 CW 校验。先写后读（不是读写擦交替）⇒ 读的每一页必然已写完，**无数据冒险**。
@@ -369,6 +370,18 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 >
 > ⚠ **背压是否触发，判据不依赖它**：用例的硬判据是「全块写-读完成 + 逐 CW 校验通过 + 三池归零」；`retry` 只出现在 debug 证据行里。若调深 buffer 池导致不再触顶，用例**仍应绿**——否则改池深就会假红。
 
+#### 链锁用例（v52）
+
+`chain_priority_lock`（`MUNIT_TEST_OPTION_NONE`，注册进 `g_fc_lifecycle_tests[]`、紧跟 `feature_write_read`）验 §2.7 的**链锁**——链未结束期间该 LUN 的填充权归链所在提交队列独占。用 `01h`（Timing mode）观察：`x = 01h`、`y = 02h`（都在手册 Table 15 的 `00h..05h` 内）。记法 `set0`/`get0` = `high_priority=0`（SQ）、`set1`/`get1` = `high_priority=1`（HSQ）。
+
+- **Step 0**：GET 原值，断言 `== 00h`（手册默认模式 0）。
+- **Step 1**：SQ 基线 `set0(x) → get0`，断言读回 `x`。
+- **Step 2（HSQ 真能插队）**：`set0(x) → get0 → set1(y)` 三条一起提交后抽干；`get0` 与终值都是 `x`——`set1(y)` 先落盘、随后被 `set0(x)` 覆盖 ⇒ HSQ 抢先，证明「HSQ 有插入能力」。
+- **Step 3（★ 链锁：链没结束 HSQ 插不进）**：连续 `fc_submit` 8 条 SQ 链（前 7 条 `chain=FC_CHAIN_MORE`、末条 `FC_CHAIN_END`，set/get 交替），`fc_service()` **一次**（前 4 条进 FIFO，`chain_owner=SQ`），再投 HSQ `set1(y)`/`get1(y)`，抽干；`get1` 读到 `y`、**终值 `y`**。
+- **Step 4**：还原 `01h` 原值。
+
+**判据的区分力**：无链锁时 HSQ 的 `y` 会插在链的第 4、5 条之间，链的后 4 条（含 `set0(x)`）会在 `y` 之后执行 ⇒ 终值 **`x`**；有链锁 ⇒ 终值 **`y`**。Step 2 与 Step 3 合起来才说明问题：**HSQ 确实能抢占**（Step 2 读回 `x` 而非 `y`）、**但链一旦开始就抢不进来**（Step 3 终值 `y`）。⚠ **生产路径零影响**——FTL 恒 `FC_CHAIN_END` ⇒ `chain_owner` 恒 NONE，只有本用例（及未来真用链的调用者）会走到新分支。夹具新增 `g_l3_prio_slots[]` + `l3_prio_reset/submit/drain`（按 `command_id` 配回槽位、GET 存值、release，与 `mixed_pipeline` 的 CID 配对同路）。
+
 **`feature_write_read` 的地址一律取自器件手册**（MT29F4G08ABADAWP Table 13）：
 `01h` Timing mode / `80h` 驱动强度 / `81h` R/B# 下拉 / `90h` Array operation mode；
 `00h`、`02h–7Fh`、`82h–FFh` 是**保留段**，读写皆未定义——**不得自造地址**
@@ -386,7 +399,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 
 #### OP 覆盖参考表（附录）
 
-下表列出各 OP 是否有 NAND 状态机前置依赖（`standalone=❌` 表示独立执行时 NAND 可能返回错误，需前置 READ/PROGRAM）。当前 13 个用例各自准备前置状态，不直接依赖本表。
+下表列出各 OP 是否有 NAND 状态机前置依赖（`standalone=❌` 表示独立执行时 NAND 可能返回错误，需前置 READ/PROGRAM）。当前 14 个用例各自准备前置状态，不直接依赖本表。
 
 > **v1.27 起 op 33/29/8/41 被直接点名**：`block_load_fetch` 用 `test_load_page()`（op 33/29，**不带 desc**）显式加载页缓冲，再用 `test_random_data_read()`（op 8/41，带 desc）取数。此前这四个 op 只在生产读路径里**间接**跑到（rewrite + CW 链），现有了直接下发的用例。注意本表的 `standalone` 列描述的是**器件前置依赖**（op 8/41 取数前必须有加载 ⇒ 仍 ❌），与本用例「先加载、再取数」的两段式一致，不因被点名而改变。
 >
@@ -504,7 +517,7 @@ static MunitSuite g_fc_nand_suite = {
 /* test_fc_level2.c — data_path 子套件，共 12 个测试（CONFIG_FC_RAID=1 时 14 个） */
 extern MunitTest g_fc_data_path_tests[];
 
-/* test_fc_level3.c — lifecycle 子套件，13 个 block 级场景用例 */
+/* test_fc_level3.c — lifecycle 子套件，14 个 block 级场景用例 */
 extern MunitTest g_fc_lifecycle_tests[];
 ```
 
@@ -616,7 +629,7 @@ tests/
 │   ├── fc_test_common.h   # 夹具对外声明（含「调了哪些原语 = 开了哪些功能」的步骤级契约）
 │   ├── test_fc_level1.c   # Level 1: 11 个测试（logic 单套件）
 │   ├── test_fc_level2.c   # Level 2: 12 个测试（步骤级 + encode/process_read/raid_recover + cw_bitmap）
-│   └── test_fc_level3.c   # Level 3: 13 个 block 级场景（真实 NAND）
+│   └── test_fc_level3.c   # Level 3: 14 个 block 级场景（真实 NAND）
 ├── integration/
 │   ├── test_fc_nand.c     # 旧硬件集成测试（**未编入 `tests` 目标**；仍引用已删的复数建链入口，待废弃）
 │   └── test_fc_nand.h
@@ -879,6 +892,7 @@ CQ entry 只有 4 个 status slot（`status0..3`），`CW_NUM=4`。超出的 slo
 
 | 日期 | 版本 | 变更描述 |
 |---|---|---|
+| 2026-10-11 | v1.34 | **新增用例 `chain_priority_lock`，并把 §2.7 的「链锁」补进 FC 机制**（见 `docs/changelog/fc_chain_priority_lock_v52.md`）。**src + 测试 + 文档**（`include/fc/fc_scheduler.h`、`src/fc/fc.c`、`tests/unit/test_fc_level3.c`），`src/ftl/**` 一行不动。**① 缺口**：链长于 per-LUN FIFO 深（`FC_SCHEDULER_CHAIN_MAX = NAND_DISPATCH_CHAIN_DEPTH = 4`）时被 `fc_poll_chain_length` 截成多批、分多次填充 pass 下发，而 `fc_poll_fill` 的 `suspended[]` **每趟 `memset` 清零** ⇒ 批与批之间无跨 pass 状态，另一条提交队列（HSQ/SQ）的命令可插进链的已下发部分与未下发部分之间（`nand_dispatch_enqueue` 只保证**一批内**原子）。用户明确这是**需求**：「防止 fifo 里面有要执行的链，但有的链还没加进来，且 HSQ 上有命令，防止被插入」。**② `src/`（约 12 行）**：`fc_scheduler_t` 新增跨 pass 持久的 `uint8_t chain_owner[CH_NUM][CE_NUM][LUN_NUM]`（取值 `fc_chain_owner_t` NONE/SQ/HSQ，`fc_init_internal` 的 `*controller = (fc_t){0}` 天然清零）；`fc_poll_fill_queue` 加 `owner` 形参、三处——**准入**（`chain_owner != NONE && != 本队列` → 回推跳过，**只回推、不置 suspended**，否则把链自己的续批一起锁死）/ **更新**（下发成功后看**批尾** `chain.ids[need-1].config.chain`：`MORE` ⇒ 锁继续转本队列、`END` ⇒ 解锁）/ **失败清锁**（整链注 `NAND_FAIL` 时清 `chain_owner`，免留残锁）。锁的粒度是「**哪条提交队列能喂这个 LUN**」而非「LUN 不能用」：链所在队列照常能喂（续批正从这条队列取），另一条队列一律回推，直到链 END 下发——**发 SQ 链时 HSQ 插不进、发 HSQ 链时 SQ 插不进**。与既有「共享 `suspended` 防优先级倒挂」**正交**。**③ 为什么安全**：FTL 全仓恒 `FC_CHAIN_END`（§23.9）⇒ `chain_owner` **恒 NONE** ⇒ 准入判断恒假、更新恒写 NONE ⇒ **生产路径逐字不变**。**④ `tests/`**：新用例 `chain_priority_lock`（`MUNIT_TEST_OPTION_NONE`，注册进 `g_fc_lifecycle_tests[]`、紧跟 `feature_write_read`）——用 `01h`（Timing mode）观察，`x = 01h`、`y = 02h`；Step 2 验「HSQ 真能插队」（`set0(x)→get0→set1(y)` ⇒ 读回 `x`）；Step 3 ★ 连续提交 8 命令 SQ 链（前 7 条 `FC_CHAIN_MORE`、末条 `FC_CHAIN_END`）→ `fc_service()` 一次（前 4 条进 FIFO、`chain_owner=SQ`）→ 投 HSQ `set1(y)/get1(y)` → 抽干 → **终值 `y`**（无锁时会是 `x`，这就是判据的区分力）。夹具新增 `g_l3_prio_slots[]` + `l3_prio_reset/submit/drain`（按 `command_id` 配回槽位、GET 存值、release，同 `mixed_pipeline` 的 CID 配对）。**用例数 55 → 56**（Level 3 **13 → 14**，其中地址随机化 **10** 不变——本用例是固定脚本）。`make format-check` 过、`make clean && make tests` 0 warning 0 error、`.bin` **234988 B**（v51 是 232260）。**✅ 上板已验**（2026-10-11，seed `0x5a4f21e4`）：`/fc-nand/lifecycle/chain_priority_lock` **[ OK ] [ 597.37 us ]**、完整 `test` **56 of 56 (100%)**、既有 55 条逐字不变。⚠ **前置契约**（只写进注释、未强制）：链成员必须在**同一条提交队列**里**连续入队**——现有链机制本就依赖它，`fc_submit` 一次一条、连续性无人保证 |
 | 2026-10-11 | v1.33 | **`mixed_pipeline` 重写为「流式提交 / 池满即抽干」的背压形态**（见 `docs/changelog/fc_ut_stress_v51.md`）。**纯测试 + 文档**，`src/**` 一行不动。起因：v1.32 的形状（每轮批量提交 `W=8` 条、op 轮转读写擦、各打专用块 → 抽干 → 共 `R=4` 轮）被用户判定**没有施加任何压力**，并给出期望节奏（逐字）：「写page0获取命令下发，polling，没有完成的 / 写page1获取命令下发，polling，没有完成的 / …… 写pagex获取命令下发，polling有命令完成，处理释放 / …… 写pagey获取命令失败没有资源，polling，有命令完成处理释放 / 写pagey获取命令成功，polling，有命令完成处理释放 / …… 退出循环后看还有多少CQ没处理，一起处理了 / 完成一次写block」。**① 两次上板量出两点**——(a) 第一版按此节奏重写但**逐页** polling，上板实测在途只爬到 `buf=104/128`（26 条）、够不着 buffer 阈值 32 条 ⇒ **全程零 `retry`**，背压闭环从未进入（`fc_service` 单次最多交付 1 条完成、且交付过就跳过填充 pass ⇒ 逐页 poll 时在途净增速仅 ≈ 0.2 条/页，128 页也到不了顶）；(b) 用户给最终形状 = **multi-plane、单块、每成功下发 4 个 page（或本条失败）做一次 polling + completions**。两点同时变：命令形态单 plane（4 desc + 4 buf）→ **multi-plane（8 desc + 8 buf）**、一块页数 128（2 plane × 64）→ **64**（plane 由 op 一次覆盖）⇒ buffer 阈值 **32 → 16 条**、在途爬升率 ≈ 0.2 → **≈ 0.84 条/页** ⇒ 64 页内必到顶。**② `tests/`**——夹具把 `test_cmd_build` 拆成 **`test_cmd_try_build`（实体）+ `test_cmd_build`（断言薄壳）**：前者配置校验（坐标越界 / `cw==0` 例外 / multi-plane 掩码覆盖）原样保留**仍是 ASSERT**，但**资源申请失败（`fc_command_alloc` 返 NULL、`ftl_cmd_configure_descriptors` 非 `FTL_OK`）返回 NULL 而非 abort**，且失败时已整条 `fc_command_release`（沿链回收 desc/buffer + 归还命令槽，幂等）⇒ 调用者拿到 NULL 即可、无需再释放、不泄漏半条链；**对既有 54 条零影响**（`test_cmd_build` 行为逐字不变，完整套 55 of 55 印证）。用例 `mixed_pipeline` 整体重写（**注册行不变**，仍在 `g_fc_lifecycle_tests[]`；抽样只留 `l3_block_draw` 一次，不再抽 plane——plane 由 multi-plane op 派生）：新宏 `L3_STRESS_BATCH`(=`CH*CE*LUN`，单次收 CQ 上限) / `L3_STRESS_SLOTS`(=`FC_COMMAND_POOL_DEPTH`，在途登记表容量) / `L3_STRESS_BUDGET`(=`TEST_SERVICE_LOOP_MAX`，每页重试护栏) / `L3_STRESS_POLL_EVERY`(=4)；新件（全 `static`）`g_l3_stress_slots[]` + `l3_stress_slots_reset/alloc/find`（完成项只带 `command_id`，靠 `fc_command_to_id` 配回命令 + 地址）、`l3_stress_try_build(op, addr, plane_bm)`（multi-plane 命令；PROGRAM 填源数据、READ 预填 `0xCC` 残留哨兵）、`l3_stress_reap()`（`fc_poll_completions(buf, batch, &n)` → 逐条配槽 → 断言无 `FC_CW_STATUS_ERROR_MASK` → READ **先** `test_capture_cmd` + `test_verify_page_paa` → **最后才** `fc_command_release`，顺序不能反）、`l3_stress_stream(op, block)`。流程：Phase 0 multi-plane 擦块（硬断言无错误位）→ Phase 1 `l3_stress_stream(PROGRAM)` 写全块 64 页 → Phase 2 `l3_stress_stream(READ)` 读全块 64 页并逐 CW 校验；每页内核 = `while (sent == 0) { try_build → NULL 则只 poll / submit 非 OK 则 release 后 poll / 成功则登记槽位并 `since_poll++`；`if (sent == 0 || since_poll >= 4) { fc_service(); drained += l3_stress_reap(); }`；打逐页证据行；`++guard` 护栏 }`，**重试用同一 `addr`**（测「资源回流后同一条能建成」这条不变式），遍历完再 `while (drained < submitted)` 把剩余 CQ 一起处理完（兑现用户「退出循环后看还有多少CQ没处理，一起处理了」）。**逐页证据**用 `test_trace_detail`（`MUNIT_LOG_DEBUG`）⇒ **默认档输出逐字不变**，`--log-visible debug` 下每页一行 `p19 retry +poll submitted=19 drained=3 \| cmd=16/64 desc=128/256 buf=128/128 sq=15 cq=1`。**③ 上板实测**（2026-10-11，seed `0x5a4f21e4`）——`p00..p18` 只 `sub`、`buf` 从 8 涨到 **128/128**（= 16 条，**与算出的 buffer 阈值精确吻合**；`desc` 只到 `128/256` ⇒ **buffer 是绑定池、desc 不是**）；`p19` 起进入稳态 `retry +poll → sub`，`p20` 因首次 poll 只走填充 pass（无完成交付）而连 `retry` 两次——正是 `fc_poll_internal`「交付过完成就跳过填充」那条语义；两个 phase 收尾都打 `phase done: submitted=64 drained=64 \| cmd=0 desc=0 buf=0 sq=0 cq=0 (应为全 0)` ⇒ **一条不漏全还回去了**。`/fc-nand/lifecycle/mixed_pipeline` **[ OK ] [ 164.47 ms ]**（v50 是 39.48 ms，多出的正是上百次 `retry` + `poll`）、完整 `test` **55 of 55 (100%)**、其余 54 条耗时与 v50 逐条对得上。**用例数不变（仍 55）**。`make format-check` 过、`make clean && make tests` 0 warning 0 error、`.bin` **232260 B**（text 230480 + data 1736 = 232216）。⚠ **`retry` 出现是「设计生效」的唯一证据，但不是硬判据**——本用例硬判据 = 全块写-读完成 + 逐 CW 校验通过 + 三池归零；默认档下即使背压没触发用例也会绿，**要看背压必须显式加 `--log-visible debug`**（刻意：判据不该绑定某个池深的具体数值，否则调池深就假红）。⚠ buffer 阈值 = `FC_BUFFER_POOL_DEPTH / (PLANE_NUM*CW_NUM)` = 16 条，改 `PLANE_NUM`/`CW_NUM`/池深都会挪 `retry` 起点，但**不影响用例是否通过**。⚠ 拓扑无关仍只是「写对了」（`LUN_NUM=1` ⇒ `batch=1`、串行推进）。⚠ 沿用 Level 3 的 30%~70% 窗口（614..1433），`src/ftl/**` 一行不动 |
 | 2026-10-11 | v1.32 | **新增压力用例 `mixed_pipeline` + FC 批量收取 API `fc_poll_completions()`**（见 `docs/changelog/fc_ut_stress_v50.md`）。用户要一条**压力测试**，形状 = **批量提交若干 → 批量收取若干**、读/写/擦**交替**，且收取条数与 `nand_dispatch_poll` 的推进上限对齐。**① `src/` 新增一个公开 API（纯增量，4 处）**——(a) `include/fc/fc_interface.h` 声明、(b) `src/fc/fc_interface.c` 壳（`ASSERT(completions!=NULL)` / `ASSERT(count!=NULL)`）、(c) `include/fc/fc_internal.h` internal 声明、(d) `src/fc/fc.c` 第 10 节实现：`while (n < max_count && fc_completion_queue_pop(&cq, &completions[n]) == FC_STATUS_OK) n++; *count = n; return (n != 0U) ? FC_STATUS_OK : FC_STATUS_QUEUE_EMPTY;`。**关键 = 不新增任何常量**（尤其没有 `FC_POLL_COMPLETION_MAX`）——上限完全由调用方给，兑现用户「**FC 不应该定死这个参数，这个参数由上层指定**」；循环天然被 CQ 占用数封顶（≤ `FC_CQ_DEPTH`），`max_count` 给多大都不越界，`max_count==0` 时 `*count=0`、返回 `QUEUE_EMPTY`，无需特判；返回语义对齐单条版（有取到 = `OK`，一条没取到 = `QUEUE_EMPTY`）；`fc_poll_completion` **原样保留**，对既有路径零影响。**② `tests/`**——夹具把静态 `test_capture_user_paa` **提升为导出** `test_capture_cmd(const fc_command_t*)`（`fc_test_common.c:198`，读路径收尾：FC 已在 `fc_complete_from_nand` 里跑过 `process_read` 原地解码，此处把 desc 的 USER 区逐槽拷回 `g_source_data`；批量读要「先捕获、再校验、最后才 release」，所以必须能在提交-抽取循环里单独调用）；新用例 `mixed_pipeline`（`MUNIT_TEST_OPTION_NONE`，**直接复用同文件的 `l3_rand`/`l3_block_draw`/`l3_plane_draw`**——它们是 `static`，另立文件就得复制一份）注册进 `g_fc_lifecycle_tests[]`（**零注册改动**：不碰 `makefile.mk`、不碰 `ut_main.c`）。形状：`W = NAND_DISPATCH_CHAIN_DEPTH * 2 = 8`（**必须 > per-LUN FIFO 深 4**，否则 SQ 留不住命令、压不出调度行为）、`R = 4` 轮；每轮 `W` 条一次 `fc_submit` 进 SQ（不逐条轮询），op 按 `k` 轮转 `PROGRAM / READ / ERASE`，**三种 op 各打自己的专用块**（读块 Phase 0 已写好、写块只写、擦块只擦）⇒ 同窗口在途无数据冒险；抽取循环 `while (本轮已收 < W) { fc_service(); fc_poll_completions(buf, batch, &n); for j: 按 buf[j].command_id 查槽表 → 断言无 FC_CW_STATUS_ERROR_MASK → READ 则 test_capture_cmd + test_verify_page_paa → fc_command_release（**先 poll 后 release**，兑现「命令不得还在 CQ 里」的契约）}`，超预算（`TEST_SERVICE_LOOP_MAX * W` 量级）未收齐 ⇒ 报「流水线卡住」。**拓扑无关**：`batch = CH_NUM*CE_NUM*LUN_NUM`（= `nand_dispatch_poll` 单次推进上限，`nand_dispatch.c:755` 三层循环全遍历不早退）与 `W` 都是**测试侧编译期表达式**，FC 不知道拓扑、只给机制（弹到上限/空），策略留给上层——对齐行业 NVMe 的 SQ/CQ 由主机驱动、条目靠 CID 配对、控制器不规定主机一次收几条。今天 `batch=1`（`LUN_NUM=1`）、测试仍串行推进，多 die 器件上同一份代码自动变 `batch>1` 真并行（**这正是设计目标，但本板无法验证并行正确性**）。**用例数 54 → 55**（Level 3 **12 → 13**，其中地址随机化 **9 → 10**）。`make format-check` 过、`make clean && make tests` 0 warning 0 error、链接 **232860 B**；**✅ 上板已验**（2026-10-11：`mixed_pipeline` [ OK ]、完整 `test` **55 of 55 (100%)**）。⚠ `fc_service()` 本轮**只要交付过 ≥1 条完成就整段跳过填充 pass**（`src/fc/fc.c:1793`）⇒ 推进节奏是「交付轮 / 填充轮」交替，`W=8>4` 正是为此选的（**刻意**，非缺陷）。⚠ 沿用 Level 3 的 30%~70% 窗口（614..1433），`src/ftl/**` 一行不动 |
 | 2026-10-11 | v1.31 | **块锁族（除永久锁）合并为一条用例 `block_lock_ops`；顺带补两处 src 缺陷**（见 `docs/changelog/fc_ut_block_lock_v49.md`）。用户要求把除永久锁（`OP_BLOCK_LOCK_TIGHT`，24 / 2Ch）以外的块锁 op **合并成一条用例** ⇒ 覆盖 op 21 `BLOCK_UNLOCK_LOW`(23h) / 22 `BLOCK_UNLOCK_HIGH`(24h) / 23 `BLOCK_LOCK`(2Ah) / 25 `BLOCK_LOCK_STATUS`(7Ah)。盘点：这 4 个 op **零生产调用者、零用例**（`grep OP_BLOCK_*` 只命中 op 表、req/completion 表、`onfi_1_0.h` 定义、`test_fc_level3.c` 两个 `#if 0` 死块）。**① `src/` 三文件四处**——(a) `src/fc/fc.c` 的 `fc_build_dispatch_request` **新增「块锁族」分支**（插在 `OP_READ_META` 分支之后、`nand_operation_has_data` 分支之前）：填 `request->plane` + `plane_paa[plane]`，**不置 `cw_bitmap`**。修的是**真缺陷**——此前这 5 个 op 落进末尾 `else`，而 `request` 在 `fc.c:1263` 被 `{0}` 整体清零 ⇒ `plane_paa[0]=0` ⇒ `req_no_data` 算出的 `row[0] = paa_to_nand_row(0)`，而 `ROW_0` 的 uop 就是 `*config->address = request->row[operand]`（`nand_fmc.c`）⇒ **23h/24h/7Ah 永远指向 block 0**，`cmd->paa` 白设；(b) `src/nand/onfi_1_0.c` op 25 的 `.has_data` `1U`→`0U`、`.data_length` `1U`→`0U`——7Ah 的状态字节走 **DQ 总线直读**，不经任何数据缓冲，标 `has_data=1` 是语义谎言（**先例 = v45** 的 op 33/29）；(c) `src/nand/nand_dispatch_tables.c` req 表 `[OP_BLOCK_LOCK_STATUS]`：`req_single` → `req_no_data`（`req_single` 在空掩码下取 `cw_buffers[0]` = 上次残留指针，**先例 = v45 改动 D**）；(d) `src/fc/fc.c` 的 `fc_complete_from_nand` 非 page-read 分支新增一支：`OP_BLOCK_LOCK_STATUS` ⇒ `completion.param.bytes[0] = nand_completion->nand_status;`——修的是**第二个真缺陷**：`nand_fmc_exec_data_out_status`（`nand_fmc.c:399-412`）把字节写进 `completion->nand_status`（**不写 `request->data`**），该值一路传到 FC 但 `fc_complete_from_nand` **从不读它** ⇒ 字节在 FC 边界被丢弃。**② `tests/`**——夹具新增 `test_block_lock_cmd(block, plane, config)`（覆盖 21/22/23，无 desc 链，断言无 `FC_CW_STATUS_ERROR_MASK` 位）与 `test_block_lock_status(block, plane, config)`（op 25，**在 `fc_command_release` 之前**取 `completion.param.bytes[0]` 返回）；新用例 `block_lock_ops`（`MUNIT_TEST_OPTION_NONE`，地址由 `l3_plane_draw`/`l3_block_draw` 抽样，`page = PAGES_PER_BLOCK/2`）八阶段：Phase 0 基线（erase+prog+read+校验，**硬断言**）→ Phase 1/3/6 三次 `7Ah` **证据打印**（解码 Lock#/LT#/LT）→ Phase 2 `2Ah` 锁（硬断言无错误位）→ **Phase 4 再擦一次，只观察不断言**（有错误位 = LOCK 生效、无 = 本板 LOCK 引脚为低致 2Ah 空转）→ Phase 5 `23h`+`24h` 解锁（23h@block 覆盖 0..block、24h@block 覆盖 block..last ⇒ 合起来恢复全器件）→ **Phase 7 再 erase+prog+read+校验 = 本用例唯一硬判据「可逆」**。**断言强度是刻意的**：手册 MT29F4G08 的 LOCK 引脚「上电为低则所有 BLOCK LOCK 命令被禁用；为高则默认锁死全部 block」，而本板现有用例一直能擦除 ⇒ 块未被保护 ⇒ 引脚几乎肯定是**低** ⇒ 2Ah 大概率空转，硬断言「LOCK 挡住擦除」在本板会当场红、且红的原因不是代码错。**③ 清理**：删 `unlock_block()`（:353，被 `test_block_lock_cmd` 取代）与 `#if 0` 死块 `test_unlock_erase`（:864-916，调用了 v32 已删的 helper）；`test_block_lock_tight` 的 `#if 0` **保留**（记录「永久锁为什么不做」）。**用例数 53 → 54**（Level 3 **11 → 12**）。`make format-check` 过、`make clean && make tests` 0 warning 0 error、链接 **229492 B**；**上板未验**。⚠ 影响面已核实为零：这 5 个 op 无生产调用者，A3 分支对其它 op 不可达，A1 只让 `ftl_cmd_needs_desc_chain(25)` 从 1 变 0（FTL 侧无人用 op 25）。⚠ `OP_BLOCK_LOCK_TIGHT`(24) 与 OTP(26/27/28) **不做**——锁到断电/资源不可恢复，同口径 |

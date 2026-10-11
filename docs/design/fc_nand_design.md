@@ -37,6 +37,7 @@
 >   （v14~v16、v18~v22、v25~v26 见各自 changelog 及 §2.10 内联注记——本列表未逐条回填。）
 > - **v33 (2026-10-10)**: **CRC 引擎改走 STM32H743 HAL 驱动**（changelog `fc_crc_hal_driver_v33.md`）。原 `fc_crc_engine.c` 裸写外设寄存器，`FC_CRC_BASE` 写成了 **ADC3** 的 `0x58026000`（真值 `0x58024C00`）⇒ IDR 自检不过 ⇒ `g_crc_ready = 0`（「失败静默继续」）⇒ `fc_crc_compute()` 恒返 0 ⇒ **CRC 校验自始恒通过**。改为新增平台层 `src/platform/stm32h743/crc.{h,c}` 唯一持有 `CRC_HandleTypeDef`（地址由 CMSIS 宏保证）、管时钟、做 IDR 写读回环自检（失败转 `ASSERT`，删除 `g_crc_ready` 静默降级路径）；`src/fc/fc_crc_engine.c` 只留「对哪 512B 算、结果怎么判」，`src/fc/` 保持零 HAL 依赖。**介质格式变更**：此前写入的 CW 里 CRC 字段恒为 0，改后是真值。⚠ 两坑：`stm32h7xx_hal_crc_ex.c` 必须同编（`HAL_CRC_Init` 无条件调 `HAL_CRCEx_Polynomial_Set`）、`ASSERT(HAL_CRC_Init(...))` 在 release 下会把初始化整个裁掉（须先求值再断言）
 > - **v47 (2026-10-11)**: **`fc_command_t.pba` → `.paa`——PBA 退出 FC 层**。SQ 里的 PBA 会经 FC 接口一路带到 FC-NAND 层，而 FC 层在 10+ 处 `pba_to_paa()` 现场转换——PBA 与 PAA **位序不同**（`pba_to_paa` 是真正的字段重排），每处转换都是一次静默算错地址的机会。改为：**FTL 在自己的空间组合 PBA，在边界处 `pba_to_paa()` 一次，赋给 `cmd->paa`**；`src/fc/**` 里 `pba_to_paa()` / `pba_to_*()` 归零。建链入口 `fc_command_configure_descriptor()` 一并改收 `nand_paa_t row_paa`（FC 层最后一个收 PBA 的地方）；`desc->paa` 由 `paa_with_cw(paa_with_plane(row_paa, plane), cw)` 造出（PAA 的 plane 与 cw **不相邻**，v24 的 plane_cw 掩码技巧只在 LBA/PBA 空间有效），`desc->meta` 仍是 LBA 公式、不变。FTL 侧 `ftl_paa_gblock(cmd->paa)` 与旧 `ftl_pba_gblock(cmd->pba)` **逐位等价**（`bst.h` 里前者本就是后者的展开）。**PAA 无 ch/ce ⇒ 路由一律走 `config.ch/ce/lun`**（生产路径与测试本就如此，本版把它写死为结构不变式）。RAID 段（`#if CONFIG_FC_RAID`，恒关）一并机械改 PAA、**无法编译验证**。用例数不变（仍 53）；`make clean && make tests` 0 warning 0 error、链接 225212 B；固件 166708 B（§2.3.1、§6.1；changelog `fc_command_paa_v47.md`）
+> - **v52 (2026-10-11)**: **链锁——链未结束期间该 LUN 的填充权归链所在提交队列独占**。补上一处真实缺口：链长于 per-LUN FIFO 深（`FC_SCHEDULER_CHAIN_MAX = 4`）时被 `fc_poll_chain_length` 截成多批、分多次填充 pass 下发，而 `fc_poll_fill` 的 `suspended[]` 每趟 `memset` 清零 ⇒ **批与批之间无跨 pass 状态**，另一条提交队列（HSQ/SQ）的命令可插进链的已下发部分与未下发部分之间。`fc_scheduler_t` 新增跨 pass 持久的 `uint8_t chain_owner[CH_NUM][CE_NUM][LUN_NUM]`（取值 `fc_chain_owner_t` NONE/SQ/HSQ），`fc_poll_fill_queue` 加 `owner` 形参、三处规则：**准入**（`chain_owner != NONE && != 本队列` → 回推跳过，**不置 suspended**，否则把链自己的续批一并锁死）/ **更新**（下发成功后看**批尾** `chain.ids[need-1].config.chain`——`MORE` ⇒ 锁继续转本队列、`END` ⇒ 解锁）/ **失败清锁**（整链注 `NAND_FAIL` 时清，免留残锁）。锁的粒度是「**哪条提交队列能喂这个 LUN**」而非「LUN 不能用」：链所在队列照常能喂（续批正从这条队列取），另一条队列一律回推，直到链 END 下发。与既有「共享 `suspended` 防优先级倒挂」**正交**。**对生产路径零影响**：FTL 全仓恒 `FC_CHAIN_END` ⇒ `chain_owner` 恒 NONE ⇒ 准入判断恒假、更新恒写 NONE ⇒ 逐字不变（§2.7、§16.9、§23.7、§23.9；changelog `fc_chain_priority_lock_v52.md`）
 > - **2026-10-09（协议查证，非代码版本）**: **multi-plane 不在 ONFI 1.0 里**。逐字读 ONFI 1.0（Rev 1.0, 2006-12-28）Table 14 命令集：cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，**全文 `plane` 一词出现 0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。multi-plane 全部来自器件侧。顺带逐字核对了 Micron「4Gb, 8Gb, and 16Gb x8 NAND Flash Memory」（MT29FxG08xAA, Rev B）的 Table 7 Two-Plane Command Set / §Two-Plane Addressing，并发现两处待办：① 「two-plane 命令族要求 on-die ECC 关闭（Note 4）」的出处对不上（该 PDF 全文无 `on-die`）；② 器件有 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`，本项目 op 表缺此 op（§25.6 前置约束 3、§25.8 风险 2 与风险 8）
 
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
@@ -441,8 +442,25 @@ FC_STATUS_RESOURCE_EMPTY   = -7    ← 状态类
   （整轮等价一次旋转，未取出命令的相对顺序不变）。
 - **共享挂起表**：HSQ 挂起某 LUN 后，SQ 本轮也跳过该 LUN——否则同 LUN 的 SQ 命令会插到
   HSQ 命令之前下发，优先级倒挂。
+- **链锁（v52）**：一条链可能长于 per-LUN FIFO 深（`FC_SCHEDULER_CHAIN_MAX = 4`），被拆成
+  多批、分多次填充 pass 下发。批与批之间若无跨 pass 状态，另一条队列的命令就会插进链的
+  「已下发部分」与「还没下发的部分」之间。故 `fc_scheduler_t` 持有一张**跨 pass 持久**的
+  per-LUN `chain_owner[ch][ce][lun]`（取值 `fc_chain_owner_t`：NONE / SQ / HSQ）：
+  链一旦开始，该 LUN 的**填充权归链所在的那条提交队列独占**，直到链的 END 下发。规则三处
+  （`fc_poll_fill_queue`）：**准入**——`chain_owner != NONE && != 本队列` 的命令回推跳过
+  （**只回推、不置 `suspended`**，置了会把链自己的续批一起锁死）；**更新**——下发成功后看
+  **批尾**的 `chain` 位，`MORE` ⇒ 锁继续（转本队列）、`END` ⇒ 解锁；**失败清锁**——整链注
+  `NAND_FAIL` 时清 `chain_owner`，免留残锁把 LUN 永久锁死。锁的粒度是「**哪条提交队列能喂
+  这个 LUN**」，不是「LUN 不能用」：链所在队列照常能喂（续批正从这条队列取），另一条队列
+  一律回推——**发 SQ 链时 HSQ 插不进、发 HSQ 链时 SQ 插不进**。它与上面那张**共享挂起表**
+  正交（准入只回推、不置 `suspended`）：挂起表管「本趟 room 不足」、每趟清零；链锁管「链
+  没完」、跨趟保留。⚠ **前置契约**：链成员必须在**同一条提交队列**里**连续入队**（现有链
+  机制本就依赖它，`fc_submit` 一次一条、连续性无人保证）。**生产路径恒 NONE**——FTL 全仓恒
+  `FC_CHAIN_END`（见 §23.9）⇒ 准入判断恒假、更新恒写 NONE ⇒ 逐字不变。详见
+  `docs/changelog/fc_chain_priority_lock_v52.md`。
 
-`fc_scheduler_t` 只剩 `{sq, hsq}`；旧的 per-LUN busy 表（`set/clear_busy`、`target_is_busy`）
+`fc_scheduler_t` 只剩 `{sq, hsq, chain_owner[][][]}`（v8 删到 `{sq, hsq}`，v52 加回链锁表）；
+旧的 per-LUN busy 表（`set/clear_busy`、`target_is_busy`）
 与读饥饿保护（`consecutive_write_count`）已删除——"忙"改由 NAND 侧 `nand_dispatch_lun_free()`
 表达。详见 `docs/changelog/fc_nand_per_lun_fifo.md`。
 
@@ -3000,6 +3018,12 @@ fc_command_submit(&command_C);
 
 调度器自动识别 `chain` 标志，dispatch 层自动按序执行。HSQ 在整个链执行期间无法插入该 LUN。
 
+> ⚠ **「HSQ 在整个链执行期间无法插入」这句到 v52 才真正成立**。链长 ≤ `FC_SCHEDULER_CHAIN_MAX`（4）
+> 时，整条链一批进 FIFO，`nand_dispatch_submit_chain` 保证一批内原子，确实插不进；但**链长 > 4**
+> 时会被拆成多批、分多次填充 pass 下发，而 v51 及以前**批与批之间无锁** ⇒ HSQ 可插在批边界上。
+> v52 新增跨 pass 持久的 per-LUN 链锁（`fc_scheduler_t.chain_owner`，见 §2.7）补上这段：
+> 链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发。
+
 ### 16.10 与 Phase D (函数指针表) 的关系
 
 | 子阶段 | §15 函数指针表 | §16 命令链 |
@@ -4186,21 +4210,26 @@ dispatch 轮询：lun_step 逐个 LUN 推进（每 LUN 每轮一条）；ISSUED 
 fc_poll_fill()   ← 一次填充 pass（快照 HSQ/SQ 数量后各扫一遍）
   │
   ├─ 先扫 HSQ（快照数）：与 SQ 同一套链逻辑（HSQ 同样参与链）
+  │     链锁准入（v52）：chain_owner[ch][ce][lun] 非 NONE 且非 HSQ → 回推跳过（不置 suspended）
   │     need = fc_poll_chain_length(hsq, head)   // 链头：连续 chain=1 段，上限 CHAIN_MAX=4
   │     nand_dispatch_lun_free(ch,ce,lun) ≥ need ? → 取出提交
   │     否则该 LUN 本轮挂起（后续同 LUN 命令跳过，含 SQ）
   │
   └─ 再扫 SQ（快照数）：
+        链锁准入（v52）：chain_owner[ch][ce][lun] 非 NONE 且非 SQ → 回推跳过（不置 suspended）
         need = fc_poll_chain_length(sq, head)   // 链头：连续 chain=1 段，上限 CHAIN_MAX=4
         nand_dispatch_lun_free(ch,ce,lun) ≥ need ?
           → 是：单命令 submit / 链 submit_chain（原子追加 need 槽）
+                下发成功后按【批尾】chain 位更新 chain_owner（MORE→本队列 / END→NONE）
           → 否：该 LUN 本轮挂起 + 命令回推队尾（保序）
-        ⚠ FTL 运行时恒 chain = FC_CHAIN_END → need 恒 1
-          （链收集分支仅单测覆盖，见 §23.9）
+        ⚠ FTL 运行时恒 chain = FC_CHAIN_END → need 恒 1 ⇒ chain_owner 恒 NONE
+          （链收集与链锁分支仅单测覆盖，见 §23.9）
 ```
 
 要点：**HSQ 优先只体现在扫描顺序**——它不抢已进 FIFO 的命令（FIFO 严格先进先出）；
 HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避免优先级倒挂）；
+**链锁（v52）**是另一张表（`chain_owner`，跨 pass 持久）——链没结束时，该 LUN 只接受链所在
+队列的命令，另一条队列回推，直到链 END 下发（见 §2.7）；
 "忙"由 `nand_dispatch_lun_free()` 表达，不再有 FC 侧 busy 表；读饥饿保护已删除。
 
 ### 23.8 运行时走读：一条读命令
@@ -4239,6 +4268,8 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 > - `fc_scheduler_set_busy` / `clear_busy` / `busy[][][]` / `consecutive_write_count` 均已删除（见 [§24](#24-fc-层断言判据assert--assume) 判据 4 的历史条目）。
 >
 > 图 9（§4.3）已重绘为遍历模型；图 11 的链收集分支语义改为"连续槽 + 逐条完成"。详见 `docs/changelog/fc_nand_per_lun_fifo.md`。
+
+> 🔁 **v52 更新（2026-10-11，链锁）**：结论仍不变（FTL 恒 `FC_CHAIN_END`，运行时 `chain_owner` 恒 NONE），但补上了一处**与"运行时不走链"无关**的真实缺口——**链长 > 4 时的跨批原子性**。链被拆成多批、分多次填充 pass 下发，v51 及以前批与批之间无锁，另一条提交队列（HSQ/SQ）的命令可插在批边界上。v52 在 `fc_scheduler_t` 加了一张跨 pass 持久的 per-LUN 链锁 `chain_owner[ch][ce][lun]`：链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发（规则见 §2.7、流程图见 §23.7）。**这是「链能力」本身的补强，不改变运行时主干**——FTL 不组链 ⇒ 锁恒 NONE ⇒ 生产路径逐字不变。由 Level 3 用例 `chain_priority_lock` 覆盖（8 命令 SQ 链 + 同 LUN HSQ 命令，判据 = 终值）。详见 `docs/changelog/fc_chain_priority_lock_v52.md`。
 
 ---
 
@@ -4983,7 +5014,7 @@ FC 不能整体下沉到 FTL（这条约束排除了"FC 只留三池、其余全
 | 图 19 | fc_service() 单步全景 | `grep -n "fc_poll_internal\|fc_poll_fail_command" src/fc/fc.c` |
 | 图 20 | nand_dispatch 相位机状态机 | `grep -n "LUN_PHASE_\|nand_dispatch_issued_advance\|nand_operation_is_issue" src/nand/nand_dispatch_internal.h src/nand/nand_dispatch.c` |
 | 图 21 | 多 LUN ISSUE/WAIT/FETCH 时序波形 | `grep -n "wait_start_cycles\|min_busy_us\|delay_dwt_cycles_now" src/nand/nand_dispatch.c src/nand/nand_dispatch_tables.c` |
-| 图 22 | 调度器填充 pass 决策 | `grep -n "fc_poll_fill\|fc_poll_chain_length\|nand_dispatch_lun_free" src/fc/fc.c` |
+| 图 22 | 调度器填充 pass 决策 | `grep -n "fc_poll_fill\|fc_poll_chain_length\|chain_owner\|nand_dispatch_lun_free" src/fc/fc.c` |
 
 ## 附录 B：建议阅读顺序
 
