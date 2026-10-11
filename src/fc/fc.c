@@ -1611,19 +1611,25 @@ static uint8_t fc_poll_chain_length(const fc_submission_queue_t *queue, const fc
  *   功能：扫描单个提交队列一趟，把能放下的命令（含链）提交进 NAND per-LUN FIFO。
  *   参数：controller —— FC 控制器；
  *         queue      —— 待扫描队列（HSQ 或 SQ）；
+ *         owner      —— 本队列的链归属标签（FC_CHAIN_OWNER_SQ / _HSQ）；
+ *                       链锁准入用：某 LUN 上有未结束的链时，只放行链所在队列；
  *         suspended  —— 本轮已挂起 LUN 表（HSQ/SQ 共享，见 fc_poll_fill）；
  *         dispatched —— 累计已提交条数（进出）。
  *   返回：FC_STATUS_OK / IO_ERROR（提交失败，剩余命令留在队列）。
  *   实现要点：
  *     - **按 LUN 保序**：命令 need = 链长；nand_dispatch_lun_free(lun) >= need 才取，
  *       否则该 LUN 本轮挂起（suspended），后续同 LUN 命令一律跳过。
+ *     - **链锁准入**：该 LUN 上有未结束的链（chain_owner != NONE）且链不归本队列 →
+ *       本命令回推跳过。**只回推、不置 suspended**——置了会把链自己的续批一起锁死。
+ *     - **链锁更新**：一批下发后看批尾的 chain 位——MORE 继续占着该 LUN（转本队列），
+ *       END 解锁；下发失败（整链注 NAND_FAIL）也清锁，不留残锁。
  *     - **一次扫描**：按进入时的队列快照数量扫描，扫完即止。
  *     - **顺序保持**：取不走的命令 pop 后回推队尾——扫完整轮等价于一次旋转，
  *       未取出命令的相对顺序不变（同 LUN 的命令因 LUN 挂起必然一起回推，顺序不破）。
  *       链成员连续且逐个回推，链头永远排在成员之前，链序不破。
  *     - 提交失败即中止本轮，剩余命令仍在队列里（未被取出），下轮重试。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *queue, uint8_t suspended[CH_NUM][CE_NUM][LUN_NUM], uint8_t *dispatched)
+static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *queue, uint8_t owner, uint8_t suspended[CH_NUM][CE_NUM][LUN_NUM], uint8_t *dispatched)
 {
     uint16_t total;
     uint16_t k;
@@ -1662,6 +1668,19 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
             (void)fc_submission_queue_push(queue, id);
             continue;
         }
+        /* 链锁准入：该 LUN 的填充权归另一条队列的未结束链 → 本命令回推跳过。
+         * 为什么「只让拥有者队列喂」就够：链成员在队列里连续（见 fc_scheduler.h 的
+         * 前置契约），续批恒是该 LUN 在队列里最老的那几条，按序扫描必然先取到它们；
+         * 后入队的同 LUN 命令都排在链后面，只会在链结束（chain_owner 清）之后才被取。
+         * ⚠ **只回推、不置 suspended**——置了会把链自己的续批也一并锁死（该 LUN 从此
+         *   既不接受另一队列、也不接受本链，活锁）。
+         * 生产路径恒假：FTL 恒 FC_CHAIN_END ⇒ chain_owner 恒 NONE。 */
+        if ((controller->scheduler.chain_owner[ch][ce][lun] != (uint8_t)FC_CHAIN_OWNER_NONE) &&
+            (controller->scheduler.chain_owner[ch][ce][lun] != owner))
+        {
+            (void)fc_submission_queue_push(queue, id);
+            continue;
+        }
 
         need = fc_poll_chain_length(queue, cmd);
         if (nand_dispatch_lun_free(ch, ce, lun) < need)
@@ -1693,8 +1712,18 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
 
         if (dispatch_status != FC_STATUS_OK)
         {
+            /* 下发失败 = fc_poll_dispatch_chain 已把整链注 NAND_FAIL（构建失败或 submit
+             * 失败都如此），这条链已经死了、不会再续批 ⇒ 必须清锁。不清的话该 LUN 会
+             * 一直只认本队列，而那条链又不存在了，等于把 LUN 永久锁死。 */
+            controller->scheduler.chain_owner[ch][ce][lun] = (uint8_t)FC_CHAIN_OWNER_NONE;
             return FC_STATUS_IO_ERROR;
         }
+        /* 链锁更新：看**批尾**（chain.ids[need-1]，本批最后一条）的 chain 位——
+         *   MORE ⇒ 这条链还没完，该 LUN 的填充权继续归本队列（下一批仍从这条队列取）；
+         *   END  ⇒ 链在此收尾，解锁，另一条队列可以喂这个 LUN 了。
+         * 单命令（need == 1）批尾恒 END ⇒ 恒写 NONE，即生产路径只是多一次无副作用的写。 */
+        controller->scheduler.chain_owner[ch][ce][lun] =
+            (controller->command_pool[chain.ids[need - 1U]].config.chain == FC_CHAIN_MORE) ? owner : (uint8_t)FC_CHAIN_OWNER_NONE;
         (*dispatched)++;
     }
 
@@ -1711,6 +1740,10 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
  *     - **HSQ 优先**：先扫 HSQ，再扫 SQ；两个队列走同一套扫描逻辑（含链）。
  *     - **共享 suspended**：HSQ 因 room 不足挂起某 LUN 后，SQ 本轮也跳过该 LUN——
  *       否则同 LUN 的 SQ 命令会插到 HSQ 命令之前下发，优先级倒挂。
+ *     - **链锁独占（跨 pass 持久，与 suspended 正交）**：链一旦开始，该 LUN 的填充权
+ *       归链所在队列独占，直到链的 END 下发——另一条队列的命令一律回推。
+ *       与上一条的区别：suspended 管"本趟 room 不足"、每趟清零；chain_owner 管"链没完"、
+ *       跨趟保留。两者互不影响（链锁准入只回推，不置 suspended）。
  *     - 扫描细节见 fc_poll_fill_queue()。
  * -------------------------------------------------------------------- */
 static fc_status_t fc_poll_fill(fc_t *controller)
@@ -1722,11 +1755,11 @@ static fc_status_t fc_poll_fill(fc_t *controller)
     memset(suspended, 0, sizeof(suspended));
 
     /* ── HSQ 优先：先扫 HSQ，再扫 SQ；同一套扫描逻辑，共享同一张 suspended 表 ── */
-    if (fc_poll_fill_queue(controller, scheduler->hsq, suspended, &dispatched) != FC_STATUS_OK)
+    if (fc_poll_fill_queue(controller, scheduler->hsq, (uint8_t)FC_CHAIN_OWNER_HSQ, suspended, &dispatched) != FC_STATUS_OK)
     {
         return FC_STATUS_IO_ERROR;
     }
-    if (fc_poll_fill_queue(controller, scheduler->sq, suspended, &dispatched) != FC_STATUS_OK)
+    if (fc_poll_fill_queue(controller, scheduler->sq, (uint8_t)FC_CHAIN_OWNER_SQ, suspended, &dispatched) != FC_STATUS_OK)
     {
         return FC_STATUS_IO_ERROR;
     }

@@ -689,6 +689,214 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
 }
 
 /**************************************************************************
+ *  test_chain_priority_lock — 高优先队列 × 命令链：链未结束期间独占该 LUN
+ *
+ *  背景：一条链可能长于 NAND per-LUN FIFO 深（FC_SCHEDULER_CHAIN_MAX = 4），会被拆成
+ *  多批、分多次填充 pass 下发。批与批之间若没有锁，另一条队列（HSQ）的命令就会插进链的
+ *  已下发部分与未下发部分之间。本用例钉死**链锁**：链一旦开始，该 LUN 的填充权归链所在
+ *  队列独占，直到链的 END 下发（见 fc_scheduler.h 的 fc_chain_owner_t、fc.c 的
+ *  fc_poll_fill_queue 准入/更新两处）。
+ *
+ *  流程（x = 01h、y = 02h，都在手册 Table 15 的 00h..05h 内）：
+ *    Step 0  GET 原值，钉住默认模式 0
+ *    Step 1  SQ 单命令基线：set0(x) → get0，读回 x
+ *    Step 2  HSQ 真会插队：set0(x) → get0 → set1(y) 一起提交
+ *              ⇒ y 先落盘、被随后的 set0(x) 覆盖 ⇒ get0 与终值都是 x
+ *    Step 3  ★ 链锁：连续提交 8 条 SQ 链（前 7 条 chain=MORE、末条 chain=END，set/get
+ *              交替），fc_service() 一次让前 4 条进 FIFO（chain_owner 转 SQ）；再往 HSQ
+ *              投 set1(y)/get1(y)（同 LUN）——链没结束 ⇒ 必须被挡到链尾之后；抽干后
+ *              get1 读到 y、终值也是 y
+ *    Step 4  还原 01h 为原值
+ *
+ *  判据为什么有区分力：**没有链锁**时，HSQ 的 y 会插在链的第 4、5 条之间，链的后 4 条
+ *  （含最后一次 set0(x)）在 y 之后执行 ⇒ 终值 **x**。有锁 ⇒ 终值 **y**。
+ *
+ *  ⚠ 还原的 SET 排在断言之前（同 test_feature_write_read）：feature 断电才复位，断言
+ *    abort 时器件不该停在非默认时序。
+ **************************************************************************/
+
+/* ── 本用例的在途登记表 ──
+ * 命令按提交顺序登记；抽干时按 command_id 配回槽位（CQ 完成项只带 id，不带指针），
+ * GET 的读回值写进槽。与 v50 mixed_pipeline 的 CID 配对同路。 */
+#define L3_PRIO_SLOTS (16U)
+
+typedef struct
+{
+    fc_command_t *cmd;
+    uint8_t       is_get; /* 1 = GET（收 param.bytes），0 = SET */
+    uint8_t       out[4]; /* GET 的读回值 */
+} l3_prio_slot_t;
+
+static l3_prio_slot_t g_l3_prio_slots[L3_PRIO_SLOTS];
+static uint8_t        g_l3_prio_used;
+
+static void l3_prio_reset(void)
+{
+    (void)memset(g_l3_prio_slots, 0, sizeof(g_l3_prio_slots));
+    g_l3_prio_used = 0U;
+}
+
+/* 建一条 feature 命令（SET/GET），设 high_priority 与 config.chain 后**提交**，登记进槽表。
+ * 与 l3_feature_get/set 的区别：那两条是**同步**的（建完即 test_submit_wait + release），
+ * 本组用例要先把多条命令按顺序排进队列、再一起抽干，所以「建+提交」与「收」必须分开。
+ * 返回槽位下标。 */
+static uint8_t l3_prio_submit(uint8_t operation, uint8_t addr, const uint8_t in[4], uint8_t priority, uint8_t chain)
+{
+    fc_cmd_conf_t conf = L3_CONF(operation, FC_CRC_ENABLE);
+    fc_command_t *cmd;
+
+    munit_assert_uint32(g_l3_prio_used, <, L3_PRIO_SLOTS);
+
+    conf.chain = (DWORD)chain;
+    cmd        = test_cmd_build(&(nand_addr_t){.block = 0U, .plane = 0U, .page = 0U}, 0U, 0U, &conf);
+
+    cmd->feature_addr  = addr;
+    cmd->high_priority = (DWORD)priority; /* 提交前设——fc_submit 按它选 SQ/HSQ */
+    if ((operation == (uint8_t)OP_SET_FEATURES) && (in != NULL))
+    {
+        (void)memcpy(cmd->param.bytes, in, 4U);
+    }
+
+    munit_assert_int(fc_submit(cmd), ==, FC_STATUS_OK);
+
+    g_l3_prio_slots[g_l3_prio_used].cmd    = cmd;
+    g_l3_prio_slots[g_l3_prio_used].is_get = (operation == (uint8_t)OP_GET_FEATURES) ? 1U : 0U;
+    return g_l3_prio_used++;
+}
+
+/* 抽干槽表里全部命令：fc_service() 反复推进，收到一条完成即按 command_id 配回槽位、
+ * GET 存值、release（feature 无 desc 链，release 只还命令槽）。 */
+static void l3_prio_drain(void)
+{
+    uint8_t outstanding = g_l3_prio_used;
+
+    for (uint32_t i = 0U; (outstanding != 0U) && (i < TEST_SERVICE_LOOP_MAX); i++)
+    {
+        fc_command_status_t completion;
+
+        (void)fc_service();
+
+        while (fc_poll_completion(&completion) == FC_STATUS_OK)
+        {
+            uint8_t matched = 0U;
+
+            munit_assert_uint32(completion.status, ==, FC_CW_STATUS_SUCCESS);
+
+            for (uint8_t j = 0U; j < g_l3_prio_used; j++)
+            {
+                fc_command_id_t id = FC_COMMAND_ID_INVALID;
+
+                if (g_l3_prio_slots[j].cmd == NULL)
+                {
+                    continue;
+                }
+                munit_assert_uint32(fc_command_to_id(g_l3_prio_slots[j].cmd, &id), ==, 1U);
+                if (id == completion.command_id)
+                {
+                    if (g_l3_prio_slots[j].is_get != 0U)
+                    {
+                        (void)memcpy(g_l3_prio_slots[j].out, completion.param.bytes, 4U);
+                    }
+                    munit_assert_int(fc_command_release(g_l3_prio_slots[j].cmd), ==, FC_STATUS_OK);
+                    g_l3_prio_slots[j].cmd = NULL;
+                    outstanding--;
+                    matched = 1U;
+                    break;
+                }
+            }
+            munit_assert_uint32(matched, ==, 1U);
+        }
+    }
+
+    munit_assert_uint32(outstanding, ==, 0U);
+}
+
+static MunitResult test_chain_priority_lock(const MunitParameter params[], void *data)
+{
+    static const uint8_t x[4] = {0x01U, 0U, 0U, 0U}; /* 手册 Table 15 模式 1 */
+    static const uint8_t y[4] = {0x02U, 0U, 0U, 0U}; /* 模式 2 */
+    uint8_t              original[4];
+    uint8_t              final[4];
+    uint8_t              restored[4];
+    uint8_t              hsq_get;
+    uint8_t              sq_get;
+
+    (void)params;
+    (void)data;
+
+    test_trace_begin();
+
+    /* ── Step 0：钉住默认模式 0（手册 "The default timing mode is mode 0"） ── */
+    l3_feature_get(L3_FEATURE_TIMING_MODE, original);
+    munit_assert_uint8(original[0], ==, L3_TIMING_MODE_0);
+
+    /* ── Step 1：SQ 单命令基线 ── */
+    l3_prio_reset();
+    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, x, 0U, (uint8_t)FC_CHAIN_END);
+    sq_get = l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 0U, (uint8_t)FC_CHAIN_END);
+    l3_prio_drain();
+    munit_assert_uint8(g_l3_prio_slots[sq_get].out[0], ==, x[0]);
+    test_trace_summary("step1 SQ 基线: set(%02X) -> get 读回 %02X", (unsigned)x[0], (unsigned)g_l3_prio_slots[sq_get].out[0]);
+
+    /* ── Step 2：HSQ 真会插队（set1(y) 抢在 SQ 的 set0(x) 之前落盘） ── */
+    l3_prio_reset();
+    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, x, 0U, (uint8_t)FC_CHAIN_END);
+    sq_get = l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 0U, (uint8_t)FC_CHAIN_END);
+    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, y, 1U, (uint8_t)FC_CHAIN_END);
+    l3_prio_drain();
+    munit_assert_uint8(g_l3_prio_slots[sq_get].out[0], ==, x[0]); /* y 先落、被 x 覆盖 ⇒ 读回 x */
+    l3_feature_get(L3_FEATURE_TIMING_MODE, final);
+    munit_assert_uint8(final[0], ==, x[0]);
+    test_trace_summary("step2 HSQ 插队: get 读回 %02X（set1(%02X) 先落盘后被 set0(%02X) 覆盖）",
+                       (unsigned)g_l3_prio_slots[sq_get].out[0],
+                       (unsigned)y[0],
+                       (unsigned)x[0]);
+
+    /* ── Step 3：★ 链锁 —— 8 命令 SQ 链（前 7 条 MORE、末条 END），HSQ 插不进 ── */
+    l3_prio_reset();
+    for (uint8_t k = 0U; k < 8U; k++)
+    {
+        const uint8_t chain_bit = (k < 7U) ? (uint8_t)FC_CHAIN_MORE : (uint8_t)FC_CHAIN_END;
+
+        if ((k % 2U) == 0U)
+        {
+            (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, x, 0U, chain_bit);
+        }
+        else
+        {
+            (void)l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 0U, chain_bit);
+        }
+    }
+
+    /* 一次 fc_service()：前 4 条进 per-LUN FIFO（chain_owner 转 SQ），后 4 条留在 SQ。 */
+    (void)fc_service();
+
+    /* 链没结束就往 HSQ 投同 LUN 的 set(y)/get(y) —— 链锁必须把它们挡到链尾之后。 */
+    (void)l3_prio_submit(OP_SET_FEATURES, L3_FEATURE_TIMING_MODE, y, 1U, (uint8_t)FC_CHAIN_END);
+    hsq_get = l3_prio_submit(OP_GET_FEATURES, L3_FEATURE_TIMING_MODE, NULL, 1U, (uint8_t)FC_CHAIN_END);
+
+    l3_prio_drain();
+
+    /* 链的后 4 条（含最后一次 set0(x)）先跑完，HSQ 的 set1(y)/get1(y) 才轮到。 */
+    munit_assert_uint8(g_l3_prio_slots[hsq_get].out[0], ==, y[0]);
+
+    /* ── Step 4：读终值 → **先还原** → 再断言（见用例头 ⚠） ── */
+    l3_feature_get(L3_FEATURE_TIMING_MODE, final);
+    l3_feature_set(L3_FEATURE_TIMING_MODE, original);
+    l3_feature_get(L3_FEATURE_TIMING_MODE, restored);
+
+    munit_assert_uint8(final[0], ==, y[0]); /* ★ 判据：链没被插入 ⇒ 终值是 y 不是 x */
+    munit_assert_uint8(restored[0], ==, original[0]);
+
+    test_trace_summary("step3 链锁: HSQ get 读回 %02X、终值 %02X（无锁时终值会是 %02X=x）",
+                       (unsigned)g_l3_prio_slots[hsq_get].out[0],
+                       (unsigned) final[0],
+                       (unsigned)x[0]);
+
+    return MUNIT_OK;
+}
+
+/**************************************************************************
  *  test_status_query — 状态查询
  *
  *  流程：
@@ -1759,21 +1967,22 @@ static MunitResult test_block_lock_tight(const MunitParameter params[], void *da
  **************************************************************************/
 
 MunitTest g_fc_lifecycle_tests[] = {
-    {     "init_sequence",      test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"feature_write_read", test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {      "status_query",       test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"internal_data_move", test_internal_data_move, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {"block_erase_verify", test_block_erase_verify, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {  "block_write_read",   test_block_write_read, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {   "block_cache_ops",    test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    { "block_multi_plane",  test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    { "block_random_data",  test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {  "block_load_fetch",   test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {   "block_read_meta",    test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {    "block_lock_ops",     test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {    "mixed_pipeline",     test_mixed_pipeline, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {      "init_sequence",       test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { "feature_write_read",  test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {"chain_priority_lock", test_chain_priority_lock, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {       "status_query",        test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    { "internal_data_move",  test_internal_data_move, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    { "block_erase_verify",  test_block_erase_verify, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {   "block_write_read",    test_block_write_read, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {    "block_cache_ops",     test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {  "block_multi_plane",   test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {  "block_random_data",   test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {   "block_load_fetch",    test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {    "block_read_meta",     test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {     "block_lock_ops",      test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {     "mixed_pipeline",      test_mixed_pipeline, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
 #if 0  /* block_lock_tight 被 #if 0 隔开，此处不注册 */
     { "block_lock_tight",    test_block_lock_tight,    test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 #endif
-    {                NULL,                    NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                 NULL,                     NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };
