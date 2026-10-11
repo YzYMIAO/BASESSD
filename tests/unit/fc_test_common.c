@@ -296,8 +296,12 @@ uint8_t *test_cw_scratch(uint8_t idx)
  *  只建链、不提交的原语
  **************************************************************************/
 
-/* 接口与契约见 fc_test_common.h「只建链、不提交的原语」。 */
-fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config)
+/* 接口与契约见 fc_test_common.h「只建链、不提交的原语」。
+ *
+ * 与 test_cmd_build 同配置校验，但**资源申请失败（命令 / desc / buffer 池空）返回 NULL**、
+ * 不 abort——供压力用例「发到池满 → 抽干 CQ 腾资源 → 重试同一条」的背压闭环使用。
+ * 配置错误（坐标越界 / 掩码漏 plane）仍是 ASSERT：那是调用者 bug，不是资源问题。 */
+fc_command_t *test_cmd_try_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config)
 {
     fc_command_t *cmd;
     uint8_t       is_multi;
@@ -328,7 +332,10 @@ fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32
     }
 
     cmd = fc_command_alloc();
-    munit_assert_not_null(cmd);
+    if (cmd == NULL)
+    {
+        return NULL; /* 命令池空 */
+    }
 
     /* 照 ftl_cmd_setup_ppa 的口径：地址信息既进 paa，也镜像进 config.ch/ce/lun。
      * v47：FTL 侧边界会 pba_to_paa 后赋给 cmd->paa，本夹具照抄（paa_from_addr 忽略
@@ -344,8 +351,23 @@ fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32
 
     /* 无数据 op 走到 ftl_cmd_needs_desc_chain 的短路分支（cw_bitmap 不看），
      * desc_id 保持 fc_command_alloc 置的 INVALID。 */
-    munit_assert_int(ftl_cmd_configure_descriptors(cmd, cw_bitmap), ==, FTL_OK);
+    if (ftl_cmd_configure_descriptors(cmd, cw_bitmap) != FTL_OK)
+    {
+        /* 建链中途失败（desc / buffer 池空）：不就地回滚，整条 release 沿链回收
+         * 已挂的 desc/buffer + 归还命令槽，再向上报「建不出来」。 */
+        (void)fc_command_release(cmd);
+        return NULL;
+    }
 
+    return cmd;
+}
+
+/* 接口与契约见 fc_test_common.h「只建链、不提交的原语」。 */
+fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config)
+{
+    fc_command_t *cmd = test_cmd_try_build(addr, cw_bitmap, meta, config);
+
+    munit_assert_not_null(cmd);
     return cmd;
 }
 

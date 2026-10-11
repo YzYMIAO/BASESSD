@@ -206,6 +206,11 @@ uint8_t *test_cw_scratch(uint8_t idx);
  *     见「五」）。 */
 fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config);
 
+/* 与 test_cmd_build 同配置校验，但**资源申请失败返回 NULL**（不 abort）——供压力用例
+ * 「发到池满 → 抽干 CQ 腾资源 → 重试同一条」的背压闭环使用。失败时命令已整条 release
+ * （沿链回收 desc/buffer + 归还命令槽），调用者拿到 NULL 即可，无需再释放。 */
+fc_command_t *test_cmd_try_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config);
+
 /* ── 内联用例用的低层原语 ──
  * 需要**自己拿着命令**做事的用例（Level 3 的 READ_ID / GET_FEATURES / cache 序列 /
  * 内部搬移 / RANDOM_DATA_READ 等）走 test_cmd_build() 建链，再用这里的零件提交 /

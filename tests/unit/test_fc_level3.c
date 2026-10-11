@@ -1340,91 +1340,265 @@ static MunitResult test_block_lock_ops(const MunitParameter params[], void *data
 }
 
 /**************************************************************************
- *  test_mixed_pipeline — 压力：批量提交 / 批量收取 / 读写擦交替（v1.32）
+ *  test_mixed_pipeline — 压力：流式提交 / 资源耗尽即抽干 / 整块先写后读（v1.33）
  *
- *  与其余用例「发一条 → poll 一条」不同，本条**先批量提交 W 条、再分批抽干**，
- *  给调度器 / 队列加压。形状对齐真实主控的 SQ/CQ + CID 配对模型：
- *    ① 提交 W 条（不轮询）→ ② 循环 { fc_service() 推进 ≤ CH*CE*LUN 条;
- *       fc_poll_completions(buf, batch) 收取 ≤ batch 条 } 直到本轮收齐。
+ *  与其余用例「发一条 → poll 一条 → 释放」不同：本条**不等完成**——连续下发，
+ *  **每 4 条（或下发失败时）才做一次 polling + 取 CQ**，在途命令数因此涨到池上限
+ *  （命令 / desc / buffer 池任一耗尽 ⇒ 建链失败），完成项又不断回流腾资源
+ *  —— 这是真实主控的背压节奏，也是本用例的核心判据。
+ *
+ *  形状：
+ *    Phase 0  擦除目标块（multi-plane，一次覆盖两个 plane）
+ *    Phase 1  按 ch→ce→lun→page 遍历整块，流式提交 multi-plane PROGRAM
+ *             每下发 4 条、或本条下发失败（池满 / SQ 满）⇒ polling + 取 CQ 处理释放
+ *             下发成功才进下一页；遍历完再把剩余 CQ 一起处理完
+ *    Phase 2  同样遍历，流式提交 multi-plane READ，逐 CW 校验 PAA（硬判据）
+ *
+ *  ── 为什么用 multi-plane ──
+ *    不遍历 plane：一条命令覆盖 PLANE_NUM 个 plane（每条占 PLANE_NUM*CW_NUM 份
+ *    desc/buffer），遍历维度因此只剩 ch→ce→lun→page。这既压到 multi-plane 那条
+ *    数据路径（全仓此前只有 block_multi_plane 覆盖它），又让每条命令吃更多资源。
  *
  *  ── 拓扑无关 ──
- *    batch = CH_NUM*CE_NUM*LUN_NUM 在**测试里**算、传给 fc_poll_completions ——
- *    FC 侧不写死任何批量常量。本板 LUN_NUM=1 ⇒ batch=1、NAND 最多 1 条在途（串行）；
- *    换多 die 器件同一份代码自动 batch>1 真并行。W = FC_SCHEDULER_CHAIN_MAX*2
- *    （= per-LUN FIFO 深 × 2）⇒ 窗口大于 FIFO 深，SQ 里能压住命令、真正给调度器加压。
+ *    遍历维度全部来自 CH_NUM/CE_NUM/LUN_NUM/PAGES_PER_BLOCK；plane 由 op 的多 plane
+ *    变体一次覆盖。收 CQ 的批量上限 batch = CH*CE*LUN 也在测试里算，FC 侧不写死任何
+ *    批量常量。本板 LUN_NUM=1 ⇒ batch=1、NAND 最多 1 条在途（串行）；多 die 器件同一份
+ *    代码自动展开成真并行。
  *
- *  ── 交替且无数据冒险 ──
- *    窗口内 op 按 PROGRAM/READ/ERASE 轮转，三种 op 各打**自己的专用块**：
- *      blk_read 只被读（Phase 0 已写好内容）／blk_write 只被写／blk_erase 只被擦。
- *    ⇒ 三种 op 同窗口在途互不影响，无数据冒险。读回逐 CW 校验 PAA 图案（硬判据）。
+ *  ── 无数据冒险 ──
+ *    先写完整块、再读回同一块 ⇒ 读的每一页必然已写完（Phase 1 已抽干到空）。
  *
- *  抽样顺序固定为 ① plane ② base block —— 顺序即复现契约。
+ *  抽样：base block 抽一次；ch/ce/lun/page 全遍历（顺序固定 ⇒ 即复现契约）。
  **************************************************************************/
 
-#define L3_STRESS_WINDOW   (FC_SCHEDULER_CHAIN_MAX * 2U) /* 8；> FIFO 深(4) 才压得住 SQ */
-#define L3_STRESS_ROUNDS   (4U)
-#define L3_STRESS_PAGES    (16U) /* blk_read 预写的页数；读命令页号在此范围内循环 */
-#define L3_STRESS_OP_PROG  (0U)
-#define L3_STRESS_OP_READ  (1U)
-#define L3_STRESS_OP_ERASE (2U)
-#define L3_STRESS_OPS      (3U)
-#define L3_STRESS_BATCH    ((uint16_t)(CH_NUM * CE_NUM * LUN_NUM))
-#define L3_STRESS_BUDGET   (TEST_SERVICE_LOOP_MAX * L3_STRESS_WINDOW)
+#define L3_STRESS_BATCH      ((uint16_t)(CH_NUM * CE_NUM * LUN_NUM))
+#define L3_STRESS_SLOTS      (FC_COMMAND_POOL_DEPTH) /* 在途上限不可能超过命令池 */
+#define L3_STRESS_BUDGET     (TEST_SERVICE_LOOP_MAX)
+#define L3_STRESS_POLL_EVERY (4U) /* 每成功下发几条命令做一次 polling + 取 CQ */
+#define L3_STRESS_OP_PROG    (0U)
+#define L3_STRESS_OP_READ    (1U)
 
 typedef struct
 {
-    fc_command_t *cmd;
+    fc_command_t *cmd; /* NULL = 空槽 */
     uint8_t       operation;
     uint16_t      block;
-    uint8_t       plane;
+    uint8_t       plane_bm; /* 该命令覆盖的 plane 位图（本用例恒为 ALL） */
     uint16_t      page;
 } l3_stress_slot_t;
 
-/* 按 completion.command_id 找槽位（cmd 无缓存 id，v15 起由指针派生）。 */
-static l3_stress_slot_t *l3_stress_find(l3_stress_slot_t *slots, uint16_t count, uint16_t command_id)
+/* 在途命令的登记表：容量 = 命令池（在途数不可能超过它），未用槽 cmd == NULL。
+ * 完成项只带 command_id，靠它在这张表里配回命令 + 地址（CID 配对的土办法）。 */
+static l3_stress_slot_t g_l3_stress_slots[L3_STRESS_SLOTS];
+
+static void l3_stress_slots_reset(void)
 {
-    for (uint16_t i = 0U; i < count; i++)
+    for (uint16_t i = 0U; i < L3_STRESS_SLOTS; i++)
+    {
+        g_l3_stress_slots[i].cmd = NULL;
+    }
+}
+
+static l3_stress_slot_t *l3_stress_slot_alloc(void)
+{
+    for (uint16_t i = 0U; i < L3_STRESS_SLOTS; i++)
+    {
+        if (g_l3_stress_slots[i].cmd == NULL)
+        {
+            return &g_l3_stress_slots[i];
+        }
+    }
+    return NULL; /* 表满 —— 只可能是登记逻辑漏了 release，munit_assert 会当场抓住 */
+}
+
+/* 按 completion.command_id 找槽位（cmd 无缓存 id，v15 起由指针派生）。 */
+static l3_stress_slot_t *l3_stress_slot_find(uint16_t command_id)
+{
+    for (uint16_t i = 0U; i < L3_STRESS_SLOTS; i++)
     {
         fc_command_id_t id = FC_COMMAND_ID_INVALID;
 
-        if (slots[i].cmd == NULL)
+        if (g_l3_stress_slots[i].cmd == NULL)
         {
             continue;
         }
-        if ((fc_command_to_id(slots[i].cmd, &id) != 0U) && ((uint16_t)id == command_id))
+        if ((fc_command_to_id(g_l3_stress_slots[i].cmd, &id) != 0U) && ((uint16_t)id == command_id))
         {
-            return &slots[i];
+            return &g_l3_stress_slots[i];
         }
     }
     return NULL;
 }
 
-/* 建一条压力命令（**只建链、不提交**）。PROGRAM 填源数据 / READ 预填 0xCC 哨兵。 */
-static fc_command_t *l3_stress_build(uint8_t operation, uint16_t block, uint8_t plane, uint16_t page)
+/* 建一条压力命令（只建链、不提交）；资源不足返回 NULL（背压信号，命令已内部 release）。
+ * **multi-plane 变体**：一条命令覆盖 plane_bm 里的全部 plane。PROGRAM 填源数据；
+ * READ 预填 0xCC 残留哨兵（读没真发生时能一眼看出）。 */
+static fc_command_t *l3_stress_try_build(uint8_t operation, const nand_addr_t *addr, uint8_t plane_bm)
 {
-    const uint8_t plane_bm = TEST_PLANE_BM(plane);
-    nand_addr_t   addr     = (nand_addr_t){.block = block, .plane = plane, .page = (uint8_t)page};
+    const uint32_t cw_bm = test_plane_cw_bitmap(plane_bm);
+    const uint32_t meta  = (uint32_t)pba_from_addr(addr);
+    fc_command_t  *cmd;
 
-    switch (operation)
+    if (operation == L3_STRESS_OP_PROG)
     {
-        case L3_STRESS_OP_PROG:
+        cmd = test_cmd_try_build(addr, cw_bm, meta, &L3_CONF(OP_PROGRAM_PAGE_MULTI_PLANE, FC_CRC_ENABLE));
+        if (cmd != NULL)
         {
-            fc_command_t *cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bm), (uint32_t)pba_from_addr(&addr), &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE));
-
             test_fill_user_paa(cmd);
-            return cmd;
         }
-        case L3_STRESS_OP_READ:
-        {
-            fc_command_t *cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bm), (uint32_t)pba_from_addr(&addr), &L3_CONF(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, FC_CRC_ENABLE));
+        return cmd;
+    }
 
-            test_memset_read_buffer(cmd);
-            return cmd;
+    cmd = test_cmd_try_build(addr, cw_bm, meta, &L3_CONF(OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT, FC_CRC_ENABLE));
+    if (cmd != NULL)
+    {
+        test_memset_read_buffer(cmd);
+    }
+    return cmd;
+}
+
+/* 从 CQ 取一批完成项并处理：配槽 → 断言无错误位 → READ 先捕获再校验 → 最后 release。
+ * 返回本次处理条数。**必须在 release 之前**捕获读回数据（release 会还 buffer）。 */
+static uint16_t l3_stress_reap(void)
+{
+    fc_command_status_t buf[L3_STRESS_BATCH];
+    uint16_t            n = 0U;
+    uint16_t            j;
+
+    (void)fc_poll_completions(buf, L3_STRESS_BATCH, &n);
+    for (j = 0U; j < n; j++)
+    {
+        l3_stress_slot_t *slot = l3_stress_slot_find((uint16_t)buf[j].command_id);
+
+        munit_assert_not_null(slot);
+        munit_assert_uint32(buf[j].status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+        if (slot->operation == L3_STRESS_OP_READ)
+        {
+            test_capture_cmd(slot->cmd);
+            test_verify_page_paa(g_source_data, slot->block, slot->page, slot->plane_bm);
         }
-        case L3_STRESS_OP_ERASE:
-            return test_cmd_build(&(nand_addr_t){.block = block, .plane = plane}, 0U, 0U, &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE));
-        default:
-            return NULL;
+        munit_assert_int(fc_command_release(slot->cmd), ==, FC_STATUS_OK);
+        slot->cmd = NULL;
+    }
+    return n;
+}
+
+/* 流式跑完一个 phase：遍历 ch→ce→lun→page，逐页下发 multi-plane 命令。
+ * **每成功下发 L3_STRESS_POLL_EVERY 条、或本条下发失败时**才 polling + 取 CQ——
+ * 批量下发才能把在途数顶到池上限；下发成功才进下一页。退出循环后再把剩余 CQ 处理完。 */
+static void l3_stress_stream(uint8_t operation, uint16_t block)
+{
+    const uint8_t plane_bm   = TEST_PLANE_BM_ALL;
+    uint32_t      submitted  = 0U;
+    uint32_t      drained    = 0U;
+    uint32_t      guard      = 0U;
+    uint16_t      since_poll = 0U;
+
+    l3_stress_slots_reset();
+
+    for (uint16_t ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (uint16_t ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (uint16_t lun = 0U; lun < LUN_NUM; lun++)
+            {
+                for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
+                {
+                    const nand_addr_t addr = (nand_addr_t){.ch = (uint8_t)ch, .ce = (uint8_t)ce, .lun = (uint8_t)lun, .block = block, .plane = test_first_plane(plane_bm), .page = (uint8_t)page};
+                    uint8_t           sent = 0U;
+
+                    while (sent == 0U)
+                    {
+                        fc_command_t *cmd    = l3_stress_try_build(operation, &addr, plane_bm);
+                        uint8_t       polled = 0U;
+
+                        if (cmd == NULL)
+                        {
+                            /* 池满：本页还没发出去，本轮只 polling */
+                        }
+                        else if (fc_submit(cmd) != FC_STATUS_OK)
+                        {
+                            /* SQ 满：还命令，本页还没发出去 */
+                            (void)fc_command_release(cmd);
+                        }
+                        else
+                        {
+                            l3_stress_slot_t *slot = l3_stress_slot_alloc();
+
+                            munit_assert_not_null(slot);
+                            slot->cmd       = cmd;
+                            slot->operation = operation;
+                            slot->block     = block;
+                            slot->plane_bm  = plane_bm;
+                            slot->page      = page;
+                            sent            = 1U;
+                            since_poll++;
+                        }
+
+                        /* 每下发 L3_STRESS_POLL_EVERY 条、或本轮没发出去 ⇒ polling + 取 CQ：
+                         * 完成项不断被处理、资源不断回流 */
+                        if ((sent == 0U) || (since_poll >= L3_STRESS_POLL_EVERY))
+                        {
+                            (void)fc_service();
+                            drained += l3_stress_reap();
+                            since_poll = 0U;
+                            polled     = 1U;
+                        }
+
+                        /* 证据档（--log-visible debug）逐条打印各资源池用量：
+                         * sub/retry = 本条下发成功 / 没发出去（池满·SQ 满）；+poll = 本轮做了 polling。
+                         * 能直接看出「发到多少条时开始 retry、retry 后完成项回流把哪个池腾空」。 */
+                        {
+                            fc_resource_stats_t rs;
+
+                            (void)fc_get_resource_stats(&rs);
+                            test_trace_detail("p%02u %s%s submitted=%u drained=%u | cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u cq=%u",
+                                              (unsigned)page,
+                                              (sent != 0U) ? "sub  " : "retry",
+                                              (polled != 0U) ? " +poll" : "      ",
+                                              (unsigned)submitted,
+                                              (unsigned)drained,
+                                              (unsigned)rs.command_used,
+                                              (unsigned)FC_COMMAND_POOL_DEPTH,
+                                              (unsigned)rs.descriptor_used,
+                                              (unsigned)FC_DESCRIPTOR_POOL_DEPTH,
+                                              (unsigned)rs.buffer_used,
+                                              (unsigned)FC_BUFFER_POOL_DEPTH,
+                                              (unsigned)rs.sq_used,
+                                              (unsigned)rs.cq_used);
+                        }
+
+                        munit_assert_uint32(++guard, <, L3_STRESS_BUDGET);
+                    }
+
+                    submitted++;
+                }
+            }
+        }
+    }
+
+    /* 退出循环后：剩余 CQ 一起处理完（本 phase 提交的必须全部完成） */
+    while (drained < submitted)
+    {
+        (void)fc_service();
+        drained += l3_stress_reap();
+        munit_assert_uint32(++guard, <, (L3_STRESS_BUDGET * 4U));
+    }
+
+    /* 收尾证据：本 phase 全部完成并 release 后，命令 / desc / buffer 三池应回到 0
+     * （SQ 也应为 0）。打印而非断言——池没归零是要人看的信号，不是本用例的判据。 */
+    {
+        fc_resource_stats_t rs;
+
+        (void)fc_get_resource_stats(&rs);
+        test_trace_summary("phase done: submitted=%u drained=%u | cmd=%u desc=%u buf=%u sq=%u cq=%u (应为全 0)",
+                           (unsigned)submitted,
+                           (unsigned)drained,
+                           (unsigned)rs.command_used,
+                           (unsigned)rs.descriptor_used,
+                           (unsigned)rs.buffer_used,
+                           (unsigned)rs.sq_used,
+                           (unsigned)rs.cq_used);
     }
 }
 
@@ -1436,113 +1610,26 @@ static void l3_stress_expect_ok(fc_command_status_t completion)
 
 static MunitResult test_mixed_pipeline(const MunitParameter params[], void *data)
 {
-    l3_stress_slot_t    slots[L3_STRESS_WINDOW] = {0};
-    fc_command_status_t batch_buf[L3_STRESS_BATCH];
-    const uint16_t      batch = L3_STRESS_BATCH;
-
     (void)params;
     (void)data;
 
-    const uint8_t  plane    = l3_plane_draw("mixed_pipeline");
-    const uint16_t b_base   = l3_block_draw("mixed_pipeline");
-    const uint32_t span     = (uint32_t)(L3_BLOCK_HI - L3_BLOCK_LO) + 1U;
-    const uint32_t off      = (uint32_t)(b_base - L3_BLOCK_LO);
-    const uint16_t b_read   = b_base; /* 1 次抽样，派生三个专用块 */
-    const uint16_t b_write  = (uint16_t)(L3_BLOCK_LO + ((off + 1U) % span));
-    const uint16_t b_erase  = (uint16_t)(L3_BLOCK_LO + ((off + 2U) % span));
-    const uint8_t  plane_bm = TEST_PLANE_BM(plane);
-    uint32_t       page_wr  = 0U;
-    uint32_t       page_rd  = 0U;
-    uint16_t       r;
-    uint16_t       k;
+    const uint16_t block = l3_block_draw("mixed_pipeline");
 
     test_trace_begin();
-    test_trace_summary("mixed_pipeline plane=%u b_rd=%u b_wr=%u b_er=%u W=%u R=%u batch=%u", (unsigned)plane, (unsigned)b_read, (unsigned)b_write, (unsigned)b_erase, (unsigned)L3_STRESS_WINDOW, (unsigned)L3_STRESS_ROUNDS, (unsigned)batch);
+    test_trace_summary("mixed_pipeline block=%u ch=%u ce=%u lun=%u plane=%u page=%u batch=%u poll_every=%u", (unsigned)block, (unsigned)CH_NUM, (unsigned)CE_NUM, (unsigned)LUN_NUM, (unsigned)PLANE_NUM, (unsigned)PAGES_PER_BLOCK, (unsigned)L3_STRESS_BATCH, (unsigned)L3_STRESS_POLL_EVERY);
 
-    /* ── Phase 0：前置（顺序）——三块各自就位，读块内容已知 ── */
-    l3_stress_expect_ok(test_erase_block(b_read, plane_bm, &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE)));
-    l3_stress_expect_ok(test_erase_block(b_write, plane_bm, &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE)));
-    l3_stress_expect_ok(test_erase_block(b_erase, plane_bm, &L3_CONF(OP_ERASE_BLOCK, FC_CRC_ENABLE)));
-    for (k = 0U; k < L3_STRESS_PAGES; k++)
-    {
-        l3_stress_expect_ok(test_prog_page(b_read, plane_bm, k, &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL));
-        l3_stress_expect_ok(test_prog_page(b_erase, plane_bm, k, &L3_CONF(OP_NORMAL_PROGRAM_PAGE, FC_CRC_ENABLE), NULL));
-    }
+    /* ── Phase 0：整块擦净（multi-plane 一次覆盖两个 plane）——给 Phase 1 一个干净起点 ── */
+    l3_stress_expect_ok(test_erase_block(block, TEST_PLANE_BM_ALL, &L3_CONF(OP_ERASE_BLOCK_MULTI_PLANE, FC_CRC_ENABLE)));
 
-    /* ── Phase 1：压力轮 ── */
-    for (r = 0U; r < L3_STRESS_ROUNDS; r++)
-    {
-        uint16_t submitted = 0U;
-        uint16_t done      = 0U;
-        uint32_t guard     = 0U;
+    /* ── Phase 1：流式写完整块（遍历 ch→ce→lun→page，multi-plane 命令），写完全部抽空 ── */
+    l3_stress_stream(L3_STRESS_OP_PROG, block);
+    test_trace_summary("phase 1 done: PROGRAM 全块 %u 页 × %u plane", (unsigned)PAGES_PER_BLOCK, (unsigned)PLANE_NUM);
 
-        /* ① 批量提交 W 条（不轮询）——op 逐条轮转 */
-        for (k = 0U; k < L3_STRESS_WINDOW; k++)
-        {
-            const uint8_t op = (uint8_t)(((uint32_t)r * L3_STRESS_WINDOW + (uint32_t)k) % L3_STRESS_OPS);
-            uint16_t      block;
-            uint16_t      page = 0U;
+    /* ── Phase 2：流式读回整块并逐 CW 校验（读在写全部落盘之后，无数据冒险） ── */
+    l3_stress_stream(L3_STRESS_OP_READ, block);
+    test_trace_summary("phase 2 done: READ 全块 %u 页 × %u plane 逐 CW 校验通过", (unsigned)PAGES_PER_BLOCK, (unsigned)PLANE_NUM);
 
-            if (op == L3_STRESS_OP_PROG)
-            {
-                block = b_write;
-                page  = (uint16_t)page_wr;
-                page_wr++;
-            }
-            else if (op == L3_STRESS_OP_READ)
-            {
-                block = b_read;
-                page  = (uint16_t)(page_rd % L3_STRESS_PAGES);
-                page_rd++;
-            }
-            else
-            {
-                block = b_erase;
-            }
-
-            slots[k].cmd       = l3_stress_build(op, block, plane, page);
-            slots[k].operation = op;
-            slots[k].block     = block;
-            slots[k].plane     = plane;
-            slots[k].page      = page;
-            munit_assert_not_null(slots[k].cmd);
-            munit_assert_int(fc_submit(slots[k].cmd), ==, FC_STATUS_OK);
-            submitted++;
-        }
-
-        /* ② 分批抽干：每轮 fc_service 推进 ≤ CH*CE*LUN，再收 ≤ batch 条 */
-        while ((done < submitted) && (guard < L3_STRESS_BUDGET))
-        {
-            uint16_t n = 0U;
-            uint16_t j;
-
-            (void)fc_service();
-            (void)fc_poll_completions(batch_buf, batch, &n);
-            for (j = 0U; j < n; j++)
-            {
-                l3_stress_slot_t *slot = l3_stress_find(slots, L3_STRESS_WINDOW, (uint16_t)batch_buf[j].command_id);
-
-                munit_assert_not_null(slot);
-                munit_assert_uint32(batch_buf[j].status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
-                if (slot->operation == L3_STRESS_OP_READ)
-                {
-                    /* 批量读：先捕获（原地解码后的明文）→ 再逐 CW 校验 → 最后 release */
-                    test_capture_cmd(slot->cmd);
-                    test_verify_page_paa(g_source_data, slot->block, slot->page, TEST_PLANE_BM(slot->plane));
-                }
-                test_trace_detail("  slot op=%u b=%u page=%u status=0x%02X", (unsigned)slot->operation, (unsigned)slot->block, (unsigned)slot->page, (unsigned)batch_buf[j].status);
-                munit_assert_int(fc_command_release(slot->cmd), ==, FC_STATUS_OK);
-                slot->cmd = NULL;
-                done++;
-            }
-            guard++;
-        }
-
-        munit_assert_uint32(done, ==, submitted);
-        test_trace_summary("round %u/%u: submitted=%u drained=%u services=%lu", (unsigned)(r + 1U), (unsigned)L3_STRESS_ROUNDS, (unsigned)submitted, (unsigned)done, (unsigned long)guard);
-    }
-
-    test_trace_summary("mixed_pipeline b_rd=%u b_wr=%u b_er=%u: %u 轮 × %u 条（读写擦交替）全部完成、读回逐 CW 校验通过", (unsigned)b_read, (unsigned)b_write, (unsigned)b_erase, (unsigned)L3_STRESS_ROUNDS, (unsigned)L3_STRESS_WINDOW);
+    test_trace_summary("mixed_pipeline block=%u: 整块先写后读（流式提交 / 池满即抽干）通过", (unsigned)block);
 
     return MUNIT_OK;
 }
