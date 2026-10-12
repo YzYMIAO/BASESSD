@@ -132,7 +132,7 @@ src/platform/<soc>/<svc>_port.c   ← 适配：只碰 HAL/MMIO
 分类记号：**(a)** 纯抽象 · **(b)** 纯硬件 · **(c)** 混合（接口/逻辑可移植，实现含硬件） ·
 **(p)** port 适配层（只碰 HAL/MMIO，无可移植逻辑）· **(t)** 构建/工具。
 
-### 2.1 `src/platform/` 顶层与 `bsp/`
+### 2.1 `src/platform/` 顶层（`bsp/` 已删除）
 
 | 文件 | 行数 | 分类 | 说明 | 违反 |
 |---|---:|---|---|---|
@@ -149,10 +149,12 @@ src/platform/<soc>/<svc>_port.c   ← 适配：只碰 HAL/MMIO
 | `delay.c` | 279 | **a** | 毫秒/DWT 忙等逻辑（Stage 2 搬来） | — |
 | `syscalls.c` | 96 | **a** | newlib `_sbrk` + 堆栈守卫（Stage 2 搬来；`mrs %0, msp` 内联汇编取 MSP） | — |
 | `makefile.mk` | 14 | t | 按 `FIRMWARE_PLATFORM` 选 `<soc>` 目录 | — |
-| `bsp/nand_loader.c` | 124 | b | 启动期 NAND 固件加载 + ITCM 初始化（硬编码 MMIO `0x80000000`） | **死代码**（G2）；`TCM_Init` / `NAND_Load_Firmware` 零调用者 |
-| `bsp/system_init.c` | 8 | b | `firmware_system_init()` 空桩 | **死代码**（G2）；零调用者 |
-| `bsp/interrupt.c` | 1 | b | 单行 `#warning` 占位 | **死代码**（G2） |
-| `bsp/drivers/{cache,dma,pcie,timer,uart}.c` | 各 1 | b | 各一行 `#warning` 占位 | **死代码**（G2） |
+
+> **`bsp/` 已删除（2026-10-12）**：原 `src/platform/bsp/` 10 个文件（`nand_loader.c` 124 行、
+> `system_init.c` 8 行空桩、`interrupt.c` 1 行 `#warning`、`drivers/{cache,dma,pcie,timer,uart}.c`
+> 各 1 行 `#warning`、两份 `makefile.mk`）全是**死代码**（G2）——其 `makefile.mk` 从未被任何
+> 构建片段 include，且 `MODULE_INCS` 指向的 `include/platform/bsp` 根本不存在。整目录删除。
+> 注意与 **`<soc>/bsp/`**（`src/platform/stm32h743/bsp/sdram_w9825g6kh.c` 等，**活的**）区分。
 
 > **注（有意保留的例外）**：共享 `fault.c` 的 `fault_dump_stack()` 仍带三个 stm32h743 内存映射
 > 常量（`FAULT_FLASH_BEGIN/END`、`FAULT_DTCM_BEGIN`）与链接符号 `_estack`。换 target 时需下沉为
@@ -218,7 +220,7 @@ Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）�
 | # | 缺口 | 证据 |
 |---|---|---|
 | **G1** | 文档点名的抽象头 `platform/soc.h` **不存在**；真实契约头是 `platform/platform.h`，且 4 个 op 只填 1 个 | `docs/architecture.md:12`；`include/platform/platform.h`；~~`src/platform/stm32h743/platform_ops.c`~~（Stage 2.6 已并入共享 `src/platform/platform.c`） |
-| **G2** | `src/platform/bsp/`（8 个 `.c`，含 124 行 `nand_loader.c`）**是死代码**，`bsp/makefile.mk` 从未被 include | `config.mk:225` `MODULES = common controller fc ftl nand platform`；`src/platform/makefile.mk` 只 include `<soc>/makefile.mk`；全仓无任何文件 include `bsp/makefile.mk` |
+| **G2** | ~~`src/platform/bsp/`（8 个 `.c`，含 124 行 `nand_loader.c`）**是死代码**，`bsp/makefile.mk` 从未被 include~~ **✅ 已删除（2026-10-12）** | `config.mk:225` `MODULES = common controller fc ftl nand platform`；`src/platform/makefile.mk` 只 include `<soc>/makefile.mk`；全仓无任何文件 include `bsp/makefile.mk` |
 | **G3** | 核心模块**直接 include `<soc>` 路径** | `src/nand/nand_fmc.c:31`、`src/nand/nand_mt29f4g08abadawp.c:26` → `platform/stm32h743/nand_dma.h`；`src/main.c:43-45` → `fault.h` / `platform_ops.h` / `stm32h7xx_hal.h` |
 | **G4** | 核心模块**以裸名 include `<soc>` 头**（靠全局 `ALL_INCS` 才编译过） | `src/fc/fc_crc_engine.c:32` → `crc.h`；`src/nand/{nand_fmc,nand_engine,nand_dispatch,nand_mt29f4g08abadawp}.c` → `delay.h`；`include/nand/nand_mt29f4g08abadawp.h:5` → `sys.h`（连带把 HAL/CMSIS 灌进所有 includer） |
 | **G5** | 纯逻辑服务被埋在 SoC 目录（**本身不违规**，但使「服务」与「驱动」难以分开复用） | `btim.h` 的 `btim_scheduler_*`；`watchdog.h` 的 `storage_wdg_*`；~~`usart.c` 的环形缓冲~~（Stage 3 已迁出） |
@@ -238,7 +240,7 @@ Stage 2 / Stage 2.6 后本目录**只剩 port**（薄 HAL 封装或向量表）�
 > - **G7 的 nand 那一半已断**（`CONFIG_NAND_DMA` 已搬进 `include/platform/dma.h`），
 >   `usart.c` 的两处倒挂（`ftl/ftl.h` / `controller/controller.h`）**Stage 3 已消除**——
 >   CLI 整体移到 `src/controller/cli.c`，平台层不再 include 上层头。
-> - **G2**（`bsp/` 死代码）、**G6**（两 target 不对称）未动。
+> - ~~**G2**（`bsp/` 死代码）~~ **✅ 已删除（2026-10-12）**；**G6**（两 target 不对称）未动。
 
 ---
 
@@ -423,7 +425,7 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **Stage 0**（已交付） | 本设计文档 + 订正失实文档（§六） | 文档结论可复算 |
-| **Stage 1**（**已部分落地**，见 §5.1） | ① 在 `include/platform/` 下为 `delay.h` / `crc.h` / `dma.h` 建抽象头（只搬声明，不搬实现；`nand_dma.h` 与 UART 的 `dma.h` 合并为一份 `dma.h`）；② `src/nand/*`、`src/fc/fc_crc_engine.c` 改 include 抽象头；③ 删 `src/platform/bsp/` 死代码（或接线）；④ 构建侧：核心模块的 `MODULE_INCS` 移除 `platform/<soc>` 目录 | 判据 A 的 grep 归零 + `make tests` 逐字不变 |
+| **Stage 1**（**已部分落地**，见 §5.1） | ① 在 `include/platform/` 下为 `delay.h` / `crc.h` / `dma.h` 建抽象头（只搬声明，不搬实现；`nand_dma.h` 与 UART 的 `dma.h` 合并为一份 `dma.h`）；② `src/nand/*`、`src/fc/fc_crc_engine.c` 改 include 抽象头；③ ~~删 `src/platform/bsp/` 死代码（或接线）~~ **✅ 已删除（2026-10-12）**；④ 构建侧：核心模块的 `MODULE_INCS` 移除 `platform/<soc>` 目录 | 判据 A 的 grep 归零 + `make tests` 逐字不变 |
 | **Stage 2**（**已落地**，见 §5.2） | **共享源文件层**：`btim` / `watchdog` / `fault` / `delay` / `syscalls` 五个服务的纯逻辑搬到 `src/platform/*.c`，`<soc>/` 只留 `*_port.c`（机制见 §1.5） | 判据 A/B/D/E 通过 + `make tests` 0 warning + 上板全套通过 |
 | **Stage 2.5**（**已落地**，见 §5.3） | **usart 拆分**：`src/platform/stm32h743/usart.c`（1204 行）拆成共享传输 `src/platform/usart.c` + port `stm32h743/usart_port.c` + CLI `src/controller/cli.c`（消除 G7 倒挂） | 判据 A/B/D/E 通过 + 上板全套通过 |
 | **Stage 2.6**（**已落地**，见 §5.4） | **剩余 7 服务补齐**：`platform_ops` / `crc` / `dma` / `mpu` / `qspi` / `rng` / `sys` 全部拆成共享源 + `*_port.c`（含只做一行转发的 `dma` / `mpu`），HAL 伞头 `sys.h` 改名 `sys_port.h` | 判据 A 归零、B/D 空、E 精确相等 + 0 warning + 上板全套通过 |
@@ -438,7 +440,8 @@ QSPI 的 `g_qspi_handle` / `QSPI_HandleTypeDef *hqspi`、`MPU_Region_InitTypeDef
   `src/fc/fc_crc_engine.c` 的 include 全部走抽象头（裸名）。`src/platform/stm32h743/` 的
   `delay.c` / `dma.c` 补了各自的 `sys.h`（原本靠 `delay.h` / `dma.h` 传递 HAL 类型），
   `usart.c` 就地补 `extern DMA_HandleTypeDef g_dma_handle;`。
-- **③ ④ 未做**：`src/nand/makefile.mk:4` 仍把 `$(INC_ROOT)/platform/stm32h743` 加进
+- **③ 已完成 / ④ 未做**：③（删 `src/platform/bsp/` 死代码）当时搁置、于 2026-10-12 补做（§2.1）；
+  ④ 未做——`src/nand/makefile.mk:4` 仍把 `$(INC_ROOT)/platform/stm32h743` 加进
   `MODULE_INCS` —— 因为 `include/nand/nand_mt29f4g08abadawp.h:5` 仍裸 include `sys.h`
   （只为 `GPIOD` / `GPIO_PIN_6` 两个宏），删这一行会编译不过。**裸名解析仍靠 `-I` 排序**
   （§1.4 的隐式耦合机制本身尚未消除），R/B# 读下沉为平台服务后一并处理 ⇒ **Stage 2**。
@@ -704,8 +707,9 @@ for f in $(grep -rhoE '[a-z_]+_port_[a-z_]+' include/platform/*.h | sort -u); do
   printf '%-42s defs=%s\n' "$f" "$n"
 done
 
-# 命令 F —— G2 复核：bsp/ 是否参与编译
-#   预期：只看到 src/platform/bsp/ 自身的 makefile.mk，无任何 include 它的片段
+# 命令 F —— G2 复核：顶层 bsp/ 是否参与编译
+#   2026-10-12 前：只看到 src/platform/bsp/ 自身的 makefile.mk，无任何 include 它的片段
+#   2026-10-12 后（目录已删）：应无输出（注意 <soc>/bsp 不含子串 "platform/bsp"）
 grep -rn 'platform/bsp' --include=*.mk --include=makefile .
 ```
 

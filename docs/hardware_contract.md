@@ -3,7 +3,7 @@
 This project targets the STM32H743 (Cortex-M7) MCU with an MT29F4G08 NAND
 device, accessed through the FMC bank 3 interface. Core SSD modules never
 access MMIO registers directly; register access lives in
-`src/platform/stm32h743` and `src/platform/bsp`.
+`src/platform/stm32h743`.
 
 > **Status note (2026-10-11).** The rule above holds for FTL / Controller / Common
 > (they use `ssd_platform_ops_t` only), but **not yet for the NAND layer**:
@@ -23,9 +23,10 @@ access MMIO registers directly; register access lives in
 > (`src/main.c` now includes the abstract `"platform.h"`). The HAL umbrella header
 > `include/platform/stm32h743/sys.h` was renamed to `sys_port.h` so the abstract `sys.h`
 > can be HAL-free. The raw MMIO and `HAL_NAND_*` usage above is what remains for Stage 3.
-> Also note `src/platform/bsp` is currently **dead code** (its
-> `makefile.mk` is not included by any build fragment). See
-> `docs/design/platform_abstraction.md` for the full audit and staged plan.
+> Also note `src/platform/bsp` — long registered as **dead code** (its
+> `makefile.mk` was never included by any build fragment) — was **deleted** on
+> 2026-10-12. See `docs/design/platform_abstraction.md` for the full audit and
+> staged plan.
 
 ## Memory layout (AXI_RAM)
 
