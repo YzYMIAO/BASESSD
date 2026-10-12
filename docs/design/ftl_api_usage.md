@@ -8,8 +8,10 @@
 ## 1. FTL 对外 API
 
 FTL 模块通过 `include/ftl/ftl.h` 对外暴露以下接口。
-FTL 对外只提供**非阻塞单页接口**，不提供同步包装。多页请求由 Controller 层拆分后逐个提交 FTL。
-Controller 层通过 `complete_flag` 轮询或 `on_complete` 回调跟踪异步完成状态。
+FTL 对外只提供**非阻塞、长度任意的接口**，不提供同步包装；**plane 配对（访问哪些物理单元）由
+FTL 自行决定**，Controller 只按 FTL 实例边界切连续 run 后提交。一次 `ftl_submit_*` = 一个
+**完成组**，Controller 通过 `complete_flag` 轮询或 `on_complete` 回调跟踪组完成。
+（设计依据与主流对照见 `ftl_host_interface.md`。）
 
 ### 1.1 核心数据结构
 
@@ -34,72 +36,83 @@ struct ftl_context {
 | 接口 | 类型 | 说明 | 备注 |
 |------|------|------|------|
 | `ftl_init()` | 初始化 | 初始化 L2P cache、allocator、journal、Metadata Directory、BBT | 在 `fc_init()` 之后调用 |
-| `ftl_submit_read()` | 异步读 | 非阻塞提交单页读请求（pending 表 + complete_flag + on_complete 回调） | L2P→PBA→FC submit→pending |
-| `ftl_submit_write()` | 异步写 | 非阻塞提交单页写请求 + Journal + watermark + complete_flag + on_complete 回调 | alloc→FC submit→journal→L2P→pending |
-| `ftl_trim()` | 异步取消映射 | 写 FTL_PBA_INVALID 到 L2P Cache，标记 DIRTY | 非阻塞 |
-| `ftl_service()` | 主循环 | 推进 FC 调度 + 统一完成泵 + 后台任务（flush/GC/WL/Checkpoint） | 在 main loop 中频繁调用 |
+| `ftl_submit_read()` | 异步读 | 非阻塞提交读，长度任意（组内自拆 plane） | L2P→PBA→FC submit→pending |
+| `ftl_submit_write()` | 异步写 | 非阻塞提交写，长度任意 + Journal + watermark | alloc→FC submit→journal→L2P→pending |
+| `ftl_flush()` | 落盘 | 落已持久化映射：L2P cache 写回 + journal 尾页刷出 | 同步阻塞 |
+| `ftl_trim(ftl,lba,count)` | 取消映射 | 取消 `[lba, lba+count)` 映射（写 FTL_PBA_INVALID 到 L2P Cache，标记 DIRTY） | 同步完成 |
+| `ftl_service()` | 主循环 | 推进 FC 调度 + 统一完成泵 + **Phase 2.5 补发子操作** + 后台任务 | 在 main loop 中频繁调用 |
 
 **注**：
-- FTL 提供**单页和多 Plane 接口**（pages=1=单 Plane 2048 字节，pages=2=双 Plane Multi-Plane 4096 字节）。多 LBA 请求由 Controller 层拆分配对后提交。
+- **长度交给 FTL**：`ftl_io_request_t.count` 为连续 LBA 数，FTL 自行决定单/双 plane 拆分（`count=5` → 2+2+1，末条单 plane）。旧 `pages` 字段已删——plane 配对属「访问哪些物理单元」，是 FTL 策略，不属 HIL。
+- **组完成**：一次 `ftl_submit_*` = 一个组，组内可含多个 FC 子操作；通知字段只在**全部子操作完成后触发一次**（详见 §1.4）。
 - FTL 不提供同步包装（删除 `ftl_read`/`ftl_write`）。
 - Controller 层通过 `ssd_controller_submit()` 异步提交请求，通过 `ssd_controller_is_complete()` 或 `on_complete` 回调跟踪完成。
 
 ### 1.3 函数签名
 
 ```c
-/* ftl.h — 当前签名（v0.29：ftl_io_request_t 结构体传参，8 形参 → 2） */
+/* ftl.h — 当前签名 */
 
 #include "common/ftl_types.h"  /* ftl_io_request_t, pending_cb_t */
 
 /*
- * ftl_submit_read - 非阻塞提交读请求（单页或多 Plane）
+ * ftl_submit_read - 非阻塞提交读请求（长度任意）
  *
  * @param ftl  FTL 上下文
- * @param req  IO 请求描述（见 ftl_io_request_t 定义，§1.1）
- *             req->pages  = 1 → 单 Plane 读（2048B）
- *             req->pages  = 2 → 双 Plane Multi-Plane 读（4096B，req->lba 须为偶数）
- * @return FTL_OK 成功提交，FTL_ERROR 失败
+ * @param req  IO 请求描述（见 ftl_io_request_t 定义）
+ *             req->count = 连续 LBA 数，FTL 自拆单/双 plane（2+2+1…，末条单 plane）
+ *             数据缓冲长度 = req->count × FTL_READ_USER_SIZE
+ * @return FTL_OK 已受理（含部分子操作排队待发）；FTL_ERROR 永久失败
+ *         ⚠ 返回 FTL_OK 不代表已完成，完成走组通知（§1.4）
  */
 ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req);
 
 /*
- * ftl_submit_write - 非阻塞提交写请求（单页或双 Plane Multi-Plane）
+ * ftl_submit_write - 非阻塞提交写请求（长度任意）
  *
  * @param ftl  FTL 上下文
- * @param req  IO 请求描述
- *             req->pages  = 1 → 单 Plane PROGRAM（2048B）
- *             req->pages  = 2 → 双 Plane Multi-Plane PROGRAM（4096B，req->lba 须为偶数）
- * @return FTL_OK 成功提交，FTL_ERROR 失败
+ * @param req  IO 请求描述（同上）
+ * @return FTL_OK 已受理；FTL_ERROR 永久失败
  */
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);
+
+/*
+ * ftl_flush - 落已持久化映射（L2P cache 写回 + journal 尾页刷出）
+ */
+void ftl_flush(ftl_context_t *ftl);
+
+/*
+ * ftl_trim - 取消 [lba, lba+count) 的 L2P 映射（同步完成、非阻塞）
+ */
+void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count);
 ```
 
-**`ftl_io_request_t` 完整定义**（`include/common/ftl_types.h`，v0.29 起 pending 表按值嵌入）：
+**`ftl_io_request_t` 完整定义**（`include/common/ftl_types.h`）：
 
 ```c
 typedef struct
 {
     uint64_t               lba;             /* Host 逻辑地址（NVMe 协议宽度） */
     void                  *buffer;          /* 读：caller 数据 buffer；写：数据源 */
-    uint32_t               pages;           /* 页数：1=单 Plane，2=双 Plane Multi-Plane */
-    volatile uint8_t      *complete_flag;   /* 非 NULL 时 NAND 完成后置 1（异步跟踪） */
-    volatile ssd_status_t *status_out;      /* 非 NULL 时完成 handler 写入 OK/IO_ERROR */
-    pending_cb_t           on_complete;     /* 完成后回调（可选，Controller 子请求聚合） */
+    uint32_t               count;           /* ★ 连续 LBA 数（= HIL block_count）；FTL 自行决定单/双 plane 拆分 */
+    volatile uint8_t      *complete_flag;   /* 非 NULL 时**全部子操作**完成后置 1（异步跟踪） */
+    volatile ssd_status_t *status_out;      /* 非 NULL 时组完成后写入 OK/IO_ERROR（粘性聚合） */
+    pending_cb_t           on_complete;     /* 组完成后回调一次（可选，Controller 子请求聚合） */
     void                  *on_complete_ctx; /* 回调上下文（ssd_request_t*） */
 } ftl_io_request_t;
 ```
 
 > **字段语义（消费级 DRAM-less）**：
-> - `buffer`：读 = 数据写回处（completion handler `ftl_cmd_read_data` → `pending->io.buffer`）；
->   写 = 数据源（`ftl_cmd_write_data(cmd, req->buffer, data_size)`）
-> - `pages`：决定 OP 码（单 Plane `OP_NORMAL_*` / 双 Plane `OP_*_MULTI_PLANE`）与 `data_size = FTL_READ_USER_SIZE × pages`
-> - `complete_flag` + `status_out`：controller 异步跟踪双通道（完成信号 + 成功/失败）
+> - `buffer`：读 = 数据写回处；写 = 数据源（`ftl_cmd_write_data(cmd, buffer, data_size)`）
+> - `count`：连续 LBA 数，FTL 内部按 2 个一组拆成 FC 子操作；**单/双 plane 由 FTL 决定**，
+>   不暴露给上层（旧 `pages` 字段已删）。子操作的 `data_size = FTL_READ_USER_SIZE × planes`
+> - `complete_flag` + `status_out`：controller 异步跟踪双通道（完成信号 + 成功/失败），
+>   **仅组完成后触发一次**
 > - `on_complete` + `on_complete_ctx`：Controller 子请求聚合（`on_sub_complete` 递减 `sub_remaining`）
 
-> **v0.29**：`ftl_submit_read/write` 形参由 8 个散落参数收敛为 `(ftl, req)` 结构体传参；
-> `ftl_pending_req_t` 按值嵌入 `ftl_io_request_t io`（`pending_add` 形参 12→6），
-> `pending_cb_t` 从 `pending.h` 迁至 `ftl_types.h` 打破循环 include；
-> `ssd_request_t` 增加 `ftl_io_request_t io` 复用模板（单块直接填，拆分循环内只改 lba/buffer/pages）。
+> **接口演进**：v0.29 `ftl_submit_read/write` 形参由 8 个散落参数收敛为 `(ftl, req)` 结构体传参；
+> **v0.58（策略下沉）** `pages` → `count`（长度交给 FTL，plane 配对离开 HIL）、新增 `ftl_flush`、
+> `ftl_trim` 加 `count`、引入**组完成语义**。设计依据见 `ftl_host_interface.md`。
 
 **`ftl_init_params_t` 完整定义**（`include/ftl/allocator.h`，v0.30 起 ftl_init / allocator_init 共用）：
 
@@ -124,20 +137,30 @@ typedef struct
 > `ftl_init` 后遍历 BST 非坏块 `allocator_free_block` 回填（allocator_init 不填、bbt 只标坏块）。
 > 启动示例见 §1.7（v0.37 多维生产版）。
 
-### 1.4 异步完成机制
+### 1.4 异步完成机制（组完成）
 
-所有异步请求通过三种机制通知完成：
+**组（group）**：一次 `ftl_submit_*`（= 一条 host 请求）= 一个组，组内可含多个 FC 子操作
+（每个子操作 = 一条 FC 命令 = 一个 pending 槽）。**通知字段只在全部子操作完成后触发一次**，
+且顺序固定：先置 `complete_flag`，再写 `status_out`，最后调 `on_complete`。
 
-1. **`complete_flag` 轮询**：completion handler 置位 `volatile uint8_t` 标志，caller 在主循环中轮询
-2. **`status_out` 状态码**：completion handler 写入 `SSD_STATUS_OK` 或 `SSD_STATUS_IO_ERROR`，与 `complete_flag` 配合使用
-3. **`on_complete` 回调**：completion handler 在 `complete_flag` 置位后调用回调（用于 Controller 子请求计数器聚合）
+三种通知机制：
 
-完成时序：
-- **读请求**：NAND READ 完成 + 数据拷贝到 caller buffer → `status_out=OK` → `complete_flag=1` → `on_complete(ctx)`
-- **写请求**：NAND PROGRAM 完成后 → `status_out=OK` → `complete_flag=1` → `on_complete(ctx)`
-- **PBA 无效（读）**：直接 memset 零 → `status_out=OK` → `complete_flag=1` → `on_complete(ctx)` (无需 NAND 操作)
-- **NAND 失败**：读返回全零 / 写标记坏块 → `status_out=IO_ERROR` → `complete_flag=1` → `on_complete(ctx)`
-- **TRIM**：立即完成（只改 L2P Cache，不写 NAND）
+1. **`complete_flag` 轮询**：组内**全部**子操作完成后置位 `volatile uint8_t` 标志，caller 在主循环中轮询
+2. **`status_out` 状态码**：写入**粘性聚合**状态——组内任一子操作失败 ⇒ 整组 `SSD_STATUS_IO_ERROR`
+3. **`on_complete` 回调**：在 `complete_flag`/`status_out` 之后调用一次（Controller 子请求计数器聚合）
+
+完成时序（组级）：
+- **读组**：各子操作 NAND READ 完成 + 数据拷贝到各自 buffer slice → 全部完成后 `status_out=OK` →
+  `complete_flag=1` → `on_complete(ctx)`
+- **写组**：各子操作 NAND PROGRAM 完成后 → 同上
+- **PBA 无效（读子操作）**：直接 memset 零 → 视同该子操作已同步完成（无需 NAND 操作）
+- **NAND 失败**：读返回全零 / 写标记坏块 → 该子操作置 IO_ERROR → 组聚合为 IO_ERROR
+- **TRIM**：`ftl_trim` 同步完成（只改 L2P Cache，不写 NAND），不走组机制
+
+> **背压（`FTL_AGAIN`）**：`ftl_submit_*` 受理后，子操作可能因 FC 资源暂空（命令/desc/buffer
+> 池满、SQ 满、pending 表满）而**排队待发**，由 `ftl_service` Phase 2.5 补发。因此
+> `ftl_submit_*` 返回 `FTL_OK` 仅表示**已受理**，不代表已完成。连续背压且无进展超过
+> `FTL_DRAIN_STALL_MAX`（8 轮）⇒ 判真卡死，弃未下发者并报 IO_ERROR。
 
 ### 1.5 Completion Table（统一完成路由）
 
@@ -201,24 +224,48 @@ ftl_submit_write(ftl, &req)
         complete_flag = 1
 ```
 
-**Pending 表新增字段**（v0.29 起 `ftl_io_request_t io` 按值嵌入，写专用字段保留在此层）：
+**Pending 表条目**（v0.58 起**不再**内嵌 `ftl_io_request_t`——子操作字段显式化，避免 `count`
+（host run 长）与 `planes`（子操作 plane 数）共用一个字段产生二义）：
 
 ```c
 typedef struct {
-    uint16_t           used;              /* 1: 槽位占用 */
-    uint16_t           command_id;        /* FC command_id */
-    ftl_io_request_t   io;                /* ★ 嵌入请求描述（lba/buffer/pages/通知/回调） */
+    uint16_t used;               /* 1: 槽位占用 */
+    uint16_t command_id;         /* FC command_id */
+    uint16_t group;              /* ★ 所属完成组 ftl->groups[] 下标 */
+    uint8_t  op;                 /* ftl_pending_op_t：完成路径判别（读/写），显式给出不可反推 */
+    uint8_t  planes;             /* 本子操作页数 1/2 */
+    lba_t    lba;                /* 子操作起始 local LBA */
+    void    *buffer;             /* 子操作缓冲（= 组基缓冲 + 2k × FTL_READ_USER_SIZE） */
     /* ↓↓↓ 写完成确认/回滚（写专用，读请求时无效） ↓↓↓ */
-    nand_pba_t         old_pba;           /* 写前旧 PBA（journal/回滚用） */
-    nand_pba_t         new_pba;           /* 新分配的 PBA（坏块标记用） */
-    ftl_context_t     *ftl;               /* completion handler 访问 ftl */
-    uint8_t            cache_intermediate;/* 1: Cache Program 中间页（15h），跳过 L2P/Journal */
+    nand_pba_t old_pba;            /* plane0 写前旧 PBA（journal/回滚用） */
+    nand_pba_t new_pba;            /* plane0 新分配 PBA（坏块标记用） */
+    nand_pba_t old_pba1;           /* planes=2 时 plane1 旧 PBA（双页簿记） */
+    nand_pba_t new_pba1;           /* planes=2 时 plane1 新 PBA（Policy B：plane1 块独立） */
+    uint8_t    cache_intermediate; /* 1: Cache Program 中间页（15h），跳过 L2P/Journal */
 } ftl_pending_req_t;
 ```
 
-> **v0.29**：`io` 按值嵌入（`pending_add` 内 `g_pending[i].io = *req` 一次性拷贝 7 字段），
-> `pending_add` 形参 12→6（`(cmd_id, io, old_pba, new_pba, ftl, cache_intermediate)`）；
-> 位域全部展开为普通字段（`used:1/command_id:15/pages:2/cache_intermediate:1`）。
+**完成组 `ftl_io_group_t`**（`ftl->groups[FTL_GROUP_MAX]`，`FTL_GROUP_MAX = FTL_PENDING_MAX = 32`）：
+
+```c
+typedef struct {
+    uint8_t  used, op, stalls;   /* 占用 / 读或写 / 连续无进展 drain 轮数（背压预算） */
+    uint16_t outstanding;        /* 已下发、未完成的子操作数（被 FC buffer 池限到 ~16） */
+    uint32_t total, next;        /* 子操作总数 = ceil(count/2) / 下一个待下发序号（uint32：count 可达 1M） */
+    uint64_t lba;                /* host 起始 LBA */
+    void    *buffer;             /* host 基缓冲 */
+    uint32_t count;              /* host 连续 LBA 数 */
+    ssd_status_t agg_status;     /* 粘性错误：任一子操作失败 → 非 OK */
+    volatile uint8_t      *complete_flag;   /* 全部子操作完成后置 1 */
+    volatile ssd_status_t *status_out;      /* 组完成后写入 agg_status */
+    pending_cb_t           on_complete;     /* 组完成后回调一次 */
+    void                  *on_complete_ctx;
+} ftl_io_group_t;
+```
+
+> **v0.58**：`ftl_io_request_t io` **不再内嵌**（`pending_add` 形参改为显式 `group/planes/lba/buffer/…`）；
+> 新增 `group` 关联到完成组。组管理 `pending_group_alloc/free/maybe_complete/count` 在 `pending.c`。
+> `pending_group_maybe_complete` 先发通知、**最后**才 `used=0`（回调可能重入提交）。
 
 **坏块标记两阶段化**：
 
@@ -231,21 +278,23 @@ typedef struct {
 
 ### 1.7 Pending 表完整数据结构
 
-多 LBA 请求（`block_count > 1`）由 Controller 层 **`request.c`** 拆分为 N 个单页子请求，按序提交 FTL。
+**v0.58 起**：多 LBA 请求的**长度交给 FTL**——Controller 只在**实例边界**切连续 run，每个 run
+一次 `ftl_submit_*(count=run_len)`；FTL 内部再把 run 按 2 个 LBA 一组拆成 FC 子操作
+（`total = ceil(count/2)`，末条奇数尾为单 plane）。**plane 配对彻底离开 HIL**。
 
 **数据流**：
 
 ```
 ssd_controller_submit(req{block_count=N})
-  ├── block_count == 1 → 直通 ftl_submit_read/write(&req->io)（单页）
-  └── block_count > 1  → ssd_request_split()
-        ├─ request->io.lba    = start_lba + i;      // 循环内复用 io 模板
-        ├─ request->io.buffer = buf + i*2048;
-        ├─ request->io.pages  = (成对) 2 / (奇数尾) 1;
-        ├─ ftl_submit_read(ssd_controller_route(ctrl, io.lba), &request->io)  // v0.36 按 LBA 路由
-        ├─ ...
-        └─ 每个完成 → ftl_handle_completion
-              → io.on_complete() → sub_remaining--
+  ├── buffer_size 校验：block_count × FTL_READ_USER_SIZE ≤ buffer_size，否则拒
+  └── ssd_request_split()（READ/WRITE 统一路径，含单块）
+        ├─ sub_remaining = ssd_split_count()      // ★ 先精确预统计 run 段数（同步完成会立即递减）
+        ├─ 逐 run：
+        │    request->io.lba    = run_start;
+        │    request->io.buffer = base + (run_start - start_lba)*2048;
+        │    request->io.count  = run_len;        // ★ 长度交给 FTL，plane 拆分由 FTL 决定
+        │    ftl_submit_read/write(ssd_controller_route(ctrl, run_start), &request->io)
+        └─ 每个 run（= 一个组）完成 → on_sub_complete → sub_remaining--
               → sub_remaining == 0 → req->complete_flag = 1
 ```
 
@@ -263,17 +312,16 @@ static void on_sub_complete(void *ctx)
 
 int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
 {
-    /* v0.36：子请求数预统计（ssd_split_count），替代硬公式 (block_count+1)/2：
-     *   - 连续 LBA 同实例才配对 pages=2（ssd_split_use_multi_plane），
-     *     跨 region/实例边界切实例时降级单 Plane → 实际子请求数 > 公式值
-     *   - 未映射读会同步完成（ftl_submit_read PBA INVALID 路径），必须先计数后提交
-     *   计数不足 → sub_remaining 永不归零 → 父请求 complete_flag 永不置位（host 悬挂） */
+    /* 子请求数 = 实例边界切出的 run 段数（ssd_split_count），**必须**先于提交精确置位：
+     *   - 未映射读会同步完成（组通知同步触发 on_sub_complete）→ 计数为 0 时提前置完成
+     *   - 中途提交失败时把 sub_remaining 收敛到"实际在飞数"（= submitted），
+     *     避免父请求提前完成（旧实现直接置 complete_flag 即此缺陷）。 */
     request->sub_remaining = ssd_split_count(controller, request);
     ...
 }
 ```
 
-写请求类似，但传 `complete_flag=NULL`（子请求用回调聚合，不用轮询）。
+写请求同理（`complete_flag=NULL`，子请求用 `on_complete` 聚合，不用轮询）。
 
 **结构体变化** (`ssd_request_t`)：
 
@@ -715,55 +763,78 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
   └── 计数 submitted（本轮新提交的 NAND 命令数）
 
   Phase 2 ── 处理完成回调
-  ├── completion_table_drain()（统一完成泵，v0.19）
+  ├── completion_table_drain()（统一完成泵）
   └── ftl_handle_completion() 按 module 路由
-        ├── FTL      → 查 pending 表 → 读数据（pending->io.buffer）/ release
+        ├── FTL      → 子操作簿记（数据拷贝到该 slice）→ 组聚合 → pending_remove
+        │              → 组可能完成（发一次组通知）
         ├── METADATA → release
         └── GC       → release
 
-  Phase 3 ── 三级后台模式
-  ├── IDLE 模式 (submitted == 0):        全力后台
+  Phase 2.5 ── 补发 host 子操作（★ 新增）
+  └── 遍历本实例各未完成组 → ftl_drain_group()
+        完成先腾出 FC 资源（命令/desc/buffer 池、SQ 空位），再补 host 子操作，
+        保证 host IO 优先于 Phase 3 后台。子操作三态：
+          FTL_OK    → 推进 next
+          FTL_AGAIN → 瞬态背压，本轮到此为止，下轮再补（stalls++ 超预算即判卡死）
+          FTL_ERROR → 弃未下发者，组报 IO_ERROR
+
+  Phase 3 ── 三级后台模式（判据 = 未决命令数近似空闲度，非"本轮有无提交 NAND"）
+  ├── IDLE 模式 (inflight == 0):               全力后台
   │   ├── l2p_cache_flush_all()
   │   ├── GC refill pre-cond pool
   │   ├── wl_execute()                  ← 磨损均衡
   │   ├── journal_flush_page()
   │   └── checkpoint_create() (按需)
   │
-  ├── NORMAL 模式 (submitted ≤ 2):      适度后台
+  ├── NORMAL 模式 (pending ≤ MAX/2 且无排队组):  适度后台
   │   ├── l2p_cache_flush_background(4)
   │   ├── GC (按 gc_check_trigger)
   │   ├── wl_execute() (按 wl_should_trigger)
   │   └── checkpoint_create() (按需)
   │
-  └── BUSY 模式 (submitted > 2):        最小后台
+  └── BUSY 模式 (pending > MAX/2 或 queued != 0):  最小后台（host 饿着，让路）
       ├── l2p_cache_flush_background(1)
       └── checkpoint_create() (仅 emergency≥95%)
 ```
+
+> `inflight = pending_count + pending_group_count + completion_table_count`。
+> ⚠ `main.c` 目前只对 `g_ftl[0][0][0]` 调 `ftl_service` ⇒ Phase 2.5 只 drain 实例 0。
+> 当前几何（CH=CE=LUN=1）正确；维度扩展时须遍历全部实例。
 
 ### 6.2 完整实现
 
 ```c
 void ftl_service(ftl_context_t *ftl) {
-    /* Phase 1: fc_service 推进 NAND */
     uint32_t submitted = 0;
-    for (int i = 0; i < NAND_SUBMIT_BUDGET; i++) {
+    uint16_t inflight, queued;
+
+    if (ftl == NULL) return;
+
+    /* Phase 1: fc_service 推进 NAND（最多 NAND_SUBMIT_BUDGET 次） */
+    for (uint8_t i = 0; i < NAND_SUBMIT_BUDGET; i++) {
         if (fc_service() != FC_STATUS_OK) break;
         submitted++;
     }
 
-    /* Phase 2: 处理完成回调 */
-    fc_command_status_t completion;
-    while (fc_poll_completion(&completion) == FC_STATUS_OK) {
-        ftl_handle_completion(ftl, &completion);
+    /* Phase 2: 统一完成泵（替代旧 fc_poll_completion 循环） */
+    completion_table_drain();
+
+    /* Phase 2.5: 补发各组的待下发子操作（完成已腾出 FC 资源） */
+    for (uint8_t i = 0; i < FTL_GROUP_MAX; i++) {
+        if (ftl->groups[i].used != 0U) {
+            ftl_drain_group(ftl, (uint16_t)i);
+        }
     }
 
-    /* Phase 3: 三级后台模式 */
-    if (submitted == 0) {
+    /* Phase 3: 三级后台模式（判据 = 未决命令数近似空闲度） */
+    queued   = pending_group_count(ftl);
+    inflight = (uint16_t)(pending_count(ftl) + queued + completion_table_count());
+    if (inflight == 0U) {
         ftl_service_idle(ftl);
-    } else if (submitted <= NAND_SUBMIT_BUDGET / 2) {
-        ftl_service_normal(ftl);
-    } else {
+    } else if ((pending_count(ftl) > (FTL_PENDING_MAX / 2U)) || (queued != 0U)) {
         ftl_service_busy(ftl);
+    } else {
+        ftl_service_normal(ftl);
     }
 }
 ```
@@ -823,26 +894,37 @@ src/ftl/
                     │                                        │
                     │  ┌────────────────────────────────┐   │
                     │  │ request.c: ssd_request_split()  │   │
-                    │  │  block_count > 1 → N 个单页子请求│   │
+                    │  │  仅按**实例边界**切连续 run     │   │
+                    │  │  每 run 一次 ftl_submit_*       │   │
                     │  │  on_sub_complete → sub_remaining│   │
-                    │  │  → 0 → complete_flag = 1       │   │
+                    │  │  → 0 → complete_flag = 1        │   │
+                    │  │  ★ plane 配对已下沉 FTL         │   │
                     │  └────────────────────────────────┘   │
                     │           │ ftl_submit_read/write      │
-                    │           │ (on_complete, complete_flag)│
+                    │           │ ({lba, count, buffer}, …)  │
                     └───────────┼──────────────────────────┘
                  ┌──────────────▼────────────────────────────┐
                  │          FTL 层         src/ftl/           │
                  │                                            │
-                 │  ftl_submit_read(ftl, &req)                │ ← 单页原语
-                 │  ftl_submit_write(ftl, &req)               │
-                 │    req = ftl_io_request_t                  │
+                 │  ftl_submit_read(ftl, &req)                │ ← 长度任意
+                 │  ftl_submit_write(ftl, &req)               │   自拆单/双 plane
+                 │  ftl_flush / ftl_trim(lba,count)           │
+                 │    req = ftl_io_request_t{lba,count,buffer}│
                  │                                            │
                  │  ┌────────────────────────────────────┐   │
-                 │  │ ftl_handle_completion()             │   │
-                 │  │   ① 数据拷贝 → buffer              │   │
-                 │  │   ② complete_flag = 1              │   │
-                 │  │   ③ on_complete(ctx) ← 回调聚合    │   │
-                 │  │   ④ pending_remove                 │   │
+                 │  │ 组：一次 submit = 一个 ftl_io_group_t│   │
+                 │  │  ftl_issue_subop × N（三态）        │   │
+                 │  │  ftl_drain_group（快路径 + 2.5 补发）│   │
+                 │  └────────────────────────────────────┘   │
+                 │                                            │
+                 │  ┌────────────────────────────────────┐   │
+                 │  │ ftl_handle_completion()（逐子操作）  │   │
+                 │  │   ① 数据拷贝 → 该 slice buffer     │   │
+                 │  │   ② 组聚合 agg_status（粘性）      │   │
+                 │  │   ③ pending_remove                 │   │
+                 │  │   ④ 组全部完成 → 发一次组通知：     │   │
+                 │  │      status_out / complete_flag /  │   │
+                 │  │      on_complete(ctx)              │   │
                  │  └────────────────────────────────────┘   │
                  │                                            │
                  │  ┌────────────────────────────────────┐   │

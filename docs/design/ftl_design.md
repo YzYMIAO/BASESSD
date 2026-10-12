@@ -2706,6 +2706,9 @@ typedef struct ftl_context {
     /* Pending Request 表（F6：per-instance 异步请求追踪）*/
     ftl_pending_req_t   pending[FTL_PENDING_MAX];
 
+    /* 完成组表（v0.58：一条 host 请求 = 一个组，通知只发一次）*/
+    ftl_io_group_t      groups[FTL_GROUP_MAX];
+
     /* Allocator */
     ftl_allocator_t     alloc;             /* 空闲 block / Super Block 写指针 */
 
@@ -2738,22 +2741,28 @@ typedef struct ftl_context {
 
 > ⚠ **以下按 `include/ftl/ftl.h` 的真实签名重写**（原伪代码的 `ftl_read`/`ftl_write`/
 > `ftl_background_flush`/`ftl_checkpoint`/`ftl_gc_execute` 均已不存在；读写是**非阻塞提交**，
-> 完成经 `fc_poll_completion` 回调路由到 pending 表）。
+> 完成经 completion table 路由到 pending 表）。
+>
+> **v0.58 订正（策略下沉 + 组完成）**：`ftl_io_request_t.pages` → `count`（长度交给 FTL，plane
+> 配对由 FTL 自决）；新增 `ftl_flush`；`ftl_trim` 加 `count`；一次 `ftl_submit_*` = 一个**组**，
+> 通知只发一次。详见变更史 v0.58 与 `ftl_host_interface.md`。
 
 ```c
 /* ── 初始化（v0.30：ftl_init_params_t 结构体指针传参，7 形参 → 2）── */
 ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params);
 
-/* ── 读写（非阻塞提交，返回 FTL_OK 只表示已入队）── */
+/* ── 读写（非阻塞提交，长度任意；返回 FTL_OK 只表示已受理）── */
 ftl_status_t ftl_submit_read (ftl_context_t *ftl, const ftl_io_request_t *req);
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);
-void         ftl_trim(ftl_context_t *ftl, uint64_t lba);   /* 单 LBA 粒度 */
+void         ftl_flush(ftl_context_t *ftl);                     /* v0.58 新增 */
+void         ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count); /* v0.58 加 count */
 
 /* ── 主循环任务（每次 main loop 调用一次）── */
 void ftl_service(ftl_context_t *ftl);
-// Phase 1: fc_service()          → 推进 FC/NAND 调度
-// Phase 2: fc_poll_completion()  → 完成回调 → 路由 pending 表（读回填 / 写记 total_writes）
-// Phase 3: 三级后台（ftl_service_idle / _normal / _busy，见 §4.8.5）
+// Phase 1:   fc_service()             → 推进 FC/NAND 调度
+// Phase 2:   completion_table_drain() → 完成回调 → 路由 pending 表（读回填 / 写记 total_writes）
+// Phase 2.5: ftl_drain_group()        → 补发各组待下发子操作（v0.58；host IO 优先于后台）
+// Phase 3:   三级后台（ftl_service_idle / _normal / _busy，见 §4.8.5）
 ```
 
 ### 11.3 FTL 内部模块 API

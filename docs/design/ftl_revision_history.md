@@ -2341,3 +2341,93 @@ per-block 存是重复的。**v0.12 Policy B**（`cc09580`+`1927762`）已把前
 
 - **无代码改动** ⇒ 无 `.bin` 变化、无介质变更、不新增测试源
 - 结论以文档内可核对的事实为准（`allocator.c:159-189`、`bst.h:121-138` 的 `_Static_assert`）
+
+---
+
+## v0.58 — FTL 对外接口对齐主流（plane 策略下沉 + 组完成语义）
+
+**日期**：2026-10-13
+
+**性质**：**接口重构 + 文档**（策略下沉，行为变更：大请求从「失败」变「成功」）。设计依据见
+新增文档 `docs/design/ftl_host_interface.md`（含 D1–D6 差异表与接口级 UT 设计）。
+
+### 动机
+
+学**主流存储主控的 FTL 对外接口设计**（本仓北极星：`fc_nand_design.md` §26 行业对照，非 Linux）。
+问题：「FTL 对外接口是什么、外部传什么给 FTL、当前架构有何差异、如何设计 UT」。
+
+### 依据（判据 = 本仓 §26.1/§26.2）
+
+**① 「访问哪些物理单元」是 FTL 的事。** §26.1 原文：设备侧固件拿到的是一条**已解析的请求**
+（目标 LBA/地址 + 数据缓冲指针 + 操作类型），**访问哪些物理单元、数据怎么搬都是固件的事**。
+**multi-plane 配对正是「访问哪些物理单元」** ⇒ 属 FTL，不属 HIL。而 v0.58 前，配对逻辑在
+`controller/request.c` 的 `ssd_split_use_multi_plane`（HIL 侧）——**位置错**。
+
+**② 主流传的是「长度」不是「plane 数」。** NVMe 的 NLB、eMMC CMDQ 的块数都是**长度**；FTL 自己
+决定怎么拆。本仓旧 `ftl_io_request_t.pages`（1/2）把 FTL 的内部策略泄漏给了上层。
+
+### 关键决策
+
+| # | 项 | 主流 | v0.58 前（本仓） | v0.58 处置 |
+|---|---|---|---|---|
+| **D1** | plane 配对 | FTL 内部策略 | HIL 的 `ssd_split_use_multi_plane` 决定 `pages=2` | **下沉到 FTL**（`ftl_issue_subop` 按 `count` 自拆） |
+| **D2** | FLUSH | FTL 的一条 op | HIL 直接调 FTL 内部 `l2p_cache_flush_all`/`journal_flush_page` | **新增 `ftl_flush(ftl)`** |
+| **D3** | TRIM 粒度 | 带长度的 deallocate | `ftl_trim(ftl,lba)` 单 LBA（忽略 `block_count`） | **改 `ftl_trim(ftl,lba,count)`** |
+| **D4** | 请求 vs 通知 | 请求纯输入；完成走 CQ | 通知字段与请求混在一起 | **不改**（本仓无 CQ，轮询+回调是既定异步契约） |
+| **D5** | Host 队列+doorbell+CQ | HIL 有 | HIL 无队列；队列机制只在 FC 内部 | **不改**（§26.2 已定位在 FC；HIL 侧属更大重构） |
+| **D6** | LBA→实例路由 | 单一 FTL 拥有全 LBA | Controller 按 LBA 路由到 `ftl[ch][ce][lun]` 分片 | **保留**（分片是刻意模型；路由=后端选择，非 plane 策略） |
+
+**③ 组完成语义（一次 submit = 一个组）。** 长度任意后，一次 `ftl_submit_*` 内部含多个 FC 子操作，
+通知字段（`complete_flag`/`status_out`/`on_complete`）必须**只在全部子操作完成后触发一次**。
+新增 `ftl_io_group_t`（`ftl->groups[FTL_GROUP_MAX]`，`FTL_GROUP_MAX = FTL_PENDING_MAX = 32`）承载
+聚合；`ftl_pending_req_t` **不再内嵌 `ftl_io_request_t io`**，改显式子操作字段 + `group`/`planes`
+（否则 `count`（host run 长）与 `planes`（子操作 plane 数）会共用一个字段、产生静默二义）。
+
+**④ 三态返回是枢纽。** `ftl_issue_subop` 返回 `FTL_OK`（已下发/同步完成）/ `FTL_AGAIN`（瞬态背压：
+命令/desc/buffer 池满、SQ 满、pending 表满）/ `FTL_ERROR`（永久）。旧实现把三类**全当致命**，
+正是「大请求在第 N 个子操作崩」的根因。背压排队由 `ftl_service` **Phase 2.5** 补发
+（完成先腾出 FC 资源 → 再补 host 子操作 → 后台吃剩下的）；连续无进展超
+`FTL_DRAIN_STALL_MAX`（8 轮）才判卡死。
+
+### 顺带修掉的两个真缺陷
+
+- **① 大请求提前完成**：旧 `ssd_request_split` 同步循环提交，`ftl_submit_*` 中途失败时置
+  `complete_flag=1`，而 `sub_remaining` 已被预置为全量 ⇒ **父请求提前完成、余下计数永不归零**。
+  真实容量瓶颈是 **FC buffer 池**（128 buffer ÷ 每多 plane 命令 8 buffer = **16** 并发子操作），
+  `wr 0 40` 旧实现必失败。v0.58 后 FTL 自拆分 + 按需 drain，瞬态背压排队重试。
+- **② CLI 谎报缓冲容量**：`cli.c` 把 `buffer_size` 设为 `n × FTL_READ_USER_SIZE`，而 `g_wr_buf`
+  实为 16 KB ⇒ `wr 0 40` 会**写爆 16 KB 数组**（内存损坏）。改为上报真实 `sizeof(g_wr_buf)`，
+  由 Controller 的容量校验拒绝（`block_count × 2048 > buffer_size` ⇒ `INVALID_ARGUMENT`）。
+
+### 连带（登记，本轮不做）
+
+- **D4/D5**：HIL 侧 host 队列 + doorbell + CQ（更大重构）。
+- **D6**：LBA→实例路由上移到单一 FTL 前端（与本仓分片模型冲突，需单独立项）。
+- `main.c` 目前只对 `g_ftl[0][0][0]` 调 `ftl_service` ⇒ Phase 2.5 只 drain 实例 0。当前几何
+  （CH=CE=LUN=1）正确；维度扩展时须遍历全部实例（**既有结构缺口**，本步使其显形）。
+- `ftl_trim` 大范围同步阻塞（超循环长停）——本轮只加 API，范围上界/分块后续定。
+- `ftl_flush` 语义 = 「落已持久化映射」，**非** NVMe 式 barrier（不等待在飞/排队写）。
+- 跨组 LBA 重叠时组间写序未定义（当前 HIL 串行，不成问题）。
+- **保留未改**：`ftl_handle_completion` 读失败分支**无条件**报 `IO_ERROR`——即使 read recovery
+  实际救回数据（S1 前既有行为，按「行为等价」原则原样保留 + ⚠ 注释，待单独立项）。
+
+### 改动文件
+
+- `include/common/ftl_types.h`：`pages` → `count`
+- `include/ftl/ftl_type.h`：新增 `FTL_AGAIN`
+- `include/ftl/pending.h` / `src/ftl/pending.c`：`ftl_io_group_t` + 组管理；pending 改显式子操作字段
+  + `group`/`planes`；删 `pending_lookup_by_lba`（零调用者死代码）
+- `include/ftl/ftl.h`：`ftl_flush` / `ftl_trim(count)` / `FTL_DRAIN_STALL_MAX` / `groups[]` 进 context
+- `src/ftl/ftl.c`：`ftl_issue_subop`（三态）/ `ftl_drain_group` / Phase 2.5 / 组完成；IDLE 判据改用未决数
+- `src/ftl/ftl_fc_interface.c`：`ftl_cmd_setup_ppa_pair` desc 配置失败区分 `FTL_AGAIN`/`FTL_ERROR`
+- `src/controller/request.c`：删 plane 配对，改按实例边界切 run 提交
+- `src/controller/controller.c`：统一提交路径；FLUSH 走 `ftl_flush`；去 l2p/journal 直依赖；buffer_size 校验
+- `src/controller/cli.c`：`buffer_size` 上报真实容量
+- `docs/design/ftl_host_interface.md`（新增）/ `ftl_api_usage.md` / `ftl_ut_munit.md`（§8.6 L1 接口套件）
+
+### 验证
+
+- `make clean && make all` / `make clean && make tests`：**零错误零新增警告**（`184304 B` / `262420 B`）
+- **等价性判据**：单实例、`count ≤ 2` 路径下提交的 FC 命令序列应与 v0.57 逐命令一致
+- 上板（UART CLI）：`wr 0 5 / rd 0 5 c`（走 2+2+1 自拆）、`wr 0 2 / rd 0 2 c`、`tr 0 / fl`
+- ⚠ CLI 缓冲仅 16 KB ⇒ `n ≤ 8`；验证更大请求需先扩 `g_wr_buf`
