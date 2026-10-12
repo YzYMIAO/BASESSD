@@ -1,3 +1,28 @@
+/*
+ * read_recovery.c — 读恢复（多级读重试 + 慢死预测 + 块退役）
+ *
+ * 职责：
+ *   读失败时的三级恢复（读电压重试 → 邻近页辅助 → 显式兜底），
+ *   以及 ECC 趋势/read disturb 驱动的「慢死预测」——提前搬空将坏块并退役。
+ *
+ * 与 wear_leveling.c 的分工：
+ *   本文件只做**判定与记录**（rr_record_ecc / rr_predictive_scan / rr_retire_block）；
+ *   搬移动作由 wear_leveling.c 的 wl_predictive_relocate 执行（它调用本文件的扫描与退役）。
+ *
+ * 块健康状态机（rr_block_health_t，单调升级）：
+ *   HEALTHY → WARNING（ECC 连续上升 ≥RR_ECC_RISING_THRESHOLD）
+ *           → CRITICAL（单次 ≥RR_ECC_HIGH_WATER 或趋势到顶）→ DYING（单次 ≥RR_ECC_MAX）
+ *
+ * 文件结构：
+ *   1. 记录/判定   rr_record_ecc
+ *   2. 恢复路径     rr_exec_retry / rr_neighbor_assist（static）/ rr_recover_read
+ *   3. 判定扫描     rr_check_predictive / rr_get_health / rr_predictive_scan
+ *   4. 退役         rr_retire_block
+ *
+ * ⚠ 层内接口（rr_record_ecc / rr_recover_read / rr_predictive_scan / rr_retire_block）
+ *   形参由调用者保证非空 ⇒ ASSERT（判据 2：调用者保证的前置条件）。
+ */
+
 #include "ftl/read_recovery.h"
 
 #include "common/assertion.h"
@@ -9,6 +34,16 @@
 
 #include <string.h>
 
+/* ── 1. 记录 / 判定 ── */
+
+/* --------------------------------------------------------------------
+ * rr_record_ecc
+ *   功能：记录一次读的 ECC 纠正 bit 数，更新趋势与健康状态（单调升级）。
+ *   参数：track —— 块的 rr 跟踪器（恒非 NULL）；ecc_bits —— 本次读最大纠正 bit 数。
+ *   返回：无。
+ *   实现要点：连续上升计数（本次 > 上次则 +1，否则清零）；三级水位各自升级 health，
+ *             只升不降（恢复由 rr_retire_block 复位）。
+ * -------------------------------------------------------------------- */
 void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits)
 {
     /* 层内接口：调用者一律传 &ftl_block_t.rr（BST 常驻，恒非 NULL） */
@@ -39,6 +74,8 @@ void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits)
         track->health = RR_BLOCK_DYING;
     }
 }
+
+/* ── 2. 恢复路径 ── */
 
 /*
  * 内部：通过 FC 执行一次 Read Retry（切换读电压模式）
@@ -188,7 +225,12 @@ static int rr_neighbor_assist(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buff
         neighbor_addr = addr_from_paa(ch, ce, paa_from_addr(&(nand_addr_t){.plane = (uint8_t)plane, .block = (uint16_t)block, .page = neighbors[i]}));
 
         memset(neighbor_buf, 0, sizeof(neighbor_buf));
-        ret = ftl_sync_read_page(neighbor_addr, neighbor_buf, sizeof(neighbor_buf), FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_READ_RECOVERY, 0U));
+        /* 邻居页的 LBA **本就未知**（辅助读只要"这一页读得出来"这个事实）⇒ 用
+         * FTL_PAGE_CFG_DATA_ANY 让命令的 META = FC_META_UNKNOWN。
+         * ⚠ 旧写法 FTL_PAGE_CFG_DATA(..., 0U) 把"LBA 就是 0"当事实下传，FC 侧比对项
+         *   拿 0 撞页内真实 META ⇒ **恒置 MATA_ERROR**；旧 ftl_sync_read_page 忽略该位
+         *   才没暴露，Stage 2 因此"永远成功"（实为假成功）。 */
+        ret = ftl_sync_read_page(neighbor_addr, neighbor_buf, sizeof(neighbor_buf), FTL_PAGE_CFG_DATA_ANY(FC_COMMAND_MODULE_READ_RECOVERY));
         if (ret == 0)
         {
             /*
@@ -210,6 +252,14 @@ static int rr_neighbor_assist(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buff
     return -1;
 }
 
+/* --------------------------------------------------------------------
+ * rr_recover_read
+ *   功能：读失败后的三级恢复编排——Stage 1 读电压重试、Stage 2 邻近页辅助、Stage 3 兜底。
+ *   参数：rr —— 恢复上下文；ch/ce/pba/buffer/length/lba —— 目标读；retry_count —— 出参重试次数。
+ *   返回：0 恢复成功；-1 三级全失败（调用方标坏块 + 搬移）。
+ *   实现要点：Stage 1 循环 RR_MAX_RETRY 个读电压模式；Stage 2 邻近页辅助；Stage 3 只是
+ *             显式兜底注释（XOR/RAID 恢复属后续阶段，当前不实现）。
+ * -------------------------------------------------------------------- */
 int rr_recover_read(ftl_read_recovery_t *rr,
                     uint8_t              ch,
                     uint8_t              ce,
@@ -265,6 +315,9 @@ int rr_recover_read(ftl_read_recovery_t *rr,
     return -1;
 }
 
+/* ── 3. 判定（块数组 / 全表扫描）── */
+
+/* rr_check_predictive — 在块数组 [0,max_blocks) 里找第一个 health ≥ CRITICAL 的块，返回其下标 */
 int rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t *gblock)
 {
     uint16_t i;
@@ -288,6 +341,7 @@ int rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t
     return 0;
 }
 
+/* rr_get_health — 取块健康状态（track 为 NULL 返回 HEALTHY） */
 rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
 {
     if (track == NULL)
@@ -298,6 +352,15 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
     return (rr_block_health_t)track->health;
 }
 
+/* --------------------------------------------------------------------
+ * rr_predictive_scan
+ *   功能：全表扫 CLOSED 块，找第一个需要慢死搬移的块（ECC 趋势恶化或 read disturb 高）。
+ *   参数：alloc —— 分配器（blocks 恒非 NULL）；gblock —— 出参块号。
+ *   返回：1 找到；0 未找到。
+ *   实现要点：只针对 CLOSED 块（Open 还在写、Free 无数据、Bad/Reserved 已退役）；
+ *             命中条件 = health ≥ CRITICAL **或** read_count ≥ RR_READ_DISTURB_THRESHOLD
+ *             （慢死第一信号）。调用者 wl_predictive_relocate 用 sb_id 反查 Closed 条目。
+ * -------------------------------------------------------------------- */
 int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
 {
     uint16_t i;
@@ -330,6 +393,16 @@ int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
     return 0;
 }
 
+/* ── 4. 退役 ── */
+
+/* --------------------------------------------------------------------
+ * rr_retire_block
+ *   功能：慢死块退役——置 RESERVED（不再分配新数据），不标坏（BBT 不删、仍可读），健康复位。
+ *   参数：b —— 目标块（恒非 NULL）。
+ *   返回：无。
+ *   实现要点：read_count 归零 = read disturb 重计（块仍活着，只是不再写）。
+ *             ⚠ 归零后需调用者补 wear_mark_dirty（本函数只拿 ftl_block_t*，拿不到 gblock）。
+ * -------------------------------------------------------------------- */
 void rr_retire_block(ftl_block_t *b)
 {
     /* 层内接口：唯一调用者 wl_predictive_relocate 传 &ftl->alloc.blocks[gblock] */

@@ -1,6 +1,26 @@
 #ifndef FTL_JOURNAL_H
 #define FTL_JOURNAL_H
 
+/*
+ * journal.h — L2P 增量日志：页/条目格式 + 环形状态 + API
+ *
+ * 职责：
+ *   定义 Journal 的磁盘/内存布局（页头、条目、环形状态 l2p_journal_t）与对外 API。
+ *   实现见 src/ftl/journal.c。
+ *
+ * 与 checkpoint.h 的分工：
+ *   Journal  —— L2P 的**增量**日志（页追加，掉电回放的最小单位）；
+ *   Checkpoint —— L2P 的**全量**快照（把 journal 的已写条目固化进 NAND L2P 表并截断 journal）。
+ *
+ * 布局：
+ *   Journal 是 JOURNAL_BLOCK_COUNT 个块的环形池（块位置 JOURNAL_BLOCK0 起）；
+ *   每页 = 页头（12B：magic + page_seq + entry_count + block_seq）+ N 条 l2p_journal_entry_t。
+ *   N 由 (页主区 − 页头) ÷ 条目大小**推导**，不写死（见 JOURNAL_ENTRIES_PER_PAGE）。
+ *
+ * ⚠ 本模块整个不转断言（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 页，
+ *   页头可能因掉电撕裂而非法，属预期情形，返回错误/跳过而非断言。
+ */
+
 #include "ftl/ftl_config.h" /* JOURNAL_BLOCK0 / JOURNAL_BLOCK_COUNT 块位置 */
 #include "ftl/ftl_type.h"
 #include "ftl/l2p_cache.h"
@@ -24,12 +44,13 @@
 #define JOURNAL_HEADER_SIZE (12U)          /* magic(4) + page_seq(4) + entry_count(2) + block_seq(2) */
 #define JOURNAL_MAGIC       (0x524F554AUL) /* "JOUR" */
 
+/* 一条 L2P 更新：lba 的映射从 old_pba 变为 new_pba（16B，packed 无填充） */
 typedef struct
 {
-    uint32_t   lba;
-    nand_pba_t old_pba;
-    nand_pba_t new_pba;
-    uint32_t   sequence;
+    uint32_t   lba;      /* 逻辑地址 */
+    nand_pba_t old_pba;  /* 更新前物理地址（回放不读；仅首条保留，供诊断） */
+    nand_pba_t new_pba;  /* 更新后物理地址（回放按此写 L2P） */
+    uint32_t   sequence; /* 全局单调序号（回放按 (page_seq, 页内下标) 定序） */
 } __attribute__((packed)) l2p_journal_entry_t;
 
 /* 每页条目数 = (页主区 − 页头) ÷ 条目大小，向下取整。
@@ -58,10 +79,13 @@ typedef struct
     uint8_t emergency;
 } l2p_journal_t;
 
+/* journal_init - 初始化 Journal：记录拓扑、预铸各块 PBA、复位写指针与序号 */
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
 /* 追加一条 L2P 更新。P1-6：若当前页缓冲里已有**同一 LBA** 的条目，就地更新
  * （只改 old/new PBA，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。 */
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba);
+/* journal_flush_page - 把当前页缓冲（含页头）同步写进 NAND 并推进写指针；
+ *   本函数是**唯一**的环形块擦除点，块满换块时先擦后写（跳过 pre_erased_block 预擦块） */
 void journal_flush_page(l2p_journal_t *journal);
 /* F10：全量回放 page_seq > cp_sequence 的页（按 (page_seq, entry_index) 递增序
  * 应用，per-LBA last-write-wins）。cp_sequence 为 checkpoint 截断水位（旧

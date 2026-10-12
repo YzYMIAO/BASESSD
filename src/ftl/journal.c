@@ -1,3 +1,35 @@
+/*
+ * journal.c — L2P 增量日志（环形块池 + 页追加 + 掉电回放 + 截断）
+ *
+ * 职责：
+ *   把每次 L2P 更新（lba, old_pba, new_pba）以「页追加」写进 Journal 环形块池，
+ *   供掉电后回放恢复；与 Checkpoint 协同做日志回收（truncate）。
+ *
+ * 与 journal.h 的分工：
+ *   journal.h —— 页头格式（JOURNAL_HEADER_SIZE / MAGIC）+ 条目结构 + 环形状态
+ *                （l2p_journal_t）；
+ *   本文件     —— 追加 / 刷页 / 回放 / 截断的实现。
+ *
+ * 写模型（P1-6）：
+ *   · 追加进 RAM 页缓冲（page_buf）；页满（JOURNAL_ENTRIES_PER_PAGE）或显式 flush
+ *     时同步写一页到 NAND；
+ *   · 块满换环形下一块——**先擦后写**，journal_flush_page 是唯一的环形块擦除点；
+ *   · 同 LBA 就地合并（不消耗 sequence）。
+ *
+ * 掉电保护：Journal 页 CRC/Random **关闭**，靠自身四层保护——ECC + 页头 magic +
+ *   entry_count 合法性 + page_seq 单调（设计 §7.6）。
+ *
+ * ⚠ **本文件整个不转断言**（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 上的
+ *   页，页头可能因掉电撕裂而非法——那是掉电的**预期情形**，必须返回错误/跳过，不能断言。
+ *
+ * 文件结构：
+ *   1. 页地址辅助     journal_page_addr / journal_block_addr（static）
+ *   2. 初始化         journal_init
+ *   3. 追加与刷页     journal_append / journal_flush_page
+ *   4. 回放           journal_replay
+ *   5. 截断           journal_truncate
+ */
+
 #include "ftl/journal.h"
 
 #include "fc/fc.h"
@@ -6,7 +38,12 @@
 
 #include <string.h>
 
+/* ══════════════════════════════════════════════════════════
+ * 1. 页地址辅助
+ * ══════════════════════════════════════════════════════════ */
+
 /* ── Journal Block 页地址辅助 ── */
+/* journal_page_addr — 第 b 块第 page 页的 NAND 地址（plane 由页号奇偶决定，见下） */
 static nand_addr_t journal_page_addr(const l2p_journal_t *journal, uint8_t b, uint8_t page)
 {
     nand_addr_t addr;
@@ -22,6 +59,7 @@ static nand_addr_t journal_page_addr(const l2p_journal_t *journal, uint8_t b, ui
     return addr;
 }
 
+/* journal_block_addr — 第 b 块的首页地址（擦除用；plane/page 归零，cw=0） */
 static nand_addr_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
 {
     nand_addr_t addr;
@@ -37,6 +75,18 @@ static nand_addr_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
     return addr;
 }
 
+/* ══════════════════════════════════════════════════════════
+ * 2. 初始化
+ * ══════════════════════════════════════════════════════════ */
+
+/* --------------------------------------------------------------------
+ * journal_init
+ *   功能：初始化 Journal 环形块池——记录拓扑、预铸各块 PBA、复位写指针与序号。
+ *   参数：journal —— 待初始化对象；topo —— 目标 NAND 芯片路由。
+ *   返回：无（journal == NULL 直接返回）。
+ *   实现要点：sequence_counter 从 1 起（0 保留作「无序号」）；page_buf 填 0xFF 表示
+ *             空页（与 NAND 擦除态一致）。
+ * -------------------------------------------------------------------- */
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 {
     uint8_t b;
@@ -66,6 +116,17 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
     journal->emergency         = 0U;
 }
 
+/* ══════════════════════════════════════════════════════════
+ * 3. 追加与刷页
+ * ══════════════════════════════════════════════════════════ */
+
+/* --------------------------------------------------------------------
+ * journal_append
+ *   功能：向当前页缓冲追加一条 L2P 更新条目（同 LBA 就地合并）。
+ *   参数：journal —— Journal；lba —— 逻辑地址；old_pba/new_pba —— 更新前后物理地址。
+ *   返回：无。
+ *   实现要点：页满（current_entry 达 JOURNAL_ENTRIES_PER_PAGE）自动 flush 一页。
+ * -------------------------------------------------------------------- */
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba)
 {
     l2p_journal_entry_t *entry;
@@ -111,6 +172,18 @@ void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
     }
 }
 
+/* --------------------------------------------------------------------
+ * journal_flush_page
+ *   功能：把当前页缓冲连同页头同步写进 NAND 当前页，并推进写指针。
+ *   参数：journal —— Journal。
+ *   返回：无（空页直接返回）。
+ *   实现要点：
+ *     · 页头 hdr_page_seq 由 `sequence_counter − current_entry` **反推**本页首条序号
+ *       （与 journal_append 的就地合并约定耦合，二者必须同步）。
+ *     · 页满换块：本函数是**唯一**的环形块擦除点；若该块已被 journal_truncate
+ *       预擦除（pre_erased_block），**跳过擦除**（否则同块每圈擦两次，+25% 磨损）。
+ *     · 写后清空页缓冲（0xFF）与 current_entry，准备下一页。
+ * -------------------------------------------------------------------- */
 void journal_flush_page(l2p_journal_t *journal)
 {
     nand_addr_t waddr;
@@ -175,6 +248,25 @@ void journal_flush_page(l2p_journal_t *journal)
     memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
 }
 
+/* ══════════════════════════════════════════════════════════
+ * 4. 回放
+ * ══════════════════════════════════════════════════════════ */
+
+/* --------------------------------------------------------------------
+ * journal_replay
+ *   功能：开机回放——全量扫描 Journal 块池，把 page_seq > cp_sequence 的页
+ *         按 (page_seq, entry_index) 递增序应用到 L2P cache。
+ *   参数：journal —— Journal；cache —— 目标 L2P cache；cp_sequence —— checkpoint
+ *         截断水位（≤ 该序号的条目已进 NAND L2P 表，无需回放）。
+ *   返回：FTL_OK 成功；FTL_ERROR 入参为 NULL。
+ *   实现要点：
+ *     · 第一遍扫描收集「需回放页」进栈上数组 replay_pages[]（JOURNAL_BLOCK_COUNT
+ *       块 × PAGES_PER_BLOCK 页，共 256 项 8B = 2KB；⚠ 256 > 255 ⇒ 计数/下标必须
+ *       uint16_t，uint8_t 会死循环），同时跟踪最大 page_seq 以更新写指针。
+ *     · 第二遍插入排序（≤256 项）后按序应用 ⇒ per-LBA last-write-wins，同 LBA 的旧
+ *       条目（含 GC/WL 搬移记录）被后写覆盖，不指向已擦除块。
+ *     · 页头 magic / entry_count 校验失败即跳过（掉电撕裂的预期情形，见文件头 ⚠）。
+ * -------------------------------------------------------------------- */
 ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence)
 {
     uint8_t  b, page;
@@ -361,6 +453,22 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
     return FTL_OK;
 }
 
+/* ══════════════════════════════════════════════════════════
+ * 5. 截断
+ * ══════════════════════════════════════════════════════════ */
+
+/* --------------------------------------------------------------------
+ * journal_truncate
+ *   功能：丢弃 ≤ up_to_sequence 的条目（Checkpoint 已把它们写进 NAND L2P 表）。
+ *   参数：journal —— Journal；up_to_sequence —— 截断水位（调用者传 sequence_counter）。
+ *   返回：无。
+ *   实现要点：
+ *     ① 水位校验：若水位不足以覆盖全部已写条目，**不截断**（最旧块可能仍持有回放
+ *        需要的条目，擦掉即丢数据）；sequence_counter == 0 一并挡掉避免下溢。
+ *     ② 预擦除环形最旧块（= 环形下一块）并记账 pre_erased_block，使 journal_flush_page
+ *        回切到它时跳过擦除——保证同一块每圈只擦一次（旧实现两处各擦一次 = 双倍磨损）。
+ *     ③ 复位水位标志（emergency / checkpoint_needed）。
+ * -------------------------------------------------------------------- */
 void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
 {
     uint8_t next;

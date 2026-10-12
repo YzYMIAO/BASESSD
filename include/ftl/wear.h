@@ -6,7 +6,7 @@
  *
  * 背景：BST（ftl_block_t）里的 erase_count / read_count 是
  * 纯 RAM 状态，ftl_init 的 memset 会把它们清零 ⇒ 跨重启后
- *   - 动态 WL（allocator_select_plane_block 选擦除最少块）
+ *   - 动态 WL（allocator_select_plane_block_from_pool 选擦除最少块）
  *   - 静态 WL（wl_should_trigger 的 max_ec - min_ec ≥ 阈值）
  *   - read-disturb 预测（rr_predictive_scan 的 read_count ≥ 阈值）
  * 全部失效。本模块把这两个计数落到固定块 WEAR_BLOCK 上，开机回填 BST。

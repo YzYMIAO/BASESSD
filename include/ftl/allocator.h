@@ -232,8 +232,8 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
  * ⚠ 与 allocator_alloc(FTL_TEMP_COLD) 的区别：后者取的是**冷 Open SB 的一页**，
  *   而冷 SB 与 GC 迁移共享 ⇒ 元数据绝不能走那条路（会把 GC 的写指针搅乱）。
  *
- * ⚠ 三件事必须一起做——只置 RESERVED 挡不住分配，因为
- *   allocator_select_plane_block() 只判 FREE：
+ * ⚠ 三件事必须一起做——只置 RESERVED 挡不住分配，因为选块以
+ *   allocator_select_plane_block_from_pool() 的 **Free Pool 数组**为准：
  *     ① allocator_pool_remove()（从 Free Pool 拿掉）
  *     ② 置 RESERVED
  *     ③ 清 FREE

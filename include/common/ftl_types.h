@@ -40,10 +40,10 @@ typedef struct
 {
     uint64_t               lba;             /* Host 逻辑地址（NVMe 协议宽度） */
     void                  *buffer;          /* 读：caller 数据 buffer（数据写回处）；写：数据源 */
-    uint32_t               pages;           /* 页数：1=单 Plane，2=双 Plane Multi-Plane */
-    volatile uint8_t      *complete_flag;   /* 非 NULL 时 NAND 完成后置 1（异步跟踪） */
-    volatile ssd_status_t *status_out;      /* 非 NULL 时完成 handler 写入 SSD_STATUS_OK/IO_ERROR */
-    pending_cb_t           on_complete;     /* 完成后回调（可选，Controller 子请求聚合） */
+    uint32_t               count;           /* ★ 连续 LBA 数（= 上层 block_count）；FTL 自行决定单/双 plane 拆分 */
+    volatile uint8_t      *complete_flag;   /* 非 NULL 时全部子操作完成后置 1（异步跟踪） */
+    volatile ssd_status_t *status_out;      /* 非 NULL 时组完成后写入 SSD_STATUS_OK/IO_ERROR */
+    pending_cb_t           on_complete;     /* 组完成后回调（可选，Controller 子请求聚合） */
     void                  *on_complete_ctx; /* 回调上下文（ssd_request_t*） */
 } ftl_io_request_t;
 

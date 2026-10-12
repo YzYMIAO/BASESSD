@@ -204,6 +204,10 @@ static inline uint8_t l2p_cache_is_thrashing(const l2p_cache_t *cache)
 /*
  * l2p_cache_init - 初始化 cache，所有 line 置 INVALID
  *
+ * ⚠ **不碰 md_dir / alloc**：这两个是宿主注入的依赖（l2p_cache_set_md_dir），
+ *   不是 cache 状态。本函数在三条开机恢复路径里都会调用，清它们会把 ftl_init
+ *   绑好的 Directory 永久解绑（后果见 l2p_cache.c 内注释）。
+ *
  * @param cache  cache 上下文指针（由调用者提供存储空间）
  * @param ch     本 cache 绑定的 CH（固定位置寻址 + 路由用）
  * @param ce     本 cache 绑定的 CE

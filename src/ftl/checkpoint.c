@@ -1,3 +1,35 @@
+/*
+ * checkpoint.c — L2P 全量快照（Checkpoint 池环形轮转 + 触发/水位）
+ *
+ * 职责：
+ *   把 L2P 缓存里的脏 region 固化进 NAND L2P 日志块、flush Metadata Directory（Anchor）、
+ *   再写一条 Checkpoint Header 记录「此刻 L2P 已落盘到哪」，最后截断 Journal；
+ *   开机由 checkpoint_find_latest 在池内挑最新一条有效记录恢复游标/序号。
+ *
+ * 与 journal 的分工：
+ *   Journal    —— L2P 的**增量**日志（每笔映射一条，掉电回放的最小单位）；
+ *   Checkpoint —— L2P 的**全量**快照（把 journal 已写条目固化进 NAND L2P 表并截断 journal）。
+ *   两者用各自的 sequence：Journal.sequence_counter 是全局单调；本池 g_cp_sequence 独立。
+ *
+ * 池几何（由 ftl_config.h 推导，见 checkpoint_ring_init）：
+ *   CHECKPOINT_POOL_BLOCKS 个块、一条 record = 1 页、单 plane；
+ *   写游标 g_cp_write_idx 在 [0, 总记录数) 环形推进，块满由 metadata_ring_prepare_write 擦下一块。
+ *
+ * 掉电安全顺序（不可倒，见 checkpoint_create 步骤③/⑦）：
+ *   先 flush region → 再 flush Anchor → 最后写 Header 声称「已落盘」。
+ *   Header 是"承诺书"：它一旦落盘，boot 就信 bitmap 里置位的 region 在 NAND 上，
+ *   故任何被 Header 声称的落盘必须**先于** Header 完成。
+ *
+ * 文件结构：
+ *   1. 内部辅助        checkpoint_now_ms / checkpoint_header_valid / checkpoint_record_probe
+ *   2. 脏区落盘        checkpoint_flush_dirty_regions（static）
+ *   3. 创建/恢复       checkpoint_create / checkpoint_find_latest
+ *   4. 触发/水位       checkpoint_check_trigger / checkpoint_is_emergency / checkpoint_journal_watermark
+ *
+ * ⚠ 本文件的游标/序号是 **file-scope static**（见下方 g_cp_*），多实例（多 LUN）下
+ *   所有实例共享一份。与 bbt.c / wear.c 同一局限，登记在案。
+ */
+
 #include "ftl/checkpoint.h"
 
 #include "common/boot_policy.h"
@@ -39,6 +71,7 @@ static uint32_t g_cp_sequence     = 0U;
 static uint16_t g_cp_write_idx    = 0U;
 static uint8_t  g_cp_cursor_valid = 0U;
 
+/* checkpoint_ring_init — 按 ftl_config.h 常量填充本池环形几何（块范围/记录页数/plane/module） */
 static void checkpoint_ring_init(metadata_ring_t *ring)
 {
     ring->first_block      = CHECKPOINT_BLOCK0;
@@ -90,6 +123,8 @@ static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, int 
     return FTL_OK;
 }
 
+/* ── 脏区落盘 ── */
+
 /*
  * checkpoint_flush_dirty_regions - 按 region 脏标记只 flush 脏区
  *
@@ -133,6 +168,21 @@ static ftl_status_t checkpoint_flush_dirty_regions(l2p_cache_t *cache)
     return FTL_OK;
 }
 
+/* ── 创建 / 恢复 ── */
+
+/* --------------------------------------------------------------------
+ * checkpoint_create
+ *   功能：执行一次完整 Checkpoint（脏区落盘 → Anchor → Header → 截断 Journal）。
+ *   参数：ftl —— FTL 实例。
+ *   返回：FTL_OK 成功；FTL_ERROR 参数非法 / 脏区落盘失败 / Anchor 落盘失败 /
+ *         池定位失败 / 写 Header 失败。
+ *   实现要点：八个步骤的**顺序即掉电安全契约**（圈码见正文）——
+ *     ① 先快照 region 脏标记进 Header（flush 会清位，快照必须在前）；
+ *     ② flush 脏区；③ flush Anchor（必须早于 Header）；⑤ 定位后才取 sequence；
+ *     ⑥ 追加写并**无论成败都推进游标**（半编程槽不可复用）；⑦ 截断 Journal；
+ *     ⑧ 复位 Journal 水位标志（否则 T1 永久命中）。
+ *     任一前置步骤失败即 return，不写 Header——保持"承诺与事实一致"。
+ * -------------------------------------------------------------------- */
 ftl_status_t checkpoint_create(ftl_context_t *ftl)
 {
     l2p_checkpoint_header_t cp;
@@ -230,6 +280,15 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
     return FTL_OK;
 }
 
+/* --------------------------------------------------------------------
+ * checkpoint_find_latest
+ *   功能：开机扫 Checkpoint 池，挑 sequence 最大的有效记录，重读其 Header 并恢复游标/序号。
+ *   参数：cp —— 出参，收最新 Header 本体；topo —— 目标芯片拓扑。
+ *   返回：FTL_OK 找到并读回一致；FTL_ERROR 参数非法 / 池内无有效记录 / 重读失败 / 校验不符。
+ *   实现要点：进入即复位 g_cp_*（找不到时保持 0/无效 ⇒ 后续 create 从池首开始）；
+ *             metadata_ring_locate 只回序号，Header 本体要按该序号**再读一次**，
+ *             并复核 sequence 与 locate 报的一致（防止 locate 后池被改动）。
+ * -------------------------------------------------------------------- */
 ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t topo)
 {
     checkpoint_probe_ctx_t probe_ctx;
@@ -276,6 +335,17 @@ ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t 
     return FTL_OK;
 }
 
+/* ── 触发 / 水位 ── */
+
+/* --------------------------------------------------------------------
+ * checkpoint_check_trigger
+ *   功能：判定是否该做 Checkpoint（三路触发，任一命中即 1）。
+ *   参数：ftl —— FTL 实例；elapsed_ms —— 距上次 CP 的毫秒数（调用者算）。
+ *   返回：1 触发；FTL_OK(0) 不触发（含 ftl==NULL）。
+ *   实现要点：T1 Journal 水位（checkpoint_needed，由 checkpoint_journal_watermark 置）；
+ *             T2 写入量（total_writes 整除 CP_WRITE_INTERVAL，且 >0 防开机即命中）；
+ *             T3 定时（elapsed_ms ≥ CP_TIME_INTERVAL_MS）。
+ * -------------------------------------------------------------------- */
 int checkpoint_check_trigger(const ftl_context_t *ftl, uint32_t elapsed_ms)
 {
     (void)elapsed_ms;
@@ -307,6 +377,7 @@ int checkpoint_check_trigger(const ftl_context_t *ftl, uint32_t elapsed_ms)
     return FTL_OK;
 }
 
+/* checkpoint_is_emergency — Journal ≥95% 紧急水位（journal.emergency）置位则 1，否则 FTL_OK(0) */
 int checkpoint_is_emergency(const ftl_context_t *ftl)
 {
     if (ftl == NULL)
@@ -317,6 +388,15 @@ int checkpoint_is_emergency(const ftl_context_t *ftl)
     return (int)ftl->journal.emergency;
 }
 
+/* --------------------------------------------------------------------
+ * checkpoint_journal_watermark
+ *   功能：按 Journal 当前写位置算出使用率，置位 checkpoint_needed(≥85%) / emergency(≥95%)。
+ *   参数：journal —— 待评估的 Journal（NULL 直接返回）。
+ *   返回：无。
+ *   实现要点：分子必须是**全局页偏移**（current_block×64 + current_page，双块环形），
+ *             分母为 JOURNAL_BLOCK_COUNT×PAGES_PER_BLOCK。旧实现单块口径导致
+ *             水位过早/永不触发（详见函数内长注释）。
+ * -------------------------------------------------------------------- */
 void checkpoint_journal_watermark(l2p_journal_t *journal)
 {
     uint32_t used;

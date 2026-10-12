@@ -1,3 +1,25 @@
+/*
+ * wear_leveling.c — 静态磨损均衡（触发判定 + 选 victim + 整 SB 搬移）
+ *
+ * 职责：
+ *   在块擦除次数分布不均时，把「擦得少」的冷 SB 的数据搬到「擦得多」的冷块上，
+ *   拉平各块磨损；另有一条「慢死预测」旁路：把 ECC 趋势恶化的块整 SB 搬空并退役。
+ *
+ * 与 gc.c 的分工：
+ *   GC —— 回收**无效页多**的块（空间回收，顺带磨损均衡）；
+ *   WL —— 搬运**擦得少**的块（磨损拉平，顺带 read disturb 缓解）。两者都用
+ *         gc_read_page_with_lba / gc_erase_and_free 等共用原语。
+ *
+ * 触发三条件（wl_should_trigger，任一命中即搬）：最大/最小差值、最大/平均比值、低擦除区占比。
+ *
+ * 文件结构：
+ *   1. 触发 / 选块     wl_should_trigger / wl_select_victim
+ *   2. 搬移            wl_relocate / wl_execute / wl_predictive_relocate
+ *   3. 磨损统计        wl_max_erase / wl_min_erase / wl_avg_erase / wl_count_blocks_below
+ *
+ * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
+ */
+
 #include "ftl/wear_leveling.h"
 
 #include "common/assertion.h"
@@ -12,6 +34,17 @@
 
 #include <string.h>
 
+/* ── 1. 触发 / 选块 ── */
+
+/* --------------------------------------------------------------------
+ * wl_should_trigger
+ *   功能：判定是否该做一轮 WL（三条件任一命中即 1）。
+ *   参数：ftl —— FTL 实例。
+ *   返回：1 触发；FTL_OK(0) 不触发（含 ftl==NULL / 未达最小间隔）。
+ *   实现要点：先过 WL_MIN_INTERVAL 最小间隔门（避免刚开机抖动）；条件 1 最大/最小差值
+ *             ≥ WL_DELTA_THRESHOLD；条件 2 最大 ≥ 平均 × WL_MAX_AVG_RATIO；
+ *             条件 3 低擦除区（min + WL_LOW_ZONE_WIDTH 以下）块占比 > WL_LOW_BLOCK_PCT%。
+ * -------------------------------------------------------------------- */
 int wl_should_trigger(const struct ftl_context *ftl)
 {
     uint32_t max_ec;
@@ -58,6 +91,15 @@ int wl_should_trigger(const struct ftl_context *ftl)
     return FTL_OK;
 }
 
+/* --------------------------------------------------------------------
+ * wl_select_victim
+ *   功能：从 Closed SB 列表里挑一个搬运候选（擦得少、有效页多、read_count 高者优先）。
+ *   参数：ftl —— FTL 实例；victim —— 出参。
+ *   返回：1 找到；FTL_OK(0) 未找到 / 参数非法。
+ *   实现要点：只考虑擦除次数落在低擦除区（min + WL_LOW_ZONE_WIDTH 内）的 Closed SB；
+ *             有效页须 ≥ 最小有效页门（WL_MIN_VALID_RATIO，太碎不值当搬）；
+ *             排序键 = 有效页多（越冷越优先）→ 同有效页下 read_count 高（read disturb 风险高优先）。
+ * -------------------------------------------------------------------- */
 int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 {
     uint16_t    i;
@@ -164,6 +206,17 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
     return 1;
 }
 
+/* ── 2. 搬移 ── */
+
+/* --------------------------------------------------------------------
+ * wl_relocate
+ *   功能：把 victim SB 的所有有效页搬到 Cold 流新块，更新 L2P/Journal/VPC，最后擦除归还。
+ *   参数：ftl —— FTL 实例；victim —— 搬运候选（须 found）。
+ *   返回：实际搬移页数（int）；FTL_OK(0) 无搬移 / 参数非法。
+ *   实现要点：逐 plane 遍历有效页位图，只搬置位页（免读无效页）；每页先查 L2P 是否仍指向
+ *             本 PBA（被覆盖则清位跳过）；搬移读顺带记录 ECC 趋势 + read_count（慢死预测闭环）；
+ *             搬完先 journal_flush_page 再擦 victim（与 gc_migrate_sb 同契约，防掉电回放指向已擦块）。
+ * -------------------------------------------------------------------- */
 int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
 {
     uint8_t  plane;
@@ -287,6 +340,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
     return (int)migrated;
 }
 
+/* wl_execute — 一轮 WL：触发判定 → 选 victim → 搬移；任一步未命中即早退返回 FTL_OK(0) */
 int wl_execute(struct ftl_context *ftl)
 {
     wl_victim_t victim;
@@ -308,6 +362,15 @@ int wl_execute(struct ftl_context *ftl)
     return wl_relocate(ftl, &victim);
 }
 
+/* --------------------------------------------------------------------
+ * wl_predictive_relocate
+ *   功能：慢死预测旁路——扫出 ECC 趋势恶化的块，整 SB 搬空并**退役**（RESERVED，不标坏）。
+ *   参数：ftl —— FTL 实例。
+ *   返回：1 命中并处理；0 未命中 / 参数非法。
+ *   实现要点：rr_predictive_scan 只返回 CLOSED 块，故可用 sb_id 反查 Closed 列表条目
+ *             （ASSERT 保证索引合法）；组装 victim 后复用 wl_relocate 搬移；搬完逐 plane
+ *             rr_retire_block 退役（归零 read_count 重计 read disturb），并补 wear_mark_dirty。
+ * -------------------------------------------------------------------- */
 int wl_predictive_relocate(struct ftl_context *ftl)
 {
     uint16_t     gblock;
@@ -372,6 +435,9 @@ int wl_predictive_relocate(struct ftl_context *ftl)
     return 1;
 }
 
+/* ── 3. 磨损统计（全部跳过坏块）── */
+
+/* wl_max_erase — 全体好块擦除次数的最大值（无块返回 0） */
 uint32_t wl_max_erase(const struct ftl_context *ftl)
 {
     uint16_t i;
@@ -398,6 +464,7 @@ uint32_t wl_max_erase(const struct ftl_context *ftl)
     return max_ec;
 }
 
+/* wl_min_erase — 全体好块擦除次数的最小值（无好块返回 0） */
 uint32_t wl_min_erase(const struct ftl_context *ftl)
 {
     uint16_t i;
@@ -424,6 +491,7 @@ uint32_t wl_min_erase(const struct ftl_context *ftl)
     return (min_ec == UINT32_MAX) ? 0U : min_ec;
 }
 
+/* wl_avg_erase — 全体好块擦除次数的平均值（无好块返回 0） */
 uint32_t wl_avg_erase(const struct ftl_context *ftl)
 {
     uint16_t i;
@@ -453,6 +521,7 @@ uint32_t wl_avg_erase(const struct ftl_context *ftl)
     return sum / count;
 }
 
+/* wl_count_blocks_below — 擦除次数严格小于 threshold 的好块数（低擦除区占比统计用） */
 uint32_t wl_count_blocks_below(const struct ftl_context *ftl, uint32_t threshold)
 {
     uint16_t i;

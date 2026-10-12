@@ -21,14 +21,20 @@ typedef uint32_t lba_t;
 /*
  * ftl_status_t — FTL 内部操作通用返回状态
  *
- * 企业级 SSD 固件的 FTL 内部采用简洁的两值枚举：
  *   FTL_OK    =  0  操作成功
- *   FTL_ERROR = -1  操作失败（通用，不细分错误码）
+ *   FTL_ERROR = -1  永久失败（配置错误 / 无可用空间）——重试无意义
+ *   FTL_AGAIN = -2  瞬态背压（资源暂空）——调用者应**排队重试**
+ *
+ * FTL_AGAIN 的存在是为了把「资源暂空」与「真失败」分开：FC 命令/desc/buffer 池、
+ * SQ、pending 表都可能在某一瞬间满（如 16 个多 plane 子操作同时在飞），但下一轮
+ * ftl_service 抽干完成后即恢复。大请求被 FTL 拆成多个子操作时，若把这种瞬态当致命，
+ * 请求就会在第 N 个子操作处整体失败——这正是本设计要消除的（见 ftl.c ftl_drain_group）。
  */
 typedef enum
 {
     FTL_OK    = 0,  /* 成功 */
-    FTL_ERROR = -1, /* 通用失败 */
+    FTL_ERROR = -1, /* 永久失败（通用，不细分错误码） */
+    FTL_AGAIN = -2, /* 瞬态背压（资源暂空，可重试） */
 } ftl_status_t;
 
 /*

@@ -215,7 +215,8 @@ static int uart_cli_wr(int argc, char *argv[])
     g_cli_pending.req.start_lba   = lba;
     g_cli_pending.req.block_count = n;
     g_cli_pending.req.buffer      = (void *)g_wr_buf;
-    g_cli_pending.req.buffer_size = (size_t)n * FTL_READ_USER_SIZE;
+    g_cli_pending.req.buffer_size = sizeof(g_wr_buf); /* 真实缓冲容量（非 n×2KB）——
+                                                       * controller 据此拒绝会写爆 g_wr_buf 的 n */
 
     if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
     {
@@ -265,7 +266,7 @@ static int uart_cli_rd(int argc, char *argv[])
     g_cli_pending.req.start_lba   = lba;
     g_cli_pending.req.block_count = n;
     g_cli_pending.req.buffer      = (void *)g_wr_buf; /* 读数据覆盖 pattern；compare 模式直接与 pattern 比对 */
-    g_cli_pending.req.buffer_size = (size_t)n * FTL_READ_USER_SIZE;
+    g_cli_pending.req.buffer_size = sizeof(g_wr_buf); /* 真实缓冲容量（非 n×2KB），见 uart_cli_wr */
 
     if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
     {
@@ -415,9 +416,18 @@ static int uart_cli_bbt(int argc, char *argv[])
     uint8_t ce;
     uint8_t lun;
 
-    if ((argc >= 2) && (strcmp(argv[1], "--erase") == 0))
+    /* 选项**严格**校验：不认识就报错返回，绝不静默降级为只读。
+     * 静默忽略曾两次把 `-erase` / `--rease`（拼错）当成合法擦除执行完、实际一条
+     * 擦除命令都没发，看图的人只会以为"擦了但没生效"。 */
+    if (argc >= 2)
     {
+        if (strcmp(argv[1], "--erase") != 0)
+        {
+            LOGW("bbt: unknown option '%s' (only --erase)\r\n", argv[1]);
+            return FUNC_STATUS_ERROR;
+        }
         do_erase = 1U;
+        LOGW("bbt --erase: erasing EVERY block of every instance (incl. metadata). Do not reset until done.\r\n");
     }
 
     for (ch = 0U; ch < CH_NUM; ch++)
@@ -432,9 +442,21 @@ static int uart_cli_bbt(int argc, char *argv[])
                 {
                     continue;
                 }
+                /* 擦除前先关掉本实例的后台写：擦除要跑十几秒，且擦完介质已空而 RAM 状态
+                 * 陈旧（CP_TIME_INTERVAL_MS=10s 的定时 checkpoint 会把旧状态写回去，
+                 * 用户就永远看不到"擦干净"）。置位后 ftl_service 跳过 Phase 3，无清除路径。 */
+                if (do_erase != 0U)
+                {
+                    ftl->bg_suspend = 1U;
+                }
                 bbt_print_bad_map(&ftl->alloc, do_erase);
             }
         }
+    }
+
+    if (do_erase != 0U)
+    {
+        LOGW("bbt --erase: done. POWER-CYCLE NOW — the running FTL rewrites metadata if left idle.\r\n");
     }
 
     return FUNC_STATUS_SUCCESS;

@@ -1,3 +1,35 @@
+/*
+ * power_failure_recovery.c — 掉电恢复（启动三条路径：fresh / clean / power-failure）
+ *
+ * 职责：
+ *   开机时判定上次关机形态并据此恢复 RAM 状态——扫 Checkpoint 取最近快照，
+ *   扫 Journal 取最后 sequence，二者比较决定走哪条路径；以及掉电重建
+ *   Closed SB 列表（F2，全 NAND 扫描）与写指针扫描。
+ *
+ * 与 checkpoint.c / journal.c 的分工：
+ *   checkpoint.c —— Checkpoint 的写与查找（checkpoint_find_latest）；
+ *   journal.c    —— Journal 的写与回放（journal_replay）；
+ *   本文件       —— 只做**编排**：把两者拼成三条启动路径，自身不解析介质格式。
+ *
+ * 三条启动路径（状态机）：
+ *   BOOT_FRESH_START    无有效 Checkpoint（出厂首次启动）→ cache 全 INVALID + F2 重建
+ *   BOOT_CLEAN_START    journal_seq ≤ cp.journal_sequence（干净关机）→ cache 全 INVALID + F2 重建
+ *   BOOT_POWER_FAILURE  journal_seq > cp.journal_sequence（异常掉电）
+ *                       → cache 全 INVALID + journal_replay + F4 bitmap 局部加载 + F2 重建
+ *   ★ 三条路径**都**走 F2 重建——closed_sb_list 只在 RAM，掉电必丢。
+ *
+ * 文件结构：
+ *   1. 启动恢复总入口   journal_page_addr（static）/ ftl_boot_recovery
+ *   2. 三条启动路径     ftl_boot_fresh_start / ftl_boot_clean_start
+ *                       / ftl_boot_apply_region_bitmap（static）/ ftl_boot_power_failure
+ *   3. 写指针扫描       ftl_boot_scan_write_pointer（旧路径，单 Super Block 版）
+ *   4. F2 全盘重建      page_is_blank / scan_block_write_pointer / close_full_block（static）
+ *                       / ftl_rebuild_closed_sb_list
+ *
+ * ⚠ 本文件依赖 ftl_init 已完成 allocator / journal / metadata_dir 的初始化；
+ *   各路径步骤用圈码 ①②③ 编号（与 docs/design/ftl_design.md §8 对应）。
+ */
+
 #include "ftl/power_failure_recovery.h"
 
 #include "common/assertion.h"
@@ -12,6 +44,9 @@
 #include <string.h>
 
 /* ── Journal Block 页地址辅助（双 Block 双 Plane 交错）── */
+
+/* journal_page_addr — Journal 页地址构造：块 = JOURNAL_BLOCK0 + b（双块交错），
+ * plane = page & 1（双 plane 交错），cw = 0（元数据页只占 CW0）。 */
 static nand_addr_t journal_page_addr(const ftl_context_t *ftl, uint8_t b, uint8_t page)
 {
     nand_addr_t addr;
@@ -27,6 +62,17 @@ static nand_addr_t journal_page_addr(const ftl_context_t *ftl, uint8_t b, uint8_
     return addr;
 }
 
+/* --------------------------------------------------------------------
+ * ftl_boot_recovery
+ *   功能：启动恢复总入口——判上次关机形态并分发到三条启动路径之一。
+ *   参数：ftl —— FTL 实例（非 NULL 校验）；result —— 出参启动结果
+ *         （boot_type / cp_sequence / journal_entries）。
+ *   返回：FTL_OK 成功；FTL_ERROR 参数非法或子路径失败。
+ *   实现要点：① checkpoint_find_latest 取最近快照，找不到 = 首次启动走 fresh_start。
+ *             ② 扫 Journal 各页 header 取最大 page_seq——**只读不改状态**，故不调
+ *                journal_replay（后者会修改 journal 内部状态）。
+ *             ③ page_seq ≤ cp.journal_sequence ⇒ 干净关机；否则异常掉电。
+ * -------------------------------------------------------------------- */
 ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
 {
     l2p_checkpoint_header_t cp;
@@ -129,6 +175,17 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
     }
 }
 
+/* ── 三条启动路径（fresh / clean / power-failure）── */
+
+/* --------------------------------------------------------------------
+ * ftl_boot_fresh_start
+ *   功能：出厂首次启动（无 Checkpoint）——cache 全 INVALID + F2 重建，sequence 归零。
+ *   参数：ftl —— FTL 实例（非 NULL 校验）。
+ *   返回：FTL_OK / FTL_ERROR。
+ *   实现要点：① l2p_cache_init 置全 INVALID（**不清 md_dir/alloc**，见 l2p_cache.c）。
+ *             ② F2 重建把「用户数据 written 块」逐出 Free Pool（见下 ⚠）。
+ *             ③④⑤ allocator / journal 已由 ftl_init 初始化，此处不重复。
+ * -------------------------------------------------------------------- */
 ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl)
 {
     if (ftl == NULL)
@@ -161,6 +218,14 @@ ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl)
     return FTL_OK;
 }
 
+/* --------------------------------------------------------------------
+ * ftl_boot_clean_start
+ *   功能：干净关机恢复——cache 全 INVALID + F2 重建，sequence 取 Checkpoint 值。
+ *   参数：ftl —— FTL 实例；cp_sequence —— 最近 Checkpoint 的 sequence。
+ *   返回：FTL_OK / FTL_ERROR。
+ *   实现要点：与 fresh_start 唯一区别是 cp_sequence 取自 CP 而非 0；写指针不需扫
+ *             NAND（干净关机下 allocator 内存态可信）。
+ * -------------------------------------------------------------------- */
 ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
 {
     if (ftl == NULL)
@@ -190,8 +255,13 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
     return FTL_OK;
 }
 
-/*
- * ftl_boot_apply_region_bitmap - 按 checkpoint region_bitmap 局部加载 L2P cache
+/* --------------------------------------------------------------------
+ * ftl_boot_apply_region_bitmap
+ *   功能：按 checkpoint region_bitmap 局部加载 L2P cache（F4）。
+ *   参数：ftl —— FTL 实例；cp —— 最近 Checkpoint 头（含 region_bitmap）。
+ *   返回：无。
+ *   实现要点：对 cache 行做三条约束——① DIRTY 行跳过；② bitmap 置位区预载 CLEAN；
+ *             ③ 未置位区置 INVALID（懒加载）。必须在 journal_replay 之后调用。
  *
  * F4：掉电恢复时，checkpoint 只保证「bitmap 置位的 region」的 NAND 页等于
  * CP 时刻快照。boot 后对 cache 行做约束：
@@ -209,7 +279,7 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
  *
  * 必须在 journal_replay 之后调用（replay 前 cache 刚 init，所有 line
  * region_id=0，先强制会误匹配全部行）。
- */
+ * -------------------------------------------------------------------- */
 static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
                                          const l2p_checkpoint_header_t *cp)
 {
@@ -282,6 +352,15 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
     }
 }
 
+/* --------------------------------------------------------------------
+ * ftl_boot_power_failure
+ *   功能：异常掉电恢复——cache 全 INVALID → Journal 回放 → F4 bitmap 局部加载 → F2 重建。
+ *   参数：ftl —— FTL 实例；cp —— 最近 Checkpoint 头；result —— 出参启动结果。
+ *   返回：FTL_OK / FTL_ERROR 参数非法。
+ *   实现要点：② journal_replay 回放所有 page_seq > cp_sequence 的页（F10：只回放
+ *             最大一页会静默丢 ≥2 页条目）；④ F2 重建顺带替代旧 hot_sb/cold_sb
+ *             写指针扫描（原实现被 valid!=0 门控恒假）。
+ * -------------------------------------------------------------------- */
 ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
                                     const l2p_checkpoint_header_t *cp,
                                     ftl_boot_result_t             *result)
@@ -352,6 +431,16 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     return FTL_OK;
 }
 
+/* ── 写指针扫描（旧路径，单 Super Block 版）── */
+
+/* --------------------------------------------------------------------
+ * ftl_boot_scan_write_pointer
+ *   功能：扫 NAND 找某 Super Block 的写指针（第一个全 0xFF 空白页），并重建 BST 有效页位图。
+ *   参数：alloc —— 分配器；ch/ce —— 目标通道/片选；sb —— 目标 Super Block（valid==0 直接返回）。
+ *   返回：无（结果写回 sb->next_page）。
+ *   实现要点：逐 plane 逐页用 LDPC_RAW 读（跳过 ECC）；全 0xFF = 空页 = 写指针位置。
+ *             ⚠ 旧路径（单 Super Block 版），新路径见下方 F2 的 scan_block_write_pointer。
+ * -------------------------------------------------------------------- */
 void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
                                  uint8_t          ch,
                                  uint8_t          ce,
@@ -572,6 +661,16 @@ static void close_full_block(ftl_context_t       *ftl,
     }
 }
 
+/* --------------------------------------------------------------------
+ * ftl_rebuild_closed_sb_list
+ *   功能：F2 掉电重建——逐 plane 逐块扫 NAND，把「写过的物理块」拉出 Free Pool 并建
+ *         Closed 条目，同时逐页 L2P 双校验回填 valid_map。
+ *   参数：ftl —— FTL 实例；stats —— 出参统计（blocks_rebuilt / valid_pages /
+ *         partial_blocks，可为 NULL）。
+ *   返回：FTL_OK / FTL_ERROR（ftl 或 alloc->blocks 为空）。
+ *   实现要点：Policy B 下两 plane 的块不再同号 ⇒ 按**单物理块**建 Closed 条目
+ *             （另一 plane 记 FTL_BLOCK_NO_PLANE 哨兵），配对无需、也无法恢复。
+ * -------------------------------------------------------------------- */
 ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
                                         ftl_rebuild_stats_t *stats)
 {

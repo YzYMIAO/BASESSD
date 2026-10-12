@@ -2,13 +2,12 @@
 
 #include "common/assertion.h"
 #include "common/log.h"
-#include "ftl/journal.h"
-#include "ftl/l2p_cache.h"
 
 #include <stddef.h>
 
-/* 外部：request.c — 拆分多块请求 */
-int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request);
+/* 外部：request.c — 按实例边界切 run / 提交子请求 */
+int      ssd_request_split(ssd_controller_t *controller, ssd_request_t *request);
+uint64_t ssd_controller_run_end(ssd_controller_t *controller, uint64_t lba, uint64_t lba_limit);
 
 /*
  * ssd_controller_route - 按全局 LBA 路由到对应 FTL 实例
@@ -99,8 +98,7 @@ uint8_t ssd_controller_is_complete(const ssd_request_t *request)
 
 int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
 {
-    int            ret;
-    ftl_context_t *ftl;
+    int ret;
 
     if ((controller == NULL) || (request == NULL) || (controller->state != SSD_CONTROLLER_READY))
     {
@@ -124,89 +122,88 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
     request->io.on_complete     = NULL;
     request->io.on_complete_ctx = NULL;
 
-    if (request->block_count == 1U)
+    switch (request->opcode)
     {
-        /* 单块直接提交：按块 LBA 路由到对应 FTL 实例 */
-        request->io.lba    = request->start_lba;
-        request->io.buffer = request->buffer;
-        request->io.pages  = 1U;
-
-        ftl = ssd_controller_route(controller, request->io.lba);
-        /* state==READY 意味着 init 已把全部槽位绑满非空实例 */
-        ASSERT(ftl != NULL);
-
-        switch (request->opcode)
-        {
-            case SSD_REQUEST_READ:
-                if (ftl_submit_read(ftl, &request->io) != FTL_OK)
-                {
-                    LOGE("[CTRL] read submit failed lba=%lu\r\n", (unsigned long)request->io.lba);
-                    request->completion_status = SSD_STATUS_IO_ERROR;
-                    request->complete_flag     = 1U;
-                }
-                break;
-
-            case SSD_REQUEST_WRITE:
-                if (ftl_submit_write(ftl, &request->io) != FTL_OK)
-                {
-                    LOGE("[CTRL] write submit failed lba=%lu\r\n", (unsigned long)request->io.lba);
-                    request->completion_status = SSD_STATUS_NO_SPACE;
-                    request->complete_flag     = 1U;
-                }
-                break;
-
-            case SSD_REQUEST_TRIM:
-                ftl_trim(ftl, request->start_lba);
-                request->completion_status = SSD_STATUS_OK;
+        case SSD_REQUEST_READ:
+        case SSD_REQUEST_WRITE:
+            /* 缓冲容量校验：block_count 页 × 2KB 必须不超过调用者给的 buffer_size
+             * （真实隐患：wr 0 64 会写爆 CLI 的 16KB g_wr_buf）。 */
+            if (request->buffer_size < ((size_t)request->block_count * FTL_READ_USER_SIZE))
+            {
+                LOGE("[CTRL] buffer too small count=%lu need=%lu have=%lu\r\n",
+                     (unsigned long)request->block_count,
+                     (unsigned long)((size_t)request->block_count * FTL_READ_USER_SIZE),
+                     (unsigned long)request->buffer_size);
+                request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
                 request->complete_flag     = 1U;
-                break;
+                return SSD_STATUS_INVALID_ARGUMENT;
+            }
 
-            case SSD_REQUEST_FLUSH:
-                /* C3：FLUSH 落地 — 对全部 (ch,ce,lun) 实例刷 dirty L2P cache 到
-                 * NAND + 强制 Journal buffer 落盘。两个原语均同步阻塞（内部
-                 * ftl_internal_sync_wait 泵完），完成标志可直接同步置 1，
-                 * 无需走 pending 异步。 */
+            /* 读/写统一走 run 拆分（含单块）：plane 配对在 FTL 内，HIL 只按实例切段 */
+            ret = ssd_request_split(controller, request);
+            if (ret != SSD_STATUS_OK)
+            {
+                request->completion_status = (ssd_status_t)ret;
+                request->complete_flag     = 1U;
+                return ret;
+            }
+            break;
+
+        case SSD_REQUEST_TRIM:
+        {
+            uint64_t lba = request->start_lba;
+            uint64_t end = request->start_lba + request->block_count;
+
+            /* TRIM 同步完成（无异步回调）；跨实例时逐 run 提交 */
+            while (lba < end)
+            {
+                uint64_t       run_end = ssd_controller_run_end(controller, lba, end);
+                ftl_context_t *tftl    = ssd_controller_route(controller, lba);
+
+                /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
+                ASSERT(tftl != NULL);
+                ftl_trim(tftl, lba, (uint32_t)(run_end - lba));
+                lba = run_end;
+            }
+
+            request->completion_status = SSD_STATUS_OK;
+            request->complete_flag     = 1U;
+            break;
+        }
+
+        case SSD_REQUEST_FLUSH:
+            /* C3：FLUSH 落地 — 对全部 (ch,ce,lun) 实例调 ftl_flush（L2P cache 写回 +
+             * journal 尾页刷出）。同步阻塞（内部 ftl_internal_sync_wait 泵完），完成
+             * 标志可直接同步置 1，无需走 pending 异步。
+             * HIL 只调 FTL 对外接口，不再伸手进 FTL 内部原语（对齐主流）。 */
+            {
+                uint8_t fch;
+                uint8_t fce;
+                uint8_t flun;
+
+                for (fch = 0U; fch < CH_NUM; fch++)
                 {
-                    uint8_t fch;
-                    uint8_t fce;
-                    uint8_t flun;
-
-                    for (fch = 0U; fch < CH_NUM; fch++)
+                    for (fce = 0U; fce < CE_NUM; fce++)
                     {
-                        for (fce = 0U; fce < CE_NUM; fce++)
+                        for (flun = 0U; flun < LUN_NUM; flun++)
                         {
-                            for (flun = 0U; flun < LUN_NUM; flun++)
-                            {
-                                ftl_context_t *fftl = controller->ftl[fch][fce][flun];
+                            ftl_context_t *fftl = controller->ftl[fch][fce][flun];
 
-                                /* 槽位由 ssd_controller_init 绑满，恒非空 */
-                                ASSERT(fftl != NULL);
-                                (void)l2p_cache_flush_all(&fftl->cache);
-                                journal_flush_page(&fftl->journal);
-                            }
+                            /* 槽位由 ssd_controller_init 绑满，恒非空 */
+                            ASSERT(fftl != NULL);
+                            ftl_flush(fftl);
                         }
                     }
-                    request->completion_status = SSD_STATUS_OK;
-                    request->complete_flag     = 1U;
                 }
-                break;
-
-            default:
-                request->completion_status = SSD_STATUS_NOT_SUPPORTED;
+                request->completion_status = SSD_STATUS_OK;
                 request->complete_flag     = 1U;
-                break;
-        }
-    }
-    else
-    {
-        /* 多块 → 拆分提交 */
-        ret = ssd_request_split(controller, request);
-        if (ret != SSD_STATUS_OK)
-        {
-            request->completion_status = (ssd_status_t)ret;
+            }
+            break;
+
+        default:
+            request->completion_status = SSD_STATUS_NOT_SUPPORTED;
             request->complete_flag     = 1U;
-            return ret;
-        }
+            break;
     }
 
     return request->completion_status;

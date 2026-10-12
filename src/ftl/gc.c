@@ -1,3 +1,29 @@
+/*
+ * gc.c — 垃圾回收（触发判定 + 选 victim + 整 SB 搬移 + 擦除归还）
+ *
+ * 职责：
+ *   回收「无效页多」的块：按四项加权评分选 victim SB，把其有效页搬到冷块、
+ *   更新 L2P/Journal/VPC，再擦除整 SB 并归还 Free Pool；并提供五路触发判定。
+ *
+ * 与 wear_leveling.c 的分工：
+ *   GC —— 回收**无效页多**的块（空间回收，顺带磨损均衡）；
+ *   WL —— 搬运**擦得少**的块（磨损拉平，顺带 read disturb 缓解）。两者共用
+ *         gc_read_page_with_lba / gc_erase_and_free 原语，且 GC 是 WL 的擦除出口。
+ *
+ * 五路触发（gc_check_triggers，位掩码）：
+ *   T1 空闲水位 < FREE_POOL_TARGET；T2 写入量整除 GC_INTERVAL_WRITES；
+ *   T3 定时 GC_TIMER_INTERVAL_MS；T4 紧急 ≤ FREE_POOL_EMERGENCY；T5 磨损比超标。
+ *
+ * 文件结构：
+ *   1. 共用原语        gc_read_page_with_lba / gc_erase_and_free
+ *   2. 全表极值        gc_table_extremes（static）
+ *   3. 选 victim       gc_select_victim（四项加权评分）
+ *   4. 搬移            gc_migrate_sb
+ *   5. 触发判定        gc_check_triggers / gc_check_trigger
+ *
+ * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
+ */
+
 #include "ftl/gc.h"
 
 #include "common/log.h"
@@ -10,6 +36,8 @@
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
+
+/* ── 1. 共用原语 ── */
 
 /*
  * gc_read_page_with_lba - 读取一页 NAND，返回用户数据 + 从 META 提取的 LBA
@@ -126,6 +154,16 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
     return FTL_OK;
 }
 
+/* --------------------------------------------------------------------
+ * gc_erase_and_free
+ *   功能：擦除 victim SB 的各 plane 块并归还 Free Pool；擦失败的块标坏；最后从 Closed 列表移除。
+ *   参数：alloc —— 分配器；victim —— 待擦 SB（须 valid==0）；now —— 当前写入量（记 last_pe_ts）。
+ *   返回：无（参数非法 / victim->valid != 0 直接返回）。
+ *   实现要点：定位 victim 在 closed_sb_list 的索引时**两 plane 都比对**（Policy B 下退化单
+ *             plane 条目的 plane_blocks[0] 是哨兵，只比 plane0 会命中另一条同哨兵条目）；
+ *             擦成功 ⇒ erase_count++、记 last_pe_ts、清位图、归还；擦失败 ⇒ bbt_mark_bad；
+ *             末尾移除 closed 条目（防列表爆炸 + 已回收 SB 被重选为 victim 的无限空转）。
+ * -------------------------------------------------------------------- */
 void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t now)
 {
     uint8_t  plane;
@@ -198,6 +236,8 @@ void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t n
     }
 }
 
+/* ── 2. 全表极值 ── */
+
 /*
  * gc_table_extremes - 全表（非坏块）磨损/时间极值，一次扫描
  *
@@ -250,6 +290,18 @@ static void gc_table_extremes(const ftl_allocator_t *alloc, uint32_t *min_erase,
     *max_pe_ts = max_t;
 }
 
+/* ── 3. 选 victim ── */
+
+/* --------------------------------------------------------------------
+ * gc_select_victim
+ *   功能：从 Closed SB 列表里按四项加权评分选回收代价最小的 SB 作 victim。
+ *   参数：alloc —— 分配器；victim —— 出参（指向 closed_sb_list 内的条目）。
+ *   返回：1 找到；FTL_OK(0) 未找到 / 参数非法。
+ *   实现要点：四项各自归一化到 0..1000——vr 有效页率、er 磨损率（越大越该回收旧块）、
+ *             cp 温度（COLD 加分）、yp 年龄（越老越优先）；cost = 加权和，取小者胜；
+ *             cost 相等取有效页更少者（确定性）。erase 项用 uint64_t 防溢出；
+ *             age 项 `max_pe_ts > pe_min` 兜住 max_pe_ts==0 与 pe_min 越界两种退化（取中性 0）。
+ * -------------------------------------------------------------------- */
 int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 {
     uint32_t min_erase;
@@ -359,6 +411,17 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
     return found;
 }
 
+/* ── 4. 搬移 ── */
+
+/* --------------------------------------------------------------------
+ * gc_migrate_sb
+ *   功能：把 victim SB 的所有有效页搬到 Cold 流新块，更新 L2P/Journal/VPC。
+ *   参数：alloc —— 分配器；cache —— L2P 缓存；journal —— 日志（可为 NULL）；victim —— 待搬 SB。
+ *   返回：实际搬移页数（int）；FTL_OK(0) 无搬移 / 参数非法。
+ *   实现要点：直接扫有效页位图，只搬置位页（免读无效页）；每页先查 L2P 是否仍指向本 PBA
+ *             （被覆盖则清位跳过）；搬移读顺带记录 ECC 趋势 + read_count（慢死预测闭环）；
+ *             搬完先 journal_flush_page 再返回（调用方随后擦 victim，防掉电回放指向已擦块）。
+ * -------------------------------------------------------------------- */
 int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *journal, super_block_t *victim)
 {
     uint8_t  plane;
@@ -479,6 +542,17 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
     return (int)migrated;
 }
 
+/* ── 5. 触发判定 ── */
+
+/* --------------------------------------------------------------------
+ * gc_check_triggers
+ *   功能：算五路触发位掩码（调用点据此决定排一次 GC 还是当场同步回收）。
+ *   参数：alloc —— 分配器；total_writes —— 累计写次数；elapsed_ms —— 距上次 GC 的毫秒数。
+ *   返回：GC_TRIGGER_* 位掩码；0 无触发（含 alloc==NULL）。
+ *   实现要点：T1 水位 < FREE_POOL_TARGET；T2 写入量整除 GC_INTERVAL_WRITES；T3 定时；
+ *             T4 紧急 ≤ FREE_POOL_EMERGENCY（与 T1 同源但阈值更低）；T5 磨损比 max/min 超标
+ *             （min==0 不触发——"有块从未被擦"是静态 WL 的职责；max 地板防早期空跑）。
+ * -------------------------------------------------------------------- */
 uint32_t gc_check_triggers(const ftl_allocator_t *alloc, uint32_t total_writes, uint32_t elapsed_ms)
 {
     uint32_t triggers = 0U;
@@ -528,6 +602,7 @@ uint32_t gc_check_triggers(const ftl_allocator_t *alloc, uint32_t total_writes, 
     return triggers;
 }
 
+/* gc_check_trigger — 布尔便捷：任一触发位命中即 1，否则 FTL_OK(0) */
 int gc_check_trigger(const ftl_allocator_t *alloc, uint32_t total_writes, uint32_t elapsed_ms)
 {
     return (gc_check_triggers(alloc, total_writes, elapsed_ms) != 0U) ? 1 : FTL_OK;

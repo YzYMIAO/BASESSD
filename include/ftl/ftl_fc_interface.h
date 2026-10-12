@@ -43,6 +43,7 @@
  * 「数据拷贝」寄存器——描述符链是固件填的、数据是固件 DMA 填的），故落在本层。
  */
 
+#include "common/assertion.h"
 #include "fc/fc_interface.h"
 #include "ftl/ftl_type.h"
 #include "nand/nand_config.h"
@@ -112,6 +113,19 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
 
 /* ── PBA helper（两者都**自己算整段位图**并传给建链入口） ── */
 
+/*
+ * ftl_cmd_setup_ppa - 单一 PBA → 拓扑 + PAA + 整段 desc 链
+ *
+ * 把 PBA 拆成拓扑（ch/ce/lun 填 cmd->config）与行地址（pba_to_paa 填 cmd->paa，v47
+ * 在 FTL 侧一次转出，FC 层不再见 PBA），随后按「本命令 plane 段内全部 CW」建整条
+ * desc 链（自己算 fc_command_plane_span_cw_bitmap 作实参，须在 paa 写好之后算）。
+ *
+ * 隐含「两 plane 同 block」——两 plane 独立分块（Policy B）请用 ftl_cmd_setup_ppa_pair()。
+ *
+ * @param cmd  FC 命令（须已设 config.operation / multi_plane）
+ * @param pba  目标物理块地址（必须合法：fc.c 拿 ch/ce/lun 当数组下标 → 越界即栈越界写）
+ * @return FTL_OK / FTL_ERROR（cmd 为 NULL / 建链失败）
+ */
 ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
 
 /*
@@ -163,6 +177,12 @@ static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *add
         return FTL_ERROR;
     }
 
+    /* 边界不变量：同 ftl_cmd_setup_ppa —— 进 FC 的 ch/ce/lun 被 fc_poll_fill_queue 当
+     * suspended[][][] 下标直接用，越界即栈越界写。本入口**不经过** ftl_cmd_setup_ppa
+     * （直填 addr，省打包拆包），校验必须自带；否则 fc.c 那句「PBA 已过 pba_is_valid()
+     * 校验」在遍历路径（同步页原语 / GC / 元数据扫描 / Checkpoint）上仍是假命题。 */
+    ASSERT(pba_is_valid(pba_from_addr(addr)));
+
     cmd->config.ch  = (DWORD)addr->ch;
     cmd->config.ce  = (DWORD)addr->ce;
     cmd->config.lun = (DWORD)addr->lun;
@@ -176,7 +196,30 @@ static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *add
 
 /* ── 数据搬运（v13 由 FC 上移）── */
 
+/*
+ * ftl_cmd_write_data - 把外部数据按 CW 顺序写入 desc 链上各 CW 的 USER 区
+ *
+ * v13 由 FC 上移：硬件 FCC 不提供「按 CW 拷贝」寄存器，数据由固件在 desc 链上逐 CW 填。
+ * 遍历界走 desc 链（链长度是 CW 数的唯一真值）；数据耗尽后剩余 CW 的 USER 区填 0xFF
+ * dummy（不把上一轮残值写进 NAND）。
+ *
+ * @param cmd     已建链的命令（desc_id 有效）
+ * @param data    源数据
+ * @param length  字节数
+ * @return FTL_OK / FTL_ERROR（链上 desc 无 buffer）
+ */
 ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t length);
+
+/*
+ * ftl_cmd_read_data - 从 desc 链各 CW 的 USER 区按链序拷出到外部缓冲
+ *
+ * 与 ftl_cmd_write_data 对称（v13 由 FC 上移）；遍历界走 desc 链，数据够即停。
+ *
+ * @param cmd     已完成的命令（desc_id 有效）
+ * @param buffer  输出缓冲
+ * @param length  字节数
+ * @return FTL_OK / FTL_ERROR（链上 desc 无 buffer）
+ */
 ftl_status_t ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length);
 
 /* ── 内部同步 NAND 操作（仅保留 sync_wait）── */
@@ -212,6 +255,12 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
  * 共同契约：返回 FTL_ERROR 时命令**已释放**、buffer 内容未定义；调用者不应再
  * 自行 fc_command_release。共同的命令配置：单 plane、FC_CHAIN_END、LP 页、
  * CW 0..3（擦除为 0，无数据链）。
+ *
+ * 【成败判据】返回 FTL_OK ⇒ 页内容**可信**；判据是 FC_CW_STATUS_ERROR_MASK 全集
+ * （NAND_FAIL / TIMEOUT / CRC_ERROR / UNC / MATA_ERROR / RAID_ERROR 任一置位即
+ * FTL_ERROR），与 fc_command.h 的链级判据同口径。两个例外：ftl_sync_read_page_raw
+ * 与 ftl_sync_read_meta / ftl_sync_read_column 刻意**不看**这些位（坏页的原始位与
+ * spare 正是它们的返回物），成败由调用者按内容自判。
  */
 
 typedef struct
@@ -223,8 +272,19 @@ typedef struct
     lba_t   lba;    /* META 源：**页** LBA（建链时 << CW_WIDTH 成扇区 LBA）；元数据页传 0 */
 } ftl_page_cfg_t;
 
+/* 「本页 LBA 未知」哨兵：只传给 FTL_PAGE_CFG_DATA_ANY。
+ * 页 LBA 的有效上界 = L2P_REGIONS_PER_INSTANCE × L2P_ENTRIES_PER_REGION（= 2^20），
+ * 故 0xFFFFFFFF 不可能是一个真实页 LBA。 */
+#define FTL_LBA_UNKNOWN (0xFFFFFFFFUL)
+
 #define FTL_PAGE_CFG_META(module)      (&(const ftl_page_cfg_t){FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, (uint8_t)(module), 0U})
 #define FTL_PAGE_CFG_DATA(module, lba) (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, (uint8_t)(module), (lba_t)(lba)})
+/* 数据页但**页 LBA 未知**（Read Recovery 的邻近页辅助读）：CRC/加扰照常开，但命令的
+ * META 填 FC_META_UNKNOWN ⇒ 跳过 FC 侧「页内 META 与本命令 LBA 比对」这一项，只保留
+ * plane/cw 三位自洽校验（见 fc_data_path_meta_check）。
+ * ⚠ 这类读**不要**用 FTL_PAGE_CFG_DATA(module, 0) 代替：那是"本页 LBA 就是 0"，
+ *   比对项会拿 0 去撞页内真实 META ⇒ 恒置 MATA_ERROR（旧实现因忽略错误位而看不出来）。 */
+#define FTL_PAGE_CFG_DATA_ANY(module) (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, (uint8_t)(module), (lba_t)FTL_LBA_UNKNOWN})
 
 /* 写页：OP_NORMAL_PROGRAM_PAGE。data/length 为空时只发命令不搬数据。 */
 ftl_status_t ftl_sync_write_page(nand_addr_t addr, const void *data, uint32_t length, const ftl_page_cfg_t *cfg);

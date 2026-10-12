@@ -1,3 +1,29 @@
+/*
+ * wear.c — 磨损计数持久化（Wear 表：页式追加日志）
+ *
+ * 职责：
+ *   把每个块的读/擦计数（read_count / erase_count）持久化到固定块 WEAR_BLOCK 上的
+ *   **页式追加日志**——常态增量写脏块、写满则 compact 成全量快照；开机逐页回放恢复计数。
+ *
+ * 与 wear.h / wear_leveling.c 的分工：
+ *   wear.h            —— wear_page_t / wear_entry_t 格式 + 宏；
+ *   本文件            —— 持久化（日志追加/compact/回放）+ 脏位图；
+ *   wear_leveling.c   —— 用这些计数做静态磨损均衡（搬移决策），不碰持久化。
+ *
+ * 介质模型（P0-1）：
+ *   块 WEAR_BLOCK（plane 0）上按页 0..PAGES_PER_BLOCK-1 **只追加**；页序 == sequence 序。
+ *   一条记录 = 一页 = 头（magic+sequence+entry_count+crc）+ 最多 WEAR_ENTRY_MAX 条
+ *   (block, read_count, erase_count)。回放**绝对值 + 最新胜**（后写覆盖先写）。
+ *
+ * 文件结构：
+ *   1. 脏位图            wear_dirty_set / wear_dirty_get / wear_dirty_count / wear_mark_dirty
+ *   2. 页地址 / 写页     wear_page_addr / wear_write_page
+ *   3. 日志写             wear_write_range / wear_compact
+ *   4. 开机回放 / 落盘   wear_init / wear_flush
+ *
+ * ⚠ file-scope static ⇒ **单实例**（与 bbt.c 同一局限）。提维度时与 bbt/completion_table 一并搬。
+ */
+
 #include "ftl/wear.h"
 
 #include "common/boot_policy.h"
@@ -21,7 +47,7 @@ static uint32_t g_wear_last_flush_writes;           /* 上次落盘时的 total_
 static uint32_t g_wear_last_flush_ms;               /* 上次落盘时刻（ms）*/
 static uint8_t  g_wear_dirty[FTL_BLOCK_TOTAL / 8U]; /* 脏位图：哪些块的计数变了 */
 
-/* ── 脏位图（512 B，按 gblock 置位；越界忽略）── */
+/* ── 1. 脏位图（512 B，按 gblock 置位；越界忽略）── */
 
 static void wear_dirty_set(uint16_t gblock)
 {
@@ -33,6 +59,7 @@ static int wear_dirty_get(uint16_t gblock)
     return (int)((g_wear_dirty[gblock >> 3] >> (gblock & 7U)) & 1U);
 }
 
+/* wear_dirty_count — 置位块数（= 本次 flush 需写的条目数，popcount 逐字节累加） */
 static uint32_t wear_dirty_count(void)
 {
     uint32_t n = 0U;
@@ -46,6 +73,7 @@ static uint32_t wear_dirty_count(void)
     return n;
 }
 
+/* wear_mark_dirty — 标记某块的计数已变（越界忽略）；计数变更点调用，flush 时只写脏块 */
 void wear_mark_dirty(uint16_t gblock)
 {
     if (gblock < FTL_BLOCK_TOTAL)
@@ -53,6 +81,8 @@ void wear_mark_dirty(uint16_t gblock)
         wear_dirty_set(gblock);
     }
 }
+
+/* ── 2. 页地址 / 写页 ── */
 
 /* ── 固定位置页地址（WEAR_BLOCK，plane 0，页 0..PAGES_PER_BLOCK-1）── */
 static nand_addr_t wear_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t page)
@@ -90,6 +120,8 @@ static ftl_status_t wear_write_page(ftl_allocator_t *alloc, wear_page_t *page, u
     g_wear_next_page++;
     return FTL_OK;
 }
+
+/* ── 3. 日志写 ── */
 
 /*
  * wear_write_range - 把计数流式写成日志页
@@ -170,6 +202,16 @@ static ftl_status_t wear_compact(ftl_allocator_t *alloc)
     return FTL_OK;
 }
 
+/* ── 4. 开机回放 / 落盘 ── */
+
+/* --------------------------------------------------------------------
+ * wear_init
+ *   功能：开机逐页回放 WEAR_BLOCK 日志，恢复各块读/擦计数；并打印观测口。
+ *   参数：alloc —— 分配器（承载计数）。
+ *   返回：FTL_OK 成功（含冷启动无有效页）；FTL_ERROR 参数非法。
+ *   实现要点：页序 == sequence 序（只追加），故**第一个无效页即日志末尾**，回放到此为止；
+ *             无有效页 = 冷启动（计数保持 ftl_init 的零值），**不 brick 开机**（非致命）。
+ * -------------------------------------------------------------------- */
 ftl_status_t wear_init(ftl_allocator_t *alloc)
 {
     wear_page_t page;
@@ -265,6 +307,15 @@ ftl_status_t wear_init(ftl_allocator_t *alloc)
     return FTL_OK;
 }
 
+/* --------------------------------------------------------------------
+ * wear_flush
+ *   功能：把脏块计数落盘——按节拍门决定是否落；增量追加，页不够则 compact 全量快照。
+ *   参数：alloc —— 分配器；total_writes —— 当前累计写次数（节拍判据之一）。
+ *   返回：FTL_OK 成功（含无脏 / 节拍未到早退）；FTL_ERROR 参数非法 / 写或 compact 失败（脏位保留）。
+ *   实现要点：节拍 = 定时（WEAR_FLUSH_INTERVAL_MS）**或** 写入增量（WEAR_FLUSH_ERASE_DELTA，
+ *             擦除活跃度的代理），任一满足即落盘；剩余页装不下脏条目 ⇒ compact（擦块+全量）；
+ *             成功后清脏位图并更新节拍基准。
+ * -------------------------------------------------------------------- */
 ftl_status_t wear_flush(ftl_allocator_t *alloc, uint32_t total_writes)
 {
     const ssd_platform_ops_t *platform;

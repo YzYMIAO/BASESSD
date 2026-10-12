@@ -84,6 +84,8 @@ int bbt_scan_factory(ftl_allocator_t *alloc);
  * ⚠ do_erase != 0 时**额外擦除本实例每个 plane 的每一个块**（含
  *   0..FTL_METADATA_BLOCK_END 的元数据区）⇒ 会抹掉该实例的全部 FTL 元数据与用户数据。
  *   只在专门的坏块体检时用，绝不可放进开机路径。
+ *   擦除是**无条件**的：即使 ① 已判定该块坏，也照擦（"全片擦除"必须连坏块一起抹掉，
+ *   否则元数据块被跳过 ⇒ 擦完 FTL 仍读回旧状态）。
  *
  * 判定（两条任一成立即坏块）：
  *   ① **擦除前**读该块 Page 0 列 2048 的 spare 首字节，非 0xFF（出厂坏块标记，x8 为 00h）；
@@ -94,11 +96,13 @@ int bbt_scan_factory(ftl_allocator_t *alloc);
  *   旧实现先擦后读、且读的是 CW0 列 0（FC 逻辑 META），故永远读不到出厂标记。
  *   列 2048 由 ftl_sync_read_column()（OP_READ_COLUMN）够到。
  *
- * 打印（每排 BBT_MAP_COLS_PER_PLANE 个块，各 plane 一组、组间留空）：
+ * 打印（每排 BBT_MAP_COLS_PER_PLANE 个块，各 plane 一组、组间留空；每格定宽 4）：
  *     CH=0  CE=0  LUN=0
- *               PLANE=0                                        PLANE=1
- *     FF FF FF FF 4 FF FF FF FF FF FF FF FF FF FF FF   FF FF ... FF 15
- *   好块打 `FF`，坏块打**本排内的列号**（0..15，十进制，跨排重新计数）。
+ *                      PLANE=0                          PLANE=1
+ *       FF   FF 2047   FF   FF   FF   FF   FF      FF   FF   FF   FF   FF   FF   FF   FF
+ *   好块打 `FF`，坏块打**本 plane 的绝对块号**（0..BLOCKS_PER_PLANE-1，十进制）。
+ *   ⚠ 不是排内列号——列号每排重新计数（0..15），读图的人得自己算 `排号×列数+列号`，
+ *     且 1~2 位的数字与 `FF` 并排极易被误读成十六进制字节值。
  *
  * ⚠ 本片芯片若已被整片擦过，出厂标记即已丢失 ⇒ 只会读到全 0xFF（不是 bug）。
  *

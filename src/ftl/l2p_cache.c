@@ -1,3 +1,31 @@
+/*
+ * l2p_cache.c — L2P Region 缓存（CLOCK 替换 + 脏行写回 + thrashing 检测）
+ *
+ * 职责：
+ *   把 L2P 映射表按 region（L2P_ENTRIES_PER_REGION 条 entry/region）缓存进 SRAM，
+ *   提供 lba→pba 的读/写；未命中时经 Metadata Directory 定位并从 NAND 加载；
+ *   脏行写回走「追加写」日志块。
+ *
+ * 与 l2p_cache.h 的分工：
+ *   l2p_cache.h —— 缓存结构（l2p_cache_t / l2p_cache_line_t）+ 尺寸宏 + API；
+ *   本文件     —— 查找 / 驱逐 / 加载 / 写回的实现 + thrashing 窗口检测。
+ *
+ * 替换算法（CLOCK，ADR-5）：
+ *   access_count 作引用位，clock_hand 环形扫描；命中置 1，逐行递减给"第二次机会"；
+ *   全 FLUSHING 时无法驱逐（返回 -1）。见 l2p_cache_evict_one。
+ *
+ * 写模型（P0-2）：
+ *   脏行写回 = 从 L2P 日志块取**下一个空槽**追加写（绝不就地覆盖——NAND 只能 1→0，
+ *   二次编程 = 新数据 AND 旧数据 = 静默损坏）；新位置由 metadata_dir_commit_region 记账。
+ *
+ * 文件结构：
+ *   1. 初始化         l2p_cache_init
+ *   2. Thrashing 检测 l2p_cache_note_access（static）
+ *   3. 查找/驱逐/加载 l2p_cache_find / evict_one / find_or_load（static）
+ *   4. 对外读写       l2p_cache_read / l2p_cache_write
+ *   5. 写回           l2p_cache_flush_one / l2p_cache_flush_all
+ */
+
 #include "ftl/l2p_cache.h"
 
 #include "common/log.h"
@@ -7,6 +35,14 @@
 
 #include <string.h>
 
+/* --------------------------------------------------------------------
+ * l2p_cache_init
+ *   功能：初始化 cache——清脏标记、逐行置 INVALID、复位 CLOCK 与统计。
+ *   参数：cache —— 待初始化对象；ch/ce/lun —— 本实例拓扑（展开物理地址用）。
+ *   返回：无（cache == NULL 直接返回）。
+ *   实现要点：⚠ md_dir / alloc **刻意不清**（宿主注入的依赖，见函数内长注释）——
+ *             在此清成 NULL 会解绑 ftl_init 刚绑好的 Directory 且无人再绑。
+ * -------------------------------------------------------------------- */
 void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
 {
     uint16_t i;
@@ -37,8 +73,20 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
     cache->clock_hand = 0U;
     cache->hit_count  = 0U;
     cache->miss_count = 0U;
-    cache->md_dir     = NULL;
-    cache->alloc      = NULL;
+
+    /* ⚠ md_dir / alloc **刻意不在这里清**。
+     *
+     * 这两个指针是**宿主注入的依赖**（由 ftl_init 经 l2p_cache_set_md_dir 绑定），
+     * 不是 cache 自己的状态。本函数在三条开机恢复路径（fresh / clean / power-failure）
+     * 里都会被调用——若在此清成 NULL，就会把 ftl_init 刚绑好的 Directory 解绑，且
+     * **无人再绑**（l2p_cache_set_md_dir 只在 ftl_init 调）。后果：
+     *   ① l2p_cache_find_or_load 永远走固定位置回退 ⇒ 读的永远是**哨兵页**（全 0xFF
+     *      = 未映射），Directory 形同虚设；
+     *   ② l2p_cache_flush_one 恒 FTL_ERROR（依赖为 NULL）⇒ L2P region **从不落盘**
+     *      ⇒ metadata_dir_update 不被调用 ⇒ dir->dirty 恒 0 ⇒ 首次 flush_to_anchor
+     *      早退 ⇒ Anchor **从不写**（开机 [META] anchor_seq 恒 0）。
+     * ftl_init 侧本来就在 init 之后显式 l2p_cache_set_md_dir(NULL, &alloc) 声明"尚未加载"，
+     * 故此处无需（也不应）代劳。 */
 
     /* Thrashing 检测窗口（P1-4）：开机从「非降级」起步 */
     cache->window_access = 0U;
@@ -267,11 +315,27 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
             /* 读失败，保持 INVALID，entries 为 FTL_PBA_INVALID */
             line->state = L2P_CACHE_INVALID;
         }
+
+        /* ⚠ 临时诊断探针（`log level debug` 才打印）：定位"重启后 L2P 条目是垃圾"。
+         * 打的是**解析出的物理页**（block/plane/page）+ 目录命中标志 + 读回的头 4 条，
+         * 一眼可判：读的是哨兵块还是日志块、页里到底是什么。定位完即删。 */
+        LOGD("[L2P] r=%u dir=%u b=%u pl=%u pg=%u ret=%d e=%08lx %08lx %08lx %08lx\r\n",
+             (unsigned)region_id,
+             (unsigned)((region_paa != NAND_PBA_INVALID) ? 1U : 0U),
+             (unsigned)region_addr.block,
+             (unsigned)region_addr.plane,
+             (unsigned)region_addr.page,
+             ret,
+             (unsigned long)line->entries[0],
+             (unsigned long)line->entries[1],
+             (unsigned long)line->entries[2],
+             (unsigned long)line->entries[3]);
     }
 
     return line;
 }
 
+/* l2p_cache_read — 读 lba 的 PBA；越界 / 未命中 / 未映射一律返回 FTL_PBA_INVALID */
 nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba)
 {
     uint16_t          region_id;
@@ -295,6 +359,7 @@ nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba)
     return line->entries[entry_idx];
 }
 
+/* l2p_cache_write — 更新 lba 的 PBA，置行 DIRTY 并置 region 脏标记（越界 no-op） */
 void l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
 {
     uint16_t          region_id;
@@ -322,6 +387,18 @@ void l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
     cache->region_dirty_bitmap[region_id / 32U] |= (1UL << (region_id & 31U));
 }
 
+/* --------------------------------------------------------------------
+ * l2p_cache_flush_one
+ *   功能：把一行脏 region 写回 NAND L2P 日志块（追加写），成功后登记新位置。
+ *   参数：cache —— 缓存；line_idx —— 行下标。
+ *   返回：FTL_OK 成功（含"本行非 DIRTY 无需 flush"）；FTL_ERROR 参数非法 / 无依赖 /
+ *         分配不到槽 / 写失败。
+ *   实现要点：
+ *     · 置 FLUSHING 防 evict 选中；追加写绝不就地覆盖（见文件头写模型）。
+ *     · **先写后记账**（顺序不可倒）：掉电最多多留一份旧记录，不会丢映射。
+ *     · 分配不到块 ⇒ 直接 FTL_ERROR，**不回退固定位置**（固定层是哨兵，写进去等于
+ *       把"未映射"变成"有映射"，且下次再写同一页即损坏）。
+ * -------------------------------------------------------------------- */
 ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
 {
     l2p_cache_line_t *line;
@@ -397,6 +474,7 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
     return ret;
 }
 
+/* l2p_cache_flush_all — 逐行 flush 全部 DIRTY 行；任一失败立即返回该错误码（不跳过） */
 ftl_status_t l2p_cache_flush_all(l2p_cache_t *cache)
 {
     uint16_t i;

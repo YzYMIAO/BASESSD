@@ -39,14 +39,24 @@ typedef struct
 
 /* ── 路由表 API ── */
 
-void                completion_table_init(void);
-ftl_status_t        completion_table_add(uint16_t                cmd_id,
-                                         completion_handler_fn_t handler,
-                                         void                   *ctx);
-void                completion_table_remove(uint16_t cmd_id);
+/* completion_table_init - 清空精确路由表 + default handler + 实例路由表（开机一次） */
+void completion_table_init(void);
+
+/* completion_table_add - 为 cmd_id 注册精确路由 handler（优先于 default）
+ * @return FTL_OK；FTL_ERROR handler 为 NULL 或表满（COMPLETION_TABLE_SIZE） */
+ftl_status_t completion_table_add(uint16_t                cmd_id,
+                                  completion_handler_fn_t handler,
+                                  void                   *ctx);
+
+/* completion_table_remove - 释放 cmd_id 的精确路由表项（未找到 no-op） */
+void completion_table_remove(uint16_t cmd_id);
+
+/* completion_table_lookup - 按 cmd_id 查精确路由表项；未注册返回 NULL */
 completion_entry_t *completion_table_lookup(uint16_t cmd_id);
-void                completion_table_set_default(completion_handler_fn_t handler,
-                                                 void                   *ctx);
+
+/* completion_table_set_default - 设置未精确路由命令的兜底 handler（FTL 侧 = ftl_handle_completion） */
+void completion_table_set_default(completion_handler_fn_t handler,
+                                  void                   *ctx);
 
 /*
  * completion_table_count - 当前占用（未决）的 completion 表项数

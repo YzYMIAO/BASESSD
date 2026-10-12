@@ -37,6 +37,11 @@
 
 #define FTL_READ_USER_SIZE (2048U) /* 一次读返回的用户数据大小 = 4 CW × 512B */
 
+/* 一个组的子操作连续遇 FTL_AGAIN（瞬态背压）而**无任何进展**的轮数上限。
+ * 超过即判真卡死：弃未下发子操作、组报 IO_ERROR（已下发的照常完成）。
+ * 预算取 8——正常背压在下轮 ftl_service 抽干完成后即恢复，连续 8 轮无进展属异常。 */
+#define FTL_DRAIN_STALL_MAX (8U)
+
 /* 最大有效 LBA（全局）= 映射单元总数（FTL_IU_TOTAL，见 ftl/ftl_config.h §一）。
  * 当前几何下 = 2048×512 = 1,048,576，与用户容量 512 MiB 逐条对应。 */
 #define FTL_LBA_MAX (FTL_IU_TOTAL)
@@ -52,8 +57,12 @@ typedef struct ftl_context
     l2p_cache_t cache;
 
     /* Pending Request 表（F6：per-instance，本实例异步请求追踪）
-     * 由 pending.c 操作，submit 时按值嵌入 io 请求。 */
+     * 由 pending.c 操作：每个子操作一个槽（command_id → 组 + 子操作字段）。 */
     ftl_pending_req_t pending[FTL_PENDING_MAX];
+
+    /* 完成组表（S1：一条 host 请求 = 一个组，聚合其全部子操作的完成通知）
+     * 由 pending.c 操作（pending_group_*）。 */
+    ftl_io_group_t groups[FTL_GROUP_MAX];
 
     /* Allocator */
     ftl_allocator_t alloc;
@@ -74,6 +83,14 @@ typedef struct ftl_context
 
     /* 统计 */
     uint32_t total_writes;
+
+    /* 后台写闸门（`bbt --erase` 置位）。
+     * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的
+     * 布局 ⇒ 唯一正确的后续动作是复位。置位后 ftl_service 的 Phase 3（IDLE/NORMAL/BUSY
+     * 三级后台：checkpoint / bbt / wear / journal / GC 全在这里）整体跳过，杜绝把旧
+     * RAM 状态写回擦净的芯片；Phase 1/2/2.5 照常（NAND 泵与 host IO 不受影响）。
+     * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
+    uint8_t bg_suspend;
 
     /* 慢死预测巡检节流（F6：per-instance，原全局 g_rr_last_scan_ms） */
     uint32_t rr_last_scan_ms;
@@ -96,58 +113,62 @@ ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params);
 /*
  * ftl_service - FTL 主循环调度（每次 main loop 调用一次）
  *
- * Phase 1: fc_service() 推进 NAND
- * Phase 2: fc_poll_completion() 处理完成回调（路由到 pending 表等）
- * Phase 3: 三级后台任务
+ * Phase 1:   fc_service() 推进 NAND
+ * Phase 2:   completion_table_drain() 处理完成回调（路由到 pending/组）
+ * Phase 2.5: 补发各组的待下发子操作（host IO 优先于后台）
+ * Phase 3:   三级后台任务
  *
  * @param ftl  FTL 上下文
  */
 void ftl_service(ftl_context_t *ftl);
 
 /*
- * ftl_submit_read - 非阻塞提交读请求（单页或多 Plane）
+ * ftl_submit_read - 非阻塞提交读请求（长度任意）
  *
- * 内部：
- *   ① l2p_cache_read() 查 PBA
- *   ② PBA 无效 → memset(buffer, 0), 立即返回
- *   ③ FC 命令构造 + submit（异步）
- *   ④ 注册 pending（io 按值嵌入）
- *   ⑤ 数据在 ftl_service() Phase 2 中路由到 buffer
+ * 请求带**长度**（req->count 个连续 LBA），FTL 自行决定单/双 plane 拆分：
+ *   ① 建完成组（一条 host 请求 = 一个组）
+ *   ② 逐子操作下发（每个子操作 2 页 Multi-Plane，末条奇数页时单 plane）
+ *   ③ 未映射子操作同步返回全零；余下子操作遇资源背压留待 ftl_service Phase 2.5
+ *   ④ 数据在 completion_table_drain 中路由回 buffer
+ *
+ * ⚠ 一次调用的完成通知（complete_flag/status_out/on_complete）**只在全部子操作
+ *   完成后触发一次**。返回 FTL_OK 仅表示已受理（含部分子操作排队），不代表已完成。
  *
  * @param ftl  FTL 上下文
- * @param req  IO 请求描述（lba/buffer/pages/complete_flag/status_out/on_complete/ctx）
- * @return FTL_OK 成功提交，FTL_ERROR 失败
+ * @param req  IO 请求描述（lba/buffer/count/complete_flag/status_out/on_complete/ctx）
+ * @return FTL_OK 已受理，FTL_ERROR 立即失败（参数非法 / LBA 越界 / 组槽满）
  */
 ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req);
 
 /*
- * ftl_submit_write - 非阻塞提交写请求（单页或双 Plane Multi-Plane）
+ * ftl_submit_write - 非阻塞提交写请求（长度任意）
  *
- * req->pages=2 时使用双 Plane Multi-Plane PROGRAM（OP_PROGRAM_PAGE_MULTI_PLANE），
- * 在同一 Super Block 页内同时写入两个 Plane。数据 buffer 需包含两个连续页的数据
- * （总长度 = FTL_READ_USER_SIZE × req->pages 字节）。
- *
- * 内部：
- *   ① allocator_alloc_pair(FTL_TEMP_HOT) → new_pba[0]/new_pba[1]（两 plane 各自独立选块）
- *   ② l2p_cache_read(lba / lba+1) → old_pba / old_pba1（journal 用）
- *   ③ FC 命令构造（逐 plane 各自的 PBA 建 desc 链）+ submit（异步写 NAND）
- *   ④ 注册 pending（complete_flag 在 NAND PROGRAM 完成后置 1）
- *   ⑤ Journal + L2P 在 completion handler 中确认 NAND PROGRAM 成功后执行
+ * 与 ftl_submit_read 对称：FTL 按 count 拆子操作，每子操作分配新 PBA（**逐 plane
+ * 独立选块**——Policy B：SB 两 plane 不再同号）+ 建 desc 链 + 异步写 NAND。
+ * Journal + L2P 在 completion handler 中确认 NAND PROGRAM 成功后执行。
  *
  * @param ftl  FTL 上下文
- * @param req  IO 请求描述（pages=2 时 io.lba 与 io.lba+1 是两个连续 LBA，分别
- *             映射 plane0/plane1 页，与奇偶无关；Policy B 下两 plane 独立选块，
- *             plane1 的实际烧录位置由 pending->new_pba1 记录，不从 plane0 派生）
- * @return FTL_OK 成功提交，FTL_ERROR 失败
+ * @param req  IO 请求描述（同 ftl_submit_read）
+ * @return FTL_OK 已受理，FTL_ERROR 立即失败
  */
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);
 
 /*
- * ftl_trim - 取消 LBA 映射（非阻塞）
+ * ftl_flush - 落盘已持久化映射（L2P cache 写回 + journal 尾页刷出）
+ *
+ * 语义 = "把 dirty 元数据落到 NAND"，**非** NVMe 式 barrier（不等待在飞/排队的写）。
  *
  * @param ftl  FTL 上下文
- * @param lba  逻辑地址（uint64_t）
  */
-void ftl_trim(ftl_context_t *ftl, uint64_t lba);
+void ftl_flush(ftl_context_t *ftl);
+
+/*
+ * ftl_trim - 取消 [lba, lba+count) 的 LBA 映射（非阻塞、同步完成）
+ *
+ * @param ftl   FTL 上下文
+ * @param lba   起始逻辑地址（uint64_t）
+ * @param count 连续 LBA 数（0 视作 1，兼容单 LBA 调用）
+ */
+void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count);
 
 #endif /* FTL_SERVICE_H */
