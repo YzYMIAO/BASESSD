@@ -11,7 +11,8 @@
 
 FC-NAND 已有三级 munit UT（`tests/unit/test_fc_level1/2/3.c` + `test_rebuild.c`，经 `make tests` 上板 + UART `test` 命令跑套件），但 **FTL 层没有自己的 UT**：`tests/unit/test_gc.c`/`test_l2p.c`/`test_nand.c` 各只有 1 行头部注释（孤儿占位，无 makefile 编入）；`src/ftl/makefile.mk` 无测试块。
 
-A/B/C 档（v0.44~v0.47）落地了大量 FTL 纯逻辑（三级 Free Pool、PRE_COND 状态位、journal 水位公式、GC/WL victim 选择、read disturb 慢死预测、坏块替换池），目前**全部依赖上板验证**——缺一层纯 RAM 单元测试把纯逻辑钉住，编译期 + 上板前能回归。
+A/B/C 档（v0.44~v0.47）落地了大量 FTL 纯逻辑（Free Pool 三级水位、journal 水位公式、GC/WL victim 选择、read disturb 慢死预测、坏块替换池；
+原文所列的 `PRE_COND` 状态位已于 v0.52 删除，见 `ftl_revision_history.md`），目前**全部依赖上板验证**——缺一层纯 RAM 单元测试把纯逻辑钉住，编译期 + 上板前能回归。
 
 **目标**：
 - 复用 FC-NAND 的 munit 架构（`MunitTest` 数组 + `ut_main.c` 根套件 + `make tests` + UART `test` 命令），零改动 tests/framework
@@ -53,15 +54,16 @@ static void ftl_fixture_reset(void);  /* memset + allocator_init(params topo={0,
 
 | 套件数组 | 覆盖（纯 RAM 函数 + 文件行号） |
 |---|---|
-| `g_ftl_allocator_tests[]` | `allocator_init`(14)、`allocator_free_block`(355：FREE+PRE_COND+pre_cond_count 恒等)、`allocator_close_open_sb`(232)、`allocator_add_closed_sb`(389：CLOSED+sb_id)、`allocator_remove_closed_sb`(193：swap-remove sb_id 修正)、`allocator_remove_from_free`(434)、`allocator_needs_gc`(444) |
-| `g_ftl_watermark_tests[]` | `checkpoint_journal_watermark`(393：双块 128 页 85%/95% + emergency 置位 + 复位)、`checkpoint_check_trigger`(352：T1/T2/T3)、`checkpoint_is_emergency`(383) |
+| `g_ftl_allocator_tests[]` | `allocator_init`、`allocator_free_block`（置 FREE + 清 RESERVED/OPEN/CLOSED/TEMP）、`allocator_close_open_sb`、`allocator_add_closed_sb`（CLOSED+sb_id）、`allocator_remove_closed_sb`（swap-remove sb_id 修正）、`allocator_remove_from_free`、`allocator_alloc_reserved_block`/`allocator_free_reserved_block` |
+| `g_ftl_watermark_tests[]` | `checkpoint_journal_watermark`(393：4 块 256 页 85%/95% + emergency 置位 + 复位)、`checkpoint_check_trigger`(352：T1/T2/T3)、`checkpoint_is_emergency`(383) |
 | `g_ftl_gc_wl_tests[]` | `gc_select_victim`(318)、`gc_check_trigger`(474)、`wl_should_trigger`(71)、`wl_select_victim`(117：有效页+read_count 权重)、`wl_max/min/avg_erase`、`wl_count_blocks_below` |
 | `g_ftl_rr_tests[]` | `rr_record_ecc`(69：8 深度环形+rising)、`rr_check_predictive`(345)、`rr_get_health`(368)、`rr_predictive_scan`(378：READ_DISTURB_THRESHOLD)、`rr_retire_block`(410) |
-| `g_ftl_bbt_tests[]` | `bbt_mark_bad`(356：BAD 位+bad_reason+clear_valid+bad_count)、`bbt_spare_pool_refill`(518：spare→free) |
-| `g_ftl_metadata_tests[]` | `metadata_dir_init`(151)、`metadata_dir_update`(208)、`metadata_dir_lookup`(186)、`ftl_is_metadata_block`(501)、`metadata_dir_anchor_paa`(473) |
+| `g_ftl_bbt_tests[]` | `bbt_mark_bad`(356：BAD 位+clear_valid+bad_count)、`bbt_spare_pool_refill`(518：spare→free) |
+| `g_ftl_metadata_tests[]` | `metadata_dir_init`、`metadata_dir_update`、`metadata_dir_lookup`、`ftl_is_metadata_block`、`metadata_ring_addr`（**纯地址换算，可纯 RAM 测**；⚠ v0.50 起原 `metadata_dir_anchor_paa` / `metadata_dir_alloc_region` 已删除） |
 | `g_ftl_pending_ct_tests[]` | `pending_add/lookup/lookup_by_lba/remove/count`（32 槽满拒绝）+ `completion_table_init/add/remove/lookup/count` |
 
-**不纳入第一版**：`allocator_alloc`、`metadata_dir_alloc_region`（需全 4096 遍历）；所有 NAND 路径（`l2p_cache` 未命中加载/flush、journal flush/replay、checkpoint_create、gc_migrate、bbt_flush/load、wl_relocate、rr_recover_read、boot recovery）——由 UART CLI + FC Level 3 上板覆盖。
+**不纳入第一版**：`allocator_alloc`、`metadata_dir_append_slot`（需全 4096 遍历 + 真 NAND 擦写）；
+**P1-4 thrashing 窗口**（`l2p_cache_note_access` 的结算+滞回是**纯逻辑**，但当前是 `l2p_cache.c` 的 `static` 内部函数，L0 要测需先把结算步导出成公开原语——属测试接线决策，实施时再定；若走 L1 Mock NAND，则随 read/write 路径自然覆盖）；所有 NAND 路径（`l2p_cache` 未命中加载/flush、journal flush/replay、checkpoint_create、gc_migrate、bbt_flush/load、wl_relocate、rr_recover_read、boot recovery、`metadata_ring_locate` 的快/慢路径）——由 UART CLI + FC Level 3 上板覆盖。
 
 ## 5. 接线（实施阶段）
 
@@ -136,7 +138,7 @@ READ 回 page_buffer + 可配 ECC bit 注入、ERASE 清零 + 可配坏块）→
 
 | 模式 | 例子 |
 |---|---|
-| 不变量 | `free + open + closed + bad == 总块数`；`pre_cond_count == free 中 PRE_COND 数` |
+| 不变量 | `free + open + closed + bad == 总块数`（P1-3 后 free_count 是唯一池计数，无派生计数） |
 | 状态机全路径 | allocator 块 FREE→OPEN→CLOSED→FREE 每步断言 state/sb_id |
 | 水位边界 | 85%/95% 阈值上下 1 条 entry 处断言触发/不触发（v0.46 B1 就是水位公式 bug） |
 | round-trip | 写 pattern → 读回 → 校验（本项目 `wr/rd c` 同构） |

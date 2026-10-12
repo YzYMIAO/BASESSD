@@ -379,8 +379,13 @@ typedef struct {
 typedef struct {
     l2p_cache_line_t  lines[L2P_CACHE_SIZE];
     uint16_t          clock_hand;        // CLOCK 替换指针
-    uint32_t          hit_count;         // 统计
+    uint32_t          hit_count;         // 统计（开机累计）
     uint32_t          miss_count;
+    // P1-4 thrashing 检测窗口（阈值见 l2p_cache.h L2P_THRASH_*）
+    uint32_t          window_access;     // 本窗口访问数
+    uint32_t          window_miss;       // 本窗口 miss 数
+    uint8_t           miss_pct;          // 最近一次窗口结算 miss 率（0..100）
+    uint8_t           thrashing;         // 1 = 降级态（停 NORMAL 主动 flush）
     uint8_t           ch, ce, lun;       // 本 cache 绑定拓扑（固定位置寻址 + 路由）
     metadata_dir_cache_t *md_dir;        // Metadata Directory 指针
     ftl_allocator_t      *alloc;         // Allocator 指针（Region 动态分配；v0.19 加）
@@ -399,7 +404,10 @@ static inline uint32_t lba_route_lun(uint64_t lba);
 /* 全局 LBA → 片内 local LBA（交错：lun 取低位 → 顺序写摊多 die） */
 static inline lba_t lba_to_local(uint64_t lba);
 
-/* L2P Table 固定位置映射：Region → PBA（lun 维度参与 block 错位） */
+/* L2P 哨兵层位置：Region → PBA（L2P 基础层块 0-15，**永不写入**，读回全 0xFF = 未映射）。
+ * ⚠ v0.50 起这不是"region 的固定存储位置"——region 实际写在**日志块**里（从 Free Pool
+ * 动态取整块，位置由 Metadata Directory 携带）。本函数只在两处用：
+ * ① Directory 尚未登记的 region 读回"未映射"；② 开机回退基础层。 */
 static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t region_id);
 ```
 
@@ -452,7 +460,7 @@ l2p_cache_find_or_load(region_id):
 
   占位后:
     metadata_dir_lookup(region_id) → 查 Directory
-    ＝ INVALID → l2p_region_pba() 固定位置回退
+    ＝ INVALID → l2p_region_pba() 哨兵层（块 0-15，读回全 0xFF = 未映射）
     sync_read_page(addr) → 从 NAND 加载 2KB region 数据（内联，见 §5.3）
     state = CLEAN
 ```
@@ -464,13 +472,13 @@ l2p_cache_find_or_load(region_id):
 ### 3.1 数据结构
 
 ```c
-#define JOURNAL_BLOCK_COUNT       (2)     // 环形 2 blocks
-#define JOURNAL_BLOCK0            (40)    // J0 固定 Block
-#define JOURNAL_BLOCK1            (41)    // J1 固定 Block
-#define JOURNAL_ENTRIES_PER_PAGE  (128)   // 每 page 128 条
-#define JOURNAL_PAGE_SIZE         (2048)  // 128 × 16B
-#define JOURNAL_HEADER_SIZE       (12)    // Header 大小
+#define JOURNAL_BLOCK_COUNT       (CW_NUM)  // 环形 4 blocks（= CW_NUM）
+#define JOURNAL_BLOCK0            (58)      // J0 起始 Block（块 58-61，见 ftl_config.h）
+#define JOURNAL_PAGE_SIZE         (PAGE_MAIN_SIZE)  // = 2048
+#define JOURNAL_ENTRIES_PER_PAGE  ((JOURNAL_PAGE_SIZE - JOURNAL_HEADER_SIZE) / 16)  // 推导 = 127
+#define JOURNAL_HEADER_SIZE       (12)      // Header 大小
 #define JOURNAL_MAGIC             (0x524F554AUL)  // "JOUR"
+#define JOURNAL_BLOCK_NONE        (0xFFU)   // 「无预擦除块」哨兵（v0.54）
 
 /* Journal entry — 16B */
 typedef struct {
@@ -482,15 +490,16 @@ typedef struct {
 
 /* Journal 上下文 */
 typedef struct {
-    uint8_t     ch, ce, lun;            // 拓扑参数
-    nand_pba_t  block_pba[2];           // J0/J1 PBA 基址
-    uint8_t     current_block;           // 当前写入 block (0/1)
-    uint8_t     current_page;            // 当前写入 page (0..63)
-    uint8_t     current_entry;           // 当前页内 entry 偏移 (0..127)
-    uint32_t    sequence_counter;        // 全局序号
-    uint8_t     page_buf[JOURNAL_PAGE_SIZE];  // SRAM buffer
-    uint8_t     checkpoint_needed;       // 水位标志
-    uint8_t     emergency;               // 紧急标志（≥95%）
+    ftl_topology_t topo;                       // 目标 NAND 芯片路由
+    nand_pba_t     block_pba[JOURNAL_BLOCK_COUNT];  // 各 Journal Block PBA 基址
+    uint8_t        current_block;              // 当前写入 block (0..3)
+    uint8_t        current_page;               // 当前写入 page (0..63)
+    uint8_t        current_entry;              // 当前页内 entry 偏移 (0..126)
+    uint32_t       sequence_counter;           // 全局序号
+    uint8_t        pre_erased_block;           // v0.54：被 truncate 预擦除的环形块号
+    uint8_t        page_buf[JOURNAL_PAGE_SIZE];// SRAM buffer
+    uint8_t        checkpoint_needed;          // 水位标志
+    uint8_t        emergency;                  // 紧急标志（≥95%）
 } l2p_journal_t;
 ```
 
@@ -498,18 +507,21 @@ typedef struct {
 
 ```c
 /* 初始化 journal */
-void journal_init(l2p_journal_t *journal, uint8_t ch, uint8_t ce, uint8_t lun);
+void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
 
 /*
  * 追加一条 journal entry。
  * 内部：写入 page_buf → page_buf 满时 flush 到 NAND。
+ * v0.54：页缓冲里已有同一 LBA 时就地更新 new_pba（不新增条目、不消耗 sequence）。
  */
 void journal_append(l2p_journal_t *journal, lba_t lba,
                     nand_pba_t old_pba, nand_pba_t new_pba);
 
 /*
  * 将当前 page_buf 写入 NAND（即使未满也可强制写）。
- * 写满页时回切到另一个 Block（先擦除）。
+ * 写满块时回切到下一 Block（环形共 JOURNAL_BLOCK_COUNT 块）。
+ * v0.54：本函数是环形块擦除的**唯一**一点；若该块已被 journal_truncate 预擦除
+ * （pre_erased_block 记账）则跳过擦除——旧实现在 truncate 与本函数各擦一次 = 双倍磨损。
  */
 void journal_flush_page(l2p_journal_t *journal);
 
@@ -523,8 +535,9 @@ int journal_replay(l2p_journal_t *journal, l2p_cache_t *cache,
                    uint32_t cp_sequence);
 
 /*
- * 截断 sequence ≤ up_to 的所有 journal entries。
- * 擦除非当前 Journal Block。
+ * 截断 sequence ≤ up_to_sequence 的条目（Checkpoint 已把它们写进 NAND L2P 表）。
+ * v0.54：预擦除环形最旧块并记账（pre_erased_block），由 journal_flush_page 回切时消费；
+ *        水位不足以覆盖全部已写条目（(up_to_sequence + 1) < sequence_counter）时**不截断**。
  */
 void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);
 ```
@@ -535,13 +548,13 @@ void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);
 Header (12B):
   magic       (4B) = 0x524F554A ("JOUR")
   page_seq    (4B) = 本页第一条 entry 的全局序号
-  entry_count (2B) = 本页有效 entry 数 (0~128)
+  entry_count (2B) = 本页有效 entry 数 (0~JOURNAL_ENTRIES_PER_PAGE=127)
   block_seq   (2B) = 本 Journal Block 写入轮次
 
-Entries (N × 16B, N ≤ 128):
+Entries (N × 16B, N ≤ 127):
   lba(4B) | old_pba(4B) | new_pba(4B) | sequence(4B)
 
-Padding: (128 - N) × 16B = 0xFF
+Padding: (127 - N) × 16B = 0xFF
 ```
 
 ---
@@ -555,9 +568,9 @@ Padding: (128 - N) × 16B = 0xFF
 #define FTL_TEMP_HOT    0U      /* 用户 IO 数据 */
 #define FTL_TEMP_COLD   1U      /* GC 搬移 / 元数据 */
 
-/* 三级 Free Pool */
-#define FREE_POOL_TARGET        (32U)   /* Pre-conditioned 目标水位 */
-#define FREE_POOL_EMERGENCY     (8U)    /* 紧急水位 */
+/* Free Pool 三级水位（一个已擦除池，见 ftl_design §3.7） */
+#define FREE_POOL_TARGET        (32U)   /* 水位①/②分界 */
+#define FREE_POOL_EMERGENCY     (8U)    /* 水位②/③分界 */
 #define SUPER_BLOCK_LIST_MAX    (1024U) /* Closed Super Block 列表容量 */
 
 /* Super Block */
@@ -574,13 +587,11 @@ typedef struct {
     uint16_t    total_blocks;           // 总好 Block 数
     uint16_t   *free_blocks;            // free block 数组
     uint16_t    free_count;             // 空闲 block 数
-    uint16_t    pre_cond_count;         // 预擦除池
-    uint16_t    emergency_count;        // 紧急池
     super_block_t hot_sb;               // Hot Open Super Block
     super_block_t cold_sb;              // Cold Open Super Block
     super_block_t *closed_sb_list;      // Closed SB 数组
     uint16_t    closed_sb_count;
-    ftl_block_t *blocks;               // Block State Table（v0.32，含 erase_count/valid_map/state/bad_reason/rr）
+    ftl_block_t *blocks;               // Block State Table（v0.32；v0.55 位图独立、v0.56 删死字段 ⇒ 20B：erase_count/last_pe_ts/read_count/valid_count/state/sb_id/rr）
     uint16_t    bad_count;             // 坏块数
     uint16_t    spare_pool_count;
 } ftl_allocator_t;
@@ -603,14 +614,8 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature);
 /* GC 擦除后归还 block 到 Free Pool */
 void allocator_free_block(ftl_allocator_t *alloc, uint16_t block);
 
-/* 运行时标记坏块 */
-void allocator_mark_bad(ftl_allocator_t *alloc, uint16_t block);
-
-/* 检查是否需要 GC */
-int allocator_needs_gc(const ftl_allocator_t *alloc);
-
-/* 同步 pre_cond_count 与 free_count */
-void allocator_refill_pre_cond(ftl_allocator_t *alloc);
+/* 运行时标记坏块（已删除：统一走 bbt_mark_bad，BBT 单数据源）*/
+/* 检查是否需要 GC（已删除：GC 触发单一数据源 = ftl/gc.h 的 gc_check_triggers）*/
 ```
 
 ---
@@ -675,9 +680,9 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
 |------|---------------|---------|------|
 | `l2p_cache.c` | `sync_read_page` / `sync_write_page` | `addr_from_paa` / `addr_from_pba` | 元数据（CRC/Random DISABLE） |
 | `journal.c` | `sync_read/write_page`、`sync_erase_block` | `journal_page_addr` / `journal_block_addr` | 元数据，20ms 超时擦除 |
-| `checkpoint.c` | `sync_read/write_page` | `checkpoint_page_addr` | CHECKPOINT module |
-| `metadata.c` | `sync_read/write_page` | `anchor_page_addr` | Anchor 固定位置 |
-| `bbt.c` | `sync_read/write_page`、`sync_read_page_raw` | `bbt_page_addr` | BBT 固定位置 |
+| `checkpoint.c` | `sync_read/write_page` | `metadata_ring_addr`（Checkpoint 池 48-55） | CHECKPOINT module，池内环内轮转 |
+| `metadata.c` | `sync_read/write_page` | `metadata_ring_addr`（Anchor 池 16-47）/ `paa_from_addr`（L2P 日志块） | METADATA module |
+| `bbt.c` | `sync_read/write_page`、`sync_read_page_raw` | `metadata_ring_addr`（BBT 池 56-57） | BBT module，池内环内轮转 |
 | `gc.c` | `sync_write_page`、`sync_erase_block` | `addr_from_pba` / `super_block_page_addr` | 用户数据（CRC/Random ENABLE），20ms 擦除 |
 | `wear_leveling.c` | `sync_write_page` | `addr_from_pba` | 同 GC |
 | `read_recovery.c` | `sync_read_page` | `addr_from_pba` / `addr_from_paa` | CRC/Random ENABLE + LBA META |
