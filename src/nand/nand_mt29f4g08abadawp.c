@@ -22,6 +22,7 @@
 #include "delay.h"
 #include "dma.h"
 #include "nand_config.h"
+#include "nand_debug.h"
 #include "nand_dispatch.h"
 #include "nand_fmc.h"
 
@@ -273,12 +274,12 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
     /* 清零 DMA 完成标志，防止上一命令的残留标志导致 DATA_IN/DATA_OUT 误判 */
     nand_dma_clear_flags();
 
-    LOGD("nand_fc_start: op=%u col=%u row=0x%06X data=%p len=%u\r\n",
-         (unsigned)operation,
-         (unsigned)request->column,
-         (unsigned)request->row[0],
-         (const void *)request->data,
-         (unsigned)request->data_length);
+    ENG_LOGD("nand_fc_start: op=%u col=%u row=0x%06X data=%p len=%u\r\n",
+             (unsigned)operation,
+             (unsigned)request->column,
+             (unsigned)request->row[0],
+             (const void *)request->data,
+             (unsigned)request->data_length);
 
     transaction->request = (nand_command_request_t){
         operation, request->column, {request->row[0], request->row[1]},
@@ -322,7 +323,7 @@ nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completio
     {
         completion->execution_status = result;
         completion->nand_status      = transaction->completion.nand_status;
-        LOGD("[NAND] complete, op=%u result=0x%02X status=0x%02X\r\n", transaction->request.operation, result, completion->nand_status);
+        ENG_LOGD("complete, op=%u result=0x%02X status=0x%02X\r\n", transaction->request.operation, result, completion->nand_status);
         transaction->engine.active = 0U;
     }
     return result;

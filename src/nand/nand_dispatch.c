@@ -420,12 +420,12 @@ static nand_dispatch_start_outcome_t nand_dispatch_task_start(nand_dispatch_lun_
 {
     g_nand_dispatch_req_table[task->operation](task);
 
-    LOGD("[NAND] FC dispatch op=%u buffer=%p length=%u column=0x%04X row=0x%06lX\r\n",
-         task->operation,
-         (void *)task->request.data,
-         task->request.data_length,
-         task->request.column,
-         (unsigned long)task->request.row[0]);
+    DISP_LOGD("FC dispatch op=%u buffer=%p length=%u column=0x%04X row=0x%06lX\r\n",
+              task->operation,
+              (void *)task->request.data,
+              task->request.data_length,
+              task->request.column,
+              (unsigned long)task->request.row[0]);
 
     return nand_dispatch_task_fc_start(queue, task, fc_result);
 }
