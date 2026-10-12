@@ -659,7 +659,7 @@ ISR 名字由 `startup_stm32h743xx.s` 的向量表固定 ⇒ 任何 TU 定义同
 - **不**把运行期 vtable 作为主机制——`ssd_platform_ops_t` 保留为**已存在的小 seam**，不扩张。
 - Stage 2 **不**拆 `usart`（1204 行、头泄漏、带 `ftl/ftl.h` 反依赖 G7）—— 已由 Stage 2.5（§5.3）
   完成：传输层留共享、CLI 移到 `src/controller/cli.c`，G7 倒挂消除。
-- **不动** `src/ftl/**`、`tests/integration/**`、`tests/framework/**`、`ut_main.c`。
+- **不动** `src/ftl/**`、`tests/framework/**`、`ut_main.c`。
 
 ---
 

@@ -34,14 +34,10 @@
 #include "ftl/metadata.h"
 #include "ftl/power_failure_recovery.h"
 // #include "led.h"
+#include "fault.h"
 #include "mpu.h"
 #include "nand/nand_dispatch.h"
 #include "nand/nand_mt29f4g08abadawp.h"
-#if defined(FC_NAND_TEST_ENABLE)
-/* TODO: 待重构为 munit UT 框架后移除 */
-/* #include "test_fc_nand.h" */
-#endif
-#include "fault.h"
 #include "platform.h"
 #include "stm32h7xx_hal.h"
 #include "sys.h"

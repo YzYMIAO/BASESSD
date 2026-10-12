@@ -653,9 +653,6 @@ tests/
 │   ├── test_fc_level1.c   # Level 1: 12 个测试（logic 单套件）
 │   ├── test_fc_level2.c   # Level 2: 12 个测试（步骤级 + encode/process_read/raid_recover + cw_bitmap）
 │   └── test_fc_level3.c   # Level 3: 15 个 block 级场景（真实 NAND）
-├── integration/
-│   ├── test_fc_nand.c     # 旧硬件集成测试（**未编入 `tests` 目标**；仍引用已删的复数建链入口，待废弃）
-│   └── test_fc_nand.h
 ```
 
 > 注：测试全部随 `make tests`（FC_NAND_TEST_ENABLE=1）编入固件、在 STM32H743 上经

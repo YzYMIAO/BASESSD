@@ -1538,29 +1538,46 @@ static inline uint32_t   paa_to_nand_row(nand_paa_t paa);         // 转换为 N
 
 ## 9. 测试
 
-### 9.1 集成测试 (test_fc_nand.c)
+FC→NAND 测试以 **munit 单元测试**形式落 `tests/unit/`，在 STM32H743 核心板上运行
+（源码与套件注册见 `docs/design/fc_nand_ut.md`）。此前独立的
+`tests/integration/test_fc_nand.c` 集成测试**已删除**。
 
-在 STM32H743 核心板上运行的 FC→NAND 全链路测试：
+### 9.1 三级单元测试套件
 
-- `fc_nand_test_read_id()` — 验证 NAND ID
-- `fc_nand_test_erase_block(paa)` — 擦除整个 Block
-- `fc_nand_test_program_block(paa)` — 顺序编程 Block（0x55 模式）
-- `fc_nand_test_read_block(paa)` — 顺序读取并校验
-- `fc_nand_test_run_all(paa)` — 串行执行上述全部
+| 套件前缀 | 文件 | 覆盖 |
+|---|---|---|
+| `/fc-nand/logic/` | `tests/unit/test_fc_level1.c` | 纯逻辑（掩码 / 地址 / 位图，不碰 NAND） |
+| `/fc-nand/data_path/` | `tests/unit/test_fc_level2.c` | 数据路径（建链 / 提交 / 收发） |
+| `/fc-nand/lifecycle/` | `tests/unit/test_fc_level3.c` | 全链路（擦写读 / multi-plane / 迁移） |
+
+> ⚠ 套件前缀**必须带尾斜杠**（munit 只把前缀与用例名首尾相接，不补分隔符）。
 
 ### 9.2 串口控制台命令
 
 ```
-nand id                          → READ_ID 测试
-nand test <PAA>                  → 完整 Block 擦写读测试
-nand paa <ch> <ce> <lun> <plane> <block> <page> <cw> → PAA 计算
+help                               → 命令列表
+status / version                   → UART 计数器 / 固件版本
+log level <error|warn|info|debug>  → 运行期日志等级
+wr <lba> <n>                       → 写 n 个块（固定模式）
+rd <lba> <n> [c]                   → 读 n 个块（c=比对模式）
+tr <lba>                           → trim 一个 LBA
+fl                                 → 刷脏 L2P + journal 到 NAND
+info                               → 控制器 + FTL 统计
+bbt [--erase]                      → 打印出厂坏块图（--erase 逐块擦）
+test [选项] [用例名…]              → 跑 munit 测试套件（仅 FC_NAND_TEST_ENABLE 构建）
 ```
+
+`test` 选项：`--seed N` / `--iterations N` / `--single` / `--list` / `--list-params` /
+`--log-visible info|debug`。跑全套**不带过滤串**；按套件过滤用带尾斜杠的前缀。
 
 ### 9.3 编译
 
 ```sh
-make BUILD_TARGET=firmware FIRMWARE_PLATFORM=stm32h743 tests
+make clean && make tests
+# 烧 build/firmware/debug/bin/debug.bin
 ```
+
+> ⚠ `make all` 之后直接 `make tests` 是**空操作**（目标未按测试 flag 重编）⇒ 必须先 `make clean`。
 
 ---
 
