@@ -110,14 +110,14 @@ static void boot_section(const char *name)
  *
  * SRAM 布局（方案 B 修正，已与设计文档确认）：
  *   g_ftl    含 l2p cache 128KB + journal/md → AXI_RAM（约 131.5KB）
- *   g_blocks BST 224KB 连续 → AXI_RAM（保持 params.blocks 线性索引契约，
+ *   g_blocks BST 160KB 连续 → AXI_RAM（保持 params.blocks 线性索引契约，
  *            拆段破坏 allocator 的 blocks[gblock] 索引；SRAM1 仅 128KB 放不下）
  *   g_free_blocks + g_closed_sb_list → SRAM2（.sram2_data NOLOAD，linker 已有）
  *
  *   AXI_RAM ≈355.5KB（剩 11.5KB）、SRAM2 ≈24KB（剩 104KB），不溢出。
  * ══════════════════════════════════════════════════════════════════ */
 static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM];                         /* 131.5KB → AXI_RAM */
-static ftl_block_t   g_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL];     /* 56B×4096=224KB → AXI_RAM */
+static ftl_block_t   g_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL];     /* 40B×4096=160KB → AXI_RAM */
 static uint16_t      g_free_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* 8KB → SRAM2 */
     __attribute__((section(".sram2_data")));
 static uint16_t g_op_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* OP 预留池，容量不动 → SRAM2 */
@@ -129,6 +129,17 @@ static super_block_t g_closed_sb_list[CH_NUM][CE_NUM][LUN_NUM][SUPER_BLOCK_LIST_
 ssd_controller_t g_ctrl; /* controller 路由表（收 g_ftl 三维指针）；非 static：
                           * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
 static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
+
+/* ── 编译期内存预算（AXI_RAM）──
+ * 上面两张表随 CH_NUM×CE_NUM×LUN_NUM 线性放大，而 AXI_RAM 是硬上限
+ * （linker/stm32h743xx_flash.ld: __AXI_RAM_SIZE = 0x60000 = 384KB）。
+ * 当前 1 个维度用 ~291.5KB，**再加一个实例就装不下**。把它变成编译错误，
+ * 而不是运行期 HardFault 或静默的 .bss 溢出。提高维度前必须先重新规划内存。 */
+#define BOARD_AXI_RAM_SIZE   (384U * 1024U) /* 对齐 __AXI_RAM_SIZE */
+#define FTL_AXI_RAM_RESERVED (20U * 1024U)  /* 命令池/描述符池/缓冲池等（实测 ~19KB）*/
+
+_Static_assert(sizeof(g_ftl) + sizeof(g_blocks) + FTL_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE,
+               "FTL 实例数组超出 AXI_RAM：提高 CH/CE/LUN 前必须重新规划内存");
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
  * 编译器不认可 static 数组直接退化为匹配指针数组参数（GCC 10.3 起

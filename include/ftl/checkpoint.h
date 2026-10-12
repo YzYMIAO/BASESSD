@@ -10,10 +10,12 @@
  * Journal 中 sequence ≤ cp_journal_sequence 的条目已全部写入 L2P Table，
  * 可在 Journal 回切时安全擦除。
  *
- * Store: Block 37-38（固定），各 3 页冗余
+ * Store: 固定元数据区的 Checkpoint 块（主备），各 3 页冗余——
+ * 块号、块数、冗余倍数由 ftl/ftl_config.h 按几何推导，见 §二/§三。
  */
 
 #include "ftl/allocator.h"
+#include "ftl/ftl_config.h" /* CHECKPOINT_BLOCK0/1 / CHECKPOINT_BLOCKS / CHECKPOINT_REDUNDANCY */
 #include "ftl/journal.h"
 #include "ftl/l2p_cache.h"
 
@@ -22,11 +24,8 @@
 /* ── 前向声明（ftl_context_t 在 ftl.h 中定义，ftl.h 会 include 本文件） ── */
 struct ftl_context;
 
-/* ── Checkpoint Block 位置 ── */
-#define CHECKPOINT_BLOCK0      (37U)
-#define CHECKPOINT_BLOCK1      (38U)
-#define CHECKPOINT_REDUNDANCY  (3U) /* 每 Block 3 页 */
-#define CHECKPOINT_TOTAL_PAGES (6U)
+/* ── Checkpoint Block 位置与冗余（CHECKPOINT_BLOCK0/1 / CHECKPOINT_BLOCKS /
+ *    CHECKPOINT_REDUNDANCY / CHECKPOINT_TOTAL_PAGES）见 ftl/ftl_config.h ── */
 
 /* ── Header Magic ── */
 #define CHECKPOINT_MAGIC (0xCCCCCCCCUL)

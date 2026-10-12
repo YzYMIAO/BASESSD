@@ -219,7 +219,7 @@ nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba)
     uint16_t          entry_idx;
     l2p_cache_line_t *line;
 
-    if ((cache == NULL) || (lba >= L2P_REGIONS_PER_LUN * L2P_ENTRIES_PER_REGION))
+    if ((cache == NULL) || (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION))
     {
         return FTL_PBA_INVALID;
     }
@@ -242,7 +242,7 @@ void l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
     uint16_t          entry_idx;
     l2p_cache_line_t *line;
 
-    if ((cache == NULL) || (lba >= L2P_REGIONS_PER_LUN * L2P_ENTRIES_PER_REGION))
+    if ((cache == NULL) || (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION))
     {
         return;
     }

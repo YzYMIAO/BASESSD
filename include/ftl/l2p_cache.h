@@ -17,6 +17,7 @@
  */
 
 #include "ftl/allocator.h"    /* ftl_allocator_t */
+#include "ftl/ftl_config.h"   /* L2P 容量/块布局宏 + 打包放置公式 */
 #include "ftl/ftl_type.h"     /* lba_t */
 #include "ftl/metadata.h"     /* metadata_dir_cache_t */
 #include "nand/nand_config.h" /* nand_pba_t */
@@ -24,57 +25,71 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* ── 宏 ── */
+/* ── 宏 ──
+ * L2P 容量与块布局宏（L2P_ENTRIES_PER_REGION / L2P_REGION_SIZE /
+ * L2P_REGIONS_PER_INSTANCE / L2P_BASE_BLOCK / L2P_BLOCKS / L2P_REGION_SHIFT /
+ * L2P_REGION_MASK / FTL_DIM_TOTAL）见 ftl/ftl_config.h。*/
+#define L2P_CACHE_SIZE  (64U)         /* cache 行数（可配 32/64/128）*/
+#define FTL_PBA_INVALID (0xFFFFFFFFU) /* 无效 PBA */
 
-#define L2P_ENTRIES_PER_REGION (512U)                                      /* 每 region 512 条 entry */
-#define L2P_REGION_SIZE        (L2P_ENTRIES_PER_REGION * sizeof(uint32_t)) /* 2KB */
-#define L2P_REGIONS_TOTAL      (2048U)                                     /* LBA 空间总 region 数（全设备） */
-#define L2P_REGIONS_PER_LUN    (L2P_REGIONS_TOTAL / LUN_NUM)               /* 每 (ch,ce,lun) 独立 region 表容量 */
-#define L2P_CACHE_SIZE         (64U)                                       /* cache 行数（可配 32/64/128）*/
-#define FTL_PBA_INVALID        (0xFFFFFFFFU)                               /* 无效 PBA */
-
-/* L2P Table NAND 固定位置（每 (ch,ce,lun) 独立表，按 lun 错开 block 偏移）：
- *   Region r → Block = L2P_BASE_BLOCK + (r / 64), Page = r % 64
- *   偶 Region → Plane 0, 奇 Region → Plane 1（双 Plane 交错）
- *   每 LUN 表占 L2P_REGIONS_PER_LUN / 64 个 Block，跨 LUN 依次错开。
- */
-#define L2P_BASE_BLOCK     (0U)                        /* L2P 起始 Block */
-#define L2P_BLOCKS_PER_LUN (L2P_REGIONS_PER_LUN / 64U) /* 每 LUN 表块数（1: 32, 2: 16） */
-
-/* 固定位置映射：Region r → PBA（lun 维度参与 block 错位） */
+/* 固定位置映射：Region r → PBA（打包放置公式见 ftl_config.h §六，两处共用）
+ * region_id 是**实例内**编号；各 die 的块号相同（分片模型），故不参与定位。*/
 static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t region_id)
 {
-    uint8_t  plane = (uint8_t)(region_id & 1U);                                                  /* 偶 P0, 奇 P1 */
-    uint16_t block = (uint16_t)(L2P_BASE_BLOCK + (lun * L2P_BLOCKS_PER_LUN) + (region_id >> 6)); /* /64 + lun 错位 */
-    uint8_t  page  = (uint8_t)(region_id & 0x3FU);                                               /* %64 */
+    uint16_t block;
+    uint8_t  page;
+    uint8_t  plane;
+
+    ftl_l2p_region_placement(region_id, &block, &page, &plane);
     return pba_from_addr(&(nand_addr_t){.ch = ch, .ce = ce, .lun = lun, .block = block, .plane = plane, .page = page});
 }
 
-/* ── Region 分解 ── */
+/* ── Region 分解 ──
+ * L2P_REGION_SHIFT（lba / 每 region 条目数）与 L2P_REGION_MASK（lba % 每 region
+ * 条目数）见 ftl/ftl_config.h §一。*/
 
-#define L2P_REGION_SHIFT (9U)                          /* lba / 512 */
-#define L2P_REGION_MASK  (L2P_ENTRIES_PER_REGION - 1U) /* lba % 512 */
-
-/* 全局 LBA → (ch,ce,lun) 路由（行业主控：哈希到三维）。
- * CH_NUM/CE_NUM/LUN_NUM 均来自 nand_config.h，当前全 1 → 恒路由 (0,0,0)。 */
+/*
+ * 全局 LBA → (ch,ce,lun) 路由。
+ *
+ * 路由键 = **region 序号**（lba >> L2P_REGION_SHIFT），不是页号也不是条目号：
+ * 一个 region（512 个 CW）整体落在同一个 die 上，region 的 flush 只碰一个实例。
+ * 再把 region 序号按设备维度**分解**成三维：
+ *     dim = region % FTL_DIM_TOTAL
+ *     ch  = dim % CH_NUM
+ *     ce  = (dim / CH_NUM) % CE_NUM
+ *     lun = dim / (CH_NUM × CE_NUM)
+ * FTL_DIM_TOTAL = 1 时恒为 (0,0,0)。
+ */
+static inline uint32_t lba_route_dim(uint64_t lba)
+{
+    return (uint32_t)((lba >> L2P_REGION_SHIFT) % FTL_DIM_TOTAL);
+}
 static inline uint32_t lba_route_ch(uint64_t lba)
 {
-    return (uint32_t)((lba >> 9U) % CH_NUM);
+    return lba_route_dim(lba) % CH_NUM;
 }
 static inline uint32_t lba_route_ce(uint64_t lba)
 {
-    return (uint32_t)((lba >> 9U) % CE_NUM);
+    return (lba_route_dim(lba) / CH_NUM) % CE_NUM;
 }
 static inline uint32_t lba_route_lun(uint64_t lba)
 {
-    return (uint32_t)((lba >> 9U) % LUN_NUM);
+    return lba_route_dim(lba) / (CH_NUM * CE_NUM);
 }
 
-/* 全局 LBA → 片内 local LBA（本 (ch,ce,lun) 的表内偏移）。
- * 交错：lun 取低位 → 连续 LBA 摊到各 LUN，顺序写并发收益最大。 */
+/*
+ * 全局 LBA → 实例内 local LBA（本 (ch,ce,lun) 的表内偏移）。
+ *
+ * **按 region 粒度反交织**（不是条目粒度）：相邻 region 轮流分给各维度，
+ * 同一实例内收到的 region 序号连续 ⇒ 本地序号 = 全局 region 序号 ÷ 维度数，
+ * 再乘回每 region 条目数、补上 region 内偏移。
+ * FTL_DIM_TOTAL = 1 时退化为恒等映射。
+ */
 static inline lba_t lba_to_local(uint64_t lba)
 {
-    return (lba_t)(lba / (uint64_t)(CH_NUM * CE_NUM * LUN_NUM));
+    uint64_t region = lba >> L2P_REGION_SHIFT;
+
+    return (lba_t)(((region / FTL_DIM_TOTAL) * L2P_ENTRIES_PER_REGION) + (lba & L2P_REGION_MASK));
 }
 
 static inline uint16_t lba_to_region(lba_t local_lba)
@@ -102,7 +117,7 @@ typedef enum
 typedef struct
 {
     nand_pba_t entries[L2P_ENTRIES_PER_REGION]; /* 512 条 PBA = 2KB */
-    uint16_t   region_id;                       /* 0..L2P_REGIONS_PER_LUN-1（本表内编号） */
+    uint16_t   region_id;                       /* 0..L2P_REGIONS_PER_INSTANCE-1（本表内编号） */
     uint8_t    state;                           /* l2p_cache_state_t */
     uint16_t   access_count;                    /* CLOCK 访问计数 */
 } l2p_cache_line_t;
@@ -121,7 +136,7 @@ typedef struct
      * flush 后行 CLEAN/失效，但 region 的"本次周期内被改过"仍由本 bitmap
      * 记住。checkpoint_create 以它填 region_bitmap（先快照再 flush）。
      * bit=1：自上次 checkpoint 以来 region_id 有写（flush 落盘后清零）。 */
-    uint32_t region_dirty_bitmap[L2P_REGIONS_PER_LUN / 32U]; /* LUN_NUM=1 → 64 word = 256B */
+    uint32_t region_dirty_bitmap[L2P_REGIONS_PER_INSTANCE / 32U]; /* 2048/32 → 64 word = 256B */
 
     /* 本 cache 绑定的拓扑（ch/ce/lun，决定固定位置寻址与路由） */
     uint8_t ch;

@@ -9,27 +9,25 @@
  *   2. 运行时隔离：PROGRAM/ERASE 失败 → BBT 标记 + allocator 跳过
  *   3. 替换机制：Block Sparing — 从 Spare Pool 取好块补充 Free Pool
  *
- * BBT 存储在 NAND Block 36，每份冗余 3 页。
- * bad_map[512] = 4096 bit，覆盖所有 4096 Block（NAND 持久化格式，保持不变）。
+ * BBT 存储在固定元数据区的 BBT 块（主 + 备），每份冗余 3 页——
+ * 块号、块数、冗余倍数均由 ftl/ftl_config.h 按几何推导，见 §二/§三。
+ * bad_map 覆盖全部 FTL_BLOCK_TOTAL 个 Block（NAND 持久化格式，保持不变）。
  * RAM 运行时坏块位统一存于 ftl_block_t.state（Block State Table 单数据源），
  * bbt_save 时从 BST 重建 bad_map。
  */
 
 #include "ftl/allocator.h"
+#include "ftl/ftl_config.h" /* BBT_BLOCK / BBT_BLOCKS / BBT_REDUNDANCY / BBT_BITMAP_SIZE */
 
 #include <stddef.h>
 #include <stdint.h>
 
-/* ── BBT Block 位置 ── */
-#define BBT_BLOCK        (36U)
-#define BBT_REDUNDANCY   (3U)  /* 每 Block 冗余页数 */
-#define BBT_TOTAL_PAGES  (6U)  /* 2 Block × 3 页（预留备用 Block）*/
-#define BBT_BLOCK_BACKUP (39U) /* 备用 BBT Block（Block 36 坏时用）*/
+/* ── BBT 尺寸与块位置（BBT_BLOCK / BBT_BLOCK_BACKUP / BBT_BLOCKS /
+ *    BBT_REDUNDANCY / BBT_TOTAL_PAGES / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE）
+ *    见 ftl/ftl_config.h ── */
 
 /* ── BBT Header 格式 ── */
-#define BBT_MAGIC       (0x424254ABUL) /* "BBT\xAB" */
-#define BBT_MAX_BLOCKS  (4096U)
-#define BBT_BITMAP_SIZE (BBT_MAX_BLOCKS / 8U) /* 512B */
+#define BBT_MAGIC (0x424254ABUL) /* "BBT\xAB" */
 
 typedef struct
 {

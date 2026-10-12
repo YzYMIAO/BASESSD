@@ -14,7 +14,7 @@ static nand_addr_t journal_page_addr(const l2p_journal_t *journal, uint8_t b, ui
     addr.ch    = journal->topo.ch;
     addr.ce    = journal->topo.ce;
     addr.lun   = journal->topo.lun;
-    addr.block = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
+    addr.block = (uint16_t)(JOURNAL_BLOCK0 + b);
     addr.plane = (uint8_t)(page & 1U); /* 偶页 P0, 奇页 P1（双 Plane 交错） */
     addr.page  = page;
     addr.cw    = 0U; /* 0 = 整页 */
@@ -29,7 +29,7 @@ static nand_addr_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
     addr.ch    = journal->topo.ch;
     addr.ce    = journal->topo.ce;
     addr.lun   = journal->topo.lun;
-    addr.block = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
+    addr.block = (uint16_t)(JOURNAL_BLOCK0 + b);
     addr.plane = 0U;
     addr.page  = 0U;
     addr.cw    = 0U;
@@ -39,6 +39,8 @@ static nand_addr_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
 
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 {
+    uint8_t b;
+
     if (journal == NULL)
     {
         return;
@@ -46,8 +48,11 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 
     journal->topo = topo;
 
-    journal->block_pba[0] = pba_from_addr(&(nand_addr_t){.ch = topo.ch, .ce = topo.ce, .block = JOURNAL_BLOCK0});
-    journal->block_pba[1] = pba_from_addr(&(nand_addr_t){.ch = topo.ch, .ce = topo.ce, .block = JOURNAL_BLOCK1});
+    for (b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
+    {
+        journal->block_pba[b] =
+            pba_from_addr(&(nand_addr_t){.ch = topo.ch, .ce = topo.ce, .block = (uint16_t)(JOURNAL_BLOCK0 + b)});
+    }
 
     journal->current_block    = 0U;
     journal->current_page     = 0U;
@@ -129,8 +134,8 @@ void journal_flush_page(l2p_journal_t *journal)
     journal->current_page++;
     if (journal->current_page >= PAGES_PER_BLOCK)
     {
-        /* 当前 Block 写满，切到另一个 Block */
-        journal->current_block = (journal->current_block == 0U) ? 1U : 0U;
+        /* 当前 Block 写满，切到下一 Block（环形，共 JOURNAL_BLOCK_COUNT 块）*/
+        journal->current_block = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
         journal->current_page  = 0U;
 
         /* 擦除目标 Block（已存在的旧数据）*/
@@ -150,7 +155,8 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
     uint8_t  last_entry   = 0U;
 
     /* F10：已发现的"需回放页"（page_seq > cp_sequence）记录表。
-     * 双块 × 每块 64 页 ≤ 128 页；每页 4×4B=16B → 512B 栈上数组。
+     * JOURNAL_BLOCK_COUNT 块 × 每块 64 页 = 256 页；每项 8B → 2KB 栈上数组。
+     * ⚠ 256 > 255 ⇒ replay_count / 循环下标必须是 uint16_t（uint8_t 会死循环）。
      * 按 (page_seq, entry_index) 递增序应用依赖先收集后排序。 */
     typedef struct
     {
@@ -160,14 +166,14 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
         uint8_t  entry_count;
     } replay_page_t;
     replay_page_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
-    uint8_t       replay_count = 0U;
+    uint16_t      replay_count = 0U;
 
     if ((journal == NULL) || (cache == NULL))
     {
         return FTL_ERROR;
     }
 
-    /* 第一遍：扫描两个 Journal Block，收集需回放页（page_seq > cp_sequence） */
+    /* 第一遍：扫描 JOURNAL_BLOCK_COUNT 个 Journal Block，收集需回放页（page_seq > cp_sequence） */
     for (b = 0; b < JOURNAL_BLOCK_COUNT; b++)
     {
         for (page = 0; page < PAGES_PER_BLOCK; page++)
@@ -233,7 +239,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
             if (page_seq > cp_sequence)
             {
                 if (replay_count <
-                    (uint8_t)(JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK))
+                    (uint16_t)(JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK))
                 {
                     replay_pages[replay_count].page_seq    = page_seq;
                     replay_pages[replay_count].block       = b;
@@ -246,11 +252,11 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
     }
 
     /* 第二遍：按 (page_seq, entry_index) 递增序应用条目。
-     * 插入排序（replay_count ≤ 128）：per-LBA last-write-wins——
+     * 插入排序（replay_count ≤ 256）：per-LBA last-write-wins——
      * 同 LBA 的旧条目（含 GC/WL 搬移记录）被后写覆盖，不指向已擦除块。 */
     {
-        uint8_t i;
-        uint8_t n;
+        uint16_t i;
+        uint16_t n;
 
         for (i = 1U; i < replay_count; i++)
         {
@@ -308,7 +314,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
             journal->current_page++;
             if (journal->current_page >= PAGES_PER_BLOCK)
             {
-                journal->current_block = (journal->current_block == 0U) ? 1U : 0U;
+                journal->current_block = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
                 journal->current_page  = 0U;
             }
             journal->current_entry = 0U;
@@ -340,15 +346,15 @@ void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
     /*
      * 截断：擦除包含 sequence ≤ up_to_sequence 的 Journal Block。
      *
-     * 遍历两个 Journal Block 的最后写入页：
+     * 遍历 JOURNAL_BLOCK_COUNT 个 Journal Block 的最后写入页：
      *   如果 Block 中所有页的 page_seq ≤ up_to_sequence → 擦除整个 Block。
      *
-     * 简化实现：始终擦除回切的目标 Block（current_block 的对方）。
-     * 因为 Checkpoint 总是在 Journal 回切前执行，对方 Block 一定 ≤ up_to_sequence。
+     * 简化实现：始终擦除回切的目标 Block（环形里的下一块）。
+     * 因为 Checkpoint 总是在 Journal 回切前执行，目标 Block 一定 ≤ up_to_sequence。
      */
 
-    /* 擦除非当前 Block（对方 Block 中所有 entry 的 seq ≤ cp_seq，可安全擦除） */
-    b = (journal->current_block == 0U) ? 1U : 0U;
+    /* 擦除环形下一块（其所有 entry 的 seq ≤ cp_seq，可安全擦除） */
+    b = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
 
     (void)ftl_sync_erase_block(journal_block_addr(journal, b));
 

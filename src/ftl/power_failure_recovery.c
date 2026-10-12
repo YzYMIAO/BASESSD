@@ -19,7 +19,7 @@ static nand_addr_t journal_page_addr(const ftl_context_t *ftl, uint8_t b, uint8_
     addr.ch    = ftl->topo.ch;
     addr.ce    = ftl->topo.ce;
     addr.lun   = ftl->topo.lun;
-    addr.block = (b == 0U) ? JOURNAL_BLOCK0 : JOURNAL_BLOCK1;
+    addr.block = (uint16_t)(JOURNAL_BLOCK0 + b);
     addr.plane = (uint8_t)(page & 1U);
     addr.page  = page;
     addr.cw    = 0U;
@@ -66,7 +66,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
         {
             uint8_t b, page;
 
-            for (b = 0U; b < 2U; b++)
+            for (b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
             {
                 for (page = 0U; page < PAGES_PER_BLOCK; page++)
                 {
