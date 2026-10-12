@@ -259,7 +259,7 @@ int rr_recover_read(ftl_read_recovery_t *rr,
      *
      * Stage 1（Read Retry）+ Stage 2（邻近页辅助）全失败后，
      * 页面已损坏提升为块级不可靠。调用方（读完成路径）在此处
-     * 标记坏块（FTL_BLOCK_BAD_READ）+ 搬移，由预测搬移/GC 接手。
+     * 标记坏块（bbt_mark_bad）+ 搬移，由预测搬移/GC 接手。
      * XOR/RAID 恢复（原规划 Stage 3）属后续阶段，当前不实现。 */
 
     return -1;

@@ -7,6 +7,7 @@
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/gc.h"
 #include "ftl/read_recovery.h" /* rr_predictive_scan / rr_retire_block */
+#include "ftl/wear.h"          /* wear_mark_dirty（计数持久化） */
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
@@ -184,7 +185,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
             continue; /* 退化单 plane 条目：该 plane 无块 */
         }
         gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
-        valid_map  = ftl->alloc.blocks[gblock_src].valid_map[plane];
+        valid_map  = ftl->alloc.valid_map[gblock_src][plane];
 
         while (valid_map != 0ULL)
         {
@@ -217,6 +218,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
                         ftl_block_t *src = &ftl->alloc.blocks[gblock_src];
                         rr_record_ecc(&src->rr, ecc);
                         src->read_count++;
+                        wear_mark_dirty(gblock_src);
                     }
                 }
 
@@ -225,7 +227,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
                 if (old_pba != pba)
                 {
                     /* 已被覆盖，无效页 → 清 bitmap 保持同步 */
-                    ftl_block_clr_valid(&ftl->alloc.blocks[gblock_src], plane, page);
+                    ftl_block_clr_valid(&ftl->alloc.blocks[gblock_src], ftl->alloc.valid_map[gblock_src], plane, page);
                     continue;
                 }
 
@@ -253,8 +255,9 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
                 journal_append(&ftl->journal, lba, old_pba, new_pba);
 
                 /* VPC/bitmap 维护：源块清位，新块置位（单点更新防漂移） */
-                ftl_block_clr_valid(&ftl->alloc.blocks[gblock_src], plane, page);
+                ftl_block_clr_valid(&ftl->alloc.blocks[gblock_src], ftl->alloc.valid_map[gblock_src], plane, page);
                 ftl_block_set_valid(&ftl->alloc.blocks[ftl_pba_gblock(new_pba)],
+                                    ftl->alloc.valid_map[ftl_pba_gblock(new_pba)],
                                     (uint8_t)pba_to_plane(new_pba),
                                     (uint8_t)pba_to_page(new_pba));
 
@@ -355,6 +358,10 @@ int wl_predictive_relocate(struct ftl_context *ftl)
         }
         retired = &ftl->alloc.blocks[ftl_gblock(plane, victim.plane_blocks[plane])];
         rr_retire_block(retired);
+
+        /* rr_retire_block 内部把 read_count 归零（read disturb 重计），
+         * 它只拿到 ftl_block_t* ⇒ 脏标记放在其唯一调用者这里。 */
+        wear_mark_dirty((uint16_t)ftl_gblock(plane, victim.plane_blocks[plane]));
     }
 
     /* 慢死预测命中：整 SB 已搬空并退役，属生命周期跃迁，留痕一次 */

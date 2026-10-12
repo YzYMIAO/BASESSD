@@ -137,6 +137,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->plane                         = request->plane;
     task->started                       = 0U;
     task->feature_addr                  = request->feature_addr;
+    task->column                        = request->column;
     /* 绑定 FMC 后端（单 bank 全 LUN 共享）+ 引擎上下文三指针（地址随事务固定，只在此绑一次） */
     task->backend                       = nand_fmc_backend_get();
     task->transaction.engine.backend    = task->backend;

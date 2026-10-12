@@ -9,9 +9,9 @@
  *
  *   - 初始化分配器、温度参数、free pool、closed 列表
  *   - 第一个 Super Block 分配需延迟到首次 allocator_alloc()
- *   - pre_cond_count 跟踪当前 Free Pool 中可用的 Block 数，
- *     所有归还到 Free Pool 的 Block 都已擦除（调用者保证），
- *     所以 pre_cond_count 始终等于 free_count。
+ *
+ * Free Pool 是**一个已擦除池**（先擦后归还 ⇒ 池内无未擦除块），
+ * 「三级」是建在 free_count 上的**水位**，不是三个分区——见 allocator.h 文件头。
  */
 ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *params)
 {
@@ -26,10 +26,8 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
     alloc->total_blocks = params->free_count;
 
     /* Free Pool */
-    alloc->free_blocks     = params->free_blocks;
-    alloc->free_count      = 0U;
-    alloc->pre_cond_count  = 0U;
-    alloc->emergency_count = 0U;
+    alloc->free_blocks = params->free_blocks;
+    alloc->free_count  = 0U;
 
     /* OP / Spare Pool（容量不动） */
     alloc->op_blocks    = params->op_blocks;
@@ -47,8 +45,10 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
     alloc->closed_sb_list  = params->closed_sb_list;
     alloc->closed_sb_count = 0U;
 
-    /* Block State Table（每 Block 状态统一承载；由调用者提供存储） */
+    /* Block State Table（每 Block 状态统一承载；由调用者提供存储）
+     * + 独立的逐页有效位图表（主流弹性项，见 bst.h 文件头） */
     alloc->blocks    = params->blocks;
+    alloc->valid_map = params->valid_map;
     alloc->bad_count = 0U;
 
     /* 状态机初始：未坏块默认 FREE（坏块由 bbt_init 置 BAD） */
@@ -197,27 +197,17 @@ static uint8_t allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint
     sb->topo.ce  = alloc->ce;
     sb->topo.lun = alloc->lun;
 
-    /* 状态机：两物理块置 OPEN（清 FREE/CLOSED/PRE_COND——块被 Open SB 占用，
-     * 从预擦除池取走）+ 记录温度流 + 反向索引 sb_id
+    /* 状态机：两物理块置 OPEN（清 FREE/CLOSED——块被 Open SB 占用，从 Free Pool 取走）
+     * + 记录温度流 + 反向索引 sb_id
      * （OPEN 时 sb_id 占位 NO_SB，关闭后由 allocator_close_sb 写 closed 索引） */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
         ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, block[plane])];
 
-        ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_PRE_COND);
+        ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_CLOSED);
         ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
         ftl_block_set_temp(b, temperature);
         ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
-    }
-
-    /* 同步 pre_cond_count：已从 Free Pool 取走 PLANE_NUM 个 Block */
-    if (alloc->pre_cond_count > PLANE_NUM)
-    {
-        alloc->pre_cond_count -= PLANE_NUM;
-    }
-    else
-    {
-        alloc->pre_cond_count = 0U;
     }
 
     return 1U;
@@ -396,24 +386,105 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
 
     /*
      * Block 擦除由调用者（gc_erase_and_free）确保在调用本函数前已完成。
-     * 本函数只归还 Block 编号（全局 Block 号）到 Free Pool，并同步 pre_cond_count。
+     * 本函数只归还 Block 编号（全局 Block 号）到 Free Pool。
      */
     if (alloc->free_count < FTL_BLOCK_TOTAL)
     {
         alloc->free_blocks[alloc->free_count++] = gblock;
     }
 
-    /* 状态机：置 FREE + PRE_COND（预擦除池语义——free pool 所有块都是已擦除态，
-     * GC 擦除/OP 补池/Spare 补池/rebuild 拉回全走本入口，故全置 PRE_COND）。
-     * 清 OPEN/CLOSED/TEMP，保留 PRE_COND 不清（alloc 取走时再清）。清反向索引。 */
+    /* 状态机：置 FREE（本入口的契约是「调用者已擦除」⇒ 进池即已擦除态。GC 擦除 /
+     * OP 补池 / Spare 补池 / rebuild 拉回全走本入口）。清 OPEN/CLOSED/TEMP/RESERVED、
+     * 清反向索引。
+     * ⚠ RESERVED 必须在清除之列：否则独占块（元数据日志块）归还后仍带 RESERVED，
+     *   被 allocator_alloc_reserved_block 再次取走时状态叠加，且「已归还」语义为假。
+     * 无派生计数需要同步：Free Pool 是**一个**已擦除池，三级水位直接建在 free_count 上（P1-3）。 */
     b = &alloc->blocks[gblock];
     ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_TEMP_MASK);
-    ftl_block_state_set(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_PRE_COND);
+    ftl_block_state_clr(b, FTL_BLOCK_STATE_RESERVED);
+    ftl_block_state_set(b, FTL_BLOCK_STATE_FREE);
+    ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+}
+
+/*
+ * 内部工具：从 **Free Pool 数组**（而非 BST 的 FREE 位）里选该 plane 擦除最少的一块。
+ *
+ * 与 allocator_select_plane_block 的区别：那个按块号扫 BST 的 FREE 位，本函数按
+ * Free Pool 数组遍历。独占分配**必须**用本函数——因为紧接着就要 allocator_pool_remove，
+ * 若两者账本不一致（FREE 位在、数组里没有），就会出现「选中 → 移除失败 → 重选同一块」
+ * 的死循环。以数组为准 ⇒ 移除必然成功。
+ *
+ * 返回 gblock；该 plane 无可选块返回 UINT16_MAX。
+ */
+static uint16_t allocator_select_plane_block_from_pool(const ftl_allocator_t *alloc, uint8_t plane)
+{
+    uint16_t i;
+    uint16_t best      = UINT16_MAX;
+    uint32_t min_erase = UINT32_MAX;
+
+    for (i = 0U; i < alloc->free_count; i++)
+    {
+        uint16_t           gblock = alloc->free_blocks[i];
+        const ftl_block_t *blk    = &alloc->blocks[gblock];
+
+        if ((uint8_t)(gblock / BLOCKS_PER_PLANE) != plane)
+        {
+            continue; /* 不属于目标 plane */
+        }
+        if (ftl_block_is_bad(blk))
+        {
+            continue; /* 坏块不该在 Free Pool，兜底再判一次 */
+        }
+        if (blk->erase_count < min_erase)
+        {
+            min_erase = blk->erase_count;
+            best      = gblock;
+        }
+    }
+
+    return best;
+}
+
+ftl_status_t allocator_alloc_reserved_block(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
+{
+    uint16_t     gblock;
+    ftl_block_t *b;
+
+    if ((alloc == NULL) || (alloc->blocks == NULL) || (out_gblock == NULL) || (plane >= PLANE_NUM))
+    {
+        return FTL_ERROR;
+    }
+
+    gblock = allocator_select_plane_block_from_pool(alloc, plane);
+    if (gblock == UINT16_MAX)
+    {
+        return FTL_ERROR; /* 该 plane 的 Free Pool 空（不向 OP 池借：OP 是 GC 的紧急缓冲） */
+    }
+
+    /* 独占三件套：① 从 Free Pool 拿掉 ② 置 RESERVED ③ 清 FREE
+     * （只置 RESERVED 挡不住分配——allocator_select_plane_block 只判 FREE） */
+    (void)allocator_pool_remove(alloc, gblock);
+
+    b = &alloc->blocks[gblock];
+    ftl_block_state_clr(b, FTL_BLOCK_STATE_FREE | FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_TEMP_MASK);
+    ftl_block_state_set(b, FTL_BLOCK_STATE_RESERVED);
     ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 
-    /* pre_cond_count = free pool 中 PRE_COND 块数（本函数只增 free_count，
-     * 且每块都置 PRE_COND → pre_cond_count 恒等于 free_count） */
-    alloc->pre_cond_count = alloc->free_count;
+    *out_gblock = gblock;
+
+    return FTL_OK;
+}
+
+void allocator_free_reserved_block(ftl_allocator_t *alloc, uint16_t gblock)
+{
+    if ((alloc == NULL) || (alloc->blocks == NULL) || (gblock >= FTL_BLOCK_TOTAL))
+    {
+        return;
+    }
+
+    /* 与 allocator_free_block 同一入口语义（置 FREE、清 RESERVED、清反向索引）。
+     * 调用者保证块已擦除——与 allocator_free_block 的契约一致。 */
+    allocator_free_block(alloc, gblock);
 }
 
 /* 说明：allocator_mark_bad 已删除——坏块标记统一走 bbt_mark_bad（BBT 单数据源）。 */
@@ -476,24 +547,5 @@ void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock)
     (void)allocator_pool_remove(alloc, gblock);
 }
 
-int allocator_needs_gc(const ftl_allocator_t *alloc)
-{
-    if (alloc == NULL)
-    {
-        return FTL_OK;
-    }
-
-    /* T1: 水位线 — Pre-conditioned 低于目标水位 */
-    if (alloc->pre_cond_count < FREE_POOL_TARGET)
-    {
-        return 1;
-    }
-
-    /* T4: 紧急 — Free Pool 空 */
-    if (alloc->free_count == 0U)
-    {
-        return 1;
-    }
-
-    return FTL_OK;
-}
+/* 说明：allocator_needs_gc 已删除（P1-3）——零调用者，且判定与 gc_check_triggers()
+ * 的 T1（水位）/ T4（紧急）重复。GC 触发的**单一数据源** = ftl/gc.h 的 GC_TRIGGER_*。 */

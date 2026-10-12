@@ -8,7 +8,11 @@
  * （读：数据写回 caller buffer；写：Journal/L2P 确认）需要 command_id → 请求
  * 映射。本表记录 command_id → ftl_io_request_t（嵌入，按值拷贝）+ 写专用字段。
  *
- * 写操作不需要 buffer（数据已在 desc buffer 中），completion 直接确认。
+ * ⚠ 读写必须**显式携带**操作类型（见 ftl_pending_op_t）：完成处理曾以
+ *   `io.buffer != NULL` 判别读写，但 ftl_submit_write 拒绝 NULL buffer
+ *   （写请求的 buffer 是**数据源**，已拷进 desc 链）⇒ 该条件对写恒真 ⇒ 写分支
+ *   （Journal/L2P/VPC 簿记 + 写失败回滚）成死代码，写完成误走读分支、
+ *   把 NAND 数据读回源 buffer，且 total_writes 永不递增。**buffer 非空 ≠ 写。**
  */
 
 #include "common/ftl_types.h" /* ftl_io_request_t, pending_cb_t */
@@ -24,6 +28,14 @@
 struct ftl_context;
 typedef struct ftl_context ftl_context_t;
 
+/* ── 操作类型：完成路径的判别依据 ──
+ * 必须由 submit 侧显式给出，**不可**从 io 字段反推（见文件头 ⚠）。 */
+typedef enum
+{
+    PENDING_OP_READ  = 0, /* 读：completion 把 NAND 数据写回 io.buffer */
+    PENDING_OP_WRITE = 1, /* 写：completion 确认 Journal + L2P（io.buffer 只是数据源，不再读它） */
+} ftl_pending_op_t;
+
 typedef struct
 {
     uint16_t         used;       /* 1: 槽位占用 */
@@ -35,6 +47,7 @@ typedef struct
     nand_pba_t old_pba1;           /* pages=2 时 plane1 写前旧 PBA（Multi-Plane 双页簿记） */
     nand_pba_t new_pba1;           /* pages=2 时 plane1 新分配 PBA（Policy B：plane1 块独立，不可由 plane0 派生） */
     uint8_t    cache_intermediate; /* 1: Cache Program 中间页（15h），completion 时不更新 L2P/Journal */
+    uint8_t    op;                 /* ftl_pending_op_t：完成路径判别（读/写），见文件头 ⚠ */
 } ftl_pending_req_t;
 
 /*
@@ -57,9 +70,10 @@ void pending_init(ftl_context_t *ftl);
  * @param old_pba1           pages=2 时 plane1 写前旧 PBA（单页请求传 NAND_PBA_INVALID）
  * @param new_pba1           pages=2 时 plane1 新分配 PBA（单页请求传 NAND_PBA_INVALID）
  * @param cache_intermediate Cache Program 中间页标志（1=中间页跳过 L2P/Journal 更新）
+ * @param op                 操作类型（PENDING_OP_READ / PENDING_OP_WRITE）——完成路径判别依据
  * @return FTL_OK 成功，FTL_ERROR 表满
  */
-int pending_add(ftl_context_t *ftl, uint16_t cmd_id, const ftl_io_request_t *io, nand_pba_t old_pba, nand_pba_t new_pba, nand_pba_t old_pba1, nand_pba_t new_pba1, uint8_t cache_intermediate);
+int pending_add(ftl_context_t *ftl, uint16_t cmd_id, const ftl_io_request_t *io, nand_pba_t old_pba, nand_pba_t new_pba, nand_pba_t old_pba1, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op);
 
 /*
  * pending_lookup - 按 command_id 查找本实例 pending 项

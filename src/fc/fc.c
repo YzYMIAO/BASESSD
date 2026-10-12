@@ -786,7 +786,7 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     completion.desc_id    = nand_completion->failed_descriptor_id;
     completion.module     = command->module;
     completion.status     = 0U;
-    completion.param      = (fc_param_t){0}; /* 联合体整体清零（4 字节）；仅 GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / BLOCK_LOCK_STATUS 会再填 */
+    completion.param      = (fc_param_t){0}; /* 联合体整体清零（4 字节）；仅 GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN / BLOCK_LOCK_STATUS 会再填 */
 
     if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) &&
         (fc_is_page_read((uint8_t)command->config.operation) != 0U))
@@ -835,13 +835,14 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         {
             completion.param.bytes[0] = nand_completion->nand_status;
         }
-        /* GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE：引擎把寄存器值 / 页内 META /
-         * 器件 ONFI 签名写进控制器侧暂存，拷进 CQ 返回段（三者都用 4 字节暂存
-         * g_fc_return_staging，见 fc_build_dispatch_request）。
+        /* GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN：引擎把
+         * 寄存器值 / 页内 META / 器件 ONFI 签名 / 按列读的 4 字节写进控制器侧暂存，拷进 CQ
+         * 返回段（都用 4 字节暂存 g_fc_return_staging，见 fc_build_dispatch_request）。
          * ⚠ SQ 命令体提交后不再被写（见 fc_command.h「SQ 不可变」）。 */
         else if ((command->config.operation == OP_GET_FEATURES) ||
                  (command->config.operation == OP_READ_META) ||
-                 (command->config.operation == OP_READ_ONFI_SIGNATURE))
+                 (command->config.operation == OP_READ_ONFI_SIGNATURE) ||
+                 (command->config.operation == OP_READ_COLUMN))
         {
             uint8_t i;
 
@@ -1304,6 +1305,9 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
  *           NAND 侧列地址），cw_buffers[plane*CW_NUM] 指向同一暂存（回读的 4 字节 META）；
  *         * OP_READ_ONFI_SIGNATURE（v59）：无 desc 链、**不填 plane_paa**——列地址恒 0x20、
  *           行地址恒 0，与介质坐标无关；cw_buffers[plane*CW_NUM] 指向同一暂存（4 字节签名）；
+ *         * OP_READ_COLUMN（v63）：无 desc 链，plane_paa[本 plane] 取自 command->paa（只提供
+ *           行地址，cw 位被丢掉）；**列地址来自命令级 param 字节 0/1（小端）**，落进
+ *           request->column；cw_buffers[plane*CW_NUM] 指向同一暂存（4 字节）；
  *         * 块锁族（BLOCK_UNLOCK_LOW/HIGH、BLOCK_LOCK(_TIGHT)、BLOCK_LOCK_STATUS，v49）：
  *           无 desc 链、无 buffer，只填 plane_paa[本 plane]（23h/24h/7Ah 带 3 个地址周期，
  *           行地址必须来自 command->paa；2Ah/2Ch 无地址周期，填了不下发）；
@@ -1425,6 +1429,22 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
         request->plane                               = (uint8_t)paa_to_plane(command->paa);
         request->cw_bitmap                           = (uint32_t)(1UL << (request->plane * CW_NUM));
         request->cw_buffers[request->plane * CW_NUM] = g_fc_return_staging[command_id];
+        (void)memset(g_fc_return_staging[command_id], 0, 4U);
+    }
+    else if (command->config.operation == OP_READ_COLUMN)
+    {
+        /* 按显式列读（v63）：无 desc 链（has_data = 0）。与 OP_READ_META 同型，唯一区别是
+         * **列地址不走 paa 的 cw 字段，而由命令级 param 的字节 0/1（小端）传入**——cw 只有
+         * 2 位（列上限 1584），够不到 spare 区（出厂坏块标记在列 2048）。行地址仍取自
+         * command->paa。4 字节落**控制器侧暂存**（同 GET_FEATURES / READ_META），完成时拷进
+         * CQ 的 param。
+         * ⚠ 必须建这一支：否则落进末尾 else，位图保持空集 ⇒ nand_dispatch_task_load 一格
+         *   cw_buffers[] 都不搬 ⇒ NAND 侧拿到残留指针，DATA_OUT 写向野地址。 */
+        request->plane                               = (uint8_t)paa_to_plane(command->paa);
+        request->plane_paa[request->plane]           = command->paa;
+        request->cw_bitmap                           = (uint32_t)(1UL << (request->plane * CW_NUM));
+        request->cw_buffers[request->plane * CW_NUM] = g_fc_return_staging[command_id];
+        request->column                              = (uint16_t)((uint16_t)command->param.bytes[0] | ((uint16_t)command->param.bytes[1] << 8U));
         (void)memset(g_fc_return_staging[command_id], 0, 4U);
     }
     else if ((command->config.operation == OP_BLOCK_UNLOCK_LOW) ||

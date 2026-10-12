@@ -58,6 +58,7 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
     journal->current_page     = 0U;
     journal->current_entry    = 0U;
     journal->sequence_counter = 1U;
+    journal->pre_erased_block = JOURNAL_BLOCK_NONE;
 
     memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
 
@@ -68,15 +69,34 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba)
 {
     l2p_journal_entry_t *entry;
+    uint16_t             i;
 
     if (journal == NULL)
     {
         return;
     }
 
-    uint16_t offset = JOURNAL_HEADER_SIZE +
-                      sizeof(l2p_journal_entry_t) * journal->current_entry;
-    entry = (l2p_journal_entry_t *)(journal->page_buf + offset);
+    /*
+     * P1-6 更新合并：当前页缓冲里已有同一 LBA 的条目 ⇒ 就地更新，不新增条目。
+     * 回放按页序 + 页内下标应用（per-LBA last-write-wins），页内同 LBA 只保留最新
+     * new_pba 即正确；old_pba 仅首条保留（回放不读 old_pba）。
+     * ⚠ **不**消耗 sequence、**不**推进 current_entry：hdr_page_seq 由
+     * `sequence_counter − current_entry` 反推本页首条序号，二者必须同步推进，
+     * 否则页序错乱会导致回放顺序错误。
+     */
+    for (i = 0U; i < journal->current_entry; i++)
+    {
+        entry = (l2p_journal_entry_t *)(journal->page_buf + JOURNAL_HEADER_SIZE +
+                                        sizeof(l2p_journal_entry_t) * i);
+        if (entry->lba == (uint32_t)lba)
+        {
+            entry->new_pba = new_pba; /* 保留首条 old_pba，更新到最新 new_pba */
+            return;
+        }
+    }
+
+    entry = (l2p_journal_entry_t *)(journal->page_buf + JOURNAL_HEADER_SIZE +
+                                    sizeof(l2p_journal_entry_t) * journal->current_entry);
 
     entry->lba      = (uint32_t)lba;
     entry->old_pba  = old_pba;
@@ -138,8 +158,17 @@ void journal_flush_page(l2p_journal_t *journal)
         journal->current_block = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
         journal->current_page  = 0U;
 
-        /* 擦除目标 Block（已存在的旧数据）*/
-        (void)ftl_sync_erase_block(journal_block_addr(journal, (uint8_t)journal->current_block));
+        /* 回切擦除（本函数是**唯一**的环形块擦除点）。
+         * P1-6：若该块已被 journal_truncate 预擦除（水位截断），跳过——否则同一块每圈
+         * 被擦两次，把 §14.1 认定的 Journal 寿命瓶颈又放大 ~25%。 */
+        if (journal->pre_erased_block == journal->current_block)
+        {
+            journal->pre_erased_block = JOURNAL_BLOCK_NONE; /* 记账消费掉：本块即将被写 */
+        }
+        else
+        {
+            (void)ftl_sync_erase_block(journal_block_addr(journal, (uint8_t)journal->current_block));
+        }
     }
 
     journal->current_entry = 0U;
@@ -334,9 +363,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
 
 void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
 {
-    uint8_t b;
-
-    (void)up_to_sequence;
+    uint8_t next;
 
     if (journal == NULL)
     {
@@ -344,26 +371,34 @@ void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
     }
 
     /*
-     * 截断：擦除包含 sequence ≤ up_to_sequence 的 Journal Block。
-     *
-     * 遍历 JOURNAL_BLOCK_COUNT 个 Journal Block 的最后写入页：
-     *   如果 Block 中所有页的 page_seq ≤ up_to_sequence → 擦除整个 Block。
-     *
-     * 简化实现：始终擦除回切的目标 Block（环形里的下一块）。
-     * 因为 Checkpoint 总是在 Journal 回切前执行，目标 Block 一定 ≤ up_to_sequence。
+     * ① 水位校验（P1-6：up_to_sequence 不再是死形参）。
+     * 调用者是 checkpoint_create，传的正是 sequence_counter（下一个待分配序号）⇒
+     * 全部已写条目 seq < up_to_sequence。若水位**不足以**覆盖全部已写条目，说明有
+     * 未 checkpoint 的条目，而环形里最旧的一块可能仍持有回放需要的条目 ⇒ **不截断**。
+     * （sequence_counter == 0 理论上不会出现；一并挡掉，避免 -1 下溢误判。）
      */
+    if ((journal->sequence_counter == 0U) || ((up_to_sequence + 1U) < journal->sequence_counter))
+    {
+        return;
+    }
 
-    /* 擦除环形下一块（其所有 entry 的 seq ≤ cp_seq，可安全擦除） */
-    b = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
+    /*
+     * ② 预擦除环形最旧块（= 环形下一块）并记账。
+     * 该块整块的条目都 ≤ up_to_sequence（checkpoint 已把它们写进 NAND L2P 表），
+     * 擦掉即完成截断。记账 pre_erased_block 让 journal_flush_page 回切到它时跳过擦除
+     * ——旧实现在此处与 flush_page 各擦一次 = **同一块每圈擦两次**，是 Journal 磨损
+     * （§14.1 的寿命瓶颈）中凭空多出的 ~25%。重复调用（两次 checkpoint 之间无写入）
+     * 时 next == pre_erased_block ⇒ 跳过重擦。
+     */
+    next = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
+    if (next != journal->pre_erased_block)
+    {
+        (void)ftl_sync_erase_block(journal_block_addr(journal, next));
+        journal->pre_erased_block = next;
+    }
 
-    (void)ftl_sync_erase_block(journal_block_addr(journal, b));
-
-    /* 截断后水位清零：对方 Block 已擦除，当前 Block 继续写入直到回切。
-     * 复位 watermark 标志（设计 §7.5.4）——truncate 即水位已清，
-     * 双保险兜底 checkpoint_create 的复位（后者在 journal_truncate 之后）。 */
+    /* ③ 复位水位标志（设计 §7.5.4）：截断即水位已清。与 checkpoint_create 第 ⑧ 步
+     * 双保险（后者覆盖 truncate 被弱桩替换的纯 RAM 测试构建）。 */
     journal->emergency         = 0U;
     journal->checkpoint_needed = 0U;
-
-    /* 如果当前 Block 的 current_page 已推进，对方 Block 已擦除，
-     * 当前 Block 继续写入，直到写满后回切到已擦除的对方 Block。 */
 }

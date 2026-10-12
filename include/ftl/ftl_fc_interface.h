@@ -241,4 +241,32 @@ ftl_status_t ftl_sync_read_page_raw(nand_addr_t addr, void *buffer, uint8_t modu
 /* 擦块：OP_ERASE_BLOCK，无数据链，20ms 超时。 */
 ftl_status_t ftl_sync_erase_block(nand_addr_t addr);
 
+/*
+ * 读 META：OP_READ_META，无数据链，回读 addr 指定页 / 指定 CW 的**前 4 字节 META**。
+ *
+ * CW 布局 [META:4][CRC:4][USER:512][PARITY:8]，META 在加扰区之前、**明文**。
+ * CW0 的 META 头 4 字节即 spare 区最前面的 4 字节 ⇒ 出厂坏块标记（spare[0] = 0x00）
+ * 落在 out[0]。addr.cw 是列选择器（不是 desc 链的 CW 位），必须显式给。
+ *
+ * 与 ftl_sync_read_page_raw 同契约：**刻意不判定 NAND 失败**——坏页也要拿到原始
+ * 位，故命令完成即返回 FTL_OK，成败由调用者按 out[] 内容判。out 需 4 字节。
+ */
+ftl_status_t ftl_sync_read_meta(nand_addr_t addr, uint8_t out[4]);
+
+/*
+ * 按列读：OP_READ_COLUMN，无数据链，回读 addr 指定页**从列 column 起的 4 个字节**。
+ *
+ * 与 ftl_sync_read_meta 的区别只有一个：**列地址不来自 addr.cw，而由 column 形参给**
+ * ——cw 只有 2 位（列上限 1584），够不到 spare 区。出厂坏块标记在 **spare 首字节 = 列
+ * 2048**（`PAGE_MAIN_SIZE`），只有本原语够得到。行地址仍取 addr 的 block/plane/page。
+ *
+ * 列地址经 FC 命令的 `param.bytes[0..1]`（小端）下传（见 fc_build_dispatch_request 的
+ * OP_READ_COLUMN 分支），结果经 CQ 的 `param.bytes[0..3]` 回。
+ *
+ * 与 ftl_sync_read_page_raw 同契约：**刻意不判定 NAND 失败**——坏块的 spare 也要拿到，
+ * 故命令完成即返回 FTL_OK，成败由调用者按 out[] 内容判。out 需 4 字节。
+ * column + 4 越出页尾是编程错误（ASSERT）。
+ */
+ftl_status_t ftl_sync_read_column(nand_addr_t addr, uint16_t column, uint8_t out[4]);
+
 #endif /* FTL_FC_INTERFACE_H */

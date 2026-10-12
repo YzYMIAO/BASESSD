@@ -55,6 +55,11 @@ typedef struct
     uint8_t feature_addr;              /* Feature register addr for SET/GET_FEATURES (column).
                                         * 内联数据不走本结构：FC 把 cw_buffers[plane*CW_NUM] 指向
                                         * 控制器侧暂存（g_fc_return_staging），见 fc.c。 */
+    uint16_t column;                   /* **显式列地址**：只有 OP_READ_COLUMN 读它（列来自命令级
+                                        * param 字节 0/1）。其余 op 的列地址各有来源（paa 的 cw
+                                        * 字段 / feature_addr / 固定常量），本字段恒为 0。
+                                        * ⚠ feature_addr 是 8 位、装不下 spare 区列号（2048 需 12 位），
+                                        *   故不能复用；两者语义不同，别合并。 */
     nand_paa_t plane_paa[PLANE_NUM];   /* 各 plane 的行地址承载 PAA（CW 位由 paa_to_nand_row 丢弃）。
                                         * FC 为命令 plane 集合内**每个** plane 填一条，即使该 plane
                                         * 一个 CW 都没选中（如只读 plane1）——多 plane op 的 uop 硬编码

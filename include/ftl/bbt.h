@@ -9,22 +9,26 @@
  *   2. 运行时隔离：PROGRAM/ERASE 失败 → BBT 标记 + allocator 跳过
  *   3. 替换机制：Block Sparing — 从 Spare Pool 取好块补充 Free Pool
  *
- * BBT 存储在固定元数据区的 BBT 块（主 + 备），每份冗余 3 页——
- * 块号、块数、冗余倍数均由 ftl/ftl_config.h 按几何推导，见 §二/§三。
+ * BBT 存储在固定元数据区的 BBT 池（`BBT_POOL_BLOCKS` 块轮转，
+ * **一条 record = 1 页**，块满换池内下一块并先擦）——池首块/块数由
+ * ftl/ftl_config.h 按几何推导，见 §二/§三。
  * bad_map 覆盖全部 FTL_BLOCK_TOTAL 个 Block（NAND 持久化格式，保持不变）。
  * RAM 运行时坏块位统一存于 ftl_block_t.state（Block State Table 单数据源），
  * bbt_save 时从 BST 重建 bad_map。
+ *
+ * 写模型与 Anchor / Checkpoint 一致（见 ftl/metadata.h §元数据写模型）。
+ * ⚠ 旧实现把同一份 6 页（主 + 备各 3 页）**就地重写**：第二个坏块出现时 BBT 即
+ *   损坏 ⇒ bbt_load 失败 ⇒ 开机不知道哪些块坏 ⇒ 用到坏块丢数据。
  */
 
 #include "ftl/allocator.h"
-#include "ftl/ftl_config.h" /* BBT_BLOCK / BBT_BLOCKS / BBT_REDUNDANCY / BBT_BITMAP_SIZE */
+#include "ftl/ftl_config.h" /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
 
 #include <stddef.h>
 #include <stdint.h>
 
-/* ── BBT 尺寸与块位置（BBT_BLOCK / BBT_BLOCK_BACKUP / BBT_BLOCKS /
- *    BBT_REDUNDANCY / BBT_TOTAL_PAGES / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE）
- *    见 ftl/ftl_config.h ── */
+/* ── BBT 尺寸与块位置（BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS /
+ *    BBT_BITMAP_SIZE）见 ftl/ftl_config.h ── */
 
 /* ── BBT Header 格式 ── */
 #define BBT_MAGIC (0x424254ABUL) /* "BBT\xAB" */
@@ -45,7 +49,7 @@ typedef struct
 /*
  * bbt_init - BBT 初始化
  *
- * 从 NAND Block 36 加载 BBT。如果无有效 BBT（首次使用），
+ * 从 NAND BBT 池加载 BBT。如果无有效 BBT（首次使用），
  * 执行出厂扫描构建初始 BBT。坏块位写入 alloc->blocks[].state。
  *
  * @param alloc  Allocator 上下文（blocks、bad_count 等输出）
@@ -56,14 +60,15 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc);
 /*
  * bbt_scan_factory - 出厂坏块扫描
  *
- * 遍历所有 Block 的 Page 0，读数据。
+ * 遍历所有 Block（**跳过 Block 0**）的 Page 0，以 **LDPC_RAW 模式**（跳过 ECC）
+ * 读取原始 CW 数据（`ftl_sync_read_page_raw`）。
  * 扫描策略（因 FC 层无独立 OOB 接口）：
- *   尝试以 BCH ECC 读取该页。
- *     - 返回 NAND_FAIL/UNC → 出厂坏块
- *     - 读取成功 → 好块
+ *   - 读取返回非 0（FTL_RESULT_FAIL）→ 出厂坏块
+ *   - 读取成功 → 好块
  *
  * 设计文档中的 OOB[0] != 0xFF 检测需要 FC 层支持
- * 单独的 OOB/Spare 区读取，当前 fallback 到 ECC 检测。
+ * 单独的 OOB/Spare 区读取，当前 fallback 到「读失败」判据（raw 模式无 ECC，
+ * 物理失败未必置 NAND status，故以返回码为准）。
  *
  * @param alloc   Allocator 上下文（blocks 输出）
  * @return 检测到的坏块数
@@ -71,17 +76,48 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc);
 int bbt_scan_factory(ftl_allocator_t *alloc);
 
 /*
+ * bbt_print_bad_map - 逐块探测并打印坏块图（**诊断用**）
+ *
+ * 默认**只读**：对每个块读 Page 0 的 spare 首字节（**列 2048** = `PAGE_MAIN_SIZE`），
+ * 非 0xFF ⇒ 出厂坏块。不写介质，可反复调用。
+ *
+ * ⚠ do_erase != 0 时**额外擦除本实例每个 plane 的每一个块**（含
+ *   0..FTL_METADATA_BLOCK_END 的元数据区）⇒ 会抹掉该实例的全部 FTL 元数据与用户数据。
+ *   只在专门的坏块体检时用，绝不可放进开机路径。
+ *
+ * 判定（两条任一成立即坏块）：
+ *   ① **擦除前**读该块 Page 0 列 2048 的 spare 首字节，非 0xFF（出厂坏块标记，x8 为 00h）；
+ *   ② do_erase 非 0 且擦除命令失败（stuck-at-0 / 不可擦）。
+ *
+ * ① 必须**先于任何 PROGRAM/ERASE** 读——器件手册（Micron AN1819）逐字：
+ *   *"the bad block information is erasable and cannot be recovered once erased"*。
+ *   旧实现先擦后读、且读的是 CW0 列 0（FC 逻辑 META），故永远读不到出厂标记。
+ *   列 2048 由 ftl_sync_read_column()（OP_READ_COLUMN）够到。
+ *
+ * 打印（每排 BBT_MAP_COLS_PER_PLANE 个块，各 plane 一组、组间留空）：
+ *     CH=0  CE=0  LUN=0
+ *               PLANE=0                                        PLANE=1
+ *     FF FF FF FF 4 FF FF FF FF FF FF FF FF FF FF FF   FF FF ... FF 15
+ *   好块打 `FF`，坏块打**本排内的列号**（0..15，十进制，跨排重新计数）。
+ *
+ * ⚠ 本片芯片若已被整片擦过，出厂标记即已丢失 ⇒ 只会读到全 0xFF（不是 bug）。
+ *
+ * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）
+ * @param do_erase  0 = 只读（非破坏性）；非 0 = 逐块擦除并额外判擦除失败
+ */
+void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase);
+
+/*
  * bbt_mark_bad - 运行时标记坏块
  *
- * ① ftl_block_t.state 置位 + bad_reason（BST 单数据源）
+ * ① ftl_block_t.state 置 BAD + 清有效页位图（BST 单数据源）
  * ② bbt_flush() — 后台写回 NAND
  *
  * @param alloc  Allocator 上下文
  * @param gblock 坏 Block 编号（全局 Block 号）
- * @param reason 坏块原因（FTL_BLOCK_BAD_*，见 ftl/bst.h）
  * @return 0 成功，-1 失败
  */
-ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock, uint8_t reason);
+ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
 
 /*
  * bbt_is_bad - 查询 Block 是否坏块
@@ -114,14 +150,11 @@ static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
 }
 
 /*
- * bbt_save - 将 BBT 写回 NAND
+ * bbt_save - 将 BBT 追加写入 NAND BBT 池
  *
- * 写 3 页冗余到 Block 36 + 3 页到备用 Block 39。
- * CRC 保护 + sequence 递增。
+ * 池内下一槽追加一条 record（块满先擦池内下一块）。CRC 保护 + sequence 递增。
  *
  * @param alloc  Allocator 上下文
- * @param ch     CH
- * @param ce     CE
  * @return 0 成功，-1 失败
  */
 ftl_status_t bbt_save(const ftl_allocator_t *alloc);
@@ -129,7 +162,7 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc);
 /*
  * bbt_flush - 将脏 BBT 写回 NAND（后台调用，两阶段持久化）
  *
- * 当 g_bbt_dirty 置位时，调用 bbt_save 将 BBT bitmap 写入 Block 36 + 39。
+ * 当 g_bbt_dirty 置位时，调用 bbt_save 追加一条 record 到 BBT 池。
  * 不需要每次写失败都立即写 BBT，后台攒批批量写入。
  *
  * @param alloc  Allocator 上下文
@@ -138,14 +171,15 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc);
 ftl_status_t bbt_flush(ftl_allocator_t *alloc);
 
 /*
- * bbt_load - 从 NAND 加载 BBT
+ * bbt_load - 从 NAND BBT 池加载 BBT
  *
- * 扫描 6 页，选 magic+CRC+sequence 最大的。
+ * 池内轮转扫描（metadata_ring_locate），选 magic+CRC 正确且 sequence 最大者。
+ * 命中时同时恢复本池的 sequence 计数与写游标。
  *
  * @param bad_map     输出：bt_bitmap[512]
  * @param bad_count   输出：坏块数
  * @param sequence    输出：最新 sequence
- * @param topo        拓扑信息（BBT 所在芯片路由）
+ * @param topo        拓扑信息（BBT 池所在芯片路由）
  * @return FTL_OK 成功，FTL_ERROR 无有效 BBT
  */
 ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, ftl_topology_t topo);

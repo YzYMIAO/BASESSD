@@ -32,6 +32,18 @@
 #define L2P_CACHE_SIZE  (64U)         /* cache 行数（可配 32/64/128）*/
 #define FTL_PBA_INVALID (0xFFFFFFFFU) /* 无效 PBA */
 
+/* ── Thrashing 检测（P1-4，设计 §6.5）──
+ * 工作集远大于 64 行 cache（64×512 = 32K entry = 16 MiB LBA 空间，而盘 512 MiB）时，
+ * 全盘随机访问几乎每次 miss ⇒ 「evict→flush→load」反复。检测到后**降级**：
+ * 停掉 NORMAL 模式的**主动**后台 flush（脏行只由驱逐路径按需写回），把 NAND 带宽让给
+ * 前台 IO，并避免「本会被驱逐的行被提前 flush 一次、随后又因驱逐再 flush」的重复写。
+ *
+ * 窗口化统计（不是开机累计）：每 L2P_THRASH_WINDOW 次访问结算一次 miss 率，带**滞回**
+ * （进入 ≥90%，退出 <70%），避免在阈值附近抖动导致降级开关反复翻转。 */
+#define L2P_THRASH_WINDOW    (256U) /* 检测窗口：每 256 次访问结算一次 */
+#define L2P_THRASH_ENTER_PCT (90U)  /* 进入阈值：窗口 miss 率 ≥ 90% */
+#define L2P_THRASH_EXIT_PCT  (70U)  /* 退出阈值：窗口 miss 率 < 70%（滞回） */
+
 /* 固定位置映射：Region r → PBA（打包放置公式见 ftl_config.h §六，两处共用）
  * region_id 是**实例内**编号；各 die 的块号相同（分片模型），故不参与定位。*/
 static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t region_id)
@@ -128,8 +140,16 @@ typedef struct
 {
     l2p_cache_line_t lines[L2P_CACHE_SIZE]; /* 64 × (2KB + 4B) ≈ 128 KB */
     uint16_t         clock_hand;            /* CLOCK 替换指针 */
-    uint32_t         hit_count;             /* 统计：命中次数 */
-    uint32_t         miss_count;            /* 统计：未命中次数 */
+    uint32_t         hit_count;             /* 统计：命中次数（开机累计，观测用） */
+    uint32_t         miss_count;            /* 统计：未命中次数（开机累计，观测用） */
+
+    /* ── Thrashing 检测窗口（P1-4；阈值见文件头 L2P_THRASH_*）──
+     * 与累计 hit/miss_count 互补：累计量随开机时长渐近，反映不了**当前**行为，
+     * 降级判定必须看窗口。窗口满即结算并清零，miss_pct 保留最近一次结算结果。 */
+    uint32_t window_access; /* 本窗口累计访问数（hit+miss） */
+    uint32_t window_miss;   /* 本窗口累计 miss 数 */
+    uint8_t  miss_pct;      /* 最近一次窗口结算的 miss 率（0..100） */
+    uint8_t  thrashing;     /* 1 = 处于 thrashing 降级态（滞回保持） */
 
     /* Region 级脏标记（F4，自上次 checkpoint 以来本 region 有过写）。
      * 与 line 级 state 互补：line DIRTY 只描述 resident 行，evict 兜底
@@ -166,6 +186,17 @@ static inline void l2p_cache_set_md_dir(l2p_cache_t          *cache,
         cache->md_dir = md_dir;
         cache->alloc  = alloc;
     }
+}
+
+/*
+ * l2p_cache_is_thrashing - 查询当前是否处于 thrashing 降级态（P1-4）
+ *
+ * 由 l2p_cache 内部按窗口 miss 率 + 滞回维护，调用点（ftl_service_normal）据此
+ * 决定是否停掉主动后台 flush。纯读，不改状态。
+ */
+static inline uint8_t l2p_cache_is_thrashing(const l2p_cache_t *cache)
+{
+    return (cache != NULL) ? cache->thrashing : 0U;
 }
 
 /* ── 接口 ── */
@@ -210,13 +241,15 @@ void l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
 /*
  * l2p_cache_flush_one - 写回指定索引的 DIRTY cache line 到 NAND
  *
- * 已实现（v0.19 起）：
- *   ① line->state = FLUSHING（防 evict 选中）
- *   ② 位置：经 metadata_dir_lookup 查已分配位置；未分配（首次写）经
- *      metadata_dir_alloc_region 从 Free Pool 动态分配；分配失败/无 md_dir
- *      时回退固定位置映射（l2p_region_pba）
- *   ③ sync_write_page 写 Region 到 NAND
- *   ④ line->state = CLEAN
+ * ① line->state = FLUSHING（防 evict 选中）
+ * ② metadata_dir_append_slot 取 L2P 日志块的下一空槽（块满先取新块）
+ * ③ sync_write_page 把整页 Region 追加写入该槽
+ * ④ metadata_dir_commit_region 登记新位置（旧位置活计数 -1）
+ * ⑤ line->state = CLEAN
+ *
+ * ⚠ **无条件追加**：绝不就地覆盖旧位置（NAND 只能 1→0，二次编程 = 静默损坏）。
+ *   分配不到块（Free Pool 空）或 md_dir/alloc 缺失 ⇒ 返回 FTL_ERROR，**不回退固定
+ *   位置**——固定层是哨兵（永不写入，读回全 0xFF = 未映射）。
  *
  * @param cache     cache 上下文
  * @param line_idx  line 索引（0 ~ L2P_CACHE_SIZE-1）

@@ -28,6 +28,7 @@
 typedef struct
 {
     ftl_block_t          blocks[FTL_BLOCK_TOTAL];
+    uint64_t             valid_map[FTL_BLOCK_TOTAL][PLANE_NUM]; /* 独立位图表（主流弹性项） */
     uint16_t             free_blocks[FTL_BLOCK_TOTAL];
     super_block_t        closed_sb_list[SUPER_BLOCK_LIST_MAX];
     ftl_allocator_t      alloc;
@@ -44,6 +45,7 @@ static void fixture_init(rebuild_fixture_t *fx)
 
     params.topo           = (ftl_topology_t){.ch = 0, .ce = 0, .lun = 0};
     params.blocks         = fx->blocks;
+    params.valid_map      = fx->valid_map;
     params.free_blocks    = fx->free_blocks;
     params.free_count     = 0;
     params.closed_sb_list = fx->closed_sb_list;

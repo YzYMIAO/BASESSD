@@ -5,7 +5,7 @@
  * FTL Allocator — Block 分配器
  *
  * 职责：
- *   1. 维护三级 Free Pool（Pre-conditioned / Normal / Emergency）
+ *   1. 维护 Free Pool（一个已擦除池，三级**水位**见下）
  *   2. 从 Free Pool 取 Block 配对为 Super Block（跨双 Plane）
  *   3. 跟踪每个温度（Hot/Cold）的 Open Super Block 写指针
  *   4. 写满时关闭 Super Block 并加入 Closed 列表
@@ -29,9 +29,26 @@
 #define FTL_TEMP_COLD 1U /* GC 搬移 / 元数据 */
 #define FTL_TEMP_NUM  2U /* 温度等级数 */
 
-/* ── 三级 Free Pool 水位 ── */
-#define FREE_POOL_TARGET    (32U) /* Pre-conditioned 目标水位 */
-#define FREE_POOL_EMERGENCY (8U)  /* 紧急水位 */
+/* ── Free Pool 三级水位（P1-3 定案；设计 §3.7）──
+ *
+ * ⚠ **三级是水位，不是分区**。池只有**一个**（`free_blocks[]`）：`gc_erase_and_free`
+ *   是**先擦后归还**，所以池内每个块都已是擦除态——不存在「预擦除块」与「普通 free 块」
+ *   的物理区分，也就没有东西可以分区。
+ *
+ *   真实主控同样如此：free pool 是**一个已擦除池 + 软/硬水位**，另外配**独立的保留池**
+ *   （本仓即 OP 池 = 性能缓冲、Spare 池 = 坏块替换，见 §3.6）。没有任何主流主控在 free
+ *   池内部再切「预擦除 / 未擦除」两级——擦除落在关键路径上本身就是要避免的事，
+ *   那才是 OP 池与后台擦除存在的理由。
+ *
+ *   三级水位与各自的动作：
+ *     ① free ≥ FREE_POOL_TARGET(32)          正常，不做后台 GC
+ *     ② FREE_POOL_EMERGENCY(8) < free < 32   后台 GC 补池（IDLE / NORMAL）
+ *     ③ free ≤ FREE_POOL_EMERGENCY(8)        紧急：强制 GC，前台写不再等
+ *
+ *   旧字段 `pre_cond_count` / `emergency_count` 与状态位 PRE_COND / EMERGENCY 已删除
+ *   （前者恒等于 free_count，后两者从无读者）。 */
+#define FREE_POOL_TARGET    (32U) /* 水位①/②分界：低于此值启动后台 GC 补池 */
+#define FREE_POOL_EMERGENCY (8U)  /* 水位②/③分界：低于等于此值转紧急 GC */
 #define FTL_OP_PERCENT      (10U) /* OP 预留百分比（编译期默认） */
 #define FTL_SPARE_POOL_SIZE (50U) /* 坏块替换池大小 */
 
@@ -71,15 +88,16 @@ typedef struct
  */
 typedef struct
 {
-    ftl_topology_t topo;           /* 本 FTL 绑定的 NAND 芯片路由 */
-    uint16_t      *free_blocks;    /* free block 数组（全局 Block 号，由调用者提供） */
-    uint16_t       free_count;     /* free block 数 */
-    uint16_t      *op_blocks;      /* OP 预留 block 数组（容量不动：GC 缓冲池，由调用者提供） */
-    uint16_t       op_count;       /* OP 池 Block 数 */
-    uint16_t      *spare_blocks;   /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
-    uint16_t       spare_count;    /* Spare Pool 初始 Block 数 */
-    ftl_block_t   *blocks;         /* Block State Table（由调用者提供，容量 FTL_BLOCK_TOTAL） */
-    super_block_t *closed_sb_list; /* closed Super Block 数组（由调用者提供） */
+    ftl_topology_t topo;              /* 本 FTL 绑定的 NAND 芯片路由 */
+    uint16_t      *free_blocks;       /* free block 数组（全局 Block 号，由调用者提供） */
+    uint16_t       free_count;        /* free block 数 */
+    uint16_t      *op_blocks;         /* OP 预留 block 数组（容量不动：GC 缓冲池，由调用者提供） */
+    uint16_t       op_count;          /* OP 池 Block 数 */
+    uint16_t      *spare_blocks;      /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
+    uint16_t       spare_count;       /* Spare Pool 初始 Block 数 */
+    ftl_block_t   *blocks;            /* Block State Table 条目（由调用者提供，容量 FTL_BLOCK_TOTAL） */
+    uint64_t (*valid_map)[PLANE_NUM]; /* 逐页有效位图（独立表，每块 PLANE_NUM 个 u64；由调用者提供） */
+    super_block_t *closed_sb_list;    /* closed Super Block 数组（由调用者提供） */
 } ftl_init_params_t;
 
 /* 该 plane 是否持有物理块（Policy B：Closed 条目允许退化单 plane，另一 plane 记哨兵）。
@@ -129,11 +147,9 @@ typedef struct
     uint8_t  lun;          /* 本 Allocator 绑定的 LUN */
     uint16_t total_blocks; /* 总好 Block 数（出厂扫描后确定） */
 
-    /* ── Free Pool（三级） ── */
-    uint16_t *free_blocks;     /* free block 编号数组（由调用者提供） */
-    uint16_t  free_count;      /* 空闲 block 数 */
-    uint16_t  pre_cond_count;  /* 预擦除池 Block 数 */
-    uint16_t  emergency_count; /* 紧急池 Block 数 */
+    /* ── Free Pool（一个已擦除池；三级水位见文件头） ── */
+    uint16_t *free_blocks; /* free block 编号数组（由调用者提供） */
+    uint16_t  free_count;  /* 空闲（且已擦除）block 数——三级水位都建在它上面 */
 
     /* ── OP / Spare Pool（容量不动） ── */
     uint16_t *op_blocks;    /* OP 预留 block 数组（GC 缓冲池，由调用者提供） */
@@ -150,8 +166,9 @@ typedef struct
     uint16_t       closed_sb_count; /* 已关闭 Super Block 数 */
 
     /* ── Block State Table（统一 per-Block 状态） ── */
-    ftl_block_t *blocks;    /* 每 Block 状态数组（由调用者提供） */
-    uint16_t     bad_count; /* 坏 Block 数 */
+    ftl_block_t *blocks;              /* 每 Block 条目数组（由调用者提供） */
+    uint64_t (*valid_map)[PLANE_NUM]; /* 逐页有效位图（独立表，每块 PLANE_NUM 个 u64；由调用者提供） */
+    uint16_t bad_count;               /* 坏 Block 数 */
 } ftl_allocator_t;
 
 /* ── 接口函数 ── */
@@ -205,6 +222,44 @@ nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature);
  * @param gblock 要归还的 Block 编号（全局 Block 号）
  */
 void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
+
+/*
+ * allocator_alloc_reserved_block - 独占分配一个**整块**（元数据专用）
+ *
+ * 用途：L2P 日志块等「整块归元数据所有」的分配。从该 plane 的 Free Pool 取一块
+ * （磨损最少者），把它从 Free Pool **移除**并标记 RESERVED。
+ *
+ * ⚠ 与 allocator_alloc(FTL_TEMP_COLD) 的区别：后者取的是**冷 Open SB 的一页**，
+ *   而冷 SB 与 GC 迁移共享 ⇒ 元数据绝不能走那条路（会把 GC 的写指针搅乱）。
+ *
+ * ⚠ 三件事必须一起做——只置 RESERVED 挡不住分配，因为
+ *   allocator_select_plane_block() 只判 FREE：
+ *     ① allocator_pool_remove()（从 Free Pool 拿掉）
+ *     ② 置 RESERVED
+ *     ③ 清 FREE
+ *
+ * ⚠ **plane 固定**：Policy B 下两个 plane 各自独立选块，拿不到「同号双 plane 都空闲」
+ *   的保证，故不跨 plane 配对；调用者给出目标 plane，返回单个 gblock。
+ *
+ * 归还走 allocator_free_reserved_block()（调用者保证已擦除）。
+ *
+ * @param alloc      Allocator 上下文
+ * @param plane      目标 plane（0..PLANE_NUM-1）
+ * @param out_gblock 输出：全局 Block 号（plane × BLOCKS_PER_PLANE + block）
+ * @return FTL_OK / FTL_ERROR（参数非法或该 plane 无空闲块）
+ */
+ftl_status_t allocator_alloc_reserved_block(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock);
+
+/*
+ * allocator_free_reserved_block - 归还独占块到 Free Pool（调用者保证已擦除）
+ *
+ * 与 allocator_free_block 同一入口语义（置 FREE、清 RESERVED/OPEN/CLOSED/TEMP、
+ * 清反向索引），只是多一个「调用者必须持有 RESERVED 块」的前置约定。
+ *
+ * @param alloc  Allocator 上下文
+ * @param gblock 要归还的全局 Block 号
+ */
+void allocator_free_reserved_block(ftl_allocator_t *alloc, uint16_t gblock);
 
 /*
  * allocator_close_open_sb - 运行时关闭当前 Open Super Block（写失败等场景）
@@ -266,13 +321,7 @@ void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock);
 
 /* 说明：allocator_mark_bad 已删除——坏块标记统一走 bbt_mark_bad（BBT 单数据源），
  * BBT 内部将 is_bad 位写入 ftl_block_t.state 并维护 alloc->bad_count。 */
-
-/*
- * allocator_needs_gc - 检查是否需要触发 GC
- *
- * @param alloc Allocator 上下文
- * @return 1 需要 GC，0 不需要
- */
-int allocator_needs_gc(const ftl_allocator_t *alloc);
+/* 说明：allocator_needs_gc 已删除（P1-3）——零调用者，且其判定（水位 / 紧急）与
+ * gc_check_triggers() 的 T1/T4 重复。GC 触发判定**单一数据源** = `ftl/gc.h`。 */
 
 #endif /* FTL_ALLOCATOR_H */

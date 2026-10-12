@@ -139,10 +139,22 @@ ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl)
     /* ① L2P Cache 全 INVALID */
     l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
-    /* ② Allocator 已由 ftl_init 初始化，此处不需重复做 */
+    /* ② 全盘重建 Closed SB 列表（F2）。
+     *    main.c free pool 回填把「用户数据 written 块」也放进了 Free Pool，其注释
+     *    明确依赖「boot_recovery 的 F2 重建会把它们拉出」。clean start 走了 F2，
+     *    fresh start 以前没走 ⇒ 那条不变量在此路径上不成立：Free Pool 里躺着已编程
+     *    的块，首次分配就把新数据 **AND** 到旧数据上（NAND 只能 1→0）。
+     *    fresh start 本就丢了映射，这里只要把 written 块逐出 Free Pool 交给 GC 擦除。
+     *    ⚠ 代价：逐块读首页判空（写满块最多 64 页），与 clean start 同一代价。 */
+    {
+        ftl_rebuild_stats_t rebuild_stats;
+        (void)ftl_rebuild_closed_sb_list(ftl, &rebuild_stats);
+    }
 
-    /* ③ Journal 已由 ftl_init 初始化（空） */
-    /* ④ checkpoint sequence = 0 */
+    /* ③ Allocator 已由 ftl_init 初始化，此处不需重复做 */
+
+    /* ④ Journal 已由 ftl_init 初始化（空） */
+    /* ⑤ checkpoint sequence = 0 */
     ftl->cp_sequence    = 0U;
     ftl->cp_timer_start = 0U;
 
@@ -417,7 +429,7 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
                 uint16_t     gblock = ftl_gblock(plane, sb->plane_blocks[plane]);
                 ftl_block_t *b      = &alloc->blocks[gblock];
 
-                ftl_block_set_valid(b, plane, page);
+                ftl_block_set_valid(b, alloc->valid_map[gblock], plane, page);
                 if (!ftl_block_is_bad(b))
                 {
                     ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
@@ -551,7 +563,7 @@ static void close_full_block(ftl_context_t       *ftl,
         cur = l2p_cache_read(&ftl->cache, lba);
         if ((cur != FTL_PBA_INVALID) && (cur == pba))
         {
-            ftl_block_set_valid(b, plane, page);
+            ftl_block_set_valid(b, alloc->valid_map[ftl_gblock(plane, block)], plane, page);
             if (stats != NULL)
             {
                 stats->valid_pages++;
@@ -628,8 +640,8 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
         }
     }
 
-    /* ⑤ 重同步：已从 free pool 拉出写过的块 */
-    alloc->pre_cond_count = alloc->free_count;
+    /* ⑤ 写过的块已从 free pool 拉出（free_count 由 allocator_remove_from_free 自行维护，
+     * 无派生计数需要重同步——P1-3 删除了 pre_cond_count 这个 free_count 的镜像） */
 
     return FTL_OK;
 }

@@ -447,7 +447,23 @@
  * 无数据传输。与 OP_ERASE_BLOCK_ISSUE 配对。 */
 #define OP_ERASE_BLOCK_WAIT (40U)
 
-#define OP_COUNT (42U) /* 0..41 inclusive */
+/* OP_READ_COLUMN（槽位 42 —— 新增；0..41 已满，槽位 20 是墓碑不得复用）
+ * ----------------------------------------------------------------------------------------------
+ * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< 30 >~~~~~< Dout1..Dout4 >-< 70 >-< Status >
+ * 按**显式列地址**读一页的 4 个字节。用途：读 spare 区——出厂坏块标记在**列 2048**
+ * （spare 首字节，x8 为 00h），任何 cw 值都够不到那里。
+ *
+ * 与 OP_READ_META 的唯一区别：**列地址不走 paa 的 cw 字段，改由命令级 param 的
+ * 字节 0/1（小端）传入**（cw 只有 2 位 ⇒ 列上限 1584，够不到 spare 区）。
+ * 行地址仍取自 command->paa。**无 desc 链、无 buffer 占用**（has_data = 0）；
+ * 4 字节落控制器侧暂存，完成时拷进 CQ 的 fc_param_t param。
+ * uop 序列与 OP_NORMAL_READ_PAGE_WITH_DATA_OUT 逐字节相同（复用其数组），
+ * 差别仅在列地址来源与输出长度 = 4。
+ * ----------------------------------------------------------------------------------------------
+ */
+#define OP_READ_COLUMN (42U)
+
+#define OP_COUNT (43U) /* 0..42 inclusive */
 
 /* ── Phase V: OP 类型枚举 ── */
 #define OP_TYPE_ATOMIC (0U) /* 原原子 OP 码 */

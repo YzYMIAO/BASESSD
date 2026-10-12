@@ -17,6 +17,9 @@
 #define JOURNAL_FULL_THRESHOLD (85U)
 #define JOURNAL_CRITICAL       (95U)
 
+/* 「无预擦除块」哨兵（P1-6：journal_truncate 预擦除记账，见 l2p_journal_t） */
+#define JOURNAL_BLOCK_NONE (0xFFU)
+
 /* Journal Page Header */
 #define JOURNAL_HEADER_SIZE (12U)          /* magic(4) + page_seq(4) + entry_count(2) + block_seq(2) */
 #define JOURNAL_MAGIC       (0x524F554AUL) /* "JOUR" */
@@ -44,6 +47,11 @@ typedef struct
     uint8_t  current_entry;
     uint32_t sequence_counter;
 
+    /* P1-6：被 journal_truncate **预擦除**、等待 flush_page 回切复用的环形块号
+     * （JOURNAL_BLOCK_NONE = 无）。记账目的 = 同一块每圈只擦一次：旧实现 truncate
+     * 擦环形下一块、flush_page 回切又擦一次 ⇒ 双倍磨损（见 journal.c truncate 注释）。 */
+    uint8_t pre_erased_block;
+
     uint8_t page_buf[JOURNAL_PAGE_SIZE];
 
     uint8_t checkpoint_needed;
@@ -51,12 +59,26 @@ typedef struct
 } l2p_journal_t;
 
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
+/* 追加一条 L2P 更新。P1-6：若当前页缓冲里已有**同一 LBA** 的条目，就地更新
+ * （只改 old/new PBA，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。 */
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba);
 void journal_flush_page(l2p_journal_t *journal);
 /* F10：全量回放 page_seq > cp_sequence 的页（按 (page_seq, entry_index) 递增序
  * 应用，per-LBA last-write-wins）。cp_sequence 为 checkpoint 截断水位（旧
  * journal_replay 只回放最大一页，掉电跨 ≥2 页时其余条目静默丢失）。 */
 ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence);
-void         journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);
+/*
+ * journal_truncate - 截断 Journal（丢弃 ≤ up_to_sequence 的条目，P1-6）
+ *
+ * 语义：Checkpoint 已把 sequence ≤ up_to_sequence 的条目 flush 进 NAND L2P 表 ⇒
+ * 环形里**最旧的一块**（= 环形下一块）整块可弃。本函数预擦除该块并记账
+ * （pre_erased_block），使 journal_flush_page 回切到它时**跳过**擦除——保证同一块
+ * 每圈只擦一次（旧实现在两处各擦一次 = 双倍磨损，直击 §14.1 的寿命瓶颈）。
+ *
+ * @param up_to_sequence 截断水位；**必须覆盖全部已写条目**（调用者传 sequence_counter）。
+ *        若水位不足以覆盖（有未 checkpoint 的条目），本函数**不截断**——最旧块可能仍
+ *        持有回放需要的条目，擦掉即丢数据。
+ */
+void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);
 
 #endif /* FTL_JOURNAL_H */

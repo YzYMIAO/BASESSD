@@ -341,6 +341,30 @@ static void req_meta_read(nand_dispatch_task_t *task)
 }
 
 /* --------------------------------------------------------------------
+ * req_read_column
+ *   功能：构建按列读请求（OP_READ_COLUMN，自带 00h-30h 加载）。
+ *   参数：task —— 预解析完成的任务；**column 由命令级 param 字节 0/1 解出后经
+ *         FC 落进 task->column**；plane_paa[task->plane] 只提供行地址；
+ *         cw_buffers[task->plane * CW_NUM] 已由 FC 重定向到 g_fc_return_staging[command_id]
+ *         （控制器级 4 字节暂存，返回值最终经 CQ 的 param 联合体交回）。
+ *   返回：无。
+ *   实现要点：与 req_meta_read 的唯一区别是**列地址不来自 PAA 的 cw 字段，而来自
+ *         task->column**——cw 只有 2 位（列上限 1584），够不到 spare 区（出厂坏块标记
+ *         在列 2048）。行地址仍取同一 PAA（paa_to_nand_row 丢掉 cw）。
+ *         4 字节落本 plane 的 CW0 那一格（掩码位 = plane*CW_NUM），与 req_feature 同口径。
+ * -------------------------------------------------------------------- */
+static void req_read_column(nand_dispatch_task_t *task)
+{
+    const uint8_t plane = task->plane;
+
+    task->request = (nand_fc_request_t){
+        .column      = task->column,
+        .row         = {paa_to_nand_row(task->plane_paa[plane])},
+        .data        = task->cw_buffers[(uint8_t)(plane * CW_NUM)],
+        .data_length = 4U};
+}
+
+/* --------------------------------------------------------------------
  * req_onfi_signature
  *   功能：构建 ONFI 签名读请求（OP_READ_ONFI_SIGNATURE，90h + 地址 20h）。
  *   参数：task —— 预解析完成的任务；cw_buffers[task->plane * CW_NUM] 已由 FC 重定向到
@@ -567,6 +591,7 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
     [OP_PROGRAM_PAGE_WAIT]                      = completion_all_cws,
     [OP_ERASE_BLOCK_ISSUE]                      = completion_all_cws,
     [OP_ERASE_BLOCK_WAIT]                       = completion_all_cws,
+    [OP_READ_COLUMN]                            = completion_single,
 };
 
 /* --------------------------------------------------------------------
@@ -583,6 +608,7 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
  *     - req_feature        ：SET/GET_FEATURES（column=feature_addr, 4B）
  *     - req_meta_read      ：META 只读回读（column = CW 号×CW_SIZE, 4B, 无 desc）
  *     - req_onfi_signature ：ONFI 签名读（90h + 地址 20h, 4B, 无 desc）
+ *     - req_read_column    ：按显式列地址读（列来自 task->column, 4B, 无 desc）
  *     - req_erase          ：擦除（无数据）
  *   下标 OP_* 不连续（含 Phase V 扩展 35..40），用设计初始化器定位。
  * -------------------------------------------------------------------- */
@@ -629,4 +655,5 @@ const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
     [OP_PROGRAM_PAGE_WAIT]                      = req_no_data,
     [OP_ERASE_BLOCK_ISSUE]                      = req_erase,
     [OP_ERASE_BLOCK_WAIT]                       = req_no_data,
+    [OP_READ_COLUMN]                            = req_read_column,
 };

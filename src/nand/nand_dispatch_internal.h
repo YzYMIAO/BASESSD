@@ -59,23 +59,25 @@ typedef struct
     uint8_t  lun;           /* LUN — needed for routing. */
     uint8_t  page_type : 2; /* Copy from dispatch request for LDPC engine. */
     uint8_t  reserved  : 6;
-    uint32_t cw_bitmap;   /* 选中的 CW 集合：bit n = plane*CW_NUM + cw（flat 绝对编号）。
-                           * 与 request->cw_bitmap 同一值；是 cw_buffers / cw_index 的唯一依据
-                           * （"本任务有几个 CW"= popcount(mask)，"第 k 个"= 第 k 个置位）。 */
-    uint8_t cw_index;     /* 当前 CW 的 **flat 绝对编号 n**（∈ cw_bitmap），不是密排槽位。
-                           * 生产：task_load 置为掩码最低位；cw_chain 每取完一个推进到下一个置位。
-                           * 消费：completion_per_cw 用它当下标写 cw_status[n]，
-                           *   并把它作为 failed_descriptor_id 上报。 */
-    uint8_t plane_count;  /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
-                           * 见 nand_dispatch.h 同名字段的完整说明。 */
-    uint8_t plane;        /* 本命令目标物理 plane 索引。
-                           * 单 plane：= request->plane，所有单 plane req_* handler / cw_chain /
-                           *   scatter 一律读 plane_paa[plane]。
-                           * multi-plane：恒 0；multi-plane handler 不读本字段，仍写死 [0]/[1]。
-                           * ⚠ 必须无条件赋值：task slot 会被链内后续命令复用（task_load 不做整体
-                           *   memset），漏赋值会读到上一条命令的残值。 */
-    uint8_t started;      /* 0=未启动；1=已 nand_fc_start（含 start 内同步完成） */
-    uint8_t feature_addr; /* SET/GET_FEATURES 的寄存器地址（column）。内联数据走 cw_buffers，不走本层。 */
+    uint32_t cw_bitmap;    /* 选中的 CW 集合：bit n = plane*CW_NUM + cw（flat 绝对编号）。
+                            * 与 request->cw_bitmap 同一值；是 cw_buffers / cw_index 的唯一依据
+                            * （"本任务有几个 CW"= popcount(mask)，"第 k 个"= 第 k 个置位）。 */
+    uint8_t cw_index;      /* 当前 CW 的 **flat 绝对编号 n**（∈ cw_bitmap），不是密排槽位。
+                            * 生产：task_load 置为掩码最低位；cw_chain 每取完一个推进到下一个置位。
+                            * 消费：completion_per_cw 用它当下标写 cw_status[n]，
+                            *   并把它作为 failed_descriptor_id 上报。 */
+    uint8_t plane_count;   /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
+                            * 见 nand_dispatch.h 同名字段的完整说明。 */
+    uint8_t plane;         /* 本命令目标物理 plane 索引。
+                            * 单 plane：= request->plane，所有单 plane req_* handler / cw_chain /
+                            *   scatter 一律读 plane_paa[plane]。
+                            * multi-plane：恒 0；multi-plane handler 不读本字段，仍写死 [0]/[1]。
+                            * ⚠ 必须无条件赋值：task slot 会被链内后续命令复用（task_load 不做整体
+                            *   memset），漏赋值会读到上一条命令的残值。 */
+    uint8_t  started;      /* 0=未启动；1=已 nand_fc_start（含 start 内同步完成） */
+    uint8_t  feature_addr; /* SET/GET_FEATURES 的寄存器地址（column）。内联数据走 cw_buffers，不走本层。 */
+    uint16_t column;       /* **显式列地址**（仅 OP_READ_COLUMN 用，见 nand_dispatch.h 同名字段）。
+                            * 其余 op 恒 0；req_read_column 直接把它当列地址，不再从 paa 的 cw 推。 */
 
     /* Pre-resolved per-CW data（定容数组，容量 = 硬件上限 CW_TOTAL_MAX = PLANE_NUM×CW_NUM）。
      * ⚠ 下标是 **flat 绝对 CW 号 n = plane*CW_NUM + cw**，与 cw_bitmap 的 bit 号、

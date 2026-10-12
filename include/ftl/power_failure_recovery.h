@@ -154,7 +154,7 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
  *      l2p_cache_read 反查回填 valid_map（只置 L2P 仍指向本页的真有效页）
  *   ⑤ 部分写块（掉电时未写满的 Open SB）同样进 Closed，交 GC 迁移——不再恢复 Open SB
  *      （per-block 下无法确定两个部分写块是否曾是一对）
- *   ⑥ 结尾重同步 pre_cond_count = free_count（拉出写过的块后）
+ *   ⑥ 写过的块由 allocator_remove_from_free 从 free pool 拉出（free_count 自维护）
  *
  * 调用时机（ftl_boot_recovery 内）：
  *   Clean Start → l2p_cache_init 之后（反查触发按需 region 加载，正确但慢）

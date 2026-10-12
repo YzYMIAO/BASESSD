@@ -21,6 +21,15 @@
  *   与 free_blocks / closed_sb_list 的「调用者提供大数组」契约一致。
  *   多 LUN 前置：每 LUN 一份表 = host 声明 g_blocks[LUN_NUM]，
  *   params 按 LUN 传入，本表代码零改动。
+ *
+ * 位图与条目的分离（主流 BIT 形态，2026-10-12 定）：
+ *   per-Block 元数据里**唯一可能不常驻**的是逐页有效位图（1 bit/页）——块数大时
+ *   会超出 SRAM 预算，主流把它当**独立、可落盘、可 GC 时重建**的弹性项，而不是塞进
+ *   每块一条的 BIT 条目。故本仓：
+ *     · ftl_block_t      = 块级聚合条目（valid_count 是真值），20B/块；
+ *     · alloc->valid_map = 独立位图表（每块 PLANE_NUM 个 u64 = 16B/块），由调用者
+ *                          经 ftl_init_params_t.valid_map 提供。
+ *   位图访问器显式收本块的位图切片（alloc->valid_map[gblock]）。
  */
 
 #include "nand/nand_config.h" /* BLOCKS_PER_PLANE, PLANE_NUM, nand_paa_t, nand_pba_t, paa_to_* */
@@ -65,86 +74,68 @@ enum
     FTL_BLOCK_STATE_RESERVED  = 0x0010U, /* Spare Pool / 元数据保留块 */
     FTL_BLOCK_STATE_TEMP_HOT  = 0x0020U, /* 温度流：Hot（super_block_t.temperature 下沉） */
     FTL_BLOCK_STATE_TEMP_COLD = 0x0040U, /* 温度流：Cold */
-    FTL_BLOCK_STATE_PRE_COND  = 0x0080U, /* Pre-conditioned Pool 分级（三级 Free Pool 预铺） */
-    FTL_BLOCK_STATE_EMERGENCY = 0x0100U, /* Emergency Pool 分级 */
+    /* ⚠ bit7/bit8（原 PRE_COND / EMERGENCY）已删除（P1-3）：Free Pool 是一个已擦除池，
+     *   池内无「预擦除 / 未擦除」之分（GC 先擦后归还），故这两个分级位从未有过读者。
+     *   三级是**水位**不是**分区**——见 allocator.h 的「Free Pool 三级水位」。 */
 };
 
-/* 全部状态位掩码（bit0..8） */
-#define FTL_BLOCK_STATE_MASK (0x01FFU)
+/* 全部状态位掩码（bit0..6） */
+#define FTL_BLOCK_STATE_MASK (0x007FU)
 
 /* 温度掩码/提取（bit5-6，显式两 bit，可扩展多温区） */
 #define FTL_BLOCK_TEMP_MASK (FTL_BLOCK_STATE_TEMP_HOT | FTL_BLOCK_STATE_TEMP_COLD)
 
-/* ── 坏块原因（独立 1B 字段 bad_reason） ── */
-enum
-{
-    FTL_BLOCK_BAD_FACTORY = 0, /* 出厂坏块 */
-    FTL_BLOCK_BAD_PROGRAM,     /* PROGRAM 失败 */
-    FTL_BLOCK_BAD_ERASE,       /* ERASE 失败 */
-    FTL_BLOCK_BAD_READ,        /* 读失败 / ECC 超限 */
-    FTL_BLOCK_BAD_GC_MOVE,     /* GC 迁移失败 */
-    FTL_BLOCK_BAD_TRIM,        /* TRIM 后坏块 */
-};
-
-/* ── Block State Table 每行 ──
- * 全字段常驻 SRAM（行业 Block Info Table 标准形态，功能优先）。
- * 字段全部有明确消费方 / 后续扩展铺垫：
+/* ── Block State Table 每行（BIT 条目）──
+ * 全字段常驻 SRAM（块级聚合；逐页位图已搬出，见文件头「位图与条目的分离」）。
+ * 只保留**有消费方**的字段——无读者的字段已删除（v0.56）：
+ *   · program_count (2B) —— 写成功++，从无读者；连带 Wear 表的持久化槽一并删
+ *   · bad_reason    (1B) —— 仅 bbt_mark_bad 写入，无读者；`FTL_BLOCK_BAD_*` 枚举与
+ *                            `bbt_mark_bad` 的 `reason` 形参一并删除（BBT 持久化本就是
+ *                            bitmap，重启后原因必丢，属纯 RAM 诊断残留）
+ *   · gc_generation (1B) —— GC 迁移成功++，从无读者
  *
- *   erase_count   合并 allocator->erase_counts[]（allocator/gc/wl 消费）
- *   last_pe_ts    最近擦除时间戳（企业级 WL 冷热避聚，gc_erase 写）
- *   read_count    read disturb 计数（读成功++，后续 read disturb 搬移预铺）
- *   program_count program 计数（健康模型，写成功++）
+ *   erase_count   合并 allocator->erase_counts[]（allocator/gc/wl/wear 消费）
+ *   last_pe_ts    最近擦除时间戳（GC victim youth_penalty，P1-1 消费）
+ *   read_count    read disturb 计数（读成功++，read recovery / wear 消费）
  *   valid_count   双 Plane 合计有效页 0..128（GC/WL victim 选真值，O(1)）
- *   state         状态机（BAD/OPEN/CLOSED/FREE/RESERVED/PRE_COND/EMERGENCY）
+ *   state         状态机（BAD/OPEN/CLOSED/FREE/RESERVED）
  *                 + 温度（HOT/COLD），bitmask 宏 + 访问器
- *   bad_reason    坏块原因（FACTORY/PROGRAM/ERASE/READ/GC_MOVE/TRIM）
- *   gc_generation GC 搬移代数（迁移成功++，新块继承 0）
  *   sb_id         block→SB 反向索引（UINT16_MAX=未归属，allocator 维护）
- *   valid_map     per-Plane 逐页有效位图（bit p = 该 plane 第 p 页有效），
- *                 GC/WL 迁移直接扫置位页搬移，免 NAND 读——落地
- *                 设计文档 P-C.5「反向映射 bitmap」。
  *   rr            ECC 健康（last_ecc + rising_count + health，read recovery 供电）
  *
  *   维护点（全真值）：
- *     ① 写成功：新页置位 + VPC++；覆盖写清旧页（old_pba）+ VPC--；program_count++
+ *     ① 写成功：新页置位 + VPC++；覆盖写清旧页（old_pba）+ VPC--
  *     ② 读成功：read_count++（ECC 记录 rr）
- *     ③ GC/WL 迁移成功：旧页清位 + VPC--；新页置位 + VPC++；gc_generation++
+ *     ③ GC/WL 迁移成功：旧页清位 + VPC--；新页置位 + VPC++
  *     ④ 擦除成功：bitmap 清空 + VPC=0 + last_pe_ts 写 + 状态 FREE
  *     ⑤ trim：清旧页 bitmap/VPC
- *     ⑥ 坏块：置 BAD + clear_valid + bad_reason
+ *     ⑥ 坏块：置 BAD + clear_valid
  *     ⑦ 掉电恢复：写指针扫描重建 bitmap（power_failure_recovery）
  *
- *   字段顺序：rr 必须排在 valid_map **之前**。valid_map 是 uint64_t 数组，
- *   需要 8 字节对齐；rr 只有 3B，若留在数组之后，结构体会被尾部对齐从 40B
- *   撑到 48B（白丢 8B/块 = 32KB）。前移后 valid_map 仍落在 @24。
+ *   逐页有效位图（per-Plane 逐页，bit p = 该 plane 第 p 页有效）**不在本结构体**——
+ *   它是 alloc->valid_map[gblock]（独立表，主流弹性项，见文件头）。GC/WL 迁移直接扫
+ *   置位页搬移，免 NAND 读（设计文档 P-C.5「反向映射 bitmap」）。
  *
- *   sizeof = 40B → 4096 项 = 160KB（全常驻 SRAM；档三分层见文档 §19）。
+ *   sizeof = 20B → 4096 项 = 80KB；位图表另计 64KB（16B×4096），合计 144KB。
  */
 typedef struct
 {
     /* ── 磨损 ── */
-    uint32_t erase_count;   /* 4B  @0   擦除次数 */
-    uint32_t last_pe_ts;    /* 4B  @4   最近擦除时间戳（WL 冷热避聚） */
-    uint16_t read_count;    /* 2B  @8   read disturb 计数 */
-    uint16_t program_count; /* 2B  @10  program 计数（健康模型） */
+    uint32_t erase_count; /* 4B  @0   擦除次数 */
+    uint32_t last_pe_ts;  /* 4B  @4   最近擦除时间戳（WL 冷热避聚） */
+    uint16_t read_count;  /* 2B  @8   read disturb 计数 */
 
-    /* ── 有效页 + 状态 ── */
-    uint16_t valid_count;   /* 2B  @12  双 Plane 合计有效页 0..128 */
-    uint16_t state;         /* 2B  @14  状态机+温度（bitmask 宏 + 访问器） */
-    uint8_t  bad_reason;    /* 1B  @16  坏块原因（独立字段） */
-    uint8_t  gc_generation; /* 1B  @17  GC 搬移代数 */
-    uint16_t sb_id;         /* 2B  @18  block→SB 反向索引（UINT16_MAX=无） */
+    /* ── 有效页聚合 + 状态 ── */
+    uint16_t valid_count; /* 2B  @10  双 Plane 合计有效页 0..128（位图在 alloc->valid_map[]） */
+    uint16_t state;       /* 2B  @12  状态机+温度（bitmask 宏 + 访问器） */
+    uint16_t sb_id;       /* 2B  @14  block→SB 反向索引（UINT16_MAX=无） */
 
-    /* ── ECC 健康（必须在 valid_map 之前，见上方字段顺序说明）── */
-    rr_ecc_track_t rr;   /* 3B  @20  ECC 健康 */
-    uint8_t        _pad; /* 1B  @23  对齐补（valid_map 需 8B 对齐） */
-
-    /* ── 逐页有效位图 ── */
-    uint64_t valid_map[PLANE_NUM]; /* 16B @24  per-Plane 逐页有效位图 */
-} ftl_block_t;
+    /* ── ECC 健康 ── */
+    rr_ecc_track_t rr; /* 3B  @16  ECC 健康 */
+} ftl_block_t;         /* 19B → 20B（u32 对齐） */
 
 /* 布局守卫：字段顺序/类型漂移会让结构体悄悄变大，编译期拦住。 */
-_Static_assert(sizeof(ftl_block_t) == 40, "ftl_block_t 布局漂移（期望 40B）");
+_Static_assert(sizeof(ftl_block_t) == 20, "ftl_block_t 布局漂移（期望 20B）");
 
 /* ── 全局 Block 号转换（单点，修复 per-plane 碰撞的关键）── */
 
@@ -223,20 +214,6 @@ static inline uint8_t ftl_block_get_temp(const ftl_block_t *b)
     return ((b->state & FTL_BLOCK_STATE_TEMP_COLD) != 0U) ? 1U : 0U;
 }
 
-/* 坏块原因（独立 1B 字段） */
-static inline uint8_t ftl_block_bad_reason(const ftl_block_t *b)
-{
-    return (b != NULL) ? b->bad_reason : (uint8_t)FTL_BLOCK_BAD_FACTORY;
-}
-
-static inline void ftl_block_set_bad_reason(ftl_block_t *b, uint8_t reason)
-{
-    if (b != NULL)
-    {
-        b->bad_reason = reason;
-    }
-}
-
 /* 反向索引 sb_id（UINT16_MAX = 未归属任何 SB） */
 #define FTL_BLOCK_NO_SB (UINT16_MAX)
 
@@ -253,50 +230,53 @@ static inline void ftl_block_set_sb(ftl_block_t *b, uint16_t sb_id)
     }
 }
 
-/* ── 有效页位图操作（bitmap + valid_count 单点维护，防漂移）── */
+/* ── 有效页位图操作（位图在独立表 alloc->valid_map[]，每块 PLANE_NUM 个 u64）──
+ *
+ * 调用点传本块的位图切片（alloc->valid_map[gblock]）；bitmap 与 valid_count
+ * （在 ftl_block_t 内）单点同步维护，防漂移。 */
 
 /* 置位一页（第 plane 的 page 页有效）。pages=2 时对两个 plane 各调一次。 */
-static inline void ftl_block_set_valid(ftl_block_t *b, uint8_t plane, uint8_t page)
+static inline void ftl_block_set_valid(ftl_block_t *b, uint64_t *valid_map, uint8_t plane, uint8_t page)
 {
-    if ((b != NULL) && (plane < PLANE_NUM) && (page < PAGES_PER_BLOCK))
+    if ((b != NULL) && (valid_map != NULL) && (plane < PLANE_NUM) && (page < PAGES_PER_BLOCK))
     {
-        if ((b->valid_map[plane] & (1ULL << page)) == 0U)
+        if ((valid_map[plane] & (1ULL << page)) == 0U)
         {
-            b->valid_map[plane] |= (1ULL << page);
+            valid_map[plane] |= (1ULL << page);
             b->valid_count++;
         }
     }
 }
 
 /* 清位一页（该页被覆盖/迁移/擦除后无效） */
-static inline void ftl_block_clr_valid(ftl_block_t *b, uint8_t plane, uint8_t page)
+static inline void ftl_block_clr_valid(ftl_block_t *b, uint64_t *valid_map, uint8_t plane, uint8_t page)
 {
-    if ((b != NULL) && (plane < PLANE_NUM) && (page < PAGES_PER_BLOCK))
+    if ((b != NULL) && (valid_map != NULL) && (plane < PLANE_NUM) && (page < PAGES_PER_BLOCK))
     {
-        if ((b->valid_map[plane] & (1ULL << page)) != 0U)
+        if ((valid_map[plane] & (1ULL << page)) != 0U)
         {
-            b->valid_map[plane] &= ~(1ULL << page);
+            valid_map[plane] &= ~(1ULL << page);
             b->valid_count--;
         }
     }
 }
 
 /* 查询一页是否有效（GC/WL 迁移直接用它，免 NAND 读） */
-static inline int ftl_block_is_valid(const ftl_block_t *b, uint8_t plane, uint8_t page)
+static inline int ftl_block_is_valid(const ftl_block_t *b, const uint64_t *valid_map, uint8_t plane, uint8_t page)
 {
-    return (b != NULL) && (plane < PLANE_NUM) && (page < PAGES_PER_BLOCK) &&
-           ((b->valid_map[plane] & (1ULL << page)) != 0U);
+    return (b != NULL) && (valid_map != NULL) && (plane < PLANE_NUM) && (page < PAGES_PER_BLOCK) &&
+           ((valid_map[plane] & (1ULL << page)) != 0U);
 }
 
 /* 清除整块位图（擦除/坏块后调用），并同步 valid_count=0 */
-static inline void ftl_block_clear_valid(ftl_block_t *b)
+static inline void ftl_block_clear_valid(ftl_block_t *b, uint64_t *valid_map)
 {
-    if (b != NULL)
+    if ((b != NULL) && (valid_map != NULL))
     {
         uint8_t p;
         for (p = 0U; p < PLANE_NUM; p++)
         {
-            b->valid_map[p] = 0ULL;
+            valid_map[p] = 0ULL;
         }
         b->valid_count = 0U;
     }

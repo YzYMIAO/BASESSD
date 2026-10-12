@@ -1,5 +1,6 @@
 #include "ftl/l2p_cache.h"
 
+#include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/ftl_fc_interface.h"
 #include "nand/onfi_1_0.h"
@@ -38,6 +39,60 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
     cache->miss_count = 0U;
     cache->md_dir     = NULL;
     cache->alloc      = NULL;
+
+    /* Thrashing 检测窗口（P1-4）：开机从「非降级」起步 */
+    cache->window_access = 0U;
+    cache->window_miss   = 0U;
+    cache->miss_pct      = 0U;
+    cache->thrashing     = 0U;
+}
+
+/*
+ * Thrashing 窗口结算（P1-4）。
+ *
+ * 每次 cache 访问（命中或未命中）调用一次；窗口满 L2P_THRASH_WINDOW 时按 miss 率
+ * 与滞回阈值更新 thrashing 标志并清零窗口。仅状态**翻转**时打一行观测日志
+ * （阈值附近不抖动 ⇒ 不会刷屏）。
+ */
+static void l2p_cache_note_access(l2p_cache_t *cache, uint8_t is_miss)
+{
+    uint8_t was_thrashing;
+
+    cache->window_access++;
+    if (is_miss != 0U)
+    {
+        cache->window_miss++;
+    }
+
+    if (cache->window_access < L2P_THRASH_WINDOW)
+    {
+        return;
+    }
+
+    cache->miss_pct      = (uint8_t)((cache->window_miss * 100U) / cache->window_access);
+    was_thrashing        = cache->thrashing;
+    cache->window_access = 0U;
+    cache->window_miss   = 0U;
+
+    /* 滞回：进入 ≥90%，退出 <70%，中间保持原态 */
+    if (cache->miss_pct >= L2P_THRASH_ENTER_PCT)
+    {
+        cache->thrashing = 1U;
+    }
+    else if (cache->miss_pct < L2P_THRASH_EXIT_PCT)
+    {
+        cache->thrashing = 0U;
+    }
+
+    if (cache->thrashing != was_thrashing)
+    {
+        /* 观测口：miss= 为最近窗口 miss 率；hit/miss= 为开机累计。 */
+        LOGI("[L2P] thrash=%u miss=%u%% hit=%lu miss_total=%lu\r\n",
+             (unsigned)cache->thrashing,
+             (unsigned)cache->miss_pct,
+             (unsigned long)cache->hit_count,
+             (unsigned long)cache->miss_count);
+    }
 }
 
 /*
@@ -150,11 +205,13 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
         /* hit */
         line->access_count++;
         cache->hit_count++;
+        l2p_cache_note_access(cache, 0U);
         return line;
     }
 
     /* miss */
     cache->miss_count++;
+    l2p_cache_note_access(cache, 1U);
 
     victim_idx = l2p_cache_evict_one(cache);
     if (victim_idx < 0)
@@ -170,10 +227,12 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
     line->access_count = 1U;
 
     /*
-     * 从 NAND L2P Table 加载 Region 数据。
+     * 从 NAND 加载 Region 数据。
      *
-     * 通过 Metadata Directory 查找 Region 的物理位置（动态分配）。
-     * 如果 Directory 中未找到（首次访问且未分配），回退到固定位置映射。
+     * 位置一律来自 Metadata Directory（每个 region 在 fill_fixed 就登记好：初始指向
+     * **哨兵层**固定页，被刷新后指向日志块）。哨兵页永不写入 ⇒ 读回全 0xFF ⇒
+     * 逐项即 PBA_INVALID = "未映射"，正是首次访问应有的语义。
+     * 下面的固定位置回退仅作 md_dir 缺失时的兜底（正常路径不可达）。
      * CRC/Random DISABLED：Region 数据不经过 CRC/Random，只保护 ECC。
      */
     {
@@ -286,54 +345,42 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
     line->state = L2P_CACHE_FLUSHING;
 
     /*
-     * 计算 Region 在 NAND 上的位置。
-     * 优先通过 Metadata Directory 查找（动态分配），
-     * 如果还未分配（首次写入），通过 Directory 分配新页。
+     * 追加写（元数据写模型 ①：只写擦除过的空页）。
+     *
+     * 每次刷新都从当前 L2P 日志块取**下一个空槽**，绝不就地覆盖旧位置 ——
+     * NAND 只能 1→0，对已编程页二次编程 = 新数据 AND 旧数据 = 静默的映射损坏。
+     * 旧位置由 metadata_dir_commit_region 的活计数记账，归零后整块回收。
+     *
+     * 分配不到块（Free Pool 空）⇒ FTL_ERROR，**不回退固定位置**：固定层是哨兵
+     * （永不写入，读回全 0xFF = 未映射），写进去就等于把"未映射"变成"有映射"，
+     * 且下次再写同一页即损坏。
      */
+    if ((cache->md_dir == NULL) || (cache->alloc == NULL))
     {
-        if (cache->md_dir != NULL)
-        {
-            region_paa = metadata_dir_lookup(cache->md_dir,
-                                             METADATA_TYPE_L2P_REGION,
-                                             line->region_id);
-        }
-
-        if (region_paa != NAND_PBA_INVALID)
-        {
-            /* 已知位置 → 展开地址（ch/ce 取本 cache 拓扑） */
-            region_addr = addr_from_paa(cache->ch, cache->ce, region_paa);
-        }
-        else if ((cache->md_dir != NULL) && (cache->alloc != NULL))
-        {
-            /* 未分配 → 通过 Directory 动态分配新位置 */
-            region_paa = metadata_dir_alloc_region(cache->md_dir,
-                                                   cache->alloc,
-                                                   line->region_id);
-            if (region_paa != NAND_PBA_INVALID)
-            {
-                region_addr = addr_from_paa(cache->ch, cache->ce, region_paa);
-            }
-            else
-            {
-                /* 动态分配失败（Free Pool 空），回退固定位置 */
-                region_addr = addr_from_pba(l2p_region_pba(cache->ch, cache->ce, cache->lun, line->region_id));
-            }
-        }
-        else
-        {
-            /* 回退固定位置（md_dir 或 alloc 不可用） */
-            region_addr = addr_from_pba(l2p_region_pba(cache->ch, cache->ce, cache->lun, line->region_id));
-        }
+        line->state = L2P_CACHE_DIRTY;
+        return FTL_ERROR; /* 无 Directory/Allocator ⇒ 无法持久化，不猜位置 */
     }
 
+    region_paa = metadata_dir_append_slot(cache->md_dir, cache->alloc);
+    if (region_paa == NAND_PBA_INVALID)
+    {
+        line->state = L2P_CACHE_DIRTY; /* 上层重试 / 紧急 GC 后再来 */
+        return FTL_ERROR;
+    }
+
+    region_addr = addr_from_paa(cache->ch, cache->ce, region_paa);
+
     /*
-     * 同步写 Region 到 NAND L2P Table。
+     * 同步写 Region 到 NAND L2P 日志块。
      * CRC/Random DISABLED（元数据不走加扰/CRC），仅 BCH ECC 保护。
      */
     ret = ftl_sync_write_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
 
     if (ret == 0)
     {
+        /* 落盘成功才登记新位置（顺序不可倒：先写后记账，掉电最多多留一份旧记录）*/
+        metadata_dir_commit_region(cache->md_dir, cache->alloc, line->region_id, region_paa);
+
         line->state = L2P_CACHE_CLEAN;
 
         /* 落盘成功：本 region 的脏标记清零（下次 checkpoint 不再重写） */
@@ -342,7 +389,8 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
     }
     else
     {
-        /* 写失败，恢复 DIRTY，后续可重试；脏标记保持置位 */
+        /* 写失败：槽位已在 append_slot 里消耗掉（可能半编程，不可复用），
+         * Directory 不登记 ⇒ 该 region 仍指向上一份有效记录，无信息丢失。 */
         line->state = L2P_CACHE_DIRTY;
     }
 

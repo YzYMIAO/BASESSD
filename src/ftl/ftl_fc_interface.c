@@ -535,3 +535,80 @@ ftl_status_t ftl_sync_erase_block(nand_addr_t addr)
     (void)fc_command_release(cmd);
     return FTL_OK;
 }
+
+ftl_status_t ftl_sync_read_meta(nand_addr_t addr, uint8_t out[4])
+{
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, FC_COMMAND_MODULE_METADATA, 0U};
+    fc_command_t        *cmd;
+    fc_command_status_t  completion;
+
+    if (out == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    /* OP_READ_META 的 has_data = 0 ⇒ ftl_cmd_needs_desc_chain 短路：addr_to_cmd 里的
+     * ftl_cmd_configure_descriptors 不建链、也不看位图（desc_id 置 INVALID）。
+     * 但地址仍须经 addr_to_cmd 落进 cmd->paa —— FC 侧据 paa 的 cw 字段算列地址。 */
+    cmd = sync_page_prepare(addr, OP_READ_META, &cfg);
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    if (sync_page_submit_wait(cmd, &completion, 0U) != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    /* 4 字节 META 走控制器侧暂存（同 GET_FEATURES），完成时已拷进 CQ 的 param。
+     * 刻意不判 NAND_FAIL：坏页的 META 也要拿到——判坏块正是要看它。 */
+    (void)memcpy(out, completion.param.bytes, 4U);
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+ftl_status_t ftl_sync_read_column(nand_addr_t addr, uint16_t column, uint8_t out[4])
+{
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, FC_COMMAND_MODULE_BBT, 0U};
+    fc_command_t        *cmd;
+    fc_command_status_t  completion;
+
+    if (out == NULL)
+    {
+        return FTL_ERROR;
+    }
+    /* 列 + 4 越出页尾是调用者编程错误（本仓首次允许任意列，故必须拦）。 */
+    ASSERT((uint32_t)column + 4U <= (uint32_t)PAGE_SIZE);
+
+    /* OP_READ_COLUMN 的 has_data = 0 ⇒ 同 ftl_sync_read_meta：addr_to_cmd 不建链、
+     * 不看位图（desc_id 置 INVALID）。地址仍须落进 cmd->paa —— 但**只提供行地址**，
+     * cw 位被 NAND 侧 paa_to_nand_row 丢掉；列地址由下面的 param 字节 0/1 给。 */
+    cmd = sync_page_prepare(addr, OP_READ_COLUMN, &cfg);
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    /* 列地址走命令级 param 的字节 0/1（小端）——FC 侧解出后落进 request->column。
+     * 字节 2/3 本 op 不用，显式清 0 保持 param 确定性。 */
+    cmd->param.parameter0 = (uint8_t)column;
+    cmd->param.parameter1 = (uint8_t)(column >> 8U);
+    cmd->param.parameter2 = 0U;
+    cmd->param.parameter3 = 0U;
+
+    if (sync_page_submit_wait(cmd, &completion, 0U) != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    /* 4 字节走控制器侧暂存（同 OP_READ_META），完成时已拷进 CQ 的 param。
+     * 刻意不判 NAND_FAIL：坏块的 spare 区也要拿到——判出厂坏块正是要看它。 */
+    (void)memcpy(out, completion.param.bytes, 4U);
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}

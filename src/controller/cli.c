@@ -14,6 +14,7 @@
 #include "common/common.h"
 #include "common/log.h"
 #include "controller/ssd_request.h"
+#include "ftl/bbt.h"
 #include "ftl/ftl.h"
 #include "usart.h"
 
@@ -381,19 +382,61 @@ static int uart_cli_info(int argc, char *argv[])
                 {
                     continue;
                 }
-                (void)LOGI("ftl[%u][%u][%u] free=%u op=%u spare=%u pre_cond=%u bad=%u closed=%u\r\n",
+                (void)LOGI("ftl[%u][%u][%u] free=%u op=%u spare=%u bad=%u closed=%u thrash=%u miss=%u%%\r\n",
                            (unsigned)ch,
                            (unsigned)ce,
                            (unsigned)lun,
                            (unsigned)ftl->alloc.free_count,
                            (unsigned)ftl->alloc.op_count,
                            (unsigned)ftl->alloc.spare_count,
-                           (unsigned)ftl->alloc.pre_cond_count,
                            (unsigned)ftl->alloc.bad_count,
-                           (unsigned)ftl->alloc.closed_sb_count);
+                           (unsigned)ftl->alloc.closed_sb_count,
+                           (unsigned)ftl->cache.thrashing,
+                           (unsigned)ftl->cache.miss_pct);
             }
         }
     }
+    return FUNC_STATUS_SUCCESS;
+}
+
+/*
+ * bbt [--erase] — 逐块探测并打印坏块图。
+ *
+ * 默认**只读**：读每块 Page 0 的 spare 首字节（列 2048），非 0xFF ⇒ 出厂坏块。
+ * 不写介质，可反复调用。
+ *
+ * ⚠ `--erase` 才是**破坏性**的：每个实例的每个块都会被擦除（含元数据区）⇒ 抹掉
+ * FTL 元数据与用户数据。只在专门的坏块体检时用。
+ */
+static int uart_cli_bbt(int argc, char *argv[])
+{
+    uint8_t do_erase = 0U;
+    uint8_t ch;
+    uint8_t ce;
+    uint8_t lun;
+
+    if ((argc >= 2) && (strcmp(argv[1], "--erase") == 0))
+    {
+        do_erase = 1U;
+    }
+
+    for (ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (lun = 0U; lun < LUN_NUM; lun++)
+            {
+                ftl_context_t *ftl = g_ctrl.ftl[ch][ce][lun];
+
+                if (ftl == NULL)
+                {
+                    continue;
+                }
+                bbt_print_bad_map(&ftl->alloc, do_erase);
+            }
+        }
+    }
+
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -484,20 +527,21 @@ static void uart_cli_pending_poll(void)
  * 单独注册，不能把 raw NAND 或任意内存访问默认暴露在量产 UART 上。
  */
 static const uart_cli_command_t g_uart_cli_commands[] = {
-    {   "help",                                                                                                           "help",                  "show command list", 1U,  1U,    uart_cli_help},
-    { "status",                                                                                                         "status", "show UART error and queue counters", 1U,  1U,  uart_cli_status},
-    {"version",                                                                                                        "version",      "show firmware console version", 1U,  1U, uart_cli_version},
-    {    "log",                                                                              "log level <error|warn|info|debug>",              "set runtime log level", 3U,  3U,     uart_cli_log},
+    {   "help",                                                                                                           "help",                                            "show command list", 1U,  1U,    uart_cli_help},
+    { "status",                                                                                                         "status",                           "show UART error and queue counters", 1U,  1U,  uart_cli_status},
+    {"version",                                                                                                        "version",                                "show firmware console version", 1U,  1U, uart_cli_version},
+    {    "log",                                                                              "log level <error|warn|info|debug>",                                        "set runtime log level", 3U,  3U,     uart_cli_log},
  /* UART CLI 驱动 FTL（C 档，D10）：wr/rd/tr/fl/info 模拟 NVMe host IO */
-    {     "wr",                                                                                                   "wr <lba> <n>",  "write n blocks with fixed pattern", 3U,  3U,      uart_cli_wr},
-    {     "rd",                                                                                               "rd <lba> <n> [c]",  "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
-    {     "tr",                                                                                                       "tr <lba>",                       "trim one lba", 2U,  2U,      uart_cli_tr},
-    {     "fl",                                                                                                             "fl",  "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
-    {   "info",                                                                                                           "info",   "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
+    {     "wr",                                                                                                   "wr <lba> <n>",                            "write n blocks with fixed pattern", 3U,  3U,      uart_cli_wr},
+    {     "rd",                                                                                               "rd <lba> <n> [c]",                            "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
+    {     "tr",                                                                                                       "tr <lba>",                                                 "trim one lba", 2U,  2U,      uart_cli_tr},
+    {     "fl",                                                                                                             "fl",                            "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
+    {   "info",                                                                                                           "info",                             "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
+    {    "bbt",                                                                                                  "bbt [--erase]", "print factory bad block map (--erase: also erase each block)", 1U,  2U,     uart_cli_bbt},
 #if defined(FC_NAND_TEST_ENABLE)
   /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
   /* { "nand", ... }, */
-    {   "test", "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [test_name...]",          "run munit unit test suite", 1U, 10U,    uart_cli_test},
+    {   "test", "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [test_name...]",                                    "run munit unit test suite", 1U, 10U,    uart_cli_test},
 #endif
 };
 

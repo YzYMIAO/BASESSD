@@ -1,10 +1,12 @@
 #include "ftl/gc.h"
 
+#include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/bbt.h"
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/journal.h"
 #include "ftl/read_recovery.h" /* rr_record_ecc（B4：GC 搬移读记 ECC/read disturb） */
+#include "ftl/wear.h"          /* wear_mark_dirty（计数持久化） */
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
@@ -177,13 +179,14 @@ void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t n
             /* 擦除成功：擦除计数 +1，记录最近擦除时间戳（单调写入量），bitmap/VPC 归零，归还 Free Pool */
             alloc->blocks[gblock].erase_count++;
             alloc->blocks[gblock].last_pe_ts = now;
-            ftl_block_clear_valid(&alloc->blocks[gblock]);
+            wear_mark_dirty(gblock);
+            ftl_block_clear_valid(&alloc->blocks[gblock], alloc->valid_map[gblock]);
             allocator_free_block(alloc, gblock);
         }
         else
         {
             /* 擦除失败：标记坏块（BBT 单数据源，后台持久化） */
-            (void)bbt_mark_bad(alloc, gblock, (uint8_t)FTL_BLOCK_BAD_ERASE);
+            (void)bbt_mark_bad(alloc, gblock);
         }
     }
 
@@ -195,22 +198,91 @@ void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t n
     }
 }
 
+/*
+ * gc_table_extremes - 全表（非坏块）磨损/时间极值，一次扫描
+ *
+ * 两个消费方共用（避免各扫一遍全表）：
+ *   ① gc_select_victim（P1-1）——评分归一化分母（max_erase / max_pe_ts）；
+ *   ② gc_check_triggers（P1-2）的 T5——磨损比 max_erase/min_erase。
+ *
+ * ⚠ 不复用 wear_leveling 的 wl_max_erase/wl_min_erase：它们形参是 ftl_context_t，
+ *   而本文件两个调用者只拿得到 ftl_allocator_t（gc_select_victim 调用点
+ *   ftl.c:323/389/718 保持不变）。
+ *
+ * @param alloc      Allocator 上下文（blocks 为 NULL 时输出中性值）
+ * @param min_erase  输出：最小擦除次数（无任何可统计块时为 0 ⇒ T5 视为"比值无意义"）
+ * @param max_erase  输出：最大擦除次数（兜底 >= 1U，防除零）
+ * @param max_pe_ts  输出：最大 last_pe_ts（0 = 本上电周期尚无块被擦 ⇒ 时间项中性）
+ */
+static void gc_table_extremes(const ftl_allocator_t *alloc, uint32_t *min_erase, uint32_t *max_erase, uint32_t *max_pe_ts)
+{
+    uint32_t min_e = UINT32_MAX;
+    uint32_t max_e = 0U;
+    uint32_t max_t = 0U;
+
+    if ((alloc != NULL) && (alloc->blocks != NULL))
+    {
+        for (uint16_t b = 0U; b < FTL_BLOCK_TOTAL; b++)
+        {
+            const ftl_block_t *blk = &alloc->blocks[b];
+
+            if (ftl_block_is_bad(blk) != 0)
+            {
+                continue;
+            }
+            if (blk->erase_count < min_e)
+            {
+                min_e = blk->erase_count;
+            }
+            if (blk->erase_count > max_e)
+            {
+                max_e = blk->erase_count;
+            }
+            if (blk->last_pe_ts > max_t)
+            {
+                max_t = blk->last_pe_ts;
+            }
+        }
+    }
+
+    *min_erase = (min_e == UINT32_MAX) ? 0U : min_e;
+    *max_erase = (max_e > 0U) ? max_e : 1U;
+    *max_pe_ts = max_t;
+}
+
 int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 {
-    uint16_t i;
-    uint16_t best_valid = PLANE_NUM * PAGES_PER_BLOCK + 1U;
+    uint32_t min_erase;
+    uint32_t max_erase;
+    uint32_t max_pe_ts;
+    uint32_t best_cost  = UINT32_MAX;
+    uint32_t best_vr    = 0U;
+    uint32_t best_er    = 0U;
+    uint32_t best_cp    = 0U;
+    uint32_t best_yp    = 0U;
+    uint16_t best_valid = (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK + 1U);
     int      found      = 0;
 
-    if ((alloc == NULL) || (victim == NULL))
+    if ((alloc == NULL) || (alloc->blocks == NULL) || (victim == NULL))
     {
         return FTL_OK;
     }
 
-    for (i = 0U; i < alloc->closed_sb_count; i++)
+    /* 归一化基准：全表极值（一次扫描，与候选数无关）。min_erase 本函数不用（T5 用）。 */
+    gc_table_extremes(alloc, &min_erase, &max_erase, &max_pe_ts);
+
+    for (uint16_t i = 0U; i < alloc->closed_sb_count; i++)
     {
-        super_block_t *sb = &alloc->closed_sb_list[i];
-        uint16_t       valid;
-        uint8_t        p;
+        super_block_t *sb      = &alloc->closed_sb_list[i];
+        uint16_t       valid   = 0U;
+        uint8_t        present = 0U;
+        uint32_t       er_max  = 0U;         /* 本 SB 的磨损代表：各 plane 取大 */
+        uint32_t       pe_min  = UINT32_MAX; /* 本 SB 的时间代表：各 plane 取小（越老越优先）*/
+        uint32_t       vr;
+        uint32_t       er;
+        uint32_t       cp;
+        uint32_t       yp;
+        uint32_t       cost;
 
         if (sb->valid != 0U)
         {
@@ -219,22 +291,69 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 
         /* 有效页数 = 各 plane 物理块 VPC 之和（真实计数，替代 next_page 近似）。
          * 退化单 plane 条目（重建产物）跳过哨兵 plane。 */
-        valid = 0U;
-        for (p = 0U; p < PLANE_NUM; p++)
+        for (uint8_t p = 0U; p < PLANE_NUM; p++)
         {
+            const ftl_block_t *blk;
+
             if (super_block_has_plane(sb, p) == 0U)
             {
                 continue;
             }
-            valid = (uint16_t)(valid + alloc->blocks[ftl_gblock(p, sb->plane_blocks[p])].valid_count);
+            blk   = &alloc->blocks[ftl_gblock(p, sb->plane_blocks[p])];
+            valid = (uint16_t)(valid + blk->valid_count);
+            present++;
+            if (blk->erase_count > er_max)
+            {
+                er_max = blk->erase_count;
+            }
+            if (blk->last_pe_ts < pe_min)
+            {
+                pe_min = blk->last_pe_ts;
+            }
+        }
+        if (present == 0U)
+        {
+            continue;
         }
 
-        if (valid < best_valid)
+        /* 四项各自归一化到 0..1000；cost 取小 = 越优先回收。
+         * erase 项用 uint64_t 中间量防溢出（erase_count 是 uint32_t，×1000 理论上可溢出）。
+         * age 项的 `max_pe_ts > pe_min` 同时兜住两种退化：① max_pe_ts == 0（上电后尚无块被擦）；
+         * ② 本 SB 的 plane 块已被标坏 ⇒ gc_score_scale 跳过它 ⇒ pe_min 可能大于 max_pe_ts
+         * （相减会下溢成大数、把 yp 绕回）。两者一律取 age_ratio = 0（时间项中性）。 */
+        vr = ((uint32_t)valid * 1000U) / ((uint32_t)present * PAGES_PER_BLOCK);
+        er = (uint32_t)(((uint64_t)er_max * 1000U) / max_erase);
+        cp = (sb->temperature == FTL_TEMP_HOT) ? 0U : 1000U;
+        yp = 1000U - (((max_pe_ts > pe_min) ? (uint32_t)(((uint64_t)(max_pe_ts - pe_min) * 1000U) / max_pe_ts) : 0U));
+
+        cost = (GC_WEIGHT_VALID * vr) + (GC_WEIGHT_ERASE * er) + (GC_WEIGHT_TEMP * cp) + (GC_WEIGHT_AGE * yp);
+
+        /* cost 相等时取有效页更少者（确定性，且退化为旧的单维贪心） */
+        if ((cost < best_cost) || ((cost == best_cost) && (valid < best_valid)))
         {
+            best_cost  = cost;
             best_valid = valid;
+            best_vr    = vr;
+            best_er    = er;
+            best_cp    = cp;
+            best_yp    = yp;
             *victim    = sb;
             found      = 1;
         }
+    }
+
+    if (found != 0)
+    {
+        /* 观测口：一次空闲 GC 突发最多打 FREE_POOL_TARGET/PLANE_NUM = 16 行
+         * （ftl_service_idle 循环调用），相对 GC 自身的 NAND 擦除/搬移耗时可忽略。 */
+        LOGI("[GC] victim p0=%u p1=%u vr=%u er=%u cp=%u yp=%u cost=%lu\r\n",
+             (unsigned)(*victim)->plane_blocks[0],
+             (unsigned)(*victim)->plane_blocks[1],
+             (unsigned)best_vr,
+             (unsigned)best_er,
+             (unsigned)best_cp,
+             (unsigned)best_yp,
+             (unsigned long)best_cost);
     }
 
     return found;
@@ -260,7 +379,7 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
             continue; /* 退化单 plane 条目：该 plane 无块 */
         }
         gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
-        valid_map  = alloc->blocks[gblock_src].valid_map[plane];
+        valid_map  = alloc->valid_map[gblock_src][plane];
 
         /*
          * 直接扫有效页位图：只搬置位页，跳过无效页（空洞/已覆盖）。
@@ -298,6 +417,7 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
                         ftl_block_t *src = &alloc->blocks[gblock_src];
                         rr_record_ecc(&src->rr, ecc);
                         src->read_count++;
+                        wear_mark_dirty(gblock_src);
                     }
                 }
 
@@ -306,7 +426,7 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
                 if (old_pba != pba)
                 {
                     /* 已被覆盖，无效页 → 清 bitmap 保持同步 */
-                    ftl_block_clr_valid(&alloc->blocks[gblock_src], plane, page);
+                    ftl_block_clr_valid(&alloc->blocks[gblock_src], alloc->valid_map[gblock_src], plane, page);
                     continue;
                 }
 
@@ -337,13 +457,11 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
                 }
 
                 /* VPC/bitmap 维护：源块清位，新块置位（单点更新防漂移） */
-                ftl_block_clr_valid(&alloc->blocks[gblock_src], plane, page);
+                ftl_block_clr_valid(&alloc->blocks[gblock_src], alloc->valid_map[gblock_src], plane, page);
                 ftl_block_set_valid(&alloc->blocks[ftl_pba_gblock(new_pba)],
+                                    alloc->valid_map[ftl_pba_gblock(new_pba)],
                                     (uint8_t)pba_to_plane(new_pba),
                                     (uint8_t)pba_to_page(new_pba));
-
-                /* GC 搬移代数：新块记录被搬过一次 */
-                alloc->blocks[ftl_pba_gblock(new_pba)].gc_generation++;
 
                 migrated++;
             }
@@ -361,25 +479,56 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
     return (int)migrated;
 }
 
-int gc_check_trigger(const ftl_allocator_t *alloc, uint32_t total_writes, uint32_t elapsed_ms)
+uint32_t gc_check_triggers(const ftl_allocator_t *alloc, uint32_t total_writes, uint32_t elapsed_ms)
 {
+    uint32_t triggers = 0U;
+
     if (alloc == NULL)
     {
-        return FTL_OK;
+        return 0U;
     }
 
-    if (alloc->pre_cond_count < FREE_POOL_TARGET)
+    /* T1：空闲块水位（主动补池，还留有余量就开工） */
+    if (alloc->free_count < FREE_POOL_TARGET)
     {
-        return 1;
+        triggers |= GC_TRIGGER_WATERMARK;
     }
-    if ((total_writes % GC_INTERVAL_WRITES) == 0)
+    /* T2：写入量（把 GC 压力摊平到整个写入流上，避免攒到水位线才爆发） */
+    if ((total_writes % GC_INTERVAL_WRITES) == 0U)
     {
-        return 1;
+        triggers |= GC_TRIGGER_WRITES;
     }
+    /* T3：定时（host 不写也不擦时，让空闲期把池补回去） */
     if (elapsed_ms >= GC_TIMER_INTERVAL_MS)
     {
-        return 1;
+        triggers |= GC_TRIGGER_TIMER;
+    }
+    /* T4：紧急（池已见底的最后手段）。与 T1 同源但阈值更低（8 vs 32）——
+     * 调用点据此决定"排一次 GC"还是"当场同步回收"。 */
+    if (alloc->free_count <= FREE_POOL_EMERGENCY)
+    {
+        triggers |= GC_TRIGGER_EMERGENCY;
+    }
+    /* T5：磨损均衡（全表擦除比）。min_erase == 0 时比值无意义（对 0 除）⇒ 不触发：
+     * "有块从未被擦过"是静态 WL（wl_execute 搬冷数据）的职责，T5 只管
+     * "所有块都在轮转、但轮得不均"。max_erase 地板防早期（max 才几次）空跑。 */
+    {
+        uint32_t min_erase;
+        uint32_t max_erase;
+        uint32_t max_pe_ts;
+
+        gc_table_extremes(alloc, &min_erase, &max_erase, &max_pe_ts);
+        if ((max_erase >= GC_WEAR_LEVEL_MIN_ERASE) && (min_erase > 0U) &&
+            ((max_erase / min_erase) > GC_WEAR_LEVEL_RATIO))
+        {
+            triggers |= GC_TRIGGER_WEAR;
+        }
     }
 
-    return FTL_OK;
+    return triggers;
+}
+
+int gc_check_trigger(const ftl_allocator_t *alloc, uint32_t total_writes, uint32_t elapsed_ms)
+{
+    return (gc_check_triggers(alloc, total_writes, elapsed_ms) != 0U) ? 1 : FTL_OK;
 }

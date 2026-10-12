@@ -13,7 +13,7 @@ void pending_init(ftl_context_t *ftl)
     memset(ftl->pending, 0, sizeof(ftl->pending));
 }
 
-int pending_add(ftl_context_t *ftl, uint16_t cmd_id, const ftl_io_request_t *io, nand_pba_t old_pba, nand_pba_t new_pba, nand_pba_t old_pba1, nand_pba_t new_pba1, uint8_t cache_intermediate)
+int pending_add(ftl_context_t *ftl, uint16_t cmd_id, const ftl_io_request_t *io, nand_pba_t old_pba, nand_pba_t new_pba, nand_pba_t old_pba1, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op)
 {
     uint8_t i;
 
@@ -33,6 +33,7 @@ int pending_add(ftl_context_t *ftl, uint16_t cmd_id, const ftl_io_request_t *io,
             ftl->pending[i].old_pba1           = old_pba1;
             ftl->pending[i].new_pba1           = new_pba1;
             ftl->pending[i].cache_intermediate = cache_intermediate;
+            ftl->pending[i].op                 = (uint8_t)op;
             return FTL_OK;
         }
     }

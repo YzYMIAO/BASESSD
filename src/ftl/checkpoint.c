@@ -28,25 +28,66 @@ static uint32_t checkpoint_now_ms(const ftl_context_t *ftl)
     return (uint32_t)(platform->time_us() / 1000U);
 }
 
-/* Checkpoint CRC 覆盖的字节数（从开头到 crc 字段） */
-#define CHECKPOINT_CRC_SIZE   (sizeof(uint32_t) * 6)                        /* magic+seq+ts+rc+bitmap[64]+js = 6 fields before crc */
-#define CHECKPOINT_CRC_OFFSET (CHECKPOINT_CRC_SIZE + sizeof(uint32_t) * 64) /* + region_bitmap[64] */
-/* = 24 + 256 = 280 bytes covered by CRC */
+/* ── Checkpoint 池：环形轮转（一条 record = 1 页）──
+ *
+ * 池几何由 ftl_config.h 推导；sequence 与写游标是**本池自己的**（与 journal /
+ * Anchor / BBT 的 sequence 互不相干），开机由 checkpoint_find_latest 恢复。
+ *
+ * ⚠ file-scope static：多实例（多 LUN）下所有实例共享同一份游标/序号。
+ *   与 bbt.c / wear.c 同一局限，登记在案（见 plan §八「不做多实例」）。 */
+static uint32_t g_cp_sequence     = 0U;
+static uint16_t g_cp_write_idx    = 0U;
+static uint8_t  g_cp_cursor_valid = 0U;
 
-/* ── Checkpoint 固定位置页地址（Block0/Block1 各 3 页）── */
-static nand_addr_t checkpoint_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint8_t i)
+static void checkpoint_ring_init(metadata_ring_t *ring)
 {
-    nand_addr_t addr;
+    ring->first_block      = CHECKPOINT_BLOCK0;
+    ring->block_count      = CHECKPOINT_POOL_BLOCKS;
+    ring->pages_per_record = 1U;
+    ring->plane            = 0U;
+    ring->module           = FC_COMMAND_MODULE_CHECKPOINT;
+}
 
-    addr.ch    = ch;
-    addr.ce    = ce;
-    addr.lun   = lun;
-    addr.plane = (uint8_t)((i & 1U) & 1U); /* 页号奇偶 → P1/P0（双 Plane 交错） */
-    addr.page  = (uint8_t)((i < 3U) ? i : (i - 3U));
-    addr.block = (uint8_t)((i < 3U) ? CHECKPOINT_BLOCK0 : CHECKPOINT_BLOCK1);
-    addr.cw    = 0U;
+/* 整条校验（一条 record = 1 页）：magic + CRC */
+static int checkpoint_header_valid(const l2p_checkpoint_header_t *hdr)
+{
+    if (hdr->magic != CHECKPOINT_MAGIC)
+    {
+        return 0;
+    }
 
-    return addr;
+    return (boot_crc32(hdr, CHECKPOINT_CRC_LEN) == hdr->crc) ? 1 : 0;
+}
+
+typedef struct
+{
+    ftl_topology_t  topo;
+    metadata_ring_t ring;
+} checkpoint_probe_ctx_t;
+
+/* Checkpoint record 探针（见 metadata_ring_probe_fn）。
+ * full 与廉价探针等价（一条 record 只有一页），故忽略。 */
+static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, int full, uint32_t *out_sequence)
+{
+    checkpoint_probe_ctx_t *c = (checkpoint_probe_ctx_t *)ctx;
+    l2p_checkpoint_header_t hdr;
+    nand_addr_t             addr;
+
+    (void)full;
+
+    addr = metadata_ring_addr(&c->ring, &c->topo, record_idx, 0U);
+
+    if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT)) != 0)
+    {
+        return FTL_ERROR;
+    }
+    if ((checkpoint_header_valid(&hdr) == 0) || (hdr.sequence == 0U))
+    {
+        return FTL_ERROR; /* sequence 从 1 起；0 = 未写 */
+    }
+
+    *out_sequence = hdr.sequence;
+    return FTL_OK;
 }
 
 /*
@@ -95,8 +136,10 @@ static ftl_status_t checkpoint_flush_dirty_regions(l2p_cache_t *cache)
 ftl_status_t checkpoint_create(ftl_context_t *ftl)
 {
     l2p_checkpoint_header_t cp;
+    metadata_ring_t         ring;
+    checkpoint_probe_ctx_t  probe_ctx;
+    nand_addr_t             addr;
     uint8_t                 i;
-    int                     ret_total    = 0;
     uint32_t                region_words = 0U;
 
     if (ftl == NULL)
@@ -118,7 +161,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
     }
     cp.region_count = region_words;
 
-    /* ② 按 bitmap 只 flush 脏 region → NAND L2P Table。
+    /* ② 按 bitmap 只 flush 脏 region → NAND L2P 日志块。
      *    flush 失败必须中止（见 checkpoint_flush_dirty_regions 注释），
      *    不写 header / 不 flush anchor / 不截断 journal，保 DIRTY 行与
      *    journal 供下个 checkpoint 重试（95% 紧急水位仍兜底强制）。 */
@@ -127,106 +170,109 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
         return FTL_ERROR;
     }
 
-    /* ③ 完成 Header 剩余字段 */
-    cp.magic            = CHECKPOINT_MAGIC;
-    cp.sequence         = ftl->journal.sequence_counter; /* 用 journal 最新 sequence */
-    cp.timestamp        = checkpoint_now_ms(ftl);        /* 平台 time_us 换算 ms 快照 */
-    cp.journal_sequence = ftl->journal.sequence_counter; /* 截断到此 seq */
-
-    /* CRC */
-    cp.crc = 0U;
-    cp.crc = boot_crc32(&cp, sizeof(cp) - sizeof(cp.padding) - 4); /* 不含 padding 和 crc 自身 */
-
-    /* ④ 写 6 页冗余 */
-    for (i = 0U; i < CHECKPOINT_TOTAL_PAGES; i++)
+    /* ③ 先 flush Metadata Directory（Anchor）——必须早于 Header：
+     *    header 声称「bitmap 置位的 region 已落盘」，若 Directory 落后于 header，
+     *    掉电后 boot 按 bitmap 预载会读到 Directory 里不存在的 region。 */
+    if (metadata_dir_flush_to_anchor(&ftl->metadata_dir) != FTL_OK)
     {
-        nand_addr_t pba;
-        int         ret;
-
-        pba = checkpoint_page_addr(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, i);
-
-        ret = ftl_sync_write_page(pba, &cp, sizeof(cp), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT));
-        if (ret != 0)
-        {
-            ret_total = -1; /* 单份失败不影响整体，有冗余 */
-        }
+        return FTL_ERROR; /* Anchor 未落盘 ⇒ 不能写 header 声称已落盘 */
     }
 
-    /* ④ flush Metadata Directory（保证 Directory 最新） */
-    metadata_dir_flush_to_anchor(&ftl->metadata_dir);
+    /* ④ 定位写游标（游标未建立时才扫池：开机 checkpoint_find_latest 已建立时零代价）*/
+    checkpoint_ring_init(&ring);
+    probe_ctx.topo = ftl->topo;
+    probe_ctx.ring = ring;
 
-    /* ⑤ 截断 Journal（间接入口：纯 RAM 测试构建可用弱桩替换 journal_truncate） */
+    if (g_cp_cursor_valid == 0U)
+    {
+        uint16_t newest = UINT16_MAX;
+
+        if (metadata_ring_locate(&ring, &probe_ctx.topo, checkpoint_record_probe, &probe_ctx, &newest, &g_cp_sequence, &g_cp_write_idx) != FTL_OK)
+        {
+            return FTL_ERROR;
+        }
+        g_cp_cursor_valid = 1U;
+    }
+
+    /* ⑤ 完成 Header 剩余字段（sequence 在定位之后取，池内已有序号时才能续上）*/
+    cp.magic            = CHECKPOINT_MAGIC;
+    cp.sequence         = ++g_cp_sequence;               /* 本池自己的单调序号 */
+    cp.timestamp        = checkpoint_now_ms(ftl);        /* 平台 time_us 换算 ms 快照 */
+    cp.journal_sequence = ftl->journal.sequence_counter; /* 截断到此 seq */
+    cp.crc              = boot_crc32(&cp, CHECKPOINT_CRC_LEN);
+
+    /* ⑥ 追加写：池内下一槽（块满则先擦池内下一块）*/
+    if (metadata_ring_prepare_write(&ring, &probe_ctx.topo, g_cp_write_idx, &addr) != FTL_OK)
+    {
+        return FTL_ERROR;
+    }
+
+    /* 无论成败都推进游标：已写过的槽（可能半编程）不可复用。
+     * 失败时不写 journal_truncate，脏数据仍由下个 checkpoint 重试。 */
+    if (ftl_sync_write_page(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT)) != 0)
+    {
+        g_cp_write_idx = (uint16_t)((g_cp_write_idx + 1U) % metadata_ring_total_records(&ring));
+        return FTL_ERROR;
+    }
+
+    g_cp_write_idx = (uint16_t)((g_cp_write_idx + 1U) % metadata_ring_total_records(&ring));
+
+    /* ⑦ 截断 Journal（间接入口：纯 RAM 测试构建可用弱桩替换 journal_truncate） */
     journal_truncate(&ftl->journal, cp.journal_sequence);
 
-    /* ⑥ 复位 Journal 水位标志（设计 §7.5.4：checkpoint 完成后 j->emergency /
+    /* ⑧ 复位 Journal 水位标志（设计 §7.5.4：checkpoint 完成后 j->emergency /
      *    checkpoint_needed 置 false——本次 CP 已把 sequence ≤ cp_seq 的条目 flush 进
      *    NAND L2P 表并截断 journal，水位已清零。不复位会导致 T1 永久命中（每圈必 CP）
      *    且 emergency 置位后 BUSY 模式每圈强制 CP（ftl_service_busy）。 */
     ftl->journal.emergency         = 0U;
     ftl->journal.checkpoint_needed = 0U;
 
-    return ret_total;
+    return FTL_OK;
 }
 
 ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t topo)
 {
-    l2p_checkpoint_header_t  candidates[6];
-    l2p_checkpoint_header_t *best = NULL;
-    uint8_t                  i;
-    int                      found = 0;
+    checkpoint_probe_ctx_t probe_ctx;
+    uint16_t               newest = UINT16_MAX;
+    nand_addr_t            addr;
 
     if (cp == NULL)
     {
         return FTL_ERROR;
     }
 
-    memset(candidates, 0, sizeof(candidates));
+    /* 复位本池状态：找不到有效 Header 时保持 0/无效（后续 create 从池首开始） */
+    g_cp_sequence     = 0U;
+    g_cp_write_idx    = 0U;
+    g_cp_cursor_valid = 0U;
 
-    for (i = 0U; i < CHECKPOINT_TOTAL_PAGES; i++)
+    checkpoint_ring_init(&probe_ctx.ring);
+    probe_ctx.topo = topo;
+
+    if (metadata_ring_locate(&probe_ctx.ring, &probe_ctx.topo, checkpoint_record_probe, &probe_ctx, &newest, &g_cp_sequence, &g_cp_write_idx) != FTL_OK)
     {
-        nand_addr_t pba;
-        int         ret;
-
-        pba = checkpoint_page_addr(topo.ch, topo.ce, topo.lun, i);
-
-        ret = ftl_sync_read_page(pba, &candidates[i], sizeof(candidates[i]), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT));
-        if (ret != 0)
-        {
-            continue;
-        }
-
-        /* 验证 Magic */
-        if (candidates[i].magic != CHECKPOINT_MAGIC)
-        {
-            continue;
-        }
-
-        /* 验证 CRC */
-        {
-            uint32_t saved_crc = candidates[i].crc;
-            candidates[i].crc  = 0U;
-            if (boot_crc32(&candidates[i], sizeof(candidates[i]) - sizeof(candidates[i].padding) - 4) != saved_crc)
-            {
-                candidates[i].crc = saved_crc;
-                continue;
-            }
-            candidates[i].crc = saved_crc;
-        }
-
-        /* 选 sequence 最大的 */
-        if ((best == NULL) || (candidates[i].sequence > best->sequence))
-        {
-            best  = &candidates[i];
-            found = 1;
-        }
+        return FTL_ERROR;
+    }
+    if (newest == UINT16_MAX)
+    {
+        g_cp_sequence  = 0U;
+        g_cp_write_idx = 0U;
+        return FTL_ERROR; /* 池内无有效 record */
     }
 
-    if (!found)
+    g_cp_cursor_valid = 1U;
+
+    /* 重读胜者（locate 只返回序号，Header 本体要再读一次）*/
+    addr = metadata_ring_addr(&probe_ctx.ring, &probe_ctx.topo, newest, 0U);
+    if (ftl_sync_read_page(addr, cp, sizeof(*cp), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT)) != 0)
+    {
+        return FTL_ERROR;
+    }
+    if ((checkpoint_header_valid(cp) == 0) || (cp->sequence != g_cp_sequence))
     {
         return FTL_ERROR;
     }
 
-    *cp = *best;
     return FTL_OK;
 }
 

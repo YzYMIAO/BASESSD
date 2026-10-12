@@ -109,16 +109,18 @@ static void boot_section(const char *name)
  * FTL 实例多维表（v0.37 — main.c FTL 上线）
  *
  * SRAM 布局（方案 B 修正，已与设计文档确认）：
- *   g_ftl    含 l2p cache 128KB + journal/md → AXI_RAM（约 131.5KB）
- *   g_blocks BST 160KB 连续 → AXI_RAM（保持 params.blocks 线性索引契约，
- *            拆段破坏 allocator 的 blocks[gblock] 索引；SRAM1 仅 128KB 放不下）
+ *   g_ftl    含 l2p cache 128KB + journal/md → AXI_RAM（约 155.0KB，见 ftl_design.md §2.3）
+ *   g_blocks BST 条目 80KB + g_valid_map 位图 64KB → AXI_RAM（保持 params.blocks /
+ *            valid_map 线性索引契约，拆段破坏 allocator 的 [gblock] 索引；
+ *            SRAM1 仅 128KB 放不下）
  *   g_free_blocks + g_closed_sb_list → SRAM2（.sram2_data NOLOAD，linker 已有）
  *
- *   AXI_RAM ≈355.5KB（剩 11.5KB）、SRAM2 ≈24KB（剩 104KB），不溢出。
+ *   AXI_RAM：g_ftl + g_blocks(80KB) + g_valid_map(64KB) + 保留 20KB，仍在 384KB 内。
  * ══════════════════════════════════════════════════════════════════ */
-static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM];                         /* 131.5KB → AXI_RAM */
-static ftl_block_t   g_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL];     /* 40B×4096=160KB → AXI_RAM */
-static uint16_t      g_free_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* 8KB → SRAM2 */
+static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM];                                   /* 155.0KB → AXI_RAM */
+static ftl_block_t   g_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL];               /* 20B×4096=80KB → AXI_RAM */
+static uint64_t      g_valid_map[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL][PLANE_NUM]; /* 16B×4096=64KB → AXI_RAM */
+static uint16_t      g_free_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL]           /* 8KB → SRAM2 */
     __attribute__((section(".sram2_data")));
 static uint16_t g_op_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* OP 预留池，容量不动 → SRAM2 */
     __attribute__((section(".sram2_data")));
@@ -138,7 +140,7 @@ static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl
 #define BOARD_AXI_RAM_SIZE   (384U * 1024U) /* 对齐 __AXI_RAM_SIZE */
 #define FTL_AXI_RAM_RESERVED (20U * 1024U)  /* 命令池/描述符池/缓冲池等（实测 ~19KB）*/
 
-_Static_assert(sizeof(g_ftl) + sizeof(g_blocks) + FTL_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE,
+_Static_assert(sizeof(g_ftl) + sizeof(g_blocks) + sizeof(g_valid_map) + FTL_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE,
                "FTL 实例数组超出 AXI_RAM：提高 CH/CE/LUN 前必须重新规划内存");
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
@@ -166,6 +168,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     memset(&params, 0, sizeof(params));
     params.topo           = (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun};
     params.blocks         = g_blocks[ch][ce][lun];
+    params.valid_map      = g_valid_map[ch][ce][lun];
     params.free_blocks    = g_free_blocks[ch][ce][lun];
     params.free_count     = 0U;
     params.op_blocks      = g_op_blocks[ch][ce][lun];
