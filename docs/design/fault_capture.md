@@ -222,7 +222,7 @@ void fault_hook(const fault_ctx_t *ctx);   /* 弱符号，默认空实现 */
    ```
 3. **触发断言**：构造一次 munit 断言失败，确认失败消息**完整打出**后再停机（验证 flush 修复），并出现 `=== CRASH RECORD === kind : ASSERT`。
 4. **跨复位**：触发一次故障后软复位（`NVIC_SystemReset()` 或调试器 reset），开机应打印 `[ERR] [FAULT] previous crash: ...`。
-5. **回归**：`make tests` 三套 FC-NAND 套件（command/queue/scheduler/data_path/lifecycle）正常跑完 —— rebuild 套件已摘除（见下）。**已上板验证**：59/59 全通过，无 HardFault。
+5. **回归**：`make tests` 三套 FC-NAND 套件（command/queue/scheduler/data_path/lifecycle）正常跑完 —— rebuild 套件已删除（见下）。**已上板验证**：59/59 全通过，无 HardFault。
 
 ## 7. 同期改动
 

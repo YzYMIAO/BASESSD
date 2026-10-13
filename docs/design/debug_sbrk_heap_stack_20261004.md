@@ -1,5 +1,9 @@
 # _sbrk 堆栈相撞 HardFault 调试记录 — 根因确认与修复
 
+> **⚠ 后续（2026-10-13）**：本文涉及的 `tests/unit/test_rebuild.c` **已删除**——其两条仍有效用例
+> 并入 `ftl_ut_munit.md §4.1/§4.6`，夹具超容改由「复用活实例」方案化解。下文的「文件本身未删」
+> 是当时（2026-10-04）的处置，现已不适用；`_sbrk` 守卫本身仍是有效结论。
+>
 > **调试日期**: 2026-10-04
 > **涉及模块**: `src/platform/stm32h743/syscalls.c`（新增）、`linker/stm32h743xx_flash.ld`（只读确认）、`tests/unit/test_rebuild.c`（触发点，未改动）
 > **触发测试**: 板端 UART CLI `test` → `ut_run_all()`，跑到 `rebuild` 套件时 HardFault

@@ -18,9 +18,6 @@ extern MunitTest g_fc_data_path_tests[];
 /* Level 3: 全链路测试 */
 extern MunitTest g_fc_lifecycle_tests[];
 
-/* F2 掉电重建套件（g_rebuild_tests）暂时摘除：夹具超 DTCM 堆，
- * 见 src/fc/makefile.mk 与 docs/design/fault_capture.md。 */
-
 /* ⚠ 子套件前缀**必须以 '/' 结尾**：munit 只把前缀和用例名**首尾相接**
  * （munit.c:1285 下探子套件、:1103 拼用例名），**不补分隔符**。根前缀已带尾斜杠；
  * 子套件漏了就会打印成 "/fc-nand/lifecycleblock_multi_plane"，且过滤串

@@ -17,8 +17,9 @@
 ## 1. 背景与目标
 
 FC-NAND 已有三级 munit UT（`tests/unit/test_fc_level1/2/3.c`，经 `make tests` 上板 + UART `test`
-命令跑），但 **FTL 层没有自己的 UT**：`tests/unit/test_gc.c`/`test_l2p.c`/`test_nand.c`
-各只有 1 行头部注释（孤儿占位，无 makefile 编入）；`src/ftl/makefile.mk` 无测试块。
+命令跑），但 **FTL 层没有自己的 UT**：原有 `tests/unit/test_gc.c`/`test_l2p.c`/`test_nand.c`
+只是各 1 行头部注释的孤儿占位、`test_rebuild.c` 因夹具超容被摘除——**这四个文件已于 2026-10-13 删除**
+（有效用例并入本文档 §4）；`src/ftl/makefile.mk` 仍无测试块。
 
 FTL 层落地了大量**纯逻辑**（Free Pool 三级水位、journal 水位公式、GC/WL victim 选择、
 read disturb 慢死预测、坏块替换池、L2P thrashing、**组完成语义**），目前**全部依赖上板验证**
@@ -325,7 +326,8 @@ endif
 
 - **不做 mock**：不建 `fc_submit` 桩 / Mock NAND / 掉电注入器
 - 不改 `tests/framework`（munit 适配已完成）；不建 host（x86）target
-- 不动孤儿 `test_gc.c`/`test_l2p.c`/`test_nand.c` 占位（用户自建域，本次新建独立测试文件）
+- ~~不动孤儿 `test_gc.c`/`test_l2p.c`/`test_nand.c` 占位~~ ✅ **2026-10-13 已删**（连同 `test_rebuild.c`），
+  本方案落在一个**新**的独立测试文件（`test_ftl.c`，用户自建）
 - 不扩 linker 加 region
 - **不纳入**：`allocator_alloc`（v0.66 已删死码）；`metadata_dir_append_slot`/`metadata_dir_compact`
   （需真 NAND 擦写 → `hil_ut_design.md`）；`ftl_wbuf_*`（全 `static`，需真 NAND → `hil_ut_design.md`）
