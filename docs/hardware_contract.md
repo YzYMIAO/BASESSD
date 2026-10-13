@@ -32,9 +32,13 @@ access MMIO registers directly; register access lives in
 
 | Region | Base | Size | Purpose |
 | --- | ---: | ---: | --- |
-| AXI_RAM | `0x24000000` | 384 KiB | FTL instances, BST `g_blocks`, L2P cache |
-| SRAM2 | `0x30020000` | 128 KiB | free pool and closed SB list |
+| AXI_RAM | `0x24000000` | 384 KiB | FTL instances `g_ftl` (157.6 KiB), BST `g_blocks` (80 KiB), L2P cache；`.bss` 合计 255.5 KiB |
+| AXI_NOCACHE | `0x24060000` | 128 KiB | FC 命令/描述符/缓冲池（`.noncacheable_buffer`, 66 KiB, 非缓存 DMA/NAND） |
+| SRAM2 | `0x30020000` | 128 KiB | free / op / spare pool 与 closed SB list（`.sram2_data`） |
 | DTCM | `0x20000000` | 128 KiB | stacks, hot data |
+
+> 实测值取自 `build/firmware/debug/bin/debug.map`（2026-10-13）。`src/main.c:138` 有
+> `_Static_assert` 挡住 AXI_RAM 超预算——**提高 CH/CE/LUN 维度前必须先重新规划内存**。
 
 ## Build selection
 

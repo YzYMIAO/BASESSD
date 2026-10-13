@@ -7,9 +7,9 @@
 > - **路线定调：不做 mock**。全部用板子测——① L0 纯 RAM munit 套件（编进 `debug.bin`，板上
 >   `test` 命令跑）；② L2 真 NAND + UART CLI（`wr/rd/tr/fl/info`）+ **物理断电重启**。
 >   原 §8.2/§8.3/§8.6 的 "mock `fc_submit` / Mock NAND / 掉电注入器" 二期设计**降级为路线说明**（不做）。
-> - §2 SRAM 预算已按 `ftl_block_t` **20B**（v0.56 删死字段 24B→20B，`bst.h:95` static_assert）重算。
+> - §2 SRAM 预算已按 `ftl_block_t` **20B**（v0.56 删死字段 24B→20B，`bst.h:139` static_assert）重算。
 >
-> **2026-10-04 事实**（仍有效）：`_sbrk` 已有实现（`src/platform/stm32h743/syscalls.c`，带实时 MSP
+> **2026-10-04 事实**（仍有效）：`_sbrk` 已有实现（`src/platform/syscalls.c`，带实时 MSP
 > 上界守卫 + 1KB 保留），`_Min_Heap_Size` 仍是 512B；`test_rebuild.c` 已从板端构建摘除
 > （`src/fc/makefile.mk` 注释 + `ut_main.c` 摘除），§3「顺带修复」与 §7「malloc→静态 fixture」暂缓。
 
@@ -39,10 +39,10 @@ GC/WL victim 选择、read disturb 慢死预测、坏块替换池、L2P thrashin
 | # | 发现（文件行号） | 结论 |
 |---|---|---|
 | 1 | munit 无测试宏，`MunitTest` 结构体数组（`tests/framework/munit.h`）+ `MunitSuite` 根套件（`ut_main.c:28-46`）逐项注册 | 新增 FTL 套件 = `extern MunitTest g_ftl_*_tests[]` + 根套件一行 |
-| 2 | **板上堆仅 512B**：`linker/stm32h743xx_flash.ld:19` `_Min_Heap_Size=0x200` | 新 FTL 测试一律**静态全局 fixture + setup 里 memset 复位**（仿 main.c 布局：blocks 落 SRAM1、池落 SRAM2）。**禁止 malloc** |
-| 3 | `ftl_block_t` = **20B**（`bst.h:95` `_Static_assert(sizeof==20)`）；`valid_map` 每块 `PLANE_NUM×u64`=**16B**；`super_block_t`=**12B**（`allocator.h:73-80`） | 见下预算表 |
-| 4 | `allocator_select_plane_block_from_pool` 只扫 **Free Pool 数组**（`allocator.c:125`），不是全 4096 遍历 | 2112 项 fixtures 足够覆盖选块；`allocator_alloc` 的 `BLOCKS_PER_PLANE` 遍历按 20B 亦可容纳（见预算） |
-| 5 | SRAM 预算（tests build 增量，按 20B 重算） | `blocks[2112]`=**41.25KB** + `valid_map[2112][2]`=**33KB** + `closed_sb_list[1024]`=**12KB** + 池（128+128+64）×2B=0.64KB ≈ **87KB**。SRAM1(128KB) + SRAM2 可容；若上 4096 项 ≈ **157KB**，跨 SRAM1+SRAM2 仍可容（实施时按 region 布局确认） |
+| 2 | **板上堆仅 512B**：`linker/stm32h743xx_flash.ld:19` `_Min_Heap_Size=0x200` | 新 FTL 测试一律**静态全局 fixture + setup 里 memset 复位**（blocks 落 AXI_RAM、池落 SRAM2，仿 main.c 布局）。**禁止 malloc** |
+| 3 | `ftl_block_t` = **20B**（`bst.h:139` `_Static_assert(sizeof==20)`）；`super_block_t`=**12B**（`allocator.h:73-80`）。⚠ `valid_map` **已删**（v0.60：有效性走 DRAM-less approach ③，逐 CW META 反查 L2P） | 见下预算表 |
+| 4 | `allocator_select_plane_block_from_pool` 只扫 **Free Pool 数组**（`allocator.c:157`），不是全 4096 遍历 | 2112 项 fixtures 足够覆盖选块；`allocator_alloc` 的 `BLOCKS_PER_PLANE` 遍历按 20B 亦可容纳（见预算） |
+| 5 | SRAM 预算（tests build 增量，按 20B 重算） | `blocks[2112]`=**41.25KB** + `closed_sb_list[1024]`=**12KB** + 池（128+128+64）×2B=0.64KB ≈ **54KB**。SRAM1(128KB) + SRAM2 可容；若上 4096 项 ≈ **96KB**，跨 SRAM1+SRAM2 仍可容（实施时按 region 布局确认） |
 
 > 结论：**fixtures 用 2112 项（2048+64）**——测试块号 0..63（双 plane 覆盖 gblock 0..2111）。
 > 按 20B 重算后 4096 项也进得了预算，`allocator_alloc` 是否纳入留待实施时定（见 §4.1 备注）。
@@ -54,8 +54,7 @@ GC/WL victim 选择、read disturb 慢死预测、坏块替换池、L2P thrashin
 
 ```c
 /* 文件内静态全局（.sram1_data / .sram2_data NOLOAD，setup 统一 ftl_fixture_reset() memset 复位） */
-static ftl_block_t      g_ftl_blocks[BLOCKS_PER_PLANE + 64];  /* 2112 × 20B = 41.25KB SRAM1 */
-static uint64_t         g_ftl_valid[BLOCKS_PER_PLANE + 64][PLANE_NUM]; /* 2112 × 16B = 33KB SRAM1 */
+static ftl_block_t      g_ftl_blocks[BLOCKS_PER_PLANE + 64];  /* 2112 × 20B = 41.25KB AXI_RAM */
 static uint16_t         g_ftl_free[128];                        /* SRAM2 */
 static uint16_t         g_ftl_op[128];
 static uint16_t         g_ftl_spare[64];
@@ -90,9 +89,9 @@ setup 统一 `ftl_fixture_reset()` 返回 NULL fixture，teardown NULL，`SINGLE
 | **`open_sb_never_picks_metadata`** | **回归用例**：metadata 块 0..62 被 `allocator_init` 标 FREE 但**不在 Free Pool** ⇒ 新建 SB 两 plane 块都 **≥63**（钉住本轮真缺陷） |
 | `open_sb_min_erase_count` | 池内多块时选该 plane `erase_count` 最小者（动态 WL） |
 
-> ⚠ **L0 只能调公开函数**：`allocator_open_sb`（`allocator.c:168`）、
-> `allocator_select_plane_block_from_pool`（`:125`）、`allocator_pull_from_op`（`:96`）都是 `static`
-> ⇒ 上两条经**公开入口 `allocator_close_open_sb`（`:318`，内部 `:357` 调 `open_sb`）间接测**：
+> ⚠ **L0 只能调公开函数**：`allocator_open_sb`（`allocator.c:200`）、
+> `allocator_select_plane_block_from_pool`（`:157`）、`allocator_pull_from_op`（`:128`）都是 `static`
+> ⇒ 上两条经**公开入口 `allocator_close_open_sb`（`:359`，内部 `:408` 调 `open_sb`）间接测**：
 > 调用后断言新 closed SB 的 `plane_blocks[p] ≥ 63` / `erase_count` 最小。
 > `allocator_alloc`/`allocator_alloc_pair` 是否纳入第一版：按 20B 预算可行（§2 行 5），留待实施定。
 
@@ -194,8 +193,8 @@ endif
 
 ## 6. 验证
 
-1. `make clean && make tests`（`FC_NAND_TEST_ENABLE=1`）**零错误零新增警告**——`.sram1_data`/`.sram2_data`
-   是 NOLOAD，编译期无感知，size 脚本确认 SRAM1 ≤128KB、SRAM2 ≤128KB
+1. `make clean && make tests`（`FC_NAND_TEST_ENABLE=1`）**零错误零新增警告**——fixture 落 `.sram2_data`
+   与 AXI_RAM 的 NOLOAD 段，编译期无感知；size 脚本确认不超各 region 预算（见 §2 行 5）
 2. `make debug / release` 不受影响（`FC_NAND_TEST_ENABLE` 默认关，测试文件不编入）
 3. 上板：
    - `test --list` → 确认 8 个 `/ftl/*/` 套件全部列出

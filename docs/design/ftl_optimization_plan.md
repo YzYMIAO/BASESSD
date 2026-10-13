@@ -16,15 +16,22 @@
 与开源/企业级设计的**大方向是对齐的**，甚至比 dhara/SPIFTL 这类极简 FTL 完整得多。差距不在「有没有这个概念」，
 而在三处：
 
-1. **有效性缺口**：一批机制**接上了但没有真正生效**——最严重的是**擦除计数跨重启归零**（WL 只在单次上电内有效）；
-   其次是 **Emergency 池是死代码**（P1-3 已定性：那是文档误把「水位」写成「池」，非实现缺陷）、
-   **Metadata Directory 容量 128 < 2048 region（被截断）**。
-2. **算法缺口**：~~GC victim 单维贪心~~（P1-1 已加权）；~~CLOCK 无 thrashing 降级~~（P1-4 已落地）；
-   GC 触发只落了 3/6 条。
-3. **一致性债**：映射粒度（文档 CW 级 vs 代码页级）、Checkpoint 注释（全量 vs 增量）、L2P 表尺寸（相对物理页疑似 4× 超额）——
-   文档与代码有偏差，需订正。
+1. **有效性缺口**：一批机制**接上了但没有真正生效**——~~最严重的是擦除计数跨重启归零~~（**P0-1 ✅ 已落地**：
+   Wear 表跨重启持久化）；~~Emergency 池死代码~~（P1-3 ✅ 定性为文档误述，非实现缺陷）；
+   ~~Metadata Directory 容量 128 < 2048 region（被截断）~~ ⇒ 该描述**已过时**（常量早已 = `L2P_REGIONS_PER_INSTANCE`），
+   实际缺陷是**元数据就地覆盖**（P0-2 ✅ 已修）。**剩余**：L2P 日志块压缩（**P0-3 ⬜ 未做**，长时压测前必须补）、
+   rr 持久化（⬜）。
+2. **算法缺口**：~~GC victim 单维贪心~~（P1-1 ✅ 已加权）；~~CLOCK 无 thrashing 降级~~（P1-4 ✅ 已落地）；
+   ~~GC 触发只落 3/6 条~~ ⇒ **5/6 条**（P1-2 ✅；T6 碎片率**刻意不实现**，见 `gc.h:60`）。
+3. **一致性债**：~~映射粒度（设计 CW 级 512B vs 代码页级 2048B）~~ ⇒ **已迁移（波 2 序 2，未上板）**；
+   ~~Checkpoint 注释（全量 vs 增量）~~ ⇒ **已订正**（全量快照语义 + 增量 flush）。
+   ~~L2P 表尺寸（相对物理页疑似 4× 超额）~~ ⇒ **已核对：非缺陷**（表按目标 IU = 页/4 = 512B 定尺寸、
+   与主流同构，见 §九 波 1）。
 
 **优先级建议**：先补 P0（有效性），再补 P1（算法），P2/P3 视内存压力与学习目标排期。
+
+> **全部未排期项一览**（偏离 / 缺口 / 债 / 边界）见 **§八 登记未排期总表**；
+> **以主流为准的执行顺序（早期方案必改）**见 **§九**。
 
 ---
 
@@ -32,26 +39,26 @@
 
 | 维度 | 现状 | 证据 |
 |---|---|---|
-| 映射粒度 | **页级**：1 次 2048B 写更新 1 条 L2P entry；`io.lba`/`io.lba+1` 对应 plane0/plane1 页 | `ftl.c:718-721,169-171`；`ftl.h` 接口注释 |
+| 映射粒度 | **IU 级（1 LBA = 1 CW = 512B = 页/4）**——**已迁移（波 2 序 2，未上板）**：1 次 512B 写更新 1 条 L2P entry + 1 条 journal；一个 pair 窗口 8 LBA = plane0 页 + plane1 页 | `ftl_config.h §八`；`ftl.c ftl_issue_subop/ftl_confirm_write`；`request.c` |
 | L2P 存储 | NAND 元数据区，**DRAM-less**；全表 2048 region × 512 entry × 4B = **4MB** | `l2p_cache.h:29-51` |
-| L2P 位置解析 | Metadata Directory（128 entry）动态分配 + 固定位置回退 | `metadata.c:35-355` |
+| L2P 位置解析 | Metadata Directory（`L2P_REGIONS_PER_INSTANCE` = 2048 entry）动态分配 + 哨兵层（0-15 块）回退 | `metadata.c:35-355`；`ftl_config.h:147` |
 | L2P cache | SRAM **64 region** CLOCK（近似 LRU），write-back + journal | `l2p_cache.c:78-132,239-264` |
 | **thrashing 检测** | ~~**无**（只有 hit/miss 计数）~~ ⇒ P1-4 已落地：窗口化 miss 率 + 滞回 + 停主动 flush | `l2p_cache.{h,c}`、`ftl.c` |
-| GC victim | **单维贪心：有效页最少**（无权重） | `gc.h:10,58`；`gc.c:198-241` |
-| GC 触发 | **3 条**：水位 32 / 写入 1024 / 定时 500ms（T1/T2/T3） | `gc.c:364-385` |
+| GC victim | **多维加权评分**（P1-1 ✅ 已落地）：有效页 / 磨损 / 温度 / 时间 四维（权重 500/200/200/100） | `gc.h:46-49,111` |
+| GC 触发 | **5 条**（P1-2 ✅ 已落地）：T1 水位 / T2 写入 / T3 定时 / T4 紧急 / T5 磨损均衡；**T6 碎片率刻意不实现** | `gc.h:51-72`；`gc.c:659-711` |
 | 静态 WL | **已实现**（三条件触发 + 冷块 victim + read_count 权重） | `wear_leveling.c:14-306`；`ftl.c:392` |
 | 动态 WL | allocator 每 plane 选擦除最少块 | `allocator.c:119-148` |
-| **擦除计数持久化** | **无**——`ftl_init` memset 全 BST，无 load/save ⇒ **每次上电归零** | `ftl.c:465`；`METADATA_TYPE_ERASE_COUNT` 零引用 |
-| Free Pool | **单一 free 池 + OP 池**；`pre_cond_count ≡ free_count`；**Emergency 死代码** ⇒ P1-3 定案为「一个池 + 三级水位」，冗余计数与状态位已删 | `allocator.c`；`bst.h` |
+| **擦除计数持久化** | **有**（P0-1 ✅ 已落地）：Wear 表落块 62（页式追加日志），开机回放回填 BST 的 `erase_count`/`read_count` | `include/ftl/wear.h`、`src/ftl/wear.c`；`ftl.c:586` |
+| Free Pool | **单一 free 池 + OP 池**；三级**水位**（P1-3 ✅ 定案）；`pre_cond_count ≡ free_count`（**非缺陷**，GC 先擦后归还） | `allocator.c`；`gc.h` |
 | 温度分区 | Hot/Cold 两个 Open SB | `allocator.c:43-44,348` |
-| Super Block | 双 plane 配对，**`block1 = block0`（同号）** | 变更史 v0.48 备注 |
-| Journal | 2 块环形 log，16B/entry，128/page；truncate 简化（不扫 sequence） | `journal.c:129-142,340-353` |
-| Checkpoint | **增量**（只 flush 脏 region）——但头注释写「全量」 | `checkpoint.c:63-93` vs `checkpoint.h:52` |
+| Super Block | 双 plane **各自独立选块**（Policy B，v0.12）；不再要求 `block1 = block0` 同号 | `allocator.h:59,192`；`allocator.c:152,192` |
+| Journal | **4 块**环形 log（`JOURNAL_BLOCKS = CW_NUM`），条目 **16B**（packed：lba + old/new pba + seq），**127/page**（推导）；truncate 已消除双倍擦除（P1-6 ✅） | `journal.h:35-59`；`ftl_config.h:170` |
+| Checkpoint | **全量快照**语义 + **增量 flush**（只写脏 region）；池 8 块环形，一条 = 1 页 | `checkpoint.c:63-93`；`checkpoint.h:62` |
 | 掉电恢复 | fresh/clean/power-failure 三类；closed SB 重建 = **全 NAND 扫描 + L2P 反查** | `power_failure_recovery.c:30-341,563-634` |
 | 调度/QoS | IDLE/NORMAL/BUSY，按 `pending+completion` 占用判空闲度 | `ftl.c:510-558` |
 | 流水线 | pending 深 32 + completion 深 32，异步提交 + 完成泵 | `pending.h:20`；`completion_table.h:38` |
-| FTL↔FC | 用户数据走**完整 CRC+加扰+ECC(BCH)**；元数据只保 ECC | `ftl.c:632-637,741-746` |
-| BST | 条目 24B × 4096 = 96KB + 独立位图表 64KB = **160KB 全常驻 SRAM**（v0.55 位图已搬出条目） | `bst.h` |
+| FTL↔FC | 用户数据走**完整 CRC+加扰+ECC(BCH)**；元数据走 **per-CW CRC + ECC（v0.62 起开启 CRC）** | `ftl.c:632-637,741-746` |
+| BST | 条目 **20B** × 4096 = **80KB 全常驻 SRAM**，**无位图表**（v0.55 位图搬出条目；v0.56 删死字段 24B→20B；v0.60 删位图表 64KB → 切 DRAM-less approach ③） | `bst.h` |
 | Read Recovery | Stage 1/2 有；**Stage 3（XOR/RAID）未实现** | `read_recovery.c:263` |
 
 ---
@@ -61,7 +68,7 @@
 | 维度 | 本仓 | SPDK FTL | Jasmine | dhara/SPIFTL | 差异性质 |
 |---|---|---|---|---|---|
 | L2P 存储 | NAND（DRAM-less） | **DRAM/缓存设备**（默认常驻 2GiB MRU，溢出换页） | DRAM 全表 | 无表/块级 | **路线不同**（本仓对标 UFS/eMMC，SPDK 对标有 DRAM 的企业盘） |
-| 映射粒度 | 页（2048B） | 4K 块 | 页 | 块 | 粒度相近 |
+| 映射粒度 | **512B = 页/4（IU = 1 CW）** | **4K = 页/4** | 页 | 块 | 本仓与 SPDK **同构**（皆 = 页/4）——**代码已迁移（波 2 序 2，未上板）** |
 | GC victim | 有效页最少（单维） | **validity ratio**（band） | Greedy 等 | 整块 | 本仓**少一维以上** |
 | 数据年龄/序号 | `last_pe_ts`（P1-1 已消费；~~`gc_generation`~~ v0.56 删） | **seq_id**（band 级，恢复用） | — | — | 本仓**未成体系** |
 | 恢复机制 | Journal + Checkpoint | **P2L 重放**（无 journal） | 重建 | 扫描 | 路线不同，本仓更接近消费级 |
@@ -81,24 +88,32 @@
   三模式后台调度、FTL 走 FC 完整保护路径（CRC/ECC/加扰）。
 
 **B. 有实现但弱（补强）**
-- GC victim 单维贪心；GC 触发仅 3/6；CLOCK 无降级；Super Block 同号连坐；Journal 2 块寿命瓶颈。
+- ~~GC victim 单维贪心~~（P1-1 ✅）；~~GC 触发仅 3/6~~（P1-2 ✅ 5/6，T6 刻意不实现）；
+  ~~CLOCK 无降级~~（P1-4 ✅）；~~Super Block 同号连坐~~（Policy B ✅ 独立选块）；
+  ~~Journal 2 块寿命瓶颈~~（P1-6 ✅ 双倍擦除已修，4 块环）。
 
 **C. 设计有、代码无（缺口）**
 - ~~Emergency Free Pool~~（P1-3 文档误述）；~~GC 多维加权~~（P1-1）；~~thrashing 检测~~（P1-4）；GC Bitmap（Layer 2）；Prefetch；
   Read Recovery Stage 3（**且 RAID 开关必须保持 0，见 §六**）。
 
 **D. 有效性缺口（最该先修）**
-- **擦除计数/read_count/rr 不持久化** ⇒ WL 与 read-disturb 预测**每次上电归零**（→ P0-1 ✅）；
+- ~~擦除计数/read_count/rr 不持久化~~ ⇒ **P0-1 ✅ 已落地**：`erase_count`/`read_count` 由 Wear 表持久化
+  （**rr 仍 ⬜ 未持久化**，登记为后续）；
 - ~~Metadata Directory 容量 128 < 2048 region~~ ⇒ **该描述已过时**（常量早已 = `L2P_REGIONS_PER_INSTANCE`）。
   实际缺陷是**元数据就地覆盖**（NAND 只能 1→0，二次编程 = 静默损坏）+ Anchor 从未落盘 +
   Checkpoint 二次写即坏（→ P0-2 ✅）；
-- **元数据日志块抗碎片**：`metadata_dir_reclaim` 只回收活计数为 0 的块 ⇒ 挂着冷 region 的块永久占块（→ P0-3）。
+- **元数据日志块抗碎片**：`metadata_dir_reclaim` 只回收活计数为 0 的块 ⇒ 挂着冷 region 的块永久占块（→ **P0-3 ⬜ 未做**）。
 
 **E. 一致性债（订正文档或代码）**
-- 映射粒度（§5.1 写 CW 级 512B vs 代码页级 2048B）；
-- Checkpoint 注释（全量 vs 增量）；
-- L2P 表 1,048,576 entry 相对 262,144 物理页**疑似 4× 超额**（若按页级映射）；
-- `ftl_boot_scan_write_pointer` 死代码且 `buf[16]` 传给按 2048B 拷贝的 raw read（风险，已自承）。
+- ~~映射粒度（§5.1 写 CW 级 512B vs 代码页级 2048B）~~ ⇒ **已迁移（波 2 序 2，未上板）**：数据路径
+  升到 IU = 1 CW = 512B，与设计/主流同构；声明地址空间回到 1,048,576 × 512B = **512 MiB = 容量**。
+  波 1 核对结论（非表设计缺陷、是在途迁移）见 §九 波 1。
+- ~~Checkpoint 注释（全量 vs 增量）~~ ⇒ **已订正**（全量快照语义 + 增量 flush，见 `checkpoint.h:62`）；
+- ~~L2P 表 1,048,576 entry 相对 262,144 物理页疑似 4× 超额（若按页级映射）~~ ⇒ **已核对：非缺陷**。
+  表按**映射单元（IU）数**定尺寸（IU = 页/4 = 512B ⇒ 4 × 页数），与主流主控同构（主流 IU = 页/4）；
+  「4×」只在相对**物理页数**而非 IU 数时才看似超额。**结论见 §九 波 1。**
+- `ftl_boot_scan_write_pointer` 死代码（旧单 SB 路径，主路径不调用）且 `buf[16]` 传给按 2048B 拷贝的
+  raw read（风险，已自承）⇒ 登记 §8.4。
 
 ---
 
@@ -111,9 +126,9 @@
   静态 WL 的「max-min ≥ 5000」、动态 WL 的「选擦除最少块」、read-disturb 预测**跨重启全部失效**。
 - **对照**：SPDK FTL 用 shm 跟踪脏页；Jasmine/企业级持久化 block metadata。
 - **落地方式**：新增 `include/ftl/wear.h` + `src/ftl/wear.c` —— Wear 表落在已预留的固定块
-  `WEAR_BLOCK`（26），介质上是**块内页式追加日志**（sequence + 每页 CRC，与 Anchor/Journal
-  同一套日志惯例；绝对值 + 最新胜），而非"每次整表重写"——块 26 只有 64 页、全量快照 25 页，
-  整表重写会让它 ~2.6 次落盘就被擦一次（磨损远超数据块）。
+  `WEAR_BLOCK`（**v0.50 布局后 = 62**；条目 8B、快照 17 页），介质上是**块内页式追加日志**（sequence + 页序，与 Anchor/Journal
+  同一套日志惯例；绝对值 + 最新胜），而非"每次整表重写"——块 62 只有 64 页、全量快照 17 页，
+  整表重写会让它 ~3.8 次落盘就被擦一次（磨损远超数据块）。
   开机 `wear_init` 逐页回放回填 BST（非致命：无有效页 = 冷启动）；运行期 5 个变更点
   `wear_mark_dirty` 置脏位，`ftl_service_idle`/`normal` 里 `wear_flush` 按节拍
   （`WEAR_FLUSH_INTERVAL_MS` 120 s 或 `WEAR_FLUSH_ERASE_DELTA` 1024 次写入）批量落盘。
@@ -164,9 +179,16 @@
   ① 同一 region 连续两次 flush 后读回正确（**改前必失败**）；
   ② `region_id > 128` 的 LBA 写 → flush → 读回正确，且该 region 的 PAA 落在
   `block ≥ FTL_METADATA_BLOCK_END`（动态块）；
-  ③ 复位后数据仍在（`[META] anchor_seq` 非 0、`dyn` 非 0）——**当前必然失败**。
+  ③ 复位后数据仍在（`[META] anchor_seq` 非 0、`dyn` 非 0）——**根因已闭合（v0.61）**：
+  原先必然失败的原因是 `metadata.c` 的 `ANCHOR_PAGE_CRC_LEN = sizeof(...) - 4` 把 `crc`
+  字段**自己**也算进覆盖面（`crc` 实际在 offset 1808，其后还有 236B padding）⇒ 写时（crc=0）
+  与读回时（crc≠0）算出的值必然不等 ⇒ `anchor_page_valid` 恒 0 ⇒ `metadata_dir_load` 永远
+  失败 ⇒ 每次开机回退 `metadata_dir_init`、**L2P 映射跨重启全丢**。v0.61 改为
+  `offsetof(metadata_anchor_page_t, crc)`（=1812），自校验成立。详见 `ftl_revision_history.md v0.61`。
   观测口 = 开机 `[META] anchor_seq=… dyn=… cur_blk=… live_blks=…`。
-- ⚠ **介质格式变更** ⇒ 上板前**必须先擦除芯片**。
+- ⚠ **介质格式变更** ⇒ ~~上板前**必须先擦除芯片**~~ **v0.61 起由开机自动格式化兜底**
+  （介质布局版本标记不符 ⇒ `ftl_media_format` 全片擦 + 保留出厂坏块 + 写当前版本标记）；
+  手动 `bbt --erase` 仍可作兜底。
 
 **P0-3 L2P 日志块压缩（抗碎片）** — 📋 **待做**（P0-2 的阶段 3，**未实现**）
 - **问题**：`metadata_dir_reclaim`（`metadata.c:573-596`）只回收 `l2p_live[g] == 0` 的块：
@@ -206,8 +228,8 @@
 
 ### P1 — 算法（对照开源可显著提升）
 
-**P1-1 GC victim 多维加权评分**（设计 §4.3 已写，未实现）
-- 公式：`score = 0.50·valid_ratio + 0.20·(1-erase_ratio) + 0.20·temp_factor + 0.10·(1-age_ratio)`。
+**P1-1 GC victim 多维加权评分** — ✅ **已落地**（`gc.h:46-49,111`）
+- 公式：`cost = GC_WEIGHT_VALID·valid_ratio + GC_WEIGHT_ERASE·erase_ratio + GC_WEIGHT_TEMP·cold_penalty + GC_WEIGHT_AGE·youth_penalty`（权重 500/200/200/100）。
 - 对照 SPDK FTL 的 validity ratio（单维）→ 本仓加上**磨损/温度/时间**三维，已超 SPDK 的 GC 选块维度。
 - **判据**：同一 victim 集下，加权选出的块擦除次数分布更均匀、COLD 块被搬次数下降。
 
@@ -272,11 +294,14 @@
 ### P2 — 内存/产品化
 
 **P2-1 BST 产品化裁剪**（设计 §19 档三，本期不做，触发条件「SRAM 紧张 + 字段有消费方」）
-- ⚠ **数字与前提待重算（v0.56 后）**：原「160KB → ~100KB（核心 40KB + valid_map 64KB）」基于 24B 条目；
-  现条目 **20B**（80KB）+ 位图 64KB = **144KB**。且 §19 档三的**扩展字段表在 v0.56 后已空**
-  （两个候选冷字段 `program_count`/`gc_generation` 已删、`last_pe_ts` 有消费者须常驻）
-  ⇒ 剩余唯一杠杆是 **`valid_map`（64KB）的驻留策略**。
-- **先决**：P0-1 的持久化子系统落地后，扩展字段才有意义。
+- ✅ **剩余唯一杠杆已消解（v0.60，2026-10-13）**：原「160KB → ~100KB（核心 40KB + valid_map 64KB）」
+  的两半都已落地——条目 24B→**20B**（v0.56 删死字段），位图 **64KB→0**（v0.60 切 DRAM-less
+  approach ③：删常驻 `valid_map`，有效性逐 CW 由页内 META 反查 L2P 判定，见
+  `cw_level_mapping_design.md §八`）。⇒ BST 常驻 = **80KB**（20B × 4096），AXI_RAM 319 → **255 KB**。
+- **扩展字段表在 v0.56 后已空**（两个候选冷字段 `program_count`/`gc_generation` 已删、
+  `last_pe_ts` 有消费者须常驻）⇒ 已无字段可裁。
+- **结论**：P2-1 **已无剩余动作**，仅保留登记（若将来 SRAM 再紧张，杠杆只剩 L2P cache 的
+  region 数，属另一项）。
 
 **P2-2 SB 索引粒度** — ✅ **已结案（v0.57），不实现**
 - **前提已死**：变更史 v0.48 备注的推导前提是 `allocator.c` 的 `block1 = block0`——SB 两 plane 永远
@@ -319,6 +344,21 @@
   GC victim 侧 SPDK 用的是 **validity ratio**（"The lower the ratio, the higher the chance the band will
   be chosen for gc"），本仓 `GC_WEIGHT_VALID` 已对齐，**不需要**序号。
 
+**P2-5 FTL 表所有权（HIL 传指针 vs 固件自持）**（主流对照，仅登记，暂不排期）
+- **主流做法**：主流主控的 FTL 是**固件本体**，表是固件自己的固定内存区——OpenSSD `address_translation.c`
+  用**全局数组**、SPDK `spdk_ftl_dev` 实例**内含**表（`storage_controller_learning.md:87`、
+  `reference/pages/spdk_ftl.html`）。**主流固件里没有「外层调用者」给 FTL 喂表指针**。
+- **本仓偏离**：HIL（`src/main.c`）声明大数组、经 `ftl_init_params_t` **传指针**进 FTL，FTL 不持有表
+  （`include/ftl/allocator.h:84-100`、`bst.h:20`）。
+- **根因（三条，均本仓特有）**：① 多实例（F6）——`g_ftl[CH][CE][LUN]`，每实例要一份独立表
+  （`bst.h:22`）；② **MCU 分段 RAM**——BST（当时 224KB，现 80KB）塞不进 SRAM1，被迫 BST→AXI_RAM / 池子→SRAM2 分置
+  （`revision_history.md:1108`），放置权落在 HIL；③ FTL 作为 §26 分层中 HIL 之下的**层**。
+- **代价**：与主流「固件自持表」形态不同；换统一 DRAM 平台无收益。
+- **改造成本**：高（把指针收进 `ftl_context_t`、FTL 自持并按 id 索引全局表）⇒ **仅登记不排期**。
+- **时间线注**：本设计定于 **v0.30（2026-09-30）**，**早于**「主流 FTL 为判据」转向（P2-1，2026-10-12）
+  ⇒ **从没被主流判据审过**。同类「早于转向、未按主流重审」的还有 v0.28~v0.30 那批**形参优化**
+  （把形参打包进结构体，纯 API 形态，未涉主流判据），建议一并补审。
+
 ### P3 — 学习/前沿（非必要）
 
 **P3-1 Prefetch 顺序读**（设计 §6.4）：检测顺序访问 → 预加载后续 region。
@@ -336,6 +376,9 @@
 ---
 
 ## 五、分阶段实施计划
+
+> ⚠ **本节为旧排序**（S1~S4，判据「先补有效性」）。**以「对齐主流」为准的新排序见 §九**；
+> 两者冲突时**以 §九 为准**。
 
 | 阶段 | 内容 | 依赖 | 判据 | 上板 |
 |---|---|---|---|---|
@@ -357,25 +400,28 @@
   现状 `read_recovery.c:263` 的「不实现」是**符合边界的**，不是待办。P0/P1 不碰它。
 - 不动 `src/fc/**` 的对外接口形态（§26.3 判据：FC 只留硬件 FCC 寄存器表的对应项）。
 - 不新增单元测试源文件（项目规则：测试源用户自建）——V-1 只出**方案**，实现由用户定。
-- 不改 `L2P_REGIONS_TOTAL`/容量语义（512MiB 不变）；不改介质格式（除 S1 若确需新增元数据表，
-  须按 v24 教训「介质格式变更须重新格式化」登记）。
+- 不改 `L2P_REGIONS_TOTAL`/容量语义（512MiB 不变）；介质格式变更**按 v0.61 惯例登记**（`FTL_MEDIA_LAYOUT_VERSION`
+  自增 ⇒ 开机自动格式化兜底，见 §七.6）。
 - 不为「对齐开源」而引入 DRAM 常驻 L2P（违背本仓 DRAM-less 定位）。
 
 ---
 
 ## 七、风险与诚实登记
 
-1. **映射粒度存疑**（§三 E）：若代码确为页级，则 L2P 表 1,048,576 entry 相对 262,144 物理页**超额 4×**
-   （浪费 ~3MB 表空间 + 24 个元数据块）。**实施 S1 前必须先核对**——这可能是比「优化」更该先修的结构问题。
-2. **计数持久化**（P0-1）：**不新增**介质格式变更——Wear 块 26 早在分区表里预留且被
+1. ~~**映射粒度存疑**（§三 E）~~ ⇒ **已核对（§九 波 1，2026-10-13）：非表设计缺陷**。表 1,048,576 entry
+   按**目标 IU = 页/4 = 512B** 定尺寸（与主流同构），**表不改小**；**代码数据路径已迁移到 IU 级**
+   （v0.59，§九 波 2 序 2）⇒ 声明空间回到 `1,048,576 × 512B = 512 MiB = 容量`，原先「2 GiB 四倍超额」已消除。
+2. **计数持久化**（P0-1）：**不新增**介质格式变更——Wear 块 62 早在分区表里预留且被
    `ftl_is_metadata_block` 排除，本次只是第一次往里写内容。块号/分区一个没动
    （v24 教训：只有改块号/布局才须重新格式化；本条只改了 `FTL_WEAR_TABLE_BYTES` 的
    逻辑表字节常量，不影响介质寻址）。
 3. ~~Emergency 池真三级化~~（P1-3 已判定为文档误述，无此改动）。
 4. **P1-1 加权评分**引入浮点/定点的取舍：嵌入式无 FPU 便利 ⇒ 用整数加权（本仓惯例），避免 `%f`（newlib-nano）。
 5. 本文档的「现状」以**源码为准**；若与 `ftl_design.md` 冲突，**以代码为准**并在 S1 一并订正文档。
-6. **上板前置（P0-2 引入）**：**必须先擦除芯片**。本次改的是介质格式（块布局 + Anchor 分页 +
-   Journal 挪号），旧镜像写下的内容按新布局解读会错位。
+6. **上板前置（P0-2 引入，v0.61 起取消）**：~~**必须先擦除芯片**~~。本次改的是介质格式
+   （块布局 + Anchor 分页 + Journal 挪号），旧镜像写下的内容按新布局解读会错位。
+   **v0.61 起由开机自动格式化兜底**（`FTL_MEDIA_LAYOUT_VERSION` 不符 ⇒ `ftl_media_format`
+   全片擦 + 保留出厂坏块 + 写当前版本标记），不再需要手动 `bbt --erase`。
 7. **未做（本轮登记，见 `ftl_revision_history.md` v0.50「登记不做」）**：
    - **阶段 3 / P0-3**（上条）——**长时压测前必须补**；
    - **多实例**：`checkpoint.c` / `bbt.c` / `wear.c` 的 file-scope static 游标/序号在多 LUN 下
@@ -387,13 +433,217 @@
    - ~~**`program_count` 无消费方**~~ / ~~**`last_pe_ts` / `gc_generation` 死字段**~~ —— ✅ v0.56 已删
      `program_count`/`bad_reason`/`gc_generation`；`last_pe_ts` 由 P1-1 消费（原判据已过期）；
      **`rr` 仍不持久化**。
-8. **文档一致性债（`cw_level_mapping_design.md` §十二 项 6 已登记，本轮未改）**：
-   - `ftl_design.md` / `ftl_api_usage.md` 仍散落**旧布局标识符**（`L2P_REGIONS_TOTAL` /
-     `L2P_REGIONS_PER_LUN` / `L2P_BLOCKS_PER_LUN`、L2P 32 块、Journal 40/41 块、
-     Directory 128 条 / 904B）——v0.50 已订正**与写模型直接矛盾**的段落（§3.3 / §5.3 / §5.5 /
-     §14 / §16），其余旧标识符**待 S1.5 一并清理**；
-   - `src/main.c` 两条内存注释仍是旧值：`g_ftl` 标 "131.5KB"（实测 `sizeof(ftl_context_t)`
-     = **147.7 KB**）；AXI_RAM 标 "≈355.5KB（剩 11.5KB）"（实测 **332.3 / 384 KB，余 51.7 KB**）。
+8. **文档一致性债**：
+   - ~~`ftl_design.md` / `ftl_api_usage.md` 旧布局标识符~~ ⇒ **✅ 本轮已清理**（2026-10-13）：L2P 分区
+     0-15、Journal 58-61、Wear 62、Checkpoint 池 8 块等常量已对齐 `ftl_config.h`；
+   - ~~`src/main.c` 两条内存注释仍是旧值~~ ⇒ **✅ 已订正**：`g_ftl` = **157.6 KB**（含 l2p cache 128KB），
+     AXI_RAM 实用 **~255 KB / 384 KB**（`src/main.c:108,116,132-138` 有 `_Static_assert` 兜底）。
+
+---
+
+## 八、登记未排期总表（本仓「已知偏离 / 缺口 / 未做」一览）
+
+> **本节性质**：把散落在 §四（P2/P3）、§六（边界）、§七（风险登记）以及
+> `ftl_revision_history.md` 各版「登记不做」中的**全部未排期项**汇成一张总表，供排期/复盘总览。
+> **本轮（2026-10-13）新增**：**P2-5**（FTL 表所有权）+ 本节。
+>
+> **类型**：`偏离`=有主流出处、可改；`缺口`=设计有/机制弱、未生效；`未决`=原因未闭合；
+> `债`=文档与代码不符；`边界`=刻意不做（**非待办**）。
+> **状态**：`待触发` / `仅登记` / `不实现` / `待补` / `保留未改`。
+
+### 8.1 主流对照偏离（有出处、可改）
+
+| 编号 | 项 | 本仓 vs 主流 | 为何未排期 | 出处 |
+|---|---|---|---|---|
+| P2-1 | BST 产品化裁剪（§19 档三） | 全常驻 vs 分层裁剪 | ✅ **已消解（v0.60）**：条目 24B→20B + 位图 64KB→0 ⇒ BST 80KB；无剩余杠杆 | 设计 §19 |
+| P2-3 | OOB/spare 通路 + 出厂坏块检测走 OOB | 靠「读失败 / 全 FF」vs 读 OOB 标记 | 与 BST 主线不同源，单独排 | `essentials:420-424` |
+| P2-4 | band 级 sequence ID + validity 聚合 | 无序号 / validity 派生 vs band 另存 | 消费者被 journal 恢复取代 ⇒ 死字段 | `spdk_ftl.html` |
+| **P2-5**（本轮新增） | **FTL 表所有权 = HIL 传指针** | HIL 声明数组传指针 vs 固件自持表 | 多实例 + MCU 分段 RAM + FTL 作层 | `learning.md:87` / `spdk_ftl.html` |
+| **P2-6**（CW 迁移新增） | **单 plane 子操作浪费另一 plane 的页** | `allocator_alloc_pair` 一次给**两 plane 同页号**并推进写指针；CW 级子操作常只覆盖半个 pair（如 512B 写只落 plane0）⇒ 另一 plane 该页被占用却从不编程 | 顺序写（pair 窗口写满）零浪费；**随机 512B 写有代价**。修法 = per-plane 独立写指针 | `allocator.c:391-426`；`ftl.c ftl_issue_subop` |
+| — | SPDK FTL 式 P2L 重建 | Journal/Checkpoint vs 每 band 尾存 P2L | 替换整层持久化的大改 | v0.50 登记 |
+| — | **介质布局版本 + 开机自动格式化**（2026-10-13，v0.61） | ✅ **已落地**：`FTL_MEDIA_LAYOUT_VERSION` 写进 Checkpoint 头 + Anchor 页；版本不符/无记录 ⇒ `ftl_media_format` 自动全片擦（**保留出厂坏块标记**）+ 写当前版本标记。此前每次改介质格式都得手动 `bbt --erase` | `ftl_revision_history.md v0.61` |
+| — | **元数据校验和下沉到下层 FC**（2026-10-13，v0.62） | ✅ **已落地**：删 FTL 记录内 CRC（Checkpoint/Anchor/BBT/Wear 四结构体字段 + 算/校验点）+ `FTL_PAGE_CFG_META` 由 `FC_CRC_DISABLE` 翻 `FC_CRC_ENABLE`。判据 = **DRAM-less 主流**（dhara：checksum 归 NAND 层、FTL 只留结构判据）；SPDK 自加 CRC32C 属 DRAM 型分岔，不适用本仓 | `ftl_revision_history.md v0.62` |
+
+### 8.2 有效性 / 算法缺口
+
+| 编号 | 项 | 现状 | 为何未排期 |
+|---|---|---|---|
+| P0-3 | L2P 日志块压缩（抗碎片） | `metadata_dir_reclaim` 只回收活计数 0 的块 ⇒ 冷 region 块永久占块 | 依赖 P0-2 上板；**长时压测前必须补** |
+| — | **Anchor 页 CRC 覆盖面缺陷**（`c5cb8a0` 引入，v0.61 修，v0.62 字段整体删除） | ✅ **已消解**：v0.61 修覆盖面（原 `ANCHOR_PAGE_CRC_LEN = sizeof - 4`（2044）把 `crc` 字段自己算进去 ⇒ `anchor_page_valid` **恒 0** ⇒ `metadata_dir_load` 永远失败 ⇒ **L2P 映射跨重启全丢**；改 `offsetof(..., crc)`=1812）；v0.62 起 Anchor 页**不再有 `crc` 字段**，完整性由下层 FC per-CW CRC + ECC 承担 ⇒ 该缺陷从根上不存在 | `ftl_revision_history.md v0.61/v0.62` |
+| — | `rr` 持久化 | 慢死预测跨重启归零 | P0-1 决策②，后续扩展 |
+| — | GC Bitmap（Layer 2） | 设计有、代码无 | 缺口，未排 |
+| — | **有效性 = DRAM-less approach ③**（2026-10-13，v0.60） | ✅ **已落地**：删常驻页级 `valid_map`（64KB）⇒ 有效性**唯一**真值 = 逐 CW 读**页内 META（=OOB 反向映射）**取回 LBA → 反查 L2P。原先位图覆盖的「整块空洞」主场景改由 `gc_migrate_sb` 的 `valid_count == 0` 快路径覆盖。出处 = DFTL / arXiv 1504.01666 / KIISE / LeaFTL / VPFTL | `cw_level_mapping_design.md §八` |
+| P3-1 | Prefetch 顺序读 | 无 | 前沿，未排 |
+| P3-2 | 多流 host stream hint | 仅双温区 | 企业级方向，未排 |
+| P3-3 | 学习型 L2P 压缩（LeaFTL） | 无 | 工程量大，未排 |
+| — | **无写页缓冲（§七 方案 A 未做）** | 512B 写直接编程 **CW 子集**（`ftl_issue_subop` 的 `cw_bitmap`），不攒满 4 CW 再整页编 ⇒ **页内允许空洞**（CW0 可能未写）。GC/WL 靠「首个写过 CW 反推页基址 + 逐 CW L2P 反查」容忍空洞（`gc_read_page_with_lba`） | 器件支持按 CW 编程（FC v27 CW 位图），故未走页缓冲；代价是页内碎片。若将来按「整页编程」约束器件，须补写缓冲 + 掉电语义 |
+
+### 8.3 多实例 / 结构性缺口
+
+| 项 | 现状（出处） | 处置 |
+|---|---|---|
+| `main.c` 只 service 实例 0 | `ftl_service(&g_ftl[0][0][0])`（`main.c:457`）⇒ Phase 2.5 只 drain 实例 0 | 当前 CH=CE=LUN=1 正确；维度扩展须遍历（**既有结构缺口**） |
+| file-scope static 游标多 LUN 共享 | `checkpoint.c`/`bbt.c`/`wear.c` 的 static 游标/序号 | 局限登记在案 |
+| `ftl_is_metadata_block` per-plane 粒度 | 按 per-plane 块号比较 ⇒ 连另一 plane 同号块一起排除 | 偏保守安全，**不修** |
+| `read_recovery` 写保留地址 0x89 | `read_recovery.c:83,99` 读重试写保留段、自始空转 | **用户明确不处理** |
+| 读失败无条件 `IO_ERROR` | `ftl.c:271-275` 即使 rr 救回也报错 | 「行为等价」保留 + ⚠ 注释，待单独立项 |
+| `ftl_trim` 大范围同步阻塞 | 超循环长停 | 范围上界/分块后续定 |
+| `ftl_flush` 语义 | = 「落已持久化映射」，**非** NVMe barrier | 语义界定，非缺陷 |
+| 跨组 LBA 重叠写序 | 未定义 | 当前 HIL 串行，不成问题 |
+
+### 8.4 文档一致性债
+
+| 项 | 债 | 处置 |
+|---|---|---|
+| 映射粒度 | §5.1 写 CW 级 vs 代码页级 | **✅ 已迁移（波 2 序 2，未上板）**；波 1 核定为「非缺陷、在途迁移」（`cw_level_mapping_design.md §十一`） |
+| Checkpoint 注释 | 头注释「全量」vs 实现增量 | **✅ 已订正**（全量快照语义 + 增量 flush，`checkpoint.h:62`） |
+| ~~L2P 表尺寸~~ | ~~1,048,576 entry vs 262,144 物理页 疑似 4× 超额~~ | **波 1 已核：非缺陷**（表按 IU = 页/4 = 512B 定尺寸，与主流同构） |
+| `ftl_boot_scan_write_pointer` | 死代码（旧单 SB 路径）+ `buf[16]` 传给按 2048B 拷贝的 raw read | 风险，已自承；**待删**（用户「无用直接删」原则） |
+| 旧布局标识符 | `ftl_design.md`/`ftl_api_usage.md` 散落 `L2P_REGIONS_TOTAL` 等 | **✅ 本轮已清理**（2026-10-13） |
+| `main.c` 内存注释 | ~~`g_ftl` 标 "131.5KB"；AXI_RAM 标 "≈355.5KB"~~ | **✅ 已订正**：`g_ftl` = **157.6KB**、AXI_RAM ~**255KB**/384KB |
+
+### 8.5 跨层 / 未决（非 FTL 主体，但影响本仓判据）
+
+| 项 | 现状 | 处置 |
+|---|---|---|
+| 擦除 op 18→17 未决 | 固件实测零改写（0/28），原因未闭合 | 插桩 `#if 0` 停在 `test_fc_level3.c` |
+| FTL UT 未接线 | 无 `test_ftl.c`；`test_gc/l2p/nand` 孤儿、`test_rebuild` 摘除 | 方案 = `ftl_ut_munit.md` + §V-1（**用户自建**） |
+| F8 / F9 | 依赖上板 | 待上板 |
+| v0.58 对外接口对齐 | 未上板 | 待上板 |
+| HAL_RCCEx_GetPeriphCLKFreq 被裁 | 恒返回 0（无 FMC/QSPI/USART1 分支） | platform 待修 |
+| FMC HiZ 是写方向 | 待上板写压力测试 | 待上板 |
+| D4/D5 HIL 队列 + 门铃 + CQ | 更大重构 | 未排 |
+| D6 LBA→实例路由上移 | 与分片模型冲突 | 需单独立项 |
+
+### 8.6 边界（刻意不做，**非待办**）
+
+- `CONFIG_FC_RAID` 保持 0 ⇒ Read Recovery Stage 3（XOR）**不实现**（`read_recovery.c:263`）。
+- 不引入 DRAM 常驻 L2P（违背 DRAM-less 定位）。
+- 不为「对齐开源」而改 `L2P_REGIONS_TOTAL` / 容量语义（512MiB 不变）。
+
+---
+
+## 九、优化顺序（以主流为准；**早期方案必改**）
+
+> **本节性质**：对 §八 全部未排期项**拍一个执行顺序**。判据 = **有出处的主流存储主控 FTL 设计**。
+> **与 §五 的关系**：§五（S1~S4）是旧排序（判据「先补有效性」）；本节判据换成「**对齐主流**」，
+> **冲突时以本节为准**。
+>
+> **两类必改**（**不再是「仅登记」**）：
+> ① **早期方案偏离主流** —— v0.30 表所有权、早期 FC 无 OOB 通路、**早期映射粒度（页级 → IU 级）**、单实例遗留；
+> ② **机制没生效的有效性缺口**。
+> **排序原则**：先决核对 → 结构对齐主流（越晚越贵）→ 有效性 → 器件通路 → 算法 → 文档债；
+> 边界不改；跨层按依赖穿插。**每波末尾上板**。
+>
+> ⚠ **当前几何 `CH=CE=LUN=1`（单实例）**：多实例类改动是**潜伏债**（dims>1 才咬），**非活跃缺陷**；
+> 且 AXI_RAM 已用 **~255 / 384 KB**（`src/main.c:132-138` 有 `_Static_assert` 挡住加实例）⇒ **多实例前必须先重规划内存**。
+> ⚠ **若以「活跃缺陷优先」而非「主流对齐优先」**，则**波 3 的 P0-3 应提到最前**（它是活跃容量泄漏；波 2 多为潜伏债）。
+> 本排序按用户指定判据（**主流**）排。
+
+### 波 0 — 已落地批次（2026-10-13 收口，**均未上板**）
+
+| 批次 | 内容 | 结论 |
+|---|---|---|
+| P0-1 | Wear 表跨重启持久化（块 62 页式追加日志） | ✅ |
+| P0-2 | 元数据写模型统一（只写擦除页 + sequence + 池内轮转 + 整条校验） | ✅ |
+| P1-1..P1-6 | GC 多维加权 / 触发 5 条 / 三级水位 / thrashing 降级 / SB 独立块号 / Journal 双倍擦除 | ✅ |
+| v0.55~v0.58 | BST 位图分离 → 删死字段 → 对外接口对齐主流 | ✅ |
+| **v0.59** | **CW 级映射迁移（IU = 512B）** — 见波 2 序 2 | ✅ |
+| **v0.60** | **有效性切 DRAM-less approach ③** — 见波 2 序 2.5 | ✅ |
+| **v0.61** | **介质布局版本 + 开机自动格式化**（顺带修 Anchor 页 CRC 覆盖面缺陷 ⇒ 跨重启丢映射） | ✅ |
+| **v0.62** | **元数据校验和下沉下层 FC**（删 FTL 记录内 CRC + `FTL_PAGE_CFG_META` 翻 `FC_CRC_ENABLE`） | ✅ |
+
+> ⚠ **上板前提**：波 0 全部改动**必须一次上板验证**（介质格式已变：v0.59 块布局 / v0.61 版本标记
+> + v0.62 字段删除）⇒ 首次上板会触发**自动格式化**，不再需要手动 `bbt --erase`。
+
+### 波 1 — 先决核对（不改代码）✅ **已完成（2026-10-13）**
+
+| 序 | 项 | 做什么 | 为何第一 |
+|---|---|---|---|
+| 1 | L2P 表尺寸 | 核对 1,048,576 entry vs 262,144 物理页是否 **4× 超额** | 决定映射层要不要重做 ⇒ 所有映射改动的**前提**（§七.1） |
+
+**波 1 结论（2026-10-13）**：**「4× 超额」不是表设计错误**。表按**目标 IU = 页/4 = 512B** 定尺寸
+（`ftl_config.h:96-100` `FTL_IU_BYTES = FC_BUFFER_USER_SIZE`、`:113` `FTL_CW_TOTAL = 4096×64×4`、
+`:208` 表 4 MiB），与主流主控 **IU = 页/4** 结构同构 ⇒ **尺寸正确、表不改小**。
+真正缺口 = **代码数据路径仍页级（2048B/LBA）**（`FTL_READ_USER_SIZE = 2048`、`request.c:148` /
+`ftl.c:909` 缓冲步进、`ftl.c:843` `internal_lba << CW_WIDTH(=2)` 佐证、`lba_to_region = lba>>9` /
+`lba_to_entry = lba&511` 无 `/4`），即 `cw_level_mapping_design.md §十一 ⬜` **已登记未落地的 5 项**。
+真实副作用 = `FTL_LBA_MAX = 1,048,576`（`ftl.c:981/1045/1123` + `cli.c:154` 强制）声明地址空间
+**2 GiB 超容量 512 MiB 四倍**。
+**决策（用户 2026-10-13）**：**方向 = 补完 CW 级（IU=512B）数据路径**（对齐主流；表/常量不动）⇒ **波 2 序 2**。
+✅ **已落地（v0.59，未上板）**：上述页级数据路径全部升到 IU 级，声明地址空间回到 **512 MiB = 容量**。
+
+### 波 2 — 早期方案对齐主流（**必改**）
+
+**已落地（波 0 内）**：
+
+| 序 | 项 | 改了什么 | 主流依据 |
+|---|---|---|---|
+| 2 | ~~**CW 级映射迁移**（波 1 结论）~~ ✅ **代码已落地（未上板）** | 数据路径 页级 2048B/LBA → **IU 级 512B/LBA**：请求层步进 / 写路径 4 entry / 读路径 512B 查 / GC·WL 逐 CW / BST per-CW。**实际做法**：不走「页缓冲」（器件支持按 CW 编程，FC v27 CW 位图）⇒ 页内允许空洞，见 §8.2「无写页缓冲」；代价「单 plane 子操作浪费另一 plane 页」见 §8.1 **P2-6** | 主流 IU = 页/4；本仓页 2048B ⇒ IU = 512B |
+| **2.5** | ~~**有效性切 DRAM-less approach ③**~~ ✅ **已落地（v0.60，2026-10-13）** | 删常驻页级 `valid_map`（64KB）⇒ 有效性**唯一**真值 = 逐 CW 读**页内 META（=OOB 反向映射）**取回 LBA → 反查 L2P；`valid_count` 留作块级聚合；整块空洞由 `valid_count == 0` 快路径覆盖。AXI_RAM 319 → **255 KB** | DFTL（OOB 存 LBA）/ arXiv 1504.01666（活页识别三法，DRAM-less 选 ③）/ KIISE（逐页位图放 flash 会引发大量 I/O）/ LeaFTL·VPFTL（P2L 存 OOB + 交叉验证） |
+
+**剩余（本波待做，**均为潜伏债**，dims=1 时不咬）**：
+
+| 序 | 项 | 改什么 | 主流依据 | 前提 |
+|---|---|---|---|---|
+| 3 | **P2-5 表所有权** | FTL **自持表**（per-instance 上下文内含 / linker 固定区），HIL 不再传指针 | OpenSSD 全局数组 / SPDK `spdk_ftl_dev` 内含表 | 无 |
+| 4 | **多实例化** | `checkpoint.c`/`bbt.c`/`wear.c` static 游标 → per-instance；`main.c:457` 遍历全实例 | 主流 per-channel 独立 | **须先重规划内存**（AXI_RAM ~255/384KB，加实例装不下） |
+| 5 | **P2-3 OOB/spare 通路** | FC 加 spare 列通路；出厂坏块检测改读 **OOB 标记** | 主流读 OOB 建 BBT | 无（改 FC 命令通路） |
+| 6 | **D6 LBA→实例路由** | 上移**单一 FTL 前端**（**或**明确保留分片并登记理由） | 主流单一 FTL 前端 | 序 4 之后 |
+
+> 3/4 同源（「FTL 作为固件本体、per-instance 自持」），建议**一并做**；且**先做 3/4，再动 UT 接线**
+> （夹具依赖表所有权形态，见 `ftl_ut_munit.md`）。
+> ⚠ 序 2（CW 迁移）**已落地**：`valid_count` 改 per-CW **未增加**内存（仍是 `uint16_t`，值域 0..512）。
+> 序 2.5 已随之落地：页级位图**已删**（不再保留为「写过」粗提示）⇒ AXI_RAM **减 64KB**
+> （319 → 255 KB，`src/main.c` 的 `_Static_assert` 仍成立且更宽松）。
+
+### 波 3 — 有效性（机制没生效）
+
+| 序 | 项 | 依赖 |
+|---|---|---|
+| 7 | **P0-3 L2P 日志块压缩**（**长时压测前必须**） | P0-2 上板 |
+| 8 | **rr 持久化**（慢死预测跨重启归零） | P0-1 |
+
+### 波 4 — 算法深度
+
+| 序 | 项 |
+|---|---|
+| 9 | GC Bitmap（Layer 2） |
+| 10 | Prefetch 顺序读 |
+| 11 | 多流 host stream hint |
+
+### 波 5 — 文档债（随行订正）— ✅ **本轮已基本清空（2026-10-13）**
+
+| 项 | 状态 |
+|---|---|
+| 映射粒度 | ✅ 已迁移（波 2 序 2） |
+| Checkpoint 注释（全量 vs 增量） | ✅ 已订正 |
+| L2P 表尺寸（4× 超额） | ✅ 已核：非缺陷 |
+| `main.c` 内存注释（131.5/355.5/147.7KB） | ✅ 已订正为 157.6KB / ~255KB |
+| 旧布局标识符（`L2P_REGIONS_TOTAL` 等） | ✅ 已清理 |
+| `ftl_boot_scan_write_pointer` 死代码 | ⬜ **待删**（旧单 SB 路径，主路径不调用） |
+
+### 不改（边界）
+
+`CONFIG_FC_RAID`=0（RR Stage 3 不实现）、不引 DRAM 常驻 L2P、**P2-4** band seq（消费者不存在）、
+**P2-1** BST 裁剪（待触发）。
+
+### 跨层穿插（按依赖）
+
+op 18→17（NAND 层）、**FTL UT 接线**（**波 2 之后**）、F8/F9、v0.58 上板、HAL_RCCEx、FMC HiZ。
+
+### 一句话顺序
+
+**（波 0 已落地：计数持久化 / 写模型 / P1 算法 / CW 迁移 / 有效性 ③ / 版本标记 / CRC 下沉）→
+先上板验证波 0 → 波 2 剩余（表所有权 + 多实例 + OOB + 路由）→ 有效性（P0-3 + rr）→ 算法 → 文档债**；
+边界不动，跨层按依赖插入；**每波上板**。
+
+### 下一步（当前悬空项，按紧急度）
+
+1. **波 0 上板验证**（`make clean && make all` → 烧 `debug.bin`）：首启应打印自动格式化横幅，随后
+   `wr/rd/tr/fl/info` 冒烟 + 断电重启数据仍在 + 一轮 GC 无 `IO_ERROR`。**这是所有后续改动的前提。**
+2. **P0-3 L2P 日志块压缩**（活跃容量泄漏；长时压测前必须）。
+3. 波 2 剩余四项（潜伏债，dims=1 不咬）。
 
 ---
 

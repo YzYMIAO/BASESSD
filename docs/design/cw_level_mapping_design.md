@@ -91,7 +91,7 @@
 
 > **单一事实来源**：`include/ftl/ftl_config.h`（宏 + `ftl_partition_t` 分区表 +
 > 打包映射 `ftl_l2p_region_placement()`），运行期分区表在 `src/ftl/ftl_config.c`
-> 的 `g_ftl_partitions[]`（7 项）。**改布局只改这一处。**
+> 的 `g_ftl_partitions[]`（6 项）。**改布局只改这一处。**
 
 ### 2.1 Flash 分区图（当前几何下的展开值）
 
@@ -101,21 +101,26 @@
 ```
 块号         用途                          块数来历
 ────────────────────────────────────────────────────────────
-0 .. 15      L2P Table                     ⌈2048 region ÷ 128 region/块⌉ = 16
-16 .. 17     Anchor（Metadata Directory）   ANCHOR_COPIES = 2（主备）
-18 .. 19     BBT（主 + 备）                 BBT_COPIES = 2
-20 .. 21     Checkpoint（主备）             CHECKPOINT_COPIES = 2
-22 .. 25     Journal（4 块）                JOURNAL_BLOCKS = CW_NUM（CW 级 4× 映射流量）
-26           Wear 表（erase_count）         WEAR_COPIES = 1（软状态单副本）
-27 .. 4095   用户数据 / OP / Spare / 坏块
+0 .. 15      L2P Table                     ⌈2048 region ÷ 128 region/块⌉ = 16（哨兵层）
+16 .. 47     Anchor（Metadata Directory）   ANCHOR_POOL_BLOCKS = 32（块轮转池）
+48 .. 55     Checkpoint                    CHECKPOINT_POOL_BLOCKS = 8（块轮转池）
+56 .. 57     BBT                           BBT_POOL_BLOCKS = 2（块轮转池）
+58 .. 61     Journal（4 块）                JOURNAL_BLOCKS = CW_NUM（CW 级 4× 映射流量）
+62           Wear 表（erase_count）         WEAR_COPIES = 1（软状态单副本）
+63 .. 4095   用户数据 / OP / Spare / 坏块
 ────────────────────────────────────────────────────────────
-固定元数据 = 16 + 2 + 2 + 2 + 4 + 1 = 27 块（FTL_METADATA_BLOCK_END = 27）
+固定元数据 = 16 + 32 + 8 + 2 + 4 + 1 = 63 块（FTL_METADATA_BLOCK_END = 63）
 ```
+
+> ⚠ **v0.50 起 Anchor/Checkpoint/BBT 都是「多块轮转池」**（P0-2 元数据写模型统一：只写
+> 擦除页 + sequence + 池内轮转 + 整条校验最新胜），不再是「主/备 2 块」。旧口径的
+> `ANCHOR_COPIES` / `BBT_COPIES` / `CHECKPOINT_COPIES` / `ANCHOR_REDUNDANCY` /
+> `ANCHOR_PAGE_PER_BLOCK` 宏**均已不存在**。
 
 **对账**（开机 free pool 统计）：
 
 ```
-4096 − 27(元数据) − 50(spare) − 204(op) − 40(出厂坏块) ≈ 3775 free
+4096 − 63(元数据) − 50(spare) − 204(op) − 40(出厂坏块) ≈ 3739 free
 ```
 
 ### 2.2 每张表的尺寸推导
@@ -123,27 +128,27 @@
 | 表 | 覆盖实体 | 每实体 | 字节数 ① | 页数 ② | 块数 ③ | 冗余 ④ | **实占** | 块位置 |
 |---|---|---|---|---|---|---|---|---|
 | **L2P Table** | 1,048,576 LBA（每实例） | 4B PBA | 4 MiB | 2048 | 16 | — | **16** | 0..15 |
-| Metadata Directory | 2048 region | 7B | 14,336 B | **8** | 1 | ×2 块 ×3 份 | **2** | 16..17 |
-| BBT | 4096 block | 1 bit | 512 B | 1 | 1 | ×2 | **2** | 18..19 |
-| Checkpoint | 2048 bit + 头 | — | ~920 B | 1 | 1 | ×2 | **2** | 20..21 |
-| Journal | — | 16B/entry | — | — | — | 环形 | **4** | 22..25 |
-| Wear 表 | 4096 block | 12B | 48 KB | **25** | 1 | 单副本 | **1** | 26 |
-| BST | 4096 block | 40B | 160 KB | — | — | SRAM | — | (RAM) |
-| **合计** | | | | | | | **27 块** | 0..26 |
+| Metadata Directory | 2048 region | 7B | 14,336 B | **8** | 1 | 池内轮转 | **32** | 16..47 |
+| Checkpoint | 2048 bit + 头 | — | ~1 页 | 1 | 1 | 池内轮转 | **8** | 48..55 |
+| BBT | 4096 block | 1 bit | 512 B | 1 | 1 | 池内轮转 | **2** | 56..57 |
+| Journal | — | 16B/entry | — | — | — | 环形 | **4** | 58..61 |
+| Wear 表 | 4096 block | 8B | 32 KB | **17** | 1 | 单副本 | **1** | 62 |
+| BST | 4096 block | 20B | 80 KB | — | — | SRAM | — | (RAM) |
+| **合计** | | | | | | | **63 块** | 0..62 |
 
 **逐条推导**（全部由 `nand_config.h` 几何 + `ftl_config.h` §二 策略常量算出）：
 
 - **L2P**：1,048,576 × 4B = 4 MiB ÷ 2048B = 2048 页 ÷ 128 槽/块 = **16 块**（打包后，见 §2.2.1）。
 - **Directory**：2048 region × 7B = 14,336B；每页装 256 条（`ANCHOR_ENTRIES_PER_PAGE`，
-  256×7 = 1792 ≤ 主区 2048）⇒ 一份 **8 页**（`ANCHOR_PAGE_COUNT`）。每块内 3 份冗余
-  （`ANCHOR_REDUNDANCY`）⇒ 每块占 24 页（≤ 64，`ANCHOR_PAGE_PER_BLOCK`）；主备 2 块
-  （`ANCHOR_COPIES`）= **2 块**，共 **6 份** Directory，任一份可独立重建全表。
-  Anchor 块的 plane 1 留空（全部页落 plane 0）。
-- **BBT**：4096 × 1 bit = 512B = 1 页 → 1 块 ×2（主+备）= **2 块**。
-- **Checkpoint**：头 ~920B（`checkpoint.h` 的 Header 格式，< 1 页）= 1 页 ×2 冗余 = **2 块**。
+  256×7 = 1792 ≤ 主区 2048）⇒ 一份 **8 页**（`ANCHOR_PAGE_COUNT` = 一条 record）。
+  池内每块装 `ANCHOR_RECORDS_PER_BLOCK` 条 record，块满换池内下一块（先擦后写）；
+  池 = `ANCHOR_POOL_BLOCKS` = **32 块**（唯一磨损旋钮）。Anchor 块的 plane 1 留空
+  （全部页落 plane 0）。
+- **Checkpoint**：Header 恰好 2048B = 一页主区 ⇒ **一条 record = 1 页**；池 = 8 块。
+- **BBT**：4096 × 1 bit = 512B = 1 页 → 一条 record = 1 页；池 = 2 块。
 - **Journal**：**4 块**（策略 = `CW_NUM`，CW 级 4× 映射流量，见 §十）。
-- **Wear**：4096 × 12B = 48KB → 全量快照 **25 页** → 1 块（软状态，单副本）。
-  ⚠ 介质上**不是** 25 页顺序表，而是页式追加日志（见 §十）：25 页是"块满时一次
+- **Wear**：4096 × 8B = 32KB → 全量快照 **17 页** ≤ 64 → 1 块（软状态，单副本）。
+  ⚠ 介质上**不是** 17 页顺序表，而是页式追加日志（见 §十）：17 页是"块满时一次
   compact 写全量快照"的页数，常态落盘只写 1–4 页。
 
 #### 2.2.1 L2P region 打包公式
@@ -187,7 +192,7 @@ page63   region126     region127
 
 ### 2.4 运行期分区表
 
-`g_ftl_partitions[]`（`ftl_config.c`，7 项：L2P / Anchor / BBT / BBT(backup) / Checkpoint /
+`g_ftl_partitions[]`（`ftl_config.c`，6 项：L2P / Anchor / Checkpoint / BBT /
 Journal / Wear），每项 `{name, first_block, block_count, redundancy, kind, table_bytes}`
 **全部由宏派生**。消费方：
 
@@ -215,12 +220,12 @@ Checkpoint、Wear、分配器、BST。
       die(0,0,0)                die(1,0,0)                        die(1,1,1)
  ┌──────────────────┐      ┌──────────────────┐              ┌──────────────────┐
  │ 块 0..15   L2P    │      │ 块 0..15   L2P    │              │ 块 0..15   L2P    │
- │ 块 16..17  Anchor │      │ 块 16..17  Anchor │              │ 块 16..17  Anchor │
- │ 块 18..19  BBT    │      │ 块 18..19  BBT    │              │ 块 18..19  BBT    │
- │ 块 20..21  CP     │  ≡   │ 块 20..21  CP     │   ≡   …      │ 块 20..21  CP     │
- │ 块 22..25  Journal│      │ 块 22..25  Journal│              │ 块 22..25  Journal│
- │ 块 26     Wear    │      │ 块 26     Wear    │              │ 块 26     Wear    │
- │ 块 27..4095 用户  │      │ 块 27..4095 用户  │              │ 块 27..4095 用户  │
+ │ 块 16..47  Anchor │      │ 块 16..47  Anchor │              │ 块 16..47  Anchor │
+ │ 块 48..55  CP     │      │ 块 48..55  CP     │              │ 块 48..55  CP     │
+ │ 块 56..57  BBT    │  ≡   │ 块 56..57  BBT    │   ≡   …      │ 块 56..57  BBT    │
+ │ 块 58..61  Journal│      │ 块 58..61  Journal│              │ 块 58..61  Journal│
+ │ 块 62     Wear    │      │ 块 62     Wear    │              │ 块 62     Wear    │
+ │ 块 63..4095 用户  │      │ 块 63..4095 用户  │              │ 块 63..4095 用户  │
  └──────────────────┘      └──────────────────┘              └──────────────────┘
       512 MiB                   512 MiB                           512 MiB
       └─────────────────────── 设备总计 8 × 512 MiB = 4 GiB ───────────────────────┘
@@ -255,8 +260,9 @@ Checkpoint、Wear、分配器、BST。
    flush 只碰一个实例；模型 B 会让一次 flush 跨 die，把并行变成串行。
 3. **坏块隔离**：一个 die 的坏块不会让"全局唯一那份表"受损。
 
-> **代价**：每实例 `g_ftl`(147.7 KB，`sizeof(ftl_context_t)`) + `g_blocks`(160 KB) ≈ **308 KB**，
-> AXI_RAM 只有 384 KB ⇒ 第二个实例装不下。`main.c` 已加编译期断言把这条变成**编译错误**（见 §3.7）。
+> **代价**：每实例 `g_ftl`(**157.6 KB**，`sizeof(ftl_context_t)`，含 l2p cache 128KB) + `g_blocks`(**80 KB**，
+> 条目 20B × 4096) ≈ **237 KB**，AXI_RAM 只有 384 KB ⇒ 第二个实例装不下。`main.c` 已加编译期断言把这条
+> 变成**编译错误**（见 §3.7）。
 
 ### 3.3 地址空间换算表
 
@@ -347,7 +353,7 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 |---|---|---|
 | 1 | **`LUN_ADDR_WIDTH = 0`** | `nand_config.h` 中 `LUN_ADDR_WIDTH = 0` ⇒ `PAA_LUN_MASK = PBA_LUN_MASK = 0` ⇒ **PAA/PBA 都装不下 LUN 字段**，L2P 表无法记录 die 号。这是**根因**。改它需同时改 `LUN_NUM`（芯片配置，未动）。 |
 | 2 | **地址构造缺 lun** | `journal.c` 的 `pba_from_addr` 未填 `.lun`；`metadata.c` 的 `paa_with_lun()` 在当前配置下是**空操作**（随 1 生效）。 |
-| 3 | **内存** | 每实例 `g_ftl`(147.7 KB) + `g_blocks`(160 KB) ≈ **308 KB**，AXI_RAM 只有 384 KB ⇒ 第二个实例装不下。`main.c` 已加编译期断言把这条变成**编译错误**。 |
+| 3 | **内存** | 每实例 `g_ftl`(**157.6 KB**) + `g_blocks`(**80 KB**) ≈ **237 KB**，AXI_RAM 只有 384 KB ⇒ 第二个实例装不下。`main.c` 已加编译期断言把这条变成**编译错误**。 |
 | 4 | **共享状态需 per-instance 化** | `bbt.c` 的文件级 `g_bbt_sequence`/`g_bbt_dirty`；`completion_table.c` 的全局 handler/ctx；`main.c` 主循环只服务 `g_ftl[0][0][0]`。 |
 
 > 本轮（2026-10-12）只做**布局 + 路由**，上列 1~4 未动。
@@ -373,14 +379,19 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 
 ### 4.2 介质格式变更清单（**须重新格式化**）
 
-本布局相对旧版**变更了介质格式**，首次上板**必须先擦除芯片**（v24 教训）：
+本布局相对旧版**变更了介质格式**（v24 教训）：
 
 - L2P 表块位置（32 块 → 16 块打包）；
 - Journal 2 块 → 4 块（`JOURNAL_BLOCKS = CW_NUM`）；
-- 新增 Wear 块（块 26）；
-- **Anchor 改为分页自包含格式**（2048 条 → 8 页/份，每页带 magic/sequence/chunk_index/CRC）。
+- 新增 Wear 块（块 **62**）；
+- **Anchor 改为分页自包含格式**（2048 条 → 8 页/份，每页带 magic/sequence/chunk_index）。
 
-本仓无 CLI format 命令，用调试器 / 外部工具擦芯片。
+> **v0.61 起不再需要手动擦芯片**：块布局/记录格式的任何变更都通过
+> `FTL_MEDIA_LAYOUT_VERSION`（当前 **2U**）标记。开机 `checkpoint_find_latest` 校验版本，
+> **不符或介质上根本没有当前版本 Checkpoint ⇒ `ftl_media_format()` 自动全片格式化**
+> （擦前先读出厂坏块标记 ⇒ 保留），随后写当前版本标记。`bbt --erase` CLI 保留为手动兜底。
+> （v0.62 进一步删除了 Checkpoint/Anchor/BBT/Wear 四个记录结构体内的 `crc` 字段——
+> 元数据页完整性改由下层 FC 的 per-CW CRC + ECC 承担，故版本再 +1。）
 
 ---
 
@@ -406,6 +417,9 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 
 ## 七、写缓冲页打包（方案 A）
 
+> ⚠ **本仓未采用（见 §十一 / §十二.1）**：FC 层有 **CW 位图**能力（v27），可**按 CW 子集编程**、
+> 页内允许空洞 ⇒ 本仓走「CW 子集直接编程」，**不设页缓冲**。本节仅作方案对照留档。
+
 **问题**：器件编程单位 = page（2048B），不能单独编 1 个 CW。512B 扇区写必须变成页编程。
 
 | 方案 | 做法 | 代价 | 主控真实性 |
@@ -414,34 +428,56 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 | (B) 读改写 RMW | 写 1 扇区 = 读旧页 + 改 1 CW + 编新页 | 读放大 1× | ⚠ 老式 |
 | (C) 单 CW 编程 | 编 1 CW + 3 个 0xFF | 写放大 4×，部分页编程不可靠 | ❌ 不推荐 |
 
-**主流 = (A)**，选 (A)。
+**主流倾向 (A)**；**本仓因 FC 的 CW 位图能力绕开**——直接编 CW 子集（见 §十一）。
 
 **掉电语义**：本仓无电容 ⇒ 写缓冲内容随 **journal** 落盘；或写缓冲只做「同页扇区合并」，
 不跨掉电窗口。
 
-## 八、有效位粒度：per-CW + L2P 权威
+## 八、有效位粒度：per-CW + **DRAM-less approach ③（flash reverse mapping）**
 
 **为什么必须 per-CW**：页打包后，一页 4 个 CW 来自**不同 LBA**；覆盖其中 1 个 LBA，
 **只失效那 1 个 CW**，页里剩 3 个还有效。**per-page 位图表达不了「半有效」的页。**
 
-**主流**：有效位粒度 = 映射粒度（IU）⇒ 本仓 per-CW。
-代价：`valid_map` 16B → 64B/块，BST 40B（`bst.h`）→ **88B**，160KB → **352KB**。
+**主流：有效位粒度 = 映射粒度（IU）⇒ 本仓 per-CW。**
+出处：SPDK FTL 的 `valid_map` 按**物理地址**索引（`ftl_bitmap_set(band->dev->valid_map, addr)`），
+索引单位 = 映射单元 ⇒ 1 bit / 映射单元。
 
-**本仓现实**：AXI_RAM 余量不足以放下 per-CW 位图（当前 323.8 / 384 KB，余 60.2 KB；
-+48 KB 后与其他需求挤在一起）。
+**但「位图放哪」主流分成两派**（arXiv 1504.01666 *Garbage Collection for Flash-Resident
+Page-Mapping FTLs* 归纳的活页识别三法）：
 
-**关键洞察——有效位能从 L2P 推出来**：某物理槽有效 ⟺ 有 LBA 的 L2P 指向它。
-**证据**：`power_failure_recovery.c` 开机重建时，正是**反查 L2P 把 `valid_map` 填回去**的。
-⇒ **`valid_map` 不是权威状态，是 L2P 的缓存/加速结构。**
+| 法 | 做法 | RAM ∝ | 谁用 |
+|---|---|---|---|
+| ① 页映射扫描 | GC 时扫页映射表判活 | 0 | — |
+| ② **PVB 逐页位图** | 常驻逐页（逐映射单元）位图 | **页数** | **有 DRAM** 者（Micron P420m 要 16 MB） |
+| ③ **flash reverse mapping** | 读**页内 OOB/P2L** 取回逻辑地址 → 反查 L2P 判活 | **0** | **DRAM-less** 者 |
 
-**结论**：
+**DRAM-less 选 ③**（同源）。佐证：
 
-- BST 存 **per-CW `valid_count`**（GC victim 选择用；`gc.c`、`wear_leveling.c`）。
-- 页内逐 CW 有效性 **查 L2P**（`gc.c` 现在就是这么设计的「读 META → 查 L2P → 判有效」，
-  只是要从 1 LBA/页 改成 **4 LBA/页**）。
-- 位图降级为 **per-page 粗提示**（扫位图跳过整页全无效的页）或砍掉。
-- **备选**：若 L2P cache 从 64 region 降到 32（省 64KB），per-CW 位图可装下
-  ——这是「缓存命中率 ↔ 有效性精度」的取舍。
+- **DFTL** — OOB 存 LBA；GC 读 OOB → 查 L2P。
+- **LeaFTL / VPFTL** — P2L 存 OOB/spare，GC 读回并与 L2P **交叉验证**（匹配 = 活）。
+- **KIISE**（*Mobile Flash Storage without DRAM*）— DRAM-less 下把逐页位图放 flash 后，
+  **失效时清旧物理页的位**会引发大量 flash I/O（旧页散落在任意块里）⇒ 主流**不做**常驻逐页位图。
+
+**本仓 = DRAM-less**（无 DRAM，L2P 表在 NAND，见 §九）⇒ **定 ③**。
+
+**本仓的「OOB」= 页内 META**。CW 布局 `[META:4][CRC:4][USER:512][PARITY:8]`（`include/fc/fc.h`），
+META 存的就是该 CW 的**扇区 LBA**（低位 plane/cw 即其物理位置）。⇒ 读 META 即得逻辑地址。
+（器件的 64B/page **物理 spare** 全空置，不用——见 §四/§六 的登记偏离。）
+
+**已落地（2026-10-13，v0.60）**：
+
+- **删**常驻页级「写过」位图 `g_valid_map`（64 KB）——它是本仓唯一非 DRAM-less 的残留，
+  且语义只是「本页被编程过」（单调、**非**真值），唯一用途是省掉 GC/WL 对从未写过的页的那次 NAND 读。
+- 有效性**唯一**真值 = `gc_read_page_with_lba` 逐 CW 从**页内 META** 取回该 CW 的扇区 LBA
+  → `l2p_cache_read(l) == pba_with_cw(本页, 本 CW)` 判活；未写过的 CW 读回全 FF ⇒ 自然跳过。
+- BST 只留 **per-CW `valid_count`**（块级聚合，GC victim 选择用）。
+- 原先位图覆盖的主场景（**整块空洞** plane 块，见 P2-6）改由 `gc_migrate_sb` 入口的
+  **`valid_count == 0` 快路径**覆盖；散点空洞仍会多读，属可接受的小概率。
+- 收益：AXI_RAM **319 → 255 KB**（余 ~129 KB），为波 2 序 3/4（表所有权 / 多实例）腾出空间；
+  同时消除「位图提示 vs `valid_count` 计数」两者漂移的隐患（TRIM 只减计数不清位、裸 NAND 扫描只置位不计数）。
+
+> 出处层见 `reference/README.md` 与 `storage_controller_learning.md`；本决策登记于
+> `ftl_optimization_plan.md §8.2 / §九 波 2 序 2.5`。
 
 ## 九、L2P 表存储（保持 DRAM-less）
 
@@ -458,17 +494,19 @@ SRAM 缓存热点 region**。
 - **Journal = `CW_NUM` 块（4）**：CW 级下每次页写 = **4 条 journal**（页级时 1 条）
   ⇒ 流量 **4×**、寿命 ÷4。容量取 `CW_NUM` 使 Journal 能容纳两次 checkpoint 之间的映射更新。
   （或做「同 region 多次写合并」。）
-- **Wear = 1 块（单副本）**：块元数据（擦除/读/写计数）持久化。**软状态**——丢了只退化 WL，
+- **Wear = 1 块（块 62，单副本）**：块元数据（擦除/读计数）持久化。**软状态**——丢了只退化 WL，
   不丢数据 ⇒ 单副本即可。**已落地**（`src/ftl/wear.c`，见 §十一）。
   ⚠ **介质上是"块内页式追加日志"，不是顺序全量表**：页序 == sequence 序，每页自包含
-  （magic + sequence + entry_count + CRC），语义 = 绝对值 + 最新胜；块满才擦一次并
-  从头写全量快照（17 页）。用日志而非"每次整表重写"是因为块 26 只有 64 页，
-  整表重写会让它在 ~2.6 次落盘后被擦一次（磨损远超数据块）。
+  （magic + sequence + entry_count；**v0.62 起无独立 CRC**，完整性由下层 FC per-CW CRC + ECC 承担），
+  语义 = 绝对值 + 最新胜；块满才擦一次并
+  从头写全量快照（17 页）。用日志而非"每次整表重写"是因为块 62 只有 64 页，
+  整表重写会让它在 ~3.8 次落盘后被擦一次（磨损远超数据块）。
   两个计数各 8B 一条目（`block` + `read_count` + `erase_count`），
   32 KB 是**逻辑表字节**（`FTL_WEAR_TABLE_BYTES`），不是介质占用量。
   （v0.56：`program_count` 槽随 BST 字段删除撤出，条目 12B → 8B、快照 25 → 17 页。）
-- **Checkpoint = 2 块（主备）**：**硬状态**（丢了丢数据）⇒ ×2。
-- **冗余取舍通则**：**硬状态**（L2P / BBT / Checkpoint / Directory）必须 ×2；
+- **Checkpoint = 8 块池（环形轮转）**：**硬状态**（丢了丢数据）⇒ 池内多副本 + sequence 最新胜。
+- **Anchor = 32 块池（`ANCHOR_POOL_BLOCKS`）**：Directory 的落盘副本，一条 8 页 / 256 槽，环形轮转。
+- **冗余取舍通则**：**硬状态**（L2P / Anchor / BBT / Checkpoint）必须多副本（池内轮转 + 最新胜）；
   **软状态**（Wear）单副本。
 
 ---
@@ -476,6 +514,13 @@ SRAM 缓存热点 region**。
 # 第三部分 · 状态与索引
 
 ## 十一、落地状态
+
+> **2026-10-13 前置核对（`ftl_optimization_plan.md §九 波 1`）**：确认 **L2P 表尺寸正确**
+> （1,048,576 entry = 4 × 262,144 物理页，因 **IU = 页/4 = 512B**，与主流主控同构；**表不改小**）。
+> 当时的「⬜ 5 项」缺口清单即下方两张「✅ 已落地」表。
+>
+> **2026-10-13 落地**：缺口**代码已全部完成**（见下方「✅ 已落地」），`make clean && make all` 0 warning。
+> **未上板**。声明地址空间回到 `1,048,576 × 512B = 512 MiB`。
 
 ### ✅ 已落地（2026-10-12）
 
@@ -490,26 +535,41 @@ SRAM 缓存热点 region**。
 | **元数据** | Directory 扩容 128→2048 entry；Anchor 改**分页自包含**（8 页/份 × 3 份 × 2 块） | `metadata.h`、`metadata.c` |
 | **磨损** | **Wear 表 load/save 落地**（P0-1）：块内页式追加日志 + 开机回填 BST + 节拍落盘 | `include/ftl/wear.h`、`src/ftl/wear.c`、`ftl_config.h` |
 
-### ⬜ 仍为设计（未改代码）
+### ✅ 已落地（2026-10-13）— CW 级映射迁移（`ftl_optimization_plan.md §九` 波 2 序 2）
 
 | 层 | 改动 | 文件 |
 |---|---|---|
-| 请求层 | `io.lba = start_lba + i` → 每页步进 **4**（扇区 LBA） | `src/controller/request.c` |
-| FTL 写路径 | 1 页 → **4 条** L2P entry + 4 条 journal；页缓冲打包 | `src/ftl/ftl.c` |
-| FTL 读路径 | 按 512B 扇区查 L2P | `src/ftl/ftl.c` |
-| GC / WL | 逐 CW 查 L2P（1 LBA/页 → 4 LBA/页） | `src/ftl/gc.c`、`src/ftl/wear_leveling.c` |
-| BST | `valid_count` 改 per-CW；位图降级/砍掉 | `include/ftl/bst.h` |
+| 地址辅助 | `ftl_lba_cw/plane/page/pair_base`、`pba_page`、`ftl_cw_span_mask`（§八 单一事实来源） | `include/ftl/ftl_config.h` §八 |
+| 请求层 | 缓冲步进 = `FTL_IU_BYTES`（512B/扇区）；`io.count` = 扇区数 | `src/controller/request.c`、`controller.c` |
+| FTL 写路径 | 1 子操作 → 逐 CW 一条 L2P entry + 一条 journal；`allocator_alloc_pair` 成对取页 | `src/ftl/ftl.c`（`ftl_issue_subop`/`ftl_confirm_write`） |
+| FTL 读路径 | 逐 LBA 查 L2P，按**物理 plane** 分组（同 plane 换页即收缩），pair 窗口内至多两 plane 段 | `src/ftl/ftl.c`（`ftl_issue_subop`） |
+| GC / WL | 逐**页索引**成对分配目标页；逐 CW L2P 反查判有效；`ftl_sync_write_page_cw` 只编有效 CW | `src/ftl/gc.c`、`src/ftl/wear_leveling.c` |
+| BST | `valid_count` 改 per-CW（0..512）；页级位图**已删**（v0.60 切 approach ③，见 §八） | `include/ftl/bst.h` |
+| 掉电重建 | `close_full_block` 逐 CW L2P 反查回填；统计字段 `valid_pages`→`valid_cw` | `src/ftl/power_failure_recovery.c`、`.h` |
+| 页基址反推 | `gc_read_page_with_lba` 由**首个写过的 CW** 反推页基址（容忍页内空洞，见下） | `src/ftl/gc.c` |
+| CLI | `g_wr_buf` 16KB ⇒ `wr/rd n ≤ 32` 扇区（旧页级上限 8） | `src/controller/cli.c` |
+
+> ⚠ **未走「页缓冲」（本文 §七 方案 A）**：器件/FC 支持按 CW 编程（FC v27 CW 位图），故 512B 写直接
+> 编 **CW 子集**，**页内允许空洞**（CW0 可能未写）。GC/WL 用「首个写过 CW 反推页基址 + 逐 CW L2P 反查」
+> 容忍空洞。代价：**单 plane 子操作浪费另一 plane 同页**（登记 `ftl_optimization_plan.md §8.1 P2-6`）。
 
 ### ⚠ 上板前置
 
-**介质格式变更**（§4.2）⇒ 首次上板**须先擦除芯片**。
+~~介质格式变更（§4.2）⇒ 首次上板须先擦除芯片~~ → **v0.61 起由开机自动格式化兜底**：
+`FTL_MEDIA_LAYOUT_VERSION` 不符即 `ftl_media_format()` 全片擦 + 写标记（保留出厂坏块），
+不再需要手动 `bbt --erase`（该 CLI 仍是手动兜底）。
 
 ## 十二、待决与风险
 
-1. **写缓冲落盘**：方案 A 的缓冲内容掉电恢复方案待定（进 journal？只做同页合并？）。
-2. **per-CW 位图 vs L2P cache 大小的取舍**：若要 per-CW 位图，需把 L2P cache 64→32 region 腾 SRAM。
+1. ~~**写缓冲落盘**：方案 A 的缓冲内容掉电恢复方案待定（进 journal？只做同页合并？）。~~
+   **已绕开（2026-10-13）**：走 **CW 子集直接编程**（不设页缓冲）⇒ 无缓冲内容需要落盘；
+   代价是页内空洞 + 单 plane 子操作浪费另一 plane 同页（`ftl_optimization_plan.md §8.1 P2-6`）。
+2. ~~**per-CW 位图 vs L2P cache 大小的取舍**：若要 per-CW 位图，需把 L2P cache 64→32 region 腾 SRAM。~~
+   **已切 DRAM-less approach ③（2026-10-13，v0.60）**：**不做**任何常驻位图（per-page 或 per-CW）。
+   有效性逐 CW 由「**页内 META（=OOB）取回 LBA → 反查 L2P**」判定；`valid_count` 保留为块级聚合。
+   ⇒ L2P cache 维持 64 region，且 AXI_RAM 反而**减 64 KB**（319 → 255 KB）。详见 §八。
 3. **介质格式变更**：新增 Wear 块 + L2P 打包改位置 + Journal 4 块 + Anchor 分页 ⇒ **须重新格式化**。
-   Wear 表 load/save 落地（P0-1）**不新增**格式变更：块 26 早已在分区表里预留且被
+   Wear 表 load/save 落地（P0-1）**不新增**格式变更：块 62 早已在分区表里预留且被
    `ftl_is_metadata_block` 排除，本次只是第一次往里写内容 ⇒ 不额外要求重新格式化。
 4. **`CONFIG_FC_RAID` 保持 0**（用户 2026-10-10 明确）——本方案不碰。
 5. **P0-2 Metadata Directory 容量** — ✅ **已落地**。旧版 `METADATA_DIR_ENTRIES = 128` < 2048 region
@@ -540,14 +600,14 @@ SRAM 缓存热点 region**。
    重入切断，**完整设计已写入 `ftl_optimization_plan.md` 的 P0-3**（含判据与依赖）。
    **依赖本次 v0.50 先上板验证通过；长时压测前必须补。**
 6. **登记（本次未改，属其它文档/代码）**：
-   - `src/main.c` 中两条内存注释仍是旧值：`g_ftl` 标 "131.5KB"（实测 `sizeof(ftl_context_t)`
-     = **147.7 KB**）；AXI_RAM 标 "≈355.5KB（剩 11.5KB）"。
-     最新实测（v0.50 构建，`make all` 输出的 SRAM Usage）：**AXI_RAM 332.3 / 384 KB（86.5%，余 51.7 KB）**、
-     AXI_NOCACHE 70.1 / 128 KB、SRAM2 44.1 / 128 KB、Total 446.8 / 880 KB（50.8%）。
-     （v0.50 的 `l2p_live[FTL_BLOCK_TOTAL]` 又吃掉 ~8 KB，故与上一轮实测值不同。）
-   - `docs/design/ftl_design.md`、`docs/design/ftl_api_usage.md` 仍写着旧布局标识符
-     （`L2P_REGIONS_TOTAL` / `L2P_REGIONS_PER_LUN` / `L2P_BLOCKS_PER_LUN`、L2P 32 块、
-     Journal 40/41 块、Directory 128 条 / 904B）。本次未改。
+   - ~~`src/main.c` 中两条内存注释仍是旧值~~ ✅ **已更新**：`g_ftl` 现标 **157.6KB**
+     （实测 `sizeof(ftl_context_t)`，取 `build/firmware/debug/bin/debug.map`），AXI_RAM 现标
+     **~255KB / 384KB**。（旧值 131.5KB / 355.5KB 已不存在；v0.50 的 `l2p_live[]` 也在
+     v0.55/v0.60 的位图演进中一并删除。）
+   - ~~`docs/design/ftl_design.md`、`docs/design/ftl_api_usage.md` 仍写着旧布局标识符~~
+     ✅ **已清理（2026-10-13）**：`L2P_REGIONS_TOTAL` / `L2P_REGIONS_PER_LUN` / `L2P_BLOCKS_PER_LUN`、
+     L2P 32 块、Journal 40/41 块、Directory 128 条 / 904B 均已对齐 `ftl_config.h` 现行常量
+     （L2P 0-15 / Anchor 16-47 / CP 48-55 / BBT 56-57 / Journal 58-61 / Wear 62 / 用户 63+）。
 
 ## 十三、关键文件索引
 

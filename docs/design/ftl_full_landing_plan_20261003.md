@@ -1,5 +1,12 @@
 # 计划：FTL 未落地项全量落地（A/B/C 档）
 
+> **状态（2026-10-13 复核）：本文件为 2026-10-03 的「历史计划」，A / B / C 三档均已落地。**
+> C 档见下方 ✅ 节；A/B 档的落地点与判据见 `ftl_revision_history.md` 与
+> `ftl_optimization_plan.md §四`（P0-1/P0-2/P1-3 等）。下面 Context 段与 A/B 档步骤
+> **仅作历史留档，不代表现状**——其中的「未落地缺口」已全部修复。
+> ⚠ 文中 `src/platform/stm32h743/usart.c` 路径已过时：usart 在 Stage 2.5 拆为
+> `src/platform/usart.c` + `src/platform/stm32h743/usart_port.c`，CLI 在 `src/controller/cli.c`。
+
 ## Context
 体检确认 `ftl_design.md`/`ftl_revision_history.md`/记忆点声称"FTL 全部模块完成"，但源码存在未落地缺口（已逐一 `grep` 验证零消费）：
 - **A 档**：`FTL_OP_PERCENT(10)`/`FTL_SPARE_POOL_SIZE(50)` 只定义不消费；`spare_pool_count` 仅 init 赋 0；`bbt_spare_pool_refill` 是 `return FTL_ERROR` 桩；`FTL_BLOCK_STATE_PRE_COND/EMERGENCY` 全库从未 set/clr。容量语义当前 = 全好块进 free pool（OP 0%）。

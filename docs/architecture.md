@@ -12,7 +12,7 @@
   ——时钟、UART、DMA、CRC、QSPI、RNG、MPU、系统启动等，只碰 HAL/MMIO。
 
 SoC 相关代码通过 `platform/platform.h` 约定的接口（`ssd_platform_ops_t`）接入，
-不能进入 Controller、FTL、NVMe 或 NAND 算法模块。
+不能进入 Controller、FTL 或 NAND 算法模块。（NVMe 主机层已于 v0.47 删除；主机侧入口是 UART CLI。）
 
 > ⚠ **现状偏差**：上述规则尚未完全落地——`platform/platform.h` 的 4 个 op 目前只填了
 > `time_us`；NAND 层的 **include 耦合已在 Stage 1 收敛**（`delay` / `crc` / `dma` 三个服务

@@ -98,7 +98,7 @@ docs/reference/
 - **对本项目的价值**：**L2P 表设计 + GC 缓冲的工业级参照**。本仓 FTL 的核心矛盾就是
   「L2P 表放不进 DRAM」，SPDK FTL 把 L2P 内存占用明码标价，是绝佳的反面对照——**看它花了
   多少 DRAM，就知道本仓省下的是什么**。
-- **怎么读**：读术语表 + recovery 段，对照本仓 `docs/design/ftl_design_document.md`。
+- **怎么读**：读术语表 + recovery 段，对照本仓 `docs/design/ftl_design.md`。
 
 ### B. 仿真器 / 模拟器（验证设计、跑实验，不碰真硬件）
 
