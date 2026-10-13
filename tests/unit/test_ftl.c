@@ -2114,7 +2114,10 @@ static MunitResult test_group_reentrant_callback(const MunitParameter params[], 
     g->outstanding   = 1U;
     g->agg_status    = SSD_STATUS_OK;
 
-    pending_group_maybe_complete(F, (uint16_t)gi);
+    /* ⚠ 不能直接调 pending_group_maybe_complete：它的前置条件是 outstanding==0
+     * （pending.c 的「负例守卫」，保证通知绝不早发），而上面刚置了 outstanding=1
+     * ⇒ 守卫提前返回、回调根本不触发。要走**子操作完成**这条生产路径（先递减再试触发）。 */
+    pending_group_complete_subop(F, (uint16_t)gi, SSD_STATUS_OK);
 
     munit_assert_uint16(g_ut_reent_calls, ==, 1U);
     munit_assert_int(g_ut_reent_new_gi, ==, 1);    /* 取到下一个空槽，而非槽 0 */

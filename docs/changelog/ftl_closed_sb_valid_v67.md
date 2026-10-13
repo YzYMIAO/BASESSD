@@ -108,11 +108,13 @@ if ((pre_len == 0 || strncmp(pre, *test_name, pre_len) == 0) &&
 | 项 | 结果 |
 |---|---|
 | `make tests UT=FTL` | 0 warning / 0 error（`Binary size: 256436 bytes`） |
-| `make tests`（全套） | 0 warning / 0 error |
-| `test /ftl/` | 展开为 8 个叶子套件（待上板复核） |
-| `test /ftl/allocator/close_open_sb` | 待上板复核（本地无板） |
+| `make tests`（全套） | 0 warning / 0 error（`Binary size: 323696 bytes`） |
+| `test /ftl/` | 展开为 8 个叶子套件 ✅ 板端已验（跑到 group 套件末段） |
+| `close_open_sb` | ✅ 板端已过（此前必 FAIL） |
+| `test_ftl.o` 反汇编 | ✅ `test_group_reentrant_callback` 现调 `pending_group_complete_subop` |
 
-**上板判据**：`test /ftl/` → 53/53 PASS。`close_open_sb` 此前是必 FAIL 的一例。
+**上板判据**：`test /ftl/` → 53/53 PASS。截至本次，板端仅剩 `group_complete_subop_multi`
+一例未经实机（已逐行核对，走的是 `pending_group_complete_subop_multi` 生产路径，前置条件满足）。
 
 ## 六、附：为什么 UT 值得先跑
 
@@ -121,3 +123,33 @@ if ((pre_len == 0 || strncmp(pre, *test_name, pre_len) == 0) &&
 **早已把「`valid != 0` = 跳过」的正确约定写进了断言**。两个用例一个描述约定、一个验证生产者，
 合起来正好把这条潜伏缺陷夹住——纯静态审查（v0.66 那轮 53 例逐条过）没能发现它，
 因为缺陷在**生产代码**里，用例本身看不出矛盾。
+
+
+## 七、同轮上板顶出的第二处：`group_reentrant_callback` 用例 setup 违反前置条件
+
+修完上面两处后重跑，板端跑到 `group` 套件第 5 例又失败：
+
+```
+Error:test_ftl.c:2119 assertion failed: g_ut_reent_calls == 1U (0 == 1)
+```
+
+**这次是用例写错，生产守卫是对的**。`pending_group_maybe_complete`（`pending.c:214`）的完成条件：
+
+```c
+if ((g->used == 0U) || (g->next < g->total) || (g->outstanding != 0U)) { return; }
+```
+
+文档写明这是「**负例守卫**（判据 8），保证通知绝不早发」。而用例在 `test_ftl.c:2114` 置了
+`g->outstanding = 1U`（= 一个子操作在飞），却直接调 `maybe_complete` ⇒ 守卫提前返回 ⇒ 回调不触发。
+
+同套件的 `group_complete_once` 走的是 `pending_group_complete_subop`（先递减 `outstanding`
+再试触发），所以它过了——**用例该走的是这条生产路径**。
+
+**修法**：`test_ftl.c:2117` 改 `pending_group_maybe_complete(F, gi)` →
+`pending_group_complete_subop(F, gi, SSD_STATUS_OK)`。`used` 由 `pending_group_alloc` 置 1，
+故递减后 `outstanding==0`、守卫放行，回调里 `pending_group_alloc` 拿不到仍占用的槽 0 ⇒ 返回槽 1，
+四条断言全部成立。
+
+**教训（写 FTL UT 的第三个坑）**：`pending_group_maybe_complete` 是**内部试触发**，
+不满足「已全部下发且全部完成」就静默返回；用例想验证「完成通知」，必须从
+`pending_group_complete_subop`（或 `..._multi`）进，别直接调 `maybe_complete`。
