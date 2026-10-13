@@ -33,7 +33,9 @@
 #include "ftl/power_failure_recovery.h"
 
 #include "common/assertion.h"
+#include "common/log.h"
 #include "fc/fc.h"
+#include "ftl/bbt.h"
 #include "ftl/checkpoint.h"
 #include "ftl/ftl.h"
 #include "ftl/ftl_fc_interface.h"
@@ -60,6 +62,68 @@ static nand_addr_t journal_page_addr(const ftl_context_t *ftl, uint8_t b, uint8_
     addr.cw    = 0U;
 
     return addr;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 介质布局版本 —— 开机自动格式化
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* --------------------------------------------------------------------
+ * ftl_media_needs_format
+ *   功能：判定介质是否需要（重新）格式化。
+ *   参数：ftl —— FTL 实例。
+ *   返回：1 = 需要格式化；0 = 介质已是当前布局版本（正常启动）。
+ *   实现要点：判据 = 「本实例 checkpoint_find_latest 失败」。因版本校验已在
+ *             checkpoint_header_valid 内，故该判据自动涵盖三种情况：
+ *             ① 有当前版本 Checkpoint ⇒ 成功 ⇒ 不格式化；
+ *             ② 有 Checkpoint 但版本不符（旧格式介质）⇒ 失败 ⇒ 格式化；
+ *             ③ 完全没有 Checkpoint（出厂空片）⇒ 失败 ⇒ 格式化（多擦一次，写标记后自愈）。
+ * -------------------------------------------------------------------- */
+int ftl_media_needs_format(const struct ftl_context *ftl)
+{
+    l2p_checkpoint_header_t cp;
+
+    if (ftl == NULL)
+    {
+        return 0;
+    }
+
+    return (checkpoint_find_latest(&cp, ftl->topo) != FTL_OK) ? 1 : 0;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_media_format
+ *   功能：全量格式化——擦本实例全部块，并把易失元数据状态复位到"空片"。
+ *   参数：ftl —— FTL 实例。
+ *   返回：FTL_OK / FTL_ERROR。
+ *   实现要点：① bbt_erase_all_blocks 擦全片（出厂坏块标记已在 bbt_init 先读进 BST，
+ *                擦除不丢坏块信息）；② bbt_save 重新持久化坏块图（BBT 池刚被擦掉）；
+ *             ③ metadata_dir_init 复位 Directory 为哨兵层；④ checkpoint_write_initial
+ *                写一条当前版本标记 ⇒ 下次开机版本判据命中，格式化只发生一次。
+ *   ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。
+ *   ⚠ BST 的 erase_count 保留旧值（wear_init 已在格式化前加载）——仅影响磨损均衡起点。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_media_format(struct ftl_context *ftl)
+{
+    if (ftl == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    if (bbt_erase_all_blocks(&ftl->alloc) != FTL_OK)
+    {
+        return FTL_ERROR;
+    }
+    (void)bbt_save(&ftl->alloc); /* 坏块图重新落盘（BBT 池刚被擦） */
+
+    metadata_dir_init(&ftl->metadata_dir);
+
+    if (checkpoint_write_initial(ftl->topo) != FTL_OK)
+    {
+        return FTL_ERROR;
+    }
+
+    return FTL_OK;
 }
 
 /* --------------------------------------------------------------------
@@ -512,13 +576,14 @@ void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
                 }
             }
 
-            /* 非空页：写指针之前的数据页，重建 BST 有效位图 + 置 OPEN 状态 */
+            /* 非空页：写指针之前的数据页 ⇒ 置 OPEN 状态。
+             * ⚠ 本路径只做裸 NAND 扫描、不查 L2P，故**不**维护 valid_count（CW 级真值
+             *   由 F2 路径 close_full_block 的逐 CW L2P 反查回填；v0.60 起无常驻位图）。 */
             if (alloc->blocks != NULL)
             {
                 uint16_t     gblock = ftl_gblock(plane, sb->plane_blocks[plane]);
                 ftl_block_t *b      = &alloc->blocks[gblock];
 
-                ftl_block_set_valid(b, alloc->valid_map[gblock], plane, page);
                 if (!ftl_block_is_bad(b))
                 {
                     ftl_block_state_set(b, FTL_BLOCK_STATE_OPEN);
@@ -602,8 +667,8 @@ static uint8_t scan_block_write_pointer(const ftl_context_t *ftl, uint8_t plane,
     return (uint8_t)PAGES_PER_BLOCK; /* 全写满 */
 }
 
-/* 写过的物理块：进 Closed 列表（退化单 plane 条目）+ 逐页 L2P 双校验回填 valid_map
- * （只置 L2P 仍指向本页的真有效页，覆盖/torn 页不置位）。
+/* 写过的物理块：进 Closed 列表（退化单 plane 条目）+ 逐 CW L2P 双校验回填 valid_count
+ * （只计 L2P 仍指向本页本 CW 的真有效 CW，覆盖/torn 页不计；v0.60 起无常驻位图）。
  *
  * Policy B 下配对不再需要被恢复——两 plane 的块各自独立归位即可，故本函数按
  * **单个物理块** 建一条 Closed 条目，另一 plane 记 FTL_BLOCK_NO_PLANE 哨兵。 */
@@ -633,29 +698,38 @@ static void close_full_block(ftl_context_t       *ftl,
         stats->blocks_rebuilt++;
     }
 
-    /* 逐页：LDPC_RAW 判空 + gc_read_page_with_lba 取 LBA + l2p 反查 */
+    /* 逐页：LDPC_RAW 判空 + gc_read_page_with_lba 取 LBA + **逐 CW** l2p 反查 */
     b = &alloc->blocks[ftl_gblock(plane, block)];
     for (page = 0U; page < PAGES_PER_BLOCK; page++)
     {
         nand_pba_t pba;
-        lba_t      lba;
-        nand_pba_t cur;
+        lba_t      cw_lba[CW_NUM];
+        uint8_t    cw;
 
         pba = super_block_page_pba(alloc->ch, alloc->ce, &alloc->closed_sb_list[sb_idx], plane, page);
 
-        /* 读失败 / LBA 提取失败 → 该页不可用，跳过 */
-        if (gc_read_page_with_lba(pba, NULL, &lba, NULL, NULL) != FTL_OK)
+        /* 读失败 / 全页无写过 CW → 该页不可用，跳过。
+         * CW 级映射：逐 CW 从页内 META（= OOB 反向映射）取回扇区 LBA。 */
+        if (gc_read_page_with_lba(pba, NULL, cw_lba, NULL, NULL, NULL) != FTL_OK)
         {
             continue;
         }
 
-        cur = l2p_cache_read(&ftl->cache, lba);
-        if ((cur != FTL_PBA_INVALID) && (cur == pba))
+        for (cw = 0U; cw < CW_NUM; cw++)
         {
-            ftl_block_set_valid(b, alloc->valid_map[ftl_gblock(plane, block)], plane, page);
-            if (stats != NULL)
+            const nand_pba_t cur = l2p_cache_read(&ftl->cache, cw_lba[cw]);
+
+            if (cw_lba[cw] == FTL_LBA_INVALID)
             {
-                stats->valid_pages++;
+                continue;
+            }
+            if ((cur != FTL_PBA_INVALID) && (cur == pba_with_cw(pba, cw)))
+            {
+                ftl_block_add_valid(b); /* valid_count 单位 = CW */
+                if (stats != NULL)
+                {
+                    stats->valid_cw++;
+                }
             }
         }
     }
@@ -664,8 +738,8 @@ static void close_full_block(ftl_context_t       *ftl,
 /* --------------------------------------------------------------------
  * ftl_rebuild_closed_sb_list
  *   功能：F2 掉电重建——逐 plane 逐块扫 NAND，把「写过的物理块」拉出 Free Pool 并建
- *         Closed 条目，同时逐页 L2P 双校验回填 valid_map。
- *   参数：ftl —— FTL 实例；stats —— 出参统计（blocks_rebuilt / valid_pages /
+ *         Closed 条目，同时逐 CW L2P 双校验回填 valid_count。
+ *   参数：ftl —— FTL 实例；stats —— 出参统计（blocks_rebuilt / valid_cw /
  *         partial_blocks，可为 NULL）。
  *   返回：FTL_OK / FTL_ERROR（ftl 或 alloc->blocks 为空）。
  *   实现要点：Policy B 下两 plane 的块不再同号 ⇒ 按**单物理块**建 Closed 条目

@@ -29,7 +29,6 @@
 
 #include "ftl/bbt.h"
 
-#include "common/boot_policy.h"
 #include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/ftl_fc_interface.h"
@@ -64,15 +63,11 @@ static void bbt_ring_init(metadata_ring_t *ring)
     ring->module           = FC_COMMAND_MODULE_BBT;
 }
 
-/* 整条校验（一条 record = 1 页）：magic + CRC */
+/* 整条校验（一条 record = 1 页）：magic。
+ * 无本层 CRC——页完整性由下层 FC 的 per-CW CRC + ECC 保证（ADR v0.62）。 */
 static int bbt_header_valid(const bbt_header_t *hdr)
 {
-    if (hdr->magic != BBT_MAGIC)
-    {
-        return 0;
-    }
-
-    return (boot_crc32(hdr, sizeof(*hdr) - sizeof(hdr->crc)) == hdr->crc) ? 1 : 0;
+    return (hdr->magic != BBT_MAGIC) ? 0 : 1;
 }
 
 typedef struct
@@ -324,6 +319,56 @@ static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t b
 }
 
 /* --------------------------------------------------------------------
+ * bbt_erase_all_blocks
+ *   功能：擦除本实例**全部**块（所有 plane），供开机自动格式化调用。
+ *   参数：alloc —— 分配器。
+ *   返回：FTL_OK / FTL_ERROR（参数非法）。
+ *   实现要点：复用 bbt_probe_block_bad(..., do_erase=1)——它**先读出厂坏块标记再擦**
+ *             （擦会永久毁掉标记），擦除失败也判坏。新发现的坏块按 bbt_scan_factory
+ *             同法落进 BST（已是坏块的**不重复计数**）。
+ *             ⚠ 调用方须保证在 bbt_init 之后调用——出厂坏块标记此时已先读进 BST，
+ *               擦除不会丢坏块信息。擦完须由调用方 bbt_save 重新持久化坏块图。
+ * -------------------------------------------------------------------- */
+ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc)
+{
+    uint8_t  plane;
+    uint16_t block;
+
+    if ((alloc == NULL) || (alloc->blocks == NULL))
+    {
+        return FTL_ERROR;
+    }
+
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        for (block = 0U; block < BLOCKS_PER_PLANE; block++)
+        {
+            const uint16_t gblock = ftl_gblock(plane, block);
+
+            if (bbt_probe_block_bad(alloc, plane, block, 1U) == 0)
+            {
+                continue; /* 好块：已擦除 */
+            }
+
+            if (ftl_block_is_bad(&alloc->blocks[gblock]) == 0)
+            {
+                /* 新发现的坏块（出厂标记 / 擦除失败）：落进 BST */
+                ftl_block_set_bad(&alloc->blocks[gblock]);
+                ftl_block_state_clr(&alloc->blocks[gblock],
+                                    FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
+                                        FTL_BLOCK_STATE_FREE);
+                ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
+                alloc->bad_count++;
+            }
+        }
+    }
+
+    g_bbt_dirty = 1;
+
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
  * bbt_print_bad_map
  *   功能：打印两 plane 并排的坏块图（CLI `bbt` 命令）；坏块打绝对块号，好块打 "FF"。
  *   参数：alloc —— 分配器；do_erase —— 非 0 时逐块擦除（全片擦除工具）。
@@ -429,10 +474,10 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock)
     }
 
     /* BST is_bad 置位（单数据源，后台 bbt_flush 持久化到 NAND）。
-     * 同时清空有效页位图——坏块后该块不会再产生有效页，
-     * 残留的 VPC/bitmap 会让 GC/WL 误判其为可回收块。 */
+     * 同时清空有效计数——坏块后该块不会再产生有效 CW，
+     * 残留的 valid_count 会让 GC/WL 误判其为可回收块。 */
     ftl_block_set_bad(&alloc->blocks[gblock]);
-    ftl_block_clear_valid(&alloc->blocks[gblock], alloc->valid_map[gblock]);
+    ftl_block_clear_valid(&alloc->blocks[gblock]);
     ftl_block_state_clr(&alloc->blocks[gblock],
                         FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
                             FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);
@@ -503,10 +548,6 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc)
             bbt_set_bad(header.bad_map, gblock);
         }
     }
-
-    /* CRC（crc 字段置 0 后计算） */
-    header.crc = 0U;
-    header.crc = boot_crc32(&header, sizeof(header) - sizeof(header.crc));
 
     /* 追加写：池内下一槽（块满则先擦池内下一块）。
      * 无论成败都推进游标（已写过的槽可能半编程，不可复用）。 */

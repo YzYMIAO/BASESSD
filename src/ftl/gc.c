@@ -40,7 +40,7 @@
 /* ── 1. 共用原语 ── */
 
 /*
- * gc_read_page_with_lba - 读取一页 NAND，返回用户数据 + 从 META 提取的 LBA
+ * gc_read_page_with_lba - 读取一页 NAND，返回用户数据 + **逐 CW 从 META 取回的逻辑地址**
  *
  * 内部管理 FC 命令生命周期：
  *   alloc → config → submit → sync_wait → read_data → get_meta → release
@@ -50,14 +50,22 @@
  * 慢死预测（rr_record_ecc / read_count++）只挂 host 读 completion，导致
  * GC/WL 搬移读成为 read disturb 盲区。现加 ecc_out / read_count_out 输出。
  *
- * @param pba            物理地址
- * @param buffer         输出：用户数据 buffer（2048 字节，可为 NULL）
- * @param lba_out        输出：从 META 提取的 LBA（可为 NULL）
+ * ⚠ CW 级映射（IU = 1 CW）+ DRAM-less approach ③：本函数读**整页**（该 plane 的 4 个 CW），
+ *   把**每个 CW 自己的 META**（即本仓的「OOB」反向映射，头 4B = 该 CW 的扇区 LBA）解码到
+ *   `cw_lba[c]`。未写过的 CW（META 全 FF）填 `FTL_LBA_INVALID`。调用者据此**逐 CW 反查 L2P**
+ *   判有效性——不靠任何常驻位图（flash reverse-mapping，见 bst.h 文件头）。
+ *   `page_base_out` 仍返回页基址（CW0 的扇区 LBA，由**首个写过的 CW** 反推：base = META(c_lo) − c_lo），
+ *   供搬移目标页的 META 基址复用。
+ *
+ * @param pba            物理地址（**页基址**，cw 位为 0）
+ * @param buffer         输出：整页用户数据 buffer（FTL_READ_USER_SIZE 字节，可为 NULL）
+ * @param cw_lba         输出：逐 CW 的扇区 LBA（长度 CW_NUM；未写过 = FTL_LBA_INVALID）
+ * @param page_base_out  输出：页基址（CW0 的扇区 LBA）（可为 NULL）
  * @param ecc_out        输出：本次读 4 CW 最大 ECC 纠正 bit 数（0..4，可为 NULL）
  * @param read_count_out 输出：1=本次读成功（调用方 ++ 该块 read_count，可为 NULL）
- * @return 0 成功, -1 失败
+ * @return 0 成功, -1 失败（读失败 / 全页无写过 CW）
  */
-ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out, uint8_t *ecc_out, uint8_t *read_count_out)
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba[CW_NUM], lba_t *page_base_out, uint8_t *ecc_out, uint8_t *read_count_out)
 {
     fc_command_t *cmd;
     uint32_t      meta_cw0;
@@ -116,31 +124,72 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
     /* 读取用户数据 */
     if (buffer != NULL)
     {
-        (void)ftl_cmd_read_data(cmd, buffer, 2048U);
+        (void)ftl_cmd_read_data(cmd, buffer, PAGE_MAIN_SIZE); /* 整页用户区 = CW_NUM × 512B */
     }
 
-    /* 从 META 提取**页** LBA（v24）
-     * CW0 的 META = 本 CW 的**扇区** LBA = (页 LBA << CW_WIDTH) | [plane][cw=0]
-     * 所以 页 LBA = meta_cw0 >> CW_WIDTH（低 3 位 [plane][cw] 丢掉，得到页粒度地址） */
+    /* 从 META 提取**本页的页基址（CW0 的扇区 LBA）**（v24 + CW 级映射）。
+     *
+     * 每个 CW 的 META = 该 CW 自己的**扇区** LBA（低位 [plane][cw] 就是它的物理位置）；
+     * 未写过的 CW 读回 0xFF…（META = 0xFFFFFFFF）。**不能直接取 CW0 的 META**——
+     * CW 级写/搬移允许页内只编一个 CW 子集（`wr 2 2` 只落 plane0 的 CW2/CW3；
+     * GC 搬移也只编有效 CW），此时 CW0 可能是空位，直接取会得到 0xFFFFFFFF。
+     *
+     * 故取**首个写过的 CW** c_lo，用 base = META(c_lo) − c_lo 反推页基址。不变量：
+     * 一个物理页只被**一次**编程操作写（host 子操作或 GC/WL 搬移各占一个全新页），
+     * 该操作以同一页基址 B 编程 ⇒ 每个写过的 CW c 的 META 恒为 B + c（搬移也保持
+     * 「LBA 相对页基址的偏移」），故 base = META(c_lo) − c_lo = B，base + c 对**所有**
+     * 写过的 c 都还原出正确 LBA（页内允许有空洞 CW，如源页只搬 CW0/CW2）。
+     * 全页无写过 CW ⇒ 返回 FTL_ERROR（调用者跳过该页，无有效数据可搬）。 */
     {
-        uint8_t *meta_ptr = fc_buffer_get_meta(cmd, 0U);
-        if (meta_ptr != NULL)
+        uint8_t       c;
+        uint8_t       found      = 0U;
+        uint32_t      base_meta  = 0U;
+        uint8_t       c_lo       = 0U;
+        const uint8_t phys_plane = (uint8_t)pba_to_plane(pba);
+
+        for (c = 0U; c < CW_NUM; c++)
         {
+            cw_lba[c] = FTL_LBA_INVALID; /* 默认未写过 */
+        }
+
+        for (c = 0U; c < CW_NUM; c++)
+        {
+            uint8_t *meta_ptr = fc_buffer_get_meta(cmd, c);
+            uint32_t m;
+
+            if (meta_ptr == NULL)
+            {
+                continue; /* 该 CW 不在链上（本入口链恒覆盖全 4 CW，防御） */
+            }
             /* meta_ptr 指向 CW buffer，CW 基址 4 字节对齐，memcpy 避免 alignment 警告 */
-            memcpy(&meta_cw0, meta_ptr, sizeof(meta_cw0));
+            memcpy(&m, meta_ptr, sizeof(m));
+
+            /* 合法 META 判据：非全 1（未写过）+ 低位 plane/cw 与本 CW 自洽 */
+            if ((m == 0xFFFFFFFFU) || (ftl_lba_cw((lba_t)m) != c) || (ftl_lba_plane((lba_t)m) != phys_plane))
+            {
+                continue;
+            }
+            cw_lba[c] = (lba_t)m; /* 本 CW 自己的扇区 LBA（META 即 LBA，低位就是 plane/cw） */
+            if (found == 0U)
+            {
+                base_meta = m; /* 首个写过的 CW，用于反推页基址 */
+                c_lo      = c;
+                found     = 1U;
+            }
         }
-        else
+
+        (void)fc_command_release(cmd);
+
+        if (found == 0U)
         {
-            meta_cw0 = 0U;
+            return FTL_ERROR; /* 全页无写过 CW：无有效数据 */
         }
+        meta_cw0 = base_meta - (uint32_t)c_lo; /* 页基址 = CW0 的扇区 LBA */
     }
 
-    (void)fc_command_release(cmd);
-
-    if (lba_out != NULL)
+    if (page_base_out != NULL)
     {
-        /* META 低 3 位 = [plane][cw]，高位 = 页 LBA */
-        *lba_out = (lba_t)(meta_cw0 >> CW_WIDTH);
+        *page_base_out = (lba_t)meta_cw0;
     }
     if (ecc_out != NULL)
     {
@@ -214,11 +263,11 @@ void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t n
         ret = ftl_sync_erase_block(block_addr);
         if (ret == 0)
         {
-            /* 擦除成功：擦除计数 +1，记录最近擦除时间戳（单调写入量），bitmap/VPC 归零，归还 Free Pool */
+            /* 擦除成功：擦除计数 +1，记录最近擦除时间戳（单调写入量），valid_count 归零，归还 Free Pool */
             alloc->blocks[gblock].erase_count++;
             alloc->blocks[gblock].last_pe_ts = now;
             wear_mark_dirty(gblock);
-            ftl_block_clear_valid(&alloc->blocks[gblock], alloc->valid_map[gblock]);
+            ftl_block_clear_valid(&alloc->blocks[gblock]);
             allocator_free_block(alloc, gblock);
         }
         else
@@ -312,7 +361,7 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
     uint32_t best_er    = 0U;
     uint32_t best_cp    = 0U;
     uint32_t best_yp    = 0U;
-    uint16_t best_valid = (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK + 1U);
+    uint16_t best_valid = (uint16_t)((PLANE_NUM * PAGES_PER_BLOCK * CW_NUM) + 1U);
     int      found      = 0;
 
     if ((alloc == NULL) || (alloc->blocks == NULL) || (victim == NULL))
@@ -341,7 +390,7 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
             continue;
         }
 
-        /* 有效页数 = 各 plane 物理块 VPC 之和（真实计数，替代 next_page 近似）。
+        /* 有效 CW 数 = 各 plane 物理块 valid_count 之和（CW 级真实计数，替代 next_page 近似）。
          * 退化单 plane 条目（重建产物）跳过哨兵 plane。 */
         for (uint8_t p = 0U; p < PLANE_NUM; p++)
         {
@@ -373,7 +422,7 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
          * age 项的 `max_pe_ts > pe_min` 同时兜住两种退化：① max_pe_ts == 0（上电后尚无块被擦）；
          * ② 本 SB 的 plane 块已被标坏 ⇒ gc_score_scale 跳过它 ⇒ pe_min 可能大于 max_pe_ts
          * （相减会下溢成大数、把 yp 绕回）。两者一律取 age_ratio = 0（时间项中性）。 */
-        vr = ((uint32_t)valid * 1000U) / ((uint32_t)present * PAGES_PER_BLOCK);
+        vr = ((uint32_t)valid * 1000U) / ((uint32_t)present * PAGES_PER_BLOCK * CW_NUM);
         er = (uint32_t)(((uint64_t)er_max * 1000U) / max_erase);
         cp = (sb->temperature == FTL_TEMP_HOT) ? 0U : 1000U;
         yp = 1000U - (((max_pe_ts > pe_min) ? (uint32_t)(((uint64_t)(max_pe_ts - pe_min) * 1000U) / max_pe_ts) : 0U));
@@ -415,116 +464,170 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 
 /* --------------------------------------------------------------------
  * gc_migrate_sb
- *   功能：把 victim SB 的所有有效页搬到 Cold 流新块，更新 L2P/Journal/VPC。
+ *   功能：把 victim SB 的所有有效 CW 搬到 Cold 流新块，更新 L2P/Journal/有效计数。
  *   参数：alloc —— 分配器；cache —— L2P 缓存；journal —— 日志（可为 NULL）；victim —— 待搬 SB。
- *   返回：实际搬移页数（int）；FTL_OK(0) 无搬移 / 参数非法。
- *   实现要点：直接扫有效页位图，只搬置位页（免读无效页）；每页先查 L2P 是否仍指向本 PBA
- *             （被覆盖则清位跳过）；搬移读顺带记录 ECC 趋势 + read_count（慢死预测闭环）；
- *             搬完先 journal_flush_page 再返回（调用方随后擦 victim，防掉电回放指向已擦块）。
+ *   返回：实际搬移的**有效 CW 数**（int）；FTL_OK(0) 无搬移 / 参数非法。
+ *   实现要点（CW 级映射 + DRAM-less approach ③）：
+ *     · **无常驻位图**（v0.60 删）：有效性逐 CW 由**页内 META 取回 LBA + 反查 L2P**判定
+ *       （flash reverse-mapping，见 bst.h 文件头）——L2P 仍指向 (本页, 本 CW) 才有效，
+ *       被覆盖 / TRIM 过的 CW 自然落选；从未写过的页读回全 FF ⇒ gc_read_page_with_lba
+ *       报错，本页跳过。
+ *     · 快路径：双 plane valid_count 之和 == 0 ⇒ 无可搬移，直接返回（省整块 NAND 读；
+ *       这正是原先「写过」位图覆盖的主场景——P2-6 整块空洞 plane）。
+ *     · 逐**页索引**成对分配目标页：一个 plane 的有效 CW 必须落到**同 plane** 的目标页，
+ *       否则页内 META（由物理 plane/cw 铸出）还原出的扇区 LBA 会指错 plane
+ *       （见 ftl_config.h §八）。只搬有效 CW（本页局部 `cw_bitmap` 外的 CW 不建链、不编程）。
+ *     · 搬移读顺带记录 ECC 趋势 + read_count（慢死预测闭环）；
+ *       搬完先 journal_flush_page 再返回（调用方随后擦 victim，防掉电回放指向已擦块）。
  * -------------------------------------------------------------------- */
 int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *journal, super_block_t *victim)
 {
-    uint8_t  plane;
     uint32_t migrated = 0U;
+    uint8_t  page;
 
     if ((alloc == NULL) || (cache == NULL) || (victim == NULL))
     {
         return FTL_OK;
     }
 
-    for (plane = 0U; plane < PLANE_NUM; plane++)
+    /* 快路径：victim 无任何有效 CW ⇒ 无可搬移（调用方仍会擦除归还）。 */
     {
-        uint16_t gblock_src;
-        uint64_t valid_map;
-
-        if (super_block_has_plane(victim, plane) == 0U)
+        uint32_t valid_total = 0U;
+        uint8_t  p;
+        for (p = 0U; p < PLANE_NUM; p++)
         {
-            continue; /* 退化单 plane 条目：该 plane 无块 */
-        }
-        gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
-        valid_map  = alloc->valid_map[gblock_src][plane];
-
-        /*
-         * 直接扫有效页位图：只搬置位页，跳过无效页（空洞/已覆盖）。
-         * 相比逐页读 NAND META + L2P 反查，省去无效页的 NAND 读。
-         */
-        while (valid_map != 0ULL)
-        {
-            uint8_t page = (uint8_t)__builtin_ctzll(valid_map);
-            valid_map &= (valid_map - 1ULL); /* 清最低置位 bit */
-
+            if (super_block_has_plane(victim, p) != 0U)
             {
-                uint8_t    buf[2048];
-                lba_t      lba;
-                nand_pba_t pba;
-                nand_pba_t old_pba;
-                nand_pba_t new_pba;
-                int        ret;
+                valid_total += alloc->blocks[ftl_gblock(p, victim->plane_blocks[p])].valid_count;
+            }
+        }
+        if (valid_total == 0U)
+        {
+            return FTL_OK;
+        }
+    }
 
-                pba = super_block_page_pba(alloc->ch, alloc->ce, victim, plane, page);
+    /* 逐**页索引**扫（而非逐 plane）——目标页必须成对分配，两 plane 各用自己那一半。 */
+    for (page = 0U; page < PAGES_PER_BLOCK; page++)
+    {
+        uint32_t   cw_bitmap[PLANE_NUM] = {0U, 0U};
+        lba_t      base[PLANE_NUM]      = {0U, 0U}; /* 各 plane 本页 CW0 的扇区 LBA */
+        lba_t      cw_lba[PLANE_NUM][CW_NUM];       /* 各 CW 自己的扇区 LBA（未写过 = FTL_LBA_INVALID） */
+        nand_pba_t src[PLANE_NUM]  = {NAND_PBA_INVALID, NAND_PBA_INVALID};
+        uint16_t   gsrc[PLANE_NUM] = {0U, 0U};
+        uint8_t    buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 整页用户区（= CW_NUM × 512B），供 gc_read_page_with_lba */
+        nand_pba_t dst[PLANE_NUM];
+        uint8_t    plane;
+        uint8_t    any = 0U;
 
-                /* 读页 + 获取 LBA + 验证有效性（bitmap 已保证置位，此处只取 LBA） */
-                memset(buf, 0, sizeof(buf));
+        for (plane = 0U; plane < PLANE_NUM; plane++)
+        {
+            uint8_t ecc;
+            uint8_t rc;
+            uint8_t cw;
+
+            if (super_block_has_plane(victim, plane) == 0U)
+            {
+                continue; /* 退化单 plane 条目：该 plane 无块 */
+            }
+            gsrc[plane] = ftl_gblock(plane, victim->plane_blocks[plane]);
+
+            src[plane] = super_block_page_pba(alloc->ch, alloc->ce, victim, plane, page);
+            memset(buf[plane], 0, sizeof(buf[plane]));
+
+            if (gc_read_page_with_lba(src[plane], buf[plane], cw_lba[plane], &base[plane], &ecc, &rc) != 0)
+            {
+                continue; /* 读失败 / 全页无写过 CW：跳过本页（L2P 未动，数据仍在 victim） */
+            }
+
+            /* B4：GC 搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环）。
+             * 判定只用 ecc_bits 与上一次读数比较，不涉及时间维度。 */
+            if (rc != 0U)
+            {
+                ftl_block_t *src_blk = &alloc->blocks[gsrc[plane]];
+
+                rr_record_ecc(&src_blk->rr, ecc);
+                src_blk->read_count++;
+                wear_mark_dirty(gsrc[plane]);
+            }
+
+            /* 逐 CW 反查 L2P：用**该 CW 自己的 META**（= cw_lba[plane][cw]）查，
+             * 仍指向 (本页, 本 CW) 才算有效。未写过的 CW（FTL_LBA_INVALID）直接跳过。 */
+            for (cw = 0U; cw < CW_NUM; cw++)
+            {
+                if (cw_lba[plane][cw] == FTL_LBA_INVALID)
                 {
-                    uint8_t ecc;
-                    uint8_t rc;
-                    if (gc_read_page_with_lba(pba, buf, &lba, &ecc, &rc) != 0)
-                    {
-                        continue; /* 读失败，跳过 */
-                    }
-
-                    /* B4：GC 搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环）。
-                     * 判定只用 ecc_bits 与上一次读数比较，不涉及时间维度。 */
-                    if (rc != 0U)
-                    {
-                        ftl_block_t *src = &alloc->blocks[gblock_src];
-                        rr_record_ecc(&src->rr, ecc);
-                        src->read_count++;
-                        wear_mark_dirty(gblock_src);
-                    }
+                    continue;
                 }
-
-                /* 查 L2P：当前映射是否仍指向本 PBA（bitmap 与 L2P 双校验） */
-                old_pba = l2p_cache_read(cache, lba);
-                if (old_pba != pba)
+                if (l2p_cache_read(cache, cw_lba[plane][cw]) == pba_with_cw(src[plane], cw))
                 {
-                    /* 已被覆盖，无效页 → 清 bitmap 保持同步 */
-                    ftl_block_clr_valid(&alloc->blocks[gblock_src], alloc->valid_map[gblock_src], plane, page);
+                    cw_bitmap[plane] |= (uint32_t)1U << (((uint32_t)plane * CW_NUM) + cw);
+                }
+            }
+            if (cw_bitmap[plane] != 0U)
+            {
+                any = 1U;
+            }
+        }
+
+        if (any == 0U)
+        {
+            continue; /* 本页索引两 plane 都没有有效 CW（空洞 / 全被覆盖） */
+        }
+
+        /* 成对分配目标页（Cold 流）。Free Pool 耗尽 → 保留未搬的源页（L2P 未动），
+         * 由调用方随后的紧急 GC 兜底。 */
+        if (allocator_alloc_pair(alloc, FTL_TEMP_COLD, dst) == NAND_PBA_INVALID)
+        {
+            break;
+        }
+
+        for (plane = 0U; plane < PLANE_NUM; plane++)
+        {
+            uint8_t cw;
+
+            if (cw_bitmap[plane] == 0U)
+            {
+                continue;
+            }
+
+            /* 只搬有效 CW：`cw_bitmap` 外的 CW 不建链、不编程——整页重写会把无效 CW 连同其
+             * （陈旧的）META 一起搬过去，污染新页且多搬无用数据。
+             * ⚠ 目标页的 plane 位就是 plane（allocator_alloc_pair 的契约），故写进去的
+             *   META 逐 CW 仍是正确的扇区 LBA。 */
+            if (ftl_sync_write_page_cw(addr_from_pba(dst[plane]),
+                                       buf[plane],
+                                       cw_bitmap[plane],
+                                       FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, ftl_lba_page(base[plane]))) != FTL_OK)
+            {
+                continue; /* 写失败：L2P 未改，源页仍有效，下轮 GC 再试 */
+            }
+
+            for (cw = 0U; cw < CW_NUM; cw++)
+            {
+                const nand_pba_t old_pba = pba_with_cw(src[plane], cw);
+                nand_pba_t       new_pba;
+                lba_t            l;
+                uint16_t         gdst;
+
+                if ((cw_bitmap[plane] & ((uint32_t)1U << cw)) == 0U)
+                {
                     continue;
                 }
 
-                /* 分配新 PBA（Cold Super Block） */
-                new_pba = allocator_alloc(alloc, FTL_TEMP_COLD);
-                if (new_pba == NAND_PBA_INVALID)
-                {
-                    break;
-                }
+                l       = cw_lba[plane][cw]; /* 用该 CW 自己的 META（E：不再 base+cw 推断） */
+                new_pba = pba_with_cw(dst[plane], cw);
 
-                /* 写用户数据到新位置 */
-                {
-                    nand_addr_t waddr = addr_from_pba(new_pba);
-                    ret               = ftl_sync_write_page(waddr, buf, sizeof(buf), FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, lba));
-                }
-                if (ret != 0)
-                {
-                    continue;
-                }
-
-                /* 更新 L2P Cache */
-                l2p_cache_write(cache, lba, new_pba);
-
-                /* Journal 记录 */
+                l2p_cache_write(cache, l, new_pba);
                 if (journal != NULL)
                 {
-                    journal_append(journal, lba, old_pba, new_pba);
+                    journal_append(journal, l, old_pba, new_pba);
                 }
 
-                /* VPC/bitmap 维护：源块清位，新块置位（单点更新防漂移） */
-                ftl_block_clr_valid(&alloc->blocks[gblock_src], alloc->valid_map[gblock_src], plane, page);
-                ftl_block_set_valid(&alloc->blocks[ftl_pba_gblock(new_pba)],
-                                    alloc->valid_map[ftl_pba_gblock(new_pba)],
-                                    (uint8_t)pba_to_plane(new_pba),
-                                    (uint8_t)pba_to_page(new_pba));
+                /* 有效计数（CW 级）：源块 -1，新块 +1 */
+                ftl_block_sub_valid(&alloc->blocks[gsrc[plane]]);
+                gdst = ftl_pba_gblock(new_pba);
+                ftl_block_add_valid(&alloc->blocks[gdst]);
 
                 migrated++;
             }

@@ -77,10 +77,8 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
     alloc->closed_sb_list  = params->closed_sb_list;
     alloc->closed_sb_count = 0U;
 
-    /* Block State Table（每 Block 状态统一承载；由调用者提供存储）
-     * + 独立的逐页有效位图表（主流弹性项，见 bst.h 文件头） */
+    /* Block State Table（每 Block 状态统一承载；由调用者提供存储；无位图表，见 bst.h） */
     alloc->blocks    = params->blocks;
-    alloc->valid_map = params->valid_map;
     alloc->bad_count = 0U;
 
     /* 状态机初始：未坏块默认 FREE（坏块由 bbt_init 置 BAD） */

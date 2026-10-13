@@ -53,15 +53,16 @@ typedef struct
     uint16_t command_id; /* FC command_id */
     uint16_t group;      /* ★ 所属完成组 ftl->groups[] 下标 */
     uint8_t  op;         /* ftl_pending_op_t：完成路径判别（读/写），见文件头 ⚠ */
-    uint8_t  planes;     /* 本子操作页数 1/2（原 io.pages 的内部含义） */
-    lba_t    lba;        /* 子操作起始 local LBA（host 起始 + 2k） */
-    void    *buffer;     /* 子操作缓冲（= 组基缓冲 + 2k × FTL_READ_USER_SIZE） */
+    uint8_t  n_cw;       /* ★ 本子操作搬运的 **CW 数**（= 字节数 ÷ FTL_IU_BYTES）；CW 级 1 LBA = 1 CW */
+    lba_t    lba;        /* 子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B） */
+    void    *buffer;     /* 子操作缓冲（= 组基缓冲 + LBA 偏移 × FTL_IU_BYTES） */
     /* ↓↓↓ 写完成确认/回滚（写专用，读请求时无效） ↓↓↓ */
-    nand_pba_t old_pba;            /* 写前旧 PBA（journal/回滚用，plane0） */
-    nand_pba_t new_pba;            /* 新分配的 PBA（坏块标记用，plane0） */
-    nand_pba_t old_pba1;           /* planes=2 时 plane1 写前旧 PBA（Multi-Plane 双页簿记） */
-    nand_pba_t new_pba1;           /* planes=2 时 plane1 新分配 PBA（Policy B：plane1 块独立，不可由 plane0 派生） */
-    uint8_t    cache_intermediate; /* 1: Cache Program 中间页（15h），completion 时不更新 L2P/Journal */
+    nand_pba_t new_pba;  /* 新分配的 **plane0 页** PBA（本子操作未覆盖 plane0 ⇒ NAND_PBA_INVALID） */
+    nand_pba_t new_pba1; /* 新分配的 **plane1 页** PBA（未覆盖 plane1 ⇒ NAND_PBA_INVALID） */
+    /* ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P 得到"此刻被替换的映射"。这比提交时快照
+     *   更正确——同一 LBA 的两次写在飞时，先完成的先改 L2P，后完成的重查即得前者，
+     *   提交时快照会让两条 journal 都指向最初映射（链断）。 */
+    uint8_t cache_intermediate; /* 1: Cache Program 中间页（15h），completion 时不更新 L2P/Journal */
 } ftl_pending_req_t;
 
 /*
@@ -76,9 +77,10 @@ typedef struct
  *   （128 buffer ÷ 每多 plane 命令 8 buffer），uint16_t 够。
  *
  * ⚠ 进度以 **LBA 偏移**计（total = count，next = 已下发到的 LBA 偏移），不是
- *   "子操作序号"：一个子操作消费 1 或 2 个 LBA —— 相邻两 LBA 能否合成一条
- *   multi-plane 命令由 FTL 现场判断（GC/WL 搬移会把 plane1 页落到 plane0，
- *   此时必须降级为单 plane，见 ftl_issue_subop）。这样"怎么拆"不外泄给调用者。
+ *   "子操作序号"：CW 级下一个子操作最多消费 FTL_LBA_PER_PAIR（= 8）个 LBA——
+ *   一个 pair 窗口内的连续 LBA 段。窗口内的 LBA 落在哪个物理页由 FTL 现场判断
+ *   （读路径查 L2P 分组、写路径按 plane 位选页，见 ftl_issue_subop），
+ *   消费几个 LBA 也由它决定。这样"怎么拆"不外泄给调用者。
  */
 typedef struct
 {
@@ -113,18 +115,16 @@ void pending_init(ftl_context_t *ftl);
  * @param ftl                FTL 上下文
  * @param cmd_id             FC command_id
  * @param group              所属完成组下标（ftl->groups[]）
- * @param lba                子操作起始 local LBA
+ * @param lba                子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B）
  * @param buffer             子操作缓冲（读=写回处；写=数据源）
- * @param planes             子操作页数（1=单 Plane，2=双 Plane Multi-Plane）
- * @param old_pba            写前旧 PBA（写请求用，读传 NAND_PBA_INVALID）
- * @param new_pba            新分配的 PBA（写请求用，读传 NAND_PBA_INVALID）
- * @param old_pba1           planes=2 时 plane1 写前旧 PBA（单页请求传 NAND_PBA_INVALID）
- * @param new_pba1           planes=2 时 plane1 新分配 PBA（单页请求传 NAND_PBA_INVALID）
+ * @param n_cw               本子操作搬运的 CW 数（读=写回长度/512；写=写入长度/512）
+ * @param new_pba            写：新分配的 plane0 页 PBA（未覆盖 plane0 传 NAND_PBA_INVALID）
+ * @param new_pba1           写：新分配的 plane1 页 PBA（未覆盖 plane1 传 NAND_PBA_INVALID）
  * @param cache_intermediate Cache Program 中间页标志（1=中间页跳过 L2P/Journal 更新）
  * @param op                 操作类型（PENDING_OP_READ / PENDING_OP_WRITE）——完成路径判别依据
  * @return FTL_OK 成功，FTL_ERROR 表满
  */
-int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint16_t group, lba_t lba, void *buffer, uint8_t planes, nand_pba_t old_pba, nand_pba_t new_pba, nand_pba_t old_pba1, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op);
+int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint16_t group, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op);
 
 /*
  * pending_lookup - 按 command_id 查找本实例 pending 项

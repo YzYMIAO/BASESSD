@@ -126,13 +126,14 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
     {
         case SSD_REQUEST_READ:
         case SSD_REQUEST_WRITE:
-            /* 缓冲容量校验：block_count 页 × 2KB 必须不超过调用者给的 buffer_size
-             * （真实隐患：wr 0 64 会写爆 CLI 的 16KB g_wr_buf）。 */
-            if (request->buffer_size < ((size_t)request->block_count * FTL_READ_USER_SIZE))
+            /* 缓冲容量校验：block_count 个映射单元 × 512B 必须不超过调用者给的
+             * buffer_size（CW 级映射下 1 个 LBA = 1 个 CW = 512B 扇区，不是 2KB 页）。
+             * 真实隐患：wr 0 64 会写爆 CLI 的 g_wr_buf。 */
+            if (request->buffer_size < ((size_t)request->block_count * FTL_IU_BYTES))
             {
                 LOGE("[CTRL] buffer too small count=%lu need=%lu have=%lu\r\n",
                      (unsigned long)request->block_count,
-                     (unsigned long)((size_t)request->block_count * FTL_READ_USER_SIZE),
+                     (unsigned long)((size_t)request->block_count * FTL_IU_BYTES),
                      (unsigned long)request->buffer_size);
                 request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
                 request->complete_flag     = 1U;

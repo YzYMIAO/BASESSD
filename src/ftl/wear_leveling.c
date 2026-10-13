@@ -93,20 +93,20 @@ int wl_should_trigger(const struct ftl_context *ftl)
 
 /* --------------------------------------------------------------------
  * wl_select_victim
- *   功能：从 Closed SB 列表里挑一个搬运候选（擦得少、有效页多、read_count 高者优先）。
+ *   功能：从 Closed SB 列表里挑一个搬运候选（擦得少、有效 CW 多、read_count 高者优先）。
  *   参数：ftl —— FTL 实例；victim —— 出参。
  *   返回：1 找到；FTL_OK(0) 未找到 / 参数非法。
  *   实现要点：只考虑擦除次数落在低擦除区（min + WL_LOW_ZONE_WIDTH 内）的 Closed SB；
- *             有效页须 ≥ 最小有效页门（WL_MIN_VALID_RATIO，太碎不值当搬）；
- *             排序键 = 有效页多（越冷越优先）→ 同有效页下 read_count 高（read disturb 风险高优先）。
+ *             有效 CW 须 ≥ 最小有效 CW 门（WL_MIN_VALID_RATIO，太碎不值当搬）；
+ *             排序键 = 有效 CW 多（越冷越优先）→ 同有效 CW 下 read_count 高（read disturb 风险高优先）。
  * -------------------------------------------------------------------- */
 int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 {
     uint16_t    i;
     uint32_t    min_ec;
     wl_victim_t best;
-    uint16_t    total_pages_per_sb;
-    uint16_t    min_valid_pages;
+    uint16_t    total_cw_per_sb;
+    uint16_t    min_valid_cw;
 
     if ((ftl == NULL) || (victim == NULL))
     {
@@ -116,8 +116,9 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
     memset(&best, 0, sizeof(best));
     min_ec = wl_min_erase(ftl);
 
-    total_pages_per_sb = (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK);
-    min_valid_pages    = (uint16_t)(total_pages_per_sb * WL_MIN_VALID_RATIO / 100U);
+    /* 门限单位是**有效 CW**（CW 级映射：1 页 = CW_NUM 个映射单元） */
+    total_cw_per_sb = (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK * CW_NUM);
+    min_valid_cw    = (uint16_t)(total_cw_per_sb * WL_MIN_VALID_RATIO / 100U);
 
     for (i = 0U; i < ftl->alloc.closed_sb_count; i++)
     {
@@ -156,9 +157,9 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
         }
 
         /*
-         * 有效页 = 双 Plane 各物理块 VPC 之和（真实计数）。
-         * 有效页越多（越冷）越优先。
-         * B5：同一有效页数下，read_count 越高的冷块越优先（read disturb
+         * 有效 CW = 双 Plane 各物理块 valid_count 之和（CW 级真实计数）。
+         * 有效 CW 越多（越冷）越优先。
+         * B5：同一有效数下，read_count 越高的冷块越优先（read disturb
          * 风险高 → 优先搬移；read_count 来自 host 读 + GC/WL 搬移读累加）。
          */
         {
@@ -179,17 +180,17 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
                 rc_sum += blk->read_count;
             }
 
-            if (valid < min_valid_pages)
+            if (valid < min_valid_cw)
             {
                 continue;
             }
 
-            if ((valid > best.valid_pages) ||
-                ((valid == best.valid_pages) && (rc_sum > best.read_count)))
+            if ((valid > best.valid_cw) ||
+                ((valid == best.valid_cw) && (rc_sum > best.read_count)))
             {
                 best.found           = 1U;
                 best.avg_erase       = sb_ec;
-                best.valid_pages     = valid;
+                best.valid_cw        = valid;
                 best.read_count      = rc_sum;
                 best.plane_blocks[0] = sb->plane_blocks[0];
                 best.plane_blocks[1] = sb->plane_blocks[1];
@@ -210,109 +211,142 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 
 /* --------------------------------------------------------------------
  * wl_relocate
- *   功能：把 victim SB 的所有有效页搬到 Cold 流新块，更新 L2P/Journal/VPC，最后擦除归还。
+ *   功能：把 victim SB 的所有有效 CW 搬到 Cold 流新块，更新 L2P/Journal/有效计数，最后擦除归还。
  *   参数：ftl —— FTL 实例；victim —— 搬运候选（须 found）。
- *   返回：实际搬移页数（int）；FTL_OK(0) 无搬移 / 参数非法。
- *   实现要点：逐 plane 遍历有效页位图，只搬置位页（免读无效页）；每页先查 L2P 是否仍指向
- *             本 PBA（被覆盖则清位跳过）；搬移读顺带记录 ECC 趋势 + read_count（慢死预测闭环）；
- *             搬完先 journal_flush_page 再擦 victim（与 gc_migrate_sb 同契约，防掉电回放指向已擦块）。
+ *   返回：实际搬移的**有效 CW 数**（int）；FTL_OK(0) 无搬移 / 参数非法。
+ *   实现要点（CW 级映射，与 gc_migrate_sb 同构）：逐**页索引**成对分配目标页——
+ *             一个 plane 的有效 CW 必须落到同 plane 的目标页；「写过」页位图只是
+ *             单调提示（省 NAND 读），真有效性逐 CW 由 L2P 反查判定；只搬有效 CW；
+ *             搬移读顺带记录 ECC 趋势 + read_count（慢死预测闭环）；搬完先
+ *             journal_flush_page 再擦 victim（防掉电回放指向已擦块）。
  * -------------------------------------------------------------------- */
 int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
 {
-    uint8_t  plane;
     uint32_t migrated = 0U;
+    uint8_t  page;
 
     if ((ftl == NULL) || (victim == NULL) || (!victim->found))
     {
         return FTL_OK;
     }
 
-    /* Step 1: 遍历双 Plane 有效页位图，只搬置位页（免 NAND 读无效页） */
-    for (plane = 0U; plane < PLANE_NUM; plane++)
+    /* Step 1: 逐**页索引**扫双 Plane（目标页必须成对分配，两 plane 各用自己那一半） */
+    for (page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        uint16_t gblock_src;
-        uint64_t valid_map;
+        uint32_t   cw_bitmap[PLANE_NUM] = {0U, 0U};
+        lba_t      base[PLANE_NUM]      = {0U, 0U}; /* 各 plane 本页 CW0 的扇区 LBA */
+        lba_t      cw_lba[PLANE_NUM][CW_NUM];       /* 各 CW 自己的扇区 LBA（未写过 = FTL_LBA_INVALID） */
+        nand_pba_t src[PLANE_NUM]  = {NAND_PBA_INVALID, NAND_PBA_INVALID};
+        uint16_t   gsrc[PLANE_NUM] = {0U, 0U};
+        uint8_t    buf[PLANE_NUM][FTL_READ_USER_SIZE];
+        nand_pba_t dst[PLANE_NUM];
+        uint8_t    plane;
+        uint8_t    any = 0U;
 
-        if (victim->plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
+        for (plane = 0U; plane < PLANE_NUM; plane++)
         {
-            continue; /* 退化单 plane 条目：该 plane 无块 */
-        }
-        gblock_src = ftl_gblock(plane, victim->plane_blocks[plane]);
-        valid_map  = ftl->alloc.valid_map[gblock_src][plane];
+            uint8_t ecc;
+            uint8_t rc;
+            uint8_t cw;
 
-        while (valid_map != 0ULL)
-        {
-            uint8_t page = (uint8_t)__builtin_ctzll(valid_map);
-            valid_map &= (valid_map - 1ULL); /* 清最低置位 bit */
-
+            if (victim->plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
             {
-                uint8_t    buf[FTL_READ_USER_SIZE];
-                lba_t      lba;
-                nand_pba_t pba;
-                nand_pba_t old_pba;
-                nand_pba_t new_pba;
-                int        ret;
+                continue; /* 退化单 plane 条目：该 plane 无块 */
+            }
+            gsrc[plane] = ftl_gblock(plane, victim->plane_blocks[plane]);
 
-                pba = pba_from_addr(&(nand_addr_t){.ch = ftl->topo.ch, .ce = ftl->topo.ce, .block = victim->plane_blocks[plane], .plane = plane, .page = page});
+            src[plane] = pba_from_addr(&(nand_addr_t){.ch    = ftl->topo.ch,
+                                                      .ce    = ftl->topo.ce,
+                                                      .block = victim->plane_blocks[plane],
+                                                      .plane = plane,
+                                                      .page  = page});
+            memset(buf[plane], 0, sizeof(buf[plane]));
 
-                /* 读页 + 从 META 提取 LBA（复用 GC 辅助函数） */
-                memset(buf, 0, sizeof(buf));
-                {
-                    uint8_t ecc;
-                    uint8_t rc;
-                    if (gc_read_page_with_lba(pba, buf, &lba, &ecc, &rc) != 0)
-                    {
-                        continue; /* 读失败，跳过 */
-                    }
+            /* 读页 + 逐 CW 从页内 META（= OOB 反向映射）取回扇区 LBA（复用 GC 辅助函数） */
+            if (gc_read_page_with_lba(src[plane], buf[plane], cw_lba[plane], &base[plane], &ecc, &rc) != 0)
+            {
+                continue; /* 读失败 / 全页无写过 CW，跳过 */
+            }
 
-                    /* B4：WL 搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环） */
-                    if (rc != 0U)
-                    {
-                        ftl_block_t *src = &ftl->alloc.blocks[gblock_src];
-                        rr_record_ecc(&src->rr, ecc);
-                        src->read_count++;
-                        wear_mark_dirty(gblock_src);
-                    }
-                }
+            /* B4：WL 搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环） */
+            if (rc != 0U)
+            {
+                ftl_block_t *src_blk = &ftl->alloc.blocks[gsrc[plane]];
 
-                /* 查 L2P：当前映射是否仍指向本 PBA */
-                old_pba = l2p_cache_read(&ftl->cache, lba);
-                if (old_pba != pba)
-                {
-                    /* 已被覆盖，无效页 → 清 bitmap 保持同步 */
-                    ftl_block_clr_valid(&ftl->alloc.blocks[gblock_src], ftl->alloc.valid_map[gblock_src], plane, page);
-                    continue;
-                }
+                rr_record_ecc(&src_blk->rr, ecc);
+                src_blk->read_count++;
+                wear_mark_dirty(gsrc[plane]);
+            }
 
-                /* 分配 Cold Super Block 新页 */
-                new_pba = allocator_alloc(&ftl->alloc, FTL_TEMP_COLD);
-                if (new_pba == NAND_PBA_INVALID)
-                {
-                    break;
-                }
-
-                /* 写入新位置 */
-                {
-                    nand_addr_t waddr = addr_from_pba(new_pba);
-                    ret               = ftl_sync_write_page(waddr, buf, FTL_READ_USER_SIZE, FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, lba));
-                }
-                if (ret != 0)
+            /* 逐 CW 反查 L2P：用该 CW 自己的 META 查，仍指向 (本页, 本 CW) 才算有效 */
+            for (cw = 0U; cw < CW_NUM; cw++)
+            {
+                if (cw_lba[plane][cw] == FTL_LBA_INVALID)
                 {
                     continue;
                 }
+                if (l2p_cache_read(&ftl->cache, cw_lba[plane][cw]) == pba_with_cw(src[plane], cw))
+                {
+                    cw_bitmap[plane] |= (uint32_t)1U << (((uint32_t)plane * CW_NUM) + cw);
+                }
+            }
+            if (cw_bitmap[plane] != 0U)
+            {
+                any = 1U;
+            }
+        }
 
-                /* 更新 L2P Cache */
-                l2p_cache_write(&ftl->cache, lba, new_pba);
+        if (any == 0U)
+        {
+            continue;
+        }
 
-                /* Journal 记录 */
-                journal_append(&ftl->journal, lba, old_pba, new_pba);
+        /* 成对分配目标页（Cold 流）。池耗尽 → 保留未搬的源页（L2P 未动）。 */
+        if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_COLD, dst) == NAND_PBA_INVALID)
+        {
+            break;
+        }
 
-                /* VPC/bitmap 维护：源块清位，新块置位（单点更新防漂移） */
-                ftl_block_clr_valid(&ftl->alloc.blocks[gblock_src], ftl->alloc.valid_map[gblock_src], plane, page);
-                ftl_block_set_valid(&ftl->alloc.blocks[ftl_pba_gblock(new_pba)],
-                                    ftl->alloc.valid_map[ftl_pba_gblock(new_pba)],
-                                    (uint8_t)pba_to_plane(new_pba),
-                                    (uint8_t)pba_to_page(new_pba));
+        for (plane = 0U; plane < PLANE_NUM; plane++)
+        {
+            uint8_t cw;
+
+            if (cw_bitmap[plane] == 0U)
+            {
+                continue;
+            }
+
+            /* 只搬有效 CW（本页局部 `cw_bitmap` 外的 CW 不建链、不编程） */
+            if (ftl_sync_write_page_cw(addr_from_pba(dst[plane]),
+                                       buf[plane],
+                                       cw_bitmap[plane],
+                                       FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, ftl_lba_page(base[plane]))) != FTL_OK)
+            {
+                continue; /* 写失败：L2P 未改，源页仍有效 */
+            }
+
+            for (cw = 0U; cw < CW_NUM; cw++)
+            {
+                const nand_pba_t old_pba = pba_with_cw(src[plane], cw);
+                nand_pba_t       new_pba;
+                lba_t            l;
+                uint16_t         gdst;
+
+                if ((cw_bitmap[plane] & ((uint32_t)1U << cw)) == 0U)
+                {
+                    continue;
+                }
+
+                l       = cw_lba[plane][cw]; /* 用该 CW 自己的 META（E：不再 base+cw 推断） */
+                new_pba = pba_with_cw(dst[plane], cw);
+
+                l2p_cache_write(&ftl->cache, l, new_pba);
+                journal_append(&ftl->journal, l, old_pba, new_pba);
+
+                /* 有效计数（CW 级）：源块 -1，新块 +1 */
+                ftl_block_sub_valid(&ftl->alloc.blocks[gsrc[plane]]);
+                gdst = ftl_pba_gblock(new_pba);
+                ftl_block_add_valid(&ftl->alloc.blocks[gdst]);
 
                 migrated++;
             }

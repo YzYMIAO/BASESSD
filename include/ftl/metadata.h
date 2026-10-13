@@ -9,7 +9,7 @@
  *
  * Anchor 池（固定元数据区内的 ANCHOR_POOL_BLOCKS 个块，出厂好块预留）：
  *   只存 Metadata Directory。一份 Directory 有 ANCHOR_PAGE_COUNT 页（chunk），
- *   每页自包含 Magic + Sequence + ChunkIndex + EntryCount + Entries + CRC；
+ *   每页自包含 Magic + Sequence + ChunkIndex + EntryCount + Entries；
  *   **一条 record = 一整份 Directory（ANCHOR_PAGE_COUNT 页）**，任一条可独立重建
  *   整个 Directory。池内块顺序轮转（见 §元数据写模型），最新有效 record 胜。
  *
@@ -37,8 +37,8 @@
 
 #include <stdint.h>
 
-/* ── Anchor Block 位置与页几何（ANCHOR_BLOCK0/1、ANCHOR_COPIES、ANCHOR_REDUNDANCY、
- *    ANCHOR_ENTRIES_PER_PAGE、ANCHOR_PAGE_COUNT、ANCHOR_PAGE_PER_BLOCK）见 ftl/ftl_config.h ── */
+/* ── Anchor 池位置与页几何（ANCHOR_BLOCK0、ANCHOR_POOL_BLOCKS、ANCHOR_ENTRIES_PER_PAGE、
+ *    ANCHOR_PAGE_COUNT、ANCHOR_RECORDS_PER_BLOCK）见 ftl/ftl_config.h ── */
 
 /* ── 元数据类型 ── */
 #define METADATA_TYPE_L2P_REGION  (0U) /* L2P Region 数据 */
@@ -68,21 +68,22 @@ typedef struct
 
 /* ── NAND 上持久化格式：**每页自包含** ──
  * Directory 有 METADATA_DIR_ENTRIES 条（14KB）⇒ 一份跨 ANCHOR_PAGE_COUNT 页，
- * 每页装 METADATA_DIR_ENTRIES_PER_PAGE 条，各自带 magic/sequence/CRC。
- * 单页损坏只丢该页（其余页仍可用），且读写只需一个 2KB 缓冲。 */
+ * 每页装 METADATA_DIR_ENTRIES_PER_PAGE 条，各自带 magic/sequence。
+ * 单页损坏只丢该页（其余页仍可用），且读写只需一个 2KB 缓冲。
+ * ⚠ 无本层 CRC——页完整性由下层 FC 的 per-CW CRC + ECC 保证（ADR v0.62）。*/
 typedef struct
 {
-    uint32_t         magic;                                                                     /* ANCHOR_MAGIC */
-    uint32_t         sequence;                                                                  /* 单调递增（同一份的各 chunk 相同）*/
-    uint16_t         chunk_index;                                                               /* 0..ANCHOR_PAGE_COUNT-1 */
-    uint16_t         chunk_count;                                                               /* = ANCHOR_PAGE_COUNT */
-    uint32_t         entry_count;                                                               /* 本 chunk 有效 entry 数 */
-    metadata_entry_t entries[METADATA_DIR_ENTRIES_PER_PAGE];                                    /* 256 × 7 = 1792B */
-    uint32_t         crc;                                                                       /* 校验（覆盖本页 crc 之前全部）*/
-    uint8_t          padding[PAGE_MAIN_SIZE - 16U - (METADATA_DIR_ENTRIES_PER_PAGE * 7U) - 4U]; /* 填满一页主区 */
+    uint32_t         magic;                                                                /* ANCHOR_MAGIC */
+    uint32_t         sequence;                                                             /* 单调递增（同一份的各 chunk 相同）*/
+    uint16_t         chunk_index;                                                          /* 0..ANCHOR_PAGE_COUNT-1 */
+    uint16_t         chunk_count;                                                          /* = ANCHOR_PAGE_COUNT */
+    uint32_t         entry_count;                                                          /* 本 chunk 有效 entry 数 */
+    uint32_t         layout_version;                                                       /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该页作废）*/
+    metadata_entry_t entries[METADATA_DIR_ENTRIES_PER_PAGE];                               /* 256 × 7 = 1792B */
+    uint8_t          padding[PAGE_MAIN_SIZE - 20U - (METADATA_DIR_ENTRIES_PER_PAGE * 7U)]; /* 填满一页主区 */
 } metadata_anchor_page_t;
 
-/* 一页必须装得下：头 16B + 每页条目 + CRC 4B */
+/* 一页必须装得下：头 20B + 每页条目（无独立 CRC，见 ADR v0.62）*/
 _Static_assert(sizeof(metadata_anchor_page_t) == PAGE_MAIN_SIZE, "Anchor 页结构体不等于一页主区");
 _Static_assert((METADATA_DIR_ENTRIES % METADATA_DIR_ENTRIES_PER_PAGE) == 0U, "每页条目数不能整除总条目数");
 
@@ -141,7 +142,7 @@ nand_addr_t metadata_ring_addr(const metadata_ring_t *ring,
  *
  * full == 0：**廉价探针** —— 只读 record 的第 0 页取 sequence（用于全池扫一遍找
  *            最大 sequence；每条只花 1 次页读）。
- * full != 0：**整条校验** —— 校验一条 record 的**全部**页（页内 magic/CRC、
+ * full != 0：**整条校验** —— 校验一条 record 的**全部**页（页内 magic、
  *            各页 sequence 一致、chunk 序完整），通过才给 sequence。
  *
  * @param ctx           调用方上下文

@@ -32,7 +32,6 @@
 
 #include "ftl/checkpoint.h"
 
-#include "common/boot_policy.h"
 #include "fc/fc.h"
 #include "ftl/ftl.h"
 #include "ftl/ftl_fc_interface.h"
@@ -81,15 +80,20 @@ static void checkpoint_ring_init(metadata_ring_t *ring)
     ring->module           = FC_COMMAND_MODULE_CHECKPOINT;
 }
 
-/* 整条校验（一条 record = 1 页）：magic + CRC */
+/* 整条校验（一条 record = 1 页）：magic + 布局版本。
+ * 无本层 CRC——页完整性由下层 FC 的 per-CW CRC + ECC 保证（ADR v0.62）。 */
 static int checkpoint_header_valid(const l2p_checkpoint_header_t *hdr)
 {
     if (hdr->magic != CHECKPOINT_MAGIC)
     {
         return 0;
     }
+    if (hdr->layout_version != FTL_MEDIA_LAYOUT_VERSION)
+    {
+        return 0; /* 旧格式介质的 Checkpoint ⇒ 作废（触发开机自动格式化）*/
+    }
 
-    return (boot_crc32(hdr, CHECKPOINT_CRC_LEN) == hdr->crc) ? 1 : 0;
+    return 1;
 }
 
 typedef struct
@@ -249,7 +253,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
     cp.sequence         = ++g_cp_sequence;               /* 本池自己的单调序号 */
     cp.timestamp        = checkpoint_now_ms(ftl);        /* 平台 time_us 换算 ms 快照 */
     cp.journal_sequence = ftl->journal.sequence_counter; /* 截断到此 seq */
-    cp.crc              = boot_crc32(&cp, CHECKPOINT_CRC_LEN);
+    cp.layout_version   = FTL_MEDIA_LAYOUT_VERSION;      /* 介质布局版本（版本不符 ⇒ 该记录作废）*/
 
     /* ⑥ 追加写：池内下一槽（块满则先擦池内下一块）*/
     if (metadata_ring_prepare_write(&ring, &probe_ctx.topo, g_cp_write_idx, &addr) != FTL_OK)
@@ -328,6 +332,40 @@ ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t 
         return FTL_ERROR;
     }
     if ((checkpoint_header_valid(cp) == 0) || (cp->sequence != g_cp_sequence))
+    {
+        return FTL_ERROR;
+    }
+
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * checkpoint_write_initial
+ *   功能：在 Checkpoint 池首槽写一条「空快照」标记（全量格式化后调用）。
+ *   参数：topo —— 目标芯片拓扑。
+ *   返回：FTL_OK / FTL_ERROR（取槽或写失败）。
+ *   实现要点：目的是让下次开机的版本判据（checkpoint_find_latest 成功 ⇒ 版本匹配）
+ *             立即命中 ⇒ 自动格式化只发生一次，不会因"开机写了元数据但还没写过
+ *             checkpoint"而在下次开机再格式化一遍。sequence 从 1 起（0 = 未写）。
+ * -------------------------------------------------------------------- */
+ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
+{
+    l2p_checkpoint_header_t cp;
+    metadata_ring_t         ring;
+    nand_addr_t             addr;
+
+    memset(&cp, 0, sizeof(cp));
+    cp.magic            = CHECKPOINT_MAGIC;
+    cp.sequence         = 1U;
+    cp.layout_version   = FTL_MEDIA_LAYOUT_VERSION;
+    cp.journal_sequence = 0U; /* 空快照：无 region、journal 从 0 起 */
+
+    checkpoint_ring_init(&ring);
+    if (metadata_ring_prepare_write(&ring, &topo, 0U, &addr) != FTL_OK)
+    {
+        return FTL_ERROR;
+    }
+    if (ftl_sync_write_page(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT)) != 0)
     {
         return FTL_ERROR;
     }

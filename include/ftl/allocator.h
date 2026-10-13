@@ -88,16 +88,15 @@ typedef struct
  */
 typedef struct
 {
-    ftl_topology_t topo;              /* 本 FTL 绑定的 NAND 芯片路由 */
-    uint16_t      *free_blocks;       /* free block 数组（全局 Block 号，由调用者提供） */
-    uint16_t       free_count;        /* free block 数 */
-    uint16_t      *op_blocks;         /* OP 预留 block 数组（容量不动：GC 缓冲池，由调用者提供） */
-    uint16_t       op_count;          /* OP 池 Block 数 */
-    uint16_t      *spare_blocks;      /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
-    uint16_t       spare_count;       /* Spare Pool 初始 Block 数 */
-    ftl_block_t   *blocks;            /* Block State Table 条目（由调用者提供，容量 FTL_BLOCK_TOTAL） */
-    uint64_t (*valid_map)[PLANE_NUM]; /* 逐页有效位图（独立表，每块 PLANE_NUM 个 u64；由调用者提供） */
-    super_block_t *closed_sb_list;    /* closed Super Block 数组（由调用者提供） */
+    ftl_topology_t topo;           /* 本 FTL 绑定的 NAND 芯片路由 */
+    uint16_t      *free_blocks;    /* free block 数组（全局 Block 号，由调用者提供） */
+    uint16_t       free_count;     /* free block 数 */
+    uint16_t      *op_blocks;      /* OP 预留 block 数组（容量不动：GC 缓冲池，由调用者提供） */
+    uint16_t       op_count;       /* OP 池 Block 数 */
+    uint16_t      *spare_blocks;   /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
+    uint16_t       spare_count;    /* Spare Pool 初始 Block 数 */
+    ftl_block_t   *blocks;         /* Block State Table 条目（由调用者提供，容量 FTL_BLOCK_TOTAL） */
+    super_block_t *closed_sb_list; /* closed Super Block 数组（由调用者提供） */
 } ftl_init_params_t;
 
 /* 该 plane 是否持有物理块（Policy B：Closed 条目允许退化单 plane，另一 plane 记哨兵）。
@@ -166,9 +165,8 @@ typedef struct
     uint16_t       closed_sb_count; /* 已关闭 Super Block 数 */
 
     /* ── Block State Table（统一 per-Block 状态） ── */
-    ftl_block_t *blocks;              /* 每 Block 条目数组（由调用者提供） */
-    uint64_t (*valid_map)[PLANE_NUM]; /* 逐页有效位图（独立表，每块 PLANE_NUM 个 u64；由调用者提供） */
-    uint16_t bad_count;               /* 坏 Block 数 */
+    ftl_block_t *blocks;    /* 每 Block 条目数组（由调用者提供） */
+    uint16_t     bad_count; /* 坏 Block 数 */
 } ftl_allocator_t;
 
 /* ── 接口函数 ── */

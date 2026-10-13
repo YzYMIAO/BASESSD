@@ -27,7 +27,6 @@
 
 #include "ftl/metadata.h"
 
-#include "common/boot_policy.h"
 #include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/bbt.h"
@@ -37,10 +36,8 @@
 #include "ftl/l2p_cache.h"
 #include "nand/onfi_1_0.h"
 
+#include <stddef.h>
 #include <string.h>
-
-/* 一页 Anchor 的 CRC 覆盖长度 = 整页减去尾部 crc 字段（padding 不参与校验）*/
-#define ANCHOR_PAGE_CRC_LEN (sizeof(metadata_anchor_page_t) - sizeof(uint32_t))
 
 /* ══════════════════════════════════════════════════════════════════
  * 一、元数据 record 池（环形轮转）—— Anchor / Checkpoint / BBT 共用
@@ -321,7 +318,8 @@ ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
  * ══════════════════════════════════════════════════════════════════ */
 
 /*
- * anchor_page_valid - 校验一页 Anchor：magic + chunk_count + 本页 CRC
+ * anchor_page_valid - 校验一页 Anchor：magic + chunk_count + 布局版本。
+ * 无本层 CRC——页完整性由下层 FC 的 per-CW CRC + ECC 保证（ADR v0.62）。
  */
 static int anchor_page_valid(const metadata_anchor_page_t *page)
 {
@@ -333,8 +331,12 @@ static int anchor_page_valid(const metadata_anchor_page_t *page)
     {
         return 0;
     }
+    if (page->layout_version != FTL_MEDIA_LAYOUT_VERSION)
+    {
+        return 0; /* 旧格式介质的 Anchor ⇒ 作废（触发开机自动格式化）*/
+    }
 
-    return (boot_crc32(page, ANCHOR_PAGE_CRC_LEN) == page->crc) ? 1 : 0;
+    return 1;
 }
 
 /* Anchor 池几何（per-plane 块号 ANCHOR_BLOCK0 起 ANCHOR_POOL_BLOCKS 块，plane 0）*/
@@ -357,7 +359,7 @@ typedef struct
  * anchor_record_probe - Anchor record 探针（见 metadata_ring_probe_fn）
  *
  * full == 0：只读 chunk 0 取 sequence（1 次页读）
- * full != 0：8 页全读，逐页校验 magic/chunk_count/CRC + chunk_index 序 + sequence 一致
+ * full != 0：8 页全读，逐页校验 magic/chunk_count + chunk_index 序 + sequence 一致
  */
 static ftl_status_t anchor_record_probe(void *ctx, uint16_t record_idx, int full, uint32_t *out_sequence)
 {
@@ -806,8 +808,8 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
  *   参数：dir —— Directory。
  *   返回：FTL_OK 成功（含 dirty==0 早退）；FTL_ERROR 参数非法 / 池定位失败 / prepare
  *         失败 / 任一分页写失败（整条作废）。
- *   实现要点：游标未建立时先定位池内最新 record 的下一槽；逐页组包（padding 归零、
- *             每页独立 CRC）；**无论成败都推进游标**（半编程槽不可复用）；任一分页
+ *   实现要点：游标未建立时先定位池内最新 record 的下一槽；逐页组包（padding 归零）；
+ *             **无论成败都推进游标**（半编程槽不可复用）；任一分页
  *             写失败 ⇒ 整条残缺 ⇒ 返回错误且**保留 dirty**（下次在新槽重试整条）。
  * -------------------------------------------------------------------- */
 ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
@@ -885,11 +887,12 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         }
 
         memset(&page, 0, sizeof(page)); /* padding 归零 ⇒ 介质内容确定 */
-        page.magic       = ANCHOR_MAGIC;
-        page.sequence    = seq;
-        page.chunk_index = chunk;
-        page.chunk_count = ANCHOR_PAGE_COUNT;
-        page.entry_count = n;
+        page.magic          = ANCHOR_MAGIC;
+        page.sequence       = seq;
+        page.chunk_index    = chunk;
+        page.chunk_count    = ANCHOR_PAGE_COUNT;
+        page.entry_count    = n;
+        page.layout_version = FTL_MEDIA_LAYOUT_VERSION;
 
         for (k = 0U; k < METADATA_DIR_ENTRIES_PER_PAGE; k++)
         {
@@ -904,8 +907,6 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
                 page.entries[k].paa  = NAND_PBA_INVALID;
             }
         }
-
-        page.crc = boot_crc32(&page, ANCHOR_PAGE_CRC_LEN);
 
         if (ftl_sync_write_page(aaddr, &page, sizeof(page), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
         {

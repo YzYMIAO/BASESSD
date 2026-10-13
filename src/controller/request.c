@@ -144,8 +144,10 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
         ASSERT(ftl != NULL);
 
         request->io.lba    = lba;
+        /* 缓冲步进 = 映射单元（FTL_IU_BYTES = 512B）——CW 级映射下 1 LBA = 1 个 CW
+         * （= 512B 扇区），不是 2KB 页。 */
         request->io.buffer = (uint8_t *)request->buffer +
-                             ((size_t)(lba - request->start_lba) * FTL_READ_USER_SIZE);
+                             ((size_t)(lba - request->start_lba) * FTL_IU_BYTES);
         request->io.count = run_len; /* ★ 长度交给 FTL，plane 拆分由 FTL 决定 */
 
         st = (request->opcode == SSD_REQUEST_WRITE) ? ftl_submit_write(ftl, &request->io)

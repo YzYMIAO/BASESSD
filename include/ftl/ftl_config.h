@@ -71,13 +71,18 @@
  *
  * ── 逻辑表字节（公式①：覆盖实体数 × 每实体字节）──
  *
- * ⚠ 本布局相对旧版（L2P 0..31 / Journal 40..41 / 无 Wear）**变更了介质格式**，
- *   首次上板须先擦除芯片（v24 教训：介质格式变更必须重新格式化）。
+ * ⚠ 本布局相对旧版（L2P 0..31 / Journal 40..41 / 无 Wear）**变更了介质格式**。
+ *   v0.61 起**不再需要手动擦除芯片**：介质上的布局版本（`FTL_MEDIA_LAYOUT_VERSION`，
+ *   写在 Checkpoint 头与 Anchor 页内）与当前固件不符（或根本没有当前版本记录）⇒
+ *   `ssd_ftl_boot` 自动全片格式化一次并写入当前版本标记（见 power_failure_recovery.c
+ *   `ftl_media_format`）。**任何改变介质格式的改动都必须把 `FTL_MEDIA_LAYOUT_VERSION` +1。**
  * ⚠ 本文件只依赖 nand_config.h（几何）与 fc.h（CW 用户区大小），不引 l2p_cache/metadata，
  *   以免循环包含。
  */
 
-#include "fc/fc.h" /* FC_BUFFER_USER_SIZE —— 映射单元的用户数据字节数 */
+#include "common/assertion.h" /* ASSERT —— CW 级地址辅助的参数自检 */
+#include "fc/fc.h"            /* FC_BUFFER_USER_SIZE —— 映射单元的用户数据字节数 */
+#include "ftl/ftl_type.h"     /* lba_t —— CW 级地址辅助的形参/返回类型 */
 #include "nand/nand_config.h"
 
 #include <stddef.h>
@@ -200,6 +205,15 @@
 /* 固定元数据区末尾 = 第一个用户块；也用作动态元数据分配起点 */
 #define FTL_METADATA_BLOCK_END (WEAR_BLOCK + WEAR_BLOCKS)
 
+/* ── 介质布局版本（NAND 上持久化格式的版本号）──
+ * 任何改变**介质格式或块布局**的改动（结构体字段/块号/记录格式）都必须把本值 +1。
+ * 开机 checkpoint_find_latest / anchor_page_valid 都校验它；不符（或介质上根本没有当前
+ * 版本的 Checkpoint）⇒ ftl_media_format() 自动全片格式化（见 power_failure_recovery.c）。
+ * 这样就不再需要"上板前先手动 bbt --erase"。
+ * v0.62：元数据页完整性改由下层 FC 的 per-CW CRC + ECC 承担，FTL 记录内的 CRC 字段
+ *        全部删除（Checkpoint/Anchor/BBT/Wear 四结构体尺寸随之变化）⇒ 版本 +1。 */
+#define FTL_MEDIA_LAYOUT_VERSION (2U)
+
 /* ══════════════════════════════════════════════════════════════════
  * 四、逻辑表字节（公式①：覆盖实体数 × 每实体字节）
  * ══════════════════════════════════════════════════════════════════ */
@@ -317,5 +331,81 @@ _Static_assert(ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS <= CHECKPOINT_BLOCK0, "Anchor 
 _Static_assert(CHECKPOINT_BLOCK0 + CHECKPOINT_POOL_BLOCKS <= BBT_BLOCK, "Checkpoint 与 BBT 重叠");
 _Static_assert(BBT_BLOCK + BBT_POOL_BLOCKS <= JOURNAL_BLOCK0, "BBT 与 Journal 重叠");
 _Static_assert(JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT <= WEAR_BLOCK, "Journal 与 Wear 重叠");
+
+/* ══════════════════════════════════════════════════════════════════
+ * 八、CW 级地址辅助（IU = CW = 512B；LBA 与 PBA 低 3 位同构）
+ *
+ * 映射粒度 = 映射单元（IU）= 1 个 CW = 512 B（§一 FTL_IU_BYTES）。
+ * LBA 与 PBA 的低 3 位同一套编码 [plane:1][cw:2]（nand_config.h §4.1）：
+ *
+ *     LBA 低位   [plane:1][cw:2]   ← 页内位置，与 PBA 逐位相同
+ *     页基址     LBA & ~(CW_NUM-1) ← 低 2 位（cw）清零，plane 位仍在 bit CW_WIDTH
+ *     页索引     LBA >> CW_WIDTH   ← 页粒度地址（bit 0 = plane，与 internal_lba 同）
+ *
+ * ⚠ 「页基址」不是页号：bit CW_WIDTH 仍是 plane 位。同一 LBA 段内相邻 4 个
+ *   LBA（同一 plane 位）共用一页；相邻 8 个 LBA 覆盖一对 plane 页。
+ *
+ * 物理 plane 必须与 LBA 的 plane 位一致：FC 侧 desc->meta 的低 3 位由**物理**
+ * plane/cw 铸出（fc_command.h），页内 META 存的就是「本 CW 的扇区 LBA」。若两者
+ * 不一致，写进去的 META 会指向另一个 LBA，GC 反查/读校验都会错。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* 每页 CW 数 = 每页映射单元数 */
+#define FTL_CW_PER_PAGE (CW_NUM)
+
+/* 一对 plane 页覆盖的 LBA 数（8 = 2 plane × 4 CW） */
+#define FTL_LBA_PER_PAIR (PLANE_NUM * CW_NUM)
+
+/* LBA → 页基址（低 CW_WIDTH 位 = cw 清零；plane 位保留） */
+static inline lba_t ftl_lba_page_base(lba_t lba)
+{
+    return (lba_t)(lba & ~(lba_t)(CW_NUM - 1U));
+}
+
+/* LBA → 页内 CW 号（0..CW_NUM-1） */
+static inline uint8_t ftl_lba_cw(lba_t lba)
+{
+    return (uint8_t)(lba & (lba_t)(CW_NUM - 1U));
+}
+
+/* LBA → 该 LBA 应落在的**物理 plane**（bit CW_WIDTH 起，与 PBA 的 plane 位同源）。
+ * 写路径按它选 plane、GC/WL 按它校验搬移目标 plane——「物理 plane == LBA 的 plane 位」
+ * 是页内 META 可自洽还原 LBA 的前提（见本节头）。 */
+static inline uint8_t ftl_lba_plane(lba_t lba)
+{
+    return (uint8_t)((lba >> CW_WIDTH) & (lba_t)(PLANE_NUM - 1U));
+}
+
+/* 页基址 + CW 号 → LBA（ftl_lba_page_base 的逆） */
+static inline lba_t ftl_lba_make(lba_t page_base, uint8_t cw)
+{
+    return (lba_t)(page_base | (lba_t)cw);
+}
+
+/* LBA → 页索引（bit 0 = plane，与 PBA 的 plane 位对齐） */
+static inline lba_t ftl_lba_page(lba_t lba)
+{
+    return (lba_t)(lba >> CW_WIDTH);
+}
+
+/* LBA → 所属「pair 窗口」基址（8 个 LBA 一组：低 3 位全清零） */
+static inline lba_t ftl_lba_pair_base(lba_t lba)
+{
+    return (lba_t)(lba & ~(lba_t)(FTL_LBA_PER_PAIR - 1U));
+}
+
+/* 取 PBA 的**页**（CW 位清零）——同一物理页的 4 个 CW 共享它 */
+static inline nand_pba_t pba_page(nand_pba_t pba)
+{
+    return (nand_pba_t)(pba & ~(nand_pba_t)(CW_NUM - 1U));
+}
+
+/* 单 plane 段内、CW [cw_lo, cw_hi] 的 flat 位图（段起点由调用者左移） */
+static inline uint32_t ftl_cw_span_mask(uint8_t cw_lo, uint8_t cw_hi)
+{
+    ASSERT(cw_lo <= cw_hi);
+    ASSERT(cw_hi < CW_NUM);
+    return (uint32_t)((1U << (uint32_t)(cw_hi + 1U)) - 1U) & ~((1U << (uint32_t)cw_lo) - 1U);
+}
 
 #endif /* FTL_CONFIG_H */

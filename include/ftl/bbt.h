@@ -41,8 +41,7 @@ typedef struct
     uint32_t bad_count;    /* 坏块数 */
     uint32_t reserved[3];
     uint8_t  bad_map[BBT_BITMAP_SIZE];  /* 4096 bit = 512B */
-    uint32_t crc;                       /* 校验和 */
-} __attribute__((packed)) bbt_header_t; /* 4+4+4+4+12+512+4 = 544B */
+} __attribute__((packed)) bbt_header_t; /* 4+4+4+4+12+512 = 540B（无独立 CRC，见 ADR v0.62）*/
 
 /* ── 接口 ── */
 
@@ -112,6 +111,18 @@ int bbt_scan_factory(ftl_allocator_t *alloc);
 void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase);
 
 /*
+ * bbt_erase_all_blocks - 擦除本实例全部块（所有 plane），供开机自动格式化调用
+ *
+ * 逐块先读出厂坏块标记（列 2048，擦前读）再擦；擦除失败也判坏。新发现的坏块落进 BST。
+ * ⚠ 必须在 bbt_init 之后调用（出厂标记此时已先读进 BST，擦除不丢坏块信息）；
+ *   擦完由调用方 bbt_save() 重新持久化坏块图。
+ *
+ * @param alloc  Allocator 上下文（取 ch/ce 与块几何）
+ * @return FTL_OK / FTL_ERROR（参数非法）
+ */
+ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc);
+
+/*
  * bbt_mark_bad - 运行时标记坏块
  *
  * ① ftl_block_t.state 置 BAD + 清有效页位图（BST 单数据源）
@@ -156,7 +167,7 @@ static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
 /*
  * bbt_save - 将 BBT 追加写入 NAND BBT 池
  *
- * 池内下一槽追加一条 record（块满先擦池内下一块）。CRC 保护 + sequence 递增。
+ * 池内下一槽追加一条 record（块满先擦池内下一块）。sequence 递增。
  *
  * @param alloc  Allocator 上下文
  * @return 0 成功，-1 失败
@@ -177,7 +188,7 @@ ftl_status_t bbt_flush(ftl_allocator_t *alloc);
 /*
  * bbt_load - 从 NAND BBT 池加载 BBT
  *
- * 池内轮转扫描（metadata_ring_locate），选 magic+CRC 正确且 sequence 最大者。
+ * 池内轮转扫描（metadata_ring_locate），选 magic 正确且 sequence 最大者。
  * 命中时同时恢复本池的 sequence 计数与写游标。
  *
  * @param bad_map     输出：bt_bitmap[512]

@@ -12,7 +12,7 @@
  *
  * 介质模型（P0-1）：
  *   块 WEAR_BLOCK（plane 0）上按页 0..PAGES_PER_BLOCK-1 **只追加**；页序 == sequence 序。
- *   一条记录 = 一页 = 头（magic+sequence+entry_count+crc）+ 最多 WEAR_ENTRY_MAX 条
+ *   一条记录 = 一页 = 头（magic+sequence+entry_count）+ 最多 WEAR_ENTRY_MAX 条
  *   (block, read_count, erase_count)。回放**绝对值 + 最新胜**（后写覆盖先写）。
  *
  * 文件结构：
@@ -26,7 +26,6 @@
 
 #include "ftl/wear.h"
 
-#include "common/boot_policy.h"
 #include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/ftl_fc_interface.h"
@@ -108,8 +107,6 @@ static ftl_status_t wear_write_page(ftl_allocator_t *alloc, wear_page_t *page, u
     nand_addr_t addr;
 
     page->entry_count = count;
-    page->crc         = 0U;
-    page->crc         = boot_crc32(page, sizeof(*page) - sizeof(uint32_t));
 
     addr = wear_page_addr(alloc->ch, alloc->ce, alloc->lun, g_wear_next_page);
     if (ftl_sync_write_page(addr, page, sizeof(*page), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_WEAR_LEVELING)) != 0)
@@ -239,7 +236,6 @@ ftl_status_t wear_init(ftl_allocator_t *alloc)
     for (p = 0U; p < PAGES_PER_BLOCK; p++)
     {
         nand_addr_t addr = wear_page_addr(alloc->ch, alloc->ce, alloc->lun, p);
-        uint32_t    saved_crc;
         uint32_t    k;
 
         memset(&page, 0, sizeof(page));
@@ -251,14 +247,6 @@ ftl_status_t wear_init(ftl_allocator_t *alloc)
         {
             break;
         }
-
-        saved_crc = page.crc;
-        page.crc  = 0U;
-        if (boot_crc32(&page, sizeof(page) - sizeof(uint32_t)) != saved_crc)
-        {
-            break;
-        }
-        page.crc = saved_crc;
 
         for (k = 0U; k < page.entry_count; k++)
         {

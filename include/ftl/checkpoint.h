@@ -25,7 +25,6 @@
 #include "ftl/journal.h"
 #include "ftl/l2p_cache.h"
 
-#include <stddef.h>
 #include <stdint.h>
 
 /* ── 前向声明（ftl_context_t 在 ftl.h 中定义，ftl.h 会 include 本文件） ── */
@@ -40,7 +39,9 @@ struct ftl_context;
 /* ── Header 格式：**恰好一页主区**（2048 B）──
  * 字段 70 字 = 6 个标量 + region_bitmap[64]；padding 补齐到 2048。
  * ⚠ padding 长度按 70 字算（旧版写 7 字 ⇒ sizeof 变成 2296 > 一页 ⇒ 写入被
- *   ftl_cmd_write_data 按链长静默截到 2048；"一条 record = 一页"名不副实）。*/
+ *   ftl_cmd_write_data 按链长静默截到 2048；"一条 record = 一页"名不副实）。
+ * 本页**无独立 CRC**：完整性由下层 FC 的 per-CW CRC + ECC 保证（ADR v0.62，
+ * DRAM-less 主流做法，见 docs/design/ftl_revision_history.md）。*/
 typedef struct
 {
     uint32_t magic;                  /* CHECKPOINT_MAGIC */
@@ -49,14 +50,9 @@ typedef struct
     uint32_t region_count;           /* 本 checkpoint 包含的 region 数 */
     uint32_t region_bitmap[64];      /* 2048 bit，哪些 region 在 checkpoint 中 */
     uint32_t journal_sequence;       /* 截断到此 sequence 之前的 journal */
-    uint32_t crc;                    /* 覆盖 [0, CHECKPOINT_CRC_LEN) */
+    uint32_t layout_version;         /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该记录作废）*/
     uint8_t  padding[2048 - 70 * 4]; /* 补齐到一页主区（1768 B）*/
 } l2p_checkpoint_header_t;
-
-/* CRC 覆盖范围 = crc 字段之前的全部内容（magic..journal_sequence，276 B）。
- * 写法用 offsetof：padding 参与 sizeof 但不参与校验，且 sizeof 的算式一旦写错
- * （见上方 ⚠）覆盖范围会跟着错。 */
-#define CHECKPOINT_CRC_LEN ((size_t)offsetof(l2p_checkpoint_header_t, crc))
 
 _Static_assert(sizeof(l2p_checkpoint_header_t) == PAGE_MAIN_SIZE, "Checkpoint Header 必须恰好一页主区");
 
@@ -81,7 +77,7 @@ ftl_status_t checkpoint_create(struct ftl_context *ftl);
 /*
  * checkpoint_find_latest - 扫描 Checkpoint 池找最新有效 Header
  *
- * 池内轮转扫描（metadata_ring_locate）：magic + CRC 正确且 sequence 最大者胜。
+ * 池内轮转扫描（metadata_ring_locate）：magic 正确且 sequence 最大者胜。
  * 命中时同时恢复本池的 sequence 计数与写游标（后续 checkpoint_create 从下一槽续写）。
  *
  * @param cp    输出：找到的 Header
@@ -89,6 +85,18 @@ ftl_status_t checkpoint_create(struct ftl_context *ftl);
  * @return 0 找到，-1 无有效 Checkpoint
  */
 ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t topo);
+
+/*
+ * checkpoint_write_initial - 全量格式化后在池首槽写一条「空快照」标记
+ *
+ * 只由 ftl_media_format() 在擦完全片后调用。写出的 Header 带当前
+ * FTL_MEDIA_LAYOUT_VERSION 与 sequence=1，使下次开机 checkpoint_find_latest
+ * 立即成功 ⇒ 版本判据命中 ⇒ 自动格式化只发生一次。
+ *
+ * @param topo  拓扑信息（Checkpoint 池所在芯片路由）
+ * @return FTL_OK / FTL_ERROR
+ */
+ftl_status_t checkpoint_write_initial(ftl_topology_t topo);
 
 /*
  * checkpoint_check_trigger - 检查 Checkpoint 触发条件

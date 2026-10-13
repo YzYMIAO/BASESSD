@@ -84,6 +84,162 @@ static uint32_t ftl_now_ms(void)
 }
 
 /* --------------------------------------------------------------------
+ * ftl_confirm_write
+ *   功能：写子操作成功后的**逐 CW** 簿记——Journal + L2P + BST 有效计数/「写过」位。
+ *   参数：ftl —— 实例；pending —— 已完成的写子操作记录。
+ *   返回：无。
+ *   实现要点：
+ *     · CW 级映射下 1 LBA = 1 CW：一个子操作覆盖 pending->n_cw 个连续 local LBA，
+ *       每个 LBA 各自一条 Journal + 一条 L2P 更新（Journal 流量 ×4，已登记）。
+ *     · 目标页按 **LBA 的 plane 位**选：plane0 的 LBA 落 pending->new_pba、plane1 的
+ *       落 pending->new_pba1。Policy B 下两 plane 独立选块，且「物理 plane 必须等于
+ *       LBA 的 plane 位」是页内 META 能还原出正确 LBA 的前提（ftl_config.h §八）。
+ *     · **不存 old_pba**：完成时按 LBA 重查 L2P 得"此刻被替换的映射"。同一 LBA 的两次
+ *       写在飞时，先完成的先改 L2P，后完成的重查即得前者；提交时快照会让两条 Journal
+ *       都指向最初映射，链断。
+ *     · valid_count 单位是 **CW**：新 CW +1、被替换的旧 CW -1。真有效性一律逐 CW
+ *       由页内 META + L2P 反查现判（DRAM-less approach ③，无位图）——见 bst.h 文件头。
+ * -------------------------------------------------------------------- */
+static void ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_t *pending)
+{
+    uint8_t k;
+
+    ASSERT(ftl != NULL);
+    ASSERT(pending != NULL);
+
+    for (k = 0U; k < pending->n_cw; k++)
+    {
+        const lba_t      l    = (lba_t)(pending->lba + (lba_t)k);
+        const uint8_t    pl   = ftl_lba_plane(l);
+        const uint8_t    cw   = ftl_lba_cw(l);
+        const nand_pba_t page = (pl == 0U) ? pending->new_pba : pending->new_pba1;
+        nand_pba_t       newp;
+        nand_pba_t       oldp;
+
+        /* 写路径为两个 plane 都分配了页（allocator_alloc_pair），故二者恒有效 */
+        ASSERT(page != NAND_PBA_INVALID);
+        ASSERT(pba_to_plane(page) == pl);
+
+        newp = pba_with_cw(page, cw);
+        oldp = l2p_cache_read(&ftl->cache, l);
+
+        journal_append(&ftl->journal, l, oldp, newp);
+        l2p_cache_write(&ftl->cache, l, newp);
+
+        ftl_block_add_valid(&ftl->alloc.blocks[ftl_pba_gblock(newp)]);
+
+        /* 覆盖写：旧 CW 失效。旧页若正是本页（同一 CW 重写）则不动计数——
+         * newp == oldp 只在"重写同一物理 CW"时出现，语义上是同一条映射。 */
+        if ((oldp != NAND_PBA_INVALID) && (oldp != newp))
+        {
+            ftl_block_sub_valid(&ftl->alloc.blocks[ftl_pba_gblock(oldp)]);
+        }
+    }
+
+    checkpoint_journal_watermark(&ftl->journal);
+    ftl->total_writes++; /* 计「编程次数」（一个子操作 = 一次页编程），不是 CW 数 */
+}
+
+/* --------------------------------------------------------------------
+ * ftl_recover_read_subop
+ *   功能：读子操作失败后的 Read Recovery——**逐 plane** 恢复并搬回 caller 缓冲。
+ *   参数：ftl —— 实例；pending —— 失败的读子操作记录。
+ *   返回：无（成败只体现在缓冲内容与坏块标记）。
+ *   实现要点：
+ *     · 一个子操作可能覆盖**两个 plane 的两张不同物理页**（Policy B 下两 plane 块号
+ *       不同），故逐 plane 各恢复一次；目标页由 L2P 反查（读失败不改 L2P，映射仍是
+ *       提交时那条）。
+ *     · 恢复读是**整页**读、从 CW0 起连续拷出 ⇒ 结果先落 ftl->rr_page_scratch，再按
+ *       各 CW 的真实偏移（ftl_lba_cw）搬回 caller 缓冲——子操作可能只覆盖页内部分 CW，
+ *       直接让 rr_recover_read 写 caller 缓冲会整段错位。
+ *     · 某 plane 恢复失败 ⇒ 该 plane 各 CW 清零 + 标坏块（RAM only，后台 bbt_flush
+ *       持久化），交由预测搬移/GC 接手搬走有效页。
+ *     · ⚠ 调用者仍一律报 IO_ERROR（沿用原实现语义，见 ftl_handle_completion）。
+ * -------------------------------------------------------------------- */
+static void ftl_recover_read_subop(ftl_context_t *ftl, const ftl_pending_req_t *pending)
+{
+    uint8_t p;
+
+    ASSERT(ftl != NULL);
+    ASSERT(pending != NULL);
+
+    for (p = 0U; p < PLANE_NUM; p++)
+    {
+        nand_pba_t page     = NAND_PBA_INVALID;
+        lba_t      page_lba = 0U;
+        uint8_t    first    = 0U;
+        uint8_t    k;
+        uint8_t    retry_count = 0U;
+        int        recovered;
+
+        /* 本子操作覆盖了 plane p 吗？覆盖则取该 plane 首个 LBA 的映射为目标页 */
+        for (k = 0U; k < pending->n_cw; k++)
+        {
+            const lba_t l = (lba_t)(pending->lba + (lba_t)k);
+
+            if (ftl_lba_plane(l) == p)
+            {
+                const nand_pba_t cur = l2p_cache_read(&ftl->cache, l);
+
+                if (cur != NAND_PBA_INVALID)
+                {
+                    page     = pba_page(cur);
+                    page_lba = ftl_lba_page(l);
+                    first    = k;
+                }
+                break;
+            }
+        }
+        if (page == NAND_PBA_INVALID)
+        {
+            continue; /* 本子操作不覆盖 plane p */
+        }
+
+        recovered = rr_recover_read(&ftl->rr,
+                                    ftl->topo.ch,
+                                    ftl->topo.ce,
+                                    page,
+                                    ftl->rr_page_scratch,
+                                    FTL_READ_USER_SIZE,
+                                    page_lba,
+                                    &retry_count);
+
+        for (k = 0U; k < pending->n_cw; k++)
+        {
+            const lba_t l = (lba_t)(pending->lba + (lba_t)k);
+            uint8_t    *dst;
+
+            if (ftl_lba_plane(l) != p)
+            {
+                continue;
+            }
+            dst = (uint8_t *)pending->buffer + ((size_t)k * FTL_IU_BYTES);
+
+            if (recovered == 0)
+            {
+                /* 恢复成功：按本 CW 在页内的真实偏移从整页镜像搬出 */
+                memcpy(dst, ftl->rr_page_scratch + ((size_t)ftl_lba_cw(l) * FTL_IU_BYTES), FTL_IU_BYTES);
+            }
+            else
+            {
+                memset(dst, 0, FTL_IU_BYTES);
+            }
+        }
+
+        if (recovered != 0)
+        {
+            /* Stage 1（Read Retry）+ Stage 2（邻近页辅助）全失败 → 页面已损坏提升为
+             * 块级不可靠，显式标记坏块（RR Stage 3 XOR/RAID 恢复属后续阶段，当前不做）。 */
+            (void)retry_count; /* 恢复失败，重试次数无意义 */
+            LOGE("[FTL] read unrecoverable lba=%lu gblock=%u\r\n",
+                 (unsigned long)(pending->lba + (lba_t)first),
+                 (unsigned)ftl_pba_gblock(page));
+            (void)bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(page));
+        }
+    }
+}
+
+/* --------------------------------------------------------------------
  * ftl_handle_completion
  *   功能：FC 命令完成回调（completion_table 的默认 handler，ctx = ftl_context_t*）。
  *   参数：completion —— FC 完成状态；ctx —— ftl 上下文（仅作单实例 fallback）。
@@ -127,8 +283,7 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                 if (pending != NULL)
                 {
                     uint16_t     gi         = pending->group;
-                    uint8_t      planes     = (pending->planes > 0U) ? pending->planes : 1U;
-                    uint32_t     data_size  = FTL_READ_USER_SIZE * planes;
+                    uint32_t     data_size  = FTL_IU_BYTES * pending->n_cw; /* 子操作字节数 */
                     ssd_status_t sub_status = SSD_STATUS_OK;
 
                     if ((completion->status & FC_CW_STATUS_NAND_FAIL) == 0U)
@@ -137,7 +292,9 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                          * 写请求的 buffer 是数据源、恒非空，用 buffer 判别会把写全判成读。 */
                         if (pending->op == PENDING_OP_READ)
                         {
-                            /* 读成功：拷贝数据到 caller buffer */
+                            /* 读成功：拷贝数据到 caller buffer。
+                             * desc 链序 == LBA 升序（plane-major + 段内 CW 升序，与
+                             * LBA 的 [plane][cw] 布局同序）⇒ 按链序连续拷出即 LBA 序。 */
                             (void)ftl_cmd_read_data(cmd, pending->buffer, data_size);
 
                             /* Read Recovery：记录本次读的 ECC 纠正 bit 数（desc 链最大值），
@@ -158,79 +315,8 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                         }
                         else if (pending->cache_intermediate == 0U)
                         {
-                            /* 写成功（非 cache 中间页）：确认 Journal + L2P（modify-after-confirm） */
-                            journal_append(&ftl->journal,
-                                           pending->lba,
-                                           pending->old_pba,
-                                           pending->new_pba);
-                            l2p_cache_write(&ftl->cache,
-                                            pending->lba,
-                                            pending->new_pba);
-                            checkpoint_journal_watermark(&ftl->journal);
-                            ftl->total_writes++;
-
-                            /* VPC/bitmap 维护：新页置位 + 覆盖写清旧页（单点更新防漂移）
-                             *
-                             * plane0（new_pba 所在 plane）簿记保留。
-                             * pages=2 的 Multi-Plane 写：plane1 的实际烧录位置是写入时分配的
-                             * pending->new_pba1（Policy B：两 plane 独立选块，**不可**由 plane0
-                             * 「同 block + plane=1」派生）。这里对 plane1 页做同样簿记
-                             * （set_valid + L2P + Journal），避免 plane1 成为无映射幽灵页
-                             * （GC 不搬 → 擦除丢数据）。 */
-                            {
-                                uint16_t     gnew = (uint16_t)ftl_pba_gblock(pending->new_pba);
-                                ftl_block_t *nb   = &ftl->alloc.blocks[gnew];
-                                ftl_block_set_valid(nb,
-                                                    ftl->alloc.valid_map[gnew],
-                                                    (uint8_t)pba_to_plane(pending->new_pba),
-                                                    (uint8_t)pba_to_page(pending->new_pba));
-
-                                /* 覆盖写：旧页失效（old_pba 有效时） */
-                                if (pending->old_pba != NAND_PBA_INVALID)
-                                {
-                                    uint16_t     gold = (uint16_t)ftl_pba_gblock(pending->old_pba);
-                                    ftl_block_t *ob   = &ftl->alloc.blocks[gold];
-                                    ftl_block_clr_valid(ob,
-                                                        ftl->alloc.valid_map[gold],
-                                                        (uint8_t)pba_to_plane(pending->old_pba),
-                                                        (uint8_t)pba_to_page(pending->old_pba));
-                                }
-                            }
-
-                            /* planes=2 Multi-Plane：plane1 页（lba+1）同样簿记 */
-                            if (planes == 2U)
-                            {
-                                const nand_pba_t pba1 = pending->new_pba1;
-                                uint16_t         g1   = (uint16_t)ftl_pba_gblock(pba1);
-                                ftl_block_t     *nb1  = &ftl->alloc.blocks[g1];
-
-                                ftl_block_set_valid(nb1,
-                                                    ftl->alloc.valid_map[g1],
-                                                    (uint8_t)pba_to_plane(pba1),
-                                                    (uint8_t)pba_to_page(pba1));
-
-                                /* L2P：lba+1 → plane1 页 */
-                                l2p_cache_write(&ftl->cache,
-                                                (lba_t)(pending->lba + 1U),
-                                                pba1);
-                                journal_append(&ftl->journal,
-                                               (lba_t)(pending->lba + 1U),
-                                               pending->old_pba1,
-                                               pba1);
-
-                                /* 覆盖写：plane1 旧页失效 */
-                                if (pending->old_pba1 != NAND_PBA_INVALID)
-                                {
-                                    uint16_t     g1old = (uint16_t)ftl_pba_gblock(pending->old_pba1);
-                                    ftl_block_t *ob1   = &ftl->alloc.blocks[g1old];
-                                    ftl_block_clr_valid(ob1,
-                                                        ftl->alloc.valid_map[g1old],
-                                                        (uint8_t)pba_to_plane(pending->old_pba1),
-                                                        (uint8_t)pba_to_page(pending->old_pba1));
-                                }
-                            }
-
-                            /* 写成功状态由组聚合（sub_status 保持 OK） */
+                            /* 写成功（非 cache 中间页）：逐 CW 确认 Journal + L2P + 有效计数 */
+                            ftl_confirm_write(ftl, pending);
                         }
                         /* cache_intermediate 页：跳过 L2P/Journal 更新，等最终 10h 确认 */
                     }
@@ -239,39 +325,12 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                         /* 同上：按 pending->op 判别，不用 io.buffer */
                         if (pending->op == PENDING_OP_READ)
                         {
-                            /* 读失败：先尝试 Read Recovery 恢复，恢复成功则数据已就位。
-                             * ⚠ rr_recover_read 的形参是 **PBA**（FTL 自己的地址空间，内部
-                             *   还要 addr_from_pba）——命令里只有 PAA（v47），此处用拓扑的
-                             *   ch/ce 还原，与当初 pba_to_paa() 前的值逐位相同。 */
-                            const nand_pba_t read_pba    = paa_to_pba(ftl->topo.ch, ftl->topo.ce, cmd->paa);
-                            uint8_t          retry_count = 0U;
-                            int              recovered   = rr_recover_read(&ftl->rr,
-                                                            ftl->topo.ch,
-                                                            ftl->topo.ce,
-                                                            read_pba,
-                                                            pending->buffer,
-                                                            data_size,
-                                                            pending->lba,
-                                                            &retry_count);
-                            if (recovered != 0)
-                            {
-                                /* 恢复失败：返回全零 + 标记坏块
-                                 *
-                                 * Stage 1（Read Retry）+ Stage 2（邻近页辅助）全失败 →
-                                 * 页面已损坏提升为块级不可靠，显式标记坏块（RAM only，
-                                 * 后台 bbt_flush 持久化），交由预测搬移/GC 接手搬走有效页。
-                                 * （RR Stage 3 XOR/RAID 恢复属后续阶段，当前不做。） */
-                                memset(pending->buffer, 0, data_size);
-                                (void)retry_count; /* 恢复失败，重试次数无意义 */
-                                LOGE("[FTL] read unrecoverable lba=%lu gblock=%u\r\n",
-                                     (unsigned long)pending->lba,
-                                     (unsigned)ftl_paa_gblock(cmd->paa));
-                                (void)bbt_mark_bad(&ftl->alloc, ftl_paa_gblock(cmd->paa));
-                            }
-                            /* ⚠ 读失败一律报 IO_ERROR：沿用原实现——原代码在 if/else
+                            /* 读失败：逐 plane 尝试 Read Recovery（见该函数文件头）。
+                             * ⚠ 读失败一律报 IO_ERROR：沿用原实现——原代码在 if/else
                              *   之后**无条件**写 *status_out = IO_ERROR，覆盖了
                              *   recovered==0 分支的 OK。即"read recovery 成功仍报错"，
                              *   语义存疑、属既有缺陷；本步保持行为等价，未顺手改。 */
+                            ftl_recover_read_subop(ftl, pending);
                             sub_status = SSD_STATUS_IO_ERROR;
                         }
                         else
@@ -279,13 +338,13 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                             /* 写失败：行业坏块替换流程（ftl_design §3.8）
                              *
                              * ① 关闭当前 Open Super Block（不再写入新数据）→ 进 closed_sb_list
-                             *    → GC 优先回收（该 SB VPC 偏低：失败页不置 valid + 旧页被覆盖清位）
+                             *    → GC 优先回收（该 SB 有效 CW 偏低：失败 CW 不计数 + 旧 CW 被覆盖清账）
                              * ② bbt_mark_bad（RAM only，后台 bbt_flush 持久化）——标 plane0 的 block 号。
                              *    Policy B 下两 plane 是独立块，**只退失败的那个 plane**：plane1 块仍
                              *    好，随 Closed SB 进 GC，擦除后回 free pool 复用（不再被同号语义连坐）。
                              *    若失败的是 plane1（本层拿不到逐 CW 状态，只知整命令失败），
                              *    其块会在 GC 擦除失败时被标坏（见 ④）。
-                             * ③ L2P 不动 → 自动回滚到 old_pba，旧数据完好
+                             * ③ L2P 不动 → 自动回滚到旧映射，旧数据完好
                              * ④ GC 回收时：好 plane 擦除回 free pool；坏 plane 擦除失败再标坏
                              */
                             LOGE("[FTL] program failed lba=%lu gblock=%u\r\n",
@@ -495,9 +554,9 @@ static void ftl_service_busy(ftl_context_t *ftl)
  * ftl_init
  *   功能：装配一个 FTL 实例——按依赖序初始化路由表 / pending / BST / cache / allocator
  *         / journal / metadata_dir / bbt / wear / 各计时器。
- *   参数：ftl —— 实例（非 NULL）；params —— 初始化参数（拓扑 + blocks/valid_map 缓冲）。
- *   返回：FTL_OK / FTL_ERROR（参数非法 / blocks 或 valid_map 未提供）。
- *   实现要点：BST 与 valid_map 由调用者提供缓冲（大数组落 AXI/SRAM2）；memset 必须早于
+ *   参数：ftl —— 实例（非 NULL）；params —— 初始化参数（拓扑 + blocks 缓冲）。
+ *   返回：FTL_OK / FTL_ERROR（参数非法 / blocks 未提供）。
+ *   实现要点：BST 由调用者提供缓冲（大数组落 AXI/SRAM2）；memset 必须早于
  *             wear_init，否则计数回填被清零。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params)
@@ -525,15 +584,13 @@ ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params)
     /* ├─ Block State Table ├─
      * per-Block 状态数组由调用者提供（params->blocks），承载
      * erase_count / valid_count / state / sb_id / rr，read recovery 靠它供电。
-     * 逐页有效位图是**独立表**（params->valid_map，主流弹性项，见 bst.h 文件头）。
-     * 两者都由调用者提供，任一未提供则初始化失败。 */
-    if ((params->blocks == NULL) || (params->valid_map == NULL))
+     * 无位图表（v0.60 删；有效性逐 CW 由 META + L2P 反查，见 bst.h 文件头）。 */
+    if (params->blocks == NULL)
     {
-        LOGE("[FTL] init failed: params->blocks / valid_map is NULL\r\n");
+        LOGE("[FTL] init failed: params->blocks is NULL\r\n");
         return FTL_ERROR;
     }
     memset(params->blocks, 0, sizeof(ftl_block_t) * FTL_BLOCK_TOTAL);
-    memset(params->valid_map, 0, sizeof(uint64_t) * PLANE_NUM * FTL_BLOCK_TOTAL);
 
     /* ├─ L2P Cache（绑定本 FTL 的 ch/ce/lun，固定位置寻址与路由据此展开）── */
     l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
@@ -667,111 +724,162 @@ void ftl_service(ftl_context_t *ftl)
 
 /* ── 子操作下发（S2：一条 host 请求 → 多个 FC 子操作）──
  *
- * ftl_issue_subop 下发**一个**子操作（1 或 2 页），三态返回：
+ * ftl_issue_subop 下发**一个**子操作 = 一个 **pair 窗口内**的连续 LBA 段
+ * （≤ FTL_LBA_PER_PAIR = 8 个 CW = 2 个 plane 页），三态返回：
  *   FTL_OK    已下发（或如未映射读般**同步完成**，此时不进 outstanding）
  *   FTL_AGAIN 瞬态背压（命令/desc/buffer 池满、SQ 满、pending 表满）——排队重试
  *   FTL_ERROR 永久失败（无可用块 / 配置错误 / 映射表损坏）
  *
  * ⚠ 三态分类是全局枢纽：现状把这三类全当致命，正是"大请求在第 N 个子操作崩"的根因。
  *
- * ⚠ planes 是**入参兼出参**：读路径查出相邻两 LBA 落在**同一个 plane** 时会把它
- *   降级为 1（见下），调用者（ftl_drain_group）据此只推进 1 个 LBA。
+ * ⚠ n_cw 是**入参兼出参**：调用者给出本窗口内可提供的最大 LBA 数，本函数按
+ *   「L2P 可分组性」（读）或「窗口边界」（写）收缩后回填**实际消费的 LBA 数**，
+ *   调用者（ftl_drain_group）据此推进进度。
+ *
+ * ⚠ **一个子操作最多覆盖每个 plane 一个物理页**——这是 FC 建链的硬约束：
+ *   fc_build_request_data_planes 断言同 plane 的各 desc 共享 block/page/lun，且
+ *   request->plane_paa[plane] 取自该 plane **第一条** desc（release 下只是断言 ⇒
+ *   违反会静默用错行地址）。子操作被 pair 窗口（FTL_LBA_PER_PAIR 对齐）夹住 ⇒
+ *   连续 LBA 段最多跨两个 plane 段，每段只落在一个页内，约束自动满足。
  */
 
 /* --------------------------------------------------------------------
  * ftl_issue_subop
- *   功能：下发**一个**子操作（1 或 2 页）——查/分配 PBA、建 FC 命令、注册 pending、submit。
- *   参数：ftl —— 实例；gi —— 组下标；internal_lba —— 片内 local LBA；
- *         buffer —— 数据缓冲；planes —— 入参兼出参（读路径可能降级为 1）。
+ *   功能：下发**一个**子操作（pair 窗口内的连续 LBA 段）——查/分配 PBA、建 FC 命令、
+ *         注册 pending、submit。
+ *   参数：ftl —— 实例；gi —— 组下标；internal_lba —— 片内 local LBA（= 扇区号）；
+ *         buffer —— 数据缓冲；n_cw —— 入参兼出参（最大可提供 / 实际消费的 LBA 数）。
  *   返回：三态——FTL_OK 已下发（或如未映射读般**同步完成**，不进 outstanding）；
  *         FTL_AGAIN 瞬态背压（命令/desc/buffer 池满、SQ 满、pending 表满）→ 排队重试；
  *         FTL_ERROR 永久失败（无可用块 / 映射表损坏）。
- *   实现要点：⚠ 三态分类是全局枢纽（见上方分区头）。读路径相邻两 LBA 落在**同一
- *             plane** 时降级为单 plane（GC/WL 搬移会把有效页一律落到 plane 0）。
+ *   实现要点：⚠ 三态分类是全局枢纽（见上方分区头）。
+ *             · 读：逐 LBA 查 L2P，按 (物理 plane, 页) 分组——未映射、或同 plane 换了页
+ *               即收缩；首个 LBA 就未映射则同步零填 1 个 LBA 并消费它。
+ *             · 写：按窗口内 LBA 段算 flat 位图（每个 LBA 落自己 plane 位的页 + 自己的
+ *               CW），一次 allocator_alloc_pair 拿两个 plane 的页。
  * -------------------------------------------------------------------- */
-static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t internal_lba, void *buffer, uint8_t *planes)
+static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t internal_lba, void *buffer, uint8_t *n_cw)
 {
     ftl_io_group_t *g = &ftl->groups[gi];
     fc_command_t   *cmd;
     nand_pba_t      pba[PLANE_NUM];
     nand_pba_t      new_pba[PLANE_NUM];
-    nand_pba_t      old_pba  = NAND_PBA_INVALID;
-    nand_pba_t      old_pba1 = NAND_PBA_INVALID;
-    uint8_t         nplanes  = *planes; /* 本子操作实际页数（可能被读路径降级为 1） */
+    uint32_t        cw_bitmap = 0U; /* flat：bit = plane*CW_NUM + cw */
+    uint8_t         n;
+    uint8_t         nplanes;
     uint32_t        data_size;
     int             ret;
 
-    ASSERT((nplanes == 1U) || (nplanes == 2U));
+    ASSERT(ftl != NULL);
+    ASSERT(buffer != NULL);
+    ASSERT(n_cw != NULL);
+    ASSERT((*n_cw > 0U) && (*n_cw <= (uint8_t)FTL_LBA_PER_PAIR));
+
+    /* 夹到 pair 窗口：一个子操作不跨窗口（窗口内最多两个 plane 段、每段一个页）。
+     * ⚠ L2P region 512 对齐且 lba_to_local 保留低 9 位 ⇒ 窗口绝不跨实例/region。 */
+    {
+        const lba_t   window_end = ftl_lba_pair_base(internal_lba) + (lba_t)FTL_LBA_PER_PAIR;
+        const uint8_t avail      = (uint8_t)(window_end - internal_lba);
+
+        n = (*n_cw < avail) ? *n_cw : avail;
+    }
+    ASSERT(n > 0U);
+
+    pba[0]     = NAND_PBA_INVALID;
+    pba[1]     = NAND_PBA_INVALID;
+    new_pba[0] = NAND_PBA_INVALID;
+    new_pba[1] = NAND_PBA_INVALID;
 
     if (g->op == (uint8_t)PENDING_OP_READ)
     {
-        /* 查 L2P：两 plane 物理位置**各自独立**（Policy B：SB 两 plane 不再同号）。
-         * 未映射 → 本 LBA 按全零**同步完成**（不进 outstanding）。
-         * ⚠ 只覆盖**自己**这一个 LBA：相邻 LBA 的映射与它无关（GC/WL 会让相邻两页
-         *   落在不同 plane、不同生命周期），余下 LBA 由 drain 的下一轮处理。 */
-        pba[0] = l2p_cache_read(&ftl->cache, internal_lba);
-        if (pba[0] == FTL_PBA_INVALID)
-        {
-            nplanes = 1U;
-            *planes = 1U;
-            memset(buffer, 0, FTL_READ_USER_SIZE);
-            return FTL_OK;
-        }
+        /* 逐 LBA 查 L2P 并按 (物理 plane, 页) 分组。收缩条件：
+         *   · 未映射（INVALID）—— 本 LBA 不进本子操作（下一轮单独处理）
+         *   · 同 plane 但换了页 —— 一条命令每 plane 只能一个页，装不下
+         *   · 非法 PBA / 物理 plane ≠ LBA 的 plane 位 —— 映射表损坏 → FTL_ERROR */
+        uint8_t k;
 
-        /* 边界不变量（fc.c 的 fc_poll_fill_queue 靠它）：**进 FC 的 PBA 必须合法**。
-         * L2P 条目既不是 FTL_PBA_INVALID 又不是合法 PBA ⇒ 映射表已损坏（介质 bit rot、
-         * 半编程页被 ECC「纠」过、跨介质格式复用旧页）。**必须在此拦下**：
-         * pba_to_ch/ce/lun 会把越界位当路由字段，放行即让 FC 按它直接索引
-         * suspended[][][]（栈越界写）；且坏 PBA 还会经 pba_to_paa 掩位后建出一条
-         * 读**别的物理页**的 desc 链——静默读到错误数据。
-         * 这是**数据**损坏而非编程错误 ⇒ 报错返回（不 ASSERT），由 drain 把本组标
-         * IO_ERROR 交给 host，不 brick 设备。 */
-        if (pba_is_valid(pba[0]) == 0U)
+        for (k = 0U; k < n; k++)
         {
-            LOGE("[FTL] rd lba=%lu: L2P entry 0x%08lx is not a valid PBA\r\n",
-                 (unsigned long)internal_lba,
-                 (unsigned long)pba[0]);
-            return FTL_ERROR;
-        }
+            const lba_t      l = (lba_t)(internal_lba + (lba_t)k);
+            const nand_pba_t p = l2p_cache_read(&ftl->cache, l);
+            uint8_t          pl;
+            nand_pba_t       pg;
 
-        if (nplanes == 2U)
-        {
-            pba[1] = l2p_cache_read(&ftl->cache, (lba_t)(internal_lba + 1U));
-
-            /* 未映射（INVALID）**先判**：它走降级路径（既有语义），不是损坏 */
-            if (pba[1] == FTL_PBA_INVALID)
+            if (p == FTL_PBA_INVALID)
             {
-                nplanes = 1U;
-                *planes = 1U;
+                break; /* 未映射：收缩到此为止 */
             }
-            else if (pba_is_valid(pba[1]) == 0U)
+
+            /* 边界不变量（fc.c 的 fc_poll_fill_queue 靠它）：**进 FC 的 PBA 必须合法**。
+             * L2P 条目既不是 FTL_PBA_INVALID 又不是合法 PBA ⇒ 映射表已损坏（介质 bit rot、
+             * 半编程页被 ECC「纠」过、跨介质格式复用旧页）。**必须在此拦下**：
+             * pba_to_ch/ce/lun 会把越界位当路由字段，放行即让 FC 按它直接索引
+             * suspended[][][]（栈越界写）；且坏 PBA 还会经 pba_to_paa 掩位后建出一条
+             * 读**别的物理页**的 desc 链——静默读到错误数据。
+             * 这是**数据**损坏而非编程错误 ⇒ 报错返回（不 ASSERT），由 drain 把本组标
+             * IO_ERROR 交给 host，不 brick 设备。 */
+            if (pba_is_valid(p) == 0U)
             {
-                /* 同 pba[0] 的判据：不是 INVALID 又不是合法 PBA = 映射表损坏 */
                 LOGE("[FTL] rd lba=%lu: L2P entry 0x%08lx is not a valid PBA\r\n",
-                     (unsigned long)(internal_lba + 1U),
-                     (unsigned long)pba[1]);
+                     (unsigned long)l,
+                     (unsigned long)p);
                 return FTL_ERROR;
             }
-            /* 降级判定：multi-plane 命令要求两个 LBA 落在**不同** plane —— 但"LBA 相邻"
-             * 只说明它们当初是**一起写**的（写路径 allocator_alloc_pair 给 plane 0/1），
-             * 不保证现在还在不同 plane：GC/WL 搬移把有效页一律落到 plane 0
-             * （allocator_alloc 只返回 pair[0]，见 allocator.c），原本 plane1 的奇数 LBA
-             * 因此可能与偶数 LBA 同 plane。此时合成一条 multi-plane 命令会把同一个
-             * (plane,cw) 挂两次 = 链构造错误（fc_interface.c 的 ASSERT 就是拦这个）。
-             * 降级为单 plane：只读本 LBA，下一个 LBA 留给 drain 的下一轮。
-             * 配对是**每次操作的临时判断**，不是持久属性——这正是"访问哪些物理单元由
-             * FTL 自己决定"的含义（fc_nand_design §26.2）。 */
-            else if (pba_to_plane(pba[0]) == pba_to_plane(pba[1]))
+
+            pl = (uint8_t)pba_to_plane(p);
+            pg = pba_page(p);
+
+            /* CW 级映射的结构不变量：**物理 plane == LBA 的 plane 位**。
+             * 违反 ⇒ FC 侧 desc->meta（由**物理** plane/cw 铸出）还原出的扇区 LBA 不是
+             * 这一条，读校验必挂 MATA_ERROR；且位图段（按 plane 位算）与 paa 的 plane 位
+             * 会分叉 ⇒ 空链。写路径由构造保证（新页从 pair 取），读路径在此拦下。
+             * 属映射表损坏（旧介质格式 / bit rot），不是编程错误。 */
+            if (pl != ftl_lba_plane(l))
             {
-                nplanes = 1U;
-                *planes = 1U;
+                LOGE("[FTL] rd lba=%lu: plane mismatch pba=0x%08lx\r\n",
+                     (unsigned long)l,
+                     (unsigned long)p);
+                return FTL_ERROR;
             }
+
+            if ((pba[pl] != NAND_PBA_INVALID) && (pba_page(pba[pl]) != pg))
+            {
+                break; /* 同 plane 跨页：本子操作到此为止，余下交给下一轮 */
+            }
+
+            pba[pl] = pg;
+            cw_bitmap |= (uint32_t)1U << (((uint32_t)pl * CW_NUM) + (uint32_t)ftl_lba_cw(l));
         }
+
+        if (k == 0U)
+        {
+            /* 首 LBA 未映射：同步返回全零，消费 1 个 LBA（不进 outstanding）。
+             * ⚠ 只覆盖**自己**这一个 LBA：相邻 LBA 的映射与它无关，由 drain 下一轮处理。 */
+            memset(buffer, 0, FTL_IU_BYTES);
+            *n_cw = 1U;
+            return FTL_OK;
+        }
+        n = k;
     }
     else
     {
-        /* 分配新 PBA（**逐 plane 独立选块**——Policy B）。Free Pool 耗尽 → 同步跑一轮
-         * 紧急 GC（回收 1 个 Super Block），归还后再重试一次。真无空间才永久失败。 */
+        /* 按窗口内 LBA 段算 flat 位图：每个 LBA 落**自己 plane 位**的页 + 自己的 CW。
+         * ⚠「物理 plane == LBA 的 plane 位」在此由构造保证——新页从 pair 取，pair[p]
+         *   的 plane 位就是 p（见下方 ASSERT）。 */
+        uint8_t k;
+
+        for (k = 0U; k < n; k++)
+        {
+            const lba_t l = (lba_t)(internal_lba + (lba_t)k);
+
+            cw_bitmap |= (uint32_t)1U << (((uint32_t)ftl_lba_plane(l) * CW_NUM) + (uint32_t)ftl_lba_cw(l));
+        }
+
+        /* 分配新页（**逐 plane 独立选块**——Policy B）。Free Pool 耗尽 → 同步跑一轮
+         * 紧急 GC（回收 1 个 Super Block），归还后再重试一次。真无空间才永久失败。
+         * ⚠ pair 一次给出**两个** plane 的页：只覆盖一个 plane 的子操作会浪费另一 plane
+         *   在该页索引上的页（不编程 ⇒ 读回全 FF，GC 快路径直接跳过，仅少一个空闲页）。
+         *   顺序写零浪费；随机 512B 写有代价——已登记（ftl_optimization_plan.md §八）。 */
         if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) == NAND_PBA_INVALID)
         {
             super_block_t *victim;
@@ -788,16 +896,29 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
             }
         }
 
-        /* 读旧 PBA（journal 记录用）。planes=2 时 plane1 页也要读旧映射。 */
-        old_pba  = l2p_cache_read(&ftl->cache, internal_lba);
-        old_pba1 = (nplanes == 2U) ? l2p_cache_read(&ftl->cache, (lba_t)(internal_lba + 1U))
-                                   : NAND_PBA_INVALID;
-        pba[0]   = new_pba[0];
-        pba[1]   = new_pba[1];
+        ASSERT(pba_to_plane(new_pba[0]) == 0U); /* allocator_alloc_pair 的契约 */
+        ASSERT(pba_to_plane(new_pba[1]) == 1U);
+        pba[0] = new_pba[0];
+        pba[1] = new_pba[1];
     }
 
-    /* 本子操作实际字节数（读路径可能已降级为单页） */
-    data_size = FTL_READ_USER_SIZE * nplanes;
+    /* 本子操作覆盖的 plane 数（决定 operation 码与 plane 段） */
+    {
+        uint8_t p;
+
+        nplanes = 0U;
+        for (p = 0U; p < PLANE_NUM; p++)
+        {
+            if ((cw_bitmap & ((uint32_t)((1U << CW_NUM) - 1U) << ((uint32_t)p * CW_NUM))) != 0U)
+            {
+                nplanes++;
+            }
+        }
+    }
+    ASSERT((nplanes == 1U) || (nplanes == 2U));
+
+    /* 本子操作实际字节数（= 消费的 LBA 数 × 512B） */
+    data_size = FTL_IU_BYTES * n;
 
     /* 分配 FC 命令槽（池空 = 瞬态） */
     cmd = fc_command_alloc();
@@ -806,32 +927,19 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
         return FTL_AGAIN;
     }
 
-    /* 配置命令头（按 op + planes 选 operation 码） */
+    /* 配置命令头（按 op + plane 数选 operation 码；multi_plane 决定 plane 段，
+     * 必须早于 ftl_cmd_setup_ppa_pair_cw——后者按段校验位图） */
     if (g->op == (uint8_t)PENDING_OP_READ)
     {
-        if (nplanes == 1U)
-        {
-            cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-            cmd->config.multi_plane = 0U;
-        }
-        else
-        {
-            cmd->config.operation   = OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT;
-            cmd->config.multi_plane = 2U;
-        }
+        cmd->config.operation   = (nplanes == 2U) ? OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT
+                                                  : OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
+        cmd->config.multi_plane = (nplanes == 2U) ? 2U : 0U;
     }
     else
     {
-        if (nplanes == 1U)
-        {
-            cmd->config.operation   = OP_NORMAL_PROGRAM_PAGE;
-            cmd->config.multi_plane = 0U;
-        }
-        else
-        {
-            cmd->config.operation   = OP_PROGRAM_PAGE_MULTI_PLANE;
-            cmd->config.multi_plane = 2U;
-        }
+        cmd->config.operation   = (nplanes == 2U) ? OP_PROGRAM_PAGE_MULTI_PLANE
+                                                  : OP_NORMAL_PROGRAM_PAGE;
+        cmd->config.multi_plane = (nplanes == 2U) ? 2U : 0U;
     }
     cmd->config.cw        = 3U;
     cmd->config.crc       = FC_CRC_ENABLE;
@@ -840,17 +948,22 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
     cmd->config.chain     = FC_CHAIN_END;
     cmd->config.page_type = FC_PAGE_TYPE_LP;
     cmd->module           = FC_COMMAND_MODULE_FTL;
-    cmd->meta             = (DWORD)(internal_lba << CW_WIDTH); /* 扇区 LBA（v24） */
+    /* 本命令的**窗口基址**（扇区 LBA，低 3 位清零）：FC 侧 desc->meta =
+     * (meta & ~PLANE_CW_MASK) | (plane<<2) | cw ⇒ 逐 CW 铸出该 CW 的扇区 LBA。
+     * 传窗口基址（而非 internal_lba）语义更直白，两者在 FC 掩掉低 3 位后等价。 */
+    cmd->meta             = (DWORD)ftl_lba_pair_base(internal_lba);
 
-    /* 建 desc 链（逐 plane 各自的 PBA）；desc/buffer 池空 → 瞬态背压 */
-    ret = ftl_cmd_setup_ppa_pair(cmd, pba);
+    /* 建 desc 链（逐 plane 各自的 PBA，位图 = 本子操作实际覆盖的 CW）；
+     * desc/buffer 池空 → 瞬态背压 */
+    ret = ftl_cmd_setup_ppa_pair_cw(cmd, pba, cw_bitmap);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
         return (ret == FTL_AGAIN) ? FTL_AGAIN : FTL_ERROR;
     }
 
-    /* 写：把数据灌进 desc 链（读不需要） */
+    /* 写：把数据灌进 desc 链（读不需要）。链序 = plane 段序 + 段内 CW 升序，
+     * 与 LBA 的 [plane][cw] 布局同序 ⇒ 按链序打包消费 buffer 即 LBA 序。 */
     if (g->op == (uint8_t)PENDING_OP_WRITE)
     {
         ret = ftl_cmd_write_data(cmd, buffer, data_size);
@@ -861,14 +974,25 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
         }
     }
 
-    /* 注册 pending 子操作（必须早于 submit，避免竞态）。单页请求 plane1 字段传 INVALID；
+    /* 注册 pending 子操作（必须早于 submit，避免竞态）。读请求的写专用字段传 INVALID；
      * lba 传**片内 local**（L2P/Journal 均按 local 索引）。 */
-    ret = pending_add(ftl, ftl_cmd_id(cmd), gi, internal_lba, buffer, nplanes, old_pba, (g->op == (uint8_t)PENDING_OP_WRITE) ? new_pba[0] : NAND_PBA_INVALID, old_pba1, ((g->op == (uint8_t)PENDING_OP_WRITE) && (nplanes == 2U)) ? new_pba[1] : NAND_PBA_INVALID, 0U, (ftl_pending_op_t)g->op);
+    ret = pending_add(ftl,
+                      ftl_cmd_id(cmd),
+                      gi,
+                      internal_lba,
+                      buffer,
+                      n,
+                      (g->op == (uint8_t)PENDING_OP_WRITE) ? new_pba[0] : NAND_PBA_INVALID,
+                      (g->op == (uint8_t)PENDING_OP_WRITE) ? new_pba[1] : NAND_PBA_INVALID,
+                      0U,
+                      (ftl_pending_op_t)g->op);
     if (ret != 0)
     {
         (void)fc_command_release(cmd);
         return FTL_AGAIN; /* pending 表满：瞬态 */
     }
+
+    *n_cw = n; /* 回填实际消费的 LBA 数（调用者据此推进） */
 
     /* 记账（**必须早于 fc_submit**——submit 之后 completion 可能立即被 drain 处理） */
     g->outstanding++;
@@ -891,11 +1015,12 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
  *   参数：ftl —— 实例；gi —— 组下标。
  *   返回：无。
  *   实现要点：**进度单位是 LBA 偏移**（g->next / g->total 都以 LBA 计），不是子操作序号：
- *             一个子操作消费 1 或 2 个 LBA，取决于 FTL 现场判断能否合成 multi-plane 命令
- *             （读路径可能降级，见 ftl_issue_subop）——"怎么拆"完全由 FTL 决定，调用者
- *             不必预先算出子操作数。每次迭代**重取** g（下发可能改变组状态甚至释放本组）；
- *             全部子操作都在本函数外异步完成，故循环末尾统一试触发组完成通知——覆盖
- *             "整段未映射读"这种从不进 outstanding、无人触发完成的组。
+ *             一个子操作消费 1..FTL_LBA_PER_PAIR（8）个 LBA，取决于 FTL 现场判断
+ *             （读路径按 L2P 分组收缩、写路径按 pair 窗口夹住，见 ftl_issue_subop）——
+ *             "怎么拆"完全由 FTL 决定，调用者不必预先算出子操作数。每次迭代**重取** g
+ *             （下发可能改变组状态甚至释放本组）；全部子操作都在本函数外异步完成，
+ *             故循环末尾统一试触发组完成通知——覆盖"整段未映射读"这种从不进 outstanding、
+ *             无人触发完成的组。
  * -------------------------------------------------------------------- */
 static void ftl_drain_group(ftl_context_t *ftl, uint16_t gi)
 {
@@ -906,20 +1031,20 @@ static void ftl_drain_group(ftl_context_t *ftl, uint16_t gi)
         const uint32_t off    = g->next; /* 已下发到的 LBA 偏移（g->next 以 LBA 计，非子操作序号） */
         const uint32_t remain = g->count - off;
         lba_t          glba   = (lba_t)(g->lba + off);
-        void          *buffer = (uint8_t *)g->buffer + ((size_t)off * FTL_READ_USER_SIZE);
-        /* 首选双 plane（相邻两 LBA 合成一条 multi-plane 命令）。读路径查出两 LBA
-         * 落在同一 plane 时会把 planes 降级为 1（见 ftl_issue_subop），故此处按
-         * **实际消费的 LBA 数**推进 next。 */
-        uint8_t      planes   = (remain >= 2U) ? 2U : 1U;
-        ftl_status_t st       = ftl_issue_subop(ftl, gi, lba_to_local(glba), buffer, &planes);
+        void          *buffer = (uint8_t *)g->buffer + ((size_t)off * FTL_IU_BYTES);
+        /* 本窗口内可提供的最大 LBA 数（≤ 一个 pair 窗口）。实际消费几个由
+         * ftl_issue_subop 回填——读路径按 L2P 分组收缩，写路径按窗口边界收缩。 */
+        uint8_t      n_cw     = (remain >= (uint32_t)FTL_LBA_PER_PAIR) ? (uint8_t)FTL_LBA_PER_PAIR
+                                                                       : (uint8_t)remain;
+        ftl_status_t st       = ftl_issue_subop(ftl, gi, lba_to_local(glba), buffer, &n_cw);
 
         g = &ftl->groups[gi]; /* 重取：下发可能改变组状态 */
 
         if (st == FTL_OK)
         {
-            ASSERT((planes == 1U) || (planes == 2U));
+            ASSERT((n_cw > 0U) && (n_cw <= (uint8_t)FTL_LBA_PER_PAIR));
             g->stalls = 0U;
-            g->next += planes;
+            g->next += n_cw;
             continue;
         }
 
@@ -1104,9 +1229,12 @@ void ftl_flush(ftl_context_t *ftl)
 
 /* --------------------------------------------------------------------
  * ftl_trim
- *   功能：逐 LBA 取消映射（TRIM）——清 bitmap/VPC + 写 L2P INVALID + 记 Journal。
+ *   功能：逐 LBA 取消映射（TRIM）——减 CW 有效计数 + 写 L2P INVALID + 记 Journal。
  *   参数：ftl —— 实例；lba —— 起始 LBA；count —— LBA 数（0 视为 1，兼容单 LBA 调用）。
  *   返回：无。
+ *   实现要点：CW 级映射下 1 个 LBA = 1 个 CW ⇒ 逐 LBA 减 1 个有效 CW 计数
+ *             （valid_count 是**精确**的 CW 计数；v0.60 起无常驻位图，有效性逐 CW
+ *             由页内 META + L2P 反查判定——见 bst.h 文件头）。
  * -------------------------------------------------------------------- */
 void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
 {
@@ -1131,15 +1259,13 @@ void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
         nand_pba_t old_pba;
         lba_t      local_lba = lba_to_local(lba + i);
 
-        /* 查旧映射：若非 INVALID，同步清该页的 bitmap/VPC（否则 VPC 虚高，GC 选 victim 不准） */
+        /* 查旧映射：若非 INVALID，同步减该 CW 的有效计数（否则 valid_count 虚高，
+         * GC 选 victim 不准）。 */
         old_pba = l2p_cache_read(&ftl->cache, local_lba);
         if (old_pba != NAND_PBA_INVALID)
         {
             uint16_t gblock = (uint16_t)ftl_pba_gblock(old_pba);
-            ftl_block_clr_valid(&ftl->alloc.blocks[gblock],
-                                ftl->alloc.valid_map[gblock],
-                                (uint8_t)pba_to_plane(old_pba),
-                                (uint8_t)pba_to_page(old_pba));
+            ftl_block_sub_valid(&ftl->alloc.blocks[gblock]);
         }
 
         l2p_cache_write(&ftl->cache, local_lba, FTL_PBA_INVALID);

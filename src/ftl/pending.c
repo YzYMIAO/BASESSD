@@ -49,21 +49,23 @@ void pending_init(ftl_context_t *ftl)
  * pending_add
  *   功能：注册一个 pending 子操作（首个空闲槽），字段按值拷入。
  *   参数：ftl —— 上下文；cmd_id —— FC command_id；group —— 所属完成组下标；
- *         lba/buffer/planes —— 子操作起始 LBA / 缓冲 / 页数（1 单 plane，2 multi-plane）；
- *         old_pba/new_pba(/1) —— 写前旧 PBA、新分配 PBA（plane0/plane1，读传 INVALID）；
+ *         lba/buffer/n_cw —— 子操作起始 LBA / 缓冲 / 搬运的 CW 数（512B 单元）；
+ *         new_pba/new_pba1 —— 写：新分配的 plane0 / plane1 **页** PBA（未覆盖传 INVALID）；
  *         cache_intermediate —— Cache Program 中间页标志（1 跳过 L2P/Journal 更新）；
  *         op —— 操作类型（完成路径判别依据）。
  *   返回：FTL_OK 成功，FTL_ERROR 表满（FTL_PENDING_MAX=32）。
  *   实现要点：子操作字段按值拷入 ⇒ submit 返回后调用者可复用其局部量；表满属
  *             预期内的资源结果，保留返回码（判据 3）。
+ *             ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P（见 ftl_pending_req_t 注释）。
  * -------------------------------------------------------------------- */
-int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint16_t group, lba_t lba, void *buffer, uint8_t planes, nand_pba_t old_pba, nand_pba_t new_pba, nand_pba_t old_pba1, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op)
+int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint16_t group, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op)
 {
     uint8_t i;
 
     /* 层内接口：调用者 ftl_submit_read/write 已在入口判过 ftl / req 非 NULL */
     ASSERT(ftl != NULL);
     ASSERT(group < FTL_GROUP_MAX);
+    ASSERT((n_cw > 0U) && (n_cw <= FTL_LBA_PER_PAIR));
 
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -73,12 +75,10 @@ int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint16_t group, lba_t lba, 
             ftl->pending[i].command_id         = cmd_id;
             ftl->pending[i].group              = group;
             ftl->pending[i].op                 = (uint8_t)op;
-            ftl->pending[i].planes             = planes;
+            ftl->pending[i].n_cw               = n_cw;
             ftl->pending[i].lba                = lba;
             ftl->pending[i].buffer             = buffer;
-            ftl->pending[i].old_pba            = old_pba;
             ftl->pending[i].new_pba            = new_pba;
-            ftl->pending[i].old_pba1           = old_pba1;
             ftl->pending[i].new_pba1           = new_pba1;
             ftl->pending[i].cache_intermediate = cache_intermediate;
             return FTL_OK;

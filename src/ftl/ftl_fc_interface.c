@@ -67,6 +67,22 @@ static uint32_t ftl_cmd_resolve_cw_bitmap(uint32_t bitmap, uint8_t plane_first, 
 
     ASSERT(bitmap != 0U);              /* 字面位图：0 = 空集 = 调用者忘了给（v27 起无隐式展开） */
     ASSERT((bitmap & ~allowed) == 0U); /* 越出本命令 plane 段 = 编程错误 */
+
+    /* multi-plane 命令的位图必须**覆盖段内每一个 plane**——NAND 侧多 plane handler 无条件
+     * 遍历 PLANE_NUM 下行地址，未覆盖 plane 会被凭空造出回退地址（见 fc.c 的
+     * fc_build_request_data_planes）。CW 级映射下「一条子操作只覆盖半个 pair」是常态，
+     * 那种情况必须用**单 plane op**（multi_plane = 0），不能用 multi-plane 配窄位图。
+     * 此处是**上游**守卫：FC 侧还有一道 release 拒绝（INVALID_ARGUMENT），两道都在，
+     * 因为本函数在 debug 下会先炸、给出比"命令静默失败"更清楚的现场。 */
+    if (plane_count > 1U)
+    {
+        uint8_t p;
+        for (p = 0U; p < plane_count; p++)
+        {
+            const uint32_t plane_bits = bitmap & ((uint32_t)((1U << CW_NUM) - 1U) << ((uint32_t)(plane_first + p) * CW_NUM));
+            ASSERT(plane_bits != 0U);
+        }
+    }
     return bitmap;
 }
 
@@ -180,7 +196,19 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba)
  *             ftl_cmd_configure_descriptors **完全一致**（同一个 ftl_cmd_resolve_cw_bitmap），
  *             唯一差别是行地址**逐 plane 各自取**。
  * -------------------------------------------------------------------- */
-ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM])
+/* --------------------------------------------------------------------
+ * ftl_cmd_build_pair_chain
+ *   功能：按**显式** cw_bitmap 逐 plane 建 desc 链（Policy B：各 plane 行地址独立）。
+ *   参数：cmd —— 命令（config.multi_plane 与 paa 须已写好，段由它们决定）；
+ *         pba —— 各 plane 的 PBA（**只校验本命令实际置位的 plane**）；
+ *         cw_bitmap —— flat 字面位图（bit = plane*CW_NUM + cw），须落在 plane 段内。
+ *   返回：FTL_OK / FTL_AGAIN（desc/buffer 池空，瞬态背压）/ FTL_ERROR。
+ *   实现要点：**未置位的 plane 整体跳过**——连 pba_is_valid 都不判。CW 级映射下一条
+ *             子操作常只覆盖半个 pair（如只写 plane1 的 4 个 CW），此时调用者按约定
+ *             可让另一 plane 的 pba 保持未初始化（见 ftl_issue_subop 的 pba 局部数组）。
+ *             位图规则与 ftl_cmd_configure_descriptors 共用 ftl_cmd_resolve_cw_bitmap。
+ * -------------------------------------------------------------------- */
+static ftl_status_t ftl_cmd_build_pair_chain(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM], uint32_t cw_bitmap)
 {
     uint32_t mask;
     uint8_t  plane_count;
@@ -188,53 +216,31 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
     uint8_t  plane_last;
     uint8_t  i;
 
-    if ((cmd == NULL) || (pba == NULL))
-    {
-        return FTL_ERROR;
-    }
-
-    /* 边界不变量：同 ftl_cmd_setup_ppa —— 进 FC 的 PBA 必须合法（ch/ce/lun 被当
-     * suspended[][][] 下标用）。只断言**本命令实际用到**的元素：单 plane 命令的
-     * 调用者按约定可让 pba[1] 保持未初始化（见 ftl_issue_subop 的 pba 局部数组）。 */
-    ASSERT(pba_is_valid(pba[0]));
-
-    /* 拓扑取 pba[0]（同一命令两 plane 必属同一 ch/ce/lun）；command->paa 写 pba[0] 转出的 PAA——
-     * 它是 fc_command_plane_span 定 plane 段的输入，各 plane 的实际行地址逐条由 row 决定。 */
-    cmd->config.ch  = (DWORD)pba_to_ch(pba[0]);
-    cmd->config.ce  = (DWORD)pba_to_ce(pba[0]);
-    cmd->config.lun = (DWORD)pba_to_lun(pba[0]);
-    cmd->paa        = pba_to_paa(pba[0]); /* v47：PBA→PAA 在 FTL 侧一次转出 */
-
-    if (ftl_cmd_needs_desc_chain(cmd) == 0U)
-    {
-        cmd->desc_id = FC_DESCRIPTOR_ID_INVALID;
-        return FTL_OK;
-    }
-
-    /* v23：plane 段与位图展开规则与 ftl_cmd_configure_descriptors **完全一致**（同一个
-     * ftl_cmd_resolve_cw_bitmap）。本函数与它的唯一差别只是**行地址逐 plane 各自取**（Policy B），
-     * 而不是"两个入口各认一个旋钮"——此前这里读 config.cw、那边读 param.cw_bitmap，
-     * 于是 param.cw_bitmap 这条通道主数据路径根本不看。
-     * v27/v28：位图是字面位图（0 = 空集），本入口语义就是「整段」——自己算好当实参
-     * 交给下面的 ftl_cmd_resolve_cw_bitmap（须在 pba 写好之后算）。 */
     plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
-    mask        = ftl_cmd_resolve_cw_bitmap(fc_command_plane_span_cw_bitmap(cmd), plane_first, plane_count);
+    mask        = ftl_cmd_resolve_cw_bitmap(cw_bitmap, plane_first, plane_count);
 
     for (i = 0U; i < plane_count; i++)
     {
-        /* ⚠ plane 号取自 PBA 自己的 plane 位，不是下标 i：读路径的 pba[] 是按 LBA 查出来的，
-         *   plane 取决于当初怎么写进去（`wr 0 2` 之后 lba 1 映射到 plane 1），下标与 plane 号
-         *   并不总相等。链序仍按 pba[] 顺序 → ftl_cmd_read_data 拷出的布局与调用者期望一致。 */
-        ASSERT(pba_is_valid(pba[i])); /* 逐 plane 的行地址都由它转出，越界位会静默算错地址 */
-        const uint8_t    plane   = (uint8_t)pba_to_plane(pba[i]);
-        const nand_paa_t row_paa = pba_to_paa(pba[i]); /* v47：PBA→PAA 在 FTL 侧转出 */
-        uint8_t          cw;
+        /* ⚠ plane 号取自**段内偏移**（plane_first + i），与位图的绝对编号一致；
+         *   pba 的下标一律用 **plane 号**（不是 i）——单 plane 命令的 plane_first 可能是 1
+         *   （paa 的 plane 位决定），此时 i==0 而 plane==1，用 pba[i] 会拿到 plane0 的行地址。 */
+        const uint8_t  plane      = (uint8_t)(plane_first + i);
+        const uint32_t plane_bits = mask & ((uint32_t)((1U << CW_NUM) - 1U) << ((uint32_t)plane * CW_NUM));
+        uint8_t        cw;
+
+        if (plane_bits == 0U)
+        {
+            continue; /* 本 plane 无 CW：不建链、不校验 PBA */
+        }
+
+        ASSERT(pba_is_valid(pba[plane]));                  /* 逐 plane 的行地址都由它转出，越界位会静默算错地址 */
+        const nand_paa_t row_paa = pba_to_paa(pba[plane]); /* v47：PBA→PAA 在 FTL 侧转出 */
 
         for (cw = 0U; cw < CW_NUM; cw++)
         {
             fc_status_t st;
 
-            if ((mask & ((uint32_t)1U << ((uint32_t)plane * CW_NUM + cw))) == 0U)
+            if ((plane_bits & ((uint32_t)1U << cw)) == 0U)
             {
                 continue;
             }
@@ -251,6 +257,80 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
     }
 
     return FTL_OK;
+}
+
+/* 写拓扑（ch/ce/lun）与行地址基址（cmd->paa = base_pba 的 PAA）——不含建链。
+ *
+ * base_pba 必须是**本命令实际访问的第一个 plane**的 PBA：`fc_command_plane_span` 用
+ * cmd->paa 的 plane 位定单 plane 命令的 plane 段，给错了段就错。整段入口（两 plane
+ * 都在）传 pba[0]；CW 级入口只覆盖 plane1 时须传 pba[1]（见 ftl_cmd_setup_ppa_pair_cw）。 */
+static void ftl_cmd_bind_pair_topo(fc_command_t *cmd, nand_pba_t base_pba)
+{
+    cmd->config.ch  = (DWORD)pba_to_ch(base_pba);
+    cmd->config.ce  = (DWORD)pba_to_ce(base_pba);
+    cmd->config.lun = (DWORD)pba_to_lun(base_pba);
+    cmd->paa        = pba_to_paa(base_pba); /* v47：PBA→PAA 在 FTL 侧一次转出 */
+}
+
+ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM])
+{
+    if ((cmd == NULL) || (pba == NULL))
+    {
+        return FTL_ERROR;
+    }
+
+    /* 边界不变量：同 ftl_cmd_setup_ppa —— 进 FC 的 PBA 必须合法（ch/ce/lun 被当
+     * suspended[][][] 下标用）。只断言**本命令实际用到**的元素：单 plane 命令的
+     * 调用者按约定可让 pba[1] 保持未初始化（见 ftl_issue_subop 的 pba 局部数组）。 */
+    ASSERT(pba_is_valid(pba[0]));
+    ftl_cmd_bind_pair_topo(cmd, pba[0]);
+
+    if (ftl_cmd_needs_desc_chain(cmd) == 0U)
+    {
+        cmd->desc_id = FC_DESCRIPTOR_ID_INVALID;
+        return FTL_OK;
+    }
+
+    /* v27/v28：位图是字面位图（0 = 空集），本入口语义就是「整段」——自己算好当实参
+     * （须在 paa 写好之后算，见 fc_command_plane_span_cw_bitmap）。 */
+    return ftl_cmd_build_pair_chain(cmd, pba, fc_command_plane_span_cw_bitmap(cmd));
+}
+
+ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM], uint32_t cw_bitmap)
+{
+    uint8_t first_plane = PLANE_NUM; /* 本命令实际覆盖的第一个 plane（= 段首） */
+    uint8_t p;
+
+    if ((cmd == NULL) || (pba == NULL))
+    {
+        return FTL_ERROR;
+    }
+
+    /* 基址 PBA 必须取自**被覆盖的 plane**，不是无条件的 pba[0]：CW 级子操作常只覆盖
+     * 半个 pair（例如一条 512B 写只落 plane1），此时 pba[0] 按约定未初始化，
+     * 拿它定段会把单 plane 命令的段定成 plane0 ⇒ 位图越段 ASSERT 或静默空链。 */
+    for (p = 0U; p < PLANE_NUM; p++)
+    {
+        if ((cw_bitmap & ((uint32_t)((1U << CW_NUM) - 1U) << ((uint32_t)p * CW_NUM))) != 0U)
+        {
+            first_plane = p;
+            break;
+        }
+    }
+    ASSERT(first_plane < PLANE_NUM); /* 空位图 = 调用者 bug（ftl_cmd_resolve_cw_bitmap 也会拦） */
+
+    ASSERT(pba_is_valid(pba[first_plane]));
+    ftl_cmd_bind_pair_topo(cmd, pba[first_plane]);
+
+    if (ftl_cmd_needs_desc_chain(cmd) == 0U)
+    {
+        cmd->desc_id = FC_DESCRIPTOR_ID_INVALID;
+        return FTL_OK;
+    }
+
+    /* CW 级映射入口：位图由调用者给出（可只覆盖本命令实际写到的那些 CW）。
+     * cmd->config.multi_plane 决定 plane 段，须由调用者**在建链前**设好。 */
+    return ftl_cmd_build_pair_chain(cmd, pba, cw_bitmap);
 }
 
 /* ── 3. 数据搬运（desc 链 ↔ 外部缓冲）── */
@@ -306,6 +386,57 @@ ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t le
             /* 数据已耗尽：本 CW 的 USER 区整体填 0xFF dummy。
              * ⚠ 长度必须是 USER 区大小——buf 是 base+FC_BUFFER_USER_OFFSET，
              *   照旧代码用 FC_BUFFER_POOL_CW_SIZE 会越界 8B 踩到下一 CW 的 META/CRC。 */
+            (void)memset(buf, 0xFF, (size_t)FC_BUFFER_USER_SIZE);
+        }
+
+        desc_id = (fc_descriptor_id_t)descriptor->next_id;
+    }
+
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_cmd_write_data_cw
+ *   功能：CW 级数据填装——按**页内 CW 偏移**从整页镜像取数，只填本命令链上的 CW。
+ *   参数：cmd —— 已建链的命令（链上 CW ⊆ cw_bitmap）；page_buf —— 整页镜像
+ *         （FTL_READ_USER_SIZE 字节，CW 按偏移排布：CW c 的数据在 page_buf + c×512）；
+ *         cw_bitmap —— 本页哪些 CW 有效（flat 字面位图，与本命令链同源）。
+ *   返回：FTL_OK / FTL_ERROR（链上 desc 无 buffer）。
+ *   实现要点：与 ftl_cmd_write_data 的差别只在**取数方式**——后者按链序**打包**消费
+ *             连续源缓冲（适合 host 写：host 数据本来就是紧凑的），本函数按 CW 偏移
+ *             **散射**取数（适合 GC/WL 搬移：源是整页镜像，只需搬其中几个 CW，且
+ *             搬入位置必须保持原 CW 偏移——页内 META 的 LBA 由 CW 号决定，挪位即错）。
+ *             位图外的 CW 若仍在链上（调用者与链不同源）填 0xFF，绝不把镜像里的
+ *             无效 CW 数据带进新页。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, uint32_t cw_bitmap)
+{
+    fc_descriptor_id_t desc_id;
+
+    ASSERT(cmd != NULL);
+    ASSERT(page_buf != NULL);
+    ASSERT(cmd->desc_id != FC_DESCRIPTOR_ID_INVALID);
+
+    desc_id = (fc_descriptor_id_t)cmd->desc_id;
+
+    while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
+        uint8_t         *buf;
+        const uint8_t    cw = (uint8_t)paa_to_cw(descriptor->paa);
+
+        if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
+        {
+            return FTL_ERROR;
+        }
+        buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+
+        if ((cw_bitmap & ((uint32_t)1U << cw)) != 0U)
+        {
+            (void)memcpy(buf, page_buf + ((size_t)cw * FC_BUFFER_USER_SIZE), (size_t)FC_BUFFER_USER_SIZE);
+        }
+        else
+        {
             (void)memset(buf, 0xFF, (size_t)FC_BUFFER_USER_SIZE);
         }
 
@@ -464,6 +595,48 @@ static fc_command_t *sync_page_prepare(nand_addr_t addr, uint8_t operation, cons
     return cmd;
 }
 
+/* 同上，但 desc 链只覆盖形参 cw_bitmap 指定的 CW（CW 级搬移写）。
+ * 与 addr_to_cmd 的差别只有最后一步的位图实参：地址绑定（ch/ce/lun + PAA）逐字相同，
+ * 故这里手工展开 addr_to_cmd 的后半段而不另造一个入口——addr_to_cmd 的语义是「整段」，
+ * 重载它会让「整段 vs 子集」这个关键差别从调用点消失。 */
+static fc_command_t *sync_page_prepare_cw(nand_addr_t addr, uint8_t operation, const ftl_page_cfg_t *cfg, uint32_t cw_bitmap)
+{
+    fc_command_t *cmd = fc_command_alloc();
+    nand_pba_t    pba;
+
+    if (cmd == NULL)
+    {
+        return NULL;
+    }
+
+    cmd->config.operation   = (DWORD)operation;
+    cmd->config.crc         = (DWORD)cfg->crc;
+    cmd->config.random      = (DWORD)cfg->random;
+    cmd->config.ldpc        = (DWORD)cfg->ldpc;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->config.page_type   = FC_PAGE_TYPE_LP;
+    cmd->module             = (DWORD)cfg->module;
+    cmd->meta               = (cfg->lba == (lba_t)FTL_LBA_UNKNOWN) ? (DWORD)FC_META_UNKNOWN
+                                                                   : (DWORD)(cfg->lba << CW_WIDTH);
+
+    /* 边界不变量同 addr_to_cmd：进 FC 的 ch/ce/lun 被当 suspended[][][] 下标直接用。 */
+    pba = pba_from_addr(&addr);
+    ASSERT(pba_is_valid(pba));
+    cmd->config.ch  = (DWORD)addr.ch;
+    cmd->config.ce  = (DWORD)addr.ce;
+    cmd->config.lun = (DWORD)addr.lun;
+    cmd->paa        = pba_to_paa(pba);
+
+    if (ftl_cmd_configure_descriptors(cmd, cw_bitmap) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return NULL;
+    }
+
+    return cmd;
+}
+
 /* 提交并等待完成。返回 0 = 命令完成（不论 NAND 成败）；-1 = 提交或等待失败。
  * ⚠ 不判定 NAND_FAIL —— RAW 读刻意忽略它（坏页也要拿原始数据），
  *    故成败判定留在调用者。命令不在此释放。 */
@@ -503,6 +676,50 @@ ftl_status_t ftl_sync_write_page(nand_addr_t addr, const void *data, uint32_t le
     {
         (void)ftl_cmd_write_data(cmd, data, length);
     }
+
+    ret = sync_page_submit_wait(cmd, &completion, 0U);
+    if (ret != 0)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_sync_write_page_cw
+ *   功能：CW 级页写——只把 page_buf 里 cw_bitmap 指定的 CW 编进目标页。
+ *   参数：addr —— 目标页地址；page_buf —— **整页镜像**（FTL_READ_USER_SIZE 字节，
+ *         CW c 的数据在 page_buf + c×512）；cw_bitmap —— 要编的 CW（flat 字面位图，
+ *         须落在本命令 plane 段内）；cfg —— 页配置（lba 必须是**本页**的页 LBA）。
+ *   返回：FTL_OK / FTL_ERROR（建链失败 / 提交等待失败 / NAND_FAIL）。
+ *   实现要点：GC/WL 搬移专用——源是整页镜像，只需搬其中几个有效 CW，且**必须保持
+ *             原 CW 偏移**（页内 META 的 LBA 由 CW 号决定，挪位即错）。未置位的 CW
+ *             不建链、不编程，读回为 0xFF（META 全 FF ⇒ 上层判无效）。
+ *             ⚠ 与 ftl_sync_write_page 的取舍：整页重写会把无效 CW 连同其（陈旧的）
+ *             META 一起搬过去——L2P 反查仍能判其无效，但新页 META 被污染且多搬无用
+ *             数据；CW 级写只搬真有效的。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_sync_write_page_cw(nand_addr_t addr, const uint8_t *page_buf, uint32_t cw_bitmap, const ftl_page_cfg_t *cfg)
+{
+    fc_command_t       *cmd;
+    fc_command_status_t completion;
+    int                 ret;
+
+    cmd = sync_page_prepare_cw(addr, OP_NORMAL_PROGRAM_PAGE, cfg, cw_bitmap);
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    (void)ftl_cmd_write_data_cw(cmd, page_buf, cw_bitmap);
 
     ret = sync_page_submit_wait(cmd, &completion, 0U);
     if (ret != 0)

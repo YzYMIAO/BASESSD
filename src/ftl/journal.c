@@ -16,8 +16,8 @@
  *   · 块满换环形下一块——**先擦后写**，journal_flush_page 是唯一的环形块擦除点；
  *   · 同 LBA 就地合并（不消耗 sequence）。
  *
- * 掉电保护：Journal 页 CRC/Random **关闭**，靠自身四层保护——ECC + 页头 magic +
- *   entry_count 合法性 + page_seq 单调（设计 §7.6）。
+ * 掉电保护：Journal 页 Random **关闭**、CRC **开启**（v0.62 起由下层 FC 提供 per-CW CRC +
+ *   ECC），外加页头 magic + entry_count 合法性 + page_seq 单调三层结构判据（设计 §7.6）。
  *
  * ⚠ **本文件整个不转断言**（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 上的
  *   页，页头可能因掉电撕裂而非法——那是掉电的**预期情形**，必须返回错误/跳过，不能断言。
@@ -219,7 +219,8 @@ void journal_flush_page(l2p_journal_t *journal)
 
     /*
      * 同步写 Journal 页到 NAND。
-     * CRC/Random DISABLED：Journal 有自身四层保护（ECC/CRC/entry_count/sequence）。
+     * Random DISABLED / CRC ENABLED（v0.62）：Journal 有 FC per-CW CRC + ECC，
+     * 外加自身结构判据（magic/entry_count/sequence）。
      */
     (void)ftl_sync_write_page(waddr, journal->page_buf, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
 

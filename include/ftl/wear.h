@@ -12,7 +12,7 @@
  * 全部失效。本模块把这两个计数落到固定块 WEAR_BLOCK 上，开机回填 BST。
  *
  * ── 介质格式：块内**页式追加日志** ──
- * 与 Anchor / Journal 同一套日志式元数据惯例（sequence + 每页 CRC），而不是
+ * 与 Anchor / Journal 同一套日志式元数据惯例（sequence + 页序），而不是
  * "每次整表重写"。理由：块 26 只有 64 页，全量快照 17 页 ⇒ 整表重写会让块 26
  * 在 3.8 次落盘后被擦一次，磨损远超普通数据块。增量日志把常态落盘压到 1–4 页。
  *
@@ -51,11 +51,11 @@ typedef struct
     uint32_t erase_count; /* 擦除计数：动态/静态 WL 的唯一输入 */
 } wear_entry_t;           /* 8 B */
 
-/* 每页条目数：头 16 B + N×12 + CRC 4 B ≤ PAGE_MAIN_SIZE。
+/* 每页条目数：头 16 B + N×8 ≤ PAGE_MAIN_SIZE（无独立 CRC，见 ADR v0.62）。
  * ⚠ 多减一条目（sizeof(wear_entry_t)）是刻意的：否则 N 会取到刚好整除的值，
  *   padding[] 退化成零长数组（非法 C）。余量写进 padding。 */
 #define WEAR_ENTRY_MAX \
-    (((uint32_t)PAGE_MAIN_SIZE - 16U - 4U - (uint32_t)sizeof(wear_entry_t)) / (uint32_t)sizeof(wear_entry_t))
+    (((uint32_t)PAGE_MAIN_SIZE - 16U - (uint32_t)sizeof(wear_entry_t)) / (uint32_t)sizeof(wear_entry_t))
 
 /* 全量快照页数（块满时 compact 一次写这么多页）*/
 #define WEAR_SNAPSHOT_PAGES (((uint32_t)FTL_BLOCK_TOTAL + WEAR_ENTRY_MAX - 1U) / WEAR_ENTRY_MAX)
@@ -67,8 +67,7 @@ typedef struct
     uint32_t     entry_count; /* 本页有效条目数（≤ WEAR_ENTRY_MAX）*/
     uint32_t     _reserved;
     wear_entry_t entries[WEAR_ENTRY_MAX];
-    uint32_t     crc; /* 覆盖本页 crc 之前全部 */
-    uint8_t      padding[PAGE_MAIN_SIZE - 16U - (WEAR_ENTRY_MAX * sizeof(wear_entry_t)) - 4U];
+    uint8_t      padding[PAGE_MAIN_SIZE - 16U - (WEAR_ENTRY_MAX * sizeof(wear_entry_t))];
 } wear_page_t;
 
 /* ── 编译期自检 ── */
@@ -96,7 +95,7 @@ _Static_assert((FTL_BLOCK_TOTAL % 8U) == 0U, "块数不是 8 的倍数，Wear �
 /*
  * wear_init - 开机加载 Wear 表并回填 BST
  *
- * 逐页读 WEAR_BLOCK（plane 0，页 0..PAGES_PER_BLOCK-1），校验 magic + CRC，
+ * 逐页读 WEAR_BLOCK（plane 0，页 0..PAGES_PER_BLOCK-1），校验 magic，
  * 按页序回放（绝对值 + 最新胜），把计数写回 alloc->blocks[]。
  * 第一个无效页即日志末尾（⇒ 下次落盘从该页续写）。
  *

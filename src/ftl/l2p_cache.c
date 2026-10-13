@@ -281,7 +281,7 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
      * **哨兵层**固定页，被刷新后指向日志块）。哨兵页永不写入 ⇒ 读回全 0xFF ⇒
      * 逐项即 PBA_INVALID = "未映射"，正是首次访问应有的语义。
      * 下面的固定位置回退仅作 md_dir 缺失时的兜底（正常路径不可达）。
-     * CRC/Random DISABLED：Region 数据不经过 CRC/Random，只保护 ECC。
+     * Random DISABLED / CRC ENABLED（v0.62）：Region 数据不加扰，但经 FC per-CW CRC + ECC 保护。
      */
     {
         nand_paa_t  region_paa = NAND_PBA_INVALID;
@@ -449,7 +449,7 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
 
     /*
      * 同步写 Region 到 NAND L2P 日志块。
-     * CRC/Random DISABLED（元数据不走加扰/CRC），仅 BCH ECC 保护。
+     * Random DISABLED / CRC ENABLED（v0.62）：元数据不加扰，经 FC per-CW CRC + BCH ECC 保护。
      */
     ret = ftl_sync_write_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
 

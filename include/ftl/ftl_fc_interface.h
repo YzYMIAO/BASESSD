@@ -154,6 +154,28 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
  */
 ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM]);
 
+/*
+ * ftl_cmd_setup_ppa_pair_cw - 同 ftl_cmd_setup_ppa_pair，但位图由调用者显式给出
+ *
+ * CW 级映射（IU = 1 CW）专用入口：一条子操作常只覆盖一页里的 **部分 CW**
+ * （512B 扇区写、页尾残段、GC 只搬有效 CW），此时「整段访问」语义不再适用。
+ *
+ * 与 ftl_cmd_setup_ppa_pair 的唯一差别 = 位图来自形参而非
+ * fc_command_plane_span_cw_bitmap(cmd)。其余（拓扑/行地址基址取 pba[0]、逐 plane
+ * 行地址、越段 ASSERT、池空 → FTL_AGAIN）完全一致。
+ *
+ * ⚠ **cmd->config.multi_plane 必须由调用者建链前设好**——它决定 plane 段，
+ *   位图须落在该段内（单 plane 命令的段 = paa 的 plane 那一个，如 plane 1 → 0xF0）。
+ * ⚠ 未置位的 plane **整体跳过**（连 pba_is_valid 都不判）⇒ 调用者可按约定让
+ *   未用到的那半个 pair 的 pba 保持未初始化。
+ *
+ * @param cmd        FC 命令（须已设 config.operation / multi_plane / meta）
+ * @param pba        [PLANE_NUM] 每 plane 的 PBA（ch/ce/lun 取 pba[0]）
+ * @param cw_bitmap  flat 字面位图（bit = plane*CW_NUM + cw，0 = 空集 → ASSERT）
+ * @return FTL_OK / FTL_AGAIN（desc/buffer 池空）/ FTL_ERROR（位图越段 → ASSERT）
+ */
+ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM], uint32_t cw_bitmap);
+
 /* ── 地址直填：nand_addr_t → FC 命令 ──
  *
  * 遍历路径（GC 搬移、元数据扫描、Checkpoint）不再打包 → 拆包，
@@ -209,6 +231,21 @@ static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *add
  * @return FTL_OK / FTL_ERROR（链上 desc 无 buffer）
  */
 ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t length);
+
+/*
+ * ftl_cmd_write_data_cw - CW 级数据填装（按页内 CW 偏移从整页镜像散射取数）
+ *
+ * 与 ftl_cmd_write_data 的差别只在取数方式：后者按**链序打包**消费连续源缓冲
+ * （host 写路径：主机数据本来就紧凑），本函数按 **CW 偏移**从整页镜像取数
+ * （GC/WL 搬移：源是整页镜像，只需搬其中几个有效 CW，且搬入位置必须保持原 CW 偏移
+ * ——页内 META 的 LBA 由 CW 号决定，挪位即错）。位图外的 CW 填 0xFF。
+ *
+ * @param cmd        已建链的命令（链上 CW ⊆ cw_bitmap）
+ * @param page_buf   整页镜像（FTL_READ_USER_SIZE 字节，CW c 的数据在 page_buf + c×512）
+ * @param cw_bitmap  本页哪些 CW 有效（flat 字面位图，与本命令链同源）
+ * @return FTL_OK / FTL_ERROR（链上 desc 无 buffer）
+ */
+ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, uint32_t cw_bitmap);
 
 /*
  * ftl_cmd_read_data - 从 desc 链各 CW 的 USER 区按链序拷出到外部缓冲
@@ -277,7 +314,7 @@ typedef struct
  * 故 0xFFFFFFFF 不可能是一个真实页 LBA。 */
 #define FTL_LBA_UNKNOWN (0xFFFFFFFFUL)
 
-#define FTL_PAGE_CFG_META(module)      (&(const ftl_page_cfg_t){FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, (uint8_t)(module), 0U})
+#define FTL_PAGE_CFG_META(module)      (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, (uint8_t)(module), 0U})
 #define FTL_PAGE_CFG_DATA(module, lba) (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, (uint8_t)(module), (lba_t)(lba)})
 /* 数据页但**页 LBA 未知**（Read Recovery 的邻近页辅助读）：CRC/加扰照常开，但命令的
  * META 填 FC_META_UNKNOWN ⇒ 跳过 FC 侧「页内 META 与本命令 LBA 比对」这一项，只保留
@@ -288,6 +325,15 @@ typedef struct
 
 /* 写页：OP_NORMAL_PROGRAM_PAGE。data/length 为空时只发命令不搬数据。 */
 ftl_status_t ftl_sync_write_page(nand_addr_t addr, const void *data, uint32_t length, const ftl_page_cfg_t *cfg);
+
+/*
+ * 写页（CW 级）：只把 page_buf 里 cw_bitmap 指定的 CW 编进目标页（GC/WL 搬移专用）。
+ *
+ * page_buf 是**整页镜像**（CW c 的数据在 page_buf + c×512）；未置位的 CW 不建链、
+ * 不编程，读回 0xFF。cfg->lba 必须是**本页**的页 LBA（CW 级写不改变 CW 偏移，
+ * 页内 META 的 LBA 由 CW 号决定）。
+ */
+ftl_status_t ftl_sync_write_page_cw(nand_addr_t addr, const uint8_t *page_buf, uint32_t cw_bitmap, const ftl_page_cfg_t *cfg);
 
 /* 读页：OP_NORMAL_READ_PAGE_WITH_DATA_OUT；数据在完成后拷入 buffer。 */
 ftl_status_t ftl_sync_read_page(nand_addr_t addr, void *buffer, uint32_t length, const ftl_page_cfg_t *cfg);

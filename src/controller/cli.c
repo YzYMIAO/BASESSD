@@ -100,14 +100,19 @@ static void uart_print_status(void)
 /*
  * UART CLI 驱动 FTL（C 档，设计文档 §13.4 D10：Host 命令来源 = UART CLI）。
  *
- * 固定 pattern 写 buffer：16KB = 2048B（FTL_READ_USER_SIZE）× 4 CW × 2 Plane，
- * 落 SRAM2（.sram2_data 为 NOLOAD 段，上电不清零 → cli_init 主动预填）。
- *   plane0 区（每页前 2048B）= 0x55555555，plane1 区（后 2048B）= 0xAAAAAAAA。
- * Multi-Plane 写（pages=2）时前 2048B 进 plane0（LBA n）、后 2048B 进 plane1
- * （LBA n+1）——写后读回一眼可确认双页簿记正确。
+ * 固定 pattern 写 buffer：16KB，落 SRAM2（.sram2_data 为 NOLOAD 段，上电不清零
+ * → cli_init 主动预填）。前 8KB = 0x55555555，后 8KB = 0xAAAAAAAA。
+ *
+ * ⚠ CW 级映射（IU = 1 CW = 512B）：`wr lba n` / `rd lba n` 的 n 单位是**扇区**
+ *   （每个 512B），缓冲步进 = FTL_IU_BYTES。故 **n 上限 = 16KB / 512B = 32**
+ *   （旧页级模型下 n 计 2048B 页，上限 8）。超出由 controller 的 buffer_size
+ *   校验拒绝（写爆 g_wr_buf 是真实隐患）。
  */
 static uint8_t g_wr_buf[FTL_READ_USER_SIZE * CW_NUM * PLANE_NUM] /* 16KB → SRAM2 */
     __attribute__((section(".sram2_data")));
+
+/* n（扇区数）上限：g_wr_buf 容量 ÷ 映射单元字节数 */
+#define UART_CLI_MAX_SECTORS ((uint32_t)(sizeof(g_wr_buf) / FTL_IU_BYTES))
 
 /* wr/rd 两段式：handler 只提交请求到 controller（异步），结果由
  * cli_service_poll 每轮末尾检查 ssd_controller_is_complete 打印（D11
@@ -128,17 +133,17 @@ static void uart_cli_pattern_init(void)
 {
     uint32_t  i;
     uint32_t  words_per_half = (uint32_t)((FTL_READ_USER_SIZE * CW_NUM) / sizeof(uint32_t)); /* 8KB/4 = 2048 */
-    uint32_t *plane0         = (uint32_t *)(void *)g_wr_buf;
-    uint32_t *plane1         = (uint32_t *)(void *)(g_wr_buf + FTL_READ_USER_SIZE * CW_NUM);
+    uint32_t *lo             = (uint32_t *)(void *)g_wr_buf;
+    uint32_t *hi             = (uint32_t *)(void *)(g_wr_buf + FTL_READ_USER_SIZE * CW_NUM);
 
     for (i = 0U; i < words_per_half; i++)
     {
-        plane0[i] = 0x55555555U;
-        plane1[i] = 0xAAAAAAAAU;
+        lo[i] = 0x55555555U;
+        hi[i] = 0xAAAAAAAAU;
     }
 }
 
-/* 从 g_wr_buf 对应 plane 区取期望 pattern 值（compare 模式用） */
+/* 从 g_wr_buf 对应区取期望 pattern 值（compare 模式用；前 8KB/后 8KB 两段） */
 static uint32_t uart_cli_expect_word(uint32_t byte_offset)
 {
     return (byte_offset < (uint32_t)(FTL_READ_USER_SIZE * CW_NUM))
@@ -199,6 +204,11 @@ static int uart_cli_wr(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
     n = (uint32_t)n_parsed;
+    if (n > UART_CLI_MAX_SECTORS)
+    {
+        (void)uart_log_write("error: n exceeds g_wr_buf (max 32 sectors)\r\n", 44U);
+        return FUNC_STATUS_ERROR;
+    }
     if (!uart_cli_lba_range_ok(lba, n))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
@@ -250,6 +260,11 @@ static int uart_cli_rd(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
     n = (uint32_t)n_parsed;
+    if (n > UART_CLI_MAX_SECTORS)
+    {
+        (void)uart_log_write("error: n exceeds g_wr_buf (max 32 sectors)\r\n", 44U);
+        return FUNC_STATUS_ERROR;
+    }
     if (!uart_cli_lba_range_ok(lba, n))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
@@ -465,7 +480,7 @@ static int uart_cli_bbt(int argc, char *argv[])
 /* rd 完成：compare 模式与 g_wr_buf pattern 比对，报 PASS / 首个不一致偏移 */
 static void uart_cli_rd_report(void)
 {
-    uint32_t total_bytes = g_cli_pending.nblocks * FTL_READ_USER_SIZE;
+    uint32_t total_bytes = g_cli_pending.nblocks * FTL_IU_BYTES; /* n 计扇区（512B），非页 */
     uint32_t offset;
 
     if (g_cli_pending.compare == 0U)

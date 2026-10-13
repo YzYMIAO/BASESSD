@@ -18,6 +18,10 @@
  */
 typedef uint32_t lba_t;
 
+/* 非法 LBA 哨兵：容量上限 1,048,576 ⇒ 0xFFFFFFFF 恒不可达。
+ * 用于「本 CW 未写过 / 无映射」的逐 CW 输出（GC/WL 从页内 META 取回）。 */
+#define FTL_LBA_INVALID ((lba_t)0xFFFFFFFFU)
+
 /*
  * ftl_status_t — FTL 内部操作通用返回状态
  *

@@ -35,7 +35,7 @@ struct ftl_context;
 #define WL_LOW_ZONE_WIDTH  (1000U) /* 低擦除区宽度 */
 #define WL_LOW_BLOCK_PCT   (5U)    /* 低区 Block 占比阈值 */
 #define WL_MIN_INTERVAL    (1000U) /* 最小间隔（写入次数） */
-#define WL_MIN_VALID_RATIO (70U)   /* 只搬有效页 ≥ 70% 的冷 Block */
+#define WL_MIN_VALID_RATIO (70U)   /* 只搬有效 **CW** ≥ 70% 的冷 Block（CW 级映射） */
 
 /* ── WL Victim 选择结果 ── */
 
@@ -44,7 +44,7 @@ typedef struct
     uint8_t  found : 1;               /* 是否找到 victim */
     uint16_t plane_blocks[PLANE_NUM]; /* 双 Plane Block 号 */
     uint32_t avg_erase;               /* victim 平均擦除次数 */
-    uint16_t valid_pages;             /* 有效页数（双 Plane VPC 之和） */
+    uint16_t valid_cw;                /* 有效 **CW** 数（双 Plane valid_count 之和；CW 级映射） */
     uint32_t read_count;              /* 双 Plane read disturb 计数之和（B5 冷块优先权重） */
 } wl_victim_t;
 
@@ -66,7 +66,7 @@ int wl_should_trigger(const struct ftl_context *ftl);
 /*
  * wl_select_victim - 选择 WL victim Super Block
  *
- * 与 GC 相反：选有效页最多 + 擦除次数最少的 Super Block。
+ * 与 GC 相反：选有效 CW 最多 + 擦除次数最少的 Super Block。
  * 只遍历 closed_sb_list，跳过打开的 SB。
  *
  * @param ftl    FTL 上下文
@@ -79,9 +79,9 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim);
  * wl_relocate - 搬移 WL victim 的所有有效数据
  *
  * 流程（与 GC 搬移一致）：
- *   ① 遍历双 Plane 所有有效页
- *   ② 读页 + 从 META 取 LBA → 查 L2P 确认有效
- *   ③ 分配 Cold Super Block 新位置并写入
+ *   ① 逐页索引遍历双 Plane，**逐 CW** 查 L2P 判有效性
+ *   ② 读页（`gc_read_page_with_lba`，容忍页内空洞）→ 逐 CW 反查 L2P 确认有效
+ *   ③ 逐页索引**成对**分配 Cold Super Block 新位置，只编有效 CW（`ftl_sync_write_page_cw`）
  *   ④ 更新 L2P Cache + Journal 记录
  *   ⑤ 擦除双 Block + 递增擦除计数
  *   ⑥ 归还 Free Pool

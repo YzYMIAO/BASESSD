@@ -74,23 +74,34 @@
 /* ── 接口函数 ── */
 
 /*
- * gc_read_page_with_lba - 读取一页 NAND，返回用户数据 + 从 META 提取的 LBA
+ * gc_read_page_with_lba - 读取一页 NAND，返回用户数据 + 逐 CW 的扇区 LBA
  *
  * 内部管理 FC 命令生命周期，无需调用者关心 alloc/submit/release。
  * 可被 GC、WL 等需要读 NAND + 取 LBA 的模块复用。
+ *
+ * ⚠ CW 级映射（IU = 1 CW）+ **DRAM-less approach ③**：本函数读**整页**（该 plane 的
+ *   4 个 CW），从每个 CW 的**页内 META（= 本仓的 OOB 反向映射）**取回该 CW 自己的扇区
+ *   LBA，写入 `cw_lba[CW_NUM]`；未写过的 CW 填 `FTL_LBA_INVALID`。调用者据此逐 CW
+ *   **反查 L2P**（仍指向本物理 CW 才算有效）——这就是有效性的唯一真值来源，无常驻位图。
+ * ⚠ 同时输出**页基址**（CW0 的扇区 LBA），供调用者构造写回页配置。页基址由**首个写过的
+ *   CW** 反推（base = META(c_lo) − c_lo），**不是**直接取 CW0 的 META：CW 级写/搬移允许
+ *   页内只编一个 CW 子集（`wr 2 2` 只落 plane0 的 CW2/CW3，GC 搬移也只编有效 CW），
+ *   此时 CW0 是空位、META 为 0xFFFFFFFF。
+ * ⚠ 全页无写过 CW ⇒ 返回 FTL_ERROR（无有效数据，调用者跳过）。
  *
  * B4：同步返回本次读的 4 CW 最大 ECC 纠正 bit 数与"读成功"标志——
  * GC/WL 搬移读是 read disturb 盲区（旧实现不记录 ECC/read_count），
  * 调用方据此 rr_record_ecc + read_count++（慢死预测闭环）。
  *
- * @param pba            物理地址
- * @param buffer         输出：用户数据 buffer（2048 字节，可为 NULL）
- * @param lba_out        输出：从 META 提取的 LBA（可为 NULL）
+ * @param pba            物理地址（**页基址**，cw 位为 0）
+ * @param buffer         输出：整页用户数据 buffer（FTL_READ_USER_SIZE 字节，可为 NULL）
+ * @param cw_lba         输出：逐 CW 的扇区 LBA，CW_NUM 项；未写过 = FTL_LBA_INVALID（不可为 NULL）
+ * @param page_base_out  输出：页基址（CW0 的扇区 LBA）（可为 NULL）
  * @param ecc_out        输出：本次读 4 CW 最大 ECC 纠正 bit 数（0..4，可为 NULL）
  * @param read_count_out 输出：1=本次读成功（调用方 ++ 该块 read_count，可为 NULL）
- * @return 0 成功, -1 失败
+ * @return 0 成功, -1 失败（读失败 / 全页无写过 CW）
  */
-ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_out, uint8_t *ecc_out, uint8_t *read_count_out);
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba[CW_NUM], lba_t *page_base_out, uint8_t *ecc_out, uint8_t *read_count_out);
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block
@@ -100,7 +111,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
  *   cost = GC_WEIGHT_VALID·valid_ratio + GC_WEIGHT_ERASE·erase_ratio
  *        + GC_WEIGHT_TEMP·cold_penalty + GC_WEIGHT_AGE·youth_penalty
  *
- *   ① valid_ratio   有效页占比（各 plane VPC 之和 ÷ 容量）——核心项
+ *   ① valid_ratio   有效 CW 占比（各 plane valid_count 之和 ÷ CW 容量）——核心项
  *   ② erase_ratio   擦除次数占比（本 SB 各 plane 取大 ÷ 全表最大）——避开临近寿命块
  *   ③ cold_penalty  HOT 块 0 / COLD 块 1000——HOT 数据自然死亡快，优先回收
  *   ④ youth_penalty 1000 − age_ratio，age = 全表最大 last_pe_ts − 本 SB 最小 last_pe_ts
@@ -120,20 +131,27 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t *lba_o
 int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim);
 
 /*
- * gc_migrate_sb - 搬移一个 victim Super Block 的所有有效页
+ * gc_migrate_sb - 搬移一个 victim Super Block 的所有有效 CW
  *
- * 内部流程：
- *   ① 遍历双 Plane × 64 页
- *   ② 对每页：读 NAND → 从 META 取 LBA → 查 L2P
- *   ③ L2P 指向本 PBA → 有效，搬移到 Cold Super Block
- *   ④ 否则 → 跳过（无效页）
- *   ⑤ 搬完 → 擦除双 Block → 归还 Free Pool
+ * 内部流程（CW 级映射 + DRAM-less approach ③）：
+ *   ① 快路径：双 plane valid_count 之和 == 0 ⇒ 无可搬移，直接返回
+ *   ② 遍历 64 个页索引 × 双 Plane
+ *   ③ 对每页：读 NAND → 逐 CW 从**页内 META（= OOB 反向映射）**取回该 CW 的扇区 LBA
+ *      → **逐 CW** 用该 LBA 查 L2P
+ *   ④ L2P 仍指向 (本页, 本 CW) → 有效，随同 plane 的目标页搬到 Cold Super Block
+ *   ⑤ 否则 → 跳过（被覆盖 / TRIM 过的 CW）
+ *   ⑥ 搬完 → 擦除双 Block → 归还 Free Pool
+ *
+ * ⚠ 无常驻位图（v0.60 删）：真有效性**唯一**由「逐 CW META 反查 L2P」判定；
+ *   从未写过的页读回全 FF ⇒ ②③ 自然跳过。
+ * ⚠ 逐页索引**成对**分配目标页：一个 plane 的有效 CW 必须落到同 plane 的目标页，
+ *   否则页内 META 还原出的扇区 LBA 会指错 plane。
  *
  * @param alloc   Allocator 上下文
  * @param cache   L2P Cache
  * @param journal Journal（记录搬移导致的 L2P 变更）
  * @param victim  要搬移的 victim Super Block
- * @return 搬移的页数
+ * @return 搬移的**有效 CW 数**
  */
 int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *journal, super_block_t *victim);
 
