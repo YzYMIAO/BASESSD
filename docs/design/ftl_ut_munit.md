@@ -1,6 +1,7 @@
 # FTL 层测试用例设计（L0 munit 纯 RAM 套件）
 
-> **状态：设计文档（供审查）。实施（测试文件 / makefile 接线）在审查通过后进行。**
+> **状态：已实施（2026-10-14）**——`tests/unit/test_ftl.c`（8 套件 53 例）已落地并接线（§6），
+> `make tests` / `UT=FC` / `UT=FTL` 三档构建通过（0 warning）。**尚未上板验证**。
 >
 > **分层边界**（判据 `fc_nand_design.md §26.1`）：本文**只管 FTL 层（`src/ftl/`）**。
 > 非 FTL 的部分已拆出（2026-10-13）：
@@ -19,7 +20,7 @@
 FC-NAND 已有三级 munit UT（`tests/unit/test_fc_level1/2/3.c`，经 `make tests` 上板 + UART `test`
 命令跑），但 **FTL 层没有自己的 UT**：原有 `tests/unit/test_gc.c`/`test_l2p.c`/`test_nand.c`
 只是各 1 行头部注释的孤儿占位、`test_rebuild.c` 因夹具超容被摘除——**这四个文件已于 2026-10-13 删除**
-（有效用例并入本文档 §4）；`src/ftl/makefile.mk` 仍无测试块。
+（有效用例并入本文档 §4）；`src/ftl/makefile.mk` 当时无测试块（**2026-10-14 已补，见 §6**）。
 
 FTL 层落地了大量**纯逻辑**（Free Pool 三级水位、journal 水位公式、GC/WL victim 选择、
 read disturb 慢死预测、坏块替换池、L2P thrashing、**组完成语义**），目前**全部依赖上板验证**
@@ -48,7 +49,7 @@ read disturb 慢死预测、坏块替换池、L2P thrashing、**组完成语义*
 |---|---|---|
 | `ftl_tables_t` | `blocks[4096]×20B`=80KB + `free_blocks[4096]×2B`=8KB + `op_blocks[4096]×2B`=8KB + `closed_sb_list[1024]×12B`=12KB + `spare_blocks[50]×2B`=100B | **≈108KB** |
 | `metadata_dir_cache_t` | `entries[2048]×7B` | **≈14.4KB** |
-| `ftl_context_t` | 内含 `tables`(108KB) + `cache`(128KB) + `metadata_dir`(14.4KB) + journal + … | **≈287KB** |
+| `ftl_context_t` | 内含 `tables`(108KB，**FTL 自持表** P2-5) + `cache`(128KB，**L2P 缓存**——非「表」；真 L2P 表在 NAND 的 region 池，SRAM 只驻 64 个 region) + `metadata_dir`(14.4KB) + journal + … | **≈287KB** |
 
 > **⚠ 关键约束**：`ftl_tables_t` 的数组尺寸由 `FTL_BLOCK_TOTAL`（=4096）**固定**——原文档
 > 「用 2112 项省内存」**不可能**（结构体按值含全 4096 项）。
@@ -70,6 +71,22 @@ memset(F->groups,        0, sizeof(F->groups));
 allocator_init(&F->alloc, F->topo, &F->tables);        /* 重绑表 + 状态机归零 */
 metadata_dir_init(&F->metadata_dir);
 ```
+
+> **⚠ `setup` 的复位范围 = 用例实际读写的子结构，按组补。** 上面只清了 §4.1/4.3/4.4/4.6/4.7/4.8
+> 用到的 `tables` / `metadata_dir` / `pending` / `groups`。其余子结构**按用例组补**，否则会看到
+> 开机残留或上一用例的脏状态：
+>
+> | 子结构 | 何时需要补 | 复位方式（同 `ftl.c:648/658` 的开机路径） |
+> |---|---|---|
+> | `F->cache`（`l2p_cache_t`，128KB） | L2P 命中/失效用例（如 thrashing） | `l2p_cache_init(&F->cache, F->topo.ch, F->topo.ce, F->topo.lun)` |
+> | `F->journal`（`l2p_journal_t`） | §4.2 journal 水位（`checkpoint.c` 读 journal 用量） | `journal_init(&F->journal, F->topo)` |
+> | `F->wbuf`（`ftl_wbuf_t`） | 页打包写缓冲用例（`ftl_wbuf_*` 全 `static`，本属 L2） | `memset` |
+> | `F->cp` / `cp_timer_start` / `total_writes` | checkpoint 触发 / 计数断言 | `memset` / 置 0 |
+> | `F->rr` / `rr_last_scan_ms` / `rr_page_scratch` | read recovery 用例 | `memset` |
+> | `F->bg_suspend` | 后台闸门相关 | 置 0 |
+>
+> `F->topo` **保持不动**（NAND 路由，必须有效）。稳妥做法：每个套件的 `setup` 把**该套件会碰的
+> 字段全清**，别只清一半——只读不写的字段可留。
 
 - **好处**：零额外内存、单一数据源（不复制 287KB）。
 - **代价**：fixture 不再「独立」；须保证 `test` 执行期间**后台泵不并发**——`test` 命令在
@@ -295,28 +312,53 @@ FTL 生产码已满足全部测试条件，**零改动**：
 **唯一张力**：fixture 287KB（P2-5 后果）⇒ 复用活实例 `g_ctrl.ftl[0][0][0]` + reset（§2.2）。
 这是**内存约束**，非设计缺陷——不构成对 FTL 生产码的修改要求。
 
-## 6. 接线（实施阶段）
+## 6. 接线（已实施）
 
-**`src/ftl/makefile.mk`**（现在只有 `MODULE_SRCS` 两行）追加（**一行测试源**，fixture 复用活实例）：
+### 6.1 UT 范围开关（`make tests UT=…`）
+
+顶层 `makefile` 解析 `UT`（空 = 全部 / `FC` / `FTL`），派生出 `UT_FC_ENABLE` / `UT_FTL_ENABLE`；
+两个模块 makefile 据此决定编入哪些测试源，`ut_main.c` 用同名宏做条件编译。三者一一对应：
+
+| `UT` | `UT_FC_ENABLE` | `UT_FTL_ENABLE` | 编入的测试源 | 对象目录 |
+|---|---|---|---|---|
+| （空） | 1 | 1 | munit + ut_main + fc_test_common + level1/2/3 + test_ftl | `obj_ut` |
+| `FC` | 1 | — | munit + ut_main + fc_test_common + level1/2/3 | `obj_ut_FC` |
+| `FTL` | — | 1 | munit + ut_main + test_ftl | `obj_ut_FTL` |
+
+- **`munit.c` + `ut_main.c` 恒编入**：`cli.c` 的 `test` 命令（`#if FC_NAND_TEST_ENABLE`）引用
+  `ut_run_all`，摘掉即链接期 undefined symbol。
+- **对象目录按配置分置**（`config.mk` 的 `OBJ_DIR` 含 `FC_NAND_TEST_ENABLE` 与 `UT`）：本工程无
+  「CFLAGS 变化 ⇒ 重编译」依赖，共用目录会复用带不同 `-D` 的陈旧 `.o`（症状：产品固件里没有
+  `test` 命令 / `ut_main.o` 引用未编入的套件数组而链接失败）。分置后 `make all` ↔ `make tests` ↔
+  各 `UT` 之间**互不污染，无需 `make clean`**。
+- **`ut_main.c` 是两层测试的唯一耦合点**：`test_ftl.c` 只依赖 FTL/NAND/munit/`g_ctrl`；
+  `fc_test_common.*` + `test_fc_level{1,2,3}.c` 只依赖 FC/NAND/munit —— 两侧互不引用，
+  只有 `ut_main.c` 同时 extern 两边的套件数组，故条件编译只需加在那里。
+
+**`src/ftl/makefile.mk`**（`FC_NAND_TEST_ENABLE` 块内再套 `UT_FTL_ENABLE`，**一行测试源**）：
 
 ```makefile
 ifeq ($(FC_NAND_TEST_ENABLE),1)
-# FTL 纯 RAM 单元测试（munit 框架由 fc/makefile.mk 的块编入）
-MODULE_INCS += $(PROJECT_ROOT)/tests/framework
-MODULE_INCS += $(PROJECT_ROOT)/tests/unit
+ifeq ($(UT_FTL_ENABLE),1)
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_ftl.c
+CFLAGS += -DUT_FTL_ENABLE
+endif
+MODULE_INCS += $(PROJECT_ROOT)/tests/unit
+MODULE_INCS += $(PROJECT_ROOT)/tests/framework
 endif
 ```
 
-**`tests/unit/ut_main.c`**：根套件名从 `/fc-nand/` 起，加一个 **`/ftl/` 根**（`ut_run_all` 里把
-`g_fc_nand_suite` 与新的 `g_ftl_suite` 并列），8 个子套件前缀统一 `xxx/`（**必须以 `/` 结尾**，
-`ut_main.c:24-27` 注释：munit 只做首尾相接、不补分隔符）。
+**`tests/unit/ut_main.c`**：8 个 `extern MunitTest g_ftl_*_tests[]` 与 `/ftl/` 根套件项整体包在
+`#if defined(UT_FTL_ENABLE)` 内（FC 侧同理包在 `#if defined(UT_FC_ENABLE)` 内）。子套件前缀统一
+`xxx/`（**必须以 `/` 结尾**，`ut_main.c` 注释：munit 只做首尾相接、不补分隔符）。
 
 ## 7. 验证
 
 1. `make clean && make tests`（`FC_NAND_TEST_ENABLE=1`）**零错误零新增警告**——fixture 复用活实例，
    不新增 NOLOAD 段；确认 AXI_RAM 用量不超（§2.1）
 2. `make debug / release` 不受影响（`FC_NAND_TEST_ENABLE` 默认关，测试文件不编入）
+2b. `make tests UT=FC` / `UT=FTL` 各自 0 警告，`nm` 确认只含本层套件数组；三档之间切换
+   **无需 `make clean`**（对象目录分置）
 3. 上板：
    - `test --list` → 确认 8 个 `/ftl/*/` 套件全部列出
    - `test /ftl/`（或逐个）→ 全 PASS（尤其 `open_sb_never_picks_metadata`）
@@ -370,10 +412,10 @@ endif
 | L0 | `gc_wl` | `gc.c` / `wear_leveling.c` | 10 |
 | L0 | `rr` | `read_recovery.c` | 6 |
 | L0 | `bbt` | `bbt.c` | 4 |
-| L0 | `metadata` | `metadata.c` | 6 |
+| L0 | `metadata` | `metadata.c` | 7 |
 | L0 | `pending_ct` | `pending.c` | 4 |
 | L0 | `group` | `pending.c` | 6 |
-| **合计** | **8 L0 套件** | — | **52** |
+| **合计** | **8 L0 套件** | — | **53** |
 
 ## 关键文件
 
@@ -381,8 +423,10 @@ endif
 |---|---|
 | `docs/design/ftl_ut_munit.md`（本文档） | 设计（FTL 层 §4 逐条用例 + §5 技法 + §10 覆盖矩阵） |
 | `tests/unit/test_ftl.c` | 实施：单文件（fixture 复用活实例 + 8 套件数组，L0）——**用户自建** |
-| `src/ftl/makefile.mk` | 实施：`FC_NAND_TEST_ENABLE` 块（一行 `TEST_C_SRCS` + INCS） |
-| `tests/unit/ut_main.c` | 实施：8 个 extern + `/ftl/*` 子套件注册 |
+| `src/ftl/makefile.mk` | 实施：`FC_NAND_TEST_ENABLE` + `UT_FTL_ENABLE` 块（一行 `TEST_C_SRCS` + INCS） |
+| `src/fc/makefile.mk` | 实施：拆「框架+入口（恒编）」与「FC 三级（`UT_FC_ENABLE` 门控）」 |
+| `makefile` §1.5 / `config.mk` | 实施：`UT` 解析 + 对象目录按测试配置分置 |
+| `tests/unit/ut_main.c` | 实施：两套 extern + 根套件项各包 `#if defined(UT_*_ENABLE)` |
 | `docs/design/hil_ut_design.md` | HIL 层 UT + 系统集成验收（非 FTL 部分） |
 
 ## 登记（本轮不做）

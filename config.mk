@@ -42,7 +42,16 @@ endif
 # 两套目标使用独立构建目录，避免同名.o互相覆盖。
 
 BUILD_DIR := $(PROJECT_ROOT)/build/$(BUILD_TARGET)/$(BUILD_TYPE)
-OBJ_DIR   := $(BUILD_DIR)/obj
+
+# 对象目录按「影响编译结果的配置」分置：
+#   obj            产品固件（make all）
+#   obj_ut         `make tests`（-DFC_NAND_TEST_ENABLE 会改变 cli.c 的 test 命令注册）
+#   obj_ut_FC      `make tests UT=FC`
+#   obj_ut_FTL     `make tests UT=FTL`
+# 分置的原因：本工程无「CFLAGS 变化 ⇒ 重编译」依赖，若共用一个对象目录，先 make all
+# 再 make tests 会复用不带测试宏的陈旧 .o（症状：固件里没有 test 命令 / ut_main.o 引用
+# 未编入的套件数组而链接失败）。分置后三种构建互不污染，无需 make clean。
+OBJ_DIR   := $(BUILD_DIR)/obj$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))
 LIB_DIR   := $(BUILD_DIR)/lib
 BIN_DIR   := $(BUILD_DIR)/bin
 DEP_DIR   := $(BUILD_DIR)/dep

@@ -429,9 +429,9 @@ int checkpoint_is_emergency(const ftl_context_t *ftl)
  *   功能：按 Journal 当前写位置算出使用率，置位 checkpoint_needed(≥85%) / emergency(≥95%)。
  *   参数：journal —— 待评估的 Journal（NULL 直接返回）。
  *   返回：无。
- *   实现要点：分子必须是**全局页偏移**（current_block×64 + current_page，双块环形），
- *             分母为 JOURNAL_BLOCK_COUNT×PAGES_PER_BLOCK。旧实现单块口径导致
- *             水位过早/永不触发（详见函数内长注释）。
+ *   实现要点：分子必须是**全局页偏移**（current_block×PAGES_PER_BLOCK + current_page，
+ *             全环口径），分母为 JOURNAL_BLOCK_COUNT×PAGES_PER_BLOCK。
+ *             旧实现单块口径导致水位过早/永不触发（详见函数内长注释）。
  * -------------------------------------------------------------------- */
 void checkpoint_journal_watermark(l2p_journal_t *journal)
 {
@@ -443,21 +443,21 @@ void checkpoint_journal_watermark(l2p_journal_t *journal)
     }
 
     /*
-     * 计算 Journal 使用率（双块环形全局口径）：
+     * 计算 Journal 使用率（全环全局口径）：
      *   used% = (current_block × PAGES_PER_BLOCK + current_page) × 100
      *           + current_entry × 100 / JOURNAL_ENTRIES_PER_PAGE
      *           ──────────────────────────────────────────────────────
      *           (JOURNAL_BLOCK_COUNT × PAGES_PER_BLOCK)
      *
-     * 分子必须是「全局页偏移」= current_block×64 + current_page（双块环形），
+     * 分子必须是「全局页偏移」= current_block×PAGES_PER_BLOCK + current_page，
      * 而非单块内 current_page（0..63）。旧实现两处都错：
      *   ① 分母用 PAGES_PER_BLOCK=64（单块）→ 85%/95% 在 page≈55/61 就触发，
      *      紧急水位离写满只剩 3 页≈384 条
-     *   ② 若只改分母 128 而分子仍用 current_page → used 最大 63×100/128≈49%，
+     *   ② 若只改分母而分子仍用 current_page → used 最大 63×100/256≈24%，
      *      85%/95% 永远不触发（更糟）
-     * 现分子分母都按双块 128 页口径：85%（JOURNAL_FULL_THRESHOLD）在全局
-     * 页≈108（留 19 页）、95%（JOURNAL_CRITICAL）在全局页≈122（留 6 页≈768 条），
-     * 与 §7.5.2 推导对齐。
+     * 现分子分母都按全环口径（JOURNAL_BLOCK_COUNT = CW_NUM = 4 块 = 256 页）：
+     * 85%（JOURNAL_FULL_THRESHOLD）在全局页 218（留 38 页）、95%（JOURNAL_CRITICAL）
+     * 在全局页 244（留 12 页），与 §7.5.2 推导对齐。
      */
     used = ((uint32_t)journal->current_block * PAGES_PER_BLOCK +
             (uint32_t)journal->current_page) *

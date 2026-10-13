@@ -134,4 +134,8 @@
 | `grep -rn 'ASSUME(' src/` | 0（全工程） |
 | 上板三套 munit + CLI 冒烟 | **待做** |
 
-> ⚠️ `build/firmware/debug` 被 `make debug` 与 `make tests` 共用（`config.mk:44` 的 `BUILD_DIR` 不含 `FC_NAND_TEST_ENABLE`）。先跑 debug 再跑 tests 会复用陈旧对象，**必须 `make clean`**。
+> ⚠️ `build/firmware/debug` 被 `make debug` 与 `make tests` 共用（`config.mk` 的 `BUILD_DIR` 不含 `FC_NAND_TEST_ENABLE`）。先跑 debug 再跑 tests 会复用陈旧对象，**必须 `make clean`**。
+>
+> **2026-10-14 订正**：对象目录已按测试配置分置（`OBJ_DIR` = `obj` / `obj_ut` / `obj_ut_FC` /
+> `obj_ut_FTL`，见 `config.mk`），上述陈旧对象问题**已消除**——`make all` ↔ `make tests` ↔
+> 各 `UT=` 之间无需 `make clean`。`BIN_DIR` 仍共用 ⇒ 最后一次构建覆盖 `bin/debug.bin`。

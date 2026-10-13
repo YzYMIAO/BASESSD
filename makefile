@@ -16,6 +16,27 @@ BUILD_TARGET ?= firmware
 FIRMWARE_PLATFORM ?= stm32h743
 BUILD_TYPE ?= debug
 
+# ----------------------------------------------------------------------------
+# 1.5 单元测试范围选择（仅 `make tests` 有意义）
+#   UT=（空）  全部：FC-NAND 三级 + FTL L0
+#   UT=FC      仅 FC-NAND 三级（/fc-nand/logic|data_path|lifecycle）
+#   UT=FTL     仅 FTL L0（/ftl/… 8 套件；纯 RAM、不碰 NAND）
+# 每种取值编入**不同的测试源集合**，并落到**不同的对象目录**（见 config.mk 的 OBJ_DIR）
+# ⇒ 切换 UT 无需 make clean，也不会复用带不同 -D 的陈旧对象（否则 ut_main.o 会引用
+#   未编入的套件数组 ⇒ 链接期 undefined symbol）。
+# ----------------------------------------------------------------------------
+UT ?=
+ifeq ($(UT),)
+    UT_FC_ENABLE  := 1
+    UT_FTL_ENABLE := 1
+else ifeq ($(UT),FC)
+    UT_FC_ENABLE  := 1
+else ifeq ($(UT),FTL)
+    UT_FTL_ENABLE := 1
+else
+    $(error Invalid UT=$(UT), valid values: (empty), FC, FTL)
+endif
+
 include $(PROJECT_ROOT)/config.mk
 
 # ============================================================================
@@ -79,6 +100,9 @@ endif
 $(info ========================================)
 $(info Collected $(words $(ALL_SRCS)) source files)
 $(info Collected $(words $(ALL_INCS)) include paths)
+ifeq ($(FC_NAND_TEST_ENABLE),1)
+$(info UT scope: $(if $(UT),$(UT),ALL)  [FC suites: $(if $(UT_FC_ENABLE),on,off) / FTL suites: $(if $(UT_FTL_ENABLE),on,off)])
+endif
 $(info ========================================)
 
 export C_SRCS
@@ -89,6 +113,7 @@ export LINK_S_OBJS
 export LINK_C_OBJS
 export ALL_OBJS
 export TEST_C_OBJS
+export UT
 
 # ============================================================================
 # 7. 包含编译和链接规则（明确分开包含）
@@ -109,9 +134,10 @@ release:
 asan:
 	$(MAKE) BUILD_TYPE=asan
 
-# 真实 NAND 集成测试。PAA 在烧录后由串口命令 nand test <PAA> 显式传入。
+# 单元/集成测试构建。UT=（空）编入全部套件；UT=FC 仅 FC-NAND 三级；UT=FTL 仅 FTL L0。
+# PAA 在烧录后由串口命令 nand test <PAA> 显式传入。
 tests:
-	$(MAKE)  BUILD_TARGET=firmware FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1 CFLAGS_EXTRA=-DMUNIT_ENABLE_TIMING
+	$(MAKE)  BUILD_TARGET=firmware FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1 UT=$(UT) CFLAGS_EXTRA=-DMUNIT_ENABLE_TIMING
 
 # ============================================================================
 # 主目标
@@ -179,6 +205,8 @@ info:
 	@echo "  BUILD_TARGET     : $(BUILD_TARGET)"
 	@echo "  FIRMWARE_PLATFORM: $(FIRMWARE_PLATFORM)"
 	@echo "  BUILD_TYPE       : $(BUILD_TYPE)"
+	@echo "  UT               : $(if $(UT),$(UT),ALL)"
+	@echo "  OBJ_DIR          : $(OBJ_DIR)"
 	@echo "  TARGET           : $(TARGET)"
 	@echo "  MODULES          : $(MODULES)"
 	@echo "  ALL_LIBS         :"
@@ -241,6 +269,7 @@ help:
 	@echo ""
 	@echo "  Variables:"
 	@echo "    BUILD_TYPE     - debug, release, asan (default: debug)"
+	@echo "    UT             - unit test scope for 'tests': (empty)=all, FC, FTL"
 	@echo "    V=1            - Show full compile commands"
 	@echo "    CROSS_COMPILE  - Cross-compilation prefix"
 	@echo "    COVERAGE=1     - Enable code coverage (gcov)"
