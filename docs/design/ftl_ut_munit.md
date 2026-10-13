@@ -36,7 +36,7 @@ read disturb 慢死预测、坏块替换池、L2P thrashing、**组完成语义*
 | # | 发现（文件行号） | 结论 |
 |---|---|---|
 | 1 | munit 无测试宏，`MunitTest` 数组（`tests/framework/munit.h`）+ `MunitSuite` 根套件（`ut_main.c`）逐项注册 | 新增 FTL 套件 = `extern MunitTest g_ftl_*_tests[]` + 根套件一行 |
-| 2 | **板上堆仅 512B**：`linker/stm32h743xx_flash.ld:19` `_Min_Heap_Size=0x200` | 新 FTL 测试一律**静态 fixture + setup 里 memset 复位**。**禁止 malloc** |
+| 2 | **堆与栈共享 128KB DTCM**：`_Min_Heap_Size=0x200`（`linker/stm32h743xx_flash.ld:19`）**不是堆上限**，只是 `._user_heap_stack` 的**最小预留**（链接期静态溢出检查，`:146-153`）。真实堆 = DTCM 底部 `end` 向上长到 `MSP - SBRK_STACK_GUARD(0x400)`（`src/platform/syscalls.c:73-96`），测试期栈峰值≈55KB ⇒ 可用堆**数十 KB** | 新 FTL 测试一律**静态 fixture + setup 里 memset 复位**，**禁止 malloc**——理由不是「堆只有 512B」，而是**大夹具（如已删的 `test_rebuild.c` ~176KB）必然撞栈 ⇒ HardFault** |
 | 3 | `ftl_block_t`=**20B**（`bst.h:139` static_assert）；`super_block_t`=**12B**（`allocator.h:80`） | 见下预算表 |
 | 4 | **`allocator_init` 现取 `ftl_tables_t*`**（3 参，`allocator.c:49`）——大数组**按值内含**，HIL 不再传指针（P2-5 表自持） | **fixture 必须提供 `ftl_tables_t`**，不能再散落数组 |
 | 5 | `allocator_init` **不填 free pool**（只把非坏块置 FREE 状态、`free_count=0`），由 HIL/`main.c` 回填（`allocator.c:59` 注释 + `main.c:230`） | 用例须区分「init 后」与「回填后」两种状态 |
