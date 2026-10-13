@@ -211,8 +211,11 @@
  * 版本的 Checkpoint）⇒ ftl_media_format() 自动全片格式化（见 power_failure_recovery.c）。
  * 这样就不再需要"上板前先手动 bbt --erase"。
  * v0.62：元数据页完整性改由下层 FC 的 per-CW CRC + ECC 承担，FTL 记录内的 CRC 字段
- *        全部删除（Checkpoint/Anchor/BBT/Wear 四结构体尺寸随之变化）⇒ 版本 +1。 */
-#define FTL_MEDIA_LAYOUT_VERSION (2U)
+ *        全部删除（Checkpoint/Anchor/BBT/Wear 四结构体尺寸随之变化）⇒ 版本 +1。
+ * v0.65：Wear 条目加 rr 健康字段（last_ecc / rising_count / health，8B → 12B）⇒ 版本 +1。
+ *        老格式的 Wear 页 magic 仍匹配、条目布局却不同 ⇒ 必须靠版本拦下（否则会把
+ *        计数读成垃圾）。 */
+#define FTL_MEDIA_LAYOUT_VERSION (3U)
 
 /* ══════════════════════════════════════════════════════════════════
  * 四、逻辑表字节（公式①：覆盖实体数 × 每实体字节）
@@ -233,8 +236,8 @@
 /* Journal：块数 × 每块页数 × 页主区 */
 #define FTL_JOURNAL_TABLE_BYTES ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK * PAGE_MAIN_SIZE)
 
-/* Wear：每条目字节（block + read 计数 + 擦除计数，见 ftl/wear.h）*/
-#define FTL_WEAR_ENTRY_BYTES (8U)
+/* Wear：每条目字节（block + read 计数 + 擦除计数 + rr 健康三字段，见 ftl/wear.h）*/
+#define FTL_WEAR_ENTRY_BYTES (12U)
 
 /* Wear：每块一条目 */
 #define FTL_WEAR_TABLE_BYTES ((uint32_t)FTL_BLOCK_TOTAL * FTL_WEAR_ENTRY_BYTES)

@@ -102,40 +102,33 @@ static void boot_section(const char *name)
 }
 
 /* ══════════════════════════════════════════════════════════════════
- * FTL 实例多维表（v0.37 — main.c FTL 上线）
+ * FTL 实例（v0.37 上线；P2-5 起**自持表**）
  *
- * SRAM 布局（方案 B 修正，已与设计文档确认）：
- *   g_ftl    含 l2p cache 128KB + journal/md → AXI_RAM（约 157.6KB，见 ftl_design.md §2.3）
- *   g_blocks BST 条目 80KB → AXI_RAM（保持 params.blocks 线性索引契约，拆段破坏
- *            allocator 的 [gblock] 索引；SRAM1 仅 128KB 放不下）
- *   g_free_blocks + g_closed_sb_list → SRAM2（.sram2_data NOLOAD，linker 已有）
+ * 表所有权（P2-5）：BST / free / op / spare / closed 五个大数组**不再由本文件声明**，
+ *   而是内含在 ftl_context_t 里（`ftl->tables`，见 ftl/allocator.h）——表归 FTL 本体
+ *   所有，本文件只提供实例存储。与主流同构（OpenSSD 全局数组 / SPDK `spdk_ftl_dev`
+ *   内含表）。好处：内存预算**单点可见**（下面的 _Static_assert 只看 g_ftl 一项）。
  *
- *   AXI_RAM：g_ftl + g_blocks(80KB) + 保留 20KB，仍在 384KB 内。
- *   （v0.60 删 g_valid_map 64KB：有效性走 DRAM-less approach ③，逐 CW META 反查 L2P。）
+ * SRAM 布局：
+ *   g_ftl（l2p cache 128KB + journal/md + 自持表 ~112KB + 页打包写缓冲 4KB）→ AXI_RAM（.bss）
+ *   AXI_RAM 实占 ≈ 287KB + 命令/描述符/缓冲池 ~19KB，仍在 384KB 内。
+ *   （v0.60 删 g_valid_map 64KB：有效性走 DRAM-less approach ③，逐 CW META 反查 L2P；
+ *     v0.66 加 wbuf 4KB/实例：页打包写缓冲，见 ftl_wbuf_t。）
  * ══════════════════════════════════════════════════════════════════ */
-static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM];                         /* 157.6KB → AXI_RAM */
-static ftl_block_t   g_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL];     /* 20B×4096=80KB → AXI_RAM */
-static uint16_t      g_free_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* 8KB → SRAM2 */
-    __attribute__((section(".sram2_data")));
-static uint16_t g_op_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_BLOCK_TOTAL] /* OP 预留池，容量不动 → SRAM2 */
-    __attribute__((section(".sram2_data")));
-static uint16_t g_spare_blocks[CH_NUM][CE_NUM][LUN_NUM][FTL_SPARE_POOL_SIZE] /* 坏块替换池 → SRAM2 */
-    __attribute__((section(".sram2_data")));
-static super_block_t g_closed_sb_list[CH_NUM][CE_NUM][LUN_NUM][SUPER_BLOCK_LIST_MAX] /* 16KB → SRAM2 */
-    __attribute__((section(".sram2_data")));
-ssd_controller_t g_ctrl; /* controller 路由表（收 g_ftl 三维指针）；非 static：
-                          * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
-static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
+static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM]; /* ≈287KB → AXI_RAM（.bss） */
+ssd_controller_t     g_ctrl;                         /* controller 路由表（收 g_ftl 三维指针）；非 static：
+                                                      * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
+static int g_ftl_ready;                              /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
 
 /* ── 编译期内存预算（AXI_RAM）──
- * 上面两张表随 CH_NUM×CE_NUM×LUN_NUM 线性放大，而 AXI_RAM 是硬上限
+ * g_ftl 随 CH_NUM×CE_NUM×LUN_NUM 线性放大，而 AXI_RAM 是硬上限
  * （linker/stm32h743xx_flash.ld: __AXI_RAM_SIZE = 0x60000 = 384KB）。
- * 当前 1 个维度用 ~255KB，**再加一个实例就装不下**。把它变成编译错误，
+ * 当前 1 个维度用 ~287KB，**再加一个实例就装不下**。把它变成编译错误，
  * 而不是运行期 HardFault 或静默的 .bss 溢出。提高维度前必须先重新规划内存。 */
 #define BOARD_AXI_RAM_SIZE   (384U * 1024U) /* 对齐 __AXI_RAM_SIZE */
 #define FTL_AXI_RAM_RESERVED (20U * 1024U)  /* 命令池/描述符池/缓冲池等（实测 ~19KB）*/
 
-_Static_assert(sizeof(g_ftl) + sizeof(g_blocks) + FTL_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE,
+_Static_assert(sizeof(g_ftl) + FTL_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE,
                "FTL 实例数组超出 AXI_RAM：提高 CH/CE/LUN 前必须重新规划内存");
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
@@ -155,36 +148,29 @@ static ftl_context_t *g_ftl_ptrs[CH_NUM][CE_NUM][LUN_NUM];
  */
 static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
 {
-    ftl_init_params_t params;
+    ftl_context_t    *ftl = &g_ftl[ch][ce][lun];
+    ftl_allocator_t  *alloc;
     ftl_boot_result_t result;
     uint16_t          gblock;
     uint16_t          free_n = 0U;
+    uint16_t          good_n = 0U;
 
-    memset(&params, 0, sizeof(params));
-    params.topo           = (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun};
-    params.blocks         = g_blocks[ch][ce][lun];
-    params.free_blocks    = g_free_blocks[ch][ce][lun];
-    params.free_count     = 0U;
-    params.op_blocks      = g_op_blocks[ch][ce][lun];
-    params.op_count       = 0U;
-    params.spare_blocks   = g_spare_blocks[ch][ce][lun];
-    params.spare_count    = 0U;
-    params.closed_sb_list = g_closed_sb_list[ch][ce][lun];
-
-    if (ftl_init(&g_ftl[ch][ce][lun], &params) != FTL_OK)
+    if (ftl_init(ftl, (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun}) != FTL_OK)
     {
         LOGE("[FTL ] init failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return -1;
     }
 
+    alloc = &ftl->alloc;
+
     /* 介质布局版本判据：介质不是当前版本（旧格式 / 空片）⇒ 全片格式化。
      * 放在 ftl_init 之后、free pool 回填之前——bbt_init 已先把出厂坏块标记读进 BST，
      * 且此时回填尚未把未擦的旧块当空白块放进 free pool。格式化后写当前版本 Checkpoint
      * 标记 ⇒ 下次开机判据命中，只发生一次。 */
-    if (ftl_media_needs_format(&g_ftl[ch][ce][lun]) != 0)
+    if (ftl_media_needs_format(ftl) != 0)
     {
         LOGW("[FTL ] media layout mismatch -> format (erase all blocks)\r\n");
-        if (ftl_media_format(&g_ftl[ch][ce][lun]) != FTL_OK)
+        if (ftl_media_format(ftl) != FTL_OK)
         {
             LOGE("[FTL ] media format failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
             return -1;
@@ -206,46 +192,53 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         uint16_t spare_idx;
         uint16_t op_idx;
 
-        if (ftl_block_is_bad(&g_blocks[ch][ce][lun][gblock]))
+        if (ftl_block_is_bad(&alloc->blocks[gblock]))
         {
             continue;
         }
-        if (ftl_is_metadata_block(&g_ftl[ch][ce][lun].metadata_dir,
+        if (ftl_is_metadata_block(&ftl->metadata_dir,
                                   (uint16_t)(gblock % BLOCKS_PER_PLANE)))
         {
             continue;
         }
 
+        good_n++;
+
         /* ① 前 50 个好块入 Spare Pool（坏块替换池） */
-        spare_idx = g_ftl[ch][ce][lun].alloc.spare_count;
+        spare_idx = alloc->spare_count;
         if (spare_idx < FTL_SPARE_POOL_SIZE)
         {
-            g_spare_blocks[ch][ce][lun][spare_idx] = gblock;
-            g_ftl[ch][ce][lun].alloc.spare_count++;
+            alloc->spare_blocks[spare_idx] = gblock;
+            alloc->spare_count++;
             continue;
         }
 
         /* ② 前 10% 好块入 OP 池（GC 缓冲池） */
-        op_idx = g_ftl[ch][ce][lun].alloc.op_count;
+        op_idx = alloc->op_count;
         if (op_idx < (uint16_t)((uint16_t)(FTL_BLOCK_TOTAL / 2U) * FTL_OP_PERCENT / 100U))
         {
-            g_op_blocks[ch][ce][lun][op_idx] = gblock;
-            g_ftl[ch][ce][lun].alloc.op_count++;
+            alloc->op_blocks[op_idx] = gblock;
+            alloc->op_count++;
             continue;
         }
 
-        allocator_free_block(&g_ftl[ch][ce][lun].alloc, gblock);
+        allocator_free_block(alloc, gblock);
         free_n++;
     }
+
+    /* 总好块数（spare + op + free）——wear_leveling 的「低擦除区占比」判据靠它定分母
+     * （见 allocator.h 声明语义）。allocator_init 置 0，此处按出厂扫描结果置定。 */
+    alloc->total_blocks = good_n;
+
     LOGI("[FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
          ch,
          ce,
          lun,
          (unsigned)free_n,
-         (unsigned)g_ftl[ch][ce][lun].alloc.op_count,
-         (unsigned)g_ftl[ch][ce][lun].alloc.spare_count);
+         (unsigned)alloc->op_count,
+         (unsigned)alloc->spare_count);
 
-    if (ftl_boot_recovery(&g_ftl[ch][ce][lun], &result) != FTL_OK)
+    if (ftl_boot_recovery(ftl, &result) != FTL_OK)
     {
         LOGE("[FTL ] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return -1;
@@ -455,8 +448,10 @@ int main(void)
     cli_service_poll();
     /* ── 主循环（裸机 superloop，无中断参与）──
      *   g_ftl_ready == 0：只跑 fc_service()，保持 FC/NAND 裸路径活着（可跑 CLI 自检命令）。
-     *   g_ftl_ready == 1：改跑 ftl_service()，它内部会先调用 fc_service() ≤4 次
-     *                     （NAND_SUBMIT_BUDGET）再 drain 完成表。
+     *   g_ftl_ready == 1：ftl_service_pump() 一次（全局 NAND 泵 + 抽干完成表），
+     *                     再对**每个**实例调 ftl_service()（Phase 2.5/3 后台）。
+     *                     ⚠ 必须遍历全部实例：只跑 [0][0][0] 会让其余实例的
+     *                       journal / checkpoint / wear / bbt / GC 永不推进（序 4）。
      *   cli_service_poll()    —— CLI 解析（含 `test` 单元测试入口）。
      *   btim_scheduler_poll() —— 1ms 任务表（看门狗喂狗等）。
      *   All command parsing and scheduled storage work remain outside ISR context. */
@@ -465,8 +460,24 @@ int main(void)
         cli_service_poll();
         if (g_ftl_ready)
         {
-            /* FTL 主循环（Phase 1 内部已含 fc_service ≤4 次） */
-            ftl_service(&g_ftl[0][0][0]);
+            uint8_t ch;
+            uint8_t ce;
+            uint8_t lun;
+
+            /* ① 全局泵：NAND 推进 + 完成表抽干（实例无关，每轮一次） */
+            ftl_service_pump();
+
+            /* ② 逐实例后台：Phase 2.5 补发子操作 + Phase 3 三级后台 */
+            for (ch = 0U; ch < CH_NUM; ch++)
+            {
+                for (ce = 0U; ce < CE_NUM; ce++)
+                {
+                    for (lun = 0U; lun < LUN_NUM; lun++)
+                    {
+                        ftl_service(&g_ftl[ch][ce][lun]);
+                    }
+                }
+            }
         }
         else
         {

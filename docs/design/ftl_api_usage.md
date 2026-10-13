@@ -22,13 +22,12 @@ struct ftl_context {
     l2p_cache_t         cache;              // SRAM L2P cache (~128KB)
     ftl_pending_req_t   pending[FTL_PENDING_MAX];  // 子操作追踪（per-instance）
     ftl_io_group_t      groups[FTL_GROUP_MAX];     // 完成组表（一次 submit = 一组）
-    ftl_allocator_t     alloc;              // 空闲 block / Super Block 写指针
+    ftl_tables_t        tables;             // 自持大表（BST/free/op/closed/spare，P2-5）
+    ftl_allocator_t     alloc;              // 空闲 block / Super Block 写指针 + per-instance 块账本游标
     l2p_journal_t       journal;            // log-structured journal
     metadata_dir_cache_t metadata_dir;      // Metadata Directory
+    l2p_cp_state_t      cp;                 // Checkpoint 池游标/序号（per-instance，v0.65）
     uint32_t            cp_timer_start;     // Checkpoint 计时
-    uint32_t            cp_sequence;        // 上次 Checkpoint sequence
-    uint32_t            gc_last_run_writes; // GC 计时
-    uint32_t            gc_timer_start;
     uint32_t            total_writes;       // 写入总次数
     uint8_t             bg_suspend;         // 后台写闸门（bbt --erase 置位）
     uint32_t            rr_last_scan_ms;    // 慢死预测巡检节流
@@ -392,7 +391,11 @@ ssd_controller_init(&g_ctrl, g_ftl_ptrs);
 while (1) {
     cli_service_poll();                 // 收 Host 命令 → ssd_controller_submit()
     if (g_ftl_ready) {
-        ftl_service(&g_ftl[0][0][0]);   // ⑧ 推进 FTL（FC + 完成路由 + 后台任务）
+        ftl_service_pump();             // ⑧ 实例无关：NAND 推进 + 完成表抽干（每轮一次）
+        for (ch = 0; ch < CH_NUM; ch++)     // ⑨ 逐实例：补发子操作 + 三级后台
+            for (ce = 0; ce < CE_NUM; ce++)
+                for (lun = 0; lun < LUN_NUM; lun++)
+                    ftl_service(&g_ftl[ch][ce][lun]);
     } else {
         (void)fc_service();             //    boot 失败降级裸 fc_service
     }
@@ -797,7 +800,7 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
   Phase 3 ── 三级后台模式（判据 = 未决命令数近似空闲度，非"本轮有无提交 NAND"）
   ├── IDLE 模式 (inflight == 0):               全力后台
   │   ├── l2p_cache_flush_all()
-  │   ├── GC 补 Free Pool 到水位① (FREE_POOL_TARGET)
+  │   ├── GC：ftl_gc_evaluate 命中 ⇒ 全力补池到水位① (FREE_POOL_TARGET)
   │   ├── wl_execute()                  ← 磨损均衡
   │   ├── wl_predictive_relocate()      ← 慢死预测巡检（节流 1s）
   │   ├── journal_flush_page() / bbt_flush() / wear_flush()
@@ -805,7 +808,7 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
   │
   ├── NORMAL 模式 (pending ≤ MAX/2 且无排队组):  适度后台
   │   ├── l2p_cache_flush_background(4)
-  │   ├── GC (按 gc_check_trigger)
+  │   ├── GC：ftl_gc_evaluate 命中 ⇒ 回收一个 SB（与 IDLE 同一求值点）
   │   ├── wl_execute() (按 wl_should_trigger)
   │   └── checkpoint_create() (按需)
   │

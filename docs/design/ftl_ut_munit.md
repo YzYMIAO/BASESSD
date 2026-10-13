@@ -1,99 +1,124 @@
-# FTL 层测试用例设计（上板路线：L0 munit 套件 + L2 真 NAND CLI）
+# FTL 层测试用例设计（L0 munit 纯 RAM 套件）
 
 > **状态：设计文档（供审查）。实施（测试文件 / makefile 接线）在审查通过后进行。**
 >
-> **2026-10-13 更新**：
-> - 本文从"覆盖清单"深化为**逐条用例表**（§4），并**新增 §9 上板验收矩阵**、**§10 覆盖矩阵**。
-> - **路线定调：不做 mock**。全部用板子测——① L0 纯 RAM munit 套件（编进 `debug.bin`，板上
->   `test` 命令跑）；② L2 真 NAND + UART CLI（`wr/rd/tr/fl/info`）+ **物理断电重启**。
->   原 §8.2/§8.3/§8.6 的 "mock `fc_submit` / Mock NAND / 掉电注入器" 二期设计**降级为路线说明**（不做）。
-> - §2 SRAM 预算已按 `ftl_block_t` **20B**（v0.56 删死字段 24B→20B，`bst.h:139` static_assert）重算。
+> **分层边界**（判据 `fc_nand_design.md §26.1`）：本文**只管 FTL 层（`src/ftl/`）**。
+> 非 FTL 的部分已拆出（2026-10-13）：
 >
-> **2026-10-04 事实**（仍有效）：`_sbrk` 已有实现（`src/platform/syscalls.c`，带实时 MSP
-> 上界守卫 + 1KB 保留），`_Min_Heap_Size` 仍是 512B；`test_rebuild.c` 已从板端构建摘除
-> （`src/fc/makefile.mk` 注释 + `ut_main.c` 摘除），§3「顺带修复」与 §7「malloc→静态 fixture」暂缓。
+> | 内容 | 归属 | 文档 |
+> |---|---|---|
+> | HIL 层（`src/controller/`）纯逻辑 UT | L0 | **`hil_ut_design.md` Part A** |
+> | 对外接口 / 拆分聚合 / 跨重启 / 后台观测（真 NAND + CLI） | L2 系统集成 | **`hil_ut_design.md` Part B~D** |
+> | FC-NAND 三级 UT | — | `fc_nand_ut.md` |
+>
+> **为什么这样分**：`src/controller/` 是 **HIL**，与 FTL **平级**（不是 FTL 的一部分）。
+> 原本文档把 CLI 端到端验收混作「FTL 层测试」，标题名不副实，故拆出。本文只剩纯 FTL 逻辑。
 
 ## 1. 背景与目标
 
 FC-NAND 已有三级 munit UT（`tests/unit/test_fc_level1/2/3.c`，经 `make tests` 上板 + UART `test`
-命令跑套件），但 **FTL 层没有自己的 UT**：`tests/unit/test_gc.c`/`test_l2p.c`/`test_nand.c`
+命令跑），但 **FTL 层没有自己的 UT**：`tests/unit/test_gc.c`/`test_l2p.c`/`test_nand.c`
 各只有 1 行头部注释（孤儿占位，无 makefile 编入）；`src/ftl/makefile.mk` 无测试块。
 
-A/B/C 档（v0.44~v0.47）+ v0.49~v0.58 落地了大量 FTL 纯逻辑（Free Pool 三级水位、journal 水位公式、
-GC/WL victim 选择、read disturb 慢死预测、坏块替换池、L2P thrashing、**组完成语义**），目前**全部依赖
-上板验证**——缺一层纯 RAM 单元测试把纯逻辑钉住，编译期 + 上板前能回归。
-
-**最近的教训**：v0.58 上板暴露 **L2P 映射不跨重启持久化**（`wr 0 1` → 断电 → `rd 0 1 c` FAIL，
-`anchor_seq=0` / `journal_entries=0`），根因未闭合。这类"跨重启一致性"缺陷**正是 FTL 测试该钉住的**
-（见 §9.2），却因为没有 FTL 测试而只能靠人工上板发现。
+FTL 层落地了大量**纯逻辑**（Free Pool 三级水位、journal 水位公式、GC/WL victim 选择、
+read disturb 慢死预测、坏块替换池、L2P thrashing、**组完成语义**），目前**全部依赖上板验证**
+——缺一层纯 RAM 单元测试把纯逻辑钉住，编译期 + 上板前能回归。
 
 **目标**：
-- 复用 FC-NAND 的 munit 架构（`MunitTest` 数组 + `ut_main.c` 根套件 + `make tests` + UART `test`
-  命令），零改动 `tests/framework`
-- **L0 只测纯 RAM 函数**（不碰 NAND、不需要 mock），上板稳、不依赖真 NAND 时序
-- **L2 走真 NAND + CLI**，覆盖 NAND 路径（GC/WL 搬移、journal flush、checkpoint、BBT 持久化、
-  boot recovery、**跨重启持久化**）
+- 复用 FC-NAND 的 munit 架构（`MunitTest` 数组 + `ut_main.c` 根套件 + `make tests` + UART `test`），
+  零改动 `tests/framework`
+- **只测纯 RAM 函数**（不碰 NAND、不需要 mock），上板稳、不依赖真 NAND 时序
+- 需真 NAND 的路径（GC 搬移 / journal replay / boot recovery / 跨重启）→ **`hil_ut_design.md`**
 
 ## 2. 关键架构约束（决定 fixture 形态）
 
 | # | 发现（文件行号） | 结论 |
 |---|---|---|
-| 1 | munit 无测试宏，`MunitTest` 结构体数组（`tests/framework/munit.h`）+ `MunitSuite` 根套件（`ut_main.c:28-46`）逐项注册 | 新增 FTL 套件 = `extern MunitTest g_ftl_*_tests[]` + 根套件一行 |
-| 2 | **板上堆仅 512B**：`linker/stm32h743xx_flash.ld:19` `_Min_Heap_Size=0x200` | 新 FTL 测试一律**静态全局 fixture + setup 里 memset 复位**（blocks 落 AXI_RAM、池落 SRAM2，仿 main.c 布局）。**禁止 malloc** |
-| 3 | `ftl_block_t` = **20B**（`bst.h:139` `_Static_assert(sizeof==20)`）；`super_block_t`=**12B**（`allocator.h:73-80`）。⚠ `valid_map` **已删**（v0.60：有效性走 DRAM-less approach ③，逐 CW META 反查 L2P） | 见下预算表 |
-| 4 | `allocator_select_plane_block_from_pool` 只扫 **Free Pool 数组**（`allocator.c:157`），不是全 4096 遍历 | 2112 项 fixtures 足够覆盖选块；`allocator_alloc` 的 `BLOCKS_PER_PLANE` 遍历按 20B 亦可容纳（见预算） |
-| 5 | SRAM 预算（tests build 增量，按 20B 重算） | `blocks[2112]`=**41.25KB** + `closed_sb_list[1024]`=**12KB** + 池（128+128+64）×2B=0.64KB ≈ **54KB**。SRAM1(128KB) + SRAM2 可容；若上 4096 项 ≈ **96KB**，跨 SRAM1+SRAM2 仍可容（实施时按 region 布局确认） |
+| 1 | munit 无测试宏，`MunitTest` 数组（`tests/framework/munit.h`）+ `MunitSuite` 根套件（`ut_main.c`）逐项注册 | 新增 FTL 套件 = `extern MunitTest g_ftl_*_tests[]` + 根套件一行 |
+| 2 | **板上堆仅 512B**：`linker/stm32h743xx_flash.ld:19` `_Min_Heap_Size=0x200` | 新 FTL 测试一律**静态 fixture + setup 里 memset 复位**。**禁止 malloc** |
+| 3 | `ftl_block_t`=**20B**（`bst.h:139` static_assert）；`super_block_t`=**12B**（`allocator.h:80`） | 见下预算表 |
+| 4 | **`allocator_init` 现取 `ftl_tables_t*`**（3 参，`allocator.c:49`）——大数组**按值内含**，HIL 不再传指针（P2-5 表自持） | **fixture 必须提供 `ftl_tables_t`**，不能再散落数组 |
+| 5 | `allocator_init` **不填 free pool**（只把非坏块置 FREE 状态、`free_count=0`），由 HIL/`main.c` 回填（`allocator.c:59` 注释 + `main.c:230`） | 用例须区分「init 后」与「回填后」两种状态 |
+| 6 | `pending_*` / `pending_group_*` 取 **`ftl_context_t*`**（`pending.h:134`），需**完整上下文** | 见下「fixture 内存」一节 |
 
-> 结论：**fixtures 用 2112 项（2048+64）**——测试块号 0..63（双 plane 覆盖 gblock 0..2111）。
-> 按 20B 重算后 4096 项也进得了预算，`allocator_alloc` 是否纳入留待实施时定（见 §4.1 备注）。
+### 2.1 尺寸与内存预算（P2-5 后重算）
+
+| 结构 | 组成 | 尺寸 |
+|---|---|---|
+| `ftl_tables_t` | `blocks[4096]×20B`=80KB + `free_blocks[4096]×2B`=8KB + `op_blocks[4096]×2B`=8KB + `closed_sb_list[1024]×12B`=12KB + `spare_blocks[50]×2B`=100B | **≈108KB** |
+| `metadata_dir_cache_t` | `entries[2048]×7B` | **≈14.4KB** |
+| `ftl_context_t` | 内含 `tables`(108KB) + `cache`(128KB) + `metadata_dir`(14.4KB) + journal + … | **≈287KB** |
+
+> **⚠ 关键约束**：`ftl_tables_t` 的数组尺寸由 `FTL_BLOCK_TOTAL`（=4096）**固定**——原文档
+> 「用 2112 项省内存」**不可能**（结构体按值含全 4096 项）。
+> 且 **AXI_RAM(384KB) 已被 `main.c` 的 `g_ftl`(287KB) 占满**（`main.c:131` 的 `_Static_assert`），
+> 独立 287KB 的 `ftl_context_t` fixture **放不下**。
+
+### 2.2 fixture 内存：复用活实例（推荐）
+
+`main.c` 的 `g_ftl[0][0][0]` 由 `g_ctrl.ftl[0][0][0]` 暴露（`g_ctrl` 是 `extern`，`cli.h:15`；
+CLI 已这么用）。**FTL L0 fixture 复用该实例**，`setup` 里 `memset` 复位其子结构：
+
+```c
+/* setup: 复位活实例的 FTL 子结构到已知态（不改拓扑指针） */
+ftl_context_t *F = g_ctrl.ftl[0][0][0];
+memset(&F->tables,       0, sizeof(F->tables));        /* BST + 各池 + closed 列表 */
+memset(&F->metadata_dir, 0, sizeof(F->metadata_dir));
+memset(F->pending,       0, sizeof(F->pending));
+memset(F->groups,        0, sizeof(F->groups));
+allocator_init(&F->alloc, F->topo, &F->tables);        /* 重绑表 + 状态机归零 */
+metadata_dir_init(&F->metadata_dir);
+```
+
+- **好处**：零额外内存、单一数据源（不复制 287KB）。
+- **代价**：fixture 不再「独立」；须保证 `test` 执行期间**后台泵不并发**——`test` 命令在
+  `cli_service_poll` 里**同步执行**（不重入泵），天然满足。
+- **备选**（不推荐）：独立 `ftl_context_t` 落 SRAM（`.sram1/2/3_data`=288KB，**仅 1KB 余量**），
+  或只对不需要上下文的用例用独立小 fixture（`ftl_tables_t`=108KB 落 SRAM1）。
 
 ## 3. 单文件测试组织（仿 fc_nand 一文件多套件）
 
-**1 个文件** `tests/unit/test_ftl.c`（仿 `test_fc_level1.c` 一文件多套件风格），fixture **内联**在文件内
-（数组只定义一次，无独立 fixture 文件）：
+**1 个文件** `tests/unit/test_ftl.c`（仿 `test_fc_level1.c` 一文件多套件风格），fixture 见 §2.2
+（复用 `g_ctrl.ftl[0][0][0]`，不另声明大数组）：
 
 ```c
-/* 文件内静态全局（.sram1_data / .sram2_data NOLOAD，setup 统一 ftl_fixture_reset() memset 复位） */
-static ftl_block_t      g_ftl_blocks[BLOCKS_PER_PLANE + 64];  /* 2112 × 20B = 41.25KB AXI_RAM */
-static uint16_t         g_ftl_free[128];                        /* SRAM2 */
-static uint16_t         g_ftl_op[128];
-static uint16_t         g_ftl_spare[64];
-static super_block_t    g_ftl_closed[SUPER_BLOCK_LIST_MAX];     /* 1024 × 12B = 12KB SRAM2 */
-static ftl_allocator_t      g_ftl_alloc;
-static metadata_dir_cache_t g_ftl_md_dir;
+/* setup 统一 ftl_fixture_reset()：复位活实例子结构（见 §2.2），返回 NULL fixture */
+static void ftl_fixture_reset(void);
 
-static void ftl_fixture_reset(void);  /* memset + allocator_init(params topo={0,0,0}+指针+counts) + metadata_dir_init */
+/* 小工具：把 n 个好块回填进 free pool（复刻 main.c 的回填循环，供 allocator 用例用） */
+static void ftl_fixture_backfill(ftl_allocator_t *alloc, uint16_t first, uint16_t count);
 ```
 
-文件内按 munit 风格分节，**导出 8 个套件数组**（非 static，供 ut_main extern）：
+文件内按 munit 风格分节，**导出 8 个套件数组**（非 static，供 `ut_main` extern）：
 `g_ftl_allocator_tests[]` / `g_ftl_watermark_tests[]` / `g_ftl_gc_wl_tests[]` / `g_ftl_rr_tests[]` /
 `g_ftl_bbt_tests[]` / `g_ftl_metadata_tests[]` / `g_ftl_pending_ct_tests[]` / **`g_ftl_group_tests[]`**。
-setup 统一 `ftl_fixture_reset()` 返回 NULL fixture，teardown NULL，`SINGLE_ITERATION`。
+setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 
 ## 4. 用例清单（逐条）
 
 > 表式：**用例名 | 前置 | 动作 | 断言**。断言优先用**不变量/边界**（判据 7 参数化 vs 迭代、
-> 判据 8 负例钉边界，见 `assertion_guidelines.md` §二十三）。**全部为纯 RAM，板上 `test` 跑，无 mock。**
+> 判据 8 负例钉边界）。**全部为纯 RAM，板上 `test` 跑，无 mock。**
 
 ### 4.1 `g_ftl_allocator_tests[]`（`src/ftl/allocator.c`）
 
 | 用例 | 断言 |
 |---|---|
-| `init_pool_full` | `allocator_init` 后 `free_count` == 非坏块总数；池内每块 state==FREE |
+| `init_zeroes_pool` | `allocator_init` 后 `free_count==0`、`op_count==0`、`spare_count==0`、非坏块 state==FREE（**init 不回填**，§2 行 5） |
+| `backfill_fills_pool` | 回填 n 个好块后 `free_count==n`；池内每块 state==FREE |
 | `free_block_clears_state` | 对 OPEN/CLOSED/RESERVED/TEMP 块调 `allocator_free_block` → state==FREE + 入池 + 计数+1 |
 | `close_open_sb` | `allocator_close_open_sb`：新 closed SB 两 plane 块 state==CLOSED + `sb_id` 正确 + `closed_sb_count`+1 |
-| `add_closed_sb` | `allocator_add_closed_sb` → count+1、两块 CLOSED + sb_id |
-| `remove_closed_sb_swap_remove` | 删中间项：末项搬到该位**且 `sb_id` 修正**、count-1（swap-remove 索引坑） |
-| `remove_from_free` | `allocator_remove_from_free` → count-1、块不在池 |
+| `add_closed_sb` | `allocator_add_closed_sb` → count+1、两块 CLOSED + sb_id；**条目字段**：`next_page==PAGES_PER_BLOCK`、`temperature` 透传、`valid==0`、`topo` 正确；两块 **清 FREE/OPEN** 位 |
+| `add_closed_sb_full` | **边界**：塞满 `SUPER_BLOCK_LIST_MAX` 后返回 `UINT16_MAX` 且**不写入**、`closed_sb_count` 不变（满列表拒绝） |
+| `remove_closed_sb_swap_remove` | 删中间项：末项搬到该位**且 `sb_id` 修正**、count-1（swap-remove 索引坑）；被删块 `sb_id` 复位 `FTL_BLOCK_NO_SB` |
+| `remove_from_free` | `allocator_remove_from_free`（swap-remove）→ count-1、块不在池；**移除不存在的块无害**（count 不变，负例） |
 | `reserved_alloc_free` | `allocator_alloc_reserved_block` 置 RESERVED；`allocator_free_reserved_block` 归还池 |
-| **`open_sb_never_picks_metadata`** | **回归用例**：metadata 块 0..62 被 `allocator_init` 标 FREE 但**不在 Free Pool** ⇒ 新建 SB 两 plane 块都 **≥63**（钉住本轮真缺陷） |
+| **`open_sb_never_picks_metadata`** | **回归用例**：metadata 块 0..62 被 `allocator_init` 标 FREE 但**不在 Free Pool** ⇒ 新建 SB 两 plane 块都 **≥63**（钉住历史真缺陷） |
 | `open_sb_min_erase_count` | 池内多块时选该 plane `erase_count` 最小者（动态 WL） |
 
 > ⚠ **L0 只能调公开函数**：`allocator_open_sb`（`allocator.c:200`）、
 > `allocator_select_plane_block_from_pool`（`:157`）、`allocator_pull_from_op`（`:128`）都是 `static`
-> ⇒ 上两条经**公开入口 `allocator_close_open_sb`（`:359`，内部 `:408` 调 `open_sb`）间接测**：
+> ⇒ 上两条经**公开入口 `allocator_close_open_sb`（`:359`，内部调 `open_sb`）间接测**：
 > 调用后断言新 closed SB 的 `plane_blocks[p] ≥ 63` / `erase_count` 最小。
-> `allocator_alloc`/`allocator_alloc_pair` 是否纳入第一版：按 20B 预算可行（§2 行 5），留待实施定。
 
 ### 4.2 `g_ftl_watermark_tests[]`（`src/ftl/checkpoint.c`）
 
@@ -103,7 +128,7 @@ setup 统一 `ftl_fixture_reset()` 返回 NULL fixture，teardown NULL，`SINGLE
 | `journal_wm_at_85` | 恰 85% → 置 `checkpoint_needed`（边界上 1 条） |
 | `journal_wm_at_95_emergency` | ≥95% → 置 `emergency`（`JOURNAL_CRITICAL`） |
 | `emergency_set_reset` | ≥95% 置位；回落清位 |
-| `checkpoint_trigger_T1_T2_T3` | `checkpoint_check_trigger` 三种条件各自命中（参数化，判据 7） |
+| `checkpoint_trigger_T1_T2_T3` | `checkpoint_check_trigger` 三种条件各自命中（参数化）——实现仍为 T1 journal 水位 / T2 写入量 / T3 定时（`checkpoint.c`） |
 | `checkpoint_is_emergency` | `checkpoint_is_emergency` 查询位与 watermark 一致 |
 
 ### 4.3 `g_ftl_gc_wl_tests[]`（`src/ftl/gc.c` + `src/ftl/wear_leveling.c`）
@@ -112,7 +137,7 @@ setup 统一 `ftl_fixture_reset()` 返回 NULL fixture，teardown NULL，`SINGLE
 |---|---|
 | `gc_victim_lowest_vpc` | `gc_select_victim` 选 VPC 最低 closed SB |
 | `gc_victim_skips_open` | 跳过 `valid!=0` 的 open SB（负例，判据 8） |
-| `gc_trigger_T1..T5` | `gc_check_triggers` 五位（水位/写数/定时/紧急/磨损）各自置位（参数化） |
+| `gc_trigger_T1_T4_T5` | `gc_check_triggers` **三位**各自置位（参数化）：T1 `GC_TRIGGER_WATERMARK(0x01)` / T4 `GC_TRIGGER_EMERGENCY(0x08)` / T5 `GC_TRIGGER_WEAR(0x10)`（`gc.h:49-51`）——**v0.63 已删 T2 写数 / T3 定时** |
 | `wl_trigger_delta` | 条件 1：`max-min ≥ WL_DELTA_THRESHOLD(5000)` |
 | `wl_trigger_ratio` | 条件 2：`max ≥ avg×WL_MAX_AVG_RATIO(3)` |
 | `wl_trigger_low_zone` | 条件 3：低擦除区块占比 `≥ WL_LOW_BLOCK_PCT(5)%` |
@@ -145,10 +170,11 @@ setup 统一 `ftl_fixture_reset()` 返回 NULL fixture，teardown NULL，`SINGLE
 
 | 用例 | 断言 |
 |---|---|
-| `dir_init_entries` | `metadata_dir_init` 后 `count==2048`、全 UNKNOWN |
+| `dir_init_entries` | `metadata_dir_init` 后 `count==2048`（= `L2P_REGIONS_PER_INSTANCE`）、全 UNKNOWN |
 | `dir_update_lookup_roundtrip` | `metadata_dir_update` 写一个 region → `metadata_dir_lookup` 回同 entry |
 | `dir_lookup_missing_unknown` | 未写 region → `0xFFFFFFFF`（负例） |
-| `is_metadata_block` | `ftl_is_metadata_block`：**0..62 true、63 false**（边界，判据 8） |
+| `is_metadata_block` | `ftl_is_metadata_block`：**0..62 true、63 false**（边界，判据 8）。区间来自 `g_ftl_partitions[]`：L2P[0,16)+Anchor[16,48)+Ckpt[48,56)+BBT[56,58)+Journal[58,62)+Wear[62,63) ⇒ `FTL_METADATA_BLOCK_END==63`。⚠ **勿写死旧单块布局**（Anchor 33/34、BBT 36/39… 是 P0-2 前的旧值，已随池化失效） |
+| `is_metadata_block_dynamic` | 动态 region：`metadata_dir_update(L2P_REGION, r, paa)` 登记 `block≥63` 后 `ftl_is_metadata_block` 命中；**`md_dir==NULL`** 时仍命中固定区（0..62）、动态块不命中 |
 | `ring_addr_geometry` | `metadata_ring_addr` 纯地址换算：idx∈{0, rpb-1, rpb, 末} → (block,page,plane) 期望值 |
 | `ring_addr_wrap` | 跨 block 边界换算 |
 
@@ -156,27 +182,121 @@ setup 统一 `ftl_fixture_reset()` 返回 NULL fixture，teardown NULL，`SINGLE
 
 | 用例 | 断言 |
 |---|---|
-| `pending_add_lookup_remove` | 增删查一致（按 `cmd_id`） |
+| `pending_add_lookup_remove` | 增删查一致（按 `cmd_id`）——`pending_add` 现 **11 参**（`ftl, cmd_id, owners, lba, buffer, n_cw, new_pba, new_pba1, cache_intermediate, op, cw_bitmap`，`pending.h:134`）；读路径传 `owners=1<<gi, cw_bitmap=0` |
 | `pending_full_32_rejects` | 满 `FTL_PENDING_MAX(32)` 槽拒绝（负例） |
 | `pending_count` | 计数与槽位一致 |
 | `ct_add_remove_lookup_count` | `completion_table_*` 同族 |
 
-### 4.8 `g_ftl_group_tests[]`（新，v0.58 组完成语义——**纯 RAM，板上可直测**）
+### 4.8 `g_ftl_group_tests[]`（组完成语义——**纯 RAM，板上可直测**）
 
 | 用例 | 断言 |
 |---|---|
-| `group_alloc_free` | `pending_group_alloc/free`；`FTL_GROUP_NONE` 哨兵；`pending_group_count` 一致 |
+| `group_alloc_free` | `pending_group_alloc/free`；`pending_group_count` 一致 |
 | `group_maybe_complete_gating` | `next<total` 或 `outstanding!=0` 时**不**完成（负例） |
 | `group_agg_status_sticky` | 任一子操作 IO_ERROR ⇒ 组聚合状态**粘性**为 IO_ERROR |
 | `group_complete_once` | `next==total && outstanding==0` 时 `complete_flag`/`status_out`/`on_complete` **各触发一次** |
-| `group_reentrant_callback` | 回调里再 `pending_group_alloc` 不踩已释放槽（`used=0` 后置，`pending.c:170`） |
+| `group_reentrant_callback` | 回调里再 `pending_group_alloc` 不踩已释放槽 |
+| **`group_complete_subop_multi`** | **新增（v0.66）**：`pending_group_complete_subop_multi(ftl, owners, status)` 按位掩码逐组置位——同一子操作同时完成多个组（页打包写）；断言掩码里**每个**组各推进一次、掩码外的组**不动** |
 
-> L0 **不纳入**：`allocator_alloc`（可选，见 §4.1）、`metadata_dir_append_slot`（需真 NAND 擦写）；
-> `l2p_cache_note_access` 结算步（是 `static`，要测须先导出——属实施接线决策）。
+> `FTL_GROUP_NONE`（`pending.h:35`）现为**死常量**（源码自注「当前无使用者」）⇒ **不测**；
+> 要么删常量，要么保留待用，不在用例里断言它。
 
-## 5. 接线（实施阶段）
+## 5. 测试技法：随机化 / 参数化 / 压力 / 异步
 
-**`src/ftl/makefile.mk`**（现在只有 `MODULE_SRCS` 两行）追加（**一行测试源**，fixture 内联无需单独文件）：
+> 沿用 FC-NAND 三级 UT 已固化的技法（`fc_nand_ut.md §2.3 / §5.4 / §5.5`），把 FTL L0 从
+> 「固定输入」升级为「随机化 + 参数化 + 可加压 + 可模拟异步」。**全部是测试写法，不改 FTL 生产码**
+> （结论见 §5.6）。
+
+### 5.1 随机化（沿用 FC-NAND Level 3 的 salted PRNG）
+
+FTL 层**确定性**（无 PRNG；`config.random` 是 FC 配置位，非 FTL 逻辑）⇒ 随机化只施加在
+**测试输入**上，结果可复现：
+
+- 抽样 = `munit_rand_uint32() ^ hash(用例名) ^ hash(用途标签)`——munit 每 exec 前 reseed，
+  不加盐会让所有用例的**第一次**抽样取值相同（`munit.c:774/503`；`fc_nand_ut.md §2.3`）。
+- 复现契约 = `(seed, 用例名, 第几次抽样)`；`test --seed 0x…`（**空格**）复现，抽到的值经
+  `test_trace_summary` 打出。
+- 用例注册用 **`MUNIT_TEST_OPTION_NONE`**（不是 `SINGLE_ITERATION`），否则 `--iterations` 被压成 1。
+
+| 套件 | 用例 | 抽什么 |
+|---|---|---|
+| allocator | `open_sb_min_erase_count` | 池内 n 块 × 各 plane `erase_count` 随机 → 断言选该 plane 最小 |
+| gc_wl | `gc_victim_lowest_vpc` | closed 列表 n 条 `valid_count` 随机 → 断言 argmin |
+| gc_wl | `wl_victim_high_valid_low_erase` | n 块 (valid, erase_count) 随机 → 断言 valid 最大 / erase 最小 |
+| gc_wl | `gc_trigger_T1_T4_T5` | `free_count` 在 T1/T4 阈值附近随机 → 断言命中位 |
+| watermark | `journal_wm_at_85` / `_95` | journal 使用率在 85%/95% ±1 条处随机 |
+| bbt | `mark_bad_sets_bits` | 随机坏块集合 → 断言 `bad_count` 与逐块 BAD 位一致 |
+| metadata | `dir_update_lookup_roundtrip` | 随机 (region → paa) 若干对 → 断言回读一致 |
+| pending_ct | `pending_add_lookup_remove` | 随机 `cmd_id` 集合 + 随机增删序 |
+| group | `group_complete_subop_multi` | 随机 `owners` 位掩码 + 随机完成序 |
+
+### 5.2 参数化（`MunitParameterEnum`）
+
+窄候选集用 munit 参数表；宽区间**在用例体内抽**（参数表是 `const char*` 数组，表达不了宽窗口
+——FC-NAND 的教训，`fc_nand_ut.md §2.3`）：
+
+| 参数 | 候选 | 用于 |
+|---|---|---|
+| `plane` | `0` / `1` | LBA↔(plane,cw) 编解码、`super_block_has_plane` |
+| `cw` | `0`..`3` | 位图索引 `plane*CW_NUM+cw` |
+| `temp` | `HOT` / `COLD` | `allocator_alloc_pair` 的 SB 选择 |
+| `op` | `READ` / `WRITE` | `ftl_confirm_write` 位图驱动 |
+
+### 5.3 压力
+
+- **L0**：`test --iterations N /ftl/`——随机化用例的**用例体各跑 N 次**（各抽 N 组输入）。
+  ⚠ 报告条数不变（`--iterations` 只乘用例体，`fc_nand_ut.md §2.3`），看**总耗时**判断加量。
+  压力断言 = **不变量每次迭代后仍成立**（§9.3 套路）：
+  - `free_count + open(2) + closed + bad == total_blocks`
+  - 反复 alloc/free N 次后各池计数守恒、无重复块
+  - 随机 `owners` 掩码下 `pending_group_count` 增减恒等
+- **L2**：长循环 `wr`/`rd`/`tr`（真 NAND，见 `hil_ut_design.md` B.4）。
+
+### 5.4 异步
+
+FTL 异步模型（`ftl.h`）：`ftl_submit_read/write` **非阻塞**（建组 → 逐子操作下发 → 返回 `FTL_OK`
+只表示受理）⇒ `ftl_service_pump()` + `ftl_service(ftl)` 推进 ⇒ 全部子操作完成后
+`complete_flag`/`status_out`/`on_complete` **恰一次**触发。测试分两层：
+
+- **L0 模拟（无 NAND、无 mock）**：**组簿记是纯的**——`pending_group_alloc` /
+  `pending_group_complete_subop(_multi)` / `pending_group_maybe_complete` 只动表（`pending.h`）。
+  故可**直接驱动「提交 → 乱序完成 → 组聚合」**：
+  ① `pending_group_alloc` 建组 + `pending_add(owners, cw_bitmap, …)` 挂 N 个子操作；
+  ② 用**随机顺序**调 `pending_group_complete_subop(_multi)` 模拟完成；
+  ③ 断言 `next==total && outstanding==0` 时 `complete_flag`/`status_out`/`on_complete` **各恰一次**，
+  任一子操作 `IO_ERROR` ⇒ 组状态**粘性**。覆盖：乱序完成、多组共享一子操作（`owners` 掩码）、
+  回调重入、组槽耗尽。
+- **L2 集成（真 NAND）**：`ftl_submit_*` 连续下发不等完成 + 泵循环 + 收 `complete_flag`——即
+  `hil_ut_design.md` B.2 的异步压力（v0.66 的 `wp <lba> <n> <k>` 已能一次提交 k 组）。
+
+> **边界**：`ftl_submit_*` 内部要 `fc_command_alloc`（FC 层）⇒ **「提交」本身不是 L0 纯函数**；
+> L0 只测**簿记**，「提交 → 泵 → 完成」的整链在 L2。
+
+### 5.5 时间注入（节流类用例）
+
+FTL 的时间源经**平台抽象**：`ftl_now_ms` / `checkpoint_now_ms` 读 `ssd_platform_get()->time_us()`
+（`ftl.c:83` / `checkpoint.c:50`）。⇒ **时间可注入**——测试克隆 `ssd_platform_ops_t`、把
+`time_us` 换成受控实现、`ssd_platform_register(&fake)`（Stage 1 v55 已建该抽象），用例后还原。
+故 `ftl_service` 内部的**节流时机**（T3 定时 / RR 扫描节流）也能 L0 确定性驱动——**无需给 FTL 加 seam**。
+
+### 5.6 回到「FTL 设计需不需要改」——结论：**不需要**
+
+FTL 生产码已满足全部测试条件，**零改动**：
+
+| 条件 | 证据 |
+|---|---|
+| **确定性** | FTL 无 PRNG（`config.random` 是 FC 位）；时间源单一 |
+| **输入可构造** | BST（`alloc->blocks[]`）、各池、`pending[]`/`groups[]` 都是普通数组，fixture 直写 |
+| **完成可观测** | `ftl_io_request_t.complete_flag`/`status_out`/`on_complete`（`ftl_types.h:44-47`） |
+| **时间可注入** | `ssd_platform_ops_t.time_us` 经 `ssd_platform_register`（`platform.h:14/19`） |
+| **无 test hook** | 生产码零注入点（测的就是真实路径） |
+
+**唯一张力**：fixture 287KB（P2-5 后果）⇒ 复用活实例 `g_ctrl.ftl[0][0][0]` + reset（§2.2）。
+这是**内存约束**，非设计缺陷——不构成对 FTL 生产码的修改要求。
+
+## 6. 接线（实施阶段）
+
+**`src/ftl/makefile.mk`**（现在只有 `MODULE_SRCS` 两行）追加（**一行测试源**，fixture 复用活实例）：
 
 ```makefile
 ifeq ($(FC_NAND_TEST_ENABLE),1)
@@ -187,143 +307,84 @@ TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_ftl.c
 endif
 ```
 
-**`tests/unit/ut_main.c`**：根套件名从 `/fc-nand/` 起，建议加一个 **`/ftl/` 根**（`ut_run_all` 里把
+**`tests/unit/ut_main.c`**：根套件名从 `/fc-nand/` 起，加一个 **`/ftl/` 根**（`ut_run_all` 里把
 `g_fc_nand_suite` 与新的 `g_ftl_suite` 并列），8 个子套件前缀统一 `xxx/`（**必须以 `/` 结尾**，
 `ut_main.c:24-27` 注释：munit 只做首尾相接、不补分隔符）。
 
-## 6. 验证
+## 7. 验证
 
-1. `make clean && make tests`（`FC_NAND_TEST_ENABLE=1`）**零错误零新增警告**——fixture 落 `.sram2_data`
-   与 AXI_RAM 的 NOLOAD 段，编译期无感知；size 脚本确认不超各 region 预算（见 §2 行 5）
+1. `make clean && make tests`（`FC_NAND_TEST_ENABLE=1`）**零错误零新增警告**——fixture 复用活实例，
+   不新增 NOLOAD 段；确认 AXI_RAM 用量不超（§2.1）
 2. `make debug / release` 不受影响（`FC_NAND_TEST_ENABLE` 默认关，测试文件不编入）
 3. 上板：
    - `test --list` → 确认 8 个 `/ftl/*/` 套件全部列出
    - `test /ftl/`（或逐个）→ 全 PASS（尤其 `open_sb_never_picks_metadata`）
-   - 随后执行 **§9 上板验收矩阵**（尤其 §9.2 跨重启）
+   - 随后执行 **`hil_ut_design.md` Part B~D**（接口行为 / 跨重启 / 后台观测）
 
-## 7. 不做（第一版边界）
+## 8. 不做（第一版边界）
 
-- **不做 mock**：不建 `fc_submit` 桩 / Mock NAND / 掉电注入器（用户定调，见 §8.2）
+- **不做 mock**：不建 `fc_submit` 桩 / Mock NAND / 掉电注入器
 - 不改 `tests/framework`（munit 适配已完成）；不建 host（x86）target
 - 不动孤儿 `test_gc.c`/`test_l2p.c`/`test_nand.c` 占位（用户自建域，本次新建独立测试文件）
 - 不扩 linker 加 region
+- **不纳入**：`allocator_alloc`（v0.66 已删死码）；`metadata_dir_append_slot`/`metadata_dir_compact`
+  （需真 NAND 擦写 → `hil_ut_design.md`）；`ftl_wbuf_*`（全 `static`，需真 NAND → `hil_ut_design.md`）
 
-## 8. 测试分层与路线
+## 9. 测试分层与路线
 
-### 8.1 行业分层（L0→L3）
+### 9.1 行业分层（L0→L3）
 
-| 层 | 运行环境 | 测什么 | 核心替身 | 本项目 |
-|---|---|---|---|---|
-| **L0 单元测试** | 板上 RAM（纯函数） | 纯算法：allocator / L2P / GC-WL victim / 水位 / 坏块 / 磨损 / 组语义 | 无 | **本文档 §4** |
-| **L1 固件集成** | 板上 + **Mock NAND** | write / GC / 掉电恢复全生命周期 | Mock NAND + 掉电注入器 | **不做**（见 §8.2） |
-| **L2 系统** | 真 NAND 上板 | 压力 / 写后读 / **跨重启** | 真硬件（UART CLI `wr/rd/tr/fl`） | **本文档 §9** |
-| **L3 HIL** | host 协议模型 | 协议级命令流（NVMe/UFS） | 可编程负载模型 | 不适用（本项目无 NVMe） |
+| 层 | 运行环境 | 测什么 | 本项目 |
+|---|---|---|---|
+| **L0 单元** | 板上 RAM（纯函数） | 纯算法：allocator / L2P / GC-WL victim / 水位 / 坏块 / 磨损 / 组语义 | **本文档 §4** |
+| L1 固件集成 | 板上 + Mock NAND | write / GC / 掉电恢复全生命周期 | **不做**（见 §9.2） |
+| L2 系统 | 真 NAND 上板 | 压力 / 写后读 / **跨重启** | **`hil_ut_design.md` Part B~D** |
+| L3 HIL | host 协议模型 | 协议级命令流（NVMe/UFS） | 不适用（本项目无 NVMe） |
 
-### 8.2 本项目路线：**不做 mock，全用板子**（替代原"二期 Mock NAND"）
+### 9.2 本项目路线：**不做 mock，全用板子**
 
 行业 FTL UT 的主体是 **L0 + L1（Mock NAND）**，但**本项目刻意不走 L1**，理由：
-- Mock NAND 的唯一拦截点是 `fc_submit`（`include/fc/fc_interface.h:95`，FTL 侧调用点
-  `ftl.c` / `gc.c` / `read_recovery.c` / `ftl_fc_interface.c`）。**桩不存在，且用户定调不建**。
+- Mock NAND 的唯一拦截点是 `fc_submit`（`include/fc/fc_interface.h:95`）。**桩不存在，且用户定调不建**。
 - 纯逻辑（水位 / victim / 磨损 / 组语义）本就能在 **L0** 用静态 fixture 钉死，不需要 NAND 替身。
 - 需要真 NAND 的路径（GC 搬移 / journal replay / boot recovery / **跨重启持久化**）直接在**真板上**
-  跑——尤其跨重启**只能用物理断电**（没有掉电注入器），反而更接近真实失效场景。
+  跑——尤其跨重启**只能用物理断电**，反而更接近真实失效场景。**见 `hil_ut_design.md` Part B~D。**
 
-### 8.3 为什么"跨重启"不用 mock 也能测
-
-"重启" = **物理断电再上电**。板上执行：擦净 → 写 → 断电 → 上电 → 读回校验。断言 = `rd … c`
-的 PASS/FAIL + 开机日志 `[FTL] boot type` / `[META] anchor_seq` / `journal_entries`。
-**这比 mock 注入更真**，代价是每次要人工断电（用例数控制在 ~7 条，见 §9.2）。
-
-### 8.4 断言套路（行业经典，抄入用例）
+### 9.3 断言套路（行业经典，抄入用例）
 
 | 模式 | 例子 |
 |---|---|
 | 不变量 | `free + open + closed + bad == 总块数`（P1-3 后 `free_count` 是唯一池计数） |
 | 状态机全路径 | allocator 块 FREE→OPEN→CLOSED→FREE 每步断言 state/sb_id |
 | 水位边界 | 85%/95% 阈值上下 1 条 entry 处断言触发/不触发（v0.46 B1 就是水位公式 bug） |
-| round-trip | 写 pattern → 读回 → 校验（本项目 `wr/rd c` 同构） |
-| 覆盖写回滚 | 旧页失效 + L2P 指新页 + 断电后回滚到最新胜 |
+| round-trip | 写 pattern → 读回 → 校验 |
 | GC/WL victim 正确性 | 选到 VPC 最低 / read_count 最高的 closed SB |
-| 掉电一致性 | 确认写不丢 / GC 擦除前搬移已落盘 |
-
-### 8.5 范围评估
-
-- **要做**：`test_ftl.c`（§4，L0 纯 RAM，板上 `test`）+ §9 上板验收矩阵（CLI + 物理断电）
-- **不做**：`fc_submit` 桩 / Mock NAND / 掉电注入器 / host（x86）编译链
-- **L3（HIL）**：本项目无 NVMe host，天然不适用（UART CLI 即 HIL 面）
-
-## 9. L2 上板验收用例矩阵（真 NAND + UART CLI，含物理断电重启）
-
-> 前置纪律：**擦净芯片**（`bbt --erase` → **立刻断电**，见 P0-2：运行中的 FTL 空闲会重写元数据）；
-> 每条用例前记录开机 `[FTL] boot type`。断言以 `rd … c` 的 PASS/FAIL 与开机日志为准。
-
-### 9.1 基础读写（对外接口行为）
-
-| 用例 | 命令 | 断言 |
-|---|---|---|
-| `cli_rw_1` | `wr 0 1` → `rd 0 1 c` | PASS |
-| `cli_rw_2`（multi-plane） | `wr 0 2` → `rd 0 2 c` | PASS；`log level debug` 见 **1 条** multi-plane `op=16` |
-| `cli_rw_5`（自拆分 2+2+1） | `wr 0 5` → `rd 0 5 c` | PASS；debug 见 3 条命令（末条单 plane） |
-| `cli_rw_8`（CLI 上限） | `wr 0 8` → `rd 0 8 c` | PASS（`g_wr_buf=16KB` ⇒ `n≤8`） |
-| `cli_large_rejected` | `wr 0 40` | 被容量校验**拒**（`INVALID_ARGUMENT`），不写爆 16KB 缓冲 |
-| `cli_trim` | `wr 0 4` → `tr 0` → `rd 0 1 c` | 全 0 / 未映射语义 |
-| `cli_flush` | `wr 0 2` → `fl` | 无错误；L2P/journal 落盘 |
-| `cli_info` | `info` | `free/op/spare` 与几何相符 |
-
-### 9.2 跨重启一致性（**物理断电**，本次重点）
-
-| 用例 | 步骤 | 断言 |
-|---|---|---|
-| **`reboot_persist_single`** | 擦净 → `wr 0 1` → **断电** → 上电 → `rd 0 1 c` | **PASS**（当前 FAIL 的最小复现——用例先红） |
-| `reboot_persist_multi` | `wr 0 8` → 断电 → 上电 → `rd 0 8 c` | PASS |
-| `reboot_after_flush` | `wr 0 2` → `fl` → 断电 → 上电 → `rd 0 2 c` | PASS |
-| `reboot_no_flush` | `wr 0 1` → **不 `fl`** → 断电 → 上电 → `rd 0 1 c` | **记录本仓持久化契约**（该丢还是该留）——正是当前 bug 所在 |
-| `overwrite_then_reboot` | `wr 0 1`(A) → `wr 0 1`(B) → 断电 → 上电 → `rd 0 1 c` | 读回 **B**（最新胜） |
-| `reboot_after_trim` | `wr 0 4` → `tr 0` → 断电 → 上电 → `rd 0 1 c` | 仍全 0 |
-| `boot_type_classify` | 三种镜像（空 / 干净关机 / 写中掉电）分别启动 | `[FTL] boot type` = FRESH / CLEAN / POWER_FAILURE |
-
-> **落盘触发语义必须先定死**（否则 `reboot_no_flush` 无判据）：`ftl_submit_write` 返回 `FTL_OK` 后，
-> 映射**何时**必须持久化？设计里写明本仓契约（flush 时机 / journal 追加时机），并让用例断言它
-> ——这正是当前 bug 的根因面（`anchor`/`journal` 从不被触发）。
-
-### 9.3 后台 / 寿命观测（上板压力）
-
-| 用例 | 步骤 | 断言 |
-|---|---|---|
-| `gc_watermark_observe` | 连写直至 `free` 逼近 `FREE_POOL_TARGET(32)` | 观察 GC 触发（`info` free 回升） |
-| `journal_watermark_observe` | 连写触发 journal 85%/95% | 观察水位告警 / emergency（§4.2 的板上印证） |
-| `wear_persist_observe` | 重启后 `[WEAR] seq/pages` | 与上次写次数相符 |
 
 ## 10. 覆盖矩阵与用例总数
 
-| 层 | 套件/分组 | 被测模块 | 用例数 | 引用判据 |
-|---|---|---|---|---|
-| L0 | `allocator` | `allocator.c` | 9 | 判据 8 |
-| L0 | `watermark` | `checkpoint.c` | 6 | 判据 7、8 |
-| L0 | `gc_wl` | `gc.c` / `wear_leveling.c` | 10 | 判据 7、8 |
-| L0 | `rr` | `read_recovery.c` | 6 | 判据 8 |
-| L0 | `bbt` | `bbt.c` | 4 | 判据 8 |
-| L0 | `metadata` | `metadata.c` | 6 | 判据 8 |
-| L0 | `pending_ct` | `pending.c` | 4 | 判据 8 |
-| L0 | `group` | `pending.c` | 5 | 判据 8 |
-| L2 | 9.1 对外接口 | HIL/CLI + FTL | 8 | — |
-| L2 | 9.2 跨重启 | boot recovery / journal / anchor | 7 | — |
-| L2 | 9.3 后台观测 | gc / journal / wear | 3 | — |
-| **合计** | **8 L0 套件 + 3 L2 组** | — | **~68**（L0 50 + L2 18） | — |
+| 层 | 套件 | 被测模块 | 用例数 |
+|---|---|---|---|
+| L0 | `allocator` | `allocator.c` | 10 |
+| L0 | `watermark` | `checkpoint.c` | 6 |
+| L0 | `gc_wl` | `gc.c` / `wear_leveling.c` | 10 |
+| L0 | `rr` | `read_recovery.c` | 6 |
+| L0 | `bbt` | `bbt.c` | 4 |
+| L0 | `metadata` | `metadata.c` | 6 |
+| L0 | `pending_ct` | `pending.c` | 4 |
+| L0 | `group` | `pending.c` | 6 |
+| **合计** | **8 L0 套件** | — | **52** |
 
 ## 关键文件
 
 | 文件 | 动作 |
 |---|---|
-| `docs/design/ftl_ut_munit.md`（本文档） | 设计（§4 逐条用例 + §9 上板矩阵 + §10 覆盖矩阵，审查后进入实施） |
-| `tests/unit/test_ftl.c` | 实施：单文件（fixture 内联 + 8 套件数组，L0）——**用户自建** |
-| `src/ftl/makefile.mk` | 实施：`FC_NAND_TEST_ENABLE` 块（一行 TEST_C_SRCS + INCS） |
+| `docs/design/ftl_ut_munit.md`（本文档） | 设计（FTL 层 §4 逐条用例 + §5 技法 + §10 覆盖矩阵） |
+| `tests/unit/test_ftl.c` | 实施：单文件（fixture 复用活实例 + 8 套件数组，L0）——**用户自建** |
+| `src/ftl/makefile.mk` | 实施：`FC_NAND_TEST_ENABLE` 块（一行 `TEST_C_SRCS` + INCS） |
 | `tests/unit/ut_main.c` | 实施：8 个 extern + `/ftl/*` 子套件注册 |
-| `docs/design/ftl_host_interface.md` | Part C 指向本文档 §8.6/§9（防两处漂移） |
+| `docs/design/hil_ut_design.md` | HIL 层 UT + 系统集成验收（非 FTL 部分） |
 
 ## 登记（本轮不做）
 
-- **mock `fc_submit` 桩 / Mock NAND / 掉电注入器**：**用户定调不做**——全部改用板子测
-  （L0 munit 套件 + L2 真 NAND CLI + 物理断电）。
+- **mock `fc_submit` 桩 / Mock NAND / 掉电注入器**：**用户定调不做**（见 §9.2）。
 - `l2p_cache_note_access` 结算步导出为公开原语（否则 §4 测不到 thrashing）——属实施接线决策。
 - host（x86）编译链：本仓只支持 `arm-none-eabi` 上板。

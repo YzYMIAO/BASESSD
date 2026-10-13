@@ -62,7 +62,14 @@ FTL 对外：ftl_init / ftl_service / ftl_submit_read / ftl_submit_write / ftl_t
 | **D3** | TRIM 粒度 | 带长度的 deallocate | `ftl_trim(ftl,lba)` 单 LBA（忽略 `block_count`） | **已改 `ftl_trim(ftl,lba,count)`** |
 | **D4** | 请求 vs 通知 | 请求纯输入；完成走 CQ | 通知字段（`complete_flag`/`status_out`/`on_complete`）与请求混在一起 | **不改**（本仓无 CQ，轮询+回调是既定异步契约；登记） |
 | **D5** | Host 队列+doorbell+CQ | HIL 有 SQ/CQ/doorbell | **HIL 无队列**；队列机制只在 **FC 内部**（SQ64/HSQ16/CQ64） | **不改**（§26.2 已定位在 FC；HIL 侧属更大重构，登记） |
-| **D6** | LBA→实例路由 | 单一 FTL 拥有全 LBA 空间 | Controller 按 LBA 路由到 `ftl[ch][ce][lun]` 分片 | **保留**（分片是刻意模型；路由=后端选择，非 plane 策略） |
+| **D6** | LBA→实例路由 | ⚠ **本仓断言，无出处**（见下方 D6 注） | Controller 按 LBA 路由到 `ftl[ch][ce][lun]` 分片 | **保留**（分片是刻意模型；路由=后端选择，非 plane 策略） |
+
+> **D6 注（v0.65 查证）**：本行「主流」列原写「单一 FTL 拥有全 LBA 空间」，但该主张
+> **无外部出处**——它只出现在本仓自己的 D6 对照表里；唯一被援引的
+> `fc_nand_design.md §26` 通篇不谈 L2P 在通道/die 间的分布。仓内甚至还有**反方向**的
+> 同类无出处断言（`ftl_revision_history.md v0.35`：「行业标准：每 LUN 独立 region 表」）。
+> 按「判据必须有出处」⇒ **不得**据此改代码；分片模型保留（见 §登记）。
+> 另：`CH_NUM=CE_NUM=LUN_NUM=1` ⇒ 今天只有一个 FTL 实例，「单一前端」性质平凡成立。
 
 ### A.4 顺带修掉的真缺陷
 
@@ -156,40 +163,48 @@ Phase 3   三级后台（IDLE / NORMAL / BUSY）
 
 ---
 
-## Part C — 测试用例设计（详见 `ftl_ut_munit.md`）
+## Part C — 测试用例设计
 
 > **路线：不做 mock，全部上板测**（用户定调）。原「mock `fc_submit` 驱动 L1 接口套件」的设计**不做**。
-> 完整逐条用例见 `ftl_ut_munit.md`：**§4**（L0 纯 RAM 8 套件，板上 `test` 跑）、
-> **§9**（L2 真 NAND CLI 上板矩阵，含物理断电跨重启）。
+> **文档按层拆为两份**（2026-10-13）：
+> - **FTL 层**纯 RAM UT → `ftl_ut_munit.md`（§4 的 8 套件，板上 `test` 跑）
+> - **HIL 层 + 系统集成**（`src/controller/` 不是 FTL 的一部分）→ `hil_ut_design.md`
+>   （Part A HIL 纯逻辑 UT、Part B~D 真 NAND CLI 上板验收，含物理断电跨重启）
 
 ### C.1 对外接口行为——上板验证（替代原 mock 套件）
 
-自拆分 / 组完成 / 背压这类行为**用真 NAND + CLI 观察**，不 mock：
+自拆分 / 组完成 / 背压这类行为**用真 NAND + CLI 观察**，不 mock
+（完整矩阵见 **`hil_ut_design.md` Part B**）：
 
-| 行为 | 上板验证（`ftl_ut_munit.md §9.1`） | 断言 |
+| 行为 | 上板验证（`hil_ut_design.md §B`） | 断言 |
 |---|---|---|
-| 自拆分（`count=2/5`） | `wr 0 2` / `wr 0 5` → `rd … c` | PASS；`log level debug` 数命令条数（1 条 multi-plane / 3 条 2+2+1） |
+| 自拆分（`count=5/32`） | `wr 0 5` / `wr 0 32` → `rd … c` | PASS；CW 映射 + 页打包后 **1 次**（`wr 0 5`）/ **4 次**（`wr 0 32`）编程 |
 | 组完成（通知一次） | 观察单次 `wr` 的完成日志 | 恰一次完成（不重复） |
-| 背压 / 大请求 | `wr 0 40` | 被容量校验拒（`g_wr_buf` 16 KB ⇒ `n≤8`） |
-| `ftl_flush` | `wr 0 2` → `fl` → 断电 → 重启 → `rd 0 2 c` | PASS（§9.2） |
+| 背压 / 大请求 | `wr 0 33` | 被容量校验拒（`g_wr_buf` 16 KB ⇒ `n ≤ 32`） |
+| `ftl_flush` | `wr 0 2` → `fl` → 断电 → 重启 → `rd 0 2 c` | PASS（§B.3） |
 | `ftl_trim(lba,n)` | `wr 0 4` → `tr 0` → `rd 0 1 c` | 全 0 |
 
 ### C.2 L0（纯 RAM，板上 `test`）
 
-8 套件（allocator / watermark / gc_wl / rr / bbt / metadata / pending_ct / **group**）——逐条用例见
-`ftl_ut_munit.md §4`。
+- **FTL 层** 8 套件（allocator / watermark / gc_wl / rr / bbt / metadata / pending_ct / **group**）
+  —— 逐条用例见 `ftl_ut_munit.md §4`。
+- **HIL 层** `hil` 套件（state_machine / is_complete / schedule / route / run_end）
+  —— 逐条用例见 `hil_ut_design.md` Part A。
 
 ### C.3 L2（真 NAND 上板）
 
-UART CLI `wr/rd/tr/fl/info` + **物理断电重启**。CLI 缓冲 16 KB ⇒ `n ≤ 8` 才能通过容量校验；
-要上板验证更大请求需先扩大 `g_wr_buf`。完整矩阵见 `ftl_ut_munit.md §9`。
+UART CLI `wr/rd/tr/fl/info` + **物理断电重启**。CLI 缓冲 16 KB ⇒ `n ≤ 32` 才能通过容量校验；
+要上板验证更大请求需先扩大 `g_wr_buf`。完整矩阵见 `hil_ut_design.md` Part B~D。
 
 ---
 
 ## 登记（本轮不做）
 
 - **D4/D5**：HIL 侧 host 队列 + doorbell + CQ（更大重构）。
-- **D6**：LBA→实例路由上移到单一 FTL 前端（与本仓分片模型冲突，需单独立项）。
+- ~~**D6**：LBA→实例路由上移到单一 FTL 前端（与本仓分片模型冲突，需单独立项）。~~
+  ✅ **已裁决（v0.65）：保留分片模型并登记理由。** 「主流是单一前端」经查证**无出处**
+  （见 A.3 的 D6 注）⇒ 按 `ftl_optimization_plan.md §九 序 6` 明文允许的「或明确保留分片
+  并登记理由」处理；本项**不再是**「与主流偏离」。
 - `ftl_trim` 大范围同步阻塞（超循环长停）——本轮只加 API，范围上界/分块后续定。
 - `ftl_flush` 语义 = "落已持久化映射"，**非** NVMe 式 barrier（不等待在飞/排队写；
   当前 CLI 靠 `g_cli_pending.busy` 串行化）。

@@ -9,11 +9,11 @@
  * 与 journal 的分工：
  *   Journal    —— L2P 的**增量**日志（每笔映射一条，掉电回放的最小单位）；
  *   Checkpoint —— L2P 的**全量**快照（把 journal 已写条目固化进 NAND L2P 表并截断 journal）。
- *   两者用各自的 sequence：Journal.sequence_counter 是全局单调；本池 g_cp_sequence 独立。
+ *   两者用各自的 sequence：Journal.sequence_counter 是全局单调；本池 ftl->cp.sequence 独立。
  *
  * 池几何（由 ftl_config.h 推导，见 checkpoint_ring_init）：
  *   CHECKPOINT_POOL_BLOCKS 个块、一条 record = 1 页、单 plane；
- *   写游标 g_cp_write_idx 在 [0, 总记录数) 环形推进，块满由 metadata_ring_prepare_write 擦下一块。
+ *   写游标 ftl->cp.write_idx 在 [0, 总记录数) 环形推进，块满由 metadata_ring_prepare_write 擦下一块。
  *
  * 掉电安全顺序（不可倒，见 checkpoint_create 步骤③/⑦）：
  *   先 flush region → 再 flush Anchor → 最后写 Header 声称「已落盘」。
@@ -26,8 +26,8 @@
  *   3. 创建/恢复       checkpoint_create / checkpoint_find_latest
  *   4. 触发/水位       checkpoint_check_trigger / checkpoint_is_emergency / checkpoint_journal_watermark
  *
- * ⚠ 本文件的游标/序号是 **file-scope static**（见下方 g_cp_*），多实例（多 LUN）下
- *   所有实例共享一份。与 bbt.c / wear.c 同一局限，登记在案。
+ * 游标/序号是 **per-instance**（序 4：收进 ftl_context_t.cp，见 l2p_cp_state_t）——
+ * 多实例（多 LUN）下每实例一份，互不干扰。
  */
 
 #include "ftl/checkpoint.h"
@@ -64,11 +64,8 @@ static uint32_t checkpoint_now_ms(const ftl_context_t *ftl)
  * 池几何由 ftl_config.h 推导；sequence 与写游标是**本池自己的**（与 journal /
  * Anchor / BBT 的 sequence 互不相干），开机由 checkpoint_find_latest 恢复。
  *
- * ⚠ file-scope static：多实例（多 LUN）下所有实例共享同一份游标/序号。
- *   与 bbt.c / wear.c 同一局限，登记在案（见 plan §八「不做多实例」）。 */
-static uint32_t g_cp_sequence     = 0U;
-static uint16_t g_cp_write_idx    = 0U;
-static uint8_t  g_cp_cursor_valid = 0U;
+ * 游标/序号是 per-instance 的 ftl->cp（l2p_cp_state_t，序 4）——原为 file-scope
+ * static，多实例下互相覆盖。 */
 
 /* checkpoint_ring_init — 按 ftl_config.h 常量填充本池环形几何（块范围/记录页数/plane/module） */
 static void checkpoint_ring_init(metadata_ring_t *ring)
@@ -237,26 +234,26 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
     probe_ctx.topo = ftl->topo;
     probe_ctx.ring = ring;
 
-    if (g_cp_cursor_valid == 0U)
+    if (ftl->cp.cursor_valid == 0U)
     {
         uint16_t newest = UINT16_MAX;
 
-        if (metadata_ring_locate(&ring, &probe_ctx.topo, checkpoint_record_probe, &probe_ctx, &newest, &g_cp_sequence, &g_cp_write_idx) != FTL_OK)
+        if (metadata_ring_locate(&ring, &probe_ctx.topo, checkpoint_record_probe, &probe_ctx, &newest, &ftl->cp.sequence, &ftl->cp.write_idx) != FTL_OK)
         {
             return FTL_ERROR;
         }
-        g_cp_cursor_valid = 1U;
+        ftl->cp.cursor_valid = 1U;
     }
 
     /* ⑤ 完成 Header 剩余字段（sequence 在定位之后取，池内已有序号时才能续上）*/
     cp.magic            = CHECKPOINT_MAGIC;
-    cp.sequence         = ++g_cp_sequence;               /* 本池自己的单调序号 */
+    cp.sequence         = ++ftl->cp.sequence;            /* 本池自己的单调序号 */
     cp.timestamp        = checkpoint_now_ms(ftl);        /* 平台 time_us 换算 ms 快照 */
     cp.journal_sequence = ftl->journal.sequence_counter; /* 截断到此 seq */
     cp.layout_version   = FTL_MEDIA_LAYOUT_VERSION;      /* 介质布局版本（版本不符 ⇒ 该记录作废）*/
 
     /* ⑥ 追加写：池内下一槽（块满则先擦池内下一块）*/
-    if (metadata_ring_prepare_write(&ring, &probe_ctx.topo, g_cp_write_idx, &addr) != FTL_OK)
+    if (metadata_ring_prepare_write(&ring, &probe_ctx.topo, ftl->cp.write_idx, &addr) != FTL_OK)
     {
         return FTL_ERROR;
     }
@@ -265,11 +262,11 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
      * 失败时不写 journal_truncate，脏数据仍由下个 checkpoint 重试。 */
     if (ftl_sync_write_page(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT)) != 0)
     {
-        g_cp_write_idx = (uint16_t)((g_cp_write_idx + 1U) % metadata_ring_total_records(&ring));
+        ftl->cp.write_idx = (uint16_t)((ftl->cp.write_idx + 1U) % metadata_ring_total_records(&ring));
         return FTL_ERROR;
     }
 
-    g_cp_write_idx = (uint16_t)((g_cp_write_idx + 1U) % metadata_ring_total_records(&ring));
+    ftl->cp.write_idx = (uint16_t)((ftl->cp.write_idx + 1U) % metadata_ring_total_records(&ring));
 
     /* ⑦ 截断 Journal（间接入口：纯 RAM 测试构建可用弱桩替换 journal_truncate） */
     journal_truncate(&ftl->journal, cp.journal_sequence);
@@ -287,43 +284,44 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
 /* --------------------------------------------------------------------
  * checkpoint_find_latest
  *   功能：开机扫 Checkpoint 池，挑 sequence 最大的有效记录，重读其 Header 并恢复游标/序号。
- *   参数：cp —— 出参，收最新 Header 本体；topo —— 目标芯片拓扑。
+ *   参数：ftl —— FTL 实例（池路由取 ftl->topo，游标/序号写回 ftl->cp）；
+ *         cp —— 出参，收最新 Header 本体。
  *   返回：FTL_OK 找到并读回一致；FTL_ERROR 参数非法 / 池内无有效记录 / 重读失败 / 校验不符。
- *   实现要点：进入即复位 g_cp_*（找不到时保持 0/无效 ⇒ 后续 create 从池首开始）；
+ *   实现要点：进入即复位 ftl->cp（找不到时保持 0/无效 ⇒ 后续 create 从池首开始）；
  *             metadata_ring_locate 只回序号，Header 本体要按该序号**再读一次**，
  *             并复核 sequence 与 locate 报的一致（防止 locate 后池被改动）。
  * -------------------------------------------------------------------- */
-ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t topo)
+ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_header_t *cp)
 {
     checkpoint_probe_ctx_t probe_ctx;
     uint16_t               newest = UINT16_MAX;
     nand_addr_t            addr;
 
-    if (cp == NULL)
+    if ((ftl == NULL) || (cp == NULL))
     {
         return FTL_ERROR;
     }
 
-    /* 复位本池状态：找不到有效 Header 时保持 0/无效（后续 create 从池首开始） */
-    g_cp_sequence     = 0U;
-    g_cp_write_idx    = 0U;
-    g_cp_cursor_valid = 0U;
+    /* 复位本实例池状态：找不到有效 Header 时保持 0/无效（后续 create 从池首开始） */
+    ftl->cp.sequence     = 0U;
+    ftl->cp.write_idx    = 0U;
+    ftl->cp.cursor_valid = 0U;
 
     checkpoint_ring_init(&probe_ctx.ring);
-    probe_ctx.topo = topo;
+    probe_ctx.topo = ftl->topo;
 
-    if (metadata_ring_locate(&probe_ctx.ring, &probe_ctx.topo, checkpoint_record_probe, &probe_ctx, &newest, &g_cp_sequence, &g_cp_write_idx) != FTL_OK)
+    if (metadata_ring_locate(&probe_ctx.ring, &probe_ctx.topo, checkpoint_record_probe, &probe_ctx, &newest, &ftl->cp.sequence, &ftl->cp.write_idx) != FTL_OK)
     {
         return FTL_ERROR;
     }
     if (newest == UINT16_MAX)
     {
-        g_cp_sequence  = 0U;
-        g_cp_write_idx = 0U;
+        ftl->cp.sequence  = 0U;
+        ftl->cp.write_idx = 0U;
         return FTL_ERROR; /* 池内无有效 record */
     }
 
-    g_cp_cursor_valid = 1U;
+    ftl->cp.cursor_valid = 1U;
 
     /* 重读胜者（locate 只返回序号，Header 本体要再读一次）*/
     addr = metadata_ring_addr(&probe_ctx.ring, &probe_ctx.topo, newest, 0U);
@@ -331,7 +329,7 @@ ftl_status_t checkpoint_find_latest(l2p_checkpoint_header_t *cp, ftl_topology_t 
     {
         return FTL_ERROR;
     }
-    if ((checkpoint_header_valid(cp) == 0) || (cp->sequence != g_cp_sequence))
+    if ((checkpoint_header_valid(cp) == 0) || (cp->sequence != ftl->cp.sequence))
     {
         return FTL_ERROR;
     }

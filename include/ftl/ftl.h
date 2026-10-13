@@ -4,17 +4,18 @@
 /*
  * ftl_service — 主循环调度器
  *
- * 每次调用执行三阶段：
- *   Phase 1: fc_service() 推进 NAND 命令执行
- *   Phase 2: fc_poll_completion() 处理完成回调
- *   Phase 3: 三级后台任务（IDLE / NORMAL / BUSY）
+ * 每轮 superloop 两段（序 4：多实例化后**泵与实例分开**）：
+ *   ① ftl_service_pump()   —— **实例无关**：Phase 1 推进 NAND + Phase 2 抽干完成表。
+ *                              全局的 NAND 引擎与完成表，每轮**只调一次**。
+ *   ② ftl_service(ftl)     —— **单实例**：Phase 2.5 补发子操作 + Phase 3 三级后台。
+ *                              对**每一个**实例都要调（多 LUN 下不能只跑 [0][0][0]）。
  *
- * 三级模式切换依据 SQ 队列深度 + 上轮提交的 NAND 命令数。
+ * 三级模式切换依据未决命令数（pending + 组 + 完成表占用），非"本轮提交了几条 NAND"。
  */
 
 #include "common/ftl_types.h" /* ftl_io_request_t */
 #include "common/ssd_types.h"
-#include "ftl/allocator.h" /* ftl_init_params_t, super_block_t */
+#include "ftl/allocator.h" /* ftl_tables_t, super_block_t */
 #include "ftl/checkpoint.h"
 #include "ftl/gc.h"
 #include "ftl/journal.h"
@@ -30,8 +31,6 @@
 #define NAND_SUBMIT_BUDGET    (4U)     /* 每轮 fc_service 最多跑 4 次（首轮抽干完成，余为填充 pass） */
 #define BG_NORMAL_FLUSH_COUNT (4U)     /* NORMAL 模式下最多 flush 4 line */
 #define BG_BUSY_FLUSH_COUNT   (1U)     /* BUSY 模式下最多 flush 1 line */
-#define BG_NORMAL_GC_PAGES    (4U)     /* NORMAL 模式下 GC 搬 4 页 */
-#define BG_IDLE_GC_TARGET     (32U)    /* IDLE 模式下目标补充 32 Block */
 #define CP_WRITE_INTERVAL     (1024U)  /* 写入量触发间隔 */
 #define CP_TIME_INTERVAL_MS   (10000U) /* 定时触发间隔（ms）*/
 
@@ -45,6 +44,28 @@
 /* 最大有效 LBA（全局）= 映射单元总数（FTL_IU_TOTAL，见 ftl/ftl_config.h §一）。
  * 当前几何下 = 2048×512 = 1,048,576，与用户容量 512 MiB 逐条对应。 */
 #define FTL_LBA_MAX (FTL_IU_TOTAL)
+
+/* ── 页打包写缓冲（§七 方案 A）──
+ *
+ * CW 级映射下子操作常只覆盖半个 pair 窗口（如一次 512B 写只落 plane0 的 CW0），
+ * 而器件**按页编程**（参数页 Byte86-89 部分页单位 = 1 CW；Byte110 每 ECC user area
+ * 只能编一次）。逐子操作分配页会让每次写都吃掉一整对页 ⇒ 利用率 12.5%~50%。
+ *
+ * 本缓冲把**同一 pair 窗口**内的多次 host 写攒成一页，窗口填满 / 切到别的窗口 /
+ * 显式 flush / 空闲时**一次编程**（两 plane 都有数据即一条 multi-plane）⇒ 写指针
+ * 按页推进，页内利用率回到 100%。
+ *
+ * data[slot] 的 slot = plane*CW_NUM + cw（与 LBA 低 3 位同构），occupied 逐位标记有效
+ * 槽。owners 记录「哪些组向本页贡献过」——一页可能由多个组拼成，完成时必须**逐组**
+ * 递减在飞数（见 pending_group_complete_subop_multi）。 */
+typedef struct
+{
+    uint8_t  data[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 CW × 512B = 4096B 页镜像 */
+    uint8_t  occupied;                              /* bit i = 槽 i 有数据（i = plane*CW_NUM+cw） */
+    uint8_t  open;                                  /* 1 = 正持有某窗口 */
+    lba_t    base;                                  /* 持有页的 pair 窗口基址（低 3 位清零） */
+    uint32_t owners;                                /* bit gi = 组 gi 贡献过本页（FTL_GROUP_MAX=32） */
+} ftl_wbuf_t;
 
 /* ── FTL 主上下文 ── */
 
@@ -64,7 +85,16 @@ typedef struct ftl_context
      * 由 pending.c 操作（pending_group_*）。 */
     ftl_io_group_t groups[FTL_GROUP_MAX];
 
-    /* Allocator */
+    /* 页打包写缓冲（§七 方案 A）——同一 pair 窗口的多次写攒成一页再编程，
+     * 见 ftl_wbuf_t。由 ftl.c 的 ftl_wbuf_* 族操作。 */
+    ftl_wbuf_t wbuf;
+
+    /* FTL 自持表（P2-5）——大数组归实例所有，HIL 不再传指针。
+     * BST blocks(80KB) / free+op(16KB) / closed(16KB) / spare(100B)，见 ftl_tables_t。
+     * 是 ftl_context_t 的**大头**，故内存预算只看本结构体尺寸（main.c 的 _Static_assert）。 */
+    ftl_tables_t tables;
+
+    /* Allocator（各指针绑到上面的自持表，见 allocator_init） */
     ftl_allocator_t alloc;
 
     /* Journal */
@@ -73,13 +103,15 @@ typedef struct ftl_context
     /* Metadata Directory */
     metadata_dir_cache_t metadata_dir;
 
-    /* Checkpoint 计时 */
-    uint32_t cp_timer_start; /* 上次 Checkpoint 时间戳 */
-    uint32_t cp_sequence;    /* 上次 Checkpoint sequence */
+    /* Checkpoint 池游标/序号（序 4：per-instance，原 checkpoint.c 的 file-scope static）。
+     * 开机由 checkpoint_find_latest 恢复，checkpoint_create 据此选池内下一槽续写。
+     * ⚠ 与 journal.sequence_counter 无关——本池自己的单调序号（见 l2p_cp_state_t）。
+     * 原 `uint32_t cp_sequence` 字段已删：只写不读，且与本字段语义重复（真正的
+     * checkpoint 序号是 cp.sequence；boot 日志里的 cp_seq 来自 ftl_boot_result_t）。 */
+    l2p_cp_state_t cp;
 
-    /* GC 计时 */
-    uint32_t gc_last_run_writes;
-    uint32_t gc_timer_start;
+    /* Checkpoint 定时触发基准（T3：elapsed_ms ≥ CP_TIME_INTERVAL_MS） */
+    uint32_t cp_timer_start; /* 上次 Checkpoint 时间戳（ms） */
 
     /* 统计 */
     uint32_t total_writes;
@@ -110,21 +142,35 @@ typedef struct ftl_context
 /*
  * ftl_init - 初始化 FTL 子系统
  *
- * @param ftl   FTL 上下文
- * @param params 初始化参数（拓扑 + 大数组存储，见 ftl_init_params_t 定义）
+ * 表由实例**自持**（P2-5）：大数组在 `ftl->tables` 内，调用者只给拓扑。
+ *
+ * @param ftl   FTL 上下文（含自持表存储）
+ * @param topo  本实例绑定的 NAND 芯片路由
  * @return FTL_OK 成功
  */
-ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params);
+ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo);
 
 /*
- * ftl_service - FTL 主循环调度（每次 main loop 调用一次）
+ * ftl_service_pump - 实例无关的每轮泵（superloop 每轮调一次）
  *
- * Phase 1:   fc_service() 推进 NAND
- * Phase 2:   completion_table_drain() 处理完成回调（路由到 pending/组）
- * Phase 2.5: 补发各组的待下发子操作（host IO 优先于后台）
- * Phase 3:   三级后台任务
+ * Phase 1: fc_service() 推进 NAND（≤ NAND_SUBMIT_BUDGET 次，首轮即抽干完成）
+ * Phase 2: completion_table_drain() 处理完成回调（按命令 ch/ce/lun 路由回实例）
  *
- * @param ftl  FTL 上下文
+ * ⚠ 必须在所有 ftl_service() 之前调，且**每轮只调一次**——NAND 引擎与完成表都是
+ *   全局单份，per-instance 调用会把 fc_service 预算重复消耗 N 遍。
+ */
+void ftl_service_pump(void);
+
+/*
+ * ftl_service - 单个 FTL 实例的服务（对**每个**实例都要调）
+ *
+ * Phase 2.5: 补发本实例各组的待下发子操作（host IO 优先于后台）
+ * Phase 3:   本实例的三级后台任务（IDLE / NORMAL / BUSY）
+ *
+ * ⚠ 调用方须先调 ftl_service_pump()。多实例（多 LUN）下漏调某实例 ⇒ 它的
+ *   journal / checkpoint / wear / bbt / GC 永不推进。
+ *
+ * @param ftl  FTL 上下文（NULL 直接返回）
  */
 void ftl_service(ftl_context_t *ftl);
 

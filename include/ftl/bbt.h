@@ -59,15 +59,15 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc);
 /*
  * bbt_scan_factory - 出厂坏块扫描
  *
- * 遍历所有 Block（**跳过 Block 0**）的 Page 0，以 **LDPC_RAW 模式**（跳过 ECC）
- * 读取原始 CW 数据（`ftl_sync_read_page_raw`）。
- * 扫描策略（因 FC 层无独立 OOB 接口）：
- *   - 读取返回非 0（FTL_RESULT_FAIL）→ 出厂坏块
- *   - 读取成功 → 好块
+ * 遍历所有 Block（**跳过 Block 0**）的 Page 0，读 **spare 区首字节**（列 2048，
+ * `OP_READ_COLUMN`）的**出厂坏块标记**：
+ *   - 标记非 0xFF → 出厂坏块
+ *   - 标记 == 0xFF → 好块
+ *   - 列读失败 → 坏块（保守）
  *
- * 设计文档中的 OOB[0] != 0xFF 检测需要 FC 层支持
- * 单独的 OOB/Spare 区读取，当前 fallback 到「读失败」判据（raw 模式无 ECC，
- * 物理失败未必置 NAND status，故以返回码为准）。
+ * 判据与器件手册的建 BBT 流程一致（Micron AN1819：出厂标记在每块首页的 spare 区，
+ * **擦除即永久丢失**，故必须在使用该块前先读）——见 `bbt.c:bbt_probe_block_bad` 的引文。
+ * 本函数**只读不擦**（do_erase=0），擦除会毁掉标记。
  *
  * @param alloc   Allocator 上下文（blocks 输出）
  * @return 检测到的坏块数
@@ -169,15 +169,15 @@ static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
  *
  * 池内下一槽追加一条 record（块满先擦池内下一块）。sequence 递增。
  *
- * @param alloc  Allocator 上下文
+ * @param alloc  Allocator 上下文（游标/序号在 alloc->bbt，序 4 起 per-instance）
  * @return 0 成功，-1 失败
  */
-ftl_status_t bbt_save(const ftl_allocator_t *alloc);
+ftl_status_t bbt_save(ftl_allocator_t *alloc);
 
 /*
  * bbt_flush - 将脏 BBT 写回 NAND（后台调用，两阶段持久化）
  *
- * 当 g_bbt_dirty 置位时，调用 bbt_save 追加一条 record 到 BBT 池。
+ * 当 alloc->bbt.dirty 置位时，调用 bbt_save 追加一条 record 到 BBT 池。
  * 不需要每次写失败都立即写 BBT，后台攒批批量写入。
  *
  * @param alloc  Allocator 上下文
@@ -189,15 +189,15 @@ ftl_status_t bbt_flush(ftl_allocator_t *alloc);
  * bbt_load - 从 NAND BBT 池加载 BBT
  *
  * 池内轮转扫描（metadata_ring_locate），选 magic 正确且 sequence 最大者。
- * 命中时同时恢复本池的 sequence 计数与写游标。
+ * 命中时同时恢复本实例的 sequence 计数与写游标（alloc->bbt）。
  *
+ * @param alloc       Allocator 上下文（池路由取其 ch/ce/lun；游标/序号写回 alloc->bbt）
  * @param bad_map     输出：bt_bitmap[512]
  * @param bad_count   输出：坏块数
  * @param sequence    输出：最新 sequence
- * @param topo        拓扑信息（BBT 池所在芯片路由）
  * @return FTL_OK 成功，FTL_ERROR 无有效 BBT
  */
-ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, ftl_topology_t topo);
+ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence);
 
 /*
  * bbt_spare_pool_refill - 从 Spare Pool 补充 Free Pool

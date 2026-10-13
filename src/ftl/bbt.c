@@ -24,7 +24,8 @@
  *   4. 标坏/持久化        bbt_mark_bad / bbt_save / bbt_flush / bbt_load
  *   5. 坏块替换           bbt_spare_pool_refill
  *
- * ⚠ 游标/序号是 **file-scope static**（多实例局限同 checkpoint/wear）。
+ * 游标/序号是 **per-instance**（序 4：收进 ftl_allocator_t.bbt，见 bbt_state_t）——
+ * 多实例（多 LUN）下每实例一份，互不干扰。
  */
 
 #include "ftl/bbt.h"
@@ -39,17 +40,13 @@
 #include <string.h>
 
 /*
- * BBT 内部状态（全局单例）。
+ * BBT 内部状态：**per-instance**，落在 ftl_allocator_t.bbt（bbt_state_t，序 4）。
+ * 原先是 file-scope static ⇒ 多实例（多 LUN）下所有实例共享一份游标/序号，互相覆盖。
+ *
  * 坏块位图已并入 ftl_block_t.state（Block State Table 单数据源），
  * NAND 持久化仍用紧凑 bad_map[512] 格式（bbt_header_t，一字不改），
  * bbt_save 时从 BST 重建 bitmap。
  */
-static uint32_t g_bbt_sequence = 0U; /* 当前 sequence（本池自己的单调序号）*/
-static int      g_bbt_dirty    = 0;  /* 是否有未写回 NAND 的变更 */
-
-/* BBT 池写游标（开机由 bbt_load 恢复）。⚠ file-scope static：多实例局限同 checkpoint/wear */
-static uint16_t g_bbt_write_idx    = 0U;
-static uint8_t  g_bbt_cursor_valid = 0U;
 
 /* ── 1. 池几何 / 校验 / 探针 ── */
 
@@ -102,6 +99,10 @@ static ftl_status_t bbt_record_probe(void *ctx, uint16_t record_idx, int full, u
 
 /* ── 2. 初始化 ── */
 
+/* 定义在下方「坏块图打印」节（与 bbt_print_bad_map / bbt_erase_all_blocks 共用）；
+ * bbt_scan_factory 需要它在前面，故先声明。 */
+static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t block, uint8_t do_erase);
+
 /* --------------------------------------------------------------------
  * bbt_init
  *   功能：开机初始化坏块账本——先尝试从 NAND 读回 BBT，无则执行出厂扫描。
@@ -122,22 +123,21 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
         return FTL_ERROR;
     }
 
-    g_bbt_sequence = 0U;
-    g_bbt_dirty    = 0;
+    alloc->bbt.sequence = 0U;
+    alloc->bbt.dirty    = 0U;
 
     /* 尝试从 NAND 加载已存在的 BBT */
     {
         uint8_t tmp_bad_map[BBT_BITMAP_SIZE];
 
-        ftl_topology_t topo = {.ch = alloc->ch, .ce = alloc->ce, .lun = alloc->lun};
-        ret                 = bbt_load(tmp_bad_map, &loaded_bad_count, &seq, topo);
+        ret = bbt_load(alloc, tmp_bad_map, &loaded_bad_count, &seq);
         if (ret == 0)
         {
             uint16_t gblock;
             uint16_t bad_idx = 0U;
 
-            g_bbt_sequence   = seq;
-            alloc->bad_count = (uint16_t)loaded_bad_count;
+            alloc->bbt.sequence = seq;
+            alloc->bad_count    = (uint16_t)loaded_bad_count;
 
             /* 从 NAND bitmap 重建 BST is_bad 位（单数据源） */
             for (gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
@@ -164,13 +164,18 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
 
 /* --------------------------------------------------------------------
  * bbt_scan_factory
- *   功能：出厂坏块扫描——逐块以 LDPC_RAW 模式读 Page 0，读失败即标记坏块。
+ *   功能：出厂坏块扫描——逐块读 Page 0 **spare 区首字节**的出厂坏块标记，标记位非 0xFF 即坏块。
  *   参数：alloc —— 分配器。
  *   返回：坏块数（int）；FTL_OK(0) 参数非法。
- *   实现要点：⚠ 当前**只以返回码**判定坏块（ret0 != 0）；raw_buf 全 FF 判据未启用
- *             （空块与坏块的 raw 数据都可能是全 FF，无法区分）。真正的 OOB/spare
- *             检测需 FC 层扩展 spare 区读取——见函数内长注释（P2-3 登记）。
+ *   实现要点：判据 = **OOB 出厂标记**（`bbt_probe_block_bad(..., do_erase=0)`），
+ *             与器件手册的建 BBT 流程一致（见 bbt_probe_block_bad 的引文）。
  *             跳过 block 0（出厂总是好块）；扫描完置 dirty 并 bbt_save 落盘。
+ *
+ *             ⚠ 历史：旧实现以 `ftl_sync_read_page_raw` 的**返回码**判坏块——但 raw 模式
+ *               跳过 ECC，物理失败的页照样回 READY（返回码判不出坏块），而「数据全 FF」
+ *               既可能是空块也可能是坏块，**两种判据都不成立**。根因是当时 FC 层够不到
+ *               spare 列（cw 只有 2 位 ⇒ 列上限 1584 < 2048）；OP_READ_COLUMN 通路
+ *               落地后该替代策略作废（P2-3 收口）。
  * -------------------------------------------------------------------- */
 int bbt_scan_factory(ftl_allocator_t *alloc)
 {
@@ -182,26 +187,12 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
         return FTL_OK;
     }
 
-    g_bbt_dirty = 0;
+    alloc->bbt.dirty = 0U;
 
-    /*
-     * 扫描策略：
-     *
-     * 标准 NAND 出厂坏块标记在 Page 0/1 的 OOB 区域第一个字节。
-     * 当前 FC 层没有独立 OOB 读取接口，采用替代策略：
-     *
-     * 以 LDPC_RAW 模式（跳过 ECC）读取 Page 0 的原始 CW 数据。
-     * 如果读取完全失败（FTL_RESULT_FAIL），判断为出厂坏块。
-     *
-     * 注意：LDPC_RAW 模式下 CW 数据仍然可以被读取，但 full-FF
-     *   可能是空块的特征，不是坏块特征。真正的 OOB 检测需要
-     *   FC 层扩展 spare 区读取功能。
-     */
     for (gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
     {
-        uint8_t     raw_buf[PAGE_SIZE];
-        nand_addr_t page_addr0;
-        int         ret0;
+        uint8_t  plane;
+        uint16_t block;
 
         /* 跳过 Block 0（出厂总是好块）*/
         if (gblock == 0U)
@@ -209,35 +200,12 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
             continue;
         }
 
-        /* 尝试读 Page 0（全局号 → 各 Plane 的物理块号） */
-        {
-            uint8_t  plane = (uint8_t)(gblock / BLOCKS_PER_PLANE);
-            uint16_t block = (uint16_t)(gblock % BLOCKS_PER_PLANE);
-            page_addr0     = addr_from_paa(alloc->ch, alloc->ce, paa_from_addr(&(nand_addr_t){.plane = (uint8_t)plane, .block = (uint16_t)block}));
-        }
+        /* 全局块号 → 各 Plane 的物理块号 */
+        plane = (uint8_t)(gblock / BLOCKS_PER_PLANE);
+        block = (uint16_t)(gblock % BLOCKS_PER_PLANE);
 
-        memset(raw_buf, 0xFF, sizeof(raw_buf));
-        ret0 = ftl_sync_read_page_raw(page_addr0, raw_buf, FC_COMMAND_MODULE_BBT);
-
-        /*
-         * LDPC_RAW 模式下，即使 NAND 物理失败，
-         * fc_poll_completion 仍然返回 status=READY（raw 模式无 ECC 错误）。
-         * 所以用返回码判断坏块不一定可靠。
-         *
-         * 替代方案：检查 Page 0 的数据是否为全 0xFF（空块特征）。
-         * 出厂好块的 Page 0 数据区不为全 FF（有坏块标记等）。
-         * 出厂坏块的 Page 0 可能全 FF 或读取失败。
-         *
-         * 当前实现：
-         *   只以**返回码**判定——ret0 != 0 才标记坏块（见下方保守策略）。
-         *   raw_buf 全 FF 判据**未启用**：空块与坏块的 raw 数据都可能是全 FF，
-         *   无法区分；出厂商预写到 spare 区的标识被跳过（FC 层当前只读 USER 数据区）。
-         *
-         * 更准确的检测需要 FC 提供 spare/OOB 读取接口。
-         */
-
-        /* 保守策略：读取出错就标记坏块 */
-        if (ret0 != 0)
+        /* 只读标记（do_erase=0）：出厂扫描阶段**不得**擦块——擦除会永久毁掉标记 */
+        if (bbt_probe_block_bad(alloc, plane, block, 0U) != 0)
         {
             ftl_block_set_bad(&alloc->blocks[gblock]);
             ftl_block_state_clr(&alloc->blocks[gblock],
@@ -249,7 +217,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
     }
 
     alloc->bad_count = bad_idx;
-    g_bbt_dirty      = 1;
+    alloc->bbt.dirty = 1U;
 
     /* 将扫描结果写入 NAND BBT */
     (void)bbt_save(alloc);
@@ -272,9 +240,10 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
 _Static_assert((BLOCKS_PER_PLANE % BBT_MAP_COLS_PER_PLANE) == 0U, "每 plane 块数须被每排列数整除，否则末排漏块");
 
 /*
- * bbt_probe_block_bad - 探测单个块是否坏块
+ * bbt_probe_block_bad - 探测单个块是否坏块（**全仓唯一的「这块坏不坏」判据**）
  *
- * ① 读 Page 0 的 spare 首字节（**列 2048**，`PAGE_MAIN_SIZE`），非 0xFF ⇒ 出厂坏块。
+ * ① 读 Page 0 的 spare 首字节（**列 2048**，`PAGE_MAIN_SIZE`），非 0xFF ⇒ 出厂坏块；
+ *    **读失败也判坏块**（列读不通 = 该页不可读，保守归入坏块，与 ② 的擦除失败同调）。
  *    **必须在擦除之前读**——器件手册（Micron AN1819）逐字：*"the bad block information is
  *    erasable and cannot be recovered once erased"*，且 *"System software should check the
  *    first spare area location on the first page of each block prior to performing any
@@ -286,6 +255,9 @@ _Static_assert((BLOCKS_PER_PLANE % BBT_MAP_COLS_PER_PLANE) == 0U, "每 plane 块
  * 列 2048 只能靠 OP_READ_COLUMN（列地址走命令 param）够到：OP_READ_META 的列 =
  * paa_to_cw × CW_SIZE，cw ∈ {0,1,2,3} ⇒ 列只能是 {0, 528, 1056, 1584}。
  * 4 字节 = spare[0..3]（2 字节坏块信息 + 2 字节 user metadata II），标记看 [0]。
+ *
+ * 调用者：bbt_scan_factory（出厂扫描，do_erase=0）/ bbt_print_bad_map（诊断，按 CLI）/
+ *         bbt_erase_all_blocks（全片擦除，do_erase=1）。
  */
 static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t block, uint8_t do_erase)
 {
@@ -297,9 +269,10 @@ static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t b
      * 不依赖 paa 的 cw 字段。 */
     addr = addr_from_paa(alloc->ch, alloc->ce, paa_from_addr(&(nand_addr_t){.plane = plane, .block = block}));
 
-    /* ① 出厂标记（擦除前读，擦除会永久毁掉它） */
+    /* ① 出厂标记（擦除前读，擦除会永久毁掉它）。读失败 ⇒ 坏块。 */
     (void)memset(mark, 0xFF, sizeof(mark));
-    marked = (int)((ftl_sync_read_column(addr, (uint16_t)PAGE_MAIN_SIZE, mark) == FTL_OK) && (mark[0] != 0xFFU));
+    marked = (ftl_sync_read_column(addr, (uint16_t)PAGE_MAIN_SIZE, mark) != FTL_OK) ? 1
+                                                                                    : ((mark[0] != 0xFFU) ? 1 : 0);
 
     /* ② 可选擦除——**无条件发**。
      * 旧实现在 ① 命中时直接 `return 1` 提前返回，于是**被标记的块永远不被擦**。而"全片擦除"
@@ -363,7 +336,7 @@ ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc)
         }
     }
 
-    g_bbt_dirty = 1;
+    alloc->bbt.dirty = 1U;
 
     return FTL_OK;
 }
@@ -483,7 +456,7 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock)
                             FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);
     ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
     alloc->bad_count++;
-    g_bbt_dirty = 1;
+    alloc->bbt.dirty = 1U;
 
     /* 不再同步调 bbt_save() — NAND BBT 持久化由后台 bbt_flush 批量执行。
      * 坏块替换：从 Spare Pool 取块补 free pool（保容量水位，ADR-11 Block Sparing）。
@@ -501,7 +474,7 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock)
  *   实现要点：游标未建立时先定位池内最新 record 的下一槽；**无论成败都推进游标**
  *             （半编程槽不可复用）；失败保留 dirty 供下次重试。NAND 格式一字不改。
  * -------------------------------------------------------------------- */
-ftl_status_t bbt_save(const ftl_allocator_t *alloc)
+ftl_status_t bbt_save(ftl_allocator_t *alloc)
 {
     bbt_header_t    header;
     bbt_probe_ctx_t ctx;
@@ -512,7 +485,7 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc)
     {
         return FTL_ERROR;
     }
-    if (!g_bbt_dirty)
+    if (alloc->bbt.dirty == 0U)
     {
         return FTL_OK;
     }
@@ -521,22 +494,22 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc)
     ctx.topo = (ftl_topology_t){.ch = alloc->ch, .ce = alloc->ce, .lun = alloc->lun};
 
     /* 游标未建立 ⇒ 先定位池内最新有效 record 的下一槽 */
-    if (g_bbt_cursor_valid == 0U)
+    if (alloc->bbt.cursor_valid == 0U)
     {
         uint16_t newest = UINT16_MAX;
 
-        if (metadata_ring_locate(&ctx.ring, &ctx.topo, bbt_record_probe, &ctx, &newest, &g_bbt_sequence, &g_bbt_write_idx) != FTL_OK)
+        if (metadata_ring_locate(&ctx.ring, &ctx.topo, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
         {
             return FTL_ERROR;
         }
-        g_bbt_cursor_valid = 1U;
+        alloc->bbt.cursor_valid = 1U;
     }
 
-    g_bbt_sequence++;
+    alloc->bbt.sequence++;
 
     memset(&header, 0, sizeof(header));
     header.magic        = BBT_MAGIC;
-    header.sequence     = g_bbt_sequence;
+    header.sequence     = alloc->bbt.sequence;
     header.total_blocks = BBT_MAX_BLOCKS;
     header.bad_count    = alloc->bad_count;
 
@@ -551,28 +524,32 @@ ftl_status_t bbt_save(const ftl_allocator_t *alloc)
 
     /* 追加写：池内下一槽（块满则先擦池内下一块）。
      * 无论成败都推进游标（已写过的槽可能半编程，不可复用）。 */
-    if (metadata_ring_prepare_write(&ctx.ring, &ctx.topo, g_bbt_write_idx, &addr) != FTL_OK)
+    if (metadata_ring_prepare_write(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, &addr) != FTL_OK)
     {
         return FTL_ERROR;
     }
 
     if (ftl_sync_write_page(addr, &header, sizeof(header), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_BBT)) != 0)
     {
-        g_bbt_write_idx = (uint16_t)((g_bbt_write_idx + 1U) % metadata_ring_total_records(&ctx.ring));
+        alloc->bbt.write_idx = (uint16_t)((alloc->bbt.write_idx + 1U) % metadata_ring_total_records(&ctx.ring));
         return FTL_ERROR; /* dirty 保留 ⇒ 下次重试 */
     }
 
-    g_bbt_write_idx = (uint16_t)((g_bbt_write_idx + 1U) % metadata_ring_total_records(&ctx.ring));
+    alloc->bbt.write_idx = (uint16_t)((alloc->bbt.write_idx + 1U) % metadata_ring_total_records(&ctx.ring));
 
-    g_bbt_dirty = 0;
+    alloc->bbt.dirty = 0U;
     return FTL_OK;
 }
 
 /* bbt_flush — 后台批量持久化入口：仅当 dirty 时才真正写 NAND（否则早退，不空转池） */
 ftl_status_t bbt_flush(ftl_allocator_t *alloc)
 {
+    if (alloc == NULL)
+    {
+        return FTL_ERROR;
+    }
     /* 仅当 dirty 时才写 NAND */
-    if (!g_bbt_dirty)
+    if (alloc->bbt.dirty == 0U)
     {
         return FTL_OK;
     }
@@ -582,43 +559,44 @@ ftl_status_t bbt_flush(ftl_allocator_t *alloc)
 /* --------------------------------------------------------------------
  * bbt_load
  *   功能：开机从 BBT 池定位并读回最新有效 BBT header，输出 bitmap/坏块数/序号。
- *   参数：bad_map[BBT_BITMAP_SIZE] —— 出参位图；bad_count/sequence —— 出参；topo —— 拓扑。
+ *   参数：alloc —— 分配器（池路由取 alloc 的 ch/ce/lun，游标/序号写回 alloc->bbt）；
+ *         bad_map[BBT_BITMAP_SIZE] —— 出参位图；bad_count/sequence —— 出参。
  *   返回：FTL_OK 成功；FTL_ERROR 参数非法 / 池内无有效 record / 重读失败 / 校验不符。
- *   实现要点：进入即复位 g_bbt_*（找不到时保持 0/无效 ⇒ 后续 save 从池首开始）；
+ *   实现要点：进入即复位 alloc->bbt（找不到时保持 0/无效 ⇒ 后续 save 从池首开始）；
  *             locate 只回序号，header 本体要按该序号**再读一次**并复核 sequence。
  * -------------------------------------------------------------------- */
-ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence, ftl_topology_t topo)
+ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence)
 {
     bbt_probe_ctx_t ctx;
     bbt_header_t    best;
     nand_addr_t     addr;
     uint16_t        newest = UINT16_MAX;
 
-    if ((bad_map == NULL) || (bad_count == NULL) || (sequence == NULL))
+    if ((alloc == NULL) || (bad_map == NULL) || (bad_count == NULL) || (sequence == NULL))
     {
         return FTL_ERROR;
     }
 
-    /* 复位本池状态：无有效 record 时保持 0/无效（后续 bbt_save 从池首开始）*/
-    g_bbt_sequence     = 0U;
-    g_bbt_write_idx    = 0U;
-    g_bbt_cursor_valid = 0U;
+    /* 复位本实例池状态：无有效 record 时保持 0/无效（后续 bbt_save 从池首开始）*/
+    alloc->bbt.sequence     = 0U;
+    alloc->bbt.write_idx    = 0U;
+    alloc->bbt.cursor_valid = 0U;
 
     bbt_ring_init(&ctx.ring);
-    ctx.topo = topo;
+    ctx.topo = (ftl_topology_t){.ch = alloc->ch, .ce = alloc->ce, .lun = alloc->lun};
 
-    if (metadata_ring_locate(&ctx.ring, &ctx.topo, bbt_record_probe, &ctx, &newest, &g_bbt_sequence, &g_bbt_write_idx) != FTL_OK)
+    if (metadata_ring_locate(&ctx.ring, &ctx.topo, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
     {
         return FTL_ERROR;
     }
     if (newest == UINT16_MAX)
     {
-        g_bbt_sequence  = 0U;
-        g_bbt_write_idx = 0U;
+        alloc->bbt.sequence  = 0U;
+        alloc->bbt.write_idx = 0U;
         return FTL_ERROR; /* 池内无有效 record */
     }
 
-    g_bbt_cursor_valid = 1U;
+    alloc->bbt.cursor_valid = 1U;
 
     /* 重读胜者（locate 只返回序号，Header 本体要再读一次）*/
     addr = metadata_ring_addr(&ctx.ring, &ctx.topo, newest, 0U);
@@ -626,7 +604,7 @@ ftl_status_t bbt_load(uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence,
     {
         return FTL_ERROR;
     }
-    if ((bbt_header_valid(&best) == 0) || (best.sequence != g_bbt_sequence))
+    if ((bbt_header_valid(&best) == 0) || (best.sequence != alloc->bbt.sequence))
     {
         return FTL_ERROR;
     }

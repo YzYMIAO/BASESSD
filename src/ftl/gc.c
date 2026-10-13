@@ -3,23 +3,22 @@
  *
  * 职责：
  *   回收「无效页多」的块：按四项加权评分选 victim SB，把其有效页搬到冷块、
- *   更新 L2P/Journal/VPC，再擦除整 SB 并归还 Free Pool；并提供五路触发判定。
+ *   更新 L2P/Journal/VPC，再擦除整 SB 并归还 Free Pool；并提供触发判定。
  *
  * 与 wear_leveling.c 的分工：
  *   GC —— 回收**无效页多**的块（空间回收，顺带磨损均衡）；
  *   WL —— 搬运**擦得少**的块（磨损拉平，顺带 read disturb 缓解）。两者共用
  *         gc_read_page_with_lba / gc_erase_and_free 原语，且 GC 是 WL 的擦除出口。
  *
- * 五路触发（gc_check_triggers，位掩码）：
- *   T1 空闲水位 < FREE_POOL_TARGET；T2 写入量整除 GC_INTERVAL_WRITES；
- *   T3 定时 GC_TIMER_INTERVAL_MS；T4 紧急 ≤ FREE_POOL_EMERGENCY；T5 磨损比超标。
+ * 三条触发（gc_check_triggers，位掩码；T2/T3/T6 已废弃见 gc.h）：
+ *   T1 空闲水位 < FREE_POOL_TARGET；T4 紧急 ≤ FREE_POOL_EMERGENCY；T5 磨损比超标。
  *
  * 文件结构：
  *   1. 共用原语        gc_read_page_with_lba / gc_erase_and_free
  *   2. 全表极值        gc_table_extremes（static）
  *   3. 选 victim       gc_select_victim（四项加权评分）
  *   4. 搬移            gc_migrate_sb
- *   5. 触发判定        gc_check_triggers / gc_check_trigger
+ *   5. 触发判定        gc_check_triggers
  *
  * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
  */
@@ -266,7 +265,7 @@ void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t n
             /* 擦除成功：擦除计数 +1，记录最近擦除时间戳（单调写入量），valid_count 归零，归还 Free Pool */
             alloc->blocks[gblock].erase_count++;
             alloc->blocks[gblock].last_pe_ts = now;
-            wear_mark_dirty(gblock);
+            wear_mark_dirty(alloc, gblock);
             ftl_block_clear_valid(&alloc->blocks[gblock]);
             allocator_free_block(alloc, gblock);
         }
@@ -473,7 +472,8 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
  *       被覆盖 / TRIM 过的 CW 自然落选；从未写过的页读回全 FF ⇒ gc_read_page_with_lba
  *       报错，本页跳过。
  *     · 快路径：双 plane valid_count 之和 == 0 ⇒ 无可搬移，直接返回（省整块 NAND 读；
- *       这正是原先「写过」位图覆盖的主场景——P2-6 整块空洞 plane）。
+ *       这正是原先「写过」位图覆盖的主场景——**整块空洞 plane**；其根因 P2-6 已由
+ *       v0.66 页打包写缓冲消除，见 ftl_optimization_plan.md §8.1 P2-6）。
  *     · 逐**页索引**成对分配目标页：一个 plane 的有效 CW 必须落到**同 plane** 的目标页，
  *       否则页内 META（由物理 plane/cw 铸出）还原出的扇区 LBA 会指错 plane
  *       （见 ftl_config.h §八）。只搬有效 CW（本页局部 `cw_bitmap` 外的 CW 不建链、不编程）。
@@ -548,7 +548,7 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
 
                 rr_record_ecc(&src_blk->rr, ecc);
                 src_blk->read_count++;
-                wear_mark_dirty(gsrc[plane]);
+                wear_mark_dirty(alloc, gsrc[plane]);
             }
 
             /* 逐 CW 反查 L2P：用**该 CW 自己的 META**（= cw_lba[plane][cw]）查，
@@ -649,14 +649,15 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
 
 /* --------------------------------------------------------------------
  * gc_check_triggers
- *   功能：算五路触发位掩码（调用点据此决定排一次 GC 还是当场同步回收）。
- *   参数：alloc —— 分配器；total_writes —— 累计写次数；elapsed_ms —— 距上次 GC 的毫秒数。
+ *   功能：算触发位掩码（调用点据此决定要不要回收、以及回收多少）。
+ *   参数：alloc —— 分配器。
  *   返回：GC_TRIGGER_* 位掩码；0 无触发（含 alloc==NULL）。
- *   实现要点：T1 水位 < FREE_POOL_TARGET；T2 写入量整除 GC_INTERVAL_WRITES；T3 定时；
- *             T4 紧急 ≤ FREE_POOL_EMERGENCY（与 T1 同源但阈值更低）；T5 磨损比 max/min 超标
- *             （min==0 不触发——"有块从未被擦"是静态 WL 的职责；max 地板防早期空跑）。
+ *   实现要点：只看**空间与磨损**——T1 水位 < FREE_POOL_TARGET（主动补池）；
+ *             T4 紧急 ≤ FREE_POOL_EMERGENCY（与 T1 同源但阈值更低，池见底）；
+ *             T5 磨损比 max/min 超标（min==0 不触发——"有块从未被擦"是静态 WL 的职责；
+ *             max 地板防早期空跑）。⚠ T2（写入量）/T3（定时）已废弃，见 gc.h 位注释。
  * -------------------------------------------------------------------- */
-uint32_t gc_check_triggers(const ftl_allocator_t *alloc, uint32_t total_writes, uint32_t elapsed_ms)
+uint32_t gc_check_triggers(const ftl_allocator_t *alloc)
 {
     uint32_t triggers = 0U;
 
@@ -670,18 +671,7 @@ uint32_t gc_check_triggers(const ftl_allocator_t *alloc, uint32_t total_writes, 
     {
         triggers |= GC_TRIGGER_WATERMARK;
     }
-    /* T2：写入量（把 GC 压力摊平到整个写入流上，避免攒到水位线才爆发） */
-    if ((total_writes % GC_INTERVAL_WRITES) == 0U)
-    {
-        triggers |= GC_TRIGGER_WRITES;
-    }
-    /* T3：定时（host 不写也不擦时，让空闲期把池补回去） */
-    if (elapsed_ms >= GC_TIMER_INTERVAL_MS)
-    {
-        triggers |= GC_TRIGGER_TIMER;
-    }
-    /* T4：紧急（池已见底的最后手段）。与 T1 同源但阈值更低（8 vs 32）——
-     * 调用点据此决定"排一次 GC"还是"当场同步回收"。 */
+    /* T4：紧急（池已见底的最后手段）。与 T1 同源但阈值更低（8 vs 32）。 */
     if (alloc->free_count <= FREE_POOL_EMERGENCY)
     {
         triggers |= GC_TRIGGER_EMERGENCY;
@@ -703,10 +693,4 @@ uint32_t gc_check_triggers(const ftl_allocator_t *alloc, uint32_t total_writes, 
     }
 
     return triggers;
-}
-
-/* gc_check_trigger — 布尔便捷：任一触发位命中即 1，否则 FTL_OK(0) */
-int gc_check_trigger(const ftl_allocator_t *alloc, uint32_t total_writes, uint32_t elapsed_ms)
-{
-    return (gc_check_triggers(alloc, total_writes, elapsed_ms) != 0U) ? 1 : FTL_OK;
 }

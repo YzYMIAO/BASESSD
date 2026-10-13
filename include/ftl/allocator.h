@@ -13,7 +13,7 @@
  *   6. 跳过坏块，通过 Spare Pool 保水位
  *
  * 地址体系：
- *   allocator_alloc() 返回 nand_pba_t（含 CH/CE 拓扑 + PAA 芯片内地址）。
+ *   allocator_alloc_pair() 返回 nand_pba_t（含 CH/CE 拓扑 + PAA 芯片内地址）。
  *   PBA 的 page 字段由 allocator 管理，block/plane 从 Free Pool 分配。
  */
 
@@ -79,25 +79,25 @@ typedef struct
     uint8_t        valid;                   /* 1=正在使用（Open），0=已关闭 */
 } super_block_t;
 
-/* ── 初始化参数（ftl_init / allocator_init 共用）──
+/* ── FTL 自持表（P2-5）──
  *
- * 大数组存储（free/closed/BST 等）由调用者（host 层）提供，
- * 本结构体只传递指针与计数，指针模式避免 FTL 自身持有大数组。
- * 定义于此（而非 common/ftl_types.h）：依赖 super_block_t（本文件定义），
- * 放 common 会形成 ftl_types.h ↔ allocator.h 循环 include。
- */
+ * 大数组**归 FTL 实例所有**：由 `ftl_context_t.tables` 内含，HIL（main.c）不再声明数组、
+ * 也不再传指针。与主流同构——OpenSSD 用全局数组、SPDK 把表放进 `spdk_ftl_dev`；
+ * 表的所有权属于 FTL 本体，不属于调用者。
+ *
+ * 全部放**一处**（而不是各散在 allocator / bbt / gc 里）是为了让内存预算**单点可见**：
+ * `src/main.c` 的 `_Static_assert` 只看 `sizeof(ftl_context_t)` 一项即可挡住维度扩展。
+ *
+ * 定义于此（而非 ftl.h）：依赖 super_block_t（本文件定义），放 ftl.h 会形成
+ * ftl.h ↔ allocator.h 循环 include。 */
 typedef struct
 {
-    ftl_topology_t topo;           /* 本 FTL 绑定的 NAND 芯片路由 */
-    uint16_t      *free_blocks;    /* free block 数组（全局 Block 号，由调用者提供） */
-    uint16_t       free_count;     /* free block 数 */
-    uint16_t      *op_blocks;      /* OP 预留 block 数组（容量不动：GC 缓冲池，由调用者提供） */
-    uint16_t       op_count;       /* OP 池 Block 数 */
-    uint16_t      *spare_blocks;   /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
-    uint16_t       spare_count;    /* Spare Pool 初始 Block 数 */
-    ftl_block_t   *blocks;         /* Block State Table 条目（由调用者提供，容量 FTL_BLOCK_TOTAL） */
-    super_block_t *closed_sb_list; /* closed Super Block 数组（由调用者提供） */
-} ftl_init_params_t;
+    ftl_block_t   blocks[FTL_BLOCK_TOTAL];              /* BST：per-Block 状态（erase_count / valid_count / state / sb_id / rr） */
+    uint16_t      free_blocks[FTL_BLOCK_TOTAL];         /* Free Pool（全局块号；三级水位见文件头） */
+    uint16_t      op_blocks[FTL_BLOCK_TOTAL];           /* OP 预留池（GC 缓冲池，容量不动） */
+    uint16_t      spare_blocks[FTL_SPARE_POOL_SIZE];    /* Spare Pool（坏块替换池，只出不进） */
+    super_block_t closed_sb_list[SUPER_BLOCK_LIST_MAX]; /* Closed Super Block 列表（等待 GC） */
+} ftl_tables_t;
 
 /* 该 plane 是否持有物理块（Policy B：Closed 条目允许退化单 plane，另一 plane 记哨兵）。
  * 凡按 plane 展开地址 / 索引 BST / 擦除的读者都要先判——哨兵不是合法块号。 */
@@ -133,9 +133,40 @@ static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const supe
     return pba_from_addr(&addr);
 }
 
+/* ── 元数据池游标（序 4：per-instance）──
+ *
+ * BBT 池 / Wear 日志各有自己的 sequence 与写游标（环形轮转，开机由各自的 load/init
+ * 恢复）。**原先是 bbt.c / wear.c 的 file-scope static** —— 单实例下无害，多实例
+ * （多 LUN，`g_ftl[ch][ce][lun]`）下所有实例共享一份游标/序号，互相覆盖 ⇒ 池写错槽。
+ * 收进 ftl_allocator_t ⇒ 每实例一份。
+ *
+ * 放这里（而非各自的 bbt.h / wear.h）的两个理由：
+ *   ① 这两个模块的**全部**接口都以 `ftl_allocator_t *` 为首参（状态随分配器走最自然）；
+ *      而 bbt.h / wear.h 已 include 本文件，反向包含会成环。
+ *   ② 语义上同属「块账本」——BBT = 坏块图，Wear = 每块擦除/读计数，与 BST 同一维度。
+ *
+ * ⚠ 两者都是**软状态**：掉电只丢「最后一次落盘之后」的增量，不丢用户数据（见 wear.h 头注）。
+ */
+typedef struct
+{
+    uint32_t sequence;     /* 本池自己的单调序号（最新有效 record） */
+    uint16_t write_idx;    /* 池内下一个待写槽（环形） */
+    uint8_t  cursor_valid; /* 游标是否已建立；未建立则首次落盘先扫池定位 */
+    uint8_t  dirty;        /* 是否有未写回 NAND 的变更 */
+} bbt_state_t;
+
+typedef struct
+{
+    uint32_t sequence;                    /* 最新已写页的 sequence */
+    uint16_t next_page;                   /* 下一个可写页（= 已回放的有效页数） */
+    uint32_t last_flush_writes;           /* 上次落盘时的 total_writes（节拍基准） */
+    uint32_t last_flush_ms;               /* 上次落盘时刻（ms，节拍基准） */
+    uint8_t  dirty[FTL_BLOCK_TOTAL / 8U]; /* 脏位图：哪些块的计数变了 */
+} wear_state_t;
+
 /* ── Allocator 上下文 ──
  *
- * 所有大数组由调用者提供存储（指针模式），当前放在 SRAM。
+ * 各指针在 allocator_init 里绑到**本实例自持的** ftl_tables_t（P2-5）——表归 FTL 所有。
  */
 
 typedef struct
@@ -144,16 +175,16 @@ typedef struct
     uint8_t  ch;           /* 本 Allocator 绑定的 CH */
     uint8_t  ce;           /* 本 Allocator 绑定的 CE */
     uint8_t  lun;          /* 本 Allocator 绑定的 LUN */
-    uint16_t total_blocks; /* 总好 Block 数（出厂扫描后确定） */
+    uint16_t total_blocks; /* 总好 Block 数（由 HIL 回填 free pool 后置定，见 main.c） */
 
     /* ── Free Pool（一个已擦除池；三级水位见文件头） ── */
-    uint16_t *free_blocks; /* free block 编号数组（由调用者提供） */
+    uint16_t *free_blocks; /* → tables.free_blocks */
     uint16_t  free_count;  /* 空闲（且已擦除）block 数——三级水位都建在它上面 */
 
     /* ── OP / Spare Pool（容量不动） ── */
-    uint16_t *op_blocks;    /* OP 预留 block 数组（GC 缓冲池，由调用者提供） */
+    uint16_t *op_blocks;    /* → tables.op_blocks（GC 缓冲池） */
     uint16_t  op_count;     /* OP 池剩余 Block 数 */
-    uint16_t *spare_blocks; /* Spare Pool（坏块替换池）block 数组（由调用者提供） */
+    uint16_t *spare_blocks; /* → tables.spare_blocks（坏块替换池） */
     uint16_t  spare_count;  /* Spare Pool 剩余 Block 数 */
 
     /* ── Open Super Block（每温度一个） ── */
@@ -161,12 +192,16 @@ typedef struct
     super_block_t cold_sb; /* Cold Open Super Block */
 
     /* ── Closed Super Block 列表（等待 GC） ── */
-    super_block_t *closed_sb_list;  /* 已写满的 Super Block 数组（由调用者提供） */
+    super_block_t *closed_sb_list;  /* → tables.closed_sb_list */
     uint16_t       closed_sb_count; /* 已关闭 Super Block 数 */
 
     /* ── Block State Table（统一 per-Block 状态） ── */
-    ftl_block_t *blocks;    /* 每 Block 条目数组（由调用者提供） */
+    ftl_block_t *blocks;    /* → tables.blocks */
     uint16_t     bad_count; /* 坏 Block 数 */
+
+    /* ── 元数据池游标（序 4：per-instance，原 bbt.c / wear.c 的 file-scope static） ── */
+    bbt_state_t  bbt;  /* 坏块表池：sequence / write_idx / cursor_valid / dirty */
+    wear_state_t wear; /* 磨损计数日志：sequence / next_page / 节拍基准 / 脏位图 */
 } ftl_allocator_t;
 
 /* ── 接口函数 ── */
@@ -174,14 +209,13 @@ typedef struct
 /*
  * allocator_init - 初始化 Allocator
  *
- * @param alloc  Allocator 上下文（由调用者提供存储）
- * @param params 初始化参数（拓扑 + 大数组存储，见 ftl_init_params_t 定义）
- *               free_blocks / free_count / blocks / closed_sb_list
- *               均为调用者提供的存储指针
+ * @param alloc   Allocator 上下文（本实例自持存储，见 ftl_context_t）
+ * @param topo    本实例绑定的 NAND 芯片路由
+ * @param tables  FTL 自持表（P2-5：由 ftl_context_t 内含；本函数只绑定指针，不复制）
  *
  * @return ftl_status_t — FTL_OK 成功
  */
-ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *params);
+ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
 
 /*
  * allocator_alloc_pair - 分配一页的**两个 plane** PBA（Multi-Plane 写用）
@@ -202,18 +236,6 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
 nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nand_pba_t out[PLANE_NUM]);
 
 /*
- * allocator_alloc - 分配一个 PBA（一页，4 CW）——单 plane 便捷
- *
- * = allocator_alloc_pair() 取 plane 0 的那一半。GC / WL / metadata 的单 plane 写路径用它。
- *
- * @param alloc       Allocator 上下文
- * @param temperature FTL_TEMP_HOT / FTL_TEMP_COLD
- *
- * @return nand_pba_t，NAND_PBA_INVALID 表示分配失败
- */
-nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature);
-
-/*
  * allocator_free_block - GC 擦除后将 Block 归还到 Free Pool
  *
  * @param alloc  Allocator 上下文
@@ -227,7 +249,7 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
  * 用途：L2P 日志块等「整块归元数据所有」的分配。从该 plane 的 Free Pool 取一块
  * （磨损最少者），把它从 Free Pool **移除**并标记 RESERVED。
  *
- * ⚠ 与 allocator_alloc(FTL_TEMP_COLD) 的区别：后者取的是**冷 Open SB 的一页**，
+ * ⚠ 与 allocator_alloc_pair(FTL_TEMP_COLD) 的区别：后者取的是**冷 Open SB 的一页**，
  *   而冷 SB 与 GC 迁移共享 ⇒ 元数据绝不能走那条路（会把 GC 的写指针搅乱）。
  *
  * ⚠ 三件事必须一起做——只置 RESERVED 挡不住分配，因为选块以

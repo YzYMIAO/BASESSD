@@ -417,8 +417,11 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 
 ## 七、写缓冲页打包（方案 A）
 
-> ⚠ **本仓未采用（见 §十一 / §十二.1）**：FC 层有 **CW 位图**能力（v27），可**按 CW 子集编程**、
-> 页内允许空洞 ⇒ 本仓走「CW 子集直接编程」，**不设页缓冲**。本节仅作方案对照留档。
+> ✅ **本仓 v0.66 已采用（方案 A 落地）**：见 §十二.1 与 `ftl_revision_history.md v0.66`。
+> FC 层有 **CW 位图**能力（v27），可**按 CW 子集编程**、页内允许空洞 ⇒ 缓冲**不是**为了「凑整页」，
+> 而是把**同一 pair 窗口**内的多次 host 写合并成**一次页编程**（消除单 plane 子操作浪费另一 plane
+> 同页，见 P2-6）。稀疏位图仍走 CW 子集直接编程，但**必须用 `ftl_cmd_write_data_cw`（按 CW 偏移散射）**
+> ——合并多组后位图可能非连续，顺序打包会把数据塞错 CW。
 
 **问题**：器件编程单位 = page（2048B），不能单独编 1 个 CW。512B 扇区写必须变成页编程。
 
@@ -428,10 +431,13 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 | (B) 读改写 RMW | 写 1 扇区 = 读旧页 + 改 1 CW + 编新页 | 读放大 1× | ⚠ 老式 |
 | (C) 单 CW 编程 | 编 1 CW + 3 个 0xFF | 写放大 4×，部分页编程不可靠 | ❌ 不推荐 |
 
-**主流倾向 (A)**；**本仓因 FC 的 CW 位图能力绕开**——直接编 CW 子集（见 §十一）。
+**主流倾向 (A)**；本仓早期因 FC 的 CW 位图能力「绕开」（直接编 CW 子集，见 §十一）——但那只解决了
+「稀疏页怎么写」，**没**解决「多个小写各吃一对页」的浪费（P2-6）。**v0.66 起本仓采用 (A)**：缓冲把
+同一 pair 窗口的多次写攒成一页、一次编程（两 plane 有数据即 multi-plane）。
 
-**掉电语义**：本仓无电容 ⇒ 写缓冲内容随 **journal** 落盘；或写缓冲只做「同页扇区合并」，
-不跨掉电窗口。
+**掉电语义**：本仓无电容 ⇒ **不做数据日志，改「推迟完成」**——缓冲 CW 只在 SRAM，Journal/L2P 只在
+flush 编程成功的完成处理里更新（不变量：L2P/journal 只引用**已编程**页）。掉电时这些 host 写**从未
+收到完成**，丢失即正确契约。详见 `ftl_revision_history.md v0.66`。
 
 ## 八、有效位粒度：per-CW + **DRAM-less approach ③（flash reverse mapping）**
 
@@ -471,8 +477,10 @@ META 存的就是该 CW 的**扇区 LBA**（低位 plane/cw 即其物理位置�
 - 有效性**唯一**真值 = `gc_read_page_with_lba` 逐 CW 从**页内 META** 取回该 CW 的扇区 LBA
   → `l2p_cache_read(l) == pba_with_cw(本页, 本 CW)` 判活；未写过的 CW 读回全 FF ⇒ 自然跳过。
 - BST 只留 **per-CW `valid_count`**（块级聚合，GC victim 选择用）。
-- 原先位图覆盖的主场景（**整块空洞** plane 块，见 P2-6）改由 `gc_migrate_sb` 入口的
+- 原先位图覆盖的主场景（**整块空洞** plane 块）改由 `gc_migrate_sb` 入口的
   **`valid_count == 0` 快路径**覆盖；散点空洞仍会多读，属可接受的小概率。
+  （空洞的另一来源——**单 plane 子操作浪费另一 plane 同页**——见 P2-6，**v0.66 已定案**
+   并落地 §七 方案 A 页打包写缓冲。）
 - 收益：AXI_RAM **319 → 255 KB**（余 ~129 KB），为波 2 序 3/4（表所有权 / 多实例）腾出空间；
   同时消除「位图提示 vs `valid_count` 计数」两者漂移的隐患（TRIM 只减计数不清位、裸 NAND 扫描只置位不计数）。
 
@@ -549,9 +557,13 @@ SRAM 缓存热点 region**。
 | 页基址反推 | `gc_read_page_with_lba` 由**首个写过的 CW** 反推页基址（容忍页内空洞，见下） | `src/ftl/gc.c` |
 | CLI | `g_wr_buf` 16KB ⇒ `wr/rd n ≤ 32` 扇区（旧页级上限 8） | `src/controller/cli.c` |
 
-> ⚠ **未走「页缓冲」（本文 §七 方案 A）**：器件/FC 支持按 CW 编程（FC v27 CW 位图），故 512B 写直接
-> 编 **CW 子集**，**页内允许空洞**（CW0 可能未写）。GC/WL 用「首个写过 CW 反推页基址 + 逐 CW L2P 反查」
-> 容忍空洞。代价：**单 plane 子操作浪费另一 plane 同页**（登记 `ftl_optimization_plan.md §8.1 P2-6`）。
+> ⚠ **已重做「页缓冲」（本文 §七 方案 A，2026-10-13 v0.66）**：器件/FC 支持按 CW 编程（FC v27 CW 位图），
+> 故 512B 写仍直接编 **CW 子集**、**页内允许空洞**（CW0 可能未写），GC/WL 用「首个写过 CW 反推页基址
+> + 逐 CW L2P 反查」容忍空洞。**新增**：同一 pair 窗口内的多次 host 写先攒进页镜像（`ftl_wbuf_t`），
+> 窗口填满 / 切换 / flush / 空闲时**一次编程**（两 plane 都有数据即一条 multi-plane）⇒ 消除
+> **单 plane 子操作浪费另一 plane 同页**（P2-6）。**方案 A 是唯一解**——登记修法（per-plane 独立写指针）
+> 被器件/标准否决：multi-plane 要求两 plane **同页地址**（Micron `MT29F4G08ABADAWP` §Two-Plane
+> Addressing；ONFI 3.2 §3.1.1）。见 `ftl_optimization_plan.md §8.1 P2-6`、`ftl_revision_history.md v0.66`。
 
 ### ⚠ 上板前置
 
@@ -562,8 +574,10 @@ SRAM 缓存热点 region**。
 ## 十二、待决与风险
 
 1. ~~**写缓冲落盘**：方案 A 的缓冲内容掉电恢复方案待定（进 journal？只做同页合并？）。~~
-   **已绕开（2026-10-13）**：走 **CW 子集直接编程**（不设页缓冲）⇒ 无缓冲内容需要落盘；
-   代价是页内空洞 + 单 plane 子操作浪费另一 plane 同页（`ftl_optimization_plan.md §8.1 P2-6`）。
+   **本方案重做（2026-10-13 v0.66）**：页打包写缓冲（`ftl_wbuf_t`）已落地，**不做数据日志**——
+   缓冲 CW 只在 SRAM，Journal/L2P 只在 flush 编程成功的完成处理里更新（不变量：L2P/journal 只引用
+   **已编程**页）。掉电时这些 host 写**从未收到完成**，丢失即正确契约；重启回放旧映射，被覆盖的旧映射
+   完好。见 `ftl_revision_history.md v0.66`。仍保留 CW 子集直接编程 + 页内空洞（GC/WL 容忍）。
 2. ~~**per-CW 位图 vs L2P cache 大小的取舍**：若要 per-CW 位图，需把 L2P cache 64→32 region 腾 SRAM。~~
    **已切 DRAM-less approach ③（2026-10-13，v0.60）**：**不做**任何常驻位图（per-page 或 per-CW）。
    有效性逐 CW 由「**页内 META（=OOB）取回 LBA → 反查 L2P**」判定；`valid_count` 保留为块级聚合。

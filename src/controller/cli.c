@@ -67,6 +67,7 @@ static int uart_cli_wr(int argc, char *argv[]);
 static int uart_cli_rd(int argc, char *argv[]);
 static int uart_cli_tr(int argc, char *argv[]);
 static int uart_cli_fl(int argc, char *argv[]);
+static int uart_cli_wp(int argc, char *argv[]); /* 页打包写缓冲合并诊断（§七 方案 A） */
 static int uart_cli_info(int argc, char *argv[]);
 #if defined(FC_NAND_TEST_ENABLE)
 static int uart_cli_test(int argc, char *argv[]);
@@ -113,6 +114,17 @@ static uint8_t g_wr_buf[FTL_READ_USER_SIZE * CW_NUM * PLANE_NUM] /* 16KB → SRA
 
 /* n（扇区数）上限：g_wr_buf 容量 ÷ 映射单元字节数 */
 #define UART_CLI_MAX_SECTORS ((uint32_t)(sizeof(g_wr_buf) / FTL_IU_BYTES))
+
+/* ── wp 诊断缓冲（§七 方案 A 合并可观测性）──
+ *
+ * 一个 pair 窗口 = FTL_LBA_PER_PAIR（= 8）个 CW = 8 扇区。wp 一次提交 k 个组、
+ * 每组 n 个扇区（k*n ≤ 8），各组的源数据取自本缓冲的**不相交切片**（组 i 用
+ * 扇区段 [i*n, i*n+n)）。切片内容按组号填不同字节，便于 rd 回读时肉眼分辨
+ * 「哪一段是哪个组写的」——若打包把 CW 错位，回读会看到串段的字节。 */
+static uint8_t g_wp_buf[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 × 512B = 4KB */
+/* 每组一个完成标志/状态（wp 不等待，仅作在飞期间的写回目标，避免悬垂指针）。 */
+static volatile uint8_t      g_wp_done[FTL_LBA_PER_PAIR];
+static volatile ssd_status_t g_wp_status[FTL_LBA_PER_PAIR];
 
 /* wr/rd 两段式：handler 只提交请求到 controller（异步），结果由
  * cli_service_poll 每轮末尾检查 ssd_controller_is_complete 打印（D11
@@ -338,6 +350,106 @@ static int uart_cli_tr(int argc, char *argv[])
     return FUNC_STATUS_SUCCESS;
 }
 
+/*
+ * wp <lba> <n> <k> — 页打包写缓冲合并诊断（§七 方案 A）
+ *
+ * 一次提交 k 个「同一 pair 窗口内、各 n 个连续 LBA」的小写，**直接调 ftl_submit_write
+ * 绕过 g_cli_pending.busy 闸门**——该闸门让连续 `wr` 串行，而串行下 idle flush 立即触发，
+ * 两个连续 wr 永不合并。k 个组同时在飞 ⇒ 窗口填满时由写缓冲合并成 **1 次编程**。
+ *
+ * 约束：lba 必须 8 对齐（= 窗口基址）；n ≥ 1；k ≥ 2；k*n ≤ FTL_LBA_PER_PAIR（= 8）。
+ * 各组源数据取自 g_wp_buf 的不相交切片，组 i 填字节 0xA0+i（错位时回读会串段）。
+ *
+ * 判据：`info` 的 total_writes 相对本次只 +1（对比逐组编程的 +k），ftl_wbuf_flush 打一行；
+ *       随后 `rd <lba> <k*n>` 回读，第 (i*n+j) 段字节应为 0xA0+i。
+ */
+static int uart_cli_wp(int argc, char *argv[])
+{
+    uint64_t       lba;
+    uint64_t       n_parsed;
+    uint64_t       k_parsed;
+    uint32_t       n;
+    uint32_t       k;
+    uint32_t       i;
+    uint32_t       j;
+    ftl_context_t *ftl;
+
+    (void)argc;
+
+    if ((uart_cli_parse_uint(argv[1], &lba) != 0) ||
+        (uart_cli_parse_uint(argv[2], &n_parsed) != 0) ||
+        (uart_cli_parse_uint(argv[3], &k_parsed) != 0) ||
+        (n_parsed == 0U) || (k_parsed < 2U) || (n_parsed > 0xFFFFFFFFU) || (k_parsed > 0xFFFFFFFFU))
+    {
+        (void)uart_log_write("error: invalid lba/n/k (need n>=1, k>=2)\r\n", 41U);
+        return FUNC_STATUS_ERROR;
+    }
+    n = (uint32_t)n_parsed;
+    k = (uint32_t)k_parsed;
+    if ((uint64_t)n * (uint64_t)k > FTL_LBA_PER_PAIR)
+    {
+        (void)uart_log_write("error: n*k must be <= 8 (one pair window)\r\n", 42U);
+        return FUNC_STATUS_ERROR;
+    }
+    if ((lba & (FTL_LBA_PER_PAIR - 1U)) != 0U)
+    {
+        (void)uart_log_write("error: lba must be 8-aligned (pair window base)\r\n", 47U);
+        return FUNC_STATUS_ERROR;
+    }
+    if (!uart_cli_lba_range_ok(lba, n * k))
+    {
+        (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    /* 诊断固定打实例 [0][0][0]——与 rd/wr 经 controller 路由到的实例一致（CH=CE=LUN=1）。 */
+    ftl = g_ctrl.ftl[0][0][0];
+    if (ftl == NULL)
+    {
+        (void)uart_log_write("error: ftl instance not ready\r\n", 31U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    /* 组 i 的 n 个扇区填字节 0xA0+i（各切片不相交） */
+    for (i = 0U; i < k; i++)
+    {
+        uint8_t *slice = &g_wp_buf[(i * n) * FTL_IU_BYTES];
+
+        for (j = 0U; j < (n * FTL_IU_BYTES); j++)
+        {
+            slice[j] = (uint8_t)(0xA0U + i);
+        }
+        g_wp_done[i]   = 0U;
+        g_wp_status[i] = SSD_STATUS_OK;
+    }
+
+    /* 逐组提交（不查 busy）：k 个组同时在飞 ⇒ 窗口填满时合并成 1 次编程。
+     * 各组 complete_flag/status_out 指向静态数组，完成前始终有效。 */
+    for (i = 0U; i < k; i++)
+    {
+        ftl_io_request_t req;
+
+        memset(&req, 0, sizeof(req));
+        req.lba           = lba + ((uint64_t)i * (uint64_t)n);
+        req.buffer        = &g_wp_buf[(i * n) * FTL_IU_BYTES];
+        req.count         = n;
+        req.complete_flag = &g_wp_done[i];
+        req.status_out    = &g_wp_status[i];
+
+        if (ftl_submit_write(ftl, &req) != FTL_OK)
+        {
+            (void)LOGE("wp: group %lu submit failed\r\n", (unsigned long)i);
+            return FUNC_STATUS_ERROR;
+        }
+    }
+
+    (void)LOGI("wp submit ok lba=%lu n=%lu k=%lu (expect 1 program on flush)\r\n",
+               (unsigned long)lba,
+               (unsigned long)n,
+               (unsigned long)k);
+    return FUNC_STATUS_SUCCESS;
+}
+
 static int uart_cli_fl(int argc, char *argv[])
 {
     (void)argc;
@@ -463,6 +575,10 @@ static int uart_cli_bbt(int argc, char *argv[])
                 if (do_erase != 0U)
                 {
                     ftl->bg_suspend = 1U;
+                    /* 页打包写缓冲里可能还攒着未编程的 CW——它们若在擦净后被 flush，
+                     * 会把数据编到刚擦空的芯片上（介质状态与 RAM 描述不再一致）。
+                     * 一并复位（含 open/occupied/owners/base），后续只等复位。 */
+                    memset(&ftl->wbuf, 0, sizeof(ftl->wbuf));
                 }
                 bbt_print_bad_map(&ftl->alloc, do_erase);
             }
@@ -573,6 +689,7 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
     {     "rd",                                                                                               "rd <lba> <n> [c]",                            "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
     {     "tr",                                                                                                       "tr <lba>",                                                 "trim one lba", 2U,  2U,      uart_cli_tr},
     {     "fl",                                                                                                             "fl",                            "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
+    {     "wp",                                                                                               "wp <lba> <n> <k>",        "submit k writes in one pair window (pack-buffer diag)", 4U,  4U,      uart_cli_wp},
     {   "info",                                                                                                           "info",                             "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
     {    "bbt",                                                                                                  "bbt [--erase]", "print factory bad block map (--erase: also erase each block)", 1U,  2U,     uart_cli_bbt},
 #if defined(FC_NAND_TEST_ENABLE)

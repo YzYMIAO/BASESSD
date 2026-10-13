@@ -17,10 +17,9 @@
  *   避免 plane1 与 plane0 的 block 号碰撞（历史 bug）。
  *
  * 存储位置：
- *   数组由调用者（host 层）通过 ftl_init_params_t.blocks 提供，
- *   与 free_blocks / closed_sb_list 的「调用者提供大数组」契约一致。
- *   多 LUN 前置：每 LUN 一份表 = host 声明 g_blocks[LUN_NUM]，
- *   params 按 LUN 传入，本表代码零改动。
+ *   表**自持**（P2-5）：数组在 `ftl_context_t.tables.blocks` 内（见 ftl_tables_t），
+ *   与 free_blocks / op_blocks / spare_blocks / closed_sb_list 同处一份。
+ *   多 LUN 前置：每实例一份表 = 每实例一个 ftl_context_t，本表代码零改动。
  *
  * 有效位（DRAM-less approach ③，2026-10-13 定）：
  *   本仓**不**维护任何常驻有效位图。有效性 = 逐 CW 读**页内 META**（即本仓的「OOB」

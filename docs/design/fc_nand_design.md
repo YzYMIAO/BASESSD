@@ -4062,7 +4062,7 @@ main() (src/main.c)          fc_init()                  nand_init()             
   │                              Step7 Mode 4（CONFIG_NAND_TIMING_MODE_4=0 → 整段编掉）
   │
   ├─ else nand_dispatch_set_armed(1)        ★放行 submit/submit_chain
-  ├─ stm32_platform_register()               （注册 time_us，FTL 的 T3 定时器依赖）
+  ├─ stm32_platform_register()               （注册 time_us，FTL 的 Checkpoint 定时触发依赖）
   └─ ssd_ftl_boot_all() ───────────────────────────────────────────────────▶ (main.c)
                                 ① 逐实例 ssd_ftl_boot → ftl_init / boot_recovery
                                 ② 建 g_ftl_ptrs 三维指针表
@@ -4119,7 +4119,7 @@ nand_init()
 | 4 | `nand_init` Step1–4 | FMC 引脚/时钟、per-LUN 后端、DMA 就绪；此时 `g_nand_dispatch_armed` 仍为 0 |
 | 5 | `nand_init` Step5–6 | NAND 已复位、ID 已核对，芯片可用；但启动命令是绕过队列直接跑的 |
 | 6 | `nand_dispatch_set_armed(1)` | `nand_dispatch_submit`/`submit_chain` 放行——从现在起 FC 才能向 NAND 派发命令 |
-| 7 | `stm32_platform_register` | FTL 的 `time_us` 就绪，T3 定时触发（CP / GC）才有依据 |
+| 7 | `stm32_platform_register` | FTL 的 `time_us` 就绪，Checkpoint 的 T3 定时触发才有依据（GC 侧定时触发已于 v0.63 删除） |
 | 8 | `ssd_ftl_boot_all` ①–④ | 每个 (ch,ce,lun) 完成 `ftl_init` + `boot_recovery`；controller 绑定 FTL 实例 |
 | 9 | `ssd_ftl_boot_all` ⑤ `g_ftl_ready=1` | 主循环切换到 `ftl_service()`，系统进入可服务状态 |
 
@@ -4356,7 +4356,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 
    **FC 层不用 `ASSUME`。** 起初按"守卫带恢复分支 → `ASSUME`"划分，后来取消：恢复分支既然已经手工删掉，`ASSUME` 的 `__builtin_unreachable()` 就换不来额外代码生成收益（工程未开 LTO，`fc_command_id_to_command()` 这类跨 TU 调用点无从利用该假设）；而它会把"违反即 UB"引入一条本来只会 HardFault 的路径——同样是崩，`ASSERT` 的现场更可定位。`ASSUME` 宏保留在 `assertion.h` 里，留给将来确有热路径需要向编译器证明的场合。
 3. **资源类结果与运行时状态保留返回码**——池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、CQ 满背压（`FC_STATUS_IO_ERROR`）、NAND 报告的错误（`FC_STATUS_IO_ERROR`）、`ctx->active == 0U` / `fc_buffer_is_occupied(...) == 0U` 这类"此刻能不能做"的状态，都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。（`g_crc_ready == 0U` 曾在此列，**v33 起随 CRC 改走 HAL 驱动整体删除**——CRC 自检失败转 `ASSERT`，见 `docs/changelog/fc_crc_hal_driver_v33.md`。）
-4. **单测固化为契约的守卫保留返回码**——判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**：`fc_command_validate`（校验器，返回判决是职责）、`test_rebuild.c` 的 `allocator_remove_from_free(..., 越界)`（文档化 no-op）等保留。（原条目还列了 `fc_scheduler_set_busy/clear_busy` 的越界忽略——**v8 起该 API 与 busy 表已整体删除**，见 §23.9。）反之，**只有测试会走"传非法参数"分支**的（`fc_command_status_set_cw` 的 `cw >= 4`（该函数 2026-10-08 因零生产调用者整体删除）、`fc_scheduler_init(NULL,…)`、`fc_submit(NULL)`、`fc_data_path_encode(NULL)` 等），按判据 2 转 `ASSERT` 并**删掉对应用例**。
+4. **单测固化为契约的守卫保留返回码**——判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**：`fc_command_validate`（校验器，返回判决是职责）、FTL 套件的 `allocator_remove_from_free(..., 越界)`（文档化 no-op，见 `ftl_ut_munit.md §4.1`）等保留。（原条目还列了 `fc_scheduler_set_busy/clear_busy` 的越界忽略——**v8 起该 API 与 busy 表已整体删除**，见 §23.9。）反之，**只有测试会走"传非法参数"分支**的（`fc_command_status_set_cw` 的 `cw >= 4`（该函数 2026-10-08 因零生产调用者整体删除）、`fc_scheduler_init(NULL,…)`、`fc_submit(NULL)`、`fc_data_path_encode(NULL)` 等），按判据 2 转 `ASSERT` 并**删掉对应用例**。
 
 **判据 4 的边界：什么时候可以删用例而不是保留守卫。** 反例是 `fc_queue.c` 的指针判空：`fc_submission_queue_*` / `fc_completion_queue_*` 的生产调用者只有 `fc.c` 与 `fc_scheduler.c`，**全部传有效指针**——唯一会传 `NULL` 的就是测试自己。这种"只有测试会走的分支"应当按判据 2 转 `ASSERT`，并**删掉对应用例**（它们验证的行为届时已不存在，留着反而是错的）。两轮补扫共删除 `test_fc_level1.c` 的 13 个 `*_null`/越界用例与 `test_fc_level2.c` 的 3 个。
 
@@ -4833,8 +4833,8 @@ plane 与 CW 号都从这一个 `n` 算出，不再有"槽位 → (plane, ordina
 | # | 风险 | 说明 |
 |---|------|------|
 | 1 | **热路径改变（最高）** | 严格统一后，每次整页读多一轮 `70h + 05h-列-E0h + WAIT_READY`（原来 CW0 靠 `00h` 的 DATA_OUT 一次拿到）；多 plane 整页读从 1 条原子事务变成 1 次加载 + `2 × cw_count` 条事务。**必须重新上板验证**。若不可接受，退回方案是「含 CW0 时把 CW0 融进加载」——局部改动 |
-| 2 | **`06h` 的 plane 语义** | 已按 Micron「4Gb, 8Gb, and 16Gb x8 NAND Flash Memory」（MT29FxG08xAA, Rev B）**逐字打开核对**（Table 7 Two-Plane Command Set / Table 6 注 / §Two-Plane Addressing）：`06h` 5 地址周期（2 列 + 3 行）✓、plane 由行地址 **BA6** 选择（"The least significant block address bit, BA6, must be different for the two addresses"）✓、`06h` 必须跟在 TWO-PLANE PAGE READ 后（Table 6 注 2："limited to use with the TWO-PLANE PAGE READ command"）✓。⚠ 第 4 项「two-plane 命令族要求 on-die ECC 关闭（**Note 4**）」**未在本 datasheet 对上**——该 PDF 里 Table 6/7 的 Note 4 是"valid during busy … interleaved die operations"，全文 `on-die` 出现 **0 次**；该条出处待重核（疑在 ABADA 专用 datasheet）。**上板未验，on-board 行为仍是最终判据** |
-| 8 | **`multi-plane` 不是 ONFI 1.0 的东西**（2026-10-09 查证） | **ONFI 1.0（Rev 1.0, 2006-12-28）根本没有 multi-plane**：Table 14 命令集里 cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，**全文 `plane` 一词出现 0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。multi-plane 全部来自器件侧（Micron datasheet 的 Table 7 Two-Plane Command Set）。⚠ 因此本文件里凡以「ONFI」泛称 multi-plane 的地方都要写成「器件 / Micron datasheet」，别让读者以为 1.0 里有。**未落地缺口**：本器件有 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`，本项目 op 表**没有**这个 op（cache 编程只有单 plane 的 `OP_PROGRAM_PAGE_CACHE`）；器件**没有** two-plane cache 读 |
+| 2 | **`06h` 的 plane 语义** | 已按 Micron「4Gb, 8Gb, and 16Gb x8 NAND Flash Memory」（**本器件 `MT29F4G08ABADAWP`**，`reference/…/FLASH/MICRON/MT29F4G08ABADAWP.pdf`）**逐字打开核对**（Table 7 Two-Plane Command Set / Table 6 注 / §Two-Plane Addressing）：`06h` 5 地址周期（2 列 + 3 行）✓、plane 由行地址 **BA6** 选择（"The least significant block address bit, BA6, must be different for the two addresses"）✓、`06h` 必须跟在 TWO-PLANE PAGE READ 后（Table 6 注 2："limited to use with the TWO-PLANE PAGE READ command"）✓。⚠ 第 4 项「two-plane 命令族要求 on-die ECC 关闭（**Note 4**）」**未在本 datasheet 对上**——该 PDF 里 Table 6/7 的 Note 4 是"valid during busy … interleaved die operations"，全文 `on-die` 出现 **0 次**；该条出处待重核（疑在 ABADA 专用 datasheet）。**上板未验，on-board 行为仍是最终判据** |
+| 8 | **`multi-plane` 不是 ONFI 1.0 的东西**（2026-10-09 查证） | **ONFI 1.0（Rev 1.0, 2006-12-28）根本没有 multi-plane**：Table 14 命令集里 cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，**全文 `plane` 一词出现 0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。multi-plane 全部来自器件侧（Micron datasheet 的 Table 7 Two-Plane Command Set）。⚠ 因此本文件里凡以「ONFI」泛称 multi-plane 的地方都要写成「器件 / Micron datasheet」，别让读者以为 1.0 里有。**ONFI 版本时间线（2026-10-13 对 ONFI 全集二分查证）**：1.0 / 2.0 / 2.1 / 2.2 全文 `plane` **0 次**；`plane` 首现 **2.3a**；**multi-plane 首成标准 = ONFI 3.2**（§3.1.1 / §6.3 / §6.5 / §6.6）。3.2 §3.1.1 明确要求两 plane **同页地址**（"The page address shall be the same as any other multi-plane operations in the multi-plane command sequence"），§3.1.1.1 则允许块地址位全不同（"No restriction: All block address bits may be different"）——这正是 P2-6（per-plane 独立写指针）**不可实现**的标准级依据（见 `ftl_optimization_plan.md §8.1 P2-6`、`ftl_revision_history.md v0.66`）。**未落地缺口**：本器件有 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`，本项目 op 表**没有**这个 op（cache 编程只有单 plane 的 `OP_PROGRAM_PAGE_CACHE`）；器件**没有** two-plane cache 读 |
 | 3 | **producer/consumer 索引不一致** | v6 把链槽位与 CW 号解耦后，消费点必须一次改齐；**v9 起两套坐标合一，本条风险随之消失**（见 §25.3 历史注 / §25.11） |
 | 4 | **`LUN_NUM>1` 的 ISSUE/WAIT 拆分** | 转换后的两个加载 op 不再命中 Phase V splittable 拆分，多 LUN 重叠会失效。当前 `LUN_NUM=1` 本就不生效；启用多 LUN 前需重新对齐 |
 | 5 | **`bitmap == 0` 的展开规则（v7 起为最高，v23 重定义，v27 取消重载）** | v7~v22：必须逐 plane 平移，照抄单 plane 的 `(1 << (config.cw+1)) - 1` 只会点亮 plane 0 → 所有 FTL 多 plane 命令当场退化。v23~v26：「0 = 本命令 plane 段内的全部 CW」，与 `config.cw` 解耦，该陷阱消失但引入"两层 0 方向相反"。**v27 起 0 = 空集**（字面位图），整段访问由 `fc_command_plane_span_cw_bitmap()` 显式给出；新风险是「忘填 ⇒ release 下静默空操作」（见 §25.4 v27） |

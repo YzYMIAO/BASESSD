@@ -11,9 +11,9 @@
  * FTL 公共请求/参数类型（Step 1~3）
  *
  * 聚合对外接口的高频参数，减少形参数（ftl_submit_read/write 8→2 已落地；
- * ftl_init 7→2 / allocator_init 8→2 由 ftl_init_params_t 落地，定义于
- * include/ftl/allocator.h —— 因其依赖 super_block_t（allocator.h 定义），
- * 放此处会与 allocator.h 形成循环 include）：
+ * ftl_init 7→2 / allocator_init 8→2 曾由 ftl_init_params_t 落地，P2-5 后该结构体
+ * 已删除——大数组改由 ftl_context_t **自持**（`ftl->tables`，定义于
+ * include/ftl/allocator.h —— 因其依赖 super_block_t，放此处会形成循环 include）：
  *   pending_cb_t      — pending 完成回调（Step 3 从 pending.h 迁入，打破循环 include）
  *   ftl_io_request_t  — 一次读写请求的完整描述（含通知/回调字段，Step 3 嵌入 pending）
  *

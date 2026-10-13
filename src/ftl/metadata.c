@@ -530,6 +530,10 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
     dir->cur_metadata_plane  = 0U;
     dir->anchor_write_idx    = 0U;
     dir->anchor_cursor_valid = 0U;
+
+    /* 压缩标志归零：init 不清 ⇒ 冷启动后若残留 1，append_slot 的换块分支会一直
+     * 失败让路（以为压缩进行中）⇒ L2P 永远写不出第二块。 */
+    dir->compacting = 0U;
 }
 
 /* metadata_dir_lookup — 线性查 (type,id) 的登记位置；未找到返回 NAND_PBA_INVALID */
@@ -683,6 +687,152 @@ ftl_status_t metadata_dir_reclaim(metadata_dir_cache_t *dir, ftl_allocator_t *al
 }
 
 /* --------------------------------------------------------------------
+ * metadata_dir_compact_victim
+ *   功能：选压缩 victim —— 活 region 数**最少**（但 > 0）的非当前日志块。
+ *   参数：dir —— Directory；alloc —— 分配器（读 BST 判 RESERVED 身份）。
+ *   返回：victim 的 gblock；无候选返回 UINT16_MAX。
+ *   实现要点：零活块**不在此列**——它们由 metadata_dir_reclaim 直接擦除归还，
+ *             无需搬移。平手取块号最小者：结果确定（跨复位可复现），且先分配的
+ *             块通常收的是更早、更可能变冷的数据。
+ * -------------------------------------------------------------------- */
+static uint16_t metadata_dir_compact_victim(metadata_dir_cache_t *dir,
+                                            ftl_allocator_t      *alloc)
+{
+    uint16_t best      = UINT16_MAX;
+    uint16_t best_live = UINT16_MAX;
+    uint16_t g;
+
+    if ((dir == NULL) || (alloc == NULL) || (alloc->blocks == NULL))
+    {
+        return UINT16_MAX;
+    }
+
+    for (g = 0U; g < FTL_BLOCK_TOTAL; g++)
+    {
+        const uint16_t live = dir->l2p_live[g];
+
+        if (live == 0U)
+        {
+            continue; /* 零活块：reclaim 的活，直接擦，不必搬 */
+        }
+        if ((dir->cur_block_valid != 0U) && (g == dir->cur_metadata_block))
+        {
+            continue; /* 当前写块正在被追加，不搬 */
+        }
+        if (ftl_block_state_is(&alloc->blocks[g], FTL_BLOCK_STATE_RESERVED) == 0)
+        {
+            continue; /* 只认本池独占的日志块（与 reclaim_block 同一判据）*/
+        }
+        if (live < best_live)
+        {
+            best_live = live;
+            best      = g;
+        }
+    }
+
+    return best;
+}
+
+/* --------------------------------------------------------------------
+ * metadata_dir_compact
+ *   功能：搬空一个「多活」日志块后擦除归还（抗碎片，P0-3）。
+ *   参数：dir —— Directory；alloc —— 分配器。
+ *   返回：FTL_OK = 确实压缩并归还一块；FTL_ERROR = 未做（无候选 / 空槽不够 /
+ *         读失败 / 写失败 / Anchor 落盘失败）。
+ *   实现要点：见 metadata.h 的同名注释。此处补充三点：
+ *             ① victim 的活 region 数 == 遍历中命中 victim 的 region 数（l2p_live
+ *                的定义就是"最新位置落在该块的 region 数"）⇒ 空槽预算一次核得准；
+ *             ② 中途失败**不回滚**：已登记的 region 已指向新页，未搬的仍指向 victim
+ *                （victim 不擦）⇒ 两边都有效，下次重来即可；
+ *             ③ 搬移走的是**裸页拷贝**（region 页无头，就是 L2P_REGION_SIZE 字节的
+ *                entries 数组，与 l2p_cache 的读写口径逐字节一致）——不经过 l2p_cache，
+ *                故不触发"写→evict→flush→又要块"的递归。
+ * -------------------------------------------------------------------- */
+ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
+{
+    uint16_t     victim;
+    uint16_t     region_id;
+    ftl_status_t st = FTL_OK;
+
+    if ((dir == NULL) || (alloc == NULL))
+    {
+        return FTL_ERROR;
+    }
+
+    if ((dir->compacting != 0U) || (dir->cur_block_valid == 0U))
+    {
+        return FTL_ERROR; /* 防重入 / 无当前写块（无处可搬）*/
+    }
+
+    victim = metadata_dir_compact_victim(dir, alloc);
+    if (victim == UINT16_MAX)
+    {
+        return FTL_ERROR; /* 无候选：全池零活（reclaim 已管）或只剩当前块 */
+    }
+
+    /* 空槽预算：victim 的全部活 region 必须一次装进当前块（见实现要点 ①）*/
+    if (dir->l2p_live[victim] > (uint16_t)(PAGES_PER_BLOCK - dir->cur_metadata_page))
+    {
+        return FTL_ERROR; /* 当前块装不下 ⇒ 不冒险，留到换块后再来 */
+    }
+
+    dir->compacting = 1U;
+
+    for (region_id = 0U; region_id < METADATA_DIR_ENTRIES; region_id++)
+    {
+        nand_paa_t  old;
+        nand_paa_t  slot;
+        nand_addr_t src;
+        uint8_t     buf[L2P_REGION_SIZE]; /* 2KB 栈缓冲：region 页就是裸 entries 数组 */
+
+        old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, region_id);
+        if (old == NAND_PBA_INVALID)
+        {
+            continue;
+        }
+        if (ftl_gblock((uint8_t)paa_to_plane(old), (uint16_t)paa_to_block(old)) != victim)
+        {
+            continue; /* 该 region 的最新位置不在 victim 上 */
+        }
+
+        src = addr_from_paa(dir->topo.ch, dir->topo.ce, old);
+        if (ftl_sync_read_page(src, buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
+        {
+            st = FTL_ERROR; /* 读不回：该 region 仍指向 victim 旧页，victim 不擦 ⇒ 无损失 */
+            break;
+        }
+
+        slot = metadata_dir_append_slot(dir, alloc);
+        if (slot == NAND_PBA_INVALID)
+        {
+            st = FTL_ERROR;
+            break;
+        }
+
+        if (ftl_sync_write_page(addr_from_paa(dir->topo.ch, dir->topo.ce, slot), buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
+        {
+            st = FTL_ERROR; /* 槽已消耗（可能半编程），不登记 ⇒ region 仍指向 victim */
+            break;
+        }
+
+        metadata_dir_commit_region(dir, alloc, region_id, slot);
+    }
+
+    if ((st == FTL_OK) && (dir->l2p_live[victim] == 0U))
+    {
+        /* ③ Directory 的新位置**先落盘**，④ 才擦 victim（顺序不可倒，见 metadata.h）*/
+        st = metadata_dir_flush_to_anchor(dir);
+        if (st == FTL_OK)
+        {
+            (void)metadata_dir_reclaim_block(dir, alloc, victim); /* ④ 擦 + ⑤ 归还 */
+        }
+    }
+
+    dir->compacting = 0U;
+    return st;
+}
+
+/* --------------------------------------------------------------------
  * metadata_dir_append_slot
  *   功能：返回 L2P 日志块的"下一个空槽"物理位置，并推进写指针。
  *   参数：dir —— Directory；alloc —— 分配器（取新块）。
@@ -690,6 +840,8 @@ ftl_status_t metadata_dir_reclaim(metadata_dir_cache_t *dir, ftl_allocator_t *al
  *   实现要点：当前块无效或写满 ⇒ 先回收无活 region 的日志块，再取新块（plane 轮转，
  *             本 plane 空则换另一 plane；**两 plane 都空绝不回退固定位置**）；
  *             取到位置后**立即推进** cur_metadata_page（写失败页可能半编程不可复用）。
+ *             ⚠ 换块后若 Free Pool 吃紧，顺带做一次抗碎片压缩（P0-3，见 metadata_dir_compact）
+ *             ——新块整块空槽，是唯一能一次搬空任意 victim 的时机。
  * -------------------------------------------------------------------- */
 nand_paa_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 {
@@ -705,6 +857,15 @@ nand_paa_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
     if ((dir->cur_block_valid == 0U) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
     {
         uint16_t gblock;
+
+        /* 压缩进行中**不得换块**：搬移的 region 都往当前块写，此时换块说明空槽预算
+         * 算错了；更要紧的是本分支会调 reclaim，而 victim 的活计数可能刚好归零
+         * ⇒ 会在 Anchor 落盘之前把 victim 擦掉（见 metadata_dir_compact 的 ③④）。
+         * 直接失败让路：压缩方收到 NAND_PBA_INVALID 即中止，victim 不擦，无损失。*/
+        if (dir->compacting != 0U)
+        {
+            return NAND_PBA_INVALID;
+        }
 
         /* 先回收无活 region 的日志块（否则稳态每填满一块就永久占一块），再取新块 */
         (void)metadata_dir_reclaim(dir, alloc);
@@ -729,6 +890,17 @@ nand_paa_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
         dir->cur_metadata_page  = 0U;
         dir->cur_block_valid    = 1U;
         dir->cur_metadata_plane = (uint8_t)((plane + 1U) % PLANE_NUM);
+
+        /* 抗碎片（P0-3）：刚换到新日志块 ⇒ 块内有整 PAGES_PER_BLOCK 个空槽，正好
+         * 够搬空任意一个 victim（一块最多 PAGES_PER_BLOCK 个 region）。零活块已由上面
+         * 的 reclaim 直接擦除归还，这里只管"多活"块。
+         * ⚠ 只在 Free Pool 吃紧时做（FREE_POOL_TARGET 是 GC 的水位①）——稳态下每
+         *   PAGES_PER_BLOCK 次 region 写最多压缩一块，既不抖也不制造写放大；
+         *   池子宽裕时压缩纯属白写 NAND。 */
+        if (alloc->free_count <= FREE_POOL_TARGET)
+        {
+            (void)metadata_dir_compact(dir, alloc);
+        }
     }
 
     plane = (uint8_t)(dir->cur_metadata_block / BLOCKS_PER_PLANE);
@@ -790,8 +962,10 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
     dir->have_dynamic = 1U;
 
     /* 旧块活计数归零且非当前块 ⇒ 立即回收，把「已无引用却仍带旧内容」的窗口压到最短
-     * （否则要等下一次 append_slot 换块时才回收，期间掉电会让该块被当空白块复用）。*/
-    if ((old_g != UINT16_MAX) && (dir->l2p_live[old_g] == 0U) &&
+     * （否则要等下一次 append_slot 换块时才回收，期间掉电会让该块被当空白块复用）。
+     * ⚠ 压缩期间**抑制**本回收：搬移 victim 的最后一个 region 时它会归零，此时 Anchor
+     *   还没指向新位置 ⇒ 擦了就会掉电丢映射（见 metadata_dir_compact 的 ③④）。*/
+    if ((old_g != UINT16_MAX) && (dir->l2p_live[old_g] == 0U) && (dir->compacting == 0U) &&
         ((dir->cur_block_valid == 0U) || (old_g != dir->cur_metadata_block)))
     {
         (void)metadata_dir_reclaim_block(dir, alloc, old_g);
@@ -1032,6 +1206,7 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
     dir->cur_metadata_page  = 0U;
     dir->cur_block_valid    = 0U;
     dir->cur_metadata_plane = 0U;
+    dir->compacting         = 0U; /* 压缩不跨重启（同游标：RAM 态，冷启动恒 0）*/
 
     metadata_dir_boot_log(dir);
 

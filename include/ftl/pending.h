@@ -51,13 +51,18 @@ typedef struct
 {
     uint16_t used;       /* 1: 槽位占用 */
     uint16_t command_id; /* FC command_id */
-    uint16_t group;      /* ★ 所属完成组 ftl->groups[] 下标 */
-    uint8_t  op;         /* ftl_pending_op_t：完成路径判别（读/写），见文件头 ⚠ */
-    uint8_t  n_cw;       /* ★ 本子操作搬运的 **CW 数**（= 字节数 ÷ FTL_IU_BYTES）；CW 级 1 LBA = 1 CW */
-    lba_t    lba;        /* 子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B） */
-    void    *buffer;     /* 子操作缓冲（= 组基缓冲 + LBA 偏移 × FTL_IU_BYTES） */
+    uint32_t owners;     /* ★ 贡献本子操作的**组位掩码**（bit gi）。读恒单组（1<<gi）；
+                          *   写页打包下一页可能由多个组拼成 ⇒ 完成时逐组递减（见
+                          *   pending_group_complete_subop_multi）。替代原 uint16_t group。 */
+    uint8_t op;          /* ftl_pending_op_t：完成路径判别（读/写），见文件头 ⚠ */
+    uint8_t n_cw;        /* ★ 本子操作搬运的 **CW 数**（写 = popcount(cw_bitmap)；读 = 写回长度/512） */
+    uint8_t cw_bitmap;   /* ★ 写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读：0 */
+    lba_t   lba;         /* 子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B）。
+                          * ⚠ 写页打包：lba = **窗口基址**，逐 CW 的 LBA = lba + bit（bit 同 cw_bitmap） */
+    void *buffer;        /* 子操作缓冲（读=写回处，= 组基缓冲 + LBA 偏移 × FTL_IU_BYTES；
+                          *   写页打包后恒 NULL——数据在 ftl->wbuf.data，完成时不读它） */
     /* ↓↓↓ 写完成确认/回滚（写专用，读请求时无效） ↓↓↓ */
-    nand_pba_t new_pba;  /* 新分配的 **plane0 页** PBA（本子操作未覆盖 plane0 ⇒ NAND_PBA_INVALID） */
+    nand_pba_t new_pba;  /* 新分配的 **plane0 页** PBA（本页未覆盖 plane0 ⇒ NAND_PBA_INVALID） */
     nand_pba_t new_pba1; /* 新分配的 **plane1 页** PBA（未覆盖 plane1 ⇒ NAND_PBA_INVALID） */
     /* ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P 得到"此刻被替换的映射"。这比提交时快照
      *   更正确——同一 LBA 的两次写在飞时，先完成的先改 L2P，后完成的重查即得前者，
@@ -114,17 +119,19 @@ void pending_init(ftl_context_t *ftl);
  *
  * @param ftl                FTL 上下文
  * @param cmd_id             FC command_id
- * @param group              所属完成组下标（ftl->groups[]）
- * @param lba                子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B）
- * @param buffer             子操作缓冲（读=写回处；写=数据源）
- * @param n_cw               本子操作搬运的 CW 数（读=写回长度/512；写=写入长度/512）
+ * @param owners             贡献本子操作的组位掩码（读=1<<gi；写页打包=wbuf.owners）
+ * @param lba                子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B）；
+ *                           写页打包时传**窗口基址**（逐 CW 的 LBA = lba + bit）
+ * @param buffer             子操作缓冲（读=写回处；写页打包传 NULL）
+ * @param n_cw               本子操作搬运的 CW 数（读=写回长度/512；写=popcount(cw_bitmap)）
  * @param new_pba            写：新分配的 plane0 页 PBA（未覆盖 plane0 传 NAND_PBA_INVALID）
  * @param new_pba1           写：新分配的 plane1 页 PBA（未覆盖 plane1 传 NAND_PBA_INVALID）
  * @param cache_intermediate Cache Program 中间页标志（1=中间页跳过 L2P/Journal 更新）
  * @param op                 操作类型（PENDING_OP_READ / PENDING_OP_WRITE）——完成路径判别依据
+ * @param cw_bitmap          写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读传 0
  * @return FTL_OK 成功，FTL_ERROR 表满
  */
-int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint16_t group, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op);
+int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint32_t owners, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op, uint8_t cw_bitmap);
 
 /*
  * pending_lookup - 按 command_id 查找本实例 pending 项
@@ -194,6 +201,19 @@ uint16_t pending_group_count(const ftl_context_t *ftl);
  * @param sub_status 本子操作的完成状态（SSD_STATUS_OK / IO_ERROR）
  */
 void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t sub_status);
+
+/*
+ * pending_group_complete_subop_multi - 一个子操作完成、归属**多个组**：逐组聚合
+ *
+ * 页打包写缓冲下一页可能由多个组拼成（一页 = 一次 FC 命令 = 一个 pending 槽），
+ * 完成时须对**每个**贡献组各递减一次在飞数（每个组对该窗口至多贡献一次 append ⇒
+ * 递增/递减数恒等）。读路径传单组位图（1<<gi），与 pending_group_complete_subop 等价。
+ *
+ * @param ftl        FTL 上下文
+ * @param owners     贡献组位掩码（bit gi）
+ * @param sub_status 本子操作的完成状态（SSD_STATUS_OK / IO_ERROR）
+ */
+void pending_group_complete_subop_multi(ftl_context_t *ftl, uint32_t owners, ssd_status_t sub_status);
 
 /*
  * pending_group_maybe_complete - 若组已全部下发且全部完成则发通知并释放槽

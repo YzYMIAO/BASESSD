@@ -66,7 +66,7 @@ typedef struct
  * @param ftl  FTL 上下文
  * @return 1 = 需要格式化；0 = 介质已是当前布局版本
  */
-int ftl_media_needs_format(const struct ftl_context *ftl);
+int ftl_media_needs_format(struct ftl_context *ftl);
 
 /*
  * ftl_media_format - 全量格式化（擦本实例全部块 + 复位易失元数据状态）
@@ -102,30 +102,37 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
 /*
  * ftl_boot_fresh_start - 出厂首次启动
  *
- * 无 Checkpoint、无 Journal，全初始化：
+ * 无 Checkpoint，映射全丢，全初始化：
  *   ① L2P Cache 全 INVALID
- *   ② Allocator 初始化
- *   ③ Journal 初始化（空）
- *   ④ Metadata Directory 初始化（固定映射）
+ *   ② F2 全盘重建 closed SB 列表
+ *   ③ Allocator 初始化
+ *   ④ Journal RAM 写态恢复（journal_resume，序号下限 1）
+ *   ⑤ Metadata Directory 初始化（固定映射）
  *
- * @param ftl  FTL 上下文
+ * @param ftl   FTL 上下文
+ * @param ring  Journal 环形块池快照（journal_scan_latest 的结果）
  * @return FTL_OK 成功，FTL_ERROR 失败
  */
-ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl);
+ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_page_ref_t *ring);
 
 /*
  * ftl_boot_clean_start - 干净关机启动
  *
- * Journal ≥ Checkpoint，无需回放：
+ * Journal 已全在 Checkpoint 里（journal_seq ≤ cp.journal_sequence），无需回放：
  *   ① Cache 全 INVALID（首次 miss 时按需加载）
- *   ② Allocator 重建 closed SB 列表
- *   ③ 写指针恢复（内存值）
+ *   ② Journal RAM 写态恢复（**关键**：环形块并没被擦，必须按 NAND 实际内容把
+ *      写指针/序号接回 cp_journal_sequence，见 journal_resume）
+ *   ③ F2 全盘重建 closed SB 列表
+ *   ④ 写指针恢复（内存值）
  *
  * @param ftl  FTL 上下文
- * @param cp_sequence  Checkpoint sequence
+ * @param cp_journal_sequence  Checkpoint 的 Journal 截断水位（= 下一个待分配序号）
+ * @param ring  Journal 环形块池快照（journal_scan_latest 的结果）
  * @return FTL_OK 成功，FTL_ERROR 失败
  */
-ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence);
+ftl_status_t ftl_boot_clean_start(struct ftl_context       *ftl,
+                                  uint32_t                  cp_journal_sequence,
+                                  const journal_page_ref_t *ring);
 
 /*
  * ftl_boot_power_failure - 异常掉电恢复
@@ -145,22 +152,6 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context *ftl, uint32_t cp_sequence)
 ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
                                     const l2p_checkpoint_header_t *cp,
                                     ftl_boot_result_t             *result);
-
-/*
- * ftl_boot_scan_write_pointer - 写指针扫描恢复
- *
- * 异常掉电时 Open Super Block 写到第 N 页时掉电，
- * 不知道当前写指针位置。扫描 NAND 找第一个全 0xFF 页。
- *
- * @param alloc  Allocator 上下文
- * @param ch     CH
- * @param ce     CE
- * @param sb     Open Super Block 指针
- */
-void ftl_boot_scan_write_pointer(ftl_allocator_t *alloc,
-                                 uint8_t          ch,
-                                 uint8_t          ce,
-                                 super_block_t   *sb);
 
 /*
  * ftl_rebuild_closed_sb_list - 掉电重启后全 NAND 扫描重建 Closed SB 列表（F2）

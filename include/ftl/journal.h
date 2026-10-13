@@ -79,6 +79,46 @@ typedef struct
     uint8_t emergency;
 } l2p_journal_t;
 
+/* Journal 环形页引用：位置 + 页序号 + 条目数（journal_scan_latest 出参） */
+typedef struct
+{
+    uint32_t page_seq;    /* 页头记录的**首条**条目序号 */
+    uint8_t  block;       /* 环形块号（0..JOURNAL_BLOCK_COUNT-1） */
+    uint8_t  page;        /* 块内页号 */
+    uint8_t  entry_count; /* 本页条目数 */
+} journal_page_ref_t;
+
+/*
+ * journal_scan_latest - 只读扫环，取**最新页**（最大 page_seq）。
+ *
+ * 用途：① 启动判型（干净关机 / 掉电）；② 干净关机的写指针恢复。**不改 journal 状态**
+ * （旧实现由 ftl_boot_recovery 内联扫一遍，本函数把它收到 Journal 层与回放共用一份）。
+ *
+ * @param journal Journal；out 出参（环空时全置 0，可为 NULL）
+ * @return 1 = 环非空（*out 有效）；0 = 环空（全部擦除 / 无有效页）
+ */
+int journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out);
+
+/*
+ * journal_resume - 恢复 Journal 的 RAM 写态（写指针 + 序号），**不回放任何条目**。
+ *
+ * 为什么必须做：`journal_init` 把写指针复位到 block0/page0、序号复位到 1，但
+ * **NAND 上的环形块并没有被擦**（`journal_truncate` 只预擦环形下一块）——「Journal
+ * 是空的」这个前提只对刚格式化过的介质成立。不恢复会有两个后果：
+ *   ① 序号从 1 重来 ⇒ 新条目的 page_seq 排到环内旧页**之后**，下次开机回放的
+ *      page_seq 过滤把它们当「已进 L2P 表」整页丢弃；
+ *   ② 写指针回到 block0/page0 ⇒ 对**已编程**的页二次编程（NAND 只能 1→0 = AND 损坏）。
+ *
+ * 落点：最新页**之后一页**——最新页已编程，续填会在页满时对同一页二次编程（页头
+ * entry_count 被 AND 成错值）；跨块时先擦下一块（那里还留着上一圈的旧页）。
+ *
+ * @param journal Journal
+ * @param latest  journal_scan_latest 的结果（NULL 或 page_seq==0 视为环空）
+ * @param floor_sequence 序号下限 = Checkpoint 的 journal_sequence（「下一个待分配」），
+ *        兜住「环空」与「环内最新页序号反而落后」两种情形（0 会被抬到 1）
+ */
+void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, uint32_t floor_sequence);
+
 /* journal_init - 初始化 Journal：记录拓扑、预铸各块 PBA、复位写指针与序号 */
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
 /* 追加一条 L2P 更新。P1-6：若当前页缓冲里已有**同一 LBA** 的条目，就地更新
@@ -87,9 +127,11 @@ void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
 /* journal_flush_page - 把当前页缓冲（含页头）同步写进 NAND 并推进写指针；
  *   本函数是**唯一**的环形块擦除点，块满换块时先擦后写（跳过 pre_erased_block 预擦块） */
 void journal_flush_page(l2p_journal_t *journal);
-/* F10：全量回放 page_seq > cp_sequence 的页（按 (page_seq, entry_index) 递增序
- * 应用，per-LBA last-write-wins）。cp_sequence 为 checkpoint 截断水位（旧
- * journal_replay 只回放最大一页，掉电跨 ≥2 页时其余条目静默丢失）。 */
+/* F10：全量回放**未进 L2P 表**的页（按 (page_seq, entry_index) 递增序应用，
+ * per-LBA last-write-wins）。cp_sequence 为 checkpoint 截断水位（旧 journal_replay
+ * 只回放最大一页，掉电跨 ≥2 页时其余条目静默丢失）。
+ * ⚠ 判据是**整页**：`page_seq + entry_count > cp_sequence`。只看页首页序号
+ *   （`page_seq > cp_sequence`）会把跨水位的那一页整页跳过，丢掉它的新条目。 */
 ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence);
 /*
  * journal_truncate - 截断 Journal（丢弃 ≤ up_to_sequence 的条目，P1-6）

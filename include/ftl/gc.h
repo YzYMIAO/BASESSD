@@ -26,11 +26,6 @@
 
 #include <stdint.h>
 
-/* ── GC 参数 ── */
-
-#define GC_INTERVAL_WRITES   (1024U) /* 写入量触发间隔 */
-#define GC_TIMER_INTERVAL_MS (500U)  /* 定时触发间隔（ms）*/
-
 /* ── GC victim 多维加权评分（P1-1；设计 §4.3）──
  * 权重为**千分比整数**：本仓无 FPU 便利、newlib-nano 无 %f ⇒ 全整数，四项各自
  * 归一化到 0..1000 后再加权，cost 上限 (500+200+200+100)×1000 = 1,000,000。
@@ -48,14 +43,21 @@
 #define GC_WEIGHT_TEMP  (200U) /* 温度（HOT 数据自然死亡快，投资未来无效收益） */
 #define GC_WEIGHT_AGE   (100U) /* 时间（保证每个 Block 都有机会被回收） */
 
-/* ── GC 触发位（P1-2；设计 §4.4 五条触发，T6 已废弃见下）──
+/* ── GC 触发位（P1-2；设计 §4.4 **三条**触发，T2/T3/T6 均已废弃见下）──
  * gc_check_triggers() 返回的**位掩码**：命中的位即触发起因（可多位同时命中）。
  * 只用于调用点打日志/调参，"要不要 GC" 的判定仍是 `!= 0`。 */
 #define GC_TRIGGER_WATERMARK (0x01U) /* T1: free_count < FREE_POOL_TARGET */
-#define GC_TRIGGER_WRITES    (0x02U) /* T2: total_writes % GC_INTERVAL_WRITES == 0 */
-#define GC_TRIGGER_TIMER     (0x04U) /* T3: elapsed_ms >= GC_TIMER_INTERVAL_MS */
 #define GC_TRIGGER_EMERGENCY (0x08U) /* T4: free_count <= FREE_POOL_EMERGENCY */
 #define GC_TRIGGER_WEAR      (0x10U) /* T5: 全表擦除比 max/min > GC_WEAR_LEVEL_RATIO */
+
+/* ⚠ **0x02 / 0x04 已随 T2/T3 退役，与 0x20 一样不再分配**（v0.63）：
+ *   T2「写入量整除 GC_INTERVAL_WRITES」与 T3「elapsed_ms 定时」在参考层（`docs/reference/`
+ *   全部论文/网页 + `storage_controller_learning.md`）**查无出处**——仓内唯一有出处的 GC
+ *   触发是 SPDK 的**按需触发**（`reference/pages/spdk_ftl.html:180`：「no band can be
+ *   freed, so no writes can be executed anymore」）与 nvcache 的 free-chunk 阈值，
+ *   DRAM-less 侧（DFTL/LeaFTL/VPFTL）与 dhara 同样只认**空间压力**。二者的求值点也
+ *   不可达（只在 `ftl_service_normal`，host IO 在场时是 BUSY、真空闲走 IDLE 的独立补池循环）。
+ *   ⚠ 位值**刻意不重排**：`[GC] trig=` 日志与历史 ADR 里的 0x01/0x02/0x04/0x08/0x10 保持可比。 */
 
 /* ⚠ 设计 §4.4 的 T6「碎片率」**刻意不实现**，0x20 位留空不再分配：
  *   原定义"平均有效页 > 70% 触发"方向与标签相反（碎片率高应对应有效页**少**），
@@ -170,39 +172,25 @@ void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t n
 /*
  * gc_check_triggers - 检查是否需要触发 GC，并返回**触发起因位掩码**
  *
- * 五条触发（设计 §4.4；T6 已废弃），可多位同时命中：
- *   T1 GC_TRIGGER_WATERMARK  free_count < FREE_POOL_TARGET          🔴 紧急
- *   T2 GC_TRIGGER_WRITES     total_writes % GC_INTERVAL_WRITES == 0 🟡 主动
- *   T3 GC_TRIGGER_TIMER      elapsed_ms >= GC_TIMER_INTERVAL_MS     🟢 后台
- *   T4 GC_TRIGGER_EMERGENCY  free_count <= FREE_POOL_EMERGENCY      🔴 紧急
+ * 三条触发（设计 §4.4；T2/T3/T6 已废弃，见上方位注释），可多位同时命中：
+ *   T1 GC_TRIGGER_WATERMARK  free_count < FREE_POOL_TARGET          🔴 主动补池
+ *   T4 GC_TRIGGER_EMERGENCY  free_count <= FREE_POOL_EMERGENCY      🔴 最后手段
  *   T5 GC_TRIGGER_WEAR       全表擦除比 max/min > GC_WEAR_LEVEL_RATIO 🟡 均衡
  *
  * ⚠ T1 与 T4 同源（都是"空闲块不够"），但阈值不同：T1 是**主动**补池（还留有余量
- *   时就开工），T4 是**最后手段**（池已见底）。T4 一旦命中，调用点应立即同步回收
- *   而不只是"排一次 GC"。
+ *   时就开工），T4 是**最后手段**（池已见底）。
  * ⚠ T5 每被调用一次就多一次 O(FTL_BLOCK_TOTAL) 全表扫描。这与既有
- *   `wl_should_trigger`（wear_leveling.c，同样每轮 NORMAL 服务扫 3 遍全表）同级，
+ *   `wl_should_trigger`（wear_leveling.c，同样每轮服务扫 3 遍全表）同级，
  *   不需要额外节流。
- * ⚠ 调用点：`ftl_service_normal`（ftl.c）。IDLE 模式走自己的补池循环，不调本函数
- *   ⇒ T5 只在 host IO 在场时评估（空闲期的磨损均衡由静态 WL `wl_execute` 负责）。
+ * ⚠ **调用点 = FTL 后台服务里唯一的 GC 求值点** `ftl_gc_evaluate`（ftl.c）：
+ *   **IDLE 与 NORMAL 两条后台路径都从这里过**（IDLE 据此决定是否启动补池突发，
+ *   NORMAL 据此决定是否回收一个 SB）；**BUSY 不求值**（host 饿着，让路），
+ *   "无块可写"由 `ftl_issue_subop` 的紧急 GC 兜底（= SPDK 的按需触发）。
+ *   参数里已无 total_writes / elapsed_ms —— T2/T3 退役后本函数只看**空间与磨损**。
  *
- * @param alloc           Allocator 上下文
- * @param total_writes    写入总次数
- * @param elapsed_ms      距上次 GC 的毫秒数
+ * @param alloc  Allocator 上下文
  * @return 触发起因位掩码（GC_TRIGGER_*），0=不需要触发
  */
-uint32_t gc_check_triggers(const ftl_allocator_t *alloc, uint32_t total_writes, uint32_t elapsed_ms);
-
-/*
- * gc_check_trigger - 检查是否需要触发 GC
- *
- * `gc_check_triggers(...) != 0` 的薄封装，保留旧契约给不关心成因的调用者。
- *
- * @param alloc           Allocator 上下文
- * @param total_writes    写入总次数
- * @param elapsed_ms      距上次 GC 的毫秒数
- * @return 1=需要触发 GC，0=不需要
- */
-int gc_check_trigger(const ftl_allocator_t *alloc, uint32_t total_writes, uint32_t elapsed_ms);
+uint32_t gc_check_triggers(const ftl_allocator_t *alloc);
 
 #endif /* FTL_GC_H */

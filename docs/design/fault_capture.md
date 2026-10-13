@@ -235,6 +235,11 @@ void fault_hook(const fault_ctx_t *ctx);   /* 弱符号，默认空实现 */
 
 `test_rebuild.c` 文件本身未删未改。夹具落地区域另议（AXI_RAM 实测只剩约 71 KB，不够；SDRAM 未接线）。
 
+> **2026-10-13 后续**：该文件**已删除**——其两条仍有效的用例（`add_closed_sb_full` 满列表边界、
+> `is_metadata_block_dynamic` 动态 region）并入 `ftl_ut_munit.md §4.1/§4.6` 的 FTL 套件设计；
+> 其余用例与 §4 既有条目重合，且 `is_metadata_block` 断言的是 P0-2 前的**旧单块布局**（已失效）。
+> 夹具超容的根因由 FTL 套件的「复用活实例」方案（`ftl_ut_munit.md §2.2`）化解，不再需要独立大夹具。
+
 ### 7.2 CLI 的 `%llu` → `%lu` 修复（newlib-nano 不支持 long long）
 
 上板验证故障捕获机制时，串口打出 `[FTL] controller ready, lba_max=lu` —— 6 处 CLI 输出（`wr`/`rd`/`tr`/`info` 的 lba、n）全部受影响。根因：`-specs=nano.specs` 的 newlib-nano 未开 `_WANT_IO_LONG_LONG`，`%llu` 把首个 `l` 当长度修饰符吃掉、剩下 `l`/`u` 当字面量原样输出；GCC 的 `-Wformat` 按标准 C 语义检查，编译期**零告警**，只有上板看串口才发现。

@@ -235,6 +235,14 @@ typedef struct
     uint8_t  cur_block_valid;           /* 游标是否已建立（0 = 尚未分配日志块）*/
     uint8_t  cur_metadata_plane;        /* 下一个新日志块选哪个 plane（轮转）*/
 
+    /* 压缩进行中（P0-3）。两个作用，缺一不可：
+     *   ① **抑制逐次立即回收**——搬移 victim 的最后一个活 region 时 l2p_live[victim]
+     *      归零，metadata_dir_commit_region 的"归零即擦"分支会**在 Anchor 落盘之前**
+     *      把 victim 擦掉（掉电后 Anchor 仍指向已擦块 ⇒ 那些 region 的映射永久丢失）；
+     *   ② **防重入**——搬移走 metadata_dir_append_slot，换块分支会再触发一次压缩。
+     * 非 0 时 append_slot 的换块分支直接失败让路（见 metadata_dir_compact 的 ③④ 顺序）。*/
+    uint8_t compacting;
+
     /* Anchor 池游标（ring 写点槽位；anchor_cursor_valid=0 时尚未定位）*/
     uint16_t anchor_write_idx;
     uint8_t  anchor_cursor_valid;
@@ -328,15 +336,37 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
  *
  * 没有它会在稳态泄漏：每填满一块就永久占一块。
  *
- * ⚠ 阶段 1 只回收 live == 0 的块。若某日志块混着永不再写的冷 region（如 63 冷 + 1 热），
- *   它永不归零 ⇒ 永久占块；最坏情况池会耗尽。抗碎片的「取 live 最小块做 victim、
- *   搬活 region 后擦」属阶段 3（登记）。
+ * ⚠ 本函数**只**回收 live == 0 的块。若某日志块混着永不再写的冷 region（如 63 冷 + 1 热），
+ *   它永不归零 ⇒ 永久占块；最坏情况吃掉近半个 die（FTL_BLOCK_TOTAL/2 块）。
+ *   抗碎片的「取 live 最小块做 victim、搬活 region 后擦」是 metadata_dir_compact。
  *
  * @param dir   Directory cache
  * @param alloc Allocator
  * @return FTL_OK（含无可回收块）/ FTL_ERROR（参数非法）
  */
 ftl_status_t metadata_dir_reclaim(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
+
+/*
+ * metadata_dir_compact - 抗碎片压缩：搬空一个「多活」日志块后归还（P0-3）
+ *
+ * metadata_dir_reclaim 的补集：挑 l2p_live 最小（但 >0）的非当前日志块做 victim，
+ * 把它上面**仍有引用**的 region 逐个读回、写进当前日志块的下一空槽并重新登记，
+ * 最后落盘 Anchor、擦除 victim、归还 Free Pool。
+ *
+ * 掉电安全顺序（不可重排）：① 搬移 → ② 登记 → ③ flush_to_anchor → ④ 擦 victim → ⑤ 归还。
+ * ③ 必须早于 ④——否则掉电后 Anchor 仍指向已擦块，那些 region 的映射永久丢失。
+ *
+ * ⚠ 调用时机受限：必须在**当前日志块有足够空槽**时调（本函数自己会核对
+ *   `l2p_live[victim] <= PAGES_PER_BLOCK - cur_metadata_page`）。最自然的调用点是
+ *   metadata_dir_append_slot 刚取到新块之后——此时块内有整 PAGES_PER_BLOCK 个空槽。
+ * ⚠ 无候选（全池零活 / 只剩当前块）/ 读失败 / 写失败 / Anchor 落盘失败 ⇒ 返回
+ *   FTL_ERROR 且**不擦 victim**（已搬 region 的新位置已登记 ⇒ 无信息丢失，下次再来）。
+ *
+ * @param dir   Directory cache
+ * @param alloc Allocator（归还 victim 时需要）
+ * @return FTL_OK = 确实压缩并归还了一块；FTL_ERROR = 未做（原因见上）
+ */
+ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
 
 /*
  * metadata_dir_flush_to_anchor - 将 Directory 追加为 Anchor 池的一条新 record

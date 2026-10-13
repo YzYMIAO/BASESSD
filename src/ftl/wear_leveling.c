@@ -275,7 +275,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
 
                 rr_record_ecc(&src_blk->rr, ecc);
                 src_blk->read_count++;
-                wear_mark_dirty(gsrc[plane]);
+                wear_mark_dirty(&ftl->alloc, gsrc[plane]);
             }
 
             /* 逐 CW 反查 L2P：用该 CW 自己的 META 查，仍指向 (本页, 本 CW) 才算有效 */
@@ -458,7 +458,7 @@ int wl_predictive_relocate(struct ftl_context *ftl)
 
         /* rr_retire_block 内部把 read_count 归零（read disturb 重计），
          * 它只拿到 ftl_block_t* ⇒ 脏标记放在其唯一调用者这里。 */
-        wear_mark_dirty((uint16_t)ftl_gblock(plane, victim.plane_blocks[plane]));
+        wear_mark_dirty(&ftl->alloc, (uint16_t)ftl_gblock(plane, victim.plane_blocks[plane]));
     }
 
     /* 慢死预测命中：整 SB 已搬空并退役，属生命周期跃迁，留痕一次 */

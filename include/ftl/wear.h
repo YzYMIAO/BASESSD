@@ -4,21 +4,22 @@
 /*
  * Wear（块磨损计数表）— 计数持久化
  *
- * 背景：BST（ftl_block_t）里的 erase_count / read_count 是
+ * 背景：BST（ftl_block_t）里的 erase_count / read_count / rr（ECC 健康）是
  * 纯 RAM 状态，ftl_init 的 memset 会把它们清零 ⇒ 跨重启后
  *   - 动态 WL（allocator_select_plane_block_from_pool 选擦除最少块）
  *   - 静态 WL（wl_should_trigger 的 max_ec - min_ec ≥ 阈值）
  *   - read-disturb 预测（rr_predictive_scan 的 read_count ≥ 阈值）
- * 全部失效。本模块把这两个计数落到固定块 WEAR_BLOCK 上，开机回填 BST。
+ *   - 慢死预测（rr_predictive_scan 的 rr.health ≥ CRITICAL，v0.65）
+ * 全部失效。本模块把这些 per-Block 状态落到固定块 WEAR_BLOCK 上，开机回填 BST。
  *
  * ── 介质格式：块内**页式追加日志** ──
  * 与 Anchor / Journal 同一套日志式元数据惯例（sequence + 页序），而不是
- * "每次整表重写"。理由：块 26 只有 64 页，全量快照 17 页 ⇒ 整表重写会让块 26
+ * "每次整表重写"。理由：块 26 只有 64 页，全量快照 25 页 ⇒ 整表重写会让块 26
  * 在 3.8 次落盘后被擦一次，磨损远超普通数据块。增量日志把常态落盘压到 1–4 页。
  *
  *   页序 == sequence 序（块内只追加；块满则擦块 + 从头写全量快照）。
  *   语义 = **绝对值 + 最新胜**（不是增量累加）⇒ 同一块出现多次只有最后一页生效。
- *   全量快照 = ⌈FTL_BLOCK_TOTAL / WEAR_ENTRY_MAX⌉ = 17 页 ≤ PAGES_PER_BLOCK。
+ *   全量快照 = ⌈FTL_BLOCK_TOTAL / WEAR_ENTRY_MAX⌉ = 25 页 ≤ PAGES_PER_BLOCK。
  *
  * 只用 plane 0 的 64 页（与 Anchor 同风格）。
  *
@@ -37,19 +38,30 @@
 /* 每条目字节（= wear_entry_t 尺寸，见 ftl/ftl_config.h §四 逻辑表字节）*/
 #define WEAR_ENTRY_BYTES (FTL_WEAR_ENTRY_BYTES)
 
-/* 一条目 = 一个 Block 的两个**持久化**计数（擦除 + 读）。
+/* 一条目 = 一个 Block 的**持久化**状态（擦除/读计数 + ECC 健康）。
  * block 存**全局块号 gblock**（= plane × BLOCKS_PER_PLANE + block），
  * 这样快照天然覆盖两个 plane，不需要按 plane 分开存表。
  *
  * v0.56：`program_count` 槽已删（BST 侧字段无消费方，一并撤出持久化）；
  *        原 `_reserved` 对齐填充也随之不再需要（block 2B + read_count 2B +
- *        erase_count 4B 天然 4 B 对齐）⇒ 条目 12 B → 8 B。 */
+ *        erase_count 4B 天然 4 B 对齐）⇒ 条目 12 B → 8 B。
+ * v0.65：加 rr 三字段（序 8「rr 持久化」）——不加则慢死预测跨重启归零：
+ *        health 回到 HEALTHY ⇒ rr_predictive_scan 要重新攒 RR_ECC_RISING_THRESHOLD
+ *        次连续上升才再触发，期间那块一直在劣化。三字段都必要：
+ *          last_ecc      —— "本次是否上升"的比较基准（丢了 ⇒ 首次读必判上升，虚高）；
+ *          rising_count  —— 连续上升的进度（丢了 ⇒ 趋势从头数）；
+ *          health        —— 派生态（丢了 ⇒ 已判定的 WARNING/CRITICAL 白丢）。
+ *        ⇒ 条目 8 B → 12 B（`_reserved` 补齐 4 B 对齐），介质格式变 ⇒ 布局版本 +1。 */
 typedef struct
 {
-    uint16_t block;       /* 全局块号 gblock（0..FTL_BLOCK_TOTAL-1）*/
-    uint16_t read_count;  /* 主机读 + GC/WL 搬移读累加 */
-    uint32_t erase_count; /* 擦除计数：动态/静态 WL 的唯一输入 */
-} wear_entry_t;           /* 8 B */
+    uint16_t block;        /* 全局块号 gblock（0..FTL_BLOCK_TOTAL-1）*/
+    uint16_t read_count;   /* 主机读 + GC/WL 搬移读累加 */
+    uint32_t erase_count;  /* 擦除计数：动态/静态 WL 的唯一输入 */
+    uint8_t  last_ecc;     /* 上次读的 ECC 纠正 bit 数（rr_ecc_track_t.last_ecc）*/
+    uint8_t  rising_count; /* 连续上升次数（rr_ecc_track_t.rising_count）*/
+    uint8_t  health;       /* rr_block_health_t */
+    uint8_t  _reserved;    /* 对齐填充，写 0 */
+} wear_entry_t;            /* 12 B */
 
 /* 每页条目数：头 16 B + N×8 ≤ PAGE_MAIN_SIZE（无独立 CRC，见 ADR v0.62）。
  * ⚠ 多减一条目（sizeof(wear_entry_t)）是刻意的：否则 N 会取到刚好整除的值，
@@ -102,7 +114,7 @@ _Static_assert((FTL_BLOCK_TOTAL % 8U) == 0U, "块数不是 8 的倍数，Wear �
  * **非致命**：读失败/无有效页只当冷启动（计数保持 ftl_init 的 memset 零值），
  * 不 brick 开机（照 v60 ONFI 参数页的先例）。
  *
- * ⚠ 必须在 ftl_init 的 memset(params->blocks) **之后**调用，否则回填被清零。
+ * ⚠ 必须在 ftl_init 的 memset(ftl->tables.blocks) **之后**调用，否则回填被清零。
  *
  * @param alloc  Allocator 上下文（ch/ce/lun 路由 + blocks[] 输出）
  * @return FTL_OK / FTL_ERROR（参数非法）
@@ -133,8 +145,9 @@ ftl_status_t wear_flush(ftl_allocator_t *alloc, uint32_t total_writes);
  * 在**每一个**改动 erase_count / read_count 的地方调用。
  * 只置位，不做 I/O（落盘由后台 wear_flush 批量做）。
  *
+ * @param alloc  Allocator 上下文（脏位图在 alloc->wear，序 4 起 per-instance）
  * @param gblock 全局块号（0..FTL_BLOCK_TOTAL-1；越界静默忽略）
  */
-void wear_mark_dirty(uint16_t gblock);
+void wear_mark_dirty(ftl_allocator_t *alloc, uint16_t gblock);
 
 #endif /* FTL_WEAR_H */

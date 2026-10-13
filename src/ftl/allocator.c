@@ -23,7 +23,7 @@
  *   2. 内部工具      allocator_pool_remove / pull_from_op / select_plane_block_from_pool /
  *                    open_sb / close_sb
  *   3. 关闭/回收     allocator_close_open_sb / allocator_remove_closed_sb
- *   4. 分配          allocator_alloc_pair / allocator_alloc / allocator_alloc_reserved_block
+ *   4. 分配          allocator_alloc_pair / allocator_alloc_reserved_block
  *   5. 归还          allocator_free_block / allocator_free_reserved_block / allocator_remove_from_free
  *   6. 重建入口      allocator_add_closed_sb
  *
@@ -39,33 +39,35 @@
 /*
  * allocator_init 初始化 Allocator
  *
- *   - 初始化分配器、温度参数、free pool、closed 列表
- *   - 第一个 Super Block 分配需延迟到首次 allocator_alloc()
+ *   - 绑定**本实例自持表**（P2-5：指针指向 ftl_tables_t，不复制数据）
+ *   - 初始化温度参数、free pool / OP / Spare 计数、closed 列表
+ *   - 第一个 Super Block 分配需延迟到首次 allocator_alloc_pair()
  *
  * Free Pool 是**一个已擦除池**（先擦后归还 ⇒ 池内无未擦除块），
  * 「三级」是建在 free_count 上的**水位**，不是三个分区——见 allocator.h 文件头。
  */
-ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *params)
+ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables)
 {
-    if ((alloc == NULL) || (params == NULL))
+    if ((alloc == NULL) || (tables == NULL))
     {
         return FTL_ERROR;
     }
 
-    alloc->ch           = params->topo.ch;
-    alloc->ce           = params->topo.ce;
-    alloc->lun          = params->topo.lun;
-    alloc->total_blocks = params->free_count;
+    alloc->ch           = topo.ch;
+    alloc->ce           = topo.ce;
+    alloc->lun          = topo.lun;
+    alloc->total_blocks = 0U; /* 由 HIL 回填 free pool 时按好块数置定（见 main.c） */
 
-    /* Free Pool */
-    alloc->free_blocks = params->free_blocks;
+    /* 自持表绑定（P2-5）：本实例的数组指针指向自己的 ftl_tables_t，不复制数据。
+     * 三处计数（free/op/spare）与 closed 列表计数在此归零——数组内容由 HIL 回填
+     * （free pool 回填 / bbt_init / F2 重建）逐项写入。 */
+    alloc->free_blocks = tables->free_blocks;
     alloc->free_count  = 0U;
 
-    /* OP / Spare Pool（容量不动） */
-    alloc->op_blocks    = params->op_blocks;
-    alloc->op_count     = params->op_count;
-    alloc->spare_blocks = params->spare_blocks;
-    alloc->spare_count  = params->spare_count;
+    alloc->op_blocks    = tables->op_blocks;
+    alloc->op_count     = 0U;
+    alloc->spare_blocks = tables->spare_blocks;
+    alloc->spare_count  = 0U;
 
     /* Open Super Block（暂无效，首次 alloc 时分配） */
     memset(&alloc->hot_sb, 0, sizeof(alloc->hot_sb));
@@ -73,16 +75,20 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *par
     alloc->hot_sb.temperature  = FTL_TEMP_HOT;
     alloc->cold_sb.temperature = FTL_TEMP_COLD;
 
-    /* Closed 列表 */
-    alloc->closed_sb_list  = params->closed_sb_list;
+    alloc->closed_sb_list  = tables->closed_sb_list;
     alloc->closed_sb_count = 0U;
 
-    /* Block State Table（每 Block 状态统一承载；由调用者提供存储；无位图表，见 bst.h） */
-    alloc->blocks    = params->blocks;
+    /* Block State Table（每 Block 状态统一承载；无位图表，见 bst.h） */
+    alloc->blocks    = tables->blocks;
     alloc->bad_count = 0U;
 
+    /* 元数据池游标（序 4：per-instance）——本实例一份，后续由 bbt_init / wear_init 恢复。
+     * 必须在此归零：bbt_state_t.cursor_valid / dirty 与 wear_state_t.dirty[] 决定首次
+     * 落盘是「扫池定位」还是「从池首开始」，残留值会让新实例写到别人的槽上。 */
+    memset(&alloc->bbt, 0, sizeof(alloc->bbt));
+    memset(&alloc->wear, 0, sizeof(alloc->wear));
+
     /* 状态机初始：未坏块默认 FREE（坏块由 bbt_init 置 BAD） */
-    if (alloc->blocks != NULL)
     {
         uint16_t i;
         for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
@@ -122,7 +128,7 @@ static uint8_t allocator_pool_remove(ftl_allocator_t *alloc, uint16_t gblock)
 
 /*
  * 从 OP 池取一个 Block 归还 Free Pool（容量不动语义：OP 是 GC 缓冲池）。
- * 分配器 free pool 耗尽时由 allocator_alloc 回退调用。
+ * 分配器 free pool 耗尽时由 allocator_alloc_pair 回退调用。
  * @return 1 成功取块，0 OP 池空
  */
 static uint8_t allocator_pull_from_op(ftl_allocator_t *alloc)
@@ -421,20 +427,6 @@ nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nan
     sb->next_page++;
 
     return out[0];
-}
-
-/* allocator_alloc — 单 plane 便捷：分配一对后返回 plane 0 那一半（GC / WL / metadata 单 plane 写路径） */
-nand_pba_t allocator_alloc(ftl_allocator_t *alloc, uint8_t temperature)
-{
-    nand_pba_t pair[PLANE_NUM];
-
-    if (allocator_alloc_pair(alloc, temperature, pair) == NAND_PBA_INVALID)
-    {
-        return NAND_PBA_INVALID;
-    }
-
-    /* 单 plane 便捷：返回 plane 0 的那一半（GC / WL / metadata 的单 plane 写路径） */
-    return pair[0];
 }
 
 /* --------------------------------------------------------------------

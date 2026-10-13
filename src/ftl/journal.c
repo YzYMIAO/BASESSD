@@ -26,7 +26,7 @@
  *   1. 页地址辅助     journal_page_addr / journal_block_addr（static）
  *   2. 初始化         journal_init
  *   3. 追加与刷页     journal_append / journal_flush_page
- *   4. 回放           journal_replay
+ *   4. 回放与写指针恢复 journal_scan_latest / journal_resume / journal_replay
  *   5. 截断           journal_truncate
  */
 
@@ -250,73 +250,58 @@ void journal_flush_page(l2p_journal_t *journal)
 }
 
 /* ══════════════════════════════════════════════════════════
- * 4. 回放
+ * 4. 回放与写指针恢复
  * ══════════════════════════════════════════════════════════ */
 
 /* --------------------------------------------------------------------
- * journal_replay
- *   功能：开机回放——全量扫描 Journal 块池，把 page_seq > cp_sequence 的页
- *         按 (page_seq, entry_index) 递增序应用到 L2P cache。
- *   参数：journal —— Journal；cache —— 目标 L2P cache；cp_sequence —— checkpoint
- *         截断水位（≤ 该序号的条目已进 NAND L2P 表，无需回放）。
- *   返回：FTL_OK 成功；FTL_ERROR 入参为 NULL。
- *   实现要点：
- *     · 第一遍扫描收集「需回放页」进栈上数组 replay_pages[]（JOURNAL_BLOCK_COUNT
- *       块 × PAGES_PER_BLOCK 页，共 256 项 8B = 2KB；⚠ 256 > 255 ⇒ 计数/下标必须
- *       uint16_t，uint8_t 会死循环），同时跟踪最大 page_seq 以更新写指针。
- *     · 第二遍插入排序（≤256 项）后按序应用 ⇒ per-LBA last-write-wins，同 LBA 的旧
- *       条目（含 GC/WL 搬移记录）被后写覆盖，不指向已擦除块。
- *     · 页头 magic / entry_count 校验失败即跳过（掉电撕裂的预期情形，见文件头 ⚠）。
+ * journal_scan_ring
+ *   功能：扫一遍环形块池——找**最新页**（最大 page_seq），并按需收集需回放页。
+ *   参数：journal —— Journal；cp_sequence —— 回放水位；
+ *         out_pages / capacity —— 收集数组与其容量（out_pages == NULL = 只找最新页）；
+ *         out_count —— 出参收集条数（可为 NULL）；out_latest —— 出参最新页（可为 NULL）。
+ *   返回：无。
+ *   实现要点：只读 NAND，**不改 journal 状态**（怎么用由调用方决定）。
+ *             需回放判据是**整页**的：`page_seq + entry_count > cp_sequence`。
+ *             旧判据只看页首页序号（`page_seq > cp_sequence`），跨水位的那一页会被
+ *             整页跳过——它页尾的新条目（> cp_sequence）随页面一起丢。
+ *             页头 magic / entry_count 校验失败即跳过（掉电撕裂的预期情形，见文件头 ⚠）。
  * -------------------------------------------------------------------- */
-ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence)
+static void journal_scan_ring(const l2p_journal_t *journal,
+                              uint32_t             cp_sequence,
+                              journal_page_ref_t  *out_pages,
+                              uint16_t             capacity,
+                              uint16_t            *out_count,
+                              journal_page_ref_t  *out_latest)
 {
+    uint16_t count = 0U;
     uint8_t  b, page;
-    uint32_t max_sequence = 0U;
-    uint8_t  last_block   = 0U;
-    uint8_t  last_page    = 0U;
-    uint8_t  last_entry   = 0U;
 
-    /* F10：已发现的"需回放页"（page_seq > cp_sequence）记录表。
-     * JOURNAL_BLOCK_COUNT 块 × 每块 64 页 = 256 页；每项 8B → 2KB 栈上数组。
-     * ⚠ 256 > 255 ⇒ replay_count / 循环下标必须是 uint16_t（uint8_t 会死循环）。
-     * 按 (page_seq, entry_index) 递增序应用依赖先收集后排序。 */
-    typedef struct
+    if (out_latest != NULL)
     {
-        uint32_t page_seq;
-        uint8_t  block;
-        uint8_t  page;
-        uint8_t  entry_count;
-    } replay_page_t;
-    replay_page_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
-    uint16_t      replay_count = 0U;
-
-    if ((journal == NULL) || (cache == NULL))
-    {
-        return FTL_ERROR;
+        out_latest->page_seq    = 0U;
+        out_latest->block       = 0U;
+        out_latest->page        = 0U;
+        out_latest->entry_count = 0U;
     }
 
-    /* 第一遍：扫描 JOURNAL_BLOCK_COUNT 个 Journal Block，收集需回放页（page_seq > cp_sequence） */
-    for (b = 0; b < JOURNAL_BLOCK_COUNT; b++)
+    for (b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
     {
-        for (page = 0; page < PAGES_PER_BLOCK; page++)
+        for (page = 0U; page < PAGES_PER_BLOCK; page++)
         {
             uint8_t     page_data[JOURNAL_PAGE_SIZE];
-            uint16_t    count;
             uint32_t    page_seq;
+            uint16_t    entry_count;
             nand_addr_t raddr;
-            int         ret;
 
-            /* 读 Journal 页 */
             raddr = journal_page_addr(journal, b, (uint8_t)page);
 
             memset(page_data, 0xFF, sizeof(page_data));
-            ret = ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
-            if (ret != 0)
+            if (ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) !=
+                0)
             {
                 continue; /* 读失败，跳过本页 */
             }
 
-            /* 验证 Magic */
             {
                 uint32_t magic;
                 memcpy(&magic, page_data + 0, sizeof(magic));
@@ -326,52 +311,158 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
                 }
             }
 
-            /* 读取 entry_count */
+            memcpy(&page_seq, page_data + 4, sizeof(page_seq));
+            memcpy(&entry_count, page_data + 8, sizeof(entry_count));
+            if ((entry_count == 0U) || (entry_count > JOURNAL_ENTRIES_PER_PAGE))
             {
-                uint16_t ec;
-                memcpy(&ec, page_data + 8, sizeof(ec));
-                count = ec;
-            }
-            if (count > JOURNAL_ENTRIES_PER_PAGE)
-            {
-                continue; /* 无效 count */
-            }
-            if (count == 0U)
-            {
-                continue; /* 空页 */
+                continue; /* 空页 / 非法 count */
             }
 
+            /* 最新页（用于恢复写指针与序号）：取 page_seq 最大者 */
+            if ((out_latest != NULL) && (page_seq >= out_latest->page_seq))
             {
-                uint32_t ps;
-                memcpy(&ps, page_data + 4, sizeof(ps));
-                page_seq = ps;
+                out_latest->page_seq    = page_seq;
+                out_latest->block       = b;
+                out_latest->page        = (uint8_t)page;
+                out_latest->entry_count = (uint8_t)entry_count;
             }
 
-            /* 跟踪最大 page_seq（用于更新写指针） */
-            if (page_seq >= max_sequence)
+            /* 需回放页：本页**最后一条**的序号已过水位 ⇒ 页内至少一条没进 L2P 表 */
+            if ((out_pages != NULL) && (count < capacity) && ((page_seq + (uint32_t)entry_count) > cp_sequence))
             {
-                max_sequence = page_seq;
-                last_block   = b;
-                last_page    = page;
-                last_entry   = (uint8_t)(count - 1U);
-            }
-
-            /* F10：只收集 post-checkpoint 页（≤ cp_sequence 的条目已在
-             * checkpoint 时 flush 进 NAND L2P 表，无需回放） */
-            if (page_seq > cp_sequence)
-            {
-                if (replay_count <
-                    (uint16_t)(JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK))
-                {
-                    replay_pages[replay_count].page_seq    = page_seq;
-                    replay_pages[replay_count].block       = b;
-                    replay_pages[replay_count].page        = page;
-                    replay_pages[replay_count].entry_count = (uint8_t)count;
-                    replay_count++;
-                }
+                out_pages[count].page_seq    = page_seq;
+                out_pages[count].block       = b;
+                out_pages[count].page        = (uint8_t)page;
+                out_pages[count].entry_count = (uint8_t)entry_count;
+                count++;
             }
         }
     }
+
+    if (out_count != NULL)
+    {
+        *out_count = count;
+    }
+}
+
+/* --------------------------------------------------------------------
+ * journal_scan_latest
+ *   功能：只读扫环取最新页（journal_scan_ring 的「只找最新页」外壳）。
+ *   参数：journal —— Journal；out —— 出参（环空时全置 0，可为 NULL）。
+ *   返回：1 = 环非空；0 = 环空。
+ * -------------------------------------------------------------------- */
+int journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out)
+{
+    if (journal == NULL)
+    {
+        return 0;
+    }
+
+    journal_scan_ring(journal, 0U, NULL, 0U, NULL, out);
+
+    return ((out != NULL) && (out->page_seq > 0U)) ? 1 : 0;
+}
+
+/* --------------------------------------------------------------------
+ * journal_resume
+ *   功能：恢复 Journal 的 RAM 写态（写指针 + 序号），**不回放条目**。
+ *   参数：journal —— Journal；latest —— 最新页（NULL 或 page_seq==0 视为环空）；
+ *         floor_sequence —— 序号下限（Checkpoint 的 journal_sequence）。
+ *   返回：无。
+ *   实现要点：① 落点是最新页**之后一页**——最新页已编程，续填会在页满时对同一页
+ *                二次编程（NAND 只能 1→0 ⇒ 页头 entry_count 被 AND 成错值）；
+ *             ② 跨块时先擦下一块（那里还留着上一圈的旧页）；**不记账
+ *                pre_erased_block**——那块马上会被写满，下一圈回切时仍需按常规擦一次；
+ *             ③ 序号取 max(最新页序号 + 1, floor)，0 抬到 1（0 保留作「无序号」，
+ *                与 journal_init 同约定；否则 journal_truncate 的水位校验会被 0 挡掉）。
+ * -------------------------------------------------------------------- */
+void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, uint32_t floor_sequence)
+{
+    uint32_t next = floor_sequence;
+
+    if (journal == NULL)
+    {
+        return;
+    }
+
+    if ((latest != NULL) && (latest->page_seq > 0U))
+    {
+        uint8_t next_block = latest->block;
+        uint8_t next_page  = (uint8_t)(latest->page + 1U);
+
+        /* ⚠ 必须加 **entry_count**，不是 +1：本页占了 page_seq .. page_seq+entry_count-1
+         *   共 entry_count 个序号（journal_append 逐条 `sequence_counter++`，页头
+         *   `hdr_page_seq = sequence_counter − current_entry` 反推）。若只 +1，序号会
+         *   退回本页内部 ⇒ 下一页的 page_seq 落进本页的序号区间，回放过滤
+         *   `page_seq + entry_count > cp_sequence` 会把已进 L2P 的页**重复回放**。 */
+        if ((latest->page_seq + (uint32_t)latest->entry_count) > next)
+        {
+            next = latest->page_seq + (uint32_t)latest->entry_count;
+        }
+
+        if (next_page >= PAGES_PER_BLOCK)
+        {
+            next_block = (uint8_t)((next_block + 1U) % JOURNAL_BLOCK_COUNT);
+            next_page  = 0U;
+            (void)ftl_sync_erase_block(journal_block_addr(journal, next_block));
+        }
+
+        journal->current_block = next_block;
+        journal->current_page  = next_page;
+    }
+    else
+    {
+        /* 环空：写指针留在 journal_init 的 (block0, page0) */
+        journal->current_block = 0U;
+        journal->current_page  = 0U;
+    }
+
+    if (next == 0U)
+    {
+        next = 1U;
+    }
+
+    journal->current_entry    = 0U;
+    journal->sequence_counter = next;
+
+    memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
+}
+
+/* --------------------------------------------------------------------
+ * journal_replay
+ *   功能：开机回放——扫 Journal 块池，把**未进 L2P 表**的页按
+ *         (page_seq, entry_index) 递增序应用到 L2P cache，末尾恢复写指针。
+ *   参数：journal —— Journal；cache —— 目标 L2P cache；cp_sequence —— checkpoint
+ *         截断水位（≤ 该序号的条目已进 NAND L2P 表，无需回放）。
+ *   返回：FTL_OK 成功；FTL_ERROR 入参为 NULL。
+ *   实现要点：
+ *     · 第一遍（journal_scan_ring）收集「需回放页」进栈上数组 replay_pages[]
+ *       （JOURNAL_BLOCK_COUNT 块 × PAGES_PER_BLOCK 页，共 256 项 8B = 2KB；
+ *       ⚠ 256 > 255 ⇒ 计数/下标必须 uint16_t，uint8_t 会死循环），
+ *       同时取到最新页用于恢复写指针。
+ *     · 第二遍插入排序（≤256 项）后按序应用 ⇒ per-LBA last-write-wins，同 LBA 的旧
+ *       条目（含 GC/WL 搬移记录）被后写覆盖，不指向已擦除块。
+ *     · 末尾 journal_resume 把写指针落到最新页之后并接续序号。
+ * -------------------------------------------------------------------- */
+ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence)
+{
+    /* JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 8B → 2KB 栈上数组。 */
+    journal_page_ref_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
+    journal_page_ref_t latest;
+    uint16_t           replay_count = 0U;
+
+    if ((journal == NULL) || (cache == NULL))
+    {
+        return FTL_ERROR;
+    }
+
+    /* 第一遍：扫环——收集需回放页 + 取最新页 */
+    journal_scan_ring(journal,
+                      cp_sequence,
+                      replay_pages,
+                      (uint16_t)(JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK),
+                      &replay_count,
+                      &latest);
 
     /* 第二遍：按 (page_seq, entry_index) 递增序应用条目。
      * 插入排序（replay_count ≤ 256）：per-LBA last-write-wins——
@@ -382,7 +473,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
 
         for (i = 1U; i < replay_count; i++)
         {
-            replay_page_t key = replay_pages[i];
+            journal_page_ref_t key = replay_pages[i];
 
             n = i;
             while ((n > 0U) && (replay_pages[n - 1U].page_seq > key.page_seq))
@@ -414,8 +505,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
                 {
                     uint32_t entry_lba;
                     uint32_t entry_new_pba;
-                    uint16_t offset = JOURNAL_HEADER_SIZE +
-                                      sizeof(l2p_journal_entry_t) * k;
+                    uint16_t offset = JOURNAL_HEADER_SIZE + sizeof(l2p_journal_entry_t) * k;
                     memcpy(&entry_lba, page_data + offset + 0, 4);
                     memcpy(&entry_new_pba, page_data + offset + 8, 4);
                     l2p_cache_write(cache, (lba_t)entry_lba, (nand_pba_t)entry_new_pba);
@@ -424,32 +514,8 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
         }
     }
 
-    /* 更新 Journal 写指针到最新位置之后 */
-    if (max_sequence > 0U)
-    {
-        journal->current_block = last_block;
-        journal->current_page  = last_page;
-
-        /* 如果最后一页已满，推进到下一页 */
-        if (last_entry >= JOURNAL_ENTRIES_PER_PAGE - 1U)
-        {
-            journal->current_page++;
-            if (journal->current_page >= PAGES_PER_BLOCK)
-            {
-                journal->current_block = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
-                journal->current_page  = 0U;
-            }
-            journal->current_entry = 0U;
-        }
-        else
-        {
-            journal->current_entry = last_entry + 1U;
-        }
-
-        journal->sequence_counter = max_sequence + 1U;
-    }
-
-    memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
+    /* 恢复写指针与序号（落到最新页之后；floor 兜住「环空 / 序号回退」） */
+    journal_resume(journal, &latest, cp_sequence);
 
     return FTL_OK;
 }

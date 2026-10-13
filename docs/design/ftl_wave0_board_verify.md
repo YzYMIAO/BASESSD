@@ -1,4 +1,4 @@
-# 波 0 上板验证清单（v0.59~v0.62 + P0/P1 批次）
+# 波 0 上板验证清单（v0.59~v0.64 + P0/P1 批次）
 
 > **性质**：`ftl_optimization_plan.md` §九「下一步」第 1 项的可执行清单。
 > **背景**：波 0 全部改动（v0.59 CW 级映射 / v0.60 有效性 ③ / v0.61 介质版本 / v0.62 CRC 下沉 +
@@ -21,7 +21,7 @@ make clean && make all        # 必须 0 warning
 
 ```
 AXI_RAM             384 KB    255.0 KB   66.4%
-Binary size: 189728 bytes
+Binary size: 189336 bytes
 ```
 
 烧录产物：`build/firmware/debug/bin/debug.bin`（无 `make flash` 目标，按既有 SWD 流程烧）。
@@ -75,7 +75,7 @@ Binary size: 189728 bytes
 | **预期** | `[INF] [WEAR] seq=<S> pages=<P> max_ec=<M> min_ec=<m>` |
 | **判据** | Wear 表落块 62（页式追加日志）。`max_ec` 应**非 0** 且**随磨损增长**（写+GC 后二次开机 `max_ec` ≥ 首次）。 |
 | **失败** | `max_ec=0` 且 `min_ec=0` ⇒ 回填失败（等同旧行为「每次上电归零」）。回退看 `wear.c` / P0-1。 |
-| **前提** | ⚠ `max_ec` 要**非 0 必须先发生过一次真实擦除**（GC 的 `gc_erase_and_free` 或 WL）。至今零 GC/零擦除 ⇒ **`max_ec=0` 是正常的**，不是失败。擦除只由 §7 的 GC 配方（≈256 次 `wr 0 32`）产生 ⇒ **先跑 §7 再验 §4**。 |
+| **前提** | ⚠ `max_ec` 要**非 0 必须先发生过一次真实擦除**（GC 的 `gc_erase_and_free` 或 WL）。至今零 GC/零擦除 ⇒ **`max_ec=0` 是正常的**，不是失败。擦除只由 §7 的 GC 配方产生（v0.63 后：临时抬高 `FREE_POOL_TARGET` ⇒ **1 个 SB 的搬移 + 擦除**，`max_ec` 变成 **1**）⇒ **先跑 §7 再验 §4**。 |
 
 ---
 
@@ -98,38 +98,45 @@ Binary size: 189728 bytes
 
 ---
 
-## 6. 断电重启数据仍在（P0-2 + v0.61 联合判据）
+## 6. 断电重启数据仍在（P0-2 + v0.61 + **v0.64** 联合判据）
+
+> ⚠ **v0.64 修的就是本项**，且缺陷**只在环被写脏过之后才暴露**。所以本项的配方**必须带「脏环」步骤**——
+> 在刚格式化过的干净介质上直接跑，会得到 `type=1 journal_entries=0` + `rd PASS` 的**假绿**
+> （数据靠 Checkpoint 活下来，回放路径根本没被走到；详见 `ftl_revision_history.md v0.64`）。
 
 | | |
 |---|---|
-| **操作** | `wr 0 8` → **直接断电**（不敲 `fl`）→ 重新上电 → `rd 0 8 c` |
+| **操作（脏环配方）** | ① 把环弄脏：敲几次 `wr 0 32`（**不要**敲 `fl`）→ ② 断电重启（让 Journal 写态与 NAND 实际内容分离）→ ③ 干净关机：`fl` → 断电 → ④ 再 `wr 0 8` → **直接断电**（不敲 `fl`）→ ⑤ 重新上电 → `rd 0 8 c` |
 | **预期** | 重启日志 `[INF] [FTL ] boot type=2 cp_seq=<N> journal_entries=<E>`（`type=2` = `BOOT_POWER_FAILURE`）<br>`rd PASS` |
-| **判据** | 掉电回放：Journal 先落（写即入 journal），重启按 `page_seq` 回放 ⇒ L2P 一致。`type=1` = `BOOT_CLEAN_START`（若先 `fl` 再断电）。 |
-| **失败** | `rd FAIL` ⇒ 掉电一致性破。回退看 P0-2 与 `ftl_revision_history.md v0.50`。 |
+| **判据** | ① `rd PASS`；② `journal_entries` 应是**本轮实际写量**的量级（`wr 0 8` = 8 条，加上前面几轮的累计）；**若出现 `30×127+1 = 3811` 这类「整圈数」** ⇒ 回放扫到了上一圈遗留的旧页 = 缺陷未修净。③ `type=1` = `BOOT_CLEAN_START`，**判据是「掉电前恰好有一次 Checkpoint 覆盖了全部已写条目」**，**不是**「敲过 `fl`」——`fl` 走 `ftl_flush`，只做 `l2p_cache_flush_all` + `journal_flush_page`，**不调 `checkpoint_create`**（`src/ftl/ftl.c:1250`）。所以 `fl` 后断电**仍可能** `type=2`。这条路径同样必须验——v0.64 的正面修复就在 `ftl_boot_clean_start`。 |
+| **失败** | `rd FAIL at byte 0: got 00000000 expect 55555555` ⇒ 掉电一致性破（v0.64 修复前的确切签名）。回退看 P0-2 / v0.50 / **v0.64**（`journal_scan_latest` + `journal_resume`）。 |
+| **前提** | 步骤 ② 不可省：它让 `sequence_counter` 与写指针都离开 NAND 真值，正是缺陷的触发条件。 |
 
 ---
 
-## 7. GC 触发 + Free Pool 不流失（P1-1 / P1-2 / P1-3 / P0-2）
+## 7. GC 触发 + Free Pool 不流失（P1-1 / P1-2 / P1-3 / P0-2 / v0.63）
 
-> ⚠ **可达性（2026-10-13 上板后补）**：空闲板**不会**出现 `[GC]` 行，这是设计、非缺陷。
-> 五路触发（`gc_check_triggers`，`gc.c:659`）只在 `ftl_service_normal` 被调，而真空闲
-> （`inflight == 0`）走 `ftl_service_idle`（`ftl.c:711`）——它有**自己的**补池循环、门在
-> `free_count < FREE_POOL_TARGET`（`ftl.c:398`），根本不调 `gc_check_triggers`。
-> ⇒ T1/T4（水位）需 `free < 32` / `≤ 8`（现 ~3713，够不到）；**T3（定时 500 ms）也只在
-> `ftl_service_normal` 判**（`gc.c:679`），空闲期不经过。**手测唯一入口 = T2。**
+> ⚠ **可达性（v0.63 重写）**：GC 现在是**纯水位驱动**——`gc_check_triggers`（`gc.c`）只看
+> T1（`free < FREE_POOL_TARGET(32)`）/ T4（`≤ FREE_POOL_EMERGENCY(8)`）/ T5（磨损比），
+> **T2 写入量与 T3 定时已删**（参考层零出处，见 `ftl_revision_history.md v0.63`）。
+> 求值点统一为 `ftl_gc_evaluate`（`ftl.c`），**IDLE 与 NORMAL 两条后台路径都从这里过**
+> （BUSY 让路，不判）。⇒ 空闲板 `free ≈ 3713 ≫ 32`，**按设计就不该跑 GC** ——
+> 上板看不到 `[GC]` 行是**正确行为**，不是失败。
 >
-> **T2 配方**：`total_writes` 按**页编程次数**计（`ftl.c:140`：一个子操作 +1，**不是** CW 数），
-> 一次 `wr 0 32` = 4 个 pair-page = **+4** ⇒ 命中 `total_writes % 1024 == 0` 需 **≈256 次
-> `wr 0 32`**（脚本灌 UART 可行，手敲不现实）。要造出真 victim 还须**重复写同一段 LBA**
-> （旧页变无效），否则 `gc_select_victim` 找不到可回收块、**只打日志不搬**。
-> 想缩短只能临时调 `GC_INTERVAL_WRITES`（`gc.h:31`，1024→32）——那是源码改动。
+> **手测入口 = 临时抬高水位**（唯一的临时源码改动，验完改回）：
+> 1. 上板敲 `info` → 记下 `free=F`（如 3713）。
+> 2. 把 `include/ftl/allocator.h:50` 的 `FREE_POOL_TARGET` 由 `32U` 改成 `F + 2U`
+>    （deficit = 2 ⇒ `⌈2/PLANE_NUM⌉` = 1 个 SB，最小可观测工作量）。
+> 3. `make clean && make all` → 烧 `build/firmware/debug/bin/debug.bin` → 复位。
+> 4. 验完**改回 `32U`** 并重编。
 
 | | |
 |---|---|
-| **操作** | 持续 `wr` 至 T2 命中（≈256 次 `wr 0 32`，见上） |
-| **预期** | `[INF] [GC] trig=0x<XX> free=<F> op=<O> writes=<W>`（`trig` 位见 `gc.h` `GC_TRIGGER_*`：T1=0x01 … T5=0x10，可多位）<br>`[INF] [GC] victim p0=<b0> p1=<b1> vr=<v> er=<e> cp=<c> yp=<y> cost=<k>` |
-| **判据** | ① `free` **不单调下降**（GC 擦后归还）；② `trig` 命中位与场景相符（本配方下应为 **`0x02`**）；③ victim 的 `vr/er/cp/yp` 四项**都参与** cost（P1-1 四维加权）。 |
-| **失败** | `free` 慢性流失 ⇒ 疑似 P0-3（日志块冷 region 卡块，本批**未修**，见 §9）；`IO_ERROR` 出现 ⇒ 记下上下文。 |
+| **操作** | 按上方 1~3 步抬高水位后复位，观察开机日志（**无需敲任何命令**） |
+| **预期** | 开机后第一个 IDLE tick：<br>`[INF] [GC] trig=0x01 free=<F'> op=<O> writes=<W>`<br>`[INF] [GC] victim p0=<b0> p1=<b1> vr=<v> er=<e> cp=<c> yp=<y> cost=<k>`<br>**各一行**（本配方 budget = 1 个 SB） |
+| **判据** | ① `trig` 含 **`0x01`**（T1 水位；位值见 `gc.h` `GC_TRIGGER_*`：T1=0x01 / T4=0x08 / T5=0x10，0x02/0x04 已随 T2/T3 退役）；② victim 的 `vr/er/cp/yp` 四项**都参与** cost（P1-1 四维加权）；③ **`[GC] victim` 行数 = 1** —— 这同时是 v0.63 修掉的 IDLE 补池 `uint32` 下溢的判据（旧代码 `target -= 2U` 在 deficit 为奇数时回绕 `0xFFFFFFFF`，会把 closed 链全搬全擦、连打几十行）。 |
+| **⚠ 不要这样判** | 拿「`free` 上升」当判据——一次 GC 迭代是「取 2 块目标页 + 还 2 块 victim」，**净变化 ≈ 0**。证据是 `[GC]` 两行 + 随后的 `rd PASS`。 |
+| **失败** | `free` 慢性流失（需真实压测才显） ⇒ 疑似 P0-3（日志块冷 region 卡块，本批**未修**，见 §11）；`IO_ERROR` 出现 ⇒ 记下上下文。 |
 
 ---
 
@@ -163,7 +170,7 @@ Binary size: 189728 bytes
 | **预期** | 全部 `rd PASS` |
 | **判据** | ① 一次 512B 写 = 1 条 L2P entry + 1 条 journal；② 页内允许空洞（CW 子集编程），页基址由**首个写过 CW** 反推；③ GC/WL 逐 CW 读 META 反查 L2P（v0.60 有效性 ③），空洞不误判。 |
 | **失败** | ③ 在 GC 后 `rd FAIL` ⇒ 逐 CW 有效性/搬移有误（v0.59/v0.60 交叉点）。 |
-| **已知代价** | 单 plane 子操作浪费另一 plane 同页（**P2-6**，登记未修，非本批判据）。 |
+| **已知代价** | 单 plane 子操作浪费另一 plane 同页（**P2-6**）——**v0.66 已由页打包写缓冲消除**（同一 pair 窗口的多次写攒成一页再编程）；见 §11。 |
 
 ---
 
@@ -171,9 +178,10 @@ Binary size: 189728 bytes
 
 | 项 | 说明 |
 |---|---|
-| **P0-3 L2P 日志块压缩** | 冷 region 卡块 ⇒ 碎片化负载下 `free` 会缓慢流失。**本批刻意未修**（依赖 P0-2 先上板验证）。长时压测前才必须补。 |
-| **P2-6 单 plane 子操作** | 随机 512B 写浪费另一 plane 页。登记未修。 |
-| **`ftl_boot_scan_write_pointer`** | 死代码（主路径不调用），待删。 |
+| ~~**P0-3 L2P 日志块压缩**~~ | ✅ **已修（v0.65）**。见 §12。 |
+| ~~**P2-6 单 plane 子操作**~~ | ✅ **已定案（v0.66）**：登记修法（per-plane 独立写指针）**不可实现**（multi-plane 要求两 plane 同页地址——Micron `MT29F4G08ABADAWP` §Two-Plane Addressing、ONFI 3.2 §3.1.1）；唯一解 = **§七 方案 A 页打包写缓冲**已落地（`ftl_wbuf_t`）。判据 = `wp <lba> <n> <k>` 一次提交 k 组同窗口小写 ⇒ `info` 的 `total_writes` 只 +1、`ftl_wbuf_flush` 打一行。 |
+| ~~**`ftl_boot_scan_write_pointer`**~~ | ✅ **已删（v0.65）**。 |
+| **波 4（GC Bitmap Layer 2 / Prefetch / 多流 hint）** | 未排期。Layer 2 的正确性窗口已由 v0.43「擦除前 flush」闭合，只是掉电后**断点续搬**的优化。 |
 | **`read_recovery` 写保留地址 0x89** | 用户明确不处理。 |
 | **`CONFIG_FC_RAID`=0** | RR Stage 3 不实现（边界，勿翻）。 |
 
@@ -188,7 +196,7 @@ Binary size: 189728 bytes
 | `anchor_seq=0 dyn=0`（丢映射） | §3 / `metadata.c:485,981` |
 | `max_ec=0`（Wear 没回填） | §4 / `wear.c` |
 | `rd FAIL`（静态） | §5 / §10 |
-| `rd FAIL`（掉电后） | §6 / P0-2 |
+| `rd FAIL`（掉电后） | §6 / P0-2 / **v0.64**（`journal_resume`） |
 | `free` 慢性流失 | §7 / **P0-3（未修）** |
 | `IO_ERROR` | 记上下文，回退对应 ADR |
 
@@ -204,11 +212,27 @@ Binary size: 189728 bytes
 | `[INF] [META] anchor load: loc=%d newest=%u seq=%lu` | `src/ftl/metadata.c:981` |
 | `[INF] [META] anchor_seq=%u dyn=%u cur_blk=%u live_blks=%u` | `src/ftl/metadata.c:485` |
 | `[INF] [WEAR] seq=%u pages=%u max_ec=%u min_ec=%u` | `src/ftl/wear.c:289` |
-| `[INF] [GC] trig=0x%02x free=%u op=%u writes=%lu` | `src/ftl/ftl.c:492` |
-| `[INF] [GC] victim p0=%u p1=%u vr=%u er=%u cp=%u yp=%u cost=%lu` | `src/ftl/gc.c:450` |
+| `[INF] [GC] trig=0x%02x free=%u op=%u writes=%lu` | `src/ftl/ftl.c:425`（`ftl_gc_evaluate`） |
+| `[INF] [GC] victim p0=%u p1=%u vr=%u er=%u cp=%u yp=%u cost=%lu` | `src/ftl/gc.c:449`（`gc_select_victim`） |
 | `[INF] [L2P] thrash=%u miss=%u%% hit=%lu miss_total=%lu` | `src/ftl/l2p_cache.c:138` |
 | `[INF] ftl[%u][%u][%u] free=%u op=%u spare=%u bad=%u closed=%u thrash=%u miss=%u%%` | `src/controller/cli.c:401` |
 | `[INF] wr done lba=%lu n=%lu status=%d` / `rd PASS` / `tr done` / `fl done` | `src/controller/cli.c:527-554` |
 
 > 日志级别前缀：`LOGE→[ERR]`、`LOGW→[WRN]`、`LOGI→[INF]`、`LOGD→[DBG]`（`include/common/log.h:39-44`）。
 > 开机期（`ftl_init` 内）的 `[META]`/`[WEAR]` 是 **INFO**，`log level debug` 在 CLI 里敲、看不到它们。
+
+---
+
+## 12. v0.65：表自持 / 多实例 / OOB 出厂坏块 / L2P 压缩 / rr 持久化
+
+> ⚠ **本节的介质版本已从 2 提到 3** ⇒ 首次烧入 v0.65 固件**必然**走一次全片自动格式化
+> （§1 的横幅会出现）。这是预期，不是失败。
+
+| # | 操作 | 预期串口输出 | 判据 |
+|---|---|---|---|
+| 12.1 | `make clean && make all` | 0 warning；AXI_RAM **283.1/384 KB (73.7%)**；`Binary size: 190952` | `_Static_assert(sizeof(g_ftl) + 20KB ≤ 384KB)` 编译期通过 ⇒ 单实例装得下 |
+| 12.2 | 首启 | 自动格式化横幅（版本 2→3） | 见 §1 |
+| 12.3 | `bbt`（只读） | 坏块图与器件出厂标记一致 | **OOB 出厂扫描**：判据是每块首页 spare 首字节（列 2048），非「读失败/全 FF」 |
+| 12.4 | `info` → 记 `free=F` → 反复 `wr`/`rd` 数百轮 → 再 `info` | `free` **不单调下降**；无 `IO_ERROR` | **P0-3 压缩**生效：日志块被回收，不再「冷 region 卡块」永久占用 |
+| 12.5 | `wr`/`rd` 冒烟 + 断电重启 | `[WEAR] seq=… pages=… max_ec=… min_ec=…` 与关机前一致 | **rr 持久化**：Wear 条目 12B（含 `last_ecc`/`rising_count`/`health`），回放后计数一致 |
+| 12.6 | 观察 `[META] log-block:`（`log level debug`） | 日志块 plane 轮转正常 | 压缩触发时不再出现「无块可分配」 |
