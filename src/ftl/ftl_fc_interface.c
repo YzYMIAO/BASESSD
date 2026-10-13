@@ -224,8 +224,12 @@ static ftl_status_t ftl_cmd_build_pair_chain(fc_command_t *cmd, const nand_pba_t
         /* ⚠ plane 号取自**段内偏移**（plane_first + i），与位图的绝对编号一致；
          *   pba 的下标一律用 **plane 号**（不是 i）——单 plane 命令的 plane_first 可能是 1
          *   （paa 的 plane 位决定），此时 i==0 而 plane==1，用 pba[i] 会拿到 plane0 的行地址。 */
-        const uint8_t  plane      = (uint8_t)(plane_first + i);
-        const uint32_t plane_bits = mask & ((uint32_t)((1U << CW_NUM) - 1U) << ((uint32_t)plane * CW_NUM));
+        const uint8_t plane       = (uint8_t)(plane_first + i);
+        /* 本 plane 段内**局部** CW 位（右移到 bit0 起）——下方内层用 `1U << cw` 逐位测，
+         * 必须与局部下标对齐。⚠ 若在此保留**绝对**位（`mask & (0xF << plane*CW_NUM)`），
+         * plane ≥ 1 时高位落在 bit4..7，而 cw 只有 0..3 ⇒ 该 plane 恒判「无 CW」静默不建链
+         * ⇒ multi-plane 命令只覆盖 plane 0 ⇒ fc.c 的 planes_with_desc ASSERT。 */
+        const uint32_t plane_bits = (mask >> ((uint32_t)plane * CW_NUM)) & ((uint32_t)((1U << CW_NUM) - 1U));
         uint8_t        cw;
 
         if (plane_bits == 0U)
