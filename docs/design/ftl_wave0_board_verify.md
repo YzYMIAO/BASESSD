@@ -75,6 +75,7 @@ Binary size: 189728 bytes
 | **预期** | `[INF] [WEAR] seq=<S> pages=<P> max_ec=<M> min_ec=<m>` |
 | **判据** | Wear 表落块 62（页式追加日志）。`max_ec` 应**非 0** 且**随磨损增长**（写+GC 后二次开机 `max_ec` ≥ 首次）。 |
 | **失败** | `max_ec=0` 且 `min_ec=0` ⇒ 回填失败（等同旧行为「每次上电归零」）。回退看 `wear.c` / P0-1。 |
+| **前提** | ⚠ `max_ec` 要**非 0 必须先发生过一次真实擦除**（GC 的 `gc_erase_and_free` 或 WL）。至今零 GC/零擦除 ⇒ **`max_ec=0` 是正常的**，不是失败。擦除只由 §7 的 GC 配方（≈256 次 `wr 0 32`）产生 ⇒ **先跑 §7 再验 §4**。 |
 
 ---
 
@@ -110,11 +111,24 @@ Binary size: 189728 bytes
 
 ## 7. GC 触发 + Free Pool 不流失（P1-1 / P1-2 / P1-3 / P0-2）
 
+> ⚠ **可达性（2026-10-13 上板后补）**：空闲板**不会**出现 `[GC]` 行，这是设计、非缺陷。
+> 五路触发（`gc_check_triggers`，`gc.c:659`）只在 `ftl_service_normal` 被调，而真空闲
+> （`inflight == 0`）走 `ftl_service_idle`（`ftl.c:711`）——它有**自己的**补池循环、门在
+> `free_count < FREE_POOL_TARGET`（`ftl.c:398`），根本不调 `gc_check_triggers`。
+> ⇒ T1/T4（水位）需 `free < 32` / `≤ 8`（现 ~3713，够不到）；**T3（定时 500 ms）也只在
+> `ftl_service_normal` 判**（`gc.c:679`），空闲期不经过。**手测唯一入口 = T2。**
+>
+> **T2 配方**：`total_writes` 按**页编程次数**计（`ftl.c:140`：一个子操作 +1，**不是** CW 数），
+> 一次 `wr 0 32` = 4 个 pair-page = **+4** ⇒ 命中 `total_writes % 1024 == 0` 需 **≈256 次
+> `wr 0 32`**（脚本灌 UART 可行，手敲不现实）。要造出真 victim 还须**重复写同一段 LBA**
+> （旧页变无效），否则 `gc_select_victim` 找不到可回收块、**只打日志不搬**。
+> 想缩短只能临时调 `GC_INTERVAL_WRITES`（`gc.h:31`，1024→32）——那是源码改动。
+
 | | |
 |---|---|
-| **操作** | 持续 `wr`（轮转 LBA，写量 > 1024 或空闲 ≥ 500ms）触发 T2/T3 |
+| **操作** | 持续 `wr` 至 T2 命中（≈256 次 `wr 0 32`，见上） |
 | **预期** | `[INF] [GC] trig=0x<XX> free=<F> op=<O> writes=<W>`（`trig` 位见 `gc.h` `GC_TRIGGER_*`：T1=0x01 … T5=0x10，可多位）<br>`[INF] [GC] victim p0=<b0> p1=<b1> vr=<v> er=<e> cp=<c> yp=<y> cost=<k>` |
-| **判据** | ① `free` **不单调下降**（GC 擦后归还）；② `trig` 命中位与场景相符；③ victim 的 `vr/er/cp/yp` 四项**都参与** cost（P1-1 四维加权）。 |
+| **判据** | ① `free` **不单调下降**（GC 擦后归还）；② `trig` 命中位与场景相符（本配方下应为 **`0x02`**）；③ victim 的 `vr/er/cp/yp` 四项**都参与** cost（P1-1 四维加权）。 |
 | **失败** | `free` 慢性流失 ⇒ 疑似 P0-3（日志块冷 region 卡块，本批**未修**，见 §9）；`IO_ERROR` 出现 ⇒ 记下上下文。 |
 
 ---
