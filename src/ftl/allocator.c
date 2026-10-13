@@ -287,11 +287,17 @@ static void allocator_close_sb(ftl_allocator_t *alloc, super_block_t *sb)
         ftl_block_set_sb(b, closed_idx);
     }
 
+    /* ⚠ 必须先清 valid 再拷贝（顺序不可换）。条目 valid 语义见 allocator.h：1=Open，0=Closed；
+     * GC（gc_select_victim）与 WL 遍历 closed_sb_list 时按 `sb->valid != 0U` 跳过
+     * （注释「跳过仍为 Open 的 SB」）。若把 Open 态（valid=1）原样拷进列表，本条目对 GC/WL
+     * **永久不可见** ⇒ 选不出 victim ⇒ 空闲池只出不进 ⇒ 写最终永久失败。
+     * 与重建路径 allocator_add_closed_sb（显式 valid=0）保持同一约定。 */
+    sb->valid = 0U;
+
     if (alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX)
     {
         alloc->closed_sb_list[alloc->closed_sb_count++] = *sb;
     }
-    sb->valid = 0U;
 }
 
 /* ── 关闭 / 回收 ── */

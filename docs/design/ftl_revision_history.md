@@ -3355,3 +3355,71 @@ flush ⇒ **不合并**；单个孤立的 4-LBA 写仍与今天相同（分配�
 `CONFIG_FC_RAID` 保持 0；`read_recovery.c` 保留地址 0x89 不碰；`journal.c`/`crash.c` 断言策略不变；
 不动 `include/nand/nand_config.h`；不引入 DRAM 常驻 L2P；不重排 `GC_TRIGGER_*` 位值；
 不把 `ftl_trim` 改成异步（只登记在飞 flush 的既有竞争）；不把 CLI 改造成队列（用最小诊断命令替代）。
+
+---
+
+## v0.67 — 修 `allocator_close_sb` 的 valid 顺序缺陷：运行期关闭的 SB 对 GC/WL 永久不可见
+
+**日期**：2026-10-14
+
+**范围**：① 生产缺陷修复（`src/ftl/allocator.c`，一行换序）；② 测试基建修复
+（`tests/unit/ut_main.c` 套件路径展开）。**上板跑 FTL L0 UT 顶出来的**。
+
+### 问题
+
+板端 `test` 跑到第 4 例失败：
+
+```
+Error:test_ftl.c:345 assertion failed: a->closed_sb_list[0].valid == 0U (1 == 0)
+```
+
+`include/ftl/allocator.h:79` 的字段语义是**字段级**的：`valid` = `1=正在使用（Open），0=已关闭`。
+GC（`gc.c:387`）、WL（`wear_leveling.c:129`）、`gc_erase_and_free`（`gc.c:220`）三处遍历都以
+`sb->valid != 0U → 跳过` 为闸门，注释写的是「跳过仍为 Open 的 SB」；重建路径
+`allocator_add_closed_sb` 也显式 `valid = 0U` 并在文档里注明「**`gc_select_victim` 依赖**」。
+
+但 `allocator_close_sb` **先拷贝、后清 valid**，清的是**源**（`hot_sb`/`cold_sb`）而非**副本**：
+
+```c
+alloc->closed_sb_list[alloc->closed_sb_count++] = *sb;   /* 拷进去的仍是 Open 态 valid=1 */
+sb->valid = 0U;                                          /* 只失效了 Open 槽 */
+```
+
+⇒ **运行期关闭的每个 SB 都带 `valid == 1` 进列表 ⇒ GC/WL 一律跳过**；只有开机重建路径的条目可见。
+`allocator_close_open_sb` 的文档注释本来就写着「进 closed_sb_list + **valid=0**」——
+**意图正确，实现写错了对象**。
+
+### 影响（潜伏）
+
+`free_count` 只出不进：水位跌破 `FREE_POOL_TARGET(32)` → `gc_check_triggers` 触发 T1 →
+`gc_select_victim` 全表跳过 → 无 victim → 紧急 GC 无块可回收 → `allocator_alloc_pair` 返回
+`NAND_PBA_INVALID` → **写永久失败**。WL 同理（一条候选都看不到，磨损均衡停摆）。
+
+此前未暴露的原因：SB 需写满 64 页才关闭，GC 需 `free < 32` 才触发；板子开机后 `free=3710`
+（`F2 rebuild blocks=2`），短测 `wr`/`rd` 触不到。
+
+### 修法
+
+`allocator_close_sb` 把 `sb->valid = 0U;` 提到拷贝**之前**，与重建路径收敛到同一约定。
+两处调用者（`allocator_alloc_pair` 写满关闭 / `allocator_close_open_sb` 显式关闭）语义不变。
+
+### 顺带：`test /ftl/` 恒「NO test run」
+
+munit 的过滤（`tests/framework/munit.c:1297-1303`）要求过滤串 = **套件累积前缀 `pre` + 用例名前缀**。
+用例挂在**叶子**套件下，其 `pre`（如 `/ftl/allocator/`）比 `/ftl/` 长 ⇒ 第一条 `strncmp` 即失配。
+⇒ 只有叶子全路径（`/ftl/allocator/`）或全路径 + 用例名前缀能命中。
+
+`ut_run_all`（`tests/unit/ut_main.c`）新增深度优先收集「持有用例的套件」全路径，把「以 `/` 结尾」
+的实参展开为其下全部叶子套件路径。展开幂等，命中不到叶子的串原样透传。⇒ `test /ftl/` 按直觉工作。
+
+### 判据
+
+`make tests UT=FTL` / `make tests` 均 0 warning；上板 `test /ftl/` → 53/53 PASS
+（`close_open_sb` 此前是必 FAIL 的一例）。
+
+### 附：为什么 UT 值得先跑
+
+本缺陷由 `test_alloc_close_open_sb` 一例直接顶出来；同一套件的 `test_gc_victim_skips_open`
+（`test_ftl.c:817/831` 手工置 `valid = 1U` 模拟 Open 条目）**早已把「`valid != 0` = 跳过」的
+正确约定写进了断言**。两例一个描述约定、一个验证生产者，合起来夹住这条潜伏缺陷——
+v0.66 那轮 53 例纯静态审查没能发现它，因为缺陷在**生产代码**里，用例本身看不出矛盾。

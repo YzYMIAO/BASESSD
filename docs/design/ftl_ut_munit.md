@@ -361,13 +361,20 @@ endif
    **无需 `make clean`**（对象目录分置）
 3. 上板：
    - `test --list` → 确认 8 个 `/ftl/*/` 套件全部列出
-   - `test /ftl/`（或逐个）→ 全 PASS（尤其 `open_sb_never_picks_metadata`）
+   - `test /ftl/` → 全 PASS（尤其 `open_sb_never_picks_metadata`）
+     > ⚠ munit 的过滤要求「过滤串 = 套件累积前缀 + 用例名前缀」（`munit.c:1297-1303`），
+     > 套件前缀本身匹配不到任何用例 ⇒ 裸 `test /ftl/` 原会打印 `NO test run`。
+     > **2026-10-14 已在 `ut_main.c` 的 `ut_run_all` 里加了「以 `/` 结尾的实参展开为叶子套件路径」**，
+     > 故 `test /ftl/`、`test /fc-nand/`、`test /` 现按直觉工作；`test /ftl/allocator/<用例名>`
+     > 这类全路径过滤串行为不变。
    - 随后执行 **`hil_ut_design.md` Part B~D**（接口行为 / 跨重启 / 后台观测）
 
 ## 8. 不做（第一版边界）
 
 - **不做 mock**：不建 `fc_submit` 桩 / Mock NAND / 掉电注入器
 - 不改 `tests/framework`（munit 适配已完成）；不建 host（x86）target
+  （**2026-10-14 例外**：`tests/unit/ut_main.c` 的 `ut_run_all` 加了套件路径展开——见 §7.3；
+  `tests/framework/munit.c` 本身仍未动）
 - ~~不动孤儿 `test_gc.c`/`test_l2p.c`/`test_nand.c` 占位~~ ✅ **2026-10-13 已删**（连同 `test_rebuild.c`），
   本方案落在一个**新**的独立测试文件（`test_ftl.c`，用户自建）
 - 不扩 linker 加 region
