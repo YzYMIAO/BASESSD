@@ -92,7 +92,7 @@
 > **单一事实来源**：`include/ftl/metadata.h`（布局宏 + `ftl_partition_t` 分区表声明 +
 > 打包映射 `ftl_l2p_region_placement()`），运行期分区表本体在 `src/ftl/metadata.c`
 > 的 `g_ftl_partitions[]`（6 项）。**改布局只改这一处。**
-> （几何量与 CW/LBA 地址编码仍在 `ftl_config.h`——布局归 metadata，几何归 config。）
+> （几何量与地址编码仍在 `ftl_config.h`——布局归 metadata，几何与 LBA/PBA 编码归 config。）
 
 ### 2.1 Flash 分区图（当前几何下的展开值）
 

@@ -285,7 +285,8 @@ struct fc_descriptor_t {
 
 #### 2.3.1 三套地址空间（v24 定稿，v47 分界调整）
 
-同一颗芯片上有三套地址，**位序刻意不同**，各司其职（定义见 `include/nand/nand_config.h`）：
+同一颗芯片上有三套地址，**位序刻意不同**，各司其职（PAA 与展开式 `nand_addr_t`
+定义于 `include/nand/nand_config.h`；**PBA 定义于 `include/ftl/ftl_config.h` §三.2**）：
 
 | | 低位优先布局 | 用途 | 谁定义 |
 |---|---|---|---|

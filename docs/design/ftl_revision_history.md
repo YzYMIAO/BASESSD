@@ -2459,7 +2459,7 @@ per-block 存是重复的。**v0.12 Policy B**（`cc09580`+`1927762`）已把前
 
 | 层 | 改动 | 文件 |
 |---|---|---|
-| 地址辅助 | `ftl_lba_cw/plane/page/pair_base`、`pba_page`、`ftl_cw_span_mask` | `include/ftl/ftl_config.h` §八 |
+| 地址辅助 | `ftl_lba_cw/plane/page/pair_base`、`pba_page`、`ftl_cw_span_mask` | `include/ftl/ftl_config.h` §八（现 §三，见 v0.72） |
 | 请求层 | 缓冲步进 = `FTL_IU_BYTES`（512 B/扇区）；`io.count` = 扇区数 | `src/controller/request.c`、`controller.c` |
 | 写路径 | 1 子操作 → 逐 CW 一条 L2P entry + 一条 journal；`allocator_alloc_pair` 成对取页 | `src/ftl/ftl.c` |
 | 读路径 | 逐 LBA 查 L2P，按物理 plane 分组；pair 窗口内至多两 plane 段 | `src/ftl/ftl.c` |
@@ -3755,3 +3755,79 @@ crash record cleared
 启动横幅的故障行只打 4 个字段，逼着人必须依赖"当场 dump"。可复用现成的
 `fault_decode_cfsr` / `fault_decode_hfsr` 把 `SP/xPSR/MMFAR/BFAR` + CFSR/HFSR 的
 **位名解码**一并打进开机日志，让单条启动日志自足。**未排期。**
+
+---
+
+## v0.72 — 结构重整：地址与布局的「归属归位」（纯文件组织，介质格式不变）
+
+**日期**：2026-10-14
+
+**范围**：`include/ftl/ftl_config.h`、`include/ftl/metadata.h`、`include/nand/nand_config.h`、
+7 个 FTL 头的 include 行、`src/ftl/metadata.c`（并删 `src/ftl/ftl_config.c`）、
+`src/fc/fc_interface.c` / `src/fc/fc_data_path.c` 各一行。
+**不动算法路径、不动地址位序、不动介质格式 ⇒ `FTL_MEDIA_LAYOUT_VERSION` 保持 `3U`。**
+
+### 起因：三处「谁拥有这个事实」的错位
+
+判据 = `fc_nand_design.md §26` 的分层（HIL / FTL / FCC / DRAM；`src/fc/` + `src/nand/`
+合起来才是行业的一个硬件 FCC）。结构重整收的是**功能定义分布不合理**，两处已修：
+
+| # | 错位 | 决定性证据 | 修法 |
+|---|---|---|---|
+| ① | **元数据区布局**（池尺寸 / 块基址 / 分区表 / L2P region 打包公式）写在 `ftl_config.h` —— 而它是 `include/ftl/` 下**唯一不对应任何 `.c` 模块**的头 | 布局的运行期唯一消费者 `ftl_is_metadata_block` 在 `metadata.c` | 整体搬进 `ftl/metadata.h`，分区表下沉 `metadata.c`，删 `ftl_config.c` |
+| ② | **PBA**（`nand_pba_t` + `PBA_*` + `pba_*` 全套）写在 `nand/nand_config.h` —— 而它是 FTL 的地址货币 | `src/nand/`、`src/fc/` 的真实代码对 `nand_pba_t` **零引用**（只有注释）；且 `ftl_config.h:173` 已定义 `pba_page()` 而同族的 `pba_page_base()` 却留在 `nand_config.h` —— **同一访问器家族被劈成两半** | 整体搬进 `ftl/ftl_config.h` §三.2 |
+
+### ① 元数据区布局 → `metadata.h`（`998d59d`）
+
+- 池尺寸宏、**全部基址宏**、逻辑表字节、`ftl_partition_t` / `g_ftl_partitions[]`
+  声明、打包公式 `ftl_l2p_region_placement()`、池几何与不重叠 `_Static_assert`
+  → `metadata.h`（「固定元数据区布局」）。
+- **基址宏必须与打包公式一起搬**：`ftl_l2p_region_placement` 依赖 `L2P_BASE_BLOCK`；
+  若基址留下，就得让 ftl_config.h include metadata.h，而成环。
+- **唯一一处实质解耦**：`metadata.c` 原先 include `ftl/l2p_cache.h`，只为拿
+  `ftl_l2p_region_placement` **一个符号** —— metadata 为一个**布局公式**依赖
+  **L2P 缓存模块**，方向是反的。随搬动一并删掉。
+- `ftl_config.h` 瘦身为「§一 几何 + §二 自检 + §三 地址编码」。
+  ⚠ **内部编号未重排 ⇒ §三 就是旧 §八**（全文 `§八` 引用已改为 `§三`）。
+
+### ② PBA → `ftl_config.h` §三.2（`797c473`）
+
+`ftl_config.h` §三 扩成「地址编码（LBA 侧 + PBA 侧）」：拓扑位宽、全部 `PBA_*_SHIFT` /
+`_MASK`、`nand_pba_t`（**名字不变**）、`NAND_PBA_INVALID`、`pba_to_*` / `pba_from_addr` /
+`paa_to_pba` / `pba_page_base` / `pba_with_*` / `pba_same_page` / `pba_is_valid` /
+`addr_from_pba`，以及「三套地址位序为什么不同」的推导注释整段随迁。
+`nand_config.h` 只剩**器件域**：几何 / ONFI 时序 / 字段位宽、PAA 与全部 `paa_*`、
+`nand_addr_t`、`addr_from_paa`。
+
+**唯一的非机械项**：`PBA_PLANE_SHIFT` 是 FC 与 FTL **共用**的低位编码（值恒等于
+`CW_WIDTH`），FC 侧铸 `desc->meta` 也在用（`fc_interface.c:214`、`fc_data_path.c:168`）
+⇒ 不能随 PBA 走。**改名 `PLANE_CW_SHIFT`**（中性名）留在 `nand_config.h` 新增的
+「共享低位编码」小节，与 `PLANE_CW_MASK` / `lba_to_meta` 同处；`PBA_PAGE_SHIFT` 随之
+改从 `PLANE_CW_SHIFT` 推导（数值不变，仍 3）；`PLANE_CW_MASK` 改写为自包含
+（不再引 `PBA_*`）+ 一条 `_Static_assert` 钉住「plane 位紧邻 cw 位之上、中间不留空档」。
+**这是本次唯一动 `src/fc/` 的地方（两行改名）。**
+
+⚠ **代价（已知并接受）**：`ftl_config.h` include 了 `fc/fc.h` ⇒ 需要 `nand_pba_t` 的
+FTL 头（`bst.h` / `allocator.h` / `gc.h` / `pending.h` / `read_recovery.h` / `journal.h` /
+`ftl_fc_interface.h`）补 `ftl_config.h` 后，**连带把 FC 层拉进这些头**。
+若将来要收紧，拆一个只依赖 `nand_config.h` 的叶子头即可。
+顺带：`include/common/ftl_types.h` **直接删掉 `nand_config.h`**（只在注释里提地址类型，
+函数体一个符号都不用）；`l2p_cache.h` 的 `nand_config.h` 换成 `ftl_config.h`。
+
+### 验证（两次搬动都是纯组织调整）
+
+| 判据 | 结果 |
+|---|---|
+| `git stash` A/B（HEAD vs 改后） | debug `.data` `0x1e4` / `.bss` `0x48b44` / `.bss.g_ftl` `0x43968`，bin 196224 B；release `0x1e0` / `0x48b3c` / `0x43968` —— **逐项相同** |
+| 搬走的 `_Static_assert` 仍生效 | 临时把 `ANCHOR_POOL_BLOCKS` 改成 1 ⇒ 编译期如期失败 |
+| 改名 / 改写项逐值等价 | 离线比对旧参考实现：`PLANE_CW_SHIFT` / `PLANE_CW_MASK` / `PBA_PAGE_SHIFT` 全等；`lba_to_meta`（全 plane×cw×抽样 LBA）、`pba_from_addr∘addr_from_pba`、`pba_to_paa∘paa_to_pba` 互逆 —— 全 **0 mismatch** |
+| 分层自检 | `src/fc/`、`src/nand/` 无存活 `PBA_` 前缀宏；`nand_config.h` 无 `nand_pba_t` / `pba_` |
+| `make format-check` | 过；debug / release 0 error |
+
+⚠ **上板验证未做**（留待用户）。⚠ `tests/unit/test_fc_level3.c:1521/1547` 两处
+`PBA_PLANE_SHIFT` 需同步改成 `PLANE_CW_SHIFT`（测试源用户自建）。
+
+### 顺带订正
+
+`wear.h` 的全量快照页数注释写「17 页」是 v0.65 条目 8B→12B **之前**的旧值，
+实为 ⌈4096 ÷ 168⌉ = **25 页**（`wear.h` 一直是对的）。

@@ -4120,6 +4120,7 @@ Step 1 — ftl_fc_interface 层 + 地址体系
   │                                       ✅ 企业级两值枚举 FTL_OK=0 / FTL_ERROR=-1
   │                                       ✅ 删除 pba_t（已由 nand_pba_t 替代）
   ├── include/nand/nand_config.h          ✅ PBA/PAA 全套 40+ inline 函数
+  │                                       ⚠ v0.72 起 PBA 部分移至 ftl/ftl_config.h §三.2（本清单为 v0.28 时点）
   │                                       ✅ v0.28: nand_addr_t + pba_from_addr/addr_from_pba/addr_from_paa
   └── 废弃: firm_boot / l2p.h / garbage_collection / nand.h / nand_geometry.h 已清理
 
