@@ -32,6 +32,7 @@
  */
 
 #include "fc.h"
+#include "nand/nand_config.h" /* nand_paa_t（对外函数的行地址形参） */
 
 #ifdef __cplusplus
 extern "C"

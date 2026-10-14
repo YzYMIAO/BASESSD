@@ -63,7 +63,7 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
     {
         l2p_cache_line_t *line = &cache->lines[i];
 
-        /* 全部 entry 填 FTL_PBA_INVALID */
+        /* 全部 entry 填 NAND_PBA_INVALID */
         memset(line->entries, 0xFF, sizeof(line->entries));
         line->region_id    = 0U;
         line->state        = L2P_CACHE_INVALID;
@@ -306,7 +306,7 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
         }
         else
         {
-            /* 读失败，保持 INVALID，entries 为 FTL_PBA_INVALID */
+            /* 读失败，保持 INVALID，entries 为 NAND_PBA_INVALID */
             line->state = L2P_CACHE_INVALID;
         }
     }
@@ -314,7 +314,7 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
     return line;
 }
 
-/* l2p_cache_read — 读 lba 的 PBA；越界 / 未命中 / 未映射一律返回 FTL_PBA_INVALID */
+/* l2p_cache_read — 读 lba 的 PBA；越界 / 未命中 / 未映射一律返回 NAND_PBA_INVALID */
 nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba)
 {
     uint16_t          region_id;
@@ -323,7 +323,7 @@ nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba)
 
     if ((cache == NULL) || (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION))
     {
-        return FTL_PBA_INVALID;
+        return NAND_PBA_INVALID;
     }
 
     region_id = lba_to_region(lba);
@@ -332,7 +332,7 @@ nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba)
     line = l2p_cache_find_or_load(cache, region_id);
     if (line == NULL)
     {
-        return FTL_PBA_INVALID;
+        return NAND_PBA_INVALID;
     }
 
     return line->entries[entry_idx];

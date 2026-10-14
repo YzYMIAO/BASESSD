@@ -1,7 +1,6 @@
 #ifndef NAND_DISPATCH_H
 #define NAND_DISPATCH_H
 
-#include "fc/fc_types.h"
 #include "nand_config.h"
 #include "nand_fc_interface.h"
 

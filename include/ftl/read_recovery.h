@@ -36,7 +36,6 @@
 #include "ftl/ftl_config.h" /* nand_pba_t */
 #include "ftl/ftl_type.h"
 #include "ftl/l2p_cache.h"
-#include "nand/nand_config.h"
 
 #include <stdint.h>
 

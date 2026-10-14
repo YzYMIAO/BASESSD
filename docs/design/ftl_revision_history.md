@@ -3939,3 +3939,31 @@ include 上层头的文件（`common/` 其余 6 个头只 include libc），且�
 注释里「打破循环 include」的理由**与目录无关**——那是把 `pending_cb_t` 从 `pending.h`
 搬出来；文件搬到 `ftl/` **不产生环**（`ftl_types.h` 不 include `pending.h`，反之才是）。
 纯头文件归置：debug 192592 B / release 114924 B 与改前**逐字节相同**，0 新警告。
+
+### 补记（同日）② — 死 include 清理 + `FTL_PBA_INVALID` 归并（同上「同类体检」的其余四条）
+
+同一轮体检发现同类的还有四处，一并处理（纯 include/宏，二进制不变）：
+
+| # | 位置 | 问题 | 处置 |
+|---|---|---|---|
+| ① | `fc/fc_types.h` | 自称「FC 层最小依赖集」，却 include `common/common.h` + `nand/nand_config.h`，**两个都零使用**（连 `<stdint.h>` 都没直接 include） | 改为只 include `<stdint.h>` |
+| ② | `nand/nand_dispatch.h` | include `fc/fc_types.h` **零使用**，且方向是 **nand(下) → fc(上)** 的假层反依赖 | 删除该 include |
+| ③ | `ftl/read_recovery.h` | include `nand/nand_config.h` **零使用** | 删除 |
+| ⑤ | `ftl/l2p_cache.h:33` | `FTL_PBA_INVALID` 与 `ftl_config.h:232` 的 `NAND_PBA_INVALID` **同值同义**，两名并存 | 删 `FTL_PBA_INVALID`，全用 `NAND_PBA_INVALID` |
+
+**①的实质收益**：`fc_types.h` 是 `fc_command.h` / `fc.h` / `ftl_config.h` 的上游 ⇒ 那个死
+include 把 `<stdio.h> <stdlib.h> <string.h> <time.h> <ctype.h>` 灌进了整条链。实测
+`gcc -E -H src/ftl/ftl.c` 的依赖里出现 `/usr/include/stdio.h`。
+
+**②的连带发现（不是纯删）**：`fc_command.h` 一直靠 `fc_types.h` **顺带**拿到
+`DWORD`（定义在 `common/common.h`）与 `PLANE_NUM`/`CW_NUM`/`paa_to_plane`
+（定义在 `nand_config.h`）——这正是「隐式传递依赖」的典型。故：
+- `DWORD` / `uint8…` / `BYTE…` 一组历史别名从 `common/common.h` **下沉到
+  `common/ssd_types.h`**（只依赖 `<stdint.h>`；`common.h` 反过来 include 它，向后兼容）；
+- `fc_command.h` 显式 include `common/ssd_types.h`（`DWORD`）+ `nand/nand_config.h`；
+- `fc_interface.h` / `fc_data_path.h` 显式 include `nand/nand_config.h`。
+
+**验证**：`src/ftl/ftl.c` / `src/fc/fc.c` / `src/ftl/metadata.c` 的预处理依赖里
+`stdio.h` 命中 **0**；`include/common/` 恢复零跨目录 include；层图里 **`nand → fc` 边消失**；
+`FTL_PBA_INVALID` 全清。debug 192592 B / release 114924 B 与改前**逐字节相同**，
+0 新警告（release 仍只有既有的 `ftl_fc_interface.c:66/82` 两条）。

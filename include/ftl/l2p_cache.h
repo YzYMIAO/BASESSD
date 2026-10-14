@@ -10,7 +10,7 @@
  * 地址体系：
  *   lba_t → region_id (lba / 512) + entry_idx (lba % 512)
  *   entry = nand_pba_t（FTL 物理地址：CH/CE/LUN 拓扑 + 块/页/plane/CW）
- *   FTL_PBA_INVALID = 0xFFFFFFFF（未映射的 LBA）
+ *   NAND_PBA_INVALID = 0xFFFFFFFF（未映射的 LBA）
  *
  * 替换策略：CLOCK（近似 LRU，O(1) amortized）
  * 写回策略：Write-back（Dirty 标记，延迟写回 NAND）
@@ -29,8 +29,7 @@
  * L2P_REGIONS_PER_INSTANCE / L2P_REGION_SHIFT / L2P_REGION_MASK /
  * FTL_DIM_TOTAL）见 ftl/ftl_config.h §一；
  * L2P 块布局宏（L2P_BASE_BLOCK / L2P_BLOCKS）见 ftl/metadata.h「固定元数据区布局」。*/
-#define L2P_CACHE_SIZE  (64U)         /* cache 行数（可配 32/64/128）*/
-#define FTL_PBA_INVALID (0xFFFFFFFFU) /* 无效 PBA */
+#define L2P_CACHE_SIZE (64U) /* cache 行数（可配 32/64/128）*/
 
 /* ── Thrashing 检测（P1-4，设计 §6.5）──
  * 工作集远大于 64 行 cache（64×512 = 32K entry = 16 MiB LBA 空间，而盘 512 MiB）时，
@@ -118,7 +117,7 @@ static inline uint16_t lba_to_entry(lba_t lba)
 
 typedef enum
 {
-    L2P_CACHE_INVALID = 0, /* cache 行无效，entries 全 FTL_PBA_INVALID */
+    L2P_CACHE_INVALID = 0, /* cache 行无效，entries 全 NAND_PBA_INVALID */
     L2P_CACHE_CLEAN,       /* cache 行有效，未修改 */
     L2P_CACHE_DIRTY,       /* cache 行有效，已修改（需写回 NAND） */
     L2P_CACHE_FLUSHING,    /* 正在写回 NAND（不可驱逐，不可读写） */
@@ -226,7 +225,7 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun);
  *
  * @param cache  cache 上下文
  * @param lba    逻辑地址
- * @return PBA 映射值，FTL_PBA_INVALID 表示未映射或加载失败
+ * @return PBA 映射值，NAND_PBA_INVALID 表示未映射或加载失败
  */
 nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba);
 

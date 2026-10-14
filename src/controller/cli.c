@@ -575,7 +575,7 @@ static int uart_cli_map(int argc, char *argv[])
     }
 
     pba = l2p_cache_read(&ftl->cache, (lba_t)lba);
-    if (pba == FTL_PBA_INVALID)
+    if (pba == NAND_PBA_INVALID)
     {
         (void)LOGI("map lba=%lu -> INVALID (未映射)\r\n", (unsigned long)lba);
         return FUNC_STATUS_SUCCESS;

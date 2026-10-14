@@ -774,7 +774,7 @@ ftl_status_t ftl_sync_read_page(nand_pba_t pba, void *buffer, uint32_t length, c
      * 后果实例：L2P region 页读回垃圾 → l2p_cache_find_or_load 标 CLEAN → 垃圾 PBA
      * 被 flush 写回介质**永久化**，读路径再拿它当 ch/ce/lun 路由字段用。
      * 空页（哨兵层）也会命中 MATA_ERROR ⇒ 返回 FTL_ERROR ⇒ 调用者保持 entries
-     * 全 FTL_PBA_INVALID，与"未映射"语义一致（这正是各调用点的既有兜底分支）。 */
+     * 全 NAND_PBA_INVALID，与"未映射"语义一致（这正是各调用点的既有兜底分支）。 */
     if ((completion.status & FC_CW_STATUS_ERROR_MASK) != 0U)
     {
         (void)fc_command_release(cmd);

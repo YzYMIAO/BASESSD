@@ -2,6 +2,7 @@
 #define FC_DATA_PATH_H
 
 #include "fc_types.h"
+#include "nand/nand_config.h" /* PLANE_NUM / nand_paa_t */
 
 /*
  * FC 数据路径管线接口。

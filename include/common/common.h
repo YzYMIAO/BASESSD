@@ -1,5 +1,7 @@
 #ifndef COMMON_H__
 #define COMMON_H__
+#include "common/ssd_types.h" /* uint8/…/DWORD 等基础别名（下沉，避免拉进本头的 libc） */
+
 #include <ctype.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -14,13 +16,4 @@ typedef enum
     FUNC_STATUS_SUCCESS = 0,
     FUNC_STATUS_ERROR   = !FUNC_STATUS_SUCCESS
 } FuncStatus;
-typedef uint8_t  uint8;
-typedef uint16_t uint16;
-typedef uint32_t uint32;
-typedef uint64_t uint64;
-
-typedef uint8  BYTE;
-typedef uint16 WORD;
-typedef uint32 DWORD;
-typedef uint64 QWORD;
 #endif

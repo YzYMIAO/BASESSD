@@ -1,8 +1,7 @@
 #ifndef FC_TYPES_H
 #define FC_TYPES_H
 
-#include "common/common.h"
-#include "nand/nand_config.h"
+#include <stdint.h>
 
 /*
  * fc_types.h — FC 层基础类型

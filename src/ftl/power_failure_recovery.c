@@ -311,7 +311,7 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context       *ftl,
  *   ② bitmap 置位区：显式从 NAND 加载 region 页 → 置 CLEAN。
  *      该区页 = CP 时刻快照（CP 时已 flush 落盘），预载可复用给
  *      ftl_rebuild_closed_sb_list 的反查。不可直接置 CLEAN——line 的
- *      entries 仍是 init 时全 FTL_PBA_INVALID，read 会对有效映射返回假 INVALID。
+ *      entries 仍是 init 时全 NAND_PBA_INVALID，read 会对有效映射返回假 INVALID。
  *   ③ bitmap 未置位区：置 INVALID，下一访问懒加载 CP 时刻快照。
  *      该区未在本次 CP 落盘，NAND 页为更旧值/从未写，懒加载即正确。
  *
@@ -574,7 +574,7 @@ static void close_full_block(ftl_context_t       *ftl,
             {
                 continue;
             }
-            if ((cur != FTL_PBA_INVALID) && (cur == pba_with_cw(pba, cw)))
+            if ((cur != NAND_PBA_INVALID) && (cur == pba_with_cw(pba, cw)))
             {
                 ftl_block_add_valid(b); /* valid_count 单位 = CW */
                 if (stats != NULL)

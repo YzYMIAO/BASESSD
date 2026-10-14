@@ -1231,13 +1231,13 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
                 break; /* 还在写缓冲（未编程）：收缩到此为止，下一轮同步从缓冲取 */
             }
 
-            if (p == FTL_PBA_INVALID)
+            if (p == NAND_PBA_INVALID)
             {
                 break; /* 未映射：收缩到此为止 */
             }
 
             /* 边界不变量（fc.c 的 fc_poll_fill_queue 靠它）：**进 FC 的 PBA 必须合法**。
-             * L2P 条目既不是 FTL_PBA_INVALID 又不是合法 PBA ⇒ 映射表已损坏（介质 bit rot、
+             * L2P 条目既不是 NAND_PBA_INVALID 又不是合法 PBA ⇒ 映射表已损坏（介质 bit rot、
              * 半编程页被 ECC「纠」过、跨介质格式复用旧页）。**必须在此拦下**：
              * pba_to_ch/ce/lun 会把越界位当路由字段，放行即让 FC 按它直接索引
              * suspended[][][]（栈越界写）；且坏 PBA 还会经 pba_to_paa 掩位后建出一条
@@ -1654,7 +1654,7 @@ void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
             ftl_block_sub_valid(&ftl->alloc.blocks[gblock]);
         }
 
-        l2p_cache_write(&ftl->cache, local_lba, FTL_PBA_INVALID);
+        l2p_cache_write(&ftl->cache, local_lba, NAND_PBA_INVALID);
 
         /* ⚠ 取消映射也必须进 Journal（new_pba = INVALID）。L2P 的每一次变更都由
          * Journal 承载，掉电恢复靠回放重建——漏记这一条会让**掉电恢复把已 TRIM
