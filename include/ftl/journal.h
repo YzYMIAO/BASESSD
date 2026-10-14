@@ -19,6 +19,11 @@
  *
  * ⚠ 本模块整个不转断言（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 页，
  *   页头可能因掉电撕裂而非法，属预期情形，返回错误/跳过而非断言。
+ *
+ * 写模型（阶段 2 起）：
+ *   追加进 RAM 页缓冲（page_buf）——**页满不再同步落盘**，而是交给异步 job
+ *   （journal_kick / g_op_service[FTL_OP_JOURNAL]），使 host 写完成回调里不再嵌套
+ *   完成泵。需要屏障语义的调用者（GC/WL 的 F10、HIL `fl`）显式调 journal_flush_page。
  */
 
 #include "ftl/ftl_config.h" /* nand_pba_t */
@@ -59,6 +64,35 @@ typedef struct
  *   第 127 条会写出 page_buf 之外（踩到 l2p_journal_t 的后续字段）。*/
 #define JOURNAL_ENTRIES_PER_PAGE ((JOURNAL_PAGE_SIZE - JOURNAL_HEADER_SIZE) / sizeof(l2p_journal_entry_t))
 
+/* ── 异步刷页 job（阶段 2：刷页从「页满即同步落盘」改为后台落盘）──
+ *
+ * 为什么不需要 ping-pong 快照缓冲：FTL 侧 page_buf 在 ftl_async_write_page 里
+ * **已拷进 FC buffer 池**（ftl_cmd_write_data 是 memcpy）⇒ 提交后即可复用/清空。
+ * 于是在飞的只剩「写指针推进 + 换块擦除」这点记账，job 只需记住落点。
+ *
+ * 单飞行：phase != JRN_IDLE 时不再起新页写（否则两条写会争同一个页地址）。
+ * 页满且 job 忙 ⇒ 调用者走**同步回退**（journal_flush_page），即改造前的行为。
+ * ⚠ 该回退在 host 写路径上**不可达**：页满需要 127 次 append，而单次
+ *   completion_table_drain 最多处理 CQ 深度（64）条完成；只有 GC/WL/开机这些
+ *   **本就是同步上下文**的批量 append 循环会走到它。 */
+typedef enum
+{
+    JRN_IDLE = 0, /* 无在飞 */
+    JRN_WRITE,    /* 页写命令在飞 */
+    JRN_ERASE     /* 页写已完成，换块擦除在飞 */
+} journal_phase_t;
+
+typedef struct
+{
+    uint8_t    phase;        /* journal_phase_t */
+    uint8_t    need_erase;   /* 有**未起**的擦除：target_block 待擦（擦命令起不来时留待重试） */
+    uint8_t    target_block; /* 页写成功后 current_block 的落点 */
+    uint8_t    target_page;  /* 页写成功后 current_page 的落点（已做块内回绕） */
+    uint8_t    from_block;   /* 起写时的 current_block（防指针回退的守卫，见 journal.c） */
+    uint8_t    from_page;    /* 起写时的 current_page */
+    nand_pba_t waddr;        /* 在飞页地址（诊断 / 心跳） */
+} journal_job_t;
+
 typedef struct
 {
     ftl_topology_t topo; /* 目标 NAND 芯片路由 */
@@ -78,6 +112,9 @@ typedef struct
 
     uint8_t checkpoint_needed;
     uint8_t emergency;
+
+    /* 阶段 2：异步刷页 job（放在末尾，纯增量字段） */
+    journal_job_t job;
 } l2p_journal_t;
 
 /* Journal 环形页引用：位置 + 页序号 + 条目数（journal_scan_latest 出参） */
@@ -125,8 +162,16 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
 /* 追加一条 L2P 更新。P1-6：若当前页缓冲里已有**同一 LBA** 的条目，就地更新
  * （只改 old/new PBA，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。 */
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba);
-/* journal_flush_page - 把当前页缓冲（含页头）同步写进 NAND 并推进写指针；
- *   本函数是**唯一**的环形块擦除点，块满换块时先擦后写（跳过 pre_erased_block 预擦块） */
+
+/* journal_kick - 后台推进 Journal（阶段 2）：把待写的整页 / 待起的擦除交给异步 job。
+ *   由 ftl_service_idle/normal 每轮调用；job 已在飞或无事可做时为空操作。 */
+void journal_kick(l2p_journal_t *journal);
+
+/* journal_flush_page - **同步**把 Journal 落盘：先排空在飞 job，再把当前页缓冲
+ *   （含页头）写进 NAND 并推进写指针。
+ *   · 本函数是**唯一**的环形块擦除点，块满换块时先擦后写（跳过 pre_erased_block 预擦块）；
+ *   · 调用者用它当**屏障**（F10：GC/WL 必须先让搬移条目落盘再擦 victim；HIL `fl`）。
+ *     host 写路径的常规刷页**不走这里**，走 journal_kick 的异步路径。 */
 void journal_flush_page(l2p_journal_t *journal);
 /* F10：全量回放**未进 L2P 表**的页（按 (page_seq, entry_index) 递增序应用，
  * per-LBA last-write-wins）。cp_sequence 为 checkpoint 截断水位（旧 journal_replay

@@ -3068,7 +3068,7 @@ fc_status_t fc_scheduler_select_chain(fc_scheduler_t *scheduler, fc_scheduler_ch
 
 ### 16.9 使用方式（FTL / Read Recovery）
 
-> ⚠ **与实现不符的历史示例**：以下代码为 Phase D 设计期的接口示意（`config.chain = 1` / `fc_command_submit`），**当前 FTL 运行时并不这样用**——Read Recovery 实际是**三条独立提交 + 同步等待**的命令（`src/ftl/read_recovery.c`：各自 `fc_submit` + `ftl_internal_sync_wait`），并非原子链。示例仅用于说明链式 API 的语义。
+> ⚠ **与实现不符的历史示例**：以下代码为 Phase D 设计期的接口示意（`config.chain = 1` / `fc_command_submit`），**当前 FTL 运行时并不这样用**——Read Recovery 实际是**三条独立提交 + 同步等待**的命令（`src/ftl/read_recovery.c`：各自 `fc_submit` + `ftl_sync_submit_wait`），并非原子链。示例仅用于说明链式 API 的语义。
 
 FTL 或 Read Recovery 模块提交 Read Retry 链时：
 
@@ -4139,7 +4139,7 @@ nand_init()
 - 驱动源只有一个：`main()` 的 `while(1)`。**没有任何 ISR 调用 `fc_service()` / `ftl_service()`**；WAIT_READY 为纯 GPIO 轮询，无中断参与（原 R/B# EXTI 方案已移除）。
 - 两个阻塞调用方：
   - `ftl_service()`（`ftl.c`）——每轮先跑 `fc_service()` **≤ `NAND_SUBMIT_BUDGET`（=4）次**推进 NAND，再 `completion_table_drain()` 消费完成项并回调 FTL。
-  - `ftl_internal_sync_wait()`（`ftl_fc_interface.c`）——FTL 内部同步命令（如 Read Retry、元数据读）用它阻塞轮询 `fc_service()` 直到指定命令完成。
+  - `ftl_sync_submit_wait()`（`ftl_fc_interface.c`，v0.75 前叫 `ftl_internal_sync_wait`）——**仅结构性顺序路径**（开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI）用它阻塞轮询 `fc_service()` 直到指定命令完成；host I/O 与后台 job 一律 `ftl_op_submit` 后异步完成。
 
 ### 23.2 流程图：一条命令的端到端生命周期（图 17）
 
@@ -4213,7 +4213,7 @@ nand_init()
 调用方（三选一）：
   main.c while(1)  ── g_ftl_ready==0 时裸调 fc_service()
   ftl_service()    ── 每轮 fc_service() × ≤4（NAND_SUBMIT_BUDGET）
-  ftl_internal_sync_wait() ── 阻塞轮询直到目标命令完成
+  ftl_sync_submit_wait()   ── 阻塞轮询直到目标命令完成（仅结构性顺序路径）
         │
         ▼
 fc_service() → fc_poll_internal
@@ -4324,7 +4324,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 
 - FTL 运行时**所有**命令都设 `config.chain = FC_CHAIN_END`（`src/ftl/` 下共 **23 处**，含 `ftl.c` / `metadata.c` / `checkpoint.c` / `gc.c` / `journal.c` / `bbt.c` / `pfr` 等）。因此调度器**永不组链**，`count` 恒为 1。
 - 于是运行时**只有 `fc_poll_dispatch_single` 是活路径**；`fc_poll_dispatch_chain` / `nand_dispatch_submit_chain` 仅由单元测试覆盖。
-- Read Retry（`src/ftl/read_recovery.c`）**不是**原子 `submit_chain`，而是**三条独立提交 + 同步等待**的命令（各自 `fc_submit` + `ftl_internal_sync_wait`）。
+- Read Retry（`src/ftl/read_recovery.c`）**不是**原子 `submit_chain`，而是**三条独立提交 + 同步等待**的命令（各自 `fc_submit` + `ftl_sync_submit_wait`）。
 
 结论：把图 11 的链收集分支理解为"**能力存在但运行时未启用**"，主干是单命令路径（图 17/图 19）。链式执行的设计与验证保留在 §16，供单测与未来扩展参考。
 

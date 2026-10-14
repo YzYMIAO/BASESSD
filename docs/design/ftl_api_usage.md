@@ -167,42 +167,54 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tab
 > `ftl_submit_*` 返回 `FTL_OK` 仅表示**已受理**，不代表已完成。连续背压且无进展超过
 > `FTL_DRAIN_STALL_MAX`（8 轮）⇒ 判真卡死，弃未下发者并报 IO_ERROR。
 
-### 1.5 Completion Table（统一完成路由）
+### 1.5 Completion Table + op tag（统一完成路由，v0.75 起）
 
-`completion_table.h/c` 提供统一完成事件分发，消除 `ftl_service` 和 `ftl_internal_sync_wait` 各自 `fc_poll_completion` 造成的 completion 丢失问题（`ftl_internal_sync_wait` 仍保留，v0.28 后为唯一同步等待入口）。
+`completion_table.h/c` 提供统一完成事件分发，消除两处各自 `fc_poll_completion` 造成的
+completion 丢失问题。**v0.75 起**派发**唯一出口**是 `ftl_op_dispatch()`：旁表只存 `ctx`，
+handler 由命令携带的 **op tag** 查 `g_op_service[]` 得到（见 `ftl_op.h`）。
 
 ```c
-// completion_table.h — 完整接口
+// completion_table.h — 接口（v0.75 起表项只留 ctx）
 
 #define COMPLETION_TABLE_SIZE (32U)
 
-/* 注册一个 completion handler */
-ftl_status_t completion_table_add(uint16_t cmd_id,
-                                  completion_handler_fn_t handler,
-                                  void *ctx);
+/* 登记一条命令的私有状态（服务函数的选择由命令的 op_tag 决定） */
+ftl_status_t completion_table_add(uint16_t cmd_id, void *ctx);
 
-/* 消费所有 CQ entry 并路由到各 handler */
+/* 查 + 摘链 + 返回 ctx（先摘再回调，容许服务函数重入登记） */
+void *completion_table_take(uint16_t cmd_id);
+
+/* 消费所有 CQ entry → ftl_op_dispatch() */
 void completion_table_drain(void);
 
-/* 设置默认 handler（未注册精确路由的 completion 走此路径） */
-void completion_table_set_default(completion_handler_fn_t handler, void *ctx);
-
-/* 同步等待器 */
+/* 同步等待器（FTL_OP_SYNC_WAIT 的 ctx，由同步原语在**自己栈上**持有） */
 typedef struct {
     uint16_t             cmd_id;
-    uint8_t              done;               /* handler 置 1 */
+    uint8_t              done;               /* 服务函数置 1 */
     fc_command_status_t  completion;          /* 保存的完成状态 */
 } ftl_sync_waiter_t;
 
-void ftl_sync_waiter_handler(const fc_command_status_t *completion, void *ctx);
-void ftl_sync_waiter_handler_with_release(const fc_command_status_t *completion,
-                                          void *ctx);
+// ftl_op.h — 提交侧 / 服务函数数组
+ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx);
+void         ftl_op_dispatch(const fc_command_status_t *completion);
+int          ftl_op_in_dispatch(void);
 ```
 
-**路由规则**：
-1. `completion_table` 中有注册 handler → 精确路由（用于同步等待、专用回调）
-2. 无注册但设置了 default → 走 `ftl_handle_completion`（FTL pending 表、complete_flag、命令释放等）
-3. 都没有 → 静默丢弃（不应发生）
+**路由规则**（`ftl_op_dispatch`）：
+1. `op = completion->op_tag`；越界或 `g_op_service[op] == NULL` ⇒ **孤儿命令**：
+   `completion_table_remove` + `fc_command_release` + LOGE（正常不应发生）。
+2. 命中 ⇒ `ctx = completion_table_take(command_id)`（**先摘链再回调**）。
+3. 实例由**命令自身**的 `config.ch/ce/lun` 经 `completion_table_route` 解析
+   （开机早期可为 NULL，是正常状态）。
+
+**op tag 的语义 = 完成服务函数选择器，不是「这是哪个功能」**：同步提交的命令一律带
+`FTL_OP_SYNC_WAIT`（其服务函数 = 唤醒等待者），因为阻塞调用方的收尾是**调用者在
+`ftl_sync_submit_wait` 返回后自己做的**；给同步命令打功能 tag 会让服务函数与调用者对
+同一份状态各推进一次。某个功能站点被改成异步之后，该站点才把 tag 换成它的功能 op ID。
+
+**命令 release 归属**（命令生命周期的唯一权威，写在 `ftl_op.h`）：
+`FTL_OP_SYNC_WAIT` 的服务函数**不** release（调用者读完 cmd 数据才释放，否则悬垂）；
+`FTL_OP_HOST_IO` 与各异步 job 的服务函数**自己** release。
 
 ### 1.6 写完成确认（modify-after-confirm）
 
@@ -216,7 +228,7 @@ ftl_submit_write(ftl, &req)
 
        ↓ 几十~几百 μs 后
 
-  ftl_handle_completion()
+  ftl_op_dispatch()
     ├─ NAND_SUCCESS →
     │   l2p_cache_read(lba) → old_pba     ← ★ 完成时**重查 L2P**（不存提交时快照）
     │   journal_append(lba, old, new)     ← 确认后记录
@@ -275,7 +287,7 @@ typedef struct {
 
 | 阶段 | 位置 | 操作 | NAND 访问 |
 |------|------|------|-----------|
-| 快速路径 | `ftl_handle_completion` | BBT bitmap 置位 + allocator 标记 | ❌ 无 |
+| 快速路径 | `ftl_op_host_io` | BBT bitmap 置位 + allocator 标记 | ❌ 无 |
 | 后台持久化 | `ftl_service_idle/normal` → `bbt_flush()` | 攒批写 NAND BBT（池 56-57） | ✅ 一次若干页 |
 
 **回滚**：写失败后 L2P 不动（仍指向被替换前的映射），Super Block 空洞由 GC 扫描时读失败自然跳过。无需额外回滚逻辑。
@@ -736,10 +748,12 @@ plane, page, cw)` 或 `pba_pack((nand_pba_fields_t){…})`；反向读取用 `pb
 ```c
 /*
  * 同步等待指定 command_id 完成。
- * 使用 completion_table 统一路由：注册 sync_waiter → fc_service + completion_table_drain。
+ * v0.75：内部走 ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter)，再自旋
+ * fc_service + completion_table_drain 直到 waiter.done。**只用于结构性顺序路径**
+ * （开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI）；host I/O 与后台 job 一律异步。
  */
-ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out,
-                                    uint32_t timeout_us);
+ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out,
+                                  uint32_t timeout_us);
 ```
 
 各模块内联助手一览：
@@ -748,9 +762,9 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
 |------|---------------|---------|------|
 | `l2p_cache.c` | `sync_read_page` / `sync_write_page` | `metadata_dir_lookup` / `metadata_dir_append_slot`（PBA）/ `l2p_region_pba` | 元数据（CRC/Random DISABLE） |
 | `journal.c` | `sync_read/write_page`、`sync_erase_block` | `journal_page_addr` / `journal_block_addr` | 元数据，20ms 超时擦除 |
-| `checkpoint.c` | `sync_read/write_page` | `metadata_ring_addr`（Checkpoint 池 48-55） | CHECKPOINT module，池内环内轮转 |
-| `metadata.c` | `sync_read/write_page` | `metadata_ring_addr`（Anchor 池 16-47）/ `pba_make`（L2P 日志块） | METADATA module |
-| `bbt.c` | `sync_read/write_page`、`ftl_sync_read_column`（列 2048 = spare 首字节，v63） | `metadata_ring_addr`（BBT 池 56-57） | BBT module，池内环内轮转 |
+| `checkpoint.c` | `sync_read/write_page` | `metadata_ring_addr`（Checkpoint 池 48-55） | 池内环内轮转 |
+| `metadata.c` | `sync_read/write_page` | `metadata_ring_addr`（Anchor 池 16-47）/ `pba_make`（L2P 日志块） | — |
+| `bbt.c` | `sync_read/write_page`、`ftl_sync_read_column`（列 2048 = spare 首字节，v63） | `metadata_ring_addr`（BBT 池 56-57） | 池内环内轮转 |
 | `gc.c` | `sync_write_page`、`sync_erase_block` | `super_block_page_pba` | 用户数据（CRC/Random ENABLE），20ms 擦除 |
 | `wear_leveling.c` | `sync_write_page` | `super_block_page_pba` | 同 GC |
 | `read_recovery.c` | `sync_read_page` | `pba_make`（邻页） | CRC/Random ENABLE + LBA META |
@@ -789,7 +803,7 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
 
     Phase 2 ── 处理完成回调
     ├── completion_table_drain()（统一完成泵）
-    └── ftl_handle_completion() 按 module 路由
+    └── ftl_op_dispatch() 按 op_tag 查 g_op_service[]
           ├── FTL      → 子操作簿记（数据拷贝到该 slice）→ 组聚合 → pending_remove
           │              → 组可能完成（发一次组通知）
           ├── METADATA → release
@@ -961,7 +975,7 @@ src/ftl/
                  │  └────────────────────────────────────┘   │
                  │                                            │
                  │  ┌────────────────────────────────────┐   │
-                 │  │ ftl_handle_completion()（逐子操作）  │   │
+                 │  │ ftl_op_host_io()（逐子操作）        │   │
                  │  │   ① 数据拷贝 → 该 slice buffer     │   │
                  │  │   ② 组聚合 agg_status（粘性）      │   │
                  │  │   ③ pending_remove                 │   │

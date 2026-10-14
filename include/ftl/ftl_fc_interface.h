@@ -35,6 +35,11 @@
  *      （共 18 份、逐字节相同，只差 crc/random/ldpc/lba 四个字段），
  *      此处收敛为 4 个公共函数 + ftl_page_cfg_t 配置结构。
  *
+ * 【异步页级原语】（阶段 2 起）
+ *   ⑩ ftl_async_write_page / ftl_async_erase_block — 只建链 + 搬数据，**不提交**；
+ *      命令交回调用者，由调用者 ftl_op_submit(cmd, <功能 op>, ctx)。服务函数负责
+ *      fc_command_release。与 ⑧ 共用同一套 prepare 模板。
+ *
  * 【命令身份】
  *   ⑨ ftl_cmd_id() — 命令指针 → FC 命令池 ID（由指针派生，见 fc_command.h）。
  *
@@ -370,6 +375,26 @@ ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer);
 
 /* 擦块：OP_ERASE_BLOCK，无数据链，20ms 超时。 */
 ftl_status_t ftl_sync_erase_block(nand_pba_t pba);
+
+/* ── 异步页级原语（阶段 2 起：提交与完成解耦）──
+ *
+ * 与上面 ftl_sync_* 同一 prepare 模板（同样的建链规则、同样的配置、同样的搬数据），
+ * 差别只有最后一步：**不提交**，把已建链、已装好数据的命令交回调用者。
+ *
+ *   ftl_async_*  →  调用者 ftl_op_submit(cmd, <功能 op ID>, ctx)
+ *                 →  g_op_service[<op ID>] 服务函数判完成状态 + fc_command_release
+ *
+ * ⚠ **数据在 prepare 阶段就已拷进 FC buffer 池**（ftl_cmd_write_data 是 memcpy，
+ *   见 ftl_fc_interface.c），故本函数返回后调用者即可复用 / 覆写源缓冲——这正是
+ *   Journal 刷页不需要 ping-pong 快照缓冲的原因。
+ * ⚠ 调用者拿到 cmd 后**必须**提交或释放：既未提交也未 release 即泄漏命令槽位
+ *   ⇒ fc_command_alloc 恒 NULL ⇒ 全系统 FTL_AGAIN。
+ * ⚠ 失败返回时命令已自行回收（与 ftl_sync_* 同约定），out_cmd 不被写入。
+ *
+ * @return FTL_OK 命令已备好；FTL_AGAIN 命令池 / desc / buffer 池瞬态耗尽（可稍后重试）。
+ */
+ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg);
+ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba);
 
 /*
  * 读 META：OP_READ_META，无数据链，回读 pba 指定页 / 指定 CW 的**前 4 字节 META**。

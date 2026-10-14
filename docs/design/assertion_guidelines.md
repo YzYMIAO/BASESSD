@@ -147,8 +147,8 @@ v8（`f8c005c`）把 `fc_poll_fill` 里 ch/ce/lun 的防御性回推改成 `ASSE
 | `nand_dispatch.c` | `nand_dispatch_lun_free` 的 ch/ce/lun 越界 | 返回 0 → 该 LUN 在 `fc_poll_fill` 里永久挂起（静默活锁） |
 | `nand_dispatch.c` | `nand_dispatch_enqueue` 的逐条前置校验：**扩到整批**（原只查 `requests[0]`），并新增「链成员同 ch/ce/lun」 | 链成员异 LUN 时队列按 `requests[0]` 选错 LUN，`cw_count` 越界则在 `completion_multi_plane` 越界写 `cw_status[]` |
 | `completion_table.c` | `completion_table_route` 的 ch/ce/lun 越界 | 返回 NULL → 上层释放命令后静默丢弃该 completion |
-| `completion_table.c` | `ftl_sync_waiter_handler_with_release` 的 `cmd != NULL` | 静默不释放命令 |
-| `ftl.c` | `ftl_handle_completion` 的 `cmd == NULL` | 静默吞 completion，命令永不完成也不报错 |
+| `completion_table.c` | `ftl_sync_waiter_handler_with_release` 的 `cmd != NULL`（**v0.75 起该函数已删**，同点由 `ftl_op_dispatch` 的 `cmd != NULL` 承担） | 静默不释放命令 |
+| `ftl_op.c` | `ftl_op_dispatch` 的 `cmd == NULL`（v0.75 前在 `ftl_handle_completion`） | 静默吞 completion，命令永不完成也不报错 |
 | `fc.c` | `fc_command_configure_descriptors_internal` 的 `plane_count > PLANE_NUM` | 与紧邻的 `ASSERT` 重复；release 下由返回码兜底（本次删除，接受 UB） |
 | `fc.c` | `fc_poll_chain_length` 的「链成员同 target」`break` | 静默把一条链截成两条，链语义丢失 |
 | `fc.c` | `fc_poll_dispatch_single` / `fc_poll_dispatch_chain` 的 `is_valid` + `command_state == QUEUED` | 命令已出队却未置 ACTIVE/未回推 → **永久泄漏** |

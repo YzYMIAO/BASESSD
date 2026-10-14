@@ -1103,16 +1103,16 @@ GC 搬移（读 → 写新位置 → 更新 L2P → 擦除旧 Block）不是原�
    └──────────────────────────┬─────────────────────────────┘
                               ▼
    ┌────────────────────────────────────────────────────────┐
-   │ migrated > 0 -> journal_flush_page（F10）              │
-   │   搬移条目先落盘，之后调用方才擦除 victim              │
+   │ migrated > 0 -> journal_flush_page（F10，同步屏障）    │
+   │   等 journal job 归位 + 立即落盘，之后才擦 victim      │
    └──────────────────────────┬─────────────────────────────┘
                               ▼
    返回 migrated -> 调用方擦除 victim -> 归还 Free Pool
 ```
 
 > **顺序不变量**：先写新页 → 再改 L2P + 记 Journal → 最后由调用方擦旧块；且擦除前必须
-> `journal_flush_page` 强制落盘（即下方 Layer 1 的 v0.43 约束）。任一步掉电，victim 要么
-> 还在、要么 L2P 未动 ⇒ 不丢数据（Layer 3 的「最多一个孤悬 Block」）。
+> `journal_flush_page` 强制落盘（即下方 Layer 1 的 v0.43 约束；v0.75 起它是**同步屏障**）。
+> 任一步掉电，victim 要么还在、要么 L2P 未动 ⇒ 不丢数据（Layer 3 的「最多一个孤悬 Block」）。
 >
 > **与静态 WL 的关系**：`wl_relocate`（§4.8.4）与 `gc_migrate_sb` **同构**——同一套
 > `gc_read_page_with_lba` / `ftl_sync_write_page_cw` / `gc_erase_and_free` 原语、同一条
@@ -1121,7 +1121,7 @@ GC 搬移（读 → 写新位置 → 更新 L2P → 擦除旧 Block）不是原�
 
 三层保护机制：
 
-- **Layer 1: Journal** — 每个 L2P 更新先写 Journal 后改 cache，掉电后 Journal 回放重建 L2P。**实现约束（v0.43）**：Journal 是 write-back（`page_buf` 攒满才 flush），GC/WL 擦除 victim 前必须 `journal_flush_page` 强制落盘——否则掉电落在"搬移条目未落盘 + victim 已擦除"窗口，回放指向已擦除块（数据损坏）。`gc_migrate_sb`/`wl_relocate` 已按此接线。
+- **Layer 1: Journal** — 每个 L2P 更新先写 Journal 后改 cache，掉电后 Journal 回放重建 L2P。**实现约束（v0.43）**：Journal 是 write-back（`page_buf` 攒满才 flush），GC/WL 擦除 victim 前必须 `journal_flush_page` 强制落盘——否则掉电落在"搬移条目未落盘 + victim 已擦除"窗口，回放指向已擦除块（数据损坏）。`gc_migrate_sb`/`wl_relocate` 已按此接线。⚠ **v0.75 起** `journal_flush_page` 是**同步屏障**（等 job 归位再落盘），不再是"页满即刷"的唯一入口；host 写路径的页满改由 journal job 后台刷（**掉电模型不变**：本仓无电容，acked 写本来就容忍丢一页条目）。
 - **Layer 2: GC Bitmap** — 在 NAND 元数据区记录搬移进度 bitmap，每搬 16 页更新一次，掉电恢复后从断点继续。**未实现**（设计有、代码无）；v0.43 用"擦除前 flush"闭合等价窗口，Layer 2 留作后续优化。
 - **Layer 3: 双拷贝容忍** — 任何掉电场景最多产生一个"孤悬"Block，不会丢数据，下次 GC 回收。**依赖 Layer 1/2 正确性**：在"擦除先于 flush"窗口下不成立（v0.43 已闭合）。
 
@@ -1407,7 +1407,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim) {
     }
 
     /* F10：搬移条目先落盘再擦除（掉电窗口内回放不会指向已擦除块）*/
-    if (migrated > 0U) journal_flush_page(&ftl->journal);
+    if (migrated > 0U) journal_flush_page(&ftl->journal);   /* F10：同步屏障（v0.75）*/
 
     /* Step 2: 擦除 + 归还 Free Pool（复用 gc_erase_and_free）*/
     gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
@@ -1425,7 +1425,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim) {
 | 目标流 | Cold（`allocator_alloc_pair(FTL_TEMP_COLD)`） | **同**（Cold） |
 | Journal 条目 | `(lba, old_pba, new_pba)` | **同**（LBA 不变、PAA 换新位置 ⇒ 回放后 L2P 指向新页） |
 | 擦除归还 | 调用方 `gc_erase_and_free` | Step 2 构造临时 SB（`valid = 0`）后**复用** `gc_erase_and_free` |
-| 掉电窗口 | 擦除**前** `journal_flush_page`（F10） | **同** |
+| 掉电窗口 | 擦除**前** `journal_flush_page`（F10，v0.75 起=同步屏障） | **同** |
 
 ⇒ 读 WL 搬移代码可**直接套用 §4.5 的图**，只需把「选 victim」换成 §4.8.3 的冷块选择。
 
@@ -1471,7 +1471,7 @@ static void ftl_service_idle(ftl_context_t *ftl) {
     }
     (void)wl_execute(ftl);                     /* WL 全力执行 */
     (void)wl_predictive_relocate(ftl);         /* 慢死巡检：1s 节流，一次一个 SB */
-    journal_flush_page(&ftl->journal);
+    journal_kick(&ftl->journal);               /* v0.75：推进刷页 job（起异步写，不阻塞）*/
     (void)bbt_flush(&ftl->alloc);
     (void)wear_flush(&ftl->alloc, ftl->total_writes);   /* P0-1 磨损计数落盘（节拍门控）*/
     if (checkpoint_check_trigger(ftl, elapsed)) { (void)checkpoint_create(ftl); }
@@ -2567,10 +2567,16 @@ Journal 中 sequence ≤ checkpoint_seq 的条目已写入 L2P table，可回收
 > 块 58-61），非本节初稿的「双 Block J0↔J1」（设计自荐的「2→4」早已落地）。
 > 环形块数见 `ftl/metadata.h`；下面的时序/容量推导按 2 块写，**数值**需 ×2。
 >
-> **环形块擦除（v0.54 P1-6）**：块的物理擦除有**唯一**一点——`journal_flush_page` 回切进入
-> 新块时擦（`journal.c`）。`journal_truncate` 只**预擦除**环形最旧块并记账
+> **环形块擦除（v0.54 P1-6）**：块的物理擦除有**唯一**一点——刷页回切进入新块时擦
+> （`journal.c`）。`journal_truncate` 只**预擦除**环形最旧块并记账
 > （`pre_erased_block`），使回切时跳过擦除 ⇒ 同一块每圈**只擦一次**。旧实现在 truncate 与
-> flush_page 各擦一次 = **双倍磨损**，直击 §14.1 的 Journal 寿命瓶颈（凭空多 ~25%）。
+> 刷页各擦一次 = **双倍磨损**，直击 §14.1 的 Journal 寿命瓶颈（凭空多 ~25%）。
+>
+> **异步化（v0.75，阶段 2）**：这条"唯一擦除点"自 v0.75 起落在 **journal job 的
+> `JRN_ERASE` 阶段**，由完成服务函数 `ftl_op_journal` 推进，**不再**在 `journal_flush_page`
+> 的同步体里。`journal_flush_page` 退化为**同步屏障**（`journal_drain` 等 job 归位 +
+> `journal_flush_now` 立即落盘），调用者只剩 F10（GC/WL 擦 victim 前）与 HIL `fl`。
+> 详见 `ftl_revision_history.md` v0.75。
 > `up_to_sequence` 不再是死形参：水位不足以覆盖全部已写条目时**拒绝截断**（最旧块可能仍持有
 > 回放需要的条目）。
 >
@@ -3410,11 +3416,14 @@ typedef struct {
 
     uint8_t     checkpoint_needed;  // 水位 ≥85%
     uint8_t     emergency;          // 水位 ≥95%
+
+    journal_job_t job;              // v0.75：刷页 job 状态机（phase / 落点 / 待擦块）
 } l2p_journal_t;
 
 void         journal_init(l2p_journal_t *journal, ftl_topology_t topo);
 void         journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old, nand_pba_t new);
-void         journal_flush_page(l2p_journal_t *journal);
+void         journal_kick(l2p_journal_t *journal);      /* v0.75：推进 job（IDLE 且有待办才起）*/
+void         journal_flush_page(l2p_journal_t *journal); /* v0.75：**同步屏障**（等 job 归位 + 立即落盘）*/
 /* F10：全量回放 page_seq > cp_sequence 的页，按 (page_seq, entry_index) 递增序应用。
  * v0.69：out_entries 回填**实际应用成功的条目数**（读失败的页不计），可为 NULL。 */
 ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence, uint32_t *out_entries);
@@ -3549,7 +3558,7 @@ host 无 IO 时会被后台命令推进误判成 NORMAL/BUSY）。`pending_group
              uint32 下溢，会把 closed 链上的 SB 全搬全擦；仅 T5 命中时 budget 取 1）
   WL:       wl_execute()                   → 磨损均衡（IDLE 全力）
             慢死预测巡检 wl_predictive_relocate()（节流 RR_SCAN_INTERVAL_MS）
-  Journal:  journal_flush_page()            → 强制写 journal buffer
+  Journal:  journal_kick()                  → 起/推进刷页 job（异步写，v0.75）
   BBT/Wear: bbt_flush() / wear_flush()      → 攒批持久化
   Checkpoint: checkpoint_check_trigger() 命中则 checkpoint_create() 并重置 cp_timer_start
 设计思路：NAND 闲着也是闲着，把后台活做完，下次 Host IO 来时系统处于最佳状态
@@ -3564,6 +3573,7 @@ host 无 IO 时会被后台命令推进误判成 NORMAL/BUSY）。`pending_group
             （⚠ P1-4：l2p_cache_is_thrashing 时停主动 flush，脏行只由驱逐按需写回）
   GC:       ftl_gc_evaluate 命中 → ftl_gc_reclaim_one() 回收**一个** SB（受节流档）
   WL:       wl_should_trigger() 命中则 wl_execute()
+  Journal:  journal_kick()                  → 推进刷页 job（异步；已在飞则空操作）
   BBT/Wear: bbt_flush() / wear_flush()      → 周期性刷入
   Checkpoint: checkpoint_check_trigger() 命中则 checkpoint_create()
 设计思路：留 NAND 带宽给突发 IO，后台任务"慢慢做"
@@ -3576,7 +3586,8 @@ host 无 IO 时会被后台命令推进误判成 NORMAL/BUSY）。`pending_group
 行为：
   flush:    只 flush 1 条 DIRTY（防 evict 阻塞）
   GC:       跳过（BUSY 模式不做 GC）
-  Journal:  跳过
+  Journal:  不起新页写（页满时 journal_append 自己起异步写）；
+            仅当有**未起的换块擦除**时 kick（新块没擦过就不能往里写）
   Checkpoint: 仅 Journal ≥ 95% 时强制执行（checkpoint_is_emergency）
 设计思路：前台 IO 优先。唯一例外：紧急 Checkpoint（非 GC——旧文写"强制 GC"是错的）。
 ```
@@ -3648,7 +3659,7 @@ static void ftl_service_idle(ftl_context_t *ftl) {
     { uint32_t now = ftl_now_ms();
       if ((now - ftl->rr_last_scan_ms) >= RR_SCAN_INTERVAL_MS) {
           ftl->rr_last_scan_ms = now; (void)wl_predictive_relocate(ftl); } }
-    journal_flush_page(&ftl->journal);
+    journal_kick(&ftl->journal);                   /* v0.75：起/推进刷页 job（异步）*/
     (void)bbt_flush(&ftl->alloc);
     (void)wear_flush(&ftl->alloc, ftl->total_writes);
     { uint32_t now = ftl_now_ms();
@@ -3831,7 +3842,7 @@ cmd->config.crc          = FC_CRC_ENABLE;
 cmd->config.random       = FC_RANDOM_ENABLE;   /* 用户数据加扰；元数据 DISABLE */
 cmd->config.ldpc         = FC_ECC_MODE_BCH;
 cmd->config.page_type    = FC_PAGE_TYPE_LP;    /* SLC */
-cmd->config.module       = FC_COMMAND_MODULE_FTL;
+/* v0.75 起无 config.module：完成路由改由 ftl_op_submit(cmd, <op>, ctx) 打 op_tag */
 cmd->paa                 = pba_to_paa(pba);    /* allocator 分配的 PBA → 芯片内 PAA */
 cmd->meta                = (DWORD)(cfg->lba << CW_WIDTH);  /* ★ META = 本命令的扇区 LBA
                                                 *   （v24；**没有** cmd->lba 字段）*/
@@ -4177,10 +4188,10 @@ Step 3 — Allocator + Super Block
 
 Step 4 — Journal
   ├── include/ftl/journal.h               ✅ 固定池 Block 58~61（= CW_NUM）环形
-  ├── src/ftl/journal.c                   ✅ flush_page（NAND 写）+ replay（扫描回放）
+  ├── src/ftl/journal.c                   ✅ 刷页 job（异步，v0.75）+ replay（扫描回放）
   │                                       ✅ Header [magic+page_seq+entry_count+block_seq]
   │                                       ✅ journal_truncate（**预擦除**环形最旧块并记账，v0.54；
-  │                                          实际擦除收敛到 journal_flush_page 回切进入新块时）
+  │                                          实际擦除收敛到刷页 job 回切进入新块时，v0.75）
   └── 开放常量移至 .h                      ✅ JOURNAL_MAGIC / JOURNAL_HEADER_SIZE
 
 Step 5 — GC + ftl_service 主循环
@@ -4195,9 +4206,9 @@ Step 5 — GC + ftl_service 主循环
 
 Step 13 — Completion Table 统一完成路由
   ├── include/ftl/completion_table.h      ✅ 32 项路由表 + 同步等待器 + 统一泵声明
-  └── src/ftl/completion_table.c          ✅ completion_table_add/lookup/remove/drain
-                                           ✅ ftl_sync_waiter_handler（带/不带 release）
-                                           ✅ completion_table_set_default（= ftl_handle_completion）
+  └── src/ftl/completion_table.c          ✅ completion_table_add/take/remove/drain
+                                           ✅ drain 的唯一出口 = ftl_op_dispatch（v0.75 起）
+                                           ✅（表项只留 ctx；handler 由 op tag 查 g_op_service[]）
 
 Step 6 — Metadata Directory
   ├── include/ftl/metadata.h              ✅ Anchor 池 (16..47) + 2048 entry Directory（7B packed）
@@ -4227,7 +4238,7 @@ Step 10 — Read Recovery
                                            ✅ Stage 2: 邻近页辅助（page±1 读验证）
                                            ✅ Stage 3+: XOR/RAID 预留
                                            ✅ ECC 预测性坏块检测（rr_check_predictive）
-                                           ✅ rr_record_ecc 已接入读完成路径（ftl_handle_completion 读成功后）
+                                           ✅ rr_record_ecc 已接入读完成路径（ftl_op_host_io 读成功后）
 
 Step 11 — Power Failure Recovery
   ├── include/ftl/power_failure_recovery.h ✅ 三类启动类型枚举 + 结果结构体
@@ -4250,11 +4261,11 @@ Step 12 — Wear Leveling
   └── boot_recovery journal_replay        ✅ 改为直接读 header，不修改 journal 状态
 
 #### 代码审视修复（v0.19 — Completion Table 统一完成路由）
-  ├── ftl_internal_sync_wait              ✅ 改为 completion_table_add + sync_waiter
+  ├── ftl_sync_submit_wait（v0.75 改名）   ✅ 改为 completion_table_add + sync_waiter
   │                                       ✅ 不再独占 fc_poll_completion
-  │                                       ✅ completion_table_drain 自动路由非目标 completion 到 ftl_handle_completion
+  │                                       ✅ completion_table_drain 自动路由非目标 completion 到 ftl_op_dispatch
   ├── ftl_service Phase 2                 ✅ 改为 completion_table_drain() 统一泵
-  │                                       ✅ ftl_handle_completion 注册为 default handler
+  │                                       ✅ 派发唯一入口 = ftl_op_dispatch（v0.75 起，无 default handler）
   ├── ftl_read/ftl_write 同步循环         ✅ 改为 completion_table_drain()，两泵合并为一个
   ├── l2p_cache_flush_one Region 分配     ✅ v0.50 消除固定回退：每次 flush → metadata_dir_append_slot（日志块追加）
   └── ftl_init 连接 Cache → Allocator     ✅ l2p_cache_set_md_dir 增加 alloc 指针参数
@@ -4737,7 +4748,7 @@ typedef struct {
     uint16_t cache_intermediate : 1;  // 1=Cache Program 中间页
 } ftl_pending_req_t;
 
-// ftl_handle_completion 中：
+// ftl_op_host_io 中：
 if (NAND_SUCCESS && buffer == NULL)   // 写完成
 {
     if (pending->cache_intermediate == 0)
@@ -4806,7 +4817,7 @@ if (NAND_SUCCESS && buffer == NULL)   // 写完成
 | P-A.1 | `fc_poll_completion` CQ 深度确认 — 确保 CQ 能同时容纳多 LUN 的完成事件 | 高 |
 | P-A.2 | pending 表扩展 — `FTL_PENDING_MAX` 从 8 增大到 32 ✅ **（v0.31 已实现）** | 高 |
 | P-A.3 | `ftl_write` 同步等待改为 per-cmd sync_waiter — 脱离全局 SQ/CQ 空判定，改用 `completion_table_add` + 等具体 cmd_id | 高 |
-| P-A.4 | `rr_record_ecc` 接入读完成路径 — ✅ **已接入**（`ftl_handle_completion` 读成功后调用）| 中 |
+| P-A.4 | `rr_record_ecc` 接入读完成路径 — ✅ **已接入**（`ftl_op_host_io` 读成功后调用）| 中 |
 
 #### P-B：Controller / Host 层
 
@@ -4988,7 +4999,8 @@ void journal_init(l2p_journal_t *journal);
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old, nand_pba_t new);
 ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence, uint32_t *out_entries);
 void journal_truncate(l2p_journal_t *journal, uint32_t seq);
-void journal_flush_page(l2p_journal_t *journal);
+void journal_kick(l2p_journal_t *journal);        /* v0.75：推进刷页 job */
+void journal_flush_page(l2p_journal_t *journal);  /* v0.75：同步屏障 */
 ```
 
 ### Allocator 接口

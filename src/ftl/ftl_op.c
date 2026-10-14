@@ -32,13 +32,15 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
  * C99 designated initializer 的 const 数组（非"注册函数"）：编译期即可发现重复/
  * 越界，且无 init-order 依赖。未列出的槽恒为 NULL（= 孤儿 tag）。
  *
- * 阶段 1 只点亮两项——今天能走到本数组的只有这两类命令：
+ * 已点亮的槽：
  *   · FTL_OP_SYNC_WAIT：所有 ftl_sync_* 经 ftl_sync_submit_wait 登记 ctx 后走这里；
- *   · FTL_OP_HOST_IO  ：host 数据读写子操作（原 ftl_op_host_io 的 FTL 分支）。
- * 其余枚举值是后续阶段（2~8）的占位，随各站点改造逐个填。 */
+ *   · FTL_OP_HOST_IO  ：host 数据读写子操作（原 ftl_op_host_io 的 FTL 分支）；
+ *   · FTL_OP_JOURNAL  ：Journal 刷页 job（阶段 2，ctx = &ftl->journal）。
+ * 其余枚举值是后续阶段（3~8）的占位，随各站点改造逐个填。 */
 static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_SYNC_WAIT] = ftl_op_sync_wait,
     [FTL_OP_HOST_IO]   = ftl_op_host_io,
+    [FTL_OP_JOURNAL]   = ftl_op_journal,
 };
 
 /* ── 2. 提交 ── */
@@ -80,6 +82,14 @@ ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
 }
 
 /* ── 3. 派发 ── */
+
+/* 派发深度（见 ftl_op_in_dispatch）。单线程顺序主循环 ⇒ 普通变量即可，无需原子。 */
+static uint8_t g_dispatch_depth = 0U;
+
+int ftl_op_in_dispatch(void)
+{
+    return (g_dispatch_depth != 0U) ? 1 : 0;
+}
 
 void ftl_op_dispatch(const fc_command_status_t *completion)
 {
@@ -123,7 +133,11 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
                                  (uint8_t)cmd->config.ce,
                                  (uint8_t)cmd->config.lun);
 
+    /* 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_in_dispatch() 据此判断
+     * "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。 */
+    g_dispatch_depth++;
     fn(ftl, completion, ctx);
+    g_dispatch_depth--;
 }
 
 /* ── 4. 同步等待服务函数 ── */

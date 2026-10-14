@@ -570,11 +570,14 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
  *   · 超时（擦除 20ms，其余默认）
  */
 
-/* 分配命令 + 填配置 + 建链。失败返回 NULL（命令已回收）。
+/* 分配命令 + 填配置（**不含**地址与建链）。池空返回 NULL。
  * v23：不再填 config.cw —— 建链只认 cw_bitmap。
  * v27：cw_bitmap 是字面位图（无隐式展开）；v28 起由 pba_to_cmd 算出「本命令 plane
- *      段内全部 CW」并作实参传给建链入口，不再存进命令结构体。 */
-static fc_command_t *sync_page_prepare(nand_pba_t pba, uint8_t operation, const ftl_page_cfg_t *cfg)
+ *      段内全部 CW」并作实参传给建链入口，不再存进命令结构体。
+ *
+ * 与地址/建链拆开是为了让异步入口能区分「池空（瞬态背压 ⇒ FTL_AGAIN）」与
+ * 「地址非法 / 建链失败（编程错误 ⇒ FTL_ERROR）」——两者在同步原语里都被压成 NULL。 */
+static fc_command_t *page_prepare_alloc(uint8_t operation, const ftl_page_cfg_t *cfg)
 {
     fc_command_t *cmd = fc_command_alloc();
 
@@ -595,6 +598,19 @@ static fc_command_t *sync_page_prepare(nand_pba_t pba, uint8_t operation, const 
     cmd->meta               = (cfg->lba == (lba_t)FTL_LBA_UNKNOWN) ? (DWORD)FC_META_UNKNOWN
                                                                    : (DWORD)(cfg->lba << CW_WIDTH);
 
+    return cmd;
+}
+
+/* 分配命令 + 填配置 + 建链。失败返回 NULL（命令已回收）。 */
+static fc_command_t *sync_page_prepare(nand_pba_t pba, uint8_t operation, const ftl_page_cfg_t *cfg)
+{
+    fc_command_t *cmd = page_prepare_alloc(operation, cfg);
+
+    if (cmd == NULL)
+    {
+        return NULL;
+    }
+
     if (pba_to_cmd(cmd, pba) != FTL_OK)
     {
         (void)fc_command_release(cmd);
@@ -610,22 +626,12 @@ static fc_command_t *sync_page_prepare(nand_pba_t pba, uint8_t operation, const 
  * 重载它会让「整段 vs 子集」这个关键差别从调用点消失。 */
 static fc_command_t *sync_page_prepare_cw(nand_pba_t pba, uint8_t operation, const ftl_page_cfg_t *cfg, uint32_t cw_bitmap)
 {
-    fc_command_t *cmd = fc_command_alloc();
+    fc_command_t *cmd = page_prepare_alloc(operation, cfg);
 
     if (cmd == NULL)
     {
         return NULL;
     }
-
-    cmd->config.operation   = (DWORD)operation;
-    cmd->config.crc         = (DWORD)cfg->crc;
-    cmd->config.random      = (DWORD)cfg->random;
-    cmd->config.ldpc        = (DWORD)cfg->ldpc;
-    cmd->config.multi_plane = 0U;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->meta               = (cfg->lba == (lba_t)FTL_LBA_UNKNOWN) ? (DWORD)FC_META_UNKNOWN
-                                                                   : (DWORD)(cfg->lba << CW_WIDTH);
 
     /* 边界不变量同 pba_to_cmd：进 FC 的 ch/ce/lun 被当 suspended[][][] 下标直接用。 */
     ASSERT(pba_is_valid(pba));
@@ -842,6 +848,88 @@ ftl_status_t ftl_sync_erase_block(nand_pba_t pba)
     }
 
     (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* ── 异步页级原语（阶段 2 起）──
+ *
+ * 与上面 ftl_sync_* 逐字共用 page_prepare_alloc / pba_to_cmd / ftl_cmd_write_data，
+ * 差别只在最后一步：**不提交**，把命令交回调用者（由它 ftl_op_submit + 服务函数 release）。
+ * 返回码比同步版多一档 FTL_AGAIN：命令池空是瞬态背压，调用者应当**保留现场、稍后重试**，
+ * 而同步版把它和"地址非法"一起压成 FTL_ERROR（同步调用者没有重试的地方）。 */
+
+/* --------------------------------------------------------------------
+ * ftl_async_write_page
+ *   功能：建链 + 搬入数据，**不提交**，命令经 out_cmd 交回。
+ *   参数：out_cmd —— 出参命令（非 NULL）；pba —— 目标页；data/length —— 源数据；
+ *         cfg —— 页配置。
+ *   返回：FTL_OK 命令已备好（调用者须提交或 release）；FTL_AGAIN 命令池空；
+ *         FTL_ERROR 入参非法 / 地址非法 / 建链失败 / 搬数据失败。
+ *   实现要点：数据在本函数内**已拷进 FC buffer 池**（ftl_cmd_write_data 是 memcpy）
+ *             ⇒ 返回后调用者即可复用源缓冲，无需为异步写保留快照。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg)
+{
+    fc_command_t *cmd;
+
+    if (out_cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd = page_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
+    if (cmd == NULL)
+    {
+        return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
+    }
+
+    if (pba_to_cmd(cmd, pba) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if ((data != NULL) && (length > 0U) && (ftl_cmd_write_data(cmd, data, length) != FTL_OK))
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    *out_cmd = cmd;
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_async_erase_block
+ *   功能：建链（无数据），**不提交**，命令经 out_cmd 交回。
+ *   参数：out_cmd —— 出参命令（非 NULL）；pba —— 目标块 PBA。
+ *   返回：FTL_OK / FTL_AGAIN（命令池空）/ FTL_ERROR（入参或地址非法 / 建链失败）。
+ *   实现要点：擦除慢（20ms 超时）是**同步版**的形参；异步版的超时由 FC 层自己的
+ *             命令超时与 job watchdog 承担，本函数不设。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba)
+{
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
+    fc_command_t        *cmd;
+
+    if (out_cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd = page_prepare_alloc(OP_ERASE_BLOCK, &cfg);
+    if (cmd == NULL)
+    {
+        return FTL_AGAIN;
+    }
+
+    if (pba_to_cmd(cmd, pba) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    *out_cmd = cmd;
     return FTL_OK;
 }
 

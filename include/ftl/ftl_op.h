@@ -49,7 +49,7 @@ typedef enum
     FTL_OP_NONE = 0,      /* 未标记：派发时判为孤儿（release + LOGE），正常不应出现 */
     FTL_OP_SYNC_WAIT,     /* 唤醒同步等待者（所有 ftl_sync_* 用） */
     FTL_OP_HOST_IO,       /* host 读写子操作（原 FC_COMMAND_MODULE_FTL 分支） */
-    FTL_OP_JOURNAL,       /* 阶段 2 */
+    FTL_OP_JOURNAL,       /* Journal 刷页 job（journal.c，阶段 2 点亮） */
     FTL_OP_READ_RECOVERY, /* 阶段 3 */
     FTL_OP_GC,            /* 阶段 4 */
     FTL_OP_WL,            /* 阶段 4 */
@@ -93,11 +93,34 @@ ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx);
 void ftl_op_dispatch(const fc_command_status_t *completion);
 
 /*
+ * ftl_op_in_dispatch - 当前是否在完成服务函数（或其嵌套调用）里。
+ *
+ * 用途：给"服务函数内不得同步等待"这条约定一个**可判定的**依据。服务函数里若再
+ * 跑一遍完成泵（ftl_sync_submit_wait / journal_flush_page 的 drain），就是嵌套泵
+ * ——那正是本次解耦要消除的东西。深度计数（不是布尔）：嵌套 drain 会再进一层。
+ *
+ * 已落地的一处用法：journal_append 页满时若异步刷页起不来，**不在**派发上下文里
+ * 同步回退（会嵌套），改为丢弃该条目 + LOGE（见 journal.c）。
+ *
+ * @return 1 = 在派发内；0 = 不在。
+ */
+int ftl_op_in_dispatch(void);
+
+/*
  * ftl_op_host_io - host 读写子操作的完成服务函数（定义在 ftl.c）。
  *
  * 由 g_op_service[FTL_OP_HOST_IO] 引用；ctx 不用（服务函数自己 pending_lookup）。
  */
 void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+
+/*
+ * ftl_op_journal - Journal 刷页 job 的完成服务函数（定义在 journal.c）。
+ *
+ * 由 g_op_service[FTL_OP_JOURNAL] 引用；ctx = `l2p_journal_t *`（= &ftl->journal），
+ * 服务函数按 job.phase 推进状态机（页写完成 ⇒ 推进写指针 / 起换块擦除；擦完成 ⇒ 收尾）。
+ * 每条命令自己 fc_command_release。
+ */
+void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
 /* ── 同步等待器（FTL_OP_SYNC_WAIT 的 ctx）──
  *

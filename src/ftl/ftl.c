@@ -549,8 +549,8 @@ static void ftl_service_idle(ftl_context_t *ftl)
         }
     }
 
-    /* 强制写 Journal buffer */
-    journal_flush_page(&ftl->journal);
+    /* 推进 Journal 刷页 job（阶段 2：起异步写，不再阻塞在服务循环里） */
+    journal_kick(&ftl->journal);
 
     /* BBT 持久化（攒批写 NAND BBT） */
     (void)bbt_flush(&ftl->alloc);
@@ -611,6 +611,9 @@ static void ftl_service_normal(ftl_context_t *ftl)
         (void)wl_execute(ftl);
     }
 
+    /* 推进 Journal 刷页 job（阶段 2：与 IDLE 同一入口，job 已在飞则空操作） */
+    journal_kick(&ftl->journal);
+
     /* BBT 持久化（NORMAL 模式周期性刷入） */
     (void)bbt_flush(&ftl->alloc);
 
@@ -646,6 +649,14 @@ static void ftl_service_busy(ftl_context_t *ftl)
             (void)l2p_cache_flush_one(&ftl->cache, (int)i);
             break;
         }
+    }
+
+    /* BUSY 档**不**起新的 Journal 页写（BUSY = host 饱和档，页满时 journal_append
+     * 自己会起异步写；这里再起就违背了「BUSY 只做防饿死的最小后台」的档位约定）。
+     * 只补「未起的换块擦除」——新环形块没擦过就不能往里写。 */
+    if ((ftl->journal.job.phase == JRN_IDLE) && (ftl->journal.job.need_erase != 0U))
+    {
+        journal_kick(&ftl->journal);
     }
 
     /* 紧急 Checkpoint：Journal ≥ 95% 时 BUSY 模式也强制执行 */
