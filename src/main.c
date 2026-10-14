@@ -23,6 +23,7 @@
 
 #include "btim.h"
 #include "common/log.h"
+#include "common/stack_guard.h"
 #include "controller/cli.h"
 #include "controller/controller.h"
 #include "delay.h"
@@ -359,6 +360,10 @@ int main(void)
     log_set_flush_sink(stm32_uart_log_flush_sink);
     log_set_level(LOG_INFO);
     LOGD("debug logging enabled\r\n");
+    /* 栈哨兵：把 [&end, 当前 SP) 整段填 pattern。必须**早**——越早，后面
+     * （FTL boot / CLI test 这些深调用）用过的栈就越多地落在被守卫区内，
+     * 周期校验才量得到真实峰值。此后由 superloop 每轮 stack_guard_check() 校验。 */
+    stack_guard_init();
     /* 开机横幅（裸行）+ 系统身份（时钟 / Cache / MPU 区域数）。 */
     (void)uart_log_write(g_boot_banner, sizeof(g_boot_banner) - 1U);
     /*
@@ -468,6 +473,10 @@ int main(void)
      *   All command parsing and scheduled storage work remain outside ISR context. */
     while (1)
     {
+        /* 栈哨兵周期校验（每轮一次，MSP 无异常时开销 ~10 条指令）：
+         * 查 MSP 是否仍在 DTCM 内 + 从上次最低点继续向下找被踩过的 pattern。
+         * 放在循环**最前**：上一轮（含 CLI 命令 / FTL 后台）若踩了栈，这里先报。 */
+        stack_guard_check();
         cli_service_poll();
         if (g_ftl_ready)
         {

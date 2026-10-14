@@ -14,6 +14,7 @@
 #include "common/common.h"
 #include "common/crash.h"
 #include "common/log.h"
+#include "common/stack_guard.h"
 #include "controller/ssd_request.h"
 #include "ftl/bbt.h"
 #include "ftl/ftl.h"
@@ -675,6 +676,22 @@ static int uart_cli_crash(int argc, char *argv[])
 }
 
 /*
+ * stack — 打印栈哨兵状态（paint 区间 / 栈峰值 / 余量 / 告警）。纯只读，可反复调。
+ *
+ * `peak` 是「自 stack_guard_init 起，栈最深到过哪里」，`low` 是对应地址。
+ * ⚠ `peak` 只在**堆没被用过**时才是栈峰值——堆从 `dtcm_bottom` 向上长，同样会抹掉
+ *   pattern。所以报告把 `dtcm_bottom` 一并打出来：`low` 贴着它 ⇒ 那是堆顶不是栈底。
+ * 告警只在**首次置位**时打过 LOGI/LOGE；`hits` 持续增长说明还在踩。
+ */
+static int uart_cli_stack(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    stack_guard_report();
+    return FUNC_STATUS_SUCCESS;
+}
+
+/*
  * bbt [--erase] — 逐块探测并打印坏块图。
  *
  * 默认**只读**：读每块 Page 0 的 spare 首字节（列 2048），非 0xFF ⇒ 出厂坏块。
@@ -840,6 +857,7 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
     {   "info",                                                                                                           "info",                             "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
     {    "map",                                                                                                      "map <lba>",  "print L2P mapping + target block BST entry (read-only diag)", 2U,  2U,     uart_cli_map},
     {  "crash",                                                                                                  "crash [clear]",                          "show/clear the .noinit crash record", 1U,  2U,   uart_cli_crash},
+    {  "stack",                                                                                                          "stack",           "show stack guard: paint region, peak usage, alarms", 1U,  1U,   uart_cli_stack},
     {    "bbt",                                                                                                  "bbt [--erase]", "print factory bad block map (--erase: also erase each block)", 1U,  2U,     uart_cli_bbt},
 #if defined(FC_NAND_TEST_ENABLE)
   /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
