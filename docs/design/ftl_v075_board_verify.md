@@ -125,15 +125,25 @@ Binary size: 212024 bytes
 
 ## 6. 断电重启数据仍在（脏环配方）
 
-> ⚠ 本项的配方**必须带「脏环」步骤**——在刚格式化过的干净介质上直接跑，会得到
-> `type=1 journal_entries=0` + `rd PASS` 的**假绿**（数据靠 Checkpoint 活下来，
-> 回放路径根本没被走到）。
+> ⚠ **2026-10-15 上板订正：原配方「敲几次 `wr 0 32` 把环弄脏」的前提不成立。**
+>   ① `journal_append`（`journal.c:143`）对**同一 LBA** 在当前页内**就地合并**——不占新槽位、
+>      不推进 `current_entry` ⇒ 反复写同一段 LBA **永远填不满一页**（`JOURNAL_ENTRIES_PER_PAGE = 127`）。
+>   ② `journal_kick`（`journal.c:347`）的判据是「`current_entry > 0` 就 freeze」，**不是等页满**，
+>      且 IDLE / NORMAL 档**每轮 superloop 都调**（`ftl.c:522` / `:587`）
+>      ⇒ **任何一次写之后最多一轮（微秒级），Journal 页就已经落到 NAND 了**，根本不需要「攒几页」。
+>   ⇒ 真正决定 `type=1` / `type=2` 的**不是「环脏不脏」，而是断电前有没有让 Checkpoint 跑过**。
+>   `CP_TIME_INTERVAL_MS = 10000`（`ftl.h:36`）⇒ **空闲 10 秒就自动落一次 CP**，会把刚写的条目
+>   全覆盖掉。**所以配方的真正约束是：写完尽快断电（几秒内，别拖过 10 秒）。**
+>
+> ⚠ 在刚格式化过的干净介质上直接跑，仍会得到 `type=1 journal_entries=0` + `rd PASS` 的**假绿**
+>   （数据靠 Checkpoint 活下来，回放路径根本没被走到）——这是本项要避开的。
 
 | | |
 |---|---|
-| **操作（脏环配方）** | ① 把环弄脏：敲几次 `wr 0 32`（**不要**敲 `fl`）→ ② 断电重启 → ③ 干净关机：`fl` → 断电 → ④ 再 `wr 0 8` → **直接断电**（不敲 `fl`）→ ⑤ 重新上电 → `rd 0 8 c` |
+| **操作（脏环配方）** | ① `wr 0 32` → 等 `wr done ... status=0`（数据页确已编程）→ ② **停 ~1 秒**（让 Journal 页落 NAND）→ **直接断电**（⚠ **别超过 10 秒**，否则 CP 会覆盖掉）→ ③ 重新上电 → ④ `rd 0 32 c` |
 | **预期** | 重启日志 `[INF] [FTL ] boot type=2 cp_seq=<N> journal_entries=<E>`（`type=2` = `BOOT_POWER_FAILURE`）<br>`rd PASS` |
-| **判据** | ① `rd PASS`；② `journal_entries` 应是**本轮实际写量**的量级；**若出现 `30×127+1 = 3811` 这类「整圈数」** ⇒ 回放扫到了上一圈遗留的旧页。③ `type=1` = `BOOT_CLEAN_START`，判据是「掉电前恰好有一次 Checkpoint 覆盖了全部已写条目」，**不是**「敲过 `fl`」（`fl` 走 `ftl_flush`，**不调** `checkpoint_create`）。 |
+| **判据** | ① `rd PASS`；② `journal_entries` 应是**本轮实际写量**的量级（`wr 0 32` ⇒ 32）；**若出现 `30×127+1 = 3811` 这类「整圈数」** ⇒ 回放扫到了上一圈遗留的旧页。③ `type=1` = `BOOT_CLEAN_START`，判据是「掉电前恰好有一次 Checkpoint 覆盖了全部已写条目」，**不是**「敲过 `fl`」（`fl` 走 `ftl_flush`，**不调** `checkpoint_create`）。 |
+| **对照组（强烈建议做）** | 同样 `wr 0 32`，但**等 15 秒**再断电 ⇒ 应得 `type=1 journal_entries=0`，而 `rd 0 32 c` 仍 `PASS`。**两次一比才证明「`type=1` 的 PASS 确实没走回放」**，即前一次的 `type=2` 是真证据。上板实测：2026-10-15 两条都 PASS。 |
 | **失败** | `rd FAIL at byte 0: got 00000000 expect 55555555` ⇒ 掉电一致性破。回退看 `journal.c`（`journal_scan_latest` / `journal_resume`）。 |
 | **⚠ v0.75 专项** | Journal 刷页已异步（阶段 2）。**前提不变**：Journal 是 write-back 且本仓**无电容** ⇒ acked 写本就容忍丢一页条目，异步化**不改变掉电模型**。但要盯 `[JRN] job phase=%u waddr=0x%08lx age=%lums` 心跳是否卡在同一 phase。 |
 
@@ -146,15 +156,20 @@ Binary size: 212024 bytes
 > **按设计就不该跑 GC**，上板看不到 `[GC]` 行是**正确行为**。
 >
 > **手测入口 = 临时抬高水位**（唯一的临时源码改动，验完改回）：
-> 1. 上板敲 `info` → 记下 `free=F`。
-> 2. 把 `include/ftl/allocator.h` 的 `FREE_POOL_TARGET` 由 `32U` 改成 `F + 2U`。
+> 1. 上板敲 `info` → 记下 `free=F`（`info` 的 `free` = `ftl->alloc.free_count`，**全局一个数**，`cli.c:521`）。
+> 2. 把 `include/ftl/allocator.h` 的 `FREE_POOL_TARGET` 由 `32U` 改成 `F + 2U`
+>    （T1 判据是 `alloc->free_count < FREE_POOL_TARGET`，`gc.c:405` ⇒ `F+2` 必然命中，且只差 2 块）。
 > 3. `make clean && make all` → 烧 → 复位。验完**改回 `32U`** 并重编。
+>
+> ⚠ 抬高会**顺带激活** `metadata.c:924` 的目录回收请求（同一个水位宏），测试期可接受，但**别忘改回**。
+> ⚠ 该改动**不得提交**（`git status` 应只有 `M include/ftl/allocator.h`）。
 
 | | |
 |---|---|
 | **操作** | 按上方抬高水位后复位，观察开机日志（**无需敲任何命令**） |
 | **预期** | `[INF] [GC] trig=0x01 free=<F'> op=<O> writes=<W> reclaimed=<R> novictim=<N>`<br>`[INF] [GC] victim p0=<b0> p1=<b1> vr=<v> er=<e> cp=<c> yp=<y> cost=<k>` |
-| **判据** | ① `trig` 含 **`0x01`**（T1）；② victim 四项 `vr/er/cp/yp` 都参与 cost；③ **`[GC] victim` 行数 = 1**（同时是 IDLE 补池 `uint32` 下溢的判据）；④ **`reclaimed` 涨 1** 而 `novictim` 不变——这两个是**进展计数**（只增不减）⇒ 一行即可区分「卡死」（`reclaimed` 不动、`novictim` 涨）与「在推进」。 |
+| **判据** | ① `trig` 含 **`0x01`**（T1）；② victim 四项 `vr/er/cp/yp` 都参与 cost；③ **`[GC] victim` 行数 = 到水位的差额**（见下方订正，**不是**恒为 1）；④ **`reclaimed` 涨、`novictim` 不变**——这两个是**进展计数**（只增不减）⇒ 一行即可区分「卡死」（`reclaimed` 不动、`novictim` 涨）与「在推进」。 |
+| **判据订正（2026-10-15）** | 原写「行数 = 1」**不对**。F2 重建产物是**退化单 plane SB**（`plane_blocks[1] == FTL_BLOCK_NO_PLANE == 65535`，`allocator.h:76`；`close_full_block(..., FTL_TEMP_HOT, ...)`，`power_failure_recovery.c:665`）⇒ 一个 victim **只净归还 1 块**（不是 2）⇒ 差 2 块就需要 **2 个** victim。上板实测：`free=3444`、水位 `3446` ⇒ 恰好 2 行 victim，`free` 精确到 `3446`、`closed` 11→9。`gc.c:368` 注释里的「最多 `TARGET/PLANE_NUM` 行」是按双 plane 写的。 |
 | **⚠ 不要这样判** | 拿「`free` 上升」当判据——一次 GC 迭代是「取 2 块目标页 + 还 2 块 victim」，**净变化 ≈ 0**。 |
 | **⚠ v0.75 专项** | 搬移已是 `mig_job_t` 状态机（三份同构搬移收敛成一台，`[FTL_OP_GC]` 与 `[FTL_OP_WL]` 填**同一个** `ftl_op_migrate`）。盯 `[MIG] job kind=%u phase=%u page=%u plane=%u aborted=%u age=%lums` 心跳：**`aborted=1`** = 分配不到目标页而中止（**victim 不擦，数据无损**）。三条刻意行为变更：① 分配不到 ⇒ 中止且不擦 victim（原实现会**静默丢数据**）；② 擦除失败**不再退役**；③ 写路径紧急 GC 改**背压**（`FTL_AGAIN`，不再是 `FTL_ERROR`）。 |
 | **专项（背压 + 池耗尽）** | 池耗尽 + 持续写 ⇒ 写最终成功、不丢数据、不死锁（验证 OP 预留池兜底）。GC 因池空中止时打 `[MIG] no free block … abort, victim kept`。 |
@@ -196,6 +211,7 @@ Binary size: 212024 bytes
 | **操作** | `bbt`（只读）→ `bbt --erase`（**破坏性**）→ 断电重启 |
 | **预期** | 只读版打印坏块图，与器件出厂标记一致；`--erase` 后重启出现自动格式化横幅（介质被抹 ⇒ 版本校验失败） |
 | **判据** | 坏块判据 = 每块首页 spare 首字节（列 2048），非「读失败/全 FF」。`--erase` 后 `free`/`op`/`spare` 回到健康片初值。 |
+| **⚠ 两个来源不同（2026-10-15 记录，**待验证**）** | `bbt` 打的是**逐块实时探测**（`bbt_print_bad_map` → `bbt_probe_block_bad`，读 spare 首字节，`bbt.c:283`）；`info` 的 `bad` 是 `alloc.bad_count`（**FTL 自己的 BBT**，`cli.c:526`）⇒ **两者本来就不必相等**。上板观察：用过一段时间的芯片上 `bbt` 标记数（约 17）**多于** `bad=11`，且标记集中在元数据区（0..62）与近期写过的数据块。**假设**：FTL 自己写过的页在 spare 里也有内容 ⇒ 探测无法区分「出厂标记」与「已写过」。**决定性试验**：刚格式化/擦净后立刻 `bbt` + `info`，若两者一致、用过之后才分叉，则假设成立。（与 §13 的 `bad=11` 未确认项可能是同一件事。） |
 | **⚠** | `--erase` 会抹掉 FTL 元数据与用户数据，只在专门的坏块体检时用。 |
 
 ---
@@ -244,7 +260,7 @@ Binary size: 212024 bytes
 | **`CONFIG_FC_RAID`=0** | RR Stage 3 不实现（边界，**勿翻**）。 |
 | **`bbt_kick` 游标未建立时的扫池** | 内含 `ftl_sync_read_page`，但一次性冷启动且**不在完成泵内** ⇒ 有意保留。 |
 | **`metadata_dir_reclaim` / `_reclaim_block`** | 仍是同步的（`append_slot` 换块分支的全池 sweep，不在完成泵内）⇒ 有意保留。 |
-| **首启 `bad=11` 而 `free=3456`** | 按 `free = 4096 − bad − metadata_good − 508` 反推有 **5 个出厂坏块落在 per-plane 元数据区（块号 0..62）**——`ftl_is_metadata_block` 只按块号预留、**不看坏块位**。次生观察，未确认，与 v0.75 无关。 |
+| **首启 `bad=11` 而 `free=3456`** | 按 `free = 4096 − bad − metadata_good − 508` 反推有 **5 个出厂坏块落在 per-plane 元数据区（块号 0..62）**——`ftl_is_metadata_block` 只按块号预留、**不看坏块位**。次生观察，未确认，与 v0.75 无关。**2026-10-15：与 §10 的「`bbt` 两个来源不同」可能是同一件事，合并看。** |
 | **v0.71 那条 MemManage 记录** | `.noinit` 陈旧记录，非本次上电（见 `docs/design/fault_capture.md` 与 §9 的栈哨兵）。**先 `crash` 再 `crash clear`**，顺序不能反。 |
 
 ---
