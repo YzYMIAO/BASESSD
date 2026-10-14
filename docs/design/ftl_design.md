@@ -1039,6 +1039,59 @@ per-instance 记 `ftl->gc_eval_last_ms`。为什么必须加：
 
 GC 搬移（读 → 写新位置 → 更新 L2P → 擦除旧 Block）不是原子的。掉电可能发生在中间任何一步。
 
+**搬移流程图**（`gc_migrate_sb`，`src/ftl/gc.c`）：
+
+```
+          gc_migrate_sb(alloc, cache, journal, victim)   victim = 选好的 Closed SB（双 plane）
+
+   ┌────────────────────────────────────────────────────────┐
+   │ 快路径：victim 的有效 CW 总数 == 0 ？                  │
+   │   是 -> 直接返回（调用方仍会擦除并归还 Free Pool）     │
+   └──────────────────────────┬─────────────────────────────┘
+                              │  否
+                              ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ for page = 0 .. PAGES_PER_BLOCK-1（按页扫，不按 plane：│
+   │                                目标页必须成对分配）    │
+   │   对每个 plane（该 SB 有块的）：                       │
+   │     (1) gc_read_page_with_lba(源页)                    │
+   │           -> 整页用户区 + 每个 CW 自己的 META LBA      │
+   │           读失败 / 全页无写过 CW -> 跳过本页本 plane   │
+   │           （L2P 未动，数据仍在 victim）                │
+   │           顺带记 ECC 趋势 + read disturb（B4）         │
+   │     (2) 逐 CW 反查 L2P 判活：                          │
+   │           l2p_cache_read(cw_lba) == pba_with_cw(src,cw)│
+   │           才置 cw_bitmap 位                            │
+   │   两 plane 本页都无有效 CW -> continue（空洞）         │
+   │   成对分配目标页 allocator_alloc_pair(COLD)            │
+   │     Free Pool 耗尽 -> break（保留未搬源页，L2P 未动）  │
+   │   对每个 plane（cw_bitmap != 0）：                     │
+   │     (3) ftl_sync_write_page_cw(dst, buf, cw_bitmap)    │
+   │           只搬有效 CW（无效 CW 不建链、不编程）        │
+   │           写失败 -> continue（L2P 未改，下轮再试）     │
+   │     (4) 逐有效 CW：                                    │
+   │           l2p_cache_write(l, new_pba)                  │
+   │           journal_append(l, old_pba, new_pba)          │
+   │           有效计数：源块 -1，新块 +1；migrated++       │
+   └──────────────────────────┬─────────────────────────────┘
+                              ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ migrated > 0 -> journal_flush_page（F10）              │
+   │   搬移条目先落盘，之后调用方才擦除 victim              │
+   └──────────────────────────┬─────────────────────────────┘
+                              ▼
+   返回 migrated -> 调用方擦除 victim -> 归还 Free Pool
+```
+
+> **顺序不变量**：先写新页 → 再改 L2P + 记 Journal → 最后由调用方擦旧块；且擦除前必须
+> `journal_flush_page` 强制落盘（即下方 Layer 1 的 v0.43 约束）。任一步掉电，victim 要么
+> 还在、要么 L2P 未动 ⇒ 不丢数据（Layer 3 的「最多一个孤悬 Block」）。
+>
+> **与静态 WL 的关系**：`wl_relocate`（§4.8.4）与 `gc_migrate_sb` **同构**——同一套
+> `gc_read_page_with_lba` / `ftl_sync_write_page_cw` / `gc_erase_and_free` 原语、同一条
+> 顺序不变量；唯一实质区别是 **victim 选择相反**（GC 选「无效页多」，WL 选「擦得少的冷块」）。
+> 对照表见 §4.8.4。
+
 三层保护机制：
 
 - **Layer 1: Journal** — 每个 L2P 更新先写 Journal 后改 cache，掉电后 Journal 回放重建 L2P。**实现约束（v0.43）**：Journal 是 write-back（`page_buf` 攒满才 flush），GC/WL 擦除 victim 前必须 `journal_flush_page` 强制落盘——否则掉电落在"搬移条目未落盘 + victim 已擦除"窗口，回放指向已擦除块（数据损坏）。`gc_migrate_sb`/`wl_relocate` 已按此接线。
@@ -1217,6 +1270,52 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim) {
 
 #### 4.8.4 数据搬移流程
 
+**搬移流程图**（`wl_relocate`，`src/ftl/wear_leveling.c`；与 §4.5 的 GC 搬移**同构**）：
+
+```
+          wl_relocate(ftl, victim)   victim = wl_select_victim 选的冷块（擦得少 + 有效 CW 多 + read_count 高）
+
+   ┌────────────────────────────────────────────────────────┐
+   │ 前置：victim->found 为 0 -> 直接返回（选块已保证       │
+   │       valid >= min_valid_cw，故没有「空块」快路径）    │
+   └──────────────────────────┬─────────────────────────────┘
+                              │  found
+                              ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ for page = 0 .. PAGES_PER_BLOCK-1（按页扫，不按 plane：│
+   │                                目标页必须成对分配）    │
+   │   对每个 plane：                                       │
+   │     plane_blocks[plane] == FTL_BLOCK_NO_PLANE -> 跳过  │
+   │     (1) gc_read_page_with_lba(源页)（复用 GC 原语）    │
+   │           -> 整页用户区 + 每个 CW 自己的 META LBA      │
+   │           读失败 / 全页无写过 CW -> 跳过本页本 plane   │
+   │           顺带记 ECC 趋势 + read_count（B4）           │
+   │     (2) 逐 CW 反查 L2P 判活 -> 置 cw_bitmap 位         │
+   │   两 plane 本页都无有效 CW -> continue（空洞）         │
+   │   成对分配目标页 allocator_alloc_pair(COLD)            │
+   │     Free Pool 耗尽 -> break（保留未搬源页，L2P 未动）  │
+   │   对每个 plane（cw_bitmap != 0）：                     │
+   │     (3) ftl_sync_write_page_cw(dst, buf, cw_bitmap)    │
+   │           只搬有效 CW（无效 CW 不建链、不编程）        │
+   │           写失败 -> continue（L2P 未改，下轮再试）     │
+   │     (4) 逐有效 CW：                                    │
+   │           l2p_cache_write(l, new_pba)                  │
+   │           journal_append(l, old_pba, new_pba)          │
+   │           有效计数：源块 -1，新块 +1；migrated++       │
+   └──────────────────────────┬─────────────────────────────┘
+                              ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ migrated > 0 -> journal_flush_page（F10，同 GC 契约）  │
+   └──────────────────────────┬─────────────────────────────┘
+                              ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ Step 2：构造临时 SB（valid = 0）-> gc_erase_and_free   │
+   │   -> 擦除 victim -> 归还 Free Pool（已擦除态）         │
+   └──────────────────────────┬─────────────────────────────┘
+                              ▼
+                      返回 migrated（有效 CW 数）
+```
+
 > ⚠ **订正**：真实 `wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)`
 > 返回 `int`（搬移 **CW** 数），**逐页索引扫双 plane**（无位图可扫，见下），读走
 > `gc_read_page_with_lba`、写走 `ftl_sync_write_page_cw`，擦除归还**复用 `gc_erase_and_free`**。
@@ -1290,11 +1389,19 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim) {
 }
 ```
 
-流程与 GC 搬移一致，区别在于：
-- 搬移目标是 **Cold Super Block**（温度分区到 COLD）
-- Journal 记的仍是 `(lba, old_pba, new_pba)` 三元组——与 GC 同构（LBA 不变、PAA 换新位置），
-  故回放后 L2P 指向新页；搬完 `journal_flush_page` **先落盘再擦除**（F10 掉电窗口）
-- 搬完后归还 Free Pool（已擦除态）
+**与 GC 搬移的关系**——同一套原语、同一条顺序不变量，只有「选谁搬」相反：
+
+| | GC（`gc_migrate_sb`，§4.5） | 静态 WL（`wl_relocate`，本节） |
+|---|---|---|
+| 目的 | 回收**空间**（无效页多 ⇒ 腾出 Free Pool） | 拉平**磨损**（擦得少的冷块搬走一次） |
+| victim | 有效 CW **最少**（加权评分，§4.3） | 擦除次数落在低擦除区 + 有效 CW **多** + read_count 高（§4.8.3） |
+| 搬移读 / 写 | `gc_read_page_with_lba` / `ftl_sync_write_page_cw` | **同**（直接复用 GC 原语） |
+| 目标流 | Cold（`allocator_alloc_pair(FTL_TEMP_COLD)`） | **同**（Cold） |
+| Journal 条目 | `(lba, old_pba, new_pba)` | **同**（LBA 不变、PAA 换新位置 ⇒ 回放后 L2P 指向新页） |
+| 擦除归还 | 调用方 `gc_erase_and_free` | Step 2 构造临时 SB（`valid = 0`）后**复用** `gc_erase_and_free` |
+| 掉电窗口 | 擦除**前** `journal_flush_page`（F10） | **同** |
+
+⇒ 读 WL 搬移代码可**直接套用 §4.5 的图**，只需把「选 victim」换成 §4.8.3 的冷块选择。
 
 #### 4.8.5 WL 在 ftl_service 中的调度
 
@@ -1975,6 +2082,126 @@ Region 当前在哪，也就无法利用双 Plane 并行。
 ---
 
 ## 6. SRAM Cache 设计
+
+> **本节怎么读**：L2P 全表住在 NAND（2048 个 region × 2KB = 4MB），SRAM 只缓存其中 **64 个
+> region**（= 64 行）。对外只有 `l2p_cache_read` / `l2p_cache_write` 两个入口：命中就改 RAM，
+> 未命中就「驱逐一行 + 从 NAND 载入新 region」，脏行**追加**写回日志块。下面三张图先给全局，
+> §6.1~§6.5 再给细节——**① 表住在哪 → ② 一次读/写走什么路 → ③ 脏行何时、如何写回**。
+
+#### 图 ① 表住在哪：SRAM 缓存 ↔ NAND 全量
+
+```
+L2P 全表 = 2048 个 region；每 region = 512 entry * 4B = 2KB（正好 1 个 NAND 页）
+region_id = lba / 512          entry_idx = lba % 512
+
+┌─────────────────────────────────────────────────────────────┐
+│ SRAM（快、易失、唯一可变副本）                              │
+│ l2p_cache_t                                                 │
+│   lines[64]：每条 line 缓存 1 个 region                     │
+│     entries[512] + region_id + state + access_count         │
+│   state：INVALID / CLEAN / DIRTY / FLUSHING                 │
+│   clock_hand：CLOCK 替换指针（64 行环）                     │
+└───────────────────────┬─────────────────────────────────────┘
+  miss 时载入 region    │  脏行追加写回
+┌─────────────────────────────────────────────────────────────┐
+│ NAND 元数据区（慢、非易失、全量 2048 region）               │
+│ Metadata Directory（SRAM 常驻约 18KB）：region_id -> 位置   │
+│   哨兵层 Block 0..15：2048 region 的出厂位，永不写入，      │
+│                      读回全 0xFF（= 未映射）                │
+│   L2P 日志块（动态）：写回追加到下一空槽，绝不就地覆盖      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 图 ② 一次读 / 写走什么路（两个入口共用同一条路径）
+
+```
+                l2p_cache_read(lba)  /  l2p_cache_write(lba, pba)
+                            │
+                            ▼
+   region_id = lba / 512        entry_idx = lba % 512
+                            │
+                            ▼
+   ┌────────────────────────────────────────────────────┐
+   │ (1) 查 lines[64] 里有没有 region_id                │
+   │     只认 state = CLEAN / DIRTY                     │
+   │     ├─ 命中 -> 直接跳到 (4)（不选 victim、不载入） │
+   │     └─ 未命中 -> 继续 (2)                          │
+   └────────────────────────┬───────────────────────────┘
+                            │
+                            ▼
+   ┌────────────────────────────────────────────────────┐
+   │ (2) CLOCK 选 victim（clock_hand 环形扫描）         │
+   │       INVALID  -> 直接用                           │
+   │       FLUSHING -> 跳过（写回中，不可驱逐）         │
+   │       DIRTY    -> 先写回 flush_one，失败则跳过     │
+   │       其余     -> access_count-- 后看下一行        │
+   └────────────────────────┬───────────────────────────┘
+                            │
+                            ▼
+   ┌────────────────────────────────────────────────────┐
+   │ (3) 从 NAND 载入该 region：                        │
+   │       metadata_dir_lookup(region_id) -> 位置       │
+   │       ftl_sync_read_page(2KB)                      │
+   │       成功 -> state = CLEAN                        │
+   │       失败 -> state = INVALID（entries 全 FF）     │
+   └────────────────────────┬───────────────────────────┘
+                            │
+                            ▼
+   ┌────────────────────────────────────────────────────┐
+   │ (4) 读：access_count++，返回 entries[entry_idx]    │
+   │     写：entries[entry_idx] = pba，置 DIRTY + 脏位  │
+   └────────────────────────────────────────────────────┘
+```
+
+#### 图 ③ 脏行何时、如何写回（`l2p_cache_flush_one`）
+
+```
+触发写回的三条路径：
+  (1) 驱逐路径（按需）      -- miss 时 victim 是 DIRTY，就地 flush_one
+  (2) ftl_service_normal    -- 每轮主动 flush 最多 4 条；thrashing 时停掉（§6.5）
+  (3) checkpoint_create     -- 兜底：flush 全部脏 region（先快照 bitmap 再 flush）
+
+                   flush_one(line)
+                           │
+                           ▼
+   ┌────────────────────────────────────────────────┐
+   │ state = FLUSHING（防 evict 选中）              │
+   └───────────────────────┬────────────────────────┘
+                           │
+                           ▼
+   ┌────────────────────────────────────────────────┐
+   │ metadata_dir_append_slot()                     │
+   │   从 L2P 日志块取下一空槽（块满先取新块）      │
+   │   取不到 -> state 还原 DIRTY，返回 ERROR       │
+   │           （绝不回退固定位置：哨兵层不可写）   │
+   └───────────────────────┬────────────────────────┘
+                           │
+                           ▼
+   ┌────────────────────────────────────────────────┐
+   │ ftl_sync_write_page（整页 2KB 追加）           │
+   │   绝不就地覆盖（二次编程 = 静默损坏）          │
+   └───────────────────────┬────────────────────────┘
+                           │
+    ┌──────────────────────┴────────────┐
+    │                                   │
+    ▼                                   ▼
+    ┌─────────────────┐
+    │ 成功：          │
+    │ commit_region   │
+    │ state = CLEAN   │
+    │ 清 region 脏位  │
+    └─────────────────┘
+                                        ┌─────────────────────────────────┐
+                                        │ 失败：                          │
+                                        │ state 还原 DIRTY                │
+                                        │ Directory 不登记                │
+                                        │ （仍指向上一次有效记录，无丢失）│
+                                        └─────────────────────────────────┘
+```
+
+> **为什么敢让脏行留在 RAM**：写路径的每次 L2P 变更都在**写完成路径**里**先
+> `journal_append`、再 `l2p_cache_write`**（§7.3）——掉电可回放；`checkpoint_create`
+> 又无条件 flush 全部脏 region。所以「脏行滞留 SRAM」不比任何 write-back 设计多一个丢失窗口。
 
 ### 6.1 数据结构
 
@@ -2764,6 +2991,44 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 
 > **F10 关键**：必须回放**所有** `page_seq > cp_sequence` 的页——早期版本只回放
 > 最大一页，掉电跨 ≥2 页时其余条目**静默丢失**。
+
+**回放流程图**（`journal_replay`，`src/ftl/journal.c`；上接 §8.3.5 第 ② 步）：
+
+```
+              journal_replay(journal, cache, cp_sequence, out_entries)
+
+   ┌────────────────────────────────────────────────────────┐
+   │ 第一遍：扫环收集                                       │
+   │   journal_scan_ring(cp_sequence, ...)                  │
+   │     扫 JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK = 256 页  │
+   │     收集所有 page_seq > cp_sequence 的页               │
+   │       -> replay_pages[]（栈上 256 * 8B = 2KB）         │
+   │     同时取「最新页」latest                             │
+   └──────────────────────────┬─────────────────────────────┘
+                              ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ 第二遍：按 (page_seq, entry_index) 递增序应用          │
+   │   插入排序 replay_pages（<= 256 项）                   │
+   │     同 LBA 后写覆盖先写 = last-write-wins              │
+   │     （含 GC/WL 搬移记录，绝不指向已擦除块）            │
+   └──────────────────────────┬─────────────────────────────┘
+                              ▼
+   ┌────────────────────────────────────────────────────────┐
+   │   逐页：                                               │
+   │     ftl_sync_read_page(该页)                           │
+   │       读失败 -> 跳过（其余页不受影响）                 │
+   │     逐 entry：l2p_cache_write(lba, new_pba)            │
+   │       （写进 L2P Cache，该行标 DIRTY）                 │
+   └──────────────────────────┬─────────────────────────────┘
+                              ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ journal_resume(latest, cp_sequence)                    │
+   │   恢复写指针与序号（落到最新页之后）                   │
+   │   floor = cp_sequence 兜住「环空 / 序号回退」          │
+   └──────────────────────────┬─────────────────────────────┘
+                              ▼
+   返回 applied（= out_entries）；DIRTY 行随后台 flush 逐步落盘
+```
 
 #### 8.3.7 写指针恢复（Write Pointer Recovery）
 
