@@ -866,7 +866,11 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
                     uint16_t offset = JOURNAL_HEADER_SIZE + sizeof(l2p_journal_entry_t) * k;
                     memcpy(&entry_lba, page_data + offset + 0, 4);
                     memcpy(&entry_new_pba, page_data + offset + 8, 4);
-                    l2p_cache_write(cache, (lba_t)entry_lba, (nand_pba_t)entry_new_pba);
+                    /* ⚠ 开机回放路径 = 结构性同步：用**同步**逃生口（自旋泵），
+                     * 不 park、不返 FTL_AGAIN——此时 superloop 尚未建立，没人推进 job。 */
+                    (void)l2p_cache_write_sync(cache,
+                                               (lba_t)entry_lba,
+                                               (nand_pba_t)entry_new_pba);
                 }
             }
         }

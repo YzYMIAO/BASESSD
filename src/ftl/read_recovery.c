@@ -99,9 +99,9 @@ void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits)
  *
  * ⚠ 本文件的每一条命令都走 ftl_async_* + ftl_op_submit（**不同步等待**）——
  *   服务函数里再跑完成泵就是嵌套泵（见 ftl_op.h）。
- * ⚠ 唯一残留的同步调用是 rr_select_plane 里的 l2p_cache_read（region 未命中时会
- *   内部同步加载）。它今天就在同一位置，且失败的读**刚刚**在 ftl_issue_subop 里查过
- *   同一 LBA ⇒ 该 region 几乎必在 cache 中。彻底关闭留待阶段 5（L2P 加载 job 化）。
+ * ⚠ 阶段 5 起 rr_select_plane 里的 l2p_cache_read 也不再同步加载：region 未命中时
+ *   它起异步加载并返回 FTL_AGAIN，rr_step 原地等下轮（`stall_rounds` 清零，
+ *   加载在飞不算提交卡死）。本文件至此**零同步等待**。
  */
 
 /* 提交一条 SET_FEATURES（读重试电压模式）。背压 ⇒ FTL_AGAIN，job 原地等下轮。 */
@@ -197,10 +197,14 @@ static void rr_next_neighbor(ftl_context_t *ftl)
  *   功能：为当前 plane 找恢复目标页——该 plane 第一个被本子操作覆盖的 LBA 的映射。
  *   参数：ftl —— 实例。
  *   返回：1 找到（page / page_lba / first 已填）；0 本子操作不覆盖本 plane（或该 LBA
- *         未映射）⇒ 调用者跳过本 plane。
+ *         未映射）⇒ 调用者跳过本 plane；-1 该 LBA 的 region **尚未就绪**（本函数已起
+ *         异步加载）⇒ 调用者原地等待、下轮重来。
  *   实现要点：与原 ftl_recover_read_subop 的选页循环逐条一致——只看**第一个** plane
  *             匹配的 k（命中即 break，无论映射是否有效）。目标页取自 L2P 而非失败
  *             命令的 desc 链：读失败不改 L2P，二者同一。
+ *   ⚠ 三态（阶段 5）：必须把"还不知道"（-1）与"未映射"（0）分清——把前者当后者会让
+ *     RR 直接判"本 plane 无需恢复"，host 读到的是零填而非真数据。函数可重入（每轮从
+ *     头扫，先清 page/page_lba/first）。
  * -------------------------------------------------------------------- */
 static int rr_select_plane(ftl_context_t *ftl)
 {
@@ -217,7 +221,12 @@ static int rr_select_plane(ftl_context_t *ftl)
 
         if (ftl_lba_plane(l) == ftl->rr.plane)
         {
-            const nand_pba_t cur = l2p_cache_read(&ftl->cache, l);
+            nand_pba_t cur;
+
+            if (l2p_cache_read(&ftl->cache, l, &cur) == FTL_AGAIN)
+            {
+                return -1; /* region 在加载：下轮再来 */
+            }
 
             if (cur != NAND_PBA_INVALID)
             {
@@ -341,12 +350,25 @@ static void rr_step(ftl_context_t *ftl)
                 break;
 
             case RR_STAGE_PLANE:
+            {
+                int sel;
+
                 if (ftl->rr.plane >= PLANE_NUM)
                 {
                     ftl->rr.stage = (uint8_t)RR_STAGE_FINISH;
                     break;
                 }
-                if (rr_select_plane(ftl) == 0)
+
+                sel = rr_select_plane(ftl);
+
+                if (sel < 0)
+                {
+                    /* L2P region 在加载（阶段 5）：原地等，**不计**提交卡死——
+                     * 加载在飞是有确定完成时刻的进展。rr_kick 每轮会 +1，这里清零。 */
+                    ftl->rr.stall_rounds = 0U;
+                    return;
+                }
+                if (sel == 0)
                 {
                     ftl->rr.plane++; /* 本子操作不覆盖本 plane ⇒ 跳过 */
                     break;
@@ -357,6 +379,7 @@ static void rr_step(ftl_context_t *ftl)
                 ftl->rr.retry_count = 0U;
                 ftl->rr.stage       = (uint8_t)RR_STAGE_SF_SET;
                 break;
+            }
 
             case RR_STAGE_SF_SET:
                 (void)rr_submit_set_features(ftl, ftl->rr.attempt);

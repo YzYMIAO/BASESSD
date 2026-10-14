@@ -53,7 +53,7 @@ typedef enum
     FTL_OP_READ_RECOVERY, /* Read Recovery job（read_recovery.c，阶段 3 点亮） */
     FTL_OP_GC,            /* GC 搬移 job（migrate.c，阶段 4 点亮） */
     FTL_OP_WL,            /* 静态 WL / 慢死预测搬移 job（migrate.c，阶段 4 点亮） */
-    FTL_OP_L2P,           /* 阶段 5 */
+    FTL_OP_L2P,           /* L2P region 加载 / 写回（l2p_cache.c，阶段 5 点亮） */
     FTL_OP_CHECKPOINT,    /* 阶段 6 */
     FTL_OP_BBT,           /* 阶段 7 */
     FTL_OP_WEAR,          /* 阶段 7 */
@@ -140,6 +140,19 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
  * 迁移有效计数；擦完成 ⇒ 归还/退役/标坏），每条命令自己 fc_command_release。
  */
 void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+
+/*
+ * ftl_op_l2p - L2P region 加载 / 写回的完成服务函数（定义在 l2p_cache.c）。
+ *
+ * 由 g_op_service[FTL_OP_L2P] 引用；ctx = `l2p_cache_line_t *`（提交时传的行指针）。
+ * 服务函数按 line->state 收尾：
+ *   · LOADING  ⇒ 成功把整页 region 拷进 line->entries（**须早于 release**：读的数据在
+ *                desc 链上），置 CLEAN；失败同样置 CLEAN（entries 保持全 INVALID = 未映射）。
+ *   · FLUSHING ⇒ 成功 metadata_dir_commit_region 登记新位置 + CLEAN + 清 region 脏位；
+ *                失败置回 DIRTY 保留下轮重试。
+ * 每条命令自己 fc_command_release。
+ */
+void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
 /* ── 同步等待器（FTL_OP_SYNC_WAIT 的 ctx）──
  *

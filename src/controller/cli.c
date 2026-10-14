@@ -576,7 +576,13 @@ static int uart_cli_map(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    pba = l2p_cache_read(&ftl->cache, (lba_t)lba);
+    /* ⚠ CLI 上下文（不在完成派发里）：region 未驻留时自旋泵等加载完成。
+     * 自旋失败（超预算）时 pba 保持 INVALID，输出按"未映射"处理——CLI 只读不写，
+     * 误报一次"未映射"无副作用。 */
+    if (l2p_cache_read_sync(&ftl->cache, (lba_t)lba, &pba) != FTL_OK)
+    {
+        pba = NAND_PBA_INVALID;
+    }
     if (pba == NAND_PBA_INVALID)
     {
         (void)LOGI("map lba=%lu -> INVALID (未映射)\r\n", (unsigned long)lba);

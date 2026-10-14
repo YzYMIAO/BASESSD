@@ -21,13 +21,19 @@
  *
  * ── 状态机 ──
  *
- *   SELECT（在 mig_begin_* 里做，不是 job 阶段）→ READ → WRITE → FLUSH_JRN → ERASE → DONE
+ *   SELECT（在 mig_begin_* 里做，不是 job 阶段）→ READ → READ_SETTLE → WRITE → WRITE_SETTLE
+ *   → FLUSH_JRN → ERASE → DONE
  *
- *   · READ  逐页逐 plane：异步读 → 完成时解 META 得 cw_lba、逐 CW 反查 L2P 得 cw_bitmap、
- *           记 rr_record_ecc / read_count（慢死预测闭环）。读失败 / 全页空洞 ⇒ 跳过该 plane。
+ *   · READ  逐页逐 plane：异步读 → 完成时解 META 得 cw_lba、记 rr_record_ecc / read_count
+ *           （慢死预测闭环）。读失败 / 全页空洞 ⇒ 该 plane 无有效 CW。
+ *   · READ_SETTLE 纯计算：逐 CW 反查 L2P 得 cw_bitmap。**先就绪前置**（阶段 5）——
+ *           region 未驻留会起异步加载并**原地等待**，全部就绪才动 bitmap；否则半途而废
+ *           会让 bitmap 一半有一半没有（重试时又从头 `|=`，语义静默错乱）。
  *   · WRITE 本页两 plane 都读完且有有效 CW ⇒ allocator_alloc_pair 拿目标页，逐 plane
- *           提交 CW 子集写；完成时逐 CW l2p_cache_write + journal_append + 有效计数迁移。
- *           写失败的 plane 不动 L2P（源数据仍有效，下轮再搬）。
+ *           提交 CW 子集写。写失败的 plane 不动 L2P（源数据仍有效，下轮再搬）。
+ *   · WRITE_SETTLE 纯计算：逐 CW l2p_cache_write + journal_append + 有效计数迁移。
+ *           同样**先就绪前置**再动账——半途而废会重复记账（valid_count 虚高、journal
+ *           重复条目）。
  *   · FLUSH_JRN 等 Journal job 空闲（**F10 契约**：搬移条目先落盘再擦 victim）。
  *   · ERASE 逐 plane 异步擦：成功 erase_count++ / wear_mark_dirty / 清 valid / 归还 Free Pool；
  *           失败 bbt_mark_bad。WL/预测额外 rr_retire_block。
@@ -82,12 +88,14 @@ typedef struct ftl_context ftl_context_t;
  * 判「有没有命令在飞」用 waiting 而不是 phase：提交可能因背压失败（phase 不变但无命令）。 */
 typedef enum
 {
-    MIG_IDLE = 0,  /* 空闲：无 job */
-    MIG_READ,      /* 提交阶段：读 victim 当前页的当前 plane */
-    MIG_WRITE,     /* 提交阶段：写目标页的当前 plane */
-    MIG_FLUSH_JRN, /* 纯计算：等 Journal job 空闲（F10 屏障） */
-    MIG_ERASE,     /* 提交阶段：擦 victim 的当前 plane */
-    MIG_DONE       /* 纯计算：收尾（移除 closed 条目 + 计数 + 复位 job） */
+    MIG_IDLE = 0,     /* 空闲：无 job */
+    MIG_READ,         /* 提交阶段：读 victim 当前页的当前 plane */
+    MIG_READ_SETTLE,  /* 纯计算：反查 L2P 得 cw_bitmap（region 未就绪则原地等，阶段 5） */
+    MIG_WRITE,        /* 提交阶段：写目标页的当前 plane */
+    MIG_WRITE_SETTLE, /* 纯计算：改 L2P/Journal + 迁移有效计数（同上，阶段 5） */
+    MIG_FLUSH_JRN,    /* 纯计算：等 Journal job 空闲（F10 屏障） */
+    MIG_ERASE,        /* 提交阶段：擦 victim 的当前 plane */
+    MIG_DONE          /* 纯计算：收尾（移除 closed 条目 + 计数 + 复位 job） */
 } mig_phase_t;
 
 /* 收尾方式（决定擦除后怎么处置 victim 的块）。 */
@@ -121,6 +129,8 @@ typedef struct
     uint8_t  page;         /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
     uint8_t  plane;        /* 当前 plane（读/写/擦各自迭代） */
     uint8_t  aborted;      /* 1 = 中止（不擦 victim、不移除 closed 条目、不计数） */
+    uint8_t  decode_ok;    /* 1 = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
+    uint8_t  write_ok;     /* 1 = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
     uint16_t stall_rounds; /* 连续提交不出去的轮数（见 MIG_SUBMIT_STALL_MAX） */
 
     super_block_t victim; /* victim 的**副本**（closed_sb_list 会被 swap-remove 挪动，不持指针） */

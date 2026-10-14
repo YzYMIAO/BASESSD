@@ -568,7 +568,11 @@ static void close_full_block(ftl_context_t       *ftl,
 
         for (cw = 0U; cw < CW_NUM; cw++)
         {
-            const nand_pba_t cur = l2p_cache_read(&ftl->cache, cw_lba[cw]);
+            /* ⚠ F2 重建 = 结构性同步路径（开机、superloop 未建立）：用同步逃生口。
+             * 读得 INVALID 与"未映射"同义 ⇒ 该 CW 不计入有效数（与旧实现同）。 */
+            nand_pba_t cur = NAND_PBA_INVALID;
+
+            (void)l2p_cache_read_sync(&ftl->cache, cw_lba[cw], &cur);
 
             if (cw_lba[cw] == FTL_LBA_INVALID)
             {

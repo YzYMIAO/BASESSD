@@ -134,6 +134,14 @@ typedef struct ftl_context
      * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
     uint8_t bg_suspend;
 
+    /* L2P 加载背压信号（v0.75 阶段 5，per-instance）。
+     * ftl_issue_subop 因 **L2P region 未就绪**（异步加载在飞，l2p_cache_read 返
+     * FTL_AGAIN）而返回 FTL_AGAIN 时置 1；ftl_drain_group 据此**不计** `stalls`——
+     * 加载在飞 = 有进展，不是"下发不动"。否则一次正常的 region 加载会吃掉 8 轮预算
+     * （FTL_DRAIN_STALL_MAX）里的一轮，随机读满盘时把组误判成卡死报 IO_ERROR。
+     * 真卡死（命令丢失）由 NAND 层 wait/jump 超时兜底，不靠这个计数。 */
+    uint8_t l2p_defer;
+
     /* 慢死预测巡检节流（F6：per-instance，原全局 g_rr_last_scan_ms） */
     uint32_t rr_last_scan_ms;
 

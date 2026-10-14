@@ -39,7 +39,8 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
  *   · FTL_OP_READ_RECOVERY：Read Recovery job（阶段 3，ctx = &ftl->rr）；
  *   · FTL_OP_GC / FTL_OP_WL：搬移 job（阶段 4，ctx = &ftl->mig）——**同一台引擎**，
  *     tag 分开只为日志/调试可辨（GC 回收 vs WL/预测退役）。
- * 其余枚举值是后续阶段（5~8）的占位，随各站点改造逐个填。 */
+ *   · FTL_OP_L2P      ：L2P region 加载 / 写回（阶段 5，ctx = 该 cache line）。
+ * 其余枚举值是后续阶段（6~8）的占位，随各站点改造逐个填。 */
 static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_SYNC_WAIT]     = ftl_op_sync_wait,
     [FTL_OP_HOST_IO]       = ftl_op_host_io,
@@ -47,6 +48,7 @@ static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_READ_RECOVERY] = ftl_op_read_recovery,
     [FTL_OP_GC]            = ftl_op_migrate,
     [FTL_OP_WL]            = ftl_op_migrate,
+    [FTL_OP_L2P]           = ftl_op_l2p,
 };
 
 /* ── 2. 提交 ── */

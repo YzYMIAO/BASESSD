@@ -20,12 +20,11 @@
  * ⚠ **本文件每条命令都走 ftl_async_* + ftl_op_submit（不同步等待）**——服务函数里再跑
  *   完成泵就是嵌套泵（见 ftl_op.h）。搬移主体（读/写/擦）已全部异步，本阶段的目的即此。
  *
- * ⚠ **唯一残留的同步调用**是完成服务里的 l2p_cache_read（读完成时逐 CW 反查有效性）与
- *   l2p_cache_write（写完成时改映射）：二者在 region **未命中**时会经
- *   l2p_cache_find_or_load 内部同步加载（ftl_sync_read_page → 嵌套完成泵）。
- *   ⚠ 与阶段 3 的 rr_select_plane 不同，这里的 LBA 取自 victim 块的页内 META，**不是**
- *   刚查过的那一条 ⇒ region miss 是**真实可达**的，不是理论分支。彻底关闭留待阶段 5
- *   （L2P region 加载 job 化：命中/加载中/未映射三态 + 调用者挂起）。
+ * ⚠ **L2P 反查/改写在独立的纯计算阶段**（MIG_READ_SETTLE / MIG_WRITE_SETTLE，阶段 5）：
+ *   读完成时逐 CW 反查有效性、写完成时改 L2P——二者的 LBA 取自 victim 块的**页内 META**，
+ *   与刚访问过的 host LBA 无必然联系 ⇒ region miss 是**真实可达**的。放进服务函数里做
+ *   就得同步等加载（嵌套泵）；改到纯计算阶段后可以「先起异步加载、原地返回、下轮重扫」。
+ *   ⚠ 这两个阶段**必须先就绪前置再动账**（否则半途而废会重复记账 / 位图一半有一半没有）。
  */
 
 #include "ftl/migrate.h"
@@ -316,8 +315,10 @@ static void mig_next_page(ftl_context_t *ftl)
 {
     mig_job_t *m = &ftl->mig;
 
-    m->page  = (uint8_t)(m->page + 1U);
-    m->plane = 0U;
+    m->page      = (uint8_t)(m->page + 1U);
+    m->plane     = 0U;
+    m->decode_ok = 0U;
+    m->write_ok  = 0U;
     for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
         m->cw_bitmap[p] = 0U;
@@ -384,6 +385,8 @@ static void mig_finish(ftl_context_t *ftl)
     m->active       = 0U;
     m->phase        = (uint8_t)MIG_IDLE;
     m->waiting      = 0U;
+    m->decode_ok    = 0U;
+    m->write_ok     = 0U;
     m->stall_rounds = 0U;
 }
 
@@ -476,6 +479,117 @@ static void mig_step(ftl_context_t *ftl)
                     (void)mig_stall(ftl);
                 }
                 return;
+            }
+
+            case MIG_READ_SETTLE:
+            {
+                const uint8_t plane = m->plane;
+
+                if (m->decode_ok == 0U)
+                {
+                    /* 读失败 / 全页空洞 / META 解不出：本 plane 无有效 CW */
+                    m->cw_bitmap[plane] = 0U;
+                }
+                else
+                {
+                    uint8_t cw;
+
+                    /* ── 就绪前置（阶段 5）──
+                     * 本页逐 CW 的扇区 LBA 来自页内 META，与刚访问过的 host LBA **无必然
+                     * 联系** ⇒ region miss 现实可达。未驻留 ⇒ 起异步加载并原地返回，
+                     * 下轮重扫（重扫幂等：ready 命中不记账、不动 access_count）。 */
+                    for (cw = 0U; cw < CW_NUM; cw++)
+                    {
+                        if (m->cw_lba[plane][cw] == FTL_LBA_INVALID)
+                        {
+                            continue;
+                        }
+                        if (l2p_cache_ready(&ftl->cache, m->cw_lba[plane][cw]) == 0)
+                        {
+                            m->stall_rounds = 0U; /* 加载在飞 = 有进展，不是提交卡死 */
+                            return;
+                        }
+                    }
+
+                    /* 全部就绪 ⇒ 一次性算出本 plane 的位图（不会半途而废） */
+                    m->cw_bitmap[plane] = 0U;
+                    for (cw = 0U; cw < CW_NUM; cw++)
+                    {
+                        nand_pba_t cur;
+
+                        if (m->cw_lba[plane][cw] == FTL_LBA_INVALID)
+                        {
+                            continue;
+                        }
+                        /* 用**该 CW 自己的 META** 查，仍指向 (本页, 本 CW) 才算有效 */
+                        if ((l2p_cache_read(&ftl->cache, m->cw_lba[plane][cw], &cur) == FTL_OK) &&
+                            (cur == pba_with_cw(m->src[plane], cw)))
+                        {
+                            m->cw_bitmap[plane] |= (uint32_t)1U << (((uint32_t)plane * CW_NUM) + cw);
+                        }
+                    }
+                }
+
+                m->decode_ok = 0U;
+                m->phase     = (uint8_t)MIG_READ;
+                m->plane     = (uint8_t)(plane + 1U); /* 可能 == PLANE_NUM ⇒ 页结算 */
+                break;
+            }
+
+            case MIG_WRITE_SETTLE:
+            {
+                const uint8_t plane = m->plane;
+
+                if (m->write_ok != 0U)
+                {
+                    uint8_t cw;
+
+                    /* 就绪前置（同 READ_SETTLE）：全部就绪才动账——半途而废会重复记账
+                     * （valid_count 虚高、journal 重复条目）。 */
+                    for (cw = 0U; cw < CW_NUM; cw++)
+                    {
+                        if ((m->cw_bitmap[plane] & ((uint32_t)1U << cw)) == 0U)
+                        {
+                            continue;
+                        }
+                        if (l2p_cache_ready(&ftl->cache, m->cw_lba[plane][cw]) == 0)
+                        {
+                            m->stall_rounds = 0U;
+                            return;
+                        }
+                    }
+
+                    for (cw = 0U; cw < CW_NUM; cw++)
+                    {
+                        nand_pba_t new_pba;
+                        lba_t      l;
+
+                        if ((m->cw_bitmap[plane] & ((uint32_t)1U << cw)) == 0U)
+                        {
+                            continue;
+                        }
+
+                        l       = m->cw_lba[plane][cw]; /* 用该 CW 自己的 META（不再 base+cw 推断） */
+                        new_pba = pba_with_cw(m->dst[plane], cw);
+
+                        (void)l2p_cache_write(&ftl->cache, l, new_pba);
+                        journal_append(&ftl->journal,
+                                       l,
+                                       pba_with_cw(m->src[plane], cw),
+                                       new_pba);
+
+                        /* 有效计数（CW 级）：源块 -1，新块 +1 */
+                        ftl_block_sub_valid(&ftl->alloc.blocks[mig_src_gblock(m, plane)]);
+                        ftl_block_add_valid(&ftl->alloc.blocks[ftl_pba_gblock(new_pba)]);
+
+                        m->migrated++;
+                    }
+                }
+
+                m->write_ok = 0U;
+                m->phase    = (uint8_t)MIG_WRITE;
+                m->plane    = (uint8_t)(plane + 1U);
+                break;
             }
 
             case MIG_WRITE:
@@ -625,7 +739,9 @@ void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completi
     {
         case MIG_READ:
         {
-            uint8_t plane = m->plane;
+            const uint8_t plane = m->plane;
+
+            m->decode_ok = 0U;
 
             if ((completion->status & FC_CW_STATUS_ERROR_MASK) == 0U)
             {
@@ -633,7 +749,6 @@ void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completi
                 if (gc_decode_cw_lba(cmd, m->src[plane], m->cw_lba[plane], &m->base[plane]) == 0)
                 {
                     ftl_block_t *src_blk = &ftl->alloc.blocks[mig_src_gblock(m, plane)];
-                    uint8_t      cw;
 
                     /* B4：搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环）。
                      * 判定只用 ecc_bits 与上一次读数比较，不涉及时间维度。 */
@@ -641,67 +756,28 @@ void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completi
                     src_blk->read_count++;
                     wear_mark_dirty(&ftl->alloc, mig_src_gblock(m, plane));
 
-                    /* 逐 CW 反查 L2P：用**该 CW 自己的 META** 查，仍指向 (本页, 本 CW)
-                     * 才算有效。未写过的 CW（FTL_LBA_INVALID）跳过。 */
-                    for (cw = 0U; cw < CW_NUM; cw++)
-                    {
-                        if (m->cw_lba[plane][cw] == FTL_LBA_INVALID)
-                        {
-                            continue;
-                        }
-                        if (l2p_cache_read(&ftl->cache, m->cw_lba[plane][cw]) == pba_with_cw(m->src[plane], cw))
-                        {
-                            m->cw_bitmap[plane] |= (uint32_t)1U << (((uint32_t)plane * CW_NUM) + cw);
-                        }
-                    }
+                    m->decode_ok = 1U;
                 }
             }
 
+            /* 逐 CW 反查 L2P 改在 MIG_READ_SETTLE（纯计算阶段，可挂起等 region 加载） */
             (void)fc_command_release(cmd);
             m->waiting      = 0U;
             m->stall_rounds = 0U;
-            m->plane        = (uint8_t)(plane + 1U); /* 下一个 plane（可能 == PLANE_NUM ⇒ 页结算） */
+            m->phase        = (uint8_t)MIG_READ_SETTLE;
             mig_step(ftl);
             return;
         }
 
         case MIG_WRITE:
         {
-            uint8_t plane = m->plane;
+            m->write_ok = ((completion->status & FC_CW_STATUS_ERROR_MASK) == 0U) ? 1U : 0U;
 
-            if ((completion->status & FC_CW_STATUS_ERROR_MASK) == 0U)
-            {
-                uint8_t cw;
-
-                for (cw = 0U; cw < CW_NUM; cw++)
-                {
-                    const nand_pba_t old_pba = pba_with_cw(m->src[plane], cw);
-                    nand_pba_t       new_pba;
-                    lba_t            l;
-
-                    if ((m->cw_bitmap[plane] & ((uint32_t)1U << cw)) == 0U)
-                    {
-                        continue;
-                    }
-
-                    l       = m->cw_lba[plane][cw]; /* 用该 CW 自己的 META（不再 base+cw 推断） */
-                    new_pba = pba_with_cw(m->dst[plane], cw);
-
-                    l2p_cache_write(&ftl->cache, l, new_pba);
-                    journal_append(&ftl->journal, l, old_pba, new_pba);
-
-                    /* 有效计数（CW 级）：源块 -1，新块 +1 */
-                    ftl_block_sub_valid(&ftl->alloc.blocks[mig_src_gblock(m, plane)]);
-                    ftl_block_add_valid(&ftl->alloc.blocks[ftl_pba_gblock(new_pba)]);
-
-                    m->migrated++;
-                }
-            }
-
+            /* 改 L2P/Journal + 迁移有效计数改在 MIG_WRITE_SETTLE（纯计算，可挂起） */
             (void)fc_command_release(cmd);
             m->waiting      = 0U;
             m->stall_rounds = 0U;
-            m->plane        = (uint8_t)(plane + 1U);
+            m->phase        = (uint8_t)MIG_WRITE_SETTLE;
             mig_step(ftl);
             return;
         }
@@ -746,6 +822,8 @@ void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completi
         }
 
         case MIG_IDLE:
+        case MIG_READ_SETTLE:
+        case MIG_WRITE_SETTLE:
         case MIG_FLUSH_JRN:
         case MIG_DONE:
         default:

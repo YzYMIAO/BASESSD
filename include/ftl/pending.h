@@ -55,6 +55,13 @@ typedef enum
                                    *   —— host 读组继续 pending，等 RR 收尾时统一结算。
                                    *   完成路径不会再碰本项（op != READ/WRITE），只有 RR 引擎
                                    *   用 pending_find_op 找它、用 pending_release_index 收尾。 */
+    PENDING_OP_WRITE_CONFIRM = 3, /* 写**已成功**、确认（Journal + L2P 记账）尚未完成：
+                                   *   L2P region 未就绪（正在异步加载）时**停泊**本项——
+                                   *   FC 命令已脱钩（command_id = FTL_PENDING_CMD_NONE）、
+                                   *   组在飞数**不**递减（host 写组继续 pending）。
+                                   *   与 READ_RECOVERY 的差别：无外部引擎，由 ftl_confirm_kick
+                                   *   每轮扫描推进（pending_find_op 按下标序找它）。
+                                   *   ⚠ 停泊项**不可被 pending_lookup 撞到**：id 已置哨兵。 */
 } ftl_pending_op_t;
 
 typedef struct

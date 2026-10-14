@@ -128,9 +128,14 @@ static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, int 
 /*
  * checkpoint_flush_dirty_regions - 按 region 脏标记只 flush 脏区
  *
- * 覆盖：cache 中所有 state==DIRTY 且其 region 的脏标记置位的行
- *（等价于"本轮周期内改过的 region"；与 flush_all 对 resident 行的
- * 覆盖相同，语义上先快照 bitmap 再 flush）。
+ * 覆盖：cache 中所有「region 脏标记置位」的 resident 行（等价于"本轮周期内改过的
+ * region"；与 flush_all 对 resident 行的覆盖相同，语义上先快照 bitmap 再 flush）。
+ *
+ * ⚠ **不按 state == DIRTY 过滤**（阶段 5）：异步化后 dirty 行可能已被后台
+ * l2p_flush_kick 起了写回（state = FLUSHING）而尚未完成——它同样属于"本周期改过、
+ * 必须已持久"，漏掉它就会让 Header 承诺一个还没落盘的映射。l2p_cache_flush_one_sync
+ * 对 FLUSHING 行是"等它完成"，对 DIRTY 行是"起 kick 再等"，对 CLEAN/INVALID 是空操作，
+ * 故直接按脏位过滤即可。
  *
  * 任一 flush 失败立即返回 FTL_ERROR——调用方必须中止 checkpoint：
  * 该 region 的 NAND 页仍旧（脏标记保持置位），若继续写 header 声称其
@@ -146,9 +151,9 @@ static ftl_status_t checkpoint_flush_dirty_regions(l2p_cache_t *cache)
         uint32_t          word;
         uint32_t          mask;
 
-        if (line->state != L2P_CACHE_DIRTY)
+        if (line->state == L2P_CACHE_INVALID)
         {
-            continue;
+            continue; /* 空行（region_id 无意义，脏位查询无意义） */
         }
 
         /* 只有 region 脏标记置位的行才需要写回（其余在本次周期内未改） */
@@ -159,7 +164,7 @@ static ftl_status_t checkpoint_flush_dirty_regions(l2p_cache_t *cache)
             continue;
         }
 
-        if (l2p_cache_flush_one(cache, (int)i) != FTL_OK)
+        if (l2p_cache_flush_one_sync(cache, (int)i) != FTL_OK)
         {
             return FTL_ERROR;
         }
