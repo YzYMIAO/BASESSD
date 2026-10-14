@@ -140,6 +140,7 @@
 #include "common/assertion.h"
 #include "fc/fc.h"
 #include "fc/fc_command.h"
+#include "ftl/ftl_config.h" /* pba_make（见 pba_from_addr 薄壳） */
 #include "ftl/ftl_fc_interface.h"
 #include "munit.h"
 #include "nand/nand_config.h"
@@ -188,6 +189,17 @@ void  test_tear_down(void *fixture);                              /* free(g_sour
  *
  * idx < CW_TOTAL_MAX（8）；越界 ASSERT。 */
 uint8_t *test_cw_scratch(uint8_t idx);
+
+/* nand_addr_t → nand_pba_t（页 PBA）。
+ *
+ * v0.73 把 FTL 层地址全面 PBA 化时**删掉了生产的 `pba_from_addr()`**（它把
+ * nand_addr_t 拖进 FTL 闭包）。但 FC 层的货币仍是 nand_addr_t，而页 helper 要拿
+ * 「本页 PBA」当 meta ⇒ 测试侧保留同名薄壳。**逐位等价**：pba_make 就是旧函数那七个
+ * 字段按同一组 PBA_*_SHIFT 打包，`addr->cw` 传 0 时即页 PBA。 */
+static inline nand_pba_t pba_from_addr(const nand_addr_t *addr)
+{
+    return pba_make(addr->ch, addr->ce, addr->lun, addr->block, addr->plane, addr->page, addr->cw);
+}
 
 /* ── 只建链、不提交的原语 ──
  * buffer 级用例（数据路径单测）与不走页 helper 的命令（RESET / READ_ID /

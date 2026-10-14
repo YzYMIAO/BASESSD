@@ -31,8 +31,9 @@
  *     有 seed 也对不上是哪个块。
  *
  * PBA 约定：ch=0 ce=0 lun=0；block / plane / page 由 l3_*_draw 抽（见「随机地址」段）
- *           （v24/v25：命令携带的是 PBA，不是 PAA；地址一律用具名字段构造，
- *             见 nand_config.h 的 pba_from_addr / paa_from_addr）
+ *           （v24/v25：命令携带的是 PBA，不是 PAA；地址一律用具名字段构造 ——
+ *             PAA 侧见 nand_config.h 的 paa_from_addr，PBA 侧见 fc_test_common.h 的
+ *             pba_from_addr 薄壳，v0.73 起生产侧只剩 pba_make/pba_pack）
  *
  * 依赖：
  *   - NAND 硬件（走 fc_submit → fc_service → nand_fc_start/step 异步路径）
@@ -1518,7 +1519,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
 
         for (uint8_t cw = 0U; cw < CW_NUM; cw += 2U) /* CW0 与 CW2：不同 CW ⇒ 不同 META */
         {
-            const uint32_t expected = (base & ~PLANE_CW_MASK) | ((uint32_t)plane << PBA_PLANE_SHIFT) | (uint32_t)cw;
+            const uint32_t expected = (base & ~PLANE_CW_MASK) | ((uint32_t)plane << PLANE_CW_SHIFT) | (uint32_t)cw;
             uint32_t       got_meta;
 
             test_read_meta(block, plane, page, cw, got);
@@ -1544,7 +1545,7 @@ static MunitResult test_block_read_meta(const MunitParameter params[], void *dat
 
             for (uint8_t cw = 0U; cw < CW_NUM; cw += 2U) /* CW0 与 CW2 */
             {
-                const uint32_t expected = (base & ~PLANE_CW_MASK) | ((uint32_t)plane << PBA_PLANE_SHIFT) | (uint32_t)cw;
+                const uint32_t expected = (base & ~PLANE_CW_MASK) | ((uint32_t)plane << PLANE_CW_SHIFT) | (uint32_t)cw;
                 uint8_t       *meta_ptr = fc_buffer_get_meta(cmd, cw);
                 uint32_t       got_meta;
 

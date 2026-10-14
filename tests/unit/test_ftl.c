@@ -196,12 +196,10 @@ static void ftl_ut_put_closed_sb(ftl_allocator_t *alloc,
     }
 }
 
-/* 造一个 nand_paa_t（只填 PAA 关心的字段；ch/ce 不入 PAA）。 */
-static nand_paa_t ftl_ut_paa(uint8_t lun, uint16_t block, uint8_t plane, uint8_t page)
+/* 造一个 nand_pba_t（ch/ce 取 0，与夹具的 topo 一致；cw 恒 0 = 页基址）。 */
+static nand_pba_t ftl_ut_pba(uint8_t lun, uint16_t block, uint8_t plane, uint8_t page)
 {
-    nand_addr_t addr = {.ch = 0U, .ce = 0U, .lun = lun, .block = block, .plane = plane, .page = page, .cw = 0U};
-
-    return paa_from_addr(&addr);
+    return pba_make(0U, 0U, lun, block, plane, page, 0U);
 }
 
 /* 完成表 handler 桩（只为验证 lookup 取回的是同一个函数指针）。 */
@@ -1480,8 +1478,8 @@ static MunitResult test_meta_dir_init_entries(const MunitParameter params[], voi
     {
         munit_assert_uint8(d->entries[i].type, ==, METADATA_TYPE_L2P_REGION);
         munit_assert_uint16(d->entries[i].id, ==, i);
-        munit_assert_uint32(d->entries[i].paa, !=, (uint32_t)NAND_PBA_INVALID);
-        munit_assert_true(paa_to_block(d->entries[i].paa) < (uint32_t)FTL_METADATA_BLOCK_END);
+        munit_assert_uint32(d->entries[i].pba, !=, (uint32_t)NAND_PBA_INVALID);
+        munit_assert_true(pba_to_block(d->entries[i].pba) < (uint32_t)FTL_METADATA_BLOCK_END);
     }
 
     return MUNIT_OK;
@@ -1494,7 +1492,7 @@ static MunitResult test_meta_dir_update_lookup_roundtrip(const MunitParameter pa
     metadata_dir_cache_t *d     = &ftl_fixture()->metadata_dir;
     uint16_t              r     = (uint16_t)ftl_rand_range(tag, 0U, (uint32_t)L2P_REGIONS_PER_INSTANCE - 1U);
     uint16_t              block = (uint16_t)ftl_rand_range(tag, (uint32_t)FTL_METADATA_BLOCK_END, (uint32_t)BLOCKS_PER_PLANE - 1U);
-    nand_paa_t            paa   = ftl_ut_paa(ftl_fixture()->topo.lun,
+    nand_pba_t            pba   = ftl_ut_pba(ftl_fixture()->topo.lun,
                                 block,
                                 (uint8_t)ftl_rand_range(tag, 0U, (uint32_t)PLANE_NUM - 1U),
                                 (uint8_t)ftl_rand_range(tag, 0U, (uint32_t)PAGES_PER_BLOCK - 1U));
@@ -1502,9 +1500,9 @@ static MunitResult test_meta_dir_update_lookup_roundtrip(const MunitParameter pa
     (void)params;
     (void)fixture;
 
-    metadata_dir_update(d, METADATA_TYPE_L2P_REGION, r, paa);
+    metadata_dir_update(d, METADATA_TYPE_L2P_REGION, r, pba);
 
-    munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_L2P_REGION, r), ==, paa);
+    munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_L2P_REGION, r), ==, pba);
     munit_assert_uint8(d->dirty, ==, 1U);
     munit_assert_uint32(d->change_count, ==, 1U);
     munit_assert_uint16(d->count, ==, (uint16_t)L2P_REGIONS_PER_INSTANCE); /* 覆盖而非追加 */
@@ -1512,7 +1510,7 @@ static MunitResult test_meta_dir_update_lookup_roundtrip(const MunitParameter pa
     /* 其他 region 不受影响 */
     munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_L2P_REGION, (uint16_t)((r + 1U) % L2P_REGIONS_PER_INSTANCE)),
                         !=,
-                        paa);
+                        pba);
 
     return MUNIT_OK;
 }
@@ -1568,7 +1566,7 @@ static MunitResult test_meta_is_metadata_block_dynamic(const MunitParameter para
     ftl_context_t        *F   = ftl_fixture();
     metadata_dir_cache_t *d   = &F->metadata_dir;
     uint16_t              r   = 7U;
-    nand_paa_t            paa = ftl_ut_paa(F->topo.lun, 100U, 0U, 0U);
+    nand_pba_t            pba = ftl_ut_pba(F->topo.lun, 100U, 0U, 0U);
 
     (void)params;
     (void)fixture;
@@ -1576,9 +1574,9 @@ static MunitResult test_meta_is_metadata_block_dynamic(const MunitParameter para
     munit_assert_int(ftl_is_metadata_block(d, 0U, 100U), ==, 0);
 
     /* 传 alloc = NULL 是安全的：旧位置是固定层（block < 63）⇒ 不走 reclaim */
-    metadata_dir_commit_region(d, NULL, r, paa);
+    metadata_dir_commit_region(d, NULL, r, pba);
 
-    munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_L2P_REGION, r), ==, paa);
+    munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_L2P_REGION, r), ==, pba);
     munit_assert_uint8(d->have_dynamic, ==, 1U);
     munit_assert_uint16(d->l2p_live[ftl_gblock(0U, 100U)], ==, 1U);
     munit_assert_int(ftl_is_metadata_block(d, 0U, 100U), ==, 1);
@@ -1591,9 +1589,9 @@ static MunitResult test_meta_is_metadata_block_dynamic(const MunitParameter para
     munit_assert_int(ftl_is_metadata_block(NULL, 0U, 100U), ==, 0);
     munit_assert_int(ftl_is_metadata_block(NULL, 0U, 10U), ==, 1);
 
-    /* 非法入参（region 越界 / paa 哨兵）不动表 */
-    metadata_dir_commit_region(d, NULL, (uint16_t)METADATA_DIR_ENTRIES, paa);
-    metadata_dir_commit_region(d, NULL, r, (nand_paa_t)NAND_PBA_INVALID);
+    /* 非法入参（region 越界 / pba 哨兵）不动表 */
+    metadata_dir_commit_region(d, NULL, (uint16_t)METADATA_DIR_ENTRIES, pba);
+    metadata_dir_commit_region(d, NULL, r, (nand_pba_t)NAND_PBA_INVALID);
     munit_assert_uint32(d->change_count, ==, 1U);
 
     return MUNIT_OK;
@@ -1604,7 +1602,7 @@ static MunitResult test_meta_ring_addr_geometry(const MunitParameter params[], v
 {
     ftl_context_t  *F = ftl_fixture();
     metadata_ring_t ring;
-    nand_addr_t     a;
+    nand_pba_t      a;
 
     (void)params;
     (void)fixture;
@@ -1620,17 +1618,17 @@ static MunitResult test_meta_ring_addr_geometry(const MunitParameter params[], v
     munit_assert_uint16(metadata_ring_total_records(&ring), ==, 512U);
 
     a = metadata_ring_addr(&ring, &F->topo, 0U, 0U);
-    munit_assert_uint16(a.block, ==, (uint16_t)CHECKPOINT_BLOCK0);
-    munit_assert_uint8(a.page, ==, 0U);
-    munit_assert_uint8(a.plane, ==, 0U);
-    munit_assert_uint8(a.cw, ==, 0U);
-    munit_assert_uint8(a.ch, ==, F->topo.ch);
-    munit_assert_uint8(a.ce, ==, F->topo.ce);
-    munit_assert_uint8(a.lun, ==, F->topo.lun);
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)CHECKPOINT_BLOCK0);
+    munit_assert_uint8(pba_to_page(a), ==, 0U);
+    munit_assert_uint8(pba_to_plane(a), ==, 0U);
+    munit_assert_uint8(pba_to_cw(a), ==, 0U);
+    munit_assert_uint8(pba_to_ch(a), ==, F->topo.ch);
+    munit_assert_uint8(pba_to_ce(a), ==, F->topo.ce);
+    munit_assert_uint8(pba_to_lun(a), ==, F->topo.lun);
 
     a = metadata_ring_addr(&ring, &F->topo, 63U, 0U);
-    munit_assert_uint16(a.block, ==, (uint16_t)CHECKPOINT_BLOCK0);
-    munit_assert_uint8(a.page, ==, 63U);
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)CHECKPOINT_BLOCK0);
+    munit_assert_uint8(pba_to_page(a), ==, 63U);
 
     /* ── Anchor 池：块 16..47，8 页/record ⇒ 每块 8 条、共 256 条 ── */
     memset(&ring, 0, sizeof(ring));
@@ -1643,27 +1641,27 @@ static MunitResult test_meta_ring_addr_geometry(const MunitParameter params[], v
     munit_assert_uint16(metadata_ring_total_records(&ring), ==, (uint16_t)(ANCHOR_POOL_BLOCKS * ANCHOR_RECORDS_PER_BLOCK));
 
     a = metadata_ring_addr(&ring, &F->topo, 0U, 0U);
-    munit_assert_uint16(a.block, ==, (uint16_t)ANCHOR_BLOCK0);
-    munit_assert_uint8(a.page, ==, 0U);
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)ANCHOR_BLOCK0);
+    munit_assert_uint8(pba_to_page(a), ==, 0U);
 
     a = metadata_ring_addr(&ring, &F->topo, 0U, 7U);
-    munit_assert_uint16(a.block, ==, (uint16_t)ANCHOR_BLOCK0);
-    munit_assert_uint8(a.page, ==, 7U);
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)ANCHOR_BLOCK0);
+    munit_assert_uint8(pba_to_page(a), ==, 7U);
 
     /* record 内跨页 */
     a = metadata_ring_addr(&ring, &F->topo, 1U, 0U);
-    munit_assert_uint16(a.block, ==, (uint16_t)ANCHOR_BLOCK0);
-    munit_assert_uint8(a.page, ==, 8U);
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)ANCHOR_BLOCK0);
+    munit_assert_uint8(pba_to_page(a), ==, 8U);
 
     /* 换块 */
     a = metadata_ring_addr(&ring, &F->topo, (uint16_t)ANCHOR_RECORDS_PER_BLOCK, 0U);
-    munit_assert_uint16(a.block, ==, (uint16_t)(ANCHOR_BLOCK0 + 1));
-    munit_assert_uint8(a.page, ==, 0U);
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)(ANCHOR_BLOCK0 + 1));
+    munit_assert_uint8(pba_to_page(a), ==, 0U);
 
     /* 池末槽 */
     a = metadata_ring_addr(&ring, &F->topo, (uint16_t)(ANCHOR_POOL_BLOCKS * ANCHOR_RECORDS_PER_BLOCK - 1U), (uint8_t)(ANCHOR_PAGE_COUNT - 1U));
-    munit_assert_uint16(a.block, ==, (uint16_t)(ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS - 1U));
-    munit_assert_uint8(a.page, ==, (uint8_t)(PAGES_PER_BLOCK - 1U));
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)(ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS - 1U));
+    munit_assert_uint8(pba_to_page(a), ==, (uint8_t)(PAGES_PER_BLOCK - 1U));
 
     return MUNIT_OK;
 }
@@ -1673,7 +1671,7 @@ static MunitResult test_meta_ring_addr_wrap(const MunitParameter params[], void 
 {
     ftl_context_t  *F = ftl_fixture();
     metadata_ring_t ring;
-    nand_addr_t     a;
+    nand_pba_t      a;
 
     (void)params;
     (void)fixture;
@@ -1686,25 +1684,25 @@ static MunitResult test_meta_ring_addr_wrap(const MunitParameter params[], void 
 
     /* 块内末槽 → 下一块首页 */
     a = metadata_ring_addr(&ring, &F->topo, 63U, 0U);
-    munit_assert_uint16(a.block, ==, (uint16_t)CHECKPOINT_BLOCK0);
-    munit_assert_uint8(a.page, ==, 63U);
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)CHECKPOINT_BLOCK0);
+    munit_assert_uint8(pba_to_page(a), ==, 63U);
 
     a = metadata_ring_addr(&ring, &F->topo, 64U, 0U);
-    munit_assert_uint16(a.block, ==, (uint16_t)(CHECKPOINT_BLOCK0 + 1));
-    munit_assert_uint8(a.page, ==, 0U);
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)(CHECKPOINT_BLOCK0 + 1));
+    munit_assert_uint8(pba_to_page(a), ==, 0U);
 
     a = metadata_ring_addr(&ring, &F->topo, 127U, 0U);
-    munit_assert_uint16(a.block, ==, (uint16_t)(CHECKPOINT_BLOCK0 + 1));
-    munit_assert_uint8(a.page, ==, 63U);
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)(CHECKPOINT_BLOCK0 + 1));
+    munit_assert_uint8(pba_to_page(a), ==, 63U);
 
     a = metadata_ring_addr(&ring, &F->topo, 128U, 0U);
-    munit_assert_uint16(a.block, ==, (uint16_t)(CHECKPOINT_BLOCK0 + 2));
-    munit_assert_uint8(a.page, ==, 0U);
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)(CHECKPOINT_BLOCK0 + 2));
+    munit_assert_uint8(pba_to_page(a), ==, 0U);
 
     /* 池末槽（512 条 × 8 块 = 末块末页），不越出池 */
     a = metadata_ring_addr(&ring, &F->topo, 511U, 0U);
-    munit_assert_uint16(a.block, ==, (uint16_t)(CHECKPOINT_BLOCK0 + CHECKPOINT_POOL_BLOCKS - 1U));
-    munit_assert_uint8(a.page, ==, (uint8_t)(PAGES_PER_BLOCK - 1U));
+    munit_assert_uint16(pba_to_block(a), ==, (uint16_t)(CHECKPOINT_BLOCK0 + CHECKPOINT_POOL_BLOCKS - 1U));
+    munit_assert_uint8(pba_to_page(a), ==, (uint8_t)(PAGES_PER_BLOCK - 1U));
 
     return MUNIT_OK;
 }
