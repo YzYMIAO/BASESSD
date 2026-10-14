@@ -2212,10 +2212,11 @@ region_id = lba / 512          entry_idx = lba % 512
 #define L2P_REGION_PER_BLOCK     (FTL_SLOTS_PER_BLOCK)      // 每块槽位 = PAGES_PER_BLOCK × PLANE_NUM = 128
 #define L2P_BLOCKS               ((L2P_REGIONS_PER_INSTANCE + L2P_REGION_PER_BLOCK - 1U) / L2P_REGION_PER_BLOCK)  // = 16
 #define L2P_CACHE_SIZE           (64)                       // 可配置：32/64/128
-#define FTL_PBA_INVALID          (0xFFFFFFFFU)              // 无效 PBA，全 F 不可能为合法地址
+// 无效 PBA 哨兵 = NAND_PBA_INVALID（ftl_config.h §三.2）。原先此处另立 FTL_PBA_INVALID，
+// 两者同值同义 ⇒ 已归并，只留 NAND_PBA_INVALID。
 
 typedef enum {
-    L2P_CACHE_INVALID = 0,      // cache 行无效（冷启动或已驱逐），entries 全 FTL_PBA_INVALID
+    L2P_CACHE_INVALID = 0,      // cache 行无效（冷启动或已驱逐），entries 全 NAND_PBA_INVALID
     L2P_CACHE_CLEAN,            // cache 行有效，未修改
     L2P_CACHE_DIRTY,            // cache 行有效，已修改（需写回）
     L2P_CACHE_FLUSHING,         // 正在写回 NAND（不可驱逐）
@@ -2283,7 +2284,7 @@ l2p_cache_read(cache, lba):
       victim->region_id = region_id
       victim->state     = 加载成功 L2P_CACHE_CLEAN / 失败 L2P_CACHE_INVALID
       victim->access_count = 1
-      return victim->entries[entry_idx]（加载失败时 entries 全 FTL_PBA_INVALID）
+      return victim->entries[entry_idx]（加载失败时 entries 全 NAND_PBA_INVALID）
 ```
 
 ### 6.3 更新流程（Write-back）
@@ -3357,7 +3358,7 @@ ftl_status_t l2p_cache_flush_all(l2p_cache_t *cache);
 
 typedef struct {
     uint32_t    lba;            // 修改的 LBA
-    nand_pba_t  old_pba;        // 修改前的 PBA（FTL_PBA_INVALID=新写入）
+    nand_pba_t  old_pba;        // 修改前的 PBA（NAND_PBA_INVALID=新写入）
     nand_pba_t  new_pba;        // 修改后的 PBA
     uint32_t    sequence;       // 单调递增序号
 } __attribute__((packed)) l2p_journal_entry_t;   // 16B

@@ -49,7 +49,7 @@ struct ftl_context {
 | `ftl_submit_read()` | 异步读 | 非阻塞提交读，长度任意（组内自拆 plane） | L2P→PBA→FC submit→pending |
 | `ftl_submit_write()` | 异步写 | 非阻塞提交写，长度任意 + Journal + watermark | alloc→FC submit→journal→L2P→pending |
 | `ftl_flush()` | 落盘 | 落已持久化映射：L2P cache 写回 + journal 尾页刷出 | 同步阻塞 |
-| `ftl_trim(ftl,lba,count)` | 取消映射 | 取消 `[lba, lba+count)` 映射（写 FTL_PBA_INVALID 到 L2P Cache，标记 DIRTY） | 同步完成 |
+| `ftl_trim(ftl,lba,count)` | 取消映射 | 取消 `[lba, lba+count)` 映射（写 NAND_PBA_INVALID 到 L2P Cache，标记 DIRTY） | 同步完成 |
 | `ftl_service()` | 主循环 | 推进 FC 调度 + 统一完成泵 + **Phase 2.5 补发子操作** + 后台任务 | 在 main loop 中频繁调用 |
 
 **注**：
@@ -469,7 +469,7 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun);
  * 读取 LBA 的 PBA 映射。
  * 可能触发 cache miss → CLOCK evict → 从 NAND 加载 region。
  * 加载时机：miss 时同步从 NAND 读（各模块内联 sync_read_page，见 §5.3）。
- * 返回 FTL_PBA_INVALID 表示该 LBA 未映射。
+ * 返回 NAND_PBA_INVALID 表示该 LBA 未映射。
  */
 nand_pba_t l2p_cache_read(l2p_cache_t *cache, lba_t lba);
 

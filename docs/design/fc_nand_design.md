@@ -1517,7 +1517,7 @@ static inline uint32_t   paa_to_nand_row(nand_paa_t paa);         // 转换为 N
 | `nand_config.h` 命名歧义 | `PAGE_NUM→PAGES_PER_BLOCK`，`BLOCK_NUM→BLOCKS_PER_PLANE` | ✅ 已解决 |
 | 缺少 Main/Spare 分离 | 已添加 `PAGE_MAIN_SIZE` / `PAGE_SPARE_SIZE` 宏 | ✅ 已解决 |
 | `nand_device_t` 遗留 | 与 FTL 模拟路径共存，未来 FTL 迁移到 FC 接口后可移除 | 📝 已文档化 |
-| 双向头文件依赖 | `nand_dispatch.h` 现只 include `fc/fc_types.h`（仅基础类型）；FC 在 submit 时预解析 Descriptor 链，nand_dispatch 不再回调 FC | ✅ 已解决 |
+| 双向头文件依赖 | `nand_dispatch.h` **不再 include 任何 `fc/` 头**（2026-10-14 清掉一处零使用的 `fc/fc_types.h` 残留）；FC 在 submit 时预解析 Descriptor 链，nand_dispatch 不再回调 FC | ✅ 已解决 |
 | `fc_command_handle` 编译 bug | `fc.c` 内部类型已统一为 `fc_command_id_t` | ✅ 已解决 |
 | 死代码 `flash_controller/` | 模块已删除 | ✅ 已解决 |
 | 桩文件清理 | `bad_block.c`, `ecc.c`, `nand_command.c`, `nand_timing.c` 已删除 | ✅ 已解决 |
