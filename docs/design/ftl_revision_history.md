@@ -3922,3 +3922,20 @@ not constant`）⇒ 退化为 `ftl_init` 里一次性 `pba_fields_layout_matches
 （Directory `paa` 变量改 `nand_pba_t`）、`:1622-1705`（`metadata_ring_addr` 现返回 PBA ⇒
 `a.block` 等改 `pba_to_block(a)`）；另有 v0.72 遗留的 `tests/unit/test_fc_level3.c:1521/1547`
 （`PBA_PLANE_SHIFT` → `PLANE_CW_SHIFT`）。
+
+### 补记（同日）— `include/common/ftl_types.h` 并入 `include/ftl/ftl_type.h`
+
+上述「范围」里列的 `include/common/ftl_types.h` **已不存在**：该文件内容全是 FTL 概念
+（`pending_cb_t` / `ftl_io_request_t`），却放在依赖图底层的 `common/`——它是那里**唯一**
+include 上层头的文件（`common/` 其余 6 个头只 include libc），且与 `include/ftl/ftl_type.h`
+**只差一个 `s`**，两个「FTL 类型头」并存是明确的误用陷阱。
+
+- 内容并入 `include/ftl/ftl_type.h`（补 `#include "common/ssd_types.h"` 取 `ssd_status_t`）；
+- 删 `include/common/ftl_types.h`；
+- 3 处 include 改路径：`ftl/pending.h`、`ftl/ftl.h`、`controller/ssd_request.h`
+  （controller 是 HIL，HIL→FTL 本就是 §26 的正确方向，不需要靠 `common/` 中立化）；
+- 文档同步：`ftl_api_usage.md`、`ftl_ut_munit.md`、`nand_config.h` 注释。
+
+注释里「打破循环 include」的理由**与目录无关**——那是把 `pending_cb_t` 从 `pending.h`
+搬出来；文件搬到 `ftl/` **不产生环**（`ftl_types.h` 不 include `pending.h`，反之才是）。
+纯头文件归置：debug 192592 B / release 114924 B 与改前**逐字节相同**，0 新警告。

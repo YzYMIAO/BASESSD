@@ -305,7 +305,7 @@ FTL 生产码已满足全部测试条件，**零改动**：
 |---|---|
 | **确定性** | FTL 无 PRNG（`config.random` 是 FC 位）；时间源单一 |
 | **输入可构造** | BST（`alloc->blocks[]`）、各池、`pending[]`/`groups[]` 都是普通数组，fixture 直写 |
-| **完成可观测** | `ftl_io_request_t.complete_flag`/`status_out`/`on_complete`（`ftl_types.h:44-47`） |
+| **完成可观测** | `ftl_io_request_t.complete_flag`/`status_out`/`on_complete`（`ftl/ftl_type.h`） |
 | **时间可注入** | `ssd_platform_ops_t.time_us` 经 `ssd_platform_register`（`platform.h:14/19`） |
 | **无 test hook** | 生产码零注入点（测的就是真实路径） |
 

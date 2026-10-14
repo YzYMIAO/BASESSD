@@ -13,10 +13,10 @@
  * 三级模式切换依据未决命令数（pending + 组 + 完成表占用），非"本轮提交了几条 NAND"。
  */
 
-#include "common/ftl_types.h" /* ftl_io_request_t */
 #include "common/ssd_types.h"
 #include "ftl/allocator.h" /* ftl_tables_t, super_block_t */
 #include "ftl/checkpoint.h"
+#include "ftl/ftl_type.h" /* ftl_io_request_t */
 #include "ftl/gc.h"
 #include "ftl/journal.h"
 #include "ftl/l2p_cache.h"

@@ -63,7 +63,7 @@ struct ftl_context {
 ```c
 /* ftl.h — 当前签名 */
 
-#include "common/ftl_types.h"  /* ftl_io_request_t, pending_cb_t */
+#include "ftl/ftl_type.h"  /* ftl_io_request_t, pending_cb_t */
 
 /*
  * ftl_submit_read - 非阻塞提交读请求（长度任意）
@@ -98,7 +98,7 @@ void ftl_flush(ftl_context_t *ftl);
 void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count);
 ```
 
-**`ftl_io_request_t` 完整定义**（`include/common/ftl_types.h`）：
+**`ftl_io_request_t` 完整定义**（`include/ftl/ftl_type.h`）：
 
 ```c
 typedef struct
@@ -135,7 +135,7 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tab
 > ⚠ **`ftl_init_params_t` 已删除（P2-5）**：大数组不再由 HIL 声明、经结构体传指针，而是
 > 由 `ftl_context_t` **自持**（`ftl->tables`，类型 `ftl_tables_t`）。`ftl_init` 因此只剩
 > `(ftl, topo)` 两参；`allocator_init` 第三参 `tables` 只**绑定指针**、不复制。
-> 见 `include/common/ftl_types.h` 的注释与 `src/ftl/ftl.c` 的实现。
+> 见 `include/ftl/ftl_type.h` 的注释与 `src/ftl/ftl.c` 的实现。
 >
 > **历史**（ADR 记录用）：v0.30 曾用 `ftl_init_params_t` 把形参 7→2 / 8→2；v0.32 删
 > `bad_blocks` / `erase_counts` 两指针（per-block 状态统一进 BST 单数据源）；P2-5 整个结构体撤除。
