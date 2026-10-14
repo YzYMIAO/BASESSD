@@ -123,28 +123,39 @@ _Static_assert((FTL_BLOCK_TOTAL % 8U) == 0U, "块数不是 8 的倍数，Wear �
 ftl_status_t wear_init(ftl_allocator_t *alloc);
 
 /*
- * wear_flush - 把脏计数落盘（后台调用）
+ * wear_kick - 把脏计数落盘（后台调用，**提交即返回**，v0.75 阶段 7）
  *
  * ① 无脏位 → 空转；
  * ② 节拍未到（elapsed < WEAR_FLUSH_INTERVAL_MS 且 total_writes - last <
  *    WEAR_FLUSH_ERASE_DELTA）→ 空转；
- * ③ 剩余页装不下脏条目 → 先 compact（擦块 + 写全量快照，next_page 归 0）；
- * ④ 流式遍历 gblock，脏块追加进 2 KB 栈页缓冲，页满即写；
- * ⑤ 清脏位图 + 更新节拍基准。
+ * ③ 剩余页装不下脏条目 → 先 compact（异步擦块 → 写全量快照，next_page 归 0）；
+ * ④ 否则按**起点快照的脏集合**流式写增量日志页（每页一条异步写命令）；
+ * ⑤ 本批走完 → 更新节拍基准（脏位图**不清**：起点已整体清零，此刻剩下的位正是
+ *    「批期间新变、本批没写到」的块，留给下一批）。
  *
- * BUSY 模式不调用本函数（照 bbt_flush 惯例）。
+ * 每步只提交**一条**命令即返回；完成由 g_op_service[FTL_OP_WEAR]（ftl_op_wear）
+ * 收尾并提交下一页。故本函数的返回值不再表示"落盘成败"——判据是「job 走完且
+ * 快照脏位已清」。
+ *
+ * ⚠ **单飞行**：job 未空闲（擦/写在飞，或上一步提交被背压拒而待续跑）⇒ 本函数
+ *   只做续跑或直接返回，不会另起一批。
+ * ⚠ BUSY 模式不调用本函数（照 bbt_kick 惯例）：批中某页提交被背压拒时会停在
+ *   WEAR_JOB_WRITE/waiting=0，等档位回落再续跑（不占任何命令/描述符资源）。
  *
  * @param alloc        Allocator 上下文
  * @param total_writes 当前累计写入量（节拍基准，由 ftl->total_writes 传入）
- * @return FTL_OK（含无需写入）/ FTL_ERROR（写失败，脏位保留待重试）
  */
-ftl_status_t wear_flush(ftl_allocator_t *alloc, uint32_t total_writes);
+void wear_kick(ftl_allocator_t *alloc, uint32_t total_writes);
 
 /*
- * wear_mark_dirty - 标记某块的计数已变更（等待下次 wear_flush 落盘）
+ * wear_mark_dirty - 标记某块的计数已变更（等待下次 wear_kick 落盘）
  *
  * 在**每一个**改动 erase_count / read_count 的地方调用。
- * 只置位，不做 I/O（落盘由后台 wear_flush 批量做）。
+ * 只置位，不做 I/O（落盘由后台 wear_kick 批量做）。
+ *
+ * ⚠ 批在飞时置位是**安全**的：批起点已把脏位图整体清零、且本批只写起点快照里的块
+ *   ⇒ 批期间置的位正好表示「批开始后才变的块」，收尾不清脏、留给下一批
+ *   （见 allocator.h 的 wear_state_t.dirty_snapshot）。
  *
  * @param alloc  Allocator 上下文（脏位图在 alloc->wear，序 4 起 per-instance）
  * @param gblock 全局块号（0..FTL_BLOCK_TOTAL-1；越界静默忽略）

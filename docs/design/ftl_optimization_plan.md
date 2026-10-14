@@ -134,7 +134,7 @@
   同一套日志惯例；绝对值 + 最新胜），而非"每次整表重写"——块 62 只有 64 页、全量快照 17 页，
   整表重写会让它 ~3.8 次落盘就被擦一次（磨损远超数据块）。
   开机 `wear_init` 逐页回放回填 BST（非致命：无有效页 = 冷启动）；运行期 5 个变更点
-  `wear_mark_dirty` 置脏位，`ftl_service_idle`/`normal` 里 `wear_flush` 按节拍
+  `wear_mark_dirty` 置脏位，`ftl_service_idle`/`normal` 里 `wear_kick` 按节拍
   （`WEAR_FLUSH_INTERVAL_MS` 120 s 或 `WEAR_FLUSH_ERASE_DELTA` 1024 次写入）批量落盘。
   持久化 `erase_count`/`read_count` 两个**有消费方**的字段（条目 8B）；
   `last_pe_ts` 不落（时间戳跨重启无意义）；`rr`（3B）登记为后续扩展。

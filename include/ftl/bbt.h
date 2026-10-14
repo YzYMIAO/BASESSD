@@ -126,7 +126,7 @@ ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc);
  * bbt_mark_bad - 运行时标记坏块
  *
  * ① ftl_block_t.state 置 BAD + 清有效页位图（BST 单数据源）
- * ② bbt_flush() — 后台写回 NAND
+ * ② 只置 alloc->bbt.dirty —— 写回 NAND 由后台 bbt_kick 攒批执行
  *
  * @param alloc  Allocator 上下文
  * @param gblock 坏 Block 编号（全局 Block 号）
@@ -175,15 +175,24 @@ static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
 ftl_status_t bbt_save(ftl_allocator_t *alloc);
 
 /*
- * bbt_flush - 将脏 BBT 写回 NAND（后台调用，两阶段持久化）
+ * bbt_kick - 后台批量持久化入口（**提交即返回**，v0.75 阶段 7）
  *
- * 当 alloc->bbt.dirty 置位时，调用 bbt_save 追加一条 record 到 BBT 池。
- * 不需要每次写失败都立即写 BBT，后台攒批批量写入。
+ * 当 alloc->bbt.dirty 置位时，装配一个 BBT job 并提交第一条命令：
+ *   换块需擦 ⇒ 异步擦（phase = BBT_JOB_ERASE）→ 擦完成再起写；
+ *   否则直接异步写（phase = BBT_JOB_WRITE）。
+ * 成败由 g_op_service[FTL_OP_BBT]（ftl_op_bbt）收尾：写完成后推进池游标、
+ * 成功清 dirty、失败保留 dirty 供下轮重试。
+ *
+ * ⚠ 与旧 bbt_flush 的差别：旧版在**一次调用内**同步写完并返回成败；本函数只保证
+ *   「已起步」。判据从返回值变成「job 走完且 dirty 清零」。
+ * ⚠ **单飞行**：命令在飞 ⇒ 空操作（池内一条 record 一次写，重入会争同一槽）；
+ *   若上一步提交被背压拒（job 停在 WRITE 但无命令在飞），本函数只**续提交写**，
+ *   不重走换块判定——擦已成功，重擦纯属磨损。
+ * ⚠ 只由 ftl_service 的后台档（idle/normal）调用。开机/格式化路径仍走同步 bbt_save。
  *
  * @param alloc  Allocator 上下文
- * @return FTL_OK 成功（含无需写入），FTL_ERROR 写入失败
  */
-ftl_status_t bbt_flush(ftl_allocator_t *alloc);
+void bbt_kick(ftl_allocator_t *alloc);
 
 /*
  * bbt_load - 从 NAND BBT 池加载 BBT

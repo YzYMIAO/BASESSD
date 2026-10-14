@@ -4066,7 +4066,7 @@ free pool 水位**降 254 块**（预留 254 → 508）。用户容量由 L2P re
 
 ---
 
-## v0.75 — 命令「提交」与「完成」解耦（阶段 1 机制 + 阶段 2 Journal 刷页异步 + 阶段 3 Read Recovery 异步 + 阶段 4 GC / WL 搬移异步 + 阶段 5 L2P region 加载写回异步 + 阶段 6 Checkpoint 保存异步）
+## v0.75 — 命令「提交」与「完成」解耦（阶段 1 机制 + 阶段 2 Journal 刷页异步 + 阶段 3 Read Recovery 异步 + 阶段 4 GC / WL 搬移异步 + 阶段 5 L2P region 加载写回异步 + 阶段 6 Checkpoint 保存异步 + 阶段 7 BBT / Wear 持久化异步）
 
 **日期**：2026-10-14
 
@@ -4476,7 +4476,7 @@ region 未命中会内部同步加载。**与阶段 3 的 `rr_select_plane` 不�
 联系。**该残留已在阶段 5 关闭**（改在纯计算阶段 `MIG_READ_SETTLE` / `MIG_WRITE_SETTLE` 里
 做就绪前置）。
 
-### 阶段 5 —— L2P region 加载 / 写回异步（本次）
+### 阶段 5 —— L2P region 加载 / 写回异步
 
 **这是「该异步的都异步」里唯一需要 API 语义变更的阶段**，也是收益最直接的一处：host 读
 随机访问的每个 region 未命中、host 写**首次触碰**每个 region，此前都会在完成泵内部同步
@@ -4609,7 +4609,7 @@ region 加载吃掉 8 轮预算（`FTL_DRAIN_STALL_MAX`）里的一轮 ⇒ 随�
 `l2p_cache_flush_kick` 内部仍会调 `metadata_dir_append_slot`——取空槽时**可能换块 ⇒ 擦除**，
 那一次擦仍是瞬时阻塞。阶段 8 的 `md_job_t` 化会一并拆掉。
 
-### 阶段 6 —— Checkpoint 保存异步（本次）
+### 阶段 6 —— Checkpoint 保存异步
 
 `checkpoint_create` 原是一条**严格有序的同步流水线**（脏区落盘 → Anchor → Header → 截断），
 每步都在 `ftl_service_*` 的栈上阻塞等 NAND 回来。单次 CP 可阻塞数十毫秒（脏 region 写回 +
@@ -4715,21 +4715,129 @@ CP_IDLE → CP_FLUSH_REGIONS → CP_ANCHOR_PREP → [CP_ANCHOR_ERASE] → CP_ANC
 且 `linker/stm32h743xx_flash.ld` 的 `_Min_Stack_Size = 0x800` 只是 heap/stack 下限**校验**，
 真实栈顶 `_estack = 0x20020000`（DTCM 末），而 `.dtcm_data` 实测 **0 字节** ⇒ 128 KB 全是栈余量。
 
+### 阶段 7 —— BBT / Wear 持久化异步（本次）
+
+这两张表是后台档里**最后两个同步站点**。它们与阶段 6 的 CP 同族（"攒批 + 后台刷"），但阻塞
+形态更极端：`wear_flush` 一次调用要写完 1~25 个 2 KB 日志页（compact 时是 25 页 + 一次整块
+擦），全程同步；`bbt_flush` 一次要写 540 B 的坏块图 record（换块时再搭一次擦）。两者都在
+`ftl_service_idle/normal` 里，每轮都可能各阻塞数毫秒。
+
+#### ① BBT：两段式 job（`bbt_job_phase_t`，ctx = `&ftl->alloc`）
+
+```
+BBT_JOB_IDLE → [BBT_JOB_ERASE] → BBT_JOB_WRITE → BBT_JOB_IDLE
+```
+
+`bbt_kick(alloc)` **只提交第一条命令即返回**；完成由 `g_op_service[FTL_OP_BBT]`（`ftl_op_bbt`）
+收尾并起写。job 状态与池游标同处（`alloc->bbt`，per-instance），`allocator_init` 的 memset
+已零化 ⇒ 开机即 `BBT_JOB_IDLE`，`bbt_init` 再显式钉一次。
+
+三处与旧 `bbt_save` 的**刻意对应**：
+- **record 内容在提交写时从 BST 重建**（不是起步时快照）。换块擦的等待期间新标坏的块会被
+  一并记进本条 record ⇒ 是严格的信息超集（坏块只增不减）。
+- **header 放在栈上**（540 B）：`ftl_async_write_page` 在 prepare 时已把它拷进 FC buffer 池
+  （同 `journal_freeze`）⇒ 异步 job **不需要**为它保留常驻快照缓冲。
+- **地址按 `write_idx` 重算**（`metadata_ring_addr(ring, topo, write_idx, 0)`，与
+  `metadata_ring_prepare_addr` 逐字同源）——因为 `write_idx` 写成功才推进，此刻仍指向本槽。
+  故 job 里**不存** `addr`（CP 的 `cp_job_t` 存了，两种都行）。
+
+#### ② Wear：三段式 job + `waiting` 标志（ctx = `&ftl->alloc`）
+
+```
+WEAR_JOB_IDLE → [WEAR_JOB_ERASE] → WEAR_JOB_WRITE（逐页，1~25 条命令）→ WEAR_JOB_IDLE
+```
+
+`wear_kick(alloc, total_writes)` 只**起步/续跑**：`wear_submit_next_page` 从 `job.cursor` 起
+装**一页**日志（2 KB 栈缓冲 → prepare 时拷进 FC buffer 池）并提交，完成由
+`g_op_service[FTL_OP_WEAR]`（`ftl_op_wear`）收尾 + `next_page++` + 续提交下一页。
+节拍门（定时 `WEAR_FLUSH_INTERVAL_MS` **或** 写入增量 `WEAR_FLUSH_ERASE_DELTA`）与旧
+`wear_flush` 逐字一致。
+
+#### ③ 批跨多轮 ⇒ 两个必须钉死的东西
+
+批不再是原子的（旧 `wear_flush` 在一次调用里写完，期间**没有任何** `wear_mark_dirty`
+可能发生）。而 `wear_mark_dirty` 的两个调用点——`migrate.c` 的搬移擦完成（`MIG` job 的
+服务函数）与 `ftl.c` 的 host 读错误——**都可能落在批中间**。于是：
+
+| 风险 | 对策 |
+|---|---|
+| 批会写出超过 compact 判定所用 `pages_needed` 的页数 ⇒ `next_page` 越过块尾（页号 64 / 共 64 页）| **起点快照** `wear.dirty_snapshot[512]`：本批只写快照里的块，页数在起步时即定死 |
+| 收尾清脏会丢掉「批期间新变」的块 | 见下条 |
+
+**脏位图的清零式语义（本阶段唯一的刻意语义收紧）**：起步时
+`snapshot = dirty; dirty = 0`，于是批期间 `wear_mark_dirty` 置的位**只表示「批开始后才变的
+块」**。收尾（`wear_job_finish`）**什么都不清**——剩下的位正是"批期间变了、本批没写或写了
+旧值"的块，留给下一批；失败（`wear_restore_dirty`）则 `dirty |= snapshot` 并回，得到
+「批前脏 ∪ 批中新脏」。
+
+对比"起步只拷快照、收尾 `dirty &= ~snapshot`"的写法：后者会丢掉「批前就脏 → 批中被写 →
+**批中又变**」的块的最后一次变更（清位时只看快照，看不见批中的二次变更）。同步版
+`wear_flush` 整批原子、根本没有这个窗口；清零式让异步版重新拿到同样的原子性。代价是
+`dirty` 在批期间短暂为 0——但 job 未回 IDLE，`wear_kick` 不会另起一批，无副作用。
+
+#### ④ 背压续跑：`waiting` 标志（**避免擦除放大**）
+
+BBT 与 Wear 的 job 都带 `waiting`：`1` = 有一条本 job 的命令在飞；`0` = 上一步提交被
+背压（`ftl_op_submit` 返回 `FTL_AGAIN`）而**停在当前 phase 待续跑**。`*_kick` 的
+`phase == WRITE && !waiting` 分支只**续提交写**，**不重走换块判定**。
+
+为什么必须有：BBT 的写点是块内槽 0 时需要先擦该块。若提交失败就回 `IDLE`，下一轮 kick 会
+重算 `prepare_addr` ⇒ `need_erase` 仍为 1 ⇒ **再擦一次同一块**。命令池被长期占满时这会变成
+"每轮擦一次同一个块"的**磨损放大**（该块可被擦成千上万次）。Wear 的 compact 路径同理。
+⇒ 擦成功后**停在 WRITE/waiting=0**，续跑路径零介质访问。
+
+#### ⑤ 失败分支逐条对照（`不顺手改语义`）
+
+| 阶段 | 旧同步行为 | 异步版 |
+|---|---|---|
+| BBT 换块擦失败 | `metadata_ring_prepare_write` 返回 `FTL_ERROR` ⇒ `bbt_save` 提前 return，`write_idx` **不推进**、dirty 保留 | `BBT_JOB_ERASE` 失败 ⇒ 回 IDLE、`write_idx` 不动、dirty 保留，下轮 kick 从头再来（擦仍会重试——这是**对**的：擦没成功）|
+| BBT record 写失败 | `write_idx` **照推**（半编程槽不可复用）+ dirty 保留 | 同（无论成败都 `write_idx++`），dirty 保留 |
+| BBT record 写成功 | `write_idx++` + `dirty = 0` | 同 |
+| Wear compact 擦失败 | `wear_compact` 首个 return ⇒ `next_page` **不动**、脏位保留 | 回 IDLE + `wear_restore_dirty`，下轮重试 |
+| Wear compact 快照页写失败 | `memset(dirty, 0xFF)`（擦除已抹掉旧内容，起点时"干净"的块也成了未持久化）| 同 `memset(dirty, 0xFF)`，回 IDLE |
+| Wear 增量页写失败 | `wear_write_page` return ⇒ `next_page` 不推进、脏位保留 | `next_page` 不推进 + `wear_restore_dirty`，回 IDLE |
+| Wear 页写成功 | `next_page++`，继续下一页 | `next_page++`，续提交下一页 |
+
+⚠ 两处**必须**保留的旧语义：① BBT 写失败**照推游标**（不是"不推进"）——已编程过的槽可能
+半写坏，复用会读到残页；② Wear compact 失败**全标脏**（不是"并回快照"）——快照只覆盖批前
+脏块，而擦除抹掉的是**整块**，批前干净的块也失去了持久化内容。
+
+#### ⑥ 删掉的同步入口与保留的逃生口
+
+- `bbt_flush` / `wear_flush`（及静态 `wear_write_page` / `wear_write_range` / `wear_compact`）
+  全仓**只剩注释引用**。
+- `bbt_save` **保留**（开机 `bbt_init` / 格式化路径的结构性同步站点，无人 drain CQ）；
+  `wear_init` 本就只读（回放），不动。
+- `bbt_kick` 里游标未建立时的 `metadata_ring_locate`（扫池逐页读）仍是**同步**的，但只在
+  **冷启动后首次落盘**发生一次，且本函数由 `ftl_service` 的**后台档**调用（不在完成泵内）
+  ⇒ 不是嵌套泵。异步化它需要把"扫池"也拆成 phase，收益极低，**有意不做**。
+- CLI `bbt --erase` 走同步的 `bbt_print_bad_map`，且置 `bg_suspend` ⇒ `ftl_service` 在
+  Phase 3 之前就返回，kick 不会被调用。`ftl_flush`（HIL FLUSH）只做 wbuf + L2P + journal，
+  **不碰** BBT / Wear ⇒ 不需要同步逃生口。
+
+#### ⑦ 无 watchdog（有意）
+
+贯穿机制 1 要求的 watchdog 在本 job **不设**，理由是既有的 `[RR]` / `[MIG]` / `[JRN]` /
+`[CP]` 也都没有：命令丢失的兜底在 NAND 层——`NAND_RESULT_TIMEOUT` 会被聚合成
+`FC_CW_STATUS_TIMEOUT` 的**完成**（`nand_dispatch_tables.c`），故"在飞"必然有终态。
+BBT / Wear 批只有 1~25 页、毫秒级，1 s 的心跳永远打不出来 ⇒ 失败可观测性靠 `LOGE`。
+
 ### 判据与实测
 
 | 判据 | 结果 |
 |---|---|
 | `make debug` / `make release` / `make tests UT=FTL` / `UT=FC` | 0 error；release 下 `ftl_fc_interface.c:69 'allowed'`、`:85 'plane_bits'`（ASSERT 被裁）、`crc_port.c:29 'status'`（HAL 状态位只写不读）三条 unused 为**既有**——均为**未改动**文件，与阶段 5 无关 |
-| debug `.text` | 191688 → 191800（阶段 1）→ 193808（阶段 2）→ 195776（阶段 3）→ 195032（阶段 4）→ 198016（阶段 5，**+2984 B**）→ **201052**（阶段 6，**+3036 B**）⚠ 本行含构建路径伪影，见下 |
-| debug `.bss` | 381500 → 381372（阶段 1，**−128 B** = 旁表删 `handler`）→ 381404（阶段 2）→ 381404（阶段 3）→ 385596（阶段 4，**+4192 B**）→ 385596（阶段 5，**±0**）→ **385948**（阶段 6，**+352 B**） |
-| `g_ftl` | 269600 → 273784（阶段 4，**+4184 B** = `mig_job_t`；其中 4KB 页镜像原在 `gc_migrate_sb` / `wl_relocate` 的**栈**上，迁入 `.bss` 是真实新增）→ 273792（阶段 5，**+8 B**）→ **274128**（阶段 6，**+336 B** = `cp_job_t`：256 B 脏位图快照 + 水位/Anchor/Header/截断 各阶段状态） |
-| release `.text` | 114612 → 114352 → 115776 → 116764 → 117108（阶段 4）→ 118440（阶段 5，**+1332 B**）→ **120332**（阶段 6，**+1892 B**） |
-| release `.bss` | 381492 → 381364 → 381396 → 381428 → 385588（阶段 4）→ 385620（阶段 5，**+32 B**）→ **385940**（阶段 6，**+320 B**） |
-| debug `.bin` / release `.bin` | 196300 → 195556（阶段 4）/ 117288 → 117628（阶段 4）→ 198540 / 118960（阶段 5）→ **201580 / 120856**（阶段 6） |
-| AXI_RAM 占用（构建脚本报告） | 284.0 KB（74.0%）→ 288.1 KB（75.0%）→ 288.1 KB（75.0%）（阶段 5 **±0**）→ **288.5 KB（75.1%）**（阶段 6 **+0.4 KB**），余量 ≈ 95.5 KB |
+| debug `.text` | 191688 → 191800（阶段 1）→ 193808（阶段 2）→ 195776（阶段 3）→ 195032（阶段 4）→ 198016（阶段 5，**+2984 B**）→ 201052（阶段 6，**+3036 B**）→ **203920**（阶段 7，**+2868 B**）|
+| debug `.bss` | 381500 → 381372（阶段 1，**−128 B** = 旁表删 `handler`）→ 381404（阶段 2）→ 381404（阶段 3）→ 385596（阶段 4，**+4192 B**）→ 385596（阶段 5，**±0**）→ 385948（阶段 6，**+352 B**）→ **386460**（阶段 7，**+512 B**）|
+| `g_ftl` | 269600 → 273784（阶段 4，**+4184 B** = `mig_job_t`；其中 4KB 页镜像原在 `gc_migrate_sb` / `wl_relocate` 的**栈**上，迁入 `.bss` 是真实新增）→ 273792（阶段 5，**+8 B**）→ 274128（阶段 6，**+336 B** = `cp_job_t`：256 B 脏位图快照 + 水位/Anchor/Header/截断 各阶段状态）→ **274656**（阶段 7，**+528 B** = `wear_state_t.dirty_snapshot[512]` + 两个 job 状态 16 B）|
+| release `.text` | 114612 → 114352 → 115776 → 116764 → 117108（阶段 4）→ 118440（阶段 5，**+1332 B**）→ 120332（阶段 6，**+1892 B**）→ **121928**（阶段 7，**+1596 B**）|
+| release `.bss` | 381492 → 381364 → 381396 → 381428 → 385588（阶段 4）→ 385620（阶段 5，**+32 B**）→ 385940（阶段 6，**+320 B**）→ **386484**（阶段 7，**+544 B**）|
+| debug `.bin` / release `.bin` | 196300 → 195556（阶段 4）/ 117288 → 117628（阶段 4）→ 198540 / 118960（阶段 5）→ 201580 / 120856（阶段 6）→ **204444 / 122448**（阶段 7）|
+| AXI_RAM 占用（构建脚本报告） | 284.0 KB（74.0%）→ 288.1 KB（75.0%）→ 288.1 KB（75.0%）（阶段 5 **±0**）→ 288.5 KB（75.1%）（阶段 6）→ **289.0 KB（75.3%）**（阶段 7，**+0.5 KB**），余量 ≈ 95.0 KB |
 | `_Static_assert(sizeof(g_ftl)+FTL_AXI_RAM_RESERVED <= 384KB)`（`main.c:131`） | 过 |
-| 二进制级核对 | `g_op_service` 48 B = 12 项；`[0]=0`、`[1]=ftl_op_sync_wait`、`[2]=ftl_op_host_io`、`[3]=ftl_op_journal`、`[4]=ftl_op_read_recovery`、`[5]=[6]=ftl_op_migrate`（GC / WL 共用同一引擎）、`[7]=ftl_op_l2p`（阶段 5 点亮）、**`[8]=ftl_op_checkpoint`**（阶段 6 点亮）、`[9..11]=0`（逐字节 dump `.rodata@0x0802e890` 核对）|
-| 旧同步 Checkpoint 入口 | `checkpoint_create` / `checkpoint_flush_dirty_regions` 从源码与符号表**双双消失**（`nm` 无命中，全仓只剩注释引用）；`metadata_dir_flush_to_anchor` / `metadata_ring_prepare_write` / `journal_truncate` 保留为同步逃生口，前者仍被 `metadata_dir_compact`（阶段 8）调用、中者被 `bbt_flush` 与 `checkpoint_write_initial` 调用、后者**零调用者**（链接期 gc）|
+| 二进制级核对 | `g_op_service` 48 B = 12 项；`[0]=0`、`[1]=ftl_op_sync_wait`、`[2]=ftl_op_host_io`、`[3]=ftl_op_journal`、`[4]=ftl_op_read_recovery`、`[5]=[6]=ftl_op_migrate`（GC / WL 共用同一引擎）、`[7]=ftl_op_l2p`（阶段 5 点亮）、`[8]=ftl_op_checkpoint`（阶段 6 点亮）、**`[9]=ftl_op_bbt`、`[10]=ftl_op_wear`**（阶段 7 点亮）、`[11]=0`（`FTL_OP_METADATA`，阶段 8）（逐字节 dump `.rodata@0x0802f3c0` 核对；`[5]`/`[6]` 同为 `0x08019761`）|
+| 旧同步 Checkpoint 入口 | `checkpoint_create` / `checkpoint_flush_dirty_regions` 从源码与符号表**双双消失**（`nm` 无命中，全仓只剩注释引用）；`metadata_dir_flush_to_anchor` / `metadata_ring_prepare_write` / `journal_truncate` 保留为同步逃生口，前者仍被 `metadata_dir_compact`（阶段 8）调用、中者被 `bbt_save` 与 `checkpoint_write_initial` 调用、后者**零调用者**（链接期 gc）|
+| 旧同步 BBT / Wear 入口 | `bbt_flush` / `wear_flush` / `wear_write_page` / `wear_write_range` / `wear_compact` / `wear_dirty_get` 从源码与符号表**双双消失**（`nm` 无命中）；`bbt_save` 保留为**开机 / 格式化**同步逃生口（`ftl_media_format`、CLI `bbt --erase` 用），`wear_init` 保留为只读回放 |
 | 旧同步搬移入口 | `gc_migrate_sb` / `gc_erase_and_free` / `wl_relocate` / `wl_execute` / `wl_predictive_relocate` / `ftl_gc_reclaim_one` 全仓**只剩注释引用** |
 | `gc_read_page_with_lba` | 形参 6 → 4（删死出参 `ecc_out` / `read_count_out`），唯一调用者是 `ftl_rebuild_closed_sb_list` |
 | 旧 L2P API | `l2p_cache_find_or_load` / `l2p_cache_flush_one` / `l2p_cache_flush_all` 全仓**只剩注释引用**；`l2p_cache_read` 的 11 个调用点全部按三态改写 |
@@ -4764,6 +4872,36 @@ debug `.text` 不同」（实测 `/tmp/s4` 7 字符 vs `/tmp/b_s4` 9 字符差 8
 `/tmp/b_s5` 长 24 字符差 ≈ 960 B）。**release 不受影响**（ASSERT 编译期消失）——
 故 release 行与历史值**逐字节吻合**，debug 行的历史值只在其自身环境下有效。
 **判体积增量必须等路径背靠背**，否则读到的是路径差而不是代码差。
+
+📏 **口径说明（易踩）**：本表的 `.text` / `.bss` 行是 **`arm-none-eabi-size`** 的
+`text` / `bss` 列，**不是** `*.size` 文件里的 `.text` / `.bss` 段尺寸。两者不同：
+`size` 的 `text` = `.text + .rodata + .data`（+ 少量段），`size` 的 `bss` 还含
+链接脚本里约 **91 KB** 的 NOLOAD 预留（栈 / 堆 / `FTL_AXI_RAM_RESERVED`）。
+以阶段 6 的 debug 为例：`size` 报 `text 201052 / bss 385948`，而 `.size` 文件报
+`.text 172484 / .bss 294948`。**同一张表里只有 `g_ftl` / `.bin` / AXI_RAM 三行是直接读数**，
+其余按 `size` 口径。⚠ 这也是为什么「路径伪影在 `.text` 里」与「路径伪影在 `.rodata` 里」
+**并不矛盾**——前者是 `size` 口径（`.rodata` 被折进 `text`），后者是段口径。
+
+⚠ **阶段 7 的体积按等路径背靠背实测**：`git stash` 前后各完整构建一次（**同一工作树、
+同一路径**，`rm -rf build/firmware/{debug,release}` 后重建）：
+
+| 实测（`size` 口径）| 阶段 6（`687bb73`）| 阶段 7 | 增量 |
+|---|---|---|---|
+| debug `text` | 201052 | 203920 | **+2868 B** |
+| debug `bss` | 385948 | 386460 | **+512 B** |
+| debug `.bin` | 201580 | 204444 | **+2864 B** |
+| release `text` | 120332 | 121928 | **+1596 B** |
+| release `bss` | 385940 | 386484 | **+544 B** |
+| release `.bin` | 120856 | 122448 | **+1592 B** |
+| `g_ftl` | 274128 | 274656 | **+528 B** |
+| AXI_RAM | 288.5 KB（75.1%）| 289.0 KB（75.3%）| **+0.5 KB** |
+| 告警 | debug 0 / release 3（既有）| 同左 | — |
+
+✅ 交叉校验：同一路径重建阶段 6 得 `size` 的 **201052 / 385948**（debug）与
+**120332 / 385940**（release），与表内阶段 6 记录**逐字节吻合** ⇒ 口径确认无误。
+**+528 B 的 `g_ftl` 全部可解释**：`wear_state_t.dirty_snapshot[FTL_BLOCK_TOTAL/8]`
+= 512 B，加 `bbt_job_t` / `wear_job_t` 两个 job 状态 16 B（`.text` 的 +2868 是
+两套 job 状态机 + 收尾服务函数）。
 
 ⚠ **上板验证未做**（留待用户）。上板判据：
 ① `wr/rd/tr/fl/info/map` 冒烟、断电重启数据仍在；
@@ -4818,13 +4956,30 @@ LBA"一致；`boot type=` 应为 `2`（JOURNAL_REPLAY）而非 `1`，且 `journa
 ⇒ make 认为已是最新），`size` 读到的是**测试镜像**（`.text` ≈ 272 KB）；必须 `make clean`
 后再 `make debug`。
 
-### 后续（阶段 7~8，本提交不含）
+### 后续（阶段 8，本提交不含）
 
-BBT·Wear 持久化 / metadata 目录压缩 —— 逐个把站点从 `ftl_sync_*` 改成
-job + `ftl_op_submit`，`g_op_service[]` 的占位槽（`FTL_OP_BBT` / `FTL_OP_WEAR` /
-`FTL_OP_METADATA`）随站点改造逐个点亮。
+metadata 目录压缩 / 换块 —— 把 `metadata_dir_compact` 从 `ftl_sync_*` 改成 job +
+`ftl_op_submit`，`g_op_service[]` 的**最后一个**占位槽 `FTL_OP_METADATA` 随之点亮
+（阶段 7 后 `[1..10]` 已全部有主，只剩 `[11]`）。
 结构性必须顺序执行的路径（开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI）继续用
 `ftl_sync_submit_wait`。
+
+**阶段 7 关闭的欠账**：
+- ✅ BBT / Wear 两处"攒批 + 后台刷"已 job 化：`bbt_flush` / `wear_flush` 及其内部
+  `wear_write_page` / `wear_write_range` / `wear_compact` 全部删除，改由
+  `bbt_kick` / `wear_kick` 起步、`ftl_op_bbt` / `ftl_op_wear` 收尾；
+- ✅ 提交被背压拒时**不重走换块判定**（`bbt_job_t.waiting` / `wear_job_t.waiting`），
+  否则每轮重擦同一块 = 擦除放大；
+- ✅ Wear 的跨轮批用「起点快照 + 起点整体清零脏位图」拿到与原同步整批等价的原子性。
+
+仍待闭合（阶段 7 相关）：
+- `bbt_kick` 在游标未建立时会调 `metadata_ring_locate` 扫池定位（内含
+  `ftl_sync_read_page`）——与 CP 的 `CP_ANCHOR_PREP` 同族的**一次性冷启动**同步点，
+  收益极低，**有意不做**；
+- BBT / Wear job **无 watchdog**（与 journal / mig / RR / CP 一致）：NAND 层超时由
+  `nand_dispatch_tables.c` 聚合成 `FC_CW_STATUS_TIMEOUT` 的**完成**送达，故"在飞"必有终态。
+  两批都只有 1~25 页、毫秒级，1 s 心跳永远打不出来 ⇒ 可观测性靠 `LOGE`；
+- per-job 的 `[JOB]` 心跳日志：仍只有 CP 有（阶段 6 补上）。
 
 **阶段 6 关闭的欠账**：
 - ✅ 同步逃生口 `l2p_cache_*_sync` 的四个调用族里，**checkpoint 一族消失**——

@@ -351,7 +351,7 @@ typedef struct {
 | 阶段 | 位置 | 操作 | NAND 访问 |
 |------|------|------|-----------|
 | 快速路径 | `ftl_op_host_io` | BBT bitmap 置位 + allocator 标记 | ❌ 无 |
-| 后台持久化 | `ftl_service_idle/normal` → `bbt_flush()` | 攒批写 NAND BBT（池 56-57） | ✅ 一次若干页 |
+| 后台持久化 | `ftl_service_idle/normal` → `bbt_kick()`（v0.75 阶段 7 起为异步 job） | 攒批写 NAND BBT（池 56-57） | ✅ 一次一页，提交即返回 |
 
 **回滚**：写失败后 L2P 不动（仍指向被替换前的映射），Super Block 空洞由 GC 扫描时读失败自然跳过。无需额外回滚逻辑。
 
@@ -933,7 +933,7 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     │   ├── GC：ftl_gc_evaluate 命中 ⇒ mig_begin_gc() 起**一个**搬移 job
     │   ├── mig_begin_wl()                ← 磨损均衡（触发判定在函数内）
     │   ├── mig_begin_predict()           ← 慢死预测巡检（节流 1s）
-    │   ├── journal_kick() / bbt_flush() / wear_flush()
+    │   ├── journal_kick() / bbt_kick() / wear_kick()   ← v0.75 阶段 7：均为异步 job
     │   └── checkpoint_begin() (按需；此后每轮 checkpoint_kick 跨档位推进)
     │
     ├── NORMAL 模式 (pending ≤ MAX/2 且无排队组):  适度后台

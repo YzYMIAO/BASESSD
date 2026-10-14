@@ -1020,7 +1020,7 @@ per-instance 记 `ftl->gc_eval_last_ms`。为什么必须加：
   判据是 **O(1)**（`ftl_needs_reloc` 只做一次 `dev->num_free` 与水位比较）；本仓 T5 要
   全表扫描（O(4096)）⇒ **门控是成本补偿，不是向主流的节拍对齐**。真正的对齐做法是拆分
   T1/T4 与 T5（见下方"代价"）。本仓既有同族做法：`rr_last_scan_ms`（1 s 巡检）、
-  `wear_flush` 的节拍门、`cp_timer_start`（10 s）。
+  `wear_kick` 的节拍门、`cp_timer_start`（10 s）。
 - **顺带修日志刷屏**。`[GC] trig=` 走**自己的节拍** `GC_LOG_INTERVAL_MS`（1 s，与求值
   同一套时基，`ftl->gc_log_last_ms`）。⚠ 求值节拍**不能**兼作日志节拍——前者管「多久算一次」，
   10 ms 拍仍是 100 行/秒；日志要的是「同一状态别重复报」。语义 = **进入触发态立即一行 +
@@ -1400,8 +1400,8 @@ static void ftl_service_idle(ftl_context_t *ftl) {
         ftl->rr_last_scan_ms = now_ms; (void)mig_begin_predict(ftl);
     }
     journal_kick(&ftl->journal);               /* v0.75：推进刷页 job（起异步写，不阻塞）*/
-    (void)bbt_flush(&ftl->alloc);
-    (void)wear_flush(&ftl->alloc, ftl->total_writes);   /* P0-1 磨损计数落盘（节拍门控）*/
+    bbt_kick(&ftl->alloc);                     /* v0.75 阶段 7：BBT 攒批 job（提交即返回）*/
+    wear_kick(&ftl->alloc, ftl->total_writes); /* P0-1 磨损计数落盘（节拍门控；阶段 7 起 job 化）*/
     /* 阶段 6：只装配 job（提交即返回）。成败不再能从返回值看出——判据是
      * "job 走完且 [CP] 无 abort"。定时基准照旧**无条件重置**（触发即重置，不看成败）。*/
     if (checkpoint_check_trigger(ftl, elapsed)) { (void)checkpoint_begin(ftl); ftl->cp_timer_start = now_ms; }
@@ -1415,8 +1415,8 @@ static void ftl_service_normal(ftl_context_t *ftl) {
     /* GC：**同一个统一求值点**；NORMAL 是受节流档 ⇒ 命中只**起一个** GC 搬移 job */
     if (ftl_gc_evaluate(ftl) != 0U) { (void)mig_begin_gc(ftl); }
     (void)mig_begin_wl(ftl);                   /* 触发判定在 mig_begin_wl 内 */
-    (void)bbt_flush(&ftl->alloc);
-    (void)wear_flush(&ftl->alloc, ftl->total_writes);
+    bbt_kick(&ftl->alloc);                     /* 阶段 7：BBT job（提交即返回）*/
+    wear_kick(&ftl->alloc, ftl->total_writes); /* 阶段 7：Wear job（节拍门控）*/
     if (checkpoint_check_trigger(ftl, elapsed)) { (void)checkpoint_begin(ftl); ftl->cp_timer_start = now_ms; }
 }
 
@@ -3667,7 +3667,7 @@ Write-back flush 代价 ≈ 200~300 μs（一次 NAND program）
   WL:       mig_begin_wl()                 → 磨损均衡（IDLE 全力；触发判定在函数内）
             慢死预测巡检 mig_begin_predict()（节流 RR_SCAN_INTERVAL_MS）
   Journal:  journal_kick()                  → 起/推进刷页 job（异步写，v0.75）
-  BBT/Wear: bbt_flush() / wear_flush()      → 攒批持久化
+  BBT/Wear: bbt_kick() / wear_kick()        → 攒批持久化（异步 job，v0.75 阶段 7）
   Checkpoint: checkpoint_check_trigger() 命中则 checkpoint_begin() 并重置 cp_timer_start
 设计思路：NAND 闲着也是闲着，把后台活做完，下次 Host IO 来时系统处于最佳状态
 ```
@@ -3682,7 +3682,7 @@ Write-back flush 代价 ≈ 200~300 μs（一次 NAND program）
   GC:       ftl_gc_evaluate 命中 → mig_begin_gc() **起一个** SB 的搬移 job（受节流档）
   WL:       mig_begin_wl() 命中则起 job（触发判定在函数内）
   Journal:  journal_kick()                  → 推进刷页 job（异步；已在飞则空操作）
-  BBT/Wear: bbt_flush() / wear_flush()      → 周期性刷入
+  BBT/Wear: bbt_kick() / wear_kick()        → 周期性刷入（异步 job，v0.75 阶段 7）
   Checkpoint: checkpoint_check_trigger() 命中则 checkpoint_begin()
 设计思路：留 NAND 带宽给突发 IO，后台任务"慢慢做"
 ```
@@ -3768,8 +3768,8 @@ static void ftl_service_idle(ftl_context_t *ftl) {
       if ((now - ftl->rr_last_scan_ms) >= RR_SCAN_INTERVAL_MS) {
           ftl->rr_last_scan_ms = now; (void)mig_begin_predict(ftl); } }
     journal_kick(&ftl->journal);                   /* v0.75：起/推进刷页 job（异步）*/
-    (void)bbt_flush(&ftl->alloc);
-    (void)wear_flush(&ftl->alloc, ftl->total_writes);
+    bbt_kick(&ftl->alloc);                         /* v0.75 阶段 7：BBT job（异步）*/
+    wear_kick(&ftl->alloc, ftl->total_writes);     /* v0.75 阶段 7：Wear job（异步）*/
     { uint32_t now = ftl_now_ms();
       if (checkpoint_check_trigger(ftl, now - ftl->cp_timer_start)) {
           (void)checkpoint_begin(ftl); ftl->cp_timer_start = now; } }
@@ -3783,8 +3783,8 @@ static void ftl_service_normal(ftl_context_t *ftl) {
     /* GC：**统一求值点**（与 IDLE 同一函数），命中则起一个 SB 的搬移 job */
     if (ftl_gc_evaluate(ftl) != 0U) { (void)mig_begin_gc(ftl); }
     (void)mig_begin_wl(ftl);
-    (void)bbt_flush(&ftl->alloc);
-    (void)wear_flush(&ftl->alloc, ftl->total_writes);
+    bbt_kick(&ftl->alloc);
+    wear_kick(&ftl->alloc, ftl->total_writes);
     { uint32_t now = ftl_now_ms();
       if (checkpoint_check_trigger(ftl, now - ftl->cp_timer_start)) {
           (void)checkpoint_begin(ftl); ftl->cp_timer_start = now; } }

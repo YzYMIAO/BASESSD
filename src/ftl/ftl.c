@@ -333,7 +333,7 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
                  *
                  * ① 关闭当前 Open Super Block（不再写入新数据）→ 进 closed_sb_list
                  *    → GC 优先回收（该 SB 有效 CW 偏低：失败 CW 不计数 + 旧 CW 被覆盖清账）
-                 * ② bbt_mark_bad（RAM only，后台 bbt_flush 持久化）——标 plane0 的 block 号。
+                 * ② bbt_mark_bad（RAM only，后台 bbt_kick 持久化）——标 plane0 的 block 号。
                  *    Policy B 下两 plane 是独立块，**只退失败的那个 plane**：plane1 块仍
                  *    好，随 Closed SB 进 GC，擦除后回 free pool 复用（不再被同号语义连坐）。
                  *    若失败的是 plane1（本层拿不到逐 CW 状态，只知整命令失败），
@@ -419,7 +419,7 @@ static void ftl_confirm_kick(ftl_context_t *ftl)
  *     是事件（空间压力/磨损），但**成本**远高于主流：SPDK FTL 的判据是 O(1)
  *     （`ftl_needs_reloc` 只读事件驱动的 `dev->num_free` 计数，其 core poller 周期 0
  *     = 每轮求值也无所谓）；本仓 T5 要全表扫描，成本不同 ⇒ 门控是**成本补偿**。
- *     与 rr_last_scan_ms / wear_flush 的节拍门同族。
+ *     与 rr_last_scan_ms / wear_kick 的节拍门同族。
  *     代价（如实登记）：T1/T4 的空间压力响应也被门到同一周期——IDLE 补池突发与
  *     NORMAL 的「一轮回收一个 SB」最坏延迟 GC_EVAL_INTERVAL_MS。真空闲下按需兜底
  *     仍在写路径（ftl_issue_subop），且 10ms 远小于搬一个 SB 的 NAND 时间。
@@ -518,11 +518,11 @@ static void ftl_service_idle(ftl_context_t *ftl)
     /* 推进 Journal 刷页 job（阶段 2：起异步写，不再阻塞在服务循环里） */
     journal_kick(&ftl->journal);
 
-    /* BBT 持久化（攒批写 NAND BBT） */
-    (void)bbt_flush(&ftl->alloc);
+    /* BBT 持久化（阶段 7：攒批写 NAND BBT；job 起步/续跑，提交即返回） */
+    bbt_kick(&ftl->alloc);
 
-    /* Wear 持久化（攒批写磨损计数；节拍未到则空转） */
-    (void)wear_flush(&ftl->alloc, ftl->total_writes);
+    /* Wear 持久化（阶段 7：攒批写磨损计数；节拍未到 / 在飞则空转） */
+    wear_kick(&ftl->alloc, ftl->total_writes);
 
     /* Checkpoint 检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）
      * ⚠ 阶段 6 起 checkpoint_begin **只装配 job**（提交即返回），CP 的成败不再能从
@@ -578,11 +578,11 @@ static void ftl_service_normal(ftl_context_t *ftl)
     /* 推进 Journal 刷页 job（阶段 2：与 IDLE 同一入口，job 已在飞则空操作） */
     journal_kick(&ftl->journal);
 
-    /* BBT 持久化（NORMAL 模式周期性刷入） */
-    (void)bbt_flush(&ftl->alloc);
+    /* BBT 持久化（NORMAL 模式周期性刷入；阶段 7 起 job 化） */
+    bbt_kick(&ftl->alloc);
 
-    /* Wear 持久化（NORMAL 模式周期性刷入） */
-    (void)wear_flush(&ftl->alloc, ftl->total_writes);
+    /* Wear 持久化（NORMAL 模式周期性刷入；阶段 7 起 job 化） */
+    wear_kick(&ftl->alloc, ftl->total_writes);
 
     /* Checkpoint 检查（NORMAL 模式也执行；语义同 IDLE 档） */
     {

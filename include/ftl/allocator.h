@@ -141,13 +141,53 @@ static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const supe
  *
  * ⚠ 两者都是**软状态**：掉电只丢「最后一次落盘之后」的增量，不丢用户数据（见 wear.h 头注）。
  */
+/* ── BBT 持久化 job（v0.75 阶段 7：异步化）──
+ *
+ * 落盘从「一次调用内同步写完」改为 job：`bbt_kick` 起步（提交第一条命令即返回），
+ * 完成由 g_op_service[FTL_OP_BBT]（ftl_op_bbt）按 phase 收尾并提交下一条。
+ * 状态与池游标同处（per-instance）。 */
+typedef enum
+{
+    BBT_JOB_IDLE = 0, /* 无 job */
+    BBT_JOB_ERASE,    /* 换块擦在飞（池内轮转到的下一块） */
+    BBT_JOB_WRITE,    /* record 写在飞 */
+} bbt_job_phase_t;
+
 typedef struct
 {
-    uint32_t sequence;     /* 本池自己的单调序号（最新有效 record） */
-    uint16_t write_idx;    /* 池内下一个待写槽（环形） */
-    uint8_t  cursor_valid; /* 游标是否已建立；未建立则首次落盘先扫池定位 */
-    uint8_t  dirty;        /* 是否有未写回 NAND 的变更 */
+    uint8_t phase;   /* bbt_job_phase_t */
+    uint8_t waiting; /* 1 = 有一条本 job 的命令在飞；0 = 待续跑（提交被背压拒） */
+} bbt_job_t;
+
+typedef struct
+{
+    uint32_t  sequence;     /* 本池自己的单调序号（最新有效 record） */
+    uint16_t  write_idx;    /* 池内下一个待写槽（环形） */
+    uint8_t   cursor_valid; /* 游标是否已建立；未建立则首次落盘先扫池定位 */
+    uint8_t   dirty;        /* 是否有未写回 NAND 的变更 */
+    bbt_job_t job;          /* 阶段 7：异步持久化 job */
 } bbt_state_t;
+
+/* ── Wear 持久化 job（v0.75 阶段 7：异步化）──
+ *
+ * 一批落盘 = 1~25 个日志页（增量 1~4 页 / compact 全量 25 页）+ 可能的整块擦。
+ * `wear_kick` 起步，完成由 g_op_service[FTL_OP_WEAR]（ftl_op_wear）收尾并提交下一页。 */
+typedef enum
+{
+    WEAR_JOB_IDLE = 0, /* 无 job */
+    WEAR_JOB_ERASE,    /* compact 前的整块擦在飞 */
+    WEAR_JOB_WRITE,    /* 日志页写在飞 */
+} wear_job_phase_t;
+
+typedef struct
+{
+    uint8_t  phase;        /* wear_job_phase_t */
+    uint8_t  waiting;      /* 1 = 有一条本 job 的命令在飞；0 = 待续跑（提交被背压拒） */
+    uint8_t  dirty_only;   /* 1 = 增量（只写快照里的脏块）；0 = compact 后的全量快照 */
+    uint16_t cursor;       /* 下一个待考察的 gblock（= FTL_BLOCK_TOTAL 表示本批走完） */
+    uint32_t flush_ms;     /* 起点时刻（收尾写回节拍基准，与旧 wear_flush 同位置） */
+    uint32_t flush_writes; /* 起点 total_writes（同上） */
+} wear_job_t;
 
 typedef struct
 {
@@ -156,6 +196,17 @@ typedef struct
     uint32_t last_flush_writes;           /* 上次落盘时的 total_writes（节拍基准） */
     uint32_t last_flush_ms;               /* 上次落盘时刻（ms，节拍基准） */
     uint8_t  dirty[FTL_BLOCK_TOTAL / 8U]; /* 脏位图：哪些块的计数变了 */
+
+    /* ── 阶段 7：异步 job ──
+     * `dirty_snapshot` = **本批起点**的脏位图副本。批跨多轮，期间 mig/RR job 的完成
+     * 会调 wear_mark_dirty 置新脏位 ⇒ 必须把「本批写哪些块」钉死，否则批会写出超过
+     * compact 判定所用的页数，next_page 可能越过块尾。
+     * 配对的写法是**批起点把 dirty 整体清零**：批期间 mark_dirty 置的位于是只表示
+     * 「批开始后才变的块」。收尾什么都不清（剩下的位留给下一批）；批失败则
+     * `dirty |= snapshot` 并回。这样「批前就脏、批中被写、批中又变」的块不会丢最后一次
+     * 变更——同步版 wear_flush 整批原子，没有这个窗口，清零式让异步版拿到同样的原子性。 */
+    wear_job_t job;
+    uint8_t    dirty_snapshot[FTL_BLOCK_TOTAL / 8U];
 } wear_state_t;
 
 /* ── Allocator 上下文 ──

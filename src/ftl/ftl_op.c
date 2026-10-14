@@ -40,8 +40,9 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
  *   · FTL_OP_GC / FTL_OP_WL：搬移 job（阶段 4，ctx = &ftl->mig）——**同一台引擎**，
  *     tag 分开只为日志/调试可辨（GC 回收 vs WL/预测退役）。
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（阶段 5，ctx = 该 cache line）；
- *   · FTL_OP_CHECKPOINT：Checkpoint job（阶段 6，ctx = &ftl->cp_job）。
- * 其余枚举值是后续阶段（7~8）的占位，随各站点改造逐个填。 */
+ *   · FTL_OP_CHECKPOINT：Checkpoint job（阶段 6，ctx = &ftl->cp_job）；
+ *   · FTL_OP_BBT / FTL_OP_WEAR：元数据表持久化 job（阶段 7，ctx = &ftl->alloc）。
+ * 其余枚举值是后续阶段（8）的占位，随各站点改造逐个填。 */
 static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_SYNC_WAIT]     = ftl_op_sync_wait,
     [FTL_OP_HOST_IO]       = ftl_op_host_io,
@@ -51,6 +52,8 @@ static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_WL]            = ftl_op_migrate,
     [FTL_OP_L2P]           = ftl_op_l2p,
     [FTL_OP_CHECKPOINT]    = ftl_op_checkpoint,
+    [FTL_OP_BBT]           = ftl_op_bbt,
+    [FTL_OP_WEAR]          = ftl_op_wear,
 };
 
 /* ── 2. 提交 ── */

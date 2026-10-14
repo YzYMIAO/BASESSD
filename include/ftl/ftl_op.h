@@ -165,6 +165,29 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
  */
 void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
+/*
+ * ftl_op_bbt - BBT 持久化 job 的完成服务函数（定义在 bbt.c）。
+ *
+ * 由 g_op_service[FTL_OP_BBT] 引用；ctx = `ftl_allocator_t *`（= &ftl->alloc，
+ * 即命令的实例归属；形参 ftl 不用）。服务函数按 alloc->bbt.job.phase 收尾：
+ *   · ERASE 成功 ⇒ 起写 record；失败 ⇒ 游标不推进、dirty 保留；
+ *   · WRITE 完成 ⇒ **无论成败都推进池游标**（半编程槽不可复用），成功清 dirty。
+ * 每条命令自己 fc_command_release。
+ */
+void ftl_op_bbt(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+
+/*
+ * ftl_op_wear - Wear 日志 job 的完成服务函数（定义在 wear.c）。
+ *
+ * 由 g_op_service[FTL_OP_WEAR] 引用；ctx = `ftl_allocator_t *`（= &ftl->alloc）。
+ * 服务函数按 alloc->wear.job.phase 收尾：
+ *   · ERASE（compact 前的整块擦）成功 ⇒ next_page 归 0、起全量快照；失败 ⇒ dirty 保留；
+ *   · WRITE 成功 ⇒ next_page++ 并续提交下一页；失败 ⇒ 不推进，增量批保留脏位，
+ *     compact 批（dirty_only==0）则全标脏（擦除已抹掉旧内容）。
+ * 每条命令自己 fc_command_release。
+ */
+void ftl_op_wear(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+
 /* ── 同步等待器（FTL_OP_SYNC_WAIT 的 ctx）──
  *
  * 由同步原语在**自己栈上**持有，经 ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter)
