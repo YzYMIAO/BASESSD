@@ -111,6 +111,11 @@ static void fault_trampoline(void)
 
 FPU 扩展帧（S0-S15/FPSCR/保留字）**排在**基本帧（R0-R3,R12,LR,PC,xPSR）**之后**，所以 `frame[0..7]` 的取法在有/无 FPU 帧时都成立；`fp_frame` 只作提示。
 
+> **出处（2026-10-14 核实）**：Zephyr `include/zephyr/arch/arm/cortex_m/exception.h` 的 `struct arch_esf` 把
+> `struct __basic_sf {r0,r1,r2,r3,r12,lr,pc,xpsr}` 放在 `struct __fpu_sf {s[16],fpscr,undefined}` **之前**，
+> 且故障路径直接用 `esf->basic.pc` 取出错 PC ⇒ **基本帧在低地址、SP 指向 R0**，FPU 帧在高地址。
+> 这条结论是「PC/LR 可作证据」的前提：若排布反过来，`frame[6]` 读到的是 S6 而不是 PC，整个故障现场就是垃圾。
+
 ### 5.2 轮询控制台：故障时中断通路已不可信
 
 正常日志走 `uart_log_write()` → 软件 TX 环 → DMA/USART 中断。故障现场可能就死在中断/DMA 里，这条通路必须绕开：
