@@ -406,6 +406,8 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
  *   参数：ftl —— FTL 实例。
  *   返回：1 = 确实回收了一个 SB；0 = 无可用 victim。
  *   实现要点：IDLE / NORMAL 两条后台路径共用同一个回收动作（差别只在"做几个"）。
+ *             本函数是 gc_reclaimed_count / gc_novictim_count 的**唯一自增点**——
+ *             放在这里（而非两个调用点）⇒ 两条路径的进展统计天然合一。
  * -------------------------------------------------------------------- */
 static int ftl_gc_reclaim_one(ftl_context_t *ftl)
 {
@@ -413,10 +415,14 @@ static int ftl_gc_reclaim_one(ftl_context_t *ftl)
 
     if (!gc_select_victim(&ftl->alloc, &victim))
     {
+        /* 触发但选不出 victim = 卡死嫌疑（观测计数，见 ftl.h）。
+         * 生产形态：closed_sb_list 空 / 条目 valid != 0（cf604ba 的缺陷形态）。 */
+        ftl->gc_novictim_count++;
         return 0;
     }
     (void)gc_migrate_sb(&ftl->alloc, &ftl->cache, &ftl->journal, victim);
     gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
+    ftl->gc_reclaimed_count++;
     return 1;
 }
 
@@ -424,25 +430,65 @@ static int ftl_gc_reclaim_one(ftl_context_t *ftl)
  * ftl_gc_evaluate
  *   功能：GC 的**统一触发求值点**——IDLE 与 NORMAL 两条后台路径都从这里过。
  *   参数：ftl —— FTL 实例。
- *   返回：GC_TRIGGER_* 位掩码；0 = 不触发（此时不打印）。
+ *   返回：GC_TRIGGER_* 位掩码；0 = 不触发（含节拍未到，此时不打印）。
  *   实现要点：触发只看**空间压力与磨损**（gc_check_triggers；T2 写入量 / T3 定时
  *             已随无出处判定退役，见 gc.h）。命中即打一行观测日志（victim 行由
  *             gc_select_victim 自己打）。
  *   ⚠ **BUSY 不调本函数**（host 饿着，后台让路）；"无块可写"由 ftl_issue_subop 的
- *     紧急 GC 兜底（= SPDK 的按需触发）。
+ *     紧急 GC 兜底（⚠ 本仓自己的**写路径按需 GC**；SPDK 无此路径——它的 GC 全在
+ *     core poller 里、判据是自由 band 水位，写路径取不到块就返 NULL 不就地回收）。
+ *   ⚠ **节拍门（GC_EVAL_INTERVAL_MS）**：本函数含 T5 的**全表扫描**
+ *     （gc_table_extremes 遍历 FTL_BLOCK_TOTAL 个块），而 Phase 3 每轮 ftl_service
+ *     都调它、主循环 `while(1)` 无节拍 ⇒ 加门前是**每轮扫一遍全表**。触发判据本身
+ *     是事件（空间压力/磨损），但**成本**远高于主流：SPDK FTL 的判据是 O(1)
+ *     （`ftl_needs_reloc` 只读事件驱动的 `dev->num_free` 计数，其 core poller 周期 0
+ *     = 每轮求值也无所谓）；本仓 T5 要全表扫描，成本不同 ⇒ 门控是**成本补偿**。
+ *     与 rr_last_scan_ms / wear_flush 的节拍门同族。
+ *     代价（如实登记）：T1/T4 的空间压力响应也被门到同一周期——IDLE 补池突发与
+ *     NORMAL 的「一轮回收一个 SB」最坏延迟 GC_EVAL_INTERVAL_MS。真空闲下按需兜底
+ *     仍在写路径（ftl_issue_subop），且 10ms 远小于搬一个 SB 的 NAND 时间。
  * -------------------------------------------------------------------- */
 static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
 {
-    uint32_t triggers = gc_check_triggers(&ftl->alloc);
+    uint32_t now_ms = ftl_now_ms();
+    uint32_t triggers;
 
+    /* 节拍门。⚠ gc_eval_last_ms == 0 是「尚未求值」哨兵：平台时钟缺失时
+     * ftl_now_ms() 恒 0，此时**每轮都求值**——GC 不能因缺时钟而停摆。 */
+    if ((ftl->gc_eval_last_ms != 0U) && ((now_ms - ftl->gc_eval_last_ms) < GC_EVAL_INTERVAL_MS))
+    {
+        return 0U;
+    }
+    ftl->gc_eval_last_ms = now_ms;
+
+    triggers = gc_check_triggers(&ftl->alloc);
+
+    /* 观测口：位图见 gc.h GC_TRIGGER_*（多位可同时命中）。日志走**自己的节拍**
+     * （GC_LOG_INTERVAL_MS，与求值同一套时基），不是逐次求值都打。
+     * ⚠ 求值节拍不能兼作日志节拍：前者管「多久算一次」，10ms 拍仍是 100 行/秒。
+     * 语义 = 进入触发态立即一行 + 触发态内每 GC_LOG_INTERVAL_MS 一行心跳；
+     * 退出触发态即归零 ⇒ 下次进入必然立即打（故无需另存触发掩码）。
+     * ⚠ 行内带 `reclaimed` / `novictim` 两个**进展计数**（ftl_gc_reclaim_one 自增）：
+     * 只有它们能区分「触发但在推进」与「触发但卡死」——`trig` 常亮对两者一视同仁，
+     * 而 `[GC] victim` 行（gc.c）在卡死时**根本不出现**，其"消失"也与"已收敛"同形。 */
     if (triggers != 0U)
     {
-        /* 观测口：trig 位图见 gc.h GC_TRIGGER_*（多位可同时命中） */
-        LOGI("[GC] trig=0x%02x free=%u op=%u writes=%lu\r\n",
-             (unsigned)triggers,
-             (unsigned)ftl->alloc.free_count,
-             (unsigned)ftl->alloc.op_count,
-             (unsigned long)ftl->total_writes);
+        if ((ftl->gc_log_last_ms == 0U) || ((now_ms - ftl->gc_log_last_ms) >= GC_LOG_INTERVAL_MS))
+        {
+            ftl->gc_log_last_ms = now_ms;
+            LOGI("[GC] trig=0x%02x free=%u op=%u writes=%lu reclaimed=%lu novictim=%lu\r\n",
+                 (unsigned)triggers,
+                 (unsigned)ftl->alloc.free_count,
+                 (unsigned)ftl->alloc.op_count,
+                 (unsigned long)ftl->total_writes,
+                 (unsigned long)ftl->gc_reclaimed_count,
+                 (unsigned long)ftl->gc_novictim_count);
+        }
+    }
+    else
+    {
+        /* 收敛：归零哨兵，使下一次进入触发态的第一行立即出现 */
+        ftl->gc_log_last_ms = 0U;
     }
 
     return triggers;
@@ -636,6 +682,14 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo)
 
     /* ├─ 慢死巡检时刻（F6：per-instance，原全局 g_rr_last_scan_ms） ── */
     ftl->rr_last_scan_ms = 0U;
+
+    /* ├─ GC 触发求值节拍 + 触发日志节拍（per-instance，见 ftl.h 字段注释） ── */
+    ftl->gc_eval_last_ms = 0U;
+    ftl->gc_log_last_ms  = 0U;
+
+    /* ├─ GC 进展计数（观测，只增不减；卡死判据见 ftl.h） ── */
+    ftl->gc_reclaimed_count = 0U;
+    ftl->gc_novictim_count  = 0U;
 
     /* ├─ Block State Table ├─
      * 表**自持**（P2-5）：条目在 ftl->tables.blocks 内，承载

@@ -47,7 +47,7 @@
  *
  *   旧字段 `pre_cond_count` / `emergency_count` 与状态位 PRE_COND / EMERGENCY 已删除
  *   （前者恒等于 free_count，后两者从无读者）。 */
-#define FREE_POOL_TARGET    (32U) /* 水位①/②分界：低于此值启动后台 GC 补池 */
+#define FREE_POOL_TARGET    (32U) /* 后台 GC 水位（IDLE 补池目标） */
 #define FREE_POOL_EMERGENCY (8U)  /* 水位②/③分界：低于等于此值转紧急 GC */
 #define FTL_OP_PERCENT      (10U) /* OP 预留百分比（编译期默认） */
 #define FTL_SPARE_POOL_SIZE (50U) /* 坏块替换池大小 */

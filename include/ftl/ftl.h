@@ -34,6 +34,15 @@
 #define CP_WRITE_INTERVAL     (1024U)  /* 写入量触发间隔 */
 #define CP_TIME_INTERVAL_MS   (10000U) /* 定时触发间隔（ms）*/
 
+/* GC 触发判定的求值节拍（见 ftl_gc_evaluate）。
+ * 判据本身是**事件**（空间压力/磨损），但求值含一次**全表扫描**，不能按主循环 pass 跑。 */
+#define GC_EVAL_INTERVAL_MS (10U)
+
+/* GC 触发日志的节拍（与求值同一套时基）。
+ * ⚠ 求值节拍**不能**兼作日志节拍：求值节拍管「多久算一次」，10ms 拍仍会打出 100 行/秒。
+ * 日志要的是「同一状态别重复报」。 */
+#define GC_LOG_INTERVAL_MS (1000U)
+
 #define FTL_READ_USER_SIZE (2048U) /* 一次读返回的用户数据大小 = 4 CW × 512B */
 
 /* 一个组的子操作连续遇 FTL_AGAIN（瞬态背压）而**无任何进展**的轮数上限。
@@ -126,6 +135,35 @@ typedef struct ftl_context
 
     /* 慢死预测巡检节流（F6：per-instance，原全局 g_rr_last_scan_ms） */
     uint32_t rr_last_scan_ms;
+
+    /* GC 触发求值的节拍基准（per-instance）。
+     * ⚠ 为什么需要：求值点 ftl_gc_evaluate 里的 T5 要算**全表**磨损极值
+     * （gc_table_extremes 遍历 FTL_BLOCK_TOTAL = 2048×PLANE_NUM 个块，≈80KB），
+     * 而它挂在 Phase 3 的 IDLE/NORMAL 两条路径上、主循环 `while(1)` 又无节拍
+     * ⇒ 改造前是**每轮扫一遍全表**（GC 选不出 victim 的卡死态下即 100% CPU）。
+     * 与 rr_last_scan_ms（1s 巡检）/ wear_flush 的节拍门同族。
+     * ⚠ 0 作「尚未求值」哨兵：平台时钟缺失时 ftl_now_ms() 恒返回 0，此时每轮都求值
+     * ——GC 不能因为缺时钟而停摆（与 T3 定时「恒不触发」的取舍方向相反）。 */
+    uint32_t gc_eval_last_ms;
+
+    /* GC 触发日志的节拍基准（per-instance，与 gc_eval_last_ms 同一套时基）。
+     * 语义 = 「进入触发态立即打一行 + 触发态内每 GC_LOG_INTERVAL_MS 一行心跳」：
+     * 退出触发态时**归零**，故下次进入必然立即打（不需要另存触发掩码）。
+     * ⚠ T1（free_count < FREE_POOL_TARGET）是 GC 的**常态工作区间**而非异常，
+     * 逐轮打会把 UART 环形队列占满、挤掉其它日志（`log_get_truncated_count` 上涨）；
+     * 而卡死态又需要心跳——「一行之后再无消息」会被误读成已恢复。
+     * ⚠ 同 gc_eval_last_ms：0 兼作「本触发态内尚未打过」哨兵。 */
+    uint32_t gc_log_last_ms;
+
+    /* GC 进展计数（per-instance，只增不减，纯观测）。
+     * ⚠ 为什么需要：`trig=` 常亮**不能区分**「在推进」与「卡死」——两种情况打的是同一行。
+     * 卡死链路：gc_select_victim 选不出 victim ⇒ ftl_gc_reclaim_one 返 0 ⇒ 空闲池只出不进
+     * （`allocator_close_sb` 的 valid 顺序缺陷 cf604ba 就是这个形态：条目对 GC/WL 永久不可见
+     * ⇒ free_count 掉到 0 后永不回升、写最终永久失败）。
+     * 判据：两次心跳之间 gc_reclaimed_count 不动、gc_novictim_count 在涨 = 卡死。
+     * 自增点在 ftl_gc_reclaim_one 内 ⇒ IDLE 补池突发与 NORMAL 单发两条路径都覆盖。 */
+    uint32_t gc_reclaimed_count; /* 累计成功回收的 SB 数 */
+    uint32_t gc_novictim_count;  /* 累计「触发但选不出 victim」次数 */
 
     /* Read Recovery：per-Block ECC 趋势追踪已并入 alloc.blocks[].rr（BST 单数据源） */
     ftl_read_recovery_t rr; /* Read Recovery 上下文（仅重试计数） */

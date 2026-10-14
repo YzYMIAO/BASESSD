@@ -923,10 +923,13 @@ cost = GC_WEIGHT_VALID·valid_ratio + GC_WEIGHT_ERASE·erase_ratio
 
 ### 4.4 GC 触发条件（空间压力驱动）
 
-GC 的触发**只由空闲块水位与磨损决定**——这是 DRAM-less 主流的一致做法（SPDK FTL 的 GC 是
-**按需**的：「all of the bands contain some valid data and no band can be freed, so no writes
-can be executed anymore」，`reference/pages/spdk_ftl.html:180`；dhara 更是「没有复杂 GC」，
-`reference/README.md:174`）：
+GC 的触发**只由空闲块水位与磨损决定**——这是 DRAM-less 主流的一致做法。SPDK FTL 的触发判据
+就是**自由 band 数 ≤ 水位**：`ftl_needs_reloc()` 读 `dev->num_free <= ftl_get_limit(dev,
+SPDK_FTL_LIMIT_START)`，默认 **5 个自由 band**（`lib/ftl/ftl_core.c:291`；默认值
+`lib/ftl/utils/ftl_conf.c:20`）。⚠ 本文件早先引 `reference/pages/spdk_ftl.html:180`
+（"no band can be freed, so no writes can be executed anymore"）当作 SPDK 的**触发条件**——
+**那段的语境是「GC 为何必需」的动机说明，不是判据**（它描述的是 CRIT 档：2 个自由 band 时
+compaction 停、只准 GC）。dhara 更简单：「没有复杂 GC」（`reference/README.md:174`）：
 
 | 触发 | 条件 | 说明 | 紧急度 |
 |------|------|------|--------|
@@ -940,13 +943,45 @@ can be executed anymore」，`reference/pages/spdk_ftl.html:180`；dhara 更是�
 **求值点（v0.63 统一）**：IDLE 与 NORMAL 两条后台路径共用**同一个求值点**
 （`ftl_gc_evaluate`，`src/ftl/ftl.c`）——IDLE 命中即做补池突发（回收
 `⌈deficit/PLANE_NUM⌉` 个 SB），NORMAL 命中即回收一个 SB。**BUSY 不求值**（host 饿着，
-后台让路）；「无块可写」由写路径的紧急 GC 兜底（`ftl_issue_subop`），等价于主流的 demand GC。
+后台让路）；「无块可写」由写路径的紧急 GC 兜底（`ftl_issue_subop`）——⚠ 这条**是本仓
+自己的**，不是抄 SPDK：SPDK 的 GC 全在 core poller 里（判据 = 自由 band 水位），写路径
+`ftl_band_get_next_free` 取不到块就返 NULL，不就地回收。
+
+**求值节拍（v0.68）**：求值点带 `GC_EVAL_INTERVAL_MS`（10 ms）的**软件节拍门**，
+per-instance 记 `ftl->gc_eval_last_ms`。为什么必须加：
+
+- **求值含一次全表扫描**。T5 判据要全表磨损极值（`gc_table_extremes` 遍历
+  `FTL_BLOCK_TOTAL` = 2048×`PLANE_NUM` 个块，≈80 KB），而求值点挂在 Phase 3 上、
+  主循环 `while(1)`（`src/main.c`）**没有任何节拍** ⇒ 加门前是**每轮 `ftl_service`
+  扫一遍全表**。GC 选不出 victim 的卡死态下，这就是 100% CPU 的纯空转。
+- **判据是事件，但本仓的判据比主流贵得多**。判据只依赖 `free_count` 与磨损表，变化很慢；
+  ⚠ **「主流也按周期求值」不成立**——SPDK FTL 的 `ftl_core_poller` 注册周期就是 `0`
+  （`lib/ftl/mngt/ftl_mngt_misc.c:208`）＝连续轮询、**每轮求值**。主流能这么做是因为它的
+  判据是 **O(1)**（`ftl_needs_reloc` 只做一次 `dev->num_free` 与水位比较）；本仓 T5 要
+  全表扫描（O(4096)）⇒ **门控是成本补偿，不是向主流的节拍对齐**。真正的对齐做法是拆分
+  T1/T4 与 T5（见下方"代价"）。本仓既有同族做法：`rr_last_scan_ms`（1 s 巡检）、
+  `wear_flush` 的节拍门、`cp_timer_start`（10 s）。
+- **顺带修日志刷屏**。`[GC] trig=` 走**自己的节拍** `GC_LOG_INTERVAL_MS`（1 s，与求值
+  同一套时基，`ftl->gc_log_last_ms`）。⚠ 求值节拍**不能**兼作日志节拍——前者管「多久算一次」，
+  10 ms 拍仍是 100 行/秒；日志要的是「同一状态别重复报」。语义 = **进入触发态立即一行 +
+  触发态内每 1 s 一行心跳**，退出触发态即归零（故下次进入必然立即打，无需另存触发掩码）。
+  T1（`free_count < FREE_POOL_TARGET`）是 GC 的**常态工作区间**而非异常，稳态必须静默；
+  而卡死态又需要心跳——「一行之后再无消息」会被误读成已恢复。
+  ⚠ 心跳行还带两个**进展计数** `reclaimed=` / `novictim=`（由 `ftl_gc_reclaim_one` 自增）：
+  `trig=` 常亮对「在推进」与「卡死」一视同仁，而 `[GC] victim` 行（`gc.c`）卡死时**根本
+  不出现**、其"消失"又与"已收敛"同形 ⇒ **只有计数能一行判读**。这不是假想问题：
+  `allocator_close_sb` 的 valid 顺序缺陷（cf604ba，已修）正是"触发常亮且永不收敛"的生产形态
+  ——运行期关闭的 SB 对 GC/WL 永久不可见 ⇒ 选不出 victim ⇒ 空闲池只出不进 ⇒ 写永久失败。
+
+**代价（如实登记）**：T1/T4 的空间压力响应也被门到同一周期 ⇒ IDLE 补池突发与 NORMAL
+的「一轮回收一个 SB」最坏延迟 10 ms。真卡死仍由写路径的按需 GC 兜底，且 10 ms 远小于
+搬一个 SB（128 页）的 NAND 时间，实际不构成瓶颈。
 
 **T2/T3 为什么删（v0.63 定案）**：
 
 - **参考层查无出处**。逐字核过 `docs/reference/`（7 论文 + 9 网页）与
   `storage_controller_learning.md`：T2（写入量整除）与 T3（定时）**零引用**。仓内唯一有出处的
-  GC 触发是 SPDK 的按需触发与 nvcache 的 free-chunk 阈值；DRAM-less 侧（DFTL/LeaFTL/VPFTL，
+  GC 触发是 SPDK 的自由 band 水位与 nvcache 的 free-chunk 阈值；DRAM-less 侧（DFTL/LeaFTL/VPFTL，
   `cw_level_mapping_design.md:445-465`）同样只认空间压力。对照 Journal 的 `CP_WRITE_INTERVAL`
   在本文件有完整推导，T2/T3 只有「分散 GC 压力」「空闲时有空就做一点」两句断言。
 - **求值点不可达**。二者只在 `ftl_service_normal` 求值；host 写全程 `queued != 0` ⇒ 走 BUSY；
@@ -984,9 +1019,10 @@ GC 搬移（读 → 写新位置 → 更新 L2P → 擦除旧 Block）不是原�
 本仓的 GC 后台模型：**GC 只在后台跑**——IDLE 全力（补池突发）/ NORMAL 受节流（一次一个 SB）/
 BUSY 让路；**空间压力（T1/T4）决定「要不要做」，后台档位决定「能做多少」**。这条分工与主流一致：
 
-- **SPDK FTL**：GC 是**按需**的——「all of the bands contain some valid data and no band can be
-  freed, so no writes can be executed anymore」才回收（`reference/pages/spdk_ftl.html:180`）；
-  victim 按 band 的有效性比例选（`:189`）。
+- **SPDK FTL**：触发判据是**自由 band 数 ≤ 水位**（`ftl_needs_reloc()`，默认 5 个自由 band；
+  2 个时 compaction 停、只准 GC）；victim 按 band 的有效性比例选（`reference/pages/spdk_ftl.html:189`）。
+  ⚠ 早先引 `:180`「no band can be freed, so no writes can be executed anymore」当作触发条件——
+  **那段是"GC 为何必需"的动机说明，不是判据**。
 - **dhara（DRAM-less 参考）**：没有复杂 GC，只有磨损均衡 + 坏块 + 日志（`reference/README.md:174`）。
 - **Idle Time GC**：空闲期把池补回水位是各家一致做法；本仓对应 `ftl_service_idle` 的补池突发。
 
@@ -1234,8 +1270,19 @@ static int ftl_gc_reclaim_one(ftl_context_t *ftl) {   /* 选 → 搬 → 擦归�
 }
 
 static uint32_t ftl_gc_evaluate(ftl_context_t *ftl) {  /* **统一求值点**：IDLE/NORMAL 共用 */
+    uint32_t now_ms = ftl_now_ms();
+    /* 节拍门（v0.68）：求值含全表扫描（T5 磨损极值），不能按主循环 pass 跑 */
+    if (ftl->gc_eval_last_ms != 0U && now_ms - ftl->gc_eval_last_ms < GC_EVAL_INTERVAL_MS)
+        return 0U;
+    ftl->gc_eval_last_ms = now_ms;
     uint32_t triggers = gc_check_triggers(&ftl->alloc);   /* 只看空间压力 + 磨损（T1/T4/T5）*/
-    if (triggers != 0U) { LOGI("[GC] trig=0x%02x free=%u op=%u writes=%lu", …); }
+    /* 日志走**自己的节拍**（1s）：进入立即一行 + 触发态内每 1s 一行心跳；退出即归零 */
+    if (triggers != 0U) {
+        if (ftl->gc_log_last_ms == 0U || now_ms - ftl->gc_log_last_ms >= GC_LOG_INTERVAL_MS) {
+            ftl->gc_log_last_ms = now_ms;
+            LOGI("[GC] trig=0x%02x free=%u op=%u writes=%lu", …);
+        }
+    } else { ftl->gc_log_last_ms = 0U; }
     return triggers;
 }
 

@@ -3423,3 +3423,91 @@ munit 的过滤（`tests/framework/munit.c:1297-1303`）要求过滤串 = **套�
 （`test_ftl.c:817/831` 手工置 `valid = 1U` 模拟 Open 条目）**早已把「`valid != 0` = 跳过」的
 正确约定写进了断言**。两例一个描述约定、一个验证生产者，合起来夹住这条潜伏缺陷——
 v0.66 那轮 53 例纯静态审查没能发现它，因为缺陷在**生产代码**里，用例本身看不出矛盾。
+
+---
+
+## v0.68 — GC 触发求值加节拍门（+ 触发日志走自己的节拍 + 进展计数）
+
+**日期**：2026-10-14
+
+**范围**：`include/ftl/ftl.h`（4 字段 + 2 常量）、`src/ftl/ftl.c`（`ftl_gc_evaluate`
+节拍门 + 日志节拍、`ftl_gc_reclaim_one` 进展计数、`ftl_init` 初始化）。
+**纯后台调度口径与观测，不改任何判据语义**。
+
+### 问题（板端顶出来的）
+
+跑完 FTL L0 UT 后，板子开始刷屏：
+
+```
+[INF] [GC] trig=0x09 free=0 op=0 writes=0
+```
+
+`trig=0x09` = `GC_TRIGGER_WATERMARK | GC_TRIGGER_EMERGENCY`，`free=0` 与之一致。
+`free=0 / op=0 / writes=0` 是**破坏性夹具的残留**（`ftl_fixture_reset` 调 `allocator_init`
+不回填 Free Pool、并清零 `total_writes`，见 `test_ftl.c:71-101` 的文件头声明）——
+这一半是既定代价，复位即消。
+
+**但刷屏本身是生产缺陷**：`ftl_gc_evaluate`（`ftl.c`）挂在 Phase 3 的 IDLE/NORMAL 两条
+路径上，而主循环 `while(1)`（`src/main.c:458`）**没有任何节拍** ⇒ 求值**每轮一次**。而
+`trig != 0` 不是异常——`free_count < FREE_POOL_TARGET(32)` 正是 GC 的**正常工作区间**
+（T1 的定义就是「低于水位」）。⇒ 任何把空闲池压在 32 以下的**持续写负载**都会让 NORMAL
+逐轮打一行；GC 选不出 victim 的卡死态下则是每轮一行 + 每轮一次全表扫描。
+
+### 根因：求值点没有节拍
+
+`gc_check_triggers` → `gc_table_extremes`（`gc.c:313`）是**全表扫描**：
+
+```c
+for (uint16_t b = 0U; b < FTL_BLOCK_TOTAL; b++)   /* 2048 × PLANE_NUM(2) = 4096 块 ≈ 80KB */
+```
+
+T5 判据要全表磨损极值，所以这次扫描无法避免；但**它的频率不该等于主循环频率**。
+
+⚠ **「主流按节拍求值」是错的**——本 ADR 初稿如此断言（"主流主控的后台 GC 跑在有节拍的
+调度单元上，没有哪家每个 pass 无条件求值"），**已订正**：SPDK FTL 的 `ftl_core_poller`
+注册周期就是 `0`（`lib/ftl/mngt/ftl_mngt_misc.c:208`：`SPDK_POLLER_REGISTER(ftl_core_poller,
+dev, 0)`）＝连续轮询、**每轮求值**。它能这么做是因为判据是 **O(1)**：`ftl_needs_reloc()`
+（`lib/ftl/ftl_core.c:291`）只做一次 `dev->num_free <= ftl_get_limit(SPDK_FTL_LIMIT_START)`
+比较（默认 5 个自由 band，`lib/ftl/utils/ftl_conf.c:20`）。本仓 T5 是 O(4096) ⇒
+**门控是成本补偿，不是向主流的节拍对齐**。
+
+本仓既有同族做法：`rr_last_scan_ms`（1 s 巡检）、`wear_flush` 的节拍门、`cp_timer_start`（10 s）。
+
+### 修法
+
+① **节拍门**：`ftl_gc_evaluate` 入口按 `GC_EVAL_INTERVAL_MS(10 ms)` 门控，per-instance
+记 `ftl->gc_eval_last_ms`。`0` 作「尚未求值」哨兵——平台时钟缺失时 `ftl_now_ms()` 恒 0，
+此时每轮都求值（**GC 不能因缺时钟而停摆**；与 T3 定时「恒不触发」的取舍方向相反）。
+
+② **日志走自己的节拍**：`[GC] trig=` 按 `GC_LOG_INTERVAL_MS`（1 s，与求值同一套时基，
+`ftl->gc_log_last_ms`）打。**求值节拍不能兼作日志节拍**——前者管「多久算一次」，10 ms 拍
+仍是 100 行/秒；日志要的是「同一状态别重复报」。语义 = **进入触发态立即一行 + 触发态内
+每 1 s 一行心跳**：退出触发态时归零该字段，故下次进入必然立即打（**不需要另存触发掩码**，
+早期草案的 `gc_trig_last` 已废弃）。心跳是刻意保留的——稳态静默是对的（T1 是常态），
+但「一行之后再无消息」会被误读成已恢复。
+
+③ **心跳行带进展计数**：`ftl_gc_reclaim_one` 内自增 `gc_reclaimed_count`（成功回收一个 SB）
+/ `gc_novictim_count`（触发但选不出 victim），两计数进 `[GC] trig=` 行。
+**为什么**：`trig=` 常亮对「在推进」与「卡死」一视同仁，唯一的进展证据 `[GC] victim`
+（`gc.c:449`）只在选到 victim 时才打——卡死时**根本不出现**，其"消失"又与"已收敛"**同形**
+⇒ 只有计数能一行判读。⚠ 这不是假想：`allocator_close_sb` 的 valid 顺序缺陷（**cf604ba**）
+正是"触发常亮且永不收敛"的**生产形态**——运行期关闭的 SB 对 GC/WL 永久不可见 ⇒
+`gc_select_victim` 恒选不出 victim ⇒ 空闲池只出不进 ⇒ `free_count` 掉到 0 后永不回升、
+**写最终永久失败**。
+
+### 代价（如实登记）
+
+T1/T4 的空间压力响应也被门到同一周期 ⇒ IDLE 补池突发与 NORMAL 的「一轮回收一个 SB」
+最坏延迟 10 ms。真卡死仍由写路径的按需 GC 兜底（`ftl_issue_subop`），且 10 ms 远小于
+搬一个 SB（128 页）的 NAND 时间，实际不构成瓶颈。若日后要更快的空间响应，正确做法是
+**把 T1/T4（O(1)）与 T5（O(N)）拆开**：便宜的每轮求值、贵的上节拍——本版未做。
+
+### 判据
+
+`make all` / `make tests` 均 0 warning。⚠ 体积按 **v0.68 提交本身**实测：product
+**192976 B** / 全套 **322980 B**（早先记的 193804 / 323968 含随后那轮排查临时加进树的
+诊断探针——`[F2] judge/blk/skip`、`[L2P] r=`——那些探针已在 v0.69 删除，不属于本改动）。
+上板判据：① 跑完 FTL L0 UT 后**不再刷屏**（卡死态是 1 行/秒心跳，改前是全速刷）；
+② 正常写负载下进入水位立刻一行、之后每 1 s 一行、离开水位后静默；
+③ **卡死可辨**——卡死态 `reclaimed` 不动而 `novictim` 持续上涨；正常回收则 `reclaimed` 每行都涨。
+

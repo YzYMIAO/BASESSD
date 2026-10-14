@@ -133,8 +133,8 @@ Binary size: 189336 bytes
 | | |
 |---|---|
 | **操作** | 按上方 1~3 步抬高水位后复位，观察开机日志（**无需敲任何命令**） |
-| **预期** | 开机后第一个 IDLE tick：<br>`[INF] [GC] trig=0x01 free=<F'> op=<O> writes=<W>`<br>`[INF] [GC] victim p0=<b0> p1=<b1> vr=<v> er=<e> cp=<c> yp=<y> cost=<k>`<br>**各一行**（本配方 budget = 1 个 SB） |
-| **判据** | ① `trig` 含 **`0x01`**（T1 水位；位值见 `gc.h` `GC_TRIGGER_*`：T1=0x01 / T4=0x08 / T5=0x10，0x02/0x04 已随 T2/T3 退役）；② victim 的 `vr/er/cp/yp` 四项**都参与** cost（P1-1 四维加权）；③ **`[GC] victim` 行数 = 1** —— 这同时是 v0.63 修掉的 IDLE 补池 `uint32` 下溢的判据（旧代码 `target -= 2U` 在 deficit 为奇数时回绕 `0xFFFFFFFF`，会把 closed 链全搬全擦、连打几十行）。 |
+| **预期** | 开机后第一个 IDLE tick：<br>`[INF] [GC] trig=0x01 free=<F'> op=<O> writes=<W> reclaimed=<R> novictim=<N>`<br>`[INF] [GC] victim p0=<b0> p1=<b1> vr=<v> er=<e> cp=<c> yp=<y> cost=<k>`<br>**各一行**（本配方 budget = 1 个 SB） |
+| **判据** | ① `trig` 含 **`0x01`**（T1 水位；位值见 `gc.h` `GC_TRIGGER_*`：T1=0x01 / T4=0x08 / T5=0x10，0x02/0x04 已随 T2/T3 退役）；② victim 的 `vr/er/cp/yp` 四项**都参与** cost（P1-1 四维加权）；③ **`[GC] victim` 行数 = 1** —— 这同时是 v0.63 修掉的 IDLE 补池 `uint32` 下溢的判据（旧代码 `target -= 2U` 在 deficit 为奇数时回绕 `0xFFFFFFFF`，会把 closed 链全搬全擦、连打几十行）；④ **`reclaimed` 涨 1**（本配方确实回收了 1 个 SB）而 `novictim` 不变——这两个计数是 v0.68 新增的进展判据，卡死时表现为 `reclaimed` 不动、`novictim` 持续上涨。 |
 | **⚠ 不要这样判** | 拿「`free` 上升」当判据——一次 GC 迭代是「取 2 块目标页 + 还 2 块 victim」，**净变化 ≈ 0**。证据是 `[GC]` 两行 + 随后的 `rd PASS`。 |
 | **失败** | `free` 慢性流失（需真实压测才显） ⇒ 疑似 P0-3（日志块冷 region 卡块，本批**未修**，见 §11）；`IO_ERROR` 出现 ⇒ 记下上下文。 |
 
@@ -212,7 +212,7 @@ Binary size: 189336 bytes
 | `[INF] [META] anchor load: loc=%d newest=%u seq=%lu` | `src/ftl/metadata.c:981` |
 | `[INF] [META] anchor_seq=%u dyn=%u cur_blk=%u live_blks=%u` | `src/ftl/metadata.c:485` |
 | `[INF] [WEAR] seq=%u pages=%u max_ec=%u min_ec=%u` | `src/ftl/wear.c:289` |
-| `[INF] [GC] trig=0x%02x free=%u op=%u writes=%lu` | `src/ftl/ftl.c:425`（`ftl_gc_evaluate`） |
+| `[INF] [GC] trig=0x%02x free=%u op=%u writes=%lu reclaimed=%lu novictim=%lu` | `src/ftl/ftl.c:478`（`ftl_gc_evaluate`）；**v0.68 起走日志节拍**：进入触发态立即一行 + 触发态内每 1 s 一行心跳，退出后静默。`reclaimed`/`novictim` 是**进展计数**（`ftl_gc_reclaim_one` 自增，只增不减）⇒ 一行即可区分「卡死」（`reclaimed` 不动、`novictim` 涨）与「在推进」 |
 | `[INF] [GC] victim p0=%u p1=%u vr=%u er=%u cp=%u yp=%u cost=%lu` | `src/ftl/gc.c:449`（`gc_select_victim`） |
 | `[INF] [L2P] thrash=%u miss=%u%% hit=%lu miss_total=%lu` | `src/ftl/l2p_cache.c:138` |
 | `[INF] ftl[%u][%u][%u] free=%u op=%u spare=%u bad=%u closed=%u thrash=%u miss=%u%%` | `src/controller/cli.c:401` |

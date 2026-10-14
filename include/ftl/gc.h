@@ -53,8 +53,8 @@
 /* ⚠ **0x02 / 0x04 已随 T2/T3 退役，与 0x20 一样不再分配**（v0.63）：
  *   T2「写入量整除 GC_INTERVAL_WRITES」与 T3「elapsed_ms 定时」在参考层（`docs/reference/`
  *   全部论文/网页 + `storage_controller_learning.md`）**查无出处**——仓内唯一有出处的 GC
- *   触发是 SPDK 的**按需触发**（`reference/pages/spdk_ftl.html:180`：「no band can be
- *   freed, so no writes can be executed anymore」）与 nvcache 的 free-chunk 阈值，
+ *   触发是 SPDK 的**自由 band 水位**（`ftl_needs_reloc`：`num_free <= SPDK_FTL_LIMIT_START`，
+ *   默认 5 个自由 band）与 nvcache 的 free-chunk 阈值，
  *   DRAM-less 侧（DFTL/LeaFTL/VPFTL）与 dhara 同样只认**空间压力**。二者的求值点也
  *   不可达（只在 `ftl_service_normal`，host IO 在场时是 BUSY、真空闲走 IDLE 的独立补池循环）。
  *   ⚠ 位值**刻意不重排**：`[GC] trig=` 日志与历史 ADR 里的 0x01/0x02/0x04/0x08/0x10 保持可比。 */
@@ -185,7 +185,10 @@ void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t n
  * ⚠ **调用点 = FTL 后台服务里唯一的 GC 求值点** `ftl_gc_evaluate`（ftl.c）：
  *   **IDLE 与 NORMAL 两条后台路径都从这里过**（IDLE 据此决定是否启动补池突发，
  *   NORMAL 据此决定是否回收一个 SB）；**BUSY 不求值**（host 饿着，让路），
- *   "无块可写"由 `ftl_issue_subop` 的紧急 GC 兜底（= SPDK 的按需触发）。
+ *   "无块可写"由 `ftl_issue_subop` 的**写路径按需 GC** 兜底。⚠ 这一条**是本仓自己的**、
+ *   不是抄 SPDK：SPDK 的 GC 全在 core poller 里，判据是自由 band 水位；其写路径
+ *   `ftl_band_get_next_free`（`ftl_core.c:769`）在 `free_bands` 空时直接返 NULL，
+ *   **不就地触发 GC**。
  *   参数里已无 total_writes / elapsed_ms —— T2/T3 退役后本函数只看**空间与磨损**。
  *
  * @param alloc  Allocator 上下文
