@@ -3617,3 +3617,67 @@ plane，②③ 两条动态分支**必须**带 plane 比较。调用点三处：
 `make all` / `make tests` 均 0 warning（product 194196 B / 全套 324608 B）。
 上板：① 重启后跑写负载，不再出现 `[FTL] dangling` 与 `bst.h` 断言；② `free` 比修复前**多 1**
 （每个活日志块不再白掩一个同号用户块）；③ `boot type=N journal_entries=N` 的条数不再恒 0。
+
+## v0.70 — 断言记录是陈旧的：加 `map <lba>` / `crash [clear]` 两条诊断 CLI
+
+**日期**：2026-10-14
+
+**范围**：`src/controller/cli.c`（两条命令 + 命令表）。**纯新增诊断口，不动任何算法路径。**
+
+### 问题：v0.69 上板后仍打印同一条断言
+
+v0.69 修完 plane 掩码上板，重启后**仍然**看到：
+
+```
+[ERR] [FAULT] previous assert: b->valid_count > 0U (include/ftl/bst.h:261)
+```
+
+### 结论：这条记录来自 v0.69 之前的镜像，是**陈旧记录**而非新崩溃
+
+四条证据，任何一条都足以排除"当前代码还在崩"：
+
+| # | 证据 | 含义 |
+|---|---|---|
+| ① | `.noinit` 是 `NOLOAD` 段（`linker/stm32h743xx_flash.ld:144`），启动**不清零** | 记录跨**软复位**保留；只有掉电才没 |
+| ② | `crash_record_clear()`（`include/common/crash.h:50`）**无任何调用者** | 没有任何路径会清它 ⇒ 一次断言被此后**每次**复位反复重放 |
+| ③ | 当前树里该断言在 **`bst.h:272`**（v0.69 新增的 `ftl_gblock_plane/block` 把它推下去 11 行）；`debug.lst` 里三份 `ftl_block_sub_valid` 全是 `mov.w r2, #272` | 记录里的 `:261` **只能**来自 v0.69 之前的镜像 |
+| ④ | 断电重启日志（`reset reason: POR PIN BOR`）**没有** `previous assert` 行 | POR 清 `.noinit` ⇒ 那是干净基线；且 `free=3715` 与 plane 修复后的口径一致 |
+
+⇒ `previous assert` 这一行的**语义**是「上次复位前记录里的东西」，不是「这次启动崩了」。
+在没有 `crash clear` 之前，它会被无限重放，看着像"还在崩"。
+
+### 缺口：没有一条来自当前代码的确认崩溃
+
+用户**不知道如何复现**，我们也拿不出一次当前代码的崩溃现场。与其空等复现，不如把
+「复现」从必要条件降成可选项——加两条 CLI，把现场直接读出来。
+
+### 修法：两条诊断命令
+
+**`map <lba>`**（只读）：打该 LBA 的 L2P 映射 + **目标块**的 BST 条目 + 末行 VERDICT。
+
+```
+map lba=100 pba=00027a00 ch=0 ce=0 lun=0 plane=0 blk=317 pg=0 cw=0 g=317
+    block g=317 state=0x0004 valid=4 sb=3 ec=12
+    VERDICT: ok —— 覆盖写安全
+```
+
+- 判据：**L2P 指向某块 ⇒ 至少该 CW 有效 ⇒ `valid_count ≥ 1` 是不变量**。
+  `valid_count == 0` 即悬空，与 v0.69 的 `[FTL] dangling` 守卫**同一判据**。
+- `state` 用于一次归因（BAD=本不可读 / FREE=会被复用**丢数据** / RESERVED=判据过宽 /
+  `0x0000`=从未认领）。
+- 关键性质：**不需要复现崩溃**——若某个 LBA 在写之前就已经指向 `valid_count == 0` 的块，
+  直接就能看到现场，而且能**事先**指出哪些 LBA 一写就死。
+
+**`crash [clear]`**：查看 / 清除 `.noinit` 记录（`crash_record_get` / `crash_record_clear`）。
+
+- 给一个**显式归零点**：清完再复位，记录重新出现才是真的又崩了。
+- ⚠ 掉电（POR）本来就清 `.noinit` ⇒ 断电重启后看到的记录一定是新的，无需 clear。
+- 副作用：`crash_record_clear()` 从"有声明无调用者"变为 CLI 可达。
+- 子参数**严格**校验（同 `bbt`）：拼错就报错返回，不静默降级。
+
+### 判据
+
+`make all` **196236 B** / `make tests` **326648 B**，均 0 warning。
+上板：① `crash` 打出 `bst.h:261` 的完整记录 ⇒ 证实陈旧；`crash clear` 后复位不再出现；
+② `map <lba>` 对写过的 LBA 出 `valid=≥1` + `VERDICT: ok`；③ 若日后真复现，
+`map` 与 `[FTL] dangling` 两条线应指向同一个 `g`。

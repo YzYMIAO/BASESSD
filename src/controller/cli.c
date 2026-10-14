@@ -12,6 +12,7 @@
 #include "controller/cli.h"
 
 #include "common/common.h"
+#include "common/crash.h"
 #include "common/log.h"
 #include "controller/ssd_request.h"
 #include "ftl/bbt.h"
@@ -69,6 +70,8 @@ static int uart_cli_tr(int argc, char *argv[]);
 static int uart_cli_fl(int argc, char *argv[]);
 static int uart_cli_wp(int argc, char *argv[]); /* 页打包写缓冲合并诊断（§七 方案 A） */
 static int uart_cli_info(int argc, char *argv[]);
+static int uart_cli_map(int argc, char *argv[]);   /* L2P 映射 + 目标块 BST 条目（只读诊断） */
+static int uart_cli_crash(int argc, char *argv[]); /* .noinit 崩溃记录查看/清除 */
 #if defined(FC_NAND_TEST_ENABLE)
 static int uart_cli_test(int argc, char *argv[]);
 #endif
@@ -528,6 +531,142 @@ static int uart_cli_info(int argc, char *argv[])
 }
 
 /*
+ * map <lba> — 只读诊断：打印该 LBA 的 L2P 映射与**目标块**的 BST 条目。
+ *
+ * 起因：`ftl_is_metadata_block` 缺 plane 掩码（v0.69 修）时，被日志块掩住的用户块
+ * 进不了 Free Pool、也被 F2 重建跳过 ⇒ `valid_count` 恒 0，而 L2P 仍可能指向它
+ * ⇒ 此后**每次**覆盖写该 LBA 都撞 `bst.h` 的 `b->valid_count > 0U` 断言。
+ * 本命令把「L2P 指向谁」与「BST 怎么看那个块」摆在一起，用于在**不复现崩溃**的前提下
+ * 判定现场是否已经悬空（末行 VERDICT）。
+ *
+ * ⚠ 判据：L2P 指向某块 ⇒ 至少该 CW 有效 ⇒ `valid_count ≥ 1` 是**不变量**；
+ *   `valid_count == 0` 即悬空，与 v0.69 的 `[FTL] dangling` 守卫同一判据。
+ *   `state` 用于一次归因：BAD=坏块本不可读 / FREE=会被复用**丢数据** /
+ *   RESERVED=判据过宽 / 0x0000=从未认领。
+ *
+ * 固定打实例 [0][0][0]（与 rd/wr 经 controller 路由到的实例一致）。
+ */
+static int uart_cli_map(int argc, char *argv[])
+{
+    ftl_context_t     *ftl;
+    const ftl_block_t *b;
+    nand_pba_t         pba;
+    uint64_t           lba;
+    uint16_t           g;
+
+    (void)argc;
+
+    if (uart_cli_parse_uint(argv[1], &lba) != 0)
+    {
+        (void)uart_log_write("error: invalid lba\r\n", 19U);
+        return FUNC_STATUS_ERROR;
+    }
+    if (!uart_cli_lba_range_ok(lba, 1U))
+    {
+        (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    ftl = g_ctrl.ftl[0][0][0];
+    if (ftl == NULL)
+    {
+        (void)uart_log_write("error: ftl instance not ready\r\n", 31U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    pba = l2p_cache_read(&ftl->cache, (lba_t)lba);
+    if (pba == FTL_PBA_INVALID)
+    {
+        (void)LOGI("map lba=%lu -> INVALID (未映射)\r\n", (unsigned long)lba);
+        return FUNC_STATUS_SUCCESS;
+    }
+
+    g = ftl_pba_gblock(pba);
+    b = &ftl->alloc.blocks[g];
+    (void)LOGI("map lba=%lu pba=%08lx ch=%lu ce=%lu lun=%lu plane=%lu blk=%lu pg=%lu cw=%lu g=%u\r\n",
+               (unsigned long)lba,
+               (unsigned long)pba,
+               (unsigned long)pba_to_ch(pba),
+               (unsigned long)pba_to_ce(pba),
+               (unsigned long)pba_to_lun(pba),
+               (unsigned long)pba_to_plane(pba),
+               (unsigned long)pba_to_block(pba),
+               (unsigned long)pba_to_page(pba),
+               (unsigned long)pba_to_cw(pba),
+               (unsigned)g);
+    (void)LOGI("    block g=%u state=0x%04x valid=%u sb=%u ec=%lu\r\n",
+               (unsigned)g,
+               (unsigned)b->state,
+               (unsigned)b->valid_count,
+               (unsigned)b->sb_id,
+               (unsigned long)b->erase_count);
+
+    if (b->valid_count == 0U)
+    {
+        (void)LOGE("    VERDICT: 悬空 —— 覆盖写该 LBA 会撞 bst.h valid_count>0 断言\r\n");
+    }
+    else
+    {
+        (void)LOGI("    VERDICT: ok —— 覆盖写安全\r\n");
+    }
+    return FUNC_STATUS_SUCCESS;
+}
+
+/*
+ * crash [clear] — 查看 / 清除 `.noinit` 崩溃记录。
+ *
+ * 记录放 `.noinit`（NOLOAD，启动不清零）⇒ **软复位后保留**，且当前没有任何路径会自动
+ * 清除它 ⇒ 一次断言会被此后每次复位反复打印成 `[FAULT] previous assert: ...`，
+ * 看上去像"还在崩"（实际只是同一条旧记录）。
+ *
+ * `crash clear` 给一个**显式归零点**：清完再复位，若记录重新出现，才是真的又崩了。
+ * ⚠ 掉电（POR）本来就清 `.noinit` ⇒ 断电重启后看到的记录一定是新的、无需 clear。
+ */
+static int uart_cli_crash(int argc, char *argv[])
+{
+    const crash_record_t *rec;
+
+    if (argc >= 2)
+    {
+        /* 选项**严格**校验（同 bbt：静默忽略拼错的子参数会让人以为"清过了"） */
+        if (strcmp(argv[1], "clear") != 0)
+        {
+            LOGW("crash: unknown option '%s' (only clear)\r\n", argv[1]);
+            return FUNC_STATUS_ERROR;
+        }
+        crash_record_clear();
+        (void)uart_log_write("crash record cleared\r\n", 22U);
+        return FUNC_STATUS_SUCCESS;
+    }
+
+    rec = crash_record_get();
+    if (rec == NULL)
+    {
+        (void)uart_log_write("crash: no record\r\n", 18U);
+        return FUNC_STATUS_SUCCESS;
+    }
+
+    (void)LOGI("crash kind=%lu line=%lu\r\n", (unsigned long)rec->kind, (unsigned long)rec->line);
+    (void)LOGI("  expr: %s\r\n", rec->expression);
+    (void)LOGI("  file: %s\r\n", rec->file);
+    if (rec->kind == (uint32_t)CRASH_KIND_FAULT)
+    {
+        (void)LOGI("  fault kind=%lu pc=%08lx lr=%08lx sp=%08lx xpsr=%08lx\r\n",
+                   (unsigned long)rec->fault.fault_kind,
+                   (unsigned long)rec->fault.pc,
+                   (unsigned long)rec->fault.lr,
+                   (unsigned long)rec->fault.sp,
+                   (unsigned long)rec->fault.xpsr);
+        (void)LOGI("  cfsr=%08lx hfsr=%08lx mmfar=%08lx bfar=%08lx\r\n",
+                   (unsigned long)rec->fault.cfsr,
+                   (unsigned long)rec->fault.hfsr,
+                   (unsigned long)rec->fault.mmfar,
+                   (unsigned long)rec->fault.bfar);
+    }
+    return FUNC_STATUS_SUCCESS;
+}
+
+/*
  * bbt [--erase] — 逐块探测并打印坏块图。
  *
  * 默认**只读**：读每块 Page 0 的 spare 首字节（列 2048），非 0xFF ⇒ 出厂坏块。
@@ -691,6 +830,8 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
     {     "fl",                                                                                                             "fl",                            "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
     {     "wp",                                                                                               "wp <lba> <n> <k>",        "submit k writes in one pair window (pack-buffer diag)", 4U,  4U,      uart_cli_wp},
     {   "info",                                                                                                           "info",                             "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
+    {    "map",                                                                                                      "map <lba>",  "print L2P mapping + target block BST entry (read-only diag)", 2U,  2U,     uart_cli_map},
+    {  "crash",                                                                                                  "crash [clear]",                          "show/clear the .noinit crash record", 1U,  2U,   uart_cli_crash},
     {    "bbt",                                                                                                  "bbt [--erase]", "print factory bad block map (--erase: also erase each block)", 1U,  2U,     uart_cli_bbt},
 #if defined(FC_NAND_TEST_ENABLE)
   /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
