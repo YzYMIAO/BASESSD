@@ -105,7 +105,7 @@ static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, int 
 {
     checkpoint_probe_ctx_t *c = (checkpoint_probe_ctx_t *)ctx;
     l2p_checkpoint_header_t hdr;
-    nand_addr_t             addr;
+    nand_pba_t              addr;
 
     (void)full;
 
@@ -189,7 +189,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
     l2p_checkpoint_header_t cp;
     metadata_ring_t         ring;
     checkpoint_probe_ctx_t  probe_ctx;
-    nand_addr_t             addr;
+    nand_pba_t              addr;
     uint8_t                 i;
     uint32_t                region_words = 0U;
 
@@ -295,7 +295,7 @@ ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_head
 {
     checkpoint_probe_ctx_t probe_ctx;
     uint16_t               newest = UINT16_MAX;
-    nand_addr_t            addr;
+    nand_pba_t             addr;
 
     if ((ftl == NULL) || (cp == NULL))
     {
@@ -350,7 +350,7 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
 {
     l2p_checkpoint_header_t cp;
     metadata_ring_t         ring;
-    nand_addr_t             addr;
+    nand_pba_t              addr;
 
     memset(&cp, 0, sizeof(cp));
     cp.magic            = CHECKPOINT_MAGIC;

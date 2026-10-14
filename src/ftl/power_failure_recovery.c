@@ -349,8 +349,8 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
             /* ② 预载 bitmap 区（仅 CLEAN/INVALID 行；DIRTY 已在上方跳过） */
             if (line->state != L2P_CACHE_CLEAN)
             {
-                nand_paa_t  region_paa = NAND_PBA_INVALID;
-                nand_addr_t region_addr;
+                nand_paa_t region_paa = NAND_PBA_INVALID;
+                nand_pba_t region_addr;
 
                 if (ftl->cache.md_dir != NULL)
                 {
@@ -361,14 +361,12 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
 
                 if (region_paa != NAND_PBA_INVALID)
                 {
-                    region_addr = addr_from_paa(ftl->cache.ch, ftl->cache.ce, region_paa);
+                    /* 桥接：Directory 此刻仍存 PAA（提交 B 改存 PBA 后本行消失） */
+                    region_addr = paa_to_pba(ftl->cache.ch, ftl->cache.ce, region_paa);
                 }
                 else
                 {
-                    region_addr = addr_from_pba(l2p_region_pba(ftl->cache.ch,
-                                                               ftl->cache.ce,
-                                                               ftl->cache.lun,
-                                                               line->region_id));
+                    region_addr = l2p_region_pba(ftl->cache.ch, ftl->cache.ce, ftl->cache.lun, line->region_id);
                 }
 
                 if (ftl_sync_read_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) == FTL_OK)
@@ -481,13 +479,13 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
  *   ⇒ 既可能被 allocator 拿去复用覆盖活数据，又让 L2P 指向一个 valid_count 恒 0 的块
  *   （`bst.h` 断言的成因，与 v0.69 修的 plane 掩码同一类）。
  *   判「非空」的代价：真为空的块会被拉出 Free Pool 交 GC 多擦一次——不丢数据。 */
-static uint8_t page_is_blank(const nand_addr_t *addr, uint8_t *raw_buf)
+static uint8_t page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
 {
     uint8_t i;
     uint8_t j;
 
     memset(raw_buf, 0xFF, PAGE_SIZE);
-    if (ftl_sync_read_page_raw(*addr, raw_buf, FC_COMMAND_MODULE_BBT) != FTL_OK)
+    if (ftl_sync_read_page_raw(pba, raw_buf, FC_COMMAND_MODULE_BBT) != FTL_OK)
     {
         return 0U; /* 命令没走通 ⇒ 内容不可知 ⇒ 一律判非空 */
     }
@@ -515,16 +513,9 @@ static uint8_t scan_block_write_pointer(const ftl_context_t *ftl, uint8_t plane,
 
     for (page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        nand_addr_t addr;
-        addr.ch    = ftl->topo.ch;
-        addr.ce    = ftl->topo.ce;
-        addr.lun   = ftl->topo.lun;
-        addr.block = block;
-        addr.plane = plane;
-        addr.page  = page;
-        addr.cw    = 0U;
+        nand_pba_t addr = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
-        if (page_is_blank(&addr, raw_buf))
+        if (page_is_blank(addr, raw_buf))
         {
             return page; /* 第一个空白页 = 写指针 */
         }

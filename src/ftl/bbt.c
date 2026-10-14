@@ -78,7 +78,7 @@ static ftl_status_t bbt_record_probe(void *ctx, uint16_t record_idx, int full, u
 {
     bbt_probe_ctx_t *c = (bbt_probe_ctx_t *)ctx;
     bbt_header_t     hdr;
-    nand_addr_t      addr;
+    nand_pba_t       addr;
 
     (void)full;
 
@@ -261,13 +261,13 @@ _Static_assert((BLOCKS_PER_PLANE % BBT_MAP_COLS_PER_PLANE) == 0U, "每 plane 块
  */
 static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t block, uint8_t do_erase)
 {
-    nand_addr_t addr;
-    uint8_t     mark[4];
-    int         marked;
+    nand_pba_t addr;
+    uint8_t    mark[4];
+    int        marked;
 
-    /* page / cw 由 paa_from_addr 给 0：擦除不看它们；列地址由 ftl_sync_read_column 显式给，
-     * 不依赖 paa 的 cw 字段。 */
-    addr = addr_from_paa(alloc->ch, alloc->ce, paa_from_addr(&(nand_addr_t){.plane = plane, .block = block}));
+    /* page / cw / lun 恒 0：擦除不看它们；列地址由 ftl_sync_read_column 显式给，
+     * 不依赖 PBA 的 cw 字段。 */
+    addr = pba_make(alloc->ch, alloc->ce, 0U, block, plane, 0U, 0U);
 
     /* ① 出厂标记（擦除前读，擦除会永久毁掉它）。读失败 ⇒ 坏块。 */
     (void)memset(mark, 0xFF, sizeof(mark));
@@ -478,7 +478,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
 {
     bbt_header_t    header;
     bbt_probe_ctx_t ctx;
-    nand_addr_t     addr;
+    nand_pba_t      addr;
     uint16_t        gblock;
 
     if (alloc == NULL)
@@ -569,7 +569,7 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_co
 {
     bbt_probe_ctx_t ctx;
     bbt_header_t    best;
-    nand_addr_t     addr;
+    nand_pba_t      addr;
     uint16_t        newest = UINT16_MAX;
 
     if ((alloc == NULL) || (bad_map == NULL) || (bad_count == NULL) || (sequence == NULL))

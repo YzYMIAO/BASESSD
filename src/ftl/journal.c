@@ -44,35 +44,16 @@
 
 /* ── Journal Block 页地址辅助 ── */
 /* journal_page_addr — 第 b 块第 page 页的 NAND 地址（plane 由页号奇偶决定，见下） */
-static nand_addr_t journal_page_addr(const l2p_journal_t *journal, uint8_t b, uint8_t page)
+static nand_pba_t journal_page_addr(const l2p_journal_t *journal, uint8_t b, uint8_t page)
 {
-    nand_addr_t addr;
-
-    addr.ch    = journal->topo.ch;
-    addr.ce    = journal->topo.ce;
-    addr.lun   = journal->topo.lun;
-    addr.block = (uint16_t)(JOURNAL_BLOCK0 + b);
-    addr.plane = (uint8_t)(page & 1U); /* 偶页 P0, 奇页 P1（双 Plane 交错） */
-    addr.page  = page;
-    addr.cw    = 0U; /* 0 = 整页 */
-
-    return addr;
+    /* cw = 0 = 整页；plane 由页号奇偶决定：偶页 P0、奇页 P1（双 Plane 交错） */
+    return pba_make(journal->topo.ch, journal->topo.ce, journal->topo.lun, (uint32_t)(JOURNAL_BLOCK0 + b), (uint32_t)(page & 1U), page, 0U);
 }
 
 /* journal_block_addr — 第 b 块的首页地址（擦除用；plane/page 归零，cw=0） */
-static nand_addr_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
+static nand_pba_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
 {
-    nand_addr_t addr;
-
-    addr.ch    = journal->topo.ch;
-    addr.ce    = journal->topo.ce;
-    addr.lun   = journal->topo.lun;
-    addr.block = (uint16_t)(JOURNAL_BLOCK0 + b);
-    addr.plane = 0U;
-    addr.page  = 0U;
-    addr.cw    = 0U;
-
-    return addr;
+    return pba_make(journal->topo.ch, journal->topo.ce, journal->topo.lun, (uint32_t)(JOURNAL_BLOCK0 + b), 0U, 0U, 0U);
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -100,8 +81,7 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 
     for (b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
     {
-        journal->block_pba[b] =
-            pba_from_addr(&(nand_addr_t){.ch = topo.ch, .ce = topo.ce, .block = (uint16_t)(JOURNAL_BLOCK0 + b)});
+        journal->block_pba[b] = pba_make(topo.ch, topo.ce, topo.lun, (uint32_t)(JOURNAL_BLOCK0 + b), 0U, 0U, 0U);
     }
 
     journal->current_block    = 0U;
@@ -186,11 +166,11 @@ void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
  * -------------------------------------------------------------------- */
 void journal_flush_page(l2p_journal_t *journal)
 {
-    nand_addr_t waddr;
-    uint8_t     target_page;
-    uint32_t    hdr_page_seq;
-    uint16_t    hdr_entry_count;
-    uint16_t    hdr_block_seq;
+    nand_pba_t waddr;
+    uint8_t    target_page;
+    uint32_t   hdr_page_seq;
+    uint16_t   hdr_entry_count;
+    uint16_t   hdr_block_seq;
 
     if (journal == NULL)
     {
@@ -288,10 +268,10 @@ static void journal_scan_ring(const l2p_journal_t *journal,
     {
         for (page = 0U; page < PAGES_PER_BLOCK; page++)
         {
-            uint8_t     page_data[JOURNAL_PAGE_SIZE];
-            uint32_t    page_seq;
-            uint16_t    entry_count;
-            nand_addr_t raddr;
+            uint8_t    page_data[JOURNAL_PAGE_SIZE];
+            uint32_t   page_seq;
+            uint16_t   entry_count;
+            nand_pba_t raddr;
 
             raddr = journal_page_addr(journal, b, (uint8_t)page);
 
@@ -492,9 +472,9 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
 
         for (i = 0U; i < replay_count; i++)
         {
-            uint8_t     page_data[JOURNAL_PAGE_SIZE];
-            nand_addr_t raddr;
-            int         ret;
+            uint8_t    page_data[JOURNAL_PAGE_SIZE];
+            nand_pba_t raddr;
+            int        ret;
 
             raddr = journal_page_addr(journal, replay_pages[i].block, replay_pages[i].page);
 

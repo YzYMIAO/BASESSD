@@ -9,7 +9,8 @@
  *   ① ftl_cmd_configure_descriptors(cmd, cw_bitmap) — 按形参 cw_bitmap 建整条 desc 链
  *   ② ftl_cmd_setup_ppa() — 单一 PBA → CH/CE/PAA + 整段位图 + 建链
  *   ③ ftl_cmd_setup_ppa_pair() — 每 plane 各自的 PBA → 整段位图 + 建链（Policy B）
- *   ④ addr_to_cmd() — nand_addr_t 直填 + 整段位图 + 建链（遍历路径，省打包拆包）
+ *   ④ pba_to_cmd() — nand_pba_t 直填 + 整段位图 + 建链（遍历路径 / 同步页原语）
+ *      ⑩ ftl_cmd_pba() — FC 命令 → PBA（④ 的逆，供 FTL 模块回读自己下发的地址）
  *
  *   v23：①③ 共用同一套位图规则（不再"每 plane 连续 0..config.cw"）。config.cw 自此
  *   退出建链（仍被 FC 的 RAID stripe 读取，见 fc_command.h 的 config.cw 注释）。
@@ -177,44 +178,59 @@ ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLAN
  */
 ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM], uint32_t cw_bitmap);
 
-/* ── 地址直填：nand_addr_t → FC 命令 ──
+/* ── 地址直填：nand_pba_t → FC 命令（PBA→PAA 的唯一关卡之一）──
  *
- * 遍历路径（GC 搬移、元数据扫描、Checkpoint）不再打包 → 拆包，
- * 直接用展开地址填入 FC 命令：
- *   ch/ce/lun  → cmd->config 位域
- *   block/plane/page/cw → paa（v47：pba_from_addr 后立刻 pba_to_paa 转出）
+ * FTL 侧的地址**一律**是 PBA（L2P / Journal / BST / Metadata Directory 存的就是它）。
+ * 只有在这里——建 FC 命令的最后一刻——才做 PBA → PAA 的字段重排：
+ *   ch/ce/lun           → cmd->config 位域
+ *   block/plane/page/cw → cmd->paa（v47：pba_to_paa 在 FTL 侧一次转出）
  *
- * 与 ftl_cmd_setup_ppa(cmd, pba_from_addr(addr)) 等价（省去打包拆包）：
+ * 与 ftl_cmd_setup_ppa(cmd, pba) 语义等价（都是「整段访问」）；本入口是同步页原语与
+ * 遍历路径（GC / 元数据扫描 / Checkpoint）的公共底座。
  * 地址填好后**必须建 desc 链**——否则命令无 buffer，数据无从搬运，
  * fc_submit 也会被 fc_command_validate 以 desc_id == INVALID 拒绝。
- * 无数据操作（ERASE / RESET 等）由 ftl_cmd_configure_descriptors 短路为 desc_id = INVALID。
+ * 无数据操作（ERASE / RESET / META / COLUMN 等）由 ftl_cmd_configure_descriptors
+ * 短路为 desc_id = INVALID。
  *
  * v27/v28：本入口把 fc_command_plane_span_cw_bitmap(cmd)（「本命令 plane 段内全部 CW」）
  *      算出来直接作实参交给建链入口——字面位图没有隐式展开，遍历路径（GC / 元数据 /
  *      checkpoint / sync 页原语）一律整段访问，故在这里一次算好，调用者不必管。
  */
-static inline ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *addr)
+static inline ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba)
 {
-    if ((cmd == NULL) || (addr == NULL))
+    if (cmd == NULL)
     {
         return FTL_ERROR;
     }
 
     /* 边界不变量：同 ftl_cmd_setup_ppa —— 进 FC 的 ch/ce/lun 被 fc_poll_fill_queue 当
-     * suspended[][][] 下标直接用，越界即栈越界写。本入口**不经过** ftl_cmd_setup_ppa
-     * （直填 addr，省打包拆包），校验必须自带；否则 fc.c 那句「PBA 已过 pba_is_valid()
-     * 校验」在遍历路径（同步页原语 / GC / 元数据扫描 / Checkpoint）上仍是假命题。 */
-    ASSERT(pba_is_valid(pba_from_addr(addr)));
+     * suspended[][][] 下标直接用，越界即栈越界写。本入口**不经过** ftl_cmd_setup_ppa，
+     * 校验必须自带；否则 fc.c 那句「PBA 已过 pba_is_valid() 校验」在遍历路径
+     * （同步页原语 / GC / 元数据扫描 / Checkpoint）上仍是假命题。 */
+    ASSERT(pba_is_valid(pba));
 
-    cmd->config.ch  = (DWORD)addr->ch;
-    cmd->config.ce  = (DWORD)addr->ce;
-    cmd->config.lun = (DWORD)addr->lun;
+    cmd->config.ch  = (DWORD)pba_to_ch(pba);
+    cmd->config.ce  = (DWORD)pba_to_ce(pba);
+    cmd->config.lun = (DWORD)pba_to_lun(pba);
     /* v47：PBA 在 FTL 侧就地转 PAA——FC 层只见 PAA，不再有 pba_to_paa 调用点。
      * ⚠ 必须在建链之前转（下面 fc_command_plane_span_cw_bitmap 读 cmd->paa）。 */
-    cmd->paa        = pba_to_paa(pba_from_addr(addr));
+    cmd->paa        = pba_to_paa(pba);
     /* v28：位图不再存进命令结构体，直接算出来当实参传。
      * 须在 paa 写好之后算（fc_command_plane_span_cw_bitmap 读 paa 与 multi_plane）。 */
     return ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));
+}
+
+/*
+ * ftl_cmd_pba - FC 命令 → PBA（pba_to_cmd 的逆）
+ *
+ * FTL 模块要回读自己下发的命令地址时用它，**不必**直接摸 cmd->paa——PAA 是 FC/器件域
+ * 的表示。ch/ce 取 cmd->config 位域，其余字段由 paa_to_pba() 反重排。
+ *
+ * ⚠ 本函数与 pba_to_cmd() 是 FTL 层仅有的两处 PBA↔PAA 转换点。
+ */
+static inline nand_pba_t ftl_cmd_pba(const fc_command_t *cmd)
+{
+    return paa_to_pba((uint32_t)cmd->config.ch, (uint32_t)cmd->config.ce, cmd->paa);
 }
 
 /* ── 数据搬运（v13 由 FC 上移）── */
@@ -282,13 +298,13 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
  * 收敛后由配置结构承载差异；配置是编译期常量，故用复合字面量宏调用：
  *
  *   元数据页（BBT / checkpoint / journal / L2P / metadata / 擦除）：
- *     ftl_sync_write_page(addr, buf, len, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_BBT));
+ *     ftl_sync_write_page(pba, buf, len, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_BBT));
  *   用户数据页（GC / WL 搬移、Read Recovery 重读）：
- *     ftl_sync_write_page(addr, buf, len, FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, lba));
+ *     ftl_sync_write_page(pba, buf, len, FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, lba));
  *   裸页（LDPC_RAW，忽略 NAND 成败）：
- *     ftl_sync_read_page_raw(addr, buf, FC_COMMAND_MODULE_BBT);
+ *     ftl_sync_read_page_raw(pba, buf, FC_COMMAND_MODULE_BBT);
  *   擦块（20ms 超时，元数据配置）：
- *     ftl_sync_erase_block(addr);
+ *     ftl_sync_erase_block(pba);
  *
  * 共同契约：返回 FTL_ERROR 时命令**已释放**、buffer 内容未定义；调用者不应再
  * 自行 fc_command_release。共同的命令配置：单 plane、FC_CHAIN_END、LP 页、
@@ -325,7 +341,7 @@ typedef struct
 #define FTL_PAGE_CFG_DATA_ANY(module) (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, (uint8_t)(module), (lba_t)FTL_LBA_UNKNOWN})
 
 /* 写页：OP_NORMAL_PROGRAM_PAGE。data/length 为空时只发命令不搬数据。 */
-ftl_status_t ftl_sync_write_page(nand_addr_t addr, const void *data, uint32_t length, const ftl_page_cfg_t *cfg);
+ftl_status_t ftl_sync_write_page(nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg);
 
 /*
  * 写页（CW 级）：只把 page_buf 里 cw_bitmap 指定的 CW 编进目标页（GC/WL 搬移专用）。
@@ -334,38 +350,38 @@ ftl_status_t ftl_sync_write_page(nand_addr_t addr, const void *data, uint32_t le
  * 不编程，读回 0xFF。cfg->lba 必须是**本页**的页 LBA（CW 级写不改变 CW 偏移，
  * 页内 META 的 LBA 由 CW 号决定）。
  */
-ftl_status_t ftl_sync_write_page_cw(nand_addr_t addr, const uint8_t *page_buf, uint32_t cw_bitmap, const ftl_page_cfg_t *cfg);
+ftl_status_t ftl_sync_write_page_cw(nand_pba_t pba, const uint8_t *page_buf, uint32_t cw_bitmap, const ftl_page_cfg_t *cfg);
 
 /* 读页：OP_NORMAL_READ_PAGE_WITH_DATA_OUT；数据在完成后拷入 buffer。 */
-ftl_status_t ftl_sync_read_page(nand_addr_t addr, void *buffer, uint32_t length, const ftl_page_cfg_t *cfg);
+ftl_status_t ftl_sync_read_page(nand_pba_t pba, void *buffer, uint32_t length, const ftl_page_cfg_t *cfg);
 
 /*
  * 裸页读：LDPC_RAW，整页 4 个 CW 依次拷出（间隔 FC_BUFFER_POOL_CW_SIZE）。
  * ⚠ 刻意**不判定 NAND 失败**——BBT 坏页也要拿到原始位（上层按「非全 FF」判空）。
  */
-ftl_status_t ftl_sync_read_page_raw(nand_addr_t addr, void *buffer, uint8_t module);
+ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer, uint8_t module);
 
 /* 擦块：OP_ERASE_BLOCK，无数据链，20ms 超时。 */
-ftl_status_t ftl_sync_erase_block(nand_addr_t addr);
+ftl_status_t ftl_sync_erase_block(nand_pba_t pba);
 
 /*
- * 读 META：OP_READ_META，无数据链，回读 addr 指定页 / 指定 CW 的**前 4 字节 META**。
+ * 读 META：OP_READ_META，无数据链，回读 pba 指定页 / 指定 CW 的**前 4 字节 META**。
  *
  * CW 布局 [META:4][CRC:4][USER:512][PARITY:8]，META 在加扰区之前、**明文**。
  * CW0 的 META 头 4 字节即 spare 区最前面的 4 字节 ⇒ 出厂坏块标记（spare[0] = 0x00）
- * 落在 out[0]。addr.cw 是列选择器（不是 desc 链的 CW 位），必须显式给。
+ * 落在 out[0]。pba 的 cw 字段是列选择器（不是 desc 链的 CW 位），必须显式给。
  *
  * 与 ftl_sync_read_page_raw 同契约：**刻意不判定 NAND 失败**——坏页也要拿到原始
  * 位，故命令完成即返回 FTL_OK，成败由调用者按 out[] 内容判。out 需 4 字节。
  */
-ftl_status_t ftl_sync_read_meta(nand_addr_t addr, uint8_t out[4]);
+ftl_status_t ftl_sync_read_meta(nand_pba_t pba, uint8_t out[4]);
 
 /*
- * 按列读：OP_READ_COLUMN，无数据链，回读 addr 指定页**从列 column 起的 4 个字节**。
+ * 按列读：OP_READ_COLUMN，无数据链，回读 pba 指定页**从列 column 起的 4 个字节**。
  *
- * 与 ftl_sync_read_meta 的区别只有一个：**列地址不来自 addr.cw，而由 column 形参给**
+ * 与 ftl_sync_read_meta 的区别只有一个：**列地址不来自 pba 的 cw 字段，而由 column 形参给**
  * ——cw 只有 2 位（列上限 1584），够不到 spare 区。出厂坏块标记在 **spare 首字节 = 列
- * 2048**（`PAGE_MAIN_SIZE`），只有本原语够得到。行地址仍取 addr 的 block/plane/page。
+ * 2048**（`PAGE_MAIN_SIZE`），只有本原语够得到。行地址仍取 pba 的 block/plane/page。
  *
  * 列地址经 FC 命令的 `param.bytes[0..1]`（小端）下传（见 fc_build_dispatch_request 的
  * OP_READ_COLUMN 分支），结果经 CQ 的 `param.bytes[0..3]` 回。
@@ -374,6 +390,6 @@ ftl_status_t ftl_sync_read_meta(nand_addr_t addr, uint8_t out[4]);
  * 故命令完成即返回 FTL_OK，成败由调用者按 out[] 内容判。out 需 4 字节。
  * column + 4 越出页尾是编程错误（ASSERT）。
  */
-ftl_status_t ftl_sync_read_column(nand_addr_t addr, uint16_t column, uint8_t out[4]);
+ftl_status_t ftl_sync_read_column(nand_pba_t pba, uint16_t column, uint8_t out[4]);
 
 #endif /* FTL_FC_INTERFACE_H */

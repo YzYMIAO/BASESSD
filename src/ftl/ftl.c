@@ -343,7 +343,9 @@ static void ftl_handle_completion(const fc_command_status_t *completion,
                              * ECC 历史存于 BST（ftl->alloc.blocks[].rr）。
                              * ⚠ 须在 fc_command_release(cmd) 之前调用——desc 释放后失效。 */
                             {
-                                uint16_t gblock = ftl_paa_gblock(cmd->paa);
+                                /* cmd 是本 FTL 自己下发的 ⇒ 用它记着的 PBA 反查全局块号
+                                 * （FTL 层不直接读 cmd->paa —— 那是 FC/器件域的表示）。 */
+                                uint16_t gblock = ftl_pba_gblock(ftl_cmd_pba(cmd));
 
                                 rr_record_ecc(&ftl->alloc.blocks[gblock].rr, fc_get_cmd_ecc_max(cmd));
 
@@ -689,6 +691,11 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo)
     {
         return FTL_ERROR;
     }
+
+    /* ├─ PBA 字段视图自检（一次）：位域布局 implementation-defined，无法用 _Static_assert
+     *    证明（见 ftl_config.h §三.2）。若本工具链的布局与 PBA_*_SHIFT 不一致，
+     *    强转（*(nand_pba_t *)&fields）会静默算错地址 ⇒ 在此硬失败。 */
+    ASSERT(pba_fields_layout_matches() != 0U);
 
     ftl->topo = topo;
 

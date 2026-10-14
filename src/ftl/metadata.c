@@ -48,27 +48,24 @@
  *   功能：把「池内第 record_idx 条 record 的第 page_in_record 页」换算成物理地址。
  *   参数：ring —— 池几何；topo —— ch/ce/lun；record_idx —— 池内记录序号；
  *         page_in_record —— record 内页偏移（Anchor 一条 = 8 页）。
- *   返回：nand_addr_t（plane 取 ring->plane，cw 恒 0）。
+ *   返回：nand_pba_t（plane 取 ring->plane，cw 恒 0）。
  *   实现要点：先按 records_per_block 整除得块偏移、取余得块内记录号，
  *             再乘 pages_per_record 得块内页号。地址公式的唯一出口。
  * -------------------------------------------------------------------- */
-nand_addr_t metadata_ring_addr(const metadata_ring_t *ring,
-                               const ftl_topology_t  *topo,
-                               uint16_t               record_idx,
-                               uint8_t                page_in_record)
+nand_pba_t metadata_ring_addr(const metadata_ring_t *ring,
+                              const ftl_topology_t  *topo,
+                              uint16_t               record_idx,
+                              uint8_t                page_in_record)
 {
-    uint16_t    rpb = metadata_ring_records_per_block(ring);
-    nand_addr_t addr;
+    uint16_t rpb = metadata_ring_records_per_block(ring);
 
-    addr.ch    = topo->ch;
-    addr.ce    = topo->ce;
-    addr.lun   = topo->lun;
-    addr.plane = ring->plane;
-    addr.block = (uint16_t)(ring->first_block + (record_idx / rpb));
-    addr.page  = (uint8_t)(((record_idx % rpb) * ring->pages_per_record) + page_in_record);
-    addr.cw    = 0U;
-
-    return addr;
+    return pba_make(topo->ch,
+                    topo->ce,
+                    topo->lun,
+                    (uint32_t)(ring->first_block + (record_idx / rpb)),
+                    ring->plane,
+                    (uint32_t)(((record_idx % rpb) * ring->pages_per_record) + page_in_record),
+                    0U);
 }
 
 /* --------------------------------------------------------------------
@@ -283,7 +280,7 @@ ftl_status_t metadata_ring_locate(const metadata_ring_t *ring,
 ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
                                          const ftl_topology_t  *topo,
                                          uint16_t               write_idx,
-                                         nand_addr_t           *out_addr)
+                                         nand_pba_t            *out_addr)
 {
     uint16_t rpb;
 
@@ -370,7 +367,7 @@ static ftl_status_t anchor_record_probe(void *ctx, uint16_t record_idx, int full
 
     for (chunk = 0U; chunk < ANCHOR_PAGE_COUNT; chunk++)
     {
-        nand_addr_t addr = metadata_ring_addr(c->ring, &c->dir->topo, record_idx, chunk);
+        nand_pba_t addr = metadata_ring_addr(c->ring, &c->dir->topo, record_idx, chunk);
 
         if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
         {
@@ -622,7 +619,7 @@ static ftl_status_t metadata_dir_reclaim_block(metadata_dir_cache_t *dir,
                                                ftl_allocator_t      *alloc,
                                                uint16_t              gblock)
 {
-    nand_addr_t addr;
+    nand_pba_t addr;
 
     if ((dir == NULL) || (alloc == NULL) || (alloc->blocks == NULL) || (gblock >= FTL_BLOCK_TOTAL))
     {
@@ -637,13 +634,13 @@ static ftl_status_t metadata_dir_reclaim_block(metadata_dir_cache_t *dir,
         return FTL_OK;
     }
 
-    addr.ch    = dir->topo.ch;
-    addr.ce    = dir->topo.ce;
-    addr.lun   = dir->topo.lun;
-    addr.plane = (uint8_t)(gblock / BLOCKS_PER_PLANE);
-    addr.block = (uint16_t)(gblock % BLOCKS_PER_PLANE);
-    addr.page  = 0U;
-    addr.cw    = 0U;
+    addr = pba_make(dir->topo.ch,
+                    dir->topo.ce,
+                    dir->topo.lun,
+                    (uint32_t)(gblock % BLOCKS_PER_PLANE),
+                    (uint32_t)(gblock / BLOCKS_PER_PLANE),
+                    0U,
+                    0U);
 
     if (ftl_sync_erase_block(addr) != 0)
     {
@@ -780,10 +777,10 @@ ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *al
 
     for (region_id = 0U; region_id < METADATA_DIR_ENTRIES; region_id++)
     {
-        nand_paa_t  old;
-        nand_paa_t  slot;
-        nand_addr_t src;
-        uint8_t     buf[L2P_REGION_SIZE]; /* 2KB 栈缓冲：region 页就是裸 entries 数组 */
+        nand_paa_t old;
+        nand_paa_t slot;
+        nand_pba_t src;
+        uint8_t    buf[L2P_REGION_SIZE]; /* 2KB 栈缓冲：region 页就是裸 entries 数组 */
 
         old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, region_id);
         if (old == NAND_PBA_INVALID)
@@ -795,7 +792,8 @@ ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *al
             continue; /* 该 region 的最新位置不在 victim 上 */
         }
 
-        src = addr_from_paa(dir->topo.ch, dir->topo.ce, old);
+        /* 桥接：Directory 此刻仍存 PAA（提交 B 后本行消失） */
+        src = paa_to_pba(dir->topo.ch, dir->topo.ce, old);
         if (ftl_sync_read_page(src, buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
         {
             st = FTL_ERROR; /* 读不回：该 region 仍指向 victim 旧页，victim 不擦 ⇒ 无损失 */
@@ -809,7 +807,7 @@ ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *al
             break;
         }
 
-        if (ftl_sync_write_page(addr_from_paa(dir->topo.ch, dir->topo.ce, slot), buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
+        if (ftl_sync_write_page(paa_to_pba(dir->topo.ch, dir->topo.ce, slot), buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
         {
             st = FTL_ERROR; /* 槽已消耗（可能半编程），不登记 ⇒ region 仍指向 victim */
             break;
@@ -990,7 +988,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
 {
     metadata_anchor_page_t page; /* 2KB 栈缓冲：**按页**组好后写入，勿放整份 Directory */
     metadata_ring_t        ring;
-    nand_addr_t            base;
+    nand_pba_t             base;
     uint16_t               idx;
     uint16_t               total;
     uint32_t               seq;
@@ -1033,18 +1031,16 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
     LOGD("[META] anchor write: idx=%u seq=%lu blk=%u pl=%u pg=%u\r\n",
          (unsigned)idx,
          (unsigned long)seq,
-         (unsigned)base.block,
-         (unsigned)base.plane,
-         (unsigned)base.page);
+         (unsigned)pba_to_block(base),
+         (unsigned)pba_to_plane(base),
+         (unsigned)pba_to_page(base));
 
     for (chunk = 0U; chunk < ANCHOR_PAGE_COUNT; chunk++)
     {
-        uint16_t    base_entry = (uint16_t)(chunk * METADATA_DIR_ENTRIES_PER_PAGE);
-        uint16_t    n;
-        uint16_t    k;
-        nand_addr_t aaddr = base;
-
-        aaddr.page = (uint8_t)(base.page + chunk);
+        uint16_t   base_entry = (uint16_t)(chunk * METADATA_DIR_ENTRIES_PER_PAGE);
+        uint16_t   n;
+        uint16_t   k;
+        nand_pba_t aaddr = pba_with_page(base, (uint32_t)pba_to_page(base) + chunk);
 
         /* 本页有效条目数 = 全局有效范围 [0,count) 与本页区间 [base,base+PER_PAGE) 的交 */
         if (base_entry >= dir->count)
@@ -1174,10 +1170,10 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
     /* 读胜者的全部页，逐页校验后覆盖对应区间 */
     for (chunk = 0U; chunk < ANCHOR_PAGE_COUNT; chunk++)
     {
-        uint16_t    base_entry = (uint16_t)(chunk * METADATA_DIR_ENTRIES_PER_PAGE);
-        nand_addr_t addr       = metadata_ring_addr(&ring, &dir->topo, newest, chunk);
-        uint16_t    n;
-        uint16_t    k;
+        uint16_t   base_entry = (uint16_t)(chunk * METADATA_DIR_ENTRIES_PER_PAGE);
+        nand_pba_t addr       = metadata_ring_addr(&ring, &dir->topo, newest, chunk);
+        uint16_t   n;
+        uint16_t   k;
 
         if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
         {

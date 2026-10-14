@@ -78,19 +78,9 @@ void wear_mark_dirty(ftl_allocator_t *alloc, uint16_t gblock)
 /* ── 2. 页地址 / 写页 ── */
 
 /* ── 固定位置页地址（WEAR_BLOCK，plane 0，页 0..PAGES_PER_BLOCK-1）── */
-static nand_addr_t wear_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t page)
+static nand_pba_t wear_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t page)
 {
-    nand_addr_t addr;
-
-    addr.ch    = ch;
-    addr.ce    = ce;
-    addr.lun   = lun;
-    addr.plane = 0U;
-    addr.page  = (uint8_t)page;
-    addr.block = (uint16_t)WEAR_BLOCK;
-    addr.cw    = 0U;
-
-    return addr;
+    return pba_make(ch, ce, lun, WEAR_BLOCK, 0U, page, 0U);
 }
 
 /* ── 写一页日志并推进 next_page ──
@@ -98,7 +88,7 @@ static nand_addr_t wear_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t 
  * 绝对值 + 最新胜 ⇒ 重试重复写同一块是幂等的）。 */
 static ftl_status_t wear_write_page(ftl_allocator_t *alloc, wear_page_t *page, uint32_t count)
 {
-    nand_addr_t addr;
+    nand_pba_t addr;
 
     page->entry_count = count;
 
@@ -176,7 +166,7 @@ static ftl_status_t wear_write_range(ftl_allocator_t *alloc, int dirty_only)
 /* 块满：擦掉整块后从头写全量快照（erase 失败则 next_page 不动，下次再试）*/
 static ftl_status_t wear_compact(ftl_allocator_t *alloc)
 {
-    nand_addr_t addr = wear_page_addr(alloc->ch, alloc->ce, alloc->lun, 0U);
+    nand_pba_t addr = wear_page_addr(alloc->ch, alloc->ce, alloc->lun, 0U);
 
     if (ftl_sync_erase_block(addr) != 0)
     {
@@ -233,8 +223,8 @@ ftl_status_t wear_init(ftl_allocator_t *alloc)
      * 非致命：无有效页 = 冷启动（计数保持 ftl_init 的 memset 零值），不 brick 开机。 */
     for (p = 0U; p < PAGES_PER_BLOCK; p++)
     {
-        nand_addr_t addr = wear_page_addr(alloc->ch, alloc->ce, alloc->lun, p);
-        uint32_t    k;
+        nand_pba_t addr = wear_page_addr(alloc->ch, alloc->ce, alloc->lun, p);
+        uint32_t   k;
 
         memset(&page, 0, sizeof(page));
         if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_WEAR_LEVELING)) != 0)

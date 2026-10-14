@@ -13,7 +13,7 @@
  * 索引语义：
  *   按「全局物理 Block 号」索引，gblock = plane * BLOCKS_PER_PLANE + block
  *   （0 .. FTL_BLOCK_TOTAL-1）。PBA/PAA 的 block 字段是 per-plane 号，
- *   通过 ftl_paa_gblock / ftl_pba_gblock 统一转换为全局号——
+ *   通过 ftl_pba_gblock 统一转换为全局号——
  *   避免 plane1 与 plane0 的 block 号碰撞（历史 bug）。
  *
  * 存储位置：
@@ -35,7 +35,7 @@
 
 #include "common/assertion.h" /* ASSERT（add/sub_valid 的计数守卫） */
 #include "ftl/ftl_config.h"   /* nand_pba_t, pba_to_*, NAND_PBA_INVALID */
-#include "nand/nand_config.h" /* BLOCKS_PER_PLANE, PLANE_NUM, CW_NUM, nand_paa_t, paa_to_* */
+#include "nand/nand_config.h" /* BLOCKS_PER_PLANE, PLANE_NUM, CW_NUM */
 
 #include <stddef.h> /* NULL */
 #include <stdint.h>
@@ -146,14 +146,10 @@ static inline uint16_t ftl_gblock(uint8_t plane, uint16_t block)
     return (uint16_t)((uint32_t)plane * BLOCKS_PER_PLANE + block);
 }
 
-static inline uint16_t ftl_paa_gblock(nand_paa_t paa)
-{
-    return ftl_gblock((uint8_t)paa_to_plane(paa), (uint16_t)paa_to_block(paa));
-}
-
+/* PBA → 全局块号（直接按 PBA 位序解，不经 PAA） */
 static inline uint16_t ftl_pba_gblock(nand_pba_t pba)
 {
-    return ftl_paa_gblock(pba_to_paa(pba));
+    return ftl_gblock((uint8_t)pba_to_plane(pba), (uint16_t)pba_to_block(pba));
 }
 
 /* gblock → plane / per-plane block（ftl_gblock 的逆，单点解码）。 */

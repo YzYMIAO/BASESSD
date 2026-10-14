@@ -248,16 +248,16 @@ void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t n
 
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        uint16_t    gblock;
-        nand_addr_t block_addr;
-        int         ret;
+        uint16_t   gblock;
+        nand_pba_t block_addr;
+        int        ret;
 
         if (super_block_has_plane(victim, plane) == 0U)
         {
             continue; /* 退化单 plane 条目：该 plane 无块可擦 */
         }
         gblock     = ftl_gblock(plane, victim->plane_blocks[plane]);
-        block_addr = super_block_page_addr(victim, plane, 0U);
+        block_addr = super_block_page_pba(alloc->ch, alloc->ce, victim, plane, 0U);
 
         ret = ftl_sync_erase_block(block_addr);
         if (ret == 0)
@@ -595,7 +595,7 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
              * （陈旧的）META 一起搬过去，污染新页且多搬无用数据。
              * ⚠ 目标页的 plane 位就是 plane（allocator_alloc_pair 的契约），故写进去的
              *   META 逐 CW 仍是正确的扇区 LBA。 */
-            if (ftl_sync_write_page_cw(addr_from_pba(dst[plane]),
+            if (ftl_sync_write_page_cw(dst[plane],
                                        buf[plane],
                                        cw_bitmap[plane],
                                        FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, ftl_lba_page(base[plane]))) != FTL_OK)

@@ -284,8 +284,8 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
      * Random DISABLED / CRC ENABLED（v0.62）：Region 数据不加扰，但经 FC per-CW CRC + ECC 保护。
      */
     {
-        nand_paa_t  region_paa = NAND_PBA_INVALID;
-        nand_addr_t region_addr;
+        nand_paa_t region_paa = NAND_PBA_INVALID;
+        nand_pba_t region_addr;
 
         if (cache->md_dir != NULL)
         {
@@ -296,13 +296,13 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
 
         if (region_paa != NAND_PBA_INVALID)
         {
-            /* 通过 Directory 查到位置 → 展开地址（ch/ce 取本 cache 拓扑） */
-            region_addr = addr_from_paa(cache->ch, cache->ce, region_paa);
+            /* 通过 Directory 查到位置（桥接：Directory 此刻仍存 PAA，提交 B 后本行消失） */
+            region_addr = paa_to_pba(cache->ch, cache->ce, region_paa);
         }
         else
         {
-            /* 回退固定位置 → 展开地址（ch/ce/lun 取本 cache 拓扑） */
-            region_addr = addr_from_pba(l2p_region_pba(cache->ch, cache->ce, cache->lun, region_id));
+            /* 回退固定位置（ch/ce/lun 取本 cache 拓扑） */
+            region_addr = l2p_region_pba(cache->ch, cache->ce, cache->lun, region_id);
         }
 
         int ret = ftl_sync_read_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
@@ -387,7 +387,7 @@ void l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
 ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
 {
     l2p_cache_line_t *line;
-    nand_addr_t       region_addr;
+    nand_pba_t        region_addr;
     int               ret;
     nand_paa_t        region_paa = NAND_PBA_INVALID;
 
@@ -430,7 +430,8 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
         return FTL_ERROR;
     }
 
-    region_addr = addr_from_paa(cache->ch, cache->ce, region_paa);
+    /* 桥接：Directory 此刻仍存 PAA（提交 B 后本行消失） */
+    region_addr = paa_to_pba(cache->ch, cache->ce, region_paa);
 
     /*
      * 同步写 Region 到 NAND L2P 日志块。

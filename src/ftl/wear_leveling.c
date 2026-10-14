@@ -255,11 +255,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
             }
             gsrc[plane] = ftl_gblock(plane, victim->plane_blocks[plane]);
 
-            src[plane] = pba_from_addr(&(nand_addr_t){.ch    = ftl->topo.ch,
-                                                      .ce    = ftl->topo.ce,
-                                                      .block = victim->plane_blocks[plane],
-                                                      .plane = plane,
-                                                      .page  = page});
+            src[plane] = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, victim->plane_blocks[plane], plane, page, 0U);
             memset(buf[plane], 0, sizeof(buf[plane]));
 
             /* 读页 + 逐 CW 从页内 META（= OOB 反向映射）取回扇区 LBA（复用 GC 辅助函数） */
@@ -317,7 +313,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
             }
 
             /* 只搬有效 CW（本页局部 `cw_bitmap` 外的 CW 不建链、不编程） */
-            if (ftl_sync_write_page_cw(addr_from_pba(dst[plane]),
+            if (ftl_sync_write_page_cw(dst[plane],
                                        buf[plane],
                                        cw_bitmap[plane],
                                        FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, ftl_lba_page(base[plane]))) != FTL_OK)

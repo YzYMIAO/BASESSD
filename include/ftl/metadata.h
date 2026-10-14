@@ -38,7 +38,7 @@
 #include "ftl/allocator.h"
 #include "ftl/ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / FTL_SLOTS_PER_BLOCK / L2P_REGIONS_PER_INSTANCE）*/
 #include "ftl/ftl_type.h"
-#include "nand/nand_config.h"
+#include "nand/nand_config.h" /* PAGE_MAIN_SIZE（Anchor 页打包自检）、paa_*（Directory 暂存 PAA）*/
 
 #include <stdint.h>
 
@@ -373,10 +373,10 @@ _Static_assert((BBT_POOL_BLOCKS * PAGES_PER_BLOCK) <= UINT16_MAX, "BBT 池槽位
  *
  * record_idx ∈ [0, total)；page_in_record ∈ [0, pages_per_record)。
  */
-nand_addr_t metadata_ring_addr(const metadata_ring_t *ring,
-                               const ftl_topology_t  *topo,
-                               uint16_t               record_idx,
-                               uint8_t                page_in_record);
+nand_pba_t metadata_ring_addr(const metadata_ring_t *ring,
+                              const ftl_topology_t  *topo,
+                              uint16_t               record_idx,
+                              uint8_t                page_in_record);
 
 /*
  * metadata_ring_probe_fn - 调用方的 record 探针（由 ring 模块回调）
@@ -450,7 +450,7 @@ ftl_status_t metadata_ring_locate(const metadata_ring_t *ring,
 ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
                                          const ftl_topology_t  *topo,
                                          uint16_t               write_idx,
-                                         nand_addr_t           *out_addr);
+                                         nand_pba_t            *out_addr);
 
 /* ── SRAM 常驻 Directory Cache（约 18KB，随 ftl_context_t 落 AXI_RAM） ── */
 typedef struct

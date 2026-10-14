@@ -53,7 +53,7 @@ static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uin
     uint8_t  plane;
 
     ftl_l2p_region_placement(region_id, &block, &page, &plane);
-    return pba_from_addr(&(nand_addr_t){.ch = ch, .ce = ce, .lun = lun, .block = block, .plane = plane, .page = page});
+    return pba_make(ch, ce, lun, block, plane, page, 0U);
 }
 
 /* ── Region 分解 ──

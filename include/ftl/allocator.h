@@ -19,9 +19,9 @@
 
 #include "common/assertion.h" /* ASSERT（退化单 plane 条目展开地址是编码错误） */
 #include "ftl/bst.h"          /* ftl_block_t, FTL_BLOCK_TOTAL, ftl_gblock, ftl_block_is_bad */
-#include "ftl/ftl_config.h"   /* nand_pba_t, pba_from_addr, NAND_PBA_INVALID */
+#include "ftl/ftl_config.h"   /* nand_pba_t, pba_make, NAND_PBA_INVALID */
 #include "ftl/ftl_type.h"     /* ftl_status_t, ftl_topology_t */
-#include "nand/nand_config.h" /* nand_addr_t, nand_paa_t, PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
+#include "nand/nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
 
 #include <stdint.h>
 
@@ -107,31 +107,15 @@ static inline uint8_t super_block_has_plane(const super_block_t *sb, uint8_t pla
     return (sb->plane_blocks[plane] != FTL_BLOCK_NO_PLANE) ? 1U : 0U;
 }
 
-/* 返回 Super Block 中指定 Plane/Page 的展开地址（ch/ce/lun 取自 sb->topo） */
-static inline nand_addr_t super_block_page_addr(const super_block_t *sb, uint8_t plane, uint8_t page)
-{
-    nand_addr_t addr;
-
-    /* 退化单 plane 条目的哨兵 plane 不可展开（plane_blocks[plane] 是哨兵，非块号） */
-    ASSERT(super_block_has_plane(sb, plane) != 0U);
-    addr.ch    = sb->topo.ch;
-    addr.ce    = sb->topo.ce;
-    addr.lun   = sb->topo.lun;
-    addr.block = sb->plane_blocks[plane];
-    addr.plane = plane;
-    addr.page  = page;
-    addr.cw    = 0U; /* 0 = 整页（页级操作基址） */
-
-    return addr;
-}
-
 /* 返回 Super Block 中指定 Plane/Page 的 PBA（用户数据使用 FTL_DATA_CH/CE） */
 static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const super_block_t *sb, uint8_t plane, uint8_t page)
 {
-    nand_addr_t addr = super_block_page_addr(sb, plane, page);
-    addr.ch          = ch; /* 显式覆盖，保持旧语义（调用点自带的 ch/ce） */
-    addr.ce          = ce;
-    return pba_from_addr(&addr);
+    /* 退化单 plane 条目的哨兵 plane 不可展开（plane_blocks[plane] 是哨兵，非块号） */
+    ASSERT(super_block_has_plane(sb, plane) != 0U);
+
+    /* ch/ce 取形参（调用点自带的 FTL_DATA_CH/CE）；lun 取 sb->topo —— sb->topo 就是
+     * 本实例的 topo（见 allocator.c 的「绑定真实拓扑」）。cw = 0 = 整页（页级基址）。 */
+    return pba_make(ch, ce, sb->topo.lun, sb->plane_blocks[plane], plane, page, 0U);
 }
 
 /* ── 元数据池游标（序 4：per-instance）──

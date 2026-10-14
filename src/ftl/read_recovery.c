@@ -138,10 +138,7 @@ static int rr_exec_retry(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buffer, u
     /*
      * Step 2: 用新模式重试读
      */
-    {
-        nand_addr_t raddr = addr_from_pba(pba);
-        ret               = ftl_sync_read_page(raddr, buffer, length, FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_READ_RECOVERY, lba));
-    }
+    ret = ftl_sync_read_page(pba, buffer, length, FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_READ_RECOVERY, lba));
     if (ret == 0)
     {
         return 0; /* 重试成功 */
@@ -218,11 +215,12 @@ static int rr_neighbor_assist(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buff
 
     for (i = 0; i < (int)RR_NEIGHBOR_ATTEMPTS; i++)
     {
-        nand_addr_t neighbor_addr;
-        uint8_t     neighbor_buf[FC_BUFFER_USER_SIZE * CW_NUM];
-        int         ret;
+        nand_pba_t neighbor_addr;
+        uint8_t    neighbor_buf[FC_BUFFER_USER_SIZE * CW_NUM];
+        int        ret;
 
-        neighbor_addr = addr_from_paa(ch, ce, paa_from_addr(&(nand_addr_t){.plane = (uint8_t)plane, .block = (uint16_t)block, .page = neighbors[i]}));
+        /* lun 恒 0（与旧 paa_from_addr 路径一致；LUN_NUM = 1），page/cw 由形参给。 */
+        neighbor_addr = pba_make(ch, ce, 0U, block, plane, neighbors[i], 0U);
 
         memset(neighbor_buf, 0, sizeof(neighbor_buf));
         /* 邻居页的 LBA **本就未知**（辅助读只要"这一页读得出来"这个事实）⇒ 用
@@ -237,10 +235,7 @@ static int rr_neighbor_assist(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buff
              * 邻居读成功 → 说明 Block 本身没问题，
              * 可能是目标页有局部 bit 错。用标准 ECC 再试一次。
              */
-            {
-                nand_addr_t raddr = addr_from_pba(pba);
-                ret               = ftl_sync_read_page(raddr, buffer, length, FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_READ_RECOVERY, lba));
-            }
+            ret = ftl_sync_read_page(pba, buffer, length, FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_READ_RECOVERY, lba));
             if (ret == 0)
             {
                 return 0; /* 邻近页辅助后恢复成功 */
