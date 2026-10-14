@@ -40,9 +40,9 @@
 
 | 维度 | 现状 | 证据 |
 |---|---|---|
-| 映射粒度 | **IU 级（1 LBA = 1 CW = 512B = 页/4）**——**已迁移（波 2 序 2，未上板）**：1 次 512B 写更新 1 条 L2P entry + 1 条 journal；一个 pair 窗口 8 LBA = plane0 页 + plane1 页 | `ftl_config.h §八`；`ftl.c ftl_issue_subop/ftl_confirm_write`；`request.c` |
+| 映射粒度 | **IU 级（1 LBA = 1 CW = 512B = 页/4）**——**已迁移（波 2 序 2，未上板）**：1 次 512B 写更新 1 条 L2P entry + 1 条 journal；一个 pair 窗口 8 LBA = plane0 页 + plane1 页 | `ftl_config.h §三`；`ftl.c ftl_issue_subop/ftl_confirm_write`；`request.c` |
 | L2P 存储 | NAND 元数据区，**DRAM-less**；全表 2048 region × 512 entry × 4B = **4MB** | `l2p_cache.h:29-51` |
-| L2P 位置解析 | Metadata Directory（`L2P_REGIONS_PER_INSTANCE` = 2048 entry）动态分配 + 哨兵层（0-15 块）回退 | `metadata.c:35-355`；`ftl_config.h:147` |
+| L2P 位置解析 | Metadata Directory（`L2P_REGIONS_PER_INSTANCE` = 2048 entry）动态分配 + 哨兵层（0-15 块）回退 | `metadata.c:35-355`；`metadata.h`（`ftl_l2p_region_placement`）|
 | L2P cache | SRAM **64 region** CLOCK（近似 LRU），write-back + journal | `l2p_cache.c:78-132,239-264` |
 | **thrashing 检测** | ~~**无**（只有 hit/miss 计数）~~ ⇒ P1-4 已落地：窗口化 miss 率 + 滞回 + 停主动 flush | `l2p_cache.{h,c}`、`ftl.c` |
 | GC victim | **多维加权评分**（P1-1 ✅ 已落地）：有效页 / 磨损 / 温度 / 时间 四维（权重 500/200/200/100） | `gc.h:46-49,111` |
@@ -53,7 +53,7 @@
 | Free Pool | **单一 free 池 + OP 池**；三级**水位**（P1-3 ✅ 定案）；`pre_cond_count ≡ free_count`（**非缺陷**，GC 先擦后归还） | `allocator.c`；`gc.h` |
 | 温度分区 | Hot/Cold 两个 Open SB | `allocator.c:43-44,348` |
 | Super Block | 双 plane **各自独立选块**（Policy B，v0.12）；不再要求 `block1 = block0` 同号 | `allocator.h:59,192`；`allocator.c:152,192` |
-| Journal | **4 块**环形 log（`JOURNAL_BLOCKS = CW_NUM`），条目 **16B**（packed：lba + old/new pba + seq），**127/page**（推导）；truncate 已消除双倍擦除（P1-6 ✅） | `journal.h:35-59`；`ftl_config.h:170` |
+| Journal | **4 块**环形 log（`JOURNAL_BLOCKS = CW_NUM`），条目 **16B**（packed：lba + old/new pba + seq），**127/page**（推导）；truncate 已消除双倍擦除（P1-6 ✅） | `journal.h:35-59`；`metadata.h` |
 | Checkpoint | **全量快照**语义 + **增量 flush**（只写脏 region）；池 8 块环形，一条 = 1 页 | `checkpoint.c:63-93`；`checkpoint.h:62` |
 | 掉电恢复 | fresh/clean/power-failure 三类；closed SB 重建 = **全 NAND 扫描 + L2P 反查** | `power_failure_recovery.c:30-341,563-634` |
 | 调度/QoS | IDLE/NORMAL/BUSY，按 `pending+completion` 占用判空闲度 | `ftl.c:510-558` |
@@ -458,7 +458,7 @@
      **`rr` 仍不持久化**。
 8. **文档一致性债**：
    - ~~`ftl_design.md` / `ftl_api_usage.md` 旧布局标识符~~ ⇒ **✅ 本轮已清理**（2026-10-13）：L2P 分区
-     0-15、Journal 58-61、Wear 62、Checkpoint 池 8 块等常量已对齐 `ftl_config.h`；
+     0-15、Journal 58-61、Wear 62、Checkpoint 池 8 块等常量已对齐 `metadata.h`；
    - ~~`src/main.c` 两条内存注释仍是旧值~~ ⇒ **✅ 已订正**：`g_ftl` = **270.4 KB**（`.bss.g_ftl` = 0x43968），
      AXI_RAM 实用 **~291.3 KB / 384 KB**（`.bss` 0x48B44 + `.data` 0x1E4 = 298,280 B，
      取 `build/firmware/debug/bin/debug.map`；`src/main.c:131` 有 `_Static_assert` 兜底）。
@@ -607,8 +607,8 @@
 | 1 | L2P 表尺寸 | 核对 1,048,576 entry vs 262,144 物理页是否 **4× 超额** | 决定映射层要不要重做 ⇒ 所有映射改动的**前提**（§七.1） |
 
 **波 1 结论（2026-10-13）**：**「4× 超额」不是表设计错误**。表按**目标 IU = 页/4 = 512B** 定尺寸
-（`ftl_config.h:96-100` `FTL_IU_BYTES = FC_BUFFER_USER_SIZE`、`:113` `FTL_CW_TOTAL = 4096×64×4`、
-`:208` 表 4 MiB），与主流主控 **IU = 页/4** 结构同构 ⇒ **尺寸正确、表不改小**。
+（`ftl_config.h:60` `FTL_IU_BYTES = FC_BUFFER_USER_SIZE`、`:73` `FTL_CW_TOTAL = 4096×64×4`；
+`metadata.h:184` `FTL_L2P_TABLE_BYTES` 表 4 MiB），与主流主控 **IU = 页/4** 结构同构 ⇒ **尺寸正确、表不改小**。
 真正缺口 = **代码数据路径仍页级（2048B/LBA）**（`FTL_READ_USER_SIZE = 2048`、`request.c:148` /
 `ftl.c:909` 缓冲步进、`ftl.c:843` `internal_lba << CW_WIDTH(=2)` 佐证、`lba_to_region = lba>>9` /
 `lba_to_entry = lba&511` 无 `/4`），即 `cw_level_mapping_design.md §十一 ⬜` **已登记未落地的 5 项**。

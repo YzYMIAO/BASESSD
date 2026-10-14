@@ -101,7 +101,7 @@ static uint32_t ftl_now_ms(void)
  *       每个 LBA 各自一条 Journal + 一条 L2P 更新（Journal 流量 ×4，已登记）。
  *     · 目标页按 **LBA 的 plane 位**选：plane0 的 LBA 落 pending->new_pba、plane1 的
  *       落 pending->new_pba1。Policy B 下两 plane 独立选块，且「物理 plane 必须等于
- *       LBA 的 plane 位」是页内 META 能还原出正确 LBA 的前提（ftl_config.h §八）。
+ *       LBA 的 plane 位」是页内 META 能还原出正确 LBA 的前提（ftl_config.h §三）。
  *     · **不存 old_pba**：完成时按 LBA 重查 L2P 得"此刻被替换的映射"。同一 LBA 的两次
  *       写在飞时，先完成的先改 L2P，后完成的重查即得前者；提交时快照会让两条 Journal
  *       都指向最初映射，链断。

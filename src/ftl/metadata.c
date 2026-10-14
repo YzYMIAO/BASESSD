@@ -7,10 +7,11 @@
  *   的组页/落盘/加载；L2P 日志块的追加槽/登记/回收；以及"这块是不是元数据块"的判定。
  *
  * 与 metadata.h 的分工：
- *   metadata.h —— 结构（metadata_ring_t / metadata_anchor_page_t / metadata_dir_cache_t）+ 几何宏；
- *   本文件     —— 上述结构的全部算法实现。
+ *   metadata.h —— 结构（metadata_ring_t / metadata_anchor_page_t / metadata_dir_cache_t）+
+ *                 固定元数据区布局（池尺寸 / 块偏移 / 表字节 / 分区表声明 / 打包公式）；
+ *   本文件     —— 上述结构的全部算法实现 + 分区表本体（g_ftl_partitions[]，单一事实来源）。
  *
- * 元数据两层（见 ftl_config.h §六）：
+ * 元数据两层（见 metadata.h「固定元数据区布局」）：
  *   固定层（哨兵）：L2P region 的初始位置，**永不写入**，读回全 0xFF = 未映射；
  *   日志层（动态）：region 刷新后从 Free Pool 取块、追加写，位置由 Directory 记账。
  *
@@ -33,7 +34,6 @@
 #include "ftl/checkpoint.h"
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/journal.h"
-#include "ftl/l2p_cache.h"
 #include "nand/onfi_1_0.h"
 
 #include <stddef.h>
@@ -404,7 +404,7 @@ static ftl_status_t anchor_record_probe(void *ctx, uint16_t record_idx, int full
 }
 
 /*
- * metadata_dir_fill_fixed - 建立全部 region 的固定位置（哨兵层，见 ftl_config.h §六）
+ * metadata_dir_fill_fixed - 建立全部 region 的固定位置（哨兵层，见 metadata.h「固定元数据区布局」）
  *
  * 每个实例的 L2P_REGIONS_PER_INSTANCE 个 region **全部登记**；某个 region 刷新到
  * 日志块后由 metadata_dir_commit_region 就地覆盖。固定位置**永不写入**（页保持
@@ -1217,6 +1217,30 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
  * 六、元数据块判定
  * ══════════════════════════════════════════════════════════════════ */
 
+/*
+ * 固定元数据分区表 —— 单一事实来源（宏声明在 ftl/metadata.h）
+ *
+ * 区间为 [first_block, first_block + block_count)；**各 (ch,ce,lun) 用同一份块号**
+ * （分片模型：每个 die 一套完整元数据，分区不随维度错开）。
+ *
+ * Anchor / Checkpoint / BBT 都是**多块轮转池**（P0-2 元数据写模型统一）：
+ * 池内每块容纳 `records_per_block` 条 record，块满换池内下一块（先擦后写）。
+ *
+ * 每项完全由 metadata.h 的宏派生——块号 / 块数 / 每块 record 数 / 表字节均无手写数字。
+ * 本表原先住在 src/ftl/ftl_config.c；布局归 metadata 之后随之下沉到本文件。
+ */
+const ftl_partition_t g_ftl_partitions[] = {
+    { "L2P Table",    L2P_BASE_BLOCK,             L2P_BLOCKS,                       1U, FTL_PART_FIXED,        FTL_L2P_TABLE_BYTES},
+    {    "Anchor",     ANCHOR_BLOCK0,     ANCHOR_POOL_BLOCKS, ANCHOR_RECORDS_PER_BLOCK, FTL_PART_FIXED,     FTL_ANCHOR_TABLE_BYTES},
+    {"Checkpoint", CHECKPOINT_BLOCK0, CHECKPOINT_POOL_BLOCKS,          PAGES_PER_BLOCK, FTL_PART_FIXED, FTL_CHECKPOINT_TABLE_BYTES},
+    {       "BBT",         BBT_BLOCK,        BBT_POOL_BLOCKS,          PAGES_PER_BLOCK, FTL_PART_FIXED,        FTL_BBT_TABLE_BYTES},
+    {   "Journal",    JOURNAL_BLOCK0,    JOURNAL_BLOCK_COUNT,                       1U, FTL_PART_FIXED,    FTL_JOURNAL_TABLE_BYTES},
+    {      "Wear",        WEAR_BLOCK,            WEAR_BLOCKS,              WEAR_COPIES, FTL_PART_FIXED,       FTL_WEAR_TABLE_BYTES},
+};
+
+/* 分区数（表长）。sizeof 派生 ⇒ 加/删分区项时自动跟随，无需手改。 */
+const uint32_t g_ftl_partition_count = (uint32_t)(sizeof(g_ftl_partitions) / sizeof(g_ftl_partitions[0]));
+
 /* --------------------------------------------------------------------
  * ftl_is_metadata_block
  *   功能：判定 (plane, per-plane 块号 block) 是否属于元数据（固定分区 / 当前日志块 /
@@ -1237,7 +1261,7 @@ int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, uin
     uint32_t p;
     uint16_t i;
 
-    /* ── 固定元数据块：遍历分区表（ftl/ftl_config.h §五）──
+    /* ── 固定元数据块：遍历分区表（本文件上方 g_ftl_partitions[]，声明见 metadata.h）──
      * 每项覆盖 [first_block, first_block + block_count)。
      * **各 (ch,ce,lun) 用同一份块号**（分片模型：每 die 一套完整元数据），
      * 分区不随维度错开。block 为 per-plane 号（调用侧取模）。 */

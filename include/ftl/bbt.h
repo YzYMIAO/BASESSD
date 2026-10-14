@@ -11,7 +11,7 @@
  *
  * BBT 存储在固定元数据区的 BBT 池（`BBT_POOL_BLOCKS` 块轮转，
  * **一条 record = 1 页**，块满换池内下一块并先擦）——池首块/块数由
- * ftl/ftl_config.h 按几何推导，见 §二/§三。
+ * ftl/metadata.h 按几何推导（「固定元数据区布局」）。
  * bad_map 覆盖全部 FTL_BLOCK_TOTAL 个 Block（NAND 持久化格式，保持不变）。
  * RAM 运行时坏块位统一存于 ftl_block_t.state（Block State Table 单数据源），
  * bbt_save 时从 BST 重建 bad_map。
@@ -22,13 +22,13 @@
  */
 
 #include "ftl/allocator.h"
-#include "ftl/ftl_config.h" /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
+#include "ftl/metadata.h" /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
 
 #include <stddef.h>
 #include <stdint.h>
 
 /* ── BBT 尺寸与块位置（BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS /
- *    BBT_BITMAP_SIZE）见 ftl/ftl_config.h ── */
+ *    BBT_BITMAP_SIZE）见 ftl/metadata.h「固定元数据区布局」── */
 
 /* ── BBT Header 格式 ── */
 #define BBT_MAGIC (0x424254ABUL) /* "BBT\xAB" */

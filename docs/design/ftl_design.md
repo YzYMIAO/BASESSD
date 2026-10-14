@@ -1976,7 +1976,7 @@ int metadata_dir_load(metadata_dir_cache_t *dir) {
 > ⚠ **本节为早期设计示意，未实现**。文中 `l2p_cache_flush_pair()` / `region_to_plane()` /
 > `allocator_get_next_metadata_page()` / `flush_single_region()` 在代码中**都不存在**；
 > 现实现是 region **逐条经 `metadata_dir_append_slot` 追加到日志块**（P0-2 统一写模型），
-> region→plane 由 `ftl_l2p_region_placement`（`include/ftl/ftl_config.h`）决定，
+> region→plane 由 `ftl_l2p_region_placement`（`include/ftl/metadata.h`）决定，
 > **没有 flush 配对**，也就没有文中所称的「翻倍 / 4×」。保留本节仅作历史思路参考。
 
 #### 背景
@@ -2388,7 +2388,7 @@ Write-back cache 的致命问题：掉电时 dirty cache 丢失，L2P 映射无�
 Journal 使用**固定位置**存储在元数据区，不通过 Metadata Directory 管理：
 
 ```
-元数据区 Block 分配（固定，由 ftl_config.h 公式算出，非手写）：
+元数据区 Block 分配（固定，由 metadata.h 布局宏算出，非手写）：
   Block 0..15:  L2P Table（哨兵层，永不写入）
   Block 16..47: Anchor 池（32 块，Metadata Directory 的块轮转日志池）
   Block 48..55: Checkpoint 池（8 块）
@@ -2531,7 +2531,7 @@ Journal 中 sequence ≤ checkpoint_seq 的条目已写入 L2P table，可回收
 
 > ⚠️ **实现订正（v0.54）**：本仓 Journal 是 **4 块**环形（`JOURNAL_BLOCKS = CW_NUM = 4`，
 > 块 58-61），非本节初稿的「双 Block J0↔J1」（设计自荐的「2→4」早已落地）。
-> 环形块数见 `ftl/ftl_config.h`；下面的时序/容量推导按 2 块写，**数值**需 ×2。
+> 环形块数见 `ftl/metadata.h`；下面的时序/容量推导按 2 块写，**数值**需 ×2。
 >
 > **环形块擦除（v0.54 P1-6）**：块的物理擦除有**唯一**一点——`journal_flush_page` 回切进入
 > 新块时擦（`journal.c`）。`journal_truncate` 只**预擦除**环形最旧块并记账
@@ -3343,7 +3343,7 @@ ftl_status_t l2p_cache_flush_all(l2p_cache_t *cache);
 **Journal**（`journal.h`）：
 
 ```c
-/* Journal 是固定块池，块号由 ftl_config.h 推导（当前 = 块 58..61）*/
+/* Journal 是固定块池，块号由 metadata.h 推导（当前 = 块 58..61）*/
 #define JOURNAL_BLOCKS          (CW_NUM)     /* = 4（CW 级 4× 映射流量）*/
 #define JOURNAL_BLOCK0          (58)         /* = BBT_BLOCK + BBT_POOL_BLOCKS */
 #define JOURNAL_BLOCK_COUNT     (JOURNAL_BLOCKS)

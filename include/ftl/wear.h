@@ -28,14 +28,15 @@
  */
 
 #include "ftl/allocator.h"
-#include "ftl/ftl_config.h" /* WEAR_BLOCK / WEAR_BLOCKS / FTL_WEAR_ENTRY_BYTES */
+#include "ftl/ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL —— 快照页数/脏位图自检）*/
+#include "ftl/metadata.h"   /* WEAR_BLOCK / WEAR_BLOCKS / FTL_WEAR_ENTRY_BYTES */
 
 #include <stdint.h>
 
 /* ── 表格式 ── */
 #define WEAR_MAGIC (0x57454152UL) /* "WEAR" */
 
-/* 每条目字节（= wear_entry_t 尺寸，见 ftl/ftl_config.h §四 逻辑表字节）*/
+/* 每条目字节（= wear_entry_t 尺寸，见 ftl/metadata.h「逻辑表字节」）*/
 #define WEAR_ENTRY_BYTES (FTL_WEAR_ENTRY_BYTES)
 
 /* 一条目 = 一个 Block 的**持久化**状态（擦除/读计数 + ECC 健康）。
@@ -83,7 +84,7 @@ typedef struct
 } wear_page_t;
 
 /* ── 编译期自检 ── */
-_Static_assert(sizeof(wear_entry_t) == WEAR_ENTRY_BYTES, "Wear 条目尺寸与 ftl_config.h 不一致");
+_Static_assert(sizeof(wear_entry_t) == WEAR_ENTRY_BYTES, "Wear 条目尺寸与 metadata.h 不一致");
 _Static_assert(sizeof(wear_page_t) == PAGE_MAIN_SIZE, "Wear 页结构体不等于一页主区");
 _Static_assert(WEAR_SNAPSHOT_PAGES <= PAGES_PER_BLOCK, "Wear 全量快照装不下一个块");
 /* 脏位图按字节填满（wear.c 的 compact 失败路径 memset 0xFF）：块数必须是 8 的倍数，

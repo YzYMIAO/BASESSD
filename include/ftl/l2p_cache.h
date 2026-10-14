@@ -17,18 +17,19 @@
  */
 
 #include "ftl/allocator.h"    /* ftl_allocator_t */
-#include "ftl/ftl_config.h"   /* L2P 容量/块布局宏 + 打包放置公式 */
+#include "ftl/ftl_config.h"   /* §一 容量/分解宏（L2P_REGIONS_PER_INSTANCE / FTL_DIM_TOTAL …）*/
 #include "ftl/ftl_type.h"     /* lba_t */
-#include "ftl/metadata.h"     /* metadata_dir_cache_t */
+#include "ftl/metadata.h"     /* metadata_dir_cache_t + 块布局宏（L2P_BASE_BLOCK / L2P_BLOCKS）+ 打包放置公式 */
 #include "nand/nand_config.h" /* nand_pba_t */
 
 #include <stddef.h>
 #include <stdint.h>
 
 /* ── 宏 ──
- * L2P 容量与块布局宏（L2P_ENTRIES_PER_REGION / L2P_REGION_SIZE /
- * L2P_REGIONS_PER_INSTANCE / L2P_BASE_BLOCK / L2P_BLOCKS / L2P_REGION_SHIFT /
- * L2P_REGION_MASK / FTL_DIM_TOTAL）见 ftl/ftl_config.h。*/
+ * L2P 容量与分解宏（L2P_ENTRIES_PER_REGION / L2P_REGION_SIZE /
+ * L2P_REGIONS_PER_INSTANCE / L2P_REGION_SHIFT / L2P_REGION_MASK /
+ * FTL_DIM_TOTAL）见 ftl/ftl_config.h §一；
+ * L2P 块布局宏（L2P_BASE_BLOCK / L2P_BLOCKS）见 ftl/metadata.h「固定元数据区布局」。*/
 #define L2P_CACHE_SIZE  (64U)         /* cache 行数（可配 32/64/128）*/
 #define FTL_PBA_INVALID (0xFFFFFFFFU) /* 无效 PBA */
 
@@ -44,7 +45,7 @@
 #define L2P_THRASH_ENTER_PCT (90U)  /* 进入阈值：窗口 miss 率 ≥ 90% */
 #define L2P_THRASH_EXIT_PCT  (70U)  /* 退出阈值：窗口 miss 率 < 70%（滞回） */
 
-/* 固定位置映射：Region r → PBA（打包放置公式见 ftl_config.h §六，两处共用）
+/* 固定位置映射：Region r → PBA（打包放置公式见 ftl/metadata.h，两处共用）
  * region_id 是**实例内**编号；各 die 的块号相同（分片模型），故不参与定位。*/
 static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t region_id)
 {

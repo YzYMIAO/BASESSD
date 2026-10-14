@@ -21,15 +21,15 @@
  *   页头可能因掉电撕裂而非法，属预期情形，返回错误/跳过而非断言。
  */
 
-#include "ftl/ftl_config.h" /* JOURNAL_BLOCK0 / JOURNAL_BLOCK_COUNT 块位置 */
 #include "ftl/ftl_type.h"
 #include "ftl/l2p_cache.h"
+#include "ftl/metadata.h" /* JOURNAL_BLOCK0 / JOURNAL_BLOCK_COUNT 块位置 */
 #include "nand/nand_config.h"
 
 #include <stdint.h>
 
 /* Journal 块位置：第 b 块 = JOURNAL_BLOCK0 + b，共 JOURNAL_BLOCK_COUNT 块
- * （块位置与块数见 ftl/ftl_config.h §二/§三）*/
+ * （块位置与块数见 ftl/metadata.h「固定元数据区布局」）*/
 
 /* Journal 页大小 = 一页主区（由 nand_config.h 推出）*/
 #define JOURNAL_PAGE_SIZE (PAGE_MAIN_SIZE)

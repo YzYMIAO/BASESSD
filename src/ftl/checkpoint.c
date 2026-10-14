@@ -11,7 +11,7 @@
  *   Checkpoint —— L2P 的**全量**快照（把 journal 已写条目固化进 NAND L2P 表并截断 journal）。
  *   两者用各自的 sequence：Journal.sequence_counter 是全局单调；本池 ftl->cp.sequence 独立。
  *
- * 池几何（由 ftl_config.h 推导，见 checkpoint_ring_init）：
+ * 池几何（由 ftl/metadata.h 推导，见 checkpoint_ring_init）：
  *   CHECKPOINT_POOL_BLOCKS 个块、一条 record = 1 页、单 plane；
  *   写游标 ftl->cp.write_idx 在 [0, 总记录数) 环形推进，块满由 metadata_ring_prepare_write 擦下一块。
  *
@@ -61,13 +61,13 @@ static uint32_t checkpoint_now_ms(const ftl_context_t *ftl)
 
 /* ── Checkpoint 池：环形轮转（一条 record = 1 页）──
  *
- * 池几何由 ftl_config.h 推导；sequence 与写游标是**本池自己的**（与 journal /
+ * 池几何由 ftl/metadata.h 推导；sequence 与写游标是**本池自己的**（与 journal /
  * Anchor / BBT 的 sequence 互不相干），开机由 checkpoint_find_latest 恢复。
  *
  * 游标/序号是 per-instance 的 ftl->cp（l2p_cp_state_t，序 4）——原为 file-scope
  * static，多实例下互相覆盖。 */
 
-/* checkpoint_ring_init — 按 ftl_config.h 常量填充本池环形几何（块范围/记录页数/plane/module） */
+/* checkpoint_ring_init — 按 metadata.h 常量填充本池环形几何（块范围/记录页数/plane/module） */
 static void checkpoint_ring_init(metadata_ring_t *ring)
 {
     ring->first_block      = CHECKPOINT_BLOCK0;

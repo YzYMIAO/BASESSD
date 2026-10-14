@@ -49,7 +49,7 @@
 
 **物理槽位数 = L2P entry 数，精确 1:1**（每实例都是 1,048,576）。这是 CW 级与页级的本质差别——
 页级时表会超额 4×（表 1,048,576 vs 物理页 262,144）。选 CW 后
-`FTL_LBA_MAX`（`ftl.h`）、`L2P_REGIONS_PER_INSTANCE`（`ftl_config.h`）、`lba_t = 512B`
+`FTL_LBA_MAX`（`ftl.h`）、`L2P_REGIONS_PER_INSTANCE`（`ftl_config.h` §一）、`lba_t = 512B`
 （`ftl_type.h`）全部自洽，**不用改常量**。
 
 ⚠ **扇区写落页**：器件编程单位仍是 page（2048B），**不能单独编 1 个 CW**。512B 写必须变成
@@ -89,9 +89,10 @@
 
 ## 二、分区布局
 
-> **单一事实来源**：`include/ftl/ftl_config.h`（宏 + `ftl_partition_t` 分区表 +
-> 打包映射 `ftl_l2p_region_placement()`），运行期分区表在 `src/ftl/ftl_config.c`
+> **单一事实来源**：`include/ftl/metadata.h`（布局宏 + `ftl_partition_t` 分区表声明 +
+> 打包映射 `ftl_l2p_region_placement()`），运行期分区表本体在 `src/ftl/metadata.c`
 > 的 `g_ftl_partitions[]`（6 项）。**改布局只改这一处。**
+> （几何量与 CW/LBA 地址编码仍在 `ftl_config.h`——布局归 metadata，几何归 config。）
 
 ### 2.1 Flash 分区图（当前几何下的展开值）
 
@@ -136,7 +137,7 @@
 | BST | 4096 block | 20B | 80 KB | — | — | SRAM | — | (RAM) |
 | **合计** | | | | | | | **63 块** | 0..62 |
 
-**逐条推导**（全部由 `nand_config.h` 几何 + `ftl_config.h` §二 策略常量算出）：
+**逐条推导**（全部由 `nand_config.h` 几何 + `metadata.h` 布局宏算出）：
 
 - **L2P**：1,048,576 × 4B = 4 MiB ÷ 2048B = 2048 页 ÷ 128 槽/块 = **16 块**（打包后，见 §2.2.1）。
 - **Directory**：2048 region × 7B = 14,336B；每页装 256 条（`ANCHOR_ENTRIES_PER_PAGE`，
@@ -153,7 +154,7 @@
 
 #### 2.2.1 L2P region 打包公式
 
-`ftl_l2p_region_placement(region_id, &block, &page, &plane)`（`ftl_config.h` §六，**唯一映射公式**，
+`ftl_l2p_region_placement(region_id, &block, &page, &plane)`（`metadata.h`，**唯一映射公式**，
 `l2p_cache` 与 `metadata` 共用）：
 
 ```
@@ -182,17 +183,17 @@ page63   region126     region127
 ```
 ① 几何量：页/块/plane/LUN 数、页主区字节、CW 数        ← 全部来自 nand_config.h
 ② 容量  ：CW 总数 ÷ 每 region 条目数 = region 数        ← 容量是几何的推论，不是输入
-③ 块数  ：每个分区 = f(几何量, 策略常量)               ← 策略常量集中在 ftl_config.h §二
+③ 块数  ：每个分区 = f(几何量, 策略常量)               ← 策略常量集中在 metadata.h
 ④ 起始块：前一分区起点 + 前一分区块数                   ← §三 顺序累积
 ```
 
-换芯片（改 `nand_config.h`）或改策略（改 `ftl_config.h` §二）⇒ 容量与全表自动重排。
-唯一的"写死"是 §二 的策略常量（副本数、每副本冗余页数、Journal 容量系数），
+换芯片（改 `nand_config.h`）或改策略（改 `metadata.h`）⇒ 容量与全表自动重排。
+唯一的"写死"是布局里的策略常量（副本数、每副本冗余页数、Journal 容量系数），
 **每个都写明了策略理由**。
 
 ### 2.4 运行期分区表
 
-`g_ftl_partitions[]`（`ftl_config.c`，6 项：L2P / Anchor / Checkpoint / BBT /
+`g_ftl_partitions[]`（`metadata.c`，6 项：L2P / Anchor / Checkpoint / BBT /
 Journal / Wear），每项 `{name, first_block, block_count, redundancy, kind, table_bytes}`
 **全部由宏派生**。消费方：
 
@@ -393,7 +394,7 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 - **Anchor 改为分页自包含格式**（2048 条 → 8 页/份，每页带 magic/sequence/chunk_index）。
 
 > **v0.61 起不再需要手动擦芯片**：块布局/记录格式的任何变更都通过
-> `FTL_MEDIA_LAYOUT_VERSION`（当前 **3U**，见 `include/ftl/ftl_config.h`）标记。开机
+> `FTL_MEDIA_LAYOUT_VERSION`（当前 **3U**，见 `include/ftl/metadata.h`）标记。开机
 > `checkpoint_find_latest` 校验版本，
 > **不符或介质上根本没有当前版本 Checkpoint ⇒ `ftl_media_format()` 自动全片格式化**
 > （擦前先读出厂坏块标记 ⇒ 保留），随后写当前版本标记。`bbt --erase` CLI 保留为手动兜底。
@@ -541,20 +542,20 @@ SRAM 缓存热点 region**。
 
 | 层 | 改动 | 文件 |
 |---|---|---|
-| **分区布局** | 分区宏/大小/偏移/公式集中一处（单一事实来源） | `include/ftl/ftl_config.h`、`src/ftl/ftl_config.c` |
-| **L2P 布局** | 打包公式（16 块，每块 128 region） | `ftl_config.h` §六、`l2p_cache.h` |
+| **分区布局** | 分区宏/大小/偏移/公式集中一处（单一事实来源） | `include/ftl/metadata.h`、`src/ftl/metadata.c` |
+| **L2P 布局** | 打包公式（16 块，每块 128 region） | `metadata.h`、`l2p_cache.h` |
 | **元数据** | Journal 2→4 块；Wear 块位预留（宏 + 表项 + 谓词） | `journal.h`/`journal.c`、`metadata.c` |
 | **元数据** | `ftl_is_metadata_block` 表驱动（消硬编码块号）；**v0.69 起带 plane 比较** | `src/ftl/metadata.c` |
-| **维度** | 布局维度无关化：删 `lun_stride`/`ANCHOR_BLOCK_STRIDE`/`*_PER_LUN`，各 die 同一份块号 | `ftl_config.h`、`ftl_config.c`、`metadata.c` |
+| **维度** | 布局维度无关化：删 `lun_stride`/`ANCHOR_BLOCK_STRIDE`/`*_PER_LUN`，各 die 同一份块号 | `metadata.h`、`metadata.c` |
 | **维度** | LBA 路由修正：`lba_route_*` 三维分解 + `lba_to_local` 按 region 反交织 | `include/ftl/l2p_cache.h` |
 | **元数据** | Directory 扩容 128→2048 entry；Anchor 改**分页自包含**（8 页/份 × 3 份 × 2 块） | `metadata.h`、`metadata.c` |
-| **磨损** | **Wear 表 load/save 落地**（P0-1）：块内页式追加日志 + 开机回填 BST + 节拍落盘 | `include/ftl/wear.h`、`src/ftl/wear.c`、`ftl_config.h` |
+| **磨损** | **Wear 表 load/save 落地**（P0-1）：块内页式追加日志 + 开机回填 BST + 节拍落盘 | `include/ftl/wear.h`、`src/ftl/wear.c`、`metadata.h` |
 
 ### ✅ 已落地（2026-10-13）— CW 级映射迁移（`ftl_optimization_plan.md §九` 波 2 序 2）
 
 | 层 | 改动 | 文件 |
 |---|---|---|
-| 地址辅助 | `ftl_lba_cw/plane/page/pair_base`、`pba_page`、`ftl_cw_span_mask`（§八 单一事实来源） | `include/ftl/ftl_config.h` §八 |
+| 地址辅助 | `ftl_lba_cw/plane/page/pair_base`、`pba_page`、`ftl_cw_span_mask`（§三 单一事实来源） | `include/ftl/ftl_config.h` §三 |
 | 请求层 | 缓冲步进 = `FTL_IU_BYTES`（512B/扇区）；`io.count` = 扇区数 | `src/controller/request.c`、`controller.c` |
 | FTL 写路径 | 1 子操作 → 逐 CW 一条 L2P entry + 一条 journal；`allocator_alloc_pair` 成对取页 | `src/ftl/ftl.c`（`ftl_issue_subop`/`ftl_confirm_write`） |
 | FTL 读路径 | 逐 LBA 查 L2P，按**物理 plane** 分组（同 plane 换页即收缩），pair 窗口内至多两 plane 段 | `src/ftl/ftl.c`（`ftl_issue_subop`） |
@@ -629,14 +630,14 @@ SRAM 缓存热点 region**。
      （此前 157.6KB 是表仍在独立全局时的值）；`l2p_live[]` 已在 v0.55/v0.60 的位图演进中删除。
    - ~~`docs/design/ftl_design.md`、`docs/design/ftl_api_usage.md` 仍写着旧布局标识符~~
      ✅ **已清理（2026-10-13）**：`L2P_REGIONS_TOTAL` / `L2P_REGIONS_PER_LUN` / `L2P_BLOCKS_PER_LUN`、
-     L2P 32 块、Journal 40/41 块、Directory 128 条 / 904B 均已对齐 `ftl_config.h` 现行常量
+     L2P 32 块、Journal 40/41 块、Directory 128 条 / 904B 均已对齐 `metadata.h` 现行常量
      （L2P 0-15 / Anchor 16-47 / CP 48-55 / BBT 56-57 / Journal 58-61 / Wear 62 / 用户 63+）。
 
 ## 十三、关键文件索引
 
 | 主题 | 文件 |
 |---|---|
-| **分区布局（单一事实来源）** | `include/ftl/ftl_config.h`、`src/ftl/ftl_config.c` |
+| **分区布局（单一事实来源）** | `include/ftl/metadata.h`、`src/ftl/metadata.c` |
 | L2P 映射 / cache / **路由** | `include/ftl/l2p_cache.h` |
 | 元数据 / Directory / Anchor | `include/ftl/metadata.h`、`src/ftl/metadata.c` |
 | BST / 有效位 | `include/ftl/bst.h` |

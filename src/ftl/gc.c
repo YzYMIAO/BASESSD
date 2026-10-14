@@ -476,7 +476,7 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
  *       v0.66 页打包写缓冲消除，见 ftl_optimization_plan.md §8.1 P2-6）。
  *     · 逐**页索引**成对分配目标页：一个 plane 的有效 CW 必须落到**同 plane** 的目标页，
  *       否则页内 META（由物理 plane/cw 铸出）还原出的扇区 LBA 会指错 plane
- *       （见 ftl_config.h §八）。只搬有效 CW（本页局部 `cw_bitmap` 外的 CW 不建链、不编程）。
+ *       （见 ftl_config.h §三）。只搬有效 CW（本页局部 `cw_bitmap` 外的 CW 不建链、不编程）。
  *     · 搬移读顺带记录 ECC 趋势 + read_count（慢死预测闭环）；
  *       搬完先 journal_flush_page 再返回（调用方随后擦 victim，防掉电回放指向已擦块）。
  * -------------------------------------------------------------------- */

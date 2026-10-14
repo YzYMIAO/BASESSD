@@ -521,7 +521,7 @@ l2p_cache_find_or_load(region_id):
 
 ```c
 #define JOURNAL_BLOCK_COUNT       (CW_NUM)  // 环形 4 blocks（= CW_NUM）
-#define JOURNAL_BLOCK0            (58)      // J0 起始 Block（块 58-61，见 ftl_config.h）
+#define JOURNAL_BLOCK0            (58)      // J0 起始 Block（块 58-61，见 metadata.h）
 #define JOURNAL_PAGE_SIZE         (PAGE_MAIN_SIZE)  // = 2048
 #define JOURNAL_ENTRIES_PER_PAGE  ((JOURNAL_PAGE_SIZE - JOURNAL_HEADER_SIZE) / 16)  // 推导 = 127
 #define JOURNAL_HEADER_SIZE       (12)      // Header 大小
@@ -873,14 +873,14 @@ void ftl_service(ftl_context_t *ftl) {
 include/ftl/
 ├── ftl.h                        # FTL 对外 API + ftl_context_t
 ├── ftl_type.h                   # lba_t / pba_t 基础类型
-├── ftl_config.h                 # ★ 分区布局/地址辅助宏（单一事实来源）+ FTL_MEDIA_LAYOUT_VERSION
+├── ftl_config.h                 # 几何推导（§一）+ CW/LBA 地址编码（§三）
 ├── ftl_fc_interface.h           # PBA helper + 同步 NAND 操作
 ├── bst.h                        # Block State Table（ftl_block_t[4096]，20B/项）
 ├── l2p_cache.h                  # L2P Cache + CLOCK 替换 + thrashing 检测
 ├── allocator.h                  # Allocator + Super Block + OP/Spare 池
 ├── journal.h                    # Journal + 四层保护
 ├── gc.h                         # GC 搬移 + 触发条件
-├── metadata.h                   # Metadata Directory + Anchor 池
+├── metadata.h                   # ★ 固定元数据区布局（单一事实来源）+ FTL_MEDIA_LAYOUT_VERSION + Metadata Directory
 ├── pending.h                    # Pending Request 表 + 完成组表
 ├── completion_table.h           # 统一完成路由表
 ├── checkpoint.h                 # Checkpoint + Journal 截断协同
@@ -893,13 +893,12 @@ include/ftl/
 src/ftl/
 ├── makefile.mk                  # 通配符自动发现
 ├── ftl.c                        # FTL 对外 API + ftl_service 三级模式
-├── ftl_config.c                 # g_ftl_partitions[] 运行期分区表
 ├── ftl_fc_interface.c           # PBA helper + 同步 NAND 操作实现
 ├── l2p_cache.c                  # CLOCK evict + Region load/flush + thrashing
 ├── allocator.c                  # Free Pool + OP/Spare + 磨损均衡
 ├── journal.c                    # append/flush_page/replay/truncate
 ├── gc.c                         # gc_read_page_with_lba + 7 步搬移
-├── metadata.c                   # Directory init/lookup/update/flush/load
+├── metadata.c                   # Directory init/lookup/update/flush/load + g_ftl_partitions[] 分区表
 ├── pending.c                    # Pending 表 + 组 add/lookup/remove
 ├── completion_table.c           # 统一完成泵
 ├── checkpoint.c                 # 全量 Checkpoint + 三级触发

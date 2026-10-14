@@ -12,7 +12,7 @@
  *
  * Store: 固定元数据区的 Checkpoint 池（`CHECKPOINT_POOL_BLOCKS` 块轮转，
  * **一条 record = 1 页**，块满换池内下一块并先擦）。池首块/块数由
- * ftl/ftl_config.h 按几何推导，见 §二/§三。
+ * ftl/metadata.h 按几何推导（「固定元数据区布局」）。
  *
  * 写模型与 Anchor / BBT 一致（见 ftl/metadata.h §元数据写模型）：
  * 只追加到擦除过的页 + 每条 record 带单调 sequence + 池内轮转 + 最新有效胜。
@@ -21,9 +21,9 @@
  */
 
 #include "ftl/allocator.h"
-#include "ftl/ftl_config.h" /* CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS */
 #include "ftl/journal.h"
 #include "ftl/l2p_cache.h"
+#include "ftl/metadata.h" /* CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS */
 
 #include <stdint.h>
 
@@ -45,7 +45,7 @@ typedef struct
 } l2p_cp_state_t;
 
 /* ── Checkpoint 池位置与块数（CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS）
- *    见 ftl/ftl_config.h ── */
+ *    见 ftl/metadata.h「固定元数据区布局」── */
 
 /* ── Header Magic ── */
 #define CHECKPOINT_MAGIC (0xCCCCCCCCUL)
