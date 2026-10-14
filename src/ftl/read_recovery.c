@@ -219,7 +219,7 @@ static int rr_neighbor_assist(uint8_t ch, uint8_t ce, nand_pba_t pba, void *buff
         uint8_t    neighbor_buf[FC_BUFFER_USER_SIZE * CW_NUM];
         int        ret;
 
-        /* lun 恒 0（与旧 paa_from_addr 路径一致；LUN_NUM = 1），page/cw 由形参给。 */
+        /* lun 恒 0（LUN_NUM = 1），page/cw 由形参给。 */
         neighbor_addr = pba_make(ch, ce, 0U, block, plane, neighbors[i], 0U);
 
         memset(neighbor_buf, 0, sizeof(neighbor_buf));

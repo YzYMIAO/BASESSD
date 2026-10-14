@@ -9,7 +9,7 @@
  *
  * 地址体系：
  *   lba_t → region_id (lba / 512) + entry_idx (lba % 512)
- *   entry = nand_pba_t（含 CH/CE 拓扑 + PAA 芯片内地址）
+ *   entry = nand_pba_t（FTL 物理地址：CH/CE/LUN 拓扑 + 块/页/plane/CW）
  *   FTL_PBA_INVALID = 0xFFFFFFFF（未映射的 LBA）
  *
  * 替换策略：CLOCK（近似 LRU，O(1) amortized）

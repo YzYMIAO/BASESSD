@@ -253,7 +253,7 @@ _Static_assert((BLOCKS_PER_PLANE % BBT_MAP_COLS_PER_PLANE) == 0U, "每 plane 块
  *    ⚠ 擦除**不能**因为 ① 命中就跳过——见下方函数体内的说明。
  *
  * 列 2048 只能靠 OP_READ_COLUMN（列地址走命令 param）够到：OP_READ_META 的列 =
- * paa_to_cw × CW_SIZE，cw ∈ {0,1,2,3} ⇒ 列只能是 {0, 528, 1056, 1584}。
+ * cw × CW_SIZE（cw 取自 PBA 的 cw 字段），cw ∈ {0,1,2,3} ⇒ 列只能是 {0, 528, 1056, 1584}。
  * 4 字节 = spare[0..3]（2 字节坏块信息 + 2 字节 user metadata II），标记看 [0]。
  *
  * 调用者：bbt_scan_factory（出厂扫描，do_erase=0）/ bbt_print_bad_map（诊断，按 CLI）/

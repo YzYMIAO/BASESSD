@@ -13,7 +13,7 @@
  *   6. 跳过坏块，通过 Spare Pool 保水位
  *
  * 地址体系：
- *   allocator_alloc_pair() 返回 nand_pba_t（含 CH/CE 拓扑 + PAA 芯片内地址）。
+ *   allocator_alloc_pair() 返回 nand_pba_t（FTL 物理地址：CH/CE/LUN 拓扑 + 块/页/plane/CW）。
  *   PBA 的 page 字段由 allocator 管理，block/plane 从 Free Pool 分配。
  */
 

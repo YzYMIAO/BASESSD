@@ -12,7 +12,7 @@
  *
  * 索引语义：
  *   按「全局物理 Block 号」索引，gblock = plane * BLOCKS_PER_PLANE + block
- *   （0 .. FTL_BLOCK_TOTAL-1）。PBA/PAA 的 block 字段是 per-plane 号，
+ *   （0 .. FTL_BLOCK_TOTAL-1）。PBA 的 block 字段是 per-plane 号，
  *   通过 ftl_pba_gblock 统一转换为全局号——
  *   避免 plane1 与 plane0 的 block 号碰撞（历史 bug）。
  *

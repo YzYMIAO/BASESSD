@@ -349,22 +349,16 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
             /* ② 预载 bitmap 区（仅 CLEAN/INVALID 行；DIRTY 已在上方跳过） */
             if (line->state != L2P_CACHE_CLEAN)
             {
-                nand_paa_t region_paa = NAND_PBA_INVALID;
-                nand_pba_t region_addr;
+                nand_pba_t region_addr = NAND_PBA_INVALID;
 
                 if (ftl->cache.md_dir != NULL)
                 {
-                    region_paa = metadata_dir_lookup(ftl->cache.md_dir,
-                                                     METADATA_TYPE_L2P_REGION,
-                                                     line->region_id);
+                    region_addr = metadata_dir_lookup(ftl->cache.md_dir,
+                                                      METADATA_TYPE_L2P_REGION,
+                                                      line->region_id);
                 }
 
-                if (region_paa != NAND_PBA_INVALID)
-                {
-                    /* 桥接：Directory 此刻仍存 PAA（提交 B 改存 PBA 后本行消失） */
-                    region_addr = paa_to_pba(ftl->cache.ch, ftl->cache.ce, region_paa);
-                }
-                else
+                if (region_addr == NAND_PBA_INVALID)
                 {
                     region_addr = l2p_region_pba(ftl->cache.ch, ftl->cache.ce, ftl->cache.lun, line->region_id);
                 }

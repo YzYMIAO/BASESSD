@@ -38,7 +38,7 @@
 #include "ftl/allocator.h"
 #include "ftl/ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / FTL_SLOTS_PER_BLOCK / L2P_REGIONS_PER_INSTANCE）*/
 #include "ftl/ftl_type.h"
-#include "nand/nand_config.h" /* PAGE_MAIN_SIZE（Anchor 页打包自检）、paa_*（Directory 暂存 PAA）*/
+#include "nand/nand_config.h" /* PAGE_MAIN_SIZE（Anchor 页打包自检）*/
 
 #include <stdint.h>
 
@@ -176,8 +176,11 @@
  *        全部删除（Checkpoint/Anchor/BBT/Wear 四结构体尺寸随之变化）⇒ 版本 +1。
  * v0.65：Wear 条目加 rr 健康字段（last_ecc / rising_count / health，8B → 12B）⇒ 版本 +1。
  *        老格式的 Wear 页 magic 仍匹配、条目布局却不同 ⇒ 必须靠版本拦下（否则会把
- *        计数读成垃圾）。 */
-#define FTL_MEDIA_LAYOUT_VERSION (3U)
+ *        计数读成垃圾）。
+ * v0.73：Directory 条目（metadata_entry_t）的 4 字节位置字段由 PAA 改存 PBA —— 字节数不变
+ *        （两者都是 uint32_t），但**字节语义变了**（位序重排）⇒ 必须 +1，否则老介质上读回
+ *        的 PAA 会被当成 PBA 解出错误的块/页。 */
+#define FTL_MEDIA_LAYOUT_VERSION (4U)
 
 /* ── 逻辑表字节（公式①：覆盖实体数 × 每实体字节）── */
 
@@ -304,7 +307,7 @@ typedef struct
 {
     uint8_t    type;                        /* METADATA_TYPE_* */
     uint16_t   id;                          /* L2P region_id / 0 for others */
-    nand_paa_t paa;                         /* 物理 NAND 位置 */
+    nand_pba_t pba;                         /* 物理位置（PBA，自带 CH/CE ⇒ 不依赖"本实例元数据必在本实例 ch/ce"假设）*/
 } __attribute__((packed)) metadata_entry_t; /* 7 bytes */
 
 /* ── NAND 上持久化格式：**每页自包含** ──
@@ -513,9 +516,9 @@ void metadata_dir_init(metadata_dir_cache_t *dir);
  * @param dir  Directory cache
  * @param type 元数据类型
  * @param id   L2P region_id / 0 for others
- * @return PAA，0xFFFFFFFF 表示未找到
+ * @return PBA，NAND_PBA_INVALID 表示未找到
  */
-nand_paa_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
+nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
                                uint8_t                     type,
                                uint16_t                    id);
 
@@ -525,12 +528,12 @@ nand_paa_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
  * @param dir    Directory cache
  * @param type   元数据类型
  * @param id     L2P region_id / 0 for others
- * @param new_paa 新物理位置
+ * @param new_pba 新物理位置（PBA）
  */
 void metadata_dir_update(metadata_dir_cache_t *dir,
                          uint8_t               type,
                          uint16_t              id,
-                         nand_paa_t            new_paa);
+                         nand_pba_t            new_pba);
 
 /*
  * metadata_dir_append_slot - 取当前日志块的下一个空槽（L2P region 的写点）
@@ -543,31 +546,31 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
  * 已擦除，故无需擦）。**绝不回退到固定位置**：分配失败返回 FTL_ERROR，由上层重试。
  *
  * 日志块在哪个 plane 由 dir->cur_metadata_plane 轮转决定（写入目标与 region 归属
- * 无关：位置由 paa 自身携带，读回一律经 Directory 查 paa）。
+ * 无关：位置由 pba 自身携带，读回一律经 Directory 查 pba）。
  *
  * @param dir    Directory cache
  * @param alloc  Allocator（取 Free Pool 块）
- * @return 写点 PAA；失败返回 NAND_PBA_INVALID
+ * @return 写点 PBA；失败返回 NAND_PBA_INVALID
  */
-nand_paa_t metadata_dir_append_slot(metadata_dir_cache_t *dir,
+nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir,
                                     ftl_allocator_t      *alloc);
 
 /*
  * metadata_dir_commit_region - 写成功后登记 region 的新位置
  *
- * 更新 entries[region_id].paa + l2p_live（旧日志块 -1、新日志块 +1）+ dirty +
+ * 更新 entries[region_id].pba + l2p_live（旧日志块 -1、新日志块 +1）+ dirty +
  * have_dynamic。旧块活计数归零且非当前块 ⇒ 立即回收（擦除 + 归还 Free Pool），
  * 把「已无引用却仍带旧内容」的窗口压到最短。
  *
  * @param dir       Directory cache
  * @param alloc     Allocator（回收时需要；可为 NULL = 只登记不回收）
  * @param region_id L2P region_id
- * @param new_paa   刚写成功的位置
+ * @param new_pba   刚写成功的位置（PBA）
  */
 void metadata_dir_commit_region(metadata_dir_cache_t *dir,
                                 ftl_allocator_t      *alloc,
                                 uint16_t              region_id,
-                                nand_paa_t            new_paa);
+                                nand_pba_t            new_pba);
 
 /*
  * metadata_dir_reclaim - 回收无活 region 的 L2P 日志块

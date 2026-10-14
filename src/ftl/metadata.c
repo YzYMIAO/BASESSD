@@ -425,7 +425,7 @@ static void metadata_dir_fill_fixed(metadata_dir_cache_t *dir)
 
         dir->entries[dir->count].type = METADATA_TYPE_L2P_REGION;
         dir->entries[dir->count].id   = i;
-        dir->entries[dir->count].paa  = paa_from_addr(&(nand_addr_t){.lun = dir->topo.lun, .block = block, .plane = plane, .page = page});
+        dir->entries[dir->count].pba  = pba_make(dir->topo.ch, dir->topo.ce, dir->topo.lun, block, plane, page, 0U);
         dir->count++;
     }
 }
@@ -448,13 +448,13 @@ static void metadata_dir_rebuild_live(metadata_dir_cache_t *dir)
             continue;
         }
 
-        block = (uint16_t)paa_to_block(dir->entries[i].paa);
+        block = (uint16_t)pba_to_block(dir->entries[i].pba);
         if (block < FTL_METADATA_BLOCK_END)
         {
             continue; /* 固定层（哨兵）不是日志块 */
         }
 
-        g = ftl_gblock((uint8_t)paa_to_plane(dir->entries[i].paa), block);
+        g = ftl_gblock((uint8_t)pba_to_plane(dir->entries[i].pba), block);
         if (g < FTL_BLOCK_TOTAL)
         {
             dir->l2p_live[g]++;
@@ -534,7 +534,7 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
 }
 
 /* metadata_dir_lookup — 线性查 (type,id) 的登记位置；未找到返回 NAND_PBA_INVALID */
-nand_paa_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
+nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
                                uint8_t                     type,
                                uint16_t                    id)
 {
@@ -549,7 +549,7 @@ nand_paa_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
     {
         if ((dir->entries[i].type == type) && (dir->entries[i].id == id))
         {
-            return dir->entries[i].paa;
+            return dir->entries[i].pba;
         }
     }
 
@@ -559,7 +559,7 @@ nand_paa_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
 /* --------------------------------------------------------------------
  * metadata_dir_update
  *   功能：更新 (type,id) 的登记位置；已有则覆盖，无则尾部追加；置 dirty 并计数。
- *   参数：dir —— Directory；type/id —— 元数据标识；new_paa —— 新位置。
+ *   参数：dir —— Directory；type/id —— 元数据标识；new_pba —— 新位置。
  *   返回：无。
  *   实现要点：容量满时**不追加**（静默返回）。对本项目的 L2P_REGION 不可达
  *             （容量 == region 数，全部在 fill_fixed 已登记）——见函数内长注释。
@@ -567,7 +567,7 @@ nand_paa_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
 void metadata_dir_update(metadata_dir_cache_t *dir,
                          uint8_t               type,
                          uint16_t              id,
-                         nand_paa_t            new_paa)
+                         nand_pba_t            new_pba)
 {
     uint16_t i;
 
@@ -581,7 +581,7 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
     {
         if ((dir->entries[i].type == type) && (dir->entries[i].id == id))
         {
-            dir->entries[i].paa = new_paa;
+            dir->entries[i].pba = new_pba;
             dir->dirty          = 1U;
             dir->change_count++;
             return;
@@ -593,7 +593,7 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
     {
         dir->entries[dir->count].type = type;
         dir->entries[dir->count].id   = id;
-        dir->entries[dir->count].paa  = new_paa;
+        dir->entries[dir->count].pba  = new_pba;
         dir->count++;
         dir->dirty = 1U;
         dir->change_count++;
@@ -777,9 +777,8 @@ ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *al
 
     for (region_id = 0U; region_id < METADATA_DIR_ENTRIES; region_id++)
     {
-        nand_paa_t old;
-        nand_paa_t slot;
-        nand_pba_t src;
+        nand_pba_t old;
+        nand_pba_t slot;
         uint8_t    buf[L2P_REGION_SIZE]; /* 2KB 栈缓冲：region 页就是裸 entries 数组 */
 
         old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, region_id);
@@ -787,14 +786,12 @@ ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *al
         {
             continue;
         }
-        if (ftl_gblock((uint8_t)paa_to_plane(old), (uint16_t)paa_to_block(old)) != victim)
+        if (ftl_pba_gblock(old) != victim)
         {
             continue; /* 该 region 的最新位置不在 victim 上 */
         }
 
-        /* 桥接：Directory 此刻仍存 PAA（提交 B 后本行消失） */
-        src = paa_to_pba(dir->topo.ch, dir->topo.ce, old);
-        if (ftl_sync_read_page(src, buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
+        if (ftl_sync_read_page(old, buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
         {
             st = FTL_ERROR; /* 读不回：该 region 仍指向 victim 旧页，victim 不擦 ⇒ 无损失 */
             break;
@@ -807,7 +804,7 @@ ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *al
             break;
         }
 
-        if (ftl_sync_write_page(paa_to_pba(dir->topo.ch, dir->topo.ce, slot), buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
+        if (ftl_sync_write_page(slot, buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
         {
             st = FTL_ERROR; /* 槽已消耗（可能半编程），不登记 ⇒ region 仍指向 victim */
             break;
@@ -834,14 +831,14 @@ ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *al
  * metadata_dir_append_slot
  *   功能：返回 L2P 日志块的"下一个空槽"物理位置，并推进写指针。
  *   参数：dir —— Directory；alloc —— 分配器（取新块）。
- *   返回：nand_paa_t 槽位置；NAND_PBA_INVALID 参数非法 / 两 plane Free Pool 皆空。
+ *   返回：nand_pba_t 槽位置；NAND_PBA_INVALID 参数非法 / 两 plane Free Pool 皆空。
  *   实现要点：当前块无效或写满 ⇒ 先回收无活 region 的日志块，再取新块（plane 轮转，
  *             本 plane 空则换另一 plane；**两 plane 都空绝不回退固定位置**）；
  *             取到位置后**立即推进** cur_metadata_page（写失败页可能半编程不可复用）。
  *             ⚠ 换块后若 Free Pool 吃紧，顺带做一次抗碎片压缩（P0-3，见 metadata_dir_compact）
  *             ——新块整块空槽，是唯一能一次搬空任意 victim 的时机。
  * -------------------------------------------------------------------- */
-nand_paa_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
+nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 {
     uint16_t plane;
     uint16_t block;
@@ -869,7 +866,7 @@ nand_paa_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
         (void)metadata_dir_reclaim(dir, alloc);
 
         /* plane 轮转：Policy B 下两 plane 各自独立选块，拿不到"同号双 plane 都空闲"
-         * 的保证，故不跨 plane 配对；日志页落在哪个 plane 对读取无影响（位置由 paa 携带）*/
+         * 的保证，故不跨 plane 配对；日志页落在哪个 plane 对读取无影响（位置由 pba 携带）*/
         plane = dir->cur_metadata_plane;
         if (allocator_alloc_reserved_block(alloc, plane, &gblock) != FTL_OK)
         {
@@ -908,13 +905,13 @@ nand_paa_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
     /* 立即推进：写失败时该页可能已半编程，不可复用（槽被跳过，块内浪费一页）*/
     dir->cur_metadata_page++;
 
-    return paa_from_addr(&(nand_addr_t){.lun = dir->topo.lun, .block = block, .plane = plane, .page = page});
+    return pba_make(dir->topo.ch, dir->topo.ce, dir->topo.lun, block, plane, page, 0U);
 }
 
 /* --------------------------------------------------------------------
  * metadata_dir_commit_region
  *   功能：登记 region 的新位置——旧位置活计数 -1、新位置 +1、更新 entries；旧块归零即回收。
- *   参数：dir —— Directory；alloc —— 分配器；region_id —— region 号；new_paa —— 新位置。
+ *   参数：dir —— Directory；alloc —— 分配器；region_id —— region 号；new_pba —— 新位置。
  *   返回：无（参数非法直接返回）。
  *   实现要点：只对**日志块**位置（block ≥ FTL_METADATA_BLOCK_END）增减活计数——固定
  *             哨兵层不计。旧块归零且非当前块 ⇒ **立即**回收，把"已无引用却带旧内容"
@@ -923,21 +920,21 @@ nand_paa_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
 void metadata_dir_commit_region(metadata_dir_cache_t *dir,
                                 ftl_allocator_t      *alloc,
                                 uint16_t              region_id,
-                                nand_paa_t            new_paa)
+                                nand_pba_t            new_pba)
 {
-    nand_paa_t old;
+    nand_pba_t old;
     uint16_t   old_g = UINT16_MAX;
 
-    if ((dir == NULL) || (region_id >= METADATA_DIR_ENTRIES) || (new_paa == NAND_PBA_INVALID))
+    if ((dir == NULL) || (region_id >= METADATA_DIR_ENTRIES) || (new_pba == NAND_PBA_INVALID))
     {
         return;
     }
 
     /* 旧位置的活计数 -1（仅当日志块）*/
     old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, region_id);
-    if ((old != NAND_PBA_INVALID) && (paa_to_block(old) >= FTL_METADATA_BLOCK_END))
+    if ((old != NAND_PBA_INVALID) && (pba_to_block(old) >= FTL_METADATA_BLOCK_END))
     {
-        uint16_t g = ftl_gblock((uint8_t)paa_to_plane(old), (uint16_t)paa_to_block(old));
+        uint16_t g = ftl_pba_gblock(old);
 
         if ((g < FTL_BLOCK_TOTAL) && (dir->l2p_live[g] > 0U))
         {
@@ -948,7 +945,7 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
 
     /* 新位置的活计数 +1 */
     {
-        uint16_t g = ftl_gblock((uint8_t)paa_to_plane(new_paa), (uint16_t)paa_to_block(new_paa));
+        uint16_t g = ftl_pba_gblock(new_pba);
 
         if (g < FTL_BLOCK_TOTAL)
         {
@@ -956,7 +953,7 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
         }
     }
 
-    metadata_dir_update(dir, METADATA_TYPE_L2P_REGION, region_id, new_paa);
+    metadata_dir_update(dir, METADATA_TYPE_L2P_REGION, region_id, new_pba);
     dir->have_dynamic = 1U;
 
     /* 旧块活计数归零且非当前块 ⇒ 立即回收，把「已无引用却仍带旧内容」的窗口压到最短
@@ -1074,7 +1071,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
             {
                 page.entries[k].type = 0U;
                 page.entries[k].id   = 0U;
-                page.entries[k].paa  = NAND_PBA_INVALID;
+                page.entries[k].pba  = NAND_PBA_INVALID;
             }
         }
 
@@ -1301,8 +1298,8 @@ int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, uin
         for (i = 0U; i < md_dir->count; i++)
         {
             if ((md_dir->entries[i].type == METADATA_TYPE_L2P_REGION) &&
-                ((uint8_t)paa_to_plane(md_dir->entries[i].paa) == plane) &&
-                (paa_to_block(md_dir->entries[i].paa) == block))
+                ((uint8_t)pba_to_plane(md_dir->entries[i].pba) == plane) &&
+                (pba_to_block(md_dir->entries[i].pba) == block))
             {
                 return 1;
             }

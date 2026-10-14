@@ -284,22 +284,16 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
      * Random DISABLED / CRC ENABLED（v0.62）：Region 数据不加扰，但经 FC per-CW CRC + ECC 保护。
      */
     {
-        nand_paa_t region_paa = NAND_PBA_INVALID;
-        nand_pba_t region_addr;
+        nand_pba_t region_addr = NAND_PBA_INVALID;
 
         if (cache->md_dir != NULL)
         {
-            region_paa = metadata_dir_lookup(cache->md_dir,
-                                             METADATA_TYPE_L2P_REGION,
-                                             region_id);
+            region_addr = metadata_dir_lookup(cache->md_dir,
+                                              METADATA_TYPE_L2P_REGION,
+                                              region_id);
         }
 
-        if (region_paa != NAND_PBA_INVALID)
-        {
-            /* 通过 Directory 查到位置（桥接：Directory 此刻仍存 PAA，提交 B 后本行消失） */
-            region_addr = paa_to_pba(cache->ch, cache->ce, region_paa);
-        }
-        else
+        if (region_addr == NAND_PBA_INVALID)
         {
             /* 回退固定位置（ch/ce/lun 取本 cache 拓扑） */
             region_addr = l2p_region_pba(cache->ch, cache->ce, cache->lun, region_id);
@@ -389,7 +383,6 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
     l2p_cache_line_t *line;
     nand_pba_t        region_addr;
     int               ret;
-    nand_paa_t        region_paa = NAND_PBA_INVALID;
 
     if ((cache == NULL) || (line_idx < 0) || (line_idx >= (int)L2P_CACHE_SIZE))
     {
@@ -423,15 +416,12 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
         return FTL_ERROR; /* 无 Directory/Allocator ⇒ 无法持久化，不猜位置 */
     }
 
-    region_paa = metadata_dir_append_slot(cache->md_dir, cache->alloc);
-    if (region_paa == NAND_PBA_INVALID)
+    region_addr = metadata_dir_append_slot(cache->md_dir, cache->alloc);
+    if (region_addr == NAND_PBA_INVALID)
     {
         line->state = L2P_CACHE_DIRTY; /* 上层重试 / 紧急 GC 后再来 */
         return FTL_ERROR;
     }
-
-    /* 桥接：Directory 此刻仍存 PAA（提交 B 后本行消失） */
-    region_addr = paa_to_pba(cache->ch, cache->ce, region_paa);
 
     /*
      * 同步写 Region 到 NAND L2P 日志块。
@@ -442,7 +432,7 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
     if (ret == 0)
     {
         /* 落盘成功才登记新位置（顺序不可倒：先写后记账，掉电最多多留一份旧记录）*/
-        metadata_dir_commit_region(cache->md_dir, cache->alloc, line->region_id, region_paa);
+        metadata_dir_commit_region(cache->md_dir, cache->alloc, line->region_id, region_addr);
 
         line->state = L2P_CACHE_CLEAN;
 
