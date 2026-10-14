@@ -587,7 +587,9 @@ l2p_cache_read()       → 11 个调用点全部按三态改写（host 读下发
 l2p_cache_write()      → 写确认 / 搬移 WRITE_SETTLE / journal_replay（F10：回放写 cache）
 l2p_cache_flush_kick   → l2p_cache_evict_one（CLOCK 驱逐脏行时）、l2p_flush_kick
 l2p_cache_flush_all_sync → ftl_flush（HIL `fl`，显式持久化请求）
-l2p_cache_flush_one_sync → checkpoint_create（Header 落盘前保证 region 已持久）
+l2p_cache_flush_one_sync → 仅 l2p_cache_flush_all_sync（v0.75 阶段 6 起**不再**由 Checkpoint 调）
+                          （CP job 的 CP_FLUSH_REGIONS 改用 l2p_cache_flush_kick：Header 落盘前
+                           保证 region 已持久，且不阻塞完成泵）
 ```
 
 ### 2.4 Region 加载流程（v0.75 阶段 5 起**异步**）
@@ -923,6 +925,8 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     ⚠ `bg_suspend` 置位（`bbt --erase` 后）⇒ 整体跳过 Phase 3，直接 return。
     ⚠ v0.75 阶段 3/4 起：rr_kick() / mig_service() **任何档位都要跑**——RR 的 host 读
       在等结果，搬移 job 可能是在 BUSY 档被写路径紧急 GC 起的，不占后台带宽预算。
+    ⚠ v0.75 阶段 6 起：checkpoint_kick() 在**三档之外**先跑一次（Phase 3 首）——CP job
+      可能在 BUSY 档被紧急水位起，后续阶段要跨档位走完；只在起它的那一档推进会把 job 钉死。
     ├── IDLE 模式 (inflight == 0):               全力后台
     │   ├── rr_kick() / mig_service()     ← 推进在飞的 RR / 搬移 job
     │   ├── l2p_flush_kick(L2P_CACHE_SIZE)  ← v0.75 阶段 5：起**异步**写回（非同步循环）
@@ -930,17 +934,17 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     │   ├── mig_begin_wl()                ← 磨损均衡（触发判定在函数内）
     │   ├── mig_begin_predict()           ← 慢死预测巡检（节流 1s）
     │   ├── journal_kick() / bbt_flush() / wear_flush()
-    │   └── checkpoint_create() (按需)
+    │   └── checkpoint_begin() (按需；此后每轮 checkpoint_kick 跨档位推进)
     │
     ├── NORMAL 模式 (pending ≤ MAX/2 且无排队组):  适度后台
     │   ├── l2p_flush_kick(BG_NORMAL_FLUSH_COUNT=4)（thrashing 降级时跳过）
     │   ├── GC：ftl_gc_evaluate 命中 ⇒ mig_begin_gc() 起一个 SB 的 job（同一求值点）
     │   ├── mig_begin_wl()
-    │   └── checkpoint_create() (按需)
+    │   └── checkpoint_begin() (按需；此后每轮 checkpoint_kick 跨档位推进)
     │
     └── BUSY 模式 (pending > MAX/2 或 queued != 0):  最小后台（host 饿着，让路）
         ├── l2p_flush_kick(1)
-        └── checkpoint_create() (仅 emergency≥95%)
+        └── checkpoint_begin() (仅 emergency≥95%；起 job 即返回)
 ```
 
 > ⚠ **Phase 2.5 的开头是 `ftl_confirm_kick()`**（v0.75 阶段 5）——推进**停泊**的写确认，

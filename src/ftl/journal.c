@@ -892,55 +892,117 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
  * ══════════════════════════════════════════════════════════ */
 
 /* --------------------------------------------------------------------
- * journal_truncate
- *   功能：丢弃 ≤ up_to_sequence 的条目（Checkpoint 已把它们写进 NAND L2P 表）。
- *   参数：journal —— Journal；up_to_sequence —— 截断水位（调用者传 sequence_counter）。
- *   返回：无。
+ * journal_truncate_plan
+ *   功能：截断 Journal 的第一步——水位校验 + 算出待预擦的环形块（纯 RAM，不动介质）。
+ *   参数：journal —— Journal；up_to_sequence —— 截断水位（CP 时刻的 sequence_counter）；
+ *         out_addr / out_block —— 出参：待预擦块的基地址 / 块号。
+ *   返回：1 = 需擦 *out_addr；0 = 无需擦（水位 OK，该块已预擦过）；
+ *         -1 = 不截断（水位不满足 / 参数非法）——**调用者不得据此复位水位标志**。
  *   实现要点：
  *     ① 水位校验：若水位不足以覆盖全部已写条目，**不截断**（最旧块可能仍持有回放
  *        需要的条目，擦掉即丢数据）；sequence_counter == 0 一并挡掉避免下溢。
- *     ② 预擦除环形最旧块（= 环形下一块）并记账 pre_erased_block，使 journal_flush_page
- *        回切到它时跳过擦除——保证同一块每圈只擦一次（旧实现两处各擦一次 = 双倍磨损）。
- *     ③ 复位水位标志（emergency / checkpoint_needed）。
+ *     ② 待擦块 = 环形下一块；已预擦过（pre_erased_block）⇒ 无需重擦。
  * -------------------------------------------------------------------- */
-void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
+int journal_truncate_plan(l2p_journal_t *journal, uint32_t up_to_sequence, nand_pba_t *out_addr, uint8_t *out_block)
 {
     uint8_t next;
 
+    if ((journal == NULL) || (out_addr == NULL) || (out_block == NULL))
+    {
+        return -1;
+    }
+
+    /*
+     * ① 水位校验（P1-6：up_to_sequence 不再是死形参）。
+     * 调用者传的是 CP **起点**的 sequence_counter（下一个待分配序号）。若水位**不足以**
+     * 覆盖全部已写条目（CP 期间 journal 又前进了 ≥2 条），说明有未 checkpoint 的条目，
+     * 而环形里最旧的一块可能仍持有回放需要的条目 ⇒ **不截断**。
+     * （sequence_counter == 0 理论上不会出现；一并挡掉，避免 -1 下溢误判。）
+     * ⚠ 异步 CP 把快照点从"CP 末尾"提前到"CP 起点"（见 checkpoint.c 的掉电安全论证），
+     *   故水位判据比同步实现**更容易不满足**——即更少预擦。这是安全方向的取舍：
+     *   预擦只是磨损优化，跳过它只是让 journal_flush_page 自己擦（每块每圈仍只擦一次）。
+     */
+    if ((journal->sequence_counter == 0U) || ((up_to_sequence + 1U) < journal->sequence_counter))
+    {
+        return -1;
+    }
+
+    /* ② 待预擦块 = 环形下一块。该块整块的条目都 ≤ up_to_sequence（checkpoint 已把它们
+     * 写进 NAND L2P 表），擦掉即完成截断。重复调用（两次 checkpoint 之间无写入）
+     * 时 next == pre_erased_block ⇒ 跳过重擦。 */
+    next = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
+    if (next == journal->pre_erased_block)
+    {
+        return 0;
+    }
+
+    *out_addr  = journal_block_addr(journal, next);
+    *out_block = next;
+    return 1;
+}
+
+/* --------------------------------------------------------------------
+ * journal_truncate_commit
+ *   功能：截断 Journal 的第二步——擦除完成后记账 + 复位水位标志。
+ *   参数：journal —— Journal；erased_block —— 刚擦成功的环形块号，
+ *         JOURNAL_BLOCK_NONE = 本次未擦（只复位水位标志）。
+ *   返回：无。
+ * -------------------------------------------------------------------- */
+void journal_truncate_commit(l2p_journal_t *journal, uint8_t erased_block)
+{
     if (journal == NULL)
     {
         return;
     }
 
-    /*
-     * ① 水位校验（P1-6：up_to_sequence 不再是死形参）。
-     * 调用者是 checkpoint_create，传的正是 sequence_counter（下一个待分配序号）⇒
-     * 全部已写条目 seq < up_to_sequence。若水位**不足以**覆盖全部已写条目，说明有
-     * 未 checkpoint 的条目，而环形里最旧的一块可能仍持有回放需要的条目 ⇒ **不截断**。
-     * （sequence_counter == 0 理论上不会出现；一并挡掉，避免 -1 下溢误判。）
-     */
-    if ((journal->sequence_counter == 0U) || ((up_to_sequence + 1U) < journal->sequence_counter))
+    /* 记账：journal_flush_page 回切到该块时跳过擦除——旧实现在此处与 flush_page 各擦
+     * 一次 = **同一块每圈擦两次**，是 Journal 磨损（§14.1 的寿命瓶颈）中凭空多出的
+     * ~25%。
+     * ⚠ 本次未擦（NONE）时**不动** pre_erased_block：覆写成 NONE 会让已预擦的块被
+     *   flush_page 再擦一次（双倍磨损回归）。 */
+    if (erased_block != JOURNAL_BLOCK_NONE)
     {
+        journal->pre_erased_block = erased_block;
+    }
+
+    /* 复位水位标志（设计 §7.5.4）：截断即水位已清。与 checkpoint job 的收尾双保险
+     * （后者覆盖 truncate 被弱桩替换的纯 RAM 测试构建）。 */
+    journal->emergency         = 0U;
+    journal->checkpoint_needed = 0U;
+}
+
+/* --------------------------------------------------------------------
+ * journal_truncate
+ *   功能：同步截断 Journal（= plan + 即刻擦 + commit）。
+ *   参数：journal —— Journal；up_to_sequence —— 截断水位。
+ *   返回：无。
+ *   实现要点：**同步**原语（含一次阻塞擦除）；异步 job 请用 plan/commit 两步。
+ *             ⚠ 阶段 6 起 checkpoint 走异步 plan/commit，本函数暂无调用者——保留为
+ *             与 l2p_cache_*_sync 同族的同步逃生口（结构性同步上下文可用）。
+ *             ⚠ **水位不满足时不复位水位标志**（逐字保留旧实现：旧函数在 ① 处直接
+ *             return，复位在函数末尾 ⇒ 走不到）。异步 CP 路径不受此影响——它在
+ *             CP_DONE 里无条件复位（对应旧 checkpoint_create 第 ⑧ 步）。
+ * -------------------------------------------------------------------- */
+void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
+{
+    nand_pba_t addr;
+    uint8_t    next;
+    int        plan;
+
+    plan = journal_truncate_plan(journal, up_to_sequence, &addr, &next);
+
+    if (plan < 0)
+    {
+        return; /* 不截断 ⇒ 也不复位水位（旧实现同此） */
+    }
+
+    if (plan > 0)
+    {
+        (void)ftl_sync_erase_block(addr);
+        journal_truncate_commit(journal, next);
         return;
     }
 
-    /*
-     * ② 预擦除环形最旧块（= 环形下一块）并记账。
-     * 该块整块的条目都 ≤ up_to_sequence（checkpoint 已把它们写进 NAND L2P 表），
-     * 擦掉即完成截断。记账 pre_erased_block 让 journal_flush_page 回切到它时跳过擦除
-     * ——旧实现在此处与 flush_page 各擦一次 = **同一块每圈擦两次**，是 Journal 磨损
-     * （§14.1 的寿命瓶颈）中凭空多出的 ~25%。重复调用（两次 checkpoint 之间无写入）
-     * 时 next == pre_erased_block ⇒ 跳过重擦。
-     */
-    next = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
-    if (next != journal->pre_erased_block)
-    {
-        (void)ftl_sync_erase_block(journal_block_addr(journal, next));
-        journal->pre_erased_block = next;
-    }
-
-    /* ③ 复位水位标志（设计 §7.5.4）：截断即水位已清。与 checkpoint_create 第 ⑧ 步
-     * 双保险（后者覆盖 truncate 被弱桩替换的纯 RAM 测试构建）。 */
-    journal->emergency         = 0U;
-    journal->checkpoint_needed = 0U;
+    /* 无需预擦（该块已预擦过）：仍要复位水位标志（否则 T1 永久命中 ⇒ 每圈必 CP） */
+    journal_truncate_commit(journal, JOURNAL_BLOCK_NONE);
 }

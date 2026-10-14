@@ -114,11 +114,17 @@ typedef struct ftl_context
     metadata_dir_cache_t metadata_dir;
 
     /* Checkpoint 池游标/序号（序 4：per-instance，原 checkpoint.c 的 file-scope static）。
-     * 开机由 checkpoint_find_latest 恢复，checkpoint_create 据此选池内下一槽续写。
+     * 开机由 checkpoint_find_latest 恢复，Checkpoint job 据此选池内下一槽续写。
      * ⚠ 与 journal.sequence_counter 无关——本池自己的单调序号（见 l2p_cp_state_t）。
      * 原 `uint32_t cp_sequence` 字段已删：只写不读，且与本字段语义重复（真正的
      * checkpoint 序号是 cp.sequence；boot 日志里的 cp_seq 来自 ftl_boot_result_t）。 */
     l2p_cp_state_t cp;
+
+    /* Checkpoint 异步 job（阶段 6：脏区落盘 → Anchor → Header → 截断 journal 的
+     * 有序流水线，见 checkpoint.h 的 cp_job_t / 掉电安全契约）。
+     * ⚠ 含 256B 的 region 脏位图**快照**——必须在 job 起点取定，不能沿用实时位图
+     *   （flush 成功会清实时位，见 checkpoint.c 的"快照点前移"）。 */
+    cp_job_t cp_job;
 
     /* Checkpoint 定时触发基准（T3：elapsed_ms ≥ CP_TIME_INTERVAL_MS） */
     uint32_t cp_timer_start; /* 上次 Checkpoint 时间戳（ms） */

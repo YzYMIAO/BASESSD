@@ -20,7 +20,8 @@
  *
  * 与 §4 的已知偏差（实现按**实测代码行为**写，文档为准待订正，见交付报告）：
  *   ① allocator_add_closed_sb 满列表不可测（实现是 ASSERT + 无条件写，非返回码）；
- *   ② checkpoint_journal_watermark **只置不撤**（撤位在 checkpoint_create ⑧，需 NAND）
+ *   ② checkpoint_journal_watermark **只置不撤**（撤位在 CP job 的 CP_TRUNC_* 阶段
+ *      → journal_truncate_commit，需 NAND）
  *      ⇒ emergency_set_reset 改为钉住「置位 + 回落不清」的实测语义；
  *   ③ rr_ecc_track_t 是 3B、**无环形缓冲** ⇒ record_ecc_ring_depth8 换成
  *      record_ecc_health_monotonic（健康度只升不降）；
@@ -696,9 +697,9 @@ static MunitResult test_wm_at_95_emergency(const MunitParameter params[], void *
 }
 
 /*
- * 水位**只置不撤**：checkpoint_journal_watermark 没有清位路径（清位在
- * checkpoint_create ⑧ 之后，需真 NAND ⇒ 属 L2）。此处钉住该语义，防止未来
- * 有人在纯函数里加"回落清位"而悄悄改变 checkpoint 触发时机。
+ * 水位**只置不撤**：checkpoint_journal_watermark 没有清位路径（清位在 CP job 的
+ * CP_TRUNC_* 阶段（journal_truncate_commit）之后，需真 NAND ⇒ 属 L2）。此处钉住
+ * 该语义，防止未来有人在纯函数里加"回落清位"而悄悄改变 checkpoint 触发时机。
  */
 static MunitResult test_wm_emergency_set_reset(const MunitParameter params[], void *fixture)
 {
@@ -714,7 +715,7 @@ static MunitResult test_wm_emergency_set_reset(const MunitParameter params[], vo
     checkpoint_journal_watermark(j);
     munit_assert_uint8(j->emergency, ==, 1U);
 
-    /* 回落到 0% 再求值：不清位（撤位在 checkpoint_create ⑧） */
+    /* 回落到 0% 再求值：不清位（撤位在 CP job 的 CP_TRUNC_* → journal_truncate_commit） */
     j->current_block = 0U;
     j->current_page  = 0U;
     checkpoint_journal_watermark(j);

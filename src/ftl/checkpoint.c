@@ -13,17 +13,18 @@
  *
  * 池几何（由 ftl/metadata.h 推导，见 checkpoint_ring_init）：
  *   CHECKPOINT_POOL_BLOCKS 个块、一条 record = 1 页、单 plane；
- *   写游标 ftl->cp.write_idx 在 [0, 总记录数) 环形推进，块满由 metadata_ring_prepare_write 擦下一块。
+ *   写游标 ftl->cp.write_idx 在 [0, 总记录数) 环形推进，块满由 metadata_ring_prepare_addr
+ *   判定（同步站点当场擦；异步 job 提交异步擦，见 CP_HDR_ERASE）。
  *
- * 掉电安全顺序（不可倒，见 checkpoint_create 步骤③/⑦）：
+ * 掉电安全顺序（不可倒，见下方"异步 job"的长注释）：
  *   先 flush region → 再 flush Anchor → 最后写 Header 声称「已落盘」。
  *   Header 是"承诺书"：它一旦落盘，boot 就信 bitmap 里置位的 region 在 NAND 上，
  *   故任何被 Header 声称的落盘必须**先于** Header 完成。
  *
  * 文件结构：
  *   1. 内部辅助        checkpoint_now_ms / checkpoint_header_valid / checkpoint_record_probe
- *   2. 脏区落盘        checkpoint_flush_dirty_regions（static）
- *   3. 创建/恢复       checkpoint_create / checkpoint_find_latest
+ *   2. 异步 job        cp_step（static）/ checkpoint_begin / checkpoint_kick / ftl_op_checkpoint
+ *   3. 创建/恢复       checkpoint_find_latest / checkpoint_write_initial
  *   4. 触发/水位       checkpoint_check_trigger / checkpoint_is_emergency / checkpoint_journal_watermark
  *
  * 游标/序号是 **per-instance**（序 4：收进 ftl_context_t.cp，见 l2p_cp_state_t）——
@@ -32,9 +33,12 @@
 
 #include "ftl/checkpoint.h"
 
+#include "common/assertion.h"
+#include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/ftl.h"
 #include "ftl/ftl_fc_interface.h"
+#include "ftl/ftl_op.h" /* ftl_op_submit / FTL_OP_CHECKPOINT */
 #include "ftl/metadata.h"
 #include "nand/onfi_1_0.h"
 #include "platform/platform.h"
@@ -123,31 +127,131 @@ static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, int 
     return FTL_OK;
 }
 
-/* ── 脏区落盘 ── */
+/* ── 创建 / 恢复 ── */
 
-/*
- * checkpoint_flush_dirty_regions - 按 region 脏标记只 flush 脏区
+/* ══════════════════════════════════════════════════════════════════
+ * Checkpoint 异步 job（v0.75 阶段 6）
  *
- * 覆盖：cache 中所有「region 脏标记置位」的 resident 行（等价于"本轮周期内改过的
- * region"；与 flush_all 对 resident 行的覆盖相同，语义上先快照 bitmap 再 flush）。
+ * checkpoint_create 原是**一整段同步流水线**：脏区落盘 → Anchor → Header → 截断，
+ * 每一步都在调用者（ftl_service_*）的栈上阻塞等 NAND 回来。单次 CP 可阻塞数十毫秒
+ * （脏 region 写回 + 8 页 Anchor + Header + 预擦），期间 host I/O 的完成泵停摆。
  *
- * ⚠ **不按 state == DIRTY 过滤**（阶段 5）：异步化后 dirty 行可能已被后台
- * l2p_flush_kick 起了写回（state = FLUSHING）而尚未完成——它同样属于"本周期改过、
- * 必须已持久"，漏掉它就会让 Header 承诺一个还没落盘的映射。l2p_cache_flush_one_sync
- * 对 FLUSHING 行是"等它完成"，对 DIRTY 行是"起 kick 再等"，对 CLEAN/INVALID 是空操作，
- * 故直接按脏位过滤即可。
+ * 现在同一份**顺序契约**由 phase 承载：每个阶段提交一条命令就返回，完成由
+ * g_op_service[FTL_OP_CHECKPOINT]（ftl_op_checkpoint）按 phase 收尾，下一轮
+ * ftl_service 调 checkpoint_kick 续跑。
  *
- * 任一 flush 失败立即返回 FTL_ERROR——调用方必须中止 checkpoint：
- * 该 region 的 NAND 页仍旧（脏标记保持置位），若继续写 header 声称其
- * 已落盘，boot 会按 bitmap 预载旧页 → 数据一致性破坏。
- */
-static ftl_status_t checkpoint_flush_dirty_regions(l2p_cache_t *cache)
+ * ⚠ **顺序即掉电安全契约**（与旧实现逐条对应，不可倒）：
+ *     ① 快照 region 脏标记 + journal 水位（**必须在任何 flush 之前**：flush 成功会清位）
+ *     ② flush 脏 region（任一失败 ⇒ 中止，不写 Header）
+ *     ③ flush Anchor（**必须早于 Header**）
+ *     ④ 写 Header（**无论成败都推进池游标**：半编程槽不可复用）
+ *     ⑤ 截断 Journal（预擦环形最旧块）+ 复位水位标志
+ *
+ * ⚠ **快照点前移（与旧同步实现的刻意差异）**：旧实现取 `journal.sequence_counter`
+ *   是在 Anchor 之后（步骤⑤），异步 CP 跨多轮，若照旧取"CP 末尾"的水位，则在
+ *   CP_ANCHOR 期间完成的 host 写会同时满足：① region 脏位在 RAM 里置了但没进本次
+ *   快照（不会被 flush）；② 其 journal 条目 seq ≤ 末尾水位（boot 视为"已进 L2P 表"
+ *   而跳过回放）⇒ **两边都不认，静默丢映射**。
+ *   故水位与脏位图**一起在 job 起点取定**：此后任何 host 写都有 seq > 快照水位，
+ *   boot 必然回放它。代价是 journal_truncate 的水位判据更容易不满足（更少预擦）——
+ *   预擦只是磨损优化，跳过它只是让 journal_flush_page 自己擦（每块每圈仍只擦一次）。
+ *
+ * ⚠ **服务函数不推进状态机**（与 migrate 的 ftl_op_migrate 不同）：本 job 的
+ *   CP_ANCHOR_PREP / CP_HDR_PREP 里有同步原语（游标未建立时要 metadata_ring_locate
+ *   读池定位），在完成泵里跑就是嵌套泵（l2p_sync_pump 有 ASSERT 挡）。故
+ *   ftl_op_checkpoint 只记结果 + release + 改 phase，推进一律留给下一轮 ftl_service。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* 中止本次 CP：记失败相位、转 CP_DONE（**不**写 Header / **不**截断 journal）。 */
+static void cp_abort(cp_job_t *j)
+{
+    j->failed     = 1U;
+    j->fail_phase = j->phase;
+    j->phase      = (uint8_t)CP_DONE;
+}
+
+/* 累计一次「提交不出去」；超限即中止 job（与 MIG/RR 同族）。返回 1 = 已中止。 */
+static int cp_stall(cp_job_t *j)
+{
+    if (j->stall_rounds >= CP_SUBMIT_STALL_MAX)
+    {
+        LOGW("[CP] stall %u rounds — abort phase=%u\r\n",
+             (unsigned)j->stall_rounds,
+             (unsigned)j->phase);
+        cp_abort(j);
+        return 1;
+    }
+    j->stall_rounds++;
+    return 0;
+}
+
+/* 提交一条异步写（Anchor 分页 / Checkpoint Header 共用）。data 在本函数内已被
+ * ftl_async_write_page 拷进 FC buffer ⇒ 调用者的栈缓冲随即可复用。 */
+static ftl_status_t cp_submit_write(cp_job_t *j, nand_pba_t addr, const void *data, uint32_t length)
+{
+    fc_command_t *cmd;
+
+    if (ftl_async_write_page(&cmd, addr, data, length, FTL_PAGE_CFG_META()) != FTL_OK)
+    {
+        return FTL_AGAIN; /* 命令池空 / 地址非法 */
+    }
+
+    j->waiting = 1U; /* 先置位、提交失败再回滚（同 mig_submit_*） */
+
+    if (ftl_op_submit(cmd, FTL_OP_CHECKPOINT, j) != FTL_OK)
+    {
+        j->waiting = 0U;
+        (void)fc_command_release(cmd);
+        return FTL_AGAIN;
+    }
+
+    /* ⚠ 卡死计数在**提交成功之后**才清零（见 mig_submit_read 的同款注释）。 */
+    j->stall_rounds = 0U;
+    return FTL_OK;
+}
+
+/* 提交一条异步擦除（Anchor 换块 / Checkpoint 换块 / Journal 预擦共用）。 */
+static ftl_status_t cp_submit_erase(cp_job_t *j, nand_pba_t addr)
+{
+    fc_command_t *cmd;
+
+    if (ftl_async_erase_block(&cmd, addr) != FTL_OK)
+    {
+        return FTL_AGAIN;
+    }
+
+    j->waiting = 1U;
+
+    if (ftl_op_submit(cmd, FTL_OP_CHECKPOINT, j) != FTL_OK)
+    {
+        j->waiting = 0U;
+        (void)fc_command_release(cmd);
+        return FTL_AGAIN;
+    }
+
+    j->stall_rounds = 0U;
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * cp_flush_regions
+ *   功能：按**快照**脏位图把每个脏 region 落盘（阶段②）。返回 1 = 全部已持久；
+ *         0 = 仍有在飞（下轮再来）；-1 = 硬失败（调用者中止，不写 Header）。
+ *   实现要点：**不按 state == DIRTY 过滤**——异步化后脏行可能已被后台 l2p_flush_kick
+ *             起了写回（state = FLUSHING）而尚未完成，它同样属于"本周期改过、必须已持久"，
+ *             漏掉它就会让 Header 承诺一个还没落盘的映射。FLUSHING 行**等**它（不重复起）。
+ *             CLEAN 行 = 已落盘（commit 已清脏位，见 l2p_cache.c 的 ftl_op_l2p）。
+ *             ⚠ 判据是**快照位图**而非实时位图：实时位图会被本次 flush 的 commit 清掉
+ *             （那样循环就永远看不到自己该等的行）。
+ * -------------------------------------------------------------------- */
+static int cp_flush_regions(ftl_context_t *ftl, cp_job_t *j)
 {
     uint16_t i;
+    int      pending = 0;
 
     for (i = 0U; i < L2P_CACHE_SIZE; i++)
     {
-        l2p_cache_line_t *line = &cache->lines[i];
+        l2p_cache_line_t *line = &ftl->cache.lines[i];
         uint32_t          word;
         uint32_t          mask;
 
@@ -156,133 +260,503 @@ static ftl_status_t checkpoint_flush_dirty_regions(l2p_cache_t *cache)
             continue; /* 空行（region_id 无意义，脏位查询无意义） */
         }
 
-        /* 只有 region 脏标记置位的行才需要写回（其余在本次周期内未改） */
-        word = cache->region_dirty_bitmap[line->region_id / 32U];
+        word = j->region_bitmap[line->region_id / 32U];
         mask = (1UL << (line->region_id & 31U));
         if ((word & mask) == 0U)
         {
+            continue; /* 本次 CP 起点时不脏（此后新脏的由 journal 兜底，见文件头） */
+        }
+
+        if (line->state == L2P_CACHE_CLEAN)
+        {
+            continue; /* 已落盘：本次 CP 期间由我们（或后台）写回成功，commit 已清脏位 */
+        }
+        if (line->state == L2P_CACHE_FLUSHING)
+        {
+            pending = 1; /* 已提交、未落盘：等它 */
+            continue;
+        }
+        if (line->state == L2P_CACHE_DIRTY)
+        {
+            const ftl_status_t st = l2p_cache_flush_kick(&ftl->cache, (int)i);
+
+            if (st == FTL_ERROR)
+            {
+                return -1; /* 无依赖 / 分配不到槽：中止（同旧 checkpoint_flush_dirty_regions） */
+            }
+            pending = 1; /* OK = 已提交；AGAIN = 背压，都还没落盘 */
             continue;
         }
 
-        if (l2p_cache_flush_one_sync(cache, (int)i) != FTL_OK)
-        {
-            return FTL_ERROR;
-        }
+        /* 只剩 LOADING：脏位已置却 entries 尚未有效 —— 不变量被破坏（脏位只由
+         * l2p_cache_write 在行可写时置位，而 LOADING 行不可写；commit 又只在
+         * FLUSHING 行上清位）。**中止**而非放过：此刻既没在写回、也没有有效数据，
+         * 若当作"已持久"写进 Header，boot 会按 bitmap 预载这一区 ⇒ **静默丢映射**。
+         * 中止的代价只是本次 CP 不做（journal 与脏位全保留，下轮重来），方向安全。 */
+        LOGW("[CP] region=%u dirty but state=%u (LOADING) — abort\r\n",
+             (unsigned)line->region_id,
+             (unsigned)line->state);
+        return -1;
     }
 
-    return FTL_OK;
+    if (pending == 0)
+    {
+        j->stall_rounds = 0U;
+        return 1;
+    }
+
+    /* 有在飞写回 = 有进展（**不**计卡死轮数）：闸门满 / 提交失败都会让本轮起不动新行，
+     * 但 flush_inflight > 0 说明完成迟早会来。 */
+    if (ftl->cache.flush_inflight > 0U)
+    {
+        j->stall_rounds = 0U;
+        return 0;
+    }
+
+    return cp_stall(j) ? -1 : 0;
 }
 
-/* ── 创建 / 恢复 ── */
-
 /* --------------------------------------------------------------------
- * checkpoint_create
- *   功能：执行一次完整 Checkpoint（脏区落盘 → Anchor → Header → 截断 Journal）。
+ * cp_step
+ *   功能：状态机主体——一次只提交**一条**命令就返回；纯计算阶段连续推进到下一个
+ *         提交阶段或终态。
  *   参数：ftl —— FTL 实例。
- *   返回：FTL_OK 成功；FTL_ERROR 参数非法 / 脏区落盘失败 / Anchor 落盘失败 /
- *         池定位失败 / 写 Header 失败。
- *   实现要点：八个步骤的**顺序即掉电安全契约**（圈码见正文）——
- *     ① 先快照 region 脏标记进 Header（flush 会清位，快照必须在前）；
- *     ② flush 脏区；③ flush Anchor（必须早于 Header）；⑤ 定位后才取 sequence；
- *     ⑥ 追加写并**无论成败都推进游标**（半编程槽不可复用）；⑦ 截断 Journal；
- *     ⑧ 复位 Journal 水位标志（否则 T1 永久命中）。
- *     任一前置步骤失败即 return，不写 Header——保持"承诺与事实一致"。
+ *   返回：无。
+ *   实现要点：阶段序列见 checkpoint.h 的 cp_phase_t。提交失败（背压）⇒ 原地返回，
+ *             由 checkpoint_kick 下轮重试同一阶段（幂等）；连续 CP_SUBMIT_STALL_MAX
+ *             轮无进展 ⇒ 中止（failed=1，走 CP_DONE 且**不**写 Header / 不截断）。
  * -------------------------------------------------------------------- */
-ftl_status_t checkpoint_create(ftl_context_t *ftl)
+static void cp_step(ftl_context_t *ftl)
 {
-    l2p_checkpoint_header_t cp;
-    metadata_ring_t         ring;
-    checkpoint_probe_ctx_t  probe_ctx;
-    nand_pba_t              addr;
-    uint8_t                 i;
-    uint32_t                region_words = 0U;
+    cp_job_t *j = &ftl->cp_job;
+
+    for (;;)
+    {
+        if (j->waiting != 0U)
+        {
+            return; /* 有命令在飞：等完成服务函数 */
+        }
+
+        switch ((cp_phase_t)j->phase)
+        {
+            case CP_FLUSH_REGIONS:
+            {
+                const int r = cp_flush_regions(ftl, j);
+
+                if (r < 0)
+                {
+                    cp_abort(j);
+                    break;
+                }
+                if (r == 0)
+                {
+                    return; /* 仍有脏行在飞 */
+                }
+                j->phase = (uint8_t)CP_ANCHOR_PREP;
+                break;
+            }
+
+            case CP_ANCHOR_PREP:
+            {
+                /* ③ Anchor：定位游标 + 取槽（游标未建立时会**同步**扫池定位——
+                 *    这是本 job 唯一可能瞬时阻塞的点，且只在冷启动后首次 CP 出现）。 */
+                int need_erase = 0;
+                int r          = metadata_dir_anchor_prepare(&ftl->metadata_dir,
+                                                    &j->anchor_ring,
+                                                    &j->anchor_base,
+                                                    &j->anchor_idx,
+                                                    &j->anchor_seq,
+                                                    &need_erase);
+
+                if (r < 0)
+                {
+                    cp_abort(j);
+                    break;
+                }
+                if (r == 0)
+                {
+                    /* Directory 无变更：整段跳过（Anchor 每写一条都消耗池内槽位，
+                     * 空转会让池无谓轮转）。旧实现是 metadata_dir_flush_to_anchor 的
+                     * dirty==0 早退，语义相同。 */
+                    j->anchor_skip = 1U;
+                    j->phase       = (uint8_t)CP_HDR_PREP;
+                    break;
+                }
+
+                j->anchor_need_erase = (uint8_t)need_erase;
+                j->anchor_chunk      = 0U;
+                j->anchor_ok         = 1U;
+                j->phase             = (need_erase != 0) ? (uint8_t)CP_ANCHOR_ERASE : (uint8_t)CP_ANCHOR_WRITE;
+                break;
+            }
+
+            case CP_ANCHOR_ERASE:
+                if (cp_submit_erase(j, j->anchor_base) != FTL_OK)
+                {
+                    (void)cp_stall(j);
+                    return;
+                }
+                return;
+
+            case CP_ANCHOR_WRITE:
+            {
+                metadata_anchor_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
+                nand_pba_t             aaddr;
+
+                if (j->anchor_chunk >= ANCHOR_PAGE_COUNT)
+                {
+                    /* 整条 record 写完：推进游标（无论成败），成功才清 dirty。
+                     * 失败 ⇒ 整条残缺（locate 会整条丢弃）⇒ 中止，不写 Header。 */
+                    metadata_dir_anchor_commit(&ftl->metadata_dir, &j->anchor_ring, j->anchor_idx, (int)j->anchor_ok);
+
+                    if (j->anchor_ok == 0U)
+                    {
+                        LOGW("[META] anchor write incomplete: idx=%u seq=%lu (chunk 写失败)\r\n",
+                             (unsigned)j->anchor_idx,
+                             (unsigned long)j->anchor_seq);
+                        cp_abort(j);
+                        break;
+                    }
+                    j->phase = (uint8_t)CP_DONE;
+                    break;
+                }
+
+                aaddr = pba_with_page(j->anchor_base, (uint32_t)pba_to_page(j->anchor_base) + j->anchor_chunk);
+                metadata_dir_anchor_page(&ftl->metadata_dir, j->anchor_seq, j->anchor_chunk, &page);
+
+                if (cp_submit_write(j, aaddr, &page, (uint32_t)sizeof(page)) != FTL_OK)
+                {
+                    (void)cp_stall(j);
+                    return;
+                }
+                return;
+            }
+
+            case CP_HDR_PREP:
+            {
+                /* ④ Header：定位写游标（游标未建立时才扫池——开机 checkpoint_find_latest
+                 *    已建立时零代价）。⚠ 这里可能同步读池（同 CP_ANCHOR_PREP）。 */
+                checkpoint_probe_ctx_t probe_ctx;
+                int                    need_erase = 0;
+
+                checkpoint_ring_init(&j->hdr_ring);
+
+                if (ftl->cp.cursor_valid == 0U)
+                {
+                    uint16_t newest = UINT16_MAX;
+
+                    probe_ctx.topo = ftl->topo;
+                    probe_ctx.ring = j->hdr_ring;
+
+                    if (metadata_ring_locate(&j->hdr_ring, &probe_ctx.topo, checkpoint_record_probe, &probe_ctx, &newest, &ftl->cp.sequence, &ftl->cp.write_idx) != FTL_OK)
+                    {
+                        cp_abort(j);
+                        break;
+                    }
+                    ftl->cp.cursor_valid = 1U;
+                }
+
+                /* sequence 在定位之后取（池内已有序号时才能续上），与旧序一致。 */
+                j->hdr_seq = ++ftl->cp.sequence;
+                j->hdr_idx = ftl->cp.write_idx;
+
+                if (metadata_ring_prepare_addr(&j->hdr_ring, &ftl->topo, j->hdr_idx, &j->hdr_addr, &need_erase) != FTL_OK)
+                {
+                    cp_abort(j);
+                    break;
+                }
+
+                j->hdr_need_erase = (uint8_t)need_erase;
+                j->phase          = (need_erase != 0) ? (uint8_t)CP_HDR_ERASE : (uint8_t)CP_HDR_WRITE;
+                break;
+            }
+
+            case CP_HDR_ERASE:
+                if (cp_submit_erase(j, j->hdr_addr) != FTL_OK)
+                {
+                    (void)cp_stall(j);
+                    return;
+                }
+                return;
+
+            case CP_HDR_WRITE:
+            {
+                l2p_checkpoint_header_t cp; /* 2KB 栈缓冲：恰好一页主区 */
+                uint8_t                 i;
+                uint32_t                region_words = 0U;
+
+                memset(&cp, 0, sizeof(cp));
+                memcpy(cp.region_bitmap, j->region_bitmap, sizeof(cp.region_bitmap));
+
+                /* region_count = 置位 word 数（无消费方，仅信息量；多 LUN 时高位 word 恒 0） */
+                for (i = 0U; i < 64U; i++)
+                {
+                    if (cp.region_bitmap[i] != 0U)
+                    {
+                        region_words++;
+                    }
+                }
+                cp.region_count = region_words;
+
+                cp.magic            = CHECKPOINT_MAGIC;
+                cp.sequence         = j->hdr_seq; /* 本池自己的单调序号 */
+                cp.timestamp        = checkpoint_now_ms(ftl);
+                cp.journal_sequence = j->journal_seq; /* 截断到此 seq（job 起点快照） */
+                cp.layout_version   = FTL_MEDIA_LAYOUT_VERSION;
+
+                if (cp_submit_write(j, j->hdr_addr, &cp, (uint32_t)sizeof(cp)) != FTL_OK)
+                {
+                    (void)cp_stall(j);
+                    return;
+                }
+                return;
+            }
+
+            case CP_TRUNC_PREP:
+            {
+                nand_pba_t addr;
+
+                /* ⑤ 截断 Journal：预擦环形最旧块（纯 RAM 判定 + 算址，不动介质）。
+                 *   ⚠ 无论 plan 返回 0（已预擦过）还是 -1（水位不满足），本 CP 都**已
+                 *   完成**它承诺的事（region 已落盘、Anchor/Header 已写）⇒ 照旧复位水位
+                 *   标志并收尾。这与旧 checkpoint_create 第 ⑧ 步的**无条件复位**逐字对应
+                 *   （旧函数末尾无条件清 emergency/checkpoint_needed，与 truncate 内部
+                 *   是否真的擦了无关）。 */
+                if (journal_truncate_plan(&ftl->journal, j->journal_seq, &addr, &j->trunc_next) <= 0)
+                {
+                    journal_truncate_commit(&ftl->journal, JOURNAL_BLOCK_NONE);
+                    j->phase = (uint8_t)CP_DONE;
+                    break;
+                }
+
+                j->trunc_addr = addr;
+                j->phase      = (uint8_t)CP_TRUNC_ERASE;
+                break;
+            }
+
+            case CP_TRUNC_ERASE:
+                if (cp_submit_erase(j, j->trunc_addr) != FTL_OK)
+                {
+                    (void)cp_stall(j);
+                    return;
+                }
+                return;
+
+            case CP_DONE:
+            {
+                if (j->failed != 0U)
+                {
+                    LOGW("[CP] abort at phase=%u (不写 Header / 不截断，脏区与 journal 保留)\r\n",
+                         (unsigned)j->fail_phase);
+                }
+                else
+                {
+                    /* 观测口：一条 CP 走完一行（含 journal 水位）。 */
+                    LOGD("[CP] done seq=%lu jrn_seq=%lu anchor=%s\r\n",
+                         (unsigned long)j->hdr_seq,
+                         (unsigned long)j->journal_seq,
+                         (j->anchor_skip != 0U) ? "skip" : "written");
+                }
+
+                j->active       = 0U;
+                j->phase        = (uint8_t)CP_IDLE;
+                j->waiting      = 0U;
+                j->failed       = 0U;
+                j->stall_rounds = 0U;
+                return;
+            }
+
+            case CP_IDLE:
+            default:
+                /* 不该发生：active 置位而 phase 非法 */
+                ASSERT(j->active == 0U);
+                return;
+        }
+    }
+}
+
+/* ── 对外接口（job）── */
+
+ftl_status_t checkpoint_begin(ftl_context_t *ftl)
+{
+    cp_job_t *j;
 
     if (ftl == NULL)
     {
         return FTL_ERROR;
     }
-
-    /* ① 快照 region 脏标记 → 构造 Header（先快照后 flush：flush 会清位） */
-    memset(&cp, 0, sizeof(cp));
-    memcpy(cp.region_bitmap, ftl->cache.region_dirty_bitmap, sizeof(cp.region_bitmap));
-
-    /* region_count = 置位 word 数（无消费方，仅信息量；多 LUN 时高位 word 恒 0） */
-    for (i = 0U; i < 64U; i++)
+    if (ftl->cp_job.active != 0U)
     {
-        if (cp.region_bitmap[i] != 0U)
-        {
-            region_words++;
-        }
-    }
-    cp.region_count = region_words;
-
-    /* ② 按 bitmap 只 flush 脏 region → NAND L2P 日志块。
-     *    flush 失败必须中止（见 checkpoint_flush_dirty_regions 注释），
-     *    不写 header / 不 flush anchor / 不截断 journal，保 DIRTY 行与
-     *    journal 供下个 checkpoint 重试（95% 紧急水位仍兜底强制）。 */
-    if (checkpoint_flush_dirty_regions(&ftl->cache) != FTL_OK)
-    {
-        return FTL_ERROR;
+        return FTL_AGAIN; /* 单飞行：上一次还没跑完 */
     }
 
-    /* ③ 先 flush Metadata Directory（Anchor）——必须早于 Header：
-     *    header 声称「bitmap 置位的 region 已落盘」，若 Directory 落后于 header，
-     *    掉电后 boot 按 bitmap 预载会读到 Directory 里不存在的 region。 */
-    if (metadata_dir_flush_to_anchor(&ftl->metadata_dir) != FTL_OK)
-    {
-        return FTL_ERROR; /* Anchor 未落盘 ⇒ 不能写 header 声称已落盘 */
-    }
+    j = &ftl->cp_job;
+    memset(j, 0, sizeof(*j));
 
-    /* ④ 定位写游标（游标未建立时才扫池：开机 checkpoint_find_latest 已建立时零代价）*/
-    checkpoint_ring_init(&ring);
-    probe_ctx.topo = ftl->topo;
-    probe_ctx.ring = ring;
+    /* ① 起点快照（**必须早于任何 flush**，见文件头"快照点前移"的长注释）：
+     *    flush 成功会清 region 脏位 ⇒ 快照必须先行；journal 水位同理。 */
+    memcpy(j->region_bitmap, ftl->cache.region_dirty_bitmap, sizeof(j->region_bitmap));
+    j->journal_seq = ftl->journal.sequence_counter;
 
-    if (ftl->cp.cursor_valid == 0U)
-    {
-        uint16_t newest = UINT16_MAX;
+    j->active   = 1U;
+    j->phase    = (uint8_t)CP_FLUSH_REGIONS;
+    j->start_ms = checkpoint_now_ms(ftl);
+    j->log_ms   = j->start_ms;
 
-        if (metadata_ring_locate(&ring, &probe_ctx.topo, checkpoint_record_probe, &probe_ctx, &newest, &ftl->cp.sequence, &ftl->cp.write_idx) != FTL_OK)
-        {
-            return FTL_ERROR;
-        }
-        ftl->cp.cursor_valid = 1U;
-    }
-
-    /* ⑤ 完成 Header 剩余字段（sequence 在定位之后取，池内已有序号时才能续上）*/
-    cp.magic            = CHECKPOINT_MAGIC;
-    cp.sequence         = ++ftl->cp.sequence;            /* 本池自己的单调序号 */
-    cp.timestamp        = checkpoint_now_ms(ftl);        /* 平台 time_us 换算 ms 快照 */
-    cp.journal_sequence = ftl->journal.sequence_counter; /* 截断到此 seq */
-    cp.layout_version   = FTL_MEDIA_LAYOUT_VERSION;      /* 介质布局版本（版本不符 ⇒ 该记录作废）*/
-
-    /* ⑥ 追加写：池内下一槽（块满则先擦池内下一块）*/
-    if (metadata_ring_prepare_write(&ring, &probe_ctx.topo, ftl->cp.write_idx, &addr) != FTL_OK)
-    {
-        return FTL_ERROR;
-    }
-
-    /* 无论成败都推进游标：已写过的槽（可能半编程）不可复用。
-     * 失败时不写 journal_truncate，脏数据仍由下个 checkpoint 重试。 */
-    if (ftl_sync_write_page(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META()) != 0)
-    {
-        ftl->cp.write_idx = (uint16_t)((ftl->cp.write_idx + 1U) % metadata_ring_total_records(&ring));
-        return FTL_ERROR;
-    }
-
-    ftl->cp.write_idx = (uint16_t)((ftl->cp.write_idx + 1U) % metadata_ring_total_records(&ring));
-
-    /* ⑦ 截断 Journal（间接入口：纯 RAM 测试构建可用弱桩替换 journal_truncate） */
-    journal_truncate(&ftl->journal, cp.journal_sequence);
-
-    /* ⑧ 复位 Journal 水位标志（设计 §7.5.4：checkpoint 完成后 j->emergency /
-     *    checkpoint_needed 置 false——本次 CP 已把 sequence ≤ cp_seq 的条目 flush 进
-     *    NAND L2P 表并截断 journal，水位已清零。不复位会导致 T1 永久命中（每圈必 CP）
-     *    且 emergency 置位后 BUSY 模式每圈强制 CP（ftl_service_busy）。 */
-    ftl->journal.emergency         = 0U;
-    ftl->journal.checkpoint_needed = 0U;
-
+    cp_step(ftl); /* 立刻推进第一步（脏区落盘可当场起异步写回） */
     return FTL_OK;
+}
+
+void checkpoint_kick(ftl_context_t *ftl)
+{
+    cp_job_t *j;
+
+    if ((ftl == NULL) || (ftl->cp_job.active == 0U))
+    {
+        return;
+    }
+
+    j = &ftl->cp_job;
+
+    /* 心跳（观测口）：正常 CP 远快于 1s ⇒ 平时静默；只有卡在某 phase 才持续可见。
+     * 判据 = 两次心跳之间 phase 不动 ⇒ 卡死（异步后"卡在哪一步"否则完全不可见）。 */
+    {
+        const uint32_t now_ms = checkpoint_now_ms(ftl);
+
+        if ((now_ms - j->log_ms) >= CP_JOB_LOG_INTERVAL_MS)
+        {
+            j->log_ms = now_ms;
+            LOGI("[CP] job phase=%u wait=%u fail=%u age=%lums\r\n",
+                 (unsigned)j->phase,
+                 (unsigned)j->waiting,
+                 (unsigned)j->failed,
+                 (unsigned long)(now_ms - j->start_ms));
+        }
+    }
+
+    cp_step(ftl);
+}
+
+/* ── Checkpoint job 的完成服务（g_op_service[FTL_OP_CHECKPOINT]）── */
+
+/* --------------------------------------------------------------------
+ * ftl_op_checkpoint
+ *   功能：Checkpoint 命令的完成服务函数——按 job.phase 记完成结果、改 phase、release。
+ *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `cp_job_t *`（= &ftl->cp_job）。
+ *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
+ *   实现要点：**本函数不推进状态机**（见文件头：阶段里有同步原语，在完成泵里跑就是
+ *             嵌套泵）——只把 phase 改到"下一步该干什么"，由下一轮 checkpoint_kick 续跑。
+ *             ⚠ Header 的池游标**无论成败都推进**（半编程槽不可复用）；失败时**不**截断
+ *             journal、**不**复位水位标志（与旧实现的提前 return 逐条对应）。
+ * -------------------------------------------------------------------- */
+void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+{
+    cp_job_t     *j = (cp_job_t *)ctx;
+    fc_command_t *cmd;
+    int           failed;
+
+    ASSERT(completion != NULL);
+    ASSERT(j != NULL);
+
+    cmd = fc_command_id_to_command((uint16_t)completion->command_id);
+    ASSERT(cmd != NULL);
+
+    /* 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出的归属实例，
+     * 二者必须一致——不一致说明派发路由错了。 */
+    ASSERT(ftl != NULL);
+    ASSERT(&ftl->cp_job == j);
+
+    failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1 : 0;
+
+    switch ((cp_phase_t)j->phase)
+    {
+        case CP_ANCHOR_ERASE:
+            (void)fc_command_release(cmd);
+            j->waiting = 0U;
+            if (failed != 0)
+            {
+                /* 换块擦失败 ⇒ 不写、**不推进游标**（与旧序一致：metadata_ring_prepare_write
+                 * 擦失败即 return FTL_ERROR），dirty 保留 ⇒ 下次在新槽重试整条。 */
+                cp_abort(j);
+                return;
+            }
+            j->phase = (uint8_t)CP_ANCHOR_WRITE;
+            return;
+
+        case CP_ANCHOR_WRITE:
+            (void)fc_command_release(cmd);
+            j->waiting = 0U;
+            if (failed != 0)
+            {
+                j->anchor_ok = 0U; /* 本条 record 残缺 ⇒ 整条作废（不取半条） */
+            }
+            j->anchor_chunk = (uint8_t)(j->anchor_chunk + 1U); /* 无论成败都往后写下一页 */
+            return;
+
+        case CP_HDR_ERASE:
+            (void)fc_command_release(cmd);
+            j->waiting = 0U;
+            if (failed != 0)
+            {
+                /* 换块擦失败 ⇒ 不写 Header、**不推进游标**（同旧序），中止本次 CP。 */
+                cp_abort(j);
+                return;
+            }
+            j->phase = (uint8_t)CP_HDR_WRITE;
+            return;
+
+        case CP_HDR_WRITE:
+            (void)fc_command_release(cmd);
+            j->waiting = 0U;
+
+            /* 无论成败都推进游标：已写过的槽（可能半编程）不可复用。 */
+            ftl->cp.write_idx = (uint16_t)((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
+
+            if (failed != 0)
+            {
+                /* 失败时不写 journal_truncate、不复位水位标志：脏数据仍由下个 checkpoint
+                 * 重试（与旧实现的提前 return FTL_ERROR 逐条对应）。 */
+                cp_abort(j);
+                return;
+            }
+            j->phase = (uint8_t)CP_TRUNC_PREP;
+            return;
+
+        case CP_TRUNC_ERASE:
+            (void)fc_command_release(cmd);
+            j->waiting = 0U;
+
+            if (failed != 0)
+            {
+                /* ⚠ **与旧实现逐条对应**：journal_truncate 当年就是 `(void)ftl_sync_erase_block(...)`
+                 * 丢弃结果、照样记账 pre_erased_block（本次异步化**不顺手改语义**）。
+                 * 留一行日志把这条路径变可观测——它意味着 journal_flush_page 回切到该块时
+                 * 会跳过擦除（写进未擦块）。 */
+                LOGW("[CP] journal pre-erase failed blk=%u — 仍记账（沿用旧语义）\r\n",
+                     (unsigned)j->trunc_next);
+            }
+
+            /* commit 记账 + 复位水位标志（设计 §7.5.4：本次 CP 已把 seq ≤ 水位 的条目
+             * 落盘并截断 ⇒ 清零。不复位会让 T1 永久命中——每圈必 CP）。 */
+            journal_truncate_commit(&ftl->journal, j->trunc_next);
+            j->phase = (uint8_t)CP_DONE;
+            return;
+
+        case CP_IDLE:
+        case CP_FLUSH_REGIONS:
+        case CP_ANCHOR_PREP:
+        case CP_HDR_PREP:
+        case CP_TRUNC_PREP:
+        case CP_DONE:
+        default:
+            /* 不该发生：一条命令对应一个提交阶段（ANCHOR_ERASE / ANCHOR_WRITE /
+             * HDR_ERASE / HDR_WRITE / TRUNC_ERASE）。 */
+            LOGE("[CP] unexpected completion phase=%u\r\n", (unsigned)j->phase);
+            (void)fc_command_release(cmd);
+            j->waiting = 0U;
+            cp_abort(j);
+            return;
+    }
 }
 
 /* --------------------------------------------------------------------

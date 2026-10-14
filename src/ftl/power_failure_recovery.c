@@ -155,7 +155,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
     /* ③ 判型：最新页**整页**都被 Checkpoint 覆盖 ⇒ 干净关机；否则异常掉电。
      *
      * ⚠ 判据必须是**整页**的 `page_seq + entry_count`，与 journal_replay 的回放过滤
-     *   同口径。`cp.journal_sequence` 的语义是「下一个待分配序号」（checkpoint_create
+     *   同口径。`cp.journal_sequence` 的语义是「下一个待分配序号」（Checkpoint job
      *   直接取 sequence_counter，journal_truncate 的注释亦如此声明）⇒ 被 CP 覆盖的条目
      *   是 seq < cp.journal_sequence。一页占 seq [page_seq, page_seq+entry_count-1]，
      *   全被覆盖 ⟺ page_seq + entry_count ≤ cp.journal_sequence。

@@ -269,22 +269,23 @@ ftl_status_t metadata_ring_locate(const metadata_ring_t *ring,
 }
 
 /* --------------------------------------------------------------------
- * metadata_ring_prepare_write
- *   功能：为写入池内第 write_idx 条 record 做前置——算地址，必要时先擦目标块。
- *   参数：ring/topo —— 池与拓扑；write_idx —— 目标槽；out_addr —— 出参物理地址。
- *   返回：FTL_OK；FTL_ERROR 参数非法 / write_idx 越界 / 换块时擦除失败。
- *   实现要点：仅当 write_idx 落在块首（% rpb == 0）才擦块。池内轮转 ⇒ 该块持全池
+ * metadata_ring_prepare_addr
+ *   功能：为写入池内第 write_idx 条 record 算地址，并判定是否需先擦目标块。
+ *   参数：ring/topo —— 池与拓扑；write_idx —— 目标槽；out_addr —— 出参物理地址；
+ *         out_need_erase —— 出参，非 0 = 写之前必须先擦 *out_addr 所在块。
+ *   返回：FTL_OK；FTL_ERROR 参数非法 / write_idx 越界。
+ *   实现要点：仅当 write_idx 落在块首（% rpb == 0）才需擦块。池内轮转 ⇒ 该块持全池
  *             最旧 record，且每条 record 是完整快照 ⇒ 擦掉不丢信息；块内槽 0 恒走本
  *             分支（新取/刚擦的块再擦一次是幂等无害代价）。
+ *             **不动介质**：擦除由调用者做（同步站点即刻擦；异步 job 提交异步擦）。
  * -------------------------------------------------------------------- */
-ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
-                                         const ftl_topology_t  *topo,
-                                         uint16_t               write_idx,
-                                         nand_pba_t            *out_addr)
+ftl_status_t metadata_ring_prepare_addr(const metadata_ring_t *ring,
+                                        const ftl_topology_t  *topo,
+                                        uint16_t               write_idx,
+                                        nand_pba_t            *out_addr,
+                                        int                   *out_need_erase)
 {
-    uint16_t rpb;
-
-    if ((ring == NULL) || (topo == NULL) || (out_addr == NULL))
+    if ((ring == NULL) || (topo == NULL) || (out_addr == NULL) || (out_need_erase == NULL))
     {
         return FTL_ERROR;
     }
@@ -293,20 +294,42 @@ ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
         return FTL_ERROR;
     }
 
-    *out_addr = metadata_ring_addr(ring, topo, write_idx, 0U);
+    *out_addr       = metadata_ring_addr(ring, topo, write_idx, 0U);
+    *out_need_erase = ((uint16_t)(write_idx % metadata_ring_records_per_block(ring)) == 0U) ? 1 : 0;
 
-    rpb = metadata_ring_records_per_block(ring);
-    if ((uint16_t)(write_idx % rpb) == 0U)
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * metadata_ring_prepare_write
+ *   功能：为写入池内第 write_idx 条 record 做前置——算地址，必要时先擦目标块。
+ *   参数：ring/topo —— 池与拓扑；write_idx —— 目标槽；out_addr —— 出参物理地址。
+ *   返回：FTL_OK；FTL_ERROR 参数非法 / write_idx 越界 / 换块时擦除失败。
+ *   实现要点：= metadata_ring_prepare_addr + 同步擦除。**同步**原语。
+ * -------------------------------------------------------------------- */
+ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
+                                         const ftl_topology_t  *topo,
+                                         uint16_t               write_idx,
+                                         nand_pba_t            *out_addr)
+{
+    nand_pba_t addr;
+    int        need_erase = 0;
+
+    if (metadata_ring_prepare_addr(ring, topo, write_idx, &addr, &need_erase) != FTL_OK)
     {
-        /* 换块：先擦目标块。池内轮转 ⇒ 该块持的是全池最旧的 record，
-         * 且每条 record 都是完整快照 ⇒ 擦掉不丢信息。
-         * （块内槽 0 恒走本分支：新取/刚擦的块再擦一次是无害的幂等代价。）*/
-        if (ftl_sync_erase_block(*out_addr) != 0)
+        return FTL_ERROR;
+    }
+
+    if (need_erase != 0)
+    {
+        /* 换块：先擦目标块（池内轮转 ⇒ 该块持全池最旧 record，擦掉不丢信息） */
+        if (ftl_sync_erase_block(addr) != 0)
         {
             return FTL_ERROR;
         }
     }
 
+    *out_addr = addr;
     return FTL_OK;
 }
 
@@ -970,34 +993,39 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
  * 五、Anchor 落盘 / 加载
  * ══════════════════════════════════════════════════════════════════ */
 
-/* --------------------------------------------------------------------
- * metadata_dir_flush_to_anchor
- *   功能：把整份 Directory 快照成一条 Anchor record（ANCHOR_PAGE_COUNT 页）追加写进池。
- *   参数：dir —— Directory。
- *   返回：FTL_OK 成功（含 dirty==0 早退）；FTL_ERROR 参数非法 / 池定位失败 / prepare
- *         失败 / 任一分页写失败（整条作废）。
- *   实现要点：游标未建立时先定位池内最新 record 的下一槽；逐页组包（padding 归零）；
- *             **无论成败都推进游标**（半编程槽不可复用）；任一分页
- *             写失败 ⇒ 整条残缺 ⇒ 返回错误且**保留 dirty**（下次在新槽重试整条）。
- * -------------------------------------------------------------------- */
-ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
-{
-    metadata_anchor_page_t page; /* 2KB 栈缓冲：**按页**组好后写入，勿放整份 Directory */
-    metadata_ring_t        ring;
-    nand_pba_t             base;
-    uint16_t               idx;
-    uint16_t               total;
-    uint32_t               seq;
-    uint8_t                chunk;
-    int                    ok = 1;
+/* ── Anchor 落盘的三段式（同步/异步共用）──
+ *
+ * 一条 Anchor record = ANCHOR_PAGE_COUNT 页。同步站点（metadata_dir_flush_to_anchor，
+ * 供 metadata_dir_compact 用）把它一口气写完；异步 job（阶段 6 起：Checkpoint job）
+ * 则拆成 prepare →（可选换块擦）→ 逐页写 → commit 四步，每步之间可以回到服务循环。
+ * 三段式把「Directory 格式」留在本文件，「状态机」留给调用者。 */
 
-    if ((dir == NULL) || (!dir->dirty))
+/*
+ * metadata_dir_anchor_prepare - Anchor 落盘第一步：定位游标 + 取槽 + 算是否需换块擦
+ *
+ * 返回：1 = 需要写（出参全部有效）；0 = 无需写（dir 不脏）；-1 = 失败（参数非法 /
+ *       池定位失败 / 槽位越界）。
+ * 副作用：游标未建立时定位并置 anchor_cursor_valid；**anchor_sequence 自增**（与旧
+ *        同步实现同序：序号先取，再取槽）。
+ * ⚠ 不动介质：换块擦除由调用者做（同步站点即刻擦；异步 job 提交异步擦命令）。
+ */
+int metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
+                                metadata_ring_t      *out_ring,
+                                nand_pba_t           *out_base,
+                                uint16_t             *out_idx,
+                                uint32_t             *out_seq,
+                                int                  *out_need_erase)
+{
+    if ((dir == NULL) || (out_ring == NULL) || (out_base == NULL) || (out_idx == NULL) || (out_seq == NULL) || (out_need_erase == NULL))
     {
-        return FTL_OK; /* 无变更早退：Anchor 每写一条都消耗池内槽位，空转会让池无谓轮转 */
+        return -1;
+    }
+    if (dir->dirty == 0U)
+    {
+        return 0; /* 无变更早退：Anchor 每写一条都消耗池内槽位，空转会让池无谓轮转 */
     }
 
-    anchor_ring_init(&ring);
-    total = metadata_ring_total_records(&ring);
+    anchor_ring_init(out_ring);
 
     /* 游标未建立（冷启动后首次 flush）⇒ 先定位池内最新有效 record 的下一槽 */
     if (dir->anchor_cursor_valid == 0U)
@@ -1006,21 +1034,143 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         uint16_t           newest = UINT16_MAX;
 
         ctx.dir  = dir;
-        ctx.ring = &ring;
+        ctx.ring = out_ring;
 
-        if (metadata_ring_locate(&ring, &dir->topo, anchor_record_probe, &ctx, &newest, &dir->anchor_sequence, &dir->anchor_write_idx) != FTL_OK)
+        if (metadata_ring_locate(out_ring, &dir->topo, anchor_record_probe, &ctx, &newest, &dir->anchor_sequence, &dir->anchor_write_idx) != FTL_OK)
         {
-            return FTL_ERROR;
+            return -1;
         }
         dir->anchor_cursor_valid = 1U;
     }
 
-    idx = dir->anchor_write_idx;
-    seq = ++dir->anchor_sequence;
+    *out_idx = dir->anchor_write_idx;
+    *out_seq = ++dir->anchor_sequence;
 
-    if (metadata_ring_prepare_write(&ring, &dir->topo, idx, &base) != FTL_OK)
+    if (metadata_ring_prepare_addr(out_ring, &dir->topo, *out_idx, out_base, out_need_erase) != FTL_OK)
     {
-        return FTL_ERROR;
+        return -1;
+    }
+
+    return 1;
+}
+
+/*
+ * metadata_dir_anchor_page - 组第 chunk 页 Anchor 数据（纯 RAM，不碰 NAND）
+ *
+ * padding 归零 ⇒ 介质内容确定；本页有效条目数 = 全局有效范围 [0,count) 与本页区间的交。
+ */
+void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, uint32_t seq, uint8_t chunk, metadata_anchor_page_t *page)
+{
+    uint16_t base_entry = (uint16_t)(chunk * METADATA_DIR_ENTRIES_PER_PAGE);
+    uint16_t n;
+    uint16_t k;
+
+    if ((dir == NULL) || (page == NULL))
+    {
+        return;
+    }
+
+    if (base_entry >= dir->count)
+    {
+        n = 0U;
+    }
+    else
+    {
+        n = (uint16_t)(dir->count - base_entry);
+        if (n > METADATA_DIR_ENTRIES_PER_PAGE)
+        {
+            n = METADATA_DIR_ENTRIES_PER_PAGE;
+        }
+    }
+
+    memset(page, 0, sizeof(*page));
+    page->magic          = ANCHOR_MAGIC;
+    page->sequence       = seq;
+    page->chunk_index    = chunk;
+    page->chunk_count    = ANCHOR_PAGE_COUNT;
+    page->entry_count    = n;
+    page->layout_version = FTL_MEDIA_LAYOUT_VERSION;
+
+    for (k = 0U; k < METADATA_DIR_ENTRIES_PER_PAGE; k++)
+    {
+        if (k < n)
+        {
+            page->entries[k] = dir->entries[base_entry + k];
+        }
+        else
+        {
+            page->entries[k].type = 0U;
+            page->entries[k].id   = 0U;
+            page->entries[k].pba  = NAND_PBA_INVALID;
+        }
+    }
+}
+
+/*
+ * metadata_dir_anchor_commit - Anchor 落盘收尾：推进游标（无论成败），成功才清 dirty
+ *
+ * ⚠ **无论成败都推进游标**：已写过的槽（可能半编程）不可复用。ok == 0 时保留 dirty
+ *   ⇒ 下次在新槽重试整条（整条残缺的 record 会被 locate 丢弃，不取半条）。
+ */
+void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t *ring, uint16_t idx, int ok)
+{
+    if ((dir == NULL) || (ring == NULL))
+    {
+        return;
+    }
+
+    dir->anchor_write_idx = (uint16_t)((idx + 1U) % metadata_ring_total_records(ring));
+
+    if (ok != 0)
+    {
+        dir->dirty        = 0U;
+        dir->change_count = 0U;
+    }
+}
+
+/* --------------------------------------------------------------------
+ * metadata_dir_flush_to_anchor
+ *   功能：把整份 Directory 快照成一条 Anchor record（ANCHOR_PAGE_COUNT 页）追加写进池。
+ *   参数：dir —— Directory。
+ *   返回：FTL_OK 成功（含 dirty==0 早退）；FTL_ERROR 参数非法 / 池定位失败 / prepare
+ *         失败 / 任一分页写失败（整条作废）。
+ *   实现要点：= prepare + 同步换块擦 + 逐页写 + commit 的**同步**串行版（异步 job 用
+ *             同一组三段式函数，见 checkpoint.c 的 CP_ANCHOR_* 阶段）。
+ * -------------------------------------------------------------------- */
+ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
+{
+    metadata_anchor_page_t page; /* 2KB 栈缓冲：**按页**组好后写入，勿放整份 Directory */
+    metadata_ring_t        ring;
+    nand_pba_t             base;
+    uint16_t               idx;
+    uint32_t               seq;
+    uint8_t                chunk;
+    int                    need_erase = 0;
+    int                    ok         = 1;
+
+    /* ⚠ 逐字保留旧契约：dir == NULL 时旧实现返回 FTL_OK（静默无事可做）。
+     *   三段式内部把 NULL 判为 -1（更严），此处挡一下以免顺手改掉可观测行为。 */
+    if (dir == NULL)
+    {
+        return FTL_OK;
+    }
+
+    switch (metadata_dir_anchor_prepare(dir, &ring, &base, &idx, &seq, &need_erase))
+    {
+        case 0:
+            return FTL_OK; /* 无变更早退 */
+        case -1:
+            return FTL_ERROR;
+        default:
+            break;
+    }
+
+    if (need_erase != 0)
+    {
+        if (ftl_sync_erase_block(base) != 0)
+        {
+            return FTL_ERROR; /* 换块擦失败 ⇒ 不写、不推进游标（与旧序一致）*/
+        }
     }
 
     /* ⚠ 临时诊断探针（`log level debug` 才打印）：Anchor 写点。定位完即删。 */
@@ -1033,46 +1183,9 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
 
     for (chunk = 0U; chunk < ANCHOR_PAGE_COUNT; chunk++)
     {
-        uint16_t   base_entry = (uint16_t)(chunk * METADATA_DIR_ENTRIES_PER_PAGE);
-        uint16_t   n;
-        uint16_t   k;
         nand_pba_t aaddr = pba_with_page(base, (uint32_t)pba_to_page(base) + chunk);
 
-        /* 本页有效条目数 = 全局有效范围 [0,count) 与本页区间 [base,base+PER_PAGE) 的交 */
-        if (base_entry >= dir->count)
-        {
-            n = 0U;
-        }
-        else
-        {
-            n = (uint16_t)(dir->count - base_entry);
-            if (n > METADATA_DIR_ENTRIES_PER_PAGE)
-            {
-                n = METADATA_DIR_ENTRIES_PER_PAGE;
-            }
-        }
-
-        memset(&page, 0, sizeof(page)); /* padding 归零 ⇒ 介质内容确定 */
-        page.magic          = ANCHOR_MAGIC;
-        page.sequence       = seq;
-        page.chunk_index    = chunk;
-        page.chunk_count    = ANCHOR_PAGE_COUNT;
-        page.entry_count    = n;
-        page.layout_version = FTL_MEDIA_LAYOUT_VERSION;
-
-        for (k = 0U; k < METADATA_DIR_ENTRIES_PER_PAGE; k++)
-        {
-            if (k < n)
-            {
-                page.entries[k] = dir->entries[base_entry + k];
-            }
-            else
-            {
-                page.entries[k].type = 0U;
-                page.entries[k].id   = 0U;
-                page.entries[k].pba  = NAND_PBA_INVALID;
-            }
-        }
+        metadata_dir_anchor_page(dir, seq, chunk, &page);
 
         if (ftl_sync_write_page(aaddr, &page, sizeof(page), FTL_PAGE_CFG_META()) != 0)
         {
@@ -1080,8 +1193,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
         }
     }
 
-    /* 无论成败都推进游标：已写过的槽（可能半编程）不可复用 */
-    dir->anchor_write_idx = (uint16_t)((idx + 1U) % total);
+    metadata_dir_anchor_commit(dir, &ring, idx, ok);
 
     if (ok == 0)
     {
@@ -1092,9 +1204,6 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
              (unsigned long)seq);
         return FTL_ERROR; /* dirty 保留 ⇒ 下次在新槽重试整条 */
     }
-
-    dir->dirty        = 0U;
-    dir->change_count = 0U;
 
     return FTL_OK;
 }

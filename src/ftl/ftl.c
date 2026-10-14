@@ -524,14 +524,17 @@ static void ftl_service_idle(ftl_context_t *ftl)
     /* Wear 持久化（攒批写磨损计数；节拍未到则空转） */
     (void)wear_flush(&ftl->alloc, ftl->total_writes);
 
-    /* Checkpoint 检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed） */
+    /* Checkpoint 检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）
+     * ⚠ 阶段 6 起 checkpoint_begin **只装配 job**（提交即返回），CP 的成败不再能从
+     *   返回值看出来——判据变成"job 走完且 [CP] 无 abort"（见 checkpoint.c 的心跳）。
+     *   定时基准照旧无条件重置（与旧实现一致：触发即重置，不看成败）。 */
     {
         uint32_t now_ms  = ftl_now_ms();
         uint32_t elapsed = now_ms - ftl->cp_timer_start;
 
         if (checkpoint_check_trigger(ftl, elapsed))
         {
-            (void)checkpoint_create(ftl);
+            (void)checkpoint_begin(ftl);
             ftl->cp_timer_start = now_ms;
         }
     }
@@ -555,8 +558,8 @@ static void ftl_service_normal(ftl_context_t *ftl)
      * ⚠ thrashing 降级（P1-4）：工作集远大于 cache 时，这些**主动** flush 大概率是白写
      * （被 flush 的行往往在下次访问前就被驱逐，届时还要再 flush 一次），且挤占前台 IO 的
      * NAND 带宽。检测到 thrashing ⇒ 停主动 flush，脏行只由**驱逐路径按需**写回。
-     * 持久性不受影响：L2P 更新已先入 Journal（写完成路径），且 checkpoint_create 会
-     * 无条件 flush 全部脏 region（见 checkpoint.c）。 */
+     * 持久性不受影响：L2P 更新已先入 Journal（写完成路径），且 Checkpoint job 会
+     * 无条件 flush 全部脏 region（见 checkpoint.c 的 CP_FLUSH_REGIONS）。 */
     if (!l2p_cache_is_thrashing(&ftl->cache))
     {
         l2p_flush_kick(&ftl->cache, BG_NORMAL_FLUSH_COUNT);
@@ -581,14 +584,14 @@ static void ftl_service_normal(ftl_context_t *ftl)
     /* Wear 持久化（NORMAL 模式周期性刷入） */
     (void)wear_flush(&ftl->alloc, ftl->total_writes);
 
-    /* Checkpoint 检查（NORMAL 模式也执行） */
+    /* Checkpoint 检查（NORMAL 模式也执行；语义同 IDLE 档） */
     {
         uint32_t now_ms  = ftl_now_ms();
         uint32_t elapsed = now_ms - ftl->cp_timer_start;
 
         if (checkpoint_check_trigger(ftl, elapsed))
         {
-            (void)checkpoint_create(ftl);
+            (void)checkpoint_begin(ftl);
             ftl->cp_timer_start = now_ms;
         }
     }
@@ -621,10 +624,11 @@ static void ftl_service_busy(ftl_context_t *ftl)
         journal_kick(&ftl->journal);
     }
 
-    /* 紧急 Checkpoint：Journal ≥ 95% 时 BUSY 模式也强制执行 */
+    /* 紧急 Checkpoint：Journal ≥ 95% 时 BUSY 模式也强制执行（起 job 即返回，
+     * 后续阶段由 ftl_service 的 checkpoint_kick 跨档位推进）。 */
     if (checkpoint_is_emergency(ftl))
     {
-        (void)checkpoint_create(ftl);
+        (void)checkpoint_begin(ftl);
     }
 }
 
@@ -716,7 +720,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo)
     (void)wear_init(&ftl->alloc);
 
     /* ├─ Checkpoint 池游标/序号 + 定时基准（序 4：per-instance）──
-     * 游标在此归零 ⇒ 首次 checkpoint_create 会先扫池定位（cursor_valid==0）。 */
+     * 游标在此归零 ⇒ 首次 Checkpoint job 会先扫池定位（cursor_valid==0，见 CP_HDR_PREP）。 */
     memset(&ftl->cp, 0, sizeof(ftl->cp));
     ftl->cp_timer_start = 0U;
 
@@ -820,6 +824,12 @@ void ftl_service(ftl_context_t *ftl)
     {
         return;
     }
+
+    /* Phase 3 首：推进**已在飞**的 Checkpoint job（阶段 6）。
+     * ⚠ 必须在三档**之外**统一推进：CP 可能在 BUSY 档被紧急水位起（journal ≥95%），
+     *   而它的后续阶段要跨多轮、跨档位才能走完——只在起它的那一档推进会把 job 钉死。
+     *   本函数只推进已在跑的 job；"要不要起"仍由各档位的 checkpoint_begin 决定。 */
+    checkpoint_kick(ftl);
 
     if (inflight == 0U)
     {

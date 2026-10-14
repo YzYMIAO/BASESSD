@@ -187,16 +187,53 @@ void journal_flush_page(l2p_journal_t *journal);
  *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。 */
 ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence, uint32_t *out_entries);
 /*
- * journal_truncate - 截断 Journal（丢弃 ≤ up_to_sequence 的条目，P1-6）
+ * journal_truncate_plan - 截断 Journal 的**第一步**：水位校验 + 算出待预擦的块
  *
  * 语义：Checkpoint 已把 sequence ≤ up_to_sequence 的条目 flush 进 NAND L2P 表 ⇒
- * 环形里**最旧的一块**（= 环形下一块）整块可弃。本函数预擦除该块并记账
- * （pre_erased_block），使 journal_flush_page 回切到它时**跳过**擦除——保证同一块
- * 每圈只擦一次（旧实现在两处各擦一次 = 双倍磨损，直击 §14.1 的寿命瓶颈）。
+ * 环形里**最旧的一块**（= 环形下一块）整块可弃。预擦该块并记账（pre_erased_block），
+ * 使 journal_flush_page 回切到它时**跳过**擦除——保证同一块每圈只擦一次（旧实现在
+ * 两处各擦一次 = 双倍磨损，直击 §14.1 的寿命瓶颈）。
  *
- * @param up_to_sequence 截断水位；**必须覆盖全部已写条目**（调用者传 sequence_counter）。
- *        若水位不足以覆盖（有未 checkpoint 的条目），本函数**不截断**——最旧块可能仍
- *        持有回放需要的条目，擦掉即丢数据。
+ * 本函数只做**判定与算址**（纯 RAM，不动介质）：擦除由调用者提交——同步站点用
+ * journal_truncate（内部即刻擦），异步 job（阶段 6 起）提交异步擦命令后调
+ * journal_truncate_commit 记账。
+ *
+ * @param journal        Journal
+ * @param up_to_sequence 截断水位；**必须覆盖全部已写条目**（调用者传 CP 时刻的
+ *                       sequence_counter）。水位不足以覆盖（有未 checkpoint 的条目）
+ *                       时**不截断**——最旧块可能仍持有回放需要的条目，擦掉即丢数据。
+ * @param out_addr       出参：待预擦块的基地址（需返回 1 时有效）
+ * @param out_block      出参：待预擦的环形块号（需返回 1 时有效；commit 要用）
+ * @return 1 = 需擦 *out_addr / *out_block；0 = 无需擦（水位 OK，该块已预擦过）；
+ *         -1 = 不截断（水位不满足 / 参数非法）——**调用者不得据此复位水位标志**
+ */
+int journal_truncate_plan(l2p_journal_t *journal, uint32_t up_to_sequence, nand_pba_t *out_addr, uint8_t *out_block);
+
+/*
+ * journal_truncate_commit - 截断 Journal 的**第二步**：记账 + 复位水位标志
+ *
+ * 在擦除命令**成功完成**后调用（同步站点由 journal_truncate 内部调用）。记
+ * pre_erased_block 使 journal_flush_page 回切时跳过擦除；复位 emergency /
+ * checkpoint_needed（设计 §7.5.4：本次 CP 已把 sequence ≤ cp_seq 的条目落盘并截断，
+ * 水位清零。不复位会让 T1 永久命中——每圈必 CP）。
+ *
+ * ⚠ erased_block == JOURNAL_BLOCK_NONE ⇒ **只复位水位标志，不动 pre_erased_block**
+ *   ——"本次没有擦"（水位不满足 / 该块已被预擦过）时调用者用它收尾；若此时把
+ *   pre_erased_block 覆写成 NONE，journal_flush_page 回切时会把已预擦的块再擦一次
+ *   （P1-6 的双倍磨损回归）。
+ *
+ * @param journal   Journal
+ * @param erased_block 刚擦成功的环形块号（journal_truncate_plan 的回传值）；
+ *                     JOURNAL_BLOCK_NONE = 本次未擦
+ */
+void journal_truncate_commit(l2p_journal_t *journal, uint8_t erased_block);
+
+/*
+ * journal_truncate - 同步截断 Journal（= plan + 即刻擦 + commit）
+ *
+ * **同步**原语：只许结构性同步上下文调用（异步 job 请用 plan/commit 两步）。
+ *
+ * @param up_to_sequence 截断水位（同 journal_truncate_plan）
  */
 void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);
 

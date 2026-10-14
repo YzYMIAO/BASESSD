@@ -4066,14 +4066,14 @@ free pool 水位**降 254 块**（预留 254 → 508）。用户容量由 L2P re
 
 ---
 
-## v0.75 — 命令「提交」与「完成」解耦（阶段 1 机制 + 阶段 2 Journal 刷页异步 + 阶段 3 Read Recovery 异步 + 阶段 4 GC / WL 搬移异步 + 阶段 5 L2P region 加载写回异步）
+## v0.75 — 命令「提交」与「完成」解耦（阶段 1 机制 + 阶段 2 Journal 刷页异步 + 阶段 3 Read Recovery 异步 + 阶段 4 GC / WL 搬移异步 + 阶段 5 L2P region 加载写回异步 + 阶段 6 Checkpoint 保存异步）
 
 **日期**：2026-10-14
 
 **范围**：`include/fc/fc_command.h`、`src/fc/fc.c`、新增 `include/ftl/ftl_op.h` +
 `src/ftl/ftl_op.c`、新增 `include/ftl/migrate.h` + `src/ftl/migrate.c`、
 `include/ftl/{completion_table,ftl,ftl_fc_interface,journal,metadata,bst,pending,
-read_recovery,gc,wear_leveling,ftl_type,l2p_cache}.h`、`src/ftl/{ftl,ftl_op,
+read_recovery,gc,wear_leveling,ftl_type,l2p_cache,checkpoint}.h`、`src/ftl/{ftl,ftl_op,
 completion_table,ftl_fc_interface,journal,bbt,checkpoint,gc,migrate,l2p_cache,metadata,
 pending,power_failure_recovery,read_recovery,wear,wear_leveling}.c`、
 `src/controller/{controller,scheduler,cli}.c`、`tests/unit/*`。
@@ -4609,20 +4609,127 @@ region 加载吃掉 8 轮预算（`FTL_DRAIN_STALL_MAX`）里的一轮 ⇒ 随�
 `l2p_cache_flush_kick` 内部仍会调 `metadata_dir_append_slot`——取空槽时**可能换块 ⇒ 擦除**，
 那一次擦仍是瞬时阻塞。阶段 8 的 `md_job_t` 化会一并拆掉。
 
+### 阶段 6 —— Checkpoint 保存异步（本次）
+
+`checkpoint_create` 原是一条**严格有序的同步流水线**（脏区落盘 → Anchor → Header → 截断），
+每步都在 `ftl_service_*` 的栈上阻塞等 NAND 回来。单次 CP 可阻塞数十毫秒（脏 region 写回 +
+8 页 Anchor + Header + 预擦），期间**完成泵停摆**——与阶段 4 的"紧急 GC 阻塞 host 写路径"
+同源，只是触发频率低（T1 水位 / T2 写入量 / T3 定时）。
+
+#### ① `cp_job_t` 状态机（`include/ftl/checkpoint.h`，per-instance 落 `ftl->cp_job`）
+
+```
+CP_IDLE → CP_FLUSH_REGIONS → CP_ANCHOR_PREP → [CP_ANCHOR_ERASE] → CP_ANCHOR_WRITE
+        → CP_HDR_PREP → [CP_HDR_ERASE] → CP_HDR_WRITE → CP_TRUNC_PREP
+        → [CP_TRUNC_ERASE] → CP_DONE
+```
+
+`checkpoint_begin(ftl)` **只装配 job 并推进第一步**（快照脏位图 + journal 水位），
+返回 `FTL_OK` **只代表"已启动"，不代表 CP 成败**——这是与旧 `checkpoint_create` 的
+调用契约差异，调用点注释已同步。此后每轮 `ftl_service` 调 `checkpoint_kick(ftl)` 续跑；
+提交失败（背压）⇒ 原地返回下轮重试，连续 `CP_SUBMIT_STALL_MAX=256` 轮无进展 ⇒ 中止。
+
+⚠ **`checkpoint_kick` 必须放在三档之外**（`ftl_service` 里 Phase 3 首，`bg_suspend` 判定
+之后）：CP 可能在 **BUSY** 档被紧急水位（journal ≥95%）起，而它的后续阶段要跨多轮、跨档位
+才能走完——只在"起它的那一档"推进会把 job 钉死在该档。
+
+#### ② 三段式：把「擦除」从同步原语里剥出来
+
+异步化的真正障碍不是"写"，而是**写之前的换块擦**：`metadata_ring_prepare_write` 和
+`metadata_dir_flush_to_anchor` 都把"算地址 + 需要就擦"揉在一个同步函数里。拆成**纯算址** +
+**调用者决定何时擦**：
+
+| 新增（纯 RAM / 不动介质） | 原同步原语（保留，= 新函数 + 即刻擦） |
+|---|---|
+| `metadata_ring_prepare_addr(ring, topo, idx, *addr, *need_erase)` | `metadata_ring_prepare_write`（唯一剩余调用者：`bbt_flush` 与 `checkpoint_write_initial`，均结构性同步）|
+| `metadata_dir_anchor_prepare(dir, *ring, *base, *idx, *seq, *need_erase)` | — |
+| `metadata_dir_anchor_page(dir, seq, chunk, *page)`（组页，纯 RAM） | — |
+| `metadata_dir_anchor_commit(dir, ring, idx, ok)`（推进游标，成功才清 dirty） | `metadata_dir_flush_to_anchor`（= prepare + 同步擦 + 逐页写 + commit）|
+| `journal_truncate_plan(journal, up_to_seq, *addr, *block)` | — |
+| `journal_truncate_commit(journal, erased_block)` | `journal_truncate`（= plan + 即刻擦 + commit）|
+
+`metadata_dir_flush_to_anchor` 因此退化成**四行串行版**，被 `metadata_dir_compact`（阶段 8）
+继续使用；`journal_truncate` 变成**零调用者**的同步逃生口（链接期被 gc 掉，源码保留）。
+⚠ `metadata_dir_flush_to_anchor` 里显式保留了 `dir == NULL ⇒ FTL_OK` 的旧契约
+（三段式内部把 NULL 判为 `-1`，更严）——`不顺手改语义`。
+
+#### ③ 快照点前移（**与旧同步实现的刻意差异**，本阶段唯一的语义变更）
+
+旧实现取 `journal.sequence_counter` 是在 **Anchor 之后**（步骤⑤）。异步 CP 跨多轮，若照旧
+取"CP 末尾"的水位，则在 `CP_ANCHOR` 期间完成的 host 写会同时满足：
+
+1. region 脏位在 RAM 里置了，但没进本次快照 ⇒ **不会被 flush**；
+2. 其 journal 条目 `seq ≤ 末尾水位` ⇒ boot 视为"已进 L2P 表"而**跳过回放**。
+
+⇒ **两边都不认，静默丢映射**。故 `region_bitmap` 与 `journal_seq` **一起在 job 起点取定**
+（`checkpoint_begin` 里 memcpy + 取值）。此后任何 host 写都有 `seq > 快照水位`，boot 必然回放。
+
+代价：`journal_truncate_plan` 的水位判据 `(up_to + 1) < sequence_counter` 比旧实现**更容易
+不满足** ⇒ **更少预擦**。这是安全方向的取舍——预擦只是磨损优化（跳过它只是让
+`journal_flush_page` 自己擦，每块每圈仍只擦一次）。
+
+#### ④ 服务函数**不推进**状态机（与 `ftl_op_migrate` 的关键差别）
+
+`CP_ANCHOR_PREP` / `CP_HDR_PREP` 里有**同步原语**：游标未建立时要 `metadata_ring_locate`
+扫池定位（内含 `ftl_sync_read_page`）。在完成泵里跑就是**嵌套泵**——正是本次解耦要消除的
+东西，且 `l2p_sync_pump` 有 `ASSERT(ftl_op_in_dispatch() == 0)` 挡。故 `ftl_op_checkpoint`
+只做「记结果 + `release` + 改 phase」，推进一律留给下一轮 `ftl_service` 的 `checkpoint_kick`。
+（`ftl_op_migrate` 可以当场推进，是因为搬移的阶段里已无同步原语——阶段 4 把
+`MIG_READ_SETTLE` / `MIG_WRITE_SETTLE` 拆成纯计算 phase 换来的。）
+
+#### ⑤ 失败分支逐条对照（`不顺手改语义`）
+
+| 阶段 | 旧同步行为 | 异步版 |
+|---|---|---|
+| 脏区 flush 任一失败 | `checkpoint_flush_dirty_regions` 返回 `FTL_ERROR` ⇒ `checkpoint_create` 提前 return（不写 Header / 不 flush Anchor / 不截断）| `cp_flush_regions` 返回 -1 ⇒ `cp_abort`，`CP_DONE` 里**不** commit ⇒ 不写 Header / 不截断 |
+| 脏行是 `LOADING`（不变量违例）| 旧实现不存在此状态 | **中止**（而非"当作已持久"）：此刻既没在写回、也无有效数据，写进 Header 会让 boot 预载该区 ⇒ 静默丢映射 |
+| Anchor 换块擦失败 | `metadata_ring_prepare_write` 返回 `FTL_ERROR` ⇒ 提前 return，**不推进游标** | `CP_ANCHOR_ERASE` 失败 ⇒ `cp_abort`，不推进游标（dirty 保留，下次新槽重试整条）|
+| Anchor 某分页写失败 | `ok = 0` ⇒ 整条残缺 ⇒ 推进游标 + 返回 `FTL_ERROR` | `anchor_ok = 0` + 照常 `anchor_chunk++` ⇒ 写完整条后 `commit` 推进游标 + `cp_abort` |
+| Header 写失败 | 推进游标 + 提前 return（不截断 / 不复位水位）| `CP_HDR_WRITE` **无论成败都推进** `ftl->cp.write_idx` + `cp_abort` |
+| Journal 预擦失败 | `(void)ftl_sync_erase_block(...)` **丢弃结果**，照样记账 `pre_erased_block` | 同（**保留旧语义**），仅加一行 `LOGW` 使其可观测 |
+| CP 成功末尾 | 无条件复位 `emergency` / `checkpoint_needed`（第 ⑧ 步）| `CP_TRUNC_PREP` / `CP_TRUNC_ERASE` 调 `journal_truncate_commit` 复位（plan 返回 0 或 -1 时也走 `commit(NONE)`）|
+| CP 中途失败 | 提前 return ⇒ 水位**不**复位 | `cp_abort` ⇒ `CP_DONE` 不 commit ⇒ 水位不复位 |
+
+⚠ **`journal_truncate_plan` 的返回值语义**（自审中收紧）：`1` = 需擦 / `0` = 无需擦
+（水位 OK，已预擦过）/ **`-1` = 不截断（水位不满足 / 参数非法）**。之所以要区分，是为了让
+同步逃生口 `journal_truncate` **逐字保留旧行为**——旧函数在水位校验处直接 `return`，
+复位语句在函数末尾 ⇒ **水位不满足时不复位水位标志**。CP job 则对 `<= 0` 统一 `commit(NONE)`
+（对应旧 `checkpoint_create` 第 ⑧ 步的**无条件**复位）。
+
+#### ⑥ 自审中发现并修掉的两处（均未流出）
+
+1. **`CLEAN` 行被误判为不变量违例**：`cp_flush_regions` 起初把非 DIRTY / 非 FLUSHING 的
+   脏位行一律 LOGW + 中止。但快照位图在 flush 成功后**仍然置位**（位由 `ftl_op_l2p` 的
+   commit 清，不是由本函数清）⇒ 已落盘的 `CLEAN` 行每轮都触发假告警。补 `CLEAN ⇒ continue`。
+2. **`default` 分支手工置 `failed`/`phase`** ⇒ 统一走 `cp_abort`，避免两处语义漂移。
+
+另：`cp_job_t.region_bitmap` 的 memcpy 长度取自身字段 ⇒ 加 `_Static_assert` 钉死它与
+`l2p_cache_t.region_dirty_bitmap` **同尺寸**（源小则读越界，源大则漏拷）。
+
+#### ⑦ 栈深核实（结论：不需要改）
+
+`cp_step` 的帧里有两个 2 KB 页缓冲（`CP_ANCHOR_WRITE` 的 `metadata_anchor_page_t page`、
+`CP_HDR_WRITE` 的 `l2p_checkpoint_header_t cp`）。实测 `sub.w sp, sp, #2128` —— **GCC 已把
+两者重叠**（2128 ≈ 2048 + 80 其它局部）。旧同步实现的嵌套是
+`metadata_dir_flush_to_anchor`(2 KB) **套在** `checkpoint_create`(2 KB) 里 ⇒ 反而是 4 KB。
+且 `linker/stm32h743xx_flash.ld` 的 `_Min_Stack_Size = 0x800` 只是 heap/stack 下限**校验**，
+真实栈顶 `_estack = 0x20020000`（DTCM 末），而 `.dtcm_data` 实测 **0 字节** ⇒ 128 KB 全是栈余量。
+
 ### 判据与实测
 
 | 判据 | 结果 |
 |---|---|
 | `make debug` / `make release` / `make tests UT=FTL` / `UT=FC` | 0 error；release 下 `ftl_fc_interface.c:69 'allowed'`、`:85 'plane_bits'`（ASSERT 被裁）、`crc_port.c:29 'status'`（HAL 状态位只写不读）三条 unused 为**既有**——均为**未改动**文件，与阶段 5 无关 |
-| debug `.text` | 191688 → 191800（阶段 1）→ 193808（阶段 2）→ 195776（阶段 3）→ 195032（阶段 4）→ **198016**（阶段 5，**+2984 B**）⚠ 本行含构建路径伪影，见下 |
-| debug `.bss` | 381500 → 381372（阶段 1，**−128 B** = 旁表删 `handler`）→ 381404（阶段 2）→ 381404（阶段 3）→ 385596（阶段 4，**+4192 B**）→ **385596**（阶段 5，**±0**） |
-| `g_ftl` | 269600 → 273784（阶段 4，**+4184 B** = `mig_job_t`；其中 4KB 页镜像原在 `gc_migrate_sb` / `wl_relocate` 的**栈**上，迁入 `.bss` 是真实新增）→ **273792**（阶段 5，**+8 B**） |
-| release `.text` | 114612 → 114352 → 115776 → 116764 → 117108（阶段 4）→ **118440**（阶段 5，**+1332 B**） |
-| release `.bss` | 381492 → 381364 → 381396 → 381428 → 385588（阶段 4）→ **385620**（阶段 5，**+32 B**） |
-| debug `.bin` / release `.bin` | 196300 → 195556（阶段 4）/ 117288 → 117628（阶段 4）→ **198540 / 118960**（阶段 5） |
-| AXI_RAM 占用（构建脚本报告） | 284.0 KB（74.0%）→ 288.1 KB（75.0%）→ **288.1 KB（75.0%）**（阶段 5 **±0**），余量 ≈ 95.9 KB |
+| debug `.text` | 191688 → 191800（阶段 1）→ 193808（阶段 2）→ 195776（阶段 3）→ 195032（阶段 4）→ 198016（阶段 5，**+2984 B**）→ **201052**（阶段 6，**+3036 B**）⚠ 本行含构建路径伪影，见下 |
+| debug `.bss` | 381500 → 381372（阶段 1，**−128 B** = 旁表删 `handler`）→ 381404（阶段 2）→ 381404（阶段 3）→ 385596（阶段 4，**+4192 B**）→ 385596（阶段 5，**±0**）→ **385948**（阶段 6，**+352 B**） |
+| `g_ftl` | 269600 → 273784（阶段 4，**+4184 B** = `mig_job_t`；其中 4KB 页镜像原在 `gc_migrate_sb` / `wl_relocate` 的**栈**上，迁入 `.bss` 是真实新增）→ 273792（阶段 5，**+8 B**）→ **274128**（阶段 6，**+336 B** = `cp_job_t`：256 B 脏位图快照 + 水位/Anchor/Header/截断 各阶段状态） |
+| release `.text` | 114612 → 114352 → 115776 → 116764 → 117108（阶段 4）→ 118440（阶段 5，**+1332 B**）→ **120332**（阶段 6，**+1892 B**） |
+| release `.bss` | 381492 → 381364 → 381396 → 381428 → 385588（阶段 4）→ 385620（阶段 5，**+32 B**）→ **385940**（阶段 6，**+320 B**） |
+| debug `.bin` / release `.bin` | 196300 → 195556（阶段 4）/ 117288 → 117628（阶段 4）→ 198540 / 118960（阶段 5）→ **201580 / 120856**（阶段 6） |
+| AXI_RAM 占用（构建脚本报告） | 284.0 KB（74.0%）→ 288.1 KB（75.0%）→ 288.1 KB（75.0%）（阶段 5 **±0**）→ **288.5 KB（75.1%）**（阶段 6 **+0.4 KB**），余量 ≈ 95.5 KB |
 | `_Static_assert(sizeof(g_ftl)+FTL_AXI_RAM_RESERVED <= 384KB)`（`main.c:131`） | 过 |
-| 二进制级核对 | `g_op_service` 48 B = 12 项；`[0]=0`、`[1]=ftl_op_sync_wait`、`[2]=ftl_op_host_io`、`[3]=ftl_op_journal`、`[4]=ftl_op_read_recovery`、`[5]=[6]=ftl_op_migrate`（GC / WL 共用同一引擎）、**`[7]=ftl_op_l2p`**（阶段 5 点亮）、`[8..11]=0` |
+| 二进制级核对 | `g_op_service` 48 B = 12 项；`[0]=0`、`[1]=ftl_op_sync_wait`、`[2]=ftl_op_host_io`、`[3]=ftl_op_journal`、`[4]=ftl_op_read_recovery`、`[5]=[6]=ftl_op_migrate`（GC / WL 共用同一引擎）、`[7]=ftl_op_l2p`（阶段 5 点亮）、**`[8]=ftl_op_checkpoint`**（阶段 6 点亮）、`[9..11]=0`（逐字节 dump `.rodata@0x0802e890` 核对）|
+| 旧同步 Checkpoint 入口 | `checkpoint_create` / `checkpoint_flush_dirty_regions` 从源码与符号表**双双消失**（`nm` 无命中，全仓只剩注释引用）；`metadata_dir_flush_to_anchor` / `metadata_ring_prepare_write` / `journal_truncate` 保留为同步逃生口，前者仍被 `metadata_dir_compact`（阶段 8）调用、中者被 `bbt_flush` 与 `checkpoint_write_initial` 调用、后者**零调用者**（链接期 gc）|
 | 旧同步搬移入口 | `gc_migrate_sb` / `gc_erase_and_free` / `wl_relocate` / `wl_execute` / `wl_predictive_relocate` / `ftl_gc_reclaim_one` 全仓**只剩注释引用** |
 | `gc_read_page_with_lba` | 形参 6 → 4（删死出参 `ecc_out` / `read_count_out`），唯一调用者是 `ftl_rebuild_closed_sb_list` |
 | 旧 L2P API | `l2p_cache_find_or_load` / `l2p_cache_flush_one` / `l2p_cache_flush_all` 全仓**只剩注释引用**；`l2p_cache_read` 的 11 个调用点全部按三态改写 |
@@ -4632,6 +4739,24 @@ region 加载吃掉 8 轮预算（`FTL_DRAIN_STALL_MAX`）里的一轮 ⇒ 随�
 **等长路径**（`/tmp/b_s4`、`/tmp/b_s5`）后完整构建，得 debug `.text` 194096 → 197056
 （**+2960 B**）、release `.text` 117108 → 118440（**+1332 B**）、`.bss` **不变**。
 debug 的 +2984（表内）与 +2960（等路径）差 24 B，即下条所述的路径伪影噪声。
+
+⚠ **阶段 6 的体积同样按等路径背靠背实测**：`git archive 27addb8` 与当前工作树各解到
+**等长路径**（`/tmp/b_s5`、`/tmp/b_s6`，均 9 字符）后完整构建：
+
+| 等路径实测 | 阶段 5（`/tmp/b_s5`）| 阶段 6（`/tmp/b_s6`）| 增量 |
+|---|---|---|---|
+| debug `.text` | 197056 | 200068 | **+3012 B** |
+| debug `.bss` | 385596 | 385948 | **+352 B** |
+| debug `g_ftl` | 273792 | 274128 | **+336 B** |
+| debug `.bin` | 197580 | 200596 | **+3016 B** |
+| release `.text` | 118440 | 120332 | **+1892 B** |
+| release `.bss` | 385620 | 385940 | **+320 B** |
+| release `.bin` | 118960 | 120856 | **+1896 B** |
+| 告警 | debug 0 / release 3（既有）| 同左 | — |
+
+✅ 交叉校验：`/tmp/b_s5` 的 release `.text` **118440**、debug `.bss` **385596**、
+`g_ftl` **273792** 与表内阶段 5 记录**逐字节吻合** ⇒ 本方法论可复现历史值。debug `.text`
+的表内值（+3036）比等路径（+3012）多 24 B，即路径伪影噪声。
 
 ⚠ **debug `.text` 含构建路径伪影**：`ASSERT` 宏把 `__FILE__` 打进 debug 的 `.rodata`，
 路径每长 1 字符 ≈ **+42 B**（≈ 40 个带断言的 TU）。故「同一提交在不同目录构建，
@@ -4667,7 +4792,23 @@ free/op/spare 与 v0.74 后一致；
 ⑫ `fl` 返回后**立即**断电重启，`map` 与断电前一致（验证 `l2p_cache_flush_all_sync` 连
 `FLUSHING` 行一起等）；
 ⑬ `[L2P] thrash=` 只在**真随机**负载下出现（写密集随机 LBA 也应能触发，验证 ② 的记账口径
-已修）；连续顺序读写**不应**触发。
+已修）；连续顺序读写**不应**触发；
+⑭ **Checkpoint 落盘期间 host I/O 仍被服务**（**阶段 6 的核心判据**）：触发一次 CP
+（等 10s 定时 / 写满 `CP_WRITE_INTERVAL=1024` 条 / journal ≥85%），期间持续 `wr`/`rd`
+应照常完成，不再出现"一次 `fl` 或一次定时 CP 卡住数十毫秒"；卡在某个 phase 可见
+`[CP] job phase=%u wait=%u fail=%u age=%lums` 心跳；
+⑮ **`fl` 后立即断电重启，`map` 与断电前一致**（阶段 6 判据）：`fl` 走 `l2p_cache_flush_all_sync`
+（含在飞 `FLUSHING` 行），**不**触发 CP；要判 CP 落盘需等一次真 CP 走完
+（`[CP] done seq=… jrn_seq=… anchor=written|skip`，`log level debug` 才打）；
+⑯ **CP 中途掉电不丢映射**（**专项**，验证 ③ 的快照点前移）：写一批 → 在 CP 进行中
+（`[CP] job phase=…` 可见时）**立即断电** → 重启 → `map` 应与"断电前最后一次成功写完的
+LBA"一致；`boot type=` 应为 `2`（JOURNAL_REPLAY）而非 `1`，且 `journal_entries` 覆盖
+断电瞬间的那批写；
+⑰ **CP 中止路径可观测**：构造 `journal_truncate_plan` 水位不满足（CP 期间再写 ≥2 条），
+应**不**出现 `[CP] abort`（那是另一条路径），而是正常 `done`；构造脏行 flush 失败可见
+`[CP] abort at phase=…`，且**无**新 Header 落盘（重启后 boot 用上一个 CP + 回放 journal）；
+⑱ **`[CP] journal pre-erase failed blk=… — 仍记账（沿用旧语义）`** 若出现，说明沿用旧语义
+的路径被踩到（不是新缺陷，但值得记录）。
 
 ⚠ 工具坑（沿用）：`release.elf` 被 strip ⇒ 构建脚本的 SRAM usage 报告对 release 恒 0.0 KB；
 `BIN_DIR` 共享 ⇒ 跑 `make tests` 会覆盖 `debug.elf`，判体积须先重建再量。
@@ -4677,12 +4818,19 @@ free/op/spare 与 v0.74 后一致；
 ⇒ make 认为已是最新），`size` 读到的是**测试镜像**（`.text` ≈ 272 KB）；必须 `make clean`
 后再 `make debug`。
 
-### 后续（阶段 6~8，本提交不含）
+### 后续（阶段 7~8，本提交不含）
 
-Checkpoint 保存 / BBT·Wear 持久化 / metadata 目录压缩 —— 逐个把站点从 `ftl_sync_*` 改成
-job + `ftl_op_submit`，`g_op_service[]` 的占位槽随站点改造逐个点亮。
+BBT·Wear 持久化 / metadata 目录压缩 —— 逐个把站点从 `ftl_sync_*` 改成
+job + `ftl_op_submit`，`g_op_service[]` 的占位槽（`FTL_OP_BBT` / `FTL_OP_WEAR` /
+`FTL_OP_METADATA`）随站点改造逐个点亮。
 结构性必须顺序执行的路径（开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI）继续用
 `ftl_sync_submit_wait`。
+
+**阶段 6 关闭的欠账**：
+- ✅ 同步逃生口 `l2p_cache_*_sync` 的四个调用族里，**checkpoint 一族消失**——
+  `CP_FLUSH_REGIONS` 改用 `l2p_cache_flush_kick`（起异步写回 + 等 `flush_inflight` 归零），
+  不再在服务循环里逐条自旋。剩下三族（开机回放 / F2 重建 / CLI `map` 与 TRIM）是**结构性
+  同步**（在 `main` 进 superloop 前执行，无人 drain CQ）或 CLI 上下文，**会长期保留**。
 
 **阶段 5 关闭的欠账**（原「已知仍待闭合」前两条）：
 - ✅ `ftl_confirm_write` 的 L2P 重查已 job 化（停泊 + 两遍式），**「完成时重查」不变量保留**；
@@ -4692,8 +4840,11 @@ job + `ftl_op_submit`，`g_op_service[]` 的占位槽随站点改造逐个点亮
 
 仍待闭合：
 - `l2p_cache_flush_kick` 内部仍会调 `metadata_dir_append_slot`（取空槽可能换块 ⇒ 擦），
-  阶段 8 再拆；
-- 同步逃生口 `l2p_cache_*_sync` 的四个调用族（开机回放 / F2 重建 / checkpoint / CLI `map`
-  与 TRIM）——checkpoint 在阶段 6 消失，其余三个是**结构性同步**（在 `main` 进 superloop
-  前执行，无人 drain CQ）或 CLI 上下文，**会长期保留**；
-- per-job 的 `[JOB]` 心跳日志（阶段 2 起欠账，目前只有各功能的失败 LOGE / LOGW）。
+  阶段 8 再拆。⚠ 这条同样意味着 **CP 的 `CP_FLUSH_REGIONS` 仍可能瞬时阻塞一次擦除**——
+  但只在"取空槽恰逢换块"时，且是**同步站点当场擦**而非整条 CP 阻塞；
+- `CP_ANCHOR_PREP` / `CP_HDR_PREP` 里游标未建立时的 `metadata_ring_locate` 扫池定位仍是
+  **同步**的（内含 `ftl_sync_read_page`）——这是本 job 唯一剩余的同步点，且**只在冷启动后
+  首次 CP** 出现（开机 `checkpoint_find_latest` 已建立游标时零代价）。异步化它需要把
+  "扫池"也拆成 phase，收益极低（一次性），**有意不做**；
+- per-job 的 `[JOB]` 心跳日志：CP 已有 `[CP] job phase=…`（阶段 6 补上），其余功能仍只有
+  失败 LOGE / LOGW。

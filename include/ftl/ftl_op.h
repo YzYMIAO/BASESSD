@@ -154,6 +154,17 @@ void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completi
  */
 void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
+/*
+ * ftl_op_checkpoint - Checkpoint job 的完成服务函数（定义在 checkpoint.c）。
+ *
+ * 由 g_op_service[FTL_OP_CHECKPOINT] 引用；ctx = `cp_job_t *`（= &ftl->cp_job）。
+ * 服务函数按 job.phase 记完成结果、推进 phase、release 命令。
+ * ⚠ 与 ftl_op_migrate 的差别：本函数**不**推进状态机（不调 checkpoint_kick）——
+ *   CP 的阶段里有同步原语（游标未建立时要读池定位），在完成泵里跑就是嵌套泵。
+ *   推进交给下一轮 ftl_service 的 checkpoint_kick。
+ */
+void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+
 /* ── 同步等待器（FTL_OP_SYNC_WAIT 的 ctx）──
  *
  * 由同步原语在**自己栈上**持有，经 ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter)

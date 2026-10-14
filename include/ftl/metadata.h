@@ -449,11 +449,31 @@ ftl_status_t metadata_ring_locate(const metadata_ring_t *ring,
                                   uint16_t              *out_write_idx);
 
 /*
- * metadata_ring_prepare_write - 把写点槽位准备好，返回该 record 第 0 页地址
+ * metadata_ring_prepare_addr - 算写点槽位地址 + 判定是否需先擦该块（**不动介质**）
  *
- * 写点是块内槽 0 时**先擦该块**（池内轮转：该块持的是全池最旧的 record，且每条
- * record 都是完整快照 ⇒ 擦掉不丢信息）。调用方随后从返回地址起顺序写
- * pages_per_record 页。
+ * 写点是块内槽 0 时**需要先擦该块**（池内轮转：该块持的是全池最旧的 record，且每条
+ * record 都是完整快照 ⇒ 擦掉不丢信息）。本函数只做**判定**，擦除留给调用者：
+ * 同步站点用 metadata_ring_prepare_write（内部即刻擦），异步 job（阶段 6 起）按
+ * *out_need_erase 自行提交异步擦命令——把"擦"放进状态机，而不是在服务循环里阻塞。
+ *
+ * @param ring          池几何
+ * @param topo          ch/ce/lun
+ * @param write_idx     写点槽位（来自 metadata_ring_locate 或上次写点 + 1）
+ * @param out_addr      输出：record 第 0 页地址
+ * @param out_need_erase 输出：非 0 = 写之前必须先擦 *out_addr 所在块
+ * @return FTL_OK / FTL_ERROR（参数非法 / 槽位越界）
+ */
+ftl_status_t metadata_ring_prepare_addr(const metadata_ring_t *ring,
+                                        const ftl_topology_t  *topo,
+                                        uint16_t               write_idx,
+                                        nand_pba_t            *out_addr,
+                                        int                   *out_need_erase);
+
+/*
+ * metadata_ring_prepare_write - 把写点槽位准备好（含换块擦除），返回该 record 第 0 页地址
+ *
+ * = metadata_ring_prepare_addr + 需要时同步擦除该块。**同步**原语：只许结构性同步
+ * 上下文调用（开机 / 格式化 / 同步回退）；异步 job 请用 metadata_ring_prepare_addr。
  *
  * @param ring      池几何
  * @param topo      ch/ce/lun
@@ -622,6 +642,51 @@ ftl_status_t metadata_dir_reclaim(metadata_dir_cache_t *dir, ftl_allocator_t *al
  * @return FTL_OK = 确实压缩并归还了一块；FTL_ERROR = 未做（原因见上）
  */
 ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
+
+/* ── Anchor 落盘的三段式（同步 / 异步共用；阶段 6 起）──
+ *
+ * 一条 Anchor record = ANCHOR_PAGE_COUNT 页。同步站点用 metadata_dir_flush_to_anchor
+ * 一口气写完；异步 job（Checkpoint）拆成 prepare →（可选换块擦）→ 逐页写 → commit，
+ * 每步之间可以回到服务循环。三段式把「Directory 格式」留在 metadata.c，「状态机」
+ * 留给调用者。 */
+
+/*
+ * metadata_dir_anchor_prepare - 定位游标 + 取槽 + 算是否需换块擦（**不动介质**）
+ *
+ * @param dir            Directory
+ * @param out_ring       出参：Anchor 池几何
+ * @param out_base       出参：本 record 第 0 页地址
+ * @param out_idx        出参：本 record 的池内槽位号（commit 要用）
+ * @param out_seq        出参：本 record 的 sequence（本函数内自增 anchor_sequence）
+ * @param out_need_erase 出参：非 0 = 写之前必须先擦 *out_base 所在块
+ * @return 1 需要写（出参全部有效）；0 无需写（dir 不脏）；-1 失败（参数非法 / 定位失败）
+ */
+int metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
+                                metadata_ring_t      *out_ring,
+                                nand_pba_t           *out_base,
+                                uint16_t             *out_idx,
+                                uint32_t             *out_seq,
+                                int                  *out_need_erase);
+
+/*
+ * metadata_dir_anchor_page - 组第 chunk 页 Anchor 数据（纯 RAM）
+ *
+ * @param dir    Directory
+ * @param seq    本 record 的 sequence（prepare 的回传值）
+ * @param chunk  页序（0..ANCHOR_PAGE_COUNT-1）
+ * @param page   出参：组好的页（调用者提供 2KB 缓冲）
+ */
+void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, uint32_t seq, uint8_t chunk, metadata_anchor_page_t *page);
+
+/*
+ * metadata_dir_anchor_commit - 收尾：推进游标（无论成败），成功才清 dirty
+ *
+ * @param dir   Directory
+ * @param ring  prepare 回传的池几何
+ * @param idx   prepare 回传的槽位号
+ * @param ok    0 = 有条分页写失败（整条作废，保留 dirty）
+ */
+void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t *ring, uint16_t idx, int ok);
 
 /*
  * metadata_dir_flush_to_anchor - 将 Directory 追加为 Anchor 池的一条新 record

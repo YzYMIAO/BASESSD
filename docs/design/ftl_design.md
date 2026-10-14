@@ -1350,6 +1350,16 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim) {
  * mig_service 推进，直到 MIG_DONE 才 allocator_remove_closed_sb + gc_reclaimed_count++。 */
 int mig_begin_gc(ftl_context_t *ftl);   /* 1 = 已启动 job；0 = job 忙 / 无 victim */
 
+/* v0.75 阶段 6：Checkpoint 同构 —— checkpoint_begin 只**装配 job 并推进第一步**
+ * （快照 region 脏位图 + journal 水位），此后每轮 checkpoint_kick 续跑，
+ * 直到 job 走完（CP_DONE）或中止（failed）。见 §7.5.3。 */
+ftl_status_t checkpoint_begin(ftl_context_t *ftl);  /* FTL_OK 已启动 / FTL_AGAIN job 忙 */
+
+/* ⚠ 以下为**统一推进点**（ftl_service 里、三档之外，Phase 3 首）：异步 job 可能在
+ * 任一档位被起（如 BUSY 档的紧急 CP），若只在起它的那一档推进就会被钉死在该档。
+ * 本处只推进**已在跑**的 job；"要不要起"仍由各档位自己的判定决定。 */
+void checkpoint_kick(ftl_context_t *ftl);   /* job 未在跑 ⇒ 空操作 */
+
 static uint32_t ftl_gc_evaluate(ftl_context_t *ftl) {  /* **统一求值点**：IDLE/NORMAL 共用 */
     uint32_t now_ms = ftl_now_ms();
     /* 节拍门（v0.68）：求值含全表扫描（T5 磨损极值），不能按主循环 pass 跑 */
@@ -1365,6 +1375,15 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl) {  /* **统一求值点**：
         }
     } else { ftl->gc_log_last_ms = 0U; }
     return triggers;
+}
+
+static void ftl_service(ftl_context_t *ftl) {   /* 骨架：三档之外的公共部分 */
+    …
+    if (ftl->bg_suspend != 0U) { return; }      /* bbt --erase 后保护：整段跳过 Phase 3 */
+    checkpoint_kick(ftl);                       /* 阶段 6：跨档位推进已在飞的 CP job */
+    if (inflight == 0U)                        { ftl_service_idle(ftl); }
+    else if (…pending 饱和 / queued…)          { ftl_service_busy(ftl); }
+    else                                       { ftl_service_normal(ftl); }
 }
 
 static void ftl_service_idle(ftl_context_t *ftl) {
@@ -1383,7 +1402,9 @@ static void ftl_service_idle(ftl_context_t *ftl) {
     journal_kick(&ftl->journal);               /* v0.75：推进刷页 job（起异步写，不阻塞）*/
     (void)bbt_flush(&ftl->alloc);
     (void)wear_flush(&ftl->alloc, ftl->total_writes);   /* P0-1 磨损计数落盘（节拍门控）*/
-    if (checkpoint_check_trigger(ftl, elapsed)) { (void)checkpoint_create(ftl); }
+    /* 阶段 6：只装配 job（提交即返回）。成败不再能从返回值看出——判据是
+     * "job 走完且 [CP] 无 abort"。定时基准照旧**无条件重置**（触发即重置，不看成败）。*/
+    if (checkpoint_check_trigger(ftl, elapsed)) { (void)checkpoint_begin(ftl); ftl->cp_timer_start = now_ms; }
 }
 
 static void ftl_service_normal(ftl_context_t *ftl) {
@@ -1396,14 +1417,15 @@ static void ftl_service_normal(ftl_context_t *ftl) {
     (void)mig_begin_wl(ftl);                   /* 触发判定在 mig_begin_wl 内 */
     (void)bbt_flush(&ftl->alloc);
     (void)wear_flush(&ftl->alloc, ftl->total_writes);
-    if (checkpoint_check_trigger(ftl, elapsed)) { (void)checkpoint_create(ftl); }
+    if (checkpoint_check_trigger(ftl, elapsed)) { (void)checkpoint_begin(ftl); ftl->cp_timer_start = now_ms; }
 }
 
 static void ftl_service_busy(ftl_context_t *ftl) {
     /* 最少后台：只起 1 条写回防 evict 阻塞 */
     l2p_flush_kick(&ftl->cache, 1U);
-    /* 紧急 Checkpoint：Journal ≥ 95% 时 BUSY 也强制执行 */
-    if (checkpoint_is_emergency(ftl)) { (void)checkpoint_create(ftl); }
+    /* 紧急 Checkpoint：Journal ≥ 95% 时 BUSY 也强制执行（起 job 即返回，
+     * 后续阶段由 ftl_service 的 checkpoint_kick 跨档位推进）。 */
+    if (checkpoint_is_emergency(ftl)) { (void)checkpoint_begin(ftl); }
     /* GC / WL 不执行，前台 IO 优先 */
 }
 ```
@@ -2119,7 +2141,7 @@ region_id = lba / 512          entry_idx = lba % 512
   (2) 服务循环主动 flush    -- idle 全量 / normal 最多 4 条 / busy 1 条（l2p_flush_kick）
                                thrashing 时停掉（§6.5）
   (3) ftl_flush（HIL FLUSH）-- l2p_cache_flush_all_sync：逐条起 kick 并**等落盘**
-  (4) checkpoint_create     -- 兜底：flush 全部脏 region（先快照 bitmap 再 flush）
+  (4) checkpoint_begin      -- 兜底：flush 全部脏 region（CP job ①：先快照 bitmap 再 flush）
 
                  flush_kick(line)                     ← 只起，不等
                            │
@@ -2164,8 +2186,9 @@ region_id = lba / 512          entry_idx = lba % 512
 ```
 
 > **为什么敢让脏行留在 RAM**：写路径的每次 L2P 变更都在**写完成路径**里**先
-> `journal_append`、再 `l2p_cache_write`**（§7.3）——掉电可回放；`checkpoint_create`
-> 又无条件 flush 全部脏 region。所以「脏行滞留 SRAM」不比任何 write-back 设计多一个丢失窗口。
+> `journal_append`、再 `l2p_cache_write`**（§7.3）——掉电可回放；`checkpoint_begin`
+> （CP job 的 `CP_FLUSH_REGIONS`）又无条件 flush 全部脏 region。所以「脏行滞留 SRAM」
+> 不比任何 write-back 设计多一个丢失窗口。
 
 ### 6.1 数据结构
 
@@ -2346,8 +2369,9 @@ thrashing 下这些主动 flush 大概率是
 NAND 带宽。降级 ⇒ 停主动 flush，**脏行只由驱逐路径按需写回**。
 
 > **持久性不受影响**：L2P 更新在写完成路径里**先入 Journal**（`journal_append` → 再
-> `l2p_cache_write`），掉电可回放；`checkpoint_create` 也无条件 flush 全部脏 region
-> （`checkpoint_flush_dirty_regions`）。故「脏行滞留 RAM」不比原设计多任何丢失窗口。
+> `l2p_cache_write`），掉电可回放；`checkpoint_begin` 也无条件 flush 全部脏 region
+> （CP job 的 `CP_FLUSH_REGIONS`，原 `checkpoint_flush_dirty_regions`）。故「脏行滞留
+> RAM」不比原设计多任何丢失窗口。
 
 #### 刻意不实现的两条（初稿策略 1 / 2）
 
@@ -2680,22 +2704,81 @@ Host 写入量很小时，条件 2 不会触发，但 Journal 中可能有少量
 
 #### 7.5.3 Checkpoint 执行流程
 
-> ⚠ **订正**：真实函数是 `checkpoint_create(struct ftl_context *ftl)`（返回
-> `ftl_status_t`），**无** `ftl_checkpoint` / `checkpoint_write` / `timer_get_ms`。
+> ⚠ **订正（v0.75 阶段 6）**：真实入口是 `checkpoint_begin(struct ftl_context *ftl)`
+> （返回 `ftl_status_t`），**无** `ftl_checkpoint` / `checkpoint_write` / `timer_get_ms`。
+> 原 `checkpoint_create` 是一整段同步流水线；现已拆成 **`cp_job_t` 状态机**——
+> 提交即返回，完成由 `g_op_service[FTL_OP_CHECKPOINT]` 收尾，每轮由 `checkpoint_kick` 续跑。
 
 ```c
-ftl_status_t checkpoint_create(struct ftl_context *ftl) {
-    /* ① 脏区落盘 → L2P 日志块（整页追加）
-     *    checkpoint_flush_dirty_regions：先快照 region_dirty_bitmap，再对每条脏行
-     *    l2p_cache_flush_one_sync（含已在飞的 FLUSHING 行——Header 承诺"这些映射已持久"，
-     *    漏掉在飞行就会承诺一个还没落盘的映射）。任一失败 ⇒ **中止**，不写 Header。*/
-    if (checkpoint_flush_dirty_regions(&ftl->cache) != FTL_OK) return FTL_ERROR;
+/* ① 装配 job 并推进第一步（**不等任何 NAND 命令**） */
+ftl_status_t checkpoint_begin(struct ftl_context *ftl) {
+    /* ⚠ 单飞行：已在跑（ftl->cp_job.active）⇒ 返回 FTL_AGAIN，不重入。
+     *   旧同步实现里 CP 是原子的一整段，不存在"上一次还没跑完"；异步化后必须挡住。*/
+    if (ftl->cp_job.active) return FTL_AGAIN;
 
-    /* ② 写 Checkpoint record（含 sequence + region_bitmap）到 Checkpoint 池下一槽 */
-    /* ③ journal_truncate（预擦除环形最旧块 + 记账，见 §7.5.1 订正）*/
-    /* ④ Checkpoint 池游标/序号已由 checkpoint_find_latest 写进 ftl->cp */
+    memset(&ftl->cp_job, 0, sizeof(ftl->cp_job));
+    /* ② 快照点：region 脏位图 + journal 水位**一起在 job 起点取定**（见下"快照点前移"）*/
+    memcpy(ftl->cp_job.region_bitmap, ftl->cache.region_dirty_bitmap, sizeof(ftl->cp_job.region_bitmap));
+    ftl->cp_job.journal_seq = ftl->journal.sequence_counter;
+
+    ftl->cp_job.active = 1; ftl->cp_job.phase = CP_FLUSH_REGIONS; …
+    cp_step(ftl);            /* 推进第一步（起 L2P flush / 直接进下一 phase）*/
+    return FTL_OK;           /* ⚠ 只保证"已启动"，**不代表 CP 成败** */
 }
+
+/* 每轮 ftl_service 调一次（**三档之外**，Phase 3 首）：推进已在飞的 job */
+void checkpoint_kick(struct ftl_context *ftl) {
+    if (!ftl->cp_job.active) return;                     /* 空操作 */
+    if ((now_ms - ftl->cp_job.log_ms) >= CP_JOB_LOG_INTERVAL_MS) {
+        LOGI("[CP] job phase=%u wait=%u fail=%u age=%lums", …);   /* 心跳：区分推进 vs 卡死 */
+    }
+    cp_step(ftl);
+}
+
+/* 完成服务函数（g_op_service[FTL_OP_CHECKPOINT]，ctx = &ftl->cp_job）：
+ * 按 phase 记结果、release 命令、改 phase；**不**推进状态机（见下）。*/
 ```
+
+**阶段（`cp_phase_t`）与顺序契约**（顺序即掉电安全契约，不可倒）：
+
+| phase | 动作 | 失败处理 |
+|---|---|---|
+| `CP_FLUSH_REGIONS` | 按**快照** bitmap 逐条 kick L2P flush，等 `flush_inflight` 归零 | 任一失败 ⇒ **中止**（不写 Header）|
+| `CP_ANCHOR_PREP` | 定位 Anchor 游标 + 取槽（可能含一次性同步定位）| — |
+| `CP_ANCHOR_ERASE` | 换块时先擦 | 失败 ⇒ 中止 |
+| `CP_ANCHOR_WRITE` | 逐页写 Anchor record（`ANCHOR_PAGE_COUNT` 页）| 任一分页失败 ⇒ `anchor_ok=0`（整条作废），**仍推进 chunk** |
+| `CP_HDR_PREP` | 定位 Checkpoint 游标 + 取 Header 槽 | — |
+| `CP_HDR_ERASE` | 换块时先擦 | 失败 ⇒ 中止 |
+| `CP_HDR_WRITE` | 写 Header（一条 record = 1 页）| **无论成败都推进 `ftl->cp.write_idx`**（半编程槽不可复用）；失败 ⇒ 中止 |
+| `CP_TRUNC_PREP` | 水位判定，算 journal 预擦块 | — |
+| `CP_TRUNC_ERASE` | 预擦 journal 环形最旧块 | 失败仅 LOGW，**仍记账**（沿用旧语义，见下）|
+| `CP_DONE` | 收尾：清 `active`、记日志 | — |
+
+> ⚠ **服务函数不推进状态机**（与 `ftl_op_migrate` 不同）：`CP_ANCHOR_PREP` / `CP_HDR_PREP`
+> 里有同步原语（游标未建立时要 `metadata_ring_locate` 读池定位），在完成泵里跑就是
+> **嵌套泵**（`l2p_sync_pump` 有 `ASSERT(ftl_op_in_dispatch() == 0)` 挡）。故
+> `ftl_op_checkpoint` 只记结果 + `release` + 改 phase，推进一律留给下一轮 `ftl_service`。
+>
+> ⚠ **`CP_TRUNC_ERASE` 失败仍记账**是**刻意保留的旧语义**：旧 `journal_truncate` 的擦除
+> 返回值被 `(void)` 丢弃且照记 `pre_erased_block`。本次只搬位置不改语义（判据：
+> 掉电安全契约不变，预擦只是磨损优化），仅补一行 LOGW 使其**可观测**。
+
+**快照点前移（与旧同步实现的刻意差异）**
+
+旧实现取 `journal.sequence_counter` 是在 Anchor 之后（步骤⑤）。异步 CP 跨多轮，若照旧取
+"CP 末尾"的水位，则在 `CP_ANCHOR` 期间完成的 host 写会同时满足：
+
+1. region 脏位在 RAM 里置了，但没进本次快照 ⇒ 不会被 flush；
+2. 其 journal 条目 `seq ≤ 末尾水位` ⇒ boot 视为"已进 L2P 表"而**跳过回放**。
+
+⇒ **两边都不认，静默丢映射**。故水位与脏位图**一起在 job 起点取定**：此后任何 host 写都有
+`seq > 快照水位`，boot 必然回放它。代价是 `journal_truncate` 的水位判据更容易不满足
+（更少预擦）——预擦只是磨损优化，跳过它只是让 `journal_flush_page` 自己擦（每块每圈仍只擦一次）。
+
+> ⚠ **L2P flush 失败 ⇒ 中止**：`l2p_cache_flush_kick` 起的写回失败时，`ftl_op_l2p` 把行置回
+> `DIRTY`（保留 region 脏位）。CP 在 `CP_FLUSH_REGIONS` 看不到 `flush_inflight` 归零且行仍脏
+> ⇒ 中止。Header **绝不**在此时落盘——否则 boot 按 bitmap 预载**未落盘**的 region = 一致性破坏。
+> `CP_FLUSH_REGIONS` 里若出现 `LOADING` 行（不变量违例），同样 **中止**（保守方向安全）。
 
 #### 7.5.4 在 ftl_service 中的决策
 
@@ -2714,7 +2797,7 @@ int checkpoint_check_trigger(const struct ftl_context *ftl, uint32_t elapsed_ms)
 
 /* BUSY 模式（ftl_service_busy）：仅紧急分支 */
 if (checkpoint_is_emergency(ftl)) {
-    (void)checkpoint_create(ftl);
+    (void)checkpoint_begin(ftl);   /* v0.75 阶段 6：起 job 即返回，跨档位推进 */
 }
 ```
 
@@ -2725,7 +2808,12 @@ if (checkpoint_is_emergency(ftl)) {
 | 水位线（85%） | NORMAL / IDLE | 否 |
 | 写入量（1024） | NORMAL / IDLE | 否 |
 | 定时（10s） | NORMAL / IDLE | 否 |
-| 紧急（95%） | 任何模式 | ⚠️ 可能阻塞 |
+| 紧急（95%） | 任何模式 | 否（v0.75 阶段 6 起 `checkpoint_begin` 只装配 job 即返回）|
+
+> ⚠ **订正**：旧表述把紧急 CP 标为"可能阻塞"——那是 `checkpoint_create` 同步流水线时代的事。
+> 异步化后**任何档位**的 `checkpoint_begin` 都提交即返回；CP 的 NAND 命令与 host I/O 在
+> 同一个泵里交错推进。代价从"阻塞前台"变成"与前台争 NAND 带宽"——由 job 的 phase 粒度
+> 自然让路（每轮只推进有限步）。
 
 #### 7.5.5 参数汇总
 
@@ -3580,7 +3668,7 @@ Write-back flush 代价 ≈ 200~300 μs（一次 NAND program）
             慢死预测巡检 mig_begin_predict()（节流 RR_SCAN_INTERVAL_MS）
   Journal:  journal_kick()                  → 起/推进刷页 job（异步写，v0.75）
   BBT/Wear: bbt_flush() / wear_flush()      → 攒批持久化
-  Checkpoint: checkpoint_check_trigger() 命中则 checkpoint_create() 并重置 cp_timer_start
+  Checkpoint: checkpoint_check_trigger() 命中则 checkpoint_begin() 并重置 cp_timer_start
 设计思路：NAND 闲着也是闲着，把后台活做完，下次 Host IO 来时系统处于最佳状态
 ```
 
@@ -3595,7 +3683,7 @@ Write-back flush 代价 ≈ 200~300 μs（一次 NAND program）
   WL:       mig_begin_wl() 命中则起 job（触发判定在函数内）
   Journal:  journal_kick()                  → 推进刷页 job（异步；已在飞则空操作）
   BBT/Wear: bbt_flush() / wear_flush()      → 周期性刷入
-  Checkpoint: checkpoint_check_trigger() 命中则 checkpoint_create()
+  Checkpoint: checkpoint_check_trigger() 命中则 checkpoint_begin()
 设计思路：留 NAND 带宽给突发 IO，后台任务"慢慢做"
 ```
 
@@ -3655,6 +3743,9 @@ void ftl_service(ftl_context_t *ftl) {
 
     if (ftl->bg_suspend != 0U) return;   /* `bbt --erase` 后整体跳过 Phase 3 */
 
+    /* 阶段 6：跨档位推进已在飞的 Checkpoint job（可能在 BUSY 档被紧急水位起） */
+    checkpoint_kick(ftl);
+
     if (inflight == 0U) {
         ftl_service_idle(ftl);
     } else if ((pending_count(ftl) > FTL_PENDING_MAX / 2U) || (queued != 0U)) {
@@ -3681,7 +3772,7 @@ static void ftl_service_idle(ftl_context_t *ftl) {
     (void)wear_flush(&ftl->alloc, ftl->total_writes);
     { uint32_t now = ftl_now_ms();
       if (checkpoint_check_trigger(ftl, now - ftl->cp_timer_start)) {
-          (void)checkpoint_create(ftl); ftl->cp_timer_start = now; } }
+          (void)checkpoint_begin(ftl); ftl->cp_timer_start = now; } }
 }
 
 static void ftl_service_normal(ftl_context_t *ftl) {
@@ -3696,14 +3787,14 @@ static void ftl_service_normal(ftl_context_t *ftl) {
     (void)wear_flush(&ftl->alloc, ftl->total_writes);
     { uint32_t now = ftl_now_ms();
       if (checkpoint_check_trigger(ftl, now - ftl->cp_timer_start)) {
-          (void)checkpoint_create(ftl); ftl->cp_timer_start = now; } }
+          (void)checkpoint_begin(ftl); ftl->cp_timer_start = now; } }
 }
 
 static void ftl_service_busy(ftl_context_t *ftl) {
     /* 只起 1 条 DIRTY 的写回（防 evict 阻塞；阶段 5：只起不等）*/
     l2p_flush_kick(&ftl->cache, 1U);
     /* 紧急 Checkpoint（Journal ≥ 95%）：BUSY 模式不做 GC */
-    if (checkpoint_is_emergency(ftl)) { (void)checkpoint_create(ftl); }
+    if (checkpoint_is_emergency(ftl)) { (void)checkpoint_begin(ftl); }
 }
 ```
 
