@@ -5,9 +5,10 @@
  *   读失败时的三级恢复（读电压重试 → 邻近页辅助 → 显式兜底），
  *   以及 ECC 趋势/read disturb 驱动的「慢死预测」——提前搬空将坏块并退役。
  *
- * 与 wear_leveling.c 的分工：
+ * 与 migrate.c 的分工：
  *   本文件只做**判定与记录**（rr_record_ecc / rr_predictive_scan / rr_retire_block）；
- *   搬移动作由 wear_leveling.c 的 wl_predictive_relocate 执行（它调用本文件的扫描与退役）。
+ *   搬移动作由 migrate.c 的搬移 job 执行（mig_begin_predict 调本文件的扫描，
+ *   MIG_ERASE 完成后调本文件的退役）。
  *
  * 块健康状态机（rr_block_health_t，单调升级）：
  *   HEALTHY → WARNING（ECC 连续上升 ≥RR_ECC_RISING_THRESHOLD）
@@ -115,8 +116,7 @@ static ftl_status_t rr_submit_set_features(ftl_context_t *ftl, uint8_t mode)
 
     /* waiting 先于提交置位、提交失败再回滚：反序（提交成功后才置位）在"完成早于置位"
      * 的路径上会丢掉一次等待状态——本仓单线程顺序主循环下不会发生，但先置位零成本。 */
-    ftl->rr.waiting      = 1U;
-    ftl->rr.stall_rounds = 0U;
+    ftl->rr.waiting = 1U;
 
     if (ftl_op_submit(cmd, FTL_OP_READ_RECOVERY, &ftl->rr) != FTL_OK)
     {
@@ -124,6 +124,11 @@ static ftl_status_t rr_submit_set_features(ftl_context_t *ftl, uint8_t mode)
         (void)fc_command_release(cmd);
         return FTL_AGAIN;
     }
+
+    /* ⚠ 卡死计数在**提交成功之后**才清零（不是准备成功时）：`ftl_op_submit` 自身失败
+     *   （完成表满 / SQ 满）也是一轮"提交不出去"，若在此前清零则计数永远停在 1、
+     *   中止判据 RR_SUBMIT_STALL_MAX 永不触发。 */
+    ftl->rr.stall_rounds = 0U;
 
     return FTL_OK;
 }
@@ -139,8 +144,7 @@ static ftl_status_t rr_submit_read(ftl_context_t *ftl, nand_pba_t pba, const ftl
         return FTL_AGAIN;
     }
 
-    ftl->rr.waiting      = 1U;
-    ftl->rr.stall_rounds = 0U;
+    ftl->rr.waiting = 1U;
 
     if (ftl_op_submit(cmd, FTL_OP_READ_RECOVERY, &ftl->rr) != FTL_OK)
     {
@@ -148,6 +152,11 @@ static ftl_status_t rr_submit_read(ftl_context_t *ftl, nand_pba_t pba, const ftl
         (void)fc_command_release(cmd);
         return FTL_AGAIN;
     }
+
+    /* ⚠ 卡死计数在**提交成功之后**才清零（不是准备成功时）：`ftl_op_submit` 自身失败
+     *   （完成表满 / SQ 满）也是一轮"提交不出去"，若在此前清零则计数永远停在 1、
+     *   中止判据 RR_SUBMIT_STALL_MAX 永不触发。 */
+    ftl->rr.stall_rounds = 0U;
 
     return FTL_OK;
 }
@@ -596,13 +605,13 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
  *   返回：1 找到；0 未找到。
  *   实现要点：只针对 CLOSED 块（Open 还在写、Free 无数据、Bad/Reserved 已退役）；
  *             命中条件 = health ≥ CRITICAL **或** read_count ≥ RR_READ_DISTURB_THRESHOLD
- *             （慢死第一信号）。调用者 wl_predictive_relocate 用 sb_id 反查 Closed 条目。
+ *             （慢死第一信号）。调用者 mig_begin_predict 用 sb_id 反查 Closed 条目。
  * -------------------------------------------------------------------- */
 int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
 {
     uint16_t i;
 
-    /* 层内接口：唯一调用者 wl_predictive_relocate 传 &ftl->alloc 与局部 gblock */
+    /* 层内接口：唯一调用者 mig_begin_predict 传 &ftl->alloc 与局部 gblock */
     ASSERT(alloc != NULL);
     ASSERT(alloc->blocks != NULL);
     ASSERT(gblock != NULL);
@@ -642,7 +651,7 @@ int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
  * -------------------------------------------------------------------- */
 void rr_retire_block(ftl_block_t *b)
 {
-    /* 层内接口：唯一调用者 wl_predictive_relocate 传 &ftl->alloc.blocks[gblock] */
+    /* 层内接口：唯一调用者 ftl_op_migrate（MIG_ERASE 完成分支）传 &ftl->alloc.blocks[gblock] */
     ASSERT(b != NULL);
 
     /* 退役：不再分配新数据（RESERVED = Spare Pool 语义），不标坏（BBT 不删、仍可读） */

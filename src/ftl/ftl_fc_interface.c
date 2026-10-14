@@ -902,6 +902,56 @@ ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const 
 }
 
 /* --------------------------------------------------------------------
+ * ftl_async_write_page_cw
+ *   功能：CW 级建链 + 按页内偏移散射搬入数据，**不提交**，命令经 out_cmd 交回。
+ *   参数：out_cmd —— 出参命令（非 NULL）；pba —— 目标页；page_buf —— **整页镜像**
+ *         （PAGE_MAIN_SIZE 字节，CW c 的数据在 page_buf + c×512）；
+ *         cw_bitmap —— 要编的 CW（flat 字面位图，须落在本命令 plane 段内）；
+ *         cfg —— 页配置（lba 必须是**本页**的页 LBA）。
+ *   返回：FTL_OK / FTL_AGAIN（命令池空）/ FTL_ERROR（入参或地址非法 / 建链失败 / 搬数据失败）。
+ *   实现要点：与同步版 ftl_sync_write_page_cw 逐字共用 page_prepare_alloc +
+ *             手工地址绑定（**不走 pba_to_cmd**：它的语义是「整段访问」，重载它会让
+ *             「整段 vs 子集」这个关键差别从调用点消失）+ ftl_cmd_write_data_cw。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_async_write_page_cw(fc_command_t **out_cmd, nand_pba_t pba, const uint8_t *page_buf, uint32_t cw_bitmap, const ftl_page_cfg_t *cfg)
+{
+    fc_command_t *cmd;
+
+    if ((out_cmd == NULL) || (page_buf == NULL))
+    {
+        return FTL_ERROR;
+    }
+
+    cmd = page_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
+    if (cmd == NULL)
+    {
+        return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
+    }
+
+    /* 边界不变量同 pba_to_cmd：进 FC 的 ch/ce/lun 被当 suspended[][][] 下标直接用。 */
+    ASSERT(pba_is_valid(pba));
+    cmd->config.ch  = (DWORD)pba_to_ch(pba);
+    cmd->config.ce  = (DWORD)pba_to_ce(pba);
+    cmd->config.lun = (DWORD)pba_to_lun(pba);
+    cmd->paa        = pba_to_paa(pba);
+
+    if (ftl_cmd_configure_descriptors(cmd, cw_bitmap) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    if (ftl_cmd_write_data_cw(cmd, page_buf, cw_bitmap) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    *out_cmd = cmd;
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
  * ftl_async_erase_block
  *   功能：建链（无数据），**不提交**，命令经 out_cmd 交回。
  *   参数：out_cmd —— 出参命令（非 NULL）；pba —— 目标块 PBA。

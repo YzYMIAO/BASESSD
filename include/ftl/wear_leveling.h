@@ -76,29 +76,10 @@ int wl_should_trigger(const struct ftl_context *ftl);
 int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim);
 
 /*
- * wl_relocate - 搬移 WL victim 的所有有效数据
- *
- * 流程（与 GC 搬移一致）：
- *   ① 逐页索引遍历双 Plane，**逐 CW** 查 L2P 判有效性
- *   ② 读页（`gc_read_page_with_lba`，容忍页内空洞）→ 逐 CW 反查 L2P 确认有效
- *   ③ 逐页索引**成对**分配 Cold Super Block 新位置，只编有效 CW（`ftl_sync_write_page_cw`）
- *   ④ 更新 L2P Cache + Journal 记录
- *   ⑤ 擦除双 Block + 递增擦除计数
- *   ⑥ 归还 Free Pool
- *
- * @param ftl    FTL 上下文
- * @param victim 要搬移的 victim
- * @return SSD_STATUS_OK 成功，SSD_STATUS_IO_ERROR 失败
+ * ⚠ 搬移（原 wl_relocate / wl_execute / wl_predictive_relocate）已随阶段 4 迁入
+ *   `ftl/migrate.h` 的异步 job：GC 与 WL 共用同一台引擎，`mig_begin_wl` /
+ *   `mig_begin_predict` 是这两个站点的入口（本文件只留触发判定与选块策略）。
  */
-int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim);
-
-/*
- * wl_execute - 执行一轮静态 WL（should_trigger + select + relocate）
- *
- * @param ftl  FTL 上下文
- * @return 搬移的页数（>0 = 执行了搬移），0 = 未执行
- */
-int wl_execute(struct ftl_context *ftl);
 
 /*
  * wl_max_erase - 获取最大擦除次数
@@ -119,18 +100,5 @@ uint32_t wl_avg_erase(const struct ftl_context *ftl);
  * wl_count_blocks_below - 统计擦除次数低于阈值的 Block 数
  */
 uint32_t wl_count_blocks_below(const struct ftl_context *ftl, uint32_t threshold);
-
-/*
- * wl_predictive_relocate - 慢死预测巡检 + 整体搬移
- *
- * 企业级 Predictive Failures 做法：后台周期扫 Closed 块 ECC 健康，
- * 命中 health ≥ CRITICAL 的慢死块 → 整 Super Block 搬移（wl_relocate）
- * → 双 plane 块退役（不再分配新数据，不标坏）。
- * 接入 ftl_service_idle（带时间节流）。
- *
- * @param ftl  FTL 上下文
- * @return 1 完成一轮搬移，0 无命中
- */
-int wl_predictive_relocate(struct ftl_context *ftl);
 
 #endif /* FTL_WEAR_LEVELING_H */

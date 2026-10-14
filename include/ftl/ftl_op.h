@@ -51,8 +51,8 @@ typedef enum
     FTL_OP_HOST_IO,       /* host 读写子操作（原 FC_COMMAND_MODULE_FTL 分支） */
     FTL_OP_JOURNAL,       /* Journal 刷页 job（journal.c，阶段 2 点亮） */
     FTL_OP_READ_RECOVERY, /* Read Recovery job（read_recovery.c，阶段 3 点亮） */
-    FTL_OP_GC,            /* 阶段 4 */
-    FTL_OP_WL,            /* 阶段 4 */
+    FTL_OP_GC,            /* GC 搬移 job（migrate.c，阶段 4 点亮） */
+    FTL_OP_WL,            /* 静态 WL / 慢死预测搬移 job（migrate.c，阶段 4 点亮） */
     FTL_OP_L2P,           /* 阶段 5 */
     FTL_OP_CHECKPOINT,    /* 阶段 6 */
     FTL_OP_BBT,           /* 阶段 7 */
@@ -130,6 +130,16 @@ void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completi
  * 释放被托管的 pending 槽并让 host 读组结算。每条命令自己 fc_command_release。
  */
 void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+
+/*
+ * ftl_op_migrate - 搬移 job（GC / 静态 WL / 慢死预测）的完成服务函数（定义在 migrate.c）。
+ *
+ * 由 g_op_service[FTL_OP_GC] 与 [FTL_OP_WL] **共同**引用（同一台引擎，靠 job.kind
+ * 区分 victim 来源、job.post 区分收尾）；ctx = `mig_job_t *`（= &ftl->mig）。
+ * 服务函数按 job.phase 推进（读完成 ⇒ 解 META + 反查 L2P；写完成 ⇒ 改 L2P/Journal +
+ * 迁移有效计数；擦完成 ⇒ 归还/退役/标坏），每条命令自己 fc_command_release。
+ */
+void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
 /* ── 同步等待器（FTL_OP_SYNC_WAIT 的 ctx）──
  *

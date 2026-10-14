@@ -21,6 +21,7 @@
 #include "ftl/journal.h"
 #include "ftl/l2p_cache.h"
 #include "ftl/metadata.h"
+#include "ftl/migrate.h"
 #include "ftl/pending.h"
 #include "ftl/read_recovery.h"
 
@@ -157,13 +158,19 @@ typedef struct ftl_context
 
     /* GC 进展计数（per-instance，只增不减，纯观测）。
      * ⚠ 为什么需要：`trig=` 常亮**不能区分**「在推进」与「卡死」——两种情况打的是同一行。
-     * 卡死链路：gc_select_victim 选不出 victim ⇒ ftl_gc_reclaim_one 返 0 ⇒ 空闲池只出不进
+     * 卡死链路：gc_select_victim 选不出 victim ⇒ mig_begin_gc 返 0 ⇒ 空闲池只出不进
      * （`allocator_close_sb` 的 valid 顺序缺陷 cf604ba 就是这个形态：条目对 GC/WL 永久不可见
      * ⇒ free_count 掉到 0 后永不回升、写最终永久失败）。
      * 判据：两次心跳之间 gc_reclaimed_count 不动、gc_novictim_count 在涨 = 卡死。
-     * 自增点在 ftl_gc_reclaim_one 内 ⇒ IDLE 补池突发与 NORMAL 单发两条路径都覆盖。 */
+     * 自增点：reclaimed 在 mig_finish 的 MIG_DONE（阶段 4 起，原 ftl_gc_reclaim_one），
+     * novictim 在 mig_begin_gc ⇒ IDLE 补池与 NORMAL 单发两条路径都覆盖。 */
     uint32_t gc_reclaimed_count; /* 累计成功回收的 SB 数 */
     uint32_t gc_novictim_count;  /* 累计「触发但选不出 victim」次数 */
+
+    /* 搬移 job（阶段 4：GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
+     * ⚠ 含 4KB 页镜像（page_buf），是本结构体里**新增的最大一块** —— 原先在
+     *   gc_migrate_sb / wl_relocate 的栈上，异步化后必须常驻（栈帧早已返回）。 */
+    mig_job_t mig;
 
     /* Read Recovery：per-Block ECC 趋势追踪已并入 alloc.blocks[].rr（BST 单数据源）；
      * 本结构 v0.75 阶段 3 起 = 异步恢复 job 状态机本体（见 read_recovery.h） */

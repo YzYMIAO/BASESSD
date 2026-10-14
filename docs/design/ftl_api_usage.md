@@ -857,18 +857,21 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 
     Phase 3 ── 三级后台模式（判据 = 未决命令数近似空闲度，非"本轮有无提交 NAND"）
     ⚠ `bg_suspend` 置位（`bbt --erase` 后）⇒ 整体跳过 Phase 3，直接 return。
+    ⚠ v0.75 阶段 3/4 起：rr_kick() / mig_service() **任何档位都要跑**——RR 的 host 读
+      在等结果，搬移 job 可能是在 BUSY 档被写路径紧急 GC 起的，不占后台带宽预算。
     ├── IDLE 模式 (inflight == 0):               全力后台
+    │   ├── rr_kick() / mig_service()     ← 推进在飞的 RR / 搬移 job
     │   ├── l2p_cache_flush_all()
-    │   ├── GC：ftl_gc_evaluate 命中 ⇒ 全力补池到水位① (FREE_POOL_TARGET)
-    │   ├── wl_execute()                  ← 磨损均衡
-    │   ├── wl_predictive_relocate()      ← 慢死预测巡检（节流 1s）
-    │   ├── journal_flush_page() / bbt_flush() / wear_flush()
+    │   ├── GC：ftl_gc_evaluate 命中 ⇒ mig_begin_gc() 起**一个**搬移 job
+    │   ├── mig_begin_wl()                ← 磨损均衡（触发判定在函数内）
+    │   ├── mig_begin_predict()           ← 慢死预测巡检（节流 1s）
+    │   ├── journal_kick() / bbt_flush() / wear_flush()
     │   └── checkpoint_create() (按需)
     │
     ├── NORMAL 模式 (pending ≤ MAX/2 且无排队组):  适度后台
     │   ├── l2p_cache_flush_background(4)
-    │   ├── GC：ftl_gc_evaluate 命中 ⇒ 回收一个 SB（与 IDLE 同一求值点）
-    │   ├── wl_execute() (按 wl_should_trigger)
+    │   ├── GC：ftl_gc_evaluate 命中 ⇒ mig_begin_gc() 起一个 SB 的 job（同一求值点）
+    │   ├── mig_begin_wl()
     │   └── checkpoint_create() (按需)
     │
     └── BUSY 模式 (pending > MAX/2 或 queued != 0):  最小后台（host 饿着，让路）
@@ -876,7 +879,9 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
         └── checkpoint_create() (仅 emergency≥95%)
 ```
 
-> `inflight = pending_count + pending_group_count + completion_table_count`。
+> `inflight = pending_count + pending_group_count`（⚠ v0.75 阶段 4 起**不再计入
+> `completion_table_count`**：后台 job 的命令也登记在那里，计进来会让"真空闲"永不成立，
+> 后台反被自己的命令饿死；后台活跃度由各自的单飞行门单独管）。
 > ⚠ `main.c` 的主循环**遍历全部实例**调 `ftl_service`（序 4：只跑 `[0][0][0]` 会让其余实例的
 > journal / checkpoint / wear / bbt / GC 永不推进）；`ftl_service_pump()` 每轮只调一次。
 
@@ -935,7 +940,8 @@ include/ftl/
 ├── l2p_cache.h                  # L2P Cache + CLOCK 替换 + thrashing 检测
 ├── allocator.h                  # Allocator + Super Block + OP/Spare 池
 ├── journal.h                    # Journal + 四层保护
-├── gc.h                         # GC 搬移 + 触发条件
+├── gc.h                         # GC 触发条件 + 选 victim（搬移在 migrate.h）
+├── migrate.h                    # 搬移 job（mig_job_t / mig_begin_* / mig_service），v0.75 阶段 4
 ├── metadata.h                   # ★ 固定元数据区布局（单一事实来源）+ FTL_MEDIA_LAYOUT_VERSION + Metadata Directory
 ├── pending.h                    # Pending Request 表 + 完成组表
 ├── completion_table.h           # 统一完成路由表（表项只留 ctx，v0.75）
@@ -953,8 +959,9 @@ src/ftl/
 ├── ftl_fc_interface.c           # PBA helper + 同步/异步 NAND 操作实现
 ├── l2p_cache.c                  # CLOCK evict + Region load/flush + thrashing
 ├── allocator.c                  # Free Pool + OP/Spare + 磨损均衡
-├── journal.c                    # append/flush_page/replay/truncate
-├── gc.c                         # gc_read_page_with_lba + 7 步搬移
+├── journal.c                    # append/flush_page/replay/truncate + 刷页 job（v0.75 阶段 2）
+├── gc.c                         # 选 victim（gc_select_victim）+ gc_read_page_with_lba
+├── migrate.c                    # GC/WL/慢死预测共用搬移 job（v0.75 阶段 4）
 ├── metadata.c                   # Directory init/lookup/update/flush/load + g_ftl_partitions[] 分区表
 ├── pending.c                    # Pending 表 + 组 add/lookup/remove
 ├── completion_table.c           # 统一完成泵（唯一出口 ftl_op_dispatch，v0.75）
@@ -964,7 +971,7 @@ src/ftl/
 ├── wear.c                       # 磨损计数页式追加日志
 ├── read_recovery.c              # Read Retry + 邻近页辅助 + 恢复 job 状态机（v0.75 阶段 3）
 ├── power_failure_recovery.c     # 三类启动 + 介质版本校验/自动格式化
-└── wear_leveling.c              # 三条件触发 + victim 选择 + 搬移
+└── wear_leveling.c              # 三条件触发 + victim 选择（搬移在 migrate.c）
 ```
 
 ---

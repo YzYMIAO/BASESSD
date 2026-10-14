@@ -13,16 +13,23 @@
  *   ④ 有效页 → 搬移到新的 Cold Super Block
  *   ⑤ 擦除双 Plane Block → 归还到 Free Pool
  *
+ * ⚠ ②~⑤ 的执行体**不在本文件**（阶段 4 起）：搬移是一个异步 job，GC 与 WL 共用同一台
+ *   引擎，见 `ftl/migrate.h` / `migrate.c`（mig_job_t + mig_begin_gc / mig_begin_wl /
+ *   mig_service + ftl_op_migrate）。本文件只留**选 victim 与共用原语**：
+ *   · gc_select_victim   —— 四项加权评分（GC 侧选块策略）
+ *   · gc_read_page_with_lba / gc_decode_cw_lba —— 搬移读与 META 解码（GC / WL / 掉电重建共用）
+ *   · gc_check_triggers  —— 触发判定
+ *   原 gc_migrate_sb / gc_erase_and_free 已随阶段 4 迁入 migrate.c 的 job 状态机。
+ *
  * 原子性：
  *   Journal 记录每一条 L2P 变更
  *   掉电时最多遗留"孤悬"Block，下次 GC 回收
  */
 
+#include "fc/fc_command.h"    /* fc_command_t（gc_decode_cw_lba 的形参） */
 #include "ftl/allocator.h"    /* ftl_allocator_t, super_block_t */
 #include "ftl/ftl_config.h"   /* nand_pba_t */
 #include "ftl/ftl_type.h"     /* lba_t */
-#include "ftl/journal.h"      /* l2p_journal_t */
-#include "ftl/l2p_cache.h"    /* l2p_cache_t */
 #include "nand/nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
 
 #include <stdint.h>
@@ -70,7 +77,7 @@
  * ⚠ GC_WEAR_LEVEL_MIN_ERASE 是**地板**：max 没到该值前不触发。没有它时，早期
  *   （max 才擦过几次）就可能满足比例条件而反复空跑 GC。
  * ⚠ 另要求 min > 0：对 0 求比值无意义（"从未被擦过的块"是**静态磨损均衡**
- *   wl_execute 的职责——它专门搬冷数据；T5 只管"所有块都在轮转、但轮得不均"）。 */
+ *   mig_begin_wl 的职责——它专门搬冷数据；T5 只管"所有块都在轮转、但轮得不均"）。 */
 #define GC_WEAR_LEVEL_RATIO     (10U) /* 最大/最小擦除比阈值 */
 #define GC_WEAR_LEVEL_MIN_ERASE (64U) /* 地板：max 擦除次数低于此值不触发 T5 */
 
@@ -80,7 +87,9 @@
  * gc_read_page_with_lba - 读取一页 NAND，返回用户数据 + 逐 CW 的扇区 LBA
  *
  * 内部管理 FC 命令生命周期，无需调用者关心 alloc/submit/release。
- * 可被 GC、WL 等需要读 NAND + 取 LBA 的模块复用。
+ * ⚠ 唯一调用者是**掉电重建**（ftl_rebuild_closed_sb_list 的逐页反查，开机结构性同步路径）。
+ *   搬移读（GC / WL / 慢死预测）自阶段 4 起走异步路径：migrate.c 用 ftl_async_read_page
+ *   建命令、在完成服务函数里调下面的 gc_decode_cw_lba 收尾——不经过本函数。
  *
  * ⚠ CW 级映射（IU = 1 CW）+ **DRAM-less approach ③**：本函数读**整页**（该 plane 的
  *   4 个 CW），从每个 CW 的**页内 META（= 本仓的 OOB 反向映射）**取回该 CW 自己的扇区
@@ -92,19 +101,30 @@
  *   此时 CW0 是空位、META 为 0xFFFFFFFF。
  * ⚠ 全页无写过 CW ⇒ 返回 FTL_ERROR（无有效数据，调用者跳过）。
  *
- * B4：同步返回本次读的 4 CW 最大 ECC 纠正 bit 数与"读成功"标志——
- * GC/WL 搬移读是 read disturb 盲区（旧实现不记录 ECC/read_count），
- * 调用方据此 rr_record_ecc + read_count++（慢死预测闭环）。
- *
  * @param pba            物理地址（**页基址**，cw 位为 0）
  * @param buffer         输出：整页用户数据 buffer（FTL_READ_USER_SIZE 字节，可为 NULL）
  * @param cw_lba         输出：逐 CW 的扇区 LBA，CW_NUM 项；未写过 = FTL_LBA_INVALID（不可为 NULL）
  * @param page_base_out  输出：页基址（CW0 的扇区 LBA）（可为 NULL）
- * @param ecc_out        输出：本次读 4 CW 最大 ECC 纠正 bit 数（0..4，可为 NULL）
- * @param read_count_out 输出：1=本次读成功（调用方 ++ 该块 read_count，可为 NULL）
  * @return 0 成功, -1 失败（读失败 / 全页无写过 CW）
  */
-ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba[CW_NUM], lba_t *page_base_out, uint8_t *ecc_out, uint8_t *read_count_out);
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba[CW_NUM], lba_t *page_base_out);
+
+/*
+ * gc_decode_cw_lba - 从**已完成的读命令**的 desc 链解出逐 CW 的扇区 LBA + 页基址
+ *
+ * gc_read_page_with_lba 的后半段（读之后的解码部分），单独导出供**异步**搬移 job 用：
+ * job 的读是 ftl_async_read_page + 服务函数收尾，命令不在 gc_read_page_with_lba 的栈上，
+ * 但解码逻辑必须与同步版**逐字相同**（页基址由首个写过的 CW 反推、低位 plane/cw 自洽校验）。
+ *
+ * ⚠ **必须在 fc_command_release 之前调用**——meta 指针指向命令的 desc 链。
+ *
+ * @param cmd           已完成的读命令（链恒覆盖该 plane 全 4 CW）
+ * @param pba           该命令的目标页 PBA（页基址，cw 位为 0；用于校验 META 的 plane 位）
+ * @param cw_lba        输出：逐 CW 的扇区 LBA，CW_NUM 项；未写过 = FTL_LBA_INVALID
+ * @param page_base_out 输出：页基址（CW0 的扇区 LBA）（可为 NULL）
+ * @return 0 成功（至少一个 CW 写过）；-1 全页无写过 CW（无有效数据，调用者跳过本页）
+ */
+int gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lba_t *page_base_out);
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block
@@ -132,43 +152,6 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
  * @return 1=找到 victim，0=无可用 victim
  */
 int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim);
-
-/*
- * gc_migrate_sb - 搬移一个 victim Super Block 的所有有效 CW
- *
- * 内部流程（CW 级映射 + DRAM-less approach ③）：
- *   ① 快路径：双 plane valid_count 之和 == 0 ⇒ 无可搬移，直接返回
- *   ② 遍历 64 个页索引 × 双 Plane
- *   ③ 对每页：读 NAND → 逐 CW 从**页内 META（= OOB 反向映射）**取回该 CW 的扇区 LBA
- *      → **逐 CW** 用该 LBA 查 L2P
- *   ④ L2P 仍指向 (本页, 本 CW) → 有效，随同 plane 的目标页搬到 Cold Super Block
- *   ⑤ 否则 → 跳过（被覆盖 / TRIM 过的 CW）
- *   ⑥ 搬完 → 擦除双 Block → 归还 Free Pool
- *
- * ⚠ 无常驻位图（v0.60 删）：真有效性**唯一**由「逐 CW META 反查 L2P」判定；
- *   从未写过的页读回全 FF ⇒ ②③ 自然跳过。
- * ⚠ 逐页索引**成对**分配目标页：一个 plane 的有效 CW 必须落到同 plane 的目标页，
- *   否则页内 META 还原出的扇区 LBA 会指错 plane。
- *
- * @param alloc   Allocator 上下文
- * @param cache   L2P Cache
- * @param journal Journal（记录搬移导致的 L2P 变更）
- * @param victim  要搬移的 victim Super Block
- * @return 搬移的**有效 CW 数**
- */
-int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *journal, super_block_t *victim);
-
-/*
- * gc_erase_and_free - 擦除 victim Block 并归还到 Free Pool
- *
- * 擦除成功后从 Closed 列表移除 victim（swap-remove，修 list 只增不减），
- * 记录 last_pe_ts = now（单调写入量时间戳）。
- *
- * @param alloc   Allocator 上下文
- * @param victim  已搬完的 victim Super Block
- * @param now     当前单调时间戳（ftl->total_writes）
- */
-void gc_erase_and_free(ftl_allocator_t *alloc, super_block_t *victim, uint32_t now);
 
 /*
  * gc_check_triggers - 检查是否需要触发 GC，并返回**触发起因位掩码**

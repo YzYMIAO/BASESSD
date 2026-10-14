@@ -4066,15 +4066,17 @@ free pool 水位**降 254 块**（预留 254 → 508）。用户容量由 L2P re
 
 ---
 
-## v0.75 — 命令「提交」与「完成」解耦（阶段 1 机制 + 阶段 2 Journal 刷页异步 + 阶段 3 Read Recovery 异步）
+## v0.75 — 命令「提交」与「完成」解耦（阶段 1 机制 + 阶段 2 Journal 刷页异步 + 阶段 3 Read Recovery 异步 + 阶段 4 GC / WL 搬移异步）
 
 **日期**：2026-10-14
 
 **范围**：`include/fc/fc_command.h`、`src/fc/fc.c`、新增 `include/ftl/ftl_op.h` +
-`src/ftl/ftl_op.c`、`include/ftl/{completion_table,ftl,ftl_fc_interface,journal,metadata,bst,
-pending,read_recovery,ftl_type}.h`、`src/ftl/{ftl,ftl_op,completion_table,ftl_fc_interface,
-journal,bbt,checkpoint,gc,l2p_cache,metadata,pending,power_failure_recovery,read_recovery,
-wear,wear_leveling}.c`、`src/controller/{controller,scheduler}.c`、`tests/unit/*`。
+`src/ftl/ftl_op.c`、新增 `include/ftl/migrate.h` + `src/ftl/migrate.c`、
+`include/ftl/{completion_table,ftl,ftl_fc_interface,journal,metadata,bst,pending,
+read_recovery,gc,wear_leveling,ftl_type}.h`、`src/ftl/{ftl,ftl_op,completion_table,
+ftl_fc_interface,journal,bbt,checkpoint,gc,migrate,l2p_cache,metadata,pending,
+power_failure_recovery,read_recovery,wear,wear_leveling}.c`、`src/controller/{controller,
+scheduler}.c`、`tests/unit/*`。
 
 ### 起因：FTL 里只有 host 读写是异步的，其余全是「提交后当场等」
 
@@ -4371,45 +4373,168 @@ ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t 
 修：只留 `ftl_op.h`（那是 `g_op_service[]` 各槽的**唯一权威列表**），`read_recovery.h` 处
 换成指向它的注释。
 
+### 阶段 4 —— GC / WL 搬移异步（本次）
+
+**动机**：单次搬移 = 最多 64 页 × 2 plane 的读 + 写 + 2 次擦，同步执行可阻塞数十毫秒；
+而 `ftl_wbuf_flush`（host 写路径的"紧急 GC"）把这一整套搬到了 **host 写完成**的路径上
+⇒ 完成泵被长时间占住，且是**最后一个嵌套泵**（`gc_migrate_sb → journal_flush_page`）。
+
+#### 收敛：三个逐字同构的搬移主体合成**一台** job
+
+原实现是三份近似复制：`gc.c` 的 `gc_migrate_sb` + `gc_erase_and_free`、
+`wear_leveling.c` 的 `wl_relocate` + `wl_execute` + `wl_predictive_relocate`。
+它们的搬移主体逐字同构，差别只有两处：
+
+| 维度 | GC | 静态 WL | 慢死预测 |
+|---|---|---|---|
+| 谁当 victim | `gc_select_victim` | `wl_select_victim` | `rr_predictive_scan` |
+| 擦完怎么处置 | 归还 Free Pool | 归还 + **退役** | 归还 + **退役** |
+
+⇒ 收敛成**一个** `mig_job_t`（新增 `include/ftl/migrate.h` / `src/ftl/migrate.c`）：
+`kind`（`MIG_KIND_GC/WL/PREDICT`）选 victim，`post`（`MIG_POST_FREE/RETIRE`）决定收尾。
+`g_op_service[]` 的 `[FTL_OP_GC]` 与 `[FTL_OP_WL]` **两槽填同一个** `ftl_op_migrate`
+（tag 由 `mig_op_tag(m)` 按 `post` 现算）——搬移引擎不关心是谁发起的。
+
+`gc.c` / `wear_leveling.c` 现在只剩**选块策略**与共用原语，`ftl.c` 只剩**触发求值**与
+`mig_begin_*` 启动；回收动作 `ftl_gc_reclaim_one` 删除。
+
+#### 状态机
+
+```
+SELECT（在 mig_begin_* 里做，不是 job 阶段）
+    → READ → WRITE → FLUSH_JRN → ERASE → DONE
+```
+
+- **READ** 逐页逐 plane：异步读 → 完成时解 META 得 `cw_lba`、逐 CW 反查 L2P 得
+  `cw_bitmap`、记 `rr_record_ecc` / `read_count`（慢死预测闭环）。读失败 / 全页空洞 ⇒ 跳过该 plane。
+- **WRITE** 本页两 plane 都读完且有有效 CW ⇒ `allocator_alloc_pair(FTL_TEMP_COLD)` 拿目标页，
+  逐 plane 提交 CW 子集写；完成时逐 CW `l2p_cache_write` + `journal_append` + 有效计数迁移。
+  写失败的 plane **不动 L2P**（源数据仍有效，下轮再搬）。
+- **FLUSH_JRN** 等 Journal job 空闲——**F10 契约**：搬移条目先落盘再擦 victim。
+  `journal_kick` 会冲刷半满页，故该屏障**必然可满足**（不会因"页没满"死等到 256 轮上限）。
+- **ERASE** 逐 plane 异步擦：成功 `erase_count++` / `wear_mark_dirty` / 清 valid / 归还 Free Pool；
+  失败 `bbt_mark_bad`。`post == MIG_POST_RETIRE` 时额外 `rr_retire_block`。
+- **DONE** `allocator_remove_closed_sb` + `gc_reclaimed_count++`（进展计数）/+ 预测命中日志。
+
+**stage 语义约定同 `rr_stage_t`**：纯计算 phase（`FLUSH_JRN` / `DONE`）只从 `mig_step` 进入、
+跑完立刻转下一个（不提交命令）；提交 phase（`READ` / `WRITE` / `ERASE`）由 `mig_step` 提交后
+**原地停留**，等 `ftl_op_migrate` 改写。判「有没有命令在飞」用 `waiting` 而**不是** `phase`：
+提交可能因背压失败（`phase` 不变但无命令）。
+
+#### 与同步版的**行为差异**（刻意，三条都登记在案）
+
+1. **分配不到目标页 ⇒ 中止且不擦 victim**。原 `gc_migrate_sb` 在 `allocator_alloc_pair` 失败时
+   `break` 出页循环，而其调用者 `ftl_gc_reclaim_one` **无条件**接着 `gc_erase_and_free`
+   ⇒ **擦掉尚未搬移的有效页 = 静默丢数据**。本引擎改为中止 job（源数据仍在、L2P 未动、
+   条目留在 `closed_sb_list`），下轮 GC 再来 —— 自愈且不丢数据。
+2. **擦除失败时不再退役**。原 `wl_predictive_relocate` 在 `wl_relocate` 返回后**无条件**
+   `rr_retire_block`（即使 `gc_erase_and_free` 已把该块标坏）。本引擎只在**擦除成功**时退役
+   （`post == MIG_POST_RETIRE`）——擦不掉的块归 `bbt_mark_bad` 管，把它同时标成
+   "RESERVED、仍可读"是自相矛盾的。擦除失败本身是极端分支（NAND 拒擦）。
+3. **新增提交侧卡死计数** `MIG_SUBMIT_STALL_MAX`（256 轮）：原同步版没有这个概念
+   （阻塞调用要么成功要么当场报错）。超限 ⇒ 中止 job（同 1：不擦 victim，数据无损）。
+
+#### 写路径紧急 GC 改**背压**（用户可见的行为变化）
+
+`ftl_wbuf_flush` 今天"分配不到块 → 同步 GC 重试一次"；改为 **分配不到 ⇒
+`mig_begin_gc(ftl)`（若未在跑）+ 返回 `FTL_AGAIN`**（缓冲保留，`ftl_drain_group` 下轮重试）。
+与既有 `FTL_AGAIN` 背压机制完全一致，也是主流做法（写路径不就地回收，取不到块就挂起主机命令）。
+
+- ⚠ **不再返回 `FTL_ERROR`**：无 victim 可回收只是"暂时没空间"，下轮可能就有（另一条写完成
+  归还了块）；报 IO_ERROR 会让 host 写**永久失败**。
+- **代价**：池满时写延迟升高（等一个 job 走完），但 superloop 不再被 GC 卡死。
+- **死锁边界**：GC 自身搬移需要 free block ⇒ 靠 **OP 预留池**兜底（v0.74 已把 OP 池改成
+  按 plane 预留）；GC job 因池空而中止时（差异 1）不擦 victim、数据无损，下轮重试。
+
+#### 自审中发现并修掉的两处（未流出）
+
+1. **`m->gsrc[plane]` 在快路径下未初始化** ⇒ 擦除收尾会去改**块 0** 的元数据
+   （`erase_count` / `clear_valid` / `allocator_free_block`）。快路径（`valid_total == 0`
+   ⇒ 直接 ERASE）**从不经过 READ 阶段**，任何"读阶段填、擦阶段用"的缓存字段在快路径下
+   都是 0。修：删掉该字段，改由 `mig_src_gblock(m, plane)` **每次现算**
+   （`ftl_gblock(plane, victim.plane_blocks[plane])`）—— 与原 `gc_erase_and_free` 的口径一致。
+2. **`stall_rounds = 0U` 置于 `ftl_op_submit` 之前** ⇒ 提交失败时每轮都清零，
+   `MIG_SUBMIT_STALL_MAX` **永不触发**。修：三处 `mig_submit_*`（`read_recovery.c` 两处
+   `rr_submit_*` 同）改为**提交成功后**才清零。
+
+#### 顺带清理
+
+- `gc_read_page_with_lba` 的两个出参 `ecc_out` / `read_count_out` 随搬移读走异步后**再无
+  读者** ⇒ 删除（`gc.h` 签名、`power_failure_recovery.c:564` 调用点同步）。该函数现只剩
+  一个调用者：掉电重建路径的 `ftl_rebuild_closed_sb_list`。
+- `inflight` 公式切换（**贯穿机制 4**）：`ftl.c` 的三级模式判定改为
+  `pending_count + pending_group_count`，**不再计入 `completion_table`**。后台 job
+  （journal / RR / 搬移）的命令也登记在 completion_table 里，计进来会让"真空闲"永不成立
+  ——一个后台 job 在飞就把模式从 IDLE 顶到 NORMAL，后台反而被自己的命令饿死。后台 job 的
+  活跃度由各自的"单飞行门"（`journal.job.phase` / `rr.stage` / `mig.active`）单独管。
+
+#### 唯一残留的同步调用
+
+`mig_step` 的 READ 阶段在解 META 后逐 CW 反查 L2P 时调 `l2p_cache_read` / `l2p_cache_write`：
+region 未命中会内部同步加载。**与阶段 3 的 `rr_select_plane` 不同，这里 region miss 是
+现实可达的**——搬移读的是**整块**的页，其 LBA 来自页内 META，与刚刚查过的 host LBA 无必然
+联系。彻底关闭留待阶段 5（L2P 加载 job 化）。
+
 ### 判据与实测
 
 | 判据 | 结果 |
 |---|---|
-| `make debug` / `make release` / `make tests UT=FTL` / `UT=FC` | 0 error 0 warning（release 下 `ftl_fc_interface.c:69 'allowed'`、`:85 'plane_bits'` 两条 unused 为**既有**：ASSERT 被裁） |
-| debug `.text` | 192644 → 194676（阶段 1+2，**+2032 B**）→ 196552（阶段 3，**+1876 B**） |
-| debug `.bss` | 381372 → 381404（+32 B）；`g_ftl` 269560 → 269576（阶段 1+2，+16 B）→ **269600**（阶段 3，**+24 B** = `ftl_read_recovery_t` 加宽） |
-| release `.text` / `.bss` | 114352 → 115776（+1424 B）→ **116764**（阶段 3，+988 B）/ 381364 → 381396 → 381428（+32 B） |
-| debug `.bin` / release `.bin` | 197076 B / 117288 B |
+| `make debug` / `make release` / `make tests UT=FTL` / `UT=FC` | 0 error；release 下 `ftl_fc_interface.c:69 'allowed'`、`:85 'plane_bits'` 两条 unused 为**既有**（ASSERT 被裁）——已 `touch` 该文件重建 HEAD 复现同样两条 |
+| debug `.text` | 191688 → 191800（阶段 1）→ 193808（阶段 2）→ 195776（阶段 3）→ **195032**（阶段 4，**−744 B**） |
+| debug `.bss` | 381500 → 381372（阶段 1，**−128 B** = 旁表删 `handler`）→ 381404（阶段 2）→ 381404（阶段 3）→ **385596**（阶段 4，**+4192 B**） |
+| `g_ftl` | 269600 → **273784**（阶段 4，**+4184 B** = `mig_job_t`；其中 4KB 页镜像原在 `gc_migrate_sb` / `wl_relocate` 的**栈**上，迁入 `.bss` 是真实新增） |
+| release `.text` | 114612 → 114352 → 115776 → 116764 → **117108**（阶段 4，**+344 B**） |
+| release `.bss` | 381492 → 381364 → 381396 → 381428 → **385588**（阶段 4，**+4160 B**） |
+| debug `.bin` / release `.bin` | 196300 → **195556** / 117288 → **117628** |
+| AXI_RAM 占用（构建脚本报告） | 284.0 KB（74.0%）→ **288.1 KB（75.0%）**，余量 ≈ 95.9 KB |
 | `_Static_assert(sizeof(g_ftl)+FTL_AXI_RAM_RESERVED <= 384KB)`（`main.c:131`） | 过 |
-| 二进制级核对 | `g_op_service` 48 B = 12 项；`[0]=0`、`[1]=ftl_op_sync_wait`、`[2]=ftl_op_host_io`、`[3]=ftl_op_journal`、**`[4]=ftl_op_read_recovery`**、`[5..11]=0` —— 「ID 在命令上、服务函数在数组里」真的落进了固件 |
-| 全仓 `fc_submit(` 的生产调用点 | 只剩 `ftl_op_submit` 一处（命令一律带 tag） |
-| `rr_recover_read` / `ftl_recover_read_subop` | 全仓 0 引用（旧同步恢复入口已删除） |
-| 测试源 | 无引用需同步（`test_ftl.c` 只 memset `F->rr_page_scratch`，该字段仍在） |
+| 二进制级核对 | `g_op_service` 48 B = 12 项；`[0]=0`、`[1]=ftl_op_sync_wait`、`[2]=ftl_op_host_io`、`[3]=ftl_op_journal`、`[4]=ftl_op_read_recovery`、**`[5]=[6]=ftl_op_migrate`**（GC / WL 共用同一引擎）、`[7..11]=0` |
+| 旧同步搬移入口 | `gc_migrate_sb` / `gc_erase_and_free` / `wl_relocate` / `wl_execute` / `wl_predictive_relocate` / `ftl_gc_reclaim_one` 全仓**只剩注释引用** |
+| `gc_read_page_with_lba` | 形参 6 → 4（删死出参 `ecc_out` / `read_count_out`），唯一调用者是 `ftl_rebuild_closed_sb_list` |
+| 测试源 | 无引用需同步（搬移引擎不进 UT） |
+
+⚠ **体积表已重测**：本次把 v0.74 → 阶段 1/2/3/4 五个提交分别 `git archive` 到干净目录**重新完整
+构建**后取值。此前记下的 debug 行（基线 `192644` / 阶段 1+2 `194676` / 阶段 3 `196552`）**无法
+复现**：实测分别高 956 / 868 / 776 B，且阶段 3 的 `.bin` 同步高 776 B —— 与"当时带着只影响
+debug 的临时探针 / 断言"吻合（release 行与实测**逐字节吻合**，故保留原值）。debug 行已按实测更正。
 
 ⚠ **上板验证未做**（留待用户）。上板判据：
 ① `wr/rd/tr/fl/info/map` 冒烟、断电重启数据仍在；
 ② 开机**无**格式化横幅（`FTL_MEDIA_LAYOUT_VERSION` 未变，仍是 5U）、`info` 的
 free/op/spare 与 v0.74 后一致；
 ③ **写满 Journal 一页时完成回调内不再出现嵌套泵**（阶段 2 的核心判据）；
-④ **构造读失败（注入 ECC 错误）后 RR 不再阻塞完成泵，host 读最终返回**（本阶段的核心判据；
+④ **构造读失败（注入 ECC 错误）后 RR 不再阻塞完成泵，host 读最终返回**（阶段 3 的核心判据；
 成功/失败都报 IO_ERROR 是既有语义，见上）；失败时可见
 `[FTL] read unrecoverable lba=… gblock=… retry=…`，提交侧卡死可见 `[RR] submit stalled`；
-⑤ Journal 刷页 job 的心跳可见（`[JOB]` 心跳尚未加，暂以 `[JRN]` / `[RR]` 失败日志观察）。
+⑤ Journal 刷页 job 的心跳可见（`[JOB]` 心跳尚未加，暂以 `[JRN]` / `[RR]` 失败日志观察）；
+⑥ **搬移期间 host I/O 仍被服务**（**本阶段的核心判据**）：持续写触发 GC 时，
+`wr`/`rd` 与后台搬移在 superloop 上重叠，不再出现"一次 `wr` 卡住数十毫秒"；
+`[GC] … reclaimed=` 持续推进；
+⑦ **池耗尽 + 持续写 ⇒ 写最终成功、不丢数据、不死锁**（**专项**，验证 OP 预留池兜底）：
+写路径取不到块时返回 `FTL_AGAIN` 背压（不再是 `FTL_ERROR`），GC job 推进后写自动完成；
+若 GC 因池空中止，可见 `[MIG] no free block page=… — abort, victim kept` 而**数据无损**；
+⑧ 提交侧卡死可见 `[MIG] stall … rounds — abort`（不擦 victim）。
 
 ⚠ 工具坑（沿用）：`release.elf` 被 strip ⇒ 构建脚本的 SRAM usage 报告对 release 恒 0.0 KB；
 `BIN_DIR` 共享 ⇒ 跑 `make tests` 会覆盖 `debug.elf`，判体积须先重建再量。
+⚠ 体积判定另有两坑：① **源无改动时 `make` 只跑 clang-format 不编译**，此时日志里没有编译
+输出、也**不会**打 SRAM 报告；"0 warning"可能只是没编译 ⇒ 判体积/判告警前必须 `touch` 源。
+② **`make tests` 之后直接 `make debug` 是空操作**（同一 `OBJ_DIR`/`BIN_DIR`，CFLAGS 不被跟踪
+⇒ make 认为已是最新），`size` 读到的是**测试镜像**（`.text` ≈ 272 KB）；必须 `make clean`
+后再 `make debug`。
 
-### 后续（阶段 4~8，本提交不含）
+### 后续（阶段 5~8，本提交不含）
 
-GC·WL 搬移 / L2P region 加载写回 / Checkpoint / BBT·Wear / metadata 目录压缩 ——
-逐个把站点从 `ftl_sync_*` 改成 job + `ftl_op_submit`，`g_op_service[]` 的占位槽随站点改造
-逐个点亮。结构性必须顺序执行的路径（开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI）继续用
+L2P region 加载写回 / Checkpoint / BBT·Wear / metadata 目录压缩 —— 逐个把站点从
+`ftl_sync_*` 改成 job + `ftl_op_submit`，`g_op_service[]` 的占位槽随站点改造逐个点亮。
+结构性必须顺序执行的路径（开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI）继续用
 `ftl_sync_submit_wait`。
 
-已知仍待闭合的项（阶段 4 起）：
-- **最后一个嵌套泵**：host 写路径的紧急 GC（`ftl_wbuf_flush → gc_migrate_sb →
-  journal_flush_page`），随阶段 4 的 mig job 化消除；
-- `ftl_confirm_write` 的 L2P 重查（阶段 5 job 化，**必须保留「完成时重查」不变量**）；
-- `rr_select_plane` 里的 `l2p_cache_read`（阶段 5）；
-- `inflight` 公式切换为只算 host 侧（阶段 4 引入第一个后台 job 时）；
-- per-job 的 `[JOB]` 心跳日志（阶段 2 起欠账，目前只有各功能的失败 LOGE）。
+已知仍待闭合的项：
+- **L2P region 加载**：`ftl_confirm_write` 的 L2P 重查（阶段 5 job 化，**必须保留「完成时
+  重查」不变量**）；`rr_select_plane`（阶段 3）与 `mig_step` 的 READ 阶段（阶段 4）里的
+  `l2p_cache_read` —— 后者 region miss **现实可达**（搬移读的是整块的页，LBA 来自页内
+  META，与刚查过的 host LBA 无必然联系）；
+- `l2p_cache_flush_one` 内部仍会调 `metadata_dir_append_slot`（取空槽可能换块 ⇒ 擦），
+  阶段 5 先不拆，阶段 8 再拆；
+- per-job 的 `[JOB]` 心跳日志（阶段 2 起欠账，目前只有各功能的失败 LOGE / LOGW）。

@@ -561,7 +561,7 @@ static void close_full_block(ftl_context_t       *ftl,
 
         /* 读失败 / 全页无写过 CW → 该页不可用，跳过。
          * CW 级映射：逐 CW 从页内 META（= OOB 反向映射）取回扇区 LBA。 */
-        if (gc_read_page_with_lba(pba, NULL, cw_lba, NULL, NULL, NULL) != FTL_OK)
+        if (gc_read_page_with_lba(pba, NULL, cw_lba, NULL) != FTL_OK)
         {
             continue;
         }

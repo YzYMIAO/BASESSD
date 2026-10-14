@@ -36,13 +36,17 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
  *   · FTL_OP_SYNC_WAIT：所有 ftl_sync_* 经 ftl_sync_submit_wait 登记 ctx 后走这里；
  *   · FTL_OP_HOST_IO  ：host 数据读写子操作（原 ftl_op_host_io 的 FTL 分支）；
  *   · FTL_OP_JOURNAL  ：Journal 刷页 job（阶段 2，ctx = &ftl->journal）；
- *   · FTL_OP_READ_RECOVERY：Read Recovery job（阶段 3，ctx = &ftl->rr）。
- * 其余枚举值是后续阶段（4~8）的占位，随各站点改造逐个填。 */
+ *   · FTL_OP_READ_RECOVERY：Read Recovery job（阶段 3，ctx = &ftl->rr）；
+ *   · FTL_OP_GC / FTL_OP_WL：搬移 job（阶段 4，ctx = &ftl->mig）——**同一台引擎**，
+ *     tag 分开只为日志/调试可辨（GC 回收 vs WL/预测退役）。
+ * 其余枚举值是后续阶段（5~8）的占位，随各站点改造逐个填。 */
 static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_SYNC_WAIT]     = ftl_op_sync_wait,
     [FTL_OP_HOST_IO]       = ftl_op_host_io,
     [FTL_OP_JOURNAL]       = ftl_op_journal,
     [FTL_OP_READ_RECOVERY] = ftl_op_read_recovery,
+    [FTL_OP_GC]            = ftl_op_migrate,
+    [FTL_OP_WL]            = ftl_op_migrate,
 };
 
 /* ── 2. 提交 ── */

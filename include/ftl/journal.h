@@ -23,7 +23,8 @@
  * 写模型（阶段 2 起）：
  *   追加进 RAM 页缓冲（page_buf）——**页满不再同步落盘**，而是交给异步 job
  *   （journal_kick / g_op_service[FTL_OP_JOURNAL]），使 host 写完成回调里不再嵌套
- *   完成泵。需要屏障语义的调用者（GC/WL 的 F10、HIL `fl`）显式调 journal_flush_page。
+ *   完成泵。需要屏障语义的调用者显式调 journal_flush_page（阶段 4 起只剩结构性同步
+ *   上下文：HIL `fl` / 开机路径 / CLI——GC/WL 的 F10 已改走 journal_kick 的异步等待）。
  */
 
 #include "ftl/ftl_config.h" /* nand_pba_t */
@@ -73,8 +74,11 @@ typedef struct
  * 单飞行：phase != JRN_IDLE 时不再起新页写（否则两条写会争同一个页地址）。
  * 页满且 job 忙 ⇒ 调用者走**同步回退**（journal_flush_page），即改造前的行为。
  * ⚠ 该回退在 host 写路径上**不可达**：页满需要 127 次 append，而单次
- *   completion_table_drain 最多处理 CQ 深度（64）条完成；只有 GC/WL/开机这些
- *   **本就是同步上下文**的批量 append 循环会走到它。 */
+ *   completion_table_drain 最多处理 CQ 深度（64）条完成。
+ * ⚠ 阶段 4 起**派发上下文**里的批量 append（搬移 job 的写完成，一次至多 8 条）也
+ *   不走该回退——journal_append 在派发内改为**丢弃本条 + LOGE**（见 journal.c），
+ *   整页留给 journal_kick 下轮刷。故同步回退的实际入口只剩开机回放 / TRIM 等
+ *   本就在同步上下文里的调用者。 */
 typedef enum
 {
     JRN_IDLE = 0, /* 无在飞 */

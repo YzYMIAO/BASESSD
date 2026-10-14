@@ -483,9 +483,10 @@ static void journal_flush_now(l2p_journal_t *journal)
  *             HIL `fl`（已持久化映射落盘）。host 写路径的常规刷页走 journal_kick。
  *             ⚠ drain 超时（命令丢失 / NAND 卡死）时**不静默**：LOGE 后仍走同步刷，
  *             因为 job 的指针推进有 from_* 守卫（见 ftl_op_journal），不会造成回退。
- *             ⚠ **已知的残留嵌套点**：host 写路径的紧急 GC（ftl_wbuf_flush →
- *             gc_migrate_sb → 本函数）仍在完成回调里跑这个 drain。它是阶段 2 **之前**
- *             就存在的（那时整条 GC 都是同步的），留待阶段 4 的搬移 job 消除。
+ *             ⚠ 阶段 4 起 host 写路径的紧急 GC 已改为**背压**（ftl_wbuf_flush 起 GC job
+ *             + 返 FTL_AGAIN），不再在完成回调里跑这个 drain；搬移 job 的 F10 屏障也
+ *             改走 journal_kick（异步），不再调本函数。故本函数的**唯一**调用者只剩
+ *             结构性同步上下文（HIL `fl`、开机路径、CLI）。
  *             journal_append 自己的同步回退已由 ftl_op_in_dispatch 挡住，不会新增。
  * -------------------------------------------------------------------- */
 void journal_flush_page(l2p_journal_t *journal)

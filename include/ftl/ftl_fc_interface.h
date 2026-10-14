@@ -36,9 +36,10 @@
  *      此处收敛为 4 个公共函数 + ftl_page_cfg_t 配置结构。
  *
  * 【异步页级原语】（阶段 2 起）
- *   ⑩ ftl_async_write_page / ftl_async_erase_block / ftl_async_read_page /
- *      ftl_async_set_features — 只建链 + 搬数据，**不提交**；命令交回调用者，由调用者
- *      ftl_op_submit(cmd, <功能 op>, ctx)。服务函数负责 fc_command_release。
+ *   ⑩ ftl_async_write_page / ftl_async_write_page_cw / ftl_async_erase_block /
+ *      ftl_async_read_page / ftl_async_set_features — 只建链 + 搬数据，**不提交**；
+ *      命令交回调用者，由调用者 ftl_op_submit(cmd, <功能 op>, ctx)。服务函数负责
+ *      fc_command_release。
  *      写/擦与 ⑧ 共用同一套 prepare 模板；**读**的数据留在 desc 链上（非 prepare 拷贝）
  *      ⇒ 目标缓冲须活到完成、ftl_cmd_read_data 须早于 release；SET_FEATURES 无 PBA
  *      ⇒ ch/ce/lun 只能显式给（完成派发的实例路由键）。
@@ -398,6 +399,23 @@ ftl_status_t ftl_sync_erase_block(nand_pba_t pba);
  */
 ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg);
 ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba);
+
+/*
+ * 写页（CW 级，异步）：只把 page_buf 里 cw_bitmap 指定的 CW 编进目标页，**不提交**。
+ *
+ * 与 ftl_async_write_page 的差别同 ftl_sync_write_page_cw 与 ftl_sync_write_page 的差别：
+ * 位图来自形参而非「整段」；数据按**页内 CW 偏移**散射取（`ftl_cmd_write_data_cw`），
+ * 不是按链序紧凑打包。GC/WL 搬移专用——只搬有效 CW 且必须保持原 CW 偏移。
+ *
+ * ⚠ 数据在本函数内已拷进 FC buffer 池（同 ftl_async_write_page）⇒ 返回后调用者即可
+ *   复用 page_buf。
+ * ⚠ cw_bitmap 须落在本命令 plane 段内（单 plane 命令的段由 pba 的 plane 决定，
+ *   见 ftl_cmd_setup_ppa_pair_cw 的注释）；越段是编程错误 → ASSERT。
+ *
+ * @return FTL_OK 命令已备好（须提交或 release）；FTL_AGAIN 命令池空；
+ *         FTL_ERROR 入参非法 / 地址非法 / 建链失败 / 搬数据失败。
+ */
+ftl_status_t ftl_async_write_page_cw(fc_command_t **out_cmd, nand_pba_t pba, const uint8_t *page_buf, uint32_t cw_bitmap, const ftl_page_cfg_t *cfg);
 
 /*
  * 读页（异步）：OP_NORMAL_READ_PAGE_WITH_DATA_OUT，建链，**不提交**。

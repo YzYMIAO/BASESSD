@@ -1,21 +1,24 @@
 /*
- * wear_leveling.c — 静态磨损均衡（触发判定 + 选 victim + 整 SB 搬移）
+ * wear_leveling.c — 静态磨损均衡（触发判定 + 选 victim）
  *
  * 职责：
- *   在块擦除次数分布不均时，把「擦得少」的冷 SB 的数据搬到「擦得多」的冷块上，
- *   拉平各块磨损；另有一条「慢死预测」旁路：把 ECC 趋势恶化的块整 SB 搬空并退役。
+ *   在块擦除次数分布不均时，挑出「擦得少」的冷 SB 作为搬运候选；另有一条「慢死预测」
+ *   旁路的巡检（rr_predictive_scan）由搬移引擎调用。**搬移本身不在本文件**。
  *
  * 与 gc.c 的分工：
  *   GC —— 回收**无效页多**的块（空间回收，顺带磨损均衡）；
- *   WL —— 搬运**擦得少**的块（磨损拉平，顺带 read disturb 缓解）。两者都用
- *         gc_read_page_with_lba / gc_erase_and_free 等共用原语。
+ *   WL —— 搬运**擦得少**的块（磨损拉平，顺带 read disturb 缓解）。两者共用
+ *         gc_read_page_with_lba 读原语与 migrate.c 的搬移引擎。
  *
  * 触发三条件（wl_should_trigger，任一命中即搬）：最大/最小差值、最大/平均比值、低擦除区占比。
  *
  * 文件结构：
  *   1. 触发 / 选块     wl_should_trigger / wl_select_victim
- *   2. 搬移            wl_relocate / wl_execute / wl_predictive_relocate
- *   3. 磨损统计        wl_max_erase / wl_min_erase / wl_avg_erase / wl_count_blocks_below
+ *   2. 磨损统计        wl_max_erase / wl_min_erase / wl_avg_erase / wl_count_blocks_below
+ *
+ * ⚠ 搬移（原第 2 节 wl_relocate / wl_execute / wl_predictive_relocate）已随阶段 4 迁入
+ *   `ftl/migrate.c` 的异步 job（GC / WL 共用一台引擎，靠 kind/post 区分）——本文件
+ *   只留触发判定与选块策略。
  *
  * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
  */
@@ -23,14 +26,7 @@
 #include "ftl/wear_leveling.h"
 
 #include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"
 #include "ftl/ftl.h"
-#include "ftl/ftl_fc_interface.h"
-#include "ftl/gc.h"
-#include "ftl/read_recovery.h" /* rr_predictive_scan / rr_retire_block */
-#include "ftl/wear.h"          /* wear_mark_dirty（计数持久化） */
-#include "nand/onfi_1_0.h"
 
 #include <string.h>
 
@@ -207,265 +203,7 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
     return 1;
 }
 
-/* ── 2. 搬移 ── */
-
-/* --------------------------------------------------------------------
- * wl_relocate
- *   功能：把 victim SB 的所有有效 CW 搬到 Cold 流新块，更新 L2P/Journal/有效计数，最后擦除归还。
- *   参数：ftl —— FTL 实例；victim —— 搬运候选（须 found）。
- *   返回：实际搬移的**有效 CW 数**（int）；FTL_OK(0) 无搬移 / 参数非法。
- *   实现要点（CW 级映射，与 gc_migrate_sb 同构）：逐**页索引**成对分配目标页——
- *             一个 plane 的有效 CW 必须落到同 plane 的目标页；「写过」页位图只是
- *             单调提示（省 NAND 读），真有效性逐 CW 由 L2P 反查判定；只搬有效 CW；
- *             搬移读顺带记录 ECC 趋势 + read_count（慢死预测闭环）；搬完先
- *             journal_flush_page 再擦 victim（防掉电回放指向已擦块）。
- * -------------------------------------------------------------------- */
-int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
-{
-    uint32_t migrated = 0U;
-    uint8_t  page;
-
-    if ((ftl == NULL) || (victim == NULL) || (!victim->found))
-    {
-        return FTL_OK;
-    }
-
-    /* Step 1: 逐**页索引**扫双 Plane（目标页必须成对分配，两 plane 各用自己那一半） */
-    for (page = 0U; page < PAGES_PER_BLOCK; page++)
-    {
-        uint32_t   cw_bitmap[PLANE_NUM] = {0U, 0U};
-        lba_t      base[PLANE_NUM]      = {0U, 0U}; /* 各 plane 本页 CW0 的扇区 LBA */
-        lba_t      cw_lba[PLANE_NUM][CW_NUM];       /* 各 CW 自己的扇区 LBA（未写过 = FTL_LBA_INVALID） */
-        nand_pba_t src[PLANE_NUM]  = {NAND_PBA_INVALID, NAND_PBA_INVALID};
-        uint16_t   gsrc[PLANE_NUM] = {0U, 0U};
-        uint8_t    buf[PLANE_NUM][FTL_READ_USER_SIZE];
-        nand_pba_t dst[PLANE_NUM];
-        uint8_t    plane;
-        uint8_t    any = 0U;
-
-        for (plane = 0U; plane < PLANE_NUM; plane++)
-        {
-            uint8_t ecc;
-            uint8_t rc;
-            uint8_t cw;
-
-            if (victim->plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
-            {
-                continue; /* 退化单 plane 条目：该 plane 无块 */
-            }
-            gsrc[plane] = ftl_gblock(plane, victim->plane_blocks[plane]);
-
-            src[plane] = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, victim->plane_blocks[plane], plane, page, 0U);
-            memset(buf[plane], 0, sizeof(buf[plane]));
-
-            /* 读页 + 逐 CW 从页内 META（= OOB 反向映射）取回扇区 LBA（复用 GC 辅助函数） */
-            if (gc_read_page_with_lba(src[plane], buf[plane], cw_lba[plane], &base[plane], &ecc, &rc) != 0)
-            {
-                continue; /* 读失败 / 全页无写过 CW，跳过 */
-            }
-
-            /* B4：WL 搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环） */
-            if (rc != 0U)
-            {
-                ftl_block_t *src_blk = &ftl->alloc.blocks[gsrc[plane]];
-
-                rr_record_ecc(&src_blk->rr, ecc);
-                src_blk->read_count++;
-                wear_mark_dirty(&ftl->alloc, gsrc[plane]);
-            }
-
-            /* 逐 CW 反查 L2P：用该 CW 自己的 META 查，仍指向 (本页, 本 CW) 才算有效 */
-            for (cw = 0U; cw < CW_NUM; cw++)
-            {
-                if (cw_lba[plane][cw] == FTL_LBA_INVALID)
-                {
-                    continue;
-                }
-                if (l2p_cache_read(&ftl->cache, cw_lba[plane][cw]) == pba_with_cw(src[plane], cw))
-                {
-                    cw_bitmap[plane] |= (uint32_t)1U << (((uint32_t)plane * CW_NUM) + cw);
-                }
-            }
-            if (cw_bitmap[plane] != 0U)
-            {
-                any = 1U;
-            }
-        }
-
-        if (any == 0U)
-        {
-            continue;
-        }
-
-        /* 成对分配目标页（Cold 流）。池耗尽 → 保留未搬的源页（L2P 未动）。 */
-        if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_COLD, dst) == NAND_PBA_INVALID)
-        {
-            break;
-        }
-
-        for (plane = 0U; plane < PLANE_NUM; plane++)
-        {
-            uint8_t cw;
-
-            if (cw_bitmap[plane] == 0U)
-            {
-                continue;
-            }
-
-            /* 只搬有效 CW（本页局部 `cw_bitmap` 外的 CW 不建链、不编程） */
-            if (ftl_sync_write_page_cw(dst[plane],
-                                       buf[plane],
-                                       cw_bitmap[plane],
-                                       FTL_PAGE_CFG_DATA(ftl_lba_page(base[plane]))) != FTL_OK)
-            {
-                continue; /* 写失败：L2P 未改，源页仍有效 */
-            }
-
-            for (cw = 0U; cw < CW_NUM; cw++)
-            {
-                const nand_pba_t old_pba = pba_with_cw(src[plane], cw);
-                nand_pba_t       new_pba;
-                lba_t            l;
-                uint16_t         gdst;
-
-                if ((cw_bitmap[plane] & ((uint32_t)1U << cw)) == 0U)
-                {
-                    continue;
-                }
-
-                l       = cw_lba[plane][cw]; /* 用该 CW 自己的 META（E：不再 base+cw 推断） */
-                new_pba = pba_with_cw(dst[plane], cw);
-
-                l2p_cache_write(&ftl->cache, l, new_pba);
-                journal_append(&ftl->journal, l, old_pba, new_pba);
-
-                /* 有效计数（CW 级）：源块 -1，新块 +1 */
-                ftl_block_sub_valid(&ftl->alloc.blocks[gsrc[plane]]);
-                gdst = ftl_pba_gblock(new_pba);
-                ftl_block_add_valid(&ftl->alloc.blocks[gdst]);
-
-                migrated++;
-            }
-        }
-    }
-
-    /* F10：搬移条目先落盘再擦除 victim（与 gc_migrate_sb 同契约）。
-     * journal 是 write-back，不 flush 则掉电窗口内恢复回放指向已擦除块。 */
-    if (migrated > 0U)
-    {
-        journal_flush_page(&ftl->journal);
-    }
-
-    /* Step 2: 构造临时 Super Block，复用 gc_erase_and_free 擦除+归还 */
-    {
-        super_block_t tmp_sb;
-
-        tmp_sb.plane_blocks[0] = victim->plane_blocks[0];
-        tmp_sb.plane_blocks[1] = victim->plane_blocks[1];
-        tmp_sb.valid           = 0U; /* gc_erase_and_free 要求 valid==0 */
-
-        gc_erase_and_free(&ftl->alloc, &tmp_sb, ftl->total_writes);
-    }
-
-    return (int)migrated;
-}
-
-/* wl_execute — 一轮 WL：触发判定 → 选 victim → 搬移；任一步未命中即早退返回 FTL_OK(0) */
-int wl_execute(struct ftl_context *ftl)
-{
-    wl_victim_t victim;
-
-    if (ftl == NULL)
-    {
-        return FTL_OK;
-    }
-
-    if (!wl_should_trigger(ftl))
-    {
-        return FTL_OK;
-    }
-    if (!wl_select_victim(ftl, &victim))
-    {
-        return FTL_OK;
-    }
-
-    return wl_relocate(ftl, &victim);
-}
-
-/* --------------------------------------------------------------------
- * wl_predictive_relocate
- *   功能：慢死预测旁路——扫出 ECC 趋势恶化的块，整 SB 搬空并**退役**（RESERVED，不标坏）。
- *   参数：ftl —— FTL 实例。
- *   返回：1 命中并处理；0 未命中 / 参数非法。
- *   实现要点：rr_predictive_scan 只返回 CLOSED 块，故可用 sb_id 反查 Closed 列表条目
- *             （ASSERT 保证索引合法）；组装 victim 后复用 wl_relocate 搬移；搬完逐 plane
- *             rr_retire_block 退役（归零 read_count 重计 read disturb），并补 wear_mark_dirty。
- * -------------------------------------------------------------------- */
-int wl_predictive_relocate(struct ftl_context *ftl)
-{
-    uint16_t     gblock;
-    uint16_t     closed_idx;
-    wl_victim_t  victim;
-    uint8_t      plane;
-    ftl_block_t *b;
-
-    if (ftl == NULL)
-    {
-        return 0;
-    }
-
-    if (!rr_predictive_scan(&ftl->alloc, &gblock))
-    {
-        return 0;
-    }
-
-    b = &ftl->alloc.blocks[gblock];
-
-    /* 反查 Super Block：慢死块必须在 closed_sb_list 中（scan 已保证 CLOSED） */
-    closed_idx = ftl_block_sb_id(b);
-    ASSERT(closed_idx < ftl->alloc.closed_sb_count);
-
-    /* 组装 victim（wl_relocate 只用 plane_blocks，其余字段无消费） */
-    memset(&victim, 0, sizeof(victim));
-    victim.found = 1U;
-    for (plane = 0U; plane < PLANE_NUM; plane++)
-    {
-        victim.plane_blocks[plane] =
-            ftl->alloc.closed_sb_list[closed_idx].plane_blocks[plane];
-    }
-
-    /* 整 SB 搬移（读有效页 → 冷块写入 → L2P/Journal → 擦除归还）。
-     * wl_relocate 内部已走 gc_erase_and_free → allocator_remove_closed_sb
-     * （gc.c:277-280 按 plane_blocks[0] 自动定位移除 closed 条目），无需外部再清。 */
-    (void)wl_relocate(ftl, &victim);
-
-    /* 搬完后各 plane 块退役：不再分配新数据（RESERVED），不标坏（仍可读）。
-     * 退化单 plane 条目跳过哨兵 plane。 */
-    for (plane = 0U; plane < PLANE_NUM; plane++)
-    {
-        ftl_block_t *retired;
-
-        if (victim.plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
-        {
-            continue;
-        }
-        retired = &ftl->alloc.blocks[ftl_gblock(plane, victim.plane_blocks[plane])];
-        rr_retire_block(retired);
-
-        /* rr_retire_block 内部把 read_count 归零（read disturb 重计），
-         * 它只拿到 ftl_block_t* ⇒ 脏标记放在其唯一调用者这里。 */
-        wear_mark_dirty(&ftl->alloc, (uint16_t)ftl_gblock(plane, victim.plane_blocks[plane]));
-    }
-
-    /* 慢死预测命中：整 SB 已搬空并退役，属生命周期跃迁，留痕一次 */
-    LOGW("[FTL] predictive relocate retired p0=%u p1=%u\r\n",
-         (unsigned)victim.plane_blocks[0],
-         (unsigned)victim.plane_blocks[1]);
-
-    return 1;
-}
-
-/* ── 3. 磨损统计（全部跳过坏块）── */
+/* ── 2. 磨损统计（全部跳过坏块）── */
 
 /* wl_max_erase — 全体好块擦除次数的最大值（无块返回 0） */
 uint32_t wl_max_erase(const struct ftl_context *ftl)

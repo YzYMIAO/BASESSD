@@ -26,11 +26,14 @@
  *
  * 文件结构：
  *   1. 内部辅助        ftl_now_ms / ftl_op_host_io（host I/O 完成服务函数）
- *   2. 三级后台服务    ftl_gc_reclaim_one / ftl_gc_evaluate /
+ *   2. 三级后台服务    ftl_gc_evaluate /
  *                      ftl_service_idle / ftl_service_normal / ftl_service_busy（static）
  *   3. 对外接口        ftl_init / ftl_service / ftl_submit_read / ftl_submit_write
  *   4. 子操作下发      ftl_issue_subop / ftl_drain_group（static）
  *   5. 元数据落盘/TRIM ftl_flush / ftl_trim
+ *
+ * ⚠ 回收动作（原 ftl_gc_reclaim_one）已随阶段 4 迁入 `ftl/migrate.c`：GC / WL / 慢死预测
+ *   共用一台异步搬移 job（mig_begin_* / mig_service），本文件只做**触发求值**与**启动**。
  *
  * ⚠ 多实例（F6）：pending / groups / rr_last_scan_ms 均 per-instance；completion 全局
  *   但按命令 ch/ce/lun 路由。main.c 目前只对 g_ftl[0][0][0] 调 ftl_service（结构缺口）。
@@ -45,8 +48,9 @@
 #include "ftl/checkpoint.h"
 #include "ftl/completion_table.h"
 #include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_op.h" /* ftl_op_submit / FTL_OP_* */
-#include "ftl/gc.h"     /* gc_select_victim / gc_migrate_sb / gc_erase_and_free（紧急 GC） */
+#include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_* */
+#include "ftl/gc.h"      /* gc_check_triggers / gc_select_victim（GC 触发求值与选块） */
+#include "ftl/migrate.h" /* mig_begin_gc / mig_begin_wl / mig_begin_predict / mig_service */
 #include "ftl/pending.h"
 #include "ftl/power_failure_recovery.h"
 #include "ftl/wear.h"
@@ -319,32 +323,6 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
 /* ── 三级后台服务 ── */
 
 /* --------------------------------------------------------------------
- * ftl_gc_reclaim_one
- *   功能：回收一个 victim Super Block（选 → 搬移有效 CW → 擦除归还 Free Pool）。
- *   参数：ftl —— FTL 实例。
- *   返回：1 = 确实回收了一个 SB；0 = 无可用 victim。
- *   实现要点：IDLE / NORMAL 两条后台路径共用同一个回收动作（差别只在"做几个"）。
- *             本函数是 gc_reclaimed_count / gc_novictim_count 的**唯一自增点**——
- *             放在这里（而非两个调用点）⇒ 两条路径的进展统计天然合一。
- * -------------------------------------------------------------------- */
-static int ftl_gc_reclaim_one(ftl_context_t *ftl)
-{
-    super_block_t *victim;
-
-    if (!gc_select_victim(&ftl->alloc, &victim))
-    {
-        /* 触发但选不出 victim = 卡死嫌疑（观测计数，见 ftl.h）。
-         * 生产形态：closed_sb_list 空 / 条目 valid != 0（cf604ba 的缺陷形态）。 */
-        ftl->gc_novictim_count++;
-        return 0;
-    }
-    (void)gc_migrate_sb(&ftl->alloc, &ftl->cache, &ftl->journal, victim);
-    gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
-    ftl->gc_reclaimed_count++;
-    return 1;
-}
-
-/* --------------------------------------------------------------------
  * ftl_gc_evaluate
  *   功能：GC 的**统一触发求值点**——IDLE 与 NORMAL 两条后台路径都从这里过。
  *   参数：ftl —— FTL 实例。
@@ -386,7 +364,7 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
      * ⚠ 求值节拍不能兼作日志节拍：前者管「多久算一次」，10ms 拍仍是 100 行/秒。
      * 语义 = 进入触发态立即一行 + 触发态内每 GC_LOG_INTERVAL_MS 一行心跳；
      * 退出触发态即归零 ⇒ 下次进入必然立即打（故无需另存触发掩码）。
-     * ⚠ 行内带 `reclaimed` / `novictim` 两个**进展计数**（ftl_gc_reclaim_one 自增）：
+     * ⚠ 行内带 `reclaimed` / `novictim` 两个**进展计数**（mig_finish / mig_begin_gc 自增）：
      * 只有它们能区分「触发但在推进」与「触发但卡死」——`trig` 常亮对两者一视同仁，
      * 而 `[GC] victim` 行（gc.c）在卡死时**根本不出现**，其"消失"也与"已收敛"同形。 */
     if (triggers != 0U)
@@ -425,34 +403,25 @@ static void ftl_service_idle(ftl_context_t *ftl)
      * 它不占后台带宽预算，只是把已在飞的坏页恢复分步做完）。 */
     rr_kick(ftl);
 
+    /* 推进搬移 job（阶段 4：GC/WL/预测共用，已在飞则续跑下一步）。
+     * 同样**任何档位都要跑**——job 可能是在 BUSY 档被写路径紧急 GC 起的。 */
+    mig_service(ftl);
+
     /* flush 所有 dirty cache */
     l2p_cache_flush_all(&ftl->cache);
 
-    /* GC：统一触发判定（与 NORMAL 同一求值点）。命中即**全力**补池到水位①
-     * （FREE_POOL_TARGET；三级水位见 allocator.h 文件头）。
-     * ⚠ 用「需回收的 SB 数」计数，**不是** `target -= 2U`——后者在 deficit 为奇数时
-     *   uint32 下溢成 0xFFFFFFFF，循环只在 gc_select_victim 失败时退出，会把 closed
-     *   链上的 SB 全搬全擦（free_count 按 2 递减，本板实测 free=3713 为奇数 ⇒ 必中）。 */
+    /* GC：统一触发判定（与 NORMAL 同一求值点）。命中即**起一个** GC 搬移 job。
+     * ⚠ 阶段 4 起「补池到水位①」不再是同步的 while 突发——搬移是异步 job，
+     *   每实例同时只允许一个（单飞行）⇒ 这里最多**启动**一个，后续由 mig_service
+     *   逐轮推进；池水位靠每轮的求值持续补，收敛速度由 NAND 带宽而非循环次数决定。
+     *   （原 while 循环的 `budget` 计数在异步下退化为「一次启动」，故一并去掉。） */
     if (ftl_gc_evaluate(ftl) != 0U)
     {
-        uint32_t deficit = (FREE_POOL_TARGET > ftl->alloc.free_count)
-                               ? (FREE_POOL_TARGET - ftl->alloc.free_count)
-                               : 0U;
-        uint32_t budget  = (deficit + (PLANE_NUM - 1U)) / PLANE_NUM;
-
-        /* 仅 T5 命中（池并不缺水）⇒ 不补池，只回收一个 SB */
-        if (budget == 0U)
-        {
-            budget = 1U;
-        }
-        while ((budget > 0U) && (ftl_gc_reclaim_one(ftl) != 0))
-        {
-            budget--;
-        }
+        (void)mig_begin_gc(ftl);
     }
 
     /* 磨损均衡（IDLE 全力执行） */
-    (void)wl_execute(ftl);
+    (void)mig_begin_wl(ftl);
 
     /* 慢死预测巡检（节流 1s；一次只搬一个 SB，防长时间阻塞） */
     {
@@ -460,7 +429,7 @@ static void ftl_service_idle(ftl_context_t *ftl)
         if ((now_ms - ftl->rr_last_scan_ms) >= RR_SCAN_INTERVAL_MS)
         {
             ftl->rr_last_scan_ms = now_ms;
-            (void)wl_predictive_relocate(ftl);
+            (void)mig_begin_predict(ftl);
         }
     }
 
@@ -497,6 +466,9 @@ static void ftl_service_normal(ftl_context_t *ftl)
     /* 推进 Read Recovery job（阶段 3，见 IDLE 档的说明） */
     rr_kick(ftl);
 
+    /* 推进搬移 job（阶段 4，见 IDLE 档的说明） */
+    mig_service(ftl);
+
     /* 后台 flush：最多 4 条。
      * ⚠ thrashing 降级（P1-4）：工作集远大于 cache 时，这些**主动** flush 大概率是白写
      * （被 flush 的行往往在下次访问前就被驱逐，届时还要再 flush 一次），且挤占前台 IO 的
@@ -516,18 +488,15 @@ static void ftl_service_normal(ftl_context_t *ftl)
         }
     }
 
-    /* 检查 GC（**统一求值点**，与 IDLE 同一函数）。命中即回收**一个** SB——
-     * NORMAL 是受节流档（有 host IO 在场），不像 IDLE 那样做补池突发。 */
+    /* 检查 GC（**统一求值点**，与 IDLE 同一函数）。命中即起一个 GC 搬移 job——
+     * NORMAL 是受节流档（有 host IO 在场），不像 IDLE 那样连起补池/预测。 */
     if (ftl_gc_evaluate(ftl) != 0U)
     {
-        (void)ftl_gc_reclaim_one(ftl);
+        (void)mig_begin_gc(ftl);
     }
 
-    /* 磨损均衡（NORMAL 模式按需执行） */
-    if (wl_should_trigger(ftl))
-    {
-        (void)wl_execute(ftl);
-    }
+    /* 磨损均衡（NORMAL 模式按需执行；触发判定在 mig_begin_wl 内） */
+    (void)mig_begin_wl(ftl);
 
     /* 推进 Journal 刷页 job（阶段 2：与 IDLE 同一入口，job 已在飞则空操作） */
     journal_kick(&ftl->journal);
@@ -562,6 +531,10 @@ static void ftl_service_busy(ftl_context_t *ftl)
     /* 推进 Read Recovery job（阶段 3）。BUSY 档**尤其**要跑：托管的子操作本身
      * 就是一条 host 读在等结果，且它占着组在飞数 ⇒ 不跑就是死等。 */
     rr_kick(ftl);
+
+    /* 推进搬移 job（阶段 4）。BUSY 档也**必须**跑：写路径的紧急 GC 就是在 BUSY
+     * 档起的（ftl_wbuf_flush 分配不到块 ⇒ 起 GC job + FTL_AGAIN），不推进就是死锁。 */
+    mig_service(ftl);
 
     /* 最少后台：只 flush 1 条防 evict 阻塞 */
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -754,15 +727,19 @@ void ftl_service(ftl_context_t *ftl)
      *
      * 旧实现用 submitted（本轮 fc_service 提交了几条）判定，host 无 IO 时
      * fc_service 也可能返回非 0（后台命令推进）→ 误判 NORMAL/BUSY，GC/WL/CP 全推迟。
-     * 现在用 pending（host IO 未决）+ groups（未完成的 host 请求）+ completion_table
-     * （同步/后台命令未决）占用近似系统空闲度：全空 = 真空闲 → IDLE 全力后台；
-     * 有未完成 host 请求 = host 饿着 → BUSY 最少后台（让路，否则抢走 drain 要用的
-     * FC buffer）；中间 → NORMAL 按需后台。
+     * 现在用 pending（host IO 未决）+ groups（未完成的 host 请求）近似系统空闲度：
+     * 全空 = 真空闲 → IDLE 全力后台；有未完成 host 请求 = host 饿着 → BUSY 最少后台
+     * （让路，否则抢走 drain 要用的 FC buffer）；中间 → NORMAL 按需后台。
      *
-     * 近似方案（文档标注）：pending/completion 是"占用快照"，不含队列里排队未 submit
+     * ⚠ **阶段 4 起不再计入 completion_table**：后台 job（journal / RR / 搬移）的命令
+     *   也登记在 completion_table 里，计进来会让「真空闲」永不成立——一个后台 job 在飞
+     *   就把模式从 IDLE 顶到 NORMAL，后台反而被自己的命令饿死。后台 job 的活跃度由各自
+     *   的「单飞行门」（journal.job.phase / rr.stage / mig.active）单独管，与 host 侧解耦。
+     *
+     * 近似方案（文档标注）：pending 是"占用快照"，不含队列里排队未 submit
      * 的 host 请求（controller 层不回报其深度）。单实例 LUN_NUM=1 下够用。 */
     queued   = pending_group_count(ftl);
-    inflight = (uint16_t)(pending_count(ftl) + queued + completion_table_count());
+    inflight = (uint16_t)(pending_count(ftl) + queued);
 
     /* 后台写闸门：`bbt --erase` 之后介质已空而 RAM 状态陈旧，任何后台写都是往干净
      * 芯片上倒垃圾。Phase 1/2/2.5 已跑完（NAND 泵 + host IO 正常），这里整体跳过
@@ -873,7 +850,8 @@ static ftl_status_t ftl_wbuf_append(ftl_context_t *ftl, uint16_t gi, lba_t inter
 }
 
 /* ftl_wbuf_flush — 把当前缓冲页编程到 NAND（一页 = 一次编程，两 plane 都有数据即 multi-plane）。
- * 返回 FTL_OK 已提交 / FTL_AGAIN 背压（缓冲保留，下次重试）/ FTL_ERROR 无空间。
+ * 返回 FTL_OK 已提交 / FTL_AGAIN 背压（缓冲保留，下次重试）/ FTL_ERROR 建链或搬数据失败
+ * （阶段 4 起**不再**有"无空间"的 FTL_ERROR——取不到块改走 FTL_AGAIN + 起 GC job）。
  * ⚠ 缓冲只在**提交成功后**清空——失败时保留供重试；outstanding 已在 append 记过，此处不动。 */
 static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
 {
@@ -889,22 +867,23 @@ static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
         return FTL_OK; /* 空：nothing to do */
     }
 
-    /* 分配新页（**逐 plane 独立选块**——Policy B）。Free Pool 耗尽 → 紧急 GC 重试一次。
-     * （原在 ftl_issue_subop 写路径，随页打包一并移到此——每页只分配一次。） */
+    /* 分配新页（**逐 plane 独立选块**——Policy B）。Free Pool 耗尽 → **背压**：
+     * 起一个 GC 搬移 job（若未在跑）后返回 FTL_AGAIN，缓冲原样保留，由 ftl_drain_group
+     * 下轮重试。
+     *
+     * ⚠ **阶段 4 的行为变化**（原为"同步 GC 重试一次"）：搬移是异步 job，在完成回调/
+     *   写路径里同步等它会把 superloop 卡死（一次搬移 = 64 页 × 2 plane 读+写 + 2 次擦）。
+     *   改为背压后与既有 FTL_AGAIN 机制完全一致，也是主流做法（写路径不就地回收，
+     *   取不到块就挂起主机命令）。**代价**：池满时写延迟升高（等一个 job 走完）。
+     *   **死锁边界**：GC 自身搬移需要 free block ⇒ 靠 **OP 预留池**兜底（v0.74 已把 OP
+     *   池改成按 plane 预留）；GC job 因池空而中止时（migrate.c 的 alloc 失败分支）
+     *   不擦 victim、数据无损，下轮重试。
+     *   ⚠ 这里**不再**返回 FTL_ERROR：无 victim 可回收只是"暂时没空间"，下轮可能就有
+     *   （另一条写完成归还了块），报 IO_ERROR 会让 host 写永久失败。 */
     if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) == NAND_PBA_INVALID)
     {
-        super_block_t *victim;
-
-        if (gc_select_victim(&ftl->alloc, &victim))
-        {
-            (void)gc_migrate_sb(&ftl->alloc, &ftl->cache, &ftl->journal, victim);
-            gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
-        }
-        if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) == NAND_PBA_INVALID)
-        {
-            LOGE("[FTL] write: no free block after GC\r\n");
-            return FTL_ERROR; /* 无 victim 可回收 / GC 未归还空间 */
-        }
+        (void)mig_begin_gc(ftl);
+        return FTL_AGAIN;
     }
 
     /* 本页覆盖的 plane 数（决定 operation 码与 plane 段） */

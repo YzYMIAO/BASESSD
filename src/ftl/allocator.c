@@ -27,7 +27,7 @@
  *   5. 归还          allocator_free_block / allocator_free_reserved_block / allocator_remove_from_free
  *   6. 重建入口      allocator_add_closed_sb
  *
- * ⚠ 本文件只做**账本**，不做介质操作：块的擦除由调用者（gc_erase_and_free 等）在归还前完成。
+ * ⚠ 本文件只做**账本**，不做介质操作：块的擦除由调用者（migrate.c 的搬移 job 等）在归还前完成。
  */
 
 #include "ftl/allocator.h"
@@ -453,7 +453,7 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
     }
 
     /*
-     * Block 擦除由调用者（gc_erase_and_free）确保在调用本函数前已完成。
+     * Block 擦除由调用者（migrate.c 的搬移 job 等）确保在调用本函数前已完成。
      * 本函数只归还 Block 编号（全局 Block 号）到 Free Pool。
      */
     if (alloc->free_count < FTL_BLOCK_TOTAL)
