@@ -509,9 +509,12 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
 
     ASSERT(cmd != NULL);
 
-    /* 开机早期 g_route 尚未 set_route ⇒ ftl 可为 NULL（正常状态）：只 release。 */
+    /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①）。
+     * 保留 release 兜底但吼一声——静默吞掉会让 RR job 永久停在 waiting=1。 */
     if (ftl == NULL)
     {
+        LOGE("[RR] service: NULL instance (route not set?) cmd=%u\r\n",
+             (unsigned)cmd_id);
         (void)fc_command_release(cmd);
         return;
     }

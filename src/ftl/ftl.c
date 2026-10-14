@@ -245,9 +245,12 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
     cmd = fc_command_id_to_command(cmd_id);
     ASSERT(cmd != NULL);
 
-    /* 开机早期 g_route 尚未 set_route ⇒ ftl 可为 NULL（正常状态）：只 release。 */
+    /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①）。
+     * 保留 release 兜底但吼一声——静默吞掉会丢掉一次 host I/O 完成。 */
     if (ftl == NULL)
     {
+        LOGE("[FTL] host_io: NULL instance (route not set?) cmd=%u\r\n",
+             (unsigned)cmd_id);
         (void)fc_command_release(cmd);
         return;
     }
@@ -648,7 +651,7 @@ static void ftl_service_busy(ftl_context_t *ftl)
 
 /* --------------------------------------------------------------------
  * ftl_init
- *   功能：装配一个 FTL 实例——按依赖序初始化路由表 / pending / BST / cache / allocator
+ *   功能：装配一个 FTL 实例——按依赖序初始化拓扑 / pending / BST / cache / allocator
  *         / journal / metadata_dir / bbt / wear / 各计时器。
  *   参数：ftl —— 实例（非 NULL，含自持表存储）；topo —— 绑定的 NAND 芯片路由。
  *   返回：FTL_OK / FTL_ERROR（参数非法）。
@@ -669,10 +672,12 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo)
 
     ftl->topo = topo;
 
-    /* ├─ Completion 旁表（全局单一；F6 实例路由由 main.c boot 后 set_route） ──
-     *    完成派发不再需要在此注册 handler：命令自己带 op_tag，g_op_service[] 是
-     *    编译期常量数组（见 ftl_op.c）。本表只登记"这条命令的私有状态在哪"。 ── */
-    completion_table_init();
+    /* ⚠ 这里**不**调 completion_table_init()：旁表与实例路由表都是**全局**资源
+     *    （completion_table.c 的 file-static），而本函数是**逐实例**调用的 ——
+     *    在此清表会抹掉其它实例在飞的 ctx 登记，也会抹掉 main.c 已设好的路由表。
+     *    该函数由 main.c 的 ssd_ftl_boot_all 在**所有实例 boot 之前**调用一次。
+     *    （完成派发不需要在此注册 handler：命令自己带 op_tag，g_op_service[] 是
+     *     编译期常量数组，见 ftl_op.c；旁表只回答"这条命令的私有状态在哪"。） */
 
     /* ├─ Pending Request 表（F6：per-instance） ── */
     pending_init(ftl);

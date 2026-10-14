@@ -142,8 +142,10 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
 
     /* 实例归属按**命令自身**的 ch/ce/lun 解析（不是"谁在 drain"）：单线程顺序主循环下
      * "实例 A 的 drain 遇到实例 B 的 completion"是必然事件。
-     * ⚠ 开机早期 g_route 尚未 set_route ⇒ NULL 是**正常状态**，不是错误：
-     *   FTL_OP_SYNC_WAIT 的服务函数不用 ftl；其余服务函数收到 NULL 应自行处理。 */
+     * 不变量：路由表由 main.c 在**逐实例 boot 之前**设好（见 ssd_ftl_boot_all ①：
+     * 先 completion_table_init 清一次、再 set_route），因为 boot 期 F2 重建就会经
+     * l2p_cache_read_sync 抽完成表。故此处解析出 NULL 只可能是编程错误，
+     * 不再是"开机早期"的正常状态。 */
     ftl = completion_table_route((uint8_t)cmd->config.ch,
                                  (uint8_t)cmd->config.ce,
                                  (uint8_t)cmd->config.lun);

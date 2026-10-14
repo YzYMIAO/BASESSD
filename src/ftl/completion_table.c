@@ -41,7 +41,11 @@ static struct ftl_context *g_route[CH_NUM][CE_NUM][LUN_NUM];
 
 /* ── 2. 旁表操作 ── */
 
-/* completion_table_init — 清空旁表 + 实例路由表（开机调用一次） */
+/* completion_table_init — 清空旁表 + 实例路由表（开机调用一次）
+ *
+ * ⚠ 清的是**全局**资源（两个 file-static），只能调一次：由 main.c 的
+ *   ssd_ftl_boot_all 在**所有实例 boot 之前**调用。**不可**放进逐实例的 ftl_init ——
+ *   那样实例 N 的 init 会抹掉实例 N-1 在飞的 ctx 登记，以及已设好的路由表。 */
 void completion_table_init(void)
 {
     memset(g_table, 0, sizeof(g_table));
@@ -164,7 +168,9 @@ void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
 struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun)
 {
     ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
-    /* g_route 在 set_route 之前全为 NULL：运行时状态，保留返回 NULL。 */
+    /* set_route 由 main.c 在**逐实例 boot 之前**调用（boot 期 F2 重建就会抽完成表）
+     * ⇒ 派发时 g_route 恒已填好。保留返回 NULL 而不断言，是为了让服务函数能自己
+     * 决定兜底方式（SYNC_WAIT 不用 ftl；其余服务函数收到 NULL 会 LOGE）。 */
     return g_route[ch][ce][lun];
 }
 

@@ -767,10 +767,14 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
     cmd = fc_command_id_to_command((uint16_t)completion->command_id);
     ASSERT(cmd != NULL);
 
-    /* 开机早期 g_route 尚未 set_route ⇒ ftl 可为 NULL（正常状态）：只 release。
-     * 此时 cache 还没建立 ⇒ 也不该有 L2P 命令在飞，属防御。 */
+    /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①）。
+     * 仍保留 release-and-return 兜底（不让 NULL 变成崩溃），但**必须吼一声**——
+     * 静默吞掉会让 line->state 永远停在 LOADING、load_inflight 泄漏，
+     * 表现为 [L2P] read_sync timeout + 心跳永久 load=1，极难定位。 */
     if (ftl == NULL)
     {
+        LOGE("[L2P] service: NULL instance (route not set?) cmd=%u\r\n",
+             (unsigned)completion->command_id);
         (void)fc_command_release(cmd);
         return;
     }

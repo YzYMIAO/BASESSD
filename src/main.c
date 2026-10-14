@@ -253,11 +253,11 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
 
 /* 完整初始化 FTL：全实例 boot + controller 绑定（boot_ok 才置 g_ftl_ready）
  *
- *   ① 逐 (ch,ce,lun) boot —— 任一失败则 boot_ok=0，整体回退 fc_service。
- *   ② 建 g_ftl_ptrs 三维指针表 —— 精确类型匹配 ssd_controller_init 形参。
- *   ③ completion_table_set_route(g_ftl_ptrs) —— 全局完成表的实例路由。
- *   ④ ssd_controller_init(&g_ctrl, g_ftl_ptrs) —— 对外 controller 就绪。
- *   ⑤ g_ftl_ready = 1 —— 主循环切换到 ftl_service。
+ *   ① 建 g_ftl_ptrs 三维指针表 + completion_table_set_route —— **必须早于逐实例 boot**，
+ *      理由见函数内注释（boot 期 F2 重建会经 l2p_cache_read_sync 抽完成表）。
+ *   ② 逐 (ch,ce,lun) boot —— 任一失败则 boot_ok=0，整体回退 fc_service。
+ *   ③ ssd_controller_init(&g_ctrl, g_ftl_ptrs) —— 对外 controller 就绪。
+ *   ④ g_ftl_ready = 1 —— 主循环切换到 ftl_service。
  */
 static void ssd_ftl_boot_all(void)
 {
@@ -267,7 +267,32 @@ static void ssd_ftl_boot_all(void)
     int     boot_ok = 1;
     int     ctrl_ret;
 
-    /* ① 逐实例 boot */
+    /* ① 全局完成旁表 + 路由表：清一次、填一次、设一次——**全部必须早于逐实例 boot**。
+     *    - completion_table_init() 清的是**全局**资源（旁表 + 路由表），只做一次。
+     *      ⚠ 它原在 ftl_init 里（逐实例调用）⇒ 实例 1 的 init 会抹掉实例 0 在飞的
+     *      ctx 登记与已设好的路由表；已移到此处。
+     *    - g_ftl_ptrs 只是对静态数组 g_ftl 取址，不依赖 ftl_init。
+     *    - 为何路由不能等 boot 之后再设：`ssd_ftl_boot` 内部的 `ftl_boot_recovery`
+     *      （F2 重建）会经 `l2p_cache_read_sync` → `l2p_sync_pump` → `ftl_service_pump()`
+     *      抽完成表。此时若 route 仍为 NULL，`ftl_op_dispatch` 解析出的 ftl 为 NULL，
+     *      服务函数只 release 不推进状态 ⇒ job 永久卡死
+     *      （现象：[L2P] read_sync timeout + load_inflight 永久不减）。
+     *    命令能在完成时拿到非 NULL 实例，前提是该实例的 ftl_init 已跑过——boot 循环
+     *    逐实例推进，任一时刻在飞的命令只可能属于已 boot 的实例。 */
+    completion_table_init();
+    for (ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (lun = 0U; lun < LUN_NUM; lun++)
+            {
+                g_ftl_ptrs[ch][ce][lun] = &g_ftl[ch][ce][lun];
+            }
+        }
+    }
+    completion_table_set_route(g_ftl_ptrs);
+
+    /* ② 逐实例 boot */
     for (ch = 0U; ch < CH_NUM; ch++)
     {
         for (ce = 0U; ce < CE_NUM; ce++)
@@ -284,28 +309,14 @@ static void ssd_ftl_boot_all(void)
 
     if (!boot_ok)
     {
+        /* 实例未必 init 完成 ⇒ 撤销路由，恢复「路由未设」语义（此时主循环退回
+         * fc_service，无人 drain 完成表，派发不会发生）。 */
+        completion_table_set_route(NULL);
         LOGE("[FTL ] boot failed, fallback to fc_service\r\n");
         return;
     }
 
-    /* ② 填 g_ftl_ptrs 三维指针表 → ssd_controller_init（类型精确匹配） */
-    for (ch = 0U; ch < CH_NUM; ch++)
-    {
-        for (ce = 0U; ce < CE_NUM; ce++)
-        {
-            for (lun = 0U; lun < LUN_NUM; lun++)
-            {
-                g_ftl_ptrs[ch][ce][lun] = &g_ftl[ch][ce][lun];
-            }
-        }
-    }
-
-    /* ③ F6：全局 completion 表的实例路由表 = 全部实例 boot 完成后的 g_ftl_ptrs。
-     * 必须在所有 ftl_init 之后、首次 ftl_service 之前设置（路由表是全局的，
-     * 补进哪个实例都行，一次设置覆盖全部）。 */
-    completion_table_set_route(g_ftl_ptrs);
-
-    /* ④ controller 就绪 */
+    /* ③ controller 就绪 */
     ctrl_ret = ssd_controller_init(&g_ctrl, g_ftl_ptrs);
     if (ctrl_ret != SSD_STATUS_OK)
     {
@@ -313,7 +324,7 @@ static void ssd_ftl_boot_all(void)
         return;
     }
 
-    /* ⑤ 主循环切换点：此后走 ftl_service（内部先跑 fc_service） */
+    /* ④ 主循环切换点：此后走 ftl_service（内部先跑 fc_service） */
     g_ftl_ready = 1;
     /* %lu 而非 %llu：newlib-nano 不支持 long long 格式化，见 usart.c 的 _Static_assert。 */
     LOGI("[FTL ] controller ready, lba_max=%lu (%luMiB)\r\n",
