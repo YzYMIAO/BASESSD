@@ -296,7 +296,7 @@ struct fc_descriptor_t {
 - **v47 分界**：**FTL 交 LBA + PAA**（PBA 在 FTL 侧转出），`fc_command_t.paa` 是 FC 层唯一的物理地址字段——`src/fc/**` 里不再出现 `pba_to_paa()` / `pba_to_*()`。PBA 带 ch/ce，而 FC 的路由本就独立走 `config.ch/ce/lun`（见 `fc_build_dispatch_request`），两套编码并存只会制造静默算错地址的机会。
 - **PBA 与 LBA 逐位同构**（除 PBA 多出的 cw 字段语义：LBA 里 cw 也是低 2 位）。这是 v24 的核心收益（v47 起只在 FTL 侧有效）：LBA 空间里两个值可用**同一个公式**造出，只是基值不同——
   ```c
-  const uint32_t plane_cw = ((uint32_t)plane << PBA_PLANE_SHIFT) | cw;
+  const uint32_t plane_cw = ((uint32_t)plane << PLANE_CW_SHIFT) | cw;
   desc->meta = (command->meta & ~PLANE_CW_MASK) | plane_cw;  /* 逻辑基值（LBA 空间，v47 不变） */
   ```
   **PAA 不参与这条公式**——它的 plane 与 cw **不相邻**（`[cw][page][plane][block]`），v47 起 `desc->paa` 改用现成 helper：
@@ -314,7 +314,7 @@ struct fc_descriptor_t {
 - **linked list 链式连接**：通过 next_id 遍历，无需 Command 中维护 descriptor_count
 - **状态 & ECC 回写**：NAND 完成时 FC 将 `cw_status` 和 `ecc_bit_count` 回写至 descriptor 的 `status` 和 `ecc_bits` 字段。FTL 遍历 desc 链即可获取每 CW 详细状态，无需 CQ 查询。这对 Read Retry、RAID 恢复路径至关重要。
 - **per-CW META**：`meta` 替代原 `reserved:16`，每个 Descriptor 拥有独立的 META 值。建链时（`fc_command_configure_descriptor()`，v17 前为 `fc_command_attach_cw()` → `fc_command_configure_descriptor_internal()`）用 `lba_to_meta(command->meta, plane, cw)` 自动计算 `desc->meta`，encode 时写入 `buffer[0..4]`（META 区），用于读回时的端到端地址校验。FC 在 decode 路径中自动对比 desc->meta 与读回值，不匹配时置 MATA_ERROR。
-  - **v24 起**：`command->meta` 是**扇区 LBA**（`页 LBA << CW_WIDTH`），`desc->meta` 是该 CW 的完整扇区 LBA（不再是"页 LBA 低 2 位塞 CW 号"）；`lba_to_meta(lba, plane, cw)` 同时把 **plane** 写进低 3 位，使 plane0/plane1 的 4 条 CW 各有唯一 meta（旧编码里 plane1 的 desc 会拿到 plane0 的 meta，两条 desc 撞值）。低 3 位编码与 PBA 的 `[plane:1][cw:2]` **同一套**（`PLANE_CW_MASK` / `PBA_PLANE_SHIFT`）。
+  - **v24 起**：`command->meta` 是**扇区 LBA**（`页 LBA << CW_WIDTH`），`desc->meta` 是该 CW 的完整扇区 LBA（不再是"页 LBA 低 2 位塞 CW 号"）；`lba_to_meta(lba, plane, cw)` 同时把 **plane** 写进低 3 位，使 plane0/plane1 的 4 条 CW 各有唯一 meta（旧编码里 plane1 的 desc 会拿到 plane0 的 meta，两条 desc 撞值）。低 3 位编码与 PBA 的 `[plane:1][cw:2]` **同一套**（`PLANE_CW_MASK` / `PLANE_CW_SHIFT`，两个宏都定义在 `include/nand/nand_config.h` —— FC 侧铸 `desc->meta` 要用，故不随 PBA 搬走）。
 
 ### 2.4 CW 状态位
 

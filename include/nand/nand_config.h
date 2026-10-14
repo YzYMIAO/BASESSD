@@ -4,13 +4,19 @@
 #include <stdint.h>
 
 /*
- * nand_config.h — NAND 逻辑几何 + 地址编码（PAA/PBA/nand_addr_t）
+ * nand_config.h — NAND 器件几何 + 芯片内地址（PAA / nand_addr_t）
  *
- * 本头文件定义：
- *   - 逻辑几何宏（页/块/plane/lun/ch/ce 数量）
- *   - 软件地址编码：PAA（芯片内地址）、PBA（系统物理地址，含 CH/CE）、
- *     LBA（逻辑地址，与 PBA 逐位同构）—— 三者的位序与用途见下方 PBA 段
- *   - nand_addr_t（展开式地址，遍历路径用）
+ * 本头文件只定义**器件域**的事实：
+ *   - 逻辑几何宏（页/块/plane/lun/ch/ce 数量）与 ONFI 时序开关
+ *   - 字段位宽（CW/PAGE/PLANE/BLOCK/LUN）
+ *   - 芯片内地址 PAA（nand_paa_t）—— 位序由 MT29F4G08 的 BA6/PA 规则决定
+ *   - nand_addr_t（展开式地址；三套打包地址共用的构造入口）
+ *   - LBA/PBA 共用的低位编码 [plane:1][cw:2]（PLANE_CW_SHIFT / PLANE_CW_MASK /
+ *     lba_to_meta）—— FC 侧铸 desc->meta 要用，故留在本层
+ *
+ * ⚠ **系统物理地址 PBA（nand_pba_t）不在这里**——它含 CH/CE 拓扑、位序按 LBA 的结构
+ *   排、是 FTL 的地址货币（`pba_to_paa()` 一次转出 PAA 才跨进 FC），整体在
+ *   **ftl/ftl_config.h §三**。
  *
  * 与芯片物理几何（nand_mt29f4g08abadawp.h）区分：本文件是 FC/FTL 的
  * 逻辑视角，物理视角见芯片头文件。
@@ -87,7 +93,7 @@
  * NAND 行地址由 paa_to_nand_row() 按 MT29F4G08 的 BA/PA 规则重新编码。
  *
  * ⚠ PBA 与 LBA **不跟这套位序**（plane 在 page 之上），而是另立一套
- *   [CW][PLANE][PAGE][BLOCK][LUN][CE][CH] —— 见下方 PBA 段。
+ *   [CW][PLANE][PAGE][BLOCK][LUN][CE][CH] —— 见 ftl/ftl_config.h §三。
  *   本段（PAA）一个字节都不要动：它的位序由 BA6/PA 规则决定。
  */
 #define CW_WIDTH_SHIFT  (0U)
@@ -243,143 +249,31 @@ static inline nand_paa_t paa_with_lun(nand_paa_t paa, uint32_t lun)
                         ((lun & PAA_LUN_MASK) << PAA_LUN_SHIFT));
 }
 
-/* ── PBA（系统物理地址）定义 ──
+/* ══════════════════════════════════════════════════════════════
+ * 共享低位编码 —— LBA 与 PBA 的 [plane:1][cw:2]
  *
- * 本工程有三套地址，位序**刻意不同**，各司其职：
- *
- *   PAA（nand_paa_t）  芯片内地址，低位优先 [CW:2][PAGE:6][PLANE:1][BLOCK:11][LUN]
- *                      —— 位序由 MT29F4G08 的 BA6/PA 规则决定，**不可随意改**；
- *                         paa_to_nand_row() 负责把它编成器件的行地址。
- *   PBA（nand_pba_t）  系统物理地址，低位优先 [CW:2][PLANE:1][PAGE:6][BLOCK:11][LUN][CE][CH]
- *                      —— 位序由本工程自定，**按 LBA 的结构排**（见下）；
- *                         L2P 表 / Journal / BST 存的就是它。
- *   LBA               逻辑地址，与 PBA 逐位同构：[CH][CE][LUN][BLOCK][PAGE][PLANE][CW]
- *                      —— 低 3 位 = [plane:1][cw:2]，与 PBA 的低 3 位同一套编码。
- *
- * 为什么 PBA 不跟 PAA 共用位序：PAA 的 plane 在 page 之上（BA6 决定），
- * 而 FTL 的页号 internal_lba 里 plane 是最低位（plane1 = internal_lba + 1）。
- * 让 PBA 跟随 LBA 而不是 PAA，`LBA >> CW_WIDTH` 才逐位等于 internal_lba，
- * 今天所有 `+1` 约定与 L2P 编号才不用改。
- *
- * 代价：pba_to_paa() / paa_to_pba() 是**真正的字段重排**，不是掩码截取。
- * 收益：desc->paa 与 desc->meta 可用同一个 plane_cw 公式造出（基值不同）。
- *
- * PBA 位宽根据芯片实际参数（CH_NUM、CE_NUM、LUN_ADDR_WIDTH 等）自动计算。
- * 某宽度为 0 时对应位域不占用 PBA 编码空间。
- */
+ * LBA 与 PBA 的低 3 位是**同一套编码**：低 2 位 = cw，bit 2 = plane。
+ *   PBA 侧：pba_to_plane() / pba_to_cw() 取的就是这两位；
+ *   LBA 侧：页内位置（plane 位在 bit CW_WIDTH，见 ftl_config.h §三）。
+ * FC 侧铸命令的 desc->meta 也用这两位（fc_command.h / fc_data_path.c），
+ * 所以**本段留在 NAND 层**，不随 PBA 搬走。
+ * ══════════════════════════════════════════════════════════════ */
 
-/* PBA 拓扑位宽：按硬件配置的最大值预留 */
-#define PBA_CE_WIDTH (2U) /* CE 位宽，支持最多 4 CE */
-#define PBA_CH_WIDTH (2U) /* CH 位宽，支持最多 4 CH */
-
-/* PBA 移位（低位优先）。⚠ plane 在 page **之下**，与 PAA 相反。 */
-#define PBA_CW_SHIFT    (0U)
-#define PBA_PLANE_SHIFT (PBA_CW_SHIFT + CW_WIDTH)            /* = 2 */
-#define PBA_PAGE_SHIFT  (PBA_PLANE_SHIFT + PLANE_ADDR_WIDTH) /* = 3 */
-#define PBA_BLOCK_SHIFT (PBA_PAGE_SHIFT + PAGE_ADDR_WIDTH)   /* = 9 */
-#define PBA_LUN_SHIFT   (PBA_BLOCK_SHIFT + BLOCK_ADDR_WIDTH) /* = 20 */
-#define PBA_CE_SHIFT    (PBA_LUN_SHIFT + LUN_ADDR_WIDTH)
-#define PBA_CH_SHIFT    (PBA_CE_SHIFT + PBA_CE_WIDTH)
-
-/* PBA 掩码 */
-#define PBA_PLANE_MASK NAND_FIELD_MASK(PLANE_ADDR_WIDTH)
-#define PBA_PAGE_MASK  NAND_FIELD_MASK(PAGE_ADDR_WIDTH)
-#define PBA_BLOCK_MASK NAND_FIELD_MASK(BLOCK_ADDR_WIDTH)
-#define PBA_LUN_MASK   NAND_FIELD_MASK(LUN_ADDR_WIDTH)
-#define PBA_CE_MASK    NAND_FIELD_MASK(PBA_CE_WIDTH)
-#define PBA_CH_MASK    NAND_FIELD_MASK(PBA_CH_WIDTH)
+/* plane 在 [plane:1][cw:2] 中的移位（= cw 位宽）。名字中性：LBA 侧同样适用。 */
+#define PLANE_CW_SHIFT (CW_WIDTH)
 
 /* LBA 与 PBA 共用的低位掩码：[plane:1][cw:2]。
  *
- *   const uint32_t plane_cw = (plane << PBA_PLANE_SHIFT) | cw;
+ *   const uint32_t plane_cw = (plane << PLANE_CW_SHIFT) | cw;
  *   desc->paa  = pba_to_paa((row_pba     & ~PLANE_CW_MASK) | plane_cw);
  *   desc->meta =            (command->meta & ~PLANE_CW_MASK) | plane_cw;
  *
  * —— 同一个 plane_cw 造出两个值，基值不同（物理 PBA vs 逻辑 LBA）。 */
-#define PLANE_CW_MASK ((uint32_t)((NAND_FIELD_MASK(PLANE_ADDR_WIDTH) << PBA_PLANE_SHIFT) | NAND_FIELD_MASK(CW_WIDTH)))
+#define PLANE_CW_MASK ((uint32_t)((NAND_FIELD_MASK(PLANE_ADDR_WIDTH) << PLANE_CW_SHIFT) | NAND_FIELD_MASK(CW_WIDTH)))
 
-typedef uint32_t nand_pba_t;
-
-/* 无效 PBA 值。PBA 编码最多 26 bit，全 F 不可能是合法地址。 */
-#define NAND_PBA_INVALID (0xFFFFFFFFU)
-
-/* ── PBA 字段提取（直接按 PBA 位序取，不经 PAA）── */
-
-static inline uint32_t pba_to_ch(nand_pba_t pba)
-{
-    return (pba >> PBA_CH_SHIFT) & PBA_CH_MASK;
-}
-
-static inline uint32_t pba_to_ce(nand_pba_t pba)
-{
-    return (pba >> PBA_CE_SHIFT) & PBA_CE_MASK;
-}
-
-static inline uint32_t pba_to_lun(nand_pba_t pba)
-{
-    return (pba >> PBA_LUN_SHIFT) & PBA_LUN_MASK;
-}
-
-static inline uint32_t pba_to_block(nand_pba_t pba)
-{
-    return (pba >> PBA_BLOCK_SHIFT) & PBA_BLOCK_MASK;
-}
-
-static inline uint32_t pba_to_page(nand_pba_t pba)
-{
-    return (pba >> PBA_PAGE_SHIFT) & PBA_PAGE_MASK;
-}
-
-static inline uint32_t pba_to_plane(nand_pba_t pba)
-{
-    return (pba >> PBA_PLANE_SHIFT) & PBA_PLANE_MASK;
-}
-
-static inline uint16_t pba_to_cw(nand_pba_t pba)
-{
-    return (uint16_t)((pba >> PBA_CW_SHIFT) & NAND_FIELD_MASK(CW_WIDTH));
-}
-
-/* 从 PBA 提取芯片内地址（PAA）。两套位序不同 ⇒ **真正的字段重排**，不是掩码截取。 */
-static inline nand_paa_t pba_to_paa(nand_pba_t pba)
-{
-    return paa_from_addr(&(nand_addr_t){.lun   = (uint8_t)pba_to_lun(pba),
-                                        .block = (uint16_t)pba_to_block(pba),
-                                        .plane = (uint8_t)pba_to_plane(pba),
-                                        .page  = (uint8_t)pba_to_page(pba),
-                                        .cw    = (uint8_t)pba_to_cw(pba)});
-}
-
-static inline uint32_t pba_to_nand_row(nand_pba_t pba)
-{
-    return paa_to_nand_row(pba_to_paa(pba));
-}
-
-/* 由展开地址构造 PBA（按 PBA 位序打包，不经 PAA）。逆函数见下方 addr_from_pba()。 */
-static inline nand_pba_t pba_from_addr(const nand_addr_t *addr)
-{
-    return ((nand_pba_t)(addr->cw & NAND_FIELD_MASK(CW_WIDTH)) << PBA_CW_SHIFT) |
-           ((nand_pba_t)(addr->plane & PBA_PLANE_MASK) << PBA_PLANE_SHIFT) |
-           ((nand_pba_t)(addr->page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT) |
-           ((nand_pba_t)(addr->block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT) |
-           ((nand_pba_t)(addr->lun & PBA_LUN_MASK) << PBA_LUN_SHIFT) |
-           ((nand_pba_t)(addr->ce & PBA_CE_MASK) << PBA_CE_SHIFT) |
-           ((nand_pba_t)(addr->ch & PBA_CH_MASK) << PBA_CH_SHIFT);
-}
-
-/* ── 便利构造 ── */
-
-/* 从芯片内地址 PAA + CH/CE 构造 PBA（字段重排，pba_to_paa 的逆） */
-static inline nand_pba_t paa_to_pba(uint32_t ch, uint32_t ce, nand_paa_t paa)
-{
-    return pba_from_addr(&(nand_addr_t){.ch    = (uint8_t)ch,
-                                        .ce    = (uint8_t)ce,
-                                        .lun   = (uint8_t)paa_to_lun(paa),
-                                        .block = (uint16_t)paa_to_block(paa),
-                                        .plane = (uint8_t)paa_to_plane(paa),
-                                        .page  = (uint8_t)paa_to_page(paa),
-                                        .cw    = (uint8_t)paa_to_cw(paa)});
-}
+/* plane 位必须紧邻 cw 位之上，中间不留空档 */
+_Static_assert(PLANE_CW_MASK == (uint32_t)NAND_FIELD_MASK(CW_WIDTH + PLANE_ADDR_WIDTH),
+               "PLANE_CW_MASK 必须是连续的 [plane:1][cw:2]");
 
 /* ── LBA → CW META ──
  *
@@ -388,114 +282,27 @@ static inline nand_pba_t paa_to_pba(uint32_t ch, uint32_t ce, nand_paa_t paa)
  *
  * ⚠ 入参 lba 是**扇区** LBA（不是页 LBA）；plane 必须由调用者给
  *   —— 单靠 `lba & ~3` 会连 plane 位一起抹掉（plane0 CW1 与 plane1 CW0 会撞值）。
- * 与 PBA 的低 3 位同一套编码（PLANE_CW_MASK / PBA_PLANE_SHIFT），
+ * 与 PBA 的低 3 位同一套编码（PLANE_CW_MASK / PLANE_CW_SHIFT），
  * 故 desc->meta 与 desc->paa 可用同一个 plane_cw 造出。 */
 static inline uint32_t lba_to_meta(uint32_t lba, uint32_t plane, uint32_t cw)
 {
     return (lba & ~PLANE_CW_MASK) |
-           ((plane & NAND_FIELD_MASK(PLANE_ADDR_WIDTH)) << PBA_PLANE_SHIFT) |
+           ((plane & NAND_FIELD_MASK(PLANE_ADDR_WIDTH)) << PLANE_CW_SHIFT) |
            (cw & NAND_FIELD_MASK(CW_WIDTH));
 }
 
-/* 获取 Page 基址 PBA（CW=0，页级操作基址） */
-static inline nand_pba_t pba_page_base(nand_pba_t pba)
-{
-    return pba & ~(nand_pba_t)NAND_FIELD_MASK(CW_WIDTH);
-}
-
-/* 同 page 内换 CW */
-static inline nand_pba_t pba_with_cw(nand_pba_t pba, uint32_t cw)
-{
-    return (pba & ~(nand_pba_t)NAND_FIELD_MASK(CW_WIDTH)) |
-           ((cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT);
-}
-
-/* 替换 PBA 中的各字段（直接按 PBA 移位，不经 PAA 往返） */
-static inline nand_pba_t pba_with_page(nand_pba_t pba, uint32_t page)
-{
-    return (nand_pba_t)((pba & ~(nand_pba_t)(PBA_PAGE_MASK << PBA_PAGE_SHIFT)) |
-                        ((nand_pba_t)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT));
-}
-
-static inline nand_pba_t pba_with_plane(nand_pba_t pba, uint32_t plane)
-{
-    return (nand_pba_t)((pba & ~(nand_pba_t)(PBA_PLANE_MASK << PBA_PLANE_SHIFT)) |
-                        ((nand_pba_t)(plane & PBA_PLANE_MASK) << PBA_PLANE_SHIFT));
-}
-
-static inline nand_pba_t pba_with_block(nand_pba_t pba, uint32_t block)
-{
-    return (nand_pba_t)((pba & ~(nand_pba_t)(PBA_BLOCK_MASK << PBA_BLOCK_SHIFT)) |
-                        ((nand_pba_t)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT));
-}
-
-static inline nand_pba_t pba_with_lun(nand_pba_t pba, uint32_t lun)
-{
-    return (nand_pba_t)((pba & ~(nand_pba_t)(PBA_LUN_MASK << PBA_LUN_SHIFT)) |
-                        ((nand_pba_t)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT));
-}
-
-static inline nand_pba_t pba_with_ch(nand_pba_t pba, uint32_t ch)
-{
-    return (nand_pba_t)((pba & ~(PBA_CH_MASK << PBA_CH_SHIFT)) |
-                        ((ch & PBA_CH_MASK) << PBA_CH_SHIFT));
-}
-
-static inline nand_pba_t pba_with_ce(nand_pba_t pba, uint32_t ce)
-{
-    return (nand_pba_t)((pba & ~(PBA_CE_MASK << PBA_CE_SHIFT)) |
-                        ((ce & PBA_CE_MASK) << PBA_CE_SHIFT));
-}
-
-/* ── 比较与校验 ── */
-
-/* 是否同 Page（无视 CW） */
-static inline uint8_t pba_same_page(nand_pba_t a, nand_pba_t b)
-{
-    return (uint8_t)((pba_page_base(a)) == (pba_page_base(b)));
-}
-
-/* 各字段是否在芯片规格范围内 */
-static inline uint8_t pba_is_valid(nand_pba_t pba)
-{
-    return (uint8_t)((pba_to_page(pba) < PAGES_PER_BLOCK) &&
-                     (pba_to_plane(pba) < PLANE_NUM) &&
-                     (pba_to_block(pba) < BLOCKS_PER_PLANE) &&
-                     (pba_to_lun(pba) < LUN_NUM) &&
-                     (pba_to_cw(pba) < CW_NUM) &&
-                     (pba_to_ch(pba) < CH_NUM) &&
-                     (pba_to_ce(pba) < CE_NUM));
-}
-
 /* ══════════════════════════════════════════════════════════════
- * 打包地址 → 展开地址 的转换器
+ * 打包地址 → 展开地址 的转换器（PAA 侧）
  *
- * 存储主控内部地址分两层：
- *   nand_addr_t（展开）  — 定义于文件开头；遍历路径用，字段直接访问不需要 shift
- *   nand_pba_t  (packed) — L2P 表存储接口用，32-bit 紧凑
+ * nand_addr_t（展开）  — 定义于文件开头；遍历路径用，字段直接访问不需要 shift
+ * nand_pba_t  (packed) — L2P 表存储接口用，32-bit 紧凑（**定义于 ftl/ftl_config.h**）
  *
- * 反向的 paa_from_addr() / pba_from_addr() 分别定义在 PAA / PBA 段内。
+ * 反向的 paa_from_addr() 定义在 PAA 段内；PBA 侧的 pba_from_addr() / addr_from_pba()
+ * 随 PBA 一并落在 ftl/ftl_config.h §三。
  *
  * 遍历路径不再先打包再 ftl_cmd_setup_ppa 拆包，
  * 而是直接用 addr_to_cmd（定义于 ftl_fc_interface.h）填入 FC 命令。
  * ══════════════════════════════════════════════════════════════ */
-
-/* nand_pba_t → nand_addr_t（展开）。allocator/L2P 返回紧凑 PBA，
- * 遍历路径填 FC 命令前展开一次。 */
-static inline nand_addr_t addr_from_pba(nand_pba_t pba)
-{
-    nand_addr_t addr;
-
-    addr.ch    = (uint8_t)pba_to_ch(pba);
-    addr.ce    = (uint8_t)pba_to_ce(pba);
-    addr.lun   = (uint8_t)pba_to_lun(pba);
-    addr.block = (uint16_t)pba_to_block(pba);
-    addr.plane = (uint8_t)pba_to_plane(pba);
-    addr.page  = (uint8_t)pba_to_page(pba);
-    addr.cw    = (uint8_t)pba_to_cw(pba);
-
-    return addr;
-}
 
 /* 从 PAA + CH/CE 构造 nand_addr_t（元数据固定位置 / Directory 查找结果用） */
 static inline nand_addr_t addr_from_paa(uint8_t ch, uint8_t ce, nand_paa_t paa)

@@ -45,6 +45,7 @@
 
 #include "common/assertion.h"
 #include "fc/fc_interface.h"
+#include "ftl/ftl_config.h" /* nand_pba_t, pba_to_paa */
 #include "ftl/ftl_type.h"
 #include "nand/nand_config.h"
 #include "nand/onfi_1_0.h"

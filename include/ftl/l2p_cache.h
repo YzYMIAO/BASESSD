@@ -16,11 +16,10 @@
  * 写回策略：Write-back（Dirty 标记，延迟写回 NAND）
  */
 
-#include "ftl/allocator.h"    /* ftl_allocator_t */
-#include "ftl/ftl_config.h"   /* §一 容量/分解宏（L2P_REGIONS_PER_INSTANCE / FTL_DIM_TOTAL …）*/
-#include "ftl/ftl_type.h"     /* lba_t */
-#include "ftl/metadata.h"     /* metadata_dir_cache_t + 块布局宏（L2P_BASE_BLOCK / L2P_BLOCKS）+ 打包放置公式 */
-#include "nand/nand_config.h" /* nand_pba_t */
+#include "ftl/allocator.h"  /* ftl_allocator_t */
+#include "ftl/ftl_config.h" /* §一 容量/分解宏 + §三.2 nand_pba_t / pba_* */
+#include "ftl/ftl_type.h"   /* lba_t */
+#include "ftl/metadata.h"   /* metadata_dir_cache_t + 块布局宏（L2P_BASE_BLOCK / L2P_BLOCKS）+ 打包放置公式 */
 
 #include <stddef.h>
 #include <stdint.h>

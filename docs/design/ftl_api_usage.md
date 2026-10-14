@@ -873,7 +873,7 @@ void ftl_service(ftl_context_t *ftl) {
 include/ftl/
 ├── ftl.h                        # FTL 对外 API + ftl_context_t
 ├── ftl_type.h                   # lba_t / pba_t 基础类型
-├── ftl_config.h                 # 几何推导（§一）+ CW/LBA 地址编码（§三）
+├── ftl_config.h                 # 几何推导（§一）+ 地址编码（§三：LBA 侧 + PBA 侧）
 ├── ftl_fc_interface.h           # PBA helper + 同步 NAND 操作
 ├── bst.h                        # Block State Table（ftl_block_t[4096]，20B/项）
 ├── l2p_cache.h                  # L2P Cache + CLOCK 替换 + thrashing 检测

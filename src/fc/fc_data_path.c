@@ -165,7 +165,7 @@ uint32_t fc_data_path_meta_check(const uint8_t *cw, uint32_t command_meta, nand_
      *   两者不同（v22 已确立）。
      * ⚠ command_meta == FC_META_UNKNOWN 时第二项被跳过，本函数只剩这项 3 位自洽；
      *   META 的其余保护来自「种子耦合」——见 fc_nand_design.md §5.3 的 META 保护矩阵。 */
-    expected_low = ((uint32_t)paa_to_plane(paa) << PBA_PLANE_SHIFT) | (uint32_t)paa_to_cw(paa);
+    expected_low = ((uint32_t)paa_to_plane(paa) << PLANE_CW_SHIFT) | (uint32_t)paa_to_cw(paa);
 
     if ((read_meta & PLANE_CW_MASK) != expected_low)
     {

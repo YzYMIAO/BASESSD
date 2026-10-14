@@ -16,8 +16,8 @@
  */
 
 #include "common/ftl_types.h" /* ftl_io_request_t, pending_cb_t */
+#include "ftl/ftl_config.h"   /* nand_pba_t, NAND_PBA_INVALID */
 #include "ftl/ftl_type.h"     /* lba_t, ftl_status_t */
-#include "nand/nand_config.h" /* nand_pba_t, NAND_PBA_INVALID */
 
 #include <stdint.h>
 

@@ -211,7 +211,7 @@ fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, u
      *                 行地址取自实参 row_paa（每 plane 独立，Policy B 两 plane 可不同块）。
      *   desc->meta —— LBA 空间：plane/cw 低 3 位相邻（PLANE_CW_MASK 有效），
      *                 高位取自 command->meta（本命令扇区 LBA）。 */
-    plane_cw              = ((uint32_t)plane << PBA_PLANE_SHIFT) | (uint32_t)cw;
+    plane_cw              = ((uint32_t)plane << PLANE_CW_SHIFT) | (uint32_t)cw;
     descriptor->paa       = paa_with_cw(paa_with_plane(row_paa, plane), cw);
     descriptor->config    = command->config;
     descriptor->config.cw = cw;

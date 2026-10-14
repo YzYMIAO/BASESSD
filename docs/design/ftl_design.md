@@ -3857,7 +3857,7 @@ fc_command_release(cmd);
 |------|------|------|------|--------------|
 | LAA | Logical Application Address | Host → Controller | 应用程序下发的原始逻辑地址 | UART CLI 的 `lba` 参数（本项目 Host 为 UART CLI，无 NVMe）|
 | LBA | Logical Block Address | L2P 索引 | 行业标准逻辑地址，经 `cmd->meta` 写入页内 META 供校验 | `cmd->meta`（v24 前的 `cmd->lba` 已改名） |
-| PBA | Physical Block Address | L2P 映射值 | 完整物理地址，含拓扑路由（CH/CE/LUN）+ 芯片内地址（PAA）| FTL 层 `nand_pba_t`（**只活在 FTL 内部**，v47 起不跨进 FC）|
+| PBA | Physical Block Address | L2P 映射值 | 完整物理地址，含拓扑路由（CH/CE/LUN）+ 芯片内地址（PAA）| FTL 层 `nand_pba_t`（**只活在 FTL 内部**，v47 起不跨进 FC；定义于 `include/ftl/ftl_config.h` §三.2）|
 | PAA | Physical Array Address | NAND 芯片寻址 | 芯片内地址（Block + Plane + Page + CW），不含拓扑 | `nand_paa_t` |
 | FAA | （本项目曾用） | — | 原代码中 `cmd->faa` 曾用名，现统一为 LBA | 已废弃 |
 

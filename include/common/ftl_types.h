@@ -3,7 +3,6 @@
 
 #include "common/ssd_types.h" /* ssd_status_t */
 #include "ftl/ftl_type.h"     /* lba_t, ftl_status_t, ftl_topology_t */
-#include "nand/nand_config.h" /* nand_addr_t, nand_pba_t, NAND_PBA_INVALID */
 
 #include <stdint.h>
 
@@ -18,8 +17,8 @@
  *   ftl_io_request_t  — 一次读写请求的完整描述（含通知/回调字段，Step 3 嵌入 pending）
  *
  * 设计原则：请求结构体用普通字段而非位域（访问更快，C 编译器无
- * 位域可移植性问题），地址一律用 nand_addr_t（展开）或 nand_pba_t
- * （L2P 表紧凑存储）。
+ * 位域可移植性问题）；地址一律用 nand_addr_t（展开，nand/nand_config.h）
+ * 或 nand_pba_t（L2P 表紧凑存储，ftl/ftl_config.h §三.2）。
  */
 
 /* pending 完成回调 — 在 ftl_handle_completion 数据拷贝 + 标志置位后调用。

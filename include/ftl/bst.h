@@ -34,7 +34,8 @@
  */
 
 #include "common/assertion.h" /* ASSERT（add/sub_valid 的计数守卫） */
-#include "nand/nand_config.h" /* BLOCKS_PER_PLANE, PLANE_NUM, CW_NUM, nand_paa_t, nand_pba_t, paa_to_* */
+#include "ftl/ftl_config.h"   /* nand_pba_t, pba_to_*, NAND_PBA_INVALID */
+#include "nand/nand_config.h" /* BLOCKS_PER_PLANE, PLANE_NUM, CW_NUM, nand_paa_t, paa_to_* */
 
 #include <stddef.h> /* NULL */
 #include <stdint.h>

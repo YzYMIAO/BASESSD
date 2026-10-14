@@ -21,10 +21,11 @@
  *   页头可能因掉电撕裂而非法，属预期情形，返回错误/跳过而非断言。
  */
 
+#include "ftl/ftl_config.h" /* nand_pba_t */
 #include "ftl/ftl_type.h"
 #include "ftl/l2p_cache.h"
-#include "ftl/metadata.h" /* JOURNAL_BLOCK0 / JOURNAL_BLOCK_COUNT 块位置 */
-#include "nand/nand_config.h"
+#include "ftl/metadata.h"     /* JOURNAL_BLOCK0 / JOURNAL_BLOCK_COUNT 块位置 */
+#include "nand/nand_config.h" /* PAGE_MAIN_SIZE */
 
 #include <stdint.h>
 

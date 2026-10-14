@@ -19,10 +19,11 @@
  */
 
 #include "ftl/allocator.h"    /* ftl_allocator_t, super_block_t */
+#include "ftl/ftl_config.h"   /* nand_pba_t */
 #include "ftl/ftl_type.h"     /* lba_t */
 #include "ftl/journal.h"      /* l2p_journal_t */
 #include "ftl/l2p_cache.h"    /* l2p_cache_t */
-#include "nand/nand_config.h" /* nand_pba_t, PLANE_NUM, PAGES_PER_BLOCK */
+#include "nand/nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
 
 #include <stdint.h>
 

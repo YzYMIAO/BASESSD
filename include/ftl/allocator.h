@@ -19,8 +19,9 @@
 
 #include "common/assertion.h" /* ASSERT（退化单 plane 条目展开地址是编码错误） */
 #include "ftl/bst.h"          /* ftl_block_t, FTL_BLOCK_TOTAL, ftl_gblock, ftl_block_is_bad */
+#include "ftl/ftl_config.h"   /* nand_pba_t, pba_from_addr, NAND_PBA_INVALID */
 #include "ftl/ftl_type.h"     /* ftl_status_t, ftl_topology_t */
-#include "nand/nand_config.h" /* nand_pba_t, nand_addr_t, nand_paa_t, PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
+#include "nand/nand_config.h" /* nand_addr_t, nand_paa_t, PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
 
 #include <stdint.h>
 

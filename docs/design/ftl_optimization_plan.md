@@ -607,7 +607,7 @@
 | 1 | L2P 表尺寸 | 核对 1,048,576 entry vs 262,144 物理页是否 **4× 超额** | 决定映射层要不要重做 ⇒ 所有映射改动的**前提**（§七.1） |
 
 **波 1 结论（2026-10-13）**：**「4× 超额」不是表设计错误**。表按**目标 IU = 页/4 = 512B** 定尺寸
-（`ftl_config.h:60` `FTL_IU_BYTES = FC_BUFFER_USER_SIZE`、`:73` `FTL_CW_TOTAL = 4096×64×4`；
+（`ftl_config.h:66` `FTL_IU_BYTES = FC_BUFFER_USER_SIZE`、`:79` `FTL_CW_TOTAL = 4096×64×4`；
 `metadata.h:184` `FTL_L2P_TABLE_BYTES` 表 4 MiB），与主流主控 **IU = 页/4** 结构同构 ⇒ **尺寸正确、表不改小**。
 真正缺口 = **代码数据路径仍页级（2048B/LBA）**（`FTL_READ_USER_SIZE = 2048`、`request.c:148` /
 `ftl.c:909` 缓冲步进、`ftl.c:843` `internal_lba << CW_WIDTH(=2)` 佐证、`lba_to_region = lba>>9` /
