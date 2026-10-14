@@ -470,12 +470,22 @@ ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  *
  * 自旋 ftl_service_pump（推 NAND + 抽干完成表）直到就绪。**只许结构性同步上下文**
  * 调用（开机恢复 / CLI / checkpoint / HIL `fl`）——服务函数里调它就是嵌套泵。
- * 断言把这条约定变成可测的。 */
-
-static void l2p_sync_pump(void)
+ * 断言把这条约定变成可测的。
+ *
+ * ⚠ 阶段 8 起还要**顺带推进本实例的元数据目录整理 job**：ftl_service_pump 是
+ *   **实例无关**的（它只跑 NAND + 完成表），而 md job 的推进挂在 ftl_service 的
+ *   各档位里。若这里不推，CLI `fl` 一旦撞上"池吃紧 ⇒ append_slot 让路"就会**死等**
+ *   （自旋里没有任何人把 compact 走完）。cache 持 md_dir/alloc（宿主注入）⇒ 够用。 */
+static void l2p_sync_pump(l2p_cache_t *cache)
 {
     ASSERT(ftl_op_in_dispatch() == 0);
+
     ftl_service_pump();
+
+    if (cache != NULL)
+    {
+        metadata_dir_kick(cache->md_dir, cache->alloc);
+    }
 }
 
 ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
@@ -490,7 +500,7 @@ ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
         {
             return st;
         }
-        l2p_sync_pump();
+        l2p_sync_pump(cache);
     }
 
     LOGE("[L2P] read_sync timeout lba=%lu\r\n", (unsigned long)lba);
@@ -507,7 +517,7 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
         {
             return l2p_cache_write(cache, lba, pba);
         }
-        l2p_sync_pump();
+        l2p_sync_pump(cache);
     }
 
     LOGE("[L2P] write_sync timeout lba=%lu\r\n", (unsigned long)lba);
@@ -521,15 +531,20 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  *   功能：把一行脏 region 的**异步**写回起起来（提交即返回，不等完成）。
  *   参数：cache —— 缓存；line_idx —— 行下标。
  *   返回：FTL_OK 已提交（含"本行非 DIRTY 无需写回"）；FTL_AGAIN 背压（命令池空 /
- *         在飞写回达上限 / 提交被 SQ 拒）；FTL_ERROR 硬失败（参数非法 / 无依赖 /
- *         分配不到槽 / 建链失败）。
+ *         在飞写回达上限 / 提交被 SQ 拒 / **取不到槽**）；FTL_ERROR 硬失败（参数非法 /
+ *         无依赖 / 建链失败）。
  *   实现要点：
  *     · 提交成功才置 FLUSHING——失败必须让行留在 DIRTY（下轮重试），否则脏数据永远
  *       不会被写回（行状态说"在落盘"，实际没有命令在飞）。
  *     · 追加写绝不就地覆盖；**先写后记账**（顺序不可倒）：掉电最多多留一份旧记录，
  *       不会丢映射。
- *     · 分配不到块 ⇒ 直接 FTL_ERROR，**不回退固定位置**（固定层是哨兵，写进去等于
- *       把"未映射"变成"有映射"，且下次再写同一页即损坏）。
+ *     · **取不到槽 ⇒ FTL_AGAIN（阶段 8 起的刻意变更，原为 FTL_ERROR）**：
+ *       metadata_dir_append_slot 返回 NAND_PBA_INVALID 现在有两种来源——
+ *       ① 两 plane 的 Free Pool 都空；② 目录整理 job 在飞（它要独占当前块的空槽）。
+ *       两者都是**瞬态**（GC 会补池 / job 会走完），报 FTL_ERROR 会被调用者当硬失败
+ *       （`l2p_flush_kick` 跳过该行、`cp_flush_regions` 直接**中止 Checkpoint**）。
+ *       背压让它们下轮重试即可。**绝不回退固定位置**（固定层是哨兵，写进去等于把
+ *       "未映射"变成"有映射"，且下次再写同一页即损坏）。
  *     · ⚠ 槽位在 append_slot 里就消耗掉了：若其后建链/提交失败，该槽作废（写指针
  *       已推进）。与旧实现的"写失败"分支同级——region 仍指向上一份有效记录，无信息丢失。
  * -------------------------------------------------------------------- */
@@ -564,7 +579,10 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
     region_addr = metadata_dir_append_slot(cache->md_dir, cache->alloc);
     if (region_addr == NAND_PBA_INVALID)
     {
-        return FTL_ERROR; /* 上层重试 / 紧急 GC 后再来 */
+        /* 瞬态：Free Pool 空（等 GC 补池）或目录整理 job 在飞（等它走完）⇒ 背压。
+         * ⚠ 不能报 FTL_ERROR：l2p_flush_kick 会跳过本行、cp_flush_regions 会**中止
+         *   Checkpoint**——一次正常的后台压缩不该把 CP 打回去。 */
+        return FTL_AGAIN;
     }
 
     /* 建链 + 把 entries 拷进 FC buffer（写的数据在 prepare 时就 memcpy 走了 ⇒
@@ -668,7 +686,7 @@ ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
             /* FTL_AGAIN：背压，泵一轮再试 */
         }
 
-        l2p_sync_pump();
+        l2p_sync_pump(cache);
     }
 
     return FTL_ERROR; /* 超时：行一直没能落盘 */

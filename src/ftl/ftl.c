@@ -524,6 +524,11 @@ static void ftl_service_idle(ftl_context_t *ftl)
     /* Wear 持久化（阶段 7：攒批写磨损计数；节拍未到 / 在飞则空转） */
     wear_kick(&ftl->alloc, ftl->total_writes);
 
+    /* 元数据目录整理 job（阶段 8：日志块回收 + 抗碎片压缩）。
+     * ⚠ **任何档位都要跑**：compact_wanted 是 append_slot 在**前台写路径**上置的
+     *   （池吃紧时换块），不推进就是写路径永久 FTL_AGAIN。 */
+    metadata_dir_kick(&ftl->metadata_dir, &ftl->alloc);
+
     /* Checkpoint 检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）
      * ⚠ 阶段 6 起 checkpoint_begin **只装配 job**（提交即返回），CP 的成败不再能从
      *   返回值看出来——判据变成"job 走完且 [CP] 无 abort"（见 checkpoint.c 的心跳）。
@@ -584,6 +589,9 @@ static void ftl_service_normal(ftl_context_t *ftl)
     /* Wear 持久化（NORMAL 模式周期性刷入；阶段 7 起 job 化） */
     wear_kick(&ftl->alloc, ftl->total_writes);
 
+    /* 元数据目录整理 job（阶段 8；语义同 IDLE 档——写路径的 FTL_AGAIN 等它推进） */
+    metadata_dir_kick(&ftl->metadata_dir, &ftl->alloc);
+
     /* Checkpoint 检查（NORMAL 模式也执行；语义同 IDLE 档） */
     {
         uint32_t now_ms  = ftl_now_ms();
@@ -630,6 +638,10 @@ static void ftl_service_busy(ftl_context_t *ftl)
     {
         (void)checkpoint_begin(ftl);
     }
+
+    /* 元数据目录整理 job（阶段 8）。BUSY 档也**必须**跑：compact_wanted 是上面那条
+     * l2p_flush_kick 的换块分支（或前台写路径）置的，不推进就是写路径永久 FTL_AGAIN。 */
+    metadata_dir_kick(&ftl->metadata_dir, &ftl->alloc);
 }
 
 /* ── 对外接口 ── */

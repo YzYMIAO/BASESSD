@@ -384,8 +384,10 @@ endif
 - ~~不动孤儿 `test_gc.c`/`test_l2p.c`/`test_nand.c` 占位~~ ✅ **2026-10-13 已删**（连同 `test_rebuild.c`），
   本方案落在一个**新**的独立测试文件（`test_ftl.c`，用户自建）
 - 不扩 linker 加 region
-- **不纳入**：`allocator_alloc`（v0.66 已删死码）；`metadata_dir_append_slot`/`metadata_dir_compact`
-  （需真 NAND 擦写 → `hil_ut_design.md`）；`ftl_wbuf_*`（全 `static`，需真 NAND → `hil_ut_design.md`）
+- **不纳入**：`allocator_alloc`（v0.66 已删死码）；`metadata_dir_append_slot` / `metadata_dir_kick`
+  （需真 NAND 擦写 → `hil_ut_design.md`；v0.75 阶段 8 起压缩/换块由 `metadata_dir_kick` +
+  `ftl_op_metadata` 承载，同步版 `metadata_dir_compact` 已删）；`ftl_wbuf_*`（全 `static`，
+  需真 NAND → `hil_ut_design.md`）
 
 ## 9. 测试分层与路线
 

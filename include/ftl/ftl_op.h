@@ -188,6 +188,22 @@ void ftl_op_bbt(struct ftl_context *ftl, const fc_command_status_t *completion, 
  */
 void ftl_op_wear(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
+/*
+ * ftl_op_metadata - L2P 日志块整理 job（回收 / 抗碎片压缩）的完成服务函数（定义在 metadata.c）。
+ *
+ * 由 g_op_service[FTL_OP_METADATA] 引用；ctx = `md_job_t *`（= &ftl->metadata_dir.job）。
+ * 服务函数按 job.phase 记完成结果、改 phase、release 命令：
+ *   · RECLAIM     ⇒ 成功 allocator_free_reserved_block；失败留 RESERVED 下次再试；
+ *   · CP_READ     ⇒ 成功 ftl_cmd_read_data 拷进 job.cp_buf（**须早于 release**）→ CP_WRITE；
+ *   · CP_WRITE    ⇒ 成功 metadata_dir_commit_region 登记 → CP_READ；失败中止（victim 不擦）；
+ *   · CP_ANCHOR_* ⇒ 逐页写 + commit（无论成败都推进游标）；
+ *   · CP_RECLAIM  ⇒ 擦完归还 victim → DONE。
+ * ⚠ 与 ftl_op_migrate 的差别：本函数**不**推进状态机（不调 metadata_dir_kick）——
+ *   整理 job 的 CP_ANCHOR_PREP 里有同步原语（游标未建立时要读池定位），在完成泵里跑
+ *   就是嵌套泵。推进交给下一轮 ftl_service 的 metadata_dir_kick。
+ */
+void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+
 /* ── 同步等待器（FTL_OP_SYNC_WAIT 的 ctx）──
  *
  * 由同步原语在**自己栈上**持有，经 ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter)

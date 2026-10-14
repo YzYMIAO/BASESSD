@@ -42,7 +42,8 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（阶段 5，ctx = 该 cache line）；
  *   · FTL_OP_CHECKPOINT：Checkpoint job（阶段 6，ctx = &ftl->cp_job）；
  *   · FTL_OP_BBT / FTL_OP_WEAR：元数据表持久化 job（阶段 7，ctx = &ftl->alloc）。
- * 其余枚举值是后续阶段（8）的占位，随各站点改造逐个填。 */
+ *   · FTL_OP_METADATA：L2P 日志块整理 job（阶段 8，ctx = &ftl->metadata_dir.job）。
+ * **全部槽已点亮**（阶段 8 是最后一阶段）。 */
 static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_SYNC_WAIT]     = ftl_op_sync_wait,
     [FTL_OP_HOST_IO]       = ftl_op_host_io,
@@ -54,6 +55,7 @@ static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_CHECKPOINT]    = ftl_op_checkpoint,
     [FTL_OP_BBT]           = ftl_op_bbt,
     [FTL_OP_WEAR]          = ftl_op_wear,
+    [FTL_OP_METADATA]      = ftl_op_metadata,
 };
 
 /* ── 2. 提交 ── */

@@ -282,8 +282,11 @@ static int cp_flush_regions(ftl_context_t *ftl, cp_job_t *j)
 
             if (st == FTL_ERROR)
             {
-                return -1; /* 无依赖 / 分配不到槽：中止（同旧 checkpoint_flush_dirty_regions） */
+                return -1; /* 无依赖 / 建链失败：中止（同旧 checkpoint_flush_dirty_regions） */
             }
+            /* ⚠ **FTL_AGAIN 是背压不是失败**（阶段 8 起 l2p_cache_flush_kick 会把
+             *   "取不到槽"报成 AGAIN：Free Pool 空 或 目录整理 job 在飞）。一次正常的
+             *   后台压缩不该把 Checkpoint 打回去——下轮重试即可。 */
             pending = 1; /* OK = 已提交；AGAIN = 背压，都还没落盘 */
             continue;
         }
@@ -306,8 +309,11 @@ static int cp_flush_regions(ftl_context_t *ftl, cp_job_t *j)
     }
 
     /* 有在飞写回 = 有进展（**不**计卡死轮数）：闸门满 / 提交失败都会让本轮起不动新行，
-     * 但 flush_inflight > 0 说明完成迟早会来。 */
-    if (ftl->cache.flush_inflight > 0U)
+     * 但 flush_inflight > 0 说明完成迟早会来。
+     * ⚠ 同理，**目录整理 job 在飞也算有进展**（阶段 8）：它独占当前日志块的空槽，期间的
+     *   脏 region 一律收到 FTL_AGAIN。一次正常的压缩要走上百轮命令，若照常累计就会撞
+     *   CP_SUBMIT_STALL_MAX 把 Checkpoint 打回去。 */
+    if ((ftl->cache.flush_inflight > 0U) || (metadata_dir_busy(&ftl->metadata_dir) != 0))
     {
         j->stall_rounds = 0U;
         return 0;

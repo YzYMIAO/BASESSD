@@ -226,10 +226,16 @@ int          ftl_op_in_dispatch(void);
 | `FTL_OP_READ_RECOVERY` | `ftl_op_read_recovery` | `&ftl->rr` | 阶段 3 |
 | `FTL_OP_GC` / `FTL_OP_WL` | `ftl_op_migrate` | `&ftl->mig` | 阶段 4，**GC 与 WL 共用同一引擎**，tag 分开只为日志可辨 |
 | `FTL_OP_L2P` | `ftl_op_l2p` | `l2p_cache_line_t *`（**该 cache line**） | 阶段 5，加载与写回共用（按 `line->state` 收尾） |
-| 其余（CHECKPOINT/BBT/WEAR/METADATA） | — | — | 阶段 6~8 占位 |
+| `FTL_OP_CHECKPOINT` | `ftl_op_checkpoint` | `&ftl->cp_job` | 阶段 6 |
+| `FTL_OP_BBT` / `FTL_OP_WEAR` | `ftl_op_bbt` / `ftl_op_wear` | `&ftl->alloc` | 阶段 7 |
+| `FTL_OP_METADATA` | `ftl_op_metadata` | `&ftl->metadata_dir.job` | 阶段 8，日志块回收 / 压缩 |
 
 ⚠ `g_op_service[]` 是 **C99 designated initializer 的 `const` 数组**（非「注册函数」）：
-编译期即可发现重复 / 越界，无 init-order 依赖。当前 `sizeof` = 48 B = 12 项。
+编译期即可发现重复 / 越界，无 init-order 依赖。当前 `sizeof` = 48 B = 12 项；
+**`[1]`~`[11]` 全部有主**（阶段 8 是最后一阶段），`[0]` = `FTL_OP_NONE` 恒 NULL。
+⚠ `FTL_OP_CHECKPOINT` / `FTL_OP_METADATA` 的服务函数**不推进状态机**（它们的 PREP 阶段含
+同步原语，在完成泵里跑就是嵌套泵）——推进交给下一轮 `ftl_service` 的 `checkpoint_kick` /
+`metadata_dir_kick`；其余 job 的完成服务函数可以自行续跑。
 
 #### 1.5.1 读失败子操作的「托管」约定（v0.75 阶段 3）
 
@@ -566,7 +572,12 @@ int l2p_cache_ready(l2p_cache_t *cache, lba_t lba);
  */
 ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
 
-/* 起一行 DIRTY 的**异步**写回（提交即返回；完成由 ftl_op_l2p 收尾） */
+/*
+ * 起一行 DIRTY 的**异步**写回（提交即返回；完成由 ftl_op_l2p 收尾）。
+ * ⚠ 三态：FTL_OK = 已提交；FTL_AGAIN = 取不到空槽（池空 / 整理 job 在飞 / 刚换块且池吃紧）
+ *   ——**背压不是失败**，下轮重试（v0.75 阶段 8 前返回 FTL_ERROR，会让 CP 误中止）；
+ *   FTL_ERROR = 建链失败 / 无依赖。
+ */
 ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx);
 
 /* 后台写回推进：每轮 ftl_service 调一次，最多起 max_kick 行 */
@@ -857,16 +868,17 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 | `gc.c` | ⚠ 1 处 | `gc_read_page_with_lba`（`ftl_sync_submit_wait`）——唯一调用者是 `ftl_rebuild_closed_sb_list`（**开机**重建，结构性同步） |
 | `journal.c` | ⚠ 7 处 | ① 非派发上下文的**同步回退**（`journal_append` 页满且 `ftl_op_in_dispatch()==0`）；② 开机 `journal_scan_latest` / `replay` / `truncate` 的擦除与读 |
 | `checkpoint.c` | ⚠ 4 处 | 记录读 ×2 / 写 ×2（**阶段 6** 转 job） |
-| `metadata.c` | ⚠ 7 处 | L2P region 读/写、目录压缩、Anchor 落盘、ring 块擦除（**阶段 8**） |
+| `metadata.c` | ⚠ 4 处 | **阶段 8 起目录压缩与 Anchor 落盘已异步**（`metadata_dir_kick` + `ftl_op_metadata`）；剩下 4 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（337，`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（405，冷启动定位游标）、`metadata_dir_reclaim_block` 的擦（737，`append_slot` 换块分支的全池 sweep）、`metadata_dir_load` 的 Anchor 读（1844，开机） |
 | `bbt.c` | ⚠ 7 处 | 记录读 ×2、出厂标记读、擦除、持久化写（**阶段 7**） |
 | `wear.c` | ⚠ 3 处 | 快照写、压实擦除、开机回放读（**阶段 7**） |
 | `power_failure_recovery.c` | ⚠ 4 处 | 开机 region 预载读、空白页裸读（**结构性同步**，长期保留） |
 | `ftl_fc_interface.c` | — | 同步原语与 `ftl_async_*` 异步原语的定义处（机制层） |
 
-⚠ **`ftl_sync_submit_wait` 的目标终态**：只被开机 / 格式化 / 出厂扫描 / CLI 路径调用。
-阶段 5 后剩余的同步站点**全部**落在上表标 ⚠ 的行里，且除 `checkpoint.c`（阶段 6）、
-`bbt.c`/`wear.c`（阶段 7）、`metadata.c`（阶段 8）外，其余都是**结构性同步**（在 `main`
-进 superloop 前执行，无人 drain CQ）或非派发上下文的回退，**会长期保留**。
+⚠ **`ftl_sync_submit_wait` 的目标终态已达成**（v0.75 阶段 8）：只被开机 / 格式化 / 出厂扫描 /
+CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，且**全是结构性同步**（在 `main`
+进 superloop 前执行，无人 drain CQ）或非派发上下文的回退（`journal.c` ①），**会长期保留**。
+`checkpoint.c`（阶段 6）、`bbt.c`/`wear.c`（阶段 7）、`metadata.c` 的压缩与 Anchor（阶段 8）
+四条异步化路径**都已不再出现**在这一栏里——即"由 job 承载"的那些同步站点已经清零。
 
 ### 5.4 约束汇总
 

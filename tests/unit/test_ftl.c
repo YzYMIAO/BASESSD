@@ -1532,7 +1532,10 @@ static MunitResult test_meta_dir_init_entries(const MunitParameter params[], voi
     munit_assert_uint8(d->have_dynamic, ==, 0U);
     munit_assert_uint8(d->cur_block_valid, ==, 0U);
     munit_assert_uint8(d->anchor_cursor_valid, ==, 0U);
-    munit_assert_uint8(d->compacting, ==, 0U);
+    munit_assert_uint8(d->job.phase, ==, (uint8_t)MD_JOB_IDLE);
+    munit_assert_uint16(d->job.victim, ==, UINT16_MAX);
+    munit_assert_uint16(d->job.reclaim_target, ==, UINT16_MAX);
+    munit_assert_uint32(d->job.slot, ==, (uint32_t)NAND_PBA_INVALID);
     munit_assert_uint32(d->change_count, ==, 0U);
 
     for (i = 0U; i < d->count; i++)

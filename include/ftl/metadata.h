@@ -486,6 +486,73 @@ ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
                                          uint16_t               write_idx,
                                          nand_pba_t            *out_addr);
 
+/* ── 元数据目录后台 job（v0.75 阶段 8）──
+ *
+ * 承载 L2P 日志块的两件"要碰 NAND 的整理活"，让它们不再阻塞服务循环：
+ *   ① **回收**——某个日志块的活 region 数归零 ⇒ 擦块 + 归还 Free Pool；
+ *   ② **压缩**——抗碎片：挑活 region 最少的块做 victim，把它的活 region 搬进当前
+ *      块，落 Anchor 后擦除归还。
+ *
+ * 阶段序列（每条命令一个 phase，完成由 g_op_service[FTL_OP_METADATA] 收尾）：
+ *
+ *   IDLE ──reclaim_target──▶ RECLAIM（擦 + 归还）──▶ IDLE
+ *   IDLE ──compact_wanted──▶ CP_READ ⇄ CP_WRITE（逐 region 搬移）
+ *                              └─▶ CP_ANCHOR_PREP ─▶ [CP_ANCHOR_ERASE] ─▶
+ *                                  CP_ANCHOR_WRITE ×N ─▶ CP_RECLAIM（擦 victim）──▶ DONE ─▶ IDLE
+ *
+ * ⚠ **顺序即掉电安全契约**（与旧同步实现逐条对应，不可倒）：
+ *   ① 搬移 → ② 登记 → ③ Anchor 落盘 → ④ 擦 victim → ⑤ 归还。
+ *   ③ 必须早于 ④——否则掉电后 Anchor 仍指向已擦块，那些 region 的映射永久丢失。
+ *   job 里就是 phase 顺序：CP_ANCHOR_* 全在 CP_RECLAIM 之前。
+ *
+ * ⚠ **失败不回滚**：任一 phase 失败 ⇒ 中止，已登记的 region 已指向新页、未搬的仍指向
+ *   victim（**victim 不擦**）⇒ 两边都有效，下次换块时重来即可。
+ *
+ * ⚠ **服务函数不推进状态机**（同 ftl_op_checkpoint）：CP_ANCHOR_PREP 要调
+ *   metadata_dir_anchor_prepare（游标未建立时会**同步**扫池定位），在完成泵里跑就是
+ *   嵌套泵。故 ftl_op_metadata 只记结果 + release + 改 phase，推进一律留给下一轮
+ *   metadata_dir_kick（在 ftl_service 各档位里跑）。
+ *
+ * ⚠ 本结构不跨重启：phase / 游标 / 请求位全是 RAM 态，冷启动恒 IDLE（见 metadata_dir_init）。 */
+typedef enum
+{
+    MD_JOB_IDLE = 0,        /* 无 job 在跑 */
+    MD_JOB_RECLAIM,         /* 在飞：擦一个「已无引用」的日志块 */
+    MD_JOB_CP_READ,         /* 在飞：读 victim 的下一个活 region 页 → cp_buf */
+    MD_JOB_CP_WRITE,        /* 在飞：把 cp_buf 写进当前块的新槽 */
+    MD_JOB_CP_ANCHOR_PREP,  /* 纯 RAM：定位 Anchor 写点（冷启动时同步扫池）*/
+    MD_JOB_CP_ANCHOR_ERASE, /* 在飞：Anchor 换块擦 */
+    MD_JOB_CP_ANCHOR_WRITE, /* 在飞：Anchor 逐页写 */
+    MD_JOB_CP_RECLAIM,      /* 在飞：擦 victim */
+    MD_JOB_DONE             /* 收尾（纯 RAM）→ IDLE */
+} md_job_phase_t;
+
+typedef struct
+{
+    uint8_t         phase;             /* md_job_phase_t */
+    uint8_t         waiting;           /* 有命令在飞（完成服务函数清）*/
+    uint8_t         compact_wanted;    /* append_slot 换块后池吃紧 ⇒ 请求压缩 */
+    uint8_t         anchor_ok;         /* Anchor 分页写是否全部成功（0 = 整条作废）*/
+    uint8_t         anchor_need_erase; /* Anchor 写点是否需先擦块 */
+    uint8_t         anchor_chunk;      /* 已写的 Anchor 页序 */
+    uint16_t        victim;            /* 压缩 victim 的 gblock（UINT16_MAX = 无）*/
+    uint16_t        region_id;         /* 搬移游标（下一个待查 region_id）*/
+    uint16_t        cur_region;        /* 当前搬移中的 region_id（CP_READ 命中时设定）*/
+    uint16_t        moved;             /* 本次压缩已搬 region 数（观测）*/
+    uint16_t        reclaim_target;    /* 待回收块（commit_region 归零即登记；UINT16_MAX = 无）*/
+    uint16_t        reclaim_gblock;    /* 在飞擦除的块（完成时归还它）*/
+    uint16_t        stall_rounds;      /* 连续"提交不出去"轮数（超限中止，同 MIG/CP）*/
+    uint16_t        anchor_idx;        /* 本 Anchor record 的池内槽位 */
+    uint32_t        anchor_seq;        /* 本 Anchor record 的序号 */
+    nand_pba_t      anchor_base;       /* 本 Anchor record 第 0 页地址 */
+    nand_pba_t      slot;              /* 压缩搬移已取到、待写的槽（NAND_PBA_INVALID = 未取）*/
+    metadata_ring_t anchor_ring;       /* Anchor 池几何（prepare 出参，commit 要用）*/
+
+    /* victim region 页搬运缓冲：**必须常驻**——异步读完成与随后的写之间隔着若干轮
+     * 服务循环，栈帧早已返回。放 job 而非栈（同 mig.page_buf / rr_page_scratch）。 */
+    uint8_t cp_buf[L2P_REGION_SIZE];
+} md_job_t;
+
 /* ── SRAM 常驻 Directory Cache（约 18KB，随 ftl_context_t 落 AXI_RAM） ── */
 typedef struct
 {
@@ -510,13 +577,13 @@ typedef struct
     uint8_t  cur_block_valid;           /* 游标是否已建立（0 = 尚未分配日志块）*/
     uint8_t  cur_metadata_plane;        /* 下一个新日志块选哪个 plane（轮转）*/
 
-    /* 压缩进行中（P0-3）。两个作用，缺一不可：
-     *   ① **抑制逐次立即回收**——搬移 victim 的最后一个活 region 时 l2p_live[victim]
-     *      归零，metadata_dir_commit_region 的"归零即擦"分支会**在 Anchor 落盘之前**
-     *      把 victim 擦掉（掉电后 Anchor 仍指向已擦块 ⇒ 那些 region 的映射永久丢失）；
-     *   ② **防重入**——搬移走 metadata_dir_append_slot，换块分支会再触发一次压缩。
-     * 非 0 时 append_slot 的换块分支直接失败让路（见 metadata_dir_compact 的 ③④ 顺序）。*/
-    uint8_t compacting;
+    /* 后台整理 job（v0.75 阶段 8：回收 + 压缩，见 md_job_t）。
+     * ⚠ 取代原 `compacting` 标志——它的两个作用现在都由 job 状态表达：
+     *   ① **抑制逐次立即回收**（搬移 victim 的最后一个活 region 时 l2p_live[victim]
+     *      归零，若就地擦掉就是**在 Anchor 落盘之前**擦 victim ⇒ 掉电丢映射）；
+     *   ② **防重入 / 防抢槽**（压缩搬移要往当前块写，期间再发放槽位会打乱空槽预算）。
+     * 判据分别是 md_compacting()（①）与 job.phase != IDLE（②）。 */
+    md_job_t job;
 
     /* Anchor 池游标（ring 写点槽位；anchor_cursor_valid=0 时尚未定位）*/
     uint16_t anchor_write_idx;
@@ -574,10 +641,17 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
  *
  * 块满（或尚无日志块）⇒ 先 metadata_dir_reclaim 回收无活 region 的日志块，再从
  * Free Pool 取**整块**新日志块（allocator_alloc_reserved_block；Free Pool 保证
- * 已擦除，故无需擦）。**绝不回退到固定位置**：分配失败返回 FTL_ERROR，由上层重试。
+ * 已擦除，故无需擦）。**绝不回退到固定位置**：分配失败返回 NAND_PBA_INVALID，由上层重试。
  *
  * 日志块在哪个 plane 由 dir->cur_metadata_plane 轮转决定（写入目标与 region 归属
  * 无关：位置由 pba 自身携带，读回一律经 Directory 查 pba）。
+ *
+ * ⚠ **阶段 8 起本函数不再就地压缩**：换块后若 Free Pool 吃紧，只登记
+ *   `job.compact_wanted` 并返回 NAND_PBA_INVALID——压缩由 metadata_dir_kick 起异步
+ *   job 做（旧实现在这里同步跑完整个压缩，可阻塞服务循环数十毫秒）。
+ * ⚠ **整理 job 在飞时一律返回 NAND_PBA_INVALID**（见函数内注释）：压缩的空槽预算按
+ *   发放那一刻的 cur_metadata_page 核定，期间再发放会打乱预算与 ③④ 顺序。调用者
+ *   （l2p_cache_flush_kick）据此返回 FTL_AGAIN，下轮重试。
  *
  * @param dir    Directory cache
  * @param alloc  Allocator（取 Free Pool 块）
@@ -590,11 +664,18 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir,
  * metadata_dir_commit_region - 写成功后登记 region 的新位置
  *
  * 更新 entries[region_id].pba + l2p_live（旧日志块 -1、新日志块 +1）+ dirty +
- * have_dynamic。旧块活计数归零且非当前块 ⇒ 立即回收（擦除 + 归还 Free Pool），
- * 把「已无引用却仍带旧内容」的窗口压到最短。
+ * have_dynamic。旧块活计数归零且非当前块 ⇒ 把块号登记进 `job.reclaim_target`，
+ * 由后台 job 异步擦除 + 归还 Free Pool。
+ *
+ * ⚠ **阶段 8 起本函数不再擦 NAND**（旧实现在这里同步擦）：本函数被
+ *   `ftl_op_l2p`（L2P region 写回完成）调用，**运行在完成派发里** —— 就地擦会
+ *   在完成泵内嵌套泵。改登记后 `ftl_op_l2p` 全路径无 NAND 访问。
+ * ⚠ 压缩 job 在飞时**不登记**：压缩自己会把 victim 的活计数搬到 0，若此时就地
+ *   登记，job 的 CP_RECLAIM 会在 Anchor 落盘**之前**擦 victim（③ 早于 ④ 契约）。
+ *   压缩期间归零的块由 job 自己在 CP_RECLAIM 里擦。
  *
  * @param dir       Directory cache
- * @param alloc     Allocator（回收时需要；可为 NULL = 只登记不回收）
+ * @param alloc     Allocator（当前未使用，保留形参：回收已改由 job 做）
  * @param region_id L2P region_id
  * @param new_pba   刚写成功的位置（PBA）
  */
@@ -613,7 +694,12 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
  *
  * ⚠ 本函数**只**回收 live == 0 的块。若某日志块混着永不再写的冷 region（如 63 冷 + 1 热），
  *   它永不归零 ⇒ 永久占块；最坏情况吃掉近半个 die（FTL_BLOCK_TOTAL/2 块）。
- *   抗碎片的「取 live 最小块做 victim、搬活 region 后擦」是 metadata_dir_compact。
+ *   抗碎片的「取 live 最小块做 victim、搬活 region 后擦」是后台压缩 job
+ *   （`md_job_t` 的 CP_* 阶段，由 metadata_dir_kick 驱动）。
+ *
+ * ⚠ 本函数**保持同步**（残留项）：它只在 append_slot 换块分支与开机重建时调用，
+ *   是后台路径且通常一个块都不擦。改成异步要额外引入"扫描请求位"，与分配顺序
+ *   耦合，收益不成比例。**唯一调用者是 append_slot（已在后台 kick 路径之外）**。
  *
  * @param dir   Directory cache
  * @param alloc Allocator
@@ -622,33 +708,45 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
 ftl_status_t metadata_dir_reclaim(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
 
 /*
- * metadata_dir_compact - 抗碎片压缩：搬空一个「多活」日志块后归还（P0-3）
+ * metadata_dir_kick - 推进元数据目录后台 job（回收 / 压缩）一步
  *
- * metadata_dir_reclaim 的补集：挑 l2p_live 最小（但 >0）的非当前日志块做 victim，
- * 把它上面**仍有引用**的 region 逐个读回、写进当前日志块的下一空槽并重新登记，
- * 最后落盘 Anchor、擦除 victim、归还 Free Pool。
+ * 每轮服务循环（ftl_service_idle / normal / busy）调一次；**没有 job 在跑时**它就是
+ * 起 job 的地方：先看 job.reclaim_target（有 ⇒ 起回收），再看 job.compact_wanted
+ * （有 ⇒ 起压缩）。起不动（提交背压 / 无候选 / 空槽不够）只记账，下轮再来。
  *
- * 掉电安全顺序（不可重排）：① 搬移 → ② 登记 → ③ flush_to_anchor → ④ 擦 victim → ⑤ 归还。
- * ③ 必须早于 ④——否则掉电后 Anchor 仍指向已擦块，那些 region 的映射永久丢失。
- *
- * ⚠ 调用时机受限：必须在**当前日志块有足够空槽**时调（本函数自己会核对
- *   `l2p_live[victim] <= PAGES_PER_BLOCK - cur_metadata_page`）。最自然的调用点是
- *   metadata_dir_append_slot 刚取到新块之后——此时块内有整 PAGES_PER_BLOCK 个空槽。
- * ⚠ 无候选（全池零活 / 只剩当前块）/ 读失败 / 写失败 / Anchor 落盘失败 ⇒ 返回
- *   FTL_ERROR 且**不擦 victim**（已搬 region 的新位置已登记 ⇒ 无信息丢失，下次再来）。
+ * ⚠ **所有状态推进都在这里**（不在完成服务函数里）：压缩的 CP_ANCHOR_PREP 阶段要调
+ *   metadata_dir_anchor_prepare，而它在游标未建立时会**同步**扫池定位 —— 在完成泵里
+ *   跑就是嵌套泵（同 ftl_op_checkpoint 的取舍）。服务函数只记结果 + release + 改
+ *   phase，本函数负责"下一轮接着走"。
+ * ⚠ 幂等且廉价：无 job 且无请求时立即返回（一次 load + 比较）。
  *
  * @param dir   Directory cache
- * @param alloc Allocator（归还 victim 时需要）
- * @return FTL_OK = 确实压缩并归还了一块；FTL_ERROR = 未做（原因见上）
+ * @param alloc Allocator（取新日志块 / 归还 victim）
  */
-ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
+void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
 
-/* ── Anchor 落盘的三段式（同步 / 异步共用；阶段 6 起）──
+/*
+ * metadata_dir_busy - 整理 job 是否在跑（有命令在飞或处在中间 phase）。
  *
- * 一条 Anchor record = ANCHOR_PAGE_COUNT 页。同步站点用 metadata_dir_flush_to_anchor
- * 一口气写完；异步 job（Checkpoint）拆成 prepare →（可选换块擦）→ 逐页写 → commit，
- * 每步之间可以回到服务循环。三段式把「Directory 格式」留在 metadata.c，「状态机」
- * 留给调用者。 */
+ * 用途：让**调用者**区分"我的重试为什么没进展"与"卡死"。当前唯一读者是
+ * checkpoint.c 的 cp_flush_regions：脏 region 取不到槽（FTL_AGAIN）时若 job 在推进，
+ * 就**不该**累计 CP 的 stall 计数——否则一次正常的长压缩会把 Checkpoint 打回去。
+ *
+ * @return 1 = 有 job 在跑；0 = 空闲（或 dir == NULL）。
+ */
+static inline int metadata_dir_busy(const metadata_dir_cache_t *dir)
+{
+    return ((dir != NULL) && (dir->job.phase != (uint8_t)MD_JOB_IDLE)) ? 1 : 0;
+}
+
+/* ── Anchor 落盘的三段式（唯一形态；阶段 6 起）──
+ *
+ * 一条 Anchor record = ANCHOR_PAGE_COUNT 页。**所有**落盘站点（Checkpoint job、
+ * 目录压缩 job）都拆成 prepare →（可选换块擦）→ 逐页写 → commit，每步之间可以回到
+ * 服务循环。三段式把「Directory 格式」留在 metadata.c，「状态机」留给调用者。
+ * （阶段 8 删掉了同步一次性版本 metadata_dir_flush_to_anchor——最后两个调用者都已
+ * job 化。）
+ */
 
 /*
  * metadata_dir_anchor_prepare - 定位游标 + 取槽 + 算是否需换块擦（**不动介质**）
@@ -687,21 +785,6 @@ void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, uint32_t seq, uin
  * @param ok    0 = 有条分页写失败（整条作废，保留 dirty）
  */
 void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t *ring, uint16_t idx, int ok);
-
-/*
- * metadata_dir_flush_to_anchor - 将 Directory 追加为 Anchor 池的一条新 record
- *
- * 变更 ≥ 64 次或 Checkpoint/ftl_service(IDLE) 时调用。
- * **按页写**：一条 record = ANCHOR_PAGE_COUNT 页，每页在一个 2KB 栈缓冲里组好后
- * 同步写入（勿在栈上放整份 Directory）。池内轮转由 metadata_ring_prepare_write 负责。
- *
- * 无变更（!dirty）直接返回 FTL_OK —— 保留的早退：Anchor 每写一条都消耗池内槽位，
- * 空转会让池无谓轮转。
- *
- * @param dir  Directory cache
- * @return FTL_OK（含无需写入）/ FTL_ERROR（擦除或写失败）
- */
-ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir);
 
 /*
  * metadata_dir_load - 从 Anchor 池加载 Directory
