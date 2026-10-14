@@ -316,7 +316,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim)
             if (ftl_sync_write_page_cw(dst[plane],
                                        buf[plane],
                                        cw_bitmap[plane],
-                                       FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, ftl_lba_page(base[plane]))) != FTL_OK)
+                                       FTL_PAGE_CFG_DATA(ftl_lba_page(base[plane]))) != FTL_OK)
             {
                 continue; /* 写失败：L2P 未改，源页仍有效 */
             }

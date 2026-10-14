@@ -170,7 +170,7 @@ typedef struct ftl_context
 
     /* Read Recovery 整页暂存（CW 级映射：一个子操作可能只覆盖页内部分 CW，
      * 而 rr_recover_read 内部是**整页读**、从 CW0 起连续拷出。故恢复结果先落本页
-     * 镜像，再按各 CW 的真实偏移搬回 caller 缓冲（见 ftl_handle_completion）。
+     * 镜像，再按各 CW 的真实偏移搬回 caller 缓冲（见 ftl_op_host_io）。
      * 放上下文而非栈：2048B 的栈局部在 DTCM 栈上风险高，且 per-instance 无别名问题。 */
     uint8_t rr_page_scratch[FTL_READ_USER_SIZE];
 } ftl_context_t;

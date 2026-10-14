@@ -2,77 +2,84 @@
 #define FTL_COMPLETION_TABLE_H
 
 /*
- * Completion Table — 统一 FC 命令完成路由表
+ * Completion Table — cmd_id → ctx 旁表
  *
- * 所有 fc_poll_completion() 消费的 CQ entry 统一经过此表分发：
- *   ① 表中有注册的 handler → 精确路由（用于同步等待、专用回调等）
- *   ② 表中没有 → 走 ftl_handle_completion 默认路径（FTL pending 表等）
+ * 本表**只**回答一个问题：「这条命令的私有状态在哪」。命令该跑哪个完成服务函数
+ * 由**命令自己**携带（fc_command_t.op_tag → g_op_service[]，见 ftl_op.h）。
  *
- * 消除当前两个"泵"（ftl_service Phase2 和 ftl_internal_sync_wait）
- * 各自 fc_poll_completion 造成 completion 互相吞掉的 bug。
+ * 两张路由表：
+ *   ① g_table[COMPLETION_TABLE_SIZE] —— command_id → ctx，**精确旁表**；
+ *   ② g_route[CH][CE][LUN]           —— 命令 ch/ce/lun → ftl_context_t（实例路由）。
+ *
+ * 为什么需要旁表（而不是让 job 自识别 cmd_id）：
+ *   同步等待的 ctx 是**调用者栈上的 waiter**，没有 per-instance 的家；若走
+ *   "job 比对 job.cmd_id == completion->command_id"，同步路径就得另造一套机制。
+ *   保留统一旁表 ⇒ 同步与异步共用同一派发。
+ *
+ * 谁登记：
+ *   · 同步路径：ftl_sync_submit_wait 登记 &waiter（栈）；
+ *   · 异步 job：ftl_op_submit(cmd, op, &ftl-><feature>_job)；
+ *   · host I/O：ctx == NULL（服务函数自己 pending_lookup）。
  *
  * 线程安全：无（裸机单线程，不在中断中访问）。
  */
 
-#include "fc/fc_command.h" /* fc_command_status_t */
-#include "ftl/ftl_type.h"  /* ftl_status_t */
+#include "ftl/ftl_type.h"     /* ftl_status_t */
+#include "nand/nand_config.h" /* CE_NUM / LUN_NUM（实例路由表形参维度）*/
 
 #include <stdint.h>
 
 /* ── 前向声明（ftl_context_t 在 ftl.h 中定义）── */
 struct ftl_context;
 
-/* ── Completion 路由表项 ── */
-
-typedef void (*completion_handler_fn_t)(const fc_command_status_t *completion,
-                                        void                      *ctx);
-
+/* ── 旁表表项 ──
+ *
+ * 只留 cmd_id → ctx：handler 指针已搬进 g_op_service[]（按 op tag 索引），
+ * 故表项从 12B 缩到 8B（32 项 = 256B）。 */
 typedef struct
 {
-    uint16_t                used   : 1;  /* 1=槽位占用 */
-    uint16_t                cmd_id : 15; /* FC command_id */
-    completion_handler_fn_t handler;     /* 完成回调 */
-    void                   *ctx;         /* 回调上下文 */
+    uint16_t used   : 1;  /* 1=槽位占用 */
+    uint16_t cmd_id : 15; /* FC command_id */
+    void    *ctx;         /* 该命令的私有状态（同步等待 = ftl_sync_waiter_t*；job = &job） */
 } completion_entry_t;
 
 #define COMPLETION_TABLE_SIZE (32U) /* 最多同时跟踪 32 个命令 */
 
 /* ── 路由表 API ── */
 
-/* completion_table_init - 清空精确路由表 + default handler + 实例路由表（开机一次） */
+/* completion_table_init - 清空旁表 + 实例路由表（开机一次） */
 void completion_table_init(void);
 
-/* completion_table_add - 为 cmd_id 注册精确路由 handler（优先于 default）
- * @return FTL_OK；FTL_ERROR handler 为 NULL 或表满（COMPLETION_TABLE_SIZE） */
-ftl_status_t completion_table_add(uint16_t                cmd_id,
-                                  completion_handler_fn_t handler,
-                                  void                   *ctx);
+/*
+ * completion_table_add - 为 cmd_id 登记 ctx。
+ * @return FTL_OK；FTL_ERROR 表满（COMPLETION_TABLE_SIZE）。
+ */
+ftl_status_t completion_table_add(uint16_t cmd_id, void *ctx);
 
-/* completion_table_remove - 释放 cmd_id 的精确路由表项（未找到 no-op） */
+/* completion_table_remove - 释放 cmd_id 的表项（未找到 no-op，幂等） */
 void completion_table_remove(uint16_t cmd_id);
 
-/* completion_table_lookup - 按 cmd_id 查精确路由表项；未注册返回 NULL */
-completion_entry_t *completion_table_lookup(uint16_t cmd_id);
-
-/* completion_table_set_default - 设置未精确路由命令的兜底 handler（FTL 侧 = ftl_handle_completion） */
-void completion_table_set_default(completion_handler_fn_t handler,
-                                  void                   *ctx);
+/*
+ * completion_table_take - 查 + **摘链** + 返回 ctx（未登记返回 NULL）。
+ *
+ * 派发路径专用：先摘链再回调，容许服务函数在自己的回调里重入登记/释放表项。
+ */
+void *completion_table_take(uint16_t cmd_id);
 
 /*
- * completion_table_count - 当前占用（未决）的 completion 表项数
+ * completion_table_count - 当前占用（未决）的表项数。
  *
- * B3：ftl_service 三级模式判定用它近似 NAND 命令忙闲——表占用高
- * = 同步等待/后台命令在飞（GC/CP/BBT sync_wait），host IO 空闲度低。
+ * ftl_service 三级模式判定用它近似 NAND 命令忙闲——表占用高 = 同步等待/后台命令
+ * 在飞，host IO 空闲度低。
  * @return 占用槽位数（0..COMPLETION_TABLE_SIZE）
  */
 uint16_t completion_table_count(void);
 
 /*
- * completion_table_set_route - 设置实例路由表（F6）
+ * completion_table_set_route - 设置实例路由表（F6）。
  *
- * 全局 completion 表保持单一（FC CQ 全局、cmd_id 全局唯一），默认 handler
- * 按命令 ch/ce/lun 路由到对应 FTL 实例的 pending 表。本函数在 main.c
- * 填完 g_ftl_ptrs 后调用一次（所有实例 boot 完成后）。
+ * 全局旁表保持单一（FC CQ 全局、cmd_id 全局唯一），派发时按命令 ch/ce/lun
+ * 路由到对应 FTL 实例。本函数在 main.c 填完 g_ftl_ptrs 后调用一次。
  *
  * @param route  CH_NUM×CE_NUM×LUN_NUM 三维 ftl_context_t* 表（仿 main.c g_ftl_ptrs）
  */
@@ -84,39 +91,10 @@ void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM]);
 struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun);
 
 /*
- * completion_table_drain - 消费所有 CQ entry 并通过路由表分发
+ * completion_table_drain - 消费所有 CQ entry 并派发（ftl_service_pump Phase 2 调用）。
  *
- * 本函数在 ftl_service Phase 2 和 ftl_internal_sync_wait 中调用，
- * 替代原先各自的 fc_poll_completion 循环。
+ * 循环 fc_poll_completion()，每条交 ftl_op_dispatch()（按命令的 op_tag 查服务函数数组）。
  */
 void completion_table_drain(void);
-
-/* ── 同步等待器 ──
- *
- * 用于内部同步操作和 ftl_write 的同步等待。
- */
-
-typedef struct
-{
-    uint16_t            cmd_id;     /* 等待的 command_id */
-    uint8_t             done;       /* handler 设置此标志 */
-    fc_command_status_t completion; /* handler 保存的完整 completion 信息 */
-} ftl_sync_waiter_t;
-
-/*
- * ftl_sync_waiter_handler - 通用同步等待 handler
- *
- * 设置 waiter->done = 1，保存 raw_status 和 module。
- * 不释放命令（由调用者负责）。
- */
-void ftl_sync_waiter_handler(const fc_command_status_t *completion, void *ctx);
-
-/*
- * ftl_sync_waiter_handler_with_release - 同步等待 + 释放命令
- *
- * 同 ftl_sync_waiter_handler，但额外调用 fc_command_release。
- */
-void ftl_sync_waiter_handler_with_release(const fc_command_status_t *completion,
-                                          void                      *ctx);
 
 #endif /* FTL_COMPLETION_TABLE_H */

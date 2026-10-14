@@ -93,7 +93,7 @@ static ftl_status_t wear_write_page(ftl_allocator_t *alloc, wear_page_t *page, u
     page->entry_count = count;
 
     addr = wear_page_addr(alloc->ch, alloc->ce, alloc->lun, alloc->wear.next_page);
-    if (ftl_sync_write_page(addr, page, sizeof(*page), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_WEAR_LEVELING)) != 0)
+    if (ftl_sync_write_page(addr, page, sizeof(*page), FTL_PAGE_CFG_META()) != 0)
     {
         return FTL_ERROR;
     }
@@ -227,7 +227,7 @@ ftl_status_t wear_init(ftl_allocator_t *alloc)
         uint32_t   k;
 
         memset(&page, 0, sizeof(page));
-        if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_WEAR_LEVELING)) != 0)
+        if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META()) != 0)
         {
             break;
         }

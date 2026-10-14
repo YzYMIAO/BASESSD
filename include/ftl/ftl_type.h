@@ -80,7 +80,7 @@ typedef struct
  * nand_paa_t——那是 NAND 层的表示。
  */
 
-/* pending 完成回调 — 在 ftl_handle_completion 数据拷贝 + 标志置位后调用。
+/* pending 完成回调 — 在 ftl_op_host_io 数据拷贝 + 标志置位后调用。
  * 定义于此（而非 pending.h），避免 pending.h ↔ ftl_type.h 循环 include。 */
 typedef void (*pending_cb_t)(void *ctx);
 

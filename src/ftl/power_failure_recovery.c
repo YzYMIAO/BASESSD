@@ -363,7 +363,7 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
                     region_addr = l2p_region_pba(ftl->cache.ch, ftl->cache.ce, ftl->cache.lun, line->region_id);
                 }
 
-                if (ftl_sync_read_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) == FTL_OK)
+                if (ftl_sync_read_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META()) == FTL_OK)
                 {
                     line->state = L2P_CACHE_CLEAN;
                 }
@@ -479,7 +479,7 @@ static uint8_t page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
     uint8_t j;
 
     memset(raw_buf, 0xFF, PAGE_SIZE);
-    if (ftl_sync_read_page_raw(pba, raw_buf, FC_COMMAND_MODULE_BBT) != FTL_OK)
+    if (ftl_sync_read_page_raw(pba, raw_buf) != FTL_OK)
     {
         return 0U; /* 命令没走通 ⇒ 内容不可知 ⇒ 一律判非空 */
     }

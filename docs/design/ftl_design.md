@@ -769,7 +769,7 @@ READ 重试超限   ECC 连续多次升高 + retry 失败  标记坏块 → 数�
 void bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
 /* 4 处调用点：gc.c 擦除失败 / ftl.c 读不可恢复 / ftl.c 写失败 / bbt.c 内部 */
 
-/* 完成路径中的失败处理（ftl_handle_completion）：
+/* 完成路径中的失败处理（ftl_op_host_io）：
  *   PROGRAM/ERASE 的 NAND_FAIL → bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(ftl_cmd_pba(cmd)))
  *   READ 不可恢复（ECC 超限）  → bbt_mark_bad + 慢死预测（rr 记录）*/
 ```
@@ -1391,8 +1391,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim) {
             if (cw_bitmap[plane] == 0U) continue;
             /* 只编有效 CW 子集（页内允许空洞；META 由页基址 + CW 偏移推出） */
             if (ftl_sync_write_page_cw(dst[plane], buf[plane], cw_bitmap[plane],
-                                       FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC,
-                                                         ftl_lba_page(base[plane]))) != 0) continue;
+                                       FTL_PAGE_CFG_DATA(ftl_lba_page(base[plane]))) != 0) continue;
             for (uint8_t cw = 0; cw < CW_NUM; cw++) {
                 if ((cw_bitmap[plane] & (1U << cw)) == 0U) continue;
                 lba_t      l       = cw_lba[plane][cw];
@@ -2462,7 +2461,7 @@ Journal 块 = JOURNAL_BLOCK0 + b（JOURNAL_BLOCK0 = 58）；块数由 JOURNAL_BL
 
 > ⚠ **订正**：真实写入分**两段**——提交路径（`ftl_submit_write`）只**建组**并走
 > `ftl_drain_group` 快路径下发子操作；Journal / L2P / 有效计数更新在**完成路径**
-> （`ftl_handle_completion` → `ftl_confirm_write`）里、NAND 确认写成功之后才做
+> （`ftl_op_host_io` → `ftl_confirm_write`）里、NAND 确认写成功之后才做
 > （**modify-after-confirm**）。原伪代码把 journal_append / l2p_cache_write 写在提交
 > 路径，且 `allocator_alloc` / `ftl_cmd_setup_ppa` / `req->pages` 等函数名与字段均已过期
 > （`pages` 字段已删，单/双 plane 改由**页打包窗口占用**决定，见下）。
@@ -2485,16 +2484,15 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req) {
  *    cmd->config.multi_plane = (nplanes==2) ? 2 : 0
  *    cmd->config.cw = 3 / crc = FC_CRC_ENABLE / random = FC_RANDOM_ENABLE
  *    cmd->config.ldpc = FC_ECC_MODE_BCH / chain = FC_CHAIN_END / page_type = FC_PAGE_TYPE_LP
- *    cmd->module = FC_COMMAND_MODULE_FTL
  *    cmd->meta   = (DWORD)ftl->wbuf.base    // 窗口基址；FC 侧按 (meta&~PLANE_CW_MASK)|(plane<<2)|cw
  *                                           // 铸出逐 CW 的扇区 LBA（非 << CW_WIDTH 的单个 LBA）
  * ④ ftl_cmd_setup_ppa_pair_cw(cmd, new_pba, wbuf.occupied)   // desc 链；位图 = 实际覆盖 CW
  * ⑤ ftl_cmd_write_data_cw(cmd, ftl->wbuf.data, wbuf.occupied) // 按页内 CW 偏移散射取数
  * ⑥ pending_add(..., owners = wbuf.owners, lba = wbuf.base, buffer = NULL, n_cw,
  *               new_pba[0], new_pba[1], cache_intermediate = 0, PENDING_OP_WRITE, wbuf.occupied)
- * ⑦ fc_submit(cmd)；cmd/desc/buffer 池空或 SQ 满 → 保留缓冲、返回 FTL_AGAIN（下轮重试） */
+ * ⑦ ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL)；cmd/desc/buffer 池空或 SQ 满 → 保留缓冲、返回 FTL_AGAIN（下轮重试） */
 
-/* ── 完成路径：ftl_handle_completion → ftl_confirm_write（确认写成功后**逐 CW** 簿记）──
+/* ── 完成路径：ftl_op_host_io → ftl_confirm_write（确认写成功后**逐 CW** 簿记）──
  * ⚠ pending **不存** old_pba：旧 PBA 在完成时按 LBA 重查 L2P（v0.58 起）。
  * ⚠ pending 描述**一整页**（lba = 窗口基址 + cw_bitmap 标记本页哪些 CW 有效）⇒
  *    循环按位图逐**置位**确认，逐 CW 的 LBA = base + bit（bit = plane*CW_NUM + cw）。 */
@@ -3842,8 +3840,8 @@ ftl_cmd_configure_descriptors(cmd, cw_bitmap); /* ★ v28 起**两参**：位图
                                                 *   （v23 起 config.cw 已不参与建链）*/
 ftl_cmd_write_data(cmd, data, len);            /* v13 前为 fc_write_cmd_data */
 
-fc_submit(cmd);                                // → SQ
-// 完成经 completion_table 路由（ftl_handle_completion），检查 per-CW status/ECC
+ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL);           // → SQ（tag = 完成服务函数选择器）
+// 完成经 completion_table 路由（ftl_op_host_io），检查 per-CW status/ECC
 // 成功后 journal_append + l2p_cache_write（modify-after-confirm）
 
 fc_command_release(cmd);

@@ -85,7 +85,6 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
     cmd->config.multi_plane = 0U;
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = FC_COMMAND_MODULE_GC;
     cmd->meta               = FC_META_UNKNOWN; /* 不知道 LBA——正是要从页内 META 读回来（v24） */
 
     if (ftl_cmd_setup_ppa(cmd, pba) != 0)
@@ -94,15 +93,10 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
         return FTL_ERROR;
     }
 
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
     {
         fc_command_status_t completion;
-        ret = ftl_internal_sync_wait(ftl_cmd_id(cmd), &completion, 0U);
+
+        ret = ftl_sync_submit_wait(cmd, &completion, 0U);
         if (ret != 0)
         {
             (void)fc_command_release(cmd);
@@ -598,7 +592,7 @@ int gc_migrate_sb(ftl_allocator_t *alloc, l2p_cache_t *cache, l2p_journal_t *jou
             if (ftl_sync_write_page_cw(dst[plane],
                                        buf[plane],
                                        cw_bitmap[plane],
-                                       FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, ftl_lba_page(base[plane]))) != FTL_OK)
+                                       FTL_PAGE_CFG_DATA(ftl_lba_page(base[plane]))) != FTL_OK)
             {
                 continue; /* 写失败：L2P 未改，源页仍有效，下轮 GC 再试 */
             }

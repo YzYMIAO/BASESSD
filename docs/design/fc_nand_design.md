@@ -2347,33 +2347,29 @@ while (desc_id < FC_DESCRIPTOR_POOL_DEPTH) {
 | 长链路命令完成，CQ 已出队 | ❌ 状态已丢失 | **✅ Descriptor 保留状态** |
 | 错误注入/调试分析 | ❌ | **✅ 状态持续可查** |
 
-#### 13.4.5 module 字段直接路由
+#### 13.4.5 op_tag 字段直接路由
 
-`fc_command_status_t.module` 拷贝自 `command->module`，使 FTL 收到 CQ 条目后无需通过 `command_id` 查询命令再决定路由：
+`fc_command_status_t.op_tag` 拷贝自 `command->op_tag`，使上层收到 CQ 条目后无需通过 `command_id` 查询命令再决定路由：
 
 ```c
-// 不用 module 的方式：
+// 不拷 op_tag 的方式：
 status = fc_poll_completion(&completion);
 cmd = fc_command_id_to_command(completion.command_id);
-switch (cmd->module) { ... }  // 需要一次额外指针查询
+switch (cmd->op_tag) { ... }  // 需要一次额外指针查询
 
-// 用 module 的方式：
+// 拷了 op_tag 的方式：
 status = fc_poll_completion(&completion);
-switch (completion.module) { ... }  // 直接路由
+service = g_op_service[completion.op_tag];  // 直接派发
+service(ftl, &completion, ctx);
 ```
 
-module 枚举值覆盖所有 FC 使用者：
+⚠ **FC 对 `op_tag` 是不透明的**：7 位整数，FC 不解释、不分支，只在完成时原样拷贝。
+取值语义（= FTL 的 `ftl_op_id_t`）由上层定义 —— 见 `include/ftl/ftl_op.h`。FC 侧**不声明**
+这套枚举（v0.75 删除了原 `fc_command_module_t`：它是 FTL 概念，不该由 FC 声明）。
 
-| module | 用途 |
-|--------|------|
-| `FC_COMMAND_MODULE_HOST_IO` | 主机读写命令 |
-| `FC_COMMAND_MODULE_FTL` | FTL 内部元数据操作 |
-| `FC_COMMAND_MODULE_GC` | 垃圾回收 |
-| `FC_COMMAND_MODULE_READ_RECOVERY` | Read Retry 恢复 |
-| `FC_COMMAND_MODULE_METADATA` | 元数据读写 |
-| `FC_COMMAND_MODULE_BBT` | Bad Block Table 管理 |
-| `FC_COMMAND_MODULE_CHECKPOINT` | Checkpoint/恢复 |
-| `FC_COMMAND_MODULE_WEAR_LEVELING` | 磨损均衡 |
+为什么是 7 位：原 `module : 4` + 紧随其后的 `reserved1 : 3` 合并而成（见
+`fc_command.h` 的位域布局），不新增字段、不改结构体大小、不落介质（落介质的只有
+`meta` / `paa`）⇒ 编号可自由重排，无介质版本影响。
 
 ### 13.5 Dispatch 请求/完成结构总览
 

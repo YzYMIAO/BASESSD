@@ -26,8 +26,8 @@
  *      record_ecc_health_monotonic（健康度只升不降）；
  *   ④ bbt_mark_bad 的 bad_count++ 是**无条件**的 ⇒ mark_bad_idempotent 只钉位级幂等，
  *      不钉 bad_count；
- *   ⑤ completion_table_init() 会清掉固件开机注册的 default handler（ftl.c 的 static
- *      ftl_handle_completion，测试无法重装）⇒ ct 用例用**相对计数**、不调 init。
+ *   ⑤ completion_table_init() 会清掉固件已登记的旁表项（同步等待/异步 job 的 ctx，
+ *      测试无法恢复）⇒ ct 用例用**相对计数**、不调 init。
  */
 
 #include "controller/cli.h" /* g_ctrl（活实例路由表，extern） */
@@ -200,13 +200,6 @@ static void ftl_ut_put_closed_sb(ftl_allocator_t *alloc,
 static nand_pba_t ftl_ut_pba(uint8_t lun, uint16_t block, uint8_t plane, uint8_t page)
 {
     return pba_make(0U, 0U, lun, block, plane, page, 0U);
-}
-
-/* 完成表 handler 桩（只为验证 lookup 取回的是同一个函数指针）。 */
-static void ftl_ut_completion_stub(const fc_command_status_t *completion, void *ctx)
-{
-    (void)completion;
-    (void)ctx;
 }
 
 /* 组完成回调计数桩（group_complete_once 用）。 */
@@ -1936,14 +1929,17 @@ static MunitResult test_pending_count(const MunitParameter params[], void *fixtu
 }
 
 /*
- * 完成表：add/lookup/remove/count。
+ * 完成旁表：add / take / remove / count。
  *
- * ⚠ 偏差 ⑤：**不调 completion_table_init()** —— 它会连同固件开机注册的 default
- *   handler（ftl.c 的 static ftl_handle_completion）一起清掉，测试无法重装 ⇒
- *   后续所有 NAND 完成回调都会静默丢失。改用**相对计数**：先取基线，只增删自己
- *   的条目，收尾恢复基线。
+ * ⚠ 偏差 ⑤：**不调 completion_table_init()** —— 它会连同固件已登记的旁表项一起
+ *   清掉（同步等待/异步 job 的 ctx），测试无法恢复 ⇒ 后续完成派发会丢 ctx。
+ *   改用**相对计数**：先取基线，只增删自己的条目，收尾恢复基线。
+ *
+ * v0.75：表项不再带 handler —— 完成服务函数由**命令自己**携带的 op_tag 经
+ *   g_op_service[] 查出（见 ftl_op.c），旁表只回答"这条命令的私有状态在哪"。
+ *   故本用例断言 cmd_id → ctx 的往返，以及 take 的「查 + 摘链」语义。
  */
-static MunitResult test_ct_add_remove_lookup_count(const MunitParameter params[], void *fixture)
+static MunitResult test_ct_add_take_remove_count(const MunitParameter params[], void *fixture)
 {
     uint16_t ids[3] = {0x7FF0U, 0x7FF1U, 0x7FF2U};
     uint16_t base_count;
@@ -1954,33 +1950,53 @@ static MunitResult test_ct_add_remove_lookup_count(const MunitParameter params[]
 
     base_count = completion_table_count();
 
-    /* 未注册的 id 落空（0x7FFE 远离命令池实际 ID） */
-    munit_assert_null(completion_table_lookup(0x7FFEU));
+    /* 未注册的 id 摘不到 ctx（0x7FFE 远离命令池实际 ID） */
+    munit_assert_null(completion_table_take(0x7FFEU));
 
     for (i = 0U; i < 3U; i++)
     {
-        munit_assert_int(completion_table_add(ids[i], ftl_ut_completion_stub, &ids[i]), ==, FTL_OK);
+        munit_assert_int(completion_table_add(ids[i], &ids[i]), ==, FTL_OK);
     }
     munit_assert_uint16(completion_table_count(), ==, (uint16_t)(base_count + 3U));
 
+    /* take = 查 + 摘链：返回登记的 ctx，且条目随即释放（故逐条取完再补回） */
     for (i = 0U; i < 3U; i++)
     {
-        completion_entry_t *e = completion_table_lookup(ids[i]);
-
-        munit_assert_not_null(e);
-        munit_assert_uint16(e->cmd_id, ==, ids[i]);
-        munit_assert_true(e->handler == ftl_ut_completion_stub);
-        munit_assert_ptr(e->ctx, ==, &ids[i]);
+        munit_assert_ptr(completion_table_take(ids[i]), ==, &ids[i]);
+        munit_assert_int(completion_table_add(ids[i], &ids[i]), ==, FTL_OK);
     }
+    munit_assert_uint16(completion_table_count(), ==, (uint16_t)(base_count + 3U));
 
-    /* handler == NULL 拒绝 */
-    munit_assert_int(completion_table_add(0x7FF3U, NULL, NULL), ==, FTL_ERROR);
+    /* ctx == NULL 合法（= "本命令不用旁表"，服务函数自行派生状态），不是错误 */
+    munit_assert_int(completion_table_add(0x7FF3U, NULL), ==, FTL_OK);
+    munit_assert_uint16(completion_table_count(), ==, (uint16_t)(base_count + 4U));
+    munit_assert_null(completion_table_take(0x7FF3U)); /* 摘到 NULL ctx，条目已释放 */
+    munit_assert_uint16(completion_table_count(), ==, (uint16_t)(base_count + 3U));
+
+    /* 表满：填满剩余槽位后 add 必须 FTL_ERROR（收尾逐条释放） */
+    {
+        uint16_t filled[COMPLETION_TABLE_SIZE];
+        uint16_t n = 0U;
+
+        while (completion_table_count() < COMPLETION_TABLE_SIZE)
+        {
+            munit_assert_uint16(n, <, COMPLETION_TABLE_SIZE); /* 基线已满则不进循环 */
+            filled[n] = (uint16_t)(0x7000U + n);
+            munit_assert_int(completion_table_add(filled[n], NULL), ==, FTL_OK);
+            n++;
+        }
+        munit_assert_int(completion_table_add(0x7FF4U, NULL), ==, FTL_ERROR);
+        for (i = 0U; i < n; i++)
+        {
+            completion_table_remove(filled[i]);
+        }
+    }
     munit_assert_uint16(completion_table_count(), ==, (uint16_t)(base_count + 3U));
 
     /* 移除 + 幂等 */
     completion_table_remove(ids[1]);
     munit_assert_uint16(completion_table_count(), ==, (uint16_t)(base_count + 2U));
-    munit_assert_null(completion_table_lookup(ids[1]));
+    munit_assert_null(completion_table_take(ids[1]));
 
     completion_table_remove(ids[1]);
     munit_assert_uint16(completion_table_count(), ==, (uint16_t)(base_count + 2U));
@@ -2374,11 +2390,11 @@ MunitTest g_ftl_metadata_tests[] = {
 };
 
 MunitTest g_ftl_pending_ct_tests[] = {
-    { (char *)"pending_add_lookup_remove",  test_pending_add_lookup_remove, ftl_setup, NULL,            FTL_UT_NONE, NULL},
-    {   (char *)"pending_full_32_rejects",    test_pending_full_32_rejects, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
-    {             (char *)"pending_count",              test_pending_count, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
-    {(char *)"ct_add_remove_lookup_count", test_ct_add_remove_lookup_count, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
-    {                                NULL,                            NULL,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+    {(char *)"pending_add_lookup_remove", test_pending_add_lookup_remove, ftl_setup, NULL,            FTL_UT_NONE, NULL},
+    {  (char *)"pending_full_32_rejects",   test_pending_full_32_rejects, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
+    {            (char *)"pending_count",             test_pending_count, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
+    { (char *)"ct_add_take_remove_count",  test_ct_add_take_remove_count, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
+    {                               NULL,                           NULL,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
 };
 
 MunitTest g_ftl_group_tests[] = {

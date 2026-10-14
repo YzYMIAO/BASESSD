@@ -192,7 +192,11 @@ RAID / stripe 命令要求两 plane 的 CW 集合相同（XOR 按 CW 配对）�
 
 **不在本次范围**：FTL 读恢复流程（`src/ftl/read_recovery.c`）对失败位图的接线。
 
-### 使用 module 直接路由完成通知
+### 使用 op_tag 直接路由完成通知
+
+`op_tag` 是 **7 位不透明标签**：FC 不解释、不分支，只在完成时把它从命令拷进
+`fc_command_status_t`。上层据它查自己的「完成服务函数数组」派发 —— 无需 `command_id`
+查询命令再决定路由：
 
 ```c
 while (1) {
@@ -200,27 +204,16 @@ while (1) {
 
     fc_command_status_t completion;
     if (fc_poll_completion(&completion) == FC_STATUS_OK) {
-        // 直接按 module 路由，无需 command_id 查询
-        switch ((fc_command_module_t)completion.module) {
-            case FC_COMMAND_MODULE_HOST_IO:
-                host_io_complete(&completion);
-                break;
-            case FC_COMMAND_MODULE_GC:
-                gc_complete(&completion);
-                break;
-            case FC_COMMAND_MODULE_READ_RECOVERY:
-                recovery_complete(&completion);
-                break;
-            default:
-                ftl_complete(&completion);
-                break;
-        }
-
-        fc_command_t *done = fc_command_id_to_command(completion.command_id);
-        fc_command_release(done);
+        // 直接按 op_tag 派发（FTL 侧的实际实现：src/ftl/ftl_op.c）
+        ftl_op_service_fn_t fn = g_op_service[completion.op_tag];
+        fn(ftl, &completion, completion_table_take(completion.command_id));
     }
 }
 ```
+
+⚠ `op_tag` 的取值语义（`ftl_op_id_t`）**由上层定义**，FC 不声明这套枚举
+（v0.75 已删除 `fc_command_module_t`）。命令的 `release` 归属同样由上层约定：
+同步等待的服务函数不 release（调用者读完命令数据后释放），异步 job 的服务函数自己 release。
 
 ### 读取 ECC 纠正比特数
 

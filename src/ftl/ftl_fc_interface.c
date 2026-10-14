@@ -21,8 +21,8 @@
  *   1. 建链            ftl_cmd_resolve_cw_bitmap（static）/ ftl_cmd_configure_descriptors
  *   2. 命令地址入口    ftl_cmd_setup_ppa / ftl_cmd_setup_ppa_pair
  *   3. 数据搬运        ftl_cmd_write_data / ftl_cmd_read_data
- *   4. 内部同步等待    ftl_internal_sync_wait
- *   5. 页级同步原语    sync_page_prepare / sync_page_submit_wait（static）
+ *   4. 同步提交等待    ftl_sync_submit_wait（ftl_op 机制的客户端）
+ *   5. 页级同步原语    sync_page_prepare / sync_page_prepare_cw（static）
  *                      + ftl_sync_write_page / ftl_sync_read_page / ftl_sync_read_page_raw
  *                        / ftl_sync_erase_block / ftl_sync_read_meta / ftl_sync_read_column
  *
@@ -35,6 +35,7 @@
 #include "common/assertion.h"
 #include "fc/fc.h"
 #include "ftl/completion_table.h"
+#include "ftl/ftl_op.h" /* ftl_op_submit / FTL_OP_SYNC_WAIT */
 #include "ftl/ftl_type.h"
 #include "nand/onfi_1_0.h"
 
@@ -501,31 +502,34 @@ ftl_status_t ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length)
     return FTL_OK;
 }
 
-/* ── 4. 内部同步等待 ── */
+/* ── 4. 同步提交等待 ── */
 
 /* --------------------------------------------------------------------
- * ftl_internal_sync_wait
- *   功能：同步等待指定 command_id 完成（内部同步 NAND 操作的等待原语）。
- *   参数：cmd_id —— 要等待的命令 id；status_out —— 出参完成状态（可 NULL）；
+ * ftl_sync_submit_wait
+ *   功能：提交命令并阻塞等待其完成（同步提交的唯一入口，ftl_op 机制的客户端）。
+ *   参数：cmd —— 已建链的命令；status_out —— 出参完成状态（可 NULL）；
  *         timeout_us —— 超时（0 = 默认 10ms）。
- *   返回：FTL_OK 完成；FTL_ERROR 超时或路由表满。
- *   实现要点：用 completion_table 统一路由——① 注册 ftl_sync_waiter_handler；
- *             ② 循环 fc_service() + completion_table_drain() 直到 done；
- *             ③ 非目标 completion 由 drain 自动路由到 default handler
- *             （ftl_handle_completion），本函数无需处理。
+ *   返回：FTL_OK 完成；FTL_ERROR 提交失败 / 超时 / 旁表满。
+ *   实现要点：① ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) —— 打 tag、登记栈上
+ *             waiter、提交（登记早于提交）；② 自旋 fc_service() +
+ *             completion_table_drain() 直到 waiter.done；③ 超时摘链返回 FTL_ERROR。
+ *             ⚠ 非目标 completion 由 drain 按各自的 op_tag 派发，本函数无需处理。
+ *             ⚠ **不 release**：调用者要在返回后读 cmd 数据才 release（见 ftl_op.h）。
  * -------------------------------------------------------------------- */
-ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out, uint32_t timeout_us)
+ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, uint32_t timeout_us)
 {
     ftl_sync_waiter_t waiter;
     uint32_t          elapsed  = 0U;
     uint32_t          max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
 
-    waiter.cmd_id = cmd_id;
+    ASSERT(cmd != NULL);
+
+    waiter.cmd_id = ftl_cmd_id(cmd);
     waiter.done   = 0U;
 
-    if (completion_table_add(cmd_id, ftl_sync_waiter_handler, &waiter) != 0)
+    if (ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) != FTL_OK)
     {
-        return FTL_ERROR; /* 路由表满 */
+        return FTL_ERROR; /* 提交失败（背压/旁表满）——命令未提交，调用者自行 release */
     }
 
     for (;;)
@@ -542,7 +546,7 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
         elapsed++;
         if (elapsed > max_wait)
         {
-            completion_table_remove(cmd_id);
+            completion_table_remove(waiter.cmd_id);
             return FTL_ERROR;
         }
     }
@@ -560,7 +564,7 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
  * 四个函数共用同一模板：alloc → 填配置 → pba_to_cmd（建链）→ 可选搬数据 →
  * submit → sync_wait → 判完成状态 → release。差异只在：
  *   · operation（PROGRAM / READ / ERASE）
- *   · 配置（crc / random / ldpc / module / lba）
+ *   · 配置（crc / random / ldpc / lba）
  *   · 数据方向（写：submit 前搬入；读：完成后搬出）
  *   · 是否判失败位（写/读页/擦除判 FC_CW_STATUS_ERROR_MASK 全集；RAW 读刻意不判）
  *   · 超时（擦除 20ms，其余默认）
@@ -586,7 +590,6 @@ static fc_command_t *sync_page_prepare(nand_pba_t pba, uint8_t operation, const 
     cmd->config.multi_plane = 0U;
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = (DWORD)cfg->module;
     /* 页 LBA → 扇区 LBA（v24）。FTL_LBA_UNKNOWN（FTL_PAGE_CFG_DATA_ANY）⇒ FC_META_UNKNOWN，
      * 让 FC 侧跳过「页内 META 与本命令 LBA 比对」那一项。 */
     cmd->meta               = (cfg->lba == (lba_t)FTL_LBA_UNKNOWN) ? (DWORD)FC_META_UNKNOWN
@@ -621,7 +624,6 @@ static fc_command_t *sync_page_prepare_cw(nand_pba_t pba, uint8_t operation, con
     cmd->config.multi_plane = 0U;
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->module             = (DWORD)cfg->module;
     cmd->meta               = (cfg->lba == (lba_t)FTL_LBA_UNKNOWN) ? (DWORD)FC_META_UNKNOWN
                                                                    : (DWORD)(cfg->lba << CW_WIDTH);
 
@@ -641,34 +643,17 @@ static fc_command_t *sync_page_prepare_cw(nand_pba_t pba, uint8_t operation, con
     return cmd;
 }
 
-/* 提交并等待完成。返回 0 = 命令完成（不论 NAND 成败）；-1 = 提交或等待失败。
- * ⚠ 不判定 NAND_FAIL —— RAW 读刻意忽略它（坏页也要拿原始数据），
- *    故成败判定留在调用者。命令不在此释放。 */
-static int sync_page_submit_wait(fc_command_t *cmd, fc_command_status_t *completion, uint32_t timeout_us)
-{
-    if (fc_submit(cmd) != FC_STATUS_OK)
-    {
-        return -1;
-    }
-    if (ftl_internal_sync_wait(ftl_cmd_id(cmd), completion, timeout_us) != 0)
-    {
-        return -1;
-    }
-    return 0;
-}
-
 /* --------------------------------------------------------------------
  * ftl_sync_write_page
  *   功能：页级同步写——建链 + 搬入数据 + 提交等待 + 判 NAND 失败。
  *   参数：pba —— 目标页 PBA；data/length —— 源数据（可为 NULL/0 = 纯建链不搬）；
- *         cfg —— 页配置（crc/random/ldpc/module/lba）。
+ *         cfg —— 页配置（crc/random/ldpc/lba）。
  *   返回：FTL_OK / FTL_ERROR（建链失败 / 提交等待失败 / NAND_FAIL）。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_write_page(nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg)
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
-    int                 ret;
 
     cmd = sync_page_prepare(pba, OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
@@ -681,8 +666,7 @@ ftl_status_t ftl_sync_write_page(nand_pba_t pba, const void *data, uint32_t leng
         (void)ftl_cmd_write_data(cmd, data, length);
     }
 
-    ret = sync_page_submit_wait(cmd, &completion, 0U);
-    if (ret != 0)
+    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -715,7 +699,6 @@ ftl_status_t ftl_sync_write_page_cw(nand_pba_t pba, const uint8_t *page_buf, uin
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
-    int                 ret;
 
     cmd = sync_page_prepare_cw(pba, OP_NORMAL_PROGRAM_PAGE, cfg, cw_bitmap);
     if (cmd == NULL)
@@ -725,8 +708,7 @@ ftl_status_t ftl_sync_write_page_cw(nand_pba_t pba, const uint8_t *page_buf, uin
 
     (void)ftl_cmd_write_data_cw(cmd, page_buf, cw_bitmap);
 
-    ret = sync_page_submit_wait(cmd, &completion, 0U);
-    if (ret != 0)
+    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -752,7 +734,6 @@ ftl_status_t ftl_sync_read_page(nand_pba_t pba, void *buffer, uint32_t length, c
 {
     fc_command_t       *cmd;
     fc_command_status_t completion;
-    int                 ret;
 
     cmd = sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
     if (cmd == NULL)
@@ -760,8 +741,7 @@ ftl_status_t ftl_sync_read_page(nand_pba_t pba, void *buffer, uint32_t length, c
         return FTL_ERROR;
     }
 
-    ret = sync_page_submit_wait(cmd, &completion, 0U);
-    if (ret != 0)
+    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -793,13 +773,13 @@ ftl_status_t ftl_sync_read_page(nand_pba_t pba, void *buffer, uint32_t length, c
 /* --------------------------------------------------------------------
  * ftl_sync_read_page_raw
  *   功能：RAW 读——LDPC_RAW 跳过 ECC 拿原始数据，4 个 CW 无条件拷出。
- *   参数：pba —— 目标页 PBA；buffer —— 输出（须 >= PAGE_SIZE）；module —— 调用方模块标识。
+ *   参数：pba —— 目标页 PBA；buffer —— 输出（须 >= PAGE_SIZE）。
  *   返回：FTL_OK / FTL_ERROR（建链失败 / 提交等待失败）。
  *   实现要点：**刻意不判 NAND 失败**——坏页/空页也要拿原始数据（判空、判出厂坏块都靠它）。
  * -------------------------------------------------------------------- */
-ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer, uint8_t module)
+ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer)
 {
-    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_LDPC_RAW, module, 0U};
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_LDPC_RAW, 0U};
     fc_command_t        *cmd;
     fc_command_status_t  completion;
     uint8_t              cw;
@@ -810,7 +790,7 @@ ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer, uint8_t module
         return FTL_ERROR;
     }
 
-    if (sync_page_submit_wait(cmd, &completion, 0U) != 0)
+    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -840,10 +820,9 @@ ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer, uint8_t module
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_erase_block(nand_pba_t pba)
 {
-    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, FC_COMMAND_MODULE_METADATA, 0U};
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
     fc_command_t        *cmd;
     fc_command_status_t  completion;
-    int                  ret;
 
     cmd = sync_page_prepare(pba, OP_ERASE_BLOCK, &cfg);
     if (cmd == NULL)
@@ -851,8 +830,7 @@ ftl_status_t ftl_sync_erase_block(nand_pba_t pba)
         return FTL_ERROR;
     }
 
-    ret = sync_page_submit_wait(cmd, &completion, 20000U);
-    if (ret != 0)
+    if (ftl_sync_submit_wait(cmd, &completion, 20000U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -877,7 +855,7 @@ ftl_status_t ftl_sync_erase_block(nand_pba_t pba)
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_read_meta(nand_pba_t pba, uint8_t out[4])
 {
-    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, FC_COMMAND_MODULE_METADATA, 0U};
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
     fc_command_t        *cmd;
     fc_command_status_t  completion;
 
@@ -895,7 +873,7 @@ ftl_status_t ftl_sync_read_meta(nand_pba_t pba, uint8_t out[4])
         return FTL_ERROR;
     }
 
-    if (sync_page_submit_wait(cmd, &completion, 0U) != 0)
+    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -919,7 +897,7 @@ ftl_status_t ftl_sync_read_meta(nand_pba_t pba, uint8_t out[4])
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_read_column(nand_pba_t pba, uint16_t column, uint8_t out[4])
 {
-    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, FC_COMMAND_MODULE_BBT, 0U};
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
     fc_command_t        *cmd;
     fc_command_status_t  completion;
 
@@ -946,7 +924,7 @@ ftl_status_t ftl_sync_read_column(nand_pba_t pba, uint16_t column, uint8_t out[4
     cmd->param.parameter2 = 0U;
     cmd->param.parameter3 = 0U;
 
-    if (sync_page_submit_wait(cmd, &completion, 0U) != 0)
+    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;

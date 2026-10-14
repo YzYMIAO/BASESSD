@@ -38,7 +38,7 @@
  *
  * config 类型就是 fc_command_t.config 的类型 fc_cmd_conf_t（fc_command.h），
  * 不是新造的类型。`test_cmd_build` 做 `cmd->config = *config` 后**只覆盖**几个
- * 字段：ch/ce/lun（取自 addr）、module（固定 HOST_IO），以及
+ * 字段：ch/ce/lun（取自 addr）、op_tag（固定 HOST_IO），以及
  *
  *     cmd->config.multi_plane = test_is_multi_op(operation) ? PLANE_NUM : 0;
  *
@@ -142,6 +142,7 @@
 #include "fc/fc_command.h"
 #include "ftl/ftl_config.h" /* pba_make（见 pba_from_addr 薄壳） */
 #include "ftl/ftl_fc_interface.h"
+#include "ftl/ftl_op.h" /* FTL_OP_HOST_IO（cmd->op_tag 的测试取值）*/
 #include "munit.h"
 #include "nand/nand_config.h"
 #include "nand/onfi_1_0.h"
@@ -213,7 +214,7 @@ static inline nand_pba_t pba_from_addr(const nand_addr_t *addr)
  *   · meta 原样写进命令（写读同页须一致；mata 用例正需要「同页不同 PBA」）。
  *   · 无 desc 链的 op（ERASE / RESET / SET·GET_FEATURES）传 cw_bitmap = 0：
  *     ftl_cmd_needs_desc_chain 短路，desc_id 置 INVALID。
- *   · cmd->module 固定 HOST_IO、cmd->feature_addr 不设——需要时调用者自行覆盖。
+ *   · cmd->op_tag 固定 HOST_IO、cmd->feature_addr 不设——需要时调用者自行覆盖。
  *   ⚠ 返回的命令**未提交**。写命令别先手工 fc_data_path_encode 再提交（FC 会再编一次，
  *     见「五」）。 */
 fc_command_t *test_cmd_build(const nand_addr_t *addr, uint32_t cw_bitmap, uint32_t meta, const fc_cmd_conf_t *config);

@@ -27,12 +27,12 @@
  *   ⑥ ftl_cmd_read_data() — 从 desc 链各 CW 的 USER 区拷出
  *
  * 【同步等待】
- *   ⑦ ftl_internal_sync_wait() — 等待指定 command_id 完成
+ *   ⑦ ftl_sync_submit_wait() — 提交命令并阻塞等待其完成（ftl_op 机制的客户端）
  *
  * 【页级同步原语】
  *   ⑧ ftl_sync_write_page / ftl_sync_read_page / ftl_sync_read_page_raw /
  *      ftl_sync_erase_block — 原先 9 个 FTL 模块各自内联一份 static 版本
- *      （共 18 份、逐字节相同，只差 crc/random/module/lba 四个字段），
+ *      （共 18 份、逐字节相同，只差 crc/random/ldpc/lba 四个字段），
  *      此处收敛为 4 个公共函数 + ftl_page_cfg_t 配置结构。
  *
  * 【命令身份】
@@ -279,17 +279,25 @@ ftl_status_t ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length)
 /* ── 内部同步 NAND 操作（仅保留 sync_wait）── */
 
 /*
- * ftl_internal_sync_wait - 同步等待指定 command_id 完成
+ * ftl_sync_submit_wait - 提交命令并阻塞等待其完成（同步提交的唯一入口）
  *
- * 循环调用 fc_service() + completion_table_drain() 直到指定命令完成。
- * 最多等待 timeout_us 微秒（0 = 默认 10ms）。
+ * 内部就是 ftl_op 机制的一个客户端：
+ *   ① ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) —— 打 tag、登记栈上 waiter、提交；
+ *   ② 自旋 fc_service() + completion_table_drain() 直到 waiter.done；
+ *   ③ 超时则 completion_table_remove 后返回 FTL_ERROR。
  *
- * @param cmd_id      要等待的 command_id
- * @param status_out  输出：completion status
- * @param timeout_us  超时微秒（0=使用默认）
- * @return FTL_OK 完成（status_out 有效）/ FTL_ERROR 超时或路由表满
+ * ⚠ **只在结构性必须顺序执行的路径上用**：开机初始化 / 全片格式化 / 出厂坏块扫描 /
+ *   CLI。主循环里（ftl_service_pump 已存在）的路径一律异步化——在这些路径上同步等待
+ *   会把调用者栈帧钉住并重入完成泵。
+ *
+ * ⚠ **不 release 命令**——调用者要在返回后读 cmd 数据（如 ftl_cmd_read_data）才 release。
+ *
+ * @param cmd         已建链的命令（本函数负责提交）
+ * @param status_out  输出：完成状态（可 NULL）
+ * @param timeout_us  超时微秒（0 = 默认 10ms）
+ * @return FTL_OK 完成（status_out 有效）；FTL_ERROR 提交失败 / 超时 / 旁表满
  */
-ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status_out, uint32_t timeout_us);
+ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, uint32_t timeout_us);
 
 /* ── 页级同步原语（18 份内联 → 4 份公共）──
  *
@@ -298,11 +306,11 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
  * 收敛后由配置结构承载差异；配置是编译期常量，故用复合字面量宏调用：
  *
  *   元数据页（BBT / checkpoint / journal / L2P / metadata / 擦除）：
- *     ftl_sync_write_page(pba, buf, len, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_BBT));
+ *     ftl_sync_write_page(pba, buf, len, FTL_PAGE_CFG_META());
  *   用户数据页（GC / WL 搬移、Read Recovery 重读）：
- *     ftl_sync_write_page(pba, buf, len, FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC, lba));
+ *     ftl_sync_write_page(pba, buf, len, FTL_PAGE_CFG_DATA(lba));
  *   裸页（LDPC_RAW，忽略 NAND 成败）：
- *     ftl_sync_read_page_raw(pba, buf, FC_COMMAND_MODULE_BBT);
+ *     ftl_sync_read_page_raw(pba, buf);
  *   擦块（20ms 超时，元数据配置）：
  *     ftl_sync_erase_block(pba);
  *
@@ -322,7 +330,6 @@ typedef struct
     uint8_t crc;    /* FC_CRC_ENABLE / FC_CRC_DISABLE */
     uint8_t random; /* FC_RANDOM_ENABLE / FC_RANDOM_DISABLE */
     uint8_t ldpc;   /* FC_ECC_MODE_BCH / FC_ECC_MODE_LDPC_RAW */
-    uint8_t module; /* FC_COMMAND_MODULE_*；同步路径下不做路由，仅诊断标签 */
     lba_t   lba;    /* META 源：**页** LBA（建链时 << CW_WIDTH 成扇区 LBA）；元数据页传 0 */
 } ftl_page_cfg_t;
 
@@ -331,14 +338,14 @@ typedef struct
  * 故 0xFFFFFFFF 不可能是一个真实页 LBA。 */
 #define FTL_LBA_UNKNOWN (0xFFFFFFFFUL)
 
-#define FTL_PAGE_CFG_META(module)      (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, (uint8_t)(module), 0U})
-#define FTL_PAGE_CFG_DATA(module, lba) (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, (uint8_t)(module), (lba_t)(lba)})
+#define FTL_PAGE_CFG_META()    (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U})
+#define FTL_PAGE_CFG_DATA(lba) (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, (lba_t)(lba)})
 /* 数据页但**页 LBA 未知**（Read Recovery 的邻近页辅助读）：CRC/加扰照常开，但命令的
  * META 填 FC_META_UNKNOWN ⇒ 跳过 FC 侧「页内 META 与本命令 LBA 比对」这一项，只保留
  * plane/cw 三位自洽校验（见 fc_data_path_meta_check）。
- * ⚠ 这类读**不要**用 FTL_PAGE_CFG_DATA(module, 0) 代替：那是"本页 LBA 就是 0"，
+ * ⚠ 这类读**不要**用 FTL_PAGE_CFG_DATA(0) 代替：那是"本页 LBA 就是 0"，
  *   比对项会拿 0 去撞页内真实 META ⇒ 恒置 MATA_ERROR（旧实现因忽略错误位而看不出来）。 */
-#define FTL_PAGE_CFG_DATA_ANY(module) (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, (uint8_t)(module), (lba_t)FTL_LBA_UNKNOWN})
+#define FTL_PAGE_CFG_DATA_ANY() (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, (lba_t)FTL_LBA_UNKNOWN})
 
 /* 写页：OP_NORMAL_PROGRAM_PAGE。data/length 为空时只发命令不搬数据。 */
 ftl_status_t ftl_sync_write_page(nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg);
@@ -359,7 +366,7 @@ ftl_status_t ftl_sync_read_page(nand_pba_t pba, void *buffer, uint32_t length, c
  * 裸页读：LDPC_RAW，整页 4 个 CW 依次拷出（间隔 FC_BUFFER_POOL_CW_SIZE）。
  * ⚠ 刻意**不判定 NAND 失败**——BBT 坏页也要拿到原始位（上层按「非全 FF」判空）。
  */
-ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer, uint8_t module);
+ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer);
 
 /* 擦块：OP_ERASE_BLOCK，无数据链，20ms 超时。 */
 ftl_status_t ftl_sync_erase_block(nand_pba_t pba);

@@ -174,7 +174,7 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
 
         case SSD_REQUEST_FLUSH:
             /* C3：FLUSH 落地 — 对全部 (ch,ce,lun) 实例调 ftl_flush（L2P cache 写回 +
-             * journal 尾页刷出）。同步阻塞（内部 ftl_internal_sync_wait 泵完），完成
+             * journal 尾页刷出）。同步阻塞（内部 ftl_sync_submit_wait 泵完），完成
              * 标志可直接同步置 1，无需走 pending 异步。
              * HIL 只调 FTL 对外接口，不再伸手进 FTL 内部原语（对齐主流）。 */
             {

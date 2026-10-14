@@ -202,7 +202,7 @@ void journal_flush_page(l2p_journal_t *journal)
      * Random DISABLED / CRC ENABLED（v0.62）：Journal 有 FC per-CW CRC + ECC，
      * 外加自身结构判据（magic/entry_count/sequence）。
      */
-    (void)ftl_sync_write_page(waddr, journal->page_buf, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
+    (void)ftl_sync_write_page(waddr, journal->page_buf, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META());
 
     /* 推进指针 */
     journal->current_page++;
@@ -276,7 +276,7 @@ static void journal_scan_ring(const l2p_journal_t *journal,
             raddr = journal_page_addr(journal, b, (uint8_t)page);
 
             memset(page_data, 0xFF, sizeof(page_data));
-            if (ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) !=
+            if (ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META()) !=
                 0)
             {
                 continue; /* 读失败，跳过本页 */
@@ -479,7 +479,7 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
             raddr = journal_page_addr(journal, replay_pages[i].block, replay_pages[i].page);
 
             memset(page_data, 0xFF, sizeof(page_data));
-            ret = ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
+            ret = ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META());
             if (ret != 0)
             {
                 continue; /* 页已失效，跳过（应用顺序其余页不受影响） */

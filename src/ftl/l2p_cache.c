@@ -299,7 +299,7 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
             region_addr = l2p_region_pba(cache->ch, cache->ce, cache->lun, region_id);
         }
 
-        int ret = ftl_sync_read_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
+        int ret = ftl_sync_read_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META());
         if (ret == 0)
         {
             line->state = L2P_CACHE_CLEAN;
@@ -427,7 +427,7 @@ ftl_status_t l2p_cache_flush_one(l2p_cache_t *cache, int line_idx)
      * 同步写 Region 到 NAND L2P 日志块。
      * Random DISABLED / CRC ENABLED（v0.62）：元数据不加扰，经 FC per-CW CRC + BCH ECC 保护。
      */
-    ret = ftl_sync_write_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA));
+    ret = ftl_sync_write_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META());
 
     if (ret == 0)
     {

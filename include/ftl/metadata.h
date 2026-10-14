@@ -363,7 +363,6 @@ typedef struct
     uint16_t block_count;      /* 池块数（>= 2）*/
     uint8_t  pages_per_record; /* 一条 record 占几页（须整除 PAGES_PER_BLOCK）*/
     uint8_t  plane;            /* 池所在 plane */
-    uint8_t  module;           /* FC_COMMAND_MODULE_*（读写页配置的诊断标签）*/
 } metadata_ring_t;
 
 /* 每块容纳的 record 数 */

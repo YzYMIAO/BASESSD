@@ -192,7 +192,7 @@ uint16_t pending_group_count(const ftl_context_t *ftl);
 /*
  * pending_group_complete_subop - 一个子操作完成：聚合状态 + 递减 + 试触发
  *
- * 由 ftl_handle_completion 在子操作簿记后调用（替代原先直接写 caller 通知字段）。
+ * 由 ftl_op_host_io 在子操作簿记后调用（替代原先直接写 caller 通知字段）。
  * sub_status != OK 时粘进 agg_status；outstanding-- 后试发组完成通知。
  *
  * @param ftl        FTL 上下文

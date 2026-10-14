@@ -112,18 +112,12 @@ typedef enum
     FC_PRIORITY_HSQ = 1U, /* 高优先级（High-priority SQ） */
 } fc_priority_t;
 
-/* 完成路由归属模块：FC 只按此分类路由 completion，不主动回调 */
-typedef enum
-{
-    FC_COMMAND_MODULE_HOST_IO       = 0U,
-    FC_COMMAND_MODULE_FTL           = 1U,
-    FC_COMMAND_MODULE_GC            = 2U,
-    FC_COMMAND_MODULE_READ_RECOVERY = 3U,
-    FC_COMMAND_MODULE_METADATA      = 4U,
-    FC_COMMAND_MODULE_BBT           = 5U,
-    FC_COMMAND_MODULE_CHECKPOINT    = 6U,
-    FC_COMMAND_MODULE_WEAR_LEVELING = 7U,
-} fc_command_module_t;
+/* ⚠ 本头文件**不再**声明"完成路由归属模块"枚举（原 fc_command_module_t，v0.75 删）。
+ *
+ * 它是 FTL 的概念（哪个功能拥有这条命令），不该由 FC 层声明。FC 只认
+ * `fc_command_t.op_tag` 这个**不透明 7 位整数**：不解释、不分支，完成时原样拷进
+ * `fc_command_status_t.op_tag`。语义（= FTL 的 `ftl_op_id_t`）由 FTL 侧定义，
+ * 见 include/ftl/ftl_op.h。 */
 
 /*
 | 状态 | 汇总规则 |
@@ -255,9 +249,12 @@ struct fc_command_t
 {
     DWORD desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
     DWORD high_priority : 1;  /* 0=SQ, 1=HSQ. */
-    DWORD module        : 4;  /* Completion route owner; FC does not invoke callbacks. */
-    DWORD feature_addr  : 8;  /* SET/GET_FEATURES register address, sent via COLUMN_0. */
-    DWORD reserved1     : 3;  /* Reserved for future Command control. */
+    DWORD op_tag        : 7;  /* 不透明 7 位完成标签（= FTL 的 ftl_op_id_t，见 ftl_op.h）。
+                               * FC **不解释、不分支**，只在完成时原样拷进
+                               * fc_command_status_t.op_tag（fc.c 的 fc_complete_from_nand）。
+                               * 上层据它查"完成服务函数数组"派发 ⇒ ID 真的在命令上。
+                               * 本字段不落介质（落介质的只有 meta/paa）⇒ 编号可自由重排。 */
+    DWORD feature_addr : 8;   /* SET/GET_FEATURES register address, sent via COLUMN_0. */
     DWORD meta;               /* META 值（本命令的**扇区 LBA**，v24 起），写入各 CW buffer[0..3]。
                                * 每条 desc 取其高位 + 自己的 plane/cw 得本 CW 的 meta，
                                * 见 fc_command_configure_descriptor 的 plane_cw 公式。 */
@@ -287,13 +284,14 @@ struct fc_command_t
  *   FC 不再代为聚合失败位图）。 */
 struct fc_command_status_t
 {
-    DWORD      command_id : 16; /* Completed Command Pool ID. */
-    DWORD      desc_id    : 16; /* 首个失败 CW 的 descriptor id；0xFFFF = 无失败。详见上方说明。 */
-    DWORD      module     : 4;  /* Copy of command->module for direct routing without ID lookup. */
-    DWORD      status     : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
-    DWORD      reserved   : 20; /* Reserved. */
-    fc_param_t param;           /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0
-                                 * （失败 CW 的定位走 desc 链，v28 起不在此聚合）。 */
+    DWORD command_id : 16;    /* Completed Command Pool ID. */
+    DWORD desc_id    : 16;    /* 首个失败 CW 的 descriptor id；0xFFFF = 无失败。详见上方说明。 */
+    DWORD op_tag     : 7;     /* Copy of command->op_tag —— 上层**不必反查命令**即可派发
+                               * （g_op_service[completion.op_tag]）。 */
+    DWORD      status   : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
+    DWORD      reserved : 17; /* Reserved. */
+    fc_param_t param;         /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0
+                               * （失败 CW 的定位走 desc 链，v28 起不在此聚合）。 */
 };
 
 /* --------------------------------------------------------------------

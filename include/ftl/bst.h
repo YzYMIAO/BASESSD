@@ -53,7 +53,7 @@ typedef enum
 } rr_block_health_t;
 
 /* ── ECC 健康记录（per-Block，自 read_recovery.h 迁入）──
- * 消费方：ftl_handle_completion 读成功后 rr_record_ecc；
+ * 消费方：ftl_op_host_io 读成功后 rr_record_ecc；
  *         rr_check_predictive / rr_get_health 查询健康度。
  *
  * 只保留「上一次 ECC bit 数」而非 N 深度环形缓冲：趋势判定（连续上升）

@@ -74,7 +74,6 @@ static void checkpoint_ring_init(metadata_ring_t *ring)
     ring->block_count      = CHECKPOINT_POOL_BLOCKS;
     ring->pages_per_record = 1U;
     ring->plane            = 0U;
-    ring->module           = FC_COMMAND_MODULE_CHECKPOINT;
 }
 
 /* 整条校验（一条 record = 1 页）：magic + 布局版本。
@@ -111,7 +110,7 @@ static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, int 
 
     addr = metadata_ring_addr(&c->ring, &c->topo, record_idx, 0U);
 
-    if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT)) != 0)
+    if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != 0)
     {
         return FTL_ERROR;
     }
@@ -260,7 +259,7 @@ ftl_status_t checkpoint_create(ftl_context_t *ftl)
 
     /* 无论成败都推进游标：已写过的槽（可能半编程）不可复用。
      * 失败时不写 journal_truncate，脏数据仍由下个 checkpoint 重试。 */
-    if (ftl_sync_write_page(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT)) != 0)
+    if (ftl_sync_write_page(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META()) != 0)
     {
         ftl->cp.write_idx = (uint16_t)((ftl->cp.write_idx + 1U) % metadata_ring_total_records(&ring));
         return FTL_ERROR;
@@ -325,7 +324,7 @@ ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_head
 
     /* 重读胜者（locate 只返回序号，Header 本体要再读一次）*/
     addr = metadata_ring_addr(&probe_ctx.ring, &probe_ctx.topo, newest, 0U);
-    if (ftl_sync_read_page(addr, cp, sizeof(*cp), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT)) != 0)
+    if (ftl_sync_read_page(addr, cp, sizeof(*cp), FTL_PAGE_CFG_META()) != 0)
     {
         return FTL_ERROR;
     }
@@ -363,7 +362,7 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
     {
         return FTL_ERROR;
     }
-    if (ftl_sync_write_page(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_CHECKPOINT)) != 0)
+    if (ftl_sync_write_page(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META()) != 0)
     {
         return FTL_ERROR;
     }

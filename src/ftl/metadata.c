@@ -343,7 +343,6 @@ static void anchor_ring_init(metadata_ring_t *ring)
     ring->block_count      = ANCHOR_POOL_BLOCKS;
     ring->pages_per_record = ANCHOR_PAGE_COUNT;
     ring->plane            = 0U;
-    ring->module           = FC_COMMAND_MODULE_METADATA;
 }
 
 typedef struct
@@ -369,7 +368,7 @@ static ftl_status_t anchor_record_probe(void *ctx, uint16_t record_idx, int full
     {
         nand_pba_t addr = metadata_ring_addr(c->ring, &c->dir->topo, record_idx, chunk);
 
-        if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
+        if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META()) != 0)
         {
             return FTL_ERROR;
         }
@@ -791,7 +790,7 @@ ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *al
             continue; /* 该 region 的最新位置不在 victim 上 */
         }
 
-        if (ftl_sync_read_page(old, buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
+        if (ftl_sync_read_page(old, buf, sizeof(buf), FTL_PAGE_CFG_META()) != 0)
         {
             st = FTL_ERROR; /* 读不回：该 region 仍指向 victim 旧页，victim 不擦 ⇒ 无损失 */
             break;
@@ -804,7 +803,7 @@ ftl_status_t metadata_dir_compact(metadata_dir_cache_t *dir, ftl_allocator_t *al
             break;
         }
 
-        if (ftl_sync_write_page(slot, buf, sizeof(buf), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
+        if (ftl_sync_write_page(slot, buf, sizeof(buf), FTL_PAGE_CFG_META()) != 0)
         {
             st = FTL_ERROR; /* 槽已消耗（可能半编程），不登记 ⇒ region 仍指向 victim */
             break;
@@ -1075,7 +1074,7 @@ ftl_status_t metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir)
             }
         }
 
-        if (ftl_sync_write_page(aaddr, &page, sizeof(page), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
+        if (ftl_sync_write_page(aaddr, &page, sizeof(page), FTL_PAGE_CFG_META()) != 0)
         {
             ok = 0; /* 本条 record 残缺 ⇒ 下次 locate 会整条丢弃它（不取半条）*/
         }
@@ -1172,7 +1171,7 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
         uint16_t   n;
         uint16_t   k;
 
-        if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_METADATA)) != 0)
+        if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META()) != 0)
         {
             continue;
         }

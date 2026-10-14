@@ -57,7 +57,6 @@ static void bbt_ring_init(metadata_ring_t *ring)
     ring->block_count      = BBT_POOL_BLOCKS;
     ring->pages_per_record = 1U;
     ring->plane            = 0U;
-    ring->module           = FC_COMMAND_MODULE_BBT;
 }
 
 /* 整条校验（一条 record = 1 页）：magic。
@@ -84,7 +83,7 @@ static ftl_status_t bbt_record_probe(void *ctx, uint16_t record_idx, int full, u
 
     addr = metadata_ring_addr(&c->ring, &c->topo, record_idx, 0U);
 
-    if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_BBT)) != 0)
+    if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != 0)
     {
         return FTL_ERROR;
     }
@@ -529,7 +528,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
         return FTL_ERROR;
     }
 
-    if (ftl_sync_write_page(addr, &header, sizeof(header), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_BBT)) != 0)
+    if (ftl_sync_write_page(addr, &header, sizeof(header), FTL_PAGE_CFG_META()) != 0)
     {
         alloc->bbt.write_idx = (uint16_t)((alloc->bbt.write_idx + 1U) % metadata_ring_total_records(&ctx.ring));
         return FTL_ERROR; /* dirty 保留 ⇒ 下次重试 */
@@ -600,7 +599,7 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_co
 
     /* 重读胜者（locate 只返回序号，Header 本体要再读一次）*/
     addr = metadata_ring_addr(&ctx.ring, &ctx.topo, newest, 0U);
-    if (ftl_sync_read_page(addr, &best, sizeof(best), FTL_PAGE_CFG_META(FC_COMMAND_MODULE_BBT)) != 0)
+    if (ftl_sync_read_page(addr, &best, sizeof(best), FTL_PAGE_CFG_META()) != 0)
     {
         return FTL_ERROR;
     }
