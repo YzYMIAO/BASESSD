@@ -121,6 +121,48 @@ static ftl_status_t bbt_record_probe(void *ctx, uint16_t record_idx, int full, u
 static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t block, uint8_t do_erase);
 
 /* --------------------------------------------------------------------
+ * bbt_medium_has_ftl_data
+ *   功能：介质上是否**已有 FTL 写过的数据**（= 这块芯片被格式化过）——
+ *         出厂坏块扫描能不能做的唯一判据。
+ *   参数：alloc —— 分配器（取 ch/ce 与几何）。
+ *   返回：1 = 介质非空；0 = 空片。
+ *   实现要点：判据 = **固定元数据区（0..FTL_METADATA_BLOCK_END，两个 plane）里只要
+ *             有一页能读成合法的 FTL 页**——即 FC 的 per-CW CRC 与 META 自洽校验
+ *             全过（fc_data_path_meta_check：META 必须编码本页的 plane/cw）。
+ *             · 空片：该区每页都是全 FF ⇒ META 自洽校验必挂（全 FF 的 META 解不出
+ *               正确的 plane/cw 位）⇒ 读必失败 ⇒ 返回 0。
+ *             · **不用「字节是否全 FF」这类内容启发式**：那会把「出厂坏块块」（主区
+ *               本来就已损坏/带残数据）误判成「写过的块」，方向恰好反了。这里让 FC
+ *               自己去判「这是不是一页合法的 FTL 页」，坏块块读不成 ⇒ 不误判。
+ *             · 与 FTL 的**布局/格式版本无关**：FC 层的 CW 结构（META/CRC/ECC）不随
+ *               FTL 版本变，故版本升级后的介质照样认得出——这正是必须覆盖的场景。
+ *   ⚠ 只读不写；只在 bbt_load 失败时才调用（正常开机不付这份代价）。
+ *   ⚠ 只探**固定元数据区**：该区的页一律以 FTL_PAGE_CFG_META()（RANDOM_DISABLE）写，
+ *     与这里的读配置一致；用户数据页用 DATA 配置（带解扰）写，不在此列、也不需要。
+ * -------------------------------------------------------------------- */
+static int bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
+{
+    uint8_t  scratch[16];
+    uint8_t  plane;
+    uint16_t block;
+
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        for (block = 0U; block < (uint16_t)FTL_METADATA_BLOCK_END; block++)
+        {
+            const nand_pba_t addr = pba_make(alloc->ch, alloc->ce, 0U, block, plane, 0U, 0U);
+
+            if (ftl_sync_read_page(addr, scratch, sizeof(scratch), FTL_PAGE_CFG_META()) == FTL_OK)
+            {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* --------------------------------------------------------------------
  * bbt_init
  *   功能：开机初始化坏块账本——先尝试从 NAND 读回 BBT，无则执行出厂扫描。
  *   参数：alloc —— 分配器（承载 BST）。
@@ -178,7 +220,32 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
         }
     }
 
-    /* 无有效 BBT → 执行出厂扫描 */
+    /* 无有效 BBT → **只有空片**才允许出厂扫描。
+     *
+     * ⚠ 为什么必须拦：用过的块，其 Page 0 的 spare 首字节（列 2048）**不是**出厂标记，
+     *   而是 FTL 自己的数据——FC 一次页编程写 PAGE_SIZE = 2112（主区 2048 + 备区 64），
+     *   页缓冲按 4 × CW(528B) 拼 ⇒ CW3 的尾巴 64 字节正好落进备区，覆盖掉出厂标记。
+     *   于是「列 2048 非 0xFF ⇒ 坏块」这条判据在用过的介质上退化成「哪些块被写过」，
+     *   重扫会把**所有写过的块**（含活的 Anchor/Checkpoint/Wear）判成坏块，随后
+     *   bbt_save 把这份垃圾落盘 —— 真坏块反而丢了，活块全废。
+     *
+     * 判据 = bbt_medium_has_ftl_data()（元数据区里有没有合法的 FTL 页）。
+     * 空片路径不受影响：那时列 2048 确实就是出厂标记。
+     *
+     * 拒绝扫描后的状态：坏块账本从空开始（bad_count = 0、sequence 仍 0、**不置 dirty**
+     * ⇒ 不落盘，免得把「零坏块」写成既成事实）。真坏块由运行时 bbt_mark_bad 兜底
+     * （PROGRAM/ERASE 失败即标）。 */
+    if (bbt_medium_has_ftl_data(alloc) != 0)
+    {
+        LOGE("[BBT] 无有效 BBT，但介质已被格式化过 —— **拒绝出厂扫描**：\r\n");
+        LOGE("      用过的块 spare[0] 是 FTL 数据而非出厂标记，重扫会把写过的块全判坏。\r\n");
+        LOGE("      坏块账本从空开始；真坏块由运行时 bbt_mark_bad 兜底。\r\n");
+
+        alloc->bad_count = 0U;
+        return FTL_OK;
+    }
+
+    /* 空片 → 执行出厂扫描 */
     return bbt_scan_factory(alloc);
 }
 
@@ -190,6 +257,12 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
  *   实现要点：判据 = **OOB 出厂标记**（`bbt_probe_block_bad(..., do_erase=0)`），
  *             与器件手册的建 BBT 流程一致（见 bbt_probe_block_bad 的引文）。
  *             跳过 block 0（出厂总是好块）；扫描完置 dirty 并 bbt_save 落盘。
+ *
+ *   ⚠ **前置条件：介质必须是空片**（`bbt_init` 用 `bbt_medium_has_ftl_data` 把关）。
+ *     用过的块 Page 0 的 spare 首字节是 FTL 自己的数据（页编程 2112B 把 CW3 尾巴 64
+ *     字节溢进备区），不是出厂标记 ⇒ 在用过的介质上扫出来的不是坏块图，而是
+ *     「哪些块被写过」图。本函数自己**判不了**这件事（它读的就是那个字节），
+ *     判据在调用方。
  *
  *             ⚠ 历史：旧实现以 `ftl_sync_read_page_raw` 的**返回码**判坏块——但 raw 模式
  *               跳过 ECC，物理失败的页照样回 READY（返回码判不出坏块），而「数据全 FF」
@@ -276,8 +349,14 @@ _Static_assert((BLOCKS_PER_PLANE % BBT_MAP_COLS_PER_PLANE) == 0U, "每 plane 块
  * cw × CW_SIZE（cw 取自 PBA 的 cw 字段），cw ∈ {0,1,2,3} ⇒ 列只能是 {0, 528, 1056, 1584}。
  * 4 字节 = spare[0..3]（2 字节坏块信息 + 2 字节 user metadata II），标记看 [0]。
  *
- * 调用者：bbt_scan_factory（出厂扫描，do_erase=0）/ bbt_print_bad_map（诊断，按 CLI）/
- *         bbt_erase_all_blocks（全片擦除，do_erase=1）。
+ * ⚠ **① 只在空片上才是「出厂标记」**。用过的块，spare 首字节是 FTL 自己的数据
+ *   （一次页编程写 2112B，CW3 尾巴 64 字节溢进备区）⇒ 本函数在用过的介质上回答的
+ *   其实是「这块被写过没有」。故它**不可**用在任何会落盘的路径上，除非调用方已经
+ *   确认介质是空片（bbt_medium_has_ftl_data）。
+ *
+ * 调用者：bbt_scan_factory（出厂扫描，do_erase=0，**调用方已确认空片**）/
+ *         bbt_print_bad_map（诊断，按 CLI——读图的人须知这不是坏块图）/
+ *         注：bbt_erase_all_blocks **已不再**调用本函数（见其注释）。
  */
 static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t block, uint8_t do_erase)
 {
@@ -297,9 +376,10 @@ static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t b
     /* ② 可选擦除——**无条件发**。
      * 旧实现在 ① 命中时直接 `return 1` 提前返回，于是**被标记的块永远不被擦**。而"全片擦除"
      * 的全部意义恰恰是连这批块一起抹掉：元数据区（0..FTL_METADATA_BLOCK_END）里的 L2P/
-     * Anchor/Checkpoint/BBT/Journal/Wear 块往往**正是**被标记的那批（FTL 写过 ⇒ 列 2048
-     * 非 0xFF）。跳过它们 ⇒ 擦完断电重启，FTL 仍从原处读回旧 checkpoint/wear/BBT，
-     * `free`/`cp_seq` 一个不少 —— 表现出来就是"发了擦除命令但没擦掉"。 */
+     * Anchor/Checkpoint/BBT/Journal/Wear 块**正是** ① 会命中的那批（FTL 写过 ⇒ 列 2048
+     * 非 0xFF —— 注意这批的命中含义是「写过」而不是「坏」）。跳过它们 ⇒ 擦完断电重启，
+     * FTL 仍从原处读回旧 checkpoint/wear/BBT，`free`/`cp_seq` 一个不少 —— 表现出来
+     * 就是"发了擦除命令但没擦掉"。 */
     if (do_erase != 0U)
     {
         if (ftl_sync_erase_block(addr) != FTL_OK)
@@ -316,11 +396,19 @@ static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t b
  *   功能：擦除本实例**全部**块（所有 plane），供开机自动格式化调用。
  *   参数：alloc —— 分配器。
  *   返回：FTL_OK / FTL_ERROR（参数非法）。
- *   实现要点：复用 bbt_probe_block_bad(..., do_erase=1)——它**先读出厂坏块标记再擦**
- *             （擦会永久毁掉标记），擦除失败也判坏。新发现的坏块按 bbt_scan_factory
- *             同法落进 BST（已是坏块的**不重复计数**）。
- *             ⚠ 调用方须保证在 bbt_init 之后调用——出厂坏块标记此时已先读进 BST，
- *               擦除不会丢坏块信息。擦完须由调用方 bbt_save 重新持久化坏块图。
+ *   实现要点：逐块**无条件**擦（含已判坏的块——"全片擦除"必须连坏块一起抹掉，
+ *             否则元数据块被跳过 ⇒ 擦完 FTL 仍读回旧状态）。擦除失败 ⇒ 坏块
+ *             （stuck-at-0 / 不可擦）——这条判据与介质是否空片无关，任何介质都成立。
+ *
+ *   ⚠ **本函数不再读出厂坏块标记**（改前它复用 bbt_probe_block_bad(..., do_erase=1)
+ *     顺带读）。原因：用过的块 Page 0 的 spare 首字节是 FTL 数据而非标记（见
+ *     bbt_medium_has_ftl_data 与 bbt_scan_factory 的说明），在**版本升级**这条正常
+ *     路径上（checkpoint 版本不符 ⇒ 格式化，但介质是旧的、写满了数据）会把所有写过的
+ *     块标成坏块，连元数据块一起——那不只是掉容量，是开不了机。
+ *     标记的读取职责现在**唯一**归 bbt_init（且只在空片时做，见 bbt_scan_factory）。
+ *
+ *   ⚠ 因此「必须在 bbt_init 之后调用」这条**是承重的**：出厂标记此时已在 BST 里，
+ *     擦除不会丢坏块信息。擦完由调用方 bbt_save 重新持久化坏块图。
  * -------------------------------------------------------------------- */
 ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc)
 {
@@ -336,16 +424,17 @@ ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc)
     {
         for (block = 0U; block < BLOCKS_PER_PLANE; block++)
         {
-            const uint16_t gblock = ftl_gblock(plane, block);
+            const uint16_t   gblock = ftl_gblock(plane, block);
+            const nand_pba_t addr   = pba_make(alloc->ch, alloc->ce, 0U, block, plane, 0U, 0U);
 
-            if (bbt_probe_block_bad(alloc, plane, block, 1U) == 0)
+            if (ftl_sync_erase_block(addr) == FTL_OK)
             {
-                continue; /* 好块：已擦除 */
+                continue;
             }
 
+            /* 擦不掉 ⇒ 坏块（已是坏块的不重复计数） */
             if (ftl_block_is_bad(&alloc->blocks[gblock]) == 0)
             {
-                /* 新发现的坏块（出厂标记 / 擦除失败）：落进 BST */
                 ftl_block_set_bad(&alloc->blocks[gblock]);
                 ftl_block_state_clr(&alloc->blocks[gblock],
                                     FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |

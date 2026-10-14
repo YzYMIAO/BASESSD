@@ -48,11 +48,19 @@ typedef struct
 /*
  * bbt_init - BBT 初始化
  *
- * 从 NAND BBT 池加载 BBT。如果无有效 BBT（首次使用），
- * 执行出厂扫描构建初始 BBT。坏块位写入 alloc->blocks[].state。
+ * 从 NAND BBT 池加载 BBT，坏块位写入 alloc->blocks[].state。
+ *
+ * 无有效 BBT 时**不无条件出厂扫描**：
+ *   · 介质是空片（固定元数据区没有一页是合法 FTL 页）⇒ 执行出厂扫描；
+ *   · 介质已被格式化过 ⇒ **拒绝扫描** + LOGE，坏块账本从空开始（bad_count = 0、
+ *     sequence 保持 0、不置 dirty ⇒ 不落盘）。真坏块由运行时 bbt_mark_bad 兜底。
+ *
+ * ⚠ 为什么：用过的块 Page 0 的 spare 首字节是 FTL 自己的数据（页编程 2112B 把 CW3
+ *   尾巴 64 字节溢进备区），不是出厂标记 ⇒ 重扫会把所有写过的块（含活的 Anchor/
+ *   Checkpoint/Wear）判成坏块并 bbt_save 落盘。详见 bbt.c 的 bbt_medium_has_ftl_data。
  *
  * @param alloc  Allocator 上下文（blocks、bad_count 等输出）
- * @return 0 成功，-1 失败
+ * @return 0 成功（含"拒绝扫描"），-1 参数非法
  */
 ftl_status_t bbt_init(ftl_allocator_t *alloc);
 
@@ -68,6 +76,11 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc);
  * 判据与器件手册的建 BBT 流程一致（Micron AN1819：出厂标记在每块首页的 spare 区，
  * **擦除即永久丢失**，故必须在使用该块前先读）——见 `bbt.c:bbt_probe_block_bad` 的引文。
  * 本函数**只读不擦**（do_erase=0），擦除会毁掉标记。
+ *
+ * ⚠ **前置条件：介质必须是空片**。用过的块 spare 首字节是 FTL 自己的数据（页编程
+ *   2112B 把 CW3 尾巴 64 字节溢进备区）⇒ 扫出来的不是坏块图，而是「哪些块被写过」图，
+ *   且会 bbt_save 落盘。`bbt_init` 是唯一调用者，它用 bbt_medium_has_ftl_data 把关；
+ *   其他调用方必须自己保证这一点。
  *
  * @param alloc   Allocator 上下文（blocks 输出）
  * @return 检测到的坏块数
@@ -113,8 +126,11 @@ void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase);
 /*
  * bbt_erase_all_blocks - 擦除本实例全部块（所有 plane），供开机自动格式化调用
  *
- * 逐块先读出厂坏块标记（列 2048，擦前读）再擦；擦除失败也判坏。新发现的坏块落进 BST。
- * ⚠ 必须在 bbt_init 之后调用（出厂标记此时已先读进 BST，擦除不丢坏块信息）；
+ * 逐块**无条件**擦（含已判坏的块）；擦除失败 ⇒ 判坏并落进 BST。
+ * **不读出厂坏块标记**——用过的块 spare 首字节是 FTL 数据，读它会把写过的块全判坏
+ * （版本升级这条正常路径上就是灾难：连元数据块一起标坏 ⇒ 开不了机）。标记的读取职责
+ * 唯一归 bbt_init（且只在空片时做）。
+ * ⚠ 因此「必须在 bbt_init 之后调用」是**承重的**（出厂标记此时已在 BST 里）；
  *   擦完由调用方 bbt_save() 重新持久化坏块图。
  *
  * @param alloc  Allocator 上下文（取 ch/ce 与块几何）

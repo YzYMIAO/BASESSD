@@ -165,9 +165,10 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     alloc = &ftl->alloc;
 
     /* 介质布局版本判据：介质不是当前版本（旧格式 / 空片）⇒ 全片格式化。
-     * 放在 ftl_init 之后、free pool 回填之前——bbt_init 已先把出厂坏块标记读进 BST，
-     * 且此时回填尚未把未擦的旧块当空白块放进 free pool。格式化后写当前版本 Checkpoint
-     * 标记 ⇒ 下次开机判据命中，只发生一次。 */
+     * 放在 ftl_init 之后、free pool 回填之前——bbt_init 已把出厂坏块标记读进 BST
+     * （**只在空片时读**；用过的介质上那些字节是 FTL 数据不是标记，bbt_init 会拒绝重扫，
+     * 见 bbt.c:bbt_medium_has_ftl_data），且此时回填尚未把未擦的旧块当空白块放进
+     * free pool。格式化后写当前版本 Checkpoint 标记 ⇒ 下次开机判据命中，只发生一次。 */
     if (ftl_media_needs_format(ftl) != 0)
     {
         LOGW("[FTL ] media layout mismatch -> format (erase all blocks)\r\n");

@@ -71,7 +71,7 @@ int ftl_media_needs_format(struct ftl_context *ftl);
 /*
  * ftl_media_format - 全量格式化（擦本实例全部块 + 复位易失元数据状态）
  *
- * ① 擦全片（出厂坏块标记已在 bbt_init 先读进 BST）→ ② bbt_save 重新持久化坏块图
+ * ① 擦全片（出厂坏块标记已在 bbt_init 读进 BST——**空片时**才读）→ ② bbt_save 重新持久化坏块图
  * → ③ metadata_dir_init 复位 Directory → ④ checkpoint_write_initial 写当前版本标记。
  *
  * ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。

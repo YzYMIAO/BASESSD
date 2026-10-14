@@ -76,8 +76,9 @@ int ftl_media_needs_format(struct ftl_context *ftl)
  *   功能：全量格式化——擦本实例全部块，并把易失元数据状态复位到"空片"。
  *   参数：ftl —— FTL 实例。
  *   返回：FTL_OK / FTL_ERROR。
- *   实现要点：① bbt_erase_all_blocks 擦全片（出厂坏块标记已在 bbt_init 先读进 BST，
- *                擦除不丢坏块信息）；② bbt_save 重新持久化坏块图（BBT 池刚被擦掉）；
+ *   实现要点：① bbt_erase_all_blocks 擦全片（出厂坏块标记已在 bbt_init 读进 BST——
+ *                **空片时**才读；用过的介质上 bbt_init 拒绝重扫，见 bbt_medium_has_ftl_data）；
+ *             ② bbt_save 重新持久化坏块图（BBT 池刚被擦掉）；
  *             ③ metadata_dir_init 复位 Directory 为哨兵层；④ checkpoint_write_initial
  *                写一条当前版本标记 ⇒ 下次开机版本判据命中，格式化只发生一次。
  *   ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。
