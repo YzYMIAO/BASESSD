@@ -265,8 +265,9 @@ Checkpoint、Wear、分配器、BST。
    flush 只碰一个实例；模型 B 会让一次 flush 跨 die，把并行变成串行。
 3. **坏块隔离**：一个 die 的坏块不会让"全局唯一那份表"受损。
 
-> **代价**：每实例 `g_ftl` = **270.4 KB**（`sizeof(ftl_context_t)`；**P2-5 后 BST 80 KB / L2P / 池全
-> 收进它内部**，不再是独立的 `g_blocks`）≈ AXI_RAM（384 KB）的 **70%** ⇒ 第二个实例装不下。
+> **代价**：每实例 `g_ftl` = **263.2 KB**（`sizeof(ftl_context_t)`；**P2-5 后 BST 80 KB / L2P / 池全
+> 收进它内部**，不再是独立的 `g_blocks`；v0.74 OP/Spare 池改 per-plane 后由 270.4 KB 再降 7.1 KB）
+> ≈ AXI_RAM（384 KB）的 **69%** ⇒ 第二个实例装不下。
 > `main.c` 已加编译期断言把这条变成**编译错误**（见 §3.7）。
 
 ### 3.3 地址空间换算表
@@ -358,7 +359,7 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 |---|---|---|
 | 1 | **`LUN_ADDR_WIDTH = 0`** | `nand_config.h` 中 `LUN_ADDR_WIDTH = 0` ⇒ `PAA_LUN_MASK = PBA_LUN_MASK = 0` ⇒ **PAA/PBA 都装不下 LUN 字段**，L2P 表无法记录 die 号。这是**根因**。改它需同时改 `LUN_NUM`（芯片配置，未动）。 |
 | 2 | **地址构造缺 lun** | ✅ **已修（v0.73）**：`journal.c` 改用 `pba_make(..., topo.lun, ...)`（原 `pba_from_addr` 未填 `.lun`）；各构造点均显式传 lun。 |
-| 3 | **内存** | 每实例 `g_ftl` = **270.4 KB**（P2-5 后**含** BST 80 KB / L2P / 池）⇒ AXI_RAM（384 KB）装不下第二个实例。`main.c` 已加编译期断言把这条变成**编译错误**。 |
+| 3 | **内存** | 每实例 `g_ftl` = **263.2 KB**（P2-5 后**含** BST 80 KB / L2P / 池；v0.74 后由 270.4 KB 再降 7.1 KB）⇒ AXI_RAM（384 KB）装不下第二个实例。`main.c` 已加编译期断言把这条变成**编译错误**。 |
 | 4 | ~~**共享状态需 per-instance 化**~~ | ✅ **已修（v0.65）**：`bbt.c`/`wear.c`/`checkpoint.c` 的 file-scope static 游标收进 `alloc.bbt` / `alloc.wear` / `ftl->cp`（per-instance）；`main.c` 主循环**遍历全部实例**（泵/实例分离）。~~残留~~ `completion_table.c` 的全局 handler/ctx 仍为单份（NAND 引擎本就全局唯一，非 per-instance 项）。 |
 
 > ~~本轮（2026-10-12）只做**布局 + 路由**，上列 1~4 未动。~~

@@ -36,7 +36,7 @@ Binary size: 189336 bytes
 | | |
 |---|---|
 | **操作** | 烧 `debug.bin` → 复位 → 观察串口 |
-| **预期** | 横幅 + `[SYS ]` 分区之后，出现 **且仅出现一次**：<br>`[WRN] [FTL ] media layout mismatch -> format (erase all blocks)`<br>随后：<br>`[INF] [FTL ] instance ch=0 ce=0 lun=0 free=<F> op=<O> spare=50` |
+| **预期** | 横幅 + `[SYS ]` 分区之后，出现 **且仅出现一次**：<br>`[WRN] [FTL ] media layout mismatch -> format (erase all blocks)`<br>随后：<br>`[INF] [FTL ] instance ch=0 ce=0 lun=0 free=<F> op=204/204 spare=50/50`（v0.74 起 `op`/`spare` 逐 plane 打印，健康片两分量都满） |
 | **判据** | `ftl_media_needs_format` = 「`checkpoint_find_latest` 失败」（版本校验在 `checkpoint_header_valid` 内）。首次上板介质是旧格式 ⇒ 必中。 |
 | **失败** | ① 没打印 ⇒ 介质竟已是 v2 版本（不该）；② 打印了但紧跟 `[ERR] [FTL ] media format failed ch=0 ce=0 lun=0` ⇒ `ftl_media_format` 里 `bbt_erase_all_blocks` / `bbt_save` / `checkpoint_write_initial` 之一失败。回退看 `power_failure_recovery.c:106` 与 `ftl_revision_history.md v0.61`。 |
 
@@ -206,16 +206,16 @@ Binary size: 189336 bytes
 
 | 串口行 | 出处 |
 |---|---|
-| `[WRN] [FTL ] media layout mismatch -> format (erase all blocks)` | `src/main.c:186` |
-| `[INF] [FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u` | `src/main.c:240` |
-| `[INF] [FTL ] boot type=%d cp_seq=%lu journal_entries=%lu` | `src/main.c:253` |
-| `[INF] [META] anchor load: loc=%d newest=%u seq=%lu` | `src/ftl/metadata.c:981` |
-| `[INF] [META] anchor_seq=%u dyn=%u cur_blk=%u live_blks=%u` | `src/ftl/metadata.c:485` |
-| `[INF] [WEAR] seq=%u pages=%u max_ec=%u min_ec=%u` | `src/ftl/wear.c:289` |
-| `[INF] [GC] trig=0x%02x free=%u op=%u writes=%lu reclaimed=%lu novictim=%lu` | `src/ftl/ftl.c:478`（`ftl_gc_evaluate`）；**v0.68 起走日志节拍**：进入触发态立即一行 + 触发态内每 1 s 一行心跳，退出后静默。`reclaimed`/`novictim` 是**进展计数**（`ftl_gc_reclaim_one` 自增，只增不减）⇒ 一行即可区分「卡死」（`reclaimed` 不动、`novictim` 涨）与「在推进」 |
+| `[WRN] [FTL ] media layout mismatch -> format (erase all blocks)` | `src/main.c:172` |
+| `[INF] [FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u/%u spare=%u/%u` | `src/main.c:231`（v0.74 起逐 plane） |
+| `[INF] [FTL ] boot type=%d cp_seq=%lu journal_entries=%lu` | `src/main.c:246` |
+| `[INF] [META] anchor load: loc=%d newest=%u seq=%lu` | `src/ftl/metadata.c:1148` |
+| `[INF] [META] anchor_seq=%u dyn=%u cur_blk=%u live_blks=%u` | `src/ftl/metadata.c:482` |
+| `[INF] [WEAR] seq=%u pages=%u max_ec=%u min_ec=%u` | `src/ftl/wear.c:285` |
+| `[INF] [GC] trig=0x%02x free=%u op=%u/%u writes=%lu reclaimed=%lu novictim=%lu` | `src/ftl/ftl.c:506`（`ftl_gc_evaluate`；v0.74 起 `op` 逐 plane）；**v0.68 起走日志节拍**：进入触发态立即一行 + 触发态内每 1 s 一行心跳，退出后静默。`reclaimed`/`novictim` 是**进展计数**（`ftl_gc_reclaim_one` 自增，只增不减）⇒ 一行即可区分「卡死」（`reclaimed` 不动、`novictim` 涨）与「在推进」 |
 | `[INF] [GC] victim p0=%u p1=%u vr=%u er=%u cp=%u yp=%u cost=%lu` | `src/ftl/gc.c:449`（`gc_select_victim`） |
 | `[INF] [L2P] thrash=%u miss=%u%% hit=%lu miss_total=%lu` | `src/ftl/l2p_cache.c:138` |
-| `[INF] ftl[%u][%u][%u] free=%u op=%u spare=%u bad=%u closed=%u thrash=%u miss=%u%%` | `src/controller/cli.c:401` |
+| `[INF] ftl[%u][%u][%u] free=%u op=%u/%u spare=%u/%u bad=%u closed=%u thrash=%u miss=%u%%` | `src/controller/cli.c:516`（v0.74 起 `op`/`spare` 逐 plane） |
 | `[INF] wr done lba=%lu n=%lu status=%d` / `rd PASS` / `tr done` / `fl done` | `src/controller/cli.c:527-554` |
 
 > 日志级别前缀：`LOGE→[ERR]`、`LOGW→[WRN]`、`LOGI→[INF]`、`LOGD→[DBG]`（`include/common/log.h:39-44`）。

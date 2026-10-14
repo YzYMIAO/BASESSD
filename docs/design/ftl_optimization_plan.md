@@ -534,7 +534,7 @@
 | 项 | 现状 | 处置 |
 |---|---|---|
 | 擦除 op 18→17 未决 | 固件实测零改写（0/28），原因未闭合 | 插桩 `#if 0` 停在 `test_fc_level3.c` |
-| ~~FTL UT 未接线~~ | ✅ **已接线（`9ff5a77`）**：`tests/unit/test_ftl.c` = **8 套件 53 例**（allocator / watermark / gc_wl / rr / bbt / metadata / pending_ct / group），板端 `test` 跑；开关 `make tests` / `UT=FC` / `UT=FTL` | 方案见 `ftl_ut_munit.md`（FTL 层）+ `hil_ut_design.md`（HIL/集成） |
+| ~~FTL UT 未接线~~ | ✅ **已接线（`9ff5a77`）**：`tests/unit/test_ftl.c` = **8 套件 53 例**（v0.74 增至 **55 例**：allocator / watermark / gc_wl / rr / bbt / metadata / pending_ct / group），板端 `test` 跑；开关 `make tests` / `UT=FC` / `UT=FTL` | 方案见 `ftl_ut_munit.md`（FTL 层）+ `hil_ut_design.md`（HIL/集成） |
 | F8 / F9 | 依赖上板 | 待上板 |
 | v0.58 对外接口对齐 | 未上板 | 待上板 |
 | HAL_RCCEx_GetPeriphCLKFreq 被裁 | 恒返回 0（无 FMC/QSPI/USART1 分支） | platform 待修 |
@@ -703,7 +703,7 @@ F8/F9、v0.58 上板、HAL_RCCEx、FMC HiZ。
 3. ~~波 2 剩余四项~~ ✅ **已落地（v0.65）**；~~波 3 两项~~ ✅ **已落地（v0.65）**；
    ~~波 5 死代码~~ ✅ **已删（v0.65）**。
 4. ~~**FTL UT 接线**（用户自建；夹具依赖表所有权形态，v0.65 已定形 ⇒ 现在可以动）。~~
-   ✅ **已接线（`9ff5a77`）**：`tests/unit/test_ftl.c` = 8 套件 53 例，板端 `test` 跑。
+   ✅ **已接线（`9ff5a77`）**：`tests/unit/test_ftl.c` = 8 套件 53 例（v0.74 增至 55 例），板端 `test` 跑。
 5. **波 4（算法深度，未排）**：GC Bitmap Layer 2（正确性已闭合，只是断点续搬）/
    Prefetch 顺序读 / 多流 host stream hint。~~**P2-6（per-plane 写指针）**~~ ⇒ **已定案（v0.66）**：
    器件/标准约束（两 plane 必须同页地址）⇒ **不实现**；唯一解 §七 方案 A 页打包写缓冲已落地。

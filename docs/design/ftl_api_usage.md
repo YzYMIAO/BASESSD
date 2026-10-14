@@ -405,6 +405,8 @@ while (1) {
 #define L2P_REGIONS_PER_INSTANCE (FTL_CW_TOTAL / L2P_ENTRIES_PER_REGION)  // 2048（每 (ch,ce,lun) 一份）
 #define L2P_REGION_PER_BLOCK     (FTL_SLOTS_PER_BLOCK)                 // 128
 #define L2P_BLOCKS               ((L2P_REGIONS_PER_INSTANCE + L2P_REGION_PER_BLOCK - 1U) / L2P_REGION_PER_BLOCK)  // 16（打包）
+//   ↑ `+ L2P_REGION_PER_BLOCK - 1U` 是向上取整 ceil(a/b) ≡ (a+b-1)/b：整数除法截断成
+//     floor，除不尽时会少算一块、丢掉尾部 region。当前 2048 ÷ 128 恰好整除 ⇒ 该项不起作用。
 #define L2P_BASE_BLOCK           (FTL_METADATA_BASE_BLOCK)             // 0
 
 // Cache line 状态
@@ -623,6 +625,12 @@ Padding: (127 - N) × 16B = 0xFF
 #define FREE_POOL_EMERGENCY     (8U)    /* 水位②/③分界 */
 #define SUPER_BLOCK_LIST_MAX    (1024U) /* Closed Super Block 列表容量 */
 
+/* OP / Spare 池（**按 plane 各留一份**，见 ftl_design §3.6） */
+#define FTL_OP_PERCENT           (10U)  /* OP 预留百分比（按 plane 计）*/
+#define FTL_OP_BLOCKS_PER_PLANE  ((BLOCKS_PER_PLANE * FTL_OP_PERCENT) / 100U)  /* = 204/plane */
+#define FTL_OP_POOL_CAP          ((FTL_OP_BLOCKS_PER_PLANE) > 0U ? (FTL_OP_BLOCKS_PER_PLANE) : 1U)
+#define FTL_SPARE_POOL_PER_PLANE (50U)  /* 每 plane 坏块替换池（总 100）*/
+
 /* Super Block */
 typedef struct {
     ftl_topology_t topo;                 /* 本 SB 绑定的 NAND 芯片路由 */
@@ -638,10 +646,10 @@ typedef struct {
     uint16_t    total_blocks;           // 总好 Block 数
     uint16_t   *free_blocks;            // → tables.free_blocks（P2-5：绑到实例自持表）
     uint16_t    free_count;             // 空闲（且已擦除）block 数——三级水位都建在它上面
-    uint16_t   *op_blocks;              // → tables.op_blocks（GC 缓冲池）
-    uint16_t    op_count;               // OP 池剩余 Block 数
-    uint16_t   *spare_blocks;           // → tables.spare_blocks（坏块替换池）
-    uint16_t    spare_count;            // Spare Pool 剩余 Block 数
+    uint16_t  (*op_blocks)[FTL_OP_POOL_CAP];             // → tables.op_blocks（GC 缓冲池，**每 plane 一份**）
+    uint16_t    op_count[PLANE_NUM];                     // 各 plane OP 池剩余 Block 数
+    uint16_t  (*spare_blocks)[FTL_SPARE_POOL_PER_PLANE]; // → tables.spare_blocks（坏块替换池，**每 plane 一份**）
+    uint16_t    spare_count[PLANE_NUM];                  // 各 plane Spare Pool 剩余 Block 数
     super_block_t hot_sb;               // Hot Open Super Block
     super_block_t cold_sb;              // Cold Open Super Block
     super_block_t *closed_sb_list;      // → tables.closed_sb_list

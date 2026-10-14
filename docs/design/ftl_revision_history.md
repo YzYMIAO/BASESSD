@@ -3967,3 +3967,99 @@ include 把 `<stdio.h> <stdlib.h> <string.h> <time.h> <ctype.h>` 灌进了整条
 `stdio.h` 命中 **0**；`include/common/` 恢复零跨目录 include；层图里 **`nand → fc` 边消失**；
 `FTL_PBA_INVALID` 全清。debug 192592 B / release 114924 B 与改前**逐字节相同**，
 0 新警告（release 仍只有既有的 `ftl_fc_interface.c:66/82` 两条）。
+
+---
+
+## v0.74 — OP / Spare 池改按 plane 预留（介质格式变更，版本 4→5）
+
+**日期**：2026-10-14
+
+**范围**：`include/ftl/{allocator,bbt,metadata}.h`、
+`src/ftl/{allocator,bbt,ftl}.c`、`src/main.c`、`src/controller/cli.c`、
+`tests/unit/test_ftl.c`。
+
+### 起因：两个池是全局的，回填却是 plane-major 的升序单循环
+
+`gblock = plane*BLOCKS_PER_PLANE + block`（`bst.h:144`，plane-major），而
+`main.c` 的回填是**单次升序 gblock 遍历 + 全局计数**。前 254 个非元数据好块
+因此全落 plane 0：
+
+| 池 | plane 0 | plane 1 |
+|---|---|---|
+| Spare 50 | 63..112 | — |
+| OP 204 | 113..316 | — |
+| 可用数据块 | 1731 | 1985 |
+
+两个消费点 `allocator_pull_from_op`（`allocator.c`）与 `bbt_spare_pool_refill`
+（`bbt.c`）都是**无 plane 参数**的 LIFO 弹出，直接 `allocator_free_block` 丢回
+通用 free pool。后果：
+
+- **plane 1 坏块无替换能力**：`bbt_mark_bad(alloc, gblock)` 手上有 gblock
+  （可算 plane）却没往下传，补进来的是 plane 0 的块 ⇒ 不恢复该 plane 的配对能力；
+- **plane 1 无 OP 兜底**：其 free pool 见底时 `allocator_pull_from_op` 拿不到
+  plane 1 的块；
+- 两 plane 可用容量不对称（1731 vs 1985），末寿命时 plane 1 有块配不成对。
+
+写入/擦除/GC 的最小单元是 **super block**（每 plane 一块），预留必须按 plane 对称。
+**注意这不是崩溃型缺陷**（账本自洽、不会写坏数据），是容量/寿命末端的可用性缺陷。
+
+**已定口径**：OP = 每 plane 块数的 10%（2048×10% = **204/plane = 408 总量**，
+floor；不接受 205/204 的非对称取法——对称正是本改动的目的）；
+Spare = **每 plane 50（总 100）**。
+
+### 改动
+
+| 文件 | 内容 |
+|---|---|
+| `allocator.h` | `FTL_SPARE_POOL_SIZE(50)` → `FTL_SPARE_POOL_PER_PLANE(50)`；新增 `FTL_OP_BLOCKS_PER_PLANE`(204) 与 `FTL_OP_POOL_CAP`（维度钳 ≥1，兜住 `FTL_OP_PERCENT=0`）；两数组升 `[PLANE_NUM][…]`；指针改 pointer-to-array、计数改 `uint16_t[PLANE_NUM]` |
+| `allocator.c` | `allocator_pull_from_op(alloc, plane)`；`allocator_open_sb` 按 plane 拉 OP（去掉 `tries<PLANE_NUM` 计数循环——每次拉进的就是本 plane 的块，一次即命中）；`allocator_init` 两处计数改 `memset`（`= 0U` 对数组不编译） |
+| `bbt.c/h` | `bbt_spare_pool_refill(alloc, plane)`；`bbt_mark_bad` 传 `ftl_gblock_plane(gblock)`（**消费点 2 的实际 bug 修复**） |
+| `main.c` | 回填循环按 `plane = ftl_gblock_plane(gblock)` 路由到 per-plane 配额；开机日志 `free=%u op=%u/%u spare=%u/%u` |
+| `ftl.c` / `cli.c` | GC 心跳与 `info` 同样逐 plane 显示 |
+| `metadata.h` | `FTL_MEDIA_LAYOUT_VERSION` **4U → 5U**（理由见下） |
+
+选**二维数组**而非展平 + helper：本仓已有 per-plane 数组先例
+（`super_block_t.plane_blocks[PLANE_NUM]`），`op_blocks[plane][idx]` 自解释、
+不需要新索引函数、也不会让 plane/idx 混用静默通过。
+
+### ⚠ 为什么必须 bump 介质版本（不是"池不落盘"能豁免的）
+
+预留块集合变了——旧固件把 plane 1 的 2111..2364 当**用户数据区**（写过用户数据、
+被 L2P 引用），新固件把它们当 spare/OP 预留。就地升级不格式化时：
+
+- 这些块仍被 L2P 引用，而预留池的契约是「块已擦除」，`pull_from_op` /
+  `spare_refill` 会把它们直接丢回 free pool ⇒ 下次写即覆盖活数据；
+- 且 F2 重建会把"写过的块"也建 Closed 条目 ⇒ 同一块同时进 spare/OP 池与
+  closed 列表，账本错乱。
+
+bump 版本让 `ftl_media_needs_format`（`power_failure_recovery.c`）在首启自动
+全片格式化一次——这是本仓既有的、取代手动 `bbt --erase` 的机制
+（`metadata.h`「介质布局版本」段）。**首启看到格式化横幅是预期行为，不是回归。**
+
+### 代价（明确记录）
+
+free pool 水位**降 254 块**（预留 254 → 508）。用户容量由 L2P region 数
+（`FTL_LBA_MAX`）固定不变，但 GC headroom 变少：开机 `free=` ≈ **3462**（旧 ≈3716）。
+这是"每 plane 10%"的既定代价。
+
+内存反而省：OP 由 `[4096]×2B`=8KB 缩为 `[2][204]×2B`=816B，Spare 由 100B 变
+200B ⇒ **净省 ≈7.3 KB**（`.bss` 290500、`g_ftl` 263.2 KB）。
+
+### 验证
+
+| 判据 | 结果 |
+|---|---|
+| `make tests UT=FTL` / `UT=FC` / `make tests` | 0 error 0 warning |
+| `make debug` / `make release` | 0 error 0 warning；`.bin` 192956 / 115136 B |
+| `_Static_assert(sizeof(g_ftl)+20KB <= 384KB)` | 过（AXI_RAM 284.1 KB / 74.0%） |
+| `.bss` | 290500（`g_ftl` 0x41CF8 = 263.2 KB），净省 ≈7.3 KB，与预测吻合 |
+| 新增用例 | `op_fallback_per_plane`（plane 1 free 空 ⇒ 从 plane 1 的 OP 补出块）、`spare_pool_plane_isolated`（plane 1 的坏块只动 plane 1 的池）；8 套件 53 → **55 例** |
+
+⚠ **上板验证未做**（留待用户）。上板判据：
+① 开机日志 `op=204/204 spare=50/50`（修复前 `op=204/0 spare=50/0`）；
+② `info` 的 `op=`/`spare=` 两个 plane 分量都非零；
+③ 写若干 LBA 后逐个 `map <lba>`，`plane=` 字段应同时出现 0 和 1（plane 1 不再饿死）；
+④ 首启打一次 `media layout mismatch -> format`，其后不再打。
+
+⚠ 工具坑：`release.elf` 被 strip（`nm: no symbols`）⇒ 构建脚本的 SRAM usage 报告
+对 release 恒为 0.0 KB，是既有行为；判断 release 内存只看 `size` 表的 `.bss`。

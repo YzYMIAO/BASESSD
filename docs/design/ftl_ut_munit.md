@@ -1,6 +1,7 @@
 # FTL 层测试用例设计（L0 munit 纯 RAM 套件）
 
-> **状态：已实施（2026-10-14）**——`tests/unit/test_ftl.c`（8 套件 53 例）已落地并接线（§6），
+> **状态：已实施（2026-10-14）**——`tests/unit/test_ftl.c`（8 套件 **55 例**；v0.74 加
+> `op_fallback_per_plane` + `spare_pool_plane_isolated` 两例回归）已落地并接线（§6），
 > `make tests` / `UT=FC` / `UT=FTL` 三档构建通过（0 warning）。**尚未上板验证**。
 >
 > **分层边界**（判据 `fc_nand_design.md §26.1`）：本文**只管 FTL 层（`src/ftl/`）**。
@@ -47,14 +48,16 @@ read disturb 慢死预测、坏块替换池、L2P thrashing、**组完成语义*
 
 | 结构 | 组成 | 尺寸 |
 |---|---|---|
-| `ftl_tables_t` | `blocks[4096]×20B`=80KB + `free_blocks[4096]×2B`=8KB + `op_blocks[4096]×2B`=8KB + `closed_sb_list[1024]×12B`=12KB + `spare_blocks[50]×2B`=100B | **≈108KB** |
+| `ftl_tables_t` | `blocks[4096]×20B`=80KB + `free_blocks[4096]×2B`=8KB + `op_blocks[2][204]×2B`=816B + `closed_sb_list[1024]×12B`=12KB + `spare_blocks[2][50]×2B`=200B | **≈101KB** |
 | `metadata_dir_cache_t` | `entries[2048]×7B` | **≈14.4KB** |
-| `ftl_context_t` | 内含 `tables`(108KB，**FTL 自持表** P2-5) + `cache`(128KB，**L2P 缓存**——非「表」；真 L2P 表在 NAND 的 region 池，SRAM 只驻 64 个 region) + `metadata_dir`(14.4KB) + journal + … | **≈287KB** |
+| `ftl_context_t` | 内含 `tables`(101KB，**FTL 自持表** P2-5) + `cache`(128KB，**L2P 缓存**——非「表」；真 L2P 表在 NAND 的 region 池，SRAM 只驻 64 个 region) + `metadata_dir`(14.4KB) + journal + … | **≈263KB** |
 
 > **⚠ 关键约束**：`ftl_tables_t` 的数组尺寸由 `FTL_BLOCK_TOTAL`（=4096）**固定**——原文档
 > 「用 2112 项省内存」**不可能**（结构体按值含全 4096 项）。
-> 且 **AXI_RAM(384KB) 已被 `main.c` 的 `g_ftl`(287KB) 占满**（`main.c:131` 的 `_Static_assert`），
-> 独立 287KB 的 `ftl_context_t` fixture **放不下**。
+> 且 **AXI_RAM(384KB) 已被 `main.c` 的 `g_ftl`(263KB，`sizeof(ftl_context_t)`) 占去 68.5%**
+> （`main.c:131` 的 `_Static_assert`），独立 263KB 的 `ftl_context_t` fixture **放不下**
+> （两份即 526KB > 384KB）——故 UT 复用固件本体：fixture 取 `g_ctrl.ftl[0][0][0]`
+> （= `&g_ftl[0][0][0]`），见下。
 
 ### 2.2 fixture 内存：复用活实例（推荐）
 
@@ -88,7 +91,7 @@ metadata_dir_init(&F->metadata_dir);
 > `F->topo` **保持不动**（NAND 路由，必须有效）。稳妥做法：每个套件的 `setup` 把**该套件会碰的
 > 字段全清**，别只清一半——只读不写的字段可留。
 
-- **好处**：零额外内存、单一数据源（不复制 287KB）。
+- **好处**：零额外内存、单一数据源（不复制 263KB）。
 - **代价**：fixture 不再「独立」；须保证 `test` 执行期间**后台泵不并发**——`test` 命令在
   `cli_service_poll` 里**同步执行**（不重入泵），天然满足。
 - **备选**（不推荐）：独立 `ftl_context_t` 落 SRAM（`.sram1/2/3_data`=288KB，**仅 1KB 余量**），
@@ -121,7 +124,7 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 
 | 用例 | 断言 |
 |---|---|
-| `init_zeroes_pool` | `allocator_init` 后 `free_count==0`、`op_count==0`、`spare_count==0`、非坏块 state==FREE（**init 不回填**，§2 行 5） |
+| `init_zeroes_pool` | `allocator_init` 后 `free_count==0`、`op_count[plane]==0`、`spare_count[plane]==0`（**逐 plane**）、非坏块 state==FREE（**init 不回填**，§2 行 5） |
 | `backfill_fills_pool` | 回填 n 个好块后 `free_count==n`；池内每块 state==FREE |
 | `free_block_clears_state` | 对 OPEN/CLOSED/RESERVED/TEMP 块调 `allocator_free_block` → state==FREE + 入池 + 计数+1 |
 | `close_open_sb` | `allocator_close_open_sb`：新 closed SB 两 plane 块 state==CLOSED + `sb_id` 正确 + `closed_sb_count`+1 |
@@ -132,11 +135,13 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | `reserved_alloc_free` | `allocator_alloc_reserved_block` 置 RESERVED；`allocator_free_reserved_block` 归还池 |
 | **`open_sb_never_picks_metadata`** | **回归用例**：metadata 块 0..62 被 `allocator_init` 标 FREE 但**不在 Free Pool** ⇒ 新建 SB 两 plane 块都 **≥63**（钉住历史真缺陷） |
 | `open_sb_min_erase_count` | 池内多块时选该 plane `erase_count` 最小者（动态 WL） |
+| **`op_fallback_per_plane`** | **回归用例（v0.74）**：某 plane Free Pool 空、其 OP 池有块 ⇒ `allocator_alloc_pair` 必须成功且该 plane 拿到 **OP 池里那块**（修复前 OP 池全局，拉进来的是 plane 0 的块 ⇒ 选不中） |
 
-> ⚠ **L0 只能调公开函数**：`allocator_open_sb`（`allocator.c:200`）、
-> `allocator_select_plane_block_from_pool`（`:157`）、`allocator_pull_from_op`（`:128`）都是 `static`
-> ⇒ 上两条经**公开入口 `allocator_close_open_sb`（`:359`，内部调 `open_sb`）间接测**：
+> ⚠ **L0 只能调公开函数**：`allocator_open_sb`（`allocator.c:209`）、
+> `allocator_select_plane_block_from_pool`（`:166`）、`allocator_pull_from_op`（`:136`）都是 `static`
+> ⇒ 上两条经**公开入口 `allocator_close_open_sb`（`:370`，内部调 `open_sb`）间接测**：
 > 调用后断言新 closed SB 的 `plane_blocks[p] ≥ 63` / `erase_count` 最小。
+> （`op_fallback_per_plane` 走公开入口 `allocator_alloc_pair`，可直接测 OP 兜底。）
 
 ### 4.2 `g_ftl_watermark_tests[]`（`src/ftl/checkpoint.c`）
 
@@ -181,7 +186,8 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 |---|---|
 | `mark_bad_sets_bits` | `bbt_mark_bad`：BAD 位 + `clear_valid` + `bad_count`+1 |
 | `mark_bad_idempotent` | 重复标坏**不**重复计数（负例） |
-| `spare_pool_refill` | `bbt_spare_pool_refill`：spare→free 补充 + 计数守恒 |
+| `spare_pool_refill` | `bbt_spare_pool_refill(alloc, plane)`：spare→free 补充 + 该 plane 计数守恒；耗尽 / `NULL` / plane 越界 → `FTL_ERROR` 且不动 free pool |
+| **`spare_pool_plane_isolated`** | **回归用例（v0.74）**：refill plane 1 ⇒ 只减 `spare_count[1]`、`spare_count[0]` 不变，且补进 free pool 的是 **plane 1 的块**（修复前全局池 ⇒ 补的是 plane 0 的块） |
 | `is_bad_set_bad_inline` | `bbt_is_bad`/`bbt_set_bad` 纯 bitmap（含 `NULL`→0） |
 
 ### 4.6 `g_ftl_metadata_tests[]`（`src/ftl/metadata.c`）
@@ -309,7 +315,7 @@ FTL 生产码已满足全部测试条件，**零改动**：
 | **时间可注入** | `ssd_platform_ops_t.time_us` 经 `ssd_platform_register`（`platform.h:14/19`） |
 | **无 test hook** | 生产码零注入点（测的就是真实路径） |
 
-**唯一张力**：fixture 287KB（P2-5 后果）⇒ 复用活实例 `g_ctrl.ftl[0][0][0]` + reset（§2.2）。
+**唯一张力**：fixture 263KB（P2-5 后果）⇒ 复用活实例 `g_ctrl.ftl[0][0][0]` + reset（§2.2）。
 这是**内存约束**，非设计缺陷——不构成对 FTL 生产码的修改要求。
 
 ## 6. 接线（已实施）

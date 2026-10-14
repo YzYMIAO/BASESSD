@@ -186,24 +186,29 @@ BAST（Block Associative Sector Translation）和 FAST（Fully Associative Secto
 > ⚠ **下表已改为 AXI_RAM 实测**（真实约束是 AXI_RAM 384 KB，由 `src/main.c` 的编译期守卫
 > `sizeof(g_ftl) + FTL_AXI_RAM_RESERVED(20KB) ≤ BOARD_AXI_RAM_SIZE(384KB)` 把住——
 > P2-5 表自持后**只看 `g_ftl` 一项**，BST/L2P/池全在它内部）。
-> 数字取自 **debug 构建的 `debug.map`（v0.70 工作树）**，按符号地址差算得
-> （`.bss` 0x48B44 + `.data` 0x1E4；其中 `.bss.g_ftl` = 0x43968 = 270.4 KB）。
+> 数字取自 **debug 构建的 `debug.map`（v0.74 工作树）**，按符号地址差算得
+> （`.bss` 0x46EC4 + `.data` 0x1E4；其中 `.bss.g_ftl` = 0x41CF8 = 263.2 KB）。
 > **旧的「总计 1 MB」粗估表已废弃**——它把
-> 「1 MB 全片 SRAM」当预算，而实际 FTL 元数据**只落 AXI_RAM**，其余大数组落 SRAM2。
+> 「1 MB 全片 SRAM」当预算，而实际 FTL 元数据**只落 AXI_RAM**。
 
 | 占用方（AXI_RAM） | 大小 | 占 AXI_RAM |
 |--------|------|------|
-| `g_ftl`（FTL 全上下文：自持表 + L2P Cache + Journal/MD/Pending/allocator + per-instance 游标） | 270.4 KB | 70.4% |
-| FC 命令池/描述符池/SQ/HSQ/CQ + CLI 缓冲 + 其他 .bss/.data | ~20.9 KB | 5.5% |
-| **小计** | **291.3 KB** | **75.9%** |
-| 余量 | 92.7 KB | 24.1% |
+| `g_ftl`（FTL 全上下文：自持表 + L2P Cache + Journal/MD/Pending/allocator + per-instance 游标） | 263.2 KB | 68.5% |
+| FC 命令池/描述符池/SQ/HSQ/CQ + CLI 缓冲 + 其他 .bss/.data | ~20.9 KB | 5.4% |
+| **小计** | **284.1 KB** | **74.0%** |
+| 余量 | 99.9 KB | 26.0% |
 | **AXI_RAM 容量** | **384 KB** | **100%** |
+
+> v0.74 起 OP 池由 `[FTL_BLOCK_TOTAL]`（8 KB）缩为 `[PLANE_NUM][204]`（816 B）、Spare 由
+> `[50]`（100 B）变 `[PLANE_NUM][50]`（200 B），净省 ≈7.3 KB。
 
 > 另有 FC 的**非缓存缓冲池**（Buffer Pool 128 × 528B ≈ 66 KB + NAND 通道页缓冲 ~4.1 KB）
 > 刻意落 **AXI_NOCACHE**（0x24060000，128 KB），不进上表——FMC/DMA 直访须绕 D-Cache。
 
-> 另有 4 张大数组刻意落 **SRAM2**（`.sram2_data`，NOLOAD）：`g_free_blocks` / `g_op_blocks` /
-> `g_spare_blocks` / `g_closed_sb_list`（16 KB）——SRAM1 仅 128 KB 放不下，见 `src/main.c` 头注释。
+> 另有 CLI 的固定 pattern 写 buffer `g_wr_buf`（16 KB）落 **SRAM2**（`.sram2_data`，NOLOAD，
+> 上电不清零 ⇒ 由 `cli_init` 主动预填 pattern）——见 `src/controller/cli.c` 头注释。
+> （早期版本的 `g_free_blocks` / `g_op_blocks` / `g_spare_blocks` / `g_closed_sb_list` 四个全局
+> 数组已随 **P2-5 表自持**并入 `g_ftl`，不再是独立符号。）
 
 ### 2.4 SDRAM（8MB）用途
 
@@ -379,8 +384,14 @@ Anchor 分页 / CW 级映射 …）。若固件**不能识别介质是旧格式*
 v0.61 起由固件兜底：
 
 ```
-#define FTL_MEDIA_LAYOUT_VERSION (2U)   /* 任何改介质格式的改动都必须 +1（v0.62 删元数据 CRC 后 +1）*/
+#define FTL_MEDIA_LAYOUT_VERSION (5U)   /* 任何改介质格式的改动都必须 +1 */
 ```
+
+> 版本演进（当前 **5**）：v0.62 删元数据记录内 CRC → 2；v0.65 Wear 条目加 `rr` 三字段
+> （8B → 12B）→ 3；v0.73 Directory 条目位置字段由 PAA 改存 PBA（字节数不变、语义变）→ 4；
+> v0.74 OP/Spare 池改按 plane 预留（**结构体布局不变，但预留块集合变了**——旧固件把
+> plane 1 的块当用户数据区写过数据、被 L2P 引用，新固件当预留池）→ 5。
+> ⚠ 判据不是"结构体字节数变没变"，而是"**老固件的介质在新固件下会不会被误读/误用**"。
 
 - **标记位置**：`l2p_checkpoint_header_t.layout_version`（Checkpoint 头）**与**
   `metadata_anchor_page_t.layout_version`（Anchor 页）**都写**。两处独立校验
@@ -485,28 +496,36 @@ Cold Super Block:  ← 几乎不更新的数据（GC 搬移、元数据）
 OP 是数据区中**不映射给用户**的好块，由 allocator 统一管理但 L2P 不覆盖。
 
 ```c
-#define FTL_OP_PERCENT    (10)    // 10% 预留空间，可调 7~28，设为 0 禁用
+#define FTL_OP_PERCENT           (10)  // 10% 预留空间，可调 7~28，设为 0 禁用（**按 plane 计**）
+#define FTL_OP_BLOCKS_PER_PLANE  ((BLOCKS_PER_PLANE * FTL_OP_PERCENT) / 100U)  // = 204/plane
 ```
 
 Spare Pool 是**独立于 OP 的替换储备**，专用于运行时坏块替换后补充 free pool 水位：
 
 ```c
-#define FTL_SPARE_POOL_SIZE   (50)    // 替换池大小，覆盖生命周期新增坏块
+#define FTL_SPARE_POOL_PER_PLANE (50)  // 每 plane 替换池大小（总 100），覆盖生命周期新增坏块
 ```
+
+> ⚠ **两个池都按 plane 各留一份**（`op_blocks[PLANE_NUM][204]` / `spare_blocks[PLANE_NUM][50]`）。
+> 理由：写入/擦除/GC 的最小单元是跨双 plane 的 **super block**，某 plane 的块耗尽就配不成对。
+> 早期实现是全局单池 + gblock 升序回填，而 `gblock = plane*BLOCKS_PER_PLANE + block` 是
+> **plane-major**，前 254 个非元数据好块全落 plane 0 ⇒ plane 1 既无 OP 兜底也无坏块替换能力，
+> 两 plane 可用容量还不对称（1731 vs 1985）。见 `ftl_revision_history.md` v0.74。
 
 #### OP 与 Spare Pool 的分工
 
 | 池 | 用途 | 大小 | 是否可以回收 |
 |----|------|------|------------|
-| OP 10% | GC 缓冲 + 性能保速 | 204 blocks（= 每 plane 块数 2048 × 10% ≈ 总量 5%） | ✅ GC 正常使用 |
-| Spare Pool | 坏块替换专用 | ~50 blocks | ❌ 只出不进，耗尽后容量下降 |
+| OP 10% | GC 缓冲 + 性能保速 | 204 blocks / plane（总 408） | ✅ GC 正常使用 |
+| Spare Pool | 坏块替换专用 | 50 blocks / plane（总 100） | ❌ 只出不进，耗尽后容量下降 |
 
 #### OP 在 RMA 和性能恢复中的作用
 
 ```
 RMA 场景：
-  出厂时：总好块 4056，Spare Pool ~50，OP ~400，用户可见 ~3600 块
-  使用中：新增 50 个坏块 → Spare Pool 补充 → 用户容量不变 ✅
+  出厂时：总好块 3970（4096 − 每 plane 元数据 63×2），Spare Pool 100（每 plane 50），
+          OP 408（每 plane 204），free pool 3462 块
+  使用中：新增 100 个坏块 → Spare Pool 补充 → 用户容量不变 ✅
   Spare Pool 耗尽后新增坏块 → 用户容量自然减少
 
 性能恢复场景：
@@ -536,7 +555,8 @@ Super Block {P0-BlockA, P1-BlockB} 中 P0-BlockA PROGRAM 失败：
      P1-BlockB 擦除 → 成功则回 free pool，失败也标记坏块
   
   ⑥ Spare Pool 补充：
-     从 Spare Pool 取一个好块 → 加入 free pool（保容量水位）
+     从**坏块所属 plane** 的 Spare Pool 取一个好块 → 加入 free pool（保容量水位）
+     （按 plane 取：补错 plane 不恢复该 plane 的配对能力）
   
   ⑦ 分配新的 Super Block：
      从 free pool 取双 Plane Block 配对
@@ -602,8 +622,11 @@ if (ftl_gc_evaluate(ftl) != 0U) {                 /* 统一触发求值（节拍
 
 | 池 | 计数 | 消费方 | 作用 |
 |---|---|---|---|
-| OP（204 块） | `op_count` | `allocator_pull_from_op`——Free Pool 给不出某 plane 的块时补 | 前台不等 GC 的性能缓冲 |
-| Spare（50 块） | `spare_count` | `bbt.c` 坏块替换 | 坏块替换，只出不进 |
+| OP（204 块 / plane，总 408） | `op_count[plane]` | `allocator_pull_from_op(alloc, plane)`——Free Pool 给不出**该 plane** 的块时补 | 前台不等 GC 的性能缓冲 |
+| Spare（50 块 / plane，总 100） | `spare_count[plane]` | `bbt_spare_pool_refill(alloc, plane)`——坏块所属 plane 替换 | 坏块替换，只出不进 |
+
+两池均按 plane 各持一份（数组 `op_blocks[PLANE_NUM][…]` / `spare_blocks[PLANE_NUM][…]`），
+理由见 §3.6。
 
 ### 3.8 坏块管理（BBT）
 
@@ -779,7 +802,8 @@ void bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
          P1-BlockB 擦除 → 成功则回 free pool，失败也标记坏块
       
       ⑥ Free Pool 补充：
-         allocator_pull_from_op() → 从 OP 池取一个好块归还 free pool（保容量水位）
+         allocator_pull_from_op(alloc, plane) → 从**该 plane** 的 OP 池取一个好块
+                                              归还 free pool（保容量水位）
       
       ⑦ 分配新的 Super Block：
          从 free pool 取双 Plane Block 配对
@@ -792,16 +816,19 @@ void bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
   >   Policy B）、分配一对：`allocator_alloc_pair(alloc, temp, out[PLANE_NUM])`；
   > - 擦除计数在 **BST**（`alloc->blocks[gblock].erase_count`），非独立数组；
   > - 坏块判据是 BST 状态位（`ftl_block_is_bad`），非 `bbt_is_bad` 查表；
-  > - Spare Pool 计数是 `alloc->spare_count`（上限 `FTL_SPARE_POOL_SIZE=50`），
-  >   由 `allocator_pull_from_op` / 补池逻辑消费，无 `ftl_handle_bad_block`。
+  > - Spare Pool 计数是 `alloc->spare_count[plane]`（每 plane 上限
+  >   `FTL_SPARE_POOL_PER_PLANE=50`），由 `bbt_spare_pool_refill(alloc, plane)` 消费
+  >   （坏块所属 plane），无 `ftl_handle_bad_block`。
 
 ```c
 /* 真实签名 */
 nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
                                 nand_pba_t out[PLANE_NUM]);                      /* 一对 plane */
+ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, uint8_t plane);       /* 按 plane 补 */
 /* 选块助手是**内部 static**，不是对外 API：
  *   static uint16_t allocator_select_plane_block_from_pool(const ftl_allocator_t *alloc,
- *                                                          uint8_t plane); */
+ *                                                          uint8_t plane);
+ *   static uint8_t  allocator_pull_from_op(ftl_allocator_t *alloc, uint8_t plane); */
 ```
 
 **为什么用 Spare Pool 而不是 Block Remap Table**：
@@ -853,8 +880,8 @@ ONFI Multi-Plane 命令中每个 Plane 有独立的行地址，
 | 出厂扫描读取 | **Page 0 列 2048 的 1 字节** | 不是整页——`ftl_sync_read_column` 够到 spare 首字节（v63）|
 | BBT_MAX_BLOCKS | 4096（= FTL_BLOCK_TOTAL） | BBT bitmap 容量 = 每 bit 一块 |
 | RR_ECC_RISING_THRESHOLD | 4 次 | ECC 连续上升触发慢死预测（`rr`）；单次 ≥ `RR_ECC_HIGH_WATER`(6) 亦告警 |
-| FTL_SPARE_POOL_SIZE | 50 | 替换池大小（覆盖生命周期坏块）|
-| FTL_OP_PERCENT | 10（= 204 块） | OP 池预留百分比（每 plane 块数的 10%）|
+| FTL_SPARE_POOL_PER_PLANE | 50（总 100） | 每 plane 替换池大小（覆盖生命周期坏块）|
+| FTL_OP_PERCENT | 10（= 204 块 / plane，总 408） | OP 池预留百分比（每 plane 块数的 10%）|
 
 ### 3.9 与企业方案对比
 
@@ -1429,7 +1456,7 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl) {  /* **统一求值点**：
     if (triggers != 0U) {
         if (ftl->gc_log_last_ms == 0U || now_ms - ftl->gc_log_last_ms >= GC_LOG_INTERVAL_MS) {
             ftl->gc_log_last_ms = now_ms;
-            LOGI("[GC] trig=0x%02x free=%u op=%u writes=%lu", …);
+            LOGI("[GC] trig=0x%02x free=%u op=%u/%u writes=%lu", …);
         }
     } else { ftl->gc_log_last_ms = 0U; }
     return triggers;
@@ -1761,6 +1788,12 @@ LBA 0x00004 ──→ CW 0 of Page X+1 ──→ ...
 > `L2P_REGION_PER_BLOCK = PAGES_PER_BLOCK × PLANE_NUM = 128`（一块的两 plane 各 64 页都算 region 槽位）
 > ⇒ 2,048 ÷ 128 = **16 块（Block 0..15）**。块号由 `ftl_l2p_region_placement` 算出：
 > `block = L2P_BASE_BLOCK + region_id / 128`。
+>
+> ⚠ `L2P_BLOCKS` 写成 `(region 数 + 128 - 1) / 128` 而非直接除：那是**向上取整**
+> （`ceil(a/b) ≡ (a+b-1)/b`）。当前 2,048 ÷ 128 恰好整除 ⇒ `-1` 项不起作用，但 region 数
+> 与每块容量都由器件几何推出，改 `PAGES_PER_BLOCK` / `CW_NUM` / `PAGE_MAIN_SIZE` 任一个
+> 就可能不再整除；floor 会丢掉最后一块。定义处配有
+> `_Static_assert(L2P_BLOCKS * L2P_REGION_PER_BLOCK >= L2P_REGIONS_PER_INSTANCE)` 兜底。
 
 ```
 L2P 表（NAND 元数据区 Block 0..15，哨兵层——本区页永不写入）：
@@ -2211,6 +2244,8 @@ region_id = lba / 512          entry_idx = lba % 512
 #define L2P_REGIONS_PER_INSTANCE (2048)                     // 每 (ch,ce,lun) 表容量（分片：每实例一份完整表）
 #define L2P_REGION_PER_BLOCK     (FTL_SLOTS_PER_BLOCK)      // 每块槽位 = PAGES_PER_BLOCK × PLANE_NUM = 128
 #define L2P_BLOCKS               ((L2P_REGIONS_PER_INSTANCE + L2P_REGION_PER_BLOCK - 1U) / L2P_REGION_PER_BLOCK)  // = 16
+//   ↑ `+ L2P_REGION_PER_BLOCK - 1U` 是向上取整 ceil(a/b) ≡ (a+b-1)/b：整数除法截断成
+//     floor，除不尽时会少算一块、丢掉尾部 region。当前 2048 ÷ 128 恰好整除 ⇒ 该项不起作用。
 #define L2P_CACHE_SIZE           (64)                       // 可配置：32/64/128
 // 无效 PBA 哨兵 = NAND_PBA_INVALID（ftl_config.h §三.2）。原先此处另立 FTL_PBA_INVALID，
 // 两者同值同义 ⇒ 已归并，只留 NAND_PBA_INVALID。
@@ -3399,8 +3434,10 @@ void         journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence); 
 /* Free Pool 三级水位（一个已擦除池，见 §3.7） */
 #define FREE_POOL_TARGET      (32)     /* 水位①/②分界 */
 #define FREE_POOL_EMERGENCY   (8)      /* 水位②/③分界 */
-#define FTL_OP_PERCENT        (10)     /* OP 预留百分比 */
-#define FTL_SPARE_POOL_SIZE   (50)     /* 坏块替换池大小 */
+#define FTL_OP_PERCENT           (10)  /* OP 预留百分比（**按 plane 计**）*/
+#define FTL_OP_BLOCKS_PER_PLANE  ((BLOCKS_PER_PLANE * FTL_OP_PERCENT) / 100U)  /* = 204/plane */
+#define FTL_OP_POOL_CAP          ((FTL_OP_BLOCKS_PER_PLANE) > 0U ? (FTL_OP_BLOCKS_PER_PLANE) : 1U)
+#define FTL_SPARE_POOL_PER_PLANE (50)  /* 每 plane 坏块替换池大小（总 100）*/
 
 /* Super Block 列表容量：每 Plane 2048 Block，最多 1024 个 Super Block 配对 */
 #define SUPER_BLOCK_LIST_MAX  (1024)
@@ -3417,9 +3454,9 @@ typedef struct {
     uint16_t *free_blocks;
     uint16_t  free_count;
 
-    /* ── OP / Spare Pool（容量不动）── */
-    uint16_t *op_blocks;    uint16_t op_count;    /* OP 预留池（GC 缓冲）*/
-    uint16_t *spare_blocks; uint16_t spare_count; /* Spare Pool（坏块替换）*/
+    /* ── OP / Spare Pool（**per-plane**，容量不动；见 §3.6）── */
+    uint16_t (*op_blocks)[FTL_OP_POOL_CAP];             uint16_t op_count[PLANE_NUM];
+    uint16_t (*spare_blocks)[FTL_SPARE_POOL_PER_PLANE]; uint16_t spare_count[PLANE_NUM];
 
     /* ── Open Super Block（每温度一个）── */
     super_block_t hot_sb;
