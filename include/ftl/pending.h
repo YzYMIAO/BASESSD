@@ -22,6 +22,12 @@
 
 #define FTL_PENDING_MAX (32U)
 
+/* 「本项已与 FC 命令脱钩」哨兵：Read Recovery 托管读失败的子操作时用它覆盖 command_id。
+ * 理由：那条 FC 命令随即被 release，其 command_id 会被后续 fc_command_alloc **复用**，
+ * 而 pending_lookup 按 command_id 线性扫首个匹配——留旧值会让新命令的完成误撞上本项。
+ * 0xFFFF 不可达：FC_COMMAND_POOL_DEPTH = 64（命令 id 恒 < 64）。 */
+#define FTL_PENDING_CMD_NONE (0xFFFFU)
+
 /* ── 完成组（ftl_io_group_t）──
  *
  * 一条 host 请求（一次 ftl_submit_read/write 调用）内部可拆成多条 FC 子操作
@@ -42,8 +48,13 @@ typedef struct ftl_context ftl_context_t;
  * 必须由 submit 侧显式给出，**不可**从 io 字段反推（见文件头 ⚠）。 */
 typedef enum
 {
-    PENDING_OP_READ  = 0, /* 读：completion 把 NAND 数据写回 io.buffer */
-    PENDING_OP_WRITE = 1, /* 写：completion 确认 Journal + L2P（io.buffer 只是数据源，不再读它） */
+    PENDING_OP_READ          = 0, /* 读：completion 把 NAND 数据写回 io.buffer */
+    PENDING_OP_WRITE         = 1, /* 写：completion 确认 Journal + L2P（io.buffer 只是数据源，不再读它） */
+    PENDING_OP_READ_RECOVERY = 2, /* 读失败、已**托管**给 Read Recovery job：FC 命令已脱钩
+                                   *   （command_id = FTL_PENDING_CMD_NONE）、组在飞数**不**递减
+                                   *   —— host 读组继续 pending，等 RR 收尾时统一结算。
+                                   *   完成路径不会再碰本项（op != READ/WRITE），只有 RR 引擎
+                                   *   用 pending_find_op 找它、用 pending_release_index 收尾。 */
 } ftl_pending_op_t;
 
 typedef struct
@@ -148,6 +159,30 @@ ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, uint16_t cmd_id);
  * @param cmd_id  FC command_id
  */
 void pending_remove(ftl_context_t *ftl, uint16_t cmd_id);
+
+/*
+ * pending_find_op - 找**第一个** op 类型匹配的 pending 项（按下标升序）
+ *
+ * 供 Read Recovery 引擎取走被托管的子操作：那些项的 command_id 已置哨兵
+ * （FTL_PENDING_CMD_NONE），按 id 查不到，只能按 op 找。
+ *
+ * @param ftl        FTL 上下文
+ * @param op         目标操作类型
+ * @param out_index  输出：命中项的下标（仅返回 1 时有效）
+ * @return 1 找到，0 无
+ */
+int pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_index);
+
+/*
+ * pending_release_index - 按下标释放 pending 项（used=0）
+ *
+ * 与 pending_remove 的差别：走**下标**而非 command_id。托管项脱钩后无 id 可查，
+ * 收尾只能靠下标。越界是调用者 bug ⇒ ASSERT。
+ *
+ * @param ftl    FTL 上下文
+ * @param index  pending 槽下标（0..FTL_PENDING_MAX-1）
+ */
+void pending_release_index(ftl_context_t *ftl, uint8_t index);
 
 /*
  * pending_count - 本实例当前未决（占用）的 pending 项数

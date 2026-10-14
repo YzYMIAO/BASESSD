@@ -165,12 +165,13 @@ typedef struct ftl_context
     uint32_t gc_reclaimed_count; /* 累计成功回收的 SB 数 */
     uint32_t gc_novictim_count;  /* 累计「触发但选不出 victim」次数 */
 
-    /* Read Recovery：per-Block ECC 趋势追踪已并入 alloc.blocks[].rr（BST 单数据源） */
-    ftl_read_recovery_t rr; /* Read Recovery 上下文（仅重试计数） */
+    /* Read Recovery：per-Block ECC 趋势追踪已并入 alloc.blocks[].rr（BST 单数据源）；
+     * 本结构 v0.75 阶段 3 起 = 异步恢复 job 状态机本体（见 read_recovery.h） */
+    ftl_read_recovery_t rr;
 
     /* Read Recovery 整页暂存（CW 级映射：一个子操作可能只覆盖页内部分 CW，
-     * 而 rr_recover_read 内部是**整页读**、从 CW0 起连续拷出。故恢复结果先落本页
-     * 镜像，再按各 CW 的真实偏移搬回 caller 缓冲（见 ftl_op_host_io）。
+     * 而恢复读内部是**整页读**、从 CW0 起连续拷出。故恢复结果先落本页
+     * 镜像，再按各 CW 的真实偏移搬回 caller 缓冲（见 rr_settle_plane）。
      * 放上下文而非栈：2048B 的栈局部在 DTCM 栈上风险高，且 per-instance 无别名问题。 */
     uint8_t rr_page_scratch[FTL_READ_USER_SIZE];
 } ftl_context_t;

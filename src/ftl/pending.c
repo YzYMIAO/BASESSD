@@ -16,7 +16,7 @@
  *   本文件不持有静态存储，全部操作挂在传入的 ftl 上。
  *
  * 文件结构：
- *   1. pending 表基础操作   init / add / lookup / remove / count
+ *   1. pending 表基础操作   init / add / lookup / remove / find_op / release_index / count
  *   2. 完成组操作           alloc / free / count / maybe_complete / complete_subop
  *
  * ⚠ 读写判别必须**显式携带** op（ftl_pending_op_t），不可从 io.buffer 反推——
@@ -120,6 +120,54 @@ void pending_remove(ftl_context_t *ftl, uint16_t cmd_id)
     {
         req->used = 0U;
     }
+}
+
+/* --------------------------------------------------------------------
+ * pending_find_op
+ *   功能：找第一个 op 类型匹配的 pending 项（按下标升序），出参其下标。
+ *   参数：ftl —— 上下文；op —— 目标操作类型；out_index —— 出参下标（可 NULL）。
+ *   返回：1 找到；0 无。
+ *   实现要点：供 Read Recovery 取走被托管的子操作——那些项的 command_id 已置
+ *             FTL_PENDING_CMD_NONE，pending_lookup 查不到，只能按 op 找。
+ *             按下标升序 = 先进先出，与「托管顺序」一致（append-only，无移动）。
+ * -------------------------------------------------------------------- */
+int pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_index)
+{
+    uint8_t i;
+
+    ASSERT(ftl != NULL);
+
+    for (i = 0U; i < FTL_PENDING_MAX; i++)
+    {
+        if ((ftl->pending[i].used != 0U) && (ftl->pending[i].op == (uint8_t)op))
+        {
+            if (out_index != NULL)
+            {
+                *out_index = i;
+            }
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* --------------------------------------------------------------------
+ * pending_release_index
+ *   功能：按下标释放 pending 项（used=0）。
+ *   参数：ftl —— 上下文；index —— 槽下标。
+ *   返回：无。
+ *   实现要点：与 pending_remove 的差别只在寻址方式——托管项脱钩后无 command_id 可查，
+ *             收尾只能按下标。⚠ 下标由 pending_find_op 产出且表无移动 ⇒ 恒有效，
+ *             故越界一律 ASSERT（判据 2：调用者保证的前置条件），不静默 no-op。
+ * -------------------------------------------------------------------- */
+void pending_release_index(ftl_context_t *ftl, uint8_t index)
+{
+    ASSERT(ftl != NULL);
+    ASSERT(index < FTL_PENDING_MAX);
+    ASSERT(ftl->pending[index].used != 0U); /* 重复释放即簿记错误，留现场 */
+
+    ftl->pending[index].used = 0U;
 }
 
 /* pending_count — 本实例占用槽位数（B3：ftl_service 三级模式判定用它近似 host IO 空闲度） */

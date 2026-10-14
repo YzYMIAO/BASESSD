@@ -762,16 +762,19 @@ READ 重试超限   ECC 连续多次升高 + retry 失败  标记坏块 → 数�
 > ⚠ **订正**：`allocator_mark_bad` 已删除（`allocator.h` 有墓碑注释），坏块统一走
 > **`bbt_mark_bad(alloc, gblock)`**（两形参，v0.56 去掉了 `reason`）；**无** `bbt_update`、
 > **无** `fc_command_id_to_command`（命令身份已去缓存化，v15 改指针派生）。
-> 运行时的坏块标记点（4 处）：GC 擦除失败、`ftl.c` 读不可恢复 / 写失败、`bbt.c` 内部。
+> 运行时的坏块标记点（4 处）：GC 擦除失败、`read_recovery.c` 读不可恢复 / `ftl.c` 写失败、
+> `bbt.c` 内部。（读不可恢复自 v0.75 阶段 3 起在 RR job 的 `rr_settle_plane` 里标记，
+> 不再是 `ftl.c`。）
 
 ```c
 /* 坏块标记唯一入口：记进 BST（FTL_BLOCK_STATE_BAD）并置 BBT dirty */
 void bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
-/* 4 处调用点：gc.c 擦除失败 / ftl.c 读不可恢复 / ftl.c 写失败 / bbt.c 内部 */
+/* 4 处调用点：gc.c 擦除失败 / read_recovery.c 读不可恢复 / ftl.c 写失败 / bbt.c 内部 */
 
-/* 完成路径中的失败处理（ftl_op_host_io）：
+/* 完成路径中的失败处理：
  *   PROGRAM/ERASE 的 NAND_FAIL → bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(ftl_cmd_pba(cmd)))
- *   READ 不可恢复（ECC 超限）  → bbt_mark_bad + 慢死预测（rr 记录）*/
+ *   READ 失败（ECC 超限）      → **托管**给 Read Recovery job（v0.75 阶段 3；见 read_recovery.c）
+ *                                三级恢复全失败才 bbt_mark_bad，成功/失败都记 rr 慢死趋势 */
 ```
 
 #### 3.8.3 替换机制
@@ -3326,11 +3329,13 @@ typedef struct ftl_context {
     uint32_t            gc_reclaimed_count; /* 累计成功回收 SB 数 */
     uint32_t            gc_novictim_count;  /* 累计「触发但选不出 victim」次数 */
 
-    /* Read Recovery 上下文（仅重试计数；ECC 趋势已并入 alloc.blocks[].rr）*/
+    /* Read Recovery job（v0.75 阶段 3 起 = 异步恢复状态机本体，见 read_recovery.h；
+     * 原先是"仅重试计数"的哑结构，ECC 趋势始终在 alloc.blocks[].rr）*/
     ftl_read_recovery_t rr;
 
     /* Read Recovery 整页暂存（CW 级映射：子操作可能只覆盖页内部分 CW，
-     * 而 rr_recover_read 内部是整页读 ⇒ 恢复结果先落本镜像再按 CW 偏移搬回）*/
+     * 而恢复读内部是整页读 ⇒ 恢复结果先落本镜像再按 CW 偏移搬回；
+     * 阶段 3 起由 ftl_op_read_recovery 在**完成服务函数里**填充）*/
     uint8_t             rr_page_scratch[FTL_READ_USER_SIZE];
 } ftl_context_t;
 ```
@@ -4201,14 +4206,16 @@ Step 5 — GC + ftl_service 主循环
   │                                       ✅ gc_erase_and_free（真实擦除 + 失败标记坏块）
   ├── include/ftl/ftl.h                   ✅ ftl_context_t + 全部子模块字段
   └── src/ftl/ftl.c                       ✅ submit_read/write（异步）+ read/write/trim（同步包装）
-                                           ✅ handle_completion 路由（FTL/METADATA/GC/BBT/CHECKPOINT）
+                                           ✅ 完成路由统一在 ftl_op_dispatch（v0.75 起；原 handle_completion 的 switch 已删）
                                            ✅ GC/WL/Checkpoint 三级后台集成
 
-Step 13 — Completion Table 统一完成路由
+Step 13 — Completion Table 统一完成路由 + op tag 服务函数数组（v0.75）
   ├── include/ftl/completion_table.h      ✅ 32 项路由表 + 同步等待器 + 统一泵声明
-  └── src/ftl/completion_table.c          ✅ completion_table_add/take/remove/drain
-                                           ✅ drain 的唯一出口 = ftl_op_dispatch（v0.75 起）
-                                           ✅（表项只留 ctx；handler 由 op tag 查 g_op_service[]）
+  ├── src/ftl/completion_table.c          ✅ completion_table_add/take/remove/drain
+  │                                       ✅ drain 的唯一出口 = ftl_op_dispatch（v0.75 起）
+  │                                       ✅（表项只留 ctx；handler 由 op tag 查 g_op_service[]）
+  ├── include/ftl/ftl_op.h                ✅ ftl_op_id_t + ftl_op_submit/ftl_op_dispatch/ftl_op_in_dispatch
+  └── src/ftl/ftl_op.c                    ✅ g_op_service[] 服务函数数组（唯一完成处理入口）
 
 Step 6 — Metadata Directory
   ├── include/ftl/metadata.h              ✅ Anchor 池 (16..47) + 2048 entry Directory（7B packed）
@@ -4217,8 +4224,9 @@ Step 6 — Metadata Directory
                                            ✅ 完整性由下层 FC per-CW CRC + ECC 保证（v0.62）
 
 Step 7 — Pending Request 表
-  ├── include/ftl/pending.h               ✅ 32 项固定表 + lba lookup
+  ├── include/ftl/pending.h               ✅ 32 项固定表 + lba lookup + FTL_PENDING_CMD_NONE 哨兵
   └── src/ftl/pending.c                   ✅ add/lookup/lookup_by_lba/remove
+                                           ✅ find_op/release_index（v0.75 阶段 3：读失败子操作的托管区）
 
 Step 8 — Checkpoint
   ├── include/ftl/checkpoint.h            ✅ 全量 + Journal 截断协同 + 三级触发
@@ -4239,6 +4247,11 @@ Step 10 — Read Recovery
                                            ✅ Stage 3+: XOR/RAID 预留
                                            ✅ ECC 预测性坏块检测（rr_check_predictive）
                                            ✅ rr_record_ecc 已接入读完成路径（ftl_op_host_io 读成功后）
+                                           ✅ **v0.75 阶段 3：恢复路径异步化**——读失败的子操作
+                                              「托管」给 RR job（pending 保留、command_id 置
+                                              FTL_PENDING_CMD_NONE），`rr_kick` + `rr_step` 状态机
+                                              一次只提交一条命令，完成由
+                                              g_op_service[FTL_OP_READ_RECOVERY] 推进（无嵌套泵）
 
 Step 11 — Power Failure Recovery
   ├── include/ftl/power_failure_recovery.h ✅ 三类启动类型枚举 + 结果结构体
@@ -4329,7 +4342,7 @@ nand_paa_t（芯片内地址）                = [LUN][BLOCK][PLANE][PAGE][CW]
 | GC | 7 步搬移：读 META→查 L2P→分配 Cold→写→L2P→Journal，贪心 victim | ✅ |
 | Checkpoint | 全量 L2P 快照 + **池 48-55（8 块，一条 1 页，环内轮转）** + 布局版本，Journal 截断协同，三级触发 | ✅ |
 | BBT | 出厂扫描（读 Page 0 列 2048 的 spare 首字节，v63）+ **池 56-57（2 块，一条 1 页，环内轮转）** + 运行时标记 | ✅ |
-| Read Recovery | Read Retry（8 次）+ 邻近页辅助 + ECC 趋势预测 + 4 级健康状态 | ✅ |
+| Read Recovery | Read Retry（8 次）+ 邻近页辅助 + ECC 趋势预测 + 4 级健康状态；**v0.75 阶段 3 起恢复路径为异步 job 状态机**（`rr_kick` / `ftl_op_read_recovery`） | ✅ |
 | Power Failure Recovery | 三类启动判断 + **F2 全扫 NAND 重建**（v0.65：原「写指针扫描」已删） | ✅ |
 | Wear Leveling | 动态（alloc 选低擦除）+ 静态（三条件触发的冷数据搬移）| ✅ |
 | Metadata Directory | Anchor **池 16-47（32 块，环内轮转）** + 布局版本，L2P Region 双 Plane 交错 | ✅ |

@@ -4066,15 +4066,15 @@ free pool 水位**降 254 块**（预留 254 → 508）。用户容量由 L2P re
 
 ---
 
-## v0.75 — 命令「提交」与「完成」解耦（阶段 1 机制 + 阶段 2 Journal 刷页异步）
+## v0.75 — 命令「提交」与「完成」解耦（阶段 1 机制 + 阶段 2 Journal 刷页异步 + 阶段 3 Read Recovery 异步）
 
 **日期**：2026-10-14
 
 **范围**：`include/fc/fc_command.h`、`src/fc/fc.c`、新增 `include/ftl/ftl_op.h` +
 `src/ftl/ftl_op.c`、`include/ftl/{completion_table,ftl,ftl_fc_interface,journal,metadata,bst,
-pending,ftl_type}.h`、`src/ftl/{ftl,ftl_op,completion_table,ftl_fc_interface,journal,bbt,
-checkpoint,gc,l2p_cache,metadata,pending,power_failure_recovery,read_recovery,wear,
-wear_leveling}.c`、`src/controller/{controller,scheduler}.c`、`tests/unit/*`。
+pending,read_recovery,ftl_type}.h`、`src/ftl/{ftl,ftl_op,completion_table,ftl_fc_interface,
+journal,bbt,checkpoint,gc,l2p_cache,metadata,pending,power_failure_recovery,read_recovery,
+wear,wear_leveling}.c`、`src/controller/{controller,scheduler}.c`、`tests/unit/*`。
 
 ### 起因：FTL 里只有 host 读写是异步的，其余全是「提交后当场等」
 
@@ -4257,32 +4257,159 @@ ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba);
    （`12 + 127×16 = 2060 > 2048`，写进 `journal_job_t`）。修：**合并扫描 → 守卫 → 写槽**
    的顺序。
 
+### 阶段 3 —— Read Recovery 异步（本次）
+
+**动机**：`ftl_op_host_io` 读失败 → `ftl_recover_read_subop` → `rr_recover_read` 把三级恢复
+串成**一次阻塞调用**（每级 `ftl_sync_submit_wait`）⇒ 完成回调里又跑一遍完成泵（嵌套泵之二），
+且一个坏页把整条 host 读流水线钉住数十毫秒。
+
+#### 设计：读失败的子操作「托管」给 job，而不是当场恢复
+
+```
+ftl_op_host_io（读失败分支）
+    pending->op         = PENDING_OP_READ_RECOVERY   ← 新 op 值（与 READ/WRITE 并列）
+    pending->command_id = FTL_PENDING_CMD_NONE       ← 0xFFFF 哨兵：本项已与 FC 命令脱钩
+    fc_command_release(cmd)                          ← 命令当场归还池
+    rr_kick(ftl)                                     ← 交给 job，本函数**返回**
+```
+
+- pending 项**保留**（不 `pending_remove`、不递减组在飞数）⇒ host 读组继续 pending，
+  直到 job 收尾统一 `pending_release_index` + `pending_group_complete_subop_multi(owners, …)`。
+- **`FTL_PENDING_CMD_NONE` 是必需的**：命令一 release，其 `command_id`（FC 命令池下标）就会
+  被后续 `fc_command_alloc` 复用，而 `pending_lookup` 按 id 扫**第一项** ⇒ 陈旧 id 会让一条
+  新命令的完成撞上这个停泊项。
+- 停泊区就是 pending 表本身（深度 32）⇒ **零额外内存**；配套新增
+  `pending_find_op` / `pending_release_index`。
+
+#### 状态机（per-instance 单 job，`ftl->rr`）
+
+```c
+typedef enum { RR_STAGE_IDLE, RR_STAGE_PLANE, RR_STAGE_SF_SET, RR_STAGE_READ,
+               RR_STAGE_SF_RESTORE, RR_STAGE_NB_READ, RR_STAGE_NB_RETRY,
+               RR_STAGE_PLANE_END, RR_STAGE_FINISH, RR_STAGE_ABORT } rr_stage_t;
+```
+
+**stage 语义约定**：stage 恒表示「当前该做 / 正在等的那一步」——
+- **纯计算 stage**（IDLE / PLANE / PLANE_END / FINISH / ABORT）只从 `rr_step` 进入，跑完
+  立刻转下一个 stage，**不提交**命令；
+- **提交 stage**（SF_SET / READ / SF_RESTORE / NB_READ / NB_RETRY）由 `rr_step` 提交后
+  **原地停留**，等完成服务函数改写。
+
+判「有没有命令在飞」用 `waiting` 而**不是** stage：提交可能因背压失败（stage 不变但无命令）。
+
+#### 逐条对照原同步实现（三级管线拆成分步，语义一字不改）
+
+| 原实现 | 分步版 |
+|---|---|
+| Stage 1：`SET_FEATURES(attempt)` → 重试读 → 失败则 `SET_FEATURES(0)` → 下一 attempt | SF_SET → READ →（失败）SF_RESTORE → `rr_next_attempt` |
+| `SET_FEATURES` 失败 ⇒ **直接**下一 attempt、**不**恢复模式（原 `rr_exec_retry` 在 Step 1 就 return -1，根本走不到 Step 3） | `RR_STAGE_SF_SET` 只认 `FC_CW_STATUS_NAND_FAIL`，命中即 `rr_next_attempt` |
+| 重试读失败 ⇒ 恢复模式 0（原 Step 3 **无条件**执行，含最后一次 attempt） | READ 失败 ⇒ `SF_RESTORE`（不看其结果，一律 `rr_next_attempt`） |
+| 重试读**成功** ⇒ 恢复成功，**不**恢复模式 0（原实现的既有行为） | READ 成功 ⇒ `ftl_cmd_read_data` + `recovered=1` + `PLANE_END` |
+| Stage 2：邻居页 `page∓1`（块内回绕）读成功 ⇒ 再试目标页 | NB_READ →（成功）NB_RETRY；失败 ⇒ `rr_next_neighbor` |
+| Stage 3：全失败 ⇒ 各 CW 清零 + `bbt_mark_bad` | `rr_settle_plane` 的 `recovered == 0` 分支 |
+
+⚠ 邻居页用 `FTL_PAGE_CFG_DATA_ANY()`：邻居页的 LBA **本就未知**（辅助读只要「这一页读得
+出来」这个事实），`DATA_ANY` 让命令 META = `FC_META_UNKNOWN` 跳过页内比对。用 `DATA(0)` 会把
+「LBA 就是 0」当事实下传 ⇒ 恒置 `MATA_ERROR`。
+
+#### 收尾
+
+```c
+static void rr_finish(ftl_context_t *ftl)
+{
+    const uint32_t owners = ftl->pending[ftl->rr.pending_idx].owners; /* 必须**先**取走：
+                                          组完成通知可能重入并复用本槽 */
+    pending_release_index(ftl, ftl->rr.pending_idx);
+    pending_group_complete_subop_multi(ftl, owners, SSD_STATUS_IO_ERROR);
+    ftl->rr.stage = (uint8_t)RR_STAGE_IDLE;
+    ftl->rr.waiting = 0U;
+}
+```
+
+⚠ **一律 `IO_ERROR`**：原代码在 `if/else` 之后**无条件**写 `IO_ERROR`，覆盖了
+`recovered == 0` 分支的 OK，即「recovery 成功仍报错」。语义存疑、属既有缺陷；**本次只搬
+位置，未顺手改**（同阶段 1「不顺手改语义」的约定）。
+
+#### watchdog 只兜「提交侧」
+
+`stall_rounds`（`uint16_t`，`RR_SUBMIT_STALL_MAX = 256`）累计「有 job 却没在飞」的轮数，
+超限 ⇒ `rr_abort` 按恢复失败收尾。
+
+- **在飞的命令不需要 watchdog**：NAND 层的 wait/jump 超时保证每条已提交命令**必有**完成
+  （超时置 `FC_CW_STATUS_TIMEOUT`）；强拆在飞的 job 会释放一条仍在 FC 池里的命令 ⇒ 池损坏。
+- **卡死也**不**标坏块**：提交侧卡死是控制器资源问题（命令池泄漏），与介质无关，标坏会白丢
+  一个好块。
+- ⚠ 字段是 `uint16_t` 而非 `uint8_t`：`uint8_t` 与 `RR_SUBMIT_STALL_MAX (256)` 比较**恒假**
+  （255 就回绕），守卫永不触发 —— 编译期 `-Wtype-limits` 抓到。
+
+#### 新增异步原语（`ftl_fc_interface.c`）
+
+```c
+ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const ftl_page_cfg_t *cfg);
+ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t ce, uint8_t lun,
+                                    uint8_t feature_addr, uint8_t mode);
+```
+
+- **读与写不对称**：写的数据在 prepare 阶段就 `memcpy` 进 FC buffer 池（源缓冲随即可复用）；
+  **读不是**——数据留在 desc 链上，只有服务函数在 release **之前**调 `ftl_cmd_read_data`
+  才拿得到 ⇒ 目标缓冲须活到完成。
+- ⚠ **`ftl_async_set_features` 的 ch/ce/lun 是对原内联代码的有意偏离**：原
+  `read_recovery.c` 建 SET_FEATURES 命令时 ch/ce/lun 留 0。它们不是地址，而是**完成派发的
+  实例路由键**（`ftl_op_dispatch` 按命令自身 ch/ce/lun 经 `completion_table_route` 解析归属
+  实例）；SET_FEATURES 无 PBA 可推 ⇒ 只能显式传。单实例下留 0 恰好等于 `topo`，多实例下会把
+  本命令的完成派给实例 `[0][0][0]`。
+
+#### 唯一残留的同步调用（有意留下）
+
+`rr_select_plane` 里的 `l2p_cache_read`：region 未命中时它会内部同步加载。**它今天就在同一
+位置**（原 `ftl_recover_read_subop` 的选页循环），且失败的读**刚刚**在 `ftl_issue_subop` 里
+查过同一 LBA ⇒ 该 region 几乎必在 cache 中。彻底关闭留待阶段 5（L2P 加载 job 化）。
+
+#### 自审中发现并修掉的一处（未流出）
+
+`-Wredundant-decls`：`ftl_op_read_recovery` 同时在 `ftl_op.h` 与 `read_recovery.h` 声明。
+修：只留 `ftl_op.h`（那是 `g_op_service[]` 各槽的**唯一权威列表**），`read_recovery.h` 处
+换成指向它的注释。
+
 ### 判据与实测
 
 | 判据 | 结果 |
 |---|---|
-| `make debug` / `make release` / `make tests UT=FTL` / `UT=FC` | 0 error 0 warning（release 下 `ftl_fc_interface.c:67/83` 两条 unused 为**既有**：ASSERT 被裁） |
-| debug `.text` | 192644 → 194676（**+2032 B**） |
-| debug `.bss` | 381372 → 381404（**+32 B**）；`g_ftl` 0x41CF8 → 0x41D08 = 269560 → 269576（**+16 B**，= `journal_job_t`） |
-| release `.text` / `.bss` | 114352 → 115776（+1424 B）/ 381364 → 381396（+32 B） |
-| debug `.bin` | 195204 B |
+| `make debug` / `make release` / `make tests UT=FTL` / `UT=FC` | 0 error 0 warning（release 下 `ftl_fc_interface.c:69 'allowed'`、`:85 'plane_bits'` 两条 unused 为**既有**：ASSERT 被裁） |
+| debug `.text` | 192644 → 194676（阶段 1+2，**+2032 B**）→ 196552（阶段 3，**+1876 B**） |
+| debug `.bss` | 381372 → 381404（+32 B）；`g_ftl` 269560 → 269576（阶段 1+2，+16 B）→ **269600**（阶段 3，**+24 B** = `ftl_read_recovery_t` 加宽） |
+| release `.text` / `.bss` | 114352 → 115776（+1424 B）→ **116764**（阶段 3，+988 B）/ 381364 → 381396 → 381428（+32 B） |
+| debug `.bin` / release `.bin` | 197076 B / 117288 B |
 | `_Static_assert(sizeof(g_ftl)+FTL_AXI_RAM_RESERVED <= 384KB)`（`main.c:131`） | 过 |
-| 二进制级核对 | `g_op_service` 48 B = 12 项；`[0]=0`、`[1]=ftl_op_sync_wait`、`[2]=ftl_op_host_io`、`[3]=ftl_op_journal`、`[4..11]=0` —— 「ID 在命令上、服务函数在数组里」真的落进了固件 |
+| 二进制级核对 | `g_op_service` 48 B = 12 项；`[0]=0`、`[1]=ftl_op_sync_wait`、`[2]=ftl_op_host_io`、`[3]=ftl_op_journal`、**`[4]=ftl_op_read_recovery`**、`[5..11]=0` —— 「ID 在命令上、服务函数在数组里」真的落进了固件 |
 | 全仓 `fc_submit(` 的生产调用点 | 只剩 `ftl_op_submit` 一处（命令一律带 tag） |
+| `rr_recover_read` / `ftl_recover_read_subop` | 全仓 0 引用（旧同步恢复入口已删除） |
+| 测试源 | 无引用需同步（`test_ftl.c` 只 memset `F->rr_page_scratch`，该字段仍在） |
 
 ⚠ **上板验证未做**（留待用户）。上板判据：
 ① `wr/rd/tr/fl/info/map` 冒烟、断电重启数据仍在；
 ② 开机**无**格式化横幅（`FTL_MEDIA_LAYOUT_VERSION` 未变，仍是 5U）、`info` 的
 free/op/spare 与 v0.74 后一致；
-③ **写满 Journal 一页时完成回调内不再出现嵌套泵**（本阶段的核心判据）；
-④ Journal 刷页 job 的心跳可见（阶段 2 的 `[JOB]` 心跳尚未加，暂以 `[JRN]` 失败日志观察）。
+③ **写满 Journal 一页时完成回调内不再出现嵌套泵**（阶段 2 的核心判据）；
+④ **构造读失败（注入 ECC 错误）后 RR 不再阻塞完成泵，host 读最终返回**（本阶段的核心判据；
+成功/失败都报 IO_ERROR 是既有语义，见上）；失败时可见
+`[FTL] read unrecoverable lba=… gblock=… retry=…`，提交侧卡死可见 `[RR] submit stalled`；
+⑤ Journal 刷页 job 的心跳可见（`[JOB]` 心跳尚未加，暂以 `[JRN]` / `[RR]` 失败日志观察）。
 
 ⚠ 工具坑（沿用）：`release.elf` 被 strip ⇒ 构建脚本的 SRAM usage 报告对 release 恒 0.0 KB；
 `BIN_DIR` 共享 ⇒ 跑 `make tests` 会覆盖 `debug.elf`，判体积须先重建再量。
 
-### 后续（阶段 3~8，本提交不含）
+### 后续（阶段 4~8，本提交不含）
 
-Read Recovery / GC·WL 搬移 / L2P region 加载写回 / Checkpoint / BBT·Wear /
-metadata 目录压缩 —— 逐个把站点从 `ftl_sync_*` 改成 job + `ftl_op_submit`，
-`g_op_service[]` 的占位槽随站点改造逐个点亮。结构性必须顺序执行的路径（开机初始化 /
-全片格式化 / 出厂坏块扫描 / CLI）继续用 `ftl_sync_submit_wait`。
+GC·WL 搬移 / L2P region 加载写回 / Checkpoint / BBT·Wear / metadata 目录压缩 ——
+逐个把站点从 `ftl_sync_*` 改成 job + `ftl_op_submit`，`g_op_service[]` 的占位槽随站点改造
+逐个点亮。结构性必须顺序执行的路径（开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI）继续用
+`ftl_sync_submit_wait`。
+
+已知仍待闭合的项（阶段 4 起）：
+- **最后一个嵌套泵**：host 写路径的紧急 GC（`ftl_wbuf_flush → gc_migrate_sb →
+  journal_flush_page`），随阶段 4 的 mig job 化消除；
+- `ftl_confirm_write` 的 L2P 重查（阶段 5 job 化，**必须保留「完成时重查」不变量**）；
+- `rr_select_plane` 里的 `l2p_cache_read`（阶段 5）；
+- `inflight` 公式切换为只算 host 侧（阶段 4 引入第一个后台 job 时）；
+- per-job 的 `[JOB]` 心跳日志（阶段 2 起欠账，目前只有各功能的失败 LOGE）。

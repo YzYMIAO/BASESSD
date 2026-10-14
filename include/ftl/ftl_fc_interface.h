@@ -36,9 +36,12 @@
  *      此处收敛为 4 个公共函数 + ftl_page_cfg_t 配置结构。
  *
  * 【异步页级原语】（阶段 2 起）
- *   ⑩ ftl_async_write_page / ftl_async_erase_block — 只建链 + 搬数据，**不提交**；
- *      命令交回调用者，由调用者 ftl_op_submit(cmd, <功能 op>, ctx)。服务函数负责
- *      fc_command_release。与 ⑧ 共用同一套 prepare 模板。
+ *   ⑩ ftl_async_write_page / ftl_async_erase_block / ftl_async_read_page /
+ *      ftl_async_set_features — 只建链 + 搬数据，**不提交**；命令交回调用者，由调用者
+ *      ftl_op_submit(cmd, <功能 op>, ctx)。服务函数负责 fc_command_release。
+ *      写/擦与 ⑧ 共用同一套 prepare 模板；**读**的数据留在 desc 链上（非 prepare 拷贝）
+ *      ⇒ 目标缓冲须活到完成、ftl_cmd_read_data 须早于 release；SET_FEATURES 无 PBA
+ *      ⇒ ch/ce/lun 只能显式给（完成派发的实例路由键）。
  *
  * 【命令身份】
  *   ⑨ ftl_cmd_id() — 命令指针 → FC 命令池 ID（由指针派生，见 fc_command.h）。
@@ -395,6 +398,35 @@ ftl_status_t ftl_sync_erase_block(nand_pba_t pba);
  */
 ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg);
 ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba);
+
+/*
+ * 读页（异步）：OP_NORMAL_READ_PAGE_WITH_DATA_OUT，建链，**不提交**。
+ *
+ * 与 ftl_async_write_page 有一处**不对称**，是本函数存在独立文档块的理由：
+ * 写的数据在 prepare 阶段就 memcpy 进 FC buffer 池（源缓冲随即可复用），**读不是**——
+ * 数据留在命令的 desc 链上，只有服务函数在 release 之前调 ftl_cmd_read_data 才拿得到。
+ * ⇒ 调用者指定的目标缓冲必须在**命令完成之前**保持有效，且拷出必须早于 release。
+ *
+ * 成败判据也搬到服务函数（同步版是 FC_CW_STATUS_ERROR_MASK 全集，见 ftl_sync_read_page）。
+ *
+ * @return FTL_OK 命令已备好（须提交或 release）；FTL_AGAIN 命令池空；FTL_ERROR 入参或地址非法。
+ */
+ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const ftl_page_cfg_t *cfg);
+
+/*
+ * SET_FEATURES（异步）：无地址、无数据链，把 mode 写进 feature_addr 指定的特性寄存器。
+ *
+ * 由 Read Recovery 用于切换读重试电压模式（RR_FEATURE_READ_RETRY；mode 0 = 正常模式）。
+ * 与 ftl_sync_* 系列不同，本命令**不绑 PBA**：cmd->paa 恒 0——特性寄存器是 die 级、
+ * 无 plane/page 语义（同 fc.c 中 OP_SET_FEATURES 分支的注释）。
+ *
+ * ⚠ ch/ce/lun 必须由调用者显式给：它们不是地址，而是**完成派发的实例路由键**
+ *   （ftl_op_dispatch 按命令自身 ch/ce/lun 经 completion_table_route 解析归属实例）。
+ *   没有 PBA 可推 ⇒ 只能显式传。留 0 在多实例下会把本命令的完成派给实例 [0][0][0]。
+ *
+ * @return FTL_OK 命令已备好（须提交或 release）；FTL_AGAIN 命令池空；FTL_ERROR out_cmd 为 NULL。
+ */
+ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t ce, uint8_t lun, uint8_t feature_addr, uint8_t mode);
 
 /*
  * 读 META：OP_READ_META，无数据链，回读 pba 指定页 / 指定 CW 的**前 4 字节 META**。

@@ -50,7 +50,7 @@ typedef enum
     FTL_OP_SYNC_WAIT,     /* 唤醒同步等待者（所有 ftl_sync_* 用） */
     FTL_OP_HOST_IO,       /* host 读写子操作（原 FC_COMMAND_MODULE_FTL 分支） */
     FTL_OP_JOURNAL,       /* Journal 刷页 job（journal.c，阶段 2 点亮） */
-    FTL_OP_READ_RECOVERY, /* 阶段 3 */
+    FTL_OP_READ_RECOVERY, /* Read Recovery job（read_recovery.c，阶段 3 点亮） */
     FTL_OP_GC,            /* 阶段 4 */
     FTL_OP_WL,            /* 阶段 4 */
     FTL_OP_L2P,           /* 阶段 5 */
@@ -121,6 +121,15 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
  * 每条命令自己 fc_command_release。
  */
 void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+
+/*
+ * ftl_op_read_recovery - Read Recovery job 的完成服务函数（定义在 read_recovery.c）。
+ *
+ * 由 g_op_service[FTL_OP_READ_RECOVERY] 引用；ctx = `ftl_read_recovery_t *`（= &ftl->rr）。
+ * 服务函数按 job.stage 推进（切读重试模式 / 重试读 / 恢复默认模式 / 邻居读），终态
+ * 释放被托管的 pending 槽并让 host 读组结算。每条命令自己 fc_command_release。
+ */
+void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
 /* ── 同步等待器（FTL_OP_SYNC_WAIT 的 ctx）──
  *

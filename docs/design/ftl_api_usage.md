@@ -216,6 +216,38 @@ int          ftl_op_in_dispatch(void);
 `FTL_OP_SYNC_WAIT` 的服务函数**不** release（调用者读完 cmd 数据才释放，否则悬垂）；
 `FTL_OP_HOST_IO` 与各异步 job 的服务函数**自己** release。
 
+**已点亮的槽**（`g_op_service[]`，随各站点改造逐个填）：
+
+| 槽 | 服务函数 | ctx | 备注 |
+|---|---|---|---|
+| `FTL_OP_SYNC_WAIT` | `ftl_op_sync_wait` | `ftl_sync_waiter_t *`（调用者栈上） | 所有 `ftl_sync_*` |
+| `FTL_OP_HOST_IO` | `ftl_op_host_io` | **NULL** | 服务函数自己 `pending_lookup(cmd_id)`（pending 表比任何新 ctx 都全） |
+| `FTL_OP_JOURNAL` | `ftl_op_journal` | `&ftl->journal` | 阶段 2 |
+| `FTL_OP_READ_RECOVERY` | `ftl_op_read_recovery` | `&ftl->rr` | 阶段 3 |
+| 其余（GC/WL/L2P/CHECKPOINT/BBT/WEAR/METADATA） | — | — | 阶段 4~8 占位 |
+
+#### 1.5.1 读失败子操作的「托管」约定（v0.75 阶段 3）
+
+异步化后，读失败的 pending 子操作**不**在完成服务函数里当场恢复，而是原地改写成
+「已被 RR job 托管」：
+
+```c
+pending->op         = PENDING_OP_READ_RECOVERY;   /* 新 op 值，与 READ/WRITE 并列 */
+pending->command_id = FTL_PENDING_CMD_NONE;       /* 0xFFFF：本项已与 FC 命令脱钩 */
+(void)fc_command_release(cmd);                    /* 命令当场归还池 */
+rr_kick(ftl);                                     /* 交给 job，本函数返回 */
+```
+
+- **pending 项保留、组在飞数不递减** ⇒ host 读组继续 pending，直到 RR job 收尾时
+  统一 `pending_release_index` + `pending_group_complete_subop_multi(owners, …)`。
+- ⚠ `FTL_PENDING_CMD_NONE` 哨兵是**必需**的：命令一 release，其 `command_id`（= FC 命令池
+  下标）就会被后续 `fc_command_alloc` 复用，而 `pending_lookup` 按 id 扫**第一项** ⇒
+  陈旧 id 会让一条新命令的完成撞上这个停泊项。
+- 停泊区就是 pending 表本身（深度 32）⇒ **零额外内存**；配套新增
+  `pending_find_op(ftl, op, &idx)` / `pending_release_index(ftl, idx)`。
+- `rr_kick` 由 `ftl_service_idle/normal/busy` 每轮调用一次（job 空闲且无托管项时只是
+  一次 32 项线性扫描）。
+
 ### 1.6 写完成确认（modify-after-confirm）
 
 写请求（`ftl_submit_write`）的 Journal + L2P 更新不在提交路径中执行，而是后移到 completion handler 中、确认 NAND PROGRAM 成功后执行：
@@ -906,29 +938,31 @@ include/ftl/
 ├── gc.h                         # GC 搬移 + 触发条件
 ├── metadata.h                   # ★ 固定元数据区布局（单一事实来源）+ FTL_MEDIA_LAYOUT_VERSION + Metadata Directory
 ├── pending.h                    # Pending Request 表 + 完成组表
-├── completion_table.h           # 统一完成路由表
+├── completion_table.h           # 统一完成路由表（表项只留 ctx，v0.75）
+├── ftl_op.h                     # op tag 枚举 + ftl_op_submit/ftl_op_dispatch（v0.75）
 ├── checkpoint.h                 # Checkpoint + Journal 截断协同
 ├── bbt.h                        # BBT 坏块表（池 + 全片擦除原语）
 ├── wear.h                       # 磨损计数持久化（页式追加日志）
-├── read_recovery.h              # Read Retry + ECC 趋势预测
+├── read_recovery.h              # Read Retry + ECC 趋势预测 + 恢复 job（rr_stage_t/rr_kick）
 ├── power_failure_recovery.h     # 三类启动恢复 + 介质格式化
 └── wear_leveling.h              # 动态 + 静态磨损均衡
 
 src/ftl/
 ├── makefile.mk                  # 通配符自动发现
 ├── ftl.c                        # FTL 对外 API + ftl_service 三级模式
-├── ftl_fc_interface.c           # PBA helper + 同步 NAND 操作实现
+├── ftl_fc_interface.c           # PBA helper + 同步/异步 NAND 操作实现
 ├── l2p_cache.c                  # CLOCK evict + Region load/flush + thrashing
 ├── allocator.c                  # Free Pool + OP/Spare + 磨损均衡
 ├── journal.c                    # append/flush_page/replay/truncate
 ├── gc.c                         # gc_read_page_with_lba + 7 步搬移
 ├── metadata.c                   # Directory init/lookup/update/flush/load + g_ftl_partitions[] 分区表
 ├── pending.c                    # Pending 表 + 组 add/lookup/remove
-├── completion_table.c           # 统一完成泵
+├── completion_table.c           # 统一完成泵（唯一出口 ftl_op_dispatch，v0.75）
+├── ftl_op.c                     # op tag + g_op_service[] 服务函数数组（v0.75）
 ├── checkpoint.c                 # 全量 Checkpoint + 三级触发
 ├── bbt.c                        # BBT 加载/扫描/标记/保存 + 全片擦除
 ├── wear.c                       # 磨损计数页式追加日志
-├── read_recovery.c              # Read Retry + 邻近页辅助
+├── read_recovery.c              # Read Retry + 邻近页辅助 + 恢复 job 状态机（v0.75 阶段 3）
 ├── power_failure_recovery.c     # 三类启动 + 介质版本校验/自动格式化
 └── wear_leveling.c              # 三条件触发 + victim 选择 + 搬移
 ```

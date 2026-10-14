@@ -25,6 +25,8 @@
  *   5. 页级同步原语    sync_page_prepare / sync_page_prepare_cw（static）
  *                      + ftl_sync_write_page / ftl_sync_read_page / ftl_sync_read_page_raw
  *                        / ftl_sync_erase_block / ftl_sync_read_meta / ftl_sync_read_column
+ *   6. 页级异步原语    ftl_async_write_page / ftl_async_read_page / ftl_async_erase_block
+ *                      / ftl_async_set_features —— 只建链（+ 写则搬数据），**不提交**
  *
  * ⚠ 地址空间：进 FC 的 PBA 必须合法（fc.c 拿 ch/ce/lun 当数组下标）；PBA→PAA 在本层
  *   一次转出，FC 层只见 PAA（v47）。
@@ -928,6 +930,87 @@ ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba)
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
+
+    *out_cmd = cmd;
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_async_read_page
+ *   功能：建链，**不提交**，命令经 out_cmd 交回（数据在完成时才拷出）。
+ *   参数：out_cmd —— 出参命令（非 NULL）；pba —— 目标页；cfg —— 页配置。
+ *   返回：FTL_OK / FTL_AGAIN（命令池空）/ FTL_ERROR（入参或地址非法 / 建链失败）。
+ *   实现要点：与 ftl_async_write_page 的**不对称**——写在本函数内已把数据拷进 FC
+ *             buffer 池，读没有：数据留在 desc 链上，服务函数必须在 release **之前**
+ *             调 ftl_cmd_read_data 才拿得到（否则命令回收、数据丢失）。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const ftl_page_cfg_t *cfg)
+{
+    fc_command_t *cmd;
+
+    if (out_cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd = page_prepare_alloc(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
+    if (cmd == NULL)
+    {
+        return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
+    }
+
+    if (pba_to_cmd(cmd, pba) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    *out_cmd = cmd;
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_async_set_features
+ *   功能：建 SET_FEATURES 命令（无地址、无数据链），**不提交**。
+ *   参数：out_cmd —— 出参命令（非 NULL）；ch/ce/lun —— **完成派发的实例路由键**
+ *         （不是地址，见头文件）；feature_addr —— 特性寄存器地址；
+ *         mode —— 写进 parameter0 的模式值（读重试电压模式，0 = 正常）。
+ *   返回：FTL_OK / FTL_AGAIN（命令池空）/ FTL_ERROR（out_cmd 为 NULL）。
+ *   实现要点：**不绑 PBA**——cmd->paa 恒 0（fc_command_alloc 已清零）：特性寄存器是
+ *             die 级、无 plane/page 语义，FC 侧 OP_SET_FEATURES 分支也不读它。
+ *             但 ch/ce/lun **必须**填——ftl_op_dispatch 靠它们解析归属实例。
+ *             其余命令配置逐字沿用原 read_recovery.c 内联版本的字段取值，差别只有"不提交"。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t ce, uint8_t lun, uint8_t feature_addr, uint8_t mode)
+{
+    fc_command_t *cmd;
+
+    if (out_cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    cmd = fc_command_alloc();
+    if (cmd == NULL)
+    {
+        return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
+    }
+
+    cmd->config.ch          = (DWORD)ch;
+    cmd->config.ce          = (DWORD)ce;
+    cmd->config.lun         = (DWORD)lun;
+    cmd->config.operation   = OP_SET_FEATURES;
+    cmd->config.crc         = FC_CRC_DISABLE;
+    cmd->config.random      = FC_RANDOM_DISABLE;
+    cmd->config.ldpc        = FC_ECC_MODE_BCH;
+    cmd->config.multi_plane = 0U;
+    cmd->config.chain       = FC_CHAIN_END;
+    cmd->meta               = 0U;
+    cmd->feature_addr       = feature_addr;
+    cmd->param.parameter0   = mode;
+    cmd->param.parameter1   = 0U;
+    cmd->param.parameter2   = 0U;
+    cmd->param.parameter3   = 0U;
 
     *out_cmd = cmd;
     return FTL_OK;

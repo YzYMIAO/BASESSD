@@ -27,10 +27,15 @@
  * 当前实现：
  *   ① ECC 趋势跟踪（per-Block bit 计数）
  *   ② 预测性坏块检测
- *   ③ Read Retry 重试循环（通过 FC GET/SET_FEATURES）
+ *   ③ Read Retry 重试循环（通过 FC SET_FEATURES 切模式 + 重读）
  *   ④ 读失败后的恢复调度入口
+ *
+ * ⚠ 阶段 3 起恢复路径是**异步状态机**（ftl_read_recovery_t + rr_kick +
+ *   ftl_op_read_recovery），不再是阻塞的 rr_recover_read。读失败的完成服务函数把
+ *   pending 子操作托管给 job 就返回，恢复在 rr_kick / 完成服务函数里分步推进。
  */
 
+#include "fc/fc_command.h" /* fc_command_status_t（服务函数签名） */
 #include "ftl/allocator.h"
 #include "ftl/bst.h"        /* rr_ecc_track_t, rr_block_health_t, ftl_block_t */
 #include "ftl/ftl_config.h" /* nand_pba_t */
@@ -38,6 +43,10 @@
 #include "ftl/l2p_cache.h"
 
 #include <stdint.h>
+
+/* 前向声明（ftl_context_t 在 ftl.h 中定义；本文件被 ftl.h include，用 struct 标签打破环） */
+struct ftl_context;
+typedef struct ftl_context ftl_context_t;
 
 /* ── ECC 趋势参数 ── */
 #define RR_ECC_RISING_THRESHOLD (4U)  /* 连续上升 ≥4 次触发预测 */
@@ -58,12 +67,59 @@
 
 /* 预测性坏块状态 rr_block_health_t / ECC 历史 rr_ecc_track_t 已迁入 ftl/bst.h */
 
-/* ── Read Recovery 上下文 ──
- * ECC 追踪数组已并入 ftl_block_t.rr（Block State Table 单数据源），
- * 本上下文只保留重试计数。 */
+/* ── Read Recovery 上下文（= 异步 job 状态机，阶段 3）──
+ *
+ * ECC 追踪数组已并入 ftl_block_t.rr（Block State Table 单数据源）；本上下文原先只留
+ * 重试计数，阶段 3 起承载**整台恢复状态机**（per-instance 单 job，放 ftl->rr）。
+ *
+ * 为什么是「托管」而不是「当场恢复」：原实现读失败的完成服务函数里直接跑完三级恢复
+ * （每级都是 ftl_sync_submit_wait）⇒ 在完成泵里再开一个完成泵（嵌套泵），且整条 host
+ * 读流水线被一个坏页钉住。改为：读失败时把 pending 子操作**托管**给本 job（保留 pending
+ * 项、不递减组在飞数），job 按 stage 一次只提交一条命令，完成由 g_op_service
+ * [FTL_OP_READ_RECOVERY] 推进。host 读组继续 pending，直到 job 收尾统一结算。
+ */
+
+/* 状态机的 stage。约定：**stage 恒表示"当前该做/正在等的那一步"**——
+ *   · 纯计算 stage（IDLE / PLANE / PLANE_END / FINISH / ABORT）只从 rr_step 进入，
+ *     跑完立刻转下一个 stage（不提交命令）；
+ *   · 提交 stage（SF_SET / READ / SF_RESTORE / NB_READ / NB_RETRY）由 rr_step 提交命令
+ *     后**原地停留**，等完成服务函数改写 stage。
+ * 判「有没有命令在飞」用 waiting 而不是 stage：提交可能因背压失败（stage 不变但无命令）。 */
+typedef enum
+{
+    RR_STAGE_IDLE = 0,   /* 空闲：无 job（= 无在飞的恢复） */
+    RR_STAGE_PLANE,      /* 选下一个 plane 的目标页（纯计算） */
+    RR_STAGE_SF_SET,     /* 在飞：SET_FEATURES(attempt) —— 切入读重试电压模式 */
+    RR_STAGE_READ,       /* 在飞：重试读目标页 → rr_page_scratch */
+    RR_STAGE_SF_RESTORE, /* 在飞：SET_FEATURES(0) —— 恢复默认读模式 */
+    RR_STAGE_NB_READ,    /* 在飞：Stage 2 读邻居页（只为"这页读得出来"这个事实） */
+    RR_STAGE_NB_RETRY,   /* 在飞：Stage 2 邻居读成功后再试目标页 */
+    RR_STAGE_PLANE_END,  /* 结算本 plane：拷回 buffer 或清零 + 标坏块（纯计算） */
+    RR_STAGE_FINISH,     /* 收尾：释放 pending 槽 + 组聚合（纯计算） */
+    RR_STAGE_ABORT       /* 提交侧长期无进展（命令池泄漏）⇒ 不标坏块，直接按失败收尾 */
+} rr_stage_t;
+
+/* 连续「提交不出去」的轮数上限：超过即判卡死，按恢复失败收尾。
+ * 正常背压（命令池被在飞的 host I/O 占满）下一两轮就恢复；预算取 256 轮留足余量。
+ * ⚠ 只兜「提交侧」——命令一旦在飞，NAND 层自身的 wait/jump 超时保证它**必有**完成
+ *   （超时置 FC_CW_STATUS_TIMEOUT），故不需要（也不该）在飞时强拆 job。 */
+#define RR_SUBMIT_STALL_MAX (256U)
+
 typedef struct
 {
-    uint8_t retry_count; /* 当前重试计数 */
+    uint8_t    stage;        /* rr_stage_t */
+    uint8_t    waiting;      /* 1 = 有一条 RR 命令在飞（等 g_op_service[FTL_OP_READ_RECOVERY]） */
+    uint8_t    plane;        /* 当前 plane（0..PLANE_NUM-1）；== PLANE_NUM ⇒ 收尾 */
+    uint8_t    attempt;      /* Stage 1 读重试计数（1..RR_MAX_RETRY） */
+    uint8_t    neighbor_i;   /* Stage 2 邻居序号（0..RR_NEIGHBOR_ATTEMPTS-1） */
+    uint8_t    pending_idx;  /* 被托管的 pending 槽下标（收尾据此释放） */
+    uint8_t    first;        /* 本 plane 首个被覆盖 CW 在子操作内的偏移（诊断用 LBA） */
+    uint8_t    recovered;    /* 本 plane 是否恢复成功（PLANE_END 结算用） */
+    uint16_t   stall_rounds; /* 连续提交不出去的轮数（见 RR_SUBMIT_STALL_MAX，> uint8_t 上限） */
+    lba_t      page_lba;     /* 本 plane 目标页的**页** LBA（META 比对用） */
+    nand_pba_t page;         /* 本 plane 目标页 PBA（NAND_PBA_INVALID = 本子操作不覆盖本 plane） */
+    nand_pba_t neighbor;     /* Stage 2 邻居页 PBA（NB_READ 提交前算好） */
+    uint8_t    retry_count;  /* 本次恢复已用的读重试次数（观测，收尾 LOGE 用） */
 } ftl_read_recovery_t;
 
 /* ── 接口 ── */
@@ -80,31 +136,23 @@ typedef struct
 void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits);
 
 /*
- * rr_recover_read - 读取失败后的恢复尝试
+ * rr_kick - 推进 Read Recovery job（唯一的驱动入口，每轮 ftl_service 调一次）
  *
- * 多级恢复管线：
- *   ① 标准 read retry（切换读电压模式）
- *   ② 邻近页辅助读取（读 +1/-1 页辅助纠错）
- *   ③ 恢复失败 → 调用方标记坏块 + 搬移（XOR/RAID 恢复后续阶段实现）
+ * 三件事，按优先级：
+ *   ① job 空闲 ⇒ 找有没有被托管的 pending 子操作，有则领走并起第一步；
+ *   ② 命令在飞 ⇒ 直接返回（等 g_op_service[FTL_OP_READ_RECOVERY]）；
+ *   ③ 未在飞又推进不下去（提交侧背压）⇒ 累计 stall_rounds，超 RR_SUBMIT_STALL_MAX
+ *      判卡死，按「恢复失败」收尾（避免 host 读被一个泄漏的命令池永久挂起）。
  *
- * @param rr       Read Recovery 上下文
- * @param ch       CH
- * @param ce       CE
- * @param pba      读出错的物理地址
- * @param buffer   输出 buffer
- * @param length   读取长度
- * @param lba      LBA（META 验证）
- * @param retry_count 输出：重试次数
- * @return 0 恢复成功，-1 恢复失败（调用方标记坏块，XOR/RAID 恢复待后续阶段）
+ * 幂等且廉价：job 空闲且无托管项时只是一次 32 项线性扫描。
+ * ⚠ 本函数**不**同步等待；提交走 ftl_async_* + ftl_op_submit。
+ *
+ * @param ftl FTL 实例
  */
-int rr_recover_read(ftl_read_recovery_t *rr,
-                    uint8_t              ch,
-                    uint8_t              ce,
-                    nand_pba_t           pba,
-                    void                *buffer,
-                    uint32_t             length,
-                    lba_t                lba,
-                    uint8_t             *retry_count);
+void rr_kick(ftl_context_t *ftl);
+
+/* 完成服务函数 ftl_op_read_recovery 与其余服务函数同处声明（ftl_op.h）——
+ * 那里是"g_op_service 各槽"的唯一权威列表，此处不再重复声明。 */
 
 /*
  * rr_check_predictive - 检查是否需要预测性搬移

@@ -184,105 +184,6 @@ static void ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_t *pendi
 }
 
 /* --------------------------------------------------------------------
- * ftl_recover_read_subop
- *   功能：读子操作失败后的 Read Recovery——**逐 plane** 恢复并搬回 caller 缓冲。
- *   参数：ftl —— 实例；pending —— 失败的读子操作记录。
- *   返回：无（成败只体现在缓冲内容与坏块标记）。
- *   实现要点：
- *     · 一个子操作可能覆盖**两个 plane 的两张不同物理页**（Policy B 下两 plane 块号
- *       不同），故逐 plane 各恢复一次；目标页由 L2P 反查（读失败不改 L2P，映射仍是
- *       提交时那条）。
- *     · 恢复读是**整页**读、从 CW0 起连续拷出 ⇒ 结果先落 ftl->rr_page_scratch，再按
- *       各 CW 的真实偏移（ftl_lba_cw）搬回 caller 缓冲——子操作可能只覆盖页内部分 CW，
- *       直接让 rr_recover_read 写 caller 缓冲会整段错位。
- *     · 某 plane 恢复失败 ⇒ 该 plane 各 CW 清零 + 标坏块（RAM only，后台 bbt_flush
- *       持久化），交由预测搬移/GC 接手搬走有效页。
- *     · ⚠ 调用者仍一律报 IO_ERROR（沿用原实现语义，见 ftl_op_host_io）。
- * -------------------------------------------------------------------- */
-static void ftl_recover_read_subop(ftl_context_t *ftl, const ftl_pending_req_t *pending)
-{
-    uint8_t p;
-
-    ASSERT(ftl != NULL);
-    ASSERT(pending != NULL);
-
-    for (p = 0U; p < PLANE_NUM; p++)
-    {
-        nand_pba_t page     = NAND_PBA_INVALID;
-        lba_t      page_lba = 0U;
-        uint8_t    first    = 0U;
-        uint8_t    k;
-        uint8_t    retry_count = 0U;
-        int        recovered;
-
-        /* 本子操作覆盖了 plane p 吗？覆盖则取该 plane 首个 LBA 的映射为目标页 */
-        for (k = 0U; k < pending->n_cw; k++)
-        {
-            const lba_t l = (lba_t)(pending->lba + (lba_t)k);
-
-            if (ftl_lba_plane(l) == p)
-            {
-                const nand_pba_t cur = l2p_cache_read(&ftl->cache, l);
-
-                if (cur != NAND_PBA_INVALID)
-                {
-                    page     = pba_page(cur);
-                    page_lba = ftl_lba_page(l);
-                    first    = k;
-                }
-                break;
-            }
-        }
-        if (page == NAND_PBA_INVALID)
-        {
-            continue; /* 本子操作不覆盖 plane p */
-        }
-
-        recovered = rr_recover_read(&ftl->rr,
-                                    ftl->topo.ch,
-                                    ftl->topo.ce,
-                                    page,
-                                    ftl->rr_page_scratch,
-                                    FTL_READ_USER_SIZE,
-                                    page_lba,
-                                    &retry_count);
-
-        for (k = 0U; k < pending->n_cw; k++)
-        {
-            const lba_t l = (lba_t)(pending->lba + (lba_t)k);
-            uint8_t    *dst;
-
-            if (ftl_lba_plane(l) != p)
-            {
-                continue;
-            }
-            dst = (uint8_t *)pending->buffer + ((size_t)k * FTL_IU_BYTES);
-
-            if (recovered == 0)
-            {
-                /* 恢复成功：按本 CW 在页内的真实偏移从整页镜像搬出 */
-                memcpy(dst, ftl->rr_page_scratch + ((size_t)ftl_lba_cw(l) * FTL_IU_BYTES), FTL_IU_BYTES);
-            }
-            else
-            {
-                memset(dst, 0, FTL_IU_BYTES);
-            }
-        }
-
-        if (recovered != 0)
-        {
-            /* Stage 1（Read Retry）+ Stage 2（邻近页辅助）全失败 → 页面已损坏提升为
-             * 块级不可靠，显式标记坏块（RR Stage 3 XOR/RAID 恢复属后续阶段，当前不做）。 */
-            (void)retry_count; /* 恢复失败，重试次数无意义 */
-            LOGE("[FTL] read unrecoverable lba=%lu gblock=%u\r\n",
-                 (unsigned long)(pending->lba + (lba_t)first),
-                 (unsigned)ftl_pba_gblock(page));
-            (void)bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(page));
-        }
-    }
-}
-
-/* --------------------------------------------------------------------
  * ftl_op_host_io
  *   功能：host 数据 I/O 子操作的完成服务函数（g_op_service[FTL_OP_HOST_IO]）。
  *   参数：ftl —— 命令归属实例（ftl_op_dispatch 按命令自身 ch/ce/lun 解析后传入）；
@@ -290,11 +191,13 @@ static void ftl_recover_read_subop(ftl_context_t *ftl, const ftl_pending_req_t *
  *         比任何旁表 ctx 都全，故该站点提交时 ctx 传 NULL）。
  *   返回：无。
  *   实现要点：按 pending->op 分流——读成功拷数据 + 记 ECC/read_count；写成功
- *             ftl_confirm_write；读失败 Read Recovery；写失败关 Open SB + 标坏块。
- *             收尾 pending_remove + 组聚合，最后 release（**本服务函数拥有命令**）。
+ *             ftl_confirm_write；读失败**托管**给 Read Recovery job（异步，本函数
+ *             当场 release 并返回）；写失败关 Open SB + 标坏块。
+ *             非托管路径收尾 pending_remove + 组聚合，最后 release
+ *             （**本服务函数拥有命令**）。
  *
  *             ⚠ 本函数**不得**同步等待（见 ftl_op.h）——它跑在完成泵里，再调
- *             ftl_sync_submit_wait 就是嵌套泵（阶段 2~8 逐步消灭剩余站点）。
+ *             ftl_sync_submit_wait 就是嵌套泵（阶段 4~8 逐步消灭剩余站点）。
  * -------------------------------------------------------------------- */
 void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
@@ -364,13 +267,21 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
             /* 同上：按 pending->op 判别，不用 io.buffer */
             if (pending->op == PENDING_OP_READ)
             {
-                /* 读失败：逐 plane 尝试 Read Recovery（见该函数文件头）。
-                 * ⚠ 读失败一律报 IO_ERROR：沿用原实现——原代码在 if/else
-                 *   之后**无条件**写 *status_out = IO_ERROR，覆盖了
-                 *   recovered==0 分支的 OK。即"read recovery 成功仍报错"，
-                 *   语义存疑、属既有缺陷；本步保持行为等价，未顺手改。 */
-                ftl_recover_read_subop(ftl, pending);
-                sub_status = SSD_STATUS_IO_ERROR;
+                /* 读失败 ⇒ **托管**给 Read Recovery job（阶段 3，见 read_recovery.c）：
+                 *   · pending 项**保留**（不 pending_remove）、组在飞数**不**递减
+                 *     ⇒ host 读组继续 pending，等 RR 收尾时统一结算；
+                 *   · command_id 置哨兵：本命令随即 release，其 id 会被后续
+                 *     fc_command_alloc 复用，留旧值会让新命令的完成误撞上本项；
+                 *   · 收尾（含一律报 IO_ERROR 的既有语义）在 rr_finish 里，见该处注释。
+                 * ⚠ 本分支**不**再当场恢复——原实现会在这里同步跑完三级恢复，
+                 *   即在完成泵里再开一个完成泵（嵌套泵），且整条 host 读流水线被
+                 *   一个坏页钉住。 */
+                pending->op         = (uint8_t)PENDING_OP_READ_RECOVERY;
+                pending->command_id = FTL_PENDING_CMD_NONE;
+
+                (void)fc_command_release(cmd);
+                rr_kick(ftl);
+                return;
             }
             else
             {
@@ -510,6 +421,10 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 static void ftl_service_idle(ftl_context_t *ftl)
 {
+    /* 推进 Read Recovery job（阶段 3：host 读在等结果，**任何档位都要跑**——
+     * 它不占后台带宽预算，只是把已在飞的坏页恢复分步做完）。 */
+    rr_kick(ftl);
+
     /* flush 所有 dirty cache */
     l2p_cache_flush_all(&ftl->cache);
 
@@ -579,6 +494,9 @@ static void ftl_service_idle(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 static void ftl_service_normal(ftl_context_t *ftl)
 {
+    /* 推进 Read Recovery job（阶段 3，见 IDLE 档的说明） */
+    rr_kick(ftl);
+
     /* 后台 flush：最多 4 条。
      * ⚠ thrashing 降级（P1-4）：工作集远大于 cache 时，这些**主动** flush 大概率是白写
      * （被 flush 的行往往在下次访问前就被驱逐，届时还要再 flush 一次），且挤占前台 IO 的
@@ -641,6 +559,10 @@ static void ftl_service_normal(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 static void ftl_service_busy(ftl_context_t *ftl)
 {
+    /* 推进 Read Recovery job（阶段 3）。BUSY 档**尤其**要跑：托管的子操作本身
+     * 就是一条 host 读在等结果，且它占着组在飞数 ⇒ 不跑就是死等。 */
+    rr_kick(ftl);
+
     /* 最少后台：只 flush 1 条防 evict 阻塞 */
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
