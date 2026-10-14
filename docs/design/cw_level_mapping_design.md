@@ -264,9 +264,9 @@ Checkpoint、Wear、分配器、BST。
    flush 只碰一个实例；模型 B 会让一次 flush 跨 die，把并行变成串行。
 3. **坏块隔离**：一个 die 的坏块不会让"全局唯一那份表"受损。
 
-> **代价**：每实例 `g_ftl`(**157.6 KB**，`sizeof(ftl_context_t)`，含 l2p cache 128KB) + `g_blocks`(**80 KB**，
-> 条目 20B × 4096) ≈ **237 KB**，AXI_RAM 只有 384 KB ⇒ 第二个实例装不下。`main.c` 已加编译期断言把这条
-> 变成**编译错误**（见 §3.7）。
+> **代价**：每实例 `g_ftl` = **270.4 KB**（`sizeof(ftl_context_t)`；**P2-5 后 BST 80 KB / L2P / 池全
+> 收进它内部**，不再是独立的 `g_blocks`）≈ AXI_RAM（384 KB）的 **70%** ⇒ 第二个实例装不下。
+> `main.c` 已加编译期断言把这条变成**编译错误**（见 §3.7）。
 
 ### 3.3 地址空间换算表
 
@@ -357,10 +357,12 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 |---|---|---|
 | 1 | **`LUN_ADDR_WIDTH = 0`** | `nand_config.h` 中 `LUN_ADDR_WIDTH = 0` ⇒ `PAA_LUN_MASK = PBA_LUN_MASK = 0` ⇒ **PAA/PBA 都装不下 LUN 字段**，L2P 表无法记录 die 号。这是**根因**。改它需同时改 `LUN_NUM`（芯片配置，未动）。 |
 | 2 | **地址构造缺 lun** | `journal.c` 的 `pba_from_addr` 未填 `.lun`；`metadata.c` 的 `paa_with_lun()` 在当前配置下是**空操作**（随 1 生效）。 |
-| 3 | **内存** | 每实例 `g_ftl`(**157.6 KB**) + `g_blocks`(**80 KB**) ≈ **237 KB**，AXI_RAM 只有 384 KB ⇒ 第二个实例装不下。`main.c` 已加编译期断言把这条变成**编译错误**。 |
-| 4 | **共享状态需 per-instance 化** | `bbt.c` 的文件级 `g_bbt_sequence`/`g_bbt_dirty`；`completion_table.c` 的全局 handler/ctx；`main.c` 主循环只服务 `g_ftl[0][0][0]`。 |
+| 3 | **内存** | 每实例 `g_ftl` = **270.4 KB**（P2-5 后**含** BST 80 KB / L2P / 池）⇒ AXI_RAM（384 KB）装不下第二个实例。`main.c` 已加编译期断言把这条变成**编译错误**。 |
+| 4 | ~~**共享状态需 per-instance 化**~~ | ✅ **已修（v0.65）**：`bbt.c`/`wear.c`/`checkpoint.c` 的 file-scope static 游标收进 `alloc.bbt` / `alloc.wear` / `ftl->cp`（per-instance）；`main.c` 主循环**遍历全部实例**（泵/实例分离）。~~残留~~ `completion_table.c` 的全局 handler/ctx 仍为单份（NAND 引擎本就全局唯一，非 per-instance 项）。 |
 
-> 本轮（2026-10-12）只做**布局 + 路由**，上列 1~4 未动。
+> ~~本轮（2026-10-12）只做**布局 + 路由**，上列 1~4 未动。~~
+> 后续：**3/4 已由 v0.65 处理**（4 已闭合，3 仍是硬约束——`CH=CE=LUN=1` 下不咬）；
+> **1/2（LUN 地址位宽）仍未动**，是 dims>1 的真正阻断点。
 
 ---
 
@@ -391,7 +393,8 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 - **Anchor 改为分页自包含格式**（2048 条 → 8 页/份，每页带 magic/sequence/chunk_index）。
 
 > **v0.61 起不再需要手动擦芯片**：块布局/记录格式的任何变更都通过
-> `FTL_MEDIA_LAYOUT_VERSION`（当前 **2U**）标记。开机 `checkpoint_find_latest` 校验版本，
+> `FTL_MEDIA_LAYOUT_VERSION`（当前 **3U**，见 `include/ftl/ftl_config.h`）标记。开机
+> `checkpoint_find_latest` 校验版本，
 > **不符或介质上根本没有当前版本 Checkpoint ⇒ `ftl_media_format()` 自动全片格式化**
 > （擦前先读出厂坏块标记 ⇒ 保留），随后写当前版本标记。`bbt --erase` CLI 保留为手动兜底。
 > （v0.62 进一步删除了 Checkpoint/Anchor/BBT/Wear 四个记录结构体内的 `crc` 字段——
@@ -612,16 +615,18 @@ SRAM 缓存热点 region**。
    ⇒ 全部元数据统一到「只写擦除过的空页 + 每条带 sequence + 块池轮转 + 最新有效胜」，
    见 `ftl_revision_history.md` 的 ADR（v0.50）。
 
-   **⚠ 尚未做完（P0-2 的阶段 3）**：`metadata_dir_reclaim` 只回收活计数为 0 的日志块 ⇒
-   挂着**永不再改写**的冷 region 的块**永久占块**（顺序写满 2048 region 用 32 块，之后只热写
-   一小撮 ⇒ 未触及的块全卡住，Free Pool 慢性流失）。补法 = victim（`l2p_live` 最小）+ 搬移 +
-   重入切断，**完整设计已写入 `ftl_optimization_plan.md` 的 P0-3**（含判据与依赖）。
-   **依赖本次 v0.50 先上板验证通过；长时压测前必须补。**
+   ~~**⚠ 尚未做完（P0-2 的阶段 3）**：`metadata_dir_reclaim` 只回收活计数为 0 的日志块 ⇒
+   挂着**永不再改写**的冷 region 的块**永久占块**… **长时压测前必须补**。~~
+   ✅ **已落地（v0.65，P0-3）**：`metadata_dir_compact`（`src/ftl/metadata.c`）——选活计数最小的
+   日志块做 victim，把其上的活 region **搬移**到当前日志块后回收整块，切断"冷 region 永久占块"
+   的慢性流失。**本身无介质格式变更**（复用同一套日志块 + Directory 语义）；同批 v0.65 的 rr
+   持久化把 Wear 条目 8B→12B ⇒ `FTL_MEDIA_LAYOUT_VERSION` 2→3，**由开机自动格式化兜底**。
 6. **登记（本次未改，属其它文档/代码）**：
-   - ~~`src/main.c` 中两条内存注释仍是旧值~~ ✅ **已更新**：`g_ftl` 现标 **157.6KB**
-     （实测 `sizeof(ftl_context_t)`，取 `build/firmware/debug/bin/debug.map`），AXI_RAM 现标
-     **~255KB / 384KB**。（旧值 131.5KB / 355.5KB 已不存在；v0.50 的 `l2p_live[]` 也在
-     v0.55/v0.60 的位图演进中一并删除。）
+   - ~~`src/main.c` 中两条内存注释仍是旧值~~ ✅ **已更新**：`g_ftl` 现标 **270.4KB**
+     （实测 `sizeof(ftl_context_t)`，取 `build/firmware/debug/bin/debug.map` 的 `.bss.g_ftl`
+     = 0x43968），AXI_RAM 现标 **~291.3KB / 384KB**。
+     ⚠ **P2-5（v0.65）后大表收进 `ftl_context_t.tables`** ⇒ `g_ftl` 一项即含 BST/L2P/池
+     （此前 157.6KB 是表仍在独立全局时的值）；`l2p_live[]` 已在 v0.55/v0.60 的位图演进中删除。
    - ~~`docs/design/ftl_design.md`、`docs/design/ftl_api_usage.md` 仍写着旧布局标识符~~
      ✅ **已清理（2026-10-13）**：`L2P_REGIONS_TOTAL` / `L2P_REGIONS_PER_LUN` / `L2P_BLOCKS_PER_LUN`、
      L2P 32 块、Journal 40/41 块、Directory 128 条 / 904B 均已对齐 `ftl_config.h` 现行常量

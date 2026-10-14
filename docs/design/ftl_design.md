@@ -43,6 +43,12 @@
 | v0.31 | 2026-09-30 | **P-A 多 LUN 并发前置**：Pending 表 + Completion Table 扩容（8→32）；元数据 lun 泛化；ECC 返回链路打通（fc_ldpc_decode err_bits）；read recovery 接入（rr_block_track 空转待供电） | Claude |
 | v0.32 | 2026-09-30 | **Block State Table（BST）统一 per-block 结构体数组**：新建 ftl/bst.h；合并 erase_counts/bad_blocks/g_bbt_bitmap/rr_block_track 四张分散表为 ftl_block_t[4096] 单数组（56B/项=224KB 全常驻 SRAM）；修复 3 处全局/per-plane 块号碰撞 bug（ftl_gblock 单点转换）；read recovery 由空转变为供电；逐页有效位图 valid_map + VPC 全真值维护（写/覆盖/GC迁移/擦除/trim/坏块/掉电七点闭环）；GC/WL 迁移扫位图免 NAND 读（P-C.5 落地）；行业全字段补全（状态机/温度/坏块原因/read&program 计数/last_pe_ts/gc_generation/sb_id 反向索引）；PFR 掉电 closed_sb_list 重建留二期 | Claude |
 
+> **⚠ 本表只记到 v0.32（2026-09-30）为止。** v0.33 起的版本历史是 **ADR 形式**，
+> 单一事实来源 = `docs/design/ftl_revision_history.md`（每条含背景/决策/后果/涉及文件），
+> 变更摘要另见 `docs/changelog/`。**本文正文（§1~§20）仍在持续维护到当前版本**
+> （最近一次是 v0.69/v0.71），故读正文时以正文的「订正注」与 `ftl_revision_history.md` 为准，
+> 不要以本表的截止版本推断文档新鲜度。
+
 ---
 
 ## 目录
@@ -180,17 +186,21 @@ BAST（Block Associative Sector Translation）和 FAST（Fully Associative Secto
 > ⚠ **下表已改为 AXI_RAM 实测**（真实约束是 AXI_RAM 384 KB，由 `src/main.c` 的编译期守卫
 > `sizeof(g_ftl) + FTL_AXI_RAM_RESERVED(20KB) ≤ BOARD_AXI_RAM_SIZE(384KB)` 把住——
 > P2-5 表自持后**只看 `g_ftl` 一项**，BST/L2P/池全在它内部）。
-> 数字取自 **debug 构建的 `debug.map`（v0.65 工作树）**，按符号地址差算得
-> （`.bss.g_ftl` = 0x428C8 = 266.2 KB）。**旧的「总计 1 MB」粗估表已废弃**——它把
+> 数字取自 **debug 构建的 `debug.map`（v0.70 工作树）**，按符号地址差算得
+> （`.bss` 0x48B44 + `.data` 0x1E4；其中 `.bss.g_ftl` = 0x43968 = 270.4 KB）。
+> **旧的「总计 1 MB」粗估表已废弃**——它把
 > 「1 MB 全片 SRAM」当预算，而实际 FTL 元数据**只落 AXI_RAM**，其余大数组落 SRAM2。
 
 | 占用方（AXI_RAM） | 大小 | 占 AXI_RAM |
 |--------|------|------|
-| `g_ftl`（FTL 全上下文：自持表 + L2P Cache + Journal/MD/Pending/allocator + per-instance 游标） | 266.2 KB | 69.3% |
-| FC 命令池/描述符池/缓冲池 + 其他 .bss/.data | ~16.9 KB | 4.4% |
-| **小计** | **283.1 KB** | **73.7%** |
-| 余量 | 100.9 KB | 26.3% |
+| `g_ftl`（FTL 全上下文：自持表 + L2P Cache + Journal/MD/Pending/allocator + per-instance 游标） | 270.4 KB | 70.4% |
+| FC 命令池/描述符池/SQ/HSQ/CQ + CLI 缓冲 + 其他 .bss/.data | ~20.9 KB | 5.5% |
+| **小计** | **291.3 KB** | **75.9%** |
+| 余量 | 92.7 KB | 24.1% |
 | **AXI_RAM 容量** | **384 KB** | **100%** |
+
+> 另有 FC 的**非缓存缓冲池**（Buffer Pool 128 × 528B ≈ 66 KB + NAND 通道页缓冲 ~4.1 KB）
+> 刻意落 **AXI_NOCACHE**（0x24060000，128 KB），不进上表——FMC/DMA 直访须绕 D-Cache。
 
 > 另有 4 张大数组刻意落 **SRAM2**（`.sram2_data`，NOLOAD）：`g_free_blocks` / `g_op_blocks` /
 > `g_spare_blocks` / `g_closed_sb_list`（16 KB）——SRAM1 仅 128 KB 放不下，见 `src/main.c` 头注释。
@@ -223,15 +233,20 @@ BAST（Block Associative Sector Translation）和 FAST（Fully Associative Secto
 #define PLANE_NUM   (2)     // 每 LUN Plane 数
 ```
 
-所有全局数据结构按此维度声明：
+所有全局数据结构按此维度声明（**每 `(ch,ce,lun)` 一个完整独立实例**，见
+`cw_level_mapping_design.md §三`）：
 
 ```c
-ftl_lun_allocator_t g_allocator[CH_NUM][CE_NUM][LUN_NUM];
+/* src/main.c —— 实例数组（大表内含在 ftl_context_t.tables，P2-5） */
+static ftl_context_t     g_ftl[CH_NUM][CE_NUM][LUN_NUM];
+static ftl_context_t    *g_ftl_ptrs[CH_NUM][CE_NUM][LUN_NUM];  /* controller 路由表 */
 
+/* 主循环：全局泵每轮一次，再逐实例服务 */
+ftl_service_pump();
 for (ch = 0; ch < CH_NUM; ch++)
     for (ce = 0; ce < CE_NUM; ce++)
         for (lun = 0; lun < LUN_NUM; lun++)
-            process_lun(ch, ce, lun);
+            ftl_service(&g_ftl[ch][ce][lun]);
 ```
 
 ### 3.2 每 LUN Block 分类
@@ -570,14 +585,16 @@ Super Block {P0-BlockA, P1-BlockB} 中 P0-BlockA PROGRAM 失败：
 #define FREE_POOL_TARGET    (32U) /* 水位①/②分界 */
 #define FREE_POOL_EMERGENCY (8U)  /* 水位②/③分界 */
 
-/* src/ftl/ftl.c ftl_service_idle —— 水位②：把池补回 TARGET */
-if (ftl->alloc.free_count < FREE_POOL_TARGET) {
-    uint32_t target = FREE_POOL_TARGET - ftl->alloc.free_count;  /* 单位：块 */
-    while (target > 0U) {
-        if (!gc_select_victim(&ftl->alloc, &victim)) break;
-        gc_migrate_sb(...); gc_erase_and_free(...);
-        target -= PLANE_NUM;   /* 一个 SB 归还 PLANE_NUM 个块 */
-    }
+/* src/ftl/ftl.c ftl_service_idle —— 水位②：把池补回 TARGET。
+ * ⚠ 用「需回收的 SB 数」计数，**不是** `target -= PLANE_NUM`——后者在 deficit 为奇数时
+ *    uint32 下溢成 0xFFFFFFFF，循环只在 gc_select_victim 失败时退出，会把 closed 链上的
+ *    SB 全搬全擦（free_count 按 2 递减，本板实测 free=3713 为奇数 ⇒ 必中，v0.63 修）。 */
+if (ftl_gc_evaluate(ftl) != 0U) {                 /* 统一触发求值（节拍门见 §12.3） */
+    uint32_t deficit = (FREE_POOL_TARGET > ftl->alloc.free_count)
+                           ? (FREE_POOL_TARGET - ftl->alloc.free_count) : 0U;
+    uint32_t budget  = (deficit + (PLANE_NUM - 1U)) / PLANE_NUM;  /* 需回收的 SB 数 */
+    if (budget == 0U) { budget = 1U; }            /* 仅 T5 命中（池不缺水）⇒ 只回收一个 SB */
+    while ((budget > 0U) && (ftl_gc_reclaim_one(ftl) != 0)) { budget--; }
 }
 ```
 
@@ -600,40 +617,53 @@ NAND 出厂时，每个 Block 的 Page 0 的 OOB（spare）区域标记该 Block
 标准规则（JEDEC/ONFI）：
   非坏块：OOB[0] = 0xFF ✅
   出厂坏块：OOB[0] ≠ 0xFF ❌
-
-⚠ **本仓偏离（登记 P2-3）**：FC 层**无独立 OOB/spare 读取接口**，spare 区
-（64B/页）全空置 ⇒ **无法按标准读 OOB 标记**。替代判据见下。
 ```
+
+✅ **本仓已按标准实现（v63 起，原 P2-3 偏离已消解）**：FC 层新增
+`ftl_sync_read_column(addr, column, out[4])`（`OP_READ_COLUMN`）——按**任意列偏移**读
+4 字节，够到 spare 区。判据即 `mark[0] != 0xFF`，与器件手册（Micron AN1819）一致。
 
 **扫描流程（真实实现）**：
 
-> ⚠ **订正**：真实 `bbt_scan_factory` 只读 **Page 0 一次**（不是 Page 0~1），
-> 走 `ftl_sync_read_page_raw`（**LDPC_RAW**，跳过 ECC），`ret0 != 0` ⇒ 标坏块；
-> 跳过 Block 0（出厂总是好块）。**无** `fc_read_oob`、**无** `bad_blocks[]` 数组、
-> **无** `METADATA_BLOCK_COUNT` / `bbt_replace_metadata_block`——坏块统一记进
-> BST（`ftl_block_set_bad`）。
+> ⚠ **订正（v63）**：真实 `bbt_scan_factory` 只读 **Page 0 的 spare 首字节**（**列 2048**
+> = `PAGE_MAIN_SIZE`），非 0xFF ⇒ 标坏块；跳过 Block 0（出厂总是好块）。读动作封装在
+> `bbt_probe_block_bad(alloc, plane, block, do_erase)`。**无** `fc_read_oob`、
+> **无** `bad_blocks[]` 数组、**无** `METADATA_BLOCK_COUNT` / `bbt_replace_metadata_block`
+> ——坏块统一记进 BST（`ftl_block_set_bad`）。
+> ⚠ 旧实现读的是 **CW0 列 0**（FC 逻辑 META，非 spare）且先擦后读 ⇒ 永远读不到出厂标记
+> （擦除会永久毁掉它）；v63 改为**读 spare 列 2048、先读后擦**。
+> ⚠ 本片芯片若已被整片擦过，出厂标记即已丢失 ⇒ 只会读到全 0xFF（不是 bug）。
 
 ```c
+/* 判据（bbt_probe_block_bad，v63）：读 Page 0 列 2048 的 spare 首字节，
+ * 非 0xFF ⇒ 出厂坏块；do_erase != 0 时**无条件**再擦（擦除失败也判坏）。 */
+static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t block,
+                               uint8_t do_erase) {
+    nand_addr_t addr = addr_from_paa(alloc->ch, alloc->ce,
+                                     paa_from_addr(&(nand_addr_t){.plane = plane, .block = block}));
+    uint8_t mark[4];
+    int     marked;
+
+    memset(mark, 0xFF, sizeof(mark));
+    /* ① 擦除前读 spare 首字节（列 2048 = PAGE_MAIN_SIZE）——擦除会永久毁掉标记 */
+    marked = (ftl_sync_read_column(addr, (uint16_t)PAGE_MAIN_SIZE, mark) != FTL_OK)
+                 ? 1 : ((mark[0] != 0xFFU) ? 1 : 0);
+
+    if (do_erase != 0U) {
+        if (ftl_sync_erase_block(addr) != FTL_OK) { return 1; }  /* 擦不掉 ⇒ 坏块 */
+    }
+    return marked;   /* 坏不坏仍按擦除前读到的出厂标记报 */
+}
+
 int bbt_scan_factory(ftl_allocator_t *alloc) {
-    uint16_t bad_idx = 0;
-
     for (uint16_t gblock = 0; gblock < BBT_MAX_BLOCKS; gblock++) {
-        uint8_t raw_buf[PAGE_SIZE];
-        nand_addr_t page0;
-        int ret0;
+        uint8_t  plane = (uint8_t)(gblock / BLOCKS_PER_PLANE);
+        uint16_t block = (uint16_t)(gblock % BLOCKS_PER_PLANE);
 
-        if (gblock == 0) continue;            /* Block 0 出厂总是好块 */
+        if (gblock == 0U) { continue; }        /* Block 0 出厂总是好块 */
 
-        /* 全局块号 → (plane, block) 物理地址，读 Page 0 */
-        page0 = addr_from_paa(alloc->ch, alloc->ce, paa_from_addr(&(nand_addr_t){
-                    .plane = gblock / BLOCKS_PER_PLANE,
-                    .block = gblock % BLOCKS_PER_PLANE }));
-
-        memset(raw_buf, 0xFF, sizeof(raw_buf));
-        ret0 = ftl_sync_read_page_raw(page0, raw_buf, FC_COMMAND_MODULE_BBT);
-
-        /* 保守判据：RAW 读失败 ⇒ 标坏块（记进 BST，非独立数组）*/
-        if (ret0 != 0) {
+        /* 只读标记（do_erase = 0）：出厂扫描阶段**不得**擦块 */
+        if (bbt_probe_block_bad(alloc, plane, block, 0U) != 0) {
             ftl_block_set_bad(&alloc->blocks[gblock]);
             ftl_block_state_clr(&alloc->blocks[gblock],
                 FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_FREE);
@@ -642,13 +672,11 @@ int bbt_scan_factory(ftl_allocator_t *alloc) {
         }
     }
     alloc->bad_count = bad_idx;
-    return bad_idx;
+    alloc->bbt.dirty = 1U;
+    (void)bbt_save(alloc);                      /* 扫描结果写入 NAND BBT */
+    return (int)bad_idx;
 }
 ```
-
-> ⚠ RAW 模式下即使 NAND 物理失败，`fc_poll_completion` 仍返回 READY（raw 无 ECC
-> 错误）⇒ 用返回码判坏块**不一定可靠**。全 FF 也可能只是空块特征。**更准确的检测
-> 需要 FC 提供 spare/OOB 读取接口**（= P2-3 偏离，见 `ftl_optimization_plan.md`）。
 
 **扫描性能估算**：
 
@@ -760,8 +788,8 @@ void bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
 
   > ⚠ **订正**：`allocator_alloc` / `allocator_select_block` / `alloc->erase_counts[]` /
   > `alloc->spare_pool_count` / `ftl_handle_bad_block` 均已不存在。真实 API：
-  > - 选块：`allocator_select_plane_block(alloc, plane)`（**逐 plane 独立**，Policy B）、
-  >   分配一对：`allocator_alloc_pair(alloc, temp, out[PLANE_NUM])`；
+  > - 选块：`allocator_select_plane_block_from_pool(alloc, plane)`（**static**，逐 plane 独立，
+  >   Policy B）、分配一对：`allocator_alloc_pair(alloc, temp, out[PLANE_NUM])`；
   > - 擦除计数在 **BST**（`alloc->blocks[gblock].erase_count`），非独立数组；
   > - 坏块判据是 BST 状态位（`ftl_block_is_bad`），非 `bbt_is_bad` 查表；
   > - Spare Pool 计数是 `alloc->spare_count`（上限 `FTL_SPARE_POOL_SIZE=50`），
@@ -769,9 +797,11 @@ void bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
 
 ```c
 /* 真实签名 */
-uint16_t allocator_select_plane_block(ftl_allocator_t *alloc, uint8_t plane);   /* 单 plane */
 nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
                                 nand_pba_t out[PLANE_NUM]);                      /* 一对 plane */
+/* 选块助手是**内部 static**，不是对外 API：
+ *   static uint16_t allocator_select_plane_block_from_pool(const ftl_allocator_t *alloc,
+ *                                                          uint8_t plane); */
 ```
 
 **为什么用 Spare Pool 而不是 Block Remap Table**：
@@ -820,9 +850,9 @@ ONFI Multi-Plane 命令中每个 Plane 有独立的行地址，
 | 参数 | 当前值 | 说明 |
 |------|--------|------|
 | BBT_POOL_BLOCKS | 2（块 56..57） | BBT 池块数，池内轮转 |
-| SCAN_PAGES_PER_BLOCK | **1**（只读 Page 0） | 出厂扫描每 Block 读的页数 |
-| MAX_BAD_BLOCKS | 200 | BBT bitmap 容量上限（历史值） |
-| ECC_PREDICT_THRESHOLD | 8 次 | ECC 连续上升触发慢死预测（`rr`）|
+| 出厂扫描读取 | **Page 0 列 2048 的 1 字节** | 不是整页——`ftl_sync_read_column` 够到 spare 首字节（v63）|
+| BBT_MAX_BLOCKS | 4096（= FTL_BLOCK_TOTAL） | BBT bitmap 容量 = 每 bit 一块 |
+| RR_ECC_RISING_THRESHOLD | 4 次 | ECC 连续上升触发慢死预测（`rr`）；单次 ≥ `RR_ECC_HIGH_WATER`(6) 亦告警 |
 | FTL_SPARE_POOL_SIZE | 50 | 替换池大小（覆盖生命周期坏块）|
 | FTL_OP_PERCENT | 10（= 204 块） | OP 池预留百分比（每 plane 块数的 10%）|
 
@@ -999,7 +1029,8 @@ per-instance 记 `ftl->gc_eval_last_ms`。为什么必须加：
   没有任何已发表策略是"u 高 → 优先清理"。
 - **语义为空**：closed 块平均 70% 有效 ⇒ 盘近满 ⇒ 空闲池必然小 ⇒ **T1/T4 已命中**，T6 加不出新信息。
 - **主流处置方向相反**：占用率高 ⇒ 写放大 ≈ `1/(1−u)` 高 ⇒ 行业杠杆是 **OP（预留空间压低 u）** 与
-  **GC 限速**（§4.6 的 `GC_BANDWIDTH_*`），不是"因为块太满所以多 GC"。
+  **GC 限速**（本仓即 §4.6 / §12.1 的**三级档位**：IDLE 全力 / NORMAL 一个 SB / BUSY 让路；
+  ⚠ 代码里**没有** `GC_BANDWIDTH_*` 常量），不是"因为块太满所以多 GC"。
 
 ⇒ `GC_FRAGMENT_THRESHOLD` 不定义；`gc.h` 的 `GC_TRIGGER_*` 位图**刻意留空 0x20**（不分配 T6 位，
 与 v0.63 退役的 0x02/0x04 同例）。
@@ -1035,15 +1066,21 @@ BUSY 让路；**空间压力（T1/T4）决定「要不要做」，后台档位�
 | 参数 | 建议值 | 说明 |
 |------|--------|------|
 | FREE_POOL_TARGET | 32 blocks | 水位①/②分界（原 `PRE_COND_LOW_WATER`，重复常量已删） |
+| FREE_POOL_EMERGENCY | 8 blocks | 水位②/③分界（T4） |
 | GC_WEAR_LEVEL_RATIO | 10 | 最大/最小擦除比阈值（T5） |
 | GC_WEAR_LEVEL_MIN_ERASE | 64 | T5 地板：max 擦除次数低于此值不触发（防早期空跑） |
 | ~~GC_FRAGMENT_THRESHOLD~~ | ~~0.7~~ | **不定义**——T6 已废弃，见 §4.4 |
-| GC_WEIGHT_VALID | 0.50 | 有效页权重 |
-| GC_WEIGHT_ERASE | 0.20 | 擦除次数权重 |
-| GC_WEIGHT_TEMP | 0.20 | 温度权重 |
-| GC_WEIGHT_AGE | 0.10 | 时间公平权重 |
-| GC_BANDWIDTH_HOST_ACTIVE | 10% | Host 活跃时 GC 带宽上限 |
-| GC_BANDWIDTH_HOST_IDLE | 100% | Host 空闲时 GC 带宽 |
+| GC_WEIGHT_VALID | 0.50 | 有效页权重（代码 `gc.h` 为**千分整数** `500`） |
+| GC_WEIGHT_ERASE | 0.20 | 擦除次数权重（代码 `200`） |
+| GC_WEIGHT_TEMP | 0.20 | 温度权重（代码 `200`） |
+| GC_WEIGHT_AGE | 0.10 | 时间公平权重（代码 `100`） |
+| ~~GC_BANDWIDTH_HOST_ACTIVE~~ | ~~10%~~ | **不定义**——带宽不靠百分比常量，见下 |
+| ~~GC_BANDWIDTH_HOST_IDLE~~ | ~~100%~~ | **不定义**——由 `ftl_service` 三级档位体现 |
+
+> ⚠ **GC 带宽没有 `GC_BANDWIDTH_*` 常量**（那两个名字代码里不存在）。本仓的做法是
+> **后台档位**：IDLE 全力补池（100% 等效）/ NORMAL 一次一个 SB / BUSY 让路（§4.6、§12.1）。
+> 「要不要做」由 T1/T4 空间压力决定，「能做多少」由档位决定——比一个带宽百分比更贴合
+> superloop 的协作式调度（没有抢占，无需配给令牌）。
 
 ### 4.8 静态磨损均衡（Static Wear Leveling）
 
@@ -1110,7 +1147,11 @@ int wl_should_trigger(const struct ftl_context *ftl) {
 }
 ```
 
-三星企业级 SSD 使用此类多维度触发条件，确保在静负载等极端场景下也不会出现单个 Block 过度磨损。
+多维度触发的目的是：在静负载等极端场景下也不会出现单个 Block 过度磨损
+（三条件各自覆盖一种失衡形态：差值=两极分化、比值=少数过热、低区占比=大量未磨损）。
+
+> ⚠ 本节早先写「三星企业级 SSD 使用此类多维度触发条件」——**无任何引用**（项目规矩：
+> 不凭记忆说行业要求）⇒ 改为对**判据本身**的中性说明，不借厂商名义（同 §4.6 的处置）。
 
 #### 4.8.3 受害块选择算法
 
@@ -1251,7 +1292,8 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim) {
 
 流程与 GC 搬移一致，区别在于：
 - 搬移目标是 **Cold Super Block**（温度分区到 COLD）
-- Journal 记录的是 **PAA 重映射**（不是 LBA→PAA 的变化）
+- Journal 记的仍是 `(lba, old_pba, new_pba)` 三元组——与 GC 同构（LBA 不变、PAA 换新位置），
+  故回放后 L2P 指向新页；搬完 `journal_flush_page` **先落盘再擦除**（F10 掉电窗口）
 - 搬完后归还 Free Pool（已擦除态）
 
 #### 4.8.5 WL 在 ftl_service 中的调度
@@ -1350,8 +1392,8 @@ TLC（3000~5000 P/E，~400GB 容量）：
 | WL_LOW_ZONE_WIDTH | 1000 | 低擦除区宽度 |
 | WL_LOW_BLOCK_PCT | 5 | 低区 Block 占比 ≥ 5% 触发 |
 | WL_MIN_INTERVAL | 1000 writes | 两次 WL 最小间隔 |
-| WL_MIN_VALID_RATIO | 70% | 只搬有效页 ≥ 70% 的冷 Block |
-| WL_BUDGET_SB | 1 SB/cycle | 每轮最多搬 1 个 Super Block |
+| WL_MIN_VALID_RATIO | 70% | 只搬有效 **CW** ≥ 70% 的冷 Block（CW 级映射）|
+| ~~WL_BUDGET_SB~~ | — | **不定义**——`wl_execute` 每轮最多搬 **1 个** Super Block（无独立预算常量）|
 
 ---
 
@@ -2155,70 +2197,91 @@ Journal 块 = JOURNAL_BLOCK0 + b（JOURNAL_BLOCK0 = 58）；块数由 JOURNAL_BL
 
 ### 7.3 写入流程（完整序列）
 
-> ⚠ **订正**：真实写入分**两段**——提交路径（`ftl_submit_write`）只分配 PBA + 提交 FC
-> 命令；Journal / L2P / 位图更新在**完成路径**（`ftl_handle_completion`）里、
-> NAND 确认写成功之后才做（**modify-after-confirm**）。原伪代码把 journal_append /
-> l2p_cache_write 写在提交路径，且 `allocator_alloc` / `ftl_cmd_setup_ppa` 等函数名均已过期。
+> ⚠ **订正**：真实写入分**两段**——提交路径（`ftl_submit_write`）只**建组**并走
+> `ftl_drain_group` 快路径下发子操作；Journal / L2P / 有效计数更新在**完成路径**
+> （`ftl_handle_completion` → `ftl_confirm_write`）里、NAND 确认写成功之后才做
+> （**modify-after-confirm**）。原伪代码把 journal_append / l2p_cache_write 写在提交
+> 路径，且 `allocator_alloc` / `ftl_cmd_setup_ppa` / `req->pages` 等函数名与字段均已过期
+> （`pages` 字段已删，单/双 plane 改由**页打包窗口占用**决定，见下）。
 
 ```c
-/* ── 提交路径：ftl_submit_write（非阻塞）── */
+/* ── 提交路径：ftl_submit_write（非阻塞）——只建组 + 快路径下发 ── */
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req) {
-    nand_pba_t new_pba[PLANE_NUM], old_pba;
-
-    /* ① 分配新 PBA（**逐 plane 独立选块**，Policy B）。Free Pool 耗尽 → 同步跑一轮
-     *    紧急 GC（gc_select_victim → gc_migrate_sb → gc_erase_and_free）后重试一次 */
-    if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) == NAND_PBA_INVALID) {
-        /* …紧急 GC 回收 1 个 SB 后重试；真无空间才返回 FTL_ERROR… */
-    }
-
-    /* ② 读旧 PBA（供 Journal 记录用）*/
-    old_pba = l2p_cache_read(&ftl->cache, internal_lba);
-
-    /* ③ 配置 FC 写命令（1 或 2 plane）+ 逐 plane PBA + desc 链 + 数据 */
-    cmd->config.operation = (req->pages == 1U) ? OP_NORMAL_PROGRAM_PAGE
-                                               : OP_PROGRAM_PAGE_MULTI_PLANE;
-    cmd->config.crc    = FC_CRC_ENABLE;
-    cmd->config.random = FC_RANDOM_ENABLE;
-    cmd->config.ldpc   = FC_ECC_MODE_BCH;
-    cmd->module        = FC_COMMAND_MODULE_FTL;
-    cmd->meta          = (DWORD)(internal_lba << CW_WIDTH);   // 扇区 LBA（v24）
-    ftl_cmd_setup_ppa_pair(cmd, new_pba);
-    ftl_cmd_write_data(cmd, req->buffer, data_size);
-    fc_submit(cmd);                                           // 非阻塞
-    return FTL_OK;
+    count = req->count;                 /* ⚠ 长度 = 连续 LBA 数；**无 req->pages** */
+    gi = pending_group_alloc(ftl);      /* 建完成组，通知字段先填入 */
+    g  = &ftl->groups[gi];              /* g->op = WRITE / total = count / buffer / cb … */
+    ftl_drain_group(ftl, gi);           /* 快路径下发；余量留待 ftl_service Phase 2.5 */
+    return FTL_OK;                      /* ⚠ = 已受理，非已完成 */
 }
 
-/* ── 完成路径：ftl_handle_completion（NAND 确认写成功后，**逐 CW** 簿记）──
- * ⚠ pending **不存** old_pba：旧 PBA 在完成时按 LBA 重查 L2P（v0.58 起）。 */
-for (k = 0U; k < pending->n_cw; k++) {
-    lba_t      l    = pending->lba + k;
-    nand_pba_t page = (ftl_lba_plane(l) == 0U) ? pending->new_pba : pending->new_pba1;
-    nand_pba_t newp = pba_with_cw(page, ftl_lba_cw(l));
-    nand_pba_t oldp = l2p_cache_read(&ftl->cache, l);
+/* ── 子操作下发：ftl_issue_subop 写分支（页打包 §七 方案 A，v0.66）── */
+/* ① allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) 逐 plane 独立选块
+ *    （Policy B）；Free Pool 耗尽 → 同步跑一轮紧急 GC 后重试一次，真无空间才 ERROR
+ * ② nplanes = popcount(wbuf.occupied 逐 plane 段)；n_cw = popcount(wbuf.occupied)
+ * ③ cmd->config.operation = (nplanes==2) ? OP_PROGRAM_PAGE_MULTI_PLANE : OP_NORMAL_PROGRAM_PAGE
+ *    cmd->config.multi_plane = (nplanes==2) ? 2 : 0
+ *    cmd->config.cw = 3 / crc = FC_CRC_ENABLE / random = FC_RANDOM_ENABLE
+ *    cmd->config.ldpc = FC_ECC_MODE_BCH / chain = FC_CHAIN_END / page_type = FC_PAGE_TYPE_LP
+ *    cmd->module = FC_COMMAND_MODULE_FTL
+ *    cmd->meta   = (DWORD)ftl->wbuf.base    // 窗口基址；FC 侧按 (meta&~PLANE_CW_MASK)|(plane<<2)|cw
+ *                                           // 铸出逐 CW 的扇区 LBA（非 << CW_WIDTH 的单个 LBA）
+ * ④ ftl_cmd_setup_ppa_pair_cw(cmd, new_pba, wbuf.occupied)   // desc 链；位图 = 实际覆盖 CW
+ * ⑤ ftl_cmd_write_data_cw(cmd, ftl->wbuf.data, wbuf.occupied) // 按页内 CW 偏移散射取数
+ * ⑥ pending_add(..., owners = wbuf.owners, lba = wbuf.base, buffer = NULL, n_cw,
+ *               new_pba[0], new_pba[1], cache_intermediate = 0, PENDING_OP_WRITE, wbuf.occupied)
+ * ⑦ fc_submit(cmd)；cmd/desc/buffer 池空或 SQ 满 → 保留缓冲、返回 FTL_AGAIN（下轮重试） */
+
+/* ── 完成路径：ftl_handle_completion → ftl_confirm_write（确认写成功后**逐 CW** 簿记）──
+ * ⚠ pending **不存** old_pba：旧 PBA 在完成时按 LBA 重查 L2P（v0.58 起）。
+ * ⚠ pending 描述**一整页**（lba = 窗口基址 + cw_bitmap 标记本页哪些 CW 有效）⇒
+ *    循环按位图逐**置位**确认，逐 CW 的 LBA = base + bit（bit = plane*CW_NUM + cw）。 */
+for (bit = 0U; bit < FTL_LBA_PER_PAIR; bit++) {
+    if ((pending->cw_bitmap & (1U << bit)) == 0U) continue;   /* 本槽未写（稀疏页） */
+    pl = bit / CW_NUM;  cw = bit % CW_NUM;
+    l    = pending->lba + bit;
+    page = (pl == 0U) ? pending->new_pba : pending->new_pba1;
+    newp = pba_with_cw(page, cw);
+    oldp = l2p_cache_read(&ftl->cache, l);
 
     journal_append(&ftl->journal, l, oldp, newp);
     l2p_cache_write(&ftl->cache, l, newp);
     ftl_block_add_valid(&ftl->alloc.blocks[ftl_pba_gblock(newp)]);      /* VPC：新 CW +1 */
     if ((oldp != NAND_PBA_INVALID) && (oldp != newp)) {
+        /* ⚠ 常驻守卫：L2P 指向的旧块在 BST 里 0 有效 ⇒ 下一行必撞 bst.h 断言。
+         * 先打 `[FTL] dangling lba=… old=… g=… st=…` 一行归因，再 sub_valid。 */
         ftl_block_sub_valid(&ftl->alloc.blocks[ftl_pba_gblock(oldp)]);  /* 覆盖写：旧 CW −1 */
     }
 }
-ftl->total_writes++;
+checkpoint_journal_watermark(&ftl->journal);
+ftl->total_writes++;   /* 计「编程次数」（页打包后一页 = 一次编程），不是 CW 数 */
 /* ⚠ v0.60 后**无位图**：有效性唯一真值 = 逐 CW 的 valid_count（=OOB 反查 L2P）*/
 ```
 
 ### 7.4 启动恢复
 
-```
-冷启动（无 journal）:
-  l2p_cache_init(cache, ch, ce, lun) → cache 全 INVALID（v0.35 起绑定拓扑）
-  首次访问时从 NAND 加载 region
+> ⚠ **订正（v0.64）**：真实恢复由 `ftl_boot_recovery`（`power_failure_recovery.c`）
+> 分**三条路径**（fresh / clean / power-failure），判型见 §8.3.2。Journal 侧的
+> 写态恢复是**独立一步**：`journal_scan_latest`（只读取环内最新页）+ `journal_resume`
+> （把写指针落到最新页**之后一页**、接续序号）。**三条路径都要接回写指针**——
+> `journal_init` 把写指针/序号复位到 `(block0,page0)/1`，而环形块**没有被擦**
+> （`journal_truncate` 只预擦下一块），不接回去就二次编程 + 序号回退。
 
-热启动（有 journal）:
-  ① 扫描 Checkpoint 区域 → 加载最新 Checkpoint
-  ② 回放 Journal（sequence > checkpoint 的所有条目）
-  ③ Cache 中所有 line 标记 DIRTY
-  ④ 后台 flush dirty regions 到 NAND L2P 表
+```
+冷启动 / 干净关机（journal 无未回放条目）:
+  journal_scan_latest → 取环内最新页快照
+  l2p_cache_init(cache, ch, ce, lun) → cache 全 INVALID（v0.35 起绑定拓扑）
+  journal_resume(journal, ring, floor) → 接回写指针 + 序号
+  ftl_rebuild_closed_sb_list → F2 全扫 NAND 重建 Closed SB（三条路径都走）
+  首次访问时按需从 NAND 加载 region
+
+异常掉电（有未回放条目）:
+  ① 扫 Checkpoint → checkpoint_find_latest 取最近快照
+  ② journal_replay：回放所有**整页** page_seq > cp_sequence 的页（按
+     (page_seq, entry_index) 递增序），写入 cache 并标 DIRTY；末尾 journal_resume
+     接回写指针（序号下限 = cp.journal_sequence）
+  ③ 按 Checkpoint region_bitmap 局部加载（F4）：跳过 DIRTY 回放行
+  ④ ftl_rebuild_closed_sb_list → F2 全扫 NAND 重建 Closed SB
+  ⑤ 后台 flush DIRTY regions 到 NAND L2P 表（不阻塞 Controller → Ready）
 ```
 
 ### 7.5 Journal 回收（与 Checkpoint 协同）
@@ -2287,12 +2350,17 @@ Journal 中 sequence ≤ checkpoint_seq 的条目已写入 L2P table，可回收
 #define JOURNAL_FULL_THRESHOLD   (85)      // 水位线触发（%）
 #define JOURNAL_CRITICAL         (95)      // 紧急水位（阻塞触发）
 
-/* 真实函数（checkpoint.h）：checkpoint_journal_watermark(l2p_journal_t *journal)
+/* 真实函数（checkpoint.c）：checkpoint_journal_watermark(l2p_journal_t *journal)
  * 在写完成路径调用，按占用率设 journal->emergency / ->checkpoint_needed */
 void checkpoint_journal_watermark(l2p_journal_t *journal) {
-    uint8_t used = (uint8_t)(((uint32_t)journal->current_block * PAGES_PER_BLOCK
-                              + journal->current_page) * 100U
-                             / (JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK));
+    /* ⚠ 分子分母都按**全环**口径（JOURNAL_BLOCK_COUNT×PAGES_PER_BLOCK = 256 页），
+     *    且计入页内 current_entry ⇒ 85%/95% 分别落在全局页 218/244，与 §7.5.2 推导对齐。
+     *    旧实现分子用单块内 current_page、分母用单块 64 页 ⇒ 水位虚高（见实现注释）。 */
+    uint32_t used = ((uint32_t)journal->current_block * PAGES_PER_BLOCK
+                     + (uint32_t)journal->current_page) * 100U
+                    / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK)
+                    + (uint32_t)journal->current_entry * 100U / JOURNAL_ENTRIES_PER_PAGE
+                          / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK);
 
     if (used >= JOURNAL_CRITICAL)
         journal->emergency = 1U;            // 强制 Checkpoint，前台可能等待
@@ -2457,7 +2525,7 @@ Layer 4: 多 Block 轮换（不是双写！）
 
 ┌─────────────────────────────────────────────────────────┐
 │ Header: 12B                                              │
-│  ├── magic       (4B) = 0x4A4F5552 ("JOUR")            │
+│  ├── magic       (4B) = 0x524F554A ("JOUR")            │
 │  ├── page_seq    (4B) = 本页第一条 entry 的全局序号      │
 │  ├── entry_count (2B) = 本页有效 entry 数（0~127）       │
 │  └── block_seq   (2B) = 本 Journal Block 写入轮次       │
@@ -2565,25 +2633,26 @@ Checkpoint 保存的是 L2P 全表（2048 regions = 4MB），
 /* 真实入口（power_failure_recovery.c）：返回 ftl_status_t，结果经 result 输出 */
 ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result) {
     l2p_checkpoint_header_t cp;
+    journal_page_ref_t      ring;
 
-    /* ① 扫描 Checkpoint 池（8 块）→ 最新有效 header */
-    if (checkpoint_find_latest(&cp, ftl->topo) != FTL_OK) {
-        return ftl_boot_fresh_start(ftl);            // 出厂首次启动
+    /* ① 扫 Journal 环形块池取最新页（journal_scan_latest，**只读不改状态**）——
+     *    判型要用它；三条路径也都要用它恢复 Journal RAM 写态（journal_resume）。
+     *    不调 journal_replay——后者会改 journal 内部状态。 */
+    (void)journal_scan_latest(&ftl->journal, &ring);
+
+    /* ② 扫描 Checkpoint 池 → 最新有效 header */
+    if (checkpoint_find_latest(ftl, &cp) != FTL_OK) {
+        return ftl_boot_fresh_start(ftl, &ring);                 // 出厂首次启动
     }
 
-    /* ② 扫 Journal 4 块池各页 header，取最大 page_seq
-     *    （不调 journal_replay——后者会改 journal 内部状态）*/
-    uint32_t journal_last_seq = 0;
-    for (b = 0; b < JOURNAL_BLOCK_COUNT; b++)
-        for (page = 0; page < PAGES_PER_BLOCK; page++)
-            if (页 magic == JOURNAL_MAGIC && page_seq > journal_last_seq)
-                journal_last_seq = page_seq;
-
-    /* ③ 判断关机类型 */
-    if (journal_last_seq <= cp.journal_sequence) {
-        return ftl_boot_clean_start(ftl, cp.sequence);           // 干净关机
+    /* ③ 判断关机类型：最新页**整页**都被 Checkpoint 覆盖 ⇒ 干净关机；否则异常掉电。
+     *    ⚠ 判据必须是整页的 `page_seq + entry_count`（与 journal_replay 的回放过滤同口径）。
+     *    只看页首（page_seq ≤ cp.journal_sequence）会把恰在水位上的新页判成干净 ⇒
+     *    写→掉电后不回放 ⇒ 丢映射（v0.64 修）。 */
+    if ((ring.page_seq + (uint32_t)ring.entry_count) <= cp.journal_sequence) {
+        return ftl_boot_clean_start(ftl, cp.journal_sequence, &ring);   // 干净关机
     } else {
-        return ftl_boot_power_failure(ftl, &cp, result);         // 异常掉电
+        return ftl_boot_power_failure(ftl, &cp, result);               // 异常掉电
     }
 }
 ```
@@ -2715,7 +2784,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 | Journal 扫描 | ~1ms | ~1ms | 读最后 sequence |
 | Journal 回放 | 0ms | ~100ms | 仅异常掉电需要 |
 | Allocator 重建 | ~50ms | ~50ms | Super Block 列表 |
-| Write Pointer | ~2ms | ~5ms | 干净取内存值，异常需扫描 |
+| Write Pointer | ~2ms | ~5ms | ⚠ 非独立阶段——写指针恢复**并入 F2 全扫**（v0.65 删独立扫描，见 §8.3.7）|
 | FW Stage: HOST | ~5ms | ~5ms | Host 初始化 |
 | **总计** | **~370ms** | **~480ms** | |
 
@@ -2833,7 +2902,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 | 选型 | **出厂全量扫描 + 运行时隔离 + Block Sparing（Spare Pool 保水位）** |
 | 理由 | 学习企业级坏块替换做法；Spare Pool 保证运行时坏块不减少用户容量；出厂坏块扫描 250ms 可接受；Sparing 不需要 block remap 表——只补充 free pool，不做映射 |
 | 拒绝方案 | Block Skip（容量自然减少，不符合企业级学习目标）；Block Remap Table（行业不用两层映射）|
-| 代价 | 出厂扫描增加启动时间 ~250ms；SPARE_POOL_SIZE × 1 Block 容量占用；需要 FC 支持 OOB/Spare 区读取 |
+| 代价 | 出厂扫描增加启动时间 ~250ms；SPARE_POOL_SIZE × 1 Block 容量占用；~~需要 FC 支持 OOB/Spare 区读取~~ ✅ v63 已提供（`ftl_sync_read_column`）|
 
 **与 §3.6 OP 的关系**：Spare Pool 替换坏块，OP 池负责 GC 缓冲和性能保速，二者职责分离。
 
@@ -2849,7 +2918,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 | 空闲池 | 一个已擦除池 + 三级水位 | 多层池（不同 P/E） | 水位 + 独立保留池 |
 | GC 触发 | 三级（水位线/紧急/磨损；T2 写入量、T3 定时、T6 碎片率均不实现） | 多级阈值 | 后台预测性 GC |
 | Over-provision | 10% 预留 | 7~15% | 7~28% |
-| 写缓冲 | 无（SLC 不需要） | SLC mode buffer | SLC / pseudo-SLC cache |
+| 写缓冲 | **页打包写缓冲**（`ftl_wbuf_t`，v0.66：同 pair 窗口多次写攒一页再编程） | SLC mode buffer | SLC / pseudo-SLC cache |
 | Super Block | 跨双 Plane | 跨 Die | 跨 N Die Super Block |
 
 ### 10.2 L2P 管理对比
@@ -2913,7 +2982,13 @@ typedef struct ftl_context {
     /* 完成组表（v0.58：一条 host 请求 = 一个组，通知只发一次）*/
     ftl_io_group_t      groups[FTL_GROUP_MAX];
 
-    /* Allocator */
+    /* 页打包写缓冲（§七 方案 A，v0.66）*/
+    ftl_wbuf_t          wbuf;
+
+    /* FTL 自持表（P2-5）：BST / free+op / closed / spare 大数组归实例所有 */
+    ftl_tables_t        tables;
+
+    /* Allocator（各指针绑到上面的 tables）*/
     ftl_allocator_t     alloc;             /* 空闲 block / Super Block 写指针 */
 
     /* Journal */
@@ -2936,6 +3011,12 @@ typedef struct ftl_context {
     /* 慢死预测巡检节流（F6：per-instance）*/
     uint32_t            rr_last_scan_ms;
 
+    /* GC 节拍 + 进展计数（v0.68，per-instance，纯观测）*/
+    uint32_t            gc_eval_last_ms;    /* 触发求值节拍（T5 要扫全表，不能每轮）*/
+    uint32_t            gc_log_last_ms;     /* 触发日志节拍（1s 心跳）*/
+    uint32_t            gc_reclaimed_count; /* 累计成功回收 SB 数 */
+    uint32_t            gc_novictim_count;  /* 累计「触发但选不出 victim」次数 */
+
     /* Read Recovery 上下文（仅重试计数；ECC 趋势已并入 alloc.blocks[].rr）*/
     ftl_read_recovery_t rr;
 
@@ -2956,8 +3037,8 @@ typedef struct ftl_context {
 > 通知只发一次。详见变更史 v0.58 与 `ftl_host_interface.md`。
 
 ```c
-/* ── 初始化（v0.30：ftl_init_params_t 结构体指针传参，7 形参 → 2）── */
-ftl_status_t ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params);
+/* ── 初始化（P2-5：ftl_init_params_t 已删除，大表由 ftl_context_t.tables 自持）── */
+ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo);
 
 /* ── 读写（非阻塞提交，长度任意；返回 FTL_OK 只表示已受理）── */
 ftl_status_t ftl_submit_read (ftl_context_t *ftl, const ftl_io_request_t *req);
@@ -2965,12 +3046,15 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);
 void         ftl_flush(ftl_context_t *ftl);                     /* v0.58 新增 */
 void         ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count); /* v0.58 加 count */
 
-/* ── 主循环任务（每次 main loop 调用一次）── */
-void ftl_service(ftl_context_t *ftl);
+/* ── 主循环（序 3/4：泵与实例分离）── */
+void ftl_service_pump(void);              /* 实例无关，**每轮只调一次** */
 // Phase 1:   fc_service()             → 推进 FC/NAND 调度
-// Phase 2:   completion_table_drain() → 完成回调 → 路由 pending 表（读回填 / 写记 total_writes）
+// Phase 2:   completion_table_drain() → 完成回调 → 按 ch/ce/lun 路由回各实例
+
+void ftl_service(ftl_context_t *ftl);     /* 对**每个**实例各调一次 */
 // Phase 2.5: ftl_drain_group()        → 补发各组待下发子操作（v0.58；host IO 优先于后台）
-// Phase 3:   三级后台（ftl_service_idle / _normal / _busy，见 §4.8.5）
+//            ftl_wbuf_maybe_flush_idle() → 页打包写缓冲的空闲 flush（v0.66）
+// Phase 3:   三级后台（ftl_service_idle / _normal / _busy）；bg_suspend 置位则整体跳过
 ```
 
 ### 11.3 FTL 内部模块 API
@@ -3082,13 +3166,14 @@ typedef struct {
 } ftl_allocator_t;
 
 /* 真实接口 */
-ftl_status_t allocator_init(ftl_allocator_t *alloc, const ftl_init_params_t *params);
-uint16_t     allocator_select_plane_block(ftl_allocator_t *alloc, uint8_t plane);
+ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
 nand_pba_t   allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
                                   nand_pba_t out[PLANE_NUM]);
 ftl_status_t allocator_alloc_reserved_block(ftl_allocator_t *alloc, uint8_t plane,
                                             uint16_t *out_gblock);
 /* ⚠ allocator_mark_bad 已删除——坏块统一走 bbt_mark_bad()；擦除计数在 BST */
+/* ⚠ 无 allocator_select_plane_block 公开 API——内部 static 助手
+ *   allocator_select_plane_block_from_pool(alloc, plane)（allocator.c）*/
 ```
 
 ### 11.4 性能估算
@@ -3111,69 +3196,78 @@ Write-back flush 代价 ≈ 200~300 μs（一次 NAND program）
 ### 12.1 调度模型概述
 
 ```
-每次 ftl_service() 调用的执行顺序：
+每轮 superloop（序 3/4：泵与实例分离）：
 
   ┌─────────────────────────────────────────────────────────────┐
-  │  ftl_service()                                              │
-  │                                                             │
+  │  ftl_service_pump()          ← 实例无关，每轮只调一次        │
   │  Phase 1 ── fc_service() 最多 NAND_SUBMIT_BUDGET 次         │
   │  ├── 推进 NAND 命令执行                                     │
-  │  └── 计数 submitted（本轮新提交的 NAND 命令数）               │
-  │                                                             │
-  │  Phase 2 ── 处理完成回调                                    │
-  │  ├── while (fc_poll_completion() == OK)                     │
-  │  └── 根据 completion.module 路由到不同 handler               │
-  │                                                             │
+  │  Phase 2 ── completion_table_drain()                        │
+  │  └── 完成回调按命令的 ch/ce/lun 路由回各实例                 │
+  └─────────────────────────────────────────────────────────────┘
+                              ↓  对**每个**实例
+  ┌─────────────────────────────────────────────────────────────┐
+  │  ftl_service(ftl)                                           │
+  │  Phase 2.5 ── ftl_drain_group()（补发各组待下发子操作）      │
+  │  └── ftl_wbuf_maybe_flush_idle()（页打包写缓冲的空闲 flush） │
   │  Phase 3 ── 后台任务（三级模式切换）                          │
   │  ├── IDLE 模式：NAND 完全空闲 → 全力做后台                   │
   │  ├── NORMAL 模式：相对空闲 → 适度做后台                      │
   │  └── BUSY 模式：前台 IO 活跃 → 最小后台                      │
+  │  ⚠ bg_suspend 置位（`bbt --erase` 后）⇒ 整体跳过 Phase 3      │
   └─────────────────────────────────────────────────────────────┘
 ```
 
-**三级模式切换依据**：系统空闲度 = `pending_count(ftl) + completion_table_count()`
-（**未决命令占用**，非 SQ 深度/本轮提交数——B3 起改；旧代理在 host 无 IO 时会被后台
-命令推进误判成 NORMAL/BUSY）。
+**三级模式切换依据**：系统空闲度 = `pending_count(ftl) + pending_group_count(ftl) +
+completion_table_count()`（**未决命令占用**，非 SQ 深度/本轮提交数——B3 起改；旧代理在
+host 无 IO 时会被后台命令推进误判成 NORMAL/BUSY）。`pending_group_count` 是 v0.58 加组
+语义后补上的第三项：**有未完成 host 请求就必须让路**，不能只看子操作槽位。
 
 | 模式 | 条件 | 前台 IO 带宽 | 后台任务带宽 |
 |------|------|------------|------------|
-| IDLE | `inflight == 0`（pending + completion 都空） | 0% | 100% |
-| NORMAL | `pending ≤ FTL_PENDING_MAX/2` | ~70% | ~30% |
-| BUSY | `pending > FTL_PENDING_MAX/2` | ~95% | ~5% |
+| IDLE | `inflight == 0`（pending + groups + completion 都空） | 0% | 100% |
+| NORMAL | 非 IDLE 且 `pending ≤ FTL_PENDING_MAX/2` 且 `queued == 0` | ~70% | ~30% |
+| BUSY | `pending > FTL_PENDING_MAX/2` **或** `queued != 0` | ~95% | ~5% |
 
 ### 12.2 三种后台模式的行为
 
 #### IDLE 模式（NAND 完全空闲）
 
 ```
-触发条件：inflight == 0（pending + completion 都空）
+触发条件：inflight == 0（pending + groups + completion 都空）
 行为：
   flush:    l2p_cache_flush_all()          → 清空所有 dirty
   GC:       ftl_gc_evaluate 命中（T1/T4/T5）⇒ 全力补池到水位①：
-            按「需回收的 SB 数」循环 gc_select_victim → gc_migrate_sb → gc_erase_and_free
-            （**无** refill_free_pool / free_pool 结构）
+            deficit = FREE_POOL_TARGET - free_count；budget = ⌈deficit / PLANE_NUM⌉；
+            循环 ftl_gc_reclaim_one() 直到 budget 用尽或选不出 victim
+            （⚠ 用「需回收的 SB 数」计数，**不是** `target -= 2U`——后者在 deficit 为奇数时
+             uint32 下溢，会把 closed 链上的 SB 全搬全擦；仅 T5 命中时 budget 取 1）
+  WL:       wl_execute()                   → 磨损均衡（IDLE 全力）
+            慢死预测巡检 wl_predictive_relocate()（节流 RR_SCAN_INTERVAL_MS）
   Journal:  journal_flush_page()            → 强制写 journal buffer
-  Checkpoint: 累计写入量够就 checkpoint_create()
+  BBT/Wear: bbt_flush() / wear_flush()      → 攒批持久化
+  Checkpoint: checkpoint_check_trigger() 命中则 checkpoint_create() 并重置 cp_timer_start
 设计思路：NAND 闲着也是闲着，把后台活做完，下次 Host IO 来时系统处于最佳状态
 ```
 
 #### NORMAL 模式（系统相对空闲）
 
 ```
-触发条件：pending ≤ FTL_PENDING_MAX/2
+触发条件：非 IDLE，且 pending ≤ FTL_PENDING_MAX/2 且 queued == 0
 行为：
   flush:    最多 BG_NORMAL_FLUSH_COUNT(4) 条 DIRTY 行
             （⚠ P1-4：l2p_cache_is_thrashing 时停主动 flush，脏行只由驱逐按需写回）
-  GC:       ftl_gc_evaluate 命中（T1/T4/T5）→ 回收一个 victim SB（受节流档）
-  Journal:  不单独 flush（让 page_buf 自然填满）
-  Checkpoint: 检查但不一定执行
+  GC:       ftl_gc_evaluate 命中 → ftl_gc_reclaim_one() 回收**一个** SB（受节流档）
+  WL:       wl_should_trigger() 命中则 wl_execute()
+  BBT/Wear: bbt_flush() / wear_flush()      → 周期性刷入
+  Checkpoint: checkpoint_check_trigger() 命中则 checkpoint_create()
 设计思路：留 NAND 带宽给突发 IO，后台任务"慢慢做"
 ```
 
 #### BUSY 模式（前台 IO 活跃）
 
 ```
-触发条件：pending > FTL_PENDING_MAX/2
+触发条件：pending > FTL_PENDING_MAX/2 **或** queued != 0
 行为：
   flush:    只 flush 1 条 DIRTY（防 evict 阻塞）
   GC:       跳过（BUSY 模式不做 GC）
@@ -3189,26 +3283,44 @@ Write-back flush 代价 ≈ 200~300 μs（一次 NAND program）
 > **均不存在**。以下按 `ftl.c` 真实实现重写。
 
 ```c
-#define NAND_SUBMIT_BUDGET      (4U)     // 每轮最多提交 4 条
+#define NAND_SUBMIT_BUDGET      (4U)     // 每轮 fc_service 最多跑 4 次
 #define BG_NORMAL_FLUSH_COUNT   (4U)
 #define BG_BUSY_FLUSH_COUNT     (1U)
-#define CP_WRITE_INTERVAL       (1024U)
-#define CP_TIME_INTERVAL_MS     (10000U)
+#define CP_WRITE_INTERVAL       (1024U)  // T2：写入量触发间隔
+#define CP_TIME_INTERVAL_MS     (10000U) // T3：定时触发间隔（ms）
+#define GC_EVAL_INTERVAL_MS     (10U)    // GC 求值节拍（v0.68）
+#define GC_LOG_INTERVAL_MS      (1000U)  // GC 触发日志节拍（v0.68）
+#define RR_SCAN_INTERVAL_MS     (1000U)  // 慢死预测巡检节流
 
-void ftl_service(ftl_context_t *ftl) {
-    /* Phase 1: fc_service 推进 NAND（最多 NAND_SUBMIT_BUDGET 次）*/
-    for (int i = 0; i < NAND_SUBMIT_BUDGET; i++) {
+/* 实例无关的每轮泵（superloop 每轮一次） */
+void ftl_service_pump(void) {
+    for (uint8_t i = 0U; i < NAND_SUBMIT_BUDGET; i++) {   /* Phase 1 */
         if (fc_service() != FC_STATUS_OK) break;
     }
+    completion_table_drain();                             /* Phase 2 */
+}
 
-    /* Phase 2: 统一完成泵（替代 fc_poll_completion 循环）*/
-    completion_table_drain();
+/* 单个实例（对每个实例都要调） */
+void ftl_service(ftl_context_t *ftl) {
+    uint16_t inflight, queued;
 
-    /* Phase 3: 三级后台（空闲度 = pending + completion 未决占用）*/
-    uint16_t inflight = (uint16_t)(pending_count(ftl) + completion_table_count());
+    if (ftl == NULL) return;
+
+    /* Phase 2.5: 补发本实例各组的待下发子操作 */
+    for (uint8_t i = 0U; i < FTL_GROUP_MAX; i++) {
+        if (ftl->groups[i].used != 0U) ftl_drain_group(ftl, (uint16_t)i);
+    }
+    ftl_wbuf_maybe_flush_idle(ftl);   /* 页打包写缓冲的确定性空闲 flush */
+
+    /* Phase 3: 三级后台（空闲度 = pending + groups + completion 未决占用）*/
+    queued   = pending_group_count(ftl);
+    inflight = (uint16_t)(pending_count(ftl) + queued + completion_table_count());
+
+    if (ftl->bg_suspend != 0U) return;   /* `bbt --erase` 后整体跳过 Phase 3 */
+
     if (inflight == 0U) {
         ftl_service_idle(ftl);
-    } else if (pending_count(ftl) > FTL_PENDING_MAX / 2U) {
+    } else if ((pending_count(ftl) > FTL_PENDING_MAX / 2U) || (queued != 0U)) {
         ftl_service_busy(ftl);
     } else {
         ftl_service_normal(ftl);
@@ -3217,15 +3329,26 @@ void ftl_service(ftl_context_t *ftl) {
 
 static void ftl_service_idle(ftl_context_t *ftl) {
     l2p_cache_flush_all(&ftl->cache);
-    /* 补 Free Pool 到水位①：循环 gc_select_victim → gc_migrate_sb → gc_erase_and_free */
-    while (ftl->alloc.free_count < FREE_POOL_TARGET) {
-        super_block_t *victim;
-        if (!gc_select_victim(&ftl->alloc, &victim)) break;
-        (void)gc_migrate_sb(&ftl->alloc, &ftl->cache, &ftl->journal, victim);
-        gc_erase_and_free(&ftl->alloc, victim, ftl->total_writes);
+    /* 补 Free Pool 到水位①。⚠ 用「需回收的 SB 数」计数，不是 target -= 2U
+     * （后者在 deficit 为奇数时 uint32 下溢，会把 closed 链全搬全擦）。 */
+    if (ftl_gc_evaluate(ftl) != 0U) {
+        uint32_t deficit = (FREE_POOL_TARGET > ftl->alloc.free_count)
+                               ? (FREE_POOL_TARGET - ftl->alloc.free_count) : 0U;
+        uint32_t budget  = (deficit + (PLANE_NUM - 1U)) / PLANE_NUM;
+        if (budget == 0U) budget = 1U;              /* 仅 T5 命中 ⇒ 只回收一个 */
+        while ((budget > 0U) && (ftl_gc_reclaim_one(ftl) != 0)) budget--;
     }
+    (void)wl_execute(ftl);
+    /* 慢死预测巡检（节流 RR_SCAN_INTERVAL_MS，一次只搬一个 SB） */
+    { uint32_t now = ftl_now_ms();
+      if ((now - ftl->rr_last_scan_ms) >= RR_SCAN_INTERVAL_MS) {
+          ftl->rr_last_scan_ms = now; (void)wl_predictive_relocate(ftl); } }
     journal_flush_page(&ftl->journal);
-    /* checkpoint：累计写入量够则 checkpoint_create() */
+    (void)bbt_flush(&ftl->alloc);
+    (void)wear_flush(&ftl->alloc, ftl->total_writes);
+    { uint32_t now = ftl_now_ms();
+      if (checkpoint_check_trigger(ftl, now - ftl->cp_timer_start)) {
+          (void)checkpoint_create(ftl); ftl->cp_timer_start = now; } }
 }
 
 static void ftl_service_normal(ftl_context_t *ftl) {
@@ -3234,29 +3357,38 @@ static void ftl_service_normal(ftl_context_t *ftl) {
         uint16_t flushed = 0U;
         for (uint16_t i = 0U; (i < L2P_CACHE_SIZE) && (flushed < BG_NORMAL_FLUSH_COUNT); i++) {
             if (ftl->cache.lines[i].state == L2P_CACHE_DIRTY) {
-                (void)l2p_cache_flush_one(&ftl->cache, (int)i);
-                flushed++;
+                (void)l2p_cache_flush_one(&ftl->cache, (int)i); flushed++;
             }
         }
     }
     /* GC：**统一求值点**（与 IDLE 同一函数），命中则回收一个 SB */
     if (ftl_gc_evaluate(ftl) != 0U) { (void)ftl_gc_reclaim_one(ftl); }
+    if (wl_should_trigger(ftl)) { (void)wl_execute(ftl); }
+    (void)bbt_flush(&ftl->alloc);
+    (void)wear_flush(&ftl->alloc, ftl->total_writes);
+    { uint32_t now = ftl_now_ms();
+      if (checkpoint_check_trigger(ftl, now - ftl->cp_timer_start)) {
+          (void)checkpoint_create(ftl); ftl->cp_timer_start = now; } }
 }
 
 static void ftl_service_busy(ftl_context_t *ftl) {
     /* 只 flush 1 条 DIRTY（防 evict 阻塞）*/
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++) {
         if (ftl->cache.lines[i].state == L2P_CACHE_DIRTY) {
-            (void)l2p_cache_flush_one(&ftl->cache, (int)i);
-            break;
+            (void)l2p_cache_flush_one(&ftl->cache, (int)i); break;
         }
     }
     /* 紧急 Checkpoint（Journal ≥ 95%）：BUSY 模式不做 GC */
-    if (checkpoint_is_emergency(ftl)) {
-        (void)checkpoint_create(ftl);
-    }
+    if (checkpoint_is_emergency(ftl)) { (void)checkpoint_create(ftl); }
 }
 ```
+
+> ⚠ **GC 求值有节拍门（v0.68）**：`ftl_gc_evaluate` 内部先查 `GC_EVAL_INTERVAL_MS`（10ms），
+> 未到点直接返回 0。原因是 T5 要遍历全表（`FTL_BLOCK_TOTAL` 个块，≈80KB），而它挂在
+> Phase 3 的 IDLE/NORMAL 两条路径上、主循环又无节拍 ⇒ 改造前是**每轮扫一遍全表**。
+> `gc_eval_last_ms == 0` 作「尚未求值」哨兵：平台时钟缺失时 `ftl_now_ms()` 恒 0，
+> 此时每轮都求值（GC 不能因缺时钟而停摆）。触发日志走**独立节拍** `GC_LOG_INTERVAL_MS`（1s），
+> 行内带 `reclaimed` / `novictim` 两个进展计数——只有它们能区分「在推进」与「卡死」。
 
 ### 12.4 企业级主循环参考
 
@@ -3305,11 +3437,14 @@ void background_scheduler(void) {
 
 | 维度 | 本方案（三级模式） | 企业级方案 |
 |------|-----------------|-----------|
-| 调度粒度 | 按 SQ 深度分三级 | 每个任务独立时间预算 + 间隔 |
+| 调度粒度 | 按**未决命令数**分三级（pending + groups + completion） | 每个任务独立时间预算 + 间隔 |
 | 后台抢占 | Phase 3 整体让路 | 高优任务可打断低优 |
-| 时间控制 | 按"做几条"控制 | 精确到 μs 硬件定时器 |
-| 前台保护 | SQ > 75% 停后台 | NAND 带宽比例动态调节 10~100% |
+| 时间控制 | 按"做几条"控制（另加 GC 求值/日志/巡检三个节拍门） | 精确到 μs 硬件定时器 |
+| 前台保护 | `pending > FTL_PENDING_MAX/2`（**50%**）或 `queued != 0` 停后台 | NAND 带宽比例动态调节 10~100% |
 | 多核 | 无 | CPU0 = 前台 IO, CPU1 = 后台任务 |
+
+> ⚠ 上表早先写「按 **SQ 深度** 分三级 / **SQ > 75%** 停后台」——**已订正**（见 §12.1）：
+> 判据是**未决命令占用**（不是 SQ 深度），阈值是 `FTL_PENDING_MAX/2`（**50%**，不是 75%）。
 
 **企业级反直觉做法——Inline mini-GC**：
 
@@ -3327,7 +3462,7 @@ ftl_write() → allocator_alloc()
 
 > ⚠ **订正**：早期草图用标量 `g_ftl` + `controller_init`/`host_io_pending`。真实 `main.c`
 > 用**数组** `g_ftl[CH_NUM][CE_NUM][LUN_NUM]`（每 `(ch,ce,lun)` 一个独立实例），
-> 逐实例 `ftl_init` 后由 `ssd_ftl_boot_all` 统一启动，主循环只 drain 实例 0；
+> 逐实例 `ftl_init` 后由 `ssd_ftl_boot_all` 统一启动，主循环**遍历全部实例**调 `ftl_service`；
 > 主机侧入口是 **UART CLI**（`cli_service_poll`），NVMe host 层已于 v0.47 删除。
 > `controller_init` / `host_process_requests` / `cpu_sleep` 均**不存在**。
 
@@ -3379,30 +3514,35 @@ int main(void) {
 ### 13.2 FTL 写数据的标准序列
 
 ```c
-nand_paa_t ftl_write_data(lba_t lba, const uint8_t *data, uint32_t len) {
-    fc_command_t *cmd = fc_command_alloc();
+/* 真实形态：FTL 侧由 ftl_fc_interface 的 helper 组装，见 ftl_fc_interface.c */
+fc_command_t *cmd = fc_command_alloc();
 
-    cmd->config.operation    = OP_NORMAL_PROGRAM_PAGE;
-    cmd->config.cw           = 3;                 // 4 CW per page
-    cmd->config.crc          = FC_CRC_ENABLE;
-    cmd->config.random       = FC_RANDOM_ENABLE;
-    cmd->config.ldpc         = FC_ECC_MODE_BCH;
-    cmd->config.page_type    = FC_PAGE_TYPE_LP;
-    cmd->config.module       = FC_COMMAND_MODULE_FTL;
-    cmd->paa                 = new_paa;           // allocator 分配
-    cmd->lba                 = lba;               // 写入 META
+cmd->config.operation    = OP_NORMAL_PROGRAM_PAGE;
+cmd->config.crc          = FC_CRC_ENABLE;
+cmd->config.random       = FC_RANDOM_ENABLE;   /* 用户数据加扰；元数据 DISABLE */
+cmd->config.ldpc         = FC_ECC_MODE_BCH;
+cmd->config.page_type    = FC_PAGE_TYPE_LP;    /* SLC */
+cmd->config.module       = FC_COMMAND_MODULE_FTL;
+cmd->paa                 = pba_to_paa(pba);    /* allocator 分配的 PBA → 芯片内 PAA */
+cmd->meta                = (DWORD)(cfg->lba << CW_WIDTH);  /* ★ META = 本命令的扇区 LBA
+                                                *   （v24；**没有** cmd->lba 字段）*/
 
-    ftl_cmd_configure_descriptors(cmd);   // v13 前为 fc_command_configure_descriptors
-    ftl_cmd_write_data(cmd, data, len);   // v13 前为 fc_write_cmd_data
+ftl_cmd_configure_descriptors(cmd, cw_bitmap); /* ★ v28 起**两参**：位图作形参
+                                                *   （v23 起 config.cw 已不参与建链）*/
+ftl_cmd_write_data(cmd, data, len);            /* v13 前为 fc_write_cmd_data */
 
-    fc_submit(cmd);                               // → SQ
-    // ftl_service() 中 fc_poll_completion 会拿到完成状态
-    // 检查 completion.status0~3, ecc_bit0~3
-    // 成功后 journal_append + l2p_cache_write
+fc_submit(cmd);                                // → SQ
+// 完成经 completion_table 路由（ftl_handle_completion），检查 per-CW status/ECC
+// 成功后 journal_append + l2p_cache_write（modify-after-confirm）
 
-    fc_command_release(cmd);
-}
+fc_command_release(cmd);
 ```
+
+> ⚠ **三处易错**（早期文档写错、照抄会编译或行为失败）：
+> ① **没有 `cmd->lba`** —— META 字段名是 `cmd->meta`（本命令的扇区 LBA，v24 起）；
+> ② **`ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 是两参**（v28），位图由 FTL 的
+>    `ftl_cw_span_mask` / `ftl_cmd_plane_span_cw_bitmap` 算出；
+> ③ **`cmd->config.cw` 自 v23 起不被建链读取**（仍被 FC 的 RAID stripe 读取）。
 
 ### 13.3 FTL 应当避免的操作
 
@@ -3425,7 +3565,7 @@ nand_paa_t ftl_write_data(lba_t lba, const uint8_t *data, uint32_t len) {
 |---|--------|------|------|
 | D1 | LBA 粒度 | **512B** | 一个 CW 的 USER 数据区（FC_BUFFER_USER_SIZE），CW 大小 = PAGE_SIZE / 4 |
 | D2 | 几何模型 | **统一到 nand_config.h** | 废弃 `config/nand_geometry.h`，FTL 直接用 nand_config.h 的宏 |
-| D3 | 地址类型 LBA | `lba_t` = **uint32_t** | Host 逻辑地址，传入 cmd->lba 用于 META 校验；替代 `ssd_lba_t`（uint64_t） |
+| D3 | 地址类型 LBA | `lba_t` = **uint32_t** | Host 逻辑地址，经 `cmd->meta` 写入页内 META（**无 `cmd->lba` 字段**，v24）；替代 `ssd_lba_t`（uint64_t） |
 | D4 | 地址类型 PBA | `nand_pba_t` = **uint32_t** | 完整物理地址，L2P 映射的目标值，含拓扑（CH/CE/LUN）+ 芯片内地址（PAA）。⚠ `pba_t` 已于 v0.20 删除 |
 | D5 | 地址类型 PAA | `nand_paa_t` = **uint32_t** bitfield | 芯片内地址 [CW:2][PAGE:6][PLANE:1][BLOCK:11]；替代 `ssd_ppa_t`（uint64_t）|
 | D5 | FTL 提交模型 | **非阻塞异步提交** | ftl_submit_*() 立即返回，ftl_service() 驱动完成 |
@@ -3443,7 +3583,7 @@ nand_paa_t ftl_write_data(lba_t lba, const uint8_t *data, uint32_t len) {
 | 缩写 | 全称 | 阶段 | 用途 | 你的代码中对应 |
 |------|------|------|------|--------------|
 | LAA | Logical Application Address | Host → Controller | 应用程序下发的原始逻辑地址 | UART CLI 的 `lba` 参数（本项目 Host 为 UART CLI，无 NVMe）|
-| LBA | Logical Block Address | L2P 索引 | 行业标准逻辑地址，`cmd->lba` 用于 META 校验 | `cmd->lba` |
+| LBA | Logical Block Address | L2P 索引 | 行业标准逻辑地址，经 `cmd->meta` 写入页内 META 供校验 | `cmd->meta`（v24 前的 `cmd->lba` 已改名） |
 | PBA | Physical Block Address | L2P 映射值 | 完整物理地址，含拓扑路由（CH/CE/LUN）+ 芯片内地址（PAA）| FTL 层 `nand_pba_t`（**只活在 FTL 内部**，v47 起不跨进 FC）|
 | PAA | Physical Array Address | NAND 芯片寻址 | 芯片内地址（Block + Plane + Page + CW），不含拓扑 | `nand_paa_t` |
 | FAA | （本项目曾用） | — | 原代码中 `cmd->faa` 曾用名，现统一为 LBA | 已废弃 |
@@ -3456,8 +3596,8 @@ Host（UART / NVMe）
   ▼
 FTL
   │ LBA → L2P → PBA（完整物理地址）
-  │ PBA(uint32_t) = [CH:?][CE:?][LUN:?][PAA]
-  │                = [CH:?][CE:?][LUN:?][BLOCK:11][PLANE:1][PAGE:6][CW:2]
+  │ PBA(uint32_t) = [CH:2][CE:2][LUN:2][CW:2][PLANE:1][PAGE:6][BLOCK:11]
+  │                （低位→高位；**PBA 的 PLANE 在 PAGE 之下**，与 PAA 相反）
   │
   │ FTL 从 PBA 拆出（v47：转换全部发生在 **FTL 侧**，FC 层只认 PAA）：
   │   cmd->config.ch/ce/lun = PBA 高位（路由到哪个 NAND 芯片）
@@ -3475,15 +3615,27 @@ NAND Chip（由 CH/CE/LUN 选中的那颗芯片）
 ```
 PBA(uint32_t):
   ┌──────────┬──────────┬──────────┬────────────────────────────┐
-  │ CH(2b)   │ CE(2b)   │ LUN(2b)  │     PAA(20b)               │
+  │ CH(2b)   │ CE(2b)   │ LUN(2b)  │  PBA 低 20 位              │
   │ 路由信息  │ 路由信息  │ 路由信息  ├─────┬──────┬──────┬──────┤
-  │          │          │          │ CW │ PAGE │PLANE│BLOCK │
-  │          │          │          │ 2b │  6b  │ 1b  │ 11b  │
+  │          │          │          │ CW │PLANE │ PAGE │BLOCK │
+  │          │          │          │ 2b │ 1b   │  6b  │ 11b  │
   └──────────┴──────────┴──────────┴────┴──────┴──────┴──────┘
 
-cmd->lba = Host 逻辑地址（用于 META 校验，不参与地址路由）
-cmd->paa = PAA（芯片内地址）= pba_to_paa(PBA)   ← v47：FC 层唯一的物理地址字段
+PAA（芯片内地址，与 PBA 低 20 位**位序不同**）:
+  ┌─────┬──────┬──────┬──────┐
+  │ CW │ PAGE │PLANE │BLOCK │        ← PAA 是 PLANE 在 PAGE 之上
+  │ 2b │  6b  │ 1b   │ 11b  │
+  └────┴──────┴──────┴──────┘
+
+cmd->meta = Host 逻辑地址（本命令的扇区 LBA，用于 META 校验，不参与地址路由）
+cmd->paa  = PAA（芯片内地址）= pba_to_paa(PBA)   ← v47：FC 层唯一的物理地址字段
 ```
+
+> ⚠ **PBA 低 20 位不是 PAA**：两者 `PLANE`/`PAGE` 位序**相反**（见
+> `cw_level_mapping_design.md §4.1`），`pba_to_paa()` 是**真正的字段重排**、不是掩码截取。
+> 早先本图把 PBA 低 20 位直接标成 `[CW][PAGE][PLANE][BLOCK]` 是**错的**——照它手算地址
+> 或写掩码会得到错 plane / 错页。两套空间必须走 `pba_from_addr` / `paa_from_addr` /
+> `pba_to_paa` 构造函数（v24/v47 教训：历史上 10+ 处现场转换都在静默算错地址）。
 
 #### 13.4.2 FTL 主循环形态
 
@@ -3529,7 +3681,7 @@ void main(void)
 | 1 | Region 物理存储：固定 vs 动态元数据 block | 固定简单但磨损集中 | ⚠️ **部分解决（v0.50 订正）**：Anchor/Checkpoint/BBT 落**固定块池**（32/8/2 块，池内环内轮转 + 池满擦旧块），**不是**动态分配；只有 L2P region 日志块走动态分配（从 Free Pool 取整块）。原「✅ 已解决」不成立——`metadata_dir_alloc_region` 因 `fill_fixed` 预登记全部 region 而**不可达**，见 §3.3 订正注 |
 | 2 | Journal 可靠性：journal 本身怎么防掉电 | journal page program 到一半掉电 | ✅ 四层保护（见 §7.6） |
 | 3 | 启动加载策略：加载 checkpoint 全表还是按需 miss | 启动延迟 vs 首次访问延迟 | ✅ 已解决（见 §8.3）：干净关机按需 miss，异常掉电批量回放 |
-| 4 | Journal 回收时机 | 需要确保 L2P 表已同步 | ✅ 已解决（见 §7.5）：三级触发（水位线 85%/95% + 写入量 4096 + 定时 10s） |
+| 4 | Journal 回收时机 | 需要确保 L2P 表已同步 | ✅ 已解决（见 §7.5）：三级触发（水位线 85%/95% + 写入量 **1024** + 定时 10s） |
 | 5 | L2P 表磨损：元数据 block 擦除是否超过数据 block | 寿命不均衡 | ⚠️ **订正（v0.50）**：Anchor 池每块擦一次需 ≈65,536 次主机写（8 份/块）⇒ 磨损是数据块的 **8×**（≈13 TB 全盘写），**不是**「几乎无磨损」。本仓磨损不是约束，选池大小是为**主控形态**而非磨损优化，详见 §14.1 |
 | 6 | 多 Plane 下 region 分布：是否跨 plane 并行写入 | L2P 写回性能 | ✅ 已解决（见 §5.6）：偶/奇 Region 交错 Plane 0/1，Multi-Plane flush 并行，速度翻倍 |
 
@@ -3617,7 +3769,7 @@ JOURNAL_BLOCKS: 2 → 4
 | **增大 JOURNAL_BLOCKS**（初稿推荐，最简单）| ✅ 已落地（= 4 块）|
 | **Region 更新合并**（同一 Region 多次写合并为一次 flush）| ✅ **本就固有**——region cache 把同 region 的多次写合并进一条脏行，只 flush 一次；无需改动。**额外**在 **Journal 条目**粒度实现了「同一 LBA 合并」（`journal_append` 就地更新）——覆盖写工作集下减少 Journal 页数 |
 | **消除环形块双倍擦除**（v0.54 新增）| ✅ `journal_truncate` 改为**预擦除 + 记账**，`flush_page` 回切跳过 ⇒ 同一块每圈只擦一次（旧实现双擦，凭空多 ~25% 磨损）|
-| **Checkpoint 批量写**（统一更新多个 Region，分摊元数据 GC 开销）| 未做（登记）——与 P0-2 的元数据写模型相关，非 P1 范围 |
+| **Checkpoint 批量写**（统一更新多个 Region，分摊元数据 GC 开销）| 未做（登记）——与 P0-2 的元数据写模型相关，非 P1 范围。⚠ 已有的相近能力：`checkpoint_flush_dirty_regions()`（static）按 region 脏位图**只 flush 本轮改过的 region**（跳过未改的），但每个 region 仍各自写一页，**不是**本条所指的「合并到一次元数据 GC」|
 
 ---
 
@@ -3653,7 +3805,8 @@ JOURNAL_BLOCKS: 2 → 4
 
 ### 15.3 硬件依赖审查
 
-所有设计功能中，除 BBT 出厂扫描需要 FC 支持 OOB/Spare 区读取外，其余功能均为纯软件逻辑，当前 FC 层和硬件平台已全部支持：
+所有设计功能均为纯软件逻辑，当前 FC 层和硬件平台已全部支持
+（BBT 出厂扫描所需的 OOB/Spare 读取由 **v63** 的 `ftl_sync_read_column` 提供）：
 
 | 功能 | 硬件依赖 | 状态 |
 |------|---------|------|
@@ -3662,7 +3815,7 @@ JOURNAL_BLOCKS: 2 → 4
 | CRC-32 | FC 数据路径 | ✅ FC Phase L 已实现 |
 | Random 加扰 | FC 数据路径 | ✅ FC Phase J 已实现 |
 | DMA 传输 | FC/NAND 层 | ✅ FC Phase F/G/H 已实现 |
-| OOB/Spare 区读写 | FC 接口 | ⚠️ 需确认/添加 |
+| OOB/Spare 区读 | FC 接口 | ✅ `ftl_sync_read_column`（`OP_READ_COLUMN`，任意列偏移读 4B，v63）|
 
 ### 15.4 与企业/消费级的一致性
 
@@ -3680,7 +3833,7 @@ BBT Sparing ✅    Block Skip                     Stripe Skip + Sparing
 三级主循环 ✅     类似                            硬件时间预算调度器
 ```
 
-**结论**：本方案与消费级 DRAM-less SSD 主流做法一致，定位合理。没有"为了炫技而做的无用功能"，也没有"当前硬件无法支持的设计"。唯一的缺口是 FC 层的 OOB 读写接口。
+**结论**：本方案与消费级 DRAM-less SSD 主流做法一致，定位合理。没有"为了炫技而做的无用功能"，也没有"当前硬件无法支持的设计"。~~唯一的缺口是 FC 层的 OOB 读写接口~~ —— ✅ 该缺口已由 v63 的 `ftl_sync_read_column` 补上（见 §3.8.1）。
 
 ### 15.5 实施顺序与当前状态
 
@@ -3713,7 +3866,8 @@ Step 4 — Journal
   ├── include/ftl/journal.h               ✅ 固定池 Block 58~61（= CW_NUM）环形
   ├── src/ftl/journal.c                   ✅ flush_page（NAND 写）+ replay（扫描回放）
   │                                       ✅ Header [magic+page_seq+entry_count+block_seq]
-  │                                       ✅ journal_truncate（擦除非当前 Block）
+  │                                       ✅ journal_truncate（**预擦除**环形最旧块并记账，v0.54；
+  │                                          实际擦除收敛到 journal_flush_page 回切进入新块时）
   └── 开放常量移至 .h                      ✅ JOURNAL_MAGIC / JOURNAL_HEADER_SIZE
 
 Step 5 — GC + ftl_service 主循环
@@ -3751,7 +3905,7 @@ Step 8 — Checkpoint
 Step 9 — BBT（Bad Block Table）
   ├── include/ftl/bbt.h                   ✅ Bitmap 4096 bit（一条 record = 1 页）
   └── src/ftl/bbt.c                       ✅ bbt_init（加载/出厂扫描）+ bbt_mark_bad + bbt_save
-                                           ✅ 扫描策略：LDPC_RAW 读 Page 0 检测坏块
+                                           ✅ 扫描策略：读 Page 0 **列 2048 的 spare 首字节**判坏块（v63）
                                            ✅ BBT 池 56..57 轮转（块满擦下一块）
 
 Step 10 — Read Recovery
@@ -3760,7 +3914,7 @@ Step 10 — Read Recovery
                                            ✅ Stage 2: 邻近页辅助（page±1 读验证）
                                            ✅ Stage 3+: XOR/RAID 预留
                                            ✅ ECC 预测性坏块检测（rr_check_predictive）
-                                           ⚠️ rr_record_ecc 未接入读完成路径（需 timer + completion）
+                                           ✅ rr_record_ecc 已接入读完成路径（ftl_handle_completion 读成功后）
 
 Step 11 — Power Failure Recovery
   ├── include/ftl/power_failure_recovery.h ✅ 三类启动类型枚举 + 结果结构体
@@ -3770,7 +3924,7 @@ Step 11 — Power Failure Recovery
                                             ✅ 扫描 Journal header 判断（不调 replay，不破坏状态）
 
 Step 12 — Wear Leveling
-  ├── include/ftl/wear_leveling.h         ✅ 动态（alloc 选低擦除）+ 静态（三星 Daemon）
+  ├── include/ftl/wear_leveling.h         ✅ 动态（alloc 选低擦除）+ 静态（三条件触发的冷数据搬移）
   └── src/ftl/wear_leveling.c             ✅ 三条件触发（差值/比值/低区占比）
                                            ✅ wl_select_victim（选有效页多+擦除少的冷 Block）
                                            ✅ wl_relocate（读→L2P查→写→Journal→擦→归还）
@@ -3799,8 +3953,8 @@ Step 12 — Wear Leveling
 |------|------|------|
 | Controller 层 | `state_machine.c` / `scheduler.c` | 状态机、优先级调度（`request.c` 已在 v0.23/v0.36 实现——拆分 + 跨实例路由，非桩）→ ✅ v0.47 已落地（最小状态机 + 调度钩子） |
 | Platform BSP | `timer.c` / `uart.c` / `cache.c` / `dma.c` / `interrupt.c` | 硬件外设驱动（已有 soc.h + DWT 实现）|
-| NVMe Host | ~~`nvme_admin.c` / `nvme_io.c` / `submission_queue.c` / `completion_queue.c`~~ | ~~NVMe 协议层~~ **已删除（v0.47）**：学习主控不实现（D10），Host 命令来源 = UART CLI（`usart.c` wr/rd/tr/fl/info） |
-| 平台计时钩子 | `ssd_platform_ops_t.time_us`（platform.h 已定义，stm32h743 未注册） | Checkpoint T3 定时 + cp.timestamp 接线（见 v0.37 遗留）。⚠ GC 侧已无定时触发（v0.63 删 T3）|
+| NVMe Host | ~~`nvme_admin.c` / `nvme_io.c` / `submission_queue.c` / `completion_queue.c`~~ | ~~NVMe 协议层~~ **已删除（v0.47）**：学习主控不实现（D10），Host 命令来源 = UART CLI（`src/controller/cli.c`：`wr/rd/tr/fl/wp/info/map/crash/bbt/test`） |
+| 平台计时钩子 | `ssd_platform_ops_t.time_us`（platform.h）| ✅ **已注册**：`main.c` 在 NAND 就绪后调 `stm32_platform_register()`，供 Checkpoint T3 定时用。⚠ GC 侧已无定时触发（v0.63 删 T3）|
 
 **FTL 层 22 个源文件，0 个 `#warning` 核心桩。全部模块已实现并通过编译。**
 
@@ -3815,7 +3969,7 @@ Step 12 — Wear Leveling
 | **Step 1** (v0.28) | 地址双层化：`nand_addr_t`（展开）+ `pba_from_addr/addr_from_pba/addr_from_paa` 双向转换；`super_block_t` 加 `topo` + `super_block_page_addr`；`addr_to_cmd` 直填 | — | nand_config.h / allocator.h / ftl_fc_interface.h |
 | **Step 2** (v0.28) | 删除 4 个 `ftl_internal_*` 同步包装（-232 行），各模块内联 static sync 助手 | 7 → 0 | ftl_fc_interface.c + 9 模块 |
 | **Step 3** (v0.29) | `ftl_submit_read/write(ftl, req)`；`ftl_pending_req_t` 按值嵌入 `io`；`pending_cb_t` 迁至 ftl_types.h | 8→2 / 12→6 | ftl_types.h / pending.h / ftl.h / controller |
-| **Step 4** (v0.30) | `ftl_init` / `allocator_init(ftl, params)`；`ftl_init_params_t` 定义于 allocator.h | 7→2 / 8→2 | ftl.h / allocator.h / ftl.c |
+| **Step 4** (v0.30) | `ftl_init` / `allocator_init(ftl, params)`；`ftl_init_params_t` 定义于 allocator.h ⚠ **v0.65 (P2-5) 已删该结构体**：`ftl_init(ftl, topo)` / `allocator_init(alloc, topo, tables)`，大表由 `ftl_context_t.tables` 自持 | 7→2 / 8→2 | ftl.h / allocator.h / ftl.c |
 
 **地址体系（最终态）**：
 
@@ -3843,10 +3997,10 @@ nand_paa_t（芯片内地址）                = [LUN][BLOCK][PLANE][PAGE][CW]
 | Journal | 固定 **Block 58-61** 四 Block 环形，SRAM buffer + flush_page，Header 4 字段 | ✅ |
 | GC | 7 步搬移：读 META→查 L2P→分配 Cold→写→L2P→Journal，贪心 victim | ✅ |
 | Checkpoint | 全量 L2P 快照 + **池 48-55（8 块，一条 1 页，环内轮转）** + 布局版本，Journal 截断协同，三级触发 | ✅ |
-| BBT | 出厂扫描（LDPC_RAW）+ **池 56-57（2 块，一条 1 页，环内轮转）** + 运行时标记 | ✅ |
+| BBT | 出厂扫描（读 Page 0 列 2048 的 spare 首字节，v63）+ **池 56-57（2 块，一条 1 页，环内轮转）** + 运行时标记 | ✅ |
 | Read Recovery | Read Retry（8 次）+ 邻近页辅助 + ECC 趋势预测 + 4 级健康状态 | ✅ |
-| Power Failure Recovery | 三类启动判断 + 写指针 NAND 扫描 | ✅ |
-| Wear Leveling | 动态（alloc 选低擦除）+ 静态三星 Daemon（三条件触发）| ✅ |
+| Power Failure Recovery | 三类启动判断 + **F2 全扫 NAND 重建**（v0.65：原「写指针扫描」已删） | ✅ |
+| Wear Leveling | 动态（alloc 选低擦除）+ 静态（三条件触发的冷数据搬移）| ✅ |
 | Metadata Directory | Anchor **池 16-47（32 块，环内轮转）** + 布局版本，L2P Region 双 Plane 交错 | ✅ |
 | Pending Request 表 | 32 项固定表，command_id + LBA lookup，支持 complete_flag 通知 | ✅ |
 | ftl_service 主循环 | 三级模式（IDLE/NORMAL/BUSY），GC/WL/Checkpoint 集成 | ✅ |
@@ -3861,10 +4015,10 @@ nand_paa_t（芯片内地址）                = [LUN][BLOCK][PLANE][PAGE][CW]
 
 | 编号 | 问题 | 解决方案 |
 |------|------|---------|
-| D4 | **多 LBA 拆分** | ✅ **方案 A — Controller 层拆分**（D7 修正：ftl_submit_read/write 加回 pages 参数支持 Multi-Plane） |
-| D5 | **写失败回滚** | ✅ **modify-after-confirm + BBT 两阶段 + 自动回滚**：`journal_append`/`l2p_cache_write` 移到 completion handler 确认路径；pending 表加 old_pba/new_pba/ftl 字段；写失败→`bbt_mark_bad` RAM only，后台 `bbt_flush` 批量持久化 BBT；L2P 不动=自动回滚 old_pba；Super Block 空洞由 GC 自然跳过 |
+| D4 | **多 LBA 拆分** | ✅ **方案 A — Controller 层按实例边界切 run**（v0.58：`pages` 参数已删，FTL 用 `count` 自拆 plane） |
+| D5 | **写失败回滚** | ✅ **modify-after-confirm + BBT 两阶段 + 自动回滚**：`journal_append`/`l2p_cache_write` 移到 completion handler（`ftl_confirm_write`）确认路径；pending 记 `new_pba`/`new_pba1`（⚠ v0.58 起**不存** `old_pba`——旧 PBA 完成时按 LBA 重查 L2P）；写失败→`bbt_mark_bad` RAM only，后台 `bbt_flush` 批量持久化 BBT；L2P 不动=自动回滚；Super Block 空洞由 GC 自然跳过 |
 | D6 | **队列深度/背压** | ✅ **pending 表满即隐式背压（DRAM-less 消费级）**：见下方 §17 D6 详细分析 |
-| D7 | **多命令流水线** | ✅ **Multi-Plane + Cache Program 安全中间页**：见下方 §18 D7 详细分析 |
+| D7 | **多命令流水线** | ✅ **Multi-Plane + 页打包写缓冲 + Cache Program 安全中间页**：见下方 §18 D7 详细分析 |
 | D8 | **错误通知粒度** | ✅ **status_out 指针（消费级 DRAM-less）**：见下方 §19 D8 详细分析 |
 
 ### 剩余待办（对外接口）
@@ -3874,10 +4028,10 @@ nand_paa_t（芯片内地址）                = [LUN][BLOCK][PLANE][PAGE][CW]
 | 编号 | 问题 | 说明 |
 |------|------|------|
 | D3 | **LBA 地址体系统一** | ssd_lba_t(uint64_t) 已废弃删除（v0.20 死代码清理），当前 lba_t=uint32_t 统一；`ftl_io_request_t.lba` 保留 uint64_t（NVMe 协议宽度）。剩余问题：UART/NVMe host 层入参宽度与 lba_t 的边界 |
-| D4 | **多 LBA 拆分** | ✅ 已实现 — Controller 层拆分，`request.c` → `on_sub_complete` 回调聚合，FTL 层保持单页原语 |
+| D4 | **多 LBA 拆分** | ✅ 已实现 — Controller 层按实例边界切 run，FTL 内部 `ftl_drain_group` 自拆 plane |
 | D5 | **写失败回滚** | ✅ 已实现 — modify-after-confirm + BBT 两阶段 + 自动回滚 |
 | D6 | **队列深度/背压** | ✅ 已实现 — pending 表满即隐式背压（DRAM-less 消费级），不需额外机制 |
-| D7 | **多命令流水线** | ✅ 已实现 — Multi-Plane（写总是双 Plane）+ pages 参数修正 D4 + Cache Program 安全中间页 |
+| D7 | **多命令流水线** | ✅ 已实现 — Multi-Plane（v0.66 起单/双 plane 由**页打包窗口占用**决定）+ Cache Program 安全中间页 |
 | D8 | **错误通知** | ✅ 已实现 — status_out 指针传递 SSD_STATUS_OK/IO_ERROR，消费级完成状态通知 |
 
 ## 17. D6 队列深度/背压方案详细分析
@@ -4076,6 +4230,18 @@ Pending 表   32     D4 拆分 block_count=8 时占用 8/32
 
 ## 18. D7 多命令流水线方案详细分析
 
+> ⚠ **订正（v0.58/v0.66）**：本章是 **v0.29 时代**的设计记录，其核心结论「加回 `pages` 参数
+> 让 FTL 知道 plane 数」**已被推翻**：
+> - **v0.58**：`ftl_io_request_t.pages` **已删除**，长度即 `count`；plane 配对由 **FTL 内部**
+>   决定（「访问哪些物理单元属 FTL，不属 HIL」，见 `ftl_host_interface.md §A.1`）。
+> - **v0.66**：单/双 plane 进一步由**页打包写缓冲**（`ftl_wbuf_t`）的窗口占用决定——
+>   同一 pair 窗口的多次写攒成一页再编程，`nplanes = popcount(wbuf.occupied 逐 plane 段)`。
+> - 因此下文 §18.6「修正 D4：加回 pages 参数」、§18.7「Controller 层配对策略」、
+>   §18.8「波及的文件」中关于 `pages` 的部分**均为过时设计**，保留作历史；
+>   当前写序见 §7.3，接口见 §13.2 与 `ftl_host_interface.md Part B`。
+> - §18.3 的 **NAND 时序分析**（Multi-Plane / Cache Program / ISSUE-WAIT）与
+>   §18.4 的互斥关系**仍然有效**，与 `pages` 之争无关。
+
 ### 18.1 问题背景
 
 D4 实现了多 LBA 拆分，但 FTL 接口的 `count` 参数被完全删除，导致 FTL 无法得知单次操作涉及几个 Plane。D4 的设计假设"FTL 只做单页原语"过于绝对——Multi-Plane 操作中，FTL 必须知道 pages 数才能配置正确的 OP 码和 multi_plane 字段。
@@ -4097,7 +4263,7 @@ D4 实现了多 LBA 拆分，但 FTL 接口的 `count` 参数被完全删除，�
 | `PAGES_PER_BLOCK` | 64 | Super Block 容量 = 64 页 |
 | Super Block 结构 | `plane_blocks[2]` | 两个 Plane 各一个 Block，配对写入 |
 | FC `multi_plane` 字段 | 3 bit | 0=single, N=N-plane desc 数 × N |
-| FC OP 码 | 已定义 `OP_PROGRAM_PAGE_MULTI_PLANE(31)`, `OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT(30)` | FTL 层全部用 `OP_NORMAL_*` |
+| FC OP 码 | 已定义 `OP_PROGRAM_PAGE_MULTI_PLANE(31)`, `OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT(30)` | ✅ FTL 写路径已按 `nplanes` 选用 `OP_PROGRAM_PAGE_MULTI_PLANE` / `OP_NORMAL_PROGRAM_PAGE` |
 | `FC_SQ_DEPTH` | 64 | 命令队列 |
 
 ### 18.3 三种流水线技术分析
@@ -4214,9 +4380,12 @@ FTL 层:
 
 ### 18.6 实现方案
 
-#### 修正 D4：加回 pages 参数
+#### ~~修正 D4：加回 pages 参数~~（⚠ 已推翻，见本章开头订正）
 
 D4 将 `count` 完全删除不恰当。FTL 需要知道单次操作涉及的页数以配置正确的 FC 命令参数。
+
+> ⚠ **v0.58 推翻**：真实落地是**保留 `count`、删除 `pages`**——FTL 从 `count` 与页打包窗口
+> 自行推导 plane 数。下面所有 `req->pages` 的用法均为过时设计。
 
 ```c
 // v0.29 签名（8 形参 → 2，ftl_io_request_t 结构体传参）
@@ -4297,14 +4466,14 @@ if (NAND_SUCCESS && buffer == NULL)   // 写完成
 | `sync_write_page/sync_read_page`（各模块内联 static） | 元数据操作不走 Super Block，保持 `multi_plane=0` |
 | `sync_erase_block`（gc/journal 内联） | 擦除 Multi-Plane OP 码（OP_ERASE_BLOCK_MULTI_PLANE）暂不使用 |
 | `gc.c` | GC 逐页搬移，`multi_plane=0` |
-| `ftl_fc_interface.c` | v0.28 起仅保留 `ftl_internal_sync_wait`（统一完成路由） |
+| `ftl_fc_interface.c` | ⚠ 过时说法：v0.28 删的是 4 个 `ftl_internal_*` 同步包装；该文件现含 `ftl_cmd_setup_ppa` / `_pair` / `_pair_cw`、`ftl_cmd_write_data` / `_cw`、`ftl_sync_write_page` / `_cw`、`ftl_sync_read_page` / `_raw`、`ftl_sync_read_meta`、`ftl_sync_read_column`、`ftl_sync_erase_block` 等 |
 
 ### 18.10 结论
 
 | 技术 | 状态 | 实现 |
 |------|------|------|
-| **Multi-Plane 写** | ✅ 已实现 | Super Block 写入总是 pages=2 |
-| **Multi-Plane 读** | ✅ 已实现 | Controller 层连续 LBA 配对 pages=2 |
+| **Multi-Plane 写** | ✅ 已实现 | 页打包窗口覆盖两 plane 时用 `OP_PROGRAM_PAGE_MULTI_PLANE`（v0.66） |
+| **Multi-Plane 读** | ✅ 已实现 | FTL 内部按 `count` 自拆 plane（v0.58 删 `pages`）|
 | **Cache Program** | ✅ 基础设施就绪 | OP 码 + dispatch 表已注册；FTL 层用 `cache_intermediate` 确保掉电安全；实际使用预留 |
 | **ISSUE/WAIT** | ⏳ Phase V 已部分实现 | 多 LUN 时启用 auto-split |
 
@@ -4317,7 +4486,7 @@ if (NAND_SUCCESS && buffer == NULL)   // 写完成
 | P-A.1 | `fc_poll_completion` CQ 深度确认 — 确保 CQ 能同时容纳多 LUN 的完成事件 | 高 |
 | P-A.2 | pending 表扩展 — `FTL_PENDING_MAX` 从 8 增大到 32 ✅ **（v0.31 已实现）** | 高 |
 | P-A.3 | `ftl_write` 同步等待改为 per-cmd sync_waiter — 脱离全局 SQ/CQ 空判定，改用 `completion_table_add` + 等具体 cmd_id | 高 |
-| P-A.4 | `rr_record_ecc` 接入读完成路径 — 当前为 ⚠️ 未接入，需 timer + completion 集成 | 中 |
+| P-A.4 | `rr_record_ecc` 接入读完成路径 — ✅ **已接入**（`ftl_handle_completion` 读成功后调用）| 中 |
 
 #### P-B：Controller / Host 层
 
@@ -4406,8 +4575,8 @@ ftl_init
 3. **功能优先全常驻 → 产品化裁剪**是行业流程；SRAM 压力真实出现 + 字段有消费方后再做，
    届时已知拆谁、有数据驱动
 
-> **当前状态（v0.60）**：BST 全常驻 = **80KB**（条目 20B × 4096，无位图表），AXI_RAM 实用
-> **~255 / 384 KB**（`src/main.c:132-138` 有 `_Static_assert` 兜底）。位图表 64KB（v0.55 独立表）
+> **当前状态（v0.70）**：BST 全常驻 = **80KB**（条目 20B × 4096，无位图表），AXI_RAM 实用
+> **~291.3 / 384 KB**（`src/main.c:131` 有 `_Static_assert` 兜底，见 §2.3）。位图表 64KB（v0.55 独立表）
 > 与冷字段（`program_count`/`gc_generation`）先后删除后，**本裁剪路径已无剩余动作**
 > （详见 `ftl_optimization_plan.md` §8.1 P2-1）。
 
@@ -4427,11 +4596,17 @@ ftl_init
 
 > ⚠️ **注意**：本附录为**旧 Phase 规划时期的历史原型**（v0.22 之前），其中的接口签名
 > （`ftl_init(ftl)`、`allocator_init(alloc, ch, ce, lun, op_percent)`、`ftl_read/write` 同步包装等）
-> **已被 v0.22~v0.30 的实际实现取代**。当前接口以头文件为准：
-> - `ftl_init(ftl_context_t *ftl, const ftl_init_params_t *params)`（v0.30，8 形参 → 2）
+> **已被 v0.22 之后的实际实现取代**。**当前接口一律以头文件为准**，逐条对照见
+> `ftl_api_usage.md`（§1 FTL 对外 API / §2 L2P / §3 Journal / §4 Allocator）。
+> 下面几条是**最容易照抄出错**的：
+> - `ftl_init(ftl_context_t *ftl, ftl_topology_t topo)`（**P2-5：`ftl_init_params_t` 已删除**，
+>   大表由 `ftl_context_t.tables` 自持）
+> - `allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables)`
 > - `ftl_submit_read/write(ftl_context_t *ftl, const ftl_io_request_t *req)`（v0.29）
 > - `ftl_read/ftl_write` 已删除（v0.22 异步化）
-> 下表仅作设计演进追溯。
+> 下表仅作设计演进追溯；其中的 `L2P_REGIONS_TOTAL` / `L2P_REGIONS_PER_LUN` / `L2P_BLOCKS_PER_LUN`
+> 与 `ftl_allocator_t` 旧字段（`bad_blocks` / `erase_counts` / `open_block[]` / `next_page[]`）
+> **均已不存在**。
 
 ### L2P Cache 接口
 

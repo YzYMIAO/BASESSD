@@ -193,7 +193,7 @@ Phase 3   三级后台（IDLE / NORMAL / BUSY）
 
 ### C.3 L2（真 NAND 上板）
 
-UART CLI `wr/rd/tr/fl/info` + **物理断电重启**。CLI 缓冲 16 KB ⇒ `n ≤ 32` 才能通过容量校验；
+UART CLI `wr/rd/tr/fl/wp/info/map/crash/bbt/test` + **物理断电重启**。CLI 缓冲 16 KB ⇒ `n ≤ 32` 才能通过容量校验；
 要上板验证更大请求需先扩大 `g_wr_buf`。完整矩阵见 `hil_ut_design.md` Part B~D。
 
 ---
