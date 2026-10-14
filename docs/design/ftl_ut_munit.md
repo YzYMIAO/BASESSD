@@ -191,8 +191,8 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | `dir_init_entries` | `metadata_dir_init` 后 `count==2048`（= `L2P_REGIONS_PER_INSTANCE`）、全 UNKNOWN |
 | `dir_update_lookup_roundtrip` | `metadata_dir_update` 写一个 region → `metadata_dir_lookup` 回同 entry |
 | `dir_lookup_missing_unknown` | 未写 region → `0xFFFFFFFF`（负例） |
-| `is_metadata_block` | `ftl_is_metadata_block`：**0..62 true、63 false**（边界，判据 8）。区间来自 `g_ftl_partitions[]`：L2P[0,16)+Anchor[16,48)+Ckpt[48,56)+BBT[56,58)+Journal[58,62)+Wear[62,63) ⇒ `FTL_METADATA_BLOCK_END==63`。⚠ **勿写死旧单块布局**（Anchor 33/34、BBT 36/39… 是 P0-2 前的旧值，已随池化失效） |
-| `is_metadata_block_dynamic` | 动态 region：`metadata_dir_update(L2P_REGION, r, paa)` 登记 `block≥63` 后 `ftl_is_metadata_block` 命中；**`md_dir==NULL`** 时仍命中固定区（0..62）、动态块不命中 |
+| `is_metadata_block` | `ftl_is_metadata_block(dir, plane, block)`：**0..62 true、63 false**（边界，判据 8）。区间来自 `g_ftl_partitions[]`：L2P[0,16)+Anchor[16,48)+Ckpt[48,56)+BBT[56,58)+Journal[58,62)+Wear[62,63) ⇒ `FTL_METADATA_BLOCK_END==63`。固定区**与 plane 无关**，用例一律传 `plane=0`。⚠ **勿写死旧单块布局**（Anchor 33/34、BBT 36/39… 是 P0-2 前的旧值，已随池化失效） |
+| `is_metadata_block_dynamic` | 动态 region：`metadata_dir_update(L2P_REGION, r, paa)` 登记 `block≥63` 后 `ftl_is_metadata_block` 命中；**`md_dir==NULL`** 时仍命中固定区（0..62）、动态块不命中。⚠ v0.69 起断言**另一个 plane 的同号块不受掩**（`(d, 1U, 100U) == 0`）——动态日志块取自用户区，只比块号会连 plane1 的用户块一起排除 |
 | `ring_addr_geometry` | `metadata_ring_addr` 纯地址换算：idx∈{0, rpb-1, rpb, 末} → (block,page,plane) 期望值 |
 | `ring_addr_wrap` | 跨 block 边界换算 |
 

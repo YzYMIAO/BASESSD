@@ -903,8 +903,8 @@ nand_paa_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
         }
     }
 
-    plane = (uint8_t)(dir->cur_metadata_block / BLOCKS_PER_PLANE);
-    block = (uint16_t)(dir->cur_metadata_block % BLOCKS_PER_PLANE);
+    plane = ftl_gblock_plane(dir->cur_metadata_block);
+    block = ftl_gblock_block(dir->cur_metadata_block);
     page  = dir->cur_metadata_page;
 
     /* 立即推进：写失败时该页可能已半编程，不可复用（槽被跳过，块内浪费一页）*/
@@ -1219,16 +1219,20 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
 
 /* --------------------------------------------------------------------
  * ftl_is_metadata_block
- *   功能：判定 per-plane 块号 block 是否属于元数据（固定分区 / 当前日志块 / 已登记日志块）。
- *   参数：md_dir —— Directory（可 NULL：只判固定分区）；block —— per-plane 块号。
+ *   功能：判定 (plane, per-plane 块号 block) 是否属于元数据（固定分区 / 当前日志块 /
+ *         已登记日志块）。
+ *   参数：md_dir —— Directory（可 NULL：只判固定分区）；plane —— 物理 plane 号；
+ *         block —— per-plane 块号。
  *   返回：1 是元数据块；0 不是。
  *   实现要点：三分支——
- *     ① 固定分区表遍历（各 (ch,ce,lun) 用同一份块号，分片模型）；
+ *     ① 固定分区表遍历（各 (ch,ce,lun) 用同一份块号，分片模型 ⇒ **不看 plane**）；
  *     ② 当前日志块（刚分配还没 commit，扫 entries 扫不到，必须显式排除）；
  *     ③ 已登记日志块（用 have_dynamic 先挡掉"无动态块"常见情形，避免每次开机
  *        回填数千次调用都全表线性扫）。
+ *   ②③ 是**从用户区动态取的**块 ⇒ 必须带 plane 比较；只比块号会连带掩掉另一 plane
+ *   的同号块（既出不了 free pool、又被 F2 重建跳过，白丢一个可用块）。
  * -------------------------------------------------------------------- */
-int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint16_t block)
+int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, uint16_t block)
 {
     uint32_t p;
     uint16_t i;
@@ -1258,9 +1262,10 @@ int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint16_t block)
     }
 
     /* ── 当前日志块：可能尚无任何 region 指向它（刚分配、还没 commit），
-     *    扫 entries 扫不到 ⇒ 必须显式排除，否则会被 Free Pool 回填当用户块收走。── */
-    if ((md_dir->cur_block_valid != 0U) &&
-        (block == (uint16_t)(md_dir->cur_metadata_block % BLOCKS_PER_PLANE)))
+     *    扫 entries 扫不到 ⇒ 必须显式排除，否则会被 Free Pool 回填当用户块收走。
+     *    cur_metadata_block 是 gblock ⇒ 用 ftl_gblock_* 解码出 plane 一起比。── */
+    if ((md_dir->cur_block_valid != 0U) && (plane == ftl_gblock_plane(md_dir->cur_metadata_block)) &&
+        (block == ftl_gblock_block(md_dir->cur_metadata_block)))
     {
         return 1;
     }
@@ -1276,6 +1281,7 @@ int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint16_t block)
         for (i = 0U; i < md_dir->count; i++)
         {
             if ((md_dir->entries[i].type == METADATA_TYPE_L2P_REGION) &&
+                ((uint8_t)paa_to_plane(md_dir->entries[i].paa) == plane) &&
                 (paa_to_block(md_dir->entries[i].paa) == block))
             {
                 return 1;

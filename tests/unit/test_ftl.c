@@ -155,7 +155,7 @@ static uint16_t ftl_fixture_backfill(ftl_allocator_t *alloc, uint16_t first, uin
         {
             continue;
         }
-        if (ftl_is_metadata_block(NULL, (uint16_t)(g % BLOCKS_PER_PLANE)) != 0)
+        if (ftl_is_metadata_block(NULL, ftl_gblock_plane(g), ftl_gblock_block(g)) != 0)
         {
             continue;
         }
@@ -1551,13 +1551,13 @@ static MunitResult test_meta_is_metadata_block(const MunitParameter params[], vo
 
     for (b = 0U; b < (uint16_t)FTL_METADATA_BLOCK_END; b++)
     {
-        munit_assert_int(ftl_is_metadata_block(d, b), ==, 1);
-        munit_assert_int(ftl_is_metadata_block(NULL, b), ==, 1); /* 固定层不依赖 md_dir */
+        munit_assert_int(ftl_is_metadata_block(d, 0U, b), ==, 1);
+        munit_assert_int(ftl_is_metadata_block(NULL, 0U, b), ==, 1); /* 固定层不依赖 md_dir */
     }
 
-    munit_assert_int(ftl_is_metadata_block(d, (uint16_t)FTL_METADATA_BLOCK_END), ==, 0);
-    munit_assert_int(ftl_is_metadata_block(NULL, (uint16_t)FTL_METADATA_BLOCK_END), ==, 0);
-    munit_assert_int(ftl_is_metadata_block(d, (uint16_t)(BLOCKS_PER_PLANE - 1U)), ==, 0);
+    munit_assert_int(ftl_is_metadata_block(d, 0U, (uint16_t)FTL_METADATA_BLOCK_END), ==, 0);
+    munit_assert_int(ftl_is_metadata_block(NULL, 0U, (uint16_t)FTL_METADATA_BLOCK_END), ==, 0);
+    munit_assert_int(ftl_is_metadata_block(d, 0U, (uint16_t)(BLOCKS_PER_PLANE - 1U)), ==, 0);
 
     return MUNIT_OK;
 }
@@ -1573,7 +1573,7 @@ static MunitResult test_meta_is_metadata_block_dynamic(const MunitParameter para
     (void)params;
     (void)fixture;
 
-    munit_assert_int(ftl_is_metadata_block(d, 100U), ==, 0);
+    munit_assert_int(ftl_is_metadata_block(d, 0U, 100U), ==, 0);
 
     /* 传 alloc = NULL 是安全的：旧位置是固定层（block < 63）⇒ 不走 reclaim */
     metadata_dir_commit_region(d, NULL, r, paa);
@@ -1581,12 +1581,15 @@ static MunitResult test_meta_is_metadata_block_dynamic(const MunitParameter para
     munit_assert_uint32(metadata_dir_lookup(d, METADATA_TYPE_L2P_REGION, r), ==, paa);
     munit_assert_uint8(d->have_dynamic, ==, 1U);
     munit_assert_uint16(d->l2p_live[ftl_gblock(0U, 100U)], ==, 1U);
-    munit_assert_int(ftl_is_metadata_block(d, 100U), ==, 1);
-    munit_assert_int(ftl_is_metadata_block(d, 101U), ==, 0);
+    munit_assert_int(ftl_is_metadata_block(d, 0U, 100U), ==, 1);
+    munit_assert_int(ftl_is_metadata_block(d, 0U, 101U), ==, 0);
+
+    /* 动态日志块取自用户区 ⇒ 判据必须带 plane：另一个 plane 的同号块**不受掩** */
+    munit_assert_int(ftl_is_metadata_block(d, 1U, 100U), ==, 0);
 
     /* md_dir == NULL：固定层仍命中，动态层无从得知 ⇒ 0 */
-    munit_assert_int(ftl_is_metadata_block(NULL, 100U), ==, 0);
-    munit_assert_int(ftl_is_metadata_block(NULL, 10U), ==, 1);
+    munit_assert_int(ftl_is_metadata_block(NULL, 0U, 100U), ==, 0);
+    munit_assert_int(ftl_is_metadata_block(NULL, 0U, 10U), ==, 1);
 
     /* 非法入参（region 越界 / paa 哨兵）不动表 */
     metadata_dir_commit_region(d, NULL, (uint16_t)METADATA_DIR_ENTRIES, paa);

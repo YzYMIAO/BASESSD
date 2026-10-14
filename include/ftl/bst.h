@@ -155,6 +155,17 @@ static inline uint16_t ftl_pba_gblock(nand_pba_t pba)
     return ftl_paa_gblock(pba_to_paa(pba));
 }
 
+/* gblock → plane / per-plane block（ftl_gblock 的逆，单点解码）。 */
+static inline uint8_t ftl_gblock_plane(uint16_t g)
+{
+    return (uint8_t)((uint32_t)g / BLOCKS_PER_PLANE);
+}
+
+static inline uint16_t ftl_gblock_block(uint16_t g)
+{
+    return (uint16_t)((uint32_t)g % BLOCKS_PER_PLANE);
+}
+
 /* ── 坏块位操作（BST 单数据源；NAND 持久化仍走 bbt_header_t.bad_map）── */
 
 static inline int ftl_block_is_bad(const ftl_block_t *b)

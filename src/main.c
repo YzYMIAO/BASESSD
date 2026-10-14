@@ -196,8 +196,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         {
             continue;
         }
-        if (ftl_is_metadata_block(&ftl->metadata_dir,
-                                  (uint16_t)(gblock % BLOCKS_PER_PLANE)))
+        if (ftl_is_metadata_block(&ftl->metadata_dir, ftl_gblock_plane(gblock), ftl_gblock_block(gblock)))
         {
             continue;
         }

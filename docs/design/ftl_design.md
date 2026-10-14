@@ -2653,8 +2653,10 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     /* ① Cache 全 INVALID */
     l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
-    /* ② Journal 回放：所有 page_seq > cp_sequence 的页（F10），写入 cache（DIRTY）*/
-    (void)journal_replay(&ftl->journal, &ftl->cache, cp_sequence);
+    /* ② Journal 回放：所有 page_seq > cp_sequence 的页（F10），写入 cache（DIRTY）。
+     *    entry_count 由回放循环累加（v0.69）——旧实现用 journal 的 RAM 写指针反推，
+     *    而末尾 journal_resume 会把 current_entry 清零 ⇒ 恒为 0。 */
+    (void)journal_replay(&ftl->journal, &ftl->cache, cp_sequence, &entry_count);
 
     /* ③ 按 Checkpoint region_bitmap 局部加载（F4）：
      *    跳过 DIRTY 回放行；bitmap 置位区预载 CLEAN；未置位区 INVALID（懒加载 CP 快照）*/
@@ -3026,8 +3028,9 @@ typedef struct {
 void         journal_init(l2p_journal_t *journal, ftl_topology_t topo);
 void         journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old, nand_pba_t new);
 void         journal_flush_page(l2p_journal_t *journal);
-/* F10：全量回放 page_seq > cp_sequence 的页，按 (page_seq, entry_index) 递增序应用 */
-ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence);
+/* F10：全量回放 page_seq > cp_sequence 的页，按 (page_seq, entry_index) 递增序应用。
+ * v0.69：out_entries 回填**实际应用成功的条目数**（读失败的页不计），可为 NULL。 */
+ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence, uint32_t *out_entries);
 void         journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);   /* P1-6 */
 ```
 
@@ -4488,7 +4491,7 @@ typedef struct {
 
 void journal_init(l2p_journal_t *journal);
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old, nand_pba_t new);
-int  journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence);
+ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence, uint32_t *out_entries);
 void journal_truncate(l2p_journal_t *journal, uint32_t seq);
 void journal_flush_page(l2p_journal_t *journal);
 ```

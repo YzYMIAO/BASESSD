@@ -315,21 +315,6 @@ static l2p_cache_line_t *l2p_cache_find_or_load(l2p_cache_t *cache, uint16_t reg
             /* 读失败，保持 INVALID，entries 为 FTL_PBA_INVALID */
             line->state = L2P_CACHE_INVALID;
         }
-
-        /* ⚠ 临时诊断探针（`log level debug` 才打印）：定位"重启后 L2P 条目是垃圾"。
-         * 打的是**解析出的物理页**（block/plane/page）+ 目录命中标志 + 读回的头 4 条，
-         * 一眼可判：读的是哨兵块还是日志块、页里到底是什么。定位完即删。 */
-        LOGD("[L2P] r=%u dir=%u b=%u pl=%u pg=%u ret=%d e=%08lx %08lx %08lx %08lx\r\n",
-             (unsigned)region_id,
-             (unsigned)((region_paa != NAND_PBA_INVALID) ? 1U : 0U),
-             (unsigned)region_addr.block,
-             (unsigned)region_addr.plane,
-             (unsigned)region_addr.page,
-             ret,
-             (unsigned long)line->entries[0],
-             (unsigned long)line->entries[1],
-             (unsigned long)line->entries[2],
-             (unsigned long)line->entries[3]);
     }
 
     return line;

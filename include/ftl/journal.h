@@ -131,8 +131,11 @@ void journal_flush_page(l2p_journal_t *journal);
  * per-LBA last-write-wins）。cp_sequence 为 checkpoint 截断水位（旧 journal_replay
  * 只回放最大一页，掉电跨 ≥2 页时其余条目静默丢失）。
  * ⚠ 判据是**整页**：`page_seq + entry_count > cp_sequence`。只看页首页序号
- *   （`page_seq > cp_sequence`）会把跨水位的那一页整页跳过，丢掉它的新条目。 */
-ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence);
+ *   （`page_seq > cp_sequence`）会把跨水位的那一页整页跳过，丢掉它的新条目。
+ * out_entries（可为 NULL）回填**实际应用成功的条目数**（读失败的页不计入）。
+ * ⚠ 该数**不能**由 journal 的 RAM 写指针反推：末尾 journal_resume 把落点放到最新页
+ *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。 */
+ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence, uint32_t *out_entries);
 /*
  * journal_truncate - 截断 Journal（丢弃 ≤ up_to_sequence 的条目，P1-6）
  *

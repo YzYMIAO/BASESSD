@@ -589,9 +589,11 @@ void journal_flush_page(l2p_journal_t *journal);
  * F10：只回放 page_seq > cp_sequence 的页（≤ cp_sequence 的条目已在
  * checkpoint 时 flush 进 NAND L2P 表），按 (page_seq, entry_index) 递增序
  * 应用（per-LBA last-write-wins）。旧实现只回放最大一页 → 掉电跨 ≥2 页丢写。
+ * v0.69：out_entries（可为 NULL）回填**实际应用成功的条目数**——在应用循环里累加，
+ * 读失败的页不计；**不能**由 journal 的 RAM 写指针反推（journal_resume 会清 current_entry）。
  */
-int journal_replay(l2p_journal_t *journal, l2p_cache_t *cache,
-                   uint32_t cp_sequence);
+ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache,
+                            uint32_t cp_sequence, uint32_t *out_entries);
 
 /*
  * 截断 sequence ≤ up_to_sequence 的条目（Checkpoint 已把它们写进 NAND L2P 表）。

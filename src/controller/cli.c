@@ -849,11 +849,18 @@ static void uart_execute_command(char *line)
             continue;
         }
 
-        if (((uint32_t)argc < command->min_argc) || ((uint32_t)argc > command->max_argc) ||
-            (command->handler(argc, argv) != 0))
+        /* ⚠ 只有**参数个数**不合法才打 usage。handler 的返回码表示「执行失败」，
+         *   而失败原因它自己已经打过（busy / invalid lba / submit failed …）。
+         *   旧写法把两者并进同一个 `||`：handler 返回 FUNC_STATUS_ERROR(=1) 也被当成
+         *   "参数错" ⇒ `wr 0 32` 在 busy 时会紧跟一条 `usage: wr <lba> <n>`，看着像
+         *   语法错误、实际参数完全合法（wr/rd/tr/fl 四个命令的 busy 分支全中）。 */
+        if (((uint32_t)argc < command->min_argc) || ((uint32_t)argc > command->max_argc))
         {
             (void)LOGE("usage: %s\r\n", command->usage);
+            return;
         }
+
+        (void)command->handler(argc, argv);
         return;
     }
 

@@ -430,8 +430,9 @@
      所有实例共享一份（`metadata.c` 的 Directory 是 per-instance，不受影响）；
    - **SPDK FTL 式 P2L 重建**（每 band 尾部存 P2L、开机顺序扫描重建 L2P）——替换整层持久化机制的
      大改，登记为后续方向；本仓 `ftl_rebuild_closed_sb_list` 已有雏形；
-   - **`ftl_is_metadata_block` 的 per-plane 粒度**（按 per-plane 块号比较 ⇒ 会连另一个 plane 的
-     同号块一起排除；偏保守、安全，不修）；
+   - ~~**`ftl_is_metadata_block` 的 per-plane 粒度**~~ ⇒ **✅ v0.69 已修**（原判断「偏保守、
+     安全」**是错的**：被掩的块既进不了 Free Pool、又被 F2 重建跳过 ⇒ 落在所有池之外、
+     `valid_count` 恒 0，而 L2P 若指向它，覆盖写就撞 `bst.h` 断言。见 §8.3 与 v0.69 ADR）；
    - ~~**`program_count` 无消费方**~~ / ~~**`last_pe_ts` / `gc_generation` 死字段**~~ —— ✅ v0.56 已删
      `program_count`/`bad_reason`/`gc_generation`；`last_pe_ts` 由 P1-1 消费（原判据已过期）；
      **`rr` 仍不持久化**。
@@ -487,7 +488,7 @@
 |---|---|---|
 | ~~`main.c` 只 service 实例 0~~ | ✅ **已修（v0.65）**：泵/实例分离——`ftl_service_pump()`（实例无关）每轮一次 + 对**每一个** `g_ftl[ch][ce][lun]` 调 `ftl_service()` | 已闭合 |
 | ~~file-scope static 游标多 LUN 共享~~ | ✅ **已修（v0.65）**：`checkpoint.c`/`bbt.c`/`wear.c` 的 static 游标/序号收进 `ftl->cp` / `alloc.bbt` / `alloc.wear`（per-instance） | 已闭合 |
-| `ftl_is_metadata_block` per-plane 粒度 | 按 per-plane 块号比较 ⇒ 连另一 plane 同号块一起排除 | 偏保守安全，**不修** |
+| `ftl_is_metadata_block` per-plane 粒度 | 按 per-plane 块号比较 ⇒ 连另一 plane 同号块一起排除 | ✅ **已修（v0.69）**：判据加 `plane` 参数（固定区仍与 plane 无关，动态日志块/游标块带 plane 比较）。⚠ 原判「偏保守安全、不修」**是错的**——被掩的块落在所有池之外、`valid_count` 恒 0 ⇒ L2P 悬空 ⇒ 覆盖写撞 `bst.h` 的 `valid_count > 0U` 断言 |
 | `read_recovery` 写保留地址 0x89 | `read_recovery.c:83,99` 读重试写保留段、自始空转 | **用户明确不处理** |
 | 读失败无条件 `IO_ERROR` | `ftl.c:271-275` 即使 rr 救回也报错 | 「行为等价」保留 + ⚠ 注释，待单独立项 |
 | `ftl_trim` 大范围同步阻塞 | 超循环长停 | 范围上界/分块后续定 |

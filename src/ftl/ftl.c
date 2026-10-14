@@ -149,7 +149,32 @@ static void ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_t *pendi
          * newp == oldp 只在"重写同一物理 CW"时出现，语义上是同一条映射。 */
         if ((oldp != NAND_PBA_INVALID) && (oldp != newp))
         {
-            ftl_block_sub_valid(&ftl->alloc.blocks[ftl_pba_gblock(oldp)]);
+            const uint16_t gob = ftl_pba_gblock(oldp);
+
+            /* ⚠ **常驻守卫**（非临时探针，勿删）：L2P 指的旧块在 BST 里 0 有效 ⇒ 下一行
+             * 必然撞 `bst.h` 的 `valid_count > 0U` 断言。这是「F2 重建漏认」类缺陷的
+             * **唯一故障点**：重建只要静默跳过一个仍被 L2P 指向的块（坏块 / 元数据块判据
+             * 过宽 / 页 0 判空），该块就落在所有池之外、valid_count 恒 0，且此后**每次**
+             * 覆盖写该 LBA 都会死机——而重启本身看不出任何异常。
+             * 打印旧块现场是为了**一次归因**（state 一眼可判）：
+             *   BAD(0x01)  = 坏块，重建按判据跳过（数据本已不可读）
+             *   FREE(0x08) = 已归还空闲池 ⇒ 块还会被 allocator 复用，**丢数据**
+             *   RESERVED   = 元数据日志块 ⇒ 判据过宽（v0.69 已修 plane 掩码）
+             *   0x0000     = 重建从未认领（页 0 判空 / 未扫描到）
+             * 代价 = 每次覆盖写多一次比较；收益 = 把「重启后写一次就死机」变成一条可读日志。 */
+            if (ftl->alloc.blocks[gob].valid_count == 0U)
+            {
+                (void)LOGE("[FTL] dangling lba=%lu old=%08lx g=%u st=0x%04x sb=%u newg=%u nst=0x%04x\r\n",
+                           (unsigned long)l,
+                           (unsigned long)oldp,
+                           (unsigned)gob,
+                           (unsigned)ftl->alloc.blocks[gob].state,
+                           (unsigned)ftl->alloc.blocks[gob].sb_id,
+                           (unsigned)ftl_pba_gblock(newp),
+                           (unsigned)ftl->alloc.blocks[ftl_pba_gblock(newp)].state);
+            }
+
+            ftl_block_sub_valid(&ftl->alloc.blocks[gob]);
         }
     }
 

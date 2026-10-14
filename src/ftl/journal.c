@@ -443,13 +443,19 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
  *     · 第二遍插入排序（≤256 项）后按序应用 ⇒ per-LBA last-write-wins，同 LBA 的旧
  *       条目（含 GC/WL 搬移记录）被后写覆盖，不指向已擦除块。
  *     · 末尾 journal_resume 把写指针落到最新页之后并接续序号。
+ *     · out_entries 在**应用循环里**逐页累加 entry_count（读失败的页不计）——
+ *       不能用 journal 的 RAM 写指针反推：journal_resume 会清 current_entry。
  * -------------------------------------------------------------------- */
-ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence)
+ftl_status_t journal_replay(l2p_journal_t *journal,
+                            l2p_cache_t   *cache,
+                            uint32_t       cp_sequence,
+                            uint32_t      *out_entries)
 {
     /* JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 8B → 2KB 栈上数组。 */
     journal_page_ref_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
     journal_page_ref_t latest;
     uint16_t           replay_count = 0U;
+    uint32_t           applied      = 0U;
 
     if ((journal == NULL) || (cache == NULL))
     {
@@ -499,6 +505,8 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
                 continue; /* 页已失效，跳过（应用顺序其余页不受影响） */
             }
 
+            applied += (uint32_t)replay_pages[i].entry_count;
+
             {
                 uint16_t k;
                 for (k = 0U; k < replay_pages[i].entry_count; k++)
@@ -516,6 +524,11 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
 
     /* 恢复写指针与序号（落到最新页之后；floor 兜住「环空 / 序号回退」） */
     journal_resume(journal, &latest, cp_sequence);
+
+    if (out_entries != NULL)
+    {
+        *out_entries = applied;
+    }
 
     return FTL_OK;
 }

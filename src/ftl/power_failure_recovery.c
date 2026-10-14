@@ -404,7 +404,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
                                     const l2p_checkpoint_header_t *cp,
                                     ftl_boot_result_t             *result)
 {
-    uint32_t entry_count;
+    uint32_t entry_count = 0U;
     uint32_t cp_sequence;
 
     if ((ftl == NULL) || (result == NULL) || (cp == NULL))
@@ -421,23 +421,12 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
      *    F10：journal_replay 按 (page_seq, entry_index) 递增序回放所有
      *    page_seq + entry_count > cp_sequence 的页——只回放最大一页会静默丢 ≥2 页条目。 */
     {
-        (void)journal_replay(&ftl->journal, &ftl->cache, cp_sequence);
-
-        /*
-         * 估算回放的 entry 数：
-         *   replay 后的 current_entry/current_page 减去初始值
-         *   简化：如果 current_entry > 0 说明有数据回放
-         */
-        if (ftl->journal.current_entry > 0U)
-        {
-            entry_count = (uint32_t)ftl->journal.current_page *
-                              JOURNAL_ENTRIES_PER_PAGE +
-                          ftl->journal.current_entry;
-        }
-        else
-        {
-            entry_count = 0U;
-        }
+        /* ⚠ 回放条数由 journal_replay 在**应用循环**里累加（读失败的页不计）。
+         * 旧实现用 journal 的 RAM 写指针反推（`current_entry > 0` → 算 current_page *
+         * ENTRIES_PER_PAGE + current_entry）——恒假：journal_replay 末尾必调
+         * journal_resume，后者把落点放到最新页之后并 `current_entry = 0`。
+         * 于是本字段三条启动路径全是 0，`boot type=N journal_entries=0` 不具判别力。 */
+        (void)journal_replay(&ftl->journal, &ftl->cache, cp_sequence, &entry_count);
 
         /*
          * journal_replay 写入了 L2P Cache，所有 line 标记 DIRTY。
@@ -483,14 +472,25 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
  * ══════════════════════════════════════════════════════════════════ */
 
 /* 判一页是否为全 0xFF 空白页。buffer 复用单个大缓冲——ftl_sync_read_page_raw 按
- * PAGE_MAIN_SIZE（2048B）拷贝，缓冲必须够大（历史上的 buf[16] 版本即栈溢出）。 */
+ * PAGE_MAIN_SIZE（2048B）拷贝，缓冲必须够大（历史上的 buf[16] 版本即栈溢出）。
+ *
+ * ⚠ **读失败一律判「非空」**（保守方向）。ftl_sync_read_page_raw 刻意不判定 NAND 失败
+ *   （坏页也要拿到原始位），故它返回 FTL_ERROR 只代表**命令本身**没走通（提交失败 /
+ *   超时 / 无 buffer），此时契约规定 buffer 内容**未定义**。若把这种页当空白页，
+ *   `scan_block_write_pointer` 会对该块返回 0 ⇒ 块被当成"没写过"**留在 Free Pool**
+ *   ⇒ 既可能被 allocator 拿去复用覆盖活数据，又让 L2P 指向一个 valid_count 恒 0 的块
+ *   （`bst.h` 断言的成因，与 v0.69 修的 plane 掩码同一类）。
+ *   判「非空」的代价：真为空的块会被拉出 Free Pool 交 GC 多擦一次——不丢数据。 */
 static uint8_t page_is_blank(const nand_addr_t *addr, uint8_t *raw_buf)
 {
     uint8_t i;
     uint8_t j;
 
     memset(raw_buf, 0xFF, PAGE_SIZE);
-    (void)ftl_sync_read_page_raw(*addr, raw_buf, FC_COMMAND_MODULE_BBT); /* 读失败也不影响：数据非全 FF 即判非空 */
+    if (ftl_sync_read_page_raw(*addr, raw_buf, FC_COMMAND_MODULE_BBT) != FTL_OK)
+    {
+        return 0U; /* 命令没走通 ⇒ 内容不可知 ⇒ 一律判非空 */
+    }
 
     /* 每 CW 的 META(4B)+CRC(4B)+前 8B 数据，共 16B。全 FF 页 META/CRC 也全 FF。 */
     for (i = 0U; i < CW_NUM; i++)
@@ -648,7 +648,7 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
             uint8_t      np;
 
             /* ① 坏块 / 元数据块跳过（判据与 main.c free pool 回填一致，per-plane 块号） */
-            if (ftl_block_is_bad(b) || ftl_is_metadata_block(&ftl->metadata_dir, block))
+            if (ftl_block_is_bad(b) || ftl_is_metadata_block(&ftl->metadata_dir, plane, block))
             {
                 continue;
             }

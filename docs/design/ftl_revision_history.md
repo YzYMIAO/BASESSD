@@ -1850,7 +1850,7 @@ NAND 只能 1→0，对已编程页二次编程 = 新数据 **AND** 旧数据 �
   所有实例共享一份（局限登记在案）。
 - **不做 SPDK FTL 式的 P2L 重建**（每 band 尾部存 P2L、开机顺序扫描重建 L2P）——那是替换整层
   持久化机制的大改，登记为后续方向；本仓 `ftl_rebuild_closed_sb_list` 已有雏形。
-- **不顺手修**：`ftl_is_metadata_block` 的 per-plane 粒度、~~`program_count` 无消费方~~（**v0.56 已删该字段**）、`rr` 不持久化。
+- **不顺手修**：~~`ftl_is_metadata_block` 的 per-plane 粒度~~（**✅ v0.69 已修**，见该版 ADR）、~~`program_count` 无消费方~~（**v0.56 已删该字段**）、`rr` 不持久化（**✅ v0.65 已落地**）。
 
 ## v0.51 — P1 算法档（GC victim 加权 + GC 触发补齐 + 读写判别修复）
 
@@ -3511,3 +3511,109 @@ T1/T4 的空间压力响应也被门到同一周期 ⇒ IDLE 补池突发与 NOR
 ② 正常写负载下进入水位立刻一行、之后每 1 s 一行、离开水位后静默；
 ③ **卡死可辨**——卡死态 `reclaimed` 不动而 `novictim` 持续上涨；正常回收则 `reclaimed` 每行都涨。
 
+---
+
+## v0.69 — 修 `ftl_is_metadata_block` 的 plane 掩码：被掩的块落在所有池之外，L2P 悬空撞断言
+
+**日期**：2026-10-14
+
+**范围**：`include/ftl/metadata.h` + `src/ftl/metadata.c`（判据加 `plane`）、`include/ftl/bst.h`
+（`ftl_gblock_plane/block` 单点解码）、`src/main.c` / `tests/unit/test_ftl.c`（调用点）、
+`src/ftl/power_failure_recovery.c`（`page_is_blank` 读失败判非空）、`include/ftl/journal.h` +
+`src/ftl/journal.c`（`journal_replay` 回填实际回放条数）、`src/controller/cli.c`（usage 只在参数个数非法时打）。
+
+### 问题（板端顶出来的）
+
+板端**重启后写一次**就撞断言：
+
+```
+[ERR] [FAULT] previous assert: b->valid_count > 0U (include/ftl/bst.h:261)
+```
+
+`ftl_block_sub_valid` 的断言 ⇒ 覆盖写时对**旧映射所在块**减有效计数，而该块的有效计数是 0。
+即：**L2P 指向了一个 BST 认为「零有效」的块**。
+
+### 根因：元数据块判据只比 per-plane 块号
+
+`ftl_is_metadata_block` 三分支里，① 固定分区**与 plane 无关**（分片模型下各 die 用同一份块号），
+但 ② 当前日志块 / ③ 已登记日志块是**从用户区动态取的**，旧实现一律只比 per-plane 块号：
+
+```c
+/* 旧：cur_metadata_block 是 gblock，却只比了它的低 11 位 */
+if ((md_dir->cur_block_valid != 0U) && (block == (uint16_t)(md_dir->cur_metadata_block % BLOCKS_PER_PLANE)))
+...
+if ((entries[i].type == METADATA_TYPE_L2P_REGION) && (paa_to_block(entries[i].paa) == block))
+```
+
+⇒ **一个 plane 的日志块会连带把另一 plane 的同号块一起排除**。被掩的块：
+
+- 进不了 Free Pool（`main.c` 回填用同一判据）；
+- 被 F2 重建跳过（`ftl_rebuild_closed_sb_list` 用同一判据）⇒ `valid_count` **恒 0**；
+- 而日志块会**迁移**（`metadata_dir_reclaim` / `metadata_dir_compact`），掩码块号随之漂移
+  ⇒ 历史上只要有一刻它没被掩住、被 allocator 当用户块发出去写过数据，L2P 就指向它。
+
+⇒ 此后**每次**覆盖写该 LBA 都会撞断言，而重启本身看不出任何异常——这正是
+「只在重启后、且必须写一次才炸」的形态。
+
+⚠ **原判「偏保守、安全，不修」是错的**（`ftl_optimization_plan.md §七.7` / §8.3 已订正）：
+被掩的块**落在所有池之外**（既不在 Free Pool、也不在 Closed），GC 永远不会碰它 ⇒ 数据确实
+不会被擦掉；但 `valid_count` 恒 0 这件事**本身就是断言条件** ⇒ 不是保守，是定时炸弹。
+
+### 修法
+
+① **判据加 `plane`**：`ftl_is_metadata_block(md_dir, plane, block)` —— ① 固定分区分支**不看**
+plane，②③ 两条动态分支**必须**带 plane 比较。调用点三处：`main.c` free pool 回填、
+`power_failure_recovery.c` F2 重建、`tests/unit/test_ftl.c` 夹具。
+顺带在 `bst.h` 加 `ftl_gblock_plane/block`（`ftl_gblock` 的逆）做**单点解码**，
+`metadata.c` 原有的 `gblock / BLOCKS_PER_PLANE` 内联算式改为调用它。
+
+② **`page_is_blank` 读失败判「非空」**（同一类「F2 静默漏块」的另一支）：
+`ftl_sync_read_page_raw` 刻意不判定 NAND 失败，返回 `FTL_ERROR` 只代表**命令**没走通
+（提交失败 / 超时 / 无 buffer），此时契约规定 buffer 内容**未定义**。旧实现 memset 成 0xFF
+后忽略返回码 ⇒ 读失败页被判空白 ⇒ `scan_block_write_pointer` 对该块返回 0 ⇒ 块被当成
+"没写过"**留在 Free Pool** ⇒ 既可能被 allocator 拿去覆盖活数据，又让 L2P 指向 valid_count
+恒 0 的块。判「非空」的代价只是真为空的块被拉出 Free Pool 多擦一次——不丢数据。
+
+③ **`journal_replay` 回填实际回放条数**（`out_entries`）：旧实现用 journal 的 RAM 写指针
+反推（`current_entry > 0` → `current_page × ENTRIES_PER_PAGE + current_entry`）——**恒假**：
+`journal_replay` 末尾必调 `journal_resume`，后者把落点放到最新页之后并清 `current_entry`。
+于是三条启动路径的 `journal_entries` 全是 0，该观测口不具判别力。改为在**应用循环**里逐页
+累加 `entry_count`（读失败的页不计）。
+
+④ **CLI 只在参数个数非法时打 usage**（`cli.c`）：旧写法把 `handler(...) != 0` 并进同一个
+`||`，于是 handler 返回「执行失败」也被当成"参数错" ⇒ `wr 0 32` 在 busy 时会紧跟一条
+`usage: wr <lba> <n>`，看着像语法错误、实际参数完全合法（wr/rd/tr/fl 四个命令的 busy 分支全中）。
+
+### 上板证据（定位用的临时探针，结论已入档，探针已删）
+
+| 探针 | 结论 |
+|---|---|
+| `[F2] judge page_seq=169 entry_count=32 sum=201 cp_jseq=169` | `sum(201) > cp_jseq(169)` ⇒ 判型**正确**走掉电路径，不是 v0.64 那个 off-by-one 假绿 |
+| `[L2P] r=0 dir=1 b=322 pl=0 pg=8 … e=00027a00..03` | 条目解出来是 plane0 block317 page0 cw0..3，与 `[F2] blk b=317 ok=4` 严丝合缝 ⇒ **L2P 不是垃圾** |
+| 5 条 `[F2] skip … bad=0 meta=1`（块 16/48/49/58/62 + 322） | 全落在固定分区 / 活日志块 ⇒ **判据无假阳性**（且 5 条全是 `bad=0`，坏块支也干净） |
+| `[F2] rebuild blocks=8 partial=8 valid_cw=39` | 4(b317)+16(b321)+3(p1 b63)+16(p1 b2043) = **39**，与各块 ok 计数一分不差 ⇒ 重建**完整自洽** |
+
+**旁证**：`free=3715` 反证 plane 修复已在运行镜像里——4096 − 126（固定 63 块 × 2 plane）−
+1（活日志块）= 3969 = 3715 + 204 + 50；若判据还是旧的只比块号，活日志块 322 会连 plane1
+的同号块一起掩掉 ⇒ 3968 ⇒ free 会是 3714。
+
+### 保留的守卫（非临时探针，勿删）
+
+`ftl_confirm_write` 里保留一条**常驻守卫**：覆盖写时若旧块 `valid_count == 0`，打一行
+`[FTL] dangling lba=… old=… g=… st=… sb=… newg=… nst=…` 再进断言。它是这一类缺陷的
+**唯一故障点**，且带旧块 `state` ⇒ 一次归因：
+
+| `st` | 含义 |
+|---|---|
+| `0x01` BAD | 坏块，重建按判据跳过（数据本已不可读） |
+| `0x08` FREE | 已归还空闲池 ⇒ 块还会被 allocator 复用，**丢数据** |
+| RESERVED | 元数据日志块 ⇒ 判据过宽（v0.69 已修 plane 掩码） |
+| `0x0000` | 重建从未认领（页 0 判空 / 未扫描到） |
+
+代价 = 每次覆盖写多一次比较；收益 = 把「重启后写一次就死机」变成一条可读日志。
+
+### 判据
+
+`make all` / `make tests` 均 0 warning（product 194196 B / 全套 324608 B）。
+上板：① 重启后跑写负载，不再出现 `[FTL] dangling` 与 `bst.h` 断言；② `free` 比修复前**多 1**
+（每个活日志块不再白掩一个同号用户块）；③ `boot type=N journal_entries=N` 的条数不再恒 0。

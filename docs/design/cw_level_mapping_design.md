@@ -196,9 +196,13 @@ page63   region126     region127
 Journal / Wear），每项 `{name, first_block, block_count, redundancy, kind, table_bytes}`
 **全部由宏派生**。消费方：
 
-- `ftl_is_metadata_block(md_dir, block)`（`metadata.c`）——**表驱动**判元数据块
-  （不再硬编码块号）：遍历 `FTL_PART_FIXED` 项判区间，再扫 Directory 的动态 L2P region 块。
+- `ftl_is_metadata_block(md_dir, plane, block)`（`metadata.c`）——**表驱动**判元数据块
+  （不再硬编码块号）：遍历 `FTL_PART_FIXED` 项判区间（**与 plane 无关**，分片模型下各 die
+  用同一份块号），再扫 Directory 的动态 L2P region 块（**必须带 plane**，动态日志块取自
+  用户区，块号会与另一 plane 的用户块撞号）。
   free pool 回填（`main.c`）与掉电恢复重建（`power_failure_recovery.c`）共用同一判据。
+  ⚠ v0.69 前该函数只比 per-plane 块号 ⇒ 一个 plane 的日志块会连带掩掉另一 plane 的同号块，
+  被掩的块落在所有池之外且 `valid_count` 恒 0 ⇒ L2P 悬空、覆盖写撞 `bst.h` 断言。
 - 开机分区打印。
 
 ---
@@ -537,7 +541,7 @@ SRAM 缓存热点 region**。
 | **分区布局** | 分区宏/大小/偏移/公式集中一处（单一事实来源） | `include/ftl/ftl_config.h`、`src/ftl/ftl_config.c` |
 | **L2P 布局** | 打包公式（16 块，每块 128 region） | `ftl_config.h` §六、`l2p_cache.h` |
 | **元数据** | Journal 2→4 块；Wear 块位预留（宏 + 表项 + 谓词） | `journal.h`/`journal.c`、`metadata.c` |
-| **元数据** | `ftl_is_metadata_block` 表驱动（消硬编码块号） | `src/ftl/metadata.c` |
+| **元数据** | `ftl_is_metadata_block` 表驱动（消硬编码块号）；**v0.69 起带 plane 比较** | `src/ftl/metadata.c` |
 | **维度** | 布局维度无关化：删 `lun_stride`/`ANCHOR_BLOCK_STRIDE`/`*_PER_LUN`，各 die 同一份块号 | `ftl_config.h`、`ftl_config.c`、`metadata.c` |
 | **维度** | LBA 路由修正：`lba_route_*` 三维分解 + `lba_to_local` 按 region 反交织 | `include/ftl/l2p_cache.h` |
 | **元数据** | Directory 扩容 128→2048 entry；Anchor 改**分页自包含**（8 页/份 × 3 份 × 2 块） | `metadata.h`、`metadata.c` |

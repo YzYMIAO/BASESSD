@@ -414,14 +414,18 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir);
  *
  * free pool 回填（main.c）与重建（ftl_rebuild_closed_sb_list）共用同一判据。
  *
- * ⚠ 现存不精确处（已登记、本次不修）：本函数按 **per-plane** 块号比较，会连另一个
- *   plane 的同号块一起排除——偏保守，安全（代价是 Anchor/Checkpoint 池在另一 plane
- *   的同号块被闲置）。
+ * ⚠ 固定块分支**与 plane 无关**（分片模型：每 die 一套完整元数据，块号不错开），
+ *   但日志块/游标块是**从用户区动态取的** ⇒ 那两条分支必须带 plane 比较。
+ *   旧实现一律只比 per-plane 块号：一个 plane 的日志块会连带把另一 plane 的同号块
+ *   一起排除——该块既进不了 free pool、又被 F2 重建跳过，落在任何池之外。虽不丢数据
+ *   （重建不认领 ⇒ GC 也不会擦它），但白丢一个可用块（上板可见 `free` 每有一个活
+ *   日志块就少 1，且被掩块号随日志块迁移而漂移）。
  *
  * @param md_dir Metadata Directory cache（可为 NULL：仅固定块区间判断）
+ * @param plane  物理 plane 号（0..PLANE_NUM-1）；仅日志块/游标块两条分支使用
  * @param block  物理 Block 号（per-plane 号，0..BLOCKS_PER_PLANE-1）
  * @return 1 = 元数据块，0 = 用户数据块
  */
-int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint16_t block);
+int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, uint16_t block);
 
 #endif /* FTL_METADATA_H */
