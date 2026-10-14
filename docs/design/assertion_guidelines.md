@@ -650,12 +650,22 @@ page, cw`）与 `paa_make` / `pba_make` 的形参序（`…, page, plane, block,
 `paa_is_valid_addr`（原 `paa_is_valid`）/ `paa_to_pba` / `pba_to_nand_row` **按用户要求保留**。
 注意 `paa_is_valid` 的**形参序本身就是**被消灭的那一套，所以它即便保留也必须换成
 `nand_addr_t` 版本——**"保留函数"不等于"保留隐患"**。
+（v0.73 更新：`pba_to_nand_row` 已随 `nand_addr_t` 退出 FTL 而删除；`paa_to_pba` 保留，
+作为 `ftl_fc_interface.h` `ftl_cmd_pba()` 用的边界转换器。）
 
-**未跟进**：`nand_addr_t` 刻意保持**普通字段**而非位域（`include/common/ftl_types.h:20-22`
-的既有设计原则）——理由五条见 `docs/changelog/nand_config_addr_ctor_v25.md`，其中两条是硬约束：
-本构建 `LUN_ADDR_WIDTH == 0`，而 C11 6.7.2.1p4 规定 0 宽位域不得有声明符（具名 `lun : 0`
-直接编译不过）；位域布局是 implementation-defined 且 `offsetof` 非法 ⇒ **没有任何静态断言**
-能证明它与 `PBA_*_SHIFT` 宏一致。
+**已跟进（v0.73）**：`nand_addr_t` 从 FTL 层**整体退出**——FTL 的地址一律 `nand_pba_t`，
+具名字段访问改经**位域视图** `nand_pba_fields_t`（`pba_fields()` / `pba_pack()` /
+`pba_make()`，定义见 `include/ftl/ftl_config.h §三.2`）。视图是 4 字节位域、位序与 PBA
+一致，可强转。⚠ **v25 否决它的那两条硬约束依然成立**，本轮是**逐条给了应对**而非推翻：
+① 本构建 `LUN_ADDR_WIDTH == 0`，而 C11 6.7.2.1p4 规定 0 宽位域不得有声明符（具名
+`lun : 0` 直接编译不过）⇒ 视图里 `lun` 成员用 `#if (LUN_ADDR_WIDTH > 0U)` 隐去，那一处
+`#if` 收敛在 `pba_make()` 内（`PBA_LUN_MASK` 为 0 ⇒ lun 自然被忽略）；
+② 位域布局 implementation-defined 且 `offsetof` 非法 ⇒ **没有任何 `_Static_assert`**
+能证明它与 `PBA_*_SHIFT` 一致（复合字面量的 union 读不是 C11 整型常量表达式，GCC 实测报
+`expression in static assertion is not constant`）⇒ 退化为 **boot 期一次性自检**
+`pba_fields_layout_matches()`（`ftl_init` 里 `ASSERT`）：逐字段置单比特、双关读出，证明
+`*(nand_pba_t *)&fields == pba_pack(fields)`。**值语义路径（`pba_pack` / `pba_fields`）
+走 `PBA_*_SHIFT` 宏，与位域布局无关**——自检只保证"强转可用"这一条性质。
 
 **验证**：debug / release / RAID=1 三档 0 warning 0 error（150028 / 84944 / 154372 B）；
 `make format-check` passed；`nm` 确认 `paa_from_addr` / `pba_from_addr` 只有 local（`t`）符号、

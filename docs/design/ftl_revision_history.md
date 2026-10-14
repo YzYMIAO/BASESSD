@@ -3831,3 +3831,94 @@ FTL 头（`bst.h` / `allocator.h` / `gc.h` / `pending.h` / `read_recovery.h` / `
 
 `wear.h` 的全量快照页数注释写「17 页」是 v0.65 条目 8B→12B **之前**的旧值，
 实为 ⌈4096 ÷ 168⌉ = **25 页**（`wear.h` 一直是对的）。
+
+---
+
+## v0.73 — FTL 层地址全面 PBA 化 + PBA 位域视图（介质格式变更，版本 3→4）
+
+**日期**：2026-10-14
+
+**范围**：`include/ftl/{ftl_config,ftl_fc_interface,metadata,allocator,bst,l2p_cache}.h`、
+`include/common/ftl_types.h`、`src/ftl/{ftl,ftl_fc_interface,metadata,l2p_cache,
+power_failure_recovery,read_recovery,bbt,journal,checkpoint,gc,wear,wear_leveling}.c`。
+**不改 `nand_pba_t` 的类型**（仍是 `uint32_t`）；**不动 `src/fc/**` / `src/nand/**`**
+（PAA 与 `nand_addr_t` 在那边照旧）。
+
+### 起因：FTL 的地址货币是 PBA，代码却到处借 NAND 层的展开式
+
+| 现象 | 证据 |
+|---|---|
+| FTL 层 78 行提到 `nand_addr_t`（展开式 7 字段结构） | `metadata.c` 11 行、`ftl_fc_interface.c` 9 行、`journal.c` 8 行…… |
+| FTL 层 ~42 行用 `nand_paa_t` / `paa_*` | `metadata.c` 25 行、`l2p_cache.c` 9 行、`bst.h` 3 行 |
+| **PAA 被写进介质** | `metadata_entry_t.paa` → Anchor 页落 NAND |
+| 绕圈子的地址转换 | `addr_from_pba(pba)` → `nand_addr_t` → `pba_from_addr()` → `pba_to_paa()`：同一趟打包再拆包（`addr_to_cmd`、`sync_page_prepare_cw`） |
+| FTL 模块直接读 FC 的 PAA 字段 | `ftl.c:346` `ftl_paa_gblock(cmd->paa)` |
+
+判据同 v0.72 = `fc_nand_design.md §26` 的分层：PBA 是控制器地址货币，PAA 是器件行地址。
+本次把 v47 的「PBA 不跨进 FC」在 **FTL 内部也贯彻到底**：`include/ftl/**` + `src/ftl/**`
+的地址一律 PBA，PAA 只在 `pba_to_cmd` / `ftl_cmd_pba` 这一处边界转出。
+
+### 提交 A — 位域视图 + FTL 边界原语改 PBA（`42689ed`，介质不变）
+
+新增 `nand_pba_fields_t`（4 字节位域，位序与 `nand_pba_t` 一致，可强转）承担原先
+`nand_addr_t` 的「具名字段构造地址」职责（`ftl_config.h §三.2`）：
+
+- `pba_fields()` / `pba_pack()` 值语义访问器，**按 `PBA_*_SHIFT` 宏编解码**，与位域布局无关；
+- `pba_make()` 具名构造（把 `LUN_ADDR_WIDTH == 0` 时不能声明 `lun : 0` 的 `#if` 收敛在一处）；
+- `pba_fields_layout_matches()` 开机自检（`ftl_init` 里 `ASSERT`）——见下「两条硬约束」。
+
+删除 `pba_from_addr()` / `addr_from_pba()` / `pba_to_nand_row()`。保留 `pba_to_paa()`
+（唯一转换器，内部仍用 `nand_addr_t`，**不改**——重写位重排无收益纯风险）。
+
+边界原语全部改收 `nand_pba_t`：`ftl_sync_write_page` / `_cw` / `read_page` /
+`read_page_raw` / `erase_block` / `read_meta` / `read_column`；`addr_to_cmd` 改名
+`pba_to_cmd` 并**去掉 `addr_from_pba`→`pba_from_addr` 往返**；新增 `ftl_cmd_pba()` 反向，
+使 `ftl.c` 不再直接读 `cmd->paa`。`bst.h` 删 `ftl_paa_gblock()`，`ftl_pba_gblock()`
+直接解 PBA（原绕 `pba_to_paa()`）。
+
+### 提交 B — Metadata Directory 改存 PBA（`e9ee83c`，**介质格式变更**）
+
+`metadata_entry_t.paa` → `.pba`；四个签名（`metadata_dir_lookup` 返回、
+`metadata_dir_update` / `metadata_dir_commit_region` 的 `new_paa`、
+`metadata_dir_append_slot` 返回）改 `nand_pba_t`；`metadata.c` 全面去 PAA
+（`paa_from_addr({…})` → `pba_make(ch,ce,lun,block,plane,page,0)`）；
+删 `l2p_cache.c` / `power_failure_recovery.c` 的 `paa_to_pba()` 桥接。
+
+**实质改善**：`append_slot` / `lookup` 返回的地址**自带 ch/ce**，不再依赖「本实例的元数据
+一定在本实例 ch/ce 上」这个隐含假设（原先靠调用方 `paa_to_pba(cache->ch, cache->ce, ·)`
+补齐）。等价性依赖 `cache->ch/ce/lun == ftl->topo == dir->topo`（`ftl.c:747` +
+`l2p_cache_init(&ftl->cache, ftl->topo.*)`，已核实）。
+
+⚠ **介质格式变更**：4 字节字段语义由 PAA 改 PBA（字节数不变，`metadata_entry_t` 仍 7B，
+Anchor 页 `_Static_assert` 不受影响）⇒ `FTL_MEDIA_LAYOUT_VERSION` **3U → 4U** ⇒
+**上板首启自动全片格式化（预期行为，不是回归）**。
+
+`paa_to_pba()` 保留在 `ftl_config.h`：它是 `pba_to_paa()` 的逆，是 `ftl_cmd_pba()` 用的
+边界转换器（与 `pba_to_paa` 同属「唯一转换器」，不在清零范围内）。
+
+### 两条硬约束（v25 否决位域方案的正是它们，本轮逐条给应对而非推翻）
+
+见 `assertion_guidelines.md §二十` 的「已跟进（v0.73）」段：
+① `LUN_ADDR_WIDTH == 0` ⇒ C11 6.7.2.1p4 禁 0 宽具名位域 ⇒ 视图里 `lun` 用 `#if` 隐去；
+② 位域布局 implementation-defined、`offsetof` 非法 ⇒ **无 `_Static_assert` 可证**（复合
+字面量的 union 读不是 C11 整型常量表达式，GCC 实测报 `expression in static assertion is
+not constant`）⇒ 退化为 `ftl_init` 里一次性 `pba_fields_layout_matches()` 自检：逐字段置
+单比特、双关读出，证明 `*(nand_pba_t *)&fields == pba_pack(fields)`。**值语义路径走
+`PBA_*_SHIFT` 宏，与位域布局无关**——自检只保证「强转可用」这一条性质。
+
+### 验证
+
+| 判据 | 结果 |
+|---|---|
+| `make debug` / `make release` | 0 error 0 warning；**debug 192592 B / release 114924 B**（A 后 193520 / 115148） |
+| `make format-check` | 过 |
+| 离线逐值等价（PBA 全域抽样） | `pba_pack∘pba_fields` 恒等、`pba_fields(p).X == pba_to_X(p)`、`pba_make ≡ 旧 pba_from_addr`、`ftl_pba_gblock` 新旧同值、`paa_to_pba` 新旧同值、`ftl_cmd_pba∘pba_to_paa` 恒等、`pba_fields_layout_matches()==1` —— **全 0 mismatch** |
+| 提交 B 放置等价 | 全 (block,plane,page) 组合（2048×2×64）新旧构造逐位相同，**0 失配** |
+| 分层自检 | `include/ftl/**` + `src/ftl/**` 的 `nand_addr_t` / `paa_*` 只剩 `ftl_config.h` 转换器 + `ftl_fc_interface` 边界 + 注释；`src/ftl/` 无 `cmd->paa` 读 |
+| `.bss` | 不变（无新增静态存储） |
+
+⚠ **上板验证未做**（留待用户）。⚠ **首启会看到格式化横幅（版本 3→4，预期）**，
+格式化后再跑一轮确认稳定。⚠ 测试源需同步：`tests/unit/test_ftl.c:1505-1596`
+（Directory `paa` 变量改 `nand_pba_t`）、`:1622-1705`（`metadata_ring_addr` 现返回 PBA ⇒
+`a.block` 等改 `pba_to_block(a)`）；另有 v0.72 遗留的 `tests/unit/test_fc_level3.c:1521/1547`
+（`PBA_PLANE_SHIFT` → `PLANE_CW_SHIFT`）。

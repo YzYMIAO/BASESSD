@@ -357,7 +357,7 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 | # | 阻断点 | 说明 |
 |---|---|---|
 | 1 | **`LUN_ADDR_WIDTH = 0`** | `nand_config.h` 中 `LUN_ADDR_WIDTH = 0` ⇒ `PAA_LUN_MASK = PBA_LUN_MASK = 0` ⇒ **PAA/PBA 都装不下 LUN 字段**，L2P 表无法记录 die 号。这是**根因**。改它需同时改 `LUN_NUM`（芯片配置，未动）。 |
-| 2 | **地址构造缺 lun** | `journal.c` 的 `pba_from_addr` 未填 `.lun`；`metadata.c` 的 `paa_with_lun()` 在当前配置下是**空操作**（随 1 生效）。 |
+| 2 | **地址构造缺 lun** | ✅ **已修（v0.73）**：`journal.c` 改用 `pba_make(..., topo.lun, ...)`（原 `pba_from_addr` 未填 `.lun`）；各构造点均显式传 lun。 |
 | 3 | **内存** | 每实例 `g_ftl` = **270.4 KB**（P2-5 后**含** BST 80 KB / L2P / 池）⇒ AXI_RAM（384 KB）装不下第二个实例。`main.c` 已加编译期断言把这条变成**编译错误**。 |
 | 4 | ~~**共享状态需 per-instance 化**~~ | ✅ **已修（v0.65）**：`bbt.c`/`wear.c`/`checkpoint.c` 的 file-scope static 游标收进 `alloc.bbt` / `alloc.wear` / `ftl->cp`（per-instance）；`main.c` 主循环**遍历全部实例**（泵/实例分离）。~~残留~~ `completion_table.c` 的全局 handler/ctx 仍为单份（NAND 引擎本就全局唯一，非 per-instance 项）。 |
 
@@ -378,8 +378,9 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 | **LBA** | 与 PBA **位同构** | 主机寻址 |
 
 ⚠ **PAA 与 PBA 的 `PLANE`/`PAGE` 位序相反**（PAA 是 PLANE 在 PAGE 之上，PBA 是 PLANE 在 PAGE 之下）。
-两套空间互相转换必须走 `paa_from_addr` / `pba_from_addr` / `pba_to_paa` 等构造函数，
-**不能靠位运算手工拼**——历史上 10+ 处现场转换都在静默算错地址（v24/v47 教训）。
+两套空间互相转换必须走构造函数（v0.73 起：PBA 侧 `pba_make` / `pba_pack`；跨空间
+`pba_to_paa` / `paa_to_pba`），**不能靠位运算手工拼**——历史上 10+ 处现场转换都在
+静默算错地址（v24/v47 教训）。
 
 ⚠ 当前 `LUN_ADDR_WIDTH = 0`、`CH_NUM = CE_NUM = 1` ⇒ PBA 的 `LUN`/`CE`/`CH` 三个字段宽度都是 0，
 实际只用了低 20 位（CW+PLANE+PAGE+BLOCK）。见 §3.7。

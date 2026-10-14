@@ -240,7 +240,7 @@ static uint8_t allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint
     sb->valid       = 1U;
 
     /* 绑定真实拓扑（Phase V: 多 LUN 时 Super Block 必须知道所属 ch/ce/lun，
-     * super_block_page_addr 由此展开地址——此前 sb->topo 恒为零） */
+     * super_block_page_pba 由此铸地址——此前 sb->topo 恒为零） */
     sb->topo.ch  = alloc->ch;
     sb->topo.ce  = alloc->ce;
     sb->topo.lun = alloc->lun;

@@ -328,7 +328,7 @@ static inline uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t
  *   参数：command —— 命令（须已设 config.multi_plane 与 paa，本函数按它们定段）。
  *   返回：段内每个 CW 一位置 1（plane 1 单 plane ⇒ 0xF0，两 plane ⇒ 0xFF）。
  *   用途：产出 **ftl_cmd_configure_descriptors(cmd, cw_bitmap) 的实参**——FTL 的整段
- *         路径（addr_to_cmd / ftl_cmd_setup_ppa / _pair）一律先调本函数算出位图，再作为
+ *         路径（pba_to_cmd / ftl_cmd_setup_ppa / _pair）一律先调本函数算出位图，再作为
  *         形参交给建链入口。（v27 前它写进 cmd->param.cw_bitmap；v28 起该字段已删。）
  *   ⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
  * -------------------------------------------------------------------- */

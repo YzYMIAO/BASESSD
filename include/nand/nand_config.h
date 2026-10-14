@@ -297,11 +297,12 @@ static inline uint32_t lba_to_meta(uint32_t lba, uint32_t plane, uint32_t cw)
  * nand_addr_t（展开）  — 定义于文件开头；遍历路径用，字段直接访问不需要 shift
  * nand_pba_t  (packed) — L2P 表存储接口用，32-bit 紧凑（**定义于 ftl/ftl_config.h**）
  *
- * 反向的 paa_from_addr() 定义在 PAA 段内；PBA 侧的 pba_from_addr() / addr_from_pba()
- * 随 PBA 一并落在 ftl/ftl_config.h §三。
+ * 反向的 paa_from_addr() 定义在 PAA 段内；PBA 侧的构造/转换（pba_make / pba_pack /
+ * pba_fields / pba_to_paa）落在 ftl/ftl_config.h §三。**v0.73 起 `nand_addr_t` 已退出
+ * FTL 层** ⇒ 本文件的 addr_from_paa() 在 `src/` 下暂无调用者（保留作 NAND/FC 侧原语）。
  *
- * 遍历路径不再先打包再 ftl_cmd_setup_ppa 拆包，
- * 而是直接用 addr_to_cmd（定义于 ftl_fc_interface.h）填入 FC 命令。
+ * FTL 遍历路径不再打包再拆包，而是直接用 pba_to_cmd（定义于 ftl_fc_interface.h）
+ * 由 PBA 填入 FC 命令。
  * ══════════════════════════════════════════════════════════════ */
 
 /* 从 PAA + CH/CE 构造 nand_addr_t（元数据固定位置 / Directory 查找结果用） */

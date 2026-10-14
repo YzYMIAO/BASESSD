@@ -17,8 +17,10 @@
  *   ftl_io_request_t  — 一次读写请求的完整描述（含通知/回调字段，Step 3 嵌入 pending）
  *
  * 设计原则：请求结构体用普通字段而非位域（访问更快，C 编译器无
- * 位域可移植性问题）；地址一律用 nand_addr_t（展开，nand/nand_config.h）
- * 或 nand_pba_t（L2P 表紧凑存储，ftl/ftl_config.h §三.2）。
+ * 位域可移植性问题）；**地址一律用 nand_pba_t**（ftl/ftl_config.h §三.2）。
+ * 具名字段访问经 pba_fields() 值语义视图（4 字节位域，仅内存内，不落介质；
+ * 见 ftl_config.h §三.2）。本文件属 FTL 公共层 ⇒ 不出现 nand_addr_t /
+ * nand_paa_t——那是 NAND 层的表示。
  */
 
 /* pending 完成回调 — 在 ftl_handle_completion 数据拷贝 + 标志置位后调用。

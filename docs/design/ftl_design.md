@@ -747,7 +747,7 @@ void bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
 /* 4 处调用点：gc.c 擦除失败 / ftl.c 读不可恢复 / ftl.c 写失败 / bbt.c 内部 */
 
 /* 完成路径中的失败处理（ftl_handle_completion）：
- *   PROGRAM/ERASE 的 NAND_FAIL → bbt_mark_bad(&ftl->alloc, ftl_paa_gblock(cmd->paa))
+ *   PROGRAM/ERASE 的 NAND_FAIL → bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(ftl_cmd_pba(cmd)))
  *   READ 不可恢复（ECC 超限）  → bbt_mark_bad + 慢死预测（rr 记录）*/
 ```
 
@@ -1340,8 +1340,8 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim) {
         for (uint8_t plane = 0; plane < PLANE_NUM; plane++) {
             if (victim->plane_blocks[plane] == FTL_BLOCK_NO_PLANE) continue;
 
-            src[plane] = pba_from_addr(&(nand_addr_t){ .ch = ftl->topo.ch, .ce = ftl->topo.ce,
-                .block = victim->plane_blocks[plane], .plane = plane, .page = page });
+            src[plane] = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun,
+                                  victim->plane_blocks[plane], plane, page, 0U);
 
             /* 读整页 + 逐 CW 从 META 取回扇区 LBA（未写过 = FTL_LBA_INVALID）。
              * 读失败 / 全页无写过 CW ⇒ 返回 FTL_ERROR，跳过本页。 */
@@ -1363,7 +1363,7 @@ int wl_relocate(struct ftl_context *ftl, const wl_victim_t *victim) {
         for (uint8_t plane = 0; plane < PLANE_NUM; plane++) {
             if (cw_bitmap[plane] == 0U) continue;
             /* 只编有效 CW 子集（页内允许空洞；META 由页基址 + CW 偏移推出） */
-            if (ftl_sync_write_page_cw(addr_from_pba(dst[plane]), buf[plane], cw_bitmap[plane],
+            if (ftl_sync_write_page_cw(dst[plane], buf[plane], cw_bitmap[plane],
                                        FTL_PAGE_CFG_DATA(FC_COMMAND_MODULE_GC,
                                                          ftl_lba_page(base[plane]))) != 0) continue;
             for (uint8_t cw = 0; cw < CW_NUM; cw++) {
@@ -3857,7 +3857,7 @@ fc_command_release(cmd);
 |------|------|------|------|--------------|
 | LAA | Logical Application Address | Host → Controller | 应用程序下发的原始逻辑地址 | UART CLI 的 `lba` 参数（本项目 Host 为 UART CLI，无 NVMe）|
 | LBA | Logical Block Address | L2P 索引 | 行业标准逻辑地址，经 `cmd->meta` 写入页内 META 供校验 | `cmd->meta`（v24 前的 `cmd->lba` 已改名） |
-| PBA | Physical Block Address | L2P 映射值 | 完整物理地址，含拓扑路由（CH/CE/LUN）+ 芯片内地址（PAA）| FTL 层 `nand_pba_t`（**只活在 FTL 内部**，v47 起不跨进 FC；定义于 `include/ftl/ftl_config.h` §三.2）|
+| PBA | Physical Block Address | L2P 映射值 | FTL 的**唯一**地址货币（4 字节）：CH/CE/LUN 拓扑 + 块/页/plane/CW；具名字段访问经位域视图 `nand_pba_fields_t` | FTL 层 `nand_pba_t`（**只活在 FTL 内部**，v47 起不跨进 FC；v0.73 起 `nand_addr_t` 亦退出 FTL；定义于 `include/ftl/ftl_config.h` §三.2）|
 | PAA | Physical Array Address | NAND 芯片寻址 | 芯片内地址（Block + Plane + Page + CW），不含拓扑 | `nand_paa_t` |
 | FAA | （本项目曾用） | — | 原代码中 `cmd->faa` 曾用名，现统一为 LBA | 已废弃 |
 
@@ -3907,8 +3907,11 @@ cmd->paa  = PAA（芯片内地址）= pba_to_paa(PBA)   ← v47：FC 层唯一�
 > ⚠ **PBA 低 20 位不是 PAA**：两者 `PLANE`/`PAGE` 位序**相反**（见
 > `cw_level_mapping_design.md §4.1`），`pba_to_paa()` 是**真正的字段重排**、不是掩码截取。
 > 早先本图把 PBA 低 20 位直接标成 `[CW][PAGE][PLANE][BLOCK]` 是**错的**——照它手算地址
-> 或写掩码会得到错 plane / 错页。两套空间必须走 `pba_from_addr` / `paa_from_addr` /
-> `pba_to_paa` 构造函数（v24/v47 教训：历史上 10+ 处现场转换都在静默算错地址）。
+> 或写掩码会得到错 plane / 错页。两套空间必须走构造函数（v24/v47 教训：历史上 10+ 处现场
+> 转换都在静默算错地址）：**PBA 侧**用位域视图 `pba_make()` / `pba_pack()`（v0.73 起；
+> `pba_from_addr` / `paa_from_addr` 已随 `nand_addr_t` 退出 FTL 而删除），**跨 PBA↔PAA**
+> 用 `pba_to_paa()` / `paa_to_pba()`（唯一转换器，只在 FTL↔FC 边界 `pba_to_cmd` /
+> `ftl_cmd_pba` 里调用）。
 
 #### 13.4.2 FTL 主循环形态
 
@@ -4258,6 +4261,13 @@ nand_paa_t（芯片内地址）                = [LUN][BLOCK][PLANE][PAGE][CW]
 **遍历路径**：`super_block_page_addr(sb, plane, page)` / `addr_from_pba(pba)` / `addr_from_paa(ch,ce,paa)`
 → `addr_to_cmd(cmd, &addr)` 直填 FC 命令（省打包拆包）。
 **随机 IO 路径**：从 L2P 拿 PBA → `ftl_cmd_setup_ppa(cmd, pba)` 保留（PBA 已在手）。
+
+> ⚠ **v0.73 更新（当前态）**：上面这段是 v0.28 的**当时态**。v0.73 起 `nand_addr_t`
+> **整体退出 FTL 层**——FTL 地址一律 `nand_pba_t`，具名字段访问经位域视图
+> `pba_make` / `pba_pack` / `pba_fields`（`ftl_config.h §三.2`）；`addr_to_cmd` 改名
+> `pba_to_cmd`（收 PBA），`addr_from_pba` / `addr_from_paa` / `pba_from_addr` /
+> `super_block_page_addr` **已删除**（后者的职责并入 `super_block_page_pba`）。
+> 详见 `ftl_revision_history.md` v0.73。
 
 ---
 

@@ -695,27 +695,29 @@ int ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t length);
 int ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length);
 ```
 
-### 5.2 地址直填 Helper（Step 1/2 新增）
+### 5.2 地址入口：`pba_to_cmd`（v0.73 起）
 
-见 `include/ftl/ftl_fc_interface.h`。遍历路径不再打包 → `ftl_cmd_setup_ppa` 拆包，
-直接用展开地址（`nand_addr_t`，定义于 `include/nand/nand_config.h`）填入 FC 命令：
+见 `include/ftl/ftl_fc_interface.h`。**FTL 层地址一律 `nand_pba_t`**——遍历路径不再
+经 `nand_addr_t` 展开，直接由 PBA 填 FC 命令；PAA 只在 `pba_to_cmd` 内部
+（`pba_to_paa()` 一次）转出，FC 层只见 PAA：
 
 ```c
-/* nand_addr_t → FC 命令（ch/ce/lun → config 位域，block/plane/page/cw → paa） */
-ftl_status_t addr_to_cmd(fc_command_t *cmd, const nand_addr_t *addr);
+/* nand_pba_t → FC 命令（ch/ce/lun → config 位域，block/plane/page/cw → paa） */
+ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba);
 
-/* nand_pba_t → nand_addr_t（allocator/L2P 返回的紧凑 PBA 展开） */
-nand_addr_t addr_from_pba(nand_pba_t pba);
+/* FC 命令 → nand_pba_t（反向：ch/ce 取 config 位域，其余由 paa_to_pba() 反重排） */
+nand_pba_t ftl_cmd_pba(const fc_command_t *cmd);
 
-/* PAA + CH/CE → nand_addr_t（元数据固定位置 / Directory 查找结果） */
-nand_addr_t addr_from_paa(uint8_t ch, uint8_t ce, nand_paa_t paa);
-
-/* Super Block 中指定 Plane/Page 的展开地址（ch/ce/lun 取自 sb->topo） */
-nand_addr_t super_block_page_addr(const super_block_t *sb, uint8_t plane, uint8_t page);
+/* Super Block 中指定 Plane/Page 的 PBA（ch/ce/lun 取自 sb->topo） */
+nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const super_block_t *sb,
+                                uint8_t plane, uint8_t page);
 ```
 
-语义上 `addr_to_cmd(cmd, &addr)` 等价于 `ftl_cmd_setup_ppa(cmd, pba_from_addr(&addr))`，
-但省去打包→拆包往返。**随机 IO 路径（从 L2P 拿到 PBA）仍走 `ftl_cmd_setup_ppa`（保留）。**
+**具名字段构造 PBA** 用位域视图（`ftl_config.h §三.2`）：`pba_make(ch, ce, lun, block,
+plane, page, cw)` 或 `pba_pack((nand_pba_fields_t){…})`；反向读取用 `pba_fields(pba)`。
+
+⚠ v0.28 引入的展开式 `nand_addr_t` 与 `addr_to_cmd` / `addr_from_pba` / `addr_from_paa`
+**已于 v0.73 删除**——`nand_addr_t` 整体退出 FTL（只在 `pba_to_paa()` 内部出现）。
 
 ### 5.3 内部同步 NAND 操作（内联化）
 
@@ -736,15 +738,15 @@ ftl_status_t ftl_internal_sync_wait(uint16_t cmd_id, fc_command_status_t *status
 
 | 模块 | 助手（static） | 地址来源 | 特征 |
 |------|---------------|---------|------|
-| `l2p_cache.c` | `sync_read_page` / `sync_write_page` | `addr_from_paa` / `addr_from_pba` | 元数据（CRC/Random DISABLE） |
+| `l2p_cache.c` | `sync_read_page` / `sync_write_page` | `metadata_dir_lookup` / `metadata_dir_append_slot`（PBA）/ `l2p_region_pba` | 元数据（CRC/Random DISABLE） |
 | `journal.c` | `sync_read/write_page`、`sync_erase_block` | `journal_page_addr` / `journal_block_addr` | 元数据，20ms 超时擦除 |
 | `checkpoint.c` | `sync_read/write_page` | `metadata_ring_addr`（Checkpoint 池 48-55） | CHECKPOINT module，池内环内轮转 |
-| `metadata.c` | `sync_read/write_page` | `metadata_ring_addr`（Anchor 池 16-47）/ `paa_from_addr`（L2P 日志块） | METADATA module |
+| `metadata.c` | `sync_read/write_page` | `metadata_ring_addr`（Anchor 池 16-47）/ `pba_make`（L2P 日志块） | METADATA module |
 | `bbt.c` | `sync_read/write_page`、`ftl_sync_read_column`（列 2048 = spare 首字节，v63） | `metadata_ring_addr`（BBT 池 56-57） | BBT module，池内环内轮转 |
-| `gc.c` | `sync_write_page`、`sync_erase_block` | `addr_from_pba` / `super_block_page_addr` | 用户数据（CRC/Random ENABLE），20ms 擦除 |
-| `wear_leveling.c` | `sync_write_page` | `addr_from_pba` | 同 GC |
-| `read_recovery.c` | `sync_read_page` | `addr_from_pba` / `addr_from_paa` | CRC/Random ENABLE + LBA META |
-| `power_failure_recovery.c` | `sync_read_page`、`sync_read_page_raw` | `journal_page_addr` | 元数据 + LDPC_RAW |
+| `gc.c` | `sync_write_page`、`sync_erase_block` | `super_block_page_pba` | 用户数据（CRC/Random ENABLE），20ms 擦除 |
+| `wear_leveling.c` | `sync_write_page` | `super_block_page_pba` | 同 GC |
+| `read_recovery.c` | `sync_read_page` | `pba_make`（邻页） | CRC/Random ENABLE + LBA META |
+| `power_failure_recovery.c` | `sync_read_page`、`sync_read_page_raw` | `journal_page_addr` / `pba_make` | 元数据 + LDPC_RAW |
 
 ### 5.4 约束汇总
 
