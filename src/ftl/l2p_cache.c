@@ -41,7 +41,8 @@
 #include "fc/fc.h"
 #include "ftl/ftl.h" /* ftl_context_t / ftl_service_pump（同步逃生口用） */
 #include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_op.h" /* ftl_op_submit / ftl_op_in_dispatch */
+#include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
+#include "ftl/ftl_op.h"  /* ftl_op_submit / ftl_op_in_dispatch */
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
@@ -612,6 +613,19 @@ void l2p_flush_kick(l2p_cache_t *cache, uint8_t max_kick)
     if ((cache == NULL) || (max_kick == 0U))
     {
         return;
+    }
+
+    /* 心跳（见 ftl_job.h）：有在飞 region（load / flush）时每满 1s 打一行计数。
+     * ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。 */
+    if ((cache->flush_inflight == 0U) && (cache->load_inflight == 0U))
+    {
+        cache->job_log_ms = 0U; /* 无在飞：清基准 */
+    }
+    else if (ftl_job_tick(&cache->job_log_ms) != 0)
+    {
+        LOGI("[L2P] job inflight load=%u flush=%u\r\n",
+             (unsigned)cache->load_inflight,
+             (unsigned)cache->flush_inflight);
     }
 
     for (i = 0U; (i < L2P_CACHE_SIZE) && (max_kick > 0U); i++)

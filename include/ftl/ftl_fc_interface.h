@@ -330,8 +330,8 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
  * 【成败判据】返回 FTL_OK ⇒ 页内容**可信**；判据是 FC_CW_STATUS_ERROR_MASK 全集
  * （NAND_FAIL / TIMEOUT / CRC_ERROR / UNC / MATA_ERROR / RAID_ERROR 任一置位即
  * FTL_ERROR），与 fc_command.h 的链级判据同口径。两个例外：ftl_sync_read_page_raw
- * 与 ftl_sync_read_meta / ftl_sync_read_column 刻意**不看**这些位（坏页的原始位与
- * spare 正是它们的返回物），成败由调用者按内容自判。
+ * 与 ftl_sync_read_column 刻意**不看**这些位（坏页的原始位与 spare 正是它们的
+ * 返回物），成败由调用者按内容自判。
  */
 
 typedef struct
@@ -447,21 +447,9 @@ ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const f
 ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t ce, uint8_t lun, uint8_t feature_addr, uint8_t mode);
 
 /*
- * 读 META：OP_READ_META，无数据链，回读 pba 指定页 / 指定 CW 的**前 4 字节 META**。
- *
- * CW 布局 [META:4][CRC:4][USER:512][PARITY:8]，META 在加扰区之前、**明文**。
- * CW0 的 META 头 4 字节即 spare 区最前面的 4 字节 ⇒ 出厂坏块标记（spare[0] = 0x00）
- * 落在 out[0]。pba 的 cw 字段是列选择器（不是 desc 链的 CW 位），必须显式给。
- *
- * 与 ftl_sync_read_page_raw 同契约：**刻意不判定 NAND 失败**——坏页也要拿到原始
- * 位，故命令完成即返回 FTL_OK，成败由调用者按 out[] 内容判。out 需 4 字节。
- */
-ftl_status_t ftl_sync_read_meta(nand_pba_t pba, uint8_t out[4]);
-
-/*
  * 按列读：OP_READ_COLUMN，无数据链，回读 pba 指定页**从列 column 起的 4 个字节**。
  *
- * 与 ftl_sync_read_meta 的区别只有一个：**列地址不来自 pba 的 cw 字段，而由 column 形参给**
+ * 列地址**不来自 pba 的 cw 字段，而由 column 形参给**
  * ——cw 只有 2 位（列上限 1584），够不到 spare 区。出厂坏块标记在 **spare 首字节 = 列
  * 2048**（`PAGE_MAIN_SIZE`），只有本原语够得到。行地址仍取 pba 的 block/plane/page。
  *

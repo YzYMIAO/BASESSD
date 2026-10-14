@@ -120,6 +120,10 @@ typedef struct
     nand_pba_t page;         /* 本 plane 目标页 PBA（NAND_PBA_INVALID = 本子操作不覆盖本 plane） */
     nand_pba_t neighbor;     /* Stage 2 邻居页 PBA（NB_READ 提交前算好） */
     uint8_t    retry_count;  /* 本次恢复已用的读重试次数（观测，收尾 LOGE 用） */
+
+    /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 stage/age */
+    uint32_t start_ms;
+    uint32_t log_ms;
 } ftl_read_recovery_t;
 
 /* ── 接口 ── */

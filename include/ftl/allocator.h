@@ -157,6 +157,10 @@ typedef struct
 {
     uint8_t phase;   /* bbt_job_phase_t */
     uint8_t waiting; /* 1 = 有一条本 job 的命令在飞；0 = 待续跑（提交被背压拒） */
+
+    /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age */
+    uint32_t start_ms;
+    uint32_t log_ms;
 } bbt_job_t;
 
 typedef struct
@@ -187,6 +191,10 @@ typedef struct
     uint16_t cursor;       /* 下一个待考察的 gblock（= FTL_BLOCK_TOTAL 表示本批走完） */
     uint32_t flush_ms;     /* 起点时刻（收尾写回节拍基准，与旧 wear_flush 同位置） */
     uint32_t flush_writes; /* 起点 total_writes（同上） */
+
+    /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/cursor/age */
+    uint32_t start_ms;
+    uint32_t log_ms;
 } wear_job_t;
 
 typedef struct

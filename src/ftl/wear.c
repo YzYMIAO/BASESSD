@@ -39,7 +39,8 @@
 #include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_op.h" /* ftl_op_submit / FTL_OP_WEAR（阶段 7） */
+#include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
+#include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_WEAR（阶段 7） */
 #include "platform/platform.h"
 
 #include <string.h>
@@ -242,6 +243,21 @@ void wear_kick(ftl_allocator_t *alloc, uint32_t total_writes)
     if ((alloc == NULL) || (alloc->blocks == NULL))
     {
         return;
+    }
+
+    /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/cursor/age */
+    if (alloc->wear.job.phase == (uint8_t)WEAR_JOB_IDLE)
+    {
+        ftl_job_heartbeat_reset(&alloc->wear.job.log_ms, &alloc->wear.job.start_ms);
+    }
+    else if (ftl_job_heartbeat(&alloc->wear.job.log_ms, &alloc->wear.job.start_ms) != 0)
+    {
+        LOGI("[WEAR] job phase=%u waiting=%u full=%u cursor=%u age=%lums\r\n",
+             (unsigned)alloc->wear.job.phase,
+             (unsigned)alloc->wear.job.waiting,
+             (unsigned)(alloc->wear.job.dirty_only == 0U),
+             (unsigned)alloc->wear.job.cursor,
+             (unsigned long)ftl_job_age_ms(&alloc->wear.job.start_ms));
     }
 
     if (alloc->wear.job.waiting != 0U)

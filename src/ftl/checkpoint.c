@@ -22,7 +22,8 @@
  *   故任何被 Header 声称的落盘必须**先于** Header 完成。
  *
  * 文件结构：
- *   1. 内部辅助        checkpoint_now_ms / checkpoint_header_valid / checkpoint_record_probe
+ *   1. 内部辅助        checkpoint_header_valid / checkpoint_record_probe
+ *                      （单调毫秒 / 心跳基准见 ftl_job.h）
  *   2. 异步 job        cp_step（static）/ checkpoint_begin / checkpoint_kick / ftl_op_checkpoint
  *   3. 创建/恢复       checkpoint_find_latest / checkpoint_write_initial
  *   4. 触发/水位       checkpoint_check_trigger / checkpoint_is_emergency / checkpoint_journal_watermark
@@ -38,30 +39,14 @@
 #include "fc/fc.h"
 #include "ftl/ftl.h"
 #include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_op.h" /* ftl_op_submit / FTL_OP_CHECKPOINT */
+#include "ftl/ftl_job.h" /* 心跳 + 单调毫秒（ftl_job_now_ms / ftl_job_heartbeat）*/
+#include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_CHECKPOINT */
 #include "ftl/metadata.h"
 #include "nand/onfi_1_0.h"
-#include "platform/platform.h"
 
 #include <string.h>
 
 /* ── 内部辅助 ── */
-
-/*
- * checkpoint_now_ms - 当前单调毫秒（经平台抽象 time_us 换算）。
- * 平台未注册时返回 0，checkpoint 头部时间戳退化为 0（行为同接线前）。
- */
-static uint32_t checkpoint_now_ms(const ftl_context_t *ftl)
-{
-    const ssd_platform_ops_t *platform = ssd_platform_get();
-
-    (void)ftl;
-    if ((platform == NULL) || (platform->time_us == NULL))
-    {
-        return 0U;
-    }
-    return (uint32_t)(platform->time_us() / 1000U);
-}
 
 /* ── Checkpoint 池：环形轮转（一条 record = 1 页）──
  *
@@ -506,7 +491,7 @@ static void cp_step(ftl_context_t *ftl)
 
                 cp.magic            = CHECKPOINT_MAGIC;
                 cp.sequence         = j->hdr_seq; /* 本池自己的单调序号 */
-                cp.timestamp        = checkpoint_now_ms(ftl);
+                cp.timestamp        = ftl_job_now_ms();
                 cp.journal_sequence = j->journal_seq; /* 截断到此 seq（job 起点快照） */
                 cp.layout_version   = FTL_MEDIA_LAYOUT_VERSION;
 
@@ -606,7 +591,7 @@ ftl_status_t checkpoint_begin(ftl_context_t *ftl)
 
     j->active   = 1U;
     j->phase    = (uint8_t)CP_FLUSH_REGIONS;
-    j->start_ms = checkpoint_now_ms(ftl);
+    j->start_ms = ftl_job_now_ms();
     j->log_ms   = j->start_ms;
 
     cp_step(ftl); /* 立刻推进第一步（脏区落盘可当场起异步写回） */
@@ -624,20 +609,16 @@ void checkpoint_kick(ftl_context_t *ftl)
 
     j = &ftl->cp_job;
 
-    /* 心跳（观测口）：正常 CP 远快于 1s ⇒ 平时静默；只有卡在某 phase 才持续可见。
-     * 判据 = 两次心跳之间 phase 不动 ⇒ 卡死（异步后"卡在哪一步"否则完全不可见）。 */
+    /* 心跳（见 ftl_job.h）：正常 CP 远快于 1s ⇒ 平时静默；只有卡在某 phase 才持续可见。
+     * 判据 = 两次心跳之间 phase 不动 ⇒ 卡死（异步后"卡在哪一步"否则完全不可见）。
+     * ⚠ 起点在 checkpoint_begin 显式记（CP 的"job 起点"是快照时刻，不是首次心跳时刻）。 */
+    if (ftl_job_heartbeat(&j->log_ms, &j->start_ms) != 0)
     {
-        const uint32_t now_ms = checkpoint_now_ms(ftl);
-
-        if ((now_ms - j->log_ms) >= CP_JOB_LOG_INTERVAL_MS)
-        {
-            j->log_ms = now_ms;
-            LOGI("[CP] job phase=%u wait=%u fail=%u age=%lums\r\n",
-                 (unsigned)j->phase,
-                 (unsigned)j->waiting,
-                 (unsigned)j->failed,
-                 (unsigned long)(now_ms - j->start_ms));
-        }
+        LOGI("[CP] job phase=%u wait=%u fail=%u age=%lums\r\n",
+             (unsigned)j->phase,
+             (unsigned)j->waiting,
+             (unsigned)j->failed,
+             (unsigned long)ftl_job_age_ms(&j->start_ms));
     }
 
     cp_step(ftl);

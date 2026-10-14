@@ -54,9 +54,7 @@ struct ftl_context;
  * 只在「有脏行却起不动」时累计——等 FLUSHING 完成算有进展，不计数。 */
 #define CP_SUBMIT_STALL_MAX (256U)
 
-/* job 心跳节拍（毫秒）：在飞期间每 ≥1s 打一行 phase/age，供区分「在推进」与「卡死」。
- * 正常 CP 远快于 1s ⇒ 平时静默，只有卡住才持续可见。 */
-#define CP_JOB_LOG_INTERVAL_MS (1000U)
+/* job 心跳节拍见 ftl_job.h 的 FTL_JOB_LOG_INTERVAL_MS（各 feature 统一，不再各自定义）。 */
 
 typedef enum
 {

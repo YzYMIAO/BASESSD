@@ -37,7 +37,7 @@
  *                     journal_start_erase / journal_flush_page（+ journal_flush_now）
  *   4. 完成服务       ftl_op_journal（g_op_service[FTL_OP_JOURNAL]）
  *   5. 回放与写指针恢复 journal_scan_latest / journal_resume / journal_replay
- *   6. 截断           journal_truncate
+ *   6. 截断           journal_truncate_plan / journal_truncate_commit（两步，异步 CP 用）
  */
 
 #include "ftl/journal.h"
@@ -46,7 +46,8 @@
 #include "fc/fc.h"
 #include "ftl/completion_table.h"
 #include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_op.h" /* ftl_op_submit / FTL_OP_JOURNAL */
+#include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
+#include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_JOURNAL */
 #include "nand/onfi_1_0.h"
 
 #include <string.h>
@@ -345,10 +346,25 @@ static int journal_start_erase(l2p_journal_t *journal)
  * -------------------------------------------------------------------- */
 void journal_kick(l2p_journal_t *journal)
 {
-    if ((journal == NULL) || (journal->job.phase != JRN_IDLE))
+    if (journal == NULL)
     {
         return;
     }
+
+    if (journal->job.phase != JRN_IDLE)
+    {
+        /* 心跳（见 ftl_job.h）：在飞期间每满 1s 打一行，异步后「卡在哪个 phase」的唯一观测口 */
+        if (ftl_job_heartbeat(&journal->job.log_ms, &journal->job.start_ms) != 0)
+        {
+            LOGI("[JRN] job phase=%u waddr=0x%08lx age=%lums\r\n",
+                 (unsigned)journal->job.phase,
+                 (unsigned long)journal->job.waddr,
+                 (unsigned long)ftl_job_age_ms(&journal->job.start_ms));
+        }
+        return; /* 单飞行：job 已在飞 */
+    }
+
+    ftl_job_heartbeat_reset(&journal->job.log_ms, &journal->job.start_ms);
 
     if (journal->job.need_erase != 0U)
     {
@@ -971,38 +987,6 @@ void journal_truncate_commit(l2p_journal_t *journal, uint8_t erased_block)
     journal->checkpoint_needed = 0U;
 }
 
-/* --------------------------------------------------------------------
- * journal_truncate
- *   功能：同步截断 Journal（= plan + 即刻擦 + commit）。
- *   参数：journal —— Journal；up_to_sequence —— 截断水位。
- *   返回：无。
- *   实现要点：**同步**原语（含一次阻塞擦除）；异步 job 请用 plan/commit 两步。
- *             ⚠ 阶段 6 起 checkpoint 走异步 plan/commit，本函数暂无调用者——保留为
- *             与 l2p_cache_*_sync 同族的同步逃生口（结构性同步上下文可用）。
- *             ⚠ **水位不满足时不复位水位标志**（逐字保留旧实现：旧函数在 ① 处直接
- *             return，复位在函数末尾 ⇒ 走不到）。异步 CP 路径不受此影响——它在
- *             CP_DONE 里无条件复位（对应旧 checkpoint_create 第 ⑧ 步）。
- * -------------------------------------------------------------------- */
-void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence)
-{
-    nand_pba_t addr;
-    uint8_t    next;
-    int        plan;
-
-    plan = journal_truncate_plan(journal, up_to_sequence, &addr, &next);
-
-    if (plan < 0)
-    {
-        return; /* 不截断 ⇒ 也不复位水位（旧实现同此） */
-    }
-
-    if (plan > 0)
-    {
-        (void)ftl_sync_erase_block(addr);
-        journal_truncate_commit(journal, next);
-        return;
-    }
-
-    /* 无需预擦（该块已预擦过）：仍要复位水位标志（否则 T1 永久命中 ⇒ 每圈必 CP） */
-    journal_truncate_commit(journal, JOURNAL_BLOCK_NONE);
-}
+/* journal_truncate（= plan + 即刻擦 + commit 的同步包装）已在阶段 6 随 Checkpoint
+ * job 化删除：异步 CP 在 CP_TRUNCATE 阶段提交异步擦命令后调 journal_truncate_commit，
+ * 唯一调用者消失。结构性同步上下文若将来需要，按 plan → 擦 → commit 三步自行组合。 */

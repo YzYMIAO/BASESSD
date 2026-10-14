@@ -33,6 +33,7 @@
 #include "ftl/bbt.h"              /* bbt_mark_bad */
 #include "ftl/ftl.h"              /* ftl_context_t（含 pending[] / cache / rr_page_scratch） */
 #include "ftl/ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_set_features / ftl_cmd_read_data */
+#include "ftl/ftl_job.h"          /* 心跳（[JOB] 观测口）*/
 #include "ftl/ftl_op.h"           /* ftl_op_submit / FTL_OP_READ_RECOVERY */
 #include "nand/onfi_1_0.h"
 
@@ -446,6 +447,24 @@ static void rr_step(ftl_context_t *ftl)
 void rr_kick(ftl_context_t *ftl)
 {
     ASSERT(ftl != NULL);
+
+    /* 心跳（见 ftl_job.h）：恢复在飞期间每满 1s 打一行 stage/age。
+     * ⚠ 判「在飞」用 stage 而非 waiting——提交侧背压时 stage 不变但无命令在飞，
+     *   那段同样属于「job 卡住」，正是心跳要暴露的。 */
+    if (ftl->rr.stage == (uint8_t)RR_STAGE_IDLE)
+    {
+        ftl_job_heartbeat_reset(&ftl->rr.log_ms, &ftl->rr.start_ms);
+    }
+    else if (ftl_job_heartbeat(&ftl->rr.log_ms, &ftl->rr.start_ms) != 0)
+    {
+        LOGI("[RR] job stage=%u plane=%u attempt=%u retry=%u stall=%u age=%lums\r\n",
+             (unsigned)ftl->rr.stage,
+             (unsigned)ftl->rr.plane,
+             (unsigned)ftl->rr.attempt,
+             (unsigned)ftl->rr.retry_count,
+             (unsigned)ftl->rr.stall_rounds,
+             (unsigned long)ftl_job_age_ms(&ftl->rr.start_ms));
+    }
 
     if (ftl->rr.waiting != 0U)
     {

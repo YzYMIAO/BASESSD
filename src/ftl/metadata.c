@@ -43,7 +43,8 @@
 #include "ftl/checkpoint.h"
 #include "ftl/ftl.h" /* ftl_context_t（服务函数要从实例取 &ftl->alloc） */
 #include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_op.h" /* ftl_op_submit / FTL_OP_METADATA */
+#include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
+#include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
 #include "ftl/journal.h"
 #include "nand/onfi_1_0.h"
 
@@ -1265,6 +1266,22 @@ void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
     if ((dir == NULL) || (alloc == NULL))
     {
         return;
+    }
+
+    /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age */
+    if (dir->job.phase == (uint8_t)MD_JOB_IDLE)
+    {
+        ftl_job_heartbeat_reset(&dir->job.log_ms, &dir->job.start_ms);
+    }
+    else if (ftl_job_heartbeat(&dir->job.log_ms, &dir->job.start_ms) != 0)
+    {
+        LOGI("[MD] job phase=%u victim=%u moved=%u reclaim=%u stall=%u age=%lums\r\n",
+             (unsigned)dir->job.phase,
+             (unsigned)dir->job.victim,
+             (unsigned)dir->job.moved,
+             (unsigned)dir->job.reclaim_target,
+             (unsigned)dir->job.stall_rounds,
+             (unsigned long)ftl_job_age_ms(&dir->job.start_ms));
     }
 
     for (;;)

@@ -548,6 +548,10 @@ typedef struct
     nand_pba_t      slot;              /* 压缩搬移已取到、待写的槽（NAND_PBA_INVALID = 未取）*/
     metadata_ring_t anchor_ring;       /* Anchor 池几何（prepare 出参，commit 要用）*/
 
+    /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/victim/age */
+    uint32_t start_ms;
+    uint32_t log_ms;
+
     /* victim region 页搬运缓冲：**必须常驻**——异步读完成与随后的写之间隔着若干轮
      * 服务循环，栈帧早已返回。放 job 而非栈（同 mig.page_buf / rr_page_scratch）。 */
     uint8_t cp_buf[L2P_REGION_SIZE];

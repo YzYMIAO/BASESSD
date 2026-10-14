@@ -147,6 +147,10 @@ typedef struct
 
     uint32_t migrated; /* 本 job 累计搬移的有效 CW 数（>0 才需要 F10 屏障） */
 
+    /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 kind/phase/page/age */
+    uint32_t start_ms;
+    uint32_t log_ms;
+
     uint8_t page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
 } mig_job_t;
 

@@ -42,6 +42,7 @@
 #include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/ftl_fc_interface.h"
+#include "ftl/ftl_job.h"  /* 心跳（[JOB] 观测口）*/
 #include "ftl/ftl_op.h"   /* ftl_op_submit / FTL_OP_BBT（阶段 7） */
 #include "ftl/metadata.h" /* metadata_ring_*（BBT 池轮转原语）*/
 #include "nand/onfi_1_0.h"
@@ -639,6 +640,21 @@ void bbt_kick(ftl_allocator_t *alloc)
     if ((alloc == NULL) || (alloc->blocks == NULL))
     {
         return;
+    }
+
+    /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age */
+    if (alloc->bbt.job.phase == (uint8_t)BBT_JOB_IDLE)
+    {
+        ftl_job_heartbeat_reset(&alloc->bbt.job.log_ms, &alloc->bbt.job.start_ms);
+    }
+    else if (ftl_job_heartbeat(&alloc->bbt.job.log_ms, &alloc->bbt.job.start_ms) != 0)
+    {
+        LOGI("[BBT] job phase=%u waiting=%u seq=%lu idx=%u age=%lums\r\n",
+             (unsigned)alloc->bbt.job.phase,
+             (unsigned)alloc->bbt.job.waiting,
+             (unsigned long)alloc->bbt.sequence,
+             (unsigned)alloc->bbt.write_idx,
+             (unsigned long)ftl_job_age_ms(&alloc->bbt.job.start_ms));
     }
 
     if (alloc->bbt.job.waiting != 0U)

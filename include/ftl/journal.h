@@ -95,6 +95,10 @@ typedef struct
     uint8_t    from_block;   /* 起写时的 current_block（防指针回退的守卫，见 journal.c） */
     uint8_t    from_page;    /* 起写时的 current_page */
     nand_pba_t waddr;        /* 在飞页地址（诊断 / 心跳） */
+
+    /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 phase/age */
+    uint32_t start_ms;
+    uint32_t log_ms;
 } journal_job_t;
 
 typedef struct
@@ -228,13 +232,7 @@ int journal_truncate_plan(l2p_journal_t *journal, uint32_t up_to_sequence, nand_
  */
 void journal_truncate_commit(l2p_journal_t *journal, uint8_t erased_block);
 
-/*
- * journal_truncate - 同步截断 Journal（= plan + 即刻擦 + commit）
- *
- * **同步**原语：只许结构性同步上下文调用（异步 job 请用 plan/commit 两步）。
- *
- * @param up_to_sequence 截断水位（同 journal_truncate_plan）
- */
-void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);
+/* journal_truncate（同步包装）已在阶段 6 随 Checkpoint job 化删除——异步 CP 走
+ * plan → 异步擦 → commit 三步；结构性同步上下文需要时自行组合（见 journal.c）。 */
 
 #endif /* FTL_JOURNAL_H */

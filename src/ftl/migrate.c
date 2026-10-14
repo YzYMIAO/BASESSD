@@ -35,6 +35,7 @@
 #include "ftl/bbt.h"              /* bbt_mark_bad */
 #include "ftl/ftl.h"              /* ftl_context_t */
 #include "ftl/ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_write_page_cw / ftl_async_erase_block */
+#include "ftl/ftl_job.h"          /* 心跳（[JOB] 观测口）*/
 #include "ftl/ftl_op.h"           /* ftl_op_submit / FTL_OP_GC / FTL_OP_WL */
 #include "ftl/gc.h"               /* gc_select_victim / gc_decode_cw_lba */
 #include "ftl/journal.h"          /* journal_kick / journal_append / JRN_IDLE */
@@ -694,10 +695,33 @@ static void mig_step(ftl_context_t *ftl)
 
 void mig_service(ftl_context_t *ftl)
 {
-    if ((ftl == NULL) || (ftl->mig.active == 0U))
+    mig_job_t *m;
+
+    if (ftl == NULL)
     {
         return;
     }
+
+    m = &ftl->mig;
+
+    if (m->active == 0U)
+    {
+        ftl_job_heartbeat_reset(&m->log_ms, &m->start_ms);
+        return;
+    }
+
+    /* 心跳（见 ftl_job.h）：搬移最长（64 页 × 2 plane），没有它卡死不可见 */
+    if (ftl_job_heartbeat(&m->log_ms, &m->start_ms) != 0)
+    {
+        LOGI("[MIG] job kind=%u phase=%u page=%u plane=%u aborted=%u age=%lums\r\n",
+             (unsigned)m->kind,
+             (unsigned)m->phase,
+             (unsigned)m->page,
+             (unsigned)m->plane,
+             (unsigned)m->aborted,
+             (unsigned long)ftl_job_age_ms(&m->start_ms));
+    }
+
     mig_step(ftl);
 }
 

@@ -5100,6 +5100,41 @@ CLI `fl` 若撞上"换块 + 池吃紧"，`append_slot` 返回 `NAND_PBA_INVALID`
 结构性必须顺序执行的路径（开机初始化 / 全片格式化 / 出厂坏块扫描 / 开机回放 / CLI）继续用
 `ftl_sync_submit_wait`。**八阶段已全部落地，v0.75 收口。**
 
+**v0.75 收口补丁（八阶段之后，未上板）**——计划书"贯穿各阶段的机制 1/2/5"的三条尾巴：
+
+1. **`[JOB]` 心跳全量化**。新增 `include/ftl/ftl_job.h`（`ftl_job_now_ms` /
+   `ftl_job_age_ms` / `ftl_job_heartbeat` / `ftl_job_heartbeat_reset` / `ftl_job_tick`），
+   把原先只有 CP 一份的心跳抽成公共节拍：每满 `FTL_JOB_LOG_INTERVAL_MS`（1 s）打一行，
+   **判据 = 两次心跳之间 phase 不动 ⇒ 卡死**（异步后没有 waiter 会超时，这是唯一观测口）。
+   - 接入：`journal_kick` / `mig_service` / `rr_kick` / `bbt_kick` / `wear_kick` /
+     `metadata_dir_kick` / `l2p_flush_kick`，加上原有的 `checkpoint_kick`。
+   - 各 job 结构体（`journal_job_t` / `mig_job_t` / `ftl_read_recovery_t` / `bbt_job_t` /
+     `wear_job_t` / `md_job_t` / `cp_job_t`）各增 `start_ms` / `log_ms` 两个基准字段
+     （`l2p_cache_t` 只增 `job_log_ms`）。
+   - **基准懒初始化**（首次见到在飞时记 start）⇒ 各 `*_begin` 无需显式赋值；只有 CP 保留
+     显式起点（"job 起点"是快照时刻，不是首次心跳时刻）。
+   - ⚠ **L2P 只报计数不报 age**：在飞的是若干 cache line，没有"单 job 的起点"可言 ⇒
+     用 `ftl_job_tick` 单基准版本，打 `[L2P] job inflight load=/flush=`。
+   - ⚠ 平台时钟缺失（`time_us` 未注册）时恒 0 ⇒ 心跳**永不触发**（纯观测，静默优于刷屏；
+     与 GC 求值节拍的取舍相反——那边 0 是"尚未求值"哨兵，且它是**功能**）。
+   - `CP_JOB_LOG_INTERVAL_MS` 删除（统一到 `FTL_JOB_LOG_INTERVAL_MS`）；
+     `checkpoint_now_ms` 删除（改用 `ftl_job_now_ms`，`checkpoint.c` 不再直接依赖
+     `platform/platform.h`）。
+   - ⚠ `ftl.c` 的 `ftl_now_ms()` **刻意不动**（同一平台时钟，但归属"功能"节拍：GC 求值 /
+     RR 巡检 / CP 定时触发）；两处等价实现在 `ftl_job.h` 顶部登记在案。
+
+2. **`ftl_sync_submit_wait` 入口断言**（贯穿机制 2 的落地）：
+   `ASSERT(ftl_op_in_dispatch() == 0)`——在完成派发里再开一个完成泵（嵌套泵）是本次异步化
+   要消灭的形态。**目标终态**：本函数只被开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI
+   调用。新增调用点若触发断言 ⇒ 该功能尚未 job 化，应改走 `ftl_async_* + ftl_op_submit`。
+
+3. **清死代码**（零调用点，逐条 grep 确认）：
+   - `journal_truncate`（同步包装 = plan + 即刻擦 + commit）——阶段 6 把 Checkpoint job 化后
+     唯一调用者消失；异步 CP 走 `journal_truncate_plan` → 异步擦 → `journal_truncate_commit`；
+   - `ftl_sync_read_meta`——页内 META 统一经 `ftl_async_read_page` 的 desc 链完成数据读取，
+     不需要单独的裸 META 原语。⚠ **判坏块看的是 OOB 标记**，那是 `ftl_sync_read_column`
+     （`OP_READ_COLUMN`），**仍在用**，勿一并删。
+
 **阶段 8 关闭的欠账**：
 - ✅ `metadata_dir_compact` / `metadata_dir_flush_to_anchor` 同步版删除；
 - ✅ `metadata_dir_commit_region` **不再擦 NAND** ⇒ 完成泵内嵌套泵的最后一条路径消失；
@@ -5116,8 +5151,9 @@ CLI `fl` 若撞上"换块 + 池吃紧"，`append_slot` 返回 `NAND_PBA_INVALID`
   收益极低，**有意不做**；
 - md job **无 watchdog**（与 journal / mig / RR / CP / BBT / Wear 一致）：NAND 层超时由
   `nand_dispatch_tables.c` 聚合成 `FC_CW_STATUS_TIMEOUT` 的**完成**送达，故"在飞"必有终态；
-- per-job 的 `[JOB]` 心跳日志：仍只有 CP 有。md job 的进展目前只能靠 `log level debug`
-  下的 `[META] compact start/done` / `log-block:` 观察。
+- per-job 的 `[JOB]` 心跳日志：✅ **已补齐**（见上文"v0.75 收口补丁"）——`[MD] job phase=…`
+  每满 1 s 一行。原先只能靠 `log level debug` 下的 `[META] compact start/done` /
+  `log-block:` 观察。
 
 **阶段 7 关闭的欠账**：
 - ✅ BBT / Wear 两处"攒批 + 后台刷"已 job 化：`bbt_flush` / `wear_flush` 及其内部
@@ -5134,7 +5170,9 @@ CLI `fl` 若撞上"换块 + 池吃紧"，`append_slot` 返回 `NAND_PBA_INVALID`
 - BBT / Wear job **无 watchdog**（与 journal / mig / RR / CP 一致）：NAND 层超时由
   `nand_dispatch_tables.c` 聚合成 `FC_CW_STATUS_TIMEOUT` 的**完成**送达，故"在飞"必有终态。
   两批都只有 1~25 页、毫秒级，1 s 心跳永远打不出来 ⇒ 可观测性靠 `LOGE`；
-- per-job 的 `[JOB]` 心跳日志：仍只有 CP 有（阶段 6 补上）。
+- per-job 的 `[JOB]` 心跳日志：✅ **已补齐**（见上文"v0.75 收口补丁"）——`[BBT] job phase=…`
+  / `[WEAR] job phase=…`。⚠ 两批都只有 1~25 页、毫秒级，1 s 心跳实际上打不出来，
+  可观测性仍主要靠 `LOGE`；心跳的价值在于"万一真卡住"。**无 watchdog** 的结论不变。
 
 **阶段 6 关闭的欠账**：
 - ✅ 同步逃生口 `l2p_cache_*_sync` 的四个调用族里，**checkpoint 一族消失**——
@@ -5156,5 +5194,5 @@ CLI `fl` 若撞上"换块 + 池吃紧"，`append_slot` 返回 `NAND_PBA_INVALID`
   **同步**的（内含 `ftl_sync_read_page`）——这是本 job 唯一剩余的同步点，且**只在冷启动后
   首次 CP** 出现（开机 `checkpoint_find_latest` 已建立游标时零代价）。异步化它需要把
   "扫池"也拆成 phase，收益极低（一次性），**有意不做**；
-- per-job 的 `[JOB]` 心跳日志：CP 已有 `[CP] job phase=…`（阶段 6 补上），其余功能仍只有
-  失败 LOGE / LOGW。
+- per-job 的 `[JOB]` 心跳日志：✅ **已全量化**（见上文"v0.75 收口补丁"）——CP 的
+  `[CP] job phase=…` 之外，journal / mig / RR / BBT / Wear / MD / L2P 各自一行。

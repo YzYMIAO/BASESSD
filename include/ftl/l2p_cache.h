@@ -207,6 +207,10 @@ typedef struct
     uint8_t load_inflight;
     uint8_t flush_inflight;
 
+    /* 心跳基准（见 ftl_job.h）：有在飞 region（load/flush）时每满 1s 打一行计数。
+     * ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。 */
+    uint32_t job_log_ms;
+
     /* Metadata Directory 指针（由 ftl_context_t 提供） */
     metadata_dir_cache_t *md_dir; /* 用于 Region 位置查找 */
 

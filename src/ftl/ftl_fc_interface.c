@@ -24,7 +24,7 @@
  *   4. 同步提交等待    ftl_sync_submit_wait（ftl_op 机制的客户端）
  *   5. 页级同步原语    sync_page_prepare / sync_page_prepare_cw（static）
  *                      + ftl_sync_write_page / ftl_sync_read_page / ftl_sync_read_page_raw
- *                        / ftl_sync_erase_block / ftl_sync_read_meta / ftl_sync_read_column
+ *                        / ftl_sync_erase_block / ftl_sync_read_column
  *   6. 页级异步原语    ftl_async_write_page / ftl_async_read_page / ftl_async_erase_block
  *                      / ftl_async_set_features —— 只建链（+ 写则搬数据），**不提交**
  *
@@ -525,6 +525,14 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     uint32_t          max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
 
     ASSERT(cmd != NULL);
+
+    /* ⚠ **服务函数内不得同步等待**（贯穿机制 2）：在完成派发里再开一个完成泵
+     * （本函数自旋 fc_service + completion_table_drain）= 嵌套泵，正是本次异步化要
+     * 消灭的形态——调用者的栈帧被钉住，且泵里再跑泵使重入面不可枚举。
+     * 目标终态：本函数只被开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI 调用
+     * （那些路径在 superloop 之前，没有别人 drain CQ，必须同步）。
+     * 新增调用点若触发本断言，说明该功能尚未 job 化——改用 ftl_async_* + ftl_op_submit。 */
+    ASSERT(ftl_op_in_dispatch() == 0);
 
     waiter.cmd_id = ftl_cmd_id(cmd);
     waiter.done   = 0U;
@@ -1066,47 +1074,9 @@ ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t 
     return FTL_OK;
 }
 
-/* --------------------------------------------------------------------
- * ftl_sync_read_meta
- *   功能：读一页的 4 字节 META（页内 META 字段，不经 desc 链）。
- *   参数：pba —— 目标页 PBA；out[4] —— 输出 4 字节 META。
- *   返回：FTL_OK / FTL_ERROR（out 为 NULL / 建链失败 / 提交等待失败）。
- *   实现要点：META 走控制器侧暂存，完成时已拷进 CQ 的 param；**刻意不判 NAND_FAIL**
- *             ——坏页的 META 也要拿到（判坏块正是要看它）。
- * -------------------------------------------------------------------- */
-ftl_status_t ftl_sync_read_meta(nand_pba_t pba, uint8_t out[4])
-{
-    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
-    fc_command_t        *cmd;
-    fc_command_status_t  completion;
-
-    if (out == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    /* OP_READ_META 的 has_data = 0 ⇒ ftl_cmd_needs_desc_chain 短路：pba_to_cmd 里的
-     * ftl_cmd_configure_descriptors 不建链、也不看位图（desc_id 置 INVALID）。
-     * 但地址仍须经 pba_to_cmd 落进 cmd->paa —— FC 侧据 paa 的 cw 字段算列地址。 */
-    cmd = sync_page_prepare(pba, OP_READ_META, &cfg);
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
-
-    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
-    {
-        (void)fc_command_release(cmd);
-        return FTL_ERROR;
-    }
-
-    /* 4 字节 META 走控制器侧暂存（同 GET_FEATURES），完成时已拷进 CQ 的 param。
-     * 刻意不判 NAND_FAIL：坏页的 META 也要拿到——判坏块正是要看它。 */
-    (void)memcpy(out, completion.param.bytes, 4U);
-
-    (void)fc_command_release(cmd);
-    return FTL_OK;
-}
+/* ftl_sync_read_meta（读一页的 4 字节 META）已在 v0.75 删除：全仓零调用点——页内 META
+ * 的读取统一走 ftl_async_read_page 的完成数据（desc 链），无需单独的裸 META 原语。
+ * 判坏块看的是 OOB 标记，那是 ftl_sync_read_column（OP_READ_COLUMN），仍在用。 */
 
 /* --------------------------------------------------------------------
  * ftl_sync_read_column
