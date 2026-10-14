@@ -102,7 +102,13 @@
 /* ── 池尺寸：策略常量 → 每个分区的块数 ── */
 
 /* L2P Table：region 打包进块（向上取整）
- * 每实例一份，块号各 die 相同（不随 LUN/CE/CH 错开）*/
+ * 每实例一份，块号各 die 相同（不随 LUN/CE/CH 错开）
+ * ⚠ `+ L2P_REGION_PER_BLOCK - 1U` 是**向上取整**惯用法（ceil(a/b) ≡ (a+b-1)/b）：
+ *   整数除法截断成 floor，除不尽时会少算一块、丢掉尾部 region。
+ *   当前几何 2048 ÷ 128 恰好整除 ⇒ 该项不起作用；但两个操作数都由器件几何推出，
+ *   改 PAGES_PER_BLOCK / CW_NUM / PAGE_MAIN_SIZE 任一个就可能不再整除 ⇒ 须写通用形式。
+ *   下方 `_Static_assert(L2P_BLOCKS * L2P_REGION_PER_BLOCK >= L2P_REGIONS_PER_INSTANCE)`
+ *   要求的正是这个 ceil 语义，两者配套。*/
 #define L2P_REGION_PER_BLOCK (FTL_SLOTS_PER_BLOCK)
 #define L2P_BLOCKS           ((L2P_REGIONS_PER_INSTANCE + L2P_REGION_PER_BLOCK - 1U) / L2P_REGION_PER_BLOCK)
 
@@ -179,8 +185,14 @@
  *        计数读成垃圾）。
  * v0.73：Directory 条目（metadata_entry_t）的 4 字节位置字段由 PAA 改存 PBA —— 字节数不变
  *        （两者都是 uint32_t），但**字节语义变了**（位序重排）⇒ 必须 +1，否则老介质上读回
- *        的 PAA 会被当成 PBA 解出错误的块/页。 */
-#define FTL_MEDIA_LAYOUT_VERSION (4U)
+ *        的 PAA 会被当成 PBA 解出错误的块/页。
+ * v0.74：OP / Spare 池改按 plane 预留（每 plane 各 204 OP + 50 Spare，见 allocator.h）。
+ *        结构体布局没变，但**预留块集合变了**：老固件把 plane 1 的块当用户数据区（已写过
+ *        用户数据、被 L2P 引用），新固件把它们当预留池 —— 而预留池的契约是"块已擦除"，
+ *        消费点会直接把它们丢回 free pool，下次写即覆盖活数据。且 F2 重建会把这些"写过的
+ *        块"也建成 Closed 条目 ⇒ 同一块同时进预留池与 closed 列表，账本错乱。⇒ 必须 +1，
+ *        让首启自动全片格式化一次。 */
+#define FTL_MEDIA_LAYOUT_VERSION (5U)
 
 /* ── 逻辑表字节（公式①：覆盖实体数 × 每实体字节）── */
 

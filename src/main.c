@@ -183,41 +183,40 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
      * 用户数据 written 块仍回填（时序安全：boot_recovery 的 F2 重建会把它们拉出）。
      *
      * OP 10% + Spare Pool（容量不动语义，ftl_design §3.6/ADR-8）：
-     *   先扣 FTL_SPARE_POOL_SIZE=50 入 Spare Pool（坏块替换池，只出不进，
-     *   耗尽后容量自然下降），再按 FTL_OP_PERCENT=10% 扣入 OP 池（GC 缓冲池），
-     *   其余才进 free pool。L2P region 数 / FTL_LBA_MAX 不变 → 用户容量 512MiB 不变。
+     *   **按 plane 各扣一份**（写入/擦除/GC 的最小单元是 super block = 每 plane 一块，
+     *   预留必须两 plane 对称，否则一个 plane 见底时配不成对）。每 plane 先扣
+     *   FTL_SPARE_POOL_PER_PLANE=50 入 Spare Pool（坏块替换池，只出不进，耗尽后容量
+     *   自然下降），再按 FTL_OP_PERCENT=10% 扣入 OP 池（GC 缓冲池），其余才进 free pool。
+     *   L2P region 数 / FTL_LBA_MAX 不变 → 用户容量 512MiB 不变。
      */
     for (gblock = 0U; gblock < FTL_BLOCK_TOTAL; gblock++)
     {
-        uint16_t spare_idx;
-        uint16_t op_idx;
+        uint8_t plane = ftl_gblock_plane(gblock);
 
         if (ftl_block_is_bad(&alloc->blocks[gblock]))
         {
             continue;
         }
-        if (ftl_is_metadata_block(&ftl->metadata_dir, ftl_gblock_plane(gblock), ftl_gblock_block(gblock)))
+        if (ftl_is_metadata_block(&ftl->metadata_dir, plane, ftl_gblock_block(gblock)))
         {
             continue;
         }
 
         good_n++;
 
-        /* ① 前 50 个好块入 Spare Pool（坏块替换池） */
-        spare_idx = alloc->spare_count;
-        if (spare_idx < FTL_SPARE_POOL_SIZE)
+        /* ① 本 plane 的前 50 个好块入 Spare Pool（坏块替换池） */
+        if (alloc->spare_count[plane] < FTL_SPARE_POOL_PER_PLANE)
         {
-            alloc->spare_blocks[spare_idx] = gblock;
-            alloc->spare_count++;
+            alloc->spare_blocks[plane][alloc->spare_count[plane]] = gblock;
+            alloc->spare_count[plane]++;
             continue;
         }
 
-        /* ② 前 10% 好块入 OP 池（GC 缓冲池） */
-        op_idx = alloc->op_count;
-        if (op_idx < (uint16_t)((uint16_t)(FTL_BLOCK_TOTAL / 2U) * FTL_OP_PERCENT / 100U))
+        /* ② 本 plane 的前 10% 好块入 OP 池（GC 缓冲池） */
+        if (alloc->op_count[plane] < (uint16_t)FTL_OP_BLOCKS_PER_PLANE)
         {
-            alloc->op_blocks[op_idx] = gblock;
-            alloc->op_count++;
+            alloc->op_blocks[plane][alloc->op_count[plane]] = gblock;
+            alloc->op_count[plane]++;
             continue;
         }
 
@@ -229,13 +228,15 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
      * （见 allocator.h 声明语义）。allocator_init 置 0，此处按出厂扫描结果置定。 */
     alloc->total_blocks = good_n;
 
-    LOGI("[FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
+    LOGI("[FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u/%u spare=%u/%u\r\n",
          ch,
          ce,
          lun,
          (unsigned)free_n,
-         (unsigned)alloc->op_count,
-         (unsigned)alloc->spare_count);
+         (unsigned)alloc->op_count[0],
+         (unsigned)alloc->op_count[1],
+         (unsigned)alloc->spare_count[0],
+         (unsigned)alloc->spare_count[1]);
 
     if (ftl_boot_recovery(ftl, &result) != FTL_OK)
     {

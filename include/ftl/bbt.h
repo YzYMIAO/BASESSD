@@ -200,14 +200,18 @@ ftl_status_t bbt_flush(ftl_allocator_t *alloc);
 ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence);
 
 /*
- * bbt_spare_pool_refill - 从 Spare Pool 补充 Free Pool
+ * bbt_spare_pool_refill - 从**指定 plane 的** Spare Pool 补充 Free Pool
  *
  * PROGRAM/ERASE 失败标记坏块后，从 Spare Pool 取一个好块
  * 加入 alloc->free_blocks 保容量水位。
  *
+ * ⚠ **按 plane 取**（本次修复点）：Spare 池按 super block 粒度预留（每 plane 各一份），
+ *   坏块属于哪个 plane 就必须补哪个 plane 的块——补错 plane 不恢复该 plane 的配对能力。
+ *
  * @param alloc  Allocator 上下文
- * @return 0 补充成功，-1 Spare Pool 耗尽
+ * @param plane  坏块所属 plane（取同 plane 的替换块）
+ * @return 0 补充成功，-1 Spare Pool 耗尽 / 参数非法
  */
-ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc);
+ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, uint8_t plane);
 
 #endif /* FTL_BBT_H */

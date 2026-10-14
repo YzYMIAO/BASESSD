@@ -503,10 +503,11 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
         if ((ftl->gc_log_last_ms == 0U) || ((now_ms - ftl->gc_log_last_ms) >= GC_LOG_INTERVAL_MS))
         {
             ftl->gc_log_last_ms = now_ms;
-            LOGI("[GC] trig=0x%02x free=%u op=%u writes=%lu reclaimed=%lu novictim=%lu\r\n",
+            LOGI("[GC] trig=0x%02x free=%u op=%u/%u writes=%lu reclaimed=%lu novictim=%lu\r\n",
                  (unsigned)triggers,
                  (unsigned)ftl->alloc.free_count,
-                 (unsigned)ftl->alloc.op_count,
+                 (unsigned)ftl->alloc.op_count[0],
+                 (unsigned)ftl->alloc.op_count[1],
                  (unsigned long)ftl->total_writes,
                  (unsigned long)ftl->gc_reclaimed_count,
                  (unsigned long)ftl->gc_novictim_count);

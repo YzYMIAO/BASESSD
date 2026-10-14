@@ -65,9 +65,9 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tab
     alloc->free_count  = 0U;
 
     alloc->op_blocks    = tables->op_blocks;
-    alloc->op_count     = 0U;
     alloc->spare_blocks = tables->spare_blocks;
-    alloc->spare_count  = 0U;
+    memset(alloc->op_count, 0, sizeof(alloc->op_count));
+    memset(alloc->spare_count, 0, sizeof(alloc->spare_count));
 
     /* Open Super Block（暂无效，首次 alloc 时分配） */
     memset(&alloc->hot_sb, 0, sizeof(alloc->hot_sb));
@@ -127,19 +127,22 @@ static uint8_t allocator_pool_remove(ftl_allocator_t *alloc, uint16_t gblock)
 }
 
 /*
- * 从 OP 池取一个 Block 归还 Free Pool（容量不动语义：OP 是 GC 缓冲池）。
- * 分配器 free pool 耗尽时由 allocator_alloc_pair 回退调用。
- * @return 1 成功取块，0 OP 池空
+ * 从**指定 plane** 的 OP 池取一个 Block 归还 Free Pool（容量不动语义：OP 是 GC 缓冲池）。
+ * 分配器该 plane 的 free pool 耗尽时由 allocator_open_sb 回退调用。
+ * ⚠ 必须按 plane 取：OP 池是按 super block 粒度预留的，取错 plane 的块对该 plane 的
+ *   耗尽毫无帮助（只会把块丢进通用 free pool 而选不中）。
+ * @return 1 成功取块，0 该 plane OP 池空 / 参数非法
  */
-static uint8_t allocator_pull_from_op(ftl_allocator_t *alloc)
+static uint8_t allocator_pull_from_op(ftl_allocator_t *alloc, uint8_t plane)
 {
-    if ((alloc == NULL) || (alloc->op_blocks == NULL) || (alloc->op_count == 0U))
+    if ((alloc == NULL) || (alloc->op_blocks == NULL) || (plane >= PLANE_NUM) ||
+        (alloc->op_count[plane] == 0U))
     {
         return 0U;
     }
 
-    alloc->op_count--;
-    allocator_free_block(alloc, alloc->op_blocks[alloc->op_count]);
+    alloc->op_count[plane]--;
+    allocator_free_block(alloc, alloc->op_blocks[plane][alloc->op_count[plane]]);
 
     return 1U;
 }
@@ -197,8 +200,8 @@ static uint16_t allocator_select_plane_block_from_pool(const ftl_allocator_t *al
 /*
  * 内部工具：为 Open SB 槽位分配一对物理块（两 plane 各自独立选块）。
  *
- * 每个 plane 独立取块；某 plane 拿不到时空闲池耗尽 → 从 OP 池补（容量不动语义：
- * OP 是 GC 缓冲池，擦除即用），最多补 PLANE_NUM 次再重试该 plane。
+ * 每个 plane 独立取块；某 plane 拿不到时空闲池耗尽 → 从**该 plane** 的 OP 池补
+ * （容量不动语义：OP 是 GC 缓冲池，擦除即用）。
  * 全部就位后：两 gblock 从 Free Pool 移除、置 OPEN、绑拓扑。
  *
  * 返回 1 成功，0 失败（调用者触发紧急 GC）。
@@ -210,15 +213,11 @@ static uint8_t allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint
 
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        uint8_t tries;
-
         gblock[plane] = allocator_select_plane_block_from_pool(alloc, plane);
-        for (tries = 0U; (gblock[plane] == UINT16_MAX) && (tries < PLANE_NUM); tries++)
+        /* OP 补池：每次拉进的就是本 plane 的块 ⇒ 重选即可命中（除非该块恰好已坏，
+         * 则再拉一次）。循环受 op_count[plane] 递减约束必然终止。 */
+        while ((gblock[plane] == UINT16_MAX) && (allocator_pull_from_op(alloc, plane) != 0U))
         {
-            if (allocator_pull_from_op(alloc) == 0U)
-            {
-                break; /* OP 池也空 */
-            }
             gblock[plane] = allocator_select_plane_block_from_pool(alloc, plane);
         }
         if (gblock[plane] == UINT16_MAX)

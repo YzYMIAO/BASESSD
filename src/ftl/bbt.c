@@ -459,9 +459,9 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock)
     alloc->bbt.dirty = 1U;
 
     /* 不再同步调 bbt_save() — NAND BBT 持久化由后台 bbt_flush 批量执行。
-     * 坏块替换：从 Spare Pool 取块补 free pool（保容量水位，ADR-11 Block Sparing）。
-     * 失败（Spare 耗尽）不影响标坏，容量自然下降。 */
-    (void)bbt_spare_pool_refill(alloc);
+     * 坏块替换：从**本块所属 plane** 的 Spare Pool 取块补 free pool
+     * （保容量水位，ADR-11 Block Sparing）。失败（Spare 耗尽）不影响标坏，容量自然下降。 */
+    (void)bbt_spare_pool_refill(alloc, ftl_gblock_plane(gblock));
 
     return FTL_OK;
 }
@@ -621,27 +621,32 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_co
 
 /* --------------------------------------------------------------------
  * bbt_spare_pool_refill
- *   功能：坏块替换——从 Spare Pool 取一个好块归还 Free Pool，保用户容量水位。
- *   参数：alloc —— 分配器。
- *   返回：FTL_OK 成功；FTL_ERROR 参数非法 / Spare Pool 耗尽（容量自然下降）。
- *   实现要点：只出不进（出厂预留 FTL_SPARE_POOL_SIZE 个）。调用者保证该块已擦除
- *             （allocator_free_block 契约）。
+ *   功能：坏块替换——从**指定 plane 的** Spare Pool 取一个好块归还 Free Pool，
+ *         保用户容量水位。
+ *   参数：alloc —— 分配器；plane —— 坏块所属 plane（取同 plane 的替换块）。
+ *   返回：FTL_OK 成功；FTL_ERROR 参数非法 / 该 plane Spare Pool 耗尽（容量自然下降）。
+ *   实现要点：只出不进（出厂每 plane 预留 FTL_SPARE_POOL_PER_PLANE 个）。调用者保证
+ *             该块已擦除（allocator_free_block 契约）。
+ *             ⚠ 必须按 plane 取：Spare 池按 super block 粒度预留，补错 plane 不恢复该
+ *             plane 的配对能力（原实现从全局池 LIFO 弹出，实际总补 plane 0）。
  * -------------------------------------------------------------------- */
-ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc)
+ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, uint8_t plane)
 {
     /*
-     * Spare Pool 坏块替换：出厂时 main.c 已预留 FTL_SPARE_POOL_SIZE=50 个
-     * 好块到 alloc->spare_blocks。运行时 bbt_mark_bad 标坏一块后，从这里
-     * 取一个好块 allocator_free_block 补进 free pool，保用户容量水位。
-     * 只出不进，Spare Pool 耗尽后返回 FTL_ERROR（容量自然下降）。
+     * Spare Pool 坏块替换：出厂时 main.c 已为**每个 plane** 预留
+     * FTL_SPARE_POOL_PER_PLANE=50 个好块到 alloc->spare_blocks[plane]。运行时
+     * bbt_mark_bad 标坏一块后，从该块所属 plane 取一个好块 allocator_free_block
+     * 补进 free pool，保用户容量水位。
+     * 只出不进，该 plane Spare Pool 耗尽后返回 FTL_ERROR（容量自然下降）。
      */
-    if ((alloc == NULL) || (alloc->spare_blocks == NULL) || (alloc->spare_count == 0U))
+    if ((alloc == NULL) || (alloc->spare_blocks == NULL) || (plane >= PLANE_NUM) ||
+        (alloc->spare_count[plane] == 0U))
     {
         return FTL_ERROR;
     }
 
-    alloc->spare_count--;
-    allocator_free_block(alloc, alloc->spare_blocks[alloc->spare_count]);
+    alloc->spare_count[plane]--;
+    allocator_free_block(alloc, alloc->spare_blocks[plane][alloc->spare_count[plane]]);
 
     return FTL_OK;
 }

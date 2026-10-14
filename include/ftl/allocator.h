@@ -50,8 +50,17 @@
  *   （前者恒等于 free_count，后两者从无读者）。 */
 #define FREE_POOL_TARGET    (32U) /* 后台 GC 水位（IDLE 补池目标） */
 #define FREE_POOL_EMERGENCY (8U)  /* 水位②/③分界：低于等于此值转紧急 GC */
-#define FTL_OP_PERCENT      (10U) /* OP 预留百分比（编译期默认） */
-#define FTL_SPARE_POOL_SIZE (50U) /* 坏块替换池大小 */
+#define FTL_OP_PERCENT      (10U) /* OP 预留百分比（编译期默认；**按 plane 计**） */
+
+/* 每 plane OP 块数 = 2048 × 10% = 204（floor）⇒ 总 408。
+ * 预留按 **super block 粒度**（每 plane 各一份），因为写入/擦除/GC 的最小单元是跨双 plane 的
+ * super block——只留单 plane 的 OP 对另一 plane 的池耗尽毫无帮助。 */
+#define FTL_OP_BLOCKS_PER_PLANE ((BLOCKS_PER_PLANE * FTL_OP_PERCENT) / 100U)
+
+/* 数组维度钳到 ≥1：FTL_OP_PERCENT=0（设计允许"禁用 OP"）会让 [PLANE_NUM][0] 非法。
+ * 填池/消费循环一律用 FTL_OP_BLOCKS_PER_PLANE（=0 ⇒ 不预留），本宏只用于定数组尺寸。 */
+#define FTL_OP_POOL_CAP          ((FTL_OP_BLOCKS_PER_PLANE) > 0U ? (FTL_OP_BLOCKS_PER_PLANE) : 1U)
+#define FTL_SPARE_POOL_PER_PLANE (50U) /* 每 plane 坏块替换池大小（总 100） */
 
 /* ── Closed Super Block 列表最大容量 ── */
 #define SUPER_BLOCK_LIST_MAX (1024U)
@@ -93,11 +102,11 @@ typedef struct
  * ftl.h ↔ allocator.h 循环 include。 */
 typedef struct
 {
-    ftl_block_t   blocks[FTL_BLOCK_TOTAL];              /* BST：per-Block 状态（erase_count / valid_count / state / sb_id / rr） */
-    uint16_t      free_blocks[FTL_BLOCK_TOTAL];         /* Free Pool（全局块号；三级水位见文件头） */
-    uint16_t      op_blocks[FTL_BLOCK_TOTAL];           /* OP 预留池（GC 缓冲池，容量不动） */
-    uint16_t      spare_blocks[FTL_SPARE_POOL_SIZE];    /* Spare Pool（坏块替换池，只出不进） */
-    super_block_t closed_sb_list[SUPER_BLOCK_LIST_MAX]; /* Closed Super Block 列表（等待 GC） */
+    ftl_block_t   blocks[FTL_BLOCK_TOTAL];                           /* BST：per-Block 状态（erase_count / valid_count / state / sb_id / rr） */
+    uint16_t      free_blocks[FTL_BLOCK_TOTAL];                      /* Free Pool（全局块号；三级水位见文件头） */
+    uint16_t      op_blocks[PLANE_NUM][FTL_OP_POOL_CAP];             /* OP 预留池（每 plane 独立；GC 缓冲池，容量不动） */
+    uint16_t      spare_blocks[PLANE_NUM][FTL_SPARE_POOL_PER_PLANE]; /* Spare Pool（每 plane 独立；坏块替换，只出不进） */
+    super_block_t closed_sb_list[SUPER_BLOCK_LIST_MAX];              /* Closed Super Block 列表（等待 GC） */
 } ftl_tables_t;
 
 /* 该 plane 是否持有物理块（Policy B：Closed 条目允许退化单 plane，另一 plane 记哨兵）。
@@ -166,11 +175,11 @@ typedef struct
     uint16_t *free_blocks; /* → tables.free_blocks */
     uint16_t  free_count;  /* 空闲（且已擦除）block 数——三级水位都建在它上面 */
 
-    /* ── OP / Spare Pool（容量不动） ── */
-    uint16_t *op_blocks;    /* → tables.op_blocks（GC 缓冲池） */
-    uint16_t  op_count;     /* OP 池剩余 Block 数 */
-    uint16_t *spare_blocks; /* → tables.spare_blocks（坏块替换池） */
-    uint16_t  spare_count;  /* Spare Pool 剩余 Block 数 */
+    /* ── OP / Spare Pool（per-plane；容量不动） ── */
+    uint16_t (*op_blocks)[FTL_OP_POOL_CAP];             /* → tables.op_blocks（GC 缓冲池，每 plane 独立） */
+    uint16_t op_count[PLANE_NUM];                       /* 各 plane OP 池剩余 Block 数 */
+    uint16_t (*spare_blocks)[FTL_SPARE_POOL_PER_PLANE]; /* → tables.spare_blocks（坏块替换池，每 plane 独立） */
+    uint16_t spare_count[PLANE_NUM];                    /* 各 plane Spare Pool 剩余 Block 数 */
 
     /* ── Open Super Block（每温度一个） ── */
     super_block_t hot_sb;  /* Hot Open Super Block */

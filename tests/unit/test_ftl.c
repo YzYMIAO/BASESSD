@@ -234,18 +234,22 @@ static void ftl_ut_reentrant_cb(void *ctx)
  * §3  套件 1 — Allocator（Free Pool / Open SB / Closed SB / 反向索引）
  * ══════════════════════════════════════════════════════════════════════ */
 
-/* 复位后：三个池计数为 0、无 Open/Closed SB、全块 FREE 且无归属。 */
+/* 复位后：三个池计数为 0（**每 plane 各一份**）、无 Open/Closed SB、全块 FREE 且无归属。 */
 static MunitResult test_alloc_init_zeroes_pool(const MunitParameter params[], void *fixture)
 {
     ftl_allocator_t *a = &ftl_fixture()->alloc;
     uint16_t         g;
+    uint8_t          p;
 
     (void)params;
     (void)fixture;
 
     munit_assert_uint16(a->free_count, ==, 0U);
-    munit_assert_uint16(a->op_count, ==, 0U);
-    munit_assert_uint16(a->spare_count, ==, 0U);
+    for (p = 0U; p < (uint8_t)PLANE_NUM; p++)
+    {
+        munit_assert_uint16(a->op_count[p], ==, 0U);
+        munit_assert_uint16(a->spare_count[p], ==, 0U);
+    }
     munit_assert_uint16(a->closed_sb_count, ==, 0U);
     munit_assert_uint16(a->bad_count, ==, 0U);
     munit_assert_uint16(a->total_blocks, ==, 0U);
@@ -595,6 +599,37 @@ static MunitResult test_alloc_open_sb_min_erase_count(const MunitParameter param
 
     munit_assert_uint32(a->blocks[ftl_pba_gblock(out[0])].erase_count, ==, min0);
     munit_assert_uint32(a->blocks[ftl_pba_gblock(out[1])].erase_count, ==, min1);
+
+    return MUNIT_OK;
+}
+
+/* OP 兜底按 plane：某 plane 的 Free Pool 空了，就从**该 plane 的** OP 池补。
+ * 修复前 OP 池是全局的：plane 1 见底时拉进来的是 plane 0 的块 ⇒ 选块仍选不中 plane 1
+ * ⇒ 分配失败（或拿到 plane 0 的块）。 */
+static MunitResult test_alloc_op_fallback_per_plane(const MunitParameter params[], void *fixture)
+{
+    ftl_allocator_t *a = &ftl_fixture()->alloc;
+    nand_pba_t       out[PLANE_NUM];
+    uint16_t         g1 = ftl_gblock(1U, 500U); /* plane 1 的 OP 块 */
+
+    (void)params;
+    (void)fixture;
+
+    /* 只回填 plane 0：plane 1 的 Free Pool 空 */
+    munit_assert_uint16(ftl_fixture_backfill(a, 200U, 4U), ==, 4U);
+
+    a->op_blocks[1][0] = g1;
+    a->op_count[1]     = 1U;
+
+    munit_assert_uint32(allocator_alloc_pair(a, FTL_TEMP_HOT, out), !=, (uint32_t)NAND_PBA_INVALID);
+
+    /* plane 1 拿到的必须是 OP 池里的那块；plane 0 仍走 Free Pool */
+    munit_assert_uint8((uint8_t)pba_to_plane(out[1]), ==, 1U);
+    munit_assert_uint16(ftl_pba_gblock(out[1]), ==, g1);
+    munit_assert_uint8((uint8_t)pba_to_plane(out[0]), ==, 0U);
+    munit_assert_uint16(a->op_count[1], ==, 0U);
+    munit_assert_uint16(a->free_count, ==, 3U); /* 4 回填 − plane 0 取走 1；OP 那块进来又出去 */
+    munit_assert_true(ftl_block_state_is(&a->blocks[g1], FTL_BLOCK_STATE_OPEN));
 
     return MUNIT_OK;
 }
@@ -1391,7 +1426,8 @@ static MunitResult test_bbt_mark_bad_idempotent(const MunitParameter params[], v
     return MUNIT_OK;
 }
 
-/* Spare 补池：LIFO 取块、置 FREE、计数递减；耗尽返回 FTL_ERROR 且不动计数。 */
+/* Spare 补池（**指定 plane**）：LIFO 取块、置 FREE、该 plane 计数递减；
+ * 耗尽返回 FTL_ERROR 且不动计数。 */
 static MunitResult test_bbt_spare_pool_refill(const MunitParameter params[], void *fixture)
 {
     ftl_allocator_t *a = &ftl_fixture()->alloc;
@@ -1399,26 +1435,57 @@ static MunitResult test_bbt_spare_pool_refill(const MunitParameter params[], voi
     (void)params;
     (void)fixture;
 
-    a->spare_blocks[0] = 300U;
-    a->spare_blocks[1] = 301U;
-    a->spare_count     = 2U;
+    a->spare_blocks[0][0] = 300U;
+    a->spare_blocks[0][1] = 301U;
+    a->spare_count[0]     = 2U;
 
-    munit_assert_int(bbt_spare_pool_refill(a), ==, FTL_OK);
-    munit_assert_uint16(a->spare_count, ==, 1U);
+    munit_assert_int(bbt_spare_pool_refill(a, 0U), ==, FTL_OK);
+    munit_assert_uint16(a->spare_count[0], ==, 1U);
     munit_assert_uint16(a->free_count, ==, 1U);
     munit_assert_uint16(a->free_blocks[0], ==, 301U); /* LIFO：取末位 */
     munit_assert_true(ftl_block_state_is(&a->blocks[301U], FTL_BLOCK_STATE_FREE));
 
-    munit_assert_int(bbt_spare_pool_refill(a), ==, FTL_OK);
-    munit_assert_uint16(a->spare_count, ==, 0U);
+    munit_assert_int(bbt_spare_pool_refill(a, 0U), ==, FTL_OK);
+    munit_assert_uint16(a->spare_count[0], ==, 0U);
     munit_assert_uint16(a->free_count, ==, 2U);
     munit_assert_uint16(a->free_blocks[1], ==, 300U);
 
     /* 耗尽 */
-    munit_assert_int(bbt_spare_pool_refill(a), ==, FTL_ERROR);
+    munit_assert_int(bbt_spare_pool_refill(a, 0U), ==, FTL_ERROR);
     munit_assert_uint16(a->free_count, ==, 2U);
 
-    munit_assert_int(bbt_spare_pool_refill(NULL), ==, FTL_ERROR);
+    /* 参数非法：NULL / plane 越界 —— 都不得动 free pool */
+    munit_assert_int(bbt_spare_pool_refill(NULL, 0U), ==, FTL_ERROR);
+    munit_assert_int(bbt_spare_pool_refill(a, (uint8_t)PLANE_NUM), ==, FTL_ERROR);
+    munit_assert_uint16(a->free_count, ==, 2U);
+
+    return MUNIT_OK;
+}
+
+/* Spare 池按 plane 隔离：坏块属哪个 plane 就补哪个 plane —— 补错 plane 不恢复该 plane
+ * 的配对能力（修复前 spare_blocks/spare_count 是全局的，plane 1 的坏块会拿 plane 0 的块）。 */
+static MunitResult test_bbt_spare_pool_plane_isolated(const MunitParameter params[], void *fixture)
+{
+    ftl_allocator_t *a  = &ftl_fixture()->alloc;
+    uint16_t         g1 = ftl_gblock(1U, 100U); /* plane 1 的块 */
+
+    (void)params;
+    (void)fixture;
+
+    a->spare_blocks[0][0] = ftl_gblock(0U, 300U);
+    a->spare_count[0]     = 1U;
+    a->spare_blocks[1][0] = g1;
+    a->spare_count[1]     = 1U;
+
+    munit_assert_int(bbt_spare_pool_refill(a, 1U), ==, FTL_OK);
+
+    /* 只动 plane 1：plane 0 的池原封不动 */
+    munit_assert_uint16(a->spare_count[1], ==, 0U);
+    munit_assert_uint16(a->spare_count[0], ==, 1U);
+    munit_assert_uint16(a->free_count, ==, 1U);
+    /* 补进来的必须是 plane 1 的块（而非 plane 0 的 300） */
+    munit_assert_uint16(a->free_blocks[0], ==, g1);
+    munit_assert_uint8(ftl_gblock_plane(a->free_blocks[0]), ==, 1U);
 
     return MUNIT_OK;
 }
@@ -2248,6 +2315,7 @@ MunitTest g_ftl_allocator_tests[] = {
     {         (char *)"reserved_alloc_free",          test_alloc_reserved_alloc_free, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
     {(char *)"open_sb_never_picks_metadata", test_alloc_open_sb_never_picks_metadata, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
     {     (char *)"open_sb_min_erase_count",      test_alloc_open_sb_min_erase_count, ftl_setup, NULL,            FTL_UT_NONE, NULL},
+    {       (char *)"op_fallback_per_plane",        test_alloc_op_fallback_per_plane, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
     {                                  NULL,                                    NULL,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
 };
 
@@ -2286,11 +2354,12 @@ MunitTest g_ftl_rr_tests[] = {
 };
 
 MunitTest g_ftl_bbt_tests[] = {
-    {   (char *)"mark_bad_sets_bits",    test_bbt_mark_bad_sets_bits, ftl_setup, NULL,            FTL_UT_NONE, NULL},
-    {  (char *)"mark_bad_idempotent",   test_bbt_mark_bad_idempotent, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
-    {    (char *)"spare_pool_refill",     test_bbt_spare_pool_refill, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
-    {(char *)"is_bad_set_bad_inline", test_bbt_is_bad_set_bad_inline, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
-    {                           NULL,                           NULL,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
+    {       (char *)"mark_bad_sets_bits",        test_bbt_mark_bad_sets_bits, ftl_setup, NULL,            FTL_UT_NONE, NULL},
+    {      (char *)"mark_bad_idempotent",       test_bbt_mark_bad_idempotent, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
+    {        (char *)"spare_pool_refill",         test_bbt_spare_pool_refill, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
+    {(char *)"spare_pool_plane_isolated", test_bbt_spare_pool_plane_isolated, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
+    {    (char *)"is_bad_set_bad_inline",     test_bbt_is_bad_set_bad_inline, ftl_setup, NULL,            FTL_UT_ONCE, NULL},
+    {                               NULL,                               NULL,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL},
 };
 
 MunitTest g_ftl_metadata_tests[] = {
