@@ -44,6 +44,7 @@
 #include "ftl/pending.h"
 #include "ftl/read_recovery.h"
 #include "ftl/wear_leveling.h"
+#include "ftl_test_common.h" /* 共享活实例夹具（§1） */
 #include "munit.h"
 #include "nand/nand_config.h"
 
@@ -51,55 +52,12 @@
 
 /* ══════════════════════════════════════════════════════════════════════
  * §1  夹具
- * ══════════════════════════════════════════════════════════════════════ */
-
-/* 活实例指针。boot 后 g_ctrl.ftl[0][0][0] 恒非 NULL（CLI `test` 是同步命令，
- * 执行期无并发泵，独占该实例）。 */
-static ftl_context_t *ftl_fixture(void)
-{
-    ftl_context_t *F = g_ctrl.ftl[0][0][0];
-
-    munit_assert_not_null(F);
-    return F;
-}
-
-/*
- * ftl_fixture_reset — 把活实例复位到「开机初始、无介质内容」的 RAM 状态。
+ * ══════════════════════════════════════════════════════════════════════
  *
- * 范围 = §2.2 表：只清会被用例写的子结构；**F->topo 保持不动**（reset 不该改路由）。
- * 顺序有依赖：先 memset 再 init（init 只建固定表/游标，不 memset 整表）。
+ * ftl_fixture() / ftl_fixture_reset() 已抽到共享 tests/unit/ftl_test_common.c
+ * （与 L0 异步套件 test_ftl_async.c 共用），契约见 ftl_test_common.h。
+ * 本文件只保留本地的 ftl_setup()（包共享复位）。
  */
-static void ftl_fixture_reset(void)
-{
-    ftl_context_t *F = ftl_fixture();
-
-    memset(&F->tables, 0, sizeof(F->tables));
-    memset(&F->metadata_dir, 0, sizeof(F->metadata_dir));
-    memset(F->pending, 0, sizeof(F->pending));
-    memset(F->groups, 0, sizeof(F->groups));
-    memset(&F->wbuf, 0, sizeof(F->wbuf));
-    memset(&F->cp, 0, sizeof(F->cp));
-    memset(&F->rr, 0, sizeof(F->rr));
-    memset(F->rr_page_scratch, 0, sizeof(F->rr_page_scratch));
-
-    F->cp_timer_start  = 0U;
-    F->total_writes    = 0U;
-    F->rr_last_scan_ms = 0U;
-    F->bg_suspend      = 0U;
-
-    /* 分配器（绑表指针 + 全块置 FREE/无归属；**不回填 Free Pool**，见 §2 行 5） */
-    (void)allocator_init(&F->alloc, F->topo, &F->tables);
-
-    /* 元数据目录：fill_fixed 用 dir->topo.lun 展开固定区地址 ⇒ 必须先绑 topo */
-    F->metadata_dir.topo = F->topo;
-    metadata_dir_init(&F->metadata_dir);
-
-    /* L2P cache（不碰 md_dir / alloc 绑定，见 l2p_cache_init 头注） */
-    l2p_cache_init(&F->cache, F->topo.ch, F->topo.ce, F->topo.lun);
-
-    /* Journal（复位游标 + block_pba 展开 + page_buf 0xFF） */
-    journal_init(&F->journal, F->topo);
-}
 
 /* setup 一律返回 NULL：夹具是**活实例**，不是 malloc 的私有块（§2.2）。
  * 返回 NULL 是合法契约（测试体用 ftl_fixture() 自己取指针）。 */
