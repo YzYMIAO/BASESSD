@@ -242,10 +242,9 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
 
     (void)ctx; /* host I/O 不登记旁表 ctx */
 
-    /* command_id 由 NAND 从本命令回填（submit 时铸出）；fc_command_id_to_command
-     * 的公共壳已断言 ID 在池内且恒返回非空指针——此处防御不可达，且会静默吞 completion。 */
+    /* command_id 由 NAND 从本命令回填；公共壳 fc_command_id_to_command 已断言
+     * ID 在池内，恒返回非空指针。 */
     cmd = fc_command_id_to_command(cmd_id);
-    ASSERT(cmd != NULL);
 
     /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①）。
      * 保留 release 兜底但吼一声——静默吞掉会丢掉一次 host I/O 完成。 */
@@ -1235,7 +1234,6 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
     ASSERT(ftl != NULL);
     ASSERT(buffer != NULL);
     ASSERT(n_cw != NULL);
-    ASSERT((*n_cw > 0U) && (*n_cw <= (uint8_t)FTL_LBA_PER_PAIR));
 
     /* 夹到 pair 窗口：一个子操作不跨窗口（窗口内最多两个 plane 段、每段一个页）。
      * ⚠ L2P region 512 对齐且 lba_to_local 保留低 9 位 ⇒ 窗口绝不跨实例/region。 */
@@ -1486,7 +1484,6 @@ static void ftl_drain_group(ftl_context_t *ftl, uint16_t gi)
 
         if (st == FTL_OK)
         {
-            ASSERT((n_cw > 0U) && (n_cw <= (uint8_t)FTL_LBA_PER_PAIR));
             g->stalls = 0U;
             g->next += n_cw;
             continue;

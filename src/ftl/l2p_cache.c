@@ -765,7 +765,6 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
     ASSERT(line != NULL);
 
     cmd = fc_command_id_to_command((uint16_t)completion->command_id);
-    ASSERT(cmd != NULL);
 
     /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①）。
      * 仍保留 release-and-return 兜底（不让 NULL 变成崩溃），但**必须吼一声**——

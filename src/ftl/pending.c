@@ -38,9 +38,6 @@
  */
 void pending_init(ftl_context_t *ftl)
 {
-    /* 层内接口：唯一调用者 ftl_init 已在入口判过 ftl != NULL */
-    ASSERT(ftl != NULL);
-
     memset(ftl->pending, 0, sizeof(ftl->pending));
     memset(ftl->groups, 0, sizeof(ftl->groups));
 }
@@ -62,8 +59,6 @@ int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint32_t owners, lba_t lba,
 {
     uint8_t i;
 
-    /* 层内接口：调用者 ftl_submit_read/write 已在入口判过 ftl / req 非 NULL */
-    ASSERT(ftl != NULL);
     ASSERT(owners != 0U); /* 至少一个贡献组（读恒单组；写页打包 ≥1） */
     ASSERT((n_cw > 0U) && (n_cw <= FTL_LBA_PER_PAIR));
 
@@ -94,8 +89,6 @@ ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, uint16_t cmd_id)
 {
     uint8_t i;
 
-    ASSERT(ftl != NULL);
-
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if ((ftl->pending[i].used != 0U) &&
@@ -112,8 +105,6 @@ ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, uint16_t cmd_id)
 void pending_remove(ftl_context_t *ftl, uint16_t cmd_id)
 {
     ftl_pending_req_t *req;
-
-    ASSERT(ftl != NULL);
 
     req = pending_lookup(ftl, cmd_id);
     if (req != NULL)
@@ -134,8 +125,6 @@ void pending_remove(ftl_context_t *ftl, uint16_t cmd_id)
 int pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_index)
 {
     uint8_t i;
-
-    ASSERT(ftl != NULL);
 
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -163,7 +152,6 @@ int pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_
  * -------------------------------------------------------------------- */
 void pending_release_index(ftl_context_t *ftl, uint8_t index)
 {
-    ASSERT(ftl != NULL);
     ASSERT(index < FTL_PENDING_MAX);
     ASSERT(ftl->pending[index].used != 0U); /* 重复释放即簿记错误，留现场 */
 
@@ -175,8 +163,6 @@ uint16_t pending_count(const ftl_context_t *ftl)
 {
     uint16_t count = 0U;
     uint8_t  i;
-
-    ASSERT(ftl != NULL);
 
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {
@@ -203,8 +189,6 @@ int pending_group_alloc(ftl_context_t *ftl)
 {
     uint8_t i;
 
-    ASSERT(ftl != NULL);
-
     for (i = 0U; i < FTL_GROUP_MAX; i++)
     {
         if (ftl->groups[i].used == 0U)
@@ -221,7 +205,6 @@ int pending_group_alloc(ftl_context_t *ftl)
 /* pending_group_free — 释放组槽（used=0）；下标越界是调用者 bug ⇒ ASSERT（判据 2） */
 void pending_group_free(ftl_context_t *ftl, uint16_t gi)
 {
-    ASSERT(ftl != NULL);
     ASSERT(gi < FTL_GROUP_MAX);
 
     ftl->groups[gi].used = 0U;
@@ -232,8 +215,6 @@ uint16_t pending_group_count(const ftl_context_t *ftl)
 {
     uint16_t count = 0U;
     uint8_t  i;
-
-    ASSERT(ftl != NULL);
 
     for (i = 0U; i < FTL_GROUP_MAX; i++)
     {
@@ -263,7 +244,6 @@ void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi)
 {
     ftl_io_group_t *g;
 
-    ASSERT(ftl != NULL);
     ASSERT(gi < FTL_GROUP_MAX);
 
     g = &ftl->groups[gi];
@@ -305,7 +285,6 @@ void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t 
 {
     ftl_io_group_t *g;
 
-    ASSERT(ftl != NULL);
     ASSERT(gi < FTL_GROUP_MAX);
 
     g = &ftl->groups[gi];
@@ -338,8 +317,6 @@ void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t 
 void pending_group_complete_subop_multi(ftl_context_t *ftl, uint32_t owners, ssd_status_t sub_status)
 {
     uint16_t gi;
-
-    ASSERT(ftl != NULL);
 
     for (gi = 0U; gi < FTL_GROUP_MAX; gi++)
     {

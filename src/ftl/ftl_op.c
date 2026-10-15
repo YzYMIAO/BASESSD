@@ -119,9 +119,8 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
     op = (uint8_t)completion->op_tag;
     fn = (op < (uint8_t)FTL_OP_COUNT) ? g_op_service[op] : NULL;
 
-    /* command_id 由 NAND 从本命令回填（submit 时铸出）；公共壳已断言 ID 在池内。 */
+    /* command_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。 */
     cmd = fc_command_id_to_command((uint16_t)completion->command_id);
-    ASSERT(cmd != NULL);
 
     if (fn == NULL)
     {

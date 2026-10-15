@@ -354,8 +354,7 @@ void ftl_op_wear(struct ftl_context *ftl, const fc_command_status_t *completion,
     ASSERT(alloc != NULL);
     ASSERT(completion != NULL);
 
-    cmd = fc_command_id_to_command((uint16_t)completion->command_id);
-    ASSERT(cmd != NULL);
+    cmd    = fc_command_id_to_command((uint16_t)completion->command_id);
     failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1U : 0U;
 
     if (alloc->wear.job.phase == (uint8_t)WEAR_JOB_ERASE)

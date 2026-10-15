@@ -549,7 +549,6 @@ void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completi
     ASSERT(completion != NULL);
 
     cmd = fc_command_id_to_command((uint16_t)completion->command_id);
-    ASSERT(cmd != NULL);
 
     if (journal->job.phase == JRN_WRITE)
     {

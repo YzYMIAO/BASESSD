@@ -1519,7 +1519,6 @@ void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *complet
     ASSERT(j != NULL);
 
     cmd = fc_command_id_to_command((uint16_t)completion->command_id);
-    ASSERT(cmd != NULL);
 
     /* 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出的归属实例，
      * 二者必须一致——不一致说明派发路由错了。 */

@@ -542,8 +542,6 @@ static void close_full_block(ftl_context_t       *ftl,
     plane_blocks[plane] = block;
 
     sb_idx = allocator_add_closed_sb(alloc, plane_blocks, temperature);
-    /* allocator_add_closed_sb 内部已断言列表未满，恒返回有效索引 */
-    ASSERT(sb_idx != UINT16_MAX);
 
     if (stats != NULL)
     {

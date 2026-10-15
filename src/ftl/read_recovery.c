@@ -507,8 +507,6 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
     fc_command_t        *cmd    = fc_command_id_to_command(cmd_id);
     ftl_read_recovery_t *rr;
 
-    ASSERT(cmd != NULL);
-
     /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①）。
      * 保留 release 兜底但吼一声——静默吞掉会让 RR job 永久停在 waiting=1。 */
     if (ftl == NULL)
