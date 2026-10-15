@@ -208,20 +208,17 @@ flowchart LR
 
 ### 2.3 SRAM 预算
 
-> **v0.32 更新**：Block State Table（BST）统一 per-block 承载后，FTL 元数据从 ~45KB 增至 ~220KB。
-> **v0.55/v0.56/v0.60 后**：BST 条目 **20B × 4096 = 80KB**（v0.55 把逐页有效位图搬出为独立表；
-> v0.56 删 3 个死字段 24B → 20B；**v0.60 删掉独立位图表 64KB**——有效性切 **DRAM-less
-> approach ③**：逐 CW 读**页内 META（=OOB 反向映射）**取回 LBA 反查 L2P，见 §4.9.7/§4.9.8 与
-> `cw_level_mapping_design.md §八`）。⇒ BST 常驻 = **80KB**（无位图表）。
-> DRAM-less 产品化裁剪路径（档三：核心 SRAM + 扩展 NAND）见 §19。
->
-> ⚠ **下表已改为 AXI_RAM 实测**（真实约束是 AXI_RAM 384 KB，由 `src/main.c` 的编译期守卫
-> `sizeof(g_ftl) + FTL_AXI_RAM_RESERVED(20KB) ≤ BOARD_AXI_RAM_SIZE(384KB)` 把住——
-> P2-5 表自持后**只看 `g_ftl` 一项**，BST/L2P/池全在它内部）。
-> 数字取自 **debug 构建的 `debug.map`（v0.74 工作树）**，按符号地址差算得
-> （`.bss` 0x46EC4 + `.data` 0x1E4；其中 `.bss.g_ftl` = 0x41CF8 = 263.2 KB）。
-> **旧的「总计 1 MB」粗估表已废弃**——它把
-> 「1 MB 全片 SRAM」当预算，而实际 FTL 元数据**只落 AXI_RAM**。
+FTL 元数据**只落 AXI_RAM（384 KB）**——真实约束由 `src/main.c` 的编译期守卫把住：
+`sizeof(g_ftl) + FTL_AXI_RAM_RESERVED(20KB) ≤ BOARD_AXI_RAM_SIZE(384KB)`（大表自持在
+`g_ftl` 内部后**只看 `g_ftl` 一项**，BST/L2P/池全在它里面）。
+
+**BST 常驻 = 80KB（无位图表）**：条目 20B × 4096。逐页有效位图**不常驻**——有效性由
+逐 CW 读**页内 META（=OOB 反向映射）**取回 LBA 反查 L2P 现查（**DRAM-less approach ③**，
+见 §4.9 与 `cw_level_mapping_design.md §八`）。DRAM-less 产品化裁剪路径（档三：核心 SRAM +
+扩展 NAND）见 §19。
+
+下表为 **debug 构建实测**（`debug.map` 按符号地址差算得，`.bss.g_ftl` = 263.2 KB）；
+早期「总计 1 MB 全片 SRAM」的粗估表已废弃——FTL 元数据只落 AXI_RAM，不占全部 SRAM：
 
 | 占用方（AXI_RAM） | 大小 | 占 AXI_RAM |
 |--------|------|------|
@@ -231,28 +228,46 @@ flowchart LR
 | 余量 | 99.9 KB | 26.0% |
 | **AXI_RAM 容量** | **384 KB** | **100%** |
 
-> v0.74 起 OP 池由 `[FTL_BLOCK_TOTAL]`（8 KB）缩为 `[PLANE_NUM][204]`（816 B）、Spare 由
-> `[50]`（100 B）变 `[PLANE_NUM][50]`（200 B），净省 ≈7.3 KB。
+> OP 池 `[PLANE_NUM][204]`（816 B）+ Spare 池 `[PLANE_NUM][50]`（200 B），**按 plane 各持一份**
+> ——写入/擦除/GC 的最小单元是跨双 plane 的 super block，某 plane 块耗尽就配不成对（§3.6）。
 
 > 另有 FC 的**非缓存缓冲池**（Buffer Pool 128 × 528B ≈ 66 KB + NAND 通道页缓冲 ~4.1 KB）
 > 刻意落 **AXI_NOCACHE**（0x24060000，128 KB），不进上表——FMC/DMA 直访须绕 D-Cache。
 
 > 另有 CLI 的固定 pattern 写 buffer `g_wr_buf`（16 KB）落 **SRAM2**（`.sram2_data`，NOLOAD，
 > 上电不清零 ⇒ 由 `cli_init` 主动预填 pattern）——见 `src/controller/cli.c` 头注释。
-> （早期版本的 `g_free_blocks` / `g_op_blocks` / `g_spare_blocks` / `g_closed_sb_list` 四个全局
-> 数组已随 **P2-5 表自持**并入 `g_ftl`，不再是独立符号。）
+> （早期独立符号 `g_free_blocks` / `g_op_blocks` / `g_spare_blocks` / `g_closed_sb_list`
+> 已并入 `g_ftl`，不再是独立数组。）
 
-### 2.4 SDRAM（8MB）用途
+### 2.4 SDRAM（W9825G6KH，256 Mbit）— 当前未启用
+
+板载 SDRAM（`sdram_w9825g6kh.c`，256 Mbit ≈ 32 MB，基址 0xC0000000）**当前未启用**：
+h743 实际使用的链接脚本（`linker/stm32h743xx_flash.ld`）没有 SDRAM 段，`sdram_init()`
+在代码里**无任何调用点**。（仓库里 `linker/ssd_controller.ld` 含 DRAM/NAND_FW 段属模板，
+不是当前构建用的链接脚本。）
+
+**规划用途**（来自早期设计，尚未落地）：
 
 | 用途 | 大小 | 说明 |
 |------|------|------|
+| 固件 text/rodata 常驻 | 由链接脚本决定 | 从 NAND 加载到 SDRAM 执行（模板形态） |
 | GC 搬运缓冲 | 256 KB | 读/写各 128 KB |
-| Host NVMe 命令缓冲区 | ~1 MB | PRP/SGL 数据传输 |
-| FTL 元数据暂存 | 32 KB | 持久化到 NAND 前暂存 |
-| 调试日志、性能计数器 | ~6.5 MB | 剩余空间 |
-| **总计** | **8 MB** | |
+| 调试日志、性能计数器 | 其余 | 剩余空间 |
 
-> SDRAM 不参与 L2P 缓存——DRAM-less 设计。
+> ⚠ 原表「Host NVMe 命令缓冲区 ~1 MB（PRP/SGL）」**已过时**——NVMe host 层已于 v0.47 删除
+> （主机入口 = UART CLI，见 §12.5）。
+>
+> **SDRAM 不参与 L2P 缓存**——DRAM-less 设计：L2P 表只经 SRAM region cache 按需加载（§5/§6）。
+
+### 2.5 资源布局策略选取
+
+| 决策 | 选择 | 理由 | 出处 |
+|---|---|---|---|
+| FTL 元数据存放 | 全落 AXI_RAM（`g_ftl` 263.2 KB / 384 KB） | 容量够（BST 80KB + L2P cache ~128KB + 游标）；SRAM 延迟优于外存 | §2.3 |
+| 有效性真值 | **不常驻**，逐 CW 反查页内 META + L2P | DRAM-less 主流 flash-reverse-mapping（DFTL / LeaFTL / VPFTL） | §4.9、`cw_level_mapping_design.md §八` |
+| L2P 表 | 不落 SDRAM，只经 SRAM region cache | DRAM-less 设计；SDRAM 当前未启用 | §2.4、§5/§6 |
+| FC 非缓存缓冲 | 落 AXI_NOCACHE（绕 D-Cache） | FMC/DMA 直访须绕 D-Cache | §2.3 |
+| 演进史 | v0.32/v0.55/v0.56/v0.60（BST 尺寸）、v0.74（per-plane 池） | 逐版本决策见 revision_history | `ftl_revision_history.md` |
 
 ---
 
@@ -345,23 +360,21 @@ Anchor 池（固定块号 16..47，出厂好块，32 块）:
 | 启动时间 | ⚠️ 扫池内各块末条 + 读胜者 1 份（Anchor = 8 页）| 只需读 Anchor 1 份 |
 | 复杂度 | 中：池几何 + 游标恢复 | ⚠️ 需维护 Directory |
 
-> ⚠️ **本表原先把「动态分配」一列标成 ✅ 全胜**，与事实相反，已于 v0.50 订正：
-> ①「元数据 GC 不需要」只对**无界日志**成立——本项目用的是**有界池**（Anchor 32 块 /
-> Checkpoint 8 块 / BBT 2 块），池满必须擦旧块（`metadata_ring_prepare_write`），
-> 回收是必需项而非可选项；
-> ②「启动时间只需读 Anchor 2 pages」是旧 2 块固定布局的数字，现 Anchor 一份 = 8 页，
-> 且开机要扫池内每块的末条 record 来定位游标；
-> ③「磨损均匀分布到所有好块」对**固定池**不成立——Anchor 每块擦一次需 ≈65,536 次
-> 主机写（8 份/块），是数据块的 8 倍。本项目选 N=32 是为了**主控形态**（固定根 +
-> 专用元数据块池），不是磨损优化的结果；磨损在本仓不是约束。
+> ⚠ **固定池的代价（如实登记）**——「动态分配」并非全胜：
+> ① 元数据 GC 是**必需项**：池是有界的，写满一块必须擦池内下一块
+>    （`metadata_ring_prepare_write`），不存在「无界日志 ⇒ 无需回收」；
+> ② 启动要**扫池内各块的末条 record** 定位游标，再读胜者一份（Anchor 一份 = 8 页）；
+> ③ 磨损分布对固定池不成立：Anchor 每块擦一次需 ≈65,536 次主机写（8 份/块），是数据块的
+>    8 倍。选 N=32 是**主控形态**（固定根 + 专用元数据块池），不是磨损优化的结果——
+>    磨损在本仓不是约束。
 > 只有 L2P region 日志块走真正的**动态分配**（从 Free Pool 取整块，
-> `allocator_alloc_reserved_block`），见 §3.4。
+> `allocator_alloc_reserved_block`），见 §3.4。出处：演进史见 `ftl_revision_history.md`（v0.50）。
 
 #### Anchor Block
 
 ```c
-/* ⚠ v0.50 起 Anchor 不再是"2 个固定 Block + 同块 3 份冗余"，而是**块池内环内轮转**
- *   （一条 record = ANCHOR_PAGE_COUNT 页，写满一块擦池内下一块）。以下为当前值。 */
+/* Anchor 是**块池内环内轮转**（一条 record = ANCHOR_PAGE_COUNT 页，写满一块擦池内下一块）。
+ * 以下为当前值。 */
 #define ANCHOR_PAGE_COUNT    ((L2P_REGIONS_PER_INSTANCE + ANCHOR_ENTRIES_PER_PAGE - 1U) / ANCHOR_ENTRIES_PER_PAGE) /* = 8 */
 #define ANCHOR_POOL_BLOCKS   (32U)  /* 池内块数（磨损旋钮）*/
 #define ANCHOR_RECORDS_PER_BLOCK (PAGES_PER_BLOCK / ANCHOR_PAGE_COUNT) /* = 8 */
@@ -380,7 +393,7 @@ typedef struct {
 
 /* 一份 Anchor record = ANCHOR_PAGE_COUNT(8) 页，每页 = 一个 metadata_anchor_page_t：
  *   magic + sequence + chunk_index + chunk_count + entry_count + entries[PER_PAGE]
- *   （无独立 crc：完整性由下层 FC per-CW CRC + ECC 保证，v0.62）
+ *   （无独立 crc：完整性由下层 FC per-CW CRC + ECC 保证）
  * 整份 = 全部 2048 条 entry。启动扫池取"整份校验通过"中 sequence 最大者。 */
 ```
 
@@ -391,10 +404,10 @@ typedef struct {
 
 #### 元数据分配 API
 
-> ⚠ **订正**：`allocator_alloc_metadata` / `allocator_select_block` / `paa_make` 均已不存在
-> （`paa_make` 于 v25 删除，改用 `*_from_addr`）。**只有 L2P region 日志块**走动态分配，
-> 用 `allocator_alloc_reserved_block` 独占取整块；Anchor/Checkpoint/BBT/Journal/Wear
-> 都是**固定块池**（见 §3.2），不走这里。
+> ⚠ **只对 L2P region 日志块动态分配**：用 `allocator_alloc_reserved_block` 独占取整块；
+> Anchor/Checkpoint/BBT/Journal/Wear 都是**固定块池**（见 §3.2）。
+> （`allocator_alloc_metadata` / `allocator_select_block` / `paa_make` 均不存在，
+> 地址构造一律走 `*_from_addr` 系列。）
 
 ```c
 /* 独占分配一个整块给元数据（当前唯一调用者：L2P region 日志块）*/
@@ -406,14 +419,13 @@ ftl_status_t allocator_alloc_reserved_block(ftl_allocator_t *alloc,
 分配时优先选低擦除次数的块。Anchor 池每块装 8 份 record（`ANCHOR_RECORDS_PER_BLOCK`），
 每份 = 8 页；故一个 Anchor 块要 8 份 × 2048 条变更才写满 ⇒ 磨损极低。
 
-#### 介质布局版本与开机自动格式化（v0.61）
+#### 介质布局版本与开机自动格式化
 
 元数据区的**块位置、记录格式**会随设计演进变化（L2P 块位置 / Journal 块数 / Wear 块 /
 Anchor 分页 / CW 级映射 …）。若固件**不能识别介质是旧格式**，直接烧板会在旧数据上启动，
 而 Free Pool 里全是**未擦的旧块**——allocator **不做擦除**（"free pool 保证已擦除" 是隐式
-前提）⇒ 写下去 = 新数据 AND 旧数据 = **静默损坏**。此前每次上板都得先手动 `bbt --erase`。
-
-v0.61 起由固件兜底：
+前提）⇒ 写下去 = 新数据 AND 旧数据 = **静默损坏**。固件由此兜底（否则每次上板都得先手动
+`bbt --erase`）：
 
 ```
 #define FTL_MEDIA_LAYOUT_VERSION (5U)   /* 任何改介质格式的改动都必须 +1 */
@@ -496,9 +508,8 @@ static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce,
 }
 ```
 
-> **v0.28**：Super Block 携带拓扑（`sb->topo`），遍历路径用 `super_block_page_addr` +
-> `addr_to_cmd` 直填 FC 命令，不再 `pba_make` 打包 → 拆包。随机 IO 路径仍走
-> `ftl_cmd_setup_ppa(cmd, pba)`（PBA 已在手）。
+> **Super Block 携带拓扑**（`sb->topo`）：遍历路径用 `super_block_page_addr` + `addr_to_cmd`
+> 直填 FC 命令，避免 pba 打包/拆包；随机 IO 路径仍走 `ftl_cmd_setup_ppa(cmd, pba)`（PBA 已在手）。
 
 ### 3.5 温度分区（Multi-Stream）
 
@@ -540,9 +551,9 @@ Spare Pool 是**独立于 OP 的替换储备**，专用于运行时坏块替换�
 
 > ⚠ **两个池都按 plane 各留一份**（`op_blocks[PLANE_NUM][204]` / `spare_blocks[PLANE_NUM][50]`）。
 > 理由：写入/擦除/GC 的最小单元是跨双 plane 的 **super block**，某 plane 的块耗尽就配不成对。
-> 早期实现是全局单池 + gblock 升序回填，而 `gblock = plane*BLOCKS_PER_PLANE + block` 是
-> **plane-major**，前 254 个非元数据好块全落 plane 0 ⇒ plane 1 既无 OP 兜底也无坏块替换能力，
-> 两 plane 可用容量还不对称（1731 vs 1985）。见 `ftl_revision_history.md` v0.74。
+> （全局单池 + gblock 升序回填会让 `gblock = plane*BLOCKS_PER_PLANE + block` 的 **plane-major**
+> 序把非元数据好块全落 plane 0 ⇒ plane 1 无 OP/Spare 兜底、两 plane 容量不对称——已修，
+> 出处见 `ftl_revision_history.md` v0.74。）
 
 #### OP 与 Spare Pool 的分工
 
@@ -598,16 +609,12 @@ Super Block {P0-BlockA, P1-BlockB} 中 P0-BlockA PROGRAM 失败：
 **不需要将两个 Block 的编号对齐**——ONFI Multi-Plane 命令中
 每个 Plane 有独立的行地址（含自己的 Block#），异号不影响并行操作。
 
-### 3.7 Free Pool 三级水位（v0.52 更正）
+### 3.7 Free Pool 三级水位（一个已擦除池）
 
-> **v0.52 更正**：本节原题为「Pre-conditioned Pool（预擦除池 — 三级 Free Pool）」，把三级画成
-> 三个**池**。这是错的——本仓（以及真实主控）都只有**一个**已擦除池，三级是**水位**。
-> 旧描述还引入了 `pre_cond_count`/`emergency_count` 两个计数与两个状态位，
-> 它们恒等于 `free_count` 或零引用，已在 v0.52 删除。
-
-**为什么不能分区**：搬移是**先擦后归还**（`mig_step` 的 `MIG_ERASE` phase 里
-`allocator_free_block`）——victim 擦完才进 Free Pool。所以池内**每个**块都已是擦除态，
-不存在「预擦除块」与「普通 free 块」的物理区分，也就没有东西可以分区。
+**Free Pool 是「一个已擦除池 + 三级水位」——不是三个池**：搬移是**先擦后归还**
+（`mig_step` 的 `MIG_ERASE` phase 里 `allocator_free_block`）——victim 擦完才进 Free Pool
+⇒ 池内**每个**块都已是擦除态，不存在「预擦除块」与「普通 free 块」的物理区分，也就没有
+东西可以分区。三级是**水位**（同一池上的两个分界阈值），不是三个池。
 
 **真实主控的做法**：free pool 是**一个已擦除池 + 软/硬水位**，另外配**独立的保留池**
 （本仓即 §3.6 的 OP 池 = 性能缓冲、Spare 池 = 坏块替换）。没有任何主流主控在 free 池
@@ -673,23 +680,21 @@ NAND 出厂时，每个 Block 的 Page 0 的 OOB（spare）区域标记该 Block
   出厂坏块：OOB[0] ≠ 0xFF ❌
 ```
 
-✅ **本仓已按标准实现（v63 起，原 P2-3 偏离已消解）**：FC 层新增
-`ftl_sync_read_column(addr, column, out[4])`（`OP_READ_COLUMN`）——按**任意列偏移**读
-4 字节，够到 spare 区。判据即 `mark[0] != 0xFF`，与器件手册（Micron AN1819）一致。
+**实现（按标准）**：FC 层提供 `ftl_sync_read_column(addr, column, out[4])`
+（`OP_READ_COLUMN`）——按**任意列偏移**读 4 字节，够到 spare 区。判据即
+`mark[0] != 0xFF`，与器件手册（Micron AN1819）一致。
 
 **扫描流程（真实实现）**：
 
-> ⚠ **订正（v63）**：真实 `bbt_scan_factory` 只读 **Page 0 的 spare 首字节**（**列 2048**
-> = `PAGE_MAIN_SIZE`），非 0xFF ⇒ 标坏块；跳过 Block 0（出厂总是好块）。读动作封装在
-> `bbt_probe_block_bad(alloc, plane, block, do_erase)`。**无** `fc_read_oob`、
-> **无** `bad_blocks[]` 数组、**无** `METADATA_BLOCK_COUNT` / `bbt_replace_metadata_block`
-> ——坏块统一记进 BST（`ftl_block_set_bad`）。
-> ⚠ 旧实现读的是 **CW0 列 0**（FC 逻辑 META，非 spare）且先擦后读 ⇒ 永远读不到出厂标记
-> （擦除会永久毁掉它）；v63 改为**读 spare 列 2048、先读后擦**。
+> ⚠ 真实 `bbt_scan_factory` 只读 **Page 0 的 spare 首字节**（**列 2048** = `PAGE_MAIN_SIZE`），
+> 非 0xFF ⇒ 标坏块；跳过 Block 0（出厂总是好块）。读动作封装在
+> `bbt_probe_block_bad(alloc, plane, block, do_erase)`。坏块统一记进 BST（`ftl_block_set_bad`）；
+> **无** `fc_read_oob` / `bad_blocks[]` 数组 / `METADATA_BLOCK_COUNT` / `bbt_replace_metadata_block`。
+> ⚠ 读的是**擦除前**的 spare 首字节——擦除会永久毁掉出厂标记，必须先读后擦。
 > ⚠ 本片芯片若已被整片擦过，出厂标记即已丢失 ⇒ 只会读到全 0xFF（不是 bug）。
 
 ```c
-/* 判据（bbt_probe_block_bad，v63）：读 Page 0 列 2048 的 spare 首字节，
+/* 判据（bbt_probe_block_bad）：读 Page 0 列 2048 的 spare 首字节，
  * 非 0xFF ⇒ 出厂坏块；do_erase != 0 时**无条件**再擦（擦除失败也判坏）。 */
 static int bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t block,
                                uint8_t do_erase) {
@@ -767,14 +772,14 @@ typedef struct {
     uint32_t bad_count;             // 坏块数
     uint32_t reserved[3];           // 保留
     uint8_t  bad_map[BBT_MAX_BLOCKS / 8];  // 4096 bit = 512B
-} __attribute__((packed)) bbt_header_t;    // 540B（v0.62 删 crc 字段）
+} __attribute__((packed)) bbt_header_t;    // 540B（无 crc 字段）
 ```
 
 - 存储在 **BBT 池（块 56..57，2 块）**，一条 record = **1 页**（540B header + padding）
 - 池内**块轮转**：块满 ⇒ 擦池内下一块续写（**先擦后写**），非"同块 3 份冗余"
 - 每份带单调 `sequence`；读取取"整条校验通过"中 sequence 最大者
-  （记录完整性由下层 FC 的 per-CW CRC + ECC 保证，v0.62）
-- ⚠ 旧实现把同一份 6 页**就地重写**——第二个坏块出现时 BBT 即损坏（见 `bbt.h` 头注释）
+  （记录完整性由下层 FC 的 per-CW CRC + ECC 保证）
+- ⚠ 若把同一份 6 页**就地重写**，第二个坏块出现时 BBT 即损坏（见 `bbt.h` 头注释）——故用池内轮转
 
 #### 3.8.2 运行时坏块隔离
 
@@ -790,12 +795,11 @@ READ 重试超限   ECC 连续多次升高 + retry 失败  标记坏块 → 数�
 
 **隔离流程**：
 
-> ⚠ **订正**：`allocator_mark_bad` 已删除（`allocator.h` 有墓碑注释），坏块统一走
-> **`bbt_mark_bad(alloc, gblock)`**（两形参，v0.56 去掉了 `reason`）；**无** `bbt_update`、
-> **无** `fc_command_id_to_command`（命令身份已去缓存化，v15 改指针派生）。
-> 运行时的坏块标记点（4 处）：GC 擦除失败、`read_recovery.c` 读不可恢复 / `ftl.c` 写失败、
-> `bbt.c` 内部。（读不可恢复自 v0.75 阶段 3 起在 RR job 的 `rr_settle_plane` 里标记，
-> 不再是 `ftl.c`。）
+> ⚠ 坏块统一走 **`bbt_mark_bad(alloc, gblock)`**（两形参，无 `reason`）；**无**
+> `allocator_mark_bad` / `bbt_update` / `fc_command_id_to_command`（命令身份是完成回调
+> 直接派生的指针，无缓存 id）。
+> 运行时的坏块标记点（4 处）：GC 擦除失败 / Read Recovery job 读不可恢复
+> （`rr_settle_plane`）/ 写失败（ftl.c）/ bbt.c 内部。
 
 ```c
 /* 坏块标记唯一入口：记进 BST（FTL_BLOCK_STATE_BAD）并置 BBT dirty */
@@ -844,8 +848,8 @@ void bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
 
   allocator 分配时跳过坏块 + 通过 Spare Pool 保水位：
 
-  > ⚠ **订正**：`allocator_alloc` / `allocator_select_block` / `alloc->erase_counts[]` /
-  > `alloc->spare_pool_count` / `ftl_handle_bad_block` 均已不存在。真实 API：
+  > ⚠ **真实 API**（`allocator_alloc` / `allocator_select_block` / `alloc->erase_counts[]` /
+  > `alloc->spare_pool_count` / `ftl_handle_bad_block` 均不存在）：
   > - 选块：`allocator_select_plane_block_from_pool(alloc, plane)`（**static**，逐 plane 独立，
   >   Policy B）、分配一对：`allocator_alloc_pair(alloc, temp, out[PLANE_NUM])`；
   > - 擦除计数在 **BST**（`alloc->blocks[gblock].erase_count`），非独立数组；
@@ -911,7 +915,7 @@ ONFI Multi-Plane 命令中每个 Plane 有独立的行地址，
 | 参数 | 当前值 | 说明 |
 |------|--------|------|
 | BBT_POOL_BLOCKS | 2（块 56..57） | BBT 池块数，池内轮转 |
-| 出厂扫描读取 | **Page 0 列 2048 的 1 字节** | 不是整页——`ftl_sync_read_column` 够到 spare 首字节（v63）|
+| 出厂扫描读取 | **Page 0 列 2048 的 1 字节** | 不是整页——`ftl_sync_read_column` 够到 spare 首字节 |
 | BBT_MAX_BLOCKS | 4096（= FTL_BLOCK_TOTAL） | BBT bitmap 容量 = 每 bit 一块 |
 | RR_ECC_RISING_THRESHOLD | 4 次 | ECC 连续上升触发慢死预测（`rr`）；单次 ≥ `RR_ECC_HIGH_WATER`(6) 亦告警 |
 | FTL_SPARE_POOL_PER_PLANE | 50（总 100） | 每 plane 替换池大小（覆盖生命周期坏块）|
@@ -928,6 +932,18 @@ ONFI Multi-Plane 命令中每个 Plane 有独立的行地址，
 | GC | Background GC 持续补充 | 后台预测性 GC |
 | SLC Cache | 不需要（本身就是 SLC） | 是（TLC/QLC） |
 | 元数据分布 | 每 LUN 固定位置 | 跨 Die 动态分配 + RAID1 |
+
+### 3.10 策略选取（本章要点）
+
+| 决策 | 选择 | 理由 | 出处 |
+|---|---|---|---|
+| 元数据布局 | 固定块池（Anchor/CP/BBT/Journal/Wear）+ 仅 L2P region 日志块动态 | 主控形态（固定根 + 专用元数据池）；只有变化最频繁的 L2P 走动态 | §3.3 对比表 |
+| Free Pool | 一个已擦除池 + 三级水位 | 搬移先擦后归还 ⇒ 池内全已擦除；水位保证前台零等待 | §3.7 |
+| 坏块替换 | Block Sparing（Spare Pool 保水位），非 Block Remap | 免映射层、PAA 直接物理；坏块配对异号不影响 Multi-Plane | §3.8.3 |
+| 温度 | Hot / Cold 双 Open SB（Multi-Stream） | 热数据无效页增长快，GC 效率高 | §3.5 |
+| OP / Spare | **每 plane 各留一份** | Super Block 跨 plane，某 plane 块耗尽就配不成对 | §3.6 |
+| 坏块探测 | 读擦除前 spare 首字节（Micron AN1819） | 擦除会永久毁掉出厂标记，必须先读后擦 | §3.8.1 |
+| 历史演进 | 固定池 vs 动态 / 单池水位 / 出厂扫描 / per-plane 池 | 逐版本决策 | `ftl_revision_history.md`（v0.50/v0.52/v0.63/v0.74） |
 
 ---
 
