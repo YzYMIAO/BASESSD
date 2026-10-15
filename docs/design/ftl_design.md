@@ -1,53 +1,22 @@
 # FTL 层完整设计方案
 
-> 本文档记录 soft_ssd 项目中 FTL（Flash Translation Layer）模块的完整设计，包括架构选型、子模块设计、行业对比、接口定义和实现规划。
+> soft_ssd 的 FTL（Flash Translation Layer）完整设计：架构选型、子模块设计、行业对比、
+> 接口与后台调度。与 `fc_nand_design.md`（FC + NAND 底层）平行，共同构成 SSD Firmware 设计。
 >
-> 本文档与 `fc_nand_design.md`（FC + NAND 底层）平行，二者共同构成 SSD Firmware 的完整设计方案。
+> **维护约定**：本文按「**最新策略设计 + 策略选取**」组织——正文只讲当前形态（不再带逐版本
+> 演进叙事）；演进历史与逐版本决策的单一事实来源 = `ftl_revision_history.md`（ADR 形式，
+> 覆盖 v0.1 起全部决策史），逐版本落地记录见 `docs/archive/changelog/`。正文里出现
+> `v0.xx` 字样一律是「出处指针」（指向上述两个文档），不是设计正文。
+>
+> 文档刷新史：2026-09-21 初稿 → **2026-10-15 去历史耦合重构**（去演进史 + 每章「策略选取」
+> + Mermaid 图解 + 伪代码核到最新实现）。
 
 ---
 
 ## 变更历史
 
-| 版本 | 日期 | 变更内容 | 作者 |
-|------|------|---------|------|
-| v0.1 | 2026-09-21 | 初始框架：页级 L2P + 顺序分配 | Claude |
-| v0.2 | 2026-09-23 | 完整设计：DRAM-less L2P cache、Region-based caching、CLOCK、Journal、Checkpoint | Claude |
-| v0.3 | 2026-09-23 | 架构决策记录、行业对比、Block 分类、Block 生命周期图、FTL 接口说明 | Claude |
-| v0.4 | 2026-09-23 | Write-back 四级触发条件 + 企业级 flush 对比 + 6 个补充设计要点 | Claude |
-| v0.5 | 2026-09-23 | GC 多维度加权评分 + 六级触发 + 原子性保证（Journal/GC Bitmap）+ 企业级参考；Block 分类重写（拓扑/Super Block/温度/OP/Pre-conditioned）；Phase 规划扩展（P2.8~P2.11）；Allocator 接口增加温度参数 | Claude |
-| v0.6 | 2026-09-23 | ftl_service 主循环调度设计：三级模式（IDLE/NORMAL/BUSY）+ 企业级后台调度器参考 + 主循环完整形态 | Claude |
-| v0.7 | 2026-09-23 | Journal 自身可靠性设计（四层保护：ECC/CRC/entry_count/sequence）+ Journal Page 完整格式；BBT 完整设计（出厂扫描 + 运行时隔离 + Block Skip 替换 + 企业级参考） | Claude |
-| v0.9 | 2026-09-24 | Super Block 坏块处理升级：Block Skip → Block Sparing + Spare Pool；"两层映射"方案废弃，回归行业标准物理 PAA 直映射（§3.8.3/ADR-11/§9/§15 联动更新） | Claude |
-| v0.10 | 2026-09-24 | 新增静态磨损均衡（Static Wear Leveling）完整设计：三星企业级独立 Daemon 方案，三条件触发、冷 Block 选择算法、数据搬移流程、ftl_service 集成（§4.8 新增） | Claude |
-| v0.11 | 2026-09-24 | Journal 回收触发条件重写：三级触发（水位线 85%/95% + 写入量 4096 + 定时 10s），基于企业级"预算推导"法，配套"无阻塞原则"（§7.5 重写） | Claude |
-| v0.12 | 2026-09-24 | L2P 表磨损均衡定量分析（§14 U5 已解决+详细推导表）；§14 未解决问题列表更新（U2/U3/U4/U5 已解决，新增 §14.1 完整分析小节） | Claude |
-| v0.13 | 2026-09-24 | 元数据区从固定 32 blocks 改为动态分配：新增 Metadata Directory + Anchor Block 设计（§3.3/§5.5）；Region 写回双 Plane 交错 Multi-Plane 加速（§5.6）；§14 U1/U6 已解决 | Claude |
-| v0.14 | 2026-09-28 | FTL 接口层决策确认：LBA 粒度 512B、lba_t(32bit)/pba_t(32bit) 地址体系（LBA→PBA→PAA）、几何统一到 nand_config.h、异步提交+ftl_service 驱动完成、新增 ftl_fc_interface.h 命令构造 helper 层 | Claude |
-| v0.15 | 2026-09-28 | 地址体系全面定稿：LAA/LBA/PBA/PAA 行业标准定义、cmd->meta 代替 cmd->faa、PBA=[CH][CE][PAA] bitfield、ftl_cmd_setup_ppa/ftl_cmd_write_data/ftl_cmd_read_data 三函数设计 | Claude |
-| v0.16 | 2026-09-28 | Step 1~5 完整实现：PBA/PAA 全套 inline、ftl_fc_interface 桩、L2P Cache 纯 SRAM+CLOCK、Allocator+Super Block、Journal 固定 Block、GC+ftl_service 三级主循环 | Claude |
-| v0.17 | 2026-09-29 | FTL 全面打通 NAND 路径：17 个核心桩全部替换为真实 FC 调用；新增同步 NAND 操作层（ftl_internal_read/write/erase）；新增 Pending Request 表；新增 ftl_read/write/trim 同步包装；GC 完整 7 步搬移（读 META→查 L2P→分配 Cold→写→L2P→Journal）；Metadata Directory 完整实现（Anchor Block 33-34 + 动态分配 + CRC 保护）；Allocator 全部桩消除（pre_cond/needs_gc/refill 同步）；controller 层 3 个隐式声明消除 | Claude |
-| v0.18 | 2026-09-29 | FTL 全部剩余模块实现：Checkpoint、BBT、Read Recovery、Power Failure Recovery、Wear Leveling；代码审视修复4个逻辑断裂 | Claude |
-| v0.19 | 2026-09-29 | Completion Table 统一完成路由：消除 ftl_service Phase2 和 ftl_internal_sync_wait 两个"泵"互相吞 completion 的 bug；新增 completion_table.h/c（16 项路由表【v0.31 扩为 32】+ 同步等待器 + 统一泵）；ftl_internal_sync_wait 改为注册 sync_waiter 后走 completion_table_drain，不再独占 fc_poll_completion；L2P Region 动态分配接入：cache 增加 alloc 指针，flush_one 中首次写 Region 改为真实调用 metadata_dir_alloc_region（取消回退固定位置） | Claude |
-| v0.20 | 2026-09-29 | 返回值体系统一 + 历史死代码清理：新增 ftl_status_t{FTL_OK=0,FTL_ERROR=-1} 企业级风格枚举，~32 个操作函数从 int 改为 ftl_status_t，谓词/计数函数保持 int；修复 checkpoint_find_latest 因 FTL_OK=0 导致的调用反转 bug；ftl_cmd_setup_ppa 等 3 函数从 (int) 强转改为显式 FC_STATUS_OK 映射；删除历史遗留文件 nand.h/c、nand_geometry.h/c、config/nand_geometry.h、config/ftl_config.h、__patch*.txt；删除死代码 pba_t、wl_init()、allocator_refill_pre_cond()；wl_relocate 复用 gc_read_page_with_lba + gc_erase_and_free（~60 行重复代码消除）；ssd_types.h 清除 ssd_ppa_t；l2p_cache.h 显式 include allocator.h 消除隐式依赖 | Claude |
-| v0.21 | 2026-09-29 | FTL 拓扑信息重构：删除 ftl_context_t/allocator_t/journal_t 中的 ch/ce/lun 散落字段，统一为 ftl_topology_t 结构体；ftl_init 新增 ftl_topology_t 参数替代原 ch/ce/lun 3 个参数；全部 pba_make 的 CH/CE 源改为从 topology 或 alloc->ch/ce 获取，消除硬编码 0,0；allocator/journal/metadata/checkpoint/bbt/power_failure_recovery/wear_leveling 各模块全部接入拓扑路由 | Claude |
-| v0.22 | 2026-09-29 | FTL 对外接口异步化：删除 ftl_read/ftl_write 同步包装，FTL 对外只提供非阻塞接口；ftl_submit_write 新增 complete_flag 参数跟踪 NAND PROGRAM 完成；Controller 层改为纯异步提交 + complete_flag 轮询；新增 ssd_controller_is_complete()；ssd_request_t.completion_status 改为 ssd_status_t | Claude |
-| v0.23 | 2026-09-29 | D4 多 LBA 拆分实现（方案 A — Controller 层拆分）：ftl_submit_read/write 去掉 count 参数（只支持单页）；pending 表新增 on_complete 回调+ctx 字段；request.c 实现 ssd_request_split 循环（block_count 次→N 个单页子请求）；on_sub_complete 递减 sub_remaining 归零时置父请求 complete_flag；单块读也传 complete_flag 正常发完成信号；PBA 无效路径也发回调/信号 | Claude |
-| v0.24 | 2026-09-29 | D5 写失败回滚（modify-after-confirm + BBT 两阶段 + 自动回滚）：ftl_submit_write 中 journal_append/l2p_cache_write 后移到 completion handler 的成功确认路径；pending 表加 old_pba/new_pba/ftl 字段；写失败→bbt_mark_bad RAM only + background bbt_flush；L2P 不动=自动回滚到旧数据；Super Block 空洞由 GC 自然跳过 | Claude |
-| v0.31 | 2026-09-30 | **Pending 表 + Completion Table 扩容**：`FTL_PENDING_MAX` 8→32、`COMPLETION_TABLE_SIZE` 16→32（多 LUN 并发软件前置）；纯常量改动，表为线性扫描数组无位域/mask 依赖；同步背压预算（§17.5）定量数字一并更新 | Claude |
-| v0.25 | 2026-09-29 | D6 队列深度/背压确认（pending 表满即隐式背压，DRAM-less 消费级不需额外机制）：SQ 深度 64 >> 实际并发（pending=8→v0.31 扩为 32），pending 表满→FTL_ERROR→Controller→Host 重试，已自然构成流控 | Claude |
-| v0.26 | 2026-09-29 | D7 多命令流水线实现：修正 D4——ftl_submit_read/write 加回 pages 参数（1=单 Plane, 2=Multi-Plane）；Super Block 双 Plane 同步写入（OP_PROGRAM_PAGE_MULTI_PLANE, multi_plane=2）；读路径区分顺序/随机（两两连续 LBA 配对 Multi-Plane）；Cache Program 安全中间页标志 cache_intermediate 跳过 L2P/Journal 确认 | Claude |
-| v0.27 | 2026-09-29 | D8 错误通知粒度（消费级 DRAM-less）：pending 表加 status_out 指针，completion handler 写入 SSD_STATUS_OK/IO_ERROR；ftl_submit_read/write 签名加 status_out 参数；Controller 层传 &request->completion_status 接收异步完成状态 | Claude |
-| v0.28 | 2026-09-30 | 地址体系双层化 + 形参优化 Step 1/2：新增 nand_addr_t（展开地址）与 pba_from_addr/addr_from_pba/addr_from_paa 双向转换，遍历路径不再 pba_make 打包→拆包；super_block_t 加 ftl_topology_t topo + super_block_page_addr；ftl_fc_interface.h 新增 addr_to_cmd 直填；删除 ftl_internal_read/write_page/erase_block/read_page_raw 四个包装（-232 行），各模块内联为 static sync 助手；新建 ftl_types.h（ftl_io_request_t/ftl_init_params_t 供 Step 3/4）；随机 IO 路径 ftl_cmd_setup_ppa 保留 | Claude |
-| v0.29 | 2026-09-30 | 形参优化 Step 3：ftl_submit_read/write 改 (ftl, req) 结构体传参（8 形参→2，ftl_io_request_t）；ftl_pending_req_t 按值嵌入 ftl_io_request_t io（pending_add 12 形参→6）；pending_cb_t 从 pending.h 迁至 ftl_types.h 打破循环 include；ssd_request_t 增加 ftl_io_request_t io 复用模板（单块直填，拆分循环内只改 lba/buffer/pages） | Claude |
-| v0.30 | 2026-09-30 | 形参优化 Step 4：ftl_init / allocator_init 改 ftl_init_params_t 结构体指针传参（7/8 形参→2）；ftl_init_params_t 定义于 allocator.h（依赖 super_block_t，避免 ftl_types.h↔allocator.h 循环 include）；ftl_types.h 收敛为 pending_cb_t + ftl_io_request_t | Claude |
-| v0.31 | 2026-09-30 | **P-A 多 LUN 并发前置**：Pending 表 + Completion Table 扩容（8→32）；元数据 lun 泛化；ECC 返回链路打通（fc_ldpc_decode err_bits）；read recovery 接入（rr_block_track 空转待供电） | Claude |
-| v0.32 | 2026-09-30 | **Block State Table（BST）统一 per-block 结构体数组**：新建 ftl/bst.h；合并 erase_counts/bad_blocks/g_bbt_bitmap/rr_block_track 四张分散表为 ftl_block_t[4096] 单数组（56B/项=224KB 全常驻 SRAM）；修复 3 处全局/per-plane 块号碰撞 bug（ftl_gblock 单点转换）；read recovery 由空转变为供电；逐页有效位图 valid_map + VPC 全真值维护（写/覆盖/GC迁移/擦除/trim/坏块/掉电七点闭环）；GC/WL 迁移扫位图免 NAND 读（P-C.5 落地）；行业全字段补全（状态机/温度/坏块原因/read&program 计数/last_pe_ts/gc_generation/sb_id 反向索引）；PFR 掉电 closed_sb_list 重建留二期 | Claude |
-
-> **⚠ 本表只记到 v0.32（2026-09-30）为止。** v0.33 起的版本历史是 **ADR 形式**，
-> 单一事实来源 = `docs/design/ftl_revision_history.md`（每条含背景/决策/后果/涉及文件），
-> 变更摘要另见 `docs/archive/changelog/`。**本文正文（§1~§20）仍在持续维护到当前版本**
-> （最近一次是 v0.69/v0.71），故读正文时以正文的「订正注」与 `ftl_revision_history.md` 为准，
-> 不要以本表的截止版本推断文档新鲜度。
+> **本文不再维护独立版本表。** 版本历史单一事实来源 = `docs/design/ftl_revision_history.md`
+> （v0.33+ 为 ADR 形式，覆盖 v0.1 起全部决策史）；逐版本落地/上板记录见 `docs/archive/changelog/`。
 
 ---
 
@@ -78,7 +47,78 @@
 
 ## 1. 架构选型与行业背景
 
-### 1.1 三种映射策略对比
+> 关联实现：`include/ftl/*` + `src/ftl/*`；历史决策见 `ftl_revision_history.md`。
+> 本章是全局地基：先看整机分层与读写主路径（背景），再落到映射粒度选型（策略选取），
+> 最后给出决策项总表。
+
+### 1.1 系统分层
+
+```mermaid
+flowchart TB
+    subgraph Host["主机侧"]
+        CLI["UART CLI / Host IO 请求"]
+    end
+    subgraph FTL["FTL 层（本设计）"]
+        SVC["ftl_service()\n完成泵 + 后台调度"]
+        L2P["L2P 映射 + SRAM Cache\n(Journal/Checkpoint/BBT)"]
+        ALC["Allocator / BST\nFree Pool / GC / WL"]
+        RR["Read Recovery"]
+    end
+    subgraph FC["FC 层 + NAND"]
+        FCL["fc_service()\n命令链 / 完成路由"]
+        NAND["MT29F4G08\n2 plane × 64 页 × 2048 块"]
+    end
+
+    CLI --> SVC
+    SVC --> L2P
+    SVC --> ALC
+    SVC --> RR
+    L2P --> FCL
+    ALC --> FCL
+    RR --> FCL
+    FCL --> NAND
+```
+
+各层职责：FTL 负责**地址映射**（L2P）、**空间管理**（Allocator/GC/WL）、**掉电一致性**
+（Journal/Checkpoint）与**介质健康**（BBT/Read Recovery）；FTL 不直接碰 NAND，一律经 FC
+接口下发命令，由 FC 保证 **CRC + ECC + Random 加扰**的完整数据保护链（§13）。
+
+### 1.2 读 / 写主路径
+
+```mermaid
+flowchart LR
+    A["ftl_submit_read(req)"] --> B{"L2P cache 命中?"}
+    B -- "命中" --> C["pba 就绪 → ftl_op_submit\n建 FC 读命令"]
+    B -- "miss" --> D["加载 region\n（NAND L2P 区）"]
+    D --> E["回填 cache（CLOCK 放置）"]
+    E --> C
+    C --> F["completion_table\n完成回调"]
+    F --> G["回 host（组完成通知）"]
+```
+
+```mermaid
+flowchart LR
+    A["ftl_submit_write(req)"] --> B["allocator_alloc_pair\n分配 PBA（hot/cold）"]
+    B --> C["页打包写缓冲\n（攒整页 4 CW）"]
+    C --> D["FC PROGRAM\n（CRC/ECC/Random）"]
+    D --> E{"program 成功?"}
+    E -- "是" --> F["modify-after-confirm:\njournal_append + l2p_cache_write"]
+    E -- "否" --> G["bbt_mark_bad（RAM）\nL2P 不动 = 自动回滚旧数据"]
+    F --> H["回 host（组完成通知）"]
+```
+
+写路径要点：**modify-after-confirm**——L2P/Journal 的修改一律推迟到 NAND PROGRAM 成功确认
+之后；program 失败时 L2P 仍指向旧 PBA，天然回滚（§4.6）。
+
+### 1.3 最新策略：纯 CW 级（512B）页映射
+
+当前选型一句话：**LBA（512B/CW）直接映射到物理 CW**，L2P 表不常驻 SRAM（DRAM-less），
+以 region（1 NAND 页 = 512 entry）为单位按需加载进 SRAM cache。粒度、地址结构与 region
+分片详见 §5。
+
+### 1.4 策略选取：为什么是纯页级映射
+
+**候选对比**：
 
 | 维度 | 块级映射 (Block Mapping) | 混合映射 (Hybrid BAST/FAST) | **纯页级映射 (Page Mapping)** ✅ |
 |------|-------------------------|----------------------------|-------------------------------|
@@ -90,27 +130,17 @@
 | 实现复杂度 | 最简单 | **最复杂** | 中等 |
 | 主流应用 | IoT / 极低端控制器 | 已淘汰（2012 年前 U 盘） | **所有现代 SSD** ✅ |
 
-### 1.2 行业现状
+**行业现状**（主流形态 = 纯页级；出处/行业对照见 `fc_nand_design.md §26`）：
 
-```
-SSD 类型                      映射策略                原因
-─────────────────────────────────────────────────────────────────
-企业级（Samsung PM9A3、       ✅ 纯页级映射（4KB 粒度）   性能/WA/延迟，几 GB DRAM 不差表空间
- Intel DC P5800X）
-消费级旗舰（990 PRO、         ✅ 纯页级映射（4KB 粒度）   1~2GB DRAM，全表常驻
- SN850X、KC3000）
-消费级入门（SN580、           ✅ 纯页级映射（4KB 粒度）   HMB 用主机内存做 cache，还是页级
- NV2）
-UFS 4.0（手机）               ✅ 纯页级映射（4KB 粒度）   L2P table on NAND + SRAM cache
-─────────────────────────────────────────────────────────────────
-块映射 / 混合映射              ❌ 已经不用                2010 年前技术
-```
+| SSD 类型 | 映射策略 | 原因 |
+|---|---|---|
+| 企业级（Samsung PM9A3、Intel DC P5800X） | ✅ 纯页级（4KB 粒度） | 性能/WA/延迟优先，几 GB DRAM 不差表空间 |
+| 消费级旗舰（990 PRO、SN850X、KC3000） | ✅ 纯页级（4KB 粒度） | 1~2GB DRAM，全表常驻 |
+| 消费级入门（SN580、NV2） | ✅ 纯页级（4KB 粒度） | HMB 用主机内存做 cache，仍是页级 |
+| UFS 4.0（手机） | ✅ 纯页级（4KB 粒度） | **L2P table on NAND + SRAM cache** = 与本仓同构 |
+| 块映射 / 混合映射 | ❌ 已不用 | 2010 年前技术 |
 
-**结论**：纯页级映射是绝对主流。
-
-### 1.3 混合映射（BAST/FAST）为何被淘汰
-
-BAST（Block Associative Sector Translation）和 FAST（Fully Associative Sector Translation）是 2007~2012 年的技术，核心原因是：
+**混合映射（BAST/FAST）为何被淘汰**——它要解决的「表空间不足」已被硬件成本下降解决：
 
 | 变化 | 影响 |
 |------|------|
@@ -120,24 +150,26 @@ BAST（Block Associative Sector Translation）和 FAST（Fully Associative Secto
 | 无 DRAM 方案用 HMB | 借用主机内存，空间管够 |
 | QLC/TLC P/E 寿命有限 | 混合映射的 merge 产生大量额外写入 |
 
-混合映射要解决的（表空间不足），已被硬件成本下降解决。块映射的 WA 在 QLC/TLC 时代更是致命。
+块映射的 WA（5~10x）在 QLC/TLC 时代更是致命 ⇒ 纯页级映射是绝对主流。
+**CW 级（512B）粒度**而非 4KB 的理由：与 FC 层的数据通路（CW = 1 ECC 码字 = 512B）完全
+对齐，映射、加扰、CRC、ECC 全部按 CW 操作，无粒度折算（详见 `cw_level_mapping_design.md`）。
 
-### 1.4 当前设计选择
+### 1.5 决策项总表
 
 | 决策项 | 选择 | 理由 |
 |--------|------|------|
 | 映射策略 | **纯 CW 级（512B）页映射** | 与 FC 完全对齐，行业标准做法 |
-| L2P 存储 | **NAND 元数据 Block（DRAM-less）** | 学习嵌入式/UFS 主流方案 |
-| L2P 缓存 | **SRAM region cache (64~256 KB)** | 1MB SRAM 可支持 |
-| 替换策略 | **CLOCK** | LRU 命中率，O(1) 开销 |
-| 写回策略 | **Write-back + Journal** | 性能与掉电安全的折中 |
-| FTL → NAND | **通过 FC 接口** | 经过 CRC/ECC/Random 完整数据保护 |
-| RAID | **不实现** | 复杂度高，当前 SLC 暂不需要 |
-| Super Block | **跨双 Plane** | 学习企业级跨 Die 条带化，当前双 Plane 配对 |
-| 温度分区 | **Hot / Cold 双 Open Super Block** | 提升 GC 效率，冷热分离 |
+| L2P 存储 | **NAND 元数据 Block（DRAM-less）** | 嵌入式/UFS 主流方案（同构见上表） |
+| L2P 缓存 | **SRAM region cache（~128 KB）** | SRAM 可支持 |
+| 替换策略 | **CLOCK** | 近 LRU 命中率，O(1) 开销（§6） |
+| 写回策略 | **Write-back + Journal** | 性能与掉电安全的折中（§6/§7） |
+| FTL → NAND | **通过 FC 接口** | 经过 CRC/ECC/Random 完整数据保护（§13） |
+| RAID | **不实现** | 复杂度高，当前 SLC 单盘暂不需要 |
+| Super Block | **跨双 Plane** | 双 Plane 配对写入/读取 |
+| 温度分区 | **Hot / Cold 双 Open Super Block** | 提升 GC 效率，冷热分离（§4.7） |
 | OP | **10% 预留（可配置 7~28%）** | 性能保速 + GC 缓冲 |
-| Free Pool | **一个已擦除池 + 三级水位**（v0.52 更正，见 §3.7） | 学习 Background GC 和前台 IO 隔离 |
-| Bad Block | **Block Sparing（Spare Pool 保水位）** | 学习企业级坏块替换，不做额外映射层 |
+| Free Pool | **一个已擦除池 + 三级水位** | 后台 GC 与前台 IO 隔离（§3.7） |
+| Bad Block | **Block Sparing（Spare Pool 保水位）** | 坏块替换，不做额外映射层（§3.8） |
 | SLC Cache | **不实现** | 本身就是 SLC NAND |
 
 ---
