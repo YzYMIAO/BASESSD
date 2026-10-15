@@ -960,3 +960,36 @@ debug 档暴露；release 档即便误调，也只是多泵一轮（后果与阶
 开机 / 格式化 / 出厂扫描 / CLI 路径调用；这些路径都在 `main` 进入 superloop **之前**
 （或 CLI 的独立上下文）执行，此时没有别人 drain CQ，改异步反而死锁——它们是**结构性同步**，
 不是漏网。断言把"还有谁在重入"从口头约定变成编译期之后仍可验证的事实。
+
+## 二十六、FTL 层断言瘦身：模块内部不逐函数复检同一入参（2026-10-15）
+
+用户指出（2026-10-15）：FTL 层「每个函数判断一次参数是否合理」——同一前提在调用链**多层重复
+断言**，判断分支开销大；断言应主要落在对外接口，**以一个模块为界限**，模块内部默认没问题。
+
+**盘点**：`src/ftl/*.c` 共 **111 处 `ASSERT`**（16 文件；无 `ASSUME`），按「值从哪来」分四类：
+[I] 接口 27 / [BOUND] 子模块公开入口 10 / [INV] 不变量 48 / [REDUND] 冗余 26。
+本轮删 **[REDUND] 26 处**，保留 85 处（I / BOUND / INV 一个不动）。
+
+**删的是什么（各按既有判据，无新规则）**：
+- **同源守卫恒真 → 删**（§十附判据 1）：`pending.c` 全族 **13× `ASSERT(ftl != NULL)`**——host 入口
+  `ftl_submit_*` 已 if-guard，`pending_init` 注释自认「唯一调用者 ftl_init 已判过」，全模块恒真。
+- **内层已断言 → 外层死守卫删**（§十附判据 2）：**`cmd != NULL` 10×**——`fc_command_id_to_command`
+  公共壳已断言 ID 在池内恒非空，派发（`ftl_op_dispatch`）+ 9 个完成服务回调（`ftl_op_*`）各自再
+  断一次是死守卫。
+- **重复守卫收敛到共用漏斗**（§十附判据 2）：`n_cw` 范围三层重复（`ftl_issue_subop` →
+  `pending_add` → `ftl_drain_group`）收敛到 **`pending_add`**（pending.h 公开入口）唯一权威点。
+- **注释自认冗余**：`power_failure_recovery.c` 的 `sb_idx != UINT16_MAX`，注释明说
+  `allocator_add_closed_sb` 内部已断言列表未满。
+
+**保留什么（一处不动）**：host 入口（用返回码，判据 1，本就无 ASSERT）+ **FTL↔FC 命令边界**（[I]，
+「配置错误一律 ASSERT」）+ **子模块公开入口**（[BOUND]）+ 内部**高价值不变量**（[INV]：状态机非法态
+`ASSERT(0)` / 实例归属 `&ftl->xxx == ctx` / 簿记计数 / 运行时上下文 `ftl_op_in_dispatch()`）。
+
+**固化约定（防回加）**：**模块内部不逐函数复检同一入参。** 边界 = host 入口返回码 +
+FTL↔FC 命令边界 / 子模块公开入口 ASSERT；内部只留高价值不变量。新增内部函数时，入参有效性
+已由唯一调用者保证就不必再断言；只有「调用方可能传错」才在边界断言。
+
+**行为影响**：release（NDEBUG）下断言整体裁空、表达式不求值——本轮删的是 debug 档冗余 +
+代码噪音，**不改任何 return / 分支行为**。编译三关全过（`make all` / `make release` /
+`make tests UT=FTL`），**零新告警**（release 档 `ftl_fc_interface.c` 的 `allowed`/`plane_bits`
+未用告警是保留的 [I] 断言被裁空的既有告警，见文件头注释，非本轮引入）。

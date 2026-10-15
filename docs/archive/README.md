@@ -19,7 +19,7 @@ FC / FTL 层**逐版本**变更记录（「为什么这样做 / 决策反转 / �
 | 家族 | 数量 | 说明 |
 |---|---|---|
 | `fc_*` | 51 | FC 层 v13~v63 建链/UT/地址/加扰/锁 各版本 |
-| `ftl_*` | 9 | FTL 层 v23~v75 部分版本 |
+| `ftl_*` | 10 | FTL 层 v23~v75 部分版本 / 断言瘦身（`ftl_assert_redundant_trim`） |
 | `nand_*` | 4 | NAND 层（地址构造 / dispatch / ONFI 打印 / poll sink） |
 | `platform_*` | 1 | ISR 分散化 v61 |
 | 其他 | 5 | `assertion_log_rollout` / `boot_banner_v62` / `diag_crash_cli_board_verify_v71` / `internal_move_op_merge` / `read_column_v63` |
