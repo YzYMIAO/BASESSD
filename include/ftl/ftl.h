@@ -237,7 +237,7 @@ void ftl_service_pump(void);
  * ⚠ 调用方须先调 ftl_service_pump()。多实例（多 LUN）下漏调某实例 ⇒ 它的
  *   journal / checkpoint / wear / bbt / GC 永不推进。
  *
- * @param ftl  FTL 上下文（NULL 直接返回）
+ * @param ftl  FTL 上下文（**非 NULL**；NULL 属编程错误，ASSERT 兜底）
  */
 void ftl_service(ftl_context_t *ftl);
 

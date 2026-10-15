@@ -158,8 +158,9 @@ Phase 2.5 遍历本实例各未完成组 → ftl_drain_group 补发子操作（h
 Phase 3   三级后台（IDLE / NORMAL / BUSY）
 ```
 
-> ⚠ `main.c` 目前只对 `g_ftl[0][0][0]` 调 `ftl_service` ⇒ Phase 2.5 只 drain 实例 0。
-> 当前几何（CH=CE=LUN=1）正确；维度扩展时须遍历全部实例（既有结构缺口，本步使其显形）。
+> `main.c` 主循环先 `ftl_service_pump()`（全局泵，每轮一次）抽干 NAND + 完成表，
+> 再**遍历全部实例**调 `ftl_service()` 逐实例推进 Phase 2.5/3（必须全遍历：只跑
+> `[0][0][0]` 会让其余实例的 journal / checkpoint / wear / bbt / GC 永不推进）。
 
 ---
 

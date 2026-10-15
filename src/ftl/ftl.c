@@ -38,7 +38,9 @@
  *   共用一台异步搬移 job（mig_begin_* / mig_service），本文件只做**触发求值**与**启动**。
  *
  * ⚠ 多实例（F6）：pending / groups / rr_last_scan_ms 均 per-instance；completion 全局
- *   但按命令 ch/ce/lun 路由。main.c 目前只对 g_ftl[0][0][0] 调 ftl_service（结构缺口）。
+ *   但按命令 ch/ce/lun 路由。main.c 主循环：先 ftl_service_pump()（全局泵，每轮一次）
+ *   抽干 NAND + 完成表，再**遍历全部实例**调 ftl_service() 逐实例推进 Phase 2.5/3——
+ *   只跑 [0][0][0] 会让其余实例的 journal / checkpoint / wear / bbt / GC 永不推进（序 4）。
  */
 
 #include "ftl/ftl.h"
@@ -857,7 +859,7 @@ void ftl_service_pump(void)
 /* --------------------------------------------------------------------
  * ftl_service
  *   功能：服务**单个** FTL 实例（Phase 2.5 补发子操作 + Phase 3 后台调度）。
- *   参数：ftl —— FTL 实例（NULL 直接返回）。
+ *   参数：ftl —— FTL 实例（**恒非空**：调用方须传合法实例地址，NULL 属编程错误）。
  *   返回：无。
  *   实现要点：调用方须**先**调 ftl_service_pump()（全局泵，每轮一次），再对**每个**
  *             实例调本函数（序 4：多实例下所有实例都要推进，不能只跑 [0][0][0]）。
@@ -868,10 +870,10 @@ void ftl_service(ftl_context_t *ftl)
 {
     uint8_t level;
 
-    if (ftl == NULL)
-    {
-        return;
-    }
+    /* 唯一调用点 main.c 传 &g_ftl[ch][ce][lun]（静态数组元素，结构性恒非空）；
+     * NULL 属「不该发生」⇒ ASSERT（release 裁空后 NULL 解引用=HardFault 留现场，
+     * 优于静默返回⇒该实例 journal/GC 永不推进的无声损坏）。 */
+    ASSERT(ftl != NULL);
 
     /* Phase 2.5 首：推进**停泊**的写确认（阶段 5）。必须早于补发——停泊意味着那个 LBA
      * 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作就会读到旧物理页（陈旧数据）。
