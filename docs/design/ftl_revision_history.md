@@ -5196,3 +5196,79 @@ CLI `fl` 若撞上"换块 + 池吃紧"，`append_slot` 返回 `NAND_PBA_INVALID`
   "扫池"也拆成 phase，收益极低（一次性），**有意不做**；
 - per-job 的 `[JOB]` 心跳日志：✅ **已全量化**（见上文"v0.75 收口补丁"）——CP 的
   `[CP] job phase=…` 之外，journal / mig / RR / BBT / Wear / MD / L2P 各自一行。
+
+---
+
+## v0.76 — 时间预算后台调度器（三级后台升级：每任务 interval + 每轮总预算 + 优先级）
+
+> **RAM 侧调度器重构，无介质变更**（`FTL_MEDIA_LAYOUT_VERSION` 不变），仿 v0.63/v0.68
+> 先例**同批上板**。`ftl_service` Phase 3 的三级 static 服务函数被 `bg_scheduler` 引擎 +
+> 14 项任务表 + 三级负载→预算映射取代；三级行为与 v0.75 **等价**。
+
+**日期**：2026-10-15
+
+**范围**：新增 `include/ftl/bg_scheduler.h` + `src/ftl/bg_scheduler.c`（策略无关引擎，
+只依赖 `platform/platform.h` 的 `time_us`）、新增 `tests/unit/test_ftl_bg.c`（`/ftl/bg/`
+套件 6 用例）、`include/ftl/ftl.h`（`bg_scheduler_t bg` 字段 + `ftl_bg_init` /
+`ftl_bg_level_select` 声明）、`src/ftl/ftl.c`（删三个 static 三级服务函数 → 14 个
+`bg_a_*` 适配器 + `g_bg_level_cfg[3]` + `ftl_bg_init` / `ftl_bg_level_select` + `ftl_service`
+Phase 3 改写）、`tests/unit/ut_main.c` + `src/ftl/makefile.mk`（套件接线）、三份文档
+（`ftl_design.md §12.4` 对比表修正 + `ftl_optimization_plan.md §九` 波 4.5 + 本文件）。
+
+### 起因：计数式三级 + 节拍门散落 + 前台保护一刀切
+
+v0.75 的三级后台按「未决命令数」分档（IDLE/NORMAL/BUSY），档内按「做几条」计数控制
+（`BG_NORMAL_FLUSH_COUNT=4` / `BG_BUSY_FLUSH_COUNT=1` / `NAND_SUBMIT_BUDGET=4`），
+节拍门散落在各处（GC 求值 10ms 哨兵、CP 定时 10s、RR 巡检 1s、wear 内部 120s 双门），
+前台保护是「档位一刀切」而非随负载缩放——离主流主控 FTL 的
+`background_task_t`（每任务 interval + 优先级 + 预算）形态有距离。
+
+### 目标（用户 2026-10-15 定）
+
+1. **对齐主流形态**：每任务独立 `interval_ms` + 每轮总预算 + 优先级（§12.4 `background_task_t`）。
+2. **前台保护升级为「负载→预算缩放」**：三级档位各配总预算 + l2p 条数上界 + 任务掩码。
+3. **节拍门统一进任务表**（唯一例外 = wear 内部双触发门，见下）。
+4. **正确性关键集显式化**为 `must_run`：无条件、不 gate、不占预算、每轮最先跑。
+
+### 阶段
+
+1. **引擎**（`bg_scheduler.h/c`）：`bg_task_t` / `bg_scheduler_t` / `bg_level_cfg_t` +
+   `bg_scheduler_init` / `bg_scheduler_run`。两遍 Pass：Pass 0 跑 must-run 集
+   （`checkpoint_kick` 排第一），Pass 1 按掩码 + interval 门 + 优先级线性扫、`charge =
+   MIN(elapsed, budget_us)`、`remaining < MIN_TASK_BUDGET_US`(250) 截断。
+2. **14 项任务表**（`ftl_bg_init`）：0~5 = must-run（checkpoint_kick / rr_kick /
+   mig_service / metadata_dir_kick / journal need_erase / 紧急 CP），6~13 = 预算任务
+   （GC 求值 10ms/400 / WL 300 / l2p flush 1500 / journal flush 700 / bbt 700 /
+   wear 700·interval=0 / CP 触发 100 / RR 巡检 1s·300）。掩码位下标 == 表下标。
+3. **三级负载→预算映射**（`g_bg_level_cfg[3]`，锚定 `onfi_1_0.c` 时序）：IDLE/NORMAL
+   2000µs（≈2~3 页写 + GC 全表求值）、BUSY 700µs（仅 must-run + 1 l2p flush）；
+   l2p 条数上界 IDLE=64 / NORMAL=4 / BUSY=1 —— **确定性前台保护由档位→条数/掩码承担**
+   （kick 全部提交即返回，elapsed 预算受 1ms 时钟量化影响，只做 CPU 时间上界）。
+4. **时钟缺失降级**：`time_us` 恒 0 ⇒ interval 门失效（`last_run_ms` 恒 0 = "未运行"哨兵）、
+   elapsed=0 永不截断 ⇒ 退化「无门控」，靠各任务内部单飞行/事件门防刷屏（GC 哨兵
+   「每轮求值」等既有语义不变）。
+5. **wear 例外**：调度器 interval 设 0，内部 OR 双门
+   （`WEAR_FLUSH_INTERVAL_MS` 120s OR 写增量≥1024）为准——写增量触发是掉电窗口上界。
+
+### 决策记录
+
+- **`bg_scheduler.c` 策略无关**：不 include 任何 kick，只 include `platform/platform.h`；
+  `ftl_context_t` 前向声明（同 `pending.h` 手法）⇒ 可被单测自定义 cfg 驱动。
+- **`ftl_bg_level_select` 纯函数**：`pending_count==0 → IDLE`；`> FTL_PENDING_MAX/2 ||
+  queued!=0 → BUSY`；否则 NORMAL——逐字复刻 v0.75 的档位判定。
+- **表位 5（紧急 CP）移入 must-run**：`checkpoint_is_emergency` 每轮检查（原仅 BUSY）；
+  `checkpoint_begin` 单飞行（`cp_job.active → FTL_AGAIN`）幂等安全，属**刻意的行为放宽**
+  ——紧急水位（journal≥95%）必须随时响应。
+- **表位 4（journal need_erase）是表位 9 的子集**：IDLE/NORMAL 双跑安全
+  （`journal_kick` 单飞行）。
+
+### 收口
+
+- `make all` / `make tests UT=FTL` / `make tests UT=FC` 三锚点全绿；`.bin` 214084B
+  （v0.75 栈哨兵后 212024B，+2060B）。
+- `test /ftl/bg/` 6 用例：任务表接线 / interval 门控 / 预算截断 / 时钟缺失 / BUSY
+  must-run / level select。
+- ⚠ **未上板**：判据 = 三级行为与 v0.75 等价回归（IO 下 BUSY 无后台刷屏 / 空闲 IDLE
+  正常补池）+ `test /ftl/bg/` 板上过 + 断电重启数据仍在。
+- ⚠ 生产适配器（bg_a_* 起 journal 擦 / mig 读 / checkpoint cp_step）的真完成链归异步套件
+  （`ftl_ut_munit.md` §4.9 计划）职责，`/ftl/bg/` 用全 14 计数桩覆盖引擎语义。
