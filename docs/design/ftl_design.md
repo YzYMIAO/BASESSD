@@ -2987,6 +2987,23 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 
 ## 9. 架构决策记录
 
+> 本节是 FTL 各架构决策点的**最终选型**（每项含候选对比与代价）。
+> 历史演化过程见 `ftl_revision_history.md`；行业对照判据见 `fc_nand_design.md §26`。
+
+| # | 决策点 | 选型（一句话） |
+|---|--------|--------------|
+| ADR-1 | 映射粒度 | 纯页映射（CW 级 512B），写放大最小 |
+| ADR-2 | L2P 存放 | NAND 全表 + SRAM region cache（DRAM-less）|
+| ADR-3 | RAID | 不实现（`CONFIG_FC_RAID=0`），优先加强 ECC |
+| ADR-4 | NAND 访问路径 | FTL → FC 接口 → NAND（带 CRC/ECC/Random）|
+| ADR-5 | Cache 替换 | CLOCK（命中率近 LRU，O(1) 免链表）|
+| ADR-6 | Super Block | 跨双 Plane 条带化（双 Plane 并行编程）|
+| ADR-7 | 温度分区 | Hot / Cold 双 Open Super Block |
+| ADR-8 | OP 预留 | 10%（可配置 7~28%），坏块替换后容量不变 |
+| ADR-9 | Free Pool | 一个已擦除池 + 三级水位 + 独立 OP/Spare 保留池 |
+| ADR-10 | SLC Cache | 不实现（介质本身即 SLC）|
+| ADR-11 | 坏块管理 | 出厂扫描 + 运行时隔离 + Block Sparing |
+
 ### ADR-1：选择纯页映射而非块映射/混合映射
 
 | 项目 | 决策 |
@@ -3056,13 +3073,13 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 | 拒绝方案 | 0% OP（坏块替换直接减少用户容量，写入压力时 GC 阻塞前台 IO）|
 | 代价 | 用户可见容量减少约 10%（512MiB → ~456MiB）|
 
-### ADR-9：Free Pool 三级**水位**（v0.52 修正原「三级池」）
+### ADR-9：Free Pool 三级**水位**
 
 | 项目 | 决策 |
 |------|------|
 | 选型 | **一个已擦除池 + 三级水位**（`FREE_POOL_TARGET 32` / `FREE_POOL_EMERGENCY 8` / 0）+ **独立的 OP / Spare 保留池** |
 | 理由 | 学习企业级 Background GC 和前台 IO 隔离：水位①以上不做事，②触发后台 GC 补池，③强制 GC。前台"零等待"由**水位**保证（池里始终有 ≥32 个已擦除块），不是由第二个池 |
-| 拒绝方案 | ~~三池分区~~——**物理上不可实现**：搬移**先擦后归还**（`mig_step` 的 `MIG_ERASE` 里 `allocator_free_block`）⇒ 池内无未擦除块，没有东西可分区（v0.52 定案，见 §3.7） |
+| 拒绝方案 | ~~三池分区~~——**物理上不可实现**：搬移**先擦后归还**（`mig_step` 的 `MIG_ERASE` 里 `allocator_free_block`）⇒ 池内无未擦除块，没有东西可分区（定案见 §3.7） |
 | 代价 | 原 `pre_cond_count`/`emergency_count` 与 PRE_COND/EMERGENCY 状态位是这一误解的产物，已删除 |
 | 主流对照 | 真实主控同样是「一个已擦除 free pool + 软/硬水位」+ 独立保留池；擦除落在关键路径上本身就是要避免的事，那才是 OP 池存在的理由 |
 
@@ -3081,13 +3098,16 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 | 选型 | **出厂全量扫描 + 运行时隔离 + Block Sparing（Spare Pool 保水位）** |
 | 理由 | 学习企业级坏块替换做法；Spare Pool 保证运行时坏块不减少用户容量；出厂坏块扫描 250ms 可接受；Sparing 不需要 block remap 表——只补充 free pool，不做映射 |
 | 拒绝方案 | Block Skip（容量自然减少，不符合企业级学习目标）；Block Remap Table（行业不用两层映射）|
-| 代价 | 出厂扫描增加启动时间 ~250ms；SPARE_POOL_SIZE × 1 Block 容量占用；~~需要 FC 支持 OOB/Spare 区读取~~ ✅ v63 已提供（`ftl_sync_read_column`）|
+| 代价 | 出厂扫描增加启动时间 ~250ms；SPARE_POOL_SIZE × 1 Block 容量占用；~~需要 FC 支持 OOB/Spare 区读取~~ ✅ 已提供（`ftl_sync_read_column`）|
 
 **与 §3.6 OP 的关系**：Spare Pool 替换坏块，OP 池负责 GC 缓冲和性能保速，二者职责分离。
 
 ---
 
 ## 10. 企业级实现对比
+
+> 对照判据 = `fc_nand_design.md §26` 的行业对照表；本文引用主流形态只做方向参照，
+> 不构成对具体厂商产品的规格承诺。设计原则背景另见 `storage_controller_design_essentials.md`。
 
 ### 10.1 Block 管理对比
 
@@ -3097,7 +3117,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 | 空闲池 | 一个已擦除池 + 三级水位 | 多层池（不同 P/E） | 水位 + 独立保留池 |
 | GC 触发 | 三级（水位线/紧急/磨损；T2 写入量、T3 定时、T6 碎片率均不实现） | 多级阈值 | 后台预测性 GC |
 | Over-provision | 10% 预留 | 7~15% | 7~28% |
-| 写缓冲 | **页打包写缓冲**（`ftl_wbuf_t`，v0.66：同 pair 窗口多次写攒一页再编程） | SLC mode buffer | SLC / pseudo-SLC cache |
+| 写缓冲 | **页打包写缓冲**（`ftl_wbuf_t`：同 pair 窗口多次写攒一页再编程；两 plane 都有数据即一条 multi-plane） | SLC mode buffer | SLC / pseudo-SLC cache |
 | Super Block | 跨双 Plane | 跨 Die | 跨 N Die Super Block |
 
 ### 10.2 L2P 管理对比
@@ -3128,18 +3148,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
   GC Cold: 无效页率低 → 很少需回收 ✅
 ```
 
-扩展方案：
-
-```c
-#define FTL_TEMP_HOT  0
-#define FTL_TEMP_COLD 1
-#define FTL_TEMP_NUM  2
-
-typedef struct {
-    uint16_t open_block[PLANE_NUM][FTL_TEMP_NUM];  // 每 Plane 2 个 open block
-    uint8_t  next_page[PLANE_NUM][FTL_TEMP_NUM];
-} ftl_allocator_t;
-```
+温度等级与 allocator 的真实结构（`hot_sb` / `cold_sb`）见 §11.3。
 
 ---
 
@@ -3149,7 +3158,7 @@ typedef struct {
 
 ```c
 typedef struct ftl_context {
-    /* 拓扑参数（v0.21 统一为结构体） */
+    /* 拓扑参数（统一为结构体） */
     ftl_topology_t      topo;              /* CH/CE/LUN */
 
     /* L2P Cache */
@@ -3158,10 +3167,10 @@ typedef struct ftl_context {
     /* Pending Request 表（F6：per-instance 异步请求追踪）*/
     ftl_pending_req_t   pending[FTL_PENDING_MAX];
 
-    /* 完成组表（v0.58：一条 host 请求 = 一个组，通知只发一次）*/
+    /* 完成组表（一条 host 请求 = 一个组，通知只发一次）*/
     ftl_io_group_t      groups[FTL_GROUP_MAX];
 
-    /* 页打包写缓冲（§七 方案 A，v0.66）*/
+    /* 页打包写缓冲（§七 方案 A）*/
     ftl_wbuf_t          wbuf;
 
     /* FTL 自持表（P2-5）：BST / free+op / closed / spare 大数组归实例所有 */
@@ -3176,7 +3185,7 @@ typedef struct ftl_context {
     /* Metadata Directory */
     metadata_dir_cache_t metadata_dir;     /* 元数据位置追踪 */
 
-    /* Checkpoint 池游标/序号（per-instance，v0.65）+ 定时触发基准 */
+    /* Checkpoint 池游标/序号（per-instance）+ 定时触发基准 */
     l2p_cp_state_t      cp;
     uint32_t            cp_timer_start;
 
@@ -3190,14 +3199,14 @@ typedef struct ftl_context {
     /* 慢死预测巡检节流（F6：per-instance）*/
     uint32_t            rr_last_scan_ms;
 
-    /* GC 节拍 + 进展计数（v0.68，per-instance，纯观测）*/
+    /* GC 节拍 + 进展计数（per-instance，纯观测）*/
     uint32_t            gc_eval_last_ms;    /* 触发求值节拍（T5 要扫全表，不能每轮）*/
     uint32_t            gc_log_last_ms;     /* 触发日志节拍（1s 心跳）*/
     uint32_t            gc_reclaimed_count; /* 累计成功回收 SB 数 */
     uint32_t            gc_novictim_count;  /* 累计「触发但选不出 victim」次数 */
 
-    /* Read Recovery job（v0.75 阶段 3 起 = 异步恢复状态机本体，见 read_recovery.h；
-     * 原先是"仅重试计数"的哑结构，ECC 趋势始终在 alloc.blocks[].rr）*/
+    /* Read Recovery job（异步恢复状态机本体，见 read_recovery.h；
+     * ECC 趋势始终在 alloc.blocks[].rr）*/
     ftl_read_recovery_t rr;
 
     /* Read Recovery 整页暂存（CW 级映射：子操作可能只覆盖页内部分 CW，
@@ -3209,13 +3218,9 @@ typedef struct ftl_context {
 
 ### 11.2 FTL API
 
-> ⚠ **以下按 `include/ftl/ftl.h` 的真实签名重写**（原伪代码的 `ftl_read`/`ftl_write`/
-> `ftl_background_flush`/`ftl_checkpoint`/`ftl_gc_execute` 均已不存在；读写是**非阻塞提交**，
-> 完成经 completion table 路由到 pending 表）。
->
-> **v0.58 订正（策略下沉 + 组完成）**：`ftl_io_request_t.pages` → `count`（长度交给 FTL，plane
-> 配对由 FTL 自决）；新增 `ftl_flush`；`ftl_trim` 加 `count`；一次 `ftl_submit_*` = 一个**组**，
-> 通知只发一次。详见变更史 v0.58 与 `ftl_host_interface.md`。
+> ⚠ 以下按 `include/ftl/ftl.h` 的真实签名整理：读写是**非阻塞提交**，完成经 completion
+> table 路由到 pending 表；`ftl_io_request_t.count` = 长度（plane 配对由 FTL 自决）；
+> 一次 `ftl_submit_*` = 一个**组**，通知只发一次。详见 `ftl_host_interface.md`。
 
 ```c
 /* ── 初始化（P2-5：ftl_init_params_t 已删除，大表由 ftl_context_t.tables 自持）── */
@@ -3224,8 +3229,8 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo);
 /* ── 读写（非阻塞提交，长度任意；返回 FTL_OK 只表示已受理）── */
 ftl_status_t ftl_submit_read (ftl_context_t *ftl, const ftl_io_request_t *req);
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);
-void         ftl_flush(ftl_context_t *ftl);                     /* v0.58 新增 */
-void         ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count); /* v0.58 加 count */
+void         ftl_flush(ftl_context_t *ftl);                     /* 全部写回落盘 */
+void         ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count); /* count = 连续 LBA 数 */
 
 /* ── 主循环（序 3/4：泵与实例分离）── */
 void ftl_service_pump(void);              /* 实例无关，**每轮只调一次** */
@@ -3233,10 +3238,10 @@ void ftl_service_pump(void);              /* 实例无关，**每轮只调一次
 // Phase 2:   completion_table_drain() → 完成回调 → 按 ch/ce/lun 路由回各实例
 
 void ftl_service(ftl_context_t *ftl);     /* 对**每个**实例各调一次 */
-// Phase 2.5: ftl_confirm_kick()       → 重试停泊的写确认（v0.75 阶段 5；未就绪则保留停泊项）
-//            ftl_drain_group()        → 补发各组待下发子操作（v0.58；host IO 优先于后台）
-//            ftl_wbuf_maybe_flush_idle() → 页打包写缓冲的空闲 flush（v0.66）
-// Phase 3:   三级后台（ftl_service_idle / _normal / _busy）；bg_suspend 置位则整体跳过
+// Phase 2.5: ftl_confirm_kick()       → 重试停泊的写确认（未就绪则保留停泊项）
+//            ftl_drain_group()        → 补发各组待下发子操作（host IO 优先于后台）
+//            ftl_wbuf_maybe_flush_idle() → 页打包写缓冲的空闲 flush
+// Phase 3:   后台调度器（bg_scheduler 任务表，见 §12）；bg_suspend 置位则整体跳过
 ```
 
 ### 11.3 FTL 内部模块 API
@@ -3244,8 +3249,8 @@ void ftl_service(ftl_context_t *ftl);     /* 对**每个**实例各调一次 */
 **L2P Cache**（`l2p_cache.h`）：
 
 ```c
-void         l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun); /* v0.35 绑定拓扑 */
-/* ── v0.75 阶段 5：三态异步主入口 ── */
+void         l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun); /* 绑定拓扑 */
+/* ── 三态异步主入口 ── */
 ftl_status_t l2p_cache_read (l2p_cache_t *cache, lba_t lba, nand_pba_t *out); /* OK/AGAIN/ERROR，ERROR 也回填 out */
 int          l2p_cache_ready(l2p_cache_t *cache, lba_t lba);                  /* 1=可读写；0=未就绪（并起加载） */
 ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);  /* OK/AGAIN/ERROR */
@@ -3258,8 +3263,8 @@ ftl_status_t l2p_cache_read_sync (l2p_cache_t *cache, lba_t lba, nand_pba_t *out
 ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
 /* 完成服务：g_op_service[FTL_OP_L2P]，ctx = 该 cache line（加载/写回共用一条路径）*/
 void         ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
-/* ⚠ 无 l2p_cache_flush_background——后台写回已内联进 ftl.c 的三级服务函数
- *    （idle 全量 / normal 4 条 / busy 1 条，均走 l2p_flush_kick）。 */
+/* ⚠ 后台写回**没有独立函数**——由调度器任务 bg_a_l2p_flush（预算任务位 8）
+ *    承担：每轮最多 kick 档位 l2p_flush_max 条（见 §12）。 */
 ```
 
 **Journal**（`journal.h`）：
@@ -3299,15 +3304,15 @@ typedef struct {
     uint8_t     checkpoint_needed;  // 水位 ≥85%
     uint8_t     emergency;          // 水位 ≥95%
 
-    journal_job_t job;              // v0.75：刷页 job 状态机（phase / 落点 / 待擦块）
+    journal_job_t job;              // 刷页 job 状态机（phase / 落点 / 待擦块）
 } l2p_journal_t;
 
 void         journal_init(l2p_journal_t *journal, ftl_topology_t topo);
 void         journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old, nand_pba_t new);
-void         journal_kick(l2p_journal_t *journal);      /* v0.75：推进 job（IDLE 且有待办才起）*/
-void         journal_flush_page(l2p_journal_t *journal); /* v0.75：**同步屏障**（等 job 归位 + 立即落盘）*/
+void         journal_kick(l2p_journal_t *journal);      /* 推进 job（IDLE 且有待办才起）*/
+void         journal_flush_page(l2p_journal_t *journal); /* **同步屏障**（等 job 归位 + 立即落盘）*/
 /* F10：全量回放 page_seq > cp_sequence 的页，按 (page_seq, entry_index) 递增序应用。
- * v0.69：out_entries 回填**实际应用成功的条目数**（读失败的页不计），可为 NULL。 */
+ * out_entries 回填**实际应用成功的条目数**（读失败的页不计），可为 NULL。 */
 ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence, uint32_t *out_entries);
 void         journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);   /* P1-6 */
 ```
@@ -3358,7 +3363,7 @@ typedef struct {
     /* ── Block State Table（统一 per-Block 状态）── */
     ftl_block_t *blocks;                            /* 每 Block 条目数组（BST）*/
     uint16_t bad_count;                             /* 坏 Block 数 */
-    /* ⚠ v0.60 起无位图表：有效性逐 CW 由页内 META + L2P 反查（DRAM-less approach ③）*/
+    /* ⚠ 无位图表：有效性逐 CW 由页内 META + L2P 反查（DRAM-less approach ③）*/
 } ftl_allocator_t;
 
 /* 真实接口 */
@@ -3713,7 +3718,7 @@ int main(void) {
 ├─────────────────────────────────────┼────────────────────────┤
 │  operation = NORMAL_PROGRAM_PAGE    │ operation = 同上       │
 │             /NORMAL_READ_PAGE       │                       │
-│  CRC    = ENABLE (数据保护)         │ CRC    = ENABLE (v0.62)│
+│  CRC    = ENABLE (数据保护)         │ CRC    = ENABLE        │
 │  Random = ENABLE (加扰)             │ Random = DISABLE      │
 │  LDPC   = BCH                      │ LDPC   = BCH          │
 │  module = FTL                      │ module = METADATA     │
@@ -3733,14 +3738,14 @@ cmd->config.crc          = FC_CRC_ENABLE;
 cmd->config.random       = FC_RANDOM_ENABLE;   /* 用户数据加扰；元数据 DISABLE */
 cmd->config.ldpc         = FC_ECC_MODE_BCH;
 cmd->config.page_type    = FC_PAGE_TYPE_LP;    /* SLC */
-/* v0.75 起无 config.module：完成路由改由 ftl_op_submit(cmd, <op>, ctx) 打 op_tag */
+/* 无 config.module：完成路由由 ftl_op_submit(cmd, <op>, ctx) 打 op_tag */
 cmd->paa                 = pba_to_paa(pba);    /* allocator 分配的 PBA → 芯片内 PAA */
 cmd->meta                = (DWORD)(cfg->lba << CW_WIDTH);  /* ★ META = 本命令的扇区 LBA
-                                                *   （v24；**没有** cmd->lba 字段）*/
+                                                *   （**没有** cmd->lba 字段）*/
 
-ftl_cmd_configure_descriptors(cmd, cw_bitmap); /* ★ v28 起**两参**：位图作形参
-                                                *   （v23 起 config.cw 已不参与建链）*/
-ftl_cmd_write_data(cmd, data, len);            /* v13 前为 fc_write_cmd_data */
+ftl_cmd_configure_descriptors(cmd, cw_bitmap); /* ★ **两参**：位图作形参
+                                                *   （config.cw 不参与建链）*/
+ftl_cmd_write_data(cmd, data, len);            /* 数据写进命令 buffer */
 
 ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL);           // → SQ（tag = 完成服务函数选择器）
 // 完成经 completion_table 路由（ftl_op_host_io），检查 per-CW status/ECC
@@ -3749,11 +3754,11 @@ ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL);           // → SQ（tag = 完成服�
 fc_command_release(cmd);
 ```
 
-> ⚠ **三处易错**（早期文档写错、照抄会编译或行为失败）：
-> ① **没有 `cmd->lba`** —— META 字段名是 `cmd->meta`（本命令的扇区 LBA，v24 起）；
-> ② **`ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 是两参**（v28），位图由 FTL 的
+> ⚠ **三处易错**（照抄会编译或行为失败）：
+> ① **没有 `cmd->lba`** —— META 字段名是 `cmd->meta`（本命令的扇区 LBA）；
+> ② **`ftl_cmd_configure_descriptors(cmd, cw_bitmap)` 是两参**，位图由 FTL 的
 >    `ftl_cw_span_mask` / `ftl_cmd_plane_span_cw_bitmap` 算出；
-> ③ **`cmd->config.cw` 自 v23 起不被建链读取**（仍被 FC 的 RAID stripe 读取）。
+> ③ **`cmd->config.cw` 不被建链读取**（仍被 FC 的 RAID stripe 读取）。
 
 ### 13.3 FTL 应当避免的操作
 
@@ -3776,16 +3781,16 @@ fc_command_release(cmd);
 |---|--------|------|------|
 | D1 | LBA 粒度 | **512B** | 一个 CW 的 USER 数据区（FC_BUFFER_USER_SIZE），CW 大小 = PAGE_SIZE / 4 |
 | D2 | 几何模型 | **统一到 nand_config.h** | 废弃 `config/nand_geometry.h`，FTL 直接用 nand_config.h 的宏 |
-| D3 | 地址类型 LBA | `lba_t` = **uint32_t** | Host 逻辑地址，经 `cmd->meta` 写入页内 META（**无 `cmd->lba` 字段**，v24）；替代 `ssd_lba_t`（uint64_t） |
-| D4 | 地址类型 PBA | `nand_pba_t` = **uint32_t** | 完整物理地址，L2P 映射的目标值，含拓扑（CH/CE/LUN）+ 芯片内地址（PAA）。⚠ `pba_t` 已于 v0.20 删除 |
+| D3 | 地址类型 LBA | `lba_t` = **uint32_t** | Host 逻辑地址，经 `cmd->meta` 写入页内 META（**无 `cmd->lba` 字段**）；替代 `ssd_lba_t`（uint64_t） |
+| D4 | 地址类型 PBA | `nand_pba_t` = **uint32_t** | 完整物理地址，L2P 映射的目标值，含拓扑（CH/CE/LUN）+ 芯片内地址（PAA）。⚠ 无 `pba_t`（统一为 `nand_pba_t`）|
 | D5 | 地址类型 PAA | `nand_paa_t` = **uint32_t** bitfield | 芯片内地址 [CW:2][PAGE:6][PLANE:1][BLOCK:11]；替代 `ssd_ppa_t`（uint64_t）|
-| D5 | FTL 提交模型 | **非阻塞异步提交** | ftl_submit_*() 立即返回，ftl_service() 驱动完成 |
-| D6 | 完成通知 | **module 路由** | fc_completion.module 区分来源，FTL 内部自行处理 |
-| D7 | FTL→FC 访问 | **命令构造 helper**（不是隔离层） | 通过 `ftl_fc_interface.h` 的 `ftl_cmd_setup_*()`，不绕过 FC |
-| D8 | 命名 | **ftl_fc_interface** | 头文件 `include/ftl/ftl_fc_interface.h`，源文件 `src/ftl/ftl_fc_interface.c` |
-| D9 | RTOS | **暂不加** | 裸机超级循环 + 中断，存储主控标准做法 |
-| D10 | Host 命令来源 | **UART Shell CLI** | 通过 read/write/trim 命令模拟 NVMe IO |
-| D11 | Host 非阻塞 | **pending 请求表** | UART 来的命令入 pending 表，FTL 异步完成后再输出结果 |
+| D6 | FTL 提交模型 | **非阻塞异步提交** | ftl_submit_*() 立即返回，ftl_service() 驱动完成 |
+| D7 | 完成路由 | **op tag** | 命令下发时打 op_tag（完成服务函数选择器）；完成经 completion_table 按 ch/ce/lun 路由回各实例，再按 tag 派发 |
+| D8 | FTL→FC 访问 | **命令构造 helper**（不是隔离层） | 通过 `ftl_fc_interface.h` 的 `ftl_cmd_setup_*()`，不绕过 FC |
+| D9 | 命名 | **ftl_fc_interface** | 头文件 `include/ftl/ftl_fc_interface.h`，源文件 `src/ftl/ftl_fc_interface.c` |
+| D10 | RTOS | **暂不加** | 裸机超级循环 + 中断，存储主控标准做法 |
+| D11 | Host 命令来源 | **UART Shell CLI** | 通过 read/write/trim 命令模拟 NVMe IO |
+| D12 | Host 非阻塞 | **pending 请求表** | UART 来的命令入 pending 表，FTL 异步完成后再输出结果 |
 
 #### 13.4.1 地址体系总结
 
@@ -3794,8 +3799,8 @@ fc_command_release(cmd);
 | 缩写 | 全称 | 阶段 | 用途 | 你的代码中对应 |
 |------|------|------|------|--------------|
 | LAA | Logical Application Address | Host → Controller | 应用程序下发的原始逻辑地址 | UART CLI 的 `lba` 参数（本项目 Host 为 UART CLI，无 NVMe）|
-| LBA | Logical Block Address | L2P 索引 | 行业标准逻辑地址，经 `cmd->meta` 写入页内 META 供校验 | `cmd->meta`（v24 前的 `cmd->lba` 已改名） |
-| PBA | Physical Block Address | L2P 映射值 | FTL 的**唯一**地址货币（4 字节）：CH/CE/LUN 拓扑 + 块/页/plane/CW；具名字段访问经位域视图 `nand_pba_fields_t` | FTL 层 `nand_pba_t`（**只活在 FTL 内部**，v47 起不跨进 FC；v0.73 起 `nand_addr_t` 亦退出 FTL；定义于 `include/ftl/ftl_config.h` §三.2）|
+| LBA | Logical Block Address | L2P 索引 | 行业标准逻辑地址，经 `cmd->meta` 写入页内 META 供校验 | `cmd->meta`（即 META 承载本命令的 LBA）|
+| PBA | Physical Block Address | L2P 映射值 | FTL 的**唯一**地址货币（4 字节）：CH/CE/LUN 拓扑 + 块/页/plane/CW；具名字段访问经位域视图 `nand_pba_fields_t` | FTL 层 `nand_pba_t`（**只活在 FTL 内部**，不跨进 FC；定义于 `include/ftl/ftl_config.h` §三.2）|
 | PAA | Physical Array Address | NAND 芯片寻址 | 芯片内地址（Block + Plane + Page + CW），不含拓扑 | `nand_paa_t` |
 | FAA | （本项目曾用） | — | 原代码中 `cmd->faa` 曾用名，现统一为 LBA | 已废弃 |
 
@@ -3810,7 +3815,7 @@ FTL
   │ PBA(uint32_t) = [CH:2][CE:2][LUN:2][CW:2][PLANE:1][PAGE:6][BLOCK:11]
   │                （低位→高位；**PBA 的 PLANE 在 PAGE 之下**，与 PAA 相反）
   │
-  │ FTL 从 PBA 拆出（v47：转换全部发生在 **FTL 侧**，FC 层只认 PAA）：
+  │ FTL 从 PBA 拆出（转换全部发生在 **FTL 侧**，FC 层只认 PAA）：
   │   cmd->config.ch/ce/lun = PBA 高位（路由到哪个 NAND 芯片）
   │   cmd->paa              = pba_to_paa(PBA)（芯片内地址；**字段重排**，不是掩码截取）
   ▼
@@ -3839,21 +3844,19 @@ PAA（芯片内地址，与 PBA 低 20 位**位序不同**）:
   └────┴──────┴──────┴──────┘
 
 cmd->meta = Host 逻辑地址（本命令的扇区 LBA，用于 META 校验，不参与地址路由）
-cmd->paa  = PAA（芯片内地址）= pba_to_paa(PBA)   ← v47：FC 层唯一的物理地址字段
+cmd->paa  = PAA（芯片内地址）= pba_to_paa(PBA)   ← FC 层唯一的物理地址字段
 ```
 
 > ⚠ **PBA 低 20 位不是 PAA**：两者 `PLANE`/`PAGE` 位序**相反**（见
 > `cw_level_mapping_design.md §4.1`），`pba_to_paa()` 是**真正的字段重排**、不是掩码截取。
-> 早先本图把 PBA 低 20 位直接标成 `[CW][PAGE][PLANE][BLOCK]` 是**错的**——照它手算地址
-> 或写掩码会得到错 plane / 错页。两套空间必须走构造函数（v24/v47 教训：历史上 10+ 处现场
-> 转换都在静默算错地址）：**PBA 侧**用位域视图 `pba_make()` / `pba_pack()`（v0.73 起；
-> `pba_from_addr` / `paa_from_addr` 已随 `nand_addr_t` 退出 FTL 而删除），**跨 PBA↔PAA**
-> 用 `pba_to_paa()` / `paa_to_pba()`（唯一转换器，只在 FTL↔FC 边界 `pba_to_cmd` /
-> `ftl_cmd_pba` 里调用）。
+> 手算地址或写掩码必须走构造函数（历史上 10+ 处现场转换都在静默算错地址）：
+> **PBA 侧**用位域视图 `pba_make()` / `pba_pack()`（无 `nand_addr_t`——已退出 FTL），
+> **跨 PBA↔PAA** 用 `pba_to_paa()` / `paa_to_pba()`（唯一转换器，只在 FTL↔FC 边界
+> `pba_to_cmd` / `ftl_cmd_pba` 里调用）。
 
 #### 13.4.2 FTL 主循环形态
 
-> ⚠ **订正**：`g_ftl` 是数组（见 §12.5），真实函数名是 `cli_service_poll`（非
+> ⚠ 当前形态：`g_ftl` 是数组（见 §12.5）；真实函数名是 `cli_service_poll`（非
 > `uart_service_poll`）；完成通知由 `ftl_service` 内的 completion 路径处理，无
 > `check_pending_done`。
 
