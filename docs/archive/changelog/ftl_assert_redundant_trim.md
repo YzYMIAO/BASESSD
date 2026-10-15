@@ -49,3 +49,24 @@
 
 **模块内部不逐函数复检同一入参。** 边界 = host 入口返回码 + FTL↔FC 命令边界 /
 子模块公开入口 ASSERT；内部只留高价值不变量。详见 `docs/design/assertion_guidelines.md` §二十六。
+
+## 跟进（同日，提交 `d8088ea`）：「不该发生」分支收口成 ASSERT
+
+用户定调「那些不应该出现的分支，应该使用 assert 而不是返回」（判据 2，FC v18~v21 同法）。
+完成回调里 3 处 `if (ftl == NULL) { LOGE; release; return; }`
+（`ftl_op_host_io` / `ftl_op_l2p` / `ftl_op_read_recovery`）与
+`pending_group_complete_subop` 的「组已释放防御早退」一并收口成 `ASSERT`：
+
+| 位置 | 原形态 | 收口后 |
+|---|---|---|
+| `ftl.c` ftl_op_host_io | `if (ftl==NULL) { LOGE; release; return; }` | `ASSERT(ftl != NULL)` |
+| `l2p_cache.c` ftl_op_l2p | 同上 | `ASSERT(ftl != NULL)` |
+| `read_recovery.c` ftl_op_read_recovery | 同上 | `ASSERT(ftl != NULL)` |
+| `pending.c` pending_group_complete_subop | `if (g->used==0U) return; /* 防御 */` | `ASSERT(g->used != 0U)` |
+
+理由：路由表 boot 前设好、完成派发保证实例恒非空；原 release-and-return 是 debug 走不到、
+release 静默吞错误的死分支。release（NDEBUG 裁空）下若真走到则 NULL 解引用留现场（可诊断停机）。
+
+**形态 B 明确不动**：非法 phase 的 default 分支（journal/wear/bbt/checkpoint/metadata）
+分支体有 `fc_command_release` + 复位 job 的资源副作用——裁掉会命令池泄漏 + job 卡死，
+它们是清理逻辑不是错误返回。编译两关（all/release）过，零新告警。

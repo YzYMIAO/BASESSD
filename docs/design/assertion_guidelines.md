@@ -993,3 +993,12 @@ FTL↔FC 命令边界 / 子模块公开入口 ASSERT；内部只留高价值不�
 代码噪音，**不改任何 return / 分支行为**。编译三关全过（`make all` / `make release` /
 `make tests UT=FTL`），**零新告警**（release 档 `ftl_fc_interface.c` 的 `allowed`/`plane_bits`
 未用告警是保留的 [I] 断言被裁空的既有告警，见文件头注释，非本轮引入）。
+
+**跟进（同日，用户定调「不该发生的分支用 ASSERT 而不是返回」）**：完成回调里 3 处
+`if (ftl == NULL) { LOGE; release; return; }`（`ftl_op_host_io` / `ftl_op_l2p` /
+`ftl_op_read_recovery`）与 `pending_group_complete_subop` 的「组已释放防御早退」
+一并收口成 `ASSERT`——路由表 boot 前设好、完成派发保证实例恒非空，原 release-and-return
+是 debug 走不到、release 静默吞错误的死分支；release（NDEBUG 裁空）下若真走到则
+NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 phase 的 default 分支
+（journal / wear / bbt / checkpoint / metadata）分支体有 `fc_command_release` + 复位 job
+的**资源副作用**，裁掉会命令池泄漏 + job 卡死——它们是清理逻辑，不是错误返回。
