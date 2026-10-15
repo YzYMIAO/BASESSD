@@ -9,6 +9,7 @@ MODULE_INCS += $(INC_ROOT)/ftl
 ifeq ($(FC_NAND_TEST_ENABLE),1)
 ifeq ($(UT_FTL_ENABLE),1)
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_ftl.c
+TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/test_ftl_bg.c
 TEST_C_SRCS += $(PROJECT_ROOT)/tests/unit/ftl_test_common.c
 CFLAGS += -DUT_FTL_ENABLE
 endif

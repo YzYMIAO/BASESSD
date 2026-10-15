@@ -42,6 +42,7 @@ extern MunitTest g_ftl_bbt_tests[];
 extern MunitTest g_ftl_metadata_tests[];
 extern MunitTest g_ftl_pending_ct_tests[];
 extern MunitTest g_ftl_group_tests[];
+extern MunitTest g_ftl_bg_tests[];
 
 #endif /* UT_FTL_ENABLE */
 
@@ -90,6 +91,7 @@ static MunitSuite g_ut_root_suite =
                        {(char *)"metadata/", g_ftl_metadata_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
                        {(char *)"pending_ct/", g_ftl_pending_ct_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
                        {(char *)"group/", g_ftl_group_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
+                       {(char *)"bg/", g_ftl_bg_tests, NULL, 1, MUNIT_SUITE_OPTION_NONE},
                        {NULL, NULL, NULL, 0, MUNIT_SUITE_OPTION_NONE},
                        },
                        1,
