@@ -4,6 +4,15 @@
 > `op_fallback_per_plane` + `spare_pool_plane_isolated` 两例回归）已落地并接线（§6），
 > `make tests` / `UT=FC` / `UT=FTL` 三档构建通过（0 warning）。**尚未上板验证**。
 >
+> **异步扩展计划（2026-10-15）**——见 §5.4 / §4.9 / §4.10 / §7 / §8 / §10：
+> v0.75 已把「提交与完成」解耦（op tag + `g_op_service[]` + 8 个 job 状态机），原 §5.4/§5.6
+> 的「L0 只测簿记、提交→泵→完成 整链在 L2」边界**已过时**——提交与完成各自都是**纯 RAM**
+> 可驱动点。新增 **L0 异步链套件**（`/ftl/async/`，测试侧伪完成注入 seam，生产码零改动）+
+> **HIL 全链套件**（`/ftl-hil/`，真 NAND 上板）。
+> ⚠ 本计划**只更新测试计划**：异步套件实现待 FTL 层改动落定后再推进（§5.6 列出
+> 测试可能顶出的 FTL 生产候选改动）；共享夹具 `tests/unit/ftl_test_common.c/.h`
+> （§3）已先行抽出并编译锚定（`make tests UT=FTL` 0 warning，53 例编译回归通过）。
+>
 > **分层边界**（判据 `fc_nand_design.md §26.1`）：本文**只管 FTL 层（`src/ftl/`）**。
 > 非 FTL 的部分已拆出（2026-10-13）：
 >
@@ -97,23 +106,25 @@ metadata_dir_init(&F->metadata_dir);
 - **备选**（不推荐）：独立 `ftl_context_t` 落 SRAM（`.sram1/2/3_data`=288KB，**仅 1KB 余量**），
   或只对不需要上下文的用例用独立小 fixture（`ftl_tables_t`=108KB 落 SRAM1）。
 
-## 3. 单文件测试组织（仿 fc_nand 一文件多套件）
+## 3. 测试文件组织（仿 fc_nand 一文件多套件）
 
-**1 个文件** `tests/unit/test_ftl.c`（仿 `test_fc_level1.c` 一文件多套件风格），fixture 见 §2.2
-（复用 `g_ctrl.ftl[0][0][0]`，不另声明大数组）：
+**共享夹具已抽**（2026-10-15）：`ftl_fixture()` / `ftl_fixture_reset()` 从 test_ftl.c
+搬进 **`tests/unit/ftl_test_common.c/.h`**（与 L0 异步套件共用；`ftl_async_fixture_reset()`
+在基础复位之上**额外零化异步 job 结构**——`alloc.bbt` / `alloc.wear` / `mig` / `cp_job`，
+见 §5.4）。test_ftl.c 保留本地 `ftl_setup()`（包共享复位）+ `ftl_fixture_backfill()`。
 
-```c
-/* setup 统一 ftl_fixture_reset()：复位活实例子结构（见 §2.2），返回 NULL fixture */
-static void ftl_fixture_reset(void);
-
-/* 小工具：把 n 个好块回填进 free pool（复刻 main.c 的回填循环，供 allocator 用例用） */
-static void ftl_fixture_backfill(ftl_allocator_t *alloc, uint16_t first, uint16_t count);
-```
-
-文件内按 munit 风格分节，**导出 8 个套件数组**（非 static，供 `ut_main` extern）：
+**同步套件（已实施）**：`tests/unit/test_ftl.c`，fixture 见 §2.2（复用 `g_ctrl.ftl[0][0][0]`，
+不另声明大数组）。文件内按 munit 风格分节，**导出 8 个套件数组**（非 static，供 `ut_main` extern）：
 `g_ftl_allocator_tests[]` / `g_ftl_watermark_tests[]` / `g_ftl_gc_wl_tests[]` / `g_ftl_rr_tests[]` /
 `g_ftl_bbt_tests[]` / `g_ftl_metadata_tests[]` / `g_ftl_pending_ct_tests[]` / **`g_ftl_group_tests[]`**。
 setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
+
+**L0 异步套件（计划）**：新文件 `tests/unit/test_ftl_async.c`，挂 `/ftl/` 根下 `/ftl/async/`
+叶子（`UT_FTL_ENABLE` 门控，`UT=FTL` 仍纯 RAM）——用例清单见 §4.9，驱动模型见 §5.4。
+
+**HIL 全链套件（计划）**：新文件 `tests/unit/test_ftl_hil.c`，**独立根 `/ftl-hil/`**、
+新 `UT_HIL_ENABLE` 门控**仅 ALL**——与 `/ftl/` 的 L0 破坏性 memset 互斥（L0 复位活实例会
+毁掉 HIL 需要的 boot 态）。用例清单见 §4.10，上板纪律见 §7。
 
 ## 4. 用例清单（逐条）
 
@@ -225,11 +236,63 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 > `FTL_GROUP_NONE`（`pending.h:35`）现为**死常量**（源码自注「当前无使用者」）⇒ **不测**；
 > 要么删常量，要么保留待用，不在用例里断言它。
 
+### 4.9 `g_ftl_async_tests[]`（计划，L0 异步链 —— `/ftl/async/`）
+
+> 新文件 `tests/unit/test_ftl_async.c`；驱动模型见 §5.4。统一模式：`ftl_async_*` →
+> `ftl_op_submit(cmd, op, ctx)` → `ut_complete_and_drain(cmd, 0x40)` → 断言。
+> **每用例 setup = `ftl_async_setup`**（基础复位 + 零化异步 job 结构）；单命令在飞；收尾断言
+> `completion_table_count()==0` + `command_used` 回基线。表式：**用例名 | 驱动 | 断言**。
+
+| 组 | 用例 | 驱动 / 前置 | 断言 |
+|---|---|---|---|
+| **C.1 op 框架** | `op_tag_and_registration` | `ftl_async_erase_block` → `ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter)` | `cmd->op_tag==FTL_OP_SYNC_WAIT`、`sq.count==1`、`completion_table_count()==1` |
+| | `sync_wait_not_release` | 伪完成 + drain（waiter.done==1） | **命令不释放**（`command_used` 仍占用）；手动 `fc_command_release` 才回落 |
+| | `async_job_self_release` | journal 写提交 → 伪完成 + drain | 服务函数**自行 release**（`command_used` 回基线） |
+| | `backpressure_ct_full` | 32 条 `ctx≠NULL` 提交在飞 → 第 33 条 `ftl_op_submit` | `FTL_ERROR` + `completion_table_count()` 不变（32）；逐条伪完成 + release 收尾 |
+| | `backpressure_pool_exhaust` | 64 条 erase 提交在飞 → 第 65 次 `ftl_async_erase_block` | `FTL_AGAIN` + 在飞命令数不变；逐条伪完成 + release 收尾 |
+| **C.2 journal** | `write_complete_idle` | `journal_append`×2 → `journal_kick`（JRN_WRITE）→ 伪完成 | JRN_IDLE + 指针推进到 target + `current_entry==0` + `page_buf` 0xFF |
+| | `cross_block_erase_chain` | 预置 `current_page=PAGES_PER_BLOCK-1` → append → kick（need_erase）→ 伪完成 | 服务函数**当场起擦**（JRN_ERASE）→ 再伪完成 → IDLE + `current_block` 回绕 |
+| | `write_fail_no_advance` | kick 后伪完成 status=0x01 | 回 IDLE + 指针**不推进** + release 正常 |
+| **C.3 bbt** | `write_complete_clear_dirty` | 预置 `cursor_valid=1`、`dirty=1` → `bbt_kick`（WRITE）→ 伪完成 | IDLE + `dirty==0` + `write_idx` 前移 1 |
+| | `erase_then_write_chain` | 预置 `cursor_valid=1`、`dirty=1`、`write_idx=ring_total-1` → kick（ERASE）→ 伪完成 | 服务函数**链起 WRITE**（不回 IDLE）→ 再伪完成 → IDLE + `dirty==0` |
+| | `write_fail_keep_dirty` | 伪完成 status=0x01 | 游标**照推**（半编程槽不可复用）+ `dirty` 保留 |
+| **C.4 wear** | `incremental_batch` | `wear_mark_dirty`×2 → `wear_kick(alloc, DELTA+1)`（节拍到）→ 伪完成 | IDLE + `next_page==1` + 本批起点快照写全 |
+| | `compact_erase_snapshot_chain` | 预置 `next_page=PAGES_PER_BLOCK-1` → kick（ERASE）→ 伪完成 | `next_page=0` + 起全量快照链 → `while(phase!=IDLE) 伪完成` → `next_page==WEAR_SNAPSHOT_PAGES` |
+| | `incremental_fail_restore_dirty` | 伪完成 status=0x01 | `next_page` 不推进 + 脏位并回（`dirty |= snapshot`） |
+| **C.5 mig（快路径）** | `gc_fastpath_erase_done` | `closed_sb_list[0]` 塞 `valid_total==0` victim + `free_count<FREE_POOL_TARGET` → `mig_begin_gc`（MIG_ERASE）→ 伪完成 | `mig_step` 自动续 → DONE + `free_count` 增加 |
+| | `gc_full_chain`（**标记可选**） | 预置 cache 行 CLEAN/DIRTY + entries + META → READ→SETTLE→WRITE→FLUSH_JRN→ERASE 各命令伪完成 | 状态机走全链 → DONE；**实现期评估 §5.6 候选 1**；完整搬移放 HIL |
+| **C.6 cp/md** | `cp_kick_complete_alternate` | `checkpoint_begin` → 循环「`checkpoint_kick`（waiting 则 return）→ 伪完成」至 CP_DONE；预置游标 | 各提交阶段恰一命令在飞、终态 DONE |
+| | `md_reclaim_kick_complete` | `metadata_dir_kick` ↔ 伪完成交替 | `md_job` 各阶段推进至 IDLE |
+| **C.7 l2p_cache** | `miss_loading_clean` | `l2p_cache_read` miss → LOADING + `FTL_AGAIN` → 伪完成（预填 region 数据进 desc buffer） | CLEAN + entries 生效 + 再 `l2p_cache_read` 命中 `FTL_OK` |
+| | `flush_dirty_flushing_clean` | `l2p_cache_write`（DIRTY）→ `l2p_cache_flush_kick` → FLUSHING → 伪完成 | CLEAN + region 脏位清 |
+| | `flush_fail_stays_dirty` | 伪完成 status=0x01 | 置回 DIRTY 保留下轮重试 |
+| **C.8 rr（简化）** | `stage_pure_progression` | SF_SET→READ→…→FINISH 每命令一伪完成 | 只钉 stage 纯推进（不结算 host 组——结算交 HIL） |
+
+> 长链模板（C.4 compact / C.5 全链 / C.2 跨块）：`while (job.phase != IDLE) ut_complete_and_drain(ut_sq_head(), 0x40);`
+> ——`ut_sq_head()` 每次取**新**在飞命令（单命令在飞纪律下即刚提交那条）。
+
+### 4.10 `g_ftl_hil_tests[]`（计划，HIL 全链 —— 独立根 `/ftl-hil/`）
+
+> 新文件 `tests/unit/test_ftl_hil.c`；`UT_HIL_ENABLE` 门控**仅 ALL**（顶层 makefile 的
+> `UT` 空分支才置位）；**fresh boot 后单独跑 `test /ftl-hil/`**，不得并入全量 `test`
+> （全量先跑 FC level3 会重置 FC 池 + 破坏 NAND，污染 HIL 介质前提）。**setup 不做任何
+> reset**（boot 态即活实例，main 已 armed）。泵模板：`ftl_service_pump()`（全局 fc_service≤4 +
+> completion_table_drain）+ `ftl_service(F)`（Phase 2.5 补发 + wbuf flush + Phase 3 kick）。
+> 用例（裸 `ftl_submit_*` + 静态 done/status 数组 + `ftl_flush` 保 wbuf 确定性）：
+
+| 用例 | 驱动 | 断言 |
+|---|---|---|
+| `async_pipeline` | k 组同窗口小写 → 泵至 done==k 且 pending 空 | **恰一次**完成 + status OK + 回读逐字节比对 |
+| `backpressure` | 大请求多子操作 | 组只结算一次、无请求丢失 |
+| `group_complete_once` | 多子操作组 | 钉「提前完成」缺陷（`complete_flag`/`status_out`/`on_complete` 各恰一次） |
+| `read_write_roundtrip` | 随机 lba 往返 | 写后读逐字节一致；未映射读全零 |
+| `journal_flush_barrier` | `hil_flush` | `current_entry==0`（屏障已排空） |
+
 ## 5. 测试技法：随机化 / 参数化 / 压力 / 异步
 
 > 沿用 FC-NAND 三级 UT 已固化的技法（`fc_nand_ut.md §2.3 / §5.4 / §5.5`），把 FTL L0 从
-> 「固定输入」升级为「随机化 + 参数化 + 可加压 + 可模拟异步」。**全部是测试写法，不改 FTL 生产码**
-> （结论见 §5.6）。
+> 「固定输入」升级为「随机化 + 参数化 + 可加压 + 可模拟异步」。§5.4 的 L0 异步 seam 是
+> **测试写法、生产零改动**；异步链测试可能顶出的 FTL 生产改动见 §5.6。
 
 ### 5.1 随机化（沿用 FC-NAND Level 3 的 salted PRNG）
 
@@ -276,25 +339,82 @@ FTL 层**确定性**（无 PRNG；`config.random` 是 FC 配置位，非 FTL 逻
   - 随机 `owners` 掩码下 `pending_group_count` 增减恒等
 - **L2**：长循环 `wr`/`rd`/`tr`（真 NAND，见 `hil_ut_design.md` B.4）。
 
-### 5.4 异步
+### 5.4 异步（v0.75 提交/完成解耦后重写）
 
-FTL 异步模型（`ftl.h`）：`ftl_submit_read/write` **非阻塞**（建组 → 逐子操作下发 → 返回 `FTL_OK`
-只表示受理）⇒ `ftl_service_pump()` + `ftl_service(ftl)` 推进 ⇒ 全部子操作完成后
-`complete_flag`/`status_out`/`on_complete` **恰一次**触发。测试分两层：
+**旧模型（§5.4 原稿）已过时**：解耦前「提交」要 `fc_command_alloc`（FC 层）、完成只能经
+真 NAND 触达 ⇒ L0 只测组簿记、整链留 L2。v0.75 把「提交」与「完成」**解耦**后，两端各自
+都是**纯 RAM 可驱动点**——L0 现在能驱动**完整异步链**（`ftl_async_*` → `ftl_op_submit` →
+测试侧伪完成 → `completion_table_drain` → `g_op_service[]` 服务函数），零 NAND、零生产改动。
 
-- **L0 模拟（无 NAND、无 mock）**：**组簿记是纯的**——`pending_group_alloc` /
-  `pending_group_complete_subop(_multi)` / `pending_group_maybe_complete` 只动表（`pending.h`）。
-  故可**直接驱动「提交 → 乱序完成 → 组聚合」**：
-  ① `pending_group_alloc` 建组 + `pending_add(owners, cw_bitmap, …)` 挂 N 个子操作；
-  ② 用**随机顺序**调 `pending_group_complete_subop(_multi)` 模拟完成；
-  ③ 断言 `next==total && outstanding==0` 时 `complete_flag`/`status_out`/`on_complete` **各恰一次**，
-  任一子操作 `IO_ERROR` ⇒ 组状态**粘性**。覆盖：乱序完成、多组共享一子操作（`owners` 掩码）、
-  回调重入、组槽耗尽。
-- **L2 集成（真 NAND）**：`ftl_submit_*` 连续下发不等完成 + 泵循环 + 收 `complete_flag`——即
-  `hil_ut_design.md` B.2 的异步压力（v0.66 的 `wp <lba> <n> <k>` 已能一次提交 k 组）。
+#### 5.4.1 链路结构（一次异步 NAND 访问的两半）
 
-> **边界**：`ftl_submit_*` 内部要 `fc_command_alloc`（FC 层）⇒ **「提交」本身不是 L0 纯函数**；
-> L0 只测**簿记**，「提交 → 泵 → 完成」的整链在 L2。
+| 半 | 入口 | 行为 | L0 驱动方式 |
+|---|---|---|---|
+| 提交 | `ftl_async_write_page/erase/read_page/set_features`（`ftl_fc_interface.h`） | 建 desc 链 + 搬数据，**不提交**，命令交回调用者 | 直调（返回 `FTL_OK` 才继续） |
+| 提交 | `ftl_op_submit(cmd, op, ctx)`（`ftl_op.h:89`） | 打 `cmd->op_tag` + `ctx≠NULL` 时 `completion_table_add`（**早于** `fc_submit`）→ `fc_submit`；失败回滚登记 | 直调；`ctx==NULL` 主动清表项 |
+| 完成 | 测试侧 `ut_fake_complete(cmd, status)`（新 seam） | 摘 SQ/HSQ → 沿 desc 链回写 status → 构 `fc_command_status_t` → `fc_completion_queue_push` + 置 `FC_COMMAND_STATE_COMPLETED` | **纯测试代码**，见 5.4.2 |
+| 完成 | `completion_table_drain()` | 消费 CQ → `ftl_op_dispatch`（按 `op_tag` 查 `g_op_service[]`，`completion_table_take` 取 ctx，`completion_table_route` 按命令自身 ch/ce/lun 解析实例） | 直调（`fc_service` 无需调——NAND 不真跑） |
+
+**为什么 L0 够得到**（seam 可行性依据，已逐行核实）：
+- `g_fc_controller` 是 **extern**（`fc_internal.h:85`）、`fc_t` 字段公开 ⇒ SQ/HSQ/CQ 环形队列
+  与 `command_state[]` 可从测试侧直接操作；
+- `fc_completion_queue_push` 公开（`fc_queue.h:55`）；`FC_COMMAND_STATE_COMPLETED`
+  （`fc_internal.h:94`）——置位与 `fc_complete_from_nand` 同构；
+- 命令身份：`ftl_cmd_id`（`ftl_fc_interface.h:77`）、`fc_command_id_to_command` /
+  `fc_descriptor_id_to_descriptor`（`fc_interface.h:156/165`）；
+- 成功态 = `FC_CW_STATUS_SUCCESS = 0x40`（`fc_command.h:144`）；完成项 `desc_id =
+  FC_DESCRIPTOR_ID_INVALID`（成功无失败 CW）。
+
+#### 5.4.2 seam 纪律（`ut_fake_complete` 的三条铁律）
+
+1. **必须同时从 SQ/HSQ 摘除该命令**（环形左移压缩）：否则 `test` 返回后 superloop 的
+   `fc_service` 会把 **stale QUEUED** 命令派给真 NAND，`fc_poll_dispatch_single`（`fc.c:1516`）
+   的 `ASSERT(state==QUEUED)` 在 debug 下必爆 ⇒ 测试把板子打崩。
+2. **只接受「`ftl_op_submit` 已返 `FTL_OK`」的命令**（在 SQ/HSQ、`state==QUEUED`）；对
+   `FTL_AGAIN`（背压回滚）路径**绝不能**调它。
+3. **每用例结束断言 `completion_table_count()==0` + 命令池回基线**
+   （`fc_get_resource_stats` 的 `command_used`）：漏 release 即命令池泄漏 ⇒ 后续用例全系统
+   `FTL_AGAIN`——测试把「release 归属」变成可断言的硬不变量。
+
+#### 5.4.3 release 归属（测试要对它下断言的核心语义）
+
+| op tag | 谁 release | L0 断言法 |
+|---|---|---|
+| `FTL_OP_SYNC_WAIT` | **不 release**（调用者 wait 返回后读 `ftl_cmd_read_data` 才 release；服务函数只唤醒 waiter） | 伪完成后 `command_used` 仍占用；手动 `fc_command_release` 才回落 |
+| `FTL_OP_HOST_IO` 与各异步 job（JOURNAL/L2P/CHECKPOINT/BBT/WEAR/METADATA/GC/WL/RR） | **服务函数自己 release** | 伪完成 + drain 后 `command_used` 回基线 |
+
+#### 5.4.4 背压面（可测的真实路径）
+
+| 背压 | 触发 | 断言 | 备注 |
+|---|---|---|---|
+| **命令池耗尽**（真实背压） | 64 条命令全在飞（如 64 条 `ftl_async_erase_block` 提交在飞）⇒ 第 65 次 `ftl_async_*` 返 `FTL_AGAIN` | `FTL_AGAIN` + 在飞命令数不变 | 系统实际撞到的就是它 |
+| **completion_table 满** | 32 条 `ctx≠NULL` 提交未完成 ⇒ 第 33 次 `ftl_op_submit` 返 `FTL_ERROR` | `FTL_ERROR` + `completion_table_count()` 不变（32） | `COMPLETION_TABLE_SIZE=32`（`completion_table.h:46`） |
+| **SQ 满 → `ftl_op_submit` 的 `FTL_AGAIN` 回滚** | — | — | **结构性不可达**：命令池 64 == SQ 深 64（`fc.h:56/70`），池满先于 SQ 满 ⇒ 该分支在本配置是死路径，不测 |
+
+#### 5.4.5 job 状态机驱动（链式 vs 踢↔伪完成交替）
+
+按服务函数是否**自动续提交**分两类（§4.9 用例按此驱动）：
+
+- **链式**（服务函数回调里续提交下一条命令，`ut_fake_complete` 后 `drain` 一次自动起下一条）：
+  journal（写→跨块擦）、bbt（擦→写）、wear（擦→快照多页链）、migrate（搬移多命令链）。
+  ⇒ 用例循环 `while (phase != IDLE) { ut_complete_and_drain(ut_sq_head(), 0x40); }`。
+- **踢↔伪完成交替**（服务函数只记完成 + 改 phase，**不**调 kick——kick 的 PREP 阶段含同步
+  NAND 原语，在完成泵里跑就是嵌套泵）：checkpoint（`checkpoint_kick` ↔ 伪完成）、
+  metadata 整理（`metadata_dir_kick` ↔ 伪完成）。
+  ⇒ 用例手动交替「kick → 伪完成 → kick → …」直到 DONE。
+
+**job 专用前置**（L0 不碰 NAND，须预置避开同步 NAND 路径）：
+- `bbt_kick` / `checkpoint` 的游标定位（`metadata_ring_locate` / Anchor 定位）是**同步读 NAND**
+  ⇒ 预置 `cursor_valid=1`（bbt）/ `anchor_cursor_valid=1`（cp）跳过；
+- migrate 的 READ/WRITE_SETTLE 会 `l2p_cache_ready==0` **原地返回**（§5.6 候选改动 1）⇒ 全链
+  用例预置 cache 行 CLEAN/DIRTY + entries，或只测不依赖该等路径的快路径（valid_total==0 → ERASE）。
+
+#### 5.4.6 与既有「组簿记」的关系
+
+§4.8 的组完成语义（`pending_group_*`）仍是 L0 纯簿记测试（不依赖伪完成）；host 读写的完成
+服务（`FTL_OP_HOST_IO`：建组 → 逐子操作提交 → 伪完成 → 组聚合恰一次）可随 C.1 框架驱动、
+用例并 §4.8（组簿记）+ C.1（op 框架）覆盖，不在 §4.9 单列；`l2p_cache` 的加载/写回链
+（§4.9 C.7）进 L0；真 NAND 的搬移全链（GC/WL/RR 组结算）归 HIL（§4.10）。
 
 ### 5.5 时间注入（节流类用例）
 
@@ -303,20 +423,28 @@ FTL 的时间源经**平台抽象**：`ftl_now_ms` / `checkpoint_now_ms` 读 `ss
 `time_us` 换成受控实现、`ssd_platform_register(&fake)`（Stage 1 v55 已建该抽象），用例后还原。
 故 `ftl_service` 内部的**节流时机**（T3 定时 / RR 扫描节流）也能 L0 确定性驱动——**无需给 FTL 加 seam**。
 
-### 5.6 回到「FTL 设计需不需要改」——结论：**不需要**
+### 5.6 回到「FTL 设计需不需要改」——L0 异步 seam：**生产零改动**；但 FTL 层**还可能改**（用户定调）
 
-FTL 生产码已满足全部测试条件，**零改动**：
+**L0 异步 seam 不需要改生产码**（§5.4.1 的 extern `g_fc_controller` + 公开队列 API 已核实）：
+伪完成是**测试侧 helper**，不是 mock 生产函数——`fc_complete_from_nand` 仍原样存在，只是
+测试不经过真 NAND 就够不到它，改用公开 CQ API 注入同构完成项。故 §5.4 的全部 L0 链驱动
+**生产码零改动**。
 
-| 条件 | 证据 |
-|---|---|
-| **确定性** | FTL 无 PRNG（`config.random` 是 FC 位）；时间源单一 |
-| **输入可构造** | BST（`alloc->blocks[]`）、各池、`pending[]`/`groups[]` 都是普通数组，fixture 直写 |
-| **完成可观测** | `ftl_io_request_t.complete_flag`/`status_out`/`on_complete`（`ftl/ftl_type.h`） |
-| **时间可注入** | `ssd_platform_ops_t.time_us` 经 `ssd_platform_register`（`platform.h:14/19`） |
-| **无 test hook** | 生产码零注入点（测的就是真实路径） |
+**但异步测试会顶出 FTL 生产候选改动**（§8 的旧边界「零改动」随 v0.75 异步化失效；
+用户 2026-10-15 已确认 FTL 层还可能改）。测试实现期如被顶出来，按提交纪律走、不混进
+测试提交：
 
-**唯一张力**：fixture 263KB（P2-5 后果）⇒ 复用活实例 `g_ctrl.ftl[0][0][0]` + reset（§2.2）。
-这是**内存约束**，非设计缺陷——不构成对 FTL 生产码的修改要求。
+| # | 候选改动 | 测试怎么顶出 | 风险面 |
+|---|---|---|---|
+| 1 | **migrate READ/WRITE_SETTLE 被动等 `l2p_cache_ready==0`**（`migrate.c:508/556` 原地返回、不自发触发加载） | 全链 GC 用例预置非就绪 region ⇒ 状态机停在 SETTLE 不再推进；候选改法：miss 时改走 `l2p_cache_read`（会起异步加载链） | 该 region 恰无人访问时 GC 挂起（`stall_rounds` 上限兜底，非卡死） |
+| 2 | **checkpoint 水位只置不撤**（`checkpoint_journal_watermark` 置位，撤位在 CP_TRUNC_* → `journal_truncate_commit`，需真 NAND） | EMERGENCY 回落用例 L0 无法纯 RAM 收口；要么驱动 CP 走到 TRUNC 阶段再断言，要么列 HIL | 只影响测试收口方式，非缺陷 |
+| 3 | completion seam fallback | 若个别读路径需要 `process_read` 数据语义（desc 每 CW status 回写 + `failed_descriptor_id` 聚合）而测试侧失真 | fc.c `#if FC_NAND_TEST_ENABLE` 薄 seam（包现成 `fc_complete_from_nand`） |
+| 4 | **红线**：派发上下文不得调同步原语（`ftl_op_in_dispatch` ASSERT，`ftl_fc_interface.c:535`） | 测试泵只能在非回调处（`ut_complete_and_drain` 外）用 | 服务函数里嵌套泵 = 解耦要消除的东西 |
+
+> 时间源：`ssd_platform_ops_t.time_us` 经 `ssd_platform_register`（`platform.h:14/19`）仍可注入，
+> 供 `wear_kick` 节拍 / `checkpoint` 定时类用例用（§5.5）。
+> 内存张力（fixture 263KB ⇒ 复用活实例 `g_ctrl.ftl[0][0][0]` + reset，§2.2）是内存约束，
+> 非设计缺陷——不构成对 FTL 生产码的修改要求。
 
 ## 6. 接线（已实施）
 
@@ -358,6 +486,17 @@ endif
 `#if defined(UT_FTL_ENABLE)` 内（FC 侧同理包在 `#if defined(UT_FC_ENABLE)` 内）。子套件前缀统一
 `xxx/`（**必须以 `/` 结尾**，`ut_main.c` 注释：munit 只做首尾相接、不补分隔符）。
 
+### 6.2 异步 / HIL 接线（计划）
+
+| 文件 | 改动 |
+|---|---|
+| `src/ftl/makefile.mk` | `UT_FTL_ENABLE` 块加 `ftl_test_common.c`（**已实施**）+ `test_ftl_async.c`（计划）；新增 `UT_HIL_ENABLE` 块加 `test_ftl_hil.c` |
+| 顶层 `makefile` | `UT` 空分支（ALL）加 `UT_HIL_ENABLE := 1`（**仅 ALL**——HIL 上板前须 fresh boot，不入 `UT=FTL` 的纯 RAM 档） |
+| `tests/unit/ut_main.c` | `/ftl/` children 加 `{"async/", g_ftl_async_tests, …}`（前缀必带尾斜杠）；`#if defined(UT_HIL_ENABLE)` 加 `extern g_ftl_hil_tests[]` + 独立根 `/ftl-hil/` |
+
+> 三档语义：`make tests UT=FTL` = 同步 53 例 + L0 异步链（全纯 RAM，`obj_ut_FTL` 无 HIL 目标）；
+> `make tests`（ALL）额外编入 `/ftl-hil/`（`obj_ut`）。对象目录分置机制（§6.1）保证三档互不污染。
+
 ## 7. 验证
 
 1. `make clean && make tests`（`FC_NAND_TEST_ENABLE=1`）**零错误零新增警告**——fixture 复用活实例，
@@ -365,29 +504,42 @@ endif
 2. `make debug / release` 不受影响（`FC_NAND_TEST_ENABLE` 默认关，测试文件不编入）
 2b. `make tests UT=FC` / `UT=FTL` 各自 0 警告，`nm` 确认只含本层套件数组；三档之间切换
    **无需 `make clean`**（对象目录分置）
-3. 上板：
-   - `test --list` → 确认 8 个 `/ftl/*/` 套件全部列出
-   - `test /ftl/` → 全 PASS（尤其 `open_sb_never_picks_metadata`）
+3. 上板（同步 53 例 + L0 异步，均纯 RAM）：
+   - `test --list` → 确认 8 个 `/ftl/*/` 套件 + `/ftl/async/` 全部列出
+   - `test /ftl/` → 全 PASS（尤其 `open_sb_never_picks_metadata`）；**`test /ftl/async/` 逐用例**，
+     重点 C.1 的 SYNC_WAIT 不 release / 背压回滚、C.2~C.4 链式推进、C.7 LOADING/FLUSHING
      > ⚠ munit 的过滤要求「过滤串 = 套件累积前缀 + 用例名前缀」（`munit.c:1297-1303`），
      > 套件前缀本身匹配不到任何用例 ⇒ 裸 `test /ftl/` 原会打印 `NO test run`。
      > **2026-10-14 已在 `ut_main.c` 的 `ut_run_all` 里加了「以 `/` 结尾的实参展开为叶子套件路径」**，
      > 故 `test /ftl/`、`test /fc-nand/`、`test /` 现按直觉工作；`test /ftl/allocator/<用例名>`
      > 这类全路径过滤串行为不变。
-   - 随后执行 **`hil_ut_design.md` Part B~D**（接口行为 / 跨重启 / 后台观测）
+   - **异步链不变量**：每个用例跑完后确认 `completion_table_count()==0` + `command_used` 回基线；
+     `test` 返回后 superloop 不崩（伪完成已摘 SQ ⇒ 无 stale QUEUED）。
+4. 上板（HIL 全链，**独立一次调用**）：
+   - **fresh boot 后单独 `test /ftl-hil/`**（不得并入全量 `test`——FC level3 会重置 FC 池 + 破坏 NAND）；
+     全绿：`async_pipeline` 恰一次完成 + 回读一致；`group_complete_once` 钉死提前完成。
+   - 确认 `test` 返回后 superloop 继续跑不崩（HIL 用真完成路径，天然无 stale 问题）。
+5. 随后执行 **`hil_ut_design.md` Part B~D**（接口行为 / 跨重启 / 后台观测）
 
-## 8. 不做（第一版边界）
+## 8. 不做（边界）
 
-- **不做 mock**：不建 `fc_submit` 桩 / Mock NAND / 掉电注入器
+- **不做 mock（生产函数桩）**：不建 `fc_submit` 桩 / Mock NAND / 掉电注入器。
+  ⚠ **L0 的伪完成 seam（§5.4）不是 mock 生产码**——`fc_complete_from_nand` 原样存在，
+  测试只经**公开** CQ API（`fc_completion_queue_push` + 手动置 `FC_COMMAND_STATE_COMPLETED`）
+  注入与生产同构的完成项；生产码零改动。区别：mock = 替换被测路径的一部分；seam = 在
+  测试侧构造输入的触发条件。
 - 不改 `tests/framework`（munit 适配已完成）；不建 host（x86）target
   （**2026-10-14 例外**：`tests/unit/ut_main.c` 的 `ut_run_all` 加了套件路径展开——见 §7.3；
   `tests/framework/munit.c` 本身仍未动）
 - ~~不动孤儿 `test_gc.c`/`test_l2p.c`/`test_nand.c` 占位~~ ✅ **2026-10-13 已删**（连同 `test_rebuild.c`），
   本方案落在一个**新**的独立测试文件（`test_ftl.c`，用户自建）
 - 不扩 linker 加 region
-- **不纳入**：`allocator_alloc`（v0.66 已删死码）；`metadata_dir_append_slot` / `metadata_dir_kick`
-  （需真 NAND 擦写 → `hil_ut_design.md`；v0.75 阶段 8 起压缩/换块由 `metadata_dir_kick` +
-  `ftl_op_metadata` 承载，同步版 `metadata_dir_compact` 已删）；`ftl_wbuf_*`（全 `static`，
-  需真 NAND → `hil_ut_design.md`）
+- **不纳入（仍属 HIL）**：`allocator_alloc`（v0.66 已删死码）；`ftl_wbuf_*`（全 `static`，
+  需真 NAND → `hil_ut_design.md` + §4.10 的 wbuf flush 泵）。`metadata_dir_kick` 已**改纳入**
+  L0 异步套件（§4.9 C.6 的 `md_reclaim_kick_complete`——kick 与伪完成交替即可驱动整理 job，
+  不再需要真 NAND 擦写）。
+- **不做（待 FTL 层改动落定）**：§4.9 的异步套件实现（计划已定、seam 已编译锚定，
+  但 FTL 生产候选改动未定，避免按会变的接口写死测试——见 §5.6）。
 
 ## 9. 测试分层与路线
 
@@ -420,6 +572,8 @@ endif
 
 ## 10. 覆盖矩阵与用例总数
 
+**已实施（`tests/unit/test_ftl.c`，8 套件 55 例）**：
+
 | 层 | 套件 | 被测模块 | 用例数 |
 |---|---|---|---|
 | L0 | `allocator` | `allocator.c` | 10 |
@@ -430,15 +584,26 @@ endif
 | L0 | `metadata` | `metadata.c` | 7 |
 | L0 | `pending_ct` | `pending.c` | 4 |
 | L0 | `group` | `pending.c` | 6 |
-| **合计** | **8 L0 套件** | — | **53** |
+| **已实施小计** | **8 L0 套件** | — | **53** |
+
+**计划（待 FTL 层改动落定，见 §5.6/§8）**：
+
+| 层 | 套件 | 被测模块 | 用例数 |
+|---|---|---|---|
+| L0 | `async`（§4.9） | op 框架 / journal / bbt / wear / migrate / checkpoint+md / l2p_cache / rr | 22（含 1 可选） |
+| L0+真NAND | `ftl-hil`（§4.10） | 全链：async pipeline / 背压 / 组结算 / 读写往返 / journal 屏障 | 5 |
+| **计划合计** | **2 套件** | — | **27** |
 
 ## 关键文件
 
 | 文件 | 动作 |
 |---|---|
-| `docs/design/ftl_ut_munit.md`（本文档） | 设计（FTL 层 §4 逐条用例 + §5 技法 + §10 覆盖矩阵） |
+| `docs/design/ftl_ut_munit.md`（本文档） | 设计（FTL 层 §4 逐条用例 + §5 技法 + §10 覆盖矩阵 + §5.4 异步计划） |
 | `tests/unit/test_ftl.c` | 实施：单文件（fixture 复用活实例 + 8 套件数组，L0）——**用户自建** |
-| `src/ftl/makefile.mk` | 实施：`FC_NAND_TEST_ENABLE` + `UT_FTL_ENABLE` 块（一行 `TEST_C_SRCS` + INCS） |
+| `tests/unit/ftl_test_common.c/.h` | 实施（**已编译锚定**）：共享活实例夹具 + `ftl_async_fixture_reset()` + `ut_fake_complete` 伪完成 seam（§3/§5.4） |
+| `tests/unit/test_ftl_async.c` | **计划**：L0 异步链套件 `/ftl/async/`（§4.9）——待 FTL 层改动落定 |
+| `tests/unit/test_ftl_hil.c` | **计划**：HIL 全链套件 `/ftl-hil/`（§4.10，`UT_HIL_ENABLE` 仅 ALL） |
+| `src/ftl/makefile.mk` | 实施：`FC_NAND_TEST_ENABLE` + `UT_FTL_ENABLE` 块（`test_ftl.c` + `ftl_test_common.c` + INCS）；计划：`UT_HIL_ENABLE` 块 |
 | `src/fc/makefile.mk` | 实施：拆「框架+入口（恒编）」与「FC 三级（`UT_FC_ENABLE` 门控）」 |
 | `makefile` §1.5 / `config.mk` | 实施：`UT` 解析 + 对象目录按测试配置分置 |
 | `tests/unit/ut_main.c` | 实施：两套 extern + 根套件项各包 `#if defined(UT_*_ENABLE)` |
@@ -449,3 +614,5 @@ endif
 - **mock `fc_submit` 桩 / Mock NAND / 掉电注入器**：**用户定调不做**（见 §9.2）。
 - `l2p_cache_note_access` 结算步导出为公开原语（否则 §4 测不到 thrashing）——属实施接线决策。
 - host（x86）编译链：本仓只支持 `arm-none-eabi` 上板。
+- **异步套件实现（`test_ftl_async.c` / `test_ftl_hil.c`）本轮不写**：FTL 层还可能改（§5.6
+  候选 1/2 未定），计划先定案、seam 已编译锚定，实现等 FTL 侧落定再推进——见 §8。
