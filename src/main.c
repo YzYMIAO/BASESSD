@@ -103,6 +103,75 @@ static void boot_section(const char *name)
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ * 上电报告（boot_report_*）：把 main() 里的上电打印按分区封装成函数，
+ * main() 只留调用与初始化级联，不内联打印细节。
+ * 约定：这些函数只做打印 / 只读查询，**不做任何初始化**——初始化仍留在
+ * main() 的 if/else-if 级联里，保证打印顺序与初始化成败一致。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* 开机横幅（裸行，编译期常量）+ 复位原因/上次崩溃记录。
+ * 必须在 sink 绑定之后调用：fault_report_boot 走异步日志，且 .noinit 记录
+ * 可跨软复位保留（VBAT 未供电时 BKPSRAM 不可用）。 */
+static void boot_report_banner(void)
+{
+    (void)uart_log_write(g_boot_banner, sizeof(g_boot_banner) - 1U);
+    fault_report_boot();
+}
+
+/* system 分区：系统身份（CPU/时钟 / Cache / MPU 区域数）+ 时钟树（全部 HAL 实读）。 */
+static void boot_report_system(void)
+{
+    sys_clock_tree_t clk;
+
+    boot_section("system");
+    LOGI("[SYS ] CPU=%luMHz HCLK=%luMHz ICache=%s DCache=%s MPU=%lu\r\n",
+         (unsigned long)(delay_port_core_clock_hz() / 1000000U),
+         (unsigned long)(delay_port_hclk_hz() / 1000000U),
+         (get_icache_sta() != 0U) ? "on" : "off",
+         (get_dcache_sta() != 0U) ? "on" : "off",
+         (unsigned long)sys_mpu_region_count());
+    /* 时钟树：APB1/2/3/4 相等时压成一个 pclk，不等则四个全列。 */
+    sys_clock_tree_get(&clk);
+    if ((clk.pclk1_hz == clk.pclk2_hz) && (clk.pclk2_hz == clk.pclk3_hz) && (clk.pclk3_hz == clk.pclk4_hz))
+    {
+        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk=%lu fmc=%lu qspi=%lu uart=%lu\r\n",
+             (unsigned long)(clk.sysclk_hz / 1000000U),
+             (unsigned long)(clk.hclk_hz / 1000000U),
+             (unsigned long)(clk.pclk1_hz / 1000000U),
+             (unsigned long)(clk.fmc_hz / 1000000U),
+             (unsigned long)(clk.qspi_hz / 1000000U),
+             (unsigned long)(clk.uart_hz / 1000000U));
+    }
+    else
+    {
+        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk1/2/3/4=%lu/%lu/%lu/%lu fmc=%lu qspi=%lu uart=%lu\r\n",
+             (unsigned long)(clk.sysclk_hz / 1000000U),
+             (unsigned long)(clk.hclk_hz / 1000000U),
+             (unsigned long)(clk.pclk1_hz / 1000000U),
+             (unsigned long)(clk.pclk2_hz / 1000000U),
+             (unsigned long)(clk.pclk3_hz / 1000000U),
+             (unsigned long)(clk.pclk4_hz / 1000000U),
+             (unsigned long)(clk.fmc_hz / 1000000U),
+             (unsigned long)(clk.uart_hz / 1000000U));
+    }
+}
+
+/* controller 分区：FC 池 / 拓扑 / 数据通路配置汇总（器件就绪后打印）。 */
+static void boot_report_controller(void)
+{
+    boot_section("controller");
+    fc_boot_report();
+    LOGI("[FC  ] raw path ready\r\n");
+}
+
+/* console 分区：交互入口就绪提示。 */
+static void boot_report_console(void)
+{
+    boot_section("console");
+    LOGI("[SYS ] console ready, type 'help' for commands\r\n");
+}
+
+/* ══════════════════════════════════════════════════════════════════
  * FTL 实例（v0.37 上线；P2-5 起**自持表**）
  *
  * 表所有权（P2-5）：BST / free / op / spare / closed 五个大数组**不再由本文件声明**，
@@ -352,8 +421,7 @@ void SysTick_Handler(void)
 
 int main(void)
 {
-    uint8_t          nand_init_result;
-    sys_clock_tree_t clk;
+    uint8_t nand_init_result;
 
     sys_init();
     cli_init(); /* 预填 CLI 固定 pattern buffer（.sram2_data NOLOAD） */
@@ -365,45 +433,8 @@ int main(void)
      * （FTL boot / CLI test 这些深调用）用过的栈就越多地落在被守卫区内，
      * 周期校验才量得到真实峰值。此后由 superloop 每轮 stack_guard_check() 校验。 */
     stack_guard_init();
-    /* 开机横幅（裸行）+ 系统身份（时钟 / Cache / MPU 区域数）。 */
-    (void)uart_log_write(g_boot_banner, sizeof(g_boot_banner) - 1U);
-    /*
-     * 复位原因 + 上次崩溃记录。必须在 sink 绑定之后调用：它走异步日志，
-     * 且 .noinit 记录可跨软复位保留（VBAT 未供电时 BKPSRAM 不可用）。
-     */
-    fault_report_boot();
-    boot_section("system");
-    LOGI("[SYS ] CPU=%luMHz HCLK=%luMHz ICache=%s DCache=%s MPU=%lu\r\n",
-         (unsigned long)(delay_port_core_clock_hz() / 1000000U),
-         (unsigned long)(delay_port_hclk_hz() / 1000000U),
-         (get_icache_sta() != 0U) ? "on" : "off",
-         (get_dcache_sta() != 0U) ? "on" : "off",
-         (unsigned long)sys_mpu_region_count());
-    /* 时钟树：全部 HAL 实读。APB1/2/3/4 相等时压成一个 pclk，不等则四个全列。 */
-    sys_clock_tree_get(&clk);
-    if ((clk.pclk1_hz == clk.pclk2_hz) && (clk.pclk2_hz == clk.pclk3_hz) && (clk.pclk3_hz == clk.pclk4_hz))
-    {
-        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk=%lu fmc=%lu qspi=%lu uart=%lu\r\n",
-             (unsigned long)(clk.sysclk_hz / 1000000U),
-             (unsigned long)(clk.hclk_hz / 1000000U),
-             (unsigned long)(clk.pclk1_hz / 1000000U),
-             (unsigned long)(clk.fmc_hz / 1000000U),
-             (unsigned long)(clk.qspi_hz / 1000000U),
-             (unsigned long)(clk.uart_hz / 1000000U));
-    }
-    else
-    {
-        LOGI("[SYS ] clk sys=%lu hclk=%lu pclk1/2/3/4=%lu/%lu/%lu/%lu fmc=%lu qspi=%lu uart=%lu\r\n",
-             (unsigned long)(clk.sysclk_hz / 1000000U),
-             (unsigned long)(clk.hclk_hz / 1000000U),
-             (unsigned long)(clk.pclk1_hz / 1000000U),
-             (unsigned long)(clk.pclk2_hz / 1000000U),
-             (unsigned long)(clk.pclk3_hz / 1000000U),
-             (unsigned long)(clk.pclk4_hz / 1000000U),
-             (unsigned long)(clk.fmc_hz / 1000000U),
-             (unsigned long)(clk.qspi_hz / 1000000U),
-             (unsigned long)(clk.uart_hz / 1000000U));
-    }
+    boot_report_banner();
+    boot_report_system();
 
     /* ── 全系统初始化顺序（严格 if/else-if 级联：前一步失败会整段跳过后面的）──
      *   ① fc_init()            —— FC 控制面：三池 + SQ/HSQ/CQ + 调度器 + CRC。
@@ -432,10 +463,7 @@ int main(void)
         else
         {
             nand_dispatch_set_armed(1U);
-            /* controller 汇总在器件就绪后打印：pools / 拓扑 / 数据通路配置。 */
-            boot_section("controller");
-            fc_boot_report();
-            LOGI("[FC  ] raw path ready\r\n");
+            boot_report_controller();
             /* 平台 time_us 注册：FTL 的 T3 定时触发（CP 10s / GC 500ms）依赖它。
              * 必须早于首次 ftl_service（boot 即首次），失败仅打日志不阻塞启动。 */
             LOGE_IF(stm32_platform_register() != 0, "platform register failed; T3 timers disabled\r\n");
@@ -445,8 +473,7 @@ int main(void)
     }
     /* APB1=100 MHz and APB1 prescaler=2, so TIM6 kernel clock is 200 MHz. */
     btim_timx_int_init(1000 - 1, 200 - 1);
-    boot_section("console");
-    LOGI("[SYS ] console ready, type 'help' for commands\r\n");
+    boot_report_console();
 #if (SSD_WATCHDOG_ENABLE != 0U)
     if (!storage_wdg_init(&g_storage_wdg_config))
     {
