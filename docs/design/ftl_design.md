@@ -3437,6 +3437,110 @@ ftl_status_t allocator_alloc_reserved_block(ftl_allocator_t *alloc, uint8_t plan
  *   allocator_select_plane_block_from_pool(alloc, plane)（allocator.c）*/
 ```
 
+**Completion Table + op tag**（`completion_table.h/c`、`ftl_op.h/c`）：
+
+```c
+/* 两张路由表：
+ *   ① g_table[COMPLETION_TABLE_SIZE=32] —— cmd_id → ctx 旁表（8B/项，256B）
+ *   ② g_route[CH][CE][LUN]               —— 命令 ch/ce/lun → ftl_context_t（实例路由）
+ * 谁登记：同步路径登记 &waiter（栈）；异步 job 登记 &<feature>_job；host I/O 登记 NULL */
+void         completion_table_init(void);                    /* 清全局两张表（开机一次） */
+ftl_status_t completion_table_add(uint16_t cmd_id, void *ctx);
+void         completion_table_remove(uint16_t cmd_id);
+void        *completion_table_take(uint16_t cmd_id);        /* 查 + 摘链（派发路径专用）*/
+void         completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM]);
+void         completion_table_drain(void);                  /* 抽干 CQ → ftl_op_dispatch */
+/* op tag = 完成服务函数选择器（ftl_op.h）；g_op_service[] 12 槽，[1]~[11] 全有主 */
+```
+
+**完成路由（`completion_table_drain → ftl_op_dispatch`，真实实现）**：
+
+```mermaid
+flowchart LR
+    DRAIN["completion_table_drain()<br/>fc_poll_completion() 抽干 CQ"] --> DISP["ftl_op_dispatch(completion)"]
+    DISP --> OP{"op_tag →<br/>g_op_service[op]?"}
+    OP -- NULL（孤儿） --> ORPHAN["completion_table_remove()<br/>+ fc_command_release() + LOGE"]
+    OP -- 有效 --> TAKE["completion_table_take(cmd_id)<br/>先摘链（防服务函数重入踩项）"]
+    TAKE --> ROUTE["completion_table_route(ch/ce/lun)<br/>按命令自身归属实例"]
+    ROUTE --> FN["fn(ftl, completion, ctx)<br/>同步等待器 / host IO / 各异步 job 完成"]
+```
+
+**Pending 表**（`pending.h/c`）：
+
+```c
+/* 32 项固定表：command_id → 请求（按值拷贝）+ 写专用字段。
+ * ⚠ 读写必须显式携带 op（PENDING_OP_*）——以 buffer != NULL 判别会把写判成读（P1 真缺陷）。*/
+typedef struct {
+    uint16_t    used;            /* 槽位占用 */
+    uint16_t    command_id;      /* FC command_id（RR/WC 停泊时 = FTL_PENDING_CMD_NONE）*/
+    uint32_t    owners;          /* 贡献本子操作的组位掩码（bit gi） */
+    uint8_t     op;              /* PENDING_OP_READ / WRITE / READ_RECOVERY / WRITE_CONFIRM */
+    uint8_t     n_cw;            /* 本子操作搬运的 CW 数 */
+    uint8_t     cw_bitmap;       /* 写：本页有效 CW 位图 */
+    lba_t       lba;             /* 子操作起始 local LBA */
+    nand_pba_t  new_pba;         /* 新分配 plane0 页 PBA */
+    nand_pba_t  new_pba1;        /* 新分配 plane1 页 PBA */
+    uint8_t     cache_intermediate; /* Cache Program 中间页：完成时不更新 L2P/Journal */
+} ftl_pending_req_t;
+```
+
+**host 请求完成链路**（`pending_add` → 完成 → 组聚合）：
+
+```mermaid
+flowchart TD
+    SUB["ftl_submit_read / write()"] --> SPLIT["拆子操作（读按 L2P 分组、写按 plane 选页）"]
+    SPLIT --> GRP["组聚合：ftl_io_group_t<br/>一次 host 请求 = 一个组（通知只发一次）"]
+    GRP --> ADD["pending_add()<br/>cmd_id → 请求按值拷贝 + 写专用字段"]
+    ADD --> FC["FC 命令提交 → 完成"]
+    FC --> DISP["完成经 op tag 路由"]
+    DISP --> RDBR{"op 类型"}
+    RDBR -- READ --> WBR["数据写回 io.buffer"]
+    RDBR -- WRITE --> WC["Journal + L2P 确认（记账）"]
+    RDBR -- READ_RECOVERY / WRITE_CONFIRM --> PARK["停泊：cmd_id = NONE、组在飞数**不**递减<br/>（等 RR job / ftl_confirm_kick 推进）"]
+    WBR --> SUBD["pending_group_complete_subop()<br/>outstanding 递减"]
+    WC --> SUBD
+    SUBD --> LAST{"全部子操作完成<br/>(next == total)?"}
+    LAST -- 是 --> DONE["complete_flag = 1 → 通知 caller 一次"]
+    LAST -- 否 --> NEXT["继续等剩余子操作"]
+```
+
+**Read Recovery**（`read_recovery.h/c`）：
+
+```c
+/* 异步恢复 job：读失败的 pending 子操作**托管**给本 job（不递减组在飞数），
+ * job 按 stage 一次只提交一条命令，完成由 g_op_service[FTL_OP_READ_RECOVERY] 推进。
+ * stage 恒表示"当前该做/正在等的那一步"；判"有无命令在飞"用 rr->waiting（stage 不可靠）。*/
+RR_STAGE_IDLE → PLANE → SF_SET → READ → SF_RESTORE → NB_READ → NB_RETRY → PLANE_END → FINISH
+/* 4 级健康（BST rr_block_health_t，只升不降）：HEALTHY → WARNING → CRITICAL → DYING
+ * ECC 连续上升 ≥4 次升级；DYING 经 rr_predictive_scan 触发预测搬移（mig_begin_predict）*/
+```
+
+**读失败恢复状态机（真实实现）**：
+
+```mermaid
+flowchart TD
+    TRIG["host 读失败（ECC 超限）<br/>pending 子操作托管给 RR job"] --> IDLE["RR_STAGE_IDLE"]
+    IDLE --> PLANE["RR_STAGE_PLANE<br/>选本 plane 目标页（L2P region 加载中则原地等）"]
+    PLANE --> SFSET["RR_STAGE_SF_SET<br/>SET_FEATURES(attempt) 切读重试电压模式"]
+    SFSET --> READ["RR_STAGE_READ<br/>重试读目标页"]
+    READ --> OK{"读成功?"}
+    OK -- 成功 --> PEND["RR_STAGE_PLANE_END<br/>拷回 rr_page_scratch → recovered=1"]
+    OK -- 失败 --> SFRE["RR_STAGE_SF_RESTORE<br/>SET_FEATURES(0) 恢复默认模式"]
+    SFRE --> ATT{"attempt < 8?<br/>（RR_MAX_RETRY）"}
+    ATT -- 是 --> SFSET
+    ATT -- 否（重试耗尽） --> NB["RR_STAGE_NB_READ<br/>Stage 2：读邻居页"]
+    NB --> NBO{"邻居读得出?"}
+    NBO -- 是 --> NBR["RR_STAGE_NB_RETRY<br/>再试目标页"]
+    NBO -- 否 --> NB2{"邻居尝试 < 2?<br/>（RR_NEIGHBOR_ATTEMPTS）"}
+    NB2 -- 是 --> NB
+    NB2 -- 否 --> BAD["RR_STAGE_PLANE_END<br/>恢复失败 → 标坏块（bbt_mark_bad）+ 数据搬移"]
+    NBR --> NRO{"目标页成功?"}
+    NRO -- 是 --> PEND
+    NRO -- 否 --> NB2
+    PEND --> FIN["RR_STAGE_FINISH<br/>释放 pending 槽 + 组聚合结算"]
+    BAD --> FIN
+```
+
 ### 11.4 性能估算
 
 | 场景 | cache 命中率 | 平均读延迟 | 说明 |
