@@ -1332,7 +1332,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
                 return FTL_ERROR;
             }
 
-            if ((pba[pl] != NAND_PBA_INVALID) && (pba_page(pba[pl]) != pg))
+            if ((pba[pl] != NAND_PBA_INVALID) && (!pba_same_page(pba[pl], p)))
             {
                 break; /* 同 plane 跨页：本子操作到此为止，余下交给下一轮 */
             }

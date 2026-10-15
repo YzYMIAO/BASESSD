@@ -414,10 +414,10 @@ static inline nand_pba_t pba_page(nand_pba_t pba)
     return (nand_pba_t)(pba & ~(nand_pba_t)(CW_NUM - 1U));
 }
 
-/* 获取 Page 基址 PBA（CW=0，页级操作基址） */
+/* 获取 Page 基址 PBA（CW=0，页级操作基址）——与 pba_page 数值恒等，收敛到单漏斗 */
 static inline nand_pba_t pba_page_base(nand_pba_t pba)
 {
-    return pba & ~(nand_pba_t)NAND_FIELD_MASK(CW_WIDTH);
+    return pba_page(pba);
 }
 
 /* 同 page 内换 CW */

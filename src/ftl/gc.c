@@ -155,7 +155,6 @@ int gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lb
     uint8_t       c;
     uint8_t       found      = 0U;
     uint32_t      base_meta  = 0U;
-    uint8_t       c_lo       = 0U;
     const uint8_t phys_plane = (uint8_t)pba_to_plane(pba);
 
     ASSERT(cmd != NULL);
@@ -187,7 +186,6 @@ int gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lb
         if (found == 0U)
         {
             base_meta = m; /* 首个写过的 CW，用于反推页基址 */
-            c_lo      = c;
             found     = 1U;
         }
     }
@@ -199,7 +197,7 @@ int gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lb
 
     if (page_base_out != NULL)
     {
-        *page_base_out = (lba_t)(base_meta - (uint32_t)c_lo); /* 页基址 = CW0 的扇区 LBA */
+        *page_base_out = ftl_lba_page_base((lba_t)base_meta); /* 页基址 = CW0 的扇区 LBA */
     }
 
     return 0;

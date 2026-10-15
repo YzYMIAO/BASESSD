@@ -396,16 +396,14 @@ static void rr_step(ftl_context_t *ftl)
 
             case RR_STAGE_NB_READ:
             {
-                /* 邻居选择与 pba_make 逐字沿用原 rr_neighbor_assist（块内回绕）。 */
+                /* 邻居选择沿用原 rr_neighbor_assist（块内回绕）。 */
                 const uint32_t page     = pba_to_page(ftl->rr.page);
-                const uint32_t block    = pba_to_block(ftl->rr.page);
-                const uint32_t plane    = pba_to_plane(ftl->rr.page);
                 const uint32_t neighbor = (ftl->rr.neighbor_i == 0U)
                                               ? ((page > 0U) ? (page - 1U) : (PAGES_PER_BLOCK - 1U))
                                               : ((page < (PAGES_PER_BLOCK - 1U)) ? (page + 1U) : 0U);
 
-                /* lun 恒 0（LUN_NUM = 1）。 */
-                ftl->rr.neighbor = pba_make(ftl->topo.ch, ftl->topo.ce, 0U, block, plane, neighbor, 0U);
+                /* 只换 page 字段：rr.page 的 ch/ce/lun/block/plane 原样保留（lun 恒 0 = LUN_NUM 1）。 */
+                ftl->rr.neighbor = pba_with_page(ftl->rr.page, neighbor);
 
                 /* 邻居页的 LBA **本就未知**（辅助读只要"这一页读得出来"这个事实）⇒
                  * FTL_PAGE_CFG_DATA_ANY 让命令 META = FC_META_UNKNOWN，跳过页内 META 比对。
