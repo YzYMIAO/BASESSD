@@ -1656,56 +1656,38 @@ L2P 表（NAND 元数据区 Block 0..15，哨兵层——本区页永不写入�
   entry[511] → PBA for LBA = region_id × 512 + 511
 ```
 
-### 5.3 Region 物理地址计算（通过 Metadata Directory）
+### 5.3 Region 物理位置计算（通过 Metadata Directory）
 
-动态分配下，Region 的物理位置通过 Metadata Directory 查询，
-不再使用固定公式：
+Region 的物理位置**不是固定公式**，而是经 Metadata Directory 查询——分两层：
 
-```c
-/* ⚠ v0.50 订正：本段为早期设计示意，与实现已不符 ——
- *   `metadata_dir_alloc_region` / `metadata_dir_add` / `paa_make` **均已删除**；
- *   region 的物理位置不再"首次访问时分配"，而是**每次 flush 追加**到日志块
- *   （`metadata_dir_append_slot`），Directory 条目在 `metadata_dir_fill_fixed`
- *   时全部预登记、由 `metadata_dir_commit_region` 就地覆盖。以下代码保留作历史。 */
+- **初始（哨兵层）**：全部 2048 个 region 在 `metadata_dir_init` 时由
+  `ftl_l2p_region_placement(region_id)` 预登记到固定表区（`L2P_BASE_BLOCK +
+  region_id / L2P_REGION_PER_BLOCK` 的**打包放置**，见 §5.2）。该区页**永不写入**——
+  读回全 0xFF ⇒ 该 region 从无映射。
+- **写后（动态日志块）**：region 首次被 flush 时**追加**写入一块从 Free Pool 取的整块
+  日志块，位置由 `metadata_dir_commit_region` 覆盖登记。此后该 region 的位置 = Directory
+  查询结果，与固定公式无关。
 
-/* 启动时加载 Metadata Directory */
-metadata_directory_t g_metadata_dir;
+写回流程（P0-2 统一写模型：只追加、绝不就地覆盖、绝不复用已编程页）：
 
-/* 读取 LBA 所在 Region 的物理位置 */
-static nand_paa_t l2p_region_ppa(uint16_t region_id) {
-    /* ① 查 Directory：优先 SRAM 中的缓存 */
-    metadata_entry_t *entry = metadata_dir_lookup(&g_metadata_dir,
-                                                   METADATA_TYPE_L2P_REGION,
-                                                   region_id);
-    if (entry != NULL) {
-        return entry->paa;   // 已有记录 → 直接返回物理 PAA
-    }
-
-    /* ② 首次访问（或 Directory 被 evict）：从 Free Pool 分配 */
-    /*    偶数 region_id → Plane 0，奇数 → Plane 1（双 Plane 交错）*/
-    uint8_t plane = (uint8_t)(region_id & 1U);
-
-    nand_paa_t paa = metadata_dir_alloc_region(&g_metadata_dir,
-                                                region_id, plane);
-    return paa;
-}
-
-/* 分配新的元数据物理位置 */
-nand_paa_t metadata_dir_alloc_region(metadata_directory_t *dir,
-                                      uint16_t region_id,
-                                      uint8_t plane) {
-    /* 从 Free Pool 取块（元数据走 COLD 温度）*/
-    uint16_t block = allocator_select_block(&g_alloc, FTL_TEMP_COLD, plane);
-
-    /* 起始页 = 0（每次分配从 Page 0 开始顺序写入）*/
-    nand_paa_t paa = paa_make(0, plane, block, 0, 0);
-
-    /* 更新 Directory */
-    metadata_dir_add(dir, METADATA_TYPE_L2P_REGION, region_id, paa);
-
-    return paa;
-}
+```mermaid
+flowchart LR
+    A["l2p_flush_kick 选中脏行"] --> B["metadata_dir_append_slot()\n取当前日志块下一空槽"]
+    B --> C{"取到槽?"}
+    C -- 否 --> D["行保持 DIRTY\n（块满取新块 / Free Pool 吃紧 / 整理 job 在飞）"]
+    C -- 是 --> E["写 region 页（异步命令在飞）"]
+    E --> F{"写成功?"}
+    F -- 否 --> G["不登记（Directory 仍指旧位置）"]
+    F -- 是 --> H["metadata_dir_commit_region()\n登记新位置 + l2p_live 增减"]
+    D --> I["下轮 flush_kick 重试"]
+    G --> I
+    H --> I
 ```
+
+> ⚠ `append_slot` **只取槽、不登记**（写失败则槽被跳过、位置不变）；`commit_region` 只负责
+> 登记。两者分离是因为"先写后登记"是崩溃安全前提——登记即指向新页，必须等新页真实落盘。
+> 旧日志块的活 region 计数归零后由后台 job 擦除归还（见 §5.5 与 `metadata.h` 的
+> `md_job_t`）。
 
 ### 5.4 LBA 分解
 
@@ -1716,248 +1698,131 @@ uint16_t entry_idx  = lba & 0x1FF;   // lba % 512 → 0..511
 
 ### 5.5 Metadata Directory（元数据目录）
 
-Metadata Directory 是动态元数据分配的核心数据结构，
-SRAM 常驻（**≈ 18 KB**：2048 条 × 7B 条目 = 14 KB + `l2p_live[]` 等），
-启动时从 Anchor 池加载（一份 record = 8 页）。
+Metadata Directory 是动态元数据分配的核心数据结构，SRAM 常驻
+（**≈ 18 KB**：2048 条 × 7B = 14.4KB + `l2p_live[4096]` 8KB 等，随 `ftl_context_t` 落
+AXI_RAM），启动时从 Anchor 池加载（一条 record = `ANCHOR_PAGE_COUNT` = 8 页）。
 
-> ⚠ **v0.50 订正（本节代码为早期示意，多处已不符）**：
-> - `METADATA_DIR_ENTRIES` = **2048**（`= L2P_REGIONS_PER_INSTANCE`），不是 128；
-> - 条目结构里**没有 `sequence` 字段**（`metadata_entry_t` = `type` + `id` + `paa`）；
-> - `metadata_dir_flush_to_anchor` 返回 `ftl_status_t`，且写的是**Anchor 池（32 块）内一条
->   8 页的 record**，不是"同块双页冗余"；
-> - **没有** `anchor_page` 这个固定页游标——写点由 `metadata_ring_locate` 从池内容推导；
-> - "Directory 变更 ≥ 64 次触发" 的节流改由 `dir->change_count` 承担（`uint32_t`，不再是
->   会回绕的 `uint8_t`）。
+> 结构与 API 以 `include/ftl/metadata.h` 为单一事实来源；本节给形状，细节见头文件。
 
 #### 数据结构
 
 ```c
-#define METADATA_DIR_ENTRIES    (L2P_REGIONS_PER_INSTANCE)   /* = 2048，非 128 */
+#define METADATA_DIR_ENTRIES (L2P_REGIONS_PER_INSTANCE)   /* = 2048：每个 region 都必须能登记 */
 
-/* Entry：7 字节（packed），**无 sequence**——位置由 record 自身的 sequence 锚定 */
+/* Entry：7 字节（packed），**无 sequence 字段**——位置由承载它的 record 自身 sequence 锚定 */
 typedef struct {
-    uint8_t    type;               // METADATA_TYPE_*
-    uint16_t   id;                 // L2P region_id / 0 for others
-    nand_paa_t paa;                // 物理 NAND 位置
-} __attribute__((packed)) metadata_entry_t;   // 7 bytes
+    uint8_t    type;               /* METADATA_TYPE_* */
+    uint16_t   id;                 /* L2P region_id / 0 for others */
+    nand_pba_t pba;                /* 物理位置（PBA，自带 CH/CE ⇒ 不依赖"元数据必在本实例"假设） */
+} __attribute__((packed)) metadata_entry_t;   /* 7 bytes */
 
 typedef struct {
-    metadata_entry_t entries[METADATA_DIR_ENTRIES]; // 2048 × 7B = 14 KB
-    uint16_t         count;                // 有效 entry 数
-    uint32_t         anchor_sequence;      // 当前 Anchor sequence
-    uint8_t          dirty;                // 是否有未写回 Anchor 的变更
-    uint32_t         change_count;         // 自上次 Anchor flush 的变更数（节流用）
-    uint8_t          have_dynamic;         // 是否已有 region 落到动态块
-    uint16_t         l2p_live[FTL_BLOCK_TOTAL]; // 每个 L2P 日志块上的活 region 数
-    /* …当前日志块游标 / Anchor 池游标 / topo（详见 metadata.h）… */
-} metadata_dir_cache_t;             // SRAM 常驻 ≈ 18 KB，随 ftl_context_t 落 AXI_RAM
+    metadata_entry_t entries[METADATA_DIR_ENTRIES]; /* 2048 × 7B = 14.4 KB */
+    uint16_t         count;                         /* 有效 entry 数 */
+    uint32_t         anchor_sequence;               /* 当前 Anchor sequence */
+    uint8_t          dirty;                         /* 是否有未写回 Anchor 的变更 */
+    uint32_t         change_count;                  /* 自上次 Anchor flush 的变更数（节流用） */
+    uint8_t          have_dynamic;                  /* 是否已有 region 落到动态块（开机回填加速） */
+    uint16_t         l2p_live[FTL_BLOCK_TOTAL];     /* 每个 L2P 日志块上的活 region 数（归零可回收） */
+    md_job_t         job;                           /* 后台整理 job（回收 + 压缩，见下） */
+    uint16_t         cur_metadata_block;            /* 当前日志块 gblock */
+    uint8_t          cur_metadata_page;             /* 当前日志块内下一可用页 */
+    uint8_t          cur_metadata_plane;            /* 下一个新日志块选哪个 plane（轮转） */
+    uint16_t         anchor_write_idx;              /* Anchor 池 ring 写点槽位 */
+    ftl_topology_t   topo;                          /* 元数据所在芯片路由 */
+} metadata_dir_cache_t;             /* ≈ 18 KB */
 ```
 
-#### 核心操作
+#### 核心操作（读写两侧）
 
 ```c
-/* 查找元数据位置 */
-nand_paa_t metadata_dir_lookup(metadata_dir_cache_t *dir,
-                                uint8_t type, uint16_t id) {
-    for (int i = 0; i < dir->count; i++) {
-        if (dir->entries[i].type == type && dir->entries[i].id == id)
-            return dir->entries[i].paa;
-    }
-    return PAA_INVALID;   // 未找到
-}
+/* 查找：linear scan entries（2048 条，开机回填数千次 ⇒ have_dynamic=0 时跳过动态扫描） */
+nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
+                               uint8_t type, uint16_t id);   /* 未找到 ⇒ NAND_PBA_INVALID */
 
-/* 添加/更新元数据位置 */
+/* 登记/更新：覆盖旧位置（无 sequence 字段，见上） */
 void metadata_dir_update(metadata_dir_cache_t *dir,
-                          uint8_t type, uint16_t id, nand_paa_t new_paa) {
-    /* 查找现有 entry（覆盖旧位置）*/
-    for (int i = 0; i < dir->count; i++) {
-        if (dir->entries[i].type == type && dir->entries[i].id == id) {
-            dir->entries[i].paa = new_paa;
-            dir->entries[i].sequence++;
-            dir->dirty = true;
-            return;
-        }
-    }
-    /* 新增 entry */
-    dir->entries[dir->count].type = type;
-    dir->entries[dir->count].id = id;
-    dir->entries[dir->count].paa = new_paa;
-    dir->entries[dir->count].sequence = dir->anchor_sequence;
-    dir->count++;
-    dir->dirty = true;
-}
+                         uint8_t type, uint16_t id, nand_pba_t new_pba);
 
-/* 将目录写回 Anchor Block（满 64 变更或 Checkpoint 时调用）*/
-void metadata_dir_flush_to_anchor(metadata_dir_cache_t *dir) {
-    if (!dir->dirty) return;
+/* 取写点槽：只取不登记。块满 ⇒ 先回收 live==0 块、再从 Free Pool 取整块新日志块；
+ * 失败返回 NAND_PBA_INVALID（绝不回退固定位置）。整理 job 在飞时一律拒绝（防乱预算）。 */
+nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
 
-    metadata_directory_t anchor;
-    anchor.magic = 0x414E4449;    // "ANDIR"
-    anchor.sequence = ++dir->anchor_sequence;
-    anchor.entry_count = dir->count;
-    for (int i = 0; i < dir->count; i++) {
-        anchor.entries[i].type = dir->entries[i].type;
-        anchor.entries[i].id = dir->entries[i].id;
-        anchor.entries[i].paa = dir->entries[i].paa;
-    }
-    anchor.crc = crc32(&anchor, offsetof(typeof(anchor), crc));
-
-    /* 写入 Anchor Block（Multi-Plane 双份冗余）*/
-    fc_write_page(ANCHOR_BLOCK_PAA(anchor_page), &anchor, sizeof(anchor));
-    fc_write_page(ANCHOR_BLOCK_PAA(anchor_page + 1), &anchor, sizeof(anchor));
-
-    dir->dirty = false;
-}
+/* 写成功后登记：entries[region_id].pba + l2p_live 增减 + dirty。
+ * 旧块活计数归零 ⇒ 登记进 job.reclaim_target，由后台 job 异步擦除归还（不在完成泵里擦）。 */
+void metadata_dir_commit_region(metadata_dir_cache_t *dir, ftl_allocator_t *alloc,
+                                uint16_t region_id, nand_pba_t new_pba);
 ```
 
-#### Anchor 同步触发条件
+> ⚠ `append_slot` 与 `commit_region` 分离是崩溃安全前提：「先写后登记」保证掉电时要么
+> Directory 仍指旧位置（数据还在旧页）、要么新页已落盘——绝不出现登记指向未写页。
+> 另注意 entry 存 **PBA**（自带 CH/CE），不是裸 PAA。
 
-| 触发条件 | 说明 |
-|---------|------|
-| Directory 变更 ≥ 64 次 | 批次写入，减少 Anchor 擦写 |
-| Checkpoint 时 | 与 L2P flush 同步 |
-| ftl_service(IDLE) | 空闲时保证最新 |
+#### Anchor 落盘（三段式 + 池内轮转）
 
-#### 启动加载 Anchor
+Anchor 池 = 32 块 ring（`metadata_ring_t`），每块 `ANCHOR_RECORDS_PER_BLOCK` 条 record；
+一条 record = `ANCHOR_PAGE_COUNT` 页，**每页自包含**（magic + sequence + chunk_index +
+entry_count + layout_version + 256 条 entry）——单页损坏只丢该页，读写只需 2KB 缓冲。
+**无本层 CRC**：页完整性由下层 FC 的 per-CW CRC + ECC 保证。
 
-```c
-int metadata_dir_load(metadata_dir_cache_t *dir) {
-    /* 扫描两个 Anchor Block 各 3 个冗余页 */
-    metadata_directory_t candidates[6];
-    for (int i = 0; i < 6; i++) {
-        fc_read_page(anchor_paa(i), &candidates[i], sizeof(metadata_directory_t));
-    }
-
-    /* 选 magic 正确 + sequence 最大的（完整性由 FC per-CW CRC + ECC 保证，v0.62） */
-    metadata_directory_t *best = NULL;
-    for (int i = 0; i < 6; i++) {
-        if (candidates[i].magic != 0x414E4449) continue;
-        if (!best || candidates[i].sequence > best->sequence)
-            best = &candidates[i];
-    }
-
-    if (!best) return SSD_STATUS_IO_ERROR;  // 无有效 Anchor
-
-    /* 重建 SRAM cache */
-    dir->count = best->entry_count;
-    dir->anchor_sequence = best->sequence;
-    for (int i = 0; i < dir->count; i++) {
-        dir->entries[i].type = best->entries[i].type;
-        dir->entries[i].id = best->entries[i].id;
-        dir->entries[i].paa = best->entries[i].paa;
-    }
-    dir->dirty = false;
-    return SSD_STATUS_OK;
-}
-```
-
-### 5.6 双 Plane Region 交错与 flush 加速
-
-> ⚠ **本节为早期设计示意，未实现**。文中 `l2p_cache_flush_pair()` / `region_to_plane()` /
-> `allocator_get_next_metadata_page()` / `flush_single_region()` 在代码中**都不存在**；
-> 现实现是 region **逐条经 `metadata_dir_append_slot` 追加到日志块**（P0-2 统一写模型），
-> region→plane 由 `ftl_l2p_region_placement`（`include/ftl/metadata.h`）决定，
-> **没有 flush 配对**，也就没有文中所称的「翻倍 / 4×」。保留本节仅作历史思路参考。
-
-#### 背景
-
-传统的 L2P region 写回固定在 Plane 0 操作，浪费 Multi-Plane 能力：
+所有 Anchor 落盘站点（Checkpoint job / 目录压缩 job）统一走三段式，每步之间可回到服务循环：
 
 ```
-传统（单 Plane）:
-  Plane 0: [R0][R1][R2][R3]...   64 次 flush = 64 × 300μs = 19.2ms
-
-企业级（双 Plane 交错）:
-  Plane 0: [R0][R2][R4][R6]...   ┐  32 次 Multi-Plane
-  Plane 1: [R1][R3][R5][R7]...   ┘  = 32 × 300μs = 9.6ms
-  → 写回速度翻倍！
+metadata_dir_anchor_prepare(dir, ...)   ──► 定位 ring 写点 + 取槽 + 判定是否需先擦块（不动介质）
+metadata_dir_anchor_page(dir, seq, chunk, page) ──► 组第 chunk 页（纯 RAM）
+[metadata_dir_anchor_erase]             ──► 写点需换块擦时提交异步擦
+metadata_dir_anchor_page ×N             ──► 逐页写（异步命令）
+metadata_dir_anchor_commit(dir, ring, idx, ok) ──► 推进游标（无论成败）；ok==0 整条作废、保留 dirty
 ```
 
-#### Region 到 Plane 的映射
+**触发节流**：`change_count ≥ 64`（批次写入减 Anchor 擦写）或 Checkpoint 时或空闲后台
+——由 `bg_a_metadata_dir` / Checkpoint job 发起，不在 `metadata_dir_update` 里同步做。
 
-```c
-/* Region 0 → Plane 0, Region 1 → Plane 1, Region 2 → Plane 0, ... */
-static uint8_t region_to_plane(uint16_t region_id) {
-    return (uint8_t)(region_id & 1U);
-}
-```
-
-偶数 Region 固定在 Plane 0，奇数在 Plane 1，保证任意相邻两次 flush 可配对。
-
-#### Cache Flush 的 Multi-Plane 优化
-
-```c
-/* 在 §6.2 的 Cache evict 和 background flush 中使用 */
-void l2p_cache_flush_pair(l2p_cache_t *cache) {
-    /* 找两个 DIRTY region，分别在 Plane 0 和 Plane 1 */
-    int p0_idx = -1, p1_idx = -1;
-
-    for (int i = 0; i < L2P_CACHE_SIZE; i++) {
-        if (cache->lines[i].state != L2P_CACHE_DIRTY) continue;
-        if (region_to_plane(cache->lines[i].region_id) == 0)
-            p0_idx = i;
-        else
-            p1_idx = i;
-        if (p0_idx >= 0 && p1_idx >= 0) break;
-    }
-
-    if (p0_idx >= 0 && p1_idx >= 0) {
-        /* 两页同 page#，不同 plane → Multi-Plane PROGRAM */
-        nand_paa_t paa0 = metadata_dir_lookup(&g_metadata_dir,
-                           METADATA_TYPE_L2P_REGION,
-                           cache->lines[p0_idx].region_id);
-        nand_paa_t paa1 = metadata_dir_lookup(&g_metadata_dir,
-                           METADATA_TYPE_L2P_REGION,
-                           cache->lines[p1_idx].region_id);
-
-        /* 确保 page# 相同且分属不同 plane */
-        uint8_t page = allocator_get_next_metadata_page(
-                         &g_alloc, 0, 1);
-
-        /* 构造 Multi-Plane 命令 */
-        fc_command_t *cmd = fc_command_alloc();
-        cmd->config.operation = OP_MULTI_PLANE_PROGRAM_PAGE;
-        // desc[0]: Plane0 region data
-        // desc[1]: Plane1 region data
-        fc_submit(cmd);
-
-        cache->lines[p0_idx].state = L2P_CACHE_CLEAN;
-        cache->lines[p1_idx].state = L2P_CACHE_CLEAN;
-
-    } else if (p0_idx >= 0) {
-        /* 只有一个 Plane 有 DIRTY → 单 Plane fallback */
-        flush_single_region(cache, p0_idx);
-    } else if (p1_idx >= 0) {
-        flush_single_region(cache, p1_idx);
-    }
-}
-```
-
-#### 性能对比
-
-| flush 方式 | 每次耗时 | 64 次 flush | 加速比 |
-|-----------|---------|------------|--------|
-| 单 Plane 逐次 | 300μs | 19.2ms | 1x |
-| 双 Plane 交错 Multi-Plane | 300μs | 9.6ms | **2x** |
-| 批量 4 条（每次 2 对） | 4×300μs | 4.8ms | **4x** |
-
-#### Directory 与双 Plane 的联动
+#### 启动加载
 
 ```
-启动时：
-  ① 读 Anchor → Metadata Directory → 知道每 Region 的位置
-  ② 偶 region → P0, 奇 region → P1（交错分配）
-  
-写入时：
-  flush(a) → metadata_dir_update(region_a, new_paa)
-  flush(b) → metadata_dir_update(region_b, new_paa)
-  
-读回时：
-  cache_miss(region_x) → metadata_dir_lookup(region_x) → 直接读
+metadata_dir_load(dir):
+  ① metadata_dir_init 铺基础层：全部 region 的固定位置（哨兵层，读回 0xFF = 未映射）
+  ② metadata_ring_locate：只读 O(块数) 页定位池内最新「整条校验通过」的 record
+     （快路径：逐块末条廉价探针 + 游标块降序；损坏时才全池慢扫，见 metadata.h）
+  ③ 读胜者各页，逐页校验 chunk_index/sequence 后装配覆盖对应区间
+  ④ 由装配后的 entries 重建 l2p_live / have_dynamic
+  ※ 游标不跨重启：cur_block_valid=0，首次追加从 Free Pool 新取块（不复用可能已编程的旧页）
 ```
 
-Metadata Directory 是双 Plane 交错的基础——没有 Directory 就不知道
-Region 当前在哪，也就无法利用双 Plane 并行。
+```mermaid
+flowchart TD
+    A["开机"] --> B["metadata_dir_init\n铺哨兵层固定位置"]
+    B --> C["metadata_ring_locate\n扫 Anchor 池定位最新 record"]
+    C --> D{"最新 record 有效?"}
+    D -- 否 --> E["无有效 Anchor → 初始化/格式化"]
+    D -- 是 --> F["读胜者各页 + 装配覆盖"]
+    F --> G["重建 l2p_live / have_dynamic"]
+    G --> H["运行期：lookup / append_slot / commit_region"]
+```
+
+#### 后台整理 job（回收 + 压缩）
+
+`l2p_live` 归零的日志块由 `metadata_dir_kick` 异步擦除归还（防稳态泄漏：每填满一块就
+永久占一块）；抗碎片的**压缩**挑活 region 最少的块做 victim、搬活 region 后擦。
+两者由 `md_job_t` 阶段机承载，顺序即掉电安全契约（搬移 → 登记 → **Anchor 落盘 → 擦
+victim**，Anchor 必须先于擦，否则掉电后 Directory 指向已擦块 ⇒ 映射永久丢失）。
+细节见 `metadata.h` 的 `md_job_t` 注释与 §12 任务总表（`bg_a_metadata_dir`，must-run 位 3）。
+
+### 5.6 策略选取：为什么不追求「双 Plane flush 配对」
+
+> 早期设计曾规划 region 写回按「偶 region → Plane 0 / 奇 → Plane 1」交错、把两个 DIRTY
+> region 凑成 Multi-Plane PROGRAM 配对以让写回翻倍。该方案**未实现**（相关函数
+> `l2p_cache_flush_pair` / `region_to_plane` 等从未存在过），当前设计不追求它，理由：
+
+| 候选 | 做法 | 代价/问题 | 结论 |
+|---|---|---|---|
+| 双 Plane flush 配对 | 凑两个同 page#、分属两 plane 的 DIRTY region 一起编程 | ① 凑 pair 需**等待/搬运**脏行，与「尽快落盘」的持久性目标冲突；② region 落到动态日志块的 plane 由**写序**（`append_slot` 轮转）决定，不是 region_id 奇偶——固定交错会把日志块写点钉死，破坏 P0-2「只追加」的块满才换块；③ 收益（一次少付一次 plane busy 等待）只在 flush 密集时显著，而本仓 L2P flush 在空闲后台做，前台不感知 | ✗ |
+| **当前（选中）** | region **逐条追加**到当前日志块（`append_slot`），plane 由写点轮转决定 | 无配对，单 plane 写回；换取写模型统一（P0-2）+ 持久性优先 + 实现简单 | ✅ |
+
+**当前 region→plane 映射**只有一处：`ftl_l2p_region_placement(region_id)`（§5.2 的打包放置，
+哨兵层初始位置用）。动态日志块的 plane 是 `dir->cur_metadata_plane` **轮转**选取，
+与 region_id 无关——位置完全由 Directory 登记携带，读回一律经 lookup。
 
 ---
 
@@ -1968,12 +1833,12 @@ Region 当前在哪，也就无法利用双 Plane 并行。
 > 未命中就「驱逐一行 + 从 NAND 载入新 region」，脏行**追加**写回日志块。下面三张图先给全局，
 > §6.1~§6.6 再给细节——**① 表住在哪 → ② 一次读/写走什么路 → ③ 脏行何时、如何写回**。
 >
-> ⚠ **v0.75 阶段 5 起本节全部异步**：载入与写回都不再在调用者的栈上同步等 NAND，而是
-> 起一条带 `FTL_OP_L2P` 标签的命令、把 **cache line 本身**当 ctx 交给服务函数
-> `ftl_op_l2p` 收尾。于是 `l2p_cache_read` 变**三态**（`FTL_OK` / `FTL_AGAIN` 加载中 /
-> `FTL_ERROR` 未映射），未命中时返回 `FTL_AGAIN` 并**在后台把 region 拉进来**，调用者
-> 下轮重试即命中。下面三张图已按异步版绘制；**行状态多一个 `LOADING`**（与 `FLUSHING`
-> 同族：在飞、不可驱逐）。§6.6 单列异步改造的三条判据。
+> ⚠ **本节全部异步**：载入与写回都不在调用者的栈上同步等 NAND，而是起一条带
+> `FTL_OP_L2P` 标签的命令、把 **cache line 本身**当 ctx 交给服务函数 `ftl_op_l2p` 收尾。
+> 于是 `l2p_cache_read` 是**三态**（`FTL_OK` / `FTL_AGAIN` 加载中 / `FTL_ERROR` 未映射），
+> 未命中时返回 `FTL_AGAIN` 并**在后台把 region 拉进来**，调用者下轮重试即命中。
+> 下面三张图已按异步版绘制；**行状态多一个 `LOADING`**（与 `FLUSHING` 同族：在飞、
+> 不可驱逐）。§6.6 单列异步改造的三条判据。
 
 #### 图 ① 表住在哪：SRAM 缓存 ↔ NAND 全量
 
@@ -2001,49 +1866,32 @@ region_id = lba / 512          entry_idx = lba % 512
 
 #### 图 ② 一次读 / 写走什么路（两个入口共用同一条路径）
 
+```mermaid
+flowchart TD
+    A["l2p_cache_read(lba) / l2p_cache_write(lba, pba)"] --> B["region_id = lba/512, entry_idx = lba%512"]
+    B --> C{"(1) lines[64] 命中?\nstate != INVALID"}
+    C -- 命中 --> H["(4) 读: access_count++ → 返回 entries[entry_idx]\n写: entries[entry_idx]=pba → DIRTY + 脏位"]
+    C -- 未命中 --> D["(2) CLOCK 选 victim（clock_hand 环形扫）"]
+    D --> D1["INVALID → 直接用"]
+    D --> D2["FLUSHING / LOADING → 跳过（在飞不可驱逐）"]
+    D --> D3["DIRTY → 踢一次 flush_kick 后跳过"]
+    D --> D4["其余 → access_count-- 看下一行"]
+    D1 --> E
+    D2 --> D
+    D3 --> D
+    D4 --> D
+    D --> D5{"全不可驱逐?"}
+    D5 -- 是 --> D6["返回 FTL_AGAIN"]
+    D5 -- 否（选中 victim） --> E["(3) 起异步载入: metadata_dir_lookup → ftl_op_submit(FTL_OP_L2P, line)\nstate=LOADING，立即返回 FTL_AGAIN"]
+    E --> F["ftl_op_l2p 收尾: 成功 → CLEAN；失败 → INVALID（entries 全 FF）"]
+    F --> G["调用者下轮重试"]
+    G --> B
 ```
-                l2p_cache_read(lba)  /  l2p_cache_write(lba, pba)
-                            │
-                            ▼
-   region_id = lba / 512        entry_idx = lba % 512
-                            │
-                            ▼
-   ┌────────────────────────────────────────────────────┐
-   │ (1) 查 lines[64] 里有没有 region_id                │
-   │     命中判据：state != INVALID（含 LOADING/FLUSHING）│
-   │     ├─ 命中 -> 直接跳到 (4)（不选 victim、不载入） │
-   │     └─ 未命中 -> 继续 (2)                          │
-   └────────────────────────┬───────────────────────────┘
-                            │
-                            ▼
-   ┌────────────────────────────────────────────────────┐
-   │ (2) CLOCK 选 victim（clock_hand 环形扫描）         │
-   │       INVALID  -> 直接用                           │
-   │       FLUSHING -> 跳过（写回中，不可驱逐）         │
-   │       LOADING  -> 跳过（载入中，不可驱逐）         │
-   │       DIRTY    -> 踢一次写回 kick 后跳过本行       │
-   │       其余     -> access_count-- 后看下一行        │
-   │       全不可驱逐 -> 返回 -1（本函数返回 FTL_AGAIN）│
-   └────────────────────────┬───────────────────────────┘
-                            │
-                            ▼
-   ┌────────────────────────────────────────────────────┐
-   │ (3) 起**异步**载入该 region（不阻塞）：            │
-   │       metadata_dir_lookup(region_id) -> 位置       │
-   │       ftl_op_submit(cmd, FTL_OP_L2P, line)         │
-   │       state = LOADING，**立即返回**                │
-   │   完成时由 ftl_op_l2p 收尾：                       │
-   │       ftl_cmd_read_data -> line->entries           │
-   │       成功 -> state = CLEAN                        │
-   │       失败 -> state = INVALID（entries 全 FF）     │
-   └────────────────────────┬───────────────────────────┘
-                            │
-                            ▼
-   ┌────────────────────────────────────────────────────┐
-   │ (4) 读：access_count++，返回 entries[entry_idx]    │
-   │     写：entries[entry_idx] = pba，置 DIRTY + 脏位  │
-   └────────────────────────────────────────────────────┘
-```
+
+> ⚠ **调用者看不到「加载中」**：未命中时 `l2p_cache_read` 返回 `FTL_AGAIN`，**不是** PBA。
+> 调用者下轮重试；重试时 `state == LOADING` 走 (1) 命中分支，此时 `entries` 仍是上一次
+> 的内容 ⇒ **`LOADING` 行不得读出 entries**（`l2p_cache_read` 内部按 state 拦下、返回
+> `FTL_AGAIN`）。等 `ftl_op_l2p` 置 `CLEAN` 后再读才是有效映射。
 
 > ⚠ **调用者看不到「加载中」**：未命中时 `l2p_cache_read` 返回 `FTL_AGAIN`，**不是** PBA。
 > 调用者下轮重试；重试时 `state == LOADING` 走 (1) 命中分支，此时 `entries` 仍是上一次
@@ -2126,7 +1974,7 @@ typedef enum {
     L2P_CACHE_CLEAN,            // cache 行有效，未修改
     L2P_CACHE_DIRTY,            // cache 行有效，已修改（需写回）
     L2P_CACHE_FLUSHING,         // 正在写回 NAND（不可驱逐）
-    L2P_CACHE_LOADING,          // 正在从 NAND 载入（v0.75 阶段 5；不可驱逐，entries 尚无效）
+    L2P_CACHE_LOADING,          // 正在从 NAND 载入（不可驱逐，entries 尚无效）
 } l2p_cache_state_t;
 
 typedef struct {
@@ -2142,7 +1990,7 @@ typedef struct {
     uint16_t         clock_hand;                           // CLOCK 替换指针
     uint32_t         hit_count, miss_count;                // 统计（开机累计，观测用）
 
-    /* Thrashing 检测窗口（v0.53，见 §6.5）*/
+    /* Thrashing 检测窗口（见 §6.5）*/
     uint32_t         window_access;                        // 本窗口累计访问数
     uint32_t         window_miss;                          // 本窗口累计 miss 数
     uint8_t          miss_pct;                             // 最近一次窗口结算 miss 率
@@ -2151,7 +1999,7 @@ typedef struct {
     /* Region 级脏标记（F4）：自上次 checkpoint 以来该 region 是否被写过 */
     uint32_t         region_dirty_bitmap[L2P_REGIONS_PER_INSTANCE / 32U];
 
-    /* 在飞计数（v0.75 阶段 5）：>0 时对应路径不可再起（防同 line 两条命令）*/
+    /* 在飞计数：>0 时对应路径不可再起（防同 line 两条命令）*/
     uint8_t          load_inflight;
     uint8_t          flush_inflight;
 
@@ -2162,7 +2010,7 @@ typedef struct {
 } l2p_cache_t;
 ```
 
-### 6.2 查找流程（v0.75 阶段 5：三态 + 异步载入）
+### 6.2 查找流程（三态 + 异步载入）
 
 对外主入口三个：`l2p_cache_read()`（三态）、`l2p_cache_ready()`（只探就绪）、
 `l2p_cache_write()`（三态）。evict 与 region load 仍是内部实现。另有四个 `*_sync` 逃生口
@@ -2254,9 +2102,9 @@ CLOCK 是 LRU 的近似。嵌入式环境无动态内存分配，CLOCK 只需一
 |---------|------|---------|---------|
 | **CLOCK-pro** | access_count 从固定位宽改为动态阈值，热数据更易留在 cache 中 | Phase 3 性能优化 | 命中率 +3~5% |
 | **自适应模式切换** | 检测到 sequential 访问时临时启用 prefetch（预加载后续 region）；随机访问时回到 CLOCK 保守模式 | Sequential 检测 | 顺序读场景命中率接近 100% |
-| **Thrashing 降级** ✅ v0.53 已落地 | 窗口化 miss 率 ≥ 90% 时停 NORMAL 模式的**主动**后台 flush（**非** write-through，见 §6.5）| miss_rate > 90% | 避免性能断崖 |
+| **Thrashing 降级** ✅ 已落地 | 窗口化 miss 率 ≥ 90% 时停 NORMAL 模式的**主动**后台 flush（**非** write-through，见 §6.5）| miss_rate > 90% | 避免性能断崖 |
 
-### 6.5 Thrashing 检测（v0.53 落地）
+### 6.5 Thrashing 检测
 
 工作集远大于 cache（64 行 × 512 entry = 16 MiB LBA 空间，而盘 512 MiB）时，全盘随机访问
 几乎每次 miss ⇒ 「evict→flush→load」反复。设计初稿列了三条降级策略，**逐条对照本仓实现后
@@ -2275,8 +2123,8 @@ CLOCK 是 LRU 的近似。嵌入式环境无动态内存分配，CLOCK 只需一
 命中/未命中在 `l2p_cache_read` / `l2p_cache_write` 的命中与未命中分支各记一次
 （`l2p_cache_note_access`），状态**翻转**时才打一行
 `[L2P] thrash=… miss=…% hit=… miss_total=…`（抖动不刷屏）。
-⚠ 阶段 5 起这两处记账**必须留在读写入口**——旧实现在 `find_or_load` 里统一做，重构时若
-只在读路径记账，写密集负载会测出 100% miss 并误触发降级（见 §6.3 的注）。
+⚠ 这两处记账**必须留在读写入口**——早期实现在 `find_or_load` 里统一做，若只在读路径
+记账，写密集负载会测出 100% miss 并误触发降级（见 §6.3 的注）。
 
 #### 降级：停 NORMAL 模式的**主动**后台 flush
 
@@ -2302,7 +2150,7 @@ NAND 带宽。降级 ⇒ 停主动 flush，**脏行只由驱逐路径按需写�
 DRAM-less 的行业解法之一是让读路径**先查 Journal overlay**（Journal 就是 L2P 的增量日志），
 从而在 thrashing 下少 load region。本仓 `l2p_cache_read` 不查 Journal ⇒ 属独立改造，不在 P1-4。
 
-### 6.6 异步改造（v0.75 阶段 5）
+### 6.6 异步改造
 
 **为什么**：DRAM-less 主控的 L2P 是**按需加载**，miss 时**挂起主机命令、取回映射段、再恢复**
 ——主机命令被 park 而非阻塞控制器。本仓改造前每个未命中 region 都会用一条同步原语
@@ -2319,8 +2167,8 @@ DRAM-less 的行业解法之一是让读路径**先查 Journal overlay**（Journ
 2. **`ftl_confirm_write` 保持"完成时重查 L2P"**。写完成回调**不存 old_pba**，完成时按 LBA
    重查得"此刻被替换的映射"（§7.3 的 modify-after-confirm）。同一 LBA 两次写在飞时，先完成
    的先改 L2P、后完成的重查即得前者——**提交时快照会让两条 Journal 都指向最初映射 ⇒ 链断**。
-   阶段 5 只把"重查"从同步改成**两遍式 + 停泊**（未就绪则保留 pending 项、下轮 `ftl_confirm_kick`
-   再来），重查仍发生在完成时。
+   异步化只把"重查"从同步改成**两遍式 + 停泊**（未就绪则保留 pending 项、下轮
+   `ftl_confirm_kick` 再来），重查仍发生在完成时。
 3. **写路径不得重入完成泵**。`ftl_confirm_write` 是 host 写完成服务函数（`ftl_op_host_io`）
    的一部分，它调 `l2p_cache_read`/`write` 只会得到 `FTL_AGAIN`（停泊），**不会**自旋
    `l2p_sync_pump`——后者带 `ASSERT(ftl_op_in_dispatch() == 0)`，一旦被服务函数调到即断言。
