@@ -14,7 +14,8 @@
  */
 
 #include "common/ssd_types.h"
-#include "ftl/allocator.h" /* ftl_tables_t, super_block_t */
+#include "ftl/allocator.h"    /* ftl_tables_t, super_block_t */
+#include "ftl/bg_scheduler.h" /* 时间预算后台调度器（v0.76，ftl_context_t 含调度器） */
 #include "ftl/checkpoint.h"
 #include "ftl/ftl_type.h" /* ftl_io_request_t */
 #include "ftl/gc.h"
@@ -170,6 +171,12 @@ typedef struct ftl_context
      * ⚠ 同 gc_eval_last_ms：0 兼作「本触发态内尚未打过」哨兵。 */
     uint32_t gc_log_last_ms;
 
+    /* 时间预算后台调度器（v0.76，per-instance）。
+     * 任务表（14 项：6 must-run + 8 预算）由 ftl_bg_init 填充；每轮 Phase 3 经
+     * ftl_bg_level_select 选档后跑 bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level])。
+     * 取代 v0.75 的三个 static 三级服务函数（IDLE/NORMAL/BUSY 的计数门控）。 */
+    bg_scheduler_t bg;
+
     /* GC 进展计数（per-instance，只增不减，纯观测）。
      * ⚠ 为什么需要：`trig=` 常亮**不能区分**「在推进」与「卡死」——两种情况打的是同一行。
      * 卡死链路：gc_select_victim 选不出 victim ⇒ mig_begin_gc 返 0 ⇒ 空闲池只出不进
@@ -233,6 +240,24 @@ void ftl_service_pump(void);
  * @param ftl  FTL 上下文（NULL 直接返回）
  */
 void ftl_service(ftl_context_t *ftl);
+
+/*
+ * ftl_bg_init - 装配实例的时间预算后台调度器（v0.76）
+ *
+ * 填充 ftl->bg 的任务表（14 项：6 must-run 正确性关键集 + 8 预算任务，见 ftl.c
+ * bg_a_* 适配器）并调用 bg_scheduler_init。由 ftl_init 末尾调用一次。
+ */
+void ftl_bg_init(ftl_context_t *ftl);
+
+/*
+ * ftl_bg_level_select - 负载 → 后台档位（纯函数，v0.76）
+ *
+ * 判据与 v0.75 三级分发逐字等价（ftl.c 旧 ftl_service :851-862）：
+ *   inflight = pending_count + pending_group_count
+ *   inflight==0 ⇒ IDLE；pending > FTL_PENDING_MAX/2 或 queued!=0 ⇒ BUSY；否则 NORMAL。
+ * 返回 BG_LEVEL_IDLE / BG_LEVEL_NORMAL / BG_LEVEL_BUSY（bg_scheduler.h）。
+ */
+uint8_t ftl_bg_level_select(const ftl_context_t *ftl);
 
 /*
  * ftl_submit_read - 非阻塞提交读请求（长度任意）

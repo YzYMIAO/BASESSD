@@ -1,10 +1,10 @@
 /*
- * ftl.c — FTL 顶层（初始化 / 三级后台服务主循环 / 子操作下发 / 对外读写入口）
+ * ftl.c — FTL 顶层（初始化 / 后台调度服务主循环 / 子操作下发 / 对外读写入口）
  *
  * 职责：
  *   FTL 的对外门面与主循环——ftl_init 装配各子模块；ftl_service 是**服务主循环**
- *   （NAND 泵 → 完成泵 → 补发 host 子操作 → 三级后台）；ftl_submit_read/write 把
- *   一条 host 请求拆成多个 FC 子操作下发；ftl_flush / ftl_trim 供 HIL 调用。
+ *   （NAND 泵 → 完成泵 → 补发 host 子操作 → 时间预算后台调度）；ftl_submit_read/write
+ *   把一条 host 请求拆成多个 FC 子操作下发；ftl_flush / ftl_trim 供 HIL 调用。
  *
  * 与子模块的分工：
  *   本文件             —— 编排：调度、拆分、完成聚合、模式切换；不解析介质格式。
@@ -17,17 +17,19 @@
  *   Phase 1    fc_service × NAND_SUBMIT_BUDGET —— 推进 NAND
  *   Phase 2    completion_table_drain —— 统一完成泵（按命令 op_tag 派发到服务函数数组）
  *   Phase 2.5  逐组补发 host 子操作（host IO 优先于后台任务）
- *   Phase 3    三级后台模式：IDLE / NORMAL / BUSY（按未决命令数选档）
+ *   Phase 3    时间预算后台调度（v0.76）：14 项任务表（6 must-run + 8 预算）经
+ *              bg_scheduler_run 执行；档位 IDLE/NORMAL/BUSY 按未决命令数选（见下）
  *
- * 后台三级模式（按 inflight 近似空闲度）：
- *   IDLE    inflight == 0                     全力后台（GC 补水 / WL / 巡检 / journal / bbt / wear / CP）
- *   BUSY    pending > MAX/2 或有排队 host 请求 最少后台（让路，否则抢走 drain 要用的 FC buffer）
- *   NORMAL  其余                               按需后台（受节流的 GC / WL / CP）
+ * 后台档位（按 inflight = pending + groups 近似空闲度，ftl_bg_level_select）：
+ *   IDLE    inflight == 0                     全预算（含 RR 巡检）
+ *   BUSY    pending > MAX/2 或有排队 host 请求 最小预算（仅 must-run + 1 l2p flush）
+ *   NORMAL  其余                               按需预算（无 RR 巡检）
+ * 档位 → 预算规模/任务掩码见 g_bg_level_cfg；时间预算语义见 bg_scheduler.h 头注。
  *
  * 文件结构：
  *   1. 内部辅助        ftl_now_ms / ftl_op_host_io（host I/O 完成服务函数）
- *   2. 三级后台服务    ftl_gc_evaluate /
- *                      ftl_service_idle / ftl_service_normal / ftl_service_busy（static）
+ *   2. 后台调度器接线  ftl_gc_evaluate（static）+ 14 个 bg_a_* 适配器 + g_bg_level_cfg
+ *                      + ftl_bg_init / ftl_bg_level_select（接线在 bg_scheduler.c 引擎上）
  *   3. 对外接口        ftl_init / ftl_service / ftl_submit_read / ftl_submit_write
  *   4. 子操作下发      ftl_issue_subop / ftl_drain_group（static）
  *   5. 元数据落盘/TRIM ftl_flush / ftl_trim
@@ -474,177 +476,257 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
     return triggers;
 }
 
-/* --------------------------------------------------------------------
- * ftl_service_idle
- *   功能：IDLE 后台（inflight == 0，系统真空闲）——全力执行 GC/WL/巡检/持久化/CP。
- *   参数：ftl —— FTL 实例。
- *   返回：无。
- * -------------------------------------------------------------------- */
-static void ftl_service_idle(ftl_context_t *ftl)
+/* ════════════════════════════════════════════════════════════════════════
+ * 后台调度器接线（v0.76）
+ *
+ * v0.75 的三级 static 服务函数（ftl_service_idle/normal/busy）→ 14 项任务表 +
+ * 档位→预算映射。引擎在 bg_scheduler.c（通用、零 kick 知识）；本文件只做三件事：
+ *   ① 14 个 static 适配器：把异构 kick（签名/参数各异）包成 void(ftl_context_t*)；
+ *   ② g_bg_level_cfg[3]：档位 → 每轮总预算 + l2p flush 条数上界 + 预算任务掩码；
+ *   ③ ftl_bg_init 填任务表 / ftl_bg_level_select 负载→档位（纯函数）。
+ *
+ * 正确性关键集（must_run）无条件每轮跑、不 gate、不占预算——删了系统会挂：
+ *   checkpoint_kick / rr / mig_service / metadata_dir / journal need_erase / 紧急 CP。
+ * 全表每项的 interval / must_run / budget 依据见 bg_scheduler.h 头注与下方各适配器注释。
+ *
+ * ⚠ 掩码位下标 = 任务表下标（ftl_bg_init 顺序填充，见计划「勿错位」警示）。
+ * ⚠ 预算时钟 = 平台 time_us（SysTick 1ms 量化）；确定性前台保护由「档位→条数/掩码」
+ *   承担（见 g_bg_level_cfg 与 bg_scheduler.h「关键语义」）。
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* 档位 → 预算规模（IDLE/NORMAL/BUSY）。锚定 onfi_1_0.c 时序（NAND_TIME_TPROG_US=700）。
+ *  IDLE/NORMAL 2000µs ≈ 2~3 页写 + GC 全表求值；BUSY 700µs ≈ 恰 1 页写。
+ * 掩码：IDLE 位 6..13 全 budgeted（含 RR 巡检）；NORMAL 位 6..12（无 RR 巡检）；
+ *       BUSY 仅位 8（l2p flush）—— 恰「仅 must-run + 1 flush」，与旧 BUSY 档逐字等价。 */
+static const bg_level_cfg_t g_bg_level_cfg[BG_LEVEL_BUSY + 1U] = {
+  /* IDLE   */ {2000U,        (uint8_t)L2P_CACHE_SIZE,    0x3FC0U},
+ /* NORMAL */
+    {2000U, (uint8_t)BG_NORMAL_FLUSH_COUNT,    0x1FC0U},
+ /* BUSY   */
+    { 700U,   (uint8_t)BG_BUSY_FLUSH_COUNT, (1U << 8U)},
+};
+
+/* ── 14 个适配器（包异构 kick → void(ftl_context_t*)）── */
+
+/* 位 0 · must_run（最先）—— 推进**已在飞**的 Checkpoint job（阶段 6）。
+ * ⚠ 必须排在最前、且不占预算：CP 可能在 BUSY 档被紧急水位起（journal≥95%），后续阶段
+ *   要跨多轮跨档位走完——排在预算 pass 里会被低优先级/预算耗尽饿死（旧实现也是先于
+ *   三档统一推进，见 ftl_service 的阶段 6 注释）。 */
+static void bg_a_checkpoint(ftl_context_t *ftl)
 {
-    /* 推进 Read Recovery job（阶段 3：host 读在等结果，**任何档位都要跑**——
-     * 它不占后台带宽预算，只是把已在飞的坏页恢复分步做完）。 */
-    rr_kick(ftl);
-
-    /* 推进搬移 job（阶段 4：GC/WL/预测共用，已在飞则续跑下一步）。
-     * 同样**任何档位都要跑**——job 可能是在 BUSY 档被写路径紧急 GC 起的。 */
-    mig_service(ftl);
-
-    /* flush 所有 dirty cache（阶段 5：改为**起异步写回**，最多 L2P_CACHE_SIZE 条/轮。
-     * ⚠ 不再是同步循环——旧实现在这里逐行阻塞写 NAND，一轮 ftl_service 可以停几十 ms。
-     * 在飞上限由 L2P_FLUSH_MAX_INFLIGHT 闸住，其余行下轮再起。 */
-    l2p_flush_kick(&ftl->cache, (uint8_t)L2P_CACHE_SIZE);
-
-    /* GC：统一触发判定（与 NORMAL 同一求值点）。命中即**起一个** GC 搬移 job。
-     * ⚠ 阶段 4 起「补池到水位①」不再是同步的 while 突发——搬移是异步 job，
-     *   每实例同时只允许一个（单飞行）⇒ 这里最多**启动**一个，后续由 mig_service
-     *   逐轮推进；池水位靠每轮的求值持续补，收敛速度由 NAND 带宽而非循环次数决定。
-     *   （原 while 循环的 `budget` 计数在异步下退化为「一次启动」，故一并去掉。） */
-    if (ftl_gc_evaluate(ftl) != 0U)
-    {
-        (void)mig_begin_gc(ftl);
-    }
-
-    /* 磨损均衡（IDLE 全力执行） */
-    (void)mig_begin_wl(ftl);
-
-    /* 慢死预测巡检（节流 1s；一次只搬一个 SB，防长时间阻塞） */
-    {
-        uint32_t now_ms = ftl_now_ms();
-        if ((now_ms - ftl->rr_last_scan_ms) >= RR_SCAN_INTERVAL_MS)
-        {
-            ftl->rr_last_scan_ms = now_ms;
-            (void)mig_begin_predict(ftl);
-        }
-    }
-
-    /* 推进 Journal 刷页 job（阶段 2：起异步写，不再阻塞在服务循环里） */
-    journal_kick(&ftl->journal);
-
-    /* BBT 持久化（阶段 7：攒批写 NAND BBT；job 起步/续跑，提交即返回） */
-    bbt_kick(&ftl->alloc);
-
-    /* Wear 持久化（阶段 7：攒批写磨损计数；节拍未到 / 在飞则空转） */
-    wear_kick(&ftl->alloc, ftl->total_writes);
-
-    /* 元数据目录整理 job（阶段 8：日志块回收 + 抗碎片压缩）。
-     * ⚠ **任何档位都要跑**：compact_wanted 是 append_slot 在**前台写路径**上置的
-     *   （池吃紧时换块），不推进就是写路径永久 FTL_AGAIN。 */
-    metadata_dir_kick(&ftl->metadata_dir, &ftl->alloc);
-
-    /* Checkpoint 检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）
-     * ⚠ 阶段 6 起 checkpoint_begin **只装配 job**（提交即返回），CP 的成败不再能从
-     *   返回值看出来——判据变成"job 走完且 [CP] 无 abort"（见 checkpoint.c 的心跳）。
-     *   定时基准照旧无条件重置（与旧实现一致：触发即重置，不看成败）。 */
-    {
-        uint32_t now_ms  = ftl_now_ms();
-        uint32_t elapsed = now_ms - ftl->cp_timer_start;
-
-        if (checkpoint_check_trigger(ftl, elapsed))
-        {
-            (void)checkpoint_begin(ftl);
-            ftl->cp_timer_start = now_ms;
-        }
-    }
+    checkpoint_kick(ftl);
 }
 
-/* --------------------------------------------------------------------
- * ftl_service_normal
- *   功能：NORMAL 后台（有 IO 但未饱和）——受节流的 GC / WL / 持久化 / CP。
- *   参数：ftl —— FTL 实例。
- *   返回：无。
- * -------------------------------------------------------------------- */
-static void ftl_service_normal(ftl_context_t *ftl)
+/* 位 1 · must_run —— 推进 Read Recovery job（阶段 3）。
+ * host 读在等结果（托管的子操作占着组在飞数），不推进即死等；任何档位都要跑。 */
+static void bg_a_rr(ftl_context_t *ftl)
 {
-    /* 推进 Read Recovery job（阶段 3，见 IDLE 档的说明） */
     rr_kick(ftl);
-
-    /* 推进搬移 job（阶段 4，见 IDLE 档的说明） */
-    mig_service(ftl);
-
-    /* 后台 flush：最多 4 条。
-     * ⚠ thrashing 降级（P1-4）：工作集远大于 cache 时，这些**主动** flush 大概率是白写
-     * （被 flush 的行往往在下次访问前就被驱逐，届时还要再 flush 一次），且挤占前台 IO 的
-     * NAND 带宽。检测到 thrashing ⇒ 停主动 flush，脏行只由**驱逐路径按需**写回。
-     * 持久性不受影响：L2P 更新已先入 Journal（写完成路径），且 Checkpoint job 会
-     * 无条件 flush 全部脏 region（见 checkpoint.c 的 CP_FLUSH_REGIONS）。 */
-    if (!l2p_cache_is_thrashing(&ftl->cache))
-    {
-        l2p_flush_kick(&ftl->cache, BG_NORMAL_FLUSH_COUNT);
-    }
-
-    /* 检查 GC（**统一求值点**，与 IDLE 同一函数）。命中即起一个 GC 搬移 job——
-     * NORMAL 是受节流档（有 host IO 在场），不像 IDLE 那样连起补池/预测。 */
-    if (ftl_gc_evaluate(ftl) != 0U)
-    {
-        (void)mig_begin_gc(ftl);
-    }
-
-    /* 磨损均衡（NORMAL 模式按需执行；触发判定在 mig_begin_wl 内） */
-    (void)mig_begin_wl(ftl);
-
-    /* 推进 Journal 刷页 job（阶段 2：与 IDLE 同一入口，job 已在飞则空操作） */
-    journal_kick(&ftl->journal);
-
-    /* BBT 持久化（NORMAL 模式周期性刷入；阶段 7 起 job 化） */
-    bbt_kick(&ftl->alloc);
-
-    /* Wear 持久化（NORMAL 模式周期性刷入；阶段 7 起 job 化） */
-    wear_kick(&ftl->alloc, ftl->total_writes);
-
-    /* 元数据目录整理 job（阶段 8；语义同 IDLE 档——写路径的 FTL_AGAIN 等它推进） */
-    metadata_dir_kick(&ftl->metadata_dir, &ftl->alloc);
-
-    /* Checkpoint 检查（NORMAL 模式也执行；语义同 IDLE 档） */
-    {
-        uint32_t now_ms  = ftl_now_ms();
-        uint32_t elapsed = now_ms - ftl->cp_timer_start;
-
-        if (checkpoint_check_trigger(ftl, elapsed))
-        {
-            (void)checkpoint_begin(ftl);
-            ftl->cp_timer_start = now_ms;
-        }
-    }
 }
 
-/* --------------------------------------------------------------------
- * ftl_service_busy
- *   功能：BUSY 后台（host 饿着）——最少后台，只 flush 1 条防 evict 阻塞 + 紧急 CP。
- *   参数：ftl —— FTL 实例。
- *   返回：无。
- * -------------------------------------------------------------------- */
-static void ftl_service_busy(ftl_context_t *ftl)
+/* 位 2 · must_run —— 推进搬移 job（阶段 4，GC/WL/预测共用，已在飞则续跑下一步）。
+ * 写路径的紧急 GC 在 BUSY 档起（ftl_wbuf_flush 分配不到块 ⇒ FTL_AGAIN），
+ * 不推进即死锁；任何档位都要跑。 */
+static void bg_a_mig_service(ftl_context_t *ftl)
 {
-    /* 推进 Read Recovery job（阶段 3）。BUSY 档**尤其**要跑：托管的子操作本身
-     * 就是一条 host 读在等结果，且它占着组在飞数 ⇒ 不跑就是死等。 */
-    rr_kick(ftl);
-
-    /* 推进搬移 job（阶段 4）。BUSY 档也**必须**跑：写路径的紧急 GC 就是在 BUSY
-     * 档起的（ftl_wbuf_flush 分配不到块 ⇒ 起 GC job + FTL_AGAIN），不推进就是死锁。 */
     mig_service(ftl);
+}
 
-    /* 最少后台：只起 1 条写回防 evict 阻塞（异步——提交即返回，不占本轮时间） */
-    l2p_flush_kick(&ftl->cache, 1U);
+/* 位 3 · must_run —— 元数据目录整理 job（阶段 8）。
+ * compact_wanted 是 append_slot 在**前台写路径**上置的（池吃紧时换块），
+ * 不推进就是写路径永久 FTL_AGAIN；任何档位都要跑。 */
+static void bg_a_metadata_dir(ftl_context_t *ftl)
+{
+    metadata_dir_kick(&ftl->metadata_dir, &ftl->alloc);
+}
 
-    /* BUSY 档**不**起新的 Journal 页写（BUSY = host 饱和档，页满时 journal_append
-     * 自己会起异步写；这里再起就违背了「BUSY 只做防饿死的最小后台」的档位约定）。
-     * 只补「未起的换块擦除」——新环形块没擦过就不能往里写。 */
+/* 位 4 · must_run —— 补「未起的换块擦除」（位 9 的子集；journal_kick 单飞行，
+ * IDLE/NORMAL 双跑安全）。新环形块没擦过就不能往里写 ⇒ 条件为真即起。 */
+static void bg_a_journal_erase(ftl_context_t *ftl)
+{
     if ((ftl->journal.job.phase == JRN_IDLE) && (ftl->journal.job.need_erase != 0U))
     {
         journal_kick(&ftl->journal);
     }
+}
 
-    /* 紧急 Checkpoint：Journal ≥ 95% 时 BUSY 模式也强制执行（起 job 即返回，
-     * 后续阶段由 ftl_service 的 checkpoint_kick 跨档位推进）。 */
+/* 位 5 · must_run —— 紧急 Checkpoint（Journal ≥ 95%）。
+ * 原只在 BUSY 档检查；移入 must-run 后每轮检查。checkpoint_begin 只装配 job、单飞行
+ * （cp_job.active → FTL_AGAIN）幂等 ⇒ 这是**刻意的行为放宽**：紧急水位必须随时响应。 */
+static void bg_a_emergency_cp(ftl_context_t *ftl)
+{
     if (checkpoint_is_emergency(ftl))
     {
         (void)checkpoint_begin(ftl);
     }
+}
 
-    /* 元数据目录整理 job（阶段 8）。BUSY 档也**必须**跑：compact_wanted 是上面那条
-     * l2p_flush_kick 的换块分支（或前台写路径）置的，不推进就是写路径永久 FTL_AGAIN。 */
-    metadata_dir_kick(&ftl->metadata_dir, &ftl->alloc);
+/* 位 6 · 预算 — GC 统一触发判定（与三档旧实现同一函数；内部 GC_EVAL_INTERVAL_MS 门兜底，
+ * interval=GC_EVAL_INTERVAL_MS 是调度器级节拍）。命中即**起一个** GC 搬移 job（单飞行）。 */
+static void bg_a_gc_eval(ftl_context_t *ftl)
+{
+    if (ftl_gc_evaluate(ftl) != 0U)
+    {
+        (void)mig_begin_gc(ftl);
+    }
+}
+
+/* 位 7 · 预算 — 磨损均衡（触发判定在 mig_begin_wl 内部；interval=0 交内部门） */
+static void bg_a_wl(ftl_context_t *ftl)
+{
+    (void)mig_begin_wl(ftl);
+}
+
+/* 位 8 · 预算 — 后台 flush 脏 L2P region，条数上界 = 档位 l2p_flush_max
+ * （IDLE=L2P_CACHE_SIZE / NORMAL=BG_NORMAL_FLUSH_COUNT / BUSY=BG_BUSY_FLUSH_COUNT，
+ * 经 ftl->bg.level 反查档位）。BUSY 仅此一项 ⇒ 「must-run + 1 flush」与旧档逐字等价。
+ * ⚠ thrashing 降级（P1-4）：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。 */
+static void bg_a_l2p_flush(ftl_context_t *ftl)
+{
+    if (l2p_cache_is_thrashing(&ftl->cache))
+    {
+        return;
+    }
+    l2p_flush_kick(&ftl->cache, (uint8_t)g_bg_level_cfg[ftl->bg.level].l2p_flush_max);
+}
+
+/* 位 9 · 预算 — 推进 Journal 刷页 job（阶段 2；job 已在飞则空操作）。
+ * BUSY 档被掩掉（host 饱和档不主动起页写；页满时 journal_append 自己会起）。 */
+static void bg_a_journal_flush(ftl_context_t *ftl)
+{
+    journal_kick(&ftl->journal);
+}
+
+/* 位 10 · 预算 — BBT 持久化（阶段 7：攒批写 NAND BBT；job 起步/续跑，提交即返回） */
+static void bg_a_bbt(ftl_context_t *ftl)
+{
+    bbt_kick(&ftl->alloc);
+}
+
+/* 位 11 · 预算 — Wear 持久化（阶段 7）。
+ * ⚠ interval 保持 0：内部 OR 双门（WEAR_FLUSH_INTERVAL_MS 120s / 写增量≥1024，wear.c）
+ *   为准——写增量触发是掉电窗口上界，不能被调度器 interval 拖死（唯一诚实例外）。 */
+static void bg_a_wear(ftl_context_t *ftl)
+{
+    wear_kick(&ftl->alloc, ftl->total_writes);
+}
+
+/* 位 12 · 预算 — Checkpoint 触发检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）。
+ * 语义同旧三档：定时基准无条件重置（触发即重置，不看成败）；job 装配由
+ * checkpoint_begin（提交即返回），成败由 [CP] 心跳判。 */
+static void bg_a_cp_trigger(ftl_context_t *ftl)
+{
+    uint32_t now_ms  = ftl_now_ms();
+    uint32_t elapsed = now_ms - ftl->cp_timer_start;
+
+    if (checkpoint_check_trigger(ftl, elapsed))
+    {
+        (void)checkpoint_begin(ftl);
+        ftl->cp_timer_start = now_ms;
+    }
+}
+
+/* 位 13 · 预算 — 慢死预测巡检（节流 1s；一次只搬一个 SB，防长时间阻塞）。仅 IDLE 档。
+ * 内部门（rr_last_scan_ms / RR_SCAN_INTERVAL_MS）与调度器 interval=RR_SCAN_INTERVAL_MS
+ * 双保险：时钟缺失降级下调度器 interval gate 失效，内部门兜底（与 v0.75 退化形态同构）。 */
+static void bg_a_rr_predict(ftl_context_t *ftl)
+{
+    uint32_t now_ms = ftl_now_ms();
+
+    if ((now_ms - ftl->rr_last_scan_ms) >= RR_SCAN_INTERVAL_MS)
+    {
+        ftl->rr_last_scan_ms = now_ms;
+        (void)mig_begin_predict(ftl);
+    }
+}
+
+/* ── 任务表 + 档位选择 ── */
+
+/* ftl_bg_init — 填 14 项任务表（表序 = 优先级升序；引擎线性扫 ⇒ 掩码位下标 = 表下标）。
+ * 由 ftl_init 在实例装配末尾调用一次。 */
+void ftl_bg_init(ftl_context_t *ftl)
+{
+    bg_scheduler_t *bg = &ftl->bg;
+    uint8_t         i  = 0U;
+
+    bg_scheduler_init(bg);
+
+    /* must-run 正确性关键集（位 0..5：无条件、不 gate、不占预算） */
+    bg->tasks[i].func     = bg_a_checkpoint;
+    bg->tasks[i].must_run = 1U;
+    i++;
+    bg->tasks[i].func     = bg_a_rr;
+    bg->tasks[i].must_run = 1U;
+    i++;
+    bg->tasks[i].func     = bg_a_mig_service;
+    bg->tasks[i].must_run = 1U;
+    i++;
+    bg->tasks[i].func     = bg_a_metadata_dir;
+    bg->tasks[i].must_run = 1U;
+    i++;
+    bg->tasks[i].func     = bg_a_journal_erase;
+    bg->tasks[i].must_run = 1U;
+    i++;
+    bg->tasks[i].func     = bg_a_emergency_cp;
+    bg->tasks[i].must_run = 1U;
+    i++;
+
+    /* 预算任务（位 6..13；interval / 优先级 / 单次钳制；掩码位 6..13 = 0x3FC0） */
+    bg->tasks[i].func        = bg_a_gc_eval;
+    bg->tasks[i].priority    = 0U;
+    bg->tasks[i].interval_ms = GC_EVAL_INTERVAL_MS;
+    bg->tasks[i].budget_us   = 400U;
+    i++;
+    bg->tasks[i].func      = bg_a_wl;
+    bg->tasks[i].priority  = 1U;
+    bg->tasks[i].budget_us = 300U;
+    i++;
+    bg->tasks[i].func      = bg_a_l2p_flush;
+    bg->tasks[i].priority  = 2U;
+    bg->tasks[i].budget_us = 1500U;
+    i++;
+    bg->tasks[i].func      = bg_a_journal_flush;
+    bg->tasks[i].priority  = 3U;
+    bg->tasks[i].budget_us = 700U;
+    i++;
+    bg->tasks[i].func      = bg_a_bbt;
+    bg->tasks[i].priority  = 4U;
+    bg->tasks[i].budget_us = 700U;
+    i++;
+    bg->tasks[i].func      = bg_a_wear;
+    bg->tasks[i].priority  = 5U;
+    bg->tasks[i].budget_us = 700U;
+    i++;
+    bg->tasks[i].func      = bg_a_cp_trigger;
+    bg->tasks[i].priority  = 6U;
+    bg->tasks[i].budget_us = 100U;
+    i++;
+    bg->tasks[i].func        = bg_a_rr_predict;
+    bg->tasks[i].priority    = 7U;
+    bg->tasks[i].interval_ms = RR_SCAN_INTERVAL_MS;
+    bg->tasks[i].budget_us   = 300U;
+    i++;
+
+    bg->task_count = i;
+}
+
+/* ftl_bg_level_select — 负载 → 档位（纯函数，无副作用）。
+ * 与 v0.75 三级分档**逐字等价**（见 ftl_service 注释）：inflight 全空 = IDLE；
+ * pending > 半池 或 有未决组 = BUSY；中间 = NORMAL。 */
+uint8_t ftl_bg_level_select(const ftl_context_t *ftl)
+{
+    uint16_t queued   = pending_group_count(ftl);
+    uint16_t inflight = (uint16_t)(pending_count(ftl) + queued);
+
+    if (inflight == 0U)
+    {
+        return BG_LEVEL_IDLE;
+    }
+    if ((pending_count(ftl) > (FTL_PENDING_MAX / 2U)) || (queued != 0U))
+    {
+        return BG_LEVEL_BUSY;
+    }
+    return BG_LEVEL_NORMAL;
 }
 
 /* ── 对外接口 ── */
@@ -744,6 +826,10 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo)
     /* ├─ 统计 ── */
     ftl->total_writes = 0U;
 
+    /* ├─ 后台调度器任务表（v0.76：14 项；must-run + interval/budget/优先级）──
+     * 必须在所有在飞的字段就绪后填（适配器只依赖实例字段与 kick，无额外依赖）。 */
+    ftl_bg_init(ftl);
+
     return FTL_OK;
 }
 
@@ -776,19 +862,17 @@ void ftl_service_pump(void)
 
 /* --------------------------------------------------------------------
  * ftl_service
- *   功能：服务**单个** FTL 实例（Phase 2.5 补发子操作 + Phase 3 三级后台）。
+ *   功能：服务**单个** FTL 实例（Phase 2.5 补发子操作 + Phase 3 后台调度）。
  *   参数：ftl —— FTL 实例（NULL 直接返回）。
  *   返回：无。
  *   实现要点：调用方须**先**调 ftl_service_pump()（全局泵，每轮一次），再对**每个**
  *             实例调本函数（序 4：多实例下所有实例都要推进，不能只跑 [0][0][0]）。
- *             Phase 3 的空闲度用 inflight（pending + groups + completion_table 占用）近似，
- *             **不再**用 submitted（旧实现 host 无 IO 时 fc_service 也可能非 0 ⇒ 误判
- *             NORMAL/BUSY）；bg_suspend 置位时整体跳过 Phase 3（`bbt --erase` 后保护）。
+ *             Phase 3 用 inflight（pending + groups）选档（bg_suspend 置位时整体跳过，
+ *             `bbt --erase` 后保护），档位 → bg_scheduler_run 执行 14 项任务表。
  * -------------------------------------------------------------------- */
 void ftl_service(ftl_context_t *ftl)
 {
-    uint16_t inflight;
-    uint16_t queued;
+    uint8_t level;
 
     if (ftl == NULL)
     {
@@ -816,50 +900,36 @@ void ftl_service(ftl_context_t *ftl)
      * 判定之前：它是 host IO 的收尾，不是后台任务。 */
     ftl_wbuf_maybe_flush_idle(ftl);
 
-    /* Phase 3: 三级后台模式（B3：空闲度基于未决命令数，非"本轮有无提交 NAND"代理）
+    /* Phase 3: 时间预算后台调度（v0.76）
      *
-     * 旧实现用 submitted（本轮 fc_service 提交了几条）判定，host 无 IO 时
-     * fc_service 也可能返回非 0（后台命令推进）→ 误判 NORMAL/BUSY，GC/WL/CP 全推迟。
-     * 现在用 pending（host IO 未决）+ groups（未完成的 host 请求）近似系统空闲度：
-     * 全空 = 真空闲 → IDLE 全力后台；有未完成 host 请求 = host 饿着 → BUSY 最少后台
-     * （让路，否则抢走 drain 要用的 FC buffer）；中间 → NORMAL 按需后台。
+     * v0.75 三级 static 服务函数 → bg_scheduler 引擎 + 14 项任务表 + 档位→预算映射
+     * （接线/引擎见本文件上部「后台调度器接线」与 bg_scheduler.h）。空闲度近似
+     * （B3：基于未决命令数，非"本轮有无提交 NAND"代理）**逐字沿用**旧实现：
+     *   旧实现用 submitted（本轮 fc_service 提交了几条）判定，host 无 IO 时 fc_service
+     *   也可能返回非 0（后台命令推进）→ 误判 NORMAL/BUSY，GC/WL/CP 全推迟。现在用
+     *   pending（host IO 未决）+ groups（未完成的 host 请求）近似系统空闲度：
+     *   全空 = 真空闲 → IDLE 全力后台；有未完成 host 请求 = host 饿着 → BUSY 最少后台
+     *   （让路，否则抢走 drain 要用的 FC buffer）；中间 → NORMAL 按需后台。
      *
      * ⚠ **阶段 4 起不再计入 completion_table**：后台 job（journal / RR / 搬移）的命令
      *   也登记在 completion_table 里，计进来会让「真空闲」永不成立——一个后台 job 在飞
      *   就把模式从 IDLE 顶到 NORMAL，后台反而被自己的命令饿死。后台 job 的活跃度由各自
      *   的「单飞行门」（journal.job.phase / rr.stage / mig.active）单独管，与 host 侧解耦。
      *
-     * 近似方案（文档标注）：pending 是"占用快照"，不含队列里排队未 submit
-     * 的 host 请求（controller 层不回报其深度）。单实例 LUN_NUM=1 下够用。 */
-    queued   = pending_group_count(ftl);
-    inflight = (uint16_t)(pending_count(ftl) + queued);
-
-    /* 后台写闸门：`bbt --erase` 之后介质已空而 RAM 状态陈旧，任何后台写都是往干净
-     * 芯片上倒垃圾。Phase 1/2/2.5 已跑完（NAND 泵 + host IO 正常），这里整体跳过
-     * Phase 3（checkpoint / bbt / wear / journal / GC 的唯一入口）。 */
+     * ⚠ bg_suspend 必须在此**最先** return（早于 must-run pass）：`bbt --erase` 之后
+     *   介质已空而 RAM 状态陈旧，任何后台写（含 must-run 里的 journal/CP/元数据目录）
+     *   都是往干净芯片上倒垃圾。Phase 1/2/2.5 已跑完（NAND 泵 + host IO 正常）。 */
     if (ftl->bg_suspend != 0U)
     {
         return;
     }
 
-    /* Phase 3 首：推进**已在飞**的 Checkpoint job（阶段 6）。
-     * ⚠ 必须在三档**之外**统一推进：CP 可能在 BUSY 档被紧急水位起（journal ≥95%），
-     *   而它的后续阶段要跨多轮、跨档位才能走完——只在起它的那一档推进会把 job 钉死。
-     *   本函数只推进已在跑的 job；"要不要起"仍由各档位的 checkpoint_begin 决定。 */
-    checkpoint_kick(ftl);
-
-    if (inflight == 0U)
-    {
-        ftl_service_idle(ftl);
-    }
-    else if ((pending_count(ftl) > (FTL_PENDING_MAX / 2U)) || (queued != 0U))
-    {
-        ftl_service_busy(ftl);
-    }
-    else
-    {
-        ftl_service_normal(ftl);
-    }
+    /* 档位选择在 ftl_bg_level_select 内算（纯函数，inflight = pending + groups）；
+     * checkpoint_kick 由 must-run 位 0 承接（引擎 Pass 0 最先执行），此处不再显式调。
+     * ftl->bg.level 供 l2p flush 适配器反查条数上界（位 8）。 */
+    level         = ftl_bg_level_select(ftl);
+    ftl->bg.level = level;
+    bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level]);
 }
 
 /* ── 页打包写缓冲（§七 方案 A）──
