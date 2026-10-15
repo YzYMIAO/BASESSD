@@ -655,6 +655,26 @@ if (ftl_gc_evaluate(ftl) != 0U) {                 /* 统一触发求值（预算
 
 坏块管理分三个阶段：出厂扫描 → 运行时隔离 → 替换机制。
 
+**生命周期总览（真实实现）**：
+
+```mermaid
+flowchart TD
+    INIT["bbt_init()"] --> LOAD{"bbt_load()<br/>池内取 sequence 最大有效份?"}
+    LOAD -- 是 --> REBUILD["重建 BST 坏块位<br/>（bad_map → blocks[].state）"]
+    LOAD -- 否（无有效 BBT） --> USED{"bbt_medium_has_ftl_data()<br/>介质已被格式化过?"}
+    USED -- 是 --> REJECT["拒绝出厂扫描（LOGE）<br/>账本从空开始，运行时兜底"]
+    USED -- 否（空片） --> SCAN["bbt_scan_factory()<br/>逐块读 Page 0 列 2048 spare 首字节"]
+    SCAN --> PROBE{"mark[0] ≠ 0xFF?"}
+    PROBE -- 是 --> SETBAD["ftl_block_set_bad()<br/>清 OPEN/CLOSED/FREE"]
+    PROBE -- 否 --> NEXT["下一块"]
+    SETBAD --> SCAN
+    SCAN --> SAVE["bbt_save()<br/>写 NAND BBT 池（块轮转 + sequence）"]
+    SAVE --> RUN["运行时隔离（§3.8.2）"]
+    RUN --> MARK["PROGRAM/ERASE 失败 或 READ 超限<br/>→ bbt_mark_bad()"]
+    MARK --> DIRTY["记 BST 坏块 + 置 dirty<br/>→ bbt_save() 攒批写回"]
+    MARK --> REPLACE["替换（§3.8.3）<br/>数据区坏块 → allocator 跳过"]
+```
+
 #### 3.8.1 出厂坏块扫描
 
 ```
@@ -1046,6 +1066,22 @@ compaction 停、只准 GC）。dhara 更简单：「没有复杂 GC」（`refer
 | ~~T3: 定时~~ | ~~500ms 定时器到期~~ | **删**（见下） | — |
 | ~~T6: 碎片率~~ | ~~平均有效页 > 70%~~ | **不做**（见下） | — |
 
+**完整流程（触发 → 选 victim → 搬移 → 收口）**：
+
+```mermaid
+flowchart TD
+    EV["bg_a_gc_eval（预算任务位 6，§12）"] --> GE["ftl_gc_evaluate()"]
+    GE --> GATE{"求值节拍<br/>now − gc_eval_last_ms ≥ 10ms?"}
+    GATE -- 未到 --> RET["返回 0（省全表扫描）"]
+    GATE -- 到 --> TRIG["gc_check_triggers()<br/>T1 / T4 / T5 位掩码"]
+    TRIG -- 0 不触发 --> RET
+    TRIG -- 命中 --> BG["mig_begin_gc()"]
+    BG --> V{"gc_select_victim()<br/>四维 cost 评分（closed_sb_list）"}
+    V -- 无 victim --> NV["gc_novictim_count++<br/>下轮再试"]
+    V -- 有 --> MIG["migrate job 单飞行<br/>READ → WRITE → FLUSH_JRN → ERASE → DONE"]
+    MIG --> FREE["allocator 归还 Free Pool<br/>gc_reclaimed_count++"]
+```
+
 **求值点（统一）**：IDLE 与 NORMAL 两条后台路径共用**同一个求值点**
 （`ftl_gc_evaluate`，`src/ftl/ftl.c`）——命中即 `mig_begin_gc()` 起**一个**搬移 job
 （搬移是异步 job 且每实例单飞行，两档同为「起一个」；IDLE 不再有 `⌈deficit/PLANE_NUM⌉`
@@ -1289,6 +1325,28 @@ int wl_should_trigger(const struct ftl_context *ftl) {
 
 > ⚠ 本节早先写「三星企业级 SSD 使用此类多维度触发条件」——**无任何引用**（项目规矩：
 > 不凭记忆说行业要求）⇒ 改为对**判据本身**的中性说明，不借厂商名义（同 §4.6 的处置）。
+
+**完整流程（触发 → 选块 → 搬移 → 收尾）**：
+
+```mermaid
+flowchart TD
+    WL["bg_a_wl（预算任务位 7，§12）"] --> BEGIN["mig_begin_wl()"]
+    BEGIN --> GATE{"间隔门<br/>total_writes ≥ WL_MIN_INTERVAL(1000)?"}
+    GATE -- 否 --> NONE["不触发"]
+    GATE -- 是 --> TRIG{"wl_should_trigger()<br/>三条件 OR"}
+    TRIG --> C1{"① max−min ≥ 5000?"}
+    C1 -- 是 --> HIT
+    C1 -- 否 --> C2{"② max ≥ avg×3<br/>（avg>0 保护）?"}
+    C2 -- 是 --> HIT
+    C2 -- 否 --> C3{"③ 低擦除区（min..min+1000）<br/>块数占比 > 5%?"}
+    C3 -- 是 --> HIT
+    C3 -- 否 --> NONE
+    HIT["触发"] --> VICT{"wl_select_victim()<br/>低擦除区 + 有效 CW ≥ 70%<br/>同有效数下 read_count 高优先"}
+    VICT -- 无 --> NONE
+    VICT -- 有 --> MIG["mig_start(MIG_KIND_WL,<br/>MIG_POST_RETIRE)"]
+    MIG --> SAME["同一台 migrate job（§4.5）<br/>READ → WRITE → FLUSH_JRN → ERASE → DONE"]
+    SAME --> RETIRE["归还 Free Pool + 退役 RESERVED<br/>+ rr_retire_block()"]
+```
 
 #### 4.8.3 受害块选择算法
 
@@ -2782,6 +2840,24 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
         return ftl_boot_power_failure(ftl, &cp, result);               // 异常掉电
     }
 }
+```
+
+**启动恢复三分支（真实实现）**：
+
+```mermaid
+flowchart TD
+    BOOT["ftl_boot_recovery()"] --> LATEST["journal_scan_latest()<br/>扫环形池取最新页（只读，不改状态）"]
+    LATEST --> FIND{"checkpoint_find_latest()<br/>找到有效 CP header?"}
+    FIND -- 否 --> FRESH["ftl_boot_fresh_start()<br/>出厂首次启动"]
+    FIND -- 是 --> JUDGE{"(page_seq + entry_count)<br/>≤ cp.journal_sequence?<br/>（整页口径）"}
+    JUDGE -- 是 --> CLEAN["ftl_boot_clean_start()<br/>干净关机：无回放"]
+    JUDGE -- 否 --> PF["ftl_boot_power_failure()<br/>异常掉电：回放未落盘条目"]
+    PF --> REPLAY["journal_replay(> cp_seq)<br/>两遍扫描 → L2P 标 DIRTY"]
+    REPLAY --> BITMAP["按 CP region_bitmap 局部预载<br/>（跳过 DIRTY 行）"]
+    FRESH --> REBUILD["ftl_rebuild_closed_sb_list()<br/>F2 全扫重建 Closed SB"]
+    CLEAN --> REBUILD
+    BITMAP --> REBUILD
+    REBUILD --> READY["Controller → Ready<br/>DIRTY 行由后台 flush 逐步写回"]
 ```
 
 #### 8.3.3 出厂首次启动（Fresh Start）
