@@ -112,4 +112,4 @@ make clean && make tests            # ✅ 0 warning / 0 error
 ## 出处
 
 - 手册：MT29F4G08 Figure 26 / Figure 27（`90h` 的 `00h` 与 `20h` 两个地址段）。
-- 同型先例：`docs/changelog/fc_ut_read_meta_v46.md`（无 desc 链 + 4 字节 + 经暂存进 CQ `param`）。
+- 同型先例：`docs/archive/changelog/fc_ut_read_meta_v46.md`（无 desc 链 + 4 字节 + 经暂存进 CQ `param`）。

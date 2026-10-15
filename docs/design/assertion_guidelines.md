@@ -16,7 +16,7 @@
 
 3. **资源类结果保留返回码**
    池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、队列满背压（`QUEUE_FULL` / `IO_ERROR`）、`fc_command_alloc()` 返回 `NULL`、`mem_alloc` 返回 `NULL`、NAND 报告的错误——都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。
-   同理**运行时状态**保留返回码：`g_nand_dispatch_armed == 0U`（异步路径未放行）、`g_initialized == 0U`（惰性初始化未完成）、`ctx->active == 0U`、`fc_buffer_is_occupied(...) == 0U`（生命周期）、`map->uops == NULL`（操作表缺项）——这些是"此刻能不能做"，不是"调用者传错"。（原条目还列了 `g_crc_ready == 0U`——**v33 起该标志随 CRC 改走 HAL 驱动整体删除**，CRC 自检失败转 `ASSERT`，不再有「静默降级」这条运行结果，见 `docs/changelog/fc_crc_hal_driver_v33.md`。）
+   同理**运行时状态**保留返回码：`g_nand_dispatch_armed == 0U`（异步路径未放行）、`g_initialized == 0U`（惰性初始化未完成）、`ctx->active == 0U`、`fc_buffer_is_occupied(...) == 0U`（生命周期）、`map->uops == NULL`（操作表缺项）——这些是"此刻能不能做"，不是"调用者传错"。（原条目还列了 `g_crc_ready == 0U`——**v33 起该标志随 CRC 改走 HAL 驱动整体删除**，CRC 自检失败转 `ASSERT`，不再有「静默降级」这条运行结果，见 `docs/archive/changelog/fc_crc_hal_driver_v33.md`。）
 
 4. **单测固化为契约的守卫保留返回码**
    这是判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**。`tests/` 里拿**文档化合法输入**调内部函数验证行为（如 `allocator_remove_from_free(..., 越界)` 是文档化的 no-op、`ftl_is_metadata_block(NULL,…)` 是文档化分类——两者都是 `ftl_ut_munit.md §4.1/§4.6` 的用例）的，按判据 1 保留返回码。
@@ -130,7 +130,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 | `fc_queue.c` 的 ~~`FC_COMMAND_ID_INVALID`~~ **（2026-10-08 撤销：入队 ID 由 FC 自铸，传哨兵是调用者 bug → `ASSERT`，见 §十五）** / `offset >= count` | 哨兵值域 |
 | `fc_command_alloc_internal` / `fc_descriptor_alloc_internal` 的池空 NULL | 资源类 |
 | ~~`fc_buffer_is_occupied(...) == 0U` / `fc_buffer_release` 未占用~~ **（2026-10-08 撤销：未占用 = 配置错误 → `ASSERT`，见 §十四）** | ~~生命周期状态~~ |
-| `g_nand_dispatch_armed == 0U` / `g_initialized == 0U` / `ctx->active == 0U`（~~`g_crc_ready == 0U`~~ 已于 v33 删除，见 `docs/changelog/fc_crc_hal_driver_v33.md`） | 运行时状态 |
+| `g_nand_dispatch_armed == 0U` / `g_initialized == 0U` / `ctx->active == 0U`（~~`g_crc_ready == 0U`~~ 已于 v33 删除，见 `docs/archive/changelog/fc_crc_hal_driver_v33.md`） | 运行时状态 |
 | `map->uops == NULL` / `nand_engine` 的 `handler == NULL` / UOP 无 END | 表完整性 |
 | `fc_ldpc_decode(..., err_bits)` 的 NULL（~~`fc_command_status_init(..., command)` / `pop_n(ids)`~~ 两函数已于 2026-10-08 整体删除，见 §十七） | 辨析 B 语义分支 |
 | desc 链遍历里带 `break` / `return 错误码` 的"链损坏"降级 | 降级语义（非纯 fence） |
@@ -195,7 +195,7 @@ v13 把 FC 的"策略层"（按掩码建链 + 数据搬运）上移 FTL，**断�
 §八 / §九 表格里出现的 `fc_command_configure_descriptors(_internal)`、`fc_write_cmd_data`/`fc_read_cmd_data`
 是**当时的落地记录**，保留不改——它们描述的是 v13 之前的形态。
 
-> 详见 `docs/changelog/fc_policy_layer_uplift.md`。
+> 详见 `docs/archive/changelog/fc_policy_layer_uplift.md`。
 
 ### §十一附 2：v17 建链入口改名（2026-10-08）
 
@@ -205,7 +205,7 @@ v17 把 FC 建链从三层接力收敛为一条：`fc_command_attach_cw` → `_i
 生命周期入口"（身份/状态返回码保留，`command == NULL` 转 `ASSERT`；**该身份/状态返回码
 契约已于 2026-10-08 撤销，见 §十三**）。**新增的不变量**：
 全部校验（指针身份 / 生命周期 / plane 段 / CW 范围）都在出池之前，非法实参不污染池子。
-详见 `docs/changelog/fc_build_chain_convergence_v17.md`。
+详见 `docs/archive/changelog/fc_build_chain_convergence_v17.md`。
 
 ### §十一附：v13.1 删掉一条同源查重断言（2026-10-07）
 
@@ -221,7 +221,7 @@ v17 把 FC 建链从三层接力收敛为一条：`fc_command_attach_cw` → `_i
 （`fc_command_descriptor_count` 不受影响——`fc_command_release` 等仍在用）。
 （v17 后该断言随建链入口一并移入 `fc_command_configure_descriptor`，函数名见 §十一附 2。）
 
-> 详见 `docs/changelog/fc_plane_span_consolidation.md`。
+> 详见 `docs/archive/changelog/fc_plane_span_consolidation.md`。
 
 ### §十二附：v16 建链失败语义与 `fc_command_cw_attached` 判据更正（2026-10-07）
 
@@ -243,7 +243,7 @@ v17 后该机制体即 `fc_command_configure_descriptor`，见 §十一附 2）�
 该断言因此**仍应保留**（在污染点就炸、定位准）。⚠ 但 release 构建下无任何守卫这条
 数据驱动的违规——留待后续（可改为返回码而非仅 ASSERT）。
 
-> 详见 `docs/changelog/fc_chain_ownership_v16.md`。
+> 详见 `docs/archive/changelog/fc_chain_ownership_v16.md`。
 
 ## 十三、v18：建链入口的"配置错误 → ASSERT"定调（2026-10-08）
 
@@ -270,7 +270,7 @@ v17 后该机制体即 `fc_command_configure_descriptor`，见 §十一附 2）�
 **未跟进项**：`fc_submit` 的身份/状态检查按同一判据也应转 `ASSERT`（其"队列满"等资源结果仍保留返回码）；`fc_command_release` 的幂等早退是**运行时分支**（对已 FREE 的命令释放是合法 no-op），不是配置错误，**不转 ASSERT**。
 > ⚠️ **2026-10-08 已跟进（v19，见 §十四）**：`fc_submit` 的身份/状态检查已转 `ASSERT`（只留 `OK`/`QUEUE_FULL`）；`fc_command_release` 的**指针身份**检查（栈上 `fc_command_t`）亦转 `ASSERT`（恒 `OK`），**幂等早退仍保留在 internal 版**，未转。
 
-> 详见 `docs/changelog/fc_configure_guard_assert_v18.md`。
+> 详见 `docs/archive/changelog/fc_configure_guard_assert_v18.md`。
 
 ## 十四、v19：FC 公开 API 壳的"配置错误 → ASSERT"（2026-10-08）
 
@@ -296,7 +296,7 @@ v18（§十三）只改了 `fc_command_configure_descriptor` 一个入口。按�
   > ⚠️ **2026-10-08 部分跟进（v21，见 §十六）**：C 档拆成三形态后，**形态三（完全不校验）**已清——`fc.c` 三个 state getter 的越界静默 clamp、`pop_n` 不校验 `count`、`fc_bch_engine.c` / `fc_ldpc_qc_engine.c` 缺入参 ASSERT、`fc_ldpc_engine.c` 的 `data_length` 无上界全部转断言。**形态一 / 二仍保留**。
 - **遗留**：本改后 `fc_data_path.c` 里对 `fc_buffer_get_base` 的 `if (buffer != NULL)`（:113/132/153/179 等）**恒真**，成死守卫——归 C 档。
 
-> 详见 `docs/changelog/fc_shell_guard_assert_v19.md`。
+> 详见 `docs/archive/changelog/fc_shell_guard_assert_v19.md`。
 
 ## 十五、v20：FC 内部 / 数据路径 / 引擎的"配置错误 → ASSERT"（B 档，2026-10-08）
 
@@ -331,7 +331,7 @@ v18 / v19（§十三 / §十四）清完了 FC 的**公开 API 壳**。本轮（
 
 **验证**：debug / release / RAID=1 debug / RAID=1 release 四档 0 warning 0 error（RAID=1 档用 `make <tier> CFLAGS_EXTRA=-DCONFIG_FC_RAID=1`，并 `nm` 确认 `fc_raid_accumulate` 等符号真的进了目标文件）；`make format-check` passed；`make -k tests` 29 error / 7 warning 与基线逐项一致（全在 `tests/`）；上板未做。
 
-> 详见 `docs/changelog/fc_internal_guard_assert_v20.md`。
+> 详见 `docs/archive/changelog/fc_internal_guard_assert_v20.md`。
 
 ## 十六、v21：FC 层 C 档·形态三"缺失的入参/边界校验"（2026-10-08）
 
@@ -394,7 +394,7 @@ v18 / v19（§十三 / §十四）清完了 FC 的**公开 API 壳**。本轮（
 
 四档（debug / release / RAID=1 debug / RAID=1 release）**0 warning 0 error**；`-DFC_ECC_ALGO=FC_ECC_ALGO_LDPC` 补 include 后 0 error（余 1 条 pre-existing `fc_ecc_init_bch defined but not used`，属该实验分支既有、非本轮）；`make -k tests` 29 error / 7 warning 与基线逐项一致（全在 `tests/`）；`make format-check` passed；上板未做。
 
-> 详见 `docs/changelog/fc_c_tier_missing_guard_v21.md`。
+> 详见 `docs/archive/changelog/fc_c_tier_missing_guard_v21.md`。
 
 ---
 
@@ -538,7 +538,7 @@ NDEBUG 下无 `-Wunused-variable` 风险（与 §十三 的 `command_id` 情形�
 197388 B（改前 197344 B，+44 B）；`nm` 确认 `ftl_cmd_resolve_cw_mask` 是 **local（`t`）**，
 未引入新的外部链接符号；`make format-check` passed；上板未做。
 
-> 详见 `docs/changelog/ftl_cw_mask_single_knob_v23.md`。
+> 详见 `docs/archive/changelog/ftl_cw_mask_single_knob_v23.md`。
 
 ---
 
@@ -606,7 +606,7 @@ debug / release / tests / RAID=1 四档 0 warning 0 error（149920 / 84988 / 197
 `make format-check` passed；`nm` 确认 `pba_to_paa` / `lba_to_meta` / `paa_to_pba` 无全局符号；
 六条加扰判据 + 四条布局判据离线自证全过（见 changelog）；**上板未验**。
 
-> 详见 `docs/changelog/fc_scrambler_lba_seed_v24.md`。
+> 详见 `docs/archive/changelog/fc_scrambler_lba_seed_v24.md`。
 
 ---
 
@@ -673,7 +673,7 @@ page, cw`）与 `paa_make` / `pba_make` 的形参序（`…, page, plane, block,
 1,048,576 组 × 7 条判据 + 2,097,152 组 × 1 条判据，**0 mismatch**；**上板未验**。
 （`make tests` 本轮未跑——测试源由用户同步重构中。）
 
-> 详见 `docs/changelog/nand_config_addr_ctor_v25.md`。
+> 详见 `docs/archive/changelog/nand_config_addr_ctor_v25.md`。
 
 ---
 
@@ -729,7 +729,7 @@ SQ 请求集 / CQ 失败集 / NAND 请求集**三处同口径**（0 = 空集）�
 测试代码重构期（Level 2/3 尚引用旧夹具符号），`make tests` / `make debug` / `make release`
 与上板验证均留到调用点迁移完成之后。
 
-> 详见 `docs/changelog/fc_cw_bitmap_literal_v27.md`。
+> 详见 `docs/archive/changelog/fc_cw_bitmap_literal_v27.md`。
 
 ---
 
@@ -787,7 +787,7 @@ FC 的 ERASE 分支给请求位图硬置一个 CW0 位，唯一目的是让 `com
 （Level 2/3 尚引用旧夹具符号），`make tests` / `make debug` / `make release` 与上板验证
 留到调用点迁移完成之后。
 
-> 详见 `docs/changelog/fc_cw_bitmap_param_v28.md`。
+> 详见 `docs/archive/changelog/fc_cw_bitmap_param_v28.md`。
 
 ## 二十三、v29：步骤级用例的形态选择——参数化 vs 迭代（2026-10-09）
 
@@ -842,7 +842,7 @@ Level 3 的 6 条地址相关用例原先挂了 `block`（`100`/`104`）× `plan
 - **`sample` 是边界情形**：四档的**探针集不同**（2/5/3/8 页 × 2/2/1/4 CW），勉强算「不同分支」；
   但它同样是**有限枚举**，钉不住「任意页 × 任意 CW」。
 
-**改法**（见 `docs/changelog/fc_ut_level3_seed_random_v40.md`）：六条改**用例体内抽样**，参数表删除；
+**改法**（见 `docs/archive/changelog/fc_ut_level3_seed_random_v40.md`）：六条改**用例体内抽样**，参数表删除；
 覆盖改由 `--iterations N` 给（同一断言、不同输入 ⇒ 迭代，**正是判据 7 对「同一断言」那一支的规定**）。
 随机性用 `l3_rand(test, tag) = munit_rand_uint32() ^ hash(用例名) ^ hash(用途标签)` —— **必须自带
 salt**，理由见 `fc_nand_ut.md` §5.4（munit 每 `exec` 前 reseed 回 `runner->seed`，导出的 `munit_rand_*`
@@ -888,7 +888,7 @@ salt**，理由见 `fc_nand_ut.md` §5.4（munit 每 `exec` 前 reseed 回 `runn
 对 `test_fc_level2.c` 与 `munit.c` 均 0 warning 0 error。**未编译**——`make tests` 因
 `test_fc_level3.c` 仍引用旧夹具符号而编不过（v27/v28/v29 共同的遗留中间态），上板未验。
 
-> 详见 `docs/changelog/fc_data_path_step_primitives_v29.md`。
+> 详见 `docs/archive/changelog/fc_data_path_step_primitives_v29.md`。
 
 ---
 
@@ -919,7 +919,7 @@ salt**，理由见 `fc_nand_ut.md` §5.4（munit 每 `exec` 前 reseed 回 `runn
 不这么做的话，命令**永不完成**，上层表现为「挂死」，比报错难查得多。
 
 **首次应用（v39）**：`fc_build_request_data_planes` 的 multi-plane 窄位图检查
-（见 `fc_nand_design.md` §25.4 与 `docs/changelog/fc_multiplane_narrow_bitmap_v39.md`）。违反时
+（见 `fc_nand_design.md` §25.4 与 `docs/archive/changelog/fc_multiplane_narrow_bitmap_v39.md`）。违反时
 NAND 侧多 plane handler 会**无条件遍历 `PLANE_NUM`** 下行地址，未覆盖的 plane 既无数据也无地址，
 旧实现凭空造一条回退地址 ⇒ **静默给该 plane 编一页全 0xFF**，调用者完全不知道。这正是判据 9 说的
 「静默写坏介质」。同时它让 `fc_build_dispatch_request` 从「构建不可失败」变成有**唯一**失败出口——

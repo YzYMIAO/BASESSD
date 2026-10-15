@@ -90,7 +90,7 @@ static MunitSuite g_fc_nand_suite =
 即「文档里一路写的带斜杠形式」由**全部失效**变成**全部可用**；代价是**不带**尾斜杠的形式反转。
 两者都不是新东西——文档（`fc_nand_ut.md` / `munit_adapter.md` / `wsl_debug_environment.md`）
 一直写的是**带斜杠**形式，而历史 changelog（v33 / v34）里记的是**粘连**形式（那才是当时真能跑的）。
-按「`docs/changelog/*` 是历史，不改正文」的规则，历史记录保留原样。
+按「`docs/archive/changelog/*` 是历史，不改正文」的规则，历史记录保留原样。
 
 ### (b) `--single` 档的参数挑值会变
 
@@ -112,8 +112,8 @@ static MunitSuite g_fc_nand_suite =
 
 ### (d) 历史文档里的粘连形式
 
-`docs/changelog/fc_crc_hal_driver_v33.md`、`fc_ut_meta_pba_v34.md`、
-`docs/design/debug_pio_dmb_20260927.md` 里的 `test /fc-nand/data_pathcrc_step_detect` 之类
+`docs/archive/changelog/fc_crc_hal_driver_v33.md`、`fc_ut_meta_pba_v34.md`、
+`docs/archive/debug_pio_dmb_20260927.md` 里的 `test /fc-nand/data_pathcrc_step_detect` 之类
 是**当时真实可用**的写法（v34 那条还标注了上板已验）。按规则**不改历史正文**。
 
 ## 验证
@@ -161,4 +161,4 @@ test                               # 全套 51 条（不加过滤串）
 - 过滤匹配：`tests/framework/munit.c:1294-1306`；自述语义在 `:1275`。
 - 套件树：`tests/unit/ut_main.c`；本文档同步 `docs/design/fc_nand_ut.md` §3 / §4.1 / §4.2 / §7。
 - 框架适配记录：`docs/design/munit_adapter.md` v1.5。
-- 同批未提交的 v40（Level 3 地址随机化）：`docs/changelog/fc_ut_level3_seed_random_v40.md`。
+- 同批未提交的 v40（Level 3 地址随机化）：`docs/archive/changelog/fc_ut_level3_seed_random_v40.md`。

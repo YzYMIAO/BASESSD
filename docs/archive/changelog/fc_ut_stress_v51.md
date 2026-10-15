@@ -243,4 +243,4 @@ test                                                        # 完整套，确认
 - 单次交付上限 / 填充 pass：`nand_dispatch_poll`（`src/nand/nand_dispatch.c:755`）、
   `fc_poll_internal`（`src/fc/fc.c:1793`）。
 - 命令释放（幂等、沿链回收）：`fc_command_release`（`src/fc/fc.c`）。
-- 前作：`docs/changelog/fc_ut_stress_v50.md`（v50 的批量提交/批量收取形状 + `fc_poll_completions`）。
+- 前作：`docs/archive/changelog/fc_ut_stress_v50.md`（v50 的批量提交/批量收取形状 + `fc_poll_completions`）。

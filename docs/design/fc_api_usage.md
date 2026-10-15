@@ -17,16 +17,16 @@
 > | `fc_write_cmd_data()` / `fc_read_cmd_data()` | `ftl_cmd_write_data()` / `ftl_cmd_read_data()`（同上） |
 >
 > FC 侧建链现在**只有** `fc_command_configure_descriptor(cmd, plane, cw, row_paa)` 一个入口。
-> 详见 `docs/changelog/fc_policy_layer_uplift.md`。
+> 详见 `docs/archive/changelog/fc_policy_layer_uplift.md`。
 >
 > **v17 补充**：建链入口由「`fc_command_attach_cw` → `_internal` → `_internal`」三层接力
 > 收敛为**一条** `fc_command_configure_descriptor`（**单数**，实现在 `src/fc/fc_interface.c`），
 > 原公共名 `fc_command_attach_cw` 与两个 `_internal` 均已删除。详见
-> `docs/changelog/fc_build_chain_convergence_v17.md`。
+> `docs/archive/changelog/fc_build_chain_convergence_v17.md`。
 >
 > **v16 补充**：建链失败的回滚入口是 `fc_descriptor_chain_release_all(head)`
 > （单个是 `fc_descriptor_chain_release_head(head)`）；`fc_command_release()` 现在
-> **真的**会回收各 CW buffer（此前一直漏着）。详见 `docs/changelog/fc_chain_ownership_v16.md`。
+> **真的**会回收各 CW buffer（此前一直漏着）。详见 `docs/archive/changelog/fc_chain_ownership_v16.md`。
 >
 > 本文件更早的过时项（未随版本同步）：`fc_real_buffer_to_buffer_id()` 已于 v10 删除；
 > §内部函数优化 里的 `fc_command_configure_descriptors_internal` 已不存在。

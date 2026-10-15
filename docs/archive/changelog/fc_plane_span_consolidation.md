@@ -96,7 +96,7 @@ desc 链按 `plane*CW_NUM + cw` OR 出来的——与它要防的对象**同源*
 | `src/nand/nand_dispatch.c` | 注释同步：原引用 `ASSERT(popcount(cw_mask) == fc_command_descriptor_count(...))`，改指 `fc_command_attach_cw_internal` 的越段校验 |
 | `docs/design/fc_nand_design.md` | §25.4 表格行 + 新增「v13.1」小节；§25.4 历史段落里 `fc_cw_mask_popcount` 加删除注 |
 | `docs/design/assertion_guidelines.md` | §十一 表格里 `fc_cw_mask_popcount` 引用改掉；新增 §十一附（本次删除的判据记录） |
-| `docs/changelog/fc_policy_layer_uplift.md` | 已知风险 #1 标注 v13.1 已解决 |
+| `docs/archive/changelog/fc_policy_layer_uplift.md` | 已知风险 #1 标注 v13.1 已解决 |
 
 ---
 

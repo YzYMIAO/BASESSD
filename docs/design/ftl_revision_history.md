@@ -1422,7 +1422,7 @@ Explore 调研另发现一个超出 F10 原描述的**真数据损坏窗口**：
 - 上板预期：`[FTL] instance ... free=N op=~400 spare=50`；PRE_COND 状态位随 alloc/free set/clr
 - 上板高压写：OP 池耗尽回退分配、坏块触发 Spare 补池
 
-### 待办（B/C 档，见 docs/design/ftl_full_landing_plan_20261003.md）
+### 待办（B/C 档，见 docs/archive/ftl_full_landing_plan_20261003.md）
 
 - **B 档**：B1 journal 水位分母（`PAGES_PER_BLOCK`→`JOURNAL_BLOCK_COUNT×PAGES_PER_BLOCK`）、B2 checkpoint/emergency 标志复位、B3 ftl_service 模式基于 pending 占用、B4 GC/WL 搬移读记录 ECC + read_count++、B5 read_count 消费（predictive scan/WL victim）。
 - **C 档**：C1 controller state_machine 完整状态机、C1b scheduler 优先级调度、C2 NVMe host（nvme_io/admin/SQ/CQ/nvme_controller 全量）、C3 `SSD_REQUEST_FLUSH` 全实例 flush。（**已在 v0.47 落地**：C2 NVMe 按学习主控定位砍掉，改 UART CLI 驱动 FTL，见 v0.47 条目）
@@ -1464,7 +1464,7 @@ v0.44 体检确认的 B 档 5 项语义缺口（FTL 层正确性）全部落地�
 - SRAM 无变化（纯逻辑改动）
 - 上板预期：journal 85%/95% 水位按双块 128 页正确触发；T1 不永久命中；emergency 复位后 BUSY 不再每圈强制 CP；高压写/搬移后 read_count 与 ECC 历史真实增长，predictive scan 能命中 read disturb 慢死块
 
-### 待办（C 档，见 docs/design/ftl_full_landing_plan_20261003.md）→ ✅ v0.47 已落地
+### 待办（C 档，见 docs/archive/ftl_full_landing_plan_20261003.md）→ ✅ v0.47 已落地
 
 - C1 controller state_machine 完整状态机、C1b scheduler 优先级调度、C2 NVMe host（nvme_io/admin/SQ/CQ/nvme_controller 全量）、C3 `SSD_REQUEST_FLUSH` 全实例 flush。（落地：C1 最小状态机 / C1b 调度钩子 / C3 FLUSH / C2 砍掉改 UART CLI，见 v0.47 条目）
 - **F8/F9**：依赖上板（紧急 CP 回切校验 / CQ·SQ 深度实测）。
@@ -1596,7 +1596,7 @@ AXI_RAM 使用率已达 98.2%（377.1KB/384KB），内存压力真实出现。�
 
 - **SB 索引粒度已评估，本次不做**：`allocator.c:299` 的 `block1 = block0` 使 SB 永远配对同号物理块，两 plane 的 `erase_count`/`state`/`sb_id`/`valid_count` 天然相同，per-block 存是重复的 → 改按 SB 索引可再省 96KB（160KB → 64KB）。但 `ftl_gblock()` 是所有索引的单一入口，改动覆盖整个 FTL，且丢 per-plane 分辨率（`read_count`/`rr`）、与 BBT 的 per-physical-block 粒度不一致。设计文档 §4.9.5 选项 C 早已评估并否决，理由一致。⚠ **v0.57 结案**：本条前提 `block1 = block0` 已被 **v0.12 Policy B** 删除（逐 plane 独立选块）⇒ 两 plane 元数据互不相同、**无可去重**；且主流是**两级**结构（band 级 + per-block BIT）。见 **v0.57 条目**。
 - **关联问题**：`block1 = block0` 本身是简化而非行业做法（真实主控允许 SB 内每 plane 用不同物理块号）。当前同号约束导致 plane0 的坏块连坐浪费 plane1 的同号好块。与索引粒度强相关，应合并评估。
-- **rebuild 套件夹具超容**：`tests/unit/test_rebuild.c` 的 245KB 夹具超 128KB DTCM 堆，本次结构体缩小不解决该独立缺陷。→ **2026-10-04 后续处理**：已把该套件从板端构建摘除（`src/fc/makefile.mk` + `tests/unit/ut_main.c`），夹具落地区域另议，见 `fault_capture.md` §7 与 `debug_sbrk_heap_stack_20261004.md` §5。
+- **rebuild 套件夹具超容**：`tests/unit/test_rebuild.c` 的 245KB 夹具超 128KB DTCM 堆，本次结构体缩小不解决该独立缺陷。→ **2026-10-04 后续处理**：已把该套件从板端构建摘除（`src/fc/makefile.mk` + `tests/unit/ut_main.c`），夹具落地区域另议，见 `fault_capture.md` §7 与 `docs/archive/debug_sbrk_heap_stack_20261004.md` §5。
 
 ---
 
@@ -2823,7 +2823,7 @@ while (target > 0U) { …GC 一个 SB…; target -= 2U; }           /* 每轮减
 - `docs/design/ftl_design.md`（§4.4 触发表重写 + T2/T3 删除论证、§4.6 带宽/后台模型重写并删
   无出处的「三星 GC 策略」句、§4.7 参数表、§12 服务模式伪码与实现原型、§4.9 对照表）
 - `docs/design/ftl_api_usage.md`（上下文结构列举、Phase 3 流程叙述）
-- `docs/design/ftl_wave0_board_verify.md`（§7 配方重写 + §4 前提行）
+- `docs/archive/ftl_wave0_board_verify.md`（§7 配方重写 + §4 前提行）
 
 ### 验证
 
@@ -2833,7 +2833,7 @@ while (target > 0U) { …GC 一个 SB…; target -= 2U; }           /* 每轮减
 - `make clean && make all`：**零告警**；AXI_RAM **255.0 / 384 KB**（66.4%，本改动只减字段）；
   `Binary size: 189656 bytes`
 - `make clean && make tests`：**零告警**；`Binary size: 267772 bytes`
-- 上板（测试一律上板，见 `ftl_wave0_board_verify.md` §7 新配方）：
+- 上板（测试一律上板，见 `docs/archive/ftl_wave0_board_verify.md` §7 新配方）：
   临时 `FREE_POOL_TARGET = free + 2` ⇒ 开机后第一个 IDLE tick 应打
   `[GC] trig=0x01 free=… op=… writes=…` + `[GC] victim p0=… p1=… vr=… er=… cp=… yp=… cost=…`
   **各一行**（下溢修复的判据就是行数：旧代码会把 closed 链全搬全擦、连打几十行）；
@@ -2964,7 +2964,7 @@ rd FAIL at byte 0: got 00000000 expect 55555555
   扫描缓冲只留一份）
 - `make clean && make tests`：**零告警**；`Binary size: 267460 bytes`（改前 267772）
 - `grep -n journal_page_addr src/ftl/power_failure_recovery.c` ⇒ **零命中**
-- 上板（待验，判据见 `ftl_wave0_board_verify.md` §6）：
+- 上板（待验，判据见 `docs/archive/ftl_wave0_board_verify.md` §6）：
   ① 复现配方 = 先把环弄脏（若干次 `wr 0 32`）→ 干净关机（`fl` 后断电）→ 再 `wr 0 8`
   → 直接断电 → 重启 `rd 0 8 c` 应 `rd PASS`；
   ② 修复前的签名是 `rd FAIL at byte 0: got 00000000`，修复后 `boot type` 仍按关机方式为 1 或 2，
@@ -3219,7 +3219,7 @@ make clean && make all      # 0 warning；AXI_RAM 283.1/384 KB（73.7%）；Bina
 make clean && make tests    # 0 warning
 ```
 
-**本批全部未上板。** 上板判据（并入 `ftl_wave0_board_verify.md`）：
+**本批全部未上板。** 上板判据（并入 `docs/archive/ftl_wave0_board_verify.md`）：
 多实例化与内存断言由编译期保证；OOB 出厂扫描的判据是「擦净介质后开机 `bbt` 读数与
 器件标记一致」；P0-3 压缩的判据是「长写后 `free` 不单调下降 + `rd PASS`」；
 rr 持久化的判据是「`[WEAR]` 行在重启后 `max_ec` 与关机前一致」。

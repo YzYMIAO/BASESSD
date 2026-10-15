@@ -129,7 +129,7 @@ debug 档的 `ASSERT` 与 release 档的拒绝**都是靠代码走查确认的**
 ## 出处
 
 - 缺陷的原始表述（本仓自陈）：`fc_nand_design.md` §25.4 旧文「空 plane 的行地址（flat 独有）」。
-- 位图语义翻转（`cw_bitmap` 0 = 空集）与漏扫调用点的历史：`docs/changelog/fc_ut_level3_bitmap_v35.md`。
+- 位图语义翻转（`cw_bitmap` 0 = 空集）与漏扫调用点的历史：`docs/archive/changelog/fc_ut_level3_bitmap_v35.md`。
 - FTL 侧越段 `ASSERT`：`assertion_guidelines.md` §十八。
 - FC 层四条断言判据：`fc_nand_design.md` §24。
-- 前一轮文档（ECC / CRC 保护什么）：`docs/changelog/fc_ecc_crc_coverage_v38.md`。
+- 前一轮文档（ECC / CRC 保护什么）：`docs/archive/changelog/fc_ecc_crc_coverage_v38.md`。

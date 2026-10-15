@@ -83,7 +83,7 @@ cw_bitmap 是 **flat 绝对编号**（bit n = `plane * CW_NUM + cw`，v9 统一�
 
 v34 的 changelog（`fc_ut_meta_pba_v34.md`）写「**上板已验**：……全套 FC UT 0 失败」——
 **当时只单独跑了 2 条用例**（`process_read_mata_error` / `internal_data_move`），
-并未跑全套；全套的首次全绿是本条（77/77）。该文件按 `docs/changelog/` 的惯例不改写正文，
+并未跑全套；全套的首次全绿是本条（77/77）。该文件按 `docs/archive/changelog/` 的惯例不改写正文，
 在此更正。
 
 ## 教训

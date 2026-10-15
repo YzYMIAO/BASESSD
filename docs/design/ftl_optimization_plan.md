@@ -604,7 +604,7 @@
 > ⚠ **v0.71 未闭合**：v0.70 上板验证通过（`crash clear` → 复位不再出现），但记录内容是
 > **HardFault**（`PC=0x2400038c LR=0x24000b09 CFSR=0x1 HFSR=0x40000000`，PC/LR 落在 `.bss` 内
 > ⇒ 控制流被写坏）而非断言，**不知如何复现**。见 `ftl_revision_history.md v0.71` +
-> `docs/changelog/diag_crash_cli_board_verify_v71.md`。
+> `docs/archive/changelog/diag_crash_cli_board_verify_v71.md`。
 
 ### 波 1 — 先决核对（不改代码）✅ **已完成（2026-10-13）**
 
@@ -716,7 +716,7 @@ F8/F9、v0.58 上板、HAL_RCCEx、FMC HiZ。
    ⚠ **唯一悬空项 = v0.71 的 HardFault**（记录见 `ftl_revision_history.md v0.71`）：
    **不知如何复现** ⇒ 下一步 = 按 `diag_crash_cli_board_verify_v71.md` 的**正确顺序**
    （**先 `crash` 看详细、再 `crash clear`**，保留当场 `=== CPU FAULT ===` dump）抓一次现场。
-   ⇒ 逐项清单仍见 `docs/design/ftl_wave0_board_verify.md`。
+   ⇒ 逐项清单仍见 `docs/archive/ftl_wave0_board_verify.md`。
 2. ~~**P0-3 L2P 日志块压缩**~~ ✅ **已落地（v0.65）**。
 3. ~~波 2 剩余四项~~ ✅ **已落地（v0.65）**；~~波 3 两项~~ ✅ **已落地（v0.65）**；
    ~~波 5 死代码~~ ✅ **已删（v0.65）**。

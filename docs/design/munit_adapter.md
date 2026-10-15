@@ -364,7 +364,7 @@ FC 单测的**证据打印**（`tests/unit/fc_test_common.c` 的 `test_trace_sum
 所以**每一级套件前缀都必须自己带尾斜杠**。`ut_main.c` 的根前缀 `"/fc-nand/"` 一直是对的，
 三个子套件原先写成 `"logic"` / `"data_path"` / `"lifecycle"` ⇒ 打印成
 `/fc-nand/lifecycleblock_multi_plane`，且 `/fc-nand/lifecycle/…` 形式的过滤串**一条都匹配不上**。
-v41 补成 `"logic/"` / `"data_path/"` / `"lifecycle/"`（见 `docs/changelog/fc_ut_suite_prefix_slash_v41.md`）。
+v41 补成 `"logic/"` / `"data_path/"` / `"lifecycle/"`（见 `docs/archive/changelog/fc_ut_suite_prefix_slash_v41.md`）。
 
 #### 过滤匹配（`munit.c:1294-1306`）的两条约束
 

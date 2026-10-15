@@ -81,6 +81,6 @@ make clean && make tests       # 0 warning 0 error，链接 219012 B（与 v36/v
 ## 出处
 
 - 讨论中确认的理论与出处：`fc_nand_design.md` §21.3.3 / §5.2 / §5.3。
-- 前一轮（加扰 = 统计独立）：`docs/changelog/fc_scrambler_theory_v37.md`。
-- CRC 引擎缺陷史（「基址写成 ADC3 ⇒ 校验恒通过」）：`docs/changelog/fc_crc_hal_driver_v33.md`。
-- 加扰种子改逻辑地址（META 明文 + 种子自举的由来）：`docs/changelog/fc_scrambler_lba_seed_v24.md`。
+- 前一轮（加扰 = 统计独立）：`docs/archive/changelog/fc_scrambler_theory_v37.md`。
+- CRC 引擎缺陷史（「基址写成 ADC3 ⇒ 校验恒通过」）：`docs/archive/changelog/fc_crc_hal_driver_v33.md`。
+- 加扰种子改逻辑地址（META 明文 + 种子自举的由来）：`docs/archive/changelog/fc_scrambler_lba_seed_v24.md`。

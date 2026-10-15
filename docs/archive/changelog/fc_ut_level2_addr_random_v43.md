@@ -185,8 +185,8 @@ test --log-visible debug /fc-nand/data_path/ --seed 0x5a4f21e4   # 同 seed 复�
 
 ## 出处
 
-- 同法的上一版（Level 3）：`docs/changelog/fc_ut_level3_seed_random_v40.md`。
-- 被撤回的观察：`docs/changelog/fc_ut_board_verify_v42.md` §三。
+- 同法的上一版（Level 3）：`docs/archive/changelog/fc_ut_level3_seed_random_v40.md`。
+- 被撤回的观察：`docs/archive/changelog/fc_ut_board_verify_v42.md` §三。
 - 种子来源与 PBA 位序：`src/fc/fc_random_engine.c`、`include/nand/nand_config.h`
   （`PBA_BLOCK_SHIFT = 9` / `PLANE_CW_MASK = 0x7`）。
 - munit 的 reseed / salt / iterations 语义：`tests/framework/munit.c:774` / `:386` / `:765-767`。

@@ -77,7 +77,7 @@ v40 的记录里写「`test --iterations 20 /fc-nand/lifecycle/` ⇒ Level 3 跑
 **怎么判断加量生效**：看**总耗时**（或数 `[EV]` 组数），**不要看条数**。
 
 已同步订正：`docs/design/fc_nand_ut.md` §2.3（并加 §7 v1.24 行）、
-`docs/changelog/fc_ut_level3_seed_random_v40.md` §五·1 与验证段。
+`docs/archive/changelog/fc_ut_level3_seed_random_v40.md` §五·1 与验证段。
 
 ## 三、顺带观察（未处理）
 
@@ -88,7 +88,7 @@ v40 的记录里写「`test --iterations 20 /fc-nand/lifecycle/` ⇒ Level 3 跑
   **各抽一次**的**三个不同值**（`comtool3.0.log:417` / `:432` / `:449`），不是写死的常量。
   真正写死的地址是 `TEST_BLOCK`(100) / `TEST_PAGE`(32) / plane 0（经 `L2_META` / `L2_PAA` / `l2_cmd`
   服务 13 条用例），已在 **v43** 改成按种子抽样，见
-  `docs/changelog/fc_ut_level2_addr_random_v43.md`。
+  `docs/archive/changelog/fc_ut_level2_addr_random_v43.md`。
 - `--list` 只列 **32** 行而实跑 **51** 条——Level 2 的 5 条参数化用例（`crc_step_detect` 4 /
   `ecc_step` 11 / `encode` 3 / `process_read_ok` 3 / `cw_bitmap` 3 = 24 展开 + 7 非参数化 = 31）。
   不是缺陷，是 munit 的参数化模型，但容易让人以为「少跑了 19 条」。
@@ -107,5 +107,5 @@ v40 的记录里写「`test --iterations 20 /fc-nand/lifecycle/` ⇒ Level 3 跑
 
 - 上板日志：用户提供的 `comtool3.0.log`（2026-10-11，1899 行）。
 - 迭代语义：`tests/framework/munit.c:760-772` / `:780` / `:803` / `:827` / `:981` / `:989`。
-- 被订正的记录：`docs/changelog/fc_ut_level3_seed_random_v40.md` §五·1。
-- 同批的 v41（套件前缀尾斜杠）：`docs/changelog/fc_ut_suite_prefix_slash_v41.md`。
+- 被订正的记录：`docs/archive/changelog/fc_ut_level3_seed_random_v40.md` §五·1。
+- 同批的 v41（套件前缀尾斜杠）：`docs/archive/changelog/fc_ut_suite_prefix_slash_v41.md`。

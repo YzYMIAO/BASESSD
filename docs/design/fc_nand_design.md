@@ -199,12 +199,12 @@ RAID XOR 使用 `FC_BUFFER_POOL_CW_SIZE(528)`，读全 CW。
 > 沿链释放即完备，**不需要任何回滚逻辑**（v15 曾用「就地回滚半成品」打补丁，
 > v16 改为消除中间态）。代价：链上允许存在 `buffer_id == FC_BUFFER_ID_INVALID`
 > 的 desc，走链的读者都要容忍——释放侧已按此实现。
-> 详见 `docs/changelog/fc_chain_ownership_v16.md`。
+> 详见 `docs/archive/changelog/fc_chain_ownership_v16.md`。
 >
 > **v17：这套机制体即 `fc_command_configure_descriptor`**（v16 时在 `fc.c`，v17 随
 > 三层合并搬到 `src/fc/fc_interface.c`，函数名去 `_internal` 后缀）。机制顺序不变，
 > 唯一新增约束是**校验段整体前置于出池**——非法实参在分配任何 desc 之前就返回，
-> 故「污染池子」的可能被进一步排除。详见 `docs/changelog/fc_build_chain_convergence_v17.md`。
+> 故「污染池子」的可能被进一步排除。详见 `docs/archive/changelog/fc_build_chain_convergence_v17.md`。
 
 ### 2.2 命令结构 (fc_command_t)
 
@@ -241,7 +241,7 @@ struct fc_command_t {
 >   `fc_command_release()` 把结构体整体清零后失效（归 0 而非 0xFFFF，判不出来），派生值不会；
 >   而指针本来就在调用者手里，再存一份只是多一个不一致的机会。
 >   派生的 ID 喂给 `nand_dispatch_request_t.command_id` 与 CQ 的 `command_id`，上层要回命令指针走
->   `fc_command_id_to_command()`。见 `docs/changelog/fc_command_identity_convergence.md`。
+>   `fc_command_id_to_command()`。见 `docs/archive/changelog/fc_command_identity_convergence.md`。
 
 `fc_param_t` 联合体：
 
@@ -459,12 +459,12 @@ FC_STATUS_RESOURCE_EMPTY   = -7    ← 状态类
   没完」、跨趟保留。⚠ **前置契约**：链成员必须在**同一条提交队列**里**连续入队**（现有链
   机制本就依赖它，`fc_submit` 一次一条、连续性无人保证）。**生产路径恒 NONE**——FTL 全仓恒
   `FC_CHAIN_END`（见 §23.9）⇒ 准入判断恒假、更新恒写 NONE ⇒ 逐字不变。详见
-  `docs/changelog/fc_chain_priority_lock_v52.md`。
+  `docs/archive/changelog/fc_chain_priority_lock_v52.md`。
 
 `fc_scheduler_t` 只剩 `{sq, hsq, chain_owner[][][]}`（v8 删到 `{sq, hsq}`，v52 加回链锁表）；
 旧的 per-LUN busy 表（`set/clear_busy`、`target_is_busy`）
 与读饥饿保护（`consecutive_write_count`）已删除——"忙"改由 NAND 侧 `nand_dispatch_lun_free()`
-表达。详见 `docs/changelog/fc_nand_per_lun_fifo.md`。
+表达。详见 `docs/archive/changelog/fc_nand_per_lun_fifo.md`。
 
 ### 2.8 软件寄存器（**v10 已删除**）
 
@@ -476,12 +476,12 @@ FC_STATUS_RESOURCE_EMPTY   = -7    ← 状态类
   只剩 `status` 是派生量，缓存着 controller 里已有的信息。
 - 全仓无任何读者。
 - "模拟硬件"的理由不成立：真硬件寄存器每次访问都读当前值，而这个影子只在 11 个点刷新，
-  早退路径上还**故意保留陈旧值**（见 `docs/changelog/fc_structural_changes.md`），
+  早退路径上还**故意保留陈旧值**（见 `docs/archive/changelog/fc_structural_changes.md`），
   比"读时计算"更不像硬件，也无法服务异步 DMA 读者。
 
 队列用量改由 `fc_get_sq_count()` / `fc_get_hsq_count()` / `fc_get_cq_count()`（`fc.c`）
 与聚合的 `fc_get_resource_stats()`（`fc_interface.c`，读 controller 实时值）提供。
-详见 `docs/changelog/fc_registers_removal.md`。
+详见 `docs/archive/changelog/fc_registers_removal.md`。
 
 ### 2.9 对外接口 (fc.h)
 
@@ -525,7 +525,7 @@ fc_status_t   fc_get_resource_stats(fc_resource_stats_t *); // 资源使用统�
 > **v13 策略层上移**：`fc_command_configure_descriptors()`（按掩码一次性建链）、`fc_write_cmd_data()` / `fc_read_cmd_data()`（按 CW 拷贝数据）**已从 FC 删除**，改由 FTL 层持有
 > （`ftl_cmd_configure_descriptors()` / `ftl_cmd_write_data()` / `ftl_cmd_read_data()`，见 `include/ftl/ftl_fc_interface.h`）。
 > 判据是"硬件 FCC 寄存器表"：硬件 FCC 既不提供"按掩码建链"寄存器（描述符链是固件填的），也不提供"数据拷贝"寄存器（数据是固件 DMA 搬的）——
-> 这两件事在行业里都在**固件（FTL）侧**。FC 只保留槽位 / 描述符 / 队列 / 数据路径。详见 §26 与 `docs/changelog/fc_policy_layer_uplift.md`。
+> 这两件事在行业里都在**固件（FTL）侧**。FC 只保留槽位 / 描述符 / 队列 / 数据路径。详见 §26 与 `docs/archive/changelog/fc_policy_layer_uplift.md`。
 >
 > **建链（v11 引入，v13 后 FC 只剩机制层，v17 收敛为一条）**：`fc_command_configure_descriptor()` 是 FC 的**唯一建链入口**——只做"分配 desc + buffer、填 PAA/config/meta、挂到链尾"。
 > 上层按自己算出的 CW 集合循环调用即可，**链序即数据布局顺序**（FTL 侧拷贝按此顺序遍历链）。重复追加同一 `n` 是 `ASSERT`。
@@ -1332,7 +1332,7 @@ raid_recover 各写了一遍字面量 `{520, 8, 4}`）。
 写回 / `desc->status` 赋值 / 错误码透传——这些要验得建链，属「管线级」用例。
 ⚠ **提交出去的命令绝不能再手工调这些原语**——FC 自己会跑整条管线，重复编码 = 数据损坏。
 
-用例与判据见 `fc_nand_ut.md` §2.2「步骤级用例」与 `docs/changelog/fc_data_path_step_primitives_v29.md`。
+用例与判据见 `fc_nand_ut.md` §2.2「步骤级用例」与 `docs/archive/changelog/fc_data_path_step_primitives_v29.md`。
 
 **关键约束**：RAID XOR 在 scrambled domain 进行——ECC 失败时其余 CW 处于"已纠错但仍加扰"，重建结果与被恢复 CW 同 domain，重建后再统一解扰。加解扰对 FTL 完全透明。
 
@@ -1432,7 +1432,7 @@ P(bit = 1 | 前面所有位) = 1/2        ← 目标（独立）
 
 **落到实现**：加扰器（LFSR）干的活就是造一条「给定历史、下一位仍是 1/2」的伪随机序列，再与数据 XOR。
 **均衡、游程均值 2、长游程稀少——全是「独立」的副产品，不是目标。**
-见 §21.3.5（无硬件加扰 → 软件 LFSR）与 `docs/changelog/fc_scrambler_lba_seed_v24.md`。
+见 §21.3.5（无硬件加扰 → 软件 LFSR）与 `docs/archive/changelog/fc_scrambler_lba_seed_v24.md`。
 
 ---
 
@@ -2816,7 +2816,7 @@ RANDOM_DATA_READ（05h-C1-C2-E0h）等命令的数据传输长度不由命令码
 > - **逐条完成**：每条命令各回一份 completion（旧模型只在链尾回一份，中间命令的 `cw_status[]` 被吞）；
 > - NAND 侧**无链标记**，`chain->cursor` / `chain_advance` 已删除。
 >
-> 详见 `docs/changelog/fc_nand_per_lun_fifo.md`；本节余下内容保留为历史设计记录。
+> 详见 `docs/archive/changelog/fc_nand_per_lun_fifo.md`；本节余下内容保留为历史设计记录。
 
 ### 16.1 问题背景
 
@@ -3780,7 +3780,7 @@ HAL_NAND_Init(保守) → RESET/READ_ID/校验 → SET_FEATURES(Mode 4)
 > `fc_scheduler_op_is_read()`、`consecutive_write_count` 与相关旋转逻辑随 per-LUN FIFO 重构一并移除：
 > 填充 pass（`fc_poll_fill`）改为「HSQ 优先 + 按 LUN 保序」，不再做读写计数与读优先旋转。
 > 在 `CH_NUM=CE_NUM=LUN_NUM=1` 的当前平台上该保护本就近乎无效（见 20.x 备注）。
-> 本章保留为设计记录，供未来多 LUN/多通道 QoS 重启时参考。详见 `docs/changelog/fc_nand_per_lun_fifo.md`。
+> 本章保留为设计记录，供未来多 LUN/多通道 QoS 重启时参考。详见 `docs/archive/changelog/fc_nand_per_lun_fifo.md`。
 
 ### 20.1 问题
 
@@ -3955,7 +3955,7 @@ UE ≈ P(误纠) × P(CRC 漏检) ≈ P(误纠) × 2⁻³²
 
 > 加扰粒度 = **被寻址逻辑单元**。本工程一个 CW（512 B 用户数据）= 一个扇区 = 一个逻辑单元，故每条 CW 用
 > 自己那条扇区 LBA 当种子；这正是业界"种子 = 被寻址逻辑单元的地址"（一个逻辑块由若干 512 B–2 kB 的
-> ECC 码字组成，块内码字共用该逻辑块的种子）。详见 `docs/changelog/fc_scrambler_lba_seed_v24.md`。
+> ECC 码字组成，块内码字共用该逻辑块的种子）。详见 `docs/archive/changelog/fc_scrambler_lba_seed_v24.md`。
 
 **副作用（v38 记录）**：明文 META + 种子耦合还带来一个**隐式**的保护——**META 损坏会传染成 CRC 失败**
 （种子错 ⇒ USER 解成垃圾 ⇒ Pass 3 不过）。这是「期望值未知」路径（GC / 掉电重建）上 META 的**唯一动态保护**，
@@ -4334,9 +4334,9 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 > - "忙"由 `nand_dispatch_lun_free()` 表达，`NOT_READY` 不再被 FC 当失败标 `NAND_FAIL`；
 > - `fc_scheduler_set_busy` / `clear_busy` / `busy[][][]` / `consecutive_write_count` 均已删除（见 [§24](#24-fc-层断言判据assert--assume) 判据 4 的历史条目）。
 >
-> 图 9（§4.3）已重绘为遍历模型；图 11 的链收集分支语义改为"连续槽 + 逐条完成"。详见 `docs/changelog/fc_nand_per_lun_fifo.md`。
+> 图 9（§4.3）已重绘为遍历模型；图 11 的链收集分支语义改为"连续槽 + 逐条完成"。详见 `docs/archive/changelog/fc_nand_per_lun_fifo.md`。
 
-> 🔁 **v52 更新（2026-10-11，链锁）**：结论仍不变（FTL 恒 `FC_CHAIN_END`，运行时 `chain_owner` 恒 NONE），但补上了一处**与"运行时不走链"无关**的真实缺口——**链长 > 4 时的跨批原子性**。链被拆成多批、分多次填充 pass 下发，v51 及以前批与批之间无锁，另一条提交队列（HSQ/SQ）的命令可插在批边界上。v52 在 `fc_scheduler_t` 加了一张跨 pass 持久的 per-LUN 链锁 `chain_owner[ch][ce][lun]`：链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发（规则见 §2.7、流程图见 §23.7）。**这是「链能力」本身的补强，不改变运行时主干**——FTL 不组链 ⇒ 锁恒 NONE ⇒ 生产路径逐字不变。由 Level 3 用例 `chain_priority_lock` 覆盖（8 命令 SQ 链 + 同 LUN HSQ 命令，判据 = 终值）。详见 `docs/changelog/fc_chain_priority_lock_v52.md`。
+> 🔁 **v52 更新（2026-10-11，链锁）**：结论仍不变（FTL 恒 `FC_CHAIN_END`，运行时 `chain_owner` 恒 NONE），但补上了一处**与"运行时不走链"无关**的真实缺口——**链长 > 4 时的跨批原子性**。链被拆成多批、分多次填充 pass 下发，v51 及以前批与批之间无锁，另一条提交队列（HSQ/SQ）的命令可插在批边界上。v52 在 `fc_scheduler_t` 加了一张跨 pass 持久的 per-LUN 链锁 `chain_owner[ch][ce][lun]`：链一旦开始，该 LUN 的填充权归链所在队列独占，直到链 END 下发（规则见 §2.7、流程图见 §23.7）。**这是「链能力」本身的补强，不改变运行时主干**——FTL 不组链 ⇒ 锁恒 NONE ⇒ 生产路径逐字不变。由 Level 3 用例 `chain_priority_lock` 覆盖（8 命令 SQ 链 + 同 LUN HSQ 命令，判据 = 终值）。详见 `docs/archive/changelog/fc_chain_priority_lock_v52.md`。
 
 ---
 
@@ -4352,7 +4352,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 2. **调用者已保证的前置条件转断言**——`static` 函数、内部头（`fc_internal.h` / `fc_queue.h` / `fc_scheduler.h` / `fc_data_path.h` 等）里的接口，以及跨层入口中调用者必然传有效值的指针/索引参数，守卫一律写成 `ASSERT(条件)`，并删掉原来的 `return` 与恢复/降级分支（"跳过坏 ID 继续找"、"回滚分配再返回"这类）。
 
    **FC 层不用 `ASSUME`。** 起初按"守卫带恢复分支 → `ASSUME`"划分，后来取消：恢复分支既然已经手工删掉，`ASSUME` 的 `__builtin_unreachable()` 就换不来额外代码生成收益（工程未开 LTO，`fc_command_id_to_command()` 这类跨 TU 调用点无从利用该假设）；而它会把"违反即 UB"引入一条本来只会 HardFault 的路径——同样是崩，`ASSERT` 的现场更可定位。`ASSUME` 宏保留在 `assertion.h` 里，留给将来确有热路径需要向编译器证明的场合。
-3. **资源类结果与运行时状态保留返回码**——池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、CQ 满背压（`FC_STATUS_IO_ERROR`）、NAND 报告的错误（`FC_STATUS_IO_ERROR`）、`ctx->active == 0U` / `fc_buffer_is_occupied(...) == 0U` 这类"此刻能不能做"的状态，都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。（`g_crc_ready == 0U` 曾在此列，**v33 起随 CRC 改走 HAL 驱动整体删除**——CRC 自检失败转 `ASSERT`，见 `docs/changelog/fc_crc_hal_driver_v33.md`。）
+3. **资源类结果与运行时状态保留返回码**——池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、CQ 满背压（`FC_STATUS_IO_ERROR`）、NAND 报告的错误（`FC_STATUS_IO_ERROR`）、`ctx->active == 0U` / `fc_buffer_is_occupied(...) == 0U` 这类"此刻能不能做"的状态，都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。（`g_crc_ready == 0U` 曾在此列，**v33 起随 CRC 改走 HAL 驱动整体删除**——CRC 自检失败转 `ASSERT`，见 `docs/archive/changelog/fc_crc_hal_driver_v33.md`。）
 4. **单测固化为契约的守卫保留返回码**——判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**：`fc_command_validate`（校验器，返回判决是职责）、FTL 套件的 `allocator_remove_from_free(..., 越界)`（文档化 no-op，见 `ftl_ut_munit.md §4.1`）等保留。（原条目还列了 `fc_scheduler_set_busy/clear_busy` 的越界忽略——**v8 起该 API 与 busy 表已整体删除**，见 §23.9。）反之，**只有测试会走"传非法参数"分支**的（`fc_command_status_set_cw` 的 `cw >= 4`（该函数 2026-10-08 因零生产调用者整体删除）、`fc_scheduler_init(NULL,…)`、`fc_submit(NULL)`、`fc_data_path_encode(NULL)` 等），按判据 2 转 `ASSERT` 并**删掉对应用例**。
 
 **判据 4 的边界：什么时候可以删用例而不是保留守卫。** 反例是 `fc_queue.c` 的指针判空：`fc_submission_queue_*` / `fc_completion_queue_*` 的生产调用者只有 `fc.c` 与 `fc_scheduler.c`，**全部传有效指针**——唯一会传 `NULL` 的就是测试自己。这种"只有测试会走的分支"应当按判据 2 转 `ASSERT`，并**删掉对应用例**（它们验证的行为届时已不存在，留着反而是错的）。两轮补扫共删除 `test_fc_level1.c` 的 13 个 `*_null`/越界用例与 `test_fc_level2.c` 的 3 个。
@@ -4565,7 +4565,7 @@ FTL 侧的 `ftl_cmd_setup_ppa_pair()`（`src/ftl/ftl_fc_interface.c`）是第一
 `fc_command_plane_span` 仍按 `command->paa` 定 plane 段（`multi_plane > 0` 时恒 `[0, multi_plane)`，
 故 multi-plane 命令的行地址来源变化不影响 plane 段判定）。
 
-> 详细落地见 `docs/changelog/fc_per_plane_row_address.md` 与 FTL 侧的 `ftl_policy_b_per_plane_block.md`。
+> 详细落地见 `docs/archive/changelog/fc_per_plane_row_address.md` 与 FTL 侧的 `ftl_policy_b_per_plane_block.md`。
 
 #### v13：策略层上移 FTL
 
@@ -4597,7 +4597,7 @@ FC 的对外函数按"硬件 FCC 寄存器表"判据过了一遍（见 §26）�
 **离散 CW 读能力保留**：`cmd->param.cw_bitmap = (1U << 4) | (1U << 6)`（plane1 的 CW0/CW2）
 再调 `ftl_cmd_configure_descriptors()` 即得离散链——能力与 v12 逐字节相同，只是发起者在 FTL。
 
-> 详细落地见 `docs/changelog/fc_policy_layer_uplift.md`。
+> 详细落地见 `docs/archive/changelog/fc_policy_layer_uplift.md`。
 
 #### v13.1：建链收敛（plane 段规则合并 + 删冗余断言）
 
@@ -4616,13 +4616,13 @@ v13 留下了两处可收敛的冗余，v13.1 一并处理，**行为中性**（
    保留前者——它在**污染点**（attach）就炸，定位更准，且覆盖完整；后者连同 `fc_cw_mask_popcount` 删除。
    `fc_command_descriptor_count` 不受影响（`fc_command_release` 等仍在用）。
 
-> 详细落地见 `docs/changelog/fc_plane_span_consolidation.md`。
+> 详细落地见 `docs/archive/changelog/fc_plane_span_consolidation.md`。
 
 > **v16 更正（理由，非结论）**：上面保留 `fc_command_cw_attached` 的**结论**不变，但
 > 「掩码迭代可能产生重复」这个**理由不成立**——掩码是集合，枚举不会重复置位。
 > 真正可达的重复路径是 `ftl_cmd_setup_ppa_pair`：plane 号取自 `pba_to_plane(pba[i])`
 > （L2P 查表结果），两个 LBA 可能解析到同一 plane → 重复 `(plane, cw)`。
-> ⚠ release 构建下该断言被裁空，此违规无守卫。详见 `docs/changelog/fc_chain_ownership_v16.md`。
+> ⚠ release 构建下该断言被裁空，此违规无守卫。详见 `docs/archive/changelog/fc_chain_ownership_v16.md`。
 
 #### v17：建链三层接力 → 一条公共入口
 
@@ -4648,7 +4648,7 @@ v13 留下了两处可收敛的冗余，v13.1 一并处理，**行为中性**（
 - Stripe RAID parity 建链改调公共入口 `fc_command_configure_descriptor(parity_cmd, parity_plane, pcw, parity_row)`
   （该路径由此硬绑单例 `g_fc_controller`——当前全仓只有一个 `fc_t` 实例，多实例时须改回 `controller` 参数化入口）。
 
-详见 `docs/changelog/fc_build_chain_convergence_v17.md`。
+详见 `docs/archive/changelog/fc_build_chain_convergence_v17.md`。
 
 #### v23：FTL 建链收敛为「单一掩码旋钮」（2026-10-08）
 
@@ -4677,7 +4677,7 @@ v18 只收了 FC 侧入口，FTL 侧这一处是同判据的漏网）。
 0 = 未指定；`request->cw_bitmap`（NAND 层）是**已解析结果**，0 = **合法空集**。
 两者共用 flat 编号但值不相等，FC 按链/按操作重新铸出后者。**v27 已消除这条不对称**（见下）。
 
-详见 `docs/changelog/ftl_cw_mask_single_knob_v23.md`。
+详见 `docs/archive/changelog/ftl_cw_mask_single_knob_v23.md`。
 
 #### v27：`cw_mask` → `cw_bitmap`，取消「0 = 段内全部」重载（2026-10-09）
 
@@ -4719,7 +4719,7 @@ release 下会被裁掉 ⇒ 忘填的代价是**编译期无声、release 下静
 `nand_dispatch_cw_first`/`_next` 形参改名；SQ 请求集 / CQ 失败集 / NAND 请求集**三处现在同口径**
 （0 = 空集），「两层 0 方向相反」这条不再需要解释。
 
-详见 `docs/changelog/fc_cw_bitmap_literal_v27.md`。
+详见 `docs/archive/changelog/fc_cw_bitmap_literal_v27.md`。
 
 #### v28：CW 集合退出命令结构体，改作建链形参（2026-10-09）
 
@@ -4753,7 +4753,7 @@ release 下会被裁掉 ⇒ 忘填的代价是**编译期无声、release 下静
 `plane_paa[]` 不读 `cw_buffers[]`，故安全——但"空掩码 = 无 buffer 可读"这条契约现在**依赖
 消费点真的不读**，新增无数据 op 时须复核（已在 `nand_dispatch.c` 的 `task_load` 注释里写明）。
 
-详见 `docs/changelog/fc_cw_bitmap_param_v28.md`。
+详见 `docs/archive/changelog/fc_cw_bitmap_param_v28.md`。
 
 ### 25.5 读路径统一
 
@@ -4867,8 +4867,8 @@ plane 与 CW 号都从这一个 `n` 算出，不再有"槽位 → (plane, ordina
 ### 25.10 验证状态
 
 - v6：`make format` + `make debug` / `make tests` / `make release` 三档**零警告**通过（153412 / — / 87660 字节）。
-- v7：见 `docs/changelog/fc_flat_cw_mask_cq_param.md` 的验证记录。
-- v9：见 `docs/changelog/fc_cw_index_unification.md` 的验证记录。
+- v7：见 `docs/archive/changelog/fc_flat_cw_mask_cq_param.md` 的验证记录。
+- v9：见 `docs/archive/changelog/fc_cw_index_unification.md` 的验证记录。
 - v27：仅 `make format-check` 通过（101 文件）。**未编译**——本轮处于测试代码重构期（Level 2/3 尚在
   引用旧夹具符号），编译验证留到调用点迁移完成之后。
 - **上板未验证**（按平台规则由用户执行）。回归护栏：现有全部读用例必须通过。

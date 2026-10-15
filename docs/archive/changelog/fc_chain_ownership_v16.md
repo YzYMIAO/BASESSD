@@ -154,7 +154,7 @@ return FTL_ERROR;
 | `src/ftl/ftl_fc_interface.c` | 两处建链失败回滚改用 `fc_descriptor_chain_release_all`；doc 注明「只建链，不搬数据」 |
 | `docs/design/fc_nand_design.md` | §2.1 池布局 v16 段；§2.9 接口数 19→21 + 两个新签名；v16 失败语义；§2.10 生命周期；图 1；§26.3 |
 | `docs/design/fc_api_usage.md` | v16 横幅；接口表 +2 行；验证表更新；写/读流程图补失败路径与「搬数据只在写」 |
-| `docs/changelog/fc_chain_ownership_v16.md` | 本文件（新增） |
+| `docs/archive/changelog/fc_chain_ownership_v16.md` | 本文件（新增） |
 
 ---
 

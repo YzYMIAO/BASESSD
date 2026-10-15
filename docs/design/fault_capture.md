@@ -233,7 +233,7 @@ void fault_hook(const fault_ctx_t *ctx);   /* 弱符号，默认空实现 */
 
 ### 7.1 FTL rebuild 套件从构建摘除
 
-`test_rebuild.c` 的 `rebuild_fixture_t` ≈ 245 KB，而堆 = DTCM = 128 KB，物理上装不下，是"跑 UT 就 HardFault"的直接来源（见 `docs/design/debug_sbrk_heap_stack_20261004.md`）。当前调试重心在 FC-NAND 层，先把该套件摘出构建，让故障捕获机制先落地可观测：
+`test_rebuild.c` 的 `rebuild_fixture_t` ≈ 245 KB，而堆 = DTCM = 128 KB，物理上装不下，是"跑 UT 就 HardFault"的直接来源（见 `docs/archive/debug_sbrk_heap_stack_20261004.md`）。当前调试重心在 FC-NAND 层，先把该套件摘出构建，让故障捕获机制先落地可观测：
 
 - `src/fc/makefile.mk`：注释掉 `test_rebuild.c`
 - `tests/unit/ut_main.c`：删掉 `g_rebuild_tests` 的 extern 与子套件条目

@@ -8,7 +8,7 @@
 /*
  * 崩溃记录放在 .noinit：NOLOAD、启动不清零，可跨软复位保留。
  * （原 .bkpsram_data 因 VBPSRAM 依赖 VBAT、本板 VBAT 未供电而无法保持，
- * 见 docs/design/debug_sbrk_heap_stack_20261004.md。）
+ * 见 docs/archive/debug_sbrk_heap_stack_20261004.md。）
  * volatile：记录在本轮只写不读，靠它阻止编译器把写优化掉。
  */
 static volatile crash_record_t g_crash_record __attribute__((section(".noinit")));

@@ -2,7 +2,7 @@
 
 **日期**: 2026-10-07
 **相关设计**: `docs/design/ftl_design.md` §3.6（Allocator）/§3.8（坏块替换）
-**前置**: `docs/changelog/fc_per_plane_row_address.md`（FC 层 per-plane 行地址，本改动的前提）
+**前置**: `docs/archive/changelog/fc_per_plane_row_address.md`（FC 层 per-plane 行地址，本改动的前提）
 
 ---
 

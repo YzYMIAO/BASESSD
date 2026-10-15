@@ -75,5 +75,5 @@ make clean && make tests       # 0 warning 0 error，链接 219012 B（与 v36 �
 ## 出处
 
 - 讨论中确认的判据理论：`fc_nand_design.md` §5.4、`fc_nand_ut.md` §5.6。
-- 加扰器缺陷史（抽头坍缩 / 种子改逻辑地址）：`docs/changelog/fc_scrambler_lba_seed_v24.md`。
-- 证据打印（本讨论的触发点）：`docs/changelog/fc_ut_evidence_trace_v36.md`。
+- 加扰器缺陷史（抽头坍缩 / 种子改逻辑地址）：`docs/archive/changelog/fc_scrambler_lba_seed_v24.md`。
+- 证据打印（本讨论的触发点）：`docs/archive/changelog/fc_ut_evidence_trace_v36.md`。

@@ -2,7 +2,7 @@
 
 > ⚠ **本文件是 v23 的历史记录，其中「`0` = 段内全部 CW」这条重载已在 v27 取消**——
 > `cw_mask` 改名 `cw_bitmap`，`0` 现在是**空集**。看当前语义请读
-> `docs/changelog/fc_cw_bitmap_literal_v27.md` 与 `docs/design/fc_nand_design.md` §25.4 v27。
+> `docs/archive/changelog/fc_cw_bitmap_literal_v27.md` 与 `docs/design/fc_nand_design.md` §25.4 v27。
 
 - **日期**：2026-10-08
 - **范围**：`src/ftl/ftl_fc_interface.c`、`src/ftl/read_recovery.c`、`include/ftl/ftl_fc_interface.h`、`include/fc/fc_command.h`、`src/fc/fc.c`（仅注释）、`tests/unit/test_fc_level2.c`、`tests/unit/test_fc_level3.c`、文档

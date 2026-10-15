@@ -37,7 +37,7 @@
  *
  * 为什么是逻辑地址而不是物理地址：GC 搬页后逻辑地址不变 ⇒ 密文不变，
  * 不需要「解扰再按新物理地址重加扰」。这是存储主控的通行做法
- * （见 docs/changelog/fc_scrambler_lba_seed_v24.md 的出处）。
+ * （见 docs/archive/changelog/fc_scrambler_lba_seed_v24.md 的出处）。
  *
  * 粒度 = 被寻址逻辑单元：本工程一个 CW（512B 用户数据）= 一个扇区 = 一个逻辑单元，
  * 故每条 CW 用自己那条扇区 LBA 当种子。

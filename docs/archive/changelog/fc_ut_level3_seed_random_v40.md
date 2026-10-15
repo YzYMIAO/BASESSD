@@ -161,7 +161,7 @@ _Static_assert(L3_BLOCK_HI < BLOCKS_PER_PLANE, "随机窗口越过本 plane 块�
    `test --iterations 20 /fc-nand/lifecycle/` ⇒ 六条随机化用例的**用例体各跑 20 次**。
    ⚠ **报告里的条数不变（仍 `9 of 9`）**——本版初稿在此写成「`3 + 6×20 = 123` 条」，是**错的**，
    2026-10-11 上板后按 `munit.c:803` / `:989` 与实测订正，见
-   `docs/changelog/fc_ut_board_verify_v42.md`。
+   `docs/archive/changelog/fc_ut_board_verify_v42.md`。
    ⚠ `--iterations` 是 **runner 级全局量**，且 `runner->suite` **恒指根套件**（`munit.c:1359`）
    ⇒ 子套件自己的 `iterations` 字段无效，**别去改 `ut_main.c`**（改了会把 Level 1/2 也乘 N）。
    它按调用范围生效：只跑 `/fc-nand/lifecycle/` 就只乘 Level 3。
@@ -222,13 +222,13 @@ test --log-visible info --seed 0x<上一轮打印的> /fc-nand/lifecycle/  # 复
 - 不动 `src/ftl/**`（一行不动）；其余 `src/**` 只改了 `usart.c` 的那行帮助串；
   不动 `tests/framework/munit.*`（不导出带盐 API——留在测试文件里，避免 fork 漂移）；
   不动 `ut_main.c`（**v40 自身不动**——随后 v41 只改了三个套件前缀字面量，
-  见 `docs/changelog/fc_ut_suite_prefix_slash_v41.md`）；不翻 `CONFIG_FC_RAID`；不重写既有 changelog 正文。
+  见 `docs/archive/changelog/fc_ut_suite_prefix_slash_v41.md`）；不翻 `CONFIG_FC_RAID`；不重写既有 changelog 正文。
 
 ## 出处
 
 - 判据 7（参数化 vs 迭代）：`docs/design/assertion_guidelines.md` §二十三。
 - munit fork 的 reseed / salt 机制：`tests/framework/munit.c:774`（reseed）、`:386`（`munit_str_hash`）、
   `:503`（`munit_rand_at_most`）、`:1198`（参数按用例名哈希挑值）。
-- 上一版 Level 3 形态（参数化 + 去转发层）：`docs/changelog/fc_ut_level3_param_v32.md`。
-- 证据打印：`docs/changelog/fc_ut_evidence_trace_v36.md`。
+- 上一版 Level 3 形态（参数化 + 去转发层）：`docs/archive/changelog/fc_ut_level3_param_v32.md`。
+- 证据打印：`docs/archive/changelog/fc_ut_evidence_trace_v36.md`。
 - 元数据块布局：`src/ftl/metadata.c` 的 `ftl_is_metadata_block`。

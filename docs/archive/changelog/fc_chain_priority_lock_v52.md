@@ -130,4 +130,4 @@ Step 2 与 Step 3 合起来才说明问题：**HSQ 确实能抢占**（step2 读
 - 链锁：`include/fc/fc_scheduler.h`（`fc_chain_owner_t` + `chain_owner[]`）、
   `src/fc/fc.c`（`fc_poll_fill_queue` 准入/更新/清锁、`fc_poll_fill` 队列标签）。
 - 用例：`tests/unit/test_fc_level3.c`（`test_chain_priority_lock` 及其上方 `l3_prio_*`）。
-- 前作：`docs/changelog/fc_ut_stress_v51.md`。
+- 前作：`docs/archive/changelog/fc_ut_stress_v51.md`。

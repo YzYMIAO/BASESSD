@@ -9,7 +9,7 @@
  *
  * 夹具：**复用活实例** `g_ctrl.ftl[0][0][0]`（boot 已建），不另开大数组——
  * ftl_context_t ≈ 287KB，AXI_RAM 已放 g_ftl/g_blocks，再开一份装不下
- * （见 docs/design/debug_sbrk_heap_stack_20261004.md §5）。
+ * （见 docs/archive/debug_sbrk_heap_stack_20261004.md §5）。
  *
  * ⚠ 本套件**破坏性**：每个用例开头 ftl_fixture_reset() 会 memset 掉活实例的表
  *   （BST / Free Pool / pending / groups / metadata_dir / journal / wbuf / cp / rr）。
