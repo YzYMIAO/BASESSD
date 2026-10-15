@@ -2253,7 +2253,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req) {
     return FTL_OK;                      /* ⚠ = 已受理，非已完成 */
 }
 
-/* ── 子操作下发：ftl_issue_subop 写分支（页打包 §七 方案 A，v0.66）── */
+/* ── 子操作下发：ftl_issue_subop 写分支（页打包 §七 方案 A）── */
 /* ① allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) 逐 plane 独立选块
  *    （Policy B）；Free Pool 耗尽 → 同步跑一轮紧急 GC 后重试一次，真无空间才 ERROR
  * ② nplanes = popcount(wbuf.occupied 逐 plane 段)；n_cw = popcount(wbuf.occupied)
@@ -2270,10 +2270,10 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req) {
  * ⑦ ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL)；cmd/desc/buffer 池空或 SQ 满 → 保留缓冲、返回 FTL_AGAIN（下轮重试） */
 
 /* ── 完成路径：ftl_op_host_io → ftl_confirm_write（确认写成功后**逐 CW** 簿记）──
- * ⚠ pending **不存** old_pba：旧 PBA 在完成时按 LBA 重查 L2P（v0.58 起）。
+ * ⚠ pending **不存** old_pba：旧 PBA 在完成时按 LBA 重查 L2P。
  * ⚠ pending 描述**一整页**（lba = 窗口基址 + cw_bitmap 标记本页哪些 CW 有效）⇒
  *    循环按位图逐**置位**确认，逐 CW 的 LBA = base + bit（bit = plane*CW_NUM + cw）。
- * ⚠ **v0.75 阶段 5 起本函数是两遍式，不可退化成一遍**（见 §6.3）：第一遍只探
+ * ⚠ **本函数是两遍式，不可退化成一遍**（见 §6.3）：第一遍只探
  *    `l2p_cache_ready`，任一 CW 的 region 未就绪 ⇒ **整体返回 FTL_AGAIN、一个都不写**，
  *    由 ftl_op_host_io 把 pending 停泊成 PENDING_OP_WRITE_CONFIRM（cmd_id = NONE、
  *    释放命令），下轮 ftl_confirm_kick 重来。第二遍才是下面的簿记——就绪前置挡住了
@@ -2304,22 +2304,46 @@ for (bit = 0U; bit < FTL_LBA_PER_PAIR; bit++) {
 }
 checkpoint_journal_watermark(&ftl->journal);
 ftl->total_writes++;   /* 计「编程次数」（页打包后一页 = 一次编程），不是 CW 数 */
-/* ⚠ v0.60 后**无位图**：有效性唯一真值 = 逐 CW 的 valid_count（=OOB 反查 L2P）*/
+/* ⚠ **无位图**：有效性唯一真值 = 逐 CW 的 valid_count（=OOB 反查 L2P）*/
+```
+
+**一次写 → 落盘 → 截断的完整时序**（追加 → 刷页 → Checkpoint）：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as Host 写完成
+    participant J as Journal
+    participant C as L2P Cache
+    participant N as NAND
+    participant CP as Checkpoint job
+
+    H->>J: journal_append(lba, old_pba, new_pba)<br/>（同 LBA 就地更新，不增条目）
+    H->>C: l2p_cache_write(lba, new_pba) → DIRTY
+    H->>J: checkpoint_journal_watermark()<br/>（按全环占用率设水位标志）
+    loop 服务循环（异步 job）
+        J-->>N: 页攒满 → 刷页（批量提交，起异步命令）
+        C-->>N: l2p_flush_kick → region 追加写回
+    end
+    CP->>CP: checkpoint_check_trigger()<br/>（水位 85% / 写入量 1024 / 定时 10s）
+    CP->>C: CP_FLUSH_REGIONS（按快照 bitmap 全部落盘）
+    CP->>N: CP_ANCHOR_WRITE + CP_HDR_WRITE<br/>（目录 + Header，带 journal_sequence 快照）
+    CP->>J: CP_TRUNC_ERASE（预擦环形最旧块）
+    Note over J: 此后 sequence ≤ cp_seq 的条目<br/>boot 不再回放（已入 L2P 表）
 ```
 
 ### 7.4 启动恢复
 
-> ⚠ **订正（v0.64）**：真实恢复由 `ftl_boot_recovery`（`power_failure_recovery.c`）
-> 分**三条路径**（fresh / clean / power-failure），判型见 §8.3.2。Journal 侧的
-> 写态恢复是**独立一步**：`journal_scan_latest`（只读取环内最新页）+ `journal_resume`
-> （把写指针落到最新页**之后一页**、接续序号）。**三条路径都要接回写指针**——
-> `journal_init` 把写指针/序号复位到 `(block0,page0)/1`，而环形块**没有被擦**
-> （`journal_truncate` 只预擦下一块），不接回去就二次编程 + 序号回退。
+恢复由 `ftl_boot_recovery`（`power_failure_recovery.c`）分**三条路径**（fresh / clean /
+power-failure），判型见 §8.3.2。Journal 侧的写态恢复是**独立一步**：`journal_scan_latest`
+（只读环内最新页）+ `journal_resume`（把写指针落到最新页**之后一页**、接续序号）。
+**三条路径都要接回写指针**——`journal_init` 把写指针/序号复位到 `(block0,page0)/1`，
+而环形块**没有被擦**（`journal_truncate` 只预擦下一块），不接回去就二次编程 + 序号回退。
 
 ```
 冷启动 / 干净关机（journal 无未回放条目）:
   journal_scan_latest → 取环内最新页快照
-  l2p_cache_init(cache, ch, ce, lun) → cache 全 INVALID（v0.35 起绑定拓扑）
+  l2p_cache_init(cache, ch, ce, lun) → cache 全 INVALID（绑定拓扑）
   journal_resume(journal, ring, floor) → 接回写指针 + 序号
   ftl_rebuild_closed_sb_list → F2 全扫 NAND 重建 Closed SB（三条路径都走）
   首次访问时按需从 NAND 加载 region
@@ -2352,34 +2376,28 @@ Journal 是环形多 Block（初稿写双 Block J0 ↔ J1，**实现为 4 块**�
 **Checkpoint 的作用**：记录一个全局 sequence 号 checkpoint_seq，
 Journal 中 sequence ≤ checkpoint_seq 的条目已写入 L2P table，可回收。
 
-> ⚠️ **实现订正（v0.54）**：本仓 Journal 是 **4 块**环形（`JOURNAL_BLOCKS = CW_NUM = 4`，
-> 块 58-61），非本节初稿的「双 Block J0↔J1」（设计自荐的「2→4」早已落地）。
-> 环形块数见 `ftl/metadata.h`；下面的时序/容量推导按 2 块写，**数值**需 ×2。
->
-> **环形块擦除（v0.54 P1-6）**：块的物理擦除有**唯一**一点——刷页回切进入新块时擦
-> （`journal.c`）。`journal_truncate` 只**预擦除**环形最旧块并记账
-> （`pre_erased_block`），使回切时跳过擦除 ⇒ 同一块每圈**只擦一次**。旧实现在 truncate 与
-> 刷页各擦一次 = **双倍磨损**，直击 §14.1 的 Journal 寿命瓶颈（凭空多 ~25%）。
->
-> **异步化（v0.75，阶段 2）**：这条"唯一擦除点"自 v0.75 起落在 **journal job 的
-> `JRN_ERASE` 阶段**，由完成服务函数 `ftl_op_journal` 推进，**不再**在 `journal_flush_page`
-> 的同步体里。`journal_flush_page` 退化为**同步屏障**（`journal_drain` 等 job 归位 +
-> `journal_flush_now` 立即落盘），调用者只剩 F10（GC/WL 擦 victim 前）与 HIL `fl`。
-> 详见 `ftl_revision_history.md` v0.75。
-> `up_to_sequence` 不再是死形参：水位不足以覆盖全部已写条目时**拒绝截断**（最旧块可能仍持有
-> 回放需要的条目）。
->
-> **更新合并（v0.54 P1-6）**：`journal_append` 在当前页缓冲里遇到**同一 LBA** 时就地更新
-> （只改 new_pba，不新增条目、不消耗 sequence）⇒ 覆盖写工作集下减少 Journal 页数。
+**当前实现要点**（环形块数见 `ftl/metadata.h`；时序/容量推导按 2 块写，实际 4 块
+数值 ×2）：
+
+- **4 块环形**：`JOURNAL_BLOCKS = CW_NUM = 4`（块 58-61），非初稿的「双 Block J0↔J1」。
+- **环形块擦除（P1-6）**：块的物理擦除有**唯一**一点——刷页回切进入新块时擦（`journal.c`
+  的 `JRN_ERASE` 阶段，由完成服务函数 `ftl_op_journal` 推进）。`journal_truncate` 只
+  **预擦除**环形最旧块并记账（`pre_erased_block`），使回切时跳过擦除 ⇒ 同一块每圈
+  **只擦一次**（双点擦除 = 双倍磨损，直击 §14.1 的 Journal 寿命瓶颈，凭空多 ~25%）。
+- **`journal_flush_page` 是同步屏障**（`journal_drain` 等 job 归位 + `journal_flush_now`
+  立即落盘），调用者只剩 F10（GC/WL 擦 victim 前）与 HIL `fl`；日常刷页走异步 job。
+- **`up_to_sequence` 非死形参**：水位不足以覆盖全部已写条目时**拒绝截断**（最旧块可能
+  仍持有回放需要的条目）。
+- **更新合并（P1-6）**：`journal_append` 在当前页缓冲里遇到**同一 LBA** 时就地更新
+  （只改 new_pba，不新增条目、不消耗 sequence）⇒ 覆盖写工作集下减少 Journal 页数。
+
+（这些点的分步落地记录见 `ftl_revision_history.md` v0.54 / v0.75。）
 
 #### 7.5.2 触发条件（三级触发）
 
 Journal 回收使用多级触发策略，核心原则是**前台 IO 不能被后台任务阻塞**。
-
-> ⚠ 本节早先写「企业级 SSD（三星/铠侠）的 Journal 回收使用多级触发策略」——**无任何引用**
-> （项目规矩：不凭记忆说行业要求）⇒ 去厂商名义，改为对**判据本身**的中性说明（同 §4.6 的
-> 处置）。判据本身是本仓已实现的事实：三级触发 = 下方条件 1/2/3
-> （`JOURNAL_FULL_THRESHOLD` / `CP_WRITE_INTERVAL` / `CP_TIME_INTERVAL_MS`）。
+判据本身是本仓已实现的事实：三级触发 = 下方条件 1/2/3
+（`JOURNAL_FULL_THRESHOLD` / `CP_WRITE_INTERVAL` / `CP_TIME_INTERVAL_MS`）。
 
 **条件 1：水位线触发（Journal 容量预警）**
 
@@ -2387,8 +2405,8 @@ Journal 回收使用多级触发策略，核心原则是**前台 IO 不能被后
 
 ```
 已知：
-  - Journal 容量：初稿 2 Block × 64 页 × 128 条 = 16,384 条
-    （**实现** 4 Block × 64 页 × 127 条 = 32,512 条 ⇒ 下列余量只增不减）
+  - Journal 容量：推导基准 2 Block × 64 页 × 128 条 = 16,384 条
+    （当前 4 Block × 64 页 × 127 条 = 32,512 条 ⇒ 下列余量只增不减）
   - NAND PROGRAM：~300μs/页（批量 flush 4 条 dirty cache 约 1.2ms）
   - Checkpoint 需要 flush 最多 64 条 dirty cache
   - 最坏情况：BUSY 模式下 Checkpoint 被延迟
@@ -2469,10 +2487,9 @@ Host 写入量很小时，条件 2 不会触发，但 Journal 中可能有少量
 
 #### 7.5.3 Checkpoint 执行流程
 
-> ⚠ **订正（v0.75 阶段 6）**：真实入口是 `checkpoint_begin(struct ftl_context *ftl)`
-> （返回 `ftl_status_t`），**无** `ftl_checkpoint` / `checkpoint_write` / `timer_get_ms`。
-> 原 `checkpoint_create` 是一整段同步流水线；现已拆成 **`cp_job_t` 状态机**——
-> 提交即返回，完成由 `g_op_service[FTL_OP_CHECKPOINT]` 收尾，每轮由 `checkpoint_kick` 续跑。
+入口是 `checkpoint_begin(struct ftl_context *ftl)`（返回 `ftl_status_t`），已拆成
+**`cp_job_t` 状态机**——提交即返回，完成由 `g_op_service[FTL_OP_CHECKPOINT]` 收尾，
+每轮由 `checkpoint_kick` 续跑。
 
 ```c
 /* ① 装配 job 并推进第一步（**不等任何 NAND 命令**） */
@@ -2562,7 +2579,7 @@ int checkpoint_check_trigger(const struct ftl_context *ftl, uint32_t elapsed_ms)
 
 /* BUSY 模式（ftl_service_busy）：仅紧急分支 */
 if (checkpoint_is_emergency(ftl)) {
-    (void)checkpoint_begin(ftl);   /* v0.75 阶段 6：起 job 即返回，跨档位推进 */
+    (void)checkpoint_begin(ftl);   /* 起 job 即返回，跨档位推进（must-run 位 5）*/
 }
 ```
 
@@ -2573,12 +2590,11 @@ if (checkpoint_is_emergency(ftl)) {
 | 水位线（85%） | NORMAL / IDLE | 否 |
 | 写入量（1024） | NORMAL / IDLE | 否 |
 | 定时（10s） | NORMAL / IDLE | 否 |
-| 紧急（95%） | 任何模式 | 否（v0.75 阶段 6 起 `checkpoint_begin` 只装配 job 即返回）|
+| 紧急（95%） | 任何模式 | 否（`checkpoint_begin` 只装配 job 即返回）|
 
-> ⚠ **订正**：旧表述把紧急 CP 标为"可能阻塞"——那是 `checkpoint_create` 同步流水线时代的事。
-> 异步化后**任何档位**的 `checkpoint_begin` 都提交即返回；CP 的 NAND 命令与 host I/O 在
-> 同一个泵里交错推进。代价从"阻塞前台"变成"与前台争 NAND 带宽"——由 job 的 phase 粒度
-> 自然让路（每轮只推进有限步）。
+> **任何档位**的 `checkpoint_begin` 都提交即返回（异步 job）；CP 的 NAND 命令与 host I/O
+> 在同一个泵里交错推进。代价从"阻塞前台"变成"与前台争 NAND 带宽"——由 job 的 phase
+> 粒度自然让路（每轮只推进有限步）。
 
 #### 7.5.5 参数汇总
 
@@ -2620,9 +2636,9 @@ Layer 1: FC per-CW CRC + BCH ECC（FC 层自带，零 FTL 侧开销）
   每次 FC PROGRAM/READ 都经过 BCH ECC（t=4）+ 逐 CW CRC-32。
   ECC 可纠正 ≤4 bit 的错误，超过时返回 UNC；CRC 覆盖整 CW（META+USER）且
   自身也在 ECC 码字内 ⇒ 消除"ECC 误纠后看似成功"的假阳性。
-  ⚠ v0.62 起元数据页（Journal/Checkpoint/Anchor/BBT/Wear/L2P-Region）的
-    FC CRC 由 FTL_PAGE_CFG_META 统一**开启**（此前为关闭）；FTL 记录内不再
-    自算 CRC —— 校验和下沉到下层，与 DRAM-less 主流（dhara）一致。
+  ⚠ 元数据页（Journal/Checkpoint/Anchor/BBT/Wear/L2P-Region）的 FC CRC 由
+    FTL_PAGE_CFG_META 统一**开启**；FTL 记录内不再自算 CRC —— 校验和下沉到
+    下层，与 DRAM-less 主流（dhara）一致。
   掉电点 B 导致的半烧录页面 → 少量 bit 错 → ECC 自动修 ✅
                               超过纠错能力 → UNC / CRC 不符 → 整页丢弃 ✅
 
@@ -2638,9 +2654,9 @@ Layer 3: 单调递增 sequence
   恢复时检测连续性：gap → 截断于此
   即使整页 CRC 假阳性 → sequence 不连续也能检测 ✅
 
-Layer 4: 多 Block 轮换（不是双写！）
+Layer 4: 多 Block 环形轮换（不是双写！）
   ────────────────────────────────────────────────────
-  Block J0 写满 → 切 J1 → J0 擦除
+  环形块池（4 块）写满当前块 → 预擦最旧块 → 回切续写
   恢复时读各块最后一页，取 sequence 大的
   无需双写代价，只需多读一页 ✅
 ```
@@ -2666,7 +2682,7 @@ Layer 4: 多 Block 轮换（不是双写！）
 ├─────────────────────────────────────────────────────────┤
 │ Padding: (127 - N) × 16B = 0xFF（未使用区域）            │
 └─────────────────────────────────────────────────────────┘
-注意：Header + Entries 整页由 FC 的 per-CW CRC + BCH ECC 保护（写入 4 CW；v0.62 起 CRC 开启）。
+注意：Header + Entries 整页由 FC 的 per-CW CRC + BCH ECC 保护（写入 4 CW；CRC 开启）。
       Entry 本身无独立 CRC（16B = lba + old_pba + new_pba + seq 全占满），
       完整性靠整页 CRC+ECC + page_seq 单调性判定。
 ```
@@ -2707,7 +2723,7 @@ Layer 4: 多 Block 轮换（不是双写！）
 | 保护层 | 实现 | 成本 | 保护能力 |
 |--------|------|------|---------|
 | BCH ECC (t=4) | FC 层自带 | 0 | 纠正 ≤4 bit，检测更多 ✅ |
-| FC per-CW CRC | FC 层自带（v0.62 起元数据页开启） | 0（4B/CW，FC 内部） | 校验整 CW，消除 ECC 误纠 ✅ |
+| FC per-CW CRC | FC 层自带（元数据页开启） | 0（4B/CW，FC 内部） | 校验整 CW，消除 ECC 误纠 ✅ |
 | entry_count header | Header 2B | ~0 | 精确定位有效 entry ✅ |
 | Monotonic sequence | 已有字段 | 4B/entry | 检测 gap 和乱序 ✅ |
 | 多块轮换 | 4 Block 轮流写 | ~0 | 避免双写代价 ✅ |
@@ -2732,7 +2748,7 @@ typedef struct {
     uint32_t region_bitmap[64];     // 2048 bit，哪些 region 在 checkpoint 中
     uint32_t journal_sequence;      // 截断到此 sequence 之前的 journal
     uint32_t layout_version;        // FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 记录作废）
-    // 无 crc：完整性由下层 FC 的 per-CW CRC + ECC 保证（v0.62）
+    // 无 crc：完整性由下层 FC 的 per-CW CRC + ECC 保证
 } l2p_checkpoint_header_t;
 ```
 
@@ -2775,7 +2791,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
     /* ③ 判断关机类型：最新页**整页**都被 Checkpoint 覆盖 ⇒ 干净关机；否则异常掉电。
      *    ⚠ 判据必须是整页的 `page_seq + entry_count`（与 journal_replay 的回放过滤同口径）。
      *    只看页首（page_seq ≤ cp.journal_sequence）会把恰在水位上的新页判成干净 ⇒
-     *    写→掉电后不回放 ⇒ 丢映射（v0.64 修）。 */
+     *    写→掉电后不回放 ⇒ 丢映射。 */
     if ((ring.page_seq + (uint32_t)ring.entry_count) <= cp.journal_sequence) {
         return ftl_boot_clean_start(ftl, cp.journal_sequence, &ring);   // 干净关机
     } else {
@@ -2788,7 +2804,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
 
 ```c
 ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl) {
-    /* ① L2P Cache 全 INVALID（v0.35 绑定拓扑）*/
+    /* ① L2P Cache 全 INVALID（绑定拓扑）*/
     l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
     /* ② 全盘重建 Closed SB 列表（F2）：把 main.c 回填进 Free Pool 的「已编程块」
@@ -2798,7 +2814,7 @@ ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl) {
 
     /* ③ Allocator / Journal 已由 ftl_init 初始化，此处不重复；
      *    Wear 表亦由 ftl_init 回填（P0-1）；Checkpoint 池游标由 checkpoint_find_latest
-     *    恢复（v0.65：原 ftl->cp_sequence 死字段已删，真值在 ftl->cp.sequence）*/
+     *    恢复（真值在 ftl->cp.sequence）*/
     ftl->cp_timer_start = 0U;
     return FTL_OK;
 }
@@ -2850,8 +2866,8 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
     /* ② Journal 回放：所有 page_seq > cp_sequence 的页（F10），写入 cache（DIRTY）。
-     *    entry_count 由回放循环累加（v0.69）——旧实现用 journal 的 RAM 写指针反推，
-     *    而末尾 journal_resume 会把 current_entry 清零 ⇒ 恒为 0。 */
+     *    entry_count 由回放循环累加——不能用 journal 的 RAM 写指针反推：
+     *    末尾 journal_resume 会把 current_entry 清零 ⇒ 恒为 0。 */
     (void)journal_replay(&ftl->journal, &ftl->cache, cp_sequence, &entry_count);
 
     /* ③ 按 Checkpoint region_bitmap 局部加载（F4）：
@@ -2929,13 +2945,10 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 
 #### 8.3.7 写指针恢复（Write Pointer Recovery）
 
-> ⚠ **订正**：原 `allocator_scan_write_pointer` 已不在主路径上。掉电/干净启动的
-> Open SB 写指针恢复**由 F2 的 `ftl_rebuild_closed_sb_list` 全扫 NAND 一并完成**
-> （它重建 Closed SB 列表，顺带重建 open SB 的写位置）。
-> 原 `ftl_boot_scan_write_pointer`（逐页 RAW 读找首个空白页，且把 `buf[16]` 传给按
-> 2048B 拷贝的 raw read = 栈溢出）**已于 v0.65 删除**——它自始无调用者。
-> `allocator_recover_write_pointer` / `paa_make` / `fc_read_page_raw`
-> 这些旧名均已不存在。
+> **当前实现**：没有独立的写指针扫描阶段。掉电/干净启动的 Open SB 写指针恢复
+> **由 F2 的 `ftl_rebuild_closed_sb_list` 全扫 NAND 一并完成**——它重建 Closed SB
+> 列表，顺带重建 open SB 的写位置。早期逐页 RAW 读找首个空白页的方案（还把
+> `buf[16]` 传给按 2048B 拷贝的 raw read = 栈溢出）已废弃，且自始无调用者。
 
 #### 8.3.8 启动时间总结
 
@@ -2950,7 +2963,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 | Journal 扫描 | ~1ms | ~1ms | 读最后 sequence |
 | Journal 回放 | 0ms | ~100ms | 仅异常掉电需要 |
 | Allocator 重建 | ~50ms | ~50ms | Super Block 列表 |
-| Write Pointer | ~2ms | ~5ms | ⚠ 非独立阶段——写指针恢复**并入 F2 全扫**（v0.65 删独立扫描，见 §8.3.7）|
+| Write Pointer | ~2ms | ~5ms | ⚠ 非独立阶段——写指针恢复**并入 F2 全扫**（见 §8.3.7）|
 | FW Stage: HOST | ~5ms | ~5ms | Host 初始化 |
 | **总计** | **~370ms** | **~480ms** | |
 
