@@ -22,6 +22,7 @@
 
 ## 目录
 
+- **术语查找表**（Glossary）：阅读前速查——行业词 / 项目缩写 → 含义（见下方）
 1. [架构选型与行业背景](#1-架构选型与行业背景)
 2. [NAND 几何与资源预算](#2-nand-几何与资源预算)
 3. [NAND Block 分类](#3-nand-block-分类)
@@ -42,6 +43,100 @@
 18. [D7 多命令流水线方案详细分析](#18-d7-多命令流水线方案详细分析)
 19. [Block State Table 产品化裁剪路径](#19-block-state-table-产品化裁剪路径档三sram-核心--nand-扩展)
 20. [附录：核心数据结构原型](#20-附录核心数据结构原型)
+
+---
+
+## 专业术语查找表（Glossary）
+
+> **阅读本文前速查**。本文大量使用行业术语与项目内部缩写；下表按主题分组，
+> 每项给「在什么场景出现（§ 章节 / 语境）→ 什么意思」。语义以本文 + 对应源码为准；
+> 与 FC/NAND 底层相关的词另见 `fc_nand_design.md`。
+
+### 地址与映射
+
+| 术语 | 出现的场景 | 含义 |
+|---|---|---|
+| **FTL** | 全文（本文主题） | Flash Translation Layer，闪存转换层：把主机 LBA 映射到 NAND 物理地址、隐藏「先擦后写」不对称的软件层，即 SSD 固件核心 |
+| **LBA** | §1、§5、§11 | Logical Block Address，逻辑块地址：主机读写的寻址单位；本项目 1 LBA = 512B = 1 CW |
+| **PBA** | §1、§5、§13 | Physical Block Address，物理块地址：FTL 层内部一律用 PBA（v0.73 起），仅在 FC 接口处转成 PAA |
+| **PAA** | §13 | Physical Array Address：NAND 命令层地址，**位序与 PBA 不同**（plane 位位置相反），二者不可混用 |
+| **L2P** | §5、§6 | Logical-to-Physical 映射表（LBA → PBA），SSD 的核心索引 |
+| **region** | §5、§6 | L2P 表的分片单元：1 NAND 页 = 512 条 entry；全表不常驻，按需加载 |
+| **DRAM-less** | §1.3、§6、§10 | 无外置 DRAM 的主控形态：L2P 全表存 NAND，SRAM 只缓存少量 region |
+| **SRAM Cache / CLOCK** | §6 | L2P region 的 SRAM 缓存；CLOCK = 类「二次机会」置换算法，决定淘汰哪个 region |
+| **hot / cold（温区）** | §1.2、§4 | 按写频度把数据分热/冷，冷热分块存放，减少 GC 搬移（结构里是 temperature 字段） |
+
+### NAND 介质结构
+
+| 术语 | 出现的场景 | 含义 |
+|---|---|---|
+| **plane** | §2、§4 | 平面：NAND 内并行擦写的最小单元；MT29F4G08 每片 2 个 plane |
+| **block（块）** | §2、§3 | 擦除的最小单位；本设计每块 64 页、全片 2048 块 |
+| **page（页）** | §2 | 读/编程的最小单位；1 页 = 4 CW + 备区 |
+| **CW** | §1、§2、§5 | Code Word，码字 = 512B 用户数据 + ECC/CRC 校验；本设计映射粒度 = 1 CW |
+| **spare / 备区 / OOB** | §3.8 | 页内校验/元数据冗余区；⚠本项目 spare[0] 被 FTL 用户数据占用（出厂坏块标记会被写操作覆盖，见 §3.8） |
+| **Super Block（SB）** | §3、§4 | 跨 plane 的逻辑配对块（P0 块 + P1 块），分配与 GC 的最小管理单位 |
+| **gblock** | §4 | 双 plane 配对后的全局块号（实例内的块索引） |
+| **open / closed block** | §4 | 打开块（正在顺序写）vs 关闭块（写满封口，可作 GC victim） |
+| **multi-plane** | §2、§17 | 双平面操作：一次命令跨两个 plane，提升吞吐/隐藏延迟 |
+| **ONFI** | §2、§10 | NAND 接口标准；本器件 MT29F4G08 遵循 ONFI 1.0 |
+
+### FTL 核心机制与一致性
+
+| 术语 | 出现的场景 | 含义 |
+|---|---|---|
+| **modify-after-confirm** | §1.2、§4.6 | 先等 NAND PROGRAM 确认成功，再改 L2P/Journal；失败时 L2P 不动 = 自动回滚到旧数据 |
+| **Journal** | §7 | 顺序追加的 L2P 变更日志（环形块），掉电后回放恢复 |
+| **flush_page** | §7 | 把 Journal 条目从 RAM 刷成 NAND 页的动作 |
+| **Checkpoint（CP）** | §8 | 定期把 L2P 等元数据做成快照写盘，缩短启动恢复时间 |
+| **Anchor** | §8 | 定位「最新 checkpoint」的固定锚点块 |
+| **replay / 回放** | §8.3 | 启动时把 checkpoint 之后 Journal 里的更新重放一遍 |
+| **GC / 垃圾回收** | §4.4 | Garbage Collection：把块里仍有效的数据搬走、再擦除，腾出空闲块 |
+| **victim** | §4.4 | 被 GC/WL 选中的搬移对象块（四维 cost 取小：VALID/ERASE/TEMP/AGE） |
+| **migrate / MIG** | §4.4、§4.8 | 数据搬移任务（GC、静态 WL、预测搬移共用同一状态机） |
+| **Wear Leveling / 磨损均衡（WL）** | §4.8 | 均匀化各块擦除次数、延长寿命；静态 WL = 把冷数据搬去高擦除块 |
+| **Free Pool** | §3、§4 | 空闲块池；allocator 从这里取块给写分配 |
+| **OP / 预留 / Spare 池** | §3 | 超容量预留空间：保空闲水位 + 坏块替换补给 |
+| **水位（watermark）** | §4.4 | 空闲块数的触发阈值（T1/T4/T5 三级，越界越急 GC 力度越大） |
+| **BST** | §3、§4 | Block State Table，块状态表：状态位 + 有效 CW 数 + 擦除计数 |
+| **BBT** | §3.8 | Bad Block Table；⚠本项目语义特殊 = 「哪些块被写过」图 + 出厂坏块扫描（spare 被覆盖后标记不准确） |
+| **Read Recovery / Read Retry** | §4、RR | 读失败恢复：切读重试电压 → 邻居页辅助 → 最后坏块替换 + 搬移 |
+| **read disturb** | §4.8 | 读干扰：反复读导致邻近单元电荷漂移，需 WL / 读恢复应对 |
+| **P/E 次数 / 寿命** | §2、§4.8 | Program/Erase cycles，擦写次数上限，决定 NAND 寿命 |
+| **ECC / CRC / 加扰** | §1.1、§13 | 数据保护链：ECC 纠位翻转、CRC 检传输错、Randomizer 加扰抑制干扰 |
+
+### 调度与性能
+
+| 术语 | 出现的场景 | 含义 |
+|---|---|---|
+| **bg_scheduler** | §12 | v0.76 后台调度引擎：按时间预算跑 14 项后台任务 |
+| **must-run** | §12 | 每轮最先、无条件执行的 6 项任务（checkpoint_kick 第一） |
+| **budget / 预算** | §12 | 每轮后台任务可用时间上限（IDLE/NORMAL 档 2000µs，BUSY 档 700µs） |
+| **档位** | §12 | IDLE / NORMAL / BUSY 三级负载 → 预算的映射 |
+| **完成泵（completion drain）** | §11、§13 | fc_service 里循环抽干完成队列并逐条派发的处理段 |
+| **op tag** | §11.3 | 完成服务函数选择器 = `g_op_service[]` 的下标 |
+| **completion table** | §11.3 | 命令完成路由表（cmd_id → ctx + ch/ce/lun → 实例，双表） |
+| **pending 表** | §11.3 | command_id → 请求的 32 项固定表（子操作记账） |
+| **owners** | §11.3 | 某 pending 子操作被哪些组共享的位掩码 |
+| **组完成** | §11 | host 一次请求的全部子操作完成后，只通知上层一次 |
+| **FTL_AGAIN** | §11 | 三态返回之一：本次提交被拒（忙），调用方稍后重试 |
+| **背压（backpressure）** | §17 | 队列满时限制/拒绝新提交，防止拥塞 |
+| **流水线（pipeline）** | §18 | 多条命令在飞、重叠执行以隐藏延迟 |
+| **CQ / SQ / HSQ** | §11、§13 | 命令完成队列 / 提交队列 / 高优先级队列（元数据操作） |
+| **thrashing / 抖动** | §6 | L2P cache 反复换入换出同一批 region，命中率崩坏 |
+| **节拍** | §4.4、§12 | 后台任务的周期性时间闸门（如 GC 求值 10ms 一次） |
+
+### 项目内部用语（口头常提）
+
+| 术语 | 出现的场景 | 含义 |
+|---|---|---|
+| **ch / ce / lun** | §2、§13 | 通道 / 片选 / 逻辑单元：NAND 拓扑三维度；每个组合一个独立 FTL 实例 |
+| **实例（instance）** | §2、多 LUN | 每 (ch,ce,lun) 一个独立 `ftl_context`：布局 / L2P / 池都按维度独立 |
+| **g_ftl** | §11、§20 | 全局实例数组（一个实例一份） |
+| **Allocator / 分配器** | §3、§4 | 负责从 free pool 取块、跨 plane 配对、分配 PBA |
+| **temperature / temp** | §4 | 数据热度字段，决定冷热分块（见 hot/cold） |
+| **退役（retire）** | §4.8 | 静态 WL / 预测搬移后把块标记退役，不再分配 |
+| **预测搬移（predictive）** | §4.8、RR | 依据健康状态提前搬移濒危块的数据 |
 
 ---
 
