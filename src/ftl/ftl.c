@@ -246,15 +246,10 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
      * ID 在池内，恒返回非空指针。 */
     cmd = fc_command_id_to_command(cmd_id);
 
-    /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①）。
-     * 保留 release 兜底但吼一声——静默吞掉会丢掉一次 host I/O 完成。 */
-    if (ftl == NULL)
-    {
-        LOGE("[FTL] host_io: NULL instance (route not set?) cmd=%u\r\n",
-             (unsigned)cmd_id);
-        (void)fc_command_release(cmd);
-        return;
-    }
+    /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①），
+     * 完成派发保证 ftl 恒非空。不留 release-and-return 兜底：debug 当场炸，
+     * release（NDEBUG 裁空）下若真走到则 NULL 解引用留现场（比静默吞完成可定位）。 */
+    ASSERT(ftl != NULL);
 
     pending = pending_lookup(ftl, cmd_id);
 

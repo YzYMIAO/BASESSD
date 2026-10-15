@@ -507,15 +507,10 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
     fc_command_t        *cmd    = fc_command_id_to_command(cmd_id);
     ftl_read_recovery_t *rr;
 
-    /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①）。
-     * 保留 release 兜底但吼一声——静默吞掉会让 RR job 永久停在 waiting=1。 */
-    if (ftl == NULL)
-    {
-        LOGE("[RR] service: NULL instance (route not set?) cmd=%u\r\n",
-             (unsigned)cmd_id);
-        (void)fc_command_release(cmd);
-        return;
-    }
+    /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①），
+     * 完成派发保证 ftl 恒非空。不留 release-and-return 兜底：debug 当场炸，
+     * release（NDEBUG 裁空）下若真走到则 NULL 解引用留现场。 */
+    ASSERT(ftl != NULL);
 
     rr = (ftl_read_recovery_t *)ctx;
     ASSERT(rr == &ftl->rr);

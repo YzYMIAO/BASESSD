@@ -288,10 +288,7 @@ void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t 
     ASSERT(gi < FTL_GROUP_MAX);
 
     g = &ftl->groups[gi];
-    if (g->used == 0U)
-    {
-        return; /* 组已释放（防御：不应发生） */
-    }
+    ASSERT(g->used != 0U); /* 组已释放 = 重复完成/簿记错误，debug 当场炸 */
 
     if (sub_status != SSD_STATUS_OK)
     {
