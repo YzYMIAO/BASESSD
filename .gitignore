@@ -90,3 +90,6 @@ Desktop.ini
 operand
 query
 sh/flash.jlink
+
+# IO 路线代码评审的登记清单（工作草稿，不进版本库）
+.claude/io_review_backlog.md
