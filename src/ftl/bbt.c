@@ -294,8 +294,8 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
         }
 
         /* 全局块号 → 各 Plane 的物理块号 */
-        plane = (uint8_t)(gblock / BLOCKS_PER_PLANE);
-        block = (uint16_t)(gblock % BLOCKS_PER_PLANE);
+        plane = ftl_gblock_plane(gblock);
+        block = ftl_gblock_block(gblock);
 
         /* 只读标记（do_erase=0）：出厂扫描阶段**不得**擦块——擦除会永久毁掉标记 */
         if (bbt_probe_block_bad(alloc, plane, block, 0U) != 0)
@@ -966,6 +966,8 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_co
  * -------------------------------------------------------------------- */
 ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, uint8_t plane)
 {
+    uint16_t gblock;
+
     /*
      * Spare Pool 坏块替换：出厂时 main.c 已为**每个 plane** 预留
      * FTL_SPARE_POOL_PER_PLANE=50 个好块到 alloc->spare_blocks[plane]。运行时
@@ -973,14 +975,16 @@ ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, uint8_t plane)
      * 补进 free pool，保用户容量水位。
      * 只出不进，该 plane Spare Pool 耗尽后返回 FTL_ERROR（容量自然下降）。
      */
-    if ((alloc == NULL) || (alloc->spare_blocks == NULL) || (plane >= PLANE_NUM) ||
-        (alloc->spare_count[plane] == 0U))
+    if ((alloc == NULL) || (alloc->spare_blocks == NULL) || (plane >= PLANE_NUM))
     {
         return FTL_ERROR;
     }
 
-    alloc->spare_count[plane]--;
-    allocator_free_block(alloc, alloc->spare_blocks[plane][alloc->spare_count[plane]]);
+    if (allocator_spare_try_pop(alloc, plane, &gblock) == 0U)
+    {
+        return FTL_ERROR; /* 该 plane Spare Pool 耗尽 */
+    }
+    allocator_free_block(alloc, gblock);
 
     return FTL_OK;
 }

@@ -290,9 +290,9 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
     /* 归一化基准：全表极值（一次扫描，与候选数无关）。min_erase 本函数不用（T5 用）。 */
     gc_table_extremes(alloc, &min_erase, &max_erase, &max_pe_ts);
 
-    for (uint16_t i = 0U; i < alloc->closed_sb_count; i++)
+    for (uint16_t i = 0U; i < allocator_closed_count(alloc); i++)
     {
-        super_block_t *sb      = &alloc->closed_sb_list[i];
+        super_block_t *sb      = allocator_closed_at(alloc, i);
         uint16_t       valid   = 0U;
         uint8_t        present = 0U;
         uint32_t       er_max  = 0U;         /* 本 SB 的磨损代表：各 plane 取大 */
@@ -303,9 +303,9 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
         uint32_t       yp;
         uint32_t       cost;
 
-        if (sb->valid != 0U)
+        if (super_block_is_open(sb))
         {
-            continue;
+            continue; /* 仍在写的 SB 不是回收对象 */
         }
 
         /* 有效 CW 数 = 各 plane 物理块 valid_count 之和（CW 级真实计数，替代 next_page 近似）。
@@ -400,12 +400,12 @@ uint32_t gc_check_triggers(const ftl_allocator_t *alloc)
     }
 
     /* T1：空闲块水位（主动补池，还留有余量就开工） */
-    if (alloc->free_count < FREE_POOL_TARGET)
+    if (allocator_free_count(alloc) < FREE_POOL_TARGET)
     {
         triggers |= GC_TRIGGER_WATERMARK;
     }
     /* T4：紧急（池已见底的最后手段）。与 T1 同源但阈值更低（8 vs 32）。 */
-    if (alloc->free_count <= FREE_POOL_EMERGENCY)
+    if (allocator_free_count(alloc) <= FREE_POOL_EMERGENCY)
     {
         triggers |= GC_TRIGGER_EMERGENCY;
     }

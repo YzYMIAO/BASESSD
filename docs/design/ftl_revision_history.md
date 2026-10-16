@@ -5272,3 +5272,49 @@ v0.75 的三级后台按「未决命令数」分档（IDLE/NORMAL/BUSY），档�
   正常补池）+ `test /ftl/bg/` 板上过 + 断电重启数据仍在。
 - ⚠ 生产适配器（bg_a_* 起 journal 擦 / mig 读 / checkpoint cp_step）的真完成链归异步套件
   （`ftl_ut_munit.md` §4.9 计划）职责，`/ftl/bg/` 用全 14 计数桩覆盖引擎语义。
+
+## v0.77 — Allocator 不变量收口（账本访问器 + 三池对称 push/pop；纯重构，无介质变更）
+
+> **RAM 侧重构，无介质变更**（`FTL_MEDIA_LAYOUT_VERSION` 仍 5U）。目标不是改行为，
+> 而是把 allocator 的不变量从「注释纪律」搬进 API。
+
+**日期**：2026-10-16
+
+**起因**：用户读 `allocator.c` 反馈「阅读起来有点难」。只读审计结论——难点不在单个函数，
+而在**同一不变量有大量外部模块手工维护**（`free_count` 5 读 / op·spare 池 4 裸写 /
+`closed_sb_list` 12 读 / 手工地址转换 4 处 / `sb->valid` 2 读），正确性寄托在注释和调用方
+纪律上，无机器强制。
+
+**改动**（`allocator.h` + `allocator.c` + `main.c` + `bbt/gc/wear_leveling/migrate/metadata/
+power_failure_recovery/ftl/cli`）：
+
+1. **谓词** `super_block_is_open/is_closed()`。`valid` 语义是反的（1=Open/0=Closed），
+   调用点裸比看不出含义；读反 ⇒ 条目对 GC/WL 永久不可见 ⇒ 空闲池只出不进（v0.67 同形态）。
+2. **只读访问器** `allocator_free_count()` / `op_count(plane)` / `spare_count(plane)` /
+   `closed_count()` / `closed_at(i)`。越界读当场 ASSERT。`closed_at` 形参收 const、返回
+   非 const（`closed_sb_list` 是 `super_block_t *` 成员，const 容器下天然非 const 左值）
+   ⇒ 无需动 `gc_select_victim` 签名。
+3. **地址解码单点**：`gblock /`、`% BLOCKS_PER_PLANE` → `ftl_gblock_plane/block`（与
+   `ftl_gblock` 严格互逆）。
+4. **三池对称 push/pop** `allocator_{op,spare}_try_push/try_pop()`。满/空返回 0 而非
+   ASSERT（判据 3：`FTL_OP_BLOCKS_PER_PLANE` 可为 0，池满在合法配置下可达）。
+   `main.c` 回填的 4 处裸写（v0.77 前唯一绕过全部 API 的地方）与 `bbt_spare_pool_refill`、
+   `allocator_pull_from_op` 的手写记账一并收口。push/pop 只动数组+计数，不碰 BST state。
+5. **`allocator.h` 文件头新增「不变量」四条**：① 四本账各有唯一闸门；② `FTL_BLOCK_STATE_FREE`
+   **会说谎**（`allocator_init` 早于元数据目录加载，把全部非坏块无条件置 FREE，而元数据块
+   不进池）⇒ 选块一律以 Free Pool **数组**为准；③ `valid` 反语义；④ `closed_sb_list` 是
+   swap-remove 活列表，借出指针不跨调用有效。
+
+**收口**：`make all` / `make release` / `make tests UT=FTL` 三锚点全绿、零新告警（release 仅剩
+3 条既有告警）。`.bin` 212772B → 215036B（+2264B，访问器 ASSERT 内联展开，release 裁空）。
+UT 零改动（纯新增 API，结构体字段仍公开）。⚠ **未上板**：判据 = 冷启动 → 顺序写 → GC 冒烟 +
+`ftl info` 计数与改动前一致。
+
+**已知未闭合项（只加注释，未修）**：`allocator_close_sb` 在 `closed_sb_count >=
+SUPER_BLOCK_LIST_MAX` 时**静默丢弃**条目（块的 BST 已置 CLOSED、`sb_id` 已写成越界索引，
+但列表无对应条目 ⇒ 永久漏账），而 `allocator_add_closed_sb` 同条件 **ASSERT**——两者不对称。
+不改的理由：关闭走在前台写路径上，停机整盘不可用。
+
+**范围外**：closed 列表稳定槽位（要改 GC victim 遍历语义）；删 `FTL_BLOCK_STATE_FREE` 位
+（生产零读者，但删前要先决定元数据块置 `RESERVED` 还是 `state=0`，且 `bbt_mark_bad` 需补一次
+free-pool 驱逐 ⇒ 改 `free_count` 可观测值，**需上板**）。

@@ -455,9 +455,9 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
             ftl->gc_log_last_ms = now_ms;
             LOGI("[GC] trig=0x%02x free=%u op=%u/%u writes=%lu reclaimed=%lu novictim=%lu\r\n",
                  (unsigned)triggers,
-                 (unsigned)ftl->alloc.free_count,
-                 (unsigned)ftl->alloc.op_count[0],
-                 (unsigned)ftl->alloc.op_count[1],
+                 (unsigned)allocator_free_count(&ftl->alloc),
+                 (unsigned)allocator_op_count(&ftl->alloc, 0U),
+                 (unsigned)allocator_op_count(&ftl->alloc, 1U),
                  (unsigned long)ftl->total_writes,
                  (unsigned long)ftl->gc_reclaimed_count,
                  (unsigned long)ftl->gc_novictim_count);

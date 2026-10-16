@@ -183,13 +183,13 @@ int mig_begin_predict(ftl_context_t *ftl)
 
     /* 慢死块必在 closed_sb_list 中（scan 只返回 CLOSED 块） */
     closed_idx = ftl_block_sb_id(&ftl->alloc.blocks[gblock]);
-    ASSERT(closed_idx < ftl->alloc.closed_sb_count);
+    ASSERT(closed_idx < allocator_closed_count(&ftl->alloc));
 
     memset(&sb, 0, sizeof(sb));
     sb.topo = ftl->topo;
     for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
-        sb.plane_blocks[p] = ftl->alloc.closed_sb_list[closed_idx].plane_blocks[p];
+        sb.plane_blocks[p] = allocator_closed_at(&ftl->alloc, closed_idx)->plane_blocks[p];
     }
 
     return mig_start(ftl, &sb, MIG_KIND_PREDICT, MIG_POST_RETIRE);
@@ -346,18 +346,20 @@ static void mig_finish(ftl_context_t *ftl)
     {
         uint16_t closed_idx = UINT16_MAX;
 
-        if (ftl->alloc.closed_sb_count > 0U)
+        if (allocator_closed_count(&ftl->alloc) > 0U)
         {
-            for (uint16_t i = 0U; i < ftl->alloc.closed_sb_count; i++)
+            for (uint16_t i = 0U; i < allocator_closed_count(&ftl->alloc); i++)
             {
-                if ((ftl->alloc.closed_sb_list[i].plane_blocks[0] == m->victim.plane_blocks[0]) &&
-                    (ftl->alloc.closed_sb_list[i].plane_blocks[1] == m->victim.plane_blocks[1]))
+                const super_block_t *e = allocator_closed_at(&ftl->alloc, i);
+
+                if ((e->plane_blocks[0] == m->victim.plane_blocks[0]) &&
+                    (e->plane_blocks[1] == m->victim.plane_blocks[1]))
                 {
                     closed_idx = i;
                     break;
                 }
             }
-            if (closed_idx >= ftl->alloc.closed_sb_count)
+            if (closed_idx >= allocator_closed_count(&ftl->alloc))
             {
                 closed_idx = UINT16_MAX; /* 未找到（非 Closed 列表成员）：无需移除 */
             }

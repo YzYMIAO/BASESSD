@@ -15,6 +15,31 @@
  * 地址体系：
  *   allocator_alloc_pair() 返回 nand_pba_t（FTL 物理地址：CH/CE/LUN 拓扑 + 块/页/plane/CW）。
  *   PBA 的 page 字段由 allocator 管理，block/plane 从 Free Pool 分配。
+ *
+ * ══ 不变量（读本文件前先读这四条；每条都有 API 兜着，别再靠调用点纪律）══
+ *
+ * ① **四本账，各有唯一的进出闸门。** Free Pool（`free_blocks/free_count`）、
+ *    OP 池、Spare 池、Closed 列表。池的进出**只走** `allocator_*_try_push/pop` 与
+ *    `allocator_free_block` / `allocator_pool_remove`——外部模块不得裸写 `op_blocks[i]`
+ *    这类数组（v0.77 前 main.c 回填就是 4 处裸写）。**读**一律走 `allocator_*_count()`
+ *    与 `allocator_closed_at()`。
+ *
+ * ② **`FTL_BLOCK_STATE_FREE` 会说谎，选块一律以 Free Pool 数组为准。**
+ *    `allocator_init` 早于元数据目录加载（`ftl.c` 的 init 顺序），拿不到「哪些是元数据块」，
+ *    故把**全部非坏块**无条件置 FREE；而元数据块**不进** Free Pool。于是「state 带 FREE」
+ *   不等于「在池里」。若按 FREE 位选块，新片恒选 block 0 = L2P region-0 哨兵页（设计上
+ *   永不写入）⇒ 用户数据覆盖它 ⇒ 重启后 region 0 读回垃圾 PBA。
+ *    见 `allocator_select_plane_block_from_pool` 的长注释与 ADR。
+ *
+ * ③ **`super_block_t.valid` 语义是反的**：1 = Open（仍在写），0 = Closed（待回收）。
+ *    一律经 `super_block_is_open()/is_closed()` 读，别在调用点裸比。
+ *
+ * ④ **`closed_sb_list` 是 swap-remove 的活列表，借出的指针不跨调用有效。**
+ *    任何一次 `allocator_add_closed_sb` / `allocator_remove_closed_sb` 都可能把末位条目
+ *    搬到别处 ⇒ 跨调用持有请**按值拷贝**（`migrate.h` 的 victim 副本就是这条约定）。
+ *    列表实际只收**已关闭**的条目（`allocator_close_sb` 在拷贝前就把 valid 清 0），
+ *    但消费方仍应经 `super_block_is_closed()` 过滤——这条过滤是 UT 钉住的契约
+ *    （`test_gc_victim_skips_open`），不是可有可无的冗余。
  */
 
 #include "common/assertion.h" /* ASSERT（退化单 plane 条目展开地址是编码错误） */
@@ -125,6 +150,24 @@ static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const supe
     /* ch/ce 取形参（调用点自带的 FTL_DATA_CH/CE）；lun 取 sb->topo —— sb->topo 就是
      * 本实例的 topo（见 allocator.c 的「绑定真实拓扑」）。cw = 0 = 整页（页级基址）。 */
     return pba_make(ch, ce, sb->topo.lun, sb->plane_blocks[plane], plane, page, 0U);
+}
+
+/* ── Super Block 开闭谓词 ──
+ *
+ * ⚠ `super_block_t.valid` 的语义是**反的**：1 = 正在使用（Open），0 = 已关闭（Closed）。
+ *   GC（gc_select_victim）与 WL（wl_select_victim）遍历 closed_sb_list 时按
+ *   「跳过仍为 Open 的 SB」过滤——即 `valid != 0` 就跳过。直接读 `sb->valid` 的调用点
+ *   看不出这层含义，读反了会让该条目对 GC/WL **永久不可见** ⇒ 选不出 victim ⇒
+ *   空闲池只出不进 ⇒ 写最终永久失败（见 allocator.c 的 allocator_close_sb 长注释）。
+ *   一律经谓词读，不要在调用点裸比 `sb->valid`。 */
+static inline uint8_t super_block_is_open(const super_block_t *sb)
+{
+    return (sb->valid != 0U) ? 1U : 0U;
+}
+
+static inline uint8_t super_block_is_closed(const super_block_t *sb)
+{
+    return (sb->valid == 0U) ? 1U : 0U;
 }
 
 /* ── 元数据池游标（序 4：per-instance）──
@@ -256,6 +299,112 @@ typedef struct
     bbt_state_t  bbt;  /* 坏块表池：sequence / write_idx / cursor_valid / dirty */
     wear_state_t wear; /* 磨损计数日志：sequence / next_page / 节拍基准 / 脏位图 */
 } ftl_allocator_t;
+
+/* ── 账本只读访问器 ──
+ *
+ * 外部模块（GC / WL / migrate / 掉电恢复 / CLI / 元数据）一律经这里读账本，
+ * 不裸摸 `alloc->free_count` / `alloc->closed_sb_list[i]`：
+ *   · 计数口径只在一处定义——将来账本换存储（如 B2 稳定槽位）只改这里；
+ *   · 越界读当场停机，而不是静默读到脏条目。
+ *
+ * 写侧**不经**这里——池的进出统一走 allocator_* 的 push/pop 族（见文件头「不变量」）。 */
+
+static inline uint16_t allocator_free_count(const ftl_allocator_t *alloc)
+{
+    return alloc->free_count;
+}
+
+static inline uint16_t allocator_op_count(const ftl_allocator_t *alloc, uint8_t plane)
+{
+    ASSERT(plane < PLANE_NUM);
+    return alloc->op_count[plane];
+}
+
+static inline uint16_t allocator_spare_count(const ftl_allocator_t *alloc, uint8_t plane)
+{
+    ASSERT(plane < PLANE_NUM);
+    return alloc->spare_count[plane];
+}
+
+static inline uint16_t allocator_closed_count(const ftl_allocator_t *alloc)
+{
+    return alloc->closed_sb_count;
+}
+
+/* closed_sb_list 第 i 项（**借出**，不转移所有权）。
+ *
+ * ⚠ 返回值是列表内的**活指针**：allocator_add_closed_sb / allocator_remove_closed_sb
+ *   是 swap-remove，一次调用就可能让先前取到的指针指向别的条目。跨调用持有请**按值
+ *   拷贝**（`migrate.h` 的 victim 副本就是这条约定）。
+ *
+ * ⚠ 消费方仍须先判 `super_block_is_closed()` 再回收——见文件头不变量 ④。 */
+static inline super_block_t *allocator_closed_at(const ftl_allocator_t *alloc, uint16_t idx)
+{
+    ASSERT(idx < alloc->closed_sb_count);
+    return &alloc->closed_sb_list[idx];
+}
+
+/* ── OP / Spare 池的对称 push / pop ──
+ *
+ * 三个池（Free / OP / Spare）的进出方式从此**只有一种**：push 入池、pop 出池，
+ * 且都只动「数组 + 计数」。池的 push/pop **不碰 BST state**——`FTL_BLOCK_STATE_FREE`
+ * 由 `allocator_free_block` / `allocator_pool_remove` 独占维护，避免两处各改一半。
+ *
+ * 满 / 空一律**返回 0 而不是 ASSERT**（判据 3：资源类结果）：
+ *   · `FTL_OP_BLOCKS_PER_PLANE` 由 `FTL_OP_PERCENT` 算出，设计上允许为 0（禁用 OP 池）
+ *     ⇒「OP 池满」在合法配置下可达，不是「不该发生」；
+ *   · Spare 池的入池发生在掉电重建逐块扫描时，好块数可能超过池容量 ⇒ 满也是常态。
+ * 调用者据此决定回退（如 main.c 回填：池满 ⇒ 改送 Free Pool）。 */
+
+static inline uint8_t allocator_op_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gblock)
+{
+    ASSERT(plane < PLANE_NUM);
+    if (alloc->op_count[plane] >= (uint16_t)FTL_OP_BLOCKS_PER_PLANE)
+    {
+        return 0U;
+    }
+    alloc->op_blocks[plane][alloc->op_count[plane]] = gblock;
+    alloc->op_count[plane]++;
+    return 1U;
+}
+
+static inline uint8_t allocator_op_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
+{
+    ASSERT(plane < PLANE_NUM);
+    ASSERT(out_gblock != NULL);
+    if (alloc->op_count[plane] == 0U)
+    {
+        return 0U;
+    }
+    alloc->op_count[plane]--;
+    *out_gblock = alloc->op_blocks[plane][alloc->op_count[plane]];
+    return 1U;
+}
+
+static inline uint8_t allocator_spare_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gblock)
+{
+    ASSERT(plane < PLANE_NUM);
+    if (alloc->spare_count[plane] >= (uint16_t)FTL_SPARE_POOL_PER_PLANE)
+    {
+        return 0U;
+    }
+    alloc->spare_blocks[plane][alloc->spare_count[plane]] = gblock;
+    alloc->spare_count[plane]++;
+    return 1U;
+}
+
+static inline uint8_t allocator_spare_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
+{
+    ASSERT(plane < PLANE_NUM);
+    ASSERT(out_gblock != NULL);
+    if (alloc->spare_count[plane] == 0U)
+    {
+        return 0U;
+    }
+    alloc->spare_count[plane]--;
+    *out_gblock = alloc->spare_blocks[plane][alloc->spare_count[plane]];
+    return 1U;
+}
 
 /* ── 接口函数 ── */
 

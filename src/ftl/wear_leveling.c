@@ -116,13 +116,13 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
     total_cw_per_sb = (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK * CW_NUM);
     min_valid_cw    = (uint16_t)(total_cw_per_sb * WL_MIN_VALID_RATIO / 100U);
 
-    for (i = 0U; i < ftl->alloc.closed_sb_count; i++)
+    for (i = 0U; i < allocator_closed_count(&ftl->alloc); i++)
     {
-        const super_block_t *sb = &ftl->alloc.closed_sb_list[i];
+        const super_block_t *sb = allocator_closed_at(&ftl->alloc, i);
         uint32_t             sb_ec;
 
         /* 跳过仍为 Open 的 SB */
-        if (sb->valid != 0U)
+        if (super_block_is_open(sb))
         {
             continue;
         }

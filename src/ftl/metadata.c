@@ -680,8 +680,8 @@ static nand_pba_t md_block_addr(const metadata_dir_cache_t *dir, uint16_t gblock
     return pba_make(dir->topo.ch,
                     dir->topo.ce,
                     dir->topo.lun,
-                    (uint32_t)(gblock % BLOCKS_PER_PLANE),
-                    (uint32_t)(gblock / BLOCKS_PER_PLANE),
+                    (uint32_t)ftl_gblock_block(gblock),
+                    (uint32_t)ftl_gblock_plane(gblock),
                     0U,
                     0U);
 }
@@ -921,7 +921,7 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
          * ⚠ 只**登记请求**，本槽本次失败：调用者收到 NAND_PBA_INVALID 会返回 FTL_AGAIN
          *   下轮重试，那时新块仍在、cur_metadata_page == 0 ⇒ 直接取到槽 0（若 job 已起，
          *   则继续让路直到压缩走完）。 */
-        if (alloc->free_count <= FREE_POOL_TARGET)
+        if (allocator_free_count(alloc) <= FREE_POOL_TARGET)
         {
             dir->job.compact_wanted = 1U;
             return NAND_PBA_INVALID;

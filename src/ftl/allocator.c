@@ -135,14 +135,13 @@ static uint8_t allocator_pool_remove(ftl_allocator_t *alloc, uint16_t gblock)
  */
 static uint8_t allocator_pull_from_op(ftl_allocator_t *alloc, uint8_t plane)
 {
-    if ((alloc == NULL) || (alloc->op_blocks == NULL) || (plane >= PLANE_NUM) ||
-        (alloc->op_count[plane] == 0U))
-    {
-        return 0U;
-    }
+    uint16_t gblock;
 
-    alloc->op_count[plane]--;
-    allocator_free_block(alloc, alloc->op_blocks[plane][alloc->op_count[plane]]);
+    if (allocator_op_try_pop(alloc, plane, &gblock) == 0U)
+    {
+        return 0U; /* 该 plane OP 池空 */
+    }
+    allocator_free_block(alloc, gblock);
 
     return 1U;
 }
@@ -179,7 +178,7 @@ static uint16_t allocator_select_plane_block_from_pool(const ftl_allocator_t *al
         uint16_t           gblock = alloc->free_blocks[i];
         const ftl_block_t *blk    = &alloc->blocks[gblock];
 
-        if ((uint8_t)(gblock / BLOCKS_PER_PLANE) != plane)
+        if (ftl_gblock_plane(gblock) != plane)
         {
             continue; /* 不属于目标 plane */
         }
@@ -228,11 +227,11 @@ static uint8_t allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint
     }
 
     /* 从 Free Pool 移除两 plane 的 gblock（swap-remove），并写入 SB
-     * （SB 存 **plane 内块号**；gblock 是跨 plane 全局编号，需取模还原） */
+     * （SB 存 **plane 内块号**；gblock 是跨 plane 全局编号，需解码还原） */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
         (void)allocator_pool_remove(alloc, gblock[plane]);
-        sb->plane_blocks[plane] = (uint16_t)(gblock[plane] % BLOCKS_PER_PLANE);
+        sb->plane_blocks[plane] = ftl_gblock_block(gblock[plane]);
     }
     sb->next_page   = 0U;
     sb->temperature = temperature;
@@ -293,6 +292,12 @@ static void allocator_close_sb(ftl_allocator_t *alloc, super_block_t *sb)
      * 与重建路径 allocator_add_closed_sb（显式 valid=0）保持同一约定。 */
     sb->valid = 0U;
 
+    /* ⚠ 列表满时**静默丢弃**：块的 BST 已置 CLOSED、sb_id 已写成越界索引（closed_idx
+     * == SUPER_BLOCK_LIST_MAX），但列表里没有对应条目 ⇒ 这些块既不在 Free Pool、
+     * 也不会被 GC 选中，等于永久漏账。
+     * 与重建路径 allocator_add_closed_sb 在同一条件下 **ASSERT** 不对称（那里好块数
+     * 远小于 1024，满即账本已坏）。此处不 ASSERT 是因为关闭走在前台写路径上，一旦停机
+     * 整盘不可用——属**已知未闭合项**，见 docs/design/ftl_revision_history.md。 */
     if (alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX)
     {
         alloc->closed_sb_list[alloc->closed_sb_count++] = *sb;
@@ -377,7 +382,7 @@ ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature
     }
 
     sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
-    if ((sb == NULL) || (sb->valid == 0U))
+    if (super_block_is_closed(sb))
     {
         return FTL_ERROR; /* 无对应 Open SB */
     }
@@ -410,9 +415,9 @@ nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nan
     sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
     /* 当前 Super Block 无效或已写满 → 关闭并分配新 Super Block */
-    if ((sb->valid == 0U) || (sb->next_page >= PAGES_PER_BLOCK))
+    if (super_block_is_closed(sb) || (sb->next_page >= PAGES_PER_BLOCK))
     {
-        if (sb->valid != 0U)
+        if (super_block_is_open(sb))
         {
             allocator_close_sb(alloc, sb);
         }

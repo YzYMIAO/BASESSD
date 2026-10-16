@@ -556,7 +556,7 @@ static void close_full_block(ftl_context_t       *ftl,
         lba_t      cw_lba[CW_NUM];
         uint8_t    cw;
 
-        pba = super_block_page_pba(alloc->ch, alloc->ce, &alloc->closed_sb_list[sb_idx], plane, page);
+        pba = super_block_page_pba(alloc->ch, alloc->ce, allocator_closed_at(alloc, sb_idx), plane, page);
 
         /* 读失败 / 全页无写过 CW → 该页不可用，跳过。
          * CW 级映射：逐 CW 从页内 META（= OOB 反向映射）取回扇区 LBA。 */

@@ -276,18 +276,14 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         good_n++;
 
         /* ① 本 plane 的前 50 个好块入 Spare Pool（坏块替换池） */
-        if (alloc->spare_count[plane] < FTL_SPARE_POOL_PER_PLANE)
+        if (allocator_spare_try_push(alloc, plane, gblock) != 0U)
         {
-            alloc->spare_blocks[plane][alloc->spare_count[plane]] = gblock;
-            alloc->spare_count[plane]++;
             continue;
         }
 
         /* ② 本 plane 的前 10% 好块入 OP 池（GC 缓冲池） */
-        if (alloc->op_count[plane] < (uint16_t)FTL_OP_BLOCKS_PER_PLANE)
+        if (allocator_op_try_push(alloc, plane, gblock) != 0U)
         {
-            alloc->op_blocks[plane][alloc->op_count[plane]] = gblock;
-            alloc->op_count[plane]++;
             continue;
         }
 
@@ -304,10 +300,10 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
          ce,
          lun,
          (unsigned)free_n,
-         (unsigned)alloc->op_count[0],
-         (unsigned)alloc->op_count[1],
-         (unsigned)alloc->spare_count[0],
-         (unsigned)alloc->spare_count[1]);
+         (unsigned)allocator_op_count(alloc, 0U),
+         (unsigned)allocator_op_count(alloc, 1U),
+         (unsigned)allocator_spare_count(alloc, 0U),
+         (unsigned)allocator_spare_count(alloc, 1U));
 
     if (ftl_boot_recovery(ftl, &result) != FTL_OK)
     {
