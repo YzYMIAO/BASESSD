@@ -3488,8 +3488,11 @@ void         journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence); 
 #define FTL_OP_POOL_CAP          ((FTL_OP_BLOCKS_PER_PLANE) > 0U ? (FTL_OP_BLOCKS_PER_PLANE) : 1U)
 #define FTL_SPARE_POOL_PER_PLANE (50)  /* 每 plane 坏块替换池大小（总 100）*/
 
-/* Super Block 列表容量：每 Plane 2048 Block，最多 1024 个 Super Block 配对 */
-#define SUPER_BLOCK_LIST_MAX  (1024)
+/* Closed Super Block 列表容量 = 全部物理块数（结构上界，不是估值）：
+ *   · 掉电重建每写过一个物理块就建一条退化单 plane 条目 ⇒ 满盘重启最多要 FTL_BLOCK_TOTAL 条；
+ *   · 运行时每条 SB 占 1~2 个块 ⇒ 条数必 < FTL_BLOCK_TOTAL。
+ * 取小值会让满盘时列表溢出：重建路径开机 ASSERT，运行时路径静默丢条目（块永久漏账）。 */
+#define SUPER_BLOCK_LIST_MAX  (FTL_BLOCK_TOTAL)
 
 /* ⚠ 无 ftl_open_sb_t 类型——allocator 直接内嵌 hot_sb / cold_sb（见下）*/
 

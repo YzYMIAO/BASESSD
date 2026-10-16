@@ -87,8 +87,20 @@
 #define FTL_OP_POOL_CAP          ((FTL_OP_BLOCKS_PER_PLANE) > 0U ? (FTL_OP_BLOCKS_PER_PLANE) : 1U)
 #define FTL_SPARE_POOL_PER_PLANE (50U) /* 每 plane 坏块替换池大小（总 100） */
 
-/* ── Closed Super Block 列表最大容量 ── */
-#define SUPER_BLOCK_LIST_MAX (1024U)
+/* ── Closed Super Block 列表最大容量 ──
+ *
+ * 容量取 **全部物理块数**（FTL_BLOCK_TOTAL）——这是结构的真实上界，不是估值：
+ *   · 掉电重建（`allocator_add_closed_sb`）**每写过一个物理块就建一条**退化单 plane 条目
+ *     ⇒ 满盘重启最多要 FTL_BLOCK_TOTAL 条；
+ *   · 运行时（`allocator_close_sb`）每条 SB 占 1~2 个块 ⇒ 条数必 < FTL_BLOCK_TOTAL。
+ * 取小值（原 1024）会让满盘重启时列表溢出——两条路径的失败形态都不可接受：
+ * 重建路径当场 ASSERT（debug 下开机即 HardFault），运行时路径**静默丢条目**（块的 BST
+ * 已置 CLOSED、`sb_id` 已写成越界索引，却不在列表里 ⇒ GC 永不可见 ⇒ 永久漏账）。
+ * 定成上界后，两条路径的「列表满」都成了**结构上不可能**，守卫才配称不变量。
+ *
+ * 代价：12 KB → 48 KB（`super_block_t` 12 B × 4096），单实例一次性。
+ */
+#define SUPER_BLOCK_LIST_MAX (FTL_BLOCK_TOTAL)
 
 /* ── Closed 条目「退化单 plane」哨兵 ──
  * Policy B 下 SB 两 plane 是**独立分配**的物理块（不再同号）。掉电重建按物理块逐个归位
@@ -523,7 +535,8 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx);
  * @param plane_blocks   [PLANE_NUM] 每 plane 的 Block 号；Policy B 下逐 plane 独立分配，
  *                       重建产生的**退化单 plane 条目**把另一 plane 记 FTL_BLOCK_NO_PLANE
  * @param temperature    FTL_TEMP_HOT / FTL_TEMP_COLD（掉电无落盘，调用方给默认）
- * @return 塞入的 closed 列表索引；列表满返回 UINT16_MAX
+ * @return 塞入的 closed 列表索引；UINT16_MAX 仅表示参数非法（列表满在结构上不可能，
+ *         见 SUPER_BLOCK_LIST_MAX，真满了是 ASSERT 停机）
  */
 uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
                                  const uint16_t   plane_blocks[PLANE_NUM],

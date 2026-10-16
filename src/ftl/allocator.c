@@ -292,16 +292,12 @@ static void allocator_close_sb(ftl_allocator_t *alloc, super_block_t *sb)
      * 与重建路径 allocator_add_closed_sb（显式 valid=0）保持同一约定。 */
     sb->valid = 0U;
 
-    /* ⚠ 列表满时**静默丢弃**：块的 BST 已置 CLOSED、sb_id 已写成越界索引（closed_idx
-     * == SUPER_BLOCK_LIST_MAX），但列表里没有对应条目 ⇒ 这些块既不在 Free Pool、
-     * 也不会被 GC 选中，等于永久漏账。
-     * 与重建路径 allocator_add_closed_sb 在同一条件下 **ASSERT** 不对称（那里好块数
-     * 远小于 1024，满即账本已坏）。此处不 ASSERT 是因为关闭走在前台写路径上，一旦停机
-     * 整盘不可用——属**已知未闭合项**，见 docs/design/ftl_revision_history.md。 */
-    if (alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX)
-    {
-        alloc->closed_sb_list[alloc->closed_sb_count++] = *sb;
-    }
+    /* 列表容量 = FTL_BLOCK_TOTAL（见 allocator.h），而每条 SB 至少占 1 个块 ⇒ 满不可能。
+     * ⚠ 这里**曾经**是 `if (count < MAX)` 静默丢弃（v0.78 修）：块的 BST 已置 CLOSED、
+     *   sb_id 已写成越界索引，却不在列表里 ⇒ 既不在 Free Pool、GC 也永不可见 = 永久漏账，
+     *   表现为可用容量无声流失、写最终永久 FTL_AGAIN。 */
+    ASSERT(alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX);
+    alloc->closed_sb_list[alloc->closed_sb_count++] = *sb;
 }
 
 /* ── 关闭 / 回收 ── */
@@ -542,7 +538,8 @@ void allocator_free_reserved_block(ftl_allocator_t *alloc, uint16_t gblock)
  *   参数：alloc —— 分配器；plane_blocks[PLANE_NUM] —— 两 plane 内块号（可含 FTL_BLOCK_NO_PLANE）；
  *         temperature —— 温度流。
  *   返回：新条目在列表中的索引；UINT16_MAX 参数非法。
- *   实现要点：列表满在重建阶段**不应发生**（好块数远小于 1024）⇒ ASSERT（块账本已破坏）；
+ *   实现要点：列表容量 = FTL_BLOCK_TOTAL，而本函数**每写过一个物理块最多建一条** ⇒
+ *             满在结构上不可能 ⇒ ASSERT（真满了只可能是块账本已破坏）。
  *             条目 next_page=64（=满）、valid=0（Closed，gc_select_victim 依赖）。
  * -------------------------------------------------------------------- */
 uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
@@ -557,7 +554,7 @@ uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
         return UINT16_MAX;
     }
 
-    /* 列表满在重建阶段不应发生（好块数远小于 1024）——满了说明块账本已破坏 */
+    /* 每条占 1 个块、容量 = 块总数 ⇒ 满不可能（见 allocator.h 的 SUPER_BLOCK_LIST_MAX） */
     ASSERT(alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX);
 
     /* 组装条目（next_page=64=满；valid=0=Closed，gc_select_victim 依赖） */

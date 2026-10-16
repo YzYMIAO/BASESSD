@@ -140,7 +140,7 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | `free_block_clears_state` | 对 OPEN/CLOSED/RESERVED/TEMP 块调 `allocator_free_block` → state==FREE + 入池 + 计数+1 |
 | `close_open_sb` | `allocator_close_open_sb`：新 closed SB 两 plane 块 state==CLOSED + `sb_id` 正确 + `closed_sb_count`+1 |
 | `add_closed_sb` | `allocator_add_closed_sb` → count+1、两块 CLOSED + sb_id；**条目字段**：`next_page==PAGES_PER_BLOCK`、`temperature` 透传、`valid==0`、`topo` 正确；两块 **清 FREE/OPEN** 位 |
-| `add_closed_sb_full` | **边界**：塞满 `SUPER_BLOCK_LIST_MAX` 后返回 `UINT16_MAX` 且**不写入**、`closed_sb_count` 不变（满列表拒绝） |
+| `add_closed_sb_full` | ~~**边界**：塞满 `SUPER_BLOCK_LIST_MAX` 后返回 `UINT16_MAX` 且**不写入**~~ **已撤销**：v0.78 起容量 = `FTL_BLOCK_TOTAL`（每条占 1 块 ⇒ 满结构上不可能），实现是 ASSERT 而非返回码，本用例不可测（见 `test_ftl.c` 文件头 ①） |
 | `remove_closed_sb_swap_remove` | 删中间项：末项搬到该位**且 `sb_id` 修正**、count-1（swap-remove 索引坑）；被删块 `sb_id` 复位 `FTL_BLOCK_NO_SB` |
 | `remove_from_free` | `allocator_remove_from_free`（swap-remove）→ count-1、块不在池；**移除不存在的块无害**（count 不变，负例） |
 | `reserved_alloc_free` | `allocator_alloc_reserved_block` 置 RESERVED；`allocator_free_reserved_block` 归还池 |

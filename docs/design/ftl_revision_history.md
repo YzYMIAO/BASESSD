@@ -5310,11 +5310,40 @@ power_failure_recovery/ftl/cli`）：
 UT 零改动（纯新增 API，结构体字段仍公开）。⚠ **未上板**：判据 = 冷启动 → 顺序写 → GC 冒烟 +
 `ftl info` 计数与改动前一致。
 
-**已知未闭合项（只加注释，未修）**：`allocator_close_sb` 在 `closed_sb_count >=
-SUPER_BLOCK_LIST_MAX` 时**静默丢弃**条目（块的 BST 已置 CLOSED、`sb_id` 已写成越界索引，
-但列表无对应条目 ⇒ 永久漏账），而 `allocator_add_closed_sb` 同条件 **ASSERT**——两者不对称。
-不改的理由：关闭走在前台写路径上，停机整盘不可用。
+**顺带发现（已在本轮修，见 v0.78）**：`allocator_close_sb` 在 `closed_sb_count >=
+SUPER_BLOCK_LIST_MAX` 时**静默丢弃**条目，而 `allocator_add_closed_sb` 同条件 **ASSERT**
+——两者不对称，且根因是容量取值本身错了。
 
 **范围外**：closed 列表稳定槽位（要改 GC victim 遍历语义）；删 `FTL_BLOCK_STATE_FREE` 位
 （生产零读者，但删前要先决定元数据块置 `RESERVED` 还是 `state=0`，且 `bbt_mark_bad` 需补一次
 free-pool 驱逐 ⇒ 改 `free_count` 可观测值，**需上板**）。
+
+## v0.78 — 修 Closed SB 列表容量：`SUPER_BLOCK_LIST_MAX` 1024 → `FTL_BLOCK_TOTAL`
+
+> **RAM 侧变更（AXI_RAM +36 KB），无介质变更**（`FTL_MEDIA_LAYOUT_VERSION` 仍 5U）。
+
+**日期**：2026-10-16
+
+**缺陷**：容量 1024 是**估值**不是上界，而列表的真实需求就是「所有不在 Free Pool 里、
+又不属于 Open SB 的块」：
+- 掉电重建**每写过一个物理块建一条**退化单 plane 条目 ⇒ 满盘重启要 ~3960 条；
+- 运行时每条 SB 占 2 个块，**盘越满、GC 越搬不动，列表就越长** ⇒ 写满 ~264 MiB
+  （1024 条 × 2 块 × 132 KiB/块）后就溢出。
+
+溢出后两条路径的失败形态都不可接受：重建路径**开机即 ASSERT**（debug 下 HardFault 开不了机），
+运行时路径 `allocator_close_sb` **静默丢条目**——块的 BST 已置 CLOSED、`sb_id` 已写成越界索引，
+却不在列表里 ⇒ 既不在 Free Pool、GC 也永不可见 = **永久漏账**，表现为可用容量无声流失、
+写最终永久 `FTL_AGAIN`。
+
+**修法**：容量取 **`FTL_BLOCK_TOTAL`**（每条条目至少占 1 个块 ⇒ 满在结构上不可能），
+于是两处守卫都成了真不变量：`allocator_close_sb` 的静默丢弃改为 **ASSERT**（与
+`allocator_add_closed_sb` 对称），`allocator_add_closed_sb` 的 ASSERT 保留并更新注释
+（其返回值 `UINT16_MAX` 从此只表示参数非法）。
+
+**代价**：`super_block_t` 12 B × 4096 = 48 KB（原 12 KB）。AXI_RAM 291.3 → 327.3 KB
+（75.9% → 85.2%），`_Static_assert(sizeof(g_ftl) + FTL_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE)`
+仍通过。**可选后续**：`super_block_t.topo` 的 `ch`/`ce` 是**只写不读**（`super_block_page_pba`
+4 个调用点全部自带宽高、只读 `topo.lun`），去掉后可压到 8 B/条 ⇒ 只 +20 KB。
+
+**收口**：三锚点全绿、零新告警；`.bin` 215036 → 215068B。⚠ **未上板**：判据 = 写满 >300 MiB
+后 `ftl info` 的 `closed` 不再被封顶、`free` 不再无声下滑，断电重启仍能开机。

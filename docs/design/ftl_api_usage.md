@@ -737,7 +737,7 @@ Padding: (127 - N) × 16B = 0xFF
 /* Free Pool 三级水位（一个已擦除池，见 ftl_design §3.7） */
 #define FREE_POOL_TARGET        (32U)   /* 水位①/②分界 */
 #define FREE_POOL_EMERGENCY     (8U)    /* 水位②/③分界 */
-#define SUPER_BLOCK_LIST_MAX    (1024U) /* Closed Super Block 列表容量 */
+#define SUPER_BLOCK_LIST_MAX    (FTL_BLOCK_TOTAL) /* Closed SB 列表容量 = 块总数（结构上界，见 §3.6） */
 
 /* OP / Spare 池（**按 plane 各留一份**，见 ftl_design §3.6） */
 #define FTL_OP_PERCENT           (10U)  /* OP 预留百分比（按 plane 计）*/
