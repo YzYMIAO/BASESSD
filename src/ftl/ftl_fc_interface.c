@@ -19,7 +19,7 @@
  *
  * 文件结构：
  *   1. 建链            ftl_cmd_resolve_cw_bitmap（static）/ ftl_cmd_configure_descriptors
- *   2. 命令地址入口    ftl_cmd_setup_ppa / ftl_cmd_setup_ppa_pair
+ *   2. 命令地址入口    ftl_cmd_setup_ppa / ftl_cmd_setup_ppa_pair_cw
  *   3. 数据搬运        ftl_cmd_write_data / ftl_cmd_read_data
  *   4. 同步提交等待    ftl_sync_submit_wait（ftl_op 机制的客户端）
  *   5. 页级同步原语    sync_page_prepare / sync_page_prepare_cw（static）
@@ -56,7 +56,7 @@
  *       现取消。名字叫 bitmap 就必须逐位字面：0 = 一个 CW 都不访问，那不是合法的
  *       数据命令（建链会产出空链 → desc_id = INVALID → 提交后**静默不搬任何数据**）。
  *       整段访问由调用者用 fc_command_plane_span_cw_bitmap() 显式算 —— 见
- *       pba_to_cmd / ftl_cmd_setup_ppa / ftl_cmd_setup_ppa_pair。
+ *       pba_to_cmd / ftl_cmd_setup_ppa。
  *       ⚠ 这两条 ASSERT 就是「生产者忘填」的唯一拦网，且 ASSERT 在 release 下会被裁掉，
  *         故「忘了填」的代价是**编译期无声、release 下静默空操作**——新增建链调用点时
  *         必须显式给位图（§十三：建链入口的配置错误一律 ASSERT）。
@@ -79,10 +79,9 @@ static uint32_t ftl_cmd_resolve_cw_bitmap(uint32_t bitmap, uint8_t plane_first, 
      * 因为本函数在 debug 下会先炸、给出比"命令静默失败"更清楚的现场。 */
     if (plane_count > 1U)
     {
-        uint8_t p;
-        for (p = 0U; p < plane_count; p++)
+        for (uint8_t p = 0U; p < plane_count; p++)
         {
-            const uint32_t plane_bits = bitmap & ((uint32_t)((1U << CW_NUM) - 1U) << ((uint32_t)(plane_first + p) * CW_NUM));
+            const uint32_t plane_bits = bitmap & ftl_cw_plane_mask((uint8_t)(plane_first + p));
             ASSERT(plane_bits != 0U);
         }
     }
@@ -107,7 +106,7 @@ static uint32_t ftl_cmd_resolve_cw_bitmap(uint32_t bitmap, uint8_t plane_first, 
  *       ⚠ 想「整段访问」不要传 0 —— 那是空集。用 ftl_cmd_setup_ppa(_pair)，
  *         或显式传 fc_command_plane_span_cw_bitmap(cmd)。
  *     - 行地址所有 plane 共用 cmd->paa（同页语义）；两 plane 不同块（Policy B）
- *       走 ftl_cmd_setup_ppa_pair()，本函数不适用。
+ *       走 ftl_cmd_setup_ppa_pair_cw()，本函数不适用。
  *     - **失败时本函数自己回滚整条链**（desc + buffer 全部还池，desc_id 复位 INVALID），
  *       调用者只需再 fc_command_release 还命令槽位。
  * -------------------------------------------------------------------- */
@@ -120,10 +119,9 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
     uint8_t  plane;
     uint8_t  cw;
 
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* cmd 由调用者从 fc_command_alloc() 取且已判空（判据 2：层内模块头 = 前置条件 → ASSERT）。
+     * 唯一合法失败是**池空**（desc/buffer）——那才是返回码。 */
+    ASSERT(cmd != NULL);
 
     if (ftl_cmd_needs_desc_chain(cmd) == 0U)
     {
@@ -163,16 +161,14 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
  * ftl_cmd_setup_ppa
  *   功能：单 plane 入口——把 PBA 拆成拓扑（ch/ce/lun）与行地址（PAA），并建整段 desc 链。
  *   参数：cmd —— 命令（config.operation 须已设）；pba —— 目标物理块地址（须合法）。
- *   返回：FTL_OK / FTL_ERROR（cmd 为 NULL / 建链失败）。
+ *   返回：FTL_OK / FTL_ERROR（建链失败）。
  *   实现要点：v47 PBA→PAA 在本层一次转出，FC 层不再见 PBA；位图取「本命令 plane 段内
  *             全部 CW」（整段语义），须在 paa 写好之后算。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba)
 {
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* cmd 由调用者从 fc_command_alloc() 取且已判空（判据 2：层内模块头 → 前置条件）。 */
+    ASSERT(cmd != NULL);
 
     /* 边界不变量：**进 FC 的 PBA 必须是合法 PBA**。
      * fc.c 的 fc_poll_fill_queue 把 config.ch/ce/lun 当数组下标直接索引
@@ -191,15 +187,6 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba)
 }
 
 /* --------------------------------------------------------------------
- * ftl_cmd_setup_ppa_pair
- *   功能：双 plane 入口（Policy B：两 plane 块号不同）——逐 plane 取各自行地址建整条 desc 链。
- *   参数：cmd —— 命令；pba[PLANE_NUM] —— 各 plane 的 PBA（单 plane 命令可只填 pba[0]）。
- *   返回：FTL_OK / FTL_AGAIN（desc/buffer 池空，瞬态背压）/ FTL_ERROR。
- *   实现要点：拓扑取 pba[0]（两 plane 必同 ch/ce/lun）；plane 段与位图展开规则与
- *             ftl_cmd_configure_descriptors **完全一致**（同一个 ftl_cmd_resolve_cw_bitmap），
- *             唯一差别是行地址**逐 plane 各自取**。
- * -------------------------------------------------------------------- */
-/* --------------------------------------------------------------------
  * ftl_cmd_build_pair_chain
  *   功能：按**显式** cw_bitmap 逐 plane 建 desc 链（Policy B：各 plane 行地址独立）。
  *   参数：cmd —— 命令（config.multi_plane 与 paa 须已写好，段由它们决定）；
@@ -217,25 +204,20 @@ static ftl_status_t ftl_cmd_build_pair_chain(fc_command_t *cmd, const nand_pba_t
     uint8_t  plane_count;
     uint8_t  plane_first;
     uint8_t  plane_last;
-    uint8_t  i;
+    uint8_t  plane;
+    uint8_t  cw;
 
     plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
     mask        = ftl_cmd_resolve_cw_bitmap(cw_bitmap, plane_first, plane_count);
 
-    for (i = 0U; i < plane_count; i++)
+    /* 与 ftl_cmd_configure_descriptors **同构**：单层 plane 循环 + 逐 CW 位测，
+     * 位图一律用**绝对编号**（bit = plane*CW_NUM + cw）——不再做「右移到 bit0 起」的
+     * 局部位体操。唯一差别：行地址逐 plane 各自取（Policy B），而不是共用 cmd->paa。 */
+    for (plane = plane_first; plane < plane_last; plane++)
     {
-        /* ⚠ plane 号取自**段内偏移**（plane_first + i），与位图的绝对编号一致；
-         *   pba 的下标一律用 **plane 号**（不是 i）——单 plane 命令的 plane_first 可能是 1
-         *   （paa 的 plane 位决定），此时 i==0 而 plane==1，用 pba[i] 会拿到 plane0 的行地址。 */
-        const uint8_t plane       = (uint8_t)(plane_first + i);
-        /* 本 plane 段内**局部** CW 位（右移到 bit0 起）——下方内层用 `1U << cw` 逐位测，
-         * 必须与局部下标对齐。⚠ 若在此保留**绝对**位（`mask & (0xF << plane*CW_NUM)`），
-         * plane ≥ 1 时高位落在 bit4..7，而 cw 只有 0..3 ⇒ 该 plane 恒判「无 CW」静默不建链
-         * ⇒ multi-plane 命令只覆盖 plane 0 ⇒ fc.c 的 planes_with_desc ASSERT。 */
-        const uint32_t plane_bits = (mask >> ((uint32_t)plane * CW_NUM)) & ((uint32_t)((1U << CW_NUM) - 1U));
-        uint8_t        cw;
-
-        if (plane_bits == 0U)
+        /* pba 的下标一律用 **plane 号**（不是段内偏移）——单 plane 命令的 plane_first 可能
+         * 是 1（paa 的 plane 位决定），用偏移会拿到 plane0 的行地址。 */
+        if ((mask & ftl_cw_plane_mask(plane)) == 0U)
         {
             continue; /* 本 plane 无 CW：不建链、不校验 PBA */
         }
@@ -245,13 +227,11 @@ static ftl_status_t ftl_cmd_build_pair_chain(fc_command_t *cmd, const nand_pba_t
 
         for (cw = 0U; cw < CW_NUM; cw++)
         {
-            fc_status_t st;
-
-            if ((plane_bits & ((uint32_t)1U << cw)) == 0U)
+            if ((mask & ((uint32_t)1U << ((uint32_t)plane * CW_NUM + cw))) == 0U)
             {
                 continue;
             }
-            st = fc_command_configure_descriptor(cmd, plane, cw, row_paa);
+            const fc_status_t st = fc_command_configure_descriptor(cmd, plane, cw, row_paa);
             if (st != FC_STATUS_OK)
             {
                 /* 回滚整条链（desc + buffer 还池，desc_id 复位）；命令槽位由调用者释放 */
@@ -279,46 +259,22 @@ static void ftl_cmd_bind_pair_topo(fc_command_t *cmd, nand_pba_t base_pba)
     cmd->paa        = pba_to_paa(base_pba); /* v47：PBA→PAA 在 FTL 侧一次转出 */
 }
 
-ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM])
-{
-    if ((cmd == NULL) || (pba == NULL))
-    {
-        return FTL_ERROR;
-    }
-
-    /* 边界不变量：同 ftl_cmd_setup_ppa —— 进 FC 的 PBA 必须合法（ch/ce/lun 被当
-     * suspended[][][] 下标用）。只断言**本命令实际用到**的元素：单 plane 命令的
-     * 调用者按约定可让 pba[1] 保持未初始化（见 ftl_issue_subop 的 pba 局部数组）。 */
-    ASSERT(pba_is_valid(pba[0]));
-    ftl_cmd_bind_pair_topo(cmd, pba[0]);
-
-    if (ftl_cmd_needs_desc_chain(cmd) == 0U)
-    {
-        cmd->desc_id = FC_DESCRIPTOR_ID_INVALID;
-        return FTL_OK;
-    }
-
-    /* v27/v28：位图是字面位图（0 = 空集），本入口语义就是「整段」——自己算好当实参
-     * （须在 paa 写好之后算，见 fc_command_plane_span_cw_bitmap）。 */
-    return ftl_cmd_build_pair_chain(cmd, pba, fc_command_plane_span_cw_bitmap(cmd));
-}
-
 ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM], uint32_t cw_bitmap)
 {
     uint8_t first_plane = PLANE_NUM; /* 本命令实际覆盖的第一个 plane（= 段首） */
-    uint8_t p;
 
-    if ((cmd == NULL) || (pba == NULL))
-    {
-        return FTL_ERROR;
-    }
+    /* cmd 来自调用者的 fc_command_alloc()（已判空）、pba 是调用者的局部数组
+     * （见 ftl_issue_subop / ftl_wbuf_flush）——两者给 NULL 都是调用者 bug ⇒ ASSERT
+     * （判据 2：层内模块头 = 前置条件，不返回码）。 */
+    ASSERT(cmd != NULL);
+    ASSERT(pba != NULL);
 
     /* 基址 PBA 必须取自**被覆盖的 plane**，不是无条件的 pba[0]：CW 级子操作常只覆盖
      * 半个 pair（例如一条 512B 写只落 plane1），此时 pba[0] 按约定未初始化，
      * 拿它定段会把单 plane 命令的段定成 plane0 ⇒ 位图越段 ASSERT 或静默空链。 */
-    for (p = 0U; p < PLANE_NUM; p++)
+    for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
-        if ((cw_bitmap & ((uint32_t)((1U << CW_NUM) - 1U) << ((uint32_t)p * CW_NUM))) != 0U)
+        if ((cw_bitmap & ftl_cw_plane_mask(p)) != 0U)
         {
             first_plane = p;
             break;

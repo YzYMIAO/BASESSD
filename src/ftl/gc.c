@@ -59,13 +59,13 @@
  * @param buffer         输出：整页用户数据 buffer（FTL_READ_USER_SIZE 字节，可为 NULL）
  * @param cw_lba         输出：逐 CW 的扇区 LBA（长度 CW_NUM；未写过 = FTL_LBA_INVALID）
  * @param page_base_out  输出：页基址（CW0 的扇区 LBA）（可为 NULL）
- * @return 0 成功, -1 失败（读失败 / 全页无写过 CW）
+ * @return FTL_OK 成功, FTL_ERROR 失败（读失败 / 全页无写过 CW）
  */
 ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba[CW_NUM], lba_t *page_base_out)
 {
     fc_command_t *cmd;
     uint32_t      meta_cw0;
-    int           ret;
+    ftl_status_t  ret;
 
     cmd = fc_command_alloc();
     if (cmd == NULL)
@@ -83,7 +83,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     cmd->meta               = FC_META_UNKNOWN; /* 不知道 LBA——正是要从页内 META 读回来（v24） */
 
-    if (ftl_cmd_setup_ppa(cmd, pba) != 0)
+    if (ftl_cmd_setup_ppa(cmd, pba) != FTL_OK)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -93,7 +93,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
         fc_command_status_t completion;
 
         ret = ftl_sync_submit_wait(cmd, &completion, 0U);
-        if (ret != 0)
+        if (ret != FTL_OK)
         {
             (void)fc_command_release(cmd);
             return FTL_ERROR;

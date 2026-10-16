@@ -43,45 +43,58 @@ void pending_init(ftl_context_t *ftl)
 }
 
 /* --------------------------------------------------------------------
- * pending_add
- *   功能：注册一个 pending 子操作（首个空闲槽），字段按值拷入。
- *   参数：ftl —— 上下文；cmd_id —— FC command_id；owners —— 贡献组位掩码（读=1<<gi，
- *         写页打包=wbuf.owners）；lba/buffer/n_cw —— 子操作起始 LBA / 缓冲 / 搬运的 CW 数
- *         （512B 单元）；new_pba/new_pba1 —— 写：新分配的 plane0 / plane1 **页** PBA
- *         （未覆盖传 INVALID）；cache_intermediate —— Cache Program 中间页标志；
- *         op —— 操作类型（完成路径判别依据）；cw_bitmap —— 写页的有效 CW 位图（读传 0）。
- *   返回：FTL_OK 成功，FTL_ERROR 表满（FTL_PENDING_MAX=32）。
- *   实现要点：子操作字段按值拷入 ⇒ submit 返回后调用者可复用其局部量；表满属
- *             预期内的资源结果，保留返回码（判据 3）。
+ * pending_alloc
+ *   功能：认领首个空闲 pending 槽（used=1、其余字段清零），字段由调用者就地填。
+ *   参数：ftl —— 上下文。
+ *   返回：空闲槽指针；NULL = 表满（FTL_PENDING_MAX=32）。
+ *   实现要点：表满属预期内的资源结果，保留返回码（判据 3）。
  *             ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P（见 ftl_pending_req_t 注释）。
+ *             ⚠ 认领即置 used=1，调用者填完须调 pending_validate()（pending.h）。
  * -------------------------------------------------------------------- */
-int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint32_t owners, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op, uint8_t cw_bitmap)
+ftl_pending_req_t *pending_alloc(ftl_context_t *ftl)
 {
     uint8_t i;
-
-    ASSERT(owners != 0U); /* 至少一个贡献组（读恒单组；写页打包 ≥1） */
-    ASSERT((n_cw > 0U) && (n_cw <= FTL_LBA_PER_PAIR));
 
     for (i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if (ftl->pending[i].used == 0U)
         {
-            ftl->pending[i].used               = 1U;
-            ftl->pending[i].command_id         = cmd_id;
-            ftl->pending[i].owners             = owners;
-            ftl->pending[i].op                 = (uint8_t)op;
-            ftl->pending[i].n_cw               = n_cw;
-            ftl->pending[i].cw_bitmap          = cw_bitmap;
-            ftl->pending[i].lba                = lba;
-            ftl->pending[i].buffer             = buffer;
-            ftl->pending[i].new_pba            = new_pba;
-            ftl->pending[i].new_pba1           = new_pba1;
-            ftl->pending[i].cache_intermediate = cache_intermediate;
-            return FTL_OK;
+            memset(&ftl->pending[i], 0, sizeof(ftl->pending[i]));
+            ftl->pending[i].used = 1U;
+            return &ftl->pending[i];
         }
     }
 
-    return FTL_ERROR; /* 表满 */
+    return NULL; /* 表满 */
+}
+
+/* --------------------------------------------------------------------
+ * pending_add — **临时桥接**（见 pending.h 声明处的说明）
+ *   功能：pending_alloc 认领空槽 + 逐字段填 + pending_validate，一步登记。
+ *   返回：FTL_OK 成功，FTL_ERROR 表满。
+ *   实现要点：定义只此一份（自洽不变量走 pending_validate），生产路径不调用。
+ * -------------------------------------------------------------------- */
+int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint32_t owners, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op, uint8_t cw_bitmap)
+{
+    ftl_pending_req_t *p = pending_alloc(ftl);
+
+    if (p == NULL)
+    {
+        return FTL_ERROR; /* 表满 */
+    }
+
+    p->command_id         = cmd_id;
+    p->owners             = owners;
+    p->op                 = (uint8_t)op;
+    p->n_cw               = n_cw;
+    p->cw_bitmap          = cw_bitmap;
+    p->lba                = lba;
+    p->buffer             = buffer;
+    p->new_pba            = new_pba;
+    p->new_pba1           = new_pba1;
+    p->cache_intermediate = cache_intermediate;
+    pending_validate(p);
+    return FTL_OK;
 }
 
 /* pending_lookup — 按 command_id 查本实例 pending 项；未找到返回 NULL（线性扫描，表深仅 32） */

@@ -8,7 +8,7 @@
  * 【desc 链组装】
  *   ① ftl_cmd_configure_descriptors(cmd, cw_bitmap) — 按形参 cw_bitmap 建整条 desc 链
  *   ② ftl_cmd_setup_ppa() — 单一 PBA → CH/CE/PAA + 整段位图 + 建链
- *   ③ ftl_cmd_setup_ppa_pair() — 每 plane 各自的 PBA → 整段位图 + 建链（Policy B）
+ *   ③ ftl_cmd_setup_ppa_pair_cw() — 每 plane 各自的 PBA + 显式位图 → 建链（Policy B）
  *   ④ pba_to_cmd() — nand_pba_t 直填 + 整段位图 + 建链（遍历路径 / 同步页原语）
  *      ⑩ ftl_cmd_pba() — FC 命令 → PBA（④ 的逆，供 FTL 模块回读自己下发的地址）
  *
@@ -97,6 +97,42 @@ static inline uint8_t ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
     return (uint8_t)((nand_operation_has_data(op) != 0U) && (op != OP_SET_FEATURES) && (op != OP_GET_FEATURES));
 }
 
+/* ── plane 数 → 命令头字段（读/写各一）──
+ *
+ * 页读/写命令的 operation 与 config.multi_plane 都由「本子操作覆盖几个 plane」决定。
+ * 两者**成对**设置，故收敛在这里，调用点只写一行：
+ *
+ *     cmd->config.operation   = ftl_plane_write_op(nplanes);
+ *     cmd->config.multi_plane = ftl_plane_multi_field(nplanes);
+ *
+ * multi_plane 字段携带**真实 plane 数**（1 → 0 = 单 plane 语义；N>1 → N）——下游
+ * fc_command_plane_span（plane 段）与 fc.c 的 all_planes 掩码都按它算，**不假设 2**。
+ * 本器件（MT29F4G08，ONFI 1.0）的 opcode 表里只有「单 plane」与「多 plane」两种页读/
+ * 写码（onfi_1_0.c 的 g_nand_multi_plane_*_uops 按 2 plane 定尺）；4/6 plane 器件须
+ * **先在 opcode 表加码**，再在此处扩展——这里泛化的是**形状**（plane 数不写死、界取自
+ * PLANE_NUM），不是凭空造出不存在的 opcode。 */
+
+/* plane 数 → config.multi_plane 字段。
+ * 纯打包：nplanes 的值域由调用点紧邻的 ftl_plane_*_op 断言（同一个 nplanes）。 */
+static inline uint8_t ftl_plane_multi_field(uint8_t nplanes)
+{
+    return (uint8_t)((nplanes > 1U) ? nplanes : 0U);
+}
+
+/* plane 数 → 读 operation 码。界取 PLANE_NUM，与 fc_command_plane_span 的上界同源。 */
+static inline uint8_t ftl_plane_read_op(uint8_t nplanes)
+{
+    ASSERT((nplanes >= 1U) && (nplanes <= PLANE_NUM));
+    return (uint8_t)((nplanes > 1U) ? OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT : OP_NORMAL_READ_PAGE_WITH_DATA_OUT);
+}
+
+/* plane 数 → 写 operation 码。界同上。 */
+static inline uint8_t ftl_plane_write_op(uint8_t nplanes)
+{
+    ASSERT((nplanes >= 1U) && (nplanes <= PLANE_NUM));
+    return (uint8_t)((nplanes > 1U) ? OP_PROGRAM_PAGE_MULTI_PLANE : OP_NORMAL_PROGRAM_PAGE);
+}
+
 /* ── desc 链组装 ── */
 
 /*
@@ -108,13 +144,13 @@ static inline uint8_t ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
  * fc_command_configure_descriptor()，故链序 = plane-major、plane 内 CW 递增。
  * 想只读离散 CW（例如 plane1 的 CW0/CW2）：传 (1U<<4)|(1U<<6)。
  * 想整段访问：传 fc_command_plane_span_cw_bitmap(cmd)
- *   —— 或者干脆用 ftl_cmd_setup_ppa()/ftl_cmd_setup_ppa_pair()，它们替你算。
+ *   —— 或者干脆用 ftl_cmd_setup_ppa()，它替你算。
  *
  * v28：位图是本函数的**形参**，不再是命令结构体的字段——它是"这次建链要建哪些 CW"
  * 的输入，用完即弃，没有留在命令里被回读的理由（读者只有本函数）。
  *
  * 行地址：所有 plane 共用 cmd->paa 的行地址（同页语义）。**两 plane 不同块
- * （Policy B）请用 ftl_cmd_setup_ppa_pair()**，本函数不适用。
+ * （Policy B）请用 ftl_cmd_setup_ppa_pair_cw()**，本函数不适用。
  *
  * @param cmd       须已设 config.operation / multi_plane / paa（config.cw 已不读）
  * @param cw_bitmap flat 字面位图；无数据 op（ERASE / RESET / FEATURES）不读它
@@ -122,7 +158,7 @@ static inline uint8_t ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
  */
 ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap);
 
-/* ── PBA helper（两者都**自己算整段位图**并传给建链入口） ── */
+/* ── PBA helper（**自己算整段位图**并传给建链入口） ── */
 
 /*
  * ftl_cmd_setup_ppa - 单一 PBA → 拓扑 + PAA + 整段 desc 链
@@ -131,49 +167,25 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
  * 在 FTL 侧一次转出，FC 层不再见 PBA），随后按「本命令 plane 段内全部 CW」建整条
  * desc 链（自己算 fc_command_plane_span_cw_bitmap 作实参，须在 paa 写好之后算）。
  *
- * 隐含「两 plane 同 block」——两 plane 独立分块（Policy B）请用 ftl_cmd_setup_ppa_pair()。
+ * 隐含「两 plane 同 block」——两 plane 独立分块（Policy B）请用 ftl_cmd_setup_ppa_pair_cw()。
  *
  * @param cmd  FC 命令（须已设 config.operation / multi_plane）
  * @param pba  目标物理块地址（必须合法：fc.c 拿 ch/ce/lun 当数组下标 → 越界即栈越界写）
- * @return FTL_OK / FTL_ERROR（cmd 为 NULL / 建链失败）
+ * @return FTL_OK / FTL_ERROR（建链失败）
  */
 ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
 
 /*
- * ftl_cmd_setup_ppa_pair - 按**每 plane 各自**的 PBA 建 desc 链（Policy B）
+ * ftl_cmd_setup_ppa_pair_cw - 按**每 plane 各自**的 PBA + 显式位图建 desc 链（Policy B）
  *
  * 与 ftl_cmd_setup_ppa 的区别：后者把单一 PBA 转成 PAA 填进 command->paa 后展开到各 plane，
- * 隐含「两 plane 同 block」。Policy B 下两 plane 独立分配物理块，故本函数逐条调
- * fc_command_configure_descriptor(cmd, plane, cw, pba_to_paa(pba[i]))，把每个 PBA 自己的
- * 行地址（转成 PAA）写进对应 plane 的 desc。
+ * 隐含「两 plane 同 block」；本函数逐 plane 取各自 PBA 的行地址（转成 PAA）写进对应
+ * plane 的 desc。CW 级映射（IU = 1 CW）专用入口：一条子操作常只覆盖一页里的**部分 CW**
+ * （512B 扇区写、页尾残段、GC 只搬有效 CW），故位图由调用者显式给出。
  *
  * ⚠ **plane 号取自每个 PBA 自己的 plane 位，不是数组下标**：读路径的 pba[]
  *   是按 LBA 查出来的，plane 取决于当初怎么写进去（例如 `wr 0 2` 之后
  *   lba 1 映射到 plane 1），下标与 plane 号并不总相等。
- *
- * 遍历范围：pba[0..plane_count-1]（plane 段由 fc_command_plane_span 定）；单 plane 命令
- * 只取 pba[0]（其 plane 位决定落哪个 plane 段）。
- *
- * v27/v28：本入口语义是「整段访问」——它把 fc_command_plane_span_cw_bitmap(cmd)
- * （在 cmd->paa 写好之后算）作为实参交给建链入口，**调用者没有位图可设**。
- * 要访问 CW 子集请改用 ftl_cmd_configure_descriptors()。
- *
- * @param cmd  FC 命令（须已设 config.operation / multi_plane / meta 等）
- * @param pba  [PLANE_NUM] 每 plane 的 PBA（ch/ce/lun 取 pba[0]）
- * @return FTL_OK / FTL_ERROR（池空；位图越出 plane 段是编程错误 → ASSERT；
- *         调用者负责 fc_command_release 回收半成品链）
- */
-ftl_status_t ftl_cmd_setup_ppa_pair(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM]);
-
-/*
- * ftl_cmd_setup_ppa_pair_cw - 同 ftl_cmd_setup_ppa_pair，但位图由调用者显式给出
- *
- * CW 级映射（IU = 1 CW）专用入口：一条子操作常只覆盖一页里的 **部分 CW**
- * （512B 扇区写、页尾残段、GC 只搬有效 CW），此时「整段访问」语义不再适用。
- *
- * 与 ftl_cmd_setup_ppa_pair 的唯一差别 = 位图来自形参而非
- * fc_command_plane_span_cw_bitmap(cmd)。其余（拓扑/行地址基址取 pba[0]、逐 plane
- * 行地址、越段 ASSERT、池空 → FTL_AGAIN）完全一致。
  *
  * ⚠ **cmd->config.multi_plane 必须由调用者建链前设好**——它决定 plane 段，
  *   位图须落在该段内（单 plane 命令的段 = paa 的 plane 那一个，如 plane 1 → 0xF0）。
@@ -207,10 +219,8 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
  */
 static inline ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba)
 {
-    if (cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* cmd 由调用者从 fc_command_alloc() 取且已判空（判据 2：层内模块头 → 前置条件）。 */
+    ASSERT(cmd != NULL);
 
     /* 边界不变量：同 ftl_cmd_setup_ppa —— 进 FC 的 ch/ce/lun 被 fc_poll_fill_queue 当
      * suspended[][][] 下标直接用，越界即栈越界写。本入口**不经过** ftl_cmd_setup_ppa，

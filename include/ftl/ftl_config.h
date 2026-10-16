@@ -496,4 +496,44 @@ static inline uint32_t ftl_cw_span_mask(uint8_t cw_lo, uint8_t cw_hi)
     return (uint32_t)((1U << (uint32_t)(cw_hi + 1U)) - 1U) & ~((1U << (uint32_t)cw_lo) - 1U);
 }
 
+/* 单个 plane 的全 CW 掩码（已左移到该 plane 的段）。
+ * 一位一段：plane p 占 bit [p*CW_NUM, (p+1)*CW_NUM)——见 §三.3 的 flat 编号约定。 */
+static inline uint32_t ftl_cw_plane_mask(uint8_t plane)
+{
+    ASSERT(plane < PLANE_NUM);
+    return (uint32_t)(ftl_cw_span_mask(0U, CW_NUM - 1U) << ((uint32_t)plane * CW_NUM));
+}
+
+/* 位图覆盖了几个 plane（= 本命令的 multi-plane 数；全空 → 0，调用者自判非法）。
+ * ⚠ 界走 PLANE_NUM（几何常量），与 fc_command_plane_span 的上界同源。 */
+static inline uint8_t ftl_cw_bitmap_plane_count(uint32_t bitmap)
+{
+    uint8_t plane;
+    uint8_t n = 0U;
+
+    for (plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        if ((bitmap & ftl_cw_plane_mask(plane)) != 0U)
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* 位图的置位数（= 本页实际 CW 数，即 n_cw）。只看前 FTL_LBA_PER_PAIR 位——
+ * 那是一页的总 CW 数，段外的高位不参与（与旧手写循环口径一致）。 */
+static inline uint8_t ftl_cw_bitmap_popcount(uint32_t bitmap)
+{
+    uint8_t n = 0U;
+
+    bitmap &= (uint32_t)((1U << (uint32_t)FTL_LBA_PER_PAIR) - 1U);
+    while (bitmap != 0U)
+    {
+        n++;
+        bitmap &= bitmap - 1U; /* 清最低置位 */
+    }
+    return n;
+}
+
 #endif /* FTL_CONFIG_H */

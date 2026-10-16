@@ -64,6 +64,29 @@ typedef enum
                                    *   ⚠ 停泊项**不可被 pending_lookup 撞到**：id 已置哨兵。 */
 } ftl_pending_op_t;
 
+/* ── op 谓词（判别一律走这里，调用点不裸比枚举值）──
+ * 形参取 uint8_t：ftl_pending_req_t.op / ftl_io_group_t.op 都是 uint8_t 字段。
+ *
+ * 语义：
+ *   is_read / is_write —— **活跃**子操作，完成路径按它们分派（拷数据 / 确认记账）。
+ *   is_write_confirm   —— **停泊**态（命令已脱钩、组在飞数不递减），由 ftl_confirm_kick
+ *                         每轮扫描推进，完成路径不碰它。
+ *   （READ_RECOVERY 同为停泊态，但判别走 pending_find_op 的**搜索实参**，不是谓词。） */
+static inline uint8_t pending_op_is_read(uint8_t op)
+{
+    return (uint8_t)(op == (uint8_t)PENDING_OP_READ);
+}
+
+static inline uint8_t pending_op_is_write(uint8_t op)
+{
+    return (uint8_t)(op == (uint8_t)PENDING_OP_WRITE);
+}
+
+static inline uint8_t pending_op_is_write_confirm(uint8_t op)
+{
+    return (uint8_t)(op == (uint8_t)PENDING_OP_WRITE_CONFIRM);
+}
+
 typedef struct
 {
     uint16_t used;       /* 1: 槽位占用 */
@@ -130,23 +153,47 @@ typedef struct
 void pending_init(ftl_context_t *ftl);
 
 /*
- * pending_add - 注册一个 pending 子操作
+ * pending_alloc - 认领一个空闲 pending 槽（**调用者就地逐字段填**）
  *
- * 子操作字段按值拷入 pending 槽（submit 调用后调用者可复用其局部量）。
+ * 返回该槽指针并置 used=1、其余字段清零；表满返回 NULL。字段由调用者（ftl.c 的
+ * 读写路径）**就地赋值**——11 个形参的注册函数读不出「这是在登记什么」，改为
+ * 逐字段赋值后字段名即文档（见 ftl_pending_req_t 的字段注释）。
  *
- * @param ftl                FTL 上下文
- * @param cmd_id             FC command_id
- * @param owners             贡献本子操作的组位掩码（读=1<<gi；写页打包=wbuf.owners）
- * @param lba                子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B）；
- *                           写页打包时传**窗口基址**（逐 CW 的 LBA = lba + bit）
- * @param buffer             子操作缓冲（读=写回处；写页打包传 NULL）
- * @param n_cw               本子操作搬运的 CW 数（读=写回长度/512；写=popcount(cw_bitmap)）
- * @param new_pba            写：新分配的 plane0 页 PBA（未覆盖 plane0 传 NAND_PBA_INVALID）
- * @param new_pba1           写：新分配的 plane1 页 PBA（未覆盖 plane1 传 NAND_PBA_INVALID）
- * @param cache_intermediate Cache Program 中间页标志（1=中间页跳过 L2P/Journal 更新）
- * @param op                 操作类型（PENDING_OP_READ / PENDING_OP_WRITE）——完成路径判别依据
- * @param cw_bitmap          写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读传 0
- * @return FTL_OK 成功，FTL_ERROR 表满
+ * 表满是预期内的资源结果 ⇒ 返回码（判据 3），不 ASSERT。
+ *
+ * ⚠ 填完后**必须**调 pending_validate() 再提交——owners / n_cw 的自洽不变量在那里守。
+ * ⚠ 认领即置 used=1 ⇒ 调用者填字段之前不得有任何可能返 FTL_AGAIN 的早退，
+ *   否则槽位泄漏（表里多一条 used=1 的垃圾项）。两个调用点都是「填完立刻用」。
+ *
+ * @param ftl  FTL 上下文
+ * @return 空闲槽指针；NULL = 表满
+ */
+ftl_pending_req_t *pending_alloc(ftl_context_t *ftl);
+
+/*
+ * pending_validate - 校验已填好的 pending 项的自洽不变量（只断言，无副作用）
+ *
+ *   owners != 0  —— 至少一个贡献组（读恒单组；写页打包 ≥1）
+ *   n_cw ∈ [1, FTL_LBA_PER_PAIR]
+ *
+ * ⚠ 这两条原是 pending_add 的 [BOUND] 检查点（§二十六 定的唯一权威点）。改成调用者
+ *   填槽后，定义挪到这里**一份**，两个调用点各调一次——不在调用点重复实现。
+ */
+static inline void pending_validate(const ftl_pending_req_t *req)
+{
+    (void)req; /* release 下 ASSERT 被 NDEBUG 裁空 ⇒ 形参无引用（见文件内既有 allowed/plane_bits 同类） */
+    ASSERT(req->owners != 0U);
+    ASSERT((req->n_cw > 0U) && (req->n_cw <= FTL_LBA_PER_PAIR));
+}
+
+/*
+ * pending_add - **临时桥接**：pending_alloc + 逐字段填 + pending_validate 的一步封装
+ *
+ * ⚠ 生产路径**已不用它**（ftl.c 改成就地填槽，字段名即文档——见 pending_alloc）。
+ *   保留仅为 `tests/unit/test_ftl.c` 的 4 个调用点**暂不改动**（用户 2026-10-16：
+ *   「测试UT暂时不用改。FTL代码还没看完呢」）。UT 跟进后**连同本声明一起删**。
+ *
+ * @return FTL_OK 成功；FTL_ERROR 表满
  */
 int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint32_t owners, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op, uint8_t cw_bitmap);
 

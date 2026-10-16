@@ -857,15 +857,15 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
 
         for (i = 0U; i < replay_count; i++)
         {
-            uint8_t    page_data[JOURNAL_PAGE_SIZE];
-            nand_pba_t raddr;
-            int        ret;
+            uint8_t      page_data[JOURNAL_PAGE_SIZE];
+            nand_pba_t   raddr;
+            ftl_status_t ret;
 
             raddr = journal_page_addr(journal, replay_pages[i].block, replay_pages[i].page);
 
             memset(page_data, 0xFF, sizeof(page_data));
             ret = ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META());
-            if (ret != 0)
+            if (ret != FTL_OK)
             {
                 continue; /* 页已失效，跳过（应用顺序其余页不受影响） */
             }
