@@ -21,10 +21,11 @@
  * ① **四本账，各有唯一的进出闸门。** Free Pool（`free_blocks/free_count`）、
  *    OP 池、Spare 池、Closed 列表。池的进出**只走** `allocator_*_try_push/pop` 与
  *    `allocator_free_block` / `allocator_pool_remove`——外部模块不得裸写 `op_blocks[i]`
- *    这类数组（v0.77 前 main.c 回填就是 4 处裸写）。**读**一律走 `allocator_*_count()`
- *    与 `allocator_closed_at()`。
+ *    这类数组。**读**一律走 `allocator_*_count()` 与 `allocator_closed_at()`。
  *
- * ② **`state == FTL_BLOCK_STATE_FREE` ⟺ 该块在 Free Pool 里**（2026-10-17 起为真，此前会说谎）。
+ * ② **`state == FTL_BLOCK_STATE_FREE` ⟺ 该块在 Free Pool 里**。
+ *    **坏块（BAD）永不进池**：BAD 是状态机终态，唯一入池闸门 `allocator_free_block`
+ *    拒绝它（debug `ASSERT` + release 运行期拒绝）。
  *    两个方向各有归属者，别的路径不许碰：
  *      · 入池 `allocator_free_block` —— 置 `FREE`（`allocator_free_reserved_block` 转调它）；
  *      · 出池 `allocator_pool_remove` —— **只校验**「在池 ⇒ state == FREE」（`ASSERT`），
@@ -35,13 +36,10 @@
  *    按几何地址寻址、永不参与分配）与 Spare / OP 池块。`allocator_init` 早于元数据目录加载
  *    （`ftl.c` 的 init 顺序），拿不到「哪些是元数据块」——所以它**什么都不置**，
  *    而不是"先全部置上再说"。
- *    历史：旧实现在此把全部非坏块无条件置 FREE ⇒「state 带 FREE」≠「在池里」；若按 FREE 位
- *    选块，新片恒选 block 0 = L2P region-0 哨兵页（设计上永不写入）⇒ 用户数据覆盖它 ⇒
- *    重启后 region 0 读回垃圾 PBA（实测 0x43d555d5，见 ADR）。
  *
- *    ⚠ 即便如此，**选块仍以 Free Pool 数组为准**——但理由换了：不是"FREE 不可信"，而是
- *      「选中 ⇒ `allocator_pool_remove` 必然成功」这条**结构性**保证（避免"选中 → 移除失败
- *      → 重选同一块"的死循环）。见 `allocator_select_plane_block_from_pool` 的长注释。
+ *    ⚠ **选块以 Free Pool 数组为准**：它给出「选中 ⇒ `allocator_pool_remove` 必然成功」
+ *      这条**结构性**保证（避免"选中 → 移除失败 → 重选同一块"的死循环），
+ *      与 FREE 位是否诚实无关。见 `allocator_select_plane_block_from_pool` 的长注释。
  *
  * ③ **`closed_sb_list` 是 swap-remove 的活列表，借出的指针不跨调用有效。**
  *    任何一次 `allocator_add_closed_sb` / `allocator_remove_closed_sb` 都可能把末位条目
@@ -74,7 +72,7 @@
 #define FTL_TEMP_COLD 1U /* GC 搬移 / 元数据 */
 #define FTL_TEMP_NUM  2U /* 温度等级数 */
 
-/* ── Free Pool 三级水位（P1-3 定案；设计 §3.7）──
+/* ── Free Pool 三级水位（设计 §3.7）──
  *
  * ⚠ **三级是水位，不是分区**。池只有**一个**（`free_blocks[]`）：搬移引擎的擦除分支
  *   是**先擦后归还**，所以池内每个块都已是擦除态——不存在「预擦除块」与「普通 free 块」
@@ -89,9 +87,7 @@
  *     ① free ≥ FREE_POOL_TARGET(32)          正常，不做后台 GC
  *     ② FREE_POOL_EMERGENCY(8) < free < 32   后台 GC 补池（IDLE / NORMAL）
  *     ③ free ≤ FREE_POOL_EMERGENCY(8)        紧急：强制 GC，前台写不再等
- *
- *   旧字段 `pre_cond_count` / `emergency_count` 与状态位 PRE_COND / EMERGENCY 已删除
- *   （前者恒等于 free_count，后两者从无读者）。 */
+ */
 #define FREE_POOL_TARGET    (32U) /* 后台 GC 水位（IDLE 补池目标） */
 #define FREE_POOL_EMERGENCY (8U)  /* 水位②/③分界：低于等于此值转紧急 GC */
 #define FTL_OP_PERCENT      (10U) /* OP 预留百分比（编译期默认；**按 plane 计**） */
@@ -112,17 +108,17 @@
  *   · 掉电重建（`allocator_add_closed_sb`）**每写过一个物理块就建一条**退化单 plane 条目
  *     ⇒ 满盘重启最多要 FTL_BLOCK_TOTAL 条；
  *   · 运行时（`allocator_close_sb`）每条 SB 占 1~2 个块 ⇒ 条数必 < FTL_BLOCK_TOTAL。
- * 取小值（原 1024）会让满盘重启时列表溢出——两条路径的失败形态都不可接受：
+ * 取更小的值会让满盘重启时列表溢出——两条路径的失败形态都不可接受：
  * 重建路径当场 ASSERT（debug 下开机即 HardFault），运行时路径**静默丢条目**（块的 BST
  * 已置 CLOSED、`sb_id` 已写成越界索引，却不在列表里 ⇒ GC 永不可见 ⇒ 永久漏账）。
- * 定成上界后，两条路径的「列表满」都成了**结构上不可能**，守卫才配称不变量。
+ * 取到上界后，两条路径的「列表满」都成了**结构上不可能**，守卫才配称不变量。
  *
- * 代价：8 KB → 32 KB（`super_block_t` 8 B × 4096），单实例一次性。
+ * 代价：每实例 32 KB（`super_block_t` 8 B × 4096），一次性。
  */
 #define SUPER_BLOCK_LIST_MAX (FTL_BLOCK_TOTAL)
 
 /* ── Closed 条目「退化单 plane」哨兵 ──
- * Policy B 下 SB 两 plane 是**独立分配**的物理块（不再同号）。掉电重建按物理块逐个归位
+ * Policy B 下 SB 两 plane 是**独立分配**的物理块（不要求同号）。掉电重建按物理块逐个归位
  * （见 power_failure_recovery.c），无法、也不需要恢复「哪两块曾是一对」，故 closed_sb_list
  * 条目允许只含一个 plane：另一个 plane 记本哨兵。Open SB（hot_sb/cold_sb，multi-plane 写的
  * 单元）恒为双 plane，不受影响。凡按 plane 展开地址的读者都要先判哨兵。 */
@@ -134,8 +130,8 @@
  * 该 plane 的 Free Pool 里没有可用块时返回本哨兵。取 `UINT16_MAX` 的判据是它**超出 gblock
  * 值域**——`ftl_gblock_plane()` 会解出 ≥ PLANE_NUM 的越界 plane（`bst.h`），可判、不与合法块号相撞。
  *
- * ⚠ **与 `FTL_BLOCK_NO_PLANE` 值相同、语义不同，不可互换**（C9：同一语义只允许一套坐标，
- *   反过来「一个值落在两套坐标里」也要分清）：
+ * ⚠ **与 `FTL_BLOCK_NO_PLANE` 值相同、语义不同，不可互换**（C11：同值 ≠ 同一坐标；
+ *   C9 管反方向「同一语义不许两套坐标」）：
  *     · `FTL_BLOCK_NO_PLANE` —— **plane 内块号**槽位（`super_block_t.plane_blocks[]`）的
  *       「该 plane 无块」**存储态**哨兵，会被写进 closed_sb_list **持久化**；
  *     · `FTL_GBLOCK_INVALID` —— **gblock** 坐标的「选块失败」**瞬时返回值**，从不落盘。
@@ -158,10 +154,10 @@ typedef struct
     bool     is_open;                 /* true = Open（仍在写），false = Closed（写满待回收） */
 } super_block_t;
 
-/* ── FTL 自持表（P2-5）──
+/* ── FTL 自持表 ──
  *
- * 大数组**归 FTL 实例所有**：由 `ftl_context_t.tables` 内含，HIL（main.c）不再声明数组、
- * 也不再传指针。与主流同构——OpenSSD 用全局数组、SPDK 把表放进 `spdk_ftl_dev`；
+ * 大数组**归 FTL 实例所有**：由 `ftl_context_t.tables` 内含，HIL（main.c）不声明数组、
+ * 不传指针。与主流同构——OpenSSD 用全局数组、SPDK 把表放进 `spdk_ftl_dev`；
  * 表的所有权属于 FTL 本体，不属于调用者。
  *
  * 全部放**一处**（而不是各散在 allocator / bbt / gc 里）是为了让内存预算**单点可见**：
@@ -198,12 +194,11 @@ static inline nand_pba_t super_block_page_pba(ftl_topology_t topo, const super_b
     return pba_make(topo.ch, topo.ce, topo.lun, sb->plane_blocks[plane], plane, page, 0U);
 }
 
-/* ── 元数据池游标（序 4：per-instance）──
+/* ── 元数据池游标（per-instance）──
  *
  * BBT 池 / Wear 日志各有自己的 sequence 与写游标（环形轮转，开机由各自的 load/init
- * 恢复）。**原先是 bbt.c / wear.c 的 file-scope static** —— 单实例下无害，多实例
- * （多 LUN，`g_ftl[ch][ce][lun]`）下所有实例共享一份游标/序号，互相覆盖 ⇒ 池写错槽。
- * 收进 ftl_allocator_t ⇒ 每实例一份。
+ * 恢复）。它们**归实例所有**：多实例（多 LUN，`g_ftl[ch][ce][lun]`）下若用
+ * file-scope static，所有实例会共享一份游标/序号、互相覆盖 ⇒ 池写错槽。
  *
  * 放这里（而非各自的 bbt.h / wear.h）的两个理由：
  *   ① 这两个模块的**全部**接口都以 `ftl_allocator_t *` 为首参（状态随分配器走最自然）；
@@ -212,10 +207,10 @@ static inline nand_pba_t super_block_page_pba(ftl_topology_t topo, const super_b
  *
  * ⚠ 两者都是**软状态**：掉电只丢「最后一次落盘之后」的增量，不丢用户数据（见 wear.h 头注）。
  */
-/* ── BBT 持久化 job（v0.75 阶段 7：异步化）──
+/* ── BBT 持久化 job（异步）──
  *
- * 落盘从「一次调用内同步写完」改为 job：`bbt_kick` 起步（提交第一条命令即返回），
- * 完成由 g_op_service[FTL_OP_BBT]（ftl_op_bbt）按 phase 收尾并提交下一条。
+ * 落盘走 job：`bbt_kick` 起步（提交第一条命令即返回），完成由
+ * g_op_service[FTL_OP_BBT]（ftl_op_bbt）按 phase 收尾并提交下一条。
  * 状态与池游标同处（per-instance）。 */
 typedef enum
 {
@@ -240,10 +235,10 @@ typedef struct
     uint16_t  write_idx;    /* 池内下一个待写槽（环形） */
     uint8_t   cursor_valid; /* 游标是否已建立；未建立则首次落盘先扫池定位 */
     uint8_t   dirty;        /* 是否有未写回 NAND 的变更 */
-    bbt_job_t job;          /* 阶段 7：异步持久化 job */
+    bbt_job_t job;          /* 异步持久化 job */
 } bbt_state_t;
 
-/* ── Wear 持久化 job（v0.75 阶段 7：异步化）──
+/* ── Wear 持久化 job（异步）──
  *
  * 一批落盘 = 1~25 个日志页（增量 1~4 页 / compact 全量 25 页）+ 可能的整块擦。
  * `wear_kick` 起步，完成由 g_op_service[FTL_OP_WEAR]（ftl_op_wear）收尾并提交下一页。 */
@@ -260,7 +255,7 @@ typedef struct
     uint8_t  waiting;      /* 1 = 有一条本 job 的命令在飞；0 = 待续跑（提交被背压拒） */
     uint8_t  dirty_only;   /* 1 = 增量（只写快照里的脏块）；0 = compact 后的全量快照 */
     uint16_t cursor;       /* 下一个待考察的 gblock（= FTL_BLOCK_TOTAL 表示本批走完） */
-    uint32_t flush_ms;     /* 起点时刻（收尾写回节拍基准，与旧 wear_flush 同位置） */
+    uint32_t flush_ms;     /* 起点时刻（收尾写回节拍基准） */
     uint32_t flush_writes; /* 起点 total_writes（同上） */
 
     /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/cursor/age */
@@ -276,21 +271,21 @@ typedef struct
     uint32_t last_flush_ms;               /* 上次落盘时刻（ms，节拍基准） */
     uint8_t  dirty[FTL_BLOCK_TOTAL / 8U]; /* 脏位图：哪些块的计数变了 */
 
-    /* ── 阶段 7：异步 job ──
+    /* ── 异步 job ──
      * `dirty_snapshot` = **本批起点**的脏位图副本。批跨多轮，期间 mig/RR job 的完成
      * 会调 wear_mark_dirty 置新脏位 ⇒ 必须把「本批写哪些块」钉死，否则批会写出超过
      * compact 判定所用的页数，next_page 可能越过块尾。
      * 配对的写法是**批起点把 dirty 整体清零**：批期间 mark_dirty 置的位于是只表示
      * 「批开始后才变的块」。收尾什么都不清（剩下的位留给下一批）；批失败则
      * `dirty |= snapshot` 并回。这样「批前就脏、批中被写、批中又变」的块不会丢最后一次
-     * 变更——同步版 wear_flush 整批原子，没有这个窗口，清零式让异步版拿到同样的原子性。 */
+     * 变更——清零式让异步批拿到与整批原子写相同的边界。 */
     wear_job_t job;
     uint8_t    dirty_snapshot[FTL_BLOCK_TOTAL / 8U];
 } wear_state_t;
 
 /* ── Allocator 上下文 ──
  *
- * 各指针在 allocator_init 里绑到**本实例自持的** ftl_tables_t（P2-5）——表归 FTL 所有。
+ * 各指针在 allocator_init 里绑到**本实例自持的** ftl_tables_t——表归 FTL 所有。
  */
 
 typedef struct
@@ -323,7 +318,7 @@ typedef struct
     ftl_block_t *blocks;    /* → tables.blocks */
     uint16_t     bad_count; /* 坏 Block 数 */
 
-    /* ── 元数据池游标（序 4：per-instance，原 bbt.c / wear.c 的 file-scope static） ── */
+    /* ── 元数据池游标（per-instance） ── */
     bbt_state_t  bbt;  /* 坏块表池：sequence / write_idx / cursor_valid / dirty */
     wear_state_t wear; /* 磨损计数日志：sequence / next_page / 节拍基准 / 脏位图 */
 } ftl_allocator_t;
@@ -340,7 +335,7 @@ static inline ftl_topology_t allocator_topo(const ftl_allocator_t *alloc)
  *
  * 外部模块（GC / WL / migrate / 掉电恢复 / CLI / 元数据）一律经这里读账本，
  * 不裸摸 `alloc->free_count` / `alloc->closed_sb_list[i]`：
- *   · 计数口径只在一处定义——将来账本换存储（如 B2 稳定槽位）只改这里；
+ *   · 计数口径只在一处定义——以后账本换存储只改这里；
  *   · 越界读当场停机，而不是静默读到脏条目。
  *
  * 写侧**不经**这里——池的进出统一走 allocator_* 的 push/pop 族（见文件头「不变量」）。 */
@@ -385,8 +380,8 @@ static inline super_block_t *allocator_closed_at(const ftl_allocator_t *alloc, u
  * 三个池（Free / OP / Spare）的进出方式从此**只有一种**：push 入池、pop 出池，
  * 且都只动「数组 + 计数」。池的 push/pop **不碰 BST state**——块状态由
  * `allocator_free_block`（入池 ⇒ FREE）与**各转移的归属者**（出池后赋新态）维护。
- * ⚠ 2026-10-17 状态机化后，出池闸门 `allocator_pool_remove` **不再清位**（互斥枚举下
- *   没有「清一个位」这种操作），改为**校验**「在池 ⇒ state == FREE」（见不变量②）。
+ * ⚠ 出池闸门 `allocator_pool_remove` **不赋新态**，只**校验**「在池 ⇒ state == FREE」
+ *   （见不变量②）；新态由转移的归属者紧随其后赋值。
  *
  * 满 / 空一律**返回 0 而不是 ASSERT**（判据 3：资源类结果）：
  *   · `FTL_OP_BLOCKS_PER_PLANE` 由 `FTL_OP_PERCENT` 算出，设计上允许为 0（禁用 OP 池）
@@ -451,7 +446,7 @@ static inline bool allocator_spare_try_pop(ftl_allocator_t *alloc, uint8_t plane
  *
  * @param alloc   Allocator 上下文（本实例自持存储，见 ftl_context_t）
  * @param topo    本实例绑定的 NAND 芯片路由
- * @param tables  FTL 自持表（P2-5：由 ftl_context_t 内含；本函数只绑定指针，不复制）
+ * @param tables  FTL 自持表（由 ftl_context_t 内含；本函数只绑定指针，不复制）
  *
  * @return ftl_status_t — 恒 FTL_OK（`alloc`/`tables` 是前置条件，非法即 ASSERT，见不变量 ④）
  */
@@ -463,7 +458,7 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tab
  * 内部：
  *   ① 从对应温度的 Open Super Block 取当前写入位置
  *   ② Super Block 已写满 → 关闭它（→ Closed），从 Free Pool 分配新的 Super Block
- *      （**两 plane 各自独立选块**——Policy B：不再要求 block 同号）
+ *      （**两 plane 各自独立选块**——Policy B）
  *   ③ out[plane] 填当前页在两 plane 的 PBA，next_page++
  *   ④ Free Pool 耗尽 → 返回 NAND_PBA_INVALID（write 路径触发紧急 GC 重试）
  *
@@ -477,6 +472,10 @@ nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nan
 
 /*
  * allocator_free_block - GC 擦除后将 Block 归还到 Free Pool
+ *
+ * **前置条件**：块已擦除、且**不是 BAD**（BAD 是状态机终态，不能回到 Free Pool——
+ * 否则会把 BAD 覆盖成 FREE，选块不再跳过它）。BAD 在 debug 用 `ASSERT`、release 用
+ * 运行期拒绝（判据 9：后果是静默介质破坏）。
  *
  * @param alloc  Allocator 上下文
  * @param gblock 要归还的 Block 编号（全局 Block 号）。**前置条件：`< FTL_BLOCK_TOTAL`**——
@@ -497,7 +496,7 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
  * ⚠ 两件事必须一起做——只置 LOG 挡不住分配，因为选块以
  *   allocator_select_plane_block_from_pool() 的 **Free Pool 数组**为准：
  *     ① allocator_pool_remove()（从 Free Pool 拿掉）
- *     ② 置 LOG（原「③ 清 FREE」随状态机化消失——出池只校验「在池 ⇒ state == FREE」）
+ *     ② 置 LOG（出池只校验「在池 ⇒ state == FREE」，赋态由转移归属者完成）
  *
  * ⚠ **plane 固定**：Policy B 下两个 plane 各自独立选块，拿不到「同号双 plane 都空闲」
  *   的保证，故不跨 plane 配对；调用者给出目标 plane，返回单个 gblock。
@@ -551,12 +550,11 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx);
  * allocator_add_closed_sb - 掉电恢复重建时，把已写过的块直接塞进 Closed 列表
  *
  * 重建（ftl_rebuild_closed_sb_list）逐 plane 扫描 NAND 判出写过的物理块后，
- * 不能复用 allocator_close_sb（那是 Open SB 的关闭流程，前半段只清 OPEN
- * 不清 FREE，而重建块的 RAM 态是 FREE）。本函数仿照 close_sb 的后半段：
+ * 不能复用 allocator_close_sb（那要求块处于 Open SB，重建块不是）。本函数直接组装：
  *
  *   sb = { plane_blocks=入参, next_page=PAGES_PER_BLOCK,
  *          temperature=入参, is_open=false }
- *   各 plane 的块置 CLOSED（清 FREE/OPEN）+ 温度 + sb_id = closed 列表索引
+ *   各 plane 的块置 CLOSED + 温度 + sb_id = closed 列表索引
  *   追加进 closed_sb_list，closed_sb_count++
  *
  * @param alloc          Allocator 上下文
@@ -588,10 +586,5 @@ uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
  * @param gblock 全局 Block 号（0..FTL_BLOCK_TOTAL-1）
  */
 void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock);
-
-/* 说明：allocator_mark_bad 已删除——坏块标记统一走 bbt_mark_bad（BBT 单数据源），
- * BBT 内部将 is_bad 位写入 ftl_block_t.state 并维护 alloc->bad_count。 */
-/* 说明：allocator_needs_gc 已删除（P1-3）——零调用者，且其判定（水位 / 紧急）与
- * gc_check_triggers() 的 T1/T4 重复。GC 触发判定**单一数据源** = `ftl/gc.h`。 */
 
 #endif /* FTL_ALLOCATOR_H */
