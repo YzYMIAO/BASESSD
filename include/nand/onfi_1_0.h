@@ -417,13 +417,15 @@
 /* OP_READ_PAGE_LOAD:
  * 70h轮询→00h→C1C2R1R2R3→30h→tWB→END
  * 不含 WAIT_READY(tR)，发完立即返回，LUN 进入 tR 期。
- * 必须由 OP_READ_PAGE_FETCH 完成 WAIT_READY + DATA_OUT + 状态检查。 */
+ * 由 OP_READ_PAGE_WAIT 完成等待 + 状态检查；数据留在页缓冲，
+ * 随后由 nand_dispatch 的 CW 链逐 CW 用 05h/06h 取回。 */
 #define OP_READ_PAGE_LOAD (35U)
 
-/* OP_READ_PAGE_FETCH:
- * WAIT_READY(tR)→DATA_OUT→70h轮询→CHECK_FAIL→END
- * 与 OP_READ_PAGE_LOAD 配对。 */
-#define OP_READ_PAGE_FETCH (36U)
+/* OP_READ_PAGE_WAIT:
+ * WAIT_READY(tR)→70h轮询→CHECK_FAIL→END
+ * 无数据传输。与 OP_READ_PAGE_LOAD / OP_READ_PAGE_MULTI_PLANE_LOAD 配对：
+ * 完成即代表页已加载，逐 CW 取数由 nand_dispatch_task_cw_chain 接续。 */
+#define OP_READ_PAGE_WAIT (36U)
 
 /* OP_PROGRAM_PAGE_ISSUE:
  * 70h轮询→80h→C1C2R1R2R3→DATA_IN→10h→tWB→END
@@ -447,7 +449,13 @@
  * 无数据传输。与 OP_ERASE_BLOCK_ISSUE 配对。 */
 #define OP_ERASE_BLOCK_WAIT (40U)
 
-/* OP_READ_COLUMN（槽位 42 —— 新增；0..41 已满，槽位 20 是墓碑不得复用）
+/* OP_READ_PAGE_MULTI_PLANE_LOAD（槽位 43）：
+ * 70h轮询→(00h+C1C2R1R2R3)[plane0]→(00h+C1C2R1R2R3)[plane1]→30h→tWB→END
+ * 与 OP_READ_PAGE_LOAD 同构，只是发两组 plane 地址；由 OP_READ_PAGE_WAIT 收尾。
+ * 数据留在页缓冲，逐 CW 取数仍用 06h（RANDOM_DATA_READ_MULTI_PLANE）。 */
+#define OP_READ_PAGE_MULTI_PLANE_LOAD (43U)
+
+/* OP_READ_COLUMN（槽位 42 —— 新增；0..41 已用，槽位 20 是墓碑不得复用）
  * ----------------------------------------------------------------------------------------------
  * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< 30 >~~~~~< Dout1..Dout4 >-< 70 >-< Status >
  * 按**显式列地址**读一页的 4 个字节。用途：读 spare 区——出厂坏块标记在**列 2048**
@@ -463,7 +471,7 @@
  */
 #define OP_READ_COLUMN (42U)
 
-#define OP_COUNT (43U) /* 0..42 inclusive */
+#define OP_COUNT (44U) /* 0..43 inclusive */
 
 /* ── Phase V: OP 类型枚举 ── */
 #define OP_TYPE_ATOMIC (0U) /* 原原子 OP 码 */
@@ -551,16 +559,19 @@ extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
 #define NAND_ONFI_PARAM_OFF_PAGES_PER_BLOCK         92U  /* 92–95  小端 */
 #define NAND_ONFI_PARAM_OFF_BLOCKS_PER_UNIT         96U  /* 96–99  小端 */
 #define NAND_ONFI_PARAM_OFF_LOGICAL_UNITS           100U /* 100    小端 */
-#define NAND_ONFI_PARAM_OFF_ADDRESS_CYCLES          101U /* 101    小端（字节原值，不解读 nibble） */
-#define NAND_ONFI_PARAM_OFF_BITS_PER_CELL           102U /* 102    小端 */
-#define NAND_ONFI_PARAM_OFF_PROGRAMS_PER_PAGE       110U /* 110    小端 */
-#define NAND_ONFI_PARAM_OFF_ECC_BITS                112U /* 112    小端 */
-#define NAND_ONFI_PARAM_OFF_TIMING_MODE_SUPPORT     129U /* 129–130 位图：bit n = 支持 Mode n */
-#define NAND_ONFI_PARAM_OFF_PROGRAM_CACHE_TIMING    131U /* 131–132 小端 */
-#define NAND_ONFI_PARAM_OFF_TPROG_MAX               133U /* 133–134 小端 */
-#define NAND_ONFI_PARAM_OFF_TBERS_MAX               135U /* 135–136 小端 */
-#define NAND_ONFI_PARAM_OFF_TR_MAX                  137U /* 137–138 小端 */
-#define NAND_ONFI_PARAM_OFF_TCCS_MIN                139U /* 139–140 小端 */
+/* 101：bits 7:4 = 列地址周期数，bits 3:0 = 行地址周期数（ONFI Table 11；
+ * 原文未随仓备份，见 docs/reference/README.md §E1）。0x23 = C2/R3。
+ * nand_init 用它与本仓 UOP 表实际发出的 C/R 周期数比对。 */
+#define NAND_ONFI_PARAM_OFF_ADDRESS_CYCLES       101U /* 101    [C:4][R:4] cycle counts */
+#define NAND_ONFI_PARAM_OFF_BITS_PER_CELL        102U /* 102    小端 */
+#define NAND_ONFI_PARAM_OFF_PROGRAMS_PER_PAGE    110U /* 110    小端 */
+#define NAND_ONFI_PARAM_OFF_ECC_BITS             112U /* 112    小端 */
+#define NAND_ONFI_PARAM_OFF_TIMING_MODE_SUPPORT  129U /* 129–130 位图：bit n = 支持 Mode n */
+#define NAND_ONFI_PARAM_OFF_PROGRAM_CACHE_TIMING 131U /* 131–132 小端 */
+#define NAND_ONFI_PARAM_OFF_TPROG_MAX            133U /* 133–134 小端 */
+#define NAND_ONFI_PARAM_OFF_TBERS_MAX            135U /* 135–136 小端 */
+#define NAND_ONFI_PARAM_OFF_TR_MAX               137U /* 137–138 小端 */
+#define NAND_ONFI_PARAM_OFF_TCCS_MIN             139U /* 139–140 小端 */
 
 /* 小端读取（参数页多字节字段一律小端；全仓无现成 LE helper）。 */
 static inline uint16_t nand_onfi_le16(const uint8_t *p)
@@ -588,7 +599,9 @@ typedef struct
     uint32_t pages_per_block;
     uint32_t blocks_per_unit;
     uint8_t  logical_units;
-    uint8_t  address_cycles; /* 字节原值（Table 11 的 23h），不解读 nibble 含义 */
+    uint8_t  address_cycles; /* 字节原值（Table 11 的 23h） */
+    uint8_t  column_cycles;  /* bits 7:4：列地址周期数 */
+    uint8_t  row_cycles;     /* bits 3:0：行地址周期数 */
     uint8_t  bits_per_cell;
     uint8_t  programs_per_page;
     uint8_t  ecc_bits;

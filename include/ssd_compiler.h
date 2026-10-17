@@ -32,6 +32,11 @@
 /* SRAM 数据段（通用变量） */
 #define SRAM_DATA __attribute__((section(".sram_data")))
 
+/* D2/D3 SRAM 的显式放置段（NOLOAD，启动不清零；使用者必须显式初始化） */
+#define SRAM12_DATA __attribute__((section(".sram12_data"))) /* SRAM1+SRAM2 连续 256KB */
+#define SRAM3_DATA  __attribute__((section(".sram3_data")))  /* SRAM3 32KB */
+#define SRAM4_DATA  __attribute__((section(".sram4_data")))  /* SRAM4 64KB */
+
 /* 掉电保持数据（复位不清零） */
 #define NOINIT __attribute__((section(".noinit")))
 

@@ -158,7 +158,7 @@ typedef struct
     bool     is_open;                 /* true = Open（仍在写），false = Closed（写满待回收） */
 } super_block_t;
 
-/* ── FTL 自持表 ──
+/* ── FTL 表存储（阶段 C：由 ftl_storage_t 提供并按域放置） ──
  *
  * 大数组**归 FTL 实例所有**：由 `ftl_context_t.tables` 内含，HIL（main.c）不声明数组、
  * 不传指针。与主流同构——OpenSSD 用全局数组、SPDK 把表放进 `spdk_ftl_dev`；
@@ -290,7 +290,7 @@ typedef struct
 
 /* ── Allocator 上下文 ──
  *
- * 各指针在 allocator_init 里绑到**本实例自持的** ftl_tables_t——表归 FTL 所有。
+ * 各指针在 allocator_init 里绑到**本实例的** ftl_tables_t（由 ftl_storage_t 提供，落 SRAM12）。
  */
 
 typedef struct
@@ -474,7 +474,7 @@ static inline bool allocator_spare_try_pop(ftl_allocator_t *alloc, uint8_t plane
  *
  * @param alloc   Allocator 上下文（本实例自持存储，见 ftl_context_t）
  * @param topo    本实例绑定的 NAND 芯片路由
- * @param tables  FTL 自持表（由 ftl_context_t 内含；本函数只绑定指针，不复制）
+ * @param tables  FTL 表存储（由 ftl_storage_t 提供；本函数只绑定指针，不复制）
  *
  * @return 无（`alloc`/`tables` 是前置条件，非法即 ASSERT，见不变量 ④）
  */

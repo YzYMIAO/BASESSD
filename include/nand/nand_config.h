@@ -4,98 +4,91 @@
 #include <stdint.h>
 
 /*
- * nand_config.h — NAND 器件几何 + 芯片内地址（PAA / nand_addr_t）
+ * nand_config.h — NAND 通用层：器件选择 + FC/FTL 软件地址布局
  *
- * 本头文件只定义**器件域**的事实：
- *   - 逻辑几何宏（页/块/plane/lun/ch/ce 数量）与 ONFI 时序开关
- *   - 字段位宽（CW/PAGE/PLANE/BLOCK/LUN）
- *   - 芯片内地址 PAA（nand_paa_t）—— 位序由 MT29F4G08 的 BA6/PA 规则决定
- *   - nand_addr_t（展开式地址；三套打包地址共用的构造入口）
- *   - LBA/PBA 共用的低位编码 [plane:1][cw:2]（PLANE_CW_SHIFT / PLANE_CW_MASK /
- *     lba_to_meta）—— FC 侧铸 desc->meta 要用，故留在本层
+ * 本文件只放**器件无关**的软件布局：
+ *   - 按 makefile 的 NAND_DEVICE 宏选择器件头（几何/拓扑/位宽/行编码/ID）
+ *   - CW 布局（CW_NUM / CW_SIZE / PAGE_BUFFER_SIZE / NAND_PLANE_MAX）
+ *   - LUN 位宽推导 + PAA 打包布局（[CW][PAGE][PLANE][BLOCK][LUN]）
+ *   - nand_addr_t 与 PAA 访问器 / 替换函数
+ *   - LBA/PBA 共用的低位编码 [plane:1][cw:2]
  *
- * ⚠ **系统物理地址 PBA（nand_pba_t）不在这里**——它含 CH/CE 拓扑、位序按 LBA 的结构
- *   排、是 FTL 的地址货币（`pba_to_paa()` 一次转出 PAA 才跨进 FC），整体在
+ * 器件事实（PAGE_SIZE / PAGES_PER_BLOCK / PLANE_NUM / LUN_NUM / CH_NUM /
+ * CE_NUM / 地址位宽 / NAND_PAA_TO_ROW / FMC / ID）在
+ * `nand/devices/<family>.h`，由宏选择：
+ *
+ *     make NAND_DEVICE=MT29F___G08A      # 默认
+ *
+ * 将来加器件：在 devices/ 下新增器件头，并在下面加一个 #elif 分支。
+ *
+ * ⚠ 系统物理地址 PBA（nand_pba_t）不在这里——它含 CH/CE 拓扑、位序按 LBA 排、
+ *   是 FTL 的地址货币（`pba_to_paa()` 一次转出 PAA 才跨进 FC），整体在
  *   **ftl/ftl_config.h §三**。
- *
- * 与芯片物理几何（nand_mt29f4g08abadawp.h）区分：本文件是 FC/FTL 的
- * 逻辑视角，物理视角见芯片头文件。
  */
 
-/* 页大小：2112 = 主区 2048 + 备区 64 */
-#define PAGE_SIZE (2112)
+#if defined(NAND_DEVICE_MT29F___G08A)
+#    include "nand/devices/mt29f___g08a.h"
+#else
+#    error "NAND device not selected: make NAND_DEVICE=<family>"
+#endif
 
-/* 通道页缓冲大小：单 plane 操作只用 PAGE_SIZE，多 plane 操作需要 PLANE_NUM 倍缓冲。 */
-#define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM) /* 2112×2=4224 */
-#define PAGE_MAIN_SIZE   (2048)                  /* 主区字节数 */
-#define PAGE_SPARE_SIZE  (64)                    /* 备区字节数 */
-#define PAGES_PER_BLOCK  (64)
-#define BLOCKS_PER_PLANE (2048)
-#define PLANE_NUM        (2)
-#define DIE_NUM          (1)
-#define LUN_NUM          (1) /* 每片选 LUN 数（MT29F4G08 单 die；换多 die 芯片只改此宏） */
-#define CH_NUM           (1)
-#define CE_NUM           (1)
-#define CW_NUM           (4U)
+/* ══════════════════════════════════════════════════════════════
+ * 一、位宽推导与软件布局
+ * ══════════════════════════════════════════════════════════════ */
 
-/* 单 CW 字节数：整页缓冲按 CW 等分（CW 偏移 → 列地址、CW 拼接/拆分的步长）。
+/* LUN 位宽：由器件头的 LUN_NUM 推导（ceil-log2，最多 4 bit）。
+ * LUN_NUM 是 2 的幂时恰好相等；非 2 的幂时上位补零（值域仍由
+ * paa_is_valid_* 检查）。 */
+#if LUN_NUM <= 1
+#    define LUN_ADDR_WIDTH (0U)
+#elif LUN_NUM <= 2
+#    define LUN_ADDR_WIDTH (1U)
+#elif LUN_NUM <= 4
+#    define LUN_ADDR_WIDTH (2U)
+#elif LUN_NUM <= 8
+#    define LUN_ADDR_WIDTH (3U)
+#elif LUN_NUM <= 16
+#    define LUN_ADDR_WIDTH (4U)
+#else
+#    error "LUN_NUM > 16 is not supported"
+#endif
+
+/* CW 布局（FC 层软件选择，不是器件几何）：每页 4 个 CW，码字 528B。
  * 528 = [META:4][CRC:4][USER:512][ECC:8]，布局见 include/fc/fc.h。 */
-#define CW_SIZE (PAGE_SIZE / CW_NUM) /* 2112/4 = 528 */
+#define CW_NUM   (4U)
+#define CW_WIDTH (2U) /* 4 个 codeword ⇒ 2 bit 编号 */
+#define CW_SIZE  (PAGE_SIZE / CW_NUM)
 
-/* 行地址数组深度（nand_fc_request_t.row[] 的长度）。与 PLANE_NUM 是两个独立维度：
- *   PLANE_NUM      —— 当前芯片实际 plane 数（MT29F4G08 = 2），是数据模型的"宽度"，
+/* 通道页缓冲大小：单 plane 操作只用 PAGE_SIZE，多 plane 操作需要 PLANE_NUM 倍。 */
+#define PAGE_BUFFER_SIZE (PAGE_SIZE * PLANE_NUM)
+
+/* 行地址数组深度（nand_command_request_t.row[] 的长度）。与 PLANE_NUM 是两个独立维度：
+ *   PLANE_NUM      —— 当前器件实际 plane 数，是数据模型的"宽度"，
  *                     牵动 CW_TOTAL_MAX / PAGE_BUFFER_SIZE / plane_paa 的长度 /
  *                     FTL 的 valid_map[] 与 plane_blocks[]。
  *   NAND_PLANE_MAX —— 行地址数组的静态预留深度，只影响 row[] 的容量。
  * ⚠ 改 plane 数时两处都要动，别只改一个。
- * ⚠ 当前 NAND_PLANE_MAX(4) > PLANE_NUM(2)，row[2..3] 是永久未用槽位
- *   （nand_mt29f4g08abadawp.c 只拷前 2 个 plane）。
- * ⚠ 深度 4 覆盖不了 6Plane NAND —— 原注释写"为 4Plane/6Plane 预留"与取值自相矛盾，已更正。 */
+ * ⚠ 当前 NAND_PLANE_MAX(4) > PLANE_NUM(2)，row[2..3] 是未用槽位
+ *   （request 包装按 NAND_PLANE_MAX 整体拷贝）。
+ * ⚠ 深度 4 覆盖不了 6Plane NAND。 */
 #define NAND_PLANE_MAX (4U)
 
 /* 多 plane 操作时 CW 总数上限 = max plane × CW per plane */
-#define CW_TOTAL_MAX (CW_NUM * PLANE_NUM) /* 4×2=8 */
+#define CW_TOTAL_MAX (CW_NUM * PLANE_NUM)
 
-/*
- * ONFI 时序模式控制
+/* ══════════════════════════════════════════════════════════════
+ * 二、PAA 打包布局（低位优先）
  *
- * CONFIG_NAND_TIMING_MODE_4
- *   0 = 低速模式（NAND 默认时序，FMC 全速保守时序）
- *       所有 ONFI 操作在 NAND 默认 Mode 0（tRC=50ns）下运行，
- *       nand_init() 中跳过 SET_FEATURES 切换 Mode 4 的步骤。
- *       用于功能验证初期，排除时序问题。
- *
- *   1 = 高速模式（ONFI Mode 4，tRC=20ns）
- *       nand_init() 中会：
- *       ① 低速初始化 FMC + 访问 NAND 完成 RESET/READ_ID
- *       ② SET_FEATURES 切 NAND 到 Mode 4
- *       ③ 重新配置 FMC 硬件时序寄存器为 Mode 4 参数
- *       NAND 和 FMC 均运行在 50MHz 接口速率。
- *
- * 默认：0（低速模式），功能验证稳定后改为 1。
- */
-#ifndef CONFIG_NAND_TIMING_MODE_4
-#    define CONFIG_NAND_TIMING_MODE_4 (0U)
-#endif
-
-#define CW_WIDTH         (2U)  /* 4个codeword,各个cw的起始位置在4等分处。 */
-#define PAGE_ADDR_WIDTH  (6U)  /* PA0~PA5，每 Block 64 页。 */
-#define PLANE_ADDR_WIDTH (1U)  /* BA6，Plane 选择。 */
-#define BLOCK_ADDR_WIDTH (11U) /* BA7~BA17，每 Plane BLOCKS_PER_PLANE 个 Block。 */
-#define DIE_ADDR_WIDTH   (0U)
-#define LUN_ADDR_WIDTH   (0U) /* MT29F4G08 单 die；换多 die 芯片改此宏 + LUN_NUM */
-
-/*
- * 软件 PAA 打包布局（低位优先）：
  * [CW][PAGE][PLANE][BLOCK][LUN]
  *
- * 注意：这是 FC/FTL 的逻辑地址编码，不是 NAND 五个地址周期的原始排列。
- * NAND 行地址由 paa_to_nand_row() 按 MT29F4G08 的 BA/PA 规则重新编码。
+ * 注意：这是 FC/FTL 的逻辑地址编码，不是 NAND 行地址的原始排列。
+ * NAND 行地址由器件头提供的 NAND_PAA_TO_ROW() 重新编码（MT29F 的 BA/PA 规则）。
  *
  * ⚠ PBA 与 LBA **不跟这套位序**（plane 在 page 之上），而是另立一套
  *   [CW][PLANE][PAGE][BLOCK][LUN][CE][CH] —— 见 ftl/ftl_config.h §三。
- *   本段（PAA）一个字节都不要动：它的位序由 BA6/PA 规则决定。
- */
+ *   本段（PAA）一个字节都不要动：它的位序由器件地址映射规则决定。
+ * ══════════════════════════════════════════════════════════════ */
+
 #define CW_WIDTH_SHIFT  (0U)
 #define PAA_PAGE_SHIFT  (CW_WIDTH_SHIFT + CW_WIDTH)
 #define PAA_PLANE_SHIFT (PAA_PAGE_SHIFT + PAGE_ADDR_WIDTH)
@@ -107,6 +100,22 @@
 #define PAA_PLANE_MASK         NAND_FIELD_MASK(PLANE_ADDR_WIDTH)
 #define PAA_BLOCK_MASK         NAND_FIELD_MASK(BLOCK_ADDR_WIDTH)
 #define PAA_LUN_MASK           NAND_FIELD_MASK(LUN_ADDR_WIDTH)
+
+/* ── 编译期自检（器件事实 ↔ 软件布局）── */
+_Static_assert((1U << LUN_ADDR_WIDTH) >= LUN_NUM, "LUN_ADDR_WIDTH 覆盖不了 LUN_NUM");
+_Static_assert(PAGE_ADDR_WIDTH + PLANE_ADDR_WIDTH + BLOCK_ADDR_WIDTH + LUN_ADDR_WIDTH <= 24U,
+               "行地址超过 3 字节：ROW_0..2 只发 3 个行周期");
+_Static_assert(PAA_LUN_SHIFT + LUN_ADDR_WIDTH <= 32U, "PAA 超出 32 位");
+_Static_assert(PAGE_MAIN_SIZE + PAGE_SPARE_SIZE == PAGE_SIZE, "主区 + 备区 != PAGE_SIZE");
+_Static_assert((1U << CW_WIDTH) == CW_NUM, "CW_WIDTH 与 CW_NUM 不一致");
+
+/* NAND 地址周期数（供开机与 ONFI 参数页的 addrcyc 比对）：
+ *   列地址 = 页内字节偏移的宽度，PAGE_SIZE=2112 ⇒ 12 bit ⇒ 2 字节；
+ *   行地址 = page + plane + block + lun 的位宽，18 bit ⇒ 3 字节。
+ * H4：这里的推导只依赖器件头给的几何/位宽宏。 */
+#define NAND_COLUMN_ADDR_CYCLES ((PAGE_SIZE <= 256U) ? 1U : ((PAGE_SIZE <= 65536U) ? 2U : 3U))
+#define NAND_ROW_ADDR_BITS      (PAGE_ADDR_WIDTH + PLANE_ADDR_WIDTH + BLOCK_ADDR_WIDTH + LUN_ADDR_WIDTH)
+#define NAND_ROW_ADDR_CYCLES    ((NAND_ROW_ADDR_BITS + 7U) / 8U)
 
 /* ══════════════════════════════════════════════════════════════
  * nand_addr_t — 展开式地址（具名字段）
@@ -179,12 +188,10 @@ static inline uint8_t paa_is_valid_addr(const nand_addr_t *addr)
                      (addr->lun < LUN_NUM) && (addr->cw < CW_NUM));
 }
 
-/* MT29F4G08 行地址：PA[5:0] -> bit[5:0]，Plane/BA6 -> bit[6]，BA[17:7] -> bit[17:7]。 */
+/* 芯片行地址：具体编码由器件头提供（NAND_PAA_TO_ROW）。 */
 static inline uint32_t paa_to_nand_row(nand_paa_t paa)
 {
-    return paa_to_page(paa) |
-           (paa_to_plane(paa) << PAGE_ADDR_WIDTH) |
-           (paa_to_block(paa) << (PAGE_ADDR_WIDTH + PLANE_ADDR_WIDTH));
+    return NAND_PAA_TO_ROW(paa);
 }
 
 static inline uint16_t paa_to_cw(nand_paa_t paa)

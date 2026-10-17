@@ -223,7 +223,7 @@ static rr_plane_step_t rr_select_plane(ftl_context_t *ftl)
         {
             nand_pba_t cur;
 
-            if (l2p_cache_read(&ftl->cache, l, &cur) == FTL_AGAIN)
+            if (l2p_cache_read(ftl->cache, l, &cur) == FTL_AGAIN)
             {
                 return RR_PLANE_WAIT; /* region 在加载：下轮再来 */
             }
@@ -398,7 +398,8 @@ static void rr_step(ftl_context_t *ftl)
                                               ? ((page > 0U) ? (page - 1U) : (PAGES_PER_BLOCK - 1U))
                                               : ((page < (PAGES_PER_BLOCK - 1U)) ? (page + 1U) : 0U);
 
-                /* 只换 page 字段：rr.page 的 ch/ce/lun/block/plane 原样保留（lun 恒 0 = LUN_NUM 1）。 */
+                /* 只换 page 字段：rr.page 的 ch/ce/lun/block/plane 原样保留
+                 * （LUN 随 PBA 携带，不假设恒 0）。 */
                 ftl->rr.neighbor = pba_with_page(ftl->rr.page, neighbor);
 
                 /* 邻居页的 LBA **本就未知**（辅助读只要"这一页读得出来"这个事实）⇒

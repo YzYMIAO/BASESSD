@@ -1,37 +1,45 @@
 /*
- * l2p_cache.c — L2P Region 缓存（CLOCK 替换 + 异步加载/写回 + thrashing 检测）
+ * l2p_cache.c — 共享 L2P Region 缓存（CLOCK + 异步加载/写回 + thrashing 检测）
  *
  * 职责：
  *   把 L2P 映射表按 region（L2P_ENTRIES_PER_REGION 条 entry/region）缓存进 SRAM，
- *   提供 lba→pba 的读/写；未命中时经 Metadata Directory 定位并从 NAND 加载；
- *   脏行写回走「追加写」日志块。
+ *   提供全局 LBA → PBA 的读/写；未命中时经 **owner 实例** 的 Metadata Directory
+ *   定位并从 NAND 加载；脏行写回走 owner 的「追加写」日志块。
+ *
+ * 共享模型（阶段 B）：
+ *   同一 (ch,ce) 下的所有 LUN 共用一份 cache（g_l2p_cache[ch][ce]）。
+ *   cache 行/脏位图的键是**全局 region**；映射页在 NAND 上的位置是
+ *   **owner die 内的局部 region**（global_region / FTL_DIM_TOTAL）。
+ *   owner 由全局 region 经注入的 owner_of_region 回调解析；load/flush/commit
+ *   一律使用 owner 的 metadata_dir / alloc / topo。
  *
  * 与 l2p_cache.h 的分工：
- *   l2p_cache.h —— 缓存结构（l2p_cache_t / l2p_cache_line_t）+ 尺寸宏 + API；
- *   本文件     —— 查找 / 驱逐 / 加载 / 写回的实现 + thrashing 窗口检测 + 完成服务函数。
+ *   l2p_cache.h —— 缓存结构 + 坐标宏 + API；本文件 —— 查找/驱逐/加载/写回实现 +
+ *   thrashing 检测 + 完成服务。
  *
- * 替换算法（CLOCK，ADR-5）：
+ * 替换算法（CLOCK）：
  *   access_count 作引用位，clock_hand 环形扫描；命中置 1，逐行递减给"第二次机会"；
- *   全在飞（LOADING / FLUSHING）时无法驱逐（返回 -1）。见 l2p_cache_evict_one。
+ *   全在飞（LOADING / FLUSHING）时无法驱逐（返回 -1）。
  *
- * 写模型（P0-2）：
- *   脏行写回 = 从 L2P 日志块取**下一个空槽**追加写（绝不就地覆盖——NAND 只能 1→0，
- *   二次编程 = 新数据 AND 旧数据 = 静默损坏）；新位置由 metadata_dir_commit_region 记账。
+ * 写模型：
+ *   脏行写回 = 从 owner 的 L2P 日志块取下一空槽追加写（绝不就地覆盖——NAND 只能
+ *   1→0，二次编程 = 静默损坏）；新位置由 metadata_dir_commit_region 记账。
  *
- * 异步化（v0.75 阶段 5）：
+ * 异步化：
  *   加载与写回都是「提交即返回」——未命中/脏行 ⇒ 建命令 + ftl_op_submit(tag=FTL_OP_L2P,
  *   ctx = 本 cache line) ⇒ 置 LOADING/FLUSHING ⇒ 返回 FTL_AGAIN。完成由
  *   g_op_service[FTL_OP_L2P]（本文件末尾的 ftl_op_l2p）按 line->state 收尾。
- *   ⇒ 对外 API 三态，调用者必须能挂起；结构性同步上下文走 `*_sync` 逃生口（自旋泵）。
+ *   ⇒ 对外 API 三态；结构性同步上下文走 `*_sync` 逃生口（自旋泵）。
  *
  * 文件结构：
- *   1. 初始化         l2p_cache_init
+ *   1. 初始化         l2p_cache_init / owner 解析
  *   2. Thrashing 检测 l2p_cache_note_access（static）
  *   3. 查找/驱逐      l2p_cache_find / evict_one（static）
  *   4. 加载           l2p_cache_load_start（static）
- *   5. 对外读写       l2p_cache_read / ready / write + 三个 *_sync 逃生口
- *   6. 写回           l2p_cache_flush_kick / l2p_flush_kick / flush_*_sync
+ *   5. 对外读写       l2p_cache_read / ready / write + *_sync 逃生口
+ *   6. 写回           l2p_cache_flush_kick / l2p_flush_kick_owner / flush_*_sync
  *   7. 完成服务       ftl_op_l2p（g_op_service[FTL_OP_L2P]）
+ *   8. 恢复辅助       invalidate_owner / snapshot_owner_bitmap
  */
 
 #include "ftl/l2p_cache.h"
@@ -48,25 +56,49 @@
 #include <string.h>
 
 /* --------------------------------------------------------------------
- * l2p_cache_init
- *   功能：初始化 cache——清脏标记、逐行置 INVALID、复位 CLOCK 与统计。
- *   参数：cache —— 待初始化对象；ch/ce/lun —— 本实例拓扑（展开物理地址用）。
- *   返回：无（cache == NULL 直接返回）。
- *   实现要点：⚠ md_dir / alloc **刻意不清**（宿主注入的依赖，见函数内长注释）——
- *             在此清成 NULL 会解绑 ftl_init 刚绑好的 Directory 且无人再绑。
- *             ⚠ load_inflight / flush_inflight 必须清：三条开机恢复路径都会重入本函数，
- *             残留计数会让写回闸门恒满（L2P 永不落盘）。
+ * l2p_cache_owner
+ *   功能：全局 region → owner FTL 实例（设备级注入的解析回调）。
+ *   返回：owner 实例（恒非空；解析失败/拓扑不匹配是内部不变量破坏 ⇒ ASSERT）。
+ *   实现要点：共享 cache 的所有 metadata I/O 都以 owner 的目录/分配器为准。
  * -------------------------------------------------------------------- */
-void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
+static struct ftl_context *l2p_cache_owner(const l2p_cache_t *cache, uint32_t global_region)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->cache。 */
     ASSERT(cache != NULL);
+    ASSERT(cache->owner_of_region != NULL);
 
-    cache->ch  = ch;
-    cache->ce  = ce;
-    cache->lun = lun;
+    struct ftl_context *owner = cache->owner_of_region(cache->owner_ctx, global_region);
 
-    /* Region 级脏标记：开机全清（F4） */
+    ASSERT(owner != NULL);
+    ASSERT(owner->cache == cache);
+    ASSERT(owner->topo.ch == cache->ch);
+    ASSERT(owner->topo.ce == cache->ce);
+    ASSERT(ftl_topo_dim(owner->topo) == (global_region % FTL_DIM_TOTAL));
+
+    return owner;
+}
+
+/* --------------------------------------------------------------------
+ * l2p_cache_init
+ *   功能：初始化共享 cache——清全局脏位图、逐行置 INVALID、复位 CLOCK/统计/在飞计数。
+ *   参数：cache —— 待初始化对象；ch/ce —— 本 cache 服务的拓扑；
+ *         owner_of_region/owner_ctx —— 全局 region → owner 的解析回调。
+ *   返回：无。
+ *   实现要点：**设备级只调一次**（main.c 在逐实例 boot 之前）。不能放进
+ *             per-instance ftl_init——第二个实例会清掉第一个实例的 line。
+ *             metadata 依赖（md_dir/alloc）不再存在 cache 里，由 owner 按需解析。
+ * -------------------------------------------------------------------- */
+void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, l2p_owner_fn_t owner_of_region, void *owner_ctx)
+{
+    /* 前置条件（判据 2）：调用者传设备级存储 + 非空解析回调。 */
+    ASSERT(cache != NULL);
+    ASSERT(owner_of_region != NULL);
+
+    cache->ch              = ch;
+    cache->ce              = ce;
+    cache->owner_of_region = owner_of_region;
+    cache->owner_ctx       = owner_ctx;
+
+    /* 全局 Region 级脏标记：开机全清（F4） */
     memset(cache->region_dirty_bitmap, 0, sizeof(cache->region_dirty_bitmap));
 
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -85,24 +117,9 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
     cache->hit_count  = 0U;
     cache->miss_count = 0U;
 
-    /* ⚠ 在飞计数归零：本函数在三条开机恢复路径（fresh / clean / power-failure）里
-     * 都会被调用；不清则闸门恒满（flush_inflight 残留）⇒ 写回永不启动 ⇒ L2P 不落盘。 */
+    /* 在飞计数归零：设备级 init 发生在任何命令之前 */
     cache->load_inflight  = 0U;
     cache->flush_inflight = 0U;
-
-    /* ⚠ md_dir / alloc **刻意不在这里清**。
-     *
-     * 这两个指针是**宿主注入的依赖**（由 ftl_init 经 l2p_cache_set_md_dir 绑定），
-     * 不是 cache 自己的状态。本函数在三条开机恢复路径（fresh / clean / power-failure）
-     * 里都会被调用——若在此清成 NULL，就会把 ftl_init 刚绑好的 Directory 解绑，且
-     * **无人再绑**（l2p_cache_set_md_dir 只在 ftl_init 调）。后果：
-     *   ① l2p_cache_load_start 永远走固定位置回退 ⇒ 读的永远是**哨兵页**（全 0xFF
-     *      = 未映射），Directory 形同虚设；
-     *   ② l2p_cache_flush_kick 恒 FTL_ERROR（依赖为 NULL）⇒ L2P region **从不落盘**
-     *      ⇒ metadata_dir_update 不被调用 ⇒ dir->dirty 恒 0 ⇒ 首次 flush_to_anchor
-     *      早退 ⇒ Anchor **从不写**（开机 [META] anchor_seq 恒 0）。
-     * ftl_init 侧本来就在 init 之后显式 l2p_cache_set_md_dir(NULL, &alloc) 声明"尚未加载"，
-     * 故此处无需（也不应）代劳。 */
 
     /* Thrashing 检测窗口（P1-4）：开机从「非降级」起步 */
     cache->window_access = 0U;
@@ -168,7 +185,7 @@ static void l2p_cache_note_access(l2p_cache_t *cache, uint8_t is_miss)
  *   后续读按**下标序**取第一行 ⇒ 写进另一行 ⇒ 映射静默不一致。
  *   命中后各调用者再按 state 判"能不能读/写"（见 l2p_cache_read / write）。
  */
-static l2p_cache_line_t *l2p_cache_find(l2p_cache_t *cache, uint16_t region_id)
+static l2p_cache_line_t *l2p_cache_find(l2p_cache_t *cache, uint32_t region_id)
 {
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
@@ -262,10 +279,10 @@ static int l2p_cache_evict_one(l2p_cache_t *cache)
  * 位置一律来自 Metadata Directory（每个 region 在 fill_fixed 就登记好：初始指向
  * **哨兵层**固定页，被刷新后指向日志块）。哨兵页永不写入 ⇒ 读回全 0xFF ⇒
  * 逐项即 PBA_INVALID = "未映射"，正是首次访问应有的语义。
- * 下面的固定位置回退仅作 md_dir 缺失时的兜底（正常路径不可达）。
+ * 下面的固定位置回退仅作 owner 的 metadata_dir 查找失败时的兜底（正常路径不可达）。
  * Random DISABLED / CRC ENABLED（v0.62）：Region 数据不加扰，但经 FC per-CW CRC + ECC 保护。
  */
-static bool l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
+static bool l2p_cache_load_start(l2p_cache_t *cache, uint32_t region_id)
 {
     int victim_idx = l2p_cache_evict_one(cache);
 
@@ -273,6 +290,9 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
     {
         return false;
     }
+
+    struct ftl_context *owner        = l2p_cache_owner(cache, region_id);
+    uint32_t            local_region = l2p_global_to_local_region(region_id);
 
     l2p_cache_line_t *line = &cache->lines[victim_idx];
 
@@ -283,18 +303,14 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
     line->state        = L2P_CACHE_LOADING;
     line->fresh        = 0U; /* 完成时置 1（见 l2p_cache_line_t.fresh） */
 
-    nand_pba_t region_addr = NAND_PBA_INVALID;
-    if (cache->md_dir != NULL)
-    {
-        region_addr = metadata_dir_lookup(cache->md_dir,
-                                          METADATA_TYPE_L2P_REGION,
-                                          region_id);
-    }
+    nand_pba_t region_addr = metadata_dir_lookup(owner->metadata_dir,
+                                                 METADATA_TYPE_L2P_REGION,
+                                                 (uint16_t)local_region);
 
     if (region_addr == NAND_PBA_INVALID)
     {
-        /* 回退固定位置（ch/ce/lun 取本 cache 拓扑） */
-        region_addr = l2p_region_pba(cache->ch, cache->ce, cache->lun, region_id);
+        /* 回退固定位置（owner die 的局部 region 编号） */
+        region_addr = l2p_region_pba(owner->topo.ch, owner->topo.ce, owner->topo.lun, (uint16_t)local_region);
     }
 
     /* ⚠ 读的数据**留在 desc 链上**（与写不对称）⇒ 目标缓冲须活到完成、
@@ -322,11 +338,11 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
 
 ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->cache 与自己的出参地址。 */
+    /* 前置条件（判据 2）：调用者传 ftl->cache 与自己的出参地址。 */
     ASSERT(cache != NULL);
     ASSERT(out != NULL);
 
-    if (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION)
+    if ((uint64_t)lba >= L2P_GLOBAL_LBA_MAX)
     {
         /* ⚠ **必须**回填 out：三态化后 FTL_ERROR 的调用者仍会读 *out（"读得 INVALID
          * 与未映射同义"是调用点的既有口径，如 ftl_trim / rr_select_plane）。
@@ -336,7 +352,11 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
         return FTL_ERROR;
     }
 
-    uint16_t region_id = lba_to_region(lba);
+    /* 全局 LBA 必须属于本 cache 服务的 (ch,ce)；跨通道/跨 CE 误用是编程错误。 */
+    ASSERT(lba_route_ch(lba) == cache->ch);
+    ASSERT(lba_route_ce(lba) == cache->ce);
+
+    uint32_t region_id = lba_to_global_region(lba);
     uint16_t entry_idx = lba_to_entry(lba);
 
     l2p_cache_line_t *line = l2p_cache_find(cache, region_id);
@@ -376,14 +396,17 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
 
 bool l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->cache。lba 越界是**数据**判断（判据 1），保留。 */
+    /* 前置条件（判据 2）：调用者传 ftl->cache。lba 越界是**数据**判断（判据 1），保留。 */
     ASSERT(cache != NULL);
-    if (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION)
+    if ((uint64_t)lba >= L2P_GLOBAL_LBA_MAX)
     {
         return true; /* 越界：调用者的 write 会是 no-op、read 会返 FTL_ERROR ⇒ 无需就绪 */
     }
 
-    l2p_cache_line_t *line = l2p_cache_find(cache, lba_to_region(lba));
+    ASSERT(lba_route_ch(lba) == cache->ch);
+    ASSERT(lba_route_ce(lba) == cache->ce);
+
+    l2p_cache_line_t *line = l2p_cache_find(cache, lba_to_global_region(lba));
     if (line != NULL)
     {
         /* ⚠ FLUSHING 也算未就绪：写一行正在落盘的行会让"落盘的是旧快照、RAM 是新值"
@@ -398,20 +421,23 @@ bool l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
      * 随后的重试命中会被 fresh 吃掉、不计 hit ⇒ 总账 = 1 miss，与旧实现同。 */
     cache->miss_count++;
     l2p_cache_note_access(cache, 1U);
-    (void)l2p_cache_load_start(cache, lba_to_region(lba));
+    (void)l2p_cache_load_start(cache, lba_to_global_region(lba));
     return false;
 }
 
 ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->cache。lba 越界是**数据**判断（判据 1），保留。 */
+    /* 前置条件（判据 2）：调用者传 ftl->cache。lba 越界是**数据**判断（判据 1），保留。 */
     ASSERT(cache != NULL);
-    if (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION)
+    if ((uint64_t)lba >= L2P_GLOBAL_LBA_MAX)
     {
         return FTL_OK; /* 越界 no-op（与旧行为一致） */
     }
 
-    uint16_t region_id = lba_to_region(lba);
+    ASSERT(lba_route_ch(lba) == cache->ch);
+    ASSERT(lba_route_ce(lba) == cache->ce);
+
+    uint32_t region_id = lba_to_global_region(lba);
 
     l2p_cache_line_t *line = l2p_cache_find(cache, region_id);
     if (line == NULL)
@@ -458,22 +484,30 @@ ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  * ⚠ 阶段 8 起还要**顺带推进本实例的元数据目录整理 job**：ftl_service_pump 是
  *   **实例无关**的（它只跑 NAND + 完成表），而 md job 的推进挂在 ftl_service 的
  *   各档位里。若这里不推，CLI `fl` 一旦撞上"池吃紧 ⇒ append_slot 让路"就会**死等**
- *   （自旋里没有任何人把 compact 走完）。cache 持 md_dir/alloc（宿主注入）⇒ 够用。 */
-static void l2p_sync_pump(l2p_cache_t *cache)
+ *   （自旋里没有任何人把 compact 走完）。同步站点知道自己的 owner ⇒
+ *   用 owner 的 metadata_dir/alloc 推进该 die 的目录整理 job。 */
+static void l2p_sync_pump(l2p_cache_t *cache, struct ftl_context *owner)
 {
     ASSERT(!ftl_op_in_dispatch());
 
     ftl_service_pump();
 
-    if (cache != NULL)
+    if ((cache != NULL) && (owner != NULL))
     {
-        metadata_dir_kick(cache->md_dir, cache->alloc);
+        metadata_dir_kick(owner->metadata_dir, &owner->alloc);
     }
 }
 
 ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
 {
-    uint32_t guard = L2P_SYNC_GUARD_MAX;
+    uint32_t            guard = L2P_SYNC_GUARD_MAX;
+    struct ftl_context *owner = NULL;
+
+    ASSERT(cache != NULL);
+    if ((uint64_t)lba < L2P_GLOBAL_LBA_MAX)
+    {
+        owner = l2p_cache_owner(cache, lba_to_global_region(lba));
+    }
 
     while (guard-- > 0U)
     {
@@ -483,7 +517,7 @@ ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
         {
             return st;
         }
-        l2p_sync_pump(cache);
+        l2p_sync_pump(cache, owner);
     }
 
     LOGE("[L2P] read_sync timeout lba=%lu\r\n", (unsigned long)lba);
@@ -492,7 +526,14 @@ ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
 
 ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
 {
-    uint32_t guard = L2P_SYNC_GUARD_MAX;
+    uint32_t            guard = L2P_SYNC_GUARD_MAX;
+    struct ftl_context *owner = NULL;
+
+    ASSERT(cache != NULL);
+    if ((uint64_t)lba < L2P_GLOBAL_LBA_MAX)
+    {
+        owner = l2p_cache_owner(cache, lba_to_global_region(lba));
+    }
 
     while (guard-- > 0U)
     {
@@ -500,7 +541,7 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
         {
             return l2p_cache_write(cache, lba, pba);
         }
-        l2p_sync_pump(cache);
+        l2p_sync_pump(cache, owner);
     }
 
     LOGE("[L2P] write_sync timeout lba=%lu\r\n", (unsigned long)lba);
@@ -525,7 +566,7 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  *       metadata_dir_append_slot 返回 NAND_PBA_INVALID 现在有两种来源——
  *       ① 两 plane 的 Free Pool 都空；② 目录整理 job 在飞（它要独占当前块的空槽）。
  *       两者都是**瞬态**（GC 会补池 / job 会走完），报 FTL_ERROR 会被调用者当硬失败
- *       （`l2p_flush_kick` 跳过该行、`cp_flush_regions` 直接**中止 Checkpoint**）。
+ *       （`l2p_flush_kick_owner` 跳过该行、`cp_flush_regions` 直接**中止 Checkpoint**）。
  *       背压让它们下轮重试即可。**绝不回退固定位置**（固定层是哨兵，写进去等于把
  *       "未映射"变成"有映射"，且下次再写同一页即损坏）。
  *     · ⚠ 槽位在 append_slot 里就消耗掉了：若其后建链/提交失败，该槽作废（写指针
@@ -533,7 +574,7 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  * -------------------------------------------------------------------- */
 ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
 {
-    /* 前置条件（判据 2）：cache 恒 &ftl->cache；line_idx 由调用者自持（下标越界是内部
+    /* 前置条件（判据 2）：cache 恒 ftl->cache；line_idx 由调用者自持（下标越界是内部
      * 自铸句柄，非外部输入）——两侧都收口成断言。 */
     ASSERT(cache != NULL);
     ASSERT((line_idx >= 0) && (line_idx < (int)L2P_CACHE_SIZE));
@@ -545,21 +586,19 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
         return FTL_OK; /* 不需要写回（含"已在飞"/"已干净"） */
     }
 
-    if ((cache->md_dir == NULL) || (cache->alloc == NULL))
-    {
-        return FTL_ERROR; /* 无 Directory/Allocator ⇒ 无法持久化，不猜位置 */
-    }
+    /* 映射页属于哪个 owner die 由全局 region 解析；写回必须落到 owner 的目录/分配器。 */
+    struct ftl_context *owner = l2p_cache_owner(cache, line->region_id);
 
     if (cache->flush_inflight >= L2P_FLUSH_MAX_INFLIGHT)
     {
-        return FTL_AGAIN; /* 在飞写回达上限：让 host I/O 先拿 FC 资源 */
+        return FTL_AGAIN; /* 共享 credit 池满：让 host I/O 先拿 FC 资源 */
     }
 
-    nand_pba_t region_addr = metadata_dir_append_slot(cache->md_dir, cache->alloc);
+    nand_pba_t region_addr = metadata_dir_append_slot(owner->metadata_dir, &owner->alloc);
     if (region_addr == NAND_PBA_INVALID)
     {
         /* 瞬态：Free Pool 空（等 GC 补池）或目录整理 job 在飞（等它走完）⇒ 背压。
-         * ⚠ 不能报 FTL_ERROR：l2p_flush_kick 会跳过本行、cp_flush_regions 会**中止
+         * ⚠ 不能报 FTL_ERROR：l2p_flush_kick_owner 会跳过本行、cp_flush_regions 会**中止
          *   Checkpoint**——一次正常的后台压缩不该把 CP 打回去。 */
         return FTL_AGAIN;
     }
@@ -585,11 +624,12 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
     return FTL_OK;
 }
 
-void l2p_flush_kick(l2p_cache_t *cache, uint8_t max_kick)
+void l2p_flush_kick_owner(l2p_cache_t *cache, uint32_t owner_dim, uint8_t max_kick)
 {
-    /* 前置条件（判据 2）：唯一调用者 ftl.c 传 &ftl->cache 与档位表里的非零条数
+    /* 前置条件（判据 2）：调用者传 ftl->cache、本实例 dim 与档位表里的非零条数
      * （IDLE L2P_CACHE_SIZE / NORMAL BG_NORMAL_FLUSH_COUNT / BUSY BG_BUSY_FLUSH_COUNT）。 */
     ASSERT(cache != NULL);
+    ASSERT(owner_dim < FTL_DIM_TOTAL);
     ASSERT(max_kick != 0U);
 
     /* 心跳（见 ftl_job.h）：有在飞 region（load / flush）时每满 1s 打一行计数。
@@ -607,20 +647,25 @@ void l2p_flush_kick(l2p_cache_t *cache, uint8_t max_kick)
 
     for (uint16_t i = 0U; (i < L2P_CACHE_SIZE) && (max_kick > 0U); i++)
     {
-        if (cache->lines[i].state == L2P_CACHE_DIRTY)
-        {
-            const ftl_status_t st = l2p_cache_flush_kick(cache, (int)i);
+        const l2p_cache_line_t *line = &cache->lines[i];
 
-            if (st == FTL_AGAIN)
-            {
-                return; /* 闸门满 / 池空：本轮到此为止，下轮再来 */
-            }
-            if (st == FTL_OK)
-            {
-                max_kick--;
-            }
-            /* FTL_ERROR：本行无法写回（无依赖 / 无槽）——跳过它，试下一行 */
+        /* 只刷自己的行：共享 cache 里别的 LUN 的行由它们自己的 CP/flush 处理。 */
+        if ((line->state != L2P_CACHE_DIRTY) || !l2p_region_owned_by(line->region_id, owner_dim))
+        {
+            continue;
         }
+
+        const ftl_status_t st = l2p_cache_flush_kick(cache, (int)i);
+
+        if (st == FTL_AGAIN)
+        {
+            return; /* 闸门满 / 池空：本轮到此为止，下轮再来 */
+        }
+        if (st == FTL_OK)
+        {
+            max_kick--;
+        }
+        /* FTL_ERROR：本行无法写回（无依赖 / 无槽）——跳过它，试下一行 */
     }
 }
 
@@ -639,11 +684,23 @@ ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
     uint32_t guard  = L2P_SYNC_GUARD_MAX;
     uint8_t  kicked = 0U;
 
-    /* 前置条件（判据 2）：cache 恒 &ftl->cache；line_idx 由调用者自持。 */
+    /* 前置条件（判据 2）：cache 恒 ftl->cache；line_idx 由调用者自持。 */
     ASSERT(cache != NULL);
     ASSERT((line_idx >= 0) && (line_idx < (int)L2P_CACHE_SIZE));
 
     l2p_cache_line_t *line = &cache->lines[line_idx];
+
+    if ((line->state == L2P_CACHE_CLEAN) || (line->state == L2P_CACHE_INVALID))
+    {
+        return FTL_OK;
+    }
+    if (line->state == L2P_CACHE_LOADING)
+    {
+        return FTL_ERROR; /* 加载中的行不能写回（entries 尚未有效） */
+    }
+
+    /* 本行的映射页属于哪个 owner die；同步泵要推进该 owner 的目录整理 job。 */
+    struct ftl_context *owner = l2p_cache_owner(cache, line->region_id);
 
     while (guard-- > 0U)
     {
@@ -675,26 +732,34 @@ ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
             /* FTL_AGAIN：背压，泵一轮再试 */
         }
 
-        l2p_sync_pump(cache);
+        l2p_sync_pump(cache, owner);
     }
 
     return FTL_ERROR; /* 超时：行一直没能落盘 */
 }
 
-ftl_status_t l2p_cache_flush_all_sync(l2p_cache_t *cache)
+ftl_status_t l2p_cache_flush_owner_sync(l2p_cache_t *cache, uint32_t owner_dim)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->cache。 */
+    /* 前置条件（判据 2）：调用者传 ftl->cache 与本实例 dim。 */
     ASSERT(cache != NULL);
+    ASSERT(owner_dim < FTL_DIM_TOTAL);
 
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
+        const l2p_cache_line_t *line = &cache->lines[i];
+
+        /* 只处理本 owner 的行；别的 LUN 的行由它们自己的 CP/flush 负责。 */
+        if (!l2p_region_owned_by(line->region_id, owner_dim))
+        {
+            continue;
+        }
+
         /* ⚠ 也等 **FLUSHING** 行（后台 kick 已把它起起来了）：只处理 DIRTY 会让
          *   "脏数据已提交、尚未落盘"的行被跳过 ⇒ `fl` 返回时映射其实没落盘，
          *   与它作为显式持久化请求的语义不符。flush_one_sync 对 FLUSHING 是**等**
          *   而非重复起（见其实现），故不会发出第二条写命令。
          *   LOADING 行不在此列：它没有脏数据可写（entries 尚未有效）。 */
-        if ((cache->lines[i].state == L2P_CACHE_DIRTY) ||
-            (cache->lines[i].state == L2P_CACHE_FLUSHING))
+        if ((line->state == L2P_CACHE_DIRTY) || (line->state == L2P_CACHE_FLUSHING))
         {
             if (l2p_cache_flush_one_sync(cache, (int)i) != FTL_OK)
             {
@@ -740,8 +805,13 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
      * release（NDEBUG 裁空）下若真走到则 NULL 解引用留现场。 */
     ASSERT(ftl != NULL);
 
-    ASSERT(&ftl->cache.lines[0] <= line);
-    ASSERT(line < &ftl->cache.lines[L2P_CACHE_SIZE]);
+    ASSERT(ftl->cache != NULL);
+    ASSERT(&ftl->cache->lines[0] <= line);
+    ASSERT(line < &ftl->cache->lines[L2P_CACHE_SIZE]);
+
+    /* 命令按 PBA 的 ch/ce/lun 路由回 owner；line 的全局 region 必须属于同一个 owner。 */
+    ASSERT(ftl_topo_dim(ftl->topo) == (line->region_id % FTL_DIM_TOTAL));
+    ASSERT(ftl == l2p_cache_owner(ftl->cache, line->region_id));
 
     uint8_t failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1U : 0U;
 
@@ -757,24 +827,25 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
         line->state = L2P_CACHE_CLEAN;
         line->fresh = 1U; /* 加载已完成 ⇒ 下一次命中是本次访问的重试，不计 hit */
 
-        ASSERT(ftl->cache.load_inflight > 0U);
-        ftl->cache.load_inflight--;
+        ASSERT(ftl->cache->load_inflight > 0U);
+        ftl->cache->load_inflight--;
     }
     else if (line->state == L2P_CACHE_FLUSHING)
     {
         if (failed == 0U)
         {
             /* 落盘成功才登记新位置（顺序不可倒：先写后记账，掉电最多多留一份旧记录）。
-             * 槽位地址取自命令自身（ftl_cmd_pba 是 pba_to_cmd 的逆）——无需在行里存。 */
-            metadata_dir_commit_region(&ftl->metadata_dir,
+             * 槽位地址取自命令自身（ftl_cmd_pba 是 pba_to_cmd 的逆）——无需在行里存。
+             * ⚠ 目录用 owner die 的局部 region 编号；cache 的键是全局 region。 */
+            metadata_dir_commit_region(ftl->metadata_dir,
                                        &ftl->alloc,
-                                       line->region_id,
+                                       (uint16_t)l2p_global_to_local_region(line->region_id),
                                        ftl_cmd_pba(cmd));
 
             line->state = L2P_CACHE_CLEAN;
 
-            /* 落盘成功：本 region 的脏标记清零（下次 checkpoint 不再重写） */
-            ftl->cache.region_dirty_bitmap[line->region_id / 32U] &=
+            /* 落盘成功：本 region 的**全局**脏位清零（下次 checkpoint 不再重写） */
+            ftl->cache->region_dirty_bitmap[line->region_id / 32U] &=
                 ~(1UL << (line->region_id & 31U));
         }
         else
@@ -782,8 +853,8 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
             line->state = L2P_CACHE_DIRTY; /* 保留重试（槽位已废，Directory 未登记） */
         }
 
-        ASSERT(ftl->cache.flush_inflight > 0U);
-        ftl->cache.flush_inflight--;
+        ASSERT(ftl->cache->flush_inflight > 0U);
+        ftl->cache->flush_inflight--;
     }
     else
     {
@@ -792,4 +863,73 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
     }
 
     (void)fc_command_release(cmd);
+}
+
+/* ── 8. 恢复辅助 ── */
+
+/*
+ * l2p_cache_invalidate_owner - 只失效某个 owner 的行与脏位（恢复/格式化用）
+ *
+ * 共享 cache 下不能按实例重新 init：那样会抹掉别的 LUN 刚回放的 DIRTY 行和
+ * 全局脏位。本函数只动本 owner 的 resident 行，并清本 owner 的全局脏位。
+ * 恢复期不应有在飞命令；FLUSHING/LOADING 行重写会泄漏在飞计数 ⇒ ASSERT。
+ */
+void l2p_cache_invalidate_owner(l2p_cache_t *cache, uint32_t owner_dim)
+{
+    ASSERT(cache != NULL);
+    ASSERT(owner_dim < FTL_DIM_TOTAL);
+
+    for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
+    {
+        l2p_cache_line_t *line = &cache->lines[i];
+
+        if (line->state == L2P_CACHE_INVALID)
+        {
+            continue; /* 空行：region_id 无语义，无需处理 */
+        }
+        if (!l2p_region_owned_by(line->region_id, owner_dim))
+        {
+            continue; /* 别的 LUN 的行，不能碰 */
+        }
+
+        ASSERT((line->state == L2P_CACHE_CLEAN) || (line->state == L2P_CACHE_DIRTY));
+
+        memset(line->entries, 0xFF, sizeof(line->entries));
+        line->region_id    = 0U;
+        line->state        = L2P_CACHE_INVALID;
+        line->access_count = 0U;
+        line->fresh        = 0U;
+    }
+
+    /* 清本 owner 的全局脏位：local 0..L2P_REGIONS_PER_INSTANCE-1
+     * → global = local * DIM + owner_dim。 */
+    for (uint32_t local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
+    {
+        const uint32_t global = (local * FTL_DIM_TOTAL) + owner_dim;
+        cache->region_dirty_bitmap[global / 32U] &= ~(1UL << (global & 31U));
+    }
+}
+
+/*
+ * l2p_cache_snapshot_owner_bitmap - 全局脏位图 → 本 die 的局部 2048-bit 快照
+ *
+ * Checkpoint 起点调用（先快照再 flush）。DIM=1 时等价于整份位图拷贝。
+ */
+void l2p_cache_snapshot_owner_bitmap(const l2p_cache_t *cache, uint32_t owner_dim, uint32_t out[L2P_LOCAL_DIRTY_WORDS])
+{
+    ASSERT(cache != NULL);
+    ASSERT(owner_dim < FTL_DIM_TOTAL);
+    ASSERT(out != NULL);
+
+    memset(out, 0, L2P_LOCAL_DIRTY_WORDS * sizeof(uint32_t));
+
+    for (uint32_t local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
+    {
+        const uint32_t global = (local * FTL_DIM_TOTAL) + owner_dim;
+
+        if ((cache->region_dirty_bitmap[global / 32U] & (1UL << (global & 31U))) != 0U)
+        {
+            out[local / 32U] |= (1UL << (local & 31U));
+        }
+    }
 }

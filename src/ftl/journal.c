@@ -90,7 +90,7 @@ static nand_pba_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
  * -------------------------------------------------------------------- */
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 {
-    /* 前置条件（判据 2 / §二十六「子模块公开入口」）：调用者一律传 &ftl->journal。 */
+    /* 前置条件（判据 2 / §二十六「子模块公开入口」）：调用者一律传 ftl->journal。 */
     ASSERT(journal != NULL);
 
     journal->topo = topo;
@@ -141,7 +141,7 @@ static bool journal_freeze(l2p_journal_t *journal);
  * -------------------------------------------------------------------- */
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->journal。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
     ASSERT(journal != NULL);
 
     /*
@@ -339,7 +339,7 @@ static bool journal_start_erase(l2p_journal_t *journal)
  * -------------------------------------------------------------------- */
 void journal_kick(l2p_journal_t *journal)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->journal。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
     ASSERT(journal != NULL);
 
     if (journal->job.phase != JRN_IDLE)
@@ -495,7 +495,7 @@ static void journal_flush_now(l2p_journal_t *journal)
  * -------------------------------------------------------------------- */
 void journal_flush_page(l2p_journal_t *journal)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->journal。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
     ASSERT(journal != NULL);
 
     if (!journal_drain(journal))
@@ -514,7 +514,7 @@ void journal_flush_page(l2p_journal_t *journal)
  * ftl_op_journal
  *   功能：Journal 刷页 job 的完成服务函数——按 job.phase 推进状态机。
  *   参数：ftl —— 实例（**不用**：ctx 已是本实例的 journal）；completion —— 完成状态；
- *         ctx —— `l2p_journal_t *`（ftl_op_submit 时传 &ftl->journal）。
+ *         ctx —— `l2p_journal_t *`（ftl_op_submit 时传 ftl->journal）。
  *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
  *   实现要点：
  *     · JRN_WRITE 成功 ⇒ 推进写指针（守卫见下）；跨块 ⇒ 起异步擦除，phase = JRN_ERASE。
@@ -694,7 +694,7 @@ static void journal_scan_ring(const l2p_journal_t *journal,
  * -------------------------------------------------------------------- */
 bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->journal。out 可为 NULL（文档化契约）。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->journal。out 可为 NULL（文档化契约）。 */
     ASSERT(journal != NULL);
 
     journal_scan_ring(journal, 0U, NULL, 0U, NULL, out);
@@ -717,7 +717,7 @@ bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out)
  * -------------------------------------------------------------------- */
 void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, uint32_t floor_sequence)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->journal。latest 可为 NULL（文档化契约）。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->journal。latest 可为 NULL（文档化契约）。 */
     ASSERT(journal != NULL);
 
     uint32_t next = floor_sequence;
@@ -853,7 +853,7 @@ ftl_status_t journal_replay(l2p_journal_t              *journal,
     /* JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 8B → 2KB 栈上数组。 */
     journal_page_ref_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
 
-    /* 前置条件（判据 2）：调用者一律传 &ftl->journal 与 &ftl->cache。 */
+    /* 前置条件（判据 2）：调用者传 ftl->journal 与共享 cache（ftl->cache）。 */
     ASSERT(journal != NULL);
     ASSERT(cache != NULL);
 
@@ -914,10 +914,15 @@ ftl_status_t journal_replay(l2p_journal_t              *journal,
                     memcpy(&entry_new_pba, page_data + offset + 8, 4);
                     memcpy(&entry_seq, page_data + offset + 12, 4);
                     /* ⚠ 开机回放路径 = 结构性同步：用**同步**逃生口（自旋泵），
-                     * 不 park、不返 FTL_AGAIN——此时 superloop 尚未建立，没人推进 job。 */
-                    (void)l2p_cache_write_sync(cache,
-                                               (lba_t)entry_lba,
-                                               (nand_pba_t)entry_new_pba);
+                     * 不 park、不返 FTL_AGAIN——此时 superloop 尚未建立，没人推进 job。
+                     * ⚠ entry_lba 来自 NAND，是**不可信输入**：先校验再查表（H29）。 */
+                    if ((entry_lba != (uint32_t)FTL_LBA_INVALID) && ((uint64_t)entry_lba < L2P_GLOBAL_LBA_MAX) &&
+                        lba_routes_to((lba_t)entry_lba, journal->topo))
+                    {
+                        (void)l2p_cache_write_sync(cache,
+                                                   (lba_t)entry_lba,
+                                                   (nand_pba_t)entry_new_pba);
+                    }
 
                     /* 块账增量：只对**快照之后**的条目记 valid_count。
                      * 整页回放（含水位之前的条目）是幂等的映射写，不能整页记增量。
@@ -1031,7 +1036,7 @@ jrn_truncate_step_t journal_truncate_plan(l2p_journal_t *journal, uint32_t up_to
  * -------------------------------------------------------------------- */
 void journal_truncate_commit(l2p_journal_t *journal, uint8_t erased_block)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->journal。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
     ASSERT(journal != NULL);
 
     /* 记账：journal_flush_page 回切到该块时跳过擦除——旧实现在此处与 flush_page 各擦

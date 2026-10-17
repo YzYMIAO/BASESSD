@@ -19,14 +19,15 @@ FTL 自行决定**，Controller 只按 FTL 实例边界切连续 run 后提交�
 /* FTL 主上下文（完整定义见 include/ftl/ftl.h） */
 struct ftl_context {
     ftl_topology_t      topo;               // 拓扑信息（ch/ce/lun）
-    l2p_cache_t         cache;              // SRAM L2P cache (~128KB)
+    l2p_cache_t        *cache;              // 共享 L2P cache（阶段 B；AXI）
     ftl_pending_req_t   pending[FTL_PENDING_MAX];  // 子操作追踪（per-instance）
     ftl_io_group_t      groups[FTL_GROUP_MAX];     // 完成组表（一次 submit = 一组）
-    ftl_wbuf_t          wbuf;               // 页打包写缓冲（§七 方案 A，v0.66）
-    ftl_tables_t        tables;             // 自持大表（BST/free/op/closed/spare，P2-5）
+    ftl_wbuf_t          wbuf;               // 页打包写缓冲（§七 方案 A）
+    ftl_tables_t       *tables;             // 大表指针（阶段 C；SRAM12）
     ftl_allocator_t     alloc;              // 空闲 block / Super Block 写指针 + per-instance 块账本游标
-    l2p_journal_t       journal;            // log-structured journal
-    metadata_dir_cache_t metadata_dir;      // Metadata Directory
+    l2p_journal_t      *journal;            // log-structured journal（阶段 C；SRAM3）
+    metadata_dir_cache_t *metadata_dir;     // Metadata Directory（阶段 C；SRAM4）
+    cp_job_t           *cp_job;             // Checkpoint job（阶段 C；SRAM3）
     l2p_cp_state_t      cp;                 // Checkpoint 池游标/序号（per-instance，v0.65）
     uint32_t            cp_timer_start;     // Checkpoint 计时（T3）
     uint32_t            total_writes;       // 写入总次数
@@ -128,17 +129,16 @@ typedef struct
 **`ftl_init` / `allocator_init` 当前签名**（`include/ftl/ftl.h` / `include/ftl/allocator.h`）：
 
 ```c
-ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo);
+ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cache,
+                      const ftl_storage_t *storage);
 void         allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
 ```
 
-> ⚠ **`ftl_init_params_t` 已删除（P2-5）**：大数组不再由 HIL 声明、经结构体传指针，而是
-> 由 `ftl_context_t` **自持**（`ftl->tables`，类型 `ftl_tables_t`）。`ftl_init` 因此只剩
-> `(ftl, topo)` 两参；`allocator_init` 第三参 `tables` 只**绑定指针**、不复制。
-> 见 `include/ftl/ftl_type.h` 的注释与 `src/ftl/ftl.c` 的实现。
+> **阶段 B/C 契约**：`cache` 是设备级共享 L2P cache（同一 `(ch,ce)` 一份，设备级 init 一次）；
+> `storage` 是四个大数组的指针（tables/md/journal/cp_job），由 HIL 按域放置
+> （SRAM12/SRAM4/SRAM3）。`ftl_init` 只**绑定指针**并整表 memset（NOLOAD 段不归 BSS 清）；
+> `allocator_init` 第三参只绑定指针、不复制。
 >
-> **历史**（ADR 记录用）：v0.30 曾用 `ftl_init_params_t` 把形参 7→2 / 8→2；v0.32 删
-> `bad_blocks` / `erase_counts` 两指针（per-block 状态统一进 BST 单数据源）；P2-5 整个结构体撤除。
 > **free pool 仍由调用者回填**：`allocator_init` 内部硬清零 `free_count`、`bbt` 只标坏块，
 > 故 `ftl_init` 后须遍历 BST 非坏块 `allocator_free_block`（见 §1.7）。
 
@@ -222,13 +222,13 @@ int          ftl_op_in_dispatch(void);
 |---|---|---|---|
 | `FTL_OP_SYNC_WAIT` | `ftl_op_sync_wait` | `ftl_sync_waiter_t *`（调用者栈上） | 所有 `ftl_sync_*` |
 | `FTL_OP_HOST_IO` | `ftl_op_host_io` | **NULL** | 服务函数自己 `pending_lookup(cmd_id)`（pending 表比任何新 ctx 都全） |
-| `FTL_OP_JOURNAL` | `ftl_op_journal` | `&ftl->journal` | 阶段 2 |
+| `FTL_OP_JOURNAL` | `ftl_op_journal` | `ftl->journal` | 阶段 2 |
 | `FTL_OP_READ_RECOVERY` | `ftl_op_read_recovery` | `&ftl->rr` | 阶段 3 |
 | `FTL_OP_GC` / `FTL_OP_WL` | `ftl_op_migrate` | `&ftl->mig` | 阶段 4，**GC 与 WL 共用同一引擎**，tag 分开只为日志可辨 |
 | `FTL_OP_L2P` | `ftl_op_l2p` | `l2p_cache_line_t *`（**该 cache line**） | 阶段 5，加载与写回共用（按 `line->state` 收尾） |
-| `FTL_OP_CHECKPOINT` | `ftl_op_checkpoint` | `&ftl->cp_job` | 阶段 6 |
+| `FTL_OP_CHECKPOINT` | `ftl_op_checkpoint` | `ftl->cp_job` | 阶段 6 |
 | `FTL_OP_BBT` / `FTL_OP_WEAR` | `ftl_op_bbt` / `ftl_op_wear` | `&ftl->alloc` | 阶段 7 |
-| `FTL_OP_METADATA` | `ftl_op_metadata` | `&ftl->metadata_dir.job` | 阶段 8，日志块回收 / 压缩 |
+| `FTL_OP_METADATA` | `ftl_op_metadata` | `&ftl->metadata_dir->job` | 阶段 8，日志块回收 / 压缩 |
 
 ⚠ `g_op_service[]` 是 **C99 designated initializer 的 `const` 数组**（非「注册函数」）：
 编译期即可发现重复 / 越界，无 init-order 依赖。当前 `sizeof` = 48 B = 12 项；
@@ -431,23 +431,33 @@ fc_init();                              // ① FC 初始化
 nand_init();                            // ② NAND 初始化
 nand_dispatch_set_armed(1U);            // ③ 放行 NAND 异步提交（submit / submit_chain）
 
-/* 每 (ch,ce,lun) 一个 FTL 实例（多维声明，宏改动即扩展；v0.35 多维化）
- * ⚠ P2-5 起大表（BST / free+op / closed / spare）**内含**在 ftl_context_t 的
- *   tables 字段里，HIL 不再声明 g_blocks / g_free_blocks / g_closed_sb_list。 */
-static ftl_context_t     g_ftl[CH_NUM][CE_NUM][LUN_NUM];
-static ssd_controller_t  g_ctrl;
+/* 每 (ch,ce,lun) 一个 FTL 描述符（多维声明，宏改动即扩展）
+ * 阶段 C：四个大数组按 FTL_DIM_TOTAL 声明并按域放置（NOLOAD），
+ * 由 ftl_storage_t 绑定；描述符本身在 AXI .bss。 */
+static ftl_context_t         g_ftl[CH_NUM][CE_NUM][LUN_NUM];
+static ftl_tables_t          g_ftl_tables[FTL_DIM_TOTAL] SRAM12_DATA;
+static cp_job_t              g_ftl_cp_job[FTL_DIM_TOTAL]  SRAM3_DATA;
+static l2p_journal_t         g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
+static metadata_dir_cache_t  g_ftl_md[FTL_DIM_TOTAL]      SRAM4_DATA;
+static ssd_controller_t      g_ctrl;
 
-/* ④ FTL 初始化（P2-5：形参只剩拓扑）
- *    内部：completion_table_init → pending_init → BST memset
- *        → l2p_cache_init → allocator_init（绑定 ftl->tables，free pool 空）
- *        → metadata_dir_load → bbt_init（填充 BST bad 位） */
-ftl_init(&g_ftl[ch][ce][lun], (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun});
+/* ④ FTL 初始化（阶段 C：拓扑 + 共享 cache + storage）
+ *    内部：绑定 storage → 四个 NOLOAD 数组 memset → pending_init
+ *        → allocator_init（绑定 tables，free pool 空）
+ *        → journal_init → metadata_dir_load → bbt_init（填充 BST bad 位） */
+const uint32_t dim = ftl_topo_dim((ftl_topology_t){.ch = ch, .ce = ce, .lun = lun});
+const ftl_storage_t storage = {
+    .tables = &g_ftl_tables[dim], .metadata_dir = &g_ftl_md[dim],
+    .journal = &g_ftl_journal[dim], .cp_job = &g_ftl_cp_job[dim],
+};
+ftl_init(&g_ftl[ch][ce][lun], (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun},
+         &g_l2p_cache[ch][ce], &storage);
 
 /* ⑤ free pool 回填（v0.37 最大缺口）：
  *    allocator_init 不填 free pool（free_count 硬清零）、bbt 只标坏块不产 free_blocks。
  *    必须遍历 BST 非坏块逐个 allocator_free_block，否则首次写 allocator_alloc 失败。 */
 for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++) {
-    if (!ftl_block_is_bad(&g_ftl[ch][ce][lun].tables.blocks[g])) {
+    if (!ftl_block_is_bad(&g_ftl[ch][ce][lun].tables->blocks[g])) {
         allocator_free_block(&g_ftl[ch][ce][lun].alloc, g);
     }
 }
@@ -501,12 +511,12 @@ typedef enum {
 /* 单条 cache line = 2KB + 元数据 */
 typedef struct {
     nand_pba_t  entries[L2P_ENTRIES_PER_REGION];   // 512 × 4B = 2048B
-    uint16_t    region_id;                           // 0..L2P_REGIONS_PER_INSTANCE-1（本表内编号）
+    uint32_t    region_id;                           // **全局** region（共享 cache 的键）
     uint8_t     state;                               // l2p_cache_state_t
     uint16_t    access_count;                        // CLOCK 访问计数
 } l2p_cache_line_t;
 
-/* 整体 cache（v0.35 起绑定本 (ch,ce,lun) 拓扑） */
+/* 整体 cache（阶段 B 起：同一 (ch,ce) 下所有 LUN 共享） */
 typedef struct {
     l2p_cache_line_t  lines[L2P_CACHE_SIZE];
     uint16_t          clock_hand;        // CLOCK 替换指针
@@ -517,22 +527,21 @@ typedef struct {
     uint32_t          window_miss;       // 本窗口 miss 数
     uint8_t           miss_pct;          // 最近一次窗口结算 miss 率（0..100）
     uint8_t           thrashing;         // 1 = 降级态（停 NORMAL 主动 flush）
-    uint8_t           ch, ce, lun;       // 本 cache 绑定拓扑（固定位置寻址 + 路由）
-    metadata_dir_cache_t *md_dir;        // Metadata Directory 指针
-    ftl_allocator_t      *alloc;         // Allocator 指针（Region 动态分配；v0.19 加）
+    uint32_t region_dirty_bitmap[L2P_DIRTY_BITMAP_WORDS]; // **全局** region 脏位图
+    uint8_t  ch, ce;                     // 本 cache 服务的 (ch,ce)（跨 LUN 共享，无 lun）
+    l2p_owner_fn_t owner_of_region;      // 全局 region → owner 实例（设备级注入）
+    void          *owner_ctx;
 } l2p_cache_t;
-
-/* 设置 Metadata Directory + Allocator 指针（v0.19 加 alloc 参数） */
-static inline void l2p_cache_set_md_dir(l2p_cache_t *cache,
-                                        metadata_dir_cache_t *md_dir,
-                                        ftl_allocator_t *alloc);
 
 /* 全局 LBA → (ch,ce,lun) 路由（行业主控哈希；LUN_NUM=1 时恒 0） */
 static inline uint32_t lba_route_ch(uint64_t lba);
 static inline uint32_t lba_route_ce(uint64_t lba);
 static inline uint32_t lba_route_lun(uint64_t lba);
 
-/* 全局 LBA → 片内 local LBA（交错：lun 取低位 → 顺序写摊多 die） */
+/* 全局 region → owner die 内的局部 region（映射页落盘位置；单一漏斗） */
+static inline uint32_t l2p_global_to_local_region(uint32_t global_region);
+
+/* 全局 LBA → 片内 local LBA（地址原语；阶段 B 起数据通路不再调用） */
 static inline lba_t lba_to_local(uint64_t lba);
 
 /* L2P 哨兵层位置：Region → PBA（L2P 基础层块 0-15，**永不写入**，读回全 0xFF = 未映射）。
@@ -545,8 +554,10 @@ static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uin
 ### 2.2 接口（⚠ v0.75 阶段 5 起**三态**）
 
 ```c
-/* 初始化 cache（所有 line 置 INVALID；v0.35 起绑定 ch/ce/lun） */
-void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun);
+/* 初始化**共享** cache（设备级每个 (ch,ce) 一次；所有 line 置 INVALID；
+ * 注入 全局 region → owner 的解析回调。不能放进逐实例 ftl_init） */
+void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce,
+                    l2p_owner_fn_t owner_of_region, void *owner_ctx);
 
 /*
  * 读取 LBA 的 PBA 映射 —— 三态（v0.75 阶段 5 起，见下）。
@@ -580,14 +591,20 @@ ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
  */
 ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx);
 
-/* 后台写回推进：每轮 ftl_service 调一次，最多起 max_kick 行 */
-void l2p_flush_kick(l2p_cache_t *cache, uint8_t max_kick);
+/* 后台写回推进：每轮 ftl_service 调一次，只处理本 owner，最多起 max_kick 行 */
+void l2p_flush_kick_owner(l2p_cache_t *cache, uint32_t owner_dim, uint8_t max_kick);
 
 /* ── 同步逃生口（自旋泵；只许结构性同步上下文，服务函数禁用）── */
 ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t *out);
 ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
 ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx);
-ftl_status_t l2p_cache_flush_all_sync(l2p_cache_t *cache);
+ftl_status_t l2p_cache_flush_owner_sync(l2p_cache_t *cache, uint32_t owner_dim);
+
+/* 恢复/格式化：只失效本 owner 的行与脏位（不能整 cache re-init） */
+void l2p_cache_invalidate_owner(l2p_cache_t *cache, uint32_t owner_dim);
+/* Checkpoint 快照：全局脏位图 → 本 die 的局部 2048-bit 位图 */
+void l2p_cache_snapshot_owner_bitmap(const l2p_cache_t *cache, uint32_t owner_dim,
+                                     uint32_t out[L2P_LOCAL_DIRTY_WORDS]);
 ```
 
 ### 2.3 内部挂载点
@@ -596,11 +613,12 @@ ftl_status_t l2p_cache_flush_all_sync(l2p_cache_t *cache);
 l2p_cache_read()       → 11 个调用点全部按三态改写（host 读下发 / 写确认 / TRIM /
                          RR / 搬移 SETTLE / 开机回放 / F2 重建 / CLI map）
 l2p_cache_write()      → 写确认 / 搬移 WRITE_SETTLE / journal_replay（F10：回放写 cache）
-l2p_cache_flush_kick   → l2p_cache_evict_one（CLOCK 驱逐脏行时）、l2p_flush_kick
-l2p_cache_flush_all_sync → ftl_flush（HIL `fl`，显式持久化请求）
-l2p_cache_flush_one_sync → 仅 l2p_cache_flush_all_sync（v0.75 阶段 6 起**不再**由 Checkpoint 调）
-                          （CP job 的 CP_FLUSH_REGIONS 改用 l2p_cache_flush_kick：Header 落盘前
+l2p_cache_flush_kick   → l2p_cache_evict_one（CLOCK 驱逐脏行时）、l2p_flush_kick_owner
+l2p_cache_flush_owner_sync → ftl_flush（HIL `fl`，显式持久化请求，只刷本 owner）
+l2p_cache_flush_one_sync → l2p_cache_flush_owner_sync / Checkpoint（逐行）
+                          （CP job 的 CP_FLUSH_REGIONS 用 l2p_cache_flush_kick：Header 落盘前
                            保证 region 已持久，且不阻塞完成泵）
+l2p_cache_invalidate_owner / snapshot_owner_bitmap → 开机恢复 / Checkpoint
 ```
 
 ### 2.4 Region 加载流程（v0.75 阶段 5 起**异步**）
@@ -941,7 +959,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
       可能在 BUSY 档被紧急水位起，后续阶段要跨档位走完；只在起它的那一档推进会把 job 钉死。
     ├── IDLE 模式 (inflight == 0):               全力后台
     │   ├── rr_kick() / mig_service()     ← 推进在飞的 RR / 搬移 job
-    │   ├── l2p_flush_kick(L2P_CACHE_SIZE)  ← v0.75 阶段 5：起**异步**写回（非同步循环）
+    │   ├── l2p_flush_kick_owner(cache, dim, L2P_CACHE_SIZE)  ← v0.75 阶段 5：起**异步**写回（非同步循环）
     │   ├── GC：ftl_gc_evaluate 命中 ⇒ mig_begin_gc() 起**一个**搬移 job
     │   ├── mig_begin_wl()                ← 磨损均衡（触发判定在函数内）
     │   ├── mig_begin_predict()           ← 慢死预测巡检（节流 1s）
@@ -949,13 +967,13 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
     │   └── checkpoint_begin() (按需；此后每轮 checkpoint_kick 跨档位推进)
     │
     ├── NORMAL 模式 (pending ≤ MAX/2 且无排队组):  适度后台
-    │   ├── l2p_flush_kick(BG_NORMAL_FLUSH_COUNT=4)（thrashing 降级时跳过）
+    │   ├── l2p_flush_kick_owner(cache, dim, BG_NORMAL_FLUSH_COUNT=4)（thrashing 降级时跳过）
     │   ├── GC：ftl_gc_evaluate 命中 ⇒ mig_begin_gc() 起一个 SB 的 job（同一求值点）
     │   ├── mig_begin_wl()
     │   └── checkpoint_begin() (按需；此后每轮 checkpoint_kick 跨档位推进)
     │
     └── BUSY 模式 (pending > MAX/2 或 queued != 0):  最小后台（host 饿着，让路）
-        ├── l2p_flush_kick(1)
+        ├── l2p_flush_kick_owner(cache, dim, 1)
         └── checkpoint_begin() (仅 emergency≥95%；起 job 即返回)
 ```
 

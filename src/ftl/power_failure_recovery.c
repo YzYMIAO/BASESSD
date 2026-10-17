@@ -104,7 +104,7 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
     }
     (void)bbt_save(&ftl->alloc); /* 坏块图重新落盘（BBT 池刚被擦） */
 
-    metadata_dir_init(&ftl->metadata_dir);
+    metadata_dir_init(ftl->metadata_dir);
 
     if (checkpoint_write_initial(ftl->topo) != FTL_OK)
     {
@@ -140,7 +140,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
      *    (block0, page0)/1，而环形块**并没有被擦**（journal_truncate 只预擦环形下一块），
      *    不接回去就会二次编程 + 序号回退（详见 journal_resume）。 */
     journal_page_ref_t ring;
-    (void)journal_scan_latest(&ftl->journal, &ring);
+    (void)journal_scan_latest(ftl->journal, &ring);
 
     /* ② 扫描 Checkpoint + 读取 块账快照（快照失败不触发格式化，只影响块账路径） */
     l2p_checkpoint_header_t cp;
@@ -161,7 +161,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
         return ret;
     }
 
-    const bool blocks_valid = checkpoint_load_block_table(ftl, &cp, cp_idx, ftl->cp_job.block_words);
+    const bool blocks_valid = checkpoint_load_block_table(ftl, &cp, cp_idx, ftl->cp_job->block_words);
 
     if (!blocks_valid)
     {
@@ -242,7 +242,7 @@ ftl_status_t ftl_boot_carve_pools(struct ftl_context *ftl)
         {
             continue;
         }
-        if (ftl_is_metadata_block(&ftl->metadata_dir, plane, block))
+        if (ftl_is_metadata_block(ftl->metadata_dir, plane, block))
         {
             continue;
         }
@@ -270,7 +270,8 @@ ftl_status_t ftl_boot_carve_pools(struct ftl_context *ftl)
  *   参数：ftl —— FTL 实例（前置条件，由 ftl_boot_recovery 保证，不在此复检）；
  *         ring —— Journal 环形块池快照。
  *   返回：FTL_OK / FTL_ERROR。
- *   实现要点：① l2p_cache_init 置全 INVALID（**不清 md_dir/alloc**，见 l2p_cache.c）。
+ *   实现要点：① 失效**本 owner** 的 L2P cache 行与脏位（共享 cache 不能整体 re-init，
+ *             否则会抹掉别的 LUN 刚回放的 DIRTY 行）。
  *             ② F2 重建把「用户数据 written 块」逐出 Free Pool（见下 ⚠）。
  *             ③ allocator 已由 ftl_init 初始化，此处不重复。
  *             ④ journal_resume 按环内最新页接回写指针（序号下限 1）。
@@ -278,8 +279,8 @@ ftl_status_t ftl_boot_carve_pools(struct ftl_context *ftl)
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_page_ref_t *ring)
 {
-    /* ① L2P Cache 全 INVALID */
-    l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
+    /* ① 只失效本 owner 的行/脏位（设备级 init 已清全体；这里覆盖格式化后的场景） */
+    l2p_cache_invalidate_owner(ftl->cache, ftl_topo_dim(ftl->topo));
 
     /* ② 池回填（从 main.c 移入——块账快照恢复必须先于 carve，否则池条目重复）。
      *    fresh 无快照 ⇒ 走几何顺序 carve。 */
@@ -297,7 +298,7 @@ ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_page_re
      *    环形块里的旧页仍在（刚格式化过的介质为空，但「找不到 Checkpoint」也可能是
      *    Checkpoint 页损坏而环形块完好）⇒ 写指针必须按 NAND 实际内容接回，否则会对
      *    已编程页二次编程；序号从 1 重来还会让下次开机把旧页当新页回放、复活旧映射。 */
-    journal_resume(&ftl->journal, ring, 1U);
+    journal_resume(ftl->journal, ring, 1U);
 
     /* ⑤ 复位 Checkpoint 定时基准（本实例 cp 游标已由 checkpoint_find_latest 置空） */
     ftl->cp_timer_start = 0U;
@@ -330,23 +331,22 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
     ASSERT(blocks_restored != NULL);
     ASSERT(ring != NULL);
 
-    /* ① Cache 全 INVALID（首次 miss 时按需从 NAND L2P Table 加载） */
-    l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
-
+    /* ① 共享 cache 已由设备级 init 置空；本路径只按 CP bitmap 约束本 owner 的行
+     *    （首次 miss 时按需从 NAND L2P Table 加载）。 */
     uint8_t restored = 0U;
 
     if (blocks_valid != 0U)
     {
-        if (ftl_recovery_restore_blocks(ftl, ftl->cp_job.block_words))
+        if (ftl_recovery_restore_blocks(ftl, ftl->cp_job->block_words))
         {
             /* 预载 CP region，供 probe 的逐 CW L2P 反查复用（未覆盖区懒加载）。 */
             ftl_boot_apply_region_bitmap(ftl, cp);
 
             ftl_block_restore_stats_t stats;
             memset(&stats, 0, sizeof(stats));
-            ftl_recovery_probe_blocks(ftl, ftl->cp_job.block_words, &stats);
+            ftl_recovery_probe_blocks(ftl, ftl->cp_job->block_words, &stats);
 
-            if (ftl_recovery_build_pools(ftl, ftl->cp_job.block_words))
+            if (ftl_recovery_build_pools(ftl, ftl->cp_job->block_words))
             {
                 restored = 1U;
                 LOGI("[BLK] restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n",
@@ -371,7 +371,7 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
     }
 
     /* ② Journal RAM 写态恢复（环形块未被擦，必须接回写指针/序号）。 */
-    journal_resume(&ftl->journal, ring, cp->journal_sequence);
+    journal_resume(ftl->journal, ring, cp->journal_sequence);
 
     /* ③ Controller → Ready */
     ftl->cp_timer_start = 0U;
@@ -385,8 +385,11 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
  *   功能：按 checkpoint region_bitmap 局部加载 L2P cache（F4）。
  *   参数：ftl —— FTL 实例；cp —— 最近 Checkpoint 头（含 region_bitmap）。
  *   返回：无。
- *   实现要点：对 cache 行做三条约束——① DIRTY 行跳过；② bitmap 置位区预载 CLEAN；
- *             ③ 未置位区置 INVALID（懒加载）。必须在 journal_replay 之后调用。
+ *   实现要点：对**本 owner 的** cache 行做三条约束——① DIRTY 行跳过；
+ *             ② bitmap 置位区预载 CLEAN；③ 未置位区置 INVALID（懒加载）。
+ *             共享 cache 下还要跳过别的 LUN 的行与在飞行（FLUSHING/LOADING），
+ *             并把全局 region 映射成本 die 的局部 region 再查 CP 位图。
+ *             必须在 journal_replay 之后调用。
  *
  * F4：掉电恢复时，checkpoint 只保证「bitmap 置位的 region」的 NAND 页等于
  * CP 时刻快照。boot 后对 cache 行做约束：
@@ -408,36 +411,47 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
 static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
                                          const l2p_checkpoint_header_t *cp)
 {
+    const uint32_t dim = ftl_topo_dim(ftl->topo);
+
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
-        l2p_cache_line_t *line = &ftl->cache.lines[i];
+        l2p_cache_line_t *line = &ftl->cache->lines[i];
 
         if (line->state == L2P_CACHE_DIRTY)
         {
             continue; /* ① 回放数据，保持 DIRTY 待后台 flush */
         }
+        /* 在飞行有命令在飞：重写状态会让完成找不到行、泄漏在飞计数。 */
+        if ((line->state == L2P_CACHE_FLUSHING) || (line->state == L2P_CACHE_LOADING))
+        {
+            continue;
+        }
+        /* 共享 cache：只处理本 owner 的行。INVALID 行 region_id=0，只归 dim0，
+         * 保持 DIM=1 的既有行为；别的 LUN 的行由它们自己的恢复处理。 */
+        if (!l2p_region_owned_by(line->region_id, dim))
+        {
+            continue;
+        }
 
-        uint32_t word      = cp->region_bitmap[line->region_id / 32U];
-        uint32_t mask      = (1UL << (line->region_id & 31U));
-        int      in_bitmap = ((word & mask) != 0U);
+        const uint32_t local_region = l2p_global_to_local_region(line->region_id);
+        ASSERT(local_region < L2P_REGIONS_PER_INSTANCE);
+
+        const uint32_t word      = cp->region_bitmap[local_region / 32U];
+        const uint32_t mask      = (1UL << (local_region & 31U));
+        const int      in_bitmap = ((word & mask) != 0U);
 
         if (in_bitmap)
         {
             /* ② 预载 bitmap 区（仅 CLEAN/INVALID 行；DIRTY 已在上方跳过） */
             if (line->state != L2P_CACHE_CLEAN)
             {
-                nand_pba_t region_addr = NAND_PBA_INVALID;
-
-                if (ftl->cache.md_dir != NULL)
-                {
-                    region_addr = metadata_dir_lookup(ftl->cache.md_dir,
-                                                      METADATA_TYPE_L2P_REGION,
-                                                      line->region_id);
-                }
+                nand_pba_t region_addr = metadata_dir_lookup(ftl->metadata_dir,
+                                                             METADATA_TYPE_L2P_REGION,
+                                                             (uint16_t)local_region);
 
                 if (region_addr == NAND_PBA_INVALID)
                 {
-                    region_addr = l2p_region_pba(ftl->cache.ch, ftl->cache.ce, ftl->cache.lun, line->region_id);
+                    region_addr = l2p_region_pba(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, (uint16_t)local_region);
                 }
 
                 if (ftl_sync_read_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META()) == FTL_OK)
@@ -476,15 +490,15 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 {
     uint32_t cp_sequence = cp->journal_sequence;
 
-    /* ① Cache 全 INVALID */
-    l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
+    /* ① 共享 cache 已由设备级 init 置空；journal 回放把本 owner 的映射写进 cache。
+     *    ⚠ 不能在此整体 re-init：会抹掉前面 LUN 刚回放的 DIRTY 行与全局脏位。 */
 
     /* ② 块账快照恢复（若有效）：先恢复块账，回放时才能同步维护 valid_count。 */
     uint8_t                    blocks_applied = 0U;
     journal_replay_block_ctx_t block_ctx;
     memset(&block_ctx, 0, sizeof(block_ctx));
 
-    if ((blocks_valid != 0U) && ftl_recovery_restore_blocks(ftl, ftl->cp_job.block_words))
+    if ((blocks_valid != 0U) && ftl_recovery_restore_blocks(ftl, ftl->cp_job->block_words))
     {
         blocks_applied        = 1U;
         block_ctx.materialize = recovery_materialize_pba;
@@ -496,8 +510,8 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
      *    F10：按 (page_seq, entry_index) 递增序回放所有
      *    page_seq + entry_count > cp_sequence 的页。 */
     uint32_t entry_count = 0U;
-    (void)journal_replay(&ftl->journal,
-                         &ftl->cache,
+    (void)journal_replay(ftl->journal,
+                         ftl->cache,
                          cp_sequence,
                          &entry_count,
                          (blocks_applied != 0U) ? &block_ctx : NULL);
@@ -513,9 +527,9 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     {
         ftl_block_restore_stats_t stats;
         memset(&stats, 0, sizeof(stats));
-        ftl_recovery_probe_blocks(ftl, ftl->cp_job.block_words, &stats);
+        ftl_recovery_probe_blocks(ftl, ftl->cp_job->block_words, &stats);
 
-        if (ftl_recovery_build_pools(ftl, ftl->cp_job.block_words))
+        if (ftl_recovery_build_pools(ftl, ftl->cp_job->block_words))
         {
             restored = 1U;
             LOGI("[BLK] restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n",
@@ -668,16 +682,19 @@ void ftl_recovery_close_block(ftl_context_t       *ftl,
 
         for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
+            /* ⚠ 先校验不可信 META LBA 再使用：FTL_LBA_INVALID / 越界都不查表
+             * （H29；全全局化后坏值可能落进另一个合法区间）。 */
+            if ((cw_lba[cw] == FTL_LBA_INVALID) || ((uint64_t)cw_lba[cw] >= L2P_GLOBAL_LBA_MAX) ||
+                !lba_routes_to(cw_lba[cw], ftl->topo))
+            {
+                continue;
+            }
+
             /* ⚠ F2 重建 = 结构性同步路径（开机、superloop 未建立）：用同步逃生口。
              * 读得 INVALID 与"未映射"同义 ⇒ 该 CW 不计入有效数（与旧实现同）。 */
             nand_pba_t cur = NAND_PBA_INVALID;
 
-            (void)l2p_cache_read_sync(&ftl->cache, cw_lba[cw], &cur);
-
-            if (cw_lba[cw] == FTL_LBA_INVALID)
-            {
-                continue;
-            }
+            (void)l2p_cache_read_sync(ftl->cache, cw_lba[cw], &cur);
             if ((cur != NAND_PBA_INVALID) && (cur == pba_with_cw(pba, cw)))
             {
                 ftl_block_add_valid(b); /* valid_count 单位 = CW */
@@ -724,7 +741,7 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
             ftl_block_t *b = &alloc->blocks[g];
 
             /* ① 坏块 / 元数据块跳过（判据与 main.c free pool 回填一致，per-plane 块号） */
-            if (ftl_block_is_bad(b) || ftl_is_metadata_block(&ftl->metadata_dir, plane, block))
+            if (ftl_block_is_bad(b) || ftl_is_metadata_block(ftl->metadata_dir, plane, block))
             {
                 continue;
             }
@@ -932,7 +949,7 @@ bool ftl_recovery_restore_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLOCK_TO
         {
             continue;
         }
-        if (ftl->metadata_dir.l2p_live[g] > 0U)
+        if (ftl->metadata_dir->l2p_live[g] > 0U)
         {
             if (ftl_block_state(b) != FTL_BLOCK_STATE_LOG)
             {
@@ -1002,7 +1019,7 @@ void ftl_recovery_probe_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLOCK_TOTA
 
         if (st == FTL_BLOCK_STATE_LOG)
         {
-            if (ftl->metadata_dir.l2p_live[g] > 0U)
+            if (ftl->metadata_dir->l2p_live[g] > 0U)
             {
                 if (stats != NULL)
                 {
@@ -1128,7 +1145,7 @@ bool ftl_recovery_build_pools(ftl_context_t *ftl, const uint16_t words[FTL_BLOCK
         const uint8_t  plane = ftl_gblock_plane(g);
         const uint16_t block = ftl_gblock_block(g);
 
-        if (ftl_is_metadata_block(&ftl->metadata_dir, plane, block))
+        if (ftl_is_metadata_block(ftl->metadata_dir, plane, block))
         {
             continue; /* 固定区（已在上面跳过）/ 活的动态 LOG 块 */
         }
@@ -1229,7 +1246,7 @@ static bool recovery_materialize_pba(void *ctx, nand_pba_t pba)
     {
         return true; /* 坏块不记账；数据已不可信 */
     }
-    if (ftl_is_metadata_block(&ftl->metadata_dir, ftl_gblock_plane(g), ftl_gblock_block(g)))
+    if (ftl_is_metadata_block(ftl->metadata_dir, ftl_gblock_plane(g), ftl_gblock_block(g)))
     {
         return false; /* journal 不应指向 L2P 日志块 */
     }

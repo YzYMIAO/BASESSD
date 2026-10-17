@@ -126,7 +126,6 @@ static uint8_t fc_is_page_read(uint8_t operation)
         case OP_READ_PAGE_CACHE_LAST:
         case OP_RANDOM_DATA_READ:
         case OP_RANDOM_DATA_READ_MULTI_PLANE: /* 06h-E0h 多 plane 逐 CW 取数（与 05h 对称） */
-        case OP_READ_PAGE_FETCH:              /* Phase V */
             return 1U;
         default:
             return 0U;
@@ -1255,10 +1254,9 @@ static fc_status_t fc_build_request_data_planes(const fc_t *controller, const fc
  *   功能：下发前对 request->operation 做两处改写（读语义 + Phase V 拆分）。
  *   参数：request —— 已构建完成的 dispatch 请求。
  *   实现要点：
- *     - ⚠ **两处改写有顺序依赖**：读改写必须排在 splittable 判定之前。读改写把
- *       WITH_DATA_OUT 换成 WITHOUT_DATA_OUT，而后者在 g_nand_operation_map 里
- *       op_type=ATOMIC / pair_op=0，于是不再 splittable。当前 LUN_NUM=1 该拆分本就不
- *       生效，但启用多 LUN 前必须把 LOAD/FETCH 拆分与逐 CW 取数模型重新对齐。
+ *     - 读改写先把 WITH_DATA_OUT 换成「加载型」op；写/擦再按 splittable 拆成
+ *       ISSUE（仅 LUN_NUM>1）。两处互不重叠，顺序不敏感，但读改写必须在这之后
+ *       不再被 splittable 判定命中——LOAD/WAIT 本身已是 ISSUE/WAIT 型。
  *     - 由 fc_build_dispatch_request 末尾调用；单命令与链式路径共用。
  * -------------------------------------------------------------------- */
 static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
@@ -1268,14 +1266,18 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
      * 完成项判定都用它），但下发给 NAND 的是对应的「只加载、不输出」op：
      * 整页先搬进 NAND 页缓冲，数据随后由 nand_dispatch_task_cw_chain 用
      * 05h（单 plane）/ 06h（多 plane）按 mask 逐 CW 取回（见 nand_dispatch.c）。
-     * 这样任意 CW 子集（含不含 CW0）走同一条路径。 */
+     *
+     * LUN_NUM==1：原子 WITHOUT_DATA_OUT（发 30h 后等 tR，再逐 CW 取数）。
+     * LUN_NUM>1 ：LOAD（ISSUE，发完 30h 立即返回）→ WAIT（等 tR + 状态）→
+     *             逐 CW 取数；tR 期间别的 LUN 可以使用总线。 */
     if (request->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT)
     {
-        request->operation = OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT;
+        request->operation = (LUN_NUM > 1U) ? OP_READ_PAGE_LOAD : OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT;
     }
     else if (request->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
     {
-        request->operation = OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT;
+        request->operation =
+            (LUN_NUM > 1U) ? OP_READ_PAGE_MULTI_PLANE_LOAD : OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT;
     }
 
     /* Phase V: splittable 原子命令自动拆为 ISSUE（仅 LUN_NUM>1 时生效；

@@ -51,7 +51,14 @@ BUILD_DIR := $(PROJECT_ROOT)/build/$(BUILD_TARGET)/$(BUILD_TYPE)
 # 分置的原因：本工程无「CFLAGS 变化 ⇒ 重编译」依赖，若共用一个对象目录，先 make all
 # 再 make tests 会复用不带测试宏的陈旧 .o（症状：固件里没有 test 命令 / ut_main.o 引用
 # 未编入的套件数组而链接失败）。分置后三种构建互不污染，无需 make clean。
-OBJ_DIR   := $(BUILD_DIR)/obj$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))
+# NAND 器件族选择（对应 include/nand/devices/<family>.h 与
+# src/nand/devices/<family>.c）。切换它会改变 CFLAGS（-DNAND_DEVICE_*）
+# 与参与编译的源文件；本工程没有「CFLAGS 变化 ⇒ 重编译」依赖，故非默认
+# 器件时在对象目录上加后缀，避免复用陈旧 .o。
+NAND_DEVICE_DEFAULT := MT29F___G08A
+NAND_DEVICE         ?= $(NAND_DEVICE_DEFAULT)
+
+OBJ_DIR   := $(BUILD_DIR)/obj$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))$(if $(filter-out $(NAND_DEVICE_DEFAULT),$(NAND_DEVICE)),_$(NAND_DEVICE))
 LIB_DIR   := $(BUILD_DIR)/lib
 BIN_DIR   := $(BUILD_DIR)/bin
 DEP_DIR   := $(BUILD_DIR)/dep
@@ -162,6 +169,8 @@ endif
 
 #最终CFLAGS（模块特定的包含路径会在顶层Makefile中追加）
 CFLAGS  = $(BASE_FLAGS) $(OPT_FLAGS) $(DBG_FLAGS) $(SAN_FLAGS)
+# 器件选择宏：nand/nand_config.h 用它决定包含哪个 devices/<family>.h。
+CFLAGS += -DNAND_DEVICE_$(NAND_DEVICE)
 
 
 # -x assembler-with-cpp  指定汇编文件使用 C 预处理器处理（支持 #include、#define 等）

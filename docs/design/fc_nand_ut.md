@@ -470,7 +470,8 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 | 33 | `OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT` | ✅ | 标准读（无数据输出） |
 | 34 | `OP_READ_PAGE_CACHE_START` | ❌ | 缓存读启动（cache 管线） |
 | 35 | `OP_READ_PAGE_LOAD` | ❌ | 多 LUN 读 ISSUE 段（Phase V） |
-| 36 | `OP_READ_PAGE_FETCH` | ❌ | 多 LUN 读 FETCH 段（Phase V） |
+| 36 | `OP_READ_PAGE_WAIT` | ❌ | 多 LUN 读 WAIT 段（Phase V：tR + 状态，无数据） |
+| 43 | `OP_READ_PAGE_MULTI_PLANE_LOAD` | ❌ | 多 LUN 多 plane 读 LOAD 段（Phase V） |
 | 37 | `OP_PROGRAM_PAGE_ISSUE` | ❌ | 多 LUN 编程 ISSUE 段 |
 | 38 | `OP_PROGRAM_PAGE_WAIT` | ❌ | 多 LUN 编程 WAIT 段 |
 | 39 | `OP_ERASE_BLOCK_ISSUE` | ❌ | 多 LUN 擦除 ISSUE 段 |

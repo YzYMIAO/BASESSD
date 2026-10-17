@@ -38,8 +38,9 @@
 #include "fault.h"
 #include "mpu.h"
 #include "nand/nand_dispatch.h"
-#include "nand/nand_mt29f4g08abadawp.h"
+#include "nand/nand_fc_interface.h"
 #include "platform.h"
+#include "ssd_compiler.h"
 #include "stm32h7xx_hal.h"
 #include "sys.h"
 #include "usart.h"
@@ -177,34 +178,69 @@ static void boot_report_console(void)
  * 表所有权（P2-5）：BST / free / op / spare / closed 五个大数组**不再由本文件声明**，
  *   而是内含在 ftl_context_t 里（`ftl->tables`，见 ftl/allocator.h）——表归 FTL 本体
  *   所有，本文件只提供实例存储。与主流同构（OpenSSD 全局数组 / SPDK `spdk_ftl_dev`
- *   内含表）。好处：内存预算**单点可见**（下面的 _Static_assert 只看 g_ftl 一项）。
+ *   内含表）。好处：内存预算**单点可见**（下面的 _Static_assert 看 g_ftl + 共享 cache）。
  *
- * SRAM 布局：
- *   g_ftl（l2p cache 128KB + journal/md + 自持表 ~112KB + 页打包写缓冲 4KB）→ AXI_RAM（.bss）
- *   AXI_RAM 实占 ≈ 287KB + 命令/描述符/缓冲池 ~19KB，仍在 384KB 内。
- *   （v0.60 删 g_valid_map 64KB：有效性走 DRAM-less approach ③，逐 CW META 反查 L2P；
- *     v0.66 加 wbuf 4KB/实例：页打包写缓冲，见 ftl_wbuf_t。）
+ * SRAM 布局（阶段 C：描述符 + 内存域散列）：
+ *   AXI_RAM（.bss）：g_ftl 描述符（~14.7KB/实例）+ g_l2p_cache（共享热 cache）
+ *                    + CLI 写缓冲 + 其它 .bss
+ *   SRAM1+SRAM2（.sram12_data）：g_ftl_tables[FTL_DIM_TOTAL]（BST/池/closed）
+ *   SRAM3（.sram3_data）：g_ftl_cp_job[] + g_ftl_journal[]
+ *   SRAM4（.sram4_data）：g_ftl_md[]（Metadata Directory）
+ *
+ * 四个 `.sram*_data` 数组是 **NOLOAD**（启动不清零）⇒ ftl_init 显式 memset。
+ * N=2：AXI ~197KB / SRAM12 247,792B / SRAM3 21,256B / SRAM4 49,320B，均装得下。
  * ══════════════════════════════════════════════════════════════════ */
-static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM]; /* ≈287KB → AXI_RAM（.bss） */
-ssd_controller_t     g_ctrl;                         /* controller 路由表（收 g_ftl 三维指针）；非 static：
-                                                      * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
-static int g_ftl_ready;                              /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
+static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM]; /* 描述符 → AXI_RAM（.bss） */
 
-/* ── 编译期内存预算（AXI_RAM）──
- * g_ftl 随 CH_NUM×CE_NUM×LUN_NUM 线性放大，而 AXI_RAM 是硬上限
- * （linker/stm32h743xx_flash.ld: __AXI_RAM_SIZE = 0x60000 = 384KB）。
- * 当前 1 个维度用 ~287KB，**再加一个实例就装不下**。把它变成编译错误，
- * 而不是运行期 HardFault 或静默的 .bss 溢出。提高维度前必须先重新规划内存。 */
+/* 共享 L2P cache：同一 (ch,ce) 下所有 LUN 共用一份（阶段 B）。
+ * 设备级初始化一次，由 ssd_l2p_owner_of_region 把全局 region 解析到 owner LUN。 */
+static l2p_cache_t g_l2p_cache[CH_NUM][CE_NUM];
+
+/* per-instance 大数组（阶段 C）：由 ftl_storage_t 绑定到描述符。 */
+static ftl_tables_t         g_ftl_tables[FTL_DIM_TOTAL] SRAM12_DATA;
+static cp_job_t             g_ftl_cp_job[FTL_DIM_TOTAL] SRAM3_DATA;
+static l2p_journal_t        g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
+static metadata_dir_cache_t g_ftl_md[FTL_DIM_TOTAL] SRAM4_DATA;
+
+ssd_controller_t g_ctrl; /* controller 路由表（收 g_ftl 三维指针）；非 static：
+                          * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
+static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl_service */
+
+/* ── 编译期内存预算（各域）──
+ * AXI_RAM 是硬上限（linker: __AXI_RAM_SIZE = 0x60000 = 384KB）；
+ * D2/D3 SRAM 的容量与 linker 的 SRAM12/SRAM3/SRAM4 区域一一对应。 */
 #define BOARD_AXI_RAM_SIZE   (384U * 1024U) /* 对齐 __AXI_RAM_SIZE */
-#define FTL_AXI_RAM_RESERVED (20U * 1024U)  /* 命令池/描述符池/缓冲池等（实测 ~19KB）*/
+#define BOARD_SRAM12_SIZE    (256U * 1024U) /* SRAM1+SRAM2 合并区域 */
+#define BOARD_SRAM3_SIZE     (32U * 1024U)
+#define BOARD_SRAM4_SIZE     (64U * 1024U)
+#define FTL_AXI_RAM_RESERVED (20U * 1024U) /* 命令池/描述符池/缓冲池等（实测 ~19KB）*/
 
-_Static_assert(sizeof(g_ftl) + FTL_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE,
-               "FTL 实例数组超出 AXI_RAM：提高 CH/CE/LUN 前必须重新规划内存");
+/* g_wr_buf 从 .sram2_data 迁入 AXI .bss（SRAM12 留给 tables），显式计入预算。 */
+#define CLI_AXI_RAM_RESERVED (16U * 1024U)
+
+_Static_assert(sizeof(g_ftl) + sizeof(g_l2p_cache) + FTL_AXI_RAM_RESERVED + CLI_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE,
+               "FTL 描述符/共享 cache/CLI 缓冲超出 AXI_RAM");
+_Static_assert(sizeof(g_ftl_tables) <= BOARD_SRAM12_SIZE, "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
+_Static_assert(sizeof(g_ftl_cp_job) + sizeof(g_ftl_journal) <= BOARD_SRAM3_SIZE, "cp_job/journal 超出 SRAM3");
+_Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4");
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
  * 编译器不认可 static 数组直接退化为匹配指针数组参数（GCC 10.3 起
  * -Wincompatible-pointer-types 恒报），此处显式构造。 */
 static ftl_context_t *g_ftl_ptrs[CH_NUM][CE_NUM][LUN_NUM];
+
+/*
+ * ssd_l2p_owner_of_region - 全局 L2P region → owner FTL 实例
+ *
+ * 共享 cache 的 load/flush/commit 用它找 owner die。region→(ch,ce,lun) 的分解
+ * 复用 completion_table_route_region（与 lba_route_* 同一套公式，避免第二套坐标）。
+ */
+static struct ftl_context *ssd_l2p_owner_of_region(void *ctx, uint32_t global_region)
+{
+    (void)ctx;
+
+    return completion_table_route_region(global_region);
+}
 
 /*
  * ssd_ftl_boot - 初始化单个 (ch,ce,lun) FTL 实例
@@ -218,11 +254,21 @@ static ftl_context_t *g_ftl_ptrs[CH_NUM][CE_NUM][LUN_NUM];
  */
 static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
 {
-    ftl_context_t    *ftl = &g_ftl[ch][ce][lun];
-    ftl_allocator_t  *alloc;
-    ftl_boot_result_t result;
+    ftl_context_t       *ftl = &g_ftl[ch][ce][lun];
+    ftl_allocator_t     *alloc;
+    ftl_boot_result_t    result;
+    const ftl_topology_t topo    = {.ch = ch, .ce = ce, .lun = lun};
+    const uint32_t       dim     = ftl_topo_dim(topo);
+    const ftl_storage_t  storage = {
+         .tables       = &g_ftl_tables[dim],
+         .metadata_dir = &g_ftl_md[dim],
+         .journal      = &g_ftl_journal[dim],
+         .cp_job       = &g_ftl_cp_job[dim],
+    };
 
-    if (ftl_init(ftl, (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun}) != FTL_OK)
+    ASSERT(dim < FTL_DIM_TOTAL);
+
+    if (ftl_init(ftl, topo, &g_l2p_cache[ch][ce], &storage) != FTL_OK)
     {
         LOGE("[FTL ] init failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return -1;
@@ -314,6 +360,17 @@ static void ssd_ftl_boot_all(void)
     }
     completion_table_set_route(g_ftl_ptrs);
 
+    /* ①.5 共享 L2P cache：每个 (ch,ce) 一份，**设备级只初始化一次**。
+     * 必须早于逐实例 boot（ftl_boot_recovery 的 F2/journal 回放就会访问 cache）；
+     * 且绝不能放进逐实例 ftl_init（第二个实例会清掉第一个实例的 line）。 */
+    for (ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (ce = 0U; ce < CE_NUM; ce++)
+        {
+            l2p_cache_init(&g_l2p_cache[ch][ce], ch, ce, ssd_l2p_owner_of_region, NULL);
+        }
+    }
+
     /* ② 逐实例 boot */
     for (ch = 0U; ch < CH_NUM; ch++)
     {
@@ -336,6 +393,22 @@ static void ssd_ftl_boot_all(void)
         completion_table_set_route(NULL);
         LOGE("[FTL ] boot failed, fallback to fc_service\r\n");
         return;
+    }
+
+    /* ②.5 路由 ↔ dim 的往返自检（owner 解析的根基）：
+     * ftl_topo_dim(route(dim)) 必须等于 dim；公式漂移会让每次 cache 操作找不到 owner。
+     * 必须在逐实例 ftl_init 之后做（topo 那时才有值），且 release 也拒绝启动
+     * （H14 判据 9 的同类：静默错路由比停机更贵）。 */
+    for (uint32_t dim = 0U; dim < FTL_DIM_TOTAL; dim++)
+    {
+        const struct ftl_context *owner = completion_table_route_region(dim);
+
+        if ((owner == NULL) || (ftl_topo_dim(owner->topo) != dim))
+        {
+            LOGE("[FTL ] route/dim mismatch dim=%lu\r\n", (unsigned long)dim);
+            completion_table_set_route(NULL);
+            return;
+        }
     }
 
     /* ③ controller 就绪 */

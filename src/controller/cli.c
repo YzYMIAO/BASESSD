@@ -18,6 +18,7 @@
 #include "controller/ssd_request.h"
 #include "ftl/bbt.h"
 #include "ftl/ftl.h"
+#include "ftl/l2p_cache.h"
 #include "usart.h"
 
 #include <stdio.h>
@@ -105,16 +106,16 @@ static void uart_print_status(void)
 /*
  * UART CLI 驱动 FTL（C 档，设计文档 §13.4 D10：Host 命令来源 = UART CLI）。
  *
- * 固定 pattern 写 buffer：16KB，落 SRAM2（.sram2_data 为 NOLOAD 段，上电不清零
- * → cli_init 主动预填）。前 8KB = 0x55555555，后 8KB = 0xAAAAAAAA。
+ * 固定 pattern 写 buffer：16KB，落 **AXI_RAM .bss**（启动清零；cli_init 仍主动预填
+ * 0x55/0xAA）。阶段 C 起 SRAM1+SRAM2 合并给 FTL tables（2×123,896B），
+ * 16KB CLI 缓冲放不进 SRAM12 的 14KB 余量，故迁回 AXI（见 main.c 内存断言）。
  *
  * ⚠ CW 级映射（IU = 1 CW = 512B）：`wr lba n` / `rd lba n` 的 n 单位是**扇区**
  *   （每个 512B），缓冲步进 = FTL_IU_BYTES。故 **n 上限 = 16KB / 512B = 32**
  *   （旧页级模型下 n 计 2048B 页，上限 8）。超出由 controller 的 buffer_size
  *   校验拒绝（写爆 g_wr_buf 是真实隐患）。
  */
-static uint8_t g_wr_buf[FTL_READ_USER_SIZE * CW_NUM * PLANE_NUM] /* 16KB → SRAM2 */
-    __attribute__((section(".sram2_data")));
+static uint8_t g_wr_buf[FTL_READ_USER_SIZE * CW_NUM * PLANE_NUM]; /* 16KB → AXI .bss */
 
 /* n（扇区数）上限：g_wr_buf 容量 ÷ 映射单元字节数 */
 #define UART_CLI_MAX_SECTORS ((uint32_t)(sizeof(g_wr_buf) / FTL_IU_BYTES))
@@ -173,6 +174,13 @@ static int uart_cli_lba_range_ok(uint64_t lba, uint32_t n)
     uint64_t end = lba + (uint64_t)n;
 
     return (lba < FTL_LBA_MAX) && (end <= FTL_LBA_MAX);
+}
+
+/* CLI 诊断命令（map / pair 窗口）按 LBA 取所属 FTL 实例。
+ * 复用 l2p_cache.h 的分片公式；8-LBA pair 窗口不跨 region，故按窗口基址取即可。 */
+static ftl_context_t *uart_cli_ftl_for_lba(uint64_t lba)
+{
+    return g_ctrl.ftl[lba_route_ch(lba)][lba_route_ce(lba)][lba_route_lun(lba)];
 }
 
 /* 解析十进制/十六进制数。成功且全部消费返回 0；失败/残留返回 -1。 */
@@ -406,8 +414,8 @@ static int uart_cli_wp(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    /* 诊断固定打实例 [0][0][0]——与 rd/wr 经 controller 路由到的实例一致（CH=CE=LUN=1）。 */
-    ftl = g_ctrl.ftl[0][0][0];
+    /* 按窗口基址路由到所属实例（与 controller/FTL 的分片规则一致）。 */
+    ftl = uart_cli_ftl_for_lba(lba);
     if (ftl == NULL)
     {
         (void)uart_log_write("error: ftl instance not ready\r\n", 31U);
@@ -525,8 +533,8 @@ static int uart_cli_info(int argc, char *argv[])
                            (unsigned)allocator_spare_count(&ftl->alloc, 1U),
                            (unsigned)ftl->alloc.bad_count,
                            (unsigned)allocator_closed_count(&ftl->alloc),
-                           (unsigned)ftl->cache.thrashing,
-                           (unsigned)ftl->cache.miss_pct);
+                           (unsigned)ftl->cache->thrashing,
+                           (unsigned)ftl->cache->miss_pct);
             }
         }
     }
@@ -547,7 +555,7 @@ static int uart_cli_info(int argc, char *argv[])
  *   `state` 用于一次归因：BAD=坏块本不可读 / FREE=会被复用**丢数据** /
  *   LOG=判据过宽 / NONE=从未认领。
  *
- * 固定打实例 [0][0][0]（与 rd/wr 经 controller 路由到的实例一致）。
+ * 按 LBA 路由到所属实例（与 rd/wr 经 controller 路由到的实例一致）。
  */
 static int uart_cli_map(int argc, char *argv[])
 {
@@ -570,7 +578,7 @@ static int uart_cli_map(int argc, char *argv[])
         return FUNC_STATUS_ERROR;
     }
 
-    ftl = g_ctrl.ftl[0][0][0];
+    ftl = uart_cli_ftl_for_lba(lba);
     if (ftl == NULL)
     {
         (void)uart_log_write("error: ftl instance not ready\r\n", 31U);
@@ -580,7 +588,7 @@ static int uart_cli_map(int argc, char *argv[])
     /* ⚠ CLI 上下文（不在完成派发里）：region 未驻留时自旋泵等加载完成。
      * 自旋失败（超预算）时 pba 保持 INVALID，输出按"未映射"处理——CLI 只读不写，
      * 误报一次"未映射"无副作用。 */
-    if (l2p_cache_read_sync(&ftl->cache, (lba_t)lba, &pba) != FTL_OK)
+    if (l2p_cache_read_sync(ftl->cache, (lba_t)lba, &pba) != FTL_OK)
     {
         pba = NAND_PBA_INVALID;
     }

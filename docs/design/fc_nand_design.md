@@ -74,7 +74,8 @@
 │  └── nand_mt29f4g08   芯片 init/execute/start/step  │
 ├─────────────────────────────────────────────────┤
 │  硬件抽象                                          │
-│  ├── nand_config.h    编译期几何配置 + PAA 编解码    │
+│  ├── nand_config.h    通用 PAA 布局 + 器件头选择      │
+│  ├── devices/<family>.h  器件几何/拓扑/位宽/行编码     │
 │  ├── nand_geometry    运行时几何校验                │
 │  └── nand_device_t    ops 回调式抽象（备用/sim）     │
 └─────────────────────────────────────────────────┘
@@ -1051,7 +1052,7 @@ nand_dispatch_lun_step(ctx)             ← 单命令推进（一次调用只处
   │     ASYNC → WAIT（本轮到此为止，仍占着 tasks[head]）
   │
   ├─ scatter_page_buffer()：page_buffer 拆回
-  │     （CACHE 读 / OP_READ_PAGE_FETCH / MP_WITH_DATA_OUT）
+  │     （CACHE 读 / MP_WITH_DATA_OUT）
   │
   └─ 本条命令完成 → *completion = tasks[head].completion
                     head++（模 DEPTH）, count--, phase=IDLE
@@ -1478,18 +1479,27 @@ static inline uint32_t   paa_to_nand_row(nand_paa_t paa);         // 转换为 N
 
 ---
 
-## 7. 编译期配置 (nand_config.h)
+## 7. 编译期配置（器件层 + 通用层）
+
+器件事实（几何/拓扑/地址位宽/行地址编码/FMC/ID）在
+`include/nand/devices/mt29f___g08a.h`，由 makefile 的 `NAND_DEVICE` 宏选择
+（默认 `MT29F___G08A` → `-DNAND_DEVICE_MT29F___G08A`）。
+通用软件布局（CW、PAA 打包/访问器、LBA/PBA 低位编码）在
+`include/nand/nand_config.h`。
 
 ```c
-#define PAGE_SIZE   (2112)   // 每页总字节（含 OOB）
-#define PAGE_NUM    (64)     // 每 Block 页数
-#define BLOCK_NUM   (2048)   // 每 Plane 块数
-#define PLANE_NUM   (2)
-#define DIE_NUM     (1)
-#define LUN_NUM     (1)
-#define CH_NUM      (1)
-#define CE_NUM      (1)
-#define CW_NUM      (4U)     // 每页 CW 数
+/* devices/mt29f___g08a.h */
+#define PAGE_SIZE        (2112)   /* 主区 2048 + 备区 64 */
+#define PAGES_PER_BLOCK  (64)
+#define BLOCKS_PER_PLANE (2048)
+#define PLANE_NUM        (2)
+#define LUN_NUM          (1)      /* LUN_ADDR_WIDTH 由 nand_config.h 推导 */
+#define CH_NUM           (1)
+#define CE_NUM           (1)
+
+/* nand_config.h（通用） */
+#define CW_NUM           (4U)     /* 每页 CW 数（FC 软件布局） */
+#define CW_SIZE          (PAGE_SIZE / CW_NUM)
 ```
 
 ---
@@ -3613,16 +3623,19 @@ LUN 1:                                                   ← FETCH(Dout)
 
 每个读/写/擦操作拆为两个 OP 码：
 
-| 原 READ OP | 拆为 ISSUE | 拆为 WAIT+FETCH |
+| 原 READ OP | 拆为 ISSUE | 拆为 WAIT |
 |-----------|-----------|----------------|
-| `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` | `OP_READ_PAGE_LOAD` | `OP_READ_PAGE_FETCH` |
-| `OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT` | `OP_READ_PAGE_LOAD` | —（已加载，FETCH 由 RANDOM_DATA_READ 完成）|
+| `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` | `OP_READ_PAGE_LOAD` | `OP_READ_PAGE_WAIT` |
+| `OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT` | `OP_READ_PAGE_MULTI_PLANE_LOAD` | `OP_READ_PAGE_WAIT` |
+| `OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT` | —（LUN=1 原子路径，tR 等待含在 op 内） | —（取数由 CW 链的 RANDOM_DATA_READ 完成）|
 | `OP_NORMAL_PROGRAM_PAGE` | `OP_PROGRAM_PAGE_ISSUE` | `OP_PROGRAM_PAGE_WAIT` |
 | `OP_ERASE_BLOCK` | `OP_ERASE_BLOCK_ISSUE` | `OP_ERASE_BLOCK_WAIT` |
 
 ISSUE 型 OP 的 UOP 序列只包含"发命令+地址+数据+CONFIRM"，**不含 WAIT_READY 和 70h 轮询**，执行完立即返回（µs 级），不阻塞 LUN。
 
-WAIT/FETCH 型 OP 的 UOP 序列只包含 WAIT_READY + 70h 轮询 + DATA_OUT + CHECK_FAIL。
+读的 WAIT 型 OP 只包含 WAIT_READY + 70h 轮询 + CHECK_FAIL；页数据留在 NAND 页缓冲，
+由 `nand_dispatch_task_cw_chain` 逐 CW 用 05h（单 plane）/ 06h（多 plane）取回。
+程序/擦除的 WAIT 同理但不取数。
 
 #### 18.7.5 调度器层面影响
 
@@ -4163,10 +4176,10 @@ nand_init()
 [engine]   nand_engine_step（图 6）：00h / addr / 30h / CONFIRM → END
   ▼
 [dispatch] lun_step → 转 ISSUED → issued_advance 等 tR
-  │         pair_op → OP_READ_PAGE_FETCH → nand_fc_start
+  │         pair_op → OP_READ_PAGE_WAIT → nand_fc_start
   ▼
-[engine]   WAIT_READY + 70h 轮询（图 7）+ DATA_OUT（PIO/DMA）+ CHECK_FAIL
-  │         scatter_page_buffer：把页缓冲拆回各 CW buffer
+[engine]   WAIT_READY + 70h 轮询（图 7）+ CHECK_FAIL
+  │         task_cw_chain：逐 CW 用 05h/06h 从页缓冲取数到 cw_buffers[]
   ▼
 [FC]       nand_dispatch_poll 返回 completion → fc_complete_from_nand（图 13）
   │         写 cw_status/ecc_bits 回 desc；fc_data_path_process_read（解扰 / ECC / RAID，图 5）
@@ -4783,7 +4796,7 @@ plane 与 CW 号都从这一个 `n` 算出，不再有"槽位 → (plane, ordina
 > **v9 起删除**：`nand_dispatch_task_total_slots()`（槽位总数 = Σ `cw_count[plane]`）与
 > `nand_dispatch_slot_to_plane_cw()`（在 `cw_count[]` 上走减的槽位→plane/CW 换算）随两套坐标一起删除。
 
-**cache 读族不动**（`OP_READ_PAGE_CACHE_SEQ` / `_RANDOM` / `_LAST` / `OP_READ_PAGE_FETCH`）——它们是 cache 管线机制，不是"加载进 cache"。
+**cache 读族不动**（`OP_READ_PAGE_CACHE_SEQ` / `_RANDOM` / `_LAST`）——它们是 cache 管线机制，不是"加载进 cache"。普通读的加载/等待/取数拆分见 §18.7（`OP_READ_PAGE_LOAD` / `OP_READ_PAGE_WAIT` + 逐 CW 取数）。
 
 ### 25.6 新增 op：`OP_RANDOM_DATA_READ_MULTI_PLANE`
 

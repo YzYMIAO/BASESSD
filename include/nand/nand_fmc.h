@@ -2,6 +2,7 @@
 #define PLATFORM_STM32H743_NAND_FMC_H
 
 #include "nand_engine.h"
+#include "sys_port.h"
 
 /*
  * nand_fmc.h — STM32H743 FMC NAND 后端接口
@@ -10,13 +11,22 @@
  * 经 nand_engine.h 间接包含）。
  *
  * 本文件为 nand_engine 提供 FMC 后端：将 UOP 微指令映射为 FMC NAND
- * Bank3 内存窗口访问（命令/地址/数据窗口别名，见 nand_mt29f4g08abadawp.h）。
+ * Bank3 内存窗口访问（命令/地址/数据窗口别名，见器件头的 NAND_FMC_* 宏）。
  */
+
+/*
+ * R/B# 接线（板级）：FMC NAND Bank3 的 ready/busy 接 GPIOD.6。
+ *
+ * 放在平台侧而不是器件头：① 它是本板接线，不是芯片属性；② GPIOD / GPIO_PIN_6
+ * 是 HAL 类型，器件头必须保持平台纯净（它经 nand_config.h 进入 FTL include 闭包）。
+ */
+#define NAND_RB_GPIO_PORT GPIOD
+#define NAND_RB_GPIO_PIN  GPIO_PIN_6
 
 /*
  * FMC NAND 时序参数（29 个 uint16_t，单位 ns）。
  *
- * ⚠ 顺序耦合：字段顺序必须与 nand_mt29f4g08abadawp.c 中两张时序表的
+ * ⚠ 顺序耦合：字段顺序必须与 src/nand/devices/mt29f___g08a.c 中两张时序表的
  * 29 个初始化值一一对应（slow / fast），错一位全错。
  * 数值来源：MT29F4G08ABADAWP 数据手册时序参数表。
  */

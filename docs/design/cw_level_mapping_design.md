@@ -22,7 +22,9 @@
 1. **每实例 vs 全局**。本 FTL 是**分片模型**——每个 `(ch,ce,lun)` 是一个**完整独立的 FTL 实例**。
    表尺寸与块号都是**每实例**量（不乘维度数）；只有"设备级"量（`FTL_IU_TOTAL` /
    `FTL_USER_CAPACITY_BYTES`）才乘 `FTL_DIM_TOTAL`。**见 §1.3、§三**。
-2. **维度默认值**。当前 `nand_config.h` 是 `CH_NUM = CE_NUM = LUN_NUM = 1`（`FTL_DIM_TOTAL = 1`），
+2. **维度默认值**。当前器件头 `include/nand/devices/mt29f___g08a.h`
+   （由 `nand/nand_config.h` 按 `NAND_DEVICE` 宏选择）是
+   `CH_NUM = CE_NUM = LUN_NUM = 1`（`FTL_DIM_TOTAL = 1`），
    所以正文里不带维度标注的数字都是 **dim=1 的展开值**。多维度情形见 **§三**。
 
 ---
@@ -340,6 +342,12 @@ local = (region / FTL_DIM_TOTAL) × L2P_ENTRIES_PER_REGION + (lba & L2P_REGION_M
 > `lba_to_local` 又是按**条目粒度**除维度数。维度 ≥2 时只有部分实例可达、其余容量不可寻址。
 > 现已修正并验证：dim=8 下 8 个实例各收到恰好 1,048,576 个 LBA，**不可寻址 0、越界 0、
 > 实例内重复 0**（双射）。
+>
+> **阶段 B 起（共享 cache）**：数据通路（group/pending/wbuf/页 META/journal）一律保留
+> **全局 LBA**，不再提前换算成 local；上面的 `local` 只用于映射页在 owner die 内的
+> **落盘位置**（`l2p_global_to_local_region(global_region) = global_region / DIM`，
+> 单一漏斗，在 cache 的 metadata 边界）。`lba_to_local()` 作为地址原语保留，生产数据
+> 通路零调用。DIM=1 时 global == local，行为逐位不变。
 
 ### 3.6 为什么条带粒度 = 1 个 region（256 KiB）
 

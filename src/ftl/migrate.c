@@ -507,11 +507,13 @@ static bool mig_step_read_settle(ftl_context_t *ftl)
          * 下轮重扫（重扫幂等：ready 命中不记账、不动 access_count）。 */
         for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
-            if (m->cw_lba[plane][cw] == FTL_LBA_INVALID)
+            if ((m->cw_lba[plane][cw] == FTL_LBA_INVALID) ||
+                ((uint64_t)m->cw_lba[plane][cw] >= L2P_GLOBAL_LBA_MAX) ||
+                !lba_routes_to(m->cw_lba[plane][cw], ftl->topo))
             {
                 continue;
             }
-            if (!l2p_cache_ready(&ftl->cache, m->cw_lba[plane][cw]))
+            if (!l2p_cache_ready(ftl->cache, m->cw_lba[plane][cw]))
             {
                 m->stall_rounds = 0U; /* 加载在飞 = 有进展，不是提交卡死 */
                 return true;
@@ -524,12 +526,14 @@ static bool mig_step_read_settle(ftl_context_t *ftl)
         {
             nand_pba_t cur;
 
-            if (m->cw_lba[plane][cw] == FTL_LBA_INVALID)
+            if ((m->cw_lba[plane][cw] == FTL_LBA_INVALID) ||
+                ((uint64_t)m->cw_lba[plane][cw] >= L2P_GLOBAL_LBA_MAX) ||
+                !lba_routes_to(m->cw_lba[plane][cw], ftl->topo))
             {
                 continue;
             }
             /* 用**该 CW 自己的 META** 查，仍指向 (本页, 本 CW) 才算有效 */
-            if ((l2p_cache_read(&ftl->cache, m->cw_lba[plane][cw], &cur) == FTL_OK) &&
+            if ((l2p_cache_read(ftl->cache, m->cw_lba[plane][cw], &cur) == FTL_OK) &&
                 (cur == pba_with_cw(m->src[plane], cw)))
             {
                 m->cw_bitmap[plane] |= ftl_cw_bit(plane, cw);
@@ -587,7 +591,7 @@ static bool mig_step_write_settle(ftl_context_t *ftl)
             {
                 continue;
             }
-            if (!l2p_cache_ready(&ftl->cache, m->cw_lba[plane][cw]))
+            if (!l2p_cache_ready(ftl->cache, m->cw_lba[plane][cw]))
             {
                 m->stall_rounds = 0U;
                 return true;
@@ -605,8 +609,8 @@ static bool mig_step_write_settle(ftl_context_t *ftl)
 
             const nand_pba_t new_pba = pba_with_cw(m->dst[plane], cw);
 
-            (void)l2p_cache_write(&ftl->cache, l, new_pba);
-            journal_append(&ftl->journal,
+            (void)l2p_cache_write(ftl->cache, l, new_pba);
+            journal_append(ftl->journal,
                            l,
                            pba_with_cw(m->src[plane], cw),
                            new_pba);
@@ -640,14 +644,14 @@ static bool mig_step_flush_jrn(ftl_context_t *ftl)
         return false;
     }
 
-    journal_kick(&ftl->journal); /* job 空闲且有待写页 ⇒ 起异步刷页 */
+    journal_kick(ftl->journal); /* job 空闲且有待写页 ⇒ 起异步刷页 */
 
-    if (ftl->journal.job.phase != JRN_IDLE)
+    if (ftl->journal->job.phase != JRN_IDLE)
     {
         m->stall_rounds = 0U; /* 有命令在飞 = 在推进，不计卡死 */
         return true;
     }
-    if ((ftl->journal.job.need_erase != 0U) || (ftl->journal.current_entry != 0U))
+    if ((ftl->journal->job.need_erase != 0U) || (ftl->journal->current_entry != 0U))
     {
         /* 想刷却刷不动（命令池空）⇒ 计卡死轮数；超限中止（**不擦 victim**） */
         (void)mig_stall(ftl);

@@ -205,6 +205,7 @@ info:
 	@echo "  BUILD_TARGET     : $(BUILD_TARGET)"
 	@echo "  FIRMWARE_PLATFORM: $(FIRMWARE_PLATFORM)"
 	@echo "  BUILD_TYPE       : $(BUILD_TYPE)"
+	@echo "  NAND_DEVICE      : $(NAND_DEVICE)"
 	@echo "  UT               : $(if $(UT),$(UT),ALL)"
 	@echo "  OBJ_DIR          : $(OBJ_DIR)"
 	@echo "  TARGET           : $(TARGET)"

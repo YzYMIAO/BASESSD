@@ -27,7 +27,6 @@
 #include "delay.h"
 #include "dma.h"
 #include "nand/nand_debug.h"
-#include "nand/nand_mt29f4g08abadawp.h"
 #include "onfi_1_0.h"
 
 #include <stddef.h>
@@ -96,12 +95,12 @@ static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
      * 如果第一次读到 RB#=HIGH，说明 NAND 已经 ready 或根本没 busy，
      * 直接返回 OK（极短 busy 或无 busy 均视为 ready）。
      */
-    if (HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT, MT29F4G08ABADAWP_RB_GPIO_PIN) == 0U)
+    if (HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN) == 0U)
     {
         /* RB# LOW → NAND busy，spin-wait 直到 ready */
         uint32_t polls = 0U;
         FMC_LOGD("WAIT_READY start op=%u\r\n", (unsigned)request->operation);
-        while (HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT, MT29F4G08ABADAWP_RB_GPIO_PIN) == 0U)
+        while (HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN) == 0U)
         {
             polls++;
             if (polls >= timing->busy_timeout_us)
@@ -335,7 +334,7 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
             if (request->operation == OP_READ_ID)
             {
                 /* DEBUG 档：默认（log level info）不打印——同一次上电
-                 * nand_mt29f4g08abadawp.c 已有一条 [INF] "[NAND] ID=..."，字节相同。
+                 * src/nand/devices/mt29f___g08a.c 已有一条 [INF] "[NAND] ID=..."，字节相同。
                  * 提到 INFO 会在用例体内抢先写 UART，粘在 munit 的结果行中间。 */
                 LOGD("[NAND] READ_ID data=%02X %02X %02X %02X %02X buffer=%p\r\n",
                      request->buffer[0],

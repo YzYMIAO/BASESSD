@@ -56,6 +56,9 @@
  * 当前几何下 = 2048×512 = 1,048,576，与用户容量 512 MiB 逐条对应。 */
 #define FTL_LBA_MAX (FTL_IU_TOTAL)
 
+/* 全局 LBA 上限必须与共享 cache 的键空间同源（C9：同一语义只允许一套范围）。 */
+_Static_assert((uint64_t)FTL_LBA_MAX == L2P_GLOBAL_LBA_MAX, "FTL_LBA_MAX 与共享 cache 的全局 LBA 上限不一致");
+
 /* ── 页打包写缓冲（§七 方案 A）──
  *
  * CW 级映射下子操作常只覆盖半个 pair 窗口（如一次 512B 写只落 plane0 的 CW0），
@@ -85,8 +88,8 @@ typedef struct ftl_context
     /* 拓扑信息（本 FTL 绑定的 NAND 芯片路由） */
     ftl_topology_t topo; /* 本 FTL 绑定的 NAND 芯片路由 */
 
-    /* L2P Cache */
-    l2p_cache_t cache;
+    /* L2P Cache（共享：指向 g_l2p_cache[ch][ce]，同一 (ch,ce) 下的所有 LUN 共用） */
+    l2p_cache_t *cache;
 
     /* Pending Request 表（F6：per-instance，本实例异步请求追踪）
      * 由 pending.c 操作：每个子操作一个槽（command_id → 组 + 子操作字段）。 */
@@ -100,19 +103,20 @@ typedef struct ftl_context
      * 见 ftl_wbuf_t。由 ftl.c 的 ftl_wbuf_* 族操作。 */
     ftl_wbuf_t wbuf;
 
-    /* FTL 自持表（P2-5）——大数组归实例所有，HIL 不再传指针。
-     * BST blocks(80KB) / free+op(16KB) / closed(16KB) / spare(100B)，见 ftl_tables_t。
-     * 是 ftl_context_t 的**大头**，故内存预算只看本结构体尺寸（main.c 的 _Static_assert）。 */
-    ftl_tables_t tables;
+    /* FTL 表指针（阶段 C：由 HIL 的 ftl_storage_t 提供并决定落哪个域）。
+     * BST blocks(80KB) / free+op(16KB) / closed(32KB) / spare(200B)，见 ftl_tables_t。
+     * allocator_init 会把 alloc 内部的指针直接绑到本表，故下游大多数表访问走
+     * `ftl->alloc->...`，不经过本指针。 */
+    ftl_tables_t *tables;
 
-    /* Allocator（各指针绑到上面的自持表，见 allocator_init） */
+    /* Allocator（各指针绑到上面的 tables，见 allocator_init） */
     ftl_allocator_t alloc;
 
-    /* Journal */
-    l2p_journal_t journal;
+    /* Journal（阶段 C：指针，由 storage 提供；落 SRAM3） */
+    l2p_journal_t *journal;
 
-    /* Metadata Directory */
-    metadata_dir_cache_t metadata_dir;
+    /* Metadata Directory（阶段 C：指针，由 storage 提供；落 SRAM4） */
+    metadata_dir_cache_t *metadata_dir;
 
     /* Checkpoint 池游标/序号（序 4：per-instance，原 checkpoint.c 的 file-scope static）。
      * 开机由 checkpoint_find_latest 恢复，Checkpoint job 据此选池内下一槽续写。
@@ -124,8 +128,9 @@ typedef struct ftl_context
     /* Checkpoint 异步 job（阶段 6：脏区落盘 → Anchor → Header → 截断 journal 的
      * 有序流水线，见 checkpoint.h 的 cp_job_t / 掉电安全契约）。
      * ⚠ 含 256B 的 region 脏位图**快照**——必须在 job 起点取定，不能沿用实时位图
-     *   （flush 成功会清实时位，见 checkpoint.c 的"快照点前移"）。 */
-    cp_job_t cp_job;
+     *   （flush 成功会清实时位，见 checkpoint.c 的"快照点前移"）。
+     * 阶段 C：指针，由 storage 提供；落 SRAM3。 */
+    cp_job_t *cp_job;
 
     /* Checkpoint 定时触发基准（T3：elapsed_ms ≥ CP_TIME_INTERVAL_MS） */
     uint32_t cp_timer_start; /* 上次 Checkpoint 时间戳（ms） */
@@ -204,18 +209,40 @@ typedef struct ftl_context
     uint8_t rr_page_scratch[FTL_READ_USER_SIZE];
 } ftl_context_t;
 
+/*
+ * ftl_storage_t - 描述符的外部存储（阶段 C）
+ *
+ * 四个大数组由 HIL 提供并决定落哪个域（main.c：tables→SRAM12、md→SRAM4、
+ * journal/cp_job→SRAM3）。ftl_init 只绑定指针；数组定义在 main.c，
+ * 生命周期覆盖全程（完成表的 ctx 会保存这些地址）。
+ */
+typedef struct
+{
+    ftl_tables_t         *tables;
+    metadata_dir_cache_t *metadata_dir;
+    l2p_journal_t        *journal;
+    cp_job_t             *cp_job;
+} ftl_storage_t;
+
 /* ── 接口 ── */
 
 /*
  * ftl_init - 初始化 FTL 子系统
  *
- * 表由实例**自持**（P2-5）：大数组在 `ftl->tables` 内，调用者只给拓扑。
+ * 描述符只持有指针；四个大数组由调用者通过 storage 提供（阶段 C）。
+ * L2P cache 是**设备级共享对象**（同一 (ch,ce) 一份），由调用者初始化一次后
+ * 传入；本函数只绑定指针，不再 init/set_md_dir。
  *
- * @param ftl   FTL 上下文（含自持表存储）
- * @param topo  本实例绑定的 NAND 芯片路由
+ * ⚠ storage 指向的数组可能在 NOLOAD 段（`.sram*_data`）：启动代码不清零，
+ *   本函数会显式 memset 四个数组。
+ *
+ * @param ftl     FTL 描述符
+ * @param topo    本实例绑定的 NAND 芯片路由
+ * @param cache   本实例所属 (ch,ce) 的共享 L2P cache（非空，设备级已初始化）
+ * @param storage 四个大数组的存储（非空，四个指针都非空）
  * @return FTL_OK 成功
  */
-ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo);
+ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cache, const ftl_storage_t *storage);
 
 /*
  * ftl_service_pump - 实例无关的每轮泵（superloop 每轮调一次）

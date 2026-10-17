@@ -97,7 +97,7 @@ typedef struct
     uint8_t op;          /* ftl_pending_op_t：完成路径判别（读/写），见文件头 ⚠ */
     uint8_t n_cw;        /* ★ 本子操作搬运的 **CW 数**（写 = popcount(cw_bitmap)；读 = 写回长度/512） */
     uint8_t cw_bitmap;   /* ★ 写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读：0 */
-    lba_t   lba;         /* 子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B）。
+    lba_t   lba;         /* 子操作起始 **全局** host LBA（CW 级：1 LBA = 1 CW = 512B）。
                           * ⚠ 写页打包：lba = **窗口基址**，逐 CW 的 LBA = lba + bit（bit 同 cw_bitmap） */
     void *buffer;        /* 子操作缓冲（读=写回处，= 组基缓冲 + LBA 偏移 × FTL_IU_BYTES；
                           *   写页打包后恒 NULL——数据在 ftl->wbuf.data，完成时不读它） */

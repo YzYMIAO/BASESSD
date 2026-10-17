@@ -1253,7 +1253,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 | 位置 | 处数 | 依据 |
 |---|---|---|
 | `bst.h` 全部 12 个访问器（`ftl_block_is_bad`/`set_bad`/`state_is`/`state_set`/`state_clr`/`set_temp`/`get_temp`/`sb_id`/`set_sb`/`add_valid`/`sub_valid`/`clear_valid`） | 12 | 见下 |
-| `l2p_cache.h` 的 `l2p_cache_set_md_dir` / `l2p_cache_is_thrashing` 的 `cache != NULL` | 2 | 各只有 1 个调用点，传 `&ftl->cache` |
+| `l2p_cache.h` 的 `l2p_cache_is_thrashing` 的 `cache != NULL` | 1 | 唯一调用点传 `ftl->cache`（阶段 B 起 cache 为共享指针；`l2p_cache_set_md_dir` 已随共享 cache 删除） |
 
 **`bst.h` 的判据链**：
 

@@ -115,7 +115,7 @@ _Static_assert((FTL_BLOCK_TOTAL % 8U) == 0U, "块数不是 8 的倍数，Wear �
  * **非致命**：读失败/无有效页只当冷启动（计数保持 ftl_init 的 memset 零值），
  * 不 brick 开机（照 v60 ONFI 参数页的先例）。
  *
- * ⚠ 必须在 ftl_init 的 memset(ftl->tables.blocks) **之后**调用，否则回填被清零。
+ * ⚠ 必须在 ftl_init 的 memset(ftl->tables) **之后**调用，否则回填被清零。
  *
  * @param alloc  Allocator 上下文（ch/ce/lun 路由 + blocks[] 输出）
  * @return FTL_OK / FTL_ERROR（参数非法）

@@ -89,7 +89,8 @@
  *
  * ⚠ **每个 (ch,ce,lun) 用同一份块号**：本 FTL 是"分片模型"——每个 die 一个完整
  *   独立实例（各自的 L2P 表/Anchor/BBT/Journal/Checkpoint/Wear），主机 LBA 空间
- *   按 region 切分到各实例（lba_route_* / lba_to_local，见 l2p_cache.h）。
+ *   按 region 切分到各实例（lba_route_* 用全局 region；映射页落盘位置用
+ *   global_region / FTL_DIM_TOTAL 的局部 region，见 l2p_cache.h）。
  *   分区**不随 LUN/CE/CH 错开**。
  *
  * ⚠ 本区相对旧版（L2P 0..31 / Journal 40..41 / 无 Wear）**变更了介质格式**。
@@ -207,7 +208,14 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
  *        让首启自动全片格式化一次。
  * v6：Checkpoint record 从 1 页扩成 5 页（Header + 块账快照 4 页），Header 增加 bit_* 字段
  *     ⇒ 记录格式与块账恢复方式都变了，必须 +1；老介质首启自动格式化一次。 */
-#define FTL_MEDIA_LAYOUT_VERSION (6U)
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (6U)
+/*
+ * 阶段 B：数据通路改用**全局 LBA**（页 META / journal 存 host 全局 LBA）。
+ * - DIM=1：global == local，介质上的值逐位不变 ⇒ 版本仍 6，**不格式化**。
+ * - DIM>1：同一个 LBA 的编码与旧格式不同 ⇒ +1，首次启用自动全片格式化。
+ * 这是本仓自定的格式策略，不是主流判据。
+ */
+#define FTL_MEDIA_LAYOUT_VERSION (FTL_MEDIA_LAYOUT_VERSION_BASE + ((FTL_DIM_TOTAL > 1U) ? 1U : 0U))
 
 /* ── 逻辑表字节（公式①：覆盖实体数 × 每实体字节）── */
 

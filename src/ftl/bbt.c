@@ -149,7 +149,7 @@ static bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
     {
         for (uint16_t block = 0U; block < (uint16_t)FTL_METADATA_BLOCK_END; block++)
         {
-            const nand_pba_t addr = pba_make(alloc->ch, alloc->ce, 0U, block, plane, 0U, 0U);
+            const nand_pba_t addr = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, 0U, 0U);
 
             if (ftl_sync_read_page(addr, scratch, sizeof(scratch), FTL_PAGE_CFG_META()) == FTL_OK)
             {
@@ -339,9 +339,9 @@ _Static_assert((BLOCKS_PER_PLANE % BBT_MAP_COLS_PER_PLANE) == 0U, "每 plane 块
  */
 static bool bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t block, uint8_t do_erase)
 {
-    /* page / cw / lun 恒 0：擦除不看它们；列地址由 ftl_sync_read_column 显式给，
-     * 不依赖 PBA 的 cw 字段。 */
-    nand_pba_t addr = pba_make(alloc->ch, alloc->ce, 0U, block, plane, 0U, 0U);
+    /* page / cw 恒 0：擦除不看它们；列地址由 ftl_sync_read_column 显式给，
+     * 不依赖 PBA 的 cw 字段。LUN 必须取本分配器实例的坐标（多 LUN 下不能写 0）。 */
+    nand_pba_t addr = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, 0U, 0U);
 
     /* ① 出厂标记（擦除前读，擦除会永久毁掉它）。读失败 ⇒ 坏块。 */
     uint8_t mark[4];
@@ -397,7 +397,7 @@ ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc)
         for (uint16_t block = 0U; block < BLOCKS_PER_PLANE; block++)
         {
             const uint16_t   gblock = ftl_gblock(plane, block);
-            const nand_pba_t addr   = pba_make(alloc->ch, alloc->ce, 0U, block, plane, 0U, 0U);
+            const nand_pba_t addr   = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, 0U, 0U);
 
             if (ftl_sync_erase_block(addr) == FTL_OK)
             {

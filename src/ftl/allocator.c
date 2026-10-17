@@ -48,7 +48,7 @@
  */
 void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables)
 {
-    /* 前置条件（判据 2：值从哪来）——唯一调用者 ftl.c 传 &ftl->alloc / &ftl->tables，
+    /* 前置条件（判据 2：值从哪来）——唯一调用者 ftl.c 传 &ftl->alloc / ftl->tables，
      * 结构上恒非空。 */
     ASSERT(alloc != NULL);
     ASSERT(tables != NULL);

@@ -1,5 +1,5 @@
 /*
- * nand_mt29f4g08abadawp.c — Micron MT29F4G08ABADAWP NAND 驱动
+ * mt29f___g08a.c — MT29FxxxG08A 族 NAND 驱动
  *
  * 职责：
  *   - 芯片初始化（FMC 硬件 + DMA + RESET + READ_ID 校验）
@@ -7,24 +7,24 @@
  *   - ONFI 操作表（g_nand_operation_map，定义于 onfi_1_0.c）的执行入口：
  *       nand_fc_execute/start/step → nand_engine → UOP → FMC 后端
  *
- * 芯片：Micron MT29F4G08ABADAWP，512MB SLC，tRC=50ns（Mode 0）/ 20ns（Mode 4）。
- * 物理几何见 nand_mt29f4g08abadawp.h；FC/FTL 逻辑几何见 nand_config.h。
+ * 芯片：当前封装为 Micron MT29F4G08ABADAWP，512MB SLC，
+ *       tRC=50ns（Mode 0）/ 20ns（Mode 4）。
+ * 器件事实见 nand/devices/mt29f___g08a.h；通用布局见 nand/nand_config.h。
  *
  * 时序来源：本文件两张静态表（slow/fast，MT29 数据手册参数）
  *   → nand_fmc_timing_t（nand_fmc.h，29 字段，顺序耦合）
  *   → UOP handler 层（nand_fmc.c）与 PCC 换算（nand_fmc_timing_to_pcc）。
  */
 
-#include "nand_mt29f4g08abadawp.h"
-
 #include "common/assertion.h"
 #include "common/log.h"
 #include "delay.h"
 #include "dma.h"
-#include "nand_config.h"
-#include "nand_debug.h"
-#include "nand_dispatch.h"
-#include "nand_fmc.h"
+#include "nand/nand_config.h"
+#include "nand/nand_debug.h"
+#include "nand/nand_dispatch.h"
+#include "nand/nand_fc_interface.h"
+#include "nand/nand_fmc.h"
 
 #include <stddef.h>
 
@@ -234,9 +234,12 @@ nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *reques
     }
 
     command_request = (nand_command_request_t){
-        operation, request->column, {request->row[0], request->row[1]},
-          request->data, request->data_length
-    };
+        operation, request->column, {0U}, request->data, request->data_length};
+    /* 行地址按 NAND_PLANE_MAX 整体搬运，不写死 plane 下标（H39）。 */
+    for (uint8_t plane = 0U; plane < NAND_PLANE_MAX; plane++)
+    {
+        command_request.row[plane] = request->row[plane];
+    }
     status                       = nand_engine_execute(nand_fmc_backend_get(), map->uops, &map->timing, &command_request, &command_completion);
     completion->execution_status = status;
     completion->nand_status      = command_completion.nand_status;
@@ -282,9 +285,12 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
              (unsigned)request->data_length);
 
     transaction->request = (nand_command_request_t){
-        operation, request->column, {request->row[0], request->row[1]},
-          request->data, request->data_length
-    };
+        operation, request->column, {0U}, request->data, request->data_length};
+    /* 行地址按 NAND_PLANE_MAX 整体搬运，不写死 plane 下标（H39）。 */
+    for (uint8_t plane = 0U; plane < NAND_PLANE_MAX; plane++)
+    {
+        transaction->request.row[plane] = request->row[plane];
+    }
     transaction->completion = (nand_command_completion_t){0};
     /* engine.backend 由 nand_dispatch_task_load 随事务绑定（全工程唯一写点，恒非空）；
      * 未绑定属调用者违约，按断言纪律转 ASSERT 而非静默回退 */
@@ -392,7 +398,8 @@ nand_result_t nand_fc_set_features(uint8_t feature_address, const uint8_t featur
  *   返回：无。
  *   实现要点：每行必须 < 192 字符（src/common/log.c 的 message[192] 上限，超长会被
  *         截断并打 "...[truncated]"）。时序字段只打原值、不打单位后缀——量纲见手册
- *         Table 11，仓库内未查证。address_cycles 打字节原值（0x23），不解读 nibble 含义。
+ *         Table 11，仓库内未查证。address_cycles 同时打原值与解码后的
+ *         C/R 周期数（0x23 = C2/R3），供 nand_init 的一致性检查对读。
  * -------------------------------------------------------------------- */
 static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
 {
@@ -408,7 +415,7 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
          (int)info->signature[3],
          (unsigned int)info->revision,
          info->model);
-    LOGI("[NAND] ONFI %luMiB page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X bitcell=%u\r\n",
+    LOGI("[NAND] ONFI %luMiB page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X(C%u/R%u) bitcell=%u\r\n",
          capacity_mib,
          (unsigned long)info->data_bytes_per_page,
          (unsigned int)info->spare_bytes_per_page,
@@ -418,6 +425,8 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
          (unsigned long)info->blocks_per_unit,
          (unsigned int)info->logical_units,
          (unsigned int)info->address_cycles,
+         (unsigned int)info->column_cycles,
+         (unsigned int)info->row_cycles,
          (unsigned int)info->bits_per_cell);
     LOGI("[NAND] ONFI ecc=%ubit prog/pg=%u tprog=%u terase=%u tr=%u tccs=%u timingmodes=0x%04X\r\n",
          (unsigned int)info->ecc_bits,
@@ -513,8 +522,8 @@ uint8_t nand_init(void)
         return NAND_RESULT_OPERATION_FAILED;
     }
     LOGI("[NAND] FMC ready, R/B#=%u\r\n",
-         (unsigned int)HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT,
-                                        MT29F4G08ABADAWP_RB_GPIO_PIN));
+         (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT,
+                                        NAND_RB_GPIO_PIN));
 
     {
         /* ── Step 3: FMC 后端实例（单 bank：全 LUN 共享窗口/时序） ──
@@ -522,9 +531,9 @@ uint8_t nand_init(void)
          * FMC 时序寄存器是 bank 级，同 bank 各 LUN 共享窗口与时序，
          * 故一个后端实例即够——无需按 [CH][CE][LUN] 循环分化。 */
         const nand_fmc_config_t fmc_config = {
-            .data    = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
-            .command = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_CMD_OFFSET),
-            .address = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_ADDR_OFFSET),
+            .data    = (volatile uint8_t *)NAND_FMC_BASE_ADDR,
+            .command = (volatile uint8_t *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET),
+            .address = (volatile uint8_t *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET),
             .timing  = g_nand_timing_slow,
         };
 
@@ -553,8 +562,8 @@ uint8_t nand_init(void)
         LOGE("[NAND] reset failed, result=0x%02X status=0x%02X R/B#=%u\r\n",
              (unsigned int)result,
              (unsigned int)completion.nand_status,
-             (unsigned int)HAL_GPIO_ReadPin(MT29F4G08ABADAWP_RB_GPIO_PORT,
-                                            MT29F4G08ABADAWP_RB_GPIO_PIN));
+             (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT,
+                                            NAND_RB_GPIO_PIN));
         return result;
     }
     LOGI("[NAND] reset complete, status=0x%02X\r\n", (unsigned int)completion.nand_status);
@@ -568,16 +577,19 @@ uint8_t nand_init(void)
         return result;
     }
     LOGI("[NAND] ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0], (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3], (unsigned int)id[4]);
-    /* 拼 id[1..4]（跳过厂商字节 id[0]=0x2C）与宏值比较，见 nand_mt29f4g08abadawp.h */
-    if ((((uint32_t)id[1] << 24U) | ((uint32_t)id[2] << 16U) | ((uint32_t)id[3] << 8U) | id[4]) != MT29F4G08ABADAWP_ID)
+    /* 拼 id[1..4]（跳过厂商字节 id[0]=0x2C）与宏值比较，见 nand/devices/mt29f___g08a.h */
+    if ((((uint32_t)id[1] << 24U) | ((uint32_t)id[2] << 16U) | ((uint32_t)id[3] << 8U) | id[4]) != NAND_CHIP_ID)
     {
         LOGE("[NAND] unexpected ID\r\n");
         return NAND_RESULT_OPERATION_FAILED;
     }
 
     /* ── Step 6b: 读 ONFI 参数页并打印设备信息（手册 Table 11，256 字节）──
-     * 同步路径（此刻 armed==0，契约允许）。**非致命**：读失败或签名不符只告警、
-     * 不阻断启动——ID 已匹配 ⇒ 器件是好的，参数页读打嗝不该 brick 开机。 */
+     * 同步路径（此刻 armed==0，契约允许）。
+     * 读失败 / 签名不符 = 非致命（ID 已匹配 ⇒ 器件是好的，参数页读打嗝不该 brick）。
+     * 但**解码成功后的地址周期数不符是致命的**：本仓 UOP 表固定发
+     * NAND_COLUMN_ADDR_CYCLES 列 + NAND_ROW_ADDR_CYCLES 行，器件报告的周期数不同
+     * ⇒ 每条命令都发错地址（静默写坏介质）⇒ release 档也必须拒绝启动。 */
     {
         uint8_t                page[NAND_ONFI_PARAM_PAGE_SIZE];
         nand_onfi_param_info_t info;
@@ -600,6 +612,15 @@ uint8_t nand_init(void)
         else
         {
             nand_onfi_param_print(&info);
+            if ((info.column_cycles != NAND_COLUMN_ADDR_CYCLES) || (info.row_cycles != NAND_ROW_ADDR_CYCLES))
+            {
+                LOGE("[NAND] addr cycle mismatch: device C%u/R%u, driver C%u/R%u\r\n",
+                     (unsigned int)info.column_cycles,
+                     (unsigned int)info.row_cycles,
+                     (unsigned int)NAND_COLUMN_ADDR_CYCLES,
+                     (unsigned int)NAND_ROW_ADDR_CYCLES);
+                return NAND_RESULT_INVALID_ARGUMENT;
+            }
         }
     }
 
@@ -635,9 +656,9 @@ uint8_t nand_init(void)
          * 单 bank：同一实例直接覆盖（无需按 [CH][CE][LUN] 循环）。 */
         {
             nand_fmc_config_t fast_fmc = {
-                .data    = (volatile uint8_t *)MT29F4G08ABADAWP_FMC_BASE_ADDR,
-                .command = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_CMD_OFFSET),
-                .address = (volatile uint8_t *)(MT29F4G08ABADAWP_FMC_BASE_ADDR | MT29F4G08ABADAWP_FMC_ADDR_OFFSET),
+                .data    = (volatile uint8_t *)NAND_FMC_BASE_ADDR,
+                .command = (volatile uint8_t *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET),
+                .address = (volatile uint8_t *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET),
                 .timing  = g_nand_timing_fast,
             };
 
@@ -681,11 +702,11 @@ void HAL_NAND_MspInit(NAND_HandleTypeDef *hnand)
     __HAL_RCC_GPIOG_CLK_ENABLE();
 
     /* R/B#：上拉输入（busy 时为低） */
-    gpio.Pin   = MT29F4G08ABADAWP_RB_GPIO_PIN;
+    gpio.Pin   = NAND_RB_GPIO_PIN;
     gpio.Mode  = GPIO_MODE_INPUT;
     gpio.Pull  = GPIO_PULLUP;
     gpio.Speed = GPIO_SPEED_HIGH;
-    HAL_GPIO_Init(MT29F4G08ABADAWP_RB_GPIO_PORT, &gpio);
+    HAL_GPIO_Init(NAND_RB_GPIO_PORT, &gpio);
 
     /* GPIOG PIN9：FMC NCE（片选，AF12） */
     gpio.Pin       = GPIO_PIN_9;

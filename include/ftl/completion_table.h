@@ -95,6 +95,15 @@ void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM]);
 struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun);
 
 /*
+ * completion_table_route_region - 按全局 L2P region 取 owner 实例
+ *
+ * dim = global_region % FTL_DIM_TOTAL，再分解为 (ch,ce,lun) 后转
+ * completion_table_route。共享 L2P cache 的 owner 解析用它，避免把
+ * region→die 的分解散落在 cache/CLI 各处（H13）。
+ */
+struct ftl_context *completion_table_route_region(uint32_t global_region);
+
+/*
  * completion_table_drain - 消费所有 CQ entry 并派发（ftl_service_pump Phase 2 调用）。
  *
  * 循环 fc_poll_completion()，每条交 ftl_op_dispatch()（按命令的 op_tag 查服务函数数组）。

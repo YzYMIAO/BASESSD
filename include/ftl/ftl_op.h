@@ -120,7 +120,7 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
 /*
  * ftl_op_journal - Journal 刷页 job 的完成服务函数（定义在 journal.c）。
  *
- * 由 g_op_service[FTL_OP_JOURNAL] 引用；ctx = `l2p_journal_t *`（= &ftl->journal），
+ * 由 g_op_service[FTL_OP_JOURNAL] 引用；ctx = `l2p_journal_t *`（= ftl->journal），
  * 服务函数按 job.phase 推进状态机（页写完成 ⇒ 推进写指针 / 起换块擦除；擦完成 ⇒ 收尾）。
  * 每条命令自己 fc_command_release。
  */
@@ -161,7 +161,7 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
 /*
  * ftl_op_checkpoint - Checkpoint job 的完成服务函数（定义在 checkpoint.c）。
  *
- * 由 g_op_service[FTL_OP_CHECKPOINT] 引用；ctx = `cp_job_t *`（= &ftl->cp_job）。
+ * 由 g_op_service[FTL_OP_CHECKPOINT] 引用；ctx = `cp_job_t *`（= ftl->cp_job）。
  * 服务函数按 job.phase 记完成结果、推进 phase、release 命令。
  * ⚠ 与 ftl_op_migrate 的差别：本函数**不**推进状态机（不调 checkpoint_kick）——
  *   CP 的阶段里有同步原语（游标未建立时要读池定位），在完成泵里跑就是嵌套泵。
@@ -195,7 +195,7 @@ void ftl_op_wear(struct ftl_context *ftl, const fc_command_status_t *completion,
 /*
  * ftl_op_metadata - L2P 日志块整理 job（回收 / 抗碎片压缩）的完成服务函数（定义在 metadata.c）。
  *
- * 由 g_op_service[FTL_OP_METADATA] 引用；ctx = `md_job_t *`（= &ftl->metadata_dir.job）。
+ * 由 g_op_service[FTL_OP_METADATA] 引用；ctx = `md_job_t *`（= ftl->metadata_dir->job）。
  * 服务函数按 job.phase 记完成结果、改 phase、release 命令：
  *   · RECLAIM     ⇒ 成功 allocator_free_log_block；失败留 LOG 下次再试；
  *   · CP_READ     ⇒ 成功 ftl_cmd_read_data 拷进 job.cp_buf（**须早于 release**）→ CP_WRITE；

@@ -91,9 +91,11 @@ typedef struct
     uint8_t  fail_phase;   /* 中止发生在哪个 phase（观测；cp_abort 记录） */
     uint16_t stall_rounds; /* 连续提交不出去的轮数（见 CP_SUBMIT_STALL_MAX） */
 
-    /* ① job 起点快照（**必须先于任何 flush**：flush 成功会清 region 脏位） */
-    uint32_t region_bitmap[64]; /* = cache.region_dirty_bitmap 的副本 */
-    uint32_t journal_seq;       /* = journal.sequence_counter（截断/回放水位） */
+    /* ① job 起点快照（**必须先于任何 flush**：flush 成功会清 region 脏位）
+     * **本 die 的局部 2048-bit 位图**：由共享 cache 的全局脏位图按 owner 过滤、
+     * global→local 映射得到（l2p_cache_snapshot_owner_bitmap）。 */
+    uint32_t region_bitmap[L2P_LOCAL_DIRTY_WORDS];
+    uint32_t journal_seq; /* = journal.sequence_counter（截断/回放水位） */
 
     /* ② Anchor（一条 record = ANCHOR_PAGE_COUNT 页，逐页提交） */
     metadata_ring_t anchor_ring;
@@ -124,10 +126,10 @@ typedef struct
     uint32_t log_ms;   /* 上次心跳时刻 */
 } cp_job_t;
 
-/* 快照位图的 memcpy 长度取 cp_job_t 自己的字段 ⇒ 必须与 cache 的位图**同尺寸**，
- * 否则会读越界（源小）或漏拷（源大）。钉死它。 */
-_Static_assert(sizeof(((cp_job_t *)0)->region_bitmap) == sizeof(((l2p_cache_t *)0)->region_dirty_bitmap),
-               "cp_job_t.region_bitmap 必须与 l2p_cache_t.region_dirty_bitmap 同尺寸");
+/* cp_job 的位图是**本 die 的局部**尺寸；共享 cache 的脏位图是全局尺寸，二者
+ * 不再同尺寸（阶段 B）。这里钉死本地位图 = L2P_REGIONS_PER_INSTANCE bit。 */
+_Static_assert(sizeof(((cp_job_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(uint32_t)),
+               "cp_job_t.region_bitmap 必须是本 die 的局部 2048-bit 位图");
 _Static_assert(sizeof(((cp_job_t *)0)->block_words) == (FTL_BLOCK_TOTAL * sizeof(uint16_t)),
                "cp_job_t.block_words 必须恰好覆盖全部块");
 
@@ -239,6 +241,8 @@ typedef struct
 } l2p_checkpoint_header_t;
 
 _Static_assert(sizeof(l2p_checkpoint_header_t) == PAGE_MAIN_SIZE, "Checkpoint Header 必须恰好一页主区");
+_Static_assert(sizeof(((l2p_checkpoint_header_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(uint32_t)),
+               "Header 位图必须是本 die 的局部 2048-bit 位图");
 
 /* ── 接口 ── */
 
@@ -257,7 +261,7 @@ _Static_assert(sizeof(l2p_checkpoint_header_t) == PAGE_MAIN_SIZE, "Checkpoint He
  *   调 checkpoint_kick 续跑，各阶段的完成由 g_op_service[FTL_OP_CHECKPOINT] 收尾。
  *   调用者**不能**据返回值判断 CP 成败（与旧 checkpoint_create 的差别）。
  *
- * ⚠ 单飞行：已在跑（`ftl->cp_job.active`）⇒ 返回 FTL_AGAIN，不重入。
+ * ⚠ 单飞行：已在跑（`ftl->cp_job->active`）⇒ 返回 FTL_AGAIN，不重入。
  *   （旧同步实现里 CP 是原子的一整段，不存在"上一次还没跑完"；异步化后必须挡住。）
  *
  * @param ftl  FTL 上下文

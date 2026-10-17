@@ -29,7 +29,6 @@
 #include "nand/nand_debug.h"
 #include "nand_config.h"
 #include "nand_dispatch_internal.h"
-#include "nand_mt29f4g08abadawp.h"
 #include "onfi_1_0.h"
 
 #include <stddef.h>
@@ -94,7 +93,7 @@ static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion
  *   实现要点：经 g_nand_dispatch_completion_table[operation] 分派
  *        （completion_per_cw / all_cws / multi_plane，见 nand_dispatch_tables.c）。
  *         注意 poll 中多处先改写 task->operation 再 complete，handler 按
- *         最新 operation 匹配（如 LOAD→FETCH 切换）。
+ *         最新 operation 匹配（如 LOAD→WAIT 切换）。
  * -------------------------------------------------------------------- */
 static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
 {
@@ -437,8 +436,10 @@ static nand_dispatch_start_outcome_t nand_dispatch_task_start(nand_dispatch_lun_
  *   返回：WAIT（忙期未到或启动异步）/ DONE（已同步完成，nand_completion 有效）。
  *   实现要点：
  *     - min_busy_us = tR(38)/tPROG(700)/tBERS(5000)，带余量的典型值。
- *     - 到点后切配对 OP（LOAD↔FETCH / ISSUE↔WAIT）；原子 OP 的 pair_op==自身，
+ *     - 到点后切配对 OP（LOAD↔WAIT / ISSUE↔WAIT）；原子 OP 的 pair_op==自身，
  *       跳过不切换。
+ *     - **ISSUE 段失败立即短路**：不再发配对 WAIT，直接把失败结果交回驱动路径，
+ *       让 cw_chain 以非 OK 收尾。
  *     - 同步完成时相位已是 FETCH，调用方直接进入完成处理链。
  * -------------------------------------------------------------------- */
 static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lun_ctx_t *ctx)
@@ -447,6 +448,16 @@ static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lu
     uint16_t              min_us = g_nand_operation_map[task->operation].min_busy_us;
     uint8_t               pair_op;
     uint8_t               result;
+
+    /* ISSUE 段已完成但失败（如起始 70h 状态 FAIL）⇒ 别再发 WAIT/取数。
+     * 否则后续逐 CW 取数可能把已标失败的状态覆盖成成功。 */
+    if (task->completion.execution_status != NAND_RESULT_OK)
+    {
+        ctx->nand_completion.execution_status = task->completion.execution_status;
+        ctx->nand_completion.nand_status      = task->completion.nand_status;
+        ctx->result                           = task->completion.execution_status;
+        return NAND_DISPATCH_LUN_DONE;
+    }
 
     if ((min_us != 0U) && !delay_dwt_elapsed_us(ctx->queue->wait_start_cycles, min_us))
     {
@@ -528,18 +539,22 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx
 }
 
 /* --------------------------------------------------------------------
- * nand_dispatch_is_load_op / nand_dispatch_is_fetch_op
+ * nand_dispatch_is_load_complete_op / nand_dispatch_is_fetch_op
  *   功能：CW 链的 op 分类（决定链如何推进）。
  *   参数：operation —— OP_*。
  *   返回：1 = 是；0 = 否。
  *   实现要点：
- *     - load：只把整页搬进 NAND 页缓冲、自身不输出数据；完成后从槽位 0 起取数。
- *     - fetch：从页缓冲按列地址取单个 CW；每完成一个推进一个槽位。
+ *     - load-complete：页已加载进 NAND 页缓冲、自身不输出数据；完成后从掩码
+ *       最低位开始逐 CW 取数。命中两类：
+ *         · WITHOUT_DATA_OUT（LUN=1 的原子加载路径，含等待 tR）
+ *         · OP_READ_PAGE_WAIT（LUN>1 的 Phase V：LOAD ISSUE 发完后由 WAIT 收尾）
+ *     - fetch：从页缓冲按列地址取单个 CW；每完成一个推进一个置位。
  * -------------------------------------------------------------------- */
-static uint8_t nand_dispatch_is_load_op(uint8_t operation)
+static uint8_t nand_dispatch_is_load_complete_op(uint8_t operation)
 {
     return ((operation == OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) ||
-            (operation == OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT))
+            (operation == OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT) ||
+            (operation == OP_READ_PAGE_WAIT))
                ? 1U
                : 0U;
 }
@@ -556,8 +571,9 @@ static uint8_t nand_dispatch_is_fetch_op(uint8_t operation)
  *   返回：CW_ASYNC（下一 CW 异步启动，本轮到此为止）/ CW_DONE。
  *   实现要点：
  *     - 每步先 task_complete，再判断是否可续读。
- *     - **加载型 op**（WITHOUT_DATA_OUT 两种）完成后从掩码最低位起发取数 op；
- *       失败则链在此终止（completion_load 已把失败刷满全部槽位）。
+ *     - **页已加载 op**（WITHOUT_DATA_OUT 两种 / Phase V 的 READ_PAGE_WAIT）
+ *       完成后从掩码最低位起发取数 op；失败则链在此终止
+ *       （completion_load 已把失败刷满全部槽位）。
  *     - **取数 op** 每完成一个推进到掩码的下一个置位，直到链尾。
  *     - **旧语义 op**（WITH_DATA_OUT 普通读 / OTP 读）：掩码最低位那个 CW 已由
  *       DATA_OUT 取回，其余逐 CW 随机读——保留原行为（FC 已把普通读转成加载型，
@@ -587,7 +603,7 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
             break;
         }
 
-        if (nand_dispatch_is_load_op(task->operation) != 0U)
+        if (nand_dispatch_is_load_complete_op(task->operation) != 0U)
         {
             /* 加载完成：数据已在页缓冲，从掩码最低位起取 */
             n = nand_dispatch_cw_next(task->cw_bitmap, 0U);
@@ -646,9 +662,8 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
  *   功能：把页缓冲的整页数据拆回各 CW buffer。
  *   参数：task —— 已完成任务（自带 ch/ce/lun，定位页缓冲）。
  *   返回：无。
- *   实现要点：三种操作的数据落在页缓冲而非各 CW buffer（FMC 数据路径约定）：
- *     - Cache 读（SEQ/RANDOM/LAST）与 OP_READ_PAGE_FETCH：单 plane，
- *       offset = CW 号 × CW_SIZE。
+ *   实现要点：两类操作的数据落在页缓冲而非各 CW buffer（FMC 数据路径约定）：
+ *     - Cache 读（SEQ/RANDOM/LAST）：单 plane，offset = CW 号 × CW_SIZE。
  *     - Multi-Plane WITH_DATA_OUT：双 plane 数据按 plane 顺序拼接，
  *       offset = plane × PAGE_SIZE + CW 号 × CW_SIZE。
  *     **遍历只走掩码里的置位**：plane = n / CW_NUM、CW 号 = n % CW_NUM，
@@ -661,7 +676,7 @@ static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
     uint8_t  n;
 
     if ((task->operation == OP_READ_PAGE_CACHE_SEQ) || (task->operation == OP_READ_PAGE_CACHE_RANDOM) ||
-        (task->operation == OP_READ_PAGE_CACHE_LAST) || (task->operation == OP_READ_PAGE_FETCH))
+        (task->operation == OP_READ_PAGE_CACHE_LAST))
     {
         for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
              n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))

@@ -35,14 +35,14 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
  * 已点亮的槽：
  *   · FTL_OP_SYNC_WAIT：所有 ftl_sync_* 经 ftl_sync_submit_wait 登记 ctx 后走这里；
  *   · FTL_OP_HOST_IO  ：host 数据读写子操作（原 ftl_op_host_io 的 FTL 分支）；
- *   · FTL_OP_JOURNAL  ：Journal 刷页 job（阶段 2，ctx = &ftl->journal）；
+ *   · FTL_OP_JOURNAL  ：Journal 刷页 job（阶段 2，ctx = ftl->journal）；
  *   · FTL_OP_READ_RECOVERY：Read Recovery job（阶段 3，ctx = &ftl->rr）；
  *   · FTL_OP_GC / FTL_OP_WL：搬移 job（阶段 4，ctx = &ftl->mig）——**同一台引擎**，
  *     tag 分开只为日志/调试可辨（GC 回收 vs WL/预测退役）。
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（阶段 5，ctx = 该 cache line）；
- *   · FTL_OP_CHECKPOINT：Checkpoint job（阶段 6，ctx = &ftl->cp_job）；
+ *   · FTL_OP_CHECKPOINT：Checkpoint job（阶段 6，ctx = ftl->cp_job）；
  *   · FTL_OP_BBT / FTL_OP_WEAR：元数据表持久化 job（阶段 7，ctx = &ftl->alloc）。
- *   · FTL_OP_METADATA：L2P 日志块整理 job（阶段 8，ctx = &ftl->metadata_dir.job）。
+ *   · FTL_OP_METADATA：L2P 日志块整理 job（阶段 8，ctx = ftl->metadata_dir->job）。
  * **全部槽已点亮**（阶段 8 是最后一阶段）。 */
 static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_SYNC_WAIT]     = ftl_op_sync_wait,

@@ -560,7 +560,7 @@ static void md_job_reset(metadata_dir_cache_t *dir)
  * -------------------------------------------------------------------- */
 void metadata_dir_init(metadata_dir_cache_t *dir)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->metadata_dir。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
     ASSERT(dir != NULL);
 
     dir->anchor_sequence = 0U;
@@ -587,7 +587,7 @@ nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
                                uint8_t                     type,
                                uint16_t                    id)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->metadata_dir。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
     ASSERT(dir != NULL);
 
     for (uint16_t i = 0U; i < dir->count; i++)
@@ -614,7 +614,7 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
                          uint16_t              id,
                          nand_pba_t            new_pba)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->metadata_dir。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
     ASSERT(dir != NULL);
 
     /* 查找现有 entry（覆盖旧位置） */
@@ -738,7 +738,7 @@ static ftl_status_t metadata_dir_reclaim_block(metadata_dir_cache_t *dir,
  * -------------------------------------------------------------------- */
 ftl_status_t metadata_dir_reclaim(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->metadata_dir 与 &ftl->alloc。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir 与 &ftl->alloc。 */
     ASSERT(dir != NULL);
     ASSERT(alloc != NULL);
 
@@ -846,7 +846,7 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
     uint16_t plane;
     uint16_t gblock;
 
-    /* 前置条件（判据 2）：调用者一律传 &ftl->metadata_dir 与 &ftl->alloc。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir 与 &ftl->alloc。 */
     ASSERT(dir != NULL);
     ASSERT(alloc != NULL);
 
@@ -924,7 +924,7 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
 {
     (void)alloc; /* 回收已改由后台 job 做（擦除地址由 md_block_addr 从 dir->topo 算出）*/
 
-    /* 前置条件（判据 2）：dir 恒 &ftl->metadata_dir。region_id / new_pba 是**数据**判断
+    /* 前置条件（判据 2）：dir 恒 ftl->metadata_dir。region_id / new_pba 是**数据**判断
      * （越界 no-op 是既有契约）⇒ 保留运行期分支。 */
     ASSERT(dir != NULL);
     if ((region_id >= METADATA_DIR_ENTRIES) || (new_pba == NAND_PBA_INVALID))
@@ -1241,7 +1241,7 @@ static md_compact_step_t md_compact_write(metadata_dir_cache_t *dir)
  * -------------------------------------------------------------------- */
 void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 {
-    /* 前置条件（判据 2）：调用者一律传 &ftl->metadata_dir 与 &ftl->alloc。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir 与 &ftl->alloc。 */
     ASSERT(dir != NULL);
     ASSERT(alloc != NULL);
 
@@ -1479,7 +1479,7 @@ void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 /* --------------------------------------------------------------------
  * ftl_op_metadata
  *   功能：日志块整理命令的完成服务函数——按 job.phase 记结果、改 phase、release。
- *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `md_job_t *`（= &ftl->metadata_dir.job）。
+ *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `md_job_t *`（= ftl->metadata_dir->job）。
  *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
  *   实现要点：**本函数不推进状态机**（见本大区开头的说明）：只把 phase 改到"下一步该
  *             干什么"，由下一轮 metadata_dir_kick 续跑。
@@ -1497,9 +1497,9 @@ void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *complet
     /* 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出的归属实例，
      * 二者必须一致——不一致说明派发路由错了。 */
     ASSERT(ftl != NULL);
-    ASSERT(&ftl->metadata_dir.job == j);
+    ASSERT(&ftl->metadata_dir->job == j);
 
-    metadata_dir_cache_t *dir    = &ftl->metadata_dir;
+    metadata_dir_cache_t *dir    = ftl->metadata_dir;
     int                   failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1 : 0;
 
     switch ((md_job_phase_t)j->phase)
@@ -1773,7 +1773,7 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
 {
     metadata_anchor_page_t page; /* 2KB 栈缓冲（按页读）*/
 
-    /* 前置条件（判据 2）：调用者一律传 &ftl->metadata_dir。 */
+    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
     ASSERT(dir != NULL);
 
     /* 基础层：全部 region 的固定位置（哨兵层，永不写入 ⇒ 读回即"未映射"）。
@@ -1925,7 +1925,7 @@ bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, ui
         }
     }
 
-    /* 前置条件（判据 2）：调用者（main.c / power_failure_recovery.c）恒传 &ftl->metadata_dir。 */
+    /* 前置条件（判据 2）：调用者（main.c / power_failure_recovery.c）恒传 ftl->metadata_dir。 */
     ASSERT(md_dir != NULL);
 
     /* ── 当前日志块：可能尚无任何 region 指向它（刚分配、还没 commit），

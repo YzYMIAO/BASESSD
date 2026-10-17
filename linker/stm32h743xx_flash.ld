@@ -26,8 +26,8 @@ MEMORY
   DTCM        (xrw) : ORIGIN = 0x20000000,      LENGTH = 0x00020000
   AXI_RAM     (xrw) : ORIGIN = __AXI_RAM_BEGIN, LENGTH = __AXI_RAM_SIZE
   AXI_NOCACHE (xrw) : ORIGIN = __AXI_NOCACHE_BEGIN, LENGTH = __AXI_NOCACHE_SIZE
-  SRAM1       (xrw) : ORIGIN = 0x30000000,      LENGTH = 0x00020000
-  SRAM2       (xrw) : ORIGIN = 0x30020000,      LENGTH = 0x00020000
+  /* SRAM1+SRAM2 连续映射（0x30000000..0x3003FFFF）：FTL tables 跨两 bank 使用。 */
+  SRAM12      (xrw) : ORIGIN = 0x30000000,      LENGTH = 0x00040000
   SRAM3       (xrw) : ORIGIN = 0x30040000,      LENGTH = 0x00008000
   SRAM4       (xrw) : ORIGIN = 0x38000000,      LENGTH = 0x00010000
   BKPSRAM     (xrw) : ORIGIN = 0x38800000,      LENGTH = 0x00001000
@@ -132,11 +132,10 @@ SECTIONS
   } > AXI_NOCACHE
 
   /* Optional explicit placement sections; NOLOAD data is not initialized. */
-  .dtcm_data (NOLOAD) : { . = ALIGN(8); *(.dtcm_data) *(.dtcm_data.*) } > DTCM
-  .sram1_data (NOLOAD) : { . = ALIGN(32); *(.sram1_data) *(.sram1_data.*) } > SRAM1
-  .sram2_data (NOLOAD) : { . = ALIGN(32); *(.sram2_data) *(.sram2_data.*) } > SRAM2
-  .sram3_data (NOLOAD) : { . = ALIGN(32); *(.sram3_data) *(.sram3_data.*) } > SRAM3
-  .sram4_data (NOLOAD) : { . = ALIGN(32); *(.sram4_data) *(.sram4_data.*) } > SRAM4
+  .dtcm_data (NOLOAD) : { . = ALIGN(8); KEEP(*(.dtcm_data)) KEEP(*(.dtcm_data.*)) } > DTCM
+  .sram12_data (NOLOAD) : { . = ALIGN(32); KEEP(*(.sram12_data)) KEEP(*(.sram12_data.*)) } > SRAM12
+  .sram3_data (NOLOAD) : { . = ALIGN(32); KEEP(*(.sram3_data)) KEEP(*(.sram3_data.*)) } > SRAM3
+  .sram4_data (NOLOAD) : { . = ALIGN(32); KEEP(*(.sram4_data)) KEEP(*(.sram4_data.*)) } > SRAM4
   .bkpsram_data (NOLOAD) : { . = ALIGN(4); *(.bkpsram_data) *(.bkpsram_data.*) } > BKPSRAM
 
   /* NOLOAD 且不被启动代码清零 → 跨软复位（NVIC_SystemReset）保留。
@@ -169,3 +168,6 @@ SECTIONS
 
 ASSERT(__NONCACHEABLEBUFFER_END <= ORIGIN(AXI_NOCACHE) + LENGTH(AXI_NOCACHE),
        "AXI non-cacheable DMA buffer region overflow")
+ASSERT(SIZEOF(.sram12_data) <= LENGTH(SRAM12), "SRAM12 (SRAM1+SRAM2) FTL tables overflow")
+ASSERT(SIZEOF(.sram3_data) <= LENGTH(SRAM3), "SRAM3 FTL cp_job/journal overflow")
+ASSERT(SIZEOF(.sram4_data) <= LENGTH(SRAM4), "SRAM4 FTL metadata dir overflow")

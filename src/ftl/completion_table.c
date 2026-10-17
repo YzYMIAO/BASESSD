@@ -163,6 +163,23 @@ struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun)
     return g_route[ch][ce][lun];
 }
 
+/*
+ * completion_table_route_region
+ *   功能：按**全局 L2P region** 取 owner FTL 实例（共享 cache 的 owner 解析）。
+ *   参数：global_region —— 全局 region 序号（lba >> L2P_REGION_SHIFT）。
+ *   返回：owner 实例；set_route 之前为 NULL。
+ *   实现要点：dim = region % FTL_DIM_TOTAL，再按 ch/ce/lun 分解；与
+ *             lba_route_* 同一套公式，避免第二套 region→die 坐标（C9）。
+ * -------------------------------------------------------------------- */
+struct ftl_context *completion_table_route_region(uint32_t global_region)
+{
+    const uint32_t dim = global_region % FTL_DIM_TOTAL;
+
+    return completion_table_route((uint8_t)(dim % CH_NUM),
+                                  (uint8_t)((dim / CH_NUM) % CE_NUM),
+                                  (uint8_t)(dim / (CH_NUM * CE_NUM)));
+}
+
 /* ── 4. CQ 排空 ── */
 
 /*

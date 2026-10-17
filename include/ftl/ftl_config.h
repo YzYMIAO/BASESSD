@@ -301,6 +301,11 @@ _Static_assert(sizeof(nand_pba_fields_t) == sizeof(nand_pba_t), "PBA 字段视�
 #define PBA_USED_BITS (PBA_CH_SHIFT + PBA_CH_WIDTH)
 #define PBA_USED_MASK NAND_FIELD_MASK(PBA_USED_BITS)
 
+/* 维度必须装得进 PBA 位宽；PBA 本身必须装进 32 位（NAND_PBA_INVALID 才有空余）。 */
+_Static_assert(CH_NUM <= (1U << PBA_CH_WIDTH), "CH_NUM 超出 PBA_CH_WIDTH");
+_Static_assert(CE_NUM <= (1U << PBA_CE_WIDTH), "CE_NUM 超出 PBA_CE_WIDTH");
+_Static_assert(PBA_USED_BITS <= 32U, "PBA 编码超出 32 位");
+
 /* 具名构造：按 PBA 的字段序填一个 PBA 字（cw 缺省 0 = 页基址）。
  * **按 PBA_*_SHIFT 宏打包**，不依赖位域布局（尾部位恒 0，无填充位垃圾）。
  * 这是 FTL 层「手搭地址」的唯一入口——位域结构体不能在 LUN_ADDR_WIDTH == 0 时
@@ -383,8 +388,9 @@ static inline bool pba_fields_layout_matches(void)
     ok  = (uint8_t)(ok & (uint8_t)((v.u & PBA_USED_MASK) == (1U << PBA_LUN_SHIFT)));
 #endif
 
-    /* 值语义往返（走宏，与位域布局无关）：pba_pack(pba_fields(p)) == p */
-    ok = (uint8_t)(ok & (uint8_t)(pba_pack(pba_fields((nand_pba_t)0x00FFFFFFU)) == (nand_pba_t)0x00FFFFFFU));
+    /* 值语义往返（走宏，与位域布局无关）：pba_pack(pba_fields(p)) == p。
+     * 用 PBA_USED_MASK 而不是固定 0x00FFFFFF：LUN 位宽变化后仍覆盖全部字段。 */
+    ok = (uint8_t)(ok & (uint8_t)(pba_pack(pba_fields((nand_pba_t)PBA_USED_MASK)) == (nand_pba_t)PBA_USED_MASK));
 
     return ok;
 }

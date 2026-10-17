@@ -8,7 +8,7 @@
  *   - 函数指针表为 O(1) 直接跳转，无分支预测惩罚
  *   - 新操作加入只需加 handler + 一行表项
  *
- * 本文件定义两张表（下标均为 OP_COUNT=42）：
+ * 本文件定义两张表（下标均为 OP_COUNT）：
  *   - g_nand_dispatch_req_table[]       ：request 构建 handler（req_*）
  *   - g_nand_dispatch_completion_table[]：completion 策略 handler（completion_*）
  * 调用点位于 nand_dispatch.c：
@@ -121,8 +121,8 @@ static void completion_per_cw(nand_dispatch_task_t *task, uint8_t result, const 
  *   实现要点：适用于 RESET/READ_ID/STATUS/FEATURES/内部搬移/块锁等。
  *         **掩码为空是常态**（RESET/STATUS/块锁等无 CW 概念），此时按旧口径写
  *         cw_status[0]——FC 的非 page read 聚合分支是全表 OR，靠这一格读到状态；
- *         掩码非空（FEATURES、Phase V 的 OP_READ_PAGE_LOAD）时逐位置位，
- *         避免"状态写在下标 0、FC 却按 n 读"而丢失。
+ *         掩码非空（如 FEATURES）时逐位置位，避免"状态写在下标 0、FC 却按 n 读"
+ *         而丢失。
  * -------------------------------------------------------------------- */
 static void completion_single(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
 {
@@ -235,34 +235,6 @@ static void req_read_page(nand_dispatch_task_t *task)
 
     ASSERT(cw_buffer != NULL);
     task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->plane_paa[task->plane])}, .data = cw_buffer, .data_length = (uint16_t)CW_SIZE};
-}
-
-/* --------------------------------------------------------------------
- * req_fetch_page
- *   功能：将整页读入 page_buffer，构建 FETCH 请求。
- *   参数：task —— 预解析完成的任务；cw_buffers[n] 为后续拆回目标。
- *   返回：无。
- *   实现要点：与 req_read_page 不同——FETCH 无后续 CW chaining，
- *         必须一次性读完整页（data_length = PAGE_SIZE），再由 poll()
- *         拆回各 CW buffer；memset 0x00 先清零整页缓冲。
- * -------------------------------------------------------------------- */
-static void req_fetch_page(nand_dispatch_task_t *task)
-{
-    uint8_t  n;
-    uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
-
-    for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
-    {
-        /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
-        ASSERT(task->cw_buffers[n] != NULL);
-    }
-    memset(page_buffer, 0x00, PAGE_SIZE);
-    task->request = (nand_fc_request_t){
-        .column      = 0U,
-        .row         = {paa_to_nand_row(task->plane_paa[task->plane])},
-        .data        = page_buffer,
-        .data_length = PAGE_SIZE};
 }
 
 /* --------------------------------------------------------------------
@@ -542,11 +514,12 @@ static void req_multi_plane_erase(nand_dispatch_task_t *task)
  * completion 表 g_nand_dispatch_completion_table
  *   每个 OP 的完成策略选择依据（与 onfi_1_0.h 的 OP 语义对应）：
  *     - completion_single    ：无 CW 概念（RESET/ID/STATUS/FEATURES/内部搬移/块锁/META 回读等）
- *     - completion_per_cw    ：逐 CW 独立状态（普通读/OTP 读/CACHE_SEQ/RANDOM/LAST/FETCH）
- *     - completion_load      ：加载型 op 不写状态，失败时刷满（WITHOUT_DATA_OUT 两种）
+ *     - completion_per_cw    ：逐 CW 独立状态（普通读/OTP 读/CACHE_SEQ/RANDOM/LAST）
+ *     - completion_load      ：加载型 op 不写状态，失败时刷满
+ *                              （WITHOUT_DATA_OUT 两种 + Phase V 的 LOAD/WAIT）
  *     - completion_all_cws   ：所有选中 CW 同状态（编程/擦除/ISSUE/WAIT/CACHE_START，
  *                              单 plane 与 multi-plane 共用——索引空间统一后两者同构）
- *   下标 OP_* 不连续（含 Phase V 扩展 35..40 与 41），用设计初始化器定位。
+ *   下标 OP_* 不连续（含 Phase V 扩展 35..43），用设计初始化器定位。
  * -------------------------------------------------------------------- */
 const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COUNT] = {
     [OP_RESET]                                  = completion_single,
@@ -584,9 +557,11 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
     [OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT]    = completion_all_cws,
     [OP_PROGRAM_PAGE_MULTI_PLANE]               = completion_all_cws,
     [OP_ERASE_BLOCK_MULTI_PLANE]                = completion_all_cws,
-    /* Phase V: ISSUE/WAIT/FETCH completion */
-    [OP_READ_PAGE_LOAD]                         = completion_single,
-    [OP_READ_PAGE_FETCH]                        = completion_per_cw,
+    /* Phase V: ISSUE/WAIT read completion —— 读的 CW 状态统一由逐 CW 取数写，
+     * 所以 LOAD/WAIT 都用 completion_load（成功不写、失败刷满）。 */
+    [OP_READ_PAGE_LOAD]                         = completion_load,
+    [OP_READ_PAGE_WAIT]                         = completion_load,
+    [OP_READ_PAGE_MULTI_PLANE_LOAD]             = completion_load,
     [OP_PROGRAM_PAGE_ISSUE]                     = completion_all_cws,
     [OP_PROGRAM_PAGE_WAIT]                      = completion_all_cws,
     [OP_ERASE_BLOCK_ISSUE]                      = completion_all_cws,
@@ -601,7 +576,6 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
  *     - req_single         ：固定长度数据（长度查 g_nand_operation_map）
  *     - req_random_read    ：页缓冲随机读单 CW（列地址 = paa_to_cw(PAA)×CW_SIZE）
  *     - req_read_page      ：读 CW0 到 cw_buffer（后续 CW 走 RANDOM_DATA_READ chaining）
- *     - req_fetch_page     ：FETCH 一次性读 full page 到 page_buffer
  *     - req_cache_read     ：CACHE_SEQ/RANDOM/LAST 全页读入 page_buffer
  *     - req_program_page   ：单 plane 多 CW 拼接后一次写
  *     - req_multi_plane_read/program/erase：双 plane 行地址 / 双 plane 拼接写
@@ -610,7 +584,7 @@ const nand_dispatch_completion_handler_t g_nand_dispatch_completion_table[OP_COU
  *     - req_onfi_signature ：ONFI 签名读（90h + 地址 20h, 4B, 无 desc）
  *     - req_read_column    ：按显式列地址读（列来自 task->column, 4B, 无 desc）
  *     - req_erase          ：擦除（无数据）
- *   下标 OP_* 不连续（含 Phase V 扩展 35..40），用设计初始化器定位。
+ *   下标 OP_* 不连续（含 Phase V 扩展 35..43），用设计初始化器定位。
  * -------------------------------------------------------------------- */
 const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
     [OP_RESET]                                  = req_no_data,
@@ -648,9 +622,10 @@ const nand_dispatch_req_handler_t g_nand_dispatch_req_table[OP_COUNT] = {
     [OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT]    = req_multi_plane_read,
     [OP_PROGRAM_PAGE_MULTI_PLANE]               = req_multi_plane_program,
     [OP_ERASE_BLOCK_MULTI_PLANE]                = req_multi_plane_erase,
-    /* Phase V: ISSUE/WAIT/FETCH request */
+    /* Phase V: ISSUE/WAIT read request */
     [OP_READ_PAGE_LOAD]                         = req_read_page,
-    [OP_READ_PAGE_FETCH]                        = req_fetch_page,
+    [OP_READ_PAGE_WAIT]                         = req_no_data,
+    [OP_READ_PAGE_MULTI_PLANE_LOAD]             = req_multi_plane_read,
     [OP_PROGRAM_PAGE_ISSUE]                     = req_program_page,
     [OP_PROGRAM_PAGE_WAIT]                      = req_no_data,
     [OP_ERASE_BLOCK_ISSUE]                      = req_erase,
