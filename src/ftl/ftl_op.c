@@ -101,9 +101,9 @@ ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
 /* 派发深度（见 ftl_op_in_dispatch）。单线程顺序主循环 ⇒ 普通变量即可，无需原子。 */
 static uint8_t g_dispatch_depth = 0U;
 
-int ftl_op_in_dispatch(void)
+bool ftl_op_in_dispatch(void)
 {
-    return (g_dispatch_depth != 0U) ? 1 : 0;
+    return (g_dispatch_depth != 0U);
 }
 
 void ftl_op_dispatch(const fc_command_status_t *completion)
@@ -167,11 +167,6 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
     ftl_sync_waiter_t *waiter = (ftl_sync_waiter_t *)ctx;
 
     (void)ftl; /* 同步等待与实例无关（waiter 由调用者持栈） */
-
-    if (waiter == NULL)
-    {
-        return;
-    }
 
     waiter->completion = *completion;
     waiter->done       = 1U;

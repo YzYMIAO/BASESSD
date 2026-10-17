@@ -74,7 +74,7 @@ ftl_pending_req_t *pending_alloc(ftl_context_t *ftl)
  *   返回：FTL_OK 成功，FTL_ERROR 表满。
  *   实现要点：定义只此一份（自洽不变量走 pending_validate），生产路径不调用。
  * -------------------------------------------------------------------- */
-int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint32_t owners, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op, uint8_t cw_bitmap)
+ftl_status_t pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint32_t owners, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op, uint8_t cw_bitmap)
 {
     ftl_pending_req_t *p = pending_alloc(ftl);
 
@@ -130,12 +130,12 @@ void pending_remove(ftl_context_t *ftl, uint16_t cmd_id)
  * pending_find_op
  *   功能：找第一个 op 类型匹配的 pending 项（按下标升序），出参其下标。
  *   参数：ftl —— 上下文；op —— 目标操作类型；out_index —— 出参下标（可 NULL）。
- *   返回：1 找到；0 无。
+ *   返回：true 找到；false 无。
  *   实现要点：供 Read Recovery 取走被托管的子操作——那些项的 command_id 已置
  *             FTL_PENDING_CMD_NONE，pending_lookup 查不到，只能按 op 找。
  *             按下标升序 = 先进先出，与「托管顺序」一致（append-only，无移动）。
  * -------------------------------------------------------------------- */
-int pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_index)
+bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_index)
 {
     uint8_t i;
 
@@ -147,11 +147,11 @@ int pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_
             {
                 *out_index = i;
             }
-            return 1;
+            return true;
         }
     }
 
-    return 0;
+    return false;
 }
 
 /* --------------------------------------------------------------------

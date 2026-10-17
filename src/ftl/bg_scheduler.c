@@ -12,6 +12,7 @@
 
 #include "ftl/bg_scheduler.h"
 
+#include "common/assertion.h"
 #include "platform/platform.h" /* ssd_platform_get / ssd_platform_ops_t.time_us */
 
 /* 低于此值不再跑任何预算任务（≈6×tR 余量：onfi_1_0.c NAND_TIME_TR_US=38 ⇒ 250 ≈ 6×38）。
@@ -22,10 +23,9 @@ void bg_scheduler_init(bg_scheduler_t *sched)
 {
     uint8_t i;
 
-    if (sched == NULL)
-    {
-        return;
-    }
+    /* 前置条件（判据 2）：唯一调用者 ftl.c 传 &ftl->bg。 */
+    ASSERT(sched != NULL);
+
     for (i = 0U; i < BG_TASK_COUNT; i++)
     {
         sched->tasks[i].func        = NULL;
@@ -53,10 +53,9 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
     uint32_t                  charge;
     uint8_t                   i;
 
-    if ((sched == NULL) || (cfg == NULL))
-    {
-        return;
-    }
+    /* 前置条件（判据 2）：唯一调用者 ftl.c 传 &ftl->bg 与自持的 g_bg_level_cfg[] 表项。 */
+    ASSERT(sched != NULL);
+    ASSERT(cfg != NULL);
 
     platform        = ssd_platform_get();
     sched->clock_ok = (platform != NULL) && (platform->time_us != NULL);

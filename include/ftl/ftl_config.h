@@ -355,9 +355,9 @@ static inline nand_pba_fields_t pba_fields(nand_pba_t pba)
  * 值语义（pba_pack / pba_fields）本身**不依赖**本结论 —— 它们走宏。本检查保证的是
  * **强转可用**：`*(nand_pba_t *)&fields` 与 pba_pack(fields) 同值。
  *
- * @return 1 = 布局与 PBA_*_SHIFT 一致；0 = 不一致（调用者应断言）
+ * @return true = 布局与 PBA_*_SHIFT 一致；false = 不一致（调用者应断言）
  */
-static inline uint8_t pba_fields_layout_matches(void)
+static inline bool pba_fields_layout_matches(void)
 {
     union
     {
@@ -467,21 +467,21 @@ static inline nand_pba_t pba_with_ce(nand_pba_t pba, uint32_t ce)
 /* ── 比较与校验 ── */
 
 /* 是否同 Page（无视 CW） */
-static inline uint8_t pba_same_page(nand_pba_t a, nand_pba_t b)
+static inline bool pba_same_page(nand_pba_t a, nand_pba_t b)
 {
-    return (uint8_t)((pba_page_base(a)) == (pba_page_base(b)));
+    return (pba_page_base(a)) == (pba_page_base(b));
 }
 
 /* 各字段是否在芯片规格范围内 */
-static inline uint8_t pba_is_valid(nand_pba_t pba)
+static inline bool pba_is_valid(nand_pba_t pba)
 {
-    return (uint8_t)((pba_to_page(pba) < PAGES_PER_BLOCK) &&
-                     (pba_to_plane(pba) < PLANE_NUM) &&
-                     (pba_to_block(pba) < BLOCKS_PER_PLANE) &&
-                     (pba_to_lun(pba) < LUN_NUM) &&
-                     (pba_to_cw(pba) < CW_NUM) &&
-                     (pba_to_ch(pba) < CH_NUM) &&
-                     (pba_to_ce(pba) < CE_NUM));
+    return (pba_to_page(pba) < PAGES_PER_BLOCK) &&
+           (pba_to_plane(pba) < PLANE_NUM) &&
+           (pba_to_block(pba) < BLOCKS_PER_PLANE) &&
+           (pba_to_lun(pba) < LUN_NUM) &&
+           (pba_to_cw(pba) < CW_NUM) &&
+           (pba_to_ch(pba) < CH_NUM) &&
+           (pba_to_ce(pba) < CE_NUM);
 }
 
 /* ══════════════════════════════════════════════════════════════════

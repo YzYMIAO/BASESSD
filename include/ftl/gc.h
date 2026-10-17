@@ -122,9 +122,9 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
  * @param pba           该命令的目标页 PBA（页基址，cw 位为 0；用于校验 META 的 plane 位）
  * @param cw_lba        输出：逐 CW 的扇区 LBA，CW_NUM 项；未写过 = FTL_LBA_INVALID
  * @param page_base_out 输出：页基址（CW0 的扇区 LBA）（可为 NULL）
- * @return 0 成功（至少一个 CW 写过）；-1 全页无写过 CW（无有效数据，调用者跳过本页）
+ * @return true 成功（至少一个 CW 写过）；false 全页无写过 CW（无有效数据，调用者跳过本页）
  */
-int gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lba_t *page_base_out);
+bool gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lba_t *page_base_out);
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block
@@ -149,9 +149,9 @@ int gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lb
  *
  * @param alloc  Allocator 上下文
  * @param victim 输出：选中的 victim 指针
- * @return 1=找到 victim，0=无可用 victim
+ * @return true=找到 victim，false=无可用 victim
  */
-int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim);
+bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim);
 
 /*
  * gc_check_triggers - 检查是否需要触发 GC，并返回**触发起因位掩码**

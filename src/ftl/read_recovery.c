@@ -197,17 +197,17 @@ static void rr_next_neighbor(ftl_context_t *ftl)
  * rr_select_plane
  *   功能：为当前 plane 找恢复目标页——该 plane 第一个被本子操作覆盖的 LBA 的映射。
  *   参数：ftl —— 实例。
- *   返回：1 找到（page / page_lba / first 已填）；0 本子操作不覆盖本 plane（或该 LBA
- *         未映射）⇒ 调用者跳过本 plane；-1 该 LBA 的 region **尚未就绪**（本函数已起
- *         异步加载）⇒ 调用者原地等待、下轮重来。
+ *   返回：RR_PLANE_READY 找到（page / page_lba / first 已填）；RR_PLANE_SKIP 本子操作
+ *         不覆盖本 plane（或该 LBA 未映射）⇒ 调用者跳过本 plane；RR_PLANE_WAIT 该 LBA
+ *         的 region **尚未就绪**（本函数已起异步加载）⇒ 调用者原地等待、下轮重来。
  *   实现要点：与原 ftl_recover_read_subop 的选页循环逐条一致——只看**第一个** plane
  *             匹配的 k（命中即 break，无论映射是否有效）。目标页取自 L2P 而非失败
  *             命令的 desc 链：读失败不改 L2P，二者同一。
- *   ⚠ 三态（阶段 5）：必须把"还不知道"（-1）与"未映射"（0）分清——把前者当后者会让
+ *   ⚠ 三态（阶段 5）：必须把"还不知道"（RR_PLANE_WAIT）与"未映射"（RR_PLANE_SKIP）分清——把前者当后者会让
  *     RR 直接判"本 plane 无需恢复"，host 读到的是零填而非真数据。函数可重入（每轮从
  *     头扫，先清 page/page_lba/first）。
  * -------------------------------------------------------------------- */
-static int rr_select_plane(ftl_context_t *ftl)
+static rr_plane_step_t rr_select_plane(ftl_context_t *ftl)
 {
     const ftl_pending_req_t *pending = &ftl->pending[ftl->rr.pending_idx];
     uint8_t                  k;
@@ -226,7 +226,7 @@ static int rr_select_plane(ftl_context_t *ftl)
 
             if (l2p_cache_read(&ftl->cache, l, &cur) == FTL_AGAIN)
             {
-                return -1; /* region 在加载：下轮再来 */
+                return RR_PLANE_WAIT; /* region 在加载：下轮再来 */
             }
 
             if (cur != NAND_PBA_INVALID)
@@ -239,7 +239,7 @@ static int rr_select_plane(ftl_context_t *ftl)
         }
     }
 
-    return (ftl->rr.page != NAND_PBA_INVALID) ? 1 : 0;
+    return (ftl->rr.page != NAND_PBA_INVALID) ? RR_PLANE_READY : RR_PLANE_SKIP;
 }
 
 /* --------------------------------------------------------------------
@@ -340,7 +340,7 @@ static void rr_step(ftl_context_t *ftl)
         {
             case RR_STAGE_IDLE:
                 /* 领走一个被托管的子操作；没有就空闲退出。 */
-                if (pending_find_op(ftl, PENDING_OP_READ_RECOVERY, &ftl->rr.pending_idx) == 0)
+                if (!pending_find_op(ftl, PENDING_OP_READ_RECOVERY, &ftl->rr.pending_idx))
                 {
                     return;
                 }
@@ -352,7 +352,7 @@ static void rr_step(ftl_context_t *ftl)
 
             case RR_STAGE_PLANE:
             {
-                int sel;
+                rr_plane_step_t sel;
 
                 if (ftl->rr.plane >= PLANE_NUM)
                 {
@@ -362,14 +362,14 @@ static void rr_step(ftl_context_t *ftl)
 
                 sel = rr_select_plane(ftl);
 
-                if (sel < 0)
+                if (sel == RR_PLANE_WAIT)
                 {
                     /* L2P region 在加载（阶段 5）：原地等，**不计**提交卡死——
                      * 加载在飞是有确定完成时刻的进展。rr_kick 每轮会 +1，这里清零。 */
                     ftl->rr.stall_rounds = 0U;
                     return;
                 }
-                if (sel == 0)
+                if (sel == RR_PLANE_SKIP)
                 {
                     ftl->rr.plane++; /* 本子操作不覆盖本 plane ⇒ 跳过 */
                     break;
@@ -453,7 +453,7 @@ void rr_kick(ftl_context_t *ftl)
     {
         ftl_job_heartbeat_reset(&ftl->rr.log_ms, &ftl->rr.start_ms);
     }
-    else if (ftl_job_heartbeat(&ftl->rr.log_ms, &ftl->rr.start_ms) != 0)
+    else if (ftl_job_heartbeat(&ftl->rr.log_ms, &ftl->rr.start_ms))
     {
         LOGI("[RR] job stage=%u plane=%u attempt=%u retry=%u stall=%u age=%lums\r\n",
              (unsigned)ftl->rr.stage,
@@ -599,14 +599,15 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
 }
 /* ── 3. 判定（块数组 / 全表扫描）── */
 
-/* rr_check_predictive — 在块数组 [0,max_blocks) 里找第一个 health ≥ CRITICAL 的块，返回其下标 */
-int rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t *gblock)
+/* rr_check_predictive — 在块数组 [0,max_blocks) 里找第一个 health ≥ CRITICAL 的块，
+ * 命中块号经 *gblock 出参给出（返回值只说"有没有命中"）。 */
+bool rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t *gblock)
 {
     uint16_t i;
 
     if ((blocks == NULL) || (gblock == NULL))
     {
-        return 0;
+        return false;
     }
 
     for (i = 0U; i < max_blocks; i++)
@@ -616,11 +617,11 @@ int rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t
         if (track->health >= RR_BLOCK_CRITICAL)
         {
             *gblock = i;
-            return 1;
+            return true;
         }
     }
 
-    return 0;
+    return false;
 }
 
 /* rr_get_health — 取块健康状态（track 为 NULL 返回 HEALTHY） */
@@ -638,12 +639,12 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
  * rr_predictive_scan
  *   功能：全表扫 CLOSED 块，找第一个需要慢死搬移的块（ECC 趋势恶化或 read disturb 高）。
  *   参数：alloc —— 分配器（blocks 恒非 NULL）；gblock —— 出参块号。
- *   返回：1 找到；0 未找到。
+ *   返回：true 找到；false 未找到。
  *   实现要点：只针对 CLOSED 块（Open 还在写、Free 无数据、Bad/Reserved 已退役）；
  *             命中条件 = health ≥ CRITICAL **或** read_count ≥ RR_READ_DISTURB_THRESHOLD
  *             （慢死第一信号）。调用者 mig_begin_predict 用 sb_id 反查 Closed 条目。
  * -------------------------------------------------------------------- */
-int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
+bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
 {
     uint16_t i;
 
@@ -668,11 +669,11 @@ int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
             (b->read_count >= RR_READ_DISTURB_THRESHOLD))
         {
             *gblock = i;
-            return 1;
+            return true;
         }
     }
 
-    return 0;
+    return false;
 }
 
 /* ── 4. 退役 ── */

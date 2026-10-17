@@ -71,6 +71,16 @@ typedef enum
     CP_DONE,          /* 收尾：释放 active，记日志 */
 } cp_phase_t;
 
+/*
+ * cp_flush_step_t - cp_flush_regions 一步的结果（消除调用点的 `r < 0` / `r == 0` 魔法数字）
+ */
+typedef enum
+{
+    CP_FLUSH_FAILED  = -1, /* 硬失败：调用者 cp_abort */
+    CP_FLUSH_PENDING = 0,  /* 仍有脏行在飞：调用者 return，下轮再来 */
+    CP_FLUSH_DONE    = 1,  /* 全部 region 已持久：推进 phase */
+} cp_flush_step_t;
+
 typedef struct
 {
     uint8_t  active;       /* 1 = job 在跑（单飞行：ftl_service 每轮推进它） */
@@ -223,9 +233,9 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo);
  *
  * @param ftl         FTL 上下文
  * @param elapsed_ms  距上次 Checkpoint 的 ms 数
- * @return 1 需要触发，0 不需要
+ * @return true 需要触发，false 不需要
  */
-int checkpoint_check_trigger(const struct ftl_context *ftl, uint32_t elapsed_ms);
+bool checkpoint_check_trigger(const struct ftl_context *ftl, uint32_t elapsed_ms);
 
 /*
  * checkpoint_is_emergency - 紧急水位判断
@@ -233,9 +243,9 @@ int checkpoint_check_trigger(const struct ftl_context *ftl, uint32_t elapsed_ms)
  * Journal 使用率 ≥ 95% 时，BUSY 模式也强制执行。
  *
  * @param ftl  FTL 上下文
- * @return 1 紧急
+ * @return true 紧急
  */
-int checkpoint_is_emergency(const struct ftl_context *ftl);
+bool checkpoint_is_emergency(const struct ftl_context *ftl);
 
 /*
  * checkpoint_journal_watermark - 计算 Journal 水位并设标志

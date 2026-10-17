@@ -72,19 +72,19 @@ typedef enum
  *   is_write_confirm   —— **停泊**态（命令已脱钩、组在飞数不递减），由 ftl_confirm_kick
  *                         每轮扫描推进，完成路径不碰它。
  *   （READ_RECOVERY 同为停泊态，但判别走 pending_find_op 的**搜索实参**，不是谓词。） */
-static inline uint8_t pending_op_is_read(uint8_t op)
+static inline bool pending_op_is_read(uint8_t op)
 {
-    return (uint8_t)(op == (uint8_t)PENDING_OP_READ);
+    return op == (uint8_t)PENDING_OP_READ;
 }
 
-static inline uint8_t pending_op_is_write(uint8_t op)
+static inline bool pending_op_is_write(uint8_t op)
 {
-    return (uint8_t)(op == (uint8_t)PENDING_OP_WRITE);
+    return op == (uint8_t)PENDING_OP_WRITE;
 }
 
-static inline uint8_t pending_op_is_write_confirm(uint8_t op)
+static inline bool pending_op_is_write_confirm(uint8_t op)
 {
-    return (uint8_t)(op == (uint8_t)PENDING_OP_WRITE_CONFIRM);
+    return op == (uint8_t)PENDING_OP_WRITE_CONFIRM;
 }
 
 typedef struct
@@ -195,7 +195,17 @@ static inline void pending_validate(const ftl_pending_req_t *req)
  *
  * @return FTL_OK 成功；FTL_ERROR 表满
  */
-int pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint32_t owners, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op, uint8_t cw_bitmap);
+ftl_status_t pending_add(ftl_context_t   *ftl,
+                         uint16_t         cmd_id,
+                         uint32_t         owners,
+                         lba_t            lba,
+                         void            *buffer,
+                         uint8_t          n_cw,
+                         nand_pba_t       new_pba,
+                         nand_pba_t       new_pba1,
+                         uint8_t          cache_intermediate,
+                         ftl_pending_op_t op,
+                         uint8_t          cw_bitmap);
 
 /*
  * pending_lookup - 按 command_id 查找本实例 pending 项
@@ -223,9 +233,9 @@ void pending_remove(ftl_context_t *ftl, uint16_t cmd_id);
  * @param ftl        FTL 上下文
  * @param op         目标操作类型
  * @param out_index  输出：命中项的下标（仅返回 1 时有效）
- * @return 1 找到，0 无
+ * @return true 找到，false 无
  */
-int pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_index);
+bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_index);
 
 /*
  * pending_release_index - 按下标释放 pending 项（used=0）

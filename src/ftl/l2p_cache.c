@@ -61,10 +61,8 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
 {
     uint16_t i;
 
-    if (cache == NULL)
-    {
-        return;
-    }
+    /* 前置条件（判据 2）：调用者一律传 &ftl->cache。 */
+    ASSERT(cache != NULL);
 
     cache->ch  = ch;
     cache->ce  = ce;
@@ -263,7 +261,7 @@ static int l2p_cache_evict_one(l2p_cache_t *cache)
  * 内部：为 region_id 启动一次异步加载。
  *
  * 前提：调用者已确认该 region **不在** cache 中（l2p_cache_find 未命中）。
- * 返回：1 已提交；0 未提交（无可驱逐行 / 命令池空 / 提交背压）——两者都让调用者
+ * 返回：true 已提交；false 未提交（无可驱逐行 / 命令池空 / 提交背压）——两者都让调用者
  *       下轮重试，语义相同（"还没好"）。
  *
  * 位置一律来自 Metadata Directory（每个 region 在 fill_fixed 就登记好：初始指向
@@ -272,7 +270,7 @@ static int l2p_cache_evict_one(l2p_cache_t *cache)
  * 下面的固定位置回退仅作 md_dir 缺失时的兜底（正常路径不可达）。
  * Random DISABLED / CRC ENABLED（v0.62）：Region 数据不加扰，但经 FC per-CW CRC + ECC 保护。
  */
-static int l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
+static bool l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
 {
     l2p_cache_line_t *line;
     nand_pba_t        region_addr = NAND_PBA_INVALID;
@@ -282,7 +280,7 @@ static int l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
     victim_idx = l2p_cache_evict_one(cache);
     if (victim_idx < 0)
     {
-        return 0;
+        return false;
     }
 
     line = &cache->lines[victim_idx];
@@ -313,18 +311,18 @@ static int l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
     if (ftl_async_read_page(&cmd, region_addr, FTL_PAGE_CFG_META()) != FTL_OK)
     {
         line->state = L2P_CACHE_INVALID; /* 回滚占位（区域未加载，等于没占用） */
-        return 0;
+        return false;
     }
 
     if (ftl_op_submit(cmd, FTL_OP_L2P, line) != FTL_OK)
     {
         (void)fc_command_release(cmd);
         line->state = L2P_CACHE_INVALID;
-        return 0;
+        return false;
     }
 
     cache->load_inflight++;
-    return 1;
+    return true;
 }
 
 /* ── 5. 对外读写 ── */
@@ -335,10 +333,10 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
     uint16_t          entry_idx;
     l2p_cache_line_t *line;
 
-    if ((cache == NULL) || (out == NULL))
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：调用者一律传 &ftl->cache 与自己的出参地址。 */
+    ASSERT(cache != NULL);
+    ASSERT(out != NULL);
+
     if (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION)
     {
         /* ⚠ **必须**回填 out：三态化后 FTL_ERROR 的调用者仍会读 *out（"读得 INVALID
@@ -387,13 +385,15 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
     return FTL_AGAIN;
 }
 
-int l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
+bool l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
 {
     l2p_cache_line_t *line;
 
-    if ((cache == NULL) || (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION))
+    /* 前置条件（判据 2）：调用者一律传 &ftl->cache。lba 越界是**数据**判断（判据 1），保留。 */
+    ASSERT(cache != NULL);
+    if (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION)
     {
-        return 1; /* 越界：调用者的 write 会是 no-op、read 会返 FTL_ERROR ⇒ 无需就绪 */
+        return true; /* 越界：调用者的 write 会是 no-op、read 会返 FTL_ERROR ⇒ 无需就绪 */
     }
 
     line = l2p_cache_find(cache, lba_to_region(lba));
@@ -404,7 +404,7 @@ int l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
          * **不记账、不消费 fresh、不动 access_count**——本函数是"就绪探针"，不是一次
          * 访问：真正的记账交给随后的 read/write（那样"一次 host 写 = 1 miss + 1 hit"
          * 与旧同步实现逐字一致，见 l2p_cache_line_t.fresh）。 */
-        return (line->state == L2P_CACHE_DIRTY || line->state == L2P_CACHE_CLEAN) ? 1 : 0;
+        return (line->state == L2P_CACHE_DIRTY) || (line->state == L2P_CACHE_CLEAN);
     }
 
     /* miss：**本函数起了加载 ⇒ 记一次 miss**（这次访问的"发现未驻留"发生在此）。
@@ -412,7 +412,7 @@ int l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
     cache->miss_count++;
     l2p_cache_note_access(cache, 1U);
     (void)l2p_cache_load_start(cache, lba_to_region(lba));
-    return 0;
+    return false;
 }
 
 ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
@@ -420,10 +420,8 @@ ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
     l2p_cache_line_t *line;
     uint16_t          region_id;
 
-    if (cache == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：调用者一律传 &ftl->cache。lba 越界是**数据**判断（判据 1），保留。 */
+    ASSERT(cache != NULL);
     if (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION)
     {
         return FTL_OK; /* 越界 no-op（与旧行为一致） */
@@ -479,7 +477,7 @@ ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  *   （自旋里没有任何人把 compact 走完）。cache 持 md_dir/alloc（宿主注入）⇒ 够用。 */
 static void l2p_sync_pump(l2p_cache_t *cache)
 {
-    ASSERT(ftl_op_in_dispatch() == 0);
+    ASSERT(!ftl_op_in_dispatch());
 
     ftl_service_pump();
 
@@ -514,7 +512,7 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
 
     while (guard-- > 0U)
     {
-        if (l2p_cache_ready(cache, lba) != 0)
+        if (l2p_cache_ready(cache, lba))
         {
             return l2p_cache_write(cache, lba, pba);
         }
@@ -555,10 +553,10 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
     nand_pba_t        region_addr;
     fc_command_t     *cmd = NULL;
 
-    if ((cache == NULL) || (line_idx < 0) || (line_idx >= (int)L2P_CACHE_SIZE))
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：cache 恒 &ftl->cache；line_idx 由调用者自持（下标越界是内部
+     * 自铸句柄，非外部输入）——两侧都收口成断言。 */
+    ASSERT(cache != NULL);
+    ASSERT((line_idx >= 0) && (line_idx < (int)L2P_CACHE_SIZE));
 
     line = &cache->lines[line_idx];
 
@@ -610,10 +608,10 @@ void l2p_flush_kick(l2p_cache_t *cache, uint8_t max_kick)
 {
     uint16_t i;
 
-    if ((cache == NULL) || (max_kick == 0U))
-    {
-        return;
-    }
+    /* 前置条件（判据 2）：唯一调用者 ftl.c 传 &ftl->cache 与档位表里的非零条数
+     * （IDLE L2P_CACHE_SIZE / NORMAL BG_NORMAL_FLUSH_COUNT / BUSY BG_BUSY_FLUSH_COUNT）。 */
+    ASSERT(cache != NULL);
+    ASSERT(max_kick != 0U);
 
     /* 心跳（见 ftl_job.h）：有在飞 region（load / flush）时每满 1s 打一行计数。
      * ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。 */
@@ -621,7 +619,7 @@ void l2p_flush_kick(l2p_cache_t *cache, uint8_t max_kick)
     {
         cache->job_log_ms = 0U; /* 无在飞：清基准 */
     }
-    else if (ftl_job_tick(&cache->job_log_ms) != 0)
+    else if (ftl_job_tick(&cache->job_log_ms))
     {
         LOGI("[L2P] job inflight load=%u flush=%u\r\n",
              (unsigned)cache->load_inflight,
@@ -663,10 +661,9 @@ ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
     uint8_t           kicked = 0U;
     l2p_cache_line_t *line;
 
-    if ((cache == NULL) || (line_idx < 0) || (line_idx >= (int)L2P_CACHE_SIZE))
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：cache 恒 &ftl->cache；line_idx 由调用者自持。 */
+    ASSERT(cache != NULL);
+    ASSERT((line_idx >= 0) && (line_idx < (int)L2P_CACHE_SIZE));
 
     line = &cache->lines[line_idx];
 
@@ -710,10 +707,8 @@ ftl_status_t l2p_cache_flush_all_sync(l2p_cache_t *cache)
 {
     uint16_t i;
 
-    if (cache == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：调用者一律传 &ftl->cache。 */
+    ASSERT(cache != NULL);
 
     for (i = 0U; i < L2P_CACHE_SIZE; i++)
     {

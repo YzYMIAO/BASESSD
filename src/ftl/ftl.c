@@ -78,7 +78,7 @@ static void ftl_drain_group(ftl_context_t *ftl, uint16_t gi);
 static ftl_status_t ftl_wbuf_append(ftl_context_t *ftl, uint16_t gi, lba_t internal_lba, const void *buffer, uint8_t n);
 static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl);
 static void         ftl_wbuf_maybe_flush_idle(ftl_context_t *ftl);
-static int          ftl_wbuf_has(const ftl_context_t *ftl, lba_t internal_lba);
+static bool         ftl_wbuf_has(const ftl_context_t *ftl, lba_t internal_lba);
 static void         ftl_wbuf_read(const ftl_context_t *ftl, lba_t internal_lba, void *out);
 
 /* --------------------------------------------------------------------
@@ -138,7 +138,7 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
         {
             continue;
         }
-        if (l2p_cache_ready(&ftl->cache, (lba_t)(pending->lba + (lba_t)bit)) == 0)
+        if (!l2p_cache_ready(&ftl->cache, (lba_t)(pending->lba + (lba_t)bit)))
         {
             return FTL_AGAIN; /* 已起加载：本轮**一条都不动** */
         }
@@ -264,7 +264,7 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
         {
             /* 判别依据是 pending->op（显式操作类型），不是 buffer——
              * 写请求的 buffer 是数据源、恒非空，用 buffer 判别会把写全判成读。 */
-            if (pending_op_is_read(pending->op) != 0U)
+            if (pending_op_is_read(pending->op))
             {
                 /* 读成功：拷贝数据到 caller buffer。
                  * desc 链序 == LBA 升序（plane-major + 段内 CW 升序，与
@@ -310,7 +310,7 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
         else
         {
             /* 同上：按 pending->op 判别，不用 io.buffer */
-            if (pending_op_is_read(pending->op) != 0U)
+            if (pending_op_is_read(pending->op))
             {
                 /* 读失败 ⇒ **托管**给 Read Recovery job（阶段 3，见 read_recovery.c）：
                  *   · pending 项**保留**（不 pending_remove）、组在飞数**不**递减
@@ -384,7 +384,7 @@ static void ftl_confirm_kick(ftl_context_t *ftl)
         ftl_pending_req_t *pending = &ftl->pending[i];
         uint32_t           owners;
 
-        if ((pending->used == 0U) || (pending_op_is_write_confirm(pending->op) == 0U))
+        if ((pending->used == 0U) || (!pending_op_is_write_confirm(pending->op)))
         {
             continue;
         }
@@ -732,21 +732,19 @@ uint8_t ftl_bg_level_select(const ftl_context_t *ftl)
  *   功能：装配一个 FTL 实例——按依赖序初始化拓扑 / pending / BST / cache / allocator
  *         / journal / metadata_dir / bbt / wear / 各计时器。
  *   参数：ftl —— 实例（非 NULL，含自持表存储）；topo —— 绑定的 NAND 芯片路由。
- *   返回：FTL_OK / FTL_ERROR（参数非法）。
+ *   返回：FTL_OK / FTL_ERROR（初始化失败）。
  *   实现要点：表自持（P2-5，`ftl->tables`）；BST 的 memset 必须早于
  *             wear_init，否则计数回填被清零。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo)
 {
-    if (ftl == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun]。 */
+    ASSERT(ftl != NULL);
 
     /* ├─ PBA 字段视图自检（一次）：位域布局 implementation-defined，无法用 _Static_assert
      *    证明（见 ftl_config.h §三.2）。若本工具链的布局与 PBA_*_SHIFT 不一致，
      *    强转（*(nand_pba_t *)&fields）会静默算错地址 ⇒ 在此硬失败。 */
-    ASSERT(pba_fields_layout_matches() != 0U);
+    ASSERT(pba_fields_layout_matches());
 
     ftl->topo = topo;
 
@@ -941,19 +939,19 @@ void ftl_service(ftl_context_t *ftl)
 
 /* ftl_wbuf_has — 该 local LBA 是否正被写缓冲持有（未编程）。
  * 命中判定：窗口匹配 + 该槽位已置位。供读路径优先取缓冲（避免读到陈旧 L2P）。 */
-static int ftl_wbuf_has(const ftl_context_t *ftl, lba_t internal_lba)
+static bool ftl_wbuf_has(const ftl_context_t *ftl, lba_t internal_lba)
 {
     const uint8_t slot = (uint8_t)(ftl_lba_plane(internal_lba) * CW_NUM + ftl_lba_cw(internal_lba));
 
     if (ftl->wbuf.open == 0U)
     {
-        return 0;
+        return false;
     }
     if (ftl_lba_pair_base(internal_lba) != ftl->wbuf.base)
     {
-        return 0;
+        return false;
     }
-    return ((ftl->wbuf.occupied & (uint8_t)(1U << slot)) != 0U) ? 1 : 0;
+    return (ftl->wbuf.occupied & (uint8_t)(1U << slot)) != 0U;
 }
 
 /* ftl_wbuf_read — 从写缓冲读一个 LBA（调用者已用 ftl_wbuf_has 确认命中） */
@@ -1166,7 +1164,7 @@ static void ftl_wbuf_maybe_flush_idle(ftl_context_t *ftl)
     {
         const ftl_io_group_t *g = &ftl->groups[i];
 
-        if ((g->used == 0U) || (pending_op_is_write(g->op) == 0U) || (g->next >= g->total))
+        if ((g->used == 0U) || (!pending_op_is_write(g->op)) || (g->next >= g->total))
         {
             continue;
         }
@@ -1237,7 +1235,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
 
     /* 写：攒进页打包缓冲（窗口满 / 切换窗口时内部触发编程），本函数对写**到此为止**。
      * 数据在 ftl_wbuf_flush 里一次编程（§七 方案 A）——分配/建链/提交/确认全在那里。 */
-    if (pending_op_is_read(g->op) == 0U)
+    if (!pending_op_is_read(g->op))
     {
         /* 回填窗口夹住后的实际消费数——调用者（ftl_drain_group）据此推进 g->next。
          * ⚠ 不可漏：内部 n 可能被窗口边界夹小（internal_lba 未 8 对齐时 avail<8），
@@ -1305,7 +1303,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
              * 读**别的物理页**的 desc 链——静默读到错误数据。
              * 这是**数据**损坏而非编程错误 ⇒ 报错返回（不 ASSERT），由 drain 把本组标
              * IO_ERROR 交给 host，不 brick 设备。 */
-            if (pba_is_valid(p) == 0U)
+            if (!pba_is_valid(p))
             {
                 LOGE("[FTL] rd lba=%lu: L2P entry 0x%08lx is not a valid PBA\r\n",
                      (unsigned long)l,
@@ -1647,17 +1645,15 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
 /* --------------------------------------------------------------------
  * ftl_flush
  *   功能：把已持久化映射落盘——L2P cache 全部写回 + journal 尾页刷出（供 HIL 调用）。
- *   参数：ftl —— 实例（NULL 直接返回）。
+ *   参数：ftl —— 实例（**前置条件**，非法即 ASSERT）。
  *   返回：无。
  *   实现要点：**非** NVMe 式 barrier——不等待在飞 / 排队的写（CLI 靠 g_cli_pending.busy
  *             串行化）。
  * -------------------------------------------------------------------- */
 void ftl_flush(ftl_context_t *ftl)
 {
-    if (ftl == NULL)
-    {
-        return;
-    }
+    /* 前置条件（判据 2 / C5）：唯一调用者 controller.c 在调用前已 ASSERT 路由结果非空。 */
+    ASSERT(ftl != NULL);
 
     /* 语义 = "把已持久化映射落盘"：先把页打包缓冲里尚未编程的写编程掉（否则它们还没
      * 进 L2P/journal，"落盘"不成立），再 L2P cache 全部写回 + journal 尾页刷出。
@@ -1685,10 +1681,9 @@ void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
 {
     uint32_t i;
 
-    if (ftl == NULL)
-    {
-        return;
-    }
+    /* 前置条件（判据 2 / C5）：唯一调用者 controller.c 在调用前已 ASSERT 路由结果非空。 */
+    ASSERT(ftl != NULL);
+
     if (count == 0U)
     {
         count = 1U; /* 兼容"单 LBA"调用 */

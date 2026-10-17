@@ -27,6 +27,12 @@
  *
  * ⚠ 本文件依赖 ftl_init 已完成 allocator / journal / metadata_dir 的初始化；
  *   各路径步骤用圈码 ①②③ 编号（与 docs/design/ftl_design.md §8 对应）。
+ *
+ * ⚠ 入口前置守卫口径（docs/design/assertion_guidelines.md §二十六 / §二十八）：
+ *   对外入口（ftl_media_needs_format / ftl_media_format / ftl_boot_recovery）的 ftl/result
+ *   非空是**前置条件**，用 ASSERT；三条启动路径与其内部 helper（fresh_start / clean_start /
+ *   power_failure / apply_region_bitmap / rebuild_closed_sb_list）只被 ftl_boot_recovery 调用，
+ *   该处的 ftl 非空已由它保证 ⇒ **不再逐函数复检**（原守卫已删）。
  */
 
 #include "ftl/power_failure_recovery.h"
@@ -52,23 +58,21 @@
  * ftl_media_needs_format
  *   功能：判定介质是否需要（重新）格式化。
  *   参数：ftl —— FTL 实例。
- *   返回：1 = 需要格式化；0 = 介质已是当前布局版本（正常启动）。
+ *   返回：true = 需要格式化；false = 介质已是当前布局版本（正常启动）。
  *   实现要点：判据 = 「本实例 checkpoint_find_latest 失败」。因版本校验已在
  *             checkpoint_header_valid 内，故该判据自动涵盖三种情况：
  *             ① 有当前版本 Checkpoint ⇒ 成功 ⇒ 不格式化；
  *             ② 有 Checkpoint 但版本不符（旧格式介质）⇒ 失败 ⇒ 格式化；
  *             ③ 完全没有 Checkpoint（出厂空片）⇒ 失败 ⇒ 格式化（多擦一次，写标记后自愈）。
  * -------------------------------------------------------------------- */
-int ftl_media_needs_format(struct ftl_context *ftl)
+bool ftl_media_needs_format(struct ftl_context *ftl)
 {
     l2p_checkpoint_header_t cp;
 
-    if (ftl == NULL)
-    {
-        return 0;
-    }
+    /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun]，结构上恒非空。 */
+    ASSERT(ftl != NULL);
 
-    return (checkpoint_find_latest(ftl, &cp) != FTL_OK) ? 1 : 0;
+    return (checkpoint_find_latest(ftl, &cp) != FTL_OK);
 }
 
 /* --------------------------------------------------------------------
@@ -86,10 +90,8 @@ int ftl_media_needs_format(struct ftl_context *ftl)
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_media_format(struct ftl_context *ftl)
 {
-    if (ftl == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun]。 */
+    ASSERT(ftl != NULL);
 
     if (bbt_erase_all_blocks(&ftl->alloc) != FTL_OK)
     {
@@ -110,9 +112,9 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
 /* --------------------------------------------------------------------
  * ftl_boot_recovery
  *   功能：启动恢复总入口——判上次关机形态并分发到三条启动路径之一。
- *   参数：ftl —— FTL 实例（非 NULL 校验）；result —— 出参启动结果
- *         （boot_type / cp_sequence / journal_entries）。
- *   返回：FTL_OK 成功；FTL_ERROR 参数非法或子路径失败。
+ *   参数：ftl —— FTL 实例（前置条件，ASSERT）；result —— 出参启动结果
+ *         （boot_type / cp_sequence / journal_entries，出参地址前置条件，ASSERT）。
+ *   返回：FTL_OK 成功；FTL_ERROR 子路径失败。
  *   实现要点：① 扫 Journal 环形块池取最新页（journal_scan_latest）——**只读不改状态**，
  *                故不调 journal_replay（后者会修改 journal 内部状态）。三条启动路径
  *                都要拿这份快照恢复 Journal RAM 写态（journal_resume）。
@@ -125,10 +127,9 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
     journal_page_ref_t      ring;
     ftl_boot_result_t       local_result;
 
-    if ((ftl == NULL) || (result == NULL))
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与栈上 &result。 */
+    ASSERT(ftl != NULL);
+    ASSERT(result != NULL);
 
     memset(&local_result, 0, sizeof(local_result));
 
@@ -198,7 +199,8 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
 /* --------------------------------------------------------------------
  * ftl_boot_fresh_start
  *   功能：出厂首次启动（无 Checkpoint）——cache 全 INVALID + F2 重建，sequence 归零。
- *   参数：ftl —— FTL 实例（非 NULL 校验）；ring —— Journal 环形块池快照。
+ *   参数：ftl —— FTL 实例（前置条件，由 ftl_boot_recovery 保证，不在此复检）；
+ *         ring —— Journal 环形块池快照。
  *   返回：FTL_OK / FTL_ERROR。
  *   实现要点：① l2p_cache_init 置全 INVALID（**不清 md_dir/alloc**，见 l2p_cache.c）。
  *             ② F2 重建把「用户数据 written 块」逐出 Free Pool（见下 ⚠）。
@@ -208,11 +210,6 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_page_ref_t *ring)
 {
-    if (ftl == NULL)
-    {
-        return FTL_ERROR;
-    }
-
     /* ① L2P Cache 全 INVALID */
     l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
@@ -258,11 +255,6 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context       *ftl,
                                   uint32_t                  cp_journal_sequence,
                                   const journal_page_ref_t *ring)
 {
-    if (ftl == NULL)
-    {
-        return FTL_ERROR;
-    }
-
     /* ① Cache 全 INVALID（首次 miss 时按需从 NAND L2P Table 加载） */
     l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
 
@@ -323,11 +315,6 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
                                          const l2p_checkpoint_header_t *cp)
 {
     uint16_t i;
-
-    if ((ftl == NULL) || (cp == NULL))
-    {
-        return;
-    }
 
     for (i = 0U; i < L2P_CACHE_SIZE; i++)
     {
@@ -400,11 +387,6 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     uint32_t entry_count = 0U;
     uint32_t cp_sequence;
 
-    if ((ftl == NULL) || (result == NULL) || (cp == NULL))
-    {
-        return FTL_ERROR;
-    }
-
     cp_sequence = cp->journal_sequence;
 
     /* ① Cache 全 INVALID */
@@ -474,7 +456,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
  *   ⇒ 既可能被 allocator 拿去复用覆盖活数据，又让 L2P 指向一个 valid_count 恒 0 的块
  *   （`bst.h` 断言的成因，与 v0.69 修的 plane 掩码同一类）。
  *   判「非空」的代价：真为空的块会被拉出 Free Pool 交 GC 多擦一次——不丢数据。 */
-static uint8_t page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
+static bool page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
 {
     uint8_t i;
     uint8_t j;
@@ -482,7 +464,7 @@ static uint8_t page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
     memset(raw_buf, 0xFF, PAGE_SIZE);
     if (ftl_sync_read_page_raw(pba, raw_buf) != FTL_OK)
     {
-        return 0U; /* 命令没走通 ⇒ 内容不可知 ⇒ 一律判非空 */
+        return false; /* 命令没走通 ⇒ 内容不可知 ⇒ 一律判非空 */
     }
 
     /* 每 CW 的 META(4B)+CRC(4B)+前 8B 数据，共 16B。全 FF 页 META/CRC 也全 FF。 */
@@ -493,12 +475,12 @@ static uint8_t page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
         {
             if (p[j] != 0xFFU)
             {
-                return 0U;
+                return false;
             }
         }
     }
 
-    return 1U;
+    return true;
 }
 
 /* 扫出某 Block 写指针：第一个全 FF 页；全非空返回 PAGES_PER_BLOCK */
@@ -556,7 +538,7 @@ static void close_full_block(ftl_context_t       *ftl,
         lba_t      cw_lba[CW_NUM];
         uint8_t    cw;
 
-        pba = super_block_page_pba(alloc->ch, alloc->ce, allocator_closed_at(alloc, sb_idx), plane, page);
+        pba = super_block_page_pba(ftl->topo, allocator_closed_at(alloc, sb_idx), plane, page);
 
         /* 读失败 / 全页无写过 CW → 该页不可用，跳过。
          * CW 级映射：逐 CW 从页内 META（= OOB 反向映射）取回扇区 LBA。 */
@@ -607,16 +589,7 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
     uint8_t          plane;
     uint16_t         block;
 
-    if (ftl == NULL)
-    {
-        return FTL_ERROR;
-    }
-
     alloc = &ftl->alloc;
-    if (alloc->blocks == NULL)
-    {
-        return FTL_ERROR;
-    }
 
     if (stats != NULL)
     {

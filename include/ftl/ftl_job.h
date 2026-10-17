@@ -16,7 +16,7 @@
  *
  *   if (<job 空闲>) {
  *       ftl_job_heartbeat_reset(&job.log_ms, &job.start_ms);   // 空闲：清基准
- *   } else if (ftl_job_heartbeat(&job.log_ms, &job.start_ms) != 0) {
+ *   } else if (ftl_job_heartbeat(&job.log_ms, &job.start_ms)) {
  *       LOGI("[XX] job phase=%u ... age=%lums\r\n",
  *            (unsigned)job.phase, ..., (unsigned long)ftl_job_age_ms(&job.start_ms));
  *   }
@@ -68,11 +68,11 @@ static inline uint32_t ftl_job_age_ms(const uint32_t *start_ms)
 /*
  * ftl_job_heartbeat - 心跳节拍到点了吗？
  *
- * 首次见到（*start_ms == 0）只**记基准**、不打（返回 0）；此后每满
- * FTL_JOB_LOG_INTERVAL_MS 更新 *log_ms 并返回 1。
- * 返回 1 时调用方打一行，age 用 ftl_job_age_ms(start_ms) 取。
+ * 首次见到（*start_ms == 0）只**记基准**、不打（返回 false）；此后每满
+ * FTL_JOB_LOG_INTERVAL_MS 更新 *log_ms 并返回 true。
+ * 返回 true 时调用方打一行，age 用 ftl_job_age_ms(start_ms) 取。
  */
-static inline int ftl_job_heartbeat(uint32_t *log_ms, uint32_t *start_ms)
+static inline bool ftl_job_heartbeat(uint32_t *log_ms, uint32_t *start_ms)
 {
     const uint32_t now_ms = ftl_job_now_ms();
 
@@ -80,16 +80,16 @@ static inline int ftl_job_heartbeat(uint32_t *log_ms, uint32_t *start_ms)
     {
         *start_ms = now_ms;
         *log_ms   = now_ms;
-        return 0;
+        return false;
     }
 
     if ((now_ms - *log_ms) < FTL_JOB_LOG_INTERVAL_MS)
     {
-        return 0;
+        return false;
     }
 
     *log_ms = now_ms;
-    return 1;
+    return true;
 }
 
 /* job 收工：清心跳基准（下一次起 job 从 0 重新计时）。 */
@@ -106,23 +106,23 @@ static inline void ftl_job_heartbeat_reset(uint32_t *log_ms, uint32_t *start_ms)
  * line（load / flush），没有"某个 job 从哪一刻开始"可言 ⇒ 调用方只报计数，不报 age。
  * 调用方在**无在飞**时把 *log_ms 直接置 0 清基准（无 start 可清）。
  */
-static inline int ftl_job_tick(uint32_t *log_ms)
+static inline bool ftl_job_tick(uint32_t *log_ms)
 {
     const uint32_t now_ms = ftl_job_now_ms();
 
     if (*log_ms == 0U)
     {
         *log_ms = now_ms;
-        return 0;
+        return false;
     }
 
     if ((now_ms - *log_ms) < FTL_JOB_LOG_INTERVAL_MS)
     {
-        return 0;
+        return false;
     }
 
     *log_ms = now_ms;
-    return 1;
+    return true;
 }
 
 #endif /* FTL_JOB_H */

@@ -99,6 +99,20 @@ typedef enum
     RR_STAGE_ABORT       /* 提交侧长期无进展（命令池泄漏）⇒ 不标坏块，直接按失败收尾 */
 } rr_stage_t;
 
+/*
+ * rr_plane_step_t - rr_select_plane 的结果（RR_STAGE_PLANE 一步）
+ *
+ * ⚠ 这里的 -1（RR_PLANE_WAIT）**不是硬失败**——是「该 LBA 的 L2P region 还在异步加载，
+ *   原地等」；调用者据此**清零** stall 计数（加载在飞是有确定完成时刻的进展）。故它不能
+ *   与 md_compact_step_t / cp_flush_step_t 共用一套名字（那两处的 -1 都要求 abort）。
+ */
+typedef enum
+{
+    RR_PLANE_WAIT  = -1, /* region 尚未就绪（加载在飞）：调用者原地等，不计卡死 */
+    RR_PLANE_SKIP  = 0,  /* 本子操作不覆盖本 plane：调用者 plane++ 跳过 */
+    RR_PLANE_READY = 1,  /* 找到本 plane 的目标页：进入 SF_SET */
+} rr_plane_step_t;
+
 /* 连续「提交不出去」的轮数上限：超过即判卡死，按恢复失败收尾。
  * 正常背压（命令池被在飞的 host I/O 占满）下一两轮就恢复；预算取 256 轮留足余量。
  * ⚠ 只兜「提交侧」——命令一旦在飞，NAND 层自身的 wait/jump 超时保证它**必有**完成
@@ -167,9 +181,9 @@ void rr_kick(ftl_context_t *ftl);
  * @param blocks    Block State Table（全表）
  * @param max_blocks 表大小（FTL_BLOCK_TOTAL）
  * @param gblock    输出：需搬移的全局 Block 编号
- * @return 1 需要搬移，0 不需要
+ * @return true 需要搬移，false 不需要
  */
-int rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t *gblock);
+bool rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t *gblock);
 
 /*
  * rr_get_health - 获取 Block 健康状态
@@ -187,9 +201,9 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track);
  *
  * @param alloc  FTL allocator（含 blocks 表）
  * @param gblock 输出：命中的全局 Block 号
- * @return 1 命中，0 无
+ * @return true 命中，false 无
  */
-int rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock);
+bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock);
 
 /*
  * rr_retire_block - 退役慢死块（不再分配新数据，不标坏）

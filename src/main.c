@@ -238,7 +238,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
      * （**只在空片时读**；用过的介质上那些字节是 FTL 数据不是标记，bbt_init 会拒绝重扫，
      * 见 bbt.c:bbt_medium_has_ftl_data），且此时回填尚未把未擦的旧块当空白块放进
      * free pool。格式化后写当前版本 Checkpoint 标记 ⇒ 下次开机判据命中，只发生一次。 */
-    if (ftl_media_needs_format(ftl) != 0)
+    if (ftl_media_needs_format(ftl))
     {
         LOGW("[FTL ] media layout mismatch -> format (erase all blocks)\r\n");
         if (ftl_media_format(ftl) != FTL_OK)
@@ -276,13 +276,13 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         good_n++;
 
         /* ① 本 plane 的前 50 个好块入 Spare Pool（坏块替换池） */
-        if (allocator_spare_try_push(alloc, plane, gblock) != 0U)
+        if (allocator_spare_try_push(alloc, plane, gblock))
         {
             continue;
         }
 
         /* ② 本 plane 的前 10% 好块入 OP 池（GC 缓冲池） */
-        if (allocator_op_try_push(alloc, plane, gblock) != 0U)
+        if (allocator_op_try_push(alloc, plane, gblock))
         {
             continue;
         }

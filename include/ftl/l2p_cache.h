@@ -221,19 +221,19 @@ typedef struct
 /*
  * l2p_cache_set_md_dir - 设置 Metadata Directory 指针和 Allocator 指针
  *
- * @param cache  cache 上下文
- * @param md_dir Metadata Directory 指针（来自 ftl_context_t）
+ * @param cache  cache 上下文（**前置条件**，非空；调用者一律传 `&ftl->cache`）
+ * @param md_dir Metadata Directory 指针（来自 ftl_context_t）；
+ *               ⚠ **可为 NULL** = 目录尚未加载（`ftl_init` 早期即 `ftl.c:790` 传 NULL
+ *               把 cache 与 dir 解绑），`l2p_cache` 内部据此判「Region 加载中」（判据 3）
  * @param alloc  Allocator 指针（来自 ftl_context_t，用于 Region 动态分配）
  */
 static inline void l2p_cache_set_md_dir(l2p_cache_t          *cache,
                                         metadata_dir_cache_t *md_dir,
                                         ftl_allocator_t      *alloc)
 {
-    if (cache != NULL)
-    {
-        cache->md_dir = md_dir;
-        cache->alloc  = alloc;
-    }
+    ASSERT(cache != NULL);
+    cache->md_dir = md_dir;
+    cache->alloc  = alloc;
 }
 
 /*
@@ -241,10 +241,13 @@ static inline void l2p_cache_set_md_dir(l2p_cache_t          *cache,
  *
  * 由 l2p_cache 内部按窗口 miss 率 + 滞回维护，调用点（ftl_service_normal）据此
  * 决定是否停掉主动后台 flush。纯读，不改状态。
+ *
+ * @param cache cache 上下文（**前置条件**，非空；唯一调用点 `ftl.c:582` 传 `&ftl->cache`）
  */
-static inline uint8_t l2p_cache_is_thrashing(const l2p_cache_t *cache)
+static inline bool l2p_cache_is_thrashing(const l2p_cache_t *cache)
 {
-    return (cache != NULL) ? cache->thrashing : 0U;
+    ASSERT(cache != NULL);
+    return cache->thrashing != 0U;
 }
 
 /* ── 接口 ── */
@@ -280,7 +283,8 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun);
  * @param cache  cache 上下文
  * @param lba    逻辑地址
  * @param out    出参 PBA（FTL_OK 与 FTL_ERROR 时有效；FTL_AGAIN 时未动）
- * @return FTL_OK / FTL_AGAIN（region 加载中，稍后重试）/ FTL_ERROR（参数非法）
+ * @return FTL_OK / FTL_AGAIN（region 加载中，稍后重试）/ FTL_ERROR（lba 越界；
+ *         cache/out 为**前置条件**（判据 2），非法即 ASSERT）
  */
 ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out);
 
@@ -296,9 +300,9 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out);
  *   fresh、不动 access_count；未命中记一次 miss（因为加载是它起的）。如此
  *   "一次 host 写 = 1 miss + 1 hit"与旧同步实现逐字一致，thrashing 窗口口径不变。
  *
- * @return 1 就绪；0 未就绪（已在加载中，稍后重试）
+ * @return true 就绪；false 未就绪（已在加载中，稍后重试）
  */
-int l2p_cache_ready(l2p_cache_t *cache, lba_t lba);
+bool l2p_cache_ready(l2p_cache_t *cache, lba_t lba);
 
 /*
  * l2p_cache_write - 写入 LBA → PBA 映射（**三态**）

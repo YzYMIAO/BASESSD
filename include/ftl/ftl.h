@@ -295,14 +295,14 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);
  *
  * 语义 = "把 dirty 元数据落到 NAND"，**非** NVMe 式 barrier（不等待在飞/排队的写）。
  *
- * @param ftl  FTL 上下文
+ * @param ftl  FTL 上下文（**前置条件**，非法即 ASSERT）
  */
 void ftl_flush(ftl_context_t *ftl);
 
 /*
  * ftl_trim - 取消 [lba, lba+count) 的 LBA 映射（非阻塞、同步完成）
  *
- * @param ftl   FTL 上下文
+ * @param ftl   FTL 上下文（**前置条件**，非法即 ASSERT）
  * @param lba   起始逻辑地址（uint64_t）
  * @param count 连续 LBA 数（0 视作 1，兼容单 LBA 调用）
  */

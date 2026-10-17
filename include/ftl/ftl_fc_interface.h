@@ -90,11 +90,11 @@ static inline uint16_t ftl_cmd_id(const fc_command_t *cmd)
  * 与 fc_command_validate 的接受条件对齐：只有 has_data 且非 FEATURES 的操作
  * 才要求 desc_id 有效。
  */
-static inline uint8_t ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
+static inline bool ftl_cmd_needs_desc_chain(const fc_command_t *cmd)
 {
     const uint8_t op = (uint8_t)cmd->config.operation;
 
-    return (uint8_t)((nand_operation_has_data(op) != 0U) && (op != OP_SET_FEATURES) && (op != OP_GET_FEATURES));
+    return (nand_operation_has_data(op) != 0U) && (op != OP_SET_FEATURES) && (op != OP_GET_FEATURES);
 }
 
 /* ── plane 数 → 命令头字段（读/写各一）──
@@ -452,7 +452,8 @@ ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const f
  *   （ftl_op_dispatch 按命令自身 ch/ce/lun 经 completion_table_route 解析归属实例）。
  *   没有 PBA 可推 ⇒ 只能显式传。留 0 在多实例下会把本命令的完成派给实例 [0][0][0]。
  *
- * @return FTL_OK 命令已备好（须提交或 release）；FTL_AGAIN 命令池空；FTL_ERROR out_cmd 为 NULL。
+ * @return FTL_OK 命令已备好（须提交或 release）；FTL_AGAIN 命令池空。
+ *         ⚠ out_cmd 为**前置条件**（判据 2），非法即 ASSERT。
  */
 ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t ce, uint8_t lun, uint8_t feature_addr, uint8_t mode);
 

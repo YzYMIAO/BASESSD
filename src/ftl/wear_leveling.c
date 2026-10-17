@@ -21,6 +21,10 @@
  *   只留触发判定与选块策略。
  *
  * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
+ *
+ * ⚠ 入口前置守卫口径（docs/design/assertion_guidelines.md §二十六 / §二十八）：
+ *   本文件全部函数都取 ftl 实例指针，且**只被 migrate.c（已持实例）与本文件内部**调用
+ *   ⇒ ftl 非空是**前置条件**，不逐函数复检（原 6 处守卫已删）。
  */
 
 #include "ftl/wear_leveling.h"
@@ -34,14 +38,16 @@
 
 /* --------------------------------------------------------------------
  * wl_should_trigger
- *   功能：判定是否该做一轮 WL（三条件任一命中即 1）。
+ *   功能：判定是否该做一轮 WL（三条件任一命中即 true）。
  *   参数：ftl —— FTL 实例。
- *   返回：1 触发；FTL_OK(0) 不触发（含 ftl==NULL / 未达最小间隔）。
+ *   返回：true 触发；false 不触发（未达最小间隔 / 三条件均未命中）。
+ *   ⚠ ftl 非空是**前置条件**（调用者 migrate.c 持有实例指针），不在此复检——
+ *     见 docs/design/assertion_guidelines.md §二十六「模块内部不逐函数复检同一入参」。
  *   实现要点：先过 WL_MIN_INTERVAL 最小间隔门（避免刚开机抖动）；条件 1 最大/最小差值
  *             ≥ WL_DELTA_THRESHOLD；条件 2 最大 ≥ 平均 × WL_MAX_AVG_RATIO；
  *             条件 3 低擦除区（min + WL_LOW_ZONE_WIDTH 以下）块占比 > WL_LOW_BLOCK_PCT%。
  * -------------------------------------------------------------------- */
-int wl_should_trigger(const struct ftl_context *ftl)
+bool wl_should_trigger(const struct ftl_context *ftl)
 {
     uint32_t max_ec;
     uint32_t min_ec;
@@ -49,15 +55,10 @@ int wl_should_trigger(const struct ftl_context *ftl)
     uint32_t low_zone;
     uint32_t low_count;
 
-    if (ftl == NULL)
-    {
-        return FTL_OK;
-    }
-
     /* WL 最小间隔检查 */
     if (ftl->total_writes < WL_MIN_INTERVAL)
     {
-        return FTL_OK;
+        return false;
     }
 
     max_ec = wl_max_erase(ftl);
@@ -67,13 +68,13 @@ int wl_should_trigger(const struct ftl_context *ftl)
     /* 条件 1：最大/最小差值 */
     if ((max_ec - min_ec) >= WL_DELTA_THRESHOLD)
     {
-        return 1;
+        return true;
     }
 
     /* 条件 2：最大/平均比值 */
     if ((avg_ec > 0U) && (max_ec >= avg_ec * WL_MAX_AVG_RATIO))
     {
-        return 1;
+        return true;
     }
 
     /* 条件 3：低擦除区 Block 占比 */
@@ -81,33 +82,28 @@ int wl_should_trigger(const struct ftl_context *ftl)
     low_count = wl_count_blocks_below(ftl, low_zone);
     if (low_count > (uint32_t)ftl->alloc.total_blocks * WL_LOW_BLOCK_PCT / 100U)
     {
-        return 1;
+        return true;
     }
 
-    return FTL_OK;
+    return false;
 }
 
 /* --------------------------------------------------------------------
  * wl_select_victim
  *   功能：从 Closed SB 列表里挑一个搬运候选（擦得少、有效 CW 多、read_count 高者优先）。
  *   参数：ftl —— FTL 实例；victim —— 出参。
- *   返回：1 找到；FTL_OK(0) 未找到 / 参数非法。
+ *   返回：true 找到；false 未找到。
  *   实现要点：只考虑擦除次数落在低擦除区（min + WL_LOW_ZONE_WIDTH 内）的 Closed SB；
  *             有效 CW 须 ≥ 最小有效 CW 门（WL_MIN_VALID_RATIO，太碎不值当搬）；
  *             排序键 = 有效 CW 多（越冷越优先）→ 同有效 CW 下 read_count 高（read disturb 风险高优先）。
  * -------------------------------------------------------------------- */
-int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
+bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 {
     uint16_t    i;
     uint32_t    min_ec;
     wl_victim_t best;
     uint16_t    total_cw_per_sb;
     uint16_t    min_valid_cw;
-
-    if ((ftl == NULL) || (victim == NULL))
-    {
-        return FTL_OK;
-    }
 
     memset(&best, 0, sizeof(best));
     min_ec = wl_min_erase(ftl);
@@ -136,7 +132,7 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 
             for (p = 0U; p < PLANE_NUM; p++)
             {
-                if (super_block_has_plane(sb, p) == 0U)
+                if (!super_block_has_plane(sb, p))
                 {
                     continue;
                 }
@@ -167,7 +163,7 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
             {
                 const ftl_block_t *blk;
 
-                if (super_block_has_plane(sb, p) == 0U)
+                if (!super_block_has_plane(sb, p))
                 {
                     continue; /* 退化单 plane 条目 */
                 }
@@ -196,11 +192,11 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 
     if (!best.found)
     {
-        return FTL_OK;
+        return false;
     }
 
     *victim = best;
-    return 1;
+    return true;
 }
 
 /* ── 2. 磨损统计（全部跳过坏块）── */
@@ -210,11 +206,6 @@ uint32_t wl_max_erase(const struct ftl_context *ftl)
 {
     uint16_t i;
     uint32_t max_ec = 0U;
-
-    if ((ftl == NULL) || (ftl->alloc.blocks == NULL))
-    {
-        return 0U;
-    }
 
     for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
@@ -237,11 +228,6 @@ uint32_t wl_min_erase(const struct ftl_context *ftl)
 {
     uint16_t i;
     uint32_t min_ec = UINT32_MAX;
-
-    if ((ftl == NULL) || (ftl->alloc.blocks == NULL))
-    {
-        return 0U;
-    }
 
     for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
@@ -266,11 +252,6 @@ uint32_t wl_avg_erase(const struct ftl_context *ftl)
     uint32_t sum   = 0U;
     uint16_t count = 0U;
 
-    if ((ftl == NULL) || (ftl->alloc.blocks == NULL))
-    {
-        return 0U;
-    }
-
     for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
         const ftl_block_t *b = &ftl->alloc.blocks[i];
@@ -294,11 +275,6 @@ uint32_t wl_count_blocks_below(const struct ftl_context *ftl, uint32_t threshold
 {
     uint16_t i;
     uint32_t count = 0U;
-
-    if ((ftl == NULL) || (ftl->alloc.blocks == NULL))
-    {
-        return 0U;
-    }
 
     for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {

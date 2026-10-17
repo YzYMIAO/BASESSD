@@ -86,6 +86,20 @@ typedef enum
     JRN_ERASE     /* 页写已完成，换块擦除在飞 */
 } journal_phase_t;
 
+/*
+ * jrn_truncate_step_t - journal_truncate_plan 的结果
+ *
+ * ⚠ 这里的 -1（JRN_TRUNC_NO_TRUNCATE）**不是硬失败**——是「水位不满足 ⇒ 安全方向地
+ *   放弃预擦」，调用者照旧收尾（预擦只是磨损优化）。故它不能与 cp_flush_step_t /
+ *   md_compact_step_t 共用一套名字（那两处的 -1 都要求 abort）。
+ */
+typedef enum
+{
+    JRN_TRUNC_NO_TRUNCATE = -1, /* 水位不满足：不截断（调用者不得复位水位标志）*/
+    JRN_TRUNC_ALREADY     = 0,  /* 无需擦（该块已预擦过）*/
+    JRN_TRUNC_NEEDS_ERASE = 1,  /* 需擦 out_addr / out_block */
+} jrn_truncate_step_t;
+
 typedef struct
 {
     uint8_t    phase;        /* journal_phase_t */
@@ -141,9 +155,9 @@ typedef struct
  * （旧实现由 ftl_boot_recovery 内联扫一遍，本函数把它收到 Journal 层与回放共用一份）。
  *
  * @param journal Journal；out 出参（环空时全置 0，可为 NULL）
- * @return 1 = 环非空（*out 有效）；0 = 环空（全部擦除 / 无有效页）
+ * @return true = 环非空（*out 有效）；false = 环空（全部擦除 / 无有效页）
  */
-int journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out);
+bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out);
 
 /*
  * journal_resume - 恢复 Journal 的 RAM 写态（写指针 + 序号），**不回放任何条目**。
@@ -208,10 +222,14 @@ ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t
  *                       时**不截断**——最旧块可能仍持有回放需要的条目，擦掉即丢数据。
  * @param out_addr       出参：待预擦块的基地址（需返回 1 时有效）
  * @param out_block      出参：待预擦的环形块号（需返回 1 时有效；commit 要用）
- * @return 1 = 需擦 *out_addr / *out_block；0 = 无需擦（水位 OK，该块已预擦过）；
- *         -1 = 不截断（水位不满足 / 参数非法）——**调用者不得据此复位水位标志**
+ * @return jrn_truncate_step_t：JRN_TRUNC_NEEDS_ERASE = 需擦 *out_addr / *out_block；
+ *         JRN_TRUNC_ALREADY = 无需擦（水位 OK，该块已预擦过）；
+ *         JRN_TRUNC_NO_TRUNCATE = 不截断（水位不满足）——**调用者不得据此复位水位标志**
  */
-int journal_truncate_plan(l2p_journal_t *journal, uint32_t up_to_sequence, nand_pba_t *out_addr, uint8_t *out_block);
+jrn_truncate_step_t journal_truncate_plan(l2p_journal_t *journal,
+                                          uint32_t       up_to_sequence,
+                                          nand_pba_t    *out_addr,
+                                          uint8_t       *out_block);
 
 /*
  * journal_truncate_commit - 截断 Journal 的**第二步**：记账 + 复位水位标志

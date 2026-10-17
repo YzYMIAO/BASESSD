@@ -6,6 +6,9 @@
  * 这里仅保存跨模块共享、且不依赖具体运行平台的定义。
  */
 
+#include <stdbool.h> /* C99 内建布尔 —— 全仓唯一的布尔类型（`bool`/`true`/`false`）。
+                      * 它是 freestanding 头（与 <stdint.h> 同类，零 libc 载荷），故可放本文件。
+                      * **不另定义 ssd_bool_t / ftl_bool_t**：同一语义的第二套坐标是缺陷（C9）。 */
 #include <stdint.h>
 
 typedef enum

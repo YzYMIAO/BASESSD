@@ -33,6 +33,7 @@
 #include "ftl/allocator.h"
 
 #include "common/assertion.h"
+#include "common/log.h" /* LOGE（判据 9 的 release 运行期拒绝要留日志，不能静默丢） */
 
 #include <string.h>
 
@@ -48,10 +49,10 @@
  */
 ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables)
 {
-    if ((alloc == NULL) || (tables == NULL))
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2：值从哪来）——唯一调用者 ftl.c 传 &ftl->alloc / &ftl->tables，
+     * 结构上恒非空；本函数恒返回 FTL_OK（调用者本就丢弃返回值）。 */
+    ASSERT(alloc != NULL);
+    ASSERT(tables != NULL);
 
     alloc->ch           = topo.ch;
     alloc->ce           = topo.ce;
@@ -109,9 +110,9 @@ ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tab
 
 /*
  * 内部工具：从 Free Pool 移除一个 gblock（swap-remove，O(1)）
- * @return 1 移除成功，0 未找到
+ * @return true 移除成功，false 未找到
  */
-static uint8_t allocator_pool_remove(ftl_allocator_t *alloc, uint16_t gblock)
+static bool allocator_pool_remove(ftl_allocator_t *alloc, uint16_t gblock)
 {
     uint16_t i;
 
@@ -120,10 +121,10 @@ static uint8_t allocator_pool_remove(ftl_allocator_t *alloc, uint16_t gblock)
         if (alloc->free_blocks[i] == gblock)
         {
             alloc->free_blocks[i] = alloc->free_blocks[--alloc->free_count];
-            return 1U;
+            return true;
         }
     }
-    return 0U;
+    return false;
 }
 
 /*
@@ -131,19 +132,19 @@ static uint8_t allocator_pool_remove(ftl_allocator_t *alloc, uint16_t gblock)
  * 分配器该 plane 的 free pool 耗尽时由 allocator_open_sb 回退调用。
  * ⚠ 必须按 plane 取：OP 池是按 super block 粒度预留的，取错 plane 的块对该 plane 的
  *   耗尽毫无帮助（只会把块丢进通用 free pool 而选不中）。
- * @return 1 成功取块，0 该 plane OP 池空 / 参数非法
+ * @return true 成功取块，false 该 plane OP 池空 / 参数非法
  */
-static uint8_t allocator_pull_from_op(ftl_allocator_t *alloc, uint8_t plane)
+static bool allocator_pull_from_op(ftl_allocator_t *alloc, uint8_t plane)
 {
     uint16_t gblock;
 
-    if (allocator_op_try_pop(alloc, plane, &gblock) == 0U)
+    if (!allocator_op_try_pop(alloc, plane, &gblock))
     {
-        return 0U; /* 该 plane OP 池空 */
+        return false; /* 该 plane OP 池空 */
     }
     allocator_free_block(alloc, gblock);
 
-    return 1U;
+    return true;
 }
 
 /*
@@ -160,18 +161,19 @@ static uint8_t allocator_pull_from_op(ftl_allocator_t *alloc, uint8_t plane)
  * Policy B：两个 plane **各自独立选块**，不再要求 block 同号——同号是旧策略的取舍，
  * 不是 NAND 约束（multi-plane 行地址每个 plane 各带自己的 block 位）。
  *
- * 返回 gblock；该 plane 无可选块返回 UINT16_MAX。
+ * 返回 gblock；该 plane 无可选块返回 FTL_GBLOCK_INVALID。
  */
 static uint16_t allocator_select_plane_block_from_pool(const ftl_allocator_t *alloc, uint8_t plane)
 {
     uint16_t i;
-    uint16_t best      = UINT16_MAX;
+    uint16_t best      = FTL_GBLOCK_INVALID;
     uint32_t min_erase = UINT32_MAX;
 
-    if ((alloc == NULL) || (alloc->blocks == NULL) || (plane >= PLANE_NUM))
-    {
-        return UINT16_MAX;
-    }
+    /* 前置条件（判据 2）：调用者 allocator_open_sb 的 plane 是循环变量，
+     * allocator_alloc_reserved_block 已判过 plane；alloc/blocks 由 allocator_init 绑定。 */
+    ASSERT(alloc != NULL);
+    ASSERT(alloc->blocks != NULL);
+    ASSERT(plane < PLANE_NUM);
 
     for (i = 0U; i < alloc->free_count; i++)
     {
@@ -203,9 +205,9 @@ static uint16_t allocator_select_plane_block_from_pool(const ftl_allocator_t *al
  * （容量不动语义：OP 是 GC 缓冲池，擦除即用）。
  * 全部就位后：两 gblock 从 Free Pool 移除、置 OPEN、绑拓扑。
  *
- * 返回 1 成功，0 失败（调用者触发紧急 GC）。
+ * 返回 true 成功，false 失败（调用者触发紧急 GC）。
  */
-static uint8_t allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint8_t temperature)
+static bool allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint8_t temperature)
 {
     uint16_t gblock[PLANE_NUM];
     uint8_t  plane;
@@ -215,14 +217,14 @@ static uint8_t allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint
         gblock[plane] = allocator_select_plane_block_from_pool(alloc, plane);
         /* OP 补池：每次拉进的就是本 plane 的块 ⇒ 重选即可命中（除非该块恰好已坏，
          * 则再拉一次）。循环受 op_count[plane] 递减约束必然终止。 */
-        while ((gblock[plane] == UINT16_MAX) && (allocator_pull_from_op(alloc, plane) != 0U))
+        while ((gblock[plane] == FTL_GBLOCK_INVALID) && allocator_pull_from_op(alloc, plane))
         {
             gblock[plane] = allocator_select_plane_block_from_pool(alloc, plane);
         }
-        if (gblock[plane] == UINT16_MAX)
+        if (gblock[plane] == FTL_GBLOCK_INVALID)
         {
             /* 该 plane 真无空间；已选的 plane 还没移出 Free Pool，无需回滚 */
-            return 0U;
+            return false;
         }
     }
 
@@ -237,12 +239,6 @@ static uint8_t allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint
     sb->temperature = temperature;
     sb->valid       = 1U;
 
-    /* 绑定真实拓扑（Phase V: 多 LUN 时 Super Block 必须知道所属 ch/ce/lun，
-     * super_block_page_pba 由此铸地址——此前 sb->topo 恒为零） */
-    sb->topo.ch  = alloc->ch;
-    sb->topo.ce  = alloc->ce;
-    sb->topo.lun = alloc->lun;
-
     /* 状态机：两物理块置 OPEN（清 FREE/CLOSED——块被 Open SB 占用，从 Free Pool 取走）
      * + 记录温度流 + 反向索引 sb_id
      * （OPEN 时 sb_id 占位 NO_SB，关闭后由 allocator_close_sb 写 closed 索引） */
@@ -256,14 +252,14 @@ static uint8_t allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint
         ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
     }
 
-    return 1U;
+    return true;
 }
 
 /*
  * 内部工具：从 Open 转移到 Closed 列表
  *
- * 注意：sb_id 语义统一为「Closed 列表索引」——块在 Open SB 时 sb_id=UINT16_MAX（占位），
- * 关闭后指向 closed_sb_list 中的条目索引；GC 回收从列表移除时恢复 UINT16_MAX。
+ * 注意：sb_id 语义统一为「Closed 列表索引」——块在 Open SB 时 sb_id=FTL_BLOCK_NO_SB（占位），
+ * 关闭后指向 closed_sb_list 中的条目索引；GC 回收从列表移除时恢复 FTL_BLOCK_NO_SB。
  */
 static void allocator_close_sb(ftl_allocator_t *alloc, super_block_t *sb)
 {
@@ -315,10 +311,10 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
 {
     uint8_t plane;
 
-    if ((alloc == NULL) || (closed_idx >= alloc->closed_sb_count))
-    {
-        return;
-    }
+    /* 前置条件（判据 2）：唯一调用者 migrate.c 在找 victim 时已把「不在列表里」换成
+     * UINT16_MAX 并拦掉 ⇒ 走到这里的 closed_idx 恒在域内，原来的越界早退是死守卫。 */
+    ASSERT(alloc != NULL);
+    ASSERT(closed_idx < alloc->closed_sb_count);
 
     /* 被移除条目的两 block 恢复"未归属"（已由 allocator_free_block 置 FREE + 清 sb_id，
      * 这里兜底再清一次索引，避免残留） */
@@ -365,22 +361,24 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
  * allocator_close_open_sb
  *   功能：主动关闭指定温度的 Open SB（写满前的显式收尾）。
  *   参数：alloc —— 分配器；temperature —— FTL_TEMP_HOT / FTL_TEMP_COLD 选槽。
- *   返回：FTL_OK 成功；FTL_ERROR 参数非法 / 对应 Open SB 无效。
+ *   返回：FTL_OK 成功；FTL_ERROR 对应 Open SB 已关闭（幂等早退，见下）。
  *   实现要点：置 CLOSED + 进 closed_sb_list + valid=0（行业坏块替换流程 ①）。
  * -------------------------------------------------------------------- */
 ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature)
 {
     super_block_t *sb;
 
-    if (alloc == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：唯一调用者 ftl.c 传 &ftl->alloc。 */
+    ASSERT(alloc != NULL);
 
     sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+
+    /* ⚠ **幂等早退，保留返回码**（不转 ASSERT）：对已关闭的槽再关一次是合法 no-op，
+     * 不是调用者编程错误。先例见 assertion_guidelines.md §十三 的 fc_command_release。
+     * 调用者 ftl.c 在 program 失败路径上调它，同一 Open SB 连续失败两次即走到这里。 */
     if (super_block_is_closed(sb))
     {
-        return FTL_ERROR; /* 无对应 Open SB */
+        return FTL_ERROR; /* 无对应 Open SB（已关闭） */
     }
 
     /* 关闭：置 CLOSED + 进 closed_sb_list + valid=0（行业坏块替换流程 ①） */
@@ -394,7 +392,7 @@ ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature
  * allocator_alloc_pair
  *   功能：分配一对 plane 页——推进 Open SB 写指针，返回两 plane 同页 PBA。
  *   参数：alloc —— 分配器；temperature —— 热/冷流；out[PLANE_NUM] —— 出参两 plane PBA。
- *   返回：out[0]（plane 0 的 PBA）；NAND_PBA_INVALID 参数非法 / 无块可分配（调用者触发紧急 GC）。
+ *   返回：out[0]（plane 0 的 PBA）；NAND_PBA_INVALID = 无块可分配（调用者触发紧急 GC）。
  *   实现要点：当前 SB 无效或写满 ⇒ 先关闭旧 SB（若有效）再 allocator_open_sb 取新对；
  *             两 plane 取同一页号（multi-plane 一次烧两 plane 同页）；最后推进写指针。
  * -------------------------------------------------------------------- */
@@ -403,10 +401,10 @@ nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nan
     super_block_t *sb;
     uint8_t        plane;
 
-    if ((alloc == NULL) || (out == NULL))
-    {
-        return NAND_PBA_INVALID;
-    }
+    /* 前置条件（判据 2）：调用者传 &ftl->alloc 与自己的 out 数组（ftl.c 的栈上 new_pba /
+     * migrate.c 的 m->dst），结构上恒非空。池空返回 NAND_PBA_INVALID 是资源类结果，保留。 */
+    ASSERT(alloc != NULL);
+    ASSERT(out != NULL);
 
     sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
@@ -417,7 +415,7 @@ nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nan
         {
             allocator_close_sb(alloc, sb);
         }
-        if (allocator_open_sb(alloc, sb, temperature) == 0U)
+        if (!allocator_open_sb(alloc, sb, temperature))
         {
             return NAND_PBA_INVALID; /* Free/OP 池都拿不出某个 plane 的块 → 调用者触发紧急 GC */
         }
@@ -426,7 +424,7 @@ nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nan
     /* 两 plane 同一页：multi-plane 写一次烧两个 plane 的同页 */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
-        out[plane] = super_block_page_pba(alloc->ch, alloc->ce, sb, plane, sb->next_page);
+        out[plane] = super_block_page_pba(allocator_topo(alloc), sb, plane, sb->next_page);
     }
 
     /* 推进写指针 */
@@ -448,18 +446,35 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
 {
     ftl_block_t *b;
 
-    if (alloc == NULL)
+    /* 前置条件（判据 2）：调用者传 &ftl->alloc 与自己算出的 gblock
+     * （migrate.c 的 victim / main.c 的出厂扫描 / bbt.c 的 Spare 取块）。 */
+    ASSERT(alloc != NULL);
+
+    /* 判据 9：`blocks[]` 之后紧跟 `free_blocks[]`（同为 ftl_tables_t 成员）⇒ 越界索引
+     * 会**静默改坏 Free Pool 数组**（漏账：不崩、不报错、容量无声流失）。ASSERT 在
+     * NDEBUG 下整条裁空 ⇒ 必须再补一道 release 运行期拒绝。 */
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+    if (gblock >= FTL_BLOCK_TOTAL)
     {
+        LOGE("[FTL] free_block: gblock %u out of range\r\n", (unsigned)gblock);
         return;
     }
 
     /*
      * Block 擦除由调用者（migrate.c 的搬移 job 等）确保在调用本函数前已完成。
      * 本函数只归还 Block 编号（全局 Block 号）到 Free Pool。
-     */
+     *
+     * 判据 9 同型：池满 = 某块被重复归还（double free），入池会越界写 `free_blocks[]`。
+     * 下面的 `if` 就是 release 侧拒绝（不还，块账保持原样），本轮只补一条日志把
+     * 「静默丢弃」变成「可诊断」——v0.78 修掉的 Closed 列表静默丢弃是同一形态。 */
+    ASSERT(alloc->free_count < FTL_BLOCK_TOTAL);
     if (alloc->free_count < FTL_BLOCK_TOTAL)
     {
         alloc->free_blocks[alloc->free_count++] = gblock;
+    }
+    else
+    {
+        LOGE("[FTL] free_block: free pool full, gblock %u dropped\r\n", (unsigned)gblock);
     }
 
     /* 状态机：置 FREE（本入口的契约是「调用者已擦除」⇒ 进池即已擦除态。GC 擦除 /
@@ -479,7 +494,7 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
  * allocator_alloc_reserved_block
  *   功能：从指定 plane 的 Free Pool 取一块并置为 RESERVED（独占，元数据日志块用）。
  *   参数：alloc —— 分配器；plane —— 目标 plane；out_gblock —— 出参 gblock。
- *   返回：FTL_OK；FTL_ERROR 参数非法 / 该 plane Free Pool 空。
+ *   返回：FTL_OK；FTL_ERROR 该 plane Free Pool 空（资源类结果，保留）。
  *   实现要点：独占三件套——① 从 Free Pool 数组拿掉 ② 置 RESERVED ③ 清 FREE。
  *             只置 RESERVED 挡不住分配（选块以数组为准），必须先从数组拿掉；
  *             **不向 OP 池借**（OP 是 GC 的紧急缓冲）。
@@ -489,13 +504,15 @@ ftl_status_t allocator_alloc_reserved_block(ftl_allocator_t *alloc, uint8_t plan
     uint16_t     gblock;
     ftl_block_t *b;
 
-    if ((alloc == NULL) || (alloc->blocks == NULL) || (out_gblock == NULL) || (plane >= PLANE_NUM))
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：唯一调用者 metadata.c 传 &ftl->alloc、dir->cur_metadata_plane
+     * 与局部出参；plane 由调用者自己轮转，不可能越界。 */
+    ASSERT(alloc != NULL);
+    ASSERT(alloc->blocks != NULL);
+    ASSERT(out_gblock != NULL);
+    ASSERT(plane < PLANE_NUM);
 
     gblock = allocator_select_plane_block_from_pool(alloc, plane);
-    if (gblock == UINT16_MAX)
+    if (gblock == FTL_GBLOCK_INVALID)
     {
         return FTL_ERROR; /* 该 plane 的 Free Pool 空（不向 OP 池借：OP 是 GC 的紧急缓冲） */
     }
@@ -518,10 +535,11 @@ ftl_status_t allocator_alloc_reserved_block(ftl_allocator_t *alloc, uint8_t plan
 /* allocator_free_reserved_block — 归还独占块；与 allocator_free_block 同一入口语义（调用者保证已擦除） */
 void allocator_free_reserved_block(ftl_allocator_t *alloc, uint16_t gblock)
 {
-    if ((alloc == NULL) || (alloc->blocks == NULL) || (gblock >= FTL_BLOCK_TOTAL))
-    {
-        return;
-    }
+    /* 前置条件（判据 2）：调用者 metadata.c 传 &ftl->alloc 与自己持有的 RESERVED 块号。
+     * `gblock` 的范围由 allocator_free_block 统一把关（含判据 9 的 release 拒绝），
+     * 不在本层重复。 */
+    ASSERT(alloc != NULL);
+    ASSERT(alloc->blocks != NULL);
 
     /* 与 allocator_free_block 同一入口语义（置 FREE、清 RESERVED、清反向索引）。
      * 调用者保证块已擦除——与 allocator_free_block 的契约一致。 */
@@ -537,7 +555,7 @@ void allocator_free_reserved_block(ftl_allocator_t *alloc, uint16_t gblock)
  *   功能：开机重建时把一个 Closed SB 条目装进 closed_sb_list（并设块状态/温度/反向索引）。
  *   参数：alloc —— 分配器；plane_blocks[PLANE_NUM] —— 两 plane 内块号（可含 FTL_BLOCK_NO_PLANE）；
  *         temperature —— 温度流。
- *   返回：新条目在列表中的索引；UINT16_MAX 参数非法。
+ *   返回：新条目在列表中的索引（无失败返回——实参是前置条件，非法即 ASSERT）。
  *   实现要点：列表容量 = FTL_BLOCK_TOTAL，而本函数**每写过一个物理块最多建一条** ⇒
  *             满在结构上不可能 ⇒ ASSERT（真满了只可能是块账本已破坏）。
  *             条目 next_page=64（=满）、valid=0（Closed，gc_select_victim 依赖）。
@@ -549,19 +567,15 @@ uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
     super_block_t sb;
     uint8_t       plane;
 
-    if ((alloc == NULL) || (plane_blocks == NULL))
-    {
-        return UINT16_MAX;
-    }
+    /* 前置条件（判据 2）：唯一调用者 power_failure_recovery.c 传 &ftl->alloc 与局部数组。 */
+    ASSERT(alloc != NULL);
+    ASSERT(plane_blocks != NULL);
 
     /* 每条占 1 个块、容量 = 块总数 ⇒ 满不可能（见 allocator.h 的 SUPER_BLOCK_LIST_MAX） */
     ASSERT(alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX);
 
     /* 组装条目（next_page=64=满；valid=0=Closed，gc_select_victim 依赖） */
     memset(&sb, 0, sizeof(sb));
-    sb.topo.ch         = alloc->ch;
-    sb.topo.ce         = alloc->ce;
-    sb.topo.lun        = alloc->lun;
     sb.plane_blocks[0] = plane_blocks[0];
     sb.plane_blocks[1] = plane_blocks[1];
     sb.next_page       = (uint8_t)PAGES_PER_BLOCK;
@@ -593,10 +607,10 @@ uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
 /* allocator_remove_from_free — 仅从 Free Pool 数组移除（不动状态位；rebuild 把块"认领"出池时用） */
 void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock)
 {
-    if (alloc == NULL)
-    {
-        return;
-    }
+    /* 前置条件（判据 2）：唯一生产调用者 power_failure_recovery.c 传 &ftl->alloc。
+     * ⚠ 「块不在池内 ⇒ no-op」是**文档化契约**（判据 4 明文举的例子），不是调用者错误，
+     *   故 allocator_pool_remove 返回 false 照旧 `(void)` 丢弃——不要转 ASSERT。 */
+    ASSERT(alloc != NULL);
 
     (void)allocator_pool_remove(alloc, gblock);
 }

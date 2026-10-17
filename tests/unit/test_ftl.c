@@ -354,9 +354,8 @@ static MunitResult test_alloc_add_closed_sb(const MunitParameter params[], void 
         munit_assert_uint16(ftl_block_sb_id(&a->blocks[gb]), ==, 0U);
     }
 
-    /* NULL 参数：返回哨兵、不写 */
-    munit_assert_uint16(allocator_add_closed_sb(a, NULL, FTL_TEMP_COLD), ==, UINT16_MAX);
-    munit_assert_uint16(a->closed_sb_count, ==, 1U);
+    /* 原「NULL 参数：返回哨兵、不写」用例已删（assertion_guidelines.md §四）：
+     * plane_blocks == NULL 是调用者编程错误，现按判据 2 走 ASSERT 停机。 */
 
     return MUNIT_OK;
 }
@@ -396,9 +395,8 @@ static MunitResult test_alloc_remove_closed_sb_swap_remove(const MunitParameter 
     munit_assert_uint16(a->closed_sb_list[1].plane_blocks[0], ==, 101U);
     munit_assert_uint16(ftl_block_sb_id(&a->blocks[ftl_gblock(0U, 101U)]), ==, 1U);
 
-    /* 越界下标：no-op（不崩、不改计数） */
-    allocator_remove_closed_sb(a, 5U);
-    munit_assert_uint16(a->closed_sb_count, ==, 2U);
+    /* 原「越界下标：no-op」用例已删（assertion_guidelines.md §四）：closed_idx 由调用者
+     * （migrate.c 找 victim）保证在域内，现按判据 2 走 ASSERT 停机。 */
 
     return MUNIT_OK;
 }
@@ -465,9 +463,8 @@ static MunitResult test_alloc_reserved_alloc_free(const MunitParameter params[],
     munit_assert_false(ftl_block_state_is(&a->blocks[g0], FTL_BLOCK_STATE_RESERVED));
     munit_assert_uint16(ftl_block_sb_id(&a->blocks[g0]), ==, FTL_BLOCK_NO_SB);
 
-    /* 越界 / NULL 拒绝 */
-    munit_assert_int(allocator_alloc_reserved_block(a, PLANE_NUM, &g1), ==, FTL_ERROR);
-    munit_assert_int(allocator_alloc_reserved_block(a, 0U, NULL), ==, FTL_ERROR);
+    /* 原「越界 plane / NULL 出参」用例已删（assertion_guidelines.md §四）：两者都是调用者
+     * 编程错误，现按判据 2 走 ASSERT 停机。**池空那条（上面 plane1）保留**——判据 3。 */
 
     return MUNIT_OK;
 }

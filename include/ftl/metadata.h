@@ -432,16 +432,19 @@ typedef ftl_status_t (*metadata_ring_probe_fn)(void     *ctx,
  * 快路径代价 = block_count 次页读 + 游标块内至多 records_per_block 次页读。
  *
  * @param ring           池几何
- * @param topo           ch/ce/lun
  * @param probe          调用方探针
  * @param ctx            探针上下文
  * @param out_newest_idx 输出：最新有效 record 槽位；**池内无有效 record 时为 UINT16_MAX**
  * @param out_sequence   输出：该 record 的 sequence；**池内无有效 record 时为 0**
  * @param out_write_idx  输出：下一个可写槽位
- * @return FTL_OK = 定位完成（含"池为空"）；FTL_ERROR = 参数非法
+ * @return FTL_OK = 定位完成（含"池为空"）；FTL_ERROR = ring 几何非法
+ *
+ * ⚠ 2026-10-17：原 `const ftl_topology_t *topo` 形参**已删** —— 它在本函数体内从未
+ *   被使用（唯一的"用途"是入口的 `topo == NULL` 守卫）。守卫按判据 2 收口成 ASSERT 后，
+ *   release 档当场报 unused-parameter（判据 10），据此确认是**废形参**（H5）而非漏用。
+ *   寻址在 metadata_ring_addr 里做，那里仍收 topo。
  */
 ftl_status_t metadata_ring_locate(const metadata_ring_t *ring,
-                                  const ftl_topology_t  *topo,
                                   metadata_ring_probe_fn probe,
                                   void                  *ctx,
                                   uint16_t              *out_newest_idx,
@@ -461,7 +464,7 @@ ftl_status_t metadata_ring_locate(const metadata_ring_t *ring,
  * @param write_idx     写点槽位（来自 metadata_ring_locate 或上次写点 + 1）
  * @param out_addr      输出：record 第 0 页地址
  * @param out_need_erase 输出：非 0 = 写之前必须先擦 *out_addr 所在块
- * @return FTL_OK / FTL_ERROR（参数非法 / 槽位越界）
+ * @return FTL_OK / FTL_ERROR（槽位越界；ring/topo/出参为前置条件，非法即 ASSERT）
  */
 ftl_status_t metadata_ring_prepare_addr(const metadata_ring_t *ring,
                                         const ftl_topology_t  *topo,
@@ -526,6 +529,34 @@ typedef enum
     MD_JOB_CP_RECLAIM,      /* 在飞：擦 victim */
     MD_JOB_DONE             /* 收尾（纯 RAM）→ IDLE */
 } md_job_phase_t;
+
+/*
+ * md_compact_step_t - 压缩 job「搬一条 region」一步的结果
+ *
+ * md_compact_read / md_compact_write 共用本契约（write 永不返回 MD_COMPACT_SCANNED：
+ * 写一条就回去读下一条）。调用者按**具名值**分派，不再靠 `r < 0` / `r != 2` 这类魔法数字。
+ */
+typedef enum
+{
+    MD_COMPACT_FAILED       = -1, /* 硬失败（md_stall 无进展）：调用者 md_job_abort */
+    MD_COMPACT_BACKPRESSURE = 0,  /* 背压未提交：保留游标/槽，**下轮重试**（调用者 return）*/
+    MD_COMPACT_SUBMITTED    = 1,  /* 已提交异步命令：等完成服务函数 */
+    MD_COMPACT_SCANNED      = 2,  /* 全表扫完、无更多 region 待搬（read 专有）*/
+} md_compact_step_t;
+
+/*
+ * md_anchor_step_t - metadata_dir_anchor_prepare 的结果
+ *
+ * ⚠ 与 md_compact_step_t **不能合并**：本处 0（无需写）时调用者**推进 phase**（跳过
+ *   Anchor 直接擦 victim），而 md_compact_* 的 0（背压）时调用者 **return 等下一轮**
+ *   —— 同值反义，共用一套名字会把两处调用点读反。
+ */
+typedef enum
+{
+    MD_ANCHOR_FAILED = -1, /* 定位/取槽失败：调用者中止 job */
+    MD_ANCHOR_CLEAN  = 0,  /* dir 不脏、无需写 Anchor：调用者整段跳过 */
+    MD_ANCHOR_READY  = 1,  /* 出参全部有效，可以写 Anchor */
+} md_anchor_step_t;
 
 typedef struct
 {
@@ -707,7 +738,7 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
  *
  * @param dir   Directory cache
  * @param alloc Allocator
- * @return FTL_OK（含无可回收块）/ FTL_ERROR（参数非法）
+ * @return 恒 FTL_OK（逐块失败被忽略，留待下次重试；dir/alloc 为前置条件，非法即 ASSERT）
  */
 ftl_status_t metadata_dir_reclaim(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
 
@@ -736,11 +767,11 @@ void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
  * checkpoint.c 的 cp_flush_regions：脏 region 取不到槽（FTL_AGAIN）时若 job 在推进，
  * 就**不该**累计 CP 的 stall 计数——否则一次正常的长压缩会把 Checkpoint 打回去。
  *
- * @return 1 = 有 job 在跑；0 = 空闲（或 dir == NULL）。
+ * @return true = 有 job 在跑；false = 空闲（或 dir == NULL）。
  */
-static inline int metadata_dir_busy(const metadata_dir_cache_t *dir)
+static inline bool metadata_dir_busy(const metadata_dir_cache_t *dir)
 {
-    return ((dir != NULL) && (dir->job.phase != (uint8_t)MD_JOB_IDLE)) ? 1 : 0;
+    return (dir != NULL) && (dir->job.phase != (uint8_t)MD_JOB_IDLE);
 }
 
 /* ── Anchor 落盘的三段式（唯一形态；阶段 6 起）──
@@ -761,14 +792,15 @@ static inline int metadata_dir_busy(const metadata_dir_cache_t *dir)
  * @param out_idx        出参：本 record 的池内槽位号（commit 要用）
  * @param out_seq        出参：本 record 的 sequence（本函数内自增 anchor_sequence）
  * @param out_need_erase 出参：非 0 = 写之前必须先擦 *out_base 所在块
- * @return 1 需要写（出参全部有效）；0 无需写（dir 不脏）；-1 失败（参数非法 / 定位失败）
+ * @return md_anchor_step_t：MD_ANCHOR_READY 需要写（出参全部有效）；
+ *         MD_ANCHOR_CLEAN 无需写（dir 不脏）；MD_ANCHOR_FAILED 失败（定位失败）
  */
-int metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
-                                metadata_ring_t      *out_ring,
-                                nand_pba_t           *out_base,
-                                uint16_t             *out_idx,
-                                uint32_t             *out_seq,
-                                int                  *out_need_erase);
+md_anchor_step_t metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
+                                             metadata_ring_t      *out_ring,
+                                             nand_pba_t           *out_base,
+                                             uint16_t             *out_idx,
+                                             uint32_t             *out_seq,
+                                             int                  *out_need_erase);
 
 /*
  * metadata_dir_anchor_page - 组第 chunk 页 Anchor 数据（纯 RAM）
@@ -831,8 +863,8 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir);
  * @param md_dir Metadata Directory cache（可为 NULL：仅固定块区间判断）
  * @param plane  物理 plane 号（0..PLANE_NUM-1）；仅日志块/游标块两条分支使用
  * @param block  物理 Block 号（per-plane 号，0..BLOCKS_PER_PLANE-1）
- * @return 1 = 元数据块，0 = 用户数据块
+ * @return true = 元数据块，false = 用户数据块
  */
-int ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, uint16_t block);
+bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, uint16_t block);
 
 #endif /* FTL_METADATA_H */

@@ -33,7 +33,7 @@
  *   块级聚合（valid_count）供 GC/WL 选 victim（对齐主流 validity ratio）；逐 CW 真值现查 L2P。
  */
 
-#include "common/assertion.h" /* ASSERT（add/sub_valid 的计数守卫） */
+#include "common/assertion.h" /* ASSERT（本文件全部访问器的入参前置条件 + 计数守卫） */
 #include "ftl/ftl_config.h"   /* nand_pba_t, pba_to_*, NAND_PBA_INVALID */
 #include "nand/nand_config.h" /* BLOCKS_PER_PLANE, PLANE_NUM, CW_NUM */
 
@@ -163,62 +163,62 @@ static inline uint16_t ftl_gblock_block(uint16_t g)
     return (uint16_t)((uint32_t)g % BLOCKS_PER_PLANE);
 }
 
+/* ── 本文件全部访问器的入参约定 ──
+ *
+ * `b` 是**前置条件**（判据 2：`bst.h` 在层内模块头名单里），不是可空参数：
+ * 调用者一律传 `&alloc->blocks[<索引>]`，而 `blocks` 指向 `ftl_context_t.tables.blocks`
+ * 这个**内嵌数组**（非指针）⇒ 取元素地址**结构性恒非空**。全仓 11 个 .c 的调用点
+ * 已逐一核实无一传 NULL。
+ * ⇒ 用 `ASSERT(b != NULL)`（H14）：debug 停机留现场，release 裁空 ⇒ 零开销，
+ *   不保留 `if (b != NULL) { … }` 那种**恒真的静默吞**（§十附判据 1）。 */
+
 /* ── 坏块位操作（BST 单数据源；NAND 持久化仍走 bbt_header_t.bad_map）── */
 
-static inline int ftl_block_is_bad(const ftl_block_t *b)
+static inline bool ftl_block_is_bad(const ftl_block_t *b)
 {
-    return (b != NULL) && ((b->state & FTL_BLOCK_STATE_BAD) != 0);
+    ASSERT(b != NULL);
+    return (b->state & FTL_BLOCK_STATE_BAD) != 0;
 }
 
 static inline void ftl_block_set_bad(ftl_block_t *b)
 {
-    if (b != NULL)
-    {
-        b->state |= FTL_BLOCK_STATE_BAD;
-    }
+    ASSERT(b != NULL);
+    b->state |= FTL_BLOCK_STATE_BAD;
 }
 
 /* ── 状态机访问器（bitmask 宏 + 可读调用，替代位域/联合体）── */
 
-static inline int ftl_block_state_is(const ftl_block_t *b, uint16_t st)
+static inline bool ftl_block_state_is(const ftl_block_t *b, uint16_t st)
 {
-    return (b != NULL) && ((b->state & st) == st);
+    ASSERT(b != NULL);
+    return (b->state & st) == st;
 }
 
 static inline void ftl_block_state_set(ftl_block_t *b, uint16_t st)
 {
-    if (b != NULL)
-    {
-        b->state |= st;
-    }
+    ASSERT(b != NULL);
+    b->state |= st;
 }
 
 static inline void ftl_block_state_clr(ftl_block_t *b, uint16_t st)
 {
-    if (b != NULL)
-    {
-        b->state &= (uint16_t)~st;
-    }
+    ASSERT(b != NULL);
+    b->state &= (uint16_t)~st;
 }
 
 /* 温度流：分配时记录 hot/cold（0=HOT / 1=COLD，与 allocator FTL_TEMP_* 对齐）。
  * 不在本头引用 FTL_TEMP_*（避免 allocator.h 循环 include），直接用值语义。 */
 static inline void ftl_block_set_temp(ftl_block_t *b, uint8_t temperature)
 {
-    if (b != NULL)
-    {
-        b->state &= (uint16_t)~FTL_BLOCK_TEMP_MASK;
-        b->state |= (temperature == 1U) ? FTL_BLOCK_STATE_TEMP_COLD
-                                        : FTL_BLOCK_STATE_TEMP_HOT;
-    }
+    ASSERT(b != NULL);
+    b->state &= (uint16_t)~FTL_BLOCK_TEMP_MASK;
+    b->state |= (temperature == 1U) ? FTL_BLOCK_STATE_TEMP_COLD : FTL_BLOCK_STATE_TEMP_HOT;
 }
 
+/* ⚠ 返回值 0=HOT / 1=COLD 是**两值域不是真值域**，不是 bool（UT 逐条钉住该值域）。 */
 static inline uint8_t ftl_block_get_temp(const ftl_block_t *b)
 {
-    if (b == NULL)
-    {
-        return 0U; /* HOT */
-    }
+    ASSERT(b != NULL);
     return ((b->state & FTL_BLOCK_STATE_TEMP_COLD) != 0U) ? 1U : 0U;
 }
 
@@ -227,15 +227,14 @@ static inline uint8_t ftl_block_get_temp(const ftl_block_t *b)
 
 static inline uint16_t ftl_block_sb_id(const ftl_block_t *b)
 {
-    return (b != NULL) ? b->sb_id : FTL_BLOCK_NO_SB;
+    ASSERT(b != NULL);
+    return b->sb_id;
 }
 
 static inline void ftl_block_set_sb(ftl_block_t *b, uint16_t sb_id)
 {
-    if (b != NULL)
-    {
-        b->sb_id = sb_id;
-    }
+    ASSERT(b != NULL);
+    b->sb_id = sb_id;
 }
 
 /* ── 有效 CW 计数（块级聚合真值）──
@@ -254,30 +253,24 @@ static inline void ftl_block_set_sb(ftl_block_t *b, uint16_t sb_id)
 /* 有效 CW 计数 +1（写成功、GC/WL 搬入新页时各 CW 调一次） */
 static inline void ftl_block_add_valid(ftl_block_t *b)
 {
-    if (b != NULL)
-    {
-        ASSERT(b->valid_count < (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK * CW_NUM));
-        b->valid_count++;
-    }
+    ASSERT(b != NULL);
+    ASSERT(b->valid_count < (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK * CW_NUM));
+    b->valid_count++;
 }
 
 /* 有效 CW 计数 -1（覆盖写旧位置、GC/WL 搬离、TRIM、擦除前清账） */
 static inline void ftl_block_sub_valid(ftl_block_t *b)
 {
-    if (b != NULL)
-    {
-        ASSERT(b->valid_count > 0U);
-        b->valid_count--;
-    }
+    ASSERT(b != NULL);
+    ASSERT(b->valid_count > 0U);
+    b->valid_count--;
 }
 
 /* 清账（擦除/坏块后调用）：valid_count=0（无位图可清） */
 static inline void ftl_block_clear_valid(ftl_block_t *b)
 {
-    if (b != NULL)
-    {
-        b->valid_count = 0U;
-    }
+    ASSERT(b != NULL);
+    b->valid_count = 0U;
 }
 
 #endif /* FTL_BST_H */

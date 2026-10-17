@@ -64,9 +64,9 @@ typedef struct
  * 内 ⇒ 该判据自动涵盖：有当前版本 Checkpoint（否）/ 有但版本不符（是）/ 完全没有（是）。
  *
  * @param ftl  FTL 上下文
- * @return 1 = 需要格式化；0 = 介质已是当前布局版本
+ * @return true = 需要格式化；false = 介质已是当前布局版本
  */
-int ftl_media_needs_format(struct ftl_context *ftl);
+bool ftl_media_needs_format(struct ftl_context *ftl);
 
 /*
  * ftl_media_format - 全量格式化（擦本实例全部块 + 复位易失元数据状态）

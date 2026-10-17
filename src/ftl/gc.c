@@ -113,7 +113,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
     }
 
     /* 从 META 解码逐 CW 的扇区 LBA + 页基址（与异步搬移 job 共用同一份实现） */
-    if (gc_decode_cw_lba(cmd, pba, cw_lba, &meta_cw0) != 0)
+    if (!gc_decode_cw_lba(cmd, pba, cw_lba, &meta_cw0))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR; /* 全页无写过 CW：无有效数据 */
@@ -134,7 +134,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
  *   功能：从已完成的读命令的 desc 链解出逐 CW 的扇区 LBA，并反推页基址。
  *   参数：cmd —— 已完成的读命令（链恒覆盖该 plane 全 4 CW）；pba —— 该命令的目标页；
  *         cw_lba —— 输出：逐 CW 的扇区 LBA（CW_NUM 项）；page_base_out —— 输出页基址（可 NULL）。
- *   返回：0 成功（至少一个 CW 写过）；-1 全页无写过 CW。
+ *   返回：true 成功（至少一个 CW 写过）；false 全页无写过 CW（**不是失败**：该页无有效数据）。
  *   实现要点：每个 CW 的 META = 该 CW 自己的**扇区** LBA（低位 [plane][cw] 就是它的物理位置）；
  *             未写过的 CW 读回 0xFF…（META = 0xFFFFFFFF）。**不能直接取 CW0 的 META**——
  *             CW 级写/搬移允许页内只编一个 CW 子集（`wr 2 2` 只落 plane0 的 CW2/CW3；
@@ -150,7 +150,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
  * ⚠ 同步版（gc_read_page_with_lba）与异步搬移 job（migrate.c）共用本函数——解码规则
  *   只此一份，避免两处漂移。
  * -------------------------------------------------------------------- */
-int gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lba_t *page_base_out)
+bool gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lba_t *page_base_out)
 {
     uint8_t       c;
     uint8_t       found      = 0U;
@@ -192,7 +192,7 @@ int gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lb
 
     if (found == 0U)
     {
-        return -1; /* 全页无写过 CW：无有效数据 */
+        return false; /* 全页无写过 CW：无有效数据 */
     }
 
     if (page_base_out != NULL)
@@ -200,7 +200,7 @@ int gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lb
         *page_base_out = ftl_lba_page_base((lba_t)base_meta); /* 页基址 = CW0 的扇区 LBA */
     }
 
-    return 0;
+    return true;
 }
 
 /* ── 2. 全表极值 ── */
@@ -233,7 +233,7 @@ static void gc_table_extremes(const ftl_allocator_t *alloc, uint32_t *min_erase,
         {
             const ftl_block_t *blk = &alloc->blocks[b];
 
-            if (ftl_block_is_bad(blk) != 0)
+            if (ftl_block_is_bad(blk))
             {
                 continue;
             }
@@ -263,13 +263,13 @@ static void gc_table_extremes(const ftl_allocator_t *alloc, uint32_t *min_erase,
  * gc_select_victim
  *   功能：从 Closed SB 列表里按四项加权评分选回收代价最小的 SB 作 victim。
  *   参数：alloc —— 分配器；victim —— 出参（指向 closed_sb_list 内的条目）。
- *   返回：1 找到；FTL_OK(0) 未找到 / 参数非法。
+ *   返回：true 找到；false 未找到 / 参数非法。
  *   实现要点：四项各自归一化到 0..1000——vr 有效页率、er 磨损率（越大越该回收旧块）、
  *             cp 温度（COLD 加分）、yp 年龄（越老越优先）；cost = 加权和，取小者胜；
  *             cost 相等取有效页更少者（确定性）。erase 项用 uint64_t 防溢出；
  *             age 项 `max_pe_ts > pe_min` 兜住 max_pe_ts==0 与 pe_min 越界两种退化（取中性 0）。
  * -------------------------------------------------------------------- */
-int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
+bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 {
     uint32_t min_erase;
     uint32_t max_erase;
@@ -280,12 +280,12 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
     uint32_t best_cp    = 0U;
     uint32_t best_yp    = 0U;
     uint16_t best_valid = (uint16_t)((PLANE_NUM * PAGES_PER_BLOCK * CW_NUM) + 1U);
-    int      found      = 0;
+    bool     found      = false;
 
-    if ((alloc == NULL) || (alloc->blocks == NULL) || (victim == NULL))
-    {
-        return FTL_OK;
-    }
+    /* 前置条件（判据 2）：调用者 migrate.c 传 &ftl->alloc 与栈上 &victim。 */
+    ASSERT(alloc != NULL);
+    ASSERT(alloc->blocks != NULL);
+    ASSERT(victim != NULL);
 
     /* 归一化基准：全表极值（一次扫描，与候选数无关）。min_erase 本函数不用（T5 用）。 */
     gc_table_extremes(alloc, &min_erase, &max_erase, &max_pe_ts);
@@ -314,7 +314,7 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
         {
             const ftl_block_t *blk;
 
-            if (super_block_has_plane(sb, p) == 0U)
+            if (!super_block_has_plane(sb, p))
             {
                 continue;
             }
@@ -357,11 +357,11 @@ int gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
             best_cp    = cp;
             best_yp    = yp;
             *victim    = sb;
-            found      = 1;
+            found      = true;
         }
     }
 
-    if (found != 0)
+    if (found)
     {
         /* 观测口：一次空闲 GC 突发最多打 FREE_POOL_TARGET/PLANE_NUM = 16 行
          * （ftl_service_idle 循环调用），相对 GC 自身的 NAND 擦除/搬移耗时可忽略。 */

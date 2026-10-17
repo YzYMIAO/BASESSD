@@ -74,23 +74,26 @@ static ftl_op_id_t mig_op_tag(const mig_job_t *m)
  * mig_start
  *   功能：装配并启动一个搬移 job（SELECT 阶段）。
  *   参数：ftl —— FTL 实例；victim —— 选中的 SB（只读，内部按值拷贝）；
- *         kind —— victim 来源；post —— 收尾方式。
- *   返回：1 = 已启动；0 = 未启动（job 忙 / 参数非法）。
+ *         kind —— victim 来源；post —— 收尾方式。ftl/victim 是**前置条件**（调用者已断言）。
+ *   返回：true = 已启动；false = 未启动（job 忙）。
  *   实现要点：**快路径**——双 plane valid_count 之和 == 0 ⇒ 直接进 ERASE（省整块 NAND
  *             读；这正是原先「写过」位图覆盖的主场景——整块空洞 plane，其根因 P2-6
  *             已由 v0.66 页打包写缓冲消除）。
  *             victim 按值拷贝：closed_sb_list 在搬移期间可能被 allocator 追加/挪动，
  *             持指针会让「本 job 的 victim」随列表漂移。
  * -------------------------------------------------------------------- */
-static int mig_start(ftl_context_t *ftl, const super_block_t *victim, mig_kind_t kind, mig_post_t post)
+static bool mig_start(ftl_context_t *ftl, const super_block_t *victim, mig_kind_t kind, mig_post_t post)
 {
     mig_job_t *m;
     uint32_t   valid_total = 0U;
     uint8_t    p;
 
-    if ((ftl == NULL) || (victim == NULL) || (ftl->mig.active != 0U))
+    /* ftl / victim 是前置条件（判据 2）：唯一调用者是本文件的 mig_begin_*，各自已断言，
+     * victim 一律传本函数内的局部 sb 或其地址 ⇒ 死守卫，不复检。
+     * active != 0 是**运行时状态**（判据 3）：job 在飞 ⇒ 不重入。 */
+    if (ftl->mig.active != 0U)
     {
-        return 0;
+        return false;
     }
 
     m = &ftl->mig;
@@ -107,7 +110,7 @@ static int mig_start(ftl_context_t *ftl, const super_block_t *victim, mig_kind_t
     /* 快路径：无任何有效 CW ⇒ 无可搬移，直接进擦除。 */
     for (p = 0U; p < PLANE_NUM; p++)
     {
-        if (super_block_has_plane(&m->victim, p) != 0U)
+        if (super_block_has_plane(&m->victim, p))
         {
             valid_total += ftl->alloc.blocks[ftl_gblock(p, m->victim.plane_blocks[p])].valid_count;
         }
@@ -115,49 +118,52 @@ static int mig_start(ftl_context_t *ftl, const super_block_t *victim, mig_kind_t
     m->phase = (valid_total == 0U) ? (uint8_t)MIG_ERASE : (uint8_t)MIG_READ;
 
     mig_step(ftl);
-    return 1;
+    return true;
 }
 
-int mig_begin_gc(ftl_context_t *ftl)
+bool mig_begin_gc(ftl_context_t *ftl)
 {
     super_block_t *victim;
 
-    if ((ftl == NULL) || (ftl->mig.active != 0U))
+    /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
+    ASSERT(ftl != NULL);
+    if (ftl->mig.active != 0U)
     {
-        return 0;
+        return false;
     }
 
-    if (gc_select_victim(&ftl->alloc, &victim) == 0)
+    if (!gc_select_victim(&ftl->alloc, &victim))
     {
         /* 触发但选不出 victim = 卡死嫌疑（观测计数，见 ftl.h）。 */
         ftl->gc_novictim_count++;
-        return 0;
+        return false;
     }
 
     return mig_start(ftl, victim, MIG_KIND_GC, MIG_POST_FREE);
 }
 
-int mig_begin_wl(ftl_context_t *ftl)
+bool mig_begin_wl(ftl_context_t *ftl)
 {
     wl_victim_t   victim;
     super_block_t sb;
 
-    if ((ftl == NULL) || (ftl->mig.active != 0U))
+    /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
+    ASSERT(ftl != NULL);
+    if (ftl->mig.active != 0U)
     {
-        return 0;
+        return false;
     }
-    if (wl_should_trigger(ftl) == 0)
+    if (!wl_should_trigger(ftl))
     {
-        return 0;
+        return false;
     }
-    if (wl_select_victim(ftl, &victim) == 0)
+    if (!wl_select_victim(ftl, &victim))
     {
-        return 0;
+        return false;
     }
 
-    /* wl_victim_t 只带 plane_blocks ⇒ 补上拓扑（super_block_page_pba 需要 sb->topo.lun）。 */
+    /* wl_victim_t 只带 plane_blocks ⇒ 组装成本实例的 SB 视图（拓扑由调用点自 alloc 取）。 */
     memset(&sb, 0, sizeof(sb));
-    sb.topo = ftl->topo;
     for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
         sb.plane_blocks[p] = victim.plane_blocks[p];
@@ -166,19 +172,21 @@ int mig_begin_wl(ftl_context_t *ftl)
     return mig_start(ftl, &sb, MIG_KIND_WL, MIG_POST_RETIRE);
 }
 
-int mig_begin_predict(ftl_context_t *ftl)
+bool mig_begin_predict(ftl_context_t *ftl)
 {
     uint16_t      gblock;
     uint16_t      closed_idx;
     super_block_t sb;
 
-    if ((ftl == NULL) || (ftl->mig.active != 0U))
+    /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
+    ASSERT(ftl != NULL);
+    if (ftl->mig.active != 0U)
     {
-        return 0;
+        return false;
     }
-    if (rr_predictive_scan(&ftl->alloc, &gblock) == 0)
+    if (!rr_predictive_scan(&ftl->alloc, &gblock))
     {
-        return 0;
+        return false;
     }
 
     /* 慢死块必在 closed_sb_list 中（scan 只返回 CLOSED 块） */
@@ -186,7 +194,6 @@ int mig_begin_predict(ftl_context_t *ftl)
     ASSERT(closed_idx < allocator_closed_count(&ftl->alloc));
 
     memset(&sb, 0, sizeof(sb));
-    sb.topo = ftl->topo;
     for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
         sb.plane_blocks[p] = allocator_closed_at(&ftl->alloc, closed_idx)->plane_blocks[p];
@@ -266,7 +273,7 @@ static ftl_status_t mig_submit_erase(ftl_context_t *ftl)
     fc_command_t *cmd;
     nand_pba_t    block_addr;
 
-    block_addr = super_block_page_pba(ftl->alloc.ch, ftl->alloc.ce, &m->victim, m->plane, 0U);
+    block_addr = super_block_page_pba(ftl->topo, &m->victim, m->plane, 0U);
 
     if (ftl_async_erase_block(&cmd, block_addr) != FTL_OK)
     {
@@ -289,8 +296,8 @@ static ftl_status_t mig_submit_erase(ftl_context_t *ftl)
 
 /* ── 4. 收尾 ── */
 
-/* 累计一次「提交不出去」；超限即中止 job。返回 1 = 已中止。 */
-static int mig_stall(ftl_context_t *ftl)
+/* 累计一次「提交不出去」；超限即中止 job。返回 true = 已中止。 */
+static bool mig_stall(ftl_context_t *ftl)
 {
     mig_job_t *m = &ftl->mig;
 
@@ -305,10 +312,10 @@ static int mig_stall(ftl_context_t *ftl)
              (unsigned)m->victim.plane_blocks[1]);
         m->aborted = 1U;
         m->phase   = (uint8_t)MIG_DONE;
-        return 1;
+        return true;
     }
     m->stall_rounds++;
-    return 0;
+    return false;
 }
 
 /* 推进到下一页（清本页状态）。读/写两阶段的页推进都走这里。 */
@@ -430,7 +437,7 @@ static void mig_step(ftl_context_t *ftl)
                 /* 找本页下一个有物理块的 plane */
                 for (p = m->plane; p < PLANE_NUM; p++)
                 {
-                    if (super_block_has_plane(&m->victim, p) != 0U)
+                    if (super_block_has_plane(&m->victim, p))
                     {
                         break;
                     }
@@ -474,7 +481,7 @@ static void mig_step(ftl_context_t *ftl)
                 }
 
                 /* 本页本 plane 的源地址（页基址）。全局块号不缓存 —— 现算，见 mig_src_gblock。 */
-                m->src[m->plane] = super_block_page_pba(ftl->alloc.ch, ftl->alloc.ce, &m->victim, m->plane, m->page);
+                m->src[m->plane] = super_block_page_pba(ftl->topo, &m->victim, m->plane, m->page);
                 memset(m->page_buf[m->plane], 0, PAGE_MAIN_SIZE);
 
                 if (mig_submit_read(ftl) != FTL_OK)
@@ -507,7 +514,7 @@ static void mig_step(ftl_context_t *ftl)
                         {
                             continue;
                         }
-                        if (l2p_cache_ready(&ftl->cache, m->cw_lba[plane][cw]) == 0)
+                        if (!l2p_cache_ready(&ftl->cache, m->cw_lba[plane][cw]))
                         {
                             m->stall_rounds = 0U; /* 加载在飞 = 有进展，不是提交卡死 */
                             return;
@@ -555,7 +562,7 @@ static void mig_step(ftl_context_t *ftl)
                         {
                             continue;
                         }
-                        if (l2p_cache_ready(&ftl->cache, m->cw_lba[plane][cw]) == 0)
+                        if (!l2p_cache_ready(&ftl->cache, m->cw_lba[plane][cw]))
                         {
                             m->stall_rounds = 0U;
                             return;
@@ -644,7 +651,7 @@ static void mig_step(ftl_context_t *ftl)
                 if ((ftl->journal.job.need_erase != 0U) || (ftl->journal.current_entry != 0U))
                 {
                     /* 想刷却刷不动（命令池空）⇒ 计卡死轮数；超限中止（**不擦 victim**） */
-                    if (mig_stall(ftl) != 0)
+                    if (mig_stall(ftl))
                     {
                         return;
                     }
@@ -662,7 +669,7 @@ static void mig_step(ftl_context_t *ftl)
 
                 for (p = m->plane; p < PLANE_NUM; p++)
                 {
-                    if (super_block_has_plane(&m->victim, p) != 0U)
+                    if (super_block_has_plane(&m->victim, p))
                     {
                         break;
                     }
@@ -699,10 +706,8 @@ void mig_service(ftl_context_t *ftl)
 {
     mig_job_t *m;
 
-    if (ftl == NULL)
-    {
-        return;
-    }
+    /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
+    ASSERT(ftl != NULL);
 
     m = &ftl->mig;
 
@@ -713,7 +718,7 @@ void mig_service(ftl_context_t *ftl)
     }
 
     /* 心跳（见 ftl_job.h）：搬移最长（64 页 × 2 plane），没有它卡死不可见 */
-    if (ftl_job_heartbeat(&m->log_ms, &m->start_ms) != 0)
+    if (ftl_job_heartbeat(&m->log_ms, &m->start_ms))
     {
         LOGI("[MIG] job kind=%u phase=%u page=%u plane=%u aborted=%u age=%lums\r\n",
              (unsigned)m->kind,
@@ -771,7 +776,7 @@ void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completi
             if ((completion->status & FC_CW_STATUS_ERROR_MASK) == 0U)
             {
                 (void)ftl_cmd_read_data(cmd, m->page_buf[plane], PAGE_MAIN_SIZE);
-                if (gc_decode_cw_lba(cmd, m->src[plane], m->cw_lba[plane], &m->base[plane]) == 0)
+                if (gc_decode_cw_lba(cmd, m->src[plane], m->cw_lba[plane], &m->base[plane]))
                 {
                     ftl_block_t *src_blk = &ftl->alloc.blocks[mig_src_gblock(m, plane)];
 

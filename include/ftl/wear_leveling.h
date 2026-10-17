@@ -59,9 +59,9 @@ typedef struct
  *   条件 3：低擦除区（min ~ min+1000）中的 Block 占比 ≥ 5%
  *
  * @param ftl  FTL 上下文
- * @return 1 需要触发，0 不需要
+ * @return true 需要触发，false 不需要
  */
-int wl_should_trigger(const struct ftl_context *ftl);
+bool wl_should_trigger(const struct ftl_context *ftl);
 
 /*
  * wl_select_victim - 选择 WL victim Super Block
@@ -71,9 +71,9 @@ int wl_should_trigger(const struct ftl_context *ftl);
  *
  * @param ftl    FTL 上下文
  * @param victim 输出：选中的 victim
- * @return 1 找到，0 无合适 victim
+ * @return true 找到，false 无合适 victim
  */
-int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim);
+bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim);
 
 /*
  * ⚠ 搬移（原 wl_relocate / wl_execute / wl_predictive_relocate）已随阶段 4 迁入

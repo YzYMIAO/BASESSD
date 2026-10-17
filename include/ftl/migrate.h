@@ -162,26 +162,26 @@ typedef struct
  * 选不出 victim ⇒ gc_novictim_count++ 并返回 0（"触发但选不出 victim"是卡死嫌疑，
  * 该计数是区分「在推进」与「卡死」的唯一判据，见 ftl.h）。
  *
- * @param ftl FTL 实例
- * @return 1 = 已启动 job；0 = 未启动（job 忙 / 无 victim / 参数非法）
+ * @param ftl FTL 实例（**前置条件**，非法即 ASSERT）
+ * @return true = 已启动 job；false = 未启动（job 忙 / 无 victim）
  */
-int mig_begin_gc(ftl_context_t *ftl);
+bool mig_begin_gc(ftl_context_t *ftl);
 
 /*
  * mig_begin_wl - 触发判定 → 选 victim → 启动一个静态 WL 搬移 job
  *
- * @param ftl FTL 实例
- * @return 1 = 已启动 job；0 = 未启动（job 忙 / 未触发 / 无 victim / 参数非法）
+ * @param ftl FTL 实例（**前置条件**，非法即 ASSERT）
+ * @return true = 已启动 job；false = 未启动（job 忙 / 未触发 / 无 victim）
  */
-int mig_begin_wl(ftl_context_t *ftl);
+bool mig_begin_wl(ftl_context_t *ftl);
 
 /*
  * mig_begin_predict - 慢死预测巡检 → 启动一个"搬空并退役"的搬移 job
  *
- * @param ftl FTL 实例
- * @return 1 = 已启动 job；0 = 未启动（job 忙 / 未命中 / 参数非法）
+ * @param ftl FTL 实例（**前置条件**，非法即 ASSERT）
+ * @return true = 已启动 job；false = 未启动（job 忙 / 未命中）
  */
-int mig_begin_predict(ftl_context_t *ftl);
+bool mig_begin_predict(ftl_context_t *ftl);
 
 /*
  * mig_service - 推进搬移 job（每轮 ftl_service 的 IDLE / NORMAL / BUSY 三档都要调）
@@ -191,7 +191,7 @@ int mig_begin_predict(ftl_context_t *ftl);
  *
  * ⚠ 本函数**不**同步等待；提交走 ftl_async_* + ftl_op_submit。
  *
- * @param ftl FTL 实例
+ * @param ftl FTL 实例（**前置条件**，非法即 ASSERT）
  */
 void mig_service(ftl_context_t *ftl);
 

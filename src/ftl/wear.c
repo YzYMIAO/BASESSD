@@ -82,9 +82,9 @@ void wear_mark_dirty(ftl_allocator_t *alloc, uint16_t gblock)
 }
 
 /* wear_snapshot_get — 本批起点快照里该块是否脏（"本批写哪些块"的唯一判据） */
-static int wear_snapshot_get(const ftl_allocator_t *alloc, uint16_t gblock)
+static bool wear_snapshot_get(const ftl_allocator_t *alloc, uint16_t gblock)
 {
-    return (int)((alloc->wear.dirty_snapshot[gblock >> 3] >> (gblock & 7U)) & 1U);
+    return ((alloc->wear.dirty_snapshot[gblock >> 3] >> (gblock & 7U)) & 1U) != 0U;
 }
 
 /* ── 2. 页地址 ── */
@@ -164,7 +164,7 @@ static ftl_status_t wear_submit_next_page(ftl_allocator_t *alloc)
 
     for (gblock = alloc->wear.job.cursor; gblock < FTL_BLOCK_TOTAL; gblock++)
     {
-        if ((alloc->wear.job.dirty_only != 0U) && (wear_snapshot_get(alloc, gblock) == 0))
+        if ((alloc->wear.job.dirty_only != 0U) && (!wear_snapshot_get(alloc, gblock)))
         {
             continue;
         }
@@ -240,17 +240,12 @@ void wear_kick(ftl_allocator_t *alloc, uint32_t total_writes)
     uint32_t                  dirty_count;
     uint32_t                  pages_needed;
 
-    if ((alloc == NULL) || (alloc->blocks == NULL))
-    {
-        return;
-    }
-
     /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/cursor/age */
     if (alloc->wear.job.phase == (uint8_t)WEAR_JOB_IDLE)
     {
         ftl_job_heartbeat_reset(&alloc->wear.job.log_ms, &alloc->wear.job.start_ms);
     }
-    else if (ftl_job_heartbeat(&alloc->wear.job.log_ms, &alloc->wear.job.start_ms) != 0)
+    else if (ftl_job_heartbeat(&alloc->wear.job.log_ms, &alloc->wear.job.start_ms))
     {
         LOGI("[WEAR] job phase=%u waiting=%u full=%u cursor=%u age=%lums\r\n",
              (unsigned)alloc->wear.job.phase,
@@ -428,7 +423,7 @@ void ftl_op_wear(struct ftl_context *ftl, const fc_command_status_t *completion,
  * wear_init
  *   功能：开机逐页回放 WEAR_BLOCK 日志，恢复各块读/擦计数；并打印观测口。
  *   参数：alloc —— 分配器（承载计数）。
- *   返回：FTL_OK 成功（含冷启动无有效页）；FTL_ERROR 参数非法。
+ *   返回：FTL_OK 成功（含冷启动无有效页）；FTL_ERROR 回放读失败。
  *   实现要点：页序 == sequence 序（只追加），故**第一个无效页即日志末尾**，回放到此为止；
  *             无有效页 = 冷启动（计数保持 ftl_init 的零值），**不 brick 开机**（非致命）。
  * -------------------------------------------------------------------- */
@@ -441,11 +436,6 @@ ftl_status_t wear_init(ftl_allocator_t *alloc)
     uint32_t    min_ec      = 0U;
     int         have_min    = 0;
     uint16_t    gblock;
-
-    if ((alloc == NULL) || (alloc->blocks == NULL))
-    {
-        return FTL_ERROR;
-    }
 
     memset(alloc->wear.dirty, 0, sizeof(alloc->wear.dirty));
     alloc->wear.sequence          = 0U;

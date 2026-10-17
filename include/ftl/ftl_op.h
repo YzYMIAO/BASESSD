@@ -106,9 +106,9 @@ void ftl_op_dispatch(const fc_command_status_t *completion);
  * 已落地的一处用法：journal_append 页满时若异步刷页起不来，**不在**派发上下文里
  * 同步回退（会嵌套），改为丢弃该条目 + LOGE（见 journal.c）。
  *
- * @return 1 = 在派发内；0 = 不在。
+ * @return true = 在派发内；false = 不在。
  */
-int ftl_op_in_dispatch(void);
+bool ftl_op_in_dispatch(void);
 
 /*
  * ftl_op_host_io - host 读写子操作的完成服务函数（定义在 ftl.c）。

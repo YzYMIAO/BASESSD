@@ -40,6 +40,16 @@
  *    列表实际只收**已关闭**的条目（`allocator_close_sb` 在拷贝前就把 valid 清 0），
  *    但消费方仍应经 `super_block_is_closed()` 过滤——这条过滤是 UT 钉住的契约
  *    （`test_gc_victim_skips_open`），不是可有可无的冗余。
+ *
+ * ⑤ **指针 / 索引类实参是前置条件，由调用者保证；非法即 `ASSERT`。**
+ *    本模块全部入口按 `docs/design/assertion_guidelines.md` 判据 2 处理（判据 2 的层内模块头
+ *    名单里逐字列了 `allocator.h`）：实参都是调用者自己持有的指针（`&ftl->alloc`）或自己
+ *    算出的索引（victim / 出厂扫描 / Spare 取块），不存在"外部输入" ⇒ **不返回错误码**。
+ *    **保留返回码的只有三处**：`allocator_alloc_pair` / `allocator_alloc_reserved_block`
+ *    的池空（判据 3 资源类结果）、`allocator_close_open_sb` 对已关闭槽的幂等早退（§十三
+ *    `fc_command_release` 先例）。
+ *    ⚠ 例外：`allocator_remove_from_free` 的「不在池内 ⇒ no-op」是判据 4 **明文举的**
+ *    文档化契约（UT 钉住），不要"顺手"转成 ASSERT。
  */
 
 #include "common/assertion.h" /* ASSERT（退化单 plane 条目展开地址是编码错误） */
@@ -98,7 +108,7 @@
  * 已置 CLOSED、`sb_id` 已写成越界索引，却不在列表里 ⇒ GC 永不可见 ⇒ 永久漏账）。
  * 定成上界后，两条路径的「列表满」都成了**结构上不可能**，守卫才配称不变量。
  *
- * 代价：12 KB → 48 KB（`super_block_t` 12 B × 4096），单实例一次性。
+ * 代价：8 KB → 32 KB（`super_block_t` 8 B × 4096），单实例一次性。
  */
 #define SUPER_BLOCK_LIST_MAX (FTL_BLOCK_TOTAL)
 
@@ -108,6 +118,20 @@
  * 条目允许只含一个 plane：另一个 plane 记本哨兵。Open SB（hot_sb/cold_sb，multi-plane 写的
  * 单元）恒为双 plane，不受影响。凡按 plane 展开地址的读者都要先判哨兵。 */
 #define FTL_BLOCK_NO_PLANE (UINT16_MAX)
+
+/* ── 选块失败哨兵（gblock 坐标的「无此块」）──
+ *
+ * 选块（`allocator_select_plane_block_from_pool`）返回的是 **gblock**（跨 plane 全局编号）；
+ * 该 plane 的 Free Pool 里没有可用块时返回本哨兵。取 `UINT16_MAX` 的判据是它**超出 gblock
+ * 值域**——`ftl_gblock_plane()` 会解出 ≥ PLANE_NUM 的越界 plane（`bst.h`），可判、不与合法块号相撞。
+ *
+ * ⚠ **与 `FTL_BLOCK_NO_PLANE` 值相同、语义不同，不可互换**（C9：同一语义只允许一套坐标，
+ *   反过来「一个值落在两套坐标里」也要分清）：
+ *     · `FTL_BLOCK_NO_PLANE` —— **plane 内块号**槽位（`super_block_t.plane_blocks[]`）的
+ *       「该 plane 无块」**存储态**哨兵，会被写进 closed_sb_list **持久化**；
+ *     · `FTL_GBLOCK_INVALID` —— **gblock** 坐标的「选块失败」**瞬时返回值**，从不落盘。
+ */
+#define FTL_GBLOCK_INVALID (UINT16_MAX)
 
 /* ── Super Block ──
  *
@@ -119,11 +143,10 @@
 
 typedef struct
 {
-    ftl_topology_t topo;                    /* 本 Super Block 绑定的 NAND 芯片路由（ch/ce/lun） */
-    uint16_t       plane_blocks[PLANE_NUM]; /* 各 Plane 的 Block 号；可为 FTL_BLOCK_NO_PLANE（退化单 plane 条目） */
-    uint8_t        next_page;               /* 当前写入页（0~63，双 Plane 同步） */
-    uint8_t        temperature;             /* FTL_TEMP_HOT / FTL_TEMP_COLD */
-    uint8_t        valid;                   /* 1=正在使用（Open），0=已关闭 */
+    uint16_t plane_blocks[PLANE_NUM]; /* 各 Plane 的 Block 号；可为 FTL_BLOCK_NO_PLANE（退化单 plane 条目） */
+    uint8_t  next_page;               /* 当前写入页（0~63，双 Plane 同步） */
+    uint8_t  temperature;             /* FTL_TEMP_HOT / FTL_TEMP_COLD */
+    uint8_t  valid;                   /* 1=正在使用（Open），0=已关闭 */
 } super_block_t;
 
 /* ── FTL 自持表（P2-5）──
@@ -148,20 +171,22 @@ typedef struct
 
 /* 该 plane 是否持有物理块（Policy B：Closed 条目允许退化单 plane，另一 plane 记哨兵）。
  * 凡按 plane 展开地址 / 索引 BST / 擦除的读者都要先判——哨兵不是合法块号。 */
-static inline uint8_t super_block_has_plane(const super_block_t *sb, uint8_t plane)
+static inline bool super_block_has_plane(const super_block_t *sb, uint8_t plane)
 {
-    return (sb->plane_blocks[plane] != FTL_BLOCK_NO_PLANE) ? 1U : 0U;
+    return (sb->plane_blocks[plane] != FTL_BLOCK_NO_PLANE);
 }
 
-/* 返回 Super Block 中指定 Plane/Page 的 PBA（用户数据使用 FTL_DATA_CH/CE） */
-static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const super_block_t *sb, uint8_t plane, uint8_t page)
+/* 返回 Super Block 中指定 Plane/Page 的 PBA（用户数据使用本实例的 ch/ce/lun）
+ *
+ * 拓扑由形参给出（`ftl_topology_t` 是 FTL 层 ch/ce/lun 的唯一坐标）—— Super Block 自身
+ * **不带路由**：它永属同一个实例（Policy B），路由就是拥有它的那个实例的拓扑。 */
+static inline nand_pba_t super_block_page_pba(ftl_topology_t topo, const super_block_t *sb, uint8_t plane, uint8_t page)
 {
     /* 退化单 plane 条目的哨兵 plane 不可展开（plane_blocks[plane] 是哨兵，非块号） */
-    ASSERT(super_block_has_plane(sb, plane) != 0U);
+    ASSERT(super_block_has_plane(sb, plane));
 
-    /* ch/ce 取形参（调用点自带的 FTL_DATA_CH/CE）；lun 取 sb->topo —— sb->topo 就是
-     * 本实例的 topo（见 allocator.c 的「绑定真实拓扑」）。cw = 0 = 整页（页级基址）。 */
-    return pba_make(ch, ce, sb->topo.lun, sb->plane_blocks[plane], plane, page, 0U);
+    /* cw = 0 = 整页（页级基址）。 */
+    return pba_make(topo.ch, topo.ce, topo.lun, sb->plane_blocks[plane], plane, page, 0U);
 }
 
 /* ── Super Block 开闭谓词 ──
@@ -172,14 +197,14 @@ static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const supe
  *   看不出这层含义，读反了会让该条目对 GC/WL **永久不可见** ⇒ 选不出 victim ⇒
  *   空闲池只出不进 ⇒ 写最终永久失败（见 allocator.c 的 allocator_close_sb 长注释）。
  *   一律经谓词读，不要在调用点裸比 `sb->valid`。 */
-static inline uint8_t super_block_is_open(const super_block_t *sb)
+static inline bool super_block_is_open(const super_block_t *sb)
 {
-    return (sb->valid != 0U) ? 1U : 0U;
+    return (sb->valid != 0U);
 }
 
-static inline uint8_t super_block_is_closed(const super_block_t *sb)
+static inline bool super_block_is_closed(const super_block_t *sb)
 {
-    return (sb->valid == 0U) ? 1U : 0U;
+    return (sb->valid == 0U);
 }
 
 /* ── 元数据池游标（序 4：per-instance）──
@@ -312,6 +337,14 @@ typedef struct
     wear_state_t wear; /* 磨损计数日志：sequence / next_page / 节拍基准 / 脏位图 */
 } ftl_allocator_t;
 
+/* 本实例的拓扑（allocator 自持的那份 ch/ce/lun 副本 → 标准 ftl_topology_t）。
+ * 只有 alloc 在手、拿不到 ftl_context_t 的调用点（allocator.c / bbt.c）用它；
+ * 有 ftl 的调用点直接传 ftl->topo 即可，不必绕这一层。 */
+static inline ftl_topology_t allocator_topo(const ftl_allocator_t *alloc)
+{
+    return (ftl_topology_t){.ch = alloc->ch, .ce = alloc->ce, .lun = alloc->lun};
+}
+
 /* ── 账本只读访问器 ──
  *
  * 外部模块（GC / WL / migrate / 掉电恢复 / CLI / 元数据）一律经这里读账本，
@@ -368,54 +401,54 @@ static inline super_block_t *allocator_closed_at(const ftl_allocator_t *alloc, u
  *   · Spare 池的入池发生在掉电重建逐块扫描时，好块数可能超过池容量 ⇒ 满也是常态。
  * 调用者据此决定回退（如 main.c 回填：池满 ⇒ 改送 Free Pool）。 */
 
-static inline uint8_t allocator_op_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gblock)
+static inline bool allocator_op_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gblock)
 {
     ASSERT(plane < PLANE_NUM);
     if (alloc->op_count[plane] >= (uint16_t)FTL_OP_BLOCKS_PER_PLANE)
     {
-        return 0U;
+        return false;
     }
     alloc->op_blocks[plane][alloc->op_count[plane]] = gblock;
     alloc->op_count[plane]++;
-    return 1U;
+    return true;
 }
 
-static inline uint8_t allocator_op_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
+static inline bool allocator_op_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
 {
     ASSERT(plane < PLANE_NUM);
     ASSERT(out_gblock != NULL);
     if (alloc->op_count[plane] == 0U)
     {
-        return 0U;
+        return false;
     }
     alloc->op_count[plane]--;
     *out_gblock = alloc->op_blocks[plane][alloc->op_count[plane]];
-    return 1U;
+    return true;
 }
 
-static inline uint8_t allocator_spare_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gblock)
+static inline bool allocator_spare_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gblock)
 {
     ASSERT(plane < PLANE_NUM);
     if (alloc->spare_count[plane] >= (uint16_t)FTL_SPARE_POOL_PER_PLANE)
     {
-        return 0U;
+        return false;
     }
     alloc->spare_blocks[plane][alloc->spare_count[plane]] = gblock;
     alloc->spare_count[plane]++;
-    return 1U;
+    return true;
 }
 
-static inline uint8_t allocator_spare_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
+static inline bool allocator_spare_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
 {
     ASSERT(plane < PLANE_NUM);
     ASSERT(out_gblock != NULL);
     if (alloc->spare_count[plane] == 0U)
     {
-        return 0U;
+        return false;
     }
     alloc->spare_count[plane]--;
     *out_gblock = alloc->spare_blocks[plane][alloc->spare_count[plane]];
-    return 1U;
+    return true;
 }
 
 /* ── 接口函数 ── */
@@ -427,7 +460,7 @@ static inline uint8_t allocator_spare_try_pop(ftl_allocator_t *alloc, uint8_t pl
  * @param topo    本实例绑定的 NAND 芯片路由
  * @param tables  FTL 自持表（P2-5：由 ftl_context_t 内含；本函数只绑定指针，不复制）
  *
- * @return ftl_status_t — FTL_OK 成功
+ * @return ftl_status_t — 恒 FTL_OK（`alloc`/`tables` 是前置条件，非法即 ASSERT，见不变量 ⑤）
  */
 ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
 
@@ -453,7 +486,9 @@ nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nan
  * allocator_free_block - GC 擦除后将 Block 归还到 Free Pool
  *
  * @param alloc  Allocator 上下文
- * @param gblock 要归还的 Block 编号（全局 Block 号）
+ * @param gblock 要归还的 Block 编号（全局 Block 号）。**前置条件：`< FTL_BLOCK_TOTAL`**——
+ *               越界索引会踩进相邻的 `free_blocks[]`，故 debug 用 ASSERT、release 用
+ *               运行期拒绝（判据 9：后果是静默漏账而非崩溃）。
  */
 void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
 
@@ -480,7 +515,8 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
  * @param alloc      Allocator 上下文
  * @param plane      目标 plane（0..PLANE_NUM-1）
  * @param out_gblock 输出：全局 Block 号（plane × BLOCKS_PER_PLANE + block）
- * @return FTL_OK / FTL_ERROR（参数非法或该 plane 无空闲块）
+ * @return FTL_OK / FTL_ERROR（**仅**表示该 plane 无空闲块——资源类结果，判据 3；
+ *         实参非法是前置条件，即 ASSERT，见不变量 ⑤）
  */
 ftl_status_t allocator_alloc_reserved_block(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock);
 
@@ -526,7 +562,7 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx);
  * 不能复用 allocator_close_sb（那是 Open SB 的关闭流程，前半段只清 OPEN
  * 不清 FREE，而重建块的 RAM 态是 FREE）。本函数仿照 close_sb 的后半段：
  *
- *   sb = { topo=alloc 维度, plane_blocks=入参, next_page=PAGES_PER_BLOCK,
+ *   sb = { plane_blocks=入参, next_page=PAGES_PER_BLOCK,
  *          temperature=入参, valid=0 }
  *   各 plane 的块置 CLOSED（清 FREE/OPEN）+ 温度 + sb_id = closed 列表索引
  *   追加进 closed_sb_list，closed_sb_count++
@@ -535,8 +571,8 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx);
  * @param plane_blocks   [PLANE_NUM] 每 plane 的 Block 号；Policy B 下逐 plane 独立分配，
  *                       重建产生的**退化单 plane 条目**把另一 plane 记 FTL_BLOCK_NO_PLANE
  * @param temperature    FTL_TEMP_HOT / FTL_TEMP_COLD（掉电无落盘，调用方给默认）
- * @return 塞入的 closed 列表索引；UINT16_MAX 仅表示参数非法（列表满在结构上不可能，
- *         见 SUPER_BLOCK_LIST_MAX，真满了是 ASSERT 停机）
+ * @return 塞入的 closed 列表索引。**无失败返回**——实参是前置条件（不变量 ⑤），列表满在
+ *         结构上不可能（见 SUPER_BLOCK_LIST_MAX），真满了是 ASSERT 停机
  */
 uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
                                  const uint16_t   plane_blocks[PLANE_NUM],

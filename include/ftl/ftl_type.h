@@ -53,6 +53,17 @@ typedef enum
  *
  * ftl_init 内部初始化，不暴露给 controller 层。
  * 各子模块在初始化时接收一份副本。
+ *
+ * ⚠ 2026-10-17 记（**有意不做的优化**，别当漏项）：本类型**可以**改成位域
+ *   （ch:2 / ce:2 / lun:?）省下每份 2 字节，但**当前不改**。收益 ~10 字节
+ *   （3 B → 1 B，常驻副本仅 3 份：ftl->topo / journal->topo / metadata_dir.topo），
+ *   代价四项：① 位宽宏在 nand_config.h，本头在依赖图底座，得加 include 才够得着；
+ *   ② 本器件 LUN_ADDR_WIDTH == 0，不能声明 `lun : 0`（C11 6.7.2.1p4）——隐去该成员
+ *   会打断全仓 20+ 处 `.lun`（本类型 HIL 可见，见 main.c 的 ftl_init 调用），
+ *   给 `lun : 1` 兜底则是个装饰位（PBA 里根本没有 lun 位，唯一合法值是 0）；
+ *   ③ 位域布局 implementation-defined（同 nand_pba_fields_t，得配开机自检）；
+ *   ④ CH_NUM 长大后静默截断，而防它的 _Static_assert 放不进本头。
+ *   ⇒ 换多 die 芯片（LUN_ADDR_WIDTH > 0）或本类型副本数显著增多时再重估。
  */
 typedef struct
 {

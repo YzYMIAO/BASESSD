@@ -59,8 +59,8 @@ typedef struct
  *   尾巴 64 字节溢进备区），不是出厂标记 ⇒ 重扫会把所有写过的块（含活的 Anchor/
  *   Checkpoint/Wear）判成坏块并 bbt_save 落盘。详见 bbt.c 的 bbt_medium_has_ftl_data。
  *
- * @param alloc  Allocator 上下文（blocks、bad_count 等输出）
- * @return 0 成功（含"拒绝扫描"），-1 参数非法
+ * @param alloc  Allocator 上下文（blocks、bad_count 等输出）；**前置条件**，非法即 ASSERT
+ * @return 0 成功（含"拒绝扫描"），-1 BBT 加载路径失败
  */
 ftl_status_t bbt_init(ftl_allocator_t *alloc);
 
@@ -118,7 +118,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc);
  *
  * ⚠ 本片芯片若已被整片擦过，出厂标记即已丢失 ⇒ 只会读到全 0xFF（不是 bug）。
  *
- * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）
+ * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）；**前置条件**，非法即 ASSERT
  * @param do_erase  0 = 只读（非破坏性）；非 0 = 逐块擦除并额外判擦除失败
  */
 void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase);
@@ -133,8 +133,8 @@ void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase);
  * ⚠ 因此「必须在 bbt_init 之后调用」是**承重的**（出厂标记此时已在 BST 里）；
  *   擦完由调用方 bbt_save() 重新持久化坏块图。
  *
- * @param alloc  Allocator 上下文（取 ch/ce 与块几何）
- * @return FTL_OK / FTL_ERROR（参数非法）
+ * @param alloc  Allocator 上下文（取 ch/ce 与块几何）；**前置条件**，非法即 ASSERT
+ * @return FTL_OK / FTL_ERROR（擦除失败）
  */
 ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc);
 
@@ -155,15 +155,15 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
  *
  * @param bad_map  BBT bitmap
  * @param block    Block 编号
- * @return 1 坏块，0 好块
+ * @return true 坏块，false 好块
  */
-static inline int bbt_is_bad(const uint8_t *bad_map, uint16_t block)
+static inline bool bbt_is_bad(const uint8_t *bad_map, uint16_t block)
 {
     if (bad_map == NULL)
     {
-        return 0;
+        return false;
     }
-    return (bad_map[block >> 3] >> (block & 7U)) & 1U;
+    return ((bad_map[block >> 3] >> (block & 7U)) & 1U) != 0U;
 }
 
 /*
@@ -185,7 +185,7 @@ static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
  *
  * 池内下一槽追加一条 record（块满先擦池内下一块）。sequence 递增。
  *
- * @param alloc  Allocator 上下文（游标/序号在 alloc->bbt，序 4 起 per-instance）
+ * @param alloc  Allocator 上下文（游标/序号在 alloc->bbt，序 4 起 per-instance）；**前置条件**，非法即 ASSERT
  * @return 0 成功，-1 失败
  */
 ftl_status_t bbt_save(ftl_allocator_t *alloc);
@@ -206,7 +206,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc);
  *   不重走换块判定——擦已成功，重擦纯属磨损。
  * ⚠ 只由 ftl_service 的后台档（idle/normal）调用。开机/格式化路径仍走同步 bbt_save。
  *
- * @param alloc  Allocator 上下文
+ * @param alloc  Allocator 上下文；**前置条件**，非法即 ASSERT
  */
 void bbt_kick(ftl_allocator_t *alloc);
 
@@ -216,7 +216,8 @@ void bbt_kick(ftl_allocator_t *alloc);
  * 池内轮转扫描（metadata_ring_locate），选 magic 正确且 sequence 最大者。
  * 命中时同时恢复本实例的 sequence 计数与写游标（alloc->bbt）。
  *
- * @param alloc       Allocator 上下文（池路由取其 ch/ce/lun；游标/序号写回 alloc->bbt）
+ * @param alloc       Allocator 上下文（池路由取其 ch/ce/lun；游标/序号写回 alloc->bbt）；
+ *                    与其余三个出参指针同为**前置条件**，非法即 ASSERT
  * @param bad_map     输出：bt_bitmap[512]
  * @param bad_count   输出：坏块数
  * @param sequence    输出：最新 sequence

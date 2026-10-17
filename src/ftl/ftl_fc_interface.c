@@ -123,7 +123,7 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
      * 唯一合法失败是**池空**（desc/buffer）——那才是返回码。 */
     ASSERT(cmd != NULL);
 
-    if (ftl_cmd_needs_desc_chain(cmd) == 0U)
+    if (!ftl_cmd_needs_desc_chain(cmd))
     {
         cmd->desc_id = FC_DESCRIPTOR_ID_INVALID;
         return FTL_OK;
@@ -285,7 +285,7 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
     ASSERT(pba_is_valid(pba[first_plane]));
     ftl_cmd_bind_pair_topo(cmd, pba[first_plane]);
 
-    if (ftl_cmd_needs_desc_chain(cmd) == 0U)
+    if (!ftl_cmd_needs_desc_chain(cmd))
     {
         cmd->desc_id = FC_DESCRIPTOR_ID_INVALID;
         return FTL_OK;
@@ -488,7 +488,7 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
      * 目标终态：本函数只被开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI 调用
      * （那些路径在 superloop 之前，没有别人 drain CQ，必须同步）。
      * 新增调用点若触发本断言，说明该功能尚未 job 化——改用 ftl_async_* + ftl_op_submit。 */
-    ASSERT(ftl_op_in_dispatch() == 0);
+    ASSERT(!ftl_op_in_dispatch());
 
     waiter.cmd_id = ftl_cmd_id(cmd);
     waiter.done   = 0U;
@@ -838,10 +838,8 @@ ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const 
 {
     fc_command_t *cmd;
 
-    if (out_cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2 / §二十六 FTL↔FC 边界）：调用者一律传本函数内局部 cmd 的地址。 */
+    ASSERT(out_cmd != NULL);
 
     cmd = page_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
@@ -881,10 +879,9 @@ ftl_status_t ftl_async_write_page_cw(fc_command_t **out_cmd, nand_pba_t pba, con
 {
     fc_command_t *cmd;
 
-    if ((out_cmd == NULL) || (page_buf == NULL))
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：out_cmd 恒为调用者局部 cmd 的地址；page_buf 恒为整页缓冲。 */
+    ASSERT(out_cmd != NULL);
+    ASSERT(page_buf != NULL);
 
     cmd = page_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
@@ -928,10 +925,8 @@ ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba)
     const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
     fc_command_t        *cmd;
 
-    if (out_cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：调用者一律传本函数内局部 cmd 的地址。 */
+    ASSERT(out_cmd != NULL);
 
     cmd = page_prepare_alloc(OP_ERASE_BLOCK, &cfg);
     if (cmd == NULL)
@@ -962,10 +957,8 @@ ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const f
 {
     fc_command_t *cmd;
 
-    if (out_cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：调用者一律传本函数内局部 cmd 的地址。 */
+    ASSERT(out_cmd != NULL);
 
     cmd = page_prepare_alloc(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
     if (cmd == NULL)
@@ -999,10 +992,8 @@ ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t 
 {
     fc_command_t *cmd;
 
-    if (out_cmd == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：调用者一律传本函数内局部 cmd 的地址。 */
+    ASSERT(out_cmd != NULL);
 
     cmd = fc_command_alloc();
     if (cmd == NULL)
@@ -1048,10 +1039,9 @@ ftl_status_t ftl_sync_read_column(nand_pba_t pba, uint16_t column, uint8_t out[4
     fc_command_t        *cmd;
     fc_command_status_t  completion;
 
-    if (out == NULL)
-    {
-        return FTL_ERROR;
-    }
+    /* 前置条件（判据 2）：唯一调用者 bbt.c 传局部数组 mark[4]。 */
+    ASSERT(out != NULL);
+
     /* 列 + 4 越出页尾是调用者编程错误（本仓首次允许任意列，故必须拦）。 */
     ASSERT((uint32_t)column + 4U <= (uint32_t)PAGE_SIZE);
 
