@@ -179,6 +179,8 @@
 - **「本仓自定」** = 没有可引用的公开出处，是本项目的实现选择；不得写成行业标准。
 - 阈值/常量均标 `file:line` 来源；代码与文档冲突时**以代码为准**。
 - 本文的 `§x.y` 引用均指向本文自身章节。
+- 图是**预渲染 SVG**（`docs/diagrams/ftl/`）；每张图下方的 `<details>` 保留 Mermaid
+  源码。修改源码后需要重新渲染 SVG，GitHub 不直接渲染本文的 Mermaid。
 
 ---
 
@@ -245,7 +247,12 @@ FTL 不直接碰 NAND，一律经 FC 接口下发命令，由 FC 保证 CRC + EC
 下图是**覆盖全部 FTL 模块与真实场景**的总图：上电恢复、主机读、主机写、
 元数据落盘、后台回收都画在一起。节点方括号里的 `S3.x` 是对应模块章节。
 
-```mermaid
+![1.4 模块全景与主流程图](../diagrams/ftl/s1-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TB
     subgraph HOST["主机与请求"]
         H1["Host UART CLI"] --> H2["controller_submit 按实例边界切 run"]
@@ -314,7 +321,10 @@ flowchart TB
 
     P6 -. "启动完成" .-> H1
     C7 -. "完成后" .-> B1
+
 ```
+
+</details>
 
 读图要点：
 
@@ -574,7 +584,12 @@ FTL 的运行时状态分两类：
 
 #### 3.1.4 启动判定流程
 
-```mermaid
+![3.1.4 启动判定流程](../diagrams/ftl/s3-1-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     BOOT["ftl_boot_recovery"] --> LATEST["journal_scan_latest 只读,不改状态"]
     LATEST --> FIND{"checkpoint_find_latest 有当前版本有效 Header"}
@@ -591,7 +606,10 @@ flowchart TD
     CLEAN --> READY
     FRESH --> READY
     F2 --> READY
+
 ```
+
+</details>
 
 #### 3.1.5 关键流程
 
@@ -736,7 +754,12 @@ NAND 的写必须落在**已擦除**的页上，而擦除以块为单位。FTL �
 
 #### 3.2.4 块状态机
 
-```mermaid
+![3.2.4 块状态机](../diagrams/ftl/s3-2-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     START["开始"]
     NONE["NONE 无归属"]
@@ -757,7 +780,10 @@ flowchart TD
     FREE -- "出厂扫描 或探测判坏" --> BAD
     OPEN -- "PROGRAM 失败" --> BAD
     CLOSED -- "运行时坏块 或读不可恢复" --> BAD
+
 ```
+
+</details>
 
 #### 3.2.5 关键流程
 
@@ -845,7 +871,12 @@ spare[0] 变成 FTL 自己的数据；此时重扫会把所有写过的块（含
 
 #### 3.3.4 流程图
 
-```mermaid
+![3.3.4 流程图](../diagrams/ftl/s3-3-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     INIT["bbt_init"] --> LOAD{"bbt_load 池内有有效 record"}
     LOAD -- "是" --> REBUILD["bad_map 到 BST state 为 BAD"]
@@ -860,7 +891,10 @@ flowchart TD
     MARK --> EXPEL["allocator_remove_from_free"]
     EXPEL --> BAD["BST 置 BAD bbt-dirty 为 1"]
     BAD --> KICK["bbt_kick 异步写回"]
+
 ```
+
+</details>
 
 #### 3.3.5 关键流程
 
@@ -947,7 +981,12 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 
 #### 3.4.4 流程图
 
-```mermaid
+![3.4.4 流程图](../diagrams/ftl/s3-4-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     W1["bg_a_wl 预算任务"] --> W2["mig_begin_wl"]
     W2 --> W3{"间隔门 total_writes 不低于 1000"}
@@ -961,7 +1000,10 @@ flowchart TD
     W5 -- "无" --> W0
     W5 -- "有" --> W6["mig_start WL RETIRE 见 3-13 节"]
     W6 --> W7["擦完 出池 RETIRED rr_retire_block"]
+
 ```
+
+</details>
 
 #### 3.4.5 关键流程
 
@@ -1210,7 +1252,12 @@ metadata_dir_append_slot
 
 **运行期 lookup**：
 
-```mermaid
+![3.5.6 读路径：lookup 与启动加载](../diagrams/ftl/s3-5-6.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart LR
     A["l2p_cache_read miss"] --> B["l2p_cache_load_start"]
     B --> C["owner 为 owner_of_region global_region"]
@@ -1221,7 +1268,10 @@ flowchart LR
     F -- "否" --> H["用固定哨兵位置 l2p_region_pba local_region"]
     H --> G
     G --> I["ftl_op_l2p 填入 cache line LOADING 到 CLEAN"]
+
 ```
+
+</details>
 
 `metadata_dir_lookup` 是 `entries[]` 线性扫描（2048 条）；`have_dynamic == 0` 时跳过
 动态块扫描（开机回填数千次调用，这个短路明显缩短启动）。**它不读 NAND**——Directory
@@ -1245,7 +1295,12 @@ flowchart LR
 
 #### 3.5.7 写路径：append → 写页 → commit
 
-```mermaid
+![3.5.7 写路径：append → 写页 → commit](../diagrams/ftl/s3-5-7.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 sequenceDiagram
     participant C as L2P cache
     participant D as Directory
@@ -1274,7 +1329,10 @@ sequenceDiagram
         C->>C: 行回 DIRTY, Directory 不登记
     end
     J->>J: metadata_dir_kick 回收 reclaim_target 压缩 compact_wanted
+
 ```
+
+</details>
 
 **为什么必须“先写后登记”**：
 
@@ -1307,7 +1365,12 @@ region 全部被改写、最新位置都迁到别处后，这个块才没有活�
 
 `md_job_t` 状态机：
 
-```mermaid
+![3.5.8 `l2p_live`、回收与压缩](../diagrams/ftl/s3-5-8.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     IDLE["IDLE"]
     RECLAIM["RECLAIM"]
@@ -1331,7 +1394,10 @@ flowchart TD
     AWRITE -- "所有分页写完" --> CPRECLAIM
     CPRECLAIM -- "victim 擦完 归还" --> DONE
     DONE --> IDLE
+
 ```
+
+</details>
 
 **顺序契约（不可倒）**：
 
@@ -1504,7 +1570,12 @@ Cache 带来三个新问题，模块必须正面回答：
 
 **状态机**：
 
-```mermaid
+![3.6.3 结构与不变量](../diagrams/ftl/s3-6-3.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart LR
     INVALID["INVALID"]
     LOADING["LOADING"]
@@ -1519,7 +1590,10 @@ flowchart LR
     FLUSHING -- "写失败" --> DIRTY
     CLEAN -- "驱逐" --> INVALID
     DIRTY -- "驱逐时踢一次 flush" --> DIRTY
+
 ```
+
+</details>
 
 **不变量**：
 
@@ -1536,7 +1610,12 @@ flowchart LR
 
 #### 3.6.4 读路径
 
-```mermaid
+![3.6.4 读路径](../diagrams/ftl/s3-6-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     A["l2p_cache_read"] --> B["region 为 lba 512, idx 为 lba 模 512"]
     B --> C{"查找 region"}
@@ -1549,7 +1628,10 @@ flowchart TD
     I --> J["返回 FTL_AGAIN"]
     J --> K["下轮重试"]
     D --> K
+
 ```
+
+</details>
 
 `ftl_op_l2p` 收尾（`ctx = line`）：
 
@@ -1693,7 +1775,12 @@ Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
 
 #### 3.7.4 写路径
 
-```mermaid
+![3.7.4 写路径](../diagrams/ftl/s3-7-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     A["写完成 ftl_confirm_write"] --> B["journal_append lba, old, new"]
     B --> C{"当前页已有同 LBA 且 sequence 不低于 merge_floor"}
@@ -1707,7 +1794,10 @@ flowchart TD
     J -- "否" --> K["推进写指针"]
     J -- "是" --> L["擦下一块 跳过 pre_erased_block"]
     L --> K
+
 ```
+
+</details>
 
 **屏障**：`journal_flush_page` 是同步屏障（排空在飞 job + 立即落盘），只给结构性同步
 上下文用（HIL `fl`、开机路径、CLI）。GC/WL 的 F10 屏障走 `MIG_FLUSH_JRN`：
@@ -1870,7 +1960,12 @@ pool: 0=NONE / 1=OP / 2=SPARE
 
 #### 3.8.5 阶段与顺序契约
 
-```mermaid
+![3.8.5 阶段与顺序契约](../diagrams/ftl/s3-8-5.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     IDLE["CP_IDLE"]
     FLUSH["CP_FLUSH_REGIONS"]
@@ -1898,7 +1993,10 @@ flowchart TD
     TPREP -- "需预擦" --> TERASE
     TPREP -- "无需" --> DONE
     TERASE --> DONE
+
 ```
+
+</details>
 
 | phase | 动作 | 失败 |
 |---|---|---|
@@ -2019,32 +2117,47 @@ plane 配对由 FTL 内部决定，不暴露 `pages`。
 
 #### 3.9.4 提交流程
 
-```mermaid
-sequenceDiagram
-    participant H as Host
-    participant F as ftl_submit
-    participant G as GRP
-    participant S as issue_subop
-    participant P as PEND
-    participant FC as NAND
+![3.9.4 提交流程](../diagrams/ftl/s3-9-4.svg)
 
-    H->>F: req 请求
-    F->>F: 校验参数
-    F->>G: pending_group_alloc
-    F->>G: 填组字段
-    F->>S: ftl_drain_group
-    loop 直到 next 等于 total
-        S->>S: 读或写分支,消费 1 到 8 个 LBA
-        S->>P: 登记 pending
-        S->>FC: ftl_op_submit
-        S->>G: outstanding 加一
-    end
-    F-->>H: FTL_OK 已受理
-    FC-->>P: 完成
-    P->>G: complete_subop_multi
-    G->>G: next 等于 total 且 outstanding 为 0
-    G-->>H: 完成通知一次
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
+flowchart TD
+    A["Host 发起 ftl_submit_read write"]
+    B["校验参数"]
+    C["pending_group_alloc 建组"]
+    D["填组字段"]
+    E["ftl_drain_group 下发子操作"]
+    F["循环 直到 next 等于 total"]
+    G["读或写分支 消费 1 到 8 个 LBA"]
+    H["登记 pending"]
+    I["ftl_op_submit"]
+    J["outstanding 加一"]
+    K["FTL_OK 已受理"]
+    L["FC 完成"]
+    M["complete_subop_multi"]
+    N["next 等于 total 且 outstanding 为 0"]
+    O["完成通知一次"]
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+    I --> J
+    J --> F
+    F --> K
+    K --> L
+    L --> M
+    M --> N
+    N --> O
+
 ```
+
+</details>
 
 #### 3.9.5 读子操作
 
@@ -2171,7 +2284,12 @@ FTL 需要回答两个问题：
 
 #### 3.10.4 完成路径
 
-```mermaid
+![3.10.4 完成路径](../diagrams/ftl/s3-10-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart LR
     A["fc_poll_completion"] --> B["completion_table_drain"]
     B --> C["ftl_op_dispatch completion"]
@@ -2180,7 +2298,10 @@ flowchart LR
     D -- "是" --> F["completion_table_take cmd_id"]
     F --> G["completion_table_route ch,ce,lun"]
     G --> H["g_op_service tag ftl, completion, ctx"]
+
 ```
+
+</details>
 
 #### 3.10.5 关键流程
 
@@ -2265,7 +2386,12 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
 
 #### 3.11.4 流程
 
-```mermaid
+![3.11.4 流程](../diagrams/ftl/s3-11-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     A["ftl_wbuf_append lba, data"] --> B{"窗口 base 相同"}
     B -- "否" --> C["ftl_wbuf_flush 旧窗口"]
@@ -2276,7 +2402,10 @@ flowchart TD
     F -- "是" --> G["ftl_wbuf_flush 尽力"]
     F -- "否" --> H["返回"]
     G --> H
+
 ```
+
+</details>
 
 **`ftl_wbuf_flush`**：
 
@@ -2393,7 +2522,12 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
 
 #### 3.12.4 主循环
 
-```mermaid
+![3.12.4 主循环](../diagrams/ftl/s3-12-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TB
     subgraph PUMP["ftl_service_pump 每轮一次"]
         P1["fc_service x 最多 4 次"] --> P2["completion_table_drain"]
@@ -2409,7 +2543,10 @@ flowchart TB
         S7 --> S9["Pass 1 interval 预算 优先级"]
     end
     PUMP --> SVC
+
 ```
+
+</details>
 
 #### 3.12.5 关键流程
 
@@ -2522,7 +2659,12 @@ cost = 500·valid_ratio + 200·erase_ratio + 200·cold_penalty + 100·youth_pena
 
 #### 3.13.5 搬移状态机
 
-```mermaid
+![3.13.5 搬移状态机](../diagrams/ftl/s3-13-5.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     IDLE["MIG_IDLE"]
     READ["MIG_READ"]
@@ -2543,7 +2685,10 @@ flowchart TD
     ERASE -- "两 plane 擦完" --> DONE
     DONE -- "valid_total 为 0 快路径" --> IDLE
     DONE -- "正常收尾" --> IDLE
+
 ```
+
+</details>
 
 #### 3.13.6 关键流程
 
@@ -2635,7 +2780,12 @@ NAND 读会失败：retention、read disturb、编程干扰都表现为 ECC 纠�
 
 #### 3.14.4 状态机
 
-```mermaid
+![3.14.4 状态机](../diagrams/ftl/s3-14-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     IDLE["IDLE"]
     PLANE["PLANE"]
@@ -2663,7 +2813,10 @@ flowchart TD
     PLANEEND -- "plane 等于 PLANE_NUM" --> FINISH
     PLANE -- "提交侧长期无进展" --> ABORT
     ABORT --> FINISH
+
 ```
+
+</details>
 
 #### 3.14.5 关键流程
 
@@ -2832,7 +2985,12 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 **触发**：`ssd_ftl_boot` 调 `ftl_media_needs_format()`；判据是
 `checkpoint_find_latest()` 失败（含版本不符）。
 
-```mermaid
+![4.1 首次上电 / 介质版本不匹配 → 格式化](../diagrams/ftl/s4-1.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     A["上电 ftl_init 完成"] --> B["ftl_media_needs_format"]
     B -- "否" --> C["正常启动 4-2 4-3 节"]
@@ -2842,7 +3000,10 @@ flowchart TD
     D2 --> D3["metadata_dir_init 复位 Directory"]
     D3 --> D4["checkpoint_write_initial 写当前版本空快照"]
     D4 --> E["后续正常启动"]
+
 ```
+
+</details>
 
 **状态变化**：
 
@@ -2865,7 +3026,12 @@ flowchart TD
 **触发**：有当前版本 Checkpoint，且
 `ring.page_seq + ring.entry_count <= cp.journal_sequence`（Journal 已全部落入 L2P）。
 
-```mermaid
+![4.2 干净启动（clean start）](../diagrams/ftl/s4-2.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 sequenceDiagram
     participant B as boot
     participant J as Journal
@@ -2888,7 +3054,10 @@ sequenceDiagram
     end
     B->>J: journal_resume floor 为 cp_seq
     B-->>B: Controller 到 Ready
+
 ```
+
+</details>
 
 **状态变化**：
 
@@ -2910,7 +3079,12 @@ sequenceDiagram
 
 **触发**：有 Checkpoint，但 Journal 有 `page_seq + entry_count > cp_seq` 的页。
 
-```mermaid
+![4.3 掉电恢复（power-failure start）](../diagrams/ftl/s4-3.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 sequenceDiagram
     participant B as boot
     participant A as Allocator
@@ -2929,7 +3103,10 @@ sequenceDiagram
         B->>A: reset carve F2
     end
     B->>J: journal_resume floor 为 cp_seq
+
 ```
+
+</details>
 
 **状态变化**：
 
@@ -2953,7 +3130,12 @@ sequenceDiagram
 
 **入口**：`ftl_submit_read(ftl, req)`。
 
-```mermaid
+![4.4 主机读](../diagrams/ftl/s4-4.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     A["ftl_submit_read"] --> B["校验 建组"]
     B --> C["ftl_drain_group 到 issue_subop"]
@@ -2970,7 +3152,10 @@ flowchart TD
     E --> M
     H --> M
     G --> C
+
 ```
+
+</details>
 
 **状态变化**：
 
@@ -2988,7 +3173,12 @@ flowchart TD
 
 **入口**：`ftl_submit_write(ftl, req)`。
 
-```mermaid
+![4.5 主机写](../diagrams/ftl/s4-5.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 sequenceDiagram
     participant H as Host
     participant F as ftl_submit_write
@@ -3028,7 +3218,10 @@ sequenceDiagram
         C->>C: bbt_mark_bad 失败 plane 块
         C->>C: L2P 不动 为 回滚
     end
+
 ```
+
+</details>
 
 **状态变化**：
 
@@ -3052,7 +3245,12 @@ sequenceDiagram
 **触发**：CLOCK 驱逐、后台 L2P flush、`ftl_flush`（HIL）、Checkpoint 的
 `CP_FLUSH_REGIONS`。
 
-```mermaid
+![4.6 L2P 脏 region 回写与 Directory commit](../diagrams/ftl/s4-6.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 sequenceDiagram
     participant S as 触发者
     participant C as L2P cache
@@ -3082,7 +3280,10 @@ sequenceDiagram
     else 写失败
         C->>C: state 为 DIRTY, Directory 不登记
     end
+
 ```
+
+</details>
 
 **状态变化**：
 
@@ -3101,7 +3302,12 @@ sequenceDiagram
 
 **触发**：T1 水位 85%/95%、T2 每 1024 次写、T3 10 s 且 Journal 增量 ≥64。
 
-```mermaid
+![4.7 Checkpoint](../diagrams/ftl/s4-7.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 sequenceDiagram
     participant T as 触发者
     participant CP as cp_job
@@ -3119,7 +3325,10 @@ sequenceDiagram
     CP->>CP: CP_HDR_WRITE commit
     CP->>J: CP_TRUNC_PREP 到 可选 TRUNC_ERASE 到 commit
     CP->>CP: CP_DONE
+
 ```
+
+</details>
 
 **状态变化**：
 
@@ -3137,7 +3346,12 @@ sequenceDiagram
 
 **触发**：GC 水位/紧急/磨损；WL 三条件；RR 预测巡检。
 
-```mermaid
+![4.8 GC / WL / 预测性迁移](../diagrams/ftl/s4-8.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     A["bg_a_gc_eval bg_a_wl bg_a_rr_predict"] --> B["选 victim"]
     B --> C["mig_begin_ 拷贝 victim,清 job"]
@@ -3161,7 +3375,10 @@ flowchart TD
     Q --> S["MIG_DONE 移除 closed 条目 计数"]
     R --> S
     E --> N
+
 ```
+
+</details>
 
 **状态变化**：
 
@@ -3181,7 +3398,12 @@ flowchart TD
 
 **触发**：每轮 `ftl_service(ftl)` 的 Phase 3。
 
-```mermaid
+![4.9 后台调度一轮](../diagrams/ftl/s4-9.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TD
     A["Phase 2-5 完成"] --> B{"bg_suspend"}
     B -- "是" --> Z["return"]
@@ -3205,7 +3427,10 @@ flowchart TD
     F5 -- "是" --> H["截断"]
     F5 -- "否" --> G
     G --> F1
+
 ```
+
+</details>
 
 **状态变化**：这一轮的 kick 只提交/推进**一步**：GC 可能起一个 job；Journal 可能起一页写；
 CP 可能推进一个 phase；RR 可能提交一条命令。真正的完成在下一轮 pump 或完成回调里。
@@ -3221,7 +3446,12 @@ CP 可能推进一个 phase；RR 可能提交一条命令。真正的完成在�
 
 ### 5.1 结构体关系
 
-```mermaid
+![5.1 结构体关系](../diagrams/ftl/s5-1.svg)
+
+<details>
+<summary>Mermaid 源码（修改后重新渲染）</summary>
+
+```text
 flowchart TB
     subgraph GLOBAL["设备级 启动时一次"]
         ROUTE["g_route CH CE LUN 实例路由"]
@@ -3257,7 +3487,10 @@ flowchart TB
     MD --- D4
     CTX --- AX
     LC --- AX
+
 ```
+
+</details>
 
 **所有权**：
 
