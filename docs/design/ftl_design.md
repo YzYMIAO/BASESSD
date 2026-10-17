@@ -70,7 +70,44 @@
 ⚠ **签名以头文件为准**。本文给结构形状与字段语义，不复制完整函数原型——接口改动频繁，
 文档复制签名必然漂移。当前公共入口见 `include/ftl/ftl.h`。
 
-### 0.3 三条阅读路径
+### 0.3 推荐阅读顺序
+
+先读 **§1.4 总图 + §1.5 路径表**，建立“一次 host 读写从哪进、经过谁、从哪出”的地图。
+然后按下面的顺序读，**不要从 §3.5 metadata 开始**：
+
+| 顺序 | 模块 | 为什么先看它 |
+|---:|---|---|
+| 1 | **§3.9 Host 提交 / group / pending** | 整个 FTL 的入口。先理解“一条 host 请求如何拆成子操作、如何用一个组聚合完成”，后面所有异步 job 都是同一套骨架 |
+| 2 | **§3.10 完成路由 / op dispatch** | 与 §3.9 配对：提交与完成解耦，op tag 决定谁收尾。不懂这条链路，后面每个 job 的 `waiting/phase` 都会显得莫名其妙 |
+| 3 | **§3.11 写缓冲 wbuf** | 一次 512 B 写如何攒成一页、双 plane 如何合并。写路径最直观的一层 |
+| 4 | **§3.2 分配器 / BST / Super Block** | 页从哪来、块状态怎么变、Free/OP/Spare 四本账。GC/WL 的前提 |
+| 5 | **§3.6 L2P Cache** | 读命中/未命中、异步加载、脏行回写。**这是 metadata 的前置** |
+| 6 | **§3.5 元数据目录** | 现在再看：region 为什么不在固定位置、append/commit 为什么分离、`l2p_live` 干什么、Anchor 为什么存在 |
+| 7 | **§3.7 Journal + §3.8 Checkpoint** | 写回之后的掉电一致性：增量日志 + 全量快照 + 截断顺序 |
+| 8 | **§3.13 GC / 迁移 + §3.4 WL + §3.3 BBT** | 后台如何回收空间、均衡磨损、处理坏块 |
+| 9 | **§3.12 service / 后台调度** | 回头看这些 job 如何在单线程 superloop 里被调度、为什么有 must-run |
+| 10 | **§3.14 读恢复 + §3.1 启动恢复** | 异常路径：读失败怎么救、掉电后怎么重建 |
+
+最后用 **§4.5 主机写**、**§4.6 L2P 回写**、**§4.7 Checkpoint** 三个场景把前面串一遍；
+状态机记不住时查 §5.2。
+
+#### 如果只想先攻克 metadata
+
+按这个最小闭环读：
+
+1. §2.2 地址模型（LBA / region / PBA）
+2. §3.6.4 读路径、§3.6.5 写路径与写回
+3. §3.5.5 ring / locate / prepare
+4. §3.5.6 lookup 与启动加载
+5. §3.5.7 append → 写页 → commit
+6. §3.5.8 `l2p_live` / 回收 / 压缩
+7. §3.5.9 Anchor
+
+原因：`metadata.c` 里的 `append_slot` / `commit_region` / `l2p_live` 不是凭空出现的——
+它们是 **L2P cache 脏行回写**的落盘端。先看 §3.6 的 `l2p_cache_flush_kick` 怎么调用它们，
+再回头看 §3.5，顺序就顺了。
+
+#### 其它三条快速路径
 
 | 路径 | 顺序 |
 |---|---|
@@ -1203,7 +1240,6 @@ flowchart LR
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant C as L2P cache
     participant D as Directory
     participant A as Allocator
@@ -1212,7 +1248,7 @@ sequenceDiagram
 
     C->>D: metadata_dir_append_slot
     alt 当前块有页
-        D->>D: 返回下一页 PBA, page++
+        D->>D: 返回下一页 PBA, page 加一
     else 块满/无当前块
         D->>D: metadata_dir_reclaim 回收无活 region 的 LOG 块
         D->>A: allocator_alloc_log_block
@@ -1487,7 +1523,7 @@ flowchart TD
     B --> C{"查找 region"}
     C -- "LOADING" --> D["返回 FTL_AGAIN"]
     C -- "CLEAN/DIRTY/FLUSHING" --> E["返回 entries[idx]<br/>fresh 不计命中"]
-    C -- "未命中" --> F["miss++, note_access(1)"]
+    C -- "未命中" --> F["miss 加一, note_access(1)"]
     F --> G["CLOCK 选 victim"]
     G -- "无可驱逐" --> H["返回 FTL_AGAIN"]
     G -- "有" --> I["起异步加载：lookup → read page<br/>state=LOADING"]
@@ -1643,7 +1679,7 @@ flowchart TD
     A["写完成 ftl_confirm_write"] --> B["journal_append(lba, old, new)"]
     B --> C{"当前页已有同 LBA<br/>且 sequence 不低于 merge_floor?"}
     C -- "是" --> D["就地更新 new_pba<br/>不新增条目/不消耗 sequence"]
-    C -- "否" --> E["写 entry, sequence++, entry_index++"]
+    C -- "否" --> E["写 entry, sequence 加一, entry_index 加一"]
     E --> F{"页满 127 条?"}
     F -- "否" --> G["返回"]
     F -- "是" --> H["journal_kick 起异步页写"]
@@ -1956,12 +1992,11 @@ plane 配对由 FTL 内部决定，不暴露 `pages`。
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant H as Host
     participant F as ftl_submit
     participant G as GRP
     participant S as issue_subop
-    participant P as pending
+    participant P as PEND
     participant FC as NAND
 
     H->>F: req 请求
@@ -1973,12 +2008,12 @@ sequenceDiagram
         S->>S: 读或写分支，消费 1 到 8 个 LBA
         S->>P: 登记 pending
         S->>FC: ftl_op_submit
-        S->>G: outstanding++
+        S->>G: outstanding 加一
     end
-    F-->>H: FTL_OK，已受理
+    F-->>H: FTL_OK 已受理
     FC-->>P: 完成
     P->>G: complete_subop_multi
-    G->>G: next 等于 total 且 outstanding 为 0?
+    G->>G: next 等于 total 且 outstanding 为 0
     G-->>H: 完成通知一次
 ```
 
@@ -2008,7 +2043,7 @@ ftl_issue_subop(write)：
   ftl_wbuf_append(ftl, lba, buffer)
     ├─ 窗口变化 ⇒ 先 flush 旧窗口
     ├─ 打开/复用窗口；逐 CW 拷进 wbuf.data[plane*CW_NUM+cw]
-    ├─ occupied 置位；owners |= 1<<gi；group.outstanding++
+    ├─ occupied 置位；owners |= 1<<gi；group.outstanding 加一
     └─ 页满 ⇒ 尽力 flush（失败不影响已受理）
 ```
 
@@ -2207,7 +2242,7 @@ flowchart TD
     B -- "否" --> C["ftl_wbuf_flush 旧窗口"]
     C --> D["打开新窗口 base"]
     B -- "是" --> D
-    D --> E["逐 CW 拷进 data[slot]<br/>occupied 置位 bit, owners 置位 gi<br/>group.outstanding++"]
+    D --> E["逐 CW 拷进 data[slot]<br/>occupied 置位 bit, owners 置位 gi<br/>group.outstanding 加一"]
     E --> F{"occupied 等于 0xFF?"}
     F -- "是" --> G["ftl_wbuf_flush 尽力 "]
     F -- "否" --> H["返回"]
@@ -2466,7 +2501,7 @@ stateDiagram-v2
     MIG_READ_SETTLE --> MIG_WRITE: 反查 L2P 得 cw_bitmap
     MIG_READ_SETTLE --> MIG_WRITE: 本页全空洞 cw_bitmap=0
     MIG_WRITE --> MIG_WRITE_SETTLE: 写完当前页所有 plane
-    MIG_WRITE_SETTLE --> MIG_READ: page++，未到 64
+    MIG_WRITE_SETTLE --> MIG_READ: page 加一，未到 64
     MIG_WRITE_SETTLE --> MIG_FLUSH_JRN: page 等于 64
     MIG_FLUSH_JRN --> MIG_ERASE: journal job 空闲
     MIG_ERASE --> MIG_DONE: 两 plane 擦完
@@ -2579,7 +2614,7 @@ stateDiagram-v2
     NB_READ --> NB_READ: 邻居尝试小于 2
     NB_READ --> PLANE_END: 邻居也失败
     NB_RETRY --> PLANE_END: 目标页成功/失败
-    PLANE_END --> PLANE: plane++
+    PLANE_END --> PLANE: plane 加一
     PLANE_END --> FINISH: plane 等于 PLANE_NUM
     FINISH --> IDLE
     PLANE --> ABORT: 提交侧长期无进展
@@ -2788,7 +2823,6 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant B as boot
     participant J as Journal
     participant C as Checkpoint
@@ -2808,7 +2842,7 @@ sequenceDiagram
     else 快照无效
         B->>A: reset + carve + F2
     end
-    B->>J: journal_resume(floor=cp_seq)
+    B->>J: journal_resume floor=cp_seq
     B-->>B: Controller → Ready
 ```
 
@@ -2834,7 +2868,6 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant B as boot
     participant A as Allocator
     participant J as Journal
@@ -2842,16 +2875,16 @@ sequenceDiagram
     participant P as Pools
 
     B->>A: restore_blocks 若快照有效
-    B->>J: journal_replay(cp_seq)
+    B->>J: journal_replay cp_seq
     J->>J: 第一遍收集晚于 cp_seq 的页
-    J->>L: 第二遍按 (page_seq, entry_idx) 应用
-    J->>A: block_ctx：new +1 / old -1
+    J->>L: 第二遍按 page_seq 与 entry_idx 应用
+    J->>A: block_ctx new 加一 old 减一
     B->>L: F4 按 region_bitmap 预载
     B->>A: probe + build_pools
     alt 任一步不一致
         B->>A: reset + carve + F2
     end
-    B->>J: journal_resume(floor=cp_seq)
+    B->>J: journal_resume floor=cp_seq
 ```
 
 **状态变化**：
@@ -2886,7 +2919,7 @@ flowchart TD
     F -- "FTL_AGAIN LOADING " --> G["l2p_defer=1<br/>停止本子操作，下轮重试"]
     F -- "FTL_OK + INVALID" --> H["零填充<br/>消费 1 LBA"]
     F -- "FTL_OK + PBA" --> I["按 (plane,page) 分组<br/>建 pending + 提交读"]
-    I --> J["ftl_op_host_io：拷回 buffer<br/>rr_record_ecc / read_count++"]
+    I --> J["ftl_op_host_io：拷回 buffer<br/>rr_record_ecc / read_count 加一"]
     J --> K{"NAND_FAIL / ECC 超限?"}
     K -- "是" --> L["停泊 → READ_RECOVERY<br/>rr_kick 3.14 节 "]
     K -- "否" --> M["组完成：递减 outstanding"]
@@ -2913,7 +2946,6 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant H as Host
     participant F as ftl_submit_write
     participant W as wbuf
@@ -2923,11 +2955,11 @@ sequenceDiagram
     participant L as L2P cache
     participant J as Journal
 
-    H->>F: req(lba, count, buffer)
+    H->>F: req 请求
     F->>F: 校验 + 建组
     F->>W: wbuf_append 按窗口
     alt 窗口切换 / 页满 / 空闲
-        W->>A: allocator_alloc_pair(HOT)
+        W->>A: allocator_alloc_pair HOT
         A-->>W: new_pba plane
         W->>N: PROGRAM 单/双 plane
         W->>C: 清 wbuf 提交成功后
@@ -2935,21 +2967,21 @@ sequenceDiagram
     N-->>C: 完成
     C->>C: ftl_op_host_io
     alt 写成功且非中间页
-        C->>L: 第一遍：ready 所有覆盖 CW
+        C->>L: 第一遍 ready 所有覆盖 CW
         alt 任一 region 未就绪
-            C->>C: 停泊 WRITE_CONFIRM<br/>下轮 ftl_confirm_kick
+            C->>C: 停泊 WRITE_CONFIRM / 下轮 ftl_confirm_kick
         else 全部就绪
             loop 每个有效 CW
-                C->>J: journal_append(lba, old, new)
-                C->>L: l2p_cache_write(new)
-                C->>C: valid_count：新 +1 / 旧 -1
+                C->>J: journal_append
+                C->>L: l2p_cache_write
+                C->>C: valid_count 新加一 旧减一
             end
             C->>J: checkpoint_journal_watermark
-            C->>C: total_writes++
+            C->>C: total_writes 加一
         end
     else 写失败
-        C->>A: close_open_sb(HOT)
-        C->>C: bbt_mark_bad(失败 plane 块)
+        C->>A: close_open_sb HOT
+        C->>C: bbt_mark_bad 失败 plane 块
         C->>C: L2P 不动 = 回滚
     end
 ```
@@ -2978,14 +3010,13 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant S as 触发者
     participant C as L2P cache
     participant D as Directory
     participant A as Allocator
     participant N as NAND
 
-    S->>C: l2p_cache_flush_kick(line)
+    S->>C: l2p_cache_flush_kick
     C->>C: 非 DIRTY / 已在 FLUSHING 则 返回
     C->>C: flush_inflight 达上限 则 FTL_AGAIN
     C->>D: metadata_dir_append_slot
@@ -2993,7 +3024,7 @@ sequenceDiagram
         D-->>C: 下一页 PBA
     else 块满
         D->>D: reclaim l2p_live==0 的 LOG 块
-        D->>A: alloc_log_block(plane)
+        D->>A: alloc_log_block
         A-->>D: 新块
         D-->>C: 新块 page 0 PBA
     end
@@ -3002,7 +3033,7 @@ sequenceDiagram
     N-->>C: 完成
     alt 写成功
         C->>D: commit_region
-        D->>D: 更新 region 的 pba<br/>l2p_live 增减 / dirty
+        D->>D: 更新 region 的 pba / l2p_live 增减 / dirty
         C->>C: state = CLEAN, 清全局脏位
     else 写失败
         C->>C: state = DIRTY, Directory 不登记
@@ -3028,7 +3059,6 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    autonumber
     participant T as 触发者
     participant CP as cp_job
     participant L as L2P cache
@@ -3039,7 +3069,7 @@ sequenceDiagram
     CP->>CP: 单飞行检查 + memset
     CP->>L: snapshot_owner_bitmap 全局→局部
     CP->>J: 记录 journal_seq job 起点
-    CP->>L: CP_FLUSH_REGIONS：逐个 kick，等 flush_inflight=0
+    CP->>L: CP_FLUSH_REGIONS 逐个 kick，等 flush_inflight=0
     CP->>D: CP_ANCHOR_PREP → 可选 ERASE → WRITE x8 → commit
     CP->>CP: CP_HDR_PREP → 可选 ERASE → CP_BLOCK_WRITE x4
     CP->>CP: CP_HDR_WRITE commit
@@ -3073,7 +3103,7 @@ flowchart TD
     F --> G["解 META 得 cw_lba<br/>记 ECC/read_count"]
     G --> H["MIG_READ_SETTLE：ready 前置<br/>反查 L2P 得 cw_bitmap"]
     H --> I{"本页有有效 CW?"}
-    I -- "否" --> J["page++，继续"]
+    I -- "否" --> J["page 加一，继续"]
     I -- "是" --> K["MIG_WRITE：alloc_pair(COLD)<br/>写 CW 子集"]
     K --> L["MIG_WRITE_SETTLE：l2p_cache_write<br/>+ journal_append + valid 加一或减一"]
     L --> J
