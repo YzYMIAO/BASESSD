@@ -9,7 +9,7 @@
  * gc_erase_and_free 与 wear_leveling.c 的 wl_relocate + wl_execute +
  * wl_predictive_relocate —— 三者的搬移主体逐字同构，差别只在
  *   · 谁当 victim（gc_select_victim / wl_select_victim / rr_predictive_scan）；
- *   · 擦完怎么处置（GC：归还 Free Pool；WL：归还 + 退役 RESERVED）。
+ *   · 擦完怎么处置（GC：归还 Free Pool；WL：退役 RETIRED）。
  * 故收敛成**一个** mig_job_t：`kind` 选 victim，`post` 决定收尾。
  *
  * ── 为什么必须异步 ──
@@ -35,8 +35,10 @@
  *           同样**先就绪前置**再动账——半途而废会重复记账（valid_count 虚高、journal
  *           重复条目）。
  *   · FLUSH_JRN 等 Journal job 空闲（**F10 契约**：搬移条目先落盘再擦 victim）。
- *   · ERASE 逐 plane 异步擦：成功 erase_count++ / wear_mark_dirty / 清 valid / 归还 Free Pool；
- *           失败 bbt_mark_bad。WL/预测额外 rr_retire_block。
+ *   · ERASE 逐 plane 异步擦：成功 erase_count++ / wear_mark_dirty / 清 valid，
+ *           然后按 `post` **二选一**——`MIG_POST_FREE` 归还 Free Pool（入池），
+ *           `MIG_POST_RETIRE` **出池** + `rr_retire_block` 退役（见 allocator.h 不变量②）；
+ *           失败 bbt_mark_bad（该函数同时把块驱逐出池）。
  *   · DONE  allocator_remove_closed_sb + 进展计数（gc_reclaimed_count）/ 预测命中日志。
  *
  * ── 与同步版的**行为差异**（刻意，登记在案）──
@@ -49,7 +51,7 @@
  * 2. **擦除失败时不再退役**：原 wl_predictive_relocate 在 wl_relocate 返回后**无条件**
  *    rr_retire_block（即使 gc_erase_and_free 已把该块标坏）。本引擎只在**擦除成功**时
  *    退役（`post == MIG_POST_RETIRE`）——擦不掉的块归 bbt_mark_bad 管，把它同时标成
- *    "RESERVED、仍可读"是自相矛盾的。擦除失败本身是极端分支（NAND 拒擦）。
+ *    "RETIRED、仍可读"是自相矛盾的。擦除失败本身是极端分支（NAND 拒擦）。
  *
  * 3. **提交侧卡死计数**：原同步版没有这个概念（阻塞调用要么成功要么当场报错）。异步后
  *    加 MIG_SUBMIT_STALL_MAX 轮上限，超限中止 job（同 1：不擦 victim，数据无损）。
@@ -102,7 +104,8 @@ typedef enum
 typedef enum
 {
     MIG_POST_FREE = 0, /* GC：擦完归还 Free Pool */
-    MIG_POST_RETIRE    /* WL / 慢死预测：归还后**退役**（RESERVED，不再分配、不标坏、仍可读） */
+    MIG_POST_RETIRE    /* WL / 慢死预测：**出池**后退役（RETIRED，不再分配、不标坏、仍可读）。
+                        * ⚠ 必须出池而非入池——选块判据是 Free Pool **数组**，留在池里会被再次分配 */
 } mig_post_t;
 
 /* victim 来源（只用于日志与收尾差异）。 */

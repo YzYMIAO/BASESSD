@@ -59,8 +59,6 @@
  * -------------------------------------------------------------------- */
 void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
 {
-    uint16_t i;
-
     /* 前置条件（判据 2）：调用者一律传 &ftl->cache。 */
     ASSERT(cache != NULL);
 
@@ -71,7 +69,7 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
     /* Region 级脏标记：开机全清（F4） */
     memset(cache->region_dirty_bitmap, 0, sizeof(cache->region_dirty_bitmap));
 
-    for (i = 0U; i < L2P_CACHE_SIZE; i++)
+    for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         l2p_cache_line_t *line = &cache->lines[i];
 
@@ -122,8 +120,6 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, uint8_t lun)
  */
 static void l2p_cache_note_access(l2p_cache_t *cache, uint8_t is_miss)
 {
-    uint8_t was_thrashing;
-
     cache->window_access++;
     if (is_miss != 0U)
     {
@@ -135,8 +131,10 @@ static void l2p_cache_note_access(l2p_cache_t *cache, uint8_t is_miss)
         return;
     }
 
-    cache->miss_pct      = (uint8_t)((cache->window_miss * 100U) / cache->window_access);
-    was_thrashing        = cache->thrashing;
+    cache->miss_pct = (uint8_t)((cache->window_miss * 100U) / cache->window_access);
+
+    uint8_t was_thrashing = cache->thrashing;
+
     cache->window_access = 0U;
     cache->window_miss   = 0U;
 
@@ -172,9 +170,7 @@ static void l2p_cache_note_access(l2p_cache_t *cache, uint8_t is_miss)
  */
 static l2p_cache_line_t *l2p_cache_find(l2p_cache_t *cache, uint16_t region_id)
 {
-    uint16_t i;
-
-    for (i = 0U; i < L2P_CACHE_SIZE; i++)
+    for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         l2p_cache_line_t *line = &cache->lines[i];
 
@@ -206,9 +202,8 @@ static l2p_cache_line_t *l2p_cache_find(l2p_cache_t *cache, uint16_t region_id)
 static int l2p_cache_evict_one(l2p_cache_t *cache)
 {
     uint16_t start = cache->clock_hand;
-    uint16_t i;
 
-    for (i = 0U; i < L2P_CACHE_SIZE; i++)
+    for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         uint16_t          idx  = (uint16_t)((start + i) % L2P_CACHE_SIZE);
         l2p_cache_line_t *line = &cache->lines[idx];
@@ -272,18 +267,14 @@ static int l2p_cache_evict_one(l2p_cache_t *cache)
  */
 static bool l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
 {
-    l2p_cache_line_t *line;
-    nand_pba_t        region_addr = NAND_PBA_INVALID;
-    fc_command_t     *cmd         = NULL;
-    int               victim_idx;
+    int victim_idx = l2p_cache_evict_one(cache);
 
-    victim_idx = l2p_cache_evict_one(cache);
     if (victim_idx < 0)
     {
         return false;
     }
 
-    line = &cache->lines[victim_idx];
+    l2p_cache_line_t *line = &cache->lines[victim_idx];
 
     /* 占位：entries 先全 INVALID（加载失败时保持此态 = 全未映射） */
     memset(line->entries, 0xFF, sizeof(line->entries));
@@ -292,6 +283,7 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
     line->state        = L2P_CACHE_LOADING;
     line->fresh        = 0U; /* 完成时置 1（见 l2p_cache_line_t.fresh） */
 
+    nand_pba_t region_addr = NAND_PBA_INVALID;
     if (cache->md_dir != NULL)
     {
         region_addr = metadata_dir_lookup(cache->md_dir,
@@ -308,6 +300,7 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
     /* ⚠ 读的数据**留在 desc 链上**（与写不对称）⇒ 目标缓冲须活到完成、
      *   ftl_cmd_read_data 须早于 release —— 二者都在 ftl_op_l2p 里，缓冲就是 line->entries
      *   （行在 LOADING 期间不可驱逐、不可写 ⇒ 地址稳定）。 */
+    fc_command_t *cmd = NULL;
     if (ftl_async_read_page(&cmd, region_addr, FTL_PAGE_CFG_META()) != FTL_OK)
     {
         line->state = L2P_CACHE_INVALID; /* 回滚占位（区域未加载，等于没占用） */
@@ -329,10 +322,6 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint16_t region_id)
 
 ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
 {
-    uint16_t          region_id;
-    uint16_t          entry_idx;
-    l2p_cache_line_t *line;
-
     /* 前置条件（判据 2）：调用者一律传 &ftl->cache 与自己的出参地址。 */
     ASSERT(cache != NULL);
     ASSERT(out != NULL);
@@ -347,10 +336,10 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
         return FTL_ERROR;
     }
 
-    region_id = lba_to_region(lba);
-    entry_idx = lba_to_entry(lba);
+    uint16_t region_id = lba_to_region(lba);
+    uint16_t entry_idx = lba_to_entry(lba);
 
-    line = l2p_cache_find(cache, region_id);
+    l2p_cache_line_t *line = l2p_cache_find(cache, region_id);
     if (line != NULL)
     {
         if (line->state == L2P_CACHE_LOADING)
@@ -387,8 +376,6 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
 
 bool l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
 {
-    l2p_cache_line_t *line;
-
     /* 前置条件（判据 2）：调用者一律传 &ftl->cache。lba 越界是**数据**判断（判据 1），保留。 */
     ASSERT(cache != NULL);
     if (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION)
@@ -396,7 +383,7 @@ bool l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
         return true; /* 越界：调用者的 write 会是 no-op、read 会返 FTL_ERROR ⇒ 无需就绪 */
     }
 
-    line = l2p_cache_find(cache, lba_to_region(lba));
+    l2p_cache_line_t *line = l2p_cache_find(cache, lba_to_region(lba));
     if (line != NULL)
     {
         /* ⚠ FLUSHING 也算未就绪：写一行正在落盘的行会让"落盘的是旧快照、RAM 是新值"
@@ -417,9 +404,6 @@ bool l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
 
 ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
 {
-    l2p_cache_line_t *line;
-    uint16_t          region_id;
-
     /* 前置条件（判据 2）：调用者一律传 &ftl->cache。lba 越界是**数据**判断（判据 1），保留。 */
     ASSERT(cache != NULL);
     if (lba >= L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION)
@@ -427,9 +411,9 @@ ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
         return FTL_OK; /* 越界 no-op（与旧行为一致） */
     }
 
-    region_id = lba_to_region(lba);
+    uint16_t region_id = lba_to_region(lba);
 
-    line = l2p_cache_find(cache, region_id);
+    l2p_cache_line_t *line = l2p_cache_find(cache, region_id);
     if (line == NULL)
     {
         /* 未驻留：起加载，本轮不写（调用者应先 l2p_cache_ready 过一遍） */
@@ -549,16 +533,12 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  * -------------------------------------------------------------------- */
 ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
 {
-    l2p_cache_line_t *line;
-    nand_pba_t        region_addr;
-    fc_command_t     *cmd = NULL;
-
     /* 前置条件（判据 2）：cache 恒 &ftl->cache；line_idx 由调用者自持（下标越界是内部
      * 自铸句柄，非外部输入）——两侧都收口成断言。 */
     ASSERT(cache != NULL);
     ASSERT((line_idx >= 0) && (line_idx < (int)L2P_CACHE_SIZE));
 
-    line = &cache->lines[line_idx];
+    l2p_cache_line_t *line = &cache->lines[line_idx];
 
     if (line->state != L2P_CACHE_DIRTY)
     {
@@ -575,7 +555,7 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
         return FTL_AGAIN; /* 在飞写回达上限：让 host I/O 先拿 FC 资源 */
     }
 
-    region_addr = metadata_dir_append_slot(cache->md_dir, cache->alloc);
+    nand_pba_t region_addr = metadata_dir_append_slot(cache->md_dir, cache->alloc);
     if (region_addr == NAND_PBA_INVALID)
     {
         /* 瞬态：Free Pool 空（等 GC 补池）或目录整理 job 在飞（等它走完）⇒ 背压。
@@ -586,6 +566,7 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
 
     /* 建链 + 把 entries 拷进 FC buffer（写的数据在 prepare 时就 memcpy 走了 ⇒
      * 提交后 line->entries 可自由改写，这正是"可读"而不"可写"的由来）。 */
+    fc_command_t *cmd = NULL;
     if (ftl_async_write_page(&cmd, region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
     {
         return FTL_ERROR;
@@ -606,8 +587,6 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
 
 void l2p_flush_kick(l2p_cache_t *cache, uint8_t max_kick)
 {
-    uint16_t i;
-
     /* 前置条件（判据 2）：唯一调用者 ftl.c 传 &ftl->cache 与档位表里的非零条数
      * （IDLE L2P_CACHE_SIZE / NORMAL BG_NORMAL_FLUSH_COUNT / BUSY BG_BUSY_FLUSH_COUNT）。 */
     ASSERT(cache != NULL);
@@ -626,7 +605,7 @@ void l2p_flush_kick(l2p_cache_t *cache, uint8_t max_kick)
              (unsigned)cache->flush_inflight);
     }
 
-    for (i = 0U; (i < L2P_CACHE_SIZE) && (max_kick > 0U); i++)
+    for (uint16_t i = 0U; (i < L2P_CACHE_SIZE) && (max_kick > 0U); i++)
     {
         if (cache->lines[i].state == L2P_CACHE_DIRTY)
         {
@@ -657,15 +636,14 @@ void l2p_flush_kick(l2p_cache_t *cache, uint8_t max_kick)
  * -------------------------------------------------------------------- */
 ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
 {
-    uint32_t          guard  = L2P_SYNC_GUARD_MAX;
-    uint8_t           kicked = 0U;
-    l2p_cache_line_t *line;
+    uint32_t guard  = L2P_SYNC_GUARD_MAX;
+    uint8_t  kicked = 0U;
 
     /* 前置条件（判据 2）：cache 恒 &ftl->cache；line_idx 由调用者自持。 */
     ASSERT(cache != NULL);
     ASSERT((line_idx >= 0) && (line_idx < (int)L2P_CACHE_SIZE));
 
-    line = &cache->lines[line_idx];
+    l2p_cache_line_t *line = &cache->lines[line_idx];
 
     while (guard-- > 0U)
     {
@@ -705,12 +683,10 @@ ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
 
 ftl_status_t l2p_cache_flush_all_sync(l2p_cache_t *cache)
 {
-    uint16_t i;
-
     /* 前置条件（判据 2）：调用者一律传 &ftl->cache。 */
     ASSERT(cache != NULL);
 
-    for (i = 0U; i < L2P_CACHE_SIZE; i++)
+    for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         /* ⚠ 也等 **FLUSHING** 行（后台 kick 已把它起起来了）：只处理 DIRTY 会让
          *   "脏数据已提交、尚未落盘"的行被跳过 ⇒ `fl` 返回时映射其实没落盘，
@@ -753,13 +729,11 @@ ftl_status_t l2p_cache_flush_all_sync(l2p_cache_t *cache)
 void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     l2p_cache_line_t *line = (l2p_cache_line_t *)ctx;
-    fc_command_t     *cmd;
-    uint8_t           failed;
 
     ASSERT(completion != NULL);
     ASSERT(line != NULL);
 
-    cmd = fc_command_id_to_command((uint16_t)completion->command_id);
+    fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①），
      * 完成派发保证 ftl 恒非空。不留 release-and-return 兜底：debug 当场炸，
@@ -769,7 +743,7 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
     ASSERT(&ftl->cache.lines[0] <= line);
     ASSERT(line < &ftl->cache.lines[L2P_CACHE_SIZE]);
 
-    failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1U : 0U;
+    uint8_t failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1U : 0U;
 
     if (line->state == L2P_CACHE_LOADING)
     {

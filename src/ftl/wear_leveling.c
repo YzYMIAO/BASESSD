@@ -49,21 +49,15 @@
  * -------------------------------------------------------------------- */
 bool wl_should_trigger(const struct ftl_context *ftl)
 {
-    uint32_t max_ec;
-    uint32_t min_ec;
-    uint32_t avg_ec;
-    uint32_t low_zone;
-    uint32_t low_count;
-
     /* WL 最小间隔检查 */
     if (ftl->total_writes < WL_MIN_INTERVAL)
     {
         return false;
     }
 
-    max_ec = wl_max_erase(ftl);
-    min_ec = wl_min_erase(ftl);
-    avg_ec = wl_avg_erase(ftl);
+    uint32_t max_ec = wl_max_erase(ftl);
+    uint32_t min_ec = wl_min_erase(ftl);
+    uint32_t avg_ec = wl_avg_erase(ftl);
 
     /* 条件 1：最大/最小差值 */
     if ((max_ec - min_ec) >= WL_DELTA_THRESHOLD)
@@ -78,8 +72,8 @@ bool wl_should_trigger(const struct ftl_context *ftl)
     }
 
     /* 条件 3：低擦除区 Block 占比 */
-    low_zone  = min_ec + WL_LOW_ZONE_WIDTH;
-    low_count = wl_count_blocks_below(ftl, low_zone);
+    uint32_t low_zone  = min_ec + WL_LOW_ZONE_WIDTH;
+    uint32_t low_count = wl_count_blocks_below(ftl, low_zone);
     if (low_count > (uint32_t)ftl->alloc.total_blocks * WL_LOW_BLOCK_PCT / 100U)
     {
         return true;
@@ -99,38 +93,33 @@ bool wl_should_trigger(const struct ftl_context *ftl)
  * -------------------------------------------------------------------- */
 bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 {
-    uint16_t    i;
-    uint32_t    min_ec;
     wl_victim_t best;
-    uint16_t    total_cw_per_sb;
-    uint16_t    min_valid_cw;
-
     memset(&best, 0, sizeof(best));
-    min_ec = wl_min_erase(ftl);
+
+    uint32_t min_ec = wl_min_erase(ftl);
 
     /* 门限单位是**有效 CW**（CW 级映射：1 页 = CW_NUM 个映射单元） */
-    total_cw_per_sb = (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK * CW_NUM);
-    min_valid_cw    = (uint16_t)(total_cw_per_sb * WL_MIN_VALID_RATIO / 100U);
+    uint16_t total_cw_per_sb = (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK * CW_NUM);
+    uint16_t min_valid_cw    = (uint16_t)(total_cw_per_sb * WL_MIN_VALID_RATIO / 100U);
 
-    for (i = 0U; i < allocator_closed_count(&ftl->alloc); i++)
+    for (uint16_t i = 0U; i < allocator_closed_count(&ftl->alloc); i++)
     {
         const super_block_t *sb = allocator_closed_at(&ftl->alloc, i);
-        uint32_t             sb_ec;
 
         /* 跳过仍为 Open 的 SB */
-        if (super_block_is_open(sb))
+        if (sb->is_open)
         {
             continue;
         }
 
         /* 计算该 Super Block 的平均擦除次数（全局 Block 号索引 BST）。
          * 退化单 plane 条目（重建产物）跳过哨兵 plane，按实际 plane 数取平均。 */
+        uint32_t sb_ec;
         {
             uint32_t ec_sum = 0U;
-            uint8_t  p;
-            uint8_t  n = 0U;
+            uint8_t  n      = 0U;
 
-            for (p = 0U; p < PLANE_NUM; p++)
+            for (uint8_t p = 0U; p < PLANE_NUM; p++)
             {
                 if (!super_block_has_plane(sb, p))
                 {
@@ -157,17 +146,15 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
         {
             uint16_t valid  = 0U;
             uint32_t rc_sum = 0U;
-            uint8_t  p;
 
-            for (p = 0U; p < PLANE_NUM; p++)
+            for (uint8_t p = 0U; p < PLANE_NUM; p++)
             {
-                const ftl_block_t *blk;
-
                 if (!super_block_has_plane(sb, p))
                 {
                     continue; /* 退化单 plane 条目 */
                 }
-                blk   = &ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])];
+                const ftl_block_t *blk = &ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])];
+
                 valid = (uint16_t)(valid + blk->valid_count);
                 rc_sum += blk->read_count;
             }
@@ -204,10 +191,9 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 /* wl_max_erase — 全体好块擦除次数的最大值（无块返回 0） */
 uint32_t wl_max_erase(const struct ftl_context *ftl)
 {
-    uint16_t i;
     uint32_t max_ec = 0U;
 
-    for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
         const ftl_block_t *b = &ftl->alloc.blocks[i];
         if (ftl_block_is_bad(b))
@@ -226,10 +212,9 @@ uint32_t wl_max_erase(const struct ftl_context *ftl)
 /* wl_min_erase — 全体好块擦除次数的最小值（无好块返回 0） */
 uint32_t wl_min_erase(const struct ftl_context *ftl)
 {
-    uint16_t i;
     uint32_t min_ec = UINT32_MAX;
 
-    for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
         const ftl_block_t *b = &ftl->alloc.blocks[i];
         if (ftl_block_is_bad(b))
@@ -248,11 +233,10 @@ uint32_t wl_min_erase(const struct ftl_context *ftl)
 /* wl_avg_erase — 全体好块擦除次数的平均值（无好块返回 0） */
 uint32_t wl_avg_erase(const struct ftl_context *ftl)
 {
-    uint16_t i;
     uint32_t sum   = 0U;
     uint16_t count = 0U;
 
-    for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
         const ftl_block_t *b = &ftl->alloc.blocks[i];
         if (ftl_block_is_bad(b))
@@ -273,10 +257,9 @@ uint32_t wl_avg_erase(const struct ftl_context *ftl)
 /* wl_count_blocks_below — 擦除次数严格小于 threshold 的好块数（低擦除区占比统计用） */
 uint32_t wl_count_blocks_below(const struct ftl_context *ftl, uint32_t threshold)
 {
-    uint16_t i;
     uint32_t count = 0U;
 
-    for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
         const ftl_block_t *b = &ftl->alloc.blocks[i];
         if (ftl_block_is_bad(b))

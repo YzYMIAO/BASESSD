@@ -66,27 +66,31 @@ typedef struct
     uint8_t health;       /* rr_block_health_t */
 } rr_ecc_track_t;         /* 3B */
 
-/* ── ftl_block_t 状态位（bitmask 宏，非 C 位域——
- *   嵌入式可移植（位域布局实现定义），支持位运算，配访问器） ── */
-enum
+/* ── ftl_block_t 状态机（互斥态，枚举而非位图）──
+ * 块**位置**同一时刻只能有一个，故用枚举而非位图：
+ *   · 位图允许非法组合——原 RESERVED 位被「L2P 日志块」与「退役块」两种身份共用，
+ *     且 bbt_mark_bad 不清它 ⇒「BAD|RESERVED」可表达且无断言拦（今天是不可达的
+ *     潜在缺口，靠调用图碰巧如此，不是任何不变量保证的）；
+ *   · 位图每次转换都要手写清位掩码——14 个转换点出现 7 种掩码，漏一位**编译期
+ *     完全无声**（bbt_mark_bad 清温度而 bbt_scan_factory 不清，同文件内已不一致）。
+ * 温度与位置**正交**（OPEN 块也有冷热），故单列字段，见 ftl_block_t.temp。
+ *
+ * ⚠ 无「预擦除 / 未擦除」分级态（P1-3）：Free Pool 是**一个**已擦除池（GC 先擦后归还），
+ *   三级是**水位**不是**分区**——见 allocator.h 的「Free Pool 三级水位」。 */
+typedef enum
 {
-    FTL_BLOCK_STATE_BAD       = 0x0001U, /* 坏块（合并 bad_blocks[] + bbt bitmap） */
-    FTL_BLOCK_STATE_OPEN      = 0x0002U, /* 属于某 Open SB（正在写） */
-    FTL_BLOCK_STATE_CLOSED    = 0x0004U, /* 属于 Closed SB（等待 GC） */
-    FTL_BLOCK_STATE_FREE      = 0x0008U, /* 在 Free Pool（已擦除） */
-    FTL_BLOCK_STATE_RESERVED  = 0x0010U, /* Spare Pool / 元数据保留块 */
-    FTL_BLOCK_STATE_TEMP_HOT  = 0x0020U, /* 温度流：Hot（super_block_t.temperature 下沉） */
-    FTL_BLOCK_STATE_TEMP_COLD = 0x0040U, /* 温度流：Cold */
-    /* ⚠ bit7/bit8（原 PRE_COND / EMERGENCY）已删除（P1-3）：Free Pool 是一个已擦除池，
-     *   池内无「预擦除 / 未擦除」之分（GC 先擦后归还），故这两个分级位从未有过读者。
-     *   三级是**水位**不是**分区**——见 allocator.h 的「Free Pool 三级水位」。 */
-};
+    FTL_BLOCK_STATE_NONE    = 0U, /* 无归属：固定元数据区 / OP 池 / Spare 池 / BSS 未初始化 */
+    FTL_BLOCK_STATE_FREE    = 1U, /* 在 Free Pool（已擦除） */
+    FTL_BLOCK_STATE_OPEN    = 2U, /* 属于某 Open SB（正在写） */
+    FTL_BLOCK_STATE_CLOSED  = 3U, /* 属于某 Closed SB（等待 GC） */
+    FTL_BLOCK_STATE_LOG     = 4U, /* L2P 日志块（动态元数据块，本池独占；metadata 回收判据） */
+    FTL_BLOCK_STATE_RETIRED = 5U, /* 退役：不再分配新数据、不标坏、仍可读（read_recovery） */
+    FTL_BLOCK_STATE_BAD     = 6U, /* 坏块（终态；合并 bad_blocks[] + bbt bitmap） */
+} ftl_block_state_t;
 
-/* 全部状态位掩码（bit0..6） */
-#define FTL_BLOCK_STATE_MASK (0x007FU)
-
-/* 温度掩码/提取（bit5-6，显式两 bit，可扩展多温区） */
-#define FTL_BLOCK_TEMP_MASK (FTL_BLOCK_STATE_TEMP_HOT | FTL_BLOCK_STATE_TEMP_COLD)
+/* 状态存于 uint8_t ⇒ 值域必须装得下（枚举成员一多就会静默截断） */
+_Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)UINT8_MAX,
+               "ftl_block_state_t 超出 uint8_t 值域");
 
 /* ── Block State Table 每行（BIT 条目）──
  * 全字段常驻 SRAM（纯块级聚合，**无**位图表；有效性现查 META+L2P，见文件头）。
@@ -101,8 +105,8 @@ enum
  *   last_pe_ts    最近擦除时间戳（GC victim youth_penalty，P1-1 消费）
  *   read_count    read disturb 计数（读成功++，read recovery / wear 消费）
  *   valid_count   双 Plane 合计有效 **CW** 0..512（GC/WL victim 选真值，O(1)）
- *   state         状态机（BAD/OPEN/CLOSED/FREE/RESERVED）
- *                 + 温度（HOT/COLD），bitmask 宏 + 访问器
+ *   state         状态机（ftl_block_state_t，互斥态：NONE/FREE/OPEN/CLOSED/LOG/RETIRED/BAD）
+ *   temp          温度流（0=HOT / 1=COLD，与位置**正交**）
  *   sb_id         block→SB 反向索引（UINT16_MAX=未归属，allocator 维护）
  *   rr            ECC 健康（last_ecc + rising_count + health，read recovery 供电）
  *
@@ -128,7 +132,8 @@ typedef struct
 
     /* ── 有效页聚合 + 状态 ── */
     uint16_t valid_count; /* 2B  @10  双 Plane 合计有效 **CW** 0..512（逐 CW 真值，现查 META+L2P） */
-    uint16_t state;       /* 2B  @12  状态机+温度（bitmask 宏 + 访问器） */
+    uint8_t  state;       /* 1B  @12  状态机（ftl_block_state_t，互斥） */
+    uint8_t  temp;        /* 1B  @13  温度流（0=HOT / 1=COLD，同 FTL_TEMP_* 值域；正交于状态） */
     uint16_t sb_id;       /* 2B  @14  block→SB 反向索引（UINT16_MAX=无） */
 
     /* ── ECC 健康 ── */
@@ -172,54 +177,82 @@ static inline uint16_t ftl_gblock_block(uint16_t g)
  * ⇒ 用 `ASSERT(b != NULL)`（H14）：debug 停机留现场，release 裁空 ⇒ 零开销，
  *   不保留 `if (b != NULL) { … }` 那种**恒真的静默吞**（§十附判据 1）。 */
 
-/* ── 坏块位操作（BST 单数据源；NAND 持久化仍走 bbt_header_t.bad_map）── */
+/* ── 状态机访问器（枚举赋值，无位运算）──
+ *
+ * ⚠ H15（位运算与位判断走公共宏）在本字段**不适用**：拍平后没有任何位掩码/位标志运算
+ *   ⇒「任一位置位 vs 全部位置位」那类歧义消失（原 `FTL_BLOCK_STATE_MASK` 零调用者，已删）。 */
+
+static inline ftl_block_state_t ftl_block_state(const ftl_block_t *b)
+{
+    ASSERT(b != NULL);
+    return (ftl_block_state_t)b->state;
+}
+
+static inline void ftl_block_set_state(ftl_block_t *b, ftl_block_state_t st)
+{
+    ASSERT(b != NULL);
+    ASSERT((unsigned)st <= (unsigned)FTL_BLOCK_STATE_BAD); /* 漏斗唯一入口，越界即停机 */
+    b->state = (uint8_t)st;
+}
+
+/* ── 坏块（BST 单数据源；NAND 持久化仍走 bbt_header_t.bad_map）──
+ * 坏块是状态机的**终态**，不再是独立位 ⇒ 与其余 6 态天然互斥
+ * （原「BAD|RESERVED」并存不再可表达）。 */
 
 static inline bool ftl_block_is_bad(const ftl_block_t *b)
 {
     ASSERT(b != NULL);
-    return (b->state & FTL_BLOCK_STATE_BAD) != 0;
+    return ftl_block_state(b) == FTL_BLOCK_STATE_BAD;
 }
 
 static inline void ftl_block_set_bad(ftl_block_t *b)
 {
     ASSERT(b != NULL);
-    b->state |= FTL_BLOCK_STATE_BAD;
+    ftl_block_set_state(b, FTL_BLOCK_STATE_BAD);
 }
 
-/* ── 状态机访问器（bitmask 宏 + 可读调用，替代位域/联合体）── */
-
-static inline bool ftl_block_state_is(const ftl_block_t *b, uint16_t st)
-{
-    ASSERT(b != NULL);
-    return (b->state & st) == st;
-}
-
-static inline void ftl_block_state_set(ftl_block_t *b, uint16_t st)
-{
-    ASSERT(b != NULL);
-    b->state |= st;
-}
-
-static inline void ftl_block_state_clr(ftl_block_t *b, uint16_t st)
-{
-    ASSERT(b != NULL);
-    b->state &= (uint16_t)~st;
-}
-
-/* 温度流：分配时记录 hot/cold（0=HOT / 1=COLD，与 allocator FTL_TEMP_* 对齐）。
- * 不在本头引用 FTL_TEMP_*（避免 allocator.h 循环 include），直接用值语义。 */
+/* 温度流：分配时记录 hot/cold（0=HOT / 1=COLD，与 allocator 的 FTL_TEMP_* 同值域）。
+ * 不在本头引用 FTL_TEMP_*（避免 allocator.h 循环 include），直接用值语义；
+ * **不另立 `ftl_block_temp_t` 枚举**——同值域再来一套名字就是第二套坐标（C9）。
+ * 温度与状态**正交** ⇒ `ftl_block_set_state` 不碰本字段；每次分配都显式写入，
+ * 故 FREE/BAD 块上残留的温度不会被任何读者读到（`ftl_block_get_temp` 生产侧零读者）。 */
 static inline void ftl_block_set_temp(ftl_block_t *b, uint8_t temperature)
 {
     ASSERT(b != NULL);
-    b->state &= (uint16_t)~FTL_BLOCK_TEMP_MASK;
-    b->state |= (temperature == 1U) ? FTL_BLOCK_STATE_TEMP_COLD : FTL_BLOCK_STATE_TEMP_HOT;
+    ASSERT(temperature <= 1U); /* 0=HOT / 1=COLD，同 FTL_TEMP_* */
+    b->temp = temperature;
 }
 
 /* ⚠ 返回值 0=HOT / 1=COLD 是**两值域不是真值域**，不是 bool（UT 逐条钉住该值域）。 */
 static inline uint8_t ftl_block_get_temp(const ftl_block_t *b)
 {
     ASSERT(b != NULL);
-    return ((b->state & FTL_BLOCK_STATE_TEMP_COLD) != 0U) ? 1U : 0U;
+    return b->temp;
+}
+
+/* 状态名（诊断日志用）。两个调用者：ftl.c 的 dangling 守卫、controller/cli.c 的 map。
+ * H7：switch 必须有 default（非枚举值只可能来自内存损坏，返回 "?" 而不是静默取一支）。 */
+static inline const char *ftl_block_state_name(ftl_block_state_t st)
+{
+    switch (st)
+    {
+        case FTL_BLOCK_STATE_NONE:
+            return "NONE";
+        case FTL_BLOCK_STATE_FREE:
+            return "FREE";
+        case FTL_BLOCK_STATE_OPEN:
+            return "OPEN";
+        case FTL_BLOCK_STATE_CLOSED:
+            return "CLOSED";
+        case FTL_BLOCK_STATE_LOG:
+            return "LOG";
+        case FTL_BLOCK_STATE_RETIRED:
+            return "RETIRED";
+        case FTL_BLOCK_STATE_BAD:
+            return "BAD";
+        default:
+            return "?";
+    }
 }
 
 /* 反向索引 sb_id（UINT16_MAX = 未归属任何 SB） */

@@ -126,13 +126,11 @@ static uint32_t ftl_now_ms(void)
  * -------------------------------------------------------------------- */
 static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_t *pending)
 {
-    uint8_t bit;
-
     /* 两个调用点（ftl_op_host_io 的 `if (pending != NULL)` 内 / ftl_confirm_kick 的
      * `&ftl->pending[i]`）都保证非空 ⇒ 不在本函数复检（§十附 / §二十六）。 */
 
     /* ── 第一遍：就绪前置（只探不动）── */
-    for (bit = 0U; bit < (uint8_t)FTL_LBA_PER_PAIR; bit++)
+    for (uint8_t bit = 0U; bit < (uint8_t)FTL_LBA_PER_PAIR; bit++)
     {
         if ((pending->cw_bitmap & (uint8_t)(1U << bit)) == 0U)
         {
@@ -148,29 +146,28 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
     /* 页打包（§七 方案 A）：pending 描述**一整页**——pending->lba = 窗口基址，
      * cw_bitmap 标记本页哪些 CW 有效，逐**置位**确认。逐 CW 的 LBA = base + bit
      * （bit 与 LBA 低 3 位 [plane][cw] 同构：bit = plane*CW_NUM + cw）。 */
-    for (bit = 0U; bit < (uint8_t)FTL_LBA_PER_PAIR; bit++)
+    for (uint8_t bit = 0U; bit < (uint8_t)FTL_LBA_PER_PAIR; bit++)
     {
-        const uint8_t    pl   = (uint8_t)(bit / CW_NUM);
-        const uint8_t    cw   = (uint8_t)(bit % CW_NUM);
-        const lba_t      l    = (lba_t)(pending->lba + (lba_t)bit);
-        const nand_pba_t page = (pl == 0U) ? pending->new_pba : pending->new_pba1;
-        nand_pba_t       newp;
-        nand_pba_t       oldp;
-
         if ((pending->cw_bitmap & (uint8_t)(1U << bit)) == 0U)
         {
             continue; /* 本槽未写（页打包后一页可只填部分 CW） */
         }
+
+        const uint8_t    pl   = (uint8_t)(bit / CW_NUM);
+        const uint8_t    cw   = (uint8_t)(bit % CW_NUM);
+        const lba_t      l    = (lba_t)(pending->lba + (lba_t)bit);
+        const nand_pba_t page = (pl == 0U) ? pending->new_pba : pending->new_pba1;
 
         /* 本页只为本命令覆盖到的 plane 分配了页（未覆盖的 plane 不进本循环体）。
          * 覆盖到的 plane 必有页（allocator_alloc_pair 两 plane 都给）。 */
         ASSERT(page != NAND_PBA_INVALID);
         ASSERT(pba_to_plane(page) == pl);
 
-        newp = pba_with_cw(page, cw);
+        nand_pba_t newp = pba_with_cw(page, cw);
 
         /* 就绪前置已保证驻留 ⇒ 读必命中、写必不返 FTL_AGAIN。非 OK 只剩"LBA 越界"
          * 一种可能（L2P 范围外）——旧实现同样把它当"未映射"处理，保持等价 + 一行日志。 */
+        nand_pba_t oldp;
         if (l2p_cache_read(&ftl->cache, l, &oldp) != FTL_OK)
         {
             LOGE("[FTL] confirm: l2p read lba=%lu out of range\r\n", (unsigned long)l);
@@ -193,22 +190,23 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
              * **唯一故障点**：重建只要静默跳过一个仍被 L2P 指向的块（坏块 / 元数据块判据
              * 过宽 / 页 0 判空），该块就落在所有池之外、valid_count 恒 0，且此后**每次**
              * 覆盖写该 LBA 都会死机——而重启本身看不出任何异常。
-             * 打印旧块现场是为了**一次归因**（state 一眼可判）：
-             *   BAD(0x01)  = 坏块，重建按判据跳过（数据本已不可读）
-             *   FREE(0x08) = 已归还空闲池 ⇒ 块还会被 allocator 复用，**丢数据**
-             *   RESERVED   = 元数据日志块 ⇒ 判据过宽（v0.69 已修 plane 掩码）
-             *   0x0000     = 重建从未认领（页 0 判空 / 未扫描到）
+             * 打印旧块现场是为了**一次归因**（state 一眼可判，名字由 ftl_block_state_name 给）：
+             *   BAD     = 坏块，重建按判据跳过（数据本已不可读）
+             *   FREE    = 已归还空闲池 ⇒ 块还会被 allocator 复用，**丢数据**
+             *   LOG     = 元数据日志块 ⇒ 判据过宽（v0.69 已修 plane 掩码）
+             *   NONE    = 重建从未认领（页 0 判空 / 未扫描到）
              * 代价 = 每次覆盖写多一次比较；收益 = 把「重启后写一次就死机」变成一条可读日志。 */
             if (ftl->alloc.blocks[gob].valid_count == 0U)
             {
-                (void)LOGE("[FTL] dangling lba=%lu old=%08lx g=%u st=0x%04x sb=%u newg=%u nst=0x%04x\r\n",
+                (void)LOGE("[FTL] dangling lba=%lu old=%08lx g=%u st=%s sb=%u newg=%u nst=%s\r\n",
                            (unsigned long)l,
                            (unsigned long)oldp,
                            (unsigned)gob,
-                           (unsigned)ftl->alloc.blocks[gob].state,
+                           ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[gob])),
                            (unsigned)ftl->alloc.blocks[gob].sb_id,
                            (unsigned)ftl_pba_gblock(newp),
-                           (unsigned)ftl->alloc.blocks[ftl_pba_gblock(newp)].state);
+                           ftl_block_state_name(
+                               ftl_block_state(&ftl->alloc.blocks[ftl_pba_gblock(newp)])));
             }
 
             ftl_block_sub_valid(&ftl->alloc.blocks[gob]);
@@ -238,26 +236,22 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
  * -------------------------------------------------------------------- */
 void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
-    uint16_t           cmd_id = (uint16_t)completion->command_id;
-    fc_command_t      *cmd;
-    ftl_pending_req_t *pending;
-
     (void)ctx; /* host I/O 不登记旁表 ctx */
 
     /* command_id 由 NAND 从本命令回填；公共壳 fc_command_id_to_command 已断言
      * ID 在池内，恒返回非空指针。 */
-    cmd = fc_command_id_to_command(cmd_id);
+    uint16_t      cmd_id = (uint16_t)completion->command_id;
+    fc_command_t *cmd    = fc_command_id_to_command(cmd_id);
 
     /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①），
      * 完成派发保证 ftl 恒非空。不留 release-and-return 兜底：debug 当场炸，
      * release（NDEBUG 裁空）下若真走到则 NULL 解引用留现场（比静默吞完成可定位）。 */
     ASSERT(ftl != NULL);
 
-    pending = pending_lookup(ftl, cmd_id);
+    ftl_pending_req_t *pending = pending_lookup(ftl, cmd_id);
 
     if (pending != NULL)
     {
-        uint32_t     data_size  = FTL_IU_BYTES * pending->n_cw; /* 子操作字节数 */
         ssd_status_t sub_status = SSD_STATUS_OK;
 
         if ((completion->status & FC_CW_STATUS_NAND_FAIL) == 0U)
@@ -269,6 +263,7 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
                 /* 读成功：拷贝数据到 caller buffer。
                  * desc 链序 == LBA 升序（plane-major + 段内 CW 升序，与
                  * LBA 的 [plane][cw] 布局同序）⇒ 按链序连续拷出即 LBA 序。 */
+                uint32_t data_size = FTL_IU_BYTES * pending->n_cw; /* 子操作字节数 */
                 (void)ftl_cmd_read_data(cmd, pending->buffer, data_size);
 
                 /* Read Recovery：记录本次读的 ECC 纠正 bit 数（desc 链最大值），
@@ -377,12 +372,9 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
  * -------------------------------------------------------------------- */
 static void ftl_confirm_kick(ftl_context_t *ftl)
 {
-    uint8_t i;
-
-    for (i = 0U; i < FTL_PENDING_MAX; i++)
+    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
     {
         ftl_pending_req_t *pending = &ftl->pending[i];
-        uint32_t           owners;
 
         if ((pending->used == 0U) || (!pending_op_is_write_confirm(pending->op)))
         {
@@ -395,7 +387,7 @@ static void ftl_confirm_kick(ftl_context_t *ftl)
         }
 
         /* 停泊发生在 NAND **编程成功之后** ⇒ 子操作状态恒 OK（没有写失败分支）。 */
-        owners = pending->owners;
+        uint32_t owners = pending->owners;
         pending_release_index(ftl, i);
         pending_group_complete_subop_multi(ftl, owners, SSD_STATUS_OK);
     }
@@ -428,7 +420,6 @@ static void ftl_confirm_kick(ftl_context_t *ftl)
 static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
 {
     uint32_t now_ms = ftl_now_ms();
-    uint32_t triggers;
 
     /* 节拍门。⚠ gc_eval_last_ms == 0 是「尚未求值」哨兵：平台时钟缺失时
      * ftl_now_ms() 恒 0，此时**每轮都求值**——GC 不能因缺时钟而停摆。 */
@@ -438,7 +429,7 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
     }
     ftl->gc_eval_last_ms = now_ms;
 
-    triggers = gc_check_triggers(&ftl->alloc);
+    uint32_t triggers = gc_check_triggers(&ftl->alloc);
 
     /* 观测口：位图见 gc.h GC_TRIGGER_*（多位可同时命中）。日志走**自己的节拍**
      * （GC_LOG_INTERVAL_MS，与求值同一套时基），不是逐次求值都打。
@@ -643,11 +634,11 @@ static void bg_a_rr_predict(ftl_context_t *ftl)
 void ftl_bg_init(ftl_context_t *ftl)
 {
     bg_scheduler_t *bg = &ftl->bg;
-    uint8_t         i  = 0U;
 
     bg_scheduler_init(bg);
 
     /* must-run 正确性关键集（位 0..5：无条件、不 gate、不占预算） */
+    uint8_t i             = 0U;
     bg->tasks[i].func     = bg_a_checkpoint;
     bg->tasks[i].must_run = 1U;
     i++;
@@ -867,8 +858,6 @@ void ftl_service_pump(void)
  * -------------------------------------------------------------------- */
 void ftl_service(ftl_context_t *ftl)
 {
-    uint8_t level;
-
     /* 唯一调用点 main.c 传 &g_ftl[ch][ce][lun]（静态数组元素，结构性恒非空）；
      * NULL 属「不该发生」⇒ ASSERT（release 裁空后 NULL 解引用=HardFault 留现场，
      * 优于静默返回⇒该实例 journal/GC 永不推进的无声损坏）。 */
@@ -922,7 +911,7 @@ void ftl_service(ftl_context_t *ftl)
     /* 档位选择在 ftl_bg_level_select 内算（纯函数，inflight = pending + groups）；
      * checkpoint_kick 由 must-run 位 0 承接（引擎 Pass 0 最先执行），此处不再显式调。
      * ftl->bg.level 供 l2p flush 适配器反查条数上界（位 8）。 */
-    level         = ftl_bg_level_select(ftl);
+    uint8_t level = ftl_bg_level_select(ftl);
     ftl->bg.level = level;
     bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level]);
 }
@@ -941,8 +930,6 @@ void ftl_service(ftl_context_t *ftl)
  * 命中判定：窗口匹配 + 该槽位已置位。供读路径优先取缓冲（避免读到陈旧 L2P）。 */
 static bool ftl_wbuf_has(const ftl_context_t *ftl, lba_t internal_lba)
 {
-    const uint8_t slot = (uint8_t)(ftl_lba_plane(internal_lba) * CW_NUM + ftl_lba_cw(internal_lba));
-
     if (ftl->wbuf.open == 0U)
     {
         return false;
@@ -951,6 +938,8 @@ static bool ftl_wbuf_has(const ftl_context_t *ftl, lba_t internal_lba)
     {
         return false;
     }
+
+    const uint8_t slot = (uint8_t)(ftl_lba_plane(internal_lba) * CW_NUM + ftl_lba_cw(internal_lba));
     return (ftl->wbuf.occupied & (uint8_t)(1U << slot)) != 0U;
 }
 
@@ -967,9 +956,7 @@ static void ftl_wbuf_read(const ftl_context_t *ftl, lba_t internal_lba, void *ou
  * 本子操作 ⇒ 调用者 g->next 不前进，下轮重试）。 */
 static ftl_status_t ftl_wbuf_append(ftl_context_t *ftl, uint16_t gi, lba_t internal_lba, const void *buffer, uint8_t n)
 {
-    const lba_t    window = ftl_lba_pair_base(internal_lba);
-    const uint8_t *src    = (const uint8_t *)buffer;
-    uint8_t        k;
+    const lba_t window = ftl_lba_pair_base(internal_lba);
 
     /* 换窗口：先把旧窗口编程掉。flush 失败（背压）则本子操作不消费，下轮重试。 */
     if ((ftl->wbuf.open != 0U) && (ftl->wbuf.base != window))
@@ -990,7 +977,8 @@ static ftl_status_t ftl_wbuf_append(ftl_context_t *ftl, uint16_t gi, lba_t inter
         ftl->wbuf.owners   = 0U;
     }
 
-    for (k = 0U; k < n; k++)
+    const uint8_t *src = (const uint8_t *)buffer;
+    for (uint8_t k = 0U; k < n; k++)
     {
         const lba_t   l    = (lba_t)(internal_lba + (lba_t)k);
         const uint8_t slot = (uint8_t)(ftl_lba_plane(l) * CW_NUM + ftl_lba_cw(l));
@@ -1019,12 +1007,6 @@ static ftl_status_t ftl_wbuf_append(ftl_context_t *ftl, uint16_t gi, lba_t inter
  * ⚠ 缓冲只在**提交成功后**清空——失败时保留供重试；outstanding 已在 append 记过，此处不动。 */
 static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
 {
-    nand_pba_t    new_pba[PLANE_NUM];
-    fc_command_t *cmd;
-    uint8_t       nplanes;
-    uint8_t       n_cw;
-    ftl_status_t  ret;
-
     if ((ftl->wbuf.open == 0U) || (ftl->wbuf.occupied == 0U))
     {
         return FTL_OK; /* 空：nothing to do */
@@ -1051,6 +1033,7 @@ static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
      *   不擦 victim、数据无损，下轮重试。
      *   ⚠ 这里**不再**返回 FTL_ERROR：无 victim 可回收只是"暂时没空间"，下轮可能就有
      *   （另一条写完成归还了块），报 IO_ERROR 会让 host 写永久失败。 */
+    nand_pba_t new_pba[PLANE_NUM];
     if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) == NAND_PBA_INVALID)
     {
         (void)mig_begin_gc(ftl);
@@ -1060,12 +1043,12 @@ static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
     /* 本页覆盖的 plane 数（决定 operation 码与 plane 段）与实际 CW 数。
      * nplanes 的值域断言在 ftl_plane_write_op 内（界 = PLANE_NUM，与
      * fc_command_plane_span 同源）——不再在这里复检。 */
-    nplanes = ftl_cw_bitmap_plane_count((uint32_t)ftl->wbuf.occupied);
-    n_cw    = ftl_cw_bitmap_popcount((uint32_t)ftl->wbuf.occupied);
+    uint8_t nplanes = ftl_cw_bitmap_plane_count((uint32_t)ftl->wbuf.occupied);
+    uint8_t n_cw    = ftl_cw_bitmap_popcount((uint32_t)ftl->wbuf.occupied);
     ASSERT(n_cw > 0U);
 
     /* 分配 FC 命令槽（池空 = 瞬态） */
-    cmd = fc_command_alloc();
+    fc_command_t *cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return FTL_AGAIN;
@@ -1084,7 +1067,7 @@ static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
     cmd->meta               = (DWORD)ftl->wbuf.base;
 
     /* 建 desc 链（位图 = 本页实际覆盖的 CW；desc/buffer 池空 → 瞬态背压） */
-    ret = ftl_cmd_setup_ppa_pair_cw(cmd, new_pba, (uint32_t)ftl->wbuf.occupied);
+    ftl_status_t ret = ftl_cmd_setup_ppa_pair_cw(cmd, new_pba, (uint32_t)ftl->wbuf.occupied);
     if (ret != FTL_OK)
     {
         (void)fc_command_release(cmd);
@@ -1153,14 +1136,12 @@ static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
  * （该组要么 append 推进、要么被 drain 判失败置 next=total，≤ FTL_DRAIN_STALL_MAX 轮）。 */
 static void ftl_wbuf_maybe_flush_idle(ftl_context_t *ftl)
 {
-    uint8_t i;
-
     if (ftl->wbuf.open == 0U)
     {
         return;
     }
 
-    for (i = 0U; i < FTL_GROUP_MAX; i++)
+    for (uint8_t i = 0U; i < FTL_GROUP_MAX; i++)
     {
         const ftl_io_group_t *g = &ftl->groups[i];
 
@@ -1216,15 +1197,10 @@ static void ftl_wbuf_maybe_flush_idle(ftl_context_t *ftl)
 static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t internal_lba, void *buffer, uint8_t *n_cw)
 {
     ftl_io_group_t *g = &ftl->groups[gi];
-    fc_command_t   *cmd;
-    nand_pba_t      pba[PLANE_NUM];
-    uint32_t        cw_bitmap = 0U; /* flat：bit = plane*CW_NUM + cw */
-    uint8_t         n;
-    uint8_t         nplanes;
-    ftl_status_t    ret;
 
     /* 夹到 pair 窗口：一个子操作不跨窗口（窗口内最多两个 plane 段、每段一个页）。
      * ⚠ L2P region 512 对齐且 lba_to_local 保留低 9 位 ⇒ 窗口绝不跨实例/region。 */
+    uint8_t n;
     {
         const lba_t   window_end = ftl_lba_pair_base(internal_lba) + (lba_t)FTL_LBA_PER_PAIR;
         const uint8_t avail      = (uint8_t)(window_end - internal_lba);
@@ -1255,11 +1231,13 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
         return FTL_OK;
     }
 
+    nand_pba_t pba[PLANE_NUM];
     for (uint8_t i = 0U; i < PLANE_NUM; i++)
     {
         pba[i] = NAND_PBA_INVALID; /* 未覆盖的 plane 保持 INVALID（见 ftl_pending_req_t.new_pba 约定） */
     }
 
+    uint32_t cw_bitmap = 0U; /* flat：bit = plane*CW_NUM + cw */
     {
         /* 逐 LBA 查 L2P 并按 (物理 plane, 页) 分组。收缩条件：
          *   · 该 LBA 仍在写缓冲里（未编程）—— 本 LBA 不进本子操作（下一轮从缓冲取）
@@ -1273,8 +1251,6 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
         {
             const lba_t l = (lba_t)(internal_lba + (lba_t)k);
             nand_pba_t  p = NAND_PBA_INVALID; /* 越界（FTL_ERROR）保持此值 = 未映射 */
-            uint8_t     pl;
-            nand_pba_t  pg;
 
             if (ftl_wbuf_has(ftl, l))
             {
@@ -1311,8 +1287,8 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
                 return FTL_ERROR;
             }
 
-            pl = (uint8_t)pba_to_plane(p);
-            pg = pba_page(p);
+            uint8_t    pl = (uint8_t)pba_to_plane(p);
+            nand_pba_t pg = pba_page(p);
 
             /* CW 级映射的结构不变量：**物理 plane == LBA 的 plane 位**。
              * 违反 ⇒ FC 侧 desc->meta（由**物理** plane/cw 铸出）还原出的扇区 LBA 不是
@@ -1356,7 +1332,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
 
     /* 本子操作覆盖的 plane 数（决定 operation 码与 plane 段）。
      * 值域断言在 ftl_plane_read_op 内（界 = PLANE_NUM）。 */
-    nplanes = ftl_cw_bitmap_plane_count(cw_bitmap);
+    uint8_t nplanes = ftl_cw_bitmap_plane_count(cw_bitmap);
 
     /* 资源次序（IO-013）：**先查 pending 表余量，再配 desc 链**。末尾要用一个 pending 槽
      * 登记本子操作；表满却先建好链，只能整条回滚——白配一场。
@@ -1367,7 +1343,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
     }
 
     /* 分配 FC 命令槽（池空 = 瞬态） */
-    cmd = fc_command_alloc();
+    fc_command_t *cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return FTL_AGAIN;
@@ -1390,7 +1366,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
 
     /* 建 desc 链（逐 plane 各自的 PBA，位图 = 本子操作实际覆盖的 CW）；
      * desc/buffer 池空 → 瞬态背压 */
-    ret = ftl_cmd_setup_ppa_pair_cw(cmd, pba, cw_bitmap);
+    ftl_status_t ret = ftl_cmd_setup_ppa_pair_cw(cmd, pba, cw_bitmap);
     if (ret != FTL_OK)
     {
         (void)fc_command_release(cmd);
@@ -1522,17 +1498,13 @@ static void ftl_drain_group(ftl_context_t *ftl, uint16_t gi)
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
 {
-    int             gi;
-    ftl_io_group_t *g;
-    uint32_t        count;
-
     if ((ftl == NULL) || (req == NULL) || (req->buffer == NULL))
     {
         return FTL_ERROR;
     }
 
     /* 长度 = 连续 LBA 数（上层 block_count）；FTL 自行决定单/双 plane 拆分 */
-    count = req->count;
+    uint32_t count = req->count;
     if (count == 0U)
     {
         return FTL_ERROR;
@@ -1548,13 +1520,13 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     }
 
     /* 建完成组（一条 host 请求 = 一个组）。通知字段必须**早于任何下发**填入。 */
-    gi = pending_group_alloc(ftl);
+    int gi = pending_group_alloc(ftl);
     if (gi < 0)
     {
         LOGE("[FTL] read: no free group slot\r\n");
         return FTL_ERROR;
     }
-    g                  = &ftl->groups[gi];
+    ftl_io_group_t *g  = &ftl->groups[gi];
     g->op              = (uint8_t)PENDING_OP_READ;
     g->total           = count; /* 进度以 **LBA** 计（子操作数由 drain 现场决定，可降级） */
     g->next            = 0U;
@@ -1586,17 +1558,13 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
 {
-    int             gi;
-    ftl_io_group_t *g;
-    uint32_t        count;
-
     if ((ftl == NULL) || (req == NULL) || (req->buffer == NULL))
     {
         return FTL_ERROR;
     }
 
     /* 长度 = 连续 LBA 数（上层 block_count）；FTL 自行决定单/双 plane 拆分 */
-    count = req->count;
+    uint32_t count = req->count;
     if (count == 0U)
     {
         return FTL_ERROR;
@@ -1612,13 +1580,13 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
     }
 
     /* 建完成组（同 ftl_submit_read：通知字段必须早于任何下发填入）。 */
-    gi = pending_group_alloc(ftl);
+    int gi = pending_group_alloc(ftl);
     if (gi < 0)
     {
         LOGE("[FTL] write: no free group slot\r\n");
         return FTL_ERROR;
     }
-    g                  = &ftl->groups[gi];
+    ftl_io_group_t *g  = &ftl->groups[gi];
     g->op              = (uint8_t)PENDING_OP_WRITE;
     g->total           = count; /* 进度以 LBA 计，同 ftl_submit_read */
     g->next            = 0U;
@@ -1679,8 +1647,6 @@ void ftl_flush(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
 {
-    uint32_t i;
-
     /* 前置条件（判据 2 / C5）：唯一调用者 controller.c 在调用前已 ASSERT 路由结果非空。 */
     ASSERT(ftl != NULL);
 
@@ -1694,7 +1660,7 @@ void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
     }
 
     /* 逐 LBA 取消映射（非阻塞、同步完成）。范围上界/分块后续再定。 */
-    for (i = 0U; i < count; i++)
+    for (uint32_t i = 0U; i < count; i++)
     {
         nand_pba_t old_pba   = NAND_PBA_INVALID; /* 越界（FTL_ERROR）由 API 回填，此处再兜一层 */
         lba_t      local_lba = lba_to_local(lba + i);

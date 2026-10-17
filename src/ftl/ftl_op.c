@@ -62,12 +62,10 @@ static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
 
 ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
 {
-    uint16_t cmd_id;
-
     ASSERT(cmd != NULL);
     ASSERT((uint32_t)op < (uint32_t)FTL_OP_COUNT);
 
-    cmd_id = ftl_cmd_id(cmd);
+    uint16_t cmd_id = ftl_cmd_id(cmd);
 
     /* ① ID 上命令（FC 只做原样拷贝，完成时回传到 completion.op_tag）。 */
     cmd->op_tag = (DWORD)op;
@@ -108,19 +106,13 @@ bool ftl_op_in_dispatch(void)
 
 void ftl_op_dispatch(const fc_command_status_t *completion)
 {
-    fc_command_t       *cmd;
-    ftl_op_service_fn_t fn;
-    struct ftl_context *ftl;
-    void               *ctx;
-    uint8_t             op;
-
     ASSERT(completion != NULL);
 
-    op = (uint8_t)completion->op_tag;
-    fn = (op < (uint8_t)FTL_OP_COUNT) ? g_op_service[op] : NULL;
+    uint8_t             op = (uint8_t)completion->op_tag;
+    ftl_op_service_fn_t fn = (op < (uint8_t)FTL_OP_COUNT) ? g_op_service[op] : NULL;
 
     /* command_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。 */
-    cmd = fc_command_id_to_command((uint16_t)completion->command_id);
+    fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     if (fn == NULL)
     {
@@ -137,7 +129,7 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
 
     /* 先摘链再回调（同 completion_table_drain 的既有约定）——服务函数内部可能
      * 重入登记/释放表项，先摘可避免它在自己的回调里踩到本项。 */
-    ctx = completion_table_take((uint16_t)completion->command_id);
+    void *ctx = completion_table_take((uint16_t)completion->command_id);
 
     /* 实例归属按**命令自身**的 ch/ce/lun 解析（不是"谁在 drain"）：单线程顺序主循环下
      * "实例 A 的 drain 遇到实例 B 的 completion"是必然事件。
@@ -145,9 +137,9 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
      * 先 completion_table_init 清一次、再 set_route），因为 boot 期 F2 重建就会经
      * l2p_cache_read_sync 抽完成表。故此处解析出 NULL 只可能是编程错误，
      * 不再是"开机早期"的正常状态。 */
-    ftl = completion_table_route((uint8_t)cmd->config.ch,
-                                 (uint8_t)cmd->config.ce,
-                                 (uint8_t)cmd->config.lun);
+    struct ftl_context *ftl = completion_table_route((uint8_t)cmd->config.ch,
+                                                     (uint8_t)cmd->config.ce,
+                                                     (uint8_t)cmd->config.lun);
 
     /* 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_in_dispatch() 据此判断
      * "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。 */

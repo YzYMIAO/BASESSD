@@ -92,12 +92,11 @@ typedef struct
 static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, int full, uint32_t *out_sequence)
 {
     checkpoint_probe_ctx_t *c = (checkpoint_probe_ctx_t *)ctx;
-    l2p_checkpoint_header_t hdr;
-    nand_pba_t              addr;
 
     (void)full;
 
-    addr = metadata_ring_addr(&c->ring, &c->topo, record_idx, 0U);
+    nand_pba_t              addr = metadata_ring_addr(&c->ring, &c->topo, record_idx, 0U);
+    l2p_checkpoint_header_t hdr;
 
     if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != 0)
     {
@@ -231,22 +230,19 @@ static ftl_status_t cp_submit_erase(cp_job_t *j, nand_pba_t addr)
  * -------------------------------------------------------------------- */
 static cp_flush_step_t cp_flush_regions(ftl_context_t *ftl, cp_job_t *j)
 {
-    uint16_t i;
-    int      pending = 0;
+    int pending = 0;
 
-    for (i = 0U; i < L2P_CACHE_SIZE; i++)
+    for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         l2p_cache_line_t *line = &ftl->cache.lines[i];
-        uint32_t          word;
-        uint32_t          mask;
 
         if (line->state == L2P_CACHE_INVALID)
         {
             continue; /* 空行（region_id 无意义，脏位查询无意义） */
         }
 
-        word = j->region_bitmap[line->region_id / 32U];
-        mask = (1UL << (line->region_id & 31U));
+        uint32_t word = j->region_bitmap[line->region_id / 32U];
+        uint32_t mask = (1UL << (line->region_id & 31U));
         if ((word & mask) == 0U)
         {
             continue; /* 本次 CP 起点时不脏（此后新脏的由 journal 兜底，见文件头） */
@@ -391,9 +387,6 @@ static void cp_step(ftl_context_t *ftl)
 
             case CP_ANCHOR_WRITE:
             {
-                metadata_anchor_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
-                nand_pba_t             aaddr;
-
                 if (j->anchor_chunk >= ANCHOR_PAGE_COUNT)
                 {
                     /* 整条 record 写完：推进游标（无论成败），成功才清 dirty。
@@ -412,7 +405,9 @@ static void cp_step(ftl_context_t *ftl)
                     break;
                 }
 
-                aaddr = pba_with_page(j->anchor_base, (uint32_t)pba_to_page(j->anchor_base) + j->anchor_chunk);
+                nand_pba_t             aaddr = pba_with_page(j->anchor_base, (uint32_t)pba_to_page(j->anchor_base) + j->anchor_chunk);
+                metadata_anchor_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
+
                 metadata_dir_anchor_page(&ftl->metadata_dir, j->anchor_seq, j->anchor_chunk, &page);
 
                 if (cp_submit_write(j, aaddr, &page, (uint32_t)sizeof(page)) != FTL_OK)
@@ -427,14 +422,12 @@ static void cp_step(ftl_context_t *ftl)
             {
                 /* ④ Header：定位写游标（游标未建立时才扫池——开机 checkpoint_find_latest
                  *    已建立时零代价）。⚠ 这里可能同步读池（同 CP_ANCHOR_PREP）。 */
-                checkpoint_probe_ctx_t probe_ctx;
-                int                    need_erase = 0;
-
                 checkpoint_ring_init(&j->hdr_ring);
 
                 if (ftl->cp.cursor_valid == 0U)
                 {
-                    uint16_t newest = UINT16_MAX;
+                    uint16_t               newest = UINT16_MAX;
+                    checkpoint_probe_ctx_t probe_ctx;
 
                     probe_ctx.topo = ftl->topo;
                     probe_ctx.ring = j->hdr_ring;
@@ -451,6 +444,7 @@ static void cp_step(ftl_context_t *ftl)
                 j->hdr_seq = ++ftl->cp.sequence;
                 j->hdr_idx = ftl->cp.write_idx;
 
+                int need_erase = 0;
                 if (metadata_ring_prepare_addr(&j->hdr_ring, &ftl->topo, j->hdr_idx, &j->hdr_addr, &need_erase) != FTL_OK)
                 {
                     cp_abort(j);
@@ -473,14 +467,14 @@ static void cp_step(ftl_context_t *ftl)
             case CP_HDR_WRITE:
             {
                 l2p_checkpoint_header_t cp; /* 2KB 栈缓冲：恰好一页主区 */
-                uint8_t                 i;
-                uint32_t                region_words = 0U;
 
                 memset(&cp, 0, sizeof(cp));
                 memcpy(cp.region_bitmap, j->region_bitmap, sizeof(cp.region_bitmap));
 
                 /* region_count = 置位 word 数（无消费方，仅信息量；多 LUN 时高位 word 恒 0） */
-                for (i = 0U; i < 64U; i++)
+                uint32_t region_words = 0U;
+
+                for (uint8_t i = 0U; i < 64U; i++)
                 {
                     if (cp.region_bitmap[i] != 0U)
                     {
@@ -505,8 +499,6 @@ static void cp_step(ftl_context_t *ftl)
 
             case CP_TRUNC_PREP:
             {
-                nand_pba_t addr;
-
                 /* ⑤ 截断 Journal：预擦环形最旧块（纯 RAM 判定 + 算址，不动介质）。
                  *   ⚠ 无论 plan 返回 JRN_TRUNC_ALREADY（已预擦过）还是 JRN_TRUNC_NO_TRUNCATE
                  *   （水位不满足），本 CP 都**已
@@ -514,6 +506,7 @@ static void cp_step(ftl_context_t *ftl)
                  *   标志并收尾。这与旧 checkpoint_create 第 ⑧ 步的**无条件复位**逐字对应
                  *   （旧函数末尾无条件清 emergency/checkpoint_needed，与 truncate 内部
                  *   是否真的擦了无关）。 */
+                nand_pba_t addr;
                 if (journal_truncate_plan(&ftl->journal, j->journal_seq, &addr, &j->trunc_next) !=
                     JRN_TRUNC_NEEDS_ERASE)
                 {
@@ -572,8 +565,6 @@ static void cp_step(ftl_context_t *ftl)
 
 ftl_status_t checkpoint_begin(ftl_context_t *ftl)
 {
-    cp_job_t *j;
-
     /* 前置条件（判据 2）：调用者 ftl.c 传实例指针。 */
     ASSERT(ftl != NULL);
 
@@ -582,7 +573,7 @@ ftl_status_t checkpoint_begin(ftl_context_t *ftl)
         return FTL_AGAIN; /* 单飞行：上一次还没跑完 */
     }
 
-    j = &ftl->cp_job;
+    cp_job_t *j = &ftl->cp_job;
     memset(j, 0, sizeof(*j));
 
     /* ① 起点快照（**必须早于任何 flush**，见文件头"快照点前移"的长注释）：
@@ -601,14 +592,12 @@ ftl_status_t checkpoint_begin(ftl_context_t *ftl)
 
 void checkpoint_kick(ftl_context_t *ftl)
 {
-    cp_job_t *j;
-
     if (ftl->cp_job.active == 0U)
     {
         return;
     }
 
-    j = &ftl->cp_job;
+    cp_job_t *j = &ftl->cp_job;
 
     /* 心跳（见 ftl_job.h）：正常 CP 远快于 1s ⇒ 平时静默；只有卡在某 phase 才持续可见。
      * 判据 = 两次心跳之间 phase 不动 ⇒ 卡死（异步后"卡在哪一步"否则完全不可见）。
@@ -639,21 +628,19 @@ void checkpoint_kick(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
-    cp_job_t     *j = (cp_job_t *)ctx;
-    fc_command_t *cmd;
-    int           failed;
+    cp_job_t *j = (cp_job_t *)ctx;
 
     ASSERT(completion != NULL);
     ASSERT(j != NULL);
 
-    cmd = fc_command_id_to_command((uint16_t)completion->command_id);
+    fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     /* 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出的归属实例，
      * 二者必须一致——不一致说明派发路由错了。 */
     ASSERT(ftl != NULL);
     ASSERT(&ftl->cp_job == j);
 
-    failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1 : 0;
+    int failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1 : 0;
 
     switch ((cp_phase_t)j->phase)
     {
@@ -758,18 +745,16 @@ void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *compl
  * -------------------------------------------------------------------- */
 ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_header_t *cp)
 {
-    checkpoint_probe_ctx_t probe_ctx;
-    uint16_t               newest = UINT16_MAX;
-    nand_pba_t             addr;
-
     /* 复位本实例池状态：找不到有效 Header 时保持 0/无效（后续 create 从池首开始） */
     ftl->cp.sequence     = 0U;
     ftl->cp.write_idx    = 0U;
     ftl->cp.cursor_valid = 0U;
 
+    checkpoint_probe_ctx_t probe_ctx;
     checkpoint_ring_init(&probe_ctx.ring);
     probe_ctx.topo = ftl->topo;
 
+    uint16_t newest = UINT16_MAX;
     if (metadata_ring_locate(&probe_ctx.ring, checkpoint_record_probe, &probe_ctx, &newest, &ftl->cp.sequence, &ftl->cp.write_idx) != FTL_OK)
     {
         return FTL_ERROR;
@@ -784,7 +769,7 @@ ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_head
     ftl->cp.cursor_valid = 1U;
 
     /* 重读胜者（locate 只返回序号，Header 本体要再读一次）*/
-    addr = metadata_ring_addr(&probe_ctx.ring, &probe_ctx.topo, newest, 0U);
+    nand_pba_t addr = metadata_ring_addr(&probe_ctx.ring, &probe_ctx.topo, newest, 0U);
     if (ftl_sync_read_page(addr, cp, sizeof(*cp), FTL_PAGE_CFG_META()) != 0)
     {
         return FTL_ERROR;
@@ -809,8 +794,6 @@ ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_head
 ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
 {
     l2p_checkpoint_header_t cp;
-    metadata_ring_t         ring;
-    nand_pba_t              addr;
 
     memset(&cp, 0, sizeof(cp));
     cp.magic            = CHECKPOINT_MAGIC;
@@ -818,7 +801,10 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
     cp.layout_version   = FTL_MEDIA_LAYOUT_VERSION;
     cp.journal_sequence = 0U; /* 空快照：无 region、journal 从 0 起 */
 
+    metadata_ring_t ring;
     checkpoint_ring_init(&ring);
+
+    nand_pba_t addr;
     if (metadata_ring_prepare_write(&ring, &topo, 0U, &addr) != FTL_OK)
     {
         return FTL_ERROR;
@@ -895,8 +881,6 @@ bool checkpoint_is_emergency(const ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 void checkpoint_journal_watermark(l2p_journal_t *journal)
 {
-    uint32_t used;
-
     /* 前置条件（判据 2）：调用者 ftl.c 传 &ftl->journal。 */
     ASSERT(journal != NULL);
 
@@ -917,10 +901,10 @@ void checkpoint_journal_watermark(l2p_journal_t *journal)
      * 85%（JOURNAL_FULL_THRESHOLD）在全局页 218（留 38 页）、95%（JOURNAL_CRITICAL）
      * 在全局页 244（留 12 页），与 §7.5.2 推导对齐。
      */
-    used = ((uint32_t)journal->current_block * PAGES_PER_BLOCK +
-            (uint32_t)journal->current_page) *
-               100U / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK) +
-           ((uint32_t)journal->current_entry * 100U / JOURNAL_ENTRIES_PER_PAGE / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK));
+    uint32_t used = ((uint32_t)journal->current_block * PAGES_PER_BLOCK +
+                     (uint32_t)journal->current_page) *
+                        100U / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK) +
+                    ((uint32_t)journal->current_entry * 100U / JOURNAL_ENTRIES_PER_PAGE / ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK));
 
     if (used >= JOURNAL_CRITICAL)
     {

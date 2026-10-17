@@ -112,13 +112,6 @@ static uint32_t ftl_cmd_resolve_cw_bitmap(uint32_t bitmap, uint8_t plane_first, 
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap)
 {
-    uint32_t mask;
-    uint8_t  plane_count;
-    uint8_t  plane_first;
-    uint8_t  plane_last;
-    uint8_t  plane;
-    uint8_t  cw;
-
     /* cmd 由调用者从 fc_command_alloc() 取且已判空（判据 2：层内模块头 = 前置条件 → ASSERT）。
      * 唯一合法失败是**池空**（desc/buffer）——那才是返回码。 */
     ASSERT(cmd != NULL);
@@ -129,16 +122,19 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
         return FTL_OK;
     }
 
-    plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
-    mask        = ftl_cmd_resolve_cw_bitmap(cw_bitmap, plane_first, plane_count);
+    uint8_t plane_first;
+    uint8_t plane_last;
+    uint8_t plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
 
-    for (plane = plane_first; plane < plane_last; plane++)
+    uint32_t mask = ftl_cmd_resolve_cw_bitmap(cw_bitmap, plane_first, plane_count);
+
+    for (uint8_t plane = plane_first; plane < plane_last; plane++)
     {
         /* 行地址逐 plane 换 plane 位：PAA 的 plane 与 cw 不相邻，不能再用 PBA 的
          * plane_cw 掩码技巧（cmd->paa 已由调用者/上层入口转好）。 */
         const nand_paa_t row_paa = paa_with_plane(cmd->paa, plane);
 
-        for (cw = 0U; cw < CW_NUM; cw++)
+        for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
             if ((mask & ((uint32_t)1U << ((uint32_t)plane * CW_NUM + cw))) == 0U)
             {
@@ -200,20 +196,16 @@ ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba)
  * -------------------------------------------------------------------- */
 static ftl_status_t ftl_cmd_build_pair_chain(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM], uint32_t cw_bitmap)
 {
-    uint32_t mask;
-    uint8_t  plane_count;
-    uint8_t  plane_first;
-    uint8_t  plane_last;
-    uint8_t  plane;
-    uint8_t  cw;
+    uint8_t plane_first;
+    uint8_t plane_last;
+    uint8_t plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
 
-    plane_count = fc_command_plane_span(cmd, &plane_first, &plane_last);
-    mask        = ftl_cmd_resolve_cw_bitmap(cw_bitmap, plane_first, plane_count);
+    uint32_t mask = ftl_cmd_resolve_cw_bitmap(cw_bitmap, plane_first, plane_count);
 
     /* 与 ftl_cmd_configure_descriptors **同构**：单层 plane 循环 + 逐 CW 位测，
      * 位图一律用**绝对编号**（bit = plane*CW_NUM + cw）——不再做「右移到 bit0 起」的
      * 局部位体操。唯一差别：行地址逐 plane 各自取（Policy B），而不是共用 cmd->paa。 */
-    for (plane = plane_first; plane < plane_last; plane++)
+    for (uint8_t plane = plane_first; plane < plane_last; plane++)
     {
         /* pba 的下标一律用 **plane 号**（不是段内偏移）——单 plane 命令的 plane_first 可能
          * 是 1（paa 的 plane 位决定），用偏移会拿到 plane0 的行地址。 */
@@ -225,7 +217,7 @@ static ftl_status_t ftl_cmd_build_pair_chain(fc_command_t *cmd, const nand_pba_t
         ASSERT(pba_is_valid(pba[plane]));                  /* 逐 plane 的行地址都由它转出，越界位会静默算错地址 */
         const nand_paa_t row_paa = pba_to_paa(pba[plane]); /* v47：PBA→PAA 在 FTL 侧转出 */
 
-        for (cw = 0U; cw < CW_NUM; cw++)
+        for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
             if ((mask & ((uint32_t)1U << ((uint32_t)plane * CW_NUM + cw))) == 0U)
             {
@@ -261,8 +253,6 @@ static void ftl_cmd_bind_pair_topo(fc_command_t *cmd, nand_pba_t base_pba)
 
 ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM], uint32_t cw_bitmap)
 {
-    uint8_t first_plane = PLANE_NUM; /* 本命令实际覆盖的第一个 plane（= 段首） */
-
     /* cmd 来自调用者的 fc_command_alloc()（已判空）、pba 是调用者的局部数组
      * （见 ftl_issue_subop / ftl_wbuf_flush）——两者给 NULL 都是调用者 bug ⇒ ASSERT
      * （判据 2：层内模块头 = 前置条件，不返回码）。 */
@@ -272,6 +262,7 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
     /* 基址 PBA 必须取自**被覆盖的 plane**，不是无条件的 pba[0]：CW 级子操作常只覆盖
      * 半个 pair（例如一条 512B 写只落 plane1），此时 pba[0] 按约定未初始化，
      * 拿它定段会把单 plane 命令的段定成 plane0 ⇒ 位图越段 ASSERT 或静默空链。 */
+    uint8_t first_plane = PLANE_NUM; /* 本命令实际覆盖的第一个 plane（= 段首） */
     for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
         if ((cw_bitmap & ftl_cw_plane_mask(p)) != 0U)
@@ -309,26 +300,23 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t length)
 {
-    fc_descriptor_id_t desc_id;
-    const uint8_t     *src;
-
     ASSERT(cmd != NULL);
     ASSERT(data != NULL);
     ASSERT(cmd->desc_id != FC_DESCRIPTOR_ID_INVALID);
 
-    src     = (const uint8_t *)data;
-    desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    const uint8_t *src = (const uint8_t *)data;
+
+    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
 
     while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
         fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
-        uint8_t         *buf;
 
         if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
         {
             return FTL_ERROR;
         }
-        buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+        uint8_t *buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
 
         if (length > 0U)
         {
@@ -374,18 +362,16 @@ ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t le
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, uint32_t cw_bitmap)
 {
-    fc_descriptor_id_t desc_id;
-
     ASSERT(cmd != NULL);
     ASSERT(page_buf != NULL);
     ASSERT(cmd->desc_id != FC_DESCRIPTOR_ID_INVALID);
 
-    desc_id = (fc_descriptor_id_t)cmd->desc_id;
+    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
 
     while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
         fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
-        uint8_t         *buf;
+
         /* CW 号取 desc 自带的 config.cw（建链时写入）——不去解 desc->paa 的 PAA 位域：
          * PAA 是 FC/器件域的表示，FTL 层不该碰。 */
         const uint8_t cw = (uint8_t)descriptor->config.cw;
@@ -394,7 +380,7 @@ ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, u
         {
             return FTL_ERROR;
         }
-        buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+        uint8_t *buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
 
         if ((cw_bitmap & ((uint32_t)1U << cw)) != 0U)
         {
@@ -421,35 +407,31 @@ ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, u
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length)
 {
-    fc_descriptor_id_t desc_id;
-    uint8_t           *dst;
-    uint32_t           remaining;
-
     ASSERT(cmd != NULL);
     ASSERT(buffer != NULL);
     ASSERT(cmd->desc_id != FC_DESCRIPTOR_ID_INVALID);
 
-    dst       = (uint8_t *)buffer;
-    remaining = length;
-    desc_id   = (fc_descriptor_id_t)cmd->desc_id;
+    uint8_t *dst = (uint8_t *)buffer;
+
+    uint32_t remaining = length;
+
+    fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
 
     while ((desc_id < FC_DESCRIPTOR_POOL_DEPTH) && (remaining > 0U))
     {
         fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
-        uint8_t         *buf;
-        uint32_t         copy_len;
 
         if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
         {
             return FTL_ERROR;
         }
-        buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
+        uint8_t *buf = fc_buffer_id_to_real_buffer(descriptor->buffer_id);
         if (buf == NULL)
         {
             return FTL_ERROR;
         }
 
-        copy_len = (remaining >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : remaining;
+        uint32_t copy_len = (remaining >= FC_BUFFER_USER_SIZE) ? FC_BUFFER_USER_SIZE : remaining;
         (void)memcpy(dst, buf, copy_len);
         dst += copy_len;
         remaining -= copy_len;
@@ -476,9 +458,8 @@ ftl_status_t ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length)
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out, uint32_t timeout_us)
 {
-    ftl_sync_waiter_t waiter;
-    uint32_t          elapsed  = 0U;
-    uint32_t          max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
+    uint32_t elapsed  = 0U;
+    uint32_t max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
 
     ASSERT(cmd != NULL);
 
@@ -490,6 +471,7 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
      * 新增调用点若触发本断言，说明该功能尚未 job 化——改用 ftl_async_* + ftl_op_submit。 */
     ASSERT(!ftl_op_in_dispatch());
 
+    ftl_sync_waiter_t waiter;
     waiter.cmd_id = ftl_cmd_id(cmd);
     waiter.done   = 0U;
 
@@ -624,10 +606,7 @@ static fc_command_t *sync_page_prepare_cw(nand_pba_t pba, uint8_t operation, con
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_write_page(nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg)
 {
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-
-    cmd = sync_page_prepare(pba, OP_NORMAL_PROGRAM_PAGE, cfg);
+    fc_command_t *cmd = sync_page_prepare(pba, OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
@@ -638,6 +617,7 @@ ftl_status_t ftl_sync_write_page(nand_pba_t pba, const void *data, uint32_t leng
         (void)ftl_cmd_write_data(cmd, data, length);
     }
 
+    fc_command_status_t completion;
     if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
@@ -669,10 +649,7 @@ ftl_status_t ftl_sync_write_page(nand_pba_t pba, const void *data, uint32_t leng
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_write_page_cw(nand_pba_t pba, const uint8_t *page_buf, uint32_t cw_bitmap, const ftl_page_cfg_t *cfg)
 {
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-
-    cmd = sync_page_prepare_cw(pba, OP_NORMAL_PROGRAM_PAGE, cfg, cw_bitmap);
+    fc_command_t *cmd = sync_page_prepare_cw(pba, OP_NORMAL_PROGRAM_PAGE, cfg, cw_bitmap);
     if (cmd == NULL)
     {
         return FTL_ERROR;
@@ -680,6 +657,7 @@ ftl_status_t ftl_sync_write_page_cw(nand_pba_t pba, const uint8_t *page_buf, uin
 
     (void)ftl_cmd_write_data_cw(cmd, page_buf, cw_bitmap);
 
+    fc_command_status_t completion;
     if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
@@ -704,15 +682,13 @@ ftl_status_t ftl_sync_write_page_cw(nand_pba_t pba, const uint8_t *page_buf, uin
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_read_page(nand_pba_t pba, void *buffer, uint32_t length, const ftl_page_cfg_t *cfg)
 {
-    fc_command_t       *cmd;
-    fc_command_status_t completion;
-
-    cmd = sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
+    fc_command_t *cmd = sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
     }
 
+    fc_command_status_t completion;
     if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
@@ -752,16 +728,14 @@ ftl_status_t ftl_sync_read_page(nand_pba_t pba, void *buffer, uint32_t length, c
 ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer)
 {
     const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_LDPC_RAW, 0U};
-    fc_command_t        *cmd;
-    fc_command_status_t  completion;
-    uint8_t              cw;
 
-    cmd = sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, &cfg);
+    fc_command_t *cmd = sync_page_prepare(pba, OP_NORMAL_READ_PAGE_WITH_DATA_OUT, &cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
     }
 
+    fc_command_status_t completion;
     if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
@@ -769,7 +743,7 @@ ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer)
     }
 
     /* 不判 NAND 失败：整页 4 个 CW 无条件拷出 */
-    for (cw = 0U; cw < CW_NUM; cw++)
+    for (uint8_t cw = 0U; cw < CW_NUM; cw++)
     {
         uint8_t *src = fc_get_cmd_data_ptr(cmd, cw);
 
@@ -793,15 +767,14 @@ ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer)
 ftl_status_t ftl_sync_erase_block(nand_pba_t pba)
 {
     const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
-    fc_command_t        *cmd;
-    fc_command_status_t  completion;
 
-    cmd = sync_page_prepare(pba, OP_ERASE_BLOCK, &cfg);
+    fc_command_t *cmd = sync_page_prepare(pba, OP_ERASE_BLOCK, &cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
     }
 
+    fc_command_status_t completion;
     if (ftl_sync_submit_wait(cmd, &completion, 20000U) != FTL_OK)
     {
         (void)fc_command_release(cmd);
@@ -836,12 +809,10 @@ ftl_status_t ftl_sync_erase_block(nand_pba_t pba)
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg)
 {
-    fc_command_t *cmd;
-
     /* 前置条件（判据 2 / §二十六 FTL↔FC 边界）：调用者一律传本函数内局部 cmd 的地址。 */
     ASSERT(out_cmd != NULL);
 
-    cmd = page_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
+    fc_command_t *cmd = page_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
@@ -877,13 +848,11 @@ ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const 
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_async_write_page_cw(fc_command_t **out_cmd, nand_pba_t pba, const uint8_t *page_buf, uint32_t cw_bitmap, const ftl_page_cfg_t *cfg)
 {
-    fc_command_t *cmd;
-
     /* 前置条件（判据 2）：out_cmd 恒为调用者局部 cmd 的地址；page_buf 恒为整页缓冲。 */
     ASSERT(out_cmd != NULL);
     ASSERT(page_buf != NULL);
 
-    cmd = page_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
+    fc_command_t *cmd = page_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
@@ -923,12 +892,11 @@ ftl_status_t ftl_async_write_page_cw(fc_command_t **out_cmd, nand_pba_t pba, con
 ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba)
 {
     const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
-    fc_command_t        *cmd;
 
     /* 前置条件（判据 2）：调用者一律传本函数内局部 cmd 的地址。 */
     ASSERT(out_cmd != NULL);
 
-    cmd = page_prepare_alloc(OP_ERASE_BLOCK, &cfg);
+    fc_command_t *cmd = page_prepare_alloc(OP_ERASE_BLOCK, &cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN;
@@ -955,12 +923,10 @@ ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba)
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const ftl_page_cfg_t *cfg)
 {
-    fc_command_t *cmd;
-
     /* 前置条件（判据 2）：调用者一律传本函数内局部 cmd 的地址。 */
     ASSERT(out_cmd != NULL);
 
-    cmd = page_prepare_alloc(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
+    fc_command_t *cmd = page_prepare_alloc(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
@@ -990,12 +956,10 @@ ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const f
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t ce, uint8_t lun, uint8_t feature_addr, uint8_t mode)
 {
-    fc_command_t *cmd;
-
     /* 前置条件（判据 2）：调用者一律传本函数内局部 cmd 的地址。 */
     ASSERT(out_cmd != NULL);
 
-    cmd = fc_command_alloc();
+    fc_command_t *cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
@@ -1036,8 +1000,6 @@ ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t 
 ftl_status_t ftl_sync_read_column(nand_pba_t pba, uint16_t column, uint8_t out[4])
 {
     const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
-    fc_command_t        *cmd;
-    fc_command_status_t  completion;
 
     /* 前置条件（判据 2）：唯一调用者 bbt.c 传局部数组 mark[4]。 */
     ASSERT(out != NULL);
@@ -1048,7 +1010,7 @@ ftl_status_t ftl_sync_read_column(nand_pba_t pba, uint16_t column, uint8_t out[4
     /* OP_READ_COLUMN 的 has_data = 0 ⇒ 同 ftl_sync_read_meta：pba_to_cmd 不建链、
      * 不看位图（desc_id 置 INVALID）。地址仍须落进 cmd->paa —— 但**只提供行地址**，
      * cw 位被 NAND 侧 paa_to_nand_row 丢掉；列地址由下面的 param 字节 0/1 给。 */
-    cmd = sync_page_prepare(pba, OP_READ_COLUMN, &cfg);
+    fc_command_t *cmd = sync_page_prepare(pba, OP_READ_COLUMN, &cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
@@ -1061,6 +1023,7 @@ ftl_status_t ftl_sync_read_column(nand_pba_t pba, uint16_t column, uint8_t out[4
     cmd->param.parameter2 = 0U;
     cmd->param.parameter3 = 0U;
 
+    fc_command_status_t completion;
     if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
     {
         (void)fc_command_release(cmd);

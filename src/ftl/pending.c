@@ -53,9 +53,7 @@ void pending_init(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 ftl_pending_req_t *pending_alloc(ftl_context_t *ftl)
 {
-    uint8_t i;
-
-    for (i = 0U; i < FTL_PENDING_MAX; i++)
+    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if (ftl->pending[i].used == 0U)
         {
@@ -100,9 +98,7 @@ ftl_status_t pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint32_t owners, l
 /* pending_lookup — 按 command_id 查本实例 pending 项；未找到返回 NULL（线性扫描，表深仅 32） */
 ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, uint16_t cmd_id)
 {
-    uint8_t i;
-
-    for (i = 0U; i < FTL_PENDING_MAX; i++)
+    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if ((ftl->pending[i].used != 0U) &&
             (ftl->pending[i].command_id == cmd_id))
@@ -117,9 +113,8 @@ ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, uint16_t cmd_id)
 /* pending_remove — 置 used=0 释放槽位；未找到则 no-op（幂等，供完成路径重复调用） */
 void pending_remove(ftl_context_t *ftl, uint16_t cmd_id)
 {
-    ftl_pending_req_t *req;
+    ftl_pending_req_t *req = pending_lookup(ftl, cmd_id);
 
-    req = pending_lookup(ftl, cmd_id);
     if (req != NULL)
     {
         req->used = 0U;
@@ -137,9 +132,7 @@ void pending_remove(ftl_context_t *ftl, uint16_t cmd_id)
  * -------------------------------------------------------------------- */
 bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_index)
 {
-    uint8_t i;
-
-    for (i = 0U; i < FTL_PENDING_MAX; i++)
+    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if ((ftl->pending[i].used != 0U) && (ftl->pending[i].op == (uint8_t)op))
         {
@@ -175,9 +168,8 @@ void pending_release_index(ftl_context_t *ftl, uint8_t index)
 uint16_t pending_count(const ftl_context_t *ftl)
 {
     uint16_t count = 0U;
-    uint8_t  i;
 
-    for (i = 0U; i < FTL_PENDING_MAX; i++)
+    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if (ftl->pending[i].used != 0U)
         {
@@ -200,9 +192,7 @@ uint16_t pending_count(const ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 int pending_group_alloc(ftl_context_t *ftl)
 {
-    uint8_t i;
-
-    for (i = 0U; i < FTL_GROUP_MAX; i++)
+    for (uint8_t i = 0U; i < FTL_GROUP_MAX; i++)
     {
         if (ftl->groups[i].used == 0U)
         {
@@ -227,9 +217,8 @@ void pending_group_free(ftl_context_t *ftl, uint16_t gi)
 uint16_t pending_group_count(const ftl_context_t *ftl)
 {
     uint16_t count = 0U;
-    uint8_t  i;
 
-    for (i = 0U; i < FTL_GROUP_MAX; i++)
+    for (uint8_t i = 0U; i < FTL_GROUP_MAX; i++)
     {
         if (ftl->groups[i].used != 0U)
         {
@@ -255,11 +244,9 @@ uint16_t pending_group_count(const ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi)
 {
-    ftl_io_group_t *g;
-
     ASSERT(gi < FTL_GROUP_MAX);
 
-    g = &ftl->groups[gi];
+    ftl_io_group_t *g = &ftl->groups[gi];
     if ((g->used == 0U) || (g->next < g->total) || (g->outstanding != 0U))
     {
         return;
@@ -296,11 +283,9 @@ void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi)
  * -------------------------------------------------------------------- */
 void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t sub_status)
 {
-    ftl_io_group_t *g;
-
     ASSERT(gi < FTL_GROUP_MAX);
 
-    g = &ftl->groups[gi];
+    ftl_io_group_t *g = &ftl->groups[gi];
     ASSERT(g->used != 0U); /* 组已释放 = 重复完成/簿记错误，debug 当场炸 */
 
     if (sub_status != SSD_STATUS_OK)
@@ -326,9 +311,7 @@ void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t 
  * -------------------------------------------------------------------- */
 void pending_group_complete_subop_multi(ftl_context_t *ftl, uint32_t owners, ssd_status_t sub_status)
 {
-    uint16_t gi;
-
-    for (gi = 0U; gi < FTL_GROUP_MAX; gi++)
+    for (uint16_t gi = 0U; gi < FTL_GROUP_MAX; gi++)
     {
         if ((owners & (uint32_t)(1U << gi)) != 0U)
         {

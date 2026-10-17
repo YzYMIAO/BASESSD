@@ -62,9 +62,7 @@ void completion_table_init(void)
  * -------------------------------------------------------------------- */
 ftl_status_t completion_table_add(uint16_t cmd_id, void *ctx)
 {
-    uint8_t i;
-
-    for (i = 0U; i < COMPLETION_TABLE_SIZE; i++)
+    for (uint8_t i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
         if (g_table[i].used == 0U)
         {
@@ -81,9 +79,7 @@ ftl_status_t completion_table_add(uint16_t cmd_id, void *ctx)
 /* completion_table_remove — 按 command_id 释放表项（未找到则 no-op，幂等） */
 void completion_table_remove(uint16_t cmd_id)
 {
-    uint8_t i;
-
-    for (i = 0U; i < COMPLETION_TABLE_SIZE; i++)
+    for (uint8_t i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
         if ((g_table[i].used != 0U) && (g_table[i].cmd_id == cmd_id))
         {
@@ -96,9 +92,7 @@ void completion_table_remove(uint16_t cmd_id)
 /* completion_table_take — 查 + 摘链 + 返回 ctx（未登记返回 NULL） */
 void *completion_table_take(uint16_t cmd_id)
 {
-    uint8_t i;
-
-    for (i = 0U; i < COMPLETION_TABLE_SIZE; i++)
+    for (uint8_t i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
         if ((g_table[i].used != 0U) && (g_table[i].cmd_id == cmd_id))
         {
@@ -115,10 +109,9 @@ void *completion_table_take(uint16_t cmd_id)
 /* completion_table_count — 旁表当前占用项数（观测/自检用） */
 uint16_t completion_table_count(void)
 {
-    uint8_t  i;
     uint16_t count = 0U;
 
-    for (i = 0U; i < COMPLETION_TABLE_SIZE; i++)
+    for (uint8_t i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
         if (g_table[i].used != 0U)
         {
@@ -141,15 +134,11 @@ uint16_t completion_table_count(void)
  * -------------------------------------------------------------------- */
 void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
 {
-    uint8_t ch;
-    uint8_t ce;
-    uint8_t lun;
-
-    for (ch = 0U; ch < CH_NUM; ch++)
+    for (uint8_t ch = 0U; ch < CH_NUM; ch++)
     {
-        for (ce = 0U; ce < CE_NUM; ce++)
+        for (uint8_t ce = 0U; ce < CE_NUM; ce++)
         {
-            for (lun = 0U; lun < LUN_NUM; lun++)
+            for (uint8_t lun = 0U; lun < LUN_NUM; lun++)
             {
                 g_route[ch][ce][lun] = (route != NULL) ? route[ch][ce][lun] : NULL;
             }

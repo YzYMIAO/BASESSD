@@ -180,7 +180,7 @@ typedef struct ftl_context
     /* GC 进展计数（per-instance，只增不减，纯观测）。
      * ⚠ 为什么需要：`trig=` 常亮**不能区分**「在推进」与「卡死」——两种情况打的是同一行。
      * 卡死链路：gc_select_victim 选不出 victim ⇒ mig_begin_gc 返 0 ⇒ 空闲池只出不进
-     * （`allocator_close_sb` 的 valid 顺序缺陷 cf604ba 就是这个形态：条目对 GC/WL 永久不可见
+     * （`allocator_close_sb` 的 is_open 顺序缺陷 cf604ba 就是这个形态：条目对 GC/WL 永久不可见
      * ⇒ free_count 掉到 0 后永不回升、写最终永久失败）。
      * 判据：两次心跳之间 gc_reclaimed_count 不动、gc_novictim_count 在涨 = 卡死。
      * 自增点：reclaimed 在 mig_finish 的 MIG_DONE（阶段 4 起，原 ftl_gc_reclaim_one），

@@ -210,13 +210,12 @@ static void rr_next_neighbor(ftl_context_t *ftl)
 static rr_plane_step_t rr_select_plane(ftl_context_t *ftl)
 {
     const ftl_pending_req_t *pending = &ftl->pending[ftl->rr.pending_idx];
-    uint8_t                  k;
 
     ftl->rr.page     = NAND_PBA_INVALID;
     ftl->rr.page_lba = 0U;
     ftl->rr.first    = 0U;
 
-    for (k = 0U; k < pending->n_cw; k++)
+    for (uint8_t k = 0U; k < pending->n_cw; k++)
     {
         const lba_t l = (lba_t)(pending->lba + (lba_t)k);
 
@@ -254,18 +253,16 @@ static rr_plane_step_t rr_select_plane(ftl_context_t *ftl)
 static void rr_settle_plane(ftl_context_t *ftl)
 {
     ftl_pending_req_t *pending = &ftl->pending[ftl->rr.pending_idx];
-    uint8_t            k;
 
-    for (k = 0U; k < pending->n_cw; k++)
+    for (uint8_t k = 0U; k < pending->n_cw; k++)
     {
         const lba_t l = (lba_t)(pending->lba + (lba_t)k);
-        uint8_t    *dst;
 
         if (ftl_lba_plane(l) != ftl->rr.plane)
         {
             continue;
         }
-        dst = (uint8_t *)pending->buffer + ((size_t)k * FTL_IU_BYTES);
+        uint8_t *dst = (uint8_t *)pending->buffer + ((size_t)k * FTL_IU_BYTES);
 
         if (ftl->rr.recovered != 0U)
         {
@@ -311,11 +308,10 @@ static void rr_finish(ftl_context_t *ftl)
 static void rr_abort(ftl_context_t *ftl)
 {
     ftl_pending_req_t *pending = &ftl->pending[ftl->rr.pending_idx];
-    uint8_t            k;
 
     LOGE("[RR] submit stalled, abort lba=%lu\r\n", (unsigned long)pending->lba);
 
-    for (k = 0U; k < pending->n_cw; k++)
+    for (uint8_t k = 0U; k < pending->n_cw; k++)
     {
         memset((uint8_t *)pending->buffer + ((size_t)k * FTL_IU_BYTES), 0, FTL_IU_BYTES);
     }
@@ -501,16 +497,15 @@ void rr_kick(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
-    uint16_t             cmd_id = (uint16_t)completion->command_id;
-    fc_command_t        *cmd    = fc_command_id_to_command(cmd_id);
-    ftl_read_recovery_t *rr;
+    uint16_t      cmd_id = (uint16_t)completion->command_id;
+    fc_command_t *cmd    = fc_command_id_to_command(cmd_id);
 
     /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①），
      * 完成派发保证 ftl 恒非空。不留 release-and-return 兜底：debug 当场炸，
      * release（NDEBUG 裁空）下若真走到则 NULL 解引用留现场。 */
     ASSERT(ftl != NULL);
 
-    rr = (ftl_read_recovery_t *)ctx;
+    ftl_read_recovery_t *rr = (ftl_read_recovery_t *)ctx;
     ASSERT(rr == &ftl->rr);
 
     /* 旁表项缺失（ctx 为 NULL）或本 job 已不在飞 ⇒ 孤儿/迟到的完成，只 release。
@@ -603,14 +598,12 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
  * 命中块号经 *gblock 出参给出（返回值只说"有没有命中"）。 */
 bool rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t *gblock)
 {
-    uint16_t i;
-
     if ((blocks == NULL) || (gblock == NULL))
     {
         return false;
     }
 
-    for (i = 0U; i < max_blocks; i++)
+    for (uint16_t i = 0U; i < max_blocks; i++)
     {
         const rr_ecc_track_t *track = &blocks[i].rr;
 
@@ -646,19 +639,17 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
  * -------------------------------------------------------------------- */
 bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
 {
-    uint16_t i;
-
     /* 层内接口：唯一调用者 mig_begin_predict 传 &ftl->alloc 与局部 gblock */
     ASSERT(alloc != NULL);
     ASSERT(alloc->blocks != NULL);
     ASSERT(gblock != NULL);
 
-    for (i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
         const ftl_block_t *b = &alloc->blocks[i];
 
-        /* 慢死预测只针对 Closed 块：Open 还在写、Free 没数据、Bad/Reserved 已退役 */
-        if (!ftl_block_state_is(b, FTL_BLOCK_STATE_CLOSED))
+        /* 慢死预测只针对 Closed 块：Open 还在写、Free 没数据、Retired/Bad 已出局 */
+        if (ftl_block_state(b) != FTL_BLOCK_STATE_CLOSED)
         {
             continue;
         }
@@ -680,7 +671,7 @@ bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
 
 /* --------------------------------------------------------------------
  * rr_retire_block
- *   功能：慢死块退役——置 RESERVED（不再分配新数据），不标坏（BBT 不删、仍可读），健康复位。
+ *   功能：慢死块退役——置 RETIRED（不再分配新数据），不标坏（BBT 不删、仍可读），健康复位。
  *   参数：b —— 目标块（恒非 NULL）。
  *   返回：无。
  *   实现要点：read_count 归零 = read disturb 重计（块仍活着，只是不再写）。
@@ -691,9 +682,15 @@ void rr_retire_block(ftl_block_t *b)
     /* 层内接口：唯一调用者 ftl_op_migrate（MIG_ERASE 完成分支）传 &ftl->alloc.blocks[gblock] */
     ASSERT(b != NULL);
 
-    /* 退役：不再分配新数据（RESERVED = Spare Pool 语义），不标坏（BBT 不删、仍可读） */
-    ftl_block_state_clr(b, FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);
-    ftl_block_state_set(b, FTL_BLOCK_STATE_RESERVED);
+    /* 退役：不再分配新数据（RETIRED 态），不标坏（BBT 不删、仍可读）。
+     * ⚠ **调用者负责先把该块驱逐出 Free Pool**（本函数只拿 ftl_block_t*，拿不到 gblock）——
+     *   只置 RETIRED 挡不住分配：allocator_select_plane_block_from_pool 的判据是
+     *   Free Pool **数组**（只跳过 is_bad），留在池里的退役块照样会被选中。
+     *   现由 migrate.c 的 MIG_ERASE RETIRE 分支调 allocator_remove_from_free 完成。
+     * ⚠ 原注释写「RESERVED = Spare Pool 语义」是**错的**（Spare 池的 push 从不碰 state）——
+     *   RESERVED 在代码里是「L2P 日志块」（metadata）与「退役块」（本函数）**两种身份共用**，
+     *   2026-10-17 拆成 LOG / RETIRED 两个态后该串味消失。 */
+    ftl_block_set_state(b, FTL_BLOCK_STATE_RETIRED);
     ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 
     /* 健康复位：块仍活着，ECC 趋势重计（read_count 归零，read disturb 重计） */

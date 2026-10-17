@@ -62,9 +62,8 @@ static void wear_dirty_set(ftl_allocator_t *alloc, uint16_t gblock)
 static uint32_t wear_dirty_count(const ftl_allocator_t *alloc)
 {
     uint32_t n = 0U;
-    uint16_t i;
 
-    for (i = 0U; i < (uint16_t)sizeof(alloc->wear.dirty); i++)
+    for (uint16_t i = 0U; i < (uint16_t)sizeof(alloc->wear.dirty); i++)
     {
         n += (uint32_t)__builtin_popcount((unsigned)alloc->wear.dirty[i]);
     }
@@ -108,9 +107,7 @@ static nand_pba_t wear_page_addr(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t p
  * -------------------------------------------------------------------- */
 static void wear_restore_dirty(ftl_allocator_t *alloc)
 {
-    uint16_t i;
-
-    for (i = 0U; i < (uint16_t)sizeof(alloc->wear.dirty); i++)
+    for (uint16_t i = 0U; i < (uint16_t)sizeof(alloc->wear.dirty); i++)
     {
         alloc->wear.dirty[i] |= alloc->wear.dirty_snapshot[i];
     }
@@ -156,13 +153,11 @@ static void wear_job_finish(ftl_allocator_t *alloc)
  * -------------------------------------------------------------------- */
 static ftl_status_t wear_submit_next_page(ftl_allocator_t *alloc)
 {
-    wear_page_t   page;
-    fc_command_t *cmd;
-    uint32_t      n = 0U; /* 当前页已填条目数；0 = 该页尚未起笔 */
-    uint16_t      gblock;
-    uint16_t      next_cursor = (uint16_t)FTL_BLOCK_TOTAL; /* 默认：本页即最后一块 */
+    wear_page_t page;
+    uint32_t    n           = 0U;                        /* 当前页已填条目数；0 = 该页尚未起笔 */
+    uint16_t    next_cursor = (uint16_t)FTL_BLOCK_TOTAL; /* 默认：本页即最后一块 */
 
-    for (gblock = alloc->wear.job.cursor; gblock < FTL_BLOCK_TOTAL; gblock++)
+    for (uint16_t gblock = alloc->wear.job.cursor; gblock < FTL_BLOCK_TOTAL; gblock++)
     {
         if ((alloc->wear.job.dirty_only != 0U) && (!wear_snapshot_get(alloc, gblock)))
         {
@@ -200,6 +195,7 @@ static ftl_status_t wear_submit_next_page(ftl_allocator_t *alloc)
 
     page.entry_count = n;
 
+    fc_command_t *cmd;
     if (ftl_async_write_page(&cmd,
                              wear_page_addr(alloc->ch, alloc->ce, alloc->lun, alloc->wear.next_page),
                              &page,
@@ -235,11 +231,6 @@ static ftl_status_t wear_submit_next_page(ftl_allocator_t *alloc)
  * -------------------------------------------------------------------- */
 void wear_kick(ftl_allocator_t *alloc, uint32_t total_writes)
 {
-    const ssd_platform_ops_t *platform;
-    uint32_t                  now_ms;
-    uint32_t                  dirty_count;
-    uint32_t                  pages_needed;
-
     /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/cursor/age */
     if (alloc->wear.job.phase == (uint8_t)WEAR_JOB_IDLE)
     {
@@ -269,14 +260,14 @@ void wear_kick(ftl_allocator_t *alloc, uint32_t total_writes)
         return; /* ③ ERASE 在飞（waiting 必为 1，此处只是防御） */
     }
 
-    dirty_count = wear_dirty_count(alloc);
+    uint32_t dirty_count = wear_dirty_count(alloc);
     if (dirty_count == 0U)
     {
         return; /* ④ 无变更：空转 */
     }
 
-    platform = ssd_platform_get();
-    now_ms   = ((platform != NULL) && (platform->time_us != NULL)) ? (uint32_t)(platform->time_us() / 1000U) : 0U;
+    const ssd_platform_ops_t *platform = ssd_platform_get();
+    uint32_t                  now_ms   = ((platform != NULL) && (platform->time_us != NULL)) ? (uint32_t)(platform->time_us() / 1000U) : 0U;
 
     if (((now_ms - alloc->wear.last_flush_ms) < WEAR_FLUSH_INTERVAL_MS) &&
         ((total_writes - alloc->wear.last_flush_writes) < WEAR_FLUSH_ERASE_DELTA))
@@ -292,7 +283,7 @@ void wear_kick(ftl_allocator_t *alloc, uint32_t total_writes)
     alloc->wear.job.flush_writes = total_writes;
 
     /* 剩余页装不下本次脏条目 ⇒ compact（擦块 + 全量快照）；否则增量追加 */
-    pages_needed = (dirty_count + WEAR_ENTRY_MAX - 1U) / WEAR_ENTRY_MAX;
+    uint32_t pages_needed = (dirty_count + WEAR_ENTRY_MAX - 1U) / WEAR_ENTRY_MAX;
 
     if (((uint32_t)alloc->wear.next_page + pages_needed) > PAGES_PER_BLOCK)
     {
@@ -341,16 +332,14 @@ void wear_kick(ftl_allocator_t *alloc, uint32_t total_writes)
 void ftl_op_wear(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     ftl_allocator_t *alloc = (ftl_allocator_t *)ctx;
-    fc_command_t    *cmd;
-    uint8_t          failed;
 
     (void)ftl; /* 实例无关：ctx 就是本实例的 allocator */
 
     ASSERT(alloc != NULL);
     ASSERT(completion != NULL);
 
-    cmd    = fc_command_id_to_command((uint16_t)completion->command_id);
-    failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1U : 0U;
+    fc_command_t *cmd    = fc_command_id_to_command((uint16_t)completion->command_id);
+    uint8_t       failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1U : 0U;
 
     if (alloc->wear.job.phase == (uint8_t)WEAR_JOB_ERASE)
     {
@@ -429,14 +418,6 @@ void ftl_op_wear(struct ftl_context *ftl, const fc_command_status_t *completion,
  * -------------------------------------------------------------------- */
 ftl_status_t wear_init(ftl_allocator_t *alloc)
 {
-    wear_page_t page;
-    uint16_t    p;
-    uint16_t    valid_pages = 0U;
-    uint32_t    max_ec      = 0U;
-    uint32_t    min_ec      = 0U;
-    int         have_min    = 0;
-    uint16_t    gblock;
-
     memset(alloc->wear.dirty, 0, sizeof(alloc->wear.dirty));
     alloc->wear.sequence          = 0U;
     alloc->wear.next_page         = 0U;
@@ -456,10 +437,12 @@ ftl_status_t wear_init(ftl_allocator_t *alloc)
     /* 逐页回放：页序 == sequence 序（块内只追加；compact 擦块后从头写全量快照），
      * 故**第一个无效页即日志末尾**，回放到此为止。
      * 非致命：无有效页 = 冷启动（计数保持 ftl_init 的 memset 零值），不 brick 开机。 */
-    for (p = 0U; p < PAGES_PER_BLOCK; p++)
+    uint16_t valid_pages = 0U;
+
+    for (uint16_t p = 0U; p < PAGES_PER_BLOCK; p++)
     {
-        nand_pba_t addr = wear_page_addr(alloc->ch, alloc->ce, alloc->lun, p);
-        uint32_t   k;
+        wear_page_t page;
+        nand_pba_t  addr = wear_page_addr(alloc->ch, alloc->ce, alloc->lun, p);
 
         memset(&page, 0, sizeof(page));
         if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META()) != 0)
@@ -471,7 +454,7 @@ ftl_status_t wear_init(ftl_allocator_t *alloc)
             break;
         }
 
-        for (k = 0U; k < page.entry_count; k++)
+        for (uint32_t k = 0U; k < page.entry_count; k++)
         {
             const wear_entry_t *e = &page.entries[k];
 
@@ -498,7 +481,11 @@ ftl_status_t wear_init(ftl_allocator_t *alloc)
     alloc->wear.next_page = valid_pages;
 
     /* 开机可观测（判据「重启后计数一致」的观测口）：跳过坏块统计 max/min */
-    for (gblock = 0U; gblock < FTL_BLOCK_TOTAL; gblock++)
+    uint32_t max_ec   = 0U;
+    uint32_t min_ec   = 0U;
+    int      have_min = 0;
+
+    for (uint16_t gblock = 0U; gblock < FTL_BLOCK_TOTAL; gblock++)
     {
         uint32_t ec = alloc->blocks[gblock].erase_count;
 

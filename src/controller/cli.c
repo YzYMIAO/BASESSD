@@ -545,7 +545,7 @@ static int uart_cli_info(int argc, char *argv[])
  * ⚠ 判据：L2P 指向某块 ⇒ 至少该 CW 有效 ⇒ `valid_count ≥ 1` 是**不变量**；
  *   `valid_count == 0` 即悬空，与 v0.69 的 `[FTL] dangling` 守卫同一判据。
  *   `state` 用于一次归因：BAD=坏块本不可读 / FREE=会被复用**丢数据** /
- *   RESERVED=判据过宽 / 0x0000=从未认领。
+ *   LOG=判据过宽 / NONE=从未认领。
  *
  * 固定打实例 [0][0][0]（与 rd/wr 经 controller 路由到的实例一致）。
  */
@@ -603,9 +603,9 @@ static int uart_cli_map(int argc, char *argv[])
                (unsigned long)pba_to_page(pba),
                (unsigned long)pba_to_cw(pba),
                (unsigned)g);
-    (void)LOGI("    block g=%u state=0x%04x valid=%u sb=%u ec=%lu\r\n",
+    (void)LOGI("    block g=%u state=%s valid=%u sb=%u ec=%lu\r\n",
                (unsigned)g,
-               (unsigned)b->state,
+               ftl_block_state_name(ftl_block_state(b)),
                (unsigned)b->valid_count,
                (unsigned)b->sb_id,
                (unsigned long)b->erase_count);

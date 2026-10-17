@@ -84,10 +84,6 @@ static ftl_op_id_t mig_op_tag(const mig_job_t *m)
  * -------------------------------------------------------------------- */
 static bool mig_start(ftl_context_t *ftl, const super_block_t *victim, mig_kind_t kind, mig_post_t post)
 {
-    mig_job_t *m;
-    uint32_t   valid_total = 0U;
-    uint8_t    p;
-
     /* ftl / victim 是前置条件（判据 2）：唯一调用者是本文件的 mig_begin_*，各自已断言，
      * victim 一律传本函数内的局部 sb 或其地址 ⇒ 死守卫，不复检。
      * active != 0 是**运行时状态**（判据 3）：job 在飞 ⇒ 不重入。 */
@@ -96,19 +92,20 @@ static bool mig_start(ftl_context_t *ftl, const super_block_t *victim, mig_kind_
         return false;
     }
 
-    m = &ftl->mig;
+    mig_job_t *m = &ftl->mig;
 
     memset(m, 0, sizeof(*m));
-    m->victim       = *victim;
-    m->victim.valid = 0U; /* 本引擎只处理 Closed SB（valid==0 是"已关闭"语义，见 allocator.h） */
-    m->kind         = (uint8_t)kind;
-    m->post         = (uint8_t)post;
-    m->page         = 0U;
-    m->plane        = 0U;
-    m->active       = 1U;
+    m->victim         = *victim;
+    m->victim.is_open = false; /* 本引擎只处理 Closed SB（见 allocator.h） */
+    m->kind           = (uint8_t)kind;
+    m->post           = (uint8_t)post;
+    m->page           = 0U;
+    m->plane          = 0U;
+    m->active         = 1U;
 
     /* 快路径：无任何有效 CW ⇒ 无可搬移，直接进擦除。 */
-    for (p = 0U; p < PLANE_NUM; p++)
+    uint32_t valid_total = 0U;
+    for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
         if (super_block_has_plane(&m->victim, p))
         {
@@ -123,8 +120,6 @@ static bool mig_start(ftl_context_t *ftl, const super_block_t *victim, mig_kind_
 
 bool mig_begin_gc(ftl_context_t *ftl)
 {
-    super_block_t *victim;
-
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
     ASSERT(ftl != NULL);
     if (ftl->mig.active != 0U)
@@ -132,6 +127,7 @@ bool mig_begin_gc(ftl_context_t *ftl)
         return false;
     }
 
+    super_block_t *victim;
     if (!gc_select_victim(&ftl->alloc, &victim))
     {
         /* 触发但选不出 victim = 卡死嫌疑（观测计数，见 ftl.h）。 */
@@ -144,9 +140,6 @@ bool mig_begin_gc(ftl_context_t *ftl)
 
 bool mig_begin_wl(ftl_context_t *ftl)
 {
-    wl_victim_t   victim;
-    super_block_t sb;
-
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
     ASSERT(ftl != NULL);
     if (ftl->mig.active != 0U)
@@ -157,12 +150,15 @@ bool mig_begin_wl(ftl_context_t *ftl)
     {
         return false;
     }
+
+    wl_victim_t victim;
     if (!wl_select_victim(ftl, &victim))
     {
         return false;
     }
 
     /* wl_victim_t 只带 plane_blocks ⇒ 组装成本实例的 SB 视图（拓扑由调用点自 alloc 取）。 */
+    super_block_t sb;
     memset(&sb, 0, sizeof(sb));
     for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
@@ -174,25 +170,24 @@ bool mig_begin_wl(ftl_context_t *ftl)
 
 bool mig_begin_predict(ftl_context_t *ftl)
 {
-    uint16_t      gblock;
-    uint16_t      closed_idx;
-    super_block_t sb;
-
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
     ASSERT(ftl != NULL);
     if (ftl->mig.active != 0U)
     {
         return false;
     }
+
+    uint16_t gblock;
     if (!rr_predictive_scan(&ftl->alloc, &gblock))
     {
         return false;
     }
 
     /* 慢死块必在 closed_sb_list 中（scan 只返回 CLOSED 块） */
-    closed_idx = ftl_block_sb_id(&ftl->alloc.blocks[gblock]);
+    uint16_t closed_idx = ftl_block_sb_id(&ftl->alloc.blocks[gblock]);
     ASSERT(closed_idx < allocator_closed_count(&ftl->alloc));
 
+    super_block_t sb;
     memset(&sb, 0, sizeof(sb));
     for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
@@ -208,9 +203,9 @@ bool mig_begin_predict(ftl_context_t *ftl)
  * ——**读**不像写那样在 prepare 阶段搬数据（见 ftl_async_read_page 的注释）。 */
 static ftl_status_t mig_submit_read(ftl_context_t *ftl)
 {
-    mig_job_t    *m = &ftl->mig;
-    fc_command_t *cmd;
+    mig_job_t *m = &ftl->mig;
 
+    fc_command_t *cmd;
     if (ftl_async_read_page(&cmd, m->src[m->plane], FTL_PAGE_CFG_DATA_ANY()) != FTL_OK)
     {
         return FTL_AGAIN; /* 命令池空 */
@@ -240,9 +235,9 @@ static ftl_status_t mig_submit_read(ftl_context_t *ftl)
  *   逐 CW 仍是正确的扇区 LBA。 */
 static ftl_status_t mig_submit_write(ftl_context_t *ftl)
 {
-    mig_job_t    *m = &ftl->mig;
-    fc_command_t *cmd;
+    mig_job_t *m = &ftl->mig;
 
+    fc_command_t *cmd;
     if (ftl_async_write_page_cw(&cmd,
                                 m->dst[m->plane],
                                 m->page_buf[m->plane],
@@ -269,12 +264,11 @@ static ftl_status_t mig_submit_write(ftl_context_t *ftl)
 /* 提交一条 victim 块擦除。 */
 static ftl_status_t mig_submit_erase(ftl_context_t *ftl)
 {
-    mig_job_t    *m = &ftl->mig;
+    mig_job_t *m = &ftl->mig;
+
+    nand_pba_t block_addr = super_block_page_pba(ftl->topo, &m->victim, m->plane, 0U);
+
     fc_command_t *cmd;
-    nand_pba_t    block_addr;
-
-    block_addr = super_block_page_pba(ftl->topo, &m->victim, m->plane, 0U);
-
     if (ftl_async_erase_block(&cmd, block_addr) != FTL_OK)
     {
         return FTL_AGAIN;
@@ -502,13 +496,11 @@ static void mig_step(ftl_context_t *ftl)
                 }
                 else
                 {
-                    uint8_t cw;
-
                     /* ── 就绪前置（阶段 5）──
                      * 本页逐 CW 的扇区 LBA 来自页内 META，与刚访问过的 host LBA **无必然
                      * 联系** ⇒ region miss 现实可达。未驻留 ⇒ 起异步加载并原地返回，
                      * 下轮重扫（重扫幂等：ready 命中不记账、不动 access_count）。 */
-                    for (cw = 0U; cw < CW_NUM; cw++)
+                    for (uint8_t cw = 0U; cw < CW_NUM; cw++)
                     {
                         if (m->cw_lba[plane][cw] == FTL_LBA_INVALID)
                         {
@@ -523,7 +515,7 @@ static void mig_step(ftl_context_t *ftl)
 
                     /* 全部就绪 ⇒ 一次性算出本 plane 的位图（不会半途而废） */
                     m->cw_bitmap[plane] = 0U;
-                    for (cw = 0U; cw < CW_NUM; cw++)
+                    for (uint8_t cw = 0U; cw < CW_NUM; cw++)
                     {
                         nand_pba_t cur;
 
@@ -552,11 +544,9 @@ static void mig_step(ftl_context_t *ftl)
 
                 if (m->write_ok != 0U)
                 {
-                    uint8_t cw;
-
                     /* 就绪前置（同 READ_SETTLE）：全部就绪才动账——半途而废会重复记账
                      * （valid_count 虚高、journal 重复条目）。 */
-                    for (cw = 0U; cw < CW_NUM; cw++)
+                    for (uint8_t cw = 0U; cw < CW_NUM; cw++)
                     {
                         if ((m->cw_bitmap[plane] & ((uint32_t)1U << cw)) == 0U)
                         {
@@ -569,18 +559,16 @@ static void mig_step(ftl_context_t *ftl)
                         }
                     }
 
-                    for (cw = 0U; cw < CW_NUM; cw++)
+                    for (uint8_t cw = 0U; cw < CW_NUM; cw++)
                     {
-                        nand_pba_t new_pba;
-                        lba_t      l;
-
                         if ((m->cw_bitmap[plane] & ((uint32_t)1U << cw)) == 0U)
                         {
                             continue;
                         }
 
-                        l       = m->cw_lba[plane][cw]; /* 用该 CW 自己的 META（不再 base+cw 推断） */
-                        new_pba = pba_with_cw(m->dst[plane], cw);
+                        lba_t l = m->cw_lba[plane][cw]; /* 用该 CW 自己的 META（不再 base+cw 推断） */
+
+                        nand_pba_t new_pba = pba_with_cw(m->dst[plane], cw);
 
                         (void)l2p_cache_write(&ftl->cache, l, new_pba);
                         journal_append(&ftl->journal,
@@ -704,12 +692,10 @@ static void mig_step(ftl_context_t *ftl)
 
 void mig_service(ftl_context_t *ftl)
 {
-    mig_job_t *m;
-
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
     ASSERT(ftl != NULL);
 
-    m = &ftl->mig;
+    mig_job_t *m = &ftl->mig;
 
     if (m->active == 0U)
     {
@@ -747,18 +733,17 @@ void mig_service(ftl_context_t *ftl)
  *     · WRITE 成功 ⇒ 逐 CW l2p_cache_write + journal_append + 有效计数迁移（源块 -1、
  *       新块 +1）。失败 ⇒ **不动 L2P**（源页仍有效，下轮再搬）。
  *     · ERASE 成功 ⇒ erase_count++ / last_pe_ts / wear_mark_dirty / 清 valid / 归还
- *       Free Pool；WL 与慢死预测额外 rr_retire_block（RESERVED：不再分配、不标坏）。
+ *       Free Pool；WL 与慢死预测额外 rr_retire_block（RETIRED：不再分配、不标坏）。
  *       失败 ⇒ bbt_mark_bad。
  * -------------------------------------------------------------------- */
 void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
-    mig_job_t    *m = (mig_job_t *)ctx;
-    fc_command_t *cmd;
+    mig_job_t *m = (mig_job_t *)ctx;
 
     ASSERT(completion != NULL);
     ASSERT(m != NULL);
 
-    cmd = fc_command_id_to_command((uint16_t)completion->command_id);
+    fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     /* 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出来的归属实例，
      * 二者必须一致——不一致说明派发路由错了。 */
@@ -821,20 +806,29 @@ void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completi
                 const uint16_t gsrc = mig_src_gblock(m, plane);
                 ftl_block_t   *blk  = &ftl->alloc.blocks[gsrc];
 
-                /* 擦除成功：擦除计数 +1，记录最近擦除时间戳（单调写入量），valid_count 归零，归还 Free Pool */
+                /* 擦除成功：擦除计数 +1，记录最近擦除时间戳（单调写入量），valid_count 归零 */
                 blk->erase_count++;
                 blk->last_pe_ts = ftl->total_writes;
-                wear_mark_dirty(&ftl->alloc, gsrc);
+                wear_mark_dirty(&ftl->alloc, gsrc); /* 擦除账（erase_count / last_pe_ts） */
                 ftl_block_clear_valid(blk);
-                allocator_free_block(&ftl->alloc, gsrc);
 
-                /* WL / 慢死预测：搬空的块**退役**（RESERVED，不再分配新数据、不标坏、仍可读）。
-                 * rr_retire_block 内部把 read_count 归零（read disturb 重计），它只拿到
-                 * ftl_block_t* ⇒ 脏标记放在这里补。 */
+                /* 去向二选一——**退役块不得先进池**：
+                 * 旧写法先 allocator_free_block（入池）再 rr_retire_block（置 RETIRED），
+                 * 块就留在 Free Pool 里，而 allocator_select_plane_block_from_pool 只跳过
+                 * is_bad ⇒ 退役块会被再次分配出去，「不再分配新数据」从未生效（真缺陷）。
+                 * 现在退役直接出池 + RETIRED，与「state == FREE ⟺ 在池」不变量一致（allocator.h ②）。 */
                 if ((mig_post_t)m->post == MIG_POST_RETIRE)
                 {
+                    /* WL / 慢死预测：搬空的块**退役**（RETIRED，不再分配新数据、不标坏、仍可读）。
+                     * rr_retire_block 内部把 read_count 归零（read disturb 重计），它只拿到
+                     * ftl_block_t* ⇒ 脏标记放在这里补。 */
+                    allocator_remove_from_free(&ftl->alloc, gsrc);
                     rr_retire_block(blk);
-                    wear_mark_dirty(&ftl->alloc, gsrc);
+                    wear_mark_dirty(&ftl->alloc, gsrc); /* rr 健康复位（read_count / health） */
+                }
+                else
+                {
+                    allocator_free_block(&ftl->alloc, gsrc);
                 }
             }
             else

@@ -55,7 +55,8 @@
  * BBT 内部状态：**per-instance**，落在 ftl_allocator_t.bbt（bbt_state_t，序 4）。
  * 原先是 file-scope static ⇒ 多实例（多 LUN）下所有实例共享一份游标/序号，互相覆盖。
  *
- * 坏块位图已并入 ftl_block_t.state（Block State Table 单数据源），
+ * 坏块状态已并入 ftl_block_t.state（Block State Table 单数据源；该字段 2026-10-17 起
+ * 是互斥枚举，BAD 为终态），
  * NAND 持久化仍用紧凑 bad_map[512] 格式（bbt_header_t，一字不改），
  * bbt_save 时从 BST 重建 bitmap。
  */
@@ -94,14 +95,13 @@ static void bbt_ctx_init(const ftl_allocator_t *alloc, bbt_probe_ctx_t *ctx)
 /* BBT record 探针（见 metadata_ring_probe_fn）。full 与廉价探针等价（record 只有一页）。 */
 static ftl_status_t bbt_record_probe(void *ctx, uint16_t record_idx, int full, uint32_t *out_sequence)
 {
-    bbt_probe_ctx_t *c = (bbt_probe_ctx_t *)ctx;
-    bbt_header_t     hdr;
-    nand_pba_t       addr;
-
     (void)full;
 
-    addr = metadata_ring_addr(&c->ring, &c->topo, record_idx, 0U);
+    bbt_probe_ctx_t *c = (bbt_probe_ctx_t *)ctx;
 
+    nand_pba_t addr = metadata_ring_addr(&c->ring, &c->topo, record_idx, 0U);
+
+    bbt_header_t hdr;
     if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != 0)
     {
         return FTL_ERROR;
@@ -143,13 +143,11 @@ static bool bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t 
  * -------------------------------------------------------------------- */
 static bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
 {
-    uint8_t  scratch[16];
-    uint8_t  plane;
-    uint16_t block;
+    uint8_t scratch[16];
 
-    for (plane = 0U; plane < PLANE_NUM; plane++)
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
     {
-        for (block = 0U; block < (uint16_t)FTL_METADATA_BLOCK_END; block++)
+        for (uint16_t block = 0U; block < (uint16_t)FTL_METADATA_BLOCK_END; block++)
         {
             const nand_pba_t addr = pba_make(alloc->ch, alloc->ce, 0U, block, plane, 0U, 0U);
 
@@ -174,10 +172,6 @@ static bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
  * -------------------------------------------------------------------- */
 ftl_status_t bbt_init(ftl_allocator_t *alloc)
 {
-    uint32_t seq;
-    int      ret;
-    uint32_t loaded_bad_count = 0U;
-
     /* 前置条件（判据 2 / §二十六「子模块公开入口」）：唯一调用者 ftl.c 传 &ftl->alloc。 */
     ASSERT(alloc != NULL);
 
@@ -191,24 +185,22 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
     {
         uint8_t tmp_bad_map[BBT_BITMAP_SIZE];
 
-        ret = bbt_load(alloc, tmp_bad_map, &loaded_bad_count, &seq);
+        uint32_t seq;
+        uint32_t loaded_bad_count = 0U;
+        int      ret              = bbt_load(alloc, tmp_bad_map, &loaded_bad_count, &seq);
         if (ret == 0)
         {
-            uint16_t gblock;
             uint16_t bad_idx = 0U;
 
             alloc->bbt.sequence = seq;
             alloc->bad_count    = (uint16_t)loaded_bad_count;
 
             /* 从 NAND bitmap 重建 BST is_bad 位（单数据源） */
-            for (gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
+            for (uint16_t gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
             {
                 if (bbt_is_bad(tmp_bad_map, gblock))
                 {
-                    ftl_block_set_bad(&alloc->blocks[gblock]);
-                    ftl_block_state_clr(&alloc->blocks[gblock],
-                                        FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
-                                            FTL_BLOCK_STATE_FREE);
+                    ftl_block_set_bad(&alloc->blocks[gblock]); /* 终态：互斥，无需清位 */
                     ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
                     bad_idx++;
                 }
@@ -271,16 +263,12 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
  * -------------------------------------------------------------------- */
 int bbt_scan_factory(ftl_allocator_t *alloc)
 {
-    uint16_t gblock;
     uint16_t bad_idx = 0U;
 
     alloc->bbt.dirty = 0U;
 
-    for (gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
+    for (uint16_t gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
     {
-        uint8_t  plane;
-        uint16_t block;
-
         /* 跳过 Block 0（出厂总是好块）*/
         if (gblock == 0U)
         {
@@ -288,16 +276,13 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
         }
 
         /* 全局块号 → 各 Plane 的物理块号 */
-        plane = ftl_gblock_plane(gblock);
-        block = ftl_gblock_block(gblock);
+        uint8_t  plane = ftl_gblock_plane(gblock);
+        uint16_t block = ftl_gblock_block(gblock);
 
         /* 只读标记（do_erase=0）：出厂扫描阶段**不得**擦块——擦除会永久毁掉标记 */
         if (bbt_probe_block_bad(alloc, plane, block, 0U))
         {
-            ftl_block_set_bad(&alloc->blocks[gblock]);
-            ftl_block_state_clr(&alloc->blocks[gblock],
-                                FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
-                                    FTL_BLOCK_STATE_FREE);
+            ftl_block_set_bad(&alloc->blocks[gblock]); /* 终态：互斥，无需清位 */
             ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
             bad_idx++;
         }
@@ -354,17 +339,15 @@ _Static_assert((BLOCKS_PER_PLANE % BBT_MAP_COLS_PER_PLANE) == 0U, "每 plane 块
  */
 static bool bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t block, uint8_t do_erase)
 {
-    nand_pba_t addr;
-    uint8_t    mark[4];
-    bool       marked;
-
     /* page / cw / lun 恒 0：擦除不看它们；列地址由 ftl_sync_read_column 显式给，
      * 不依赖 PBA 的 cw 字段。 */
-    addr = pba_make(alloc->ch, alloc->ce, 0U, block, plane, 0U, 0U);
+    nand_pba_t addr = pba_make(alloc->ch, alloc->ce, 0U, block, plane, 0U, 0U);
 
     /* ① 出厂标记（擦除前读，擦除会永久毁掉它）。读失败 ⇒ 坏块。 */
+    uint8_t mark[4];
     (void)memset(mark, 0xFF, sizeof(mark));
-    marked = (ftl_sync_read_column(addr, (uint16_t)PAGE_MAIN_SIZE, mark) != FTL_OK) || (mark[0] != 0xFFU);
+
+    bool marked = (ftl_sync_read_column(addr, (uint16_t)PAGE_MAIN_SIZE, mark) != FTL_OK) || (mark[0] != 0xFFU);
 
     /* ② 可选擦除——**无条件发**。
      * 旧实现在 ① 命中时直接 `return 1` 提前返回，于是**被标记的块永远不被擦**。而"全片擦除"
@@ -405,16 +388,13 @@ static bool bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t 
  * -------------------------------------------------------------------- */
 ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc)
 {
-    uint8_t  plane;
-    uint16_t block;
-
     /* 前置条件（判据 2）：唯一调用者 power_failure_recovery.c 传 &ftl->alloc。 */
     ASSERT(alloc != NULL);
     ASSERT(alloc->blocks != NULL);
 
-    for (plane = 0U; plane < PLANE_NUM; plane++)
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
     {
-        for (block = 0U; block < BLOCKS_PER_PLANE; block++)
+        for (uint16_t block = 0U; block < BLOCKS_PER_PLANE; block++)
         {
             const uint16_t   gblock = ftl_gblock(plane, block);
             const nand_pba_t addr   = pba_make(alloc->ch, alloc->ce, 0U, block, plane, 0U, 0U);
@@ -427,10 +407,7 @@ ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc)
             /* 擦不掉 ⇒ 坏块（已是坏块的不重复计数） */
             if (!ftl_block_is_bad(&alloc->blocks[gblock]))
             {
-                ftl_block_set_bad(&alloc->blocks[gblock]);
-                ftl_block_state_clr(&alloc->blocks[gblock],
-                                    FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
-                                        FTL_BLOCK_STATE_FREE);
+                ftl_block_set_bad(&alloc->blocks[gblock]); /* 终态：互斥，无需清位 */
                 ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
                 alloc->bad_count++;
             }
@@ -452,16 +429,10 @@ ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc)
  * -------------------------------------------------------------------- */
 void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase)
 {
-    char     line[BBT_MAP_LINE_MAX];
-    uint16_t rows;
-    uint16_t row;
-    uint16_t col;
-    uint8_t  plane;
+    char line[BBT_MAP_LINE_MAX];
 
     /* 前置条件（判据 2）：唯一调用者 cli.c 已判 ftl 非空后传 &ftl->alloc。 */
     ASSERT(alloc != NULL);
-
-    rows = (uint16_t)(BLOCKS_PER_PLANE / BBT_MAP_COLS_PER_PLANE);
 
     LOGI("CH=%u  CE=%u  LUN=%u\r\n", (unsigned)alloc->ch, (unsigned)alloc->ce, (unsigned)alloc->lun);
 
@@ -469,7 +440,7 @@ void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase)
     {
         int n = 0;
 
-        for (plane = 0U; plane < PLANE_NUM; plane++)
+        for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
         {
             const int label_w = 7; /* "PLANE=k" */
             const int pad     = (int)((BBT_MAP_GROUP_W - (uint16_t)label_w) / 2U);
@@ -485,18 +456,19 @@ void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase)
     }
 
     /* ── 数据行：一排同时打各 plane 的同段块号（块号 = row × 列数 + col，格内打的是块号本身）── */
-    for (row = 0U; row < rows; row++)
+    uint16_t rows = (uint16_t)(BLOCKS_PER_PLANE / BBT_MAP_COLS_PER_PLANE);
+    for (uint16_t row = 0U; row < rows; row++)
     {
         int n = 0;
 
-        for (plane = 0U; plane < PLANE_NUM; plane++)
+        for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
         {
             if (plane > 0U)
             {
                 n += snprintf(&line[n], sizeof(line) - (size_t)n, "   ");
             }
 
-            for (col = 0U; col < BBT_MAP_COLS_PER_PLANE; col++)
+            for (uint16_t col = 0U; col < BBT_MAP_COLS_PER_PLANE; col++)
             {
                 const uint16_t block = (uint16_t)((row * BBT_MAP_COLS_PER_PLANE) + col);
 
@@ -545,14 +517,19 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock)
         return FTL_ERROR;
     }
 
-    /* BST is_bad 置位（单数据源，后台 bbt_kick 持久化到 NAND）。
+    /* 驱逐出 Free Pool —— **必须先于置 BAD**：allocator_pool_remove 校验「在池 ⇒ state == FREE」
+     * （allocator.h 不变量②）。块若在池里，此刻它正是 FREE；先置 BAD 再出池就会命中断言。
+     * 不驱逐则留下「在池却不是 FREE」的反向不一致（运行时标坏：擦除失败 / 预测性标坏）。
+     * 不在池内 ⇒ no-op（allocator_remove_from_free 的文档化契约，判据 4）。
+     * 注：出厂扫描 / BBT 加载路径跑在建池之前（池还是空的）⇒ 恒 no-op，无需特判。 */
+    allocator_remove_from_free(alloc, gblock);
+
+    /* BST 置 BAD（单数据源，后台 bbt_kick 持久化到 NAND）。BAD 是状态机**终态** ⇒
+     * 一行赋值即抹掉 OPEN/CLOSED/FREE/LOG（原掩码漏位的风险消失）；温度字段不动（与状态正交）。
      * 同时清空有效计数——坏块后该块不会再产生有效 CW，
      * 残留的 valid_count 会让 GC/WL 误判其为可回收块。 */
     ftl_block_set_bad(&alloc->blocks[gblock]);
     ftl_block_clear_valid(&alloc->blocks[gblock]);
-    ftl_block_state_clr(&alloc->blocks[gblock],
-                        FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED |
-                            FTL_BLOCK_STATE_FREE | FTL_BLOCK_TEMP_MASK);
     ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
     alloc->bad_count++;
     alloc->bbt.dirty = 1U;
@@ -575,11 +552,6 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock)
  * -------------------------------------------------------------------- */
 ftl_status_t bbt_save(ftl_allocator_t *alloc)
 {
-    bbt_header_t    header;
-    bbt_probe_ctx_t ctx;
-    nand_pba_t      addr;
-    uint16_t        gblock;
-
     /* 前置条件（判据 2）：唯一调用者 power_failure_recovery.c 传 &ftl->alloc。 */
     ASSERT(alloc != NULL);
 
@@ -588,6 +560,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
         return FTL_OK;
     }
 
+    bbt_probe_ctx_t ctx;
     bbt_ctx_init(alloc, &ctx);
 
     /* 游标未建立 ⇒ 先定位池内最新有效 record 的下一槽 */
@@ -604,6 +577,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
 
     alloc->bbt.sequence++;
 
+    bbt_header_t header;
     memset(&header, 0, sizeof(header));
     header.magic        = BBT_MAGIC;
     header.sequence     = alloc->bbt.sequence;
@@ -611,7 +585,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
     header.bad_count    = alloc->bad_count;
 
     /* 从 BST 重建 NAND 持久化 bitmap（NAND 格式一字不改） */
-    for (gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
+    for (uint16_t gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
     {
         if (ftl_block_is_bad(&alloc->blocks[gblock]))
         {
@@ -621,6 +595,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
 
     /* 追加写：池内下一槽（块满则先擦池内下一块）。
      * 无论成败都推进游标（已写过的槽可能半编程，不可复用）。 */
+    nand_pba_t addr;
     if (metadata_ring_prepare_write(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, &addr) != FTL_OK)
     {
         return FTL_ERROR;
@@ -655,14 +630,9 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
 static ftl_status_t bbt_submit_write(ftl_allocator_t *alloc)
 {
     bbt_probe_ctx_t ctx;
-    bbt_header_t    header;
-    nand_pba_t      addr;
-    fc_command_t   *cmd;
-    uint16_t        gblock;
-
     bbt_ctx_init(alloc, &ctx);
-    addr = metadata_ring_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, 0U);
 
+    bbt_header_t header;
     memset(&header, 0, sizeof(header));
     header.magic        = BBT_MAGIC;
     header.sequence     = alloc->bbt.sequence;
@@ -670,7 +640,7 @@ static ftl_status_t bbt_submit_write(ftl_allocator_t *alloc)
     header.bad_count    = alloc->bad_count;
 
     /* 从 BST 重建 NAND 持久化 bitmap（NAND 格式一字不改，同 bbt_save） */
-    for (gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
+    for (uint16_t gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
     {
         if (ftl_block_is_bad(&alloc->blocks[gblock]))
         {
@@ -678,6 +648,9 @@ static ftl_status_t bbt_submit_write(ftl_allocator_t *alloc)
         }
     }
 
+    nand_pba_t addr = metadata_ring_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, 0U);
+
+    fc_command_t *cmd;
     if (ftl_async_write_page(&cmd, addr, &header, sizeof(header), FTL_PAGE_CFG_META()) != FTL_OK)
     {
         return FTL_ERROR;
@@ -711,10 +684,6 @@ static ftl_status_t bbt_submit_write(ftl_allocator_t *alloc)
  * -------------------------------------------------------------------- */
 void bbt_kick(ftl_allocator_t *alloc)
 {
-    bbt_probe_ctx_t ctx;
-    nand_pba_t      addr;
-    int             need_erase = 0;
-
     /* 前置条件（判据 2）：唯一调用者 ftl.c 传 &ftl->alloc。 */
     ASSERT(alloc != NULL);
     ASSERT(alloc->blocks != NULL);
@@ -753,6 +722,7 @@ void bbt_kick(ftl_allocator_t *alloc)
         return; /* ④ 无变更 */
     }
 
+    bbt_probe_ctx_t ctx;
     bbt_ctx_init(alloc, &ctx);
 
     /* 游标未建立 ⇒ 先定位池内最新有效 record 的下一槽 */
@@ -770,6 +740,8 @@ void bbt_kick(ftl_allocator_t *alloc)
 
     alloc->bbt.sequence++;
 
+    nand_pba_t addr;
+    int        need_erase = 0;
     if (metadata_ring_prepare_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, &addr, &need_erase) != FTL_OK)
     {
         LOGE("[BBT] prepare failed idx=%u\r\n", (unsigned)alloc->bbt.write_idx);
@@ -818,16 +790,14 @@ void bbt_kick(ftl_allocator_t *alloc)
 void ftl_op_bbt(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     ftl_allocator_t *alloc = (ftl_allocator_t *)ctx;
-    fc_command_t    *cmd;
-    uint8_t          failed;
 
     (void)ftl; /* 实例无关：ctx 就是本实例的 allocator */
 
     ASSERT(alloc != NULL);
     ASSERT(completion != NULL);
 
-    cmd    = fc_command_id_to_command((uint16_t)completion->command_id);
-    failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1U : 0U;
+    fc_command_t *cmd    = fc_command_id_to_command((uint16_t)completion->command_id);
+    uint8_t       failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1U : 0U;
 
     if (alloc->bbt.job.phase == (uint8_t)BBT_JOB_ERASE)
     {
@@ -892,11 +862,6 @@ void ftl_op_bbt(struct ftl_context *ftl, const fc_command_status_t *completion, 
  * -------------------------------------------------------------------- */
 ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence)
 {
-    bbt_probe_ctx_t ctx;
-    bbt_header_t    best;
-    nand_pba_t      addr;
-    uint16_t        newest = UINT16_MAX;
-
     /* 死守卫（判据 2 / §十附判据 2）：唯一调用者 bbt_init（同文件）传已断言的 alloc、
      * 局部数组 tmp_bad_map 与两个局部变量地址——四个指针结构上恒非空。 */
 
@@ -905,8 +870,10 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_co
     alloc->bbt.write_idx    = 0U;
     alloc->bbt.cursor_valid = 0U;
 
+    bbt_probe_ctx_t ctx;
     bbt_ctx_init(alloc, &ctx);
 
+    uint16_t newest = UINT16_MAX;
     if (metadata_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
     {
         return FTL_ERROR;
@@ -921,7 +888,8 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_co
     alloc->bbt.cursor_valid = 1U;
 
     /* 重读胜者（locate 只返回序号，Header 本体要再读一次）*/
-    addr = metadata_ring_addr(&ctx.ring, &ctx.topo, newest, 0U);
+    nand_pba_t   addr = metadata_ring_addr(&ctx.ring, &ctx.topo, newest, 0U);
+    bbt_header_t best;
     if (ftl_sync_read_page(addr, &best, sizeof(best), FTL_PAGE_CFG_META()) != 0)
     {
         return FTL_ERROR;
@@ -954,8 +922,6 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_co
  * -------------------------------------------------------------------- */
 ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, uint8_t plane)
 {
-    uint16_t gblock;
-
     /*
      * Spare Pool 坏块替换：出厂时 main.c 已为**每个 plane** 预留
      * FTL_SPARE_POOL_PER_PLANE=50 个好块到 alloc->spare_blocks[plane]。运行时
@@ -968,6 +934,7 @@ ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, uint8_t plane)
         return FTL_ERROR;
     }
 
+    uint16_t gblock;
     if (!allocator_spare_try_pop(alloc, plane, &gblock))
     {
         return FTL_ERROR; /* 该 plane Spare Pool 耗尽 */

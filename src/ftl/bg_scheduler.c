@@ -21,12 +21,10 @@
 
 void bg_scheduler_init(bg_scheduler_t *sched)
 {
-    uint8_t i;
-
     /* 前置条件（判据 2）：唯一调用者 ftl.c 传 &ftl->bg。 */
     ASSERT(sched != NULL);
 
-    for (i = 0U; i < BG_TASK_COUNT; i++)
+    for (uint8_t i = 0U; i < BG_TASK_COUNT; i++)
     {
         sched->tasks[i].func        = NULL;
         sched->tasks[i].interval_ms = 0U;
@@ -45,20 +43,12 @@ void bg_scheduler_init(bg_scheduler_t *sched)
 
 void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_cfg_t *cfg)
 {
-    const ssd_platform_ops_t *platform;
-    uint32_t                  budget_remaining;
-    uint32_t                  now_ms;
-    uint32_t                  now_us;
-    uint32_t                  elapsed;
-    uint32_t                  charge;
-    uint8_t                   i;
-
     /* 前置条件（判据 2）：唯一调用者 ftl.c 传 &ftl->bg 与自持的 g_bg_level_cfg[] 表项。 */
     ASSERT(sched != NULL);
     ASSERT(cfg != NULL);
 
-    platform        = ssd_platform_get();
-    sched->clock_ok = (platform != NULL) && (platform->time_us != NULL);
+    const ssd_platform_ops_t *platform = ssd_platform_get();
+    sched->clock_ok                    = (platform != NULL) && (platform->time_us != NULL);
     sched->round_seq++;
     sched->round_total_us = cfg->total_budget_us;
     sched->round_used_us  = 0U;
@@ -66,7 +56,7 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
     /* ── Pass 0：must-run 正确性关键集（不 gate、不占预算）──
      * 表序即执行序：checkpoint_kick（位 0）必须最先——在飞的 CP 要跨轮推进，
      * 拖到预算 pass 里会被低优先级/预算耗尽饿死。 */
-    for (i = 0U; i < sched->task_count; i++)
+    for (uint8_t i = 0U; i < sched->task_count; i++)
     {
         if ((sched->tasks[i].func != NULL) && (sched->tasks[i].must_run != 0U))
         {
@@ -75,9 +65,9 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
     }
 
     /* ── Pass 1：预算 + interval + 优先级（表按 priority 升序预排序，线性扫）── */
-    budget_remaining = cfg->total_budget_us;
+    uint32_t budget_remaining = cfg->total_budget_us;
 
-    for (i = 0U; i < sched->task_count; i++)
+    for (uint8_t i = 0U; i < sched->task_count; i++)
     {
         bg_task_t *task = &sched->tasks[i];
 
@@ -93,7 +83,7 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
         /* interval 门：仅时钟可用时生效；last_run_ms==0 = 尚未运行 ⇒ 立即跑（哨兵） */
         if ((sched->clock_ok != 0U) && (task->interval_ms != 0U))
         {
-            now_ms = (uint32_t)(platform->time_us() / 1000U);
+            uint32_t now_ms = (uint32_t)(platform->time_us() / 1000U);
             if ((task->last_run_ms != 0U) && ((now_ms - task->last_run_ms) < task->interval_ms))
             {
                 continue;
@@ -102,12 +92,13 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
 
         /* 执行 + 计账：charge = MIN(elapsed, budget_us)。时钟缺失（clock_ok=0 或恒 0）
          * ⇒ elapsed=0、永不截断 —— 退化为「无门控」，防刷屏靠任务内部事件门。 */
-        now_us = (sched->clock_ok != 0U) ? (uint32_t)platform->time_us() : 0U;
+        uint32_t now_us = (sched->clock_ok != 0U) ? (uint32_t)platform->time_us() : 0U;
         task->func(ftl);
         if (sched->clock_ok != 0U)
         {
-            elapsed          = (uint32_t)(platform->time_us() - now_us);
-            charge           = (elapsed < task->budget_us) ? elapsed : task->budget_us;
+            uint32_t elapsed = (uint32_t)(platform->time_us() - now_us);
+            uint32_t charge  = (elapsed < task->budget_us) ? elapsed : task->budget_us;
+
             budget_remaining = (budget_remaining > charge) ? (budget_remaining - charge) : 0U;
             if (task->interval_ms != 0U)
             {

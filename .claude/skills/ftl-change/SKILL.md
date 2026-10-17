@@ -29,8 +29,8 @@ FTL 层 = 映射 / GC / WL / journal / checkpoint / BBT / 掉电恢复。
 ### 不变量必须收敛成唯一闸门（§3.1 / H10 / H13）
 
 - 同一不变量**不允许**由多个模块各自手工维护 —— 任一处漏掉就是**永久漏账**。
-- 模块内部状态**只通过访问器**读写（范本：`allocator.h` 的 `super_block_is_open/is_closed`
-  + `allocator_*_count` / `closed_at`）。
+- 模块内部状态**只通过访问器**读写（范本：`allocator.h` 的 `allocator_*_count` / `closed_at`
+  —— 封装**数组/不变量**的才留；只为兜住坏字段名的谓词已删，见 CLAUDE.md H13）。
 - ⚠ `FTL_BLOCK_STATE_FREE` **会说谎**（`allocator_init` 早于元数据目录加载）——
   **选块一律以 Free Pool 数组为准**，不以 state 位为准。
 

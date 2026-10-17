@@ -67,11 +67,10 @@
  * -------------------------------------------------------------------- */
 bool ftl_media_needs_format(struct ftl_context *ftl)
 {
-    l2p_checkpoint_header_t cp;
-
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun]，结构上恒非空。 */
     ASSERT(ftl != NULL);
 
+    l2p_checkpoint_header_t cp;
     return (checkpoint_find_latest(ftl, &cp) != FTL_OK);
 }
 
@@ -123,23 +122,22 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
 {
-    l2p_checkpoint_header_t cp;
-    journal_page_ref_t      ring;
-    ftl_boot_result_t       local_result;
-
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与栈上 &result。 */
     ASSERT(ftl != NULL);
     ASSERT(result != NULL);
 
+    ftl_boot_result_t local_result;
     memset(&local_result, 0, sizeof(local_result));
 
     /* ① 扫 Journal 环形块池取最新页（只读）。
      *    判型要用它；三条路径也都要用它恢复写指针——journal_init 把写指针/序号复位到
      *    (block0, page0)/1，而环形块**并没有被擦**（journal_truncate 只预擦环形下一块），
      *    不接回去就会二次编程 + 序号回退（详见 journal_resume）。 */
+    journal_page_ref_t ring;
     (void)journal_scan_latest(&ftl->journal, &ring);
 
     /* ② 扫描 Checkpoint */
+    l2p_checkpoint_header_t cp;
     if (checkpoint_find_latest(ftl, &cp) != FTL_OK)
     {
         /* 无有效 Checkpoint → 出厂首次启动 */
@@ -314,23 +312,18 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context       *ftl,
 static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
                                          const l2p_checkpoint_header_t *cp)
 {
-    uint16_t i;
-
-    for (i = 0U; i < L2P_CACHE_SIZE; i++)
+    for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         l2p_cache_line_t *line = &ftl->cache.lines[i];
-        uint32_t          word;
-        uint32_t          mask;
-        int               in_bitmap;
 
         if (line->state == L2P_CACHE_DIRTY)
         {
             continue; /* ① 回放数据，保持 DIRTY 待后台 flush */
         }
 
-        word      = cp->region_bitmap[line->region_id / 32U];
-        mask      = (1UL << (line->region_id & 31U));
-        in_bitmap = ((word & mask) != 0U);
+        uint32_t word      = cp->region_bitmap[line->region_id / 32U];
+        uint32_t mask      = (1UL << (line->region_id & 31U));
+        int      in_bitmap = ((word & mask) != 0U);
 
         if (in_bitmap)
         {
@@ -378,16 +371,13 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
  *   实现要点：② journal_replay 回放所有**未全被 CP 覆盖**的页（整页判据
  *             `page_seq + entry_count > cp_sequence`；F10：只回放最大一页会静默丢
  *             ≥2 页条目）；④ F2 重建顺带替代旧 hot_sb/cold_sb
- *             写指针扫描（原实现被 valid!=0 门控恒假）。
+ *             写指针扫描（原实现被 is_open 门控恒假）。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
                                     const l2p_checkpoint_header_t *cp,
                                     ftl_boot_result_t             *result)
 {
-    uint32_t entry_count = 0U;
-    uint32_t cp_sequence;
-
-    cp_sequence = cp->journal_sequence;
+    uint32_t cp_sequence = cp->journal_sequence;
 
     /* ① Cache 全 INVALID */
     l2p_cache_init(&ftl->cache, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun);
@@ -395,6 +385,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     /* ② Journal 回放（sequence > cp_sequence 的条目 → L2P Cache）。
      *    F10：journal_replay 按 (page_seq, entry_index) 递增序回放所有
      *    page_seq + entry_count > cp_sequence 的页——只回放最大一页会静默丢 ≥2 页条目。 */
+    uint32_t entry_count = 0U;
     {
         /* ⚠ 回放条数由 journal_replay 在**应用循环**里累加（读失败的页不计）。
          * 旧实现用 journal 的 RAM 写指针反推（`current_entry > 0` → 算 current_page *
@@ -416,7 +407,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 
     /* ④ Allocator 重建（F2：掉电重启后全扫 NAND 重建 Closed SB 列表）。
      *    journal_replay 已把未回放 entry 写入 cache → L2P 反查零 region 加载。
-     *    顺带替代原 hot_sb/cold_sb 写指针扫描（原实现被 valid!=0 门控恒假）。 */
+     *    顺带替代原 hot_sb/cold_sb 写指针扫描（原实现被 is_open 门控恒假）。 */
     {
         ftl_rebuild_stats_t rebuild_stats;
         (void)ftl_rebuild_closed_sb_list(ftl, &rebuild_stats);
@@ -458,9 +449,6 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
  *   判「非空」的代价：真为空的块会被拉出 Free Pool 交 GC 多擦一次——不丢数据。 */
 static bool page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
 {
-    uint8_t i;
-    uint8_t j;
-
     memset(raw_buf, 0xFF, PAGE_SIZE);
     if (ftl_sync_read_page_raw(pba, raw_buf) != FTL_OK)
     {
@@ -468,10 +456,10 @@ static bool page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
     }
 
     /* 每 CW 的 META(4B)+CRC(4B)+前 8B 数据，共 16B。全 FF 页 META/CRC 也全 FF。 */
-    for (i = 0U; i < CW_NUM; i++)
+    for (uint8_t i = 0U; i < CW_NUM; i++)
     {
         const uint8_t *p = raw_buf + (uint32_t)i * FC_BUFFER_POOL_CW_SIZE;
-        for (j = 0U; j < 16U; j++)
+        for (uint8_t j = 0U; j < 16U; j++)
         {
             if (p[j] != 0xFFU)
             {
@@ -486,9 +474,7 @@ static bool page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
 /* 扫出某 Block 写指针：第一个全 FF 页；全非空返回 PAGES_PER_BLOCK */
 static uint8_t scan_block_write_pointer(const ftl_context_t *ftl, uint8_t plane, uint16_t block, uint8_t *raw_buf)
 {
-    uint8_t page;
-
-    for (page = 0U; page < PAGES_PER_BLOCK; page++)
+    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
         nand_pba_t addr = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
@@ -512,18 +498,15 @@ static void close_full_block(ftl_context_t       *ftl,
                              uint8_t              temperature,
                              ftl_rebuild_stats_t *stats)
 {
-    ftl_allocator_t *alloc = &ftl->alloc;
-    uint16_t         sb_idx;
-    uint16_t         page;
-    uint16_t         plane_blocks[PLANE_NUM];
-    ftl_block_t     *b;
-
     /* 退化单 plane 条目：本 plane 记块号，另一 plane 记哨兵 */
+    uint16_t plane_blocks[PLANE_NUM];
     plane_blocks[0]     = FTL_BLOCK_NO_PLANE;
     plane_blocks[1]     = FTL_BLOCK_NO_PLANE;
     plane_blocks[plane] = block;
 
-    sb_idx = allocator_add_closed_sb(alloc, plane_blocks, temperature);
+    ftl_allocator_t *alloc = &ftl->alloc;
+
+    uint16_t sb_idx = allocator_add_closed_sb(alloc, plane_blocks, temperature);
 
     if (stats != NULL)
     {
@@ -531,23 +514,20 @@ static void close_full_block(ftl_context_t       *ftl,
     }
 
     /* 逐页：LDPC_RAW 判空 + gc_read_page_with_lba 取 LBA + **逐 CW** l2p 反查 */
-    b = &alloc->blocks[ftl_gblock(plane, block)];
-    for (page = 0U; page < PAGES_PER_BLOCK; page++)
+    ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, block)];
+    for (uint16_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
-        nand_pba_t pba;
-        lba_t      cw_lba[CW_NUM];
-        uint8_t    cw;
-
-        pba = super_block_page_pba(ftl->topo, allocator_closed_at(alloc, sb_idx), plane, page);
+        nand_pba_t pba = super_block_page_pba(ftl->topo, allocator_closed_at(alloc, sb_idx), plane, page);
 
         /* 读失败 / 全页无写过 CW → 该页不可用，跳过。
          * CW 级映射：逐 CW 从页内 META（= OOB 反向映射）取回扇区 LBA。 */
+        lba_t cw_lba[CW_NUM];
         if (gc_read_page_with_lba(pba, NULL, cw_lba, NULL) != FTL_OK)
         {
             continue;
         }
 
-        for (cw = 0U; cw < CW_NUM; cw++)
+        for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
             /* ⚠ F2 重建 = 结构性同步路径（开机、superloop 未建立）：用同步逃生口。
              * 读得 INVALID 与"未映射"同义 ⇒ 该 CW 不计入有效数（与旧实现同）。 */
@@ -584,12 +564,9 @@ static void close_full_block(ftl_context_t       *ftl,
 ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
                                         ftl_rebuild_stats_t *stats)
 {
-    uint8_t          raw_buf[PAGE_SIZE];
-    ftl_allocator_t *alloc;
-    uint8_t          plane;
-    uint16_t         block;
+    uint8_t raw_buf[PAGE_SIZE];
 
-    alloc = &ftl->alloc;
+    ftl_allocator_t *alloc = &ftl->alloc;
 
     if (stats != NULL)
     {
@@ -600,13 +577,12 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
      * allocator 创建，之后从不被查找（multi-plane 读的两个 PBA 各自从 L2P 查；
      * GC/WL 逐 plane 工作），故重建只需把"写过的物理块各自归位"，无需、也无法
      * 恢复"哪两块曾是一对"（配对取决于 GC 历史，不在任何持久化位图里）。 */
-    for (plane = 0U; plane < PLANE_NUM; plane++)
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
     {
-        for (block = 0U; block < BLOCKS_PER_PLANE; block++)
+        for (uint16_t block = 0U; block < BLOCKS_PER_PLANE; block++)
         {
             uint16_t     g = ftl_gblock(plane, block);
             ftl_block_t *b = &alloc->blocks[g];
-            uint8_t      np;
 
             /* ① 坏块 / 元数据块跳过（判据与 main.c free pool 回填一致，per-plane 块号） */
             if (ftl_block_is_bad(b) || ftl_is_metadata_block(&ftl->metadata_dir, plane, block))
@@ -615,7 +591,7 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
             }
 
             /* ② 判空找写指针（第一个全 FF 页） */
-            np = scan_block_write_pointer(ftl, plane, block, raw_buf);
+            uint8_t np = scan_block_write_pointer(ftl, plane, block, raw_buf);
 
             /* ③ 未写过（全 FF）→ 保持 FREE */
             if (np == 0U)

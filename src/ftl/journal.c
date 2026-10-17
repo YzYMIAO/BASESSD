@@ -89,14 +89,12 @@ static nand_pba_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
  * -------------------------------------------------------------------- */
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 {
-    uint8_t b;
-
     /* 前置条件（判据 2 / §二十六「子模块公开入口」）：调用者一律传 &ftl->journal。 */
     ASSERT(journal != NULL);
 
     journal->topo = topo;
 
-    for (b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
+    for (uint8_t b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
     {
         journal->block_pba[b] = pba_make(topo.ch, topo.ce, topo.lun, (uint32_t)(JOURNAL_BLOCK0 + b), 0U, 0U, 0U);
     }
@@ -141,9 +139,6 @@ static bool journal_freeze(l2p_journal_t *journal);
  * -------------------------------------------------------------------- */
 void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba)
 {
-    l2p_journal_entry_t *entry;
-    uint16_t             i;
-
     /* 前置条件（判据 2）：调用者一律传 &ftl->journal。 */
     ASSERT(journal != NULL);
 
@@ -156,7 +151,8 @@ void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
      * 否则页序错乱会导致回放顺序错误。
      * ⚠ 合并放在「页满守卫」之前：合并**不占新槽位**，页满时仍应更新最新映射。
      */
-    for (i = 0U; i < journal->current_entry; i++)
+    l2p_journal_entry_t *entry;
+    for (uint16_t i = 0U; i < journal->current_entry; i++)
     {
         entry = (l2p_journal_entry_t *)(journal->page_buf + JOURNAL_HEADER_SIZE +
                                         sizeof(l2p_journal_entry_t) * i);
@@ -251,28 +247,25 @@ static void journal_clear_page(l2p_journal_t *journal)
  * -------------------------------------------------------------------- */
 static bool journal_freeze(l2p_journal_t *journal)
 {
-    fc_command_t *cmd;
-    nand_pba_t    waddr;
-    uint8_t       tpage;
-    uint8_t       tblock;
-    uint8_t       need_erase = 0U;
-
     if ((journal->job.phase != JRN_IDLE) || (journal->job.need_erase != 0U))
     {
         return false;
     }
 
     journal_write_header(journal);
-    waddr = journal_page_addr(journal, (uint8_t)journal->current_block, journal->current_page);
 
+    nand_pba_t waddr = journal_page_addr(journal, (uint8_t)journal->current_block, journal->current_page);
+
+    fc_command_t *cmd;
     if (ftl_async_write_page(&cmd, waddr, journal->page_buf, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
     {
         return false; /* 命令池空 / 建链失败 ⇒ 同步回退 */
     }
 
     /* 落点：写成功后指针推进到 (target_block, target_page)；跨块 ⇒ 需擦新块 */
-    tpage  = (uint8_t)(journal->current_page + 1U);
-    tblock = journal->current_block;
+    uint8_t tpage      = (uint8_t)(journal->current_page + 1U);
+    uint8_t tblock     = journal->current_block;
+    uint8_t need_erase = 0U;
     if (tpage >= PAGES_PER_BLOCK)
     {
         tpage      = 0U;
@@ -317,7 +310,6 @@ static bool journal_freeze(l2p_journal_t *journal)
 static bool journal_start_erase(l2p_journal_t *journal)
 {
     fc_command_t *cmd;
-
     if (ftl_async_erase_block(&cmd, journal_block_addr(journal, journal->job.target_block)) != FTL_OK)
     {
         return false;
@@ -436,9 +428,6 @@ static void journal_erase_pending_sync(l2p_journal_t *journal)
  * -------------------------------------------------------------------- */
 static void journal_flush_now(l2p_journal_t *journal)
 {
-    nand_pba_t waddr;
-    uint8_t    target_page;
-
     if (journal->job.need_erase != 0U)
     {
         journal_erase_pending_sync(journal);
@@ -451,8 +440,8 @@ static void journal_flush_now(l2p_journal_t *journal)
 
     journal_write_header(journal);
 
-    target_page = journal->current_page;
-    waddr       = journal_page_addr(journal, (uint8_t)journal->current_block, target_page);
+    uint8_t    target_page = journal->current_page;
+    nand_pba_t waddr       = journal_page_addr(journal, (uint8_t)journal->current_block, target_page);
 
     /*
      * 同步写 Journal 页到 NAND。
@@ -534,14 +523,13 @@ void journal_flush_page(l2p_journal_t *journal)
 void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     l2p_journal_t *journal = (l2p_journal_t *)ctx;
-    fc_command_t  *cmd;
 
     (void)ftl; /* 实例无关：ctx 就是本实例的 journal */
 
     ASSERT(journal != NULL);
     ASSERT(completion != NULL);
 
-    cmd = fc_command_id_to_command((uint16_t)completion->command_id);
+    fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     if (journal->job.phase == JRN_WRITE)
     {
@@ -626,9 +614,6 @@ static void journal_scan_ring(const l2p_journal_t *journal,
                               uint16_t            *out_count,
                               journal_page_ref_t  *out_latest)
 {
-    uint16_t count = 0U;
-    uint8_t  b, page;
-
     if (out_latest != NULL)
     {
         out_latest->page_seq    = 0U;
@@ -637,18 +622,15 @@ static void journal_scan_ring(const l2p_journal_t *journal,
         out_latest->entry_count = 0U;
     }
 
-    for (b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
+    uint16_t count = 0U;
+    for (uint8_t b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
     {
-        for (page = 0U; page < PAGES_PER_BLOCK; page++)
+        for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
         {
-            uint8_t    page_data[JOURNAL_PAGE_SIZE];
-            uint32_t   page_seq;
-            uint16_t   entry_count;
-            nand_pba_t raddr;
-
-            raddr = journal_page_addr(journal, b, (uint8_t)page);
-
+            uint8_t page_data[JOURNAL_PAGE_SIZE];
             memset(page_data, 0xFF, sizeof(page_data));
+
+            nand_pba_t raddr = journal_page_addr(journal, b, (uint8_t)page);
             if (ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META()) !=
                 0)
             {
@@ -664,6 +646,8 @@ static void journal_scan_ring(const l2p_journal_t *journal,
                 }
             }
 
+            uint32_t page_seq;
+            uint16_t entry_count;
             memcpy(&page_seq, page_data + 4, sizeof(page_seq));
             memcpy(&entry_count, page_data + 8, sizeof(entry_count));
             if ((entry_count == 0U) || (entry_count > JOURNAL_ENTRIES_PER_PAGE))
@@ -729,16 +713,13 @@ bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out)
  * -------------------------------------------------------------------- */
 void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, uint32_t floor_sequence)
 {
-    uint32_t next = floor_sequence;
-
     /* 前置条件（判据 2）：调用者一律传 &ftl->journal。latest 可为 NULL（文档化契约）。 */
     ASSERT(journal != NULL);
 
+    uint32_t next = floor_sequence;
+
     if ((latest != NULL) && (latest->page_seq > 0U))
     {
-        uint8_t next_block = latest->block;
-        uint8_t next_page  = (uint8_t)(latest->page + 1U);
-
         /* ⚠ 必须加 **entry_count**，不是 +1：本页占了 page_seq .. page_seq+entry_count-1
          *   共 entry_count 个序号（journal_append 逐条 `sequence_counter++`，页头
          *   `hdr_page_seq = sequence_counter − current_entry` 反推）。若只 +1，序号会
@@ -749,6 +730,8 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
             next = latest->page_seq + (uint32_t)latest->entry_count;
         }
 
+        uint8_t next_block = latest->block;
+        uint8_t next_page  = (uint8_t)(latest->page + 1U);
         if (next_page >= PAGES_PER_BLOCK)
         {
             next_block = (uint8_t)((next_block + 1U) % JOURNAL_BLOCK_COUNT);
@@ -807,15 +790,14 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
 {
     /* JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 8B → 2KB 栈上数组。 */
     journal_page_ref_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
-    journal_page_ref_t latest;
-    uint16_t           replay_count = 0U;
-    uint32_t           applied      = 0U;
 
     /* 前置条件（判据 2）：调用者一律传 &ftl->journal 与 &ftl->cache。 */
     ASSERT(journal != NULL);
     ASSERT(cache != NULL);
 
     /* 第一遍：扫环——收集需回放页 + 取最新页 */
+    journal_page_ref_t latest;
+    uint16_t           replay_count = 0U;
     journal_scan_ring(journal,
                       cp_sequence,
                       replay_pages,
@@ -826,15 +808,13 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
     /* 第二遍：按 (page_seq, entry_index) 递增序应用条目。
      * 插入排序（replay_count ≤ 256）：per-LBA last-write-wins——
      * 同 LBA 的旧条目（含 GC/WL 搬移记录）被后写覆盖，不指向已擦除块。 */
+    uint32_t applied = 0U;
     {
-        uint16_t i;
-        uint16_t n;
-
-        for (i = 1U; i < replay_count; i++)
+        for (uint16_t i = 1U; i < replay_count; i++)
         {
             journal_page_ref_t key = replay_pages[i];
 
-            n = i;
+            uint16_t n = i;
             while ((n > 0U) && (replay_pages[n - 1U].page_seq > key.page_seq))
             {
                 replay_pages[n] = replay_pages[n - 1U];
@@ -843,16 +823,14 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
             replay_pages[n] = key;
         }
 
-        for (i = 0U; i < replay_count; i++)
+        for (uint16_t i = 0U; i < replay_count; i++)
         {
-            uint8_t      page_data[JOURNAL_PAGE_SIZE];
-            nand_pba_t   raddr;
-            ftl_status_t ret;
+            nand_pba_t raddr = journal_page_addr(journal, replay_pages[i].block, replay_pages[i].page);
 
-            raddr = journal_page_addr(journal, replay_pages[i].block, replay_pages[i].page);
-
+            uint8_t page_data[JOURNAL_PAGE_SIZE];
             memset(page_data, 0xFF, sizeof(page_data));
-            ret = ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META());
+
+            ftl_status_t ret = ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META());
             if (ret != FTL_OK)
             {
                 continue; /* 页已失效，跳过（应用顺序其余页不受影响） */
@@ -861,12 +839,12 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
             applied += (uint32_t)replay_pages[i].entry_count;
 
             {
-                uint16_t k;
-                for (k = 0U; k < replay_pages[i].entry_count; k++)
+                for (uint16_t k = 0U; k < replay_pages[i].entry_count; k++)
                 {
+                    uint16_t offset = JOURNAL_HEADER_SIZE + sizeof(l2p_journal_entry_t) * k;
+
                     uint32_t entry_lba;
                     uint32_t entry_new_pba;
-                    uint16_t offset = JOURNAL_HEADER_SIZE + sizeof(l2p_journal_entry_t) * k;
                     memcpy(&entry_lba, page_data + offset + 0, 4);
                     memcpy(&entry_new_pba, page_data + offset + 8, 4);
                     /* ⚠ 开机回放路径 = 结构性同步：用**同步**逃生口（自旋泵），
@@ -908,8 +886,6 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
  * -------------------------------------------------------------------- */
 jrn_truncate_step_t journal_truncate_plan(l2p_journal_t *journal, uint32_t up_to_sequence, nand_pba_t *out_addr, uint8_t *out_block)
 {
-    uint8_t next;
-
     /* 前置条件（判据 2）：三个指针均由调用者自持。 */
     ASSERT(journal != NULL);
     ASSERT(out_addr != NULL);
@@ -933,7 +909,7 @@ jrn_truncate_step_t journal_truncate_plan(l2p_journal_t *journal, uint32_t up_to
     /* ② 待预擦块 = 环形下一块。该块整块的条目都 ≤ up_to_sequence（checkpoint 已把它们
      * 写进 NAND L2P 表），擦掉即完成截断。重复调用（两次 checkpoint 之间无写入）
      * 时 next == pre_erased_block ⇒ 跳过重擦。 */
-    next = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
+    uint8_t next = (uint8_t)((journal->current_block + 1U) % JOURNAL_BLOCK_COUNT);
     if (next == journal->pre_erased_block)
     {
         return JRN_TRUNC_ALREADY;

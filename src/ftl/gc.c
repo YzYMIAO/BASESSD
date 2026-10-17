@@ -63,11 +63,7 @@
  */
 ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba[CW_NUM], lba_t *page_base_out)
 {
-    fc_command_t *cmd;
-    uint32_t      meta_cw0;
-    ftl_status_t  ret;
-
-    cmd = fc_command_alloc();
+    fc_command_t *cmd = fc_command_alloc();
     if (cmd == NULL)
     {
         return FTL_ERROR;
@@ -92,7 +88,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
     {
         fc_command_status_t completion;
 
-        ret = ftl_sync_submit_wait(cmd, &completion, 0U);
+        ftl_status_t ret = ftl_sync_submit_wait(cmd, &completion, 0U);
         if (ret != FTL_OK)
         {
             (void)fc_command_release(cmd);
@@ -113,6 +109,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
     }
 
     /* 从 META 解码逐 CW 的扇区 LBA + 页基址（与异步搬移 job 共用同一份实现） */
+    uint32_t meta_cw0;
     if (!gc_decode_cw_lba(cmd, pba, cw_lba, &meta_cw0))
     {
         (void)fc_command_release(cmd);
@@ -152,29 +149,28 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
  * -------------------------------------------------------------------- */
 bool gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lba_t *page_base_out)
 {
-    uint8_t       c;
-    uint8_t       found      = 0U;
-    uint32_t      base_meta  = 0U;
     const uint8_t phys_plane = (uint8_t)pba_to_plane(pba);
 
     ASSERT(cmd != NULL);
     ASSERT(cw_lba != NULL);
 
-    for (c = 0U; c < CW_NUM; c++)
+    for (uint8_t c = 0U; c < CW_NUM; c++)
     {
         cw_lba[c] = FTL_LBA_INVALID; /* 默认未写过 */
     }
 
-    for (c = 0U; c < CW_NUM; c++)
+    uint8_t  found     = 0U;
+    uint32_t base_meta = 0U;
+    for (uint8_t c = 0U; c < CW_NUM; c++)
     {
         uint8_t *meta_ptr = fc_buffer_get_meta(cmd, c);
-        uint32_t m;
 
         if (meta_ptr == NULL)
         {
             continue; /* 该 CW 不在链上（本入口链恒覆盖全 4 CW，防御） */
         }
         /* meta_ptr 指向 CW buffer，CW 基址 4 字节对齐，memcpy 避免 alignment 警告 */
+        uint32_t m;
         memcpy(&m, meta_ptr, sizeof(m));
 
         /* 合法 META 判据：非全 1（未写过）+ 低位 plane/cw 与本 CW 自洽 */
@@ -271,9 +267,17 @@ static void gc_table_extremes(const ftl_allocator_t *alloc, uint32_t *min_erase,
  * -------------------------------------------------------------------- */
 bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 {
+    /* 前置条件（判据 2）：调用者 migrate.c 传 &ftl->alloc 与栈上 &victim。 */
+    ASSERT(alloc != NULL);
+    ASSERT(alloc->blocks != NULL);
+    ASSERT(victim != NULL);
+
+    /* 归一化基准：全表极值（一次扫描，与候选数无关）。min_erase 本函数不用（T5 用）。 */
     uint32_t min_erase;
     uint32_t max_erase;
     uint32_t max_pe_ts;
+    gc_table_extremes(alloc, &min_erase, &max_erase, &max_pe_ts);
+
     uint32_t best_cost  = UINT32_MAX;
     uint32_t best_vr    = 0U;
     uint32_t best_er    = 0U;
@@ -282,43 +286,30 @@ bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
     uint16_t best_valid = (uint16_t)((PLANE_NUM * PAGES_PER_BLOCK * CW_NUM) + 1U);
     bool     found      = false;
 
-    /* 前置条件（判据 2）：调用者 migrate.c 传 &ftl->alloc 与栈上 &victim。 */
-    ASSERT(alloc != NULL);
-    ASSERT(alloc->blocks != NULL);
-    ASSERT(victim != NULL);
-
-    /* 归一化基准：全表极值（一次扫描，与候选数无关）。min_erase 本函数不用（T5 用）。 */
-    gc_table_extremes(alloc, &min_erase, &max_erase, &max_pe_ts);
-
     for (uint16_t i = 0U; i < allocator_closed_count(alloc); i++)
     {
-        super_block_t *sb      = allocator_closed_at(alloc, i);
-        uint16_t       valid   = 0U;
-        uint8_t        present = 0U;
-        uint32_t       er_max  = 0U;         /* 本 SB 的磨损代表：各 plane 取大 */
-        uint32_t       pe_min  = UINT32_MAX; /* 本 SB 的时间代表：各 plane 取小（越老越优先）*/
-        uint32_t       vr;
-        uint32_t       er;
-        uint32_t       cp;
-        uint32_t       yp;
-        uint32_t       cost;
+        super_block_t *sb = allocator_closed_at(alloc, i);
 
-        if (super_block_is_open(sb))
+        if (sb->is_open)
         {
             continue; /* 仍在写的 SB 不是回收对象 */
         }
+
+        uint16_t valid   = 0U;
+        uint8_t  present = 0U;
+        uint32_t er_max  = 0U;         /* 本 SB 的磨损代表：各 plane 取大 */
+        uint32_t pe_min  = UINT32_MAX; /* 本 SB 的时间代表：各 plane 取小（越老越优先）*/
 
         /* 有效 CW 数 = 各 plane 物理块 valid_count 之和（CW 级真实计数，替代 next_page 近似）。
          * 退化单 plane 条目（重建产物）跳过哨兵 plane。 */
         for (uint8_t p = 0U; p < PLANE_NUM; p++)
         {
-            const ftl_block_t *blk;
-
             if (!super_block_has_plane(sb, p))
             {
                 continue;
             }
-            blk   = &alloc->blocks[ftl_gblock(p, sb->plane_blocks[p])];
+            const ftl_block_t *blk = &alloc->blocks[ftl_gblock(p, sb->plane_blocks[p])];
+
             valid = (uint16_t)(valid + blk->valid_count);
             present++;
             if (blk->erase_count > er_max)
@@ -340,12 +331,12 @@ bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
          * age 项的 `max_pe_ts > pe_min` 同时兜住两种退化：① max_pe_ts == 0（上电后尚无块被擦）；
          * ② 本 SB 的 plane 块已被标坏 ⇒ gc_score_scale 跳过它 ⇒ pe_min 可能大于 max_pe_ts
          * （相减会下溢成大数、把 yp 绕回）。两者一律取 age_ratio = 0（时间项中性）。 */
-        vr = ((uint32_t)valid * 1000U) / ((uint32_t)present * PAGES_PER_BLOCK * CW_NUM);
-        er = (uint32_t)(((uint64_t)er_max * 1000U) / max_erase);
-        cp = (sb->temperature == FTL_TEMP_HOT) ? 0U : 1000U;
-        yp = 1000U - (((max_pe_ts > pe_min) ? (uint32_t)(((uint64_t)(max_pe_ts - pe_min) * 1000U) / max_pe_ts) : 0U));
+        uint32_t vr = ((uint32_t)valid * 1000U) / ((uint32_t)present * PAGES_PER_BLOCK * CW_NUM);
+        uint32_t er = (uint32_t)(((uint64_t)er_max * 1000U) / max_erase);
+        uint32_t cp = (sb->temperature == FTL_TEMP_HOT) ? 0U : 1000U;
+        uint32_t yp = 1000U - (((max_pe_ts > pe_min) ? (uint32_t)(((uint64_t)(max_pe_ts - pe_min) * 1000U) / max_pe_ts) : 0U));
 
-        cost = (GC_WEIGHT_VALID * vr) + (GC_WEIGHT_ERASE * er) + (GC_WEIGHT_TEMP * cp) + (GC_WEIGHT_AGE * yp);
+        uint32_t cost = (GC_WEIGHT_VALID * vr) + (GC_WEIGHT_ERASE * er) + (GC_WEIGHT_TEMP * cp) + (GC_WEIGHT_AGE * yp);
 
         /* cost 相等时取有效页更少者（确定性，且退化为旧的单维贪心） */
         if ((cost < best_cost) || ((cost == best_cost) && (valid < best_valid)))
@@ -392,12 +383,12 @@ bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
  * -------------------------------------------------------------------- */
 uint32_t gc_check_triggers(const ftl_allocator_t *alloc)
 {
-    uint32_t triggers = 0U;
-
     if (alloc == NULL)
     {
         return 0U;
     }
+
+    uint32_t triggers = 0U;
 
     /* T1：空闲块水位（主动补池，还留有余量就开工） */
     if (allocator_free_count(alloc) < FREE_POOL_TARGET)

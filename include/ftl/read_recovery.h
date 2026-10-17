@@ -196,7 +196,7 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track);
 /*
  * rr_predictive_scan - 巡检：找第一个 health ≥ CRITICAL 的 Closed 块
  *
- * 只扫 CLOSED（跳过 OPEN/FREE/BAD/RESERVED），返回全局物理 Block 号。
+ * 只扫 CLOSED（跳过 OPEN/FREE/BAD/LOG/RETIRED），返回全局物理 Block 号。
  * 慢死预测命中 Open SB 的块不搬（还在写），等关闭后进 closed 再巡检。
  *
  * @param alloc  FTL allocator（含 blocks 表）
@@ -209,7 +209,7 @@ bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock);
  * rr_retire_block - 退役慢死块（不再分配新数据，不标坏）
  *
  * 有效数据已由调用方搬走，本函数：
- *   - 状态机：清 OPEN/CLOSED/FREE/TEMP，置 RESERVED（Spare Pool 语义）
+ *   - 状态机：置 RETIRED（互斥枚举 ⇒ 一行赋值即抹掉原状态；温度字段正交，不动）
  *   - 清反向索引 sb_id → NO_SB
  *   - 复位 rr 健康（health=HEALTHY、rising_count=0、last_ecc=0、read_count=0）
  *     块仍可读（ECC 能纠），只是不再当新块分配。

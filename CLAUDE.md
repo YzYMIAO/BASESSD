@@ -142,7 +142,8 @@ release 运行期拒绝。判别法与例外见 **H14**（`ASSERT` 与 `return` 
 - **形态**：同一不变量（如 allocator 的「四本账」）由多个模块各自手工维护，任一处漏掉就
   **永久漏账**，且不报错、不崩溃，只表现为容量无声流失。
 - **判据**：读代码觉得「难读」时先怀疑这个（见 C3），不是命名/结构问题。
-- **对策**：收敛成**唯一闸门** + 账本访问器（如 `super_block_is_open/is_closed`）。
+- **对策**：收敛成**唯一闸门** + 账本访问器（如 `allocator_free_block` / `allocator_pool_remove`
+  两个入/出池闸门 + `allocator_*_count()` / `allocator_closed_at()` 读口）。
 
 ### 3.2 FC-NAND 层 —— 静默失效 + 判据没有区分力
 
@@ -270,8 +271,12 @@ release 运行期拒绝。判别法与例外见 **H14**（`ASSERT` 与 `return` 
 
 **H13 模块化：一个模块只做一件事；模块间只通过接口通信，不碰对方内部数据。**（华为原则2.1/12.2、建议4.2）
 **耦合过重的信号 = 改 A 模块时被迫去改 B 模块的内部**——这时不该改 B，该给 B 加接口。
-本仓落点：`allocator.h` 的账本访问器（`super_block_is_open/is_closed` + `allocator_*_count` /
-`closed_at`）就是「不让外部模块直接摸数组」的做法；此前 6 处外部手工地址转换正是耦合的代价。
+本仓落点：`allocator.h` 的账本访问器（`allocator_*_count` / `closed_at`）就是「不让外部模块
+直接摸数组」的做法；此前 6 处外部手工地址转换正是耦合的代价。
+⚠ **2026-10-17 删掉了 `super_block_is_open/is_closed` 谓词** —— 它们当初只为**兜住一个撒谎的
+字段名**（`valid` 语义是反的）而存在，名字改成 `is_open` 后谓词成了纯仪式（用户裁决）。
+判据：**访问器的价值来自它封装了什么，不来自它存在**——封装的是**数组/不变量**就留（`closed_at`），
+只是给坏名字打补丁就删。**H13 原则不变**（模块内部状态单点访问），只是换了个举例。
 与 H10 同源：H10 管**全局变量**，H13 管**模块内部状态**，都是「单点访问」。
 ⚠ 与 C2 不冲突：**加访问器不是加代码量**，是把手抄的等价物收进唯一入口。
 
@@ -303,9 +308,10 @@ release 运行期拒绝。判别法与例外见 **H14**（`ASSERT` 与 `return` 
   - `(completion->status & FC_CW_STATUS_ERROR_MASK)` 在 **`src/` 下 14 处、跨 10 个文件**
     手写（`read_recovery.c` / `migrate.c` 各 3 处），远超 C2「第 3 次必须提炼」的阈值。
   - `include/ftl/bst.h:170` `(state & FTL_BLOCK_STATE_BAD) != 0`（任一）与
-    `:185` `(state & st) == st`（全部）**两种语义并存**，只靠运算符区分。
-    `bst.h` 注释已自陈方向是「bitmask 宏 + 可读调用，替代位域/联合体」，
-    但只覆盖块状态一个域，**没有公共底座**。
+    `:185` `(state & st) == st`（全部）**两种语义并存**，只靠运算符区分 ——
+    ⚠ **该反例已于 2026-10-17 消失**：`ftl_block_t.state` 由 7 位位图**拍平为互斥枚举**
+    （见 §九 变更记录），该字段上已无任何位运算，歧义随之消失。**反例换成上一条**
+    （`FC_CW_STATUS_ERROR_MASK` 那 14 处）——它仍在，且形态完全一样（手写掩码、语义靠运算符）。
 - **公共头的落点**：通用位运算进 `include/common/`。现状唯一的**通用**（按位宽生成）掩码构造器是
   `NAND_FIELD_MASK(width)`（`include/nand/nand_config.h:105`），却挂在 NAND 层下 ——
   FTL/FC 要复用它得跨层。新增位运算**先找它**，不要另起一套（见 C2 / R9）。
@@ -516,3 +522,5 @@ FC 层已有完整判据体系：**判据 9**（配置错误的后果是静默�
 | 2026-10-17 | 新增 H16~H31（嵌入式运行时 / MISRA 类型位运算 / 华为补漏 / CERT 健壮性）；订正「不采纳表」；新增 P5（偏离留痕）、P6（故障排查） | 对比 MISRA C:2012 / CERT C / BARR-C:2018 / Zephyr / 开源嵌入式 skill 后的缺口补全 |
 | 2026-10-17 | 建 4 个 skill（`.claude/skills/`：`board-run` / `fault-triage` / `ftl-change` / `c-review`），P4 由「待建」改为入口表 | 用户要求建立 |
 | 2026-10-17 | 新增第 5 个 skill `arch-design`（**判据型**：分层决策 / 增删对外接口 / 跨层），P4 补该行 | 用户：「没有架构设计的skill吗」。架构知识已在 `essentials` 等四份文档里 ⇒ 该 skill **只做流程 + 定位表**，不搬知识（H6） |
+| 2026-10-17 | **H15「本仓现状」的反例换掉**：删 `bst.h:170`/`:185`（`ftl_block_t.state` 已拍平为互斥枚举，该字段上再无位运算），改用仍在的 `FC_CW_STATUS_ERROR_MASK` 14 处 | 原反例随代码消失。**H15 本身不变**——它管的是位掩码/位标志运算，枚举字段不适用（详见 `docs/design/ftl_design.md §3.7.1`） |
+| 2026-10-17 | **H13 举例更换**：删 `super_block_is_open/is_closed` 谓词；`super_block_t.valid`（`uint8_t`，1=Open/0=Closed）→ `bool is_open`。`allocator.h` 不变量 ③（「`valid` 语义是反的」）随之删除，原 ④⑤ 重编号为 ③④（`assertion_guidelines.md` 两处「不变量 ⑤」同步标注） | 用户：「**这些封装有些冗余**」「好的代码不需要过多注释和封装就能知道代码逻辑」。**判据**：谓词当初只为**兜住一个撒谎的字段名**（`valid` 不表示有效性——Closed SB 的数据完全有效，只是写满）⇒ 把名字改对，谓词成纯仪式、全仓 ~6 处「语义是反的 / 别裸比」警告**归零**。**H13 原则不变**（模块内部状态单点访问），只换举例为 `allocator_*_count` / `closed_at`（封装**数组/不变量**的留，给坏名字打补丁的删）。⚠ 用户提议的 `ENABLE`/`DISABLE` **未采纳**：`include/ftl/*.h` 对 CMSIS/HAL 依赖**命中 0**（FTL 层平台纯净），且全仓 ENABLE/DISABLE 使用 **0 处** ⇒ 引入即 FTL 层首次平台泄漏 + 第二套布尔约定（C9 同源）。`super_block_t` 尺寸 8 B **不变**（7 B 补齐），RAM-only 不涉介质版本 |

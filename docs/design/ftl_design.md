@@ -98,7 +98,7 @@
 | **Free Pool** | §3、§4 | 空闲块池；allocator 从这里取块给写分配 |
 | **OP / 预留 / Spare 池** | §3 | 超容量预留空间：保空闲水位 + 坏块替换补给 |
 | **水位（watermark）** | §4.4 | 空闲块数的触发阈值（T1/T4/T5 三级，越界越急 GC 力度越大） |
-| **BST** | §3、§4 | Block State Table，块状态表：状态位 + 有效 CW 数 + 擦除计数 |
+| **BST** | §3、§4 | Block State Table，块状态表：状态（互斥枚举）+ 温度 + 有效 CW 数 + 擦除计数 |
 | **BBT** | §3.8 | Bad Block Table；⚠本项目语义特殊 = 「哪些块被写过」图 + 出厂坏块扫描（spare 被覆盖后标记不准确） |
 | **Read Recovery / Read Retry** | §4、RR | 读失败恢复：切读重试电压 → 邻居页辅助 → 最后坏块替换 + 搬移 |
 | **read disturb** | §4.8 | 读干扰：反复读导致邻近单元电荷漂移，需 WL / 读恢复应对 |
@@ -491,8 +491,10 @@ typedef struct {
  * 整份 = 全部 2048 条 entry。启动扫池取"整份校验通过"中 sequence 最大者。 */
 ```
 
-- Anchor 池出厂时**不需要**预留固定好块——池内块由 Free Pool 提供（`RESERVED` 位标识），
-  坏块由分配器自然跳过
+- Anchor 池出厂时**不需要**预留固定好块——池是**固定块池**（16..47），块按几何地址寻址、
+  不参与分配 ⇒ BST 态为 `NONE`；池内遇坏块由池内轮转自然跳过
+  （⚠ 旧文写「由 Free Pool 提供、带 `RESERVED` 位」是**过期描述**：`RESERVED` 实为 L2P 日志块独占，
+  且日志块才走动态分配，见 §3.3 与 §3.7）
 - 冗余方式改为**池内多份**（32 块 × 8 份/块 = 256 份），不是同块 3 页
 - 序列号单调递增，启动时取最大 sequence 的**整份有效**记录（不取半份）
 
@@ -569,11 +571,10 @@ Open Super Block（每个温度等级一个）:
 #define FTL_TEMP_NUM    2
 
 typedef struct {
-    ftl_topology_t topo;                  // 本 Super Block 绑定的 NAND 芯片路由（ch/ce/lun）
-    uint16_t plane_blocks[PLANE_NUM];     // Plane 0 和 Plane 1 的 Block 号
+    uint16_t plane_blocks[PLANE_NUM];     // Plane 0 和 Plane 1 的 Block 号（可为 FTL_BLOCK_NO_PLANE）
     uint8_t  next_page;                   // 当前写入页（0~63，双 Plane 同步）
     uint8_t  temperature;                 // FTL_TEMP_HOT / FTL_TEMP_COLD
-    uint8_t  valid;                       // 1=正在使用（Open），0=已关闭
+    bool     is_open;                     // true = Open（仍在写），false = Closed（写满待回收）
 } super_block_t;
 
 /* 返回 Super Block 中指定 Plane/Page 的 PBA（用户数据使用 FTL_DATA_CH/CE；cw=0 = 整页）*/
@@ -690,7 +691,8 @@ Super Block {P0-BlockA, P1-BlockB} 中 P0-BlockA PROGRAM 失败：
 ### 3.7 Free Pool 三级水位（一个已擦除池）
 
 **Free Pool 是「一个已擦除池 + 三级水位」——不是三个池**：搬移是**先擦后归还**
-（`mig_step` 的 `MIG_ERASE` phase 里 `allocator_free_block`）——victim 擦完才进 Free Pool
+（`mig_step` 的 `MIG_ERASE` phase 里 `allocator_free_block`；退役块则**出池**不入池，见下文）
+——victim 擦完才进 Free Pool
 ⇒ 池内**每个**块都已是擦除态，不存在「预擦除块」与「普通 free 块」的物理区分，也就没有
 东西可以分区。三级是**水位**（同一池上的两个分界阈值），不是三个池。
 
@@ -745,6 +747,89 @@ if (ftl_gc_evaluate(ftl) != 0U) {                 /* 统一触发求值（预算
 
 两池均按 plane 各持一份（数组 `op_blocks[PLANE_NUM][…]` / `spare_blocks[PLANE_NUM][…]`），
 理由见 §3.6。
+
+**入池 / 出池是唯一闸门，`state == FREE` 是池成员的镜像**（`allocator.h` 不变量②）：
+
+| 动作 | 唯一入口 | 对 `state` 的作用 |
+|---|---|---|
+| 入池 | `allocator_free_block` | **置 `FREE`** |
+| 出池 | `allocator_pool_remove`（`allocator_remove_from_free` 是它的"容忍未命中"变体） | **只校验**（`ASSERT` 在池 ⇒ 必为 `FREE`），**不改状态** |
+
+⇒ 不变量：**`state == FTL_BLOCK_STATE_FREE` ⟺ 该块在 Free Pool 里**。
+⚠ 与 2026-10-17 前的写法不同：出池**不再清位**。状态是**互斥枚举**（见 §3.7.1），
+没有"清一个位"这种操作——**赋态属于转移的归属者**，出池只是容器操作。
+故出池闸门退化为一次 `ASSERT`（C7：出池后忘赋态即可让它失败），
+状态由紧随其后的归属者赋值（`open_sb`→`OPEN` / `alloc_reserved`→`LOG` /
+migrate 退役→`RETIRED` / rebuild→`CLOSED` / `bbt_mark_bad`→`BAD`）。
+**只改一半（在池却不是 FREE，或反之）就是账本分叉**，且不报错、不崩溃，
+只表现为容量无声流失（§3.1 的形态）。
+
+**不进 Free Pool 的块一律 `state = NONE`**（固定元数据区、OP 池、Spare 池）——语义是
+「无归属，按几何地址寻址，不参与分配」，是中性描述，不是"假装 FREE"。
+⚠ 原 `RESERVED` 位**不是**给它们的：该位已被拆成两个互斥态（见 §3.7.1），
+固定元数据块/OP/Spare 从无任何置位路径（`allocator_spare_try_push` /
+`allocator_op_try_push` 根本不碰 `state`）。
+
+两条**必须**同时满足的边界路径（否则不变量可被活路径打破）：
+
+- **标坏**：`bbt_mark_bad` 必须把该块**驱逐出池**（复用 `allocator_remove_from_free`），
+  **且该调用必须早于置 `BAD`**（出池闸门校验「在池 ⇒ FREE」，块此刻正是 `FREE`；
+  先置 `BAD` 再出池就会命中断言）。否则留下「在池却不带 FREE」的反向分叉。
+  出厂扫描 / BBT 加载跑在建池之前（池为空）⇒ 该调用恒 no-op，无需特判。
+- **退役**：`migrate` 的 `MIG_POST_RETIRE` 分支**先出池、再 `rr_retire_block`**，
+  **不得**先 `allocator_free_block` 入池。否则退役块留在池里，而选块判据是**池数组**
+  （只跳过 `is_bad`）⇒ 退役块会被**再次分配出去**，`read_recovery.c` 的"不再分配新数据"
+  形同虚设。⚠ 该分支**改变可观测行为**：退役块真的退出池 ⇒ `free_count` 下降 ⇒
+  三级水位（T1/T4 建在 `free_count` 上）更早触发 GC。
+
+> 历史（2026-10-17 前）：`allocator_init` 无条件把**全部非坏块**置 `FREE`，而固定元数据块与
+> OP / Spare 块**从不入池** ⇒ `FREE` 是**谎言**；`allocator_pool_remove` 出池也不清 `FREE`。
+> 于是选块被迫"**一律以 Free Pool 数组为准**"，是一条防御性补丁。收口后该判据仍保留，
+> 但理由换成了**结构性**的：池数组为准 ⇒ 选中即 `pool_remove` 必命中，无重复选择死循环。
+
+#### 3.7.1 块状态机（互斥枚举 + 正交温度）
+
+⚠ **2026-10-17 起 `ftl_block_t.state` 是互斥枚举，不再是位图**（原 7 位软件位图已删）：
+
+```c
+/* include/ftl/bst.h —— 位置互斥，同一时刻只能有一个 */
+typedef enum
+{
+    FTL_BLOCK_STATE_NONE    = 0U, /* 无归属：固定元数据区 / OP 池 / Spare 池 / BSS 未初始化 */
+    FTL_BLOCK_STATE_FREE    = 1U, /* 在 Free Pool（已擦除） */
+    FTL_BLOCK_STATE_OPEN    = 2U, /* 属于某 Open SB（正在写） */
+    FTL_BLOCK_STATE_CLOSED  = 3U, /* 属于某 Closed SB（等待 GC） */
+    FTL_BLOCK_STATE_LOG     = 4U, /* L2P 日志块（动态元数据块，本池独占）—— metadata 回收判据 */
+    FTL_BLOCK_STATE_RETIRED = 5U, /* 退役：不再分配新数据、不标坏、仍可读（read_recovery） */
+    FTL_BLOCK_STATE_BAD     = 6U, /* 坏块（终态） */
+} ftl_block_state_t;
+```
+
+**为什么用枚举而不是位图**（这是拍平的判据）：
+
+- **位图允许非法组合**。原 `RESERVED` 一位被**两种身份共用**——`allocator_alloc_reserved_block`
+  置它表示「L2P 日志块」，`rr_retire_block` 置它表示「退役块」——于是 `metadata.c` 的日志块判据
+  （`md_block_is_log`）**把退役块也当成日志块**（C9：一位两义）。
+  更糟的是 `bbt_mark_bad` **不清** `RESERVED` ⇒ 字面上 `BAD|RESERVED` 可表达且无断言拦
+  （今天不可达，靠调用图碰巧如此，不是任何不变量保证的 —— 静默失效的温床）。
+  拍平后 `BAD` 是**终态**，与其余 6 态天然互斥，"并存"不再是一个可以表达的状态。
+- **位图每次转换都要手写清位掩码**：14 个转换点出现 **7 种**不同掩码，漏一位**编译期完全无声**
+  （§3.2 静默失效）。且同文件内已经不一致：`bbt_mark_bad` 清温度位，而
+  `bbt_init` / `bbt_scan_factory` / `bbt_erase_all_blocks` **不清**。
+
+**温度与位置正交**（`OPEN` 块也有冷热），故单列字段 `ftl_block_t.temp`
+（`0=HOT / 1=COLD`，值域同 `allocator.h` 的 `FTL_TEMP_*`）。
+⚠ **不另立 `ftl_block_temp_t` 枚举**：那会是**第二套坐标**（C9）——温度语义已由 `FTL_TEMP_*`
+承载，此处只声明「值域同它」。温度**不随状态清**：每次分配（`open_sb` / `add_closed_sb`）
+都显式写入 ⇒ 无读者能读到陈旧值。
+
+**字段尺寸不变**：`state` 由 `uint16_t`（2B，位图）降为 `uint8_t`（1B，枚举），
+空出的 1B 给 `temp`（1B）⇒ `ftl_block_t` 仍 **20B**（`_Static_assert` 兜底）。
+`state` 是**纯 RAM 态**，BBT 持久化的只有坏块位图（`bbt_header_t.bad_map`，加载时反填 `set_bad`）
+⇒ **无介质变更、无版本号 bump**。
+
+⚠ **`H15`（位运算走公共宏）对本字段不再适用**：拍平后 `state` 上**没有任何位运算**，
+"任一位置位 vs 全部位置位"的歧义随之消失（该歧义原是本仓 H15 的反例来源）。
 
 ### 3.8 坏块管理（BBT）
 
@@ -822,9 +907,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc) {
 
         /* 只读标记（do_erase = 0）：出厂扫描阶段**不得**擦块 */
         if (bbt_probe_block_bad(alloc, plane, block, 0U) != 0) {
-            ftl_block_set_bad(&alloc->blocks[gblock]);
-            ftl_block_state_clr(&alloc->blocks[gblock],
-                FTL_BLOCK_STATE_OPEN | FTL_BLOCK_STATE_CLOSED | FTL_BLOCK_STATE_FREE);
+            ftl_block_set_bad(&alloc->blocks[gblock]); /* 终态：互斥枚举 ⇒ 一行赋值即抹掉原态 */
             ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
             bad_idx++;
         }
@@ -850,7 +933,8 @@ int bbt_scan_factory(ftl_allocator_t *alloc) {
 ```
 元数据区坏块：
   → 元数据走固定块池（Anchor/Checkpoint/BBT/Journal/Wear 见 §3.2）——
-     池内块由 Free Pool 提供并带 RESERVED 位，坏块由分配器自然跳过
+     块按几何地址寻址、BST 态为 NONE，坏块由池内轮转自然跳过；
+     只有 **L2P 日志块**走动态分配（从 Free Pool 取，态为 LOG）
   → 无独立 Reserved 块、无 bbt_replace_metadata_block
 
 数据区坏块：
@@ -1054,18 +1138,22 @@ ONFI Multi-Plane 命令中每个 Plane 有独立的行地址，
 
 ```mermaid
 stateDiagram-v2
-    [*] --> FREE: 开机 / 擦除归还
+    [*] --> NONE: 固定元数据区 / OP / Spare 池（无归属，不参与分配）
+    [*] --> FREE: 开机建池 / 擦除归还
     FREE --> OPEN: allocator_alloc_pair\n（置 OPEN + TEMP + sb_id）
     OPEN --> CLOSED: 64 页写满关闭
     CLOSED --> FREE: GC 搬移有效页 → 擦除 → 归还（MIG_POST_FREE）
-    CLOSED --> FREE: WL 搬移冷块 → 退役归还（MIG_POST_RETIRE）
+    CLOSED --> RETIRED: WL/慢死预测搬移冷块（MIG_POST_RETIRE，**出池**不入池）
+    FREE --> LOG: allocator_alloc_reserved_block（L2P 日志块，独占整块）
+    LOG --> FREE: 活 region 归零 → 擦块 + 归还（metadata_dir_reclaim）
     FREE --> BAD: 出厂扫描 / 探测判坏
     OPEN --> BAD: PROGRAM 失败
     CLOSED --> BAD: 运行时坏块 / 读不可恢复
     BAD --> [*]
 ```
 
-（块级状态机；Super Block 粒度的搬移细节见下方流程图与 §4.5。）
+（块级状态机；Super Block 粒度的搬移细节见下方流程图与 §4.5。
+⚠ 七态互斥枚举见 §3.7.1；`RETIRED` 是**旁路终态**——仍可读、不再分配、不标坏。）
 
 ```
                 ┌────────────────────────┐
@@ -1276,9 +1364,10 @@ GC 搬移（读 → 写新位置 → 更新 L2P → 擦除旧 Block）不是原�
         │    journal_kick 会冲刷半满页 ⇒ 该屏障**必然可满足**（不会死等到提交侧上限）
         ▼
    phase = MIG_ERASE ──► 逐 plane 提交擦除（ftl_async_erase_block）
-        │  完成：成功 erase_count++ / wear_mark_dirty / 清 valid / allocator_free_block
-        │        失败 -> bbt_mark_bad
-        │        post == MIG_POST_RETIRE（WL / 慢死预测）额外 rr_retire_block
+        │  完成：成功 erase_count++ / wear_mark_dirty / 清 valid，再按 post 二选一
+        │        post == MIG_POST_FREE   -> allocator_free_block（入池）
+        │        post == MIG_POST_RETIRE -> allocator_remove_from_free（出池）+ rr_retire_block
+        │        失败 -> bbt_mark_bad（该函数同时把块驱逐出池）
         │        两 plane 擦完 -> MIG_DONE
         ▼
    phase = MIG_DONE（**纯计算**）──► allocator_remove_closed_sb
@@ -1440,7 +1529,7 @@ flowchart TD
     VICT -- 无 --> NONE
     VICT -- 有 --> MIG["mig_start(MIG_KIND_WL,<br/>MIG_POST_RETIRE)"]
     MIG --> SAME["同一台 migrate job（§4.5）<br/>READ → WRITE → FLUSH_JRN → ERASE → DONE"]
-    SAME --> RETIRE["归还 Free Pool + 退役 RESERVED<br/>+ rr_retire_block()"]
+    SAME --> RETIRE["出池（不入池）+ 置 RETIRED<br/>+ rr_retire_block()"]
 ```
 
 #### 4.8.3 受害块选择算法
@@ -1471,7 +1560,7 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim) {
 
     for (uint16_t i = 0; i < ftl->alloc.closed_sb_count; i++) {
         const super_block_t *sb = &ftl->alloc.closed_sb_list[i];
-        if (sb->valid != 0U) continue;              /* 跳过仍为 Open 的 SB */
+        if (sb->is_open) continue;                  /* 跳过仍为 Open 的 SB */
 
         /* 该 SB 平均擦除次数（按 BST 全局块号索引；退化单 plane 按实际 plane 数取平均）*/
         uint32_t sb_ec = /* sum(blocks[ftl_gblock(p, sb->plane_blocks[p])].erase_count) / n */;
@@ -1527,13 +1616,14 @@ int wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim) {
 | 目的 | 回收**空间**（无效页多 ⇒ 腾出 Free Pool） | 拉平**磨损**（擦得少的冷块搬走一次） | 搬空**慢死块**后退役 |
 | victim 来源 | `gc_select_victim`（有效 CW **最少**，加权评分，§4.3） | `wl_select_victim`（擦除次数落在低擦除区 + 有效 CW **多** + read_count 高，§4.8.3） | `rr_predictive_scan`（ECC / read_count 趋势） |
 | `mig_kind_t` | `MIG_KIND_GC` | `MIG_KIND_WL` | `MIG_KIND_PREDICT` |
-| `mig_post_t` | `MIG_POST_FREE`（归还 Free Pool） | `MIG_POST_RETIRE`（归还 + **退役**） | `MIG_POST_RETIRE` |
+| `mig_post_t` | `MIG_POST_FREE`（归还 Free Pool） | `MIG_POST_RETIRE`（**出池** + 退役） | `MIG_POST_RETIRE` |
 | 入口 | `mig_begin_gc` | `mig_begin_wl` | `mig_begin_predict` |
 | 完成服务 | `g_op_service[FTL_OP_GC]` = `ftl_op_migrate` | `g_op_service[FTL_OP_WL]` = **同一个** `ftl_op_migrate` | 同（tag 由 `mig_op_tag` 按 `post` 现算） |
 | 搬移读 / 写 / 目标流 / Journal 条目 / 擦除归还 / 掉电窗口 | 见 §4.5 —— 三项**逐字相同** | | |
 
 ⇒ 读 WL 搬移代码**就是** §4.5 的图，只需把「选 victim」换成 §4.8.3 的冷块选择、
-把收尾的 `allocator_free_block` 之后补一次 `rr_retire_block`。
+把收尾的 `allocator_free_block`（入池）换成 `allocator_remove_from_free`（**出池**）+
+`rr_retire_block`——退役块**不得**先进池，理由见 §3.7 的"入池 / 出池唯一闸门"。
 
 #### 4.8.5 WL 在 ftl_service 中的调度
 
@@ -1609,7 +1699,7 @@ TLC（3000~5000 P/E，~400GB 容量）：
 | 有效页数 | 无——GC/WL 用 `sb->next_page` 近似 | 每 SB | 非真值，选 victim 不准 |
 | ECC 趋势 | `rr_ecc_track_t[]`（未分配） | 每 block | read recovery 空转 |
 | 温度 | 仅 `super_block_t.temperature` | 每 SB | block 关闭后 GC/WL 不读 |
-| 块状态 | 散落（free_blocks/sb->valid） | — | 块不知道自己状态 |
+| 块状态 | 散落（free_blocks/sb->is_open） | — | 块不知道自己状态 |
 
 **3 处块号碰撞 bug（已修复）**：
 1. `gc_erase_and_free` 用 per-plane 号索引 4096 容量数组 → 2048..4095 从未被写
@@ -1626,7 +1716,8 @@ typedef struct {
     uint32_t       last_pe_ts;    /* 4B  @4   最近擦除时间戳（WL 冷热避聚） */
     uint16_t       read_count;    /* 2B  @8   read disturb 计数 */
     uint16_t       valid_count;   /* 2B  @10  双 Plane 合计有效 **CW** 0..512 */
-    uint16_t       state;         /* 2B  @12  状态机+温度（bitmask 宏） */
+    uint8_t        state;         /* 1B  @12  状态机（ftl_block_state_t，互斥枚举） */
+    uint8_t        temp;          /* 1B  @13  温度流（0=HOT / 1=COLD，正交于状态） */
     uint16_t       sb_id;         /* 2B  @14  block→SB 反向索引 */
     rr_ecc_track_t rr;            /* 3B  @16  ECC 健康（last_ecc/rising/health） */
 } ftl_block_t;                    /* 19B → 20B（u32 对齐）→ 4096×20 = 80KB */
@@ -1643,21 +1734,32 @@ typedef struct {
 > bitmap，原因跨重启必丢，属纯 RAM 诊断残留）。`program_count` 在 Wear 表里的持久化槽
 > 同步撤出（条目 12B → 8B）。见 §4.9.8。
 
-**`state` 位域**（bitmask 宏 + 访问器，非 C 位域——嵌入式可移植）：
+**`state` 取值表**（互斥枚举 + 访问器；**2026-10-17 起不再是位图**，见 §3.7.1）：
 
-```
-bit0  BAD        bit1  OPEN      bit2  CLOSED    bit3  FREE
-bit4  RESERVED   bit5  TEMP_HOT  bit6  TEMP_COLD bit7-15 预留
+| 值 | 名称 | 含义 |
+|---|---|---|
+| 0 | `FTL_BLOCK_STATE_NONE` | 无归属：固定元数据区 / OP 池 / Spare 池 / BSS 未初始化 |
+| 1 | `FTL_BLOCK_STATE_FREE` | 在 Free Pool（已擦除） |
+| 2 | `FTL_BLOCK_STATE_OPEN` | 属于某 Open SB（正在写） |
+| 3 | `FTL_BLOCK_STATE_CLOSED` | 属于某 Closed SB（等待 GC） |
+| 4 | `FTL_BLOCK_STATE_LOG` | L2P 日志块（动态元数据块，本池独占） |
+| 5 | `FTL_BLOCK_STATE_RETIRED` | 退役：不再分配新数据、不标坏、仍可读 |
+| 6 | `FTL_BLOCK_STATE_BAD` | 坏块（终态） |
 
-（bit7/bit8 曾被 PRE_COND / EMERGENCY 分级位占用，现已删除——从无读者，见 §3.7）
-```
+温度是**正交维度**，不在本字段：单列 `temp`（0=HOT / 1=COLD，值域同 `FTL_TEMP_*`）。
+
+> 演进：原为 7 位软件位图（`bit0 BAD / bit1 OPEN / bit2 CLOSED / bit3 FREE /
+> bit4 RESERVED / bit5 TEMP_HOT / bit6 TEMP_COLD`）。拍平理由见 §3.7.1 ——
+> `RESERVED` 一位两义（L2P 日志块 + 退役块）、`BAD|RESERVED` 可表达无断言拦、
+> 14 个转换点 7 种手写掩码（漏位编译期无声）。
+> 更早的 `bit7/bit8` 曾被 PRE_COND / EMERGENCY 分级位占用，早已删除（从无读者）。
 
 ### 4.9.3 与消费级/企业级对比
 
 | 维度 | 本方案 | 消费级 DRAM-less（Phison/SMI/Realtek） | 企业级（Samsung/Solidigm） |
 |------|--------|--------------------------------------|---------------------------|
 | 粒度 | 物理 Block 全局号索引 | 物理 Block BIT | 物理 Block Descriptor |
-| 状态机 | BAD/OPEN/CLOSED/FREE + 分级 | FREE/OPEN/CLOSED/BAD | 多级 + 迁移代数 |
+| 状态机 | NONE/FREE/OPEN/CLOSED/LOG/RETIRED/BAD（互斥枚举）+ 正交温度字段 | FREE/OPEN/CLOSED/BAD | 多级 + 迁移代数 |
 | VPC | `valid_count` 计数（**无位图**，逐 CW 现查 META+L2P） | VPC + bitmap（可选） | VPC + bitmap |
 | 温度 | block 级 HOT/COLD 位 | block 级温区位 | 多级温度流 |
 | read disturb | `read_count` 2B（预铺） | 部分有 | 有（读计数触发搬移） |
@@ -1725,7 +1827,7 @@ bit4  RESERVED   bit5  TEMP_HOT  bit6  TEMP_COLD bit7-15 预留
 flash I/O（出处 `cw_level_mapping_design.md §八`：DFTL / arXiv 1504.01666 活页识别三法 /
 LeaFTL / VPFTL）。本仓的「OOB」= 页内 **META**（每 CW 头 4B 存本 CW 扇区 LBA，
 `include/fc/fc.h`）：GC/WL 迁移逐页读回 → 反查 L2P → 仍指向本物理位置则该 CW 有效；
-整块空洞由搬移 job 快路径（`victim.valid == 0` ⇒ 直接 `MIG_ERASE`）覆盖，免 NAND 读。
+整块空洞由搬移 job 快路径（`!victim.is_open` ⇒ 直接 `MIG_ERASE`）覆盖，免 NAND 读。
 `valid_count`（块级聚合，单位 CW 0..512）仍是真值、与 L2P 逐条同步，只服务 GC/WL 选 victim。
 
 **策略选取（位图形态三选一）**：

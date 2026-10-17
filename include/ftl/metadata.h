@@ -722,7 +722,7 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
 /*
  * metadata_dir_reclaim - 回收无活 region 的 L2P 日志块
  *
- * 遍历全部 gblock：l2p_live == 0、非当前日志块、且 BST 带 RESERVED 位（= 确实是
+ * 遍历全部 gblock：l2p_live == 0、非当前日志块、且 BST 态为 LOG（= 确实是
  * 本池独占的日志块，而非恰好活计数为 0 的用户块）⇒ 擦块 + allocator_free_reserved_block。
  *
  * 没有它会在稳态泄漏：每填满一块就永久占一块。
