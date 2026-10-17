@@ -11,11 +11,12 @@
  *
  *   Clean Start（干净关机）
  *     — 有 Checkpoint，Journal 已全部回填到 L2P Table
- *     — 只需加载 Checkpoint header，不需要回放 Journal
+ *     — 块账快照有效 ⇒ 加载块账 + probe 池块 + 建池（不跑 F2）；否则 carve + F2
  *
  *   Power Failure Recovery（异常掉电）
  *     — 有 Checkpoint，Journal 有未回放的条目（sequence > cp_seq）
- *     — ① 加载 Checkpoint ② Journal 回放 ③ 写指针扫描恢复
+ *     — ① 块账快照恢复（若有效）② Journal 回放（映射 + valid 增量）③ F4
+ *       ④ probe + build_pools；任一步不一致 ⇒ reset + carve + F2
  *
  * 设计文档参考：§8.3 启动恢复完整流程
  */
@@ -53,7 +54,45 @@ typedef struct
     ftl_boot_type_t boot_type;       /* 启动类型 */
     uint32_t        cp_sequence;     /* Checkpoint sequence（0 = 无） */
     uint32_t        journal_entries; /* 回放的 Journal entry 数 */
+    uint8_t         blocks_restored; /* 1 = 块账来自 块账快照；0 = F2 兜底 */
 } ftl_boot_result_t;
+
+/* ── 块账快照恢复（Checkpoint 的 16-bit/块 word）──
+ * 格式编码在 checkpoint.h（记录格式的 owner）；恢复编排在本模块（开机恢复的 owner）。
+ * 统计仅用于观测日志。 */
+typedef struct
+{
+    uint16_t closed_blocks; /* 恢复出的 Closed 条目数（退化单 plane 计） */
+    uint16_t log_blocks;    /* 恢复出的活 LOG 块数 */
+    uint16_t free_blocks;   /* 探测中转回 Free 的块数 */
+    uint16_t op_blocks;     /* OP 池块数（全 plane 合计） */
+    uint16_t spare_blocks;  /* Spare 池块数（全 plane 合计） */
+    uint16_t anomalies;     /* 探测发现的「池块却有数据」块数 */
+    uint32_t valid_cw;      /* 探测补算出的有效 CW 数 */
+} ftl_block_restore_stats_t;
+
+bool ftl_recovery_restore_blocks(struct ftl_context *ftl, uint16_t words[FTL_BLOCK_TOTAL]);
+void ftl_recovery_probe_blocks(struct ftl_context *ftl, uint16_t words[FTL_BLOCK_TOTAL], ftl_block_restore_stats_t *stats);
+bool ftl_recovery_build_pools(struct ftl_context *ftl, const uint16_t words[FTL_BLOCK_TOTAL]);
+void ftl_recovery_reset_blocks(struct ftl_context *ftl);
+
+/* ── F2 / 块账探测共用的块原语 ──
+ * 三者必须同源：F2 全盘重建与 块账快照 异常块补算用的是同一套判空/写指针/逐 CW 反查。 */
+bool    ftl_recovery_page_is_blank(nand_pba_t pba, uint8_t *raw_buf);
+uint8_t ftl_recovery_scan_write_pointer(const struct ftl_context *ftl, uint8_t plane, uint16_t block, uint8_t *raw_buf);
+void    ftl_recovery_close_block(struct ftl_context  *ftl,
+                                 uint8_t              plane,
+                                 uint16_t             block,
+                                 uint8_t              pages_written,
+                                 uint8_t              temperature,
+                                 ftl_rebuild_stats_t *stats);
+
+/*
+ * ftl_boot_carve_pools - 按出厂/几何顺序切分 Spare/OP/Free 池（无快照 或 快照失败时用）
+ *
+ * ⚠ 从 main.c 移入：块账快照恢复必须先于 carve，否则池条目会重复。
+ */
+ftl_status_t ftl_boot_carve_pools(struct ftl_context *ftl);
 
 /* ── 接口 ── */
 
@@ -122,35 +161,40 @@ ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_page_re
  *   ① Cache 全 INVALID（首次 miss 时按需加载）
  *   ② Journal RAM 写态恢复（**关键**：环形块并没被擦，必须按 NAND 实际内容把
  *      写指针/序号接回 cp_journal_sequence，见 journal_resume）
- *   ③ F2 全盘重建 closed SB 列表
- *   ④ 写指针恢复（内存值）
+ *   ③ 块账快照有效 ⇒ 恢复块账 + 池 + Closed 列表（probe 池块）；否则 carve + F2
+ *   ④ Journal RAM 写态恢复（journal_resume，水位 = cp.journal_sequence）
  *
- * @param ftl  FTL 上下文
- * @param cp_journal_sequence  Checkpoint 的 Journal 截断水位（= 下一个待分配序号）
- * @param ring  Journal 环形块池快照（journal_scan_latest 的结果）
+ * @param ftl          FTL 上下文
+ * @param cp           最新 Checkpoint Header
+ * @param blocks_valid    块账快照 是否已通过 checkpoint_load_block_table（1/0）
+ * @param blocks_restored 输出：1 = 走 快照路径，0 = F2 兜底
+ * @param ring         Journal 环形块池快照（journal_scan_latest 的结果）
  * @return FTL_OK 成功，FTL_ERROR 失败
  */
-ftl_status_t ftl_boot_clean_start(struct ftl_context       *ftl,
-                                  uint32_t                  cp_journal_sequence,
-                                  const journal_page_ref_t *ring);
+ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
+                                  const l2p_checkpoint_header_t *cp,
+                                  uint8_t                        blocks_valid,
+                                  uint8_t                       *blocks_restored,
+                                  const journal_page_ref_t      *ring);
 
 /*
  * ftl_boot_power_failure - 异常掉电恢复
  *
  * Journal > Checkpoint，需回放未写到 L2P Table 的条目：
  *   ① Cache 全 INVALID
- *   ② Journal 回放 → 重建 L2P Cache
- *   ③ Checkpoint region_bitmap 应用（F4：局部加载 bitmap 区，见实现注释）
- *   ④ Allocator 重建 + 写指针扫描（异常掉电需扫描 NAND）
- *   ⑤ cp_sequence 记录
+ *   ② 块账快照恢复（有效时）→ ③ Journal 回放（映射 + valid 增量 + materialize）
+ *   ④ Checkpoint region_bitmap 应用（F4）
+ *   ⑤ 块账快照收尾（probe + build_pools）；失败 ⇒ reset + carve + F2
  *
- * @param ftl  FTL 上下文
- * @param cp   最新 Checkpoint header（含 region_bitmap，回放起点 = journal_sequence）
- * @param result 输出：回放的 entry 数
+ * @param ftl       FTL 上下文
+ * @param cp        最新 Checkpoint header（含 region_bitmap，回放起点 = journal_sequence）
+ * @param blocks_valid 块账快照 是否已通过 checkpoint_load_block_table（1/0）
+ * @param result    输出：回放的 entry 数 / 是否走 块账快照
  * @return FTL_OK 成功，FTL_ERROR 失败
  */
 ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
                                     const l2p_checkpoint_header_t *cp,
+                                    uint8_t                        blocks_valid,
                                     ftl_boot_result_t             *result);
 
 /*

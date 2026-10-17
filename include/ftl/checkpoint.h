@@ -65,6 +65,7 @@ typedef enum
     CP_ANCHOR_WRITE,  /* ② 逐页写 Anchor record */
     CP_HDR_PREP,      /* ③ 定位 Checkpoint 游标 + 取 Header 槽 */
     CP_HDR_ERASE,     /* ③ 换块擦（仅需换块时） */
+    CP_BLOCK_WRITE,   /* ③ 逐页写 块账快照（**必须早于 Header**：Header 是整条 record 的 commit） */
     CP_HDR_WRITE,     /* ③ 写 Header */
     CP_TRUNC_PREP,    /* ④ 水位判定：算 journal 预擦块 */
     CP_TRUNC_ERASE,   /* ④ 预擦 journal 环形最旧块 */
@@ -104,12 +105,15 @@ typedef struct
     uint8_t         anchor_need_erase; /* 1 = 写之前先擦 *anchor_base 所在块 */
     uint8_t         anchor_skip;       /* 1 = Directory 无变更 ⇒ 整段跳过 */
 
-    /* ③ Header（一条 record = 1 页） */
+    /* ③ Header + 块账快照（一条 record = 1 + CP_BLOCK_PAGES 页） */
     metadata_ring_t hdr_ring;
     nand_pba_t      hdr_addr;
-    uint16_t        hdr_idx;        /* 写这条 Header 用的池内槽位 */
-    uint32_t        hdr_seq;        /* ++ftl->cp.sequence（prepare 时取，与旧序一致） */
-    uint8_t         hdr_need_erase; /* 1 = 写之前先擦 *hdr_addr 所在块 */
+    uint16_t        hdr_idx;                      /* 写这条 Header 用的池内槽位 */
+    uint32_t        hdr_seq;                      /* ++ftl->cp.sequence（prepare 时取，与旧序一致） */
+    uint8_t         hdr_need_erase;               /* 1 = 写之前先擦 *hdr_addr 所在块 */
+    uint8_t         block_page;                   /* 下一页要写的 快照页（0..CP_BLOCK_PAGES） */
+    uint8_t         block_ok;                     /* 0 = 有 快照页写失败（整条作废，不写 Header） */
+    uint16_t        block_words[FTL_BLOCK_TOTAL]; /* 8KB：CP 起点快照 + boot 加载缓冲 */
 
     /* ④ Journal 截断 */
     nand_pba_t trunc_addr; /* 待预擦块基地址（plan 回传） */
@@ -124,6 +128,8 @@ typedef struct
  * 否则会读越界（源小）或漏拷（源大）。钉死它。 */
 _Static_assert(sizeof(((cp_job_t *)0)->region_bitmap) == sizeof(((l2p_cache_t *)0)->region_dirty_bitmap),
                "cp_job_t.region_bitmap 必须与 l2p_cache_t.region_dirty_bitmap 同尺寸");
+_Static_assert(sizeof(((cp_job_t *)0)->block_words) == (FTL_BLOCK_TOTAL * sizeof(uint16_t)),
+               "cp_job_t.block_words 必须恰好覆盖全部块");
 
 /* ── Checkpoint 池游标/序号（序 4：per-instance）──
  *
@@ -134,9 +140,11 @@ _Static_assert(sizeof(((cp_job_t *)0)->region_bitmap) == sizeof(((l2p_cache_t *)
  * ⚠ 与 journal / Anchor / BBT 的 sequence **互不相干**：本池自己的单调序号。 */
 typedef struct
 {
-    uint32_t sequence;     /* 本池自己的单调序号（最新有效 record） */
-    uint16_t write_idx;    /* 池内下一个待写槽（环形） */
-    uint8_t  cursor_valid; /* 游标是否已建立；未建立则首次写入先扫池定位 */
+    uint32_t sequence;              /* 本池自己的单调序号（最新有效 record） */
+    uint32_t last_journal_sequence; /* 上一次成功 CP 的 journal 水位（T3/空转判据） */
+    uint16_t write_idx;             /* 池内下一个待写槽（环形） */
+    uint8_t  cursor_valid;          /* 游标是否已建立；未建立则首次写入先扫池定位 */
+    uint8_t  advance_next;          /* 1 = 本 session 首次 CP 先跳过一槽（避开掉电残留的半编程槽） */
 } l2p_cp_state_t;
 
 /* ── Checkpoint 池位置与块数（CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS）
@@ -145,10 +153,72 @@ typedef struct
 /* ── Header Magic ── */
 #define CHECKPOINT_MAGIC (0xCCCCCCCCUL)
 
+/* ── 块账快照（per-block metadata snapshot）随 Checkpoint 一起落盘 ──
+ * 16-bit/块 × 4096 = 8 KB = 4 页；一条 record = Header(1) + 快照(4) = 5 页。
+ * ⚠ Header 是 commit 页：快照页必须**先写**，Header 最后写。
+ * 术语：公开资料称 per-block metadata / block descriptor；本仓统一叫「块账快照」，
+ * 不使用未经验证的缩写。 */
+/* 记录几何的唯一事实来源在 metadata.h（布局权威）；这里只给本模块的别名。 */
+#define CP_BLOCK_WORD_BYTES     FTL_CHECKPOINT_BLOCK_WORD_BYTES
+#define CP_BLOCK_WORDS_PER_PAGE FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE /* 1024 */
+#define CP_BLOCK_PAGES          FTL_CHECKPOINT_BLOCK_PAGES          /* 4 */
+#define CHECKPOINT_RECORD_PAGES FTL_CHECKPOINT_RECORD_PAGES         /* 5 */
+
+/* word 位域：valid_count 10 / state 3 / temp 1 / pool 2（小端、显式移位，H27） */
+#define CP_BLOCK_WORD_VALID_MASK  (0x03FFU)
+#define CP_BLOCK_WORD_STATE_SHIFT (10U)
+#define CP_BLOCK_WORD_STATE_MASK  (0x7U)
+#define CP_BLOCK_WORD_TEMP_SHIFT  (13U)
+#define CP_BLOCK_WORD_POOL_SHIFT  (14U)
+#define CP_BLOCK_WORD_POOL_MASK   (0x3U)
+#define CP_BLOCK_WORD_MAX_VALID   ((uint16_t)(PAGES_PER_BLOCK * CW_NUM))
+#define CP_BLOCK_POOL_NONE        (0U)
+#define CP_BLOCK_POOL_OP          (1U)
+#define CP_BLOCK_POOL_SPARE       (2U)
+
+_Static_assert((unsigned)CP_BLOCK_WORD_MAX_VALID <= (unsigned)CP_BLOCK_WORD_VALID_MASK,
+               "valid_count 超出 word 位宽");
+_Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)CP_BLOCK_WORD_STATE_MASK,
+               "state 超出 word 位宽");
+
+static inline uint16_t checkpoint_block_word_pack(uint16_t valid, uint8_t state, uint8_t temp, uint8_t pool)
+{
+    return (uint16_t)((valid & CP_BLOCK_WORD_VALID_MASK) |
+                      ((uint16_t)(state & CP_BLOCK_WORD_STATE_MASK) << CP_BLOCK_WORD_STATE_SHIFT) |
+                      ((uint16_t)(temp & 0x1U) << CP_BLOCK_WORD_TEMP_SHIFT) |
+                      ((uint16_t)(pool & CP_BLOCK_WORD_POOL_MASK) << CP_BLOCK_WORD_POOL_SHIFT));
+}
+
+static inline uint16_t checkpoint_block_word_valid(uint16_t word)
+{
+    return (uint16_t)(word & CP_BLOCK_WORD_VALID_MASK);
+}
+
+static inline uint8_t checkpoint_block_word_state(uint16_t word)
+{
+    return (uint8_t)((word >> CP_BLOCK_WORD_STATE_SHIFT) & CP_BLOCK_WORD_STATE_MASK);
+}
+
+static inline uint8_t checkpoint_block_word_temp(uint16_t word)
+{
+    return (uint8_t)((word >> CP_BLOCK_WORD_TEMP_SHIFT) & 0x1U);
+}
+
+static inline uint8_t checkpoint_block_word_pool(uint16_t word)
+{
+    return (uint8_t)((word >> CP_BLOCK_WORD_POOL_SHIFT) & CP_BLOCK_WORD_POOL_MASK);
+}
+
+/* 把当前 BST + OP/Spare 池归属编码成块账快照（Checkpoint 起点调用）。 */
+void checkpoint_block_snapshot(const ftl_allocator_t *alloc, uint16_t words[FTL_BLOCK_TOTAL]);
+
+/* T3 定时的最小 journal 增量：5 页/CP 比旧 1 页/CP 磨损约 5×，
+ * 加此门后轻载下不会每个定时拍都写一条 record（数值为本仓经验值）。 */
+#define CP_T3_MIN_JOURNAL_DELTA (64U)
+
 /* ── Header 格式：**恰好一页主区**（2048 B）──
- * 字段 70 字 = 6 个标量 + region_bitmap[64]；padding 补齐到 2048。
- * ⚠ padding 长度按 70 字算（旧版写 7 字 ⇒ sizeof 变成 2296 > 一页 ⇒ 写入被
- *   ftl_cmd_write_data 按链长静默截到 2048；"一条 record = 一页"名不副实）。
+ * 字段 75 字 = 11 个标量 + region_bitmap[64]；padding 补齐到 2048。
+ * ⚠ padding 长度必须按实际字算（历史上算错 ⇒ sizeof > 一页 ⇒ 写入被静默截断）。
  * 本页**无独立 CRC**：完整性由下层 FC 的 per-CW CRC + ECC 保证（ADR v0.62，
  * DRAM-less 主流做法，见 docs/design/ftl_revision_history.md）。*/
 typedef struct
@@ -160,7 +230,12 @@ typedef struct
     uint32_t region_bitmap[64];      /* 2048 bit，哪些 region 在 checkpoint 中 */
     uint32_t journal_sequence;       /* 截断到此 sequence 之前的 journal */
     uint32_t layout_version;         /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该记录作废）*/
-    uint8_t  padding[2048 - 70 * 4]; /* 补齐到一页主区（1768 B）*/
+    uint32_t block_word_count;       /* 块账 word 数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
+    uint32_t block_word_bytes;       /* 每 word 字节数（2；0 = 无快照）*/
+    uint32_t block_page_count;       /* 快照页数（CP_BLOCK_PAGES；0 = 无快照）*/
+    uint32_t block_crc32;            /* 快照 words 的 boot_crc32() */
+    uint32_t record_pages;           /* 1 + block_page_count */
+    uint8_t  padding[2048 - 75 * 4]; /* 补齐到一页主区（1748 B）*/
 } l2p_checkpoint_header_t;
 
 _Static_assert(sizeof(l2p_checkpoint_header_t) == PAGE_MAIN_SIZE, "Checkpoint Header 必须恰好一页主区");
@@ -205,11 +280,30 @@ void checkpoint_kick(struct ftl_context *ftl);
  * 池内轮转扫描（metadata_ring_locate）：magic 正确且 sequence 最大者胜。
  * 命中时同时恢复本实例的 sequence 计数与写游标（后续 Checkpoint job 从下一槽续写）。
  *
- * @param ftl  FTL 上下文（池路由取 ftl->topo；游标/序号写回 ftl->cp）
- * @param cp   输出：找到的 Header
+ * @param ftl            FTL 上下文（池路由取 ftl->topo；游标/序号写回 ftl->cp）
+ * @param cp             输出：找到的 Header
+ * @param out_record_idx 输出：该 Header 在池内的槽位（可为 NULL；块账快照 加载要用）
  * @return 0 找到，-1 无有效 Checkpoint
  */
-ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_header_t *cp);
+ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_header_t *cp, uint16_t *out_record_idx);
+
+/*
+ * checkpoint_load_block_table - 读取并校验一条 Checkpoint 记录的 块账快照
+ *
+ * 校验 header 的 bit_* 字段、逐页读入 words、再用 boot_crc32 验证。
+ * 失败（含 block_page_count == 0 的 initial CP）只表示「没有可用 块账快照」，
+ * **不得**据此触发格式化；块账改走 F2。
+ *
+ * @param ftl        FTL 上下文
+ * @param cp         最近 Header（checkpoint_find_latest 的输出）
+ * @param record_idx 该 Header 的池内槽位
+ * @param block_words  输出：FTL_BLOCK_TOTAL 个 16-bit word
+ * @return true = 已加载且 CRC 通过；false = 无快照 / 损坏
+ */
+bool checkpoint_load_block_table(struct ftl_context            *ftl,
+                                 const l2p_checkpoint_header_t *cp,
+                                 uint16_t                       record_idx,
+                                 uint16_t                       block_words[FTL_BLOCK_TOTAL]);
 
 /*
  * checkpoint_write_initial - 全量格式化后在池首槽写一条「空快照」标记

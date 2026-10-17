@@ -362,6 +362,29 @@ static inline uint16_t allocator_spare_count(const ftl_allocator_t *alloc, uint8
     return alloc->spare_count[plane];
 }
 
+/* 全 plane 合计（日志/观测用；维度变化时自动跟随，不写死 [0]/[1]）。 */
+static inline uint16_t allocator_op_total(const ftl_allocator_t *alloc)
+{
+    uint16_t n = 0U;
+
+    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    {
+        n = (uint16_t)(n + alloc->op_count[p]);
+    }
+    return n;
+}
+
+static inline uint16_t allocator_spare_total(const ftl_allocator_t *alloc)
+{
+    uint16_t n = 0U;
+
+    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    {
+        n = (uint16_t)(n + alloc->spare_count[p]);
+    }
+    return n;
+}
+
 static inline uint16_t allocator_closed_count(const ftl_allocator_t *alloc)
 {
     return alloc->closed_sb_count;

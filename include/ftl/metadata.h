@@ -69,7 +69,7 @@
  *   块号        分区        块数  来历
  *   0..15       L2P Table   16    ⌈2048 region ÷ 128 region/块⌉（哨兵层）
  *   16..47      Anchor      32    元数据池：每块 8 份 Directory，块满换块
- *   48..55      Checkpoint  8     元数据池：每块 64 份 Header
+ *   48..55      Checkpoint  8     元数据池：每块 12 份 record（Header + 块账快照 共 5 页）
  *   56..57      BBT         2     元数据池：每块 64 份坏块位图
  *   58..61      Journal     4     策略 = CW_NUM（CW 级 4× 映射流量）
  *   62          Wear        1     软状态单副本
@@ -128,9 +128,22 @@
 #define BBT_BITMAP_SIZE (BBT_MAX_BLOCKS / 8U)
 #define BBT_POOL_BLOCKS (2U) /* 策略：池内块数 */
 
-/* ── Checkpoint（L2P 快照头）池 ──
- * Header 恰好 2048 B = 一页主区 ⇒ **一条 record = 1 页**。*/
-#define CHECKPOINT_POOL_BLOCKS (8U) /* 策略：池内块数 */
+/* ── Checkpoint（L2P 快照 + 块账快照）池 ──
+ * 一条 record = Header（1 页）+ 块账快照（4 页，16-bit/块 × 4096 = 8KB）。
+ * ⚠ Header 是 commit 页：块账快照 必须**先写**，Header 最后写。 */
+#define FTL_CHECKPOINT_BLOCK_WORD_BYTES     (2U)
+#define FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE (PAGE_MAIN_SIZE / FTL_CHECKPOINT_BLOCK_WORD_BYTES)
+#define FTL_CHECKPOINT_BLOCK_PAGES          ((FTL_BLOCK_TOTAL + FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE - 1U) / FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE)
+#define FTL_CHECKPOINT_RECORD_PAGES         (1U + FTL_CHECKPOINT_BLOCK_PAGES)
+#define FTL_CHECKPOINT_RECORDS_PER_BLOCK    (PAGES_PER_BLOCK / FTL_CHECKPOINT_RECORD_PAGES)
+#define CHECKPOINT_POOL_BLOCKS              (8U) /* 策略：池内块数 */
+
+_Static_assert((FTL_CHECKPOINT_BLOCK_PAGES * FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE) == FTL_BLOCK_TOTAL,
+               "快照页数必须恰好覆盖全部块");
+_Static_assert(FTL_CHECKPOINT_RECORD_PAGES <= PAGES_PER_BLOCK,
+               "一条 Checkpoint record 必须装得进一个块");
+_Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
+               "每块至少容纳 2 条 record（块满轮转需要）");
 
 /* ── Journal（环形日志）──
  * 容量策略：Journal 必须容纳"两次 checkpoint 之间"的全部映射更新。
@@ -191,8 +204,10 @@
  *        用户数据、被 L2P 引用），新固件把它们当预留池 —— 而预留池的契约是"块已擦除"，
  *        消费点会直接把它们丢回 free pool，下次写即覆盖活数据。且 F2 重建会把这些"写过的
  *        块"也建成 Closed 条目 ⇒ 同一块同时进预留池与 closed 列表，账本错乱。⇒ 必须 +1，
- *        让首启自动全片格式化一次。 */
-#define FTL_MEDIA_LAYOUT_VERSION (5U)
+ *        让首启自动全片格式化一次。
+ * v6：Checkpoint record 从 1 页扩成 5 页（Header + 块账快照 4 页），Header 增加 bit_* 字段
+ *     ⇒ 记录格式与块账恢复方式都变了，必须 +1；老介质首启自动格式化一次。 */
+#define FTL_MEDIA_LAYOUT_VERSION (6U)
 
 /* ── 逻辑表字节（公式①：覆盖实体数 × 每实体字节）── */
 
@@ -206,7 +221,7 @@
 #define FTL_BBT_TABLE_BYTES (BBT_BITMAP_SIZE)
 
 /* Checkpoint：Header 1 页 */
-#define FTL_CHECKPOINT_TABLE_BYTES (PAGE_MAIN_SIZE)
+#define FTL_CHECKPOINT_TABLE_BYTES (FTL_CHECKPOINT_RECORD_PAGES * PAGE_MAIN_SIZE)
 
 /* Journal：块数 × 每块页数 × 页主区 */
 #define FTL_JOURNAL_TABLE_BYTES ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK * PAGE_MAIN_SIZE)
@@ -361,8 +376,9 @@ typedef struct
 {
     uint16_t first_block;      /* 池首块（per-plane 块号）*/
     uint16_t block_count;      /* 池块数（>= 2）*/
-    uint8_t  pages_per_record; /* 一条 record 占几页（须整除 PAGES_PER_BLOCK）*/
-    uint8_t  plane;            /* 池所在 plane */
+    uint8_t  pages_per_record; /* 一条 record 占几页（向下取整到每块 record 数；
+                                * 不能整除时块尾剩余页不用——metadata_ring 的地址公式已按 floor 处理）*/
+    uint8_t plane;             /* 池所在 plane */
 } metadata_ring_t;
 
 /* 每块容纳的 record 数 */

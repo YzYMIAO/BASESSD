@@ -221,9 +221,6 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     ftl_context_t    *ftl = &g_ftl[ch][ce][lun];
     ftl_allocator_t  *alloc;
     ftl_boot_result_t result;
-    uint16_t          gblock;
-    uint16_t          free_n = 0U;
-    uint16_t          good_n = 0U;
 
     if (ftl_init(ftl, (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun}) != FTL_OK)
     {
@@ -248,72 +245,30 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         }
     }
 
-    /* free pool 回填：遍历 BST 非坏块（bad 位已由 bbt_init 标好）。
-     * 固定/动态元数据块（L2P/anchor/BBT/checkpoint/journal）不进 free pool——
-     * 否则开机后可能被 allocator 当作空白块复用（覆盖未擦除的半满元数据块）。
-     * 用户数据 written 块仍回填（时序安全：boot_recovery 的 F2 重建会把它们拉出）。
-     *
-     * OP 10% + Spare Pool（容量不动语义，ftl_design §3.6/ADR-8）：
-     *   **按 plane 各扣一份**（写入/擦除/GC 的最小单元是 super block = 每 plane 一块，
-     *   预留必须两 plane 对称，否则一个 plane 见底时配不成对）。每 plane 先扣
-     *   FTL_SPARE_POOL_PER_PLANE=50 入 Spare Pool（坏块替换池，只出不进，耗尽后容量
-     *   自然下降），再按 FTL_OP_PERCENT=10% 扣入 OP 池（GC 缓冲池），其余才进 free pool。
-     *   L2P region 数 / FTL_LBA_MAX 不变 → 用户容量 512MiB 不变。
-     */
-    for (gblock = 0U; gblock < FTL_BLOCK_TOTAL; gblock++)
-    {
-        uint8_t plane = ftl_gblock_plane(gblock);
-
-        if (ftl_block_is_bad(&alloc->blocks[gblock]))
-        {
-            continue;
-        }
-        if (ftl_is_metadata_block(&ftl->metadata_dir, plane, ftl_gblock_block(gblock)))
-        {
-            continue;
-        }
-
-        good_n++;
-
-        /* ① 本 plane 的前 50 个好块入 Spare Pool（坏块替换池） */
-        if (allocator_spare_try_push(alloc, plane, gblock))
-        {
-            continue;
-        }
-
-        /* ② 本 plane 的前 10% 好块入 OP 池（GC 缓冲池） */
-        if (allocator_op_try_push(alloc, plane, gblock))
-        {
-            continue;
-        }
-
-        allocator_free_block(alloc, gblock);
-        free_n++;
-    }
-
-    /* 总好块数（spare + op + free）——wear_leveling 的「低擦除区占比」判据靠它定分母
-     * （见 allocator.h 声明语义）。allocator_init 置 0，此处按出厂扫描结果置定。 */
-    alloc->total_blocks = good_n;
-
-    LOGI("[FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u/%u spare=%u/%u\r\n",
-         ch,
-         ce,
-         lun,
-         (unsigned)free_n,
-         (unsigned)allocator_op_count(alloc, 0U),
-         (unsigned)allocator_op_count(alloc, 1U),
-         (unsigned)allocator_spare_count(alloc, 0U),
-         (unsigned)allocator_spare_count(alloc, 1U));
-
+    /* 池回填 / F2 / 块账快照恢复全部在 ftl_boot_recovery 内完成：
+     *   · 块账快照有效 ⇒ 直接按快照恢复 Free/OP/Spare（不再几何 carve）；
+     *   · 无快照 / 快照损坏 ⇒ carve + F2。
+     * ⚠ carve 必须先于 F2（F2 要把 written 块逐出 Free Pool），且**不能**在
+     *   块账快照恢复之前做——否则池条目会重复。 */
     if (ftl_boot_recovery(ftl, &result) != FTL_OK)
     {
         LOGE("[FTL ] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return -1;
     }
-    LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu\r\n",
+
+    LOGI("[FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
+         ch,
+         ce,
+         lun,
+         (unsigned)allocator_free_count(alloc),
+         (unsigned)allocator_op_total(alloc),
+         (unsigned)allocator_spare_total(alloc));
+
+    LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu bit=%s\r\n",
          (int)result.boot_type,
          (unsigned long)result.cp_sequence,
-         (unsigned long)result.journal_entries);
+         (unsigned long)result.journal_entries,
+         (result.blocks_restored != 0U) ? "restored" : "fallback");
 
     return 0;
 }

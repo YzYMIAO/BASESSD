@@ -92,7 +92,7 @@ typedef enum
 _Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)UINT8_MAX,
                "ftl_block_state_t 超出 uint8_t 值域");
 
-/* ── Block State Table 每行（BIT 条目）──
+/* ── Block State Table 每行（per-block 条目）──
  * 全字段常驻 SRAM（纯块级聚合，**无**位图表；有效性现查 META+L2P，见文件头）。
  * 只保留**有消费方**的字段——无读者的字段已删除（v0.56）：
  *   · program_count (2B) —— 写成功++，从无读者；连带 Wear 表的持久化槽一并删
@@ -304,6 +304,15 @@ static inline void ftl_block_clear_valid(ftl_block_t *b)
 {
     ASSERT(b != NULL);
     b->valid_count = 0U;
+}
+
+/* 直接设置 `valid_count`（块账快照恢复 / 重建用；日常增量仍走 add/sub）。
+ * ⚠ 上界是**单物理块**的 CW 数（PAGES_PER_BLOCK × CW_NUM），不是 SB 合计。 */
+static inline void ftl_block_set_valid(ftl_block_t *b, uint16_t valid)
+{
+    ASSERT(b != NULL);
+    ASSERT(valid <= (uint16_t)(PAGES_PER_BLOCK * CW_NUM));
+    b->valid_count = valid;
 }
 
 #endif /* FTL_BST_H */

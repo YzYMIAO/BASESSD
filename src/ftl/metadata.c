@@ -1878,12 +1878,12 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
  * 本表原先住在 src/ftl/ftl_config.c；布局归 metadata 之后随之下沉到本文件。
  */
 const ftl_partition_t g_ftl_partitions[] = {
-    { "L2P Table",    L2P_BASE_BLOCK,             L2P_BLOCKS,                       1U, FTL_PART_FIXED,        FTL_L2P_TABLE_BYTES},
-    {    "Anchor",     ANCHOR_BLOCK0,     ANCHOR_POOL_BLOCKS, ANCHOR_RECORDS_PER_BLOCK, FTL_PART_FIXED,     FTL_ANCHOR_TABLE_BYTES},
-    {"Checkpoint", CHECKPOINT_BLOCK0, CHECKPOINT_POOL_BLOCKS,          PAGES_PER_BLOCK, FTL_PART_FIXED, FTL_CHECKPOINT_TABLE_BYTES},
-    {       "BBT",         BBT_BLOCK,        BBT_POOL_BLOCKS,          PAGES_PER_BLOCK, FTL_PART_FIXED,        FTL_BBT_TABLE_BYTES},
-    {   "Journal",    JOURNAL_BLOCK0,    JOURNAL_BLOCK_COUNT,                       1U, FTL_PART_FIXED,    FTL_JOURNAL_TABLE_BYTES},
-    {      "Wear",        WEAR_BLOCK,            WEAR_BLOCKS,              WEAR_COPIES, FTL_PART_FIXED,       FTL_WEAR_TABLE_BYTES},
+    { "L2P Table",    L2P_BASE_BLOCK,             L2P_BLOCKS,                               1U, FTL_PART_FIXED,        FTL_L2P_TABLE_BYTES},
+    {    "Anchor",     ANCHOR_BLOCK0,     ANCHOR_POOL_BLOCKS,         ANCHOR_RECORDS_PER_BLOCK, FTL_PART_FIXED,     FTL_ANCHOR_TABLE_BYTES},
+    {"Checkpoint", CHECKPOINT_BLOCK0, CHECKPOINT_POOL_BLOCKS, FTL_CHECKPOINT_RECORDS_PER_BLOCK, FTL_PART_FIXED, FTL_CHECKPOINT_TABLE_BYTES},
+    {       "BBT",         BBT_BLOCK,        BBT_POOL_BLOCKS,                  PAGES_PER_BLOCK, FTL_PART_FIXED,        FTL_BBT_TABLE_BYTES},
+    {   "Journal",    JOURNAL_BLOCK0,    JOURNAL_BLOCK_COUNT,                               1U, FTL_PART_FIXED,    FTL_JOURNAL_TABLE_BYTES},
+    {      "Wear",        WEAR_BLOCK,            WEAR_BLOCKS,                      WEAR_COPIES, FTL_PART_FIXED,       FTL_WEAR_TABLE_BYTES},
 };
 
 /* 分区数（表长）。sizeof 派生 ⇒ 加/删分区项时自动跟随，无需手改。 */

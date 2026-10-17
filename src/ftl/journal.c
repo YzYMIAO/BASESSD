@@ -46,6 +46,7 @@
 #include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/completion_table.h"
+#include "ftl/ftl.h"
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
 #include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_JOURNAL */
@@ -103,6 +104,7 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
     journal->current_page     = 0U;
     journal->current_entry    = 0U;
     journal->sequence_counter = 1U;
+    journal->merge_floor      = 0U;
     journal->pre_erased_block = JOURNAL_BLOCK_NONE;
 
     memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
@@ -156,7 +158,9 @@ void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
     {
         entry = (l2p_journal_entry_t *)(journal->page_buf + JOURNAL_HEADER_SIZE +
                                         sizeof(l2p_journal_entry_t) * i);
-        if (entry->lba == (uint32_t)lba)
+        /* CP 边界之前的条目不得被合并：merge_floor 之后的覆盖写另起一条，
+         * 否则 sequence 仍是旧的、new_pba 却是新的，块账 delta 回放会漏记。 */
+        if ((entry->lba == (uint32_t)lba) && (entry->sequence >= journal->merge_floor))
         {
             entry->new_pba = new_pba; /* 保留首条 old_pba，更新到最新 new_pba */
             return;
@@ -756,6 +760,7 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
 
     journal->current_entry    = 0U;
     journal->sequence_counter = next;
+    journal->merge_floor      = 0U;
 
     /* 异步刷页 job 复位（阶段 2）：resume 是开机路径，此前不可能有在飞 job；
      * 但复位是廉价的，且能挡住「同一实例被重复 resume」的残留。 */
@@ -763,6 +768,62 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
     journal->job.need_erase = 0U;
 
     memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
+}
+
+/* journal 回放的 valid_count 增量（带守卫：越界/下溢置 *ok=0，不触发 ASSERT）。
+ * 只被 journal_replay 调用；materialize 已保证该块处于可记账状态。 */
+static void jrn_add_valid_guarded(ftl_context_t *ftl, nand_pba_t pba, uint8_t *ok)
+{
+    ASSERT(ftl != NULL);
+    ASSERT(ok != NULL);
+
+    const uint16_t g = ftl_pba_gblock(pba);
+
+    if (g >= FTL_BLOCK_TOTAL)
+    {
+        *ok = 0U;
+        return;
+    }
+
+    ftl_block_t *b = &ftl->alloc.blocks[g];
+
+    if (ftl_block_is_bad(b))
+    {
+        return;
+    }
+    if (b->valid_count >= (uint16_t)(PAGES_PER_BLOCK * CW_NUM))
+    {
+        *ok = 0U;
+        return;
+    }
+    ftl_block_add_valid(b);
+}
+
+static void jrn_sub_valid_guarded(ftl_context_t *ftl, nand_pba_t pba, uint8_t *ok)
+{
+    ASSERT(ftl != NULL);
+    ASSERT(ok != NULL);
+
+    const uint16_t g = ftl_pba_gblock(pba);
+
+    if (g >= FTL_BLOCK_TOTAL)
+    {
+        *ok = 0U;
+        return;
+    }
+
+    ftl_block_t *b = &ftl->alloc.blocks[g];
+
+    if (ftl_block_is_bad(b))
+    {
+        return;
+    }
+    if (b->valid_count == 0U)
+    {
+        *ok = 0U;
+        return;
+    }
+    ftl_block_sub_valid(b);
 }
 
 /* --------------------------------------------------------------------
@@ -783,10 +844,11 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
  *     · out_entries 在**应用循环里**逐页累加 entry_count（读失败的页不计）——
  *       不能用 journal 的 RAM 写指针反推：journal_resume 会清 current_entry。
  * -------------------------------------------------------------------- */
-ftl_status_t journal_replay(l2p_journal_t *journal,
-                            l2p_cache_t   *cache,
-                            uint32_t       cp_sequence,
-                            uint32_t      *out_entries)
+ftl_status_t journal_replay(l2p_journal_t              *journal,
+                            l2p_cache_t                *cache,
+                            uint32_t                    cp_sequence,
+                            uint32_t                   *out_entries,
+                            journal_replay_block_ctx_t *block_ctx)
 {
     /* JOURNAL_BLOCK_COUNT 块 × 每块 PAGES_PER_BLOCK 页 = 256 页；每项 8B → 2KB 栈上数组。 */
     journal_page_ref_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
@@ -844,14 +906,54 @@ ftl_status_t journal_replay(l2p_journal_t *journal,
                     uint16_t offset = JOURNAL_HEADER_SIZE + sizeof(l2p_journal_entry_t) * k;
 
                     uint32_t entry_lba;
+                    uint32_t entry_old_pba;
                     uint32_t entry_new_pba;
+                    uint32_t entry_seq;
                     memcpy(&entry_lba, page_data + offset + 0, 4);
+                    memcpy(&entry_old_pba, page_data + offset + 4, 4);
                     memcpy(&entry_new_pba, page_data + offset + 8, 4);
+                    memcpy(&entry_seq, page_data + offset + 12, 4);
                     /* ⚠ 开机回放路径 = 结构性同步：用**同步**逃生口（自旋泵），
                      * 不 park、不返 FTL_AGAIN——此时 superloop 尚未建立，没人推进 job。 */
                     (void)l2p_cache_write_sync(cache,
                                                (lba_t)entry_lba,
                                                (nand_pba_t)entry_new_pba);
+
+                    /* 块账增量：只对**快照之后**的条目记 valid_count。
+                     * 整页回放（含水位之前的条目）是幂等的映射写，不能整页记增量。
+                     * materialize 由开机恢复模块注入——journal 不反向依赖 pfr。 */
+                    if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && (entry_seq >= cp_sequence))
+                    {
+                        ftl_context_t   *ftl     = (ftl_context_t *)block_ctx->ctx;
+                        const nand_pba_t old_pba = (nand_pba_t)entry_old_pba;
+                        const nand_pba_t new_pba = (nand_pba_t)entry_new_pba;
+
+                        if (new_pba != old_pba)
+                        {
+                            if (new_pba != NAND_PBA_INVALID)
+                            {
+                                if (block_ctx->materialize(block_ctx->ctx, new_pba))
+                                {
+                                    jrn_add_valid_guarded(ftl, new_pba, &block_ctx->ok);
+                                }
+                                else
+                                {
+                                    block_ctx->ok = 0U;
+                                }
+                            }
+                            if (old_pba != NAND_PBA_INVALID)
+                            {
+                                if (block_ctx->materialize(block_ctx->ctx, old_pba))
+                                {
+                                    jrn_sub_valid_guarded(ftl, old_pba, &block_ctx->ok);
+                                }
+                                else
+                                {
+                                    block_ctx->ok = 0U;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

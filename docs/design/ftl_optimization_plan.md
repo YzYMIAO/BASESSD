@@ -336,9 +336,9 @@
 - **数字双重过期**：备注写「再省 96KB」；当前条目 20B × 4096 = **80KB**，且按 SB 索引（2048 条）
   只是 80KB → 40KB，省下的是**分辨率**而非重复。
 - **主流方向相反**：SPDK FTL（`reference/pages/spdk_ftl.html`）是**两级**——band 级记 sequence ID /
-  validity / write pointer / OPEN-FREE-CLOSE，底层仍是 **per-block BIT**（valid map = 「all the valid
+  validity / write pointer / OPEN-FREE-CLOSE，底层仍是 **per-block metadata**（valid map = 「all the valid
   physical addresses」的位掩码）。本仓 `super_block_t`（SB 级）+ `ftl_block_t`（block 级）**逐项对应**，
-  已对齐 ⇒ 改成按 SB 索引 = **删掉 block 级 BIT**，往主流反方向走。
+  已对齐 ⇒ 改成按 SB 索引 = **删掉 块级元数据表**，往主流反方向走。
 - **「删 `sb_id` 省 8KB」一并撤回**：删掉 2B 的 `sb_id` 后 `ftl_block_t` **仍是 20B**
   （4+4+2+2+2+3 = 17B → u32 对齐 20B）⇒ **省 0 字节**，与 v0.48「删死字段省 0 字节」是**同一个对齐
   陷阱**（见设计 §4.9.6）。且主流 DRAM 控制器**有** block→band 反查表。要真省字节只能砍**活**字段

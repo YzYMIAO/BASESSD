@@ -125,6 +125,12 @@ typedef struct
     uint8_t  current_entry;
     uint32_t sequence_counter;
 
+    /* CP 边界：sequence < merge_floor 的旧条目**不得**被同 LBA 原地合并。
+     * 否则 CP 后的覆盖写会复用 CP 前的 sequence 却带新的 new_pba ⇒
+     * 块账快照 增量回放按 sequence 过滤时漏记，之后覆盖写可能撞 valid_count 下溢断言。
+     * 0 = 不设门（开机/初始化）。 */
+    uint32_t merge_floor;
+
     /* P1-6：被 journal_truncate **预擦除**、等待 flush_page 回切复用的环形块号
      * （JOURNAL_BLOCK_NONE = 无）。记账目的 = 同一块每圈只擦一次：旧实现 truncate
      * 擦环形下一块、flush_page 回切又擦一次 ⇒ 双倍磨损（见 journal.c truncate 注释）。 */
@@ -203,7 +209,29 @@ void journal_flush_page(l2p_journal_t *journal);
  * out_entries（可为 NULL）回填**实际应用成功的条目数**（读失败的页不计入）。
  * ⚠ 该数**不能**由 journal 的 RAM 写指针反推：末尾 journal_resume 把落点放到最新页
  *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。 */
-ftl_status_t journal_replay(l2p_journal_t *journal, l2p_cache_t *cache, uint32_t cp_sequence, uint32_t *out_entries);
+/*
+ * journal_replay_block_ctx_t - 回放时的块账增量上下文（可选）
+ *
+ * materialize 由调用者注入（开机恢复模块）：把 PBA 所属块从池状态转成「可记账」
+ * 的 Closed 状态。journal 自己只做 valid_count 的 ±1（用 ctx 指向的 ftl_context_t），
+ * 不反向依赖 power_failure_recovery。
+ *
+ * 只对 sequence ≥ cp_sequence 的条目记账：new_pba +1、old_pba −1
+ * （TRIM 只减 old；old==new 跳过）。materialize 失败 / 越界 / 下溢 ⇒ ok=0，
+ * 调用者据此丢弃快照恢复结果并回退 F2。
+ */
+typedef struct
+{
+    bool (*materialize)(void *ctx, nand_pba_t pba);
+    void   *ctx; /* 调用者的 ftl_context_t* */
+    uint8_t ok;
+} journal_replay_block_ctx_t;
+
+ftl_status_t journal_replay(l2p_journal_t              *journal,
+                            l2p_cache_t                *cache,
+                            uint32_t                    cp_sequence,
+                            uint32_t                   *out_entries,
+                            journal_replay_block_ctx_t *block_ctx);
 /*
  * journal_truncate_plan - 截断 Journal 的**第一步**：水位校验 + 算出待预擦的块
  *
