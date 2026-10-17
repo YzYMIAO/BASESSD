@@ -675,7 +675,7 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
  * metadata_dir_commit_region 登记（写失败则位置不变，槽被跳过——已编程页不可复用）。
  *
  * 块满（或尚无日志块）⇒ 先 metadata_dir_reclaim 回收无活 region 的日志块，再从
- * Free Pool 取**整块**新日志块（allocator_alloc_reserved_block；Free Pool 保证
+ * Free Pool 取**整块**新日志块（allocator_alloc_log_block；Free Pool 保证
  * 已擦除，故无需擦）。**绝不回退到固定位置**：分配失败返回 NAND_PBA_INVALID，由上层重试。
  *
  * 日志块在哪个 plane 由 dir->cur_metadata_plane 轮转决定（写入目标与 region 归属
@@ -723,7 +723,7 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
  * metadata_dir_reclaim - 回收无活 region 的 L2P 日志块
  *
  * 遍历全部 gblock：l2p_live == 0、非当前日志块、且 BST 态为 LOG（= 确实是
- * 本池独占的日志块，而非恰好活计数为 0 的用户块）⇒ 擦块 + allocator_free_reserved_block。
+ * 本池独占的日志块，而非恰好活计数为 0 的用户块）⇒ 擦块 + allocator_free_log_block。
  *
  * 没有它会在稳态泄漏：每填满一块就永久占一块。
  *

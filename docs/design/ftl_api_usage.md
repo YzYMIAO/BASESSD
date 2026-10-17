@@ -129,7 +129,7 @@ typedef struct
 
 ```c
 ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo);
-ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
+void         allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
 ```
 
 > ⚠ **`ftl_init_params_t` 已删除（P2-5）**：大数组不再由 HIL 声明、经结构体传指针，而是
@@ -779,16 +779,16 @@ typedef struct {
 
 ```c
 /* 初始化 allocator（P2-5：形参 = 拓扑 + 自持表指针；第三参只绑定不复制） */
-ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
+void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
 
 /*
- * 分配一页的**两个 plane** PBA（CW 级映射 + Policy B：每 plane 独立块）。
+ * 分配一页的**各 plane** PBA（CW 级映射 + Policy B：每 plane 独立块）。
  * 从当前温度的 Open Super Block 顺序分配；Super Block 写满 → 关闭（→Closed），
- * 从 Free Pool 选新 Block。Free Pool 耗尽 → out[] 置 NAND_PBA_INVALID。
+ * 从 Free Pool 选新 Block。Free Pool 耗尽 → 返回 FTL_AGAIN（瞬态资源结果）。
  * （旧的单 plane `allocator_alloc` 已删，见 v0.56/v0.65。）
  */
-nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
-                                nand_pba_t out[PLANE_NUM]);
+ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
+                                  nand_pba_t out[PLANE_NUM]);
 
 /* GC 擦除后归还 block 到 Free Pool */
 void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);

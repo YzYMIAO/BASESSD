@@ -354,16 +354,20 @@ bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 
     if (found)
     {
-        /* 观测口：一次空闲 GC 突发最多打 FREE_POOL_TARGET/PLANE_NUM = 16 行
-         * （ftl_service_idle 循环调用），相对 GC 自身的 NAND 擦除/搬移耗时可忽略。 */
-        LOGI("[GC] victim p0=%u p1=%u vr=%u er=%u cp=%u yp=%u cost=%lu\r\n",
-             (unsigned)(*victim)->plane_blocks[0],
-             (unsigned)(*victim)->plane_blocks[1],
-             (unsigned)best_vr,
-             (unsigned)best_er,
-             (unsigned)best_cp,
-             (unsigned)best_yp,
-             (unsigned long)best_cost);
+        /* 观测口：一次空闲 GC 突发最多打 FREE_POOL_TARGET = 32 行
+         * （每 victim 每 plane 一行；ftl_service_idle 循环调用），
+         * 相对 GC 自身的 NAND 擦除/搬移耗时可忽略。 */
+        for (uint8_t p = 0U; p < PLANE_NUM; p++)
+        {
+            LOGI("[GC] victim plane%u=%u vr=%u er=%u cp=%u yp=%u cost=%lu\r\n",
+                 (unsigned)p,
+                 (unsigned)(*victim)->plane_blocks[p],
+                 (unsigned)best_vr,
+                 (unsigned)best_er,
+                 (unsigned)best_cp,
+                 (unsigned)best_yp,
+                 (unsigned long)best_cost);
+        }
     }
 
     return found;

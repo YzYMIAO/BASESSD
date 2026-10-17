@@ -1077,22 +1077,22 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 | 函数 | 转换的守卫 | 唯一调用者 / 保证 |
 |---|---|---|
 | `allocator_init` | `alloc/tables == NULL` | `ftl.c` 传 `&ftl->alloc` / `&ftl->tables` |
-| `allocator_select_plane_block_from_pool`(static) | `alloc/blocks == NULL`、`plane >= PLANE_NUM` | `allocator_open_sb` 循环变量；`allocator_alloc_reserved_block` 已判 |
+| `allocator_select_plane_block_from_pool`(static) | `alloc/blocks == NULL`、`plane >= PLANE_NUM` | `allocator_open_sb` 循环变量；`allocator_alloc_log_block` 的 `dir->cur_metadata_plane` |
 | `allocator_remove_closed_sb` | `alloc == NULL`、`closed_idx >= closed_sb_count` | `migrate.c` 找 victim 时**已把越界换成 `UINT16_MAX` 并拦掉** ⇒ 内层是死守卫（§十附判据 2） |
-| `allocator_close_open_sb` | `alloc == NULL` | `ftl.c` 传 `&ftl->alloc` |
-| `allocator_alloc_pair` | `alloc/out == NULL` | `ftl.c` 栈上 `new_pba`；`migrate.c` 的 `m->dst` |
-| `allocator_free_block` | `alloc == NULL` | `migrate.c` / `main.c` / `bbt.c` |
-| `allocator_free_reserved_block` | `alloc/blocks == NULL` | `metadata.c` 三处 |
-| `allocator_alloc_reserved_block` | 四条 | `metadata.c`（`plane` 来自 `dir->cur_metadata_plane`） |
-| `allocator_add_closed_sb` | `alloc/plane_blocks == NULL` | `power_failure_recovery.c` 局部数组 |
-| `allocator_remove_from_free` | `alloc == NULL` | `power_failure_recovery.c` |
+| `allocator_close_open_sb` | `alloc == NULL`、`temperature >= FTL_TEMP_NUM` | `ftl.c` 传 `&ftl->alloc` + 编译期 HOT/COLD 常量 |
+| `allocator_alloc_pair` | `alloc/out == NULL`、`temperature >= FTL_TEMP_NUM` | `ftl.c` 栈上 `new_pba`；`migrate.c` 的 `m->dst` + 编译期 HOT/COLD 常量 |
+| `allocator_free_block` | `alloc == NULL`；判据 9 四条：越界 / BAD / 重复归还（`state == FREE`）/ 池满 | `migrate.c` / `main.c` / `bbt.c` / `allocator.c` 内部 OP 补池 |
+| `allocator_free_log_block` | **无**（转调 `allocator_free_block`，不重复守卫） | `metadata.c` 三处 |
+| `allocator_alloc_log_block` | `out_gblock == NULL`（`alloc` / `blocks` / `plane` 由 `allocator_select_plane_block_from_pool` 统一校验） | `metadata.c`（`plane` 来自 `dir->cur_metadata_plane`） |
+| `allocator_add_closed_sb` | `alloc/plane_blocks == NULL`、`temperature >= FTL_TEMP_NUM` | `power_failure_recovery.c` 局部数组 + 默认温度常量 |
+| `allocator_remove_from_free` | `alloc == NULL` | 唯一出池闸门：`power_failure_recovery.c` / `bbt.c` / `migrate.c` + `allocator.c` 内部 open_sb / alloc_log |
 
 ### 保留项（**不要**"顺手"转成 ASSERT）
 
 | 位置 | 类别 | 依据 |
 |---|---|---|
-| `allocator_alloc_pair` 池空 → `NAND_PBA_INVALID` | 资源类结果 | 判据 3 |
-| `allocator_alloc_reserved_block` 池空 → `FTL_ERROR` | 资源类结果 | 判据 3（`test_ftl.c` 测的正是它） |
+| `allocator_alloc_pair` 池空 → `FTL_AGAIN` | 资源类结果 | 判据 3 |
+| `allocator_alloc_log_block` 池空 → `FTL_AGAIN` | 资源类结果 | 判据 3（`test_ftl.c` 测的正是它） |
 | `allocator_close_open_sb` 已关闭 → `FTL_ERROR` | **幂等早退** | §十三 `fc_command_release` 先例；调用者在 program 失败路径上会连续两次关同一 SB |
 | `allocator_remove_from_free` 不在池内 → no-op | 文档化契约 | **判据 4 明文举的就是这个例子** |
 
@@ -1101,14 +1101,14 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 `allocator_free_block` 两处，形态照抄 `fc.c` 的 `fc_build_request_data_planes`（§二十四）：
 `ASSERT` 先行 + 紧跟 `if (违反) 拒绝`，注释写明"`ASSERT` 在 `NDEBUG` 下被裁空"。
 
-1. **缺 `gblock < FTL_BLOCK_TOTAL` 上界**（与孪生兄弟 `allocator_free_reserved_block` 不对称）。
+1. **缺 `gblock < FTL_BLOCK_TOTAL` 上界**（与孪生兄弟 `allocator_free_log_block` 不对称）。
    `blocks[]` 之后**紧跟** `free_blocks[]`（同为 `ftl_tables_t` 成员）⇒ 越界索引**静默改坏
    Free Pool 数组** = 漏账（不崩、不报错、容量无声流失）⇒ `ASSERT` + release 拒绝（`LOGE` + `return`）。
 2. **`free_count` 满时静默丢弃**（与 v0.78 修掉的 Closed 列表静默丢弃同形态）：池满 = 某块被
    重复归还（double free），入池同样越界写 `free_blocks[]` ⇒ `ASSERT` + 既有 `if` 作 release
    拒绝，补 `LOGE` 把"静默"变成"可诊断"。
 
-⚠ 因为 `allocator_free_block` 现在自己把 `gblock` 范围，`allocator_free_reserved_block` 里的
+⚠ 因为 `allocator_free_block` 现在自己把 `gblock` 范围，`allocator_free_log_block` 里的
 同名检查**删掉不重复**（§十附判据 2：重复守卫收敛到共用漏斗）。
 
 ### 连带：删用例（§四）
@@ -1117,7 +1117,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 
 - `allocator_add_closed_sb(a, NULL, …)` 的哨兵返回
 - `allocator_remove_closed_sb(a, 越界)` 的 no-op
-- `allocator_alloc_reserved_block(a, PLANE_NUM / …, NULL)` 的拒绝
+- `allocator_alloc_log_block(a, PLANE_NUM / …, NULL)` 的拒绝
 
 **不动**：池空（判据 3）、幂等早退、`remove_from_free` 越界 no-op（判据 4）。
 

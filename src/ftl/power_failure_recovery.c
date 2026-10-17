@@ -498,10 +498,13 @@ static void close_full_block(ftl_context_t       *ftl,
                              uint8_t              temperature,
                              ftl_rebuild_stats_t *stats)
 {
-    /* 退化单 plane 条目：本 plane 记块号，另一 plane 记哨兵 */
+    /* 退化单 plane 条目：本 plane 记块号，其余 plane 记哨兵 */
     uint16_t plane_blocks[PLANE_NUM];
-    plane_blocks[0]     = FTL_BLOCK_NO_PLANE;
-    plane_blocks[1]     = FTL_BLOCK_NO_PLANE;
+
+    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    {
+        plane_blocks[p] = FTL_BLOCK_NO_PLANE;
+    }
     plane_blocks[plane] = block;
 
     ftl_allocator_t *alloc = &ftl->alloc;

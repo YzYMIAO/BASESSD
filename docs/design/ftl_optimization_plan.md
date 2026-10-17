@@ -162,7 +162,7 @@
   **只写擦除过的空页 + 每条 record 带单调 sequence + 池内块轮转（满则擦池内下一块）+
   读取取「整条校验通过」中 sequence 最大者**。共用原语 `metadata_ring_addr` /
   `metadata_ring_locate` / `metadata_ring_prepare_write`（`src/ftl/metadata.c`）。
-  - **L2P region**：日志块（从 Free Pool 取整块，`allocator_alloc_reserved_block`），
+  - **L2P region**：日志块（从 Free Pool 取整块，`allocator_alloc_log_block`），
     64 槽/块；`l2p_cache_flush_one` 每次 flush 无条件追加；旧块活 region 归零即归还。
   - **Anchor 池**：块 16-47（**N=32**，用户定），一条 8 页，256 槽。
   - **Checkpoint 池**：块 48-55（8 块，一条 1 页）；**写序重排**为
@@ -224,7 +224,7 @@
   （每实例共 `FTL_BLOCK_TOTAL` = 2048 × 2 plane = **4096 块** ⇒ 最坏近**半个 die**）。
   稳态随机写会自愈（region 反复改写 ⇒ 旧块自然归零），**碎片化负载不会**。
 - **方向**（照企业级「日志块回收」惯例）：
-  - **触发**：`allocator_alloc_reserved_block` 取不到块（或 free 水位低于阈值）且**无** `l2p_live == 0` 的块；
+  - **触发**：`allocator_alloc_log_block` 取不到块（或 free 水位低于阈值）且**无** `l2p_live == 0` 的块；
   - **victim**：`l2p_live` **最小**的块（排除当前写入块）；
   - **搬移**：把 victim 的活 region 逐个读回 → 写进**当前**日志块（`metadata_dir_append_slot` +
     `metadata_dir_commit_region`）⇒ Directory 就地更新；
@@ -238,7 +238,7 @@
 - **判据**：
   ① 造冷热混块（写满 32 块后只反复写其中 1 块所含的 region）⇒ 观察 victim 被选、活 region 被搬、
   块被归还（`[META] live_blks` 不单调上升）；
-  ② 长时随机写压测：`live_blks` **稳定不发散**，`allocator_alloc_reserved_block` 不返回失败。
+  ② 长时随机写压测：`live_blks` **稳定不发散**，`allocator_alloc_log_block` 不返回失败。
 - **依赖**：**P0-2 必须先上板验证**。压缩是建在环之上的**新机制**（victim 选择 + 搬移 + 重入切断），
   与环同时上板 ⇒ 失败无法定位是环错还是压缩错。计划 §三 已定「阶段 1 必须一次落地、不可拆」，
   正因为那次**拆掉了「固定位置」安全网**——在这张网验证之前不要再叠一层。

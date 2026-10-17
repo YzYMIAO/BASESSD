@@ -517,7 +517,7 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock)
         return FTL_ERROR;
     }
 
-    /* 驱逐出 Free Pool —— **必须先于置 BAD**：allocator_pool_remove 校验「在池 ⇒ state == FREE」
+    /* 驱逐出 Free Pool —— **必须先于置 BAD**：allocator_remove_from_free 校验「在池 ⇒ state == FREE」
      * （allocator.h 不变量②）。块若在池里，此刻它正是 FREE；先置 BAD 再出池就会命中断言。
      * 不驱逐则留下「在池却不是 FREE」的反向不一致（运行时标坏：擦除失败 / 预测性标坏）。
      * 不在池内 ⇒ no-op（allocator_remove_from_free 的文档化契约，判据 4）。

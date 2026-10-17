@@ -1034,7 +1034,7 @@ static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
      *   ⚠ 这里**不再**返回 FTL_ERROR：无 victim 可回收只是"暂时没空间"，下轮可能就有
      *   （另一条写完成归还了块），报 IO_ERROR 会让 host 写永久失败。 */
     nand_pba_t new_pba[PLANE_NUM];
-    if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) == NAND_PBA_INVALID)
+    if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) != FTL_OK)
     {
         (void)mig_begin_gc(ftl);
         return FTL_AGAIN;

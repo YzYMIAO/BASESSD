@@ -435,7 +435,7 @@ Anchor 池（固定块号 16..47，出厂好块，32 块）:
 
 元数据（**只有 L2P region 日志块**从 Free Pool 动态取；其余是固定块池）:
   ┌──────────────────────────────────────────────────┐
-  │  L2P Region 日志块 ── 动态（allocator_alloc_reserved_block）│
+  │  L2P Region 日志块 ── 动态（allocator_alloc_log_block）│
   │  Anchor            ── 固定池 16..47                │
   │  Checkpoint        ── 固定池 48..55                │
   │  BBT               ── 固定池 56..57                │
@@ -462,7 +462,7 @@ Anchor 池（固定块号 16..47，出厂好块，32 块）:
 >    8 倍。选 N=32 是**主控形态**（固定根 + 专用元数据块池），不是磨损优化的结果——
 >    磨损在本仓不是约束。
 > 只有 L2P region 日志块走真正的**动态分配**（从 Free Pool 取整块，
-> `allocator_alloc_reserved_block`），见 §3.4。出处：演进史见 `ftl_revision_history.md`（v0.50）。
+> `allocator_alloc_log_block`），见 §3.4。出处：演进史见 `ftl_revision_history.md`（v0.50）。
 
 #### Anchor Block
 
@@ -500,14 +500,14 @@ typedef struct {
 
 #### 元数据分配 API
 
-> ⚠ **只对 L2P region 日志块动态分配**：用 `allocator_alloc_reserved_block` 独占取整块；
+> ⚠ **只对 L2P region 日志块动态分配**：用 `allocator_alloc_log_block` 独占取整块；
 > Anchor/Checkpoint/BBT/Journal/Wear 都是**固定块池**（见 §3.2）。
 > （`allocator_alloc_metadata` / `allocator_select_block` / `paa_make` 均不存在，
 > 地址构造一律走 `*_from_addr` 系列。）
 
 ```c
 /* 独占分配一个整块给元数据（当前唯一调用者：L2P region 日志块）*/
-ftl_status_t allocator_alloc_reserved_block(ftl_allocator_t *alloc,
+ftl_status_t allocator_alloc_log_block(ftl_allocator_t *alloc,
                                             uint8_t plane,
                                             uint16_t *out_gblock);
 ```
@@ -753,7 +753,7 @@ if (ftl_gc_evaluate(ftl) != 0U) {                 /* 统一触发求值（预算
 | 动作 | 唯一入口 | 对 `state` 的作用 |
 |---|---|---|
 | 入池 | `allocator_free_block` | **置 `FREE`** |
-| 出池 | `allocator_pool_remove`（`allocator_remove_from_free` 是它的"容忍未命中"变体） | **只校验**（`ASSERT` 在池 ⇒ 必为 `FREE`），**不改状态** |
+| 出池 | `allocator_remove_from_free` | **只校验**（`ASSERT` 在池 ⇒ 必为 `FREE`），**不改状态** |
 
 ⇒ 不变量：**`state == FTL_BLOCK_STATE_FREE` ⟺ 该块在 Free Pool 里**。
 ⚠ 与 2026-10-17 前的写法不同：出池**不再清位**。状态是**互斥枚举**（见 §3.7.1），
@@ -783,7 +783,7 @@ migrate 退役→`RETIRED` / rebuild→`CLOSED` / `bbt_mark_bad`→`BAD`）。
   三级水位（T1/T4 建在 `free_count` 上）更早触发 GC。
 
 > 历史（2026-10-17 前）：`allocator_init` 无条件把**全部非坏块**置 `FREE`，而固定元数据块与
-> OP / Spare 块**从不入池** ⇒ `FREE` 是**谎言**；`allocator_pool_remove` 出池也不清 `FREE`。
+> OP / Spare 块**从不入池** ⇒ `FREE` 是**谎言**；`allocator_remove_from_free` 出池也不清 `FREE`。
 > 于是选块被迫"**一律以 Free Pool 数组为准**"，是一条防御性补丁。收口后该判据仍保留，
 > 但理由换成了**结构性**的：池数组为准 ⇒ 选中即 `pool_remove` 必命中，无重复选择死循环。
 
@@ -1043,8 +1043,8 @@ void bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
 
 ```c
 /* 真实签名 */
-nand_pba_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
-                                nand_pba_t out[PLANE_NUM]);                      /* 一对 plane */
+ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
+                                  nand_pba_t out[PLANE_NUM]);                    /* 各 plane 同页 */
 ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, uint8_t plane);       /* 按 plane 补 */
 /* 选块助手是**内部 static**，不是对外 API：
  *   static uint16_t allocator_select_plane_block_from_pool(const ftl_allocator_t *alloc,
@@ -1144,7 +1144,7 @@ stateDiagram-v2
     OPEN --> CLOSED: 64 页写满关闭
     CLOSED --> FREE: GC 搬移有效页 → 擦除 → 归还（MIG_POST_FREE）
     CLOSED --> RETIRED: WL/慢死预测搬移冷块（MIG_POST_RETIRE，**出池**不入池）
-    FREE --> LOG: allocator_alloc_reserved_block（L2P 日志块，独占整块）
+    FREE --> LOG: allocator_alloc_log_block（L2P 日志块，独占整块）
     LOG --> FREE: 活 region 归零 → 擦块 + 归还（metadata_dir_reclaim）
     FREE --> BAD: 出厂扫描 / 探测判坏
     OPEN --> BAD: PROGRAM 失败
@@ -3627,10 +3627,10 @@ typedef struct {
 } ftl_allocator_t;
 
 /* 真实接口 */
-ftl_status_t allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
-nand_pba_t   allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
+void         allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
+ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
                                   nand_pba_t out[PLANE_NUM]);
-ftl_status_t allocator_alloc_reserved_block(ftl_allocator_t *alloc, uint8_t plane,
+ftl_status_t allocator_alloc_log_block(ftl_allocator_t *alloc, uint8_t plane,
                                             uint16_t *out_gblock);
 /* ⚠ allocator_mark_bad 已删除——坏块统一走 bbt_mark_bad()；擦除计数在 BST */
 /* ⚠ 无 allocator_select_plane_block 公开 API——内部 static 助手
@@ -4228,7 +4228,7 @@ void main(void)
 
 | # | 问题 | 影响 | 状态 |
 |---|------|------|------|
-| 1 | Region 物理存储：固定 vs 动态元数据 block | 固定简单但磨损集中 | ⚠️ **部分解决**：Anchor/Checkpoint/BBT 落**固定块池**（32/8/2 块，池内环内轮转 + 池满擦旧块），只有 L2P region 日志块走真正的**动态分配**（从 Free Pool 取整块，`allocator_alloc_reserved_block`），见 §3.3 |
+| 1 | Region 物理存储：固定 vs 动态元数据 block | 固定简单但磨损集中 | ⚠️ **部分解决**：Anchor/Checkpoint/BBT 落**固定块池**（32/8/2 块，池内环内轮转 + 池满擦旧块），只有 L2P region 日志块走真正的**动态分配**（从 Free Pool 取整块，`allocator_alloc_log_block`），见 §3.3 |
 | 2 | Journal 可靠性：journal 本身怎么防掉电 | journal page program 到一半掉电 | ✅ 四层保护（见 §7.6） |
 | 3 | 启动加载策略：加载 checkpoint 全表还是按需 miss | 启动延迟 vs 首次访问延迟 | ✅ 已解决（见 §8.3）：干净关机按需 miss，异常掉电批量回放 |
 | 4 | Journal 回收时机 | 需要确保 L2P 表已同步 | ✅ 已解决（见 §7.5）：三级触发（水位线 85%/95% + 写入量 **1024** + 定时 10s） |

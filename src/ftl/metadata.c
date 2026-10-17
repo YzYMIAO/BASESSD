@@ -725,7 +725,7 @@ static ftl_status_t metadata_dir_reclaim_block(metadata_dir_cache_t *dir,
         return FTL_ERROR; /* 擦失败：留 LOG + 活计数 0，下次再试 */
     }
 
-    allocator_free_reserved_block(alloc, gblock);
+    allocator_free_log_block(alloc, gblock);
     return FTL_OK;
 }
 
@@ -868,11 +868,11 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
         /* plane 轮转：Policy B 下两 plane 各自独立选块，拿不到"同号双 plane 都空闲"
          * 的保证，故不跨 plane 配对；日志页落在哪个 plane 对读取无影响（位置由 pba 携带）*/
         plane = dir->cur_metadata_plane;
-        if (allocator_alloc_reserved_block(alloc, plane, &gblock) != FTL_OK)
+        if (allocator_alloc_log_block(alloc, plane, &gblock) != FTL_OK)
         {
             /* 本 plane 的 Free Pool 空 ⇒ 换另一 plane 再试（两池是独立的，一个空不代表全空）*/
             plane = (uint8_t)((plane + 1U) % PLANE_NUM);
-            if (allocator_alloc_reserved_block(alloc, plane, &gblock) != FTL_OK)
+            if (allocator_alloc_log_block(alloc, plane, &gblock) != FTL_OK)
             {
                 return NAND_PBA_INVALID; /* 两 plane 都空：**绝不**回退到固定位置 */
             }
@@ -1517,7 +1517,7 @@ void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *complet
             }
             else
             {
-                allocator_free_reserved_block(&ftl->alloc, j->reclaim_gblock);
+                allocator_free_log_block(&ftl->alloc, j->reclaim_gblock);
             }
 
             j->reclaim_gblock = UINT16_MAX;
@@ -1597,7 +1597,7 @@ void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *complet
             }
             else
             {
-                allocator_free_reserved_block(&ftl->alloc, j->victim);
+                allocator_free_log_block(&ftl->alloc, j->victim);
             }
 
             j->phase = (uint8_t)MD_JOB_DONE;

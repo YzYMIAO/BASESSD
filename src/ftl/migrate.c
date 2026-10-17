@@ -297,13 +297,17 @@ static bool mig_stall(ftl_context_t *ftl)
 
     if (m->stall_rounds >= MIG_SUBMIT_STALL_MAX)
     {
-        LOGW("[MIG] stall %u rounds — abort kind=%u phase=%u page=%u p0=%u p1=%u\r\n",
+        LOGW("[MIG] stall %u rounds — abort kind=%u phase=%u page=%u\r\n",
              (unsigned)m->stall_rounds,
              (unsigned)m->kind,
              (unsigned)m->phase,
-             (unsigned)m->page,
-             (unsigned)m->victim.plane_blocks[0],
-             (unsigned)m->victim.plane_blocks[1]);
+             (unsigned)m->page);
+        for (uint8_t p = 0U; p < PLANE_NUM; p++)
+        {
+            LOGW("[MIG]   victim plane%u block=%u\r\n",
+                 (unsigned)p,
+                 (unsigned)m->victim.plane_blocks[p]);
+        }
         m->aborted = 1U;
         m->phase   = (uint8_t)MIG_DONE;
         return true;
@@ -334,9 +338,8 @@ static void mig_next_page(ftl_context_t *ftl)
  *   功能：DONE——移除 closed 条目、记进展计数、复位 job。
  *   参数：ftl —— FTL 实例。
  *   返回：无。
- *   实现要点：定位 victim 在 closed_sb_list 的索引时**两 plane 都比对**（Policy B 下
- *             退化单 plane 条目的 plane_blocks[0] 是哨兵，只比 plane0 会命中另一条
- *             同哨兵条目——原 gc_erase_and_free 的同一坑）。
+ *   实现要点：定位 victim 在 closed_sb_list 的索引时**全部 plane 都比对**（Policy B 下
+ *             退化单 plane 条目的哨兵 plane 相同，只比其中一个会命中另一条同哨兵条目）。
  *             aborted ⇒ 不做任何列表/计数变更（victim 未被擦，仍有效）。
  * -------------------------------------------------------------------- */
 static void mig_finish(ftl_context_t *ftl)
@@ -353,8 +356,17 @@ static void mig_finish(ftl_context_t *ftl)
             {
                 const super_block_t *e = allocator_closed_at(&ftl->alloc, i);
 
-                if ((e->plane_blocks[0] == m->victim.plane_blocks[0]) &&
-                    (e->plane_blocks[1] == m->victim.plane_blocks[1]))
+                bool same = true;
+
+                for (uint8_t p = 0U; p < PLANE_NUM; p++)
+                {
+                    if (e->plane_blocks[p] != m->victim.plane_blocks[p])
+                    {
+                        same = false;
+                        break;
+                    }
+                }
+                if (same)
                 {
                     closed_idx = i;
                     break;
@@ -380,9 +392,12 @@ static void mig_finish(ftl_context_t *ftl)
         else if (m->kind == MIG_KIND_PREDICT)
         {
             /* 慢死预测命中：整 SB 已搬空并退役，属生命周期跃迁，留痕一次 */
-            LOGW("[FTL] predictive relocate retired p0=%u p1=%u\r\n",
-                 (unsigned)m->victim.plane_blocks[0],
-                 (unsigned)m->victim.plane_blocks[1]);
+            for (uint8_t p = 0U; p < PLANE_NUM; p++)
+            {
+                LOGW("[FTL] predictive relocate retired plane%u=%u\r\n",
+                     (unsigned)p,
+                     (unsigned)m->victim.plane_blocks[p]);
+            }
         }
     }
 
@@ -458,12 +473,16 @@ static void mig_step(ftl_context_t *ftl)
 
                     /* 成对分配目标页（Cold 流）。池耗尽 ⇒ 中止（不擦 victim，源数据仍在、
                      * L2P 未动，下轮 GC 再来）——与同步版"擦掉未搬页"的缺陷相反。 */
-                    if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_COLD, m->dst) == NAND_PBA_INVALID)
+                    if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_COLD, m->dst) != FTL_OK)
                     {
-                        LOGW("[MIG] no free block page=%u p0=%u p1=%u — abort, victim kept\r\n",
-                             (unsigned)m->page,
-                             (unsigned)m->victim.plane_blocks[0],
-                             (unsigned)m->victim.plane_blocks[1]);
+                        LOGW("[MIG] no free block page=%u — abort, victim kept\r\n",
+                             (unsigned)m->page);
+                        for (uint8_t vp = 0U; vp < PLANE_NUM; vp++)
+                        {
+                            LOGW("[MIG]   victim plane%u block=%u\r\n",
+                                 (unsigned)vp,
+                                 (unsigned)m->victim.plane_blocks[vp]);
+                        }
                         m->aborted = 1U;
                         m->phase   = (uint8_t)MIG_DONE;
                         break;

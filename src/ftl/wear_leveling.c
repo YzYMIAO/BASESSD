@@ -167,12 +167,14 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
             if ((valid > best.valid_cw) ||
                 ((valid == best.valid_cw) && (rc_sum > best.read_count)))
             {
-                best.found           = 1U;
-                best.avg_erase       = sb_ec;
-                best.valid_cw        = valid;
-                best.read_count      = rc_sum;
-                best.plane_blocks[0] = sb->plane_blocks[0];
-                best.plane_blocks[1] = sb->plane_blocks[1];
+                best.found      = 1U;
+                best.avg_erase  = sb_ec;
+                best.valid_cw   = valid;
+                best.read_count = rc_sum;
+                for (uint8_t p = 0U; p < PLANE_NUM; p++)
+                {
+                    best.plane_blocks[p] = sb->plane_blocks[p];
+                }
             }
         }
     }
