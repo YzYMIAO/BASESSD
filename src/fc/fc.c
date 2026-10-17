@@ -1234,7 +1234,7 @@ static fc_status_t fc_build_request_data_planes(const fc_t *controller, const fc
     }
     else
     {
-        /* Single-plane：地址取自 command->paa（ftl_cmd_setup_ppa 单 plane 路径直接写它，
+        /* Single-plane：地址取自 command->paa（pba_to_cmd 单 plane 路径直接写它，
          * GC/WL 的单 plane 写也走这条），desc 链只负责 CW 落位。
          * 不变式：本命令所有 desc 的 plane 位相同、行地址与 command->paa 一致——下面这条
          * ASSERT 把它显式化（有 desc 时链上地址 == command->paa）。

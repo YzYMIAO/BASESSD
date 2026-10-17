@@ -7,7 +7,6 @@
  *
  * 【desc 链组装】
  *   ① ftl_cmd_configure_descriptors(cmd, cw_bitmap) — 按形参 cw_bitmap 建整条 desc 链
- *   ② ftl_cmd_setup_ppa() — 单一 PBA → CH/CE/PAA + 整段位图 + 建链
  *   ③ ftl_cmd_setup_ppa_pair_cw() — 每 plane 各自的 PBA + 显式位图 → 建链（Policy B）
  *   ④ pba_to_cmd() — nand_pba_t 直填 + 整段位图 + 建链（遍历路径 / 同步页原语）
  *      ⑩ ftl_cmd_pba() — FC 命令 → PBA（④ 的逆，供 FTL 模块回读自己下发的地址）
@@ -15,12 +14,12 @@
  *   v23：①③ 共用同一套位图规则（不再"每 plane 连续 0..config.cw"）。config.cw 自此
  *   退出建链（仍被 FC 的 RAID stripe 读取，见 fc_command.h 的 config.cw 注释）。
  *   v27：位图是**字面位图**（bit 置 1 = 要访问该 CW，0 = 空集），v23~v26 的
- *   「0 = 本命令 plane 段内全部 CW」重载已取消。故 ②③④ 三个「整段访问」入口各自
+ *   「0 = 本命令 plane 段内全部 CW」重载已取消。故 ③④ 两个「整段访问」入口各自
  *   显式算 fc_command_plane_span_cw_bitmap(cmd)；只有 ① 接受调用者给的部分位图
  *   （0 会被 ftl_cmd_resolve_cw_bitmap 的 ASSERT 拦下）。规则唯一定义在
  *   ftl_cmd_resolve_cw_bitmap()（static，见 ftl_fc_interface.c）。
  *   v28：位图**不再存于命令结构体**（`fc_command_t.param.cw_bitmap` 已删）——它是建链的
- *   输入而非命令的属性，改作 ① 的**形参**。②③④ 算好后直接传参。
+ *   输入而非命令的属性，改作 ① 的**形参**。③④ 算好后直接传参。
  *
  * 【数据搬运】
  *   ⑤ ftl_cmd_write_data() — 用户数据写入 desc 链各 CW 的 USER 区
@@ -144,7 +143,7 @@ static inline uint8_t ftl_plane_write_op(uint8_t nplanes)
  * fc_command_configure_descriptor()，故链序 = plane-major、plane 内 CW 递增。
  * 想只读离散 CW（例如 plane1 的 CW0/CW2）：传 (1U<<4)|(1U<<6)。
  * 想整段访问：传 fc_command_plane_span_cw_bitmap(cmd)
- *   —— 或者干脆用 ftl_cmd_setup_ppa()，它替你算。
+ *   —— 或者干脆用 pba_to_cmd()，它替你算。
  *
  * v28：位图是本函数的**形参**，不再是命令结构体的字段——它是"这次建链要建哪些 CW"
  * 的输入，用完即弃，没有留在命令里被回读的理由（读者只有本函数）。
@@ -161,24 +160,9 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
 /* ── PBA helper（**自己算整段位图**并传给建链入口） ── */
 
 /*
- * ftl_cmd_setup_ppa - 单一 PBA → 拓扑 + PAA + 整段 desc 链
- *
- * 把 PBA 拆成拓扑（ch/ce/lun 填 cmd->config）与行地址（pba_to_paa 填 cmd->paa，v47
- * 在 FTL 侧一次转出，FC 层不再见 PBA），随后按「本命令 plane 段内全部 CW」建整条
- * desc 链（自己算 fc_command_plane_span_cw_bitmap 作实参，须在 paa 写好之后算）。
- *
- * 隐含「两 plane 同 block」——两 plane 独立分块（Policy B）请用 ftl_cmd_setup_ppa_pair_cw()。
- *
- * @param cmd  FC 命令（须已设 config.operation / multi_plane）
- * @param pba  目标物理块地址（必须合法：fc.c 拿 ch/ce/lun 当数组下标 → 越界即栈越界写）
- * @return FTL_OK / FTL_ERROR（建链失败）
- */
-ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
-
-/*
  * ftl_cmd_setup_ppa_pair_cw - 按**每 plane 各自**的 PBA + 显式位图建 desc 链（Policy B）
  *
- * 与 ftl_cmd_setup_ppa 的区别：后者把单一 PBA 转成 PAA 填进 command->paa 后展开到各 plane，
+ * 与 pba_to_cmd 的区别：后者把单一 PBA 转成 PAA 填进 command->paa 后展开到各 plane，
  * 隐含「两 plane 同 block」；本函数逐 plane 取各自 PBA 的行地址（转成 PAA）写进对应
  * plane 的 desc。CW 级映射（IU = 1 CW）专用入口：一条子操作常只覆盖一页里的**部分 CW**
  * （512B 扇区写、页尾残段、GC 只搬有效 CW），故位图由调用者显式给出。
@@ -206,8 +190,8 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
  *   ch/ce/lun           → cmd->config 位域
  *   block/plane/page/cw → cmd->paa（v47：pba_to_paa 在 FTL 侧一次转出）
  *
- * 与 ftl_cmd_setup_ppa(cmd, pba) 语义等价（都是「整段访问」）；本入口是同步页原语与
- * 遍历路径（GC / 元数据扫描 / Checkpoint）的公共底座。
+ * 本入口是同步页原语与遍历路径（GC / 元数据扫描 / Checkpoint）的公共底座，
+ * 语义是「整段访问」（单一 PBA，隐含「两 plane 同 block」；Policy B 用 _pair_cw 入口）。
  * 地址填好后**必须建 desc 链**——否则命令无 buffer，数据无从搬运，
  * fc_submit 也会被 fc_command_validate 以 desc_id == INVALID 拒绝。
  * 无数据操作（ERASE / RESET / META / COLUMN 等）由 ftl_cmd_configure_descriptors
@@ -222,10 +206,9 @@ static inline ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba)
     /* cmd 由调用者从 fc_command_alloc() 取且已判空（判据 2：层内模块头 → 前置条件）。 */
     ASSERT(cmd != NULL);
 
-    /* 边界不变量：同 ftl_cmd_setup_ppa —— 进 FC 的 ch/ce/lun 被 fc_poll_fill_queue 当
-     * suspended[][][] 下标直接用，越界即栈越界写。本入口**不经过** ftl_cmd_setup_ppa，
-     * 校验必须自带；否则 fc.c 那句「PBA 已过 pba_is_valid() 校验」在遍历路径
-     * （同步页原语 / GC / 元数据扫描 / Checkpoint）上仍是假命题。 */
+    /* 边界不变量：进 FC 的 ch/ce/lun 被 fc_poll_fill_queue 当 suspended[][][] 下标
+     * 直接用，越界即栈越界写。校验必须自带；否则 fc.c 那句「PBA 已过 pba_is_valid()
+     * 校验」在遍历路径（同步页原语 / GC / 元数据扫描 / Checkpoint）上仍是假命题。 */
     ASSERT(pba_is_valid(pba));
 
     cmd->config.ch  = (DWORD)pba_to_ch(pba);

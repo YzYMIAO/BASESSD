@@ -70,30 +70,25 @@
 /* ── 接口函数 ── */
 
 /*
- * gc_read_page_with_lba - 读取一页 NAND，返回用户数据 + 逐 CW 的扇区 LBA
+ * gc_read_page_with_lba - 读取一页 NAND，取回逐 CW 的扇区 LBA
  *
  * 内部管理 FC 命令生命周期，无需调用者关心 alloc/submit/release。
  * ⚠ 唯一调用者是**掉电重建**（ftl_rebuild_closed_sb_list 的逐页反查，开机结构性同步路径）。
  *   搬移读（GC / WL / 慢死预测）走异步路径：migrate.c 用 ftl_async_read_page
  *   建命令、在完成服务函数里调下面的 gc_decode_cw_lba 收尾——不经过本函数。
  *
+ * ⚠ 读整页只是为了取回页内 META；**不向调用者拷用户数据**。
  * ⚠ CW 级映射（IU = 1 CW）+ **DRAM-less approach ③**：本函数读**整页**（该 plane 的
  *   4 个 CW），从每个 CW 的**页内 META（= 本仓的 OOB 反向映射）**取回该 CW 自己的扇区
  *   LBA，写入 `cw_lba[CW_NUM]`；未写过的 CW 填 `FTL_LBA_INVALID`。调用者据此逐 CW
  *   **反查 L2P**（仍指向本物理 CW 才算有效）——这就是有效性的唯一真值来源，无常驻位图。
- * ⚠ 同时输出**页基址**（CW0 的扇区 LBA），供调用者构造写回页配置。页基址由**首个写过的
- *   CW** 反推（base = META(c_lo) − c_lo），**不是**直接取 CW0 的 META：CW 级写/搬移允许
- *   页内只编一个 CW 子集（`wr 2 2` 只落 plane0 的 CW2/CW3，GC 搬移也只编有效 CW），
- *   此时 CW0 是空位、META 为 0xFFFFFFFF。
  * ⚠ 全页无写过 CW ⇒ 返回 FTL_ERROR（无有效数据，调用者跳过）。
  *
- * @param pba            物理地址（**页基址**，cw 位为 0）
- * @param buffer         输出：整页用户数据 buffer（PAGE_MAIN_SIZE 字节，可为 NULL）
- * @param cw_lba         输出：逐 CW 的扇区 LBA，CW_NUM 项；未写过 = FTL_LBA_INVALID（不可为 NULL）
- * @param page_base_out  输出：页基址（CW0 的扇区 LBA）（可为 NULL）
+ * @param pba     物理地址（**页基址**，cw 位为 0）
+ * @param cw_lba  输出：逐 CW 的扇区 LBA，CW_NUM 项；未写过 = FTL_LBA_INVALID（不可为 NULL）
  * @return FTL_OK 成功；FTL_AGAIN 命令池空；FTL_ERROR 读失败 / 全页无写过 CW
  */
-ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba[CW_NUM], lba_t *page_base_out);
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, lba_t cw_lba[CW_NUM]);
 
 /*
  * gc_decode_cw_lba - 从**已完成的读命令**的 desc 链解出逐 CW 的扇区 LBA + 页基址

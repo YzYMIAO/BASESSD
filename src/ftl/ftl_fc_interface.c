@@ -19,7 +19,7 @@
  *
  * 文件结构：
  *   1. 建链            ftl_cmd_resolve_cw_bitmap（static）/ ftl_cmd_configure_descriptors
- *   2. 命令地址入口    ftl_cmd_setup_ppa / ftl_cmd_setup_ppa_pair_cw
+ *   2. 命令地址入口    ftl_cmd_setup_ppa_pair_cw（pba_to_cmd 在头文件内联）
  *   3. 数据搬运        ftl_cmd_write_data / ftl_cmd_read_data
  *   4. 同步提交等待    ftl_sync_submit_wait（ftl_op 机制的客户端）
  *   5. 页级同步原语    sync_page_prepare / sync_page_prepare_cw（static）
@@ -56,7 +56,7 @@
  *       现取消。名字叫 bitmap 就必须逐位字面：0 = 一个 CW 都不访问，那不是合法的
  *       数据命令（建链会产出空链 → desc_id = INVALID → 提交后**静默不搬任何数据**）。
  *       整段访问由调用者用 fc_command_plane_span_cw_bitmap() 显式算 —— 见
- *       pba_to_cmd / ftl_cmd_setup_ppa。
+ *       pba_to_cmd。
  *       ⚠ 这两条 ASSERT 就是「生产者忘填」的唯一拦网，且 ASSERT 在 release 下会被裁掉，
  *         故「忘了填」的代价是**编译期无声、release 下静默空操作**——新增建链调用点时
  *         必须显式给位图（§十三：建链入口的配置错误一律 ASSERT）。
@@ -103,7 +103,7 @@ static uint32_t ftl_cmd_resolve_cw_bitmap(uint32_t bitmap, uint8_t plane_first, 
  *       fc_command_plane_span_cw_bitmap() 算）。它必须落在本命令 plane 段内
  *       （越段 = 编程错误 → ASSERT，见 ftl_cmd_resolve_cw_bitmap）。
  *       离散读 plane1 的 CW0/CW2 即传 (1U << 4) | (1U << 6)。
- *       ⚠ 想「整段访问」不要传 0 —— 那是空集。用 ftl_cmd_setup_ppa(_pair)，
+ *       ⚠ 想「整段访问」不要传 0 —— 那是空集。用 pba_to_cmd / ftl_cmd_setup_ppa_pair_cw，
  *         或显式传 fc_command_plane_span_cw_bitmap(cmd)。
  *     - 行地址所有 plane 共用 cmd->paa（同页语义）；两 plane 不同块（Policy B）
  *       走 ftl_cmd_setup_ppa_pair_cw()，本函数不适用。
@@ -152,35 +152,6 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
 }
 
 /* ── 2. 命令地址入口（PBA → PAA + 拓扑）── */
-
-/* --------------------------------------------------------------------
- * ftl_cmd_setup_ppa
- *   功能：单 plane 入口——把 PBA 拆成拓扑（ch/ce/lun）与行地址（PAA），并建整段 desc 链。
- *   参数：cmd —— 命令（config.operation 须已设）；pba —— 目标物理块地址（须合法）。
- *   返回：FTL_OK / FTL_ERROR（建链失败）。
- *   实现要点：v47 PBA→PAA 在本层一次转出，FC 层不再见 PBA；位图取「本命令 plane 段内
- *             全部 CW」（整段语义），须在 paa 写好之后算。
- * -------------------------------------------------------------------- */
-ftl_status_t ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba)
-{
-    /* cmd 由调用者从 fc_command_alloc() 取且已判空（判据 2：层内模块头 → 前置条件）。 */
-    ASSERT(cmd != NULL);
-
-    /* 边界不变量：**进 FC 的 PBA 必须是合法 PBA**。
-     * fc.c 的 fc_poll_fill_queue 把 config.ch/ce/lun 当数组下标直接索引
-     * suspended[][][]（越界 = 栈越界写），它靠本断言保证值域——那里注释写的
-     * 「PBA 已过 pba_is_valid() 校验」指的就是这一行。
-     * 调用者给不出合法 PBA = 编程错误 ⇒ ASSERT（§十三），不返回码。 */
-    ASSERT(pba_is_valid(pba));
-
-    cmd->config.ch  = (DWORD)pba_to_ch(pba);
-    cmd->config.ce  = (DWORD)pba_to_ce(pba);
-    cmd->config.lun = (DWORD)pba_to_lun(pba);
-    cmd->paa        = pba_to_paa(pba); /* v47：PBA 在此转 PAA 一次，FC 层不再见 PBA */
-    /* v27/v28：位图是字面位图（0 = 空集），「整段访问」不再有隐式默认值。本入口语义
-     * 就是「整段」——自己算好当实参传，调用者不必管。须在 paa 写好之后算。 */
-    return ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));
-}
 
 /* --------------------------------------------------------------------
  * ftl_cmd_build_pair_chain

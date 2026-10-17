@@ -807,8 +807,8 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
 见 `include/ftl/ftl_fc_interface.h`：
 
 ```c
-/* PBA→CH/CE/PAA + descriptor 链配置 */
-int ftl_cmd_setup_ppa(fc_command_t *cmd, nand_pba_t pba);
+/* PBA→CH/CE/PAA + descriptor 链配置（static inline，include/ftl/ftl_fc_interface.h） */
+static inline ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba);
 
 /* 用户数据写入 desc buffer */
 int ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t length);
@@ -1116,7 +1116,7 @@ src/ftl/
                  │  │ GC / WL / Checkpoint                │   │
                  │  └────────────────────────────────────┘   │
                  └──────────────┬──────────────────────────┘
-                                │ ftl_cmd_setup_ppa / fc_submit
+                                │ pba_to_cmd / fc_submit
                  ┌──────────────▼────────────────────────────┐
                  │     FC 层          src/fc/                  │
                  │  fc_submit / fc_service / fc_poll_completion│

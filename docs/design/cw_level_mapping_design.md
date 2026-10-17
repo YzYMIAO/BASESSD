@@ -564,7 +564,7 @@ SRAM 缓存热点 region**。
 | GC / WL | 逐**页索引**成对分配目标页；逐 CW L2P 反查判有效；`ftl_sync_write_page_cw` 只编有效 CW | `src/ftl/gc.c`、`src/ftl/wear_leveling.c` |
 | BST | `valid_count` 改 per-CW（0..512）；页级位图**已删**（v0.60 切 approach ③，见 §八） | `include/ftl/bst.h` |
 | 掉电重建 | `close_full_block` 逐 CW L2P 反查回填；统计字段 `valid_pages`→`valid_cw` | `src/ftl/power_failure_recovery.c`、`.h` |
-| 页基址反推 | `gc_read_page_with_lba` 由**首个写过的 CW** 反推页基址（容忍页内空洞，见下） | `src/ftl/gc.c` |
+| 页基址反推 | `gc_decode_cw_lba` 由**首个写过的 CW** 反推页基址（容忍页内空洞，见下） | `src/ftl/gc.c`、`src/ftl/migrate.c` |
 | CLI | `g_wr_buf` 16KB ⇒ `wr/rd n ≤ 32` 扇区（旧页级上限 8） | `src/controller/cli.c` |
 
 > ⚠ **已重做「页缓冲」（本文 §七 方案 A，2026-10-13 v0.66）**：器件/FC 支持按 CW 编程（FC v27 CW 位图），

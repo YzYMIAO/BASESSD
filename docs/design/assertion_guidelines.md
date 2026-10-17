@@ -770,8 +770,8 @@ ASSERT((bitmap & ~allowed) == 0U); /* ← §十八 既有条目 */
   批判的形态（两个入口各认一个旋钮）。
 - 备选二：保留 `0` = 全部，另加一个"显式空集"的哨兵值 ⇒ 又造了一个不可达状态。
 - 结论：**字面语义 + 显式整段写法**（`fc_command_plane_span_cw_bitmap()`）比"隐式默认值"
-  更少歧义，代价是忘填时 release 无守卫。**整段入口自己填位图**（`addr_to_cmd` /
-`ftl_cmd_setup_ppa` / `ftl_cmd_setup_ppa_pair`）就是为了把"忘填"从调用者手里拿走。
+  更少歧义，代价是忘填时 release 无守卫。**整段入口自己填位图**（`pba_to_cmd` /
+`ftl_cmd_setup_ppa_pair_cw`）就是为了把"忘填"从调用者手里拿走。
 
 **易错点（写代码时注意）**：`fc_command_plane_span_cw_bitmap(cmd)` 读的是 `cmd->pba` 与
 `config.multi_plane`，**必须在两者都写好之后**调用。段算小了不会触发越段 ASSERT

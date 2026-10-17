@@ -553,7 +553,7 @@ fc_status_t   fc_get_resource_stats(fc_resource_stats_t *); // 资源使用统�
    · ftl_cmd_configure_descriptors(cmd, cw_bitmap) → 按**形参** cw_bitmap 展开 N 条 fc_command_configure_descriptor()，申请 N 个 Descriptor + Buffer 并串联
      （N = popcount(bitmap)；**字面位图**——v27 起没有「0 = 全部」这回事，bitmap == 0 由
       ftl_cmd_resolve_cw_bitmap() 的 ASSERT 拦下。整段访问须调用者先算
-      fc_command_plane_span_cw_bitmap(cmd) 当实参传，或改用 pba_to_cmd / ftl_cmd_setup_ppa / _pair）
+      fc_command_plane_span_cw_bitmap(cmd) 当实参传，或改用 pba_to_cmd / ftl_cmd_setup_ppa_pair_cw）
      · 任一条失败 → 本函数**自己回滚整条链**（desc+buffer 还池，desc_id 复位 INVALID）→ 返回 FTL_ERROR
    · 或 直接逐条 fc_command_configure_descriptor(plane, cw, row_paa) → 上层自己决定访问集合 + 每 plane 行地址，链序即数据布局序
 3b.（仅写操作）ftl_cmd_write_data(cmd, data, len) → 遍历链把数据搬进各 CW 的 buffer USER 区
@@ -4396,7 +4396,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 > ```c
 > ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));  /* 须在 pba 与 multi_plane 写好之后 */
 > ```
-> 三个「整段访问」入口（`pba_to_cmd` / `ftl_cmd_setup_ppa` / `ftl_cmd_setup_ppa_pair`）各自替你调它；
+> 两个「整段访问」入口（`pba_to_cmd` / `ftl_cmd_setup_ppa_pair_cw`）各自替你调它；
 > 只有 `ftl_cmd_configure_descriptors()` 接受调用者给的部分位图。校验/展开规则唯一定义在
 > `ftl_cmd_resolve_cw_bitmap()`（`src/ftl/ftl_fc_interface.c`，static），两个建链入口共用。
 
@@ -4556,7 +4556,7 @@ v11 的机制原语不收行地址，各 plane 的行地址仍由 `fc_build_requ
 一个 plane 一次只访问一个物理位置（与 `fc_command_plane_span` 的 `ASSERT(plane_count <= PLANE_NUM)` 同风格）。
 单 plane 命令也加了一条"若该 plane 在链上，则其行地址须与 `command->paa` 一致"的兜底断言。
 
-**行为中性论证**：现有全部调用者（策略层、FTL 的 `pba_to_cmd` / `ftl_cmd_setup_ppa`）传进来的
+**行为中性论证**：现有全部调用者（策略层、FTL 的 `pba_to_cmd`）传进来的
 `row_paa` 都是"`command->paa` 的 page/block/lun + 目标 plane"，与 v11 的
 `paa_make(paa_to_page(cmd->paa), plane, paa_to_block(cmd->paa), paa_to_lun(cmd->paa), cw)` 逐字节相同。
 FTL 侧的 `ftl_cmd_setup_ppa_pair()`（`src/ftl/ftl_fc_interface.c`）是第一个真正传不同行地址的调用者。
@@ -4699,9 +4699,8 @@ v18 只收了 FC 侧入口，FTL 侧这一处是同判据的漏网）。
 
 | 入口 | 调用者 | v27 起的位图来源 |
 |---|---|---|
-| `pba_to_cmd`（`ftl_fc_interface.h`） | `sync_page_prepare` → 四个 `ftl_sync_*` 页原语 | 入口自己填 `plane_span_cw_bitmap` |
-| `ftl_cmd_setup_ppa` | `gc.c` | 同上（**在 `cmd->paa` 写好之后**算） |
-| `ftl_cmd_setup_ppa_pair` | **host 读写**（`ftl.c`） | 同上；**调用者先前设的位图会被丢弃** |
+| `pba_to_cmd`（`ftl_fc_interface.h`） | `sync_page_prepare` → 四个 `ftl_sync_*` 页原语；`gc.c` 的同步读 | 入口自己填 `plane_span_cw_bitmap` |
+| `ftl_cmd_setup_ppa_pair_cw` | **host 读写**（`ftl.c`） | 同上；**调用者先前设的位图会被丢弃** |
 | `ftl_cmd_configure_descriptors` | GC / 测试 / Read Recovery | **唯一**接受调用者给的部分位图 |
 
 ⚠ `fc_command_plane_span_cw_bitmap` 读的是 `cmd->paa` 与 `config.multi_plane`，

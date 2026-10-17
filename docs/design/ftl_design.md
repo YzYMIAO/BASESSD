@@ -588,7 +588,7 @@ static inline nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce,
 ```
 
 > **Super Block 携带拓扑**（`sb->topo`）：遍历路径用 `super_block_page_pba` + `pba_to_cmd`
-> 直填 FC 命令，避免 pba 打包/拆包；随机 IO 路径仍走 `ftl_cmd_setup_ppa(cmd, pba)`（PBA 已在手）。
+> 直填 FC 命令，避免 pba 打包/拆包；随机 IO 路径走 `ftl_cmd_setup_ppa_pair_cw()`（Policy B 每 plane 各自 PBA）。
 
 ### 3.5 温度分区（Multi-Stream）
 
@@ -4385,7 +4385,7 @@ FTL 层 22 个源文件、0 个 `#warning` 核心桩，全部模块已实现并�
 
 | 模块 | 关键文件 | 现状要点 |
 |------|---------|---------|
-| FC 接口 + 地址体系 | `ftl_fc_interface.h/c`、`ftl_config.h §三.2` | 遍历路径 `super_block_page_pba()` → `pba_to_cmd()` 直填（省打包拆包）；随机 IO 从 L2P 拿 PBA → `ftl_cmd_setup_ppa()`；Policy B 每 plane 各自 PBA → `ftl_cmd_setup_ppa_pair()`；同步页原语 `ftl_sync_*`（`_page/_cw/_raw/_meta/_column/_erase`） |
+| FC 接口 + 地址体系 | `ftl_fc_interface.h/c`、`ftl_config.h §三.2` | 遍历路径 `super_block_page_pba()` → `pba_to_cmd()` 直填（省打包拆包）；随机 IO 从 L2P 拿 PBA → `ftl_cmd_setup_ppa_pair_cw()`（Policy B 每 plane 各自 PBA）；同步页原语 `ftl_sync_*`（`_page/_cw/_raw/_meta/_column/_erase`） |
 | L2P Cache + CLOCK | `l2p_cache.h/c` | Region load（读 NAND）+ flush（写 NAND）；Region 定位经 Metadata Directory（日志块动态分配）；`l2p_cache_flush_one` → `metadata_dir_append_slot` 追加写 |
 | Allocator + Super Block | `allocator.h/c` | Free Pool 三级水位 + 磨损均衡 + Super Block 跨 plane 配对；`allocator_close_sb` → Closed 列表 |
 | Journal | `journal.h/c` | 固定池块 58~61（= CW_NUM）环形；刷页 job 异步 + replay 扫描回放；Header `[magic+page_seq+entry_count+block_seq]`；`journal_truncate` 预擦除最旧块并记账（回切跳过 ⇒ 每圈只擦一次） |
@@ -4416,7 +4416,7 @@ FTL 层地址一律 nand_pba_t（32-bit 紧凑，L2P 表存储）：
   具名字段视图：pba_make / pba_pack / pba_fields（ftl_config.h §三.2）
   跨层桥接（字段重排）：pba_to_paa() / paa_to_pba() —— PAA 只在填 FC 命令时出现
 遍历路径：super_block_page_pba(sb, plane, page) → pba_to_cmd() 直填（省打包拆包）
-随机 IO：从 L2P 拿 PBA → ftl_cmd_setup_ppa()（PBA 已在手）
+随机 IO：从 L2P 拿 PBA → ftl_cmd_setup_ppa_pair_cw()（Policy B 每 plane 各自 PBA）
 ```
 
 对外接口为 `ftl_submit_read/write(ftl, req)`（纯异步、请求按值嵌入 `io`、`complete_flag` 跟踪）、
@@ -4838,7 +4838,7 @@ Controller 层**不**做 LBA 两两配对（方案 A）：`ssd_request_split` �
 | `sync_write_page/sync_read_page`（各模块内联 static） | 元数据操作不走 Super Block，保持 `multi_plane=0` |
 | `sync_erase_block`（gc/journal 内联） | 擦除 Multi-Plane OP 码（OP_ERASE_BLOCK_MULTI_PLANE）暂不使用 |
 | `gc.c` | GC 逐页搬移，`multi_plane=0` |
-| `ftl_fc_interface.c` | 含 `ftl_cmd_setup_ppa` / `_pair` / `_pair_cw` 建链 + `ftl_sync_write_page` / `_cw`、`ftl_sync_read_page` / `_raw`、`ftl_sync_read_meta`、`ftl_sync_read_column`、`ftl_sync_erase_block` 等同步页原语 |
+| `ftl_fc_interface.c` | 含 `ftl_cmd_setup_ppa_pair_cw` 建链（`pba_to_cmd` 在头文件内联）+ `ftl_sync_write_page` / `_cw`、`ftl_sync_read_page` / `_raw`、`ftl_sync_read_meta`、`ftl_sync_read_column`、`ftl_sync_erase_block` 等同步页原语 |
 
 ### 18.10 结论
 

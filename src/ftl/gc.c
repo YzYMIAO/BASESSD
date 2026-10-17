@@ -34,32 +34,29 @@
 /* ── 1. 共用原语 ── */
 
 /*
- * gc_read_page_with_lba - 读取一页 NAND，返回用户数据 + **逐 CW 从 META 取回的逻辑地址**
+ * gc_read_page_with_lba - 读取一页 NAND，取回**逐 CW 从 META 解出的逻辑地址**
  *
  * 内部管理 FC 命令生命周期：
- *   alloc → config → submit → sync_wait → read_data → get_meta → release
+ *   alloc → config → submit → sync_wait → get_meta → release
  *
  * 唯一调用者是掉电重建（ftl_rebuild_closed_sb_list 的逐页反查）。
  * 搬移读（GC / WL / 慢死预测）走 **异步** 路径：migrate.c 用 ftl_async_read_page +
  * gc_decode_cw_lba 在完成服务函数里收尾——不经过本函数。
  *
+ * ⚠ 读整页只是为了取回页内 META；**不向调用者拷用户数据**（本函数没有数据出参）。
  * ⚠ CW 级映射（IU = 1 CW）+ DRAM-less approach ③：本函数读**整页**（该 plane 的 4 个 CW），
  *   把**每个 CW 自己的 META**（本仓的「OOB」反向映射，头 4B = 该 CW 的扇区 LBA）解码到
  *   `cw_lba[c]`。未写过的 CW（META 全 FF）填 `FTL_LBA_INVALID`。调用者据此**逐 CW 反查 L2P**
  *   判有效性——不靠任何常驻位图（flash reverse-mapping，见 bst.h 文件头）。
- *   `page_base_out` 返回页基址（CW0 的扇区 LBA，由**首个写过的 CW** 反推：base = META(c_lo) − c_lo），
- *   供搬移目标页的 META 基址复用。
  *
  * ⚠ 成败判据 = FC_CW_STATUS_ERROR_MASK 全集（fc_cw_status_has_error）：UNC / MATA_ERROR
  *   页的内容不可信，不得当成功解析 META。
  *
- * @param pba            物理地址（**页基址**，cw 位为 0）
- * @param buffer         输出：整页用户数据 buffer（PAGE_MAIN_SIZE 字节，可为 NULL）
- * @param cw_lba         输出：逐 CW 的扇区 LBA（长度 CW_NUM；未写过 = FTL_LBA_INVALID）
- * @param page_base_out  输出：页基址（CW0 的扇区 LBA）（可为 NULL）
+ * @param pba     物理地址（**页基址**，cw 位为 0）
+ * @param cw_lba  输出：逐 CW 的扇区 LBA（长度 CW_NUM；未写过 = FTL_LBA_INVALID）
  * @return FTL_OK 成功；FTL_AGAIN 命令池空；FTL_ERROR 读失败 / 全页无写过 CW
  */
-ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba[CW_NUM], lba_t *page_base_out)
+ftl_status_t gc_read_page_with_lba(nand_pba_t pba, lba_t cw_lba[CW_NUM])
 {
     /* 命令池空是**资源类**结果（FTL_AGAIN）；唯一调用者在开机重建期，池结构性充足。 */
     fc_command_t *cmd = fc_command_alloc();
@@ -78,7 +75,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     cmd->meta               = FC_META_UNKNOWN; /* 不知道 LBA——正是要从页内 META 读回来 */
 
-    if (ftl_cmd_setup_ppa(cmd, pba) != FTL_OK)
+    if (pba_to_cmd(cmd, pba) != FTL_OK)
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -103,26 +100,14 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
         }
     }
 
-    /* 读取用户数据 */
-    if (buffer != NULL)
-    {
-        (void)ftl_cmd_read_data(cmd, buffer, PAGE_MAIN_SIZE); /* 整页用户区 = CW_NUM × 512B */
-    }
-
-    /* 从 META 解码逐 CW 的扇区 LBA + 页基址（与异步搬移 job 共用同一份实现） */
-    uint32_t meta_cw0;
-    if (!gc_decode_cw_lba(cmd, pba, cw_lba, &meta_cw0))
+    /* 从 META 解码逐 CW 的扇区 LBA（与异步搬移 job 共用同一份实现） */
+    if (!gc_decode_cw_lba(cmd, pba, cw_lba, NULL))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR; /* 全页无写过 CW：无有效数据 */
     }
 
     (void)fc_command_release(cmd);
-
-    if (page_base_out != NULL)
-    {
-        *page_base_out = (lba_t)meta_cw0;
-    }
 
     return FTL_OK;
 }

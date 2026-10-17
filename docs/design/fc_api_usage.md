@@ -182,8 +182,8 @@ ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));  // �
 ```
 
 它按 `cmd->pba` 的 plane 位与 `config.multi_plane` 算出"段内全部 CW"（plane1 单 plane ⇒ `0xF0`，
-双 plane ⇒ `0xFF`）。三个语义为"整段访问"的 FTL 入口（`pba_to_cmd` / `ftl_cmd_setup_ppa` /
-`ftl_cmd_setup_ppa_pair`）**自己替你调**，不必管；只有 `ftl_cmd_configure_descriptors()` 需要你给位图。
+双 plane ⇒ `0xFF`）。两个语义为"整段访问"的 FTL 入口（`pba_to_cmd` /
+`ftl_cmd_setup_ppa_pair_cw`）**自己替你调**，不必管；只有 `ftl_cmd_configure_descriptors()` 需要你给位图。
 
 **校验**：位图越出本命令 plane 位段（或位宽超过 `PLANE_NUM * CW_NUM`）由
 `ftl_cmd_resolve_cw_bitmap()` 的 `ASSERT` 拦下（v23 起由返回码改 ASSERT）；
