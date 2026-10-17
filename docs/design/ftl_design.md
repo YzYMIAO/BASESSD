@@ -248,68 +248,68 @@ FTL 不直接碰 NAND，一律经 FC 接口下发命令，由 FC 保证 CRC + EC
 ```mermaid
 flowchart TB
     subgraph HOST["主机与请求"]
-        H1["Host / UART CLI"] --> H2["controller_submit / 按实例边界切 run"]
-        H2 --> H3["ftl_submit_read / write / S3.9"]
-        H3 --> H4["完成组 group / next / outstanding"]
-        H4 --> H5["ftl_issue_subop / S3.9"]
+        H1["Host / UART CLI"] --> H2["controller_submit<br/>按实例边界切 run"]
+        H2 --> H3["ftl_submit_read / write<br/>S3.9"]
+        H3 --> H4["完成组 group<br/>next / outstanding"]
+        H4 --> H5["ftl_issue_subop<br/>S3.9"]
     end
 
     subgraph DATA["数据面"]
         H5 --> D1{"读还是写"}
-        D1 -- "读" --> R1["wbuf 命中? / S3.11"]
+        D1 -- "读" --> R1["wbuf 命中?<br/>S3.11"]
         R1 -- "是" --> R2["同步拷出"]
-        R1 -- "否" --> R3["l2p_cache_read / S3.6"]
+        R1 -- "否" --> R3["l2p_cache_read<br/>S3.6"]
         R3 -- "hit" --> R4["得到 PBA"]
-        R3 -- "miss / LOADING" --> R5["起 region load / FTL_AGAIN，下轮重试"]
+        R3 -- "miss / LOADING" --> R5["起 region load<br/>FTL_AGAIN，下轮重试"]
         R3 -- "未映射" --> R6["零填充"]
-        D1 -- "写" --> W1["wbuf_append / S3.11"]
-        W1 --> W2["wbuf_flush / allocator_alloc_pair S3.2"]
+        D1 -- "写" --> W1["wbuf_append<br/>S3.11"]
+        W1 --> W2["wbuf_flush<br/>allocator_alloc_pair S3.2"]
     end
 
     subgraph CMD["命令与完成"]
-        R4 --> C1["ftl_op_submit / S3.10"]
+        R4 --> C1["ftl_op_submit<br/>S3.10"]
         W2 --> C1
-        C1 --> C2["FC descriptor chain / S3.15"]
+        C1 --> C2["FC descriptor chain<br/>S3.15"]
         C2 --> C3["NAND 执行"]
         C3 --> C4["FC CQ"]
-        C4 --> C5["ftl_service_pump / completion_table_drain S3.10"]
-        C5 --> C6["ftl_op_dispatch / op tag 选服务函数"]
-        C6 --> C7["ftl_op_host_io / 读: 拷回 / 写: confirm"]
+        C4 --> C5["ftl_service_pump<br/>completion_table_drain S3.10"]
+        C5 --> C6["ftl_op_dispatch<br/>op tag 选服务函数"]
+        C6 --> C7["ftl_op_host_io<br/>读: 拷回 / 写: confirm"]
     end
 
     subgraph META["元数据与一致性"]
-        C7 --> M1["ftl_confirm_write / 先 ready，再应用 S3.6"]
-        M1 --> M2["journal_append / S3.7"]
-        M1 --> M3["l2p_cache_write / CLEAN→DIRTY S3.6"]
-        M1 --> M4["BST valid_count 加一或减一 / S3.2"]
-        M3 --> M5["l2p_cache_flush_kick / DIRTY→FLUSHING"]
-        M5 --> M6["metadata_dir_append_slot / S3.5"]
+        C7 --> M1["ftl_confirm_write<br/>先 ready，再应用 S3.6"]
+        M1 --> M2["journal_append<br/>S3.7"]
+        M1 --> M3["l2p_cache_write<br/>CLEAN→DIRTY S3.6"]
+        M1 --> M4["BST valid_count 加一或减一<br/>S3.2"]
+        M3 --> M5["l2p_cache_flush_kick<br/>DIRTY→FLUSHING"]
+        M5 --> M6["metadata_dir_append_slot<br/>S3.5"]
         M6 --> M7["写 region 页"]
-        M7 --> M8["metadata_dir_commit_region / S3.5"]
-        M2 --> M9["checkpoint_journal_watermark / 85% / 95% S3.7"]
-        M9 --> M10["checkpoint_begin / S3.8"]
-        M10 --> M11["flush regions → Anchor / → 块账快照 → Header → 截断 Journal"]
+        M7 --> M8["metadata_dir_commit_region<br/>S3.5"]
+        M2 --> M9["checkpoint_journal_watermark<br/>85% / 95% S3.7"]
+        M9 --> M10["checkpoint_begin<br/>S3.8"]
+        M10 --> M11["flush regions → Anchor<br/>→ 块账快照 → Header → 截断 Journal"]
     end
 
     subgraph BG["后台与空间"]
-        M11 --> B1["bg_scheduler / must-run + 预算任务 S3.12"]
-        B1 --> B2["GC 求值 / S3.13"]
-        B1 --> B3["静态 WL / S3.4"]
-        B1 --> B4["metadata_dir_kick / S3.5"]
-        B1 --> B5["Journal / BBT / Wear / CP 持久化 / S3.3 / S3.4 / S3.7 / S3.8"]
-        B2 --> B6["migrate job / READ→WRITE→FLUSH_JRN→ERASE"]
+        M11 --> B1["bg_scheduler<br/>must-run + 预算任务 S3.12"]
+        B1 --> B2["GC 求值<br/>S3.13"]
+        B1 --> B3["静态 WL<br/>S3.4"]
+        B1 --> B4["metadata_dir_kick<br/>S3.5"]
+        B1 --> B5["Journal / BBT / Wear / CP 持久化<br/>S3.3 / S3.4 / S3.7 / S3.8"]
+        B2 --> B6["migrate job<br/>READ→WRITE→FLUSH_JRN→ERASE"]
         B3 --> B6
-        B6 --> B7["allocator 归还 / 退役 / S3.2"]
-        B1 --> B8["rr_kick / S3.14"]
+        B6 --> B7["allocator 归还 / 退役<br/>S3.2"]
+        B1 --> B8["rr_kick<br/>S3.14"]
         B8 --> B9["read retry / 邻居页 / 标坏"]
     end
 
     subgraph BOOT["上电与恢复"]
-        P1["ftl_init / S3.1"] --> P2["介质版本检查 / S2.5"]
-        P2 --> P3["journal_scan_latest + / checkpoint_find_latest S3.7 / S3.8"]
+        P1["ftl_init<br/>S3.1"] --> P2["介质版本检查<br/>S2.5"]
+        P2 --> P3["journal_scan_latest +<br/>checkpoint_find_latest S3.7 / S3.8"]
         P3 --> P4{"fresh / clean / PF"}
-        P4 --> P5["块账快照恢复 / journal replay / F2 / S4.1~S4.3"]
-        P5 --> P6["carve + build pools / → Ready"]
+        P4 --> P5["块账快照恢复 / journal replay / F2<br/>S4.1~S4.3"]
+        P5 --> P6["carve + build pools<br/>→ Ready"]
     end
 
     P6 -. "启动完成" .-> H1
@@ -576,14 +576,14 @@ FTL 的运行时状态分两类：
 
 ```mermaid
 flowchart TD
-    BOOT["ftl_boot_recovery"] --> LATEST["journal_scan_latest / 只读，不改状态"]
-    LATEST --> FIND{"checkpoint_find_latest / 有当前版本有效 Header?"}
+    BOOT["ftl_boot_recovery"] --> LATEST["journal_scan_latest<br/>只读，不改状态"]
+    LATEST --> FIND{"checkpoint_find_latest<br/>有当前版本有效 Header?"}
     FIND -- "否" --> FRESH["fresh：carve + F2 全扫"]
-    FIND -- "是" --> LOAD{"checkpoint_load_block_table / 块账快照 + CRC 有效?"}
+    FIND -- "是" --> LOAD{"checkpoint_load_block_table<br/>块账快照 + CRC 有效?"}
     LOAD -- "否" --> PFALL["块账走 F2 兜底"]
-    LOAD -- "是" --> JUDGE{"page_seq + entry_count / 不高于 cp.journal_sequence?"}
+    LOAD -- "是" --> JUDGE{"page_seq + entry_count<br/>不高于 cp.journal_sequence?"}
     JUDGE -- "是" --> CLEAN["clean：restore + probe + build_pools"]
-    JUDGE -- "否" --> PF["PF：restore + journal replay / + F4 + probe + build_pools"]
+    JUDGE -- "否" --> PF["PF：restore + journal replay<br/>+ F4 + probe + build_pools"]
     PFALL --> F2["reset + carve + F2"]
     PF --> PFOk{"块账恢复一致?"}
     PFOk -- "否" --> F2
@@ -738,17 +738,17 @@ NAND 的写必须落在**已擦除**的页上，而擦除以块为单位。FTL �
 
 ```mermaid
 stateDiagram-v2
-    [*] --> NONE: 固定元数据 / OP / Spare
-    [*] --> FREE: 建池 / 擦除归还
+    [*] --> NONE: 固定元数据 OP Spare
+    [*] --> FREE: 建池 擦除归还
     FREE --> OPEN: allocator_alloc_pair
     OPEN --> CLOSED: 64 页写满
-    CLOSED --> FREE: GC 搬移 → 擦除 → 归还
-    CLOSED --> RETIRED: WL / 预测搬移 出池，不标坏
+    CLOSED --> FREE: GC 搬移 擦除 归还
+    CLOSED --> RETIRED: WL 预测搬移 出池，不标坏
     FREE --> LOG: allocator_alloc_log_block
-    LOG --> FREE: l2p_live 归零 → 擦除 → 归还
-    FREE --> BAD: 出厂扫描 / 探测判坏
+    LOG --> FREE: l2p_live 归零 擦除 归还
+    FREE --> BAD: 出厂扫描 探测判坏
     OPEN --> BAD: PROGRAM 失败
-    CLOSED --> BAD: 运行时坏块 / 读不可恢复
+    CLOSED --> BAD: 运行时坏块 读不可恢复
     BAD --> [*]
 ```
 
@@ -840,16 +840,16 @@ spare[0] 变成 FTL 自己的数据；此时重扫会把所有写过的块（含
 
 ```mermaid
 flowchart TD
-    INIT["bbt_init"] --> LOAD{"bbt_load / 池内有有效 record?"}
+    INIT["bbt_init"] --> LOAD{"bbt_load<br/>池内有有效 record?"}
     LOAD -- "是" --> REBUILD["bad_map → BST state=BAD"]
     LOAD -- "否" --> USED{"介质已有 FTL 数据?"}
-    USED -- "是" --> REJECT["拒绝出厂扫描 + LOGE / bad_count=0，运行时兜底"]
-    USED -- "否" --> SCAN["逐块读 page0 列 2048 / 非 0xFF 则 BAD"]
+    USED -- "是" --> REJECT["拒绝出厂扫描 + LOGE<br/>bad_count=0，运行时兜底"]
+    USED -- "否" --> SCAN["逐块读 page0 列 2048<br/>非 0xFF 则 BAD"]
     SCAN --> SAVE["bbt_save 写入池"]
     REBUILD --> RUN["运行时"]
     REJECT --> RUN
     SAVE --> RUN
-    RUN --> MARK["PROGRAM/ERASE 失败 / 或 RR 耗尽"]
+    RUN --> MARK["PROGRAM/ERASE 失败<br/>或 RR 耗尽"]
     MARK --> EXPEL["allocator_remove_from_free"]
     EXPEL --> BAD["BST 置 BAD + bbt.dirty=1"]
     BAD --> KICK["bbt_kick 异步写回"]
@@ -943,17 +943,17 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 ```mermaid
 flowchart TD
     W1["bg_a_wl 预算任务"] --> W2["mig_begin_wl"]
-    W2 --> W3{"间隔门 / total_writes 不低于 1000?"}
+    W2 --> W3{"间隔门<br/>total_writes 不低于 1000?"}
     W3 -- "否" --> W0["不触发"]
     W3 -- "是" --> W4{"三条件 OR"}
     W4 -- "1 max-min 不低于 5000" --> HIT["触发"]
     W4 -- "2 max 不低于 avgx3, avg 非零" --> HIT
     W4 -- "3 低擦除区块占比超过 5%" --> HIT
     W4 -- "都不满足" --> W0
-    HIT --> W5["wl_select_victim / 低擦除区 + valid 不低于 70% / read_count 高优先"]
+    HIT --> W5["wl_select_victim<br/>低擦除区 + valid 不低于 70%<br/>read_count 高优先"]
     W5 -- "无" --> W0
-    W5 -- "有" --> W6["mig_start WL RETIRE / 见 3.13 节"]
-    W6 --> W7["擦完 出池 RETIRED / rr_retire_block"]
+    W5 -- "有" --> W6["mig_start WL RETIRE<br/>见 3.13 节"]
+    W6 --> W7["擦完 出池 RETIRED<br/>rr_retire_block"]
 ```
 
 #### 3.4.5 关键流程
@@ -1211,9 +1211,9 @@ flowchart LR
     D --> E["metadata_dir_lookup L2P_REGION, local_region"]
     E --> F{"pba 有效?"}
     F -- "是" --> G["ftl_async_read_page pba"]
-    F -- "否" --> H["用固定哨兵位置 / l2p_region_pba local_region"]
+    F -- "否" --> H["用固定哨兵位置<br/>l2p_region_pba local_region"]
     H --> G
-    G --> I["ftl_op_l2p：填入 cache line / LOADING→CLEAN"]
+    G --> I["ftl_op_l2p：填入 cache line<br/>LOADING→CLEAN"]
 ```
 
 `metadata_dir_lookup` 是 `entries[]` 线性扫描（2048 条）；`have_dynamic == 0` 时跳过
@@ -1304,7 +1304,7 @@ region 全部被改写、最新位置都迁到别处后，这个块才没有活�
 stateDiagram-v2
     [*] --> IDLE
     IDLE --> RECLAIM: reclaim_target 不等于 NONE
-    RECLAIM --> IDLE: 擦完 + 归还
+    RECLAIM --> IDLE: 擦完 归还
     IDLE --> CP_READ: compact_wanted
     CP_READ --> CP_WRITE: 读到一条活 region cp_buf
     CP_WRITE --> CP_READ: 写成功，继续下一条
@@ -1314,7 +1314,7 @@ stateDiagram-v2
     CP_ANCHOR_PREP --> CP_ANCHOR_WRITE: 无需擦
     CP_ANCHOR_ERASE --> CP_ANCHOR_WRITE
     CP_ANCHOR_WRITE --> CP_RECLAIM: 所有分页写完
-    CP_RECLAIM --> DONE: victim 擦完 + 归还
+    CP_RECLAIM --> DONE: victim 擦完 归还
     DONE --> IDLE
 ```
 
@@ -1496,7 +1496,7 @@ stateDiagram-v2
     LOADING --> CLEAN: 完成 成功或失败
     CLEAN --> DIRTY: 写命中
     DIRTY --> FLUSHING: flush_kick
-    FLUSHING --> CLEAN: 写成功 + commit
+    FLUSHING --> CLEAN: 写成功 commit
     FLUSHING --> DIRTY: 写失败
     CLEAN --> INVALID: 驱逐
     DIRTY --> DIRTY: 驱逐时踢一次 flush
@@ -1522,11 +1522,11 @@ flowchart TD
     A["l2p_cache_read"] --> B["region = lba / 512, idx = lba 模 512"]
     B --> C{"查找 region"}
     C -- "LOADING" --> D["返回 FTL_AGAIN"]
-    C -- "CLEAN/DIRTY/FLUSHING" --> E["返回 entries idx / fresh 不计命中"]
+    C -- "CLEAN/DIRTY/FLUSHING" --> E["返回 entries idx <br/>fresh 不计命中"]
     C -- "未命中" --> F["miss 加一, note_access 1"]
     F --> G["CLOCK 选 victim"]
     G -- "无可驱逐" --> H["返回 FTL_AGAIN"]
-    G -- "有" --> I["起异步加载：lookup → read page / state=LOADING"]
+    G -- "有" --> I["起异步加载：lookup → read page<br/>state=LOADING"]
     I --> J["返回 FTL_AGAIN"]
     J --> K["下轮重试"]
     D --> K
@@ -1677,8 +1677,8 @@ Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
 ```mermaid
 flowchart TD
     A["写完成 ftl_confirm_write"] --> B["journal_append lba, old, new"]
-    B --> C{"当前页已有同 LBA / 且 sequence 不低于 merge_floor?"}
-    C -- "是" --> D["就地更新 new_pba / 不新增条目/不消耗 sequence"]
+    B --> C{"当前页已有同 LBA<br/>且 sequence 不低于 merge_floor?"}
+    C -- "是" --> D["就地更新 new_pba<br/>不新增条目/不消耗 sequence"]
     C -- "否" --> E["写 entry, sequence 加一, entry_index 加一"]
     E --> F{"页满 127 条?"}
     F -- "否" --> G["返回"]
@@ -2147,7 +2147,7 @@ flowchart LR
     A["fc_poll_completion"] --> B["completion_table_drain"]
     B --> C["ftl_op_dispatch completion"]
     C --> D{"op_tag 合法?"}
-    D -- "否" --> E["completion_table_remove / fc_command_release / LOGE 孤儿"]
+    D -- "否" --> E["completion_table_remove<br/>fc_command_release<br/>LOGE 孤儿"]
     D -- "是" --> F["completion_table_take cmd_id"]
     F --> G["completion_table_route ch,ce,lun"]
     G --> H["g_op_service tag ftl, completion, ctx"]
@@ -2242,7 +2242,7 @@ flowchart TD
     B -- "否" --> C["ftl_wbuf_flush 旧窗口"]
     C --> D["打开新窗口 base"]
     B -- "是" --> D
-    D --> E["逐 CW 拷进 data slot / occupied 置位 bit, owners 置位 gi / group.outstanding 加一"]
+    D --> E["逐 CW 拷进 data slot <br/>occupied 置位 bit, owners 置位 gi<br/>group.outstanding 加一"]
     E --> F{"occupied 等于 0xFF?"}
     F -- "是" --> G["ftl_wbuf_flush 尽力"]
     F -- "否" --> H["返回"]
@@ -2496,17 +2496,17 @@ cost = 500·valid_ratio + 200·erase_ratio + 200·cold_penalty + 100·youth_pena
 ```mermaid
 stateDiagram-v2
     [*] --> MIG_IDLE
-    MIG_IDLE --> MIG_READ: mig_begin_* victim 已选
+    MIG_IDLE --> MIG_READ: mig_begin_ victim 已选
     MIG_READ --> MIG_READ_SETTLE: 读完当前页所有 plane
     MIG_READ_SETTLE --> MIG_WRITE: 反查 L2P 得 cw_bitmap
-    MIG_READ_SETTLE --> MIG_WRITE: 本页全空洞 cw_bitmap=0
+    MIG_READ_SETTLE --> MIG_WRITE: 本页全空洞 cw_bitmap 0
     MIG_WRITE --> MIG_WRITE_SETTLE: 写完当前页所有 plane
     MIG_WRITE_SETTLE --> MIG_READ: page 加一，未到 64
     MIG_WRITE_SETTLE --> MIG_FLUSH_JRN: page 等于 64
     MIG_FLUSH_JRN --> MIG_ERASE: journal job 空闲
     MIG_ERASE --> MIG_DONE: 两 plane 擦完
     MIG_DONE --> MIG_IDLE
-    MIG_DONE --> MIG_IDLE: valid_total==0 快路径直接 ERASE
+    MIG_DONE --> MIG_IDLE: valid_total 0 快路径直接 ERASE
 ```
 
 #### 3.13.6 关键流程
@@ -2605,7 +2605,7 @@ stateDiagram-v2
     IDLE --> PLANE: 领走托管的 pending 项
     PLANE --> SF_SET: 找到本 plane 目标页
     PLANE --> PLANE: 本子操作不覆盖本 plane
-    SF_SET --> READ: SET_FEATURES attempt
+    SF_SET --> READ: SET_FEATURES(attempt)
     READ --> PLANE_END: 读成功，数据落 scratch
     READ --> SF_RESTORE: 读失败
     SF_RESTORE --> SF_SET: attempt 小于 8
@@ -2613,7 +2613,7 @@ stateDiagram-v2
     NB_READ --> NB_RETRY: 邻居页读出
     NB_READ --> NB_READ: 邻居尝试小于 2
     NB_READ --> PLANE_END: 邻居也失败
-    NB_RETRY --> PLANE_END: 目标页成功/失败
+    NB_RETRY --> PLANE_END: 目标页成功 失败
     PLANE_END --> PLANE: plane 加一
     PLANE_END --> FINISH: plane 等于 PLANE_NUM
     FINISH --> IDLE
@@ -2793,10 +2793,10 @@ flowchart TD
     A["上电 / ftl_init 完成"] --> B["ftl_media_needs_format?"]
     B -- "否" --> C["正常启动 4.2/4.3 节"]
     B -- "是" --> D["ftl_media_format"]
-    D --> D1["bbt_erase_all_blocks / 空片：出厂标记已在 bbt_init 读入 / 已用：依赖已持久化 BBT"]
+    D --> D1["bbt_erase_all_blocks<br/>空片：出厂标记已在 bbt_init 读入<br/>已用：依赖已持久化 BBT"]
     D1 --> D2["bbt_save 重新持久化坏块图"]
     D2 --> D3["metadata_dir_init 复位 Directory"]
-    D3 --> D4["checkpoint_write_initial / 写当前版本空快照"]
+    D3 --> D4["checkpoint_write_initial<br/>写当前版本空快照"]
     D4 --> E["后续正常启动"]
 ```
 
@@ -2914,14 +2914,14 @@ flowchart TD
     A["ftl_submit_read"] --> B["校验 + 建组"]
     B --> C["ftl_drain_group → issue_subop"]
     C --> D{"该 LBA 在 wbuf?"}
-    D -- "是" --> E["从 wbuf.data 拷出 / 消费 1 LBA"]
+    D -- "是" --> E["从 wbuf.data 拷出<br/>消费 1 LBA"]
     D -- "否" --> F["l2p_cache_read"]
-    F -- "FTL_AGAIN LOADING" --> G["l2p_defer=1 / 停止本子操作，下轮重试"]
-    F -- "FTL_OK + INVALID" --> H["零填充 / 消费 1 LBA"]
-    F -- "FTL_OK + PBA" --> I["按 plane,page 分组 / 建 pending + 提交读"]
-    I --> J["ftl_op_host_io：拷回 buffer / rr_record_ecc / read_count 加一"]
+    F -- "FTL_AGAIN LOADING" --> G["l2p_defer=1<br/>停止本子操作，下轮重试"]
+    F -- "FTL_OK + INVALID" --> H["零填充<br/>消费 1 LBA"]
+    F -- "FTL_OK + PBA" --> I["按 plane,page 分组<br/>建 pending + 提交读"]
+    I --> J["ftl_op_host_io：拷回 buffer<br/>rr_record_ecc / read_count 加一"]
     J --> K{"NAND_FAIL / ECC 超限?"}
-    K -- "是" --> L["停泊 → READ_RECOVERY / rr_kick 3.14 节"]
+    K -- "是" --> L["停泊 → READ_RECOVERY<br/>rr_kick 3.14 节"]
     K -- "否" --> M["组完成：递减 outstanding"]
     E --> M
     H --> M
@@ -3100,12 +3100,12 @@ flowchart TD
     C --> D{"valid_total 等于 0?"}
     D -- "是" --> E["快到 MIG_ERASE"]
     D -- "否" --> F["MIG_READ：逐页逐 plane 读"]
-    F --> G["解 META 得 cw_lba / 记 ECC/read_count"]
-    G --> H["MIG_READ_SETTLE：ready 前置 / 反查 L2P 得 cw_bitmap"]
+    F --> G["解 META 得 cw_lba<br/>记 ECC/read_count"]
+    G --> H["MIG_READ_SETTLE：ready 前置<br/>反查 L2P 得 cw_bitmap"]
     H --> I{"本页有有效 CW?"}
     I -- "否" --> J["page 加一，继续"]
-    I -- "是" --> K["MIG_WRITE：alloc_pair COLD / 写 CW 子集"]
-    K --> L["MIG_WRITE_SETTLE：l2p_cache_write / + journal_append + valid 加一或减一"]
+    I -- "是" --> K["MIG_WRITE：alloc_pair COLD <br/>写 CW 子集"]
+    K --> L["MIG_WRITE_SETTLE：l2p_cache_write<br/>+ journal_append + valid 加一或减一"]
     L --> J
     J --> M{"page 等于 64?"}
     M -- "否" --> F
@@ -3180,17 +3180,17 @@ CP 可能推进一个 phase；RR 可能提交一条命令。真正的完成在�
 ```mermaid
 flowchart TB
     subgraph GLOBAL["设备级 启动时一次"]
-        ROUTE["g_route CH CE LUN / 实例路由"]
-        CT["completion_table / cmd_id → ctx"]
-        LC["g_l2p_cache CH CE / 共享 L2P cache"]
+        ROUTE["g_route CH CE LUN <br/>实例路由"]
+        CT["completion_table<br/>cmd_id → ctx"]
+        LC["g_l2p_cache CH CE <br/>共享 L2P cache"]
     end
 
     subgraph INST["每实例 g_ftl dim 描述符，AXI"]
-        CTX["ftl_context_t / topo / cache* / pending / groups / / wbuf / alloc / mig / rr / bg / cp"]
-        TAB["ftl_tables_t* / BST / free / op / spare / closed"]
-        MD["metadata_dir_cache_t* / entries / l2p_live / job"]
-        JRN["l2p_journal_t* / page_buf / ring / job"]
-        CPJ["cp_job_t* / phase / bitmap / block_words"]
+        CTX["ftl_context_t<br/>topo / cache* / pending / groups /<br/>wbuf / alloc / mig / rr / bg / cp"]
+        TAB["ftl_tables_t*<br/>BST / free / op / spare / closed"]
+        MD["metadata_dir_cache_t*<br/>entries / l2p_live / job"]
+        JRN["l2p_journal_t*<br/>page_buf / ring / job"]
+        CPJ["cp_job_t*<br/>phase / bitmap / block_words"]
     end
 
     subgraph DOMAIN["内存域 main.c 静态数组"]
