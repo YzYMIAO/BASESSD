@@ -53,7 +53,7 @@ Flash 控制器的启动策略实现，包含：
 - pending 槽启动前扣减重试次数、失败回退和成功确认。
 
 > ⚠ 该模块**当前未被 `main()` 调用**（无 A/B 槽 / 安全启动流程）；FTL 元数据侧另有独立的
-> 完整性判据（介质布局版本 + 下层 FC 的 per-CW CRC/ECC，见 `docs/design/ftl_design.md §3.3`）。
+> 完整性判据（介质布局版本 + 下层 FC 的 per-CW CRC/ECC，见 `docs/design/ftl_design.md §2.3`）。
 
 真实 BSP 的启动顺序应为：读取两份元数据，选择最新合法记录；读取并计算
 A/B 镜像摘要，调用 `boot_image_validate()`；调用 `boot_policy_select_slot()`；

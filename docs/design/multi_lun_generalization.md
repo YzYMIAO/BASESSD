@@ -5,7 +5,7 @@
 > 本文是这项工作的唯一清单；实施时逐项勾选，避免遗漏。
 >
 > 相关文档：`docs/design/cw_level_mapping_design.md` §3（分片模型）、
-> `docs/design/ftl_design.md` §2.3/§5（内存、L2P）、
+> `docs/design/ftl_design.md` §2.3/§3.5/§3.6（内存、元数据目录、L2P）、
 > `docs/design/fc_nand_design.md` §18（1×1×1 拓扑与多 LUN 预留）、
 > `docs/hardware_contract.md`（AXI_RAM 预算）、`include/ftl/l2p_cache.h`（路由）。
 
@@ -33,7 +33,7 @@
 |---|---|
 | 物理层级 channel → package/way → die(LUN) → plane → block/page；LUN 地址在行地址高位 | ONFI 2.3 spec（`https://onfi.org/files/onfi_2_3a_gold.pdf`） |
 | 多 die 的并行来自 channel（外部）、die/LUN（interleaved）、plane（multi-plane） | PSU 博士论文（`https://etda.libraries.psu.edu/files/final_submissions/27001`）、MSST "Parallel all the time" |
-| superblock/band 把每个 die/plane 一块组成逻辑擦写单元，写入 channel-first 条带化，GC 以 superblock 选 victim | SPDK FTL 文档（本仓 `docs/reference/pages/spdk_ftl.html:146-205`）、`ftl_design.md:551-591` |
+| superblock/band 把每个 die/plane 一块组成逻辑擦写单元，写入 channel-first 条带化，GC 以 superblock 选 victim | SPDK FTL 文档（本仓 `docs/reference/pages/spdk_ftl.html:146-205`）、`ftl_design.md §3.2` |
 | DRAM-less：L2P 表在 NAND，SRAM 只放**共享** L2P cache + 每 die 小块元数据 | DFTL（`https://dl.acm.org/doi/pdf/10.1145/1640457.1640463`）、HP-UFS（`https://www.usenix.org/system/files/fast23-kim-yoona.pdf`）、MSST'24 DRAM-less（`https://msstconference.org/MSST-history/2024/Papers/msst24-7.3.pdf`） |
 | UFS/eMMC 的多个 LU/LUN 共享同一 FTL、同一 L2P cache，不是 N 套 FTL | HP-UFS；`storage_controller_learning.md:96-103` |
 | 主流控制器固件用 **descriptor + 指针** 持有各表，scatter/linker 决定落 DRAM/SRAM/TCM | `ftl_optimization_plan.md:371-381`（OpenSSD 全局数组 / SPDK `spdk_ftl_dev` 内嵌表） |
@@ -300,7 +300,7 @@ N=4 仍需表瘦身或 SDRAM。
       `ssd_request_split/run_end` / CLI `map/wr/rd`
 - [x] `FTL_MEDIA_LAYOUT_VERSION`：`6 + (FTL_DIM_TOTAL > 1)`（阶段 B 已做）；
       DIM=1 不 bump/不格式化，DIM>1 首次启用自动格式化
-- [ ] 文档：本文、`cw_level_mapping_design.md §3.7`、`ftl_design.md §2.3/§5`、
+- [ ] 文档：本文、`cw_level_mapping_design.md §3.7`、`ftl_design.md §2.3/§3.5/§3.6`、
       `fc_nand_design.md §18`、`hardware_contract.md`
 - [ ] 不新增 UT（R4）；冻结 UT 的既有编译错误不修
 

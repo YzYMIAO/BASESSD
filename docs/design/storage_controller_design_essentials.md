@@ -433,7 +433,7 @@ channel（通道，主控的一组数据总线）
 | **全盘扫描** | 扫描所有页重建映射 | 慢，但最兜底 |
 
 - **目标**：任何掉电点，恢复后映射表**一致**（不能丢已确认的写，不能认未确认的写）。
-- ⚠ 本仓：Journal + Checkpoint + closed SB 重建扫描（见 `ftl_design.md` §7/§8）。
+- ⚠ 本仓：Journal + Checkpoint + closed SB 重建扫描（见 `ftl_design.md` §3.7/§3.8）。
 
 ### 5.8 写放大 (WAF) 与 OP
 
