@@ -593,4 +593,74 @@ uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
  */
 void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock);
 
+/* ── 统计访问器 ──
+ *
+ * 「一个 Super Block / 全表的磨损与有效性怎么算」只在本模块定义：GC / WL / 搬移引擎
+ * 都消费同一份口径，不再各自手抄逐 plane 遍历。口径固定为：
+ *   · 坏块不计入全表统计；
+ *   · 退化单 plane 条目（重建产物）跳过哨兵 plane，按实际 plane 数计算；
+ *   · valid_count 单位是 **CW**（CW 级映射）。
+ *
+ * 统计是**只读**的派生量，不进账本、不参与不变量维护。 */
+
+/* 单个 Super Block 的聚合值。 */
+typedef struct
+{
+    uint16_t valid_cw;    /* 各 plane valid_count 之和（CW 粒度） */
+    uint16_t plane_count; /* 实际存在的 plane 数（退化单 plane 条目 = 1；全哨兵 = 0） */
+    uint32_t erase_max;   /* 各 plane erase_count 取大 */
+    uint32_t erase_sum;   /* 各 plane erase_count 之和（平均 = erase_sum / plane_count） */
+    uint32_t pe_min;      /* 各 plane last_pe_ts 取小（plane_count == 0 时为 UINT32_MAX） */
+    uint32_t read_sum;    /* 各 plane read_count 之和 */
+} allocator_sb_stats_t;
+
+/*
+ * allocator_sb_stats - 计算一个 Super Block 的各 plane 聚合值
+ *
+ * @param alloc    Allocator 上下文（前置条件，非法即 ASSERT）
+ * @param sb       目标 Super Block（前置条件，非法即 ASSERT）
+ * @param out      输出（前置条件，非法即 ASSERT）
+ */
+void allocator_sb_stats(const ftl_allocator_t *alloc, const super_block_t *sb, allocator_sb_stats_t *out);
+
+/* 全表（好块）磨损统计，一次扫描得到全部派生量。 */
+typedef struct
+{
+    uint32_t erase_min;  /* 最小擦除次数；good_count == 0 时为 0 */
+    uint32_t erase_max;  /* 最大擦除次数；good_count == 0 时为 0 */
+    uint32_t erase_sum;  /* 擦除次数总和（平均 = erase_sum / good_count） */
+    uint32_t max_pe_ts;  /* 最大 last_pe_ts（0 = 本上电周期尚无块被擦） */
+    uint16_t good_count; /* 参与统计的好块数 */
+} allocator_erase_stats_t;
+
+/*
+ * allocator_erase_stats - 全表好块磨损统计（一次扫描）
+ *
+ * @param alloc  Allocator 上下文（前置条件，非法即 ASSERT）
+ * @param out    输出（前置条件，非法即 ASSERT）
+ */
+void allocator_erase_stats(const ftl_allocator_t *alloc, allocator_erase_stats_t *out);
+
+/*
+ * allocator_count_blocks_below - 擦除次数严格小于 threshold 的好块数
+ *
+ * @param alloc      Allocator 上下文（前置条件，非法即 ASSERT）
+ * @param threshold  上界（不含）
+ * @return 好块数（0..FTL_BLOCK_TOTAL）
+ */
+uint16_t allocator_count_blocks_below(const ftl_allocator_t *alloc, uint32_t threshold);
+
+/*
+ * allocator_find_closed_sb - 按 Super Block 各 plane 块号在 Closed 列表里定位条目
+ *
+ * 比对**全部 plane**：Policy B 下不同 SB 的哨兵 plane 可能相同，只比一个 plane
+ * 会命中另一条同哨兵条目。供搬移收尾（migrate.c）在回收后定位并移除条目。
+ *
+ * @param alloc    Allocator 上下文（前置条件，非法即 ASSERT）
+ * @param sb       目标 Super Block（前置条件，非法即 ASSERT）
+ * @param out_idx  输出：Closed 列表索引（找到时才写）
+ * @return true 找到（*out_idx 有效）；false 不在列表内
+ */
+bool allocator_find_closed_sb(const ftl_allocator_t *alloc, const super_block_t *sb, uint16_t *out_idx);
+
 #endif /* FTL_ALLOCATOR_H */

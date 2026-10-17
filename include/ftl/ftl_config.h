@@ -504,6 +504,17 @@ static inline uint32_t ftl_cw_plane_mask(uint8_t plane)
     return (uint32_t)(ftl_cw_span_mask(0U, CW_NUM - 1U) << ((uint32_t)plane * CW_NUM));
 }
 
+/* 单 plane 内单个 CW 的 flat 位（已左移到该 plane 的段）。
+ * ⚠ flat 是**绝对**编号：plane 1 的 CW0 是 bit CW_NUM，不是 bit 0。
+ *   所有 CW 位图（含逐 plane 保存的 `mig_job_t.cw_bitmap[]`）都用本函数构造，
+ *   避免同一份位图出现「绝对位置、相对位判」两种写法。 */
+static inline uint32_t ftl_cw_bit(uint8_t plane, uint8_t cw)
+{
+    ASSERT(plane < PLANE_NUM);
+    ASSERT(cw < CW_NUM);
+    return (uint32_t)1U << ((uint32_t)plane * CW_NUM + cw);
+}
+
 /* 位图覆盖了几个 plane（= 本命令的 multi-plane 数；全空 → 0，调用者自判非法）。
  * ⚠ 界走 PLANE_NUM（几何常量），与 fc_command_plane_span 的上界同源。 */
 static inline uint8_t ftl_cw_bitmap_plane_count(uint32_t bitmap)

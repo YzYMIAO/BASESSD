@@ -6,6 +6,7 @@
 #include "fc_types.h"
 #include "nand/nand_config.h" /* PLANE_NUM / CW_NUM / paa_to_plane */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -144,12 +145,21 @@ typedef enum
 #define FC_CW_STATUS_SUCCESS    (FC_CW_STATUS_READY)
 
 /* 「失败位」的规范集合——上表六个错误位的并集（READY / PROTECTED / UNUSED 不算失败）。
- * 唯一读者：fc_complete_from_nand()（fc.c）用它挑出**首个失败 CW** 的 desc_id，
- * 以兑现 fc_command_status_t.desc_id 的契约（"first-failing desc on error"）。
- * 判「CW 是否失败」时一律用它，不要就地重列位——六位散落多处时漏一位不会有编译错误。 */
+ * 它是失败判定的**唯一定义**：fc_complete_from_nand()（fc.c）用它挑出**首个失败 CW**
+ * 的 desc_id（兑现 fc_command_status_t.desc_id 的 "first-failing desc on error"），
+ * 其余消费方一律经 `fc_cw_status_has_error()`。不要就地重列位——六位散落多处时
+ * 漏一位不会有编译错误。 */
 #define FC_CW_STATUS_ERROR_MASK                                                                  \
     (FC_CW_STATUS_NAND_FAIL | FC_CW_STATUS_TIMEOUT | FC_CW_STATUS_CRC_ERROR | FC_CW_STATUS_UNC | \
      FC_CW_STATUS_MATA_ERROR | FC_CW_STATUS_RAID_ERROR)
+
+/* 命令级聚合状态是否含任一错误位。
+ * 读路径的成败判据 = 本函数（单看 NAND_FAIL 会把 UNC / MATA_ERROR 当成功，
+ * 页内容不可信却照常搬出，见 ftl_sync_read_page 的注释）。 */
+static inline bool fc_cw_status_has_error(DWORD status)
+{
+    return (status & (DWORD)FC_CW_STATUS_ERROR_MASK) != 0U;
+}
 
 /* Command 与 Descriptor 共用 32 位操作配置（位域布局见下） */
 typedef struct fc_cmd_conf_t

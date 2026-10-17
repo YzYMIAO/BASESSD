@@ -1056,7 +1056,7 @@ static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
 
     cmd->config.operation   = ftl_plane_write_op(nplanes);
     cmd->config.multi_plane = ftl_plane_multi_field(nplanes);
-    cmd->config.cw          = 3U;
+    cmd->config.cw          = CW_NUM - 1U;
     cmd->config.crc         = FC_CRC_ENABLE;
     cmd->config.random      = FC_RANDOM_ENABLE;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
@@ -1353,7 +1353,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
      * 后者按段校验位图） */
     cmd->config.operation   = ftl_plane_read_op(nplanes);
     cmd->config.multi_plane = ftl_plane_multi_field(nplanes);
-    cmd->config.cw          = 3U;
+    cmd->config.cw          = CW_NUM - 1U;
     cmd->config.crc         = FC_CRC_ENABLE;
     cmd->config.random      = FC_RANDOM_ENABLE;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;

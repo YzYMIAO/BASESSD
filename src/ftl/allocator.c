@@ -593,3 +593,149 @@ void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock)
         }
     }
 }
+
+/* ── 统计访问器 ── */
+
+/* 账本统计的**唯一实现**：GC / WL / 搬移引擎都经这里读，不再各自遍历 blocks[]。
+ * 三条口径固定于此（见 allocator.h）：好块、跳过哨兵 plane、valid_count 单位 = CW。 */
+void allocator_sb_stats(const ftl_allocator_t *alloc, const super_block_t *sb, allocator_sb_stats_t *out)
+{
+    /* 前置条件（判据 2）：alloc 由调用者持有实例、sb 是 Closed 条目或其副本、
+     * out 是调用者栈上变量 ⇒ 非法即 ASSERT。 */
+    ASSERT(alloc != NULL);
+    ASSERT(alloc->blocks != NULL);
+    ASSERT(sb != NULL);
+    ASSERT(out != NULL);
+
+    uint16_t valid     = 0U;
+    uint32_t erase_max = 0U;
+    uint32_t erase_sum = 0U;
+    uint32_t pe_min    = UINT32_MAX;
+    uint32_t read_sum  = 0U;
+    uint8_t  n         = 0U;
+
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        if (!super_block_has_plane(sb, plane))
+        {
+            continue; /* 退化单 plane 条目的哨兵 plane 不可展开 */
+        }
+        const ftl_block_t *blk = &alloc->blocks[ftl_gblock(plane, sb->plane_blocks[plane])];
+
+        valid = (uint16_t)(valid + blk->valid_count);
+        erase_sum += blk->erase_count;
+        if (blk->erase_count > erase_max)
+        {
+            erase_max = blk->erase_count;
+        }
+        if (blk->last_pe_ts < pe_min)
+        {
+            pe_min = blk->last_pe_ts;
+        }
+        read_sum += blk->read_count;
+        n++;
+    }
+
+    out->valid_cw    = valid;
+    out->plane_count = n;
+    out->erase_max   = erase_max;
+    out->erase_sum   = erase_sum;
+    out->pe_min      = pe_min;
+    out->read_sum    = read_sum;
+}
+
+void allocator_erase_stats(const ftl_allocator_t *alloc, allocator_erase_stats_t *out)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(alloc->blocks != NULL);
+    ASSERT(out != NULL);
+
+    uint32_t min_ec = UINT32_MAX;
+    uint32_t max_ec = 0U;
+    uint32_t sum    = 0U;
+    uint32_t max_t  = 0U;
+    uint16_t n      = 0U;
+
+    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    {
+        const ftl_block_t *blk = &alloc->blocks[i];
+
+        if (ftl_block_is_bad(blk))
+        {
+            continue; /* 坏块不计入磨损统计 */
+        }
+        if (blk->erase_count < min_ec)
+        {
+            min_ec = blk->erase_count;
+        }
+        if (blk->erase_count > max_ec)
+        {
+            max_ec = blk->erase_count;
+        }
+        sum += blk->erase_count;
+        if (blk->last_pe_ts > max_t)
+        {
+            max_t = blk->last_pe_ts;
+        }
+        n++;
+    }
+
+    out->erase_min  = (n == 0U) ? 0U : min_ec;
+    out->erase_max  = max_ec;
+    out->erase_sum  = sum;
+    out->max_pe_ts  = max_t;
+    out->good_count = n;
+}
+
+uint16_t allocator_count_blocks_below(const ftl_allocator_t *alloc, uint32_t threshold)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(alloc->blocks != NULL);
+
+    uint16_t count = 0U;
+
+    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    {
+        const ftl_block_t *blk = &alloc->blocks[i];
+
+        if (ftl_block_is_bad(blk))
+        {
+            continue; /* 坏块不计入磨损统计 */
+        }
+        if (blk->erase_count < threshold)
+        {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+bool allocator_find_closed_sb(const ftl_allocator_t *alloc, const super_block_t *sb, uint16_t *out_idx)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(sb != NULL);
+    ASSERT(out_idx != NULL);
+
+    for (uint16_t i = 0U; i < alloc->closed_sb_count; i++)
+    {
+        const super_block_t *e    = &alloc->closed_sb_list[i];
+        bool                 same = true;
+
+        for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+        {
+            if (e->plane_blocks[plane] != sb->plane_blocks[plane])
+            {
+                same = false;
+                break;
+            }
+        }
+        if (same)
+        {
+            *out_idx = i;
+            return true;
+        }
+    }
+
+    return false;
+}

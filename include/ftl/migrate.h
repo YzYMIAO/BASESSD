@@ -4,13 +4,11 @@
 /*
  * migrate — Super Block 搬移引擎（GC / 静态 WL / 慢死预测**共用一台**异步 job）
  *
- * 阶段 4：把「读 victim 的有效 CW → 写进冷块 → 更新 L2P/Journal → 擦除归还」
- * 从**同步阻塞**改成**异步 job 状态机**。原实现是 gc.c 的 gc_migrate_sb +
- * gc_erase_and_free 与 wear_leveling.c 的 wl_relocate + wl_execute +
- * wl_predictive_relocate —— 三者的搬移主体逐字同构，差别只在
+ * 把「读 victim 的有效 CW → 写进冷块 → 更新 L2P/Journal → 擦除归还」实现为
+ * **异步 job 状态机**。GC / WL / 慢死预测的搬移主体逐字同构，差别只在
  *   · 谁当 victim（gc_select_victim / wl_select_victim / rr_predictive_scan）；
  *   · 擦完怎么处置（GC：归还 Free Pool；WL：退役 RETIRED）。
- * 故收敛成**一个** mig_job_t：`kind` 选 victim，`post` 决定收尾。
+ * 故共用**一个** mig_job_t：`kind` 选 victim，`post` 决定收尾。
  *
  * ── 为什么必须异步 ──
  *
@@ -26,35 +24,30 @@
  *
  *   · READ  逐页逐 plane：异步读 → 完成时解 META 得 cw_lba、记 rr_record_ecc / read_count
  *           （慢死预测闭环）。读失败 / 全页空洞 ⇒ 该 plane 无有效 CW。
- *   · READ_SETTLE 纯计算：逐 CW 反查 L2P 得 cw_bitmap。**先就绪前置**（阶段 5）——
+ *   · READ_SETTLE 纯计算：逐 CW 反查 L2P 得 cw_bitmap。**先就绪前置**——
  *           region 未驻留会起异步加载并**原地等待**，全部就绪才动 bitmap；否则半途而废
  *           会让 bitmap 一半有一半没有（重试时又从头 `|=`，语义静默错乱）。
- *   · WRITE 本页两 plane 都读完且有有效 CW ⇒ allocator_alloc_pair 拿目标页，逐 plane
+ *   · WRITE 本页各 plane 都读完且有有效 CW ⇒ allocator_alloc_pair 拿目标页，逐 plane
  *           提交 CW 子集写。写失败的 plane 不动 L2P（源数据仍有效，下轮再搬）。
  *   · WRITE_SETTLE 纯计算：逐 CW l2p_cache_write + journal_append + 有效计数迁移。
  *           同样**先就绪前置**再动账——半途而废会重复记账（valid_count 虚高、journal
  *           重复条目）。
  *   · FLUSH_JRN 等 Journal job 空闲（**F10 契约**：搬移条目先落盘再擦 victim）。
  *   · ERASE 逐 plane 异步擦：成功 erase_count++ / wear_mark_dirty / 清 valid，
- *           然后按 `post` **二选一**——`MIG_POST_FREE` 归还 Free Pool（入池），
- *           `MIG_POST_RETIRE` **出池** + `rr_retire_block` 退役（见 allocator.h 不变量②）；
+ *           然后按 `post` 二选一——`MIG_POST_FREE` 归还 Free Pool（入池），
+ *           `MIG_POST_RETIRE` **不入池** + `rr_retire_block` 退役（见 allocator.h 不变量②）；
  *           失败 bbt_mark_bad（该函数同时把块驱逐出池）。
- *   · DONE  allocator_remove_closed_sb + 进展计数（gc_reclaimed_count）/ 预测命中日志。
+ *   · DONE  allocator_find_closed_sb + allocator_remove_closed_sb + 进展计数
+ *           （gc_reclaimed_count）/ 预测命中日志。
  *
- * ── 与同步版的**行为差异**（刻意，登记在案）──
+ * ── 中止语义（数据安全约束）──
  *
- * 1. **分配不到目标页**：原 gc_migrate_sb 在 allocator_alloc_pair 失败时 `break` 出页循环，
- *    而其调用者 ftl_gc_reclaim_one **无条件**接着 gc_erase_and_free ⇒ **擦掉尚未搬移的
- *    有效页 = 静默丢数据**。本引擎改为：分配不到目标页 ⇒ **中止 job 且不擦 victim**
- *    （源数据仍在、L2P 未动、条目留在 closed_sb_list），下轮 GC 再来。自愈，且不丢数据。
- *
- * 2. **擦除失败时不再退役**：原 wl_predictive_relocate 在 wl_relocate 返回后**无条件**
- *    rr_retire_block（即使 gc_erase_and_free 已把该块标坏）。本引擎只在**擦除成功**时
- *    退役（`post == MIG_POST_RETIRE`）——擦不掉的块归 bbt_mark_bad 管，把它同时标成
- *    "RETIRED、仍可读"是自相矛盾的。擦除失败本身是极端分支（NAND 拒擦）。
- *
- * 3. **提交侧卡死计数**：原同步版没有这个概念（阻塞调用要么成功要么当场报错）。异步后
- *    加 MIG_SUBMIT_STALL_MAX 轮上限，超限中止 job（同 1：不擦 victim，数据无损）。
+ * 1. **分配不到目标页 ⇒ 中止且不擦 victim**（源数据仍在、L2P 未动、条目留在
+ *    closed_sb_list），下轮 GC 再来。**不得**先擦后搬——那会静默丢掉尚未搬移的有效页。
+ * 2. **擦除失败时不退役**：擦不掉的块归 bbt_mark_bad 管；同时标成 "RETIRED、仍可读"
+ *    是自相矛盾的。擦除失败本身是极端分支（NAND 拒擦）。
+ * 3. **提交侧卡死计数**：连续 MIG_SUBMIT_STALL_MAX 轮提交不出去 ⇒ 中止 job（同 1：
+ *    不擦 victim，数据无损）。**永久错误**（建链 / 入参）立即中止，不空转重试。
  *
  * ── 单飞行 ──
  *
@@ -71,6 +64,7 @@
 #include "ftl/ftl_type.h"     /* lba_t */
 #include "nand/nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* 前向声明（ftl_context_t 在 ftl.h 中定义；本文件被 ftl.h include，用 struct 标签打破环） */
@@ -92,9 +86,9 @@ typedef enum
 {
     MIG_IDLE = 0,     /* 空闲：无 job */
     MIG_READ,         /* 提交阶段：读 victim 当前页的当前 plane */
-    MIG_READ_SETTLE,  /* 纯计算：反查 L2P 得 cw_bitmap（region 未就绪则原地等，阶段 5） */
+    MIG_READ_SETTLE,  /* 纯计算：反查 L2P 得 cw_bitmap（region 未就绪则原地等） */
     MIG_WRITE,        /* 提交阶段：写目标页的当前 plane */
-    MIG_WRITE_SETTLE, /* 纯计算：改 L2P/Journal + 迁移有效计数（同上，阶段 5） */
+    MIG_WRITE_SETTLE, /* 纯计算：改 L2P/Journal + 迁移有效计数 */
     MIG_FLUSH_JRN,    /* 纯计算：等 Journal job 空闲（F10 屏障） */
     MIG_ERASE,        /* 提交阶段：擦 victim 的当前 plane */
     MIG_DONE          /* 纯计算：收尾（移除 closed 条目 + 计数 + 复位 job） */
@@ -104,8 +98,9 @@ typedef enum
 typedef enum
 {
     MIG_POST_FREE = 0, /* GC：擦完归还 Free Pool */
-    MIG_POST_RETIRE    /* WL / 慢死预测：**出池**后退役（RETIRED，不再分配、不标坏、仍可读）。
-                        * ⚠ 必须出池而非入池——选块判据是 Free Pool **数组**，留在池里会被再次分配 */
+    MIG_POST_RETIRE    /* WL / 慢死预测：**不入池**，置 RETIRED（不再分配、不标坏、仍可读）。
+                        * ⚠ 退役块不得进 Free Pool——选块判据是 Free Pool **数组**，
+                        *    留在池里会被再次分配 */
 } mig_post_t;
 
 /* victim 来源（只用于日志与收尾差异）。 */
@@ -118,22 +113,21 @@ typedef enum
 
 /* ── 搬移 job（per-instance，放 ftl->mig）──
  *
- * ⚠ page_buf 是 4KB 的页镜像，**今天在 gc_migrate_sb / wl_relocate 的栈上**，迁到本
- *   结构体是真实新增的 `.bss` 占用（见 ftl_optimization_plan 内存预算）。
- *   放上下文而非栈：异步 job 的栈帧早就在提交时返回了，数据必须活到完成。
+ * ⚠ page_buf 是 4KB 的页镜像，常驻上下文而非调用栈：异步 job 的栈帧在提交命令时
+ *   就已返回，数据必须活到完成回调。它是真实的 `.bss` 占用（见内存预算）。
  */
 typedef struct
 {
-    uint8_t  active;       /* 1 = job 在跑（单飞行门） */
+    bool     active;       /* true = job 在跑（单飞行门） */
+    bool     waiting;      /* true = 有一条搬移命令在飞（等 g_op_service[FTL_OP_GC]/[FTL_OP_WL]） */
+    bool     aborted;      /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
+    bool     decode_ok;    /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
+    bool     write_ok;     /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
     uint8_t  phase;        /* mig_phase_t */
     uint8_t  kind;         /* mig_kind_t */
     uint8_t  post;         /* mig_post_t */
-    uint8_t  waiting;      /* 1 = 有一条搬移命令在飞（等 g_op_service[FTL_OP_GC]/[FTL_OP_WL]） */
     uint8_t  page;         /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
     uint8_t  plane;        /* 当前 plane（读/写/擦各自迭代） */
-    uint8_t  aborted;      /* 1 = 中止（不擦 victim、不移除 closed 条目、不计数） */
-    uint8_t  decode_ok;    /* 1 = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
-    uint8_t  write_ok;     /* 1 = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
     uint16_t stall_rounds; /* 连续提交不出去的轮数（见 MIG_SUBMIT_STALL_MAX） */
 
     super_block_t victim; /* victim 的**副本**（closed_sb_list 会被 swap-remove 挪动，不持指针） */

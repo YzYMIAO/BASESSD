@@ -2,14 +2,15 @@
  * gc.c — 垃圾回收（触发判定 + 选 victim + 共用读原语）
  *
  * 职责：
- *   按四项加权评分选 victim SB，并给出 GC 触发判定；搬移与擦除归还已迁入 migrate.c。
+ *   按四项加权评分选 victim SB，并给出 GC 触发判定。搬移与擦除归还在 migrate.c
+ *   的异步 job 里完成（GC / WL 共用一台引擎，靠 kind/post 区分）。
  *
  * 与 wear_leveling.c 的分工：
  *   GC —— 回收**无效页多**的块（空间回收，顺带磨损均衡）；
  *   WL —— 搬运**擦得少**的块（磨损拉平，顺带 read disturb 缓解）。两者共用
  *         gc_read_page_with_lba 读原语与 migrate.c 的搬移引擎，且 GC 是 WL 的擦除出口。
  *
- * 三条触发（gc_check_triggers，位掩码；T2/T3/T6 已废弃见 gc.h）：
+ * 三条触发（gc_check_triggers，位掩码）：
  *   T1 空闲水位 < FREE_POOL_TARGET；T4 紧急 ≤ FREE_POOL_EMERGENCY；T5 磨损比超标。
  *
  * 文件结构：
@@ -17,10 +18,6 @@
  *   2. 全表极值        gc_table_extremes（static）
  *   3. 选 victim       gc_select_victim（四项加权评分）
  *   4. 触发判定        gc_check_triggers
- *
- * ⚠ 搬移（原第 4 节 gc_migrate_sb）与擦除归还（原 gc_erase_and_free）已随阶段 4 迁入
- *   `ftl/migrate.c` 的异步 job（GC / WL 共用一台引擎，靠 kind/post 区分）——本文件
- *   只留选块策略与共用读原语。
  *
  * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
  */
@@ -43,41 +40,43 @@
  *   alloc → config → submit → sync_wait → read_data → get_meta → release
  *
  * 唯一调用者是掉电重建（ftl_rebuild_closed_sb_list 的逐页反查）。
- * ⚠ 搬移读（GC / WL / 慢死预测）已随阶段 4 改走 **异步** 路径：migrate.c 用
- *   ftl_async_read_page + gc_decode_cw_lba（本函数的后半段）在完成服务函数里收尾，
- *   不再经过本函数。原先为搬移读加的 ecc_out / read_count_out 两个出参随之删除——
- *   ECC 趋势与 read_count++ 现在记在 migrate.c 的读完成分支里（B4 闭环不变）。
+ * 搬移读（GC / WL / 慢死预测）走 **异步** 路径：migrate.c 用 ftl_async_read_page +
+ * gc_decode_cw_lba 在完成服务函数里收尾——不经过本函数。
  *
  * ⚠ CW 级映射（IU = 1 CW）+ DRAM-less approach ③：本函数读**整页**（该 plane 的 4 个 CW），
- *   把**每个 CW 自己的 META**（即本仓的「OOB」反向映射，头 4B = 该 CW 的扇区 LBA）解码到
+ *   把**每个 CW 自己的 META**（本仓的「OOB」反向映射，头 4B = 该 CW 的扇区 LBA）解码到
  *   `cw_lba[c]`。未写过的 CW（META 全 FF）填 `FTL_LBA_INVALID`。调用者据此**逐 CW 反查 L2P**
  *   判有效性——不靠任何常驻位图（flash reverse-mapping，见 bst.h 文件头）。
- *   `page_base_out` 仍返回页基址（CW0 的扇区 LBA，由**首个写过的 CW** 反推：base = META(c_lo) − c_lo），
+ *   `page_base_out` 返回页基址（CW0 的扇区 LBA，由**首个写过的 CW** 反推：base = META(c_lo) − c_lo），
  *   供搬移目标页的 META 基址复用。
  *
+ * ⚠ 成败判据 = FC_CW_STATUS_ERROR_MASK 全集（fc_cw_status_has_error）：UNC / MATA_ERROR
+ *   页的内容不可信，不得当成功解析 META。
+ *
  * @param pba            物理地址（**页基址**，cw 位为 0）
- * @param buffer         输出：整页用户数据 buffer（FTL_READ_USER_SIZE 字节，可为 NULL）
+ * @param buffer         输出：整页用户数据 buffer（PAGE_MAIN_SIZE 字节，可为 NULL）
  * @param cw_lba         输出：逐 CW 的扇区 LBA（长度 CW_NUM；未写过 = FTL_LBA_INVALID）
  * @param page_base_out  输出：页基址（CW0 的扇区 LBA）（可为 NULL）
- * @return FTL_OK 成功, FTL_ERROR 失败（读失败 / 全页无写过 CW）
+ * @return FTL_OK 成功；FTL_AGAIN 命令池空；FTL_ERROR 读失败 / 全页无写过 CW
  */
 ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba[CW_NUM], lba_t *page_base_out)
 {
+    /* 命令池空是**资源类**结果（FTL_AGAIN）；唯一调用者在开机重建期，池结构性充足。 */
     fc_command_t *cmd = fc_command_alloc();
     if (cmd == NULL)
     {
-        return FTL_ERROR;
+        return FTL_AGAIN;
     }
 
     cmd->config.operation   = OP_NORMAL_READ_PAGE_WITH_DATA_OUT;
-    cmd->config.cw          = 3U;
+    cmd->config.cw          = CW_NUM - 1U;
     cmd->config.crc         = FC_CRC_ENABLE;
     cmd->config.random      = FC_RANDOM_ENABLE;
     cmd->config.ldpc        = FC_ECC_MODE_BCH;
     cmd->config.multi_plane = 0U;
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    cmd->meta               = FC_META_UNKNOWN; /* 不知道 LBA——正是要从页内 META 读回来（v24） */
+    cmd->meta               = FC_META_UNKNOWN; /* 不知道 LBA——正是要从页内 META 读回来 */
 
     if (ftl_cmd_setup_ppa(cmd, pba) != FTL_OK)
     {
@@ -95,7 +94,9 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, uint8_t *buffer, lba_t cw_lba
             return FTL_ERROR;
         }
 
-        if (completion.status & FC_CW_STATUS_NAND_FAIL)
+        /* ⚠ [待上板] 成败判据 = ERROR_MASK 全集：只认 NAND_FAIL 会把 UNC / MATA_ERROR
+         * 页当成功读并解析 META（重建期可能写回错误映射）。 */
+        if (fc_cw_status_has_error(completion.status))
         {
             (void)fc_command_release(cmd);
             return FTL_ERROR;
@@ -174,7 +175,8 @@ bool gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], l
         memcpy(&m, meta_ptr, sizeof(m));
 
         /* 合法 META 判据：非全 1（未写过）+ 低位 plane/cw 与本 CW 自洽 */
-        if ((m == 0xFFFFFFFFU) || (ftl_lba_cw((lba_t)m) != c) || (ftl_lba_plane((lba_t)m) != phys_plane))
+        if ((m == (uint32_t)FTL_LBA_INVALID) || (ftl_lba_cw((lba_t)m) != c) ||
+            (ftl_lba_plane((lba_t)m) != phys_plane))
         {
             continue;
         }
@@ -202,55 +204,30 @@ bool gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], l
 /* ── 2. 全表极值 ── */
 
 /*
- * gc_table_extremes - 全表（非坏块）磨损/时间极值，一次扫描
+ * gc_table_extremes - 全表（非坏块）磨损/时间极值
  *
  * 两个消费方共用（避免各扫一遍全表）：
- *   ① gc_select_victim（P1-1）——评分归一化分母（max_erase / max_pe_ts）；
- *   ② gc_check_triggers（P1-2）的 T5——磨损比 max_erase/min_erase。
+ *   ① gc_select_victim —— 评分归一化分母（max_erase / max_pe_ts）；
+ *   ② gc_check_triggers 的 T5 —— 磨损比 max_erase/min_erase。
  *
- * ⚠ 不复用 wear_leveling 的 wl_max_erase/wl_min_erase：它们形参是 ftl_context_t，
- *   而本文件两个调用者只拿得到 ftl_allocator_t（gc_select_victim 调用点
- *   ftl.c:323/389/718 保持不变）。
+ * 统计口径（好块 / 坏块排除）由 allocator 定义；本函数只把退化值折算成 GC 需要的语义：
+ *   · 无任何可统计块 ⇒ min_erase = 0（T5 视为"比值无意义"）；
+ *   · max_erase 兜底 >= 1U，防除零。
  *
- * @param alloc      Allocator 上下文（blocks 为 NULL 时输出中性值）
- * @param min_erase  输出：最小擦除次数（无任何可统计块时为 0 ⇒ T5 视为"比值无意义"）
- * @param max_erase  输出：最大擦除次数（兜底 >= 1U，防除零）
+ * @param alloc      Allocator 上下文（前置条件）
+ * @param min_erase  输出：最小擦除次数
+ * @param max_erase  输出：最大擦除次数（>= 1U）
  * @param max_pe_ts  输出：最大 last_pe_ts（0 = 本上电周期尚无块被擦 ⇒ 时间项中性）
  */
 static void gc_table_extremes(const ftl_allocator_t *alloc, uint32_t *min_erase, uint32_t *max_erase, uint32_t *max_pe_ts)
 {
-    uint32_t min_e = UINT32_MAX;
-    uint32_t max_e = 0U;
-    uint32_t max_t = 0U;
+    allocator_erase_stats_t st;
 
-    if ((alloc != NULL) && (alloc->blocks != NULL))
-    {
-        for (uint16_t b = 0U; b < FTL_BLOCK_TOTAL; b++)
-        {
-            const ftl_block_t *blk = &alloc->blocks[b];
+    allocator_erase_stats(alloc, &st);
 
-            if (ftl_block_is_bad(blk))
-            {
-                continue;
-            }
-            if (blk->erase_count < min_e)
-            {
-                min_e = blk->erase_count;
-            }
-            if (blk->erase_count > max_e)
-            {
-                max_e = blk->erase_count;
-            }
-            if (blk->last_pe_ts > max_t)
-            {
-                max_t = blk->last_pe_ts;
-            }
-        }
-    }
-
-    *min_erase = (min_e == UINT32_MAX) ? 0U : min_e;
-    *max_erase = (max_e > 0U) ? max_e : 1U;
-    *max_pe_ts = max_t;
+    *min_erase = st.erase_min;
+    *max_erase = (st.erase_max > 0U) ? st.erase_max : 1U;
+    *max_pe_ts = st.max_pe_ts;
 }
 
 /* ── 3. 选 victim ── */
@@ -259,13 +236,13 @@ static void gc_table_extremes(const ftl_allocator_t *alloc, uint32_t *min_erase,
  * gc_select_victim
  *   功能：从 Closed SB 列表里按四项加权评分选回收代价最小的 SB 作 victim。
  *   参数：alloc —— 分配器；victim —— 出参（指向 closed_sb_list 内的条目）。
- *   返回：true 找到；false 未找到 / 参数非法。
+ *   返回：true 找到；false 未找到。
  *   实现要点：四项各自归一化到 0..1000——vr 有效页率、er 磨损率（越大越该回收旧块）、
  *             cp 温度（COLD 加分）、yp 年龄（越老越优先）；cost = 加权和，取小者胜；
  *             cost 相等取有效页更少者（确定性）。erase 项用 uint64_t 防溢出；
  *             age 项 `max_pe_ts > pe_min` 兜住 max_pe_ts==0 与 pe_min 越界两种退化（取中性 0）。
  * -------------------------------------------------------------------- */
-bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
+bool gc_select_victim(const ftl_allocator_t *alloc, super_block_t **victim)
 {
     /* 前置条件（判据 2）：调用者 migrate.c 传 &ftl->alloc 与栈上 &victim。 */
     ASSERT(alloc != NULL);
@@ -292,57 +269,35 @@ bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 
         if (sb->is_open)
         {
-            continue; /* 仍在写的 SB 不是回收对象 */
+            continue; /* 仍在写的 SB 不是回收对象（UT 钉住的契约） */
         }
 
-        uint16_t valid   = 0U;
-        uint8_t  present = 0U;
-        uint32_t er_max  = 0U;         /* 本 SB 的磨损代表：各 plane 取大 */
-        uint32_t pe_min  = UINT32_MAX; /* 本 SB 的时间代表：各 plane 取小（越老越优先）*/
-
-        /* 有效 CW 数 = 各 plane 物理块 valid_count 之和（CW 级真实计数，替代 next_page 近似）。
-         * 退化单 plane 条目（重建产物）跳过哨兵 plane。 */
-        for (uint8_t p = 0U; p < PLANE_NUM; p++)
+        /* 各 plane 的聚合值（有效 CW / 磨损 / 时间）由 allocator 统一计算：
+         * 有效 CW = 各 plane valid_count 之和（CW 级真实计数）；退化单 plane 条目跳过哨兵 plane。 */
+        allocator_sb_stats_t st;
+        allocator_sb_stats(alloc, sb, &st);
+        if (st.plane_count == 0U)
         {
-            if (!super_block_has_plane(sb, p))
-            {
-                continue;
-            }
-            const ftl_block_t *blk = &alloc->blocks[ftl_gblock(p, sb->plane_blocks[p])];
-
-            valid = (uint16_t)(valid + blk->valid_count);
-            present++;
-            if (blk->erase_count > er_max)
-            {
-                er_max = blk->erase_count;
-            }
-            if (blk->last_pe_ts < pe_min)
-            {
-                pe_min = blk->last_pe_ts;
-            }
-        }
-        if (present == 0U)
-        {
-            continue;
+            continue; /* 全哨兵条目 */
         }
 
         /* 四项各自归一化到 0..1000；cost 取小 = 越优先回收。
          * erase 项用 uint64_t 中间量防溢出（erase_count 是 uint32_t，×1000 理论上可溢出）。
          * age 项的 `max_pe_ts > pe_min` 同时兜住两种退化：① max_pe_ts == 0（上电后尚无块被擦）；
-         * ② 本 SB 的 plane 块已被标坏 ⇒ gc_score_scale 跳过它 ⇒ pe_min 可能大于 max_pe_ts
+         * ② 本 SB 的 plane 块已被标坏 ⇒ 全表统计跳过它 ⇒ pe_min 可能大于 max_pe_ts
          * （相减会下溢成大数、把 yp 绕回）。两者一律取 age_ratio = 0（时间项中性）。 */
-        uint32_t vr = ((uint32_t)valid * 1000U) / ((uint32_t)present * PAGES_PER_BLOCK * CW_NUM);
-        uint32_t er = (uint32_t)(((uint64_t)er_max * 1000U) / max_erase);
+        uint32_t vr = ((uint32_t)st.valid_cw * 1000U) / ((uint32_t)st.plane_count * PAGES_PER_BLOCK * CW_NUM);
+        uint32_t er = (uint32_t)(((uint64_t)st.erase_max * 1000U) / max_erase);
         uint32_t cp = (sb->temperature == FTL_TEMP_HOT) ? 0U : 1000U;
-        uint32_t yp = 1000U - (((max_pe_ts > pe_min) ? (uint32_t)(((uint64_t)(max_pe_ts - pe_min) * 1000U) / max_pe_ts) : 0U));
+        uint32_t yp = 1000U - (((max_pe_ts > st.pe_min) ? (uint32_t)(((uint64_t)(max_pe_ts - st.pe_min) * 1000U) / max_pe_ts) : 0U));
 
         uint32_t cost = (GC_WEIGHT_VALID * vr) + (GC_WEIGHT_ERASE * er) + (GC_WEIGHT_TEMP * cp) + (GC_WEIGHT_AGE * yp);
 
-        /* cost 相等时取有效页更少者（确定性，且退化为旧的单维贪心） */
-        if ((cost < best_cost) || ((cost == best_cost) && (valid < best_valid)))
+        /* cost 相等时取有效页更少者（确定性，且退化为单维贪心） */
+        if ((cost < best_cost) || ((cost == best_cost) && (st.valid_cw < best_valid)))
         {
             best_cost  = cost;
-            best_valid = valid;
+            best_valid = st.valid_cw;
             best_vr    = vr;
             best_er    = er;
             best_cp    = cp;
@@ -356,9 +311,13 @@ bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
     {
         /* 观测口：一次空闲 GC 突发最多打 FREE_POOL_TARGET = 32 行
          * （每 victim 每 plane 一行；ftl_service_idle 循环调用），
-         * 相对 GC 自身的 NAND 擦除/搬移耗时可忽略。 */
+         * 相对 GC 自身的 NAND 擦除/搬移耗时可忽略。哨兵 plane 不打印。 */
         for (uint8_t p = 0U; p < PLANE_NUM; p++)
         {
+            if (!super_block_has_plane(*victim, p))
+            {
+                continue;
+            }
             LOGI("[GC] victim plane%u=%u vr=%u er=%u cp=%u yp=%u cost=%lu\r\n",
                  (unsigned)p,
                  (unsigned)(*victim)->plane_blocks[p],
@@ -378,15 +337,17 @@ bool gc_select_victim(ftl_allocator_t *alloc, super_block_t **victim)
 /* --------------------------------------------------------------------
  * gc_check_triggers
  *   功能：算触发位掩码（调用点据此决定要不要回收、以及回收多少）。
- *   参数：alloc —— 分配器。
- *   返回：GC_TRIGGER_* 位掩码；0 无触发（含 alloc==NULL）。
+ *   参数：alloc —— 分配器（前置条件：调用者持有实例，非法即 ASSERT）。
+ *   返回：GC_TRIGGER_* 位掩码；0 无触发。
  *   实现要点：只看**空间与磨损**——T1 水位 < FREE_POOL_TARGET（主动补池）；
  *             T4 紧急 ≤ FREE_POOL_EMERGENCY（与 T1 同源但阈值更低，池见底）；
  *             T5 磨损比 max/min 超标（min==0 不触发——"有块从未被擦"是静态 WL 的职责；
- *             max 地板防早期空跑）。⚠ T2（写入量）/T3（定时）已废弃，见 gc.h 位注释。
+ *             max 地板防早期空跑）。
  * -------------------------------------------------------------------- */
 uint32_t gc_check_triggers(const ftl_allocator_t *alloc)
 {
+    /* NULL ⇒ 不触发：这是**文档化契约**（UT `test_gc_check_triggers` 钉住），
+     * 不是静默吞（C5 判据 4）。 */
     if (alloc == NULL)
     {
         return 0U;

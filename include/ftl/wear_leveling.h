@@ -6,7 +6,7 @@
  *
  * 动态磨损均衡（Dynamic WL）：
  *   allocator_select_plane_block_from_pool() 每次为**每个 plane 各自**从 Free Pool 选该 plane
- *   擦除次数最少的 Block（Policy B：两 plane 独立分配，不再要求 block 同号），
+ *   擦除次数最少的 Block（Policy B：各 plane 独立分配，不要求 block 同号），
  *   确保新分配的 Block 磨损均匀。已在 allocator 中实现。
  *
  * 静态磨损均衡（Static WL）：
@@ -20,7 +20,7 @@
  *   — 二者独立运行，互不干扰
  */
 
-#include "common/ssd_types.h"
+#include "common/ssd_types.h" /* bool */
 #include "nand/nand_config.h"
 
 #include <stdint.h>
@@ -41,11 +41,11 @@ struct ftl_context;
 
 typedef struct
 {
-    uint8_t  found : 1;               /* 是否找到 victim */
-    uint16_t plane_blocks[PLANE_NUM]; /* 双 Plane Block 号 */
+    bool     found;                   /* 是否找到 victim */
+    uint16_t plane_blocks[PLANE_NUM]; /* 各 plane Block 号 */
     uint32_t avg_erase;               /* victim 平均擦除次数 */
-    uint16_t valid_cw;                /* 有效 **CW** 数（双 Plane valid_count 之和；CW 级映射） */
-    uint32_t read_count;              /* 双 Plane read disturb 计数之和（B5 冷块优先权重） */
+    uint16_t valid_cw;                /* 有效 **CW** 数（各 plane valid_count 之和；CW 级映射） */
+    uint32_t read_count;              /* 各 plane read disturb 计数之和（B5 冷块优先权重） */
 } wl_victim_t;
 
 /* ── 接口 ── */
@@ -76,9 +76,13 @@ bool wl_should_trigger(const struct ftl_context *ftl);
 bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim);
 
 /*
- * ⚠ 搬移（原 wl_relocate / wl_execute / wl_predictive_relocate）已随阶段 4 迁入
- *   `ftl/migrate.h` 的异步 job：GC 与 WL 共用同一台引擎，`mig_begin_wl` /
- *   `mig_begin_predict` 是这两个站点的入口（本文件只留触发判定与选块策略）。
+ * ⚠ 搬移在 `ftl/migrate.h` 的异步 job 里完成：GC 与 WL 共用同一台引擎，
+ *   `mig_begin_wl` / `mig_begin_predict` 是这两个站点的入口（本文件只留触发判定与选块策略）。
+ */
+
+/*
+ * 磨损统计访问器 —— 口径（好块 / 坏块排除）由 allocator 定义，这里只做本模块的查询入口。
+ * 热路径（wl_should_trigger）直接调 allocator_erase_stats 一次取全，不逐个调用下面的 API。
  */
 
 /*
@@ -87,12 +91,12 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim);
 uint32_t wl_max_erase(const struct ftl_context *ftl);
 
 /*
- * wl_min_erase - 获取最小擦除次数
+ * wl_min_erase - 获取最小擦除次数（无好块返回 0）
  */
 uint32_t wl_min_erase(const struct ftl_context *ftl);
 
 /*
- * wl_avg_erase - 获取平均擦除次数
+ * wl_avg_erase - 获取平均擦除次数（无好块返回 0）
  */
 uint32_t wl_avg_erase(const struct ftl_context *ftl);
 

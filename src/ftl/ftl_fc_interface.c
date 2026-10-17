@@ -136,7 +136,7 @@ ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap
 
         for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
-            if ((mask & ((uint32_t)1U << ((uint32_t)plane * CW_NUM + cw))) == 0U)
+            if ((mask & ftl_cw_bit(plane, cw)) == 0U)
             {
                 continue;
             }
@@ -215,11 +215,11 @@ static ftl_status_t ftl_cmd_build_pair_chain(fc_command_t *cmd, const nand_pba_t
         }
 
         ASSERT(pba_is_valid(pba[plane]));                  /* 逐 plane 的行地址都由它转出，越界位会静默算错地址 */
-        const nand_paa_t row_paa = pba_to_paa(pba[plane]); /* v47：PBA→PAA 在 FTL 侧转出 */
+        const nand_paa_t row_paa = pba_to_paa(pba[plane]); /* PBA→PAA 在 FTL 侧转出 */
 
         for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
-            if ((mask & ((uint32_t)1U << ((uint32_t)plane * CW_NUM + cw))) == 0U)
+            if ((mask & ftl_cw_bit(plane, cw)) == 0U)
             {
                 continue;
             }
