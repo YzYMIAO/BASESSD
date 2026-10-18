@@ -448,7 +448,8 @@ void rr_kick(ftl_context_t *ftl)
      *   那段同样属于「job 卡住」，正是心跳要暴露的。 */
     if (ftl->rr.stage == (uint8_t)RR_STAGE_IDLE)
     {
-        ftl_job_heartbeat_reset(&ftl->rr.log_ms, &ftl->rr.start_ms);
+        ftl->rr.log_ms   = 0U;
+        ftl->rr.start_ms = 0U;
     }
     else if (ftl_job_heartbeat(&ftl->rr.log_ms, &ftl->rr.start_ms))
     {

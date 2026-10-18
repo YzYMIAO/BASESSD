@@ -23,7 +23,7 @@
  *   2. 内部工具      pull_from_op / select_plane_block_from_pool / open_sb / close_sb
  *   3. 关闭/回收     allocator_close_open_sb / allocator_remove_closed_sb
  *   4. 分配          allocator_alloc_pair / allocator_alloc_log_block
- *   5. 归还          allocator_free_block / allocator_free_log_block / allocator_remove_from_free
+ *   5. 归还          allocator_free_block / allocator_remove_from_free
  *   6. 重建入口      allocator_add_closed_sb
  *
  * ⚠ 本文件只做**账本**，不做介质操作：块的擦除由调用者（migrate.c 的搬移 job 等）在归还前完成。
@@ -504,15 +504,6 @@ ftl_status_t allocator_alloc_log_block(ftl_allocator_t *alloc, uint8_t plane, ui
     *out_gblock = gblock;
 
     return FTL_OK;
-}
-
-/* allocator_free_log_block — 归还独占块；与 allocator_free_block 同一入口语义（调用者保证已擦除） */
-void allocator_free_log_block(ftl_allocator_t *alloc, uint16_t gblock)
-{
-    /* 前置条件（判据 2）：metadata.c 传 &ftl->alloc 与自己持有的 LOG 块号。
-     * alloc / gblock 范围的校验统一由 allocator_free_block（唯一漏斗）负责，
-     * 本层不重复（§二十六）。调用者保证块已擦除——与漏斗契约一致。 */
-    allocator_free_block(alloc, gblock);
 }
 
 /* ── 重建入口 ── */

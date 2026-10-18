@@ -1082,7 +1082,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 | `allocator_close_open_sb` | `alloc == NULL`、`temperature >= FTL_TEMP_NUM` | `ftl.c` 传 `&ftl->alloc` + 编译期 HOT/COLD 常量 |
 | `allocator_alloc_pair` | `alloc/out == NULL`、`temperature >= FTL_TEMP_NUM` | `ftl.c` 栈上 `new_pba`；`migrate.c` 的 `m->dst` + 编译期 HOT/COLD 常量 |
 | `allocator_free_block` | `alloc == NULL`；判据 9 四条：越界 / BAD / 重复归还（`state == FREE`）/ 池满 | `migrate.c` / `main.c` / `bbt.c` / `allocator.c` 内部 OP 补池 |
-| `allocator_free_log_block` | **无**（转调 `allocator_free_block`，不重复守卫） | `metadata.c` 三处 |
+| ~~`allocator_free_log_block`~~ | v0.80 已删除（纯转发薄包装）⇒ 直接走 `allocator_free_block` | — |
 | `allocator_alloc_log_block` | `out_gblock == NULL`（`alloc` / `blocks` / `plane` 由 `allocator_select_plane_block_from_pool` 统一校验） | `metadata.c`（`plane` 来自 `dir->cur_metadata_plane`） |
 | `allocator_add_closed_sb` | `alloc/plane_blocks == NULL`、`temperature >= FTL_TEMP_NUM` | `power_failure_recovery.c` 局部数组 + 默认温度常量 |
 | `allocator_remove_from_free` | `alloc == NULL` | 唯一出池闸门：`power_failure_recovery.c` / `bbt.c` / `migrate.c` + `allocator.c` 内部 open_sb / alloc_log |
@@ -1101,15 +1101,16 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 `allocator_free_block` 两处，形态照抄 `fc.c` 的 `fc_build_request_data_planes`（§二十四）：
 `ASSERT` 先行 + 紧跟 `if (违反) 拒绝`，注释写明"`ASSERT` 在 `NDEBUG` 下被裁空"。
 
-1. **缺 `gblock < FTL_BLOCK_TOTAL` 上界**（与孪生兄弟 `allocator_free_log_block` 不对称）。
+1. **缺 `gblock < FTL_BLOCK_TOTAL` 上界**（当时与孪生兄弟 `allocator_free_log_block` 不对称；
+   该薄包装已于 v0.80 删除）。
    `blocks[]` 之后**紧跟** `free_blocks[]`（同为 `ftl_tables_t` 成员）⇒ 越界索引**静默改坏
    Free Pool 数组** = 漏账（不崩、不报错、容量无声流失）⇒ `ASSERT` + release 拒绝（`LOGE` + `return`）。
 2. **`free_count` 满时静默丢弃**（与 v0.78 修掉的 Closed 列表静默丢弃同形态）：池满 = 某块被
    重复归还（double free），入池同样越界写 `free_blocks[]` ⇒ `ASSERT` + 既有 `if` 作 release
    拒绝，补 `LOGE` 把"静默"变成"可诊断"。
 
-⚠ 因为 `allocator_free_block` 现在自己把 `gblock` 范围，`allocator_free_log_block` 里的
-同名检查**删掉不重复**（§十附判据 2：重复守卫收敛到共用漏斗）。
+⚠ 因为 `allocator_free_block` 现在自己把 `gblock` 范围，薄包装 `allocator_free_log_block`
+里的同名检查**删掉不重复**（§十附判据 2：重复守卫收敛到共用漏斗）；该包装已于 v0.80 整体删除。
 
 ### 连带：删用例（§四）
 

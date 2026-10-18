@@ -207,7 +207,8 @@
 > ⚠ **v0.75 阶段 8 追记**：同步版 `metadata_dir_compact` 与 `dir->compacting` 已删，改由
 > `md_job_t` 状态机承载（`metadata_dir_kick` + `ftl_op_metadata`）。**victim 判据、触发点、
 > ①②③④⑤ 顺序全不变**；两处实现差异：① 压缩不再就地阻塞服务循环，改为逐 region 提交异步
-> 读写；② `metadata_dir_commit_region` 不再就地擦块（改为登记 `job.reclaim_target`），
+> 读写；② `metadata_dir_commit_region` 不再就地擦块（v0.75 登记单槽 `reclaim_target`；
+> v0.80 起改为 `reclaim_pending` 位图 + 全异步擦除），
 > 因为它是从 `ftl_op_l2p` 的完成服务函数里被调用的——就地擦 = 在完成泵里嵌套泵。
 
 - **问题（原文留档）**：`metadata_dir_reclaim`（`metadata.c:573-596`）只回收 `l2p_live[g] == 0` 的块：

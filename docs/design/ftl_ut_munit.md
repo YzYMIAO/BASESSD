@@ -143,7 +143,7 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | `add_closed_sb_full` | ~~**边界**：塞满 `SUPER_BLOCK_LIST_MAX` 后返回 `UINT16_MAX` 且**不写入**~~ **已撤销**：v0.78 起容量 = `FTL_BLOCK_TOTAL`（每条占 1 块 ⇒ 满结构上不可能），实现是 ASSERT 而非返回码，本用例不可测（见 `test_ftl.c` 文件头 ①） |
 | `remove_closed_sb_swap_remove` | 删中间项：末项搬到该位**且 `sb_id` 修正**、count-1（swap-remove 索引坑）；被删块 `sb_id` 复位 `FTL_BLOCK_NO_SB` |
 | `remove_from_free` | `allocator_remove_from_free`（swap-remove）→ count-1、块不在池；**移除不存在的块无害**（count 不变，负例） |
-| `reserved_alloc_free` | `allocator_alloc_log_block` 置 LOG；`allocator_free_log_block` 归还池 |
+| `reserved_alloc_free` | `allocator_alloc_log_block` 置 LOG；`allocator_free_block` 归还池 |
 | **`open_sb_never_picks_metadata`** | **回归用例**：metadata 块 0..62 被 `allocator_init` 标 FREE 但**不在 Free Pool** ⇒ 新建 SB 两 plane 块都 **≥63**（钉住历史真缺陷） |
 | `open_sb_min_erase_count` | 池内多块时选该 plane `erase_count` 最小者（动态 WL） |
 | **`op_fallback_per_plane`** | **回归用例（v0.74）**：某 plane Free Pool 空、其 OP 池有块 ⇒ `allocator_alloc_pair` 必须成功且该 plane 拿到 **OP 池里那块**（修复前 OP 池全局，拉进来的是 plane 0 的块 ⇒ 选不中） |

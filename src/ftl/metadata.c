@@ -4,7 +4,8 @@
  * 职责：
  *   提供 FTL 全部持久化元数据（Anchor / Checkpoint / BBT / L2P region）共用的
  *   落盘原语：环形 record 池的寻址/定位/换块擦除；Anchor（Metadata Directory 快照）
- *   的组页/落盘/加载；L2P 日志块的追加槽/登记/回收；以及"这块是不是元数据块"的判定。
+ *   的组页/落盘/加载；L2P 日志块的追加槽/登记；以及"这块是不是元数据块"的判定。
+ *   日志块的**回收与压缩**状态机在 metadata_job.c（本文件只负责登记待回收位图）。
  *
  * 与 metadata.h 的分工：
  *   metadata.h —— 结构（metadata_ring_t / metadata_anchor_page_t / metadata_dir_cache_t）+
@@ -19,18 +20,17 @@
  *   一、元数据 record 池（环形轮转）—— Anchor / Checkpoint / BBT 共用
  *   二、Anchor 池（Metadata Directory 的 record 池）
  *   三、Directory 查询 / 更新
- *   四、L2P 日志块：追加槽 / 登记 / 回收（元数据写模型 ①②③④）+ 后台整理 job
+ *   四、L2P 日志块：追加槽 / 登记（元数据写模型 ①②③④）
  *   五、Anchor 落盘 / 加载
  *   六、元数据块判定
  *
- * ⚠ 同步 / 异步的分界（v0.75 阶段 8 起）：
- *   · **异步**：日志块的回收与压缩（`md_job_t` + g_op_service[FTL_OP_METADATA]）——
- *      它们原来嵌在 `l2p_cache_flush_kick → metadata_dir_append_slot / ftl_op_l2p →
- *      metadata_dir_commit_region` 这条**完成回调链**上，就地擦块就是在完成泵里嵌套泵。
- *    · **同步（残留）**：开机加载 / 格式化（metadata_dir_load / init）、
- *      Anchor 池定位（metadata_ring_locate）、append_slot 换块前的全池 sweep
- *      （metadata_dir_reclaim）。前者在 superloop 之前跑（无泵可等），后两者是
- *      后台路径且有界。
+ * ⚠ 同步 / 异步的分界：
+ *   · **异步**：日志块的回收与压缩（`md_job_t` + g_op_service[FTL_OP_METADATA]，
+ *      状态机在 metadata_job.c）。待回收块由 commit_region / append_slot 登记进
+ *      `reclaim_pending` 位图，运行期没有任何同步擦除。
+ *   · **同步（刻意）**：开机加载 / 格式化（metadata_dir_load / init）、Anchor 池定位
+ *      （metadata_ring_locate）——前者在 superloop 之前跑（无泵可等），后者只在
+ *      冷启动后首次整理出现。
  * ⚠ 无断言——失败一律返回 FTL_ERROR / NAND_PBA_INVALID（服务函数按错误位判失败）。
  */
 
@@ -46,6 +46,7 @@
 #include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
 #include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
 #include "ftl/journal.h"
+#include "metadata_internal.h" /* slot_now / job_reset / 待回收位图（与 metadata_job.c 共用） */
 #include "nand/onfi_1_0.h"
 
 #include <stddef.h>
@@ -532,27 +533,6 @@ static void metadata_dir_boot_log(const metadata_dir_cache_t *dir)
  * ══════════════════════════════════════════════════════════════════ */
 
 /* --------------------------------------------------------------------
- * md_job_reset
- *   功能：把后台整理 job（v0.75 阶段 8）清回 IDLE——冷启动 / 开机加载后必须调。
- *   参数：dir —— Directory（死守卫：本文件内部调用者恒持 dir）。
- *   返回：无。
- *   实现要点：**哨兵值必须显式写**（memset 只给 0）：victim / reclaim_target /
- *             reclaim_gblock 的"无"是 UINT16_MAX，slot 的"未取"是 NAND_PBA_INVALID。
- *             ⚠ 不清的后果与旧的 compacting 标志同类：残留 phase ≠ IDLE ⇒
- *             metadata_dir_append_slot 永久让路（以为整理在跑）⇒ L2P 写不出第二块。
- * -------------------------------------------------------------------- */
-static void md_job_reset(metadata_dir_cache_t *dir)
-{
-    /* 死守卫（§十附判据 2）：本文件内部调用者都持 dir，不复检。 */
-
-    memset(&dir->job, 0, sizeof(dir->job));
-    dir->job.victim         = UINT16_MAX;
-    dir->job.reclaim_target = UINT16_MAX;
-    dir->job.reclaim_gblock = UINT16_MAX;
-    dir->job.slot           = NAND_PBA_INVALID;
-}
-
-/* --------------------------------------------------------------------
  * metadata_dir_init
  *   功能：首次格式化——全部 region 置"未映射"、清 Anchor 序号/脏标记、游标全部置无效。
  *   参数：dir —— 待初始化 Directory（前置条件，非法即 ASSERT）。
@@ -580,12 +560,14 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
     dir->anchor_write_idx    = 0U;
     dir->anchor_cursor_valid = 0U;
 
-    /* 后台整理 job 归零（见 md_job_reset：不清 ⇒ append_slot 永久让路）。 */
+    /* 待回收位图 / 后台整理 job 归零（RAM 态，不跨重启；
+     * 不清 job ⇒ append_slot 永久让路）。 */
+    md_reclaim_reset(dir);
     md_job_reset(dir);
 }
 
 /* metadata_dir_lookup — 线性查 (type,id) 的登记位置；未找到返回 NAND_PBA_INVALID */
-//问题 除了日志块还有其他类型需要查找吗？
+// 问题 除了日志块还有其他类型需要查找吗？
 nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
                                uint8_t                     type,
                                uint16_t                    id)
@@ -659,36 +641,6 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
  * 四、L2P 日志块：追加槽 / 登记 / 回收（元数据写模型 ①②③④）
  * ══════════════════════════════════════════════════════════════════ */
 
-/* ── 日志块整理的共用判据（同步 sweep 与异步 job 共用）── */
-
-/* md_block_addr — gblock → 该块第 0 页的 PBA（ch/ce/lun 取本 Directory 拓扑）。 */
-static nand_pba_t md_block_addr(const metadata_dir_cache_t *dir, uint16_t gblock)
-{
-    return pba_make(dir->topo.ch,
-                    dir->topo.ce,
-                    dir->topo.lun,
-                    (uint32_t)ftl_gblock_block(gblock),
-                    (uint32_t)ftl_gblock_plane(gblock),
-                    0U,
-                    0U);
-}
-
-/* md_block_is_log — 该 gblock 是否**确实是本池独占的日志块**（BST 态 == LOG）。
- * 只认 LOG：否则会误擦"恰好活计数为 0 的用户块"。
- * ⚠ 重启后 LOG 态为 0（RAM 态）⇒ 开机不做回收；开机时"无引用却带旧内容"的
- *   日志块由 ftl_rebuild_closed_sb_list 的全盘扫描拉出 Free Pool 后交 GC 擦除。
- * ⚠ 2026-10-17 前本判据是 RESERVED 位，而退役块也带该位 ⇒ 退役块被**误当**日志块
- *   （一个位两种身份，C9）。拆成 LOG / RETIRED 后本函数只认 LOG，误判消失。 */
-static bool md_block_is_log(const ftl_allocator_t *alloc, uint16_t gblock)
-{
-    /* alloc 是死守卫（本文件内部调用者都持 alloc）；gblock 范围是**边界**（H31）⇒ 保留。 */
-    if (gblock >= FTL_BLOCK_TOTAL)
-    {
-        return false;
-    }
-    return ftl_block_state(&alloc->blocks[gblock]) == FTL_BLOCK_STATE_LOG;
-}
-
 /* md_compacting — 压缩 job 是否在飞（CP_* 阶段）。
  * 等价于旧 `dir->compacting` 标志的读法：commit_region 据此**抑制逐次立即回收**
  * （搬移 victim 的最后一个活 region 时它会归零，此时 Anchor 还没指向新位置
@@ -699,167 +651,32 @@ static bool md_compacting(const metadata_dir_cache_t *dir)
 }
 
 /* --------------------------------------------------------------------
- * metadata_dir_reclaim_block
- *   功能：擦除一个**已无引用**的日志块并归还 Free Pool（**同步**）。
- *   参数：dir / alloc / gblock。
- *   返回：FTL_OK（含"不该回收"）/ FTL_ERROR（gblock 越界 / 擦失败）。
- *   实现要点：只回收本池独占的日志块（BST 态 == LOG，见 md_block_is_log）。
- *             ⚠ **同步残留**：只被 metadata_dir_reclaim 的 sweep 调用，而 sweep 只在
- *             append_slot 换块分支里跑（后台路径、通常一个块都不擦）。异步回收走
- *             job 的 MD_JOB_RECLAIM 阶段（同一组判据 + md_submit_erase）。
- * -------------------------------------------------------------------- */
-static ftl_status_t metadata_dir_reclaim_block(metadata_dir_cache_t *dir,
-                                               ftl_allocator_t      *alloc,
-                                               uint16_t              gblock)
-{
-    /* 死守卫（本文件内部调用者持 dir/alloc）；gblock 范围是**边界** ⇒ 保留。 */
-    //问题 死守卫不删除吗
-    if (gblock >= FTL_BLOCK_TOTAL)
-    {
-        return FTL_ERROR;
-    }
-	//问题 调用的这个是不是过度封装呀，这个中间函数完全没必要呀，且这个分支有可能吗
-    if (!md_block_is_log(alloc, gblock))
-    {
-        return FTL_OK; /* 不是本池的日志块：不动它 */
-    }
-    //问题居然是同步，这里是上电时的路径吗
-    if (ftl_sync_erase_block(md_block_addr(dir, gblock)) != 0)
-    {
-        return FTL_ERROR; /* 擦失败：留 LOG + 活计数 0，下次再试 */
-    }
-	//问题 这个封装确实没必要呀
-    allocator_free_log_block(alloc, gblock);
-    return FTL_OK;
-}
-
-/* --------------------------------------------------------------------
- * metadata_dir_reclaim
- *   功能：全池扫一遍，回收所有"活计数 0 且非当前写块"的日志块。
- *   参数：dir —— Directory；alloc —— 分配器（判定 LOG 位 / 归还块）。
- *   返回：恒 FTL_OK（逐块失败被忽略——留待下次重试）。
- *   实现要点：当前写块（cur_metadata_block）**绝不**回收——它正在被追加。
- * -------------------------------------------------------------------- */
-ftl_status_t metadata_dir_reclaim(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
-{
-    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir 与 &ftl->alloc。 */
-    //问题 这里不是对外模块，这里的assert可以去掉
-    ASSERT(dir != NULL);
-    ASSERT(alloc != NULL);
-
-    for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++)
-    {
-        if (dir->l2p_live[g] != 0U)
-        {
-            continue;
-        }
-        if ((dir->cur_block_valid != 0U) && (g == dir->cur_metadata_block))
-        {
-            continue; /* 当前写入块不可回收 */
-        }
-        //问题 这个函数下的功能没必要封装为函数啊，直接摊开就行了呀
-        (void)metadata_dir_reclaim_block(dir, alloc, g);
-    }
-
-    return FTL_OK;
-}
-
-/* --------------------------------------------------------------------
- * metadata_dir_compact_victim
- *   功能：选压缩 victim —— 活 region 数**最少**（但 > 0）的非当前日志块。
- *   参数：dir —— Directory；alloc —— 分配器（读 BST 判 LOG 身份）。
- *   返回：victim 的 gblock；无候选返回 UINT16_MAX。
- *   实现要点：零活块**不在此列**——它们由 metadata_dir_reclaim 直接擦除归还，
- *             无需搬移。平手取块号最小者：结果确定（跨复位可复现），且先分配的
- *             块通常收的是更早、更可能变冷的数据。
- * -------------------------------------------------------------------- */
-static uint16_t metadata_dir_compact_victim(metadata_dir_cache_t *dir,
-                                            ftl_allocator_t      *alloc)
-{
-    uint16_t best      = UINT16_MAX;
-    uint16_t best_live = UINT16_MAX;
-
-    /* 死守卫（§十附判据 2）：本文件内部调用者都持 dir/alloc。 */
-
-    for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++)
-    {
-        const uint16_t live = dir->l2p_live[g];
-
-        if (live == 0U)
-        {
-            continue; /* 零活块：reclaim 的活，直接擦，不必搬 */
-        }
-        if ((dir->cur_block_valid != 0U) && (g == dir->cur_metadata_block))
-        {
-            continue; /* 当前写块正在被追加，不搬 */
-        }
-        if (ftl_block_state(&alloc->blocks[g]) != FTL_BLOCK_STATE_LOG)
-        {
-            continue; /* 只认本池独占的日志块（与 reclaim_block 同一判据）*/
-        }
-        if (live < best_live)
-        {
-            best_live = live;
-            best      = g;
-        }
-    }
-
-    return best;
-}
-
-/* --------------------------------------------------------------------
- * metadata_dir_slot_now
- *   功能：取当前日志块的**下一个空槽**并推进写指针（纯 RAM，不做任何块管理）。
- *   参数：dir —— Directory。
- *   返回：槽位 PBA；无当前块 / 块已满 ⇒ NAND_PBA_INVALID。
- *   实现要点：取到位置后**立即推进** cur_metadata_page——写失败时该页可能已半编程，
- *             不可复用（槽被跳过，块内浪费一页）。与 metadata_dir_append_slot 的尾部
- *             逐字一致；抽出来是给压缩 job 用的（它**不能**走 append_slot：那里有
- *             "job 在飞就让路"的判据，job 自己调就会自锁）。
- * -------------------------------------------------------------------- */
-static nand_pba_t metadata_dir_slot_now(metadata_dir_cache_t *dir)
-{
-    /* dir 是死守卫（本文件内部调用者持 dir）；后两个是**运行时状态**，保留。 */
-    if ((dir->cur_block_valid == 0U) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
-    {
-        return NAND_PBA_INVALID;
-    }
-
-    uint16_t plane = ftl_gblock_plane(dir->cur_metadata_block);
-    uint16_t block = ftl_gblock_block(dir->cur_metadata_block);
-    uint8_t  page  = dir->cur_metadata_page;
-
-    /* 立即推进：写失败时该页可能已半编程，不可复用（槽被跳过，块内浪费一页）*/
-    dir->cur_metadata_page++;
-
-    return pba_make(dir->topo.ch, dir->topo.ce, dir->topo.lun, block, plane, page, 0U);
-}
-
-/* --------------------------------------------------------------------
  * metadata_dir_append_slot
  *   功能：返回 L2P 日志块的"下一个空槽"物理位置，并推进写指针。
  *   参数：dir —— Directory；alloc —— 分配器（取新块）。
  *   返回：nand_pba_t 槽位置；NAND_PBA_INVALID 两 plane Free Pool 皆空 / 无当前写块。
- *   实现要点：当前块无效或写满 ⇒ 先回收无活 region 的日志块，再取新块（plane 轮转，
- *             本 plane 空则换另一 plane；**两 plane 都空则返回 INVALID（无固定位置可退）**）；
+ *   实现要点：当前块无效或写满 ⇒ 从 Free Pool 取新块（plane 轮转，本 plane 空则换另一
+ *             plane；**两 plane 都空则返回 INVALID**——等后台 job 擦完待回收块后重试）；
  *             取到位置后**立即推进** cur_metadata_page（写失败页可能半编程不可复用）。
+ *             旧当前块若已无活 region ⇒ 置进 `reclaim_pending` 位图；换块时还会扫一遍
+ *             全池**只登记**零活 LOG 块（不擦）。运行期擦除全部由后台 job 异步做，
+ *             本函数里没有任何同步 tERASE。
  *             ⚠ 换块后若 Free Pool 吃紧，只**登记压缩请求**（job.compact_wanted）并返回
- *             NAND_PBA_INVALID——新块整块空槽，是唯一能一次搬空任意 victim 的时机，
- *             但压缩本身交给后台 job（阶段 8：旧实现就地同步跑完，可阻塞服务循环数十毫秒）。
+ *             NAND_PBA_INVALID——新块整块空槽，是唯一能一次搬空任意 victim 的时机。
  * -------------------------------------------------------------------- */
 nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 {
     uint16_t plane;
     uint16_t gblock;
+    uint16_t old_cur = UINT16_MAX;
+    bool     had_cur = false;
 
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir 与 &ftl->alloc。 */
     ASSERT(dir != NULL);
     ASSERT(alloc != NULL);
 
-    /* 整理 job 在飞 ⇒ 一律让路（空槽预算 + ③④ 顺序，见函数头与 metadata.h）：
-     *   · 压缩搬移按**发放那一刻**的 cur_metadata_page 核定空槽预算，期间再发放会打乱它；
-     *   · 更要紧的是本函数换块分支会调 metadata_dir_reclaim 全池 sweep，而 victim 的
-     *     活计数此刻可能刚好归零 ⇒ 会在 Anchor 落盘之前把 victim 擦掉。
+    /* 整理 job 在飞 ⇒ 一律让路：压缩搬移按**发放那一刻**的 cur_metadata_page 核定
+     * 空槽预算，期间再发放会打乱它（详见 metadata.h 的 md_job_t 长注释）。
      * 调用者（l2p_cache_flush_kick）据此返回 FTL_AGAIN，下轮重试。 */
     if (dir->job.phase != (uint8_t)MD_JOB_IDLE)
     {
@@ -868,14 +685,24 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
 
     if ((dir->cur_block_valid == 0U) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
     {
-        /* 先回收无活 region 的日志块（否则稳态每填满一块就永久占一块），再取新块 */
-        //问题 这下面有同步逻辑，符合预期吗，非上电初始化应该全用异步呀
-        (void)metadata_dir_reclaim(dir, alloc);
+        /* 当前块已写满且无活 region：它不可能再被追加，先从"当前写块"身份上摘下来，
+         * 否则 mark_all 会把它永远排除；Free Pool 空时就再也换不了块（死等）。 */
+        if ((dir->cur_block_valid != 0U) && (dir->cur_metadata_page >= PAGES_PER_BLOCK) &&
+            (dir->l2p_live[dir->cur_metadata_block] == 0U))
+        {
+            (void)md_reclaim_mark(dir, dir->cur_metadata_block);
+            dir->cur_block_valid = 0U;
+        }
+
+        /* 换块时机扫一遍全池：只**登记**零活 LOG 块，绝不在这里擦。
+         * 擦除由后台 job 异步做——同步 tERASE ~3 ms 会击穿服务预算。
+         * 扫描保持旧 sweep 的覆盖范围（开机快照 / journal 回放 / 压缩中止留下的零活块）。 */
+        md_reclaim_mark_all(dir, alloc);
 
         /* plane 轮转：Policy B 下两 plane 各自独立选块，拿不到"同号双 plane 都空闲"
          * 的保证，故不跨 plane 配对；日志页落在哪个 plane 对读取无影响（位置由 pba 携带）*/
         plane = dir->cur_metadata_plane;
-        //问题   这里plane没有泛化呀，而且取日志块不能精准定位吗，需要这样多次定位吗
+        // 问题   这里plane没有泛化呀，而且取日志块不能精准定位吗，需要这样多次定位吗
         if (allocator_alloc_log_block(alloc, plane, &gblock) != FTL_OK)
         {
             /* 本 plane 的 Free Pool 空 ⇒ 换另一 plane 再试（两池是独立的，一个空不代表全空）*/
@@ -889,15 +716,28 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
         /* ⚠ 临时诊断探针（`log level debug` 才打印）：日志块从哪来。定位完即删。 */
         LOGD("[META] log-block: plane=%u gblock=%u\r\n", (unsigned)plane, (unsigned)gblock);
 
+        if (dir->cur_block_valid != 0U)
+        {
+            old_cur = dir->cur_metadata_block;
+            had_cur = true;
+        }
+
         dir->cur_metadata_block = gblock;
         dir->cur_metadata_page  = 0U;
-        //问题 这个游标不能是bool类型吗
+        // 问题 这个游标不能是bool类型吗
         dir->cur_block_valid    = 1U;
         dir->cur_metadata_plane = (uint8_t)((plane + 1U) % PLANE_NUM);
 
+        /* 旧当前块可能已被搬空（压缩只搬活 region，零活块不会成为 victim）：
+         * 换走后它再也不会被追加，登记给后台回收。 */
+        if (had_cur && (dir->l2p_live[old_cur] == 0U))
+        {
+            (void)md_reclaim_mark(dir, old_cur);
+        }
+
         /* 抗碎片（P0-3）：刚换到新日志块 ⇒ 块内有整 PAGES_PER_BLOCK 个空槽，正好
-         * 够搬空任意一个 victim（一块最多 PAGES_PER_BLOCK 个 region）。零活块已由上面
-         * 的 reclaim 直接擦除归还，这里只管"多活"块。
+         * 够搬空任意一个 victim（一块最多 PAGES_PER_BLOCK 个 region）。零活块已登记
+         * 在待回收位图（见上），这里只管"多活"块。
          * ⚠ 只在 Free Pool 吃紧时请求（FREE_POOL_TARGET 是 GC 的水位①）——稳态下每
          *   PAGES_PER_BLOCK 次 region 写最多压缩一块，既不抖也不制造写放大；
          *   池子宽裕时压缩纯属白写 NAND。
@@ -910,7 +750,6 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
             return NAND_PBA_INVALID;
         }
     }
-    //问题既然本函数就是 完成这个功能的函数为什么还要 metadata_dir_slot_now这个封装而且里面还有死守卫，不能直接在这写吗
     return metadata_dir_slot_now(dir);
 }
 
@@ -921,8 +760,8 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
  *         new_pba —— 新位置。
  *   返回：无（越界 no-op）。
  *   实现要点：只对**日志块**位置（block ≥ FTL_METADATA_BLOCK_END）增减活计数——
- *             INVALID（未映射）不计。旧块归零且非当前块 ⇒ 登记进 `job.reclaim_target`，
- *             把"已无引用却带旧内容"的窗口压到最短（否则要等下次 append_slot 换块才回收）。
+ *             INVALID（未映射）不计。旧块归零且非当前块 ⇒ 置进 `reclaim_pending` 位图，
+ *             由后台 job 异步擦除；位图不会像单槽那样被后来的块覆盖。
  *   ⚠ **本函数不擦 NAND**（阶段 8 起的刻意变更）：它运行在完成派发里
  *     （`ftl_op_l2p` 的 FLUSHING 分支），就地擦块 = 在完成泵里嵌套泵。
  * -------------------------------------------------------------------- */
@@ -931,13 +770,13 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
                                 uint16_t              region_id,
                                 nand_pba_t            new_pba)
 {
-    //问题 这个形参没有就删掉呀
+    // 问题 这个形参没有就删掉呀
     (void)alloc; /* 回收已改由后台 job 做（擦除地址由 md_block_addr 从 dir->topo 算出）*/
 
     /* 前置条件（判据 2）：dir 恒 ftl->metadata_dir。region_id / new_pba 是**数据**判断
      * （越界 no-op 是既有契约）⇒ 保留运行期分支。 */
     ASSERT(dir != NULL);
-    //问题 下面的if判断这个有意义吗，存在这个场景吗
+    // 问题 下面的if判断这个有意义吗，存在这个场景吗
     if ((region_id >= METADATA_DIR_ENTRIES) || (new_pba == NAND_PBA_INVALID))
     {
         return;
@@ -946,9 +785,9 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
     uint16_t old_g = UINT16_MAX;
 
     /* 旧位置的活计数 -1（仅当日志块）*/
-    
+
     nand_pba_t old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, region_id);
-    //问题 这个判断条件是不是冗余呀
+    // 问题 这个判断条件是不是冗余呀
     if ((old != NAND_PBA_INVALID) && (pba_to_block(old) >= FTL_METADATA_BLOCK_END))
     {
         uint16_t g = ftl_pba_gblock(old);
@@ -972,667 +811,15 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
     metadata_dir_update(dir, METADATA_TYPE_L2P_REGION, region_id, new_pba);
     dir->have_dynamic = 1U;
 
-    /* 旧块活计数归零且非当前块 ⇒ 登记回收，把「已无引用却仍带旧内容」的窗口压到最短。
+    /* 旧块活计数归零且非当前块 ⇒ 登记进待回收位图，由后台 job 异步擦除。
      * ⚠ 压缩期间**抑制**本登记：搬移 victim 的最后一个 region 时它会归零，此时 Anchor
      *   还没指向新位置 ⇒ 擦了就会掉电丢映射（③④ 契约）。压缩期间归零的块由 job 自己在
      *   CP_RECLAIM 里擦。 */
-     //问题 这里的判断是不是太多了能优化吗
+    // 问题 这里的判断是不是太多了能优化吗
     if ((old_g != UINT16_MAX) && (dir->l2p_live[old_g] == 0U) && (!md_compacting(dir)) &&
         ((dir->cur_block_valid == 0U) || (old_g != dir->cur_metadata_block)))
     {
-        /* ⚠ 只留**一个**待回收槽位：同一轮里若有多个块先后归零，早的会被覆盖。
-         *   这不是泄漏——被覆盖的块仍是"活计数 0 + LOG"，append_slot 换块前的
-         *   metadata_dir_reclaim 全池 sweep 会补上（它本来就是既有兜底）。 */
-        dir->job.reclaim_target = old_g;
-    }
-}
-
-/* ══════════════════════════════════════════════════════════════════
- * 四·b、日志块整理 job（v0.75 阶段 8）—— 回收 + 抗碎片压缩
- *
- * 设计 / 掉电安全顺序 / 失败语义见 metadata.h 的 md_job_t 长注释。此处只补实现约定：
- *
- *   · **一次只提交一条命令**：提交阶段设 waiting 就返回；纯 RAM 阶段连续推进到下一个
- *     提交阶段或终态。推进一律由 metadata_dir_kick 驱动（服务函数不推进，见下）。
- *   · **服务函数不推进状态机**（同 ftl_op_checkpoint）：CP_ANCHOR_PREP 要调
- *     metadata_dir_anchor_prepare，而它在游标未建立时会**同步**扫池定位
- *     （metadata_ring_locate → ftl_sync_read_page）——在完成泵里跑就是嵌套泵
- *     （l2p_sync_pump 首行有 ASSERT 挡）。故 ftl_op_metadata 只记结果 + release + 改
- *     phase，下一轮 kick 接着走。
- *   · **提交失败（背压）保留现场**：压缩搬移的槽位取到后即消耗（写指针已推进），
- *     故 `job.slot` 在提交失败时必须留着，下轮重试**同一个**槽——绝不能重取
- *     （重取会白烧一页）。
- * ══════════════════════════════════════════════════════════════════ */
-
-/* 连续"提交不出去"的轮数上限（同 CP/MIG/RR_SUBMIT_STALL_MAX）。 */
-#define MD_SUBMIT_STALL_MAX (256U)
-
-/* 中止本次整理：清请求与游标，回 IDLE。
- * ⚠ **victim 不擦**（已登记的 region 已指向新页、未搬的仍指向 victim ⇒ 两边都有效），
- *   下次换块时重来即可——与旧同步实现的"失败不回滚"逐条一致。 */
-static void md_job_abort(metadata_dir_cache_t *dir)
-{
-    md_job_t *j = &dir->job;
-
-    LOGW("[META] md job abort phase=%u victim=%u moved=%u (victim 不擦)\r\n",
-         (unsigned)j->phase,
-         (unsigned)j->victim,
-         (unsigned)j->moved);
-
-    md_job_reset(dir);
-}
-
-/* 累计一次「提交不出去」；超限即中止 job（同 CP/MIG 同族）。返回 true = 已中止。 */
-static bool md_stall(metadata_dir_cache_t *dir)
-{
-    md_job_t *j = &dir->job;
-
-    if (j->stall_rounds >= MD_SUBMIT_STALL_MAX)
-    {
-        md_job_abort(dir);
-        return true;
-    }
-    j->stall_rounds++;
-    return false;
-}
-
-/* 提交一条异步写（搬移页 / Anchor 分页共用）。data 在 ftl_async_write_page 内已拷进
- * FC buffer ⇒ 调用者的缓冲随即可复用。 */
-static ftl_status_t md_submit_write(metadata_dir_cache_t *dir, nand_pba_t addr, const void *data, uint32_t length)
-{
-    fc_command_t *cmd;
-
-    if (ftl_async_write_page(&cmd, addr, data, length, FTL_PAGE_CFG_META()) != FTL_OK)
-    {
-        return FTL_AGAIN; /* 命令池空 / 地址非法 */
-    }
-
-    md_job_t *j = &dir->job;
-
-    j->waiting = 1U; /* 先置位、提交失败再回滚（同 cp_submit_write） */
-
-    if (ftl_op_submit(cmd, FTL_OP_METADATA, j) != FTL_OK)
-    {
-        j->waiting = 0U;
-        (void)fc_command_release(cmd);
-        return FTL_AGAIN;
-    }
-
-    j->stall_rounds = 0U; /* ⚠ 提交**成功之后**才清零（同 mig/cp） */
-    return FTL_OK;
-}
-
-/* 提交一条异步擦除（日志块回收 / Anchor 换块 / victim 擦除共用）。 */
-static ftl_status_t md_submit_erase(metadata_dir_cache_t *dir, nand_pba_t addr)
-{
-    fc_command_t *cmd;
-
-    if (ftl_async_erase_block(&cmd, addr) != FTL_OK)
-    {
-        return FTL_AGAIN;
-    }
-
-    md_job_t *j = &dir->job;
-
-    j->waiting = 1U;
-
-    if (ftl_op_submit(cmd, FTL_OP_METADATA, j) != FTL_OK)
-    {
-        j->waiting = 0U;
-        (void)fc_command_release(cmd);
-        return FTL_AGAIN;
-    }
-
-    j->stall_rounds = 0U;
-    return FTL_OK;
-}
-
-/* 提交一条异步读（搬移 victim 的 region 页 → job.cp_buf）。
- * ⚠ 读的数据**留在 desc 链上** ⇒ 目标缓冲必须活到完成，ftl_cmd_read_data 必须早于
- *   release —— 二者都在 ftl_op_metadata 里，缓冲就是 job.cp_buf（job 常驻 ⇒ 稳定）。 */
-static ftl_status_t md_submit_read(metadata_dir_cache_t *dir, nand_pba_t addr)
-{
-    fc_command_t *cmd;
-
-    if (ftl_async_read_page(&cmd, addr, FTL_PAGE_CFG_META()) != FTL_OK)
-    {
-        return FTL_AGAIN;
-    }
-
-    md_job_t *j = &dir->job;
-
-    j->waiting = 1U;
-
-    if (ftl_op_submit(cmd, FTL_OP_METADATA, j) != FTL_OK)
-    {
-        j->waiting = 0U;
-        (void)fc_command_release(cmd);
-        return FTL_AGAIN;
-    }
-
-    j->stall_rounds = 0U;
-    return FTL_OK;
-}
-
-/* --------------------------------------------------------------------
- * md_compact_begin
- *   功能：选 victim、核空槽预算、把 job 推进到 CP_READ（纯 RAM，不碰介质）。
- *   参数：dir / alloc。
- *   返回：无（起不动就留在 IDLE）。
- *   实现要点：**无论成败都先清 compact_wanted**——它由 append_slot 置位而 append_slot
- *             又对 `phase != IDLE` 让路，不清就永远起不来（死锁）。
- *             空槽预算在此**重算**（不在 append_slot 置位时算）：置位到本函数之间可能
- *             又发放过若干槽位（此时 phase 还是 IDLE），按当下 cur_metadata_page 核才准。
- * -------------------------------------------------------------------- */
-static void md_compact_begin(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
-{
-    md_job_t *j = &dir->job;
-
-    j->compact_wanted = 0U;
-
-    /* alloc 是死守卫（本文件内部调用者持 alloc）；cur_block_valid 是运行时状态，保留。 */
-    if (dir->cur_block_valid == 0U)
-    {
-        return; /* 无当前写块：无处可搬 */
-    }
-
-    uint16_t victim = metadata_dir_compact_victim(dir, alloc);
-    if (victim == UINT16_MAX)
-    {
-        return; /* 无候选：全池零活（reclaim 已管）或只剩当前块 */
-    }
-
-    /* 空槽预算：victim 的全部活 region 必须一次装进当前块（l2p_live 的定义就是
-     * "最新位置落在该块的 region 数" ⇒ 预算一次核得准）。装不下 ⇒ 留到换块后再来。 */
-    if (dir->l2p_live[victim] > (uint16_t)(PAGES_PER_BLOCK - dir->cur_metadata_page))
-    {
-        return;
-    }
-
-    j->victim       = victim;
-    j->region_id    = 0U;
-    j->cur_region   = 0U;
-    j->moved        = 0U;
-    j->slot         = NAND_PBA_INVALID;
-    j->anchor_ok    = 0U;
-    j->stall_rounds = 0U;
-    j->phase        = (uint8_t)MD_JOB_CP_READ;
-
-    LOGD("[META] compact start victim=%u live=%u cur_page=%u\r\n",
-         (unsigned)victim,
-         (unsigned)dir->l2p_live[victim],
-         (unsigned)dir->cur_metadata_page);
-}
-
-/* --------------------------------------------------------------------
- * md_compact_read
- *   功能：从 job.region_id 起找 victim 上**下一个**仍有引用的 region，发起异步读。
- *   返回：MD_COMPACT_SCANNED = 已扫完（未提交任何命令）；MD_COMPACT_SUBMITTED = 已提交（等完成）；
- *         MD_COMPACT_BACKPRESSURE = 背压未提交（下轮重试）；MD_COMPACT_FAILED = 硬失败（调用者中止）。
- *   实现要点：游标先走后命中，提交失败再把游标退回来（重试同一 region）。
- *             搬移走的是**裸页拷贝**（region 页无头，就是 L2P_REGION_SIZE 字节的 entries
- *             数组，与 l2p_cache 的读写口径逐字节一致）——不经过 l2p_cache，故不触发
- *             "写→evict→flush→又要块"的递归。
- * -------------------------------------------------------------------- */
-static md_compact_step_t md_compact_read(metadata_dir_cache_t *dir)
-{
-    md_job_t *j = &dir->job;
-
-    while (j->region_id < METADATA_DIR_ENTRIES)
-    {
-        const uint16_t rid = j->region_id;
-
-        j->region_id = (uint16_t)(rid + 1U); /* 游标先走：本轮不命中也不回头 */
-
-        nand_pba_t old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, rid);
-        if (old == NAND_PBA_INVALID)
-        {
-            continue;
-        }
-        if (ftl_pba_gblock(old) != j->victim)
-        {
-            continue; /* 该 region 的最新位置不在 victim 上 */
-        }
-
-        j->cur_region = rid;
-
-        if (md_submit_read(dir, old) != FTL_OK)
-        {
-            j->region_id = rid; /* 退回：下轮重试同一 region */
-            if (md_stall(dir))
-            {
-                return MD_COMPACT_FAILED;
-            }
-            return MD_COMPACT_BACKPRESSURE;
-        }
-        return MD_COMPACT_SUBMITTED;
-    }
-
-    return MD_COMPACT_SCANNED; /* 扫描完毕 */
-}
-
-/* --------------------------------------------------------------------
- * md_compact_write
- *   功能：把 job.cp_buf 写进当前块的新槽（槽只取一次，提交失败重试同一槽）。
- *   返回：同 md_compact_read。
- * -------------------------------------------------------------------- */
-static md_compact_step_t md_compact_write(metadata_dir_cache_t *dir)
-{
-    md_job_t *j = &dir->job;
-
-    if (j->slot == NAND_PBA_INVALID)
-    {
-        j->slot = metadata_dir_slot_now(dir);
-        if (j->slot == NAND_PBA_INVALID)
-        {
-            /* 当前块无空槽 ⇒ 空槽预算失准（不该发生：预算一次核得准且期间无人发放槽位） */
-            LOGW("[META] compact: 当前块无空槽 (page=%u) — 中止\r\n",
-                 (unsigned)dir->cur_metadata_page);
-            return MD_COMPACT_FAILED;
-        }
-    }
-
-    if (md_submit_write(dir, j->slot, j->cp_buf, (uint32_t)L2P_REGION_SIZE) != FTL_OK)
-    {
-        if (md_stall(dir))
-        {
-            return MD_COMPACT_FAILED;
-        }
-        return MD_COMPACT_BACKPRESSURE; /* 背压：**保留 slot**，下轮重试同一槽（重取会白烧一页）*/
-    }
-
-    return MD_COMPACT_SUBMITTED;
-}
-
-/* --------------------------------------------------------------------
- * metadata_dir_kick
- *   功能：推进整理 job 一步（每轮服务循环调一次）。见 metadata.h 的同名注释。
- *   参数：dir / alloc。
- *   返回：无。
- *   实现要点：`for (;;)` 里每个分支要么设 waiting 后 return（提交阶段），要么推进 phase
- *             后 break（纯 RAM 阶段）。**不允许既不推进也不返回**——那会死循环。
- * -------------------------------------------------------------------- */
- //问题 这个名称是不是有点不好理解呀
- //问题 这个功能好像可以拆分出去另起一个metadata的.c/.h
- //问题 而且其好像只需要     md_job_t job,不能只传它吗
-void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
-{
-    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir 与 &ftl->alloc。 */
-    ASSERT(dir != NULL);
-    ASSERT(alloc != NULL);
-    
-    /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age */
-    //问题 打印这个有意义吗主流主控是这么做的吗
-    if (dir->job.phase == (uint8_t)MD_JOB_IDLE)
-    {
-        //过度封装
-        ftl_job_heartbeat_reset(&dir->job.log_ms, &dir->job.start_ms);
-    }
-    else if (ftl_job_heartbeat(&dir->job.log_ms, &dir->job.start_ms))
-    {
-        LOGI("[MD] job phase=%u victim=%u moved=%u reclaim=%u stall=%u age=%lums\r\n",
-             (unsigned)dir->job.phase,
-             (unsigned)dir->job.victim,
-             (unsigned)dir->job.moved,
-             (unsigned)dir->job.reclaim_target,
-             (unsigned)dir->job.stall_rounds,
-             (unsigned long)ftl_job_age_ms(&dir->job.start_ms));
-    }
-
-    for (;;)
-    {
-        md_job_t *j = &dir->job;
-
-        if (j->waiting != 0U)
-        {
-            return; /* 有命令在飞：等完成服务函数 */
-        }
-
-        switch ((md_job_phase_t)j->phase)
-        {
-            case MD_JOB_IDLE:
-            {
-                if (j->reclaim_target != UINT16_MAX)
-                {
-                    j->phase = (uint8_t)MD_JOB_RECLAIM;
-                    break;
-                }
-                if (j->compact_wanted == 0U)
-                {
-                    return; /* 无事可做 */
-                }
-                md_compact_begin(dir, alloc);
-                if (j->phase == (uint8_t)MD_JOB_IDLE)
-                {
-                    return; /* 起不动（无候选 / 空槽不够）——compact_wanted 已被清 */
-                }
-                break;
-            }
-
-            case MD_JOB_RECLAIM:
-            {
-                const uint16_t g = j->reclaim_target;
-
-                if (g == UINT16_MAX)
-                {
-                    j->phase = (uint8_t)MD_JOB_IDLE;
-                    break;
-                }
-
-                /* 消费前**重查**（登记到消费之间可能隔了很多轮，块号可能已被重新分配）：
-                 *   ① 活计数非 0 ⇒ 该块又被引用了；
-                 *   ② 成了当前写块 ⇒ 正在被追加；
-                 *   ③ 不再带 LOG ⇒ 已被别处归还/复用。
-                 * 任一命中即放弃本次（块留给下次），**绝不擦活块**。 */
-                if ((dir->l2p_live[g] != 0U) ||
-                    ((dir->cur_block_valid != 0U) && (g == dir->cur_metadata_block)) ||
-                    (!md_block_is_log(alloc, g)))
-                {
-                    j->reclaim_target = UINT16_MAX;
-                    j->phase          = (uint8_t)MD_JOB_IDLE;
-                    break;
-                }
-
-                if (md_submit_erase(dir, md_block_addr(dir, g)) != FTL_OK)
-                {
-                    (void)md_stall(dir); /* 背压：保留 target，下轮重试 */
-                    return;
-                }
-
-                j->reclaim_gblock = g; /* 提交**成功**才认领 */
-                j->reclaim_target = UINT16_MAX;
-                return;
-            }
-
-            case MD_JOB_CP_READ:
-            {
-                const md_compact_step_t r = md_compact_read(dir);
-
-                if (r == MD_COMPACT_FAILED)
-                {
-                    md_job_abort(dir);
-                    break;
-                }
-                if (r != MD_COMPACT_SCANNED)
-                {
-                    return; /* 已提交 / 背压 */
-                }
-                j->phase = (uint8_t)MD_JOB_CP_ANCHOR_PREP;
-                break;
-            }
-
-            case MD_JOB_CP_WRITE:
-            {
-                /* md_compact_write 只返回 MD_COMPACT_SUBMITTED / MD_COMPACT_BACKPRESSURE /
-                 * MD_COMPACT_FAILED，**不会**返回 MD_COMPACT_SCANNED（"扫完"）
-                 * ——写一条就回去读下一条。 */
-                const md_compact_step_t r = md_compact_write(dir);
-
-                if (r == MD_COMPACT_FAILED)
-                {
-                    md_job_abort(dir);
-                    break;
-                }
-                return;
-            }
-
-            case MD_JOB_CP_ANCHOR_PREP:
-            {
-                /* ③ Anchor：定位游标 + 取槽。游标未建立时会**同步**扫池定位——本 job
-                 *   唯一可能瞬时阻塞的点，且只在冷启动后首次整理出现。 */
-                int              need_erase = 0;
-                md_anchor_step_t r          = metadata_dir_anchor_prepare(dir,
-                                                                 &j->anchor_ring,
-                                                                 &j->anchor_base,
-                                                                 &j->anchor_idx,
-                                                                 &j->anchor_seq,
-                                                                 &need_erase);
-
-                if (r == MD_ANCHOR_FAILED)
-                {
-                    //问题 过度封装
-                    md_job_abort(dir);
-                    break;
-                }
-                if (r == MD_ANCHOR_CLEAN)
-                {
-                    /* Directory 无变更（本次没搬成任何 region）：跳过 Anchor 直接擦 victim。 */
-                    j->phase = (uint8_t)MD_JOB_CP_RECLAIM;
-                    break;
-                }
-
-                j->anchor_need_erase = (uint8_t)need_erase;
-                j->anchor_chunk      = 0U;
-                j->anchor_ok         = 1U;
-                j->phase             = (need_erase != 0) ? (uint8_t)MD_JOB_CP_ANCHOR_ERASE : (uint8_t)MD_JOB_CP_ANCHOR_WRITE;
-                break;
-            }
-
-            case MD_JOB_CP_ANCHOR_ERASE:
-                if (md_submit_erase(dir, j->anchor_base) != FTL_OK)
-                {
-                    (void)md_stall(dir);
-                }
-                return;
-
-            case MD_JOB_CP_ANCHOR_WRITE:
-            {
-                if (j->anchor_chunk >= ANCHOR_PAGE_COUNT)
-                {
-                    /* 整条 record 写完：推进游标（无论成败），成功才清 dirty。
-                     * 失败 ⇒ 整条残缺（locate 会整条丢弃）⇒ 中止，不擦 victim。 */
-                    metadata_dir_anchor_commit(dir, &j->anchor_ring, j->anchor_idx, (int)j->anchor_ok);
-
-                    if (j->anchor_ok == 0U)
-                    {
-                        LOGW("[META] anchor write incomplete: idx=%u seq=%lu (chunk 写失败)\r\n",
-                             (unsigned)j->anchor_idx,
-                             (unsigned long)j->anchor_seq);
-                        md_job_abort(dir);
-                        break;
-                    }
-                    j->phase = (uint8_t)MD_JOB_CP_RECLAIM;
-                    break;
-                }
-
-                nand_pba_t aaddr = pba_with_page(j->anchor_base, (uint32_t)pba_to_page(j->anchor_base) + j->anchor_chunk);
-
-                metadata_anchor_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
-                metadata_dir_anchor_page(dir, j->anchor_seq, j->anchor_chunk, &page);
-
-                if (md_submit_write(dir, aaddr, &page, (uint32_t)sizeof(page)) != FTL_OK)
-                {
-                    (void)md_stall(dir);
-                }
-                return;
-            }
-
-            case MD_JOB_CP_RECLAIM:
-            {
-                const uint16_t v = j->victim;
-
-                /* ④ 擦 victim —— 只在它**确实已无引用**时（③ Anchor 已落盘）。 */
-                if (v == UINT16_MAX)
-                {
-                    j->phase = (uint8_t)MD_JOB_DONE;
-                    break;
-                }
-                if ((dir->l2p_live[v] != 0U) ||
-                    ((dir->cur_block_valid != 0U) && (v == dir->cur_metadata_block)) ||
-                    (!md_block_is_log(alloc, v)))
-                {
-                    /* 扫描期间又有 region 落回 victim（在飞的写回完成）⇒ 不能擦，留给下次。
-                     * 这与旧实现末尾的 `l2p_live[victim] == 0` 判据同一件事。 */
-                    LOGD("[META] compact: victim %u 仍有 %u 活 region — 不擦\r\n",
-                         (unsigned)v,
-                         (unsigned)dir->l2p_live[v]);
-                    j->phase = (uint8_t)MD_JOB_DONE;
-                    break;
-                }
-
-                if (md_submit_erase(dir, md_block_addr(dir, v)) != FTL_OK)
-                {
-                    (void)md_stall(dir);
-                }
-                return;
-            }
-
-            case MD_JOB_DONE:
-                LOGD("[META] compact done victim=%u moved=%u\r\n",
-                     (unsigned)j->victim,
-                     (unsigned)j->moved);
-                md_job_reset(dir);
-                break; /* 回 IDLE：继续循环（可能还有待回收的块）*/
-
-            default:
-                /* 不该发生：phase 越界 ⇒ 清回 IDLE，否则 append_slot 永久让路。 */
-                LOGE("[META] md job bad phase=%u — reset\r\n", (unsigned)j->phase);
-                md_job_reset(dir);
-                return;
-        }
-    }
-}
-
-/* ── 整理 job 的完成服务（g_op_service[FTL_OP_METADATA]）── */
-
-/* --------------------------------------------------------------------
- * ftl_op_metadata
- *   功能：日志块整理命令的完成服务函数——按 job.phase 记结果、改 phase、release。
- *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `md_job_t *`（= ftl->metadata_dir->job）。
- *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
- *   实现要点：**本函数不推进状态机**（见本大区开头的说明）：只把 phase 改到"下一步该
- *             干什么"，由下一轮 metadata_dir_kick 续跑。
- *             ⚠ CP_READ 的 ftl_cmd_read_data **必须早于** release（数据在 desc 链上）。
- * -------------------------------------------------------------------- */
-void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
-{
-    md_job_t *j = (md_job_t *)ctx;
-
-    ASSERT(completion != NULL);
-    ASSERT(j != NULL);
-
-    fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
-
-    /* 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出的归属实例，
-     * 二者必须一致——不一致说明派发路由错了。 */
-    ASSERT(ftl != NULL);
-    ASSERT(&ftl->metadata_dir->job == j);
-
-    metadata_dir_cache_t *dir    = ftl->metadata_dir;
-    int                   failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1 : 0;
-
-    switch ((md_job_phase_t)j->phase)
-    {
-        case MD_JOB_RECLAIM:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-
-            if (failed != 0)
-            {
-                /* 擦失败：留 LOG + 活计数 0 ⇒ append_slot 换块前的全池 sweep
-                 * （或下一次登记）会再来一次。与旧同步实现逐条一致。 */
-                LOGW("[META] reclaim erase failed blk=%u — 留 LOG 下次再试\r\n",
-                     (unsigned)j->reclaim_gblock);
-            }
-            else
-            {
-                allocator_free_log_block(&ftl->alloc, j->reclaim_gblock);
-            }
-
-            j->reclaim_gblock = UINT16_MAX;
-            j->phase          = (uint8_t)MD_JOB_IDLE;
-            return;
-
-        case MD_JOB_CP_READ:
-            if (failed == 0)
-            {
-                /* 数据在 desc 链上 ⇒ 必须早于 release 拷出 */
-                (void)ftl_cmd_read_data(cmd, j->cp_buf, (uint32_t)L2P_REGION_SIZE);
-            }
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-
-            if (failed != 0)
-            {
-                /* 读不回：该 region 仍指向 victim 旧页，victim 不擦 ⇒ 无损失。 */
-                md_job_abort(dir);
-                return;
-            }
-            j->phase = (uint8_t)MD_JOB_CP_WRITE;
-            return;
-
-        case MD_JOB_CP_WRITE:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-
-            if (failed != 0)
-            {
-                /* 槽已消耗（可能半编程）⇒ 不登记；region 仍指向 victim 旧页 ⇒ 无损失。 */
-                md_job_abort(dir);
-                return;
-            }
-
-            metadata_dir_commit_region(dir, &ftl->alloc, j->cur_region, j->slot);
-            j->slot  = NAND_PBA_INVALID;
-            j->moved = (uint16_t)(j->moved + 1U);
-            j->phase = (uint8_t)MD_JOB_CP_READ;
-            return;
-
-        case MD_JOB_CP_ANCHOR_ERASE:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-
-            if (failed != 0)
-            {
-                /* 换块擦失败 ⇒ 不写、**不推进游标**（同 metadata_ring_prepare_write 的
-                 * 擦失败即返回错误），dirty 保留 ⇒ 下次在新槽重试整条。 */
-                md_job_abort(dir);
-                return;
-            }
-            j->phase = (uint8_t)MD_JOB_CP_ANCHOR_WRITE;
-            return;
-
-        case MD_JOB_CP_ANCHOR_WRITE:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-
-            if (failed != 0)
-            {
-                j->anchor_ok = 0U; /* 本条 record 残缺 ⇒ 整条作废（不取半条）*/
-            }
-            j->anchor_chunk = (uint8_t)(j->anchor_chunk + 1U); /* 无论成败都往后写下一页 */
-            return;
-
-        case MD_JOB_CP_RECLAIM:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-
-            if (failed != 0)
-            {
-                /* 擦失败：留 LOG + 活计数 0 ⇒ 下次换块时重来（同旧实现的
-                 * `(void)metadata_dir_reclaim_block(...)` 忽略返回值，但这里留痕）。 */
-                LOGW("[META] compact: victim erase failed blk=%u — 留 LOG\r\n",
-                     (unsigned)j->victim);
-            }
-            else
-            {
-                allocator_free_log_block(&ftl->alloc, j->victim);
-            }
-
-            j->phase = (uint8_t)MD_JOB_DONE;
-            return;
-
-        case MD_JOB_IDLE:
-        case MD_JOB_CP_ANCHOR_PREP:
-        case MD_JOB_DONE:
-        default:
-            /* 不该发生：一条命令对应一个提交阶段（RECLAIM / CP_READ / CP_WRITE /
-             * CP_ANCHOR_ERASE / CP_ANCHOR_WRITE / CP_RECLAIM）。 */
-            LOGE("[META] md job unexpected completion phase=%u\r\n", (unsigned)j->phase);
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-            md_job_abort(dir);
-            return;
+        (void)md_reclaim_mark(dir, old_g);
     }
 }
 
@@ -1867,13 +1054,14 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
 
     /* 由装配后的 entries 重建活计数；**游标不跨重启恢复**：首次追加时从 Free Pool
      * 新取一块（绝不复用可能已编程的旧页）。旧日志块仍被 Directory 引用 ⇒ 由 l2p_live
-     * 保住，待其 region 全部改写后由 metadata_dir_reclaim 归还。 */
+     * 保住，待其 region 全部改写后由后台整理 job 异步擦除归还。 */
     metadata_dir_rebuild_live(dir);
     dir->cur_metadata_block = 0U;
     dir->cur_metadata_page  = 0U;
     dir->cur_block_valid    = 0U;
     dir->cur_metadata_plane = 0U;
-    md_job_reset(dir); /* 整理 job 不跨重启（同游标：phase / 游标 / 请求位全是 RAM 态）*/
+    md_reclaim_reset(dir); /* 待回收位图不跨重启（同 job：全是 RAM 态）*/
+    md_job_reset(dir);     /* 整理 job 不跨重启（同游标：phase / 游标 / 请求位全是 RAM 态）*/
 
     metadata_dir_boot_log(dir);
 

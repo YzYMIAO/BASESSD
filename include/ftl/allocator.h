@@ -29,7 +29,7 @@
  *    **坏块（BAD）永不进池**：BAD 是状态机终态，唯一入池闸门 `allocator_free_block`
  *    拒绝它（debug `ASSERT` + release 运行期拒绝）。
  *    两个方向各有归属者，别的路径不许碰：
- *      · 入池 `allocator_free_block` —— 置 `FREE`（`allocator_free_log_block` 转调它）；
+ *      · 入池 `allocator_free_block` —— 置 `FREE`；
  *      · 出池 `allocator_remove_from_free` —— **只校验**「在池 ⇒ state == FREE」（`ASSERT`），
  *        状态由**转移的归属者**紧跟其后赋值（open_sb→OPEN / alloc_log→LOG /
  *        migrate 退役→RETIRED / rebuild→CLOSED / bbt_mark_bad→BAD）。
@@ -529,7 +529,7 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
  * ⚠ **plane 固定**：Policy B 下各 plane 各自独立选块，拿不到「各 plane 同号都空闲」
  *   的保证，故不跨 plane 配对；调用者给出目标 plane，返回单个 gblock。
  *
- * 归还走 allocator_free_log_block()（调用者保证已擦除）。
+ * 归还走 allocator_free_block()（调用者保证该 LOG 块已擦除）。
  *
  * @param alloc      Allocator 上下文
  * @param plane      目标 plane（0..PLANE_NUM-1）
@@ -538,17 +538,6 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
  *         实参非法是前置条件，即 ASSERT，见不变量 ④）
  */
 ftl_status_t allocator_alloc_log_block(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock);
-
-/*
- * allocator_free_log_block - 归还独占块到 Free Pool（调用者保证已擦除）
- *
- * 与 allocator_free_block 同一入口语义（置 FREE、清反向索引），
- * 只是多一个「调用者必须持有 LOG 块」的前置约定。
- *
- * @param alloc  Allocator 上下文
- * @param gblock 要归还的全局 Block 号
- */
-void allocator_free_log_block(ftl_allocator_t *alloc, uint16_t gblock);
 
 /*
  * allocator_close_open_sb - 运行时关闭当前 Open Super Block（写失败等场景）

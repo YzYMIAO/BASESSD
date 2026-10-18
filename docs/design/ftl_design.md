@@ -775,7 +775,7 @@ flowchart TD
 3. **归还**：搬移擦除成功后 `allocator_free_block` 入池并置 FREE；退役走
    `allocator_remove_from_free` + RETIRED，**不得**先入池。
 4. **日志块**：`allocator_alloc_log_block` 从指定 plane 的 Free Pool 取一块，出池 + 置 LOG；
-   归还走 `allocator_free_log_block`。
+   归还走 `allocator_free_block`（调用者保证已擦除）。
 
 #### 3.2.6 失败语义
 
@@ -1146,7 +1146,7 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `compact_wanted` | 换块后池吃紧，请求压缩 |
 | `anchor_ok` / `anchor_need_erase` / `anchor_chunk` | Anchor 分页写结果/擦除判定/页序 |
 | `victim` / `region_id` / `cur_region` / `moved` | 压缩的 victim / 游标 / 当前 region / 已搬数 |
-| `reclaim_target` / `reclaim_gblock` | 待回收/在飞擦除的 gblock |
+| `reclaim_gblock` | 在飞擦除的 gblock（待回收集合在 dir 的 `reclaim_pending` 位图里） |
 | `stall_rounds` | 连续提交不出去（> 256 中止） |
 | `anchor_idx` / `anchor_seq` / `anchor_base` / `anchor_ring` | 本 Anchor record 的槽位/序号/基址/池几何 |
 | `slot` | 压缩搬移已取到、待写的槽 |
@@ -1201,11 +1201,14 @@ return pba_make(topo->ch, topo->ce, topo->lun, block, plane, page, 0)
 metadata_dir_append_slot
   ├─ 当前块还有页 ⇒ 返回当前块下一页的 PBA，page++
   ├─ 块满/无当前块
-  │   ├─ metadata_dir_reclaim：擦所有 l2p_live==0 且非当前的 LOG 块，归还 Free Pool
+  │   ├─ 当前块已满且 l2p_live==0 ⇒ 先摘掉当前身份并登记（否则永远换不了块）
+  │   ├─ md_reclaim_mark_all：把 l2p_live==0 且非当前的 LOG 块**只登记**进
+  │   │                      reclaim_pending 位图（不擦；擦除由后台 job 异步做）
   │   ├─ allocator_alloc_log_block(alloc, cur_metadata_plane) 取整块
   │   ├─ 设置 cur_metadata_block / page=0 / cur_block_valid=1
   │   └─ cur_metadata_plane 轮转到下一 plane
-  └─ 分配失败或整理 job 在飞 ⇒ 返回 NAND_PBA_INVALID（上层 FTL_AGAIN）
+  └─ 分配失败或整理 job 在飞 ⇒ 返回 NAND_PBA_INVALID（上层 FTL_AGAIN，
+     等后台 job 擦完待回收块后重试）
 ```
 
 **plane 由写序轮转决定，与 region_id 无关**。region 落在哪个 plane 完全由 PBA 携带，
@@ -1261,7 +1264,7 @@ sequenceDiagram
     alt 当前块有页
         D->>D: 返回下一页 PBA, page 加一
     else 块满/无当前块
-        D->>D: metadata_dir_reclaim 回收无活 region 的 LOG 块
+        D->>D: md_reclaim_mark_all 只登记零活 LOG 块（不擦）
         D->>A: allocator_alloc_log_block
         A-->>D: 新 gblock
         D->>D: 更新 cur_block page plane, plane 轮转
@@ -1273,11 +1276,11 @@ sequenceDiagram
         C->>D: metadata_dir_commit_region
         D->>D: 更新 region 的 pba
         D->>D: l2p_live 旧减新加
-        D->>D: dirty 为 1, 旧块归零则登记 reclaim_target
+        D->>D: dirty 为 1, 旧块归零则置 reclaim_pending 位
     else 写失败
         C->>C: 行回 DIRTY, Directory 不登记
     end
-    J->>J: metadata_dir_kick 回收 reclaim_target 压缩 compact_wanted
+    J->>J: metadata_dir_kick 消费 reclaim_pending / 压缩 compact_wanted
 ```
 
 **为什么必须“先写后登记”**：
@@ -1297,13 +1300,16 @@ Anchor 装配、测试使用；运行期 L2P region 的更新走 `commit_region`
 region 全部被改写、最新位置都迁到别处后，这个块才没有活引用，才能擦。`l2p_live[g]`
 就是这个计数；它只在 `commit_region` 里增减，并在 `metadata_dir_load` 里重建。
 
-**回收**（`metadata_dir_reclaim`）：遍历全部 gblock，满足以下三条才擦：
+**回收**（`reclaim_pending` 位图 + `MD_JOB_RECLAIM`）：块进入回收前必须满足三条：
 
 1. `l2p_live[g] == 0`；
-2. `g != cur_metadata_block`；
+2. `g != cur_metadata_block`（已满且零活的当前块会先被摘掉当前身份）；
 3. BST 状态为 `LOG`（确实是本池独占的日志块，而不是恰好计数为 0 的用户块）。
 
-回收是**同步**的，只在 `append_slot` 换块分支与开机重建时调用；通常一个块都不擦。
+登记点：`commit_region` 旧位置归零、`append_slot` 换走零活旧块、换块时的
+`md_reclaim_mark_all` 扫描、压缩/擦除失败重试。**登记只置位，不碰 NAND**；
+`metadata_dir_kick` 的 RECLAIM 阶段逐块异步擦除，成功才清位并归还 Free Pool，
+失败保留位下轮重试。运行期没有任何同步 `tERASE`（3 ms 会击穿服务预算）。
 
 **压缩**（抗碎片）：某日志块可能混着“永不再写的冷 region”（63 冷 + 1 热），
 `l2p_live` 永远不归零，最坏吃掉近半个 die。压缩挑**活 region 最少**的块做 victim，
@@ -1322,8 +1328,8 @@ flowchart TD
     AWRITE["CP_ANCHOR_WRITE"]
     CPRECLAIM["CP_RECLAIM"]
     DONE["DONE"]
-    IDLE -- "reclaim_target 有效" --> RECLAIM
-    RECLAIM -- "擦完 归还" --> IDLE
+    IDLE -- "reclaim_pending 非空" --> RECLAIM
+    RECLAIM -- "异步擦完 清位 归还" --> IDLE
     IDLE -- "compact_wanted" --> CP_READ
     CP_READ -- "读到一条活 region" --> CP_WRITE
     CP_WRITE -- "写成功 继续下一条" --> CP_READ
@@ -3077,7 +3083,7 @@ sequenceDiagram
     alt 当前日志块有页
         D-->>C: 下一页 PBA
     else 块满
-        D->>D: reclaim l2p_live 为 为 0 的 LOG 块
+        D->>D: 登记 l2p_live 为 0 的 LOG 块到 reclaim_pending（不擦）
         D->>A: alloc_log_block
         A-->>D: 新块
         D-->>C: 新块 page 0 PBA

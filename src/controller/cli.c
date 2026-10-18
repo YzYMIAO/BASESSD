@@ -535,6 +535,24 @@ static int uart_cli_info(int argc, char *argv[])
                            (unsigned)allocator_closed_count(&ftl->alloc),
                            (unsigned)ftl->cache->thrashing,
                            (unsigned)ftl->cache->miss_pct);
+
+                /* 元数据整理 job 的现场（心跳默认档不打，靠这里观测）。
+                 * 只在有 job 在跑 / 有待回收块时多打一行，空闲时不刷屏。 */
+                const metadata_dir_cache_t *md  = ftl->metadata_dir;
+                const md_job_t             *job = &md->job;
+
+                if ((job->phase != (uint8_t)MD_JOB_IDLE) || (md->reclaim_pending_count != 0U))
+                {
+                    (void)LOGI("md[%u][%u][%u] phase=%u moved=%u stall=%u pending=%u victim=%u\r\n",
+                               (unsigned)ch,
+                               (unsigned)ce,
+                               (unsigned)lun,
+                               (unsigned)job->phase,
+                               (unsigned)job->moved,
+                               (unsigned)job->stall_rounds,
+                               (unsigned)md->reclaim_pending_count,
+                               (unsigned)job->victim);
+                }
             }
         }
     }

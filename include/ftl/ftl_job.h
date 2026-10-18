@@ -15,7 +15,8 @@
  * ── 用法（每个 *_kick 的固定骨架）──
  *
  *   if (<job 空闲>) {
- *       ftl_job_heartbeat_reset(&job.log_ms, &job.start_ms);   // 空闲：清基准
+ *       job.log_ms = 0U;   // 空闲：清基准（两个时间戳必须一起清）
+ *       job.start_ms = 0U;
  *   } else if (ftl_job_heartbeat(&job.log_ms, &job.start_ms)) {
  *       LOGI("[XX] job phase=%u ... age=%lums\r\n",
  *            (unsigned)job.phase, ..., (unsigned long)ftl_job_age_ms(&job.start_ms));
@@ -90,13 +91,6 @@ static inline bool ftl_job_heartbeat(uint32_t *log_ms, uint32_t *start_ms)
 
     *log_ms = now_ms;
     return true;
-}
-
-/* job 收工：清心跳基准（下一次起 job 从 0 重新计时）。 */
-static inline void ftl_job_heartbeat_reset(uint32_t *log_ms, uint32_t *start_ms)
-{
-    *log_ms   = 0U;
-    *start_ms = 0U;
 }
 
 /*

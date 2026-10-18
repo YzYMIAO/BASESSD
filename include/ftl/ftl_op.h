@@ -193,11 +193,11 @@ void ftl_op_bbt(struct ftl_context *ftl, const fc_command_status_t *completion, 
 void ftl_op_wear(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
 /*
- * ftl_op_metadata - L2P 日志块整理 job（回收 / 抗碎片压缩）的完成服务函数（定义在 metadata.c）。
+ * ftl_op_metadata - L2P 日志块整理 job（回收 / 抗碎片压缩）的完成服务函数（定义在 metadata_job.c）。
  *
  * 由 g_op_service[FTL_OP_METADATA] 引用；ctx = `md_job_t *`（= ftl->metadata_dir->job）。
  * 服务函数按 job.phase 记完成结果、改 phase、release 命令：
- *   · RECLAIM     ⇒ 成功 allocator_free_log_block；失败留 LOG 下次再试；
+ *   · RECLAIM     ⇒ 成功清待回收位 + allocator_free_block；失败保留位，下轮重试；
  *   · CP_READ     ⇒ 成功 ftl_cmd_read_data 拷进 job.cp_buf（**须早于 release**）→ CP_WRITE；
  *   · CP_WRITE    ⇒ 成功 metadata_dir_commit_region 登记 → CP_READ；失败中止（victim 不擦）；
  *   · CP_ANCHOR_* ⇒ 逐页写 + commit（无论成败都推进游标）；

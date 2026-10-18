@@ -234,7 +234,8 @@ void wear_kick(ftl_allocator_t *alloc, uint32_t total_writes)
     /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/cursor/age */
     if (alloc->wear.job.phase == (uint8_t)WEAR_JOB_IDLE)
     {
-        ftl_job_heartbeat_reset(&alloc->wear.job.log_ms, &alloc->wear.job.start_ms);
+        alloc->wear.job.log_ms   = 0U;
+        alloc->wear.job.start_ms = 0U;
     }
     else if (ftl_job_heartbeat(&alloc->wear.job.log_ms, &alloc->wear.job.start_ms))
     {

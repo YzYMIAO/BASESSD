@@ -5386,3 +5386,41 @@ unused-variable 告警）、`make tests UT=FTL` 仍因 v0.77~v0.78 重构遗留�
 上板判据：首启自动格式化 → 冷启动 `free` 计数比旧布局多 16 块号对应量 → 顺序写/随机读
 回归 → 读一个从未写过的 LBA 返回未映射且设备不产生额外 NAND 读（可对比改动前后同负载
 的读耗时/FC 命令计数）。
+
+## v0.80 — 元数据回收全面异步化：待回收位图 + job 拆分 + 观测收口
+
+**日期**：2026-10-18
+
+**动机**：v0.75 已把压缩/回收做成后台 job，但 `metadata_dir_append_slot` 换块时仍保留
+一条**同步**全池 sweep（`metadata_dir_reclaim`）作为兜底——每次换块（每 64 次 region
+刷盘）可能同步擦 0..N 个块，单次 tERASE ~3 ms，直接击穿 700 µs / 2000 µs 的服务预算。
+同步 sweep 存在的原因是 `md_job_t.reclaim_target` 只有**一个槽**：同一轮多个块归零时
+早的会被覆盖，只能靠 sweep 补。
+
+**修法**：
+1. `metadata_dir_cache_t` 新增 `reclaim_pending[FTL_BLOCK_TOTAL/32]` 位图（4096 bit =
+   512 B，RAM-only）+ `reclaim_pending_count`；`md_job_t.reclaim_target` 删除。
+2. 登记点：`commit_region` 旧位置归零、`append_slot` 换走零活旧块、换块时
+   `md_reclaim_mark_all` 只登记不擦、压缩/擦除失败重试。登记**永不**碰 NAND。
+3. `metadata_dir_kick` 的 IDLE 先看 `reclaim_pending_count`；RECLAIM 从位图取块、
+   重查三条资格判据后提交异步擦除。**成功才清位**并归还 Free Pool；失败保留位，下轮重试。
+4. 当前日志块已满且 `l2p_live == 0` 时，换块前先摘掉其"当前"身份并登记，否则
+   Free Pool 空时会永远换不了块。
+5. 拆分：job 状态机（约 650 行）移到 `src/ftl/metadata_job.c`；共用原语
+   （`metadata_dir_slot_now` / `md_job_reset` / 位图操作）放
+   `src/ftl/metadata_internal.h`；`metadata.c` 只留 Directory/布局/Anchor/追加/登记。
+6. 薄封装收口：删 `allocator_free_log_block`（纯转发 ⇒ 直接用 `allocator_free_block`）、
+   `md_block_is_log`（纯表达式 ⇒ 两处内联）、`ftl_job_heartbeat_reset`
+   （纯清零 ⇒ 调用点直接写）。
+7. 观测：`[MD] job` 心跳 `LOGI → LOGD`（默认档静默）；CLI `info` 在 job 在跑或
+   `pending != 0` 时追加一行 phase/moved/stall/pending/victim。
+
+**介质格式**：**无变更**（位图是 RAM 态），`FTL_MEDIA_LAYOUT_VERSION` 不动，上板首启
+不格式化。
+
+**验证状态**：⚠ **未上板**。`make all` 零告警；`make release` 仅剩 2 条既有
+unused-variable 告警；`make tests UT=FTL` 仍因既有测试符号失败，另新增 1 条
+`md_job_t.reclaim_target` 不存在（UT 冻结，未改测试源）。
+上板判据：冷启动不格式化；顺序写跨越多个日志块轮转时 `info` 的 `pending` 能归零、
+`free` 不持续下滑；压缩中途 / 回收在飞时断电，重启后 Journal/Anchor 恢复且
+`[FTL] dangling` 不出现；写路径不再出现 ~3 ms 同步擦除停顿。

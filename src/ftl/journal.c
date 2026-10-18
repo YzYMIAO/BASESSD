@@ -355,7 +355,8 @@ void journal_kick(l2p_journal_t *journal)
         return; /* 单飞行：job 已在飞 */
     }
 
-    ftl_job_heartbeat_reset(&journal->job.log_ms, &journal->job.start_ms);
+    journal->job.log_ms   = 0U;
+    journal->job.start_ms = 0U;
 
     if (journal->job.need_erase != 0U)
     {

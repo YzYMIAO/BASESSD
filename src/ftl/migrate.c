@@ -756,7 +756,8 @@ void mig_service(ftl_context_t *ftl)
 
     if (!m->active)
     {
-        ftl_job_heartbeat_reset(&m->log_ms, &m->start_ms);
+        m->log_ms   = 0U;
+        m->start_ms = 0U;
         return;
     }
 

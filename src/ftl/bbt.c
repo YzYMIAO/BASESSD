@@ -691,7 +691,8 @@ void bbt_kick(ftl_allocator_t *alloc)
     /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age */
     if (alloc->bbt.job.phase == (uint8_t)BBT_JOB_IDLE)
     {
-        ftl_job_heartbeat_reset(&alloc->bbt.job.log_ms, &alloc->bbt.job.start_ms);
+        alloc->bbt.job.log_ms   = 0U;
+        alloc->bbt.job.start_ms = 0U;
     }
     else if (ftl_job_heartbeat(&alloc->bbt.job.log_ms, &alloc->bbt.job.start_ms))
     {

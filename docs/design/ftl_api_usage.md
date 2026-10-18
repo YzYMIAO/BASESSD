@@ -885,7 +885,7 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 | `gc.c` | ⚠ 1 处 | `gc_read_page_with_lba`（`ftl_sync_submit_wait`）——唯一调用者是 `ftl_rebuild_closed_sb_list`（**开机**重建，结构性同步） |
 | `journal.c` | ⚠ 7 处 | ① 非派发上下文的**同步回退**（`journal_append` 页满且 `ftl_op_in_dispatch()==0`）；② 开机 `journal_scan_latest` / `replay` / `truncate` 的擦除与读 |
 | `checkpoint.c` | ⚠ 4 处 | 记录读 ×2 / 写 ×2（**阶段 6** 转 job） |
-| `metadata.c` | ⚠ 4 处 | **阶段 8 起目录压缩与 Anchor 落盘已异步**（`metadata_dir_kick` + `ftl_op_metadata`）；剩下 4 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（337，`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（405，冷启动定位游标）、`metadata_dir_reclaim_block` 的擦（737，`append_slot` 换块分支的全池 sweep）、`metadata_dir_load` 的 Anchor 读（1844，开机） |
+| `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / Anchor 落盘全在异步 job（`metadata_job.c`：`metadata_dir_kick` + `ftl_op_metadata`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的 Anchor 读（开机） |
 | `bbt.c` | ⚠ 7 处 | 记录读 ×2、出厂标记读、擦除、持久化写（**阶段 7**） |
 | `wear.c` | ⚠ 3 处 | 快照写、压实擦除、开机回放读（**阶段 7**） |
 | `power_failure_recovery.c` | ⚠ 4 处 | 开机 region 预载读、空白页裸读（**结构性同步**，长期保留） |
