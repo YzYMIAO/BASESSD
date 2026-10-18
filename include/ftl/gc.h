@@ -17,7 +17,8 @@
  *   见 `ftl/migrate.h` / `migrate.c`（mig_job_t + mig_begin_gc / mig_begin_wl /
  *   mig_service + ftl_op_migrate）。本文件只留**选 victim 与共用原语**：
  *   · gc_select_victim   —— 四项加权评分（GC 侧选块策略）
- *   · gc_read_page_with_lba / gc_decode_cw_lba —— 搬移读与 META 解码（GC / WL / 掉电重建共用）
+ *   · gc_decode_cw_lba   —— 已完成读命令的逐 CW META 解码（异步搬移 + 掉电重建共用）
+ *   · gc_read_page_with_lba —— 同步读 + 解码（只服务掉电重建）
  *   · gc_check_triggers  —— 触发判定
  *
  * 原子性：
@@ -51,10 +52,11 @@
  * gc_check_triggers() 返回的**位掩码**：命中的位即触发起因（可多位同时命中）。
  * 只用于调用点打日志/调参，"要不要 GC" 的判定仍是 `!= 0`。
  *
- * ⚠ 位值**不得重排**：`[GC] trig=` 日志与历史 ADR 按位值对齐（0x02 / 0x04 / 0x20 不用，
- *   但缺口保留）。触发判据的出处：SPDK 的 `ftl_needs_reloc`（自由 band 水位）与
- *   nvcache 的 free-chunk 阈值；DRAM-less 侧（DFTL / LeaFTL / VPFTL）与 dhara 同样只认
- *   **空间压力**。定时 / 写入量 / 碎片率三类触发在参考层查无出处，且碎片率会自激。 */
+ * ⚠ 位值是对外观测契约（`[GC] trig=` 日志 / 测试），**不得重排**；0x02 / 0x04 / 0x20
+ *   不用但缺口保留，避免旧日志/脚本按位值解读时错位。触发判据的出处：SPDK 的
+ *   `ftl_needs_reloc`（自由 band 水位）与 nvcache 的 free-chunk 阈值；DRAM-less 侧
+ *   （DFTL / LeaFTL / VPFTL）与 dhara 同样只认**空间压力**。定时 / 写入量 / 碎片率
+ *   三类触发在参考层查无出处，且碎片率会自激。 */
 #define GC_TRIGGER_WATERMARK (0x01U) /* T1: free_count < FREE_POOL_TARGET */
 #define GC_TRIGGER_EMERGENCY (0x08U) /* T4: free_count <= FREE_POOL_EMERGENCY */
 #define GC_TRIGGER_WEAR      (0x10U) /* T5: 全表擦除比 max/min > GC_WEAR_LEVEL_RATIO */
@@ -102,10 +104,22 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, lba_t cw_lba[CW_NUM]);
  * @param cmd           已完成的读命令（链恒覆盖该 plane 全 4 CW）
  * @param pba           该命令的目标页 PBA（页基址，cw 位为 0；用于校验 META 的 plane 位）
  * @param cw_lba        输出：逐 CW 的扇区 LBA，CW_NUM 项；未写过 = FTL_LBA_INVALID
- * @param page_base_out 输出：页基址（CW0 的扇区 LBA）（可为 NULL）
- * @return true 成功（至少一个 CW 写过）；false 全页无写过 CW（无有效数据，调用者跳过本页）
+ * @param page_base_out 输出：页基址（首个写过 CW 反推）（可为 NULL）
+ * @return GC_DECODE_OK = 至少一个 CW 写过且页基址一致；GC_DECODE_EMPTY = 全页未写过
+ *         （无有效数据，调用者跳过）；GC_DECODE_CORRUPT = 写过的 CW 页基址不一致
+ *         （META 损坏，调用者必须按不可迁移处理，**不得**擦 victim）。
  */
-bool gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lba_t *page_base_out);
+typedef enum
+{
+    GC_DECODE_OK = 0,
+    GC_DECODE_EMPTY,
+    GC_DECODE_CORRUPT,
+} gc_decode_result_t;
+
+gc_decode_result_t gc_decode_cw_lba(fc_command_t *cmd,
+                                    nand_pba_t    pba,
+                                    lba_t         cw_lba[CW_NUM],
+                                    lba_t        *page_base_out);
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block

@@ -131,6 +131,12 @@ _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能�
 /* 每页 CW 数 = 每页映射单元数 */
 #define FTL_CW_PER_PAGE (CW_NUM)
 
+/* 单物理块 / 单个 Super Block 的 CW 容量。
+ * ⚠ `ftl_block_t.valid_count` 是**单物理块**计数（0..FTL_CW_PER_BLOCK）；
+ *   victim 评分的 `valid_cw` 是各 plane 之和（0..FTL_CW_PER_SB）。两者不可混用。 */
+#define FTL_CW_PER_BLOCK (PAGES_PER_BLOCK * CW_NUM)
+#define FTL_CW_PER_SB    (PLANE_NUM * FTL_CW_PER_BLOCK)
+
 /* 一对 plane 页覆盖的 LBA 数（8 = 2 plane × 4 CW） */
 #define FTL_LBA_PER_PAIR (PLANE_NUM * CW_NUM)
 

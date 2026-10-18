@@ -276,9 +276,10 @@ static inline void ftl_block_set_sb(ftl_block_t *b, uint16_t sb_id)
  * 主机只改写其中 1 个 CW 时，同页另 3 个 CW 仍然有效。
  *
  * valid_count（在 ftl_block_t 内）是**真值**，单位 **CW**，值域
- * 0 .. PLANE_NUM × PAGES_PER_BLOCK × CW_NUM（当前 0..512）。每次「某 LBA 的映射
+ * 0 .. FTL_CW_PER_BLOCK（单物理块，当前 0..256）。每次「某 LBA 的映射
  * 指向本块某页某 CW」+1、「某 LBA 不再指向本块某页某 CW」-1，与 L2P 逐条同步。
- * GC/WL 的 victim 评分分母必须是**满块 CW 数**（不是页数）。
+ * SB 层的 `valid_cw` 是各 plane 之和（0..FTL_CW_PER_SB，当前 0..512），只用于
+ * victim 评分；**不要**拿它作为单块 `valid_count` 的上界。
  *
  * ⚠ 本仓**无**「写过」位图（v0.60 删）：页内哪些 CW 有效由**页内 META + L2P 反查**
  *   逐 CW 现判（DRAM-less approach ③，见文件头）；本计数只服务 victim 选择。 */
@@ -287,7 +288,7 @@ static inline void ftl_block_set_sb(ftl_block_t *b, uint16_t sb_id)
 static inline void ftl_block_add_valid(ftl_block_t *b)
 {
     ASSERT(b != NULL);
-    ASSERT(b->valid_count < (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK * CW_NUM));
+    ASSERT(b->valid_count < (uint16_t)FTL_CW_PER_BLOCK);
     b->valid_count++;
 }
 
@@ -307,11 +308,11 @@ static inline void ftl_block_clear_valid(ftl_block_t *b)
 }
 
 /* 直接设置 `valid_count`（块元数据快照恢复 / 重建用；日常增量仍走 add/sub）。
- * ⚠ 上界是**单物理块**的 CW 数（PAGES_PER_BLOCK × CW_NUM），不是 SB 合计。 */
+ * ⚠ 上界是**单物理块**的 CW 数（FTL_CW_PER_BLOCK），不是 SB 合计。 */
 static inline void ftl_block_set_valid(ftl_block_t *b, uint16_t valid)
 {
     ASSERT(b != NULL);
-    ASSERT(valid <= (uint16_t)(PAGES_PER_BLOCK * CW_NUM));
+    ASSERT(valid <= (uint16_t)FTL_CW_PER_BLOCK);
     b->valid_count = valid;
 }
 

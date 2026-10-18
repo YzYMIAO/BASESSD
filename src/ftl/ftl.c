@@ -34,8 +34,8 @@
  *   4. 子操作下发      ftl_issue_subop / ftl_drain_group（static）
  *   5. 元数据落盘/TRIM ftl_flush / ftl_trim
  *
- * ⚠ 回收动作（原 ftl_gc_reclaim_one）已随阶段 4 迁入 `ftl/migrate.c`：GC / WL / 慢死预测
- *   共用一台异步搬移 job（mig_begin_* / mig_service），本文件只做**触发求值**与**启动**。
+ * ⚠ 回收动作在 `ftl/migrate.c`：GC / WL / 慢死预测共用一台异步搬移 job
+ *   （mig_begin_* / mig_service），本文件只做**触发求值**与**启动**。
  *
  * ⚠ 多实例（F6）：pending / groups / rr_last_scan_ms 均 per-instance；completion 全局
  *   但按命令 ch/ce/lun 路由。main.c 主循环：先 ftl_service_pump()（全局泵，每轮一次）
@@ -173,7 +173,7 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
             oldp = NAND_PBA_INVALID;
         }
 
-        journal_append(ftl->journal, l, oldp, newp);
+        (void)journal_append(ftl->journal, l, oldp, newp);
         (void)l2p_cache_write(ftl->cache, l, newp);
 
         ftl_block_add_valid(&ftl->alloc.blocks[ftl_pba_gblock(newp)]);
@@ -465,10 +465,10 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
 }
 
 /* ════════════════════════════════════════════════════════════════════════
- * 后台调度器接线（v0.76）
+ * 后台调度器接线
  *
- * v0.75 的三级 static 服务函数（ftl_service_idle/normal/busy）→ 13 项任务表 +
- * 档位→预算映射。引擎在 bg_scheduler.c（通用、零 kick 知识）；本文件只做三件事：
+ * 13 项任务表 + 档位→预算映射。引擎在 bg_scheduler.c（通用、零 kick 知识）；
+ * 本文件只做三件事：
  *   ① 13 个 static 适配器：把异构 kick（签名/参数各异）包成 void(ftl_context_t*)；
  *   ② g_bg_level_cfg[3]：档位 → 每轮总预算 + l2p flush 条数上界 + 预算任务掩码；
  *   ③ ftl_bg_init 填任务表 / ftl_bg_level_select 负载→档位（纯函数）。
@@ -512,7 +512,7 @@ static void bg_a_rr(ftl_context_t *ftl)
     rr_kick(ftl);
 }
 
-/* 位 2 · must_run —— 推进搬移 job（阶段 4，GC/WL/预测共用，已在飞则续跑下一步）。
+/* 位 2 · must_run —— 推进搬移 job（GC/WL/预测共用，已在飞则续跑下一步）。
  * 写路径的紧急 GC 在 BUSY 档起（ftl_wbuf_flush 分配不到块 ⇒ FTL_AGAIN），
  * 不推进即死锁；任何档位都要跑。 */
 static void bg_a_mig_service(ftl_context_t *ftl)
@@ -549,8 +549,8 @@ static void bg_a_emergency_cp(ftl_context_t *ftl)
     }
 }
 
-/* 位 6 · 预算 — GC 统一触发判定（与三档旧实现同一函数；内部 GC_EVAL_INTERVAL_MS 门兜底，
- * interval=GC_EVAL_INTERVAL_MS 是调度器级节拍）。命中即**起一个** GC 搬移 job（单飞行）。 */
+/* 位 6 · 预算 — GC 统一触发判定（内部 GC_EVAL_INTERVAL_MS 门与调度器 interval 双保险）。
+ * 命中即**起一个** GC 搬移 job（单飞行）。 */
 static void bg_a_gc_eval(ftl_context_t *ftl)
 {
     if (ftl_gc_evaluate(ftl) != 0U)
@@ -608,7 +608,7 @@ static void bg_a_cp_trigger(ftl_context_t *ftl)
 
 /* 位 13 · 预算 — 慢死预测巡检（节流 1s；一次只搬一个 SB，防长时间阻塞）。仅 IDLE 档。
  * 内部门（rr_last_scan_ms / RR_SCAN_INTERVAL_MS）与调度器 interval=RR_SCAN_INTERVAL_MS
- * 双保险：时钟缺失降级下调度器 interval gate 失效，内部门兜底（与 v0.75 退化形态同构）。 */
+ * 双保险：时钟缺失降级下调度器 interval gate 失效，内部门兜底。 */
 static void bg_a_rr_predict(ftl_context_t *ftl)
 {
     uint32_t now_ms = ftl_now_ms();
@@ -657,9 +657,10 @@ void ftl_bg_init(ftl_context_t *ftl)
     bg->tasks[i].interval_ms = GC_EVAL_INTERVAL_MS;
     bg->tasks[i].budget_us   = 400U;
     i++;
-    bg->tasks[i].func      = bg_a_wl;
-    bg->tasks[i].priority  = 1U;
-    bg->tasks[i].budget_us = 300U;
+    bg->tasks[i].func        = bg_a_wl;
+    bg->tasks[i].priority    = 1U;
+    bg->tasks[i].interval_ms = WL_EVAL_INTERVAL_MS; /* 触发判定要扫全表，5 s 一次足够 */
+    bg->tasks[i].budget_us   = 300U;
     i++;
     bg->tasks[i].func      = bg_a_l2p_flush;
     bg->tasks[i].priority  = 2U;
@@ -686,9 +687,8 @@ void ftl_bg_init(ftl_context_t *ftl)
     bg->task_count = i;
 }
 
-/* ftl_bg_level_select — 负载 → 档位（纯函数，无副作用）。
- * 与 v0.75 三级分档**逐字等价**（见 ftl_service 注释）：inflight 全空 = IDLE；
- * pending > 半池 或 有未决组 = BUSY；中间 = NORMAL。 */
+/* ftl_bg_level_select — 负载 → 档位（纯函数，无副作用）：
+ * inflight 全空 = IDLE；pending > 半池 或 有未决组 = BUSY；中间 = NORMAL。 */
 uint8_t ftl_bg_level_select(const ftl_context_t *ftl)
 {
     uint16_t queued   = pending_group_count(ftl);
@@ -882,21 +882,18 @@ void ftl_service(ftl_context_t *ftl)
      * 判定之前：它是 host IO 的收尾，不是后台任务。 */
     ftl_wbuf_maybe_flush_idle(ftl);
 
-    /* Phase 3: 时间预算后台调度（v0.76）
+    /* Phase 3: 时间预算后台调度
      *
-     * v0.75 三级 static 服务函数 → bg_scheduler 引擎 + 13 项任务表 + 档位→预算映射
-     * （接线/引擎见本文件上部「后台调度器接线」与 bg_scheduler.h）。空闲度近似
-     * （B3：基于未决命令数，非"本轮有无提交 NAND"代理）**逐字沿用**旧实现：
-     *   旧实现用 submitted（本轮 fc_service 提交了几条）判定，host 无 IO 时 fc_service
-     *   也可能返回非 0（后台命令推进）→ 误判 NORMAL/BUSY，GC/WL/CP 全推迟。现在用
-     *   pending（host IO 未决）+ groups（未完成的 host 请求）近似系统空闲度：
+     * bg_scheduler 引擎 + 13 项任务表 + 档位→预算映射（接线/引擎见本文件上部
+     * 「后台调度器接线」与 bg_scheduler.h）。空闲度用 pending（host IO 未决）+
+     * groups（未完成的 host 请求）近似：
      *   全空 = 真空闲 → IDLE 全力后台；有未完成 host 请求 = host 饿着 → BUSY 最少后台
      *   （让路，否则抢走 drain 要用的 FC buffer）；中间 → NORMAL 按需后台。
      *
-     * ⚠ **阶段 4 起不再计入 completion_table**：后台 job（journal / RR / 搬移）的命令
-     *   也登记在 completion_table 里，计进来会让「真空闲」永不成立——一个后台 job 在飞
-     *   就把模式从 IDLE 顶到 NORMAL，后台反而被自己的命令饿死。后台 job 的活跃度由各自
-     *   的「单飞行门」（journal.job.phase / rr.stage / mig.active）单独管，与 host 侧解耦。
+     * ⚠ **空闲度不计 completion_table**：后台 job（journal / RR / 搬移）的命令也登记在
+     *   completion_table 里，计进来会让「真空闲」永不成立——一个后台 job 在飞就把模式
+     *   从 IDLE 顶到 NORMAL，后台反而被自己的命令饿死。后台 job 的活跃度由各自的
+     *   「单飞行门」（journal.job.phase / rr.stage / mig.active）单独管，与 host 侧解耦。
      *
      * ⚠ bg_suspend 必须在此**最先** return（早于 must-run pass）：`bbt --erase` 之后
      *   介质已空而 RAM 状态陈旧，任何后台写（含 must-run 里的 journal/CP/元数据目录）
@@ -1001,7 +998,7 @@ static ftl_status_t ftl_wbuf_append(ftl_context_t *ftl, uint16_t gi, lba_t inter
 
 /* ftl_wbuf_flush — 把当前缓冲页编程到 NAND（一页 = 一次编程，两 plane 都有数据即 multi-plane）。
  * 返回 FTL_OK 已提交 / FTL_AGAIN 背压（缓冲保留，下次重试）/ FTL_ERROR 建链或搬数据失败
- * （阶段 4 起**不再**有"无空间"的 FTL_ERROR——取不到块改走 FTL_AGAIN + 起 GC job）。
+ * （**没有**"无空间"的 FTL_ERROR——取不到块改走 FTL_AGAIN + 起 GC job）。
  * ⚠ 缓冲只在**提交成功后**清空——失败时保留供重试；outstanding 已在 append 记过，此处不动。 */
 static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
 {
@@ -1022,13 +1019,13 @@ static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
      * 起一个 GC 搬移 job（若未在跑）后返回 FTL_AGAIN，缓冲原样保留，由 ftl_drain_group
      * 下轮重试。
      *
-     * ⚠ **阶段 4 的行为变化**（原为"同步 GC 重试一次"）：搬移是异步 job，在完成回调/
-     *   写路径里同步等它会把 superloop 卡死（一次搬移 = 64 页 × 2 plane 读+写 + 2 次擦）。
-     *   改为背压后与既有 FTL_AGAIN 机制完全一致，也是主流做法（写路径不就地回收，
-     *   取不到块就挂起主机命令）。**代价**：池满时写延迟升高（等一个 job 走完）。
-     *   **死锁边界**：GC 自身搬移需要 free block ⇒ 靠 **OP 预留池**兜底（v0.74 已把 OP
-     *   池改成按 plane 预留）；GC job 因池空而中止时（migrate.c 的 alloc 失败分支）
-     *   不擦 victim、数据无损，下轮重试。
+     * ⚠ **搬移是异步 job**：在完成回调/写路径里同步等它会把 superloop 卡死
+     *   （一次搬移 = 64 页 × 2 plane 读+写 + 2 次擦）。背压与既有 FTL_AGAIN 机制一致，
+     *   也是主流做法（写路径不就地回收，取不到块就挂起主机命令）。
+     *   **代价**：池满时写延迟升高（等一个 job 走完）。
+     *   **死锁边界**：GC 自身搬移需要 free block ⇒ 靠 **OP 预留池**兜底（OP 池按 plane
+     *   预留）；GC job 因池空而中止时（migrate.c 的 alloc 失败分支）不擦 victim、
+     *   数据无损，下轮重试。
      *   ⚠ 这里**不再**返回 FTL_ERROR：无 victim 可回收只是"暂时没空间"，下轮可能就有
      *   （另一条写完成归还了块），报 IO_ERROR 会让 host 写永久失败。 */
     nand_pba_t new_pba[PLANE_NUM];
@@ -1701,6 +1698,6 @@ void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
          * 的 LBA 复活**：region 虽被 flush 成 INVALID，但回放按序重放更早的写条目
          * （page_seq 更小但 > cp_sequence）会把它改回有效 PBA，且回放行标 DIRTY
          * 后 ftl_boot_apply_region_bitmap 会跳过预载，NAND 上的 INVALID 也不生效。 */
-        journal_append(ftl->journal, l, old_pba, NAND_PBA_INVALID);
+        (void)journal_append(ftl->journal, l, old_pba, NAND_PBA_INVALID);
     }
 }

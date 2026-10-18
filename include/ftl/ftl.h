@@ -161,7 +161,7 @@ typedef struct ftl_context
      * ⚠ 为什么需要：求值点 ftl_gc_evaluate 里的 T5 要算**全表**磨损极值
      * （gc_table_extremes 遍历 FTL_BLOCK_TOTAL = 2048×PLANE_NUM 个块，≈80KB），
      * 而它挂在 Phase 3 的 IDLE/NORMAL 两条路径上、主循环 `while(1)` 又无节拍
-     * ⇒ 改造前是**每轮扫一遍全表**（GC 选不出 victim 的卡死态下即 100% CPU）。
+     * ⇒ 必须用本字段限频，否则每轮扫一遍全表（选不出 victim 的卡死态下即 100% CPU）。
      * 与 rr_last_scan_ms（1s 巡检）/ cp_timer_start 的节拍门同族。
      * ⚠ 0 作「尚未求值」哨兵：平台时钟缺失时 ftl_now_ms() 恒返回 0，此时每轮都求值
      * ——GC 不能因为缺时钟而停摆（与 T3 定时「恒不触发」的取舍方向相反）。 */
@@ -176,10 +176,9 @@ typedef struct ftl_context
      * ⚠ 同 gc_eval_last_ms：0 兼作「本触发态内尚未打过」哨兵。 */
     uint32_t gc_log_last_ms;
 
-    /* 时间预算后台调度器（v0.76，per-instance）。
+    /* 时间预算后台调度器（per-instance）。
      * 任务表（13 项：6 must-run + 7 预算）由 ftl_bg_init 填充；每轮 Phase 3 经
-     * ftl_bg_level_select 选档后跑 bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level])。
-     * 取代 v0.75 的三个 static 三级服务函数（IDLE/NORMAL/BUSY 的计数门控）。 */
+     * ftl_bg_level_select 选档后跑 bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level])。 */
     bg_scheduler_t bg;
 
     /* GC 进展计数（per-instance，只增不减，纯观测）。
@@ -188,18 +187,18 @@ typedef struct ftl_context
      * （`allocator_close_sb` 的 is_open 顺序缺陷 cf604ba 就是这个形态：条目对 GC/WL 永久不可见
      * ⇒ free_count 掉到 0 后永不回升、写最终永久失败）。
      * 判据：两次心跳之间 gc_reclaimed_count 不动、gc_novictim_count 在涨 = 卡死。
-     * 自增点：reclaimed 在 mig_finish 的 MIG_DONE（阶段 4 起，原 ftl_gc_reclaim_one），
+     * 自增点：reclaimed 在 mig_finish 的 MIG_DONE（仅擦除成功且 closed 条目已移除），
      * novictim 在 mig_begin_gc ⇒ IDLE 补池与 NORMAL 单发两条路径都覆盖。 */
     uint32_t gc_reclaimed_count; /* 累计成功回收的 SB 数 */
     uint32_t gc_novictim_count;  /* 累计「触发但选不出 victim」次数 */
 
-    /* 搬移 job（阶段 4：GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
-     * ⚠ 含 4KB 页镜像（page_buf），是本结构体里**新增的最大一块** —— 原先在
-     *   gc_migrate_sb / wl_relocate 的栈上，异步化后必须常驻（栈帧早已返回）。 */
+    /* 搬移 job（GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
+     * ⚠ 含逐 plane 的页镜像（page_buf，当前共 4KB），必须常驻：异步 job 的栈帧在
+     *   提交命令时就已返回，数据要活到完成回调。 */
     mig_job_t mig;
 
-    /* Read Recovery：per-Block ECC 趋势追踪已并入 alloc.blocks[].rr（BST 单数据源）；
-     * 本结构 v0.75 阶段 3 起 = 异步恢复 job 状态机本体（见 read_recovery.h） */
+    /* Read Recovery：per-Block ECC 趋势追踪在 alloc.blocks[].rr（BST 单数据源）；
+     * 本结构 = 异步恢复 job 状态机本体（见 read_recovery.h） */
     ftl_read_recovery_t rr;
 
     /* Read Recovery 整页暂存（CW 级映射：一个子操作可能只覆盖页内部分 CW，

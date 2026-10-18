@@ -21,7 +21,8 @@
  *     它们是防死锁/防 host 读挂起的动作（删了系统会挂，见 ftl.c 三档函数注释）。
  *   · interval_ms = 最小执行间隔；0 = 不设调度器级间隔（任务内部事件门管节流，如
  *     journal 的页满门）。last_run_ms==0 作「尚未运行」哨兵（仿 gc_eval_last_ms）。
- *   · budget_us = 单次执行钳制：charge = MIN(elapsed, budget_us)，本轮总预算耗尽即截断。
+ *   · budget_us = 单次**计账上限**（charge = MIN(elapsed, budget_us)），不是执行中断/
+ *     硬钳制：任务函数跑到返回为止，超出的时间只是不被计入 charge。
  *     ⚠ kick 全部「提交即返回」⇒ elapsed 只反映 CPU 时间（平台 time_us 实测 SysTick 1ms
  *     量化）；**确定性前台保护由档位 → l2p 条数/任务掩码承担**（见 ftl.c g_bg_level_cfg）。
  *   · 时钟缺失（time_us 缺失或恒 0）：interval 门与预算计账一并退化——last_run_ms 恒 0
@@ -51,7 +52,7 @@ typedef struct
     bg_task_func_t func;        /* 适配器（ftl.c 定义） */
     uint32_t       interval_ms; /* 最小执行间隔；0 = 不设调度器级间隔（内部事件门管） */
     uint32_t       last_run_ms; /* 上次运行时刻；0 = 尚未运行 ⇒ 立即跑（哨兵） */
-    uint16_t       budget_us;   /* 单次钳制：charge = MIN(elapsed, budget_us) */
+    uint16_t       budget_us;   /* 单次计账上限：charge = MIN(elapsed, budget_us) */
     uint8_t        priority;    /* 越小越先跑（预算内按表序 = 优先级升序） */
     uint8_t        must_run;    /* 1 = 正确性关键集：不 gate、不占预算、无条件每轮跑 */
 } bg_task_t;

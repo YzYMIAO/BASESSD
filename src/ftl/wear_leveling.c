@@ -8,13 +8,14 @@
  * 与 gc.c 的分工：
  *   GC —— 回收**无效页多**的块（空间回收，顺带磨损均衡）；
  *   WL —— 搬运**擦得少**的块（磨损拉平，顺带 read disturb 缓解）。两者共用
- *         gc_read_page_with_lba 读原语与 migrate.c 的搬移引擎。
+ *         migrate.c 的搬移引擎；异步读路径用 ftl_async_read_page + gc_decode_cw_lba
+ *         （gc_read_page_with_lba 是掉电重建专用的同步原语）。
  *
  * 触发三条件（wl_should_trigger，任一命中即搬）：最大/最小差值、最大/平均比值、低擦除区占比。
  *
  * 文件结构：
  *   1. 触发 / 选块     wl_should_trigger / wl_select_victim
- *   2. 磨损统计        wl_max_erase / wl_min_erase / wl_avg_erase / wl_count_blocks_below
+ *   2. 磨损统计        wl_min_erase
  *
  * ⚠ 搬移在 `ftl/migrate.c` 的异步 job 里完成（GC / WL 共用一台引擎，靠 kind/post 区分）
  *   ——本文件只留触发判定与选块策略。
@@ -28,7 +29,6 @@
 
 #include "wear_leveling.h"
 
-#include "assertion.h"
 #include "ftl.h"
 
 #include <string.h>
@@ -42,14 +42,15 @@
  *   返回：true 触发；false 不触发（未达最小间隔 / 三条件均未命中）。
  *   ⚠ ftl 非空是**前置条件**（调用者 migrate.c 持有实例指针），不在此复检——
  *     见 docs/design/assertion_guidelines.md §二十六「模块内部不逐函数复检同一入参」。
- *   实现要点：先过 WL_MIN_INTERVAL 最小间隔门（避免刚开机抖动）；条件 1 最大/最小差值
+ *   实现要点：先过 WL_MIN_WRITES 启动门（刚开机不抖）；条件 1 最大/最小差值
  *             ≥ WL_DELTA_THRESHOLD；条件 2 最大 ≥ 平均 × WL_MAX_AVG_RATIO；
- *             条件 3 低擦除区（min + WL_LOW_ZONE_WIDTH 以下）块占比 > WL_LOW_BLOCK_PCT%。
+ *             条件 3 低擦除区（min + WL_LOW_ZONE_WIDTH 以下）块占比 **>** WL_LOW_BLOCK_PCT%。
  * -------------------------------------------------------------------- */
 bool wl_should_trigger(const struct ftl_context *ftl)
 {
-    /* WL 最小间隔检查 */
-    if (ftl->total_writes < WL_MIN_INTERVAL)
+    /* 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
+     * 周期节拍由 bg_a_wl 的 WL_EVAL_INTERVAL_MS 负责。 */
+    if (ftl->total_writes < WL_MIN_WRITES)
     {
         return false;
     }
@@ -102,7 +103,7 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
     uint32_t min_ec = wl_min_erase(ftl);
 
     /* 门限单位是**有效 CW**（CW 级映射：1 页 = CW_NUM 个映射单元） */
-    uint16_t total_cw_per_sb = (uint16_t)(PLANE_NUM * PAGES_PER_BLOCK * CW_NUM);
+    uint16_t total_cw_per_sb = (uint16_t)FTL_CW_PER_SB;
     uint16_t min_valid_cw    = (uint16_t)(total_cw_per_sb * WL_MIN_VALID_RATIO / 100U);
 
     for (uint16_t i = 0U; i < ftl->alloc.closed_sb_count; i++)
@@ -142,7 +143,6 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
             ((st.valid_cw == best.valid_cw) && (st.read_sum > best.read_count)))
         {
             best.found      = true;
-            best.avg_erase  = sb_ec;
             best.valid_cw   = st.valid_cw;
             best.read_count = st.read_sum;
             for (uint8_t p = 0U; p < PLANE_NUM; p++)
@@ -164,16 +164,8 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
 /* ── 2. 磨损统计（全部跳过坏块）── */
 
 /* 磨损统计访问器 —— 口径（好块 / 坏块排除）由 allocator 定义。
- * 热路径 wl_should_trigger 用 allocator_erase_stats 一次取全；以下 API 供外部/UT 查询。 */
-
-/* wl_max_erase — 全体好块擦除次数的最大值（无块返回 0） */
-uint32_t wl_max_erase(const struct ftl_context *ftl)
-{
-    allocator_erase_stats_t st;
-
-    allocator_erase_stats(&ftl->alloc, &st);
-    return st.erase_max;
-}
+ * 热路径 wl_should_trigger 用 allocator_erase_stats 一次取全；本访问器只服务
+ * wl_select_victim 的低擦除区判定。 */
 
 /* wl_min_erase — 全体好块擦除次数的最小值（无好块返回 0） */
 uint32_t wl_min_erase(const struct ftl_context *ftl)
@@ -182,19 +174,4 @@ uint32_t wl_min_erase(const struct ftl_context *ftl)
 
     allocator_erase_stats(&ftl->alloc, &st);
     return st.erase_min;
-}
-
-/* wl_avg_erase — 全体好块擦除次数的平均值（无好块返回 0） */
-uint32_t wl_avg_erase(const struct ftl_context *ftl)
-{
-    allocator_erase_stats_t st;
-
-    allocator_erase_stats(&ftl->alloc, &st);
-    return (st.good_count == 0U) ? 0U : (st.erase_sum / st.good_count);
-}
-
-/* wl_count_blocks_below — 擦除次数严格小于 threshold 的好块数（低擦除区占比统计用） */
-uint32_t wl_count_blocks_below(const struct ftl_context *ftl, uint32_t threshold)
-{
-    return allocator_count_blocks_below(&ftl->alloc, threshold);
 }

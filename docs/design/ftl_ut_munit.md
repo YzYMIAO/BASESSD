@@ -171,14 +171,15 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 |---|---|
 | `gc_victim_lowest_vpc` | `gc_select_victim` 选 VPC 最低 closed SB |
 | `gc_victim_skips_open` | 跳过 `valid!=0` 的 open SB（负例，判据 8） |
-| `gc_trigger_T1_T4_T5` | `gc_check_triggers` **三位**各自置位（参数化）：T1 `GC_TRIGGER_WATERMARK(0x01)` / T4 `GC_TRIGGER_EMERGENCY(0x08)` / T5 `GC_TRIGGER_WEAR(0x10)`（`gc.h:49-51`）——**v0.63 已删 T2 写数 / T3 定时** |
+| `gc_trigger_T1_T4_T5` | `gc_check_triggers` **三位**各自置位（参数化）：T1 `GC_TRIGGER_WATERMARK(0x01)` / T4 `GC_TRIGGER_EMERGENCY(0x08)` / T5 `GC_TRIGGER_WEAR(0x10)`（`GC_TRIGGER_*`）——T2 写数 / T3 定时不实现 |
 | `wl_trigger_delta` | 条件 1：`max-min ≥ WL_DELTA_THRESHOLD(5000)` |
 | `wl_trigger_ratio` | 条件 2：`max ≥ avg×WL_MAX_AVG_RATIO(3)` |
-| `wl_trigger_low_zone` | 条件 3：低擦除区块占比 `≥ WL_LOW_BLOCK_PCT(5)%` |
+| `wl_trigger_low_zone` | 条件 3：低擦除区块占比 **>** `WL_LOW_BLOCK_PCT(5)%` |
 | `wl_victim_high_valid_low_erase` | `wl_select_victim` 选有效页最多 + 擦除最少（`valid≥89`） |
 | `wl_victim_read_count_weight` | 平手时 `read_count` 高者优先（B5 权重） |
-| `wl_max_min_avg_erase` | 三统计量与手工构造一致 |
-| `wl_count_blocks_below` | 低于阈值块计数正确 |
+
+> `wl_max_erase` / `wl_avg_erase` / `wl_count_blocks_below` 已删除（零生产消费者）；
+> 原 `wl_max_min_avg_erase` / `wl_count_blocks_below` 两个用例需由测试源所有者同步删除。
 
 ### 4.4 `g_ftl_rr_tests[]`（`src/ftl/read_recovery.c`）
 
@@ -436,7 +437,7 @@ FTL 的时间源经**平台抽象**：`ftl_now_ms` / `checkpoint_now_ms` 读 `ss
 
 | # | 候选改动 | 测试怎么顶出 | 风险面 |
 |---|---|---|---|
-| 1 | **migrate READ/WRITE_SETTLE 被动等 `l2p_cache_ready==0`**（`migrate.c:508/556` 原地返回、不自发触发加载） | 全链 GC 用例预置非就绪 region ⇒ 状态机停在 SETTLE 不再推进；候选改法：miss 时改走 `l2p_cache_read`（会起异步加载链） | 该 region 恰无人访问时 GC 挂起（`stall_rounds` 上限兜底，非卡死） |
+| 1 | **migrate READ/WRITE_SETTLE 等待 `l2p_cache_ready`**（`mig_step_read_settle` / `mig_step_write_settle` 原地返回；`l2p_cache_ready` 在 miss 时会**起异步加载**） | 全链 GC 用例预置非就绪 region ⇒ 状态机停在 SETTLE，等 region 加载完成后下一轮继续 | 该 region 恰无人访问时由 `l2p_cache_ready` 自行触发加载；等待期间 `stall_rounds` 被清零，**不是**上限兜底 |
 | 2 | **checkpoint 水位只置不撤**（`checkpoint_journal_watermark` 置位，撤位在 CP_TRUNC_* → `journal_truncate_commit`，需真 NAND） | EMERGENCY 回落用例 L0 无法纯 RAM 收口；要么驱动 CP 走到 TRUNC 阶段再断言，要么列 HIL | 只影响测试收口方式，非缺陷 |
 | 3 | completion seam fallback | 若个别读路径需要 `process_read` 数据语义（desc 每 CW status 回写 + `failed_descriptor_id` 聚合）而测试侧失真 | fc.c `#if FC_NAND_TEST_ENABLE` 薄 seam（包现成 `fc_complete_from_nand`） |
 | 4 | **红线**：派发上下文不得调同步原语（`ftl_op_in_dispatch` ASSERT，`ftl_fc_interface.c:535`） | 测试泵只能在非回调处（`ut_complete_and_drain` 外）用 | 服务函数里嵌套泵 = 解耦要消除的东西 |

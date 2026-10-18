@@ -849,7 +849,10 @@ void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *compl
                 return;
             }
             ftl->cp.last_journal_sequence = j->journal_seq; /* T3 空转门 / 增量判据 */
-            j->phase                      = (uint8_t)CP_TRUNC_PREP;
+            /* Header 是 commit 页：此时快照的脏区都已落盘。若本次 CP 起点覆盖了
+             * Journal 的持久性失败点，可清除 pending（见 journal_clear_write_failure）。 */
+            journal_clear_write_failure(ftl->journal, j->journal_seq);
+            j->phase = (uint8_t)CP_TRUNC_PREP;
             return;
 
         case CP_TRUNC_ERASE:

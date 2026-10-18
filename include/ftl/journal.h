@@ -20,11 +20,11 @@
  * ⚠ 本模块整个不转断言（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 页，
  *   页头可能因掉电撕裂而非法，属预期情形，返回错误/跳过而非断言。
  *
- * 写模型（阶段 2 起）：
- *   追加进 RAM 页缓冲（page_buf）——**页满不再同步落盘**，而是交给异步 job
- *   （journal_kick / g_op_service[FTL_OP_JOURNAL]），使 host 写完成回调里不再嵌套
- *   完成泵。需要屏障语义的调用者显式调 journal_flush_page（阶段 4 起只剩结构性同步
- *   上下文：HIL `fl` / 开机路径 / CLI——GC/WL 的 F10 已改走 journal_kick 的异步等待）。
+ * 写模型：
+ *   追加进 RAM 页缓冲（page_buf）——**页满异步落盘**，交给 job
+ *   （journal_kick / g_op_service[FTL_OP_JOURNAL]），使 host 写完成回调里不嵌套
+ *   完成泵。需要屏障语义的调用者显式调 journal_flush_page（只剩结构性同步上下文：
+ *   HIL `fl` / 开机路径 / CLI——GC/WL 的 F10 走 journal_kick 的异步等待 + 失败 pending）。
  */
 
 #include "ftl_config.h" /* nand_pba_t */
@@ -141,6 +141,16 @@ typedef struct
     uint8_t checkpoint_needed;
     uint8_t emergency;
 
+    /* ── 持久性失败观测（全部 RAM，不随介质持久化）──
+     * 页写 / 换块擦失败时 +1 并置 pending。`write_fail_seq` 是失败时刻的
+     * sequence_counter；pending 一直阻止 victim 擦除（GC/WL/predict），直到一次
+     * Checkpoint Header 成功且其 journal_seq ≥ write_fail_seq —— 此时迁移后的
+     * L2P 已随 CP 落盘，丢掉的那条 journal 条目不再是唯一副本。
+     * ⚠ 不尝试恢复已丢条目；pending 只负责“不撒谎地说屏障已达成”。 */
+    uint32_t write_fail_count;
+    uint32_t write_fail_seq;
+    uint8_t  write_fail_pending;
+
     /* 阶段 2：异步刷页 job（放在末尾，纯增量字段） */
     journal_job_t job;
 } l2p_journal_t;
@@ -187,9 +197,12 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
 
 /* journal_init - 初始化 Journal：记录拓扑、预铸各块 PBA、复位写指针与序号 */
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
-/* 追加一条 L2P 更新。P1-6：若当前页缓冲里已有**同一 LBA** 的条目，就地更新
- * （只改 old/new PBA，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。 */
-void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba);
+/* 追加一条 L2P 更新。若当前页缓冲里已有**同一 LBA** 的条目，就地更新
+ * （只改 old/new PBA，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。
+ * 返回：true = 已追加 / 就地合并；false = 页满且异步刷页起不来，本条目被丢弃。
+ * ⚠ 返回 false 时调用者必须按“映射未持久化”处理：迁移侧中止 job（victim 不擦）；
+ *   host 写路径当前只能记日志继续（其 drop 分支按注释结构性不可达）。 */
+bool journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba);
 
 /* journal_kick - 后台推进 Journal（阶段 2）：把待写的整页 / 待起的擦除交给异步 job。
  *   由 ftl_service_idle/normal 每轮调用；job 已在飞或无事可做时为空操作。 */
@@ -277,6 +290,11 @@ jrn_truncate_step_t journal_truncate_plan(l2p_journal_t *journal,
  *                     JOURNAL_BLOCK_NONE = 本次未擦
  */
 void journal_truncate_commit(l2p_journal_t *journal, uint8_t erased_block);
+
+/* journal_clear_write_failure - Checkpoint Header 成功后清除持久性失败 pending。
+ * 仅当该 CP 的 journal 水位（起点快照）≥ 失败时刻的 sequence 才清除：说明 CP 在
+ * 失败之后启动，已把迁移后的 L2P 区域落盘；否则保留 pending，让下一次 CP 再试。 */
+void journal_clear_write_failure(l2p_journal_t *journal, uint32_t cp_journal_seq);
 
 /* journal_truncate（同步包装）已在阶段 6 随 Checkpoint job 化删除——异步 CP 走
  * plan → 异步擦 → commit 三步；结构性同步上下文需要时自行组合（见 journal.c）。 */

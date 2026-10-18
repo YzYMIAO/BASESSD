@@ -28,15 +28,18 @@
  *           region 未驻留会起异步加载并**原地等待**，全部就绪才动 bitmap；否则半途而废
  *           会让 bitmap 一半有一半没有（重试时又从头 `|=`，语义静默错乱）。
  *   · WRITE 本页各 plane 都读完且有有效 CW ⇒ allocator_alloc_pair 拿目标页，逐 plane
- *           提交 CW 子集写。写失败的 plane 不动 L2P（源数据仍有效，下轮再搬）。
- *   · WRITE_SETTLE 纯计算：逐 CW l2p_cache_write + journal_append + 有效计数迁移。
- *           同样**先就绪前置**再动账——半途而废会重复记账（valid_count 虚高、journal
- *           重复条目）。
- *   · FLUSH_JRN 等 Journal job 空闲（**F10 契约**：搬移条目先落盘再擦 victim）。
- *   · ERASE 逐 plane 异步擦：成功 erase_count++ / 清 valid，
- *           然后按 `post` 二选一——`MIG_POST_FREE` 归还 Free Pool（入池），
+ *           提交 CW 子集写。**任一写完成错误 ⇒ 中止 job（victim 不擦）**，绝不继续擦。
+ *   · WRITE_SETTLE 纯计算：逐 CW **重查 L2P**（host 写/TRIM 可能已抢先），仍指向
+ *           源 CW 才 journal_append → l2p_cache_write → 有效计数迁移。
+ *           同样**先就绪前置**再动账——半途而废会重复记账。
+ *   · FLUSH_JRN 等 Journal job 空闲，并检查 `write_fail_pending`
+ *           （**F10 契约**：搬移条目先落盘再擦 victim；页写失败 ⇒ 条目已丢，
+ *           pending 会阻止擦除，直到 Checkpoint 把 L2P 落盘）。
+ *   · ERASE 逐 plane 异步擦：成功走 `allocator_note_erase`（erase_count / last_pe_ts /
+ *           清 valid），然后按 `post` 二选一——`MIG_POST_FREE` 归还 Free Pool（入池），
  *           `MIG_POST_RETIRE` **不入池** + `rr_retire_block` 退役（见 allocator.h 不变量②）；
- *           失败 bbt_mark_bad（该函数同时把块驱逐出池）。
+ *           失败（且尚未 BAD）`bbt_mark_bad`，并置 `erase_failed`：该 SB 不计入
+ *           `gc_reclaimed_count`、不打印 predict 退役日志。
  *   · DONE  allocator_find_closed_sb + allocator_remove_closed_sb + 进展计数
  *           （gc_reclaimed_count）/ 预测命中日志。
  *
@@ -51,8 +54,9 @@
  *
  * ── 单飞行 ──
  *
- * 每实例同时只允许一个 mig job（`active`）。GC 与 WL 共用引擎 ⇒ WL 让 GC 先跑
- * （符合「GC 是 WL 的擦除出口」）。
+ * 每实例同时只允许一个 mig job（`active`）。GC / WL / predict 共用引擎：
+ * 调度器任务表把 GC 求值排在 WL 之前，但两者各自受触发条件/节拍门控，**不存在**
+ * 硬性的“WL 让 GC 先跑”；真正的互斥是 `active` 单飞行。
  *
  * ⚠ 本文件**不被** gc.h / wear_leveling.h include —— migrate.c 单向依赖它们的选块策略，
  *   反向包含会成环。ftl.h include 本文件以放置 mig_job_t。
@@ -113,8 +117,9 @@ typedef enum
 
 /* ── 搬移 job（per-instance，放 ftl->mig）──
  *
- * ⚠ page_buf 是 4KB 的页镜像，常驻上下文而非调用栈：异步 job 的栈帧在提交命令时
- *   就已返回，数据必须活到完成回调。它是真实的 `.bss` 占用（见内存预算）。
+ * ⚠ page_buf 是 **逐 plane** 的页镜像（`PLANE_NUM × PAGE_MAIN_SIZE`，当前共 4KB），
+ *   常驻上下文而非调用栈：异步 job 的栈帧在提交命令时就已返回，数据必须活到完成
+ *   回调。它是真实的 `.bss` 占用（见内存预算）。
  */
 typedef struct
 {
@@ -123,6 +128,7 @@ typedef struct
     bool     aborted;      /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
     bool     decode_ok;    /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
     bool     write_ok;     /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
+    bool     erase_failed; /* true = 任一 plane 擦除失败/处置失败（回收计数与 predict 日志不计） */
     uint8_t  phase;        /* mig_phase_t */
     uint8_t  kind;         /* mig_kind_t */
     uint8_t  post;         /* mig_post_t */

@@ -103,7 +103,8 @@ void ftl_op_dispatch(const fc_command_status_t *completion);
  * ——那正是本次解耦要消除的东西。深度计数（不是布尔）：嵌套 drain 会再进一层。
  *
  * 已落地的一处用法：journal_append 页满时若异步刷页起不来，**不在**派发上下文里
- * 同步回退（会嵌套），改为丢弃该条目 + LOGE（见 journal.c）。
+ * 同步回退（会嵌套），改为丢弃该条目 + LOGE 并返回 false（见 journal.c）。
+ * 迁移侧必须把 false 当失败中止（victim 不擦）；host 写路径当前只能记日志继续。
  *
  * @return true = 在派发内；false = 不在。
  */

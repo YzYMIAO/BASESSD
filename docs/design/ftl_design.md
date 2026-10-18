@@ -1416,7 +1416,7 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 |---|---|---|
 | `cp_wear_entry_t` | erase(4) / read(2) / last_ecc(1) / flags(1) | 8 B，按 **gblock 下标**存 |
 | CP Header 磨损字段 | `wear_entry_count` / `wear_entry_bytes` / `wear_page_count` / `wear_page_crc[16]` | 几何 + 每页 CRC |
-| `wl_victim_t` | found / plane_blocks / avg_erase / valid_cw / read_count | WL 选块结果 |
+| `wl_victim_t` | found / plane_blocks / valid_cw / read_count | WL 选块结果 |
 
 不变量：
 
@@ -1455,7 +1455,7 @@ flowchart TD
    `wear_page_crc[]`。Header 是 commit 页——它落盘才代表整条 record 有效。
    **持久化窗口 = CP 间隔**（水位/定时/强制触发）。
 3. **静态 WL 触发**：`wl_should_trigger` 三条件 OR（差值 / 比值 / 低区占比）；
-   间隔门 `total_writes ≥ WL_MIN_INTERVAL`。
+   启动门 `total_writes ≥ WL_MIN_WRITES`；求值节拍 `WL_EVAL_INTERVAL_MS = 5000`。
 4. **选 victim**：遍历 Closed 列表，要求 `sb_ec <= min_ec + WL_LOW_ZONE_WIDTH`、
    `valid >= 70%`；按有效 CW 最多者优先，平手看 `read_count`。
 5. **搬移**：`mig_begin_wl` 起 job；收尾 `MIG_POST_RETIRE`：出池 + RETIRED，
@@ -2189,7 +2189,9 @@ flowchart TD
 
 **屏障**：`journal_flush_page` 是同步屏障（排空在飞 job + 立即落盘），只给结构性同步
 上下文用（HIL `fl`、开机路径、CLI）。GC/WL 的 F10 屏障走 `MIG_FLUSH_JRN`：
-`journal_kick` 冲刷半满页，等 job 空闲即可满足。
+`journal_kick` 冲刷半满页，等 job 空闲 **且 `write_fail_pending == 0`**。
+页写失败时 pending 会阻止 victim 擦除，直到一次 Checkpoint Header 成功
+（其 journal 水位 ≥ 失败点）把 L2P 落盘后才清除。
 
 #### 3.7.5 回放与恢复
 
@@ -2227,7 +2229,7 @@ journal_replay(journal, cache, cp_sequence, &entries, block_ctx)
 |---|---|---|
 | 环形写满且 CP 未完成 | `emergency=1`，强制 CP | 前台写入可能被背压 |
 | 截断水位不覆盖全部已写条目 | `JRN_TRUNC_NO_TRUNCATE`，不截断 | 最旧块仍持有回放条目，安全 |
-| 页写失败 | job 保留待续跑；行仍 DIRTY | 映射由下一次 Journal/CP 恢复 |
+| 页写失败 | 条目已随页缓冲丢弃；置 `write_fail_pending` + `checkpoint_needed/emergency` | 迁移侧中止且不擦 victim；CP 把当前 L2P 落盘后清 pending |
 | 回放某页读失败 | 跳过该页 | 该页条目丢失；映射回退一版 |
 | 序号不连续 | 在该处截断 | 之后的页不应用 |
 
@@ -2986,10 +2988,16 @@ flowchart TB
 1. **顺序**：先写新页 → 改 L2P + Journal → 等 Journal 落盘（F10）→ 擦旧块。
 2. **分配不到目标页 ⇒ 中止且不擦 victim**。先擦后搬会丢掉尚未搬移的有效页。
 3. **擦除失败不退役**：擦不掉的块归 BBT；同时标 RETIRED 自相矛盾。
-4. **单飞行**：每实例同时一个 mig job；WL 让 GC 先跑。
+4. **单飞行**：每实例同时一个 mig job；GC/WL/predict 由调度器顺序与各自触发门控协调。
 5. **有效性唯一真值是 META + L2P 反查**：没有常驻位图；`cw_bitmap` 是本次 job 的临时结果。
 6. **源块 gblock 不缓存**：快路径（valid_total==0）不经过 READ；缓存字段会是 0。
    真值始终是 `victim.plane_blocks[plane]`。
+7. **完成错误即中止**：READ / WRITE 完成带 `FC_CW_STATUS_ERROR_MASK`（或数据拷出失败）
+   ⇒ 中止 job，victim 不擦。只有“无错误但 META 全 FF 的空页”才允许跳过。
+8. **提交时重查 L2P**：READ_SETTLE 到 WRITE_SETTLE 之间 host 写/TRIM 可能已改映射；
+   只有 L2P 仍指向源 CW 才迁移，被抢先的 CW 跳过（不再引用 victim）。
+9. **Journal 失败即中止**：`journal_append` 返回 false、`l2p_cache_write` 失败、
+   或 Journal 页写失败 pending ⇒ 中止 job，victim 不擦；pending 直到 CP 确认 L2P 落盘。
 
 #### 3.13.4 触发与选块
 
@@ -3039,31 +3047,38 @@ flowchart TD
 
 #### 3.13.6 关键流程
 
-1. `mig_begin_gc`：`gc_check_triggers` → `gc_select_victim` → `mig_start(GC, FREE)`。
+1. 触发求值在 `ftl_gc_evaluate`（`gc_check_triggers`）；`mig_begin_gc` 只
+   `gc_select_victim` → `mig_start(GC, FREE)`。
 2. `MIG_READ`：逐页逐 plane 异步读 victim；完成时解 META 得 `cw_lba`，
-   记 `rr_record_ecc` / `read_count`（慢死预测闭环）。
+   记 `rr_record_ecc` / `read_count`（慢死预测闭环）。**读错误 ⇒ 中止**；
+   只有“无错误 + META 全 FF”的空页才跳过。
 3. `MIG_READ_SETTLE`：**先 `l2p_cache_ready` 前置**，全部就绪后才逐 CW 反查 L2P；
    仍指向本物理 CW 才置 `cw_bitmap`。半途而废会让 bitmap 一半有一半没有。
 4. `MIG_WRITE`：本页有有效 CW ⇒ `allocator_alloc_pair(COLD)` → 提交 CW 子集写。
-5. `MIG_WRITE_SETTLE`：同样先就绪前置，再逐 CW `l2p_cache_write` + `journal_append`
-   + 源块 `sub_valid` / 新块 `add_valid`。
-6. `MIG_FLUSH_JRN`：等 Journal job 空闲（F10）。`journal_kick` 冲刷半满页，
-   所以屏障必然可满足。
-7. `MIG_ERASE`：逐 plane 擦；成功 `erase_count++` / `last_pe_ts` / `clear_valid`；
-   `post==FREE` ⇒ 归还 Free Pool；`post==RETIRE` ⇒ 出池 + `rr_retire_block`；
-   擦除失败 ⇒ `bbt_mark_bad`。
-8. `MIG_DONE`：移除 Closed 条目；GC 计数 `gc_reclaimed_count++`；复位 job。
+   **写错误 ⇒ 中止**（victim 不擦）。
+5. `MIG_WRITE_SETTLE`：先就绪前置；再逐 CW **重查 L2P**（host 写/TRIM 可能已抢先），
+   仍指向源 CW 才 `journal_append` → `l2p_cache_write` → 源块 `sub_valid` / 新块
+   `add_valid`。append/L2P 失败 ⇒ 中止。
+6. `MIG_FLUSH_JRN`：等 Journal job 空闲 **且 `write_fail_pending == 0`**（F10）。
+   `journal_kick` 冲刷半满页；页写失败时 pending 会阻止擦除，直到 CP 把 L2P 落盘。
+7. `MIG_ERASE`：逐 plane 擦；成功走 `allocator_note_erase`（erase_count / last_pe_ts /
+   clear_valid）；`post==FREE` ⇒ 归还 Free Pool；`post==RETIRE` ⇒ 出池 + `rr_retire_block`；
+   擦除失败且未 BAD ⇒ `bbt_mark_bad`，置 `erase_failed`。
+8. `MIG_DONE`：移除 Closed 条目；只有擦除成功且条目确实移除才
+   `gc_reclaimed_count++` / 打 predict 日志；复位 job。
 
 #### 3.13.7 失败语义
 
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
-| 分配不到目标页 | 中止，不擦 victim | 源数据仍在，L2P 未动，下轮重来 |
-| 读失败/全页空洞 | 跳过该 plane/页 | 该页无有效 CW 或数据不可读 |
-| 写失败 | 该 plane 的 L2P 不动 | 源数据仍有效，下轮再搬 |
+| 分配不到目标页 | 中止，不擦 victim | 已搬移页指向新页；未搬移页仍指向 victim；下轮重来 |
+| NAND 读失败 | 中止，不擦 victim | 源数据仍在；空页（无错误 + META 全 FF）才跳过 |
+| NAND 写失败 | 中止，不擦 victim | 该 plane 的 L2P 未动；源数据仍有效，下轮再搬 |
+| Journal append 丢弃 / L2P 写失败 | 中止，不擦 victim | 该 CW 的映射未持久化；前一 CW 的迁移保持有效 |
+| Journal 页写失败 | 置 `write_fail_pending`，中止 F10 | pending 阻止一切 victim 擦除，直到 CP 确认 L2P 落盘 |
 | 提交侧 256 轮无进展 | 中止 | 数据无损；命令在飞由 NAND 超时保证完成 |
-| 擦除失败 | 标坏 | 数据由 BBT/GC 处理 |
-| 掉电 | 最多一个孤悬块 | Journal 回放恢复映射；victim 未擦或已擦但 L2P 已落盘 |
+| 擦除失败 | 未 BAD 则标坏一次；`erase_failed` | 数据由 BBT/GC 处理；不计入 `gc_reclaimed_count` |
+| 掉电 | 最多一个孤悬块 | Journal 回放恢复映射；victim 未擦或已擦但 L2P/CP 已落盘 |
 
 #### 3.13.8 常量与出处
 
@@ -4263,9 +4278,10 @@ flowchart TB
 | `WL_DELTA_THRESHOLD` | 5000 | `include/ftl/wear_leveling.h` |
 | `WL_MAX_AVG_RATIO` | 3 | 同上 |
 | `WL_LOW_ZONE_WIDTH` | 1000 | 同上 |
-| `WL_LOW_BLOCK_PCT` | 5% | 同上 |
-| `WL_MIN_INTERVAL` | 1000 writes | 同上 |
+| `WL_LOW_BLOCK_PCT` | 5%（判据是严格 >） | 同上 |
+| `WL_MIN_WRITES` | 1000 writes（启动门，一次性） | 同上 |
 | `WL_MIN_VALID_RATIO` | 70% | 同上 |
+| `WL_EVAL_INTERVAL_MS` | 5000 ms（调度器求值节拍） | 同上 |
 
 #### CP 磨损快照 / BBT
 
