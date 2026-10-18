@@ -91,7 +91,7 @@ bool ftl_media_needs_format(struct ftl_context *ftl)
  *             ③ metadata_dir_init 把 Directory 复位为"全部未映射"；④ checkpoint_write_initial
  *                写一条当前版本标记 ⇒ 下次开机版本判据命中，格式化只发生一次。
  *   ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。
- *   ⚠ BST 的 erase_count 保留旧值（wear_init 已在格式化前加载）——仅影响磨损均衡起点。
+ *   ⚠ BST 的 erase_count 保留旧值（开机已从 CP 磨损快照回填）——仅影响磨损均衡起点。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_media_format(struct ftl_context *ftl)
 {
@@ -166,6 +166,14 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
     if (!blocks_valid)
     {
         LOGW("[BLK] unavailable (rec=%u seq=%lu) — block accounting via F2\r\n",
+             (unsigned)cp_idx,
+             (unsigned long)cp.sequence);
+    }
+
+    /* 磨损计数（erase/read/ECC 健康）与块账一起在 CP 里；软状态，失败只退化 WL。 */
+    if (!checkpoint_load_wear_table(ftl, &cp, cp_idx))
+    {
+        LOGW("[WEAR] snapshot unavailable (rec=%u seq=%lu) — counters start at 0\r\n",
              (unsigned)cp_idx,
              (unsigned long)cp.sequence);
     }

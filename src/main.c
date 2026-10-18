@@ -519,7 +519,7 @@ int main(void)
      *   g_ftl_ready == 1：ftl_service_pump() 一次（全局 NAND 泵 + 抽干完成表），
      *                     再对**每个**实例调 ftl_service()（Phase 2.5/3 后台）。
      *                     ⚠ 必须遍历全部实例：只跑 [0][0][0] 会让其余实例的
-     *                       journal / checkpoint / wear / bbt / GC 永不推进（序 4）。
+     *                       journal / checkpoint / bbt / GC 永不推进（序 4）。
      *   cli_service_poll()    —— CLI 解析（含 `test` 单元测试入口）。
      *   btim_scheduler_poll() —— 1ms 任务表（看门狗喂狗等）。
      *   All command parsing and scheduled storage work remain outside ISR context. */

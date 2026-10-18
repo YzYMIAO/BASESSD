@@ -141,7 +141,7 @@ typedef struct ftl_context
     /* 后台写闸门（`bbt --erase` 置位）。
      * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的
      * 布局 ⇒ 唯一正确的后续动作是复位。置位后 ftl_service 的 Phase 3（IDLE/NORMAL/BUSY
-     * 三级后台：checkpoint / bbt / wear / journal / GC 全在这里）整体跳过，杜绝把旧
+     * 三级后台：checkpoint / bbt / journal / GC 全在这里）整体跳过，杜绝把旧
      * RAM 状态写回擦净的芯片；Phase 1/2/2.5 照常（NAND 泵与 host IO 不受影响）。
      * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
     uint8_t bg_suspend;
@@ -162,7 +162,7 @@ typedef struct ftl_context
      * （gc_table_extremes 遍历 FTL_BLOCK_TOTAL = 2048×PLANE_NUM 个块，≈80KB），
      * 而它挂在 Phase 3 的 IDLE/NORMAL 两条路径上、主循环 `while(1)` 又无节拍
      * ⇒ 改造前是**每轮扫一遍全表**（GC 选不出 victim 的卡死态下即 100% CPU）。
-     * 与 rr_last_scan_ms（1s 巡检）/ wear_kick 的节拍门同族。
+     * 与 rr_last_scan_ms（1s 巡检）/ cp_timer_start 的节拍门同族。
      * ⚠ 0 作「尚未求值」哨兵：平台时钟缺失时 ftl_now_ms() 恒返回 0，此时每轮都求值
      * ——GC 不能因为缺时钟而停摆（与 T3 定时「恒不触发」的取舍方向相反）。 */
     uint32_t gc_eval_last_ms;
@@ -262,7 +262,7 @@ void ftl_service_pump(void);
  * Phase 3:   本实例的三级后台任务（IDLE / NORMAL / BUSY）
  *
  * ⚠ 调用方须先调 ftl_service_pump()。多实例（多 LUN）下漏调某实例 ⇒ 它的
- *   journal / checkpoint / wear / bbt / GC 永不推进。
+ *   journal / checkpoint / bbt / GC 永不推进。
  *
  * @param ftl  FTL 上下文（**非 NULL**；NULL 属编程错误，ASSERT 兜底）
  */

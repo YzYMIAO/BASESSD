@@ -10,7 +10,7 @@
  *   本文件             —— 编排：调度、拆分、完成聚合、模式切换；不解析介质格式。
  *   pending.c          —— 子操作登记 + 组完成聚合（一条 host 请求 = 一个 group）。
  *   completion_table.c —— cmd_id → ctx 旁表 + 实例路由 + CQ 排空（派发给 ftl_op.c）。
- *   其余模块（gc / wl / journal / checkpoint / bbt / wear / l2p_cache）各司其职，
+ *   其余模块（gc / wl / journal / checkpoint / bbt / l2p_cache）各司其职，
  *   见各自文件头。
  *
  * 服务主循环（ftl_service）四阶段：
@@ -28,7 +28,7 @@
  *
  * 文件结构：
  *   1. 内部辅助        ftl_now_ms / ftl_op_host_io（host I/O 完成服务函数）
- *   2. 后台调度器接线  ftl_gc_evaluate（static）+ 14 个 bg_a_* 适配器 + g_bg_level_cfg
+ *   2. 后台调度器接线  ftl_gc_evaluate（static）+ 13 个 bg_a_* 适配器 + g_bg_level_cfg
  *                      + ftl_bg_init / ftl_bg_level_select（接线在 bg_scheduler.c 引擎上）
  *   3. 对外接口        ftl_init / ftl_service / ftl_submit_read / ftl_submit_write
  *   4. 子操作下发      ftl_issue_subop / ftl_drain_group（static）
@@ -40,7 +40,7 @@
  * ⚠ 多实例（F6）：pending / groups / rr_last_scan_ms 均 per-instance；completion 全局
  *   但按命令 ch/ce/lun 路由。main.c 主循环：先 ftl_service_pump()（全局泵，每轮一次）
  *   抽干 NAND + 完成表，再**遍历全部实例**调 ftl_service() 逐实例推进 Phase 2.5/3——
- *   只跑 [0][0][0] 会让其余实例的 journal / checkpoint / wear / bbt / GC 永不推进（序 4）。
+ *   只跑 [0][0][0] 会让其余实例的 journal / checkpoint / bbt / GC 永不推进（序 4）。
  */
 
 #include "ftl/ftl.h"
@@ -57,7 +57,6 @@
 #include "ftl/migrate.h" /* mig_begin_gc / mig_begin_wl / mig_begin_predict / mig_service */
 #include "ftl/pending.h"
 #include "ftl/power_failure_recovery.h"
-#include "ftl/wear.h"
 #include "ftl/wear_leveling.h"
 #include "nand/onfi_1_0.h"
 #include "platform/platform.h"
@@ -277,9 +276,9 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
 
                     rr_record_ecc(&ftl->alloc.blocks[gblock].rr, fc_get_cmd_ecc_max(cmd));
 
-                    /* read disturb 计数：读成功累加（周期归零由上层维护） */
+                    /* read disturb 计数：读成功累加（周期归零由上层维护）；
+                     * 随下一次 Checkpoint 的磨损快照持久化。 */
                     ftl->alloc.blocks[gblock].read_count++;
-                    wear_mark_dirty(&ftl->alloc, gblock);
                 }
 
                 /* 读成功状态由组聚合（sub_status 保持 OK） */
@@ -412,7 +411,7 @@ static void ftl_confirm_kick(ftl_context_t *ftl)
  *     是事件（空间压力/磨损），但**成本**远高于主流：SPDK FTL 的判据是 O(1)
  *     （`ftl_needs_reloc` 只读事件驱动的 `dev->num_free` 计数，其 core poller 周期 0
  *     = 每轮求值也无所谓）；本仓 T5 要全表扫描，成本不同 ⇒ 门控是**成本补偿**。
- *     与 rr_last_scan_ms / wear_kick 的节拍门同族。
+ *     与 rr_last_scan_ms / cp_timer_start 的节拍门同族。
  *     代价（如实登记）：T1/T4 的空间压力响应也被门到同一周期——IDLE 补池突发与
  *     NORMAL 的「一轮回收一个 SB」最坏延迟 GC_EVAL_INTERVAL_MS。真空闲下按需兜底
  *     仍在写路径（ftl_issue_subop），且 10ms 远小于搬一个 SB 的 NAND 时间。
@@ -483,12 +482,12 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
 
 /* 档位 → 预算规模（IDLE/NORMAL/BUSY）。锚定 onfi_1_0.c 时序（NAND_TIME_TPROG_US=700）。
  *  IDLE/NORMAL 2000µs ≈ 2~3 页写 + GC 全表求值；BUSY 700µs ≈ 恰 1 页写。
- * 掩码：IDLE 位 6..13 全 budgeted（含 RR 巡检）；NORMAL 位 6..12（无 RR 巡检）；
+ * 掩码：IDLE 位 6..12 全 budgeted（含 RR 巡检）；NORMAL 位 6..11（无 RR 巡检）；
  *       BUSY 仅位 8（l2p flush）—— 恰「仅 must-run + 1 flush」，与旧 BUSY 档逐字等价。 */
 static const bg_level_cfg_t g_bg_level_cfg[BG_LEVEL_BUSY + 1U] = {
-  /* IDLE   */ {2000U,        (uint8_t)L2P_CACHE_SIZE,    0x3FC0U},
+  /* IDLE   */ {2000U,        (uint8_t)L2P_CACHE_SIZE,    0x1FC0U},
  /* NORMAL */
-    {2000U, (uint8_t)BG_NORMAL_FLUSH_COUNT,    0x1FC0U},
+    {2000U, (uint8_t)BG_NORMAL_FLUSH_COUNT,    0x0FC0U},
  /* BUSY   */
     { 700U,   (uint8_t)BG_BUSY_FLUSH_COUNT, (1U << 8U)},
 };
@@ -590,14 +589,6 @@ static void bg_a_bbt(ftl_context_t *ftl)
     bbt_kick(&ftl->alloc);
 }
 
-/* 位 11 · 预算 — Wear 持久化（阶段 7）。
- * ⚠ interval 保持 0：内部 OR 双门（WEAR_FLUSH_INTERVAL_MS 120s / 写增量≥1024，wear.c）
- *   为准——写增量触发是掉电窗口上界，不能被调度器 interval 拖死（唯一诚实例外）。 */
-static void bg_a_wear(ftl_context_t *ftl)
-{
-    wear_kick(&ftl->alloc, ftl->total_writes);
-}
-
 /* 位 12 · 预算 — Checkpoint 触发检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）。
  * 语义同旧三档：定时基准无条件重置（触发即重置，不看成败）；job 装配由
  * checkpoint_begin（提交即返回），成败由 [CP] 心跳判。 */
@@ -658,7 +649,7 @@ void ftl_bg_init(ftl_context_t *ftl)
     bg->tasks[i].must_run = 1U;
     i++;
 
-    /* 预算任务（位 6..13；interval / 优先级 / 单次钳制；掩码位 6..13 = 0x3FC0） */
+    /* 预算任务（位 6..12；interval / 优先级 / 单次钳制；掩码位 6..12 = 0x1FC0） */
     bg->tasks[i].func        = bg_a_gc_eval;
     bg->tasks[i].priority    = 0U;
     bg->tasks[i].interval_ms = GC_EVAL_INTERVAL_MS;
@@ -678,10 +669,6 @@ void ftl_bg_init(ftl_context_t *ftl)
     i++;
     bg->tasks[i].func      = bg_a_bbt;
     bg->tasks[i].priority  = 4U;
-    bg->tasks[i].budget_us = 700U;
-    i++;
-    bg->tasks[i].func      = bg_a_wear;
-    bg->tasks[i].priority  = 5U;
     bg->tasks[i].budget_us = 700U;
     i++;
     bg->tasks[i].func      = bg_a_cp_trigger;
@@ -721,14 +708,13 @@ uint8_t ftl_bg_level_select(const ftl_context_t *ftl)
 /* --------------------------------------------------------------------
  * ftl_init
  *   功能：装配一个 FTL 实例——按依赖序初始化拓扑 / pending / BST / allocator
- *         / journal / metadata_dir / bbt / wear / 各计时器。
+ *         / journal / metadata_dir / bbt / 各计时器。
  *   参数：ftl —— 实例（非 NULL，含自持表存储）；topo —— 绑定的 NAND 芯片路由；
  *         cache —— 本实例所属 (ch,ce) 的**共享** L2P cache（设备级已初始化，
  *                  本函数只绑定指针，不再 init / set_md_dir）。
  *   返回：FTL_OK / FTL_ERROR（初始化失败）。
  *   实现要点：描述符只持有指针（阶段 C）；四个大数组由 storage 提供，
  *             可能在 NOLOAD 段 ⇒ 本函数必须显式 memset。
- *             BST 的 memset 必须早于 wear_init，否则计数回填被清零。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cache, const ftl_storage_t *storage)
 {
@@ -785,7 +771,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
      * metadata_dir：load/init 不覆盖全部字段 ⇒ 先整表清零。
      * journal：init 只重置部分 job 字段 ⇒ 先整表清零。
      * cp_job：active 在 checkpoint_begin 自己 memset 之前就会被读 ⇒ 必须先清零。
-     * ⚠ 全部 memset 必须早于 wear_init（计数回填）与 metadata_dir_load。 */
+     * ⚠ 全部 memset 必须早于 metadata_dir_load。 */
     memset(ftl->tables, 0, sizeof(*ftl->tables));
     memset(ftl->metadata_dir, 0, sizeof(*ftl->metadata_dir));
     memset(ftl->journal, 0, sizeof(*ftl->journal));
@@ -813,10 +799,6 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
 
     /* ├─ BBT 初始化（从 NAND 加载或出厂扫描）── */
     (void)bbt_init(&ftl->alloc);
-
-    /* ├─ Wear 表加载（回填 erase/read/program 计数）──
-     * 必须在上面 memset(ftl->tables) 之后、否则回填被清零。 */
-    (void)wear_init(&ftl->alloc);
 
     /* ├─ Checkpoint 池游标/序号 + 定时基准（序 4：per-instance）──
      * 游标在此归零 ⇒ 首次 Checkpoint job 会先扫池定位（cursor_valid==0，见 CP_HDR_PREP）。 */

@@ -82,11 +82,10 @@ void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *t
     alloc->blocks    = tables->blocks;
     alloc->bad_count = 0U;
 
-    /* 元数据池游标（per-instance）——本实例一份，后续由 bbt_init / wear_init 恢复。
-     * 必须在此归零：bbt_state_t.cursor_valid / dirty 与 wear_state_t.dirty[] 决定首次
-     * 落盘是「扫池定位」还是「从池首开始」，残留值会让新实例写到别人的槽上。 */
+    /* 元数据池游标（per-instance）——本实例一份，后续由 bbt_init 恢复。
+     * 必须在此归零：bbt_state_t.cursor_valid / dirty 决定首次落盘是「扫池定位」
+     * 还是「从池首开始」，残留值会让新实例写到别人的槽上。 */
     memset(&alloc->bbt, 0, sizeof(alloc->bbt));
-    memset(&alloc->wear, 0, sizeof(alloc->wear));
 
     /* 反向索引初始：未坏块一律 NO_SB（坏块由 bbt_init 置 BAD，不在此动）。
      * ⚠ 必须显式置：首启 `tables` 在 BSS 里全 0，`sb_id = 0` 会被读成「属于 Closed

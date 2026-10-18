@@ -21,7 +21,7 @@
   - [3.1 引导与掉电恢复](#s3-1)
   - [3.2 分配器 / BST / Super Block](#s3-2)
   - [3.3 坏块表 BBT](#s3-3)
-  - [3.4 磨损持久化与静态磨损均衡](#s3-4)
+  - [3.4 磨损计数持久化与静态磨损均衡](#s3-4)
   - [3.5 元数据目录](#s3-5)
   - [3.6 L2P Cache](#s3-6)
   - [3.7 Journal](#s3-7)
@@ -302,7 +302,7 @@ flowchart TB
         B1 --> B2["GC 求值 S3-13"]
         B1 --> B3["静态 WL S3-4"]
         B1 --> B4["metadata_dir_kick S3-5"]
-        B1 --> B5["Journal BBT Wear CP 持久化 S3-3 S3-4 S3-7 S3-8"]
+        B1 --> B5["Journal BBT CP 持久化 S3-3 S3-4 S3-7 S3-8"]
         B2 --> B6["migrate job READ 到 WRITE 到 FLUSH_JRN 到 ERASE"]
         B3 --> B6
         B6 --> B7["allocator 归还 退役 S3-2"]
@@ -337,7 +337,7 @@ flowchart TB
 
 | 路径 | 入口 | 经过模块 | 持久状态变化 | 失败分支 | 场景 |
 |---|---|---|---|---|---|
-| **P1** 读命中 | `ftl_submit_read` | §3.9 → §3.11（wbuf）或 §3.6（cache）→ §3.10 → §3.15 | 无持久变化（读计数稍后由 Wear 落盘） | ECC 失败 → §3.14 | §4.4 |
+| **P1** 读命中 | `ftl_submit_read` | §3.9 → §3.11（wbuf）或 §3.6（cache）→ §3.10 → §3.15 | 无持久变化（读计数随下一次 CP 的磨损快照落盘） | ECC 失败 → §3.14 | §4.4 |
 | **P2** 读 miss | 同上 | §3.6 region load → 下轮重试 | 无（cache 行 CLEAN） | load 失败 → 行 INVALID，重试 | §4.4 |
 | **P3** 主机写 | `ftl_submit_write` | §3.11 wbuf → §3.2 分配 → §3.10 → §3.15 → 完成 §3.6/§3.7/§3.2 | Journal 追加；L2P 行 DIRTY；BST valid ±1 | 编程失败 → 关 SB + 标坏，L2P 不动 | §4.5 |
 | **P4** 脏 region 回写 | 缓存驱逐 / 后台 flush / CP | §3.6 → §3.5 append → 写页 → commit | L2P region 新位置；Directory 更新；`l2p_live` 增减 | 写失败 → 行回 DIRTY，Directory 不登记 | §4.6 |
@@ -386,7 +386,7 @@ flowchart TB
 | 拓扑维度 | `CH_NUM × CE_NUM × LUN_NUM` | `ftl_config.h` §一 |
 
 **实例模型**：每个 `(ch, ce, lun)` 是一个**完整独立**的 FTL 实例，各有一份
-L2P 表、Anchor/Checkpoint/BBT/Journal/Wear 分区与块池。主机 LBA 空间按 **region**
+L2P 表、Anchor/Checkpoint/BBT/Journal 分区与块池。主机 LBA 空间按 **region**
 切分到各实例（`lba_route_*`，见 §5.4）；`FTL_DIM_TOTAL = CH × CE × LUN`。
 
 当前构建 `CH = CE = LUN = 1` ⇒ `FTL_DIM_TOTAL = 1`，下面所有“每实例”的量就是全设备量。
@@ -446,30 +446,29 @@ PAA(uint32_t)，低位 → 高位：
 | 32..39 | Checkpoint | 8 | P0+P1 镜像 | Checkpoint Header + 块账快照池 |
 | 40..41 | BBT | 2 | P0+P1 镜像 | 坏块位图池 |
 | 42..45 | Journal | 4 | P0+P1 交错（单副本） | L2P 增量日志，环形 |
-| 46 | Wear | 1 | P0 单副本 | 每块擦除/读计数 + ECC 健康的持久化日志 |
-| 47.. | 用户数据 | — | P0 | Free Pool / Open SB / Closed SB / OP / Spare（P1 的块 46 也是用户数据） |
+| 46.. | 用户数据 | — | P0+P1 | Free Pool / Open SB / Closed SB / OP / Spare |
 
 各分区的**落盘结构 / 记录几何**见下表（结构体定义分别在
-`include/ftl/metadata.h` / `checkpoint.h` / `bbt.h` / `journal.h` / `wear.h`；
+`include/ftl/metadata.h` / `checkpoint.h` / `bbt.h` / `journal.h`；
 尺寸与页数全部由宏推导，`_Static_assert` 校验）：
 
 | 分区 | 副本方式 | 落盘结构 | 条目/页 | 一条 record | 每块 record | 池内总量 |
 |---|---|---|---:|---:|---:|---:|
 | Anchor | **P0+P1 镜像** | `metadata_anchor_page_t` + `metadata_entry_t` | 256 条 | 8 页 | 8 | 32 块 × 8 = **256 条** |
-| Checkpoint | **P0+P1 镜像** | `l2p_checkpoint_header_t` + 块账快照 | Header 1 页 + 快照 4 页 | 5 页 | 12（64/5 向下取整） | 8 块 × 12 = **96 条** |
+| Checkpoint | **P0+P1 镜像** | Header + 块账快照 + **磨损快照** | Header 1 + 块账 4 + 磨损 16 页 | 21 页 | 3（64/21 向下取整） | 8 块 × 3 = **24 条** |
 | BBT | **P0+P1 镜像** | `bbt_header_t` | 1 条 | 1 页 | 64 | 2 块 × 64 = **128 条** |
 | Journal | P0+P1 交错（单副本） | `l2p_journal_entry_t` + 12 B 页头 | 127 条 | 1 页（页即写单位） | 64 页 | 4 块 × 64 页 = **256 页 / 32,512 条** |
-| Wear | P0 单副本（软状态） | `wear_page_t` + `wear_entry_t` | 168 条 | 1 页（追加日志） | 64 页 | 单块 64 页；全量快照 25 页 |
 
 运行期可枚举视图是 `g_ftl_partitions[]`（`src/ftl/metadata.c`），每项
 `ftl_partition_t { name, first_block, block_count, plane_mask, redundancy, kind, table_bytes }`；
 `ftl_is_metadata_block()` 与 CLI 都读这张表。`redundancy` = 每块容纳的 record 数，
-Journal/Wear 不是 record 池，填 1。`plane_mask` 决定固定块在哪些 plane 上占用：
-Anchor/CP/BBT/Journal = `0x03`，Wear = `0x01`。
+Journal 不是 record 池，填 1。`plane_mask` 决定固定块在哪些 plane 上占用：
+Anchor/CP/BBT/Journal = `0x03`。
 
 ⚠ 镜像池（Anchor/CP/BBT）的**逻辑 record 数**与上表一致；每个 record 在 P0/P1 各存
 一份 ⇒ **物理页用量与元数据写放大 ×2**（换的是单 plane 损坏仍可恢复）。Journal 是
-单副本交错，Wear 是单副本。
+单副本交错。**磨损计数（erase/read/ECC 健康）在 CP 记录里**（介质版本 9），不再有
+独立 Wear 块。
 
 #### 2.3.1 Anchor —— Metadata Directory 的全量快照
 
@@ -505,7 +504,7 @@ Anchor/CP/BBT/Journal = `0x03`，Wear = `0x01`。
 
 **用途**：记录「Journal 回放起点」和「块账快照」，让开机不必全盘重建。
 
-**`l2p_checkpoint_header_t`（恰好 2048 B = 一页主区，75 字）**
+**`l2p_checkpoint_header_t`（恰好 2048 B = 一页主区，94 字）**
 
 | 字段 | 大小 | 含义 |
 |---|---:|---|
@@ -516,16 +515,24 @@ Anchor/CP/BBT/Journal = `0x03`，Wear = `0x01`。
 | `journal_sequence` | 4 B | Journal 截断水位：回放只取 sequence 之后 |
 | `layout_version` | 4 B | 介质布局版本 |
 | `block_word_count` / `block_word_bytes` / `block_page_count` | 4 + 4 + 4 B | 块账快照几何（4096 / 2 / 4；0 = 无快照） |
-| `block_crc32` | 4 B | 块账快照 words 的 CRC32（FTL 层一致性校验） |
-| `record_pages` | 4 B | 本条 record 页数（= 1 + 块账页数） |
-| `padding` | 1748 B | 补齐到一页主区 |
+| `block_crc32` | 4 B | 块账快照 words 的 CRC32 |
+| `wear_entry_count` / `wear_entry_bytes` / `wear_page_count` | 4 + 4 + 4 B | 磨损快照几何（4096 / 8 / 16；0 = 无快照） |
+| `wear_page_crc[16]` | 64 B | 磨损快照每页的 CRC32（16 页各一枚） |
+| `record_pages` | 4 B | 本条 record 页数（= 1 + 块账页数 + 磨损页数 = 21） |
+| `padding` | 1672 B | 补齐到一页主区 |
 
 **块账快照（4 页 = 8 KB）**：每块一个 **16-bit word**，位域
 `valid_count[10] | state[3] | temp[1] | pool[2]`；按 4096 块顺序打包。
-**顺序不可倒**：快照页先写，Header 最后写（Header 是 commit 页）。
 
-**几何**：一条 record = 5 页；每块 12 条（64/5 向下取整，块尾 4 页不用）；池 8 块 ⇒ 96 条。
-**副本**：P0+P1 镜像，Header 与块账快照页都写两份；读侧整条快照从同一个 plane 读，CRC/读失败再换另一个 plane。
+**磨损快照（16 页 = 32 KB）**：每块一个 **8 B 条目**（`erase 4 / read 2 /
+last_ecc 1 / flags 1`，`flags = rising_count:4 | health:2 | rsv:2`），按 gblock 稠密排列；
+每页 256 条，页内 CRC 写在 Header 的 `wear_page_crc[]`。
+
+**顺序不可倒**：块账页 + 磨损页先写，Header 最后写（Header 是 commit 页）。
+
+**几何**：一条 record = 21 页；每块 3 条（64/21 向下取整，块尾 1 页不用）；池 8 块 ⇒ 24 条。
+**副本**：P0+P1 镜像，Header、块账页、磨损页都写两份；读侧整条快照从同一个 plane 读，
+CRC/读失败再换另一个 plane。
 
 #### 2.3.3 BBT —— 坏块位图
 
@@ -564,26 +571,28 @@ Checkpoint 成功后按 `journal_sequence` 截断/回收。
 **副本**：**单副本**，页号奇偶交错到 P0/P1（不是镜像——日志写频率最高，镜像会 2× 写放大）。
 因此换块擦除必须用 `OP_ERASE_BLOCK_MULTI_PLANE`，否则 P1 的页不会被擦。
 
-#### 2.3.5 Wear —— 块磨损/读计数（软状态）
+#### 2.3.5 磨损/读计数 —— 并入 Checkpoint（软状态）
 
 **用途**：持久化每块的擦除计数、读计数和 ECC 健康，供动态/静态 WL 与 Read Recovery 使用。
 
-**`wear_entry_t`（12 B）**
+**介质版本 9 起不再有独立 Wear 块**：计数随 Checkpoint 一起落盘（块账 4 页 +
+磨损 16 页 + Header 1 页 = 21 页/record）。这样计数与块账**原子提交**，且随 CP 池
+轮转（不是固定热点）。CP 间隔就是持久化窗口：CP 期间的计数变化允许漏到下一个 CP。
+
+**`cp_wear_entry_t`（8 B，按 gblock 稠密排列，下标即块号）**
 
 | 字段 | 大小 | 含义 |
 |---|---:|---|
-| `block` | 2 B | 全局块号 gblock |
-| `read_count` | 2 B | 主机读 + GC/WL 搬移读累加 |
-| `erase_count` | 4 B | 擦除计数（WL 的唯一输入） |
+| `erase_count` | 4 B | 擦除计数（动态/静态 WL 的唯一输入） |
+| `read_count` | 2 B | 主机读 + GC/WL 搬移读累加（read disturb） |
 | `last_ecc` | 1 B | 上次读的 ECC 纠正 bit 数 |
-| `rising_count` | 1 B | ECC 连续上升次数 |
-| `health` | 1 B | 块健康档位（`rr_block_health_t`） |
-| `_reserved` | 1 B | 对齐填充，写 0 |
+| `flags` | 1 B | `rising_count:4`（bit0..3）+ `health:2`（bit4..5）+ 保留 2 bit |
 
-**`wear_page_t`（恰好 2048 B）**：页头 16 B（`magic / sequence / entry_count / reserved`）
-+ 168 × 12 B 条目 + 16 B padding。**页式追加日志**：每页最多 168 块；
-全量快照 = ⌈4096/168⌉ = 25 页 ≤ 64 页/块。块满时压实（重写 25 页全量快照）再续写；
-单副本、软状态（丢只退化 WL 精度）；只占 **P0**，P1 的同号块 46 是用户数据。
+> **主流对照（有出处）**：擦除计数必须持久化，否则跨重启归零、WL 失效
+> （`docs/design/storage_controller_design_essentials.md` §5.5）；read disturb 用
+> 读计数/刷新/GC 搬移（同文档失效模式表）。**"计数随 CP 快照落盘"的具体形态是本仓
+> 设计**——主流也会把 per-block 元数据放进 block descriptor/checkpoint，但具体布局
+> 无统一标准。
 
 #### 2.3.6 L2P region 日志块（动态，不属于固定分区）
 
@@ -606,8 +615,8 @@ Directory 指向的 region 页不占固定分区，而是从 Free Pool 动态取
   结构体本身**无独立 CRC**（例外：Checkpoint 的块账快照有 `block_crc32`）。
 - **版本**：Anchor 页与 Checkpoint Header 都带 `layout_version`；不符 ⇒ 该 record
   作废，开机自动全片格式化。
-- **只有 L2P region 日志块是动态的**；Anchor/Checkpoint/BBT/Journal/Wear 都是固定块池。
-- **固定池的副本策略**（介质版本 8）：
+- **只有 L2P region 日志块是动态的**；Anchor/Checkpoint/BBT/Journal 都是固定块池。
+- **固定池的副本策略**（介质版本 9）：
   - **Anchor / Checkpoint / BBT：P0+P1 镜像**。同一条 record/页用 multi-plane program
     一次写进两个 plane 的同 block/page（`ftl_async_write_page_mirror`）；读侧任一副本
     有效即可，一个 plane 损坏仍能恢复。运行期写走异步提交 + 完成服务；同步镜像写只在
@@ -615,9 +624,9 @@ Directory 指向的 region 页不占固定分区，而是从 Free Pool 动态取
   - **Journal：P0+P1 页号奇偶交错**（偶页 P0、奇页 P1），是**单副本**而不是镜像——
     日志写频率最高，镜像会 2× 写放大。因此它的换块擦除**必须**用
     `OP_ERASE_BLOCK_MULTI_PLANE`（否则 P1 页不会被擦，回绕后二次编程）。
-  - **Wear：P0 单副本**（软状态，丢失只退化 WL）；P1 的块 46 进 Free/OP 池，不是元数据。
-- 这条布局满足"预留必用"：P1 的 Anchor/CP/BBT 块是**真实副本**，不是闲置；只有 Wear 的
-  P1 块归还用户区。`ftl_is_metadata_block()` 按 `(plane & plane_mask)` 判固定块。
+  - **磨损计数不再占独立块**：随 Checkpoint 记录一起落盘（§2.3.5），块号 46 起全部是用户数据。
+- 这条布局满足"预留必用"：P1 的 Anchor/CP/BBT 块是**真实副本**，不是闲置。
+  `ftl_is_metadata_block()` 按 `(plane & plane_mask)` 判固定块。
 
 #### 2.3.8 结构分布图（一）：空间布局
 
@@ -627,14 +636,14 @@ Directory 指向的 region 页不占固定分区，而是从 Free Pool 动态取
 **① 每个 die 的 plane / 块号分布**
 
 ```text
-P0  [ Anchor 0..31 ][ Checkpoint 32..39 ][ BBT 40..41 ][ Journal 42..45 ][ Wear 46 ][ User 47..2047 ]
-P1  [ Anchor'0..31 ][ CP'32..39         ][ BBT'40..41 ][ Journal 42..45 ][ User 46 ][ User 47..2047 ]
-     \____ mirror ____/\_____ mirror _____/\____ mirror __/\__ interleave _/\_ single _/
+P0  [ Anchor 0..31 ][ Checkpoint 32..39 ][ BBT 40..41 ][ Journal 42..45 ][ User 46..2047 ]
+P1  [ Anchor'0..31 ][ CP'32..39         ][ BBT'40..41 ][ Journal 42..45 ][ User 46..2047 ]
+     \____ mirror ____/\_____ mirror _____/\____ mirror __/\__ interleave _/
 ```
 
 - **镜像**：同一条 record/页在 P0、P1 各存一份；读侧任一副本有效即可。
 - **交错**：Journal 的逻辑页 i 落在 plane `i & 1`（偶页 P0、奇页 P1），是**单副本**。
-- **单 P0**：Wear 只在 P0；P1 的块号 46 是用户数据。
+- **用户区**：块号 46 起在两个 plane 都是用户数据（磨损计数已并入 CP）。
 
 **② 池 → 块 → 页 → record → entry（Anchor 示例）**
 
@@ -666,12 +675,11 @@ bytes      4      4      2       2      4      4            1792                
 **③ 其余池的块内排布**
 
 ```text
-Checkpoint 块（64 页；一条 record = 5 页）
-├─ page  0.. 4   record 0   (page 0 = Header；page 1..4 = 块账快照 4 页)
-├─ page  5.. 9   record 1
-├─ ...
-├─ page 55..59   record 11
-└─ page 60..63   未用（64 / 5 向下取整）
+Checkpoint 块（64 页；一条 record = 21 页）
+├─ page  0..20   record 0   (page 0 = Header；page 1..4 = 块账；page 5..20 = 磨损快照)
+├─ page 21..41   record 1
+├─ page 42..62   record 2
+└─ page 63       未用（64 / 21 向下取整）
 
 BBT 块（64 页；一条 record = 1 页）
 └─ page 0..63 = record 0..63（每页 540 B header + padding）
@@ -680,10 +688,10 @@ Journal 块（4 个块号 × 64 页；页是写单位）
 ├─ page 0..63；逻辑页 i 的 plane = i & 1（偶页 P0、奇页 P1）
 └─ 每页：12 B 页头 + 127 × 16 B entry = 2032 B + 4 B 余量
 
-Wear 块（P0 单块 64 页；页式追加日志）
-├─ 常态：脏页追加写（每页 16 B 头 + 168 × 12 B entry = 2016 B + 16 B pad）
-├─ 块满：compact 成全量快照 = ⌈4096 / 168⌉ = 25 页
-└─ 压实后继续追加（页序 == sequence 序）
+CP 磨损快照（16 页 × 256 条 × 8 B；随 Checkpoint 记录落盘）
+├─ 每条：erase 4 / read 2 / last_ecc 1 / flags 1
+├─ page p 覆盖 gblock p×256 .. p×256+255
+└─ 每页 CRC 存在 Header 的 wear_page_crc[p]
 
 L2P region（动态块，非固定分区）
 ├─ 一页 = 512 × 4 B nand_pba_t = 2048 B（无页头）
@@ -693,10 +701,10 @@ L2P region（动态块，非固定分区）
 **④ 关键结构的字节偏移尺**
 
 ```text
-l2p_checkpoint_header_t（2048 B；75 字 = 300 B + padding）
-offset   0      4      8      12     16                     272    276    280    284    288    292    296    300     2048
-         [magic][seq  ][ts   ][rgn_cnt][ region_bitmap 64×4 ][jseq ][ver  ][wcnt ][wbytes][pcnt ][crc32 ][rpages][ pad ]
-bytes      4      4      4      4            256              4      4      4      4      4      4      4     1748
+l2p_checkpoint_header_t（2048 B；94 字 = 376 B + padding）
+offset   0      4      8      12     16                     272    276    280    284    288    292    296    300    304    308    312                     376     380     2048
+         [magic][seq  ][ts   ][rgn_cnt][ region_bitmap 64×4 ][jseq ][ver  ][wcnt ][wbytes][pcnt ][crc32 ][w_ent][w_byt][w_pg][ wear_page_crc 16×4 ][rpages][ pad ]
+bytes      4      4      4      4            256              4      4      4      4      4      4      4      4      4      64            4     1668
 
 bbt_header_t（540 B，packed）
 offset   0      4      8      12     16          28            540
@@ -709,11 +717,10 @@ offset   0      4      8      10     12                     2044   2048
 bytes      4      4      2      2             2032            4
 entry    [ lba 4 ][ old_pba 4 ][ new_pba 4 ][ sequence 4 ] = 16 B
 
-Wear 页（2048 B）
-offset   0      4      8      12     16                     2032   2048
-         [magic][seq  ][e_cnt ][ rsv  ][ 168 × 12 B entries ][ pad ]
-bytes      4      4      4      4            2016            16
-entry    [block 2][read 2][erase 4][last_ecc 1][rising 1][health 1][rsv 1] = 12 B
+CP 磨损条目 cp_wear_entry_t（8 B；每页 256 条）
+offset   0      4      6      7      8
+         [erase 4][read 2][ecc 1][flags 1] = 8 B
+flags    bit0..3 rising_count | bit4..5 health | bit6..7 保留
 
 L2P region 页（2048 B）
 offset   0                                                         2048
@@ -740,7 +747,7 @@ flowchart LR
 #### 2.3.9 结构分布图（二）：池间流转
 
 > 本节回答"数据从哪来、什么时候被替换、掉电后从哪恢复"，把各池串起来。
-> 精确时序以 `src/ftl/metadata_job.c` / `checkpoint.c` / `journal.c` / `wear.c` 与
+> 精确时序以 `src/ftl/metadata_job.c` / `checkpoint.c` / `journal.c` 与
 > §3.5 / §3.7 / §3.8 为准。
 
 **① 各池的"产生 → 消费 → 替换/回收 → 恢复"**
@@ -748,10 +755,10 @@ flowchart LR
 | 池 | 产生（谁写） | 消费（谁读） | 替换 / 回收 | 掉电后 |
 |---|---|---|---|---|
 | **Anchor** | `commit_region` 置脏 → CP/后台 job 组页写 | 开机 `metadata_dir_load` | 池内 ring：块满轮转；最新 sequence 胜；旧块整块擦 | 重建 Directory；缺页回退"未映射" |
-| **Checkpoint** | CP job：快照 bitmap → flush region → flush Anchor → 写 Header | 开机 `checkpoint_find_latest` + `checkpoint_load_block_table` | 池内 ring：8 块 × 12 条；最新 sequence 胜 | Header 给 Journal 水位；块账快照给块账 |
+| **Checkpoint** | CP job：快照 bitmap → flush region → flush Anchor → 写块账 + 磨损快照 → 写 Header | 开机 `checkpoint_find_latest` + `checkpoint_load_block_table` / `checkpoint_load_wear_table` | 池内 ring：8 块 × 3 条（21 页/条）；最新 sequence 胜 | Header 给 Journal 水位；块账给块账；磨损快照给计数 |
 | **BBT** | 出厂扫描 / 运行时 `bbt_mark_bad` → BBT job | `bbt_init`（开机） | 池内 ring：2 块 × 64 条；最新 sequence 胜 | 坏块图；无有效 BBT 时按空片/拒扫策略 |
 | **Journal** | 每次 host 写确认 `journal_append` | 开机 `journal_replay`；CP 截断 | 4 块环形：页满换块；CP 按水位截断 | 回放 `seq > CP journal_sequence` 的条目 |
-| **Wear** | 运行时计数更新 → 周期 flush | `wear_init`（开机） | 页式追加；块满 compact 25 页 | 回放绝对值，最新页胜（软状态） |
+| **磨损计数（CP 内）** | 运行时 `erase/read/rr` 更新 BST → CP job 组页 | 开机 `checkpoint_load_wear_table` | 随 CP record 轮转覆盖；无独立回收 | 从 CP 磨损快照回填；丢失只退化 WL（软状态） |
 | **L2P region log** | L2P cache 刷脏 → `append_slot` + FC 写 | cache miss 读回；GC/compaction | 块满换块；`l2p_live==0` → `reclaim_pending`；冷热混合 → compaction | Directory 指向最新页；Journal 补差量 |
 | **Directory（SRAM）** | `commit_region` / journal replay 写入 cache 后 flush | L2P lookup；Anchor 快照源 | 覆盖 entry；Anchor 全量落盘 | Anchor 重建 Directory；Journal 回放补 L2P cache 增量 |
 
@@ -762,17 +769,16 @@ flowchart TD
     PWR["上电"] --> JI["ftl_init: journal_init"]
     JI --> MDL["metadata_dir_load: Anchor → Directory"]
     MDL --> BBTI["bbt_init: BBT 或出厂扫描"]
-    BBTI --> WI["wear_init: Wear 回放"]
-    WI --> VER["介质版本检查"]
+    BBTI --> VER["介质版本检查"]
     VER -- "版本不符" --> FMT["全片格式化"]
     VER -- "版本匹配" --> BR["ftl_boot_recovery"]
     FMT --> BR
     BR --> JS["journal_scan_latest"]
     JS --> CPF["checkpoint_find_latest"]
     CPF -- "无 CP" --> FRESH["fresh: reset + carve + F2"]
-    CPF -- "干净关机" --> CL["块账快照 load"]
-    CPF -- "异常掉电" --> BL["块账快照恢复"]
-    BL --> JR["journal_replay"]
+    CPF -- "有 CP" --> LS["块账 + 磨损快照 load"]
+    LS -- "干净关机" --> CL["块账快照恢复"]
+    LS -- "异常掉电" --> JR["journal_replay"]
     CL --> F4["F4 预载 bitmap"]
     JR --> F4
     F4 --> POOL["probe + build pools（快照路径）"]
@@ -805,7 +811,7 @@ sequenceDiagram
     C->>L: 快照脏 bitmap + journal 水位
     C->>LB: flush 脏 region
     C->>A: flush Directory（全量快照）
-    C->>C: 写 CP Header（块账快照）
+    C->>C: 写块账 + 磨损快照，再写 Header（commit）
     C->>J: truncate（水位之前的条目）
 ```
 
@@ -817,7 +823,7 @@ flowchart LR
     GC --> MV["搬有效 CW → 新块"]
     MV --> CL["关闭 / 擦除 victim；更新 BST"]
     CL --> BBTJ["BBT job（如有坏块）"]
-    CL --> WJ["Wear 计数更新"]
+    CL --> WJ["BST 计数更新（随下次 CP 落盘）"]
     L2P["L2P log block l2p_live == 0"] --> RP["reclaim_pending 位图"]
     RP --> RJ["MD job RECLAIM：单 plane 擦 → Free Pool"]
     COLD["L2P log block 冷热混合"] --> MC["MD job 压缩：搬活 region → Anchor → 擦 victim"]
@@ -832,14 +838,14 @@ flowchart LR
 | L2P 增量 | Journal（lba / old_pba / new_pba / seq） | replay `seq > CP journal_sequence` |
 | L2P region 页 | L2P log block（Directory 指向最新页） | Directory 加载后按 PBA 读回 |
 | Directory | Anchor（全量快照，P0+P1 镜像） | `metadata_dir_load` 取最新完整 record |
-| 块账快照 | Checkpoint（Header + 4 页 word，P0+P1 镜像） | `checkpoint_load_block_table`；失败走 F2 |
+| 块账快照 | Checkpoint（4 页 word，P0+P1 镜像） | `checkpoint_load_block_table`；失败走 F2 |
 | 坏块图 | BBT（P0+P1 镜像） | `bbt_init`；运行时 `bbt_mark_bad` 兜底 |
-| 磨损/读计数 | Wear（P0 单副本，软状态） | `wear_init` 回放；丢失只退化 WL |
+| 磨损/读计数 | Checkpoint 磨损快照（16 页，P0+P1 镜像，软状态） | `checkpoint_load_wear_table`；丢失只退化 WL |
 
 **⑥ 池内轮转 / 替换的时间线**
 
 ```text
-Anchor / Checkpoint / BBT（record 池）
+Anchor / BBT（record 池）
   slot 0 → slot 1 → … → slot N-1 → slot 0 → …
   写满一块 ⇒ 擦池内下一块 ⇒ 从该块 slot 0 续写
   读：扫池，取「整条校验通过 + sequence 最大」；旧 record 不单独擦，随块轮转一起擦
@@ -848,8 +854,9 @@ Journal（页环形）
   page 0 → … → page 63 → block+1 page 0 → … → block 0（先擦环形下一块）
   CP 成功后按 journal_sequence 截断/预擦；回放只取 seq > CP 水位
 
-Wear（页式追加日志）
-  page 0 → … → page 63 → compact（擦块 + 写 25 页全量快照）→ page 25 → …
+Checkpoint（21 页/record：Header 1 + 块账 4 + 磨损 16）
+  slot 0 → slot 1 → slot 2 → 下一块 slot 0 → …
+  每条 record 覆盖一块账 + 一份磨损快照；磨损计数随 CP 覆盖式更新
 
 L2P region log（追加块）
   region 页追加到当前块 page 0..63 → 换新块 page 0
@@ -915,7 +922,7 @@ L2P region log（追加块）
 | 引导与掉电恢复 | `power_failure_recovery.c/h` | §3.1 |
 | 分配器 / BST / Super Block | `allocator.c/h`、`bst.h` | §3.2 |
 | 坏块表 | `bbt.c/h` | §3.3 |
-| 磨损持久化 / 静态 WL | `wear.c/h`、`wear_leveling.c/h` | §3.4 |
+| 磨损计数持久化 / 静态 WL | `checkpoint.c`（磨损快照）、`wear_leveling.c/h` | §3.4 |
 | 元数据目录 | `metadata.c/h` | §3.5 |
 | L2P cache | `l2p_cache.c/h` | §3.6 |
 | Journal | `journal.c/h` | §3.7 |
@@ -940,7 +947,7 @@ FTL 的运行时状态分两类：
 | 状态 | 掉电后 |
 |---|---|
 | L2P cache（64 行）、Block State Table、Free/OP/Spare 池、Closed 列表、各类写指针 | **全部丢失**（RAM） |
-| 用户数据、页内 META、L2P region 页、Anchor、Checkpoint、Journal、BBT、Wear | 留在 NAND |
+| 用户数据、页内 META、L2P region 页、Anchor、Checkpoint、Journal、BBT、CP 磨损快照 | 留在 NAND |
 
 没有恢复模块，开机后 L2P cache 是空的、Closed 列表是空的、Free Pool 可能把**写过的块**
 当空白块分配——第一次写就会 AND 掉旧数据。恢复模块要回答三个问题：
@@ -965,6 +972,7 @@ FTL 的运行时状态分两类：
 | `ftl_boot_result_t` | `boot_type`、`cp_sequence`、`journal_entries`、`blocks_restored` | 观测/日志 |
 | `ftl_rebuild_stats_t` | `blocks_rebuilt`、`partial_blocks`、`valid_cw` | F2 结果 |
 | `cp_job_t.block_words` | 16-bit/块 × 4096 | Checkpoint 的块账快照，boot 时复用为加载缓冲 |
+| `cp_job_t.wear_page` / `wear_page_crc[16]` / `wear_page_buf` | 8 B/块 × 4096 → 16 页 | 磨损快照写进度 / 每页 CRC / 组页缓冲 |
 
 不变量：
 
@@ -984,7 +992,7 @@ flowchart TD
     BOOT["ftl_boot_recovery"] --> LATEST["journal_scan_latest 只读,不改状态"]
     LATEST --> FIND{"checkpoint_find_latest 有当前版本有效 Header"}
     FIND -- "否" --> FRESH["fresh carve F2 全扫"]
-    FIND -- "是" --> LOAD{"checkpoint_load_block_table 块账快照 CRC 有效"}
+    FIND -- "是" --> LOAD{"checkpoint_load_block_table + checkpoint_load_wear_table"}
     LOAD -- "否" --> PFALL["块账走 F2 兜底"]
     LOAD -- "是" --> JUDGE{"page_seq entry_count 不高于 cp-journal_sequence"}
     JUDGE -- "是" --> CLEAN["clean restore probe build_pools"]
@@ -1077,7 +1085,7 @@ NAND 的写必须落在**已擦除**的页上，而擦除以块为单位。FTL �
   进出闸门；按 plane 选块、配对成 SB；维护 SB 写指针与关闭；提供磨损/有效性统计访问器。
 - **不做**：不决定“什么时候 GC”（`gc.c` 的策略）；不执行搬移（`migrate.c`）；不定义坏块
   持久化格式（`bbt.c`）；不定义元数据布局（`metadata.h`）。
-- **下游**：GC/WL/migrate、元数据目录、BBT、Wear、掉电恢复都读它。
+- **下游**：GC/WL/migrate、元数据目录、BBT、掉电恢复都读它。
 
 #### 3.2.3 结构与不变量
 
@@ -1308,7 +1316,7 @@ flowchart TD
 
 <a id="s3-4" name="s3-4"></a>
 
-### 3.4 磨损持久化与静态磨损均衡（wear + wear_leveling）
+### 3.4 磨损计数持久化与静态磨损均衡（checkpoint + wear_leveling）
 
 #### 3.4.1 背景与需求
 
@@ -1319,13 +1327,18 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 - 静态 WL 的 `max-min` 差值归零，永远不会触发；
 - read disturb / 慢死预测的记录归零，劣化块被当成新块。
 
-静态 WL 的需求则是另一个方向：GC 只回收“有效数据少”的块，冷数据所在的低擦除块
+> **出处**：`docs/design/storage_controller_design_essentials.md` §5.5 —— "擦除计数必须
+> 持久化，否则跨重启归零、WL 失效"；失效模式表：read disturb → "定期刷新、读计数、
+> GC 搬移"。
+
+静态 WL 的需求是另一个方向：GC 只回收"有效数据少"的块，冷数据所在的低擦除块
 可能长期不被擦到；需要主动把冷数据搬走一次，让这些块进入磨损轮转。
 
 #### 3.4.2 职责与边界
 
-- **wear.c**：把每块的计数持久化到固定块 46 的页式追加日志；开机回填 BST；
-  后台按“120 s 或 1024 次写增量”落盘。
+- **checkpoint.c**：`checkpoint_wear_page_build` 从 BST 组 16 页磨损快照；
+  `checkpoint_load_wear_table` 开机逐页校验并回填 BST。计数随 CP 记录**原子落盘**，
+  不再有独立 Wear 块。
 - **wear_leveling.c**：静态 WL 的触发判定与 victim 选择；搬移交给 `migrate.c`。
 - **不做**：不执行擦除/搬移；不决定 GC（`gc.c`）；不维护 BST（`allocator.h`）。
 - **动态 WL** 不在本模块：它是 `allocator_select_plane_block_from_pool` 的选块策略
@@ -1335,20 +1348,18 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 
 | 结构 | 字段 | 说明 |
 |---|---|---|
-| `wear_entry_t` | block(2) / read_count(2) / erase_count(4) / last_ecc / rising_count / health | 12 B，按 **gblock** 存 |
-| `wear_page_t` | magic / sequence / entry_count / entries[] | 恰好一页主区 |
-| `wear_state_t` | sequence / next_page / 节拍基准 / dirty 位图 / job / dirty_snapshot | 每实例 |
+| `cp_wear_entry_t` | erase(4) / read(2) / last_ecc(1) / flags(1) | 8 B，按 **gblock 下标**存 |
+| CP Header 磨损字段 | `wear_entry_count` / `wear_entry_bytes` / `wear_page_count` / `wear_page_crc[16]` | 几何 + 每页 CRC |
 | `wl_victim_t` | found / plane_blocks / avg_erase / valid_cw / read_count | WL 选块结果 |
 
 不变量：
 
-1. **绝对值 + 最新胜**：同一块出现多次只有最后一次生效；页序 == sequence 序。
-2. **先快照后写批**：`dirty_snapshot` 固定本批写的块集合；批起点清 dirty，
-   批期间新置的位留给下一批——“批中变更”不会丢。
-3. **Wear 是软状态**：两次落盘之间掉电只丢一个窗口的计数，不丢用户数据。
-4. **WL 只选 Closed 块**：跳过 Open；只选低擦除区 + 有效 CW ≥ 70% 的块；
+1. **绝对值 + CP 快照**：每次 CP 写整份磨损快照（不是增量），读回直接覆盖 BST。
+2. **软状态**：两次 CP 之间掉电只丢一个 CP 窗口的计数，不丢用户数据；
+   快照损坏只退化 WL/read-disturb 精度，**不得**触发格式化。
+3. **WL 只选 Closed 块**：跳过 Open；只选低擦除区 + 有效 CW ≥ 70% 的块；
    同有效数下 `read_count` 高者优先（read disturb 冷块优先搬）。
-5. **WL 与 GC 共用一台迁移引擎**：WL 只改 victim 来源与收尾方式（RETIRED，不入池）。
+4. **WL 与 GC 共用一台迁移引擎**：WL 只改 victim 来源与收尾方式（RETIRED，不入池）。
 
 #### 3.4.4 流程图
 
@@ -1370,11 +1381,13 @@ flowchart TD
 
 #### 3.4.5 关键流程
 
-1. **开机**：`wear_init` 逐页读块 46，magic 校验，按页序回放，把计数写回 BST。
-   第一个无效页即日志末尾，下次从该页续写。读失败只当冷启动（非致命）。
-2. **落盘**：`wear_kick` 检查双门（`WEAR_FLUSH_INTERVAL_MS` **或** 写增量 ≥ 1024）；
-   剩余页装不下脏条目 → 先 compact（异步擦块 + 写全量 25 页）；否则按起点快照
-   流式写增量页。每步只提交一条命令，完成由 `ftl_op_wear` 推进。
+1. **开机**：`checkpoint_load_wear_table` 逐页读 16 页磨损快照（P0/P1 任一副本），
+   每页用 Header 的 `wear_page_crc[p]` 校验，回填 BST 的 erase/read/rr 三组字段。
+   无快照 / CRC 错 / 读失败 ⇒ 计数从 0 开始（软状态，非致命）。
+2. **落盘**：CP job 在块账快照之后、Header 之前，逐页调用
+   `checkpoint_wear_page_build` 从 BST 组页并写入；每页 CRC 存进 Header 的
+   `wear_page_crc[]`。Header 是 commit 页——它落盘才代表整条 record 有效。
+   **持久化窗口 = CP 间隔**（水位/定时/强制触发）。
 3. **静态 WL 触发**：`wl_should_trigger` 三条件 OR（差值 / 比值 / 低区占比）；
    间隔门 `total_writes ≥ WL_MIN_INTERVAL`。
 4. **选 victim**：遍历 Closed 列表，要求 `sb_ec <= min_ec + WL_LOW_ZONE_WIDTH`、
@@ -1386,8 +1399,8 @@ flowchart TD
 
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
-| Wear 页读失败 | 当冷启动，计数从 0 开始 | WL 精度下降；用户数据不丢 |
-| Wear 写失败 | dirty 保留，下轮重试 | 掉电窗口内计数可能丢 |
+| 磨损快照读失败 / CRC 错 | 计数从 0 开始 | WL/read-disturb 精度下降；用户数据不丢 |
+| 磨损页写失败 | `block_ok=0`，整条 CP record 作废（不写 Header），游标推进一槽 | 下一 CP 重试；计数窗口延长 |
 | WL 无 victim | 不触发，下轮再试 | 磨损继续累积 |
 | WL 搬移中分配不到目标页 | 中止且不擦 victim | 数据无损，下轮重来 |
 | 擦除失败 | 标坏，不退役 | 数据由 GC/BBT 处理 |
@@ -1396,25 +1409,11 @@ flowchart TD
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `WEAR_FLUSH_INTERVAL_MS` | 120,000 | `include/ftl/wear.h` |
-| `WEAR_FLUSH_ERASE_DELTA` | 1024 | 同上 |
-| `WEAR_ENTRY_BYTES` | 12 | 同上 |
+| `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 | `include/ftl/metadata.h` |
+| `FTL_CHECKPOINT_WEAR_PAGES` | 16 | 同上 |
+| `CP_WEAR_RISING_MASK` / `CP_WEAR_HEALTH_MASK` | 0x0F / 0x03 | `include/ftl/checkpoint.h` |
 | `WL_DELTA_THRESHOLD` | 5000 | `include/ftl/wear_leveling.h` |
 | `WL_MAX_AVG_RATIO` | 3 | 同上 |
-| `WL_LOW_ZONE_WIDTH` | 1000 | 同上 |
-| `WL_LOW_BLOCK_PCT` | 5% | 同上 |
-| `WL_MIN_INTERVAL` | 1000 writes | 同上 |
-| `WL_MIN_VALID_RATIO` | 70% | 同上 |
-
-#### 3.4.8 主流对照
-
-动态 WL（分配时选低擦除块）+ 静态 WL（主动搬冷数据）+ 每块磨损计数持久化，是主流
-FTL 的通用形态。**本仓自定**的是三条件 OR 的具体阈值（5000/3/1000/5%）与 120 s/1024
-的落盘双门；它们来自本仓经验值，不冒充行业标准数值。
-
----
-
-<a id="s3-5" name="s3-5"></a>
 
 ### 3.5 元数据目录（metadata.c / metadata.h）
 
@@ -1456,7 +1455,7 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 |---|---|
 | `l2p_cache.c` | `lookup` / `append_slot` / `commit_region` / `snapshot` 前的 Directory |
 | `checkpoint.c` | `metadata_ring_*`、`anchor_prepare/page/commit` |
-| `bbt.c` / `wear.c` | `metadata_ring_*`（各自的固定块池） |
+| `bbt.c` | `metadata_ring_*`（固定块池） |
 | `power_failure_recovery.c` | `metadata_dir_load`、`ftl_is_metadata_block` |
 | `ftl.c` | `metadata_dir_kick`（后台 job） |
 
@@ -1467,14 +1466,13 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | **L2P region（未映射）** | Directory 条目 = `NAND_PBA_INVALID` | 无（`fill_fixed` 预登记） | 该 region 从未写过；不读 NAND |
 | **L2P 动态日志块** | Free Pool 取的整块 | `l2p_cache_flush_kick` 追加 | 最新一份 region 页 |
 | **Anchor** | 固定池 0..31 | Directory 快照 job / CP | Directory 全量快照 |
-| **Checkpoint** | 固定池 32..39 | CP job | L2P 水位 + 块账快照 |
+| **Checkpoint** | 固定池 32..39 | CP job | L2P 水位 + 块账快照 + 磨损快照 |
 | **BBT** | 固定池 40..41 | BBT job | 坏块位图 |
 | **Journal** | 固定池 42..45 | Journal job | L2P 增量日志 |
-| **Wear** | 固定块 46 | Wear job | 每块计数 |
 
 两类写模型：
 
-- **固定池（Anchor/CP/BBT/Wear）**：record 池，块内轮转，先擦后写，最新有效胜。
+- **固定池（Anchor/CP/BBT）**：record 池，块内轮转，先擦后写，最新有效胜；Journal 是页环形。
   每条 record 带单调 sequence；读 = 找“整条校验通过”中 sequence 最大者。
 - **动态日志块（L2P region）**：一页一个 region，只追加；块满换新块；旧块由
   `l2p_live` 归零后回收。未映射的 region 没有物理页，也没有"固定回退位置"。
@@ -2227,17 +2225,20 @@ Checkpoint 的作用是：
 | `layout_version` | 4 B | 介质版本 |
 | `block_word_count` | 4 B | 块账 word 数（0 = 无快照） |
 | `block_word_bytes` | 4 B | 每 word 字节数（2） |
-| `block_page_count` | 4 B | 快照页数（4） |
+| `block_page_count` | 4 B | 块账页数（4） |
 | `block_crc32` | 4 B | 块账 words 的 CRC |
-| `record_pages` | 4 B | 1 + 4 |
-| `padding` | 1748 B | 补齐一页 |
+| `wear_entry_count` / `wear_entry_bytes` / `wear_page_count` | 4 + 4 + 4 B | 磨损快照几何（4096 / 8 / 16） |
+| `wear_page_crc[16]` | 64 B | 每页磨损快照的 CRC |
+| `record_pages` | 4 B | 1 + 4 + 16 |
+| `padding` | 1672 B | 补齐一页 |
 
-**一条 record = 5 页**：块账快照 4 页（16-bit/块 × 4096 = 8 KiB）+ Header 1 页。
-**Header 是 commit 页**：快照页必须先写，Header 最后写。
+**一条 record = 21 页**：块账快照 4 页（16-bit/块 × 4096 = 8 KiB）+ 磨损快照 16 页
+（8 B/块 × 4096 = 32 KiB）+ Header 1 页。
+**Header 是 commit 页**：块账页 + 磨损页必须先写，Header 最后写。
 
-快照只存**块账**需要的量：`valid_count` / `state` / `temp` / 池归属。
-不存 `erase_count` / `read_count` / `rr`（Wear 表是它们的单一真值），
-也不存 `last_pe_ts`（刻意 volatile，上电后从 0 开始）。
+块账快照只存**块账**需要的量：`valid_count` / `state` / `temp` / 池归属；
+磨损快照存 `erase_count` / `read_count` / `rr`（last_ecc / rising_count / health）。
+`last_pe_ts` 不存（刻意 volatile，上电后从 0 开始）。
 
 **块账 word 位域**（小端、显式移位）：
 
@@ -2257,13 +2258,14 @@ pool: 0=NONE / 1=OP / 2=SPARE
 | `anchor_*` | Anchor 池几何、基址、槽位、序号、页序、擦除判定 |
 | `hdr_*` | Header 池几何、地址、槽位、序号、擦除判定 |
 | `block_page` / `block_ok` / `block_words[4096]` | 块账快照进度与缓冲 |
+| `wear_page` / `wear_page_crc[16]` / `wear_page_buf` | 磨损快照进度 / 每页 CRC / 组页缓冲 |
 | `trunc_addr` / `trunc_next` | Journal 预擦块 |
 
 **不变量**：
 
 1. **快照点在 job 起点**：脏位图与 `journal_sequence` 一起取定。异步 CP 跨多轮，
    若取“CP 末尾”的水位，CP 期间完成的 host 写会两边都不认（不 flush、不回放）⇒ 丢映射。
-2. **顺序不可换**：flush regions → Anchor → 块账快照 → Header → 截断 Journal。
+2. **顺序不可换**：flush regions → Anchor → 块账快照 → 磨损快照 → Header → 截断 Journal。
    Header 一旦落盘，boot 就信 `region_bitmap` 里的 region 已在 NAND 上。
 3. **flush 失败 ⇒ 中止**：不写 Header。否则 boot 会预载未落盘的 region。
 4. **Header 写无论成败都推进池游标**：半编程槽不可复用。
@@ -2351,7 +2353,7 @@ flowchart TD
 |---|---|---|
 | `CHECKPOINT_MAGIC` | `0xCCCCCCCC` | `include/ftl/checkpoint.h` |
 | `CHECKPOINT_POOL_BLOCKS` | 8 | `include/ftl/metadata.h` |
-| 一条 record | 5 页（1 Header + 4 块账） | `include/ftl/checkpoint.h` |
+| 一条 record | 21 页（1 Header + 4 块账 + 16 磨损） | `include/ftl/checkpoint.h` |
 | `CP_WRITE_INTERVAL` | 1024 | `include/ftl/ftl.h` |
 | `CP_TIME_INTERVAL_MS` | 10,000 | 同上 |
 | `CP_T3_MIN_JOURNAL_DELTA` | 64 | `include/ftl/checkpoint.h` |
@@ -2361,7 +2363,7 @@ flowchart TD
 
 “全量快照 + 日志截断 + 崩溃安全的提交顺序”是主流 FTL/数据库的通用恢复模型。
 块账快照（per-block metadata snapshot）对应企业级 SSD 的 block descriptor/accounting
-snapshot。**本仓自定**的是 16-bit/块的紧凑编码、5 页/record 与 T1/T2/T3 阈值。
+snapshot。**本仓自定**的是 16-bit/块 + 8 B/块的紧凑编码、21 页/record 与 T1/T2/T3 阈值。
 
 ---
 
@@ -2751,7 +2753,7 @@ FTL 是单线程 superloop：没有 RTOS 任务，没有抢占。它必须同时
 
 1. **推进 NAND**：FC 的命令引擎与完成队列是全局的，每轮只能推一次；
 2. **服务 host IO**：补发未下发的子操作，处理停泊的写确认；
-3. **跑后台**：Journal 刷页、L2P 回写、CP、GC、WL、BBT/Wear 持久化、读恢复。
+3. **跑后台**：Journal 刷页、L2P 回写、CP、GC、WL、BBT 持久化、读恢复。
 
 如果后台任务按“每轮全跑”实现，host 忙时会被后台拖慢；如果后台完全让路，GC 不推进，
 Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**：按负载分档，给每档固定
@@ -2786,23 +2788,22 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
 | 7 | 静态 WL | 预算 | 0（内部门） | 300 µs | 触发判定在 `mig_begin_wl` |
 | 8 | L2P flush | 预算 | 0 | 1500 µs | 条数上界由档位决定 |
 | 9 | Journal 刷页 | 预算 | 0 | 700 µs | BUSY 被掩掉 |
-| 10 | BBT 持久化 | 预算 | 0 | 700 µs | 攒批写 |
-| 11 | Wear 持久化 | 预算 | **0（必须）** | 700 µs | 内部 120 s/1024 双门 |
-| 12 | CP 触发 | 预算 | 0 | 100 µs | T1/T2/T3 |
-| 13 | RR 巡检 | 预算 | 1 s | 300 µs | 仅 IDLE |
+| 10 | BBT 持久化 | 预算 | 0 | 700 µs | 攒批写（磨损计数随 CP） |
+| 11 | CP 触发 | 预算 | 0 | 100 µs | T1/T2/T3 |
+| 12 | RR 巡检 | 预算 | 1 s | 300 µs | 仅 IDLE |
 
 **档位**：
 
 | 档位 | 条件 | 总预算 | 任务掩码 |
 |---|---|---:|---|
-| IDLE | `pending + groups == 0` | 2000 µs | 位 6..13 全开 |
-| NORMAL | 非 IDLE 且 `pending ≤ 16` 且 `queued == 0` | 2000 µs | 位 6..12 |
+| IDLE | `pending + groups == 0` | 2000 µs | 位 6..12 全开 |
+| NORMAL | 非 IDLE 且 `pending ≤ 16` 且 `queued == 0` | 2000 µs | 位 6..11 |
 | BUSY | `pending > 16` 或 `queued != 0` | 700 µs | 仅位 8（L2P flush） |
 
 **不变量**：
 
 1. **pump 每轮只调一次**：NAND 引擎与完成表是全局单份，逐实例调用会重复消耗预算。
-2. **每个实例都要调 `ftl_service`**：漏一个，它的 Journal/CP/Wear/BBT/GC 永不推进。
+2. **每个实例都要调 `ftl_service`**：漏一个，它的 Journal/CP/BBT/GC 永不推进。
 3. **must-run 不 gate、不占预算**：它们是防死锁/防 host 挂起的动作。
 4. **确定性保护靠“档位 → 条数/掩码”**，不靠 `elapsed` 计时：kick 都是“提交即返回”，
    `elapsed` 只反映 CPU 时间（SysTick 1 ms 量化）。
@@ -3154,7 +3155,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
   同步等待器。
 - **不做**：不实现 NAND 引擎/时序；不决定 FTL 的映射与空间管理；不拥有完成路由
   （§3.10）。
-- **调用者**：FTL 所有需要碰 NAND 的模块（L2P、Journal、CP、Metadata、GC/WL、RR、BBT、Wear、PFR）。
+- **调用者**：FTL 所有需要碰 NAND 的模块（L2P、Journal、CP、Metadata、GC/WL、RR、BBT、PFR）。
 
 #### 3.15.3 结构与约束
 
@@ -3723,7 +3724,7 @@ flowchart TB
 | Checkpoint Header | CP | boot | 水位/块账丢失 | 上一个 CP / F2 |
 | 块账快照 | CP | boot | 块账回退 | F2 |
 | BBT record | BBT job | boot | 坏块账本回退 | 运行时失败兜底 |
-| Wear 页 | Wear job | boot | 计数回退（软状态） | 从 0 开始（精度下降） |
+| CP 磨损快照 | CP job | boot | 计数回退（软状态） | 从 0 开始（精度下降） |
 | 介质版本 | CP Header / Anchor 页 | boot | 误读旧格式 | 自动格式化 |
 
 **恢复顺序**（不可换）：
@@ -4191,15 +4192,13 @@ flowchart TB
 | `WL_MIN_INTERVAL` | 1000 writes | 同上 |
 | `WL_MIN_VALID_RATIO` | 70% | 同上 |
 
-#### Wear / BBT
+#### CP 磨损快照 / BBT
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `WEAR_MAGIC` | `0x57454152` | `include/ftl/wear.h` |
-| `WEAR_ENTRY_BYTES` | 12 | 同上 |
-| `WEAR_FLUSH_INTERVAL_MS` | 120,000 | 同上 |
-| `WEAR_FLUSH_ERASE_DELTA` | 1024 | 同上 |
-| `WEAR_SNAPSHOT_PAGES` | 25 | 同上 |
+| `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 | `include/ftl/metadata.h` |
+| `FTL_CHECKPOINT_WEAR_PAGES` | 16 | 同上 |
+| `CP_WEAR_RISING_MASK` / `CP_WEAR_HEALTH_MASK` | `0x0F` / `0x03` | `include/ftl/checkpoint.h` |
 | `BBT_MAGIC` | `0x424254AB` | `include/ftl/bbt.h` |
 | `BBT_BITMAP_SIZE` | 512 B（4096 bit） | `include/ftl/metadata.h` |
 | 出厂标记列 | 2048 | `src/ftl/bbt.c` |
@@ -4271,7 +4270,7 @@ flowchart TB
 | `ftl_read_recovery_t` | `include/ftl/read_recovery.h` | stage / waiting / pending_idx / page |
 | `bg_scheduler_t` / `bg_task_t` | `include/ftl/bg_scheduler.h` | 任务表 / 预算 / 档位 |
 | `bbt_header_t` / `bbt_state_t` | `include/ftl/bbt.h` / `allocator.h` | 坏块位图 / 池游标 |
-| `wear_entry_t` / `wear_page_t` / `wear_state_t` | `include/ftl/wear.h` / `allocator.h` | 每块计数 / 日志页 |
+| `cp_wear_entry_t` | `include/ftl/checkpoint.h` | CP 磨损快照条目（8 B/块）|
 
 ### 8.C 静默失效与证据判据清单
 

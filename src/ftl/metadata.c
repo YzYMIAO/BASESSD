@@ -1134,7 +1134,6 @@ const ftl_partition_t g_ftl_partitions[] = {
     {"Checkpoint", CHECKPOINT_BLOCK0, CHECKPOINT_POOL_BLOCKS, 0x03U, FTL_CHECKPOINT_RECORDS_PER_BLOCK, FTL_PART_FIXED, FTL_CHECKPOINT_TABLE_BYTES},
     {       "BBT",         BBT_BLOCK,        BBT_POOL_BLOCKS, 0x03U,                  PAGES_PER_BLOCK, FTL_PART_FIXED,        FTL_BBT_TABLE_BYTES},
     {   "Journal",    JOURNAL_BLOCK0,    JOURNAL_BLOCK_COUNT, 0x03U,                               1U, FTL_PART_FIXED,    FTL_JOURNAL_TABLE_BYTES},
-    {      "Wear",        WEAR_BLOCK,            WEAR_BLOCKS, 0x01U,                      WEAR_COPIES, FTL_PART_FIXED,       FTL_WEAR_TABLE_BYTES},
 };
 
 /* 分区数（表长）。sizeof 派生 ⇒ 加/删分区项时自动跟随，无需手改。 */

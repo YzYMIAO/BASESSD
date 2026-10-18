@@ -5462,3 +5462,42 @@ unused-variable 告警；`make tests UT=FTL` 仍因既有测试符号 + `reclaim
 上板判据：首启自动格式化；`info` 显示 `cp_seq`/`free` 正常；顺序写/随机读回归；**故意
 损坏 P0 副本后仍能从 P1 读回 Anchor/CP/BBT**（镜像生效的唯一证据）；Journal 回绕多圈
 无 `PROGRAM_FAIL`；掉电恢复与 `[FTL] dangling` 不出现。
+
+## v0.82 — 磨损计数并入 Checkpoint：删除独立 Wear 块
+
+**日期**：2026-10-18
+
+**动机**：独立 Wear 块（块 46，P0 单副本 + 页式追加日志）是一块**固定单副本热点**：
+它自身的擦除计数不被 WL 管理，也不随 Anchor/CP/BBT 镜像。按主流"per-block 元数据随
+块账/checkpoint 一起落盘"的思路，把 `erase_count / read_count / last_ecc /
+rising_count / health` 并入 Checkpoint 记录：与块账**原子提交**，随 CP 池轮转，
+不再占独立块。
+
+**修法**：
+1. Checkpoint 记录从 5 页扩到 **21 页**：Header 1 + 块账 4 + **磨损快照 16**
+   （每块 8 B：erase 4 / read 2 / last_ecc 1 / flags 1；256 条/页）。
+   每块 record 数 12 → **3**；池 8 块 ⇒ 24 条。
+2. Header 新增 `wear_entry_count / wear_entry_bytes / wear_page_count /
+   wear_page_crc[16]`；`record_pages = 1 + 块账页 + 磨损页`。
+3. CP job 新增 `CP_WEAR_WRITE` 阶段：在块账页之后、Header 之前逐页从 BST 组页写入；
+   每页 CRC 存 Header；Header 仍是 commit 页。运行期全 async。
+4. 开机 `checkpoint_load_wear_table`：逐页从 P0/P1 任一副本读、校验 per-page CRC、
+   回填 BST；失败只当"计数不可用"（软状态），不触发格式化。
+5. **删除** `include/ftl/wear.h` / `src/ftl/wear.c`、`wear_state_t`、`FTL_OP_WEAR`、
+   `ftl_op_wear`、后台 Wear 任务（任务表 14 → 13，掩码 IDLE 0x3FC0→0x1FC0、
+   NORMAL 0x1FC0→0x0FC0）、`wear_mark_dirty` 调用点。
+6. 块布局：`FTL_METADATA_BLOCK_END` 47 → **46**；块 46 起在两个 plane 都是用户数据。
+   `g_ftl_partitions[]` 删 Wear 项。
+
+**介质格式**：`FTL_MEDIA_LAYOUT_VERSION_BASE` **8 → 9** ⇒ **上板首启自动全片格式化**。
+
+**代价/收益**：CP 每条 record 的写页数 5 → 21（CP 仍由水位/定时触发，非每写必跑）；
+磨损计数不再有固定热点，且与块账原子。软状态语义不变：两次 CP 之间掉电只丢一个 CP
+窗口的计数。
+
+**验证状态**：⚠ **未上板**。`make all` 零告警；`make release` 仅剩 2 条既有
+unused-variable 告警；`make tests UT=FTL` 仍因既有测试符号 + `ring.plane` /
+`reclaim_target` 引用失败（UT 冻结，未改测试源）。
+上板判据：首启自动格式化；`checkpoint_load_wear_table` 成功回填（`[WEAR]` 无告警）；
+顺序写/GC 后 `erase_count` 非零且跨重启保持；损坏磨损页 CRC 后计数从 0 且不触发格式化；
+CP 记录 21 页读写与回绕正常。

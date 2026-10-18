@@ -518,13 +518,46 @@ static void cp_step(ftl_context_t *ftl)
                         cp_abort(j);
                         break;
                     }
-                    j->phase = (uint8_t)CP_HDR_WRITE;
+                    j->wear_page = 0U;
+                    j->phase     = (uint8_t)CP_WEAR_WRITE;
                     break;
                 }
 
                 nand_pba_t a = metadata_ring_addr(&j->hdr_ring, &ftl->topo, j->hdr_idx, (uint8_t)(1U + j->block_page));
 
                 if (cp_submit_write(j, a, &j->block_words[j->block_page * CP_BLOCK_WORDS_PER_PAGE], PAGE_MAIN_SIZE) != FTL_OK)
+                {
+                    (void)cp_stall(j);
+                    return;
+                }
+                return;
+            }
+
+            case CP_WEAR_WRITE:
+            {
+                if (j->wear_page >= FTL_CHECKPOINT_WEAR_PAGES)
+                {
+                    if (j->block_ok == 0U)
+                    {
+                        ftl->cp.write_idx = (uint16_t)((j->hdr_idx + 1U) %
+                                                       metadata_ring_total_records(&j->hdr_ring));
+                        cp_abort(j);
+                        break;
+                    }
+                    j->phase = (uint8_t)CP_HDR_WRITE;
+                    break;
+                }
+
+                /* 磨损快照在**写到哪页时组哪页**（软状态；CP 期间的计数变化允许漏到下一 CP）。 */
+                checkpoint_wear_page_build(&ftl->alloc, (uint16_t)j->wear_page, j->wear_page_buf);
+                j->wear_page_crc[j->wear_page] = boot_crc32(j->wear_page_buf, PAGE_MAIN_SIZE);
+
+                nand_pba_t a = metadata_ring_addr(&j->hdr_ring,
+                                                  &ftl->topo,
+                                                  j->hdr_idx,
+                                                  (uint8_t)(1U + CP_BLOCK_PAGES + j->wear_page));
+
+                if (cp_submit_write(j, a, j->wear_page_buf, PAGE_MAIN_SIZE) != FTL_OK)
                 {
                     (void)cp_stall(j);
                     return;
@@ -561,7 +594,11 @@ static void cp_step(ftl_context_t *ftl)
                 cp.block_word_bytes = CP_BLOCK_WORD_BYTES;
                 cp.block_page_count = CP_BLOCK_PAGES;
                 cp.block_crc32      = boot_crc32(j->block_words, sizeof(j->block_words));
-                cp.record_pages     = CHECKPOINT_RECORD_PAGES;
+                cp.wear_entry_count = FTL_BLOCK_TOTAL;
+                cp.wear_entry_bytes = FTL_CHECKPOINT_WEAR_ENTRY_BYTES;
+                cp.wear_page_count  = FTL_CHECKPOINT_WEAR_PAGES;
+                memcpy(cp.wear_page_crc, j->wear_page_crc, sizeof(cp.wear_page_crc));
+                cp.record_pages = CHECKPOINT_RECORD_PAGES;
 
                 if (cp_submit_write(j, j->hdr_addr, &cp, (uint32_t)sizeof(cp)) != FTL_OK)
                 {
@@ -781,6 +818,22 @@ void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *compl
             j->block_page = (uint8_t)(j->block_page + 1U);
             return;
 
+        case CP_WEAR_WRITE:
+            (void)fc_command_release(cmd);
+            j->waiting = 0U;
+
+            if (failed != 0)
+            {
+                /* 磨损页写失败 ⇒ 同块账页：整条 record 作废（不写 Header），游标推进一槽。 */
+                j->block_ok       = 0U;
+                ftl->cp.write_idx = (uint16_t)((j->hdr_idx + 1U) %
+                                               metadata_ring_total_records(&j->hdr_ring));
+                cp_abort(j);
+                return;
+            }
+            j->wear_page = (uint8_t)(j->wear_page + 1U);
+            return;
+
         case CP_HDR_WRITE:
             (void)fc_command_release(cmd);
             j->waiting = 0U;
@@ -959,6 +1012,143 @@ void checkpoint_block_snapshot(const ftl_allocator_t *alloc, uint16_t words[FTL_
 }
 
 /* --------------------------------------------------------------------
+ * checkpoint_wear_page_build
+ *   功能：把第 page_index 页磨损快照从 BST 组进 page（256 条 × 8 B）。
+ *   参数：alloc —— 分配器；page_index —— 0..FTL_CHECKPOINT_WEAR_PAGES-1；
+ *         page —— 输出（PAGE_MAIN_SIZE）。
+ *   实现要点：条目按 gblock 稠密排列（下标即块号）；rising_count 截到 4 bit，
+ *             health 截到 2 bit。软状态：调用时从 BST 现取，CP 期间的计数变化
+ *             允许漏到下一个 CP。
+ * -------------------------------------------------------------------- */
+void checkpoint_wear_page_build(const ftl_allocator_t *alloc, uint16_t page_index, uint8_t page[PAGE_MAIN_SIZE])
+{
+    ASSERT(alloc != NULL);
+    ASSERT(alloc->blocks != NULL);
+    ASSERT(page != NULL);
+    ASSERT(page_index < FTL_CHECKPOINT_WEAR_PAGES);
+
+    cp_wear_entry_t *entries = (cp_wear_entry_t *)page;
+
+    for (uint16_t i = 0U; i < FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE; i++)
+    {
+        const uint32_t g = ((uint32_t)page_index * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) + i;
+
+        if (g < FTL_BLOCK_TOTAL)
+        {
+            const ftl_block_t *b      = &alloc->blocks[g];
+            uint8_t            rising = (b->rr.rising_count > CP_WEAR_RISING_MASK) ? CP_WEAR_RISING_MASK : b->rr.rising_count;
+
+            entries[i].erase_count = b->erase_count;
+            entries[i].read_count  = b->read_count;
+            entries[i].last_ecc    = b->rr.last_ecc;
+            entries[i].flags       = (uint8_t)((rising & CP_WEAR_RISING_MASK) |
+                                         ((b->rr.health & CP_WEAR_HEALTH_MASK) << CP_WEAR_HEALTH_SHIFT));
+        }
+        else
+        {
+            entries[i].erase_count = 0U;
+            entries[i].read_count  = 0U;
+            entries[i].last_ecc    = 0U;
+            entries[i].flags       = 0U;
+        }
+    }
+}
+
+/* --------------------------------------------------------------------
+ * checkpoint_load_wear_table
+ *   功能：读取并校验 Checkpoint 记录里的磨损快照，回填 BST。
+ *   返回：true = 已加载并回填；false = 无快照 / 字段不符 / 读失败 / CRC 不符。
+ *   实现要点：逐页从镜像的任一 plane 读；每页自带 CRC（Header 的 wear_page_crc[]）。
+ *             失败只表示软状态不可用，**不得**触发格式化。
+ * -------------------------------------------------------------------- */
+bool checkpoint_load_wear_table(struct ftl_context            *ftl,
+                                const l2p_checkpoint_header_t *cp,
+                                uint16_t                       record_idx)
+{
+    ASSERT(ftl != NULL);
+    ASSERT(cp != NULL);
+
+    if (cp->wear_page_count == 0U)
+    {
+        return false; /* initial CP / 旧记录：无磨损快照 */
+    }
+    if ((cp->wear_entry_count != FTL_BLOCK_TOTAL) ||
+        (cp->wear_entry_bytes != FTL_CHECKPOINT_WEAR_ENTRY_BYTES) ||
+        (cp->wear_page_count != FTL_CHECKPOINT_WEAR_PAGES))
+    {
+        LOGW("[WEAR] snapshot fields inconsistent (entries=%lu bytes=%lu pages=%lu)\r\n",
+             (unsigned long)cp->wear_entry_count,
+             (unsigned long)cp->wear_entry_bytes,
+             (unsigned long)cp->wear_page_count);
+        return false;
+    }
+
+    metadata_ring_t ring;
+    checkpoint_ring_init(&ring);
+
+    uint8_t *page = ftl->cp_job->wear_page_buf; /* 开机时 CP job 未在跑，可复用 */
+
+    for (uint8_t p = 0U; p < FTL_CHECKPOINT_WEAR_PAGES; p++)
+    {
+        bool loaded = false;
+
+        for (uint8_t pi = 0U; pi < metadata_ring_plane_count(ring.plane_mask); pi++)
+        {
+            const uint8_t plane = metadata_ring_plane_at(ring.plane_mask, pi);
+            nand_pba_t    addr  = metadata_ring_addr_plane(&ring,
+                                                       &ftl->topo,
+                                                       record_idx,
+                                                       (uint8_t)(1U + CP_BLOCK_PAGES + p),
+                                                       plane);
+
+            if (ftl_sync_read_page(addr, page, PAGE_MAIN_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
+            {
+                continue;
+            }
+            if (boot_crc32(page, PAGE_MAIN_SIZE) != cp->wear_page_crc[p])
+            {
+                LOGW("[WEAR] page %u crc mismatch (plane=%u rec=%u)\r\n",
+                     (unsigned)p,
+                     (unsigned)plane,
+                     (unsigned)record_idx);
+                continue;
+            }
+
+            const cp_wear_entry_t *entries = (const cp_wear_entry_t *)page;
+
+            for (uint16_t i = 0U; i < FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE; i++)
+            {
+                const uint32_t g = ((uint32_t)p * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) + i;
+
+                if (g >= FTL_BLOCK_TOTAL)
+                {
+                    break;
+                }
+
+                ftl_block_t *b = &ftl->alloc.blocks[g];
+
+                b->erase_count     = entries[i].erase_count;
+                b->read_count      = entries[i].read_count;
+                b->rr.last_ecc     = entries[i].last_ecc;
+                b->rr.rising_count = (uint8_t)(entries[i].flags & CP_WEAR_RISING_MASK);
+                b->rr.health       = (uint8_t)((entries[i].flags >> CP_WEAR_HEALTH_SHIFT) & CP_WEAR_HEALTH_MASK);
+            }
+
+            loaded = true;
+            break;
+        }
+
+        if (!loaded)
+        {
+            LOGW("[WEAR] snapshot page %u unavailable (rec=%u)\r\n", (unsigned)p, (unsigned)record_idx);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/* --------------------------------------------------------------------
  * checkpoint_load_block_table
  *   功能：读取并校验一条 Checkpoint 记录的块账快照（Header 之后的 4 页）。
  *   参数：ftl —— 实例；cp —— 最近 Header；record_idx —— 该 Header 的池内槽位；
@@ -1073,6 +1263,9 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
     cp.block_word_bytes = 0U;
     cp.block_page_count = 0U;
     cp.block_crc32      = 0U;
+    cp.wear_entry_count = 0U;
+    cp.wear_entry_bytes = 0U;
+    cp.wear_page_count  = 0U;
     cp.record_pages     = 1U;
 
     metadata_ring_t ring;

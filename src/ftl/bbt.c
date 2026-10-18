@@ -364,9 +364,9 @@ static bool bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t 
     /* ② 可选擦除——**无条件发**。
      * 旧实现在 ① 命中时直接 `return 1` 提前返回，于是**被标记的块永远不被擦**。而"全片擦除"
      * 的全部意义恰恰是连这批块一起抹掉：元数据区（0..FTL_METADATA_BLOCK_END）里的 L2P/
-     * Anchor/Checkpoint/BBT/Journal/Wear 块**正是** ① 会命中的那批（FTL 写过 ⇒ 列 2048
+     * Anchor/Checkpoint/BBT/Journal 块**正是** ① 会命中的那批（FTL 写过 ⇒ 列 2048
      * 非 0xFF —— 注意这批的命中含义是「写过」而不是「坏」）。跳过它们 ⇒ 擦完断电重启，
-     * FTL 仍从原处读回旧 checkpoint/wear/BBT，`free`/`cp_seq` 一个不少 —— 表现出来
+     * FTL 仍从原处读回旧 checkpoint/BBT，`free`/`cp_seq` 一个不少 —— 表现出来
      * 就是"发了擦除命令但没擦掉"。 */
     if (do_erase != 0U)
     {

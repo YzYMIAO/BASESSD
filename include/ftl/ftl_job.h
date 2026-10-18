@@ -10,7 +10,7 @@
  *
  * 本头文件只提供「该不该打、上次什么时候打的」这层节拍与公共时钟，**不参与任何
  * 状态机**：每个 job 的 phase 枚举仍由各自的头文件定义（cp_phase_t / md_job_phase_t /
- * mig_phase_t / rr_stage_t / journal_phase_t / bbt_job_phase_t / wear_job_phase_t）。
+ * mig_phase_t / rr_stage_t / journal_phase_t / bbt_job_phase_t）。
  *
  * ── 用法（每个 *_kick 的固定骨架）──
  *

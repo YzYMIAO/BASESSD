@@ -60,7 +60,6 @@
  *   Checkpoint  CHECKPOINT_POOL_BLOCKS（Header 的块轮转日志池）
  *   BBT         BBT_POOL_BLOCKS（坏块位图的块轮转日志池）
  *   Journal     JOURNAL_BLOCKS（策略：容纳两次 checkpoint 之间的映射更新）
- *   Wear        WEAR_COPIES（软状态单副本）
  *
  * ── 当前几何下展开的布局（由下方公式算出，非手写）──
  *   块号        分区        块数  使用 plane  来历
@@ -68,13 +67,11 @@
  *   32..39      Checkpoint  8     P0 + P1     元数据池：每块 12 份 record；**P1 镜像**
  *   40..41      BBT         2     P0 + P1     元数据池：每块 64 份坏块位图；**P1 镜像**
  *   42..45      Journal     4     P0 + P1     策略 = CW_NUM；页地址按页号奇偶跨 plane（单副本交错）
- *   46          Wear        1     P0          软状态单副本（P1 同号块是用户数据）
- *   47..       用户数据    —     P0          FTL_METADATA_BLOCK_END 之后
+ *   46..       用户数据    —     P0 + P1     FTL_METADATA_BLOCK_END 之后（磨损计数已并入 CP）
  *
  * ⚠ **固定分区只预留 plane_mask 里的 plane**：`ftl_is_metadata_block()` 同时比较
- *   (plane & plane_mask)。Anchor/CP/BBT 在 P1 的同号块是**镜像副本**（不是用户数据）；
- *   Wear 只有 P0，P1 的块 46 进 Free/OP 池。
- *   升级到本布局（介质版本 8）时首启自动全片格式化。
+ *   (plane & plane_mask)。Anchor/CP/BBT/Journal 在 P1 都有元数据（镜像或交错）；
+ *   升级到本布局（介质版本 9）时首启自动全片格式化。
  *
  * ── 元数据写模型（P0-2：全部元数据统一）──
  *   ① 只写**擦除态**页。NAND 只能 1→0，对已编程页二次编程 = 新数据 AND 旧数据
@@ -119,18 +116,30 @@
 #define BBT_BITMAP_SIZE (BBT_MAX_BLOCKS / 8U)
 #define BBT_POOL_BLOCKS (2U) /* 策略：池内块数 */
 
-/* ── Checkpoint（L2P 快照 + 块账快照）池 ──
- * 一条 record = Header（1 页）+ 块账快照（4 页，16-bit/块 × 4096 = 8KB）。
- * ⚠ Header 是 commit 页：块账快照 必须**先写**，Header 最后写。 */
+/* ── Checkpoint（L2P 快照 + 块账 + 磨损快照）池 ──
+ * 一条 record = Header（1 页）+ 块账快照（4 页，16-bit/块 × 4096 = 8 KB）
+ *             + 磨损快照（16 页，8 B/块 × 4096 = 32 KB）。
+ * ⚠ Header 是 commit 页：块账 + 磨损快照必须**先写**，Header 最后写。
+ * 磨损计数（erase/read/ECC 健康）随 CP 原子落盘，不再占独立固定块。 */
 #define FTL_CHECKPOINT_BLOCK_WORD_BYTES     (2U)
 #define FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE (PAGE_MAIN_SIZE / FTL_CHECKPOINT_BLOCK_WORD_BYTES)
 #define FTL_CHECKPOINT_BLOCK_PAGES          ((FTL_BLOCK_TOTAL + FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE - 1U) / FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE)
-#define FTL_CHECKPOINT_RECORD_PAGES         (1U + FTL_CHECKPOINT_BLOCK_PAGES)
-#define FTL_CHECKPOINT_RECORDS_PER_BLOCK    (PAGES_PER_BLOCK / FTL_CHECKPOINT_RECORD_PAGES)
-#define CHECKPOINT_POOL_BLOCKS              (8U) /* 策略：池内块数 */
+
+/* 磨损快照：每块 8 B（erase 4 / read 2 / last_ecc 1 / flags 1）。 */
+#define FTL_CHECKPOINT_WEAR_ENTRY_BYTES      (8U)
+#define FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE (PAGE_MAIN_SIZE / FTL_CHECKPOINT_WEAR_ENTRY_BYTES)
+#define FTL_CHECKPOINT_WEAR_PAGES            ((FTL_BLOCK_TOTAL + FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE - 1U) / FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE)
+
+#define FTL_CHECKPOINT_SNAPSHOT_PAGES    (FTL_CHECKPOINT_BLOCK_PAGES + FTL_CHECKPOINT_WEAR_PAGES)
+#define FTL_CHECKPOINT_RECORD_PAGES      (1U + FTL_CHECKPOINT_SNAPSHOT_PAGES)
+#define FTL_CHECKPOINT_RECORDS_PER_BLOCK (PAGES_PER_BLOCK / FTL_CHECKPOINT_RECORD_PAGES)
+#define CHECKPOINT_POOL_BLOCKS           (8U) /* 策略：池内块数 */
 
 _Static_assert((FTL_CHECKPOINT_BLOCK_PAGES * FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE) == FTL_BLOCK_TOTAL,
-               "快照页数必须恰好覆盖全部块");
+               "块账快照页数必须恰好覆盖全部块");
+_Static_assert((FTL_CHECKPOINT_WEAR_PAGES * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) == FTL_BLOCK_TOTAL,
+               "磨损快照页数必须恰好覆盖全部块");
+_Static_assert(FTL_CHECKPOINT_WEAR_PAGES <= UINT8_MAX, "磨损快照页数必须装进 uint8_t");
 _Static_assert(FTL_CHECKPOINT_RECORD_PAGES <= PAGES_PER_BLOCK,
                "一条 Checkpoint record 必须装得进一个块");
 _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
@@ -142,13 +151,6 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
  * ⇒ 容量取 CW_NUM 块（旧版 2 块 → CW 级 4 块）。*/
 #define JOURNAL_BLOCKS      (CW_NUM)
 #define JOURNAL_BLOCK_COUNT (JOURNAL_BLOCKS)
-
-/* ── Wear（块磨损计数持久化）──
- * 块内**页式追加日志**（见 ftl/wear.h）：全量快照 = ⌈FTL_BLOCK_TOTAL ÷ WEAR_ENTRY_MAX⌉
- * = ⌈4096 ÷ 168⌉ = 25 页 ≤ PAGES_PER_BLOCK，块满才擦一次。
- * 软状态 ⇒ 单副本，不做主备。*/
-#define WEAR_COPIES (1U) /* 软状态：单副本 */
-#define WEAR_BLOCKS (WEAR_COPIES)
 
 /* ── 偏移：从元数据区起点顺序累积（不写死任何块号）── */
 
@@ -167,11 +169,9 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
 /* Journal：第 b 块 = JOURNAL_BLOCK0 + b（**环形 + 擦除**，唯一本来就正确的元数据）*/
 #define JOURNAL_BLOCK0 (BBT_BLOCK + BBT_POOL_BLOCKS)
 
-/* Wear：接在 Journal 之后 */
-#define WEAR_BLOCK (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT)
-
-/* 固定元数据区末尾 = 第一个用户块；也用作动态元数据分配起点 */
-#define FTL_METADATA_BLOCK_END (WEAR_BLOCK + WEAR_BLOCKS)
+/* 固定元数据区末尾 = 第一个用户块；也用作动态元数据分配起点。
+ * 磨损计数已并入 Checkpoint 快照（介质版本 9），不再占独立 Wear 块。 */
+#define FTL_METADATA_BLOCK_END (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT)
 
 /* ── 介质布局版本（NAND 上持久化格式的版本号）──
  * 任何改变**介质格式或块布局**的改动（结构体字段/块号/记录格式）都必须把本值 +1。
@@ -200,8 +200,11 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
  * v8：固定元数据池改**跨 plane 镜像**（Anchor/Checkpoint/BBT 用 multi-plane program 把
  *     同一页写 P0+P1；Wear 仍单副本 P0；Journal 保持页号奇偶交错）——块的写语义与
  *     恢复路径变了，必须 +1；老介质首启自动格式化一次。Journal/CP/Anchor/BBT 的换块
- *     擦除统一改 multi-plane。 */
-#define FTL_MEDIA_LAYOUT_VERSION_BASE (8U)
+ *     擦除统一改 multi-plane。
+ * v9：删除独立 Wear 块（原块 46）——erase/read/ECC 健康并入 Checkpoint 记录
+ *     （块账 4 页 + 磨损快照 16 页）；记录从 5 页扩到 21 页，块布局与记录格式都变了
+ *     ⇒ 必须 +1；老介质首启自动格式化一次。 */
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (9U)
 /*
  * 阶段 B：数据通路改用**全局 LBA**（页 META / journal 存 host 全局 LBA）。
  * - DIM=1：global == local，介质上的值逐位不变 ⇒ 版本不额外 +1，**不额外格式化**。
@@ -223,12 +226,6 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
 
 /* Journal：块数 × 每块页数 × 页主区 */
 #define FTL_JOURNAL_TABLE_BYTES ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK * PAGE_MAIN_SIZE)
-
-/* Wear：每条目字节（block + read 计数 + 擦除计数 + rr 健康三字段，见 ftl/wear.h）*/
-#define FTL_WEAR_ENTRY_BYTES (12U)
-
-/* Wear：每块一条目 */
-#define FTL_WEAR_TABLE_BYTES ((uint32_t)FTL_BLOCK_TOTAL * FTL_WEAR_ENTRY_BYTES)
 
 /* ── 分区表（运行期可枚举：谓词判据 + 按名查询）── */
 
@@ -273,7 +270,8 @@ _Static_assert(BBT_POOL_BLOCKS >= 2U, "BBT 池至少 2 块");
 _Static_assert(ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS <= CHECKPOINT_BLOCK0, "Anchor 与 Checkpoint 重叠");
 _Static_assert(CHECKPOINT_BLOCK0 + CHECKPOINT_POOL_BLOCKS <= BBT_BLOCK, "Checkpoint 与 BBT 重叠");
 _Static_assert(BBT_BLOCK + BBT_POOL_BLOCKS <= JOURNAL_BLOCK0, "BBT 与 Journal 重叠");
-_Static_assert(JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT <= WEAR_BLOCK, "Journal 与 Wear 重叠");
+_Static_assert((JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT) == FTL_METADATA_BLOCK_END,
+               "固定区末尾必须紧接 Journal 之后");
 
 /* ── 元数据类型 ── */
 #define METADATA_TYPE_L2P_REGION  (0U) /* L2P Region 数据 */

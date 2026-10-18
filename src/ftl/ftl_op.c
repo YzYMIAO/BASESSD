@@ -41,7 +41,7 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
  *     tag 分开只为日志/调试可辨（GC 回收 vs WL/预测退役）。
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（阶段 5，ctx = 该 cache line）；
  *   · FTL_OP_CHECKPOINT：Checkpoint job（阶段 6，ctx = ftl->cp_job）；
- *   · FTL_OP_BBT / FTL_OP_WEAR：元数据表持久化 job（阶段 7，ctx = &ftl->alloc）。
+ *   · FTL_OP_BBT：元数据表持久化 job（阶段 7，ctx = &ftl->alloc）。
  *   · FTL_OP_METADATA：L2P 日志块整理 job（阶段 8，ctx = ftl->metadata_dir->job）。
  * **全部槽已点亮**（阶段 8 是最后一阶段）。 */
 static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
@@ -54,7 +54,6 @@ static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_L2P]           = ftl_op_l2p,
     [FTL_OP_CHECKPOINT]    = ftl_op_checkpoint,
     [FTL_OP_BBT]           = ftl_op_bbt,
-    [FTL_OP_WEAR]          = ftl_op_wear,
     [FTL_OP_METADATA]      = ftl_op_metadata,
 };
 

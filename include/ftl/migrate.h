@@ -33,7 +33,7 @@
  *           同样**先就绪前置**再动账——半途而废会重复记账（valid_count 虚高、journal
  *           重复条目）。
  *   · FLUSH_JRN 等 Journal job 空闲（**F10 契约**：搬移条目先落盘再擦 victim）。
- *   · ERASE 逐 plane 异步擦：成功 erase_count++ / wear_mark_dirty / 清 valid，
+ *   · ERASE 逐 plane 异步擦：成功 erase_count++ / 清 valid，
  *           然后按 `post` 二选一——`MIG_POST_FREE` 归还 Free Pool（入池），
  *           `MIG_POST_RETIRE` **不入池** + `rr_retire_block` 退役（见 allocator.h 不变量②）；
  *           失败 bbt_mark_bad（该函数同时把块驱逐出池）。

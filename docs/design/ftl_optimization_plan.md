@@ -49,7 +49,7 @@
 | GC 触发 | **3 条**（P1-2 ✅ + **v0.63 收敛**）：T1 水位 / T4 紧急 / T5 磨损均衡；**T2 写入、T3 定时、T6 碎片率均不实现**（T2/T3 参考层零出处且求值点不可达，见 v0.63） | `gc.h`；`gc.c`（`gc_check_triggers`） |
 | 静态 WL | **已实现**（三条件触发 + 冷块 victim + read_count 权重） | `wear_leveling.c:14-306`；`ftl.c:392` |
 | 动态 WL | allocator 每 plane 选擦除最少块 | `allocator.c:119-148` |
-| **擦除计数持久化** | **有**（P0-1 ✅ 已落地）：Wear 表落块 46（页式追加日志），开机回放回填 BST 的 `erase_count`/`read_count` | `include/ftl/wear.h`、`src/ftl/wear.c`；`ftl.c:586` |
+| **擦除计数持久化** | **有**（P0-1 ✅；v0.82 改形态）：磨损计数随 Checkpoint 记录落盘（16 页/record），开机 `checkpoint_load_wear_table` 回填 BST | `include/ftl/checkpoint.h`、`src/ftl/checkpoint.c` |
 | Free Pool | **单一 free 池 + OP 池**；三级**水位**（P1-3 ✅ 定案）；`pre_cond_count ≡ free_count`（**非缺陷**，GC 先擦后归还） | `allocator.c`；`gc.h` |
 | 温度分区 | Hot/Cold 两个 Open SB | `allocator.c:43-44,348` |
 | Super Block | 双 plane **各自独立选块**（Policy B，v0.12）；不再要求 `block1 = block0` 同号 | `allocator.h:59,192`；`allocator.c:152,192` |
@@ -76,7 +76,7 @@
 | Free Pool | 单池 + OP + 三级**水位** | nvcache chunk + band 状态机 | — | — | 本仓**三级水位已生效**（v0.52 定案） |
 | 多流/温度 | Hot/Cold 双 Open SB | band 顺序写 | — | — | 本仓对齐消费级，**弱于企业级多流** |
 | 学习型压缩 | 无 | 无 | 无 | 无 | **LeaFTL 是前沿方向**，本仓未涉及 |
-| 有效性基建（计数持久化） | ~~**缺**（归零）~~ ⇒ **P0-1 ✅ 已落地**：Wear 表（块 46）持久化 `erase_count`/`read_count`，v0.65 起并入 rr 三字段 | 有（shm 脏跟踪） | 有 | 有 | ~~本仓**落后**~~ ⇒ **已补齐** |
+| 有效性基建（计数持久化） | ~~**缺**（归零）~~ ⇒ **P0-1 ✅**：磨损快照随 Checkpoint 持久化 `erase_count`/`read_count`/rr 三字段（v0.82 起；原独立 Wear 块已删） | 有（shm 脏跟踪） | 有 | 有 | ~~本仓**落后**~~ ⇒ **已补齐** |
 
 **一句话**：本仓在「DRAM-less 路线 + 分层结构」上不落后；~~**落后的是 GC/WL 的算法深度与计数持久化**~~
 ⇒ **计数持久化已补齐（P0-1/v0.65）**；剩余差距是 GC/WL 的算法深度（波 4 未排）。
@@ -99,7 +99,7 @@
   Read Recovery Stage 3（**且 RAID 开关必须保持 0，见 §六**）。
 
 **D. 有效性缺口（最该先修）**
-- ~~擦除计数/read_count/rr 不持久化~~ ⇒ **P0-1 ✅ 已落地**：`erase_count`/`read_count` 由 Wear 表持久化
+- ~~擦除计数/read_count/rr 不持久化~~ ⇒ **P0-1 ✅ 已落地**：`erase_count`/`read_count`/rr 由 Checkpoint 磨损快照持久化（v0.82）
   （**rr 仍 ⬜ 未持久化**，登记为后续）；
 - ~~Metadata Directory 容量 128 < 2048 region~~ ⇒ **该描述已过时**（常量早已 = `L2P_REGIONS_PER_INSTANCE`）。
   实际缺陷是**元数据就地覆盖**（NAND 只能 1→0，二次编程 = 静默损坏）+ Anchor 从未落盘 +
@@ -126,6 +126,10 @@
 ### P0 — 有效性（不做则「机制在跑但没生效」）
 
 **P0-1 计数持久化（最高优先）** — ✅ **已落地**（2026-10-12）
+
+> ⚠ **v0.82（介质版本 9）改形态**：本段描述的独立 Wear 块（块 46 + `wear.c`）已删除；
+> 磨损计数并入 Checkpoint 记录（块账 4 页 + 磨损 16 页 + Header 1 页 = 21 页），
+> 与块账原子提交、随 CP 池轮转。以下保留当时的实现记录。
 - **问题**：`ftl.c` 每次 `ftl_init` memset 全 BST ⇒ `erase_count`/`read_count`/`program_count` 归零。
   静态 WL 的「max-min ≥ 5000」、动态 WL 的「选擦除最少块」、read-disturb 预测**跨重启全部失效**。
 - **对照**：SPDK FTL 用 shm 跟踪脏页；Jasmine/企业级持久化 block metadata。

@@ -227,7 +227,7 @@ int          ftl_op_in_dispatch(void);
 | `FTL_OP_GC` / `FTL_OP_WL` | `ftl_op_migrate` | `&ftl->mig` | 阶段 4，**GC 与 WL 共用同一引擎**，tag 分开只为日志可辨 |
 | `FTL_OP_L2P` | `ftl_op_l2p` | `l2p_cache_line_t *`（**该 cache line**） | 阶段 5，加载与写回共用（按 `line->state` 收尾） |
 | `FTL_OP_CHECKPOINT` | `ftl_op_checkpoint` | `ftl->cp_job` | 阶段 6 |
-| `FTL_OP_BBT` / `FTL_OP_WEAR` | `ftl_op_bbt` / `ftl_op_wear` | `&ftl->alloc` | 阶段 7 |
+| `FTL_OP_BBT` | `ftl_op_bbt` | `&ftl->alloc` | 阶段 7 |
 | `FTL_OP_METADATA` | `ftl_op_metadata` | `&ftl->metadata_dir->job` | 阶段 8，日志块回收 / 压缩 |
 
 ⚠ `g_op_service[]` 是 **C99 designated initializer 的 `const` 数组**（非「注册函数」）：
@@ -788,7 +788,6 @@ typedef struct {
     ftl_block_t *blocks;               // → tables.blocks（BST 20B：erase_count/last_pe_ts/read_count/valid_count/state/sb_id/rr）
     uint16_t    bad_count;             // 坏块数
     bbt_state_t  bbt;                  // BBT 池状态（序 4：per-instance，原 bbt.c 的 file-scope static）
-    wear_state_t wear;                 // Wear 日志状态（序 4：per-instance，原 wear.c 的 file-scope static）
 } ftl_allocator_t;
 ```
 
@@ -887,14 +886,13 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 | `checkpoint.c` | ⚠ 4 处 | 记录读 ×2 / 写 ×2（**阶段 6** 转 job） |
 | `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / Anchor 落盘全在异步 job（`metadata_job.c`：`metadata_dir_kick` + `ftl_op_metadata`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的 Anchor 读（开机） |
 | `bbt.c` | ⚠ 7 处 | 记录读 ×2、出厂标记读、擦除、持久化写（**阶段 7**） |
-| `wear.c` | ⚠ 3 处 | 快照写、压实擦除、开机回放读（**阶段 7**） |
 | `power_failure_recovery.c` | ⚠ 4 处 | 开机 region 预载读、空白页裸读（**结构性同步**，长期保留） |
 | `ftl_fc_interface.c` | — | 同步原语与 `ftl_async_*` 异步原语的定义处（机制层） |
 
 ⚠ **`ftl_sync_submit_wait` 的目标终态已达成**（v0.75 阶段 8）：只被开机 / 格式化 / 出厂扫描 /
 CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，且**全是结构性同步**（在 `main`
 进 superloop 前执行，无人 drain CQ）或非派发上下文的回退（`journal.c` ①），**会长期保留**。
-`checkpoint.c`（阶段 6）、`bbt.c`/`wear.c`（阶段 7）、`metadata.c` 的压缩与 Anchor（阶段 8）
+`checkpoint.c`（阶段 6）、`bbt.c`（阶段 7）、`metadata.c` 的压缩与 Anchor（阶段 8）
 四条异步化路径**都已不再出现**在这一栏里——即"由 job 承载"的那些同步站点已经清零。
 
 ### 5.4 约束汇总
@@ -962,7 +960,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
     │   ├── GC：ftl_gc_evaluate 命中 ⇒ mig_begin_gc() 起**一个**搬移 job
     │   ├── mig_begin_wl()                ← 磨损均衡（触发判定在函数内）
     │   ├── mig_begin_predict()           ← 慢死预测巡检（节流 1s）
-    │   ├── journal_kick() / bbt_kick() / wear_kick()   ← v0.75 阶段 7：均为异步 job
+    │   ├── journal_kick() / bbt_kick()                ← v0.75 阶段 7：均为异步 job
     │   └── checkpoint_begin() (按需；此后每轮 checkpoint_kick 跨档位推进)
     │
     ├── NORMAL 模式 (pending ≤ MAX/2 且无排队组):  适度后台
@@ -986,7 +984,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 > `completion_table_count`**：后台 job 的命令也登记在那里，计进来会让"真空闲"永不成立，
 > 后台反被自己的命令饿死；后台活跃度由各自的单飞行门单独管）。
 > ⚠ `main.c` 的主循环**遍历全部实例**调 `ftl_service`（序 4：只跑 `[0][0][0]` 会让其余实例的
-> journal / checkpoint / wear / bbt / GC 永不推进）；`ftl_service_pump()` 每轮只调一次。
+> journal / checkpoint / bbt / GC 永不推进）；`ftl_service_pump()` 每轮只调一次。
 
 ### 6.2 完整实现
 
@@ -1051,7 +1049,6 @@ include/ftl/
 ├── ftl_op.h                     # op tag 枚举 + ftl_op_submit/ftl_op_dispatch（v0.75）
 ├── checkpoint.h                 # Checkpoint + Journal 截断协同
 ├── bbt.h                        # BBT 坏块表（池 + 全片擦除原语）
-├── wear.h                       # 磨损计数持久化（页式追加日志）
 ├── read_recovery.h              # Read Retry + ECC 趋势预测 + 恢复 job（rr_stage_t/rr_kick）
 ├── power_failure_recovery.h     # 三类启动恢复 + 介质格式化
 └── wear_leveling.h              # 动态 + 静态磨损均衡
@@ -1071,7 +1068,6 @@ src/ftl/
 ├── ftl_op.c                     # op tag + g_op_service[] 服务函数数组（v0.75）
 ├── checkpoint.c                 # 全量 Checkpoint + 三级触发
 ├── bbt.c                        # BBT 加载/扫描/标记/保存 + 全片擦除
-├── wear.c                       # 磨损计数页式追加日志
 ├── read_recovery.c              # Read Retry + 邻近页辅助 + 恢复 job 状态机（v0.75 阶段 3）
 ├── power_failure_recovery.c     # 三类启动 + 介质版本校验/自动格式化
 └── wear_leveling.c              # 三条件触发 + victim 选择（搬移在 migrate.c）

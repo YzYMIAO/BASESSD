@@ -19,8 +19,8 @@
  *   · must_run = 正确性关键集（rr / mig_service / metadata_dir / checkpoint_kick /
  *     紧急 CP / journal need_erase）：**无条件每轮跑、不受 interval 门控、不占预算**——
  *     它们是防死锁/防 host 读挂起的动作（删了系统会挂，见 ftl.c 三档函数注释）。
- *   · interval_ms = 最小执行间隔；0 = 不设调度器级间隔（任务内部事件门管节流，如 wear
- *     的 120s/1024-delta 双触发门）。last_run_ms==0 作「尚未运行」哨兵（仿 gc_eval_last_ms）。
+ *   · interval_ms = 最小执行间隔；0 = 不设调度器级间隔（任务内部事件门管节流，如
+ *     journal 的页满门）。last_run_ms==0 作「尚未运行」哨兵（仿 gc_eval_last_ms）。
  *   · budget_us = 单次执行钳制：charge = MIN(elapsed, budget_us)，本轮总预算耗尽即截断。
  *     ⚠ kick 全部「提交即返回」⇒ elapsed 只反映 CPU 时间（平台 time_us 实测 SysTick 1ms
  *     量化）；**确定性前台保护由档位 → l2p 条数/任务掩码承担**（见 ftl.c g_bg_level_cfg）。
@@ -36,7 +36,7 @@
 struct ftl_context;
 typedef struct ftl_context ftl_context_t;
 
-#define BG_TASK_COUNT (14U) /* 任务表容量（ftl.c ftl_bg_init 填满） */
+#define BG_TASK_COUNT (13U) /* 任务表容量（ftl.c ftl_bg_init 填满） */
 
 /* ── 档位（负载 → 预算规模，见 ftl.c g_bg_level_cfg）── */
 #define BG_LEVEL_IDLE   (0U)

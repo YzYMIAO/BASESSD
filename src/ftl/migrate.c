@@ -42,7 +42,6 @@
 #include "ftl/journal.h"          /* journal_kick / journal_append / JRN_IDLE */
 #include "ftl/l2p_cache.h"        /* l2p_cache_read / l2p_cache_write */
 #include "ftl/read_recovery.h"    /* rr_record_ecc / rr_predictive_scan / rr_retire_block */
-#include "ftl/wear.h"             /* wear_mark_dirty */
 #include "ftl/wear_leveling.h"    /* wl_should_trigger / wl_select_victim */
 
 #include <string.h>
@@ -800,7 +799,6 @@ static void mig_complete_read(ftl_context_t             *ftl,
              * 判定只用 ecc_bits 与上一次读数比较，不涉及时间维度。 */
             rr_record_ecc(&src_blk->rr, fc_get_cmd_ecc_max(cmd));
             src_blk->read_count++;
-            wear_mark_dirty(&ftl->alloc, mig_src_gblock(m, plane));
 
             m->decode_ok = true;
         }
@@ -830,7 +828,7 @@ static void mig_complete_write(ftl_context_t             *ftl,
     mig_step(ftl);
 }
 
-/* MIG_ERASE 完成：成功 ⇒ erase_count++ / last_pe_ts / wear_mark_dirty / 清 valid，
+/* MIG_ERASE 完成：成功 ⇒ erase_count++ / last_pe_ts / 清 valid，
  * 然后按 post 二选一（FREE 入池 / RETIRE 退役）；失败 ⇒ bbt_mark_bad。 */
 static void mig_complete_erase(ftl_context_t             *ftl,
                                mig_job_t                 *m,
@@ -847,7 +845,6 @@ static void mig_complete_erase(ftl_context_t             *ftl,
         /* 擦除成功：擦除计数 +1，记录最近擦除时间戳（单调写入量），valid_count 归零 */
         blk->erase_count++;
         blk->last_pe_ts = ftl->total_writes;
-        wear_mark_dirty(&ftl->alloc, gsrc); /* 擦除账（erase_count / last_pe_ts） */
         ftl_block_clear_valid(blk);
 
         /* 去向二选一——**退役块不得先进池**：
@@ -861,7 +858,6 @@ static void mig_complete_erase(ftl_context_t             *ftl,
              * ftl_block_t* ⇒ 脏标记放在这里补。 */
             allocator_remove_from_free(&ftl->alloc, gsrc);
             rr_retire_block(blk);
-            wear_mark_dirty(&ftl->alloc, gsrc); /* rr 健康复位（read_count / health） */
         }
         else
         {

@@ -677,7 +677,7 @@ bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
  *   参数：b —— 目标块（恒非 NULL）。
  *   返回：无。
  *   实现要点：read_count 归零 = read disturb 重计（块仍活着，只是不再写）。
- *             ⚠ 归零后需调用者补 wear_mark_dirty（本函数只拿 ftl_block_t*，拿不到 gblock）。
+ *             计数随下一次 Checkpoint 的磨损快照持久化（不再有独立的 dirty 标记）。
  * -------------------------------------------------------------------- */
 void rr_retire_block(ftl_block_t *b)
 {

@@ -60,7 +60,6 @@ typedef enum
     FTL_OP_L2P,           /* L2P region 加载 / 写回（l2p_cache.c，阶段 5 点亮） */
     FTL_OP_CHECKPOINT,    /* 阶段 6 */
     FTL_OP_BBT,           /* 阶段 7 */
-    FTL_OP_WEAR,          /* 阶段 7 */
     FTL_OP_METADATA,      /* 阶段 8 */
     FTL_OP_COUNT          /* 计数哨兵 */
 } ftl_op_id_t;
@@ -179,18 +178,6 @@ void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *compl
  * 每条命令自己 fc_command_release。
  */
 void ftl_op_bbt(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
-
-/*
- * ftl_op_wear - Wear 日志 job 的完成服务函数（定义在 wear.c）。
- *
- * 由 g_op_service[FTL_OP_WEAR] 引用；ctx = `ftl_allocator_t *`（= &ftl->alloc）。
- * 服务函数按 alloc->wear.job.phase 收尾：
- *   · ERASE（compact 前的整块擦）成功 ⇒ next_page 归 0、起全量快照；失败 ⇒ dirty 保留；
- *   · WRITE 成功 ⇒ next_page++ 并续提交下一页；失败 ⇒ 不推进，增量批保留脏位，
- *     compact 批（dirty_only==0）则全标脏（擦除已抹掉旧内容）。
- * 每条命令自己 fc_command_release。
- */
-void ftl_op_wear(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
 /*
  * ftl_op_metadata - L2P 日志块整理 job（回收 / 抗碎片压缩）的完成服务函数（定义在 metadata_job.c）。

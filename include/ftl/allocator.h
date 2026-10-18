@@ -201,16 +201,14 @@ static inline nand_pba_t super_block_page_pba(ftl_topology_t topo, const super_b
 
 /* ── 元数据池游标（per-instance）──
  *
- * BBT 池 / Wear 日志各有自己的 sequence 与写游标（环形轮转，开机由各自的 load/init
- * 恢复）。它们**归实例所有**：多实例（多 LUN，`g_ftl[ch][ce][lun]`）下若用
- * file-scope static，所有实例会共享一份游标/序号、互相覆盖 ⇒ 池写错槽。
+ * BBT 池有自己的 sequence 与写游标（环形轮转，开机由 bbt_load 恢复）。它**归实例所有**：
+ * 多实例（多 LUN，`g_ftl[ch][ce][lun]`）下若用 file-scope static，所有实例会共享一份
+ * 游标/序号、互相覆盖 ⇒ 池写错槽。
  *
- * 放这里（而非各自的 bbt.h / wear.h）的两个理由：
- *   ① 这两个模块的**全部**接口都以 `ftl_allocator_t *` 为首参（状态随分配器走最自然）；
- *      而 bbt.h / wear.h 已 include 本文件，反向包含会成环。
- *   ② 语义上同属「块账本」——BBT = 坏块图，Wear = 每块擦除/读计数，与 BST 同一维度。
- *
- * ⚠ 两者都是**软状态**：掉电只丢「最后一次落盘之后」的增量，不丢用户数据（见 wear.h 头注）。
+ * 放这里（而非 bbt.h）的两个理由：
+ *   ① 本模块的**全部**接口都以 `ftl_allocator_t *` 为首参（状态随分配器走最自然）；
+ *      而 bbt.h 已 include 本文件，反向包含会成环。
+ *   ② 语义上属「块账本」，与 BST 同一维度。
  */
 /* ── BBT 持久化 job（异步）──
  *
@@ -242,51 +240,6 @@ typedef struct
     uint8_t   dirty;        /* 是否有未写回 NAND 的变更 */
     bbt_job_t job;          /* 异步持久化 job */
 } bbt_state_t;
-
-/* ── Wear 持久化 job（异步）──
- *
- * 一批落盘 = 1~25 个日志页（增量 1~4 页 / compact 全量 25 页）+ 可能的整块擦。
- * `wear_kick` 起步，完成由 g_op_service[FTL_OP_WEAR]（ftl_op_wear）收尾并提交下一页。 */
-typedef enum
-{
-    WEAR_JOB_IDLE = 0, /* 无 job */
-    WEAR_JOB_ERASE,    /* compact 前的整块擦在飞 */
-    WEAR_JOB_WRITE,    /* 日志页写在飞 */
-} wear_job_phase_t;
-
-typedef struct
-{
-    uint8_t  phase;        /* wear_job_phase_t */
-    uint8_t  waiting;      /* 1 = 有一条本 job 的命令在飞；0 = 待续跑（提交被背压拒） */
-    uint8_t  dirty_only;   /* 1 = 增量（只写快照里的脏块）；0 = compact 后的全量快照 */
-    uint16_t cursor;       /* 下一个待考察的 gblock（= FTL_BLOCK_TOTAL 表示本批走完） */
-    uint32_t flush_ms;     /* 起点时刻（收尾写回节拍基准） */
-    uint32_t flush_writes; /* 起点 total_writes（同上） */
-
-    /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/cursor/age */
-    uint32_t start_ms;
-    uint32_t log_ms;
-} wear_job_t;
-
-typedef struct
-{
-    uint32_t sequence;                    /* 最新已写页的 sequence */
-    uint16_t next_page;                   /* 下一个可写页（= 已回放的有效页数） */
-    uint32_t last_flush_writes;           /* 上次落盘时的 total_writes（节拍基准） */
-    uint32_t last_flush_ms;               /* 上次落盘时刻（ms，节拍基准） */
-    uint8_t  dirty[FTL_BLOCK_TOTAL / 8U]; /* 脏位图：哪些块的计数变了 */
-
-    /* ── 异步 job ──
-     * `dirty_snapshot` = **本批起点**的脏位图副本。批跨多轮，期间 mig/RR job 的完成
-     * 会调 wear_mark_dirty 置新脏位 ⇒ 必须把「本批写哪些块」钉死，否则批会写出超过
-     * compact 判定所用的页数，next_page 可能越过块尾。
-     * 配对的写法是**批起点把 dirty 整体清零**：批期间 mark_dirty 置的位于是只表示
-     * 「批开始后才变的块」。收尾什么都不清（剩下的位留给下一批）；批失败则
-     * `dirty |= snapshot` 并回。这样「批前就脏、批中被写、批中又变」的块不会丢最后一次
-     * 变更——清零式让异步批拿到与整批原子写相同的边界。 */
-    wear_job_t job;
-    uint8_t    dirty_snapshot[FTL_BLOCK_TOTAL / 8U];
-} wear_state_t;
 
 /* ── Allocator 上下文 ──
  *
@@ -324,8 +277,7 @@ typedef struct
     uint16_t     bad_count; /* 坏 Block 数 */
 
     /* ── 元数据池游标（per-instance） ── */
-    bbt_state_t  bbt;  /* 坏块表池：sequence / write_idx / cursor_valid / dirty */
-    wear_state_t wear; /* 磨损计数日志：sequence / next_page / 节拍基准 / 脏位图 */
+    bbt_state_t bbt; /* 坏块表池：sequence / write_idx / cursor_valid / dirty */
 } ftl_allocator_t;
 
 /* 本实例的拓扑（allocator 自持的那份 ch/ce/lun 副本 → 标准 ftl_topology_t）。
