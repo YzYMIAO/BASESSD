@@ -621,8 +621,8 @@ static void metadata_dir_rebuild_live(metadata_dir_cache_t *dir)
 
         /* ⚠ 不能用 "block >= FTL_METADATA_BLOCK_END"：P1 的 0..45 是镜像元数据、
          *   46.. 才是用户区，动态日志块可以落在 END 之前。固定元数据块才不是日志块。 */
-        uint8_t  plane = (uint8_t)pba_to_plane(dir->entries[i].pba);
-        uint16_t block = (uint16_t)pba_to_block(dir->entries[i].pba);
+        uint8_t  plane = pba_to_plane(dir->entries[i].pba);
+        uint16_t block = pba_to_block(dir->entries[i].pba);
 
         /* Anchor 条目来自介质（不可信输入）：plane/block 越界是损坏数据，跳过而不是断言。
          * ⚠ block 越界必须在 ftl_gblock 之前挡：它按 uint16 截断，65535 会回绕成
@@ -947,8 +947,8 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
 
     /* ⚠ `!ftl_is_metadata_block` 对正确加载的 Directory 冗余，但 Anchor 条目来自介质
      *   （H29 不可信输入）：损坏条目可能指向固定块。plane 越界同样跳过。 */
-    if ((old != NAND_PBA_INVALID) && ((uint8_t)pba_to_plane(old) < PLANE_NUM) &&
-        (!ftl_is_metadata_block(NULL, (uint8_t)pba_to_plane(old), (uint16_t)pba_to_block(old))))
+    if ((old != NAND_PBA_INVALID) && (pba_to_plane(old) < PLANE_NUM) &&
+        (!ftl_is_metadata_block(NULL, pba_to_plane(old), pba_to_block(old))))
     {
         uint16_t g = ftl_pba_gblock(old);
 
@@ -1333,8 +1333,8 @@ bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, ui
             continue;
         }
 
-        const uint8_t  ep = (uint8_t)pba_to_plane(md_dir->entries[i].pba);
-        const uint16_t eb = (uint16_t)pba_to_block(md_dir->entries[i].pba);
+        const uint8_t  ep = pba_to_plane(md_dir->entries[i].pba);
+        const uint16_t eb = pba_to_block(md_dir->entries[i].pba);
 
         if ((ep >= PLANE_NUM) || (eb >= BLOCKS_PER_PLANE) ||
             ftl_is_metadata_block(NULL, ep, eb))

@@ -135,7 +135,7 @@ ftl_status_t gc_read_page_with_lba(nand_pba_t pba, lba_t cw_lba[CW_NUM])
  * -------------------------------------------------------------------- */
 bool gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], lba_t *page_base_out)
 {
-    const uint8_t phys_plane = (uint8_t)pba_to_plane(pba);
+    const uint8_t phys_plane = pba_to_plane(pba);
 
     ASSERT(cmd != NULL);
     ASSERT(cw_lba != NULL);

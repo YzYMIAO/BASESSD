@@ -216,9 +216,9 @@ static ftl_status_t ftl_cmd_build_pair_chain(fc_command_t *cmd, const nand_pba_t
  * 都在）传 pba[0]；CW 级入口只覆盖 plane1 时须传 pba[1]（见 ftl_cmd_setup_ppa_pair_cw）。 */
 static void ftl_cmd_bind_pair_topo(fc_command_t *cmd, nand_pba_t base_pba)
 {
-    cmd->config.ch  = (DWORD)pba_to_ch(base_pba);
-    cmd->config.ce  = (DWORD)pba_to_ce(base_pba);
-    cmd->config.lun = (DWORD)pba_to_lun(base_pba);
+    cmd->config.ch  = pba_to_ch(base_pba);
+    cmd->config.ce  = pba_to_ce(base_pba);
+    cmd->config.lun = pba_to_lun(base_pba);
     cmd->paa        = pba_to_paa(base_pba); /* v47：PBA→PAA 在 FTL 侧一次转出 */
 }
 
@@ -554,9 +554,9 @@ static fc_command_t *sync_page_prepare_cw(nand_pba_t pba, uint8_t operation, con
 
     /* 边界不变量同 pba_to_cmd：进 FC 的 ch/ce/lun 被当 suspended[][][] 下标直接用。 */
     ASSERT(pba_is_valid(pba));
-    cmd->config.ch  = (DWORD)pba_to_ch(pba);
-    cmd->config.ce  = (DWORD)pba_to_ce(pba);
-    cmd->config.lun = (DWORD)pba_to_lun(pba);
+    cmd->config.ch  = pba_to_ch(pba);
+    cmd->config.ce  = pba_to_ce(pba);
+    cmd->config.lun = pba_to_lun(pba);
     cmd->paa        = pba_to_paa(pba);
 
     if (ftl_cmd_configure_descriptors(cmd, cw_bitmap) != FTL_OK)
@@ -975,9 +975,9 @@ ftl_status_t ftl_async_write_page_cw(fc_command_t **out_cmd, nand_pba_t pba, con
 
     /* 边界不变量同 pba_to_cmd：进 FC 的 ch/ce/lun 被当 suspended[][][] 下标直接用。 */
     ASSERT(pba_is_valid(pba));
-    cmd->config.ch  = (DWORD)pba_to_ch(pba);
-    cmd->config.ce  = (DWORD)pba_to_ce(pba);
-    cmd->config.lun = (DWORD)pba_to_lun(pba);
+    cmd->config.ch  = pba_to_ch(pba);
+    cmd->config.ce  = pba_to_ce(pba);
+    cmd->config.lun = pba_to_lun(pba);
     cmd->paa        = pba_to_paa(pba);
 
     if (ftl_cmd_configure_descriptors(cmd, cw_bitmap) != FTL_OK)

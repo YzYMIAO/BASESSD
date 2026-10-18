@@ -670,7 +670,7 @@ void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
                     break;
                 }
 
-                nand_pba_t aaddr = pba_with_page(j->anchor_base, (uint32_t)pba_to_page(j->anchor_base) + j->anchor_chunk);
+                nand_pba_t aaddr = pba_with_page(j->anchor_base, pba_to_page(j->anchor_base) + j->anchor_chunk);
 
                 metadata_anchor_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
 

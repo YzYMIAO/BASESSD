@@ -1286,7 +1286,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
                 return FTL_ERROR;
             }
 
-            uint8_t    pl = (uint8_t)pba_to_plane(p);
+            uint8_t    pl = pba_to_plane(p);
             nand_pba_t pg = pba_page(p);
 
             /* CW 级映射的结构不变量：**物理 plane == LBA 的 plane 位**。

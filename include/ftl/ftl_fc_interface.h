@@ -213,9 +213,9 @@ static inline ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba)
      * 校验」在遍历路径（同步页原语 / GC / 元数据扫描 / Checkpoint）上仍是假命题。 */
     ASSERT(pba_is_valid(pba));
 
-    cmd->config.ch  = (DWORD)pba_to_ch(pba);
-    cmd->config.ce  = (DWORD)pba_to_ce(pba);
-    cmd->config.lun = (DWORD)pba_to_lun(pba);
+    cmd->config.ch  = pba_to_ch(pba);
+    cmd->config.ce  = pba_to_ce(pba);
+    cmd->config.lun = pba_to_lun(pba);
     /* v47：PBA 在 FTL 侧就地转 PAA——FC 层只见 PAA，不再有 pba_to_paa 调用点。
      * ⚠ 必须在建链之前转（下面 fc_command_plane_span_cw_bitmap 读 cmd->paa）。 */
     cmd->paa        = pba_to_paa(pba);

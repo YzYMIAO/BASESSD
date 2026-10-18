@@ -226,41 +226,43 @@ typedef uint32_t nand_pba_t;
 /* 无效 PBA 值。PBA 编码最多 26 bit，全 F 不可能是合法地址。 */
 #define NAND_PBA_INVALID (0xFFFFFFFFU)
 
-/* ── PBA 字段提取（直接按 PBA 位序取，不经 PAA）── */
+/* ── PBA 字段提取（直接按 PBA 位序取，不经 PAA）──
+ *
+ * 返回类型 = 字段的**自然宽度**：窄化在 getter 内完成一次，调用点不再逐个强转。 */
 
-static inline uint32_t pba_to_ch(nand_pba_t pba)
+static inline uint8_t pba_to_ch(nand_pba_t pba)
 {
-    return (pba >> PBA_CH_SHIFT) & PBA_CH_MASK;
+    return (uint8_t)((pba >> PBA_CH_SHIFT) & PBA_CH_MASK);
 }
 
-static inline uint32_t pba_to_ce(nand_pba_t pba)
+static inline uint8_t pba_to_ce(nand_pba_t pba)
 {
-    return (pba >> PBA_CE_SHIFT) & PBA_CE_MASK;
+    return (uint8_t)((pba >> PBA_CE_SHIFT) & PBA_CE_MASK);
 }
 
-static inline uint32_t pba_to_lun(nand_pba_t pba)
+static inline uint8_t pba_to_lun(nand_pba_t pba)
 {
-    return (pba >> PBA_LUN_SHIFT) & PBA_LUN_MASK;
+    return (uint8_t)((pba >> PBA_LUN_SHIFT) & PBA_LUN_MASK);
 }
 
-static inline uint32_t pba_to_block(nand_pba_t pba)
+static inline uint16_t pba_to_block(nand_pba_t pba)
 {
-    return (pba >> PBA_BLOCK_SHIFT) & PBA_BLOCK_MASK;
+    return (uint16_t)((pba >> PBA_BLOCK_SHIFT) & PBA_BLOCK_MASK);
 }
 
-static inline uint32_t pba_to_page(nand_pba_t pba)
+static inline uint8_t pba_to_page(nand_pba_t pba)
 {
-    return (pba >> PBA_PAGE_SHIFT) & PBA_PAGE_MASK;
+    return (uint8_t)((pba >> PBA_PAGE_SHIFT) & PBA_PAGE_MASK);
 }
 
-static inline uint32_t pba_to_plane(nand_pba_t pba)
+static inline uint8_t pba_to_plane(nand_pba_t pba)
 {
-    return (pba >> PLANE_CW_SHIFT) & PBA_PLANE_MASK;
+    return (uint8_t)((pba >> PLANE_CW_SHIFT) & PBA_PLANE_MASK);
 }
 
-static inline uint16_t pba_to_cw(nand_pba_t pba)
+static inline uint8_t pba_to_cw(nand_pba_t pba)
 {
-    return (uint16_t)((pba >> PBA_CW_SHIFT) & NAND_FIELD_MASK(CW_WIDTH));
+    return (uint8_t)((pba >> PBA_CW_SHIFT) & NAND_FIELD_MASK(CW_WIDTH));
 }
 
 /* ── PBA 字段视图（4 字节位域，位序与 nand_pba_t 一致）──
@@ -393,11 +395,11 @@ static inline bool pba_fields_layout_matches(void)
 /* 从 PBA 提取芯片内地址（PAA）。两套位序不同 ⇒ **真正的字段重排**，不是掩码截取。 */
 static inline nand_paa_t pba_to_paa(nand_pba_t pba)
 {
-    return paa_from_addr(&(nand_addr_t){.lun   = (uint8_t)pba_to_lun(pba),
-                                        .block = (uint16_t)pba_to_block(pba),
-                                        .plane = (uint8_t)pba_to_plane(pba),
-                                        .page  = (uint8_t)pba_to_page(pba),
-                                        .cw    = (uint8_t)pba_to_cw(pba)});
+    return paa_from_addr(&(nand_addr_t){.lun   = pba_to_lun(pba),
+                                        .block = pba_to_block(pba),
+                                        .plane = pba_to_plane(pba),
+                                        .page  = pba_to_page(pba),
+                                        .cw    = pba_to_cw(pba)});
 }
 
 /* ── 便利构造 ── */

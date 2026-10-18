@@ -154,7 +154,7 @@ static inline uint16_t ftl_gblock(uint8_t plane, uint16_t block)
 /* PBA → 全局块号（直接按 PBA 位序解，不经 PAA） */
 static inline uint16_t ftl_pba_gblock(nand_pba_t pba)
 {
-    return ftl_gblock((uint8_t)pba_to_plane(pba), (uint16_t)pba_to_block(pba));
+    return ftl_gblock(pba_to_plane(pba), pba_to_block(pba));
 }
 
 /* gblock → plane / per-plane block（ftl_gblock 的逆，单点解码）。 */
