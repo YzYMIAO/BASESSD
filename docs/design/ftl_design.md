@@ -619,6 +619,106 @@ Directory 指向的 region 页不占固定分区，而是从 Free Pool 动态取
 - 这条布局满足"预留必用"：P1 的 Anchor/CP/BBT 块是**真实副本**，不是闲置；只有 Wear 的
   P1 块归还用户区。`ftl_is_metadata_block()` 按 `(plane & plane_mask)` 判固定块。
 
+#### 2.3.8 结构分布图
+
+> 表给精确尺寸，图给空间关系。**尺寸/字段以本章表格和 `include/ftl/*.h` 为准**，
+> 图只表达结构；改布局时两处一起改（H6）。
+
+**① 每 die 的 plane / 块分布**
+
+```text
+plane 0: | Anchor 0..31 | CP 32..39 | BBT 40..41 | Journal 42..45 | Wear 46 | 用户数据 47..2047 |
+plane 1: | Anchor'0..31 | CP'32..39 | BBT'40..41 | Journal 42..45 | 用户 46 | 用户数据 47..2047 |
+          \_____ P0+P1 镜像 _____/ \_ P0+P1 镜像 _/ \_ P0+P1 镜像 _/ \_ P0+P1 交错 _/   \_ 单 P0 _/
+```
+
+**② 池 → 块 → 页 → record（Anchor 示例）**
+
+```text
+Anchor 池 = 32 个块号 × (P0 副本 + P1 副本)
+块 b（64 页，128 KiB）:
+  page  0..7   record 0
+  page  8..15  record 1
+  ...
+  page 56..63  record 7          ← 8 条 record/块（一条 8 页）
+
+一条 record（8 页 = 8 个 chunk）:
+  chunk 0: entry 0..255
+  chunk 1: entry 256..511
+  ...
+  chunk 7: entry 1792..2047
+
+一个 chunk（1 页，2048 B）:
+  [20 B 头][256 × 7 B entries = 1792 B][236 B padding]
+```
+
+**③ 各池的块内排布**
+
+```text
+Checkpoint 块（64 页）:
+  page 0..4    record 0   (page 0 = Header, page 1..4 = 块账快照)
+  page 5..9    record 1
+  ...
+  page 55..59  record 11
+  page 60..63  未用（64 / 5 向下取整）
+
+BBT 块（64 页）:
+  page 0..63 = record 0..63（每页一条，540 B + padding）
+
+Journal 块（4 块号 × 64 页；页是写单位）:
+  page 0..63；逻辑页 i 的 plane = i & 1（偶页 P0、奇页 P1）
+  每页：[12 B 头][127 × 16 B entries = 2032 B][4 B 余量]
+
+Wear 块（P0 单块 64 页）:
+  页式追加日志；每页 [16 B 头][168 × 12 B entries = 2016 B][16 B padding]
+  全量快照 = 25 页；块满压实
+
+L2P region（动态，非固定分区）:
+  一页 = 512 × 4 B nand_pba_t = 2048 B（无页头）
+  一块 = 64 页 = 64 个 region
+```
+
+**④ 关键结构的字节偏移**
+
+```text
+metadata_anchor_page_t (2048 B):
+  0      4      8      10     12     16     20                          2048
+  [magic][seq][chunk_i][chunk_c][cnt][ver][entries 256×7=1792][pad 236]
+
+l2p_checkpoint_header_t (2048 B；75 字 = 300 B + padding):
+  0      4      8      12     16                                     272    276    280    284    288    292    296    300
+  [magic][seq][ts][rgn_cnt][region_bitmap 64×4=256][jseq][ver][wcnt][wbytes][pcnt][crc32][rpages][padding 1748]
+
+bbt_header_t (540 B，packed):
+  0      4      8      12     16           28            540
+  [magic][seq][total][bad_cnt][reserved 12][bad_map 512]
+
+l2p_journal_entry_t (16 B) / 页:
+  页:    [magic 4][page_seq 4][entry_cnt 2][block_seq 2][127×16 B entries][4 B 余]
+  entry: [lba 4][old_pba 4][new_pba 4][sequence 4]
+
+wear_entry_t (12 B) / wear_page_t (2048 B):
+  页:    [magic 4][seq 4][entry_cnt 4][rsv 4][168×12 B entries][pad 16]
+  entry: [block 2][read 2][erase 4][last_ecc 1][rising 1][health 1][rsv 1]
+```
+
+**⑤ 镜像写 / 读回退（运行期 async）**
+
+```mermaid
+flowchart LR
+    A["record/page 2 KiB"] --> B["multi-plane program: P0 page N + P1 page N"]
+    B --> C["completion: waiting=0"]
+    D["read P0 page N"] --> E{"valid?"}
+    E -- "yes" --> F["use"]
+    E -- "no" --> G["read P1 page N"]
+    G --> H{"valid + seq match?"}
+    H -- "yes" --> F
+    H -- "no" --> I["fallback previous record"]
+```
+
+⚠ 图只表达**空间结构/回退关系**；精确的读写时序见 §3.5.6 / §3.5.7 与
+`src/ftl/metadata_job.c`。
+
 ### 2.4 单一坐标与转换漏斗
 
 | 坐标 | 值域/含义 | 谁拥有 |
