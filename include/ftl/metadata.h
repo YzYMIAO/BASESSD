@@ -524,6 +524,7 @@ typedef enum
     MD_ANCHOR_READY  = 1,  /* 出参全部有效，可以写 Anchor */
 } md_anchor_step_t;
 
+//问题 这里面的状态好多都是bool类型的，不能压缩吗按位域的那种
 typedef struct
 {
     uint8_t         phase;             /* md_job_phase_t */

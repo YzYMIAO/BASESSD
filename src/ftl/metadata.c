@@ -585,6 +585,7 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
 }
 
 /* metadata_dir_lookup — 线性查 (type,id) 的登记位置；未找到返回 NAND_PBA_INVALID */
+//问题 除了日志块还有其他类型需要查找吗？
 nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
                                uint8_t                     type,
                                uint16_t                    id)
@@ -712,21 +713,22 @@ static ftl_status_t metadata_dir_reclaim_block(metadata_dir_cache_t *dir,
                                                uint16_t              gblock)
 {
     /* 死守卫（本文件内部调用者持 dir/alloc）；gblock 范围是**边界** ⇒ 保留。 */
+    //问题 死守卫不删除吗
     if (gblock >= FTL_BLOCK_TOTAL)
     {
         return FTL_ERROR;
     }
-
+	//问题 调用的这个是不是过度封装呀，这个中间函数完全没必要呀，且这个分支有可能吗
     if (!md_block_is_log(alloc, gblock))
     {
         return FTL_OK; /* 不是本池的日志块：不动它 */
     }
-
+    //问题居然是同步，这里是上电时的路径吗
     if (ftl_sync_erase_block(md_block_addr(dir, gblock)) != 0)
     {
         return FTL_ERROR; /* 擦失败：留 LOG + 活计数 0，下次再试 */
     }
-
+	//问题 这个封装确实没必要呀
     allocator_free_log_block(alloc, gblock);
     return FTL_OK;
 }
@@ -741,6 +743,7 @@ static ftl_status_t metadata_dir_reclaim_block(metadata_dir_cache_t *dir,
 ftl_status_t metadata_dir_reclaim(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir 与 &ftl->alloc。 */
+    //问题 这里不是对外模块，这里的assert可以去掉
     ASSERT(dir != NULL);
     ASSERT(alloc != NULL);
 
@@ -754,6 +757,7 @@ ftl_status_t metadata_dir_reclaim(metadata_dir_cache_t *dir, ftl_allocator_t *al
         {
             continue; /* 当前写入块不可回收 */
         }
+        //问题 这个函数下的功能没必要封装为函数啊，直接摊开就行了呀
         (void)metadata_dir_reclaim_block(dir, alloc, g);
     }
 
@@ -865,11 +869,13 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
     if ((dir->cur_block_valid == 0U) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
     {
         /* 先回收无活 region 的日志块（否则稳态每填满一块就永久占一块），再取新块 */
+        //问题 这下面有同步逻辑，符合预期吗，非上电初始化应该全用异步呀
         (void)metadata_dir_reclaim(dir, alloc);
 
         /* plane 轮转：Policy B 下两 plane 各自独立选块，拿不到"同号双 plane 都空闲"
          * 的保证，故不跨 plane 配对；日志页落在哪个 plane 对读取无影响（位置由 pba 携带）*/
         plane = dir->cur_metadata_plane;
+        //问题   这里plane没有泛化呀，而且取日志块不能精准定位吗，需要这样多次定位吗
         if (allocator_alloc_log_block(alloc, plane, &gblock) != FTL_OK)
         {
             /* 本 plane 的 Free Pool 空 ⇒ 换另一 plane 再试（两池是独立的，一个空不代表全空）*/
@@ -885,6 +891,7 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
 
         dir->cur_metadata_block = gblock;
         dir->cur_metadata_page  = 0U;
+        //问题 这个游标不能是bool类型吗
         dir->cur_block_valid    = 1U;
         dir->cur_metadata_plane = (uint8_t)((plane + 1U) % PLANE_NUM);
 
@@ -903,7 +910,7 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
             return NAND_PBA_INVALID;
         }
     }
-
+    //问题既然本函数就是 完成这个功能的函数为什么还要 metadata_dir_slot_now这个封装而且里面还有死守卫，不能直接在这写吗
     return metadata_dir_slot_now(dir);
 }
 
@@ -924,11 +931,13 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
                                 uint16_t              region_id,
                                 nand_pba_t            new_pba)
 {
+    //问题 这个形参没有就删掉呀
     (void)alloc; /* 回收已改由后台 job 做（擦除地址由 md_block_addr 从 dir->topo 算出）*/
 
     /* 前置条件（判据 2）：dir 恒 ftl->metadata_dir。region_id / new_pba 是**数据**判断
      * （越界 no-op 是既有契约）⇒ 保留运行期分支。 */
     ASSERT(dir != NULL);
+    //问题 下面的if判断这个有意义吗，存在这个场景吗
     if ((region_id >= METADATA_DIR_ENTRIES) || (new_pba == NAND_PBA_INVALID))
     {
         return;
@@ -937,11 +946,12 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
     uint16_t old_g = UINT16_MAX;
 
     /* 旧位置的活计数 -1（仅当日志块）*/
+    
     nand_pba_t old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, region_id);
+    //问题 这个判断条件是不是冗余呀
     if ((old != NAND_PBA_INVALID) && (pba_to_block(old) >= FTL_METADATA_BLOCK_END))
     {
         uint16_t g = ftl_pba_gblock(old);
-
         if ((g < FTL_BLOCK_TOTAL) && (dir->l2p_live[g] > 0U))
         {
             dir->l2p_live[g]--;
@@ -966,6 +976,7 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
      * ⚠ 压缩期间**抑制**本登记：搬移 victim 的最后一个 region 时它会归零，此时 Anchor
      *   还没指向新位置 ⇒ 擦了就会掉电丢映射（③④ 契约）。压缩期间归零的块由 job 自己在
      *   CP_RECLAIM 里擦。 */
+     //问题 这里的判断是不是太多了能优化吗
     if ((old_g != UINT16_MAX) && (dir->l2p_live[old_g] == 0U) && (!md_compacting(dir)) &&
         ((dir->cur_block_valid == 0U) || (old_g != dir->cur_metadata_block)))
     {
@@ -1241,15 +1252,20 @@ static md_compact_step_t md_compact_write(metadata_dir_cache_t *dir)
  *   实现要点：`for (;;)` 里每个分支要么设 waiting 后 return（提交阶段），要么推进 phase
  *             后 break（纯 RAM 阶段）。**不允许既不推进也不返回**——那会死循环。
  * -------------------------------------------------------------------- */
+ //问题 这个名称是不是有点不好理解呀
+ //问题 这个功能好像可以拆分出去另起一个metadata的.c/.h
+ //问题 而且其好像只需要     md_job_t job,不能只传它吗
 void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir 与 &ftl->alloc。 */
     ASSERT(dir != NULL);
     ASSERT(alloc != NULL);
-
+    
     /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age */
+    //问题 打印这个有意义吗主流主控是这么做的吗
     if (dir->job.phase == (uint8_t)MD_JOB_IDLE)
     {
+        //过度封装
         ftl_job_heartbeat_reset(&dir->job.log_ms, &dir->job.start_ms);
     }
     else if (ftl_job_heartbeat(&dir->job.log_ms, &dir->job.start_ms))
@@ -1374,6 +1390,7 @@ void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 
                 if (r == MD_ANCHOR_FAILED)
                 {
+                    //问题 过度封装
                     md_job_abort(dir);
                     break;
                 }

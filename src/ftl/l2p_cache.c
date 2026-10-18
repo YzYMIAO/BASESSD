@@ -598,7 +598,7 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
     {
         return FTL_AGAIN; /* 共享 credit 池满：让 host I/O 先拿 FC 资源 */
     }
-
+    //问题 这个函数说异步，为什么metadata_dir_append_slot这里面还有同步呢 
     nand_pba_t region_addr = metadata_dir_append_slot(owner->metadata_dir, &owner->alloc);
     if (region_addr == NAND_PBA_INVALID)
     {
