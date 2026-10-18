@@ -227,7 +227,7 @@ static void gc_table_extremes(const ftl_allocator_t *alloc, uint32_t *min_erase,
  *             cost 相等取有效页更少者（确定性）。erase 项用 uint64_t 防溢出；
  *             age 项 `max_pe_ts > pe_min` 兜住 max_pe_ts==0 与 pe_min 越界两种退化（取中性 0）。
  * -------------------------------------------------------------------- */
-bool gc_select_victim(const ftl_allocator_t *alloc, super_block_t **victim)
+bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim)
 {
     /* 前置条件（判据 2）：调用者 migrate.c 传 &ftl->alloc 与栈上 &victim。 */
     ASSERT(alloc != NULL);
@@ -248,9 +248,9 @@ bool gc_select_victim(const ftl_allocator_t *alloc, super_block_t **victim)
     uint16_t best_valid = (uint16_t)((PLANE_NUM * PAGES_PER_BLOCK * CW_NUM) + 1U);
     bool     found      = false;
 
-    for (uint16_t i = 0U; i < allocator_closed_count(alloc); i++)
+    for (uint16_t i = 0U; i < alloc->closed_sb_count; i++)
     {
-        super_block_t *sb = allocator_closed_at(alloc, i);
+        const super_block_t *sb = allocator_closed_at(alloc, i);
 
         if (sb->is_open)
         {
@@ -341,12 +341,12 @@ uint32_t gc_check_triggers(const ftl_allocator_t *alloc)
     uint32_t triggers = 0U;
 
     /* T1：空闲块水位（主动补池，还留有余量就开工） */
-    if (allocator_free_count(alloc) < FREE_POOL_TARGET)
+    if (alloc->free_count < FREE_POOL_TARGET)
     {
         triggers |= GC_TRIGGER_WATERMARK;
     }
     /* T4：紧急（池已见底的最后手段）。与 T1 同源但阈值更低（8 vs 32）。 */
-    if (allocator_free_count(alloc) <= FREE_POOL_EMERGENCY)
+    if (alloc->free_count <= FREE_POOL_EMERGENCY)
     {
         triggers |= GC_TRIGGER_EMERGENCY;
     }

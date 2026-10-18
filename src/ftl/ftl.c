@@ -324,23 +324,25 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
             }
             else
             {
-                /* 写失败：行业坏块替换流程（ftl_design §3.8）
+                /* 写失败：行业坏块替换流程
                  *
-                 * ① 关闭当前 Open Super Block（不再写入新数据）→ 进 closed_sb_list
-                 *    → GC 优先回收（该 SB 有效 CW 偏低：失败 CW 不计数 + 旧 CW 被覆盖清账）
-                 * ② bbt_mark_bad（RAM only，后台 bbt_kick 持久化）——标 plane0 的 block 号。
-                 *    Policy B 下两 plane 是独立块，**只退失败的那个 plane**：plane1 块仍
-                 *    好，随 Closed SB 进 GC，擦除后回 free pool 复用（不再被同号语义连坐）。
-                 *    若失败的是 plane1（本层拿不到逐 CW 状态，只知整命令失败），
-                 *    其块会在 GC 擦除失败时被标坏（见 ④）。
-                 * ③ L2P 不动 → 自动回滚到旧映射，旧数据完好
-                 * ④ GC 回收时：好 plane 擦除回 free pool；坏 plane 擦除失败再标坏
+                 * ① bbt_mark_bad（RAM only，后台 bbt_kick 持久化）——先标坏，
+                 *    让 ② 关闭 SB 时把该 plane 从 Closed 条目剔除。
+                 * ② 关闭当前 Open Super Block → 进 closed_sb_list；好 plane 随条目由 GC 回收。
+                 *    Policy B 下两 plane 是独立块，坏 plane 不再被 GC 读/擦。
+                 * ③ L2P 不动 → 自动回滚到旧映射，旧数据完好。
+                 *
+                 * 局限：本层拿不到逐 CW 失败状态，只标 plane0 的块；若失败的是 plane1，
+                 *       其块会在 GC 擦除失败时再标坏。
                  */
                 LOGE("[FTL] program failed lba=%lu gblock=%u\r\n",
                      (unsigned long)pending->lba,
                      (unsigned)ftl_pba_gblock(pending->new_pba));
+                if (pending->new_pba != NAND_PBA_INVALID)
+                {
+                    (void)bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(pending->new_pba));
+                }
                 (void)allocator_close_open_sb(&ftl->alloc, (uint8_t)FTL_TEMP_HOT);
-                (void)bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(pending->new_pba));
                 sub_status = SSD_STATUS_IO_ERROR;
             }
         }
@@ -445,7 +447,7 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
             ftl->gc_log_last_ms = now_ms;
             LOGI("[GC] trig=0x%02x free=%u op=%u/%u writes=%lu reclaimed=%lu novictim=%lu\r\n",
                  (unsigned)triggers,
-                 (unsigned)allocator_free_count(&ftl->alloc),
+                 (unsigned)ftl->alloc.free_count,
                  (unsigned)allocator_op_count(&ftl->alloc, 0U),
                  (unsigned)allocator_op_count(&ftl->alloc, 1U),
                  (unsigned long)ftl->total_writes,

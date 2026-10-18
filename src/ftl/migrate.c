@@ -234,7 +234,7 @@ bool mig_begin_gc(ftl_context_t *ftl)
         return false;
     }
 
-    super_block_t *victim;
+    const super_block_t *victim;
     if (!gc_select_victim(&ftl->alloc, &victim))
     {
         /* 触发但选不出 victim = 卡死嫌疑（观测计数，见 ftl.h）。 */
@@ -289,7 +289,7 @@ bool mig_begin_predict(ftl_context_t *ftl)
 
     /* 慢死块必在 closed_sb_list 中（scan 只返回 CLOSED 块）。 */
     const uint16_t closed_idx   = ftl_block_sb_id(&ftl->alloc.blocks[gblock]);
-    const uint16_t closed_count = allocator_closed_count(&ftl->alloc);
+    const uint16_t closed_count = ftl->alloc.closed_sb_count;
 
     ASSERT(closed_idx < closed_count);
 

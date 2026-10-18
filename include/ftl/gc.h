@@ -132,7 +132,7 @@ bool gc_decode_cw_lba(fc_command_t *cmd, nand_pba_t pba, lba_t cw_lba[CW_NUM], l
  * @param victim 输出：选中的 victim 指针
  * @return true=找到 victim，false=无可用 victim
  */
-bool gc_select_victim(const ftl_allocator_t *alloc, super_block_t **victim);
+bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim);
 
 /*
  * gc_check_triggers - 检查是否需要触发 GC，并返回**触发起因位掩码**

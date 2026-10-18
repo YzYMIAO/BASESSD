@@ -360,7 +360,7 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
                 LOGI("[BLK] restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n",
                      (unsigned)stats.closed_blocks,
                      (unsigned)stats.log_blocks,
-                     (unsigned)allocator_free_count(&ftl->alloc),
+                     (unsigned)ftl->alloc.free_count,
                      (unsigned)allocator_op_total(&ftl->alloc),
                      (unsigned)allocator_spare_total(&ftl->alloc),
                      (unsigned)stats.anomalies,
@@ -548,7 +548,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
             LOGI("[BLK] restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n",
                  (unsigned)stats.closed_blocks,
                  (unsigned)stats.log_blocks,
-                 (unsigned)allocator_free_count(&ftl->alloc),
+                 (unsigned)ftl->alloc.free_count,
                  (unsigned)allocator_op_total(&ftl->alloc),
                  (unsigned)allocator_spare_total(&ftl->alloc),
                  (unsigned)stats.anomalies,
@@ -669,6 +669,13 @@ void ftl_recovery_close_block(ftl_context_t       *ftl,
     ftl_allocator_t *alloc = &ftl->alloc;
 
     uint16_t sb_idx = allocator_add_closed_sb(alloc, plane_blocks, temperature);
+
+    /* 列表满（结构上不应发生）：放弃本块，避免用非法索引继续扫描。 */
+    if (sb_idx == FTL_BLOCK_NO_SB)
+    {
+        LOGE("[FTL] rebuild: closed_sb_list full, block %u dropped\r\n", (unsigned)block);
+        return;
+    }
 
     if (stats != NULL)
     {

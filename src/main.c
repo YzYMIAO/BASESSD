@@ -306,7 +306,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
          ch,
          ce,
          lun,
-         (unsigned)allocator_free_count(alloc),
+         (unsigned)alloc->free_count,
          (unsigned)allocator_op_total(alloc),
          (unsigned)allocator_spare_total(alloc));
 

@@ -679,6 +679,8 @@ void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *complet
             else
             {
                 md_reclaim_clear(dir, j->reclaim_gblock);
+                /* 元数据日志块不经 migrate 擦除路径，磨损计数在这里补记。 */
+                allocator_note_erase(&ftl->alloc, j->reclaim_gblock, ftl->total_writes);
                 allocator_free_block(&ftl->alloc, j->reclaim_gblock); /* 已擦除 ⇒ 归还 Free Pool */
             }
 
@@ -759,6 +761,8 @@ void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *complet
             }
             else
             {
+                /* 元数据日志块不经 migrate 擦除路径，磨损计数在这里补记。 */
+                allocator_note_erase(&ftl->alloc, j->victim, ftl->total_writes);
                 allocator_free_block(&ftl->alloc, j->victim); /* 已擦除 ⇒ 归还 Free Pool */
             }
 

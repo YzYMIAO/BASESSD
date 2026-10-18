@@ -526,13 +526,13 @@ static int uart_cli_info(int argc, char *argv[])
                            (unsigned)ch,
                            (unsigned)ce,
                            (unsigned)lun,
-                           (unsigned)allocator_free_count(&ftl->alloc),
+                           (unsigned)ftl->alloc.free_count,
                            (unsigned)allocator_op_count(&ftl->alloc, 0U),
                            (unsigned)allocator_op_count(&ftl->alloc, 1U),
                            (unsigned)allocator_spare_count(&ftl->alloc, 0U),
                            (unsigned)allocator_spare_count(&ftl->alloc, 1U),
                            (unsigned)ftl->alloc.bad_count,
-                           (unsigned)allocator_closed_count(&ftl->alloc),
+                           (unsigned)ftl->alloc.closed_sb_count,
                            (unsigned)ftl->cache->thrashing,
                            (unsigned)ftl->cache->miss_pct);
 
