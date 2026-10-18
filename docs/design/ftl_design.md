@@ -619,88 +619,109 @@ Directory 指向的 region 页不占固定分区，而是从 Free Pool 动态取
 - 这条布局满足"预留必用"：P1 的 Anchor/CP/BBT 块是**真实副本**，不是闲置；只有 Wear 的
   P1 块归还用户区。`ftl_is_metadata_block()` 按 `(plane & plane_mask)` 判固定块。
 
-#### 2.3.8 结构分布图
+#### 2.3.8 结构分布图（一）：空间布局
 
-> 表给精确尺寸，图给空间关系。**尺寸/字段以本章表格和 `include/ftl/*.h` 为准**，
-> 图只表达结构；改布局时两处一起改（H6）。
+> 表给精确尺寸，图给空间关系。**尺寸/字段以本章表格与 `include/ftl/*.h` 为准**；
+> 改布局时两处同步（H6）。
 
-**① 每 die 的 plane / 块分布**
-
-```text
-plane 0: | Anchor 0..31 | CP 32..39 | BBT 40..41 | Journal 42..45 | Wear 46 | 用户数据 47..2047 |
-plane 1: | Anchor'0..31 | CP'32..39 | BBT'40..41 | Journal 42..45 | 用户 46 | 用户数据 47..2047 |
-          \_____ P0+P1 镜像 _____/ \_ P0+P1 镜像 _/ \_ P0+P1 镜像 _/ \_ P0+P1 交错 _/   \_ 单 P0 _/
-```
-
-**② 池 → 块 → 页 → record（Anchor 示例）**
+**① 每个 die 的 plane / 块号分布**
 
 ```text
-Anchor 池 = 32 个块号 × (P0 副本 + P1 副本)
-块 b（64 页，128 KiB）:
-  page  0..7   record 0
-  page  8..15  record 1
-  ...
-  page 56..63  record 7          ← 8 条 record/块（一条 8 页）
-
-一条 record（8 页 = 8 个 chunk）:
-  chunk 0: entry 0..255
-  chunk 1: entry 256..511
-  ...
-  chunk 7: entry 1792..2047
-
-一个 chunk（1 页，2048 B）:
-  [20 B 头][256 × 7 B entries = 1792 B][236 B padding]
+P0  [ Anchor 0..31 ][ Checkpoint 32..39 ][ BBT 40..41 ][ Journal 42..45 ][ Wear 46 ][ User 47..2047 ]
+P1  [ Anchor'0..31 ][ CP'32..39         ][ BBT'40..41 ][ Journal 42..45 ][ User 46 ][ User 47..2047 ]
+     \____ mirror ____/\_____ mirror _____/\____ mirror __/\__ interleave _/\_ single _/
 ```
 
-**③ 各池的块内排布**
+- **镜像**：同一条 record/页在 P0、P1 各存一份；读侧任一副本有效即可。
+- **交错**：Journal 的逻辑页 i 落在 plane `i & 1`（偶页 P0、奇页 P1），是**单副本**。
+- **单 P0**：Wear 只在 P0；P1 的块号 46 是用户数据。
+
+**② 池 → 块 → 页 → record → entry（Anchor 示例）**
 
 ```text
-Checkpoint 块（64 页）:
-  page 0..4    record 0   (page 0 = Header, page 1..4 = 块账快照)
-  page 5..9    record 1
-  ...
-  page 55..59  record 11
-  page 60..63  未用（64 / 5 向下取整）
-
-BBT 块（64 页）:
-  page 0..63 = record 0..63（每页一条，540 B + padding）
-
-Journal 块（4 块号 × 64 页；页是写单位）:
-  page 0..63；逻辑页 i 的 plane = i & 1（偶页 P0、奇页 P1）
-  每页：[12 B 头][127 × 16 B entries = 2032 B][4 B 余量]
-
-Wear 块（P0 单块 64 页）:
-  页式追加日志；每页 [16 B 头][168 × 12 B entries = 2016 B][16 B padding]
-  全量快照 = 25 页；块满压实
-
-L2P region（动态，非固定分区）:
-  一页 = 512 × 4 B nand_pba_t = 2048 B（无页头）
-  一块 = 64 页 = 64 个 region
+Anchor 池
+├─ 32 个块号（每个块号在 P0、P1 各一个物理块；两份内容相同）
+│  └─ 块 b（64 页，128 KiB）
+│     ├─ record 0   pages  0.. 7
+│     ├─ record 1   pages  8..15
+│     ├─ ...
+│     └─ record 7   pages 56..63        ← 8 条 record/块（8 页/条）
+│
+├─ 每条 record = 8 页 = chunk 0..7（页序 = chunk 序）
+│  ├─ chunk 0: page 0 → entry   0..255
+│  ├─ chunk 1: page 1 → entry 256..511
+│  ├─ ...
+│  └─ chunk 7: page 7 → entry 1792..2047
+└─ 一条 record = 整份 Directory 快照（2048 条 entry）
 ```
 
-**④ 关键结构的字节偏移**
+一个 chunk 的页内布局：
 
 ```text
-metadata_anchor_page_t (2048 B):
-  0      4      8      10     12     16     20                          2048
-  [magic][seq][chunk_i][chunk_c][cnt][ver][entries 256×7=1792][pad 236]
-
-l2p_checkpoint_header_t (2048 B；75 字 = 300 B + padding):
-  0      4      8      12     16                                     272    276    280    284    288    292    296    300
-  [magic][seq][ts][rgn_cnt][region_bitmap 64×4=256][jseq][ver][wcnt][wbytes][pcnt][crc32][rpages][padding 1748]
-
-bbt_header_t (540 B，packed):
-  0      4      8      12     16           28            540
-  [magic][seq][total][bad_cnt][reserved 12][bad_map 512]
-
-l2p_journal_entry_t (16 B) / 页:
-  页:    [magic 4][page_seq 4][entry_cnt 2][block_seq 2][127×16 B entries][4 B 余]
-  entry: [lba 4][old_pba 4][new_pba 4][sequence 4]
-
-wear_entry_t (12 B) / wear_page_t (2048 B):
-  页:    [magic 4][seq 4][entry_cnt 4][rsv 4][168×12 B entries][pad 16]
-  entry: [block 2][read 2][erase 4][last_ecc 1][rising 1][health 1][rsv 1]
+offset   0      4      8      10     12     16     20                          1812     2048
+         [magic][seq  ][chunk_i][chunk_c][cnt  ][ver  ][ entries 256 × 7 B    ][ pad  ]
+bytes      4      4      2       2      4      4            1792                 236
 ```
+
+**③ 其余池的块内排布**
+
+```text
+Checkpoint 块（64 页；一条 record = 5 页）
+├─ page  0.. 4   record 0   (page 0 = Header；page 1..4 = 块账快照 4 页)
+├─ page  5.. 9   record 1
+├─ ...
+├─ page 55..59   record 11
+└─ page 60..63   未用（64 / 5 向下取整）
+
+BBT 块（64 页；一条 record = 1 页）
+└─ page 0..63 = record 0..63（每页 540 B header + padding）
+
+Journal 块（4 个块号 × 64 页；页是写单位）
+├─ page 0..63；逻辑页 i 的 plane = i & 1（偶页 P0、奇页 P1）
+└─ 每页：12 B 页头 + 127 × 16 B entry = 2032 B + 4 B 余量
+
+Wear 块（P0 单块 64 页；页式追加日志）
+├─ 常态：脏页追加写（每页 16 B 头 + 168 × 12 B entry = 2016 B + 16 B pad）
+├─ 块满：compact 成全量快照 = ⌈4096 / 168⌉ = 25 页
+└─ 压实后继续追加（页序 == sequence 序）
+
+L2P region（动态块，非固定分区）
+├─ 一页 = 512 × 4 B nand_pba_t = 2048 B（无页头）
+└─ 一块 = 64 页 = 64 个 region
+```
+
+**④ 关键结构的字节偏移尺**
+
+```text
+l2p_checkpoint_header_t（2048 B；75 字 = 300 B + padding）
+offset   0      4      8      12     16                     272    276    280    284    288    292    296    300     2048
+         [magic][seq  ][ts   ][rgn_cnt][ region_bitmap 64×4 ][jseq ][ver  ][wcnt ][wbytes][pcnt ][crc32 ][rpages][ pad ]
+bytes      4      4      4      4            256              4      4      4      4      4      4      4     1748
+
+bbt_header_t（540 B，packed）
+offset   0      4      8      12     16          28            540
+         [magic][seq  ][total ][bad_cnt][reserved 12][ bad_map 512 ]
+bytes      4      4      4      4         12           512
+
+Journal 页（2048 B）
+offset   0      4      8      10     12                     2044   2048
+         [magic][p_seq ][e_cnt ][b_seq ][ 127 × 16 B entries ][ 余 ]
+bytes      4      4      2      2             2032            4
+entry    [ lba 4 ][ old_pba 4 ][ new_pba 4 ][ sequence 4 ] = 16 B
+
+Wear 页（2048 B）
+offset   0      4      8      12     16                     2032   2048
+         [magic][seq  ][e_cnt ][ rsv  ][ 168 × 12 B entries ][ pad ]
+bytes      4      4      4      4            2016            16
+entry    [block 2][read 2][erase 4][last_ecc 1][rising 1][health 1][rsv 1] = 12 B
+
+L2P region 页（2048 B）
+offset   0                                                         2048
+         [ 512 × nand_pba_t（4 B） = 2048 B；NAND_PBA_INVALID = 未映射 ]
+```
+
+> 尺上的字段名是缩写（为了排版）；完整字段名/类型见 2.3.1~2.3.5 的表与
+> `include/ftl/*.h`。
 
 **⑤ 镜像写 / 读回退（运行期 async）**
 
@@ -716,8 +737,125 @@ flowchart LR
     H -- "no" --> I["fallback previous record"]
 ```
 
-⚠ 图只表达**空间结构/回退关系**；精确的读写时序见 §3.5.6 / §3.5.7 与
-`src/ftl/metadata_job.c`。
+#### 2.3.9 结构分布图（二）：池间流转
+
+> 本节回答"数据从哪来、什么时候被替换、掉电后从哪恢复"，把各池串起来。
+> 精确时序以 `src/ftl/metadata_job.c` / `checkpoint.c` / `journal.c` / `wear.c` 与
+> §3.5 / §3.7 / §3.8 为准。
+
+**① 各池的"产生 → 消费 → 替换/回收 → 恢复"**
+
+| 池 | 产生（谁写） | 消费（谁读） | 替换 / 回收 | 掉电后 |
+|---|---|---|---|---|
+| **Anchor** | `commit_region` 置脏 → CP/后台 job 组页写 | 开机 `metadata_dir_load` | 池内 ring：块满轮转；最新 sequence 胜；旧块整块擦 | 重建 Directory；缺页回退"未映射" |
+| **Checkpoint** | CP job：快照 bitmap → flush region → flush Anchor → 写 Header | 开机 `checkpoint_find_latest` + `checkpoint_load_block_table` | 池内 ring：8 块 × 12 条；最新 sequence 胜 | Header 给 Journal 水位；块账快照给块账 |
+| **BBT** | 出厂扫描 / 运行时 `bbt_mark_bad` → BBT job | `bbt_init`（开机） | 池内 ring：2 块 × 64 条；最新 sequence 胜 | 坏块图；无有效 BBT 时按空片/拒扫策略 |
+| **Journal** | 每次 host 写确认 `journal_append` | 开机 `journal_replay`；CP 截断 | 4 块环形：页满换块；CP 按水位截断 | 回放 `seq > CP journal_sequence` 的条目 |
+| **Wear** | 运行时计数更新 → 周期 flush | `wear_init`（开机） | 页式追加；块满 compact 25 页 | 回放绝对值，最新页胜（软状态） |
+| **L2P region log** | L2P cache 刷脏 → `append_slot` + FC 写 | cache miss 读回；GC/compaction | 块满换块；`l2p_live==0` → `reclaim_pending`；冷热混合 → compaction | Directory 指向最新页；Journal 补差量 |
+| **Directory（SRAM）** | `commit_region` / journal replay 写入 cache 后 flush | L2P lookup；Anchor 快照源 | 覆盖 entry；Anchor 全量落盘 | Anchor 重建 Directory；Journal 回放补 L2P cache 增量 |
+
+**② 上电恢复顺序（逻辑依赖）**
+
+```mermaid
+flowchart TD
+    PWR["上电"] --> JI["ftl_init: journal_init"]
+    JI --> MDL["metadata_dir_load: Anchor → Directory"]
+    MDL --> BBTI["bbt_init: BBT 或出厂扫描"]
+    BBTI --> WI["wear_init: Wear 回放"]
+    WI --> VER["介质版本检查"]
+    VER -- "版本不符" --> FMT["全片格式化"]
+    VER -- "版本匹配" --> BR["ftl_boot_recovery"]
+    FMT --> BR
+    BR --> JS["journal_scan_latest"]
+    JS --> CPF["checkpoint_find_latest"]
+    CPF -- "无 CP" --> FRESH["fresh: reset + carve + F2"]
+    CPF -- "干净关机" --> CL["块账快照 load"]
+    CPF -- "异常掉电" --> BL["块账快照恢复"]
+    BL --> JR["journal_replay"]
+    CL --> F4["F4 预载 bitmap"]
+    JR --> F4
+    F4 --> POOL["probe + build pools（快照路径）"]
+    POOL -- "失败" --> FB["reset + carve + F2 重建"]
+    POOL -- "成功" --> LOOP["superloop"]
+    FRESH --> LOOP
+    FB --> LOOP
+```
+
+**③ 运行期写入 + Checkpoint 流转**
+
+```mermaid
+sequenceDiagram
+    participant H as Host
+    participant F as FTL 数据路径
+    participant J as Journal
+    participant L as L2P cache
+    participant LB as L2P log block
+    participant D as Directory SRAM
+    participant A as Anchor
+    participant C as Checkpoint
+    H->>F: write LBA
+    F->>F: FC program 用户页（数据块）
+    F->>J: journal_append(lba, old_pba, new_pba, seq)
+    F->>L: l2p_cache_write（行 DIRTY）
+    L->>LB: flush region 页（append slot）
+    LB-->>D: commit_region(region → new PBA)
+    D->>D: l2p_live 旧减/新加；归零 → reclaim_pending
+    Note over C: CP 触发（水位 / 定时 / 强制）
+    C->>L: 快照脏 bitmap + journal 水位
+    C->>LB: flush 脏 region
+    C->>A: flush Directory（全量快照）
+    C->>C: 写 CP Header（块账快照）
+    C->>J: truncate（水位之前的条目）
+```
+
+**④ GC / 回收 / 压缩如何影响各池**
+
+```mermaid
+flowchart LR
+    FP["Free Pool 低水位"] --> GC["GC 选 victim 数据块"]
+    GC --> MV["搬有效 CW → 新块"]
+    MV --> CL["关闭 / 擦除 victim；更新 BST"]
+    CL --> BBTJ["BBT job（如有坏块）"]
+    CL --> WJ["Wear 计数更新"]
+    L2P["L2P log block l2p_live == 0"] --> RP["reclaim_pending 位图"]
+    RP --> RJ["MD job RECLAIM：单 plane 擦 → Free Pool"]
+    COLD["L2P log block 冷热混合"] --> MC["MD job 压缩：搬活 region → Anchor → 擦 victim"]
+    MC --> RP
+```
+
+**⑤ 掉电持久性映射**
+
+| 数据 | 最后落点 | 掉电后怎么恢复 |
+|---|---|---|
+| 用户数据 | data block 页 + 页内 META（CW 的 LBA） | ECC / read retry / RAID（若启用） |
+| L2P 增量 | Journal（lba / old_pba / new_pba / seq） | replay `seq > CP journal_sequence` |
+| L2P region 页 | L2P log block（Directory 指向最新页） | Directory 加载后按 PBA 读回 |
+| Directory | Anchor（全量快照，P0+P1 镜像） | `metadata_dir_load` 取最新完整 record |
+| 块账快照 | Checkpoint（Header + 4 页 word，P0+P1 镜像） | `checkpoint_load_block_table`；失败走 F2 |
+| 坏块图 | BBT（P0+P1 镜像） | `bbt_init`；运行时 `bbt_mark_bad` 兜底 |
+| 磨损/读计数 | Wear（P0 单副本，软状态） | `wear_init` 回放；丢失只退化 WL |
+
+**⑥ 池内轮转 / 替换的时间线**
+
+```text
+Anchor / Checkpoint / BBT（record 池）
+  slot 0 → slot 1 → … → slot N-1 → slot 0 → …
+  写满一块 ⇒ 擦池内下一块 ⇒ 从该块 slot 0 续写
+  读：扫池，取「整条校验通过 + sequence 最大」；旧 record 不单独擦，随块轮转一起擦
+
+Journal（页环形）
+  page 0 → … → page 63 → block+1 page 0 → … → block 0（先擦环形下一块）
+  CP 成功后按 journal_sequence 截断/预擦；回放只取 seq > CP 水位
+
+Wear（页式追加日志）
+  page 0 → … → page 63 → compact（擦块 + 写 25 页全量快照）→ page 25 → …
+
+L2P region log（追加块）
+  region 页追加到当前块 page 0..63 → 换新块 page 0
+  l2p_live 归零 ⇒ reclaim_pending ⇒ job 异步擦除归还
+  冷热混合且池吃紧 ⇒ compaction：搬活 region 到当前块 → Anchor 落盘 → 擦 victim
+```
 
 ### 2.4 单一坐标与转换漏斗
 
@@ -745,7 +883,7 @@ flowchart LR
 隐式前提）⇒ 新数据 AND 旧数据 = **静默损坏**。因此：
 
 ```c
-#define FTL_MEDIA_LAYOUT_VERSION_BASE (6U)
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (8U)
 #define FTL_MEDIA_LAYOUT_VERSION \
     (FTL_MEDIA_LAYOUT_VERSION_BASE + ((FTL_DIM_TOTAL > 1U) ? 1U : 0U))
 ```
