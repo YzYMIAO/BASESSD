@@ -65,7 +65,7 @@ typedef enum
     CP_ANCHOR_WRITE,  /* ② 逐页写 Anchor record */
     CP_HDR_PREP,      /* ③ 定位 Checkpoint 游标 + 取 Header 槽 */
     CP_HDR_ERASE,     /* ③ 换块擦（仅需换块时） */
-    CP_BLOCK_WRITE,   /* ③ 逐页写 块账快照（**必须早于 Header**：Header 是整条 record 的 commit） */
+    CP_BLOCK_WRITE,   /* ③ 逐页写 块元数据快照（**必须早于 Header**：Header 是整条 record 的 commit） */
     CP_WEAR_WRITE,    /* ③ 逐页写 磨损快照（erase/read/ECC health；同样早于 Header） */
     CP_HDR_WRITE,     /* ③ 写 Header */
     CP_TRUNC_PREP,    /* ④ 水位判定：算 journal 预擦块 */
@@ -108,13 +108,13 @@ typedef struct
     uint8_t         anchor_need_erase; /* 1 = 写之前先擦 *anchor_base 所在块 */
     uint8_t         anchor_skip;       /* 1 = Directory 无变更 ⇒ 整段跳过 */
 
-    /* ③ Header + 块账快照（一条 record = 1 + CP_BLOCK_PAGES 页） */
+    /* ③ Header + 块元数据快照（一条 record = 1 + CP_BLOCK_PAGES 页） */
     metadata_ring_t hdr_ring;
     nand_pba_t      hdr_addr;
     uint16_t        hdr_idx;                                  /* 写这条 Header 用的池内槽位 */
     uint32_t        hdr_seq;                                  /* ++ftl->cp.sequence（prepare 时取，与旧序一致） */
     uint8_t         hdr_need_erase;                           /* 1 = 写之前先擦 *hdr_addr 所在块 */
-    uint8_t         block_page;                               /* 下一页要写的 块账页（0..CP_BLOCK_PAGES） */
+    uint8_t         block_page;                               /* 下一页要写的 块元数据页（0..CP_BLOCK_PAGES） */
     uint8_t         wear_page;                                /* 下一页要写的 磨损页（0..FTL_CHECKPOINT_WEAR_PAGES） */
     uint8_t         block_ok;                                 /* 0 = 有 快照页写失败（整条作废，不写 Header） */
     uint16_t        block_words[FTL_BLOCK_TOTAL];             /* 8KB：CP 起点快照 + boot 加载缓冲 */
@@ -159,10 +159,10 @@ typedef struct
 /* ── Header Magic ── */
 #define CHECKPOINT_MAGIC (0xCCCCCCCCUL)
 
-/* ── 块账快照（per-block metadata snapshot）随 Checkpoint 一起落盘 ──
- * 16-bit/块 × 4096 = 8 KB = 4 页；一条 record = Header(1) + 快照(4) = 5 页。
+/* ── 块元数据快照（per-block metadata snapshot）随 Checkpoint 一起落盘 ──
+ * 16-bit/块 × 4096 = 8 KB = 4 页；一条 record = Header(1) + 块元数据快照(4) + 磨损快照(16) = 21 页。
  * ⚠ Header 是 commit 页：快照页必须**先写**，Header 最后写。
- * 术语：公开资料称 per-block metadata / block descriptor；本仓统一叫「块账快照」，
+ * 术语：公开资料称 per-block metadata / block descriptor；本仓统一叫「块元数据快照」，
  * 不使用未经验证的缩写。 */
 /* 记录几何的唯一事实来源在 metadata.h（布局权威）；这里只给本模块的别名。 */
 #define CP_BLOCK_WORD_BYTES     FTL_CHECKPOINT_BLOCK_WORD_BYTES
@@ -215,7 +215,7 @@ static inline uint8_t checkpoint_block_word_pool(uint16_t word)
     return (uint8_t)((word >> CP_BLOCK_WORD_POOL_SHIFT) & CP_BLOCK_WORD_POOL_MASK);
 }
 
-/* 把当前 BST + OP/Spare 池归属编码成块账快照（Checkpoint 起点调用）。 */
+/* 把当前 BST + OP/Spare 池归属编码成块元数据快照（Checkpoint 起点调用）。 */
 void checkpoint_block_snapshot(const ftl_allocator_t *alloc, uint16_t words[FTL_BLOCK_TOTAL]);
 
 /* ── 磨损快照（随 Checkpoint 原子落盘，取代旧的独立 Wear 块）──
@@ -244,7 +244,7 @@ _Static_assert((sizeof(cp_wear_entry_t) * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) 
 /* 把第 page_index 页磨损快照从 BST 组进 page（256 条 × 8 B）。 */
 void checkpoint_wear_page_build(const ftl_allocator_t *alloc, uint16_t page_index, uint8_t page[PAGE_MAIN_SIZE]);
 
-/* T3 定时的最小 journal 增量：5 页/CP 比旧 1 页/CP 磨损约 5×，
+/* T3 定时的最小 journal 增量：21 页/CP 比旧 1 页/CP 磨损约 21×，
  * 加此门后轻载下不会每个定时拍都写一条 record（数值为本仓经验值）。 */
 #define CP_T3_MIN_JOURNAL_DELTA (64U)
 
@@ -262,10 +262,10 @@ typedef struct
     uint32_t region_bitmap[64];                        /* 2048 bit，哪些 region 在 checkpoint 中 */
     uint32_t journal_sequence;                         /* 截断到此 sequence 之前的 journal */
     uint32_t layout_version;                           /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该记录作废）*/
-    uint32_t block_word_count;                         /* 块账 word 数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
+    uint32_t block_word_count;                         /* 块元数据 word 数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
     uint32_t block_word_bytes;                         /* 每 word 字节数（2；0 = 无快照）*/
-    uint32_t block_page_count;                         /* 块账页数（CP_BLOCK_PAGES；0 = 无快照）*/
-    uint32_t block_crc32;                              /* 块账 words 的 boot_crc32() */
+    uint32_t block_page_count;                         /* 块元数据页数（CP_BLOCK_PAGES；0 = 无快照）*/
+    uint32_t block_crc32;                              /* 块元数据 words 的 boot_crc32() */
     uint32_t wear_entry_count;                         /* 磨损条目数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
     uint32_t wear_entry_bytes;                         /* 磨损条目字节（8；0 = 无快照）*/
     uint32_t wear_page_count;                          /* 磨损页数（FTL_CHECKPOINT_WEAR_PAGES；0 = 无快照）*/
@@ -320,17 +320,17 @@ void checkpoint_kick(struct ftl_context *ftl);
  *
  * @param ftl            FTL 上下文（池路由取 ftl->topo；游标/序号写回 ftl->cp）
  * @param cp             输出：找到的 Header
- * @param out_record_idx 输出：该 Header 在池内的槽位（可为 NULL；块账快照 加载要用）
+ * @param out_record_idx 输出：该 Header 在池内的槽位（可为 NULL；块元数据快照 加载要用）
  * @return 0 找到，-1 无有效 Checkpoint
  */
 ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_header_t *cp, uint16_t *out_record_idx);
 
 /*
- * checkpoint_load_block_table - 读取并校验一条 Checkpoint 记录的 块账快照
+ * checkpoint_load_block_table - 读取并校验一条 Checkpoint 记录的 块元数据快照
  *
  * 校验 header 的 bit_* 字段、逐页读入 words、再用 boot_crc32 验证。
- * 失败（含 block_page_count == 0 的 initial CP）只表示「没有可用 块账快照」，
- * **不得**据此触发格式化；块账改走 F2。
+ * 失败（含 block_page_count == 0 的 initial CP）只表示「没有可用 块元数据快照」，
+ * **不得**据此触发格式化；块元数据改走 F2。
  *
  * @param ftl        FTL 上下文
  * @param cp         最近 Header（checkpoint_find_latest 的输出）

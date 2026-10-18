@@ -14,10 +14,10 @@
  * 三条启动路径（状态机）：
  *   BOOT_FRESH_START    无有效 Checkpoint（出厂首次启动）→ cache INVALID + carve + F2
  *   BOOT_CLEAN_START    journal 全被 CP 覆盖（干净关机）
- *                       → 块账快照有效：restore + probe + build_pools（**不跑 F2**）
+ *                       → 块元数据快照有效：restore + probe + build_pools（**不跑 F2**）
  *                         否则 carve + F2
  *   BOOT_POWER_FAILURE  journal 有未回放条目（异常掉电）
- *                       → 块账快照 restore + journal_replay（映射 + valid 增量）+ F4
+ *                       → 块元数据快照 restore + journal_replay（映射 + valid 增量）+ F4
  *                         + probe + build_pools；失败 ⇒ reset + carve + F2
  *   ★ F2 只在「无快照 / 快照损坏 / 增量记账不一致」时兜底。
  *
@@ -53,7 +53,7 @@
 
 #include <string.h>
 
-/* 块账快照恢复的前置声明（定义在文件末尾；journal replay 以回调注入）。 */
+/* 块元数据快照恢复的前置声明（定义在文件末尾；journal replay 以回调注入）。 */
 static bool recovery_materialize_pba(void *ctx, nand_pba_t pba);
 
 /* ══════════════════════════════════════════════════════════════════
@@ -142,7 +142,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
     journal_page_ref_t ring;
     (void)journal_scan_latest(ftl->journal, &ring);
 
-    /* ② 扫描 Checkpoint + 读取 块账快照（快照失败不触发格式化，只影响块账路径） */
+    /* ② 扫描 Checkpoint + 读取 块元数据快照（快照失败不触发格式化，只影响块元数据路径） */
     l2p_checkpoint_header_t cp;
     uint16_t                cp_idx = UINT16_MAX;
 
@@ -170,7 +170,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
              (unsigned long)cp.sequence);
     }
 
-    /* 磨损计数（erase/read/ECC 健康）与块账一起在 CP 里；软状态，失败只退化 WL。 */
+    /* 磨损计数（erase/read/ECC 健康）与块元数据一起在 CP 里；软状态，失败只退化 WL。 */
     if (!checkpoint_load_wear_table(ftl, &cp, cp_idx))
     {
         LOGW("[WEAR] snapshot unavailable (rec=%u seq=%lu) — counters start at 0\r\n",
@@ -290,13 +290,13 @@ ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_page_re
     /* ① 只失效本 owner 的行/脏位（设备级 init 已清全体；这里覆盖格式化后的场景） */
     l2p_cache_invalidate_owner(ftl->cache, ftl_topo_dim(ftl->topo));
 
-    /* ② 池回填（从 main.c 移入——块账快照恢复必须先于 carve，否则池条目重复）。
+    /* ② 池回填（从 main.c 移入——块元数据快照恢复必须先于 carve，否则池条目重复）。
      *    fresh 无快照 ⇒ 走几何顺序 carve。 */
     (void)ftl_boot_carve_pools(ftl);
 
     /* ③ 全盘重建 Closed SB 列表（F2）。
      *    Free Pool 里躺着已编程的块，F2 把它们逐出并交 GC 擦除。
-     *    ⚠ 代价：逐块读首页判空 + 对写过页读 META 反查（clean/PF 已由块账快照取代）。 */
+     *    ⚠ 代价：逐块读首页判空 + 对写过页读 META 反查（clean/PF 已由块元数据快照取代）。 */
     {
         ftl_rebuild_stats_t rebuild_stats;
         (void)ftl_rebuild_closed_sb_list(ftl, &rebuild_stats);
@@ -319,8 +319,8 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
 
 /* --------------------------------------------------------------------
  * ftl_boot_clean_start
- *   功能：干净关机恢复——块账快照有效时加载块账 + 池 + Closed 列表；否则 carve + F2。
- *   参数：ftl —— FTL 实例；cp —— 最近 Checkpoint Header；blocks_valid —— 块账快照是否已通过校验；
+ *   功能：干净关机恢复——块元数据快照有效时加载块元数据 + 池 + Closed 列表；否则 carve + F2。
+ *   参数：ftl —— FTL 实例；cp —— 最近 Checkpoint Header；blocks_valid —— 块元数据快照是否已通过校验；
  *         blocks_restored —— 出参：1 = 走 快照路径；ring —— Journal 环形块池快照。
  *   返回：FTL_OK / FTL_ERROR。
  *   实现要点：clean 下 Checkpoint 覆盖全部 journal 条目，不需要回放；但必须
@@ -506,7 +506,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     /* ① 共享 cache 已由设备级 init 置空；journal 回放把本 owner 的映射写进 cache。
      *    ⚠ 不能在此整体 re-init：会抹掉前面 LUN 刚回放的 DIRTY 行与全局脏位。 */
 
-    /* ② 块账快照恢复（若有效）：先恢复块账，回放时才能同步维护 valid_count。 */
+    /* ② 块元数据快照恢复（若有效）：先恢复块元数据，回放时才能同步维护 valid_count。 */
     uint8_t                    blocks_applied = 0U;
     journal_replay_block_ctx_t block_ctx;
     memset(&block_ctx, 0, sizeof(block_ctx));
@@ -533,7 +533,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
      *    bitmap 区预载 CLEAN，非 bitmap 区 INVALID（懒加载 CP 时刻快照）。 */
     ftl_boot_apply_region_bitmap(ftl, cp);
 
-    /* ⑤ 块账快照收尾：探测池块 + 唯一入池点；任一步失败 ⇒ 丢弃快照结果走 F2。 */
+    /* ⑤ 块元数据快照收尾：探测池块 + 唯一入池点；任一步失败 ⇒ 丢弃快照结果走 F2。 */
     uint8_t restored = 0U;
 
     if ((blocks_applied != 0U) && (block_ctx.ok != 0U))
@@ -804,7 +804,7 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
 }
 
 /* ══════════════════════════════════════════════════════════════════
- * 块账快照恢复（Checkpoint 的 16-bit/块 word）
+ * 块元数据快照恢复（Checkpoint 的 16-bit/块 word）
  *
  * 格式编码在 checkpoint.h / checkpoint.c（记录格式的 owner）；本节只做**恢复编排**：
  *   restore（state/valid/temp + Closed 列表 + LOG 对账）
@@ -856,7 +856,7 @@ bool ftl_recovery_restore_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLOCK_TO
 
         if (recovery_is_fixed_block(g))
         {
-            /* 固定元数据块不参与块账；但 BAD 是终态（BBT），不得被清掉。 */
+            /* 固定元数据块不参与块元数据；但 BAD 是终态（BBT），不得被清掉。 */
             if (ftl_block_is_bad(b))
             {
                 ftl_block_clear_valid(b);

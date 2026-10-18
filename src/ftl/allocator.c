@@ -2,7 +2,7 @@
  * allocator.c — 块分配器（Free Pool + Open/Closed Super Block + 磨损选块）
  *
  * 职责：
- *   管理每个 FTL 实例的块账本：Free Pool（已擦除块）、Open Super Block（热/冷两条写入流）、
+ *   管理每个 FTL 实例的块元数据：Free Pool（已擦除块）、Open Super Block（热/冷两条写入流）、
  *   Closed Super Block 列表（GC 的候选集）、OP/Spare 保留池；并提供选块（按 plane 挑擦除最少）、
  *   分配一对 plane 页、归还块、保留块（LOG 态，元数据日志块专用）。
  *
@@ -455,7 +455,7 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
     else
     {
         LOGE("[FTL] free_block: free pool full, gblock %u dropped\r\n", (unsigned)gblock);
-        return; /* 不还，块账保持原样（不得再置 FREE） */
+        return; /* 不还，块元数据保持原样（不得再置 FREE） */
     }
 
     /* 状态机：置 FREE（本入口的契约是「调用者已擦除」⇒ 进池即已擦除态。GC 擦除 /
@@ -514,7 +514,7 @@ ftl_status_t allocator_alloc_log_block(ftl_allocator_t *alloc, uint8_t plane, ui
  *         temperature —— 温度流。
  *   返回：新条目在列表中的索引（无失败返回——实参是前置条件，非法即 ASSERT）。
  *   实现要点：列表容量 = FTL_BLOCK_TOTAL，而本函数**每写过一个物理块最多建一条** ⇒
- *             满在结构上不可能 ⇒ ASSERT（真满了只可能是块账本已破坏）。
+ *             满在结构上不可能 ⇒ ASSERT（真满了只可能是块元数据已破坏）。
  *             条目 next_page=64（=满）、is_open=false（Closed，gc_select_victim 依赖）。
  * -------------------------------------------------------------------- */
 uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,

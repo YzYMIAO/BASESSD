@@ -136,7 +136,7 @@ L2P 表不在固定分区：未映射 = Directory 条目 INVALID，写过的 reg
 |---|---|---|---|---|---|---|---|---|
 | **L2P Table** | 1,048,576 LBA（每实例） | 4B PBA | 4 MiB | 2048 | — | — | **动态** | 日志块（Free Pool） |
 | Metadata Directory | 2048 region | 7B | 14,336 B | **8** | 1 | 池内轮转 | **32** | 0..31 |
-| Checkpoint | 块账 + 磨损快照 + 头 | — | 43,008 B | **21** | 1 | 池内轮转 | **8** | 32..39 |
+| Checkpoint | 块元数据 + 磨损快照 + 头 | — | 43,008 B | **21** | 1 | 池内轮转 | **8** | 32..39 |
 | BBT | 4096 block | 1 bit | 512 B | 1 | 1 | 池内轮转 | **2** | 40..41 |
 | Journal | — | 16B/entry | — | — | — | 环形 | **4** | 42..45 |
 | BST | 4096 block | 20B | 80 KB | — | — | SRAM | — | (RAM) |
@@ -149,7 +149,7 @@ L2P 表不在固定分区：未映射 = Directory 条目 INVALID，写过的 reg
   256×7 = 1792 ≤ 主区 2048）⇒ 一份 **8 页**（`ANCHOR_PAGE_COUNT` = 一条 record）。
   池内每块装 `ANCHOR_RECORDS_PER_BLOCK` 条 record，块满换池内下一块（先擦后写）；
   池 = `ANCHOR_POOL_BLOCKS` = **32 块**（唯一磨损旋钮）。Anchor 在 P0/P1 镜像。
-- **Checkpoint**：Header 1 页 + 块账 4 页 + 磨损快照 16 页 = **21 页/record**；池 = 8 块
+- **Checkpoint**：Header 1 页 + 块元数据 4 页 + 磨损快照 16 页 = **21 页/record**；池 = 8 块
   ⇒ 3 条/块 × 8 = 24 条。
 - **BBT**：4096 × 1 bit = 512B = 1 页 → 一条 record = 1 页；池 = 2 块。
 - **Journal**：**4 块**（策略 = `CW_NUM`，CW 级 4× 映射流量，见 §十）。
@@ -519,10 +519,10 @@ SRAM 缓存热点 region**。
   ⇒ 流量 **4×**、寿命 ÷4。容量取 `CW_NUM` 使 Journal 能容纳两次 checkpoint 之间的映射更新。
   （或做「同 region 多次写合并」。）
 - **磨损计数 = CP record 的一部分（介质版本 9）**：每块 8 B（erase/read/last_ecc/
-  flags），4096 块 = 32 KB = 16 页，随 Checkpoint 与块账一起原子落盘；不再有独立
+  flags），4096 块 = 32 KB = 16 页，随 Checkpoint 与块元数据一起原子落盘；不再有独立
   Wear 块。**软状态**——丢了只退化 WL，不丢数据；CP 间隔就是持久化窗口。
 - **Checkpoint = 8 块池（环形轮转）**：**硬状态**（丢了丢数据）⇒ 池内多副本 + sequence 最新胜；
-  一条 record 含块账 4 页 + 磨损 16 页 + Header 1 页 = 21 页。
+  一条 record 含块元数据 4 页 + 磨损 16 页 + Header 1 页 = 21 页。
 - **Anchor = 32 块池（`ANCHOR_POOL_BLOCKS`）**：Directory 的落盘副本，一条 8 页 / 256 槽，环形轮转。
 - **冗余取舍通则**：**硬状态**（L2P / Anchor / BBT / Checkpoint）必须多副本（池内轮转 + 最新胜）；
   **软状态**（磨损计数）随 CP 快照覆盖，不单独做副本。

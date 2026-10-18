@@ -127,7 +127,7 @@ typedef struct
 
     /* CP 边界：sequence < merge_floor 的旧条目**不得**被同 LBA 原地合并。
      * 否则 CP 后的覆盖写会复用 CP 前的 sequence 却带新的 new_pba ⇒
-     * 块账快照 增量回放按 sequence 过滤时漏记，之后覆盖写可能撞 valid_count 下溢断言。
+     * 块元数据快照 增量回放按 sequence 过滤时漏记，之后覆盖写可能撞 valid_count 下溢断言。
      * 0 = 不设门（开机/初始化）。 */
     uint32_t merge_floor;
 
@@ -210,7 +210,7 @@ void journal_flush_page(l2p_journal_t *journal);
  * ⚠ 该数**不能**由 journal 的 RAM 写指针反推：末尾 journal_resume 把落点放到最新页
  *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。 */
 /*
- * journal_replay_block_ctx_t - 回放时的块账增量上下文（可选）
+ * journal_replay_block_ctx_t - 回放时的块元数据增量上下文（可选）
  *
  * materialize 由调用者注入（开机恢复模块）：把 PBA 所属块从池状态转成「可记账」
  * 的 Closed 状态。journal 自己只做 valid_count 的 ±1（用 ctx 指向的 ftl_context_t），

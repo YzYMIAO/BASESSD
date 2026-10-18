@@ -116,10 +116,10 @@
 #define BBT_BITMAP_SIZE (BBT_MAX_BLOCKS / 8U)
 #define BBT_POOL_BLOCKS (2U) /* 策略：池内块数 */
 
-/* ── Checkpoint（L2P 快照 + 块账 + 磨损快照）池 ──
- * 一条 record = Header（1 页）+ 块账快照（4 页，16-bit/块 × 4096 = 8 KB）
+/* ── Checkpoint（L2P 快照 + 块元数据 + 磨损快照）池 ──
+ * 一条 record = Header（1 页）+ 块元数据快照（4 页，16-bit/块 × 4096 = 8 KB）
  *             + 磨损快照（16 页，8 B/块 × 4096 = 32 KB）。
- * ⚠ Header 是 commit 页：块账 + 磨损快照必须**先写**，Header 最后写。
+ * ⚠ Header 是 commit 页：块元数据 + 磨损快照必须**先写**，Header 最后写。
  * 磨损计数（erase/read/ECC 健康）随 CP 原子落盘，不再占独立固定块。 */
 #define FTL_CHECKPOINT_BLOCK_WORD_BYTES     (2U)
 #define FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE (PAGE_MAIN_SIZE / FTL_CHECKPOINT_BLOCK_WORD_BYTES)
@@ -136,7 +136,7 @@
 #define CHECKPOINT_POOL_BLOCKS           (8U) /* 策略：池内块数 */
 
 _Static_assert((FTL_CHECKPOINT_BLOCK_PAGES * FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE) == FTL_BLOCK_TOTAL,
-               "块账快照页数必须恰好覆盖全部块");
+               "块元数据快照页数必须恰好覆盖全部块");
 _Static_assert((FTL_CHECKPOINT_WEAR_PAGES * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) == FTL_BLOCK_TOTAL,
                "磨损快照页数必须恰好覆盖全部块");
 _Static_assert(FTL_CHECKPOINT_WEAR_PAGES <= UINT8_MAX, "磨损快照页数必须装进 uint8_t");
@@ -192,8 +192,8 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
  *        消费点会直接把它们丢回 free pool，下次写即覆盖活数据。且 F2 重建会把这些"写过的
  *        块"也建成 Closed 条目 ⇒ 同一块同时进预留池与 closed 列表，账本错乱。⇒ 必须 +1，
  *        让首启自动全片格式化一次。
- * v6：Checkpoint record 从 1 页扩成 5 页（Header + 块账快照 4 页），Header 增加 bit_* 字段
- *     ⇒ 记录格式与块账恢复方式都变了，必须 +1；老介质首启自动格式化一次。
+ * v6：Checkpoint record 从 1 页扩成 5 页（Header + 块元数据快照 4 页），Header 增加 bit_* 字段
+ *     ⇒ 记录格式与块元数据恢复方式都变了，必须 +1；老介质首启自动格式化一次。
  * v7：删除 L2P 哨兵层（原固定分区 0..15）——未映射改由 Directory 条目 NAND_PBA_INVALID
  *     表示；固定元数据分区整体前移 16 个块号，FTL_METADATA_BLOCK_END 63 → 47 ⇒
  *     块布局变了，必须 +1；老介质首启自动格式化一次。
@@ -202,7 +202,7 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
  *     恢复路径变了，必须 +1；老介质首启自动格式化一次。Journal/CP/Anchor/BBT 的换块
  *     擦除统一改 multi-plane。
  * v9：删除独立 Wear 块（原块 46）——erase/read/ECC 健康并入 Checkpoint 记录
- *     （块账 4 页 + 磨损快照 16 页）；记录从 5 页扩到 21 页，块布局与记录格式都变了
+ *     （块元数据 4 页 + 磨损快照 16 页）；记录从 5 页扩到 21 页，块布局与记录格式都变了
  *     ⇒ 必须 +1；老介质首启自动格式化一次。 */
 #define FTL_MEDIA_LAYOUT_VERSION_BASE (9U)
 /*

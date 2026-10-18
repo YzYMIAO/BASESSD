@@ -2,7 +2,7 @@
  * bbt.c — 坏块表（BBT）：出厂扫描 + 运行时标坏 + NAND 持久化 + Spare 池替换
  *
  * 职责：
- *   维护坏块账本——开机从 NAND 读回 BBT（无则出厂扫描）、运行时标坏块、
+ *   维护坏块表——开机从 NAND 读回 BBT（无则出厂扫描）、运行时标坏块、
  *   把坏块位图持久化到 NAND BBT 池（环形轮转）、坏块替换从 Spare Pool 补块。
  *
  * 与 bbt.h 的分工：
@@ -175,7 +175,7 @@ static bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
 
 /* --------------------------------------------------------------------
  * bbt_init
- *   功能：开机初始化坏块账本——先尝试从 NAND 读回 BBT，无则执行出厂扫描。
+ *   功能：开机初始化坏块表——先尝试从 NAND 读回 BBT，无则执行出厂扫描。
  *   参数：alloc —— 分配器（承载 BST）；**前置条件**，非法即 ASSERT。
  *   返回：FTL_OK 读到 BBT 并重建 BST；btb_scan_factory 的返回值（坏块数）当无有效 BBT；
  *         FTL_ERROR BBT 加载路径失败。
@@ -235,14 +235,14 @@ ftl_status_t bbt_init(ftl_allocator_t *alloc)
      * 判据 = bbt_medium_has_ftl_data()（元数据区里有没有合法的 FTL 页）。
      * 空片路径不受影响：那时列 2048 确实就是出厂标记。
      *
-     * 拒绝扫描后的状态：坏块账本从空开始（bad_count = 0、sequence 仍 0、**不置 dirty**
+     * 拒绝扫描后的状态：坏块表从空开始（bad_count = 0、sequence 仍 0、**不置 dirty**
      * ⇒ 不落盘，免得把「零坏块」写成既成事实）。真坏块由运行时 bbt_mark_bad 兜底
      * （PROGRAM/ERASE 失败即标）。 */
     if (bbt_medium_has_ftl_data(alloc))
     {
         LOGE("[BBT] 无有效 BBT，但介质已被格式化过 —— **拒绝出厂扫描**：\r\n");
         LOGE("      用过的块 spare[0] 是 FTL 数据而非出厂标记，重扫会把写过的块全判坏。\r\n");
-        LOGE("      坏块账本从空开始；真坏块由运行时 bbt_mark_bad 兜底。\r\n");
+        LOGE("      坏块表从空开始；真坏块由运行时 bbt_mark_bad 兜底。\r\n");
 
         alloc->bad_count = 0U;
         return FTL_OK;

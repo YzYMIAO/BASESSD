@@ -35,7 +35,7 @@
 #include "ftl/checkpoint.h"
 
 #include "common/assertion.h"
-#include "common/boot_policy.h" /* boot_crc32（块账快照跨页校验和） */
+#include "common/boot_policy.h" /* boot_crc32（块元数据快照跨页校验和） */
 #include "common/log.h"
 #include "fc/fc.h"
 #include "ftl/ftl.h"
@@ -474,7 +474,7 @@ static void cp_step(ftl_context_t *ftl)
 
                 /* 本 session 首次 CP：跳过一槽。掉电可能留下「快照页已写、Header 未写」
                  * 的半编程槽，locate 会把它当下一可写槽。跳过后 re-prepare：
-                 *   · 同块内 ⇒ 下一槽的 5 页从未被写，安全；
+                 *   · 同块内 ⇒ 下一槽的 21 页从未被写，安全；
                  *   · 跨块   ⇒ need_erase=1，先擦目标块，同样安全。
                  * 只在 need_erase==0 时跳（块边界本来就会擦，不需要额外浪费）。 */
                 if ((ftl->cp.advance_next != 0U) && (need_erase == 0))
@@ -693,9 +693,9 @@ ftl_status_t checkpoint_begin(ftl_context_t *ftl)
     l2p_cache_snapshot_owner_bitmap(ftl->cache, ftl_topo_dim(ftl->topo), j->region_bitmap);
     j->journal_seq = ftl->journal->sequence_counter;
 
-    /* 块账快照与 region_bitmap / journal_seq 在**同一个协作点**取定：
+    /* 块元数据快照与 region_bitmap / journal_seq 在**同一个协作点**取定：
      * 单线程 superloop 里本函数不会被完成回调打断 ⇒ 三者是同一个 cut。
-     * ⚠ 不要把 块账快照挪到 flush 之后：CP 期间完成的写会同时改 BST 与 journal，
+     * ⚠ 不要把 块元数据快照挪到 flush 之后：CP 期间完成的写会同时改 BST 与 journal，
      *   水位与快照会对不上。 */
     checkpoint_block_snapshot(&ftl->alloc, j->block_words);
 
@@ -824,7 +824,7 @@ void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *compl
 
             if (failed != 0)
             {
-                /* 磨损页写失败 ⇒ 同块账页：整条 record 作废（不写 Header），游标推进一槽。 */
+                /* 磨损页写失败 ⇒ 同块元数据页：整条 record 作废（不写 Header），游标推进一槽。 */
                 j->block_ok       = 0U;
                 ftl->cp.write_idx = (uint16_t)((j->hdr_idx + 1U) %
                                                metadata_ring_total_records(&j->hdr_ring));
@@ -964,7 +964,7 @@ ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_head
 
 /* --------------------------------------------------------------------
  * checkpoint_block_snapshot
- *   功能：把当前 BST（state/valid_count/temp）与 OP/Spare 池归属编码成块账快照。
+ *   功能：把当前 BST（state/valid_count/temp）与 OP/Spare 池归属编码成块元数据快照。
  *   参数：alloc —— 分配器（前置条件）；words —— 输出（FTL_BLOCK_TOTAL 个 16-bit word）。
  *   实现要点：在 Checkpoint job 起点调用，与 region_bitmap / journal_sequence 同一
  *             协作点取定（单线程 superloop 不会被完成回调打断）。
@@ -1150,7 +1150,7 @@ bool checkpoint_load_wear_table(struct ftl_context            *ftl,
 
 /* --------------------------------------------------------------------
  * checkpoint_load_block_table
- *   功能：读取并校验一条 Checkpoint 记录的块账快照（Header 之后的 4 页）。
+ *   功能：读取并校验一条 Checkpoint 记录的块元数据快照（Header 之后的 4 页）。
  *   参数：ftl —— 实例；cp —— 最近 Header；record_idx —— 该 Header 的池内槽位；
  *         block_words —— 输出（FTL_BLOCK_TOTAL 个 16-bit word）。
  *   返回：true = 加载且 CRC 通过；false = 无快照 / 字段不符 / 读失败 / CRC 不符。
@@ -1258,7 +1258,7 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
     cp.sequence         = 1U;
     cp.layout_version   = FTL_MEDIA_LAYOUT_VERSION;
     cp.journal_sequence = 0U; /* 空快照：无 region、journal 从 0 起 */
-    /* initial CP 不带块账快照：首次开机走 carve + F2，下一次 CP 才写完整块账。 */
+    /* initial CP 不带块元数据快照：首次开机走 carve + F2，下一次 CP 才写完整块元数据。 */
     cp.block_word_count = 0U;
     cp.block_word_bytes = 0U;
     cp.block_page_count = 0U;
@@ -1319,7 +1319,7 @@ bool checkpoint_check_trigger(const ftl_context_t *ftl, uint32_t elapsed_ms)
     }
 
     /* T3: 定时触发（由调用者检查 elapsed_ms）。
-     * ⚠ 5 页/CP 的 块账快照让本条 record 的磨损约为旧 1 页/CP 的 5× ⇒ 轻载下加最小
+     * ⚠ 21 页/CP 的块元数据快照让本条 record 的磨损约为旧 1 页/CP 的 21× ⇒ 轻载下加最小
      *   journal 增量门：定时拍到了但自上次 CP 没有足够新条目 ⇒ 不写。 */
     if (elapsed_ms >= CP_TIME_INTERVAL_MS)
     {

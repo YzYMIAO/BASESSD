@@ -161,7 +161,7 @@ void journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
         entry = (l2p_journal_entry_t *)(journal->page_buf + JOURNAL_HEADER_SIZE +
                                         sizeof(l2p_journal_entry_t) * i);
         /* CP 边界之前的条目不得被合并：merge_floor 之后的覆盖写另起一条，
-         * 否则 sequence 仍是旧的、new_pba 却是新的，块账 delta 回放会漏记。 */
+         * 否则 sequence 仍是旧的、new_pba 却是新的，块元数据 delta 回放会漏记。 */
         if ((entry->lba == (uint32_t)lba) && (entry->sequence >= journal->merge_floor))
         {
             entry->new_pba = new_pba; /* 保留首条 old_pba，更新到最新 new_pba */
@@ -927,7 +927,7 @@ ftl_status_t journal_replay(l2p_journal_t              *journal,
                                                    (nand_pba_t)entry_new_pba);
                     }
 
-                    /* 块账增量：只对**快照之后**的条目记 valid_count。
+                    /* 块元数据增量：只对**快照之后**的条目记 valid_count。
                      * 整页回放（含水位之前的条目）是幂等的映射写，不能整页记增量。
                      * materialize 由开机恢复模块注入——journal 不反向依赖 pfr。 */
                     if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && (entry_seq >= cp_sequence))

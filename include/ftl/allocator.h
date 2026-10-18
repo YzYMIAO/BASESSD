@@ -208,7 +208,7 @@ static inline nand_pba_t super_block_page_pba(ftl_topology_t topo, const super_b
  * 放这里（而非 bbt.h）的两个理由：
  *   ① 本模块的**全部**接口都以 `ftl_allocator_t *` 为首参（状态随分配器走最自然）；
  *      而 bbt.h 已 include 本文件，反向包含会成环。
- *   ② 语义上属「块账本」，与 BST 同一维度。
+ *   ② 语义上属「块元数据」，与 BST 同一维度。
  */
 /* ── BBT 持久化 job（异步）──
  *

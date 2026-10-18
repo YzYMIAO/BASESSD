@@ -128,8 +128,8 @@
 **P0-1 计数持久化（最高优先）** — ✅ **已落地**（2026-10-12）
 
 > ⚠ **v0.82（介质版本 9）改形态**：本段描述的独立 Wear 块（块 46 + `wear.c`）已删除；
-> 磨损计数并入 Checkpoint 记录（块账 4 页 + 磨损 16 页 + Header 1 页 = 21 页），
-> 与块账原子提交、随 CP 池轮转。以下保留当时的实现记录。
+> 磨损计数并入 Checkpoint 记录（块元数据 4 页 + 磨损 16 页 + Header 1 页 = 21 页），
+> 与块元数据原子提交、随 CP 池轮转。以下保留当时的实现记录。
 - **问题**：`ftl.c` 每次 `ftl_init` memset 全 BST ⇒ `erase_count`/`read_count`/`program_count` 归零。
   静态 WL 的「max-min ≥ 5000」、动态 WL 的「选擦除最少块」、read-disturb 预测**跨重启全部失效**。
 - **对照**：SPDK FTL 用 shm 跟踪脏页；Jasmine/企业级持久化 block metadata。

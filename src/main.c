@@ -291,11 +291,11 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         }
     }
 
-    /* 池回填 / F2 / 块账快照恢复全部在 ftl_boot_recovery 内完成：
-     *   · 块账快照有效 ⇒ 直接按快照恢复 Free/OP/Spare（不再几何 carve）；
+    /* 池回填 / F2 / 块元数据快照恢复全部在 ftl_boot_recovery 内完成：
+     *   · 块元数据快照有效 ⇒ 直接按快照恢复 Free/OP/Spare（不再几何 carve）；
      *   · 无快照 / 快照损坏 ⇒ carve + F2。
      * ⚠ carve 必须先于 F2（F2 要把 written 块逐出 Free Pool），且**不能**在
-     *   块账快照恢复之前做——否则池条目会重复。 */
+     *   块元数据快照恢复之前做——否则池条目会重复。 */
     if (ftl_boot_recovery(ftl, &result) != FTL_OK)
     {
         LOGE("[FTL ] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);

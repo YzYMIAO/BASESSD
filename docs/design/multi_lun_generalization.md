@@ -62,7 +62,7 @@
 | `l2p_cache_t` | 132,136 B（0x20428；64 line + 全局脏位图；`region_id` 为 u32） |
 | `ftl_tables_t` | 123,896 B（BST 81,920 + closed 32,768 + free 8,192 + 池 1,016） |
 | `metadata_dir_cache_t` | 24,652 B（注释里的“18KB”已过时） |
-| `cp_job_t` | 8,524 B（含 8KB 块账快照） |
+| `cp_job_t` | 8,524 B（含 8KB 块元数据快照） |
 | `ftl_wbuf_t` | 4,108 B |
 | `l2p_journal_t` | 2,104 B |
 | `ftl_allocator_t` | 1,148 B |

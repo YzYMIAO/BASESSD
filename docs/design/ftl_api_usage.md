@@ -24,7 +24,7 @@ struct ftl_context {
     ftl_io_group_t      groups[FTL_GROUP_MAX];     // 完成组表（一次 submit = 一组）
     ftl_wbuf_t          wbuf;               // 页打包写缓冲（§七 方案 A）
     ftl_tables_t       *tables;             // 大表指针（阶段 C；SRAM12）
-    ftl_allocator_t     alloc;              // 空闲 block / Super Block 写指针 + per-instance 块账本游标
+    ftl_allocator_t     alloc;              // 空闲 block / Super Block 写指针 + per-instance 块元数据游标
     l2p_journal_t      *journal;            // log-structured journal（阶段 C；SRAM3）
     metadata_dir_cache_t *metadata_dir;     // Metadata Directory（阶段 C；SRAM4）
     cp_job_t           *cp_job;             // Checkpoint job（阶段 C；SRAM3）

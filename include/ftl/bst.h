@@ -306,7 +306,7 @@ static inline void ftl_block_clear_valid(ftl_block_t *b)
     b->valid_count = 0U;
 }
 
-/* 直接设置 `valid_count`（块账快照恢复 / 重建用；日常增量仍走 add/sub）。
+/* 直接设置 `valid_count`（块元数据快照恢复 / 重建用；日常增量仍走 add/sub）。
  * ⚠ 上界是**单物理块**的 CW 数（PAGES_PER_BLOCK × CW_NUM），不是 SB 合计。 */
 static inline void ftl_block_set_valid(ftl_block_t *b, uint16_t valid)
 {
