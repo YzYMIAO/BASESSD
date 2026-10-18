@@ -696,7 +696,8 @@ FC 层已有完整判据体系：**判据 9**（配置错误的后果是静默�
 | 项 | 位置 |
 |---|---|
 | 文档地图 | `docs/README.md` |
-| 活跃设计文档 | `docs/design/`（18 个） |
+| **已知残余风险登记** | `docs/design/known_risks.md`（复查模块前先读） |
+| 活跃设计文档 | `docs/design/`（20 个） |
 | 历史归档 | `docs/archive/`（日常不读） |
 | 构建 | `make all`(debug) / `make release` / `make tests UT=FC\|FTL` |
 | 产物 | `build/firmware/<debug\|release>/` |
