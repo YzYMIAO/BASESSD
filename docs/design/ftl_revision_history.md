@@ -5501,3 +5501,20 @@ unused-variable 告警；`make tests UT=FTL` 仍因既有测试符号 + `ring.pl
 上板判据：首启自动格式化；`checkpoint_load_wear_table` 成功回填（`[WEAR]` 无告警）；
 顺序写/GC 后 `erase_count` 非零且跨重启保持；损坏磨损页 CRC 后计数从 0 且不触发格式化；
 CP 记录 21 页读写与回绕正常。
+
+## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
+
+当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（9）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。
+任何改变**介质格式或块布局**的改动（结构体字段 / 块号 / 记录格式 / 字段位序语义）
+都必须把 BASE +1；版本不符或缺失 ⇒ 首启自动全片格式化。
+
+| 版本 | 变更 | 为什么必须 +1 |
+|---:|---|---|
+| v0.62 | 元数据页完整性改由 FC 的 per-CW CRC + ECC 承担，FTL 记录内 CRC 字段全部删除 | Checkpoint / Anchor / BBT / Wear 结构体尺寸变化 |
+| v0.65 | Wear 条目增加 rr 健康字段（`last_ecc` / `rising_count` / `health`，8 B → 12 B） | 老格式 Wear 页 magic 仍匹配、条目布局不同，不拦会把计数读成垃圾 |
+| v0.73 | Directory 条目 4 字节位置字段由 PAA 改存 PBA（字节数不变） | 字段位序语义变化；老介质读回的 PAA 会被当 PBA 解出错误块/页 |
+| v0.74 | OP / Spare 池改按 plane 预留（每 plane 204 OP + 50 Spare） | 预留块集合变化；老固件把 plane 1 同号块当用户数据，新固件当已擦除预留池 ⇒ 账本与活数据冲突 |
+| v6 | Checkpoint record 1 页 → 5 页（Header + 块元数据快照 4 页），Header 增加 `bit_*` 字段 | 记录格式与块元数据恢复方式变化 |
+| v7 | 删除 L2P 哨兵层（原固定分区 0..15）；未映射改由 Directory 条目 `NAND_PBA_INVALID` 表示；固定分区整体前移，`FTL_METADATA_BLOCK_END` 63 → 47 | 块布局变化 |
+| v8 | Anchor / Checkpoint / BBT 改 P0+P1 跨 plane 镜像；Journal 保持页号奇偶交错；换块擦除统一 multi-plane | 块的写语义与恢复路径变化 |
+| v9 | 删除独立 Wear 块（块 46）；erase/read/ECC 健康并入 Checkpoint（块元数据 4 页 + 磨损快照 16 页），record 5 页 → 21 页 | 块布局与记录格式变化 |

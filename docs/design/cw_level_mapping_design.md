@@ -195,18 +195,18 @@ page63   region126     region127
 
 ### 2.4 运行期分区表
 
-`g_ftl_partitions[]`（`metadata.c`，5 项：Anchor / Checkpoint / BBT / Journal），
-每项 `{name, first_block, block_count, plane_mask, redundancy, kind, table_bytes}`
-**全部由宏派生**。消费方：
+`g_ftl_partitions[]`（`metadata.c` 内的 `static const`，4 项：Anchor / Checkpoint /
+BBT / Journal），每项 `{name, first_block, block_count, plane_mask, redundancy,
+table_bytes}` **全部由宏派生**。唯一消费方：
 
-- `ftl_is_metadata_block(md_dir, plane, block)`（`metadata.c`）——**表驱动**判元数据块
-  （不再硬编码块号）：遍历 `FTL_PART_FIXED` 项，**同时比较块区间与 `plane_mask`**
-  （Anchor/CP/BBT/Journal = `0x03`；未使用的 plane 同号块是用户数据），再扫 Directory 的
-  动态 L2P region 块（**必须带 plane**，动态日志块取自用户区，块号会与另一 plane 的用户块撞号）。
+- `ftl_is_metadata_block(md_dir, plane, block)`（`metadata.c`）——**表驱动**判元数据块：
+  遍历分区表，**同时比较块区间与 `plane_mask`**（Anchor/CP/BBT/Journal =
+  `METADATA_MIRROR_PLANE_MASK`；未使用的 plane 同号块是用户数据）；当前日志块单独比较
+  plane；已登记的动态日志块用 `l2p_live[g] != 0` O(1) 判定（**必须带 plane**：动态日志块
+  取自用户区，块号会与另一 plane 的用户块撞号）。
   free pool 回填（`main.c`）与掉电恢复重建（`power_failure_recovery.c`）共用同一判据。
-  ⚠ v0.69 前该函数只比 per-plane 块号 ⇒ 一个 plane 的日志块会连带掩掉另一 plane 的同号块，
-  被掩的块落在所有池之外且 `valid_count` 恒 0 ⇒ L2P 悬空、覆盖写撞 `bst.h` 断言。
-- 开机分区打印。
+  只比 per-plane 块号会连带掩掉另一 plane 的同号块，被掩的块落在所有池之外且
+  `valid_count` 恒 0 ⇒ L2P 悬空、覆盖写撞 `bst.h` 断言。
 
 ---
 

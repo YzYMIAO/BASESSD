@@ -61,7 +61,7 @@
 | `ftl_context_t`（阶段 C 后：描述符） | 14,664 B（0x3948） |
 | `l2p_cache_t` | 132,136 B（0x20428；64 line + 全局脏位图；`region_id` 为 u32） |
 | `ftl_tables_t` | 123,896 B（BST 81,920 + closed 32,768 + free 8,192 + 池 1,016） |
-| `metadata_dir_cache_t` | 24,652 B（注释里的“18KB”已过时） |
+| `metadata_dir_cache_t` | 25,164 B（DWARF 实测） |
 | `cp_job_t` | 8,524 B（含 8KB 块元数据快照） |
 | `ftl_wbuf_t` | 4,108 B |
 | `l2p_journal_t` | 2,104 B |
@@ -196,7 +196,7 @@ typedef struct ftl_context {
 | `g_l2p_cache[CH][CE]` | AXI_RAM（cacheable） | 132,136 B | 132,136 B |
 | `g_ftl_tables[FTL_DIM_TOTAL]` | `.sram12_data`（SRAM1+SRAM2 连续 256KB） | 123,896 B | 247,792 B（242.0 KiB） |
 | `g_ftl_cp_job[]` + `g_ftl_journal[]` | `.sram3_data`（32KB） | 10,628 B | 21,256 B（20.8 KiB） |
-| `g_ftl_md[FTL_DIM_TOTAL]` | `.sram4_data`（64KB） | 24,660 B | 49,320 B（48.2 KiB） |
+| `g_ftl_md[FTL_DIM_TOTAL]` | `.sram4_data`（64KB） | 25,164 B | 50,328 B（49.1 KiB） |
 | 描述符 + pending/groups/wbuf/mig/rr/bg | AXI_RAM | 14,664 B | 29,328 B |
 
 - 新增 `SRAM12_DATA/SRAM3_DATA/SRAM4_DATA` 宏；linker 把 SRAM1/2 合并为 `SRAM12`，
@@ -313,12 +313,12 @@ N=4 仍需表瘦身或 SDRAM。
 | AXI_RAM | 2×描述符 + 共享 cache + CLI + FC/其他 | **195.5 KB** | 384 KB |
 | SRAM12 | 2×`ftl_tables_t` | **242.0 KB** | 256 KB |
 | SRAM3 | 2×`cp_job` + 2×`journal` | **20.8 KB** | 32 KB |
-| SRAM4 | 2×`metadata_dir` | **48.2 KB** | 64 KB |
+| SRAM4 | 2×`metadata_dir` | **49.1 KB** | 64 KB |
 
 N=2 已通过影子构建**链接成功**；N=4 需要表瘦身（`ftl_block_t` 20B→12B 等）或 SDRAM。
 DIM=1 下：描述符 14,664 B + 共享 cache 132,136 B（AXI ~180KB）+
 tables 123,896 B（SRAM12）+ cp_job/journal 10,628 B（SRAM3）+
-metadata_dir 24,660 B（SRAM4）。
+metadata_dir 25,164 B（SRAM4）。
 
 ---
 

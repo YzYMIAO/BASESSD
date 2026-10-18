@@ -654,7 +654,7 @@ l2p_cache_load_start(cache, region_id):            ← static，由 read/ready/w
 
 ```c
 #define JOURNAL_BLOCK_COUNT       (CW_NUM)  // 环形 4 blocks（= CW_NUM）
-#define JOURNAL_BLOCK0            (58)      // J0 起始 Block（块 58-61，见 metadata.h）
+#define JOURNAL_BLOCK0            (BBT_BLOCK + BBT_POOL_BLOCKS)  // J0 起始 Block（当前 = 42，见 metadata.h）
 #define JOURNAL_PAGE_SIZE         (PAGE_MAIN_SIZE)  // = 2048
 #define JOURNAL_ENTRIES_PER_PAGE  ((JOURNAL_PAGE_SIZE - JOURNAL_HEADER_SIZE) / 16)  // 推导 = 127
 #define JOURNAL_HEADER_SIZE       (12)      // Header 大小

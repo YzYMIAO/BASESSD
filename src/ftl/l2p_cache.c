@@ -567,10 +567,11 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  *       不会被写回（行状态说"在落盘"，实际没有命令在飞）。
  *     · 追加写绝不就地覆盖；**先写后记账**（顺序不可倒）：掉电最多多留一份旧记录，
  *       不会丢映射。
- *     · **取不到槽 ⇒ FTL_AGAIN（阶段 8 起的刻意变更，原为 FTL_ERROR）**：
- *       metadata_dir_append_slot 返回 NAND_PBA_INVALID 现在有两种来源——
- *       ① 两 plane 的 Free Pool 都空；② 目录整理 job 在飞（它要独占当前块的空槽）。
- *       两者都是**瞬态**（GC 会补池 / job 会走完），报 FTL_ERROR 会被调用者当硬失败
+ *     · **取不到槽 ⇒ FTL_AGAIN**：
+ *       metadata_dir_append_slot 返回 NAND_PBA_INVALID 有三种来源——
+ *       ① 全部 plane 的 Free Pool 都空；② 目录整理 job 在飞（它要独占当前块的空槽）；
+ *       ③ 刚换新块且 Free Pool 吃紧，本函数只登记压缩请求、本次不发放槽位。
+ *       三者都是**瞬态**（GC 会补池 / job 会走完），报 FTL_ERROR 会被调用者当硬失败
  *       （`l2p_flush_kick_owner` 跳过该行、`cp_flush_regions` 直接**中止 Checkpoint**）。
  *       背压让它们下轮重试即可。**绝不回退任何固定位置**（本仓没有固定的 region
  *       位置；把"未映射"写成"有映射"会让下次再写同一页即损坏）。
@@ -842,7 +843,6 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
              * 槽位地址取自命令自身（ftl_cmd_pba 是 pba_to_cmd 的逆）——无需在行里存。
              * ⚠ 目录用 owner die 的局部 region 编号；cache 的键是全局 region。 */
             metadata_dir_commit_region(ftl->metadata_dir,
-                                       &ftl->alloc,
                                        (uint16_t)l2p_global_to_local_region(line->region_id),
                                        ftl_cmd_pba(cmd));
 

@@ -460,11 +460,11 @@ PAA(uint32_t)，低位 → 高位：
 | BBT | **P0+P1 镜像** | `bbt_header_t` | 1 条 | 1 页 | 64 | 2 块 × 64 = **128 条** |
 | Journal | P0+P1 交错（单副本） | `l2p_journal_entry_t` + 12 B 页头 | 127 条 | 1 页（页即写单位） | 64 页 | 4 块 × 64 页 = **256 页 / 32,512 条** |
 
-运行期可枚举视图是 `g_ftl_partitions[]`（`src/ftl/metadata.c`），每项
-`ftl_partition_t { name, first_block, block_count, plane_mask, redundancy, kind, table_bytes }`；
-`ftl_is_metadata_block()` 与 CLI 都读这张表。`redundancy` = 每块容纳的 record 数，
+可枚举视图是 `g_ftl_partitions[]`（`src/ftl/metadata.c` 内的 `static const`），每项
+`ftl_partition_t { name, first_block, block_count, plane_mask, redundancy, table_bytes }`；
+只有 `ftl_is_metadata_block()` 读这张表。`redundancy` = 每块容纳的 record 数，
 Journal 不是 record 池，填 1。`plane_mask` 决定固定块在哪些 plane 上占用：
-Anchor/CP/BBT/Journal = `0x03`。
+Anchor/CP/BBT/Journal = `METADATA_MIRROR_PLANE_MASK`（当前 2 plane ⇒ `0x03`）。
 
 ⚠ 上表「池内总量」是**池深策略的结果**，不是容量需求；任意时刻只有 1 条 record
 是权威数据，其余是回退历史与磨损预算。池深为什么取 32 / 8 / 2 / 4、环形池如何
@@ -1549,7 +1549,7 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 
 | 字段 | 大小 | 含义 |
 |---|---:|---|
-| `type` | 1 B | `METADATA_TYPE_L2P_REGION / JOURNAL / CHECKPOINT / BBT / ERASE_COUNT` |
+| `type` | 1 B | `METADATA_TYPE_L2P_REGION / JOURNAL / CHECKPOINT / BBT`（当前只写 `L2P_REGION`） |
 | `id` | 2 B | L2P region_id；其他类型为 0 |
 | `pba` | 4 B | 物理位置（PBA，自带 ch/ce/lun） |
 
@@ -1576,12 +1576,12 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `first_block` | 池首块（per-plane 块号） |
 | `block_count` | 池块数（≥ 2；1 块的池换块会擦掉唯一有效 record） |
 | `pages_per_record` | 一条 record 占几页；块尾不足一条的页不用 |
-| `plane` | 池所在 plane |
+| `plane_mask` | 池实际使用的 plane 位图（镜像池 = 全部 plane） |
 
 派生量：`records_per_block = PAGES_PER_BLOCK / pages_per_record`（floor）；
 `total_records = block_count × records_per_block`。
 
-**`metadata_dir_cache_t`（每实例，约 24 KiB，落 SRAM4）**
+**`metadata_dir_cache_t`（每实例，约 24.6 KiB，落 SRAM4）**
 
 | 字段 | 大小 | 含义 |
 |---|---:|---|
@@ -1589,12 +1589,12 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `count` | 2 B | 有效 entry 数（固定层全填，通常 = 2048） |
 | `anchor_sequence` | 4 B | 当前 Anchor 序号 |
 | `dirty` | 1 B | 有未写回 Anchor 的变更 |
-| `have_dynamic` | 1 B | 是否已有 region 落到动态块（开机加速） |
-| `l2p_live[4096]` | 8 KiB | 每个 gblock 上还有多少 region 的**最新位置** |
+| `l2p_live[4096]` | 8 KiB | 每个 gblock 上还有多少 region 的**最新位置**；也是 `ftl_is_metadata_block` 的动态块判据 |
 | `cur_metadata_block` | 2 B | 当前日志块 gblock |
 | `cur_metadata_page` | 1 B | 当前日志块下一可用页 |
 | `cur_block_valid` | 1 B | 游标是否已建立 |
 | `cur_metadata_plane` | 1 B | 下一个新日志块选哪个 plane（轮转） |
+| `reclaim_pending` / `count` / `scan` | ~516 B | 待回收位图 + 计数 + 轮转起点 |
 | `job` | ~2.2 KiB | 回收/压缩 job（含 `cp_buf[2048]`） |
 | `anchor_write_idx` | 2 B | Anchor 池写点槽位 |
 | `anchor_cursor_valid` | 1 B | Anchor 游标是否已定位 |
@@ -1693,9 +1693,9 @@ flowchart LR
     F -- "否" --> H["line 直接置 CLEAN（entries 全 INVALID，不读 NAND）"]
 ```
 
-`metadata_dir_lookup` 是 `entries[]` 线性扫描（2048 条）；`have_dynamic == 0` 时跳过
-动态块扫描（开机回填数千次调用，这个短路明显缩短启动）。**它不读 NAND**——Directory
+`metadata_dir_lookup` 是 `entries[]` 线性扫描（2048 条）。**它不读 NAND**——Directory
 是 SRAM 常驻的；读 NAND 的是随后加载 region 页的命令（未映射则根本不发命令）。
+`ftl_is_metadata_block` 的动态块判定改用 `l2p_live[g]`（O(1)，不再扫 entries）。
 
 **启动加载**（`metadata_dir_load`）：
 
@@ -1707,11 +1707,13 @@ flowchart LR
 ③ 读胜者各页，逐页校验 chunk_index / sequence / layout_version，装配覆盖对应区间
    - 镜像池：每页先读 P0 副本；不可信时回退 P1 副本（sequence 必须等于被选中的
      record sequence，绝不跨 record 拼页）
-④ 由装配后的 entries 重建 l2p_live[] 与 have_dynamic
+④ 由装配后的 entries 重建 l2p_live[]
    - entry 的 pba **不是固定元数据块**（按分区表 plane_mask 判）⇒ 动态日志块；l2p_live[g]++
    - ⚠ 不能用 "block >= FTL_METADATA_BLOCK_END"：P1 的 0..45 是镜像元数据、46 起才是用户区
-⑤ 游标全部置无效（cur_block_valid=0 / anchor_cursor_valid=0）
-   ——首次追加从 Free Pool 新取块，绝不复用可能已编程的旧页
+⑤ 日志块游标置无效（cur_block_valid=false）——首次追加从 Free Pool 新取块，
+   绝不复用可能已编程的旧页；**Anchor 游标反向恢复**：locate 已给出
+   `anchor_write_idx` / `anchor_sequence`，直接置 `anchor_cursor_valid=true`，
+   避免首次 flush 再扫一遍池
 ```
 
 无有效 Anchor ⇒ 返回错误，调用者转 `metadata_dir_init`（fresh）或格式化（版本判据）。

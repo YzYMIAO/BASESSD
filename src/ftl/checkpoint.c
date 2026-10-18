@@ -63,7 +63,7 @@ static void checkpoint_ring_init(metadata_ring_t *ring)
     ring->first_block      = CHECKPOINT_BLOCK0;
     ring->block_count      = CHECKPOINT_POOL_BLOCKS;
     ring->pages_per_record = CHECKPOINT_RECORD_PAGES; /* Header(1) + 块元数据(4) + 磨损(16) */
-    ring->plane_mask       = 0x03U;
+    ring->plane_mask       = METADATA_MIRROR_PLANE_MASK;
 }
 
 /* Header 校验（record 的 commit 页）：magic + 布局版本。
@@ -90,7 +90,7 @@ typedef struct
 
 /* Checkpoint record 探针（见 metadata_ring_probe_fn）。
  * full 与廉价探针等价（一条 record 只有一页），故忽略。 */
-static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, int full, uint32_t *out_sequence)
+static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, bool full, uint32_t *out_sequence)
 {
     checkpoint_probe_ctx_t *c = (checkpoint_probe_ctx_t *)ctx;
 
@@ -368,7 +368,7 @@ static void cp_step(ftl_context_t *ftl)
             {
                 /* ③ Anchor：定位游标 + 取槽（游标未建立时会**同步**扫池定位——
                  *    这是本 job 唯一可能瞬时阻塞的点，且只在冷启动后首次 CP 出现）。 */
-                int              need_erase = 0;
+                bool             need_erase = false;
                 md_anchor_step_t r          = metadata_dir_anchor_prepare(ftl->metadata_dir,
                                                                  &j->anchor_ring,
                                                                  &j->anchor_base,
@@ -391,10 +391,10 @@ static void cp_step(ftl_context_t *ftl)
                     break;
                 }
 
-                j->anchor_need_erase = (uint8_t)need_erase;
+                j->anchor_need_erase = need_erase;
                 j->anchor_chunk      = 0U;
                 j->anchor_ok         = 1U;
-                j->phase             = (need_erase != 0) ? (uint8_t)CP_ANCHOR_ERASE : (uint8_t)CP_ANCHOR_WRITE;
+                j->phase             = need_erase ? (uint8_t)CP_ANCHOR_ERASE : (uint8_t)CP_ANCHOR_WRITE;
                 break;
             }
 
@@ -412,7 +412,7 @@ static void cp_step(ftl_context_t *ftl)
                 {
                     /* 整条 record 写完：推进游标（无论成败），成功才清 dirty。
                      * 失败 ⇒ 整条残缺（locate 会整条丢弃）⇒ 中止，不写 Header。 */
-                    metadata_dir_anchor_commit(ftl->metadata_dir, &j->anchor_ring, j->anchor_idx, (int)j->anchor_ok);
+                    metadata_dir_anchor_commit(ftl->metadata_dir, &j->anchor_ring, j->anchor_idx, (j->anchor_ok != 0U));
 
                     if (j->anchor_ok == 0U)
                     {
@@ -465,7 +465,7 @@ static void cp_step(ftl_context_t *ftl)
 
                 j->hdr_idx = ftl->cp.write_idx;
 
-                int need_erase = 0;
+                bool need_erase = false;
                 if (metadata_ring_prepare_addr(&j->hdr_ring, &ftl->topo, j->hdr_idx, &j->hdr_addr, &need_erase) != FTL_OK)
                 {
                     cp_abort(j);

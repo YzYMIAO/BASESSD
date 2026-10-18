@@ -69,7 +69,7 @@ static void bbt_ring_init(metadata_ring_t *ring)
     ring->first_block      = BBT_BLOCK;
     ring->block_count      = BBT_POOL_BLOCKS;
     ring->pages_per_record = 1U;
-    ring->plane_mask       = 0x03U;
+    ring->plane_mask       = METADATA_MIRROR_PLANE_MASK;
 }
 
 /* 整条校验（一条 record = 1 页）：magic。
@@ -93,7 +93,7 @@ static void bbt_ctx_init(const ftl_allocator_t *alloc, bbt_probe_ctx_t *ctx)
 }
 
 /* BBT record 探针（见 metadata_ring_probe_fn）。full 与廉价探针等价（record 只有一页）。 */
-static ftl_status_t bbt_record_probe(void *ctx, uint16_t record_idx, int full, uint32_t *out_sequence)
+static ftl_status_t bbt_record_probe(void *ctx, uint16_t record_idx, bool full, uint32_t *out_sequence)
 {
     (void)full;
 
@@ -755,14 +755,14 @@ void bbt_kick(ftl_allocator_t *alloc)
     alloc->bbt.sequence++;
 
     nand_pba_t addr;
-    int        need_erase = 0;
+    bool       need_erase = false;
     if (metadata_ring_prepare_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, &addr, &need_erase) != FTL_OK)
     {
         LOGE("[BBT] prepare failed idx=%u\r\n", (unsigned)alloc->bbt.write_idx);
         return;
     }
 
-    if (need_erase != 0)
+    if (need_erase)
     {
         fc_command_t *cmd;
 
