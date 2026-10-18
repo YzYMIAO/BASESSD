@@ -273,13 +273,12 @@ static int l2p_cache_evict_one(l2p_cache_t *cache)
  * 内部：为 region_id 启动一次异步加载。
  *
  * 前提：调用者已确认该 region **不在** cache 中（l2p_cache_find 未命中）。
- * 返回：true 已提交；false 未提交（无可驱逐行 / 命令池空 / 提交背压）——两者都让调用者
- *       下轮重试，语义相同（"还没好"）。
+ * 返回：true = 行已就绪（未映射，同步完成）或读命令已提交；false = 未提交（无可驱逐行 /
+ *       命令池空 / 提交背压）——调用者一律下轮重试，语义相同（"还没好"）。
  *
- * 位置一律来自 Metadata Directory（每个 region 在 fill_fixed 就登记好：初始指向
- * **哨兵层**固定页，被刷新后指向日志块）。哨兵页永不写入 ⇒ 读回全 0xFF ⇒
- * 逐项即 PBA_INVALID = "未映射"，正是首次访问应有的语义。
- * 下面的固定位置回退仅作 owner 的 metadata_dir 查找失败时的兜底（正常路径不可达）。
+ * 位置一律来自 Metadata Directory（每个 region 在 fill_fixed 就登记好：从未写过 =
+ * `NAND_PBA_INVALID`，刷过盘 = 日志块上的真实 PBA）。
+ * 未映射 ⇒ 直接把行置为"全 INVALID 的 CLEAN 行"，**不提交 NAND 读**。
  * Random DISABLED / CRC ENABLED（v0.62）：Region 数据不加扰，但经 FC per-CW CRC + ECC 保护。
  */
 static bool l2p_cache_load_start(l2p_cache_t *cache, uint32_t region_id)
@@ -309,8 +308,14 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint32_t region_id)
 
     if (region_addr == NAND_PBA_INVALID)
     {
-        /* 回退固定位置（owner die 的局部 region 编号） */
-        region_addr = l2p_region_pba(owner->topo.ch, owner->topo.ce, owner->topo.lun, (uint16_t)local_region);
+        /* 未映射：该 region 从未写过，Directory 里没有它的位置。entries 已是全
+         * NAND_PBA_INVALID（上面 memset），直接置 CLEAN 并返回——**不提交读命令**。
+         * 主流 DRAM-less 的未映射路径同样不产生 NAND I/O；此处若去读"某个固定擦除页"，
+         * 就退化成本仓已删除的哨兵层（见 metadata.h 布局版本 v7）。
+         * fresh=1 与异步加载完成后的记账一致：下一次命中是本次 miss 的重试，不计 hit。 */
+        line->state = L2P_CACHE_CLEAN;
+        line->fresh = 1U;
+        return true;
     }
 
     /* ⚠ 读的数据**留在 desc 链上**（与写不对称）⇒ 目标缓冲须活到完成、
@@ -567,8 +572,8 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  *       ① 两 plane 的 Free Pool 都空；② 目录整理 job 在飞（它要独占当前块的空槽）。
  *       两者都是**瞬态**（GC 会补池 / job 会走完），报 FTL_ERROR 会被调用者当硬失败
  *       （`l2p_flush_kick_owner` 跳过该行、`cp_flush_regions` 直接**中止 Checkpoint**）。
- *       背压让它们下轮重试即可。**绝不回退固定位置**（固定层是哨兵，写进去等于把
- *       "未映射"变成"有映射"，且下次再写同一页即损坏）。
+ *       背压让它们下轮重试即可。**绝不回退任何固定位置**（本仓没有固定的 region
+ *       位置；把"未映射"写成"有映射"会让下次再写同一页即损坏）。
  *     · ⚠ 槽位在 append_slot 里就消耗掉了：若其后建链/提交失败，该槽作废（写指针
  *       已推进）。与旧实现的"写失败"分支同级——region 仍指向上一份有效记录，无信息丢失。
  * -------------------------------------------------------------------- */

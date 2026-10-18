@@ -6,6 +6,8 @@
  *
  * 全表存储于 NAND 元数据区（4MB），SRAM 中缓存最近访问的 region。
  * Region 分片：512 条 entry × 4B = 2KB/region，2048 region 覆盖全部 LBA 空间。
+ * 从未写过的 region 在 Directory 里登记为 NAND_PBA_INVALID：加载时直接合成
+ * 全 INVALID 的 cache 行，**不产生 NAND 读**（对齐 DRAM-less 主流的"未映射无 I/O"）。
  *
  * 地址体系：
  *   lba_t → region_id (lba / 512) + entry_idx (lba % 512)
@@ -19,7 +21,7 @@
 #include "ftl/allocator.h"  /* ftl_allocator_t */
 #include "ftl/ftl_config.h" /* §一 容量/分解宏 + §三.2 nand_pba_t / pba_* */
 #include "ftl/ftl_type.h"   /* lba_t */
-#include "ftl/metadata.h"   /* metadata_dir_cache_t + 块布局宏（L2P_BASE_BLOCK / L2P_BLOCKS）+ 打包放置公式 */
+#include "ftl/metadata.h"   /* metadata_dir_* / metadata_dir_cache_t（Directory 访问） */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -28,7 +30,7 @@
  * L2P 容量与分解宏（L2P_ENTRIES_PER_REGION / L2P_REGION_SIZE /
  * L2P_REGIONS_PER_INSTANCE / L2P_REGION_SHIFT / L2P_REGION_MASK /
  * FTL_DIM_TOTAL）见 ftl/ftl_config.h §一；
- * L2P 块布局宏（L2P_BASE_BLOCK / L2P_BLOCKS）见 ftl/metadata.h「固定元数据区布局」。*/
+ * 元数据块布局见 ftl/metadata.h「固定元数据区布局」。*/
 #define L2P_CACHE_SIZE (64U) /* cache 行数（可配 32/64/128）*/
 
 /* 在飞写回上限（背压闸门，见 l2p_cache_t.flush_inflight）：每次写回占 1 条命令 + 4 buffer，
@@ -88,19 +90,6 @@ static inline uint32_t l2p_global_to_local_region(uint32_t global_region)
 static inline bool l2p_region_owned_by(uint32_t global_region, uint32_t dim)
 {
     return (uint32_t)(global_region % FTL_DIM_TOTAL) == dim;
-}
-
-/* 固定位置映射：Region r → PBA（打包放置公式见 ftl/metadata.h，两处共用）
- * region_id 是**owner die 内**的局部编号（0..L2P_REGIONS_PER_INSTANCE-1）；
- * 各 die 的块号相同（分片模型），故不参与定位。*/
-static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t region_id)
-{
-    uint16_t block;
-    uint8_t  page;
-    uint8_t  plane;
-
-    ftl_l2p_region_placement(region_id, &block, &page, &plane);
-    return pba_make(ch, ce, lun, block, plane, page, 0U);
 }
 
 /* ── Region 分解 ──
@@ -382,8 +371,8 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  *
  * ⚠ **无条件追加**：绝不就地覆盖旧位置（NAND 只能 1→0，二次编程 = 静默损坏）。
  *   分配不到块（owner 的 Free Pool 空）⇒ FTL_AGAIN；owner 的 metadata_dir/alloc
- *   由全局 region 解析得到（不是 cache 自带指针）。**不回退固定位置**
- *   ——固定层是哨兵（永不写入，读回全 0xFF = 未映射）。
+ *   由全局 region 解析得到（不是 cache 自带指针）。**不回退任何固定位置**
+ *   ——没有固定位置：未刷盘的 region 在 Directory 里就是 NAND_PBA_INVALID。
  * ⚠ 背压：命令池空 / 在飞写回数达 L2P_FLUSH_MAX_INFLIGHT ⇒ FTL_AGAIN（行保持 DIRTY）。
  *   ⚠ 若已消耗槽位后提交失败，该槽位作废（append_slot 已推进写指针）——与旧实现的
  *     写失败分支同级，信息不丢（region 仍指向上一份有效记录）。

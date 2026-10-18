@@ -104,15 +104,15 @@
 ```
 块号         用途                          块数来历
 ────────────────────────────────────────────────────────────
-0 .. 15      L2P Table                     ⌈2048 region ÷ 128 region/块⌉ = 16（哨兵层）
-16 .. 47     Anchor（Metadata Directory）   ANCHOR_POOL_BLOCKS = 32（块轮转池）
-48 .. 55     Checkpoint                    CHECKPOINT_POOL_BLOCKS = 8（块轮转池）
-56 .. 57     BBT                           BBT_POOL_BLOCKS = 2（块轮转池）
-58 .. 61     Journal（4 块）                JOURNAL_BLOCKS = CW_NUM（CW 级 4× 映射流量）
-62           Wear 表（erase_count）         WEAR_COPIES = 1（软状态单副本）
-63 .. 4095   用户数据 / OP / Spare / 坏块
+0 .. 31      Anchor（Metadata Directory）   ANCHOR_POOL_BLOCKS = 32（块轮转池）
+32 .. 39     Checkpoint                    CHECKPOINT_POOL_BLOCKS = 8（块轮转池）
+40 .. 41     BBT                           BBT_POOL_BLOCKS = 2（块轮转池）
+42 .. 45     Journal（4 块）                JOURNAL_BLOCKS = CW_NUM（CW 级 4× 映射流量）
+46           Wear 表（erase_count）         WEAR_COPIES = 1（软状态单副本）
+47 .. 4095   用户数据 / OP / Spare / 坏块
 ────────────────────────────────────────────────────────────
-固定元数据 = 16 + 32 + 8 + 2 + 4 + 1 = 63 块（FTL_METADATA_BLOCK_END = 63）
+固定元数据 = 32 + 8 + 2 + 4 + 1 = 47 块（FTL_METADATA_BLOCK_END = 47）
+L2P 表不在固定分区：未映射 = Directory 条目 INVALID，写过的 region 落动态日志块。
 ```
 
 > ⚠ **v0.50 起 Anchor/Checkpoint/BBT 都是「多块轮转池」**（P0-2 元数据写模型统一：只写
@@ -123,21 +123,21 @@
 **对账**（开机 free pool 统计）：
 
 ```
-4096 − 63(元数据) − 50(spare) − 204(op) − 40(出厂坏块) ≈ 3739 free
+4096 − 47(元数据) − 50(spare) − 204(op) − 40(出厂坏块) ≈ 3739 free
 ```
 
 ### 2.2 每张表的尺寸推导
 
 | 表 | 覆盖实体 | 每实体 | 字节数 ① | 页数 ② | 块数 ③ | 冗余 ④ | **实占** | 块位置 |
 |---|---|---|---|---|---|---|---|---|
-| **L2P Table** | 1,048,576 LBA（每实例） | 4B PBA | 4 MiB | 2048 | 16 | — | **16** | 0..15 |
-| Metadata Directory | 2048 region | 7B | 14,336 B | **8** | 1 | 池内轮转 | **32** | 16..47 |
-| Checkpoint | 2048 bit + 头 | — | ~1 页 | 1 | 1 | 池内轮转 | **8** | 48..55 |
-| BBT | 4096 block | 1 bit | 512 B | 1 | 1 | 池内轮转 | **2** | 56..57 |
-| Journal | — | 16B/entry | — | — | — | 环形 | **4** | 58..61 |
-| Wear 表 | 4096 block | 8B | 32 KB | **17** | 1 | 单副本 | **1** | 62 |
+| **L2P Table** | 1,048,576 LBA（每实例） | 4B PBA | 4 MiB | 2048 | — | — | **动态** | 日志块（Free Pool） |
+| Metadata Directory | 2048 region | 7B | 14,336 B | **8** | 1 | 池内轮转 | **32** | 0..31 |
+| Checkpoint | 2048 bit + 头 | — | ~1 页 | 1 | 1 | 池内轮转 | **8** | 32..39 |
+| BBT | 4096 block | 1 bit | 512 B | 1 | 1 | 池内轮转 | **2** | 40..41 |
+| Journal | — | 16B/entry | — | — | — | 环形 | **4** | 42..45 |
+| Wear 表 | 4096 block | 8B | 32 KB | **17** | 1 | 单副本 | **1** | 46 |
 | BST | 4096 block | 20B | 80 KB | — | — | SRAM | — | (RAM) |
-| **合计** | | | | | | | **63 块** | 0..62 |
+| **合计** | | | | | | | **47 块** | 0..46 |
 
 **逐条推导**（全部由 `nand_config.h` 几何 + `metadata.h` 布局宏算出）：
 
@@ -226,13 +226,12 @@ Checkpoint、Wear、分配器、BST。
 ```
       die(0,0,0)                die(1,0,0)                        die(1,1,1)
  ┌──────────────────┐      ┌──────────────────┐              ┌──────────────────┐
- │ 块 0..15   L2P    │      │ 块 0..15   L2P    │              │ 块 0..15   L2P    │
- │ 块 16..47  Anchor │      │ 块 16..47  Anchor │              │ 块 16..47  Anchor │
- │ 块 48..55  CP     │      │ 块 48..55  CP     │              │ 块 48..55  CP     │
- │ 块 56..57  BBT    │  ≡   │ 块 56..57  BBT    │   ≡   …      │ 块 56..57  BBT    │
- │ 块 58..61  Journal│      │ 块 58..61  Journal│              │ 块 58..61  Journal│
- │ 块 62     Wear    │      │ 块 62     Wear    │              │ 块 62     Wear    │
- │ 块 63..4095 用户  │      │ 块 63..4095 用户  │              │ 块 63..4095 用户  │
+ │ 块 0..31   Anchor │      │ 块 0..31   Anchor │              │ 块 0..31   Anchor │
+ │ 块 32..39  CP     │      │ 块 32..39  CP     │              │ 块 32..39  CP     │
+ │ 块 40..41  BBT    │  ≡   │ 块 40..41  BBT    │   ≡   …      │ 块 40..41  BBT    │
+ │ 块 42..45  Journal│      │ 块 42..45  Journal│              │ 块 42..45  Journal│
+ │ 块 46     Wear    │      │ 块 46     Wear    │              │ 块 46     Wear    │
+ │ 块 47..4095 用户  │      │ 块 47..4095 用户  │              │ 块 47..4095 用户  │
  └──────────────────┘      └──────────────────┘              └──────────────────┘
       512 MiB                   512 MiB                           512 MiB
       └─────────────────────── 设备总计 8 × 512 MiB = 4 GiB ───────────────────────┘
@@ -520,12 +519,12 @@ SRAM 缓存热点 region**。
 - **Journal = `CW_NUM` 块（4）**：CW 级下每次页写 = **4 条 journal**（页级时 1 条）
   ⇒ 流量 **4×**、寿命 ÷4。容量取 `CW_NUM` 使 Journal 能容纳两次 checkpoint 之间的映射更新。
   （或做「同 region 多次写合并」。）
-- **Wear = 1 块（块 62，单副本）**：块元数据（擦除/读计数）持久化。**软状态**——丢了只退化 WL，
+- **Wear = 1 块（块 46，单副本）**：块元数据（擦除/读计数）持久化。**软状态**——丢了只退化 WL，
   不丢数据 ⇒ 单副本即可。**已落地**（`src/ftl/wear.c`，见 §十一）。
   ⚠ **介质上是"块内页式追加日志"，不是顺序全量表**：页序 == sequence 序，每页自包含
   （magic + sequence + entry_count；**v0.62 起无独立 CRC**，完整性由下层 FC per-CW CRC + ECC 承担），
   语义 = 绝对值 + 最新胜；块满才擦一次并
-  从头写全量快照（17 页）。用日志而非"每次整表重写"是因为块 62 只有 64 页，
+  从头写全量快照（17 页）。用日志而非"每次整表重写"是因为块 46 只有 64 页，
   整表重写会让它在 ~3.8 次落盘后被擦一次（磨损远超数据块）。
   两个计数各 8B 一条目（`block` + `read_count` + `erase_count`），
   32 KB 是**逻辑表字节**（`FTL_WEAR_TABLE_BYTES`），不是介质占用量。
@@ -601,7 +600,7 @@ SRAM 缓存热点 region**。
    有效性逐 CW 由「**页内 META（=OOB）取回 LBA → 反查 L2P**」判定；`valid_count` 保留为块级聚合。
    ⇒ L2P cache 维持 64 region，且 AXI_RAM 反而**减 64 KB**（319 → 255 KB）。详见 §八。
 3. **介质格式变更**：新增 Wear 块 + L2P 打包改位置 + Journal 4 块 + Anchor 分页 ⇒ **须重新格式化**。
-   Wear 表 load/save 落地（P0-1）**不新增**格式变更：块 62 早已在分区表里预留且被
+   Wear 表 load/save 落地（P0-1）**不新增**格式变更：块 46 早已在分区表里预留且被
    `ftl_is_metadata_block` 排除，本次只是第一次往里写内容 ⇒ 不额外要求重新格式化。
 4. **`CONFIG_FC_RAID` 保持 0**（用户 2026-10-10 明确）——本方案不碰。
 5. **P0-2 Metadata Directory 容量** — ✅ **已落地**。旧版 `METADATA_DIR_ENTRIES = 128` < 2048 region

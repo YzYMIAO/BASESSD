@@ -5347,3 +5347,42 @@ free-pool 驱逐 ⇒ 改 `free_count` 可观测值，**需上板**）。
 
 **收口**：三锚点全绿、零新告警；`.bin` 215036 → 215068B。⚠ **未上板**：判据 = 写满 >300 MiB
 后 `ftl info` 的 `closed` 不再被封顶、`free` 不再无声下滑，断电重启仍能开机。
+
+## v0.79 — 删除 L2P 哨兵层：未映射改由 Directory 条目 `NAND_PBA_INVALID` 表示
+
+**日期**：2026-10-18
+
+**动机（主流对齐）**：SPDK FTL（DRAM 型）把 L2P 表放 DRAM，"未映射/已 trim"是映射条目的
+状态，不占闪存；DFTL 路线（DRAM-less）同理——未分配的翻译页不存在，查表命中"无效"即可
+返回未映射。主流的共同点：**未映射不产生 NAND 读**。本仓原设计为每个 region 预登记一个
+指向"永不写入的擦除页"（固定块 0..15，共 4 MiB），读该 region 时**真的发一次 NAND 读**，
+再以读回全 `0xFF` 判定未映射。这是本仓自拟的表示法，不是主流形态。
+
+**修法**：
+1. `metadata_dir_fill_fixed()` 把全部 region 预登记为 `NAND_PBA_INVALID`（不再生成固定 PBA）；
+2. `l2p_cache_load_start()` 查到 `NAND_PBA_INVALID` ⇒ entries 已是全 INVALID，直接置
+   `CLEAN` / `fresh=1` 返回，**不提交读命令、不占 `load_inflight`**；
+3. 删除固定分区 `L2P Table`（原块号 0..15）。固定元数据整体前移：Anchor 0..31、
+   Checkpoint 32..39、BBT 40..41、Journal 42..45、Wear 46，`FTL_METADATA_BLOCK_END`
+   **63 → 47**；释放的 16 个块号（4 MiB）归入用户数据/OP 池；
+4. 删除 `l2p_region_pba()` / `ftl_l2p_region_placement()` / `L2P_BASE_BLOCK` /
+   `L2P_BLOCKS` / `L2P_REGION_PER_BLOCK` / `FTL_L2P_TABLE_BYTES` / `FTL_SLOTS_PER_BLOCK`
+   （再无消费者）。
+
+**必须同步的两处 INVALID 判定**（编译期完全无声，写错会在开机/回填时把最后一个用户块
+误当元数据块，或把 gblock 4095 记成活 region）：
+- `metadata_dir_rebuild_live()`：先挡 `NAND_PBA_INVALID` 再解 PBA 字段；
+- `ftl_is_metadata_block()`：动态块扫描跳过 INVALID 条目。
+
+**介质格式**：块布局变了 ⇒ `FTL_MEDIA_LAYOUT_VERSION_BASE` **6 → 7**（DIM>1 为 8）。
+⚠ **上板首启会自动全片格式化**，这是预期行为。
+
+**代价/收益**：省 4 MiB（0.78% die）；每次首次访问未写 region（含首次写该 region 的
+read-modify-write）省一次 NAND 读（tR ~25 µs）。L2P cache 仍为 64 region / 2048。
+
+**验证状态**：⚠ **未上板**。已过 `make all`（零新告警）、`make release`（仅剩 2 条既有
+unused-variable 告警）、`make tests UT=FTL` 仍因 v0.77~v0.78 重构遗留的测试符号
+（`super_block_t.topo/valid`、旧块状态 API）编译失败，与本轮改动无关（UT 冻结）。
+上板判据：首启自动格式化 → 冷启动 `free` 计数比旧布局多 16 块号对应量 → 顺序写/随机读
+回归 → 读一个从未写过的 LBA 返回未映射且设备不产生额外 NAND 读（可对比改动前后同负载
+的读耗时/FC 命令计数）。

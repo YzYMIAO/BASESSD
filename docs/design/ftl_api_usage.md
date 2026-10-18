@@ -544,11 +544,9 @@ static inline uint32_t l2p_global_to_local_region(uint32_t global_region);
 /* 全局 LBA → 片内 local LBA（地址原语；阶段 B 起数据通路不再调用） */
 static inline lba_t lba_to_local(uint64_t lba);
 
-/* L2P 哨兵层位置：Region → PBA（L2P 基础层块 0-15，**永不写入**，读回全 0xFF = 未映射）。
- * ⚠ v0.50 起这不是"region 的固定存储位置"——region 实际写在**日志块**里（从 Free Pool
- * 动态取整块，位置由 Metadata Directory 携带）。本函数只在两处用：
- * ① Directory 尚未登记的 region 读回"未映射"；② 开机回退基础层。 */
-static inline nand_pba_t l2p_region_pba(uint8_t ch, uint8_t ce, uint8_t lun, uint16_t region_id);
+/* ⚠ 本仓没有"region 的固定位置"：未写过的 region 在 Metadata Directory 里登记为
+ * NAND_PBA_INVALID（未映射，读取不产生 NAND I/O）；写过的 region 只在日志块里，
+ * 位置由 Directory 携带。 */
 ```
 
 ### 2.2 接口（⚠ v0.75 阶段 5 起**三态**）
@@ -633,10 +631,11 @@ l2p_cache_load_start(cache, region_id):            ← static，由 read/ready/w
 
   占位后:
     metadata_dir_lookup(region_id) → 查 Directory
-    ＝ INVALID → l2p_region_pba() 哨兵层（读回全 0xFF = 未映射）
-    ftl_async_read_page(addr) + ftl_op_submit(tag=FTL_OP_L2P, ctx=line)
-    state = LOADING；load_inflight++
-    ⇒ **立即返回 FTL_AGAIN**（不等 NAND）
+    ＝ INVALID → entries 已是全 INVALID ⇒ 直接 state = CLEAN, fresh = 1，返回
+                 （未映射；**不提交读命令、不占 load_inflight**）
+    否则 → ftl_async_read_page(addr) + ftl_op_submit(tag=FTL_OP_L2P, ctx=line)
+           state = LOADING；load_inflight++
+           ⇒ **立即返回 FTL_AGAIN**（不等 NAND）
 
   完成时（g_op_service[FTL_OP_L2P] = ftl_op_l2p）:
     成功 → ftl_cmd_read_data 拷进 line->entries（必须早于 release）

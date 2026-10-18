@@ -8,12 +8,12 @@
  *
  * 与 metadata.h 的分工：
  *   metadata.h —— 结构（metadata_ring_t / metadata_anchor_page_t / metadata_dir_cache_t）+
- *                 固定元数据区布局（池尺寸 / 块偏移 / 表字节 / 分区表声明 / 打包公式）；
+ *                 固定元数据区布局（池尺寸 / 块偏移 / 表字节 / 分区表声明）；
  *   本文件     —— 上述结构的全部算法实现 + 分区表本体（g_ftl_partitions[]，单一事实来源）。
  *
- * 元数据两层（见 metadata.h「固定元数据区布局」）：
- *   固定层（哨兵）：L2P region 的初始位置，**永不写入**，读回全 0xFF = 未映射；
- *   日志层（动态）：region 刷新后从 Free Pool 取块、追加写，位置由 Directory 记账。
+ * L2P region 的位置只有一层来源（见 metadata.h「固定元数据区布局」）：
+ *   Directory 条目 = `NAND_PBA_INVALID` ⇒ region 从未写过（未映射，读取不碰 NAND）；
+ *   非 INVALID ⇒ region 页在日志块上的真实 PBA（从 Free Pool 取块、追加写）。
  *
  * 文件结构（═══ 编号大区沿用既有编号，未重排）：
  *   一、元数据 record 池（环形轮转）—— Anchor / Checkpoint / BBT 共用
@@ -439,13 +439,15 @@ static ftl_status_t anchor_record_probe(void *ctx, uint16_t record_idx, int full
 }
 
 /*
- * metadata_dir_fill_fixed - 建立全部 region 的固定位置（哨兵层，见 metadata.h「固定元数据区布局」）
+ * metadata_dir_fill_fixed - 为全部 region 登记"未映射"（见 metadata.h「固定元数据区布局」）
  *
- * 每个实例的 L2P_REGIONS_PER_INSTANCE 个 region **全部登记**；某个 region 刷新到
- * 日志块后由 metadata_dir_commit_region 就地覆盖。固定位置**永不写入**（页保持
- * 擦除态 ⇒ 读回全 0xFF ⇒ 未映射），它只是「尚未搬到日志块」的表示。
+ * 每个实例的 L2P_REGIONS_PER_INSTANCE 个 region **全部登记为 NAND_PBA_INVALID**；
+ * 某个 region 刷新到日志块后由 metadata_dir_commit_region 就地覆盖成真实 PBA。
+ * "全部预登记"同时保证 Directory 容量（= region 数）按构造不会溢出 ——
+ * metadata_dir_update 的"满则丢弃"分支对 L2P region 不可达。
  *
- * 共用于 metadata_dir_init（首次格式化）与 metadata_dir_load（基础层）。
+ * 共用于 metadata_dir_init（首次格式化）与 metadata_dir_load（基础层）：
+ * Anchor 损坏时该层即"全部未映射"，不需要任何闪存读。
  */
 static void metadata_dir_fill_fixed(metadata_dir_cache_t *dir)
 {
@@ -454,15 +456,9 @@ static void metadata_dir_fill_fixed(metadata_dir_cache_t *dir)
 
     for (uint16_t i = 0U; i < L2P_REGIONS_PER_INSTANCE; i++)
     {
-        uint16_t block;
-        uint8_t  page;
-        uint8_t  plane;
-
-        ftl_l2p_region_placement(i, &block, &page, &plane);
-
         dir->entries[dir->count].type = METADATA_TYPE_L2P_REGION;
         dir->entries[dir->count].id   = i;
-        dir->entries[dir->count].pba  = pba_make(dir->topo.ch, dir->topo.ce, dir->topo.lun, block, plane, page, 0U);
+        dir->entries[dir->count].pba  = NAND_PBA_INVALID;
         dir->count++;
     }
 }
@@ -479,11 +475,17 @@ static void metadata_dir_rebuild_live(metadata_dir_cache_t *dir)
         {
             continue;
         }
+        /* ⚠ 必须先挡 INVALID：0xFFFFFFFF 的 block 字段解出 0x7FF、plane 解出 1，
+         *   会误算成一个合法 gblock（4095）并记进 l2p_live —— 编译期完全无声。 */
+        if (dir->entries[i].pba == NAND_PBA_INVALID)
+        {
+            continue; /* 未映射，不在任何日志块上 */
+        }
 
         uint16_t block = (uint16_t)pba_to_block(dir->entries[i].pba);
         if (block < FTL_METADATA_BLOCK_END)
         {
-            continue; /* 固定层（哨兵）不是日志块 */
+            continue; /* 非日志块（正常路径不会出现：L2P region 只落日志块） */
         }
 
         uint16_t g = ftl_gblock((uint8_t)pba_to_plane(dir->entries[i].pba), block);
@@ -552,7 +554,7 @@ static void md_job_reset(metadata_dir_cache_t *dir)
 
 /* --------------------------------------------------------------------
  * metadata_dir_init
- *   功能：首次格式化——建立固定哨兵层、清 Anchor 序号/脏标记、游标全部置无效。
+ *   功能：首次格式化——全部 region 置"未映射"、清 Anchor 序号/脏标记、游标全部置无效。
  *   参数：dir —— 待初始化 Directory（前置条件，非法即 ASSERT）。
  *   返回：无。
  *   实现要点：游标置无效是"绝不复用可能已编程的旧页"的保证——首次追加才从 Free
@@ -645,7 +647,7 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
      * ⚠ 本分支对 METADATA_TYPE_L2P_REGION **不可达**：METADATA_DIR_ENTRIES 已等于
      *   L2P_REGIONS_PER_INSTANCE，且每个 region 在 metadata_dir_fill_fixed 就登记完毕，
      *   刷新后走的是上面的"覆盖"分支。旧版容量 128 < 2048 时本分支可达，结果是
-     *   region ≥128 的刷新位置被**静默丢弃**（重启回落到固定位置 = 更新永久丢失）。
+     *   region ≥128 的刷新位置被**静默丢弃**（重启回落到"未映射" = 更新永久丢失）。
      *
      * ⚠ 只有"登记第 METADATA_DIR_ENTRIES+1 种元数据"才会走到这里。届时**不要**在此
      *   静默返回：调用者以为位置已记录，实际没有。必须先扩容量或实现淘汰。
@@ -835,7 +837,7 @@ static nand_pba_t metadata_dir_slot_now(metadata_dir_cache_t *dir)
  *   参数：dir —— Directory；alloc —— 分配器（取新块）。
  *   返回：nand_pba_t 槽位置；NAND_PBA_INVALID 两 plane Free Pool 皆空 / 无当前写块。
  *   实现要点：当前块无效或写满 ⇒ 先回收无活 region 的日志块，再取新块（plane 轮转，
- *             本 plane 空则换另一 plane；**两 plane 都空绝不回退固定位置**）；
+ *             本 plane 空则换另一 plane；**两 plane 都空则返回 INVALID（无固定位置可退）**）；
  *             取到位置后**立即推进** cur_metadata_page（写失败页可能半编程不可复用）。
  *             ⚠ 换块后若 Free Pool 吃紧，只**登记压缩请求**（job.compact_wanted）并返回
  *             NAND_PBA_INVALID——新块整块空槽，是唯一能一次搬空任意 victim 的时机，
@@ -874,7 +876,7 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
             plane = (uint8_t)((plane + 1U) % PLANE_NUM);
             if (allocator_alloc_log_block(alloc, plane, &gblock) != FTL_OK)
             {
-                return NAND_PBA_INVALID; /* 两 plane 都空：**绝不**回退到固定位置 */
+                return NAND_PBA_INVALID; /* 两 plane 都空：本仓没有可回退的固定位置 */
             }
         }
 
@@ -911,9 +913,9 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
  *   参数：dir —— Directory；alloc —— 分配器（保留形参：回收已改由 job 做）；region_id；
  *         new_pba —— 新位置。
  *   返回：无（越界 no-op）。
- *   实现要点：只对**日志块**位置（block ≥ FTL_METADATA_BLOCK_END）增减活计数——固定
- *             哨兵层不计。旧块归零且非当前块 ⇒ 登记进 `job.reclaim_target`，把
- *             "已无引用却带旧内容"的窗口压到最短（否则要等下次 append_slot 换块才回收）。
+ *   实现要点：只对**日志块**位置（block ≥ FTL_METADATA_BLOCK_END）增减活计数——
+ *             INVALID（未映射）不计。旧块归零且非当前块 ⇒ 登记进 `job.reclaim_target`，
+ *             把"已无引用却带旧内容"的窗口压到最短（否则要等下次 append_slot 换块才回收）。
  *   ⚠ **本函数不擦 NAND**（阶段 8 起的刻意变更）：它运行在完成派发里
  *     （`ftl_op_l2p` 的 FLUSHING 分支），就地擦块 = 在完成泵里嵌套泵。
  * -------------------------------------------------------------------- */
@@ -1762,10 +1764,10 @@ void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t
 
 /* --------------------------------------------------------------------
  * metadata_dir_load
- *   功能：开机加载 Directory——先铺固定哨兵层，再定位并读回最新有效 Anchor 覆盖 entries。
+ *   功能：开机加载 Directory——先铺"全部未映射"基础层，再定位并读回最新有效 Anchor 覆盖 entries。
  *   参数：dir —— Directory（含 topo）。
  *   返回：FTL_OK 成功；FTL_ERROR 池内无有效 Anchor（调用者转 metadata_dir_init）。
- *   实现要点：先 fill_fixed 铺基础层（Anchor 缺页/损坏时该区间回落固定位置，不出现空洞）；
+ *   实现要点：先 fill_fixed 铺基础层（Anchor 缺页/损坏时该区间回落"未映射"，不出现空洞）；
  *             定位失败或无有效记录 ⇒ 清游标返回错误；读胜者逐页校验，坏页保留基础层；
  *             **游标不跨重启恢复**（首次追加从 Free Pool 新取块，绝不复用旧页）。
  * -------------------------------------------------------------------- */
@@ -1776,8 +1778,8 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
     ASSERT(dir != NULL);
 
-    /* 基础层：全部 region 的固定位置（哨兵层，永不写入 ⇒ 读回即"未映射"）。
-     * Anchor 缺页/损坏时该区间回落到固定位置，不会出现"未登记"的空洞。 */
+    /* 基础层：全部 region = NAND_PBA_INVALID（未映射）。
+     * Anchor 缺页/损坏时该区间回落"未映射"，不会出现"未登记"的空洞。 */
     metadata_dir_fill_fixed(dir);
     metadata_dir_rebuild_live(dir); /* 失败路径也要给出确定的活计数（开机日志用）*/
 
@@ -1833,7 +1835,7 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
         }
         if ((!anchor_page_valid(&page)) || (page.sequence != dir->anchor_sequence) || (page.chunk_index != chunk))
         {
-            continue; /* 该页不可信：保留基础层的固定位置 */
+            continue; /* 该页不可信：保留基础层的"未映射" */
         }
 
         uint16_t n = (uint16_t)((page.entry_count < METADATA_DIR_ENTRIES_PER_PAGE) ? page.entry_count : METADATA_DIR_ENTRIES_PER_PAGE);
@@ -1878,7 +1880,6 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
  * 本表原先住在 src/ftl/ftl_config.c；布局归 metadata 之后随之下沉到本文件。
  */
 const ftl_partition_t g_ftl_partitions[] = {
-    { "L2P Table",    L2P_BASE_BLOCK,             L2P_BLOCKS,                               1U, FTL_PART_FIXED,        FTL_L2P_TABLE_BYTES},
     {    "Anchor",     ANCHOR_BLOCK0,     ANCHOR_POOL_BLOCKS,         ANCHOR_RECORDS_PER_BLOCK, FTL_PART_FIXED,     FTL_ANCHOR_TABLE_BYTES},
     {"Checkpoint", CHECKPOINT_BLOCK0, CHECKPOINT_POOL_BLOCKS, FTL_CHECKPOINT_RECORDS_PER_BLOCK, FTL_PART_FIXED, FTL_CHECKPOINT_TABLE_BYTES},
     {       "BBT",         BBT_BLOCK,        BBT_POOL_BLOCKS,                  PAGES_PER_BLOCK, FTL_PART_FIXED,        FTL_BBT_TABLE_BYTES},
@@ -1938,8 +1939,8 @@ bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, ui
     }
 
     /* ── 日志块：Metadata Directory 登记的 L2P region 物理位置 ──
-     * L2P region 首写落在固定表区（上面已短路），之后从 Free Pool 动态取块
-     * （flushed region，块号 >= FTL_METADATA_BLOCK_END）。这些块写满 64 页，
+     * L2P region 只落动态日志块（从 Free Pool 取块，块号 >= FTL_METADATA_BLOCK_END；
+     * 未映射的 region 条目是 INVALID，不指向任何块）。这些块写满 64 页，
      * 逐页判空会误判为满 SB，必须排除。
      * ⚠ entries 有 2048 条而本函数在开机回填里按块调用数千次 ⇒ 用 have_dynamic
      *   先挡掉"根本没有动态块"的常见情形（全表线性扫会明显拖慢开机）。 */
@@ -1947,7 +1948,10 @@ bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, ui
     {
         for (uint16_t i = 0U; i < md_dir->count; i++)
         {
+            /* ⚠ 必须跳过 INVALID：0xFFFFFFFF 解出 plane=1 / block=2047，会把最后
+             *   一个用户块误判成元数据块（既出不了 Free Pool、又被 F2 重建跳过）。 */
             if ((md_dir->entries[i].type == METADATA_TYPE_L2P_REGION) &&
+                (md_dir->entries[i].pba != NAND_PBA_INVALID) &&
                 ((uint8_t)pba_to_plane(md_dir->entries[i].pba) == plane) &&
                 (pba_to_block(md_dir->entries[i].pba) == block))
             {

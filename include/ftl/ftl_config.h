@@ -33,8 +33,7 @@
  *   用户容量   = 条目总数 × 每 CW 用户字节
  *
  * ⚠ **元数据区布局不在这里**——哪个分区占哪些块、每个池多大、每条 record 占几页、
- *   运行期分区表 `g_ftl_partitions[]`、以及 region 打包放置公式
- *   `ftl_l2p_region_placement()`，全部在 **ftl/metadata.h**（运行期表在
+ *   运行期分区表 `g_ftl_partitions[]`，全部在 **ftl/metadata.h**（运行期表在
  *   src/ftl/metadata.c）。那是 metadata 模块的事实来源，不是"配置"。
  * ⚠ 本文件只依赖 nand_config.h（几何）与 fc.h（CW 用户区大小），不引 l2p_cache/metadata，
  *   以免循环包含。
@@ -54,10 +53,6 @@
 
 /* 全芯片块数（per-LUN）= 每 plane 块数 × plane 数 */
 #define FTL_BLOCK_TOTAL (BLOCKS_PER_PLANE * PLANE_NUM)
-
-/* 每块"页槽位"数 = 每块页数 × plane 数（同页两 plane 都放一个 region）
- * ⚠ 供 metadata.h 的 L2P 打包公式使用（L2P_REGION_PER_BLOCK）。*/
-#define FTL_SLOTS_PER_BLOCK (PAGES_PER_BLOCK * PLANE_NUM)
 
 /* 映射单元（IU）= 1 个 CW；每条 L2P 条目覆盖该 CW 的**用户数据区**。
  * ⚠ 不是 CW_SIZE(528)：CW 槽 = [META:4][CRC:4][USER:512][PARITY:8]，其中 16B

@@ -42,14 +42,14 @@
 |---|---|---|
 | 映射粒度 | **IU 级（1 LBA = 1 CW = 512B = 页/4）**——**已迁移（波 2 序 2，未上板）**：1 次 512B 写更新 1 条 L2P entry + 1 条 journal；一个 pair 窗口 8 LBA = plane0 页 + plane1 页 | `ftl_config.h §三`；`ftl.c ftl_issue_subop/ftl_confirm_write`；`request.c` |
 | L2P 存储 | NAND 元数据区，**DRAM-less**；全表 2048 region × 512 entry × 4B = **4MB** | `l2p_cache.h:29-51` |
-| L2P 位置解析 | Metadata Directory（`L2P_REGIONS_PER_INSTANCE` = 2048 entry）动态分配 + 哨兵层（0-15 块）回退 | `metadata.c:35-355`；`metadata.h`（`ftl_l2p_region_placement`）|
+| L2P 位置解析 | Metadata Directory（`L2P_REGIONS_PER_INSTANCE` = 2048 entry）动态分配；未映射 = 目录条目 `NAND_PBA_INVALID`（不读 NAND） | `metadata.c`（`metadata_dir_lookup/fill_fixed`）；`metadata.h` |
 | L2P cache | SRAM **64 region** CLOCK（近似 LRU），write-back + journal | `l2p_cache.c:78-132,239-264` |
 | **thrashing 检测** | ~~**无**（只有 hit/miss 计数）~~ ⇒ P1-4 已落地：窗口化 miss 率 + 滞回 + 停主动 flush | `l2p_cache.{h,c}`、`ftl.c` |
 | GC victim | **多维加权评分**（P1-1 ✅ 已落地）：有效页 / 磨损 / 温度 / 时间 四维（权重 500/200/200/100） | `gc.h:46-49,111` |
 | GC 触发 | **3 条**（P1-2 ✅ + **v0.63 收敛**）：T1 水位 / T4 紧急 / T5 磨损均衡；**T2 写入、T3 定时、T6 碎片率均不实现**（T2/T3 参考层零出处且求值点不可达，见 v0.63） | `gc.h`；`gc.c`（`gc_check_triggers`） |
 | 静态 WL | **已实现**（三条件触发 + 冷块 victim + read_count 权重） | `wear_leveling.c:14-306`；`ftl.c:392` |
 | 动态 WL | allocator 每 plane 选擦除最少块 | `allocator.c:119-148` |
-| **擦除计数持久化** | **有**（P0-1 ✅ 已落地）：Wear 表落块 62（页式追加日志），开机回放回填 BST 的 `erase_count`/`read_count` | `include/ftl/wear.h`、`src/ftl/wear.c`；`ftl.c:586` |
+| **擦除计数持久化** | **有**（P0-1 ✅ 已落地）：Wear 表落块 46（页式追加日志），开机回放回填 BST 的 `erase_count`/`read_count` | `include/ftl/wear.h`、`src/ftl/wear.c`；`ftl.c:586` |
 | Free Pool | **单一 free 池 + OP 池**；三级**水位**（P1-3 ✅ 定案）；`pre_cond_count ≡ free_count`（**非缺陷**，GC 先擦后归还） | `allocator.c`；`gc.h` |
 | 温度分区 | Hot/Cold 两个 Open SB | `allocator.c:43-44,348` |
 | Super Block | 双 plane **各自独立选块**（Policy B，v0.12）；不再要求 `block1 = block0` 同号 | `allocator.h:59,192`；`allocator.c:152,192` |
@@ -76,7 +76,7 @@
 | Free Pool | 单池 + OP + 三级**水位** | nvcache chunk + band 状态机 | — | — | 本仓**三级水位已生效**（v0.52 定案） |
 | 多流/温度 | Hot/Cold 双 Open SB | band 顺序写 | — | — | 本仓对齐消费级，**弱于企业级多流** |
 | 学习型压缩 | 无 | 无 | 无 | 无 | **LeaFTL 是前沿方向**，本仓未涉及 |
-| 有效性基建（计数持久化） | ~~**缺**（归零）~~ ⇒ **P0-1 ✅ 已落地**：Wear 表（块 62）持久化 `erase_count`/`read_count`，v0.65 起并入 rr 三字段 | 有（shm 脏跟踪） | 有 | 有 | ~~本仓**落后**~~ ⇒ **已补齐** |
+| 有效性基建（计数持久化） | ~~**缺**（归零）~~ ⇒ **P0-1 ✅ 已落地**：Wear 表（块 46）持久化 `erase_count`/`read_count`，v0.65 起并入 rr 三字段 | 有（shm 脏跟踪） | 有 | 有 | ~~本仓**落后**~~ ⇒ **已补齐** |
 
 **一句话**：本仓在「DRAM-less 路线 + 分层结构」上不落后；~~**落后的是 GC/WL 的算法深度与计数持久化**~~
 ⇒ **计数持久化已补齐（P0-1/v0.65）**；剩余差距是 GC/WL 的算法深度（波 4 未排）。
@@ -131,7 +131,7 @@
 - **对照**：SPDK FTL 用 shm 跟踪脏页；Jasmine/企业级持久化 block metadata。
 - **落地方式**：新增 `include/ftl/wear.h` + `src/ftl/wear.c` —— Wear 表落在已预留的固定块
   `WEAR_BLOCK`（**v0.50 布局后 = 62**；条目 8B、快照 17 页），介质上是**块内页式追加日志**（sequence + 页序，与 Anchor/Journal
-  同一套日志惯例；绝对值 + 最新胜），而非"每次整表重写"——块 62 只有 64 页、全量快照 17 页，
+  同一套日志惯例；绝对值 + 最新胜），而非"每次整表重写"——块 46 只有 64 页、全量快照 17 页，
   整表重写会让它 ~3.8 次落盘就被擦一次（磨损远超数据块）。
   开机 `wear_init` 逐页回放回填 BST（非致命：无有效页 = 冷启动）；运行期 5 个变更点
   `wear_mark_dirty` 置脏位，`ftl_service_idle`/`normal` 里 `wear_kick` 按节拍
@@ -170,7 +170,8 @@
     （旧序 header 早于 Anchor ⇒ 两者之间掉电会「header 新 / Directory 旧」⇒ 丢更新）。
   - **BBT 池**：块 56-57（2 块，一条 1 页）。
   - **Journal 不动**（4 块环 + 擦除 + 两遍重放本来就是对的；只挪块号 58-61）。
-  - **块布局**：L2P 基础层 0-15 是**哨兵层（永不写入）**，读回全 0xFF = 未映射；
+  - **块布局**：L2P 基础层 0-15 是**哨兵层（永不写入）**，读回全 0xFF = 未映射
+    （v0.79 已删除该层，见 `ftl_revision_history.md`；本条记录当时的波次设计）；
     `FTL_METADATA_BLOCK_END` 27 → **63**（物理 126/4096 = 3.1% 系统区）。
 - **代价**：池满擦旧块 ⇒ 元数据有**回收成本**（原先文档写「不需要 GC」是错的，见
   `ftl_design.md` §2.3 订正）。Anchor 每块擦一次 ≈65,536 次主机写（8 份/块）⇒ 磨损是
@@ -577,7 +578,7 @@
 
 | 批次 | 内容 | 结论 |
 |---|---|---|
-| P0-1 | Wear 表跨重启持久化（块 62 页式追加日志） | ✅ |
+| P0-1 | Wear 表跨重启持久化（块 46 页式追加日志） | ✅ |
 | P0-2 | 元数据写模型统一（只写擦除页 + sequence + 池内轮转 + 整条校验） | ✅ |
 | P1-1..P1-6 | GC 多维加权 / 触发 5 条 / 三级水位 / thrashing 降级 / SB 独立块号 / Journal 双倍擦除 | ✅ |
 | v0.55~v0.58 | BST 位图分离 → 删死字段 → 对外接口对齐主流 | ✅ |

@@ -442,19 +442,18 @@ PAA(uint32_t)，低位 → 高位：
 
 | 块号 | 分区 | 块数 | 用途 |
 |---|---:|---:|---|
-| 0..15 | L2P Table | 16 | **哨兵层**：给未写过的 region 一个确定位置；该区页永不写入 |
-| 16..47 | Anchor | 32 | Metadata Directory 的全量快照池，块内轮转 |
-| 48..55 | Checkpoint | 8 | Checkpoint Header + 块账快照池 |
-| 56..57 | BBT | 2 | 坏块位图池 |
-| 58..61 | Journal | 4 | L2P 增量日志，环形 |
-| 62 | Wear | 1 | 每块擦除/读计数 + ECC 健康的持久化日志 |
-| 63.. | 用户数据 | — | Free Pool / Open SB / Closed SB / OP / Spare |
+| 0..31 | Anchor | 32 | Metadata Directory 的全量快照池，块内轮转 |
+| 32..39 | Checkpoint | 8 | Checkpoint Header + 块账快照池 |
+| 40..41 | BBT | 2 | 坏块位图池 |
+| 42..45 | Journal | 4 | L2P 增量日志，环形 |
+| 46 | Wear | 1 | 每块擦除/读计数 + ECC 健康的持久化日志 |
+| 47.. | 用户数据 | — | Free Pool / Open SB / Closed SB / OP / Spare |
 
-两个容易混淆的点：
+要点：
 
-- **L2P 哨兵层不是数据区**。它只在 `metadata_dir_init` 时铺出“出厂位置”，页保持擦除态；
-  读回全 `0xFF` 表示“该 region 从未写过”。写过的 region 一律落到动态日志块，
-  位置由 Metadata Directory 记录（§3.5）。
+- **未映射不占闪存**。Directory 为每个 region 预登记一条 `NAND_PBA_INVALID`
+  （= 从未写过）；读取该 region 时 L2P cache 直接合成全 `INVALID` 的行，**不发 NAND 读**。
+  写过的 region 一律落到动态日志块，位置由 Metadata Directory 记录（§3.5）。
 - **只有 L2P region 日志块是动态的**，从 Free Pool 取整块（`allocator_alloc_log_block`）。
   Anchor/Checkpoint/BBT/Journal/Wear 都是固定块池；池内轮转、先擦后写。
 
@@ -894,7 +893,7 @@ flowchart TD
 | 常量 | 值 | 来源 |
 |---|---|---|
 | `BBT_MAGIC` | `0x424254AB` | `include/ftl/bbt.h` |
-| BBT 池块数 | 2（块 56..57） | `include/ftl/metadata.h` |
+| BBT 池块数 | 2（块 40..41） | `include/ftl/metadata.h` |
 | `bad_map` | 512 B = 4096 bit | 同上 |
 | 出厂标记列 | 2048（`PAGE_MAIN_SIZE`） | 器件页布局 |
 | Spare / plane | 50 | `allocator.h` |
@@ -925,7 +924,7 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 
 #### 3.4.2 职责与边界
 
-- **wear.c**：把每块的计数持久化到固定块 62 的页式追加日志；开机回填 BST；
+- **wear.c**：把每块的计数持久化到固定块 46 的页式追加日志；开机回填 BST；
   后台按“120 s 或 1024 次写增量”落盘。
 - **wear_leveling.c**：静态 WL 的触发判定与 victim 选择；搬移交给 `migrate.c`。
 - **不做**：不执行擦除/搬移；不决定 GC（`gc.c`）；不维护 BST（`allocator.h`）。
@@ -971,7 +970,7 @@ flowchart TD
 
 #### 3.4.5 关键流程
 
-1. **开机**：`wear_init` 逐页读块 62，magic 校验，按页序回放，把计数写回 BST。
+1. **开机**：`wear_init` 逐页读块 46，magic 校验，按页序回放，把计数写回 BST。
    第一个无效页即日志末尾，下次从该页续写。读失败只当冷启动（非致命）。
 2. **落盘**：`wear_kick` 检查双门（`WEAR_FLUSH_INTERVAL_MS` **或** 写增量 ≥ 1024）；
    剩余页装不下脏条目 → 先 compact（异步擦块 + 写全量 25 页）；否则按起点快照
@@ -1019,10 +1018,10 @@ FTL 的通用形态。**本仓自定**的是三条件 OR 的具体阈值（5000/
 
 ### 3.5 元数据目录（metadata.c / metadata.h）
 
-> **本节怎么读**：先看 §3.5.1 的两层模型（固定哨兵层 + 动态日志块），再看 §3.5.3 的
-> 四个结构，然后按 §3.5.5 的写路径读一遍，最后看 §3.5.8 的回收/压缩状态机。
-> `metadata.c` 难读的根因不是命名，而是**同一个“位置”有两层来源**：固定公式给出的
-> 初始位置，和 Directory 登记的最新位置。先把这两层分开，代码就顺了。
+> **本节怎么读**：先看 §3.5.1 的背景（为什么位置会变、为什么需要 Directory），再看
+> §3.5.3 的四个结构，然后按 §3.5.5 的写路径读一遍，最后看 §3.5.8 的回收/压缩状态机。
+> `metadata.c` 的核心是**唯一的一层位置来源**：Directory 条目。`NAND_PBA_INVALID` =
+> 从未写过（未映射），非 INVALID = region 页在日志块上的真实位置。
 
 #### 3.5.1 背景与需求
 
@@ -1061,24 +1060,24 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `power_failure_recovery.c` | `metadata_dir_load`、`ftl_is_metadata_block` |
 | `ftl.c` | `metadata_dir_kick`（后台 job） |
 
-#### 3.5.3 两层元数据模型
+#### 3.5.3 元数据位置模型
 
-| 层 | 位置 | 谁写 | 读回含义 |
+| 对象 | 位置 | 谁写 | 读回含义 |
 |---|---|---|---|
-| **L2P 哨兵层** | 固定块 0..15（16 块） | **永不写** | 全 `0xFF` = 该 region 从未写过 |
+| **L2P region（未映射）** | Directory 条目 = `NAND_PBA_INVALID` | 无（`fill_fixed` 预登记） | 该 region 从未写过；不读 NAND |
 | **L2P 动态日志块** | Free Pool 取的整块 | `l2p_cache_flush_kick` 追加 | 最新一份 region 页 |
-| **Anchor** | 固定池 16..47 | Directory 快照 job / CP | Directory 全量快照 |
-| **Checkpoint** | 固定池 48..55 | CP job | L2P 水位 + 块账快照 |
-| **BBT** | 固定池 56..57 | BBT job | 坏块位图 |
-| **Journal** | 固定池 58..61 | Journal job | L2P 增量日志 |
-| **Wear** | 固定块 62 | Wear job | 每块计数 |
+| **Anchor** | 固定池 0..31 | Directory 快照 job / CP | Directory 全量快照 |
+| **Checkpoint** | 固定池 32..39 | CP job | L2P 水位 + 块账快照 |
+| **BBT** | 固定池 40..41 | BBT job | 坏块位图 |
+| **Journal** | 固定池 42..45 | Journal job | L2P 增量日志 |
+| **Wear** | 固定块 46 | Wear job | 每块计数 |
 
 两类写模型：
 
 - **固定池（Anchor/CP/BBT/Wear）**：record 池，块内轮转，先擦后写，最新有效胜。
   每条 record 带单调 sequence；读 = 找“整条校验通过”中 sequence 最大者。
 - **动态日志块（L2P region）**：一页一个 region，只追加；块满换新块；旧块由
-  `l2p_live` 归零后回收。**绝不回退到哨兵层**（哨兵层不可写）。
+  `l2p_live` 归零后回收。未映射的 region 没有物理页，也没有"固定回退位置"。
 
 #### 3.5.4 结构与字段
 
@@ -1156,12 +1155,12 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 **不变量**
 
 1. **`entries` 容量 = 每实例 region 数**：每个 region 都必须能登记自己的位置；
-   容量不足会让“满则丢弃”丢掉已落到动态块的 region，重启后回落到固定位置 = 更新永久丢失。
+   容量不足会让“满则丢弃”丢掉已落到动态块的 region，重启后回落到“未映射” = 更新永久丢失。
 2. **`l2p_live[g]` = 最新位置在 g 上的 region 数**。归零才可擦；当前日志块除外。
 3. **`append_slot` 只取槽、不登记**；`commit_region` 只登记。两者分离是崩溃安全前提。
 4. **Anchor 先于 victim 擦除**：压缩的顺序是“搬移 → 登记 → Anchor 落盘 → 擦 victim → 归还”。
 5. **`entries` 存 PBA，不存 PAA**；读取一律经 `lookup`，不现场手写位置公式。
-6. **固定层永不写**：`append_slot` 分配失败时返回 `NAND_PBA_INVALID`，不回退固定位置。
+6. **未映射没有物理位置**：`append_slot` 分配失败时返回 `NAND_PBA_INVALID`；不存在可回退的固定块。
 
 #### 3.5.5 地址模型：ring / locate / prepare
 
@@ -1224,21 +1223,20 @@ flowchart LR
     D --> E["metadata_dir_lookup L2P_REGION, local_region"]
     E --> F{"pba 有效"}
     F -- "是" --> G["ftl_async_read_page pba"]
-    F -- "否" --> H["用固定哨兵位置 l2p_region_pba local_region"]
-    H --> G
-    G --> I["ftl_op_l2p 填入 cache line LOADING 到 CLEAN"]
+    G --> I["ftl_op_l2p 填入 cache line：LOADING → CLEAN"]
+    F -- "否" --> H["line 直接置 CLEAN（entries 全 INVALID，不读 NAND）"]
 ```
 
 `metadata_dir_lookup` 是 `entries[]` 线性扫描（2048 条）；`have_dynamic == 0` 时跳过
 动态块扫描（开机回填数千次调用，这个短路明显缩短启动）。**它不读 NAND**——Directory
-是 SRAM 常驻的；读 NAND 的是随后加载 region 页的命令。
+是 SRAM 常驻的；读 NAND 的是随后加载 region 页的命令（未映射则根本不发命令）。
 
 **启动加载**（`metadata_dir_load`）：
 
 ```text
-① metadata_dir_fill_fixed：铺固定层（与 metadata_dir_init 共用）
-   对 r = 0..2047：entries[r] = {type=L2P_REGION, id=r, pba=l2p_region_pba(r)}
-   （哨兵位置；页永不写，读回全 0xFF = 未映射）
+① metadata_dir_fill_fixed：铺基础层（与 metadata_dir_init 共用）
+   对 r = 0..2047：entries[r] = {type=L2P_REGION, id=r, pba=NAND_PBA_INVALID}
+   （= 未映射；没有物理页，也没有固定回退位置）
 ② metadata_ring_locate(Anchor 池) 找最新“整条校验通过”的 record
 ③ 读胜者各页，逐页校验 chunk_index / sequence / layout_version，装配覆盖对应区间
 ④ 由装配后的 entries 重建 l2p_live[] 与 have_dynamic
@@ -1427,19 +1425,18 @@ CRC 覆盖 META+USER，且自身在 ECC 码字内，能消除“ECC 误纠后看
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `L2P_BLOCKS` | 16（0..15） | `include/ftl/metadata.h` |
-| `ANCHOR_POOL_BLOCKS` | 32（16..47） | 同上 |
+| `ANCHOR_POOL_BLOCKS` | 32（0..31） | `include/ftl/metadata.h` |
 | `ANCHOR_ENTRIES_PER_PAGE` | 256 | 同上 |
 | `ANCHOR_PAGE_COUNT` | 8 | 同上 |
 | `ANCHOR_RECORDS_PER_BLOCK` | 8 | 同上 |
-| `CHECKPOINT_POOL_BLOCKS` | 8（48..55） | 同上 |
-| `BBT_POOL_BLOCKS` | 2（56..57） | 同上 |
-| `JOURNAL_BLOCKS` | `CW_NUM` = 4（58..61） | 同上 |
-| `WEAR_BLOCKS` | 1（62） | 同上 |
+| `CHECKPOINT_POOL_BLOCKS` | 8（32..39） | 同上 |
+| `BBT_POOL_BLOCKS` | 2（40..41） | 同上 |
+| `JOURNAL_BLOCKS` | `CW_NUM` = 4（42..45） | 同上 |
+| `WEAR_BLOCKS` | 1（46） | 同上 |
 | `METADATA_DIR_ENTRIES` | 2048 | 同上 |
 | `metadata_entry_t` | 7 B | 同上 |
 | `metadata_anchor_page_t` | 2048 B | 同上 |
-| 介质版本 | 6（DIM=1）/ 7（DIM>1） | 同上 |
+| 介质版本 | 7（DIM=1）/ 8（DIM>1） | 同上 |
 | `MD_SUBMIT_STALL_MAX` | 256 | `src/ftl/metadata.c` |
 | Anchor 触发节流 | `change_count >= 64` | `src/ftl/metadata.c` |
 
@@ -3311,7 +3308,7 @@ flowchart TB
 | 用户数据页 | `wbuf_flush` / migrate | host 读 / GC | 数据丢失 | 无（由 ECC/读恢复兜底） |
 | 页内 META | FC（`cmd->meta`） | GC / F2 / RR | 无法判有效 CW | 整页作废 |
 | L2P region 页 | L2P flush | L2P load | 映射回退一版 | Journal 回放 |
-| Directory entry（SRAM） | `commit_region` / load | lookup | 位置丢失 | Anchor / 哨兵层 |
+| Directory entry（SRAM） | `commit_region` / load | lookup | 位置丢失 | Anchor（无 Anchor = 全部未映射）|
 | Anchor record | CP / md job | boot | Directory 回退到旧快照 | 旧 Anchor / F2 |
 | Journal 页 | Journal job | boot replay | 增量丢失 | 旧 L2P 表（回退一版） |
 | Checkpoint Header | CP | boot | 水位/块账丢失 | 上一个 CP / F2 |
@@ -3744,8 +3741,7 @@ flowchart TB
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `L2P_BLOCKS` | 16 | `include/ftl/metadata.h` |
-| `ANCHOR_POOL_BLOCKS` | 32 | 同上 |
+| `ANCHOR_POOL_BLOCKS` | 32 | `include/ftl/metadata.h` |
 | `ANCHOR_ENTRIES_PER_PAGE` | 256 | 同上 |
 | `ANCHOR_PAGE_COUNT` | 8 | 同上 |
 | `ANCHOR_RECORDS_PER_BLOCK` | 8 | 同上 |
@@ -3754,7 +3750,7 @@ flowchart TB
 | `METADATA_DIR_ENTRIES` | 2048 | 同上 |
 | `metadata_entry_t` | 7 B | 同上 |
 | `metadata_anchor_page_t` | 2048 B | 同上 |
-| `FTL_MEDIA_LAYOUT_VERSION` | 6（DIM=1）/ 7（DIM>1） | 同上 |
+| `FTL_MEDIA_LAYOUT_VERSION` | 7（DIM=1）/ 8（DIM>1） | 同上 |
 | Anchor 落盘节流 | `change_count >= 64` | `src/ftl/metadata.c` |
 | `MD_SUBMIT_STALL_MAX` | 256 | 同上 |
 

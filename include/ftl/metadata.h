@@ -19,7 +19,8 @@
  *   整个 Directory。池内块顺序轮转（见 §元数据写模型），最新有效 record 胜。
  *
  * 元数据（从 Free Pool 动态分配）:
- *   L2P Region       — 固定表区（哨兵，永不写入）+ 日志块（通过 Directory 查找）
+ *   L2P Region       — 日志块（通过 Directory 查找）；目录条目 = NAND_PBA_INVALID
+ *                      即该 region 从未写过（未映射），读取不经 NAND
  *   Journal          — 固定元数据区（块位置见上方「固定元数据区布局」）
  *   Checkpoint/BBT   — 固定元数据区（见上方「固定元数据区布局」）
  *
@@ -36,7 +37,7 @@
  */
 
 #include "ftl/allocator.h"
-#include "ftl/ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / FTL_SLOTS_PER_BLOCK / L2P_REGIONS_PER_INSTANCE）*/
+#include "ftl/ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / L2P_REGIONS_PER_INSTANCE）*/
 #include "ftl/ftl_type.h"
 #include "nand/nand_config.h" /* PAGE_MAIN_SIZE（Anchor 页打包自检）*/
 
@@ -55,10 +56,6 @@
  * 换芯片（改 nand_config.h）或改策略（改本区）⇒ 全表自动重排。
  *
  * ── 尺寸公式（块数怎么算出来）──
- *   L2P Table   ⌈每实例 region 数 ÷ 每块槽位数⌉，每块槽位 = PAGES_PER_BLOCK × PLANE_NUM
- *               ⚠ 这是**哨兵层**：只给"从未写过的 region"一个确定位置，该区页
- *                 **永不写入**（保持擦除态 ⇒ 读回全 0xFF ⇒ 未映射）。写过的 region
- *                 一律落动态日志块（见下方 Metadata Directory）。
  *   Anchor      ANCHOR_POOL_BLOCKS（Directory 的块轮转日志池）
  *   Checkpoint  CHECKPOINT_POOL_BLOCKS（Header 的块轮转日志池）
  *   BBT         BBT_POOL_BLOCKS（坏块位图的块轮转日志池）
@@ -67,13 +64,12 @@
  *
  * ── 当前几何下展开的布局（由下方公式算出，非手写）──
  *   块号        分区        块数  来历
- *   0..15       L2P Table   16    ⌈2048 region ÷ 128 region/块⌉（哨兵层）
- *   16..47      Anchor      32    元数据池：每块 8 份 Directory，块满换块
- *   48..55      Checkpoint  8     元数据池：每块 12 份 record（Header + 块账快照 共 5 页）
- *   56..57      BBT         2     元数据池：每块 64 份坏块位图
- *   58..61      Journal     4     策略 = CW_NUM（CW 级 4× 映射流量）
- *   62          Wear        1     软状态单副本
- *   63..       用户数据    —     FTL_METADATA_BLOCK_END 之后
+ *   0..31       Anchor      32    元数据池：每块 8 份 Directory，块满换块
+ *   32..39      Checkpoint  8     元数据池：每块 12 份 record（Header + 块账快照 共 5 页）
+ *   40..41      BBT         2     元数据池：每块 64 份坏块位图
+ *   42..45      Journal     4     策略 = CW_NUM（CW 级 4× 映射流量）
+ *   46          Wear        1     软状态单副本
+ *   47..       用户数据    —     FTL_METADATA_BLOCK_END 之后
  *
  * ── 元数据写模型（P0-2：全部元数据统一）──
  *   ① 只写**擦除态**页。NAND 只能 1→0，对已编程页二次编程 = 新数据 AND 旧数据
@@ -101,17 +97,6 @@
  * ══════════════════════════════════════════════════════════════════ */
 
 /* ── 池尺寸：策略常量 → 每个分区的块数 ── */
-
-/* L2P Table：region 打包进块（向上取整）
- * 每实例一份，块号各 die 相同（不随 LUN/CE/CH 错开）
- * ⚠ `+ L2P_REGION_PER_BLOCK - 1U` 是**向上取整**惯用法（ceil(a/b) ≡ (a+b-1)/b）：
- *   整数除法截断成 floor，除不尽时会少算一块、丢掉尾部 region。
- *   当前几何 2048 ÷ 128 恰好整除 ⇒ 该项不起作用；但两个操作数都由器件几何推出，
- *   改 PAGES_PER_BLOCK / CW_NUM / PAGE_MAIN_SIZE 任一个就可能不再整除 ⇒ 须写通用形式。
- *   下方 `_Static_assert(L2P_BLOCKS * L2P_REGION_PER_BLOCK >= L2P_REGIONS_PER_INSTANCE)`
- *   要求的正是这个 ceil 语义，两者配套。*/
-#define L2P_REGION_PER_BLOCK (FTL_SLOTS_PER_BLOCK)
-#define L2P_BLOCKS           ((L2P_REGIONS_PER_INSTANCE + L2P_REGION_PER_BLOCK - 1U) / L2P_REGION_PER_BLOCK)
 
 /* ── Anchor（Metadata Directory）池 ──
  * Directory 有 L2P_REGIONS_PER_INSTANCE 条（每条 7 B）⇒ **一页装不下**，须跨页。
@@ -165,12 +150,8 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
 /* 元数据区起点 */
 #define FTL_METADATA_BASE_BLOCK (0U)
 
-/* L2P Table：接在元数据区起点，打包放置（见下方 ftl_l2p_region_placement）。
- * ⚠ 哨兵层：本区页**永不写入** ⇒ 只提供"未映射"语义，不承载数据。*/
-#define L2P_BASE_BLOCK (FTL_METADATA_BASE_BLOCK)
-
-/* Anchor 池：接在 L2P 之后；池 = [ANCHOR_BLOCK0, ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS) */
-#define ANCHOR_BLOCK0 (L2P_BASE_BLOCK + L2P_BLOCKS)
+/* Anchor 池：池 = [ANCHOR_BLOCK0, ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS) */
+#define ANCHOR_BLOCK0 (FTL_METADATA_BASE_BLOCK)
 
 /* Checkpoint 池：接在 Anchor 池之后 */
 #define CHECKPOINT_BLOCK0 (ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS)
@@ -207,20 +188,20 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
  *        块"也建成 Closed 条目 ⇒ 同一块同时进预留池与 closed 列表，账本错乱。⇒ 必须 +1，
  *        让首启自动全片格式化一次。
  * v6：Checkpoint record 从 1 页扩成 5 页（Header + 块账快照 4 页），Header 增加 bit_* 字段
- *     ⇒ 记录格式与块账恢复方式都变了，必须 +1；老介质首启自动格式化一次。 */
-#define FTL_MEDIA_LAYOUT_VERSION_BASE (6U)
+ *     ⇒ 记录格式与块账恢复方式都变了，必须 +1；老介质首启自动格式化一次。
+ * v7：删除 L2P 哨兵层（原固定分区 0..15）——未映射改由 Directory 条目 NAND_PBA_INVALID
+ *     表示；固定元数据分区整体前移 16 个块号，FTL_METADATA_BLOCK_END 63 → 47 ⇒
+ *     块布局变了，必须 +1；老介质首启自动格式化一次。 */
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (7U)
 /*
  * 阶段 B：数据通路改用**全局 LBA**（页 META / journal 存 host 全局 LBA）。
- * - DIM=1：global == local，介质上的值逐位不变 ⇒ 版本仍 6，**不格式化**。
+ * - DIM=1：global == local，介质上的值逐位不变 ⇒ 版本不额外 +1，**不额外格式化**。
  * - DIM>1：同一个 LBA 的编码与旧格式不同 ⇒ +1，首次启用自动全片格式化。
  * 这是本仓自定的格式策略，不是主流判据。
  */
 #define FTL_MEDIA_LAYOUT_VERSION (FTL_MEDIA_LAYOUT_VERSION_BASE + ((FTL_DIM_TOTAL > 1U) ? 1U : 0U))
 
 /* ── 逻辑表字节（公式①：覆盖实体数 × 每实体字节）── */
-
-/* L2P：**每实例** region × 每 region 条目 × 4 B = 4 MiB（每 die 一份；设备总量再 × FTL_DIM_TOTAL）*/
-#define FTL_L2P_TABLE_BYTES ((uint32_t)L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION * sizeof(uint32_t))
 
 /* Anchor：每份 Directory = ANCHOR_PAGE_COUNT 页 */
 #define FTL_ANCHOR_TABLE_BYTES ((uint32_t)ANCHOR_PAGE_COUNT * PAGE_MAIN_SIZE)
@@ -259,45 +240,7 @@ typedef struct
 extern const ftl_partition_t g_ftl_partitions[];
 extern const uint32_t        g_ftl_partition_count;
 
-/* ── L2P Region 打包放置（唯一映射公式，metadata 与 l2p_cache 共用）── */
-
-/*
- * ftl_l2p_region_placement - Region r → (block, page, plane) 打包映射
- *
- *   block = L2P_BASE_BLOCK + r / L2P_REGION_PER_BLOCK
- *   page  = (r % L2P_REGION_PER_BLOCK) / PLANE_NUM   ← 同页各 plane 都放 region
- *   plane = r % PLANE_NUM
- *
- * region_id 是**实例内**编号；各 (ch,ce,lun) 的块号相同（分片模型），故无 lun 形参。
- * 输出指针可为 NULL（只取需要的一项）。
- *
- * ⚠ 本公式归 metadata 所有（"第 r 个 region 放在元数据区的哪个物理位置"是**布局**），
- *   l2p_cache.h 的 `l2p_region_pba()` 只是把它包成带拓扑的 PBA。反过来让 metadata
- *   去 include L2P 缓存头拿这个公式是方向错的。
- */
-static inline void ftl_l2p_region_placement(uint16_t  region_id,
-                                            uint16_t *block,
-                                            uint8_t  *page,
-                                            uint8_t  *plane)
-{
-    if (block != NULL)
-    {
-        *block = (uint16_t)(L2P_BASE_BLOCK + (region_id / L2P_REGION_PER_BLOCK));
-    }
-    if (page != NULL)
-    {
-        *page = (uint8_t)((region_id % L2P_REGION_PER_BLOCK) / PLANE_NUM);
-    }
-    if (plane != NULL)
-    {
-        *plane = (uint8_t)(region_id % PLANE_NUM);
-    }
-}
-
 /* ── 编译期自检（池几何与分区不重叠）── */
-
-/* L2P 块数足以覆盖每实例的 region 数 */
-_Static_assert(L2P_BLOCKS *L2P_REGION_PER_BLOCK >= L2P_REGIONS_PER_INSTANCE, "L2P 块数不足");
 
 /* 固定元数据区不越界 */
 _Static_assert(FTL_METADATA_BLOCK_END <= BLOCKS_PER_PLANE, "固定元数据区超出每 plane 块数");
@@ -313,7 +256,6 @@ _Static_assert(CHECKPOINT_POOL_BLOCKS >= 2U, "Checkpoint 池至少 2 块");
 _Static_assert(BBT_POOL_BLOCKS >= 2U, "BBT 池至少 2 块");
 
 /* 分区按块号升序、互不重叠 */
-_Static_assert(L2P_BASE_BLOCK + L2P_BLOCKS <= ANCHOR_BLOCK0, "L2P 与 Anchor 重叠");
 _Static_assert(ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS <= CHECKPOINT_BLOCK0, "Anchor 与 Checkpoint 重叠");
 _Static_assert(CHECKPOINT_BLOCK0 + CHECKPOINT_POOL_BLOCKS <= BBT_BLOCK, "Checkpoint 与 BBT 重叠");
 _Static_assert(BBT_BLOCK + BBT_POOL_BLOCKS <= JOURNAL_BLOCK0, "BBT 与 Journal 重叠");
@@ -330,7 +272,7 @@ _Static_assert(JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT <= WEAR_BLOCK, "Journal 与 
 /* ── Directory 容量 ──
  * = 每实例 L2P region 数：**每个 region 都必须能登记自己的位置**，否则
  * metadata_dir_update 的"满则丢弃"分支会把已落到动态块上的 region 位置丢掉
- * （重启后回落到固定位置 = 更新永久丢失）。容量取满即按构造消除该分支。*/
+ * （重启后回落到"未映射" = 更新永久丢失）。容量取满即按构造消除该分支。*/
 #define METADATA_DIR_ENTRIES          (L2P_REGIONS_PER_INSTANCE)
 #define METADATA_DIR_ENTRIES_PER_PAGE (ANCHOR_ENTRIES_PER_PAGE)
 
@@ -657,8 +599,9 @@ typedef struct
 /*
  * metadata_dir_init - 初始化 Metadata Directory
  *
- * 首次使用时建立固定的 L2P Region 映射（哨兵层：永不写入，读回 0xFF ⇒ 未映射；
- * 打包放置：Block/Page/Plane 由 ftl_l2p_region_placement() 给出，见本文件上方同名小节）。
+ * 首次使用时为全部 L2P Region 登记 `NAND_PBA_INVALID`（= 未映射；读取该 region
+ * 不需要访问 NAND）。写过并刷盘的 region 由 metadata_dir_commit_region 覆盖成
+ * 日志块上的真实位置。
  *
  * 游标全部置**无效**（cur_block_valid = 0 / anchor_cursor_valid = 0）：首次追加
  * 才从 Free Pool 取块，避免"没拿块就用"。
@@ -673,7 +616,8 @@ void metadata_dir_init(metadata_dir_cache_t *dir);
  * @param dir  Directory cache
  * @param type 元数据类型
  * @param id   L2P region_id / 0 for others
- * @return PBA，NAND_PBA_INVALID 表示未找到
+ * @return PBA；NAND_PBA_INVALID = 未找到。对 L2P region 而言"未找到"与"未映射"
+ *         同义：`fill_fixed` 为每个 region 预登记一条，之后只在刷盘时覆盖。
  */
 nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
                                uint8_t                     type,
@@ -849,7 +793,7 @@ void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t
 /*
  * metadata_dir_load - 从 Anchor 池加载 Directory
  *
- * ① 先 fill_fixed 铺基础层（全部 region 的固定位置 = 哨兵层，读回即"未映射"）；
+ * ① 先 fill_fixed 铺基础层（全部 region = `NAND_PBA_INVALID`，即未映射）；
  * ② metadata_ring_locate 定位池内最新**整条校验通过**的 record；
  * ③ 读胜者各页装配覆盖对应区间（逐页再校验 chunk_index/sequence）；
  * ④ 由装配后的 entries 重建 l2p_live / have_dynamic。
@@ -866,7 +810,7 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir);
 /*
  * ftl_is_metadata_block - 判断物理 Block 是否属于固定/动态元数据区
  *
- * 掉电恢复重建 closed_sb_list 时，L2P Table（固定表区 + 动态 region）、
+ * 掉电恢复重建 closed_sb_list 时，L2P region 日志块、
  * Anchor、BBT、Checkpoint、Journal、Wear 等元数据块可能写满全部页（尤其
  * Journal 环形回切），逐页判空会把它们误判为满 Super Block。本谓词统一排除：
  *

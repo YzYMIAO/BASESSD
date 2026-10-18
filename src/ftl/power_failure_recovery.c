@@ -88,7 +88,7 @@ bool ftl_media_needs_format(struct ftl_context *ftl)
  *   实现要点：① bbt_erase_all_blocks 擦全片（出厂坏块标记已在 bbt_init 读进 BST——
  *                **空片时**才读；用过的介质上 bbt_init 拒绝重扫，见 bbt_medium_has_ftl_data）；
  *             ② bbt_save 重新持久化坏块图（BBT 池刚被擦掉）；
- *             ③ metadata_dir_init 复位 Directory 为哨兵层；④ checkpoint_write_initial
+ *             ③ metadata_dir_init 把 Directory 复位为"全部未映射"；④ checkpoint_write_initial
  *                写一条当前版本标记 ⇒ 下次开机版本判据命中，格式化只发生一次。
  *   ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。
  *   ⚠ BST 的 erase_count 保留旧值（wear_init 已在格式化前加载）——仅影响磨损均衡起点。
@@ -402,6 +402,8 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
  *      该区页 = CP 时刻快照（CP 时已 flush 落盘），预载可复用给
  *      ftl_rebuild_closed_sb_list 的反查。不可直接置 CLEAN——line 的
  *      entries 仍是 init 时全 NAND_PBA_INVALID，read 会对有效映射返回假 INVALID。
+ *      目录条目为 INVALID（该 region 从未写过 / 刷盘未成功）⇒ 无页可预载，
+ *      保持 INVALID 交给懒加载（合成全 INVALID 行，无需 NAND 读）。
  *   ③ bitmap 未置位区：置 INVALID，下一访问懒加载 CP 时刻快照。
  *      该区未在本次 CP 落盘，NAND 页为更旧值/从未写，懒加载即正确。
  *
@@ -451,7 +453,10 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
 
                 if (region_addr == NAND_PBA_INVALID)
                 {
-                    region_addr = l2p_region_pba(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, (uint16_t)local_region);
+                    /* 目录说未映射：没有页可预载。置 INVALID 交给懒加载——那条路径
+                     * 会合成全 NAND_PBA_INVALID 的 CLEAN 行，且不产生 NAND 读。 */
+                    line->state = L2P_CACHE_INVALID;
+                    continue;
                 }
 
                 if (ftl_sync_read_page(region_addr, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META()) == FTL_OK)
