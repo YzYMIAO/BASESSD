@@ -152,6 +152,7 @@
 | **DRAM-less** | 无外置 DRAM：L2P 全表在 NAND，SRAM 只做 region cache |
 | **Write-back** | L2P cache 延迟写回；脏行由 Journal 保掉电一致性 |
 | **Journal** | L2P 增量日志（环形块）；掉电后回放 post-checkpoint 的更新 |
+| **块账快照** | per-block metadata snapshot；**本仓自拟中文名**。每 gblock 一个 16-bit word（有效 CW 数 / 状态 / 温度 / 池归属），随 Checkpoint 记录落盘。主流资料称 per-block metadata / block descriptor；本仓粒度是物理 gblock、放 CP record（SPDK 的 Chunk 是 band 级、放 nvcache） |
 | **Checkpoint（CP）** | L2P 全量快照 + 块账快照 + 截断 Journal |
 | **Anchor** | Metadata Directory 的全量快照，存在固定 Anchor 池 |
 | **modify-after-confirm** | 先等 NAND PROGRAM 成功，再改 L2P/Journal；失败则 L2P 不动 = 自动回滚 |
@@ -294,7 +295,7 @@ flowchart TB
         M7 --> M8["metadata_dir_commit_region S3-5"]
         M2 --> M9["checkpoint_journal_watermark 85 百分比 95 百分比 S3-7"]
         M9 --> M10["checkpoint_begin S3-8"]
-        M10 --> M11["flush regions 到 Anchor 到 块账快照 到 Header 到 截断 Journal"]
+        M10 --> M11["flush regions 到 Anchor 到 块账快照 到 磨损快照 到 Header 到 截断 Journal"]
     end
 
     subgraph "后台与空间"
@@ -341,7 +342,7 @@ flowchart TB
 | **P2** 读 miss | 同上 | §3.6 region load → 下轮重试 | 无（cache 行 CLEAN） | load 失败 → 行 INVALID，重试 | §4.4 |
 | **P3** 主机写 | `ftl_submit_write` | §3.11 wbuf → §3.2 分配 → §3.10 → §3.15 → 完成 §3.6/§3.7/§3.2 | Journal 追加；L2P 行 DIRTY；BST valid ±1 | 编程失败 → 关 SB + 标坏，L2P 不动 | §4.5 |
 | **P4** 脏 region 回写 | 缓存驱逐 / 后台 flush / CP | §3.6 → §3.5 append → 写页 → commit | L2P region 新位置；Directory 更新；`l2p_live` 增减 | 写失败 → 行回 DIRTY，Directory 不登记 | §4.6 |
-| **P5** Checkpoint | 水位/写入量/定时/紧急 | §3.8：快照 → flush regions → Anchor → 块账 → Header → 截断 | 新 CP record；Anchor；Journal 水位标志/预擦 | flush 失败 → 中止，不写 Header | §4.7 |
+| **P5** Checkpoint | 水位/写入量/定时/紧急 | §3.8：快照 → flush regions → Anchor → 块账 → 磨损 → Header → 截断 | 新 CP record；Anchor；Journal 水位标志/预擦 | flush 失败 → 中止，不写 Header | §4.7 |
 | **P6** GC / WL / 预测迁移 | 后台触发 / 写路径紧急 GC | §3.13：选 victim → 读 → 反查有效 → 写新页 → 改 L2P/Journal → 屏障 → 擦 | 新位置映射；journal 条目；源块擦除/归还或退役 | 分配不到目标页 → 中止且不擦 victim | §4.8 |
 | **P7** 读恢复 | host 读 ECC 失败 | §3.14：托管 pending → 读重试 → 邻居页 → 标坏/搬移 | 成功则拷回；失败则 BBT 标坏 + 迁移 | 提交侧长期无进展 → 按失败收尾 | §4.9 |
 | **P8** 上电恢复 | `ftl_init` 后 | §3.1 → §2.5 版本 → §3.7 scan → §3.8 find → §3.1 三分支 → F2 | 块账/映射/cache 从介质重建 | 快照/探测不一致 → F2 兜底 | §4.1~4.3 |
@@ -443,7 +444,7 @@ PAA(uint32_t)，低位 → 高位：
 | 块号 | 分区 | 块数 | plane | 用途 |
 |---|---:|---:|---|---|
 | 0..31 | Anchor | 32 | P0+P1 镜像 | Metadata Directory 的全量快照池，块内轮转 |
-| 32..39 | Checkpoint | 8 | P0+P1 镜像 | Checkpoint Header + 块账快照池 |
+| 32..39 | Checkpoint | 8 | P0+P1 镜像 | Checkpoint Header + 块账快照 + 磨损快照池 |
 | 40..41 | BBT | 2 | P0+P1 镜像 | 坏块位图池 |
 | 42..45 | Journal | 4 | P0+P1 交错（单副本） | L2P 增量日志，环形 |
 | 46.. | 用户数据 | — | P0+P1 | Free Pool / Open SB / Closed SB / OP / Spare |
@@ -890,7 +891,7 @@ L2P region log（追加块）
 隐式前提）⇒ 新数据 AND 旧数据 = **静默损坏**。因此：
 
 ```c
-#define FTL_MEDIA_LAYOUT_VERSION_BASE (8U)
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (9U)
 #define FTL_MEDIA_LAYOUT_VERSION \
     (FTL_MEDIA_LAYOUT_VERSION_BASE + ((FTL_DIM_TOTAL > 1U) ? 1U : 0U))
 ```
@@ -992,9 +993,10 @@ flowchart TD
     BOOT["ftl_boot_recovery"] --> LATEST["journal_scan_latest 只读,不改状态"]
     LATEST --> FIND{"checkpoint_find_latest 有当前版本有效 Header"}
     FIND -- "否" --> FRESH["fresh carve F2 全扫"]
-    FIND -- "是" --> LOAD{"checkpoint_load_block_table + checkpoint_load_wear_table"}
+    FIND -- "是" --> LOAD{"checkpoint_load_block_table"}
     LOAD -- "否" --> PFALL["块账走 F2 兜底"]
-    LOAD -- "是" --> JUDGE{"page_seq entry_count 不高于 cp-journal_sequence"}
+    LOAD -- "是" --> WEAR["checkpoint_load_wear_table 软状态，失败只从 0 起算"]
+    WEAR --> JUDGE{"page_seq entry_count 不高于 cp-journal_sequence"}
     JUDGE -- "是" --> CLEAN["clean restore probe build_pools"]
     JUDGE -- "否" --> PF["PF restore journal replay F4 probe build_pools"]
     PFALL --> F2["reset carve F2"]
@@ -1052,7 +1054,7 @@ flowchart TD
 |---|---|---|
 | 判型口径 | `page_seq + entry_count` | `src/ftl/power_failure_recovery.c` |
 | Journal 回放缓冲 | 栈上 `replay_pages[256]`（2 KiB） | `src/ftl/journal.c` |
-| 介质版本 | 6（DIM=1）/ 7（DIM>1） | `include/ftl/metadata.h` |
+| 介质版本 | 9（DIM=1）/ 10（DIM>1） | `include/ftl/metadata.h` |
 
 #### 3.1.8 主流对照
 
@@ -1523,7 +1525,6 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `count` | 2 B | 有效 entry 数（固定层全填，通常 = 2048） |
 | `anchor_sequence` | 4 B | 当前 Anchor 序号 |
 | `dirty` | 1 B | 有未写回 Anchor 的变更 |
-| `change_count` | 4 B | 自上次 Anchor 起的变更数（节流） |
 | `have_dynamic` | 1 B | 是否已有 region 落到动态块（开机加速） |
 | `l2p_live[4096]` | 8 KiB | 每个 gblock 上还有多少 region 的**最新位置** |
 | `cur_metadata_block` | 2 B | 当前日志块 gblock |
@@ -1769,7 +1770,7 @@ flowchart TD
 | 池 | 32 块，每块 8 条 record（64 页 / 8 页） |
 | 写序 | 池内 ring 轮转；写满一块先擦池内下一块 |
 | 读取 | 找“整条校验通过”中 sequence 最大者；不取半条 |
-| 触发 | `change_count >= 64` 或 Checkpoint 或空闲后台；不在 `metadata_dir_update` 里同步做 |
+| 触发 | `dirty` 置位后由元数据 job 异步 flush（无变更阈值）；Checkpoint 前也要求 flush；不在 `metadata_dir_update` 里同步做 |
 | CRC | 无本层 CRC；完整性由下层 FC 的 per-CW CRC + ECC 保证 |
 
 三段式（所有落盘站点统一）：
@@ -1839,13 +1840,12 @@ CRC 覆盖 META+USER，且自身在 ECC 码字内，能消除“ECC 误纠后看
 | `CHECKPOINT_POOL_BLOCKS` | 8（32..39） | 同上 |
 | `BBT_POOL_BLOCKS` | 2（40..41） | 同上 |
 | `JOURNAL_BLOCKS` | `CW_NUM` = 4（42..45） | 同上 |
-| `WEAR_BLOCKS` | 1（46） | 同上 |
 | `METADATA_DIR_ENTRIES` | 2048 | 同上 |
 | `metadata_entry_t` | 7 B | 同上 |
 | `metadata_anchor_page_t` | 2048 B | 同上 |
-| 介质版本 | 7（DIM=1）/ 8（DIM>1） | 同上 |
-| `MD_SUBMIT_STALL_MAX` | 256 | `src/ftl/metadata.c` |
-| Anchor 触发节流 | `change_count >= 64` | `src/ftl/metadata.c` |
+| 介质版本 | 9（DIM=1）/ 10（DIM>1） | 同上 |
+| `MD_SUBMIT_STALL_MAX` | 256 | `src/ftl/metadata_job.c` |
+| Anchor 触发 | `dirty` 置位（元数据 job 异步） | `src/ftl/metadata_job.c` |
 
 #### 3.5.13 主流对照
 
@@ -2294,6 +2294,7 @@ flowchart TD
     HPREP["CP_HDR_PREP"]
     HERASE["CP_HDR_ERASE"]
     BWRITE["CP_BLOCK_WRITE"]
+    WWRITE["CP_WEAR_WRITE"]
     HWRITE["CP_HDR_WRITE"]
     TPREP["CP_TRUNC_PREP"]
     TERASE["CP_TRUNC_ERASE"]
@@ -2307,7 +2308,8 @@ flowchart TD
     HPREP -- "需换块" --> HERASE
     HPREP -- "无需擦" --> BWRITE
     HERASE --> BWRITE
-    BWRITE -- "4 页快照写完" --> HWRITE
+    BWRITE -- "4 页块账写完" --> WWRITE
+    WWRITE -- "16 页磨损写完" --> HWRITE
     HWRITE -- "Header 落盘" --> TPREP
     TPREP -- "需预擦" --> TERASE
     TPREP -- "无需" --> DONE
@@ -2322,6 +2324,7 @@ flowchart TD
 | `CP_ANCHOR_WRITE` | 逐页写 8 页 Anchor | 任一分页失败 ⇒ 整条作废，仍推进 |
 | `CP_HDR_PREP` / `CP_HDR_ERASE` | 定位 Header 槽 / 换块擦 | 中止 |
 | `CP_BLOCK_WRITE` | 逐页写 4 页块账快照 | 失败 ⇒ 中止，不写 Header |
+| `CP_WEAR_WRITE` | 逐页写 16 页磨损快照（每页 CRC 存 Header） | 失败 ⇒ 中止，不写 Header |
 | `CP_HDR_WRITE` | 写 1 页 Header（commit） | 无论成败推进游标；失败中止 |
 | `CP_TRUNC_PREP` | 水位判定，算预擦块 | 水位不足 ⇒ 不截断 |
 | `CP_TRUNC_ERASE` | 预擦 Journal 最旧块 | 失败仅 LOGW，仍记账（预擦只是磨损优化） |
@@ -2343,6 +2346,7 @@ flowchart TD
 | L2P flush 失败 | 中止，不写 Header | boot 用上一个 CP + Journal 回放，一致 |
 | Anchor 分页失败 | 整条 Anchor 作废，保留 dirty | 旧 Anchor 仍有效 |
 | 块账快照失败 | 不写 Header | 本次 CP 未提交；下次重来 |
+| 磨损快照失败 | 不写 Header | 本次 CP 未提交；计数窗口延长，用户数据不受影响 |
 | Header 写失败 | 游标仍推进；中止 | 旧 Header 仍有效 |
 | Journal 截断失败 | 只记日志 | 预擦是磨损优化，不影响一致性 |
 | 提交侧长期背压 | `stall_rounds > 256` 中止 | 下轮重试；不丢映射 |
@@ -2771,10 +2775,10 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
 #### 3.12.3 结构与不变量
 
 `bg_task_t`：`func` / `interval_ms` / `last_run_ms` / `budget_us` / `priority` / `must_run`。
-`bg_scheduler_t`：`tasks[14]` / `task_count` / `level` / 轮次统计 / `clock_ok`。
+`bg_scheduler_t`：`tasks[13]` / `task_count` / `level` / 轮次统计 / `clock_ok`。
 `bg_level_cfg_t`：每轮总预算 / L2P flush 条数上界 / 任务掩码。
 
-**14 项任务**：
+**13 项任务**：
 
 | 位 | 任务 | 类型 | interval | 预算 | 语义 |
 |---:|---|---|---:|---:|---|
@@ -2859,14 +2863,14 @@ flowchart TB
 | `GC_EVAL_INTERVAL_MS` | 10 | 同上 |
 | `GC_LOG_INTERVAL_MS` | 1000 | 同上 |
 | `RR_SCAN_INTERVAL_MS` | 1000 | `src/ftl/ftl.c` |
-| `BG_TASK_COUNT` | 14 | `include/ftl/bg_scheduler.h` |
+| `BG_TASK_COUNT` | 13 | `include/ftl/bg_scheduler.h` |
 | 档位预算 | 2000 / 2000 / 700 µs | `src/ftl/ftl.c` |
 | `MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
 
 #### 3.12.8 主流对照
 
 “主循环 + 独立后台调度器 + 每任务 interval/预算/优先级”是主控固件的常见形态
-（SPDK core poller、企业级后台核）。**本仓自定**的是 14 项任务表、三级负载→固定预算
+（SPDK core poller、企业级后台核）。**本仓自定**的是 13 项任务表、三级负载→固定预算
 （不是连续带宽调节）与 must-run 集合的划分。
 
 ---
@@ -3535,7 +3539,7 @@ sequenceDiagram
     CP->>J: 记录 journal_seq job 起点
     CP->>L: CP_FLUSH_REGIONS 逐个 kick,等 flush_inflight 为 0
     CP->>D: CP_ANCHOR_PREP 到 可选 ERASE 到 WRITE x8 到 commit
-    CP->>CP: CP_HDR_PREP 到 可选 ERASE 到 CP_BLOCK_WRITE x4
+    CP->>CP: CP_HDR_PREP 到 可选 ERASE 到 CP_BLOCK_WRITE x4 到 CP_WEAR_WRITE x16
     CP->>CP: CP_HDR_WRITE commit
     CP->>J: CP_TRUNC_PREP 到 可选 TRUNC_ERASE 到 commit
     CP->>CP: CP_DONE
@@ -3547,11 +3551,11 @@ sequenceDiagram
 |---|---|
 | L2P region | 快照内的脏 region 全部落盘 |
 | Anchor | 新 record（Directory 全量快照） |
-| Checkpoint | 新 Header（含 `journal_sequence`、块账快照 CRC） |
+| Checkpoint | 新 Header（含 `journal_sequence`、块账 CRC、磨损页 CRC） |
 | Journal | 水位标志复位；最旧块预擦 |
 
 **失败分支**：flush 失败 ⇒ 中止，不写 Header；Anchor 分页失败 ⇒ 整条作废；
-块账失败 ⇒ 不写 Header；Header 失败 ⇒ 游标仍推进，旧 Header 有效；截断失败只记日志。
+块账/磨损失败 ⇒ 不写 Header；Header 失败 ⇒ 游标仍推进，旧 Header 有效；截断失败只记日志。
 
 ### 4.8 GC / WL / 预测性迁移
 
@@ -3773,7 +3777,7 @@ flowchart TB
 | Journal | 同 LBA 合并受 `merge_floor` 约束 | `journal_append` | 块账增量漏记 |
 | Journal | 同一块每圈只擦一次 | `pre_erased_block` | 双倍磨损 |
 | CP | 快照点在 job 起点 | `checkpoint_begin` | 两边都不认，丢映射 |
-| CP | flush → Anchor → 块账 → Header → 截断 | `cp_step` | boot 预载未落盘 region |
+| CP | flush → Anchor → 块账 → 磨损 → Header → 截断 | `cp_step` | boot 预载未落盘 region |
 | Metadata | append_slot 只取槽；commit 才登记 | `l2p_cache` | Directory 指向未写页 |
 | Metadata | Anchor 先于 victim 擦除 | `md_job` phase | 掉电后映射永久丢失 |
 | Metadata | 固定层永不写 | `append_slot` | 反向映射到擦除态页 |
@@ -3978,7 +3982,7 @@ flowchart TB
 |---|---|
 | 背景 | 单线程 superloop，后台任务多；既要防饿死，又要防 host 被拖慢 |
 | 选项 | 每轮全跑 / 固定顺序三级服务 / 每任务 interval + 预算 + must-run |
-| 选择 | **14 项任务表：6 must-run（不 gate、不占预算）+ 8 预算任务；三级负载→固定预算/掩码** |
+| 选择 | **13 项任务表：6 must-run（不 gate、不占预算）+ 7 预算任务；三级负载→固定预算/掩码** |
 | 理由 | must-run 只放“不跑会死锁/挂起”的动作；预算任务按 interval/优先级/总预算截断；前台保护是确定性的（条数/掩码），不依赖 µs 计时 |
 | 主流 | 主控固件常见“poller + 后台调度器 + 每任务预算”；本仓用固定分档而非连续带宽调节 |
 | 代价 | 分档粒度粗；时钟缺失时退化为无门控 |
@@ -3998,6 +4002,7 @@ flowchart TB
 | 项 | 状态 | 说明 |
 |---|---|---|
 | 多 LUN 阶段 A/B/C（器件配置分层 / 共享 cache / 描述符化与域散列） | **已提交、未上板** | DIM=1 的构建与 DIM=2 的影子链接通过；**不得**据此声称多 LUN 可用 |
+| 介质版本 9 布局（哨兵层删除 / 固定元数据 P0+P1 镜像 / Journal multi-plane 擦 / 磨损并入 CP） | **已提交、未上板** | 老介质首启自动格式化是预期；**不得**据此声称掉电恢复与磨损持久化已验证 |
 | DIM=1 上板回归 | 待做 | fresh/clean/PF 启动、`wr/rd`、`fl`、`map`、Checkpoint、断电重启、GC |
 | 阶段 D（审计/文档/验证） | 未开始 | 不是新功能；见 §7.3 |
 | FTL UT | **冻结** | `tests/unit/test_ftl.c` 仍引用已删字段；不为让 UT 编过而回退生产代码 |
@@ -4139,7 +4144,10 @@ flowchart TB
 | `FTL_CHECKPOINT_BLOCK_WORD_BYTES` | 2 | 同上 |
 | `FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE` | 1024 | 同上 |
 | `FTL_CHECKPOINT_BLOCK_PAGES` | 4 | 同上 |
-| `FTL_CHECKPOINT_RECORD_PAGES` | 5 | 同上 |
+| `FTL_CHECKPOINT_RECORD_PAGES` | 21 | 同上 |
+| `FTL_CHECKPOINT_WEAR_ENTRY_BYTES` | 8 | 同上 |
+| `FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE` | 256 | 同上 |
+| `FTL_CHECKPOINT_WEAR_PAGES` | 16 | 同上 |
 | `CHECKPOINT_MAGIC` | `0xCCCCCCCC` | `include/ftl/checkpoint.h` |
 | `CP_WRITE_INTERVAL` | 1024 | `include/ftl/ftl.h` |
 | `CP_TIME_INTERVAL_MS` | 10,000 | 同上 |
@@ -4156,12 +4164,11 @@ flowchart TB
 | `ANCHOR_PAGE_COUNT` | 8 | 同上 |
 | `ANCHOR_RECORDS_PER_BLOCK` | 8 | 同上 |
 | `BBT_POOL_BLOCKS` | 2 | 同上 |
-| `WEAR_BLOCKS` | 1 | 同上 |
 | `METADATA_DIR_ENTRIES` | 2048 | 同上 |
 | `metadata_entry_t` | 7 B | 同上 |
 | `metadata_anchor_page_t` | 2048 B | 同上 |
-| `FTL_MEDIA_LAYOUT_VERSION` | 7（DIM=1）/ 8（DIM>1） | 同上 |
-| Anchor 落盘节流 | `change_count >= 64` | `src/ftl/metadata.c` |
+| `FTL_MEDIA_LAYOUT_VERSION` | 9（DIM=1）/ 10（DIM>1） | 同上 |
+| Anchor 触发 | `dirty` 置位（元数据 job 异步） | `src/ftl/metadata_job.c` |
 | `MD_SUBMIT_STALL_MAX` | 256 | 同上 |
 
 #### Allocator / BST
@@ -4219,7 +4226,7 @@ flowchart TB
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `BG_TASK_COUNT` | 14 | `include/ftl/bg_scheduler.h` |
+| `BG_TASK_COUNT` | 13 | `include/ftl/bg_scheduler.h` |
 | `NAND_SUBMIT_BUDGET` | 4 | `include/ftl/ftl.h` |
 | `BG_NORMAL_FLUSH_COUNT` / `BUSY` | 4 / 1 | 同上 |
 | `GC_EVAL_INTERVAL_MS` | 10 | 同上 |
@@ -4241,12 +4248,12 @@ flowchart TB
 
 | 对象 | 大小 | 域 |
 |---|---:|---|
-| `g_ftl`（描述符） | 14,664 B | AXI |
+| `g_ftl`（描述符） | 13,584 B | AXI |
 | `g_l2p_cache` | 132,136 B | AXI |
 | `g_ftl_tables` | 123,896 B | SRAM12 |
-| `g_ftl_cp_job` | 8,524 B | SRAM3 |
+| `g_ftl_cp_job` | 10,636 B | SRAM3 |
 | `g_ftl_journal` | 2,104 B | SRAM3 |
-| `g_ftl_md` | 24,660 B | SRAM4 |
+| `g_ftl_md` | 25,164 B | SRAM4 |
 | CLI `g_wr_buf` | 16,384 B | AXI `.bss` |
 
 ⚠ `.sram*_data` 是 NOLOAD，启动代码不清零；`ftl_init` 必须显式 memset 四个数组
@@ -4263,7 +4270,7 @@ flowchart TB
 | `ftl_io_group_t` | 同上 | next / total / outstanding / agg_status |
 | `l2p_cache_t` / `l2p_cache_line_t` | `include/ftl/l2p_cache.h` | 行状态 / entries / clock / 脏位图 / owner |
 | `l2p_journal_t` / `journal_job_t` | `include/ftl/journal.h` | 页缓冲 / 游标 / sequence / merge_floor / pre_erased_block |
-| `l2p_checkpoint_header_t` / `cp_job_t` | `include/ftl/checkpoint.h` | Header / 块账快照 / phase / 快照位图 |
+| `l2p_checkpoint_header_t` / `cp_job_t` | `include/ftl/checkpoint.h` | Header / 块账快照 / 磨损快照 / phase / 快照位图 |
 | `metadata_entry_t` / `metadata_anchor_page_t` / `metadata_ring_t` / `metadata_dir_cache_t` / `md_job_t` | `include/ftl/metadata.h` | Directory / Anchor / 池几何 / 回收压缩 job |
 | `ftl_block_t` / `ftl_tables_t` / `ftl_allocator_t` / `super_block_t` | `include/ftl/bst.h` / `allocator.h` | BST / 四本账 / SB |
 | `mig_job_t` | `include/ftl/migrate.h` | phase / kind / post / victim / cw_bitmap / page_buf |
