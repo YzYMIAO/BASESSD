@@ -614,7 +614,6 @@ typedef struct
     uint16_t         count;           /* 有效 entry 数 */
     uint32_t         anchor_sequence; /* 当前 Anchor sequence */
     uint8_t          dirty;           /* 是否有未写回 Anchor 的变更 */
-    uint32_t         change_count;    /* 自上次 Anchor flush 后的变更数（仅节流用）*/
 
     /* 是否已有 region 落到动态块（block >= FTL_METADATA_BLOCK_END）。
      * entries 现在有 2048 条，而 ftl_is_metadata_block() 在开机回填里按块调用

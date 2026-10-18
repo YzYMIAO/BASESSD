@@ -11,7 +11,7 @@
  * 模块边界（本文件是**通用引擎**，零 kick 知识、策略无关）：
  *   · bg_scheduler.h/c —— 引擎：must-run pass + 预算 pass（interval 门 / charge 计账 /
  *     预算不足截断）。不 include 任何 kick 头，只前向声明 ftl_context_t。
- *   · ftl.c —— 接线：14 个 static 适配器（包异构 kick → void(ftl_context_t*)）+ 任务表
+ *   · ftl.c —— 接线：13 个 static 适配器（包异构 kick → void(ftl_context_t*)）+ 任务表
  *     （ftl_bg_init）+ 三级负载→预算映射（g_bg_level_cfg，IDLE/NORMAL/BUSY）+ 档位选择
  *     （ftl_bg_level_select）。档位策略是 FTL 域政策，引擎不持有。
  *

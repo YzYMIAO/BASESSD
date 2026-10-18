@@ -588,7 +588,6 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
 
     dir->anchor_sequence = 0U;
     dir->dirty           = 0U;
-    dir->change_count    = 0U;
 
     metadata_dir_fill_fixed(dir);
     metadata_dir_rebuild_live(dir);
@@ -650,7 +649,6 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
         {
             dir->entries[i].pba = new_pba;
             dir->dirty          = 1U;
-            dir->change_count++;
             return;
         }
     }
@@ -663,7 +661,6 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
         dir->entries[dir->count].pba  = new_pba;
         dir->count++;
         dir->dirty = 1U;
-        dir->change_count++;
     }
     /*
      * 满：不追加。
@@ -995,8 +992,7 @@ void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t
 
     if (ok != 0)
     {
-        dir->dirty        = 0U;
-        dir->change_count = 0U;
+        dir->dirty = 0U;
     }
 }
 
@@ -1053,7 +1049,6 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
             dir->anchor_write_idx    = 0U;
             dir->anchor_cursor_valid = 0U;
             dir->dirty               = 0U;
-            dir->change_count        = 0U;
             metadata_dir_boot_log(dir);
             return FTL_ERROR; /* 无有效 Anchor：调用者转 metadata_dir_init */
         }
@@ -1093,8 +1088,7 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
         }
     }
 
-    dir->dirty        = 0U;
-    dir->change_count = 0U;
+    dir->dirty = 0U;
 
     /* 由装配后的 entries 重建活计数；**游标不跨重启恢复**：首次追加时从 Free Pool
      * 新取一块（绝不复用可能已编程的旧页）。旧日志块仍被 Directory 引用 ⇒ 由 l2p_live

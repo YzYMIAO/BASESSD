@@ -177,7 +177,7 @@ typedef struct ftl_context
     uint32_t gc_log_last_ms;
 
     /* 时间预算后台调度器（v0.76，per-instance）。
-     * 任务表（14 项：6 must-run + 8 预算）由 ftl_bg_init 填充；每轮 Phase 3 经
+     * 任务表（13 项：6 must-run + 7 预算）由 ftl_bg_init 填充；每轮 Phase 3 经
      * ftl_bg_level_select 选档后跑 bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level])。
      * 取代 v0.75 的三个 static 三级服务函数（IDLE/NORMAL/BUSY 的计数门控）。 */
     bg_scheduler_t bg;
@@ -271,7 +271,7 @@ void ftl_service(ftl_context_t *ftl);
 /*
  * ftl_bg_init - 装配实例的时间预算后台调度器（v0.76）
  *
- * 填充 ftl->bg 的任务表（14 项：6 must-run 正确性关键集 + 8 预算任务，见 ftl.c
+ * 填充 ftl->bg 的任务表（13 项：6 must-run 正确性关键集 + 7 预算任务，见 ftl.c
  * bg_a_* 适配器）并调用 bg_scheduler_init。由 ftl_init 末尾调用一次。
  */
 void ftl_bg_init(ftl_context_t *ftl);

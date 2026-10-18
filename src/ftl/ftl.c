@@ -17,7 +17,7 @@
  *   Phase 1    fc_service × NAND_SUBMIT_BUDGET —— 推进 NAND
  *   Phase 2    completion_table_drain —— 统一完成泵（按命令 op_tag 派发到服务函数数组）
  *   Phase 2.5  逐组补发 host 子操作（host IO 优先于后台任务）
- *   Phase 3    时间预算后台调度（v0.76）：14 项任务表（6 must-run + 8 预算）经
+ *   Phase 3    时间预算后台调度（v0.76）：13 项任务表（6 must-run + 7 预算）经
  *              bg_scheduler_run 执行；档位 IDLE/NORMAL/BUSY 按未决命令数选（见下）
  *
  * 后台档位（按 inflight = pending + groups 近似空闲度，ftl_bg_level_select）：
@@ -465,9 +465,9 @@ static uint32_t ftl_gc_evaluate(ftl_context_t *ftl)
 /* ════════════════════════════════════════════════════════════════════════
  * 后台调度器接线（v0.76）
  *
- * v0.75 的三级 static 服务函数（ftl_service_idle/normal/busy）→ 14 项任务表 +
+ * v0.75 的三级 static 服务函数（ftl_service_idle/normal/busy）→ 13 项任务表 +
  * 档位→预算映射。引擎在 bg_scheduler.c（通用、零 kick 知识）；本文件只做三件事：
- *   ① 14 个 static 适配器：把异构 kick（签名/参数各异）包成 void(ftl_context_t*)；
+ *   ① 13 个 static 适配器：把异构 kick（签名/参数各异）包成 void(ftl_context_t*)；
  *   ② g_bg_level_cfg[3]：档位 → 每轮总预算 + l2p flush 条数上界 + 预算任务掩码；
  *   ③ ftl_bg_init 填任务表 / ftl_bg_level_select 负载→档位（纯函数）。
  *
@@ -492,7 +492,7 @@ static const bg_level_cfg_t g_bg_level_cfg[BG_LEVEL_BUSY + 1U] = {
     { 700U,   (uint8_t)BG_BUSY_FLUSH_COUNT, (1U << 8U)},
 };
 
-/* ── 14 个适配器（包异构 kick → void(ftl_context_t*)）── */
+/* ── 13 个适配器（包异构 kick → void(ftl_context_t*)）── */
 
 /* 位 0 · must_run（最先）—— 推进**已在飞**的 Checkpoint job（阶段 6）。
  * ⚠ 必须排在最前、且不占预算：CP 可能在 BUSY 档被紧急水位起（journal≥95%），后续阶段
@@ -620,7 +620,7 @@ static void bg_a_rr_predict(ftl_context_t *ftl)
 
 /* ── 任务表 + 档位选择 ── */
 
-/* ftl_bg_init — 填 14 项任务表（表序 = 优先级升序；引擎线性扫 ⇒ 掩码位下标 = 表下标）。
+/* ftl_bg_init — 填 13 项任务表（表序 = 优先级升序；引擎线性扫 ⇒ 掩码位下标 = 表下标）。
  * 由 ftl_init 在实例装配末尾调用一次。 */
 void ftl_bg_init(ftl_context_t *ftl)
 {
@@ -808,7 +808,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     /* ├─ 统计 ── */
     ftl->total_writes = 0U;
 
-    /* ├─ 后台调度器任务表（v0.76：14 项；must-run + interval/budget/优先级）──
+    /* ├─ 后台调度器任务表（v0.76：13 项；must-run + interval/budget/优先级）──
      * 必须在所有在飞的字段就绪后填（适配器只依赖实例字段与 kick，无额外依赖）。 */
     ftl_bg_init(ftl);
 
@@ -850,7 +850,7 @@ void ftl_service_pump(void)
  *   实现要点：调用方须**先**调 ftl_service_pump()（全局泵，每轮一次），再对**每个**
  *             实例调本函数（序 4：多实例下所有实例都要推进，不能只跑 [0][0][0]）。
  *             Phase 3 用 inflight（pending + groups）选档（bg_suspend 置位时整体跳过，
- *             `bbt --erase` 后保护），档位 → bg_scheduler_run 执行 14 项任务表。
+ *             `bbt --erase` 后保护），档位 → bg_scheduler_run 执行 13 项任务表。
  * -------------------------------------------------------------------- */
 void ftl_service(ftl_context_t *ftl)
 {
@@ -882,7 +882,7 @@ void ftl_service(ftl_context_t *ftl)
 
     /* Phase 3: 时间预算后台调度（v0.76）
      *
-     * v0.75 三级 static 服务函数 → bg_scheduler 引擎 + 14 项任务表 + 档位→预算映射
+     * v0.75 三级 static 服务函数 → bg_scheduler 引擎 + 13 项任务表 + 档位→预算映射
      * （接线/引擎见本文件上部「后台调度器接线」与 bg_scheduler.h）。空闲度近似
      * （B3：基于未决命令数，非"本轮有无提交 NAND"代理）**逐字沿用**旧实现：
      *   旧实现用 submitted（本轮 fc_service 提交了几条）判定，host 无 IO 时 fc_service
