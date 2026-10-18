@@ -13,7 +13,7 @@
 
 #include "fc_scheduler.h"
 
-#include "common/assertion.h"
+#include "assertion.h"
 
 /* --------------------------------------------------------------------
  * fc_scheduler_init

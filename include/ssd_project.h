@@ -2,9 +2,9 @@
 #define SSD_PROJECT_H
 
 /* 工程公共入口：业务模块只需包含本文件即可获得基础类型、属性和诊断接口。 */
-#include "common/assertion.h"
-#include "common/common.h"
-#include "common/log.h"
+#include "assertion.h"
+#include "common.h"
+#include "log.h"
 #include "ssd_compiler.h"
 
 /* 工程代码等级的语义名称，便于模块代码表达放置意图。 */

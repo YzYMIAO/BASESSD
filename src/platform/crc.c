@@ -12,7 +12,7 @@
 
 #include "crc.h"
 
-#include "common/assertion.h"
+#include "assertion.h"
 
 /*
  * crc_init

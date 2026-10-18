@@ -11,7 +11,7 @@
 
 #include "fc_queue.h"
 
-#include "common/assertion.h"
+#include "assertion.h"
 
 #include <stddef.h>
 

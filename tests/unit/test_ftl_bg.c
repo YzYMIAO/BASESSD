@@ -21,12 +21,12 @@
  * 恒 0（时钟缺失）。
  */
 
-#include "ftl/bg_scheduler.h"
-#include "ftl/ftl.h"         /* ftl_context_t / ftl_bg_init / ftl_bg_level_select */
-#include "ftl/pending.h"     /* pending_add / pending_group_alloc（level_select 造负载） */
+#include "bg_scheduler.h"
+#include "ftl.h"             /* ftl_context_t / ftl_bg_init / ftl_bg_level_select */
 #include "ftl_test_common.h" /* 共享活实例夹具（ftl_fixture / ftl_async_fixture_reset） */
 #include "munit.h"
-#include "platform/platform.h" /* ssd_platform_ops_t / ssd_platform_register / _get */
+#include "pending.h"  /* pending_add / pending_group_alloc（level_select 造负载） */
+#include "platform.h" /* ssd_platform_ops_t / ssd_platform_register / _get */
 
 /* ══════════════════════════════════════════════════════════════════════
  * §1  夹具 + 时钟 fake

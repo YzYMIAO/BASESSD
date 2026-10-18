@@ -29,10 +29,10 @@
  * ⚠ 本文件只做**账本**，不做介质操作：块的擦除由调用者（migrate.c 的搬移 job 等）在归还前完成。
  */
 
-#include "ftl/allocator.h"
+#include "allocator.h"
 
-#include "common/assertion.h"
-#include "common/log.h" /* LOGE（判据 9 的 release 运行期拒绝要留日志，不能静默丢） */
+#include "assertion.h"
+#include "log.h" /* LOGE（判据 9 的 release 运行期拒绝要留日志，不能静默丢） */
 
 #include <string.h>
 

@@ -31,7 +31,7 @@
  *   不是观测。）
  */
 
-#include "platform/platform.h"
+#include "platform.h"
 
 #include <stdint.h>
 

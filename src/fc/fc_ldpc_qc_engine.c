@@ -1,6 +1,6 @@
 #include "fc_ldpc_qc_engine.h"
 
-#include "common/assertion.h"
+#include "assertion.h"
 
 #include <stddef.h>
 #include <stdint.h>

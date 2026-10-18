@@ -10,10 +10,10 @@
  *     耗尽即截断。elapsed 预算时钟 = 平台 time_us；时钟缺失时退化为「无门控」。
  */
 
-#include "ftl/bg_scheduler.h"
+#include "bg_scheduler.h"
 
-#include "common/assertion.h"
-#include "platform/platform.h" /* ssd_platform_get / ssd_platform_ops_t.time_us */
+#include "assertion.h"
+#include "platform.h" /* ssd_platform_get / ssd_platform_ops_t.time_us */
 
 /* 低于此值不再跑任何预算任务（≈6×tR 余量：onfi_1_0.c NAND_TIME_TR_US=38 ⇒ 250 ≈ 6×38）。
  * 语义：预算剩余太少时，再跑一个任务既不划算也无法被诚实度量。 */

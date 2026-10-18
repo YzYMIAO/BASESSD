@@ -10,7 +10,7 @@
 
 #include "sys.h"
 
-#include "common/common.h"
+#include "common.h"
 #include "delay.h"
 #include "fault.h"
 #include "usart.h"

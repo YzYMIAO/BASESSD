@@ -1,7 +1,7 @@
 #ifndef NAND_FC_INTERFACE_H
 #define NAND_FC_INTERFACE_H
 
-#include "nand/onfi_1_0.h"
+#include "onfi_1_0.h"
 
 #include <stdint.h>
 
@@ -14,7 +14,7 @@
  *        nand_config.h（NAND_PLANE_MAX 拓扑宏）。
  */
 
-#include "nand/nand_config.h"
+#include "nand_config.h"
 
 /* NAND 命令请求：列/行/数据。row 按 plane 索引（NAND_PLANE_MAX 深）。 */
 typedef struct

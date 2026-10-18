@@ -36,10 +36,10 @@
  * 每条 record 是完整快照 ⇒ 擦掉最旧一份不损失任何信息。
  */
 
-#include "ftl/allocator.h"
-#include "ftl/ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / L2P_REGIONS_PER_INSTANCE）*/
-#include "ftl/ftl_type.h"
-#include "nand/nand_config.h" /* PAGE_MAIN_SIZE（Anchor 页打包自检）*/
+#include "allocator.h"
+#include "ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / L2P_REGIONS_PER_INSTANCE）*/
+#include "ftl_type.h"
+#include "nand_config.h" /* PAGE_MAIN_SIZE（Anchor 页打包自检）*/
 
 #include <stdint.h>
 
@@ -64,7 +64,7 @@
  * ── 当前几何下展开的布局（由下方公式算出，非手写）──
  *   块号        分区        块数  使用 plane  来历
  *   0..31       Anchor      32    P0 + P1     元数据池：每块 8 份 Directory；**P1 镜像**
- *   32..39      Checkpoint  8     P0 + P1     元数据池：每块 12 份 record；**P1 镜像**
+ *   32..39      Checkpoint  8     P0 + P1     元数据池：每块 3 份 record；**P1 镜像**
  *   40..41      BBT         2     P0 + P1     元数据池：每块 64 份坏块位图；**P1 镜像**
  *   42..45      Journal     4     P0 + P1     策略 = CW_NUM；页地址按页号奇偶跨 plane（单副本交错）
  *   46..       用户数据    —     P0 + P1     FTL_METADATA_BLOCK_END 之后（磨损计数已并入 CP）

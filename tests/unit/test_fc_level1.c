@@ -31,12 +31,12 @@
  *     随之删除 setup_fc_suite（其唯一用途是给 status_init 两条用例初始化命令池）。
  */
 
-#include "fc/fc_command.h"
-#include "fc/fc_queue.h"
-#include "fc/fc_scheduler.h"
+#include "fc_command.h"
+#include "fc_queue.h"
+#include "fc_scheduler.h"
 #include "fc_test_common.h" /* 只为证据打印原语 test_trace_*（本文件不碰 NAND / 池） */
 #include "munit.h"
-#include "nand/onfi_1_0.h"
+#include "onfi_1_0.h"
 
 /**************************************************************************
  *  Part 1: fc_command 测试

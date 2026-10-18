@@ -37,14 +37,14 @@
 
 #include "fc.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
+#include "assertion.h"
 #include "fc_crc_engine.h"
 #include "fc_data_path.h"
 #include "fc_internal.h"
 #include "fc_queue.h"
 #include "fc_scheduler.h"
-#include "nand/nand_dispatch.h"
+#include "log.h"
+#include "nand_dispatch.h"
 
 #include <stddef.h>
 #include <string.h>

@@ -1,8 +1,8 @@
 #ifndef SSD_REQUEST_H
 #define SSD_REQUEST_H
 
-#include "common/ssd_types.h"
-#include "ftl/ftl_type.h" /* ftl_io_request_t */
+#include "ftl_type.h" /* ftl_io_request_t */
+#include "ssd_types.h"
 
 #include <stddef.h>
 #include <stdint.h>

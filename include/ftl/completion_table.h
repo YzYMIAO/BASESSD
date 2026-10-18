@@ -24,8 +24,8 @@
  * 线程安全：无（裸机单线程，不在中断中访问）。
  */
 
-#include "ftl/ftl_type.h"     /* ftl_status_t */
-#include "nand/nand_config.h" /* CE_NUM / LUN_NUM（实例路由表形参维度）*/
+#include "ftl_type.h"    /* ftl_status_t */
+#include "nand_config.h" /* CE_NUM / LUN_NUM（实例路由表形参维度）*/
 
 #include <stdint.h>
 

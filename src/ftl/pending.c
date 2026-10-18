@@ -23,10 +23,10 @@
  *   写请求的 buffer 是数据源、非 NULL ⇒ `buffer != NULL` 对写恒真（见 pending.h 文件头）。
  */
 
-#include "ftl/pending.h"
+#include "pending.h"
 
-#include "common/assertion.h"
-#include "ftl/ftl.h" /* ftl_context_t */
+#include "assertion.h"
+#include "ftl.h" /* ftl_context_t */
 
 #include <string.h>
 

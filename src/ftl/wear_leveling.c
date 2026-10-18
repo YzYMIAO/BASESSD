@@ -26,10 +26,10 @@
  *   ⇒ ftl 非空是**前置条件**，不逐函数复检。
  */
 
-#include "ftl/wear_leveling.h"
+#include "wear_leveling.h"
 
-#include "common/assertion.h"
-#include "ftl/ftl.h"
+#include "assertion.h"
+#include "ftl.h"
 
 #include <string.h>
 

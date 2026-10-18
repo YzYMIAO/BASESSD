@@ -1,8 +1,8 @@
 #ifndef SSD_CONTROLLER_H
 #define SSD_CONTROLLER_H
 
-#include "controller/ssd_request.h"
-#include "ftl/ftl.h"
+#include "ftl.h"
+#include "ssd_request.h"
 
 typedef enum
 {

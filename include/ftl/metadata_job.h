@@ -17,8 +17,8 @@
  *     摊开会让"漏复位一个字段"变成静默故障（§3.1）。
  */
 
-#include "ftl/bst.h"      /* ftl_gblock_plane / ftl_gblock_block */
-#include "ftl/metadata.h" /* metadata_dir_cache_t / md_job_t / PAGES_PER_BLOCK */
+#include "bst.h"      /* ftl_gblock_plane / ftl_gblock_block */
+#include "metadata.h" /* metadata_dir_cache_t / md_job_t / PAGES_PER_BLOCK */
 
 #include <stdint.h>
 #include <string.h>

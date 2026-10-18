@@ -38,18 +38,18 @@
  *   该处的 ftl 非空已由它保证 ⇒ **不再逐函数复检**（原守卫已删）。
  */
 
-#include "ftl/power_failure_recovery.h"
+#include "power_failure_recovery.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"
-#include "ftl/bbt.h"
-#include "ftl/checkpoint.h"
-#include "ftl/ftl.h"
-#include "ftl/ftl_fc_interface.h"
-#include "ftl/gc.h"
-#include "ftl/metadata.h"
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
+#include "bbt.h"
+#include "checkpoint.h"
+#include "fc.h"
+#include "ftl.h"
+#include "ftl_fc_interface.h"
+#include "gc.h"
+#include "log.h"
+#include "metadata.h"
+#include "onfi_1_0.h"
 
 #include <string.h>
 

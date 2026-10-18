@@ -11,8 +11,9 @@
  * 可在 Journal 回切时安全擦除。
  *
  * Store: 固定元数据区的 Checkpoint 池（`CHECKPOINT_POOL_BLOCKS` 块轮转，
- * **一条 record = 1 页**，块满换池内下一块并先擦）。池首块/块数由
- * ftl/metadata.h 按几何推导（「固定元数据区布局」）。
+ * **一条 record = 21 页**（Header 1 + 块元数据 4 + 磨损 16），块满换池内下一块并先擦；
+ * 每条 record 在 P0/P1 镜像）。池首块/块数由 ftl/metadata.h 按几何推导
+ * （「固定元数据区布局」）。
  *
  * 写模型与 Anchor / BBT 一致（见 ftl/metadata.h §元数据写模型）：
  * 只追加到擦除过的页 + 每条 record 带单调 sequence + 池内轮转 + 最新有效胜。
@@ -20,10 +21,10 @@
  *   checkpoint_find_latest 失败 ⇒ 开机 ftl_boot_fresh_start ⇒ **映射全丢**。
  */
 
-#include "ftl/allocator.h"
-#include "ftl/journal.h"
-#include "ftl/l2p_cache.h"
-#include "ftl/metadata.h" /* CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS */
+#include "allocator.h"
+#include "journal.h"
+#include "l2p_cache.h"
+#include "metadata.h" /* CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS */
 
 #include <stdint.h>
 
@@ -168,7 +169,7 @@ typedef struct
 #define CP_BLOCK_WORD_BYTES     FTL_CHECKPOINT_BLOCK_WORD_BYTES
 #define CP_BLOCK_WORDS_PER_PAGE FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE /* 1024 */
 #define CP_BLOCK_PAGES          FTL_CHECKPOINT_BLOCK_PAGES          /* 4 */
-#define CHECKPOINT_RECORD_PAGES FTL_CHECKPOINT_RECORD_PAGES         /* 5 */
+#define CHECKPOINT_RECORD_PAGES FTL_CHECKPOINT_RECORD_PAGES         /* 21 */
 
 /* word 位域：valid_count 10 / state 3 / temp 1 / pool 2（小端、显式移位，H27） */
 #define CP_BLOCK_WORD_VALID_MASK  (0x03FFU)

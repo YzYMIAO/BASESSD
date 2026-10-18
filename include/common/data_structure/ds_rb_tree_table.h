@@ -1,6 +1,8 @@
 #ifndef DS_RB_TREE_TABLE_H_
 #define DS_RB_TREE_TABLE_H_
 
+#include "config.h"
+
 /**
  * @brief 红黑树颜色常量
  */

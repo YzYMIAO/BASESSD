@@ -5,7 +5,7 @@
  * 按字喂入计算。自检策略与对齐契约在共享 src/platform/crc.c。
  */
 
-#include "common/assertion.h"
+#include "assertion.h"
 #include "crc.h"
 #include "sys_port.h" /* CRC_HandleTypeDef、UNUSED、__HAL_CRC_*、__HAL_RCC_CRC_CLK_ENABLE */
 

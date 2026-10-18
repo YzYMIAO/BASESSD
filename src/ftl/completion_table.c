@@ -21,14 +21,14 @@
  *   4. CQ 排空      completion_table_drain
  */
 
-#include "ftl/completion_table.h"
+#include "completion_table.h"
 
-#include "common/assertion.h"
-#include "fc/fc.h"
-#include "ftl/ftl.h" /* ftl_context_t（route 表） */
-#include "ftl/ftl_op.h"
-#include "ftl/ftl_type.h"
-#include "nand/nand_config.h" /* CH_NUM/CE_NUM/LUN_NUM */
+#include "assertion.h"
+#include "fc.h"
+#include "ftl.h" /* ftl_context_t（route 表） */
+#include "ftl_op.h"
+#include "ftl_type.h"
+#include "nand_config.h" /* CH_NUM/CE_NUM/LUN_NUM */
 
 #include <string.h>
 

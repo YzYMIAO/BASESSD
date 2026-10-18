@@ -16,15 +16,15 @@
  *   → UOP handler 层（nand_fmc.c）与 PCC 换算（nand_fmc_timing_to_pcc）。
  */
 
-#include "common/assertion.h"
-#include "common/log.h"
+#include "assertion.h"
 #include "delay.h"
 #include "dma.h"
-#include "nand/nand_config.h"
-#include "nand/nand_debug.h"
-#include "nand/nand_dispatch.h"
-#include "nand/nand_fc_interface.h"
-#include "nand/nand_fmc.h"
+#include "log.h"
+#include "nand_config.h"
+#include "nand_debug.h"
+#include "nand_dispatch.h"
+#include "nand_fc_interface.h"
+#include "nand_fmc.h"
 
 #include <stddef.h>
 

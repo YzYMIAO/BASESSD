@@ -1,7 +1,7 @@
 #include "fc_random_engine.h"
 
-#include "common/assertion.h"
-#include "nand/nand_config.h"
+#include "assertion.h"
+#include "nand_config.h"
 
 #include <stddef.h>
 

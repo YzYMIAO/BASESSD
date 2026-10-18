@@ -21,8 +21,8 @@
  *   损坏 ⇒ bbt_load 失败 ⇒ 开机不知道哪些块坏 ⇒ 用到坏块丢数据。
  */
 
-#include "ftl/allocator.h"
-#include "ftl/metadata.h" /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
+#include "allocator.h"
+#include "metadata.h" /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
 
 #include <stddef.h>
 #include <stdint.h>

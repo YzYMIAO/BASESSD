@@ -1,6 +1,8 @@
 #ifndef DS_QUEUE_H_
 #define DS_QUEUE_H_
 
+#include "config.h"
+
 /**
  * @brief 队列结构体（不透明指针）
  *

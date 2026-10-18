@@ -49,19 +49,19 @@
  *       一起还池；不要再手动 fc_buffer_release（会二次释放、空闲链成环）。
  */
 
-#include "fc/fc.h"
-#include "fc/fc_command.h"
-#include "fc/fc_crc_engine.h"
-#include "fc/fc_data_path.h"
-#include "fc/fc_ldpc_engine.h"
-#include "fc/fc_random_engine.h"
+#include "fc.h"
+#include "fc_command.h"
+#include "fc_crc_engine.h"
+#include "fc_data_path.h"
+#include "fc_ldpc_engine.h"
+#include "fc_random_engine.h"
 #include "fc_test_common.h"
 #include "munit.h"
-#include "nand/nand_config.h"
-#include "nand/onfi_1_0.h"
+#include "nand_config.h"
+#include "onfi_1_0.h"
 
 #if CONFIG_FC_RAID
-#    include "fc/fc_raid_engine.h"
+#    include "fc_raid_engine.h"
 #endif
 
 #include <string.h>

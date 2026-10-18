@@ -32,14 +32,14 @@
  *   一次转出，FC 层只见 PAA（v47）。
  */
 
-#include "ftl/ftl_fc_interface.h"
+#include "ftl_fc_interface.h"
 
-#include "common/assertion.h"
-#include "fc/fc.h"
-#include "ftl/completion_table.h"
-#include "ftl/ftl_op.h" /* ftl_op_submit / FTL_OP_SYNC_WAIT */
-#include "ftl/ftl_type.h"
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
+#include "completion_table.h"
+#include "fc.h"
+#include "ftl_op.h" /* ftl_op_submit / FTL_OP_SYNC_WAIT */
+#include "ftl_type.h"
+#include "onfi_1_0.h"
 
 #include <string.h>
 

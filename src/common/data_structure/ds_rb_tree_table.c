@@ -1,5 +1,6 @@
-#include <config.h>
-#include <ds_rb_tree_table.h>
+#include "ds_rb_tree_table.h"
+
+#include "config.h"
 
 /**
  * @brief 红黑树表结构体

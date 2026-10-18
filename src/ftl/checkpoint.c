@@ -12,7 +12,7 @@
  *   两者用各自的 sequence：Journal.sequence_counter 是全局单调；本池 ftl->cp.sequence 独立。
  *
  * 池几何（由 ftl/metadata.h 推导，见 checkpoint_ring_init）：
- *   CHECKPOINT_POOL_BLOCKS 个块、一条 record = 1 页、单 plane；
+ *   CHECKPOINT_POOL_BLOCKS 个块、一条 record = 21 页、P0+P1 镜像；
  *   写游标 ftl->cp.write_idx 在 [0, 总记录数) 环形推进，块满由 metadata_ring_prepare_addr
  *   判定（同步站点当场擦；异步 job 提交异步擦，见 CP_HDR_ERASE）。
  *
@@ -32,24 +32,24 @@
  * 多实例（多 LUN）下每实例一份，互不干扰。
  */
 
-#include "ftl/checkpoint.h"
+#include "checkpoint.h"
 
-#include "common/assertion.h"
-#include "common/boot_policy.h" /* boot_crc32（块元数据快照跨页校验和） */
-#include "common/log.h"
-#include "fc/fc.h"
-#include "ftl/ftl.h"
-#include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_job.h" /* 心跳 + 单调毫秒（ftl_job_now_ms / ftl_job_heartbeat）*/
-#include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_CHECKPOINT */
-#include "ftl/metadata.h"
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
+#include "boot_policy.h" /* boot_crc32（块元数据快照跨页校验和） */
+#include "fc.h"
+#include "ftl.h"
+#include "ftl_fc_interface.h"
+#include "ftl_job.h" /* 心跳 + 单调毫秒（ftl_job_now_ms / ftl_job_heartbeat）*/
+#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_CHECKPOINT */
+#include "log.h"
+#include "metadata.h"
+#include "onfi_1_0.h"
 
 #include <string.h>
 
 /* ── 内部辅助 ── */
 
-/* ── Checkpoint 池：环形轮转（一条 record = 1 页）──
+/* ── Checkpoint 池：环形轮转（一条 record = 21 页、P0+P1 镜像）──
  *
  * 池几何由 ftl/metadata.h 推导；sequence 与写游标是**本池自己的**（与 journal /
  * Anchor / BBT 的 sequence 互不相干），开机由 checkpoint_find_latest 恢复。
@@ -62,11 +62,11 @@ static void checkpoint_ring_init(metadata_ring_t *ring)
 {
     ring->first_block      = CHECKPOINT_BLOCK0;
     ring->block_count      = CHECKPOINT_POOL_BLOCKS;
-    ring->pages_per_record = CHECKPOINT_RECORD_PAGES; /* Header(1) + 快照(4) */
+    ring->pages_per_record = CHECKPOINT_RECORD_PAGES; /* Header(1) + 块元数据(4) + 磨损(16) */
     ring->plane_mask       = 0x03U;
 }
 
-/* 整条校验（一条 record = 1 页）：magic + 布局版本。
+/* Header 校验（record 的 commit 页）：magic + 布局版本。
  * 无本层 CRC——页完整性由下层 FC 的 per-CW CRC + ECC 保证（ADR v0.62）。 */
 static bool checkpoint_header_valid(const l2p_checkpoint_header_t *hdr)
 {

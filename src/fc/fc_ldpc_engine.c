@@ -1,6 +1,6 @@
 #include "fc_ldpc_engine.h"
 
-#include "common/assertion.h"
+#include "assertion.h"
 #include "fc.h" /* FC_BUFFER_DATA_SIZE / FC_BUFFER_POOL_CW_SIZE（入口上界与 LDPC 分支用） */
 #include "fc_bch_engine.h"
 #include "fc_ldpc_qc_engine.h"

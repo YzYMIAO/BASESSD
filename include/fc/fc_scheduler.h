@@ -2,8 +2,8 @@
 #define FC_SCHEDULER_H
 
 #include "fc_queue.h"
-#include "nand/nand_config.h"
-#include "nand/nand_dispatch.h"
+#include "nand_config.h"
+#include "nand_dispatch.h"
 
 /*
  * 调度器：HSQ 优先于普通 SQ。

@@ -1,8 +1,8 @@
 #include "fc_raid_engine.h"
 
-#include "common/assertion.h"
+#include "assertion.h"
 #include "fc.h"
-#include "nand/nand_config.h"
+#include "nand_config.h"
 
 #include <stddef.h>
 #include <string.h>

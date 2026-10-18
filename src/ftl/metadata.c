@@ -34,20 +34,20 @@
  * ⚠ 无断言——失败一律返回 FTL_ERROR / NAND_PBA_INVALID（服务函数按错误位判失败）。
  */
 
-#include "ftl/metadata.h"
+#include "metadata.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"
-#include "ftl/bbt.h"
-#include "ftl/checkpoint.h"
-#include "ftl/ftl.h" /* ftl_context_t（服务函数要从实例取 &ftl->alloc） */
-#include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
-#include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
-#include "ftl/journal.h"
-#include "ftl/metadata_job.h" /* slot_now / job_reset / 待回收位图（与 metadata_job.c 共用） */
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
+#include "bbt.h"
+#include "checkpoint.h"
+#include "fc.h"
+#include "ftl.h" /* ftl_context_t（服务函数要从实例取 &ftl->alloc） */
+#include "ftl_fc_interface.h"
+#include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
+#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
+#include "journal.h"
+#include "log.h"
+#include "metadata_job.h" /* slot_now / job_reset / 待回收位图（与 metadata_job.c 共用） */
+#include "onfi_1_0.h"
 
 #include <stddef.h>
 #include <string.h>

@@ -52,16 +52,16 @@
  *   ssd> test --seed 0x<上一轮打印的> /fc-nand/lifecycle/            # 复现同一组地址
  */
 
-#include "common/log.h"
-#include "fc/fc.h"
-#include "fc/fc_command.h"
-#include "fc/fc_queue.h"
-#include "fc/fc_scheduler.h"
+#include "fc.h"
+#include "fc_command.h"
+#include "fc_queue.h"
+#include "fc_scheduler.h"
 #include "fc_test_common.h"
-#include "ftl/ftl_fc_interface.h"
+#include "ftl_fc_interface.h"
+#include "log.h"
 #include "munit.h"
-#include "nand/nand_config.h"
-#include "nand/onfi_1_0.h"
+#include "nand_config.h"
+#include "onfi_1_0.h"
 
 #include <string.h>
 

@@ -1,6 +1,8 @@
 #ifndef DS_LIST_H_
 #define DS_LIST_H_
 
+#include "config.h"
+
 /**
  * @brief 双向链表结构体（不透明指针）
  */

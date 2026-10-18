@@ -21,11 +21,11 @@
  * 设计文档参考：§8.3 启动恢复完整流程
  */
 
-#include "common/ssd_types.h"
-#include "ftl/allocator.h"
-#include "ftl/checkpoint.h" /* l2p_checkpoint_header_t */
-#include "ftl/journal.h"
-#include "ftl/l2p_cache.h"
+#include "allocator.h"
+#include "checkpoint.h" /* l2p_checkpoint_header_t */
+#include "journal.h"
+#include "l2p_cache.h"
+#include "ssd_types.h"
 
 #include <stdint.h>
 

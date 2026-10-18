@@ -1,6 +1,8 @@
 #ifndef DS_DEQUE_H_
 #define DS_DEQUE_H_
 
+#include "config.h"
+
 /**
  * @brief 双端队列结构体（不透明指针）
  *

@@ -11,8 +11,7 @@
 
 #include "fc_command.h"
 
-#include "common/assertion.h"
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
 #include "onfi_1_0.h"
 
 #include <stddef.h>

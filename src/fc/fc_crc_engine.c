@@ -27,7 +27,7 @@
 
 #include "fc_crc_engine.h"
 
-#include "common/assertion.h"
+#include "assertion.h"
 #include "crc.h"
 
 #include <stddef.h>

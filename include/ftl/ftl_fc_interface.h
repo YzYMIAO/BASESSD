@@ -54,12 +54,12 @@
  * 「数据拷贝」寄存器——描述符链是固件填的、数据是固件 DMA 填的），故落在本层。
  */
 
-#include "common/assertion.h"
-#include "fc/fc_interface.h"
-#include "ftl/ftl_config.h" /* nand_pba_t, pba_to_paa */
-#include "ftl/ftl_type.h"
-#include "nand/nand_config.h"
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
+#include "fc_interface.h"
+#include "ftl_config.h" /* nand_pba_t, pba_to_paa */
+#include "ftl_type.h"
+#include "nand_config.h"
+#include "onfi_1_0.h"
 
 #include <stdint.h>
 

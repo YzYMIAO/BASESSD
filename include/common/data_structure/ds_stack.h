@@ -1,6 +1,8 @@
 #ifndef DS_STACK_H_
 #define DS_STACK_H_
 
+#include "config.h"
+
 /**
  * @brief 栈结构体（不透明指针）
  *

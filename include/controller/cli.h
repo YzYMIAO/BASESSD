@@ -1,7 +1,7 @@
 #ifndef SSD_CLI_H
 #define SSD_CLI_H
 
-#include "controller/controller.h"
+#include "controller.h"
 
 /*
  * UART CLI（应用层）—— 行编辑、命令表与 wr/rd/tr/fl/info/test 等命令。

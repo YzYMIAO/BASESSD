@@ -13,18 +13,18 @@
  * 三级模式切换依据未决命令数（pending + 组 + 完成表占用），非"本轮提交了几条 NAND"。
  */
 
-#include "common/ssd_types.h"
-#include "ftl/allocator.h"    /* ftl_tables_t, super_block_t */
-#include "ftl/bg_scheduler.h" /* 时间预算后台调度器（v0.76，ftl_context_t 含调度器） */
-#include "ftl/checkpoint.h"
-#include "ftl/ftl_type.h" /* ftl_io_request_t */
-#include "ftl/gc.h"
-#include "ftl/journal.h"
-#include "ftl/l2p_cache.h"
-#include "ftl/metadata.h"
-#include "ftl/migrate.h"
-#include "ftl/pending.h"
-#include "ftl/read_recovery.h"
+#include "allocator.h"    /* ftl_tables_t, super_block_t */
+#include "bg_scheduler.h" /* 时间预算后台调度器（v0.76，ftl_context_t 含调度器） */
+#include "checkpoint.h"
+#include "ftl_type.h" /* ftl_io_request_t */
+#include "gc.h"
+#include "journal.h"
+#include "l2p_cache.h"
+#include "metadata.h"
+#include "migrate.h"
+#include "pending.h"
+#include "read_recovery.h"
+#include "ssd_types.h"
 
 #include <stdint.h>
 

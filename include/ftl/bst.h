@@ -33,9 +33,9 @@
  *   块级聚合（valid_count）供 GC/WL 选 victim（对齐主流 validity ratio）；逐 CW 真值现查 L2P。
  */
 
-#include "common/assertion.h" /* ASSERT（本文件全部访问器的入参前置条件 + 计数守卫） */
-#include "ftl/ftl_config.h"   /* nand_pba_t, pba_to_*, NAND_PBA_INVALID */
-#include "nand/nand_config.h" /* BLOCKS_PER_PLANE, PLANE_NUM, CW_NUM */
+#include "assertion.h"   /* ASSERT（本文件全部访问器的入参前置条件 + 计数守卫） */
+#include "ftl_config.h"  /* nand_pba_t, pba_to_*, NAND_PBA_INVALID */
+#include "nand_config.h" /* BLOCKS_PER_PLANE, PLANE_NUM, CW_NUM */
 
 #include <stddef.h> /* NULL */
 #include <stdint.h>

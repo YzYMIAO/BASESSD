@@ -7,7 +7,7 @@
 
 #include "rng.h"
 
-#include "common/common.h"
+#include "common.h"
 #include "delay.h"
 
 uint8_t rng_init(void)

@@ -8,8 +8,8 @@
  * SHUTDOWN 不在枚举内（学习主控无热移除/优雅掉电退出路径），注释保留；
  * 若后续加枚举值，只扩展本文件的转换表，不动调用方。
  */
-#include "common/log.h"
-#include "controller/controller.h"
+#include "controller.h"
+#include "log.h"
 
 void ssd_controller_state_transition(ssd_controller_t      *controller,
                                      ssd_controller_state_t next_state)

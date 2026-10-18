@@ -1,6 +1,8 @@
 #ifndef DS_PQUEUE_H_
 #define DS_PQUEUE_H_
 
+#include "config.h"
+
 /**
  * @brief 优先队列结构体（不透明指针）
  *

@@ -1,5 +1,6 @@
-#include <config.h>
-#include <ds_pqueue.h>
+#include "ds_pqueue.h"
+
+#include "config.h"
 
 #define DEFAULT_CAPACITY         8 /**< 默认初始容量 */
 #define DEFAULT_EXPANSION_FACTOR 2 /**< 默认扩容因子 */

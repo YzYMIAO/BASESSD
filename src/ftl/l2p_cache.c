@@ -42,16 +42,16 @@
  *   8. 恢复辅助       invalidate_owner / snapshot_owner_bitmap
  */
 
-#include "ftl/l2p_cache.h"
+#include "l2p_cache.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"
-#include "ftl/ftl.h" /* ftl_context_t / ftl_service_pump（同步逃生口用） */
-#include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
-#include "ftl/ftl_op.h"  /* ftl_op_submit / ftl_op_in_dispatch */
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
+#include "fc.h"
+#include "ftl.h" /* ftl_context_t / ftl_service_pump（同步逃生口用） */
+#include "ftl_fc_interface.h"
+#include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
+#include "ftl_op.h"  /* ftl_op_submit / ftl_op_in_dispatch */
+#include "log.h"
+#include "onfi_1_0.h"
 
 #include <string.h>
 

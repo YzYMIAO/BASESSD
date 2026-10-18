@@ -1,6 +1,6 @@
-#include "platform/platform.h"
+#include "platform.h"
 
-#include "common/common.h"
+#include "common.h"
 #include "delay.h"
 
 static const ssd_platform_ops_t *g_platform_ops;

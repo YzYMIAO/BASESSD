@@ -8,7 +8,7 @@
 
 #include "sys_port.h"
 
-#include "common/common.h"
+#include "common.h"
 
 static const MPU_Region_InitTypeDef g_sys_mpu_regions[] = {
   /* Flash: executable read-only firmware. */

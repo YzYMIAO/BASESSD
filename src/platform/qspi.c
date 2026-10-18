@@ -7,7 +7,7 @@
 
 #include "qspi.h"
 
-#include "common/common.h"
+#include "common.h"
 
 uint8_t qspi_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime)
 {

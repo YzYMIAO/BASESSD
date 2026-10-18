@@ -14,10 +14,10 @@
  *   dump 会关掉 TX DMA/中断，若排在 flush 之前，队列里还没发出去的日志会被一起掐掉。
  */
 
-#include "common/assertion.h"
+#include "assertion.h"
 
-#include "common/crash.h"
-#include "common/log.h"
+#include "crash.h"
+#include "log.h"
 
 #include <stdarg.h>
 #include <stdio.h>

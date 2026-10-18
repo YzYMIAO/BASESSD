@@ -1,7 +1,7 @@
 #ifndef FTL_TYPE_H
 #define FTL_TYPE_H
 
-#include "common/ssd_types.h" /* ssd_status_t（ftl_io_request_t 的完成状态字段） */
+#include "ssd_types.h" /* ssd_status_t（ftl_io_request_t 的完成状态字段） */
 
 #include <stdint.h>
 

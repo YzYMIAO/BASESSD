@@ -28,7 +28,7 @@
 
 #include "fc_data_path.h"
 
-#include "common/assertion.h"
+#include "assertion.h"
 #include "fc.h"
 #include "fc_crc_engine.h"
 #include "fc_ldpc_engine.h"

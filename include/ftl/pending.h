@@ -15,8 +15,8 @@
  *   把 NAND 数据读回源 buffer，且 total_writes 永不递增。**buffer 非空 ≠ 写。**
  */
 
-#include "ftl/ftl_config.h" /* nand_pba_t, NAND_PBA_INVALID */
-#include "ftl/ftl_type.h"   /* lba_t, ftl_status_t, ftl_io_request_t, pending_cb_t */
+#include "ftl_config.h" /* nand_pba_t, NAND_PBA_INVALID */
+#include "ftl_type.h"   /* lba_t, ftl_status_t, ftl_io_request_t, pending_cb_t */
 
 #include <stdint.h>
 

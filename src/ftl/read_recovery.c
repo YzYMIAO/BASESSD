@@ -24,18 +24,18 @@
  *   形参由调用者保证非空 ⇒ ASSERT（判据 2：调用者保证的前置条件）。
  */
 
-#include "ftl/read_recovery.h"
+#include "read_recovery.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"
-#include "fc/fc_command.h"
-#include "ftl/bbt.h"              /* bbt_mark_bad */
-#include "ftl/ftl.h"              /* ftl_context_t（含 pending[] / cache / rr_page_scratch） */
-#include "ftl/ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_set_features / ftl_cmd_read_data */
-#include "ftl/ftl_job.h"          /* 心跳（[JOB] 观测口）*/
-#include "ftl/ftl_op.h"           /* ftl_op_submit / FTL_OP_READ_RECOVERY */
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
+#include "bbt.h" /* bbt_mark_bad */
+#include "fc.h"
+#include "fc_command.h"
+#include "ftl.h"              /* ftl_context_t（含 pending[] / cache / rr_page_scratch） */
+#include "ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_set_features / ftl_cmd_read_data */
+#include "ftl_job.h"          /* 心跳（[JOB] 观测口）*/
+#include "ftl_op.h"           /* ftl_op_submit / FTL_OP_READ_RECOVERY */
+#include "log.h"
+#include "onfi_1_0.h"
 
 #include <string.h>
 

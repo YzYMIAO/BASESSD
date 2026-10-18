@@ -39,8 +39,8 @@
  * 的正常状态（FTL_OP_SYNC_WAIT 的服务函数不用 ftl，是唯一例外）。
  */
 
-#include "fc/fc_command.h" /* fc_command_t / fc_command_status_t */
-#include "ftl/ftl_type.h"  /* ftl_status_t */
+#include "fc_command.h" /* fc_command_t / fc_command_status_t */
+#include "ftl_type.h"   /* ftl_status_t */
 
 #include <stdint.h>
 

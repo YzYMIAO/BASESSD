@@ -9,7 +9,7 @@
  * completion_table 占用 → IDLE/NORMAL/BUSY，见 ftl.c 的 inflight 计算），本钩子不重复
  * 实现队列，只做"host IO 到来"的观测点，返回值预留后续挂时间窗/预算缩减。
  */
-#include "controller/controller.h"
+#include "controller.h"
 
 int ssd_controller_schedule(ssd_controller_t *controller, int host_io_active)
 {

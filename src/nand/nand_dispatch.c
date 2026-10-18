@@ -22,12 +22,12 @@
  *           is_armed / lun_free。
  */
 
-#include "common/assertion.h"
-#include "common/log.h"
+#include "assertion.h"
 #include "delay.h"
-#include "fc/fc_command.h"
-#include "nand/nand_debug.h"
+#include "fc_command.h"
+#include "log.h"
 #include "nand_config.h"
+#include "nand_debug.h"
 #include "nand_dispatch_internal.h"
 #include "onfi_1_0.h"
 

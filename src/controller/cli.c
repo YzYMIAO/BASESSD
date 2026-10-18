@@ -9,16 +9,16 @@
  * uart_log_write 输出、uart_get_stats 读诊断计数，不碰环形队列/寄存器。
  */
 
-#include "controller/cli.h"
+#include "cli.h"
 
-#include "common/common.h"
-#include "common/crash.h"
-#include "common/log.h"
-#include "common/stack_guard.h"
-#include "controller/ssd_request.h"
-#include "ftl/bbt.h"
-#include "ftl/ftl.h"
-#include "ftl/l2p_cache.h"
+#include "bbt.h"
+#include "common.h"
+#include "crash.h"
+#include "ftl.h"
+#include "l2p_cache.h"
+#include "log.h"
+#include "ssd_request.h"
+#include "stack_guard.h"
 #include "usart.h"
 
 #include <stdio.h>

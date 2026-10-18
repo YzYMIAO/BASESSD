@@ -5,7 +5,7 @@
  * 重试策略与范围映射在共享 src/platform/rng.c。
  */
 
-#include "common/common.h"
+#include "common.h"
 #include "rng.h"
 #include "sys_port.h"
 

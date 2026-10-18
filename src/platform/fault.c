@@ -17,8 +17,8 @@
 
 #include "fault.h"
 
-#include "common/crash.h"
-#include "common/log.h"
+#include "crash.h"
+#include "log.h"
 
 #include <stddef.h>
 #include <stdint.h>

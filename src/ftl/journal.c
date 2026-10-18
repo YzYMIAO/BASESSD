@@ -40,17 +40,17 @@
  *   6. 截断           journal_truncate_plan / journal_truncate_commit（两步，异步 CP 用）
  */
 
-#include "ftl/journal.h"
+#include "journal.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"
-#include "ftl/completion_table.h"
-#include "ftl/ftl.h"
-#include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
-#include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_JOURNAL */
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
+#include "completion_table.h"
+#include "fc.h"
+#include "ftl.h"
+#include "ftl_fc_interface.h"
+#include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
+#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_JOURNAL */
+#include "log.h"
+#include "onfi_1_0.h"
 
 #include <string.h>
 

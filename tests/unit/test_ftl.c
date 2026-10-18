@@ -31,22 +31,22 @@
  *      测试无法恢复）⇒ ct 用例用**相对计数**、不调 init。
  */
 
-#include "controller/cli.h" /* g_ctrl（活实例路由表，extern） */
-#include "ftl/allocator.h"
-#include "ftl/bbt.h"
-#include "ftl/bst.h"
-#include "ftl/checkpoint.h"
-#include "ftl/completion_table.h"
-#include "ftl/gc.h"
-#include "ftl/journal.h"
-#include "ftl/l2p_cache.h"
-#include "ftl/metadata.h"
-#include "ftl/pending.h"
-#include "ftl/read_recovery.h"
-#include "ftl/wear_leveling.h"
+#include "allocator.h"
+#include "bbt.h"
+#include "bst.h"
+#include "checkpoint.h"
+#include "cli.h" /* g_ctrl（活实例路由表，extern） */
+#include "completion_table.h"
 #include "ftl_test_common.h" /* 共享活实例夹具（§1） */
+#include "gc.h"
+#include "journal.h"
+#include "l2p_cache.h"
+#include "metadata.h"
 #include "munit.h"
-#include "nand/nand_config.h"
+#include "nand_config.h"
+#include "pending.h"
+#include "read_recovery.h"
+#include "wear_leveling.h"
 
 #include <string.h>
 

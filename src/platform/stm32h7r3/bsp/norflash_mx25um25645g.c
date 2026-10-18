@@ -1,6 +1,6 @@
 #include "norflash_mx25um25645g.h"
 
-#include "common/common.h"
+#include "common.h"
 #include "delay.h"
 
 /* MX25UM25645G SPI命令定义 */

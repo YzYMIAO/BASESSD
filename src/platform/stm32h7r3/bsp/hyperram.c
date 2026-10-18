@@ -1,6 +1,6 @@
 #include "hyperram.h"
 
-#include "common/common.h"
+#include "common.h"
 
 #define HYPERRAM_IDENTIFICATION_REGISTER_0 ((0x00000000UL) << 1)
 #define HYPERRAM_IDENTIFICATION_REGISTER_1 ((0x00000001UL) << 1)

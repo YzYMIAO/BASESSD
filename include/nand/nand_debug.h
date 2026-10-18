@@ -20,7 +20,7 @@
 #ifndef NAND_DEBUG_H
 #define NAND_DEBUG_H
 
-#include "common/log.h"
+#include "log.h"
 
 #include <stdint.h>
 

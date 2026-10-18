@@ -43,23 +43,23 @@
  *   只跑 [0][0][0] 会让其余实例的 journal / checkpoint / bbt / GC 永不推进（序 4）。
  */
 
-#include "ftl/ftl.h"
+#include "ftl.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"
-#include "ftl/bbt.h"
-#include "ftl/checkpoint.h"
-#include "ftl/completion_table.h"
-#include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_* */
-#include "ftl/gc.h"      /* gc_check_triggers / gc_select_victim（GC 触发求值与选块） */
-#include "ftl/migrate.h" /* mig_begin_gc / mig_begin_wl / mig_begin_predict / mig_service */
-#include "ftl/pending.h"
-#include "ftl/power_failure_recovery.h"
-#include "ftl/wear_leveling.h"
-#include "nand/onfi_1_0.h"
-#include "platform/platform.h"
+#include "assertion.h"
+#include "bbt.h"
+#include "checkpoint.h"
+#include "completion_table.h"
+#include "fc.h"
+#include "ftl_fc_interface.h"
+#include "ftl_op.h" /* ftl_op_submit / FTL_OP_* */
+#include "gc.h"     /* gc_check_triggers / gc_select_victim（GC 触发求值与选块） */
+#include "log.h"
+#include "migrate.h" /* mig_begin_gc / mig_begin_wl / mig_begin_predict / mig_service */
+#include "onfi_1_0.h"
+#include "pending.h"
+#include "platform.h"
+#include "power_failure_recovery.h"
+#include "wear_leveling.h"
 
 #include <string.h>
 

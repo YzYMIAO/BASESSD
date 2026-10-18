@@ -1,7 +1,7 @@
-#include "controller/controller.h"
+#include "controller.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
+#include "assertion.h"
+#include "log.h"
 
 #include <stddef.h>
 

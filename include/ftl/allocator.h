@@ -60,11 +60,11 @@
  *    文档化契约（UT 钉住），不要"顺手"转成 ASSERT。
  */
 
-#include "common/assertion.h" /* ASSERT（退化单 plane 条目展开地址是编码错误） */
-#include "ftl/bst.h"          /* ftl_block_t, FTL_BLOCK_TOTAL, ftl_gblock, ftl_block_is_bad */
-#include "ftl/ftl_config.h"   /* nand_pba_t, pba_make, NAND_PBA_INVALID */
-#include "ftl/ftl_type.h"     /* ftl_status_t, ftl_topology_t */
-#include "nand/nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
+#include "assertion.h"   /* ASSERT（退化单 plane 条目展开地址是编码错误） */
+#include "bst.h"         /* ftl_block_t, FTL_BLOCK_TOTAL, ftl_gblock, ftl_block_is_bad */
+#include "ftl_config.h"  /* nand_pba_t, pba_make, NAND_PBA_INVALID */
+#include "ftl_type.h"    /* ftl_status_t, ftl_topology_t */
+#include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK, BLOCKS_PER_PLANE */
 
 #include <stdbool.h>
 #include <stdint.h>

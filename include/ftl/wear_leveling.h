@@ -20,8 +20,8 @@
  *   — 二者独立运行，互不干扰
  */
 
-#include "common/ssd_types.h" /* bool */
-#include "nand/nand_config.h"
+#include "nand_config.h"
+#include "ssd_types.h" /* bool */
 
 #include <stdint.h>
 

@@ -22,12 +22,12 @@
  * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
  */
 
-#include "ftl/gc.h"
+#include "gc.h"
 
-#include "common/log.h"
-#include "fc/fc.h"
-#include "ftl/ftl_fc_interface.h"
-#include "nand/onfi_1_0.h"
+#include "fc.h"
+#include "ftl_fc_interface.h"
+#include "log.h"
+#include "onfi_1_0.h"
 
 #include <string.h>
 

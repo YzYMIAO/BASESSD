@@ -39,10 +39,10 @@
  *   以免循环包含。
  */
 
-#include "common/assertion.h" /* ASSERT —— CW 级地址辅助的参数自检 */
-#include "fc/fc.h"            /* FC_BUFFER_USER_SIZE —— 映射单元的用户数据字节数 */
-#include "ftl/ftl_type.h"     /* lba_t —— CW 级地址辅助的形参/返回类型 */
-#include "nand/nand_config.h"
+#include "assertion.h" /* ASSERT —— CW 级地址辅助的参数自检 */
+#include "fc.h"        /* FC_BUFFER_USER_SIZE —— 映射单元的用户数据字节数 */
+#include "ftl_type.h"  /* lba_t —— CW 级地址辅助的形参/返回类型 */
+#include "nand_config.h"
 
 #include <stddef.h>
 #include <stdint.h>

@@ -15,7 +15,7 @@
  *   bbt_save 时从 BST 重建 bitmap，bbt_init 时从 bitmap 重建 BST。
  *
  * BBT 池（环形轮转，一条 record = 1 页，见 metadata_ring_*）：
- *   BBT_POOL_BLOCKS 块、单 plane；游标/序号是**本池自己的**，开机由 bbt_load 恢复。
+ *   BBT_POOL_BLOCKS 块、P0+P1 镜像；游标/序号是**本池自己的**，开机由 bbt_load 恢复。
  *
  * 文件结构：
  *   1. 池几何/校验/探针   bbt_ring_init / bbt_header_valid / bbt_record_probe
@@ -37,16 +37,16 @@
  * 多实例（多 LUN）下每实例一份，互不干扰。
  */
 
-#include "ftl/bbt.h"
+#include "bbt.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"
-#include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_job.h"  /* 心跳（[JOB] 观测口）*/
-#include "ftl/ftl_op.h"   /* ftl_op_submit / FTL_OP_BBT（阶段 7） */
-#include "ftl/metadata.h" /* metadata_ring_*（BBT 池轮转原语）*/
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
+#include "fc.h"
+#include "ftl_fc_interface.h"
+#include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
+#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_BBT（阶段 7） */
+#include "log.h"
+#include "metadata.h" /* metadata_ring_*（BBT 池轮转原语）*/
+#include "onfi_1_0.h"
 
 #include <stdio.h>
 #include <string.h>

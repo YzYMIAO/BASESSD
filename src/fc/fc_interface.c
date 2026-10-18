@@ -22,13 +22,13 @@
 
 #include "fc_interface.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
+#include "assertion.h"
 #include "dma.h" /* CONFIG_NAND_DMA：数据通路 PIO/DMA */
 #include "fc_command.h"
 #include "fc_internal.h"
 #include "fc_ldpc_engine.h"
 #include "fc_random_engine.h"
+#include "log.h"
 
 #include <stddef.h>
 

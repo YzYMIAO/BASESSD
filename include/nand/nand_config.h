@@ -27,7 +27,7 @@
  */
 
 #if defined(NAND_DEVICE_MT29F___G08A)
-#    include "nand/devices/mt29f___g08a.h"
+#    include "mt29f___g08a.h"
 #else
 #    error "NAND device not selected: make NAND_DEVICE=<family>"
 #endif

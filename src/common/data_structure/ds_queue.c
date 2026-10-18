@@ -1,6 +1,7 @@
-#include <config.h>
-#include <ds_deque.h>
-#include <ds_queue.h>
+#include "ds_queue.h"
+
+#include "config.h"
+#include "ds_deque.h"
 
 #define DEFAULT_CAPACITY 8 /**< 默认初始容量 */
 

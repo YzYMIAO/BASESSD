@@ -5,7 +5,7 @@
  * 共享 src/platform/dma.c 只转发 uart_tx_dma_* 到本文件。
  */
 
-#include "common/common.h"
+#include "common.h"
 #include "dma.h"
 #include "sys_port.h"   /* DMA_HandleTypeDef / DMA1_Stream0 / HAL_DMA_* —— 抽象 dma.h 已不再传递 */
 #include "usart_port.h" /* g_uart1_handle（__HAL_LINKDMA 需要） */

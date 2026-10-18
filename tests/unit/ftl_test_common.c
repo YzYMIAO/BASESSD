@@ -17,18 +17,18 @@
 
 #include "ftl_test_common.h"
 
-#include "controller/cli.h"  /* g_ctrl（活实例路由表，extern） */
-#include "fc/fc_interface.h" /* fc_command_id_to_command / fc_descriptor_id_to_descriptor */
-#include "fc/fc_internal.h"  /* g_fc_controller / fc_t / FC_COMMAND_STATE_* */
-#include "ftl/allocator.h"   /* ftl_allocator_t（含 bbt/wear 池游标） */
-#include "ftl/checkpoint.h"  /* cp_job_t */
-#include "ftl/completion_table.h"
-#include "ftl/ftl_fc_interface.h" /* ftl_cmd_id */
-#include "ftl/journal.h"
-#include "ftl/l2p_cache.h"
-#include "ftl/metadata.h"
-#include "ftl/migrate.h" /* mig_job_t */
-#include "ftl/read_recovery.h"
+#include "allocator.h"  /* ftl_allocator_t（含 bbt/wear 池游标） */
+#include "checkpoint.h" /* cp_job_t */
+#include "cli.h"        /* g_ctrl（活实例路由表，extern） */
+#include "completion_table.h"
+#include "fc_interface.h"     /* fc_command_id_to_command / fc_descriptor_id_to_descriptor */
+#include "fc_internal.h"      /* g_fc_controller / fc_t / FC_COMMAND_STATE_* */
+#include "ftl_fc_interface.h" /* ftl_cmd_id */
+#include "journal.h"
+#include "l2p_cache.h"
+#include "metadata.h"
+#include "migrate.h" /* mig_job_t */
+#include "read_recovery.h"
 
 #include <string.h>
 

@@ -35,12 +35,12 @@
  *   pending 子操作托管给 job 就返回，恢复在 rr_kick / 完成服务函数里分步推进。
  */
 
-#include "fc/fc_command.h" /* fc_command_status_t（服务函数签名） */
-#include "ftl/allocator.h"
-#include "ftl/bst.h"        /* rr_ecc_track_t, rr_block_health_t, ftl_block_t */
-#include "ftl/ftl_config.h" /* nand_pba_t */
-#include "ftl/ftl_type.h"
-#include "ftl/l2p_cache.h"
+#include "allocator.h"
+#include "bst.h"        /* rr_ecc_track_t, rr_block_health_t, ftl_block_t */
+#include "fc_command.h" /* fc_command_status_t（服务函数签名） */
+#include "ftl_config.h" /* nand_pba_t */
+#include "ftl_type.h"
+#include "l2p_cache.h"
 
 #include <stdint.h>
 

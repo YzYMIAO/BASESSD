@@ -1,4 +1,4 @@
-#include "common/boot_policy.h"
+#include "boot_policy.h"
 
 #include <stddef.h>
 

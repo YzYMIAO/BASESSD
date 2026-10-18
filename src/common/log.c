@@ -1,6 +1,6 @@
-#include "common/log.h"
+#include "log.h"
 
-#include "platform/platform.h"
+#include "platform.h"
 
 #include <stddef.h>
 #include <stdio.h>

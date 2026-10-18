@@ -1,6 +1,6 @@
 #include "spi_sdnand.h"
 
-#include "common/common.h"
+#include "common.h"
 #include "delay.h"
 #include "usart.h"
 

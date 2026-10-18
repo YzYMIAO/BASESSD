@@ -15,14 +15,14 @@
  *   4. 同步等待服务    ftl_op_sync_wait（原 ftl_sync_waiter_handler）
  */
 
-#include "ftl/ftl_op.h"
+#include "ftl_op.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h" /* fc_submit / fc_command_id_to_command / fc_command_release */
-#include "ftl/completion_table.h"
-#include "ftl/ftl.h"              /* ftl_context_t */
-#include "ftl/ftl_fc_interface.h" /* ftl_cmd_id */
+#include "assertion.h"
+#include "completion_table.h"
+#include "fc.h"               /* fc_submit / fc_command_id_to_command / fc_command_release */
+#include "ftl.h"              /* ftl_context_t */
+#include "ftl_fc_interface.h" /* ftl_cmd_id */
+#include "log.h"
 
 /* 前置声明：服务函数定义在本文件末尾（数组初始化器须先见到声明）。 */
 static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);

@@ -1,6 +1,6 @@
 #include "delay.h"
 
-#include "common/common.h"
+#include "common.h"
 /* 本文件是**跨 target 共享**的平台源文件：不 include 任何 SoC 头，也不出现
  * HAL 类型。计数器寄存器（DWT/SysTick）与时钟查询一律经 delay_port_* 下沉到
  * src/platform/<soc>/delay_port.c —— 内核头无法单独使用（它依赖设备头提供

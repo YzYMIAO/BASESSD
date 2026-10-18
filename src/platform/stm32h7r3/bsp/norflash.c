@@ -1,6 +1,6 @@
 #include "norflash.h"
 
-#include "common/common.h"
+#include "common.h"
 #include "norflash_mx25um25645g.h"
 #include "norflash_w25q128_dual.h"
 

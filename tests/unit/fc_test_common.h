@@ -137,15 +137,15 @@
  *     读回时 Pass 4 ①（自洽：低 3 位 == plane_cw）当场不过。
  */
 
-#include "common/assertion.h"
-#include "fc/fc.h"
-#include "fc/fc_command.h"
-#include "ftl/ftl_config.h" /* pba_make（见 pba_from_addr 薄壳） */
-#include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_op.h" /* FTL_OP_HOST_IO（cmd->op_tag 的测试取值）*/
+#include "assertion.h"
+#include "fc.h"
+#include "fc_command.h"
+#include "ftl_config.h" /* pba_make（见 pba_from_addr 薄壳） */
+#include "ftl_fc_interface.h"
+#include "ftl_op.h" /* FTL_OP_HOST_IO（cmd->op_tag 的测试取值）*/
 #include "munit.h"
-#include "nand/nand_config.h"
-#include "nand/onfi_1_0.h"
+#include "nand_config.h"
+#include "onfi_1_0.h"
 
 #include <stdint.h>
 

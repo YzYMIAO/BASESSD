@@ -1,4 +1,4 @@
-#include "common/common.h"
+#include "common.h"
 #include "dma.h" /* 抽象头提供 CONFIG_NAND_DMA 默认值，必须在 #if 之前 */
 
 #if CONFIG_NAND_DMA

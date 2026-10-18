@@ -1,4 +1,4 @@
-#include "common/crash.h"
+#include "crash.h"
 
 #include <string.h>
 

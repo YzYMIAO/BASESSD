@@ -28,21 +28,21 @@
  *   ⚠ 这两个阶段**必须先就绪前置再动账**（否则半途而废会重复记账 / 位图一半有一半没有）。
  */
 
-#include "ftl/migrate.h"
+#include "migrate.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"                /* fc_command_release / fc_command_id_to_command */
-#include "ftl/bbt.h"              /* bbt_mark_bad */
-#include "ftl/ftl.h"              /* ftl_context_t */
-#include "ftl/ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_write_page_cw / ftl_async_erase_block */
-#include "ftl/ftl_job.h"          /* 心跳（[JOB] 观测口）*/
-#include "ftl/ftl_op.h"           /* ftl_op_submit / FTL_OP_GC / FTL_OP_WL */
-#include "ftl/gc.h"               /* gc_select_victim / gc_decode_cw_lba */
-#include "ftl/journal.h"          /* journal_kick / journal_append / JRN_IDLE */
-#include "ftl/l2p_cache.h"        /* l2p_cache_read / l2p_cache_write */
-#include "ftl/read_recovery.h"    /* rr_record_ecc / rr_predictive_scan / rr_retire_block */
-#include "ftl/wear_leveling.h"    /* wl_should_trigger / wl_select_victim */
+#include "assertion.h"
+#include "bbt.h"              /* bbt_mark_bad */
+#include "fc.h"               /* fc_command_release / fc_command_id_to_command */
+#include "ftl.h"              /* ftl_context_t */
+#include "ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_write_page_cw / ftl_async_erase_block */
+#include "ftl_job.h"          /* 心跳（[JOB] 观测口）*/
+#include "ftl_op.h"           /* ftl_op_submit / FTL_OP_GC / FTL_OP_WL */
+#include "gc.h"               /* gc_select_victim / gc_decode_cw_lba */
+#include "journal.h"          /* journal_kick / journal_append / JRN_IDLE */
+#include "l2p_cache.h"        /* l2p_cache_read / l2p_cache_write */
+#include "log.h"
+#include "read_recovery.h" /* rr_record_ecc / rr_predictive_scan / rr_retire_block */
+#include "wear_leveling.h" /* wl_should_trigger / wl_select_victim */
 
 #include <string.h>
 

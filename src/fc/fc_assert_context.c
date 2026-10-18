@@ -8,9 +8,9 @@
  * （它最初内联在 munit.c 里，属于非上游移植件，随断言系统重建迁出。）
  */
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"
+#include "assertion.h"
+#include "fc.h"
+#include "log.h"
 
 void assertion_platform_context(void)
 {

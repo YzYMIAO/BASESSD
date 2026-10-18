@@ -1,10 +1,10 @@
 #ifndef FC_COMMAND_H
 #define FC_COMMAND_H
 
-#include "common/assertion.h"
-#include "common/ssd_types.h" /* DWORD（命令/描述符位域的 32 位字） */
+#include "assertion.h"
 #include "fc_types.h"
-#include "nand/nand_config.h" /* PLANE_NUM / CW_NUM / paa_to_plane */
+#include "nand_config.h" /* PLANE_NUM / CW_NUM / paa_to_plane */
+#include "ssd_types.h"   /* DWORD（命令/描述符位域的 32 位字） */
 
 #include <stdbool.h>
 #include <stdint.h>

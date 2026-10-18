@@ -18,10 +18,10 @@
  * 写回策略：Write-back（Dirty 标记，延迟写回 NAND）
  */
 
-#include "ftl/allocator.h"  /* ftl_allocator_t */
-#include "ftl/ftl_config.h" /* §一 容量/分解宏 + §三.2 nand_pba_t / pba_* */
-#include "ftl/ftl_type.h"   /* lba_t */
-#include "ftl/metadata.h"   /* metadata_dir_* / metadata_dir_cache_t（Directory 访问） */
+#include "allocator.h"  /* ftl_allocator_t */
+#include "ftl_config.h" /* §一 容量/分解宏 + §三.2 nand_pba_t / pba_* */
+#include "ftl_type.h"   /* lba_t */
+#include "metadata.h"   /* metadata_dir_* / metadata_dir_cache_t（Directory 访问） */
 
 #include <stddef.h>
 #include <stdint.h>

@@ -9,10 +9,10 @@
  * 物理单元、数据怎么搬都是固件（FTL）的事。
  */
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "controller/controller.h"
-#include "ftl/ftl.h"
+#include "assertion.h"
+#include "controller.h"
+#include "ftl.h"
+#include "log.h"
 
 /* 外部：controller.c — 按 LBA 路由到 FTL 实例（内部函数，拆分循环共用） */
 ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, uint64_t lba);

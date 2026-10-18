@@ -8,8 +8,8 @@
 #ifndef NAND_DISPATCH_INTERNAL_H
 #define NAND_DISPATCH_INTERNAL_H
 
-#include "fc/fc_command.h"
-#include "fc/fc_types.h"
+#include "fc_command.h"
+#include "fc_types.h"
 #include "nand_config.h"
 #include "nand_dispatch.h"
 #include "nand_fc_interface.h"

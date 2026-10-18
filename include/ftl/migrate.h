@@ -58,11 +58,11 @@
  *   反向包含会成环。ftl.h include 本文件以放置 mig_job_t。
  */
 
-#include "fc/fc_command.h"    /* fc_command_status_t（服务函数签名） */
-#include "ftl/allocator.h"    /* super_block_t */
-#include "ftl/ftl_config.h"   /* nand_pba_t, CW_NUM, PAGE_MAIN_SIZE */
-#include "ftl/ftl_type.h"     /* lba_t */
-#include "nand/nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
+#include "allocator.h"   /* super_block_t */
+#include "fc_command.h"  /* fc_command_status_t（服务函数签名） */
+#include "ftl_config.h"  /* nand_pba_t, CW_NUM, PAGE_MAIN_SIZE */
+#include "ftl_type.h"    /* lba_t */
+#include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
 
 #include <stdbool.h>
 #include <stdint.h>

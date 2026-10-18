@@ -466,6 +466,10 @@ PAA(uint32_t)，低位 → 高位：
 Journal 不是 record 池，填 1。`plane_mask` 决定固定块在哪些 plane 上占用：
 Anchor/CP/BBT/Journal = `0x03`。
 
+⚠ 上表「池内总量」是**池深策略的结果**，不是容量需求；任意时刻只有 1 条 record
+是权威数据，其余是回退历史与磨损预算。池深为什么取 32 / 8 / 2 / 4、环形池如何
+摊开磨损，见 §2.3.7。
+
 ⚠ 镜像池（Anchor/CP/BBT）的**逻辑 record 数**与上表一致；每个 record 在 P0/P1 各存
 一份 ⇒ **物理页用量与元数据写放大 ×2**（换的是单 plane 损坏仍可恢复）。Journal 是
 单副本交错。**磨损计数（erase/read/ECC 健康）在 CP 记录里**（介质版本 9），不再有
@@ -606,17 +610,77 @@ Directory 指向的 region 页不占固定分区，而是从 Free Pool 动态取
 - **未映射不占闪存**：Directory 为每个 region 预登记 `NAND_PBA_INVALID`，读取该
   region 时 L2P cache 直接合成全 `INVALID` 的行，**不发 NAND 读**。
 
-#### 2.3.7 共同写模型
+#### 2.3.7 共同写模型：环形池为什么这样写
+
+**固定元数据块唯一的磨损均衡**
+
+固定元数据块（Anchor / Checkpoint / BBT / Journal）**不在 Free Pool 里**，GC 与 WL
+都管理不到它们（§3.2.3：这些块的 pool 归属是 NONE）。因此，对这些块而言，
+**池内环形轮转是唯一的磨损均衡手段**。如果只在一个固定块/固定页上反复擦写：
+
+- **不擦就重写**：NAND 只能 1→0，对已编程页二次编程 = 新数据 AND 旧数据
+  = **静默损坏**。
+- **擦同一块再写**：该块承担全部元数据擦除 ⇒ **单块热点**，先达到 P/E 上限
+  ⇒ 早期坏块。
+
+这两类问题的历史记录见 `docs/design/ftl_revision_history.md` 的 v0.50（固定地址
+写模型）与 v0.82（独立 Wear 块是固定单副本热点）。
+
+**定量：环形池摊开的是单块磨损，不是总擦除数**
+
+设池 N 块、每块 R 条 record、每条 record 对应 W 次主机写：
+
+| 量 | 公式 | 含义 |
+|---|---|---|
+| 每条 record 的块擦除 | `1 / R` | 与 N 无关 |
+| 写 T 条 record 的总擦除 | `T / R` | 与 N 无关；环形池**不省擦除** |
+| 单块擦除次数 | `T / (R × N)` | 随 N 线性下降 |
+| 单块擦除间隔（主机写） | `N × R × W` | 池越深，同一块两次擦除隔得越久 |
+| 池可承受 record 数 | `≈ N × R × P/E 上限` | N 块各自贡献 P/E 预算 |
+
+所以环形池降低的是「任何单块先到寿命终点」的概率；代价是把 N 个块从用户容量里划走。
+
+**共同写模型：这些规则同时给出掉电安全**
 
 - **只追加**：元数据页只写擦除态页；对已编程页二次编程 = 新数据 AND 旧数据 = 静默损坏。
 - **带 sequence**：每条 record 带单调序号；池内写序 == sequence 序；读取取
   「整条校验通过」中 sequence 最大者（**不取半条**）。
-- **池内轮转**：块满 ⇒ 擦池内下一块 ⇒ 从页 0 续写；`block_count >= 2` 是硬要求。
+- **池内轮转**：块满 ⇒ 擦池内下一块 ⇒ 从页 0 续写；`block_count >= 2` 是硬要求
+  —— 1 块池换块时会擦掉唯一有效副本。
 - **完整性**：元数据页统一用 `FTL_PAGE_CFG_META` 写（FC per-CW CRC + ECC）；
   结构体本身**无独立 CRC**（例外：Checkpoint 的块元数据快照有 `block_crc32`）。
 - **版本**：Anchor 页与 Checkpoint Header 都带 `layout_version`；不符 ⇒ 该 record
   作废，开机自动全片格式化。
 - **只有 L2P region 日志块是动态的**；Anchor/Checkpoint/BBT/Journal 都是固定块池。
+
+**池深是策略旋钮，不是磨损推导**
+
+| 池 | 块数 | 性质 | 依据 |
+|---|---:|---|---|
+| Anchor | 32 | 策略 | 固定根 + 专用元数据块池的主控形态；本仓磨损不是约束，32 不是按 P/E 算出来的 |
+| Checkpoint | 8 | 策略 | 无容量下界论证；`>= 2` 是硬约束 |
+| BBT | 2 | **最小合法池** | 2 块是环形池下限；1 页/条 × 64 页/块 ⇒ 128 条，不是"开大了" |
+| Journal | 4 = `CW_NUM` | 容量策略 | 容纳两次 Checkpoint 之间的映射更新；85%/95% 水位兜底 |
+
+⚠ §2.3 主表的「池内总量」（Anchor 256 / CP 24 / BBT 128 / Journal 32,512）是
+上表池深 × 每块 record 数的**结果**，不是容量需求；任意时刻只有 1 条 record 是
+权威数据，其余是回退历史与磨损预算。
+
+**代价**
+
+- 容量：固定元数据区 46 个块号 × 2 plane = 92 个物理块 × 128 KiB =
+  **11.5 MiB ≈ 512 MiB 的 2.25%**。
+- 启动：`metadata_ring_locate` 快路径要读每个块的末条 record（O(块数) 次页读），
+  池越深启动扫描越久。
+
+**主流对照**
+
+- SPDK FTL 把 Superblock 常驻 cache 并镜像到 base device，nvcache chunk 按顺序写
+  （`docs/reference/pages/spdk_ftl.html`）——"固定根 + 顺序 chunk"与本节形态同构。
+- 磨损均衡的通用原则见 `docs/design/storage_controller_design_essentials.md §5.5`：
+  P/E 有限 ⇒ 必须把擦除摊平。
+- **具体深度 32 / 8 / 2 / 4 是本仓自定**——公开资料没有对应的数值。
+
 - **固定池的副本策略**（介质版本 9）：
   - **Anchor / Checkpoint / BBT：P0+P1 镜像**。同一条 record/页用 multi-plane program
     一次写进两个 plane 的同 block/page（`ftl_async_write_page_mirror`）；读侧任一副本
@@ -1853,6 +1917,8 @@ CRC 覆盖 META+USER，且自身在 ECC 码字内，能消除“ECC 误纠后看
 固定根给启动一个确定的查找起点，日志块吸收高频更新，Directory 追踪最新位置。
 企业级把日志块也放到全动态池并加 RAID1；本仓保留固定池是为了启动时间与实现可控，
 **这是本仓自定**的取舍，不是行业标准形态。
+
+固定池为什么必须环形轮转、池深如何影响单块磨损与启动扫描，见 §2.3.7。
 
 DRAM-less 侧的关键同构是 **flash reverse-mapping**：不常驻逐页有效位图，
 靠页内 META + L2P 反查判有效（§3.13）。这与 Directory 是两件事：Directory 管

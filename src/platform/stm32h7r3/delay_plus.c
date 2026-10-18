@@ -1,6 +1,6 @@
 #include "delay_plus.h"
 
-#include "common/common.h"
+#include "common.h"
 #include "stm32h7rsxx_hal.h"
 
 static uint32_t s_core_clock_hz;

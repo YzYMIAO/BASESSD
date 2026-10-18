@@ -21,16 +21,16 @@
  *     （重取会白烧一页）；待回收位在擦除在飞/失败期间也保持置位。
  */
 
-#include "ftl/metadata_job.h"
+#include "metadata_job.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
-#include "fc/fc.h"
-#include "ftl/ftl.h" /* ftl_context_t（服务函数要从实例取 &ftl->alloc） */
-#include "ftl/ftl_fc_interface.h"
-#include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
-#include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
-#include "nand/onfi_1_0.h"
+#include "assertion.h"
+#include "fc.h"
+#include "ftl.h" /* ftl_context_t（服务函数要从实例取 &ftl->alloc） */
+#include "ftl_fc_interface.h"
+#include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
+#include "ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
+#include "log.h"
+#include "onfi_1_0.h"
 
 /* 连续"提交不出去"的轮数上限（同 CP/MIG/RR_SUBMIT_STALL_MAX）。 */
 #define MD_SUBMIT_STALL_MAX (256U)

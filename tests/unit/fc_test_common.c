@@ -6,8 +6,8 @@
 
 #include "fc_test_common.h"
 
-#include "fc/fc_random_engine.h"
-#include "nand/nand_dispatch.h"
+#include "fc_random_engine.h"
+#include "nand_dispatch.h"
 
 #include <stdio.h>
 #include <stdlib.h>

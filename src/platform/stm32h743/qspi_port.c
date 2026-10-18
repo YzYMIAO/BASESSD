@@ -7,7 +7,7 @@
 
 #include "qspi_port.h"
 
-#include "common/common.h"
+#include "common.h"
 #include "qspi.h"
 
 static QSPI_HandleTypeDef g_qspi_handle; /* QSPI句柄 */

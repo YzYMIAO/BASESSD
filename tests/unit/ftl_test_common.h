@@ -8,9 +8,9 @@
 #ifndef FTL_TEST_COMMON_H
 #define FTL_TEST_COMMON_H
 
-#include "fc/fc_command.h" /* fc_command_t / fc_command_status_t */
-#include "ftl/ftl.h"       /* ftl_context_t */
-#include "munit.h"         /* MunitParameter / MunitTest */
+#include "fc_command.h" /* fc_command_t / fc_command_status_t */
+#include "ftl.h"        /* ftl_context_t */
+#include "munit.h"      /* MunitParameter / MunitTest */
 
 /* ── §1 活实例夹具 ──
  *

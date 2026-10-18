@@ -22,11 +22,11 @@
 
 #include "nand_fmc.h"
 
-#include "common/assertion.h"
-#include "common/log.h"
+#include "assertion.h"
 #include "delay.h"
 #include "dma.h"
-#include "nand/nand_debug.h"
+#include "log.h"
+#include "nand_debug.h"
 #include "onfi_1_0.h"
 
 #include <stddef.h>

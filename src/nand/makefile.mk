@@ -9,4 +9,5 @@ endif
 MODULE_SRCS += $(wildcard $(SRC_ROOT)/nand/*.c)
 MODULE_SRCS += $(NAND_DEVICE_SRC)
 MODULE_INCS += $(INC_ROOT)/nand
+MODULE_INCS += $(INC_ROOT)/nand/devices
 MODULE_INCS += $(INC_ROOT)/platform/stm32h743

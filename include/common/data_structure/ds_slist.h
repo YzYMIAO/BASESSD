@@ -1,6 +1,8 @@
 #ifndef SLIST_H_
 #define SLIST_H_
 
+#include "config.h"
+
 /**
  * @brief 单向链表节点结构体
  */

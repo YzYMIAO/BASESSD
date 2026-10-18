@@ -10,9 +10,9 @@
  *   4. 尾注        -fstack-protector-strong（本模块的补充，不是替代）
  */
 
-#include "common/stack_guard.h"
+#include "stack_guard.h"
 
-#include "common/log.h"
+#include "log.h"
 
 /* ── 1. 链接脚本边界与常量 ── */
 
