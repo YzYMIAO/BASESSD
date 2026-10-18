@@ -440,22 +440,184 @@ PAA(uint32_t)，低位 → 高位：
 固定元数据区在每个实例的每 plane 上占**相同的块号**（分片模型），块号由
 `include/ftl/metadata.h` 的几何公式推出，不手写：
 
-| 块号 | 分区 | 块数 | 用途 |
-|---|---:|---:|---|
-| 0..31 | Anchor | 32 | Metadata Directory 的全量快照池，块内轮转 |
-| 32..39 | Checkpoint | 8 | Checkpoint Header + 块账快照池 |
-| 40..41 | BBT | 2 | 坏块位图池 |
-| 42..45 | Journal | 4 | L2P 增量日志，环形 |
-| 46 | Wear | 1 | 每块擦除/读计数 + ECC 健康的持久化日志 |
-| 47.. | 用户数据 | — | Free Pool / Open SB / Closed SB / OP / Spare |
+| 块号 | 分区 | 块数 | plane | 用途 |
+|---|---:|---:|---|---|
+| 0..31 | Anchor | 32 | P0+P1 镜像 | Metadata Directory 的全量快照池，块内轮转 |
+| 32..39 | Checkpoint | 8 | P0+P1 镜像 | Checkpoint Header + 块账快照池 |
+| 40..41 | BBT | 2 | P0+P1 镜像 | 坏块位图池 |
+| 42..45 | Journal | 4 | P0+P1 交错（单副本） | L2P 增量日志，环形 |
+| 46 | Wear | 1 | P0 单副本 | 每块擦除/读计数 + ECC 健康的持久化日志 |
+| 47.. | 用户数据 | — | P0 | Free Pool / Open SB / Closed SB / OP / Spare（P1 的块 46 也是用户数据） |
 
-要点：
+各分区的**落盘结构 / 记录几何**见下表（结构体定义分别在
+`include/ftl/metadata.h` / `checkpoint.h` / `bbt.h` / `journal.h` / `wear.h`；
+尺寸与页数全部由宏推导，`_Static_assert` 校验）：
 
-- **未映射不占闪存**。Directory 为每个 region 预登记一条 `NAND_PBA_INVALID`
-  （= 从未写过）；读取该 region 时 L2P cache 直接合成全 `INVALID` 的行，**不发 NAND 读**。
-  写过的 region 一律落到动态日志块，位置由 Metadata Directory 记录（§3.5）。
-- **只有 L2P region 日志块是动态的**，从 Free Pool 取整块（`allocator_alloc_log_block`）。
-  Anchor/Checkpoint/BBT/Journal/Wear 都是固定块池；池内轮转、先擦后写。
+| 分区 | 副本方式 | 落盘结构 | 条目/页 | 一条 record | 每块 record | 池内总量 |
+|---|---|---|---:|---:|---:|---:|
+| Anchor | **P0+P1 镜像** | `metadata_anchor_page_t` + `metadata_entry_t` | 256 条 | 8 页 | 8 | 32 块 × 8 = **256 条** |
+| Checkpoint | **P0+P1 镜像** | `l2p_checkpoint_header_t` + 块账快照 | Header 1 页 + 快照 4 页 | 5 页 | 12（64/5 向下取整） | 8 块 × 12 = **96 条** |
+| BBT | **P0+P1 镜像** | `bbt_header_t` | 1 条 | 1 页 | 64 | 2 块 × 64 = **128 条** |
+| Journal | P0+P1 交错（单副本） | `l2p_journal_entry_t` + 12 B 页头 | 127 条 | 1 页（页即写单位） | 64 页 | 4 块 × 64 页 = **256 页 / 32,512 条** |
+| Wear | P0 单副本（软状态） | `wear_page_t` + `wear_entry_t` | 168 条 | 1 页（追加日志） | 64 页 | 单块 64 页；全量快照 25 页 |
+
+运行期可枚举视图是 `g_ftl_partitions[]`（`src/ftl/metadata.c`），每项
+`ftl_partition_t { name, first_block, block_count, plane_mask, redundancy, kind, table_bytes }`；
+`ftl_is_metadata_block()` 与 CLI 都读这张表。`redundancy` = 每块容纳的 record 数，
+Journal/Wear 不是 record 池，填 1。`plane_mask` 决定固定块在哪些 plane 上占用：
+Anchor/CP/BBT/Journal = `0x03`，Wear = `0x01`。
+
+⚠ 镜像池（Anchor/CP/BBT）的**逻辑 record 数**与上表一致；每个 record 在 P0/P1 各存
+一份 ⇒ **物理页用量与元数据写放大 ×2**（换的是单 plane 损坏仍可恢复）。Journal 是
+单副本交错，Wear 是单副本。
+
+#### 2.3.1 Anchor —— Metadata Directory 的全量快照
+
+**用途**：持久化「region → 当前位置」索引。一份完整 Directory = 一条 record。
+
+**`metadata_entry_t`（7 B，`__attribute__((packed))`）**
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `type` | 1 B | 元数据类型（当前只有 `METADATA_TYPE_L2P_REGION`） |
+| `id` | 2 B | L2P region_id |
+| `pba` | 4 B | 该 region 页当前位置；`NAND_PBA_INVALID` = 未映射 |
+
+**`metadata_anchor_page_t`（恰好 2048 B = 一页主区）**
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `magic` | 4 B | `ANCHOR_MAGIC`（"ANDIR"） |
+| `sequence` | 4 B | 同一份 Directory 的各 chunk 相同；单调递增 |
+| `chunk_index` / `chunk_count` | 2 + 2 B | 页序 / 总页数（= `ANCHOR_PAGE_COUNT` = 8） |
+| `entry_count` | 4 B | 本页有效条目数（≤ 256） |
+| `layout_version` | 4 B | 介质布局版本；不符 ⇒ 本页作废 |
+| `entries[256]` | 1792 B | 256 × 7 B |
+| `padding` | 236 B | 补齐到一页主区 |
+
+**几何**：2048 条 Directory ⇒ 8 页/record；每块 8 条 record；池 32 块 ⇒ 256 个槽位。
+**副本**：P0+P1 镜像——同一页用 multi-plane program 写两个 plane；读侧任一副本有效。
+读取时扫池找「整条校验通过」中 sequence 最大者；任一条完整 record 都能独立重建
+整个 Directory。SRAM 常驻副本是 `metadata_dir_cache_t.entries[2048]`（2048 × 7 B =
+14,336 B），启动时从 Anchor 加载。
+
+#### 2.3.2 Checkpoint —— L2P 水位 + 块账快照
+
+**用途**：记录「Journal 回放起点」和「块账快照」，让开机不必全盘重建。
+
+**`l2p_checkpoint_header_t`（恰好 2048 B = 一页主区，75 字）**
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `magic` / `sequence` | 4 + 4 B | `CHECKPOINT_MAGIC` / 本池单调序号（最新有效胜） |
+| `timestamp` | 4 B | 写 Header 时的毫秒时钟快照 |
+| `region_count` | 4 B | 本次 CP 覆盖的 region 数 |
+| `region_bitmap[64]` | 256 B | 本 die 的 2048-bit 局部脏位图（哪些 region 在本次 CP 中） |
+| `journal_sequence` | 4 B | Journal 截断水位：回放只取 sequence 之后 |
+| `layout_version` | 4 B | 介质布局版本 |
+| `block_word_count` / `block_word_bytes` / `block_page_count` | 4 + 4 + 4 B | 块账快照几何（4096 / 2 / 4；0 = 无快照） |
+| `block_crc32` | 4 B | 块账快照 words 的 CRC32（FTL 层一致性校验） |
+| `record_pages` | 4 B | 本条 record 页数（= 1 + 块账页数） |
+| `padding` | 1748 B | 补齐到一页主区 |
+
+**块账快照（4 页 = 8 KB）**：每块一个 **16-bit word**，位域
+`valid_count[10] | state[3] | temp[1] | pool[2]`；按 4096 块顺序打包。
+**顺序不可倒**：快照页先写，Header 最后写（Header 是 commit 页）。
+
+**几何**：一条 record = 5 页；每块 12 条（64/5 向下取整，块尾 4 页不用）；池 8 块 ⇒ 96 条。
+**副本**：P0+P1 镜像，Header 与块账快照页都写两份；读侧整条快照从同一个 plane 读，CRC/读失败再换另一个 plane。
+
+#### 2.3.3 BBT —— 坏块位图
+
+**用途**：持久化坏块账本；开机加载后重建 BST 的 BAD 位。
+
+**`bbt_header_t`（540 B，packed）**
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `magic` / `sequence` | 4 + 4 B | `BBT_MAGIC` / 单调序号 |
+| `total_blocks` / `bad_count` | 4 + 4 B | 总块数 / 坏块数 |
+| `reserved[3]` | 12 B | 保留（写 0） |
+| `bad_map[512]` | 512 B | 4096 bit，一位一个 gblock（1 = 坏） |
+
+**几何**：一条 record = 1 页（540 B ≤ 2048 B）；每块 64 条；池 2 块 ⇒ 128 条。
+**副本**：P0+P1 镜像；读侧任一副本有效。
+
+#### 2.3.4 Journal —— L2P 增量日志（环形）
+
+**用途**：写确认路径先追加一条 L2P 更新；掉电后回放恢复「Anchor 之后的增量」。
+
+**页头（12 B）**：`magic(4) + page_seq(4) + entry_count(2) + block_seq(2)`。
+
+**`l2p_journal_entry_t`（16 B，packed）**
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `lba` | 4 B | 逻辑地址（全局 LBA） |
+| `old_pba` | 4 B | 更新前位置（回放不读；仅首条保留供诊断） |
+| `new_pba` | 4 B | 更新后位置（回放按此写 L2P） |
+| `sequence` | 4 B | 全局单调序号（回放按 `(page_seq, 页内下标)` 定序） |
+
+**几何**：每页 127 条（⌊(2048−12)/16⌋）；每块 64 页；**4 块环形**（`JOURNAL_BLOCKS =
+CW_NUM`）⇒ 总容量 4 × 64 × 127 = **32,512 条**。块写满 ⇒ 擦环形下一块再续写；
+Checkpoint 成功后按 `journal_sequence` 截断/回收。
+**副本**：**单副本**，页号奇偶交错到 P0/P1（不是镜像——日志写频率最高，镜像会 2× 写放大）。
+因此换块擦除必须用 `OP_ERASE_BLOCK_MULTI_PLANE`，否则 P1 的页不会被擦。
+
+#### 2.3.5 Wear —— 块磨损/读计数（软状态）
+
+**用途**：持久化每块的擦除计数、读计数和 ECC 健康，供动态/静态 WL 与 Read Recovery 使用。
+
+**`wear_entry_t`（12 B）**
+
+| 字段 | 大小 | 含义 |
+|---|---:|---|
+| `block` | 2 B | 全局块号 gblock |
+| `read_count` | 2 B | 主机读 + GC/WL 搬移读累加 |
+| `erase_count` | 4 B | 擦除计数（WL 的唯一输入） |
+| `last_ecc` | 1 B | 上次读的 ECC 纠正 bit 数 |
+| `rising_count` | 1 B | ECC 连续上升次数 |
+| `health` | 1 B | 块健康档位（`rr_block_health_t`） |
+| `_reserved` | 1 B | 对齐填充，写 0 |
+
+**`wear_page_t`（恰好 2048 B）**：页头 16 B（`magic / sequence / entry_count / reserved`）
++ 168 × 12 B 条目 + 16 B padding。**页式追加日志**：每页最多 168 块；
+全量快照 = ⌈4096/168⌉ = 25 页 ≤ 64 页/块。块满时压实（重写 25 页全量快照）再续写；
+单副本、软状态（丢只退化 WL 精度）；只占 **P0**，P1 的同号块 46 是用户数据。
+
+#### 2.3.6 L2P region 日志块（动态，不属于固定分区）
+
+Directory 指向的 region 页不占固定分区，而是从 Free Pool 动态取整块：
+
+- **一页 = 一个 region**：2048 B = 512 × 4 B `nand_pba_t`（无页头）；
+  每条目是一个 CW 的物理位置，`NAND_PBA_INVALID` = 未映射。
+- **一块 = 64 页 = 64 个 region**；只追加，块满换新块；旧块由 `l2p_live` 归零后
+  经 `reclaim_pending` 位图交给后台 job 异步擦除（§3.5）。
+- **未映射不占闪存**：Directory 为每个 region 预登记 `NAND_PBA_INVALID`，读取该
+  region 时 L2P cache 直接合成全 `INVALID` 的行，**不发 NAND 读**。
+
+#### 2.3.7 共同写模型
+
+- **只追加**：元数据页只写擦除态页；对已编程页二次编程 = 新数据 AND 旧数据 = 静默损坏。
+- **带 sequence**：每条 record 带单调序号；池内写序 == sequence 序；读取取
+  「整条校验通过」中 sequence 最大者（**不取半条**）。
+- **池内轮转**：块满 ⇒ 擦池内下一块 ⇒ 从页 0 续写；`block_count >= 2` 是硬要求。
+- **完整性**：元数据页统一用 `FTL_PAGE_CFG_META` 写（FC per-CW CRC + ECC）；
+  结构体本身**无独立 CRC**（例外：Checkpoint 的块账快照有 `block_crc32`）。
+- **版本**：Anchor 页与 Checkpoint Header 都带 `layout_version`；不符 ⇒ 该 record
+  作废，开机自动全片格式化。
+- **只有 L2P region 日志块是动态的**；Anchor/Checkpoint/BBT/Journal/Wear 都是固定块池。
+- **固定池的副本策略**（介质版本 8）：
+  - **Anchor / Checkpoint / BBT：P0+P1 镜像**。同一条 record/页用 multi-plane program
+    一次写进两个 plane 的同 block/page（`ftl_async_write_page_mirror`）；读侧任一副本
+    有效即可，一个 plane 损坏仍能恢复。运行期写走异步提交 + 完成服务；同步镜像写只在
+    开机/格式化（没有服务泵可等）使用。
+  - **Journal：P0+P1 页号奇偶交错**（偶页 P0、奇页 P1），是**单副本**而不是镜像——
+    日志写频率最高，镜像会 2× 写放大。因此它的换块擦除**必须**用
+    `OP_ERASE_BLOCK_MULTI_PLANE`（否则 P1 页不会被擦，回绕后二次编程）。
+  - **Wear：P0 单副本**（软状态，丢失只退化 WL）；P1 的块 46 进 Free/OP 池，不是元数据。
+- 这条布局满足"预留必用"：P1 的 Anchor/CP/BBT 块是**真实副本**，不是闲置；只有 Wear 的
+  P1 块归还用户区。`ftl_is_metadata_block()` 按 `(plane & plane_mask)` 判固定块。
 
 ### 2.4 单一坐标与转换漏斗
 
@@ -1242,8 +1404,11 @@ flowchart LR
    （= 未映射；没有物理页，也没有固定回退位置）
 ② metadata_ring_locate(Anchor 池) 找最新“整条校验通过”的 record
 ③ 读胜者各页，逐页校验 chunk_index / sequence / layout_version，装配覆盖对应区间
+   - 镜像池：每页先读 P0 副本；不可信时回退 P1 副本（sequence 必须等于被选中的
+     record sequence，绝不跨 record 拼页）
 ④ 由装配后的 entries 重建 l2p_live[] 与 have_dynamic
-   - entry 的 pba 所在块 >= FTL_METADATA_BLOCK_END ⇒ 动态块；l2p_live[g]++
+   - entry 的 pba **不是固定元数据块**（按分区表 plane_mask 判）⇒ 动态日志块；l2p_live[g]++
+   - ⚠ 不能用 "block >= FTL_METADATA_BLOCK_END"：P1 的 0..45 是镜像元数据、46 起才是用户区
 ⑤ 游标全部置无效（cur_block_valid=0 / anchor_cursor_valid=0）
    ——首次追加从 Free Pool 新取块，绝不复用可能已编程的旧页
 ```

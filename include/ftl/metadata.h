@@ -63,13 +63,18 @@
  *   Wear        WEAR_COPIES（软状态单副本）
  *
  * ── 当前几何下展开的布局（由下方公式算出，非手写）──
- *   块号        分区        块数  来历
- *   0..31       Anchor      32    元数据池：每块 8 份 Directory，块满换块
- *   32..39      Checkpoint  8     元数据池：每块 12 份 record（Header + 块账快照 共 5 页）
- *   40..41      BBT         2     元数据池：每块 64 份坏块位图
- *   42..45      Journal     4     策略 = CW_NUM（CW 级 4× 映射流量）
- *   46          Wear        1     软状态单副本
- *   47..       用户数据    —     FTL_METADATA_BLOCK_END 之后
+ *   块号        分区        块数  使用 plane  来历
+ *   0..31       Anchor      32    P0 + P1     元数据池：每块 8 份 Directory；**P1 镜像**
+ *   32..39      Checkpoint  8     P0 + P1     元数据池：每块 12 份 record；**P1 镜像**
+ *   40..41      BBT         2     P0 + P1     元数据池：每块 64 份坏块位图；**P1 镜像**
+ *   42..45      Journal     4     P0 + P1     策略 = CW_NUM；页地址按页号奇偶跨 plane（单副本交错）
+ *   46          Wear        1     P0          软状态单副本（P1 同号块是用户数据）
+ *   47..       用户数据    —     P0          FTL_METADATA_BLOCK_END 之后
+ *
+ * ⚠ **固定分区只预留 plane_mask 里的 plane**：`ftl_is_metadata_block()` 同时比较
+ *   (plane & plane_mask)。Anchor/CP/BBT 在 P1 的同号块是**镜像副本**（不是用户数据）；
+ *   Wear 只有 P0，P1 的块 46 进 Free/OP 池。
+ *   升级到本布局（介质版本 8）时首启自动全片格式化。
  *
  * ── 元数据写模型（P0-2：全部元数据统一）──
  *   ① 只写**擦除态**页。NAND 只能 1→0，对已编程页二次编程 = 新数据 AND 旧数据
@@ -191,8 +196,12 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
  *     ⇒ 记录格式与块账恢复方式都变了，必须 +1；老介质首启自动格式化一次。
  * v7：删除 L2P 哨兵层（原固定分区 0..15）——未映射改由 Directory 条目 NAND_PBA_INVALID
  *     表示；固定元数据分区整体前移 16 个块号，FTL_METADATA_BLOCK_END 63 → 47 ⇒
- *     块布局变了，必须 +1；老介质首启自动格式化一次。 */
-#define FTL_MEDIA_LAYOUT_VERSION_BASE (7U)
+ *     块布局变了，必须 +1；老介质首启自动格式化一次。
+ * v8：固定元数据池改**跨 plane 镜像**（Anchor/Checkpoint/BBT 用 multi-plane program 把
+ *     同一页写 P0+P1；Wear 仍单副本 P0；Journal 保持页号奇偶交错）——块的写语义与
+ *     恢复路径变了，必须 +1；老介质首启自动格式化一次。Journal/CP/Anchor/BBT 的换块
+ *     擦除统一改 multi-plane。 */
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (8U)
 /*
  * 阶段 B：数据通路改用**全局 LBA**（页 META / journal 存 host 全局 LBA）。
  * - DIM=1：global == local，介质上的值逐位不变 ⇒ 版本不额外 +1，**不额外格式化**。
@@ -231,11 +240,16 @@ typedef struct
     const char *name;        /* 分区名 */
     uint16_t    first_block; /* 起始块（per-plane 号；各 die 相同）*/
     uint16_t    block_count; /* 块数 */
-    uint8_t     redundancy;  /* 每块容纳的 record 数（池内块轮转，见上方元数据写模型；
+    uint8_t     plane_mask;  /* 本分区**实际使用**的 plane：bit0=P0, bit1=P1。
+                              * 固定池只预留 mask 里的 plane；其余 plane 的同号块
+                              * 是用户数据（不再被 ftl_is_metadata_block 排除）。*/
+    uint8_t redundancy;      /* 每块容纳的 record 数（池内块轮转，见上方元数据写模型；
                               * Journal/Wear 不是 record 池，填 1）*/
     uint8_t  kind;           /* FTL_PART_FIXED / FTL_PART_DYNAMIC */
     uint32_t table_bytes;    /* 逻辑表大小 */
 } ftl_partition_t;
+
+_Static_assert(PLANE_NUM <= 8U, "plane_mask 是 uint8_t，PLANE_NUM 不能超过 8");
 
 extern const ftl_partition_t g_ftl_partitions[];
 extern const uint32_t        g_ftl_partition_count;
@@ -328,8 +342,41 @@ typedef struct
     uint16_t block_count;      /* 池块数（>= 2）*/
     uint8_t  pages_per_record; /* 一条 record 占几页（向下取整到每块 record 数；
                                 * 不能整除时块尾剩余页不用——metadata_ring 的地址公式已按 floor 处理）*/
-    uint8_t plane;             /* 池所在 plane */
+    uint8_t plane_mask;        /* 池实际使用的 plane：bit0=P0, bit1=P1。
+                                * 0x03 = 镜像（同一 record 写两个 plane）；0x01 = 单副本。*/
 } metadata_ring_t;
+
+/* plane_mask 里第 idx 个置位的 plane 号（idx 从 0 起）；越界返回 PLANE_NUM。 */
+static inline uint8_t metadata_ring_plane_at(uint8_t plane_mask, uint8_t idx)
+{
+    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    {
+        if ((plane_mask & (1U << p)) != 0U)
+        {
+            if (idx == 0U)
+            {
+                return p;
+            }
+            idx--;
+        }
+    }
+    return (uint8_t)PLANE_NUM;
+}
+
+/* plane_mask 里的 plane 个数。 */
+static inline uint8_t metadata_ring_plane_count(uint8_t plane_mask)
+{
+    uint8_t n = 0U;
+
+    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    {
+        if ((plane_mask & (1U << p)) != 0U)
+        {
+            n++;
+        }
+    }
+    return n;
+}
 
 /* 每块容纳的 record 数 */
 static inline uint16_t metadata_ring_records_per_block(const metadata_ring_t *ring)
@@ -357,6 +404,14 @@ nand_pba_t metadata_ring_addr(const metadata_ring_t *ring,
                               const ftl_topology_t  *topo,
                               uint16_t               record_idx,
                               uint8_t                page_in_record);
+
+/* 指定 plane 的同一个 record 槽地址（镜像池的读回退 / 写镜像用）。
+ * plane 必须落在 ring->plane_mask 内；越界是调用者 bug ⇒ ASSERT。 */
+nand_pba_t metadata_ring_addr_plane(const metadata_ring_t *ring,
+                                    const ftl_topology_t  *topo,
+                                    uint16_t               record_idx,
+                                    uint8_t                page_in_record,
+                                    uint8_t                plane);
 
 /*
  * metadata_ring_probe_fn - 调用方的 record 探针（由 ring 模块回调）

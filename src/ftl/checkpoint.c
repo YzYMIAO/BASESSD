@@ -63,7 +63,7 @@ static void checkpoint_ring_init(metadata_ring_t *ring)
     ring->first_block      = CHECKPOINT_BLOCK0;
     ring->block_count      = CHECKPOINT_POOL_BLOCKS;
     ring->pages_per_record = CHECKPOINT_RECORD_PAGES; /* Header(1) + 快照(4) */
-    ring->plane            = 0U;
+    ring->plane_mask       = 0x03U;
 }
 
 /* 整条校验（一条 record = 1 页）：magic + 布局版本。
@@ -96,20 +96,29 @@ static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, int 
 
     (void)full;
 
-    nand_pba_t              addr = metadata_ring_addr(&c->ring, &c->topo, record_idx, 0U);
-    l2p_checkpoint_header_t hdr;
+    /* 镜像池：任一 plane 的副本有效即可。 */
+    const uint8_t plane_count = metadata_ring_plane_count(c->ring.plane_mask);
 
-    if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != 0)
+    for (uint8_t pi = 0U; pi < plane_count; pi++)
     {
-        return FTL_ERROR;
-    }
-    if ((!checkpoint_header_valid(&hdr)) || (hdr.sequence == 0U))
-    {
-        return FTL_ERROR; /* sequence 从 1 起；0 = 未写 */
+        const uint8_t           plane = metadata_ring_plane_at(c->ring.plane_mask, pi);
+        nand_pba_t              addr  = metadata_ring_addr_plane(&c->ring, &c->topo, record_idx, 0U, plane);
+        l2p_checkpoint_header_t hdr;
+
+        if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != 0)
+        {
+            continue;
+        }
+        if ((!checkpoint_header_valid(&hdr)) || (hdr.sequence == 0U))
+        {
+            continue; /* sequence 从 1 起；0 = 未写 */
+        }
+
+        *out_sequence = hdr.sequence;
+        return FTL_OK;
     }
 
-    *out_sequence = hdr.sequence;
-    return FTL_OK;
+    return FTL_ERROR;
 }
 
 /* ── 创建 / 恢复 ── */
@@ -170,13 +179,14 @@ static bool cp_stall(cp_job_t *j)
     return false;
 }
 
-/* 提交一条异步写（Anchor 分页 / Checkpoint Header 共用）。data 在本函数内已被
- * ftl_async_write_page 拷进 FC buffer ⇒ 调用者的栈缓冲随即可复用。 */
+/* 提交一条异步写（Anchor 分页 / Checkpoint Header 共用）。同步镜像到 P0+P1：
+ * 同一页数据用 multi-plane 一次写两个 plane；data 在本函数内已拷进 FC buffer
+ * ⇒ 调用者的栈缓冲随即可复用。 */
 static ftl_status_t cp_submit_write(cp_job_t *j, nand_pba_t addr, const void *data, uint32_t length)
 {
     fc_command_t *cmd;
 
-    if (ftl_async_write_page(&cmd, addr, data, length, FTL_PAGE_CFG_META()) != FTL_OK)
+    if (ftl_async_write_page_mirror(&cmd, addr, data, length, FTL_PAGE_CFG_META()) != FTL_OK)
     {
         return FTL_AGAIN; /* 命令池空 / 地址非法 */
     }
@@ -195,12 +205,13 @@ static ftl_status_t cp_submit_write(cp_job_t *j, nand_pba_t addr, const void *da
     return FTL_OK;
 }
 
-/* 提交一条异步擦除（Anchor 换块 / Checkpoint 换块 / Journal 预擦共用）。 */
+/* 提交一条异步擦除（Anchor 换块 / Checkpoint 换块 / Journal 预擦共用）。
+ * 固定元数据池是 P0+P1 镜像 ⇒ 换块必须 multi-plane 擦，否则副本 plane 不会清。 */
 static ftl_status_t cp_submit_erase(cp_job_t *j, nand_pba_t addr)
 {
     fc_command_t *cmd;
 
-    if (ftl_async_erase_block(&cmd, addr) != FTL_OK)
+    if (ftl_async_erase_block_multi_plane(&cmd, addr) != FTL_OK)
     {
         return FTL_AGAIN;
     }
@@ -862,13 +873,26 @@ ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_head
 
     ftl->cp.cursor_valid = 1U;
 
-    /* 重读胜者（locate 只返回序号，Header 本体要再读一次）*/
-    nand_pba_t addr = metadata_ring_addr(&probe_ctx.ring, &probe_ctx.topo, newest, 0U);
-    if (ftl_sync_read_page(addr, cp, sizeof(*cp), FTL_PAGE_CFG_META()) != 0)
+    /* 重读胜者（locate 只返回序号，Header 本体要再读一次）。
+     * 镜像池：逐个 plane 试；sequence 必须等于 locate 选中的 record sequence。 */
+    bool found = false;
+    for (uint8_t pi = 0U; pi < metadata_ring_plane_count(probe_ctx.ring.plane_mask); pi++)
     {
-        return FTL_ERROR;
+        const uint8_t plane = metadata_ring_plane_at(probe_ctx.ring.plane_mask, pi);
+        nand_pba_t    addr  = metadata_ring_addr_plane(&probe_ctx.ring, &probe_ctx.topo, newest, 0U, plane);
+
+        if (ftl_sync_read_page(addr, cp, sizeof(*cp), FTL_PAGE_CFG_META()) != 0)
+        {
+            continue;
+        }
+        if ((!checkpoint_header_valid(cp)) || (cp->sequence != ftl->cp.sequence))
+        {
+            continue;
+        }
+        found = true;
+        break;
     }
-    if ((!checkpoint_header_valid(cp)) || (cp->sequence != ftl->cp.sequence))
+    if (!found)
     {
         return FTL_ERROR;
     }
@@ -973,33 +997,57 @@ bool checkpoint_load_block_table(struct ftl_context            *ftl,
     metadata_ring_t ring;
     checkpoint_ring_init(&ring);
 
-    for (uint8_t p = 0U; p < CP_BLOCK_PAGES; p++)
+    /* 镜像池：整条快照从**同一个 plane** 读（不在 plane 间拼页）；该副本读失败或
+     * CRC 不符时换另一个 plane 重读整条。 */
+    for (uint8_t pi = 0U; pi < metadata_ring_plane_count(ring.plane_mask); pi++)
     {
-        nand_pba_t addr = metadata_ring_addr(&ring, &ftl->topo, record_idx, (uint8_t)(1U + p));
+        const uint8_t plane = metadata_ring_plane_at(ring.plane_mask, pi);
 
-        if (ftl_sync_read_page(addr,
-                               &block_words[(uint32_t)p * CP_BLOCK_WORDS_PER_PAGE],
-                               PAGE_MAIN_SIZE,
-                               FTL_PAGE_CFG_META()) != FTL_OK)
+        uint8_t fail_page = 0U;
+        bool    ok        = true;
+
+        for (uint8_t p = 0U; p < CP_BLOCK_PAGES; p++)
         {
-            LOGW("[BLK] read failed page=%u rec=%u\r\n", (unsigned)p, (unsigned)record_idx);
-            return false;
+            nand_pba_t addr = metadata_ring_addr_plane(&ring, &ftl->topo, record_idx, (uint8_t)(1U + p), plane);
+
+            if (ftl_sync_read_page(addr,
+                                   &block_words[(uint32_t)p * CP_BLOCK_WORDS_PER_PAGE],
+                                   PAGE_MAIN_SIZE,
+                                   FTL_PAGE_CFG_META()) != FTL_OK)
+            {
+                fail_page = p;
+                ok        = false;
+                break;
+            }
         }
-    }
 
-    if (boot_crc32(block_words, sizeof(uint16_t) * FTL_BLOCK_TOTAL) != cp->block_crc32)
-    {
-        LOGW("[BLK] crc mismatch rec=%u seq=%lu\r\n",
+        if (!ok)
+        {
+            LOGW("[BLK] read failed plane=%u page=%u rec=%u\r\n",
+                 (unsigned)plane,
+                 (unsigned)fail_page,
+                 (unsigned)record_idx);
+            continue;
+        }
+
+        if (boot_crc32(block_words, sizeof(uint16_t) * FTL_BLOCK_TOTAL) != cp->block_crc32)
+        {
+            LOGW("[BLK] crc mismatch plane=%u rec=%u seq=%lu\r\n",
+                 (unsigned)plane,
+                 (unsigned)record_idx,
+                 (unsigned long)cp->sequence);
+            continue;
+        }
+
+        LOGI("[BLK] load plane=%u rec=%u seq=%lu pages=%u crc=ok\r\n",
+             (unsigned)plane,
              (unsigned)record_idx,
-             (unsigned long)cp->sequence);
-        return false;
+             (unsigned long)cp->sequence,
+             (unsigned)CP_BLOCK_PAGES);
+        return true;
     }
 
-    LOGI("[BLK] load rec=%u seq=%lu pages=%u crc=ok\r\n",
-         (unsigned)record_idx,
-         (unsigned long)cp->sequence,
-         (unsigned)CP_BLOCK_PAGES);
-    return true;
+    return false;
 }
 
 /* --------------------------------------------------------------------
@@ -1035,7 +1083,8 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
     {
         return FTL_ERROR;
     }
-    if (ftl_sync_write_page(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META()) != 0)
+    /* 开机/格式化：同步镜像写到 P0+P1（没有服务泵可等）。 */
+    if (ftl_sync_write_page_mirror(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META()) != 0)
     {
         return FTL_ERROR;
     }

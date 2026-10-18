@@ -1,12 +1,14 @@
-#ifndef FTL_METADATA_INTERNAL_H
-#define FTL_METADATA_INTERNAL_H
+#ifndef FTL_METADATA_JOB_H
+#define FTL_METADATA_JOB_H
 
 /*
- * metadata_internal.h — metadata.c / metadata_job.c 共用的内部原语
+ * metadata_job.h — metadata 模块内部接口（metadata.c ↔ metadata_job.c 共享）
  *
- * 只在本模块的两个 .c 之间共享，**不放进公共 include 目录**：这里暴露的是
- * Directory 内部状态（reclaim_pending 位图、写指针）的直接操作，
- * 不属于对外接口。
+ * 不是对外 API：外部模块用 `metadata.h`（Directory/布局）或 `ftl_op.h`
+ * （完成服务注册）即可，**不得 include 本头**。
+ * 放在 include/ftl/ 是遵守本仓"头文件统一在 include/<模块>/"的约定；文件名按
+ * 主要使用者（metadata_job.c）命名，但内容包含 Directory 核心也要用的写指针原语
+ * 与待回收位图操作。
  *
  * 为什么这些函数不内联进调用者：
  *   · metadata_dir_slot_now —— append_slot 与压缩 job 跨文件共用；job 不能调
@@ -165,4 +167,22 @@ static inline void md_job_reset(metadata_dir_cache_t *dir)
     dir->job.slot           = NAND_PBA_INVALID;
 }
 
-#endif /* FTL_METADATA_INTERNAL_H */
+/* md_job_idle — 整理 job 是否空闲（无回收/压缩在跑）。 */
+static inline bool md_job_idle(const metadata_dir_cache_t *dir)
+{
+    return dir->job.phase == (uint8_t)MD_JOB_IDLE;
+}
+
+/*
+ * md_compacting — 压缩 job 是否处于 CP_* 阶段。
+ *
+ * `commit_region` 据此**抑制逐次立即回收**：搬移 victim 的最后一个 region 时其活
+ * 计数归零，但 Anchor 还没指向新位置 ⇒ 此刻擦 victim 会在掉电后丢映射（③④ 契约）。
+ * 压缩期间归零的块由 job 自己在 CP_RECLAIM 里擦。
+ */
+static inline bool md_compacting(const metadata_dir_cache_t *dir)
+{
+    return (dir->job.phase >= (uint8_t)MD_JOB_CP_READ) && (dir->job.phase <= (uint8_t)MD_JOB_CP_RECLAIM);
+}
+
+#endif /* FTL_METADATA_JOB_H */

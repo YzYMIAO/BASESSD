@@ -30,12 +30,14 @@
  *
  * 【页级同步原语】
  *   ⑧ ftl_sync_write_page / ftl_sync_read_page / ftl_sync_read_page_raw /
- *      ftl_sync_erase_block — 原先 9 个 FTL 模块各自内联一份 static 版本
+ *      ftl_sync_erase_block / ftl_sync_erase_block_multi_plane — 原先 9 个 FTL
+ *      模块各自内联一份 static 版本
  *      （共 18 份、逐字节相同，只差 crc/random/ldpc/lba 四个字段），
  *      此处收敛为 4 个公共函数 + ftl_page_cfg_t 配置结构。
  *
  * 【异步页级原语】（阶段 2 起）
  *   ⑩ ftl_async_write_page / ftl_async_write_page_cw / ftl_async_erase_block /
+ *      ftl_async_erase_block_multi_plane /
  *      ftl_async_read_page / ftl_async_set_features — 只建链 + 搬数据，**不提交**；
  *      命令交回调用者，由调用者 ftl_op_submit(cmd, <功能 op>, ctx)。服务函数负责
  *      fc_command_release。
@@ -370,8 +372,13 @@ ftl_status_t ftl_sync_read_page(nand_pba_t pba, void *buffer, uint32_t length, c
  */
 ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer);
 
-/* 擦块：OP_ERASE_BLOCK，无数据链，20ms 超时。 */
+/* 擦块（单 plane）：OP_ERASE_BLOCK，plane 取自 PBA，无数据链，20ms 超时。 */
 ftl_status_t ftl_sync_erase_block(nand_pba_t pba);
+
+/* 擦块（多 plane）：OP_ERASE_BLOCK_MULTI_PLANE，擦**同一 block 号在两个 plane**
+ * 上的两个物理块。只给跨 plane 的固定池（Journal：页地址按奇偶跨 plane）用；
+ * 普通块擦除仍走单 plane 版本。PBA 的 plane 字段被忽略。 */
+ftl_status_t ftl_sync_erase_block_multi_plane(nand_pba_t pba);
 
 /* ── 异步页级原语（阶段 2 起：提交与完成解耦）──
  *
@@ -392,6 +399,27 @@ ftl_status_t ftl_sync_erase_block(nand_pba_t pba);
  */
 ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg);
 ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba);
+
+/* 多 plane 擦块（异步）：同 ftl_async_erase_block，op = OP_ERASE_BLOCK_MULTI_PLANE。 */
+ftl_status_t ftl_async_erase_block_multi_plane(fc_command_t **out_cmd, nand_pba_t pba);
+
+/* ── 元数据镜像写（多 plane 同页同数据）──
+ *
+ * 用 OP_PROGRAM_PAGE_MULTI_PLANE 把**同一份页数据**一次写入 PLANE_NUM 个 plane 的
+ * 同一 block/page（元数据固定池的空间冗余；读侧任一副本有效即可）。
+ *
+ * 数据填装：按 CW 偏移把同一页复制到每个 plane 的 desc（`ftl_cmd_write_data_cw`）；
+ * `length < PAGE_MAIN_SIZE` 时（如 BBT header 540 B）用 0xFF 补齐到一页。
+ *
+ * ⚠ 只给**固定元数据池**用；用户数据/日志块仍走单 plane/正常多 plane 数据路径。
+ * ⚠ 这是 multi-plane program：两个 plane 的 page 必须都处于擦除态。
+ */
+ftl_status_t ftl_async_write_page_mirror(fc_command_t        **out_cmd,
+                                         nand_pba_t            pba,
+                                         const void           *data,
+                                         uint32_t              length,
+                                         const ftl_page_cfg_t *cfg);
+ftl_status_t ftl_sync_write_page_mirror(nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg);
 
 /*
  * 写页（CW 级，异步）：只把 page_buf 里 cw_bitmap 指定的 CW 编进目标页，**不提交**。

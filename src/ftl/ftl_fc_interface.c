@@ -604,6 +604,116 @@ ftl_status_t ftl_sync_write_page(nand_pba_t pba, const void *data, uint32_t leng
     return FTL_OK;
 }
 
+/* ── 元数据镜像写：multi-plane 同页同数据 ── */
+
+/* 短页（< PAGE_MAIN_SIZE，如 BBT header 540 B）的补齐缓冲。单线程 superloop；
+ * 数据在 mirror_write_prepare 返回前已拷进 FC buffer，调用者无需持有。 */
+static uint8_t s_mirror_page[PAGE_MAIN_SIZE];
+
+/*
+ * mirror_write_prepare - 建一条 multi-plane program 命令：同一页数据写两个 plane。
+ *
+ * 数据填装用 ftl_cmd_write_data_cw：链上两个 plane 的 desc 的 config.cw 都是 0..3，
+ * 同一页镜像会按 CW 分别填进两个 plane（无需 2× 源缓冲）。
+ */
+static fc_command_t *mirror_write_prepare(nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg)
+{
+    ASSERT(data != NULL);
+    ASSERT((length > 0U) && (length <= PAGE_MAIN_SIZE));
+    ASSERT(pba_is_valid(pba));
+
+    fc_command_t *cmd = page_prepare_alloc(OP_PROGRAM_PAGE_MULTI_PLANE, cfg);
+    if (cmd == NULL)
+    {
+        return NULL;
+    }
+
+    cmd->config.multi_plane = PLANE_NUM;
+
+    nand_pba_t pair[PLANE_NUM];
+    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    {
+        pair[p] = pba_with_plane(pba, p);
+    }
+
+    /* 本命令的 plane 段 = 全部 plane；位图必须覆盖段内每个 plane 的每个 CW。 */
+    const uint32_t bitmap = (1UL << (PLANE_NUM * CW_NUM)) - 1U;
+
+    if (ftl_cmd_setup_ppa_pair_cw(cmd, pair, bitmap) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return NULL;
+    }
+
+    const uint8_t *page = (const uint8_t *)data;
+
+    if (length != PAGE_MAIN_SIZE)
+    {
+        (void)memset(s_mirror_page, 0xFF, sizeof(s_mirror_page));
+        (void)memcpy(s_mirror_page, data, length);
+        page = s_mirror_page;
+    }
+
+    if (ftl_cmd_write_data_cw(cmd, page, bitmap) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return NULL;
+    }
+
+    return cmd;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_async_write_page_mirror
+ *   功能：把同一页数据用 multi-plane program 同时写入 PLANE_NUM 个 plane 的同 block/page。
+ *   返回：FTL_OK / FTL_AGAIN（命令/desc/buffer 池空）/ FTL_ERROR。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_async_write_page_mirror(fc_command_t        **out_cmd,
+                                         nand_pba_t            pba,
+                                         const void           *data,
+                                         uint32_t              length,
+                                         const ftl_page_cfg_t *cfg)
+{
+    ASSERT(out_cmd != NULL);
+
+    fc_command_t *cmd = mirror_write_prepare(pba, data, length, cfg);
+    if (cmd == NULL)
+    {
+        return FTL_AGAIN;
+    }
+
+    *out_cmd = cmd;
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_sync_write_page_mirror
+ *   功能：镜像写的同步版（建链 + 提交等待 + 判错）。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_sync_write_page_mirror(nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg)
+{
+    fc_command_t *cmd = mirror_write_prepare(pba, data, length, cfg);
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    fc_command_status_t completion;
+    if (ftl_sync_submit_wait(cmd, &completion, 0U) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
 /* --------------------------------------------------------------------
  * ftl_sync_write_page_cw
  *   功能：CW 级页写——只把 page_buf 里 cw_bitmap 指定的 CW 编进目标页。
@@ -731,8 +841,8 @@ ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer)
 
 /* --------------------------------------------------------------------
  * ftl_sync_erase_block
- *   功能：块级同步擦除——建链（无数据）+ 提交等待 + 判 NAND 失败。
- *   参数：pba —— 目标块 PBA（page/plane 字段被 FC 侧忽略，只取 block）。
+ *   功能：块级同步擦除（**单 plane**）——建链（无数据）+ 提交等待 + 判 NAND 失败。
+ *   参数：pba —— 目标块 PBA；FC 对 OP_ERASE_BLOCK 取 block + **PBA 的 plane** 擦一个 plane。
  *   返回：FTL_OK / FTL_ERROR（建链失败 / 提交等待失败 / NAND_FAIL）。
  *   实现要点：擦除慢，超时放宽到 20ms（其余原语用默认 10ms）。
  * -------------------------------------------------------------------- */
@@ -741,6 +851,39 @@ ftl_status_t ftl_sync_erase_block(nand_pba_t pba)
     const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
 
     fc_command_t *cmd = sync_page_prepare(pba, OP_ERASE_BLOCK, &cfg);
+    if (cmd == NULL)
+    {
+        return FTL_ERROR;
+    }
+
+    fc_command_status_t completion;
+    if (ftl_sync_submit_wait(cmd, &completion, 20000U) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    (void)fc_command_release(cmd);
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_sync_erase_block_multi_plane
+ *   功能：块级同步擦除（**多 plane**）——擦同一 block 号在所有 plane 上的物理块。
+ *   参数：pba —— 目标块 PBA（plane 字段被 FC 侧忽略，block 号用于所有 plane）。
+ *   实现要点：OP_ERASE_BLOCK_MULTI_PLANE；只给页地址跨 plane 的固定池（Journal）用。
+ *             超时同单 plane 版本（20ms）。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_sync_erase_block_multi_plane(nand_pba_t pba)
+{
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
+
+    fc_command_t *cmd = sync_page_prepare(pba, OP_ERASE_BLOCK_MULTI_PLANE, &cfg);
     if (cmd == NULL)
     {
         return FTL_ERROR;
@@ -869,6 +1012,34 @@ ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba)
     ASSERT(out_cmd != NULL);
 
     fc_command_t *cmd = page_prepare_alloc(OP_ERASE_BLOCK, &cfg);
+    if (cmd == NULL)
+    {
+        return FTL_AGAIN;
+    }
+
+    if (pba_to_cmd(cmd, pba) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    *out_cmd = cmd;
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_async_erase_block_multi_plane
+ *   功能：建链（多 plane 擦除，无数据），**不提交**，命令经 out_cmd 交回。
+ *   实现要点：OP_ERASE_BLOCK_MULTI_PLANE；FC 侧按 command->paa 的 block 号
+ *             对**所有 plane** 生成擦除地址（PBA 的 plane 字段被忽略）。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_async_erase_block_multi_plane(fc_command_t **out_cmd, nand_pba_t pba)
+{
+    const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
+
+    ASSERT(out_cmd != NULL);
+
+    fc_command_t *cmd = page_prepare_alloc(OP_ERASE_BLOCK_MULTI_PLANE, &cfg);
     if (cmd == NULL)
     {
         return FTL_AGAIN;

@@ -69,7 +69,7 @@ static void bbt_ring_init(metadata_ring_t *ring)
     ring->first_block      = BBT_BLOCK;
     ring->block_count      = BBT_POOL_BLOCKS;
     ring->pages_per_record = 1U;
-    ring->plane            = 0U;
+    ring->plane_mask       = 0x03U;
 }
 
 /* 整条校验（一条 record = 1 页）：magic。
@@ -99,20 +99,27 @@ static ftl_status_t bbt_record_probe(void *ctx, uint16_t record_idx, int full, u
 
     bbt_probe_ctx_t *c = (bbt_probe_ctx_t *)ctx;
 
-    nand_pba_t addr = metadata_ring_addr(&c->ring, &c->topo, record_idx, 0U);
-
-    bbt_header_t hdr;
-    if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != 0)
+    /* 镜像池：任一 plane 的副本有效即可。 */
+    for (uint8_t pi = 0U; pi < metadata_ring_plane_count(c->ring.plane_mask); pi++)
     {
-        return FTL_ERROR;
-    }
-    if ((!bbt_header_valid(&hdr)) || (hdr.sequence == 0U))
-    {
-        return FTL_ERROR; /* sequence 从 1 起；0 = 未写 */
+        const uint8_t plane = metadata_ring_plane_at(c->ring.plane_mask, pi);
+        nand_pba_t    addr  = metadata_ring_addr_plane(&c->ring, &c->topo, record_idx, 0U, plane);
+
+        bbt_header_t hdr;
+        if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != 0)
+        {
+            continue;
+        }
+        if ((!bbt_header_valid(&hdr)) || (hdr.sequence == 0U))
+        {
+            continue; /* sequence 从 1 起；0 = 未写 */
+        }
+
+        *out_sequence = hdr.sequence;
+        return FTL_OK;
     }
 
-    *out_sequence = hdr.sequence;
-    return FTL_OK;
+    return FTL_ERROR;
 }
 
 /* ── 2. 初始化 ── */
@@ -127,7 +134,7 @@ static bool bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t 
  *         出厂坏块扫描能不能做的唯一判据。
  *   参数：alloc —— 分配器（取 ch/ce 与几何）。
  *   返回：true = 介质非空；false = 空片。
- *   实现要点：判据 = **固定元数据区（0..FTL_METADATA_BLOCK_END，两个 plane）里只要
+ *   实现要点：判据 = **分区表里每个固定分区实际使用的 plane（plane_mask）中，只要
  *             有一页能读成合法的 FTL 页**——即 FC 的 per-CW CRC 与 META 自洽校验
  *             全过（fc_data_path_meta_check：META 必须编码本页的 plane/cw）。
  *             · 空片：该区每页都是全 FF ⇒ META 自洽校验必挂（全 FF 的 META 解不出
@@ -149,6 +156,11 @@ static bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
     {
         for (uint16_t block = 0U; block < (uint16_t)FTL_METADATA_BLOCK_END; block++)
         {
+            if (!ftl_is_metadata_block(NULL, plane, block))
+            {
+                continue; /* 该 plane 的这个块号不是固定元数据（可能是用户数据） */
+            }
+
             const nand_pba_t addr = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, 0U, 0U);
 
             if (ftl_sync_read_page(addr, scratch, sizeof(scratch), FTL_PAGE_CFG_META()) == FTL_OK)
@@ -601,7 +613,8 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
         return FTL_ERROR;
     }
 
-    if (ftl_sync_write_page(addr, &header, sizeof(header), FTL_PAGE_CFG_META()) != 0)
+    /* 开机/格式化：同步镜像写到 P0+P1（没有服务泵可等）。 */
+    if (ftl_sync_write_page_mirror(addr, &header, sizeof(header), FTL_PAGE_CFG_META()) != 0)
     {
         alloc->bbt.write_idx = (uint16_t)((alloc->bbt.write_idx + 1U) % metadata_ring_total_records(&ctx.ring));
         return FTL_ERROR; /* dirty 保留 ⇒ 下次重试 */
@@ -651,7 +664,7 @@ static ftl_status_t bbt_submit_write(ftl_allocator_t *alloc)
     nand_pba_t addr = metadata_ring_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, 0U);
 
     fc_command_t *cmd;
-    if (ftl_async_write_page(&cmd, addr, &header, sizeof(header), FTL_PAGE_CFG_META()) != FTL_OK)
+    if (ftl_async_write_page_mirror(&cmd, addr, &header, sizeof(header), FTL_PAGE_CFG_META()) != FTL_OK)
     {
         return FTL_ERROR;
     }
@@ -753,8 +766,9 @@ void bbt_kick(ftl_allocator_t *alloc)
     {
         fc_command_t *cmd;
 
-        /* 换块：先擦目标块（池内轮转 ⇒ 该块持全池最旧 record，擦掉不丢信息） */
-        if (ftl_async_erase_block(&cmd, addr) != FTL_OK)
+        /* 换块：先擦目标块（池内轮转 ⇒ 该块持全池最旧 record，擦掉不丢信息）。
+         * 镜像池 ⇒ multi-plane 擦，两个副本一起清。 */
+        if (ftl_async_erase_block_multi_plane(&cmd, addr) != FTL_OK)
         {
             return; /* 命令池空 / 建链失败 ⇒ 下轮重试（write_idx 未动） */
         }
@@ -888,14 +902,27 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_co
 
     alloc->bbt.cursor_valid = 1U;
 
-    /* 重读胜者（locate 只返回序号，Header 本体要再读一次）*/
-    nand_pba_t   addr = metadata_ring_addr(&ctx.ring, &ctx.topo, newest, 0U);
+    /* 重读胜者（locate 只返回序号，Header 本体要再读一次）。
+     * 镜像池：逐个 plane 试；sequence 必须等于 locate 选中的 record sequence。 */
     bbt_header_t best;
-    if (ftl_sync_read_page(addr, &best, sizeof(best), FTL_PAGE_CFG_META()) != 0)
+    bool         found = false;
+    for (uint8_t pi = 0U; pi < metadata_ring_plane_count(ctx.ring.plane_mask); pi++)
     {
-        return FTL_ERROR;
+        const uint8_t plane = metadata_ring_plane_at(ctx.ring.plane_mask, pi);
+        nand_pba_t    addr  = metadata_ring_addr_plane(&ctx.ring, &ctx.topo, newest, 0U, plane);
+
+        if (ftl_sync_read_page(addr, &best, sizeof(best), FTL_PAGE_CFG_META()) != 0)
+        {
+            continue;
+        }
+        if ((!bbt_header_valid(&best)) || (best.sequence != alloc->bbt.sequence))
+        {
+            continue;
+        }
+        found = true;
+        break;
     }
-    if ((!bbt_header_valid(&best)) || (best.sequence != alloc->bbt.sequence))
+    if (!found)
     {
         return FTL_ERROR;
     }

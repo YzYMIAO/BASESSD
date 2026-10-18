@@ -70,7 +70,9 @@ static nand_pba_t journal_page_addr(const l2p_journal_t *journal, uint8_t b, uin
     return pba_make(journal->topo.ch, journal->topo.ce, journal->topo.lun, (uint32_t)(JOURNAL_BLOCK0 + b), (uint32_t)(page & 1U), page, 0U);
 }
 
-/* journal_block_addr — 第 b 块的首页地址（擦除用；plane/page 归零，cw=0） */
+/* journal_block_addr — 第 b 块的首页地址（擦除用的基址；plane/page 归零，cw=0）。
+ * ⚠ 页地址跨 P0/P1（见 journal_page_addr）⇒ **所有擦除必须用
+ *   ftl_*_erase_block_multi_plane**，否则 P1 的那一半页不会被擦，环形回绕后二次编程。 */
 static nand_pba_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
 {
     return pba_make(journal->topo.ch, journal->topo.ce, journal->topo.lun, (uint32_t)(JOURNAL_BLOCK0 + b), 0U, 0U, 0U);
@@ -314,7 +316,7 @@ static bool journal_freeze(l2p_journal_t *journal)
 static bool journal_start_erase(l2p_journal_t *journal)
 {
     fc_command_t *cmd;
-    if (ftl_async_erase_block(&cmd, journal_block_addr(journal, journal->job.target_block)) != FTL_OK)
+    if (ftl_async_erase_block_multi_plane(&cmd, journal_block_addr(journal, journal->job.target_block)) != FTL_OK)
     {
         return false;
     }
@@ -412,7 +414,7 @@ static void journal_erase_pending_sync(l2p_journal_t *journal)
     }
     else
     {
-        (void)ftl_sync_erase_block(journal_block_addr(journal, journal->job.target_block));
+        (void)ftl_sync_erase_block_multi_plane(journal_block_addr(journal, journal->job.target_block));
     }
     journal->job.need_erase = 0U;
 }
@@ -472,7 +474,7 @@ static void journal_flush_now(l2p_journal_t *journal)
         }
         else
         {
-            (void)ftl_sync_erase_block(journal_block_addr(journal, (uint8_t)journal->current_block));
+            (void)ftl_sync_erase_block_multi_plane(journal_block_addr(journal, (uint8_t)journal->current_block));
         }
     }
 
@@ -741,7 +743,7 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
         {
             next_block = (uint8_t)((next_block + 1U) % JOURNAL_BLOCK_COUNT);
             next_page  = 0U;
-            (void)ftl_sync_erase_block(journal_block_addr(journal, next_block));
+            (void)ftl_sync_erase_block_multi_plane(journal_block_addr(journal, next_block));
         }
 
         journal->current_block = next_block;

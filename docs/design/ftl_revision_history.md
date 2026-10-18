@@ -5408,7 +5408,7 @@ unused-variable 告警）、`make tests UT=FTL` 仍因 v0.77~v0.78 重构遗留�
    Free Pool 空时会永远换不了块。
 5. 拆分：job 状态机（约 650 行）移到 `src/ftl/metadata_job.c`；共用原语
    （`metadata_dir_slot_now` / `md_job_reset` / 位图操作）放
-   `src/ftl/metadata_internal.h`；`metadata.c` 只留 Directory/布局/Anchor/追加/登记。
+   `include/ftl/metadata_job.h`；`metadata.c` 只留 Directory/布局/Anchor/追加/登记。
 6. 薄封装收口：删 `allocator_free_log_block`（纯转发 ⇒ 直接用 `allocator_free_block`）、
    `md_block_is_log`（纯表达式 ⇒ 两处内联）、`ftl_job_heartbeat_reset`
    （纯清零 ⇒ 调用点直接写）。
@@ -5424,3 +5424,41 @@ unused-variable 告警；`make tests UT=FTL` 仍因既有测试符号失败，�
 上板判据：冷启动不格式化；顺序写跨越多个日志块轮转时 `info` 的 `pending` 能归零、
 `free` 不持续下滑；压缩中途 / 回收在飞时断电，重启后 Journal/Anchor 恢复且
 `[FTL] dangling` 不出现；写路径不再出现 ~3 ms 同步擦除停顿。
+
+## v0.81 — 固定元数据跨 plane 镜像（Anchor/Checkpoint/BBT）+ Journal multi-plane 擦除
+
+**日期**：2026-10-18
+
+**动机**：v0.80 后固定池仍只落 P0，P1 的同号块被 `ftl_is_metadata_block()` 排除却从未
+写入（43 块 ≈ 5.375 MiB 闲置）。按"预留必用"对齐主流：要么把 P1 的块用起来，要么
+不预留。选择**镜像**：关键元数据（Anchor/Checkpoint/BBT）用 multi-plane program 把
+同一页写两份，P1 成为真实副本；Wear 是软状态，保持 P0 单副本，P1 的块 46 归还用户区。
+
+**修法**：
+1. `ftl_partition_t` 新增 `plane_mask`；Anchor/Checkpoint/BBT/Journal = `0x03`，
+   Wear = `0x01`。`ftl_is_metadata_block()` 改为 `(plane & plane_mask)` + 块区间判断。
+2. 新增 `ftl_async_write_page_mirror` / `ftl_sync_write_page_mirror`：
+   `OP_PROGRAM_PAGE_MULTI_PLANE`，同一页按 CW 复制到两个 plane 的 desc；短页
+   （BBT 540 B）用 0xFF 补到一页。**运行期只用 async**；sync 仅开机/格式化
+   （`checkpoint_write_initial` / `bbt_save`，没有服务泵可等）。
+3. 读回退：Anchor/Checkpoint/BBT 的 probe / locate / load 逐 plane 尝试；整条 record
+   或整条快照从**同一个 plane** 读，某副本读失败/CRC 不符才换另一个 plane。
+4. 换块擦除：镜像池（Anchor/CP/BBT）与 Journal 全部改
+   `OP_ERASE_BLOCK_MULTI_PLANE`。这同时修掉 Journal 的**既有隐患**：
+   `journal_page_addr` 按页号奇偶写 P0/P1，但旧擦除只擦 P0 ⇒ 回绕后对 P1 未擦页二次编程。
+5. `metadata_ring_t.plane` → `plane_mask`；新增 `metadata_ring_addr_plane()`；
+   `metadata_ring_prepare_write()`（仅开机/格式化）在镜像池上用 multi-plane 同步擦。
+6. 分类修正：P1 的 0..41/46.. 现在是用户区，动态日志块可能落在
+   `FTL_METADATA_BLOCK_END` 之前 ⇒ `metadata_dir_rebuild_live` / `commit_region` /
+   `recovery_is_fixed_block` 从"块号 ≥ END"改为"非固定元数据块"（按分区表）。
+7. `bbt_medium_has_ftl_data()` 只扫分区表实际使用的 plane。
+
+**介质格式**：`FTL_MEDIA_LAYOUT_VERSION_BASE` **7 → 8**（块的写语义/副本布局变了）
+⇒ **上板首启自动全片格式化**。
+
+**验证状态**：⚠ **未上板**。`make all` 零告警；`make release` 仅剩 2 条既有
+unused-variable 告警；`make tests UT=FTL` 仍因既有测试符号 + `reclaim_target` 引用失败
+（UT 冻结，未改测试源）。
+上板判据：首启自动格式化；`info` 显示 `cp_seq`/`free` 正常；顺序写/随机读回归；**故意
+损坏 P0 副本后仍能从 P1 读回 Anchor/CP/BBT**（镜像生效的唯一证据）；Journal 回绕多圈
+无 `PROGRAM_FAIL`；掉电恢复与 `[FTL] dangling` 不出现。

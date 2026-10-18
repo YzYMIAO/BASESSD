@@ -46,7 +46,7 @@
 #include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
 #include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
 #include "ftl/journal.h"
-#include "metadata_internal.h" /* slot_now / job_reset / 待回收位图（与 metadata_job.c 共用） */
+#include "ftl/metadata_job.h" /* slot_now / job_reset / 待回收位图（与 metadata_job.c 共用） */
 #include "nand/onfi_1_0.h"
 
 #include <stddef.h>
@@ -57,28 +57,42 @@
  * ══════════════════════════════════════════════════════════════════ */
 
 /* --------------------------------------------------------------------
- * metadata_ring_addr
+ * metadata_ring_addr_plane / metadata_ring_addr
  *   功能：把「池内第 record_idx 条 record 的第 page_in_record 页」换算成物理地址。
  *   参数：ring —— 池几何；topo —— ch/ce/lun；record_idx —— 池内记录序号；
- *         page_in_record —— record 内页偏移（Anchor 一条 = 8 页）。
- *   返回：nand_pba_t（plane 取 ring->plane，cw 恒 0）。
+ *         page_in_record —— record 内页偏移（Anchor 一条 = 8 页）；plane —— 目标 plane。
+ *   返回：nand_pba_t（cw 恒 0）。
  *   实现要点：先按 records_per_block 整除得块偏移、取余得块内记录号，
  *             再乘 pages_per_record 得块内页号。地址公式的唯一出口。
+ *             `metadata_ring_addr` 是"取 plane_mask 里第一个 plane"的薄入口，
+ *             镜像池的读回退/写镜像用 `_plane` 版本。
  * -------------------------------------------------------------------- */
-nand_pba_t metadata_ring_addr(const metadata_ring_t *ring,
-                              const ftl_topology_t  *topo,
-                              uint16_t               record_idx,
-                              uint8_t                page_in_record)
+nand_pba_t metadata_ring_addr_plane(const metadata_ring_t *ring,
+                                    const ftl_topology_t  *topo,
+                                    uint16_t               record_idx,
+                                    uint8_t                page_in_record,
+                                    uint8_t                plane)
 {
+    ASSERT(plane < PLANE_NUM);
+    ASSERT((ring->plane_mask & (1U << plane)) != 0U);
+
     uint16_t rpb = metadata_ring_records_per_block(ring);
 
     return pba_make(topo->ch,
                     topo->ce,
                     topo->lun,
                     (uint32_t)(ring->first_block + (record_idx / rpb)),
-                    ring->plane,
+                    plane,
                     (uint32_t)(((record_idx % rpb) * ring->pages_per_record) + page_in_record),
                     0U);
+}
+
+nand_pba_t metadata_ring_addr(const metadata_ring_t *ring,
+                              const ftl_topology_t  *topo,
+                              uint16_t               record_idx,
+                              uint8_t                page_in_record)
+{
+    return metadata_ring_addr_plane(ring, topo, record_idx, page_in_record, metadata_ring_plane_at(ring->plane_mask, 0U));
 }
 
 /* --------------------------------------------------------------------
@@ -322,7 +336,9 @@ ftl_status_t metadata_ring_prepare_addr(const metadata_ring_t *ring,
  *   功能：为写入池内第 write_idx 条 record 做前置——算地址，必要时先擦目标块。
  *   参数：ring/topo —— 池与拓扑；write_idx —— 目标槽；out_addr —— 出参物理地址。
  *   返回：FTL_OK；FTL_ERROR write_idx 越界 / 换块时擦除失败。
- *   实现要点：= metadata_ring_prepare_addr + 同步擦除。**同步**原语。
+ *   实现要点：= metadata_ring_prepare_addr + 同步擦除。**同步原语，仅开机/格式化用**
+ *             （运行期 job 走 metadata_ring_prepare_addr + 异步擦除）。
+ *             镜像池（plane_mask 含多个 plane）用 multi-plane 擦，两个副本一起擦。
  * -------------------------------------------------------------------- */
 ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
                                          const ftl_topology_t  *topo,
@@ -340,7 +356,9 @@ ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
     if (need_erase != 0)
     {
         /* 换块：先擦目标块（池内轮转 ⇒ 该块持全池最旧 record，擦掉不丢信息） */
-        if (ftl_sync_erase_block(addr) != 0)
+        const int st = (metadata_ring_plane_count(ring->plane_mask) > 1U) ? ftl_sync_erase_block_multi_plane(addr)
+                                                                          : ftl_sync_erase_block(addr);
+        if (st != 0)
         {
             return FTL_ERROR;
         }
@@ -376,13 +394,13 @@ static bool anchor_page_valid(const metadata_anchor_page_t *page)
     return true;
 }
 
-/* Anchor 池几何（per-plane 块号 ANCHOR_BLOCK0 起 ANCHOR_POOL_BLOCKS 块，plane 0）*/
+/* Anchor 池几何（per-plane 块号 ANCHOR_BLOCK0 起 ANCHOR_POOL_BLOCKS 块；P0+P1 镜像）*/
 static void anchor_ring_init(metadata_ring_t *ring)
 {
     ring->first_block      = ANCHOR_BLOCK0;
     ring->block_count      = ANCHOR_POOL_BLOCKS;
     ring->pages_per_record = ANCHOR_PAGE_COUNT;
-    ring->plane            = 0U;
+    ring->plane_mask       = 0x03U;
 }
 
 typedef struct
@@ -402,41 +420,60 @@ static ftl_status_t anchor_record_probe(void *ctx, uint16_t record_idx, int full
     anchor_probe_ctx_t    *c = (anchor_probe_ctx_t *)ctx;
     metadata_anchor_page_t page;
 
-    uint32_t seq = 0U;
+    /* 镜像池：逐个 plane 试。某 plane 的整条 record 有效即采用——不跨 plane 拼接
+     * 半条 record；sequence 一致性由页内字段校验。 */
+    const uint8_t plane_count = metadata_ring_plane_count(c->ring->plane_mask);
 
-    for (uint8_t chunk = 0U; chunk < ANCHOR_PAGE_COUNT; chunk++)
+    for (uint8_t pi = 0U; pi < plane_count; pi++)
     {
-        nand_pba_t addr = metadata_ring_addr(c->ring, &c->dir->topo, record_idx, chunk);
+        const uint8_t plane = metadata_ring_plane_at(c->ring->plane_mask, pi);
 
-        if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META()) != 0)
+        uint32_t seq = 0U;
+        bool     ok  = true;
+
+        for (uint8_t chunk = 0U; chunk < ANCHOR_PAGE_COUNT; chunk++)
         {
-            return FTL_ERROR;
-        }
-        if ((!anchor_page_valid(&page)) || (page.chunk_index != chunk))
-        {
-            return FTL_ERROR;
+            nand_pba_t addr = metadata_ring_addr_plane(c->ring, &c->dir->topo, record_idx, chunk, plane);
+
+            if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META()) != 0)
+            {
+                ok = false;
+                break;
+            }
+            if ((!anchor_page_valid(&page)) || (page.chunk_index != chunk))
+            {
+                ok = false;
+                break;
+            }
+
+            if (chunk == 0U)
+            {
+                seq = page.sequence;
+                if (seq == 0U)
+                {
+                    ok = false; /* sequence 从 1 起；0 = 未写 */
+                    break;
+                }
+                if (full == 0)
+                {
+                    break; /* 廉价探针：只读第 0 页 */
+                }
+            }
+            else if (page.sequence != seq)
+            {
+                ok = false; /* 整条校验：各页 sequence 必须一致 */
+                break;
+            }
         }
 
-        if (chunk == 0U)
+        if (ok)
         {
-            seq = page.sequence;
-            if (seq == 0U)
-            {
-                return FTL_ERROR; /* sequence 从 1 起；0 = 未写 */
-            }
-            if (full == 0)
-            {
-                break; /* 廉价探针：只读第 0 页 */
-            }
-        }
-        else if (page.sequence != seq)
-        {
-            return FTL_ERROR; /* 整条校验：各页 sequence 必须一致 */
+            *out_sequence = seq;
+            return FTL_OK;
         }
     }
 
-    *out_sequence = seq;
-    return FTL_OK;
+    return FTL_ERROR;
 }
 
 /*
@@ -464,7 +501,7 @@ static void metadata_dir_fill_fixed(metadata_dir_cache_t *dir)
     }
 }
 
-/* 由 entries 重建 l2p_live / have_dynamic（日志块 = block >= FTL_METADATA_BLOCK_END）*/
+/* 由 entries 重建 l2p_live / have_dynamic（日志块 = 非固定元数据块）*/
 static void metadata_dir_rebuild_live(metadata_dir_cache_t *dir)
 {
     memset(dir->l2p_live, 0, sizeof(dir->l2p_live));
@@ -483,13 +520,17 @@ static void metadata_dir_rebuild_live(metadata_dir_cache_t *dir)
             continue; /* 未映射，不在任何日志块上 */
         }
 
+        /* ⚠ 不能用 "block >= FTL_METADATA_BLOCK_END"：plane 1 的 0..41/46.. 已是
+         *   用户区，动态日志块可以落在 END 之前。固定元数据块才不是日志块。 */
+        uint8_t  plane = (uint8_t)pba_to_plane(dir->entries[i].pba);
         uint16_t block = (uint16_t)pba_to_block(dir->entries[i].pba);
-        if (block < FTL_METADATA_BLOCK_END)
+
+        if (ftl_is_metadata_block(NULL, plane, block))
         {
-            continue; /* 非日志块（正常路径不会出现：L2P region 只落日志块） */
+            continue; /* 固定元数据块（正常路径不会出现：L2P region 只落日志块） */
         }
 
-        uint16_t g = ftl_gblock((uint8_t)pba_to_plane(dir->entries[i].pba), block);
+        uint16_t g = ftl_gblock(plane, block);
         if (g < FTL_BLOCK_TOTAL)
         {
             dir->l2p_live[g]++;
@@ -638,17 +679,9 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
 }
 
 /* ══════════════════════════════════════════════════════════════════
- * 四、L2P 日志块：追加槽 / 登记 / 回收（元数据写模型 ①②③④）
+ * 四、L2P 日志块：追加槽 / 登记（元数据写模型 ①②③④）
+ *（回收 / 压缩在 metadata_job.c；本区只维护写指针与 Directory 登记）
  * ══════════════════════════════════════════════════════════════════ */
-
-/* md_compacting — 压缩 job 是否在飞（CP_* 阶段）。
- * 等价于旧 `dir->compacting` 标志的读法：commit_region 据此**抑制逐次立即回收**
- * （搬移 victim 的最后一个活 region 时它会归零，此时 Anchor 还没指向新位置
- * ⇒ 擦了就是掉电丢映射，见 metadata.h 的 ③④ 契约）。 */
-static bool md_compacting(const metadata_dir_cache_t *dir)
-{
-    return (dir->job.phase >= (uint8_t)MD_JOB_CP_READ) && (dir->job.phase <= (uint8_t)MD_JOB_CP_RECLAIM);
-}
 
 /* --------------------------------------------------------------------
  * metadata_dir_append_slot
@@ -678,7 +711,7 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
     /* 整理 job 在飞 ⇒ 一律让路：压缩搬移按**发放那一刻**的 cur_metadata_page 核定
      * 空槽预算，期间再发放会打乱它（详见 metadata.h 的 md_job_t 长注释）。
      * 调用者（l2p_cache_flush_kick）据此返回 FTL_AGAIN，下轮重试。 */
-    if (dir->job.phase != (uint8_t)MD_JOB_IDLE)
+    if (!md_job_idle(dir))
     {
         return NAND_PBA_INVALID;
     }
@@ -759,9 +792,9 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
  *   参数：dir —— Directory；alloc —— 分配器（保留形参：回收已改由 job 做）；region_id；
  *         new_pba —— 新位置。
  *   返回：无（越界 no-op）。
- *   实现要点：只对**日志块**位置（block ≥ FTL_METADATA_BLOCK_END）增减活计数——
- *             INVALID（未映射）不计。旧块归零且非当前块 ⇒ 置进 `reclaim_pending` 位图，
- *             由后台 job 异步擦除；位图不会像单槽那样被后来的块覆盖。
+ *   实现要点：只对**动态日志块**位置（非固定元数据块）增减活计数——INVALID（未映射）
+ *             不计。旧块归零且非当前块 ⇒ 置进 `reclaim_pending` 位图，由后台 job
+ *             异步擦除；位图不会像单槽那样被后来的块覆盖。
  *   ⚠ **本函数不擦 NAND**（阶段 8 起的刻意变更）：它运行在完成派发里
  *     （`ftl_op_l2p` 的 FLUSHING 分支），就地擦块 = 在完成泵里嵌套泵。
  * -------------------------------------------------------------------- */
@@ -788,7 +821,8 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
 
     nand_pba_t old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, region_id);
     // 问题 这个判断条件是不是冗余呀
-    if ((old != NAND_PBA_INVALID) && (pba_to_block(old) >= FTL_METADATA_BLOCK_END))
+    if ((old != NAND_PBA_INVALID) &&
+        (!ftl_is_metadata_block(NULL, (uint8_t)pba_to_plane(old), (uint16_t)pba_to_block(old))))
     {
         uint16_t g = ftl_pba_gblock(old);
         if ((g < FTL_BLOCK_TOTAL) && (dir->l2p_live[g] > 0U))
@@ -1027,25 +1061,35 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
 
     dir->anchor_cursor_valid = 1U;
 
-    /* 读胜者的全部页，逐页校验后覆盖对应区间 */
+    /* 读胜者的全部页，逐页校验后覆盖对应区间。
+     * 镜像池：每页先读首选 plane；该页不可信时回退到另一个 plane（sequence 必须仍等于
+     * 被选中的 record sequence，避免把另一条 record 的页拼进来）。 */
+    const uint8_t plane_count = metadata_ring_plane_count(ring.plane_mask);
+
     for (uint8_t chunk = 0U; chunk < ANCHOR_PAGE_COUNT; chunk++)
     {
-        uint16_t   base_entry = (uint16_t)(chunk * METADATA_DIR_ENTRIES_PER_PAGE);
-        nand_pba_t addr       = metadata_ring_addr(&ring, &dir->topo, newest, chunk);
+        uint16_t base_entry = (uint16_t)(chunk * METADATA_DIR_ENTRIES_PER_PAGE);
 
-        if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META()) != 0)
+        for (uint8_t pi = 0U; pi < plane_count; pi++)
         {
-            continue;
-        }
-        if ((!anchor_page_valid(&page)) || (page.sequence != dir->anchor_sequence) || (page.chunk_index != chunk))
-        {
-            continue; /* 该页不可信：保留基础层的"未映射" */
-        }
+            const uint8_t plane = metadata_ring_plane_at(ring.plane_mask, pi);
+            nand_pba_t    addr  = metadata_ring_addr_plane(&ring, &dir->topo, newest, chunk, plane);
 
-        uint16_t n = (uint16_t)((page.entry_count < METADATA_DIR_ENTRIES_PER_PAGE) ? page.entry_count : METADATA_DIR_ENTRIES_PER_PAGE);
-        for (uint16_t k = 0U; (k < n) && ((uint16_t)(base_entry + k) < METADATA_DIR_ENTRIES); k++)
-        {
-            dir->entries[base_entry + k] = page.entries[k];
+            if (ftl_sync_read_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META()) != 0)
+            {
+                continue;
+            }
+            if ((!anchor_page_valid(&page)) || (page.sequence != dir->anchor_sequence) || (page.chunk_index != chunk))
+            {
+                continue; /* 该副本不可信：试另一个 plane；都失败则保留基础层的"未映射" */
+            }
+
+            uint16_t n = (uint16_t)((page.entry_count < METADATA_DIR_ENTRIES_PER_PAGE) ? page.entry_count : METADATA_DIR_ENTRIES_PER_PAGE);
+            for (uint16_t k = 0U; (k < n) && ((uint16_t)(base_entry + k) < METADATA_DIR_ENTRIES); k++)
+            {
+                dir->entries[base_entry + k] = page.entries[k];
+            }
+            break; /* 本页已从某个 plane 取到有效副本 */
         }
     }
 
@@ -1085,11 +1129,12 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
  * 本表原先住在 src/ftl/ftl_config.c；布局归 metadata 之后随之下沉到本文件。
  */
 const ftl_partition_t g_ftl_partitions[] = {
-    {    "Anchor",     ANCHOR_BLOCK0,     ANCHOR_POOL_BLOCKS,         ANCHOR_RECORDS_PER_BLOCK, FTL_PART_FIXED,     FTL_ANCHOR_TABLE_BYTES},
-    {"Checkpoint", CHECKPOINT_BLOCK0, CHECKPOINT_POOL_BLOCKS, FTL_CHECKPOINT_RECORDS_PER_BLOCK, FTL_PART_FIXED, FTL_CHECKPOINT_TABLE_BYTES},
-    {       "BBT",         BBT_BLOCK,        BBT_POOL_BLOCKS,                  PAGES_PER_BLOCK, FTL_PART_FIXED,        FTL_BBT_TABLE_BYTES},
-    {   "Journal",    JOURNAL_BLOCK0,    JOURNAL_BLOCK_COUNT,                               1U, FTL_PART_FIXED,    FTL_JOURNAL_TABLE_BYTES},
-    {      "Wear",        WEAR_BLOCK,            WEAR_BLOCKS,                      WEAR_COPIES, FTL_PART_FIXED,       FTL_WEAR_TABLE_BYTES},
+  /* name, first_block, block_count, plane_mask, redundancy, kind, table_bytes */
+    {    "Anchor",     ANCHOR_BLOCK0,     ANCHOR_POOL_BLOCKS, 0x03U,         ANCHOR_RECORDS_PER_BLOCK, FTL_PART_FIXED,     FTL_ANCHOR_TABLE_BYTES},
+    {"Checkpoint", CHECKPOINT_BLOCK0, CHECKPOINT_POOL_BLOCKS, 0x03U, FTL_CHECKPOINT_RECORDS_PER_BLOCK, FTL_PART_FIXED, FTL_CHECKPOINT_TABLE_BYTES},
+    {       "BBT",         BBT_BLOCK,        BBT_POOL_BLOCKS, 0x03U,                  PAGES_PER_BLOCK, FTL_PART_FIXED,        FTL_BBT_TABLE_BYTES},
+    {   "Journal",    JOURNAL_BLOCK0,    JOURNAL_BLOCK_COUNT, 0x03U,                               1U, FTL_PART_FIXED,    FTL_JOURNAL_TABLE_BYTES},
+    {      "Wear",        WEAR_BLOCK,            WEAR_BLOCKS, 0x01U,                      WEAR_COPIES, FTL_PART_FIXED,       FTL_WEAR_TABLE_BYTES},
 };
 
 /* 分区数（表长）。sizeof 派生 ⇒ 加/删分区项时自动跟随，无需手改。 */
@@ -1103,7 +1148,7 @@ const uint32_t g_ftl_partition_count = (uint32_t)(sizeof(g_ftl_partitions) / siz
  *         block —— per-plane 块号。
  *   返回：true 是元数据块；false 不是。
  *   实现要点：三分支——
- *     ① 固定分区表遍历（各 (ch,ce,lun) 用同一份块号，分片模型 ⇒ **不看 plane**）；
+ *     ① 固定分区表遍历：块区间 + `plane_mask` 同时匹配；未使用的 plane 同号块是用户数据；
  *     ② 当前日志块（刚分配还没 commit，扫 entries 扫不到，必须显式排除）；
  *     ③ 已登记日志块（用 have_dynamic 先挡掉"无动态块"常见情形，避免每次开机
  *        回填数千次调用都全表线性扫）。
@@ -1112,9 +1157,11 @@ const uint32_t g_ftl_partition_count = (uint32_t)(sizeof(g_ftl_partitions) / siz
  * -------------------------------------------------------------------- */
 bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, uint16_t block)
 {
+    ASSERT(plane < PLANE_NUM);
+
     /* ── 固定元数据块：遍历分区表（本文件上方 g_ftl_partitions[]，声明见 metadata.h）──
-     * 每项覆盖 [first_block, first_block + block_count)。
-     * **各 (ch,ce,lun) 用同一份块号**（分片模型：每 die 一套完整元数据），
+     * 每项覆盖 [first_block, first_block + block_count)，且只在 plane_mask 指定的
+     * plane 上占用。**各 (ch,ce,lun) 用同一份块号**（分片模型：每 die 一套完整元数据），
      * 分区不随维度错开。block 为 per-plane 号（调用侧取模）。 */
     for (uint32_t p = 0U; p < g_ftl_partition_count; p++)
     {
@@ -1124,6 +1171,10 @@ bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, ui
         {
             continue;
         }
+        if ((part->plane_mask & (1U << plane)) == 0U)
+        {
+            continue; /* 本分区不使用这个 plane ⇒ 同号块是用户数据 */
+        }
 
         if ((block >= part->first_block) && (block < (uint16_t)(part->first_block + part->block_count)))
         {
@@ -1131,8 +1182,12 @@ bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, ui
         }
     }
 
-    /* 前置条件（判据 2）：调用者（main.c / power_failure_recovery.c）恒传 ftl->metadata_dir。 */
-    ASSERT(md_dir != NULL);
+    /* md_dir == NULL：只判固定分区（开机 carve / recovery 的"固定块"判据用）。
+     * 这不是错误——调用者明确只要固定分区视图。 */
+    if (md_dir == NULL)
+    {
+        return false;
+    }
 
     /* ── 当前日志块：可能尚无任何 region 指向它（刚分配、还没 commit），
      *    扫 entries 扫不到 ⇒ 必须显式排除，否则会被 Free Pool 回填当用户块收走。
@@ -1144,7 +1199,8 @@ bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, ui
     }
 
     /* ── 日志块：Metadata Directory 登记的 L2P region 物理位置 ──
-     * L2P region 只落动态日志块（从 Free Pool 取块，块号 >= FTL_METADATA_BLOCK_END；
+     * L2P region 只落动态日志块（从 Free Pool 取块；**不按块号判断**——plane 1 的
+     * 0..41/46.. 已是用户区，动态日志块可以落在 `FTL_METADATA_BLOCK_END` 之前；
      * 未映射的 region 条目是 INVALID，不指向任何块）。这些块写满 64 页，
      * 逐页判空会误判为满 SB，必须排除。
      * ⚠ entries 有 2048 条而本函数在开机回填里按块调用数千次 ⇒ 用 have_dynamic

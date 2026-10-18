@@ -809,7 +809,9 @@ ftl_status_t ftl_rebuild_closed_sb_list(struct ftl_context  *ftl,
 /* 固定元数据区（分区表几何；动态 LOG 块不在此列） */
 static bool recovery_is_fixed_block(uint16_t g)
 {
-    return ftl_gblock_block(g) < FTL_METADATA_BLOCK_END;
+    /* 必须按分区的 plane_mask 判：plane 1 的 0..41/46.. 已是用户数据，
+     * 用 "block < FTL_METADATA_BLOCK_END" 会把它们误当固定元数据块跳过。 */
+    return ftl_is_metadata_block(NULL, ftl_gblock_plane(g), ftl_gblock_block(g));
 }
 
 /* 把一个物理块发成退化单 plane Closed 条目（与 F2 同口径；Policy B 不要求配对）。 */

@@ -6,7 +6,7 @@
  *   metadata_job.c —— 两件"要碰 NAND 的整理活"的异步状态机：
  *                     ① 回收：待回收位图（reclaim_pending）里的块 ⇒ 擦 + 归还 Free Pool；
  *                     ② 压缩：挑活 region 最少的 victim，搬进当前块，落 Anchor 后擦除。
- *   共享的内部原语（slot_now / job_reset / 待回收位图）在 metadata_internal.h。
+ *   共享的内部原语（slot_now / job_reset / 待回收位图）在 include/ftl/metadata_job.h。
  *
  * 设计约束（与 metadata.h 的 md_job_t 长注释配套）：
  *   · **一次只提交一条命令**：提交阶段设 waiting 就返回；纯 RAM 阶段连续推进到下一个
@@ -21,6 +21,8 @@
  *     （重取会白烧一页）；待回收位在擦除在飞/失败期间也保持置位。
  */
 
+#include "ftl/metadata_job.h"
+
 #include "common/assertion.h"
 #include "common/log.h"
 #include "fc/fc.h"
@@ -28,7 +30,6 @@
 #include "ftl/ftl_fc_interface.h"
 #include "ftl/ftl_job.h" /* 心跳（[JOB] 观测口）*/
 #include "ftl/ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
-#include "metadata_internal.h"
 #include "nand/onfi_1_0.h"
 
 /* 连续"提交不出去"的轮数上限（同 CP/MIG/RR_SUBMIT_STALL_MAX）。 */
@@ -152,12 +153,63 @@ static ftl_status_t md_submit_write(metadata_dir_cache_t *dir, nand_pba_t addr, 
     return FTL_OK;
 }
 
+/* 提交一条**镜像**异步写（固定元数据池：同一页用 multi-plane 写两个 plane）。
+ * 只用于 Anchor/CP/BBT 的元数据页；L2P region 搬移仍走单 plane 的 md_submit_write。 */
+static ftl_status_t md_submit_write_mirror(metadata_dir_cache_t *dir, nand_pba_t addr, const void *data, uint32_t length)
+{
+    fc_command_t *cmd;
+
+    if (ftl_async_write_page_mirror(&cmd, addr, data, length, FTL_PAGE_CFG_META()) != FTL_OK)
+    {
+        return FTL_AGAIN;
+    }
+
+    md_job_t *j = &dir->job;
+
+    j->waiting = 1U;
+
+    if (ftl_op_submit(cmd, FTL_OP_METADATA, j) != FTL_OK)
+    {
+        j->waiting = 0U;
+        (void)fc_command_release(cmd);
+        return FTL_AGAIN;
+    }
+
+    j->stall_rounds = 0U;
+    return FTL_OK;
+}
+
 /* 提交一条异步擦除（日志块回收 / Anchor 换块 / victim 擦除共用）。 */
 static ftl_status_t md_submit_erase(metadata_dir_cache_t *dir, nand_pba_t addr)
 {
     fc_command_t *cmd;
 
     if (ftl_async_erase_block(&cmd, addr) != FTL_OK)
+    {
+        return FTL_AGAIN;
+    }
+
+    md_job_t *j = &dir->job;
+
+    j->waiting = 1U;
+
+    if (ftl_op_submit(cmd, FTL_OP_METADATA, j) != FTL_OK)
+    {
+        j->waiting = 0U;
+        (void)fc_command_release(cmd);
+        return FTL_AGAIN;
+    }
+
+    j->stall_rounds = 0U;
+    return FTL_OK;
+}
+
+/* 提交一条**镜像**异步擦除（固定元数据池的换块：两个 plane 一起擦）。 */
+static ftl_status_t md_submit_erase_multi(metadata_dir_cache_t *dir, nand_pba_t addr)
+{
+    fc_command_t *cmd;
+
+    if (ftl_async_erase_block_multi_plane(&cmd, addr) != FTL_OK)
     {
         return FTL_AGAIN;
     }
@@ -499,7 +551,7 @@ void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
             }
 
             case MD_JOB_CP_ANCHOR_ERASE:
-                if (md_submit_erase(dir, j->anchor_base) != FTL_OK)
+                if (md_submit_erase_multi(dir, j->anchor_base) != FTL_OK)
                 {
                     (void)md_stall(dir);
                 }
@@ -530,7 +582,7 @@ void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
                 metadata_anchor_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
                 metadata_dir_anchor_page(dir, j->anchor_seq, j->anchor_chunk, &page);
 
-                if (md_submit_write(dir, aaddr, &page, (uint32_t)sizeof(page)) != FTL_OK)
+                if (md_submit_write_mirror(dir, aaddr, &page, (uint32_t)sizeof(page)) != FTL_OK)
                 {
                     (void)md_stall(dir);
                 }

@@ -115,6 +115,10 @@
 L2P 表不在固定分区：未映射 = Directory 条目 INVALID，写过的 region 落动态日志块。
 ```
 
+> **副本策略（介质版本 8）**：Anchor/Checkpoint/BBT 在 **P0+P1 镜像**（multi-plane 同页
+> 写两份，读侧任一副本有效）；Journal 在 P0+P1 **页号奇偶交错**（单副本，擦除必须
+> multi-plane）；Wear 仅 **P0** 单副本，P1 的块 46 是用户数据。
+
 > ⚠ **v0.50 起 Anchor/Checkpoint/BBT 都是「多块轮转池」**（P0-2 元数据写模型统一：只写
 > 擦除页 + sequence + 池内轮转 + 整条校验最新胜），不再是「主/备 2 块」。旧口径的
 > `ANCHOR_COPIES` / `BBT_COPIES` / `CHECKPOINT_COPIES` / `ANCHOR_REDUNDANCY` /
