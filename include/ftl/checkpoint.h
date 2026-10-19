@@ -370,8 +370,9 @@ bool checkpoint_load_block_table(struct ftl_context            *ftl,
  *
  * 逐页读入 16 页磨损快照、用 Header 里的 wear_page_crc[] 验证，然后回填 BST 的
  * erase_count / read_count / rr（last_ecc / rising_count / health）。
- * 失效（无快照 / CRC 错 / 读失败）只表示「磨损计数不可用」——**软状态**，
- * 不得触发格式化，也不影响用户数据；调用者继续用默认值（0）即可。
+ * ⚠ 逐页应用：中途某页失败时，**已读页已回填**，其余块保持默认计数。
+ * 失效（无快照 / CRC 错 / 读失败）只表示「磨损计数不完整」——**软状态**，
+ * 不得触发格式化，也不影响用户数据。
  *
  * @param ftl        FTL 上下文
  * @param cp         最近 Header

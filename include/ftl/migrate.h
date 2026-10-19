@@ -7,7 +7,7 @@
  * 把「读 victim 的有效 CW → 写进冷块 → 更新 L2P/Journal → 擦除归还」实现为
  * **异步 job 状态机**。GC / WL / 慢死预测的搬移主体逐字同构，差别只在
  *   · 谁当 victim（gc_select_victim / wl_select_victim / rr_predictive_scan）；
- *   · 擦完怎么处置（GC：归还 Free Pool；WL：退役 RETIRED）。
+ *   · 擦完怎么处置（GC / WL：归还 Free Pool；慢死预测：退役 RETIRED）。
  * 故共用**一个** mig_job_t：`kind` 选 victim，`post` 决定收尾。
  *
  * ── 为什么必须异步 ──
@@ -36,8 +36,9 @@
  *           （**F10 契约**：搬移条目先落盘再擦 victim；页写失败 ⇒ 条目已丢，
  *           pending 会阻止擦除，直到 Checkpoint 把 L2P 落盘）。
  *   · ERASE 逐 plane 异步擦：成功走 `allocator_note_erase`（erase_count / last_pe_ts /
- *           清 valid），然后按 `post` 二选一——`MIG_POST_FREE` 归还 Free Pool（入池），
- *           `MIG_POST_RETIRE` **不入池** + `rr_retire_block` 退役（见 allocator.h 不变量②）；
+ *           清 valid），然后按 `post` 二选一——`MIG_POST_FREE` 归还 Free Pool（入池，
+ *           GC 与静态 WL 用），`MIG_POST_RETIRE` **不入池** + `rr_retire_block` 退役
+ *           （慢死预测用，见 allocator.h 不变量②）；
  *           失败（且尚未 BAD）`bbt_mark_bad`，并置 `erase_failed`：该 SB 不计入
  *           `gc_reclaimed_count`、不打印 predict 退役日志。
  *   · DONE  allocator_find_closed_sb + allocator_remove_closed_sb + 进展计数
@@ -101,8 +102,9 @@ typedef enum
 /* 收尾方式（决定擦除后怎么处置 victim 的块）。 */
 typedef enum
 {
-    MIG_POST_FREE = 0, /* GC：擦完归还 Free Pool */
-    MIG_POST_RETIRE    /* WL / 慢死预测：**不入池**，置 RETIRED（不再分配、不标坏、仍可读）。
+    MIG_POST_FREE = 0, /* GC / 静态 WL：擦完归还 Free Pool，重新进入磨损轮转 */
+    MIG_POST_RETIRE    /* 慢死预测 / read recovery：**不入池**，置 RETIRED
+                        * （不再分配、不标坏、仍可读）。
                         * ⚠ 退役块不得进 Free Pool——选块判据是 Free Pool **数组**，
                         *    留在池里会被再次分配 */
 } mig_post_t;

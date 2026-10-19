@@ -17,7 +17,8 @@
  * GC / WL 分工（本仓自拟的策略划分，不是某一份公开规范）：
  *   — GC 回收"有效页少"的 Block（回收空间）
  *   — WL 搬移"有效页多 + 擦除少"的 Block（均衡磨损）
- *   — 二者共用 migrate 引擎；GC 是 WL 的擦除出口
+ *   — 二者共用 migrate 引擎与同一收尾（擦完归还 Free Pool）：WL 的源块随后会被
+ *     动态 WL 优先选中写入，擦除计数回升；**不退役**（退役只属于慢死预测/RR）
  */
 
 #include "nand_config.h"
@@ -48,7 +49,7 @@ typedef struct
     bool     found;                   /* 是否找到 victim */
     uint16_t plane_blocks[PLANE_NUM]; /* 各 plane Block 号 */
     uint16_t valid_cw;                /* 有效 **CW** 数（各 plane valid_count 之和；CW 级映射） */
-    uint32_t read_count;              /* 各 plane read disturb 计数之和（B5 冷块优先权重） */
+    uint32_t read_count;              /* 各 plane read disturb 计数之和（冷块优先权重） */
 } wl_victim_t;
 
 /* ── 接口 ── */
@@ -56,7 +57,7 @@ typedef struct
 /*
  * wl_should_trigger - 检查是否需要触发静态 WL
  *
- * 三条件 OR（三星企业级方案）：
+ * 三条件 OR（**本仓自拟**：数值为本仓经验值，无公开出处）：
  *   条件 1：max_ec - min_ec ≥ WL_DELTA_THRESHOLD（5000）
  *   条件 2：max_ec / avg_ec ≥ WL_MAX_AVG_RATIO（3x）
  *   条件 3：低擦除区（min ~ min+1000）中的 Block 占比 **> 5%**（代码是严格大于）

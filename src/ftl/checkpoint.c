@@ -1186,7 +1186,8 @@ void checkpoint_wear_page_build(const ftl_allocator_t *alloc, uint16_t page_inde
  *   功能：读取并校验 Checkpoint 记录里的磨损快照，回填 BST。
  *   返回：true = 已加载并回填；false = 无快照 / 字段不符 / 读失败 / CRC 不符。
  *   实现要点：逐页从镜像的任一 plane 读；每页自带 CRC（Header 的 wear_page_crc[]）。
- *             失败只表示软状态不可用，**不得**触发格式化。
+ *             逐页应用：中途某页失败时，**已读页已回填**，其余块保持默认计数。
+ *             失败只表示软状态不完整，**不得**触发格式化。
  * -------------------------------------------------------------------- */
 bool checkpoint_load_wear_table(struct ftl_context            *ftl,
                                 const l2p_checkpoint_header_t *cp,
@@ -1203,12 +1204,14 @@ bool checkpoint_load_wear_table(struct ftl_context            *ftl,
     }
     if ((cp->wear_entry_count != FTL_BLOCK_TOTAL) ||
         (cp->wear_entry_bytes != FTL_CHECKPOINT_WEAR_ENTRY_BYTES) ||
-        (cp->wear_page_count != FTL_CHECKPOINT_WEAR_PAGES))
+        (cp->wear_page_count != FTL_CHECKPOINT_WEAR_PAGES) ||
+        (cp->record_pages != CHECKPOINT_RECORD_PAGES))
     {
-        LOGW("[WEAR] snapshot fields inconsistent (entries=%lu bytes=%lu pages=%lu)\r\n",
+        LOGW("[WEAR] snapshot fields inconsistent (entries=%lu bytes=%lu pages=%lu rec=%lu)\r\n",
              (unsigned long)cp->wear_entry_count,
              (unsigned long)cp->wear_entry_bytes,
-             (unsigned long)cp->wear_page_count);
+             (unsigned long)cp->wear_page_count,
+             (unsigned long)cp->record_pages);
         return false;
     }
 
@@ -1270,7 +1273,10 @@ bool checkpoint_load_wear_table(struct ftl_context            *ftl,
 
         if (!loaded)
         {
-            LOGW("[WEAR] snapshot page %u unavailable (rec=%u)\r\n", (unsigned)p, (unsigned)record_idx);
+            /* 逐页应用：前面的页已回填 BST，其余块保持默认计数（软状态，可接受）。 */
+            LOGW("[WEAR] snapshot page %u unavailable (rec=%u) — 已读页保留，其余从 0\r\n",
+                 (unsigned)p,
+                 (unsigned)record_idx);
             return false;
         }
     }

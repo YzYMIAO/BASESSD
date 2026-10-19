@@ -196,7 +196,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
     /* 磨损计数（erase/read/ECC 健康）与块元数据一起在 CP 里；软状态，失败只退化 WL。 */
     if (!checkpoint_load_wear_table(ftl, &cp, cp_idx))
     {
-        LOGW("[WEAR] snapshot unavailable (rec=%u seq=%lu) — counters start at 0\r\n",
+        LOGW("[WEAR] snapshot incomplete (rec=%u seq=%lu) — read pages kept, rest default\r\n",
              (unsigned)cp_idx,
              (unsigned long)cp.sequence);
     }

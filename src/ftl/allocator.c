@@ -141,6 +141,10 @@ void allocator_note_erase(ftl_allocator_t *alloc, uint16_t gblock, uint32_t now)
     b->erase_count++;
     b->last_pe_ts = now;
     ftl_block_clear_valid(b);
+
+    /* read disturb 是「自上次擦除以来」的计数：擦除把它清零。
+     * rr.health / last_ecc / rising_count **保留**——慢死趋势要跨擦除周期观察。 */
+    b->read_count = 0U;
 }
 
 /* 实现要点：按 plane 追加到 op_blocks；容量由 FTL_OP_BLOCKS_PER_PLANE 限定。 */

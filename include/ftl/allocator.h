@@ -271,7 +271,8 @@ void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock);
 
 /*
  * allocator_note_erase - 记录一次成功的擦除
- * 功能：erase_count++、last_pe_ts = now、valid_count 清零。
+ * 功能：erase_count++、last_pe_ts = now、valid_count 与 read_count 清零
+ *       （read disturb 按“自上次擦除以来”计；rr 健康趋势保留）。
  * 参数：alloc — 分配器；gblock — 全局块号；now — 当前时间戳。
  * 返回：无。
  */

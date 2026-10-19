@@ -3,7 +3,7 @@
  *
  * 职责：
  *   把 victim SB 的有效 CW 逐页搬到 Cold 流新块，更新 L2P / Journal / 有效计数，
- *   最后擦除 victim 并归还（GC）/ 退役（WL）。三处搬移的差别只在**谁当 victim**
+ *   最后擦除 victim 并归还（GC / 静态 WL）或退役（慢死预测）。三处搬移的差别只在**谁当 victim**
  *   （kind）与**擦完怎么处置**（post），故共用一台异步 job。
  *
  * 文件结构：
@@ -290,7 +290,7 @@ bool mig_begin_wl(ftl_context_t *ftl)
     super_block_t sb;
     mig_victim_from_planes(&sb, victim.plane_blocks);
 
-    mig_start(ftl, &sb, MIG_KIND_WL, MIG_POST_RETIRE);
+    mig_start(ftl, &sb, MIG_KIND_WL, MIG_POST_FREE);
     return true;
 }
 
@@ -980,7 +980,8 @@ static void mig_complete_erase(ftl_context_t             *ftl,
              * 退役直接 RETIRED，与「state == FREE ⟺ 在池」不变量一致（allocator.h ②）。 */
             if ((mig_post_t)m->post == MIG_POST_RETIRE)
             {
-                /* WL / 慢死预测：搬空的块**退役**（RETIRED，不再分配新数据、不标坏、仍可读）。
+                /* 慢死预测：搬空的块**退役**（RETIRED，不再分配新数据、不标坏、仍可读）。
+                 * GC / 静态 WL 走 FREE 分支，块重新进入磨损轮转。
                  * victim 正常是 CLOSED、从未入池 ⇒ remove_from_free 是文档化 no-op
                  * （allocator.h 判据 4）；保留它是为了让「退役块绝不留在池里」不依赖调用顺序。
                  * rr_retire_block 内部把 read_count 归零（read disturb 重计）。 */

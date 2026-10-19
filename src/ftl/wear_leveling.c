@@ -75,7 +75,10 @@ bool wl_should_trigger(const struct ftl_context *ftl)
         return true;
     }
 
-    /* 条件 3：低擦除区 Block 占比 */
+    /* 条件 3：低擦除区 Block 占比。
+     * ⚠ 分子由 allocator_count_blocks_below 统计（非 BAD/NONE 的全部块，含 RETIRED），
+     *   分母是 alloc->total_blocks（用户区好块数）。RETIRED 极少时两者近似一致；
+     *   分子集合更大 ⇒ 占比略偏高，判据偏保守（更容易触发，均衡方向安全）。 */
     const uint32_t low_zone  = min_ec + WL_LOW_ZONE_WIDTH;
     const uint32_t low_count = allocator_count_blocks_below(&ftl->alloc, low_zone);
     if (low_count > (uint32_t)ftl->alloc.total_blocks * WL_LOW_BLOCK_PCT / 100U)
@@ -116,8 +119,29 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
             continue;
         }
 
+        /* 任一 present plane 的块已坏 ⇒ 跳过：migrate 读它必然失败并 abort，
+         * 而该 SB 仍可能是“有效 CW 最多”的候选 ⇒ 每轮重选、WL 永久卡死。 */
+        bool has_bad_plane = false;
+
+        for (uint8_t p = 0U; p < PLANE_NUM; p++)
+        {
+            if (!super_block_has_plane(sb, p))
+            {
+                continue;
+            }
+            if (ftl_block_is_bad(&ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])]))
+            {
+                has_bad_plane = true;
+                break;
+            }
+        }
+        if (has_bad_plane)
+        {
+            continue;
+        }
+
         /* 各 plane 聚合值由 allocator 统一计算（有效 CW / 擦除平均 / read disturb）。
-         * 有效 CW 越多（越冷）越优先；B5：同一有效数下 read_count 高者优先
+         * 有效 CW 越多（越冷）越优先；同一有效数下 read_count 高者优先
          * （read disturb 风险高 → 优先搬移；read_count 来自 host 读 + GC/WL 搬移读累加）。 */
         allocator_sb_stats_t st;
         allocator_sb_stats(&ftl->alloc, sb, &st);

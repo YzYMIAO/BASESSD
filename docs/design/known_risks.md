@@ -2,7 +2,7 @@
 
 > **用途**：把「暂不修 / 待上板 / 待测试源同步 / 待决策」的风险固定下来。
 > **复查 `metadata` / GC / migrate / journal / BBT / 掉电恢复 / L2P cache /
-> Checkpoint / 类型规则前先读本表**，避免重复分析、重复消耗。
+> Checkpoint / 磨损计数与 WL / 类型规则前先读本表**，避免重复分析、重复消耗。
 >
 > 状态词：`待决策`（需要用户裁决）· `待后续`（已登记，独立任务）·
 > `待上板`（代码已改，板端未验）· `待测试源`（冻结 UT 待所有者同步）· `已修未上板`。
@@ -99,6 +99,19 @@
 
 ---
 
+## 2E. 磨损计数 / 静态 WL（本轮审查）
+
+| ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
+| RISK-WL-01 | 已修未上板 | ~~WL 擦完 victim 用 `MIG_POST_RETIRE`：RETIRED 仍计入 erase 统计的 min/max ⇒ 低擦除块永久压低 min + 每次 WL 退役一块 ⇒ 容量持续流失~~ | 改 `MIG_POST_FREE`：擦完归还 Free Pool，动态 WL 优先选中它写入，擦除计数回升 | 上板：触发 WL 后 Free Pool/容量不下降，低擦除块被重新分配 | `src/ftl/migrate.c` `mig_begin_wl` |
+| RISK-WL-02 | 已修未上板 | ~~`allocator_note_erase` 不重置 `read_count`：read disturb 跨擦除周期累计 ⇒ 正常块越过 1000 被预测路径退役~~ | 擦除成功清 `read_count`；`rr.health / last_ecc / rising_count` 保留（慢死趋势跨周期） | 长时 soak：正常块不被 `rr_predictive_scan` 误退役 | `src/ftl/allocator.c` `allocator_note_erase` |
+| RISK-WL-03 | 已修未上板 | ~~Closed SB 的某个 plane 在标 BAD 后仍被 WL 选中：`plane_blocks` 含 BAD 块 ⇒ migrate 读失败 abort，且每轮重选 ⇒ WL 永久卡死~~ | `wl_select_victim` 预检：任一 present plane 的块 BAD ⇒ 跳过该 SB | 上板：运行期标坏后 WL 仍能前进 | `src/ftl/wear_leveling.c` `wl_select_victim` |
+| RISK-WL-04 | 待上板 | 本轮行为变化未板验：WL 收尾 FREE、read_count 复位、BAD plane 过滤、磨损表 `record_pages` 校验 | 编译零告警 | 正常 WL/GC、断电、长时 soak | `src/ftl/migrate.c` / `allocator.c` / `wear_leveling.c` |
+| RISK-WL-05 | 待后续 | `wl_should_trigger` 与 `wl_select_victim` 各做一次全表扫描（RISK-PERF-01 的一部分）；RETIRED 块仍计入 erase stats | 5 s 节拍门 | 需要时把 `allocator_erase_stats_t` 从触发点透传 | `src/ftl/wear_leveling.c` |
+| RISK-WL-06 | 信息 | 磨损快照**逐页应用**：中途失败时前面的页已回填，其余保持默认（软状态） | Header 字段校验 + 每页 CRC + 日志 | 若要求整条原子恢复：32 KB 暂存或两遍读 | `src/ftl/checkpoint.c` `checkpoint_load_wear_table` |
+
+---
+
 ## 3. 类型 / 显式强转（H44，提交 `6050703`）
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
@@ -138,6 +151,8 @@
   重新挂起、同步屏障返回状态、回放写失败可见；见 RISK-JN-02/04、RISK-BOOT-10。
 - Checkpoint（本次审查）：预擦失败不再记 `pre_erased_block`、完成服务 waiting 守卫、
   提交状态传播、find_latest 失败复位、水位公式精确到条目；见 RISK-CP-01~03。
+- 磨损计数 / 静态 WL（本次审查）：WL 收尾改 FREE、擦除清零 read_count、跳过含 BAD
+  plane 的候选、磨损表一致性校验；见 RISK-WL-01~04。
 - 板端最小回归：格式化启动 → 顺序写满多个 SB → GC → 并发覆盖写/TRIM → 断电重启 → WL →
   Journal/BBT 故障注入 → 格式化中途断电 → 长时 soak 后全量读回。
 

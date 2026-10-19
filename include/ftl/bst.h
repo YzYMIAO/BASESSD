@@ -100,8 +100,8 @@ _Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)UINT8_MAX,
  *   · gc_generation (1B) —— GC 迁移成功++，从无读者
  *
  *   erase_count   合并 allocator->erase_counts[]（allocator/gc/wl 消费）
- *   last_pe_ts    最近擦除时间戳（GC victim youth_penalty，P1-1 消费）
- *   read_count    read disturb 计数（读成功++，read recovery 消费）
+ *   last_pe_ts    最近擦除时间戳（GC victim youth_penalty 消费）
+ *   read_count    read disturb 计数（读成功++，擦除成功清零；read recovery 消费）
  *   valid_count   双 Plane 合计有效 **CW** 0..512（GC/WL victim 选真值，O(1)）
  *   state         状态机（ftl_block_state_t，互斥态：NONE/FREE/OPEN/CLOSED/LOG/RETIRED/BAD）
  *   temp          温度流（0=HOT / 1=COLD，与位置**正交**）

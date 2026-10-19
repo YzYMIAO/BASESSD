@@ -38,7 +38,7 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
  *   · FTL_OP_JOURNAL  ：Journal 刷页 job（阶段 2，ctx = ftl->journal）；
  *   · FTL_OP_READ_RECOVERY：Read Recovery job（阶段 3，ctx = &ftl->rr）；
  *   · FTL_OP_GC / FTL_OP_WL：搬移 job（阶段 4，ctx = &ftl->mig）——**同一台引擎**，
- *     tag 分开只为日志/调试可辨（GC 回收 vs WL/预测退役）。
+ *     tag 分开只为日志/调试可辨（GC/WL 回收 vs 慢死预测退役）。
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（阶段 5，ctx = 该 cache line）；
  *   · FTL_OP_CHECKPOINT：Checkpoint job（阶段 6，ctx = ftl->cp_job）；
  *   · FTL_OP_BBT：元数据表持久化 job（阶段 7，ctx = &ftl->alloc）。

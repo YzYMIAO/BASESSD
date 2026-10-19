@@ -600,7 +600,7 @@ Checkpoint 成功后按 `journal_sequence` 截断/回收。
 | 字段 | 大小 | 含义 |
 |---|---:|---|
 | `erase_count` | 4 B | 擦除计数（动态/静态 WL 的唯一输入） |
-| `read_count` | 2 B | 主机读 + GC/WL 搬移读累加（read disturb） |
+| `read_count` | 2 B | 主机读 + GC/WL 搬移读累加（read disturb）；擦除成功清零 |
 | `last_ecc` | 1 B | 上次读的 ECC 纠正 bit 数 |
 | `flags` | 1 B | `rising_count:4`（bit0..3）+ `health:2`（bit4..5）+ 保留 2 bit |
 
@@ -1180,7 +1180,7 @@ NAND 的写必须落在**已擦除**的页上，而擦除以块为单位。FTL �
 |---|---:|---|
 | `erase_count` | 4 B | 擦除次数；动态 WL 选块、静态 WL 触发、GC 的 erase 项 |
 | `last_pe_ts` | 4 B | 最近擦除时间戳；GC 的 age 项（刻意不持久化） |
-| `read_count` | 2 B | read disturb 计数；预测搬移 |
+| `read_count` | 2 B | read disturb 计数（自上次擦除）；预测搬移 |
 | `valid_count` | 2 B | **CW 级**有效计数（0..512），GC/WL 的 valid 项 |
 | `state` | 1 B | 互斥枚举：NONE/FREE/OPEN/CLOSED/LOG/RETIRED/BAD |
 | `temp` | 1 B | HOT/COLD，正交于状态 |
@@ -1248,8 +1248,8 @@ flowchart TD
     START -- "建池 擦除归还" --> FREE
     FREE -- "allocator_alloc_pair" --> OPEN
     OPEN -- "64 页写满" --> CLOSED
-    CLOSED -- "GC 搬移 擦除 归还" --> FREE
-    CLOSED -- "WL 或预测搬移 出池 不标坏" --> RETIRED
+    CLOSED -- "GC / 静态 WL 搬移 擦除 归还" --> FREE
+    CLOSED -- "慢死预测 出池 不标坏" --> RETIRED
     FREE -- "allocator_alloc_log_block" --> LOG
     LOG -- "l2p_live 归零 擦除 归还" --> FREE
     FREE -- "出厂扫描 或探测判坏" --> BAD
@@ -1444,7 +1444,9 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
    快照损坏只退化 WL/read-disturb 精度，**不得**触发格式化。
 3. **WL 只选 Closed 块**：跳过 Open；只选低擦除区 + 有效 CW ≥ 70% 的块；
    同有效数下 `read_count` 高者优先（read disturb 冷块优先搬）。
-4. **WL 与 GC 共用一台迁移引擎**：WL 只改 victim 来源与收尾方式（RETIRED，不入池）。
+4. **WL 与 GC 共用一台迁移引擎与同一收尾（FREE）**：WL 只改 victim 来源；
+   擦完归还 Free Pool，源块由动态 WL 优先选中写入，擦除计数回升。
+   退役只属于慢死预测 / read recovery。
 
 #### 3.4.4 流程图
 
@@ -1460,8 +1462,8 @@ flowchart TD
     W4 -- "都不满足" --> W0
     HIT --> W5["wl_select_victim 低擦除区 valid 不低于 70 百分比 read_count 高优先"]
     W5 -- "无" --> W0
-    W5 -- "有" --> W6["mig_start WL RETIRE 见 3-13 节"]
-    W6 --> W7["擦完 出池 RETIRED rr_retire_block"]
+    W5 -- "有" --> W6["mig_start WL FREE 见 3-13 节"]
+    W6 --> W7["擦完 归还 Free Pool"]
 ```
 
 #### 3.4.5 关键流程
@@ -1477,8 +1479,8 @@ flowchart TD
    启动门 `total_writes ≥ WL_MIN_WRITES`；求值节拍 `WL_EVAL_INTERVAL_MS = 5000`。
 4. **选 victim**：遍历 Closed 列表，要求 `sb_ec <= min_ec + WL_LOW_ZONE_WIDTH`、
    `valid >= 70%`；按有效 CW 最多者优先，平手看 `read_count`。
-5. **搬移**：`mig_begin_wl` 起 job；收尾 `MIG_POST_RETIRE`：出池 + RETIRED，
-   **不得**先入 Free Pool（否则会被再次分配）。
+5. **搬移**：`mig_begin_wl` 起 job；收尾 `MIG_POST_FREE`：擦完归还 Free Pool。
+   动态 WL 选块取擦除最少者，会优先选中刚擦过的低擦除块，使其进入磨损轮转。
 
 #### 3.4.6 失败语义
 
@@ -2995,7 +2997,7 @@ flowchart TB
 |---|---|
 | `active` / `waiting` / `aborted` | 单飞行 / 有命令在飞 / 中止 |
 | `phase` | `MIG_READ → READ_SETTLE → WRITE → WRITE_SETTLE → FLUSH_JRN → ERASE → DONE` |
-| `kind` / `post` | GC/WL/PREDICT；FREE/RETIRE |
+| `kind` / `post` | GC/WL/PREDICT；GC+WL=FREE，PREDICT=RETIRE |
 | `page` / `plane` | 当前页/plane |
 | `victim` | **按值拷贝**的 SB（closed 列表 swap-remove，不能持指针） |
 | `cw_bitmap[plane]` / `base` / `cw_lba` / `src` / `dst` | 本页逐 CW 有效位、页基址、META LBA、源/目标 PBA |
@@ -3697,8 +3699,8 @@ flowchart TD
     M -- "是" --> N["MIG_FLUSH_JRN 等 journal 空闲 F10"]
     N --> O["MIG_ERASE 逐 plane 擦"]
     O --> P{"post 类型"}
-    P -- "FREE" --> Q["allocator_free_block 入池"]
-    P -- "RETIRE" --> R["remove_from_free RETIRED"]
+    P -- "FREE GC 或 WL" --> Q["allocator_free_block 入池"]
+    P -- "RETIRE 慢死预测" --> R["remove_from_free RETIRED"]
     Q --> S["MIG_DONE 移除 closed 条目 计数"]
     R --> S
     E --> N
@@ -3713,7 +3715,7 @@ flowchart TD
 | L2P | 逐 CW 指向新 PBA |
 | Journal | 每条搬移映射一条记录；F10 屏障后落盘 |
 | Closed 列表 | victim 移除；GC 计数 +1 |
-| BST 状态 | GC：FREE；WL/预测：RETIRED |
+| BST 状态 | GC / 静态 WL：FREE；慢死预测：RETIRED |
 
 **失败分支**：分配不到目标页/提交侧 256 轮无进展 ⇒ 中止，不擦 victim；
 写失败 ⇒ 该 plane L2P 不动；擦除失败 ⇒ 标坏；掉电 ⇒ 最多一个孤悬块，Journal 回放恢复。
