@@ -209,11 +209,11 @@
 > 判据见下（原判据照用）；**依赖「P0-2 先上板验证」**仍然成立，见「依赖」条。
 >
 > ⚠ **v0.75 阶段 8 追记**：同步版 `metadata_dir_compact` 与 `dir->compacting` 已删，改由
-> `md_job_t` 状态机承载（`metadata_dir_kick` + `ftl_op_metadata`）。**victim 判据、触发点、
+> `metadata_handle_t` 状态机承载（`metadata_dir_kick` + `ftl_metadata_callback`）。**victim 判据、触发点、
 > ①②③④⑤ 顺序全不变**；两处实现差异：① 压缩不再就地阻塞服务循环，改为逐 region 提交异步
 > 读写；② `metadata_dir_commit_region` 不再就地擦块（v0.75 登记单槽 `reclaim_target`；
 > v0.80 起改为 `reclaim_pending` 位图 + 全异步擦除），
-> 因为它是从 `ftl_op_l2p` 的完成服务函数里被调用的——就地擦 = 在完成泵里嵌套泵。
+> 因为它是从 `ftl_l2p_callback` 的完成服务函数里被调用的——就地擦 = 在完成泵里嵌套泵。
 
 - **问题（原文留档）**：`metadata_dir_reclaim`（`metadata.c:573-596`）只回收 `l2p_live[g] == 0` 的块：
 
@@ -507,7 +507,7 @@
 
 | 编号 | 项 | 现状 | 为何未排期 |
 |---|---|---|---|
-| P0-3 | L2P 日志块压缩（抗碎片） | ✅ **已落地（v0.65，未上板）**：`metadata_dir_compact` 给「多活」日志块一条出路（`metadata_dir_reclaim` 只回收活计数 0 的块 ⇒ 冷 region 块永久占块，最坏吃近半个 die）。<br>⚠ **v0.75 阶段 8 重写为异步**：同步版 `metadata_dir_compact` 已删，改由 `md_job_t` 状态机（`metadata_dir_kick` + `ftl_op_metadata`）承载；**算法与触发点不变**，只是不再阻塞服务循环、且不再在完成泵内擦块 | `ftl_revision_history.md v0.65 / v0.75 阶段 8` |
+| P0-3 | L2P 日志块压缩（抗碎片） | ✅ **已落地（v0.65，未上板）**：`metadata_dir_compact` 给「多活」日志块一条出路（`metadata_dir_reclaim` 只回收活计数 0 的块 ⇒ 冷 region 块永久占块，最坏吃近半个 die）。<br>⚠ **v0.75 阶段 8 重写为异步**：同步版 `metadata_dir_compact` 已删，改由 `metadata_handle_t` 状态机（`metadata_dir_kick` + `ftl_metadata_callback`）承载；**算法与触发点不变**，只是不再阻塞服务循环、且不再在完成泵内擦块 | `ftl_revision_history.md v0.65 / v0.75 阶段 8` |
 | — | **Anchor 页 CRC 覆盖面缺陷**（`c5cb8a0` 引入，v0.61 修，v0.62 字段整体删除） | ✅ **已消解**：v0.61 修覆盖面（原 `ANCHOR_PAGE_CRC_LEN = sizeof - 4`（2044）把 `crc` 字段自己算进去 ⇒ `anchor_page_valid` **恒 0** ⇒ `metadata_dir_load` 永远失败 ⇒ **L2P 映射跨重启全丢**；改 `offsetof(..., crc)`=1812）；v0.62 起 Anchor 页**不再有 `crc` 字段**，完整性由下层 FC per-CW CRC + ECC 承担 ⇒ 该缺陷从根上不存在 | `ftl_revision_history.md v0.61/v0.62` |
 | — | `rr` 持久化 | ✅ **已落地（v0.65，未上板）**：`last_ecc`/`rising_count`/`health` 并入 Wear 条目（8B→12B，布局版本 2→3）；`health` 回放时范围钳制 | `ftl_revision_history.md v0.65` |
 | — | GC Bitmap（Layer 2） | 设计有、代码无。**正确性窗口已由 v0.43「擦除前 flush」闭合**；Layer 2 只是掉电后**断点续搬**的性能优化 | 缺口，未排（非正确性） |
@@ -664,7 +664,7 @@
 
 | 序 | 项 | 依赖 | 结果 |
 |---|---|---|---|
-| 7 | ~~**P0-3 L2P 日志块压缩**~~（**长时压测前必须**） | P0-2 上板 | ✅ `metadata_dir_compact`：victim = `l2p_live` 最小非当前块，搬活 region 后 **Anchor 先落盘、再擦**；触发点在「刚换新日志块 + Free Pool 低水位」；`dir->compacting` 防重入 + 抑制逐次立即回收。<br>⚠ v0.75 阶段 8：同步版删除，改 `md_job_t` + `metadata_dir_kick` + `ftl_op_metadata`（算法 / 触发点 / ③④ 顺序契约全不变） |
+| 7 | ~~**P0-3 L2P 日志块压缩**~~（**长时压测前必须**） | P0-2 上板 | ✅ `metadata_dir_compact`：victim = `l2p_live` 最小非当前块，搬活 region 后 **Anchor 先落盘、再擦**；触发点在「刚换新日志块 + Free Pool 低水位」；`dir->compacting` 防重入 + 抑制逐次立即回收。<br>⚠ v0.75 阶段 8：同步版删除，改 `metadata_handle_t` + `metadata_dir_kick` + `ftl_metadata_callback`（算法 / 触发点 / ③④ 顺序契约全不变） |
 | 8 | ~~**rr 持久化**~~（慢死预测跨重启归零） | P0-1 | ✅ 三字段（`last_ecc`/`rising_count`/`health`）并入 Wear 条目（8B→12B）⇒ `FTL_MEDIA_LAYOUT_VERSION` 2→3 |
 
 ### 波 4 — 算法深度

@@ -5,7 +5,7 @@
  * Completion Table — cmd_id → ctx 旁表
  *
  * 本表**只**回答一个问题：「这条命令的私有状态在哪」。命令该跑哪个完成服务函数
- * 由**命令自己**携带（fc_command_t.op_tag → g_op_service[]，见 ftl_op.h）。
+ * 由**命令自己**携带（fc_command_t.op_tag → g_op_callbacks[]，见 ftl_op.h）。
  *
  * 两张表：
  *   ① g_table[COMPLETION_TABLE_SIZE] —— command_id → ctx，**精确旁表**；
@@ -35,7 +35,7 @@ struct ftl_context;
 /* ── 旁表表项 ──
  *
  * 只留 cmd_id → ctx：命令该跑哪个完成服务函数由命令自己携带
- * （fc_command_t.op_tag → g_op_service[]，见 ftl_op.h），旁表不存 handler。
+ * （fc_command_t.op_tag → g_op_callbacks[]，见 ftl_op.h），旁表不存 handler。
  * 8 B/项（2 B 位域 + 2 B 补齐 + 4 B 指针，Cortex-M 指针 4 B）。 */
 typedef struct
 {
@@ -88,7 +88,7 @@ void *completion_table_take(uint16_t cmd_id);
  * completion_table_count - 当前占用（未决）的表项数（观测 / 自检口）。
  *
  * ⚠ 后台档位判定（ftl_bg_level_select）**刻意不**用它：档位要的是 host IO 忙闲，
- *   而 host 请求不经旁表（ftl_op_host_io 的 ctx == NULL）⇒ 旁表占用与 host 负载无关。
+ *   而 host 请求不经旁表（ftl_host_io_callback 的 ctx == NULL）⇒ 旁表占用与 host 负载无关。
  *   档位判据是 pending 占用（见 ftl.c 的 ftl_bg_level_select）。
  *
  * @return 占用槽位数（0..COMPLETION_TABLE_SIZE）

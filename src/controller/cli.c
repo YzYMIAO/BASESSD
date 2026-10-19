@@ -541,7 +541,7 @@ static int uart_cli_info(int argc, char *argv[])
                 /* 元数据整理 job 的现场（心跳默认档不打，靠这里观测）。
                  * 只在有 job 在跑 / 有待回收块时多打一行，空闲时不刷屏。 */
                 const metadata_dir_cache_t *md  = ftl->metadata_dir;
-                const md_job_t             *job = &md->job;
+                const metadata_handle_t    *job = &md->handle;
 
                 if ((job->phase != (uint8_t)MD_JOB_IDLE) || (md->reclaim_pending_count != 0U))
                 {

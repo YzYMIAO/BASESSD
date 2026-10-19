@@ -260,7 +260,7 @@ ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
     pending->cache_intermediate = 0U;
     pending_validate(pending);
 
-    /* 提交（tag = HOST_IO ⇒ 完成时由 g_op_service[FTL_OP_HOST_IO] 收尾）。
+    /* 提交（tag = HOST_IO ⇒ 完成时由 g_op_callbacks[FTL_OP_HOST_IO] 收尾）。
      * ctx 传 NULL：host I/O 的私有状态在 pending 表里（比旁表 ctx 更全）。 */
     if (ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL) != FTL_OK)
     {

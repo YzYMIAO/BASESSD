@@ -3,7 +3,7 @@
  *
  * 职责：
  *   ① 跟踪异步请求的 command_id → 请求映射，供 FC 完成回调据以做 caller 通知
- *      与写回滚簿记（ftl_op_host_io → pending_lookup）；
+ *      与写回滚簿记（ftl_host_io_callback → pending_lookup）；
  *   ② 实现「完成组」——把一条 host 请求拆出的多条 FC 子操作聚成一个完成单元，
  *      通知字段（complete_flag/status_out/on_complete）只在最后一个子操作完成后
  *      触发一次（见 pending_group_* 族）。
@@ -273,7 +273,7 @@ void pending_group_drop_subop(ftl_context_t *ftl, uint16_t gi)
  *   返回：无。
  *   实现要点：
  *     · caller 通知字段（complete_flag / status_out / on_complete）的**唯一写点**：
- *       由 ftl_op_host_io 在子操作簿记后调用。
+ *       由 ftl_host_io_callback 在子操作簿记后调用。
  *     · agg_status **粘性**：仅当 sub_status != OK 时写入，一旦失败即保留首个错误，
  *       后续成功不覆盖（组整体语义 = 任一子操作失败则整组 IO_ERROR）。
  *     · outstanding-- 后交 pending_group_maybe_complete 判是否整组完成。

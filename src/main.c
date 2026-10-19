@@ -184,7 +184,7 @@ static void boot_report_console(void)
  *   AXI_RAM（.bss）：g_ftl 描述符（~14.7KB/实例）+ g_l2p_cache（共享热 cache）
  *                    + CLI 写缓冲 + 其它 .bss
  *   SRAM1+SRAM2（.sram12_data）：g_ftl_tables[FTL_DIM_TOTAL]（BST/池/closed）
- *   SRAM3（.sram3_data）：g_ftl_cp_job[] + g_ftl_journal[]
+ *   SRAM3（.sram3_data）：g_ftl_checkpoint_handle[] + g_ftl_journal[]
  *   SRAM4（.sram4_data）：g_ftl_md[]（Metadata Directory）
  *
  * 四个 `.sram*_data` 数组是 **NOLOAD**（启动不清零）⇒ ftl_init 显式 memset。
@@ -198,7 +198,7 @@ static l2p_cache_t g_l2p_cache[CH_NUM][CE_NUM];
 
 /* per-instance 大数组（阶段 C）：由 ftl_storage_t 绑定到描述符。 */
 static ftl_tables_t         g_ftl_tables[FTL_DIM_TOTAL] SRAM12_DATA;
-static cp_job_t             g_ftl_cp_job[FTL_DIM_TOTAL] SRAM3_DATA;
+static checkpoint_handle_t  g_ftl_checkpoint_handle[FTL_DIM_TOTAL] SRAM3_DATA;
 static l2p_journal_t        g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
 static metadata_dir_cache_t g_ftl_md[FTL_DIM_TOTAL] SRAM4_DATA;
 
@@ -221,7 +221,7 @@ static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl
 _Static_assert(sizeof(g_ftl) + sizeof(g_l2p_cache) + FTL_AXI_RAM_RESERVED + CLI_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE,
                "FTL 描述符/共享 cache/CLI 缓冲超出 AXI_RAM");
 _Static_assert(sizeof(g_ftl_tables) <= BOARD_SRAM12_SIZE, "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
-_Static_assert(sizeof(g_ftl_cp_job) + sizeof(g_ftl_journal) <= BOARD_SRAM3_SIZE, "cp_job/journal 超出 SRAM3");
+_Static_assert(sizeof(g_ftl_checkpoint_handle) + sizeof(g_ftl_journal) <= BOARD_SRAM3_SIZE, "checkpoint_handle/journal 超出 SRAM3");
 _Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4");
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
@@ -260,10 +260,10 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     const ftl_topology_t topo    = {.ch = ch, .ce = ce, .lun = lun};
     const uint32_t       dim     = ftl_topo_dim(topo);
     const ftl_storage_t  storage = {
-         .tables       = &g_ftl_tables[dim],
-         .metadata_dir = &g_ftl_md[dim],
-         .journal      = &g_ftl_journal[dim],
-         .cp_job       = &g_ftl_cp_job[dim],
+         .tables            = &g_ftl_tables[dim],
+         .metadata_dir      = &g_ftl_md[dim],
+         .journal           = &g_ftl_journal[dim],
+         .checkpoint_handle = &g_ftl_checkpoint_handle[dim],
     };
 
     ASSERT(dim < FTL_DIM_TOTAL);

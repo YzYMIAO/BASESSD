@@ -205,7 +205,7 @@ while (1) {
     fc_command_status_t completion;
     if (fc_poll_completion(&completion) == FC_STATUS_OK) {
         // 直接按 op_tag 派发（FTL 侧的实际实现：src/ftl/ftl_op.c）
-        ftl_op_service_fn_t fn = g_op_service[completion.op_tag];
+        ftl_op_callback_fn_t fn = g_op_callbacks[completion.op_tag];
         fn(ftl, &completion, completion_table_take(completion.command_id));
     }
 }

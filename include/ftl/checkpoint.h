@@ -34,8 +34,8 @@ struct ftl_context;
 /* ── 异步 Checkpoint job ──
  *
  * CP 是严格有序的流水线（掉电安全契约，见 .c 头注释）；顺序由本状态机的 phase
- * 承载：每一步提交命令后即返回，完成由 g_op_service[FTL_OP_CHECKPOINT]
- * （ftl_op_checkpoint）按 phase 收尾，下一轮 checkpoint_kick 续跑。
+ * 承载：每一步提交命令后即返回，完成由 g_op_callbacks[FTL_OP_CHECKPOINT]
+ * （ftl_checkpoint_callback）按 phase 收尾，下一轮 checkpoint_kick 续跑。
  *
  * ⚠ **掉电安全契约不变**：先 flush region → 再 flush Anchor → 最后写 Header。
  *   Header 是"承诺书"——它一旦落盘，boot 就信 region_bitmap 里置位的 region 在
@@ -45,7 +45,7 @@ struct ftl_context;
  *   journal_sequence 在 job **起点**一次取定。CP 跨多轮，期间完成的 host 写会在
  *   journal 里留下 > 快照水位的新条目——水位取早 ⇒ 它们一定被回放，不会丢。
  *
- * 完成服务函数 `ftl_op_checkpoint` 声明在 ftl/ftl_op.h（与其余 op 服务函数同处）；
+ * 完成服务函数 `ftl_checkpoint_callback` 声明在 ftl/ftl_op.h（与其余 op 服务函数同处）；
  * 它按 phase 记结果并推进，**不**调用 checkpoint_kick（CP 阶段含同步原语，见 .c）。
  */
 
@@ -127,14 +127,14 @@ typedef struct
     /* 心跳 */
     uint32_t start_ms; /* job 起点（观测用） */
     uint32_t log_ms;   /* 上次心跳时刻 */
-} cp_job_t;
+} checkpoint_handle_t;
 
-/* cp_job 的位图是**本 die 的局部**尺寸；共享 cache 的脏位图是全局尺寸，二者
+/* checkpoint_handle 的位图是**本 die 的局部**尺寸；共享 cache 的脏位图是全局尺寸，二者
  * 不再同尺寸（阶段 B）。这里钉死本地位图 = L2P_REGIONS_PER_INSTANCE bit。 */
-_Static_assert(sizeof(((cp_job_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(uint32_t)),
-               "cp_job_t.region_bitmap 必须是本 die 的局部 2048-bit 位图");
-_Static_assert(sizeof(((cp_job_t *)0)->block_words) == (FTL_BLOCK_TOTAL * sizeof(uint16_t)),
-               "cp_job_t.block_words 必须恰好覆盖全部块");
+_Static_assert(sizeof(((checkpoint_handle_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(uint32_t)),
+               "checkpoint_handle_t.region_bitmap 必须是本 die 的局部 2048-bit 位图");
+_Static_assert(sizeof(((checkpoint_handle_t *)0)->block_words) == (FTL_BLOCK_TOTAL * sizeof(uint16_t)),
+               "checkpoint_handle_t.block_words 必须恰好覆盖全部块");
 
 /* ── Checkpoint 池游标/序号（per-instance）──
  *
@@ -291,10 +291,10 @@ _Static_assert(sizeof(((l2p_checkpoint_header_t *)0)->region_bitmap) == (L2P_LOC
  *   现序掉电在 ④ 之前 ⇒ 本次 CP 未记录，boot 用上一个 CP 并回放 journal（⑤ 还没跑）⇒ 一致。
  *
  * ⚠ 本函数**只装配 job 并推进第一步**，不等任何 NAND 命令。此后由每轮 ftl_service
- *   调 checkpoint_kick 续跑，各阶段的完成由 g_op_service[FTL_OP_CHECKPOINT] 收尾。
+ *   调 checkpoint_kick 续跑，各阶段的完成由 g_op_callbacks[FTL_OP_CHECKPOINT] 收尾。
  *   调用者**不能**据返回值判断 CP 成败。
  *
- * ⚠ 单飞行：已在跑（`ftl->cp_job->active`）⇒ 返回 FTL_AGAIN，不重入。
+ * ⚠ 单飞行：已在跑（`ftl->checkpoint_handle->active`）⇒ 返回 FTL_AGAIN，不重入。
  *
  * @param ftl  FTL 上下文
  * @return FTL_OK 已启动 / FTL_AGAIN job 忙 / FTL_ERROR 参数非法

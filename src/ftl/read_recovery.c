@@ -16,7 +16,7 @@
  *
  * 文件结构：
  *   1. 记录/判定   rr_record_ecc
- *   2. 恢复路径     rr_kick / rr_step（static）/ ftl_op_read_recovery（异步 job 状态机）
+ *   2. 恢复路径     rr_kick / rr_step（static）/ ftl_read_recovery_callback（异步 job 状态机）
  *   3. 判定扫描     rr_check_predictive / rr_get_health / rr_predictive_scan
  *   4. 退役         rr_retire_block
  *
@@ -122,11 +122,11 @@ static ftl_status_t rr_submit_set_features(ftl_context_t *ftl, uint8_t mode)
 
     /* waiting 先于提交置位、提交失败再回滚：反序（提交成功后才置位）在"完成早于置位"
      * 的路径上会丢掉一次等待状态——本仓单线程顺序主循环下不会发生，但先置位零成本。 */
-    ftl->rr.waiting = 1U;
+    ftl->read_recovery_handle.waiting = 1U;
 
-    if (ftl_op_submit(cmd, FTL_OP_READ_RECOVERY, &ftl->rr) != FTL_OK)
+    if (ftl_op_submit(cmd, FTL_OP_READ_RECOVERY, &ftl->read_recovery_handle) != FTL_OK)
     {
-        ftl->rr.waiting = 0U;
+        ftl->read_recovery_handle.waiting = 0U;
         (void)fc_command_release(cmd);
         return FTL_AGAIN;
     }
@@ -134,7 +134,7 @@ static ftl_status_t rr_submit_set_features(ftl_context_t *ftl, uint8_t mode)
     /* ⚠ 卡死计数在**提交成功之后**才清零（不是准备成功时）：`ftl_op_submit` 自身失败
      *   （完成表满 / SQ 满）也是一轮"提交不出去"，若在此前清零则计数永远停在 1、
      *   中止判据 RR_SUBMIT_STALL_MAX 永不触发。 */
-    ftl->rr.stall_rounds = 0U;
+    ftl->read_recovery_handle.stall_rounds = 0U;
 
     return FTL_OK;
 }
@@ -151,11 +151,11 @@ static ftl_status_t rr_submit_read(ftl_context_t *ftl, nand_pba_t pba, const ftl
         return st;
     }
 
-    ftl->rr.waiting = 1U;
+    ftl->read_recovery_handle.waiting = 1U;
 
-    if (ftl_op_submit(cmd, FTL_OP_READ_RECOVERY, &ftl->rr) != FTL_OK)
+    if (ftl_op_submit(cmd, FTL_OP_READ_RECOVERY, &ftl->read_recovery_handle) != FTL_OK)
     {
-        ftl->rr.waiting = 0U;
+        ftl->read_recovery_handle.waiting = 0U;
         (void)fc_command_release(cmd);
         return FTL_AGAIN;
     }
@@ -163,7 +163,7 @@ static ftl_status_t rr_submit_read(ftl_context_t *ftl, nand_pba_t pba, const ftl
     /* ⚠ 卡死计数在**提交成功之后**才清零（不是准备成功时）：`ftl_op_submit` 自身失败
      *   （完成表满 / SQ 满）也是一轮"提交不出去"，若在此前清零则计数永远停在 1、
      *   中止判据 RR_SUBMIT_STALL_MAX 永不触发。 */
-    ftl->rr.stall_rounds = 0U;
+    ftl->read_recovery_handle.stall_rounds = 0U;
 
     return FTL_OK;
 }
@@ -171,31 +171,31 @@ static ftl_status_t rr_submit_read(ftl_context_t *ftl, nand_pba_t pba, const ftl
 /* 记账本 attempt 的重试次数，再决定去向：还有 attempt ⇒ 再切模式；用满 ⇒ 进 Stage 2。 */
 static void rr_next_attempt(ftl_context_t *ftl)
 {
-    ftl->rr.retry_count = ftl->rr.attempt;
+    ftl->read_recovery_handle.retry_count = ftl->read_recovery_handle.attempt;
 
-    if (ftl->rr.attempt < RR_MAX_RETRY)
+    if (ftl->read_recovery_handle.attempt < RR_MAX_RETRY)
     {
-        ftl->rr.attempt++;
-        ftl->rr.stage = (uint8_t)RR_STAGE_SF_SET;
+        ftl->read_recovery_handle.attempt++;
+        ftl->read_recovery_handle.stage = (uint8_t)RR_STAGE_SF_SET;
     }
     else
     {
-        ftl->rr.neighbor_i = 0U;
-        ftl->rr.stage      = (uint8_t)RR_STAGE_NB_READ;
+        ftl->read_recovery_handle.neighbor_i = 0U;
+        ftl->read_recovery_handle.stage      = (uint8_t)RR_STAGE_NB_READ;
     }
 }
 
 /* 下一个邻居；已用满 ⇒ 本 plane 失败，去结算。 */
 static void rr_next_neighbor(ftl_context_t *ftl)
 {
-    if (((uint32_t)ftl->rr.neighbor_i + 1U) < RR_NEIGHBOR_ATTEMPTS)
+    if (((uint32_t)ftl->read_recovery_handle.neighbor_i + 1U) < RR_NEIGHBOR_ATTEMPTS)
     {
-        ftl->rr.neighbor_i++;
-        ftl->rr.stage = (uint8_t)RR_STAGE_NB_READ;
+        ftl->read_recovery_handle.neighbor_i++;
+        ftl->read_recovery_handle.stage = (uint8_t)RR_STAGE_NB_READ;
     }
     else
     {
-        ftl->rr.stage = (uint8_t)RR_STAGE_PLANE_END;
+        ftl->read_recovery_handle.stage = (uint8_t)RR_STAGE_PLANE_END;
     }
 }
 
@@ -215,17 +215,17 @@ static void rr_next_neighbor(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 static rr_plane_step_t rr_select_plane(ftl_context_t *ftl)
 {
-    const ftl_pending_req_t *pending = &ftl->pending[ftl->rr.pending_idx];
+    const ftl_pending_req_t *pending = &ftl->pending[ftl->read_recovery_handle.pending_idx];
 
-    ftl->rr.page     = NAND_PBA_INVALID;
-    ftl->rr.page_lba = 0U;
-    ftl->rr.first    = 0U;
+    ftl->read_recovery_handle.page     = NAND_PBA_INVALID;
+    ftl->read_recovery_handle.page_lba = 0U;
+    ftl->read_recovery_handle.first    = 0U;
 
     for (uint8_t k = 0U; k < pending->n_cw; k++)
     {
         const lba_t l = (lba_t)(pending->lba + (lba_t)k);
 
-        if (ftl_lba_plane(l) == ftl->rr.plane)
+        if (ftl_lba_plane(l) == ftl->read_recovery_handle.plane)
         {
             nand_pba_t cur;
 
@@ -236,15 +236,15 @@ static rr_plane_step_t rr_select_plane(ftl_context_t *ftl)
 
             if (cur != NAND_PBA_INVALID)
             {
-                ftl->rr.page     = pba_page(cur);
-                ftl->rr.page_lba = ftl_lba_page(l);
-                ftl->rr.first    = k;
+                ftl->read_recovery_handle.page     = pba_page(cur);
+                ftl->read_recovery_handle.page_lba = ftl_lba_page(l);
+                ftl->read_recovery_handle.first    = k;
             }
             break;
         }
     }
 
-    return (ftl->rr.page != NAND_PBA_INVALID) ? RR_PLANE_READY : RR_PLANE_SKIP;
+    return (ftl->read_recovery_handle.page != NAND_PBA_INVALID) ? RR_PLANE_READY : RR_PLANE_SKIP;
 }
 
 /* --------------------------------------------------------------------
@@ -258,19 +258,19 @@ static rr_plane_step_t rr_select_plane(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 static void rr_settle_plane(ftl_context_t *ftl)
 {
-    ftl_pending_req_t *pending = &ftl->pending[ftl->rr.pending_idx];
+    ftl_pending_req_t *pending = &ftl->pending[ftl->read_recovery_handle.pending_idx];
 
     for (uint8_t k = 0U; k < pending->n_cw; k++)
     {
         const lba_t l = (lba_t)(pending->lba + (lba_t)k);
 
-        if (ftl_lba_plane(l) != ftl->rr.plane)
+        if (ftl_lba_plane(l) != ftl->read_recovery_handle.plane)
         {
             continue;
         }
         uint8_t *dst = (uint8_t *)pending->buffer + ((size_t)k * FTL_IU_BYTES);
 
-        if (ftl->rr.recovered != 0U)
+        if (ftl->read_recovery_handle.recovered != 0U)
         {
             memcpy(dst, ftl->rr_page_scratch + ((size_t)ftl_lba_cw(l) * FTL_IU_BYTES), FTL_IU_BYTES);
         }
@@ -280,17 +280,17 @@ static void rr_settle_plane(ftl_context_t *ftl)
         }
     }
 
-    if (ftl->rr.recovered == 0U)
+    if (ftl->read_recovery_handle.recovered == 0U)
     {
-        ftl->rr.all_ok = 0U; /* 任一 plane 失败 ⇒ 整个托管子操作按 IO_ERROR 结算 */
+        ftl->read_recovery_handle.all_ok = 0U; /* 任一 plane 失败 ⇒ 整个托管子操作按 IO_ERROR 结算 */
 
         /* Stage 1（读重试）+ Stage 2（邻居辅助）全失败 ⇒ 页面已损坏提升为块级不可靠，
          * 显式标记坏块（RR Stage 3 XOR/RAID 恢复属后续阶段，当前不做）。 */
         LOGE("[FTL] read unrecoverable lba=%lu gblock=%u retry=%u\r\n",
-             (unsigned long)(pending->lba + (lba_t)ftl->rr.first),
-             (unsigned)ftl_pba_gblock(ftl->rr.page),
-             (unsigned)ftl->rr.retry_count);
-        (void)bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(ftl->rr.page));
+             (unsigned long)(pending->lba + (lba_t)ftl->read_recovery_handle.first),
+             (unsigned)ftl_pba_gblock(ftl->read_recovery_handle.page),
+             (unsigned)ftl->read_recovery_handle.retry_count);
+        (void)bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(ftl->read_recovery_handle.page));
     }
 }
 
@@ -298,25 +298,25 @@ static void rr_settle_plane(ftl_context_t *ftl)
  * owners 必须在释放**之前**取走——组完成通知可能重入并复用本槽。 */
 static void rr_finish(ftl_context_t *ftl)
 {
-    const uint32_t     owners = ftl->pending[ftl->rr.pending_idx].owners;
+    const uint32_t     owners = ftl->pending[ftl->read_recovery_handle.pending_idx].owners;
     const ssd_status_t status =
-        (ftl->rr.all_ok != 0U) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
+        (ftl->read_recovery_handle.all_ok != 0U) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
 
-    pending_release_index(ftl, ftl->rr.pending_idx);
+    pending_release_index(ftl, ftl->read_recovery_handle.pending_idx);
 
     /* all_ok 是**所有被覆盖 plane 的聚合**：任一 plane 不可恢复或提交侧 abort
      * 都按 IO_ERROR 结算；全部恢复成功才报 OK（数据已由 rr_settle_plane 拷回）。 */
     pending_group_complete_subop_multi(ftl, owners, status);
 
-    ftl->rr.stage   = (uint8_t)RR_STAGE_IDLE;
-    ftl->rr.waiting = 0U;
+    ftl->read_recovery_handle.stage   = (uint8_t)RR_STAGE_IDLE;
+    ftl->read_recovery_handle.waiting = 0U;
 }
 
 /* 卡死兜底：提交侧长期无进展（命令池泄漏），按恢复失败收尾。
  * ⚠ **不**标坏块——卡死是控制器侧资源问题，与介质无关，标坏会白丢一个好块。 */
 static void rr_abort(ftl_context_t *ftl)
 {
-    ftl_pending_req_t *pending = &ftl->pending[ftl->rr.pending_idx];
+    ftl_pending_req_t *pending = &ftl->pending[ftl->read_recovery_handle.pending_idx];
 
     LOGE("[RR] submit stalled, abort lba=%lu\r\n", (unsigned long)pending->lba);
 
@@ -325,8 +325,8 @@ static void rr_abort(ftl_context_t *ftl)
         memset((uint8_t *)pending->buffer + ((size_t)k * FTL_IU_BYTES), 0, FTL_IU_BYTES);
     }
 
-    ftl->rr.all_ok = 0U;
-    ftl->rr.stage  = (uint8_t)RR_STAGE_FINISH;
+    ftl->read_recovery_handle.all_ok = 0U;
+    ftl->read_recovery_handle.stage  = (uint8_t)RR_STAGE_FINISH;
 }
 
 /* 提交结果处理：FTL_ERROR = 地址/建链硬失败 ⇒ 立即 abort；
@@ -363,28 +363,28 @@ static void rr_step(ftl_context_t *ftl)
 {
     for (;;)
     {
-        switch ((rr_stage_t)ftl->rr.stage)
+        switch ((rr_stage_t)ftl->read_recovery_handle.stage)
         {
             case RR_STAGE_IDLE:
                 /* 领走一个被托管的子操作；没有就空闲退出。 */
-                if (!pending_find_op(ftl, PENDING_OP_READ_RECOVERY, &ftl->rr.pending_idx))
+                if (!pending_find_op(ftl, PENDING_OP_READ_RECOVERY, &ftl->read_recovery_handle.pending_idx))
                 {
                     return;
                 }
-                ftl->rr.plane        = 0U;
-                ftl->rr.recovered    = 0U;
-                ftl->rr.all_ok       = 1U; /* 聚合结果：任一 plane 失败才清零 */
-                ftl->rr.stall_rounds = 0U; /* 新 job：卡死计数从头算（不复用上一 job 的） */
-                ftl->rr.stage        = (uint8_t)RR_STAGE_PLANE;
+                ftl->read_recovery_handle.plane        = 0U;
+                ftl->read_recovery_handle.recovered    = 0U;
+                ftl->read_recovery_handle.all_ok       = 1U; /* 聚合结果：任一 plane 失败才清零 */
+                ftl->read_recovery_handle.stall_rounds = 0U; /* 新 job：卡死计数从头算（不复用上一 job 的） */
+                ftl->read_recovery_handle.stage        = (uint8_t)RR_STAGE_PLANE;
                 break;
 
             case RR_STAGE_PLANE:
             {
                 rr_plane_step_t sel;
 
-                if (ftl->rr.plane >= PLANE_NUM)
+                if (ftl->read_recovery_handle.plane >= PLANE_NUM)
                 {
-                    ftl->rr.stage = (uint8_t)RR_STAGE_FINISH;
+                    ftl->read_recovery_handle.stage = (uint8_t)RR_STAGE_FINISH;
                     break;
                 }
 
@@ -394,28 +394,28 @@ static void rr_step(ftl_context_t *ftl)
                 {
                     /* L2P region 在加载：原地等，**不计**提交卡死——
                      * 加载在飞是有确定完成时刻的进展。rr_kick 每轮会 +1，这里清零。 */
-                    ftl->rr.stall_rounds = 0U;
+                    ftl->read_recovery_handle.stall_rounds = 0U;
                     return;
                 }
                 if (sel == RR_PLANE_SKIP)
                 {
-                    ftl->rr.plane++; /* 本子操作不覆盖本 plane ⇒ 跳过 */
+                    ftl->read_recovery_handle.plane++; /* 本子操作不覆盖本 plane ⇒ 跳过 */
                     break;
                 }
-                ftl->rr.attempt     = 1U;
-                ftl->rr.neighbor_i  = 0U;
-                ftl->rr.recovered   = 0U;
-                ftl->rr.retry_count = 0U;
-                ftl->rr.stage       = (uint8_t)RR_STAGE_SF_SET;
+                ftl->read_recovery_handle.attempt     = 1U;
+                ftl->read_recovery_handle.neighbor_i  = 0U;
+                ftl->read_recovery_handle.recovered   = 0U;
+                ftl->read_recovery_handle.retry_count = 0U;
+                ftl->read_recovery_handle.stage       = (uint8_t)RR_STAGE_SF_SET;
                 break;
             }
 
             case RR_STAGE_SF_SET:
-                rr_submit_result(ftl, rr_submit_set_features(ftl, ftl->rr.attempt));
+                rr_submit_result(ftl, rr_submit_set_features(ftl, ftl->read_recovery_handle.attempt));
                 return;
 
             case RR_STAGE_READ:
-                rr_submit_result(ftl, rr_submit_read(ftl, ftl->rr.page, FTL_PAGE_CFG_DATA(ftl->rr.page_lba)));
+                rr_submit_result(ftl, rr_submit_read(ftl, ftl->read_recovery_handle.page, FTL_PAGE_CFG_DATA(ftl->read_recovery_handle.page_lba)));
                 return;
 
             case RR_STAGE_SF_RESTORE:
@@ -425,27 +425,27 @@ static void rr_step(ftl_context_t *ftl)
             case RR_STAGE_NB_READ:
             {
                 /* 邻居选择沿用原 rr_neighbor_assist（块内回绕）。 */
-                const uint32_t neighbor = rr_neighbor_page(pba_to_page(ftl->rr.page), ftl->rr.neighbor_i);
+                const uint32_t neighbor = rr_neighbor_page(pba_to_page(ftl->read_recovery_handle.page), ftl->read_recovery_handle.neighbor_i);
 
                 /* 只换 page 字段：rr.page 的 ch/ce/lun/block/plane 原样保留
                  * （LUN 随 PBA 携带，不假设恒 0）。 */
-                ftl->rr.neighbor = pba_with_page(ftl->rr.page, neighbor);
+                ftl->read_recovery_handle.neighbor = pba_with_page(ftl->read_recovery_handle.page, neighbor);
 
                 /* 邻居页的 LBA **本就未知**（辅助读只要"这一页读得出来"这个事实）⇒
                  * FTL_PAGE_CFG_DATA_ANY 让命令 META = FC_META_UNKNOWN，跳过页内 META 比对。
                  * ⚠ 用 FTL_PAGE_CFG_DATA(0) 会把"LBA 就是 0"当事实下传 ⇒ 恒置 MATA_ERROR。 */
-                rr_submit_result(ftl, rr_submit_read(ftl, ftl->rr.neighbor, FTL_PAGE_CFG_DATA_ANY()));
+                rr_submit_result(ftl, rr_submit_read(ftl, ftl->read_recovery_handle.neighbor, FTL_PAGE_CFG_DATA_ANY()));
                 return;
             }
 
             case RR_STAGE_NB_RETRY:
-                rr_submit_result(ftl, rr_submit_read(ftl, ftl->rr.page, FTL_PAGE_CFG_DATA(ftl->rr.page_lba)));
+                rr_submit_result(ftl, rr_submit_read(ftl, ftl->read_recovery_handle.page, FTL_PAGE_CFG_DATA(ftl->read_recovery_handle.page_lba)));
                 return;
 
             case RR_STAGE_PLANE_END:
                 rr_settle_plane(ftl);
-                ftl->rr.plane++;
-                ftl->rr.stage = (uint8_t)RR_STAGE_PLANE;
+                ftl->read_recovery_handle.plane++;
+                ftl->read_recovery_handle.stage = (uint8_t)RR_STAGE_PLANE;
                 break;
 
             case RR_STAGE_FINISH:
@@ -475,47 +475,47 @@ void rr_kick(ftl_context_t *ftl)
     /* 心跳（见 ftl_job.h）：恢复在飞期间每满 1s 打一行 stage/age。
      * ⚠ 判「在飞」用 stage 而非 waiting——提交侧背压时 stage 不变但无命令在飞，
      *   那段同样属于「job 卡住」，正是心跳要暴露的。 */
-    if (ftl->rr.stage == (uint8_t)RR_STAGE_IDLE)
+    if (ftl->read_recovery_handle.stage == (uint8_t)RR_STAGE_IDLE)
     {
-        ftl->rr.log_ms   = 0U;
-        ftl->rr.start_ms = 0U;
+        ftl->read_recovery_handle.log_ms   = 0U;
+        ftl->read_recovery_handle.start_ms = 0U;
     }
-    else if (ftl_job_heartbeat(&ftl->rr.log_ms, &ftl->rr.start_ms))
+    else if (ftl_job_heartbeat(&ftl->read_recovery_handle.log_ms, &ftl->read_recovery_handle.start_ms))
     {
         LOGI("[RR] job stage=%u plane=%u attempt=%u retry=%u stall=%u age=%lums\r\n",
-             (unsigned)ftl->rr.stage,
-             (unsigned)ftl->rr.plane,
-             (unsigned)ftl->rr.attempt,
-             (unsigned)ftl->rr.retry_count,
-             (unsigned)ftl->rr.stall_rounds,
-             (unsigned long)ftl_job_age_ms(&ftl->rr.start_ms));
+             (unsigned)ftl->read_recovery_handle.stage,
+             (unsigned)ftl->read_recovery_handle.plane,
+             (unsigned)ftl->read_recovery_handle.attempt,
+             (unsigned)ftl->read_recovery_handle.retry_count,
+             (unsigned)ftl->read_recovery_handle.stall_rounds,
+             (unsigned long)ftl_job_age_ms(&ftl->read_recovery_handle.start_ms));
     }
 
-    if (ftl->rr.waiting != 0U)
+    if (ftl->read_recovery_handle.waiting != 0U)
     {
         return; /* 命令在飞：NAND 层自身超时保证它**必有**完成（超时置 FC_CW_STATUS_TIMEOUT） */
     }
 
-    if (ftl->rr.stage == (uint8_t)RR_STAGE_IDLE)
+    if (ftl->read_recovery_handle.stage == (uint8_t)RR_STAGE_IDLE)
     {
         rr_step(ftl); /* 无 job：看有没有新托管的子操作 */
         return;
     }
 
     /* 有 job 却没在飞 = 上轮提交失败。连续无进展超限 ⇒ 判卡死收尾。 */
-    if (ftl->rr.stall_rounds >= RR_SUBMIT_STALL_MAX)
+    if (ftl->read_recovery_handle.stall_rounds >= RR_SUBMIT_STALL_MAX)
     {
         rr_abort(ftl);
     }
     else
     {
-        ftl->rr.stall_rounds++;
+        ftl->read_recovery_handle.stall_rounds++;
     }
 
     rr_step(ftl);
 }
 
-/* ── RR 各 stage 的完成处理（ftl_op_read_recovery 按 rr->stage 分派）──
+/* ── RR 各 stage 的完成处理（ftl_read_recovery_callback 按 rr->stage 分派）──
  *
  * 共同约定：命令的 release 与 rr_step 续跑**不**在这里做（见 dispatcher）——
  * 但需要 cmd 数据的分支（READ / NB_*）必须在此把数据拷进 rr_page_scratch，
@@ -531,7 +531,7 @@ static void rr_complete_sf_set(ftl_context_t *ftl, const fc_command_status_t *co
     }
     else
     {
-        ftl->rr.stage = (uint8_t)RR_STAGE_READ;
+        ftl->read_recovery_handle.stage = (uint8_t)RR_STAGE_READ;
     }
 }
 
@@ -540,17 +540,17 @@ static void rr_complete_sf_set(ftl_context_t *ftl, const fc_command_status_t *co
  * 失败 ⇒ 先恢复默认读模式（原 Step 3 无条件执行，含最后一次 attempt）。 */
 static void rr_complete_read(ftl_context_t *ftl, fc_command_t *cmd, const fc_command_status_t *completion)
 {
-    ftl->rr.retry_count = ftl->rr.attempt;
+    ftl->read_recovery_handle.retry_count = ftl->read_recovery_handle.attempt;
 
     if (!fc_cw_status_has_error(completion->status))
     {
         (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
-        ftl->rr.recovered = 1U;
-        ftl->rr.stage     = (uint8_t)RR_STAGE_PLANE_END;
+        ftl->read_recovery_handle.recovered = 1U;
+        ftl->read_recovery_handle.stage     = (uint8_t)RR_STAGE_PLANE_END;
     }
     else
     {
-        ftl->rr.stage = (uint8_t)RR_STAGE_SF_RESTORE;
+        ftl->read_recovery_handle.stage = (uint8_t)RR_STAGE_SF_RESTORE;
     }
 }
 
@@ -568,7 +568,7 @@ static void rr_complete_nb_read(ftl_context_t *ftl, fc_command_t *cmd, const fc_
     if (!fc_cw_status_has_error(completion->status))
     {
         (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
-        ftl->rr.stage = (uint8_t)RR_STAGE_NB_RETRY;
+        ftl->read_recovery_handle.stage = (uint8_t)RR_STAGE_NB_RETRY;
     }
     else
     {
@@ -582,8 +582,8 @@ static void rr_complete_nb_retry(ftl_context_t *ftl, fc_command_t *cmd, const fc
     if (!fc_cw_status_has_error(completion->status))
     {
         (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
-        ftl->rr.recovered = 1U;
-        ftl->rr.stage     = (uint8_t)RR_STAGE_PLANE_END;
+        ftl->read_recovery_handle.recovered = 1U;
+        ftl->read_recovery_handle.stage     = (uint8_t)RR_STAGE_PLANE_END;
     }
     else
     {
@@ -592,10 +592,10 @@ static void rr_complete_nb_retry(ftl_context_t *ftl, fc_command_t *cmd, const fc
 }
 
 /* --------------------------------------------------------------------
- * ftl_op_read_recovery
- *   功能：Read Recovery 命令的完成服务函数（g_op_service[FTL_OP_READ_RECOVERY]）。
+ * ftl_read_recovery_callback
+ *   功能：Read Recovery 命令的完成服务函数（g_op_callbacks[FTL_OP_READ_RECOVERY]）。
  *   参数：ftl —— 命令归属实例（ftl_op_dispatch 按命令自身 ch/ce/lun 解析后传入）；
- *         completion —— FC 完成状态；ctx —— &ftl->rr。
+ *         completion —— FC 完成状态；ctx —— &ftl->read_recovery_handle。
  *   返回：无。
  *   实现要点：按 stage 分派到 rr_complete_* 判完成结果并改 stage，然后 release
  *             命令 → rr_step 续跑。
@@ -603,7 +603,7 @@ static void rr_complete_nb_retry(ftl_context_t *ftl, fc_command_t *cmd, const fc
  *               FC_CW_STATUS_ERROR_MASK 全集（同 ftl_sync_read_page）。
  *             ⚠ 本函数**不得**同步等待（见 ftl_op.h）。
  * -------------------------------------------------------------------- */
-void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     ASSERT(completion != NULL);
 
@@ -614,12 +614,12 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
      * ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。 */
     ASSERT(ftl != NULL);
 
-    ftl_read_recovery_t *rr = (ftl_read_recovery_t *)ctx;
-    ASSERT(rr == &ftl->rr);
+    read_recovery_handle_t *rr = (read_recovery_handle_t *)ctx;
+    ASSERT(rr == &ftl->read_recovery_handle);
 
     /* 旁表项缺失（ctx 为 NULL）或本 job 已不在飞 ⇒ 孤儿/迟到的完成，只 release。
-     * 正常路径不该出现：每条 RR 命令提交时都登记了 &ftl->rr，且只被 take 一次。 */
-    if ((rr != &ftl->rr) || (rr->waiting == 0U))
+     * 正常路径不该出现：每条 RR 命令提交时都登记了 &ftl->read_recovery_handle，且只被 take 一次。 */
+    if ((rr != &ftl->read_recovery_handle) || (rr->waiting == 0U))
     {
         (void)fc_command_release(cmd);
         return;
@@ -775,7 +775,7 @@ bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
  * -------------------------------------------------------------------- */
 void rr_retire_block(ftl_block_t *b)
 {
-    /* 层内接口：唯一调用者 ftl_op_migrate（MIG_ERASE 完成分支）传 &ftl->alloc.blocks[gblock] */
+    /* 层内接口：唯一调用者 ftl_migrate_callback（MIG_ERASE 完成分支）传 &ftl->alloc.blocks[gblock] */
     ASSERT(b != NULL);
 
     /* 退役：不再分配新数据（RETIRED 态），不标坏（BBT 不删、仍可读）。

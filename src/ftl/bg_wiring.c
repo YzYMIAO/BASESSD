@@ -182,7 +182,7 @@ static void bg_a_journal_erase(ftl_context_t *ftl)
 
 /* 表 5 · must_run —— 紧急 Checkpoint（Journal ≥ 95%）。
  * 紧急水位必须**任何档位都随时响应**（BUSY 档也一样）。checkpoint_begin 只装配 job、
- * 单飞行（cp_job.active → FTL_AGAIN）幂等 ⇒ 每轮检查无副作用。 */
+ * 单飞行（checkpoint_handle.active → FTL_AGAIN）幂等 ⇒ 每轮检查无副作用。 */
 static void bg_a_emergency_cp(ftl_context_t *ftl)
 {
     if (checkpoint_is_emergency(ftl))
@@ -328,7 +328,7 @@ uint8_t ftl_bg_level_select(const ftl_context_t *ftl)
  * ⚠ **空闲度不计 completion_table**：后台 job（journal / RR / 搬移）的命令也登记在
  *   completion_table 里，计进来会让「真空闲」永不成立——一个后台 job 在飞就把模式
  *   从 IDLE 顶到 NORMAL，后台反而被自己的命令饿死。后台 job 的活跃度由各自的
- *   「单飞行门」（journal.job.phase / rr.stage / mig.active）单独管，与 host 侧解耦。 */
+ *   「单飞行门」（journal.handle.phase / read_recovery_handle.stage / migrate_handle.active）单独管，与 host 侧解耦。 */
 void ftl_bg_service(ftl_context_t *ftl)
 {
     ASSERT(ftl != NULL);

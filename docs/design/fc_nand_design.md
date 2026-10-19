@@ -2369,7 +2369,7 @@ switch (cmd->op_tag) { ... }  // 需要一次额外指针查询
 
 // 拷了 op_tag 的方式：
 status = fc_poll_completion(&completion);
-service = g_op_service[completion.op_tag];  // 直接派发
+service = g_op_callbacks[completion.op_tag];  // 直接派发
 service(ftl, &completion, ctx);
 ```
 

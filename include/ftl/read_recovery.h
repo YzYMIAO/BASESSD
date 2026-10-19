@@ -30,8 +30,8 @@
  *   ③ Read Retry 重试循环（通过 FC SET_FEATURES 切模式 + 重读）
  *   ④ 读失败后的恢复调度入口
  *
- * ⚠ 恢复路径是**异步状态机**（ftl_read_recovery_t + rr_kick +
- *   ftl_op_read_recovery）：读失败的完成服务函数把 pending 子操作托管给 job 就返回，
+ * ⚠ 恢复路径是**异步状态机**（read_recovery_handle_t + rr_kick +
+ *   ftl_read_recovery_callback）：读失败的完成服务函数把 pending 子操作托管给 job 就返回，
  *   恢复在 rr_kick / 完成服务函数里分步推进，不在完成泵里嵌套同步等待。
  */
 
@@ -72,12 +72,12 @@ typedef struct ftl_context ftl_context_t;
 /* ── Read Recovery 上下文（= 异步 job 状态机）──
  *
  * ECC 追踪数组在 ftl_block_t.rr（Block State Table 单数据源）；本上下文承载
- * **整台恢复状态机**（per-instance 单 job，放 ftl->rr）。
+ * **整台恢复状态机**（per-instance 单 job，放 ftl->read_recovery_handle）。
  *
  * 为什么是「托管」而不是「当场恢复」：当场恢复要在完成服务函数里同步等待每一级命令
  * ⇒ 在完成泵里再开一个完成泵（嵌套泵），且整条 host 读流水线被一个坏页钉住。
  * 改为：读失败时把 pending 子操作**托管**给本 job（保留 pending 项、不递减组在飞数），
- * job 按 stage 一次只提交一条命令，完成由 g_op_service[FTL_OP_READ_RECOVERY] 推进；
+ * job 按 stage 一次只提交一条命令，完成由 g_op_callbacks[FTL_OP_READ_RECOVERY] 推进；
  * host 读组继续 pending，直到 job 收尾统一结算。
  */
 
@@ -123,7 +123,7 @@ typedef enum
 typedef struct
 {
     uint8_t    stage;        /* rr_stage_t */
-    uint8_t    waiting;      /* 1 = 有一条 RR 命令在飞（等 g_op_service[FTL_OP_READ_RECOVERY]） */
+    uint8_t    waiting;      /* 1 = 有一条 RR 命令在飞（等 g_op_callbacks[FTL_OP_READ_RECOVERY]） */
     uint8_t    plane;        /* 当前 plane（0..PLANE_NUM-1）；== PLANE_NUM ⇒ 收尾 */
     uint8_t    attempt;      /* Stage 1 读重试计数（1..RR_MAX_RETRY） */
     uint8_t    neighbor_i;   /* Stage 2 邻居序号（0..RR_NEIGHBOR_ATTEMPTS-1） */
@@ -140,7 +140,7 @@ typedef struct
     /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 stage/age */
     uint32_t start_ms;
     uint32_t log_ms;
-} ftl_read_recovery_t;
+} read_recovery_handle_t;
 
 /* ── 接口 ── */
 
@@ -160,7 +160,7 @@ void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits);
  *
  * 三件事，按优先级：
  *   ① job 空闲 ⇒ 找有没有被托管的 pending 子操作，有则领走并起第一步；
- *   ② 命令在飞 ⇒ 直接返回（等 g_op_service[FTL_OP_READ_RECOVERY]）；
+ *   ② 命令在飞 ⇒ 直接返回（等 g_op_callbacks[FTL_OP_READ_RECOVERY]）；
  *   ③ 未在飞又推进不下去（提交侧背压）⇒ 累计 stall_rounds，超 RR_SUBMIT_STALL_MAX
  *      判卡死，按「恢复失败」收尾（避免 host 读被一个泄漏的命令池永久挂起）。
  *
@@ -171,8 +171,8 @@ void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits);
  */
 void rr_kick(ftl_context_t *ftl);
 
-/* 完成服务函数 ftl_op_read_recovery 与其余服务函数同处声明（ftl_op.h）——
- * 那里是"g_op_service 各槽"的唯一权威列表，此处不再重复声明。 */
+/* 完成服务函数 ftl_read_recovery_callback 与其余服务函数同处声明（ftl_op.h）——
+ * 那里是"g_op_callbacks 各槽"的唯一权威列表，此处不再重复声明。 */
 
 /*
  * rr_check_predictive - 检查是否需要预测性搬移

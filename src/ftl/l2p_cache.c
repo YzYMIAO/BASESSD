@@ -28,7 +28,7 @@
  * 异步化：
  *   加载与写回都是「提交即返回」——未命中/脏行 ⇒ 建命令 + ftl_op_submit(tag=FTL_OP_L2P,
  *   ctx = 本 cache line) ⇒ 置 LOADING/FLUSHING ⇒ 返回 FTL_AGAIN。完成由
- *   g_op_service[FTL_OP_L2P]（本文件末尾的 ftl_op_l2p）按 line->state 收尾。
+ *   g_op_callbacks[FTL_OP_L2P]（本文件末尾的 ftl_l2p_callback）按 line->state 收尾。
  *   ⇒ 对外 API 三态；结构性同步上下文走 `*_sync` 逃生口（自旋泵）。
  *
  * 文件结构：
@@ -38,7 +38,7 @@
  *   4. 加载           l2p_cache_load_start（static）
  *   5. 对外读写       l2p_cache_read / ready / write + *_sync 逃生口
  *   6. 写回           l2p_cache_flush_kick / l2p_flush_kick_owner / flush_*_sync
- *   7. 完成服务       ftl_op_l2p（g_op_service[FTL_OP_L2P]）
+ *   7. 完成服务       ftl_l2p_callback（g_op_callbacks[FTL_OP_L2P]）
  *   8. 恢复辅助       invalidate_owner / snapshot_owner_bitmap
  */
 
@@ -405,7 +405,7 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint32_t region_id)
     }
 
     /* ⚠ 读的数据**留在 desc 链上**（与写不对称）⇒ 目标缓冲须活到完成、
-     *   ftl_cmd_read_data 须早于 release —— 二者都在 ftl_op_l2p 里，缓冲就是 line->entries
+     *   ftl_cmd_read_data 须早于 release —— 二者都在 ftl_l2p_callback 里，缓冲就是 line->entries
      *   （行在 LOADING 期间不可驱逐、不可写 ⇒ 地址稳定）。 */
     fc_command_t *cmd = NULL;
     if (ftl_async_read_page(&cmd, region_addr, FTL_PAGE_CFG_META()) != FTL_OK)
@@ -781,7 +781,7 @@ void l2p_flush_kick_owner(l2p_cache_t *cache, uint32_t owner_dim, uint8_t max_ki
  *   返回：FTL_OK（行已 CLEAN，或本就非 DIRTY）；FTL_ERROR（写失败 / 加载中的行 / 超时）。
  *   实现要点：
  *     · 入口若已是 FLUSHING（后台已起），**等它**而不是重复起——否则同一行两条写命令。
- *     · 起过一次后又回到 DIRTY ⇒ 那条写失败了（ftl_op_l2p 的失败分支置回 DIRTY），
+ *     · 起过一次后又回到 DIRTY ⇒ 那条写失败了（ftl_l2p_callback 的失败分支置回 DIRTY），
  *       直接报错，不再重试——同步站点要的是"已落盘"，不是无限重试。
  * -------------------------------------------------------------------- */
 ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
@@ -876,10 +876,10 @@ ftl_status_t l2p_cache_flush_owner_sync(l2p_cache_t *cache, uint32_t owner_dim)
     return FTL_OK;
 }
 
-/* ── 7. 完成服务（g_op_service[FTL_OP_L2P]）── */
+/* ── 7. 完成服务（g_op_callbacks[FTL_OP_L2P]）── */
 
 /* --------------------------------------------------------------------
- * ftl_op_l2p
+ * ftl_l2p_callback
  *   功能：L2P cache 命令（加载 / 写回）的完成服务函数——按 line->state 收尾。
  *   参数：ftl —— 命令归属实例（ftl_op_dispatch 按命令自身 ch/ce/lun 解析后传入）；
  *         completion —— FC 完成状态；ctx —— `l2p_cache_line_t *`（提交时传的行指针）。
@@ -894,7 +894,7 @@ ftl_status_t l2p_cache_flush_owner_sync(l2p_cache_t *cache, uint32_t owner_dim)
  *       Directory 不登记 ⇒ 该 region 仍指向上一份有效记录，无信息丢失）。
  *     · 其余状态 ⇒ 编程错误（LOADING/FLUSHING 期间行不可被改写状态），debug 断言。
  * -------------------------------------------------------------------- */
-void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     l2p_cache_line_t *line = (l2p_cache_line_t *)ctx;
 

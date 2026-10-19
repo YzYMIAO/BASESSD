@@ -10,7 +10,7 @@
  *   本文件             —— 两张表的实现 + CQ 排空。
  *
  * ⚠ 命令该跑哪个完成服务函数**不在本表**——由命令自己携带（fc_command_t.op_tag →
- *   g_op_service[]，见 ftl_op.c）。本表只回答"这条命令的私有状态在哪"。
+ *   g_op_callbacks[]，见 ftl_op.c）。本表只回答"这条命令的私有状态在哪"。
  *
  * ⚠ 两张表都是**全局单例**（非 per-instance）——command_id 由 FC 全局池铸出、全局唯一。
  *
@@ -207,7 +207,7 @@ struct ftl_context *completion_table_route_region(uint32_t global_region)
 /*
  * completion_table_drain — 消费所有 CQ entry 并派发
  *
- * 每条 completion 交 ftl_op_dispatch()：它按命令携带的 op_tag 查 g_op_service[]，
+ * 每条 completion 交 ftl_op_dispatch()：它按命令携带的 op_tag 查 g_op_callbacks[]，
  * 从旁表摘 ctx，再调对应服务函数。命令该跑什么**不由本表决定**。
  *
  * ⚠ 摘链在调用服务函数**之前**（ftl_op_dispatch 内）——服务函数可能重入登记/释放

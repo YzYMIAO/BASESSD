@@ -14,8 +14,8 @@
  *   ⑤ 擦除各 Plane Block → 归还到 Free Pool
  *
  * ⚠ ②~⑤ 的执行体**不在本文件**：搬移是一个异步 job，GC 与 WL 共用同一台引擎，
- *   见 `ftl/migrate.h` / `migrate.c`（mig_job_t + mig_begin_gc / mig_begin_wl /
- *   mig_service + ftl_op_migrate）。本文件只留**选 victim 与共用原语**：
+ *   见 `ftl/migrate.h` / `migrate.c`（migrate_handle_t + mig_begin_gc / mig_begin_wl /
+ *   mig_service + ftl_migrate_callback）。本文件只留**选 victim 与共用原语**：
  *   · gc_select_victim   —— 四项加权评分（GC 侧选块策略）
  *   · gc_decode_cw_lba   —— 已完成读命令的逐 CW META 解码（异步搬移 + 掉电重建共用）
  *   · gc_read_page_with_lba —— 同步读 + 解码（只服务掉电重建）

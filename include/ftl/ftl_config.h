@@ -523,7 +523,7 @@ static inline uint32_t ftl_cw_plane_mask(uint8_t plane)
 
 /* 单 plane 内单个 CW 的 flat 位（已左移到该 plane 的段）。
  * ⚠ flat 是**绝对**编号：plane 1 的 CW0 是 bit CW_NUM，不是 bit 0。
- *   所有 CW 位图（含逐 plane 保存的 `mig_job_t.cw_bitmap[]`）都用本函数构造，
+ *   所有 CW 位图（含逐 plane 保存的 `migrate_handle_t.cw_bitmap[]`）都用本函数构造，
  *   避免同一份位图出现「绝对位置、相对位判」两种写法。 */
 static inline uint32_t ftl_cw_bit(uint8_t plane, uint8_t cw)
 {

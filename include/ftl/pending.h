@@ -283,7 +283,7 @@ void pending_group_drop_subop(ftl_context_t *ftl, uint16_t gi);
 /*
  * pending_group_complete_subop - 一个子操作完成：聚合状态 + 递减 + 试触发
  *
- * 由 ftl_op_host_io 在子操作簿记后调用（caller 通知字段的唯一写点）。
+ * 由 ftl_host_io_callback 在子操作簿记后调用（caller 通知字段的唯一写点）。
  * sub_status != OK 时粘进 agg_status；outstanding-- 后试发组完成通知。
  *
  * @param ftl        FTL 上下文

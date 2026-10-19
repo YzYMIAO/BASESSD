@@ -5,7 +5,7 @@
 > `make tests` / `UT=FC` / `UT=FTL` 三档构建通过（0 warning）。**尚未上板验证**。
 >
 > **异步扩展计划（2026-10-15）**——见 §5.4 / §4.9 / §4.10 / §7 / §8 / §10：
-> v0.75 已把「提交与完成」解耦（op tag + `g_op_service[]` + 8 个 job 状态机），原 §5.4/§5.6
+> v0.75 已把「提交与完成」解耦（op tag + `g_op_callbacks[]` + 8 个 job 状态机），原 §5.4/§5.6
 > 的「L0 只测簿记、提交→泵→完成 整链在 L2」边界**已过时**——提交与完成各自都是**纯 RAM**
 > 可驱动点。新增 **L0 异步链套件**（`/ftl/async/`，测试侧伪完成注入 seam，生产码零改动）+
 > **HIL 全链套件**（`/ftl-hil/`，真 NAND 上板）。
@@ -110,7 +110,7 @@ metadata_dir_init(&F->metadata_dir);
 
 **共享夹具已抽**（2026-10-15）：`ftl_fixture()` / `ftl_fixture_reset()` 从 test_ftl.c
 搬进 **`tests/unit/ftl_test_common.c/.h`**（与 L0 异步套件共用；`ftl_async_fixture_reset()`
-在基础复位之上**额外零化异步 job 结构**——`alloc.bbt` / `alloc.wear` / `mig` / `cp_job`，
+在基础复位之上**额外零化异步 job 结构**——`alloc.bbt` / `alloc.wear` / `mig` / `checkpoint_handle`，
 见 §5.4）。test_ftl.c 保留本地 `ftl_setup()`（包共享复位）+ `ftl_fixture_backfill()`。
 
 **同步套件（已实施）**：`tests/unit/test_ftl.c`，fixture 见 §2.2（复用 `g_ctrl.ftl[0][0][0]`，
@@ -350,7 +350,7 @@ FTL 层**确定性**（无 PRNG；`config.random` 是 FC 配置位，非 FTL 逻
 **旧模型（§5.4 原稿）已过时**：解耦前「提交」要 `fc_command_alloc`（FC 层）、完成只能经
 真 NAND 触达 ⇒ L0 只测组簿记、整链留 L2。v0.75 把「提交」与「完成」**解耦**后，两端各自
 都是**纯 RAM 可驱动点**——L0 现在能驱动**完整异步链**（`ftl_async_*` → `ftl_op_submit` →
-测试侧伪完成 → `completion_table_drain` → `g_op_service[]` 服务函数），零 NAND、零生产改动。
+测试侧伪完成 → `completion_table_drain` → `g_op_callbacks[]` 服务函数），零 NAND、零生产改动。
 
 #### 5.4.1 链路结构（一次异步 NAND 访问的两半）
 
@@ -359,7 +359,7 @@ FTL 层**确定性**（无 PRNG；`config.random` 是 FC 配置位，非 FTL 逻
 | 提交 | `ftl_async_write_page/erase/read_page/set_features`（`ftl_fc_interface.h`） | 建 desc 链 + 搬数据，**不提交**，命令交回调用者 | 直调（返回 `FTL_OK` 才继续） |
 | 提交 | `ftl_op_submit(cmd, op, ctx)`（`ftl_op.h:89`） | 打 `cmd->op_tag` + `ctx≠NULL` 时 `completion_table_add`（**早于** `fc_submit`）→ `fc_submit`；失败回滚登记 | 直调；`ctx==NULL` 主动清表项 |
 | 完成 | 测试侧 `ut_fake_complete(cmd, status)`（新 seam） | 摘 SQ/HSQ → 沿 desc 链回写 status → 构 `fc_command_status_t` → `fc_completion_queue_push` + 置 `FC_COMMAND_STATE_COMPLETED` | **纯测试代码**，见 5.4.2 |
-| 完成 | `completion_table_drain()` | 消费 CQ → `ftl_op_dispatch`（按 `op_tag` 查 `g_op_service[]`，`completion_table_take` 取 ctx，`completion_table_route` 按命令自身 ch/ce/lun 解析实例） | 直调（`fc_service` 无需调——NAND 不真跑） |
+| 完成 | `completion_table_drain()` | 消费 CQ → `ftl_op_dispatch`（按 `op_tag` 查 `g_op_callbacks[]`，`completion_table_take` 取 ctx，`completion_table_route` 按命令自身 ch/ce/lun 解析实例） | 直调（`fc_service` 无需调——NAND 不真跑） |
 
 **为什么 L0 够得到**（seam 可行性依据，已逐行核实）：
 - `g_fc_controller` 是 **extern**（`fc_internal.h:85`）、`fc_t` 字段公开 ⇒ SQ/HSQ/CQ 环形队列

@@ -9,8 +9,8 @@
  * FTL_JOB_LOG_INTERVAL_MS 打一行 phase/age；判据 = 两次心跳之间 phase 不动 ⇒ 卡死。
  *
  * 本头文件只提供「该不该打、上次什么时候打的」这层节拍与公共时钟，**不参与任何
- * 状态机**：每个 job 的 phase 枚举仍由各自的头文件定义（cp_phase_t / md_job_phase_t /
- * mig_phase_t / rr_stage_t / journal_phase_t / bbt_job_phase_t）。
+ * 状态机**：每个 job 的 phase 枚举仍由各自的头文件定义（cp_phase_t / metadata_handle_phase_t /
+ * mig_phase_t / rr_stage_t / journal_phase_t / bbt_handle_phase_t）。
  *
  * ── 用法（每个 *_kick 的固定骨架）──
  *

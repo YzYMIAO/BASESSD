@@ -85,26 +85,26 @@ typedef enum
     BBT_JOB_IDLE = 0, /* 无 job */
     BBT_JOB_ERASE,    /* 换块擦在飞 */
     BBT_JOB_WRITE,    /* record 写在飞 */
-} bbt_job_phase_t;
+} bbt_handle_phase_t;
 
 typedef struct
 {
-    uint8_t  phase;     /* bbt_job_phase_t */
+    uint8_t  phase;     /* bbt_handle_phase_t */
     uint8_t  waiting;   /* 1 = 有命令在飞 */
     uint32_t dirty_gen; /* 本条 record 组 header 时的 dirty 代际快照 */
     uint32_t start_ms;
     uint32_t log_ms;
-} bbt_job_t;
+} bbt_handle_t;
 
 typedef struct
 {
-    uint32_t  sequence;           /* 本池单调序号 */
-    uint16_t  write_idx;          /* 池内下一个待写槽 */
-    uint8_t   cursor_valid;       /* 游标是否已建立 */
-    uint8_t   dirty;              /* 是否有未写回变更 */
-    bool      format_in_progress; /* 最新 BBT record 带 FORMAT_IN_PROGRESS 标志 */
-    uint32_t  dirty_gen;          /* dirty 每次置位 +1；检测写飞行期间的新变更 */
-    bbt_job_t job;                /* 异步持久化 job */
+    uint32_t     sequence;           /* 本池单调序号 */
+    uint16_t     write_idx;          /* 池内下一个待写槽 */
+    uint8_t      cursor_valid;       /* 游标是否已建立 */
+    uint8_t      dirty;              /* 是否有未写回变更 */
+    bool         format_in_progress; /* 最新 BBT record 带 FORMAT_IN_PROGRESS 标志 */
+    uint32_t     dirty_gen;          /* dirty 每次置位 +1；检测写飞行期间的新变更 */
+    bbt_handle_t handle;             /* 异步持久化 handle */
 } bbt_state_t;
 
 /* ── Allocator 上下文 ── */

@@ -8,7 +8,7 @@
  * **异步 job 状态机**。GC / WL / 慢死预测的搬移主体逐字同构，差别只在
  *   · 谁当 victim（gc_select_victim / wl_select_victim / rr_predictive_scan）；
  *   · 擦完怎么处置（GC / WL：归还 Free Pool；慢死预测：退役 RETIRED）。
- * 故共用**一个** mig_job_t：`kind` 选 victim，`post` 决定收尾。
+ * 故共用**一个** migrate_handle_t：`kind` 选 victim，`post` 决定收尾。
  *
  * ── 为什么必须异步 ──
  *
@@ -60,7 +60,7 @@
  * 硬性的“WL 让 GC 先跑”；真正的互斥是 `active` 单飞行。
  *
  * ⚠ 本文件**不被** gc.h / wear_leveling.h include —— migrate.c 单向依赖它们的选块策略，
- *   反向包含会成环。ftl.h include 本文件以放置 mig_job_t。
+ *   反向包含会成环。ftl.h include 本文件以放置 migrate_handle_t。
  */
 
 #include "allocator.h"   /* super_block_t */
@@ -138,7 +138,7 @@ typedef enum
     MIG_KIND_PREDICT /* 慢死预测旁路（rr_predictive_scan） */
 } mig_kind_t;
 
-/* ── 搬移 job（per-instance，放 ftl->mig）──
+/* ── 搬移 job（per-instance，放 ftl->migrate_handle）──
  *
  * ⚠ page_buf 是 **逐 plane** 的页镜像（`PLANE_NUM × PAGE_MAIN_SIZE`，当前共 4KB），
  *   常驻上下文而非调用栈：异步 job 的栈帧在提交命令时就已返回，数据必须活到完成
@@ -147,7 +147,7 @@ typedef enum
 typedef struct
 {
     bool     active;          /* true = job 在跑（单飞行门） */
-    bool     waiting;         /* true = 有一条搬移命令在飞（等 g_op_service[FTL_OP_GC]/[FTL_OP_WL]） */
+    bool     waiting;         /* true = 有一条搬移命令在飞（等 g_op_callbacks[FTL_OP_GC]/[FTL_OP_WL]） */
     bool     aborted;         /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
     bool     decode_ok;       /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
     bool     write_ok;        /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
@@ -184,7 +184,7 @@ typedef struct
     uint32_t log_ms;
 
     uint8_t page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
-} mig_job_t;
+} migrate_handle_t;
 
 /* ── 接口 ── */
 
@@ -227,6 +227,6 @@ bool mig_begin_predict(ftl_context_t *ftl);
  */
 void mig_service(ftl_context_t *ftl);
 
-/* 完成服务函数 ftl_op_migrate 的声明在 ftl_op.h —— 那里是 g_op_service 各槽的唯一权威列表。 */
+/* 完成服务函数 ftl_migrate_callback 的声明在 ftl_op.h —— 那里是 g_op_callbacks 各槽的唯一权威列表。 */
 
 #endif /* FTL_MIGRATE_H */

@@ -25,7 +25,7 @@
  *   六、元数据块判定
  *
  * ⚠ 同步 / 异步的分界：
- *   · **异步**：日志块的回收与压缩（`md_job_t` + g_op_service[FTL_OP_METADATA]，
+ *   · **异步**：日志块的回收与压缩（`metadata_handle_t` + g_op_callbacks[FTL_OP_METADATA]，
  *      状态机在 metadata_job.c）。待回收块由 commit_region / append_slot 登记进
  *      `reclaim_pending` 位图，运行期没有任何同步擦除。
  *   · **同步（刻意）**：开机加载 / 格式化（metadata_dir_load / init）、Anchor 池定位
@@ -723,7 +723,7 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
     /* 待回收位图 / 后台整理 job 归零（RAM 态，不跨重启；
      * 不清 job ⇒ append_slot 永久让路）。 */
     md_reclaim_reset(dir);
-    md_job_reset(dir);
+    metadata_handle_reset(dir);
 }
 
 /* 线性查 (type,id) 的下标；未找到返回 dir->count（调用者用它判 < count）。 */
@@ -873,7 +873,7 @@ static bool metadata_dir_rotate_log_block(metadata_dir_cache_t *dir, ftl_allocat
      * 下轮重试；若 job 已起则继续让路直到压缩走完。 */
     if (alloc->free_count <= FREE_POOL_TARGET)
     {
-        dir->job.compact_wanted = true;
+        dir->handle.compact_wanted = true;
         return false;
     }
 
@@ -897,7 +897,7 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
 
     /* 整理 job 在飞 ⇒ 一律让路：压缩搬移按**发放那一刻**的 cur_metadata_page 核定
      * 空槽预算，期间再发放会打乱它。调用者（l2p_cache_flush_kick）据此返回 FTL_AGAIN。 */
-    if (!md_job_idle(dir))
+    if (!metadata_handle_idle(dir))
     {
         return NAND_PBA_INVALID;
     }
@@ -921,7 +921,7 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
  *   实现要点：只对**动态日志块**位置（非固定元数据块）增减活计数——INVALID（未映射）
  *             不计。旧块归零且非当前块 ⇒ 置进 `reclaim_pending` 位图，由后台 job
  *             异步擦除；位图不会像单槽那样被后来的块覆盖。
- *   ⚠ **本函数不擦 NAND**：它运行在完成派发里（`ftl_op_l2p` 的 FLUSHING 分支），
+ *   ⚠ **本函数不擦 NAND**：它运行在完成派发里（`ftl_l2p_callback` 的 FLUSHING 分支），
  *     就地擦块 = 在完成泵里嵌套泵。
  * -------------------------------------------------------------------- */
 void metadata_dir_commit_region(metadata_dir_cache_t *dir,
@@ -1229,8 +1229,8 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
     dir->cur_metadata_page  = 0U;
     dir->cur_block_valid    = false;
     dir->cur_metadata_plane = 0U;
-    md_reclaim_reset(dir); /* 待回收位图不跨重启（同 job：全是 RAM 态）*/
-    md_job_reset(dir);     /* 整理 job 不跨重启（同游标：phase / 游标 / 请求位全是 RAM 态）*/
+    md_reclaim_reset(dir);      /* 待回收位图不跨重启（同 job：全是 RAM 态）*/
+    metadata_handle_reset(dir); /* 整理 job 不跨重启（同游标：phase / 游标 / 请求位全是 RAM 态）*/
 
     metadata_dir_boot_log(dir);
 

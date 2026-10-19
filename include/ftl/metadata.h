@@ -509,7 +509,7 @@ ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
  *   ② **压缩**——抗碎片：挑活 region 最少的块做 victim，把它的活 region 搬进当前
  *      块，落 Anchor 后擦除归还。
  *
- * 阶段序列（每条命令一个 phase，完成由 g_op_service[FTL_OP_METADATA] 收尾）：
+ * 阶段序列（每条命令一个 phase，完成由 g_op_callbacks[FTL_OP_METADATA] 收尾）：
  *
  *   IDLE ──reclaim_pending──▶ RECLAIM（擦 + 归还）──▶ IDLE
  *   IDLE ──compact_wanted──▶ CP_READ ⇄ CP_WRITE（逐 region 搬移）
@@ -524,9 +524,9 @@ ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
  * ⚠ **失败不回滚**：任一 phase 失败 ⇒ 中止，已登记的 region 已指向新页、未搬的仍指向
  *   victim（**victim 不擦**）⇒ 两边都有效，下次换块时重来即可。
  *
- * ⚠ **服务函数不推进状态机**（同 ftl_op_checkpoint）：CP_ANCHOR_PREP 要调
+ * ⚠ **服务函数不推进状态机**（同 ftl_checkpoint_callback）：CP_ANCHOR_PREP 要调
  *   metadata_dir_anchor_prepare（游标未建立时会**同步**扫池定位），在完成泵里跑就是
- *   嵌套泵。故 ftl_op_metadata 只记结果 + release + 改 phase，推进一律留给下一轮
+ *   嵌套泵。故 ftl_metadata_callback 只记结果 + release + 改 phase，推进一律留给下一轮
  *   metadata_dir_kick（在 ftl_service 各档位里跑）。
  *
  * ⚠ 本结构不跨重启：phase / 游标 / 请求位全是 RAM 态，冷启动恒 IDLE（见 metadata_dir_init）。 */
@@ -541,7 +541,7 @@ typedef enum
     MD_JOB_CP_ANCHOR_WRITE, /* 在飞：Anchor 逐页写 */
     MD_JOB_CP_RECLAIM,      /* 在飞：擦 victim */
     MD_JOB_DONE             /* 收尾（纯 RAM）→ IDLE */
-} md_job_phase_t;
+} metadata_handle_phase_t;
 
 /*
  * md_compact_step_t - 压缩 job「搬一条 region」一步的结果
@@ -551,7 +551,7 @@ typedef enum
  */
 typedef enum
 {
-    MD_COMPACT_FAILED       = -1, /* 硬失败（md_stall 无进展）：调用者 md_job_abort */
+    MD_COMPACT_FAILED       = -1, /* 硬失败（md_stall 无进展）：调用者 metadata_handle_abort */
     MD_COMPACT_BACKPRESSURE = 0,  /* 背压未提交：保留游标/槽，**下轮重试**（调用者 return）*/
     MD_COMPACT_SUBMITTED    = 1,  /* 已提交异步命令：等完成服务函数 */
     MD_COMPACT_SCANNED      = 2,  /* 全表扫完、无更多 region 待搬（read 专有）*/
@@ -575,7 +575,7 @@ typedef enum
  * `_Static_assert` 证不了（C4），且这里没有 RAM 压力。 */
 typedef struct
 {
-    uint8_t         phase;               /* md_job_phase_t */
+    uint8_t         phase;               /* metadata_handle_phase_t */
     bool            waiting;             /* 有命令在飞（完成服务函数清）*/
     bool            compact_wanted;      /* append_slot 换块后池吃紧 ⇒ 请求压缩 */
     bool            anchor_ok;           /* Anchor 分页写是否全部成功（false = 整条作废）*/
@@ -600,9 +600,9 @@ typedef struct
     uint32_t log_ms;
 
     /* victim region 页搬运缓冲：**必须常驻**——异步读完成与随后的写之间隔着若干轮
-     * 服务循环，栈帧早已返回。放 job 而非栈（同 mig.page_buf / rr_page_scratch）。 */
+     * 服务循环，栈帧早已返回。放 job 而非栈（同 migrate_handle.page_buf / rr_page_scratch）。 */
     uint8_t cp_buf[L2P_REGION_SIZE];
-} md_job_t;
+} metadata_handle_t;
 
 /* ── 常驻 Directory Cache（约 24.6 KiB，`g_ftl_md[]` 落 SRAM4，见 src/main.c） ── */
 typedef struct
@@ -632,12 +632,12 @@ typedef struct
     uint16_t reclaim_pending_count;
     uint16_t reclaim_scan; /* 轮转起点：擦除持续失败的块不再永久挡住后续块 */
 
-    /* 后台整理 job（回收 + 压缩，见 md_job_t）。两个作用：
+    /* 后台整理 job（回收 + 压缩，见 metadata_handle_t）。两个作用：
      *   ① **抑制逐次立即回收**（搬移 victim 的最后一个活 region 时 l2p_live[victim]
      *      归零，若就地擦掉就是**在 Anchor 落盘之前**擦 victim ⇒ 掉电丢映射）；
      *   ② **防重入 / 防抢槽**（压缩搬移要往当前块写，期间再发放槽位会打乱空槽预算）。
      * 判据分别是 md_compacting()（①）与 job.phase != IDLE（②）。 */
-    md_job_t job;
+    metadata_handle_t handle;
 
     /* Anchor 池游标（ring 写点槽位；anchor_cursor_valid=false 时尚未定位）*/
     uint16_t anchor_write_idx;
@@ -727,8 +727,8 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir,
  * 旧块活计数归零且非当前块 ⇒ 把块号置进 `reclaim_pending` 位图，
  * 由后台 job 异步擦除 + 归还 Free Pool。
  *
- * ⚠ **本函数不擦 NAND**：它被 `ftl_op_l2p`（L2P region 写回完成）调用，**运行在
- *   完成派发里** —— 就地擦会在完成泵内嵌套泵。登记后 `ftl_op_l2p` 全路径无 NAND 访问。
+ * ⚠ **本函数不擦 NAND**：它被 `ftl_l2p_callback`（L2P region 写回完成）调用，**运行在
+ *   完成派发里** —— 就地擦会在完成泵内嵌套泵。登记后 `ftl_l2p_callback` 全路径无 NAND 访问。
  * ⚠ 压缩 job 在飞时**不登记**：压缩自己会把 victim 的活计数搬到 0，若此时就地
  *   登记，job 的 CP_RECLAIM 会在 Anchor 落盘**之前**擦 victim（③ 早于 ④ 契约）。
  *   压缩期间归零的块由 job 自己在 CP_RECLAIM 里擦。
@@ -751,7 +751,7 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
  *
  * ⚠ **所有状态推进都在这里**（不在完成服务函数里）：压缩的 CP_ANCHOR_PREP 阶段要调
  *   metadata_dir_anchor_prepare，而它在游标未建立时会**同步**扫池定位 —— 在完成泵里
- *   跑就是嵌套泵（同 ftl_op_checkpoint 的取舍）。服务函数只记结果 + release + 改
+ *   跑就是嵌套泵（同 ftl_checkpoint_callback 的取舍）。服务函数只记结果 + release + 改
  *   phase，本函数负责"下一轮接着走"。
  * ⚠ 幂等且廉价：无 job 且无请求时立即返回（一次 load + 比较）。
  *
@@ -771,7 +771,7 @@ void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
  */
 static inline bool metadata_dir_busy(const metadata_dir_cache_t *dir)
 {
-    return (dir != NULL) && (dir->job.phase != (uint8_t)MD_JOB_IDLE);
+    return (dir != NULL) && (dir->handle.phase != (uint8_t)MD_JOB_IDLE);
 }
 
 /* ── Anchor 落盘的三段式（唯一形态）──

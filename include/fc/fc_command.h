@@ -297,7 +297,7 @@ struct fc_command_status_t
     DWORD command_id : 16;    /* Completed Command Pool ID. */
     DWORD desc_id    : 16;    /* 首个失败 CW 的 descriptor id；0xFFFF = 无失败。详见上方说明。 */
     DWORD op_tag     : 7;     /* Copy of command->op_tag —— 上层**不必反查命令**即可派发
-                               * （g_op_service[completion.op_tag]）。 */
+                               * （g_op_callbacks[completion.op_tag]）。 */
     DWORD      status   : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
     DWORD      reserved : 17; /* Reserved. */
     fc_param_t param;         /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0

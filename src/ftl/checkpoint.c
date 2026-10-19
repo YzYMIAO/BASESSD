@@ -24,7 +24,7 @@
  * 文件结构：
  *   1. 内部辅助        checkpoint_header_valid / checkpoint_record_probe
  *                      （单调毫秒 / 心跳基准见 ftl_job.h）
- *   2. 异步 job        cp_step（static）/ checkpoint_begin / checkpoint_kick / ftl_op_checkpoint
+ *   2. 异步 job        cp_step（static）/ checkpoint_begin / checkpoint_kick / ftl_checkpoint_callback
  *   3. 创建/恢复       checkpoint_find_latest / checkpoint_write_initial
  *   4. 触发/水位       checkpoint_check_trigger / checkpoint_is_emergency / checkpoint_journal_watermark
  *
@@ -133,7 +133,7 @@ static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, bool
  * Checkpoint 异步 job
  *
  * 同一份**顺序契约**由 phase 承载：每个阶段提交一条命令就返回，完成由
- * g_op_service[FTL_OP_CHECKPOINT]（ftl_op_checkpoint）按 phase 收尾，下一轮
+ * g_op_callbacks[FTL_OP_CHECKPOINT]（ftl_checkpoint_callback）按 phase 收尾，下一轮
  * ftl_service 调 checkpoint_kick 续跑。同步流水线会阻塞数十毫秒
  * （脏 region 写回 + 8 页 Anchor + Header + 预擦），期间 host I/O 的完成泵停摆。
  *
@@ -152,14 +152,14 @@ static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, bool
  *   boot 必然回放它。代价是 journal_truncate 的水位判据更容易不满足（更少预擦）——
  *   预擦只是磨损优化，跳过它只是让 journal_flush_page 自己擦（每块每圈仍只擦一次）。
  *
- * ⚠ **服务函数不推进状态机**（与 migrate 的 ftl_op_migrate 不同）：本 job 的
+ * ⚠ **服务函数不推进状态机**（与 migrate 的 ftl_migrate_callback 不同）：本 job 的
  *   CP_ANCHOR_PREP / CP_HDR_PREP 里有同步原语（游标未建立时要 metadata_ring_locate
  *   读池定位），在完成泵里跑就是嵌套泵（l2p_sync_pump 有 ASSERT 挡）。故
- *   ftl_op_checkpoint 只记结果 + release + 改 phase，推进一律留给下一轮 ftl_service。
+ *   ftl_checkpoint_callback 只记结果 + release + 改 phase，推进一律留给下一轮 ftl_service。
  * ══════════════════════════════════════════════════════════════════ */
 
 /* 中止本次 CP：记失败相位、转 CP_DONE（**不**写 Header / **不**截断 journal）。 */
-static void cp_abort(cp_job_t *j)
+static void cp_abort(checkpoint_handle_t *j)
 {
     j->failed     = 1U;
     j->fail_phase = j->phase;
@@ -167,7 +167,7 @@ static void cp_abort(cp_job_t *j)
 }
 
 /* 累计一次「提交不出去」；超限即中止 job（与 MIG/RR 同族）。返回 true = 已中止。 */
-static bool cp_stall(cp_job_t *j)
+static bool cp_stall(checkpoint_handle_t *j)
 {
     if (j->stall_rounds >= CP_SUBMIT_STALL_MAX)
     {
@@ -182,7 +182,7 @@ static bool cp_stall(cp_job_t *j)
 }
 
 /* 提交一条已建好的 CP 命令（写 / 擦共用）。成功才清零卡死计数。 */
-static ftl_status_t cp_submit_cmd(cp_job_t *j, fc_command_t *cmd)
+static ftl_status_t cp_submit_cmd(checkpoint_handle_t *j, fc_command_t *cmd)
 {
     j->waiting = 1U; /* 先置位、提交失败再回滚 */
 
@@ -201,7 +201,7 @@ static ftl_status_t cp_submit_cmd(cp_job_t *j, fc_command_t *cmd)
  * 提交结果处理：true = 调用者必须 return（已中止，或已计卡死等待重试）。
  * FTL_ERROR = 配置/地址硬失败 ⇒ 立即中止；FTL_AGAIN = 瞬态背压 ⇒ 下轮重试。
  */
-static bool cp_submit_result(cp_job_t *j, ftl_status_t st)
+static bool cp_submit_result(checkpoint_handle_t *j, ftl_status_t st)
 {
     if (st == FTL_OK)
     {
@@ -220,7 +220,7 @@ static bool cp_submit_result(cp_job_t *j, ftl_status_t st)
 /* 提交一条异步写（Anchor 分页 / Checkpoint Header 共用）。同步镜像到 P0+P1：
  * 同一页数据用 multi-plane 一次写两个 plane；data 在本函数内已拷进 FC buffer
  * ⇒ 调用者的栈缓冲随即可复用。 */
-static ftl_status_t cp_submit_write(cp_job_t *j, nand_pba_t addr, const void *data, uint32_t length)
+static ftl_status_t cp_submit_write(checkpoint_handle_t *j, nand_pba_t addr, const void *data, uint32_t length)
 {
     fc_command_t *cmd;
 
@@ -235,7 +235,7 @@ static ftl_status_t cp_submit_write(cp_job_t *j, nand_pba_t addr, const void *da
 
 /* 提交一条异步擦除（Anchor 换块 / Checkpoint 换块 / Journal 预擦共用）。
  * 固定元数据池是 P0+P1 镜像 ⇒ 换块必须 multi-plane 擦，否则副本 plane 不会清。 */
-static ftl_status_t cp_submit_erase(cp_job_t *j, nand_pba_t addr)
+static ftl_status_t cp_submit_erase(checkpoint_handle_t *j, nand_pba_t addr)
 {
     fc_command_t *cmd;
 
@@ -249,7 +249,7 @@ static ftl_status_t cp_submit_erase(cp_job_t *j, nand_pba_t addr)
 }
 
 /* 组装 Checkpoint Header（一页主区）。调用者持有 2KB 缓冲。 */
-static void cp_build_header(const cp_job_t *j, l2p_checkpoint_header_t *cp)
+static void cp_build_header(const checkpoint_handle_t *j, l2p_checkpoint_header_t *cp)
 {
     memset(cp, 0, sizeof(*cp));
     memcpy(cp->region_bitmap, j->region_bitmap, sizeof(cp->region_bitmap));
@@ -289,11 +289,11 @@ static void cp_build_header(const cp_job_t *j, l2p_checkpoint_header_t *cp)
  *   实现要点：**不按 state == DIRTY 过滤**——异步化后脏行可能已被后台 l2p_flush_kick
  *             起了写回（state = FLUSHING）而尚未完成，它同样属于"本周期改过、必须已持久"，
  *             漏掉它就会让 Header 承诺一个还没落盘的映射。FLUSHING 行**等**它（不重复起）。
- *             CLEAN 行 = 已落盘（commit 已清脏位，见 l2p_cache.c 的 ftl_op_l2p）。
+ *             CLEAN 行 = 已落盘（commit 已清脏位，见 l2p_cache.c 的 ftl_l2p_callback）。
  *             ⚠ 判据是**快照位图**而非实时位图：实时位图会被本次 flush 的 commit 清掉
  *             （那样循环就永远看不到自己该等的行）。
  * -------------------------------------------------------------------- */
-static cp_flush_step_t cp_flush_regions(ftl_context_t *ftl, cp_job_t *j)
+static cp_flush_step_t cp_flush_regions(ftl_context_t *ftl, checkpoint_handle_t *j)
 {
     const uint32_t dim     = ftl_topo_dim(ftl->topo);
     bool           pending = false;
@@ -389,7 +389,7 @@ static cp_flush_step_t cp_flush_regions(ftl_context_t *ftl, cp_job_t *j)
  * -------------------------------------------------------------------- */
 static void cp_step(ftl_context_t *ftl)
 {
-    cp_job_t *j = ftl->cp_job;
+    checkpoint_handle_t *j = ftl->checkpoint_handle;
 
     for (;;)
     {
@@ -674,12 +674,12 @@ ftl_status_t checkpoint_begin(ftl_context_t *ftl)
     /* 前置条件（判据 2）：调用者 ftl.c 传实例指针。 */
     ASSERT(ftl != NULL);
 
-    if (ftl->cp_job->active != 0U)
+    if (ftl->checkpoint_handle->active != 0U)
     {
         return FTL_AGAIN; /* 单飞行：上一次还没跑完 */
     }
 
-    cp_job_t *j = ftl->cp_job;
+    checkpoint_handle_t *j = ftl->checkpoint_handle;
     memset(j, 0, sizeof(*j));
 
     /* ① 起点快照（**必须早于任何 flush**，见文件头"快照点前移"的长注释）：
@@ -709,12 +709,12 @@ ftl_status_t checkpoint_begin(ftl_context_t *ftl)
 
 void checkpoint_kick(ftl_context_t *ftl)
 {
-    if (ftl->cp_job->active == 0U)
+    if (ftl->checkpoint_handle->active == 0U)
     {
         return;
     }
 
-    cp_job_t *j = ftl->cp_job;
+    checkpoint_handle_t *j = ftl->checkpoint_handle;
 
     /* 心跳（见 ftl_job.h）：正常 CP 远快于 1s ⇒ 平时静默；只有卡在某 phase 才持续可见。
      * 判据 = 两次心跳之间 phase 不动 ⇒ 卡死（异步后"卡在哪一步"否则完全不可见）。
@@ -731,14 +731,14 @@ void checkpoint_kick(ftl_context_t *ftl)
     cp_step(ftl);
 }
 
-/* ── Checkpoint job 的完成服务（g_op_service[FTL_OP_CHECKPOINT]）── */
+/* ── Checkpoint job 的完成服务（g_op_callbacks[FTL_OP_CHECKPOINT]）── */
 
-/* 每个提交阶段的完成处理（ftl_op_checkpoint 按 phase 分派）。
+/* 每个提交阶段的完成处理（ftl_checkpoint_callback 按 phase 分派）。
  * 共同前提：命令已 release、job.waiting 已清零（由派发处统一做）。 */
 
 /* 换块擦完成：成功 ⇒ phase 推进到 next；失败 ⇒ 中止本次 CP（**不**推进游标，
  * dirty 保留 ⇒ 下次在新槽重试整条）。 */
-static void cp_complete_erase(cp_job_t *j, bool failed, cp_phase_t next)
+static void cp_complete_erase(checkpoint_handle_t *j, bool failed, cp_phase_t next)
 {
     if (failed)
     {
@@ -750,7 +750,7 @@ static void cp_complete_erase(cp_job_t *j, bool failed, cp_phase_t next)
 
 /* 快照页 / 磨损页写完成：失败 ⇒ 整条 record 作废（不写 Header——Header 是 commit），
  * 游标推进一槽（本条记录的剩余页可能半编程，永不复用）。返回 true = 已中止。 */
-static bool cp_complete_page_write(ftl_context_t *ftl, cp_job_t *j, bool failed)
+static bool cp_complete_page_write(ftl_context_t *ftl, checkpoint_handle_t *j, bool failed)
 {
     if (!failed)
     {
@@ -763,7 +763,7 @@ static bool cp_complete_page_write(ftl_context_t *ftl, cp_job_t *j, bool failed)
 }
 
 /* Anchor record 一页写完：无论成败都往后写下一页；失败 ⇒ 整条作废（不取半条）。 */
-static void cp_complete_anchor_write(cp_job_t *j, bool failed)
+static void cp_complete_anchor_write(checkpoint_handle_t *j, bool failed)
 {
     if (failed)
     {
@@ -774,7 +774,7 @@ static void cp_complete_anchor_write(cp_job_t *j, bool failed)
 
 /* Header（commit 页）写完：无论成败都推进游标（已写过的槽可能半编程，不可复用）；
  * 成功才提交 journal 水位并清持久性失败标记。 */
-static void cp_complete_hdr_write(ftl_context_t *ftl, cp_job_t *j, bool failed)
+static void cp_complete_hdr_write(ftl_context_t *ftl, checkpoint_handle_t *j, bool failed)
 {
     ftl->cp.write_idx = (uint16_t)((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
 
@@ -795,7 +795,7 @@ static void cp_complete_hdr_write(ftl_context_t *ftl, cp_job_t *j, bool failed)
  * journal_flush_page 回切到该块会跳过擦除 ⇒ 写进未擦块（二次编程 = 静默损坏）。
  * commit(NONE) 只复位水位标志；该块保持"未预擦"，journal 回切时由 need_erase 重试，
  * 下一次 CP 的 plan 也会再次返回 NEEDS_ERASE。 */
-static void cp_complete_trunc_erase(ftl_context_t *ftl, cp_job_t *j, bool failed)
+static void cp_complete_trunc_erase(ftl_context_t *ftl, checkpoint_handle_t *j, bool failed)
 {
     if (failed)
     {
@@ -813,18 +813,18 @@ static void cp_complete_trunc_erase(ftl_context_t *ftl, cp_job_t *j, bool failed
 }
 
 /* --------------------------------------------------------------------
- * ftl_op_checkpoint
+ * ftl_checkpoint_callback
  *   功能：Checkpoint 命令的完成服务函数——按 job.phase 分派到 cp_complete_* 记结果。
- *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `cp_job_t *`（= ftl->cp_job）。
+ *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `checkpoint_handle_t *`（= ftl->checkpoint_handle）。
  *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
  *   实现要点：**本函数不推进状态机**（见文件头：阶段里有同步原语，在完成泵里跑就是
  *             嵌套泵）——只把 phase 改到"下一步该干什么"，由下一轮 checkpoint_kick 续跑。
  *             ⚠ Header 的池游标**无论成败都推进**（半编程槽不可复用）；失败时**不**截断
  *             journal、**不**复位水位标志。
  * -------------------------------------------------------------------- */
-void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
-    cp_job_t *j = (cp_job_t *)ctx;
+    checkpoint_handle_t *j = (checkpoint_handle_t *)ctx;
 
     ASSERT(completion != NULL);
     ASSERT(j != NULL);
@@ -834,7 +834,7 @@ void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *compl
     /* 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出的归属实例，
      * 二者必须一致——不一致说明派发路由错了。 */
     ASSERT(ftl != NULL);
-    ASSERT(ftl->cp_job == j);
+    ASSERT(ftl->checkpoint_handle == j);
 
     /* 没有在飞命令却收到完成 ⇒ 重复/迟到完成。按当前 phase 再走一遍会误推进
      * chunk/游标（静默 CP 状态破坏），故 release 也必须拒绝（H14 判据 9）。 */
@@ -1200,8 +1200,8 @@ bool checkpoint_load_wear_table(struct ftl_context            *ftl,
 {
     ASSERT(ftl != NULL);
     ASSERT(cp != NULL);
-    /* 读缓冲复用 cp_job 的 wear_page_buf ⇒ 只能在开机（job 未在跑）调用。 */
-    ASSERT(ftl->cp_job->active == 0U);
+    /* 读缓冲复用 checkpoint_handle 的 wear_page_buf ⇒ 只能在开机（job 未在跑）调用。 */
+    ASSERT(ftl->checkpoint_handle->active == 0U);
 
     if (cp->wear_page_count == 0U)
     {
@@ -1224,7 +1224,7 @@ bool checkpoint_load_wear_table(struct ftl_context            *ftl,
     checkpoint_ring_init(&ring);
 
     /* 开机路径专用：CP job 未在跑（入口 ASSERT），可复用它的页缓冲作读缓冲。 */
-    uint8_t *page = ftl->cp_job->wear_page_buf;
+    uint8_t *page = ftl->checkpoint_handle->wear_page_buf;
 
     for (uint8_t p = 0U; p < FTL_CHECKPOINT_WEAR_PAGES; p++)
     {

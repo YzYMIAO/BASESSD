@@ -104,11 +104,11 @@ typedef struct ftl_context
     l2p_cp_state_t cp;
 
     /* Checkpoint 异步 job（脏区落盘 → Anchor → Header → 截断 journal 的
-     * 有序流水线，见 checkpoint.h 的 cp_job_t / 掉电安全契约）。
+     * 有序流水线，见 checkpoint.h 的 checkpoint_handle_t / 掉电安全契约）。
      * ⚠ 含 256B 的 region 脏位图**快照**——必须在 job 起点取定，不能沿用实时位图
      *   （flush 成功会清实时位，见 checkpoint.c 的"快照点前移"）。
      * 指针，由 storage 提供；落 SRAM3。 */
-    cp_job_t *cp_job;
+    checkpoint_handle_t *checkpoint_handle;
 
     /* Checkpoint 定时触发基准（T3：elapsed_ms ≥ CP_TIME_INTERVAL_MS） */
     uint32_t cp_timer_start; /* 上次 Checkpoint 时间戳（ms） */
@@ -179,11 +179,11 @@ typedef struct ftl_context
     /* 搬移 job（GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
      * ⚠ 含逐 plane 的页镜像（page_buf，当前共 4KB），必须常驻：异步 job 的栈帧在
      *   提交命令时就已返回，数据要活到完成回调。 */
-    mig_job_t mig;
+    migrate_handle_t migrate_handle;
 
     /* Read Recovery：per-Block ECC 趋势追踪在 alloc.blocks[].rr（BST 单数据源）；
      * 本结构 = 异步恢复 job 状态机本体（见 read_recovery.h） */
-    ftl_read_recovery_t rr;
+    read_recovery_handle_t read_recovery_handle;
 
     /* Read Recovery 整页暂存（CW 级映射：一个子操作可能只覆盖页内部分 CW，
      * 而恢复读内部是**整页读**、从 CW0 起连续拷出。故恢复结果先落本页
@@ -196,7 +196,7 @@ typedef struct ftl_context
  * ftl_storage_t - 描述符的外部存储
  *
  * 四个大数组由 HIL 提供并决定落哪个域（main.c：tables→SRAM12、md→SRAM4、
- * journal/cp_job→SRAM3）。ftl_init 只绑定指针；数组定义在 main.c，
+ * journal/checkpoint_handle→SRAM3）。ftl_init 只绑定指针；数组定义在 main.c，
  * 生命周期覆盖全程（完成表的 ctx 会保存这些地址）。
  */
 typedef struct
@@ -204,7 +204,7 @@ typedef struct
     ftl_tables_t         *tables;
     metadata_dir_cache_t *metadata_dir;
     l2p_journal_t        *journal;
-    cp_job_t             *cp_job;
+    checkpoint_handle_t  *checkpoint_handle;
 } ftl_storage_t;
 
 /* ── 接口 ── */

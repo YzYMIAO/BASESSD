@@ -201,7 +201,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
         return FTL_ERROR;
     }
 
-    const bool blocks_valid = checkpoint_load_block_table(ftl, &cp, cp_idx, ftl->cp_job->block_words);
+    const bool blocks_valid = checkpoint_load_block_table(ftl, &cp, cp_idx, ftl->checkpoint_handle->block_words);
 
     if (!blocks_valid)
     {
@@ -421,14 +421,14 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
 
     if (blocks_valid != 0U)
     {
-        if (ftl_recovery_restore_blocks(ftl, ftl->cp_job->block_words))
+        if (ftl_recovery_restore_blocks(ftl, ftl->checkpoint_handle->block_words))
         {
             /* 预载 CP region，供 probe 的逐 CW L2P 反查复用（未覆盖区懒加载）。 */
             ftl_boot_apply_region_bitmap(ftl, cp);
 
             ftl_block_restore_stats_t stats;
             memset(&stats, 0, sizeof(stats));
-            ftl_recovery_probe_blocks(ftl, ftl->cp_job->block_words, &stats);
+            ftl_recovery_probe_blocks(ftl, ftl->checkpoint_handle->block_words, &stats);
 
             if (stats.l2p_read_errors != 0U)
             {
@@ -436,7 +436,7 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
                 LOGW("[BLK] probe: %u L2P read error(s) — fallback to F2\r\n",
                      (unsigned)stats.l2p_read_errors);
             }
-            else if (ftl_recovery_build_pools(ftl, ftl->cp_job->block_words))
+            else if (ftl_recovery_build_pools(ftl, ftl->checkpoint_handle->block_words))
             {
                 restored = 1U;
                 LOGI("[BLK] restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n",
@@ -578,7 +578,7 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     journal_replay_block_ctx_t block_ctx;
     memset(&block_ctx, 0, sizeof(block_ctx));
 
-    if ((blocks_valid != 0U) && ftl_recovery_restore_blocks(ftl, ftl->cp_job->block_words))
+    if ((blocks_valid != 0U) && ftl_recovery_restore_blocks(ftl, ftl->checkpoint_handle->block_words))
     {
         blocks_applied        = 1U;
         block_ctx.materialize = recovery_materialize_pba;
@@ -615,14 +615,14 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     {
         ftl_block_restore_stats_t stats;
         memset(&stats, 0, sizeof(stats));
-        ftl_recovery_probe_blocks(ftl, ftl->cp_job->block_words, &stats);
+        ftl_recovery_probe_blocks(ftl, ftl->checkpoint_handle->block_words, &stats);
 
         if (stats.l2p_read_errors != 0U)
         {
             LOGW("[BLK] probe: %u L2P read error(s) — fallback to F2\r\n",
                  (unsigned)stats.l2p_read_errors);
         }
-        else if (ftl_recovery_build_pools(ftl, ftl->cp_job->block_words))
+        else if (ftl_recovery_build_pools(ftl, ftl->checkpoint_handle->block_words))
         {
             restored = 1U;
             LOGI("[BLK] restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n",

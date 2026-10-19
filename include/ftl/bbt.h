@@ -237,7 +237,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc);
  * 当 alloc->bbt.dirty 置位时，装配一个 BBT job 并提交第一条命令：
  *   换块需擦 ⇒ 异步擦（phase = BBT_JOB_ERASE）→ 擦完成再起写；
  *   否则直接异步写（phase = BBT_JOB_WRITE）。
- * 成败由 g_op_service[FTL_OP_BBT]（ftl_op_bbt）收尾：写完成后推进池游标、
+ * 成败由 g_op_callbacks[FTL_OP_BBT]（ftl_bbt_callback）收尾：写完成后推进池游标、
  * 成功清 dirty、失败保留 dirty 供下轮重试。
  *
  * ⚠ 本函数只保证「已起步」；成败判据 = job 走完且 dirty 清零（同步路径见 bbt_save）。

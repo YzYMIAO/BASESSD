@@ -10,12 +10,12 @@
  * 本头只放**声明**与**纯谓词**：
  *   · 改状态的闸门（位图置/清、写指针、job 复位）定义在 metadata_job.c，
  *     保证单一实现（H42）；
- *   · `md_job_idle` / `md_compacting` / `md_log_block_idle` /
+ *   · `metadata_handle_idle` / `md_compacting` / `md_log_block_idle` /
  *     `md_log_block_reclaimable` 是纯读谓词，跨 TU 内联。
  */
 
 #include "bst.h"      /* ftl_gblock_plane / ftl_gblock_block / ftl_block_state */
-#include "metadata.h" /* metadata_dir_cache_t / md_job_t / PAGES_PER_BLOCK */
+#include "metadata.h" /* metadata_dir_cache_t / metadata_handle_t / PAGES_PER_BLOCK */
 
 #include <stdint.h>
 
@@ -52,12 +52,12 @@ nand_pba_t metadata_dir_slot_now(metadata_dir_cache_t *dir);
  * slot 的"未取"是 NAND_PBA_INVALID。漏一个 ⇒ append_slot 永久让路（phase 卡死）
  * 或下次压缩复用已消耗的槽（二次编程 = 静默损坏）。
  * ⚠ 不清 `reclaim_pending` / `reclaim_scan`：待回收知识不属于 job 状态。 */
-void md_job_reset(metadata_dir_cache_t *dir);
+void metadata_handle_reset(metadata_dir_cache_t *dir);
 
-/* md_job_idle — 整理 job 是否空闲（无回收/压缩在跑）。 */
-static inline bool md_job_idle(const metadata_dir_cache_t *dir)
+/* metadata_handle_idle — 整理 job 是否空闲（无回收/压缩在跑）。 */
+static inline bool metadata_handle_idle(const metadata_dir_cache_t *dir)
 {
-    return dir->job.phase == (uint8_t)MD_JOB_IDLE;
+    return dir->handle.phase == (uint8_t)MD_JOB_IDLE;
 }
 
 /*
@@ -69,7 +69,7 @@ static inline bool md_job_idle(const metadata_dir_cache_t *dir)
  */
 static inline bool md_compacting(const metadata_dir_cache_t *dir)
 {
-    return (dir->job.phase >= (uint8_t)MD_JOB_CP_READ) && (dir->job.phase <= (uint8_t)MD_JOB_CP_RECLAIM);
+    return (dir->handle.phase >= (uint8_t)MD_JOB_CP_READ) && (dir->handle.phase <= (uint8_t)MD_JOB_CP_RECLAIM);
 }
 
 /*

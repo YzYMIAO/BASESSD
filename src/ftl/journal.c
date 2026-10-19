@@ -13,7 +13,7 @@
  * 写模型：
  *   · 追加进 RAM 页缓冲（page_buf）；页满（JOURNAL_ENTRIES_PER_PAGE）时**不再同步落盘**，
  *     改为交给异步 job（journal_freeze → ftl_op_submit(FTL_OP_JOURNAL)），完成由
- *     g_op_service[FTL_OP_JOURNAL]（ftl_op_journal）按 job.phase 推进；
+ *     g_op_callbacks[FTL_OP_JOURNAL]（ftl_journal_callback）按 job.phase 推进；
  *   · 块满换环形下一块——**先擦后写**，换块擦除也是 job 的一个 phase（JRN_ERASE）；
  *   · 同 LBA 就地合并（不消耗 sequence）。
  *
@@ -28,14 +28,14 @@
  *
  * ⚠ **介质读回不转断言**（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 上的
  *   页，页头可能因掉电撕裂而非法——那是掉电的**预期情形**，必须返回错误/跳过，不能断言。
- *   模块入口与命令派发路径（ftl_op_journal）的前置条件仍用 ASSERT。
+ *   模块入口与命令派发路径（ftl_journal_callback）的前置条件仍用 ASSERT。
  *
  * 文件结构：
  *   1. 页地址辅助     journal_page_addr / journal_block_addr（static）
  *   2. 初始化         journal_init
  *   3. 追加与刷页     journal_append / journal_freeze / journal_kick /
  *                     journal_start_erase / journal_flush_page（+ journal_flush_now）
- *   4. 完成服务       ftl_op_journal（g_op_service[FTL_OP_JOURNAL]）
+ *   4. 完成服务       ftl_journal_callback（g_op_callbacks[FTL_OP_JOURNAL]）
  *   5. 回放与写指针恢复 journal_scan_latest / journal_resume / journal_replay
  *   6. 截断           journal_truncate_plan / journal_truncate_commit（两步，异步 CP 用）
  */
@@ -179,8 +179,8 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
     journal->write_fail_pending = 0U;
 
     /* 异步刷页 job 复位：无在飞、无待偿擦除 */
-    journal->job.phase      = JRN_IDLE;
-    journal->job.need_erase = 0U;
+    journal->handle.phase      = JRN_IDLE;
+    journal->handle.need_erase = 0U;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -242,7 +242,7 @@ bool journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
     /* 页已满且上一轮异步刷页未成功（job 忙 / 池空）⇒ 本条无处可放，丢弃。
      * ⚠ 守卫必须在按 current_entry 取槽位**之前**：current_entry ==
      *   JOURNAL_ENTRIES_PER_PAGE 时 `JOURNAL_HEADER_SIZE + 127×16 = 2060 > 2048`
-     *   会写出 page_buf 之外（踩到 journal_job_t）。
+     *   会写出 page_buf 之外（踩到 journal_handle_t）。
      * 丢弃的后果与「掉电丢最后一页 journal」同级（回放少应用一次映射更新）；
      * 整页由 journal_kick 下轮刷掉后自动恢复。 */
     if (journal->current_entry >= JOURNAL_ENTRIES_PER_PAGE)
@@ -317,7 +317,7 @@ static void journal_clear_page(l2p_journal_t *journal)
  *     · **待偿擦除也不许写**：need_erase 置位说明当前环形块**还没擦过**（换块后
  *       擦命令没起起来），此时往里写就是往没擦的块编程 ⇒ 同样拒绝。
  *       （journal_kick 会先补擦；journal_append 的回退路径由 journal_flush_now 补擦。）
- *     · 页写成功后指针才推进（推进点在 ftl_op_journal），故落点先算好存进 job；
+ *     · 页写成功后指针才推进（推进点在 ftl_journal_callback），故落点先算好存进 job；
  *       跨块时一并算出 need_erase（先擦后写）。
  *     · 数据在 ftl_async_write_page 内**已拷进 FC buffer 池** ⇒ 提交后立刻腾页缓冲，
  *       不需要 ping-pong 快照缓冲。
@@ -325,7 +325,7 @@ static void journal_clear_page(l2p_journal_t *journal)
  * -------------------------------------------------------------------- */
 static bool journal_freeze(l2p_journal_t *journal)
 {
-    if ((journal->job.phase != JRN_IDLE) || (journal->job.need_erase != 0U) ||
+    if ((journal->handle.phase != JRN_IDLE) || (journal->handle.need_erase != 0U) ||
         (journal->ring_full != 0U))
     {
         return false; /* 环已全部不可用：不再起新页写 */
@@ -363,11 +363,11 @@ static bool journal_freeze(l2p_journal_t *journal)
         }
     }
 
-    journal->job.from_block   = journal->current_block;
-    journal->job.from_page    = journal->current_page;
-    journal->job.target_block = tblock;
-    journal->job.target_page  = tpage;
-    journal->job.waddr        = waddr;
+    journal->handle.from_block   = journal->current_block;
+    journal->handle.from_page    = journal->current_page;
+    journal->handle.target_block = tblock;
+    journal->handle.target_page  = tpage;
+    journal->handle.waddr        = waddr;
 
     if (ftl_op_submit(cmd, FTL_OP_JOURNAL, journal) != FTL_OK)
     {
@@ -382,8 +382,8 @@ static bool journal_freeze(l2p_journal_t *journal)
         journal->pre_erased_block = JOURNAL_BLOCK_NONE;
         need_erase                = 0U;
     }
-    journal->job.need_erase = need_erase;
-    journal->job.phase      = JRN_WRITE;
+    journal->handle.need_erase = need_erase;
+    journal->handle.phase      = JRN_WRITE;
 
     journal_clear_page(journal);
     return true;
@@ -406,7 +406,7 @@ static bool journal_start_erase(l2p_journal_t *journal)
     }
 
     fc_command_t *cmd;
-    if (ftl_async_erase_block_multi_plane(&cmd, journal_block_addr(journal, journal->job.target_block)) != FTL_OK)
+    if (ftl_async_erase_block_multi_plane(&cmd, journal_block_addr(journal, journal->handle.target_block)) != FTL_OK)
     {
         return false;
     }
@@ -416,8 +416,8 @@ static bool journal_start_erase(l2p_journal_t *journal)
         return false;
     }
 
-    journal->job.need_erase = 0U;
-    journal->job.phase      = JRN_ERASE;
+    journal->handle.need_erase = 0U;
+    journal->handle.phase      = JRN_ERASE;
     return true;
 }
 
@@ -482,7 +482,7 @@ static void journal_erase_failed(l2p_journal_t *journal, uint8_t block)
         return; /* need_erase 保留：绝不能写未擦块 */
     }
 
-    journal->job.target_block = next;
+    journal->handle.target_block = next;
     if (journal->current_block == block)
     {
         journal->current_block = next;
@@ -508,23 +508,23 @@ void journal_kick(l2p_journal_t *journal)
         return; /* 环全部不可用：不重试擦除（已 LOGE 过），也不写未擦块 */
     }
 
-    if (journal->job.phase != JRN_IDLE)
+    if (journal->handle.phase != JRN_IDLE)
     {
         /* 心跳（见 ftl_job.h）：在飞期间每满 1s 打一行，异步后「卡在哪个 phase」的唯一观测口 */
-        if (ftl_job_heartbeat(&journal->job.log_ms, &journal->job.start_ms))
+        if (ftl_job_heartbeat(&journal->handle.log_ms, &journal->handle.start_ms))
         {
             LOGI("[JRN] job phase=%u waddr=0x%08lx age=%lums\r\n",
-                 (unsigned)journal->job.phase,
-                 (unsigned long)journal->job.waddr,
-                 (unsigned long)ftl_job_age_ms(&journal->job.start_ms));
+                 (unsigned)journal->handle.phase,
+                 (unsigned long)journal->handle.waddr,
+                 (unsigned long)ftl_job_age_ms(&journal->handle.start_ms));
         }
         return; /* 单飞行：job 已在飞 */
     }
 
-    journal->job.log_ms   = 0U;
-    journal->job.start_ms = 0U;
+    journal->handle.log_ms   = 0U;
+    journal->handle.start_ms = 0U;
 
-    if (journal->job.need_erase != 0U)
+    if (journal->handle.need_erase != 0U)
     {
         (void)journal_start_erase(journal);
         return;
@@ -553,7 +553,7 @@ void journal_kick_erase_only(l2p_journal_t *journal)
     /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
     ASSERT(journal != NULL);
 
-    if ((journal->job.phase == JRN_IDLE) && (journal->job.need_erase != 0U))
+    if ((journal->handle.phase == JRN_IDLE) && (journal->handle.need_erase != 0U))
     {
         journal_kick(journal); /* need_erase 优先 ⇒ 必然走擦除分支 */
     }
@@ -572,14 +572,14 @@ static bool journal_drain(l2p_journal_t *journal)
 {
     uint32_t spin = 0U;
 
-    while ((journal->job.phase != JRN_IDLE) && (spin < JOURNAL_DRAIN_SPIN_MAX))
+    while ((journal->handle.phase != JRN_IDLE) && (spin < JOURNAL_DRAIN_SPIN_MAX))
     {
         (void)fc_service();
         completion_table_drain();
         spin++;
     }
 
-    return (journal->job.phase == JRN_IDLE);
+    return (journal->handle.phase == JRN_IDLE);
 }
 
 /* 前置声明：同步写/擦失败也要置持久性 pending（定义在完成服务小节）。 */
@@ -596,28 +596,28 @@ static void journal_note_write_failure(l2p_journal_t *journal);
  * -------------------------------------------------------------------- */
 static void journal_erase_pending_sync(l2p_journal_t *journal)
 {
-    if (journal->pre_erased_block == journal->job.target_block)
+    if (journal->pre_erased_block == journal->handle.target_block)
     {
         journal->pre_erased_block = JOURNAL_BLOCK_NONE; /* truncate 已代擦，记账消费 */
     }
     else
     {
-        const ftl_status_t est = ftl_sync_erase_block_multi_plane(journal_block_addr(journal, journal->job.target_block));
+        const ftl_status_t est = ftl_sync_erase_block_multi_plane(journal_block_addr(journal, journal->handle.target_block));
 
         if (est != FTL_OK)
         {
             /* 擦失败 ⇒ 保留 need_erase，绝不清账；flusher 看到它仍置位就不会写未擦块。 */
             LOGE("[JRN] sync ring erase failed blk=%u status=%d\r\n",
-                 (unsigned)journal->job.target_block,
+                 (unsigned)journal->handle.target_block,
                  (int)est);
-            journal_erase_failed(journal, journal->job.target_block);
+            journal_erase_failed(journal, journal->handle.target_block);
             journal_note_write_failure(journal);
             return;
         }
         journal->erase_fail_count = 0U;
         journal->erase_fail_block = JOURNAL_BLOCK_NONE;
     }
-    journal->job.need_erase = 0U;
+    journal->handle.need_erase = 0U;
 }
 
 /* --------------------------------------------------------------------
@@ -643,16 +643,16 @@ static bool journal_flush_now(l2p_journal_t *journal)
         return false; /* 环已全部不可用：不再写任何页 */
     }
 
-    if (journal->job.phase != JRN_IDLE)
+    if (journal->handle.phase != JRN_IDLE)
     {
         return false; /* 在飞命令拥有当前页地址：再写 = 双重编程 */
     }
 
-    if (journal->job.need_erase != 0U)
+    if (journal->handle.need_erase != 0U)
     {
         journal_erase_pending_sync(journal);
 
-        if (journal->job.need_erase != 0U)
+        if (journal->handle.need_erase != 0U)
         {
             /* 目标块仍未擦：不能把页写进去（二次编程/脏块写 = 静默损坏）。
              * 页缓冲保留，下次 flush 重试；pending 已置位，GC 不会擦 victim。 */
@@ -725,9 +725,9 @@ static bool journal_flush_now(l2p_journal_t *journal)
                     LOGE("[JRN] sync ring advance erase failed blk=%u status=%d — 挂起\r\n",
                          (unsigned)journal->current_block,
                          (int)est);
-                    journal->job.target_block = journal->current_block;
+                    journal->handle.target_block = journal->current_block;
                     journal_erase_failed(journal, journal->current_block);
-                    journal->job.need_erase = 1U;
+                    journal->handle.need_erase = 1U;
                     journal_note_write_failure(journal);
                     ok = false;
                 }
@@ -762,7 +762,7 @@ ftl_status_t journal_flush_page(l2p_journal_t *journal)
     if (!journal_drain(journal))
     {
         LOGE("[JRN] drain timeout phase=%u — 拒绝同步刷（在飞命令拥有当前页）\r\n",
-             (unsigned)journal->job.phase);
+             (unsigned)journal->handle.phase);
         journal_note_write_failure(journal);
         return FTL_ERROR;
     }
@@ -771,11 +771,11 @@ ftl_status_t journal_flush_page(l2p_journal_t *journal)
 }
 
 /* ══════════════════════════════════════════════════════════
- * 4. 完成服务（g_op_service[FTL_OP_JOURNAL]）
+ * 4. 完成服务（g_op_callbacks[FTL_OP_JOURNAL]）
  * ══════════════════════════════════════════════════════════ */
 
 /* --------------------------------------------------------------------
- * ftl_op_journal
+ * ftl_journal_callback
  *   功能：Journal 刷页 job 的完成服务函数——按 job.phase 推进状态机。
  *   参数：ftl —— 实例（**不用**：ctx 已是本实例的 journal）；completion —— 完成状态；
  *         ctx —— `l2p_journal_t *`（ftl_op_submit 时传 ftl->journal）。
@@ -809,17 +809,17 @@ static void journal_complete_write(l2p_journal_t *journal, fc_command_t *cmd, co
     if (failed)
     {
         LOGE("[JRN] page write failed pba=%08lx status=0x%02x — 跳过失败页\r\n",
-             (unsigned long)journal->job.waddr,
+             (unsigned long)journal->handle.waddr,
              (unsigned)completion->status);
         journal_note_write_failure(journal);
     }
 
-    if ((journal->current_block == journal->job.from_block) && (journal->current_page == journal->job.from_page))
+    if ((journal->current_block == journal->handle.from_block) && (journal->current_page == journal->handle.from_page))
     {
-        journal->current_block = journal->job.target_block;
-        journal->current_page  = journal->job.target_page;
+        journal->current_block = journal->handle.target_block;
+        journal->current_page  = journal->handle.target_page;
     }
-    journal->job.phase = JRN_IDLE;
+    journal->handle.phase = JRN_IDLE;
 
     if (failed)
     {
@@ -831,16 +831,16 @@ static void journal_complete_write(l2p_journal_t *journal, fc_command_t *cmd, co
     /* 换块 ⇒ 起异步擦除；起不来就留着 need_erase，由 journal_kick 下轮重试。
      * ⚠ 先查 pre_erased_block：journal_truncate 可能已在这段窗口里代擦了环形
      *   下一块（正是本 job.target_block）⇒ 消费记账跳过，避免重复擦。 */
-    if (journal->job.need_erase != 0U)
+    if (journal->handle.need_erase != 0U)
     {
-        if (journal->pre_erased_block == journal->job.target_block)
+        if (journal->pre_erased_block == journal->handle.target_block)
         {
-            journal->pre_erased_block = JOURNAL_BLOCK_NONE;
-            journal->job.need_erase   = 0U;
+            journal->pre_erased_block  = JOURNAL_BLOCK_NONE;
+            journal->handle.need_erase = 0U;
         }
         else if (!journal_start_erase(journal))
         {
-            LOGE("[JRN] erase kick failed blk=%u — 下轮重试\r\n", (unsigned)journal->job.target_block);
+            LOGE("[JRN] erase kick failed blk=%u — 下轮重试\r\n", (unsigned)journal->handle.target_block);
         }
     }
 
@@ -854,12 +854,12 @@ static void journal_complete_erase(l2p_journal_t *journal, fc_command_t *cmd, co
     if (fc_cw_status_has_error(completion->status))
     {
         LOGE("[JRN] ring block erase failed blk=%u status=0x%02x — 重新挂起\r\n",
-             (unsigned)journal->job.target_block,
+             (unsigned)journal->handle.target_block,
              (unsigned)completion->status);
         /* 擦失败 ⇒ 目标块仍是脏的；绝不能把后续页写进去。重新挂起 need_erase，
          * 由 journal_kick 下轮重试；持续失败由 journal_erase_failed 标坏并跳过。 */
-        journal_erase_failed(journal, journal->job.target_block);
-        journal->job.need_erase = 1U;
+        journal_erase_failed(journal, journal->handle.target_block);
+        journal->handle.need_erase = 1U;
     }
     else
     {
@@ -867,11 +867,11 @@ static void journal_complete_erase(l2p_journal_t *journal, fc_command_t *cmd, co
         journal->erase_fail_count = 0U;
         journal->erase_fail_block = JOURNAL_BLOCK_NONE;
     }
-    journal->job.phase = JRN_IDLE;
+    journal->handle.phase = JRN_IDLE;
     (void)fc_command_release(cmd);
 }
 
-void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_journal_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     l2p_journal_t *journal = (l2p_journal_t *)ctx;
 
@@ -883,13 +883,13 @@ void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completi
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     /* 一条命令对应一个 job：phase 只能是 WRITE / ERASE（残留完成 = 状态机破坏）。 */
-    ASSERT((journal->job.phase == JRN_WRITE) || (journal->job.phase == JRN_ERASE));
+    ASSERT((journal->handle.phase == JRN_WRITE) || (journal->handle.phase == JRN_ERASE));
 
-    if (journal->job.phase == JRN_WRITE)
+    if (journal->handle.phase == JRN_WRITE)
     {
         journal_complete_write(journal, cmd, completion);
     }
-    else if (journal->job.phase == JRN_ERASE)
+    else if (journal->handle.phase == JRN_ERASE)
     {
         journal_complete_erase(journal, cmd, completion);
     }
@@ -897,8 +897,8 @@ void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completi
     {
         /* 上面的 ASSERT 在 release 下裁空 ⇒ 这里必须留运行期兜底：否则 job 永远
          * 卡在非 IDLE，后续 flush 再也起不来（命令还不回收就是池泄漏）。 */
-        LOGE("[JRN] unexpected completion phase=%u\r\n", (unsigned)journal->job.phase);
-        journal->job.phase = JRN_IDLE;
+        LOGE("[JRN] unexpected completion phase=%u\r\n", (unsigned)journal->handle.phase);
+        journal->handle.phase = JRN_IDLE;
         (void)fc_command_release(cmd);
     }
 }
@@ -1086,7 +1086,7 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
                 /* 擦失败绝不能继续：首次写会落进未擦块（二次编程 = 静默损坏）。
                  * 重新挂起 need_erase，由 journal_kick / flush_now 先补擦；
                  * 持续失败由 journal_erase_failed 标坏并跳到下一块。 */
-                journal->job.target_block = next_block;
+                journal->handle.target_block = next_block;
 
                 if (ftl_sync_erase_block_multi_plane(journal_block_addr(journal, next_block)) != FTL_OK)
                 {
@@ -1099,7 +1099,7 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
                     }
                     else
                     {
-                        next_block    = journal->job.target_block; /* 可能已跳到下一可用块 */
+                        next_block    = journal->handle.target_block; /* 可能已跳到下一可用块 */
                         pending_erase = 1U;
                         erase_block   = next_block;
                     }
@@ -1144,9 +1144,9 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
     /* 异步刷页 job 复位：resume 是开机路径，此前不可能有在飞 job；
      * 但复位是廉价的，且能挡住「同一实例被重复 resume」的残留。
      * 若上面换块擦除失败，在此（复位之后）重新挂起，保证首次写前先补擦。 */
-    journal->job.phase        = JRN_IDLE;
-    journal->job.target_block = erase_block;
-    journal->job.need_erase   = pending_erase;
+    journal->handle.phase        = JRN_IDLE;
+    journal->handle.target_block = erase_block;
+    journal->handle.need_erase   = pending_erase;
 
     memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
 }

@@ -2,17 +2,17 @@
  * ftl_op.c — 完成派发实现：服务函数数组 + 提交 + 派发
  *
  * 职责：
- *   ① 持有 g_op_service[]（op tag → 完成服务函数）——**唯一的完成处理入口**；
+ *   ① 持有 g_op_callbacks[]（op tag → 完成服务函数）——**唯一的完成处理入口**；
  *   ② ftl_op_submit()  —— 打 tag、登记 ctx、提交（登记早于提交）；
  *   ③ ftl_op_dispatch()—— 取 ctx、解析实例、按 tag 调服务函数。
  *
  * 设计要点见 include/ftl/ftl_op.h 的文件头（尤其 op tag 的语义与 release 归属）。
  *
  * 文件结构：
- *   1. 服务函数数组    g_op_service
+ *   1. 服务函数数组    g_op_callbacks
  *   2. 提交            ftl_op_submit
  *   3. 派发            ftl_op_dispatch
- *   4. 同步等待服务    ftl_op_sync_wait
+ *   4. 同步等待服务    ftl_sync_wait_callback
  */
 
 #include "ftl_op.h"
@@ -25,7 +25,7 @@
 #include "log.h"
 
 /* 前置声明：服务函数定义在本文件末尾（数组初始化器须先见到声明）。 */
-static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
+static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
 /* ── 1. 服务函数数组 ──
  *
@@ -36,24 +36,24 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
  *   · FTL_OP_SYNC_WAIT：所有 ftl_sync_* 经 ftl_sync_submit_wait 登记 ctx 后走这里；
  *   · FTL_OP_HOST_IO  ：host 数据读写子操作（ctx 不用，服务函数自己 pending_lookup）；
  *   · FTL_OP_JOURNAL  ：Journal 刷页 job（ctx = ftl->journal）；
- *   · FTL_OP_READ_RECOVERY：Read Recovery job（ctx = &ftl->rr）；
- *   · FTL_OP_GC / FTL_OP_WL：搬移 job（ctx = &ftl->mig）——**同一台引擎**，
+ *   · FTL_OP_READ_RECOVERY：Read Recovery job（ctx = &ftl->read_recovery_handle）；
+ *   · FTL_OP_GC / FTL_OP_WL：搬移 job（ctx = &ftl->migrate_handle）——**同一台引擎**，
  *     tag 分开只为日志/调试可辨（GC/WL 回收 vs 慢死预测退役）；
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（ctx = 该 cache line）；
- *   · FTL_OP_CHECKPOINT：Checkpoint job（ctx = ftl->cp_job）；
+ *   · FTL_OP_CHECKPOINT：Checkpoint job（ctx = ftl->checkpoint_handle）；
  *   · FTL_OP_BBT      ：元数据表持久化 job（ctx = &ftl->alloc）；
- *   · FTL_OP_METADATA ：L2P 日志块整理 job（ctx = ftl->metadata_dir->job）。 */
-static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
-    [FTL_OP_SYNC_WAIT]     = ftl_op_sync_wait,
-    [FTL_OP_HOST_IO]       = ftl_op_host_io,
-    [FTL_OP_JOURNAL]       = ftl_op_journal,
-    [FTL_OP_READ_RECOVERY] = ftl_op_read_recovery,
-    [FTL_OP_GC]            = ftl_op_migrate,
-    [FTL_OP_WL]            = ftl_op_migrate,
-    [FTL_OP_L2P]           = ftl_op_l2p,
-    [FTL_OP_CHECKPOINT]    = ftl_op_checkpoint,
-    [FTL_OP_BBT]           = ftl_op_bbt,
-    [FTL_OP_METADATA]      = ftl_op_metadata,
+ *   · FTL_OP_METADATA ：L2P 日志块整理 job（ctx = ftl->metadata_dir->handle）。 */
+static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
+    [FTL_OP_SYNC_WAIT]     = ftl_sync_wait_callback,
+    [FTL_OP_HOST_IO]       = ftl_host_io_callback,
+    [FTL_OP_JOURNAL]       = ftl_journal_callback,
+    [FTL_OP_READ_RECOVERY] = ftl_read_recovery_callback,
+    [FTL_OP_GC]            = ftl_migrate_callback,
+    [FTL_OP_WL]            = ftl_migrate_callback,
+    [FTL_OP_L2P]           = ftl_l2p_callback,
+    [FTL_OP_CHECKPOINT]    = ftl_checkpoint_callback,
+    [FTL_OP_BBT]           = ftl_bbt_callback,
+    [FTL_OP_METADATA]      = ftl_metadata_callback,
 };
 
 /* ── 2. 提交 ── */
@@ -107,8 +107,8 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
 {
     ASSERT(completion != NULL);
 
-    uint8_t             op = (uint8_t)completion->op_tag;
-    ftl_op_service_fn_t fn = (op < (uint8_t)FTL_OP_COUNT) ? g_op_service[op] : NULL;
+    uint8_t              op = (uint8_t)completion->op_tag;
+    ftl_op_callback_fn_t fn = (op < (uint8_t)FTL_OP_COUNT) ? g_op_callbacks[op] : NULL;
 
     /* command_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。 */
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
@@ -149,11 +149,11 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
 
 /* ── 4. 同步等待服务函数 ── */
 
-/* ftl_op_sync_wait — 同步等待的完成服务：把 completion 存入 waiter、置 done=1。
+/* ftl_sync_wait_callback — 同步等待的完成服务：把 completion 存入 waiter、置 done=1。
  *
  * **不 release 命令**——调用者（ftl_sync_submit_wait）要在 wait 返回后读 cmd 数据
  * （如 ftl_cmd_read_data）才 release，这里释放即悬垂。 */
-static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     (void)ftl; /* 同步等待与实例无关（waiter 由调用者持栈） */
 

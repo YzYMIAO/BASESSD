@@ -169,7 +169,7 @@ typedef enum
  *
  * 加载与写回都改为**提交即返回**：未命中 ⇒ 建命令 + ftl_op_submit(tag = FTL_OP_L2P,
  * ctx = 本 cache line) ⇒ 置 LOADING/FLUSHING ⇒ 返回 FTL_AGAIN；完成由
- * g_op_service[FTL_OP_L2P]（ftl_op_l2p，l2p_cache.c）按 line->state 收尾。
+ * g_op_callbacks[FTL_OP_L2P]（ftl_l2p_callback，l2p_cache.c）按 line->state 收尾。
  * ⇒ 对外 API 的失败语义变成三态，调用者必须能**挂起**（见下）。
  *
  * ⚠ 两条不变量（异步后仍成立，是正确性根基）：
@@ -182,7 +182,7 @@ typedef enum
  *
  * ⚠ **同步逃生口**（`*_sync`）：内部自旋 ftl_service_pump 直到就绪。只许结构性同步
  *   上下文调用（开机恢复 / CLI / checkpoint / HIL `fl`）——它们不在完成派发里，
- *   自旋不是嵌套泵。服务函数（g_op_service 里的任何一个）**禁止**调用，由
+ *   自旋不是嵌套泵。服务函数（g_op_callbacks 里的任何一个）**禁止**调用，由
  *   ftl_op_in_dispatch 断言兜住。服务函数里禁止自旋泵（嵌套派发）。
  */
 
@@ -369,7 +369,7 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  * ① metadata_dir_append_slot 取 L2P 日志块的下一空槽（块满先取新块）
  * ② ftl_async_write_page 建链 + 把 entries 拷进 FC buffer
  * ③ line->state = FLUSHING；ftl_op_submit(tag = FTL_OP_L2P, ctx = line)
- * 完成时（ftl_op_l2p）：成功 ⇒ metadata_dir_commit_region + CLEAN + 清 region 脏位；
+ * 完成时（ftl_l2p_callback）：成功 ⇒ metadata_dir_commit_region + CLEAN + 清 region 脏位；
  * 失败 ⇒ 置回 DIRTY 保留下轮重试。
  *
  * ⚠ **无条件追加**：绝不就地覆盖旧位置（NAND 只能 1→0，二次编程 = 静默损坏）。

@@ -62,7 +62,7 @@
 | `l2p_cache_t` | 132,136 B（0x20428；64 line + 全局脏位图；`region_id` 为 u32） |
 | `ftl_tables_t` | 123,896 B（BST 81,920 + closed 32,768 + free 8,192 + 池 1,016） |
 | `metadata_dir_cache_t` | 25,164 B（DWARF 实测） |
-| `cp_job_t` | 8,524 B（含 8KB 块元数据快照） |
+| `checkpoint_handle_t` | 8,524 B（含 8KB 块元数据快照） |
 | `ftl_wbuf_t` | 4,108 B |
 | `l2p_journal_t` | 2,104 B |
 | `ftl_allocator_t` | 1,148 B |
@@ -75,7 +75,7 @@
 | AXI_NOCACHE | 128 KB | 70 KB（FC/DMA，保持） |
 | DTCM | **128 KB**（此前误写 16） | 0.2 KB（栈/heap + `.noinit`） |
 | SRAM12（SRAM1+SRAM2） | 256 KB | 121 KB（`g_ftl_tables`） |
-| SRAM3 | 32 KB | 10.4 KB（`g_ftl_cp_job` + `g_ftl_journal`） |
+| SRAM3 | 32 KB | 10.4 KB（`g_ftl_checkpoint_handle` + `g_ftl_journal`） |
 | SRAM4 | 64 KB | 24.1 KB（`g_ftl_md`） |
 
 ---
@@ -163,7 +163,7 @@
 - 每 LUN 的 Checkpoint 只快照**自己的 region 脏位**：
   `l2p_cache_snapshot_owner_bitmap` 把全局位图按 owner 过滤、global→local 映射成
   **本地 2048-bit `region_bitmap`**。⚠ Header 的 `region_bitmap[64]` 仍是 2048 bit；
-  `cp_job.region_bitmap`（本地）与 `cache.region_dirty_bitmap`（全局）的
+  `checkpoint_handle.region_bitmap`（本地）与 `cache.region_dirty_bitmap`（全局）的
   同尺寸 static assert 已拆掉。
 - `cp_flush_regions` 遍历共享 cache：跳过别的 owner 的行；用局部 region 查快照；
   LOADING 中止、FLUSHING 等待，语义不变。
@@ -183,7 +183,7 @@ typedef struct ftl_context {
     ftl_tables_t         *tables;        /* per FTL_DIM_TOTAL；SRAM12 */
     metadata_dir_cache_t *metadata_dir;  /* per instance；SRAM4 */
     l2p_journal_t        *journal;       /* per instance；SRAM3 */
-    cp_job_t             *cp_job;        /* per instance；SRAM3 */
+    checkpoint_handle_t             *checkpoint_handle;        /* per instance；SRAM3 */
     pending/groups/wbuf/alloc/mig/rr/bg  /* 热状态，留在描述符（AXI） */
     ...
 } ftl_context_t;
@@ -195,14 +195,14 @@ typedef struct ftl_context {
 |---|---|---:|---:|
 | `g_l2p_cache[CH][CE]` | AXI_RAM（cacheable） | 132,136 B | 132,136 B |
 | `g_ftl_tables[FTL_DIM_TOTAL]` | `.sram12_data`（SRAM1+SRAM2 连续 256KB） | 123,896 B | 247,792 B（242.0 KiB） |
-| `g_ftl_cp_job[]` + `g_ftl_journal[]` | `.sram3_data`（32KB） | 10,628 B | 21,256 B（20.8 KiB） |
+| `g_ftl_checkpoint_handle[]` + `g_ftl_journal[]` | `.sram3_data`（32KB） | 10,628 B | 21,256 B（20.8 KiB） |
 | `g_ftl_md[FTL_DIM_TOTAL]` | `.sram4_data`（64KB） | 25,164 B | 50,328 B（49.1 KiB） |
 | 描述符 + pending/groups/wbuf/mig/rr/bg | AXI_RAM | 14,664 B | 29,328 B |
 
 - 新增 `SRAM12_DATA/SRAM3_DATA/SRAM4_DATA` 宏；linker 把 SRAM1/2 合并为 `SRAM12`，
   新增 `.sram12_data`，每段 `KEEP` + `ASSERT(SIZEOF(...) <= LENGTH(...))`。
 - ⚠ `.sram*_data` 是 **NOLOAD**：启动只清 AXI `.bss` ⇒ `ftl_init` 对
-  `tables/metadata_dir/journal/cp_job` **整表 memset**，不能依赖 BSS。
+  `tables/metadata_dir/journal/checkpoint_handle` **整表 memset**，不能依赖 BSS。
 - 每域独立 `_Static_assert`；`main.c` 的 AXI 断言现在覆盖
   描述符 + 共享 cache + CLI 缓冲（16KB，从 `.sram2_data` 迁入 `.bss`）。
 - MPU 已把 SRAM1/2/3/4 配成 cacheable；这些表是 **CPU-only**（无 DMA），
@@ -264,7 +264,7 @@ N=4 仍需表瘦身或 SDRAM。
 - [x] owner 解析：`completion_table_route_region`（`lba_route_*` 同一套公式），
       load/flush/commit/evict 全覆盖；cache 不再保存 `md_dir/alloc`
 - [x] `flush_inflight` **单个共享计数**（主流共享 credit）；owner 过滤的 flush/sync/CP
-- [x] `ftl_op_l2p` 提交到 owner 的 `metadata_dir`（local region = global/DIM）
+- [x] `ftl_l2p_callback` 提交到 owner 的 `metadata_dir`（local region = global/DIM）
 - [x] Checkpoint：`l2p_cache_snapshot_owner_bitmap` 生成**本地** 2048-bit 快照；
       `cp_flush_regions` owner 过滤；拆同尺寸断言；Header 格式不变
 - [x] 数据通路全链路全局 LBA：group/pending/wbuf/page META/journal/migrate/rr/F2/trim
@@ -276,9 +276,9 @@ N=4 仍需表瘦身或 SDRAM。
 
 ### Phase C：描述符化 + 内存域散列（已实现，未上板）
 
-- [x] `ftl_context_t`：`tables/metadata_dir/journal/cp_job` 指针化（描述符 14,664 B）
+- [x] `ftl_context_t`：`tables/metadata_dir/journal/checkpoint_handle` 指针化（描述符 14,664 B）
 - [x] `g_ftl_tables[FTL_DIM_TOTAL]` → `.sram12_data`（SRAM1+SRAM2 合并）
-- [x] `g_ftl_cp_job/journal[FTL_DIM_TOTAL]` → `.sram3_data`
+- [x] `g_ftl_checkpoint_handle/journal[FTL_DIM_TOTAL]` → `.sram3_data`
 - [x] `g_ftl_md[FTL_DIM_TOTAL]` → `.sram4_data`
 - [x] `g_l2p_cache[CH][CE]` → AXI_RAM（共享热 cache）
 - [x] `linker/stm32h743xx_flash.ld`：SRAM12 区域 + `.sram12_data` + 段 KEEP/ASSERT
@@ -312,12 +312,12 @@ N=4 仍需表瘦身或 SDRAM。
 |---|---|---:|---:|
 | AXI_RAM | 2×描述符 + 共享 cache + CLI + FC/其他 | **195.5 KB** | 384 KB |
 | SRAM12 | 2×`ftl_tables_t` | **242.0 KB** | 256 KB |
-| SRAM3 | 2×`cp_job` + 2×`journal` | **20.8 KB** | 32 KB |
+| SRAM3 | 2×`checkpoint_handle` + 2×`journal` | **20.8 KB** | 32 KB |
 | SRAM4 | 2×`metadata_dir` | **49.1 KB** | 64 KB |
 
 N=2 已通过影子构建**链接成功**；N=4 需要表瘦身（`ftl_block_t` 20B→12B 等）或 SDRAM。
 DIM=1 下：描述符 14,664 B + 共享 cache 132,136 B（AXI ~180KB）+
-tables 123,896 B（SRAM12）+ cp_job/journal 10,628 B（SRAM3）+
+tables 123,896 B（SRAM12）+ checkpoint_handle/journal 10,628 B（SRAM3）+
 metadata_dir 25,164 B（SRAM4）。
 
 ---
@@ -343,7 +343,7 @@ metadata_dir 25,164 B（SRAM4）。
 
 - **owner 解析漏路径**：load/flush/commit/evict 任一处用错 owner ⇒ region 写到错误的 die。
   用统一的 `l2p_cache_owner_of_region()`，并在影子 dim=2 构建里覆盖。
-- **Checkpoint bitmap 尺寸**：误把 `cp_job.region_bitmap` 做成全局，会让 Header 超一页
+- **Checkpoint bitmap 尺寸**：误把 `checkpoint_handle.region_bitmap` 做成全局，会让 Header 超一页
   或 per-LUN 快照错位；保持本地 2048 bit + global→local 映射。
 - **NOLOAD 未初始化**：`.sram*_data` 上电垃圾 ⇒ 必须显式 memset/初始化。
 - **LBA 语义混用**：global 与 local 在同一路径混用，编译期无声；按 §4 Phase D 全量回扫。

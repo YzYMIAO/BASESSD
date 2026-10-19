@@ -20,7 +20,7 @@
  *   Phase 3    ftl_bg_service —— 时间预算后台调度（本文件只有一行调用）
  *
  * 文件结构（与下方分区注释一一对应）：
- *   1. 内部辅助        ftl_confirm_write / ftl_op_host_io（+ 4 个 ftl_host_io_* 完成
+ *   1. 内部辅助        ftl_confirm_write / ftl_host_io_callback（+ 4 个 ftl_host_io_* 完成
  *                      分支）/ ftl_confirm_kick
  *   2. 对外接口        ftl_init / ftl_service_pump / ftl_service
  *   3. 子操作下发      ftl_issue_subop / ftl_drain_group（static）+ ftl_submit_read / write
@@ -88,7 +88,7 @@ static void ftl_drain_group(ftl_context_t *ftl, uint16_t gi);
  * -------------------------------------------------------------------- */
 static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_t *pending)
 {
-    /* 两个调用点（ftl_op_host_io 的 `if (pending != NULL)` 内 / ftl_confirm_kick 的
+    /* 两个调用点（ftl_host_io_callback 的 `if (pending != NULL)` 内 / ftl_confirm_kick 的
      * `&ftl->pending[i]`）都保证非空 ⇒ 不在本函数复检（§十附 / §二十六）。
      * 同理 pending->lba 恒为**窗口基址**（唯一写点是 ftl_wbuf_flush 的 wbuf.base）——
      * 下面用 ftl_lba_plane/cw(l) 取代"从位下标反解坐标"就依赖这条。 */
@@ -185,7 +185,7 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
     return FTL_OK;
 }
 
-/* ── host I/O 完成的四个分支（ftl_op_host_io 按 pending->op 与成败分派）── */
+/* ── host I/O 完成的四个分支（ftl_host_io_callback 按 pending->op 与成败分派）── */
 
 /* 读成功：按链序把数据拷给 caller。
  * desc 链序 == LBA 升序（plane-major + 段内 CW 升序，与 LBA 的 [plane][cw] 布局同序）
@@ -282,8 +282,8 @@ static void ftl_host_io_write_fail(ftl_context_t *ftl, ftl_pending_req_t *pendin
 }
 
 /* --------------------------------------------------------------------
- * ftl_op_host_io
- *   功能：host 数据 I/O 子操作的完成服务函数（g_op_service[FTL_OP_HOST_IO]）。
+ * ftl_host_io_callback
+ *   功能：host 数据 I/O 子操作的完成服务函数（g_op_callbacks[FTL_OP_HOST_IO]）。
  *   参数：ftl —— 命令归属实例（ftl_op_dispatch 按命令自身 ch/ce/lun 解析后传入）；
  *         completion —— FC 完成状态；ctx —— 未用（host I/O 的私有状态在 pending 表，
  *         比任何旁表 ctx 都全，故该站点提交时 ctx 传 NULL）。
@@ -297,7 +297,7 @@ static void ftl_host_io_write_fail(ftl_context_t *ftl, ftl_pending_req_t *pendin
  *             ⚠ 本函数**不得**同步等待（见 ftl_op.h）——它跑在完成泵里，再调
  *             ftl_sync_submit_wait 就是嵌套泵（泵里再开泵，完成顺序与栈深都失控）。
  * -------------------------------------------------------------------- */
-void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     (void)ctx; /* host I/O 不登记旁表 ctx */
 
@@ -377,7 +377,7 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
  *   返回：无。
  *   实现要点：按**下标**升序扫（停泊项的 command_id 已置哨兵 FTL_PENDING_CMD_NONE，
  *             按 id 查不到）；仍不就绪的原地留着下轮再来。确认完成后走与
- *             ftl_op_host_io **完全相同**的收尾（release pending 槽 + 逐组递减），
+ *             ftl_host_io_callback **完全相同**的收尾（release pending 槽 + 逐组递减），
  *             故 host 写组能正常结算。
  *   ⚠ 必须由 ftl_service 在 **Phase 2.5 开头**（补发 host 子操作之前）调用：
  *     停泊意味着该 LBA 的 L2P 还是旧映射，此时若先补发一条读同一 LBA 的子操作，
@@ -428,7 +428,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     ASSERT(storage->tables != NULL);
     ASSERT(storage->metadata_dir != NULL);
     ASSERT(storage->journal != NULL);
-    ASSERT(storage->cp_job != NULL);
+    ASSERT(storage->checkpoint_handle != NULL);
 
     /* ├─ PBA 字段视图自检（一次）：位域布局 implementation-defined，无法用 _Static_assert
      *    证明（见 ftl_config.h §三.2）。若本工具链的布局与 PBA_*_SHIFT 不一致，
@@ -439,16 +439,16 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
 
     /* ├─ 绑定外部存储（四个大数组由 HIL 按域提供）──
      * ⚠ .sram*_data 是 NOLOAD，启动代码不清零 ⇒ 下面必须整表 memset。 */
-    ftl->tables       = storage->tables;
-    ftl->metadata_dir = storage->metadata_dir;
-    ftl->journal      = storage->journal;
-    ftl->cp_job       = storage->cp_job;
+    ftl->tables            = storage->tables;
+    ftl->metadata_dir      = storage->metadata_dir;
+    ftl->journal           = storage->journal;
+    ftl->checkpoint_handle = storage->checkpoint_handle;
 
     /* ⚠ 这里**不**调 completion_table_init()：旁表与实例路由表都是**全局**资源
      *    （completion_table.c 的 file-static），而本函数是**逐实例**调用的 ——
      *    在此清表会抹掉其它实例在飞的 ctx 登记，也会抹掉 main.c 已设好的路由表。
      *    该函数由 main.c 的 ssd_ftl_boot_all 在**所有实例 boot 之前**调用一次。
-     *    （完成派发不需要在此注册 handler：命令自己带 op_tag，g_op_service[] 是
+     *    （完成派发不需要在此注册 handler：命令自己带 op_tag，g_op_callbacks[] 是
      *     编译期常量数组，见 ftl_op.c；旁表只回答"这条命令的私有状态在哪"。） */
 
     /* ├─ Pending Request 表（per-instance） ── */
@@ -473,12 +473,12 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
      *         free/op/spare/closed 的读者按 count 有界，整表清零让 NOLOAD 语义确定。
      * metadata_dir：load/init 不覆盖全部字段 ⇒ 先整表清零。
      * journal：init 只重置部分 job 字段 ⇒ 先整表清零。
-     * cp_job：active 在 checkpoint_begin 自己 memset 之前就会被读 ⇒ 必须先清零。
+     * checkpoint_handle：active 在 checkpoint_begin 自己 memset 之前就会被读 ⇒ 必须先清零。
      * ⚠ 全部 memset 必须早于 metadata_dir_load。 */
     memset(ftl->tables, 0, sizeof(*ftl->tables));
     memset(ftl->metadata_dir, 0, sizeof(*ftl->metadata_dir));
     memset(ftl->journal, 0, sizeof(*ftl->journal));
-    memset(ftl->cp_job, 0, sizeof(*ftl->cp_job));
+    memset(ftl->checkpoint_handle, 0, sizeof(*ftl->checkpoint_handle));
 
     /* ├─ 绑定共享 L2P Cache（设备级已初始化一次；metadata 依赖由 owner 解析）── */
     ftl->cache = cache;

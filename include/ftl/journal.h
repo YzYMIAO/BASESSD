@@ -23,7 +23,7 @@
  *
  * 写模型：
  *   追加进 RAM 页缓冲（page_buf）——**页满异步落盘**，交给 job
- *   （journal_kick / g_op_service[FTL_OP_JOURNAL]），使 host 写完成回调里不嵌套
+ *   （journal_kick / g_op_callbacks[FTL_OP_JOURNAL]），使 host 写完成回调里不嵌套
  *   完成泵。需要屏障语义的调用者显式调 journal_flush_page（只剩结构性同步上下文：
  *   HIL `fl` / 开机路径 / CLI——GC/WL 的 F10 走 journal_kick 的异步等待 + 失败 pending）。
  */
@@ -110,7 +110,7 @@ typedef struct
     /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 phase/age */
     uint32_t start_ms;
     uint32_t log_ms;
-} journal_job_t;
+} journal_handle_t;
 
 typedef struct
 {
@@ -163,7 +163,7 @@ typedef struct
     uint8_t  write_fail_pending;
 
     /* 异步刷页 job（放在末尾，纯增量字段） */
-    journal_job_t job;
+    journal_handle_t handle;
 } l2p_journal_t;
 
 /* Journal 环形页引用：位置 + 页序号 + 条目数（journal_scan_latest 出参） */

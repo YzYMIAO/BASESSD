@@ -116,7 +116,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 | `ftl/` | `allocator.c` | Tier 1 | **24** | ✅（2026-10-17 §二十七 补做） |
 | | `power_failure_recovery.c` | Tier 1 | **34**（对外入口 `ftl_media_check_format`/`ftl_media_format`/`ftl_boot_recovery` + 恢复/重建/Carve 内部前置条件） | ✅（2026-10-19 掉电恢复审查） |
 | | `wear_leveling.c` | Tier 1 | **0** | ⚠️ 见下注 2 |
-| | `migrate.c` | Tier 1（**v0.75 阶段 4**：`ftl_op_migrate` 的 `completion`/`ctx` 非空与 `ctx == &ftl->mig`、`mig_begin_predict` 的 `closed_idx` 界内、`mig_finish` 的单飞行门） | **10** | ✅ |
+| | `migrate.c` | Tier 1（**v0.75 阶段 4**：`ftl_migrate_callback` 的 `completion`/`ctx` 非空与 `ctx == &ftl->migrate_handle`、`mig_begin_predict` 的 `closed_idx` 界内、`mig_finish` 的单飞行门） | **10** | ✅ |
 | | `pending.c` | Tier 2：6×`ftl == NULL` | **6**，但**全是下标越界**（`index < FTL_PENDING_MAX` / `gi < FTL_GROUP_MAX`），**没有 `ftl == NULL`** | ⚠️ 措辞与实现不符（见下注 3） |
 | | `read_recovery.c` | Tier 2：`rr_record_ecc`/`rr_predictive_scan`/`rr_retire_block`/`rr_kick` | **10** | ✅ |
 | `controller/` | `controller.c` | Tier 1 | **6**（`controller != NULL`、ch/ce/lun 界、路由结果 `tftl`/`fftl`） | ✅ |
@@ -1054,8 +1054,8 @@ FTL↔FC 命令边界 / 子模块公开入口 ASSERT；内部只留高价值不�
 未用告警是保留的 [I] 断言被裁空的既有告警，见文件头注释，非本轮引入）。
 
 **跟进（同日，用户定调「不该发生的分支用 ASSERT 而不是返回」）**：完成回调里 3 处
-`if (ftl == NULL) { LOGE; release; return; }`（`ftl_op_host_io` / `ftl_op_l2p` /
-`ftl_op_read_recovery`）与 `pending_group_complete_subop` 的「组已释放防御早退」
+`if (ftl == NULL) { LOGE; release; return; }`（`ftl_host_io_callback` / `ftl_l2p_callback` /
+`ftl_read_recovery_callback`）与 `pending_group_complete_subop` 的「组已释放防御早退」
 一并收口成 `ASSERT`——路由表 boot 前设好、完成派发保证实例恒非空，原 release-and-return
 是 debug 走不到、release 静默吞错误的死分支；release（NDEBUG 裁空）下若真走到则
 NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 phase 的 default 分支
@@ -1219,7 +1219,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 ⇒ **不做任何反向操作**：
 
 - §二十六 已删的 `pending.c` 13 处 **不补回**；
-- 本轮按「调用者全在本 .c 内 ⇒ 纯删」处理的 `bbt_load` / `md_job_reset` / `ftl_boot_fresh_start`
+- 本轮按「调用者全在本 .c 内 ⇒ 纯删」处理的 `bbt_load` / `metadata_handle_reset` / `ftl_boot_fresh_start`
   /`clean_start`/`power_failure` 等 **不补回**；
 - 落在争议线的 `wear_leveling.c` 6 / `wear.c` 2 / `checkpoint.c` 2 **保持删除**。
 

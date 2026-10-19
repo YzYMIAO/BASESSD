@@ -404,7 +404,7 @@ ftl_status_t ftl_sync_erase_block_multi_plane(nand_pba_t pba);
  * 差别只有最后一步：**不提交**，把已建链、已装好数据的命令交回调用者。
  *
  *   ftl_async_*  →  调用者 ftl_op_submit(cmd, <功能 op ID>, ctx)
- *                 →  g_op_service[<op ID>] 服务函数判完成状态 + fc_command_release
+ *                 →  g_op_callbacks[<op ID>] 服务函数判完成状态 + fc_command_release
  *
  * ⚠ **数据在 prepare 阶段就已拷进 FC buffer 池**（ftl_cmd_write_data 是 memcpy，
  *   见 ftl_fc_interface.c），故本函数返回后调用者即可复用 / 覆写源缓冲——这正是

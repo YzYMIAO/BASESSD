@@ -27,7 +27,7 @@ struct ftl_context {
     ftl_allocator_t     alloc;              // 空闲 block / Super Block 写指针 + per-instance 块元数据游标
     l2p_journal_t      *journal;            // log-structured journal（阶段 C；SRAM3）
     metadata_dir_cache_t *metadata_dir;     // Metadata Directory（阶段 C；SRAM4）
-    cp_job_t           *cp_job;             // Checkpoint job（阶段 C；SRAM3）
+    checkpoint_handle_t           *checkpoint_handle;             // Checkpoint job（阶段 C；SRAM3）
     l2p_cp_state_t      cp;                 // Checkpoint 池游标/序号（per-instance，v0.65）
     uint32_t            cp_timer_start;     // Checkpoint 计时（T3）
     uint32_t            total_writes;       // 写入总次数
@@ -37,7 +37,7 @@ struct ftl_context {
     uint32_t            gc_log_last_ms;     // GC 触发日志节拍（v0.68）
     uint32_t            gc_reclaimed_count; // GC 累计成功回收 SB 数（v0.68，纯观测）
     uint32_t            gc_novictim_count;  // GC 累计「触发但选不出 victim」次数（v0.68）
-    ftl_read_recovery_t rr;                 // Read Recovery 上下文
+    read_recovery_handle_t rr;                 // Read Recovery 上下文
     uint8_t             rr_page_scratch[FTL_READ_USER_SIZE]; // 恢复整页暂存
 };
 ```
@@ -135,7 +135,7 @@ void         allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tab
 ```
 
 > **阶段 B/C 契约**：`cache` 是设备级共享 L2P cache（同一 `(ch,ce)` 一份，设备级 init 一次）；
-> `storage` 是四个大数组的指针（tables/md/journal/cp_job），由 HIL 按域放置
+> `storage` 是四个大数组的指针（tables/md/journal/checkpoint_handle），由 HIL 按域放置
 > （SRAM12/SRAM4/SRAM3）。`ftl_init` 只**绑定指针**并整表 memset（NOLOAD 段不归 BSS 清）；
 > `allocator_init` 第三参只绑定指针、不复制。
 >
@@ -171,7 +171,7 @@ void         allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tab
 
 `completion_table.h/c` 提供统一完成事件分发，消除两处各自 `fc_poll_completion` 造成的
 completion 丢失问题。**v0.75 起**派发**唯一出口**是 `ftl_op_dispatch()`：旁表只存 `ctx`，
-handler 由命令携带的 **op tag** 查 `g_op_service[]` 得到（见 `ftl_op.h`）。
+handler 由命令携带的 **op tag** 查 `g_op_callbacks[]` 得到（见 `ftl_op.h`）。
 
 ```c
 // completion_table.h — 接口（v0.75 起表项只留 ctx）
@@ -201,7 +201,7 @@ int          ftl_op_in_dispatch(void);
 ```
 
 **路由规则**（`ftl_op_dispatch`）：
-1. `op = completion->op_tag`；越界或 `g_op_service[op] == NULL` ⇒ **孤儿命令**：
+1. `op = completion->op_tag`；越界或 `g_op_callbacks[op] == NULL` ⇒ **孤儿命令**：
    `completion_table_remove` + `fc_command_release` + LOGE（正常不应发生）。
 2. 命中 ⇒ `ctx = completion_table_take(command_id)`（**先摘链再回调**）。
 3. 实例由**命令自身**的 `config.ch/ce/lun` 经 `completion_table_route` 解析
@@ -216,21 +216,21 @@ int          ftl_op_in_dispatch(void);
 `FTL_OP_SYNC_WAIT` 的服务函数**不** release（调用者读完 cmd 数据才释放，否则悬垂）；
 `FTL_OP_HOST_IO` 与各异步 job 的服务函数**自己** release。
 
-**已点亮的槽**（`g_op_service[]`，随各站点改造逐个填）：
+**已点亮的槽**（`g_op_callbacks[]`，随各站点改造逐个填）：
 
 | 槽 | 服务函数 | ctx | 备注 |
 |---|---|---|---|
-| `FTL_OP_SYNC_WAIT` | `ftl_op_sync_wait` | `ftl_sync_waiter_t *`（调用者栈上） | 所有 `ftl_sync_*` |
-| `FTL_OP_HOST_IO` | `ftl_op_host_io` | **NULL** | 服务函数自己 `pending_lookup(cmd_id)`（pending 表比任何新 ctx 都全） |
-| `FTL_OP_JOURNAL` | `ftl_op_journal` | `ftl->journal` | 阶段 2 |
-| `FTL_OP_READ_RECOVERY` | `ftl_op_read_recovery` | `&ftl->rr` | 阶段 3 |
-| `FTL_OP_GC` / `FTL_OP_WL` | `ftl_op_migrate` | `&ftl->mig` | 阶段 4，**GC 与 WL 共用同一引擎**，tag 分开只为日志可辨 |
-| `FTL_OP_L2P` | `ftl_op_l2p` | `l2p_cache_line_t *`（**该 cache line**） | 阶段 5，加载与写回共用（按 `line->state` 收尾） |
-| `FTL_OP_CHECKPOINT` | `ftl_op_checkpoint` | `ftl->cp_job` | 阶段 6 |
-| `FTL_OP_BBT` | `ftl_op_bbt` | `&ftl->alloc` | 阶段 7 |
-| `FTL_OP_METADATA` | `ftl_op_metadata` | `&ftl->metadata_dir->job` | 阶段 8，日志块回收 / 压缩 |
+| `FTL_OP_SYNC_WAIT` | `ftl_sync_wait_callback` | `ftl_sync_waiter_t *`（调用者栈上） | 所有 `ftl_sync_*` |
+| `FTL_OP_HOST_IO` | `ftl_host_io_callback` | **NULL** | 服务函数自己 `pending_lookup(cmd_id)`（pending 表比任何新 ctx 都全） |
+| `FTL_OP_JOURNAL` | `ftl_journal_callback` | `ftl->journal` | 阶段 2 |
+| `FTL_OP_READ_RECOVERY` | `ftl_read_recovery_callback` | `&ftl->read_recovery_handle` | 阶段 3 |
+| `FTL_OP_GC` / `FTL_OP_WL` | `ftl_migrate_callback` | `&ftl->migrate_handle` | 阶段 4，**GC 与 WL 共用同一引擎**，tag 分开只为日志可辨 |
+| `FTL_OP_L2P` | `ftl_l2p_callback` | `l2p_cache_line_t *`（**该 cache line**） | 阶段 5，加载与写回共用（按 `line->state` 收尾） |
+| `FTL_OP_CHECKPOINT` | `ftl_checkpoint_callback` | `ftl->checkpoint_handle` | 阶段 6 |
+| `FTL_OP_BBT` | `ftl_bbt_callback` | `&ftl->alloc` | 阶段 7 |
+| `FTL_OP_METADATA` | `ftl_metadata_callback` | `&ftl->metadata_dir->handle` | 阶段 8，日志块回收 / 压缩 |
 
-⚠ `g_op_service[]` 是 **C99 designated initializer 的 `const` 数组**（非「注册函数」）：
+⚠ `g_op_callbacks[]` 是 **C99 designated initializer 的 `const` 数组**（非「注册函数」）：
 编译期即可发现重复 / 越界，无 init-order 依赖。当前 `sizeof` = 48 B = 12 项；
 **`[1]`~`[11]` 全部有主**（阶段 8 是最后一阶段），`[0]` = `FTL_OP_NONE` 恒 NULL。
 ⚠ `FTL_OP_CHECKPOINT` / `FTL_OP_METADATA` 的服务函数**不推进状态机**（它们的 PREP 阶段含
@@ -273,7 +273,7 @@ return;                                           /* 组在飞数**不**递减 *
 
 - 推进者**不是**外部引擎，而是 `ftl_confirm_kick()`——`ftl_service` Phase 2.5 的**开头**，
   按下标升序扫（停泊项的 `command_id` 已是哨兵，`pending_lookup` 查不到）：
-  仍返 `FTL_AGAIN` 就原地留着下轮再来；否则走与 `ftl_op_host_io` **完全相同**的收尾
+  仍返 `FTL_AGAIN` 就原地留着下轮再来；否则走与 `ftl_host_io_callback` **完全相同**的收尾
   （`pending_release_index` + `pending_group_complete_subop_multi(owners, SSD_STATUS_OK)`）。
 - ⚠ 顺序**必须**早于 Phase 2.5 的补发循环（读旧映射的陈旧数据问题，见 §6.1 注）。
 - 停泊发生在 NAND 编程**成功之后** ⇒ 收尾的子操作状态恒 `SSD_STATUS_OK`（没有写失败分支）。
@@ -356,7 +356,7 @@ typedef struct {
 
 | 阶段 | 位置 | 操作 | NAND 访问 |
 |------|------|------|-----------|
-| 快速路径 | `ftl_op_host_io` | BBT bitmap 置位 + allocator 标记 | ❌ 无 |
+| 快速路径 | `ftl_host_io_callback` | BBT bitmap 置位 + allocator 标记 | ❌ 无 |
 | 后台持久化 | `ftl_service_idle/normal` → `bbt_kick()`（v0.75 阶段 7 起为异步 job） | 攒批写 NAND BBT（池 56-57） | ✅ 一次一页，提交即返回 |
 
 **回滚**：写失败后 L2P 不动（仍指向被替换前的映射），Super Block 空洞由 GC 扫描时读失败自然跳过。无需额外回滚逻辑。
@@ -436,7 +436,7 @@ nand_dispatch_set_armed(1U);            // ③ 放行 NAND 异步提交（submit
  * 由 ftl_storage_t 绑定；描述符本身在 AXI .bss。 */
 static ftl_context_t         g_ftl[CH_NUM][CE_NUM][LUN_NUM];
 static ftl_tables_t          g_ftl_tables[FTL_DIM_TOTAL] SRAM12_DATA;
-static cp_job_t              g_ftl_cp_job[FTL_DIM_TOTAL]  SRAM3_DATA;
+static checkpoint_handle_t              g_ftl_checkpoint_handle[FTL_DIM_TOTAL]  SRAM3_DATA;
 static l2p_journal_t         g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
 static metadata_dir_cache_t  g_ftl_md[FTL_DIM_TOTAL]      SRAM4_DATA;
 static ssd_controller_t      g_ctrl;
@@ -448,7 +448,7 @@ static ssd_controller_t      g_ctrl;
 const uint32_t dim = ftl_topo_dim((ftl_topology_t){.ch = ch, .ce = ce, .lun = lun});
 const ftl_storage_t storage = {
     .tables = &g_ftl_tables[dim], .metadata_dir = &g_ftl_md[dim],
-    .journal = &g_ftl_journal[dim], .cp_job = &g_ftl_cp_job[dim],
+    .journal = &g_ftl_journal[dim], .checkpoint_handle = &g_ftl_checkpoint_handle[dim],
 };
 ftl_init(&g_ftl[ch][ce][lun], (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun},
          &g_l2p_cache[ch][ce], &storage);
@@ -582,7 +582,7 @@ int l2p_cache_ready(l2p_cache_t *cache, lba_t lba);
 ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
 
 /*
- * 起一行 DIRTY 的**异步**写回（提交即返回；完成由 ftl_op_l2p 收尾）。
+ * 起一行 DIRTY 的**异步**写回（提交即返回；完成由 ftl_l2p_callback 收尾）。
  * ⚠ 三态：FTL_OK = 已提交；FTL_AGAIN = 取不到空槽（池空 / 整理 job 在飞 / 刚换块且池吃紧）
  *   ——**背压不是失败**，下轮重试（v0.75 阶段 8 前返回 FTL_ERROR，会让 CP 误中止）；
  *   FTL_ERROR = 建链失败 / 无依赖。
@@ -637,7 +637,7 @@ l2p_cache_load_start(cache, region_id):            ← static，由 read/ready/w
            state = LOADING；load_inflight++
            ⇒ **立即返回 FTL_AGAIN**（不等 NAND）
 
-  完成时（g_op_service[FTL_OP_L2P] = ftl_op_l2p）:
+  完成时（g_op_callbacks[FTL_OP_L2P] = ftl_l2p_callback）:
     成功 → ftl_cmd_read_data 拷进 line->entries（必须早于 release）
     失败 → entries 保持全 INVALID
     两者都 → state = CLEAN；fresh = 1；load_inflight--
@@ -884,7 +884,7 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 | `gc.c` | ⚠ 1 处 | `gc_read_page_with_lba`（`ftl_sync_submit_wait`）——唯一调用者是 `ftl_rebuild_closed_sb_list`（**开机**重建，结构性同步） |
 | `journal.c` | ⚠ 7 处 | ① 非派发上下文的**同步回退**（`journal_append` 页满且 `ftl_op_in_dispatch()==0`）；② 开机 `journal_scan_latest` / `replay` / `truncate` 的擦除与读 |
 | `checkpoint.c` | ⚠ 4 处 | 记录读 ×2 / 写 ×2（**阶段 6** 转 job） |
-| `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / Anchor 落盘全在异步 job（`metadata_job.c`：`metadata_dir_kick` + `ftl_op_metadata`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的 Anchor 读（开机） |
+| `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / Anchor 落盘全在异步 job（`metadata_job.c`：`metadata_dir_kick` + `ftl_metadata_callback`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的 Anchor 读（开机） |
 | `bbt.c` | ⚠ 7 处 | 记录读 ×2、出厂标记读、擦除、持久化写（**阶段 7**） |
 | `power_failure_recovery.c` | ⚠ 4 处 | 开机 region 预载读、空白页裸读（**结构性同步**，长期保留） |
 | `ftl_fc_interface.c` | — | 同步原语与 `ftl_async_*` 异步原语的定义处（机制层） |
@@ -928,7 +928,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 
     Phase 2 ── 处理完成回调
     ├── completion_table_drain()（统一完成泵）
-    └── ftl_op_dispatch() 按 op_tag 查 g_op_service[]
+    └── ftl_op_dispatch() 按 op_tag 查 g_op_callbacks[]
           ├── FTL      → 子操作簿记（数据拷贝到该 slice）→ 组聚合 → pending_remove
           │              → 组可能完成（发一次组通知）
           ├── METADATA → release
@@ -1042,7 +1042,7 @@ include/ftl/
 ├── allocator.h                  # Allocator + Super Block + OP/Spare 池
 ├── journal.h                    # Journal + 四层保护
 ├── gc.h                         # GC 触发条件 + 选 victim（搬移在 migrate.h）
-├── migrate.h                    # 搬移 job（mig_job_t / mig_begin_* / mig_service），v0.75 阶段 4
+├── migrate.h                    # 搬移 job（migrate_handle_t / mig_begin_* / mig_service），v0.75 阶段 4
 ├── metadata.h                   # ★ 固定元数据区布局（单一事实来源）+ FTL_MEDIA_LAYOUT_VERSION + Metadata Directory
 ├── pending.h                    # Pending Request 表 + 完成组表
 ├── completion_table.h           # 统一完成路由表（表项只留 ctx，v0.75）
@@ -1057,7 +1057,7 @@ src/ftl/
 ├── makefile.mk                  # 通配符自动发现
 ├── ftl.c                        # FTL 对外 API + ftl_service 三级模式
 ├── ftl_fc_interface.c           # PBA helper + 同步/异步 NAND 操作实现
-├── l2p_cache.c                  # CLOCK evict + 异步 Region load/flush + thrashing + ftl_op_l2p
+├── l2p_cache.c                  # CLOCK evict + 异步 Region load/flush + thrashing + ftl_l2p_callback
 ├── allocator.c                  # Free Pool + OP/Spare + 磨损均衡
 ├── journal.c                    # append/flush_page/replay/truncate + 刷页 job（v0.75 阶段 2）
 ├── gc.c                         # 选 victim（gc_select_victim）+ gc_read_page_with_lba
@@ -1065,7 +1065,7 @@ src/ftl/
 ├── metadata.c                   # Directory init/lookup/update/flush/load + g_ftl_partitions[] 分区表
 ├── pending.c                    # Pending 表 + 组 add/lookup/remove
 ├── completion_table.c           # 统一完成泵（唯一出口 ftl_op_dispatch，v0.75）
-├── ftl_op.c                     # op tag + g_op_service[] 服务函数数组（v0.75）
+├── ftl_op.c                     # op tag + g_op_callbacks[] 服务函数数组（v0.75）
 ├── checkpoint.c                 # 全量 Checkpoint + 三级触发
 ├── bbt.c                        # BBT 加载/扫描/标记/保存 + 全片擦除
 ├── read_recovery.c              # Read Retry + 邻近页辅助 + 恢复 job 状态机（v0.75 阶段 3）
@@ -1115,7 +1115,7 @@ src/ftl/
                  │  └────────────────────────────────────┘   │
                  │                                            │
                  │  ┌────────────────────────────────────┐   │
-                 │  │ ftl_op_host_io()（逐子操作）        │   │
+                 │  │ ftl_host_io_callback()（逐子操作）        │   │
                  │  │   ① 数据拷贝 → 该 slice buffer     │   │
                  │  │   ② 组聚合 agg_status（粘性）      │   │
                  │  │   ③ pending_remove                 │   │

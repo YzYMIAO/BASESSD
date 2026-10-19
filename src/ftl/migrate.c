@@ -12,7 +12,7 @@
  *   3. 启动           mig_start（static）/ mig_begin_gc / mig_begin_wl / mig_begin_predict
  *   4. 收尾           mig_abort / mig_stall / mig_next_page / mig_finish（static）
  *   5. 推进           ／各 phase 处理函数（static）/ mig_step（static）/ mig_service
- *   6. 完成服务       ftl_op_migrate（g_op_service[FTL_OP_GC] / [FTL_OP_WL]）
+ *   6. 完成服务       ftl_migrate_callback（g_op_callbacks[FTL_OP_GC] / [FTL_OP_WL]）
  *
  * 设计要点见 include/ftl/migrate.h（状态机、单飞行、F10 契约）。
  *
@@ -58,7 +58,7 @@ static void mig_step(ftl_context_t *ftl);
  *   的缓存字段在快路径下都是未初始化的 0 ⇒ 擦除收尾会去改**块 0** 的元数据
  *   （erase_count / clear_valid / allocator_free_block）。
  * 调用点已保证 super_block_has_plane() 为真（哨兵 plane 不展开）。 */
-static uint16_t mig_src_gblock(const mig_job_t *m, uint8_t plane)
+static uint16_t mig_src_gblock(const migrate_handle_t *m, uint8_t plane)
 {
     return ftl_gblock(plane, m->victim.plane_blocks[plane]);
 }
@@ -81,7 +81,7 @@ static void mig_victim_from_planes(super_block_t *sb, const uint16_t plane_block
  *   · 部分 plane 已擦除后 job 中止，重试时那些 plane 已是 FREE/RETIRED/BAD，
  *     再擦一次会重复计磨损 / 复活 BAD；
  *   · 迁移期间被 RR 标 BAD 的 plane 不能再读/擦。 */
-static uint8_t mig_next_present_plane(const ftl_allocator_t *alloc, const mig_job_t *m, uint8_t from)
+static uint8_t mig_next_present_plane(const ftl_allocator_t *alloc, const migrate_handle_t *m, uint8_t from)
 {
     for (uint8_t p = from; p < PLANE_NUM; p++)
     {
@@ -104,7 +104,7 @@ static uint8_t mig_next_present_plane(const ftl_allocator_t *alloc, const mig_jo
 }
 
 /* 从 from 起找下一个**本页有有效 CW** 的 plane；没有返回 PLANE_NUM。 */
-static uint8_t mig_next_data_plane(const mig_job_t *m, uint8_t from)
+static uint8_t mig_next_data_plane(const migrate_handle_t *m, uint8_t from)
 {
     uint8_t p;
 
@@ -121,8 +121,8 @@ static uint8_t mig_next_data_plane(const mig_job_t *m, uint8_t from)
 /* ── 2. 提交原语 ── */
 
 /* 提交一条搬移命令时用的 op tag：GC 与 WL 共用同一服务函数，但 tag 分开——
- * 日志/调试时能一眼看出这条命令属于哪条路径（g_op_service 两个槽指向同一函数）。 */
-static ftl_op_id_t mig_op_tag(const mig_job_t *m)
+ * 日志/调试时能一眼看出这条命令属于哪条路径（g_op_callbacks 两个槽指向同一函数）。 */
+static ftl_op_id_t mig_op_tag(const migrate_handle_t *m)
 {
     return (m->kind == MIG_KIND_GC) ? FTL_OP_GC : FTL_OP_WL;
 }
@@ -132,7 +132,7 @@ static ftl_op_id_t mig_op_tag(const mig_job_t *m)
  *   也是一轮"提交不出去"，提前清零会让 MIG_SUBMIT_STALL_MAX 永不触发。 */
 static ftl_status_t mig_submit(ftl_context_t *ftl, fc_command_t *cmd)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     m->waiting = true;
 
@@ -152,7 +152,7 @@ static ftl_status_t mig_submit(ftl_context_t *ftl, fc_command_t *cmd)
  * ——**读**不像写那样在 prepare 阶段搬数据（见 ftl_async_read_page 的注释）。 */
 static ftl_status_t mig_submit_read(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     fc_command_t      *cmd;
     const ftl_status_t ret = ftl_async_read_page(&cmd, m->src[m->plane], FTL_PAGE_CFG_DATA_ANY());
@@ -170,7 +170,7 @@ static ftl_status_t mig_submit_read(ftl_context_t *ftl)
  *   逐 CW 仍是正确的扇区 LBA。 */
 static ftl_status_t mig_submit_write(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     fc_command_t      *cmd;
     const ftl_status_t ret = ftl_async_write_page_cw(&cmd,
@@ -189,7 +189,7 @@ static ftl_status_t mig_submit_write(ftl_context_t *ftl)
 /* 提交一条 victim 块擦除。 */
 static ftl_status_t mig_submit_erase(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     const nand_pba_t block_addr = super_block_page_pba(ftl->topo, &m->victim, m->plane, 0U);
 
@@ -221,9 +221,9 @@ static void mig_start(ftl_context_t *ftl, const super_block_t *victim, mig_kind_
      * active 是运行时状态（单飞行），由调用者在选块**之前**判过 ⇒ 这里是死守卫。 */
     ASSERT(ftl != NULL);
     ASSERT(victim != NULL);
-    ASSERT(!ftl->mig.active);
+    ASSERT(!ftl->migrate_handle.active);
 
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     memset(m, 0, sizeof(*m));
     m->victim          = *victim;
@@ -246,7 +246,7 @@ bool mig_begin_gc(ftl_context_t *ftl)
 {
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
     ASSERT(ftl != NULL);
-    if (ftl->mig.active)
+    if (ftl->migrate_handle.active)
     {
         return false;
     }
@@ -271,7 +271,7 @@ bool mig_begin_wl(ftl_context_t *ftl)
 {
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
     ASSERT(ftl != NULL);
-    if (ftl->mig.active)
+    if (ftl->migrate_handle.active)
     {
         return false;
     }
@@ -301,7 +301,7 @@ bool mig_begin_predict(ftl_context_t *ftl)
 {
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
     ASSERT(ftl != NULL);
-    if (ftl->mig.active)
+    if (ftl->migrate_handle.active)
     {
         return false;
     }
@@ -344,7 +344,7 @@ bool mig_begin_predict(ftl_context_t *ftl)
 /* 中止 job：不擦 victim、不动 L2P、不移除 closed 条目（源数据仍有效，下轮重试）。 */
 static void mig_abort(ftl_context_t *ftl, const char *reason)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     LOGW("[MIG] abort kind=%u phase=%u page=%u plane=%u — %s\r\n",
          (unsigned)m->kind,
@@ -370,7 +370,7 @@ static void mig_abort(ftl_context_t *ftl, const char *reason)
 /* 累计一次「提交不出去」；超限即中止 job。返回 true = 已中止。 */
 static bool mig_stall(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     if (m->stall_rounds >= MIG_SUBMIT_STALL_MAX)
     {
@@ -385,7 +385,7 @@ static bool mig_stall(ftl_context_t *ftl)
  * ⚠ 与 mig_stall 分开：外部命令在飞也计数——"在飞"不等于"会完成"。 */
 static bool mig_wait(ftl_context_t *ftl, const char *reason)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     if (m->wait_rounds >= MIG_WAIT_MAX)
     {
@@ -399,7 +399,7 @@ static bool mig_wait(ftl_context_t *ftl, const char *reason)
 /* 推进到下一页（清本页状态）。读/写两阶段的页推进都走这里。 */
 static void mig_next_page(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     m->page      = (uint8_t)(m->page + 1U);
     m->plane     = 0U;
@@ -424,7 +424,7 @@ static void mig_next_page(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 static void mig_finish(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     if (!m->aborted)
     {
@@ -490,7 +490,7 @@ static void mig_finish(ftl_context_t *ftl)
 
 static bool mig_step_read(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     if (m->page >= PAGES_PER_BLOCK)
     {
@@ -559,8 +559,8 @@ static bool mig_lba_usable(const ftl_context_t *ftl, lba_t lba)
 
 static bool mig_step_read_settle(ftl_context_t *ftl)
 {
-    mig_job_t    *m     = &ftl->mig;
-    const uint8_t plane = m->plane;
+    migrate_handle_t *m     = &ftl->migrate_handle;
+    const uint8_t     plane = m->plane;
 
     if (!m->decode_ok)
     {
@@ -617,7 +617,7 @@ static bool mig_step_read_settle(ftl_context_t *ftl)
 
 static bool mig_step_write(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     /* 找本页下一个有待写 CW 的 plane */
     m->plane = mig_next_data_plane(m, m->plane);
@@ -642,8 +642,8 @@ static bool mig_step_write(ftl_context_t *ftl)
 
 static bool mig_step_write_settle(ftl_context_t *ftl)
 {
-    mig_job_t    *m     = &ftl->mig;
-    const uint8_t plane = m->plane;
+    migrate_handle_t *m     = &ftl->migrate_handle;
+    const uint8_t     plane = m->plane;
 
     if (m->write_ok)
     {
@@ -739,7 +739,7 @@ static bool mig_step_write_settle(ftl_context_t *ftl)
 
 static bool mig_step_flush_jrn(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     /* Journal 持久性失败 pending（页写失败 ⇒ 条目已丢）：
      * 在 CP 确认当前 L2P 已落盘之前，任何 victim 都不许擦——包括本 job 没有搬移
@@ -763,14 +763,14 @@ static bool mig_step_flush_jrn(ftl_context_t *ftl)
 
     journal_kick(ftl->journal); /* job 空闲且有待写页 ⇒ 起异步刷页 */
 
-    if (ftl->journal->job.phase != JRN_IDLE)
+    if (ftl->journal->handle.phase != JRN_IDLE)
     {
         /* 有命令在飞不计提交卡死，但计入独立的等待上限：Journal job 永久卡住时
          * job 否则永不中止（RISK-MIG-01）。 */
         (void)mig_wait(ftl, "journal flush timeout");
         return true;
     }
-    if ((ftl->journal->job.need_erase != 0U) || (ftl->journal->current_entry != 0U))
+    if ((ftl->journal->handle.need_erase != 0U) || (ftl->journal->current_entry != 0U))
     {
         /* 想刷却刷不动（命令池空）⇒ 计卡死轮数；超限中止（**不擦 victim**） */
         (void)mig_stall(ftl);
@@ -786,7 +786,7 @@ static bool mig_step_flush_jrn(ftl_context_t *ftl)
 
 static bool mig_step_erase(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     m->plane = mig_next_present_plane(&ftl->alloc, m, m->plane);
 
@@ -819,7 +819,7 @@ static bool mig_step_erase(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 static void mig_step(ftl_context_t *ftl)
 {
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     for (;;)
     {
@@ -872,7 +872,7 @@ void mig_service(ftl_context_t *ftl)
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
     ASSERT(ftl != NULL);
 
-    mig_job_t *m = &ftl->mig;
+    migrate_handle_t *m = &ftl->migrate_handle;
 
     if (!m->active)
     {
@@ -896,12 +896,12 @@ void mig_service(ftl_context_t *ftl)
     mig_step(ftl);
 }
 
-/* ── 6. 完成服务（g_op_service[FTL_OP_GC] / [FTL_OP_WL]）── */
+/* ── 6. 完成服务（g_op_callbacks[FTL_OP_GC] / [FTL_OP_WL]）── */
 
 /* MIG_READ 完成：拷数据 + 解 META 得逐 CW 的扇区 LBA；顺带记 ECC 趋势 + read_count
  * （慢死预测闭环）。失败 / 全页空洞 ⇒ 该 plane 无有效 CW，不影响另一 plane。 */
 static void mig_complete_read(ftl_context_t             *ftl,
-                              mig_job_t                 *m,
+                              migrate_handle_t          *m,
                               fc_command_t              *cmd,
                               const fc_command_status_t *completion)
 {
@@ -996,7 +996,7 @@ static void mig_complete_read(ftl_context_t             *ftl,
 /* MIG_WRITE 完成：只记成败，L2P/Journal/有效计数的改动在 MIG_WRITE_SETTLE。
  * 写失败 ⇒ **中止 job，victim 不擦**（源数据仍有效，下轮再搬）；绝不能继续到 ERASE。 */
 static void mig_complete_write(ftl_context_t             *ftl,
-                               mig_job_t                 *m,
+                               migrate_handle_t          *m,
                                fc_command_t              *cmd,
                                const fc_command_status_t *completion)
 {
@@ -1046,7 +1046,7 @@ static void mig_complete_write(ftl_context_t             *ftl,
 /* MIG_ERASE 完成：成功 ⇒ erase_count++ / last_pe_ts / 清 valid，
  * 然后按 post 二选一（FREE 入池 / RETIRE 退役）；失败 ⇒ bbt_mark_bad。 */
 static void mig_complete_erase(ftl_context_t             *ftl,
-                               mig_job_t                 *m,
+                               migrate_handle_t          *m,
                                fc_command_t              *cmd,
                                const fc_command_status_t *completion)
 {
@@ -1119,15 +1119,15 @@ static void mig_complete_erase(ftl_context_t             *ftl,
 }
 
 /* --------------------------------------------------------------------
- * ftl_op_migrate
+ * ftl_migrate_callback
  *   功能：搬移命令的完成服务函数——按 job.phase 判完成结果、改 phase、release 命令，
  *         再交回 mig_step 续跑。
- *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `mig_job_t *`（= &ftl->mig）。
+ *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `migrate_handle_t *`（= &ftl->migrate_handle）。
  *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
  * -------------------------------------------------------------------- */
-void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
-    mig_job_t *m = (mig_job_t *)ctx;
+    migrate_handle_t *m = (migrate_handle_t *)ctx;
 
     ASSERT(completion != NULL);
     ASSERT(m != NULL);
@@ -1137,7 +1137,7 @@ void ftl_op_migrate(struct ftl_context *ftl, const fc_command_status_t *completi
     /* 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出来的归属实例，
      * 二者必须一致——不一致说明派发路由错了。 */
     ASSERT(ftl != NULL);
-    ASSERT(&ftl->mig == m);
+    ASSERT(&ftl->migrate_handle == m);
 
     /* 孤儿 / 重复完成：job 已收尾或当前没有在飞命令 ⇒ 只释放命令，不改状态。
      * 否则迟到的完成会按新 job 的 phase 被误解释（同 read_recovery.c 的守卫）。 */
