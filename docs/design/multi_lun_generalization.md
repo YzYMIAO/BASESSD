@@ -143,13 +143,13 @@
 
 - **数据通路一律用 host 全局 LBA**：`group` / `pending->lba` / `wbuf.base` /
   `cmd->meta`（页 META）/ journal 条目 / migrate 的 `cw_lba` / read recovery /
-  F2 全部是全局。
+  full metadata rebuild 全部是全局。
 - **唯一局部坐标**：映射页在 owner die 元数据区里的位置
   `local_region = global_region / FTL_DIM_TOTAL`，只出现在 cache 的 metadata 边界
   （`metadata_dir_lookup/append_slot/commit_region`、`l2p_region_pba`）。
 - `lba_to_local()` 退出数据通路（作为地址原语保留，生产代码零调用）；
   entries 下标 `lba & 511` 在全局/局部下相同。
-- **不可信 LBA 先校验**（META/journal/F2 读回值）：
+- **不可信 LBA 先校验**（META/journal/full metadata rebuild 读回值）：
   `FTL_LBA_INVALID` / `>= L2P_GLOBAL_LBA_MAX` / `!lba_routes_to(..., topo)` 一律跳过。
 - `FTL_DIM_TOTAL=1` 时 global == local，默认行为逐位不变；介质值不变。
 - 全量调用点回扫清单见 §4 Phase B 清单。
@@ -267,7 +267,7 @@ N=4 仍需表瘦身或 SDRAM。
 - [x] `ftl_l2p_callback` 提交到 owner 的 `metadata_dir`（local region = global/DIM）
 - [x] Checkpoint：`l2p_cache_snapshot_owner_bitmap` 生成**本地** 2048-bit 快照；
       `cp_flush_regions` owner 过滤；拆同尺寸断言；Header 格式不变
-- [x] 数据通路全链路全局 LBA：group/pending/wbuf/page META/journal/migrate/rr/F2/trim
+- [x] 数据通路全链路全局 LBA：group/pending/wbuf/page META/journal/migrate/rr/full metadata rebuild / trim
 - [x] 不可信 LBA 校验：`FTL_LBA_INVALID` / `< L2P_GLOBAL_LBA_MAX` / `lba_routes_to`
 - [x] 介质版本：`6 + (FTL_DIM_TOTAL > 1)`；DIM=1 不格式化
 - [x] 内存实测：`g_ftl` 173,832 B/实例 + `g_l2p_cache` 132,136 B/(ch,ce)

@@ -34,7 +34,7 @@
  * completion_table_route 解析后传入（不是"谁在 drain"）。
  *
  * 路由表在 main.c 的**逐实例 boot 之前**设好（ssd_ftl_boot_all ①：先
- * completion_table_init 清一次、再 set_route；boot 期 F2 重建就会抽完成表），
+ * completion_table_init 清一次、再 set_route；boot 期 full metadata rebuild 就会抽完成表），
  * 故服务函数收到的 ftl **不应**为 NULL——收到 NULL 是编程错误，不是"开机早期"
  * 的正常状态（FTL_OP_SYNC_WAIT 的服务函数不用 ftl，是唯一例外）。
  */

@@ -11,12 +11,12 @@
  *
  *   Clean Start（干净关机）
  *     — 有 Checkpoint，Journal 已全部回填到 L2P Table
- *     — 块元数据快照有效 ⇒ 加载块元数据 + probe 池块 + 建池（不跑 F2）；否则 F2 → carve
+ *     — 块元数据快照有效 ⇒ 加载块元数据 + probe 池块 + 建池（不跑 full metadata rebuild）；否则 full metadata rebuild → carve
  *
  *   Power Failure Recovery（异常掉电）
  *     — 有 Checkpoint，Journal 有未回放的条目（sequence > cp_seq）
  *     — ① 块元数据快照恢复（若有效）② Journal 回放（映射 + valid 增量）③ F4
- *       ④ probe + build_pools；任一步不一致 ⇒ reset → F2 → carve
+ *       ④ probe + build_pools；任一步不一致 ⇒ reset → full metadata rebuild → carve
  *
  * 设计文档参考：§8.3 启动恢复完整流程
  */
@@ -55,7 +55,7 @@ typedef struct
     ftl_boot_type_t boot_type;       /* 启动类型 */
     uint32_t        cp_sequence;     /* Checkpoint sequence（0 = 无） */
     uint32_t        journal_entries; /* 回放的 Journal entry 数 */
-    uint8_t         blocks_restored; /* 1 = 块元数据快照已加载；0 = F2 兜底 */
+    uint8_t         blocks_restored; /* 1 = 块元数据快照已加载；0 = full metadata rebuild 兜底 */
 } ftl_boot_result_t;
 
 /* ── 块元数据快照恢复（Checkpoint 的 16-bit/块 word）──
@@ -66,12 +66,12 @@ typedef struct
     uint16_t closed_blocks;   /* 恢复出的 Closed 条目数（退化单 plane 计） */
     uint16_t log_blocks;      /* 恢复出的活 LOG 块数 */
     uint16_t anomalies;       /* 探测发现的「池块却有数据」块数 */
-    uint16_t l2p_read_errors; /* 探测中 L2P 反查失败次数（非 0 ⇒ 快照结果不完整，回退 F2） */
+    uint16_t l2p_read_errors; /* 探测中 L2P 反查失败次数（非 0 ⇒ 快照结果不完整，回退 full metadata rebuild） */
     uint32_t valid_cw;        /* 探测补算出的有效 CW 数 */
 } ftl_block_restore_stats_t;
 
-/* ── F2 / 块元数据恢复原语是**模块内部实现**（static，定义在 .c）──
- * 上游只能通过 ftl_boot_recovery 触发；F2 的判空/写指针/逐 CW 反查三者同源。 */
+/* ── full metadata rebuild / 块元数据恢复原语是**模块内部实现**（static，定义在 .c）──
+ * 上游只能通过 ftl_boot_recovery 触发；full metadata rebuild 的判空/写指针/逐 CW 反查三者同源。 */
 
 /* ── 接口 ── */
 

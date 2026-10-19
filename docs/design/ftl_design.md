@@ -156,7 +156,7 @@
 | **Checkpoint（CP）** | L2P 全量快照 + 块元数据快照 + 截断 Journal |
 | **Anchor** | Metadata Directory 的全量快照，存在固定 Anchor 池 |
 | **modify-after-confirm** | 先等 NAND PROGRAM 成功，再改 L2P/Journal；失败则 L2P 不动 = 自动回滚 |
-| **F2** | 掉电重建：全盘扫描、逐 CW 读 META 反查 L2P，重建 Closed 列表与有效计数 |
+| **full metadata rebuild** | 全盘元数据重建（本仓自述；机制 = full media scan + 逐 CW 读 META 反查 L2P）：重建 Closed 列表与有效计数 |
 | **F4** | 按 Checkpoint 的 region 位图局部预载 L2P region |
 | **F10** | 搬移条目先落 Journal，再擦 victim（数据安全屏障） |
 | **Read Recovery** | 读失败恢复：读重试电压 → 邻居页辅助 → 标坏/搬移 |
@@ -231,7 +231,7 @@ FTL 不直接碰 NAND，一律经 FC 接口下发命令，由 FC 保证 CRC + EC
 | 目标 | 导出约束 | 落点 |
 |---|---|---|
 | 主机写不丢映射 | 映射变更先入 Journal；Checkpoint 截断前 Journal 不得擦 | §3.7、§3.8 |
-| 掉电恢复时间有界 | Journal 容量有界 + 定期 Checkpoint；块元数据快照避免全盘 F2 | §3.8、§3.1 |
+| 掉电恢复时间有界 | Journal 容量有界 + 定期 Checkpoint；块元数据快照避免 full metadata rebuild | §3.8、§3.1 |
 | 前台不会被后台饿死 | 单线程 superloop；后台按负载分档 + 时间预算；must-run 只放防死锁动作 | §3.12 |
 | 写放大可控 | CW 级映射 + 页打包 + 只搬有效 CW + 冷热分离 | §3.11、§3.13 |
 | 容量不无声流失 | 池账本唯一闸门；坏块/退役块不得留在 Free Pool；块���快照 | §3.2、§3.8 |
@@ -315,7 +315,7 @@ flowchart TB
         P1["ftl_init S3-1"] --> P2["介质版本检查 S2-5"]
         P2 --> P3["journal_scan_latest checkpoint_find_latest S3-7 S3-8"]
         P3 --> P4{"fresh clean PF"}
-        P4 --> P5["块元数据快照恢复 journal replay F2 S4-1 至 S4-3"]
+        P4 --> P5["块元数据快照恢复 journal replay full metadata rebuild S4-1 至 S4-3"]
         P5 --> P6["carve build pools 到 Ready"]
     end
 
@@ -330,7 +330,7 @@ flowchart TB
   真正的 NAND 元数据写发生在后台（`M5` 起）或 Checkpoint（`M10`）。
 - 所有 NAND 命令最终都走 `C1→C2→C3→C4→C5→C6`：**提交与完成解耦**，
   完成由 op tag 选择服务函数（§3.10）。
-- 上电路径 `P1→P6` 在进入 superloop 之前完成；`P5` 的 F2 是兜底，优先走快照/回放。
+- 上电路径 `P1→P6` 在进入 superloop 之前完成；`P5` 的 full metadata rebuild 是兜底，优先走快照/回放。
 
 <a id="s1-5" name="s1-5"></a>
 
@@ -345,7 +345,7 @@ flowchart TB
 | **P5** Checkpoint | 水位/写入量/定时/紧急 | §3.8：快照 → flush regions → Anchor → 块元数据 → 磨损 → Header → 截断 | 新 CP record；Anchor；Journal 水位标志/预擦 | flush 失败 → 中止，不写 Header | §4.7 |
 | **P6** GC / WL / 预测迁移 | 后台触发 / 写路径紧急 GC | §3.13：选 victim → 读 → 反查有效 → 写新页 → 改 L2P/Journal → 屏障 → 擦 | 新位置映射；journal 条目；源块擦除/归还或退役 | 分配不到目标页 → 中止且不擦 victim | §4.8 |
 | **P7** 读恢复 | host 读 ECC 失败 | §3.14：托管 pending → 读重试 → 邻居页 → 标坏/搬移 | 成功则拷回；失败则 BBT 标坏 + 迁移 | 提交侧长期无进展 → 按失败收尾 | §4.9 |
-| **P8** 上电恢复 | `ftl_init` 后 | §3.1 → §2.5 版本 → §3.7 scan → §3.8 find → §3.1 三分支 → F2 | 块元数据/映射/cache 从介质重建 | 快照/探测不一致 → F2 兜底 | §4.1~4.3 |
+| **P8** 上电恢复 | `ftl_init` 后 | §3.1 → §2.5 版本 → §3.7 scan → §3.8 find → §3.1 三分支 → full metadata rebuild | 块元数据/映射/cache 从介质重建 | 快照/探测不一致 → full metadata rebuild 兜底 | §4.1~4.3 |
 
 ### 1.6 DRAM 型 vs DRAM-less / 企业级 vs 消费级
 
@@ -852,14 +852,14 @@ flowchart TD
     FMT --> BR
     BR --> JS["journal_scan_latest"]
     JS --> CPF["checkpoint_find_latest"]
-    CPF -- "无 CP" --> FRESH["fresh: F2 → carve"]
+    CPF -- "无 CP" --> FRESH["fresh: full metadata rebuild → carve"]
     CPF -- "有 CP" --> LS["块元数据 + 磨损快照 load"]
     LS -- "干净关机" --> CL["块元数据快照恢复"]
     LS -- "异常掉电" --> JR["journal_replay"]
     CL --> F4["F4 按 bitmap 逐 region 预载"]
     JR --> F4
     F4 --> POOL["probe + build pools + Spare 补池（快照路径）"]
-    POOL -- "失败" --> FB["reset → F2 → carve"]
+    POOL -- "失败" --> FB["reset → full metadata rebuild → carve"]
     POOL -- "成功" --> LOOP["superloop"]
     FRESH --> LOOP
     FB --> LOOP
@@ -915,7 +915,7 @@ flowchart LR
 | L2P 增量 | Journal（lba / old_pba / new_pba / seq） | replay `seq > CP journal_sequence` |
 | L2P region 页 | L2P log block（Directory 指向最新页） | Directory 加载后按 PBA 读回 |
 | Directory | Anchor（全量快照，P0+P1 镜像） | `metadata_dir_load` 取最新完整 record |
-| 块元数据快照 | Checkpoint（4 页 word，P0+P1 镜像） | `checkpoint_load_block_table`；失败走 F2 |
+| 块元数据快照 | Checkpoint（4 页 word，P0+P1 镜像） | `checkpoint_load_block_table`；失败走 full metadata rebuild |
 | 坏块图 | BBT（P0+P1 镜像） | `bbt_init`；运行时 `bbt_mark_bad` 兜底 |
 | 磨损/读计数 | Checkpoint 磨损快照（16 页，P0+P1 镜像，软状态） | `checkpoint_load_wear_table`；丢失只退化 WL |
 
@@ -1039,7 +1039,7 @@ FTL 的运行时状态分两类：
 
 #### 3.1.2 职责与边界
 
-- **做**：判定启动类型；编排“扫描 → 分类 → 恢复块元数据 / 回放 Journal / F2 → 建池”的顺序；
+- **做**：判定启动类型；编排“扫描 → 分类 → 恢复块元数据 / 回放 Journal / full metadata rebuild → 建池”的顺序；
   维护恢复结果与统计。
 - **不做**：不定义 Journal/Checkpoint/Anchor 的记录格式（各模块自己拥有）；不做介质格式化
   （`ftl_media_format` 在版本判据命中时调用）；不处理 host IO。
@@ -1051,7 +1051,7 @@ FTL 的运行时状态分两类：
 |---|---|---|
 | `ftl_boot_type_t` | `FRESH / CLEAN / POWER_FAILURE` | 启动分类 |
 | `ftl_boot_result_t` | `boot_type`、`cp_sequence`、`journal_entries`、`blocks_restored` | 观测/日志 |
-| `ftl_rebuild_stats_t` | `blocks_rebuilt`、`partial_blocks`、`valid_cw` | F2 结果 |
+| `ftl_rebuild_stats_t` | `blocks_rebuilt`、`partial_blocks`、`valid_cw` | full metadata rebuild 结果 |
 | `checkpoint_handle_t.block_words` | 16-bit/块 × 4096 | Checkpoint 的块元数据快照，boot 时复用为加载缓冲 |
 | `checkpoint_handle_t.wear_page` / `wear_page_crc[16]` / `wear_page_buf` | 8 B/块 × 4096 → 16 页 | 磨损快照写进度 / 每页 CRC / 组页缓冲 |
 
@@ -1062,9 +1062,9 @@ FTL 的运行时状态分两类：
    只比页首页序号会漏掉跨水位那一页的新条目。
 3. **三条路径都要 `journal_resume`**：环形块没有被擦，写指针/序号必须接回；
    否则二次编程或序号回退。
-4. **Open SB 不续写**：快照/F2 都把 OPEN 降级为 CLOSED，整块交 GC。掉电可能留下半编程页，
+4. **Open SB 不续写**：快照/full metadata rebuild 都把 OPEN 降级为 CLOSED，整块交 GC。掉电可能留下半编程页，
    续写会二次编程；Policy B 下两 plane 的配对也无法可靠恢复。
-5. **快照失败只回退 F2，不格式化**：格式化只由介质版本判据触发。
+5. **快照失败只回退 full metadata rebuild，不格式化**：格式化只由介质版本判据触发。
 
 #### 3.1.4 启动判定流程
 
@@ -1072,20 +1072,20 @@ FTL 的运行时状态分两类：
 flowchart TD
     BOOT["ftl_boot_recovery"] --> LATEST["journal_scan_latest 只读,不改状态"]
     LATEST --> FIND{"checkpoint_find_latest 有当前版本有效 Header"}
-    FIND -- "否" --> FRESH["fresh F2 全扫 → carve"]
+    FIND -- "否" --> FRESH["fresh full metadata rebuild 全扫 → carve"]
     FIND -- "是" --> LOAD{"checkpoint_load_block_table"}
-    LOAD -- "否" --> PFALL["块元数据走 F2 兜底"]
+    LOAD -- "否" --> PFALL["块元数据走 full metadata rebuild 兜底"]
     LOAD -- "是" --> WEAR["checkpoint_load_wear_table 软状态，失败只从 0 起算"]
     WEAR --> JUDGE{"page_seq entry_count 不高于 cp-journal_sequence"}
     JUDGE -- "是" --> CLEAN["clean restore probe build_pools"]
     JUDGE -- "否" --> PF["PF restore journal replay F4 probe build_pools"]
-    PFALL --> F2["reset → F2 → carve"]
+    PFALL --> FULL_SCAN["reset → full metadata rebuild → carve"]
     PF --> PFOk{"块元数据恢复一致"}
-    PFOk -- "否" --> F2
+    PFOk -- "否" --> FULL_SCAN
     PFOk -- "是" --> READY["Controller 到 Ready"]
     CLEAN --> READY
     FRESH --> READY
-    F2 --> READY
+    FULL_SCAN --> READY
 ```
 
 #### 3.1.5 关键流程
@@ -1097,36 +1097,36 @@ flowchart TD
    - 无有效 CP → **fresh**；
    - `page_seq + entry_count <= cp.journal_sequence` → **clean**（Journal 已全部落入 L2P）；
    - 否则 → **power failure**（有未回放的增量）。
-3. **fresh**：失效本 owner 的 cache 行/脏位 → **F2 重建 Closed 列表 → carve 池**
+3. **fresh**：失效本 owner 的 cache 行/脏位 → **full metadata rebuild（重建 Closed 列表）→ carve 池**
    （carve 只把 state==NONE 的块入池）→ Spare 补池 → `journal_resume(floor=1)`。
 4. **clean**：块元数据快照有效时 `restore_blocks`（先全量校验再应用）→ 按 CP 位图
    **逐 region 预载**（F4，不按 INVALID 行的 region_id 反查）→ probe 池块 →
-   `build_pools` → Spare 补池；任一步失败 → reset → F2 → carve。
+   `build_pools` → Spare 补池；任一步失败 → reset → full metadata rebuild → carve。
    最后 `journal_resume(floor=cp_seq)`。
 5. **PF**：先恢复块元数据 → `journal_replay`（所有 `page_seq+entry_count > cp_seq` 的页，
    按 `(page_seq, entry_idx)` 递增，last-write-wins；同步维护 valid_count）→ F4 →
-   probe + `build_pools` + Spare 补池；失败 → reset → F2 → carve。
-6. **F2**：逐 plane/块扫 page 0 判空、找写指针；坏块/元数据块跳过；写过的块建退化单 plane
-   的 Closed 条目；逐页读 META + 反查 L2P 回填 `valid_count`。F2 **先于 carve**：
+   probe + `build_pools` + Spare 补池；失败 → reset → full metadata rebuild → carve。
+6. **full metadata rebuild**：逐 plane/块扫 page 0 判空、找写指针；坏块/元数据块跳过；写过的块建退化单 plane
+   的 Closed 条目；逐页读 META + 反查 L2P 回填 `valid_count`。full metadata rebuild **先于 carve**：
    否则被 carve 放进 Spare/OP 的写过块会同时成为 Closed 条目。
 
 **启动时间量级**（观测值，不是编译期常量）：
 
 | 路径 | 量级 | 说明 |
 |---|---:|---|
-| clean + 块元数据快照 | ~150 ms | 不跑 F2；probe 只读池块 page 0 |
+| clean + 块元数据快照 | ~150 ms | 不跑 full metadata rebuild；probe 只读池块 page 0 |
 | power failure | ~250 ms | 多 Journal 回放 |
-| F2 兜底 | ~400~550 ms | 全盘扫描 + 逐页反查 |
+| full metadata rebuild 兜底 | ~400~550 ms | 全盘扫描 + 逐页反查 |
 
 #### 3.1.6 失败语义
 
 | 失败点 | 结果 | 数据影响 |
 |---|---|---|
-| 无有效 CP | fresh + F2 | 旧映射不可达（介质已被格式化/版本不符时这是预期） |
-| 块元数据快照 CRC 失败 | 该快照丢弃，F2 重建 | 用户数据不丢；恢复时间变长 |
+| 无有效 CP | fresh + full metadata rebuild | 旧映射不可达（介质已被格式化/版本不符时这是预期） |
+| 块元数据快照 CRC 失败 | 该快照丢弃，走 full metadata rebuild | 用户数据不丢；恢复时间变长 |
 | Journal 回放某页读失败 | 跳过该页，继续其余页 | 该页条目丢失；映射可能回退到上一版本 |
-| 块元数据恢复与 probe 不一致 | reset → F2 → carve | 以介质为准；块元数据重新计算 |
-| F2 中某块读失败 | 跳过该块 | 该块数据不可恢复；后续由 GC 处理 |
+| 块元数据恢复与 probe 不一致 | reset → full metadata rebuild → carve | 以介质为准；块元数据重新计算 |
+| full metadata rebuild 中某块读失败 | 跳过该块 | 该块数据不可恢复；后续由 GC 处理 |
 
 ⚠ **恢复路径不在完成派发里**：它在 superloop 之前运行，无人 drain CQ，所以允许使用
 `*_sync` 逃生口（内部自旋泵）。服务函数禁止调用这些同步口（会嵌套泵）。
@@ -1891,7 +1891,7 @@ metadata_dir_anchor_commit(dir, &ring, idx, ok)
 | CP 的 Anchor 阶段 | `metadata_dir_anchor_prepare/page/commit`，与压缩 job 共用同一套三段式 |
 | 共享 cache 的 owner | `owner_of_region(global_region)` 返回 `l2p_owner_t {dim, metadata_dir, alloc, topo}`；不返回整个 `ftl_context_t` |
 
-**`ftl_is_metadata_block` 的三条分支**（F2/建池共用）：
+**`ftl_is_metadata_block` 的三条分支**（full metadata rebuild / 建池共用）：
 
 1. **固定分区**：遍历 `g_ftl_partitions[]` 按 `first_block/block_count` 判区间；
    固定块号各 die 相同，**与 plane 无关**。
@@ -1901,7 +1901,7 @@ metadata_dir_anchor_commit(dir, &ring, idx, ok)
    同样必须带 plane 比较。
 
 漏掉 2/3 的 plane 比较会把另一 plane 的同号块一起排除——它既进不了 Free Pool，
-又被 F2 跳过，落在任何池之外（容量白丢）。
+又被 full metadata rebuild 跳过，落在任何池之外（容量白丢）。
 
 #### 3.5.11 失败语义与掉电点
 
@@ -1914,7 +1914,7 @@ metadata_dir_anchor_commit(dir, &ring, idx, ok)
 | Anchor 已落盘、擦 victim 之前 | 新位置已登记且落盘 | victim 未擦，映射完整；下次压缩重来 |
 | 擦 victim 中掉电 | victim 部分块擦除 | `l2p_live == 0` 才擦，且 Anchor 已先落盘 ⇒ 无映射指向 victim |
 | 回收日志块时掉电 | 无活 region 的块被擦 | 无映射引用它，安全 |
-| Anchor 池/日志块 NAND 读失败 | record/页作废 | 回退到上一个有效 Anchor；最坏走 F2 |
+| Anchor 池/日志块 NAND 读失败 | record/页作废 | 回退到上一个有效 Anchor；最坏走 full metadata rebuild |
 | 介质版本不符 | 记录作废 | `ftl_media_format` 全片格式化（§2.5） |
 
 ⚠ **“没有本层 CRC”不是漏洞**：元数据页的 FC CRC 由 `FTL_PAGE_CFG_META` 统一开启；
@@ -2240,7 +2240,7 @@ journal_replay(journal, cache, cp_sequence, &entries, block_ctx)
           - l2p_cache_write_sync(lba, new_pba)（开机无人 drain CQ，用同步逃生口）
           - block_ctx 有效时同步维护 valid_count：new +1 / old -1
             （TRIM 只减 old；old == new 跳过）
-          - materialize 失败/越界/下溢 ⇒ ok=0，调用者回退 F2
+          - materialize 失败/越界/下溢 ⇒ ok=0，调用者回退 full metadata rebuild
   journal_resume(latest, floor=cp_sequence)：写指针落到最新页之后，序号不回退
 ```
 
@@ -2303,7 +2303,7 @@ Checkpoint 的作用是：
 1. 把当前 L2P cache 里的脏 region **全部写回 NAND L2P 表**；
 2. 写一条 Header，记录“到此为止的 Journal 水位”；
 3. 截断/预擦 Journal 的旧块；
-4. 顺带把**块元数据**（每块状态/有效计数/池归属）做成快照，减少开机 F2。
+4. 顺带把**块元数据**（每块状态/有效计数/池归属）做成快照，减少开机 full metadata rebuild。
 
 没有 Checkpoint，Journal 会溢出，掉电恢复时间无界；没有块元数据快照，每次开机都要全盘扫描
 （约 250~400 ms）。
@@ -3456,7 +3456,7 @@ flowchart TD
     D1 --> D2["阶段②：擦除 BBT 池之外的块，失败标 BAD"]
     D2 --> D3["阶段③：best-effort bbt_save 并入新 BAD"]
     D3 --> D4["metadata_dir_init 复位 Directory"]
-    D4 --> D5["checkpoint_write_initial 写当前版本空快照"]
+    D4 --> D5["checkpoint_write_initial 写完整 initial CP（块元数据 + 磨损 + Header）"]
     D5 --> E["后续正常启动"]
 ```
 
@@ -3467,7 +3467,7 @@ flowchart TD
 | BST | 除 BBT 池外的块被擦除；擦除失败标 BAD |
 | BBT | 先追加当前坏块图（带 `FORMAT_IN_PROGRESS`），擦除后再追加新 BAD；BBT 池旧 record 保留，新 record 以更高 sequence 胜出 |
 | Directory | 固定层重建，动态层清空 |
-| Checkpoint | 写一条当前版本、`sequence=1`、无块元数据快照的 Header |
+| Checkpoint | 写一条当前版本、`sequence=1` 的**完整 21 页 record**：4 页 per-block metadata + 16 页磨损快照 + Header（Header 最后 commit）。首次掉电可用这份快照 + journal 恢复，不再 full metadata rebuild |
 | Journal | `journal_init` 的初始游标；环形块已被擦 |
 
 **失败分支**：
@@ -3476,6 +3476,10 @@ flowchart TD
 - 擦除失败 ⇒ 该块标坏；格式化继续。
 - `checkpoint_write_initial` 失败 ⇒ 下次开机会再次格式化（阶段①的 `FORMAT_IN_PROGRESS`
   使 `checkpoint_probe_media_status` 继续返回 `NO_RECORD`，中断的格式化可续做）。
+  完整 initial CP 的块/磨损页在 Header 之前写；任一分页失败都不会留下有效 record。
+- 旧介质上由旧固件写出的空 initial CP（`block_word_count=0`）仍走 clean-start 的
+  initial-CP 快速路径（跳过 full metadata rebuild + carve）；新 format 写出的完整快照
+  则走 `restore → probe → build_pools`。
 - 版本只在 DIM>1 时比 DIM=1 高 1；DIM=1 的旧介质不会被误格式化。
 
 ### 4.2 干净启动（clean start）
@@ -3502,7 +3506,7 @@ sequenceDiagram
         B->>A: probe_blocks 池块 page0（PFR 内部 static）
         B->>A: build_pools（PFR 内部 static）
     else 快照无效
-        B->>A: reset → F2（认领写过块）→ carve（只入池 state==NONE）
+        B->>A: reset → full metadata rebuild（认领写过块）→ carve（只入池 state==NONE）
     end
     B->>A: Spare 补池（Free → Spare，逐 plane）
     B->>J: journal_resume floor 为 cp_seq
@@ -3510,7 +3514,7 @@ sequenceDiagram
 ```
 
 > **PFR 公开边界**：公开头只保留 `ftl_media_check_format` / `ftl_media_format` /
-> `ftl_boot_recovery` 三个顶层入口；fresh / clean / power-failure 子流程与 F2 原语
+> `ftl_boot_recovery` 三个顶层入口；fresh / clean / power-failure 子流程与 full metadata rebuild 原语
 > （restore / probe / build_pools / reset / page_is_blank / scan_write_pointer /
 > close_block / carve / rebuild_closed_sb_list）全部为 `static`（RISK-ARCH-09）。
 
@@ -3528,8 +3532,8 @@ sequenceDiagram
 ⚠ **clean 也要 probe 池块**：本仓无关机 journal flush，“末页丢失”与干净关机在介质上
 不可区分。probe 只读池块 page 0，成本可控。
 
-**失败分支**：快照 CRC 失败/不一致 ⇒ reset → F2 → carve（顺序不可颠倒：carve 只把
-`state == NONE` 的块入池，否则写过块会同时是池成员与 Closed 条目）；F2 中读失败 ⇒ 跳过该块。
+**失败分支**：快照 CRC 失败/不一致 ⇒ reset → full metadata rebuild → carve（顺序不可颠倒：carve 只把
+`state == NONE` 的块入池，否则写过块会同时是池成员与 Closed 条目）；full metadata rebuild 中读失败 ⇒ 跳过该块。
 
 ### 4.3 掉电恢复（power-failure start）
 
@@ -3551,7 +3555,7 @@ sequenceDiagram
     B->>L: F4 按 region_bitmap 逐 region 预载
     B->>A: probe build_pools → Spare 补池
     alt 任一步不一致
-        B->>A: reset → F2 → carve → Spare 补池
+        B->>A: reset → full metadata rebuild → carve → Spare 补池
     end
     B->>J: journal_resume floor 为 cp_seq
 ```
@@ -3562,15 +3566,15 @@ sequenceDiagram
 |---|---|
 | L2P cache | 回放写入的行标 DIRTY；其余空 |
 | BST.valid_count | 回放按 `new/old` 增量维护；TRIM 只减 old |
-| Closed 列表 | 快照恢复或 F2 重建 |
+| Closed 列表 | 快照恢复或 full metadata rebuild |
 | Journal | 回放完后 resume；写指针在最新页之后 |
 
 **失败分支**：
 
 - 某页读失败 ⇒ 跳过该页，继续其余页（该页条目丢失）。
 - `materialize` 的 PBA 非法（越界 / ch-ce-lun 与拓扑不符）或 valid 下溢 ⇒
-  `block_ctx.ok=0`，块元数据回退 F2。
-- F2 中某块读失败 ⇒ 跳过；该块数据不可恢复。
+  `block_ctx.ok=0`，块元数据回退 full metadata rebuild。
+- full metadata rebuild 中某块读失败 ⇒ 跳过；该块数据不可恢复。
 
 ⚠ **回放必须覆盖所有 `page_seq > cp_seq` 的页**，不能只回放最大一页；跨多页掉电时
 其余条目会静默丢失。
@@ -3823,9 +3827,9 @@ flowchart TD
     E1 --> F["Pass 1 预算任务"]
     F --> F1{"掩码允许"}
     F1 -- "否" --> G["下一任务"]
-    F1 -- "是" --> F2{"interval 到点"}
-    F2 -- "否" --> G
-    F2 -- "是" --> F3["执行 kick 提交即返回"]
+    F1 -- "是" --> DUE{"interval 到点"}
+    DUE -- "否" --> G
+    DUE -- "是" --> F3["执行 kick 提交即返回"]
     F3 --> F4["charge 为 MIN elapsed, budget"]
     F4 --> F5{"剩余预算不足 250µs"}
     F5 -- "是" --> H["截断"]
@@ -3977,13 +3981,13 @@ flowchart TB
 | 持久对象 | 谁写 | 谁读 | 丢失/损坏后果 | 恢复来源 |
 |---|---|---|---|---|
 | 用户数据页 | `wbuf_flush` / migrate | host 读 / GC | 数据丢失 | 无（由 ECC/读恢复兜底） |
-| 页内 META | FC（`cmd->meta`） | GC / F2 / RR | 无法判有效 CW | 整页作废 |
+| 页内 META | FC（`cmd->meta`） | GC / full metadata rebuild / RR | 无法判有效 CW | 整页作废 |
 | L2P region 页 | L2P flush | L2P load | 映射回退一版 | Journal 回放 |
 | Directory entry（SRAM） | `commit_region` / load | lookup | 位置丢失 | Anchor（无 Anchor = 全部未映射）|
-| Anchor record | CP / md job | boot | Directory 回退到旧快照 | 旧 Anchor / F2 |
+| Anchor record | CP / md job | boot | Directory 回退到旧快照 | 旧 Anchor / full metadata rebuild |
 | Journal 页 | Journal job | boot replay | 增量丢失 | 旧 L2P 表（回退一版） |
-| Checkpoint Header | CP | boot | 水位/块元数据丢失 | 上一个 CP / F2 |
-| 块元数据快照 | CP | boot | 块元数据回退 | F2 |
+| Checkpoint Header | CP | boot | 水位/块元数据丢失 | 上一个 CP / full metadata rebuild |
+| 块元数据快照 | CP | boot | 块元数据回退 | full metadata rebuild |
 | BBT record | BBT job | boot | 坏块表回退 | 运行时失败兜底 |
 | CP 磨损快照 | CP job | boot | 计数回退（软状态） | 从 0 开始（精度下降） |
 | 介质版本 | CP Header / Anchor 页 | boot | 误读旧格式 | 自动格式化 |
@@ -4274,7 +4278,7 @@ flowchart TB
 | 同页双 plane 合并回写未实现 | region 写回逐条追加，单 plane 编程 | 当前设计不追求配对；配对会与“尽快落盘”冲突 |
 | Checkpoint 批量写未实现 | 每个 region 各写一页，元数据 GC 开销未摊薄 | 与元数据写模型相关，非当前优先级 |
 | 无 shutdown journal flush | 干净启动也要 probe 池块 | “末页丢失”与干净关机在介质上不可区分 |
-| F2 启动约 400~550 ms | 快照损坏时恢复较慢 | 快照路径约 150~250 ms；F2 是兜底 |
+| full metadata rebuild 启动约 400~550 ms | 快照损坏时恢复较慢 | 快照路径约 150~250 ms；full metadata rebuild 是兜底 |
 | 压缩最坏占近半个 die | 冷 region 长期占住日志块 | 压缩会搬走活 region；极端冷热分布下收益有限 |
 | Anchor/元数据池磨损集中 | Anchor 磨损约为数据块的 8× | 本仓磨损不是约束；池大小是为启动/形态而非磨损优化 |
 | 介质版本不符即全片格式化 | 升级会擦掉旧数据 | 判据是“老固件介质在新固件下会否被误读”；这是有意的安全兜底 |

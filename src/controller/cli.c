@@ -17,6 +17,7 @@
 #include "ftl.h"
 #include "l2p_cache.h"
 #include "log.h"
+#include "power_failure_recovery.h" /* ftl_media_format（boot 失败后的恢复格式化） */
 #include "ssd_request.h"
 #include "stack_guard.h"
 #include "usart.h"
@@ -565,7 +566,7 @@ static int uart_cli_info(int argc, char *argv[])
  * map <lba> — 只读诊断：打印该 LBA 的 L2P 映射与**目标块**的 BST 条目。
  *
  * 起因：`ftl_is_metadata_block` 缺 plane 掩码（v0.69 修）时，被日志块掩住的用户块
- * 进不了 Free Pool、也被 F2 重建跳过 ⇒ `valid_count` 恒 0，而 L2P 仍可能指向它
+ * 进不了 Free Pool、也被 full metadata rebuild 跳过 ⇒ `valid_count` 恒 0，而 L2P 仍可能指向它
  * ⇒ 此后**每次**覆盖写该 LBA 都撞 `bst.h` 的 `b->valid_count > 0U` 断言。
  * 本命令把「L2P 指向谁」与「BST 怎么看那个块」摆在一起，用于在**不复现崩溃**的前提下
  * 判定现场是否已经悬空（末行 VERDICT）。
@@ -790,6 +791,72 @@ static int uart_cli_bbt(int argc, char *argv[])
     return FUNC_STATUS_SUCCESS;
 }
 
+/*
+ * format — boot 失败后的恢复格式化（破坏性）
+ *
+ * 用途：CP/Anchor 介质状态无法被 ftl_media_check_format 判定为「空片/版本不符」
+ * （例如上一轮 bbt --erase 后仍有擦不掉的坏块残留数据），自动格式化会保守拒绝。
+ * 本命令直接对已 ftl_init 的实例执行 ftl_media_format：重落 BBT（带
+ * FORMAT_IN_PROGRESS）→ 擦除 BBT 池之外的块 → 写当前版本初始 Checkpoint。
+ *
+ * ⚠ 擦除全部用户数据与元数据；执行后必须断电重启，不能在运行中的 FTL 上继续用。
+ */
+static int uart_cli_format(int argc, char *argv[])
+{
+    uint8_t ch;
+    uint8_t ce;
+    uint8_t lun;
+    uint8_t done = 0U;
+
+    (void)argc;
+    (void)argv;
+
+    LOGW("format: ERASING every block and writing initial metadata. Do not reset until done.\r\n");
+
+    for (ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (lun = 0U; lun < LUN_NUM; lun++)
+            {
+                ftl_context_t *ftl = g_ctrl.ftl[ch][ce][lun];
+
+                if (ftl == NULL)
+                {
+                    continue;
+                }
+
+                /* 格式化期间禁止后台写；与 bbt --erase 同口径。 */
+                ftl->bg_suspend = 1U;
+                {
+                    const wbuf_trigger_t trigger = {.kind = WBUF_TRIGGER_RESET};
+                    wbuf_status_t        status;
+
+                    (void)wbuf_handle(ftl->wbuf, &trigger, NULL, &status);
+                }
+
+                if (ftl_media_format(ftl) != FTL_OK)
+                {
+                    LOGE("format: failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
+                    return FUNC_STATUS_ERROR;
+                }
+
+                done = 1U;
+                LOGI("format: done ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
+            }
+        }
+    }
+
+    if (done == 0U)
+    {
+        LOGE("format: no initialized FTL instance\r\n");
+        return FUNC_STATUS_ERROR;
+    }
+
+    LOGW("format: done. POWER-CYCLE NOW.\r\n");
+    return FUNC_STATUS_SUCCESS;
+}
+
 /* rd 完成：compare 模式与 g_wr_buf pattern 比对，报 PASS / 首个不一致偏移 */
 static void uart_cli_rd_report(void)
 {
@@ -892,6 +959,7 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
     {  "crash",                                                                                                  "crash [clear]",                          "show/clear the .noinit crash record", 1U,  2U,   uart_cli_crash},
     {  "stack",                                                                                                          "stack",           "show stack guard: paint region, peak usage, alarms", 1U,  1U,   uart_cli_stack},
     {    "bbt",                                                                                                  "bbt [--erase]", "print factory bad block map (--erase: also erase each block)", 1U,  2U,     uart_cli_bbt},
+    { "format",                                                                                                         "format",      "ERASE all blocks + write initial metadata (destructive)", 1U,  1U,  uart_cli_format},
 #if defined(FC_NAND_TEST_ENABLE)
   /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
   /* { "nand", ... }, */

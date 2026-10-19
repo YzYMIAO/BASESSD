@@ -350,7 +350,7 @@ ftl_status_t journal_flush_page(l2p_journal_t *journal);
  * ⚠ 该数**不能**由 journal 的 RAM 写指针反推：末尾 journal_resume 把落点放到最新页
  *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。
  * @return FTL_OK = 完整回放；FTL_ERROR = 环内存在读失败页（写态已恢复，但回放可能
- *         不完整 ⇒ 调用者应回退 F2 全盘重建）。 */
+ *         不完整 ⇒ 调用者应回退 full metadata rebuild）。 */
 /*
  * journal_replay_block_ctx_t - 回放时的块元数据增量端口（可选）
  *
@@ -361,7 +361,7 @@ ftl_status_t journal_flush_page(l2p_journal_t *journal);
  *
  * 只对 sequence ≥ cp_sequence 的条目记账：new_pba +1、old_pba −1
  * （TRIM 只减 old；old==new 跳过）。materialize 失败 / 越界 / 下溢 ⇒ ok=0，
- * 调用者据此丢弃快照恢复结果并回退 F2。
+ * 调用者据此丢弃快照恢复结果并回退 full metadata rebuild。
  */
 typedef struct
 {

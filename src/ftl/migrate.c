@@ -142,8 +142,9 @@ static ftl_status_t mig_submit(migrate_handle_t *m, fc_command_t *cmd)
         return FTL_AGAIN;
     }
 
-    m->stall_ms = 0U;
-    m->wait_ms  = 0U;
+    m->stall_ms    = 0U;
+    m->wait_ms     = 0U;
+    m->cmd_wait_ms = 0U;
     return FTL_OK;
 }
 
@@ -214,14 +215,16 @@ static void mig_start(migrate_handle_t *m, const super_block_t *victim, mig_kind
      * active 是运行时状态（单飞行），由调用者在选块**之前**判过 ⇒ 这里是死守卫。 */
     ASSERT(!m->active);
 
-    /* job 状态整体复位，但**端口 / 自持节拍 / 单调计数**必须跨 job 保留。 */
-    const migrate_port_t port      = m->port;
-    const uint32_t       gc_eval   = m->gc_eval_last_ms;
-    const uint32_t       gc_log    = m->gc_log_last_ms;
-    const uint32_t       wl_eval   = m->wl_eval_last_ms;
-    const uint32_t       predict   = m->predict_last_ms;
-    const uint32_t       reclaimed = m->reclaimed_count;
-    const uint32_t       novictim  = m->novictim_count;
+    /* job 状态整体复位，但**端口 / 自持节拍 / 单调计数 / 连续失败计数**必须跨 job 保留。 */
+    const migrate_port_t port        = m->port;
+    const uint32_t       gc_eval     = m->gc_eval_last_ms;
+    const uint32_t       gc_log      = m->gc_log_last_ms;
+    const uint32_t       wl_eval     = m->wl_eval_last_ms;
+    const uint32_t       predict     = m->predict_last_ms;
+    const uint32_t       reclaimed   = m->reclaimed_count;
+    const uint32_t       novictim    = m->novictim_count;
+    const uint16_t       fail_gblock = m->fail_gblock;
+    const uint8_t        fail_count  = m->fail_count;
 
     memset(m, 0, sizeof(*m));
 
@@ -232,15 +235,15 @@ static void mig_start(migrate_handle_t *m, const super_block_t *victim, mig_kind
     m->predict_last_ms = predict;
     m->reclaimed_count = reclaimed;
     m->novictim_count  = novictim;
+    m->fail_gblock     = fail_gblock;
+    m->fail_count      = fail_count;
 
-    m->victim          = *victim;
-    m->victim.is_open  = false; /* 本引擎只处理 Closed SB（见 allocator.h） */
-    m->kind            = (uint8_t)kind;
-    m->post            = (uint8_t)post;
-    m->active          = true;
-    m->error           = (int32_t)FTL_OK;
-    m->fail_gblock     = UINT16_MAX;
-    m->dst_fail_gblock = UINT16_MAX;
+    m->victim         = *victim;
+    m->victim.is_open = false; /* 本引擎只处理 Closed SB（见 allocator.h） */
+    m->kind           = (uint8_t)kind;
+    m->post           = (uint8_t)post;
+    m->active         = true;
+    m->error          = (int32_t)FTL_OK;
 
     /* 快路径：无任何有效 CW ⇒ 无可搬移，直接进擦除。 */
     allocator_sb_stats_t st;
@@ -434,6 +437,39 @@ static void mig_next_page(migrate_handle_t *m)
     m->phase = (uint8_t)MIG_READ;
 }
 
+/* 当前目标页对里，m->plane 之前是否已有 plane 被成功编程。
+ * mig_step_write 只在上一 plane 的 WRITE_SETTLE 成功后才会推进到下一 plane，
+ * 所以“前序 plane 的 cw_bitmap 非 0”⇒ 它已编程。 */
+static bool mig_dst_pair_has_programmed_plane(const migrate_handle_t *m)
+{
+    for (uint8_t p = 0U; p < m->plane; p++)
+    {
+        if (m->cw_bitmap[p] != 0U)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* 目标页失败处置（RISK-GC-02）：
+ * - 命令从未提交（建链失败 / stall 超时）且本页对没有任何 plane 编程 ⇒ rewind；
+ * - 命令已提交/可能半编程，或前序 plane 已编程 ⇒ 立即关闭 Cold SB。
+ * 绝不能在同一个 Open SB 上继续写下一页。 */
+static void mig_dst_fail_cleanup(migrate_handle_t *m, bool command_attempted)
+{
+    if (command_attempted || mig_dst_pair_has_programmed_plane(m))
+    {
+        LOGW("[MIG] dst failure plane=%u — close cold SB\r\n", (unsigned)m->plane);
+        (void)allocator_close_open_sb(m->port.alloc, FTL_TEMP_COLD);
+    }
+    else
+    {
+        LOGW("[MIG] dst failure plane=%u — rewind pair\r\n", (unsigned)m->plane);
+        allocator_rewind_pair(m->port.alloc, FTL_TEMP_COLD);
+    }
+}
+
 /* --------------------------------------------------------------------
  * mig_finish
  *   功能：DONE——移除 closed 条目、记进展计数、复位 job。
@@ -485,18 +521,16 @@ static void mig_finish(migrate_handle_t *m)
         }
     }
 
-    m->active          = false;
-    m->phase           = (uint8_t)MIG_IDLE;
-    m->waiting         = false;
-    m->decode_ok       = false;
-    m->write_ok        = false;
-    m->closed_removed  = false;
-    m->stall_ms        = 0U;
-    m->wait_ms         = 0U;
-    m->fail_gblock     = UINT16_MAX;
-    m->fail_count      = 0U;
-    m->dst_fail_gblock = UINT16_MAX;
-    m->dst_fail_count  = 0U;
+    m->active         = false;
+    m->phase          = (uint8_t)MIG_IDLE;
+    m->waiting        = false;
+    m->decode_ok      = false;
+    m->write_ok       = false;
+    m->closed_removed = false;
+    m->stall_ms       = 0U;
+    m->wait_ms        = 0U;
+    m->cmd_wait_ms    = 0U;
+    /* fail_gblock / fail_count 跨 job 保留（RISK-GC-01）：清零会让 3 次阈值永不生效。 */
 }
 
 /* ── 5. 推进 ── */
@@ -645,10 +679,15 @@ static bool mig_step_write(migrate_handle_t *m)
     const ftl_status_t ret = mig_submit_write(m);
     if (ret == FTL_AGAIN)
     {
-        (void)mig_stall(m);
+        if (mig_stall(m))
+        {
+            /* 命令从未提交：无 plane 编程则 rewind，否则关 Cold SB。 */
+            mig_dst_fail_cleanup(m, false);
+        }
     }
     else if (ret != FTL_OK)
     {
+        mig_dst_fail_cleanup(m, false);
         mig_abort(m, "write command rejected"); /* [待上板] 永久错误不再空转重试 */
     }
     return true;
@@ -839,7 +878,22 @@ static void mig_step(migrate_handle_t *m)
     {
         if (m->waiting)
         {
-            return; /* 有命令在飞：等完成服务函数 */
+            /* 完成丢失（例如 FC CQ 满时 CQ entry 被丢）时 waiting 永真，GC/WL 永久卡死。
+             * 在飞也计时：超时后放弃本 job；若迟到的完成随后到达，回调的
+             * (!active || !waiting) 分支会 release 命令。 */
+            if (mig_deadline_expired(&m->cmd_wait_ms, FTL_WAIT_TIMEOUT_MS))
+            {
+                /* 写命令可能已部分编程：超时后按“已提交”处置，关闭 Cold SB。 */
+                if (m->phase == (uint8_t)MIG_WRITE)
+                {
+                    mig_dst_fail_cleanup(m, true);
+                }
+                m->timed_out     = 1U;
+                m->timeout_phase = m->phase;
+                m->waiting       = false;
+                mig_abort(m, "completion timeout");
+            }
+            return;
         }
 
         bool stop;
@@ -912,10 +966,9 @@ static void mig_service_step(migrate_handle_t *m)
 void migrate_init(migrate_handle_t *m, const migrate_port_t *port)
 {
     memset(m, 0, sizeof(*m));
-    m->port            = *port;
-    m->fail_gblock     = UINT16_MAX;
-    m->dst_fail_gblock = UINT16_MAX;
-    m->error           = (int32_t)FTL_OK;
+    m->port        = *port;
+    m->fail_gblock = UINT16_MAX;
+    m->error       = (int32_t)FTL_OK;
 }
 
 void migrate_trigger(migrate_handle_t *m, migrate_reason_t reason)
@@ -1190,37 +1243,17 @@ static void mig_complete_write(migrate_handle_t          *m,
     if (!write_ok)
     {
         /* [待上板] 写错误 ⇒ 中止，victim 不擦。
-         * 同一目的块连续失败达上限 ⇒ 关闭 Cold SB（RISK-GC-02）：目的块可能已有
-         * 成功迁移的页，**不能**标 BAD；关闭后下一次 GC 换新的目的块，旧块的
-         * 已写页仍可读，残留页由 GC 正常回收。 */
-        const uint16_t gdst = ftl_pba_gblock(m->dst[m->plane]);
-
-        if (m->dst_fail_gblock != gdst)
-        {
-            m->dst_fail_gblock = gdst;
-            m->dst_fail_count  = 0U;
-        }
-        m->dst_fail_count++;
-
-        if (m->dst_fail_count >= MIG_DST_WRITE_FAIL_MAX)
-        {
-            LOGE("[MIG] dst write failed blk=%u x%u — close cold SB\r\n",
-                 (unsigned)gdst,
-                 (unsigned)m->dst_fail_count);
-            (void)allocator_close_open_sb(m->port.alloc, FTL_TEMP_COLD);
-            m->dst_fail_count  = 0U;
-            m->dst_fail_gblock = UINT16_MAX;
-        }
-
+         * 命令已提交，目的页可能已半编程 ⇒ 不能 rewind；立即关闭 Cold SB
+         * （RISK-GC-02）。关闭后失败页留在 SB 尾部，下一次 GC 换新的目的块；
+         * 目的块可能已有成功迁移的页，**不能**标 BAD，旧块的已写页仍可读。 */
+        mig_dst_fail_cleanup(m, true);
         mig_abort(m, "write failed");
         mig_step(m);
         return;
     }
 
-    m->write_ok        = true;
-    m->dst_fail_count  = 0U;
-    m->dst_fail_gblock = UINT16_MAX;
-    m->phase           = (uint8_t)MIG_WRITE_SETTLE;
+    m->write_ok = true;
+    m->phase    = (uint8_t)MIG_WRITE_SETTLE;
     mig_step(m);
 }
 
@@ -1314,6 +1347,17 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
     migrate_handle_t *m = (migrate_handle_t *)ctx;
 
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
+
+    /* 旁表项缺失（ctx == NULL）= 重复/迟到的完成：只 release 命令，不解引用 m。
+     * 对齐 read_recovery.c 的同族守卫；release 下 ASSERT 裁空，必须先判空。 */
+    if (m == NULL)
+    {
+        LOGE("[MIG] late completion cmd=%u status=0x%02x — released\r\n",
+             (unsigned)completion->command_id,
+             (unsigned)completion->status);
+        (void)fc_command_release(cmd);
+        return;
+    }
 
     /* 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出来的归属实例，
      * 二者必须一致——不一致说明派发路由错了。 */

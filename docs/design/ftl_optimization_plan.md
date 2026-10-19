@@ -463,7 +463,7 @@
    - **SPDK FTL 式 P2L 重建**（每 band 尾部存 P2L、开机顺序扫描重建 L2P）——替换整层持久化机制的
      大改，登记为后续方向；本仓 `ftl_rebuild_closed_sb_list` 已有雏形；
    - ~~**`ftl_is_metadata_block` 的 per-plane 粒度**~~ ⇒ **✅ v0.69 已修**（原判断「偏保守、
-     安全」**是错的**：被掩的块既进不了 Free Pool、又被 F2 重建跳过 ⇒ 落在所有池之外、
+     安全」**是错的**：被掩的块既进不了 Free Pool、又被 full metadata rebuild跳过 ⇒ 落在所有池之外、
      `valid_count` 恒 0，而 L2P 若指向它，覆盖写就撞 `bst.h` 断言。见 §8.3 与 v0.69 ADR）；
    - ~~**`program_count` 无消费方**~~ / ~~**`last_pe_ts` / `gc_generation` 死字段**~~ —— ✅ v0.56 已删
      `program_count`/`bad_reason`/`gc_generation`；`last_pe_ts` 由 P1-1 消费（原判据已过期）；

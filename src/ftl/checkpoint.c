@@ -1411,8 +1411,51 @@ bool checkpoint_load_block_table(checkpoint_handle_t           *h,
  *             立即命中 ⇒ 自动格式化只发生一次，不会因"开机写了元数据但还没写过
  *             checkpoint"而在下次开机再格式化一遍。sequence 从 1 起（0 = 未写）。
  * -------------------------------------------------------------------- */
-ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
+ftl_status_t checkpoint_write_initial(struct ftl_context *ftl)
 {
+    checkpoint_handle_t *h     = ftl->checkpoint_handle;
+    uint16_t            *words = checkpoint_block_words(h);
+
+    /* 完整 per-block metadata snapshot：与 carve 后的池归属一致（由调用者先 carve）。 */
+    checkpoint_block_snapshot(&ftl->alloc, words);
+
+    metadata_ring_t ring;
+    checkpoint_ring_init(&ring);
+
+    nand_pba_t base;
+    if (metadata_ring_prepare_write(&ring, &ftl->topo, 0U, &base) != FTL_OK)
+    {
+        return FTL_ERROR;
+    }
+
+    /* 记录页序：0=Header（最后写），1..4=块元数据，5..20=磨损快照。 */
+    for (uint8_t p = 1U; p <= CP_BLOCK_PAGES; p++)
+    {
+        const nand_pba_t addr = metadata_ring_addr(&ring, &ftl->topo, 0U, p);
+        const uint8_t   *data = (const uint8_t *)(words + ((uint16_t)(p - 1U) * CP_BLOCK_WORDS_PER_PAGE));
+
+        if (ftl_sync_write_page_mirror(addr, data, PAGE_MAIN_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
+        {
+            return FTL_ERROR;
+        }
+    }
+
+    uint32_t wear_crc[FTL_CHECKPOINT_WEAR_PAGES];
+    uint8_t  wear_page[PAGE_MAIN_SIZE];
+
+    for (uint8_t i = 0U; i < FTL_CHECKPOINT_WEAR_PAGES; i++)
+    {
+        checkpoint_wear_page_build(&ftl->alloc, i, wear_page);
+        wear_crc[i] = boot_crc32(wear_page, PAGE_MAIN_SIZE);
+
+        const nand_pba_t addr = metadata_ring_addr(&ring, &ftl->topo, 0U, (uint8_t)(1U + CP_BLOCK_PAGES + i));
+
+        if (ftl_sync_write_page_mirror(addr, wear_page, PAGE_MAIN_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
+        {
+            return FTL_ERROR;
+        }
+    }
+
     l2p_checkpoint_header_t cp;
 
     memset(&cp, 0, sizeof(cp));
@@ -1420,26 +1463,20 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
     cp.sequence         = 1U;
     cp.layout_version   = FTL_MEDIA_LAYOUT_VERSION;
     cp.journal_sequence = 0U; /* 空快照：无 region、journal 从 0 起 */
-    /* initial CP 不带块元数据快照：首次开机走 F2 → carve，下一次 CP 才写完整块元数据。 */
-    cp.block_word_count = 0U;
-    cp.block_word_bytes = 0U;
-    cp.block_page_count = 0U;
-    cp.block_crc32      = 0U;
-    cp.wear_entry_count = 0U;
-    cp.wear_entry_bytes = 0U;
-    cp.wear_page_count  = 0U;
-    cp.record_pages     = 1U;
+    cp.block_word_count = FTL_BLOCK_TOTAL;
+    cp.block_word_bytes = CP_BLOCK_WORD_BYTES;
+    cp.block_page_count = CP_BLOCK_PAGES;
+    cp.block_crc32      = boot_crc32(words, FTL_BLOCK_TOTAL * CP_BLOCK_WORD_BYTES);
+    cp.wear_entry_count = FTL_BLOCK_TOTAL;
+    cp.wear_entry_bytes = FTL_CHECKPOINT_WEAR_ENTRY_BYTES;
+    cp.wear_page_count  = FTL_CHECKPOINT_WEAR_PAGES;
+    memcpy(cp.wear_page_crc, wear_crc, sizeof(cp.wear_page_crc));
+    cp.record_pages = CHECKPOINT_RECORD_PAGES;
 
-    metadata_ring_t ring;
-    checkpoint_ring_init(&ring);
+    /* Header 最后写 = commit：前面任何一页失败都不会留下有效 record。 */
+    const nand_pba_t hdr_addr = metadata_ring_addr(&ring, &ftl->topo, 0U, 0U);
 
-    nand_pba_t addr;
-    if (metadata_ring_prepare_write(&ring, &topo, 0U, &addr) != FTL_OK)
-    {
-        return FTL_ERROR;
-    }
-    /* 开机/格式化：同步镜像写到 P0+P1（没有服务泵可等）。 */
-    if (ftl_sync_write_page_mirror(addr, &cp, sizeof(cp), FTL_PAGE_CFG_META()) != FTL_OK)
+    if (ftl_sync_write_page_mirror(hdr_addr, &cp, sizeof(cp), FTL_PAGE_CFG_META()) != FTL_OK)
     {
         return FTL_ERROR;
     }

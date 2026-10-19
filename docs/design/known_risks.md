@@ -62,7 +62,7 @@
 | RISK-BBT-04 | 待后续 | BBT header **无布局版本字段**；只靠 `total_blocks` 做代理。块数相同但 bitmap 语义变化的格式演进无法识别 | `bbt_header_valid` 校验 `total_blocks == FTL_BLOCK_TOTAL` | 下次 BBT 格式变更时用 `reserved[]` 加版本（属于介质格式变更，需 bump `FTL_MEDIA_LAYOUT_VERSION`） | `include/ftl/bbt.h` `bbt_header_t` |
 | RISK-BBT-05 | 已修未上板 | `bbt_medium_has_ftl_data` 只查固定元数据区；元数据被擦、用户区仍有数据时会被误判为空片并重扫（出厂标记已被覆盖 ⇒ 坏块图丢失） | **格式化决策已不再依赖它**：`checkpoint_probe_media_status` 先 raw 读 CP 池页区分空片/读死；本谓词只剩 `bbt_init` 内部决定“是否做出厂扫描” | 若要闭合：增加用户区抽样 / 独立介质标记点 | `src/ftl/bbt.c` `bbt_medium_has_ftl_data`；`src/ftl/checkpoint.c` `checkpoint_probe_media_status` |
 | RISK-BBT-06 | 待后续 | `ftl_bbt_callback` 没有保存 in-flight `command_id`；擦完成与写完成若被重复投递，phase 可能误配 | `waiting==0` 的孤儿守卫只能挡 job 结束后的迟到完成 | **2026-10-19 核实**：FC 侧 `fc_complete_internal`（`fc.c:712-724`）**没有**「已 COMPLETED 就不重复入队」的守卫 ⇒ 是否重复完成完全取决于 NAND 层是否重复上报。当前 NAND 是单次轮询完成模型，无重复上报源 ⇒ 暂不修；换 NAND 引擎 / 加中断完成时**必须先补该守卫** | `src/ftl/bbt.c` `ftl_bbt_callback`；`src/fc/fc.c` `fc_complete_internal` |
-| RISK-BBT-07 | 已修未上板 | ~~boot 期 CP 快照并集的 BAD 不补 Spare~~ | 新增 `allocator_spare_refill_from_free(alloc, plane)`：摘 Free → state 置 NONE → push Spare，直到 `FTL_SPARE_POOL_PER_PLANE` 或无同 plane 空闲块。三条启动路径（clean 快照 / clean F2 / PF F2）建池后逐 plane 补池并打印补后计数 | 上板：制造 CP 快照含 BAD、Spare 不足的介质，确认补回 50/plane；Free 不足时自然下降 | `src/ftl/allocator.c`；`src/ftl/power_failure_recovery.c` `recovery_refill_spare_pools` |
+| RISK-BBT-07 | 已修未上板 | ~~boot 期 CP 快照并集的 BAD 不补 Spare~~ | 新增 `allocator_spare_refill_from_free(alloc, plane)`：摘 Free → state 置 NONE → push Spare，直到 `FTL_SPARE_POOL_PER_PLANE` 或无同 plane 空闲块。三条启动路径（clean 快照 / clean full metadata rebuild / PF full metadata rebuild）建池后逐 plane 补池并打印补后计数 | 上板：制造 CP 快照含 BAD、Spare 不足的介质，确认补回 50/plane；Free 不足时自然下降 | `src/ftl/allocator.c`；`src/ftl/power_failure_recovery.c` `recovery_refill_spare_pools` |
 | RISK-BBT-08 | 信息 | `bbt_scan_factory` 跳过 gblock 0，依赖“Block 0 出厂总是好块”的器件假设 | 器件手册（Micron AN1819）支持 | 换器件时复核 | `src/ftl/bbt.c` `bbt_scan_factory` |
 | RISK-BBT-09 | 信息 | CLI `bbt --erase` / `bbt_print_bad_map(do_erase)` 会擦全片，且运行时 BST 不更新 | CLI 先 suspend 后台并提示断电 | 只作为专用体检工具；不要放进开机路径 | `src/ftl/bbt.c` `bbt_print_bad_map`；`src/controller/cli.c` |
 | RISK-BBT-10 | 待测试源 | BBT UT 只覆盖 `mark_bad` / `spare_pool_refill` / inline bitmap；`bbt_load/save/kick/scan_factory/format_erase` 无用例；`test_ftl.c` 的“已知偏差 ④”注释在幂等修复后过期 | 未改测试源（R4） | 测试所有者补 NAND seam / 更新注释；新增 `dirty_gen`、`FORMAT_IN_PROGRESS` 中断恢复用例 | `tests/unit/test_ftl.c`；`docs/design/ftl_ut_munit.md §4.5` |
@@ -74,16 +74,16 @@
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
 |---|---|---|---|---|---|
 | RISK-BOOT-01 | 待上板 | ~~F4 按 INVALID 行的 `region_id` 反查 CP bitmap ⇒ 全部别名到 region 0~~ | 新增 `l2p_cache_preload_region(cache, global_region, pba)`：由 CP bitmap **逐 bit** 找 INVALID 行、设 `region_id`、同步读、置 CLEAN/INVALID；F4 只对 resident CLEAN 行做 bitmap 失效 | 上板：region 0 与非 0 region 各预载一次，确认 `l2p_cache_find` 不返回别名、post-CP 映射可读 | `src/ftl/l2p_cache.c`；`src/ftl/power_failure_recovery.c` `ftl_boot_apply_region_bitmap` |
-| RISK-BOOT-02 | 待上板 | ~~carve 先于 F2 ⇒ 写过块同时是池成员与 CLOSED 条目 ⇒ 活数据可被复用~~ | 三条路径统一 **F2/快照 → carve**；`ftl_boot_carve_pools` 只把 `state == NONE` 的块入池，其余只计入 `total_blocks` | 上板：预置数据在旧 carve 会选中的块上，走 F2 fallback 后验证不在池 | `src/ftl/power_failure_recovery.c` |
+| RISK-BOOT-02 | 待上板 | ~~carve 先于 full metadata rebuild ⇒ 写过块同时是池成员与 CLOSED 条目 ⇒ 活数据可被复用~~ | 三条路径统一 **full metadata rebuild / 快照 → carve**；`ftl_boot_carve_pools` 只把 `state == NONE` 的块入池，其余只计入 `total_blocks` | 上板：预置数据在旧 carve 会选中的块上，走 full metadata rebuild fallback 后验证不在池 | `src/ftl/power_failure_recovery.c` |
 | RISK-BOOT-03 | 待上板 | ~~CP 读失败被当作“需要格式化” ⇒ 一次瞬时读错整片擦除~~ | `checkpoint_probe_media_status` 区分 `CURRENT / NO_RECORD / VERSION_MISMATCH / IO_ERROR`；`ftl_media_check_format` 对 IO_ERROR 返回 `FTL_ERROR`，`main` 拒绝格式化并停止启动 | 上板：CP 读失败注入不擦片；版本不符正常格式化 | `src/ftl/checkpoint.c`；`src/main.c` |
 | RISK-BOOT-04 | 待上板 | 两阶段格式化中途掉电后，重启不能判断“格式化未完成” | `FORMAT_IN_PROGRESS` 写入 `bbt_header_t.reserved[0]`，`bbt_load` 恢复；`checkpoint_probe_media_status` 见该标志返回 NO_RECORD ⇒ 继续格式化 | 上板：save 后 / erase 中 / CP marker 前各断电一次 | `src/ftl/bbt.c`；`src/ftl/checkpoint.c` |
-| RISK-BOOT-05 | 待上板 | 快照/恢复路径的校验与计数改动未板验：restore Pass 0 全量校验（不再部分应用 BAD）、`recovery_materialize_pba` 校验 ch/ce/lun、`recovery_add_closed` 传播列表满、`valid_cw` 改 `uint32_t` | 编译零告警；失败路径回退 F2 | 上板：快照中途注入非法 word（不留下部分 BAD）；journal 注入越界 PBA（回退 F2）；满盘重建确认 `valid_cw` 不截断 | `src/ftl/power_failure_recovery.c` |
-| RISK-BOOT-06 | 已修未上板 | F2 把“第一个空白页”当写指针：中间若因编程失败留下 hole，hole 之后的页不会被 recount（valid_count 少算） | 写路径失败通常关闭 SB，hole+后续写概率低 | 若要闭合：F2 扫全块 page 0..N；代价是启动时间随块数线性增长 | `src/ftl/power_failure_recovery.c` `ftl_recovery_scan_write_pointer` |
+| RISK-BOOT-05 | 待上板 | 快照/恢复路径的校验与计数改动未板验：restore Pass 0 全量校验（不再部分应用 BAD）、`recovery_materialize_pba` 校验 ch/ce/lun、`recovery_add_closed` 传播列表满、`valid_cw` 改 `uint32_t` | 编译零告警；失败路径回退 full metadata rebuild | 上板：快照中途注入非法 word（不留下部分 BAD）；journal 注入越界 PBA（回退 full metadata rebuild）；满盘重建确认 `valid_cw` 不截断 | `src/ftl/power_failure_recovery.c` |
+| RISK-BOOT-06 | 已修未上板 | full metadata rebuild 把“第一个空白页”当写指针：中间若因编程失败留下 hole，hole 之后的页不会被 recount（valid_count 少算） | 写路径失败通常关闭 SB，hole+后续写概率低 | 若要闭合：full metadata rebuild 扫全块 page 0..N；代价是启动时间随块数线性增长 | `src/ftl/power_failure_recovery.c` `ftl_recovery_scan_write_pointer` |
 | RISK-BOOT-07 | 已修未上板 | `ftl_recovery_page_is_blank` 读的是 raw USER 区（DATA 页已加扰），不是 META/CRC；依赖当前页面配置 | 当前 user 页走 DATA 加扰 ⇒ 空页全 FF 成立 | 若引入 `RANDOM_DISABLE` 且用户页前缀全 FF，判空会失效 ⇒ 改为读 META/CRC | `src/ftl/power_failure_recovery.c` `ftl_recovery_page_is_blank` |
 | RISK-BOOT-08 | 已修未上板 | `journal_scan_latest` / `journal_replay` 的读失败不向上传播：坏页被当作“无更多条目”，可能少回放 | **读失败现在有 `LOGW`**（scan 汇总一条 / replay 逐页）；回放按 `(page_seq, entry_idx)` 单调过滤 | 统一到 journal 的读错误策略（重试/隔离），属跨模块改动 | `src/ftl/journal.c` |
 | RISK-BOOT-09 | 已修未上板 | `metadata_dir_load` 失败时静默回退到新建 Directory：旧 region 映射可能整体丢失，但启动继续 | 失败后有 LOGW（无返回码） | 决定是否把“Directory 读失败”升级为启动失败 / 重扫 | `src/ftl/metadata.c` `metadata_dir_load` |
 | RISK-BOOT-10 | 已修未上板 | ~~`journal_resume` 恢复写态时忽略跨块擦除结果：擦失败后首次写会落在未擦页~~ | 擦失败 ⇒ `LOGE` + 重新挂起 `job.need_erase`（在 job 复位之后写入）；`journal_handle` / `flush_now` 先补擦，`journal_freeze` 在 `need_erase != 0` 时拒绝写 | 上板：注入 resume 跨块擦失败，首次写前必须补擦成功 | `src/ftl/journal.c` `journal_resume` |
-| RISK-BOOT-11 | 已修未上板 | 快照 probe 的 `l2p_cache_read_sync` 失败只记 LOGW 并计入 `anomalies`，`blocks_restored` 仍为 1 ⇒ valid_count 少算 | 读失败日志可见；不触发 F2 | 若读失败频繁，升级为 F2 或按块隔离 | `src/ftl/power_failure_recovery.c` `ftl_recovery_probe_blocks` |
+| RISK-BOOT-11 | 已修未上板 | 快照 probe 的 `l2p_cache_read_sync` 失败只记 LOGW 并计入 `anomalies`，`blocks_restored` 仍为 1 ⇒ valid_count 少算 | 读失败日志可见；不触发 full metadata rebuild | 若读失败频繁，升级为 full metadata rebuild 或按块隔离 | `src/ftl/power_failure_recovery.c` `ftl_recovery_probe_blocks` |
 
 ---
 
@@ -200,16 +200,20 @@
 | MD-01 | 元数据回收块连续擦除失败 3 次 ⇒ `bbt_mark_bad` + 清回收位，不再无限重试 | `MD_RECLAIM_FAIL_MAX`；`src/ftl/metadata_job.c` `md_complete_reclaim` | 注入擦除失败：第 3 次后块进 BBT、回收位清零、后台不再重试 |
 | MD-02 | 压缩空槽预算预留 1 槽（`MD_COMPACT_RESERVED_SLOTS`），消除在飞 region 写导致的良性中止 | `src/ftl/metadata_job.c` `md_compact_begin` | 压缩期间并发写：不再出现 “无空槽中止” |
 | MD-04 / TYPE-02 | `fc.c` 最后一处手写 ERROR_MASK 改走 `fc_cw_status_has_error()`（H15 归零） | `src/fc/fc.c` `fc_complete_from_nand` | 随读错误注入回归（首个失败 desc 仍正确） |
-| GC-01 | 同一 victim 块连续读失败 3 次 ⇒ 标 BAD + 从 Closed 条目摘除该 plane，GC 换候选 | `MIG_VICTIM_READ_FAIL_MAX`；`src/ftl/migrate.c` `mig_complete_read` | 造不可纠读：第 3 次后容量继续增长，GC 不再空转 |
-| GC-02 | 同一目的块连续写失败 3 次 ⇒ `allocator_close_open_sb(COLD)`，**不**标 BAD（已有成功迁移页） | `MIG_DST_WRITE_FAIL_MAX`；`mig_complete_write` | 注入目的页写失败：关闭 Cold SB、已迁移页仍可读 |
+| GC-01 | 同一 victim 块连续读失败 3 次 ⇒ 标 BAD + 从 Closed 条目摘除该 plane，GC 换候选。计数跨 job 保留（`mig_start` 保存/恢复、`mig_finish` 不清零），否则 3 次阈值永不生效 | `MIG_VICTIM_READ_FAIL_MAX`；`src/ftl/migrate.c` `mig_complete_read` / `mig_start` / `mig_finish` | 造不可纠读：第 3 次后容量继续增长，GC 不再空转 |
+| GC-02 | 目的页写失败 ⇒ **立即** `allocator_close_open_sb(COLD)`，**不**标 BAD（已有成功迁移页）；失败页可能半编程，不能 rewind，关闭后失败页留在 SB 尾部，下一次 GC 换新目的块 | `src/ftl/migrate.c` `mig_dst_fail_cleanup` / `mig_complete_write` | 注入目的页写失败：关闭 Cold SB、已迁移页仍可读、下一页不再写同一 SB |
+| GC-03 | 目的页写提交失败 / stall 超时：本页对无任何 plane 编程 ⇒ `allocator_rewind_pair(COLD)`；前序 plane 已编程 ⇒ 关闭 Cold SB。不得在同一 Open SB 上继续写下一页（否则留下 hole） | `src/ftl/migrate.c` `mig_dst_fail_cleanup` / `mig_step_write`；`allocator.c` `allocator_rewind_pair` | 注入提交超时：plane0 场景页对回退、plane1 场景关 Cold SB |
 | GC-04 | 每擦完一个 plane 即从 Closed 条目摘除（`allocator_closed_drop_plane`），防止部分擦除后旧条目误认 | `src/ftl/allocator.c`；`mig_complete_erase` | 两 plane victim 中途断电/中止：重启后旧条目不含已释放 plane |
+| GC-05 | `waiting` 期间也 arm `FTL_WAIT_TIMEOUT_MS` deadline；完成丢失时 abort，不再永久 `active=true`；写阶段超时同时关闭 Cold SB（防 hole）。迟到的完成由回调的 `(!active || !waiting)` 分支 release | `src/ftl/migrate.c` `cmd_wait_ms` / `mig_step`；`fc.c` CQ-full 丢完成 | 注入完成丢失：GC/WL 超时中止并恢复 |
+| GC-06 | `ftl_migrate_callback` 增加 `ctx == NULL` 早退（重复/迟到完成只 release 命令）；对齐 RR 同族守卫 | `src/ftl/migrate.c` `ftl_migrate_callback`；`read_recovery.c` 同族写法 | 注入重复完成：release 命令，不解引用 NULL |
 | MIG-01 | 等 L2P 加载 / Journal 刷页用独立 ms deadline（`FTL_WAIT_TIMEOUT_MS`），超时 abort（victim 不擦） | `src/ftl/migrate.c` `mig_wait` | 注入 region 加载永久卡住：job 超时中止而非永久挂起 |
 | JN-01 | 环形块连续擦除失败 3 次 ⇒ 标坏（RAM + BBT 两个 plane）+ 跳到下一可用块；全坏则 `ring_full` 停止写入 | `JRN_ERASE_FAIL_MAX`；`journal_ring_block_bad` / `journal_erase_failed` | 注入环形块擦失败：journal 用剩余块继续；重启后 BBT 仍挡住坏块 |
-| BOOT-06 | F2 写指针检测 hole：空白页后仍有写过页 ⇒ 返回全块，逐页反查 valid_count | `ftl_recovery_scan_write_pointer` | 造 hole（page 0 写失败、后续页成功）：valid_count 不少算 |
+| BOOT-06 | full metadata rebuild 写指针检测 hole：空白页后仍有写过页 ⇒ 返回全块，逐页反查 valid_count | `ftl_recovery_scan_write_pointer` | 造 hole（page 0 写失败、后续页成功）：valid_count 不少算 |
 | BOOT-07 | 判空改看每 CW 的 META（4B，明文），不再依赖 USER 区加扰 | `ftl_recovery_page_is_blank` | 空片/写满块判空仍正确；RANDOM_DISABLE 不受影响 |
-| BOOT-08 | Journal 扫描读失败向上传播：判型走掉电路径，回放读失败返回 `FTL_ERROR` ⇒ F2 | `journal_scan_latest(..., out_read_error)` / `journal_replay`；`ftl_boot_recovery` | 注入 journal 页读失败：不复用“无更多条目”，启动回退 F2 |
+| BOOT-08 | Journal 扫描读失败向上传播：判型走掉电路径，回放读失败返回 `FTL_ERROR` ⇒ full metadata rebuild | `journal_scan_latest(..., out_read_error)` / `journal_replay`；`ftl_boot_recovery` | 注入 journal 页读失败：不复用“无更多条目”，启动回退 full metadata rebuild |
 | BOOT-09 | Directory 加载失败不再静默建新表：介质有有效 CP 时拒绝启动（空片/格式化后才放行） | `ftl->md_load_failed`；`ftl_boot_recovery` | Anchor 损坏 + 有效 CP：启动停止并 LOGE，不丢映射 |
-| BOOT-11 | probe 的 L2P 反查失败计数向上传播，非 0 ⇒ 快照结果作废、回退 F2 | `ftl_rebuild_stats_t.l2p_read_errors`；`ftl_recovery_probe_blocks` | 注入 L2P 读失败：不声称 `blocks_restored=1` |
+| BOOT-11 | probe 的 L2P 反查失败计数向上传播，非 0 ⇒ 快照结果作废、回退 full metadata rebuild | `ftl_rebuild_stats_t.l2p_read_errors`；`ftl_recovery_probe_blocks` | 注入 L2P 读失败：不声称 `blocks_restored=1` |
+| BOOT-12 | **上板通过（debug，2026-10-20）**：initial CP 由“空 Header”升级为完整 21 页快照（4 页块元数据 + 16 页磨损 + Header 最后 commit）；format 后首次掉电走“快照 + journal”，不再 full metadata rebuild。旧空 initial CP 保留 clean-start 快速路径 | `checkpoint_write_initial`；`ftl_media_format`（reset → carve → snapshot → reset → write）；`ftl_boot_power_failure` | 板上实测：format→`boot type=1 bit=restored`；`wr 0 32` 不 `fl` 断电→`boot type=2 journal_entries=32 bit=restored`、无 fallback、`rd 0 32 c` PASS；覆盖写后 `fl`→CP seq=2→`boot type=1 bit=restored`。首次 PF 的 `probe anomalies=1 valid_cw=0` 是 probe 对未引用池块的统计口径（journal 记账不在该 stat 内），覆盖写/读均 PASS，后续 CP 后 `anomalies=0` |
 | L2P-01 | region 加载失败先重试 3 次（置 INVALID），仍失败才降级为全未映射 CLEAN 行 | `L2P_LOAD_RETRY_MAX`；`ftl_l2p_callback` LOADING 分支 | 造瞬态读错：映射不丢；持续坏 region：不活锁 |
 | HOST-02 | 逐 plane 反查命令访问的全局块与 ECC（`ftl_cmd_block_ecc_list`），读记账覆盖两个 plane | `src/ftl/ftl_fc_interface.c`；`ftl_host_io_read_ok` | multi-plane 读：两个块的 read_count / ECC 都增长 |
 | WB-04 | 组在飞数收敛为 `pending_group_add_subop` / `pending_group_drop_subop` 唯一闸门 | `src/ftl/pending.c`；`wbuf.c` / `ftl.c` 调用点 | 写路径回归：组完成/回滚均在飞数归零 |
@@ -246,7 +250,7 @@
 | RISK-ARCH-06 | 待后续 | 模块 handle 契约迁移**未上板**：只证 `make all` / `make release` 零新告警；typed 入口/端口/字段归属改动量大，行为保持需板端回归 | 每个 Phase 保持行为；新增状态上报只读；`ftl_status_t` 增 `FTL_TIMEOUT`（未消费） | 上板回归：正常读写/GC/WL/RR/CP/journal/BBT/格式化/掉电重启；重点看完成路由与组结算 | `docs/design/ftl_module_contracts.md`；本轮各模块 `*_handle` |
 | RISK-ARCH-07 | 已改未上板 | §8.1 Phase 1.5：`migrate_handle` / `wbuf` / `rr_page_scratch` 已从 `ftl_context_t` 改为 `ftl_storage_t` 挂载指针；数组落 AXI `.bss`（`g_ftl_migrate` / `g_ftl_wbuf` / `g_ftl_rr_page_scratch`） | `ftl_init` 绑定 + 显式 memset；AXI 预算 `_Static_assert` 已把三块计入 | 上板确认 RAM 实测与 cache/局部性；若需要域优化再调整放置 | `src/main.c`；`include/ftl/ftl.h` `ftl_storage_t` |
 | RISK-ARCH-08 | 已改未上板 | migrate / RR / CP 的提交/等待计数已由**轮数**改为绝对 ms deadline：`FTL_SUBMIT_TIMEOUT_MS = 10` / `FTL_WAIT_TIMEOUT_MS = 50`；confirm park 用 `FTL_GROUP_DRAIN_TIMEOUT_MS = 100` | 时钟缺失（now_ms == 0）时 deadline 不生效（退化为无超时；本板 time_us 恒非空 ⇒ 不可达） | 上板标定这三个值（NAND 页操作 ~700µs + 主循环轮速）；观察 `timed_out`/`timeout_phase` 上报 | `include/ftl/ftl_module.h`；`migrate.c` / `read_recovery.c` / `checkpoint.c` / `pending.c` |
-| RISK-ARCH-09 | 已改未上板 | §5 PFR 收为 boot orchestrator：fresh/clean/PF 子流程与 F2 原语（restore/probe/build_pools/reset/page_is_blank/scan_write_pointer/close_block/carve/rebuild）全部改为 `static`；公开头只留 `ftl_media_check_format` / `ftl_media_format` / `ftl_boot_recovery` | `checkpoint_block_words()` / `metadata_live_count()` / `l2p_cache_invalidate_line()` 三个穿透已收口 | 上板回归 fresh/clean/PF/F2 四条启动路径 | `src/ftl/power_failure_recovery.c`；`include/ftl/power_failure_recovery.h` |
+| RISK-ARCH-09 | 已改未上板 | §5 PFR 收为 boot orchestrator：fresh/clean/PF 子流程与 full metadata rebuild 原语（restore/probe/build_pools/reset/page_is_blank/scan_write_pointer/close_block/carve/rebuild）全部改为 `static`；公开头只留 `ftl_media_check_format` / `ftl_media_format` / `ftl_boot_recovery` | `checkpoint_block_words()` / `metadata_live_count()` / `l2p_cache_invalidate_line()` 三个穿透已收口 | 上板回归 fresh/clean/PF/full metadata rebuild 四条启动路径 | `src/ftl/power_failure_recovery.c`；`include/ftl/power_failure_recovery.h` |
 | RISK-ARCH-10 | 信息（有意偏离） | 为适配本仓 **per-instance** 架构，typed 入口有几处签名偏离设计文档原文：`journal_handle` 增加 `journal_trigger_t`（区分 FLUSH / ERASE_ONLY）；`wbuf_handle` 返回 `ftl_status_t`（调用者必须分支 FTL_AGAIN/ERROR）；`pending_confirm_*` 带 `ftl_context_t *`；`rr_handle` 的 `rr_trigger` 仍登记 owner 而非 desc 链 | 各偏差已在头文件与 P2/P5 注明 | 若未来引入设备级 pending/wbuf 上下文，再评估收回这些实参 | `include/ftl/journal.h` / `wbuf.h` / `pending.h`；`docs/design/ftl_module_contracts.md` §3.3 |
 
 ---
@@ -283,7 +287,7 @@
 - GC/migrate/Journal（`fdc7c7f`）：见 RISK-GC-06 / RISK-JN-03。
 - BBT（本次审查）：`bbt_mark_bad` 幂等、`dirty_gen`、列读失败、两阶段 `bbt_format_erase`、
   sync 写/擦错误掩码；见 RISK-BBT-01 / RISK-BBT-02 / RISK-BBT-03。
-- 掉电恢复（本次审查）：F4 逐 region 预载、F2→carve、CP 介质状态三态、格式化中断恢复、
+- 掉电恢复（本次审查）：F4 逐 region 预载、full metadata rebuild→carve、CP 介质状态三态、格式化中断恢复、
   Spare 补池、restore Pass 0、materialize PBA 校验；见 RISK-BOOT-01~05。
 - L2P cache（本次审查）：`flush_kick` 背压改报 `FTL_AGAIN`、CLOCK 引用位置 1、
   位图/命中记账收敛、删除零调用 helper；见 RISK-L2P-03。

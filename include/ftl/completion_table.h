@@ -100,7 +100,7 @@ uint16_t completion_table_count(void);
  *
  * 全局旁表保持单一（FC CQ 全局、cmd_id 全局唯一），派发时按命令 ch/ce/lun
  * 路由到对应 FTL 实例。本函数在 main.c 填完 g_ftl_ptrs 后调用一次——
- * ⚠ **必须早于逐实例 boot**：boot 期的 F2 重建就会经 l2p_cache_read_sync 抽完成表。
+ * ⚠ **必须早于逐实例 boot**：boot 期的 full metadata rebuild 就会经 l2p_cache_read_sync 抽完成表。
  * 传 NULL 则清空（boot 失败回退 fc_service 时用）。
  *
  * @param route  CH_NUM×CE_NUM×LUN_NUM 三维 ftl_context_t* 表（仿 main.c g_ftl_ptrs）

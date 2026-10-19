@@ -40,7 +40,7 @@
  * 内部管理 FC 命令生命周期：
  *   alloc → config → submit → sync_wait → get_meta → release
  *
- * 唯一调用者是掉电重建（PFR 的 F2 全盘重建（内部）的逐页反查）。
+ * 唯一调用者是掉电重建（PFR 的 full metadata rebuild（内部）的逐页反查）。
  * 搬移读（GC / WL / 慢死预测）走 **异步** 路径：migrate.c 用 ftl_async_read_page +
  * gc_decode_cw_lba 在完成服务函数里收尾——不经过本函数。
  *

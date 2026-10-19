@@ -84,7 +84,7 @@
  * gc_read_page_with_lba - 读取一页 NAND，取回逐 CW 的扇区 LBA
  *
  * 内部管理 FC 命令生命周期，无需调用者关心 alloc/submit/release。
- * ⚠ 唯一调用者是**掉电重建**（PFR 的 F2 全盘重建（内部）的逐页反查，开机结构性同步路径）。
+ * ⚠ 唯一调用者是**掉电重建**（PFR 的 full metadata rebuild（内部）的逐页反查，开机结构性同步路径）。
  *   搬移读（GC / WL / 慢死预测）走异步路径：migrate.c 用 ftl_async_read_page
  *   建命令、在完成服务函数里调下面的 gc_decode_cw_lba 收尾——不经过本函数。
  *

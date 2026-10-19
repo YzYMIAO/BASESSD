@@ -356,7 +356,7 @@ bool checkpoint_is_active(const checkpoint_handle_t *h);
 /* checkpoint_reset_timer - 复位 T3 定时基准（boot 恢复 / 格式化后调用）。 */
 void checkpoint_reset_timer(checkpoint_handle_t *h);
 
-/* checkpoint_block_words - 块元数据快照缓冲（F2/恢复的端口；FTL_BLOCK_TOTAL 个 word）。
+/* checkpoint_block_words - 块元数据快照缓冲（full metadata rebuild / 恢复的端口；FTL_BLOCK_TOTAL 个 word）。
  * 返回的是 handle 内部常驻缓冲，调用者只读/按恢复流程填充。 */
 uint16_t *checkpoint_block_words(checkpoint_handle_t *h);
 
@@ -404,7 +404,7 @@ cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t
  *
  * 校验 header 的 bit_* 字段、逐页读入 words、再用 boot_crc32 验证。
  * 失败（含 block_page_count == 0 的 initial CP）只表示「没有可用 块元数据快照」，
- * **不得**据此触发格式化；块元数据改走 F2。
+ * **不得**据此触发格式化；块元数据改走 full metadata rebuild。
  *
  * @param ftl        FTL 上下文
  * @param cp         最近 Header（checkpoint_find_latest 的输出）
@@ -436,15 +436,17 @@ bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
                                 uint16_t                       record_idx);
 
 /*
- * checkpoint_write_initial - 全量格式化后在池首槽写一条「空快照」标记
+ * checkpoint_write_initial - 全量格式化后写一条完整的 initial Checkpoint
  *
- * 只由 ftl_media_format() 在擦完全片后调用。写出的 Header 带当前
- * FTL_MEDIA_LAYOUT_VERSION 与 sequence=1，使下次开机 checkpoint_find_latest
- * 立即成功 ⇒ 版本判据命中 ⇒ 自动格式化只发生一次。
+ * 只由 ftl_media_format() 在擦完全片后调用。写出完整 21 页 record：
+ * 4 页 per-block metadata snapshot + 16 页磨损快照 + Header（最后写 = commit）。
+ * sequence=1、journal_sequence=0；下次开机 checkpoint_find_latest 立即命中，
+ * 版本判据只格式化一次；即使随后发生 power failure，也能用这份快照 + journal
+ * 增量恢复，不必 full metadata rebuild。
  *
- * @param topo  拓扑信息（Checkpoint 池所在芯片路由）
- * @return FTL_OK / FTL_ERROR
+ * @param ftl  FTL 实例（含 allocator / checkpoint handle / topo）
+ * @return FTL_OK / FTL_ERROR（任一分页写失败 ⇒ 不写 Header，无有效 record）
  */
-ftl_status_t checkpoint_write_initial(ftl_topology_t topo);
+ftl_status_t checkpoint_write_initial(struct ftl_context *ftl);
 
 #endif /* FTL_CHECKPOINT_H */

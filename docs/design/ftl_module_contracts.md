@@ -368,7 +368,7 @@ void pending_confirm_service(const ftl_bg_info_t *info);
 ### PFR（boot orchestrator）
 
 - 顶层入口：`ftl_media_check_format` / `ftl_media_format` /
-  `ftl_boot_recovery`；fresh/clean/PF 子流程与 F2 原语收为 static/私有头。
+  `ftl_boot_recovery`；fresh/clean/PF 子流程与 full metadata rebuild 原语收为 static/私有头。
 - 输入：已绑定 handles/ports + `need_format` + media status。
 - 输出：`ftl_boot_result_t`。
 - 时间：只受 NAND 操作超时约束。
@@ -625,7 +625,7 @@ typedef struct {
 | 5 Checkpoint | 已改未上板 | `checkpoint_handle` + trigger/status；`ftl->cp` 并入 handle；端口；T1/T2/T3 求值收进模块 |
 | 6 L2P cache | 已改未上板 | `l2p_handle`（档位→max_kick 模块内表）；owner 端口返回 `l2p_owner_t`；行查询/失效原语 |
 | 7 Wbuf | 已改未上板 | `wbuf_handle_t` + `wbuf_handle(trigger)`；alloc/pending/migrate 端口 |
-| 8 调度/Confirm | 已改未上板 | confirm park 收进 `pending_confirm_service()`（含 ms 超时）；任务表改具名 `bg_task_id_t`（13→10 项）；PFR 公开头只留 3 个顶层入口，F2/fresh/clean/PF 原语全部 static |
+| 8 调度/Confirm | 已改未上板 | confirm park 收进 `pending_confirm_service()`（含 ms 超时）；任务表改具名 `bg_task_id_t`（13→10 项）；PFR 公开头只留 3 个顶层入口，full metadata rebuild / fresh/clean/PF 原语全部 static |
 | Phase 1.5 | 已改未上板 | `migrate` / `wbuf` / `rr_page_scratch` 改 `ftl_storage_t` 挂载指针；数组落 AXI `.bss`，AXI 预算断言已计入 |
 | ms deadline | 已改未上板 | migrate / RR / CP 的轮数计数改绝对 ms：`FTL_SUBMIT_TIMEOUT_MS=10`、`FTL_WAIT_TIMEOUT_MS=50`、`FTL_GROUP_DRAIN_TIMEOUT_MS=100`（待上板标定） |
 
@@ -645,7 +645,7 @@ typedef struct {
 **符号/尺寸证据**（debug ELF，`arm-none-eabi-nm`）：
 
 - PFR 只有 `ftl_media_check_format` / `ftl_media_format` / `ftl_boot_recovery` 为 `T`；
-  fresh/clean/PF 子流程与 F2 原语全部为 `t`。
+  fresh/clean/PF 子流程与 full metadata rebuild 原语全部为 `t`。
 - Phase 1.5：`g_ftl` 3352 B（原 ~13.8KB）、`g_ftl_migrate` 4268 B、
   `g_ftl_wbuf` 4164 B、`g_ftl_rr_page_scratch` 2048 B；AXI 预算 `_Static_assert` 已计入。
 

@@ -338,10 +338,10 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         }
     }
 
-    /* 池回填 / F2 / 块元数据快照恢复全部在 ftl_boot_recovery 内完成：
+    /* 池回填 / full metadata rebuild / 块元数据快照恢复全部在 ftl_boot_recovery 内完成：
      *   · 块元数据快照有效 ⇒ 直接按快照恢复 Free/OP/Spare（不再几何 carve）；
-     *   · 无快照 / 快照损坏 ⇒ F2 → carve。
-     * ⚠ **F2 必须先于 carve**（F2 认领写过的块，carve 只把 state==NONE 的块入池）；
+     *   · 无快照 / 快照损坏 ⇒ full metadata rebuild → carve。
+     * ⚠ **full metadata rebuild 必须先于 carve**（full metadata rebuild 认领写过的块，carve 只把 state==NONE 的块入池）；
      *   carve 也**不能**在块元数据快照恢复之前做——否则池条目会重复。 */
     if (ftl_boot_recovery(ftl, &result) != FTL_OK)
     {
@@ -369,7 +369,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
 /* 完整初始化 FTL：全实例 boot + controller 绑定（boot_ok 才置 g_ftl_ready）
  *
  *   ① 建 g_ftl_ptrs 三维指针表 + completion_table_set_route —— **必须早于逐实例 boot**，
- *      理由见函数内注释（boot 期 F2 重建会经 l2p_cache_read_sync 抽完成表）。
+ *      理由见函数内注释（boot 期 full metadata rebuild会经 l2p_cache_read_sync 抽完成表）。
  *   ② 逐 (ch,ce,lun) boot —— 任一失败则 boot_ok=0，整体回退 fc_service。
  *   ③ ssd_controller_init(&g_ctrl, g_ftl_ptrs) —— 对外 controller 就绪。
  *   ④ g_ftl_ready = 1 —— 主循环切换到 ftl_service。
@@ -388,7 +388,7 @@ static void ssd_ftl_boot_all(void)
      *      ctx 登记与已设好的路由表；已移到此处。
      *    - g_ftl_ptrs 只是对静态数组 g_ftl 取址，不依赖 ftl_init。
      *    - 为何路由不能等 boot 之后再设：`ssd_ftl_boot` 内部的 `ftl_boot_recovery`
-     *      （F2 重建）会经 `l2p_cache_read_sync` → `l2p_sync_pump` → `ftl_service_pump()`
+     *      （full metadata rebuild）会经 `l2p_cache_read_sync` → `l2p_sync_pump` → `ftl_service_pump()`
      *      抽完成表。此时若 route 仍为 NULL，`ftl_op_dispatch` 解析出的 ftl 为 NULL，
      *      服务函数只 release 不推进状态 ⇒ job 永久卡死
      *      （现象：[L2P] read_sync timeout + load_inflight 永久不减）。
@@ -402,13 +402,18 @@ static void ssd_ftl_boot_all(void)
             for (lun = 0U; lun < LUN_NUM; lun++)
             {
                 g_ftl_ptrs[ch][ce][lun] = &g_ftl[ch][ce][lun];
+
+                /* 预绑 controller 的实例指针：boot 失败时 ssd_controller_init 不会执行，
+                 * 但 CLI 的 `bbt --erase` 仍需要实例才能擦除旧/坏介质。
+                 * boot 成功后 ssd_controller_init 会重新校验并绑定同一组指针。 */
+                g_ctrl.ftl[ch][ce][lun] = g_ftl_ptrs[ch][ce][lun];
             }
         }
     }
     completion_table_set_route(g_ftl_ptrs);
 
     /* ①.5 共享 L2P cache：每个 (ch,ce) 一份，**设备级只初始化一次**。
-     * 必须早于逐实例 boot（ftl_boot_recovery 的 F2/journal 回放就会访问 cache）；
+     * 必须早于逐实例 boot（ftl_boot_recovery 的 full metadata rebuild / journal 回放就会访问 cache）；
      * 且绝不能放进逐实例 ftl_init（第二个实例会清掉第一个实例的 line）。 */
     for (ch = 0U; ch < CH_NUM; ch++)
     {

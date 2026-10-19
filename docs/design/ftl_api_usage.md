@@ -610,7 +610,7 @@ void l2p_cache_snapshot_owner_bitmap(const l2p_cache_t *cache, uint32_t owner_di
 
 ```
 l2p_cache_read()       → 11 个调用点全部按三态改写（host 读下发 / 写确认 / TRIM /
-                         RR / 搬移 SETTLE / 开机回放 / F2 重建 / CLI map）
+                         RR / 搬移 SETTLE / 开机回放 / full metadata rebuild / CLI map）
 l2p_cache_write()      → 写确认 / 搬移 WRITE_SETTLE / journal_replay（F10：回放写 cache）
 l2p_cache_flush_kick   → l2p_cache_evict_one（CLOCK 驱逐脏行时）、l2p_flush_kick_owner
 l2p_cache_flush_owner_sync → ftl_flush（HIL `fl`，显式持久化请求，只刷本 owner）

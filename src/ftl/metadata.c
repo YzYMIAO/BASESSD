@@ -1251,7 +1251,7 @@ static const uint32_t g_ftl_partition_count = (uint32_t)(sizeof(g_ftl_partitions
  *     ③ 已登记日志块：用 `l2p_live[g] != 0` 做 O(1) 判定（该账本的定义就是
  *        "最新位置落在 g 的 region 数"）。debug 档保留全表扫描做差分自检。
  *   ②③ 是**从用户区动态取的**块 ⇒ 必须带 plane 比较；只比块号会连带掩掉另一 plane
- *   的同号块（既出不了 free pool、又被 F2 重建跳过，白丢一个可用块）。
+ *   的同号块（既出不了 free pool、又被 full metadata rebuild 跳过，白丢一个可用块）。
  * -------------------------------------------------------------------- */
 bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, uint16_t block)
 {

@@ -154,7 +154,7 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
             const uint16_t gob = ftl_pba_gblock(oldp);
 
             /* ⚠ **常驻守卫**（非临时探针，勿删）：L2P 指的旧块在 BST 里 0 有效 ⇒ 下一行
-             * 必然撞 `bst.h` 的 `valid_count > 0U` 断言。这是「F2 重建漏认」类缺陷的
+             * 必然撞 `bst.h` 的 `valid_count > 0U` 断言。这是「full metadata rebuild 漏认」类缺陷的
              * **唯一故障点**：重建只要静默跳过一个仍被 L2P 指向的块（坏块 / 元数据块判据
              * 过宽 / 页 0 判空），该块就落在所有池之外、valid_count 恒 0，且此后**每次**
              * 覆盖写该 LBA 都会死机——而重启本身看不出任何异常。
@@ -894,8 +894,7 @@ static void contract_check_jobs_idle(const ftl_context_t *ftl)
 
     ASSERT((!ftl->migrate_handle->active) && (!ftl->migrate_handle->waiting) &&
            (ftl->migrate_handle->phase == (uint8_t)MIG_IDLE) &&
-           (ftl->migrate_handle->fail_gblock == UINT16_MAX) &&
-           (ftl->migrate_handle->dst_fail_gblock == UINT16_MAX));
+           (ftl->migrate_handle->fail_gblock == UINT16_MAX));
 
     ASSERT((ftl->read_recovery_handle.stage == (uint8_t)RR_STAGE_IDLE) &&
            (ftl->read_recovery_handle.waiting == 0U) &&

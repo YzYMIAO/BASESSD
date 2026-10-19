@@ -1036,6 +1036,33 @@ void ftl_journal_callback(struct ftl_context *ftl, const fc_command_status_t *co
  *             （> cp_sequence）随页面一起丢。
  *             页头 magic / entry_count 校验失败即跳过（掉电撕裂的预期情形，见文件头 ⚠）。
  * -------------------------------------------------------------------- */
+/* 空片页判定（仅读失败时调用）：格式化后的 Journal 环形块是全 FF，
+ * 带 META/CRC 校验的读会失败；raw 读全 FF ⇒ 空页，不是“不可读”。
+ * 只有非 FF 的读失败才是真正不可信的页（RISK-BOOT-08）。 */
+static bool journal_raw_page_blank(nand_pba_t addr)
+{
+    uint8_t raw[PAGE_SIZE];
+
+    /* raw 读只填 4 个 CW 的用户区（512B × 4，间隔 FC_BUFFER_POOL_CW_SIZE）；
+     * 尾部/间隔字节不填。先铺 FF，避免未初始化栈字节把空页误判成非空。 */
+    memset(raw, 0xFF, sizeof(raw));
+
+    if (ftl_sync_read_page_raw(addr, raw) != FTL_OK)
+    {
+        return false;
+    }
+
+    for (uint32_t i = 0U; i < PAGE_SIZE; i++)
+    {
+        if (raw[i] != 0xFFU)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static uint16_t journal_scan_ring(const l2p_journal_t *journal,
                                   uint32_t             cp_sequence,
                                   journal_page_ref_t  *out_pages,
@@ -1056,7 +1083,7 @@ static uint16_t journal_scan_ring(const l2p_journal_t *journal,
 
     for (uint8_t b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
     {
-        /* 已判坏的环形块不扫：它的读必然失败，会把整次回放标成“不完整”并逼出 F2。
+        /* 已判坏的环形块不扫：它的读必然失败，会把整次回放标成“不完整”并逼出 full metadata rebuild。
          * 坏块上的条目本来就不该再被信任。 */
         if (journal_ring_block_bad(journal, b))
         {
@@ -1071,7 +1098,10 @@ static uint16_t journal_scan_ring(const l2p_journal_t *journal,
             nand_pba_t raddr = journal_page_addr(journal, b, (uint8_t)page);
             if (ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
             {
-                read_errors++; /* 读失败，跳过本页（下面汇总一条日志） */
+                if (!journal_raw_page_blank(raddr))
+                {
+                    read_errors++; /* 非空页读失败：真正的不可信页 */
+                }
                 continue;
             }
 
@@ -1273,7 +1303,7 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
  * 开机回放 = 结构性同步：用同步逃生口（自旋泵），不 park、不返 FTL_AGAIN
  * ——此时 superloop 尚未建立，没人推进 job。
  * entry_lba 来自 NAND，是**不可信输入**：先校验再查表（H29）。
- * 写失败 ⇒ LOGW + block_ctx->ok=0（调用者回退 F2）。
+ * 写失败 ⇒ LOGW + block_ctx->ok=0（调用者回退 full metadata rebuild）。
  */
 static uint32_t jrn_replay_apply_page(l2p_journal_t              *journal,
                                       l2p_cache_t                *cache,
@@ -1440,7 +1470,7 @@ ftl_status_t journal_replay(l2p_journal_t              *journal,
 
     /* 读失败的页 = 可能漏回放的条目。**写态恢复已经完成**（journal_resume 必须执行，
      * 否则写指针会回到 block0/page0 二次编程），但调用者不能把本次回放当成完整结果
-     * ——应回退 F2 全盘重建（RISK-BOOT-08）。 */
+     * ——应回退 full metadata rebuild（RISK-BOOT-08）。 */
     if (read_errors != 0U)
     {
         LOGW("[JRN] replay incomplete: %u page(s) unreadable\r\n", (unsigned)read_errors);

@@ -909,11 +909,11 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir);
  *   日志块：`l2p_live[g] != 0` —— 该账本的定义就是"最新位置落在 g 的 region 数"，
  *           与 Directory 条目一一对应，判据 O(1)
  *
- * free pool 回填（main.c）与重建（PFR 内部 F2）共用同一判据。
+ * free pool 回填（main.c）与重建（PFR 内部 full metadata rebuild）共用同一判据。
  *
  * ⚠ 固定块分支也**必须比较 plane**：固定池只占 plane_mask 里的 plane，其余 plane 的
  *   同号块是用户数据。日志块/游标块从用户区动态取，同样必须带 plane 比较；只比
- *   per-plane 块号会连带掩掉另一 plane 的同号块（既出不了 free pool、又被 F2 重建
+ *   per-plane 块号会连带掩掉另一 plane 的同号块（既出不了 free pool、又被 full metadata rebuild
  *   跳过，白丢一个可用块）。
  *
  * @param md_dir Metadata Directory cache（可为 NULL：仅固定块区间判断）
