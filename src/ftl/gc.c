@@ -256,8 +256,6 @@ static void gc_table_extremes(const ftl_allocator_t *alloc, gc_extremes_t *out)
 bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim)
 {
     /* 前置条件（判据 2）：调用者 migrate.c 传 &ftl->alloc 与栈上 &victim。 */
-    ASSERT(alloc != NULL);
-    ASSERT(alloc->blocks != NULL);
     ASSERT(victim != NULL);
 
     /* 归一化基准：全表极值（一次扫描，与候选数无关）。min_erase 本函数不用（T5 用）。 */
@@ -346,7 +344,7 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
 /* --------------------------------------------------------------------
  * gc_check_triggers
  *   功能：算触发位掩码（调用点据此决定要不要回收、以及回收多少）。
- *   参数：alloc —— 分配器（前置条件：调用者持有实例，非法即 ASSERT）。
+ *   参数：alloc —— 分配器（前置条件：调用者持有实例；绑定由 ftl_contract_audit 证明）。
  *   返回：GC_TRIGGER_* 位掩码；0 无触发。
  *   实现要点：只看**空间与磨损**——T1 水位 < FREE_POOL_TARGET（主动补池）；
  *             T4 紧急 ≤ FREE_POOL_EMERGENCY（与 T1 同源但阈值更低，池见底）；

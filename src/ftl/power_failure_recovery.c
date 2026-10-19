@@ -104,7 +104,6 @@ static void         ftl_recovery_reset_blocks(ftl_context_t *ftl);
 ftl_status_t ftl_media_check_format(struct ftl_context *ftl, bool *out_need_format)
 {
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与局部 bool。 */
-    ASSERT(ftl != NULL);
     ASSERT(out_need_format != NULL);
 
     uint32_t          media_version = 0U;
@@ -148,7 +147,6 @@ ftl_status_t ftl_media_check_format(struct ftl_context *ftl, bool *out_need_form
 ftl_status_t ftl_media_format(struct ftl_context *ftl)
 {
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun]。 */
-    ASSERT(ftl != NULL);
 
     /* 两阶段擦除：BBT 先在擦用户块之前落盘；若这一步失败，用户数据与工厂标记
      * 都还完整，格式化不完成、可重试。 */
@@ -186,7 +184,6 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
 ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
 {
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与栈上 &result。 */
-    ASSERT(ftl != NULL);
     ASSERT(result != NULL);
 
     ftl_boot_result_t local_result;
@@ -302,8 +299,6 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
  * -------------------------------------------------------------------- */
 static ftl_status_t ftl_boot_carve_pools(struct ftl_context *ftl)
 {
-    ASSERT(ftl != NULL);
-
     ftl_allocator_t *alloc = &ftl->alloc;
 
     ASSERT(alloc->free_count == 0U);
@@ -358,8 +353,6 @@ static ftl_status_t ftl_boot_carve_pools(struct ftl_context *ftl)
  * Free 不足时自然停在低水位，并打一行告警（容量下降是真实结果）。 */
 static void recovery_refill_spare_pools(ftl_context_t *ftl)
 {
-    ASSERT(ftl != NULL);
-
     for (uint8_t p = 0U; p < PLANE_NUM; p++)
     {
         (void)allocator_spare_refill_from_free(&ftl->alloc, p);
@@ -392,7 +385,6 @@ static void recovery_refill_spare_pools(ftl_context_t *ftl)
 static ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_page_ref_t *ring)
 {
     /* 前置条件（判据 2）：唯一调用者 ftl_boot_recovery 持有实例与 ring 快照。 */
-    ASSERT(ftl != NULL);
     ASSERT(ring != NULL);
 
     /* ① 只失效本 owner 的行/脏位（设备级 init 已清全体；这里覆盖格式化后的场景） */
@@ -443,7 +435,6 @@ static ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
                                          uint8_t                       *blocks_restored,
                                          const journal_page_ref_t      *ring)
 {
-    ASSERT(ftl != NULL);
     ASSERT(cp != NULL);
     ASSERT(blocks_restored != NULL);
     ASSERT(ring != NULL);
@@ -600,7 +591,6 @@ static ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
                                            ftl_boot_result_t             *result)
 {
     /* 前置条件（判据 2）：唯一调用者 ftl_boot_recovery 持有实例与局部结构。 */
-    ASSERT(ftl != NULL);
     ASSERT(cp != NULL);
     ASSERT(result != NULL);
 
@@ -896,8 +886,6 @@ static void ftl_recovery_close_block(ftl_context_t       *ftl,
 static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, ftl_rebuild_stats_t *stats)
 {
     /* 前置条件（判据 2）：唯一调用者在本文件（boot 三条路径）。 */
-    ASSERT(ftl != NULL);
-    ASSERT(ftl->alloc.blocks != NULL);
 
     uint8_t raw_buf[PAGE_SIZE];
 
@@ -1008,7 +996,6 @@ static bool recovery_add_closed(ftl_context_t *ftl, uint16_t g, uint8_t temperat
 
 static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLOCK_TOTAL])
 {
-    ASSERT(ftl != NULL);
     ASSERT(words != NULL);
 
     ftl_allocator_t *alloc = &ftl->alloc;
@@ -1210,7 +1197,6 @@ static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, uint16_t words[FTL_B
 
 static void ftl_recovery_probe_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLOCK_TOTAL], ftl_block_restore_stats_t *stats)
 {
-    ASSERT(ftl != NULL);
     ASSERT(words != NULL);
 
     ftl_allocator_t *alloc = &ftl->alloc;
@@ -1338,7 +1324,6 @@ static void ftl_recovery_probe_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLO
 
 static bool ftl_recovery_build_pools(ftl_context_t *ftl, const uint16_t words[FTL_BLOCK_TOTAL])
 {
-    ASSERT(ftl != NULL);
     ASSERT(words != NULL);
 
     ftl_allocator_t *alloc = &ftl->alloc;
@@ -1419,8 +1404,6 @@ static bool ftl_recovery_build_pools(ftl_context_t *ftl, const uint16_t words[FT
 
 static void ftl_recovery_reset_blocks(ftl_context_t *ftl)
 {
-    ASSERT(ftl != NULL);
-
     ftl_allocator_t *alloc = &ftl->alloc;
 
     for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++)
@@ -1454,8 +1437,6 @@ static void ftl_recovery_reset_blocks(ftl_context_t *ftl)
 static bool recovery_materialize_pba(void *ctx, nand_pba_t pba)
 {
     ftl_context_t *ftl = (ftl_context_t *)ctx;
-
-    ASSERT(ftl != NULL);
 
     /* journal 条目来自介质（H29 不可信输入）：先校验 PBA 属于本实例且字段合法，
      * 否则会把 valid_count 记到别的块，而 L2P 存下一个越界地址。 */
@@ -1523,7 +1504,6 @@ static void recovery_valid_add(void *ctx, nand_pba_t pba, uint8_t *ok)
 {
     ftl_context_t *ftl = (ftl_context_t *)ctx;
 
-    ASSERT(ftl != NULL);
     ASSERT(ok != NULL);
 
     const uint16_t g = ftl_pba_gblock(pba);
@@ -1552,7 +1532,6 @@ static void recovery_valid_sub(void *ctx, nand_pba_t pba, uint8_t *ok)
 {
     ftl_context_t *ftl = (ftl_context_t *)ctx;
 
-    ASSERT(ftl != NULL);
     ASSERT(ok != NULL);
 
     const uint16_t g = ftl_pba_gblock(pba);

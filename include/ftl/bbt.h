@@ -83,7 +83,7 @@ void bbt_init(ftl_allocator_t *alloc);
  *     “有元数据但 CP 缺失/损坏”。调用者应先用 raw 读确认命令通路正常，
  *     否则“总线读死”也会返回 false。
  *
- * @param alloc Allocator 上下文（取 ch/ce/lun 与几何）；**前置条件**，非法即 ASSERT
+ * @param alloc Allocator 上下文（取 ch/ce/lun 与几何）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @return true = 至少一页是合法 FTL 页（介质已格式化过）；false = 空片
  */
 bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc);
@@ -141,7 +141,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc);
  *
  * ⚠ 本片芯片若已被整片擦过，出厂标记即已丢失 ⇒ 只会读到全 0xFF（不是 bug）。
  *
- * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）；**前置条件**，非法即 ASSERT
+ * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param do_erase  0 = 只读（非破坏性）；非 0 = 逐块擦除并额外判擦除失败
  */
 void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase);
@@ -162,7 +162,7 @@ void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase);
  *   `FORMAT_IN_PROGRESS` 让下次开机识别“格式化未完成”并继续格式化，而不是把
  *   “有 BBT、无 CP”误判成损坏介质。
  *
- * @param alloc  Allocator 上下文；**前置条件**，非法即 ASSERT
+ * @param alloc  Allocator 上下文；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @return FTL_OK；FTL_ERROR = ① 的 BBT save 失败（未擦用户块，可重试）。
  */
 ftl_status_t bbt_format_erase(ftl_allocator_t *alloc);
@@ -227,7 +227,7 @@ static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
  *
  * 池内下一槽追加一条 record（块满先擦池内下一块）。sequence 递增。
  *
- * @param alloc  Allocator 上下文（游标/序号在 alloc->bbt，per-instance）；**前置条件**，非法即 ASSERT
+ * @param alloc  Allocator 上下文（游标/序号在 alloc->bbt，per-instance）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @return FTL_OK 成功（含 dirty==0 早退）；FTL_ERROR 池定位 / prepare / 写失败。
  */
 ftl_status_t bbt_save(ftl_allocator_t *alloc);
@@ -267,7 +267,7 @@ typedef struct
  *   不重走换块判定——擦已成功，重擦纯属磨损。
  * ⚠ 只由后台调度器/B 档调用。开机/格式化路径仍走同步 bbt_save。
  *
- * @param alloc  Allocator 上下文；**前置条件**，非法即 ASSERT
+ * @param alloc  Allocator 上下文；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param info   本轮动态信息（当前未用，可传 NULL）
  * @param out    出参：本轮结束后的上报（**非空**，由调用者提供）
  */
@@ -280,7 +280,7 @@ void bbt_handle(ftl_allocator_t *alloc, const ftl_bg_info_t *info, bbt_status_t 
  * 命中时同时恢复本实例的 sequence 计数与写游标（alloc->bbt）。
  *
  * @param alloc       Allocator 上下文（池路由取其 ch/ce/lun；游标/序号写回 alloc->bbt）；
- *                    与其余三个出参指针同为**前置条件**，非法即 ASSERT
+ *                    alloc 由 ftl_contract_audit 证明；其余三个出参指针仍为**前置条件**（非法即 ASSERT）
  * @param bad_map     输出：bt_bitmap[512]
  * @param bad_count   输出：坏块数
  * @param sequence    输出：最新 sequence

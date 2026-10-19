@@ -32,7 +32,8 @@
  *      （metadata_ring_locate）——前者在 superloop 之前跑（无泵可等），后者只在
  *      冷启动后首次整理出现。
  *
- * 断言口径：指针/配置类前置条件用 ASSERT（判据 2）；ring 几何非法、槽位越界等
+ * 断言口径：init/bind 入口与配置类前置条件用 ASSERT（判据 2）；运行期模块入口的
+ * 实例句柄由 ftl_contract_audit 在 boot 期证明，不再逐次复检；ring 几何非法、槽位越界等
  * 配置错误在 release 也必须拒绝（判据 9），因此保留 FTL_ERROR 返回。
  */
 
@@ -747,7 +748,6 @@ nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
                                uint16_t                    id)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
-    ASSERT(dir != NULL);
     ASSERT(type < METADATA_TYPE_COUNT);
 
     const uint16_t i = metadata_dir_find_index(dir, type, id);
@@ -757,8 +757,6 @@ nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
 
 uint16_t metadata_live_count(const metadata_dir_cache_t *dir, uint16_t gblock)
 {
-    ASSERT(dir != NULL);
-
     if (gblock >= FTL_BLOCK_TOTAL)
     {
         return 0U; /* 来源可能是介质/快照（H29）：越界按“无引用”处理 */
@@ -780,7 +778,6 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
                          nand_pba_t            new_pba)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
-    ASSERT(dir != NULL);
     ASSERT(type < METADATA_TYPE_COUNT);
 
     /* 查找现有 entry（覆盖旧位置） */
@@ -903,8 +900,6 @@ static bool metadata_dir_rotate_log_block(metadata_dir_cache_t *dir, ftl_allocat
 nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir 与 &ftl->alloc。 */
-    ASSERT(dir != NULL);
-    ASSERT(alloc != NULL);
 
     /* 整理 job 在飞 ⇒ 一律让路：压缩搬移按**发放那一刻**的 cur_metadata_page 核定
      * 空槽预算，期间再发放会打乱它。调用者（l2p_cache_flush_kick）据此返回 FTL_AGAIN。 */
@@ -942,7 +937,6 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
     /* 前置条件（判据 2）：dir 恒 ftl->metadata_dir。
      * region_id / new_pba 对内部调用者结构性有效；但违反后的后果是**静默丢映射**，
      * 因此 ASSERT 之外保留 release 拒绝（H14 / 判据 9，二者不是二选一）。 */
-    ASSERT(dir != NULL);
     ASSERT(region_id < METADATA_DIR_ENTRIES);
     ASSERT(new_pba != NAND_PBA_INVALID);
 
@@ -1020,7 +1014,6 @@ md_anchor_step_t metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
                                              bool                 *out_need_erase)
 {
     /* 前置条件（判据 2）：六个指针均由调用者自持。 */
-    ASSERT(dir != NULL);
     ASSERT(out_ring != NULL);
     ASSERT(out_base != NULL);
     ASSERT(out_idx != NULL);
@@ -1069,7 +1062,6 @@ md_anchor_step_t metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
 void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, uint32_t seq, uint8_t chunk, metadata_anchor_page_t *page)
 {
     /* 前置条件（判据 2）：两个指针均由调用者自持。 */
-    ASSERT(dir != NULL);
     ASSERT(page != NULL);
 
     uint16_t base_entry = (uint16_t)(chunk * METADATA_DIR_ENTRIES_PER_PAGE);
@@ -1122,7 +1114,6 @@ void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, uint32_t seq, uin
 void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t *ring, uint16_t idx, bool ok)
 {
     /* 前置条件（判据 2）：两个指针均由调用者自持。 */
-    ASSERT(dir != NULL);
     ASSERT(ring != NULL);
 
     dir->anchor_write_idx = (uint16_t)((idx + 1U) % metadata_ring_total_records(ring));

@@ -19,7 +19,8 @@
  *
  * ⚠ **介质读回**不转断言（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 页，
  *   页头可能因掉电撕裂而非法，属预期情形，返回错误/跳过而非断言。模块入口与命令
- *   派发路径的前置条件（NULL / phase / 内部句柄）仍用 ASSERT。
+ *   派发路径的 phase / 内部句柄前置条件仍用 ASSERT；实例 handle 非空由
+ *   ftl_contract_audit 在 boot 期证明，运行期入口不再逐次复检。
  *
  * 写模型：
  *   追加进 RAM 页缓冲（page_buf）——**页满异步落盘**，交给 job
@@ -289,7 +290,7 @@ typedef enum
 /*
  * journal_handle - 后台推进 Journal（提交即返回；job 在飞或无事可做时为空操作）
  *
- * @param journal  Journal；**前置条件**，非法即 ASSERT
+ * @param journal  Journal；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param trigger  本轮意图（NULL 视作 FLUSH）
  * @param info     本轮动态信息（now_ms / load_level；当前只用于观测，不改变判据）
  * @param out      出参：本轮结束后的上报（**非空**）

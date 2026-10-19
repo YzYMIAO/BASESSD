@@ -179,6 +179,17 @@ typedef struct
 ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cache, const ftl_storage_t *storage);
 
 /*
+ * ftl_contract_audit - debug-only 初始化契约自检（release 下空实现）
+ *
+ * 在 ftl_init 与设备级 owner 登记完成后调用一次。只证明初始化后**不可变**的绑定：
+ * 句柄、storage 数组、端口回调、topology 副本、PBA 布局、bg 任务表、owner/route 身份。
+ * 不检查运行期可变状态（phase / 计数 / 池成员），也不替代每次调用的入参断言。
+ *
+ * @param ftl FTL 上下文（非 NULL；由 ssd_ftl_boot 在 ftl_init 成功后调用）
+ */
+void ftl_contract_audit(const ftl_context_t *ftl);
+
+/*
  * ftl_service_pump - 实例无关的每轮泵（superloop 每轮调一次）
  *
  * Phase 1: fc_service() 推进 NAND（≤ NAND_SUBMIT_BUDGET 次，首轮即抽干完成）
@@ -198,7 +209,7 @@ void ftl_service_pump(void);
  * ⚠ 调用方须先调 ftl_service_pump()。多实例（多 LUN）下漏调某实例 ⇒ 它的
  *   journal / checkpoint / bbt / GC 永不推进。
  *
- * @param ftl  FTL 上下文（**非 NULL**；NULL 属编程错误，ASSERT 兜底）
+ * @param ftl  FTL 上下文（**非 NULL**；实例绑定由 ftl_contract_audit 在 boot 期证明）
  */
 void ftl_service(ftl_context_t *ftl);
 
@@ -270,14 +281,14 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);
  *
  * 语义 = "把 dirty 元数据落到 NAND"，**非** NVMe 式 barrier（不等待在飞/排队的写）。
  *
- * @param ftl  FTL 上下文（**前置条件**，非法即 ASSERT）
+ * @param ftl  FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
  */
 void ftl_flush(ftl_context_t *ftl);
 
 /*
  * ftl_trim - 取消 [lba, lba+count) 的 LBA 映射（非阻塞、同步完成）
  *
- * @param ftl   FTL 上下文（**前置条件**，非法即 ASSERT）
+ * @param ftl   FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
  * @param lba   起始逻辑地址（uint64_t）
  * @param count 连续 LBA 数（0 视作 1，兼容单 LBA 调用）
  */

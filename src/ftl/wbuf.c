@@ -40,8 +40,6 @@ static uint8_t wbuf_lba_bit(lba_t lba)
 
 bool ftl_wbuf_has(const wbuf_handle_t *h, lba_t lba)
 {
-    ASSERT(h != NULL);
-
     if (h->open == 0U)
     {
         return false;
@@ -56,7 +54,6 @@ bool ftl_wbuf_has(const wbuf_handle_t *h, lba_t lba)
 
 bool ftl_wbuf_read(const wbuf_handle_t *h, lba_t lba, void *out)
 {
-    ASSERT(h != NULL);
     ASSERT(out != NULL);
 
     if (!ftl_wbuf_has(h, lba))
@@ -125,10 +122,6 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
      * 表现为容量无声流失，见 CLAUDE.md §3.1）。
      * 单线程 superloop ⇒ 查到这里登记之间没有别的消费者。 */
     const wbuf_port_t *port = &h->port;
-
-    ASSERT(port->pending_count != NULL);
-    ASSERT(port->pending_alloc != NULL);
-    ASSERT(port->alloc != NULL);
 
     if (port->pending_count(port->pending_ctx) >= FTL_PENDING_MAX)
     {
@@ -240,12 +233,9 @@ wbuf_flush_fail:
 
 static ftl_status_t wbuf_append(wbuf_handle_t *h, uint16_t gi, lba_t lba, const void *buffer, uint8_t n)
 {
-    ASSERT(h != NULL);
     ASSERT(buffer != NULL);
     ASSERT(n > 0U);
     const wbuf_port_t *port = &h->port;
-
-    ASSERT(port->group_add_subop != NULL);
 
     const lba_t window = ftl_lba_pair_base(lba);
 
@@ -297,8 +287,6 @@ static ftl_status_t wbuf_append(wbuf_handle_t *h, uint16_t gi, lba_t lba, const 
 
 static bool wbuf_drop(wbuf_handle_t *h, lba_t lba)
 {
-    ASSERT(h != NULL);
-
     if (!ftl_wbuf_has(h, lba))
     {
         return false;
@@ -315,7 +303,6 @@ static bool wbuf_drop(wbuf_handle_t *h, lba_t lba)
          *   收在这里，不由调用者手工维护（CLAUDE.md §3.1）。 */
         const wbuf_port_t *port = &h->port;
 
-        ASSERT(port->group_complete_multi != NULL);
         port->group_complete_multi(port->pending_ctx, h->owners, SSD_STATUS_OK);
         h->open   = 0U;
         h->owners = 0U;
@@ -327,15 +314,12 @@ static bool wbuf_drop(wbuf_handle_t *h, lba_t lba)
 
 static void wbuf_reset(wbuf_handle_t *h)
 {
-    ASSERT(h != NULL);
-
     if (h->owners != 0U)
     {
         /* 缓冲里的写被整体丢弃（介质已擦净）⇒ 按**写失败**收尾。不能只清零 owners：
          * 那些组仍在等子操作完成，直接丢会让它们的在飞数永不归零、host 写挂死。 */
         const wbuf_port_t *port = &h->port;
 
-        ASSERT(port->group_complete_multi != NULL);
         port->group_complete_multi(port->pending_ctx, h->owners, SSD_STATUS_IO_ERROR);
     }
 
@@ -349,8 +333,6 @@ static void wbuf_reset(wbuf_handle_t *h)
 
 static void wbuf_maybe_flush_idle(wbuf_handle_t *h)
 {
-    ASSERT(h != NULL);
-
     if (h->open == 0U)
     {
         return;
@@ -373,11 +355,6 @@ void wbuf_init(wbuf_handle_t *h, const wbuf_port_t *port)
 {
     ASSERT(h != NULL);
     ASSERT(port != NULL);
-    ASSERT(port->alloc != NULL);
-    ASSERT(port->pending_count != NULL);
-    ASSERT(port->pending_alloc != NULL);
-    ASSERT(port->group_add_subop != NULL);
-    ASSERT(port->group_complete_multi != NULL);
 
     memset(h, 0, sizeof(*h));
     h->port = *port;
@@ -385,7 +362,6 @@ void wbuf_init(wbuf_handle_t *h, const wbuf_port_t *port)
 
 static void wbuf_status_fill(const wbuf_handle_t *h, wbuf_status_t *out)
 {
-    ASSERT(h != NULL);
     ASSERT(out != NULL);
 
     out->base.critical  = false; /* wbuf 是 host 写路径的一部分，由 Phase 2.5 驱动 */
@@ -423,7 +399,6 @@ ftl_status_t wbuf_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const 
     /* info 当前不参与 wbuf 决策；保留形参以统一 typed 入口。 */
     (void)info;
 
-    ASSERT(h != NULL);
     ASSERT(trigger != NULL);
     ASSERT(out != NULL);
 

@@ -151,7 +151,7 @@ gc_decode_result_t gc_decode_cw_lba(fc_command_t *cmd,
  * ⚠ cost 相等时取 valid_count 更小者（确定性，且退化为单维贪心）。
  * ⚠ 退化单 plane 条目（掉电重建产物）跳过哨兵 plane；全哨兵条目直接跳过。
  *
- * @param alloc  Allocator 上下文（前置条件，非法即 ASSERT）
+ * @param alloc  Allocator 上下文（前置条件；实例绑定由 ftl_contract_audit 证明）
  * @param victim 输出：选中的 victim 指针
  * @return true=找到 victim，false=无可用 victim
  */

@@ -307,8 +307,6 @@ uint8_t ftl_bg_level_select(const ftl_context_t *ftl)
  *   各模块**内部**的单飞行门（不在这里窥探 phase/active）单独管，与 host 侧解耦。 */
 void ftl_bg_service(ftl_context_t *ftl)
 {
-    ASSERT(ftl != NULL);
-
     if (ftl->bg_suspend != 0U)
     {
         return;

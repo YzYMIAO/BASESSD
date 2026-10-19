@@ -812,7 +812,7 @@ void metadata_dir_bind_port(metadata_dir_cache_t *dir, const metadata_port_t *po
  * 事件驱动（reclaim_pending / compact_wanted 由 Directory 函数置位），`info` 当前
  * 不参与决策；保留形参以统一 typed 入口。
  *
- * @param dir   Directory cache；**前置条件**，非法即 ASSERT
+ * @param dir   Directory cache；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param info  本轮动态信息（当前未用，可传 NULL）
  * @param out   出参：本轮结束后的上报（**非空**）
  */

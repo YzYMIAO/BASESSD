@@ -220,7 +220,7 @@ typedef struct
 /*
  * migrate_init - 绑定端口并复位 handle。
  *
- * @param m     handle（= ftl->migrate_handle）；**前置条件**，非法即 ASSERT
+ * @param m     handle（= ftl->migrate_handle）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param port  共享服务端口（allocator / journal / l2p / total_writes / topo）
  */
 void migrate_init(migrate_handle_t *m, const migrate_port_t *port);
@@ -234,7 +234,7 @@ typedef enum
 /*
  * migrate_trigger - 登记一个显式搬移请求（不立即启动；由下一次 migrate_handle 消费）。
  *
- * @param m      handle；**前置条件**，非法即 ASSERT
+ * @param m      handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param reason 触发原因
  */
 void migrate_trigger(migrate_handle_t *m, migrate_reason_t reason);
@@ -264,7 +264,7 @@ typedef struct
  *      紧急触发（migrate_trigger）→ GC 10ms → WL 5s → predict 1s；
  *   ③ 每轮最多启动一个 job（单飞行）。
  *
- * @param m     handle；**前置条件**，非法即 ASSERT
+ * @param m     handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param info  本轮动态信息（now_ms / load_level）
  * @param out   出参：本轮结束后的上报（**非空**）
  */

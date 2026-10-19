@@ -177,7 +177,8 @@ void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
  *   返回：ftl_context_t*；set_route 之前为 NULL。
  *   实现要点：越界属编程错误（坐标由 FTL 从 PBA 灌入并经 pba_is_valid 校验）⇒ ASSERT。
  *             返回 NULL 同属编程错误（set_route 漏调）——但**不在此处断言**：判据在
- *             **被调方**（各服务函数入口的 ASSERT(ftl != NULL)，见 ftl_op.h 的所有权表
+ *             **被调方**（各服务函数入口；实例绑定由 ftl_contract_audit 在 boot 期证明，
+ *             见 ftl_op.h 的所有权表
  *             与各服务函数），此处再断一次只是把同一判据写两遍（C7：它不会独立失败）。
  *             不用 ftl 的服务函数（SYNC_WAIT / JOURNAL / BBT）收到 NULL 也无需处理。
  * -------------------------------------------------------------------- */

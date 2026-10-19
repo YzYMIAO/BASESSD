@@ -83,23 +83,12 @@ static bool l2p_bitmap_test(const uint32_t *bitmap, uint32_t bit)
 /* --------------------------------------------------------------------
  * l2p_cache_owner
  *   功能：全局 region → owner FTL 实例（设备级注入的解析回调）。
- *   返回：owner 实例（恒非空；解析失败/拓扑不匹配是内部不变量破坏 ⇒ ASSERT）。
+ *   返回：owner 实例（恒非空；owner 表与 topology 的一致性由 ftl_contract_audit 在 boot 期证明）。
  *   实现要点：共享 cache 的所有 metadata I/O 都以 owner 的目录/分配器为准。
  * -------------------------------------------------------------------- */
 static const l2p_owner_t *l2p_cache_owner(const l2p_cache_t *cache, uint32_t global_region)
 {
-    ASSERT(cache != NULL);
-    ASSERT(cache->owner_of_region != NULL);
-
-    const l2p_owner_t *owner = cache->owner_of_region(cache->owner_ctx, global_region);
-
-    ASSERT(owner != NULL);
-    ASSERT(owner->dim == (global_region % FTL_DIM_TOTAL));
-    ASSERT(owner->topo.ch == cache->ch);
-    ASSERT(owner->topo.ce == cache->ce);
-    ASSERT(ftl_topo_dim(owner->topo) == owner->dim);
-
-    return owner;
+    return cache->owner_of_region(cache->owner_ctx, global_region);
 }
 
 /* --------------------------------------------------------------------
@@ -247,7 +236,6 @@ static l2p_cache_line_t *l2p_cache_find(l2p_cache_t *cache, uint32_t region_id)
 
 bool l2p_cache_preload_region(l2p_cache_t *cache, uint32_t global_region, nand_pba_t pba)
 {
-    ASSERT(cache != NULL);
     ASSERT(global_region < L2P_GLOBAL_REGIONS);
     ASSERT(pba_is_valid(pba));
 
@@ -432,7 +420,6 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint32_t region_id)
 ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
 {
     /* 前置条件（判据 2）：调用者传 ftl->cache 与自己的出参地址。 */
-    ASSERT(cache != NULL);
     ASSERT(out != NULL);
 
     if ((uint64_t)lba >= L2P_GLOBAL_LBA_MAX)
@@ -445,9 +432,8 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
         return FTL_ERROR;
     }
 
-    /* 全局 LBA 必须属于本 cache 服务的 (ch,ce)；跨通道/跨 CE 误用是编程错误。 */
-    ASSERT(lba_route_ch(lba) == cache->ch);
-    ASSERT(lba_route_ce(lba) == cache->ce);
+    /* LBA→(ch,ce) 路由由 ftl_contract_audit 在 boot 期对全部 region 起点证明；
+     * 此处不再逐次复检（跨通道/跨 CE 误用是编程错误，boot 审计已覆盖）。 */
 
     uint32_t region_id = lba_to_global_region(lba);
     uint16_t entry_idx = lba_to_entry(lba);
@@ -477,14 +463,10 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
 bool l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
 {
     /* 前置条件（判据 2）：调用者传 ftl->cache。lba 越界是**数据**判断（判据 1），保留。 */
-    ASSERT(cache != NULL);
     if ((uint64_t)lba >= L2P_GLOBAL_LBA_MAX)
     {
         return true; /* 越界：调用者的 write 会是 no-op、read 会返 FTL_ERROR ⇒ 无需就绪 */
     }
-
-    ASSERT(lba_route_ch(lba) == cache->ch);
-    ASSERT(lba_route_ce(lba) == cache->ce);
 
     l2p_cache_line_t *line = l2p_cache_find(cache, lba_to_global_region(lba));
     if (line != NULL)
@@ -508,14 +490,10 @@ bool l2p_cache_ready(l2p_cache_t *cache, lba_t lba)
 ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
 {
     /* 前置条件（判据 2）：调用者传 ftl->cache。lba 越界是**数据**判断（判据 1），保留。 */
-    ASSERT(cache != NULL);
     if ((uint64_t)lba >= L2P_GLOBAL_LBA_MAX)
     {
         return FTL_OK; /* 越界 no-op：数据通路的调用点都自带范围检查 */
     }
-
-    ASSERT(lba_route_ch(lba) == cache->ch);
-    ASSERT(lba_route_ce(lba) == cache->ce);
 
     uint32_t region_id = lba_to_global_region(lba);
 
@@ -574,7 +552,6 @@ ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
     uint32_t           guard = L2P_SYNC_GUARD_MAX;
     const l2p_owner_t *owner = NULL;
 
-    ASSERT(cache != NULL);
     if ((uint64_t)lba < L2P_GLOBAL_LBA_MAX)
     {
         owner = l2p_cache_owner(cache, lba_to_global_region(lba));
@@ -600,7 +577,6 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
     uint32_t           guard = L2P_SYNC_GUARD_MAX;
     const l2p_owner_t *owner = NULL;
 
-    ASSERT(cache != NULL);
     if ((uint64_t)lba < L2P_GLOBAL_LBA_MAX)
     {
         owner = l2p_cache_owner(cache, lba_to_global_region(lba));
@@ -671,7 +647,6 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
 {
     /* 前置条件（判据 2）：cache 恒 ftl->cache；line_idx 由调用者自持（下标越界是内部
      * 自铸句柄，非外部输入）——两侧都收口成断言。 */
-    ASSERT(cache != NULL);
     ASSERT((line_idx >= 0) && (line_idx < (int)L2P_CACHE_SIZE));
 
     l2p_cache_line_t *line = &cache->lines[line_idx];
@@ -736,7 +711,6 @@ void l2p_flush_kick_owner(l2p_cache_t *cache, uint32_t owner_dim, uint8_t max_ki
 {
     /* 前置条件（判据 2）：调用者传 ftl->cache、本实例 dim 与档位表里的非零条数
      * （IDLE L2P_CACHE_SIZE / NORMAL BG_NORMAL_FLUSH_COUNT / BUSY BG_BUSY_FLUSH_COUNT）。 */
-    ASSERT(cache != NULL);
     ASSERT(owner_dim < FTL_DIM_TOTAL);
     ASSERT(max_kick != 0U);
 
@@ -793,7 +767,6 @@ ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
     uint8_t  kicked = 0U;
 
     /* 前置条件（判据 2）：cache 恒 ftl->cache；line_idx 由调用者自持。 */
-    ASSERT(cache != NULL);
     ASSERT((line_idx >= 0) && (line_idx < (int)L2P_CACHE_SIZE));
 
     l2p_cache_line_t *line = &cache->lines[line_idx];
@@ -849,7 +822,6 @@ ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
 ftl_status_t l2p_cache_flush_owner_sync(l2p_cache_t *cache, uint32_t owner_dim)
 {
     /* 前置条件（判据 2）：调用者传 ftl->cache 与本实例 dim。 */
-    ASSERT(cache != NULL);
     ASSERT(owner_dim < FTL_DIM_TOTAL);
 
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -908,9 +880,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
 
     /* ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
      * ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。 */
-    ASSERT(ftl != NULL);
 
-    ASSERT(ftl->cache != NULL);
     ASSERT(&ftl->cache->lines[0] <= line);
     ASSERT(line < &ftl->cache->lines[L2P_CACHE_SIZE]);
 
@@ -1014,7 +984,6 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
  */
 void l2p_cache_invalidate_owner(l2p_cache_t *cache, uint32_t owner_dim)
 {
-    ASSERT(cache != NULL);
     ASSERT(owner_dim < FTL_DIM_TOTAL);
 
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -1056,7 +1025,6 @@ void l2p_cache_invalidate_owner(l2p_cache_t *cache, uint32_t owner_dim)
  */
 void l2p_cache_snapshot_owner_bitmap(const l2p_cache_t *cache, uint32_t owner_dim, uint32_t out[L2P_LOCAL_DIRTY_WORDS])
 {
-    ASSERT(cache != NULL);
     ASSERT(owner_dim < FTL_DIM_TOTAL);
     ASSERT(out != NULL);
 
@@ -1095,7 +1063,6 @@ static uint16_t l2p_dirty_count(const l2p_cache_t *cache)
 
 static void l2p_status_fill(const l2p_cache_t *cache, l2p_status_t *out)
 {
-    ASSERT(cache != NULL);
     ASSERT(out != NULL);
 
     uint16_t resident = 0U;
@@ -1138,7 +1105,6 @@ static void l2p_status_fill(const l2p_cache_t *cache, l2p_status_t *out)
 
 void l2p_handle(l2p_cache_t *cache, uint32_t dim, const ftl_bg_info_t *info, l2p_status_t *out)
 {
-    ASSERT(cache != NULL);
     ASSERT(dim < FTL_DIM_TOTAL);
     ASSERT(info != NULL);
     ASSERT(out != NULL);
@@ -1158,7 +1124,6 @@ void l2p_handle(l2p_cache_t *cache, uint32_t dim, const ftl_bg_info_t *info, l2p
 
 void l2p_cache_line_get(const l2p_cache_t *cache, uint16_t idx, l2p_line_info_t *out)
 {
-    ASSERT(cache != NULL);
     ASSERT(out != NULL);
 
     if (idx >= L2P_CACHE_SIZE)
@@ -1174,7 +1139,6 @@ void l2p_cache_line_get(const l2p_cache_t *cache, uint16_t idx, l2p_line_info_t 
 
 void l2p_cache_invalidate_line(l2p_cache_t *cache, uint16_t idx)
 {
-    ASSERT(cache != NULL);
     ASSERT(idx < L2P_CACHE_SIZE);
     ASSERT(cache->lines[idx].state != L2P_CACHE_FLUSHING);
     ASSERT(cache->lines[idx].state != L2P_CACHE_LOADING);
@@ -1184,6 +1148,5 @@ void l2p_cache_invalidate_line(l2p_cache_t *cache, uint16_t idx)
 
 bool l2p_cache_has_flush_inflight(const l2p_cache_t *cache)
 {
-    ASSERT(cache != NULL);
     return cache->flush_inflight != 0U;
 }

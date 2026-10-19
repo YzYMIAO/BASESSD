@@ -344,7 +344,7 @@ typedef struct
  * 未在跑时按 trigger 判定是否启动：emergency / force / T1 水位 / T2 写入量 / T3 定时
  * （T3 带 CP_T3_MIN_JOURNAL_DELTA 门）。已在跑则续跑下一步（任何档位都要调）。
  *
- * @param h       handle；**前置条件**，非法即 ASSERT
+ * @param h       handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param trigger 本轮触发信息（**非空**）
  * @param out    出参：本轮结束后的上报（**非空**）
  */

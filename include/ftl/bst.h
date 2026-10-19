@@ -33,7 +33,7 @@
  *   块级聚合（valid_count）供 GC/WL 选 victim（对齐主流 validity ratio）；逐 CW 真值现查 L2P。
  */
 
-#include "assertion.h"   /* ASSERT（本文件全部访问器的入参前置条件 + 计数守卫） */
+#include "assertion.h"   /* ASSERT（计数守卫；指针非空由内嵌数组结构性保证） */
 #include "ftl_config.h"  /* nand_pba_t, pba_to_*, NAND_PBA_INVALID */
 #include "nand_config.h" /* BLOCKS_PER_PLANE, PLANE_NUM, CW_NUM */
 
@@ -172,8 +172,8 @@ static inline uint16_t ftl_gblock_block(uint16_t g)
  * 调用者一律传 `&alloc->blocks[<索引>]`，而 `blocks` 指向 `ftl_context_t.tables.blocks`
  * 这个**内嵌数组**（非指针）⇒ 取元素地址**结构性恒非空**。全仓 11 个 .c 的调用点
  * 已逐一核实无一传 NULL。
- * ⇒ 用 `ASSERT(b != NULL)`（H14）：debug 停机留现场，release 裁空 ⇒ 零开销，
- *   不保留 `if (b != NULL) { … }` 那种**恒真的静默吞**（§十附判据 1）。 */
+ * ⇒ 指针非空由内嵌数组结构性保证，不保留 `if (b != NULL)` 恒真守卫；
+ *   计数越界仍用 `ASSERT`（H14：debug 停机留现场，release 裁空 ⇒ 零开销）。 */
 
 /* ── 状态机访问器（枚举赋值，无位运算）──
  *
@@ -182,13 +182,11 @@ static inline uint16_t ftl_gblock_block(uint16_t g)
 
 static inline ftl_block_state_t ftl_block_state(const ftl_block_t *b)
 {
-    ASSERT(b != NULL);
     return (ftl_block_state_t)b->state;
 }
 
 static inline void ftl_block_set_state(ftl_block_t *b, ftl_block_state_t st)
 {
-    ASSERT(b != NULL);
     ASSERT((unsigned)st <= (unsigned)FTL_BLOCK_STATE_BAD); /* 漏斗唯一入口，越界即停机 */
     b->state = (uint8_t)st;
 }
@@ -199,13 +197,11 @@ static inline void ftl_block_set_state(ftl_block_t *b, ftl_block_state_t st)
 
 static inline bool ftl_block_is_bad(const ftl_block_t *b)
 {
-    ASSERT(b != NULL);
     return ftl_block_state(b) == FTL_BLOCK_STATE_BAD;
 }
 
 static inline void ftl_block_set_bad(ftl_block_t *b)
 {
-    ASSERT(b != NULL);
     ftl_block_set_state(b, FTL_BLOCK_STATE_BAD);
 }
 
@@ -216,7 +212,6 @@ static inline void ftl_block_set_bad(ftl_block_t *b)
  * 故 FREE/BAD 块上残留的温度不会被任何读者读到（`ftl_block_get_temp` 生产侧零读者）。 */
 static inline void ftl_block_set_temp(ftl_block_t *b, uint8_t temperature)
 {
-    ASSERT(b != NULL);
     ASSERT(temperature <= 1U); /* 0=HOT / 1=COLD，同 FTL_TEMP_* */
     b->temp = temperature;
 }
@@ -224,7 +219,6 @@ static inline void ftl_block_set_temp(ftl_block_t *b, uint8_t temperature)
 /* ⚠ 返回值 0=HOT / 1=COLD 是**两值域不是真值域**，不是 bool（UT 逐条钉住该值域）。 */
 static inline uint8_t ftl_block_get_temp(const ftl_block_t *b)
 {
-    ASSERT(b != NULL);
     return b->temp;
 }
 
@@ -258,13 +252,11 @@ static inline const char *ftl_block_state_name(ftl_block_state_t st)
 
 static inline uint16_t ftl_block_sb_id(const ftl_block_t *b)
 {
-    ASSERT(b != NULL);
     return b->sb_id;
 }
 
 static inline void ftl_block_set_sb(ftl_block_t *b, uint16_t sb_id)
 {
-    ASSERT(b != NULL);
     b->sb_id = sb_id;
 }
 
@@ -285,7 +277,6 @@ static inline void ftl_block_set_sb(ftl_block_t *b, uint16_t sb_id)
 /* 有效 CW 计数 +1（写成功、GC/WL 搬入新页时各 CW 调一次） */
 static inline void ftl_block_add_valid(ftl_block_t *b)
 {
-    ASSERT(b != NULL);
     ASSERT(b->valid_count < (uint16_t)FTL_CW_PER_BLOCK);
     b->valid_count++;
 }
@@ -293,7 +284,6 @@ static inline void ftl_block_add_valid(ftl_block_t *b)
 /* 有效 CW 计数 -1（覆盖写旧位置、GC/WL 搬离、TRIM、擦除前清账） */
 static inline void ftl_block_sub_valid(ftl_block_t *b)
 {
-    ASSERT(b != NULL);
     ASSERT(b->valid_count > 0U);
     b->valid_count--;
 }
@@ -301,7 +291,6 @@ static inline void ftl_block_sub_valid(ftl_block_t *b)
 /* 清账（擦除/坏块后调用）：valid_count=0（无位图可清） */
 static inline void ftl_block_clear_valid(ftl_block_t *b)
 {
-    ASSERT(b != NULL);
     b->valid_count = 0U;
 }
 
@@ -309,7 +298,6 @@ static inline void ftl_block_clear_valid(ftl_block_t *b)
  * ⚠ 上界是**单物理块**的 CW 数（FTL_CW_PER_BLOCK），不是 SB 合计。 */
 static inline void ftl_block_set_valid(ftl_block_t *b, uint16_t valid)
 {
-    ASSERT(b != NULL);
     ASSERT(valid <= (uint16_t)FTL_CW_PER_BLOCK);
     b->valid_count = valid;
 }

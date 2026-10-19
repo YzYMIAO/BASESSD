@@ -211,7 +211,7 @@ void rr_trigger(read_recovery_handle_t *rr, const rr_owner_t *owner);
 /*
  * rr_handle - 推进 Read Recovery job（每轮 must-run；提交即返回）。
  *
- * @param rr    handle；**前置条件**，非法即 ASSERT
+ * @param rr    handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param info  本轮动态信息（当前未用，可传 NULL）
  * @param out   出参：本轮结束后的上报（**非空**）
  */

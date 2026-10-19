@@ -335,7 +335,7 @@ bool l2p_cache_preload_region(l2p_cache_t *cache, uint32_t global_region, nand_p
  * @param lba    **全局** LBA（host LBA；数据通路不做局部/全局预转）
  * @param out    出参 PBA（FTL_OK 与 FTL_ERROR 时有效；FTL_AGAIN 时未动）
  * @return FTL_OK / FTL_AGAIN（region 加载中，稍后重试）/ FTL_ERROR（lba 越界；
- *         cache/out 为**前置条件**（判据 2），非法即 ASSERT）
+ *         out 为**前置条件**（判据 2），非法即 ASSERT；cache 由 ftl_contract_audit 在 boot 期证明）
  */
 ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out);
 
@@ -471,7 +471,7 @@ typedef struct
  * 按 info->load_level 查**模块内** static const 表决定本轮 max_kick；只处理
  * owner_dim 的脏行。同步逃生口（*_sync）自己用 drain deadline，不经过本入口。
  *
- * @param cache  共享 cache；**前置条件**，非法即 ASSERT
+ * @param cache  共享 cache；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param dim    本实例的 owner dim（ftl_topo_dim(topo)）
  * @param info   本轮动态信息（now_ms / load_level）
  * @param out    出参：本轮结束后的上报（**非空**）

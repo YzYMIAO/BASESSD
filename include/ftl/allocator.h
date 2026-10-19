@@ -15,7 +15,8 @@
  *      无归属块（固定元数据 / OP / Spare / 未初始化）为 NONE。
  *   ③ closed_sb_list 是 swap-remove 活列表：跨调用持有条目必须按值拷贝；
  *      消费方按 !is_open 过滤。
- *   ④ 指针 / 索引实参由调用者保证；非法即 ASSERT。仅池空 / 幂等早退返回错误码。
+ *   ④ 指针 / 索引实参由调用者保证；实例 allocator 的绑定由 ftl_contract_audit 在 boot 期证明，
+ *      运行期入口不逐次复检；init 与索引越界仍用 ASSERT。仅池空 / 幂等早退返回错误码。
  */
 
 #include "assertion.h"   /* ASSERT（inline 访问器与地址展开的入参检查） */

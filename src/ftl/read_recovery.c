@@ -21,7 +21,8 @@
  *   4. 退役         rr_retire_block
  *
  * ⚠ 层内接口（rr_record_ecc / rr_handle / rr_predictive_scan / rr_retire_block）
- *   形参由调用者保证非空 ⇒ ASSERT（判据 2：调用者保证的前置条件）。
+ *   形参由调用者保证非空；实例 handle 由 ftl_contract_audit 在 boot 期证明，
+ *   运行期入口不再逐次复检。
  */
 
 #include "read_recovery.h"
@@ -310,7 +311,6 @@ static void rr_finish(read_recovery_handle_t *rr)
      * 释放 pending 槽与组结算都走端口（RR 不直接摸 pending 表）。 */
     const rr_pending_port_t *pending = &rr->port.pending;
 
-    ASSERT(pending->complete != NULL);
     pending->complete(pending->ctx, rr->owner.pending_idx, rr->owner.owners, status);
 
     rr->has_owner = 0U;
@@ -510,8 +510,6 @@ static void rr_step(read_recovery_handle_t *rr)
  * -------------------------------------------------------------------- */
 static void rr_service_step(read_recovery_handle_t *rr)
 {
-    ASSERT(rr != NULL);
-
     /* 心跳（见 ftl_job.h）：恢复在飞期间每满 1s 打一行 stage/age。
      * ⚠ 判「在飞」用 stage 而非 waiting——提交侧背压时 stage 不变但无命令在飞，
      *   那段同样属于「job 卡住」，正是心跳要暴露的。 */
@@ -569,11 +567,6 @@ void rr_init(read_recovery_handle_t *rr, const rr_port_t *port)
 {
     ASSERT(rr != NULL);
     ASSERT(port != NULL);
-    ASSERT(port->cache != NULL);
-    ASSERT(port->alloc != NULL);
-    ASSERT(port->page_scratch != NULL);
-    ASSERT(port->pending.take != NULL);
-    ASSERT(port->pending.complete != NULL);
 
     memset(rr, 0, sizeof(*rr));
     rr->port  = *port;
@@ -582,7 +575,6 @@ void rr_init(read_recovery_handle_t *rr, const rr_port_t *port)
 
 void rr_trigger(read_recovery_handle_t *rr, const rr_owner_t *owner)
 {
-    ASSERT(rr != NULL);
     ASSERT(owner != NULL);
 
     /* 单飞行：busy 时不覆盖当前 owner；被托管的 pending 项仍在表里，
@@ -596,7 +588,6 @@ void rr_trigger(read_recovery_handle_t *rr, const rr_owner_t *owner)
 
 static void rr_status_fill(const read_recovery_handle_t *rr, rr_status_t *out)
 {
-    ASSERT(rr != NULL);
     ASSERT(out != NULL);
 
     out->base.critical  = true; /* host 读在等结果，不推进即死等 */
@@ -636,7 +627,6 @@ void rr_handle(read_recovery_handle_t *rr, const ftl_bg_info_t *info, rr_status_
     /* info 当前不参与恢复决策；保留形参以统一 typed 入口。 */
     (void)info;
 
-    ASSERT(rr != NULL);
     ASSERT(out != NULL);
 
     rr_service_step(rr);
@@ -742,7 +732,6 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
 
     /* ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
      * ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。 */
-    ASSERT(ftl != NULL);
 
     read_recovery_handle_t *rr = (read_recovery_handle_t *)ctx;
     ASSERT(rr == &ftl->read_recovery_handle);
@@ -838,8 +827,6 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
 bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
 {
     /* 层内接口：唯一调用者 mig_begin_predict 传 rr->port.alloc 与局部 gblock */
-    ASSERT(alloc != NULL);
-    ASSERT(alloc->blocks != NULL);
     ASSERT(gblock != NULL);
 
     for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
@@ -907,7 +894,6 @@ bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
 void rr_retire_block(ftl_block_t *b)
 {
     /* 层内接口：唯一调用者 ftl_migrate_callback（MIG_ERASE 完成分支）传 rr->port.alloc.blocks[gblock] */
-    ASSERT(b != NULL);
 
     /* 退役：不再分配新数据（RETIRED 态），不标坏（BBT 不删、仍可读）。
      * ⚠ **调用者负责先把该块驱逐出 Free Pool**（本函数只拿 ftl_block_t*，拿不到 gblock）——

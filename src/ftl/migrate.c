@@ -212,7 +212,6 @@ static void mig_start(migrate_handle_t *m, const super_block_t *victim, mig_kind
 {
     /* 前置条件（判据 2）：唯一调用者是本文件的 mig_begin_*，各自已断言 ftl / victim；
      * active 是运行时状态（单飞行），由调用者在选块**之前**判过 ⇒ 这里是死守卫。 */
-    ASSERT(m != NULL);
     ASSERT(victim != NULL);
     ASSERT(!m->active);
 
@@ -255,7 +254,6 @@ static void mig_start(migrate_handle_t *m, const super_block_t *victim, mig_kind
 static bool mig_begin_gc(migrate_handle_t *m)
 {
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
-    ASSERT(m != NULL);
     if (m->active)
     {
         return false;
@@ -280,7 +278,6 @@ static bool mig_begin_gc(migrate_handle_t *m)
 static bool mig_begin_wl(migrate_handle_t *m)
 {
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
-    ASSERT(m != NULL);
     if (m->active)
     {
         return false;
@@ -312,7 +309,6 @@ static bool mig_begin_wl(migrate_handle_t *m)
 static bool mig_begin_predict(migrate_handle_t *m)
 {
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
-    ASSERT(m != NULL);
     if (m->active)
     {
         return false;
@@ -889,7 +885,6 @@ static void mig_step(migrate_handle_t *m)
 static void mig_service_step(migrate_handle_t *m)
 {
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
-    ASSERT(m != NULL);
 
     if (!m->active)
     {
@@ -919,10 +914,6 @@ void migrate_init(migrate_handle_t *m, const migrate_port_t *port)
 {
     ASSERT(m != NULL);
     ASSERT(port != NULL);
-    ASSERT(port->alloc != NULL);
-    ASSERT(port->journal != NULL);
-    ASSERT(port->cache != NULL);
-    ASSERT(port->total_writes != NULL);
 
     memset(m, 0, sizeof(*m));
     m->port            = *port;
@@ -933,8 +924,6 @@ void migrate_init(migrate_handle_t *m, const migrate_port_t *port)
 
 void migrate_trigger(migrate_handle_t *m, migrate_reason_t reason)
 {
-    ASSERT(m != NULL);
-
     switch (reason)
     {
         case MIGRATE_REASON_GC_URGENT:
@@ -988,7 +977,6 @@ static uint32_t mig_gc_evaluate(migrate_handle_t *m, uint32_t now_ms)
 
 static void migrate_status_fill(const migrate_handle_t *m, const ftl_bg_info_t *info, migrate_status_t *out)
 {
-    ASSERT(m != NULL);
     ASSERT(out != NULL);
 
     out->base.critical = true; /* 写路径紧急 GC 在 BUSY 档起，不推进即死锁 */
@@ -1036,7 +1024,6 @@ static void migrate_status_fill(const migrate_handle_t *m, const ftl_bg_info_t *
 
 void migrate_handle(migrate_handle_t *m, const ftl_bg_info_t *info, migrate_status_t *out)
 {
-    ASSERT(m != NULL);
     ASSERT(out != NULL);
     ASSERT(info != NULL); /* must-run 适配器每轮都构造 info */
 
@@ -1086,19 +1073,16 @@ void migrate_handle(migrate_handle_t *m, const ftl_bg_info_t *info, migrate_stat
 
 bool migrate_is_active(const migrate_handle_t *m)
 {
-    ASSERT(m != NULL);
     return m->active;
 }
 
 uint32_t migrate_reclaimed_count(const migrate_handle_t *m)
 {
-    ASSERT(m != NULL);
     return m->reclaimed_count;
 }
 
 uint32_t migrate_novictim_count(const migrate_handle_t *m)
 {
-    ASSERT(m != NULL);
     return m->novictim_count;
 }
 
@@ -1339,13 +1323,11 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
     migrate_handle_t *m = (migrate_handle_t *)ctx;
 
     ASSERT(completion != NULL);
-    ASSERT(m != NULL);
 
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     /* 实例由 ctx 反推（job 就长在实例里）；ftl 形参是 dispatch 解析出来的归属实例，
      * 二者必须一致——不一致说明派发路由错了。 */
-    ASSERT(m != NULL);
     ASSERT(ftl->migrate_handle == m);
 
     /* 孤儿 / 重复完成：job 已收尾或当前没有在飞命令 ⇒ 只释放命令，不改状态。

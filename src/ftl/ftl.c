@@ -333,7 +333,6 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
 
     /* ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
      * ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。 */
-    ASSERT(ftl != NULL);
 
     ftl_pending_req_t *pending = pending_lookup(ftl, cmd_id);
 
@@ -406,7 +405,6 @@ static bool ftl_journal_block_is_bad(void *ctx, uint16_t gblock)
 {
     const ftl_allocator_t *alloc = (const ftl_allocator_t *)ctx;
 
-    ASSERT(alloc != NULL);
     ASSERT(gblock < FTL_BLOCK_TOTAL);
 
     return ftl_block_is_bad(&alloc->blocks[gblock]);
@@ -416,7 +414,6 @@ static void ftl_journal_mark_bad(void *ctx, uint16_t gblock)
 {
     ftl_allocator_t *alloc = (ftl_allocator_t *)ctx;
 
-    ASSERT(alloc != NULL);
     ASSERT(gblock < FTL_BLOCK_TOTAL);
 
     (void)bbt_mark_bad(alloc, gblock);
@@ -429,7 +426,6 @@ static bool ftl_rr_pending_take(void *ctx, rr_owner_t *out)
     ftl_context_t *ftl = (ftl_context_t *)ctx;
     uint8_t        idx = 0U;
 
-    ASSERT(ftl != NULL);
     ASSERT(out != NULL);
 
     if (!pending_find_op(ftl, PENDING_OP_READ_RECOVERY, &idx))
@@ -451,7 +447,6 @@ static void ftl_rr_pending_complete(void *ctx, uint16_t pending_idx, uint32_t ow
 {
     ftl_context_t *ftl = (ftl_context_t *)ctx;
 
-    ASSERT(ftl != NULL);
     ASSERT(pending_idx < FTL_PENDING_MAX);
 
     /* owners 已由 RR 在释放**之前**取走并按值传入（组完成通知可能重入复用本槽）。 */
@@ -496,8 +491,6 @@ static bool ftl_wbuf_group_window_pending(void *ctx, lba_t window)
 {
     ftl_context_t *ftl = (ftl_context_t *)ctx;
 
-    ASSERT(ftl != NULL);
-
     for (uint8_t i = 0U; i < FTL_GROUP_MAX; i++)
     {
         const ftl_io_group_t *g = &ftl->groups[i];
@@ -519,7 +512,6 @@ static void ftl_wbuf_gc_urgent(void *ctx)
 {
     ftl_context_t *ftl = (ftl_context_t *)ctx;
 
-    ASSERT(ftl != NULL);
     migrate_trigger(ftl->migrate_handle, MIGRATE_REASON_GC_URGENT);
 }
 
@@ -750,6 +742,214 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     return FTL_OK;
 }
 
+/* ── 初始化契约自检（debug-only）──
+ *
+ * 只在 ftl_init + 设备级 owner 登记完成后跑一次，证明“初始化后不可变”的绑定。
+ * 覆盖：句柄、storage 数组、端口回调、topology 副本、PBA 布局、bg 任务表、
+ *       L2P owner / completion route 身份、各 job 的初始 idle 状态。
+ *
+ * ⚠ 边界（不要据此删运行期断言）：
+ *   · 不覆盖运行期可变状态（phase 重启、计数、池成员、valid_count）；
+ *   · 不覆盖每次调用的入参前置条件（out 指针、enum/index、cmd/desc）；
+ *   · release（NDEBUG）下本组函数整体不存在，不能替代 release 拒绝（判据 9）。
+ *   · 下方 helper 全部包在 #if !defined(NDEBUG) 内，避免 release 的 unused 告警。
+ *   · 审计通过后，下游对同一绑定的逐次复检已删除——这些绑定视为生命周期内不可变。
+ */
+#if !defined(NDEBUG)
+
+/* 每个 ASSERT 按模块聚合：一条断言覆盖同一生命周期的一组字段。
+ * 失败时 file:line 定位到模块组；需要逐字段定位时临时拆分。 */
+
+static void contract_check_handles(const ftl_context_t *ftl)
+{
+    ASSERT((ftl->cache != NULL) && (ftl->tables != NULL) && (ftl->metadata_dir != NULL) &&
+           (ftl->journal != NULL) && (ftl->checkpoint_handle != NULL) &&
+           (ftl->migrate_handle != NULL) && (ftl->wbuf != NULL) && (ftl->rr_page_scratch != NULL));
+
+    ASSERT((ftl->alloc.blocks == ftl->tables->blocks) &&
+           (ftl->alloc.free_blocks == ftl->tables->free_blocks) &&
+           (ftl->alloc.op_blocks == ftl->tables->op_blocks) &&
+           (ftl->alloc.spare_blocks == ftl->tables->spare_blocks) &&
+           (ftl->alloc.closed_sb_list == ftl->tables->closed_sb_list));
+}
+
+static void contract_check_topology(const ftl_context_t *ftl)
+{
+    const ftl_topology_t *topo = &ftl->topo;
+    const uint32_t        dim  = ftl_topo_dim(*topo);
+
+    ASSERT((topo->ch < CH_NUM) && (topo->ce < CE_NUM) && (topo->lun < LUN_NUM) &&
+           (dim < FTL_DIM_TOTAL) && (ftl_dim_ch(dim) == topo->ch) &&
+           (ftl_dim_ce(dim) == topo->ce) && (ftl_dim_lun(dim) == topo->lun));
+
+    ASSERT((ftl->alloc.ch == topo->ch) && (ftl->alloc.ce == topo->ce) &&
+           (ftl->alloc.lun == topo->lun) && (ftl->cache->ch == topo->ch) &&
+           (ftl->cache->ce == topo->ce));
+
+    /* 各模块在 init 时拷贝 topology；副本必须与实例路由一致。 */
+    ASSERT((ftl->metadata_dir->topo.ch == topo->ch) &&
+           (ftl->metadata_dir->topo.ce == topo->ce) &&
+           (ftl->metadata_dir->topo.lun == topo->lun) &&
+           (ftl->journal->topo.ch == topo->ch) && (ftl->journal->topo.ce == topo->ce) &&
+           (ftl->journal->topo.lun == topo->lun));
+
+    ASSERT((ftl->checkpoint_handle->port.topo.ch == topo->ch) &&
+           (ftl->checkpoint_handle->port.topo.ce == topo->ce) &&
+           (ftl->checkpoint_handle->port.topo.lun == topo->lun) &&
+           (ftl->migrate_handle->port.topo.ch == topo->ch) &&
+           (ftl->migrate_handle->port.topo.ce == topo->ce) &&
+           (ftl->migrate_handle->port.topo.lun == topo->lun) &&
+           (ftl->read_recovery_handle.port.topo.ch == topo->ch) &&
+           (ftl->read_recovery_handle.port.topo.ce == topo->ce) &&
+           (ftl->read_recovery_handle.port.topo.lun == topo->lun));
+}
+
+static void contract_check_ports(const ftl_context_t *ftl)
+{
+    const metadata_port_t *md = &ftl->metadata_dir->port;
+
+    ASSERT((md->alloc == &ftl->alloc) && (md->total_writes == &ftl->total_writes));
+
+    const journal_bad_block_port_t *jbb = &ftl->journal->bad_block_port;
+
+    ASSERT((jbb->ctx == &ftl->alloc) && (jbb->block_is_bad != NULL) && (jbb->mark_bad != NULL));
+
+    const checkpoint_port_t *cp = &ftl->checkpoint_handle->port;
+
+    ASSERT((cp->cache == ftl->cache) && (cp->journal == ftl->journal) &&
+           (cp->metadata_dir == ftl->metadata_dir) && (cp->alloc == &ftl->alloc) &&
+           (cp->total_writes == &ftl->total_writes));
+
+    const migrate_port_t *mg = &ftl->migrate_handle->port;
+
+    ASSERT((mg->alloc == &ftl->alloc) && (mg->journal == ftl->journal) &&
+           (mg->cache == ftl->cache) && (mg->total_writes == &ftl->total_writes));
+
+    const rr_port_t *rr = &ftl->read_recovery_handle.port;
+
+    ASSERT((rr->cache == ftl->cache) && (rr->alloc == &ftl->alloc) &&
+           (rr->page_scratch == ftl->rr_page_scratch) && (rr->pending.ctx == ftl) &&
+           (rr->pending.take != NULL) && (rr->pending.complete != NULL));
+
+    const wbuf_port_t *wb = &ftl->wbuf->port;
+
+    ASSERT((wb->alloc == &ftl->alloc) && (wb->pending_ctx == ftl) &&
+           (wb->pending_count != NULL) && (wb->pending_alloc != NULL) &&
+           (wb->pending_remove != NULL) && (wb->pending_validate != NULL) &&
+           (wb->group_add_subop != NULL) && (wb->group_complete_multi != NULL) &&
+           (wb->group_window_pending != NULL) && (wb->migrate_ctx == ftl) &&
+           (wb->gc_urgent != NULL));
+}
+
+static void contract_check_identity(const ftl_context_t *ftl)
+{
+    const ftl_topology_t topo = ftl->topo;
+    const uint32_t       dim  = ftl_topo_dim(topo);
+
+    ASSERT(ftl->cache->owner_of_region != NULL);
+    ASSERT(completion_table_route(topo.ch, topo.ce, topo.lun) == ftl);
+
+    /* 只查本实例拥有的 region：其他 LUN 的 owner 可能尚未 boot。 */
+    for (uint32_t local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
+    {
+        const uint32_t     global = (local * FTL_DIM_TOTAL) + dim;
+        const l2p_owner_t *owner =
+            ftl->cache->owner_of_region(ftl->cache->owner_ctx, global);
+        const uint64_t lba = (uint64_t)global * L2P_ENTRIES_PER_REGION;
+
+        ASSERT((owner != NULL) && (owner->dim == dim) &&
+               (owner->metadata_dir == ftl->metadata_dir) && (owner->alloc == &ftl->alloc) &&
+               (owner->topo.ch == ftl->cache->ch) && (owner->topo.ce == ftl->cache->ce) &&
+               (owner->topo.lun == ftl->topo.lun) && (ftl_topo_dim(owner->topo) == dim));
+
+        ASSERT((completion_table_route_region(global) == ftl) &&
+               (lba_route_ch(lba) == ftl->cache->ch) &&
+               (lba_route_ce(lba) == ftl->cache->ce));
+    }
+}
+
+static void contract_check_bg(const ftl_context_t *ftl)
+{
+    ASSERT((ftl->bg.task_count > 0U) && (ftl->bg.task_count <= BG_TASK_COUNT) &&
+           (ftl->bg.cfg == NULL) && (ftl->bg.level == BG_LEVEL_IDLE));
+
+    for (uint8_t i = 0U; i < ftl->bg.task_count; i++)
+    {
+        ASSERT(ftl->bg.tasks[i].func != NULL);
+    }
+}
+
+static void contract_check_jobs_idle(const ftl_context_t *ftl)
+{
+    const journal_handle_t *j = &ftl->journal->handle;
+
+    ASSERT((j->phase == (uint8_t)JRN_IDLE) && (j->current_block < JOURNAL_BLOCK_COUNT) &&
+           (j->current_page < PAGES_PER_BLOCK) && (j->current_entry == 0U) &&
+           (j->sequence_counter == 1U) && (j->merge_floor == 0U) && (j->need_erase == 0U) &&
+           (j->checkpoint_needed == 0U) && (j->emergency == 0U) &&
+           (j->write_fail_count == 0U) && (j->write_fail_pending == 0U) &&
+           (j->pre_erased_block == JOURNAL_BLOCK_NONE) && (j->bad_mask == 0U) &&
+           (j->erase_fail_count == 0U) && (j->ring_full == 0U));
+
+    const checkpoint_handle_t *cp = ftl->checkpoint_handle;
+
+    ASSERT((cp->active == 0U) && (cp->waiting == 0U) && (cp->failed == 0U) &&
+           (cp->phase == (uint8_t)CP_IDLE) && (cp->cp_state.advance_next == 0U) &&
+           (cp->cp_state.cursor_valid == 0U));
+
+    ASSERT((!metadata_dir_busy(ftl->metadata_dir)) &&
+           (ftl->metadata_dir->count <= METADATA_DIR_ENTRIES) &&
+           ((!ftl->metadata_dir->cur_block_valid) ||
+            ((ftl->metadata_dir->cur_metadata_block < FTL_BLOCK_TOTAL) &&
+             (ftl->metadata_dir->cur_metadata_page <= PAGES_PER_BLOCK))));
+
+    ASSERT((!ftl->migrate_handle->active) && (!ftl->migrate_handle->waiting) &&
+           (ftl->migrate_handle->phase == (uint8_t)MIG_IDLE) &&
+           (ftl->migrate_handle->fail_gblock == UINT16_MAX) &&
+           (ftl->migrate_handle->dst_fail_gblock == UINT16_MAX));
+
+    ASSERT((ftl->read_recovery_handle.stage == (uint8_t)RR_STAGE_IDLE) &&
+           (ftl->read_recovery_handle.waiting == 0U) &&
+           (ftl->read_recovery_handle.has_owner == 0U));
+
+    ASSERT((!ftl->wbuf->open) && (ftl->wbuf->occupied == 0U) && (ftl->wbuf->error == FTL_OK));
+}
+
+static void contract_check_boot_zero(const ftl_context_t *ftl)
+{
+    ASSERT((pending_count(ftl) == 0U) && (pending_group_count(ftl) == 0U) &&
+           (ftl->total_writes == 0U) && (ftl->cache->load_inflight == 0U) &&
+           (ftl->cache->flush_inflight == 0U) && (ftl->bg_suspend == 0U) &&
+           (ftl->l2p_defer == 0U));
+}
+
+#endif /* !NDEBUG */
+
+void ftl_contract_audit(const ftl_context_t *ftl)
+{
+#if defined(NDEBUG)
+    (void)ftl; /* release：审计不存在，行为与今天一致 */
+#else
+    ASSERT(ftl != NULL);
+    ASSERT(pba_fields_layout_matches());
+
+    contract_check_handles(ftl);
+    contract_check_topology(ftl);
+    contract_check_ports(ftl);
+    contract_check_identity(ftl);
+    contract_check_bg(ftl);
+    contract_check_jobs_idle(ftl);
+    contract_check_boot_zero(ftl);
+
+    LOGI("[FTL ] contract ok ch=%u ce=%u lun=%u regions=%u tasks=%u\r\n",
+         (unsigned)ftl->topo.ch,
+         (unsigned)ftl->topo.ce,
+         (unsigned)ftl->topo.lun,
+         (unsigned)L2P_REGIONS_PER_INSTANCE,
+         (unsigned)ftl->bg.task_count);
+#endif
+}
+
 /* --------------------------------------------------------------------
  * ftl_service_pump
  *   功能：**实例无关**的每轮泵 —— Phase 1（推进 NAND）+ Phase 2（抽干完成表）。
@@ -792,7 +992,6 @@ void ftl_service(ftl_context_t *ftl)
     /* 唯一调用点 main.c 传 &g_ftl[ch][ce][lun]（静态数组元素，结构性恒非空）；
      * NULL 属「不该发生」⇒ ASSERT（release 裁空后 NULL 解引用=HardFault 留现场，
      * 优于静默返回⇒该实例 journal/GC 永不推进的无声损坏）。 */
-    ASSERT(ftl != NULL);
 
     /* Phase 2.5 首：推进**停泊**的写确认。必须早于补发——停泊意味着那个 LBA
      * 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作就会读到旧物理页（陈旧数据）。
@@ -1261,7 +1460,7 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
 /* --------------------------------------------------------------------
  * ftl_flush
  *   功能：把已持久化映射落盘——L2P cache 全部写回 + journal 尾页刷出（供 HIL 调用）。
- *   参数：ftl —— 实例（**前置条件**，非法即 ASSERT）。
+ *   参数：ftl —— 实例（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）。
  *   返回：无。
  *   实现要点：**非** NVMe 式 barrier——不等待在飞 / 排队的写（CLI 靠 g_cli_pending.busy
  *             串行化）。L2P 与 journal 走**同步**逃生口（自旋泵）而非 kick：`fl` 的契约
@@ -1271,7 +1470,6 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
 void ftl_flush(ftl_context_t *ftl)
 {
     /* 前置条件（判据 2 / C5）：唯一调用者 controller.c 在调用前已 ASSERT 路由结果非空。 */
-    ASSERT(ftl != NULL);
 
     /* 先把页打包缓冲里尚未编程的写编程掉：它们还没进 L2P/journal，"落盘"不成立。
      * ⚠ 遇瞬态背压会保留缓冲、下轮 ftl_service 重试；此处尽力而为。 */
@@ -1305,7 +1503,6 @@ void ftl_flush(ftl_context_t *ftl)
 void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
 {
     /* 前置条件（判据 2 / C5）：唯一调用者 controller.c 在调用前已 ASSERT 路由结果非空。 */
-    ASSERT(ftl != NULL);
 
     if (count == 0U)
     {

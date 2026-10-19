@@ -28,7 +28,8 @@
  *
  * ⚠ **介质读回不转断言**（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 上的
  *   页，页头可能因掉电撕裂而非法——那是掉电的**预期情形**，必须返回错误/跳过，不能断言。
- *   模块入口与命令派发路径（ftl_journal_callback）的前置条件仍用 ASSERT。
+ *   实例 handle 非空由 ftl_contract_audit 在 boot 期证明；命令派发路径
+ *   （ftl_journal_callback）的 phase / 内部句柄前置条件仍用 ASSERT。
  *
  * 文件结构：
  *   1. 页地址辅助     journal_page_addr / journal_block_addr（static）
@@ -93,7 +94,6 @@ static nand_pba_t journal_block_addr(const l2p_journal_t *journal, uint8_t b)
  * journal 块跨两个 plane 交错（页号奇偶决定 plane）⇒ 任一 plane 的块 BAD 即跳过整块。 */
 static bool journal_ring_block_bad(const l2p_journal_t *journal, uint8_t b)
 {
-    ASSERT(journal != NULL);
     ASSERT(b < JOURNAL_BLOCK_COUNT);
 
     if ((journal->handle.bad_mask & (uint8_t)(1U << b)) != 0U)
@@ -121,7 +121,6 @@ static bool journal_ring_block_bad(const l2p_journal_t *journal, uint8_t b)
 /* 从 from 之后找下一个可用环形块；全部不可用返回 JOURNAL_BLOCK_NONE。 */
 static uint8_t journal_next_block(const l2p_journal_t *journal, uint8_t from)
 {
-    ASSERT(journal != NULL);
     ASSERT(from < JOURNAL_BLOCK_COUNT);
 
     for (uint8_t i = 1U; i <= JOURNAL_BLOCK_COUNT; i++)
@@ -139,8 +138,6 @@ static uint8_t journal_next_block(const l2p_journal_t *journal, uint8_t from)
 /* 环内第一个可用块（空环恢复写指针用）；全部不可用返回 JOURNAL_BLOCK_NONE。 */
 static uint8_t journal_first_usable(const l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
-
     for (uint8_t b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
     {
         if (!journal_ring_block_bad(journal, b))
@@ -196,8 +193,6 @@ void journal_bind_bad_block_port(l2p_journal_t *journal, const journal_bad_block
 {
     ASSERT(journal != NULL);
     ASSERT(port != NULL);
-    ASSERT(port->block_is_bad != NULL);
-    ASSERT(port->mark_bad != NULL);
 
     journal->bad_block_port = *port;
 }
@@ -227,7 +222,6 @@ static bool journal_freeze(l2p_journal_t *journal);
 bool journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
-    ASSERT(journal != NULL);
 
     /* 环全部不可用：当前页缓冲永远刷不出去，追加只会制造“看起来记下了”的假象。 */
     if (journal->handle.ring_full != 0U)
@@ -454,7 +448,6 @@ static bool journal_start_erase(l2p_journal_t *journal)
  * -------------------------------------------------------------------- */
 static void journal_erase_failed(l2p_journal_t *journal, uint8_t block)
 {
-    ASSERT(journal != NULL);
     ASSERT(block < JOURNAL_BLOCK_COUNT);
 
     if (journal->handle.erase_fail_block != block)
@@ -517,7 +510,6 @@ static void journal_erase_failed(l2p_journal_t *journal, uint8_t block)
 /* ── 状态上报（主流程只读这个，不窥探 handle 内部） ── */
 static void journal_status_fill(const l2p_journal_t *journal, journal_status_t *out)
 {
-    ASSERT(journal != NULL);
     ASSERT(out != NULL);
 
     out->base.critical  = false; /* 由 must-run 适配器另行调用 ERASE_ONLY 入口保证 liveness */
@@ -575,7 +567,6 @@ static void journal_status_fill(const l2p_journal_t *journal, journal_status_t *
 void journal_handle(l2p_journal_t *journal, const journal_trigger_t *trigger, const ftl_bg_info_t *info, journal_status_t *out)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
-    ASSERT(journal != NULL);
     ASSERT(out != NULL);
 
     /* info 当前只用于观测（心跳用自己的平台时钟）；保留形参以统一 typed 入口。 */
@@ -626,62 +617,51 @@ void journal_handle(l2p_journal_t *journal, const journal_trigger_t *trigger, co
 /* ── 查询（替代外部直读 handle 字段） ── */
 bool journal_is_idle(const l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
     return journal->handle.phase == JRN_IDLE;
 }
 
 bool journal_can_erase_victim(const l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
     return journal->handle.write_fail_pending == 0U;
 }
 
 uint32_t journal_sequence(const l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
     return journal->handle.sequence_counter;
 }
 
 bool journal_write_failed(const l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
     return journal->handle.write_fail_pending != 0U;
 }
 
 bool journal_has_pending_entries(const l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
     return journal->handle.current_entry != 0U;
 }
 
 bool journal_erase_pending(const l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
     return journal->handle.need_erase != 0U;
 }
 
 bool journal_checkpoint_needed(const l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
     return journal->handle.checkpoint_needed != 0U;
 }
 
 bool journal_is_emergency(const l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
     return journal->handle.emergency != 0U;
 }
 
 void journal_set_merge_floor(l2p_journal_t *journal, uint32_t sequence)
 {
-    ASSERT(journal != NULL);
     journal->handle.merge_floor = sequence;
 }
 
 uint8_t journal_watermark(const l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
-
     /* 全环全局口径（精确到条目）：分子必须是「全局写位置」，不是单块内 current_page
      * ——否则 85%/95% 会提前或永不触发。最大 used_units = 256 × 127 ≈ 32512，
      * ×100 不会溢出 uint32_t。 */
@@ -697,8 +677,6 @@ uint8_t journal_watermark(const l2p_journal_t *journal)
 
 void journal_update_watermark(l2p_journal_t *journal)
 {
-    ASSERT(journal != NULL);
-
     const uint8_t used = journal_watermark(journal);
 
     if (used >= JOURNAL_CRITICAL)
@@ -912,7 +890,6 @@ static bool journal_flush_now(l2p_journal_t *journal)
 ftl_status_t journal_flush_page(l2p_journal_t *journal)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
-    ASSERT(journal != NULL);
 
     if (!journal_drain(journal))
     {
@@ -1032,7 +1009,6 @@ void ftl_journal_callback(struct ftl_context *ftl, const fc_command_status_t *co
 
     (void)ftl; /* 实例无关：ctx 就是本实例的 journal */
 
-    ASSERT(journal != NULL);
     ASSERT(completion != NULL);
 
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
@@ -1172,7 +1148,6 @@ static uint16_t journal_scan_ring(const l2p_journal_t *journal,
 bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out, bool *out_read_error)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->journal。out / out_read_error 可为 NULL。 */
-    ASSERT(journal != NULL);
 
     const uint16_t read_errors = journal_scan_ring(journal, 0U, NULL, 0U, NULL, out);
 
@@ -1205,7 +1180,6 @@ bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out, 
 void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, uint32_t floor_sequence)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->journal。latest 可为 NULL（文档化契约）。 */
-    ASSERT(journal != NULL);
 
     uint32_t next          = floor_sequence;
     uint8_t  pending_erase = 0U;
@@ -1436,8 +1410,6 @@ ftl_status_t journal_replay(l2p_journal_t              *journal,
     journal_page_ref_t replay_pages[JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK];
 
     /* 前置条件（判据 2）：调用者传 ftl->journal 与共享 cache（ftl->cache）。 */
-    ASSERT(journal != NULL);
-    ASSERT(cache != NULL);
 
     /* 第一遍：扫环——收集需回放页 + 取最新页 */
     journal_page_ref_t latest;
@@ -1512,7 +1484,6 @@ ftl_status_t journal_replay(l2p_journal_t              *journal,
 jrn_truncate_step_t journal_truncate_plan(l2p_journal_t *journal, uint32_t up_to_sequence, nand_pba_t *out_addr, uint8_t *out_block)
 {
     /* 前置条件（判据 2）：三个指针均由调用者自持。 */
-    ASSERT(journal != NULL);
     ASSERT(out_addr != NULL);
     ASSERT(out_block != NULL);
 
@@ -1560,7 +1531,6 @@ jrn_truncate_step_t journal_truncate_plan(l2p_journal_t *journal, uint32_t up_to
 void journal_truncate_commit(l2p_journal_t *journal, uint8_t erased_block)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
-    ASSERT(journal != NULL);
 
     /* 记账：journal_flush_page 回切到该块时跳过擦除——保证同一块每圈只擦一次。
      * ⚠ 本次未擦（NONE）时**不动** pre_erased_block：覆写成 NONE 会让已预擦的块被
@@ -1583,8 +1553,6 @@ void journal_truncate_commit(l2p_journal_t *journal, uint8_t erased_block)
 
 void journal_clear_write_failure(l2p_journal_t *journal, uint32_t cp_journal_seq)
 {
-    ASSERT(journal != NULL);
-
     /* CP 起点水位 ≥ 失败点 ⇒ 该 CP 在失败之后快照了脏区并把 L2P 落盘；
      * pending 可以清。否则保留，等下一次 CP。 */
     if ((journal->handle.write_fail_pending != 0U) && (cp_journal_seq >= journal->handle.write_fail_seq))

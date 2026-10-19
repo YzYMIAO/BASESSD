@@ -60,7 +60,6 @@ void pending_confirm_set_handler(pending_confirm_handler_t handler)
 
 void pending_confirm_park(ftl_context_t *ftl, uint16_t pending_idx, uint32_t owners)
 {
-    ASSERT(ftl != NULL);
     ASSERT(pending_idx < FTL_PENDING_MAX);
 
     ftl_pending_req_t *pending = &ftl->pending[pending_idx];
@@ -75,8 +74,6 @@ void pending_confirm_park(ftl_context_t *ftl, uint16_t pending_idx, uint32_t own
 
 bool pending_confirm_has_parked(const ftl_context_t *ftl)
 {
-    ASSERT(ftl != NULL);
-
     for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if ((ftl->pending[i].used != 0U) && pending_op_is_write_confirm(ftl->pending[i].op))
@@ -89,7 +86,6 @@ bool pending_confirm_has_parked(const ftl_context_t *ftl)
 
 void pending_confirm_service(ftl_context_t *ftl, const ftl_bg_info_t *info)
 {
-    ASSERT(ftl != NULL);
     ASSERT(s_confirm_handler != NULL);
 
     const uint32_t now_ms = ((info != NULL) && (info->now_ms != 0U)) ? info->now_ms : ftl_job_now_ms();

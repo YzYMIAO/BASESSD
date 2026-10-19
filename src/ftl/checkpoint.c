@@ -699,8 +699,6 @@ static void cp_step(checkpoint_handle_t *h)
 
 static ftl_status_t cp_begin(checkpoint_handle_t *h)
 {
-    ASSERT(h != NULL);
-
     if (h->active != 0U)
     {
         return FTL_AGAIN; /* 单飞行：上一次还没跑完 */
@@ -869,13 +867,11 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
     checkpoint_handle_t *j = h;
 
     ASSERT(completion != NULL);
-    ASSERT(h != NULL);
 
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     /* 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，
      * 二者必须一致——不一致说明派发路由错了。 */
-    ASSERT(h != NULL);
     ASSERT(ftl->checkpoint_handle == h);
 
     /* 没有在飞命令却收到完成 ⇒ 重复/迟到完成。按当前 phase 再走一遍会误推进
@@ -1031,8 +1027,6 @@ ftl_status_t checkpoint_find_latest(checkpoint_handle_t *h, l2p_checkpoint_heade
 
 cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t *out_layout_version)
 {
-    ASSERT(h != NULL);
-
     checkpoint_probe_ctx_t ctx;
     checkpoint_ring_init(&ctx.ring);
     ctx.topo        = h->port.topo;
@@ -1146,8 +1140,6 @@ cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t
  * -------------------------------------------------------------------- */
 void checkpoint_block_snapshot(const ftl_allocator_t *alloc, uint16_t words[FTL_BLOCK_TOTAL])
 {
-    ASSERT(alloc != NULL);
-    ASSERT(alloc->blocks != NULL);
     ASSERT(words != NULL);
 
     for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++)
@@ -1196,8 +1188,6 @@ void checkpoint_block_snapshot(const ftl_allocator_t *alloc, uint16_t words[FTL_
  * -------------------------------------------------------------------- */
 void checkpoint_wear_page_build(const ftl_allocator_t *alloc, uint16_t page_index, uint8_t page[PAGE_MAIN_SIZE])
 {
-    ASSERT(alloc != NULL);
-    ASSERT(alloc->blocks != NULL);
     ASSERT(page != NULL);
     ASSERT(page_index < FTL_CHECKPOINT_WEAR_PAGES);
 
@@ -1240,7 +1230,6 @@ bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
                                 const l2p_checkpoint_header_t *cp,
                                 uint16_t                       record_idx)
 {
-    ASSERT(h != NULL);
     ASSERT(cp != NULL);
     /* 读缓冲复用 checkpoint_handle 的 wear_page_buf ⇒ 只能在开机（job 未在跑）调用。 */
     ASSERT(h->active == 0U);
@@ -1347,7 +1336,6 @@ bool checkpoint_load_block_table(checkpoint_handle_t           *h,
                                  uint16_t                       record_idx,
                                  uint16_t                       block_words[FTL_BLOCK_TOTAL])
 {
-    ASSERT(h != NULL);
     ASSERT(cp != NULL);
     ASSERT(block_words != NULL);
 
@@ -1484,7 +1472,6 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
  * -------------------------------------------------------------------- */
 static bool cp_should_start(const checkpoint_handle_t *h, const checkpoint_trigger_t *trigger)
 {
-    ASSERT(h != NULL);
     ASSERT(trigger != NULL);
 
     /* 触发原因决定本轮**允许**评估哪些带门。
@@ -1540,7 +1527,6 @@ static bool cp_should_start(const checkpoint_handle_t *h, const checkpoint_trigg
 
 static void checkpoint_status_fill(const checkpoint_handle_t *h, checkpoint_status_t *out)
 {
-    ASSERT(h != NULL);
     ASSERT(out != NULL);
 
     out->base.critical  = true; /* CP 跨轮推进，任何档位都要跑 */
@@ -1579,7 +1565,6 @@ static void checkpoint_status_fill(const checkpoint_handle_t *h, checkpoint_stat
 
 void checkpoint_handle(checkpoint_handle_t *h, const checkpoint_trigger_t *trigger, checkpoint_status_t *out)
 {
-    ASSERT(h != NULL);
     ASSERT(trigger != NULL);
     ASSERT(out != NULL);
 
@@ -1609,18 +1594,15 @@ void checkpoint_handle(checkpoint_handle_t *h, const checkpoint_trigger_t *trigg
 
 bool checkpoint_is_active(const checkpoint_handle_t *h)
 {
-    ASSERT(h != NULL);
     return h->active != 0U;
 }
 
 void checkpoint_reset_timer(checkpoint_handle_t *h)
 {
-    ASSERT(h != NULL);
     h->last_ms = 0U;
 }
 
 uint16_t *checkpoint_block_words(checkpoint_handle_t *h)
 {
-    ASSERT(h != NULL);
     return h->block_words;
 }

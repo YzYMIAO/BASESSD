@@ -72,8 +72,6 @@ static nand_pba_t md_block_addr(const metadata_dir_cache_t *dir, uint16_t gblock
 
 bool md_reclaim_mark(metadata_dir_cache_t *dir, uint16_t g)
 {
-    ASSERT(dir != NULL);
-
     if (g >= FTL_BLOCK_TOTAL)
     {
         return false;
@@ -94,7 +92,6 @@ bool md_reclaim_mark(metadata_dir_cache_t *dir, uint16_t g)
 
 bool md_reclaim_take(metadata_dir_cache_t *dir, uint16_t *out)
 {
-    ASSERT(dir != NULL);
     ASSERT(out != NULL);
 
     /* 从上次取走的位置继续扫描并环绕：擦除持续失败的块保留位，但不再永久占住
@@ -116,8 +113,6 @@ bool md_reclaim_take(metadata_dir_cache_t *dir, uint16_t *out)
 
 void md_reclaim_clear(metadata_dir_cache_t *dir, uint16_t g)
 {
-    ASSERT(dir != NULL);
-
     if (g >= FTL_BLOCK_TOTAL)
     {
         return;
@@ -138,8 +133,6 @@ void md_reclaim_clear(metadata_dir_cache_t *dir, uint16_t g)
 
 void md_reclaim_reset(metadata_dir_cache_t *dir)
 {
-    ASSERT(dir != NULL);
-
     memset(dir->reclaim_pending, 0, sizeof(dir->reclaim_pending));
     dir->reclaim_pending_count = 0U;
     dir->reclaim_scan          = 0U;
@@ -147,9 +140,6 @@ void md_reclaim_reset(metadata_dir_cache_t *dir)
 
 void md_reclaim_mark_all(metadata_dir_cache_t *dir, const ftl_allocator_t *alloc)
 {
-    ASSERT(dir != NULL);
-    ASSERT(alloc != NULL);
-
     for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
         if (!md_log_block_reclaimable(dir, alloc, g))
@@ -162,8 +152,6 @@ void md_reclaim_mark_all(metadata_dir_cache_t *dir, const ftl_allocator_t *alloc
 
 nand_pba_t metadata_dir_slot_now(metadata_dir_cache_t *dir)
 {
-    ASSERT(dir != NULL);
-
     if ((!dir->cur_block_valid) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
     {
         return NAND_PBA_INVALID;
@@ -178,8 +166,6 @@ nand_pba_t metadata_dir_slot_now(metadata_dir_cache_t *dir)
 
 void metadata_handle_reset(metadata_dir_cache_t *dir)
 {
-    ASSERT(dir != NULL);
-
     /* reclaimed_count 是**单调进度计数**（跨 job 保留）；其余 job 状态清零。
      * error 也保留到下一次起 job 时再清（status 要能看到最近一次失败）。 */
     const uint32_t reclaimed  = dir->handle.reclaimed_count;
@@ -531,11 +517,8 @@ static md_compact_step_t md_compact_write(metadata_dir_cache_t *dir)
 static void metadata_handle_step(metadata_dir_cache_t *dir)
 {
     /* 前置条件（判据 2）：调用者一律传 dir；allocator 走已绑定端口。 */
-    ASSERT(dir != NULL);
 
     ftl_allocator_t *alloc = dir->port.alloc;
-
-    ASSERT(alloc != NULL);
 
     /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age。
      * 默认档（INFO）不打印；需要现场观测时 `log level debug`。 */
@@ -783,15 +766,12 @@ void metadata_dir_bind_port(metadata_dir_cache_t *dir, const metadata_port_t *po
 {
     ASSERT(dir != NULL);
     ASSERT(port != NULL);
-    ASSERT(port->alloc != NULL);
-    ASSERT(port->total_writes != NULL);
 
     dir->port = *port;
 }
 
 static void metadata_status_fill(const metadata_dir_cache_t *dir, metadata_status_t *out)
 {
-    ASSERT(dir != NULL);
     ASSERT(out != NULL);
 
     const metadata_handle_t *j = &dir->handle;
@@ -836,7 +816,6 @@ void metadata_handle(metadata_dir_cache_t *dir, const ftl_bg_info_t *info, metad
     /* info 当前不参与目录整理决策（事件驱动）；保留形参以统一 typed 入口。 */
     (void)info;
 
-    ASSERT(dir != NULL);
     ASSERT(out != NULL);
 
     metadata_handle_step(dir);
@@ -853,10 +832,6 @@ void metadata_handle(metadata_dir_cache_t *dir, const ftl_bg_info_t *info, metad
  * 且**先记账再归还**（顺序颠倒会让 Free Pool 出现未记磨损的块）。 */
 static void md_note_block_erased(metadata_dir_cache_t *dir, uint16_t gblock)
 {
-    ASSERT(dir != NULL);
-    ASSERT(dir->port.alloc != NULL);
-    ASSERT(dir->port.total_writes != NULL);
-
     const uint32_t total_writes = *dir->port.total_writes;
 
     allocator_note_erase(dir->port.alloc, gblock, total_writes);
@@ -1014,14 +989,11 @@ void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *c
     metadata_handle_t    *j   = (dir != NULL) ? &dir->handle : NULL;
 
     ASSERT(completion != NULL);
-    ASSERT(dir != NULL);
-    ASSERT(j != NULL);
 
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     /* 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，二者必须一致
      * ——不一致说明派发路由错了。 */
-    ASSERT(ftl != NULL);
     ASSERT(ftl->metadata_dir == dir);
 
     const bool failed = fc_cw_status_has_error(completion->status);

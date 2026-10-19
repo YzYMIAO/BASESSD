@@ -309,6 +309,13 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     owner.topo         = ftl->topo;
     g_l2p_owner[dim]   = owner;
 
+    /* debug-only：初始化契约自检。必须在 owner 登记之后、任何 cache 访问之前——
+     * 校验全部句柄/端口绑定、topology 副本与 owner/route 身份。
+     * release 下连调用都不生成，保证零运行期开销。 */
+#if !defined(NDEBUG)
+    ftl_contract_audit(ftl);
+#endif
+
     /* 介质布局版本判据：介质不是当前版本（旧格式 / 空片）⇒ 全片格式化。
      * 放在 ftl_init 之后、free pool 回填之前——bbt_init 已把出厂坏块标记读进 BST
      * （**只在空片时读**；用过的介质上那些字节是 FTL 数据不是标记，bbt_init 会拒绝重扫，
