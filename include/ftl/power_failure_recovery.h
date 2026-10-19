@@ -35,9 +35,10 @@ struct ftl_context;
 /* ── 掉电重建闭环的标志量（上板验证用，UART 可读） ── */
 typedef struct
 {
-    uint16_t blocks_rebuilt; /* 重建的 Closed 条目数（= 扫到的写过物理块数，per-plane） */
-    uint16_t partial_blocks; /* 其中部分写块数（写指针 < PAGES_PER_BLOCK，整块交 GC） */
-    uint32_t valid_cw;       /* 重建回填的有效 **CW** 总数（全实例；最大 4096×256=1,048,576） */
+    uint16_t blocks_rebuilt;  /* 重建的 Closed 条目数（= 扫到的写过物理块数，per-plane） */
+    uint16_t partial_blocks;  /* 其中部分写块数（写指针 < PAGES_PER_BLOCK，整块交 GC） */
+    uint16_t l2p_read_errors; /* 逐 CW 反查 L2P 的读失败次数（valid_cw 可能少算） */
+    uint32_t valid_cw;        /* 重建回填的有效 **CW** 总数（全实例；最大 4096×256=1,048,576） */
 } ftl_rebuild_stats_t;
 
 /* ── 启动类型 ── */
@@ -62,10 +63,11 @@ typedef struct
  * 统计仅用于观测日志。 */
 typedef struct
 {
-    uint16_t closed_blocks; /* 恢复出的 Closed 条目数（退化单 plane 计） */
-    uint16_t log_blocks;    /* 恢复出的活 LOG 块数 */
-    uint16_t anomalies;     /* 探测发现的「池块却有数据」块数 */
-    uint32_t valid_cw;      /* 探测补算出的有效 CW 数 */
+    uint16_t closed_blocks;   /* 恢复出的 Closed 条目数（退化单 plane 计） */
+    uint16_t log_blocks;      /* 恢复出的活 LOG 块数 */
+    uint16_t anomalies;       /* 探测发现的「池块却有数据」块数 */
+    uint16_t l2p_read_errors; /* 探测中 L2P 反查失败次数（非 0 ⇒ 快照结果不完整，回退 F2） */
+    uint32_t valid_cw;        /* 探测补算出的有效 CW 数 */
 } ftl_block_restore_stats_t;
 
 bool ftl_recovery_restore_blocks(struct ftl_context *ftl, uint16_t words[FTL_BLOCK_TOTAL]);

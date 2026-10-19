@@ -233,6 +233,28 @@ static inline nand_pba_t ftl_cmd_pba(const fc_command_t *cmd)
     return paa_to_pba((uint32_t)cmd->config.ch, (uint32_t)cmd->config.ce, cmd->paa);
 }
 
+/* 一个命令实际访问到的**全局块**及其本命令内的最大 ECC 纠正 bit 数。 */
+typedef struct
+{
+    uint16_t gblock;
+    uint8_t  ecc_max;
+} ftl_cmd_block_ecc_t;
+
+/*
+ * ftl_cmd_block_ecc_list - 逐 plane 反查命令访问的全局块与 ECC
+ *
+ * 一个 multi-plane 子操作在 Policy B 下覆盖**两个独立块**；host 读成功后的
+ * read_count / ECC 趋势记账必须逐块进行，只记 `ftl_cmd_pba()` 的首个 desc 会漏掉
+ * 第二个 plane（RISK-HOST-02）。本函数遍历 desc 链、按 gblock 去重、取每块内
+ * ECC 最大值——desc 链布局与 PBA→PAA 转换都留在本层（H13）。
+ *
+ * @param cmd 已完成、且尚未 release 的命令（desc 链仍有效）
+ * @param out 输出数组（长度 >= max）
+ * @param max 输出容量
+ * @return 实际写入的块数（0..max）；链为空返回 0
+ */
+uint8_t ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out, uint8_t max);
+
 /* ── 数据搬运 ── */
 
 /*

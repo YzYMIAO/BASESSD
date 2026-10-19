@@ -575,23 +575,25 @@ typedef enum
  * `_Static_assert` 证不了（C4），且这里没有 RAM 压力。 */
 typedef struct
 {
-    uint8_t         phase;             /* md_job_phase_t */
-    bool            waiting;           /* 有命令在飞（完成服务函数清）*/
-    bool            compact_wanted;    /* append_slot 换块后池吃紧 ⇒ 请求压缩 */
-    bool            anchor_ok;         /* Anchor 分页写是否全部成功（false = 整条作废）*/
-    bool            anchor_need_erase; /* Anchor 写点是否需先擦块 */
-    uint8_t         anchor_chunk;      /* 已写的 Anchor 页序 */
-    uint16_t        victim;            /* 压缩 victim 的 gblock（UINT16_MAX = 无）*/
-    uint16_t        region_id;         /* 搬移游标（下一个待查 region_id）*/
-    uint16_t        cur_region;        /* 当前搬移中的 region_id（CP_READ 命中时设定）*/
-    uint16_t        moved;             /* 本次压缩已搬 region 数（观测）*/
-    uint16_t        reclaim_gblock;    /* 在飞擦除的块（完成时归还它）*/
-    uint16_t        stall_rounds;      /* 连续"提交不出去"轮数（超限中止，同 MIG/CP）*/
-    uint16_t        anchor_idx;        /* 本 Anchor record 的池内槽位 */
-    uint32_t        anchor_seq;        /* 本 Anchor record 的序号 */
-    nand_pba_t      anchor_base;       /* 本 Anchor record 第 0 页地址 */
-    nand_pba_t      slot;              /* 压缩搬移已取到、待写的槽（NAND_PBA_INVALID = 未取）*/
-    metadata_ring_t anchor_ring;       /* Anchor 池几何（prepare 出参，commit 要用）*/
+    uint8_t         phase;               /* md_job_phase_t */
+    bool            waiting;             /* 有命令在飞（完成服务函数清）*/
+    bool            compact_wanted;      /* append_slot 换块后池吃紧 ⇒ 请求压缩 */
+    bool            anchor_ok;           /* Anchor 分页写是否全部成功（false = 整条作废）*/
+    bool            anchor_need_erase;   /* Anchor 写点是否需先擦块 */
+    uint8_t         anchor_chunk;        /* 已写的 Anchor 页序 */
+    uint16_t        victim;              /* 压缩 victim 的 gblock（UINT16_MAX = 无）*/
+    uint16_t        region_id;           /* 搬移游标（下一个待查 region_id）*/
+    uint16_t        cur_region;          /* 当前搬移中的 region_id（CP_READ 命中时设定）*/
+    uint16_t        moved;               /* 本次压缩已搬 region 数（观测）*/
+    uint16_t        reclaim_gblock;      /* 在飞擦除的块（完成时归还它）*/
+    uint16_t        reclaim_fail_gblock; /* 连续擦除失败计数对应的块（RISK-MD-01）*/
+    uint8_t         reclaim_fail_count;  /* 该块连续擦除失败次数；达上限即标坏并清位 */
+    uint16_t        stall_rounds;        /* 连续"提交不出去"轮数（超限中止，同 MIG/CP）*/
+    uint16_t        anchor_idx;          /* 本 Anchor record 的池内槽位 */
+    uint32_t        anchor_seq;          /* 本 Anchor record 的序号 */
+    nand_pba_t      anchor_base;         /* 本 Anchor record 第 0 页地址 */
+    nand_pba_t      slot;                /* 压缩搬移已取到、待写的槽（NAND_PBA_INVALID = 未取）*/
+    metadata_ring_t anchor_ring;         /* Anchor 池几何（prepare 出参，commit 要用）*/
 
     /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/victim/age */
     uint32_t start_ms;

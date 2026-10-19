@@ -806,7 +806,7 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
              * 不只 UNC：ECC 纠错成功但 CRC/META 校验失败的 CW 同样是失败 CW（其 status 为
              * READY|CRC_ERROR / READY|MATA_ERROR），此前只认 UNC 会让这类命令的 desc_id
              * 停留在 NAND 层透传值（读成功时即 INVALID），与契约不符。 */
-            if ((found_fail == 0U) && ((d->status & FC_CW_STATUS_ERROR_MASK) != 0U))
+            if ((found_fail == 0U) && fc_cw_status_has_error(d->status))
             {
                 completion.desc_id = did;
                 found_fail         = 1U;

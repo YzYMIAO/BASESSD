@@ -35,6 +35,7 @@
 #include "ftl_fc_interface.h"
 
 #include "assertion.h"
+#include "bst.h" /* ftl_pba_gblock（逐块 ECC 记账） */
 #include "completion_table.h"
 #include "fc.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_SYNC_WAIT */
@@ -270,6 +271,57 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
     /* CW 级映射入口：位图由调用者给出（可只覆盖本命令实际写到的那些 CW）。
      * cmd->config.multi_plane 决定 plane 段，须由调用者**在建链前**设好。 */
     return ftl_cmd_build_pair_chain(cmd, pba, cw_bitmap);
+}
+
+/* --------------------------------------------------------------------
+ * ftl_cmd_block_ecc_list
+ *   功能：遍历命令 desc 链，按全局块号去重，取每块内最大 ECC。
+ *   参数：cmd —— 已完成且未 release 的命令；out / max —— 输出数组与容量。
+ *   返回：写入的块数。
+ *   实现要点：desc 的 PAA 经 paa_to_pba（本层唯一的 PBA↔PAA 转换漏斗）反解，
+ *             再经 ftl_pba_gblock 转全局块号。multi-plane 命令的两个 plane 是
+ *             Policy B 下的两个独立块，必须分别记账（RISK-HOST-02）。
+ * -------------------------------------------------------------------- */
+uint8_t ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out, uint8_t max)
+{
+    ASSERT(cmd != NULL);
+    ASSERT(out != NULL);
+
+    uint8_t            count = 0U;
+    fc_descriptor_id_t did   = (fc_descriptor_id_t)cmd->desc_id;
+
+    while (did < FC_DESCRIPTOR_POOL_DEPTH)
+    {
+        const fc_descriptor_t *d   = fc_descriptor_id_to_descriptor(did);
+        const nand_pba_t       pba = paa_to_pba((uint32_t)cmd->config.ch, (uint32_t)cmd->config.ce, d->paa);
+        const uint16_t         gb  = ftl_pba_gblock(pba);
+
+        uint8_t i = 0U;
+
+        for (; i < count; i++)
+        {
+            if (out[i].gblock == gb)
+            {
+                break;
+            }
+        }
+        if (i == count)
+        {
+            if (count >= max)
+            {
+                break; /* 容量不足：保留已收集的块，不越界 */
+            }
+            out[count].gblock  = gb;
+            out[count].ecc_max = 0U;
+            count++;
+        }
+        if (d->ecc_bits > out[i].ecc_max)
+        {
+            out[i].ecc_max = (uint8_t)d->ecc_bits;
+        }
+        did = (fc_descriptor_id_t)d->next_id;
+    }
+    return count;
 }
 
 /* ── 3. 数据搬运（desc 链 ↔ 外部缓冲）── */

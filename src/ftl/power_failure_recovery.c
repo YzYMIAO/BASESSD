@@ -44,6 +44,7 @@
 #include "bbt.h"
 #include "checkpoint.h"
 #include "fc.h"
+#include "fc_crc_engine.h" /* FC_CRC_META_SIZE */
 #include "ftl.h"
 #include "ftl_fc_interface.h"
 #include "gc.h"
@@ -134,6 +135,9 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
         return FTL_ERROR;
     }
 
+    /* 格式化后 Directory 就是全新的「全部未映射」，之前的加载失败不再有意义。 */
+    ftl->md_load_failed = 0U;
+
     return FTL_OK;
 }
 
@@ -163,7 +167,8 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
      *    (block0, page0)/1，而环形块**并没有被擦**（journal_truncate 只预擦环形下一块），
      *    不接回去就会二次编程 + 序号回退（详见 journal_resume）。 */
     journal_page_ref_t ring;
-    (void)journal_scan_latest(ftl->journal, &ring);
+    bool               ring_read_error = false;
+    (void)journal_scan_latest(ftl->journal, &ring, &ring_read_error);
 
     /* ② 扫描 Checkpoint + 读取 块元数据快照（快照失败不触发格式化，只影响块元数据路径） */
     l2p_checkpoint_header_t cp;
@@ -171,7 +176,9 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
 
     if (checkpoint_find_latest(ftl, &cp, &cp_idx) != FTL_OK)
     {
-        /* 无有效 Checkpoint → 出厂首次启动 */
+        /* 无有效 Checkpoint → 出厂首次启动。空 Directory 是预期状态。 */
+        ftl->md_load_failed = 0U;
+
         ftl_status_t ret = ftl_boot_fresh_start(ftl, &ring);
         if (ret == FTL_OK)
         {
@@ -182,6 +189,16 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
             *result                      = local_result;
         }
         return ret;
+    }
+
+    /* 介质已有有效 Checkpoint，但 Directory 加载失败 ⇒ 空 Directory 会让旧 region
+     * 映射整体丢失（RISK-BOOT-09）。此时没有可用的「重扫 L2P region」路径，唯一
+     * 诚实的做法是拒绝启动并保留介质，由用户决定是否格式化。 */
+    if (ftl->md_load_failed != 0U)
+    {
+        LOGE("[META] Directory load failed but checkpoint seq=%lu exists — refuse to boot\r\n",
+             (unsigned long)cp.sequence);
+        return FTL_ERROR;
     }
 
     const bool blocks_valid = checkpoint_load_block_table(ftl, &cp, cp_idx, ftl->cp_job->block_words);
@@ -213,7 +230,10 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
      * page_seq 正好 == cp.journal_sequence，只看页首会把「写→掉电」判成干净、不回放
      * ⇒ 数据静默丢失。上板签名：`boot type=1 journal_entries=0` +
      * `[F2] rebuild blocks=N valid_cw=0` + `rd FAIL ... got 00000000`。 */
-    if ((ring.page_seq + (uint32_t)ring.entry_count) <= cp.journal_sequence)
+    /* ⚠ 环内有读失败页 ⇒ 最新页与判型都不可信：不能据此判「干净关机」
+     *   （否则可能少回放条目）。保守走掉电回放路径；回放也会因读失败返回
+     *   FTL_ERROR，再由 ftl_boot_power_failure 回退 F2。 */
+    if ((!ring_read_error) && ((ring.page_seq + (uint32_t)ring.entry_count) <= cp.journal_sequence))
     {
         /* 干净关机 */
         ftl_status_t ret = ftl_boot_clean_start(ftl, &cp, blocks_valid ? 1U : 0U, &local_result.blocks_restored, &ring);
@@ -410,7 +430,13 @@ ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
             memset(&stats, 0, sizeof(stats));
             ftl_recovery_probe_blocks(ftl, ftl->cp_job->block_words, &stats);
 
-            if (ftl_recovery_build_pools(ftl, ftl->cp_job->block_words))
+            if (stats.l2p_read_errors != 0U)
+            {
+                /* L2P 反查失败 ⇒ valid_count 少算，快照结果不完整：回退 F2。 */
+                LOGW("[BLK] probe: %u L2P read error(s) — fallback to F2\r\n",
+                     (unsigned)stats.l2p_read_errors);
+            }
+            else if (ftl_recovery_build_pools(ftl, ftl->cp_job->block_words))
             {
                 restored = 1U;
                 LOGI("[BLK] restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n",
@@ -563,12 +589,20 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     /* ③ Journal 回放：映射写入 L2P Cache；block_ctx 有效时同步记 valid 增量。
      *    F10：按 (page_seq, entry_index) 递增序回放所有
      *    page_seq + entry_count > cp_sequence 的页。 */
-    uint32_t entry_count = 0U;
-    (void)journal_replay(ftl->journal,
-                         ftl->cache,
-                         cp_sequence,
-                         &entry_count,
-                         (blocks_applied != 0U) ? &block_ctx : NULL);
+    uint32_t   entry_count = 0U;
+    const bool replay_ok   = (journal_replay(ftl->journal,
+                                           ftl->cache,
+                                           cp_sequence,
+                                           &entry_count,
+                                           (blocks_applied != 0U) ? &block_ctx : NULL) == FTL_OK);
+
+    if (!replay_ok)
+    {
+        /* 回放不完整（环内有读失败页）：journal 写态已恢复，但映射可能缺失
+         * ⇒ 强制回退 F2 全盘重建（见下方 restored 判定）。 */
+        LOGW("[BLK] journal replay incomplete — force F2\r\n");
+        block_ctx.ok = 0U;
+    }
 
     /* ④ 按 Checkpoint region_bitmap 局部加载（F4）：跳过 DIRTY 回放行，
      *    bitmap 区预载 CLEAN，非 bitmap 区 INVALID（懒加载 CP 时刻快照）。 */
@@ -583,7 +617,12 @@ ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
         memset(&stats, 0, sizeof(stats));
         ftl_recovery_probe_blocks(ftl, ftl->cp_job->block_words, &stats);
 
-        if (ftl_recovery_build_pools(ftl, ftl->cp_job->block_words))
+        if (stats.l2p_read_errors != 0U)
+        {
+            LOGW("[BLK] probe: %u L2P read error(s) — fallback to F2\r\n",
+                 (unsigned)stats.l2p_read_errors);
+        }
+        else if (ftl_recovery_build_pools(ftl, ftl->cp_job->block_words))
         {
             restored = 1U;
             LOGI("[BLK] restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n",
@@ -653,13 +692,15 @@ bool ftl_recovery_page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
         return false; /* 命令没走通 ⇒ 内容不可知 ⇒ 一律判非空 */
     }
 
-    /* 检查每个 CW 的 raw USER 前缀（16B）。空页全 FF；写过的 DATA 页因加扰必然非 FF。
-     * ⚠ 判据依赖“被扫描的页都用 DATA 配置（随机化开启）”。若将来引入 RANDOM_DISABLE
-     *   且前缀恰好全 FF 的用户页，本判空会失效（登记在 known_risks）。 */
+    /* 检查每个 CW 的 **META 字段**（4B，CW 基址偏移 0）。空页全 FF；写过的页 META
+     * 由 fc_data_path_meta_write 写成扇区 LBA（明文，加扰区从偏移 8 开始）⇒ 必然非 FF。
+     * ⚠ 不再依赖 USER 区加扰（RISK-BOOT-07）：引入 RANDOM_DISABLE 或写入全 FF 用户数据
+     *   都不会让已编程页被误判为空。残留风险：以 FC_META_UNKNOWN（全 FF）编程的页会
+     *   被当空页——FTL 的数据/元数据页都不写该哨兵。 */
     for (uint8_t i = 0U; i < CW_NUM; i++)
     {
         const uint8_t *p = raw_buf + (uint32_t)i * FC_BUFFER_POOL_CW_SIZE;
-        for (uint8_t j = 0U; j < 16U; j++)
+        for (uint8_t j = 0U; j < FC_CRC_META_SIZE; j++)
         {
             if (p[j] != 0xFFU)
             {
@@ -671,20 +712,40 @@ bool ftl_recovery_page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
     return true;
 }
 
-/* 扫出某 Block 写指针：第一个全 FF 页；全非空返回 PAGES_PER_BLOCK */
+/* 扫出某 Block 的写指针（第一个空白页），并检测写失败留下的 hole。
+ *
+ * 返回值语义：0 = 整块空白；k = 从页 0 到 k-1 连续写过、页 k 起全空；
+ * PAGES_PER_BLOCK = 全写满**或存在 hole**（空白页之后又有写过的页）。
+ * 存在 hole 时不能把第一个空白页当上界——那会把 hole 之后的页漏出 valid_count
+ * （RISK-BOOT-06），故返回全块让调用者逐页反查。
+ *
+ * ⚠ 代价：存在 hole 的块要扫完全部页（正常部分写块仍在第一个空白页停止）。
+ *   这类块只可能由写失败产生，属少数；换来的 valid_count 正确性是 GC 选择
+ *   victim 的前提。 */
 uint8_t ftl_recovery_scan_write_pointer(const ftl_context_t *ftl, uint8_t plane, uint16_t block, uint8_t *raw_buf)
 {
+    uint8_t first_blank = (uint8_t)PAGES_PER_BLOCK;
+
     for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
     {
         nand_pba_t addr = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
         if (ftl_recovery_page_is_blank(addr, raw_buf))
         {
-            return page; /* 第一个空白页 = 写指针 */
+            if (first_blank == (uint8_t)PAGES_PER_BLOCK)
+            {
+                first_blank = page;
+            }
+            continue;
+        }
+
+        if (first_blank != (uint8_t)PAGES_PER_BLOCK)
+        {
+            return (uint8_t)PAGES_PER_BLOCK; /* hole：空白页后仍有写过的页 */
         }
     }
 
-    return (uint8_t)PAGES_PER_BLOCK; /* 全写满 */
+    return first_blank;
 }
 
 /* 写过的物理块：进 Closed 列表（退化单 plane 条目）+ 逐 CW L2P 双校验回填 valid_count
@@ -761,9 +822,14 @@ void ftl_recovery_close_block(ftl_context_t       *ftl,
 
             if (l2p_cache_read_sync(ftl->cache, cw_lba[cw], &cur) != FTL_OK)
             {
-                /* 读失败 ⇒ 该 CW 无法确认有效；valid_count 会少算，留一行可归因日志。 */
-                LOGW("[BLK] F2 L2P read failed lba=%lu — valid_count 可能少算\r\n",
+                /* 读失败 ⇒ 该 CW 无法确认有效；valid_count 会少算。计数向上传播：
+                 * 启动快照路径据此回退 F2（RISK-BOOT-11），F2 路径至少可见。 */
+                LOGW("[BLK] L2P read failed lba=%lu — valid_count 可能少算\r\n",
                      (unsigned long)cw_lba[cw]);
+                if (stats != NULL)
+                {
+                    stats->l2p_read_errors++;
+                }
                 continue;
             }
             if ((cur != NAND_PBA_INVALID) && (cur == pba_with_cw(pba, cw)))
@@ -1225,6 +1291,7 @@ void ftl_recovery_probe_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLOCK_TOTA
         if (stats != NULL)
         {
             stats->anomalies++;
+            stats->l2p_read_errors += rebuild.l2p_read_errors;
             stats->valid_cw += rebuild.valid_cw;
         }
     }

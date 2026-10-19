@@ -2177,6 +2177,8 @@ Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
 | `page_buf[2048]` | 当前页缓冲 |
 | `checkpoint_needed` / `emergency` | 85% / 95% 水位标志 |
 | `job` | 异步刷页 job（IDLE/WRITE/ERASE） |
+| `alloc` | 分配器指针（仅用于把持续失败的环形块标进 BBT；测试可为 NULL） |
+| `bad_mask` / `erase_fail_count` / `erase_fail_block` / `ring_full` | 环形块坏块策略（见不变量 6） |
 
 **不变量**：
 
@@ -2189,6 +2191,10 @@ Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
 4. **单飞行**：`job.phase != IDLE` 时不再起新页写；两条写会争同一页地址。
 5. **回放不信任页内容**：Journal 模块整体不转断言——页头可能因掉电撕裂而非法，
    属预期情形，返回错误/跳过。
+6. **环形块持续擦除失败的处理**：同一块连续失败 `JRN_ERASE_FAIL_MAX`（3）次 ⇒
+   置 `bad_mask` + `bbt_mark_bad`（两个 plane），跳到下一个可用块；全部不可用 ⇒
+   `ring_full`，停止写入并拒绝新条目（绝不写未擦块，也不再无限重试）。坏块在
+   `journal_scan_ring` 中被跳过，不会把回放误判为“不完整”。
 
 #### 3.7.4 写路径
 

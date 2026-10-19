@@ -341,6 +341,20 @@ uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
  */
 void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx);
 
+/*
+ * allocator_closed_drop_plane - 从 Closed 条目摘除一个已擦除/已标坏的 plane 块
+ *
+ * GC/WL/predict 逐 plane 擦 victim。若擦完一个 plane 后 job 中止，旧条目仍引用
+ * 已归还 Free Pool 的块；该块被重新分配并再次 Closed 后会被旧条目误认
+ * （RISK-GC-04）。擦完即摘除，条目只在仍有未处理 plane 时存在。
+ *
+ * @param alloc  分配器
+ * @param plane  plane 号
+ * @param block  该 plane 内的块号
+ * @return true = 条目已无任何 plane（条目被移除）；false = 仍有其他 plane 或未找到
+ */
+bool allocator_closed_drop_plane(ftl_allocator_t *alloc, uint8_t plane, uint16_t block);
+
 /* ── 只读统计 ──
  * 口径：跳过 BAD 与 state == NONE（固定元数据 / OP / Spare / 未初始化）；
  * 退化单 plane 条目只按实际 plane 计算；valid_count 单位是 CW。 */

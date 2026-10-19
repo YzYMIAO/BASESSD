@@ -201,8 +201,17 @@ typedef struct
      * （随机读满盘：真值 100% → 观测 50%，跌破 L2P_THRASH_EXIT_PCT=70% ⇒
      * 降级永不触发）。故：加载完成时置 1，其后**第一次**命中消费它且不计命中，
      * 一次逻辑访问在窗口里只记一次 miss。
-     * 代价 1 字节 —— 落在 entries 的 4 字节对齐填充里，结构体尺寸不变。 */
+     * 代价：与 load_fail_count 一起占尾部对齐填充，行结构体按 4B 对齐后
+     * 由 2056B 增至 2060B（64 行共 +256B）。 */
     uint8_t fresh;
+
+    /* 本 region 连续加载失败次数（RISK-L2P-01）。
+     * 失败后先置 INVALID 重试，达到 L2P_LOAD_RETRY_MAX 才降级为「全未映射的
+     * CLEAN 行」——既不每次访问都重读坏 region（活锁），也不把一次瞬态读错
+     * 永久当成「从未写过」。换 region 时由 load_start 清零。
+     * ⚠ 计数随行保存：行被驱逐后计数丢失（重试预算重置）。持续访问的坏 region
+     *   通常会复用同一 INVALID 行，仍能达到上限；这是用 1B/行换「不做全 region 计数表」。 */
+    uint8_t load_fail_count;
 } l2p_cache_line_t;
 
 /* ── Owner 解析回调 ──

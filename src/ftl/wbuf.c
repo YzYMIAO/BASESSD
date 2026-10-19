@@ -127,7 +127,7 @@ ftl_status_t ftl_wbuf_append(ftl_context_t *ftl, uint16_t gi, lba_t lba, const v
         ftl->wbuf.occupied |= wbuf_lba_bit(l);
     }
     ftl->wbuf.owners |= ftl_group_bit(gi);
-    ftl->groups[gi].outstanding++;
+    pending_group_add_subop(ftl, gi);
 
     /* 满：尝试立即编程（失败则留给 idle flush 重试；append 本身已成功 ⇒ 仍返 OK，
      * 否则调用者会重发同一子操作 ⇒ 重复计数）。 */
@@ -156,7 +156,7 @@ static ftl_status_t wbuf_program_page(ftl_context_t   *ftl,
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     /* 窗口基址：FC 侧 desc->meta = (meta & ~PLANE_CW_MASK) | (plane<<2) | cw
      * ⇒ 逐 CW 铸出该 CW 的扇区 LBA（同 ftl_issue_subop）。 */
-    cmd->meta               = (DWORD)ftl->wbuf.base;
+    cmd->meta               = ftl->wbuf.base;
 
     /* 建 desc 链（位图 = 本页实际覆盖的 CW；desc/buffer 池空 → 瞬态背压） */
     ftl_status_t ret = ftl_cmd_setup_ppa_pair_cw(cmd, pba, ftl->wbuf.occupied);

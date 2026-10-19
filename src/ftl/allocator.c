@@ -652,6 +652,57 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
     }
 }
 
+/* --------------------------------------------------------------------
+ * allocator_closed_drop_plane
+ *   功能：从 Closed 条目中摘除一个**已擦除/已标坏**的 plane 块。
+ *   参数：alloc —— 分配器；plane —— plane 号；block —— 该 plane 内的块号。
+ *   返回：true = 摘除后条目已无任何 plane（条目被移除）；false = 条目仍有其他 plane
+ *         或未找到匹配条目。
+ *   实现要点：GC/WL/predict 逐 plane 擦除 victim；若擦完一个 plane 后 job 中止，
+ *             旧条目仍引用已归还 Free Pool 的块。该块被重新分配并再次 Closed 后，
+ *             旧条目会把它误认成原 SB 的一员（RISK-GC-04）。擦完一个 plane 就把它
+ *             从条目摘除，条目只在仍有未处理 plane 时存在。
+ *             ⚠ 擦除成功路径已由 allocator_free_block/retire 改过 BST 状态；本函数只
+ *             负责 Closed 条目与 sb_id 的同步，不碰池。
+ * -------------------------------------------------------------------- */
+bool allocator_closed_drop_plane(ftl_allocator_t *alloc, uint8_t plane, uint16_t block)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(plane < PLANE_NUM);
+    ASSERT(block != FTL_BLOCK_NO_PLANE);
+
+    for (uint16_t i = 0U; i < alloc->closed_sb_count; i++)
+    {
+        super_block_t *e = &alloc->closed_sb_list[i];
+
+        if (e->plane_blocks[plane] != block)
+        {
+            continue;
+        }
+
+        ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, block)];
+
+        if (ftl_block_sb_id(b) == i)
+        {
+            ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+        }
+        e->plane_blocks[plane] = FTL_BLOCK_NO_PLANE;
+
+        for (uint8_t p = 0U; p < PLANE_NUM; p++)
+        {
+            if (e->plane_blocks[p] != FTL_BLOCK_NO_PLANE)
+            {
+                return false;
+            }
+        }
+
+        allocator_remove_closed_sb(alloc, i);
+        return true;
+    }
+
+    return false;
+}
+
 /* ── 5. 只读统计 ── */
 
 /* 参与磨损统计的块：非 BAD 且已归属（state != NONE）。

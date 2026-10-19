@@ -28,6 +28,7 @@
  *   HIL `fl` / 开机路径 / CLI——GC/WL 的 F10 走 journal_kick 的异步等待 + 失败 pending）。
  */
 
+#include "allocator.h"  /* ftl_allocator_t（持续擦除失败 → bbt_mark_bad） */
 #include "ftl_config.h" /* nand_pba_t */
 #include "ftl_type.h"
 #include "l2p_cache.h"
@@ -115,6 +116,21 @@ typedef struct
 {
     ftl_topology_t topo; /* 目标 NAND 芯片路由 */
 
+    /* 分配器（仅用于把持续擦除失败的环形块标进 BBT）。
+     * 由 ftl_init 在 journal_init 之后绑定；测试夹具可为 NULL（只用 RAM bad_mask）。 */
+    ftl_allocator_t *alloc;
+
+    /* 环形块坏块策略（RISK-JN-01，全部 RAM 态）：
+     *   bad_mask     —— 已判定不可用的环形块（bit b）；持久化由 bbt_mark_bad 承担，
+     *                   重启后 BST BAD 会重新挡住这些块。
+     *   erase_fail_count / erase_fail_block —— 同一块连续擦除失败计数；
+     *                   达 JRN_ERASE_FAIL_MAX 即标坏并跳到下一可用块。
+     *   ring_full    —— 全部环形块不可用：journal 停止写入（不擦未擦块、不无限重试）。 */
+    uint8_t bad_mask;
+    uint8_t erase_fail_count;
+    uint8_t erase_fail_block;
+    uint8_t ring_full;
+
     uint8_t  current_block;
     uint8_t  current_page;
     uint8_t  current_entry;
@@ -166,9 +182,11 @@ typedef struct
  * 与回放共用同一套页头判定。
  *
  * @param journal Journal；out 出参（环空时全置 0，可为 NULL）
+ * @param out_read_error 出参（可为 NULL）：true = 环内存在读失败页 ⇒ 最新页与
+ *        「干净/掉电」判型都不可信，启动恢复应走掉电回放路径
  * @return true = 环非空（*out 有效）；false = 环空（全部擦除 / 无有效页）
  */
-bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out);
+bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out, bool *out_read_error);
 
 /*
  * journal_resume - 恢复 Journal 的 RAM 写态（写指针 + 序号），**不回放任何条目**。
@@ -226,7 +244,9 @@ ftl_status_t journal_flush_page(l2p_journal_t *journal);
  *   （`page_seq > cp_sequence`）会把跨水位的那一页整页跳过，丢掉它的新条目。
  * out_entries（可为 NULL）回填**实际应用成功的条目数**（读失败的页不计入）。
  * ⚠ 该数**不能**由 journal 的 RAM 写指针反推：末尾 journal_resume 把落点放到最新页
- *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。 */
+ *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。
+ * @return FTL_OK = 完整回放；FTL_ERROR = 环内存在读失败页（写态已恢复，但回放可能
+ *         不完整 ⇒ 调用者应回退 F2 全盘重建）。 */
 /*
  * journal_replay_block_ctx_t - 回放时的块元数据增量上下文（可选）
  *

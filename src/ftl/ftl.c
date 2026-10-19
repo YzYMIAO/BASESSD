@@ -208,18 +208,21 @@ static ssd_status_t ftl_host_io_read_ok(ftl_context_t     *ftl,
         return SSD_STATUS_IO_ERROR;
     }
 
-    /* Read Recovery：记录本次读的 ECC 纠正 bit 数（desc 链最大值），用于慢死预测
-     * （连续上升 → WARNING → 主动搬移）。ECC 历史存于 BST（ftl->alloc.blocks[].rr）。
-     * ⚠ 须在 fc_command_release(cmd) 之前调用——desc 释放后失效。
-     * cmd 是本 FTL 自己下发的 ⇒ 用它记着的 PBA 反查全局块号（FTL 层不直接读
-     * cmd->paa —— 那是 FC/器件域的表示）。 */
-    uint16_t gblock = ftl_pba_gblock(ftl_cmd_pba(cmd));
+    /* Read Recovery：逐 plane 记录 ECC 与 read disturb，用于慢死预测。
+     * ⚠ 不能只记 `ftl_cmd_pba()` 的首个 desc：一个 multi-plane 子操作在 Policy B 下
+     *   覆盖**两个独立块**，第二块的趋势会漏记（RISK-HOST-02）。
+     * ⚠ 须在 fc_command_release(cmd) 之前调用——desc 释放后失效。 */
+    ftl_cmd_block_ecc_t blocks[PLANE_NUM];
+    const uint8_t       nblocks = ftl_cmd_block_ecc_list(cmd, blocks, (uint8_t)PLANE_NUM);
 
-    rr_record_ecc(&ftl->alloc.blocks[gblock].rr, fc_get_cmd_ecc_max(cmd));
+    for (uint8_t i = 0U; i < nblocks; i++)
+    {
+        rr_record_ecc(&ftl->alloc.blocks[blocks[i].gblock].rr, blocks[i].ecc_max);
 
-    /* read disturb 计数：读成功累加（周期归零由上层维护）；
-     * 随下一次 Checkpoint 的磨损快照持久化。 */
-    ftl->alloc.blocks[gblock].read_count++;
+        /* read disturb 计数：读成功累加（周期归零由上层维护）；
+         * 随下一次 Checkpoint 的磨损快照持久化。 */
+        ftl->alloc.blocks[blocks[i].gblock].read_count++;
+    }
 
     return SSD_STATUS_OK;
 }
@@ -485,11 +488,18 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
 
     /* ├─ Journal ── */
     journal_init(ftl->journal, ftl->topo);
+    /* 持续擦除失败的环形块要标进 BBT（RISK-JN-01）；journal 自己没有分配器。 */
+    ftl->journal->alloc = &ftl->alloc;
 
     /* ├─ Metadata Directory ── */
     ftl->metadata_dir->topo = ftl->topo;
     {
         const ftl_status_t md_ret = metadata_dir_load(ftl->metadata_dir);
+
+        /* 失败时仍建空 Directory（空片首启 / 格式化路径需要），但把失败状态留给
+         * ftl_boot_recovery：介质若已有有效 Checkpoint，空 Directory = 映射整体丢失
+         * ⇒ 必须拒绝启动（RISK-BOOT-09）。 */
+        ftl->md_load_failed = (md_ret != FTL_OK) ? 1U : 0U;
 
         if (md_ret != FTL_OK)
         {
@@ -789,7 +799,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
     /* 本命令的**窗口基址**（扇区 LBA，低 3 位清零）：FC 侧 desc->meta =
      * (meta & ~PLANE_CW_MASK) | (plane<<2) | cw ⇒ 逐 CW 铸出该 CW 的扇区 LBA。
      * 传窗口基址（而非 internal_lba）语义更直白，两者在 FC 掩掉低 3 位后等价。 */
-    cmd->meta               = (DWORD)ftl_lba_pair_base(internal_lba);
+    cmd->meta               = ftl_lba_pair_base(internal_lba);
 
     /* 建 desc 链（逐 plane 各自的 PBA，位图 = 本子操作实际覆盖的 CW）；
      * desc/buffer 池空 → 瞬态背压 */
@@ -825,14 +835,14 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
     *n_cw = n; /* 回填实际消费的 LBA 数（调用者据此推进） */
 
     /* 记账（**必须早于 submit**——submit 之后 completion 可能立即被 drain 处理） */
-    g->outstanding++;
+    pending_group_add_subop(ftl, gi);
 
     /* 提交（tag = HOST_IO；ctx 传 NULL —— 私有状态在 pending 表） */
     if (ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL) != FTL_OK)
     {
         pending_remove(ftl, ftl_cmd_id(cmd));
         (void)fc_command_release(cmd);
-        g->outstanding--;
+        pending_group_drop_subop(ftl, gi);
         return FTL_AGAIN; /* SQ 满：瞬态 */
     }
 

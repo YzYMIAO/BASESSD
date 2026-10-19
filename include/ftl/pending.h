@@ -269,6 +269,18 @@ int pending_group_alloc(ftl_context_t *ftl);
 uint16_t pending_group_count(const ftl_context_t *ftl);
 
 /*
+ * pending_group_add_subop / pending_group_drop_subop - 组在飞数增减的唯一闸门
+ *
+ * 下发前 add；提交失败回滚 drop（不触发完成通知）。完整完成走
+ * pending_group_complete_subop*（聚合状态 + 递减 + 试触发）。
+ *
+ * @param ftl  FTL 上下文
+ * @param gi   组下标（0..FTL_GROUP_MAX-1；组必须 used）
+ */
+void pending_group_add_subop(ftl_context_t *ftl, uint16_t gi);
+void pending_group_drop_subop(ftl_context_t *ftl, uint16_t gi);
+
+/*
  * pending_group_complete_subop - 一个子操作完成：聚合状态 + 递减 + 试触发
  *
  * 由 ftl_op_host_io 在子操作簿记后调用（caller 通知字段的唯一写点）。

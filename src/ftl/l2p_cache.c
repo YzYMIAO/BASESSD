@@ -56,6 +56,11 @@
 
 #include <string.h>
 
+/* 同一 region 连续加载失败多少次后降级为「全未映射的 CLEAN 行」（RISK-L2P-01）。
+ * 取 3：一次瞬态读错（NAND 忙 / 命令超时）不应永久丢映射；持续失败则必须止损，
+ * 否则每次访问都重读坏 region、host 永久停在 FTL_AGAIN。 */
+#define L2P_LOAD_RETRY_MAX (3U)
+
 /* ── 位图原语（本文件内部）──
  * 脏位图是 flat 绝对编号（bit = 全局 region）。set/clear/test 集中在此，
  * 避免调用点各自手写 word 下标与移位（H15 / C9）。 */
@@ -372,6 +377,12 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint32_t region_id)
 
     /* 占位：entries 先全 INVALID（加载失败时保持此态 = 全未映射） */
     memset(line->entries, 0xFF, sizeof(line->entries));
+    /* 失败计数只在**换 region** 时清零：同一 region 的重试必须累计，否则
+     * L2P_LOAD_RETRY_MAX 永远达不到（每次 load_start 都清零）。 */
+    if (line->region_id != region_id)
+    {
+        line->load_fail_count = 0U;
+    }
     line->region_id    = region_id;
     line->access_count = 1U;
     line->state        = L2P_CACHE_LOADING;
@@ -911,19 +922,46 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
 
     if (line->state == L2P_CACHE_LOADING)
     {
-        if (failed == 0U)
+        uint8_t load_failed = failed;
+
+        if (load_failed == 0U)
         {
             /* 数据在 desc 链上 ⇒ 必须早于 release 拷出。 */
             if (ftl_cmd_read_data(cmd, line->entries, L2P_REGION_SIZE) != FTL_OK)
             {
-                /* 拷贝失败与 NAND 读失败同义：entries 保持全 INVALID（见下）。 */
                 LOGW("[L2P] load copy failed region=%lu\r\n", (unsigned long)line->region_id);
+                load_failed = 1U;
             }
         }
-        /* 成功与失败都置 CLEAN：失败时 entries 保持全 NAND_PBA_INVALID = 全部未映射。
-         * 置 INVALID 会让每次访问都重新加载坏 region（host 永久停在 FTL_AGAIN 的活锁）。 */
-        line->state = L2P_CACHE_CLEAN;
-        line->fresh = 1U; /* 加载已完成 ⇒ 下一次命中是本次访问的重试，不计 hit */
+
+        if (load_failed == 0U)
+        {
+            line->load_fail_count = 0U;
+            line->state           = L2P_CACHE_CLEAN;
+            line->fresh           = 1U; /* 下一次命中是本次访问的重试，不计 hit */
+        }
+        else
+        {
+            /* 失败：先有限次重试（置 INVALID 让下次访问重新加载），超过上限才降级为
+             * 「全未映射的 CLEAN 行」。两个极端都要避免：
+             *   · 直接 CLEAN ⇒ 一次瞬态读错被永久当成“从未写过”，映射静默丢失；
+             *   · 一直 INVALID ⇒ 每次访问都重读坏 region，host 永久停在 FTL_AGAIN。 */
+            memset(line->entries, 0xFF, sizeof(line->entries));
+            line->load_fail_count++;
+
+            if (line->load_fail_count < L2P_LOAD_RETRY_MAX)
+            {
+                line->state = L2P_CACHE_INVALID;
+            }
+            else
+            {
+                line->state = L2P_CACHE_CLEAN;
+                line->fresh = 1U;
+                LOGE("[L2P] region %lu load failed %u times — degrade to unmapped\r\n",
+                     (unsigned long)line->region_id,
+                     (unsigned)line->load_fail_count);
+            }
+        }
 
         ASSERT(ftl->cache->load_inflight > 0U);
         ftl->cache->load_inflight--;

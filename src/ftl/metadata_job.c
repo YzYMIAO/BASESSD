@@ -25,6 +25,7 @@
 #include "metadata_job.h"
 
 #include "assertion.h"
+#include "bbt.h" /* bbt_mark_bad（持续擦除失败标坏，RISK-MD-01） */
 #include "fc.h"
 #include "ftl.h" /* ftl_context_t（服务函数要从实例取 &ftl->alloc） */
 #include "ftl_fc_interface.h"
@@ -37,6 +38,15 @@
 
 /* 连续"提交不出去"的轮数上限（同 CP/MIG/RR_SUBMIT_STALL_MAX）。 */
 #define MD_SUBMIT_STALL_MAX (256U)
+
+/* 同一块连续擦除失败多少次后标坏（RISK-MD-01）。
+ * 3 次覆盖瞬态擦除失败（忙/超时）；持续失败只能来自物理坏块，继续重试没有意义：
+ * 保留回收位会让该块永久占着轮转队列、每次后台都白付一次擦除命令。 */
+#define MD_RECLAIM_FAIL_MAX (3U)
+
+/* 压缩空槽预算为「扫描期间可能落回 victim 的前台 region 写」预留的槽位数。
+ * 1 个 = 当前 HIL 串行提交下最多一条在飞 region 写；见 md_compact_begin。 */
+#define MD_COMPACT_RESERVED_SLOTS (1U)
 
 /* md_block_page_pba — gblock + 页号 → PBA（ch/ce/lun 取本 Directory 拓扑）。
  * ⚠ 单一转换漏斗（C9）：block/plane 的字段序只在这里出现一次，调用点不手写 pba_make。 */
@@ -172,9 +182,10 @@ void md_job_reset(metadata_dir_cache_t *dir)
     ASSERT(dir != NULL);
 
     memset(&dir->job, 0, sizeof(dir->job));
-    dir->job.victim         = UINT16_MAX;
-    dir->job.reclaim_gblock = UINT16_MAX;
-    dir->job.slot           = NAND_PBA_INVALID;
+    dir->job.victim              = UINT16_MAX;
+    dir->job.reclaim_gblock      = UINT16_MAX;
+    dir->job.reclaim_fail_gblock = UINT16_MAX;
+    dir->job.slot                = NAND_PBA_INVALID;
 }
 
 /* --------------------------------------------------------------------
@@ -378,8 +389,14 @@ static void md_compact_begin(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
     }
 
     /* 空槽预算：victim 的全部活 region 必须一次装进当前块（l2p_live 的定义就是
-     * "最新位置落在该块的 region 数"）。装不下 ⇒ 留到换块后再来。 */
-    if (dir->l2p_live[victim] > (uint16_t)(PAGES_PER_BLOCK - dir->cur_metadata_page))
+     * "最新位置落在该块的 region 数"）。装不下 ⇒ 留到换块后再来。
+     * ⚠ 预留 1 个槽位给「job 启动前已发出、扫描期间才 commit 的前台 region 写」：
+     *     不预留时，在飞写落回 victim 会让实际需搬数超过预算 ⇒ slot_now 取不到槽 ⇒
+     *     本次压缩中止（良性但白做）。预留槽把该竞态从「中止」降为「容量少一页」。
+     *     代价：victim 活 region 数等于剩余槽位时本轮到不了它，换块后再来。 */
+    const uint16_t free_slots = (uint16_t)(PAGES_PER_BLOCK - dir->cur_metadata_page);
+
+    if ((uint32_t)dir->l2p_live[victim] + MD_COMPACT_RESERVED_SLOTS > (uint32_t)free_slots)
     {
         return;
     }
@@ -749,11 +766,38 @@ static void md_complete_reclaim(ftl_context_t *ftl, md_job_t *j, fc_command_t *c
 
     if (failed)
     {
-        LOGW("[META] reclaim erase failed blk=%u — 位保留，下轮重试\r\n",
-             (unsigned)j->reclaim_gblock);
+        /* 同一块连续失败计数；达上限即标坏并清回收位（RISK-MD-01）。
+         * 否则该块会被无限重试——数据安全但每次后台白付一条擦除命令，
+         * 且坏块永远不会进入 BBT。 */
+        if (j->reclaim_fail_gblock != j->reclaim_gblock)
+        {
+            j->reclaim_fail_gblock = j->reclaim_gblock;
+            j->reclaim_fail_count  = 0U;
+        }
+        j->reclaim_fail_count++;
+
+        if (j->reclaim_fail_count >= MD_RECLAIM_FAIL_MAX)
+        {
+            LOGE("[META] reclaim erase failed blk=%u x%u — mark BAD\r\n",
+                 (unsigned)j->reclaim_gblock,
+                 (unsigned)j->reclaim_fail_count);
+            (void)bbt_mark_bad(&ftl->alloc, j->reclaim_gblock);
+            md_reclaim_clear(ftl->metadata_dir, j->reclaim_gblock);
+            j->reclaim_fail_count  = 0U;
+            j->reclaim_fail_gblock = UINT16_MAX;
+        }
+        else
+        {
+            LOGW("[META] reclaim erase failed blk=%u (%u/%u) — 位保留，下轮重试\r\n",
+                 (unsigned)j->reclaim_gblock,
+                 (unsigned)j->reclaim_fail_count,
+                 (unsigned)MD_RECLAIM_FAIL_MAX);
+        }
     }
     else
     {
+        j->reclaim_fail_count  = 0U;
+        j->reclaim_fail_gblock = UINT16_MAX;
         md_reclaim_clear(ftl->metadata_dir, j->reclaim_gblock);
         md_note_block_erased(ftl, j->reclaim_gblock);
     }

@@ -233,6 +233,40 @@ void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi)
 }
 
 /* --------------------------------------------------------------------
+ * pending_group_add_subop / pending_group_drop_subop
+ *   功能：组在飞子操作数的**唯一增减闸门**（H10 / §3.1）。
+ *   参数：ftl —— 上下文；gi —— 组下标。
+ *   返回：无。
+ *   实现要点：outstanding 是「已下发、未完成」的组不变量。写点分散在 host 读
+ *             （ftl_issue_subop）与页打包写（ftl_wbuf_append）两处、递减点分散在
+ *             完成服务与提交失败回滚——任一处漏掉即 host 写组永不完成、挂死。
+ *             故所有增减都收敛到本对函数；完整完成走
+ *             pending_group_complete_subop*（带聚合状态与完成通知），
+ *             提交失败回滚走 drop（不触发完成通知）。
+ * -------------------------------------------------------------------- */
+void pending_group_add_subop(ftl_context_t *ftl, uint16_t gi)
+{
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    ftl_io_group_t *g = &ftl->groups[gi];
+    ASSERT(g->used != 0U);
+    ASSERT(g->outstanding < UINT16_MAX);
+
+    g->outstanding++;
+}
+
+void pending_group_drop_subop(ftl_context_t *ftl, uint16_t gi)
+{
+    ASSERT(gi < FTL_GROUP_MAX);
+
+    ftl_io_group_t *g = &ftl->groups[gi];
+    ASSERT(g->used != 0U);
+    ASSERT(g->outstanding > 0U);
+
+    g->outstanding--;
+}
+
+/* --------------------------------------------------------------------
  * pending_group_complete_subop
  *   功能：一个子操作完成时的簿记——聚合状态、递减在飞数、试触发组完成。
  *   参数：ftl —— 上下文；gi —— 组下标；sub_status —— 本子操作完成状态。

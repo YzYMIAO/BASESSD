@@ -83,6 +83,27 @@ typedef struct ftl_context ftl_context_t;
  * 超过即判卡死 ⇒ 中止 job（不擦 victim，数据无损，下轮重试）。 */
 #define MIG_SUBMIT_STALL_MAX (256U)
 
+/* ── 等待**外部模块**推进的轮数上限（独立的 liveness 界，不是性能目标）──
+ * READ_SETTLE / WRITE_SETTLE 等 L2P region 加载、FLUSH_JRN 等 Journal 刷页时，
+ * 原先每轮都把 stall_rounds 清零（"有命令在飞 = 在推进"）⇒ 外部模块若永久卡住，
+ * job 永远不中止、victim 永远不擦。给这类等待单独计数：命令在飞也计数，只有
+ * 等待条件解除/提交成功才清零。
+ * 取值：远大于一次 NAND 页操作（~700µs）与 L2P region 加载所需的轮数，
+ * 只兜「永不完成」；256 与提交卡死上限同量级会误伤正常慢路径。 */
+#define MIG_WAIT_MAX (4096U)
+
+/* ── 同一 victim 块连续读失败多少次后标坏（RISK-GC-01）──
+ * 持续读失败（ECC 不可纠 / META 基址损坏）时 GC 会每轮重选同一 victim 并 abort，
+ * 容量不再增长。3 次覆盖瞬态读错；超过即标 BAD 并从 Closed 条目摘除该 plane，
+ * 让 GC 换下一个候选。源块的其他 plane 仍可迁移，数据不丢。 */
+#define MIG_VICTIM_READ_FAIL_MAX (3U)
+
+/* ── 同一目的块连续写失败多少次后关闭 Cold SB（RISK-GC-02）──
+ * 目的页写失败**不能**把整块标 BAD：该冷 SB 可能已有成功迁移的页，L2P 正指向它们。
+ * 正确处置是关闭这个 Cold SB，让下一次 GC 从 Free Pool 取新的目的块；已写成功的页
+ * 仍可读，残留页由 GC 按正常路径回收。 */
+#define MIG_DST_WRITE_FAIL_MAX (3U)
+
 /* ── 状态机的 phase ──
  * 约定同 rr_stage_t：纯计算 phase 只从 mig_step 进入、跑完立刻转下一个（不提交命令）；
  * 提交 phase 由 mig_step 提交命令后**原地停留**，等完成服务函数改写。
@@ -125,18 +146,24 @@ typedef enum
  */
 typedef struct
 {
-    bool     active;       /* true = job 在跑（单飞行门） */
-    bool     waiting;      /* true = 有一条搬移命令在飞（等 g_op_service[FTL_OP_GC]/[FTL_OP_WL]） */
-    bool     aborted;      /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
-    bool     decode_ok;    /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
-    bool     write_ok;     /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
-    bool     erase_failed; /* true = 任一 plane 擦除失败/处置失败（回收计数与 predict 日志不计） */
-    uint8_t  phase;        /* mig_phase_t */
-    uint8_t  kind;         /* mig_kind_t */
-    uint8_t  post;         /* mig_post_t */
-    uint8_t  page;         /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
-    uint8_t  plane;        /* 当前 plane（读/写/擦各自迭代） */
-    uint16_t stall_rounds; /* 连续提交不出去的轮数（见 MIG_SUBMIT_STALL_MAX） */
+    bool     active;          /* true = job 在跑（单飞行门） */
+    bool     waiting;         /* true = 有一条搬移命令在飞（等 g_op_service[FTL_OP_GC]/[FTL_OP_WL]） */
+    bool     aborted;         /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
+    bool     decode_ok;       /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
+    bool     write_ok;        /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
+    bool     erase_failed;    /* true = 任一 plane 擦除失败/处置失败（回收计数与 predict 日志不计） */
+    bool     closed_removed;  /* true = 逐 plane 摘除后 Closed 条目已被移除（RISK-GC-04） */
+    uint8_t  phase;           /* mig_phase_t */
+    uint8_t  kind;            /* mig_kind_t */
+    uint8_t  post;            /* mig_post_t */
+    uint8_t  page;            /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
+    uint8_t  plane;           /* 当前 plane（读/写/擦各自迭代） */
+    uint16_t stall_rounds;    /* 连续提交不出去的轮数（见 MIG_SUBMIT_STALL_MAX） */
+    uint16_t wait_rounds;     /* 等外部模块（L2P / Journal）推进的轮数（见 MIG_WAIT_MAX） */
+    uint16_t fail_gblock;     /* 连续读失败计数对应的源块（RISK-GC-01） */
+    uint8_t  fail_count;      /* 该块连续读失败次数 */
+    uint16_t dst_fail_gblock; /* 连续写失败计数对应的目的块（RISK-GC-02） */
+    uint8_t  dst_fail_count;  /* 该目的块连续写失败次数 */
 
     super_block_t victim; /* victim 的**副本**（closed_sb_list 会被 swap-remove 挪动，不持指针） */
 

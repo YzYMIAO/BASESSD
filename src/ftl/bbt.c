@@ -41,6 +41,7 @@
 
 #include "assertion.h"
 #include "fc.h"
+#include "fc_crc_engine.h" /* FC_CRC_META_SIZE（用户区抽样判空） */
 #include "ftl_fc_interface.h"
 #include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
 #include "ftl_op.h"  /* ftl_op_submit / FTL_OP_BBT */
@@ -125,6 +126,10 @@ static ftl_status_t bbt_record_probe(void *ctx, uint16_t record_idx, bool full, 
 
 /* ── 2. 初始化 ── */
 
+/* 用户区抽样点数（每 plane）。见 bbt_medium_has_ftl_data：只在 BBT 载入失败时
+ * 判「介质是否被写过」，抽样而非全扫以控制开机路径成本。 */
+#define BBT_USER_SAMPLE_COUNT (8U)
+
 /* 定义在下方「坏块图打印」节（与 bbt_print_bad_map 共用）；
  * bbt_scan_factory 需要它在前面，故先声明。 */
 static bool bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t block, uint8_t do_erase);
@@ -167,6 +172,53 @@ bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
             if (ftl_sync_read_page(addr, scratch, sizeof(scratch), FTL_PAGE_CFG_META()) == FTL_OK)
             {
                 return true;
+            }
+        }
+    }
+
+    /* 固定元数据区被擦、用户区仍有数据：只查元数据区会把介质误判为空片，
+     * 随后的出厂扫描会覆盖已失效的坏块图（RISK-BBT-05）。抽样用户区 Page 0 的
+     * META（4B，明文）判「写过」——抽样而不是全扫：本函数只在 BBT 载入失败时执行，
+     * 全扫 4096 块 × 一次 NAND 读在开机路径上不可接受。残留风险：用户数据恰好
+     * 全部落在抽样点之外 ⇒ 仍会误判；概率低，且该介质已丢失元数据，属于灾后场景。 */
+    {
+        uint8_t        raw[PAGE_SIZE];
+        const uint16_t start = (uint16_t)FTL_METADATA_BLOCK_END;
+
+        if (start < (uint16_t)BLOCKS_PER_PLANE)
+        {
+            const uint16_t span = (uint16_t)((uint16_t)BLOCKS_PER_PLANE - start);
+            uint16_t       step = (uint16_t)(span / BBT_USER_SAMPLE_COUNT);
+
+            if (step == 0U)
+            {
+                step = 1U;
+            }
+            for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+            {
+                for (uint16_t block = start; block < (uint16_t)BLOCKS_PER_PLANE; block = (uint16_t)(block + step))
+                {
+                    const nand_pba_t addr = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, 0U, 0U);
+
+                    if (ftl_sync_read_page_raw(addr, raw) != FTL_OK)
+                    {
+                        continue; /* 读不通的块不当作“有数据”（与固定区探针同口径） */
+                    }
+                    /* 逐 CW 看 META（CW 基址偏移 0，明文）：只写部分 CW 的页
+                     * 也能被识别。 */
+                    for (uint8_t cw = 0U; cw < CW_NUM; cw++)
+                    {
+                        const uint8_t *p = raw + (uint32_t)cw * FC_BUFFER_POOL_CW_SIZE;
+
+                        for (uint8_t i = 0U; i < FC_CRC_META_SIZE; i++)
+                        {
+                            if (p[i] != 0xFFU)
+                            {
+                                return true; /* 写过：META 非 FF */
+                            }
+                        }
+                    }
+                }
             }
         }
     }

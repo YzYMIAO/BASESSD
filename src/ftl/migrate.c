@@ -144,6 +144,7 @@ static ftl_status_t mig_submit(ftl_context_t *ftl, fc_command_t *cmd)
     }
 
     m->stall_rounds = 0U;
+    m->wait_rounds  = 0U;
     return FTL_OK;
 }
 
@@ -225,11 +226,13 @@ static void mig_start(ftl_context_t *ftl, const super_block_t *victim, mig_kind_
     mig_job_t *m = &ftl->mig;
 
     memset(m, 0, sizeof(*m));
-    m->victim         = *victim;
-    m->victim.is_open = false; /* 本引擎只处理 Closed SB（见 allocator.h） */
-    m->kind           = (uint8_t)kind;
-    m->post           = (uint8_t)post;
-    m->active         = true;
+    m->victim          = *victim;
+    m->victim.is_open  = false; /* 本引擎只处理 Closed SB（见 allocator.h） */
+    m->kind            = (uint8_t)kind;
+    m->post            = (uint8_t)post;
+    m->active          = true;
+    m->fail_gblock     = UINT16_MAX;
+    m->dst_fail_gblock = UINT16_MAX;
 
     /* 快路径：无任何有效 CW ⇒ 无可搬移，直接进擦除。 */
     allocator_sb_stats_t st;
@@ -378,6 +381,21 @@ static bool mig_stall(ftl_context_t *ftl)
     return false;
 }
 
+/* 累计一次「等外部模块推进」；超限即中止 job（不擦 victim）。返回 true = 已中止。
+ * ⚠ 与 mig_stall 分开：外部命令在飞也计数——"在飞"不等于"会完成"。 */
+static bool mig_wait(ftl_context_t *ftl, const char *reason)
+{
+    mig_job_t *m = &ftl->mig;
+
+    if (m->wait_rounds >= MIG_WAIT_MAX)
+    {
+        mig_abort(ftl, reason);
+        return true;
+    }
+    m->wait_rounds++;
+    return false;
+}
+
 /* 推进到下一页（清本页状态）。读/写两阶段的页推进都走这里。 */
 static void mig_next_page(ftl_context_t *ftl)
 {
@@ -411,12 +429,14 @@ static void mig_finish(ftl_context_t *ftl)
     if (!m->aborted)
     {
         uint16_t closed_idx;
-        bool     removed = false;
+        /* 逐 plane 擦除时条目可能已被 allocator_closed_drop_plane 摘空并移除
+         * （最后一个 plane 摘除即删条目）⇒ 此时按原值查找必然失败。 */
+        bool removed = m->closed_removed;
 
         /* 移除已回收条目（swap-remove）——防 closed_sb_count 只增不减导致列表爆炸
          * + 已回收 SB 被再次选为 victim 的无限 GC 空转。
          * 擦除失败也移除：该 SB 已坏/不可再用，留在列表里只会反复被选。 */
-        if (allocator_find_closed_sb(&ftl->alloc, &m->victim, &closed_idx))
+        if ((!removed) && allocator_find_closed_sb(&ftl->alloc, &m->victim, &closed_idx))
         {
             allocator_remove_closed_sb(&ftl->alloc, closed_idx);
             removed = true;
@@ -446,12 +466,18 @@ static void mig_finish(ftl_context_t *ftl)
         }
     }
 
-    m->active       = false;
-    m->phase        = (uint8_t)MIG_IDLE;
-    m->waiting      = false;
-    m->decode_ok    = false;
-    m->write_ok     = false;
-    m->stall_rounds = 0U;
+    m->active          = false;
+    m->phase           = (uint8_t)MIG_IDLE;
+    m->waiting         = false;
+    m->decode_ok       = false;
+    m->write_ok        = false;
+    m->closed_removed  = false;
+    m->stall_rounds    = 0U;
+    m->wait_rounds     = 0U;
+    m->fail_gblock     = UINT16_MAX;
+    m->fail_count      = 0U;
+    m->dst_fail_gblock = UINT16_MAX;
+    m->dst_fail_count  = 0U;
 }
 
 /* ── 5. 推进 ── */
@@ -555,10 +581,14 @@ static bool mig_step_read_settle(ftl_context_t *ftl)
             }
             if (!l2p_cache_ready(ftl->cache, m->cw_lba[plane][cw]))
             {
-                m->stall_rounds = 0U; /* 加载在飞 = 有进展，不是提交卡死 */
+                /* 加载在飞不计提交卡死，但**必须**计入独立的等待上限：
+                 * 加载永久卡住时 job 否则永不中止（RISK-MIG-01）。 */
+                (void)mig_wait(ftl, "l2p load timeout");
                 return true;
             }
         }
+
+        m->wait_rounds = 0U; /* 等待条件解除 */
 
         /* 全部就绪 ⇒ 一次性算出本 plane 的位图（不会半途而废） */
         m->cw_bitmap[plane] = 0U;
@@ -631,10 +661,12 @@ static bool mig_step_write_settle(ftl_context_t *ftl)
             }
             if (!l2p_cache_ready(ftl->cache, m->cw_lba[plane][cw]))
             {
-                m->stall_rounds = 0U;
+                (void)mig_wait(ftl, "l2p load timeout");
                 return true;
             }
         }
+
+        m->wait_rounds = 0U; /* 等待条件解除 */
 
         for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
@@ -733,7 +765,9 @@ static bool mig_step_flush_jrn(ftl_context_t *ftl)
 
     if (ftl->journal->job.phase != JRN_IDLE)
     {
-        m->stall_rounds = 0U; /* 有命令在飞 = 在推进，不计卡死 */
+        /* 有命令在飞不计提交卡死，但计入独立的等待上限：Journal job 永久卡住时
+         * job 否则永不中止（RISK-MIG-01）。 */
+        (void)mig_wait(ftl, "journal flush timeout");
         return true;
     }
     if ((ftl->journal->job.need_erase != 0U) || (ftl->journal->current_entry != 0U))
@@ -743,7 +777,8 @@ static bool mig_step_flush_jrn(ftl_context_t *ftl)
         return true;
     }
 
-    m->stall_rounds = 0U; /* 屏障达成 */
+    m->stall_rounds = 0U;
+    m->wait_rounds  = 0U; /* 屏障达成 */
     m->phase        = (uint8_t)MIG_ERASE;
     m->plane        = 0U;
     return false;
@@ -914,11 +949,44 @@ static void mig_complete_read(ftl_context_t             *ftl,
 
     if (!read_ok)
     {
-        /* [待上板] 读错误 ⇒ 中止，victim 不擦。空页（decode false）不在此列。 */
+        /* [待上板] 读错误 ⇒ 中止，victim 不擦。空页（decode false）不在此列。
+         * 同一源块连续失败达上限 ⇒ 标 BAD 并摘除其 Closed plane（RISK-GC-01）：
+         * 否则每轮 GC 都重选同一 victim、永久 abort，容量不再增长。
+         * 其他 plane 仍可迁移；数据不因标坏而丢失（坏块本来就读不回来）。 */
+        const uint16_t gsrc = mig_src_gblock(m, plane);
+
+        if (m->fail_gblock != gsrc)
+        {
+            m->fail_gblock = gsrc;
+            m->fail_count  = 0U;
+        }
+        m->fail_count++;
+
+        if (m->fail_count >= MIG_VICTIM_READ_FAIL_MAX)
+        {
+            LOGE("[MIG] victim read failed blk=%u x%u — mark BAD\r\n",
+                 (unsigned)gsrc,
+                 (unsigned)m->fail_count);
+            (void)bbt_mark_bad(&ftl->alloc, gsrc);
+            if (allocator_closed_drop_plane(&ftl->alloc, plane, m->victim.plane_blocks[plane]))
+            {
+                m->closed_removed = true;
+            }
+            m->fail_count  = 0U;
+            m->fail_gblock = UINT16_MAX;
+        }
+
         mig_abort(ftl, "victim read failed");
     }
     else
     {
+        /* 只清**同一块**的连续失败计数：另一个 plane 的正常读不能把本块的失败
+         * 计数冲掉（否则两 plane 交替时永远达不到标坏阈值）。 */
+        if (m->fail_gblock == mig_src_gblock(m, plane))
+        {
+            m->fail_count  = 0U;
+            m->fail_gblock = UINT16_MAX;
+        }
         m->phase = (uint8_t)MIG_READ_SETTLE;
     }
 
@@ -940,14 +1008,38 @@ static void mig_complete_write(ftl_context_t             *ftl,
 
     if (!write_ok)
     {
-        /* [待上板] 写错误 ⇒ 中止，victim 不擦。 */
+        /* [待上板] 写错误 ⇒ 中止，victim 不擦。
+         * 同一目的块连续失败达上限 ⇒ 关闭 Cold SB（RISK-GC-02）：目的块可能已有
+         * 成功迁移的页，**不能**标 BAD；关闭后下一次 GC 换新的目的块，旧块的
+         * 已写页仍可读，残留页由 GC 正常回收。 */
+        const uint16_t gdst = ftl_pba_gblock(m->dst[m->plane]);
+
+        if (m->dst_fail_gblock != gdst)
+        {
+            m->dst_fail_gblock = gdst;
+            m->dst_fail_count  = 0U;
+        }
+        m->dst_fail_count++;
+
+        if (m->dst_fail_count >= MIG_DST_WRITE_FAIL_MAX)
+        {
+            LOGE("[MIG] dst write failed blk=%u x%u — close cold SB\r\n",
+                 (unsigned)gdst,
+                 (unsigned)m->dst_fail_count);
+            (void)allocator_close_open_sb(&ftl->alloc, FTL_TEMP_COLD);
+            m->dst_fail_count  = 0U;
+            m->dst_fail_gblock = UINT16_MAX;
+        }
+
         mig_abort(ftl, "write failed");
         mig_step(ftl);
         return;
     }
 
-    m->write_ok = true;
-    m->phase    = (uint8_t)MIG_WRITE_SETTLE;
+    m->write_ok        = true;
+    m->dst_fail_count  = 0U;
+    m->dst_fail_gblock = UINT16_MAX;
+    m->phase           = (uint8_t)MIG_WRITE_SETTLE;
     mig_step(ftl);
 }
 
@@ -1009,6 +1101,14 @@ static void mig_complete_erase(ftl_context_t             *ftl,
             LOGW("[MIG] erase failed on already-BAD block %u — not re-marked\r\n",
                  (unsigned)gsrc);
         }
+    }
+
+    /* 逐 plane 摘除已处理的块：擦完后该块已归还 Free Pool（或已标坏），旧 Closed 条目
+     * 不得继续引用它——否则块被重新分配并再次 Closed 后会被旧条目误认（RISK-GC-04）。
+     * 条目在最后一个 plane 摘除时自动移除。 */
+    if (allocator_closed_drop_plane(&ftl->alloc, plane, m->victim.plane_blocks[plane]))
+    {
+        m->closed_removed = true;
     }
 
     (void)fc_command_release(cmd);

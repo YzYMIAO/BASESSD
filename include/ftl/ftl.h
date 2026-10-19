@@ -124,6 +124,12 @@ typedef struct ftl_context
      * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
     uint8_t bg_suspend;
 
+    /* Directory 加载失败（Anchor 池无有效 record / 读失败）。
+     * ftl_init 仍建空 Directory（格式化/首次启动路径需要它），但**不能静默继续**：
+     * 空 Directory 会让旧 region 映射整体丢失（RISK-BOOT-09）。ftl_boot_recovery 在
+     * 介质存在有效 Checkpoint 时据此拒绝启动；无 Checkpoint（空片）才放行。 */
+    uint8_t md_load_failed;
+
     /* L2P 加载背压信号（per-instance）。
      * ftl_issue_subop 因 **L2P region 未就绪**（异步加载在飞，l2p_cache_read 返
      * FTL_AGAIN）而返回 FTL_AGAIN 时置 1；ftl_drain_group 据此**不计** `stalls`——
