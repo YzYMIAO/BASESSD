@@ -105,6 +105,11 @@ _Static_assert(FTL_IU_BYTES + (2U * FC_BUFFER_USER_OFFSET) == CW_SIZE, "CW 用�
 /* 维度数至少为 1 */
 _Static_assert(FTL_DIM_TOTAL >= 1U, "设备维度数非法");
 
+/* LBA 低位按「2 的幂」做掩码/移位（ftl_lba_page_base 的 ~(CW_NUM-1)、
+ * ftl_lba_plane 的 (PLANE_NUM-1)）——几何量不满足时静默算错地址，故编译期钉死。 */
+_Static_assert((CW_NUM & (CW_NUM - 1U)) == 0U, "CW_NUM 必须是 2 的幂");
+_Static_assert((PLANE_NUM & (PLANE_NUM - 1U)) == 0U, "PLANE_NUM 必须是 2 的幂");
+
 /* CW 总数必须整除每 region 条目数（否则最后一个 region 不满）*/
 _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能被每 region 条目数整除");
 
@@ -423,12 +428,6 @@ static inline nand_pba_t pba_page(nand_pba_t pba)
     return (nand_pba_t)(pba & ~(nand_pba_t)(CW_NUM - 1U));
 }
 
-/* 获取 Page 基址 PBA（CW=0，页级操作基址）——与 pba_page 数值恒等，收敛到单漏斗 */
-static inline nand_pba_t pba_page_base(nand_pba_t pba)
-{
-    return pba_page(pba);
-}
-
 /* 同 page 内换 CW */
 static inline nand_pba_t pba_with_cw(nand_pba_t pba, uint32_t cw)
 {
@@ -478,7 +477,7 @@ static inline nand_pba_t pba_with_ce(nand_pba_t pba, uint32_t ce)
 /* 是否同 Page（无视 CW） */
 static inline bool pba_same_page(nand_pba_t a, nand_pba_t b)
 {
-    return (pba_page_base(a)) == (pba_page_base(b));
+    return pba_page(a) == pba_page(b);
 }
 
 /* 各字段是否在芯片规格范围内 */
@@ -542,7 +541,7 @@ static inline uint8_t ftl_cw_bitmap_plane_count(uint32_t bitmap)
 }
 
 /* 位图的置位数（= 本页实际 CW 数，即 n_cw）。只看前 FTL_LBA_PER_PAIR 位——
- * 那是一页的总 CW 数，段外的高位不参与（与旧手写循环口径一致）。 */
+ * 那是一页的总 CW 数，段外的高位不参与。 */
 static inline uint8_t ftl_cw_bitmap_popcount(uint32_t bitmap)
 {
     uint8_t n = 0U;

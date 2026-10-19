@@ -65,32 +65,36 @@ void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits)
     }
     track->last_ecc = ecc_bits;
 
-    /* 健康状态升级 */
-    if (track->rising_count >= RR_ECC_RISING_THRESHOLD)
+    /* 健康状态**单调升级**：只取 max，绝不回落。
+     * ⚠ 逐条直接赋值会让 CRITICAL/DYING 块在后续几次低 ECC 连续上升时被打回
+     *   WARNING（例如 1→2→3→4 触发 rising 门）——那会掩盖慢死信号。 */
+    uint8_t level = track->health;
+
+    if ((track->rising_count >= RR_ECC_RISING_THRESHOLD) && (level < (uint8_t)RR_BLOCK_WARNING))
     {
-        track->health = RR_BLOCK_WARNING;
+        level = (uint8_t)RR_BLOCK_WARNING;
     }
-    if (ecc_bits >= RR_ECC_HIGH_WATER)
+    if ((ecc_bits >= RR_ECC_HIGH_WATER) && (level < (uint8_t)RR_BLOCK_CRITICAL))
     {
-        track->health = RR_BLOCK_CRITICAL;
+        level = (uint8_t)RR_BLOCK_CRITICAL;
     }
-    if (ecc_bits >= RR_ECC_MAX)
+    if ((ecc_bits >= RR_ECC_MAX) && (level < (uint8_t)RR_BLOCK_DYING))
     {
-        track->health = RR_BLOCK_DYING;
+        level = (uint8_t)RR_BLOCK_DYING;
     }
+    track->health = level;
 }
 
 /* ── 2. 恢复路径（异步 job 状态机）──
  *
- * 三级管线的**分步**实现：原 rr_recover_read 把三级串成一次阻塞调用，本版把它拆成
- * rr_step 的 stage 序列，每步只提交一条命令就返回。逐条对照原实现：
+ * 三级管线的**分步**实现：rr_step 的 stage 序列每步只提交一条命令就返回。
  *
  *   Stage 1（读电压重试，attempt = 1..RR_MAX_RETRY）
  *     SET_FEATURES(attempt) → 重试读 → 失败则 SET_FEATURES(0) → 下一 attempt
  *     · SET_FEATURES 失败（提交失败 / NAND_FAIL）⇒ **直接**下一 attempt，**不**恢复模式
  *       （原 rr_exec_retry 在 Step 1 就 return -1，根本走不到 Step 3）
  *     · 重试读失败 ⇒ 先恢复模式 0 再下一 attempt（原 Step 3 无条件执行，含最后一次 attempt）
- *     · 重试读成功 ⇒ 本 plane 恢复成功（**不**恢复模式 0 —— 原实现的既有行为，保持不变）
+ *     · 重试读成功 ⇒ 本 plane 恢复成功（**不**恢复模式 0——成功后紧接着结算/收尾）
  *   Stage 2（邻居页辅助，neighbor_i = 0..RR_NEIGHBOR_ATTEMPTS-1）
  *     · 邻居选择：page∓1、块内回绕（与原 rr_neighbor_assist 同）
  *     · 邻居读成功 ⇒ 再试目标页；成功 ⇒ 本 plane 恢复成功
@@ -100,7 +104,7 @@ void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits)
  *
  * ⚠ 本文件的每一条命令都走 ftl_async_* + ftl_op_submit（**不同步等待**）——
  *   服务函数里再跑完成泵就是嵌套泵（见 ftl_op.h）。
- * ⚠ 阶段 5 起 rr_select_plane 里的 l2p_cache_read 也不再同步加载：region 未命中时
+ * ⚠ rr_select_plane 里的 l2p_cache_read 不同步加载：region 未命中时
  *   它起异步加载并返回 FTL_AGAIN，rr_step 原地等下轮（`stall_rounds` 清零，
  *   加载在飞不算提交卡死）。本文件至此**零同步等待**。
  */
@@ -110,9 +114,10 @@ static ftl_status_t rr_submit_set_features(ftl_context_t *ftl, uint8_t mode)
 {
     fc_command_t *cmd;
 
-    if (ftl_async_set_features(&cmd, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, RR_FEATURE_READ_RETRY, mode) != FTL_OK)
+    const ftl_status_t st = ftl_async_set_features(&cmd, ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, RR_FEATURE_READ_RETRY, mode);
+    if (st != FTL_OK)
     {
-        return FTL_AGAIN; /* 命令池空 */
+        return st; /* FTL_AGAIN 命令池空 / FTL_ERROR 建链失败 */
     }
 
     /* waiting 先于提交置位、提交失败再回滚：反序（提交成功后才置位）在"完成早于置位"
@@ -140,9 +145,10 @@ static ftl_status_t rr_submit_read(ftl_context_t *ftl, nand_pba_t pba, const ftl
 {
     fc_command_t *cmd;
 
-    if (ftl_async_read_page(&cmd, pba, cfg) != FTL_OK)
+    const ftl_status_t st = ftl_async_read_page(&cmd, pba, cfg);
+    if (st != FTL_OK)
     {
-        return FTL_AGAIN;
+        return st;
     }
 
     ftl->rr.waiting = 1U;
@@ -203,7 +209,7 @@ static void rr_next_neighbor(ftl_context_t *ftl)
  *   实现要点：与原 ftl_recover_read_subop 的选页循环逐条一致——只看**第一个** plane
  *             匹配的 k（命中即 break，无论映射是否有效）。目标页取自 L2P 而非失败
  *             命令的 desc 链：读失败不改 L2P，二者同一。
- *   ⚠ 三态（阶段 5）：必须把"还不知道"（RR_PLANE_WAIT）与"未映射"（RR_PLANE_SKIP）分清——把前者当后者会让
+ *   ⚠ 三态：必须把"还不知道"（RR_PLANE_WAIT）与"未映射"（RR_PLANE_SKIP）分清——把前者当后者会让
  *     RR 直接判"本 plane 无需恢复"，host 读到的是零填而非真数据。函数可重入（每轮从
  *     头扫，先清 page/page_lba/first）。
  * -------------------------------------------------------------------- */
@@ -248,7 +254,7 @@ static rr_plane_step_t rr_select_plane(ftl_context_t *ftl)
  *   返回：无。
  *   实现要点：恢复读是**整页**读、从 CW0 起连续拷出（落 rr_page_scratch），而子操作
  *             可能只覆盖页内部分 CW ⇒ 必须按各 CW 的真实偏移（ftl_lba_cw）搬回，
- *             否则整段错位（与原实现逐条一致）。
+ *             否则整段错位。
  * -------------------------------------------------------------------- */
 static void rr_settle_plane(ftl_context_t *ftl)
 {
@@ -276,6 +282,8 @@ static void rr_settle_plane(ftl_context_t *ftl)
 
     if (ftl->rr.recovered == 0U)
     {
+        ftl->rr.all_ok = 0U; /* 任一 plane 失败 ⇒ 整个托管子操作按 IO_ERROR 结算 */
+
         /* Stage 1（读重试）+ Stage 2（邻居辅助）全失败 ⇒ 页面已损坏提升为块级不可靠，
          * 显式标记坏块（RR Stage 3 XOR/RAID 恢复属后续阶段，当前不做）。 */
         LOGE("[FTL] read unrecoverable lba=%lu gblock=%u retry=%u\r\n",
@@ -290,14 +298,15 @@ static void rr_settle_plane(ftl_context_t *ftl)
  * owners 必须在释放**之前**取走——组完成通知可能重入并复用本槽。 */
 static void rr_finish(ftl_context_t *ftl)
 {
-    const uint32_t owners = ftl->pending[ftl->rr.pending_idx].owners;
+    const uint32_t     owners = ftl->pending[ftl->rr.pending_idx].owners;
+    const ssd_status_t status =
+        (ftl->rr.all_ok != 0U) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
 
     pending_release_index(ftl, ftl->rr.pending_idx);
 
-    /* ⚠ 一律 IO_ERROR：沿用原实现语义——原代码在 if/else 之后**无条件**写 IO_ERROR，
-     *   覆盖了 recovered==0 分支的 OK，即"recovery 成功仍报错"。语义存疑、属既有缺陷；
-     *   本次只搬位置，未顺手改。 */
-    pending_group_complete_subop_multi(ftl, owners, SSD_STATUS_IO_ERROR);
+    /* all_ok 是**所有被覆盖 plane 的聚合**：任一 plane 不可恢复或提交侧 abort
+     * 都按 IO_ERROR 结算；全部恢复成功才报 OK（数据已由 rr_settle_plane 拷回）。 */
+    pending_group_complete_subop_multi(ftl, owners, status);
 
     ftl->rr.stage   = (uint8_t)RR_STAGE_IDLE;
     ftl->rr.waiting = 0U;
@@ -316,7 +325,29 @@ static void rr_abort(ftl_context_t *ftl)
         memset((uint8_t *)pending->buffer + ((size_t)k * FTL_IU_BYTES), 0, FTL_IU_BYTES);
     }
 
-    ftl->rr.stage = (uint8_t)RR_STAGE_FINISH;
+    ftl->rr.all_ok = 0U;
+    ftl->rr.stage  = (uint8_t)RR_STAGE_FINISH;
+}
+
+/* 提交结果处理：FTL_ERROR = 地址/建链硬失败 ⇒ 立即 abort；
+ * FTL_AGAIN = 背压 ⇒ stage 不变，下轮 rr_kick 重试。 */
+static void rr_submit_result(ftl_context_t *ftl, ftl_status_t st)
+{
+    if (st == FTL_ERROR)
+    {
+        rr_abort(ftl);
+    }
+}
+
+/* 邻居页号：neighbor 0 = 前一页、1 = 后一页，块内回绕。 */
+static uint32_t rr_neighbor_page(uint32_t page, uint8_t neighbor_i)
+{
+    if (neighbor_i == 0U)
+    {
+        return (page > 0U) ? (page - 1U) : (PAGES_PER_BLOCK - 1U);
+    }
+
+    return (page < (PAGES_PER_BLOCK - 1U)) ? (page + 1U) : 0U;
 }
 
 /* --------------------------------------------------------------------
@@ -342,6 +373,7 @@ static void rr_step(ftl_context_t *ftl)
                 }
                 ftl->rr.plane        = 0U;
                 ftl->rr.recovered    = 0U;
+                ftl->rr.all_ok       = 1U; /* 聚合结果：任一 plane 失败才清零 */
                 ftl->rr.stall_rounds = 0U; /* 新 job：卡死计数从头算（不复用上一 job 的） */
                 ftl->rr.stage        = (uint8_t)RR_STAGE_PLANE;
                 break;
@@ -360,7 +392,7 @@ static void rr_step(ftl_context_t *ftl)
 
                 if (sel == RR_PLANE_WAIT)
                 {
-                    /* L2P region 在加载（阶段 5）：原地等，**不计**提交卡死——
+                    /* L2P region 在加载：原地等，**不计**提交卡死——
                      * 加载在飞是有确定完成时刻的进展。rr_kick 每轮会 +1，这里清零。 */
                     ftl->rr.stall_rounds = 0U;
                     return;
@@ -379,24 +411,21 @@ static void rr_step(ftl_context_t *ftl)
             }
 
             case RR_STAGE_SF_SET:
-                (void)rr_submit_set_features(ftl, ftl->rr.attempt);
+                rr_submit_result(ftl, rr_submit_set_features(ftl, ftl->rr.attempt));
                 return;
 
             case RR_STAGE_READ:
-                (void)rr_submit_read(ftl, ftl->rr.page, FTL_PAGE_CFG_DATA(ftl->rr.page_lba));
+                rr_submit_result(ftl, rr_submit_read(ftl, ftl->rr.page, FTL_PAGE_CFG_DATA(ftl->rr.page_lba)));
                 return;
 
             case RR_STAGE_SF_RESTORE:
-                (void)rr_submit_set_features(ftl, RR_FEATURE_READ_RETRY_MODE);
+                rr_submit_result(ftl, rr_submit_set_features(ftl, RR_FEATURE_READ_RETRY_MODE));
                 return;
 
             case RR_STAGE_NB_READ:
             {
                 /* 邻居选择沿用原 rr_neighbor_assist（块内回绕）。 */
-                const uint32_t page     = pba_to_page(ftl->rr.page);
-                const uint32_t neighbor = (ftl->rr.neighbor_i == 0U)
-                                              ? ((page > 0U) ? (page - 1U) : (PAGES_PER_BLOCK - 1U))
-                                              : ((page < (PAGES_PER_BLOCK - 1U)) ? (page + 1U) : 0U);
+                const uint32_t neighbor = rr_neighbor_page(pba_to_page(ftl->rr.page), ftl->rr.neighbor_i);
 
                 /* 只换 page 字段：rr.page 的 ch/ce/lun/block/plane 原样保留
                  * （LUN 随 PBA 携带，不假设恒 0）。 */
@@ -405,12 +434,12 @@ static void rr_step(ftl_context_t *ftl)
                 /* 邻居页的 LBA **本就未知**（辅助读只要"这一页读得出来"这个事实）⇒
                  * FTL_PAGE_CFG_DATA_ANY 让命令 META = FC_META_UNKNOWN，跳过页内 META 比对。
                  * ⚠ 用 FTL_PAGE_CFG_DATA(0) 会把"LBA 就是 0"当事实下传 ⇒ 恒置 MATA_ERROR。 */
-                (void)rr_submit_read(ftl, ftl->rr.neighbor, FTL_PAGE_CFG_DATA_ANY());
+                rr_submit_result(ftl, rr_submit_read(ftl, ftl->rr.neighbor, FTL_PAGE_CFG_DATA_ANY()));
                 return;
             }
 
             case RR_STAGE_NB_RETRY:
-                (void)rr_submit_read(ftl, ftl->rr.page, FTL_PAGE_CFG_DATA(ftl->rr.page_lba));
+                rr_submit_result(ftl, rr_submit_read(ftl, ftl->rr.page, FTL_PAGE_CFG_DATA(ftl->rr.page_lba)));
                 return;
 
             case RR_STAGE_PLANE_END:
@@ -493,12 +522,14 @@ void rr_kick(ftl_context_t *ftl)
  *         completion —— FC 完成状态；ctx —— &ftl->rr。
  *   返回：无。
  *   实现要点：按 stage 判完成结果 → 改 stage → release 命令 → rr_step 续跑。
- *             ⚠ 成功判据逐条对齐原同步实现：SET_FEATURES 只认 NAND_FAIL；读认
+ *             ⚠ 成功判据：SET_FEATURES 只认 NAND_FAIL；读认
  *               FC_CW_STATUS_ERROR_MASK 全集（同 ftl_sync_read_page）。
  *             ⚠ 本函数**不得**同步等待（见 ftl_op.h）。
  * -------------------------------------------------------------------- */
 void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
+    ASSERT(completion != NULL);
+
     uint16_t      cmd_id = (uint16_t)completion->command_id;
     fc_command_t *cmd    = fc_command_id_to_command(cmd_id);
 
@@ -551,8 +582,8 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
             break;
 
         case RR_STAGE_SF_RESTORE:
-            /* 原实现只判提交/等待成败、**不**看 NAND_FAIL，且无论结果都返回 -1
-             * ⇒ 一律进下一 attempt（或 Stage 2）。 */
+            /* 模式恢复命令只管把读电压切回默认：不看 NAND_FAIL，一律进入下一
+             * attempt（或 Stage 2）。 */
             rr_next_attempt(ftl);
             break;
 
@@ -560,7 +591,7 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
             if ((completion->status & FC_CW_STATUS_ERROR_MASK) == 0U)
             {
                 /* 邻居读得出来 ⇒ 块本身没问题，可能是目标页局部 bit 错：再试目标页。
-                 * 邻居数据本身不用（原实现读进局部 neighbor_buf 后即弃）⇒ 拷进
+                 * 邻居数据本身不用 ⇒ 拷进
                  * rr_page_scratch 也无妨，它随后会被 NB_RETRY 的结果覆盖。 */
                 (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
                 rr->stage = (uint8_t)RR_STAGE_NB_RETRY;
@@ -635,7 +666,7 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
  *   功能：全表扫 CLOSED 块，找第一个需要慢死搬移的块（ECC 趋势恶化或 read disturb 高）。
  *   参数：alloc —— 分配器（blocks 恒非 NULL）；gblock —— 出参块号。
  *   返回：true 找到；false 未找到。
- *   实现要点：只针对 CLOSED 块（Open 还在写、Free 无数据、Bad/Reserved 已退役）；
+ *   实现要点：只针对 CLOSED 块（Open 还在写、Free 无数据、BAD/RETIRED 已出局）；
  *             命中条件 = health ≥ CRITICAL **或** read_count ≥ RR_READ_DISTURB_THRESHOLD
  *             （慢死第一信号）。调用者 mig_begin_predict 用 sb_id 反查 Closed 条目。
  * -------------------------------------------------------------------- */
@@ -656,11 +687,40 @@ bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
             continue;
         }
 
-        /* B5：ECC 趋势（连续上升 ≥RISING / 单次 ≥HIGH_WATER）或 read disturb
+        /* ECC 趋势（连续上升 ≥RISING / 单次 ≥HIGH_WATER）或 read disturb
          * 高水位（read_count 超阈值，慢死第一信号）都触发搬移。 */
         if ((b->rr.health >= RR_BLOCK_CRITICAL) ||
             (b->read_count >= RR_READ_DISTURB_THRESHOLD))
         {
+            /* 候选 SB 的另一个 plane 若已 BAD，migrate 读它必失败并 abort，
+             * 而巡检每轮仍返回同一块 ⇒ 预测路径永久卡死。跳过该 SB。 */
+            const uint16_t sb_id = ftl_block_sb_id(b);
+
+            if (sb_id >= alloc->closed_sb_count)
+            {
+                continue; /* 状态与闭链表不一致（不应发生）：不拿它冒险 */
+            }
+
+            const super_block_t *sb       = allocator_closed_at(alloc, sb_id);
+            bool                 bad_peer = false;
+
+            for (uint8_t p = 0U; p < PLANE_NUM; p++)
+            {
+                if (!super_block_has_plane(sb, p))
+                {
+                    continue;
+                }
+                if (ftl_block_is_bad(&alloc->blocks[ftl_gblock(p, sb->plane_blocks[p])]))
+                {
+                    bad_peer = true;
+                    break;
+                }
+            }
+            if (bad_peer)
+            {
+                continue;
+            }
+
             *gblock = i;
             return true;
         }
@@ -688,10 +748,7 @@ void rr_retire_block(ftl_block_t *b)
      * ⚠ **调用者负责先把该块驱逐出 Free Pool**（本函数只拿 ftl_block_t*，拿不到 gblock）——
      *   只置 RETIRED 挡不住分配：allocator_select_plane_block_from_pool 的判据是
      *   Free Pool **数组**（只跳过 is_bad），留在池里的退役块照样会被选中。
-     *   现由 migrate.c 的 MIG_ERASE RETIRE 分支调 allocator_remove_from_free 完成。
-     * ⚠ 原注释写「RESERVED = Spare Pool 语义」是**错的**（Spare 池的 push 从不碰 state）——
-     *   RESERVED 在代码里是「L2P 日志块」（metadata）与「退役块」（本函数）**两种身份共用**，
-     *   2026-10-17 拆成 LOG / RETIRED 两个态后该串味消失。 */
+     *   由 migrate.c 的 MIG_ERASE RETIRE 分支调 allocator_remove_from_free 完成。 */
     ftl_block_set_state(b, FTL_BLOCK_STATE_RETIRED);
     ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 

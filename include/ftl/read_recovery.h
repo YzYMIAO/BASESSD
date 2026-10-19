@@ -14,7 +14,7 @@
  *     读取目标页的上下邻居页，利用 NAND 单元间电压干扰
  *     的物理特性辅助纠错。适用于 ECC 略超纠错上限的场景。
  *
- *   Stage 3 — XOR/RAID 恢复（后续阶段，当前未实现）
+ *   Stage 3 — XOR/RAID 恢复（未实现）
  *     跨 Plane 的 Stripe RAID 数据恢复。
  *
  *   Stage 4 — 坏块标记 + 数据搬移
@@ -30,9 +30,9 @@
  *   ③ Read Retry 重试循环（通过 FC SET_FEATURES 切模式 + 重读）
  *   ④ 读失败后的恢复调度入口
  *
- * ⚠ 阶段 3 起恢复路径是**异步状态机**（ftl_read_recovery_t + rr_kick +
- *   ftl_op_read_recovery），不再是阻塞的 rr_recover_read。读失败的完成服务函数把
- *   pending 子操作托管给 job 就返回，恢复在 rr_kick / 完成服务函数里分步推进。
+ * ⚠ 恢复路径是**异步状态机**（ftl_read_recovery_t + rr_kick +
+ *   ftl_op_read_recovery）：读失败的完成服务函数把 pending 子操作托管给 job 就返回，
+ *   恢复在 rr_kick / 完成服务函数里分步推进，不在完成泵里嵌套同步等待。
  */
 
 #include "allocator.h"
@@ -55,32 +55,34 @@ typedef struct ftl_context ftl_context_t;
 #define RR_MAX_RETRY            (8U)  /* 最大 read retry 次数 */
 #define RR_NEIGHBOR_ATTEMPTS    (2U)  /* 邻近页辅助尝试次数 */
 
-/* B5：read disturb 慢死阈值——单块累计读次数超此值即视为慢死候选。
- * read_count 由 host 读 completion（ftl.c）与 GC/WL 搬移读（B4，gc.c/wear_leveling.c）
- * 共同累加；取 SLC MT29F4G08 读干扰容忍度量级（NAND 读寿命 ~10^5 次，保守取
- * 每块 1000 次触发搬移，远早于数据损坏）。 */
+/* read disturb 慢死阈值——单块自上次擦除以来的累计读次数超此值即视为慢死候选。
+ * read_count 由 host 读 completion（ftl.c）与 GC/WL 搬移读（migrate.c）共同累加；
+ * 取 SLC MT29F4G08 读干扰容忍度量级（NAND 读寿命 ~10^5 次，保守取每块 1000 次
+ * 触发搬移，远早于数据损坏）。擦除成功会把 read_count 清零（allocator_note_erase）。 */
 #define RR_READ_DISTURB_THRESHOLD (1000U)
 
-/* ── Read Retry ONFI Feature Address ── */
-#define RR_FEATURE_READ_RETRY      (0x89U) /* Micron/ONFI Read Retry */
+/* ── Read Retry ONFI Feature Address ──
+ * ⚠ 0x89 在 MT29F4G08 上是**保留地址**：SET_FEATURES 不产生实际效果，Stage 1
+ *   在本器件上自始空转（用户明确不处理）。保留该路径只为接口/状态机完整。 */
+#define RR_FEATURE_READ_RETRY      (0x89U) /* 本器件保留；见上 */
 #define RR_FEATURE_READ_RETRY_MODE (0x00U) /* Mode 0 = normal, 1-7 = retry modes */
 
 /* 预测性坏块状态 rr_block_health_t / ECC 历史 rr_ecc_track_t 已迁入 ftl/bst.h */
 
-/* ── Read Recovery 上下文（= 异步 job 状态机，阶段 3）──
+/* ── Read Recovery 上下文（= 异步 job 状态机）──
  *
- * ECC 追踪数组已并入 ftl_block_t.rr（Block State Table 单数据源）；本上下文原先只留
- * 重试计数，阶段 3 起承载**整台恢复状态机**（per-instance 单 job，放 ftl->rr）。
+ * ECC 追踪数组在 ftl_block_t.rr（Block State Table 单数据源）；本上下文承载
+ * **整台恢复状态机**（per-instance 单 job，放 ftl->rr）。
  *
- * 为什么是「托管」而不是「当场恢复」：原实现读失败的完成服务函数里直接跑完三级恢复
- * （每级都是 ftl_sync_submit_wait）⇒ 在完成泵里再开一个完成泵（嵌套泵），且整条 host
- * 读流水线被一个坏页钉住。改为：读失败时把 pending 子操作**托管**给本 job（保留 pending
- * 项、不递减组在飞数），job 按 stage 一次只提交一条命令，完成由 g_op_service
- * [FTL_OP_READ_RECOVERY] 推进。host 读组继续 pending，直到 job 收尾统一结算。
+ * 为什么是「托管」而不是「当场恢复」：当场恢复要在完成服务函数里同步等待每一级命令
+ * ⇒ 在完成泵里再开一个完成泵（嵌套泵），且整条 host 读流水线被一个坏页钉住。
+ * 改为：读失败时把 pending 子操作**托管**给本 job（保留 pending 项、不递减组在飞数），
+ * job 按 stage 一次只提交一条命令，完成由 g_op_service[FTL_OP_READ_RECOVERY] 推进；
+ * host 读组继续 pending，直到 job 收尾统一结算。
  */
 
 /* 状态机的 stage。约定：**stage 恒表示"当前该做/正在等的那一步"**——
- *   · 纯计算 stage（IDLE / PLANE / PLANE_END / FINISH / ABORT）只从 rr_step 进入，
+ *   · 纯计算 stage（IDLE / PLANE / PLANE_END / FINISH）只从 rr_step 进入，
  *     跑完立刻转下一个 stage（不提交命令）；
  *   · 提交 stage（SF_SET / READ / SF_RESTORE / NB_READ / NB_RETRY）由 rr_step 提交命令
  *     后**原地停留**，等完成服务函数改写 stage。
@@ -95,8 +97,7 @@ typedef enum
     RR_STAGE_NB_READ,    /* 在飞：Stage 2 读邻居页（只为"这页读得出来"这个事实） */
     RR_STAGE_NB_RETRY,   /* 在飞：Stage 2 邻居读成功后再试目标页 */
     RR_STAGE_PLANE_END,  /* 结算本 plane：拷回 buffer 或清零 + 标坏块（纯计算） */
-    RR_STAGE_FINISH,     /* 收尾：释放 pending 槽 + 组聚合（纯计算） */
-    RR_STAGE_ABORT       /* 提交侧长期无进展（命令池泄漏）⇒ 不标坏块，直接按失败收尾 */
+    RR_STAGE_FINISH      /* 收尾：释放 pending 槽 + 组聚合（纯计算） */
 } rr_stage_t;
 
 /*
@@ -129,6 +130,7 @@ typedef struct
     uint8_t    pending_idx;  /* 被托管的 pending 槽下标（收尾据此释放） */
     uint8_t    first;        /* 本 plane 首个被覆盖 CW 在子操作内的偏移（诊断用 LBA） */
     uint8_t    recovered;    /* 本 plane 是否恢复成功（PLANE_END 结算用） */
+    uint8_t    all_ok;       /* 1 = 本 job 覆盖的所有 plane 都恢复成功（收尾状态用） */
     uint16_t   stall_rounds; /* 连续提交不出去的轮数（见 RR_SUBMIT_STALL_MAX，> uint8_t 上限） */
     lba_t      page_lba;     /* 本 plane 目标页的**页** LBA（META 比对用） */
     nand_pba_t page;         /* 本 plane 目标页 PBA（NAND_PBA_INVALID = 本子操作不覆盖本 plane） */

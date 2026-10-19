@@ -155,9 +155,20 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
  * （如 ftl_cmd_read_data）才 release，这里释放即悬垂。 */
 static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
-    ftl_sync_waiter_t *waiter = (ftl_sync_waiter_t *)ctx;
-
     (void)ftl; /* 同步等待与实例无关（waiter 由调用者持栈） */
+
+    /* ctx == NULL = 超时路径已把旁表项摘掉，这是**迟到的完成**：waiter 的栈帧
+     * 早已失效，绝不能再解引用；但命令槽位仍必须回收，否则命令池泄漏。 */
+    if (ctx == NULL)
+    {
+        LOGE("[FTL] late sync completion cmd=%u status=0x%02x — released\r\n",
+             (unsigned)completion->command_id,
+             (unsigned)completion->status);
+        (void)fc_command_release(fc_command_id_to_command((uint16_t)completion->command_id));
+        return;
+    }
+
+    ftl_sync_waiter_t *waiter = (ftl_sync_waiter_t *)ctx;
 
     waiter->completion = *completion;
     waiter->done       = 1U;

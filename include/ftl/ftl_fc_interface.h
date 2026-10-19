@@ -11,15 +11,12 @@
  *   ④ pba_to_cmd() — nand_pba_t 直填 + 整段位图 + 建链（遍历路径 / 同步页原语）
  *      ⑩ ftl_cmd_pba() — FC 命令 → PBA（④ 的逆，供 FTL 模块回读自己下发的地址）
  *
- *   v23：①③ 共用同一套位图规则（不再"每 plane 连续 0..config.cw"）。config.cw 自此
- *   退出建链（仍被 FC 的 RAID stripe 读取，见 fc_command.h 的 config.cw 注释）。
- *   v27：位图是**字面位图**（bit 置 1 = 要访问该 CW，0 = 空集），v23~v26 的
- *   「0 = 本命令 plane 段内全部 CW」重载已取消。故 ③④ 两个「整段访问」入口各自
- *   显式算 fc_command_plane_span_cw_bitmap(cmd)；只有 ① 接受调用者给的部分位图
- *   （0 会被 ftl_cmd_resolve_cw_bitmap 的 ASSERT 拦下）。规则唯一定义在
- *   ftl_cmd_resolve_cw_bitmap()（static，见 ftl_fc_interface.c）。
- *   v28：位图**不再存于命令结构体**（`fc_command_t.param.cw_bitmap` 已删）——它是建链的
- *   输入而非命令的属性，改作 ① 的**形参**。③④ 算好后直接传参。
+ *   位图规则（①③ 共用，唯一定义在 ftl_cmd_validate_cw_bitmap）：
+ *     · cw_bitmap 是**字面位图**（bit 置 1 = 要访问该 CW；0 = 空集，无隐式展开）；
+ *     · ③④ 两个「整段访问」入口各自显式算 fc_command_plane_span_cw_bitmap(cmd)，
+ *       只有 ① 接受调用者给的部分位图（空集 / 越段会被校验函数拒绝）；
+ *     · 位图是建链的**输入**，不存进命令结构体（③④ 算好后直接传参）；
+ *     · config.cw 不参与建链（仍被 FC 的 RAID stripe 读取，见 fc_command.h）。
  *
  * 【数据搬运】
  *   ⑤ ftl_cmd_write_data() — 用户数据写入 desc 链各 CW 的 USER 区
@@ -35,7 +32,7 @@
  *      （共 18 份、逐字节相同，只差 crc/random/ldpc/lba 四个字段），
  *      此处收敛为 4 个公共函数 + ftl_page_cfg_t 配置结构。
  *
- * 【异步页级原语】（阶段 2 起）
+ * 【异步页级原语】（提交与完成解耦）
  *   ⑩ ftl_async_write_page / ftl_async_write_page_cw / ftl_async_erase_block /
  *      ftl_async_erase_block_multi_plane /
  *      ftl_async_read_page / ftl_async_set_features — 只建链 + 搬数据，**不提交**；
@@ -48,7 +45,7 @@
  * 【命令身份】
  *   ⑨ ftl_cmd_id() — 命令指针 → FC 命令池 ID（由指针派生，见 fc_command.h）。
  *
- * 为什么这些在本层（v13）：FC 定位为**硬件 FCC 的软件替身**——只提供槽位/描述符/
+ * 为什么这些在本层：FC 定位为**硬件 FCC 的软件替身**——只提供槽位/描述符/
  * 队列/数据路径，不含策略。而「访问哪些 CW」（掩码枚举）与「数据怎么搬」（拷贝）
  * 在行业里都是**固件侧**的事（硬件 FCC 既不提供「按掩码建链」寄存器，也不提供
  * 「数据拷贝」寄存器——描述符链是固件填的、数据是固件 DMA 填的），故落在本层。
@@ -139,16 +136,15 @@ static inline uint8_t ftl_plane_write_op(uint8_t nplanes)
 /*
  * ftl_cmd_configure_descriptors - 按形参 cw_bitmap 组装整条 desc 链
  *
- * cw_bitmap 是 flat 绝对编号（bit n = plane*CW_NUM + cw）；**字面位图**（v27）——
- * 置 1 的位就是本命令要访问的 CW，**0 = 空集**（不是"全部"）。v23~v26 的
- * 「0 = 本命令 plane 段内的全部 CW」重载已取消。置位的每个 CW 逐条调
+ * cw_bitmap 是 flat 绝对编号（bit n = plane*CW_NUM + cw）；**字面位图**——
+ * 置 1 的位就是本命令要访问的 CW，**0 = 空集**（不是"全部"）。置位的每个 CW 逐条调
  * fc_command_configure_descriptor()，故链序 = plane-major、plane 内 CW 递增。
  * 想只读离散 CW（例如 plane1 的 CW0/CW2）：传 (1U<<4)|(1U<<6)。
  * 想整段访问：传 fc_command_plane_span_cw_bitmap(cmd)
  *   —— 或者干脆用 pba_to_cmd()，它替你算。
  *
- * v28：位图是本函数的**形参**，不再是命令结构体的字段——它是"这次建链要建哪些 CW"
- * 的输入，用完即弃，没有留在命令里被回读的理由（读者只有本函数）。
+ * 位图是本函数的**形参**，不是命令结构体的字段——它是"这次建链要建哪些 CW"的
+ * 输入，用完即弃。
  *
  * 行地址：所有 plane 共用 cmd->paa 的行地址（同页语义）。**两 plane 不同块
  * （Policy B）请用 ftl_cmd_setup_ppa_pair_cw()**，本函数不适用。
@@ -190,7 +186,7 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
  * FTL 侧的地址**一律**是 PBA（L2P / Journal / BST / Metadata Directory 存的就是它）。
  * 只有在这里——建 FC 命令的最后一刻——才做 PBA → PAA 的字段重排：
  *   ch/ce/lun           → cmd->config 位域
- *   block/plane/page/cw → cmd->paa（v47：pba_to_paa 在 FTL 侧一次转出）
+ *   block/plane/page/cw → cmd->paa（pba_to_paa 在 FTL 侧一次转出）
  *
  * 本入口是同步页原语与遍历路径（GC / 元数据扫描 / Checkpoint）的公共底座，
  * 语义是「整段访问」（单一 PBA，隐含「两 plane 同 block」；Policy B 用 _pair_cw 入口）。
@@ -199,9 +195,9 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
  * 无数据操作（ERASE / RESET / META / COLUMN 等）由 ftl_cmd_configure_descriptors
  * 短路为 desc_id = INVALID。
  *
- * v27/v28：本入口把 fc_command_plane_span_cw_bitmap(cmd)（「本命令 plane 段内全部 CW」）
- *      算出来直接作实参交给建链入口——字面位图没有隐式展开，遍历路径（GC / 元数据 /
- *      checkpoint / sync 页原语）一律整段访问，故在这里一次算好，调用者不必管。
+ * 本入口把 fc_command_plane_span_cw_bitmap(cmd)（「本命令 plane 段内全部 CW」）算出来
+ * 直接作实参交给建链入口——字面位图没有隐式展开，遍历路径（GC / 元数据 / checkpoint /
+ * sync 页原语）一律整段访问，故在这里一次算好，调用者不必管。
  */
 static inline ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba)
 {
@@ -216,10 +212,10 @@ static inline ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba)
     cmd->config.ch  = pba_to_ch(pba);
     cmd->config.ce  = pba_to_ce(pba);
     cmd->config.lun = pba_to_lun(pba);
-    /* v47：PBA 在 FTL 侧就地转 PAA——FC 层只见 PAA，不再有 pba_to_paa 调用点。
+    /* PBA 在 FTL 侧就地转 PAA——FC 层只见 PAA，不再有 pba_to_paa 调用点。
      * ⚠ 必须在建链之前转（下面 fc_command_plane_span_cw_bitmap 读 cmd->paa）。 */
     cmd->paa        = pba_to_paa(pba);
-    /* v28：位图不再存进命令结构体，直接算出来当实参传。
+    /* 位图不存进命令结构体，直接算出来当实参传。
      * 须在 paa 写好之后算（fc_command_plane_span_cw_bitmap 读 paa 与 multi_plane）。 */
     return ftl_cmd_configure_descriptors(cmd, fc_command_plane_span_cw_bitmap(cmd));
 }
@@ -237,12 +233,12 @@ static inline nand_pba_t ftl_cmd_pba(const fc_command_t *cmd)
     return paa_to_pba((uint32_t)cmd->config.ch, (uint32_t)cmd->config.ce, cmd->paa);
 }
 
-/* ── 数据搬运（v13 由 FC 上移）── */
+/* ── 数据搬运 ── */
 
 /*
  * ftl_cmd_write_data - 把外部数据按 CW 顺序写入 desc 链上各 CW 的 USER 区
  *
- * v13 由 FC 上移：硬件 FCC 不提供「按 CW 拷贝」寄存器，数据由固件在 desc 链上逐 CW 填。
+ * 硬件 FCC 不提供「按 CW 拷贝」寄存器，数据由固件在 desc 链上逐 CW 填。
  * 遍历界走 desc 链（链长度是 CW 数的唯一真值）；数据耗尽后剩余 CW 的 USER 区填 0xFF
  * dummy（不把上一轮残值写进 NAND）。
  *
@@ -271,7 +267,7 @@ ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, u
 /*
  * ftl_cmd_read_data - 从 desc 链各 CW 的 USER 区按链序拷出到外部缓冲
  *
- * 与 ftl_cmd_write_data 对称（v13 由 FC 上移）；遍历界走 desc 链，数据够即停。
+ * 与 ftl_cmd_write_data 对称；遍历界走 desc 链，数据够即停。
  *
  * @param cmd     已完成的命令（desc_id 有效）
  * @param buffer  输出缓冲
@@ -348,7 +344,7 @@ typedef struct
  * META 填 FC_META_UNKNOWN ⇒ 跳过 FC 侧「页内 META 与本命令 LBA 比对」这一项，只保留
  * plane/cw 三位自洽校验（见 fc_data_path_meta_check）。
  * ⚠ 这类读**不要**用 FTL_PAGE_CFG_DATA(0) 代替：那是"本页 LBA 就是 0"，
- *   比对项会拿 0 去撞页内真实 META ⇒ 恒置 MATA_ERROR（旧实现因忽略错误位而看不出来）。 */
+ *   比对项会拿 0 去撞页内真实 META ⇒ 恒置 MATA_ERROR（若忽略错误位会看不出来）。 */
 #define FTL_PAGE_CFG_DATA_ANY() (&(const ftl_page_cfg_t){FC_CRC_ENABLE, FC_RANDOM_ENABLE, FC_ECC_MODE_BCH, (lba_t)FTL_LBA_UNKNOWN})
 
 /* 写页：OP_NORMAL_PROGRAM_PAGE。data/length 为空时只发命令不搬数据。 */
@@ -380,7 +376,7 @@ ftl_status_t ftl_sync_erase_block(nand_pba_t pba);
  * 普通块擦除仍走单 plane 版本。PBA 的 plane 字段被忽略。 */
 ftl_status_t ftl_sync_erase_block_multi_plane(nand_pba_t pba);
 
-/* ── 异步页级原语（阶段 2 起：提交与完成解耦）──
+/* ── 异步页级原语（提交与完成解耦）──
  *
  * 与上面 ftl_sync_* 同一 prepare 模板（同样的建链规则、同样的配置、同样的搬数据），
  * 差别只有最后一步：**不提交**，把已建链、已装好数据的命令交回调用者。

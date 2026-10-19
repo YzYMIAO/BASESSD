@@ -3148,7 +3148,7 @@ NAND 读会失败：retention、read disturb、编程干扰都表现为 ECC 纠�
 
 | 结构 | 字段 | 说明 |
 |---|---|---|
-| `ftl_read_recovery_t` | `stage` / `waiting` / `plane` / `attempt` / `neighbor_i` / `pending_idx` / `page` / `neighbor` / `recovered` / `stall_rounds` | 单 job |
+| `ftl_read_recovery_t` | `stage` / `waiting` / `plane` / `attempt` / `neighbor_i` / `pending_idx` / `page` / `neighbor` / `recovered` / `all_ok` / `stall_rounds` | 单 job |
 | `rr_ecc_track_t`（BST） | `last_ecc` / `rising_count` / `health` | 每块 |
 | `rr_block_health_t` | HEALTHY / WARNING / CRITICAL / DYING | 只升不降 |
 
@@ -3174,7 +3174,6 @@ flowchart TD
     NBRETRY["NB_RETRY"]
     PLANEEND["PLANE_END"]
     FINISH["FINISH"]
-    ABORT["ABORT"]
     IDLE -- "领走托管的 pending 项" --> PLANE
     PLANE -- "找到本 plane 目标页" --> SFSET
     PLANE -- "本子操作不覆盖本 plane" --> PLANE
@@ -3189,8 +3188,7 @@ flowchart TD
     NBRETRY -- "目标页成功或失败" --> PLANEEND
     PLANEEND -- "plane 加一" --> PLANE
     PLANEEND -- "plane 等于 PLANE_NUM" --> FINISH
-    PLANE -- "提交侧长期无进展" --> ABORT
-    ABORT --> FINISH
+    PLANE -- "提交侧长期无进展（清零缓冲）" --> FINISH
 ```
 
 #### 3.14.5 关键流程
@@ -3822,7 +3820,7 @@ flowchart TB
 | **md job** | IDLE → RECLAIM → IDLE；IDLE → CP_READ ⇄ CP_WRITE → ANCHOR_* → CP_RECLAIM → DONE | 回收目标 / 压缩请求 | `metadata_dir_kick` / `ftl_op_metadata` |
 | **块** | NONE / FREE / OPEN / CLOSED / LOG / RETIRED / BAD | 分配 / 写满 / 搬移 / 标坏 | allocator / migrate / bbt |
 | **mig job** | IDLE → READ → READ_SETTLE → WRITE → WRITE_SETTLE → FLUSH_JRN → ERASE → DONE | 页/plane 推进 | `mig_service` / `ftl_op_migrate` |
-| **RR job** | IDLE → PLANE → SF_SET → READ → … → FINISH / ABORT | 读结果 / 重试耗尽 | `rr_kick` / `ftl_op_read_recovery` |
+| **RR job** | IDLE → PLANE → SF_SET → READ → … → FINISH | 读结果 / 重试耗尽 / 提交卡死 | `rr_kick` / `ftl_op_read_recovery` |
 | **后台档位** | IDLE / NORMAL / BUSY | `pending + groups` | `ftl_bg_level_select` |
 
 **状态机的统一约定**：
