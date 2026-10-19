@@ -35,7 +35,7 @@ struct ftl_context;
  *
  * CP 是严格有序的流水线（掉电安全契约，见 .c 头注释）；顺序由本状态机的 phase
  * 承载：每一步提交命令后即返回，完成由 g_op_callbacks[FTL_OP_CHECKPOINT]
- * （ftl_checkpoint_callback）按 phase 收尾，下一轮 checkpoint_kick 续跑。
+ * （ftl_checkpoint_callback）按 phase 收尾，下一轮 checkpoint_handle 续跑。
  *
  * ⚠ **掉电安全契约不变**：先 flush region → 再 flush Anchor → 最后写 Header。
  *   Header 是"承诺书"——它一旦落盘，boot 就信 region_bitmap 里置位的 region 在
@@ -46,12 +46,12 @@ struct ftl_context;
  *   journal 里留下 > 快照水位的新条目——水位取早 ⇒ 它们一定被回放，不会丢。
  *
  * 完成服务函数 `ftl_checkpoint_callback` 声明在 ftl/ftl_op.h（与其余 op 服务函数同处）；
- * 它按 phase 记结果并推进，**不**调用 checkpoint_kick（CP 阶段含同步原语，见 .c）。
+ * 它按 phase 记结果并推进，**不**调用 checkpoint_handle（CP 阶段含同步原语，见 .c）。
  */
 
-/* 连续提交不出去的轮数上限（提交侧背压兜底；与 MIG/RR_SUBMIT_STALL_MAX 同族）。
- * 只在「有脏行却起不动」时累计——等 FLUSHING 完成算有进展，不计数。 */
-#define CP_SUBMIT_STALL_MAX (256U)
+/* 提交 deadline：连续提交不出去超过 `FTL_SUBMIT_TIMEOUT_MS` 即中止本次 CP。
+ * 只在「有脏行却起不动」时计时——等 FLUSHING 完成算有进展，清零。
+ * 时钟缺失（now_ms == 0）时 deadline 不生效；本板 time_us 恒非空 ⇒ 不可达。 */
 
 /* job 心跳节拍见 ftl_job.h 的 FTL_JOB_LOG_INTERVAL_MS（各 feature 统一，不再各自定义）。 */
 
@@ -82,14 +82,42 @@ typedef enum
     CP_FLUSH_DONE    = 1,  /* 全部 region 已持久：推进 phase */
 } cp_flush_step_t;
 
+/* ── Checkpoint 池游标/序号（per-instance，归 handle）──
+ *
+ * 开机由 checkpoint_find_latest 恢复。不能做成 file-scope static：多实例会共享同一份
+ * 游标/序号，各自往同一个池槽写、sequence 互相踩。
+ *
+ * ⚠ 与 journal / Anchor / BBT 的 sequence **互不相干**：本池自己的单调序号。 */
 typedef struct
 {
-    uint8_t  active;       /* 1 = job 在跑（单飞行：ftl_service 每轮推进它） */
-    uint8_t  phase;        /* cp_phase_t */
-    uint8_t  waiting;      /* 1 = 有一条本 job 的命令在飞（等完成服务函数） */
-    uint8_t  failed;       /* 1 = 前置步骤失败 ⇒ 中止（不写 Header / 不截断） */
-    uint8_t  fail_phase;   /* 中止发生在哪个 phase（观测；cp_abort 记录） */
-    uint16_t stall_rounds; /* 连续提交不出去的轮数（见 CP_SUBMIT_STALL_MAX） */
+    uint32_t sequence;              /* 本池自己的单调序号（最新有效 record） */
+    uint32_t last_journal_sequence; /* 上一次成功 CP 的 journal 水位（T3/空转判据） */
+    uint16_t write_idx;             /* 池内下一个待写槽（环形） */
+    uint8_t  cursor_valid;          /* 游标是否已建立；未建立则首次写入先扫池定位 */
+    uint8_t  advance_next;          /* 1 = 本 session 首次 CP 先跳过一槽（避开掉电残留的半编程槽） */
+} l2p_cp_state_t;
+
+/* ── 端口（装配层绑定；docs §4.6）── */
+typedef struct
+{
+    l2p_cache_t          *cache;
+    l2p_journal_t        *journal;
+    metadata_dir_cache_t *metadata_dir;
+    ftl_allocator_t      *alloc;
+    const uint32_t       *total_writes;
+    ftl_topology_t        topo;
+} checkpoint_port_t;
+
+typedef struct
+{
+    uint8_t  active;        /* 1 = job 在跑（单飞行：ftl_service 每轮推进它） */
+    uint8_t  phase;         /* cp_phase_t */
+    uint8_t  waiting;       /* 1 = 有一条本 job 的命令在飞（等完成服务函数） */
+    uint8_t  failed;        /* 1 = 前置步骤失败 ⇒ 中止（不写 Header / 不截断） */
+    uint8_t  fail_phase;    /* 中止发生在哪个 phase（观测；cp_abort 记录） */
+    uint32_t stall_ms;      /* 本轮连续「提交不出去」的起点（0 = 未计时） */
+    uint8_t  timed_out;     /* 1 = 本次 job 因 deadline 中止 */
+    uint8_t  timeout_phase; /* 超时发生的 phase */
 
     /* ① job 起点快照（**必须先于任何 flush**：flush 成功会清 region 脏位）
      * **本 die 的局部 2048-bit 位图**：由共享 cache 的全局脏位图按 owner 过滤、
@@ -111,7 +139,7 @@ typedef struct
     metadata_ring_t hdr_ring;
     nand_pba_t      hdr_addr;
     uint16_t        hdr_idx;                                  /* 写这条 Header 用的池内槽位 */
-    uint32_t        hdr_seq;                                  /* ++ftl->cp.sequence（槽位确定后取） */
+    uint32_t        hdr_seq;                                  /* ++h->cp_state.sequence（槽位确定后取） */
     uint8_t         hdr_need_erase;                           /* 1 = 写之前先擦 *hdr_addr 所在块 */
     uint8_t         block_page;                               /* 下一页要写的 块元数据页（0..CP_BLOCK_PAGES） */
     uint8_t         wear_page;                                /* 下一页要写的 磨损页（0..FTL_CHECKPOINT_WEAR_PAGES） */
@@ -124,6 +152,11 @@ typedef struct
     nand_pba_t trunc_addr; /* 待预擦块基地址（plan 回传） */
     uint8_t    trunc_next; /* 待预擦的环形块号（plan 回传） */
 
+    /* 端口 + 池游标（装配层绑定 / 开机恢复；跨 job 保留，不能随 memset 清） */
+    checkpoint_port_t port;
+    l2p_cp_state_t    cp_state;
+    uint32_t          last_ms; /* 上次触发的 ms 时基（T3） */
+
     /* 心跳 */
     uint32_t start_ms; /* job 起点（观测用） */
     uint32_t log_ms;   /* 上次心跳时刻 */
@@ -135,22 +168,6 @@ _Static_assert(sizeof(((checkpoint_handle_t *)0)->region_bitmap) == (L2P_LOCAL_D
                "checkpoint_handle_t.region_bitmap 必须是本 die 的局部 2048-bit 位图");
 _Static_assert(sizeof(((checkpoint_handle_t *)0)->block_words) == (FTL_BLOCK_TOTAL * sizeof(uint16_t)),
                "checkpoint_handle_t.block_words 必须恰好覆盖全部块");
-
-/* ── Checkpoint 池游标/序号（per-instance）──
- *
- * 放在 ftl_context_t 里 ⇒ 每个 (ch,ce,lun) 一份；开机由
- * checkpoint_find_latest 恢复。不能做成 file-scope static：多实例会共享同一份
- * 游标/序号，各自往同一个池槽写、sequence 互相踩。
- *
- * ⚠ 与 journal / Anchor / BBT 的 sequence **互不相干**：本池自己的单调序号。 */
-typedef struct
-{
-    uint32_t sequence;              /* 本池自己的单调序号（最新有效 record） */
-    uint32_t last_journal_sequence; /* 上一次成功 CP 的 journal 水位（T3/空转判据） */
-    uint16_t write_idx;             /* 池内下一个待写槽（环形） */
-    uint8_t  cursor_valid;          /* 游标是否已建立；未建立则首次写入先扫池定位 */
-    uint8_t  advance_next;          /* 1 = 本 session 首次 CP 先跳过一槽（避开掉电残留的半编程槽） */
-} l2p_cp_state_t;
 
 /* ── Checkpoint 池位置与块数（CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS）
  *    见 ftl/metadata.h「固定元数据区布局」── */
@@ -279,36 +296,71 @@ _Static_assert(sizeof(((l2p_checkpoint_header_t *)0)->region_bitmap) == (L2P_LOC
 
 /* ── 接口 ── */
 
-/*
- * checkpoint_begin - 启动一次全量 Checkpoint（异步 job，提交即返回）
- *
- * ① 快照 region 脏标记 + journal 水位 → ② flush 脏 region 到 NAND L2P 日志块
- * → ③ flush Metadata Directory（Anchor）→ ④ 追加写 Header（池内下一槽）
- * → ⑤ 截断 Journal → ⑥ 复位水位标志
- *
- * ⚠ 顺序不可换：③ 必须早于 ④。若 Header 先于 Anchor，两者之间掉电会留下
- *   「header 新 / Directory 旧」⇒ 已声称落盘的 region 在 Directory 里找不到 ⇒ 丢更新。
- *   现序掉电在 ④ 之前 ⇒ 本次 CP 未记录，boot 用上一个 CP 并回放 journal（⑤ 还没跑）⇒ 一致。
- *
- * ⚠ 本函数**只装配 job 并推进第一步**，不等任何 NAND 命令。此后由每轮 ftl_service
- *   调 checkpoint_kick 续跑，各阶段的完成由 g_op_callbacks[FTL_OP_CHECKPOINT] 收尾。
- *   调用者**不能**据返回值判断 CP 成败。
- *
- * ⚠ 单飞行：已在跑（`ftl->checkpoint_handle->active`）⇒ 返回 FTL_AGAIN，不重入。
- *
- * @param ftl  FTL 上下文
- * @return FTL_OK 已启动 / FTL_AGAIN job 忙 / FTL_ERROR 参数非法
- */
-ftl_status_t checkpoint_begin(struct ftl_context *ftl);
+/* 触发原因（观测 / 策略分流；行为上统一走同一状态机） */
+typedef enum
+{
+    CHECKPOINT_REASON_ADVANCE = 0, /* 只推进在飞 job，不评估启动（must-run 表首） */
+    CHECKPOINT_REASON_WATERMARK,   /* Journal 水位 */
+    CHECKPOINT_REASON_WRITES,      /* 写入量 */
+    CHECKPOINT_REASON_TIMER,       /* 定时 */
+    CHECKPOINT_REASON_EMERGENCY,   /* 紧急水位（只认 trigger->emergency） */
+    CHECKPOINT_REASON_EXPLICIT,    /* force */
+} checkpoint_reason_t;
 
 /*
- * checkpoint_kick - 推进 Checkpoint job（每轮 ftl_service 调一次，任何档位都要调）
+ * checkpoint_trigger_t — FTL 每轮汇总的触发信息（docs §4.6）
  *
- * job 未在跑 ⇒ 空操作。已在跑 ⇒ 从当前 phase 续跑（有命令在飞时只做心跳）。
- *
- * @param ftl  FTL 上下文
+ * 只传**每轮会变**的动态量；编译期常量 / 策略表由本模块自己持有。
  */
-void checkpoint_kick(struct ftl_context *ftl);
+typedef struct
+{
+    uint32_t now_ms;
+    uint32_t total_writes;
+    uint32_t journal_seq;
+    uint8_t  journal_watermark; /* 0..100 */
+    bool     emergency;         /* Journal ≥ 95% */
+    bool     force;             /* 显式请求（开机/诊断） */
+    uint8_t  reason;            /* checkpoint_reason_t（force 时优先用） */
+} checkpoint_trigger_t;
+
+typedef struct
+{
+    ftl_module_status_t base;
+
+    uint8_t  phase; /* cp_phase_t（观测；外部不要据此驱动） */
+    bool     active;
+    uint32_t journal_seq;    /* 本次 job 起点的 journal 水位 */
+    uint8_t  anchor_pages;   /* 已写 Anchor 页数 */
+    bool     header_written; /* Header（commit 页）已写 */
+    bool     truncated;      /* 本次已做 journal 截断 */
+    uint8_t  fail_phase;     /* 中止发生的 phase */
+    bool     timed_out;
+    uint8_t  timeout_phase;
+} checkpoint_status_t;
+
+/*
+ * checkpoint_handle - 推进 Checkpoint（typed handle；提交即返回）
+ *
+ * 未在跑时按 trigger 判定是否启动：emergency / force / T1 水位 / T2 写入量 / T3 定时
+ * （T3 带 CP_T3_MIN_JOURNAL_DELTA 门）。已在跑则续跑下一步（任何档位都要调）。
+ *
+ * @param h       handle；**前置条件**，非法即 ASSERT
+ * @param trigger 本轮触发信息（**非空**）
+ * @param out    出参：本轮结束后的上报（**非空**）
+ */
+void checkpoint_handle(checkpoint_handle_t *h, const checkpoint_trigger_t *trigger, checkpoint_status_t *out);
+
+/* checkpoint_is_active - 是否有 CP job 在跑（查询；外部不要读 h->active）。 */
+bool checkpoint_is_active(const checkpoint_handle_t *h);
+
+/* checkpoint_reset_timer - 复位 T3 定时基准（boot 恢复 / 格式化后调用）。 */
+void checkpoint_reset_timer(checkpoint_handle_t *h);
+
+/* checkpoint_block_words - 块元数据快照缓冲（F2/恢复的端口；FTL_BLOCK_TOTAL 个 word）。
+ * 返回的是 handle 内部常驻缓冲，调用者只读/按恢复流程填充。 */
+uint16_t *checkpoint_block_words(checkpoint_handle_t *h);
+
+/* cp_begin / cp_kick / checkpoint_handle 是本模块内部状态机入口（不对外）。 */
 
 /*
  * checkpoint_find_latest - 扫描 Checkpoint 池找最新有效 Header
@@ -316,12 +368,12 @@ void checkpoint_kick(struct ftl_context *ftl);
  * 池内轮转扫描（metadata_ring_locate）：magic 正确且 sequence 最大者胜。
  * 命中时同时恢复本实例的 sequence 计数与写游标（后续 Checkpoint job 从下一槽续写）。
  *
- * @param ftl            FTL 上下文（池路由取 ftl->topo；游标/序号写回 ftl->cp）
+ * @param h              Checkpoint handle（池路由取 h->port.topo；游标/序号写回 h->cp_state）
  * @param cp             输出：找到的 Header
  * @param out_record_idx 输出：该 Header 在池内的槽位（可为 NULL；块元数据快照 加载要用）
  * @return FTL_OK 找到；FTL_ERROR 无有效 Checkpoint / 重读失败 / 校验不符
  */
-ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_header_t *cp, uint16_t *out_record_idx);
+ftl_status_t checkpoint_find_latest(checkpoint_handle_t *h, l2p_checkpoint_header_t *cp, uint16_t *out_record_idx);
 
 /*
  * checkpoint_probe_media_status - 开机格式化判据：区分“空片 / 版本不符 / 读失败”
@@ -345,7 +397,7 @@ typedef enum
     CP_MEDIA_IO_ERROR,         /* 有介质内容但 CP 读不通 / 头损坏 */
 } cp_media_status_t;
 
-cp_media_status_t checkpoint_probe_media_status(struct ftl_context *ftl, uint32_t *out_layout_version);
+cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t *out_layout_version);
 
 /*
  * checkpoint_load_block_table - 读取并校验一条 Checkpoint 记录的 块元数据快照
@@ -360,7 +412,7 @@ cp_media_status_t checkpoint_probe_media_status(struct ftl_context *ftl, uint32_
  * @param block_words  输出：FTL_BLOCK_TOTAL 个 16-bit word
  * @return true = 已加载且 CRC 通过；false = 无快照 / 损坏
  */
-bool checkpoint_load_block_table(struct ftl_context            *ftl,
+bool checkpoint_load_block_table(checkpoint_handle_t           *h,
                                  const l2p_checkpoint_header_t *cp,
                                  uint16_t                       record_idx,
                                  uint16_t                       block_words[FTL_BLOCK_TOTAL]);
@@ -379,7 +431,7 @@ bool checkpoint_load_block_table(struct ftl_context            *ftl,
  * @param record_idx 该 Header 的池内槽位
  * @return true = 已加载并回填；false = 无快照 / 损坏
  */
-bool checkpoint_load_wear_table(struct ftl_context            *ftl,
+bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
                                 const l2p_checkpoint_header_t *cp,
                                 uint16_t                       record_idx);
 
@@ -394,36 +446,5 @@ bool checkpoint_load_wear_table(struct ftl_context            *ftl,
  * @return FTL_OK / FTL_ERROR
  */
 ftl_status_t checkpoint_write_initial(ftl_topology_t topo);
-
-/*
- * checkpoint_check_trigger - 检查 Checkpoint 触发条件
- *
- * 三级触发：
- *   T1: Journal 水位线（≥85% → checkpoint_needed flag）
- *   T2: 写入量（total_writes % CP_WRITE_INTERVAL == 0）
- *   T3: 定时（timer elapsed ≥ CP_TIME_INTERVAL_MS，仅 IDLE/NORMAL）
- *
- * @param ftl         FTL 上下文
- * @param elapsed_ms  距上次 Checkpoint 的 ms 数
- * @return true 需要触发，false 不需要
- */
-bool checkpoint_check_trigger(const struct ftl_context *ftl, uint32_t elapsed_ms);
-
-/*
- * checkpoint_is_emergency - 紧急水位判断
- *
- * Journal 使用率 ≥ 95% 时，BUSY 模式也强制执行。
- *
- * @param ftl  FTL 上下文
- * @return true 紧急
- */
-bool checkpoint_is_emergency(const struct ftl_context *ftl);
-
-/*
- * checkpoint_journal_watermark - 计算 Journal 水位并设标志
- *
- * @param journal  Journal 上下文
- */
-void checkpoint_journal_watermark(l2p_journal_t *journal);
 
 #endif /* FTL_CHECKPOINT_H */

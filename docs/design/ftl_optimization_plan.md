@@ -209,7 +209,7 @@
 > 判据见下（原判据照用）；**依赖「P0-2 先上板验证」**仍然成立，见「依赖」条。
 >
 > ⚠ **v0.75 阶段 8 追记**：同步版 `metadata_dir_compact` 与 `dir->compacting` 已删，改由
-> `metadata_handle_t` 状态机承载（`metadata_dir_kick` + `ftl_metadata_callback`）。**victim 判据、触发点、
+> `metadata_handle_t` 状态机承载（`metadata_handle` + `ftl_metadata_callback`）。**victim 判据、触发点、
 > ①②③④⑤ 顺序全不变**；两处实现差异：① 压缩不再就地阻塞服务循环，改为逐 region 提交异步
 > 读写；② `metadata_dir_commit_region` 不再就地擦块（v0.75 登记单槽 `reclaim_target`；
 > v0.80 起改为 `reclaim_pending` 位图 + 全异步擦除），
@@ -263,7 +263,7 @@
   新增 `gc_check_triggers()` 返回位掩码（`GC_TRIGGER_*`）；观测口 `[GC] trig=0x%02x free=… op=… writes=…`。
   ⚠ **v0.63 订正**：当时的 `gc_check_trigger()` 布尔薄封装**零调用者，已删**；原五路触发里
   T2（写入量整除 1024）/T3（500ms 定时）**参考层零出处且求值点不可达，已删** ⇒ 现存 **T1/T4/T5 三条**，
-  求值点统一到 `ftl_gc_evaluate`（IDLE + NORMAL）。
+  求值点统一到 `mig_gc_evaluate`（IDLE + NORMAL）。
 - 复用 `gc_table_extremes()`（P1-1 的 `gc_score_scale` 扩成同时出 min/max 擦除）⇒ T5 不额外扫全表。
 - **T6 废弃**：指标方向与"碎片率"标签相反、自激、与 T1/T4 语义重复；行业对高占用率的杠杆是 OP + GC 限速。
   论证见 `ftl_design.md` §3.13 表下注。
@@ -501,13 +501,13 @@
 | — | SPDK FTL 式 P2L 重建 | Journal/Checkpoint vs 每 band 尾存 P2L | 替换整层持久化的大改 | v0.50 登记 |
 | — | **介质布局版本 + 开机自动格式化**（2026-10-13，v0.61） | ✅ **已落地**：`FTL_MEDIA_LAYOUT_VERSION` 写进 Checkpoint 头 + Anchor 页；版本不符/无记录 ⇒ `ftl_media_format` 自动全片擦（**保留出厂坏块标记**）+ 写当前版本标记。此前每次改介质格式都得手动 `bbt --erase` | `ftl_revision_history.md v0.61` |
 | — | **元数据校验和下沉到下层 FC**（2026-10-13，v0.62） | ✅ **已落地**：删 FTL 记录内 CRC（Checkpoint/Anchor/BBT/Wear 四结构体字段 + 算/校验点）+ `FTL_PAGE_CFG_META` 由 `FC_CRC_DISABLE` 翻 `FC_CRC_ENABLE`。判据 = **DRAM-less 主流**（dhara：checksum 归 NAND 层、FTL 只留结构判据）；SPDK 自加 CRC32C 属 DRAM 型分岔，不适用本仓 | `ftl_revision_history.md v0.62` |
-| — | **GC 触发对齐 DRAM-less 主流**（2026-10-13，v0.63） | ✅ **已落地**：删 T2（写入量整除 1024）/T3（500ms 定时）——参考层**零出处**且求值点（只在 `ftl_service_normal`）不可达 ⇒ 触发收敛为**空间压力 + 磨损**（T1/T4/T5）；求值点统一到 `ftl_gc_evaluate`（IDLE+NORMAL 共用，BUSY 让路）；顺带修 IDLE 补池循环 `target -= 2U` 的 **uint32 下溢**（deficit 为奇数 ⇒ 回绕 0xFFFFFFFF ⇒ 把 closed 链全搬全擦） | `ftl_revision_history.md v0.63`；SPDK `spdk_ftl.html:180` |
+| — | **GC 触发对齐 DRAM-less 主流**（2026-10-13，v0.63） | ✅ **已落地**：删 T2（写入量整除 1024）/T3（500ms 定时）——参考层**零出处**且求值点（只在 `ftl_service_normal`）不可达 ⇒ 触发收敛为**空间压力 + 磨损**（T1/T4/T5）；求值点统一到 `mig_gc_evaluate`（IDLE+NORMAL 共用，BUSY 让路）；顺带修 IDLE 补池循环 `target -= 2U` 的 **uint32 下溢**（deficit 为奇数 ⇒ 回绕 0xFFFFFFFF ⇒ 把 closed 链全搬全擦） | `ftl_revision_history.md v0.63`；SPDK `spdk_ftl.html:180` |
 
 ### 8.2 有效性 / 算法缺口
 
 | 编号 | 项 | 现状 | 为何未排期 |
 |---|---|---|---|
-| P0-3 | L2P 日志块压缩（抗碎片） | ✅ **已落地（v0.65，未上板）**：`metadata_dir_compact` 给「多活」日志块一条出路（`metadata_dir_reclaim` 只回收活计数 0 的块 ⇒ 冷 region 块永久占块，最坏吃近半个 die）。<br>⚠ **v0.75 阶段 8 重写为异步**：同步版 `metadata_dir_compact` 已删，改由 `metadata_handle_t` 状态机（`metadata_dir_kick` + `ftl_metadata_callback`）承载；**算法与触发点不变**，只是不再阻塞服务循环、且不再在完成泵内擦块 | `ftl_revision_history.md v0.65 / v0.75 阶段 8` |
+| P0-3 | L2P 日志块压缩（抗碎片） | ✅ **已落地（v0.65，未上板）**：`metadata_dir_compact` 给「多活」日志块一条出路（`metadata_dir_reclaim` 只回收活计数 0 的块 ⇒ 冷 region 块永久占块，最坏吃近半个 die）。<br>⚠ **v0.75 阶段 8 重写为异步**：同步版 `metadata_dir_compact` 已删，改由 `metadata_handle_t` 状态机（`metadata_handle` + `ftl_metadata_callback`）承载；**算法与触发点不变**，只是不再阻塞服务循环、且不再在完成泵内擦块 | `ftl_revision_history.md v0.65 / v0.75 阶段 8` |
 | — | **Anchor 页 CRC 覆盖面缺陷**（`c5cb8a0` 引入，v0.61 修，v0.62 字段整体删除） | ✅ **已消解**：v0.61 修覆盖面（原 `ANCHOR_PAGE_CRC_LEN = sizeof - 4`（2044）把 `crc` 字段自己算进去 ⇒ `anchor_page_valid` **恒 0** ⇒ `metadata_dir_load` 永远失败 ⇒ **L2P 映射跨重启全丢**；改 `offsetof(..., crc)`=1812）；v0.62 起 Anchor 页**不再有 `crc` 字段**，完整性由下层 FC per-CW CRC + ECC 承担 ⇒ 该缺陷从根上不存在 | `ftl_revision_history.md v0.61/v0.62` |
 | — | `rr` 持久化 | ✅ **已落地（v0.65，未上板）**：`last_ecc`/`rising_count`/`health` 并入 Wear 条目（8B→12B，布局版本 2→3）；`health` 回放时范围钳制 | `ftl_revision_history.md v0.65` |
 | — | GC Bitmap（Layer 2） | 设计有、代码无。**正确性窗口已由 v0.43「擦除前 flush」闭合**；Layer 2 只是掉电后**断点续搬**的性能优化 | 缺口，未排（非正确性） |
@@ -665,7 +665,7 @@
 
 | 序 | 项 | 依赖 | 结果 |
 |---|---|---|---|
-| 7 | ~~**P0-3 L2P 日志块压缩**~~（**长时压测前必须**） | P0-2 上板 | ✅ `metadata_dir_compact`：victim = `l2p_live` 最小非当前块，搬活 region 后 **Anchor 先落盘、再擦**；触发点在「刚换新日志块 + Free Pool 低水位」；`dir->compacting` 防重入 + 抑制逐次立即回收。<br>⚠ v0.75 阶段 8：同步版删除，改 `metadata_handle_t` + `metadata_dir_kick` + `ftl_metadata_callback`（算法 / 触发点 / ③④ 顺序契约全不变） |
+| 7 | ~~**P0-3 L2P 日志块压缩**~~（**长时压测前必须**） | P0-2 上板 | ✅ `metadata_dir_compact`：victim = `l2p_live` 最小非当前块，搬活 region 后 **Anchor 先落盘、再擦**；触发点在「刚换新日志块 + Free Pool 低水位」；`dir->compacting` 防重入 + 抑制逐次立即回收。<br>⚠ v0.75 阶段 8：同步版删除，改 `metadata_handle_t` + `metadata_handle` + `ftl_metadata_callback`（算法 / 触发点 / ③④ 顺序契约全不变） |
 | 8 | ~~**rr 持久化**~~（慢死预测跨重启归零） | P0-1 | ✅ 三字段（`last_ecc`/`rising_count`/`health`）并入 Wear 条目（8B→12B）⇒ `FTL_MEDIA_LAYOUT_VERSION` 2→3 |
 
 ### 波 4 — 算法深度
@@ -680,7 +680,7 @@
 
 | 序 | 项 | 结果 |
 |---|---|---|
-| P2-7 | **时间预算后台调度器** | ✅ **v0.76**：v0.75 的「按未决命令数分三级 + 按"做几条"计数门控」→ `bg_scheduler` 引擎（每任务 `interval_ms` + 每轮总预算 + 优先级 + **must-run 正确性关键集**），14 项任务表 + 三级负载→预算映射（`g_bg_level_cfg`：IDLE/NORMAL 2000µs、BUSY 700µs 仅 must-run + 1 l2p flush）。对齐 §12.4 `background_task_t` 主流形态；`ftl_gc_evaluate` / `checkpoint_kick` / 各 kick 单飞行门**原样保留**。<br>⚠ 预算时钟 = 平台 `time_us`（SysTick 1ms 量化）；确定性前台保护由「档位→l2p 条数/掩码」承担，真 µs（DWT CYCCNT）留作升级 seam。<br>⚠ **wear 保留内部双触发门**（`WEAR_FLUSH_INTERVAL_MS` 120s OR 写增量≥1024）——调度器 interval 设 0，写增量触发是掉电窗口上界。<br>⚠ 时钟缺失降级：interval 门失效（每轮跑）+ elapsed=0 不截断 ⇒ 退化「无门控」，靠各任务内部单飞行/事件门防刷屏（GC 哨兵「每轮求值」等既有语义不变）。 |
+| P2-7 | **时间预算后台调度器** | ✅ **v0.76**：v0.75 的「按未决命令数分三级 + 按"做几条"计数门控」→ `bg_scheduler` 引擎（每任务 `interval_ms` + 每轮总预算 + 优先级 + **must-run 正确性关键集**），14 项任务表 + 三级负载→预算映射（`g_bg_level_cfg`：IDLE/NORMAL 2000µs、BUSY 700µs 仅 must-run + 1 l2p flush）。对齐 §12.4 `background_task_t` 主流形态；`mig_gc_evaluate` / `checkpoint_handle` / 各 kick 单飞行门**原样保留**。<br>⚠ 预算时钟 = 平台 `time_us`（SysTick 1ms 量化）；确定性前台保护由「档位→l2p 条数/掩码」承担，真 µs（DWT CYCCNT）留作升级 seam。<br>⚠ **wear 保留内部双触发门**（`WEAR_FLUSH_INTERVAL_MS` 120s OR 写增量≥1024）——调度器 interval 设 0，写增量触发是掉电窗口上界。<br>⚠ 时钟缺失降级：interval 门失效（每轮跑）+ elapsed=0 不截断 ⇒ 退化「无门控」，靠各任务内部单飞行/事件门防刷屏（GC 哨兵「每轮求值」等既有语义不变）。 |
 
 > **上板注**：无介质变更（`FTL_MEDIA_LAYOUT_VERSION` 不变），仿 v0.63/v0.68 先例同批上板。
 > 判据 = 三级行为与 v0.75 **等价回归**（IO 下 BUSY 无后台刷屏 / 空闲 IDLE 正常补池）+ `test /ftl/bg/`

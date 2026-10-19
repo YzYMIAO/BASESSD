@@ -27,20 +27,26 @@ typedef uint32_t lba_t;
 /*
  * ftl_status_t — FTL 内部操作通用返回状态
  *
- *   FTL_OK    =  0  操作成功
- *   FTL_ERROR = -1  永久失败（配置错误 / 无可用空间）——重试无意义
- *   FTL_AGAIN = -2  瞬态背压（资源暂空）——调用者应**排队重试**
+ *   FTL_OK      =  0  操作成功
+ *   FTL_ERROR   = -1  永久失败（配置错误 / 无可用空间）——重试无意义
+ *   FTL_AGAIN   = -2  瞬态背压（资源暂空）——调用者应**排队重试**
+ *   FTL_TIMEOUT = -3  等待超时（ms deadline 到期）——调用者按失败收尾
  *
  * FTL_AGAIN 的存在是为了把「资源暂空」与「真失败」分开：FC 命令/desc/buffer 池、
  * SQ、pending 表都可能在某一瞬间满（如 16 个多 plane 子操作同时在飞），但下一轮
  * ftl_service 抽干完成后即恢复。大请求被 FTL 拆成多个子操作时，若把这种瞬态当致命，
  * 请求就会在第 N 个子操作处整体失败——这正是本设计要消除的（见 ftl.c ftl_drain_group）。
+ *
+ * FTL_TIMEOUT 与 NVMe timeout / POSIX -ETIMEDOUT 同构：它**不是** FTL_AGAIN
+ * （重试无意义），也**不是** FTL_ERROR（失败原因可归因到等待者）。模块的
+ * `*_status_t.timeout_phase` 给出超时发生在哪一步（docs/design/ftl_module_contracts.md §6.3）。
  */
 typedef enum
 {
-    FTL_OK    = 0,  /* 成功 */
-    FTL_ERROR = -1, /* 永久失败（通用，不细分错误码） */
-    FTL_AGAIN = -2, /* 瞬态背压（资源暂空，可重试） */
+    FTL_OK      = 0,  /* 成功 */
+    FTL_ERROR   = -1, /* 永久失败（通用，不细分错误码） */
+    FTL_AGAIN   = -2, /* 瞬态背压（资源暂空，可重试） */
+    FTL_TIMEOUT = -3, /* 等待超时（ms deadline 到期） */
 } ftl_status_t;
 
 /*

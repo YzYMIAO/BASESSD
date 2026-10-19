@@ -16,6 +16,7 @@
  */
 
 #include "ftl_config.h" /* nand_pba_t, NAND_PBA_INVALID */
+#include "ftl_module.h" /* ftl_bg_info_t（confirm service 入参） */
 #include "ftl_type.h"   /* lba_t, ftl_status_t, ftl_io_request_t, pending_cb_t */
 
 #include <stdint.h>
@@ -68,7 +69,7 @@ typedef enum
                                    *   L2P region 未就绪（正在异步加载）时**停泊**本项——
                                    *   FC 命令已脱钩（command_id = FTL_PENDING_CMD_NONE）、
                                    *   组在飞数**不**递减（host 写组继续 pending）。
-                                   *   与 READ_RECOVERY 的差别：无外部引擎，由 ftl_confirm_kick
+                                   *   与 READ_RECOVERY 的差别：无外部引擎，由 pending_confirm_service
                                    *   每轮扫描推进（pending_find_op 按下标序找它）。
                                    *   ⚠ 停泊项**不可被 pending_lookup 撞到**：id 已置哨兵。 */
 } ftl_pending_op_t;
@@ -78,7 +79,7 @@ typedef enum
  *
  * 语义：
  *   is_read / is_write —— **活跃**子操作，完成路径按它们分派（拷数据 / 确认记账）。
- *   is_write_confirm   —— **停泊**态（命令已脱钩、组在飞数不递减），由 ftl_confirm_kick
+ *   is_write_confirm   —— **停泊**态（命令已脱钩、组在飞数不递减），由 pending_confirm_service
  *                         每轮扫描推进，完成路径不碰它。
  *   （READ_RECOVERY 同为停泊态，但判别走 pending_find_op 的**搜索实参**，不是谓词。） */
 static inline bool pending_op_is_read(uint8_t op)
@@ -116,7 +117,8 @@ typedef struct
     /* ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P 得到"此刻被替换的映射"。这比提交时快照
      *   更正确——同一 LBA 的两次写在飞时，先完成的先改 L2P，后完成的重查即得前者，
      *   提交时快照会让两条 journal 都指向最初映射（链断）。 */
-    uint8_t cache_intermediate; /* 1: Cache Program 中间页（15h），completion 时不更新 L2P/Journal */
+    uint8_t  cache_intermediate; /* 1: Cache Program 中间页（15h），completion 时不更新 L2P/Journal */
+    uint32_t park_ms;            /* WRITE_CONFIRM 停泊起点（ms；内部字段，外部不要读） */
 } ftl_pending_req_t;
 
 /*
@@ -160,6 +162,31 @@ typedef struct
  * @param ftl  FTL 上下文（含 pending 数组存储）
  */
 void pending_init(ftl_context_t *ftl);
+
+/* ── write-confirm park（docs §5「Confirm → pending 服务」）──
+ *
+ * 停泊列表归 pending 模块；FTL 不再扫 pending[] 找 PENDING_OP_WRITE_CONFIRM。
+ * 事务（Journal → L2P → BST ±）仍由 FTL 注入的 handler 执行——pending 只负责
+ * 遍历/超时/结算，避免把数据面事务复制进 pending 模块（C2/R9）。
+ *
+ * handler 返回：
+ *   FTL_OK    —— 事务已应用；pending 释放槽 + 组聚合完成；
+ *   FTL_AGAIN —— region 未就绪；保留停泊，超 ms deadline 后按 IO_ERROR 收尾；
+ *   FTL_ERROR —— 永久失败；释放槽 + 组报 IO_ERROR。
+ */
+typedef ftl_status_t (*pending_confirm_handler_t)(void *ctx, ftl_pending_req_t *pending);
+
+/* 注册事务 handler（ftl_init 中调用一次）。 */
+void pending_confirm_set_handler(pending_confirm_handler_t handler);
+
+/* 把一个已成功编程、但确认尚未完成的写子操作登记进停泊列表。 */
+void pending_confirm_park(ftl_context_t *ftl, uint16_t pending_idx, uint32_t owners);
+
+/* 推进停泊列表（ftl_service Phase 2.5 开头调用；info 可为 NULL，此时用平台时钟）。 */
+void pending_confirm_service(ftl_context_t *ftl, const ftl_bg_info_t *info);
+
+/* 是否还有停泊项（观测/测试）。 */
+bool pending_confirm_has_parked(const ftl_context_t *ftl);
 
 /*
  * pending_alloc - 认领一个空闲 pending 槽（**调用者就地逐字段填**）

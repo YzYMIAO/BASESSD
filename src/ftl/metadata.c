@@ -678,18 +678,18 @@ static void metadata_dir_boot_log(const metadata_dir_cache_t *dir)
 
     if (dir->cur_block_valid)
     {
-        LOGI("[META] anchor_seq=%u dyn=%u cur_blk=%u live_blks=%u\r\n",
-             (unsigned)dir->anchor_sequence,
+        LOGI("[META] anchor_seq=%lu dyn=%u cur_blk=%u live_blks=%lu\r\n",
+             dir->anchor_sequence,
              dyn,
              (unsigned)dir->cur_metadata_block,
-             (unsigned)live_blocks);
+             live_blocks);
     }
     else
     {
-        LOGI("[META] anchor_seq=%u dyn=%u cur_blk=- live_blks=%u\r\n",
-             (unsigned)dir->anchor_sequence,
+        LOGI("[META] anchor_seq=%lu dyn=%u cur_blk=- live_blks=%lu\r\n",
+             dir->anchor_sequence,
              dyn,
-             (unsigned)live_blocks);
+             live_blocks);
     }
 }
 
@@ -753,6 +753,17 @@ nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
     const uint16_t i = metadata_dir_find_index(dir, type, id);
 
     return (i < dir->count) ? dir->entries[i].pba : NAND_PBA_INVALID;
+}
+
+uint16_t metadata_live_count(const metadata_dir_cache_t *dir, uint16_t gblock)
+{
+    ASSERT(dir != NULL);
+
+    if (gblock >= FTL_BLOCK_TOTAL)
+    {
+        return 0U; /* 来源可能是介质/快照（H29）：越界按“无引用”处理 */
+    }
+    return dir->l2p_live[gblock];
 }
 
 /* --------------------------------------------------------------------
@@ -1202,7 +1213,7 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
         LOGI("[META] anchor load: loc=%d newest=%u seq=%lu\r\n",
              (int)loc,
              (unsigned)newest,
-             (unsigned long)dir->anchor_sequence);
+             dir->anchor_sequence);
 
         if ((loc != FTL_OK) || (newest == UINT16_MAX))
         {
@@ -1316,7 +1327,7 @@ bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, ui
     /* ── 已登记日志块：l2p_live 是 Directory 条目的账本，O(1) 判定 ──
      * block 可能来自损坏介质：先挡掉越界值，避免 ftl_gblock 截断后误判。 */
     const bool     in_range = (block < BLOCKS_PER_PLANE);
-    const uint16_t g        = in_range ? ftl_gblock(plane, block) : (uint16_t)FTL_BLOCK_TOTAL;
+    const uint16_t g        = in_range ? ftl_gblock(plane, block) : FTL_BLOCK_TOTAL;
     const bool     fast     = in_range && (g < FTL_BLOCK_TOTAL) && (md_dir->l2p_live[g] != 0U);
 
 #ifndef NDEBUG

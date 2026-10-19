@@ -26,7 +26,9 @@
 #include "pending.h"
 
 #include "assertion.h"
-#include "ftl.h" /* ftl_context_t */
+#include "ftl.h"     /* ftl_context_t */
+#include "ftl_job.h" /* ftl_job_now_ms（confirm 停泊超时） */
+#include "log.h"
 
 #include <string.h>
 
@@ -40,6 +42,96 @@ void pending_init(ftl_context_t *ftl)
 {
     memset(ftl->pending, 0, sizeof(ftl->pending));
     memset(ftl->groups, 0, sizeof(ftl->groups));
+}
+
+/* ── write-confirm park（停泊列表 = pending 表里的 WRITE_CONFIRM 项）──
+ *
+ * 不另建一张列表：停泊项本来就在 pending 表里（op = WRITE_CONFIRM、command_id
+ * 已脱钩为哨兵），另建列表会变成第二套坐标（C9）。pending 模块负责扫描/超时/结算，
+ * 数据面事务由 FTL 注入的 handler 执行（C2/R9：不复制 Journal→L2P→BST 顺序）。 */
+
+static pending_confirm_handler_t s_confirm_handler;
+
+void pending_confirm_set_handler(pending_confirm_handler_t handler)
+{
+    ASSERT(handler != NULL);
+    s_confirm_handler = handler;
+}
+
+void pending_confirm_park(ftl_context_t *ftl, uint16_t pending_idx, uint32_t owners)
+{
+    ASSERT(ftl != NULL);
+    ASSERT(pending_idx < FTL_PENDING_MAX);
+
+    ftl_pending_req_t *pending = &ftl->pending[pending_idx];
+
+    ASSERT(pending->used != 0U);
+
+    pending->op         = (uint8_t)PENDING_OP_WRITE_CONFIRM;
+    pending->command_id = FTL_PENDING_CMD_NONE;
+    pending->owners     = owners;
+    pending->park_ms    = ftl_job_now_ms();
+}
+
+bool pending_confirm_has_parked(const ftl_context_t *ftl)
+{
+    ASSERT(ftl != NULL);
+
+    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
+    {
+        if ((ftl->pending[i].used != 0U) && pending_op_is_write_confirm(ftl->pending[i].op))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void pending_confirm_service(ftl_context_t *ftl, const ftl_bg_info_t *info)
+{
+    ASSERT(ftl != NULL);
+    ASSERT(s_confirm_handler != NULL);
+
+    const uint32_t now_ms = ((info != NULL) && (info->now_ms != 0U)) ? info->now_ms : ftl_job_now_ms();
+
+    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
+    {
+        ftl_pending_req_t *pending = &ftl->pending[i];
+
+        if ((pending->used == 0U) || (!pending_op_is_write_confirm(pending->op)))
+        {
+            continue;
+        }
+
+        if (pending->park_ms == 0U)
+        {
+            pending->park_ms = now_ms; /* 懒初始化：停泊时刻（沿用 ftl_job 的时钟口径） */
+        }
+
+        const ftl_status_t st = s_confirm_handler(ftl, pending);
+
+        if (st == FTL_AGAIN)
+        {
+            if ((now_ms - pending->park_ms) < FTL_GROUP_DRAIN_TIMEOUT_MS)
+            {
+                continue; /* region 仍在加载：保留停泊，下轮再来 */
+            }
+            LOGE("[FTL] confirm park timeout lba=%lu idx=%u\r\n",
+                 pending->lba,
+                 (unsigned)i);
+        }
+        else if (st != FTL_OK)
+        {
+            LOGE("[FTL] confirm failed lba=%lu idx=%u\r\n", pending->lba, (unsigned)i);
+        }
+
+        /* 结算：owners 必须在释放**之前**取走（组完成通知可能重入复用本槽）。 */
+        const uint32_t     owners = pending->owners;
+        const ssd_status_t status = (st == FTL_OK) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
+
+        pending_release_index(ftl, i);
+        pending_group_complete_subop_multi(ftl, owners, status);
+    }
 }
 
 /* --------------------------------------------------------------------
@@ -238,7 +330,7 @@ void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi)
  *   参数：ftl —— 上下文；gi —— 组下标。
  *   返回：无。
  *   实现要点：outstanding 是「已下发、未完成」的组不变量。写点分散在 host 读
- *             （ftl_issue_subop）与页打包写（ftl_wbuf_append）两处、递减点分散在
+ *             （ftl_issue_subop）与页打包写（wbuf_handle(APPEND)）两处、递减点分散在
  *             完成服务与提交失败回滚——任一处漏掉即 host 写组永不完成、挂死。
  *             故所有增减都收敛到本对函数；完整完成走
  *             pending_group_complete_subop*（带聚合状态与完成通知），

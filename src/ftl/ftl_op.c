@@ -37,7 +37,7 @@ static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_sta
  *   · FTL_OP_HOST_IO  ：host 数据读写子操作（ctx 不用，服务函数自己 pending_lookup）；
  *   · FTL_OP_JOURNAL  ：Journal 刷页 job（ctx = ftl->journal）；
  *   · FTL_OP_READ_RECOVERY：Read Recovery job（ctx = &ftl->read_recovery_handle）；
- *   · FTL_OP_GC / FTL_OP_WL：搬移 job（ctx = &ftl->migrate_handle）——**同一台引擎**，
+ *   · FTL_OP_GC / FTL_OP_WL：搬移 job（ctx = ftl->migrate_handle）——**同一台引擎**，
  *     tag 分开只为日志/调试可辨（GC/WL 回收 vs 慢死预测退役）；
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（ctx = 该 cache line）；
  *   · FTL_OP_CHECKPOINT：Checkpoint job（ctx = ftl->checkpoint_handle）；
@@ -66,7 +66,7 @@ ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
     uint16_t cmd_id = ftl_cmd_id(cmd);
 
     /* ① ID 上命令（FC 只做原样拷贝，完成时回传到 completion.op_tag）。 */
-    cmd->op_tag = (DWORD)op;
+    cmd->op_tag = op;
 
     /* ② 登记必须**早于**提交（见头文件）。
      *    ctx == NULL（host I/O）：主动清表项——cmd_id 是池下标、会复用，主动清是廉价保险。
@@ -120,7 +120,7 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
         LOGE("[FTL] orphan completion cmd=%u op=%u status=0x%02x\r\n",
              (unsigned)completion->command_id,
              (unsigned)op,
-             (unsigned)completion->status);
+             completion->status);
         completion_table_remove((uint16_t)completion->command_id);
         (void)fc_command_release(cmd);
         return;
@@ -163,7 +163,7 @@ static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_sta
     {
         LOGE("[FTL] late sync completion cmd=%u status=0x%02x — released\r\n",
              (unsigned)completion->command_id,
-             (unsigned)completion->status);
+             completion->status);
         (void)fc_command_release(fc_command_id_to_command((uint16_t)completion->command_id));
         return;
     }

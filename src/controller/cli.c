@@ -374,7 +374,7 @@ static int uart_cli_tr(int argc, char *argv[])
  * 各组源数据取自 g_wp_buf 的不相交切片，组 i 填字节 0xA0+i（错位时回读会串段）。
  *
  * 判据：`info` 的 total_writes 相对本次只 +1（对比逐组编程的 +k）——**主判据**；
- *       ftl_wbuf_flush 的 `[FTL] wbuf flush` 行是辅助证据，且是 LOGD ⇒ **仅 debug 档可见**。
+ *       wbuf_handle(FLUSH) 的 `[FTL] wbuf flush` 行是辅助证据，且是 LOGD ⇒ **仅 debug 档可见**。
  *       随后 `rd <lba> <k*n>` 回读，第 (i*n+j) 段字节应为 0xA0+i。
  */
 static int uart_cli_wp(int argc, char *argv[])
@@ -545,13 +545,13 @@ static int uart_cli_info(int argc, char *argv[])
 
                 if ((job->phase != (uint8_t)MD_JOB_IDLE) || (md->reclaim_pending_count != 0U))
                 {
-                    (void)LOGI("md[%u][%u][%u] phase=%u moved=%u stall=%u pending=%u victim=%u\r\n",
+                    (void)LOGI("md[%u][%u][%u] phase=%u moved=%u stall=%lums pending=%u victim=%u\r\n",
                                (unsigned)ch,
                                (unsigned)ce,
                                (unsigned)lun,
                                (unsigned)job->phase,
                                (unsigned)job->moved,
-                               (unsigned)job->stall_rounds,
+                               (unsigned long)job->stall_ms,
                                (unsigned)md->reclaim_pending_count,
                                (unsigned)job->victim);
                 }
@@ -771,7 +771,11 @@ static int uart_cli_bbt(int argc, char *argv[])
                      * 会把数据编到刚擦空的芯片上（介质状态与 RAM 描述不再一致）。
                      * 走 wbuf 的复位接口（不是裸 memset）：它会一并结算那些写组的在飞数，
                      * 否则 host 写组永不完成。 */
-                    ftl_wbuf_reset(ftl);
+                    {
+                        const wbuf_trigger_t trigger = {.kind = WBUF_TRIGGER_RESET};
+                        wbuf_status_t        status;
+                        (void)wbuf_handle(ftl->wbuf, &trigger, NULL, &status);
+                    }
                 }
                 bbt_print_bad_map(&ftl->alloc, do_erase);
             }

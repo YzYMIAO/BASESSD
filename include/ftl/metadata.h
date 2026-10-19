@@ -38,6 +38,7 @@
 
 #include "allocator.h"
 #include "ftl_config.h" /* §一 几何量（FTL_BLOCK_TOTAL / L2P_REGIONS_PER_INSTANCE）*/
+#include "ftl_module.h" /* ftl_bg_info_t / ftl_module_status_t */
 #include "ftl_type.h"
 #include "nand_config.h" /* PAGE_MAIN_SIZE（Anchor 页打包自检）*/
 
@@ -527,7 +528,7 @@ ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
  * ⚠ **服务函数不推进状态机**（同 ftl_checkpoint_callback）：CP_ANCHOR_PREP 要调
  *   metadata_dir_anchor_prepare（游标未建立时会**同步**扫池定位），在完成泵里跑就是
  *   嵌套泵。故 ftl_metadata_callback 只记结果 + release + 改 phase，推进一律留给下一轮
- *   metadata_dir_kick（在 ftl_service 各档位里跑）。
+ *   metadata_handle（在 ftl_service 各档位里跑）。
  *
  * ⚠ 本结构不跨重启：phase / 游标 / 请求位全是 RAM 态，冷启动恒 IDLE（见 metadata_dir_init）。 */
 typedef enum
@@ -588,12 +589,16 @@ typedef struct
     uint16_t        reclaim_gblock;      /* 在飞擦除的块（完成时归还它）*/
     uint16_t        reclaim_fail_gblock; /* 连续擦除失败计数对应的块（RISK-MD-01）*/
     uint8_t         reclaim_fail_count;  /* 该块连续擦除失败次数；达上限即标坏并清位 */
-    uint16_t        stall_rounds;        /* 连续"提交不出去"轮数（超限中止，同 MIG/CP）*/
+    uint32_t        stall_ms;            /* 连续「提交不出去」的起点（0 = 未计时） */
+    uint8_t         timed_out;           /* 1 = 本次 job 因 deadline 中止 */
+    uint8_t         timeout_phase;       /* 超时发生的 phase */
     uint16_t        anchor_idx;          /* 本 Anchor record 的池内槽位 */
     uint32_t        anchor_seq;          /* 本 Anchor record 的序号 */
     nand_pba_t      anchor_base;         /* 本 Anchor record 第 0 页地址 */
     nand_pba_t      slot;                /* 压缩搬移已取到、待写的槽（NAND_PBA_INVALID = 未取）*/
     metadata_ring_t anchor_ring;         /* Anchor 池几何（prepare 出参，commit 要用）*/
+    uint32_t        reclaimed_count;     /* 累计擦除成功并归还的日志块数（单调进度） */
+    int32_t         error;               /* 最近一次中止的 FTL_*（回 IDLE 时清） */
 
     /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/victim/age */
     uint32_t start_ms;
@@ -603,6 +608,17 @@ typedef struct
      * 服务循环，栈帧早已返回。放 job 而非栈（同 migrate_handle.page_buf / rr_page_scratch）。 */
     uint8_t cp_buf[L2P_REGION_SIZE];
 } metadata_handle_t;
+
+/* ── 模块端口（docs/design/ftl_module_contracts.md §4.3）──
+ *
+ * metadata job 需要：allocator（取新日志块 / 归还 victim / 标坏 / 池状态）与
+ * total_writes（策略计数）。两者都由装配层在 init 时绑定；模块不持有 ftl_context。
+ */
+typedef struct
+{
+    ftl_allocator_t *alloc;
+    const uint32_t  *total_writes;
+} metadata_port_t;
 
 /* ── 常驻 Directory Cache（约 24.6 KiB，`g_ftl_md[]` 落 SRAM4，见 src/main.c） ── */
 typedef struct
@@ -625,7 +641,7 @@ typedef struct
 
     /* ── 待回收日志块位图（RAM 态，不跨重启）──
      * commit_region 在活计数归零时置位；append_slot 换走旧当前块时若其已空也置位。
-     * 运行期擦除全部由 metadata_dir_kick 的 MD_JOB_RECLAIM 异步做——append_slot 不做
+     * 运行期擦除全部由 metadata_handle 的 MD_JOB_RECLAIM 异步做——append_slot 不做
      * 同步擦除（3 ms tERASE 会击穿服务预算）。
      * 位在"擦除在飞"期间保持置位：完成成功才清；失败保留，下轮重试。 */
     uint32_t reclaim_pending[FTL_BLOCK_TOTAL / 32U];
@@ -645,6 +661,9 @@ typedef struct
 
     /* 拓扑信息（元数据所在芯片路由） */
     ftl_topology_t topo;
+
+    /* allocator / total_writes 端口（装配层绑定；docs §4.3） */
+    metadata_port_t port;
 } metadata_dir_cache_t;
 
 /* 待回收位图按 32 位字切分，块总数必须能整除一个字。 */
@@ -680,6 +699,14 @@ nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
                                uint16_t                    id);
 
 /*
+ * metadata_live_count - 某个 gblock 上还有多少 region 的**最新位置**落在它上面。
+ *
+ * 供开机恢复（PFR）判断「该块是否仍被 Directory 引用」。越界返回 0（不是 ASSERT：
+ * 调用者的 g 来自介质/快照，属不可信输入，H29）。
+ */
+uint16_t metadata_live_count(const metadata_dir_cache_t *dir, uint16_t gblock);
+
+/*
  * metadata_dir_update - 添加或更新元数据位置
  *
  * @param dir    Directory cache
@@ -707,7 +734,7 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
  * 无关：位置由 pba 自身携带，读回一律经 Directory 查 pba）。
  *
  * ⚠ **本函数不做压缩**：换块后若 Free Pool 吃紧，只登记 `job.compact_wanted` 并返回
- *   NAND_PBA_INVALID——压缩由 metadata_dir_kick 起异步 job 做，避免在写回路径上同步
+ *   NAND_PBA_INVALID——压缩由 metadata_handle 起异步 job 做，避免在写回路径上同步
  *   阻塞数十毫秒。
  * ⚠ **整理 job 在飞时一律返回 NAND_PBA_INVALID**（见函数内注释）：压缩的空槽预算按
  *   发放那一刻的 cur_metadata_page 核定，期间再发放会打乱预算与 ③④ 顺序。调用者
@@ -742,7 +769,7 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
                                 nand_pba_t            new_pba);
 
 /*
- * metadata_dir_kick - 推进元数据目录后台 job（回收 / 压缩）一步
+ * metadata_handle - 推进元数据目录后台 job（回收 / 压缩）一步
  *
  * 每轮服务循环（ftl_service_idle / normal / busy）调一次；**没有 job 在跑时**它就是
  * 起 job 的地方：先看 `reclaim_pending_count`（有 ⇒ 从位图取一个块起回收），再看
@@ -758,7 +785,38 @@ void metadata_dir_commit_region(metadata_dir_cache_t *dir,
  * @param dir   Directory cache
  * @param alloc Allocator（取新日志块 / 归还 victim）
  */
-void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
+typedef struct
+{
+    ftl_module_status_t base;
+
+    uint8_t  phase;           /* metadata_handle_phase_t（观测；外部不要据此驱动） */
+    uint16_t victim;          /* 压缩 victim（UINT16_MAX = 无） */
+    uint16_t moved;           /* 本次压缩已搬 region 数 */
+    uint32_t reclaimed;       /* 累计擦除成功的日志块数（单调进度） */
+    bool     compact_wanted;  /* 池吃紧，请求压缩 */
+    bool     anchor_ok;       /* Anchor 分页写是否全部成功 */
+    bool     reclaim_pending; /* 有已登记待回收的日志块 */
+    bool     timed_out;       /* 本次 job 因 deadline 中止 */
+    uint8_t  timeout_phase;   /* 超时发生的 phase */
+} metadata_status_t;
+
+/*
+ * metadata_dir_bind_port - 绑定 allocator / total_writes 端口。
+ * 由装配层（ftl.c）在 metadata 初始化之后、后台调度之前调用一次。
+ */
+void metadata_dir_bind_port(metadata_dir_cache_t *dir, const metadata_port_t *port);
+
+/*
+ * metadata_handle - 推进元数据目录整理 job（typed handle；提交即返回）
+ *
+ * 事件驱动（reclaim_pending / compact_wanted 由 Directory 函数置位），`info` 当前
+ * 不参与决策；保留形参以统一 typed 入口。
+ *
+ * @param dir   Directory cache；**前置条件**，非法即 ASSERT
+ * @param info  本轮动态信息（当前未用，可传 NULL）
+ * @param out   出参：本轮结束后的上报（**非空**）
+ */
+void metadata_handle(metadata_dir_cache_t *dir, const ftl_bg_info_t *info, metadata_status_t *out);
 
 /*
  * metadata_dir_busy - 整理 job 是否在跑（有命令在飞或处在中间 phase）。
@@ -851,7 +909,7 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir);
  *   日志块：`l2p_live[g] != 0` —— 该账本的定义就是"最新位置落在 g 的 region 数"，
  *           与 Directory 条目一一对应，判据 O(1)
  *
- * free pool 回填（main.c）与重建（ftl_rebuild_closed_sb_list）共用同一判据。
+ * free pool 回填（main.c）与重建（PFR 内部 F2）共用同一判据。
  *
  * ⚠ 固定块分支也**必须比较 plane**：固定池只占 plane_mask 里的 plane，其余 plane 的
  *   同号块是用户数据。日志块/游标块从用户区动态取，同样必须带 plane 比较；只比

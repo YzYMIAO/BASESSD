@@ -301,7 +301,7 @@ ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, n
  *   ⚠ 若那次 alloc 顺带开了一个新 SB，归还后该 SB 处于 next_page == 0 的**合法态**
  *     （等价于「刚开、未写」）：块仍由 Open SB 持有，无容量损失，且下次重试直接命中页 0。
  *
- * 用途：`ftl_wbuf_flush` 的取页后失败路径——不归还则每次重试白烧一对页，
+ * 用途：`wbuf_handle(FLUSH)` 的取页后失败路径——不归还则每次重试白烧一对页，
  *       表现为**容量无声流失**（CLAUDE.md §3.1）。
  */
 void allocator_rewind_pair(ftl_allocator_t *alloc, uint8_t temperature);

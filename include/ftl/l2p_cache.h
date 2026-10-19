@@ -20,6 +20,7 @@
 
 #include "allocator.h"  /* ftl_allocator_t */
 #include "ftl_config.h" /* §一 容量/分解宏 + §三.2 nand_pba_t / pba_* */
+#include "ftl_module.h" /* ftl_bg_info_t / ftl_module_status_t */
 #include "ftl_type.h"   /* lba_t */
 #include "metadata.h"   /* metadata_dir_* / metadata_dir_cache_t（Directory 访问） */
 
@@ -36,6 +37,11 @@
 /* 在飞写回上限（背压闸门，见 l2p_cache_t.flush_inflight）：每次写回占 1 条命令 + 4 buffer，
  * 4 条在飞 = 16 buffer，占 FC buffer 池（128）的 1/8，给 host I/O 留足余量。 */
 #define L2P_FLUSH_MAX_INFLIGHT (4U)
+
+/* 后台主动 flush 的每轮条数上界（按档位；docs §4.7 的 static const 策略表）。
+ * BUSY 档只放行 1 条 ⇒ 最小预算 = 「must-run + 1 flush」。 */
+#define L2P_FLUSH_MAX_NORMAL (4U)
+#define L2P_FLUSH_MAX_BUSY   (1U)
 
 /* 同步逃生口的自旋预算（轮）。每轮 = 一次 ftl_service_pump（推 NAND + 抽干完成）。
  * 超预算即判失败返回——兜住"命令永不到达"这类编程错误，不让同步站点死等。 */
@@ -214,15 +220,21 @@ typedef struct
     uint8_t load_fail_count;
 } l2p_cache_line_t;
 
-/* ── Owner 解析回调 ──
+/* ── Owner 端口（docs §4.7）──
  *
  * cache 跨 LUN 共享后，load/flush/commit 需要知道某个全局 region 属于哪个
- * FTL 实例（owner die）。回调由设备级 init 注入（main.c），内部复用
- * lba_route_* + completion_table_route；l2p_cache.h 只前置声明 ftl_context，
- * 不反向包含 ftl.h（避免循环依赖）。
+ * FTL 实例（owner die）。端口只暴露**共享服务的最小集**，不返回整个 ftl_context。
+ * 回调由设备级 init 注入（main.c），内部复用 lba_route_* + completion_table_route。
  */
-struct ftl_context;
-typedef struct ftl_context *(*l2p_owner_fn_t)(void *ctx, uint32_t global_region);
+typedef struct
+{
+    uint32_t              dim; /* 本 owner 的实例编号（global 路由键） */
+    metadata_dir_cache_t *metadata_dir;
+    ftl_allocator_t      *alloc;
+    ftl_topology_t        topo;
+} l2p_owner_t;
+
+typedef const l2p_owner_t *(*l2p_owner_fn_t)(void *ctx, uint32_t global_region);
 
 /* ── Cache 上下文 ── */
 
@@ -232,6 +244,8 @@ typedef struct
     uint16_t         clock_hand;            /* CLOCK 替换指针 */
     uint32_t         hit_count;             /* 统计：命中次数（开机累计，观测用） */
     uint32_t         miss_count;            /* 统计：未命中次数（开机累计，观测用） */
+    uint32_t         eviction_count;        /* 统计：被驱逐的行数（开机累计） */
+    int32_t          error;                 /* 最近一次硬失败（status.error） */
 
     /* ── Thrashing 检测窗口（阈值见文件头 L2P_THRASH_*）──
      * 与累计 hit/miss_count 互补：累计量随开机时长渐近，反映不了**当前**行为，
@@ -392,8 +406,7 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx);
  * 跳过不属于 owner_dim 的行——一个 LUN 的后台刷写不应替别的 LUN 做决定。
  *
  * @param owner_dim 本实例的 dim（ftl_topo_dim(ftl->topo)）
- * @param max_kick  本轮最多起几条（IDLE 传 L2P_CACHE_SIZE，NORMAL 传 BG_NORMAL_FLUSH_COUNT，
- *                  BUSY 传 1）
+ * @param max_kick  本轮最多起几条（档位表见 l2p_cache.c 的 s_l2p_flush_max）
  */
 void l2p_flush_kick_owner(l2p_cache_t *cache, uint32_t owner_dim, uint8_t max_kick);
 
@@ -437,5 +450,48 @@ void l2p_cache_invalidate_owner(l2p_cache_t *cache, uint32_t owner_dim);
  * DIM=1 时等价于整份位图拷贝。
  */
 void l2p_cache_snapshot_owner_bitmap(const l2p_cache_t *cache, uint32_t owner_dim, uint32_t out[L2P_LOCAL_DIRTY_WORDS]);
+
+/* ── 模块 handle（typed 入口，docs §4.7） ── */
+typedef struct
+{
+    ftl_module_status_t base;
+
+    uint8_t  load_inflight;
+    uint8_t  flush_inflight;
+    uint16_t dirty_regions;  /* 本 (ch,ce) 全局脏位图的置位数 */
+    uint16_t resident_lines; /* 非 INVALID 行数 */
+    bool     thrashing;
+    uint8_t  miss_pct;
+    uint32_t evictions;
+} l2p_status_t;
+
+/*
+ * l2p_handle - 后台写回推进（每轮调用；不阻塞、不遍历 cache 内部）
+ *
+ * 按 info->load_level 查**模块内** static const 表决定本轮 max_kick；只处理
+ * owner_dim 的脏行。同步逃生口（*_sync）自己用 drain deadline，不经过本入口。
+ *
+ * @param cache  共享 cache；**前置条件**，非法即 ASSERT
+ * @param dim    本实例的 owner dim（ftl_topo_dim(topo)）
+ * @param info   本轮动态信息（now_ms / load_level）
+ * @param out    出参：本轮结束后的上报（**非空**）
+ */
+void l2p_handle(l2p_cache_t *cache, uint32_t dim, const ftl_bg_info_t *info, l2p_status_t *out);
+
+/* ── 查询（替代外部直读 cache 内部） ── */
+typedef struct
+{
+    uint32_t region_id; /* 全局 region（INVALID 行无意义） */
+    uint8_t  state;     /* l2p_cache_state_t */
+} l2p_line_info_t;
+
+/* 读一行元信息（idx 越界/空行时 state == INVALID）。 */
+void l2p_cache_line_get(const l2p_cache_t *cache, uint16_t idx, l2p_line_info_t *out);
+
+/* 失效一行（仅 CLEAN/INVALID；恢复/格式化用）。 */
+void l2p_cache_invalidate_line(l2p_cache_t *cache, uint16_t idx);
+
+/* 是否有在飞写回（背压/进展判据；不暴露 flush_inflight 字段）。 */
+bool l2p_cache_has_flush_inflight(const l2p_cache_t *cache);
 
 #endif /* FTL_L2P_CACHE_H */

@@ -181,13 +181,15 @@ static void boot_report_console(void)
  *   内含表）。好处：内存预算**单点可见**（下面的 _Static_assert 看 g_ftl + 共享 cache）。
  *
  * SRAM 布局（阶段 C：描述符 + 内存域散列）：
- *   AXI_RAM（.bss）：g_ftl 描述符（~14.7KB/实例）+ g_l2p_cache（共享热 cache）
+ *   AXI_RAM（.bss）：g_ftl 描述符 + g_ftl_migrate / g_ftl_wbuf / g_ftl_rr_page_scratch
+ *                    （Phase 1.5 挂载块）+ g_l2p_cache（共享热 cache）
  *                    + CLI 写缓冲 + 其它 .bss
  *   SRAM1+SRAM2（.sram12_data）：g_ftl_tables[FTL_DIM_TOTAL]（BST/池/closed）
  *   SRAM3（.sram3_data）：g_ftl_checkpoint_handle[] + g_ftl_journal[]
  *   SRAM4（.sram4_data）：g_ftl_md[]（Metadata Directory）
  *
  * 四个 `.sram*_data` 数组是 **NOLOAD**（启动不清零）⇒ ftl_init 显式 memset。
+ * Phase 1.5 的三个挂载块在 AXI .bss（启动清零），ftl_init 仍显式 memset（统一语义）。
  * N=2：AXI ~197KB / SRAM12 247,792B / SRAM3 21,256B / SRAM4 49,320B，均装得下。
  * ══════════════════════════════════════════════════════════════════ */
 static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM]; /* 描述符 → AXI_RAM（.bss） */
@@ -201,6 +203,12 @@ static ftl_tables_t         g_ftl_tables[FTL_DIM_TOTAL] SRAM12_DATA;
 static checkpoint_handle_t  g_ftl_checkpoint_handle[FTL_DIM_TOTAL] SRAM3_DATA;
 static l2p_journal_t        g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
 static metadata_dir_cache_t g_ftl_md[FTL_DIM_TOTAL] SRAM4_DATA;
+
+/* Phase 1.5：三块大状态挂 storage 指针，仍落 AXI_RAM（默认 .bss）。
+ * 挂指针**不减少总 RAM**，只让 ftl_context_t 变小、放置可控、handle 形态统一。 */
+static migrate_handle_t g_ftl_migrate[FTL_DIM_TOTAL];
+static wbuf_handle_t    g_ftl_wbuf[FTL_DIM_TOTAL];
+static uint8_t          g_ftl_rr_page_scratch[FTL_DIM_TOTAL][FTL_READ_USER_SIZE];
 
 ssd_controller_t g_ctrl; /* controller 路由表（收 g_ftl 三维指针）；非 static：
                           * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
@@ -218,8 +226,11 @@ static int g_ftl_ready;  /* 主循环守卫：全部实例 boot 成功才切 ftl
 /* g_wr_buf 从 .sram2_data 迁入 AXI .bss（SRAM12 留给 tables），显式计入预算。 */
 #define CLI_AXI_RAM_RESERVED (16U * 1024U)
 
-_Static_assert(sizeof(g_ftl) + sizeof(g_l2p_cache) + FTL_AXI_RAM_RESERVED + CLI_AXI_RAM_RESERVED <= BOARD_AXI_RAM_SIZE,
-               "FTL 描述符/共享 cache/CLI 缓冲超出 AXI_RAM");
+_Static_assert(sizeof(g_ftl) + sizeof(g_ftl_migrate) + sizeof(g_ftl_wbuf) +
+                       sizeof(g_ftl_rr_page_scratch) + sizeof(g_l2p_cache) +
+                       FTL_AXI_RAM_RESERVED + CLI_AXI_RAM_RESERVED <=
+                   BOARD_AXI_RAM_SIZE,
+               "FTL 描述符/挂载块/共享 cache/CLI 缓冲超出 AXI_RAM");
 _Static_assert(sizeof(g_ftl_tables) <= BOARD_SRAM12_SIZE, "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
 _Static_assert(sizeof(g_ftl_checkpoint_handle) + sizeof(g_ftl_journal) <= BOARD_SRAM3_SIZE, "checkpoint_handle/journal 超出 SRAM3");
 _Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4");
@@ -229,17 +240,27 @@ _Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4"
  * -Wincompatible-pointer-types 恒报），此处显式构造。 */
 static ftl_context_t *g_ftl_ptrs[CH_NUM][CE_NUM][LUN_NUM];
 
+/* 共享 L2P cache 的 owner 端口表（docs §4.7）：每 dim 一份，只暴露
+ * {dim, metadata_dir, alloc, topo}，不把整个 ftl_context 交给 l2p_cache。
+ * 由 ssd_ftl_boot 在 ftl_init 之后填充；生命周期覆盖全程。 */
+static l2p_owner_t g_l2p_owner[FTL_DIM_TOTAL];
+
 /*
  * ssd_l2p_owner_of_region - 全局 L2P region → owner FTL 实例
  *
  * 共享 cache 的 load/flush/commit 用它找 owner die。region→(ch,ce,lun) 的分解
  * 复用 completion_table_route_region（与 lba_route_* 同一套公式，避免第二套坐标）。
  */
-static struct ftl_context *ssd_l2p_owner_of_region(void *ctx, uint32_t global_region)
+static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, uint32_t global_region)
 {
     (void)ctx;
 
-    return completion_table_route_region(global_region);
+    const uint32_t dim = global_region % FTL_DIM_TOTAL;
+
+    ASSERT(dim < FTL_DIM_TOTAL);
+    ASSERT(g_l2p_owner[dim].metadata_dir != NULL);
+
+    return &g_l2p_owner[dim];
 }
 
 /*
@@ -264,6 +285,9 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
          .metadata_dir      = &g_ftl_md[dim],
          .journal           = &g_ftl_journal[dim],
          .checkpoint_handle = &g_ftl_checkpoint_handle[dim],
+         .migrate           = &g_ftl_migrate[dim],
+         .wbuf              = &g_ftl_wbuf[dim],
+         .rr_page_scratch   = g_ftl_rr_page_scratch[dim],
     };
 
     ASSERT(dim < FTL_DIM_TOTAL);
@@ -275,6 +299,15 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     }
 
     alloc = &ftl->alloc;
+
+    /* L2P owner 端口：必须在任何 cache 访问（含下面的格式化/恢复）之前就绪。 */
+    l2p_owner_t owner;
+
+    owner.dim          = dim;
+    owner.metadata_dir = ftl->metadata_dir;
+    owner.alloc        = &ftl->alloc;
+    owner.topo         = ftl->topo;
+    g_l2p_owner[dim]   = owner;
 
     /* 介质布局版本判据：介质不是当前版本（旧格式 / 空片）⇒ 全片格式化。
      * 放在 ftl_init 之后、free pool 回填之前——bbt_init 已把出厂坏块标记读进 BST

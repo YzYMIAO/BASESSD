@@ -40,7 +40,7 @@
  * 内部管理 FC 命令生命周期：
  *   alloc → config → submit → sync_wait → get_meta → release
  *
- * 唯一调用者是掉电重建（ftl_rebuild_closed_sb_list 的逐页反查）。
+ * 唯一调用者是掉电重建（PFR 的 F2 全盘重建（内部）的逐页反查）。
  * 搬移读（GC / WL / 慢死预测）走 **异步** 路径：migrate.c 用 ftl_async_read_page +
  * gc_decode_cw_lba 在完成服务函数里收尾——不经过本函数。
  *
@@ -216,7 +216,7 @@ gc_decode_result_t gc_decode_cw_lba(fc_command_t *cmd,
  * 两个消费方**各自调用一次**（不共享扫描）：
  *   ① gc_select_victim —— 评分归一化分母（max_erase / max_pe_ts）；
  *   ② gc_check_triggers 的 T5 —— 磨损比 max_erase/min_erase。
- * 求值点由 `ftl_gc_evaluate` 的 10 ms 节拍门兜成本；不要为省这一次扫描把
+ * 求值点由 `mig_gc_evaluate` 的 10 ms 节拍门兜成本；不要为省这一次扫描把
  * 结构体穿过 bg 适配器 / mig_begin_gc 的公开 API（会把策略耦合进引擎）。
  *
  * 统计口径（好块 / 坏块排除）由 allocator 定义；本函数只把退化值折算成 GC 需要的语义：
@@ -327,14 +327,14 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
             {
                 continue;
             }
-            LOGI("[GC] victim plane%u=%u vr=%u er=%u cp=%u yp=%u cost=%lu\r\n",
+            LOGI("[GC] victim plane%u=%u vr=%lu er=%lu cp=%lu yp=%lu cost=%lu\r\n",
                  (unsigned)p,
                  (unsigned)(*victim)->plane_blocks[p],
-                 (unsigned)best_vr,
-                 (unsigned)best_er,
-                 (unsigned)best_cp,
-                 (unsigned)best_yp,
-                 (unsigned long)best_cost);
+                 best_vr,
+                 best_er,
+                 best_cp,
+                 best_yp,
+                 best_cost);
         }
     }
 

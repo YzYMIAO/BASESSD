@@ -13,7 +13,7 @@
  * ── 为什么必须异步 ──
  *
  * 单次搬移 = 最多 64 页 × 2 plane 的读 + 写 + 2 次擦，同步执行可阻塞数十毫秒；
- * 而它有两个**在完成回调里**的入口（写路径紧急 GC，见 ftl_wbuf_flush），
+ * 而它有两个**在完成回调里**的入口（写路径紧急 GC，见 wbuf_handle(FLUSH)），
  * 于是 host 写完成的处理会长时间占住完成泵。job 化后每轮只推进**一步**
  * （一条 NAND 命令），host I/O 与后台搬移在 superloop 上真正重叠。
  *
@@ -50,7 +50,7 @@
  *    closed_sb_list），下轮 GC 再来。**不得**先擦后搬——那会静默丢掉尚未搬移的有效页。
  * 2. **擦除失败时不退役**：擦不掉的块归 bbt_mark_bad 管；同时标成 "RETIRED、仍可读"
  *    是自相矛盾的。擦除失败本身是极端分支（NAND 拒擦）。
- * 3. **提交侧卡死计数**：连续 MIG_SUBMIT_STALL_MAX 轮提交不出去 ⇒ 中止 job（同 1：
+ * 3. **提交侧 deadline**：连续超过 `FTL_SUBMIT_TIMEOUT_MS` 提交不出去 ⇒ 中止 job（同 1：
  *    不擦 victim，数据无损）。**永久错误**（建链 / 入参）立即中止，不空转重试。
  *
  * ── 单飞行 ──
@@ -66,7 +66,10 @@
 #include "allocator.h"   /* super_block_t */
 #include "fc_command.h"  /* fc_command_status_t（服务函数签名） */
 #include "ftl_config.h"  /* nand_pba_t, CW_NUM, PAGE_MAIN_SIZE */
+#include "ftl_module.h"  /* ftl_bg_info_t / ftl_module_status_t */
 #include "ftl_type.h"    /* lba_t */
+#include "journal.h"     /* l2p_journal_t（端口） */
+#include "l2p_cache.h"   /* l2p_cache_t（端口） */
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
 
 #include <stdbool.h>
@@ -76,21 +79,14 @@
 struct ftl_context;
 typedef struct ftl_context ftl_context_t;
 
-/* ── 连续「提交不出去」的轮数上限 ──
- * 只兜**提交侧**（命令池被在飞的 host I/O 占满 ⇒ ftl_async_* 返 FTL_AGAIN）。
- * 命令一旦在飞，NAND 层的 wait/jump 超时保证它**必有**完成（超时置
- * FC_CW_STATUS_TIMEOUT），故不需要（也不该）在飞时强拆 job。
- * 超过即判卡死 ⇒ 中止 job（不擦 victim，数据无损，下轮重试）。 */
-#define MIG_SUBMIT_STALL_MAX (256U)
-
-/* ── 等待**外部模块**推进的轮数上限（独立的 liveness 界，不是性能目标）──
- * READ_SETTLE / WRITE_SETTLE 等 L2P region 加载、FLUSH_JRN 等 Journal 刷页时，
- * 原先每轮都把 stall_rounds 清零（"有命令在飞 = 在推进"）⇒ 外部模块若永久卡住，
- * job 永远不中止、victim 永远不擦。给这类等待单独计数：命令在飞也计数，只有
- * 等待条件解除/提交成功才清零。
- * 取值：远大于一次 NAND 页操作（~700µs）与 L2P region 加载所需的轮数，
- * 只兜「永不完成」；256 与提交卡死上限同量级会误伤正常慢路径。 */
-#define MIG_WAIT_MAX (4096U)
+/* ── 提交/等待 deadline（绝对 ms，docs §6.3）──
+ * 提交侧（命令池被在飞的 host I/O 占满 ⇒ ftl_async_* 返 FTL_AGAIN）用
+ * `FTL_SUBMIT_TIMEOUT_MS`；等外部模块（L2P region / Journal 刷页）用
+ * `FTL_WAIT_TIMEOUT_MS`。命令一旦在飞，NAND 层的 wait/jump 超时保证它必有完成
+ * （超时置 FC_CW_STATUS_TIMEOUT），故不在飞时强拆 job。
+ * 超过 deadline ⇒ 中止 job（不擦 victim，数据无损，下轮重试）。
+ * ⚠ 平台时钟缺失（now_ms == 0）时 deadline 不生效——退化为「无超时」；本板
+ *   `ssd_platform_register` 强制 time_us 非空 ⇒ 该分支不可达。 */
 
 /* ── 同一 victim 块连续读失败多少次后标坏（RISK-GC-01）──
  * 持续读失败（ECC 不可纠 / META 基址损坏）时 GC 会每轮重选同一 victim 并 abort，
@@ -138,6 +134,22 @@ typedef enum
     MIG_KIND_PREDICT /* 慢死预测旁路（rr_predictive_scan） */
 } mig_kind_t;
 
+/*
+ * migrate_port_t — 搬移引擎的端口（装配层在 init 时绑定；docs §4.4）
+ *
+ * 只放**共享数据面服务**的指针与每实例不可变配置；GC/WL/predict 的选块策略仍是
+ * 编译期链接的静态调用（gc_select_victim / wl_select_victim / rr_predictive_scan），
+ * 不做运行期 vtable（§3.3 明确不引入）。
+ */
+typedef struct
+{
+    ftl_allocator_t *alloc;
+    l2p_journal_t   *journal;
+    l2p_cache_t     *cache;
+    const uint32_t  *total_writes; /* allocator_note_erase 的磨损时钟 */
+    ftl_topology_t   topo;         /* 本实例路由（源页地址 / LBA 归属校验） */
+} migrate_port_t;
+
 /* ── 搬移 job（per-instance，放 ftl->migrate_handle）──
  *
  * ⚠ page_buf 是 **逐 plane** 的页镜像（`PLANE_NUM × PAGE_MAIN_SIZE`，当前共 4KB），
@@ -146,6 +158,8 @@ typedef enum
  */
 typedef struct
 {
+    migrate_port_t port; /* 共享服务端口（init 绑定） */
+
     bool     active;          /* true = job 在跑（单飞行门） */
     bool     waiting;         /* true = 有一条搬移命令在飞（等 g_op_callbacks[FTL_OP_GC]/[FTL_OP_WL]） */
     bool     aborted;         /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
@@ -158,8 +172,10 @@ typedef struct
     uint8_t  post;            /* mig_post_t */
     uint8_t  page;            /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
     uint8_t  plane;           /* 当前 plane（读/写/擦各自迭代） */
-    uint16_t stall_rounds;    /* 连续提交不出去的轮数（见 MIG_SUBMIT_STALL_MAX） */
-    uint16_t wait_rounds;     /* 等外部模块（L2P / Journal）推进的轮数（见 MIG_WAIT_MAX） */
+    uint32_t stall_ms;        /* 本轮连续「提交不出去」的起点（0 = 未计时） */
+    uint32_t wait_ms;         /* 等外部模块（L2P / Journal）的起点（0 = 未计时） */
+    uint8_t  timed_out;       /* 1 = 本次 job 因 deadline 中止 */
+    uint8_t  timeout_phase;   /* 超时发生的 phase */
     uint16_t fail_gblock;     /* 连续读失败计数对应的源块（RISK-GC-01） */
     uint8_t  fail_count;      /* 该块连续读失败次数 */
     uint16_t dst_fail_gblock; /* 连续写失败计数对应的目的块（RISK-GC-02） */
@@ -178,10 +194,23 @@ typedef struct
      *   是 0 ⇒ 擦除收尾会改块 0 的元数据。见 migrate.c 的 mig_src_gblock。 */
 
     uint32_t migrated; /* 本 job 累计搬移的有效 CW 数（>0 才需要 F10 屏障） */
+    uint16_t erased;   /* 本 job 已成功擦除的 plane 数（观测） */
 
     /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 kind/phase/page/age */
     uint32_t start_ms;
     uint32_t log_ms;
+
+    /* ── handle 自持的求值节拍（docs §4.4：GC 10ms / WL 5s / predict 1s）── */
+    uint32_t gc_eval_last_ms;
+    uint32_t gc_log_last_ms;
+    uint32_t wl_eval_last_ms;
+    uint32_t predict_last_ms;
+
+    /* ── 观测计数（单调，只增不减）── */
+    uint32_t reclaimed_count; /* 成功回收的 SB 数（GC/WL） */
+    uint32_t novictim_count;  /* 触发但选不出 victim 的次数 */
+    uint8_t  urgent_gc;       /* migrate_trigger(GC_URGENT) 登记（被 handle 消费） */
+    int32_t  error;           /* 最近一次中止的归因 */
 
     uint8_t page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
 } migrate_handle_t;
@@ -189,43 +218,62 @@ typedef struct
 /* ── 接口 ── */
 
 /*
- * mig_begin_gc - 选 victim 并启动一个 GC 搬移 job
+ * migrate_init - 绑定端口并复位 handle。
  *
- * 选不出 victim ⇒ gc_novictim_count++ 并返回 0（"触发但选不出 victim"是卡死嫌疑，
- * 该计数是区分「在推进」与「卡死」的唯一判据，见 ftl.h）。
- *
- * @param ftl FTL 实例（**前置条件**，非法即 ASSERT）
- * @return true = 已启动 job；false = 未启动（job 忙 / 无 victim）
+ * @param m     handle（= ftl->migrate_handle）；**前置条件**，非法即 ASSERT
+ * @param port  共享服务端口（allocator / journal / l2p / total_writes / topo）
  */
-bool mig_begin_gc(ftl_context_t *ftl);
+void migrate_init(migrate_handle_t *m, const migrate_port_t *port);
+
+/* 显式触发原因（设计 §4.4：只登记紧急/显式原因，周期评估由 handle 自持） */
+typedef enum
+{
+    MIGRATE_REASON_GC_URGENT = 0, /* 写路径分配不到页对（wbuf / host 写） */
+} migrate_reason_t;
 
 /*
- * mig_begin_wl - 触发判定 → 选 victim → 启动一个静态 WL 搬移 job
+ * migrate_trigger - 登记一个显式搬移请求（不立即启动；由下一次 migrate_handle 消费）。
  *
- * @param ftl FTL 实例（**前置条件**，非法即 ASSERT）
- * @return true = 已启动 job；false = 未启动（job 忙 / 未触发 / 无 victim）
+ * @param m      handle；**前置条件**，非法即 ASSERT
+ * @param reason 触发原因
  */
-bool mig_begin_wl(ftl_context_t *ftl);
+void migrate_trigger(migrate_handle_t *m, migrate_reason_t reason);
+
+typedef struct
+{
+    ftl_module_status_t base;
+
+    uint8_t  phase;    /* mig_phase_t（观测；外部不要据此驱动） */
+    uint8_t  kind;     /* mig_kind_t（GC / WL / PREDICT） */
+    uint16_t migrated; /* 本次 job 已搬 CW 数 */
+    uint16_t erased;   /* 本次 job 已擦 plane 数 */
+    bool     aborted;
+    bool     erase_failed;
+    bool     timed_out;
+    uint8_t  timeout_phase;
+    uint32_t reclaimed; /* 累计成功回收 SB 数（单调） */
+    uint32_t novictim;  /* 累计「触发但选不出 victim」次数 */
+} migrate_status_t;
 
 /*
- * mig_begin_predict - 慢死预测巡检 → 启动一个"搬空并退役"的搬移 job
+ * migrate_handle - 推进搬移引擎（每轮 must-run；提交即返回）
  *
- * @param ftl FTL 实例（**前置条件**，非法即 ASSERT）
- * @return true = 已启动 job；false = 未启动（job 忙 / 未命中）
+ * 语义：
+ *   ① job 在飞 ⇒ 只推进/心跳（等完成服务函数）；
+ *   ② 不在飞时，若 `load_level != BUSY`，按 handle 自持节拍评估新工作：
+ *      紧急触发（migrate_trigger）→ GC 10ms → WL 5s → predict 1s；
+ *   ③ 每轮最多启动一个 job（单飞行）。
+ *
+ * @param m     handle；**前置条件**，非法即 ASSERT
+ * @param info  本轮动态信息（now_ms / load_level）
+ * @param out   出参：本轮结束后的上报（**非空**）
  */
-bool mig_begin_predict(ftl_context_t *ftl);
+void migrate_handle(migrate_handle_t *m, const ftl_bg_info_t *info, migrate_status_t *out);
 
-/*
- * mig_service - 推进搬移 job（每轮 ftl_service 的 IDLE / NORMAL / BUSY 三档都要调）
- *
- * 在飞 ⇒ 空操作（等完成服务函数）；不在飞且 job 未结束 ⇒ 续跑下一步。
- * 幂等且廉价：无 job 时只判一个 active。
- *
- * ⚠ 本函数**不**同步等待；提交走 ftl_async_* + ftl_op_submit。
- *
- * @param ftl FTL 实例（**前置条件**，非法即 ASSERT）
- */
-void mig_service(ftl_context_t *ftl);
+/* ── 查询（替代外部读 handle 内部） ── */
+bool     migrate_is_active(const migrate_handle_t *m);
+uint32_t migrate_reclaimed_count(const migrate_handle_t *m);
+uint32_t migrate_novictim_count(const migrate_handle_t *m);
 
 /* 完成服务函数 ftl_migrate_callback 的声明在 ftl_op.h —— 那里是 g_op_callbacks 各槽的唯一权威列表。 */
 

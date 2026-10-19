@@ -606,3 +606,48 @@ typedef struct {
   模块划分（`reloc`）。
 - `docs/design/known_risks.md`：共享账本决策、跨 LUN GC/WL、无 supervisor 等
   残余项。
+
+---
+
+## 12. 实现状态（2026-10-19）
+
+> 本节记录**代码落地状态**与偏离；契约正文（§1~§11）仍是目标设计。
+> 未上板，按 R1 一律标「未上板」。
+
+| Phase | 状态 | 落地内容 |
+|---|---|---|
+| 0 | 完成 | 本文档 + §8 字段所有权表 |
+| 1 BBT | 已改未上板 | `bbt_handle(alloc, info, bbt_status_t)`；状态上报 |
+| 2 Journal | 已改未上板 | 写游标/sequence/merge_floor/page_buf/失败观测并入 `journal_handle_t`；`journal_handle` + 查询；坏块端口；replay valid 端口 |
+| 3 Metadata | 已改未上板 | `metadata_handle`；allocator/total_writes 端口；`metadata_live_count`；状态上报 |
+| 4 Migrate | 已改未上板 | `migrate_handle`（自持 GC 10ms / WL 5s / predict 1s 节拍）；`migrate_trigger(GC_URGENT)`；端口；reclaimed/novictim 计数入 handle |
+| 4 RR | 已改未上板 | `rr_handle` / `rr_trigger` / `rr_status_t`；pending 端口；**desc 保留方案未实现**（保留 compact 重下发，见 RISK-ARCH-04） |
+| 5 Checkpoint | 已改未上板 | `checkpoint_handle` + trigger/status；`ftl->cp` 并入 handle；端口；T1/T2/T3 求值收进模块 |
+| 6 L2P cache | 已改未上板 | `l2p_handle`（档位→max_kick 模块内表）；owner 端口返回 `l2p_owner_t`；行查询/失效原语 |
+| 7 Wbuf | 已改未上板 | `wbuf_handle_t` + `wbuf_handle(trigger)`；alloc/pending/migrate 端口 |
+| 8 调度/Confirm | 已改未上板 | confirm park 收进 `pending_confirm_service()`（含 ms 超时）；任务表改具名 `bg_task_id_t`（13→10 项）；PFR 公开头只留 3 个顶层入口，F2/fresh/clean/PF 原语全部 static |
+| Phase 1.5 | 已改未上板 | `migrate` / `wbuf` / `rr_page_scratch` 改 `ftl_storage_t` 挂载指针；数组落 AXI `.bss`，AXI 预算断言已计入 |
+| ms deadline | 已改未上板 | migrate / RR / CP 的轮数计数改绝对 ms：`FTL_SUBMIT_TIMEOUT_MS=10`、`FTL_WAIT_TIMEOUT_MS=50`、`FTL_GROUP_DRAIN_TIMEOUT_MS=100`（待上板标定） |
+
+**有意偏离**（已登记 RISK-ARCH-10）：
+
+- `journal_handle` 增加 `journal_trigger_t`（FLUSH / ERASE_ONLY），保留 must-run 擦除与
+  预算刷页两条调度路径的原有分工；
+- `wbuf_handle` 返回 `ftl_status_t`（写路径必须区分 `FTL_AGAIN` 背压与永久失败）；
+- `pending_confirm_*` 带 `ftl_context_t *`（pending 表是 per-instance 的，设计原文
+  假设设备级 pending 上下文）；
+- RR 采用 compact 重下发而非 §4.5 的 desc 链保留（§〇 主流判据 + 无实测收益）。
+
+**验证**：`make all` / `make release` 零新告警；`make tests UT=FC` 通过；
+`make tests UT=FTL` 仍在冻结的 `tests/unit/test_ftl.c` 上编译失败（既有旧符号，R4：
+测试源由用户维护，不回改生产代码）。
+
+**符号/尺寸证据**（debug ELF，`arm-none-eabi-nm`）：
+
+- PFR 只有 `ftl_media_check_format` / `ftl_media_format` / `ftl_boot_recovery` 为 `T`；
+  fresh/clean/PF 子流程与 F2 原语全部为 `t`。
+- Phase 1.5：`g_ftl` 3352 B（原 ~13.8KB）、`g_ftl_migrate` 4268 B、
+  `g_ftl_wbuf` 4164 B、`g_ftl_rr_page_scratch` 2048 B；AXI 预算 `_Static_assert` 已计入。
+
+**仍未验证**：整组改动**未上板**；需回归正常读写 / GC / WL / RR / CP / journal / BBT /
+格式化 / 掉电重启（RISK-ARCH-06）。

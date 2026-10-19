@@ -234,8 +234,8 @@ int          ftl_op_in_dispatch(void);
 编译期即可发现重复 / 越界，无 init-order 依赖。当前 `sizeof` = 48 B = 12 项；
 **`[1]`~`[11]` 全部有主**（阶段 8 是最后一阶段），`[0]` = `FTL_OP_NONE` 恒 NULL。
 ⚠ `FTL_OP_CHECKPOINT` / `FTL_OP_METADATA` 的服务函数**不推进状态机**（它们的 PREP 阶段含
-同步原语，在完成泵里跑就是嵌套泵）——推进交给下一轮 `ftl_service` 的 `checkpoint_kick` /
-`metadata_dir_kick`；其余 job 的完成服务函数可以自行续跑。
+同步原语，在完成泵里跑就是嵌套泵）——推进交给下一轮 `ftl_service` 的 `checkpoint_handle` /
+`metadata_handle`；其余 job 的完成服务函数可以自行续跑。
 
 #### 1.5.1 读失败子操作的「托管」约定（v0.75 阶段 3）
 
@@ -246,7 +246,7 @@ int          ftl_op_in_dispatch(void);
 pending->op         = PENDING_OP_READ_RECOVERY;   /* 新 op 值，与 READ/WRITE 并列 */
 pending->command_id = FTL_PENDING_CMD_NONE;       /* 0xFFFF：本项已与 FC 命令脱钩 */
 (void)fc_command_release(cmd);                    /* 命令当场归还池 */
-rr_kick(ftl);                                     /* 交给 job，本函数返回 */
+rr_handle(ftl);                                     /* 交给 job，本函数返回 */
 ```
 
 - **pending 项保留、组在飞数不递减** ⇒ host 读组继续 pending，直到 RR job 收尾时
@@ -256,7 +256,7 @@ rr_kick(ftl);                                     /* 交给 job，本函数返�
   陈旧 id 会让一条新命令的完成撞上这个停泊项。
 - 停泊区就是 pending 表本身（深度 32）⇒ **零额外内存**；配套新增
   `pending_find_op(ftl, op, &idx)` / `pending_release_index(ftl, idx)`。
-- `rr_kick` 由 `ftl_service_idle/normal/busy` 每轮调用一次（job 空闲且无托管项时只是
+- `rr_handle` 由 `ftl_service_idle/normal/busy` 每轮调用一次（job 空闲且无托管项时只是
   一次 32 项线性扫描）。
 
 #### 1.5.2 写确认的「停泊」约定（v0.75 阶段 5）
@@ -271,7 +271,7 @@ pending->command_id = FTL_PENDING_CMD_NONE;
 return;                                           /* 组在飞数**不**递减 */
 ```
 
-- 推进者**不是**外部引擎，而是 `ftl_confirm_kick()`——`ftl_service` Phase 2.5 的**开头**，
+- 推进者**不是**外部引擎，而是 `pending_confirm_service()`——`ftl_service` Phase 2.5 的**开头**，
   按下标升序扫（停泊项的 `command_id` 已是哨兵，`pending_lookup` 查不到）：
   仍返 `FTL_AGAIN` 就原地留着下轮再来；否则走与 `ftl_host_io_callback` **完全相同**的收尾
   （`pending_release_index` + `pending_group_complete_subop_multi(owners, SSD_STATUS_OK)`）。
@@ -294,7 +294,7 @@ ftl_submit_write(ftl, &req)
     ├─ NAND_SUCCESS → ftl_confirm_write(ftl, pending)   ← ★ v0.75 阶段 5：**两遍式**
     │   ├─ 第一遍：逐 CW l2p_cache_ready(lba) → 任一未就绪 ⇒ 返 FTL_AGAIN（**一条都不动**）
     │   │            ⇒ 本项**停泊**（op=PENDING_OP_WRITE_CONFIRM、command_id 置哨兵、
-    │   │               组在飞数**不**递减），由 ftl_confirm_kick 每轮推进
+    │   │               组在飞数**不**递减），由 pending_confirm_service 每轮推进
     │   └─ 第二遍（全部就绪）：
     │        l2p_cache_read(lba) → old_pba  ← ★ 完成时**重查 L2P**（不存提交时快照）
     │        journal_append(lba, old, new)  ← 确认后记录
@@ -357,7 +357,7 @@ typedef struct {
 | 阶段 | 位置 | 操作 | NAND 访问 |
 |------|------|------|-----------|
 | 快速路径 | `ftl_host_io_callback` | BBT bitmap 置位 + allocator 标记 | ❌ 无 |
-| 后台持久化 | `ftl_service_idle/normal` → `bbt_kick()`（v0.75 阶段 7 起为异步 job） | 攒批写 NAND BBT（池 56-57） | ✅ 一次一页，提交即返回 |
+| 后台持久化 | `ftl_service_idle/normal` → `bbt_handle()`（v0.75 阶段 7 起为异步 job） | 攒批写 NAND BBT（池 56-57） | ✅ 一次一页，提交即返回 |
 
 **回滚**：写失败后 L2P 不动（仍指向被替换前的映射），Super Block 空洞由 GC 扫描时读失败自然跳过。无需额外回滚逻辑。
 
@@ -811,7 +811,7 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
 
 /* 运行时标记坏块（已删除：统一走 bbt_mark_bad，BBT 单数据源）*/
 /* 检查是否需要 GC（已删除：GC 触发单一数据源 = ftl/gc.h 的 gc_check_triggers，
- * 唯一求值点 = ftl.c 的 ftl_gc_evaluate，v0.63）*/
+ * 唯一求值点 = ftl.c 的 mig_gc_evaluate，v0.63）*/
 ```
 
 ---
@@ -884,7 +884,7 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 | `gc.c` | ⚠ 1 处 | `gc_read_page_with_lba`（`ftl_sync_submit_wait`）——唯一调用者是 `ftl_rebuild_closed_sb_list`（**开机**重建，结构性同步） |
 | `journal.c` | ⚠ 7 处 | ① 非派发上下文的**同步回退**（`journal_append` 页满且 `ftl_op_in_dispatch()==0`）；② 开机 `journal_scan_latest` / `replay` / `truncate` 的擦除与读 |
 | `checkpoint.c` | ⚠ 4 处 | 记录读 ×2 / 写 ×2（**阶段 6** 转 job） |
-| `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / Anchor 落盘全在异步 job（`metadata_job.c`：`metadata_dir_kick` + `ftl_metadata_callback`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的 Anchor 读（开机） |
+| `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / Anchor 落盘全在异步 job（`metadata_job.c`：`metadata_handle` + `ftl_metadata_callback`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的 Anchor 读（开机） |
 | `bbt.c` | ⚠ 7 处 | 记录读 ×2、出厂标记读、擦除、持久化写（**阶段 7**） |
 | `power_failure_recovery.c` | ⚠ 4 处 | 开机 region 预载读、空白页裸读（**结构性同步**，长期保留） |
 | `ftl_fc_interface.c` | — | 同步原语与 `ftl_async_*` 异步原语的定义处（机制层） |
@@ -950,31 +950,36 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 
     Phase 3 ── 三级后台模式（判据 = 未决命令数近似空闲度，非"本轮有无提交 NAND"）
     ⚠ `bg_suspend` 置位（`bbt --erase` 后）⇒ 整体跳过 Phase 3，直接 return。
-    ⚠ v0.75 阶段 3/4 起：rr_kick() / mig_service() **任何档位都要跑**——RR 的 host 读
+    ⚠ v0.75 阶段 3/4 起：rr_handle() / migrate_handle() **任何档位都要跑**——RR 的 host 读
       在等结果，搬移 job 可能是在 BUSY 档被写路径紧急 GC 起的，不占后台带宽预算。
-    ⚠ v0.75 阶段 6 起：checkpoint_kick() 在**三档之外**先跑一次（Phase 3 首）——CP job
+    ⚠ v0.75 阶段 6 起：checkpoint_handle() 在**三档之外**先跑一次（Phase 3 首）——CP job
       可能在 BUSY 档被紧急水位起，后续阶段要跨档位走完；只在起它的那一档推进会把 job 钉死。
+    ├── 三档之前（must-run 正确性关键集，无条件每轮跑）
+    │   ├── checkpoint_handle(ADVANCE)       ← 推进在飞 CP（每轮只推进一次）
+    │   ├── rr_handle()                      ← 推进在飞 RR
+    │   ├── migrate_handle()                 ← 推进在飞搬移 + 自持节拍（GC/WL/predict）
+    │   ├── metadata_handle()                ← 目录整理
+    │   ├── journal_handle(ERASE_ONLY)       ← 新环形块没擦不能写
+    │   └── checkpoint_handle(EMERGENCY)     ← Journal ≥95%
+    │
     ├── IDLE 模式 (inflight == 0):               全力后台
-    │   ├── rr_kick() / mig_service()     ← 推进在飞的 RR / 搬移 job
-    │   ├── l2p_flush_kick_owner(cache, dim, L2P_CACHE_SIZE)  ← v0.75 阶段 5：起**异步**写回（非同步循环）
-    │   ├── GC：ftl_gc_evaluate 命中 ⇒ mig_begin_gc() 起**一个**搬移 job
-    │   ├── mig_begin_wl()                ← 磨损均衡（触发判定在函数内）
-    │   ├── mig_begin_predict()           ← 慢死预测巡检（节流 1s）
-    │   ├── journal_kick() / bbt_kick()                ← v0.75 阶段 7：均为异步 job
-    │   └── checkpoint_begin() (按需；此后每轮 checkpoint_kick 跨档位推进)
+    │   ├── l2p_handle(cache, dim)            ← 档位 → max_kick（模块内表）
+    │   ├── journal_handle(FLUSH)             ← 异步刷页
+    │   ├── bbt_handle()                      ← 攒批持久化
+    │   └── checkpoint_handle(TIMER)          ← T1/T2/T3 触发评估
     │
     ├── NORMAL 模式 (pending ≤ MAX/2 且无排队组):  适度后台
-    │   ├── l2p_flush_kick_owner(cache, dim, BG_NORMAL_FLUSH_COUNT=4)（thrashing 降级时跳过）
-    │   ├── GC：ftl_gc_evaluate 命中 ⇒ mig_begin_gc() 起一个 SB 的 job（同一求值点）
-    │   ├── mig_begin_wl()
-    │   └── checkpoint_begin() (按需；此后每轮 checkpoint_kick 跨档位推进)
+    │   └── 同 IDLE 的四项（l2p max_kick 降到 4）
     │
     └── BUSY 模式 (pending > MAX/2 或 queued != 0):  最小后台（host 饿着，让路）
-        ├── l2p_flush_kick_owner(cache, dim, 1)
-        └── checkpoint_begin() (仅 emergency≥95%；起 job 即返回)
+        └── l2p_handle(cache, dim)            ← max_kick = 1
 ```
 
-> ⚠ **Phase 2.5 的开头是 `ftl_confirm_kick()`**（v0.75 阶段 5）——推进**停泊**的写确认，
+> `migrate_handle` 的自持节拍：GC 10ms / WL 5s / predict 1s（仅 IDLE）；
+> `load_level == BUSY` 时不评估新工作，只推进在飞 job。写路径取不到页对时
+> `migrate_trigger(GC_URGENT)` 只登记，下一轮由 must-run 启动。
+
+> ⚠ **Phase 2.5 的开头是 `pending_confirm_service()`**——推进**停泊**的写确认，
 > 必须早于补发循环：停泊意味着该 LBA 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作
 > 就会读到旧物理页。
 > ⚠ 每实例的写回在飞上限 `L2P_FLUSH_MAX_INFLIGHT = 4`（一次写回 = 1 命令 + 4 buffer，
@@ -1042,14 +1047,14 @@ include/ftl/
 ├── allocator.h                  # Allocator + Super Block + OP/Spare 池
 ├── journal.h                    # Journal + 四层保护
 ├── gc.h                         # GC 触发条件 + 选 victim（搬移在 migrate.h）
-├── migrate.h                    # 搬移 job（migrate_handle_t / mig_begin_* / mig_service），v0.75 阶段 4
+├── migrate.h                    # 搬移 job（migrate_handle_t / mig_begin_* / migrate_handle），v0.75 阶段 4
 ├── metadata.h                   # ★ 固定元数据区布局（单一事实来源）+ FTL_MEDIA_LAYOUT_VERSION + Metadata Directory
 ├── pending.h                    # Pending Request 表 + 完成组表
 ├── completion_table.h           # 统一完成路由表（表项只留 ctx，v0.75）
 ├── ftl_op.h                     # op tag 枚举 + ftl_op_submit/ftl_op_dispatch（v0.75）
 ├── checkpoint.h                 # Checkpoint + Journal 截断协同
 ├── bbt.h                        # BBT 坏块表（池 + 全片擦除原语）
-├── read_recovery.h              # Read Retry + ECC 趋势预测 + 恢复 job（rr_stage_t/rr_kick）
+├── read_recovery.h              # Read Retry + ECC 趋势预测 + 恢复 job（rr_stage_t/rr_handle）
 ├── power_failure_recovery.h     # 三类启动恢复 + 介质格式化
 └── wear_leveling.h              # 动态 + 静态磨损均衡
 

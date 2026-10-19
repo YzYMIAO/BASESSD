@@ -15,7 +15,7 @@
  *
  * ⚠ ②~⑤ 的执行体**不在本文件**：搬移是一个异步 job，GC 与 WL 共用同一台引擎，
  *   见 `ftl/migrate.h` / `migrate.c`（migrate_handle_t + mig_begin_gc / mig_begin_wl /
- *   mig_service + ftl_migrate_callback）。本文件只留**选 victim 与共用原语**：
+ *   migrate_handle + ftl_migrate_callback）。本文件只留**选 victim 与共用原语**：
  *   · gc_select_victim   —— 四项加权评分（GC 侧选块策略）
  *   · gc_decode_cw_lba   —— 已完成读命令的逐 CW META 解码（异步搬移 + 掉电重建共用）
  *   · gc_read_page_with_lba —— 同步读 + 解码（只服务掉电重建）
@@ -61,6 +61,15 @@
 #define GC_TRIGGER_EMERGENCY (0x08U) /* T4: free_count <= FREE_POOL_EMERGENCY */
 #define GC_TRIGGER_WEAR      (0x10U) /* T5: 全表擦除比 max/min > GC_WEAR_LEVEL_RATIO */
 
+/* ── GC 触发判定的求值节拍（由 migrate handle 自持）──
+ * 判据本身是**事件**（空间压力/磨损），但求值含一次**全表扫描**，不能按主循环 pass 跑。 */
+#define GC_EVAL_INTERVAL_MS (10U)
+
+/* GC 触发日志的节拍（与求值同一套时基）。
+ * ⚠ 求值节拍**不能**兼作日志节拍：求值节拍管「多久算一次」，10ms 拍仍会打出 100 行/秒。
+ * 日志要的是「同一状态别重复报」。 */
+#define GC_LOG_INTERVAL_MS (1000U)
+
 /* ── T5 磨损均衡阈值（设计 §4.7）──
  * ⚠ GC_WEAR_LEVEL_MIN_ERASE 是**地板**：max 没到该值前不触发。没有它时，早期
  *   （max 才擦过几次）就可能满足比例条件而反复空跑 GC。
@@ -75,7 +84,7 @@
  * gc_read_page_with_lba - 读取一页 NAND，取回逐 CW 的扇区 LBA
  *
  * 内部管理 FC 命令生命周期，无需调用者关心 alloc/submit/release。
- * ⚠ 唯一调用者是**掉电重建**（ftl_rebuild_closed_sb_list 的逐页反查，开机结构性同步路径）。
+ * ⚠ 唯一调用者是**掉电重建**（PFR 的 F2 全盘重建（内部）的逐页反查，开机结构性同步路径）。
  *   搬移读（GC / WL / 慢死预测）走异步路径：migrate.c 用 ftl_async_read_page
  *   建命令、在完成服务函数里调下面的 gc_decode_cw_lba 收尾——不经过本函数。
  *
@@ -159,8 +168,8 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
  * ⚠ T1 与 T4 同源（都是"空闲块不够"），但阈值不同：T1 是**主动**补池（还留有余量
  *   时就开工），T4 是**最后手段**（池已见底）。
  * ⚠ T5 每被调用一次就多一次 O(FTL_BLOCK_TOTAL) 全表扫描；求值点由
- *   `ftl_gc_evaluate` 的节拍门（GC_EVAL_INTERVAL_MS）兜成本，不在本函数内节流。
- * ⚠ **调用点 = FTL 后台服务里唯一的 GC 求值点** `ftl_gc_evaluate`（ftl.c）：
+ *   `mig_gc_evaluate` 的节拍门（GC_EVAL_INTERVAL_MS）兜成本，不在本函数内节流。
+ * ⚠ **调用点 = FTL 后台服务里唯一的 GC 求值点** `mig_gc_evaluate`（ftl.c）：
  *   **IDLE 与 NORMAL 两条后台路径都从这里过**（IDLE 据此决定是否启动补池突发，
  *   NORMAL 据此决定是否回收一个 SB）；**BUSY 不求值**（host 饿着，让路），
  *   "无块可写"由 `ftl_issue_subop` 的**写路径按需 GC** 兜底。⚠ 这一条**是本仓自己的**、

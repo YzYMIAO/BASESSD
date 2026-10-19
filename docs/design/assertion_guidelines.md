@@ -118,7 +118,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 | | `wear_leveling.c` | Tier 1 | **0** | ⚠️ 见下注 2 |
 | | `migrate.c` | Tier 1（**v0.75 阶段 4**：`ftl_migrate_callback` 的 `completion`/`ctx` 非空与 `ctx == &ftl->migrate_handle`、`mig_begin_predict` 的 `closed_idx` 界内、`mig_finish` 的单飞行门） | **10** | ✅ |
 | | `pending.c` | Tier 2：6×`ftl == NULL` | **6**，但**全是下标越界**（`index < FTL_PENDING_MAX` / `gi < FTL_GROUP_MAX`），**没有 `ftl == NULL`** | ⚠️ 措辞与实现不符（见下注 3） |
-| | `read_recovery.c` | Tier 2：`rr_record_ecc`/`rr_predictive_scan`/`rr_retire_block`/`rr_kick` | **10** | ✅ |
+| | `read_recovery.c` | Tier 2：`rr_record_ecc`/`rr_predictive_scan`/`rr_retire_block`/`rr_handle` | **10** | ✅ |
 | `controller/` | `controller.c` | Tier 1 | **6**（`controller != NULL`、ch/ce/lun 界、路由结果 `tftl`/`fftl`） | ✅ |
 | | `request.c` | Tier 1（route 越界、ftl 槽位恒非空） | **2**，均为路由结果 `ftl != NULL`；⚠️ route 的 ch/ce/lun 越界断言在**被调方** `controller.c`，不在本文件 | ⚠️ 措辞与实现不符（见下注 4） |
 | `common/` | — | 无 | `crash.c` 0（故障路径，见 §五）；`assertion.c` 5（设施自身） | — |
@@ -1161,12 +1161,12 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 | `l2p_cache.c` | 12 | 8 | 含 `line_idx` 界内断言；`line == NULL`（cache miss）与依赖态判空**保留** |
 | `bbt.c` | 7 | 7 | 5 转 + 2 删（`bbt_scan_factory` / `bbt_load` 同文件调用者） |
 | `ftl_fc_interface.c` | 7 | 6 | 全为**出参**（FTL↔FC 边界）；`cmd == NULL`（池空，判据 3）**保留** |
-| `migrate.c` | 4 | 5 | `mig_begin_*`/`mig_service` 转；`mig_start`（static）删 |
+| `migrate.c` | 4 | 5 | `mig_begin_*`/`migrate_handle` 转；`mig_start`（static）删 |
 | `power_failure_recovery.c` | 4 | 9 | 3 个**对外入口**转；6 个同文件内部路径函数删 |
 | `bg_scheduler.c` | 3 | 2 | 任务表项判空 |
 | `ftl.c` | 3 | 3 | `ftl_init` + 本轮补的 `ftl_flush` / `ftl_trim`（C5：唯一调用点已 `ASSERT`） |
 | `gc.c` | 3 | 1 | — |
-| `checkpoint.c` | 2 | 4 | `checkpoint_begin` / `checkpoint_journal_watermark` 转；另 2 处见三、 |
+| `checkpoint.c` | 2 | 4 | `cp_begin` / `checkpoint_journal_watermark` 转；另 2 处见三、 |
 | `wear_leveling.c` | 0 | 6 | **纯删**（恒真）——见三、的分叉 |
 | `wear.c` | 0 | 2 | **纯删**（恒真） |
 | `ftl_op.c` | 0 | 1 | **纯删**（同文件调用者） |
@@ -1224,7 +1224,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 - 落在争议线的 `wear_leveling.c` 6 / `wear.c` 2 / `checkpoint.c` 2 **保持删除**。
 
 **⚠️ 遗留（未闭合，登记不掩盖）**：上列第三组共 10 处的调用者**在别的 .c**
-（`wl_should_trigger`/`wl_select_victim` ← `migrate.c`；`checkpoint_kick` ← `ftl.c`/`bg_scheduler.c`；
+（`wl_should_trigger`/`wl_select_victim` ← `migrate.c`；`checkpoint_handle` ← `ftl.c`/`bg_scheduler.c`；
 `checkpoint_find_latest` ← `ftl.c`/`power_failure_recovery.c`），按 §二十七 的判据 2 本应 `ASSERT`，
 本轮按「恒真」删了。⇒ **全仓口径暂未强行归一**，现行事实口径为：
 

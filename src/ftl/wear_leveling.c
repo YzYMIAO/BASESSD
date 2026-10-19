@@ -46,18 +46,18 @@
  *             ≥ WL_DELTA_THRESHOLD；条件 2 最大 ≥ 平均 × WL_MAX_AVG_RATIO；
  *             条件 3 低擦除区（min + WL_LOW_ZONE_WIDTH 以下）块占比 **>** WL_LOW_BLOCK_PCT%。
  * -------------------------------------------------------------------- */
-bool wl_should_trigger(const struct ftl_context *ftl)
+bool wl_should_trigger(const ftl_allocator_t *alloc, uint32_t total_writes)
 {
     /* 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
-     * 周期节拍由 bg_a_wl 的 WL_EVAL_INTERVAL_MS 负责。 */
-    if (ftl->total_writes < WL_MIN_WRITES)
+     * 周期节拍由 migrate_handle 的 WL 求值 的 WL_EVAL_INTERVAL_MS 负责。 */
+    if (total_writes < WL_MIN_WRITES)
     {
         return false;
     }
 
     /* 一次全表扫描取全部派生量（口径由 allocator 定义）。 */
     allocator_erase_stats_t est;
-    allocator_erase_stats(&ftl->alloc, &est);
+    allocator_erase_stats(alloc, &est);
 
     const uint32_t max_ec = est.erase_max;
     const uint32_t min_ec = est.erase_min;
@@ -80,8 +80,8 @@ bool wl_should_trigger(const struct ftl_context *ftl)
      *   分母是 alloc->total_blocks（用户区好块数）。RETIRED 极少时两者近似一致；
      *   分子集合更大 ⇒ 占比略偏高，判据偏保守（更容易触发，均衡方向安全）。 */
     const uint32_t low_zone  = min_ec + WL_LOW_ZONE_WIDTH;
-    const uint32_t low_count = allocator_count_blocks_below(&ftl->alloc, low_zone);
-    if (low_count > (uint32_t)ftl->alloc.total_blocks * WL_LOW_BLOCK_PCT / 100U)
+    const uint32_t low_count = allocator_count_blocks_below(alloc, low_zone);
+    if (low_count > (uint32_t)alloc->total_blocks * WL_LOW_BLOCK_PCT / 100U)
     {
         return true;
     }
@@ -98,20 +98,20 @@ bool wl_should_trigger(const struct ftl_context *ftl)
  *             有效 CW 须 ≥ 最小有效 CW 门（WL_MIN_VALID_RATIO，太碎不值当搬）；
  *             排序键 = 有效 CW 多（越冷越优先）→ 同有效 CW 下 read_count 高（read disturb 风险高优先）。
  * -------------------------------------------------------------------- */
-bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
+bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim)
 {
     wl_victim_t best;
     memset(&best, 0, sizeof(best));
 
-    uint32_t min_ec = wl_min_erase(ftl);
+    uint32_t min_ec = wl_min_erase(alloc);
 
     /* 门限单位是**有效 CW**（CW 级映射：1 页 = CW_NUM 个映射单元） */
-    uint16_t total_cw_per_sb = (uint16_t)FTL_CW_PER_SB;
+    uint16_t total_cw_per_sb = FTL_CW_PER_SB;
     uint16_t min_valid_cw    = (uint16_t)(total_cw_per_sb * WL_MIN_VALID_RATIO / 100U);
 
-    for (uint16_t i = 0U; i < ftl->alloc.closed_sb_count; i++)
+    for (uint16_t i = 0U; i < alloc->closed_sb_count; i++)
     {
-        const super_block_t *sb = allocator_closed_at(&ftl->alloc, i);
+        const super_block_t *sb = allocator_closed_at(alloc, i);
 
         /* 跳过仍为 Open 的 SB */
         if (sb->is_open)
@@ -129,7 +129,10 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
             {
                 continue;
             }
-            if (ftl_block_is_bad(&ftl->alloc.blocks[ftl_gblock(p, sb->plane_blocks[p])]))
+            const uint16_t block  = sb->plane_blocks[p];
+            const uint16_t gblock = ftl_gblock(p, block);
+
+            if (ftl_block_is_bad(&alloc->blocks[gblock]))
             {
                 has_bad_plane = true;
                 break;
@@ -144,7 +147,7 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
          * 有效 CW 越多（越冷）越优先；同一有效数下 read_count 高者优先
          * （read disturb 风险高 → 优先搬移；read_count 来自 host 读 + GC/WL 搬移读累加）。 */
         allocator_sb_stats_t st;
-        allocator_sb_stats(&ftl->alloc, sb, &st);
+        allocator_sb_stats(alloc, sb, &st);
         if (st.plane_count == 0U)
         {
             continue; /* 全哨兵条目 */
@@ -192,10 +195,10 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim)
  * wl_select_victim 的低擦除区判定。 */
 
 /* wl_min_erase — 全体好块擦除次数的最小值（无好块返回 0） */
-uint32_t wl_min_erase(const struct ftl_context *ftl)
+uint32_t wl_min_erase(const ftl_allocator_t *alloc)
 {
     allocator_erase_stats_t st;
 
-    allocator_erase_stats(&ftl->alloc, &st);
+    allocator_erase_stats(alloc, &st);
     return st.erase_min;
 }

@@ -240,7 +240,7 @@ static void ftl_cmd_bind_pair_topo(fc_command_t *cmd, nand_pba_t base_pba)
 ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[PLANE_NUM], uint32_t cw_bitmap)
 {
     /* cmd 来自调用者的 fc_command_alloc()（已判空）、pba 是调用者的局部数组
-     * （见 ftl_issue_subop / ftl_wbuf_flush）——两者给 NULL 都是调用者 bug ⇒ ASSERT
+     * （见 ftl_issue_subop / wbuf_handle(FLUSH)）——两者给 NULL 都是调用者 bug ⇒ ASSERT
      * （判据 2：层内模块头 = 前置条件，不返回码）。 */
     ASSERT(cmd != NULL);
     ASSERT(pba != NULL);
@@ -574,17 +574,17 @@ static fc_command_t *page_prepare_alloc(uint8_t operation, const ftl_page_cfg_t 
         return NULL;
     }
 
-    cmd->config.operation   = (DWORD)operation;
-    cmd->config.crc         = (DWORD)cfg->crc;
-    cmd->config.random      = (DWORD)cfg->random;
-    cmd->config.ldpc        = (DWORD)cfg->ldpc;
+    cmd->config.operation   = operation;
+    cmd->config.crc         = cfg->crc;
+    cmd->config.random      = cfg->random;
+    cmd->config.ldpc        = cfg->ldpc;
     cmd->config.multi_plane = 0U;
     cmd->config.chain       = FC_CHAIN_END;
     cmd->config.page_type   = FC_PAGE_TYPE_LP;
     /* 页 LBA → 扇区 LBA。FTL_LBA_UNKNOWN（FTL_PAGE_CFG_DATA_ANY）⇒ FC_META_UNKNOWN，
      * 让 FC 侧跳过「页内 META 与本命令 LBA 比对」那一项。 */
-    cmd->meta               = (cfg->lba == (lba_t)FTL_LBA_UNKNOWN) ? (DWORD)FC_META_UNKNOWN
-                                                                   : (DWORD)(cfg->lba << CW_WIDTH);
+    cmd->meta               = (cfg->lba == (lba_t)FTL_LBA_UNKNOWN) ? FC_META_UNKNOWN
+                                                                   : (cfg->lba << CW_WIDTH);
 
     return cmd;
 }
@@ -1187,9 +1187,9 @@ ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t 
         return FTL_AGAIN; /* 命令池空 = 瞬态背压 */
     }
 
-    cmd->config.ch          = (DWORD)ch;
-    cmd->config.ce          = (DWORD)ce;
-    cmd->config.lun         = (DWORD)lun;
+    cmd->config.ch          = ch;
+    cmd->config.ce          = ce;
+    cmd->config.lun         = lun;
     cmd->config.operation   = OP_SET_FEATURES;
     cmd->config.crc         = FC_CRC_DISABLE;
     cmd->config.random      = FC_RANDOM_DISABLE;

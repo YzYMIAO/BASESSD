@@ -624,7 +624,7 @@ SRAM 缓存热点 region**。
    日志块做 victim，把其上的活 region **搬移**到当前日志块后回收整块，切断"冷 region 永久占块"
    的慢性流失。**本身无介质格式变更**（复用同一套日志块 + Directory 语义）；同批 v0.65 的 rr
    持久化把 Wear 条目 8B→12B ⇒ `FTL_MEDIA_LAYOUT_VERSION` 2→3，**由开机自动格式化兜底**。
-   ⚠ **v0.75 阶段 8**：同步版已删，改由 `metadata_handle_t` 状态机承载（`metadata_dir_kick` 起步/续跑、
+   ⚠ **v0.75 阶段 8**：同步版已删，改由 `metadata_handle_t` 状态机承载（`metadata_handle` 起步/续跑、
    `ftl_metadata_callback` 收尾）——算法、victim 判据、③④ 落盘顺序契约**逐条不变**，只是不再阻塞
    服务循环，且 `metadata_dir_commit_region` 不再就地擦块（v0.75 登记单槽 `reclaim_target`；
    v0.80 起改为 `reclaim_pending` 位图 + 全异步擦除）。

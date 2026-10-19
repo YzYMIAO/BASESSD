@@ -202,7 +202,7 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | **`spare_pool_plane_isolated`** | **回归用例（v0.74）**：refill plane 1 ⇒ 只减 `spare_count[1]`、`spare_count[0]` 不变，且补进 free pool 的是 **plane 1 的块**（修复前全局池 ⇒ 补的是 plane 0 的块） |
 | `is_bad_set_bad_inline` | `bbt_is_bad`/`bbt_set_bad` 纯 bitmap（含 `NULL`→0；越界块保守判坏） |
 
-> **未覆盖**：`bbt_load` / `bbt_save` / `bbt_kick` 的池定位与持久化、`bbt_scan_factory`、
+> **未覆盖**：`bbt_load` / `bbt_save` / `bbt_handle` 的池定位与持久化、`bbt_scan_factory`、
 > `bbt_format_erase`（两阶段格式化 / `FORMAT_IN_PROGRESS` 中断恢复）、
 > `bbt_medium_has_ftl_data`——需要 NAND seam 或上板验证。
 
@@ -255,10 +255,10 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | | `async_job_self_release` | journal 写提交 → 伪完成 + drain | 服务函数**自行 release**（`command_used` 回基线） |
 | | `backpressure_ct_full` | 32 条 `ctx≠NULL` 提交在飞 → 第 33 条 `ftl_op_submit` | `FTL_ERROR` + `completion_table_count()` 不变（32）；逐条伪完成 + release 收尾 |
 | | `backpressure_pool_exhaust` | 64 条 erase 提交在飞 → 第 65 次 `ftl_async_erase_block` | `FTL_AGAIN` + 在飞命令数不变；逐条伪完成 + release 收尾 |
-| **C.2 journal** | `write_complete_idle` | `journal_append`×2 → `journal_kick`（JRN_WRITE）→ 伪完成 | JRN_IDLE + 指针推进到 target + `current_entry==0` + `page_buf` 0xFF |
+| **C.2 journal** | `write_complete_idle` | `journal_append`×2 → `journal_handle`（JRN_WRITE）→ 伪完成 | JRN_IDLE + 指针推进到 target + `current_entry==0` + `page_buf` 0xFF |
 | | `cross_block_erase_chain` | 预置 `current_page=PAGES_PER_BLOCK-1` → append → kick（need_erase）→ 伪完成 | 服务函数**当场起擦**（JRN_ERASE）→ 再伪完成 → IDLE + `current_block` 回绕 |
 | | `write_fail_advance_past_page` | kick 后伪完成 status=0x01 | 回 IDLE + 指针**推进到 target**（失败页不可复用）+ `write_fail_pending` 置位 + release 正常 |
-| **C.3 bbt** | `write_complete_clear_dirty` | 预置 `cursor_valid=1`、`dirty=1`，`dirty_gen` 不变 → `bbt_kick`（WRITE）→ 伪完成 | IDLE + `dirty==0` + `write_idx` 前移 1 |
+| **C.3 bbt** | `write_complete_clear_dirty` | 预置 `cursor_valid=1`、`dirty=1`，`dirty_gen` 不变 → `bbt_handle`（WRITE）→ 伪完成 | IDLE + `dirty==0` + `write_idx` 前移 1 |
 | | `write_complete_dirty_gen_advanced` | 写飞行期间 `bbt_mark_bad`（`dirty_gen++`）→ 伪完成成功 | IDLE + **`dirty` 保留**（本条 record 是旧快照，需再落一条） |
 | | `erase_then_write_chain` | 预置 `cursor_valid=1`、`dirty=1`、`write_idx=ring_total-1` → kick（ERASE）→ 伪完成 | 服务函数**链起 WRITE**（不回 IDLE）→ 再伪完成 → IDLE + `dirty==0` |
 | | `write_fail_keep_dirty` | 伪完成 status=0x01 | 游标**照推**（半编程槽不可复用）+ `dirty` 保留 |
@@ -267,8 +267,8 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | | `incremental_fail_restore_dirty` | 伪完成 status=0x01 | `next_page` 不推进 + 脏位并回（`dirty |= snapshot`） |
 | **C.5 mig（快路径）** | `gc_fastpath_erase_done` | `closed_sb_list[0]` 塞 `valid_total==0` victim + `free_count<FREE_POOL_TARGET` → `mig_begin_gc`（MIG_ERASE）→ 伪完成 | `mig_step` 自动续 → DONE + `free_count` 增加 |
 | | `gc_full_chain`（**标记可选**） | 预置 cache 行 CLEAN/DIRTY + entries + META → READ→SETTLE→WRITE→FLUSH_JRN→ERASE 各命令伪完成 | 状态机走全链 → DONE；**实现期评估 §5.6 候选 1**；完整搬移放 HIL |
-| **C.6 cp/md** | `cp_kick_complete_alternate` | `checkpoint_begin` → 循环「`checkpoint_kick`（waiting 则 return）→ 伪完成」至 CP_DONE；预置游标 | 各提交阶段恰一命令在飞、终态 DONE |
-| | `md_reclaim_kick_complete` | `metadata_dir_kick` ↔ 伪完成交替 | `md_job` 各阶段推进至 IDLE |
+| **C.6 cp/md** | `cp_kick_complete_alternate` | `cp_begin` → 循环「`checkpoint_handle`（waiting 则 return）→ 伪完成」至 CP_DONE；预置游标 | 各提交阶段恰一命令在飞、终态 DONE |
+| | `md_reclaim_kick_complete` | `metadata_handle` ↔ 伪完成交替 | `md_job` 各阶段推进至 IDLE |
 | **C.7 l2p_cache** | `miss_loading_clean` | `l2p_cache_read` miss → LOADING + `FTL_AGAIN` → 伪完成（预填 region 数据进 desc buffer） | CLEAN + entries 生效 + 再 `l2p_cache_read` 命中 `FTL_OK` |
 | | `flush_dirty_flushing_clean` | `l2p_cache_write`（DIRTY）→ `l2p_cache_flush_kick` → FLUSHING → 伪完成 | CLEAN + region 脏位清 |
 | | `flush_fail_stays_dirty` | 伪完成 status=0x01 | 置回 DIRTY 保留下轮重试 |
@@ -405,12 +405,12 @@ FTL 层**确定性**（无 PRNG；`config.random` 是 FC 配置位，非 FTL 逻
   journal（写→跨块擦）、bbt（擦→写）、wear（擦→快照多页链）、migrate（搬移多命令链）。
   ⇒ 用例循环 `while (phase != IDLE) { ut_complete_and_drain(ut_sq_head(), 0x40); }`。
 - **踢↔伪完成交替**（服务函数只记完成 + 改 phase，**不**调 kick——kick 的 PREP 阶段含同步
-  NAND 原语，在完成泵里跑就是嵌套泵）：checkpoint（`checkpoint_kick` ↔ 伪完成）、
-  metadata 整理（`metadata_dir_kick` ↔ 伪完成）。
+  NAND 原语，在完成泵里跑就是嵌套泵）：checkpoint（`checkpoint_handle` ↔ 伪完成）、
+  metadata 整理（`metadata_handle` ↔ 伪完成）。
   ⇒ 用例手动交替「kick → 伪完成 → kick → …」直到 DONE。
 
 **job 专用前置**（L0 不碰 NAND，须预置避开同步 NAND 路径）：
-- `bbt_kick` / `checkpoint` 的游标定位（`metadata_ring_locate` / Anchor 定位）是**同步读 NAND**
+- `bbt_handle` / `checkpoint` 的游标定位（`metadata_ring_locate` / Anchor 定位）是**同步读 NAND**
   ⇒ 预置 `cursor_valid=1`（bbt）/ `anchor_cursor_valid=1`（cp）跳过；
 - migrate 的 READ/WRITE_SETTLE 会 `l2p_cache_ready==0` **原地返回**（§5.6 候选改动 1）⇒ 全链
   用例预置 cache 行 CLEAN/DIRTY + entries，或只测不依赖该等路径的快路径（valid_total==0 → ERASE）。
@@ -442,7 +442,7 @@ FTL 的时间源经**平台抽象**：`ftl_now_ms` / `checkpoint_now_ms` 读 `ss
 
 | # | 候选改动 | 测试怎么顶出 | 风险面 |
 |---|---|---|---|
-| 1 | **migrate READ/WRITE_SETTLE 等待 `l2p_cache_ready`**（`mig_step_read_settle` / `mig_step_write_settle` 原地返回；`l2p_cache_ready` 在 miss 时会**起异步加载**） | 全链 GC 用例预置非就绪 region ⇒ 状态机停在 SETTLE，等 region 加载完成后下一轮继续 | 该 region 恰无人访问时由 `l2p_cache_ready` 自行触发加载；等待期间 `stall_rounds` 被清零，**不是**上限兜底 |
+| 1 | **migrate READ/WRITE_SETTLE 等待 `l2p_cache_ready`**（`mig_step_read_settle` / `mig_step_write_settle` 原地返回；`l2p_cache_ready` 在 miss 时会**起异步加载**） | 全链 GC 用例预置非就绪 region ⇒ 状态机停在 SETTLE，等 region 加载完成后下一轮继续 | 该 region 恰无人访问时由 `l2p_cache_ready` 自行触发加载；等待期间 `stall_ms` 被清零，**不是**上限兜底 |
 | 2 | **checkpoint 水位只置不撤**（`checkpoint_journal_watermark` 置位，撤位在 CP_TRUNC_* → `journal_truncate_commit`，需真 NAND） | EMERGENCY 回落用例 L0 无法纯 RAM 收口；要么驱动 CP 走到 TRUNC 阶段再断言，要么列 HIL | 只影响测试收口方式，非缺陷 |
 | 3 | completion seam fallback | 若个别读路径需要 `process_read` 数据语义（desc 每 CW status 回写 + `failed_descriptor_id` 聚合）而测试侧失真 | fc.c `#if FC_NAND_TEST_ENABLE` 薄 seam（包现成 `fc_complete_from_nand`） |
 | 4 | **红线**：派发上下文不得调同步原语（`ftl_op_in_dispatch` ASSERT，`ftl_fc_interface.c:535`） | 测试泵只能在非回调处（`ut_complete_and_drain` 外）用 | 服务函数里嵌套泵 = 解耦要消除的东西 |
@@ -541,7 +541,7 @@ endif
   本方案落在一个**新**的独立测试文件（`test_ftl.c`，用户自建）
 - 不扩 linker 加 region
 - **不纳入（仍属 HIL）**：`allocator_alloc`（v0.66 已删死码）；`ftl_wbuf_*`（全 `static`，
-  需真 NAND → `hil_ut_design.md` + §4.10 的 wbuf flush 泵）。`metadata_dir_kick` 已**改纳入**
+  需真 NAND → `hil_ut_design.md` + §4.10 的 wbuf flush 泵）。`metadata_handle` 已**改纳入**
   L0 异步套件（§4.9 C.6 的 `md_reclaim_kick_complete`——kick 与伪完成交替即可驱动整理 job，
   不再需要真 NAND 擦写）。
 - **不做（待 FTL 层改动落定）**：§4.9 的异步套件实现（计划已定、seam 已编译锚定，

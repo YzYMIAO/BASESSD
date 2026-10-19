@@ -23,7 +23,8 @@
 
 #include "allocator.h"
 #include "assertion.h"
-#include "metadata.h" /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
+#include "ftl_module.h" /* ftl_bg_info_t / ftl_module_status_t */
+#include "metadata.h"   /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -153,7 +154,7 @@ void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase);
  *    **不擦任何用户块**（工厂标记仍完整）。
  * ② 擦除**除 BBT 池之外**的全部块（所有 plane）；擦失败的块标 BAD。
  * ③ 清 `FORMAT_IN_PROGRESS`，再次 `bbt_save` 把新 BAD 并入（best-effort；
- *    失败则 dirty 留给后台 bbt_kick；工厂坏块图已在 ① 落盘）。
+ *    失败则 dirty 留给后台 bbt_handle；工厂坏块图已在 ① 落盘）。
  *
  * ⚠ **不读出厂坏块标记**：标记的读取职责唯一归 `bbt_init`（且只在空片时做）；
  *   因此「必须在 bbt_init 之后调用」是承重的。
@@ -170,7 +171,7 @@ ftl_status_t bbt_format_erase(ftl_allocator_t *alloc);
  * bbt_mark_bad - 运行时标记坏块
  *
  * ① ftl_block_t.state 置 BAD + 清有效页位图（BST 单数据源）
- * ② 只置 alloc->bbt.dirty —— 写回 NAND 由后台 bbt_kick 攒批执行
+ * ② 只置 alloc->bbt.dirty —— 写回 NAND 由后台 bbt_handle 攒批执行
  *
  * @param alloc  Allocator 上下文
  * @param gblock 坏 Block 编号（全局 Block 号）
@@ -231,8 +232,25 @@ static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
  */
 ftl_status_t bbt_save(ftl_allocator_t *alloc);
 
+/* ── BBT 模块 handle 的上报结构（docs/design/ftl_module_contracts.md §4.1）──
+ *
+ * `base` 是公共前缀（state / critical / wants_run / progress / next_ms / error）。
+ * BBT 只做提交背压，**无周期** ⇒ next_ms 恒 0。
+ */
+typedef struct
+{
+    ftl_module_status_t base;
+
+    uint8_t  phase;     /* BBT_JOB_IDLE / ERASE / WRITE（观测；外部不要据此驱动） */
+    bool     dirty;     /* 是否有未落盘变更 */
+    uint32_t dirty_gen; /* dirty 代际（写飞行期间的新变更） */
+    uint32_t sequence;  /* 本池单调序号 */
+    uint16_t write_idx; /* 池内下一个待写槽 */
+    uint16_t bad_count; /* 当前坏块数 */
+} bbt_status_t;
+
 /*
- * bbt_kick - 后台批量持久化入口（**提交即返回**）
+ * bbt_handle - BBT 后台持久化入口（typed handle；提交即返回）
  *
  * 当 alloc->bbt.dirty 置位时，装配一个 BBT job 并提交第一条命令：
  *   换块需擦 ⇒ 异步擦（phase = BBT_JOB_ERASE）→ 擦完成再起写；
@@ -240,15 +258,20 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc);
  * 成败由 g_op_callbacks[FTL_OP_BBT]（ftl_bbt_callback）收尾：写完成后推进池游标、
  * 成功清 dirty、失败保留 dirty 供下轮重试。
  *
+ * `info` 当前不参与决策（BBT 是 dirty 驱动、无周期），保留参数是为了统一 typed 入口
+ * （docs/design/ftl_module_contracts.md §3.3）。
+ *
  * ⚠ 本函数只保证「已起步」；成败判据 = job 走完且 dirty 清零（同步路径见 bbt_save）。
  * ⚠ **单飞行**：命令在飞 ⇒ 空操作（池内一条 record 一次写，重入会争同一槽）；
  *   若上一步提交被背压拒（job 停在 WRITE 但无命令在飞），本函数只**续提交写**，
  *   不重走换块判定——擦已成功，重擦纯属磨损。
- * ⚠ 只由 ftl_service 的后台档（idle/normal）调用。开机/格式化路径仍走同步 bbt_save。
+ * ⚠ 只由后台调度器/B 档调用。开机/格式化路径仍走同步 bbt_save。
  *
  * @param alloc  Allocator 上下文；**前置条件**，非法即 ASSERT
+ * @param info   本轮动态信息（当前未用，可传 NULL）
+ * @param out    出参：本轮结束后的上报（**非空**，由调用者提供）
  */
-void bbt_kick(ftl_allocator_t *alloc);
+void bbt_handle(ftl_allocator_t *alloc, const ftl_bg_info_t *info, bbt_status_t *out);
 
 /*
  * bbt_load - 从 NAND BBT 池加载 BBT

@@ -33,6 +33,7 @@ void bg_scheduler_init(bg_scheduler_t *sched, const bg_task_t *table, uint8_t co
     }
     sched->task_count = count;
     sched->cfg        = NULL;
+    sched->level      = BG_LEVEL_IDLE;
 }
 
 void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_cfg_t *cfg)
@@ -44,11 +45,12 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
     const ssd_platform_ops_t *platform = ssd_platform_get();
     const bool                clock_ok = (platform != NULL) && (platform->time_us != NULL);
 
-    /* 发布本轮配置：任务（如 l2p flush 的条数上界）从这里读，不再各自反查档位表。 */
+    /* 发布本轮配置：任务（如 l2p flush 的条数上界）从这里读，不再各自反查档位表。
+     * 档位（sched->level）由策略层 ftl_bg_service 在同轮先写入，本引擎不改。 */
     sched->cfg = cfg;
 
     /* ── Pass 0：must-run 正确性关键集（不 gate、不占预算）──
-     * 表序即执行序：checkpoint_kick（表首）必须最先——在飞的 CP 要跨轮推进，
+     * 表序即执行序：checkpoint_handle（表首）必须最先——在飞的 CP 要跨轮推进，
      * 拖到预算 pass 里会被低优先级/预算耗尽饿死。 */
     for (uint8_t i = 0U; i < sched->task_count; i++)
     {

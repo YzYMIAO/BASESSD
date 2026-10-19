@@ -139,7 +139,7 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
  * ftl_migrate_callback - 搬移 job（GC / 静态 WL / 慢死预测）的完成服务函数（定义在 migrate.c）。
  *
  * 由 g_op_callbacks[FTL_OP_GC] 与 [FTL_OP_WL] **共同**引用（同一台引擎，靠 job.kind
- * 区分 victim 来源、job.post 区分收尾）；ctx = `migrate_handle_t *`（= &ftl->migrate_handle）。
+ * 区分 victim 来源、job.post 区分收尾）；ctx = `migrate_handle_t *`（= ftl->migrate_handle）。
  * 服务函数按 job.phase 推进（读完成 ⇒ 解 META + 反查 L2P；写完成 ⇒ 改 L2P/Journal +
  * 迁移有效计数；擦完成 ⇒ 归还/退役/标坏），每条命令自己 fc_command_release。
  */
@@ -163,9 +163,9 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
  *
  * 由 g_op_callbacks[FTL_OP_CHECKPOINT] 引用；ctx = `checkpoint_handle_t *`（= ftl->checkpoint_handle）。
  * 服务函数按 job.phase 记完成结果、推进 phase、release 命令。
- * ⚠ 与 ftl_migrate_callback 的差别：本函数**不**推进状态机（不调 checkpoint_kick）——
+ * ⚠ 与 ftl_migrate_callback 的差别：本函数**不**推进状态机（不调 checkpoint_handle）——
  *   CP 的阶段里有同步原语（游标未建立时要读池定位），在完成泵里跑就是嵌套泵。
- *   推进交给下一轮 ftl_service 的 checkpoint_kick。
+ *   推进交给下一轮 ftl_service 的 checkpoint_handle。
  */
 void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
@@ -183,16 +183,17 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
 /*
  * ftl_metadata_callback - L2P 日志块整理 job（回收 / 抗碎片压缩）的完成服务函数（定义在 metadata_job.c）。
  *
- * 由 g_op_callbacks[FTL_OP_METADATA] 引用；ctx = `metadata_handle_t *`（= ftl->metadata_dir->handle）。
+ * 由 g_op_callbacks[FTL_OP_METADATA] 引用；ctx = `metadata_dir_cache_t *`
+ * （模块上下文；服务函数内部取 `&dir->handle`）。
  * 服务函数按 job.phase 记完成结果、改 phase、release 命令：
  *   · RECLAIM     ⇒ 成功清待回收位 + allocator_free_block；失败保留位，下轮重试；
  *   · CP_READ     ⇒ 成功 ftl_cmd_read_data 拷进 job.cp_buf（**须早于 release**）→ CP_WRITE；
  *   · CP_WRITE    ⇒ 成功 metadata_dir_commit_region 登记 → CP_READ；失败中止（victim 不擦）；
  *   · CP_ANCHOR_* ⇒ 逐页写 + commit（无论成败都推进游标）；
  *   · CP_RECLAIM  ⇒ 擦完归还 victim → DONE。
- * ⚠ 与 ftl_migrate_callback 的差别：本函数**不**推进状态机（不调 metadata_dir_kick）——
+ * ⚠ 与 ftl_migrate_callback 的差别：本函数**不**推进状态机（不调 metadata_handle）——
  *   整理 job 的 CP_ANCHOR_PREP 里有同步原语（游标未建立时要读池定位），在完成泵里跑
- *   就是嵌套泵。推进交给下一轮 ftl_service 的 metadata_dir_kick。
+ *   就是嵌套泵。推进交给下一轮 ftl_service 的 metadata_handle。
  */
 void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 

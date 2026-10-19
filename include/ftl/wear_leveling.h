@@ -10,7 +10,7 @@
  *   确保新分配的 Block 磨损均匀。已在 allocator 中实现。
  *
  * 静态磨损均衡（Static WL）：
- *   `bg_a_wl` 预算任务，按 WL_EVAL_INTERVAL_MS 节拍求值。
+ *   `migrate_handle 的 WL 求值` 预算任务，按 WL_EVAL_INTERVAL_MS 节拍求值。
  *   主动搬移低擦除 Block 中的冷数据到 Cold Super Block，
  *   使这些 Block 被擦除一次，提升擦除次数。
  *
@@ -21,13 +21,11 @@
  *     动态 WL 优先选中写入，擦除计数回升；**不退役**（退役只属于慢死预测/RR）
  */
 
+#include "allocator.h" /* ftl_allocator_t（共享数据面账本，策略只读） */
 #include "nand_config.h"
 #include "ssd_types.h" /* bool */
 
 #include <stdint.h>
-
-/* ── 前向声明（ftl_context_t 在 ftl.h 中定义，.c 文件需先 include ftl.h） ── */
-struct ftl_context;
 
 /* ── WL 参数 ── */
 
@@ -65,7 +63,7 @@ typedef struct
  * @param ftl  FTL 上下文
  * @return true 需要触发，false 不需要
  */
-bool wl_should_trigger(const struct ftl_context *ftl);
+bool wl_should_trigger(const ftl_allocator_t *alloc, uint32_t total_writes);
 
 /*
  * wl_select_victim - 选择 WL victim Super Block
@@ -77,7 +75,7 @@ bool wl_should_trigger(const struct ftl_context *ftl);
  * @param victim 输出：选中的 victim
  * @return true 找到，false 无合适 victim
  */
-bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim);
+bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim);
 
 /*
  * ⚠ 搬移在 `ftl/migrate.h` 的异步 job 里完成：GC 与 WL 共用同一台引擎，
@@ -95,6 +93,6 @@ bool wl_select_victim(const struct ftl_context *ftl, wl_victim_t *victim);
  * 唯一保留的统计访问器：wl_select_victim 用它确定低擦除区。
  * 热路径 wl_should_trigger 直接调 allocator_erase_stats 一次取全。
  */
-uint32_t wl_min_erase(const struct ftl_context *ftl);
+uint32_t wl_min_erase(const ftl_allocator_t *alloc);
 
 #endif /* FTL_WEAR_LEVELING_H */

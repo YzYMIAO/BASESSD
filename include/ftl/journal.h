@@ -23,13 +23,14 @@
  *
  * 写模型：
  *   追加进 RAM 页缓冲（page_buf）——**页满异步落盘**，交给 job
- *   （journal_kick / g_op_callbacks[FTL_OP_JOURNAL]），使 host 写完成回调里不嵌套
+ *   （journal_handle / g_op_callbacks[FTL_OP_JOURNAL]），使 host 写完成回调里不嵌套
  *   完成泵。需要屏障语义的调用者显式调 journal_flush_page（只剩结构性同步上下文：
- *   HIL `fl` / 开机路径 / CLI——GC/WL 的 F10 走 journal_kick 的异步等待 + 失败 pending）。
+ *   HIL `fl` / 开机路径 / CLI——GC/WL 的 F10 走 journal_handle 的异步等待 + 失败 pending）。
  */
 
 #include "allocator.h"  /* ftl_allocator_t（持续擦除失败 → bbt_mark_bad） */
 #include "ftl_config.h" /* nand_pba_t */
+#include "ftl_module.h" /* ftl_bg_info_t / ftl_module_status_t */
 #include "ftl_type.h"
 #include "l2p_cache.h"
 #include "metadata.h"    /* JOURNAL_BLOCK0 / JOURNAL_BLOCK_COUNT 块位置 */
@@ -75,7 +76,7 @@ typedef struct
  *
  * 单飞行：phase != JRN_IDLE 时不再起新页写（否则两条写会争同一个页地址）。
  * 页满且 job 忙 ⇒ **非派发上下文**走同步回退（journal_flush_page）；派发上下文
- * （host 写完成 / 搬移完成）**丢弃本条 + LOGE**，整页留给 journal_kick 下轮刷。 */
+ * （host 写完成 / 搬移完成）**丢弃本条 + LOGE**，整页留给 journal_handle 下轮刷。 */
 typedef enum
 {
     JRN_IDLE = 0, /* 无在飞 */
@@ -97,8 +98,18 @@ typedef enum
     JRN_TRUNC_NEEDS_ERASE = 1,  /* 需擦 out_addr / out_block */
 } jrn_truncate_step_t;
 
+/*
+ * journal_handle_t — 本模块的**执行状态**（FSM / 写游标 / 持久性失败观测）
+ *
+ * 归属：`l2p_journal_t.handle`（per-instance）。共享账本（L2P cache / BST /
+ * allocator）不在这里；需要它们时走 `l2p_journal_t` 里的端口。
+ *
+ * 主流程**不读**本结构的 phase / 游标 / 失败位：只读 `journal_status_t` 与查询
+ * （docs/design/ftl_module_contracts.md §4.2）。
+ */
 typedef struct
 {
+    /* ── 异步刷页 job ── */
     uint8_t    phase;        /* journal_phase_t */
     uint8_t    need_erase;   /* 有**未起**的擦除：target_block 待擦（擦命令起不来时留待重试） */
     uint8_t    target_block; /* 页写成功后 current_block 的落点 */
@@ -107,30 +118,7 @@ typedef struct
     uint8_t    from_page;    /* 起写时的 current_page */
     nand_pba_t waddr;        /* 在飞页地址（诊断 / 心跳） */
 
-    /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 phase/age */
-    uint32_t start_ms;
-    uint32_t log_ms;
-} journal_handle_t;
-
-typedef struct
-{
-    ftl_topology_t topo; /* 目标 NAND 芯片路由 */
-
-    /* 分配器（仅用于把持续擦除失败的环形块标进 BBT）。
-     * 由 ftl_init 在 journal_init 之后绑定；测试夹具可为 NULL（只用 RAM bad_mask）。 */
-    ftl_allocator_t *alloc;
-
-    /* 环形块坏块策略（RISK-JN-01，全部 RAM 态）：
-     *   bad_mask     —— 已判定不可用的环形块（bit b）；持久化由 bbt_mark_bad 承担，
-     *                   重启后 BST BAD 会重新挡住这些块。
-     *   erase_fail_count / erase_fail_block —— 同一块连续擦除失败计数；
-     *                   达 JRN_ERASE_FAIL_MAX 即标坏并跳到下一可用块。
-     *   ring_full    —— 全部环形块不可用：journal 停止写入（不擦未擦块、不无限重试）。 */
-    uint8_t bad_mask;
-    uint8_t erase_fail_count;
-    uint8_t erase_fail_block;
-    uint8_t ring_full;
-
+    /* ── 环形写游标 ── */
     uint8_t  current_block;
     uint8_t  current_page;
     uint8_t  current_entry;
@@ -152,6 +140,17 @@ typedef struct
     uint8_t checkpoint_needed;
     uint8_t emergency;
 
+    /* ── 环形块坏块策略（RISK-JN-01，全部 RAM 态）──
+     *   bad_mask     —— 已判定不可用的环形块（bit b）；持久化由 bad_block_port 承担，
+     *                   重启后 BST BAD 会重新挡住这些块。
+     *   erase_fail_count / erase_fail_block —— 同一块连续擦除失败计数；
+     *                   达 JRN_ERASE_FAIL_MAX 即标坏并跳到下一可用块。
+     *   ring_full    —— 全部环形块不可用：journal 停止写入（不擦未擦块、不无限重试）。 */
+    uint8_t bad_mask;
+    uint8_t erase_fail_count;
+    uint8_t erase_fail_block;
+    uint8_t ring_full;
+
     /* ── 持久性失败观测（全部 RAM，不随介质持久化）──
      * 页写 / 换块擦失败时 +1 并置 pending。`write_fail_seq` 是失败时刻的
      * sequence_counter；pending 一直阻止 victim 擦除（GC/WL/predict），直到一次
@@ -162,7 +161,32 @@ typedef struct
     uint32_t write_fail_seq;
     uint8_t  write_fail_pending;
 
-    /* 异步刷页 job（放在末尾，纯增量字段） */
+    /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 phase/age */
+    uint32_t start_ms;
+    uint32_t log_ms;
+} journal_handle_t;
+
+/*
+ * journal_bad_block_port_t — 环形块坏块查询/标记端口（docs §4.2）
+ *
+ * journal 不持有 allocator，也不 include BST 语义：只通过端口问「这块坏吗」、
+ * 「把这块标坏」。端口实现由 FTL 装配层（ftl.c）提供，ctx 自持。
+ */
+typedef struct
+{
+    void *ctx;
+    bool (*block_is_bad)(void *ctx, uint16_t gblock);
+    void (*mark_bad)(void *ctx, uint16_t gblock);
+} journal_bad_block_port_t;
+
+typedef struct
+{
+    ftl_topology_t topo; /* 目标 NAND 芯片路由 */
+
+    /* 坏块端口（持续擦除失败 → 标坏）。未绑定时只维护 RAM bad_mask。 */
+    journal_bad_block_port_t bad_block_port;
+
+    /* 异步刷页 job / 环形写游标 / 失败观测（见 journal_handle_t） */
     journal_handle_t handle;
 } l2p_journal_t;
 
@@ -210,8 +234,12 @@ bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out, 
  */
 void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, uint32_t floor_sequence);
 
-/* journal_init - 初始化 Journal：记录拓扑、预铸各块 PBA、复位写指针与序号 */
+/* journal_init - 初始化 Journal：记录拓扑、复位写指针与序号、清空端口 */
 void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
+
+/* journal_bind_bad_block_port - 绑定坏块端口（装配层在 journal_init 之后调用）。
+ * 端口为纯函数指针 + ctx，生命周期须覆盖 Journal；未绑定时只维护 RAM bad_mask。 */
+void journal_bind_bad_block_port(l2p_journal_t *journal, const journal_bad_block_port_t *port);
 /* 追加一条 L2P 更新。若当前页缓冲里已有**同一 LBA** 的条目，就地更新
  * （只改 old/new PBA，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。
  * 返回：true = 已追加 / 就地合并；false = 页满且异步刷页起不来，本条目被丢弃。
@@ -219,20 +247,95 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
  *   host 写路径当前只能记日志继续（其 drop 分支按注释结构性不可达）。 */
 bool journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_pba_t new_pba);
 
-/* journal_kick - 后台推进 Journal：把待写的整页 / 待起的擦除交给异步 job。
- *   由 ftl_service_idle/normal 每轮调用；job 已在飞或无事可做时为空操作。 */
-void journal_kick(l2p_journal_t *journal);
+/* ── 模块 handle（typed 入口，docs/design/ftl_module_contracts.md §3.3 / §4.2）── */
 
-/* journal_kick_erase_only - 后台推进 Journal 的**换块擦除**，不起页写。
- *   与 journal_kick 的唯一区别是不做 freeze：host 饱和档（BUSY）要让路给前台，
- *   但新环形块没擦过就不能往里写 ⇒ 擦除必须任何档位都能补。
- *   判据（有无待擦块、是否已有 job 在飞）由本模块自己持有——外部不必读 job 内部字段。 */
-void journal_kick_erase_only(l2p_journal_t *journal);
+/* journal 执行状态（上报用，不是内部 phase 编号） */
+typedef enum
+{
+    JOURNAL_STATE_IDLE = 0,
+    JOURNAL_STATE_WRITE_WAIT, /* 页写在飞 */
+    JOURNAL_STATE_ERASE_WAIT, /* 换块擦在飞 */
+    JOURNAL_STATE_RING_FULL,  /* 全部环形块不可用：停止写入 */
+    JOURNAL_STATE_FAILED,     /* 持久性失败 pending（条目已丢，等 CP 兜底） */
+} journal_state_t;
+
+typedef struct
+{
+    ftl_module_status_t base;
+
+    journal_state_t state;
+    uint32_t        sequence;     /* sequence_counter（单调） */
+    bool            write_failed; /* write_fail_pending */
+    bool            ring_full;
+    bool            erase_pending; /* need_erase */
+    uint8_t         current_block;
+    uint8_t         current_page;
+    uint16_t        current_entry;
+} journal_status_t;
+
+/*
+ * journal_trigger_t — 本轮调用的意图
+ *
+ * FLUSH       推进「补擦 + 页写」完整流程（预算任务）；
+ * ERASE_ONLY  只补换块擦除，不起页写（must-run：新环形块没擦过就不能写，但
+ *             host 饱和档要让路给前台）。
+ */
+typedef enum
+{
+    JOURNAL_TRIGGER_FLUSH = 0,
+    JOURNAL_TRIGGER_ERASE_ONLY,
+} journal_trigger_t;
+
+/*
+ * journal_handle - 后台推进 Journal（提交即返回；job 在飞或无事可做时为空操作）
+ *
+ * @param journal  Journal；**前置条件**，非法即 ASSERT
+ * @param trigger  本轮意图（NULL 视作 FLUSH）
+ * @param info     本轮动态信息（now_ms / load_level；当前只用于观测，不改变判据）
+ * @param out      出参：本轮结束后的上报（**非空**）
+ */
+void journal_handle(l2p_journal_t *journal, const journal_trigger_t *trigger, const ftl_bg_info_t *info, journal_status_t *out);
+
+/* ── 查询（替代外部直读 handle 字段）── */
+
+/* journal_is_idle — 无在飞 job（写 / 擦都完成）。 */
+bool journal_is_idle(const l2p_journal_t *journal);
+
+/* journal_can_erase_victim — F10 屏障：页写失败 pending 已清（迁移后的 L2P 已随
+ * CP 落盘）⇒ 允许 GC/WL 擦 victim。 */
+bool journal_can_erase_victim(const l2p_journal_t *journal);
+
+/* journal_sequence — 下一个待分配序号（= CP 截断水位）。 */
+uint32_t journal_sequence(const l2p_journal_t *journal);
+
+/* journal_watermark — 当前使用率（0..100，全局写位置 / 全环容量）。 */
+uint8_t journal_watermark(const l2p_journal_t *journal);
+
+/* journal_write_failed — 持久性失败 pending 是否置位。 */
+bool journal_write_failed(const l2p_journal_t *journal);
+
+/* journal_has_pending_entries — 页缓冲里是否有未落盘条目。 */
+bool journal_has_pending_entries(const l2p_journal_t *journal);
+
+/* journal_erase_pending — 是否有「未起」的换块擦除（新环形块尚未擦）。 */
+bool journal_erase_pending(const l2p_journal_t *journal);
+
+/* journal_checkpoint_needed / journal_is_emergency — CP 水位标志（≥85% / ≥95%）。 */
+bool journal_checkpoint_needed(const l2p_journal_t *journal);
+bool journal_is_emergency(const l2p_journal_t *journal);
+
+/* journal_set_merge_floor — CP Header 成功后设置合并边界（Checkpoint 模块调用）。 */
+void journal_set_merge_floor(l2p_journal_t *journal, uint32_t sequence);
+
+/* journal_update_watermark - 按当前写位置重算并置位 CP 水位标志。
+ * 由写确认路径在每次 L2P 更新后调用（原 journal_update_watermark 的归属收回
+ * journal 模块：它是 journal 自己的状态）。 */
+void journal_update_watermark(l2p_journal_t *journal);
 
 /* journal_flush_page - **同步**把 Journal 落盘：先排空在飞 job，再把当前页缓冲
  *   （含页头）写进 NAND 并推进写指针。
  *   · 本函数是**唯一**的同步环形块擦除点，块满换块时先擦后写（跳过 pre_erased_block 预擦块）；
- *   · 调用者用它当**屏障**（HIL `fl`）。host 写路径的常规刷页走 journal_kick 的异步路径。
+ *   · 调用者用它当**屏障**（HIL `fl`）。host 写路径的常规刷页走 journal_handle 的异步路径。
  *   · drain 超时 ⇒ **拒绝同步刷**（在飞命令仍拥有当前页地址，再写同页 = 双重编程），
  *     置 write_fail_pending 并返回 FTL_ERROR。
  * @return FTL_OK = 屏障达成；FTL_ERROR = drain 超时 / 擦除失败 / 页写失败。 */
@@ -248,11 +351,12 @@ ftl_status_t journal_flush_page(l2p_journal_t *journal);
  * @return FTL_OK = 完整回放；FTL_ERROR = 环内存在读失败页（写态已恢复，但回放可能
  *         不完整 ⇒ 调用者应回退 F2 全盘重建）。 */
 /*
- * journal_replay_block_ctx_t - 回放时的块元数据增量上下文（可选）
+ * journal_replay_block_ctx_t - 回放时的块元数据增量端口（可选）
  *
- * materialize 由调用者注入（开机恢复模块）：把 PBA 所属块从池状态转成「可记账」
- * 的 Closed 状态。journal 自己只做 valid_count 的 ±1（用 ctx 指向的 ftl_context_t），
- * 不反向依赖 power_failure_recovery。
+ * 三个回调都由调用者（开机恢复模块）注入，journal 不 cast ctx、不反向依赖 PFR：
+ *   materialize  把 PBA 所属块从池状态转成「可记账」的 Closed 状态；
+ *   valid_add    给该 PBA 的块 valid_count +1（带越界/上溢守卫，失败置 *ok=0）；
+ *   valid_sub    给该 PBA 的块 valid_count -1（带下溢守卫，失败置 *ok=0）。
  *
  * 只对 sequence ≥ cp_sequence 的条目记账：new_pba +1、old_pba −1
  * （TRIM 只减 old；old==new 跳过）。materialize 失败 / 越界 / 下溢 ⇒ ok=0，
@@ -261,7 +365,9 @@ ftl_status_t journal_flush_page(l2p_journal_t *journal);
 typedef struct
 {
     bool (*materialize)(void *ctx, nand_pba_t pba);
-    void   *ctx; /* 调用者的 ftl_context_t* */
+    void (*valid_add)(void *ctx, nand_pba_t pba, uint8_t *ok);
+    void (*valid_sub)(void *ctx, nand_pba_t pba, uint8_t *ok);
+    void   *ctx; /* 调用者自持（PFR 传 &g_ftl[...]） */
     uint8_t ok;
 } journal_replay_block_ctx_t;
 

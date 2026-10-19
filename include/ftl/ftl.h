@@ -31,20 +31,9 @@
 
 /* ── 宏 ── */
 
-#define NAND_SUBMIT_BUDGET    (4U)     /* 每轮 fc_service 最多跑 4 次（首轮抽干完成，余为填充 pass） */
-#define BG_NORMAL_FLUSH_COUNT (4U)     /* NORMAL 模式下最多 flush 4 line */
-#define BG_BUSY_FLUSH_COUNT   (1U)     /* BUSY 模式下最多 flush 1 line */
-#define CP_WRITE_INTERVAL     (1024U)  /* 写入量触发间隔 */
-#define CP_TIME_INTERVAL_MS   (10000U) /* 定时触发间隔（ms）*/
-
-/* GC 触发判定的求值节拍（见 ftl_gc_evaluate）。
- * 判据本身是**事件**（空间压力/磨损），但求值含一次**全表扫描**，不能按主循环 pass 跑。 */
-#define GC_EVAL_INTERVAL_MS (10U)
-
-/* GC 触发日志的节拍（与求值同一套时基）。
- * ⚠ 求值节拍**不能**兼作日志节拍：求值节拍管「多久算一次」，10ms 拍仍会打出 100 行/秒。
- * 日志要的是「同一状态别重复报」。 */
-#define GC_LOG_INTERVAL_MS (1000U)
+#define NAND_SUBMIT_BUDGET  (4U)     /* 每轮 fc_service 最多跑 4 次（首轮抽干完成，余为填充 pass） */
+#define CP_WRITE_INTERVAL   (1024U)  /* 写入量触发间隔 */
+#define CP_TIME_INTERVAL_MS (10000U) /* 定时触发间隔（ms）*/
 
 #define FTL_READ_USER_SIZE (2048U) /* 一次读返回的用户数据大小 = 4 CW × 512B */
 
@@ -79,8 +68,9 @@ typedef struct ftl_context
     ftl_io_group_t groups[FTL_GROUP_MAX];
 
     /* 页打包写缓冲——同一 pair 窗口的多次写攒成一页再编程，
-     * 见 wbuf.h 的 ftl_wbuf_t。由 wbuf.c 的 ftl_wbuf_* 族操作。 */
-    ftl_wbuf_t wbuf;
+     * 见 wbuf.h 的 wbuf_handle_t。事件走 wbuf_handle()，读路径走 ftl_wbuf_has/read。
+     * 指针，由 storage 提供并决定落哪个域（Phase 1.5）。 */
+    wbuf_handle_t *wbuf;
 
     /* FTL 表指针（由 HIL 的 ftl_storage_t 提供并决定落哪个域）。
      * BST blocks(80KB) / free+op(16KB) / closed(32KB) / spare(200B)，见 ftl_tables_t。
@@ -97,21 +87,11 @@ typedef struct ftl_context
     /* Metadata Directory（指针，由 storage 提供；落 SRAM4） */
     metadata_dir_cache_t *metadata_dir;
 
-    /* Checkpoint 池游标/序号（per-instance）。
-     * 开机由 checkpoint_find_latest 恢复，Checkpoint job 据此选池内下一槽续写。
-     * ⚠ 与 journal.sequence_counter 无关——本池自己的单调序号（见 l2p_cp_state_t），
-     *   boot 日志里的 cp_seq 另来自 ftl_boot_result_t。 */
-    l2p_cp_state_t cp;
-
-    /* Checkpoint 异步 job（脏区落盘 → Anchor → Header → 截断 journal 的
-     * 有序流水线，见 checkpoint.h 的 checkpoint_handle_t / 掉电安全契约）。
+    /* Checkpoint 异步 job（含池游标/序号、定时基准与端口；见 checkpoint.h）。
      * ⚠ 含 256B 的 region 脏位图**快照**——必须在 job 起点取定，不能沿用实时位图
      *   （flush 成功会清实时位，见 checkpoint.c 的"快照点前移"）。
      * 指针，由 storage 提供；落 SRAM3。 */
     checkpoint_handle_t *checkpoint_handle;
-
-    /* Checkpoint 定时触发基准（T3：elapsed_ms ≥ CP_TIME_INTERVAL_MS） */
-    uint32_t cp_timer_start; /* 上次 Checkpoint 时间戳（ms） */
 
     /* 统计 */
     uint32_t total_writes;
@@ -138,48 +118,15 @@ typedef struct ftl_context
      * 真卡死（命令丢失）由 NAND 层 wait/jump 超时兜底，不靠这个计数。 */
     uint8_t l2p_defer;
 
-    /* 慢死预测巡检节流（per-instance） */
-    uint32_t rr_last_scan_ms;
-
-    /* GC 触发求值的节拍基准（per-instance）。
-     * ⚠ 为什么需要：求值点 ftl_gc_evaluate 里的 T5 要算**全表**磨损极值
-     * （gc_table_extremes 遍历 FTL_BLOCK_TOTAL = 2048×PLANE_NUM 个块，≈80KB），
-     * 而它挂在 Phase 3 的 IDLE/NORMAL 两条路径上、主循环 `while(1)` 又无节拍
-     * ⇒ 必须用本字段限频，否则每轮扫一遍全表（选不出 victim 的卡死态下即 100% CPU）。
-     * 与 rr_last_scan_ms（1s 巡检）/ cp_timer_start 的节拍门同族。
-     * ⚠ 0 作「尚未求值」哨兵：平台时钟缺失时 ftl_now_ms() 恒返回 0，此时每轮都求值
-     * ——GC 不能因为缺时钟而停摆（与 T3 定时「恒不触发」的取舍方向相反）。 */
-    uint32_t gc_eval_last_ms;
-
-    /* GC 触发日志的节拍基准（per-instance，与 gc_eval_last_ms 同一套时基）。
-     * 语义 = 「进入触发态立即打一行 + 触发态内每 GC_LOG_INTERVAL_MS 一行心跳」：
-     * 退出触发态时**归零**，故下次进入必然立即打（不需要另存触发掩码）。
-     * ⚠ T1（free_count < FREE_POOL_TARGET）是 GC 的**常态工作区间**而非异常，
-     * 逐轮打会把 UART 环形队列占满、挤掉其它日志（`log_get_truncated_count` 上涨）；
-     * 而卡死态又需要心跳——「一行之后再无消息」会被误读成已恢复。
-     * ⚠ 同 gc_eval_last_ms：0 兼作「本触发态内尚未打过」哨兵。 */
-    uint32_t gc_log_last_ms;
-
     /* 时间预算后台调度器（per-instance）。
-     * 任务表（13 项：6 must-run + 7 预算）由 ftl_bg_init 从 `ftl/bg_wiring.c` 的静态表
+     * 任务表（10 项：6 must-run + 4 预算）由 ftl_bg_init 从 `ftl/bg_wiring.c` 的静态表
      * 装载；每轮 Phase 3 由 ftl_bg_service 选档后跑 bg_scheduler_run。 */
     bg_scheduler_t bg;
 
-    /* GC 进展计数（per-instance，只增不减，纯观测）。
-     * ⚠ 为什么需要：`trig=` 常亮**不能区分**「在推进」与「卡死」——两种情况打的是同一行。
-     * 卡死链路：gc_select_victim 选不出 victim ⇒ mig_begin_gc 返 0 ⇒ 空闲池只出不进
-     * ⇒ free_count 掉到 0 后永不回升、写最终永久失败。Closed 条目对 GC/WL 不可见
-     * （`allocator_close_sb` 的 is_open 顺序写错）就是这个形态。
-     * 判据：两次心跳之间 gc_reclaimed_count 不动、gc_novictim_count 在涨 = 卡死。
-     * 自增点：reclaimed 在 mig_finish 的 MIG_DONE（仅擦除成功且 closed 条目已移除），
-     * novictim 在 mig_begin_gc ⇒ IDLE 补池与 NORMAL 单发两条路径都覆盖。 */
-    uint32_t gc_reclaimed_count; /* 累计成功回收的 SB 数 */
-    uint32_t gc_novictim_count;  /* 累计「触发但选不出 victim」次数 */
-
     /* 搬移 job（GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
-     * ⚠ 含逐 plane 的页镜像（page_buf，当前共 4KB），必须常驻：异步 job 的栈帧在
-     *   提交命令时就已返回，数据要活到完成回调。 */
-    migrate_handle_t migrate_handle;
+     * 观测计数（reclaimed / novictim）与求值节拍已收进 handle（migrate_status_t）。
+     * 指针，由 storage 提供；含逐 plane 页镜像（page_buf，约 4KB），必须常驻。 */
+    migrate_handle_t *migrate_handle;
 
     /* Read Recovery：per-Block ECC 趋势追踪在 alloc.blocks[].rr（BST 单数据源）；
      * 本结构 = 异步恢复 job 状态机本体（见 read_recovery.h） */
@@ -188,15 +135,16 @@ typedef struct ftl_context
     /* Read Recovery 整页暂存（CW 级映射：一个子操作可能只覆盖页内部分 CW，
      * 而恢复读内部是**整页读**、从 CW0 起连续拷出。故恢复结果先落本页
      * 镜像，再按各 CW 的真实偏移搬回 caller 缓冲（见 rr_settle_plane）。
-     * 放上下文而非栈：2048B 的栈局部在 DTCM 栈上风险高，且 per-instance 无别名问题。 */
-    uint8_t rr_page_scratch[FTL_READ_USER_SIZE];
+     * 指针，由 storage 提供；必须是常驻存储（不能是栈）。 */
+    uint8_t *rr_page_scratch;
 } ftl_context_t;
 
 /*
  * ftl_storage_t - 描述符的外部存储
  *
- * 四个大数组由 HIL 提供并决定落哪个域（main.c：tables→SRAM12、md→SRAM4、
- * journal/checkpoint_handle→SRAM3）。ftl_init 只绑定指针；数组定义在 main.c，
+ * storage 数组由 HIL 提供并决定落哪个域（main.c：tables→SRAM12、md→SRAM4、
+ * journal/checkpoint_handle→SRAM3；migrate/wbuf/rr_page_scratch→AXI .bss）。
+ * ftl_init 只绑定指针；数组定义在 main.c，
  * 生命周期覆盖全程（完成表的 ctx 会保存这些地址）。
  */
 typedef struct
@@ -205,6 +153,9 @@ typedef struct
     metadata_dir_cache_t *metadata_dir;
     l2p_journal_t        *journal;
     checkpoint_handle_t  *checkpoint_handle;
+    migrate_handle_t     *migrate;         /* Phase 1.5：挂载指针（不减少总 RAM） */
+    wbuf_handle_t        *wbuf;            /* Phase 1.5 */
+    uint8_t              *rr_page_scratch; /* Phase 1.5：FTL_READ_USER_SIZE */
 } ftl_storage_t;
 
 /* ── 接口 ── */
@@ -212,7 +163,7 @@ typedef struct
 /*
  * ftl_init - 初始化 FTL 子系统
  *
- * 描述符只持有指针；四个大数组由调用者通过 storage 提供。
+ * 描述符只持有指针；storage 数组/挂载块由调用者提供。
  * L2P cache 是**设备级共享对象**（同一 (ch,ce) 一份），由调用者初始化一次后
  * 传入；本函数只绑定指针，不 init、不 set_md_dir。
  *
@@ -222,7 +173,7 @@ typedef struct
  * @param ftl     FTL 描述符
  * @param topo    本实例绑定的 NAND 芯片路由
  * @param cache   本实例所属 (ch,ce) 的共享 L2P cache（非空，设备级已初始化）
- * @param storage 四个大数组的存储（非空，四个指针都非空）
+ * @param storage storage 数组/挂载块的存储（非空，所有指针都非空）
  * @return FTL_OK 成功
  */
 ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cache, const ftl_storage_t *storage);
@@ -254,7 +205,7 @@ void ftl_service(ftl_context_t *ftl);
 /*
  * ftl_bg_init - 装配实例的时间预算后台调度器
  *
- * 把 `ftl/bg_wiring.c` 的静态任务表（13 项：6 must-run 正确性关键集 + 7 预算任务，
+ * 把 `ftl/bg_wiring.c` 的静态任务表（10 项：6 must-run 正确性关键集 + 4 预算任务，
  * 含 bg_a_* 适配器）装载进 ftl->bg。由 ftl_init 末尾调用一次。
  *
  * ⚠ 为什么不做成 ftl.c 直接调 bg_scheduler_init：任务表是 bg_wiring.c 的 static 数据，
