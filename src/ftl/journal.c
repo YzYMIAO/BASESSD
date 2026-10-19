@@ -10,7 +10,7 @@
  *                （l2p_journal_t）；
  *   本文件     —— 追加 / 刷页 / 回放 / 截断的实现。
  *
- * 写模型（P1-6，阶段 2 起改异步）：
+ * 写模型：
  *   · 追加进 RAM 页缓冲（page_buf）；页满（JOURNAL_ENTRIES_PER_PAGE）时**不再同步落盘**，
  *     改为交给异步 job（journal_freeze → ftl_op_submit(FTL_OP_JOURNAL)），完成由
  *     g_op_service[FTL_OP_JOURNAL]（ftl_op_journal）按 job.phase 推进；
@@ -21,14 +21,14 @@
  *   victim」，HIL `fl` 要求「已持久化映射落盘」。这两处**必须**同步 ⇒ journal_flush_page
  *   先排空在飞 job，再同步刷当前页（它是唯一的同步出口，也是同步回退路径）。
  *
- * 掉电保护：Journal 页 Random **关闭**、CRC **开启**（v0.62 起由下层 FC 提供 per-CW CRC +
+ * 掉电保护：Journal 页 Random **关闭**、CRC **开启**（由下层 FC 提供 per-CW CRC +
  *   ECC），外加页头 magic + entry_count 合法性 + page_seq 单调三层结构判据（设计 §7.6）。
  *   异步化**不改变**掉电模型：本仓无电容，acked 写本来就容忍丢最后一页 journal 条目
  *   （write-back 攒批），把「页满时立刻阻塞刷」改成「页满时交给 job 刷」只是把阻塞挪走。
  *
- * ⚠ **本文件整个不转断言**（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 上的
+ * ⚠ **介质读回不转断言**（assertion_guidelines §六 辨析 C）：replay 读的是 NAND 上的
  *   页，页头可能因掉电撕裂而非法——那是掉电的**预期情形**，必须返回错误/跳过，不能断言。
- *   （ftl_op_journal 的入参断言是例外：那是**命令派发**路径，不读 NAND 页头。）
+ *   模块入口与命令派发路径（ftl_op_journal）的前置条件仍用 ASSERT。
  *
  * 文件结构：
  *   1. 页地址辅助     journal_page_addr / journal_block_addr（static）
@@ -97,11 +97,6 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
 
     journal->topo = topo;
 
-    for (uint8_t b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
-    {
-        journal->block_pba[b] = pba_make(topo.ch, topo.ce, topo.lun, (uint32_t)(JOURNAL_BLOCK0 + b), 0U, 0U, 0U);
-    }
-
     journal->current_block    = 0U;
     journal->current_page     = 0U;
     journal->current_entry    = 0U;
@@ -118,7 +113,7 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
     journal->write_fail_seq     = 0U;
     journal->write_fail_pending = 0U;
 
-    /* 异步刷页 job 复位（阶段 2）：无在飞、无待偿擦除 */
+    /* 异步刷页 job 复位：无在飞、无待偿擦除 */
     journal->job.phase      = JRN_IDLE;
     journal->job.need_erase = 0U;
 }
@@ -151,7 +146,7 @@ bool journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
     ASSERT(journal != NULL);
 
     /*
-     * P1-6 更新合并：当前页缓冲里已有同一 LBA 的条目 ⇒ 就地更新，不新增条目。
+     * 更新合并：当前页缓冲里已有同一 LBA 的条目 ⇒ 就地更新，不新增条目。
      * 回放按页序 + 页内下标应用（per-LBA last-write-wins），页内同 LBA 只保留最新
      * new_pba 即正确；old_pba 仅首条保留（回放不读 old_pba）。
      * ⚠ **不**消耗 sequence、**不**推进 current_entry：hdr_page_seq 由
@@ -199,7 +194,7 @@ bool journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
     {
         if ((!journal_freeze(journal)) && (!ftl_op_in_dispatch()))
         {
-            /* 非派发上下文（GC/WL/TRIM/开机）⇒ 同步回退 = 阶段 2 之前的行为。
+            /* 非派发上下文（GC/WL/TRIM/开机）⇒ 同步回退。
              * 页缓冲此时仍是满的、写指针未动，journal_flush_page 会先排空在飞 job
              * 再同步刷这一页。 */
             journal_flush_page(journal);
@@ -298,7 +293,7 @@ static bool journal_freeze(l2p_journal_t *journal)
     }
 
     /* 提交成功才消费预擦除记账：该块已被 journal_truncate 预擦过 ⇒ 回切时跳过擦除
-     * （同一块每圈只擦一次，见 journal_truncate 的 P1-6 说明）。 */
+     * （同一块每圈只擦一次）。 */
     if ((need_erase != 0U) && (journal->pre_erased_block == tblock))
     {
         journal->pre_erased_block = JOURNAL_BLOCK_NONE;
@@ -442,18 +437,25 @@ static void journal_erase_pending_sync(l2p_journal_t *journal)
  * journal_flush_now
  *   功能：**同步**把当前页缓冲连同页头写进 NAND 当前页，并推进写指针。
  *   参数：journal —— Journal。
- *   返回：无（空页直接返回）。
- *   实现要点（= 阶段 2 之前 journal_flush_page 的主体，逐字保留）：
+ *   返回：true = 缓冲已空或已落盘；false = 未落盘（在飞 / 擦失败 / 写失败）。
+ *   实现要点：
+ *     · **在飞守卫**：job.phase != IDLE 时当前页地址仍归在飞命令所有，再写就是
+ *       双重编程 ⇒ 直接拒绝。
  *     · 先偿还未起的换块擦除（job.need_erase 待偿时，目标块 = 已推进到的 current_block）。
  *     · 页满换块：本函数是**唯一**的同步环形块擦除点；若该块已被 journal_truncate
- *       预擦除（pre_erased_block），**跳过擦除**（否则同块每圈擦两次，+25% 磨损）。
+ *       预擦除（pre_erased_block），**跳过擦除**。
  *     · 写后清空页缓冲（0xFF）与 current_entry，准备下一页。
  *     · ⚠ 写失败：置 `write_fail_pending`（阻止 GC 擦 victim）+ LOGE，但仍推进指针
- *       ——已写过的页（可能半编程）不可复用。同步/异步两条路径在这一点上一致：
- *       同步在写后推进；异步在失败完成时推进到 freeze 算好的下一落点。
+ *       ——已写过的页（可能半编程）不可复用。同步在写后推进；异步在失败完成时推进到
+ *       freeze 算好的下一落点。
  * -------------------------------------------------------------------- */
-static void journal_flush_now(l2p_journal_t *journal)
+static bool journal_flush_now(l2p_journal_t *journal)
 {
+    if (journal->job.phase != JRN_IDLE)
+    {
+        return false; /* 在飞命令拥有当前页地址：再写 = 双重编程 */
+    }
+
     if (journal->job.need_erase != 0U)
     {
         journal_erase_pending_sync(journal);
@@ -462,13 +464,13 @@ static void journal_flush_now(l2p_journal_t *journal)
         {
             /* 目标块仍未擦：不能把页写进去（二次编程/脏块写 = 静默损坏）。
              * 页缓冲保留，下次 flush 重试；pending 已置位，GC 不会擦 victim。 */
-            return;
+            return false;
         }
     }
 
     if (journal->current_entry == 0U)
     {
-        return; /* 无数据，无需 flush */
+        return true; /* 无数据，无需 flush */
     }
 
     journal_write_header(journal);
@@ -478,12 +480,14 @@ static void journal_flush_now(l2p_journal_t *journal)
 
     /*
      * 同步写 Journal 页到 NAND。
-     * Random DISABLED / CRC ENABLED（v0.62）：Journal 有 FC per-CW CRC + ECC，
+     * Random DISABLED / CRC ENABLED：Journal 有 FC per-CW CRC + ECC，
      * 外加自身结构判据（magic/entry_count/sequence）。
      */
     const ftl_status_t wst = ftl_sync_write_page(waddr, journal->page_buf, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META());
 
-    if (wst != FTL_OK)
+    bool ok = (wst == FTL_OK);
+
+    if (!ok)
     {
         LOGE("[JRN] sync page write failed pba=%08lx status=%d — 条目丢失，置 pending\r\n",
              (unsigned long)waddr,
@@ -500,8 +504,7 @@ static void journal_flush_now(l2p_journal_t *journal)
         journal->current_page  = 0U;
 
         /* 回切擦除（同步路径的环形块擦除点）。
-         * P1-6：若该块已被 journal_truncate 预擦除（水位截断），跳过——否则同一块每圈
-         * 被擦两次，把 §14.1 认定的 Journal 寿命瓶颈又放大 ~25%。 */
+         * 若该块已被 journal_truncate 预擦除（水位截断），跳过——同一块每圈只擦一次。 */
         if (journal->pre_erased_block == journal->current_block)
         {
             journal->pre_erased_block = JOURNAL_BLOCK_NONE; /* 记账消费掉：本块即将被写 */
@@ -520,39 +523,39 @@ static void journal_flush_now(l2p_journal_t *journal)
                 journal->job.target_block = journal->current_block;
                 journal->job.need_erase   = 1U;
                 journal_note_write_failure(journal);
+                ok = false;
             }
         }
     }
 
     journal_clear_page(journal);
+    return ok;
 }
 
 /* --------------------------------------------------------------------
  * journal_flush_page
  *   功能：**同步**把 Journal 落盘（屏障语义）——先排空在飞 job，再刷当前页。
  *   参数：journal —— Journal。
- *   返回：无。
- *   实现要点：调用者拿它当屏障——GC/WL 的 F10 契约（搬移条目先落盘再擦 victim）、
- *             HIL `fl`（已持久化映射落盘）。host 写路径的常规刷页走 journal_kick。
- *             ⚠ drain 超时（命令丢失 / NAND 卡死）时**不静默**：LOGE 后仍走同步刷，
- *             因为 job 的指针推进有 from_* 守卫（见 ftl_op_journal），不会造成回退。
- *             ⚠ 阶段 4 起 host 写路径的紧急 GC 已改为**背压**（ftl_wbuf_flush 起 GC job
- *             + 返 FTL_AGAIN），不再在完成回调里跑这个 drain；搬移 job 的 F10 屏障也
- *             改走 journal_kick（异步），不再调本函数。故本函数的**唯一**调用者只剩
- *             结构性同步上下文（HIL `fl`、开机路径、CLI）。
- *             journal_append 自己的同步回退已由 ftl_op_in_dispatch 挡住，不会新增。
+ *   返回：FTL_OK = 屏障达成；FTL_ERROR = drain 超时 / 擦除失败 / 页写失败。
+ *   实现要点：调用者拿它当屏障——HIL `fl`（已持久化映射落盘）、journal_append 的
+ *             非派发同步回退。host 写路径的常规刷页走 journal_kick。
+ *             ⚠ drain 超时（命令丢失 / NAND 卡死）⇒ **拒绝同步刷**：在飞写命令仍
+ *             拥有当前页地址，再写同页就是双重编程。置 pending 后返回错误。
  * -------------------------------------------------------------------- */
-void journal_flush_page(l2p_journal_t *journal)
+ftl_status_t journal_flush_page(l2p_journal_t *journal)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
     ASSERT(journal != NULL);
 
     if (!journal_drain(journal))
     {
-        LOGE("[JRN] drain timeout phase=%u — 屏障语义降级，仍走同步刷\r\n", (unsigned)journal->job.phase);
+        LOGE("[JRN] drain timeout phase=%u — 拒绝同步刷（在飞命令拥有当前页）\r\n",
+             (unsigned)journal->job.phase);
+        journal_note_write_failure(journal);
+        return FTL_ERROR;
     }
 
-    journal_flush_now(journal);
+    return journal_flush_now(journal) ? FTL_OK : FTL_ERROR;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -597,9 +600,12 @@ void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completi
 
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
+    /* 一条命令对应一个 job：phase 只能是 WRITE / ERASE（残留完成 = 状态机破坏）。 */
+    ASSERT((journal->job.phase == JRN_WRITE) || (journal->job.phase == JRN_ERASE));
+
     if (journal->job.phase == JRN_WRITE)
     {
-        if ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U)
+        if (fc_cw_status_has_error(completion->status))
         {
             LOGE("[JRN] page write failed pba=%08lx status=0x%02x — 跳过失败页\r\n",
                  (unsigned long)journal->job.waddr,
@@ -650,7 +656,9 @@ void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completi
 
     if (journal->job.phase == JRN_ERASE)
     {
-        if ((completion->status & FC_CW_STATUS_NAND_FAIL) != 0U)
+        /* 失败判据必须是全集：只看 NAND_FAIL 会把 TIMEOUT / CRC 当成擦成功，
+         * 后续页写进可能未擦的块（二次编程 = 静默损坏）。 */
+        if (fc_cw_status_has_error(completion->status))
         {
             LOGE("[JRN] ring block erase failed blk=%u status=0x%02x — 重新挂起\r\n",
                  (unsigned)journal->job.target_block,
@@ -683,8 +691,8 @@ void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completi
  *   返回：无。
  *   实现要点：只读 NAND，**不改 journal 状态**（怎么用由调用方决定）。
  *             需回放判据是**整页**的：`page_seq + entry_count > cp_sequence`。
- *             旧判据只看页首页序号（`page_seq > cp_sequence`），跨水位的那一页会被
- *             整页跳过——它页尾的新条目（> cp_sequence）随页面一起丢。
+ *             只看页首页序号会把跨水位的那一页整页跳过——它页尾的新条目
+ *             （> cp_sequence）随页面一起丢。
  *             页头 magic / entry_count 校验失败即跳过（掉电撕裂的预期情形，见文件头 ⚠）。
  * -------------------------------------------------------------------- */
 static void journal_scan_ring(const l2p_journal_t *journal,
@@ -702,7 +710,9 @@ static void journal_scan_ring(const l2p_journal_t *journal,
         out_latest->entry_count = 0U;
     }
 
-    uint16_t count = 0U;
+    uint16_t count       = 0U;
+    uint16_t read_errors = 0U;
+
     for (uint8_t b = 0U; b < JOURNAL_BLOCK_COUNT; b++)
     {
         for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
@@ -711,10 +721,10 @@ static void journal_scan_ring(const l2p_journal_t *journal,
             memset(page_data, 0xFF, sizeof(page_data));
 
             nand_pba_t raddr = journal_page_addr(journal, b, (uint8_t)page);
-            if (ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META()) !=
-                0)
+            if (ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
             {
-                continue; /* 读失败，跳过本页 */
+                read_errors++; /* 读失败，跳过本页（下面汇总一条日志） */
+                continue;
             }
 
             {
@@ -760,6 +770,12 @@ static void journal_scan_ring(const l2p_journal_t *journal,
     {
         *out_count = count;
     }
+
+    if (read_errors != 0U)
+    {
+        /* 读失败的页等于「看不到的条目」：不回放、也不计入统计。至少让它可见。 */
+        LOGW("[JRN] ring scan: %u page(s) unreadable\r\n", (unsigned)read_errors);
+    }
 }
 
 /* --------------------------------------------------------------------
@@ -787,7 +803,8 @@ bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out)
  *   实现要点：① 落点是最新页**之后一页**——最新页已编程，续填会在页满时对同一页
  *                二次编程（NAND 只能 1→0 ⇒ 页头 entry_count 被 AND 成错值）；
  *             ② 跨块时先擦下一块（那里还留着上一圈的旧页）；**不记账
- *                pre_erased_block**——那块马上会被写满，下一圈回切时仍需按常规擦一次；
+ *                pre_erased_block**——那块马上会被写满，下一圈回切时仍需按常规擦一次。
+ *                擦除失败 ⇒ 重新挂起 `job.need_erase`，首次写前由 kick/flush 补擦；
  *             ③ 序号取 max(最新页序号 + 1, floor)，0 抬到 1（0 保留作「无序号」，
  *                与 journal_init 同约定；否则 journal_truncate 的水位校验会被 0 挡掉）。
  * -------------------------------------------------------------------- */
@@ -796,7 +813,9 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
     /* 前置条件（判据 2）：调用者一律传 ftl->journal。latest 可为 NULL（文档化契约）。 */
     ASSERT(journal != NULL);
 
-    uint32_t next = floor_sequence;
+    uint32_t next          = floor_sequence;
+    uint8_t  pending_erase = 0U;
+    uint8_t  erase_block   = 0U;
 
     if ((latest != NULL) && (latest->page_seq > 0U))
     {
@@ -816,7 +835,15 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
         {
             next_block = (uint8_t)((next_block + 1U) % JOURNAL_BLOCK_COUNT);
             next_page  = 0U;
-            (void)ftl_sync_erase_block_multi_plane(journal_block_addr(journal, next_block));
+
+            /* 擦失败绝不能继续：首次写会落进未擦块（二次编程 = 静默损坏）。
+             * 重新挂起 need_erase，由 journal_kick / flush_now 先补擦。 */
+            if (ftl_sync_erase_block_multi_plane(journal_block_addr(journal, next_block)) != FTL_OK)
+            {
+                LOGE("[JRN] resume ring erase failed blk=%u — 挂起补擦\r\n", (unsigned)next_block);
+                pending_erase = 1U;
+                erase_block   = next_block;
+            }
         }
 
         journal->current_block = next_block;
@@ -843,10 +870,12 @@ void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, ui
     journal->write_fail_seq     = 0U;
     journal->write_fail_pending = 0U;
 
-    /* 异步刷页 job 复位（阶段 2）：resume 是开机路径，此前不可能有在飞 job；
-     * 但复位是廉价的，且能挡住「同一实例被重复 resume」的残留。 */
-    journal->job.phase      = JRN_IDLE;
-    journal->job.need_erase = 0U;
+    /* 异步刷页 job 复位：resume 是开机路径，此前不可能有在飞 job；
+     * 但复位是廉价的，且能挡住「同一实例被重复 resume」的残留。
+     * 若上面换块擦除失败，在此（复位之后）重新挂起，保证首次写前先补擦。 */
+    journal->job.phase        = JRN_IDLE;
+    journal->job.target_block = erase_block;
+    journal->job.need_erase   = pending_erase;
 
     memset(journal->page_buf, 0xFF, sizeof(journal->page_buf));
 }
@@ -907,6 +936,105 @@ static void jrn_sub_valid_guarded(ftl_context_t *ftl, nand_pba_t pba, uint8_t *o
     ftl_block_sub_valid(b);
 }
 
+/*
+ * 应用一页 Journal 条目；返回**成功写入 L2P 的条目数**。
+ *
+ * 开机回放 = 结构性同步：用同步逃生口（自旋泵），不 park、不返 FTL_AGAIN
+ * ——此时 superloop 尚未建立，没人推进 job。
+ * entry_lba 来自 NAND，是**不可信输入**：先校验再查表（H29）。
+ * 写失败 ⇒ LOGW + block_ctx->ok=0（调用者回退 F2）。
+ */
+static uint32_t jrn_replay_apply_page(l2p_journal_t              *journal,
+                                      l2p_cache_t                *cache,
+                                      const journal_page_ref_t   *page,
+                                      uint32_t                    cp_sequence,
+                                      journal_replay_block_ctx_t *block_ctx)
+{
+    nand_pba_t raddr = journal_page_addr(journal, page->block, page->page);
+    uint8_t    page_data[JOURNAL_PAGE_SIZE];
+
+    memset(page_data, 0xFF, sizeof(page_data));
+
+    if (ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
+    {
+        LOGW("[JRN] replay: page blk=%u page=%u unreadable\r\n",
+             (unsigned)page->block,
+             (unsigned)page->page);
+        return 0U;
+    }
+
+    uint32_t applied = 0U;
+
+    for (uint16_t k = 0U; k < page->entry_count; k++)
+    {
+        const uint16_t offset = (uint16_t)(JOURNAL_HEADER_SIZE + sizeof(l2p_journal_entry_t) * k);
+
+        uint32_t entry_lba;
+        uint32_t entry_old_pba;
+        uint32_t entry_new_pba;
+        uint32_t entry_seq;
+        memcpy(&entry_lba, page_data + offset + 0, 4);
+        memcpy(&entry_old_pba, page_data + offset + 4, 4);
+        memcpy(&entry_new_pba, page_data + offset + 8, 4);
+        memcpy(&entry_seq, page_data + offset + 12, 4);
+
+        if ((entry_lba != (uint32_t)FTL_LBA_INVALID) && ((uint64_t)entry_lba < L2P_GLOBAL_LBA_MAX) &&
+            lba_routes_to((lba_t)entry_lba, journal->topo))
+        {
+            if (l2p_cache_write_sync(cache, (lba_t)entry_lba, (nand_pba_t)entry_new_pba) == FTL_OK)
+            {
+                applied++;
+            }
+            else
+            {
+                LOGW("[JRN] replay: L2P write failed lba=%lu\r\n", (unsigned long)entry_lba);
+                if (block_ctx != NULL)
+                {
+                    block_ctx->ok = 0U;
+                }
+            }
+        }
+
+        /* 块元数据增量：只对**快照之后**的条目记 valid_count。
+         * 整页回放（含水位之前的条目）是幂等的映射写，不能整页记增量。
+         * materialize 由开机恢复模块注入——journal 不反向依赖 pfr。 */
+        if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && (entry_seq >= cp_sequence))
+        {
+            ftl_context_t   *ftl     = (ftl_context_t *)block_ctx->ctx;
+            const nand_pba_t old_pba = (nand_pba_t)entry_old_pba;
+            const nand_pba_t new_pba = (nand_pba_t)entry_new_pba;
+
+            if (new_pba != old_pba)
+            {
+                if (new_pba != NAND_PBA_INVALID)
+                {
+                    if (block_ctx->materialize(block_ctx->ctx, new_pba))
+                    {
+                        jrn_add_valid_guarded(ftl, new_pba, &block_ctx->ok);
+                    }
+                    else
+                    {
+                        block_ctx->ok = 0U;
+                    }
+                }
+                if (old_pba != NAND_PBA_INVALID)
+                {
+                    if (block_ctx->materialize(block_ctx->ctx, old_pba))
+                    {
+                        jrn_sub_valid_guarded(ftl, old_pba, &block_ctx->ok);
+                    }
+                    else
+                    {
+                        block_ctx->ok = 0U;
+                    }
+                }
+            }
+        }
+    }
+
+    return applied;
+}
+
 /* --------------------------------------------------------------------
  * journal_replay
  *   功能：开机回放——扫 Journal 块池，把**未进 L2P 表**的页按
@@ -922,8 +1050,8 @@ static void jrn_sub_valid_guarded(ftl_context_t *ftl, nand_pba_t pba, uint8_t *o
  *     · 第二遍插入排序（≤256 项）后按序应用 ⇒ per-LBA last-write-wins，同 LBA 的旧
  *       条目（含 GC/WL 搬移记录）被后写覆盖，不指向已擦除块。
  *     · 末尾 journal_resume 把写指针落到最新页之后并接续序号。
- *     · out_entries 在**应用循环里**逐页累加 entry_count（读失败的页不计）——
- *       不能用 journal 的 RAM 写指针反推：journal_resume 会清 current_entry。
+ *     · out_entries 由应用循环按**成功写入 L2P 的条目**累加（读失败页 / 越界 LBA
+ *       不计）——不能用 journal 的 RAM 写指针反推：journal_resume 会清 current_entry。
  * -------------------------------------------------------------------- */
 ftl_status_t journal_replay(l2p_journal_t              *journal,
                             l2p_cache_t                *cache,
@@ -968,80 +1096,7 @@ ftl_status_t journal_replay(l2p_journal_t              *journal,
 
         for (uint16_t i = 0U; i < replay_count; i++)
         {
-            nand_pba_t raddr = journal_page_addr(journal, replay_pages[i].block, replay_pages[i].page);
-
-            uint8_t page_data[JOURNAL_PAGE_SIZE];
-            memset(page_data, 0xFF, sizeof(page_data));
-
-            ftl_status_t ret = ftl_sync_read_page(raddr, page_data, JOURNAL_PAGE_SIZE, FTL_PAGE_CFG_META());
-            if (ret != FTL_OK)
-            {
-                continue; /* 页已失效，跳过（应用顺序其余页不受影响） */
-            }
-
-            applied += (uint32_t)replay_pages[i].entry_count;
-
-            {
-                for (uint16_t k = 0U; k < replay_pages[i].entry_count; k++)
-                {
-                    uint16_t offset = JOURNAL_HEADER_SIZE + sizeof(l2p_journal_entry_t) * k;
-
-                    uint32_t entry_lba;
-                    uint32_t entry_old_pba;
-                    uint32_t entry_new_pba;
-                    uint32_t entry_seq;
-                    memcpy(&entry_lba, page_data + offset + 0, 4);
-                    memcpy(&entry_old_pba, page_data + offset + 4, 4);
-                    memcpy(&entry_new_pba, page_data + offset + 8, 4);
-                    memcpy(&entry_seq, page_data + offset + 12, 4);
-                    /* ⚠ 开机回放路径 = 结构性同步：用**同步**逃生口（自旋泵），
-                     * 不 park、不返 FTL_AGAIN——此时 superloop 尚未建立，没人推进 job。
-                     * ⚠ entry_lba 来自 NAND，是**不可信输入**：先校验再查表（H29）。 */
-                    if ((entry_lba != (uint32_t)FTL_LBA_INVALID) && ((uint64_t)entry_lba < L2P_GLOBAL_LBA_MAX) &&
-                        lba_routes_to((lba_t)entry_lba, journal->topo))
-                    {
-                        (void)l2p_cache_write_sync(cache,
-                                                   (lba_t)entry_lba,
-                                                   (nand_pba_t)entry_new_pba);
-                    }
-
-                    /* 块元数据增量：只对**快照之后**的条目记 valid_count。
-                     * 整页回放（含水位之前的条目）是幂等的映射写，不能整页记增量。
-                     * materialize 由开机恢复模块注入——journal 不反向依赖 pfr。 */
-                    if ((block_ctx != NULL) && (block_ctx->ctx != NULL) && (entry_seq >= cp_sequence))
-                    {
-                        ftl_context_t   *ftl     = (ftl_context_t *)block_ctx->ctx;
-                        const nand_pba_t old_pba = (nand_pba_t)entry_old_pba;
-                        const nand_pba_t new_pba = (nand_pba_t)entry_new_pba;
-
-                        if (new_pba != old_pba)
-                        {
-                            if (new_pba != NAND_PBA_INVALID)
-                            {
-                                if (block_ctx->materialize(block_ctx->ctx, new_pba))
-                                {
-                                    jrn_add_valid_guarded(ftl, new_pba, &block_ctx->ok);
-                                }
-                                else
-                                {
-                                    block_ctx->ok = 0U;
-                                }
-                            }
-                            if (old_pba != NAND_PBA_INVALID)
-                            {
-                                if (block_ctx->materialize(block_ctx->ctx, old_pba))
-                                {
-                                    jrn_sub_valid_guarded(ftl, old_pba, &block_ctx->ok);
-                                }
-                                else
-                                {
-                                    block_ctx->ok = 0U;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            applied += jrn_replay_apply_page(journal, cache, &replay_pages[i], cp_sequence, block_ctx);
         }
     }
 
@@ -1080,16 +1135,16 @@ jrn_truncate_step_t journal_truncate_plan(l2p_journal_t *journal, uint32_t up_to
     ASSERT(out_block != NULL);
 
     /*
-     * ① 水位校验（P1-6：up_to_sequence 不再是死形参）。
+     * ① 水位校验。
      * 调用者传的是 CP **起点**的 sequence_counter（下一个待分配序号）。若水位**不足以**
      * 覆盖全部已写条目（CP 期间 journal 又前进了 ≥2 条），说明有未 checkpoint 的条目，
      * 而环形里最旧的一块可能仍持有回放需要的条目 ⇒ **不截断**。
      * （sequence_counter == 0 理论上不会出现；一并挡掉，避免 -1 下溢误判。）
-     * ⚠ 异步 CP 把快照点从"CP 末尾"提前到"CP 起点"（见 checkpoint.c 的掉电安全论证），
-     *   故水位判据比同步实现**更容易不满足**——即更少预擦。这是安全方向的取舍：
-     *   预擦只是磨损优化，跳过它只是让 journal_flush_page 自己擦（每块每圈仍只擦一次）。
+     * ⚠ CP 的快照点在**起点**（见 checkpoint.c 的掉电安全论证），故水位判据容易不满足
+     *   ——即更少预擦。这是安全方向的取舍：预擦只是磨损优化，跳过它只是让
+     *   journal_flush_page 自己擦（每块每圈仍只擦一次）。
      */
-    if ((journal->sequence_counter == 0U) || ((up_to_sequence + 1U) < journal->sequence_counter))
+    if ((journal->sequence_counter == 0U) || (up_to_sequence < (journal->sequence_counter - 1U)))
     {
         return JRN_TRUNC_NO_TRUNCATE;
     }
@@ -1120,9 +1175,7 @@ void journal_truncate_commit(l2p_journal_t *journal, uint8_t erased_block)
     /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
     ASSERT(journal != NULL);
 
-    /* 记账：journal_flush_page 回切到该块时跳过擦除——旧实现在此处与 flush_page 各擦
-     * 一次 = **同一块每圈擦两次**，是 Journal 磨损（§14.1 的寿命瓶颈）中凭空多出的
-     * ~25%。
+    /* 记账：journal_flush_page 回切到该块时跳过擦除——保证同一块每圈只擦一次。
      * ⚠ 本次未擦（NONE）时**不动** pre_erased_block：覆写成 NONE 会让已预擦的块被
      *   flush_page 再擦一次（双倍磨损回归）。 */
     if (erased_block != JOURNAL_BLOCK_NONE)
@@ -1152,7 +1205,3 @@ void journal_clear_write_failure(l2p_journal_t *journal, uint32_t cp_journal_seq
         journal->write_fail_pending = 0U;
     }
 }
-
-/* journal_truncate（= plan + 即刻擦 + commit 的同步包装）已在阶段 6 随 Checkpoint
- * job 化删除：异步 CP 在 CP_TRUNCATE 阶段提交异步擦命令后调 journal_truncate_commit，
- * 唯一调用者消失。结构性同步上下文若将来需要，按 plan → 擦 → commit 三步自行组合。 */

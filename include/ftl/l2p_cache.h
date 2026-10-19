@@ -41,7 +41,7 @@
  * 超预算即判失败返回——兜住"命令永不到达"这类编程错误，不让同步站点死等。 */
 #define L2P_SYNC_GUARD_MAX (100000UL)
 
-/* ── Thrashing 检测（P1-4，设计 §6.5）──
+/* ── Thrashing 检测（设计 §6.5）──
  * 工作集远大于 64 行 cache（64×512 = 32K entry = 16 MiB LBA 空间，而盘 512 MiB）时，
  * 全盘随机访问几乎每次 miss ⇒ 「evict→flush→load」反复。检测到后**降级**：
  * 停掉 NORMAL 模式的**主动**后台 flush（脏行只由驱逐路径按需写回），把 NAND 带宽让给
@@ -53,7 +53,7 @@
 #define L2P_THRASH_ENTER_PCT (90U)  /* 进入阈值：窗口 miss 率 ≥ 90% */
 #define L2P_THRASH_EXIT_PCT  (70U)  /* 退出阈值：窗口 miss 率 < 70%（滞回） */
 
-/* ── 全局坐标（阶段 B：cache 跨 LUN 共享）──
+/* ── 全局坐标（cache 跨 LUN 共享）──
  *
  * 数据通路一律用 **host 全局 LBA**；只有「映射页在 owner die 元数据区里的落盘位置」
  * 用局部 region（每个 die 只有 L2P_REGIONS_PER_INSTANCE 个槽）。
@@ -132,30 +132,6 @@ static inline bool lba_routes_to(lba_t glba, ftl_topology_t topo)
            (lba_route_lun(glba) == topo.lun);
 }
 
-/*
- * 全局 LBA → 实例内 local LBA（本 (ch,ce,lun) 的表内偏移）。
- *
- * **按 region 粒度反交织**（不是条目粒度）：相邻 region 轮流分给各维度，
- * 同一实例内收到的 region 序号连续 ⇒ 本地序号 = 全局 region 序号 ÷ 维度数，
- * 再乘回每 region 条目数、补上 region 内偏移。
- * FTL_DIM_TOTAL = 1 时退化为恒等映射。
- *
- * ⚠ 阶段 B 起数据通路一律用全局 LBA，本函数只作为地址原语保留（诊断/测试）；
- *   生产代码里需要「全局 region → owner die 内局部 region」时用
- *   l2p_global_to_local_region()，不要手写换算（C9）。
- */
-static inline lba_t lba_to_local(uint64_t lba)
-{
-    uint64_t region = lba >> L2P_REGION_SHIFT;
-
-    return (lba_t)(((region / FTL_DIM_TOTAL) * L2P_ENTRIES_PER_REGION) + (lba & L2P_REGION_MASK));
-}
-
-static inline uint16_t lba_to_region(lba_t local_lba)
-{
-    return (uint16_t)(local_lba >> L2P_REGION_SHIFT);
-}
-
 static inline uint16_t lba_to_entry(lba_t lba)
 {
     return (uint16_t)(lba & L2P_REGION_MASK);
@@ -172,7 +148,7 @@ typedef enum
     L2P_CACHE_LOADING,     /* 正在从 NAND 加载 region（不可驱逐、不可读写——entries 尚未有效） */
 } l2p_cache_state_t;
 
-/* ── 异步化（v0.75 阶段 5）──
+/* ── 异步化 ──
  *
  * 加载与写回都改为**提交即返回**：未命中 ⇒ 建命令 + ftl_op_submit(tag = FTL_OP_L2P,
  * ctx = 本 cache line) ⇒ 置 LOADING/FLUSHING ⇒ 返回 FTL_AGAIN；完成由
@@ -190,7 +166,7 @@ typedef enum
  * ⚠ **同步逃生口**（`*_sync`）：内部自旋 ftl_service_pump 直到就绪。只许结构性同步
  *   上下文调用（开机恢复 / CLI / checkpoint / HIL `fl`）——它们不在完成派发里，
  *   自旋不是嵌套泵。服务函数（g_op_service 里的任何一个）**禁止**调用，由
- *   ftl_op_in_dispatch 断言兜住。这些站点在阶段 6/8 逐个 job 化后即可删除。
+ *   ftl_op_in_dispatch 断言兜住。服务函数里禁止自旋泵（嵌套派发）。
  */
 
 /* ── Cache Line ── */
@@ -205,9 +181,9 @@ typedef struct
     /* 「本次加载正是为**当前这次访问**而起」（异步化的观测口径补偿）。
      * 异步后一次 miss 访问会跨两轮：第 1 轮起加载（计一次 miss）、第 2 轮重试命中。
      * 若重试也计一次 hit，则**同一次访问被记成 miss + hit** ⇒ 窗口 miss 率虚降一半
-     * （随机读满盘：真值 100% → 观测 50%，跌破 L2P_THRASH_EXIT_PCT=70% ⇒ P1-4
-     * 降级永不触发）。故：加载完成时置 1，其后**第一次**命中消费它且不计命中。
-     * 与旧同步实现等价（旧实现同一调用内 miss→加载→返回，只记一次 miss）。
+     * （随机读满盘：真值 100% → 观测 50%，跌破 L2P_THRASH_EXIT_PCT=70% ⇒
+     * 降级永不触发）。故：加载完成时置 1，其后**第一次**命中消费它且不计命中，
+     * 一次逻辑访问在窗口里只记一次 miss。
      * 代价 1 字节 —— 落在 entries 的 4 字节对齐填充里，结构体尺寸不变。 */
     uint8_t fresh;
 } l2p_cache_line_t;
@@ -231,7 +207,7 @@ typedef struct
     uint32_t         hit_count;             /* 统计：命中次数（开机累计，观测用） */
     uint32_t         miss_count;            /* 统计：未命中次数（开机累计，观测用） */
 
-    /* ── Thrashing 检测窗口（P1-4；阈值见文件头 L2P_THRASH_*）──
+    /* ── Thrashing 检测窗口（阈值见文件头 L2P_THRASH_*）──
      * 与累计 hit/miss_count 互补：累计量随开机时长渐近，反映不了**当前**行为，
      * 降级判定必须看窗口。窗口满即结算并清零，miss_pct 保留最近一次结算结果。 */
     uint32_t window_access; /* 本窗口累计访问数（hit+miss） */
@@ -269,20 +245,6 @@ typedef struct
     l2p_owner_fn_t owner_of_region;
     void          *owner_ctx;
 } l2p_cache_t;
-
-/*
- * l2p_cache_is_thrashing - 查询当前是否处于 thrashing 降级态（P1-4）
- *
- * 由 l2p_cache 内部按窗口 miss 率 + 滞回维护，调用点（ftl_service_normal）据此
- * 决定是否停掉主动后台 flush。纯读，不改状态。
- *
- * @param cache cache 上下文（**前置条件**，非空；调用点传 `ftl->cache`）
- */
-static inline bool l2p_cache_is_thrashing(const l2p_cache_t *cache)
-{
-    ASSERT(cache != NULL);
-    return cache->thrashing != 0U;
-}
 
 /* ── 接口 ── */
 
@@ -330,7 +292,7 @@ bool l2p_cache_preload_region(l2p_cache_t *cache, uint32_t global_region, nand_p
  *   同义"（见 ftl_trim / rr_select_plane），不回填就是未初始化变量。
  *
  * @param cache  cache 上下文
- * @param lba    **全局** LBA（host LBA；数据通路从阶段 B 起不再预转局部）
+ * @param lba    **全局** LBA（host LBA；数据通路不做局部/全局预转）
  * @param out    出参 PBA（FTL_OK 与 FTL_ERROR 时有效；FTL_AGAIN 时未动）
  * @return FTL_OK / FTL_AGAIN（region 加载中，稍后重试）/ FTL_ERROR（lba 越界；
  *         cache/out 为**前置条件**（判据 2），非法即 ASSERT）
@@ -347,7 +309,7 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out);
  *
  * ⚠ **就绪探针，不是一次访问**：命中不记账（记账交给随后的 read/write）、不消费
  *   fresh、不动 access_count；未命中记一次 miss（因为加载是它起的）。如此
- *   "一次 host 写 = 1 miss + 1 hit"与旧同步实现逐字一致，thrashing 窗口口径不变。
+ *   "一次 host 写 = 1 miss + 1 hit"，thrashing 窗口口径与一次访问一致。
  *
  * @return true 就绪；false 未就绪（已在加载中，稍后重试）
  */
@@ -388,9 +350,10 @@ ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
  *   分配不到块（owner 的 Free Pool 空）⇒ FTL_AGAIN；owner 的 metadata_dir/alloc
  *   由全局 region 解析得到（不是 cache 自带指针）。**不回退任何固定位置**
  *   ——没有固定位置：未刷盘的 region 在 Directory 里就是 NAND_PBA_INVALID。
- * ⚠ 背压：命令池空 / 在飞写回数达 L2P_FLUSH_MAX_INFLIGHT ⇒ FTL_AGAIN（行保持 DIRTY）。
- *   ⚠ 若已消耗槽位后提交失败，该槽位作废（append_slot 已推进写指针）——与旧实现的
- *     写失败分支同级，信息不丢（region 仍指向上一份有效记录）。
+ * ⚠ 背压（**FTL_AGAIN**）：在飞写回数达 L2P_FLUSH_MAX_INFLIGHT、命令池空、取不到槽位
+ *   ⇒ 行保持 DIRTY，下轮重试。只有地址/建链/提交的**硬失败**才是 FTL_ERROR。
+ *   ⚠ 槽位在 append_slot 时就已消耗：若其后建链/提交失败，该槽作废（写指针已推进），
+ *     但信息不丢——region 仍指向上一份有效记录。
  *
  * @return FTL_OK 已提交（含"本行非 DIRTY 无需写回"）/ FTL_AGAIN 背压 / FTL_ERROR 硬失败
  */

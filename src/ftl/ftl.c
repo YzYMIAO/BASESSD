@@ -568,10 +568,10 @@ static void bg_a_wl(ftl_context_t *ftl)
 /* 位 8 · 预算 — 后台 flush 脏 L2P region，条数上界 = 档位 l2p_flush_max
  * （IDLE=L2P_CACHE_SIZE / NORMAL=BG_NORMAL_FLUSH_COUNT / BUSY=BG_BUSY_FLUSH_COUNT，
  * 经 ftl->bg.level 反查档位）。BUSY 仅此一项 ⇒ 「must-run + 1 flush」与旧档逐字等价。
- * ⚠ thrashing 降级（P1-4）：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。 */
+ * ⚠ thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。 */
 static void bg_a_l2p_flush(ftl_context_t *ftl)
 {
-    if (l2p_cache_is_thrashing(ftl->cache))
+    if (ftl->cache->thrashing != 0U)
     {
         return;
     }
@@ -1629,7 +1629,11 @@ void ftl_flush(ftl_context_t *ftl)
      * 返回时脏 region 必须真的已持久（否则"落盘"这个词不成立——而它本就在 CLI 上下文，
      * 自旋不是嵌套泵）。后台攒批走 l2p_flush_kick（ftl_service 各档）。 */
     (void)l2p_cache_flush_owner_sync(ftl->cache, ftl_topo_dim(ftl->topo));
-    journal_flush_page(ftl->journal);
+
+    if (journal_flush_page(ftl->journal) != FTL_OK)
+    {
+        LOGW("[FTL] flush: journal barrier not reached\r\n");
+    }
 }
 
 /* --------------------------------------------------------------------
