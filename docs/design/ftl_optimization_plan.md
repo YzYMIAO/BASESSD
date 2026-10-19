@@ -529,6 +529,7 @@
 | `ftl_trim` 大范围同步阻塞 | 超循环长停 | 范围上界/分块后续定 |
 | `ftl_flush` 语义 | = 「落已持久化映射」，**非** NVMe barrier | 语义界定，非缺陷 |
 | 跨组 LBA 重叠写序 | 未定义 | 当前 HIL 串行，不成问题 |
+| **跨 LUN superblock 条带 / 跨 LUN GC/WL** | 当前 per-LUN（region 级分片，非多 die 条带）；见 `multi_lun_generalization.md:26,358-359` | **后续性能项**（`known_risks.md` RISK-ARCH-02）：需要设备级 relocation 引擎 + 跨实例事务（两套 allocator/BST/journal/CP 账本同步）；不是改 `migrate_handle_t` 入参能解决 |
 
 ### 8.4 文档一致性债
 

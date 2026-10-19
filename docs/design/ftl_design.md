@@ -3864,6 +3864,11 @@ flowchart TB
 - `alloc` 内部指针直接绑到 `tables`，多数下游走 `ftl->alloc.blocks/...`，不经过 `ftl->tables`。
 - 共享 cache 的生命周期覆盖全程；它的 `ctx`（cache line）会进完成表，不能是栈对象。
 - 完成表的 `ctx` 可以是 `NULL`（host IO）、cache line、job、pending 槽；生命周期必须覆盖命令在飞期。
+- **模块执行状态 vs 共享数据面**：`ftl_context_t` 是 device 描述符，持有共享账本与
+  per-instance 模块 handle；模块只拥有执行状态（FSM / 单飞行 / 计时器 / 进度计数）。
+  主流程通过 typed `*_handle(module_handle, trigger, status)` 推进模块，
+  **不得读/写** `*.handle.phase` / `waiting` / `active`，只经 poll/status/查询；
+  跨模块字段走语义查询或端口。完整契约见 `docs/design/ftl_module_contracts.md`。
 
 ### 5.2 状态机总表
 

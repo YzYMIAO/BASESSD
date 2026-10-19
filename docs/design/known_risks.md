@@ -231,6 +231,21 @@
 
 ---
 
+## 2L. FTL 模块 handle 契约（2026-10-19 设计，未改代码）
+
+> 设计文档：`docs/design/ftl_module_contracts.md`。本节只登记架构决策与后续项，
+> 避免下一轮把「有意设计」当缺陷重查（R11）。
+
+| ID | 状态 | 风险 / 判定 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
+| RISK-ARCH-01 | 信息（有意设计） | 共享数据面账本（L2P / BST / allocator / journal 水位 / metadata / pending / completion）保持共享 device context，模块只封装执行状态；不做每模块私有副本 | `ftl_module_contracts.md` 的契约与字段所有权表；typed handle + 端口 | 若有人提出「模块私有账本/去掉共享 context」，先读契约文档；多实现/多 device 需求才重估 | `docs/design/ftl_module_contracts.md` §1/§8 |
+| RISK-ARCH-02 | 待后续（性能） | 跨 LUN superblock 条带 / 跨 LUN GC/WL **未实现**；当前 migrate 严格 per-LUN（源/目的/账本都在本实例） | per-LUN `migrate_handle`；`lba_routes_to` 守卫 | 上板基线稳定、需要多 die 均衡/条带性能时重估；需要设备级 relocation 引擎 + 跨实例事务，不是改 handle 入参 | `multi_lun_generalization.md:26,358-359`；`migrate.c:553-557,524`；`allocator.c:26-34` |
+| RISK-ARCH-03 | 信息（有意设计） | 无模块级 liveness supervisor / 无 per-engine watchdog；IWDG 只兜系统级卡死 | 各 handle ms deadline + 主循环轮询 + IWDG | 若出现主循环卡死/漏 deadline 的实际案例，加主循环 progress monitor；**不要**在 ISR 里跑状态机或喂狗 | `known_risks.md` §6 设计；`src/main.c` IWDG |
+| RISK-ARCH-04 | 信息（本仓自拟） | RR 保留 UNC/CRC desc 链、由 FTL 完成处理函数做链手术——**非主流**（主流通常以 LBA/PBA 重新下发新命令 + 新 buffer）；代价是 FC 所有权拆分、desc 池保留、生命周期复杂 | 明确 FC 机制原语、buffer 还池/`buffer_id` 清空、`≤8 desc` 上界、迟到完成 orphan 守卫 | 若实测无收益，改回 compact `rr_request_t`（命令立即 release）；保留则必须维持所有权契约 | `ftl_module_contracts.md` §4.5 |
+| RISK-ARCH-05 | 信息（本仓自拟） | 独立 `confirm_handle` **未采用**；write-confirm park 收进 `pending_confirm_service()`；TRIM 仍留在 `ftl.c` | 停泊列表归 pending；超时 complete group IO_ERROR | Journal→L2P→BST 顺序有两处实现（confirm/TRIM），**任何顺序变更必须同步两处**（C2/R9） | `ftl_module_contracts.md` §5 |
+
+---
+
 ## 3. 类型 / 显式强转（H44，提交 `6050703`）
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |

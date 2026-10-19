@@ -16,6 +16,7 @@
 | 平台 / 移植 / 调试链 | `design/platform_abstraction.md` + `design/wsl_debug_environment.md` + `hardware_contract.md` |
 | 断言 / 日志 / 故障捕获 | `design/assertion_guidelines.md` + `design/fault_capture.md` |
 | 设计原则 / 学习 | `design/storage_controller_design_essentials.md` + `design/cw_level_mapping_design.md` |
+| **模块接口 / 解耦判据** | `design/ftl_module_contracts.md`（handle 契约 / 字段所有权 / 超时 / 多 LUN） |
 | 多 LUN / 共享 L2P cache / 内存域 | `design/multi_lun_generalization.md` |
 | **复查已知风险 / 判断是否该修** | **先读 `design/known_risks.md`**（暂不修 / 待上板 / 待测试源 / 待决策）→ 再进对应模块文档 |
 
@@ -25,7 +26,7 @@
 docs/
 ├── README.md                  ← 本文件（导航）
 ├── archive/                   ← 历史区（日常不读）：changelog 70 个 + dated 6 个，见 archive/README.md
-├── design/                    ← 活跃权威设计文档（20 个）
+├── design/                    ← 活跃权威设计文档（21 个）
 ├── reference/                 ← 资料区：论文 PDF / 网页存档离线备份
 ├── diagrams/                  ← 示意图
 ├── architecture.md            ← 软件架构总览
