@@ -144,9 +144,6 @@ gc_decode_result_t gc_decode_cw_lba(fc_command_t *cmd,
 {
     const uint8_t phys_plane = pba_to_plane(pba);
 
-    ASSERT(cmd != NULL);
-    ASSERT(cw_lba != NULL);
-
     for (uint8_t c = 0U; c < CW_NUM; c++)
     {
         cw_lba[c] = FTL_LBA_INVALID; /* 默认未写过 */
@@ -256,7 +253,6 @@ static void gc_table_extremes(const ftl_allocator_t *alloc, gc_extremes_t *out)
 bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim)
 {
     /* 前置条件（判据 2）：调用者 migrate.c 传 &ftl->alloc 与栈上 &victim。 */
-    ASSERT(victim != NULL);
 
     /* 归一化基准：全表极值（一次扫描，与候选数无关）。min_erase 本函数不用（T5 用）。 */
     gc_extremes_t ex;

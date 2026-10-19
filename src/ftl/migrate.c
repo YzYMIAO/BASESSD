@@ -210,9 +210,8 @@ static ftl_status_t mig_submit_erase(migrate_handle_t *m)
  * -------------------------------------------------------------------- */
 static void mig_start(migrate_handle_t *m, const super_block_t *victim, mig_kind_t kind, mig_post_t post)
 {
-    /* 前置条件（判据 2）：唯一调用者是本文件的 mig_begin_*，各自已断言 ftl / victim；
+    /* 前置条件（判据 2）：唯一调用者是本文件的 mig_begin_*，各自持有实例与 victim；
      * active 是运行时状态（单飞行），由调用者在选块**之前**判过 ⇒ 这里是死守卫。 */
-    ASSERT(victim != NULL);
     ASSERT(!m->active);
 
     /* job 状态整体复位，但**端口 / 自持节拍 / 单调计数**必须跨 job 保留。 */
@@ -912,9 +911,6 @@ static void mig_service_step(migrate_handle_t *m)
 
 void migrate_init(migrate_handle_t *m, const migrate_port_t *port)
 {
-    ASSERT(m != NULL);
-    ASSERT(port != NULL);
-
     memset(m, 0, sizeof(*m));
     m->port            = *port;
     m->fail_gblock     = UINT16_MAX;
@@ -977,8 +973,6 @@ static uint32_t mig_gc_evaluate(migrate_handle_t *m, uint32_t now_ms)
 
 static void migrate_status_fill(const migrate_handle_t *m, const ftl_bg_info_t *info, migrate_status_t *out)
 {
-    ASSERT(out != NULL);
-
     out->base.critical = true; /* 写路径紧急 GC 在 BUSY 档起，不推进即死锁 */
     out->base.progress = m->reclaimed_count;
     out->base.next_ms  = 0U;
@@ -1024,9 +1018,6 @@ static void migrate_status_fill(const migrate_handle_t *m, const ftl_bg_info_t *
 
 void migrate_handle(migrate_handle_t *m, const ftl_bg_info_t *info, migrate_status_t *out)
 {
-    ASSERT(out != NULL);
-    ASSERT(info != NULL); /* must-run 适配器每轮都构造 info */
-
     /* ① 在飞：只服务当前 job（提交即返回）。 */
     if (m->active)
     {
@@ -1321,8 +1312,6 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
     /* 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。 */
     (void)ftl;
     migrate_handle_t *m = (migrate_handle_t *)ctx;
-
-    ASSERT(completion != NULL);
 
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 

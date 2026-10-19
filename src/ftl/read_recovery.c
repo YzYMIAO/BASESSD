@@ -53,7 +53,6 @@
 void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits)
 {
     /* 层内接口：调用者一律传 &ftl_block_t.rr（BST 常驻，恒非 NULL） */
-    ASSERT(track != NULL);
 
     /* 趋势：与上一次读数比较（last_ecc 即上次值），连续上升计数 */
     if (ecc_bits > track->last_ecc)
@@ -565,9 +564,6 @@ static void rr_service_step(read_recovery_handle_t *rr)
 
 void rr_init(read_recovery_handle_t *rr, const rr_port_t *port)
 {
-    ASSERT(rr != NULL);
-    ASSERT(port != NULL);
-
     memset(rr, 0, sizeof(*rr));
     rr->port  = *port;
     rr->error = (int32_t)FTL_OK;
@@ -575,8 +571,6 @@ void rr_init(read_recovery_handle_t *rr, const rr_port_t *port)
 
 void rr_trigger(read_recovery_handle_t *rr, const rr_owner_t *owner)
 {
-    ASSERT(owner != NULL);
-
     /* 单飞行：busy 时不覆盖当前 owner；被托管的 pending 项仍在表里，
      * 当前 job 结束后由 pending 端口的 take 领走（行为与旧扫描一致）。 */
     if ((rr->stage == (uint8_t)RR_STAGE_IDLE) && (rr->has_owner == 0U))
@@ -588,8 +582,6 @@ void rr_trigger(read_recovery_handle_t *rr, const rr_owner_t *owner)
 
 static void rr_status_fill(const read_recovery_handle_t *rr, rr_status_t *out)
 {
-    ASSERT(out != NULL);
-
     out->base.critical  = true; /* host 读在等结果，不推进即死等 */
     out->base.wants_run = (rr->stage != (uint8_t)RR_STAGE_IDLE) || (rr->has_owner != 0U);
     out->base.progress  = rr->retry_count;
@@ -626,8 +618,6 @@ void rr_handle(read_recovery_handle_t *rr, const ftl_bg_info_t *info, rr_status_
 {
     /* info 当前不参与恢复决策；保留形参以统一 typed 入口。 */
     (void)info;
-
-    ASSERT(out != NULL);
 
     rr_service_step(rr);
     rr_status_fill(rr, out);
@@ -725,7 +715,6 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
 {
     /* 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。 */
     (void)ftl;
-    ASSERT(completion != NULL);
 
     uint16_t      cmd_id = (uint16_t)completion->command_id;
     fc_command_t *cmd    = fc_command_id_to_command(cmd_id);
@@ -827,7 +816,6 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
 bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock)
 {
     /* 层内接口：唯一调用者 mig_begin_predict 传 rr->port.alloc 与局部 gblock */
-    ASSERT(gblock != NULL);
 
     for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {

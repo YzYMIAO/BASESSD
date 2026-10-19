@@ -238,7 +238,6 @@ bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
 void bbt_init(ftl_allocator_t *alloc)
 {
     /* 前置条件（判据 2 / §二十六「子模块公开入口」）：唯一调用者 ftl.c 传 &ftl->alloc。 */
-    ASSERT(alloc != NULL);
 
     alloc->bbt.sequence           = 0U;
     alloc->bbt.dirty              = 0U;
@@ -773,8 +772,6 @@ static ftl_status_t bbt_submit_write(ftl_allocator_t *alloc)
  * -------------------------------------------------------------------- */
 static void bbt_status_fill(const ftl_allocator_t *alloc, bbt_status_t *out)
 {
-    ASSERT(out != NULL);
-
     out->base.critical  = false; /* BBT 持久化属预算任务，不占 must-run 正确性关键集 */
     out->base.wants_run = (alloc->bbt.handle.phase != (uint8_t)BBT_JOB_IDLE) || (alloc->bbt.dirty != 0U);
     out->base.progress  = alloc->bbt.sequence;
@@ -920,8 +917,6 @@ void bbt_handle(ftl_allocator_t *alloc, const ftl_bg_info_t *info, bbt_status_t 
     /* info 目前不参与 BBT 决策（dirty 驱动、无周期）；保留形参以统一 typed 入口。 */
     (void)info;
 
-    ASSERT(out != NULL);
-
     bbt_handle_step(alloc);
 
     /* 上报在**推进之后**取：主流程看到的是本轮结束时的可行动性。 */
@@ -991,8 +986,6 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
 
     (void)ftl; /* 实例无关：ctx 就是本实例的 allocator */
 
-    ASSERT(completion != NULL);
-
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     /* 孤儿 / 迟到完成：当前没有在飞命令 ⇒ 只释放，不改状态。 */
@@ -1026,7 +1019,7 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
  *   功能：开机从 BBT 池定位并读回最新有效 BBT header，输出 bitmap/坏块数/序号。
  *   参数：alloc —— 分配器（池路由取 alloc 的 ch/ce/lun，游标/序号写回 alloc->bbt）；
  *         bad_map[BBT_BITMAP_SIZE] —— 出参位图；bad_count/sequence —— 出参。
- *         ⚠ alloc 是**前置条件**，由唯一调用者 bbt_init 断言；其余三个出参指针非法即 ASSERT。
+ *         ⚠ alloc 是**前置条件**，由 ftl_init 的调用链保证；出参由调用者提供。
  *   返回：FTL_OK 成功；FTL_ERROR 池内无有效 record / 重读失败 / 校验不符。
  *   实现要点：进入即复位 alloc->bbt（找不到时保持 0/无效 ⇒ 后续 save 从池首开始）；
  *             locate 只回序号，header 本体要按该序号**再读一次**并复核 sequence。

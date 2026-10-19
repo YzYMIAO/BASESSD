@@ -335,7 +335,7 @@ bool l2p_cache_preload_region(l2p_cache_t *cache, uint32_t global_region, nand_p
  * @param lba    **全局** LBA（host LBA；数据通路不做局部/全局预转）
  * @param out    出参 PBA（FTL_OK 与 FTL_ERROR 时有效；FTL_AGAIN 时未动）
  * @return FTL_OK / FTL_AGAIN（region 加载中，稍后重试）/ FTL_ERROR（lba 越界；
- *         out 为**前置条件**（判据 2），非法即 ASSERT；cache 由 ftl_contract_audit 在 boot 期证明）
+ *         out 由调用者提供；cache 由 ftl_contract_audit 在 boot 期证明）
  */
 ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out);
 

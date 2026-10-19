@@ -54,14 +54,11 @@ static pending_confirm_handler_t s_confirm_handler;
 
 void pending_confirm_set_handler(pending_confirm_handler_t handler)
 {
-    ASSERT(handler != NULL);
     s_confirm_handler = handler;
 }
 
 void pending_confirm_park(ftl_context_t *ftl, uint16_t pending_idx, uint32_t owners)
 {
-    ASSERT(pending_idx < FTL_PENDING_MAX);
-
     ftl_pending_req_t *pending = &ftl->pending[pending_idx];
 
     ASSERT(pending->used != 0U);
@@ -86,8 +83,6 @@ bool pending_confirm_has_parked(const ftl_context_t *ftl)
 
 void pending_confirm_service(ftl_context_t *ftl, const ftl_bg_info_t *info)
 {
-    ASSERT(s_confirm_handler != NULL);
-
     const uint32_t now_ms = ((info != NULL) && (info->now_ms != 0U)) ? info->now_ms : ftl_job_now_ms();
 
     for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
@@ -217,7 +212,6 @@ bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out
  * -------------------------------------------------------------------- */
 void pending_release_index(ftl_context_t *ftl, uint8_t index)
 {
-    ASSERT(index < FTL_PENDING_MAX);
     ASSERT(ftl->pending[index].used != 0U); /* 重复释放即簿记错误，留现场 */
 
     ftl->pending[index].used = 0U;
@@ -295,8 +289,6 @@ uint16_t pending_group_count(const ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi)
 {
-    ASSERT(gi < FTL_GROUP_MAX);
-
     ftl_io_group_t *g = &ftl->groups[gi];
     if ((g->used == 0U) || (g->next < g->total) || (g->outstanding != 0U))
     {
@@ -334,8 +326,6 @@ void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi)
  * -------------------------------------------------------------------- */
 void pending_group_add_subop(ftl_context_t *ftl, uint16_t gi)
 {
-    ASSERT(gi < FTL_GROUP_MAX);
-
     ftl_io_group_t *g = &ftl->groups[gi];
     ASSERT(g->used != 0U);
     ASSERT(g->outstanding < UINT16_MAX);
@@ -345,8 +335,6 @@ void pending_group_add_subop(ftl_context_t *ftl, uint16_t gi)
 
 void pending_group_drop_subop(ftl_context_t *ftl, uint16_t gi)
 {
-    ASSERT(gi < FTL_GROUP_MAX);
-
     ftl_io_group_t *g = &ftl->groups[gi];
     ASSERT(g->used != 0U);
     ASSERT(g->outstanding > 0U);
@@ -368,8 +356,6 @@ void pending_group_drop_subop(ftl_context_t *ftl, uint16_t gi)
  * -------------------------------------------------------------------- */
 void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t sub_status)
 {
-    ASSERT(gi < FTL_GROUP_MAX);
-
     ftl_io_group_t *g = &ftl->groups[gi];
     ASSERT(g->used != 0U); /* 组已释放 = 重复完成/簿记错误，debug 当场炸 */
 

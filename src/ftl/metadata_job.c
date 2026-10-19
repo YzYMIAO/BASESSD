@@ -92,8 +92,6 @@ bool md_reclaim_mark(metadata_dir_cache_t *dir, uint16_t g)
 
 bool md_reclaim_take(metadata_dir_cache_t *dir, uint16_t *out)
 {
-    ASSERT(out != NULL);
-
     /* 从上次取走的位置继续扫描并环绕：擦除持续失败的块保留位，但不再永久占住
      * 扫描起点，后续块仍能被回收。 */
     for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
@@ -764,16 +762,11 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
 void metadata_dir_bind_port(metadata_dir_cache_t *dir, const metadata_port_t *port)
 {
-    ASSERT(dir != NULL);
-    ASSERT(port != NULL);
-
     dir->port = *port;
 }
 
 static void metadata_status_fill(const metadata_dir_cache_t *dir, metadata_status_t *out)
 {
-    ASSERT(out != NULL);
-
     const metadata_handle_t *j = &dir->handle;
 
     out->base.critical  = false; /* 由 must-run 适配器保证 liveness */
@@ -815,8 +808,6 @@ void metadata_handle(metadata_dir_cache_t *dir, const ftl_bg_info_t *info, metad
 {
     /* info 当前不参与目录整理决策（事件驱动）；保留形参以统一 typed 入口。 */
     (void)info;
-
-    ASSERT(out != NULL);
 
     metadata_handle_step(dir);
     metadata_status_fill(dir, out);
@@ -987,8 +978,6 @@ void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *c
     (void)ftl;
     metadata_dir_cache_t *dir = (metadata_dir_cache_t *)ctx;
     metadata_handle_t    *j   = (dir != NULL) ? &dir->handle : NULL;
-
-    ASSERT(completion != NULL);
 
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 

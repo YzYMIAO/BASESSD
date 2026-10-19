@@ -120,14 +120,12 @@ static inline uint8_t ftl_plane_multi_field(uint8_t nplanes)
 /* plane 数 → 读 operation 码。界取 PLANE_NUM，与 fc_command_plane_span 的上界同源。 */
 static inline uint8_t ftl_plane_read_op(uint8_t nplanes)
 {
-    ASSERT((nplanes >= 1U) && (nplanes <= PLANE_NUM));
     return (uint8_t)((nplanes > 1U) ? OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT : OP_NORMAL_READ_PAGE_WITH_DATA_OUT);
 }
 
 /* plane 数 → 写 operation 码。界同上。 */
 static inline uint8_t ftl_plane_write_op(uint8_t nplanes)
 {
-    ASSERT((nplanes >= 1U) && (nplanes <= PLANE_NUM));
     return (uint8_t)((nplanes > 1U) ? OP_PROGRAM_PAGE_MULTI_PLANE : OP_NORMAL_PROGRAM_PAGE);
 }
 
@@ -202,7 +200,6 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
 static inline ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba)
 {
     /* cmd 由调用者从 fc_command_alloc() 取且已判空（判据 2：层内模块头 → 前置条件）。 */
-    ASSERT(cmd != NULL);
 
     /* 边界不变量：进 FC 的 ch/ce/lun 被 fc_poll_fill_queue 当 suspended[][][] 下标
      * 直接用，越界即栈越界写。校验必须自带；否则 fc.c 那句「PBA 已过 pba_is_valid()
@@ -482,7 +479,7 @@ ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const f
  *   没有 PBA 可推 ⇒ 只能显式传。留 0 在多实例下会把本命令的完成派给实例 [0][0][0]。
  *
  * @return FTL_OK 命令已备好（须提交或 release）；FTL_AGAIN 命令池空。
- *         ⚠ out_cmd 为**前置条件**（判据 2），非法即 ASSERT。
+ *         ⚠ out_cmd 由调用者传局部地址，不在此重复断言。
  */
 ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t ce, uint8_t lun, uint8_t feature_addr, uint8_t mode);
 

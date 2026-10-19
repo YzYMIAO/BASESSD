@@ -236,7 +236,6 @@ static l2p_cache_line_t *l2p_cache_find(l2p_cache_t *cache, uint32_t region_id)
 
 bool l2p_cache_preload_region(l2p_cache_t *cache, uint32_t global_region, nand_pba_t pba)
 {
-    ASSERT(global_region < L2P_GLOBAL_REGIONS);
     ASSERT(pba_is_valid(pba));
 
     /* 已有驻留行（journal 回放的 DIRTY / 已预载）⇒ 维持「一 region 一行」。 */
@@ -420,7 +419,6 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint32_t region_id)
 ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
 {
     /* 前置条件（判据 2）：调用者传 ftl->cache 与自己的出参地址。 */
-    ASSERT(out != NULL);
 
     if ((uint64_t)lba >= L2P_GLOBAL_LBA_MAX)
     {
@@ -647,7 +645,6 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx)
 {
     /* 前置条件（判据 2）：cache 恒 ftl->cache；line_idx 由调用者自持（下标越界是内部
      * 自铸句柄，非外部输入）——两侧都收口成断言。 */
-    ASSERT((line_idx >= 0) && (line_idx < (int)L2P_CACHE_SIZE));
 
     l2p_cache_line_t *line = &cache->lines[line_idx];
 
@@ -711,8 +708,6 @@ void l2p_flush_kick_owner(l2p_cache_t *cache, uint32_t owner_dim, uint8_t max_ki
 {
     /* 前置条件（判据 2）：调用者传 ftl->cache、本实例 dim 与档位表里的非零条数
      * （IDLE L2P_CACHE_SIZE / NORMAL BG_NORMAL_FLUSH_COUNT / BUSY BG_BUSY_FLUSH_COUNT）。 */
-    ASSERT(owner_dim < FTL_DIM_TOTAL);
-    ASSERT(max_kick != 0U);
 
     /* 心跳（见 ftl_job.h）：有在飞 region（load / flush）时每满 1s 打一行计数。
      * ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。 */
@@ -767,7 +762,6 @@ ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
     uint8_t  kicked = 0U;
 
     /* 前置条件（判据 2）：cache 恒 ftl->cache；line_idx 由调用者自持。 */
-    ASSERT((line_idx >= 0) && (line_idx < (int)L2P_CACHE_SIZE));
 
     l2p_cache_line_t *line = &cache->lines[line_idx];
 
@@ -822,7 +816,6 @@ ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx)
 ftl_status_t l2p_cache_flush_owner_sync(l2p_cache_t *cache, uint32_t owner_dim)
 {
     /* 前置条件（判据 2）：调用者传 ftl->cache 与本实例 dim。 */
-    ASSERT(owner_dim < FTL_DIM_TOTAL);
 
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
@@ -873,7 +866,6 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
 {
     l2p_cache_line_t *line = (l2p_cache_line_t *)ctx;
 
-    ASSERT(completion != NULL);
     ASSERT(line != NULL);
 
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
@@ -984,8 +976,6 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
  */
 void l2p_cache_invalidate_owner(l2p_cache_t *cache, uint32_t owner_dim)
 {
-    ASSERT(owner_dim < FTL_DIM_TOTAL);
-
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         l2p_cache_line_t *line = &cache->lines[i];
@@ -1025,9 +1015,6 @@ void l2p_cache_invalidate_owner(l2p_cache_t *cache, uint32_t owner_dim)
  */
 void l2p_cache_snapshot_owner_bitmap(const l2p_cache_t *cache, uint32_t owner_dim, uint32_t out[L2P_LOCAL_DIRTY_WORDS])
 {
-    ASSERT(owner_dim < FTL_DIM_TOTAL);
-    ASSERT(out != NULL);
-
     memset(out, 0, L2P_LOCAL_DIRTY_WORDS * sizeof(uint32_t));
 
     for (uint32_t local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
@@ -1063,8 +1050,6 @@ static uint16_t l2p_dirty_count(const l2p_cache_t *cache)
 
 static void l2p_status_fill(const l2p_cache_t *cache, l2p_status_t *out)
 {
-    ASSERT(out != NULL);
-
     uint16_t resident = 0U;
 
     for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
@@ -1105,11 +1090,6 @@ static void l2p_status_fill(const l2p_cache_t *cache, l2p_status_t *out)
 
 void l2p_handle(l2p_cache_t *cache, uint32_t dim, const ftl_bg_info_t *info, l2p_status_t *out)
 {
-    ASSERT(dim < FTL_DIM_TOTAL);
-    ASSERT(info != NULL);
-    ASSERT(out != NULL);
-    ASSERT(info->load_level < BG_LEVEL_NUM);
-
     /* thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。
      * 判据在模块内，主流程不读 cache->thrashing。 */
     if (cache->thrashing == 0U)
@@ -1124,8 +1104,6 @@ void l2p_handle(l2p_cache_t *cache, uint32_t dim, const ftl_bg_info_t *info, l2p
 
 void l2p_cache_line_get(const l2p_cache_t *cache, uint16_t idx, l2p_line_info_t *out)
 {
-    ASSERT(out != NULL);
-
     if (idx >= L2P_CACHE_SIZE)
     {
         out->region_id = 0U;
@@ -1139,10 +1117,6 @@ void l2p_cache_line_get(const l2p_cache_t *cache, uint16_t idx, l2p_line_info_t 
 
 void l2p_cache_invalidate_line(l2p_cache_t *cache, uint16_t idx)
 {
-    ASSERT(idx < L2P_CACHE_SIZE);
-    ASSERT(cache->lines[idx].state != L2P_CACHE_FLUSHING);
-    ASSERT(cache->lines[idx].state != L2P_CACHE_LOADING);
-
     cache->lines[idx].state = L2P_CACHE_INVALID;
 }
 

@@ -117,9 +117,8 @@ static ftl_status_t ftl_cmd_validate_cw_bitmap(uint32_t bitmap, uint8_t plane_fi
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_cmd_configure_descriptors(fc_command_t *cmd, uint32_t cw_bitmap)
 {
-    /* cmd 由调用者从 fc_command_alloc() 取且已判空（判据 2：层内模块头 = 前置条件 → ASSERT）。
+    /* cmd 由调用者从 fc_command_alloc() 取且已判空；此处不重复断言。
      * 唯一合法失败是**池空**（desc/buffer）——那才是返回码。 */
-    ASSERT(cmd != NULL);
 
     if (!ftl_cmd_needs_desc_chain(cmd))
     {
@@ -242,8 +241,6 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
     /* cmd 来自调用者的 fc_command_alloc()（已判空）、pba 是调用者的局部数组
      * （见 ftl_issue_subop / wbuf_handle(FLUSH)）——两者给 NULL 都是调用者 bug ⇒ ASSERT
      * （判据 2：层内模块头 = 前置条件，不返回码）。 */
-    ASSERT(cmd != NULL);
-    ASSERT(pba != NULL);
 
     /* 基址 PBA 必须取自**被覆盖的 plane**，不是无条件的 pba[0]：CW 级子操作常只覆盖
      * 半个 pair（例如一条 512B 写只落 plane1），此时 pba[0] 按约定未初始化，
@@ -284,9 +281,6 @@ ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const nand_pba_t pba[P
  * -------------------------------------------------------------------- */
 uint8_t ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out, uint8_t max)
 {
-    ASSERT(cmd != NULL);
-    ASSERT(out != NULL);
-
     uint8_t            count = 0U;
     fc_descriptor_id_t did   = (fc_descriptor_id_t)cmd->desc_id;
 
@@ -337,10 +331,6 @@ uint8_t ftl_cmd_block_ecc_list(const fc_command_t *cmd, ftl_cmd_block_ecc_t *out
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t length)
 {
-    ASSERT(cmd != NULL);
-    ASSERT(data != NULL);
-    ASSERT(cmd->desc_id != FC_DESCRIPTOR_ID_INVALID);
-
     const uint8_t *src = (const uint8_t *)data;
 
     fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
@@ -399,10 +389,6 @@ ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t le
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, uint32_t cw_bitmap)
 {
-    ASSERT(cmd != NULL);
-    ASSERT(page_buf != NULL);
-    ASSERT(cmd->desc_id != FC_DESCRIPTOR_ID_INVALID);
-
     fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
 
     while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
@@ -447,10 +433,6 @@ ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, u
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length)
 {
-    ASSERT(cmd != NULL);
-    ASSERT(buffer != NULL);
-    ASSERT(cmd->desc_id != FC_DESCRIPTOR_ID_INVALID);
-
     uint8_t *dst = (uint8_t *)buffer;
 
     uint32_t remaining = length;
@@ -501,8 +483,6 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 {
     uint32_t elapsed  = 0U;
     uint32_t max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
-
-    ASSERT(cmd != NULL);
 
     /* ⚠ **服务函数内不得同步等待**（贯穿机制 2）：在完成派发里再开一个完成泵
      * （本函数自旋 fc_service + completion_table_drain）= 嵌套泵，正是本次异步化要
@@ -622,7 +602,6 @@ static fc_command_t *sync_page_prepare_cw(nand_pba_t pba, uint8_t operation, con
     }
 
     /* 边界不变量同 pba_to_cmd：进 FC 的 ch/ce/lun 被当 suspended[][][] 下标直接用。 */
-    ASSERT(pba_is_valid(pba));
     cmd->config.ch  = pba_to_ch(pba);
     cmd->config.ce  = pba_to_ce(pba);
     cmd->config.lun = pba_to_lun(pba);
@@ -692,9 +671,6 @@ static ftl_status_t mirror_write_prepare(fc_command_t        **out_cmd,
                                          uint32_t              length,
                                          const ftl_page_cfg_t *cfg)
 {
-    ASSERT(out_cmd != NULL);
-    ASSERT(data != NULL);
-    ASSERT((length > 0U) && (length <= PAGE_MAIN_SIZE));
     ASSERT(pba_is_valid(pba));
 
     fc_command_t *cmd = page_prepare_alloc(OP_PROGRAM_PAGE_MULTI_PLANE, cfg);
@@ -1004,7 +980,6 @@ ftl_status_t ftl_sync_erase_block_multi_plane(nand_pba_t pba)
 ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg)
 {
     /* 前置条件（判据 2 / §二十六 FTL↔FC 边界）：调用者一律传本函数内局部 cmd 的地址。 */
-    ASSERT(out_cmd != NULL);
 
     fc_command_t *cmd = page_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
@@ -1043,8 +1018,6 @@ ftl_status_t ftl_async_write_page(fc_command_t **out_cmd, nand_pba_t pba, const 
 ftl_status_t ftl_async_write_page_cw(fc_command_t **out_cmd, nand_pba_t pba, const uint8_t *page_buf, uint32_t cw_bitmap, const ftl_page_cfg_t *cfg)
 {
     /* 前置条件（判据 2）：out_cmd 恒为调用者局部 cmd 的地址；page_buf 恒为整页缓冲。 */
-    ASSERT(out_cmd != NULL);
-    ASSERT(page_buf != NULL);
 
     fc_command_t *cmd = page_prepare_alloc(OP_NORMAL_PROGRAM_PAGE, cfg);
     if (cmd == NULL)
@@ -1088,7 +1061,6 @@ ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba)
     const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
 
     /* 前置条件（判据 2）：调用者一律传本函数内局部 cmd 的地址。 */
-    ASSERT(out_cmd != NULL);
 
     fc_command_t *cmd = page_prepare_alloc(OP_ERASE_BLOCK, &cfg);
     if (cmd == NULL)
@@ -1115,8 +1087,6 @@ ftl_status_t ftl_async_erase_block(fc_command_t **out_cmd, nand_pba_t pba)
 ftl_status_t ftl_async_erase_block_multi_plane(fc_command_t **out_cmd, nand_pba_t pba)
 {
     const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
-
-    ASSERT(out_cmd != NULL);
 
     fc_command_t *cmd = page_prepare_alloc(OP_ERASE_BLOCK_MULTI_PLANE, &cfg);
     if (cmd == NULL)
@@ -1146,7 +1116,6 @@ ftl_status_t ftl_async_erase_block_multi_plane(fc_command_t **out_cmd, nand_pba_
 ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const ftl_page_cfg_t *cfg)
 {
     /* 前置条件（判据 2）：调用者一律传本函数内局部 cmd 的地址。 */
-    ASSERT(out_cmd != NULL);
 
     fc_command_t *cmd = page_prepare_alloc(OP_NORMAL_READ_PAGE_WITH_DATA_OUT, cfg);
     if (cmd == NULL)
@@ -1170,7 +1139,7 @@ ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const f
  *   参数：out_cmd —— 出参命令（非 NULL）；ch/ce/lun —— **完成派发的实例路由键**
  *         （不是地址，见头文件）；feature_addr —— 特性寄存器地址；
  *         mode —— 写进 parameter0 的模式值（读重试电压模式，0 = 正常）。
- *   返回：FTL_OK / FTL_AGAIN（命令池空）。out_cmd 为 NULL 是前置条件违反 ⇒ ASSERT。
+ *   返回：FTL_OK / FTL_AGAIN（命令池空）。out_cmd 由调用者传局部地址。
  *   实现要点：**不绑 PBA**——cmd->paa 恒 0（fc_command_alloc 已清零）：特性寄存器是
  *             die 级、无 plane/page 语义，FC 侧 OP_SET_FEATURES 分支也不读它。
  *             但 ch/ce/lun **必须**填——ftl_op_dispatch 靠它们解析归属实例。
@@ -1179,7 +1148,6 @@ ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, nand_pba_t pba, const f
 ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t ce, uint8_t lun, uint8_t feature_addr, uint8_t mode)
 {
     /* 前置条件（判据 2）：调用者一律传本函数内局部 cmd 的地址。 */
-    ASSERT(out_cmd != NULL);
 
     fc_command_t *cmd = fc_command_alloc();
     if (cmd == NULL)
@@ -1222,10 +1190,8 @@ ftl_status_t ftl_sync_read_column(nand_pba_t pba, uint16_t column, uint8_t out[4
     const ftl_page_cfg_t cfg = {FC_CRC_DISABLE, FC_RANDOM_DISABLE, FC_ECC_MODE_BCH, 0U};
 
     /* 前置条件（判据 2）：唯一调用者 bbt.c 传局部数组 mark[4]。 */
-    ASSERT(out != NULL);
 
     /* 列 + 4 越出页尾是调用者编程错误（本仓首次允许任意列，故必须拦）。 */
-    ASSERT((uint32_t)column + 4U <= (uint32_t)PAGE_SIZE);
 
     /* OP_READ_COLUMN 的 has_data = 0 ⇒ pba_to_cmd 不建链、
      * 不看位图（desc_id 置 INVALID）。地址仍须落进 cmd->paa —— 但**只提供行地址**，

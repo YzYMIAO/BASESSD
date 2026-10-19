@@ -327,7 +327,6 @@ static cp_flush_step_t cp_flush_regions(checkpoint_handle_t *h, checkpoint_handl
         }
 
         const uint32_t local_region = l2p_global_to_local_region(line.region_id);
-        ASSERT(local_region < L2P_REGIONS_PER_INSTANCE);
 
         uint32_t word = j->region_bitmap[local_region / 32U];
         uint32_t mask = (1UL << (local_region & 31U));
@@ -866,8 +865,6 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
     checkpoint_handle_t *h = (checkpoint_handle_t *)ctx;
     checkpoint_handle_t *j = h;
 
-    ASSERT(completion != NULL);
-
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     /* 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，
@@ -1140,8 +1137,6 @@ cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t
  * -------------------------------------------------------------------- */
 void checkpoint_block_snapshot(const ftl_allocator_t *alloc, uint16_t words[FTL_BLOCK_TOTAL])
 {
-    ASSERT(words != NULL);
-
     for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
         const ftl_block_t *b = &alloc->blocks[g];
@@ -1188,9 +1183,6 @@ void checkpoint_block_snapshot(const ftl_allocator_t *alloc, uint16_t words[FTL_
  * -------------------------------------------------------------------- */
 void checkpoint_wear_page_build(const ftl_allocator_t *alloc, uint16_t page_index, uint8_t page[PAGE_MAIN_SIZE])
 {
-    ASSERT(page != NULL);
-    ASSERT(page_index < FTL_CHECKPOINT_WEAR_PAGES);
-
     cp_wear_entry_t *entries = (cp_wear_entry_t *)page;
 
     for (uint16_t i = 0U; i < FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE; i++)
@@ -1230,7 +1222,6 @@ bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
                                 const l2p_checkpoint_header_t *cp,
                                 uint16_t                       record_idx)
 {
-    ASSERT(cp != NULL);
     /* 读缓冲复用 checkpoint_handle 的 wear_page_buf ⇒ 只能在开机（job 未在跑）调用。 */
     ASSERT(h->active == 0U);
 
@@ -1336,9 +1327,6 @@ bool checkpoint_load_block_table(checkpoint_handle_t           *h,
                                  uint16_t                       record_idx,
                                  uint16_t                       block_words[FTL_BLOCK_TOTAL])
 {
-    ASSERT(cp != NULL);
-    ASSERT(block_words != NULL);
-
     if (cp->block_page_count == 0U)
     {
         return false; /* initial CP / 旧记录：无快照 */
@@ -1472,8 +1460,6 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
  * -------------------------------------------------------------------- */
 static bool cp_should_start(const checkpoint_handle_t *h, const checkpoint_trigger_t *trigger)
 {
-    ASSERT(trigger != NULL);
-
     /* 触发原因决定本轮**允许**评估哪些带门。
      *   ADVANCE   —— must-run 表首只推进在飞 job，不评估启动；
      *   EMERGENCY —— 任何档位只响应紧急水位；
@@ -1527,8 +1513,6 @@ static bool cp_should_start(const checkpoint_handle_t *h, const checkpoint_trigg
 
 static void checkpoint_status_fill(const checkpoint_handle_t *h, checkpoint_status_t *out)
 {
-    ASSERT(out != NULL);
-
     out->base.critical  = true; /* CP 跨轮推进，任何档位都要跑 */
     out->base.wants_run = (h->active != 0U);
     out->base.progress  = h->cp_state.sequence;
@@ -1565,9 +1549,6 @@ static void checkpoint_status_fill(const checkpoint_handle_t *h, checkpoint_stat
 
 void checkpoint_handle(checkpoint_handle_t *h, const checkpoint_trigger_t *trigger, checkpoint_status_t *out)
 {
-    ASSERT(trigger != NULL);
-    ASSERT(out != NULL);
-
     if (h->active != 0U)
     {
         /* 每轮**只推进一次**：只有表首的 ADVANCE 入口跑状态机；紧急/周期入口在

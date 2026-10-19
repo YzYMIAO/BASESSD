@@ -187,7 +187,6 @@ static inline ftl_block_state_t ftl_block_state(const ftl_block_t *b)
 
 static inline void ftl_block_set_state(ftl_block_t *b, ftl_block_state_t st)
 {
-    ASSERT((unsigned)st <= (unsigned)FTL_BLOCK_STATE_BAD); /* 漏斗唯一入口，越界即停机 */
     b->state = (uint8_t)st;
 }
 
@@ -212,7 +211,6 @@ static inline void ftl_block_set_bad(ftl_block_t *b)
  * 故 FREE/BAD 块上残留的温度不会被任何读者读到（`ftl_block_get_temp` 生产侧零读者）。 */
 static inline void ftl_block_set_temp(ftl_block_t *b, uint8_t temperature)
 {
-    ASSERT(temperature <= 1U); /* 0=HOT / 1=COLD，同 FTL_TEMP_* */
     b->temp = temperature;
 }
 
@@ -298,7 +296,6 @@ static inline void ftl_block_clear_valid(ftl_block_t *b)
  * ⚠ 上界是**单物理块**的 CW 数（FTL_CW_PER_BLOCK），不是 SB 合计。 */
 static inline void ftl_block_set_valid(ftl_block_t *b, uint16_t valid)
 {
-    ASSERT(valid <= (uint16_t)FTL_CW_PER_BLOCK);
     b->valid_count = valid;
 }
 

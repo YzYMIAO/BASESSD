@@ -508,8 +508,6 @@ static inline bool pba_is_valid(nand_pba_t pba)
 /* 单 plane 段内、CW [cw_lo, cw_hi] 的 flat 位图（段起点由调用者左移） */
 static inline uint32_t ftl_cw_span_mask(uint8_t cw_lo, uint8_t cw_hi)
 {
-    ASSERT(cw_lo <= cw_hi);
-    ASSERT(cw_hi < CW_NUM);
     return (uint32_t)((1U << (uint32_t)(cw_hi + 1U)) - 1U) & ~((1U << (uint32_t)cw_lo) - 1U);
 }
 
@@ -517,7 +515,6 @@ static inline uint32_t ftl_cw_span_mask(uint8_t cw_lo, uint8_t cw_hi)
  * 一位一段：plane p 占 bit [p*CW_NUM, (p+1)*CW_NUM)——见 §三.3 的 flat 编号约定。 */
 static inline uint32_t ftl_cw_plane_mask(uint8_t plane)
 {
-    ASSERT(plane < PLANE_NUM);
     return (uint32_t)(ftl_cw_span_mask(0U, CW_NUM - 1U) << ((uint32_t)plane * CW_NUM));
 }
 
@@ -527,8 +524,6 @@ static inline uint32_t ftl_cw_plane_mask(uint8_t plane)
  *   避免同一份位图出现「绝对位置、相对位判」两种写法。 */
 static inline uint32_t ftl_cw_bit(uint8_t plane, uint8_t cw)
 {
-    ASSERT(plane < PLANE_NUM);
-    ASSERT(cw < CW_NUM);
     return (uint32_t)1U << ((uint32_t)plane * CW_NUM + cw);
 }
 

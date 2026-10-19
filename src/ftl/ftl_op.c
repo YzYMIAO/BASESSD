@@ -60,9 +60,6 @@ static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
 
 ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
 {
-    ASSERT(cmd != NULL);
-    ASSERT((uint32_t)op < (uint32_t)FTL_OP_COUNT);
-
     uint16_t cmd_id = ftl_cmd_id(cmd);
 
     /* ① ID 上命令（FC 只做原样拷贝，完成时回传到 completion.op_tag）。 */
@@ -105,8 +102,6 @@ bool ftl_op_in_dispatch(void)
 
 void ftl_op_dispatch(const fc_command_status_t *completion)
 {
-    ASSERT(completion != NULL);
-
     uint8_t              op = (uint8_t)completion->op_tag;
     ftl_op_callback_fn_t fn = (op < (uint8_t)FTL_OP_COUNT) ? g_op_callbacks[op] : NULL;
 

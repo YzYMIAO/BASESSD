@@ -33,7 +33,7 @@
  *
  * ⚠ 入口前置守卫口径（docs/design/assertion_guidelines.md §二十六 / §二十八）：
  *   对外入口（ftl_media_check_format / ftl_media_format / ftl_boot_recovery）的 ftl/result
- *   非空是**前置条件**，用 ASSERT；三条启动路径与其内部 helper（fresh_start / clean_start /
+ *   非空由 main.c 的调用链保证；三条启动路径与其内部 helper（fresh_start / clean_start /
  *   power_failure / apply_region_bitmap / rebuild_closed_sb_list）只被 ftl_boot_recovery 调用，
  *   该处的 ftl 非空已由它保证 ⇒ **不再逐函数复检**。
  */
@@ -104,7 +104,6 @@ static void         ftl_recovery_reset_blocks(ftl_context_t *ftl);
 ftl_status_t ftl_media_check_format(struct ftl_context *ftl, bool *out_need_format)
 {
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与局部 bool。 */
-    ASSERT(out_need_format != NULL);
 
     uint32_t          media_version = 0U;
     cp_media_status_t st            = checkpoint_probe_media_status(ftl->checkpoint_handle, &media_version);
@@ -172,8 +171,8 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
 /* --------------------------------------------------------------------
  * ftl_boot_recovery
  *   功能：启动恢复总入口——判上次关机形态并分发到三条启动路径之一。
- *   参数：ftl —— FTL 实例（前置条件，ASSERT）；result —— 出参启动结果
- *         （boot_type / cp_sequence / journal_entries，出参地址前置条件，ASSERT）。
+ *   参数：ftl —— FTL 实例（由 main.c 的调用链保证）；result —— 出参启动结果
+ *         （boot_type / cp_sequence / journal_entries，由调用者提供）。
  *   返回：FTL_OK 成功；FTL_ERROR 子路径失败。
  *   实现要点：① 扫 Journal 环形块池取最新页（journal_scan_latest）——**只读不改状态**，
  *                故不调 journal_replay（后者会修改 journal 内部状态）。三条启动路径
@@ -184,7 +183,6 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
 ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
 {
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与栈上 &result。 */
-    ASSERT(result != NULL);
 
     ftl_boot_result_t local_result;
     memset(&local_result, 0, sizeof(local_result));
@@ -385,7 +383,6 @@ static void recovery_refill_spare_pools(ftl_context_t *ftl)
 static ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_page_ref_t *ring)
 {
     /* 前置条件（判据 2）：唯一调用者 ftl_boot_recovery 持有实例与 ring 快照。 */
-    ASSERT(ring != NULL);
 
     /* ① 只失效本 owner 的行/脏位（设备级 init 已清全体；这里覆盖格式化后的场景） */
     const uint32_t dim = ftl_topo_dim(ftl->topo);
@@ -435,10 +432,6 @@ static ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
                                          uint8_t                       *blocks_restored,
                                          const journal_page_ref_t      *ring)
 {
-    ASSERT(cp != NULL);
-    ASSERT(blocks_restored != NULL);
-    ASSERT(ring != NULL);
-
     /* ① 共享 cache 已由设备级 init 置空；本路径只按 CP bitmap 约束本 owner 的行
      *    （首次 miss 时按需从 NAND L2P Table 加载）。 */
     uint8_t   restored    = 0U;
@@ -542,8 +535,6 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
 
         const uint32_t local = l2p_global_to_local_region(line.region_id);
 
-        ASSERT(local < L2P_REGIONS_PER_INSTANCE);
-
         if ((cp->region_bitmap[local / 32U] & (1UL << (local & 31U))) == 0U)
         {
             l2p_cache_invalidate_line(ftl->cache, i);
@@ -591,8 +582,6 @@ static ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
                                            ftl_boot_result_t             *result)
 {
     /* 前置条件（判据 2）：唯一调用者 ftl_boot_recovery 持有实例与局部结构。 */
-    ASSERT(cp != NULL);
-    ASSERT(result != NULL);
 
     uint32_t cp_sequence = cp->journal_sequence;
 
@@ -790,7 +779,6 @@ static void ftl_recovery_close_block(ftl_context_t       *ftl,
                                      ftl_rebuild_stats_t *stats)
 {
     /* 前置条件（判据 2）：pages_written 来自 ftl_recovery_scan_write_pointer，调用者已跳过 0。 */
-    ASSERT((pages_written > 0U) && (pages_written <= PAGES_PER_BLOCK));
 
     /* 退化单 plane 条目：本 plane 记块号，其余 plane 记哨兵 */
     uint16_t plane_blocks[PLANE_NUM];
@@ -996,8 +984,6 @@ static bool recovery_add_closed(ftl_context_t *ftl, uint16_t g, uint8_t temperat
 
 static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLOCK_TOTAL])
 {
-    ASSERT(words != NULL);
-
     ftl_allocator_t *alloc = &ftl->alloc;
 
     /* Pass 0：先全量校验。任何非法 word 必须在**改动任何状态之前**拒绝——
@@ -1197,8 +1183,6 @@ static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, uint16_t words[FTL_B
 
 static void ftl_recovery_probe_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLOCK_TOTAL], ftl_block_restore_stats_t *stats)
 {
-    ASSERT(words != NULL);
-
     ftl_allocator_t *alloc = &ftl->alloc;
 
     if (stats != NULL)
@@ -1324,8 +1308,6 @@ static void ftl_recovery_probe_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLO
 
 static bool ftl_recovery_build_pools(ftl_context_t *ftl, const uint16_t words[FTL_BLOCK_TOTAL])
 {
-    ASSERT(words != NULL);
-
     ftl_allocator_t *alloc = &ftl->alloc;
 
     /* 此时不应有池条目（restore 不发、replay/probe 只建 Closed）。 */
@@ -1504,8 +1486,6 @@ static void recovery_valid_add(void *ctx, nand_pba_t pba, uint8_t *ok)
 {
     ftl_context_t *ftl = (ftl_context_t *)ctx;
 
-    ASSERT(ok != NULL);
-
     const uint16_t g = ftl_pba_gblock(pba);
 
     if (g >= FTL_BLOCK_TOTAL)
@@ -1531,8 +1511,6 @@ static void recovery_valid_add(void *ctx, nand_pba_t pba, uint8_t *ok)
 static void recovery_valid_sub(void *ctx, nand_pba_t pba, uint8_t *ok)
 {
     ftl_context_t *ftl = (ftl_context_t *)ctx;
-
-    ASSERT(ok != NULL);
 
     const uint16_t g = ftl_pba_gblock(pba);
 

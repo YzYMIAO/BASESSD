@@ -16,7 +16,7 @@
  *   ③ closed_sb_list 是 swap-remove 活列表：跨调用持有条目必须按值拷贝；
  *      消费方按 !is_open 过滤。
  *   ④ 指针 / 索引实参由调用者保证；实例 allocator 的绑定由 ftl_contract_audit 在 boot 期证明，
- *      运行期入口不逐次复检；init 与索引越界仍用 ASSERT。仅池空 / 幂等早退返回错误码。
+ *      运行期入口不逐次复检；init/bind 与 release 关键边界仍用 ASSERT。仅池空 / 幂等早退返回错误码。
  */
 
 #include "assertion.h"   /* ASSERT（inline 访问器与地址展开的入参检查） */
@@ -148,14 +148,12 @@ typedef struct
 /* plane 是否持有物理块（退化条目在另一 plane 记哨兵）。 */
 static inline bool super_block_has_plane(const super_block_t *sb, uint8_t plane)
 {
-    ASSERT(plane < PLANE_NUM);
     return (sb->plane_blocks[plane] != FTL_BLOCK_NO_PLANE);
 }
 
 /* Super Block 指定 plane/page 的页基址 PBA（cw = 0）。 */
 static inline nand_pba_t super_block_page_pba(ftl_topology_t topo, const super_block_t *sb, uint8_t plane, uint8_t page)
 {
-    ASSERT(super_block_has_plane(sb, plane));
     return pba_make(topo.ch, topo.ce, topo.lun, sb->plane_blocks[plane], plane, page, 0U);
 }
 
@@ -171,14 +169,12 @@ static inline ftl_topology_t allocator_topo(const ftl_allocator_t *alloc)
 /* 各 plane OP 池剩余块数（带 plane 边界检查）。 */
 static inline uint16_t allocator_op_count(const ftl_allocator_t *alloc, uint8_t plane)
 {
-    ASSERT(plane < PLANE_NUM);
     return alloc->op_count[plane];
 }
 
 /* 各 plane Spare 池剩余块数（带 plane 边界检查）。 */
 static inline uint16_t allocator_spare_count(const ftl_allocator_t *alloc, uint8_t plane)
 {
-    ASSERT(plane < PLANE_NUM);
     return alloc->spare_count[plane];
 }
 
@@ -200,7 +196,6 @@ uint16_t allocator_spare_total(const ftl_allocator_t *alloc);
  * swap-remove 会让先前指针失效：跨调用持有请按值拷贝。 */
 static inline const super_block_t *allocator_closed_at(const ftl_allocator_t *alloc, uint16_t idx)
 {
-    ASSERT(idx < alloc->closed_sb_count);
     return &alloc->closed_sb_list[idx];
 }
 

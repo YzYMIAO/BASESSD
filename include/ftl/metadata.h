@@ -478,7 +478,7 @@ ftl_status_t metadata_ring_locate(const metadata_ring_t *ring,
  * @param write_idx     写点槽位（来自 metadata_ring_locate 或上次写点 + 1）
  * @param out_addr      输出：record 第 0 页地址
  * @param out_need_erase 输出：true = 写之前必须先擦 *out_addr 所在块
- * @return FTL_OK / FTL_ERROR（几何非法或槽位越界；ring/topo/出参为前置条件，非法即 ASSERT）
+ * @return FTL_OK / FTL_ERROR（几何非法或槽位越界；ring/topo/出参由调用者提供）
  */
 ftl_status_t metadata_ring_prepare_addr(const metadata_ring_t *ring,
                                         const ftl_topology_t  *topo,

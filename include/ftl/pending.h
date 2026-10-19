@@ -45,7 +45,6 @@
  * 掩码运算一律经本函数：调用点不手写 `1U << gi`（位宽/移位量对不上时是 UB，且无从审查）。 */
 static inline uint32_t ftl_group_bit(uint16_t gi)
 {
-    ASSERT(gi < FTL_GROUP_MAX);
     return (uint32_t)1U << gi;
 }
 

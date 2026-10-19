@@ -92,7 +92,6 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
      * `&ftl->pending[i]`）都保证非空 ⇒ 不在本函数复检（§十附 / §二十六）。
      * 同理 pending->lba 恒为**窗口基址**（唯一写点是 wbuf_handle(FLUSH) 的 wbuf.base）——
      * 下面用 ftl_lba_plane/cw(l) 取代"从位下标反解坐标"就依赖这条。 */
-    ASSERT(ftl_lba_pair_base(pending->lba) == pending->lba);
 
     /* ── 第一遍：就绪前置（只探不动）── */
     for (uint8_t bit = 0U; bit < FTL_LBA_PER_PAIR; bit++)
@@ -129,8 +128,6 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
 
         /* 本页只为本命令覆盖到的 plane 分配了页（未覆盖的 plane 不进本循环体）。
          * 覆盖到的 plane 必有页（allocator_alloc_pair 两 plane 都给）。 */
-        ASSERT(page != NAND_PBA_INVALID);
-        ASSERT(pba_to_plane(page) == pl);
 
         nand_pba_t newp = pba_with_cw(page, cw);
 
@@ -405,16 +402,12 @@ static bool ftl_journal_block_is_bad(void *ctx, uint16_t gblock)
 {
     const ftl_allocator_t *alloc = (const ftl_allocator_t *)ctx;
 
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
     return ftl_block_is_bad(&alloc->blocks[gblock]);
 }
 
 static void ftl_journal_mark_bad(void *ctx, uint16_t gblock)
 {
     ftl_allocator_t *alloc = (ftl_allocator_t *)ctx;
-
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
 
     (void)bbt_mark_bad(alloc, gblock);
 }
@@ -425,8 +418,6 @@ static bool ftl_rr_pending_take(void *ctx, rr_owner_t *out)
 {
     ftl_context_t *ftl = (ftl_context_t *)ctx;
     uint8_t        idx = 0U;
-
-    ASSERT(out != NULL);
 
     if (!pending_find_op(ftl, PENDING_OP_READ_RECOVERY, &idx))
     {
@@ -446,8 +437,6 @@ static bool ftl_rr_pending_take(void *ctx, rr_owner_t *out)
 static void ftl_rr_pending_complete(void *ctx, uint16_t pending_idx, uint32_t owners, ssd_status_t status)
 {
     ftl_context_t *ftl = (ftl_context_t *)ctx;
-
-    ASSERT(pending_idx < FTL_PENDING_MAX);
 
     /* owners 已由 RR 在释放**之前**取走并按值传入（组完成通知可能重入复用本槽）。 */
     pending_release_index(ftl, (uint8_t)pending_idx);
@@ -1072,7 +1061,6 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
 
         n = (*n_cw < avail) ? *n_cw : avail;
     }
-    ASSERT(n > 0U);
 
     /* 写：攒进页打包缓冲（窗口满 / 切换窗口时内部触发编程），本函数对写**到此为止**。
      * 数据在 wbuf_handle(FLUSH) 里一次编程——分配/建链/提交/确认全在那里。 */

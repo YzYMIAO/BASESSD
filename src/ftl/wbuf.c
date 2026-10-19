@@ -54,8 +54,6 @@ bool ftl_wbuf_has(const wbuf_handle_t *h, lba_t lba)
 
 bool ftl_wbuf_read(const wbuf_handle_t *h, lba_t lba, void *out)
 {
-    ASSERT(out != NULL);
-
     if (!ftl_wbuf_has(h, lba))
     {
         return false;
@@ -158,8 +156,6 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
     uint8_t nplanes = ftl_cw_bitmap_plane_count(h->occupied);
     uint8_t n_cw    = ftl_cw_bitmap_popcount(h->occupied);
 
-    ASSERT(n_cw > 0U);
-
     ftl_status_t ret = wbuf_program_page(h, cmd, pba, nplanes);
 
     if (ret != FTL_OK)
@@ -233,8 +229,6 @@ wbuf_flush_fail:
 
 static ftl_status_t wbuf_append(wbuf_handle_t *h, uint16_t gi, lba_t lba, const void *buffer, uint8_t n)
 {
-    ASSERT(buffer != NULL);
-    ASSERT(n > 0U);
     const wbuf_port_t *port = &h->port;
 
     const lba_t window = ftl_lba_pair_base(lba);
@@ -353,17 +347,12 @@ static void wbuf_maybe_flush_idle(wbuf_handle_t *h)
 
 void wbuf_init(wbuf_handle_t *h, const wbuf_port_t *port)
 {
-    ASSERT(h != NULL);
-    ASSERT(port != NULL);
-
     memset(h, 0, sizeof(*h));
     h->port = *port;
 }
 
 static void wbuf_status_fill(const wbuf_handle_t *h, wbuf_status_t *out)
 {
-    ASSERT(out != NULL);
-
     out->base.critical  = false; /* wbuf 是 host 写路径的一部分，由 Phase 2.5 驱动 */
     out->base.wants_run = (h->open != 0U) || (h->occupied != 0U);
     out->base.progress  = h->flushed_pages;
@@ -398,9 +387,6 @@ ftl_status_t wbuf_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const 
 {
     /* info 当前不参与 wbuf 决策；保留形参以统一 typed 入口。 */
     (void)info;
-
-    ASSERT(trigger != NULL);
-    ASSERT(out != NULL);
 
     ftl_status_t st = FTL_OK;
 

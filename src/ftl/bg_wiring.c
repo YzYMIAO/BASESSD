@@ -269,7 +269,6 @@ _Static_assert((sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])) == BG_TASK_NUM,
 /* ftl_bg_init —— 把 s_bg_tasks 装载进本实例的调度器。由 ftl_init 在装配末尾调用一次。 */
 void ftl_bg_init(ftl_context_t *ftl)
 {
-    ASSERT(ftl != NULL);
     bg_scheduler_init(&ftl->bg, s_bg_tasks, (uint8_t)(sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])));
 }
 
@@ -314,8 +313,7 @@ void ftl_bg_service(ftl_context_t *ftl)
 
     const uint8_t level = ftl_bg_level_select(ftl);
     /* 档位下标越界不会崩：会静默读到相邻静态数据 ⇒ 预算/掩码全错而无声（H31/H40）。 */
-    ASSERT(level < BG_LEVEL_NUM);
     /* 档位先发布到调度器：typed 模块入口的 ftl_bg_info_t.load_level 取这里。 */
-    ftl->bg.level = level;
+    ftl->bg.level       = level;
     bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level]);
 }

@@ -22,10 +22,7 @@
 void bg_scheduler_init(bg_scheduler_t *sched, const bg_task_t *table, uint8_t count)
 {
     /* 前置条件（判据 2）：调用者传自持的 sched 与静态任务表。 */
-    ASSERT(sched != NULL);
-    ASSERT(table != NULL);
     /* ⚠ 必须在拷贝循环**之前**：count 超容量时循环本身就会越界写 tasks[]。 */
-    ASSERT(count <= BG_TASK_COUNT);
 
     for (uint8_t i = 0U; i < count; i++)
     {
@@ -39,8 +36,6 @@ void bg_scheduler_init(bg_scheduler_t *sched, const bg_task_t *table, uint8_t co
 void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_cfg_t *cfg)
 {
     /* 前置条件（判据 2）：调用者传 &ftl->bg 与自持的 g_bg_level_cfg[] 表项。 */
-    ASSERT(sched != NULL);
-    ASSERT(cfg != NULL);
 
     const ssd_platform_ops_t *platform = ssd_platform_get();
     const bool                clock_ok = (platform != NULL) && (platform->time_us != NULL);

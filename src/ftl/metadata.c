@@ -32,8 +32,8 @@
  *      （metadata_ring_locate）——前者在 superloop 之前跑（无泵可等），后者只在
  *      冷启动后首次整理出现。
  *
- * 断言口径：init/bind 入口与配置类前置条件用 ASSERT（判据 2）；运行期模块入口的
- * 实例句柄由 ftl_contract_audit 在 boot 期证明，不再逐次复检；ring 几何非法、槽位越界等
+ * 断言口径：init/bind 入口与 release 关键边界用 ASSERT（判据 2）；运行期模块入口的
+ * 实例句柄/出参由调用链保证，不再逐次复检；ring 几何非法、槽位越界等
  * 配置错误在 release 也必须拒绝（判据 9），因此保留 FTL_ERROR 返回。
  */
 
@@ -108,16 +108,10 @@ nand_pba_t metadata_ring_addr_plane(const metadata_ring_t *ring,
                                     uint8_t                page_in_record,
                                     uint8_t                plane)
 {
-    ASSERT(ring != NULL);
-    ASSERT(topo != NULL);
-    ASSERT(plane < PLANE_NUM);
-    ASSERT((ring->plane_mask & (1U << plane)) != 0U);
-
     if (!metadata_ring_geom_valid(ring))
     {
         return NAND_PBA_INVALID; /* 配置错误：不产生"看起来合法"的错误地址 */
     }
-    ASSERT(record_idx < metadata_ring_total_records(ring));
 
     uint16_t rpb = metadata_ring_records_per_block(ring);
 
@@ -186,7 +180,6 @@ static void ring_scan(const metadata_ring_t *ring,
     /* ② 所有块都写满 ⇒ 池转满一圈：游标 = 最新块之后，且该块整体擦掉重写 */
     if (s->cursor_block == UINT16_MAX)
     {
-        ASSERT(s->best_full_idx != UINT16_MAX);
         s->cursor_block = (uint16_t)(((s->best_full_idx / rpb) + 1U) % ring->block_count);
         s->ring_full    = true;
     }
@@ -283,11 +276,6 @@ ftl_status_t metadata_ring_locate(const metadata_ring_t *ring,
                                   uint16_t              *out_write_idx)
 {
     /* 前置条件（判据 2 / §二十六「子模块公开入口」）：指针均由调用者自持。 */
-    ASSERT(ring != NULL);
-    ASSERT(probe != NULL);
-    ASSERT(out_newest_idx != NULL);
-    ASSERT(out_sequence != NULL);
-    ASSERT(out_write_idx != NULL);
     /* ring 自身几何是**配置**（构造错误 ⇒ 寻址全错）⇒ 保留运行期拒绝（判据 9）。 */
     if (!metadata_ring_geom_valid(ring))
     {
@@ -384,10 +372,6 @@ ftl_status_t metadata_ring_prepare_addr(const metadata_ring_t *ring,
                                         bool                  *out_need_erase)
 {
     /* 前置条件（判据 2）：四个指针均由调用者自持。 */
-    ASSERT(ring != NULL);
-    ASSERT(topo != NULL);
-    ASSERT(out_addr != NULL);
-    ASSERT(out_need_erase != NULL);
 
     if (!metadata_ring_geom_valid(ring))
     {
@@ -697,7 +681,7 @@ static void metadata_dir_boot_log(const metadata_dir_cache_t *dir)
 /* --------------------------------------------------------------------
  * metadata_dir_init
  *   功能：首次格式化——全部 region 置"未映射"、清 Anchor 序号/脏标记、游标全部置无效。
- *   参数：dir —— 待初始化 Directory（前置条件，非法即 ASSERT）。
+ *   参数：dir —— 待初始化 Directory（前置条件：调用者传 ftl->metadata_dir）。
  *   返回：无。
  *   实现要点：游标置无效是"绝不复用可能已编程的旧页"的保证——首次追加才从 Free
  *             Pool 新取块。
@@ -705,7 +689,6 @@ static void metadata_dir_boot_log(const metadata_dir_cache_t *dir)
 void metadata_dir_init(metadata_dir_cache_t *dir)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
-    ASSERT(dir != NULL);
 
     dir->anchor_sequence = 0U;
     dir->dirty           = false;
@@ -748,7 +731,6 @@ nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
                                uint16_t                    id)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
-    ASSERT(type < METADATA_TYPE_COUNT);
 
     const uint16_t i = metadata_dir_find_index(dir, type, id);
 
@@ -778,7 +760,6 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
                          nand_pba_t            new_pba)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
-    ASSERT(type < METADATA_TYPE_COUNT);
 
     /* 查找现有 entry（覆盖旧位置） */
     const uint16_t i = metadata_dir_find_index(dir, type, id);
@@ -1014,11 +995,6 @@ md_anchor_step_t metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
                                              bool                 *out_need_erase)
 {
     /* 前置条件（判据 2）：六个指针均由调用者自持。 */
-    ASSERT(out_ring != NULL);
-    ASSERT(out_base != NULL);
-    ASSERT(out_idx != NULL);
-    ASSERT(out_seq != NULL);
-    ASSERT(out_need_erase != NULL);
 
     if (!dir->dirty)
     {
@@ -1062,7 +1038,6 @@ md_anchor_step_t metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
 void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, uint32_t seq, uint8_t chunk, metadata_anchor_page_t *page)
 {
     /* 前置条件（判据 2）：两个指针均由调用者自持。 */
-    ASSERT(page != NULL);
 
     uint16_t base_entry = (uint16_t)(chunk * METADATA_DIR_ENTRIES_PER_PAGE);
     uint16_t n;
@@ -1114,7 +1089,6 @@ void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, uint32_t seq, uin
 void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t *ring, uint16_t idx, bool ok)
 {
     /* 前置条件（判据 2）：两个指针均由调用者自持。 */
-    ASSERT(ring != NULL);
 
     dir->anchor_write_idx = (uint16_t)((idx + 1U) % metadata_ring_total_records(ring));
 
@@ -1173,7 +1147,6 @@ static void metadata_dir_load_assemble(metadata_dir_cache_t *dir, const metadata
 ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
-    ASSERT(dir != NULL);
 
     /* 基础层：全部 region = NAND_PBA_INVALID（未映射）。
      * Anchor 缺页/损坏时该区间回落"未映射"，不会出现"未登记"的空洞。 */
@@ -1282,8 +1255,6 @@ static const uint32_t g_ftl_partition_count = (uint32_t)(sizeof(g_ftl_partitions
  * -------------------------------------------------------------------- */
 bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, uint16_t block)
 {
-    ASSERT(plane < PLANE_NUM);
-
     /* ── 固定元数据块：遍历分区表，区间 + plane_mask 同时匹配 ── */
     for (uint32_t p = 0U; p < g_ftl_partition_count; p++)
     {

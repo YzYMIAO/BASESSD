@@ -68,7 +68,7 @@ _Static_assert(sizeof(bbt_header_t) <= PAGE_MAIN_SIZE, "BBT header 必须装得�
  *   尾巴 64 字节溢进备区），不是出厂标记 ⇒ 重扫会把所有写过的块（含活的 Anchor/
  *   Checkpoint/Wear）判成坏块并 bbt_save 落盘。详见 bbt.c 的 bbt_medium_has_ftl_data。
  *
- * @param alloc  Allocator 上下文（blocks、bad_count 等输出）；**前置条件**，非法即 ASSERT
+ * @param alloc  Allocator 上下文（blocks、bad_count 等输出）；**前置条件**（调用者传 &ftl->alloc）
  * @return 无。加载失败不是致命错误：走“拒绝重扫（已用过介质）”或“出厂扫描”回退；
  *         坏块数只走 `alloc->bad_count`（H38：恒为常量的返回码改 void）。
  */
@@ -214,8 +214,6 @@ static inline bool bbt_is_bad(const uint8_t *bad_map, uint16_t block)
  */
 static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
 {
-    ASSERT(block < BBT_MAX_BLOCKS);
-
     if ((bad_map != NULL) && (block < BBT_MAX_BLOCKS))
     {
         bad_map[block >> 3] |= (uint8_t)(1U << (block & 7U));
@@ -280,7 +278,7 @@ void bbt_handle(ftl_allocator_t *alloc, const ftl_bg_info_t *info, bbt_status_t 
  * 命中时同时恢复本实例的 sequence 计数与写游标（alloc->bbt）。
  *
  * @param alloc       Allocator 上下文（池路由取其 ch/ce/lun；游标/序号写回 alloc->bbt）；
- *                    alloc 由 ftl_contract_audit 证明；其余三个出参指针仍为**前置条件**（非法即 ASSERT）
+ *                    alloc 由 ftl_contract_audit 证明；出参由调用者提供
  * @param bad_map     输出：bt_bitmap[512]
  * @param bad_count   输出：坏块数
  * @param sequence    输出：最新 sequence
