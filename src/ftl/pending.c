@@ -12,12 +12,12 @@
  *   pending.h —— 表结构（ftl_pending_req_t / ftl_io_group_t）+ 容量宏 + 语义约定；
  *   本文件     —— 两张表的增删查 + 组完成编排，无新数据结构。
  *
- * 存储：pending[] / groups[] 均内嵌于 ftl_context_t（per-instance，F6），由调用者提供；
+ * 存储：pending[] / groups[] 均内嵌于 ftl_context_t（per-instance），由调用者提供；
  *   本文件不持有静态存储，全部操作挂在传入的 ftl 上。
  *
  * 文件结构：
- *   1. pending 表基础操作   init / add / lookup / remove / find_op / release_index / count
- *   2. 完成组操作           alloc / free / count / maybe_complete / complete_subop
+ *   1. pending 表基础操作   init / alloc / lookup / remove / find_op / release_index / count
+ *   2. 完成组操作           alloc / count / maybe_complete / complete_subop[_multi]
  *
  * ⚠ 读写判别必须**显式携带** op（ftl_pending_op_t），不可从 io.buffer 反推——
  *   写请求的 buffer 是数据源、非 NULL ⇒ `buffer != NULL` 对写恒真（见 pending.h 文件头）。
@@ -33,8 +33,8 @@
 /*
  * pending_init — 清空本实例的 pending 表与完成组表
  *
- * 全零即「无占用」（used==0），开机/重建时调用。F6 起 per-instance：每个 FTL 实例
- * 各有一份 pending/groups，不再共用全局表。
+ * 全零即「无占用」（used==0），开机/重建时调用。表是 per-instance 的：每个 FTL
+ * 实例各有一份 pending/groups（多 LUN 下完成按命令的 ch/ce/lun 路由回本实例）。
  */
 void pending_init(ftl_context_t *ftl)
 {
@@ -64,35 +64,6 @@ ftl_pending_req_t *pending_alloc(ftl_context_t *ftl)
     }
 
     return NULL; /* 表满 */
-}
-
-/* --------------------------------------------------------------------
- * pending_add — **临时桥接**（见 pending.h 声明处的说明）
- *   功能：pending_alloc 认领空槽 + 逐字段填 + pending_validate，一步登记。
- *   返回：FTL_OK 成功，FTL_ERROR 表满。
- *   实现要点：定义只此一份（自洽不变量走 pending_validate），生产路径不调用。
- * -------------------------------------------------------------------- */
-ftl_status_t pending_add(ftl_context_t *ftl, uint16_t cmd_id, uint32_t owners, lba_t lba, void *buffer, uint8_t n_cw, nand_pba_t new_pba, nand_pba_t new_pba1, uint8_t cache_intermediate, ftl_pending_op_t op, uint8_t cw_bitmap)
-{
-    ftl_pending_req_t *p = pending_alloc(ftl);
-
-    if (p == NULL)
-    {
-        return FTL_ERROR; /* 表满 */
-    }
-
-    p->command_id         = cmd_id;
-    p->owners             = owners;
-    p->op                 = (uint8_t)op;
-    p->n_cw               = n_cw;
-    p->cw_bitmap          = cw_bitmap;
-    p->lba                = lba;
-    p->buffer             = buffer;
-    p->new_pba            = new_pba;
-    p->new_pba1           = new_pba1;
-    p->cache_intermediate = cache_intermediate;
-    pending_validate(p);
-    return FTL_OK;
 }
 
 /* pending_lookup — 按 command_id 查本实例 pending 项；未找到返回 NULL（线性扫描，表深仅 32） */
@@ -164,7 +135,7 @@ void pending_release_index(ftl_context_t *ftl, uint8_t index)
     ftl->pending[index].used = 0U;
 }
 
-/* pending_count — 本实例占用槽位数（B3：ftl_service 三级模式判定用它近似 host IO 空闲度） */
+/* pending_count — 本实例占用槽位数（ftl_service 档位判定用它近似 host IO 空闲度） */
 uint16_t pending_count(const ftl_context_t *ftl)
 {
     uint16_t count = 0U;
@@ -205,15 +176,7 @@ int pending_group_alloc(ftl_context_t *ftl)
     return FTL_ERROR; /* 组槽满 */
 }
 
-/* pending_group_free — 释放组槽（used=0）；下标越界是调用者 bug ⇒ ASSERT（判据 2） */
-void pending_group_free(ftl_context_t *ftl, uint16_t gi)
-{
-    ASSERT(gi < FTL_GROUP_MAX);
-
-    ftl->groups[gi].used = 0U;
-}
-
-/* pending_group_count — 占用（未完成）组数（B3：有未完成组 = host 工作饿着 → 归 BUSY） */
+/* pending_group_count — 占用（未完成）组数（有未完成组 = host 工作饿着 → 归 BUSY） */
 uint16_t pending_group_count(const ftl_context_t *ftl)
 {
     uint16_t count = 0U;
@@ -275,8 +238,8 @@ void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi)
  *   参数：ftl —— 上下文；gi —— 组下标；sub_status —— 本子操作完成状态。
  *   返回：无。
  *   实现要点：
- *     · 由 ftl_op_host_io 在子操作簿记后调用，替代原先直接写 caller
- *       通知字段（收敛点）。
+ *     · caller 通知字段（complete_flag / status_out / on_complete）的**唯一写点**：
+ *       由 ftl_op_host_io 在子操作簿记后调用。
  *     · agg_status **粘性**：仅当 sub_status != OK 时写入，一旦失败即保留首个错误，
  *       后续成功不覆盖（组整体语义 = 任一子操作失败则整组 IO_ERROR）。
  *     · outstanding-- 后交 pending_group_maybe_complete 判是否整组完成。
@@ -313,7 +276,7 @@ void pending_group_complete_subop_multi(ftl_context_t *ftl, uint32_t owners, ssd
 {
     for (uint16_t gi = 0U; gi < FTL_GROUP_MAX; gi++)
     {
-        if ((owners & (uint32_t)(1U << gi)) != 0U)
+        if ((owners & ftl_group_bit(gi)) != 0U)
         {
             pending_group_complete_subop(ftl, gi, sub_status);
         }

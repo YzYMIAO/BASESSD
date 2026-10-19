@@ -849,7 +849,7 @@ void ftl_op_bbt(struct ftl_context *ftl, const fc_command_status_t *completion, 
     ASSERT(completion != NULL);
 
     fc_command_t *cmd    = fc_command_id_to_command((uint16_t)completion->command_id);
-    uint8_t       failed = ((completion->status & FC_CW_STATUS_ERROR_MASK) != 0U) ? 1U : 0U;
+    uint8_t       failed = fc_cw_status_has_error(completion->status) ? 1U : 0U;
 
     /* 孤儿 / 迟到完成：当前没有在飞命令 ⇒ 只释放，不改状态。 */
     if (alloc->bbt.job.waiting == 0U)

@@ -8,11 +8,11 @@
  * （读：数据写回 caller buffer；写：Journal/L2P 确认）需要 command_id → 请求
  * 映射。本表记录 command_id → ftl_io_request_t（嵌入，按值拷贝）+ 写专用字段。
  *
- * ⚠ 读写必须**显式携带**操作类型（见 ftl_pending_op_t）：完成处理曾以
- *   `io.buffer != NULL` 判别读写，但 ftl_submit_write 拒绝 NULL buffer
- *   （写请求的 buffer 是**数据源**，已拷进 desc 链）⇒ 该条件对写恒真 ⇒ 写分支
- *   （Journal/L2P/VPC 簿记 + 写失败回滚）成死代码，写完成误走读分支、
- *   把 NAND 数据读回源 buffer，且 total_writes 永不递增。**buffer 非空 ≠ 写。**
+ * ⚠ 读写必须**显式携带**操作类型（见 ftl_pending_op_t），**不可**从 io 字段反推：
+ *   `io.buffer != NULL` 对写恒真（写请求的 buffer 是**数据源**，已拷进 desc 链，
+ *   且 ftl_submit_write 拒绝 NULL）⇒ 用它判别会把写完成误走读分支：Journal/L2P/
+ *   VPC 簿记与写失败回滚全不执行，却把 NAND 数据读回源 buffer。
+ *   **buffer 非空 ≠ 写。**
  */
 
 #include "ftl_config.h" /* nand_pba_t, NAND_PBA_INVALID */
@@ -38,6 +38,15 @@
  * 组容量 = pending 容量（一个组至少占一个 pending 槽，组不会比在飞子操作多）。 */
 #define FTL_GROUP_MAX  (FTL_PENDING_MAX)
 #define FTL_GROUP_NONE (0xFFFFU) /* 「无组」哨兵（当前无使用者；留作显式语义） */
+
+/* 组 gi 在 owners 位掩码里的位（ftl_pending_req_t.owners / ftl_io_group_t 的约定）。
+ * 组号由 pending_group_alloc 给出，恒 < FTL_GROUP_MAX ⇒ 移位量恒小于 uint32_t 位宽。
+ * 掩码运算一律经本函数：调用点不手写 `1U << gi`（位宽/移位量对不上时是 UB，且无从审查）。 */
+static inline uint32_t ftl_group_bit(uint16_t gi)
+{
+    ASSERT(gi < FTL_GROUP_MAX);
+    return (uint32_t)1U << gi;
+}
 
 /* 前向声明（ftl_context_t 在 ftl.h 中定义；本文件被 ftl.h include，
  * 用 struct 标签前向引用打破环） */
@@ -91,9 +100,9 @@ typedef struct
 {
     uint16_t used;       /* 1: 槽位占用 */
     uint16_t command_id; /* FC command_id */
-    uint32_t owners;     /* ★ 贡献本子操作的**组位掩码**（bit gi）。读恒单组（1<<gi）；
+    uint32_t owners;     /* ★ 贡献本子操作的**组位掩码**（bit gi = ftl_group_bit(gi)）。读恒单组；
                           *   写页打包下一页可能由多个组拼成 ⇒ 完成时逐组递减（见
-                          *   pending_group_complete_subop_multi）。替代原 uint16_t group。 */
+                          *   pending_group_complete_subop_multi）。 */
     uint8_t op;          /* ftl_pending_op_t：完成路径判别（读/写），见文件头 ⚠ */
     uint8_t n_cw;        /* ★ 本子操作搬运的 **CW 数**（写 = popcount(cw_bitmap)；读 = 写回长度/512） */
     uint8_t cw_bitmap;   /* ★ 写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读：0 */
@@ -131,7 +140,7 @@ typedef struct
 {
     uint8_t                used;            /* 1: 槽位占用 */
     uint8_t                op;              /* PENDING_OP_READ / PENDING_OP_WRITE */
-    uint8_t                stalls;          /* 连续无进展 drain 轮数（背压预算，S2 用） */
+    uint8_t                stalls;          /* 连续无进展 drain 轮数（背压预算，见 FTL_DRAIN_STALL_MAX） */
     uint16_t               outstanding;     /* 已下发、未完成的子操作数 */
     uint32_t               total;           /* 本请求 LBA 总数（= count） */
     uint32_t               next;            /* 已下发到的 LBA 偏移（0..count） */
@@ -146,7 +155,7 @@ typedef struct
 } ftl_io_group_t;
 
 /*
- * pending_init - 清空本 FTL 实例的 pending 表（F6：per-instance）
+ * pending_init - 清空本 FTL 实例的 pending 表（表是 per-instance 的）
  *
  * @param ftl  FTL 上下文（含 pending 数组存储）
  */
@@ -185,27 +194,6 @@ static inline void pending_validate(const ftl_pending_req_t *req)
     ASSERT(req->owners != 0U);
     ASSERT((req->n_cw > 0U) && (req->n_cw <= FTL_LBA_PER_PAIR));
 }
-
-/*
- * pending_add - **临时桥接**：pending_alloc + 逐字段填 + pending_validate 的一步封装
- *
- * ⚠ 生产路径**已不用它**（ftl.c 改成就地填槽，字段名即文档——见 pending_alloc）。
- *   保留仅为 `tests/unit/test_ftl.c` 的 4 个调用点**暂不改动**（用户 2026-10-16：
- *   「测试UT暂时不用改。FTL代码还没看完呢」）。UT 跟进后**连同本声明一起删**。
- *
- * @return FTL_OK 成功；FTL_ERROR 表满
- */
-ftl_status_t pending_add(ftl_context_t   *ftl,
-                         uint16_t         cmd_id,
-                         uint32_t         owners,
-                         lba_t            lba,
-                         void            *buffer,
-                         uint8_t          n_cw,
-                         nand_pba_t       new_pba,
-                         nand_pba_t       new_pba1,
-                         uint8_t          cache_intermediate,
-                         ftl_pending_op_t op,
-                         uint8_t          cw_bitmap);
 
 /*
  * pending_lookup - 按 command_id 查找本实例 pending 项
@@ -251,7 +239,7 @@ void pending_release_index(ftl_context_t *ftl, uint8_t index);
 /*
  * pending_count - 本实例当前未决（占用）的 pending 项数
  *
- * B3：ftl_service 三级模式判定用它近似 host IO 空闲度——
+ * ftl_service 的档位判定用它近似 host IO 空闲度——
  * pending 占用高 = host IO 繁忙 → BUSY；占用低 = 空闲 → IDLE。
  *
  * @param ftl  FTL 上下文
@@ -270,17 +258,9 @@ uint16_t pending_count(const ftl_context_t *ftl);
 int pending_group_alloc(ftl_context_t *ftl);
 
 /*
- * pending_group_free - 释放完成组槽（used=0）
- *
- * @param ftl  FTL 上下文
- * @param gi   组下标
- */
-void pending_group_free(ftl_context_t *ftl, uint16_t gi);
-
-/*
  * pending_group_count - 当前占用（未完成）的组数
  *
- * B3：ftl_service 三级模式判定用它近似"排队未下发的 host 请求"——
+ * ftl_service 的档位判定用它近似"排队未下发的 host 请求"——
  * 有未完成组 = host 工作饿着 → 归 BUSY。
  *
  * @param ftl  FTL 上下文
@@ -291,7 +271,7 @@ uint16_t pending_group_count(const ftl_context_t *ftl);
 /*
  * pending_group_complete_subop - 一个子操作完成：聚合状态 + 递减 + 试触发
  *
- * 由 ftl_op_host_io 在子操作簿记后调用（替代原先直接写 caller 通知字段）。
+ * 由 ftl_op_host_io 在子操作簿记后调用（caller 通知字段的唯一写点）。
  * sub_status != OK 时粘进 agg_status；outstanding-- 后试发组完成通知。
  *
  * @param ftl        FTL 上下文

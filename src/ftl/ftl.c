@@ -17,7 +17,7 @@
  *   Phase 1    fc_service × NAND_SUBMIT_BUDGET —— 推进 NAND
  *   Phase 2    completion_table_drain —— 统一完成泵（按命令 op_tag 派发到服务函数数组）
  *   Phase 2.5  逐组补发 host 子操作（host IO 优先于后台任务）
- *   Phase 3    时间预算后台调度（v0.76）：13 项任务表（6 must-run + 7 预算）经
+ *   Phase 3    时间预算后台调度：13 项任务表（6 must-run + 7 预算）经
  *              bg_scheduler_run 执行；档位 IDLE/NORMAL/BUSY 按未决命令数选（见下）
  *
  * 后台档位（按 inflight = pending + groups 近似空闲度，ftl_bg_level_select）：
@@ -26,21 +26,22 @@
  *   NORMAL  其余                               按需预算（无 RR 巡检）
  * 档位 → 预算规模/任务掩码见 g_bg_level_cfg；时间预算语义见 bg_scheduler.h 头注。
  *
- * 文件结构：
- *   1. 内部辅助        ftl_now_ms / ftl_op_host_io（host I/O 完成服务函数）
+ * 文件结构（与下方分区注释一一对应）：
+ *   1. 内部辅助        ftl_now_ms / ftl_confirm_write / ftl_op_host_io / ftl_confirm_kick
  *   2. 后台调度器接线  ftl_gc_evaluate（static）+ 13 个 bg_a_* 适配器 + g_bg_level_cfg
  *                      + ftl_bg_init / ftl_bg_level_select（接线在 bg_scheduler.c 引擎上）
- *   3. 对外接口        ftl_init / ftl_service / ftl_submit_read / ftl_submit_write
- *   4. 子操作下发      ftl_issue_subop / ftl_drain_group（static）
- *   5. 元数据落盘/TRIM ftl_flush / ftl_trim
+ *   3. 对外接口        ftl_init / ftl_service_pump / ftl_service
+ *   4. 页打包写缓冲    ftl_wbuf_has / read / append / flush / maybe_flush_idle（static）
+ *   5. 子操作下发      ftl_issue_subop / ftl_drain_group（static）+ ftl_submit_read / write
+ *   6. 元数据落盘/TRIM ftl_flush / ftl_trim
  *
  * ⚠ 回收动作在 `ftl/migrate.c`：GC / WL / 慢死预测共用一台异步搬移 job
  *   （mig_begin_* / mig_service），本文件只做**触发求值**与**启动**。
  *
- * ⚠ 多实例（F6）：pending / groups / rr_last_scan_ms 均 per-instance；completion 全局
+ * ⚠ 多实例：pending / groups / rr_last_scan_ms 均 per-instance；completion 全局
  *   但按命令 ch/ce/lun 路由。main.c 主循环：先 ftl_service_pump()（全局泵，每轮一次）
  *   抽干 NAND + 完成表，再**遍历全部实例**调 ftl_service() 逐实例推进 Phase 2.5/3——
- *   只跑 [0][0][0] 会让其余实例的 journal / checkpoint / bbt / GC 永不推进（序 4）。
+ *   只跑 [0][0][0] 会让其余实例的 journal / checkpoint / bbt / GC 永不推进。
  */
 
 #include "ftl.h"
@@ -68,12 +69,10 @@
 /* 慢死预测巡检节流：≥1s 才扫一轮（read disturb 是慢变量，频繁全扫无谓开销） */
 #define RR_SCAN_INTERVAL_MS (1000U)
 
-/* F6：巡检时刻已移入 ftl_context_t（ftl->rr_last_scan_ms），per-instance */
-
 /* 组下发机制（定义在文件后部；ftl_service Phase 2.5 先用到） */
 static void ftl_drain_group(ftl_context_t *ftl, uint16_t gi);
 
-/* 页打包写缓冲（§七 方案 A；定义在文件后部）：ftl_service 与 ftl_issue_subop 先用到 */
+/* 页打包写缓冲（定义在文件后部）：ftl_service 与 ftl_issue_subop 先用到 */
 static ftl_status_t ftl_wbuf_append(ftl_context_t *ftl, uint16_t gi, lba_t internal_lba, const void *buffer, uint8_t n);
 static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl);
 static void         ftl_wbuf_maybe_flush_idle(ftl_context_t *ftl);
@@ -113,11 +112,11 @@ static uint32_t ftl_now_ms(void)
  *       LBA 的 plane 位」是页内 META 能还原出正确 LBA 的前提（ftl_config.h §三）。
  *     · **不存 old_pba**：完成时按 LBA 重查 L2P 得"此刻被替换的映射"。同一 LBA 的两次
  *       写在飞时，先完成的先改 L2P，后完成的重查即得前者；提交时快照会让两条 Journal
- *       都指向最初映射，链断。⚠ **异步化（阶段 5）没有削弱这条**：本函数仍是在**完成
- *       时刻**执行（停泊只是延后几轮，顺序仍按完成序），重查语义不变。
+ *       都指向最初映射，链断。⚠ **停泊没有削弱这条**：本函数仍是在**完成时刻**执行
+ *       （停泊只是延后几轮，顺序仍按完成序），重查语义不变。
  *     · valid_count 单位是 **CW**：新 CW +1、被替换的旧 CW -1。真有效性一律逐 CW
  *       由页内 META + L2P 反查现判（DRAM-less approach ③，无位图）——见 bst.h 文件头。
- *     · ⚠ **两遍式**（阶段 5）：第一遍只做**就绪前置**（region 未驻留则起异步加载并返
+ *     · ⚠ **两遍式**：第一遍只做**就绪前置**（region 未驻留则起异步加载并返
  *       FTL_AGAIN），第二遍才动账。绝不能边查边改——l2p_cache_write 对正在加载/写回
  *       的行返 FTL_AGAIN，中途放弃会让同一页里部分 CW 已记账、部分没记，重试时重复
  *       记账（valid_count 虚高、journal 重复条目、total_writes 多计）。
@@ -126,7 +125,10 @@ static uint32_t ftl_now_ms(void)
 static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_t *pending)
 {
     /* 两个调用点（ftl_op_host_io 的 `if (pending != NULL)` 内 / ftl_confirm_kick 的
-     * `&ftl->pending[i]`）都保证非空 ⇒ 不在本函数复检（§十附 / §二十六）。 */
+     * `&ftl->pending[i]`）都保证非空 ⇒ 不在本函数复检（§十附 / §二十六）。
+     * 同理 pending->lba 恒为**窗口基址**（唯一写点是 ftl_wbuf_flush 的 wbuf.base）——
+     * 下面用 ftl_lba_plane/cw(l) 取代"从位下标反解坐标"就依赖这条。 */
+    ASSERT(ftl_lba_pair_base(pending->lba) == pending->lba);
 
     /* ── 第一遍：就绪前置（只探不动）── */
     for (uint8_t bit = 0U; bit < (uint8_t)FTL_LBA_PER_PAIR; bit++)
@@ -142,9 +144,10 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
     }
 
     /* ── 第二遍：应用（此时不可能再返 FTL_AGAIN）── */
-    /* 页打包（§七 方案 A）：pending 描述**一整页**——pending->lba = 窗口基址，
-     * cw_bitmap 标记本页哪些 CW 有效，逐**置位**确认。逐 CW 的 LBA = base + bit
-     * （bit 与 LBA 低 3 位 [plane][cw] 同构：bit = plane*CW_NUM + cw）。 */
+    /* 页打包：pending 描述**一整页**——pending->lba = 窗口基址，cw_bitmap 标记本页哪些
+     * CW 有效，逐**置位**确认。逐 CW 的 LBA = base + bit（bit 与 LBA 低 3 位 [plane][cw]
+     * 同构：bit = plane*CW_NUM + cw，即 ftl_lba_pair_slot）。plane/cw 由 **LBA** 取
+     * （ftl_lba_plane/cw），不从位下标反解——坐标只有一个来源（见本函数头的 ASSERT）。 */
     for (uint8_t bit = 0U; bit < (uint8_t)FTL_LBA_PER_PAIR; bit++)
     {
         if ((pending->cw_bitmap & (uint8_t)(1U << bit)) == 0U)
@@ -152,9 +155,9 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
             continue; /* 本槽未写（页打包后一页可只填部分 CW） */
         }
 
-        const uint8_t    pl   = (uint8_t)(bit / CW_NUM);
-        const uint8_t    cw   = (uint8_t)(bit % CW_NUM);
         const lba_t      l    = (lba_t)(pending->lba + (lba_t)bit);
+        const uint8_t    pl   = ftl_lba_plane(l);
+        const uint8_t    cw   = ftl_lba_cw(l);
         const nand_pba_t page = (pl == 0U) ? pending->new_pba : pending->new_pba1;
 
         /* 本页只为本命令覆盖到的 plane 分配了页（未覆盖的 plane 不进本循环体）。
@@ -165,7 +168,7 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
         nand_pba_t newp = pba_with_cw(page, cw);
 
         /* 就绪前置已保证驻留 ⇒ 读必命中、写必不返 FTL_AGAIN。非 OK 只剩"LBA 越界"
-         * 一种可能（L2P 范围外）——旧实现同样把它当"未映射"处理，保持等价 + 一行日志。 */
+         * 一种可能（L2P 范围外）⇒ 按"未映射"处理并留一行日志。 */
         nand_pba_t oldp;
         if (l2p_cache_read(ftl->cache, l, &oldp) != FTL_OK)
         {
@@ -192,7 +195,8 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
              * 打印旧块现场是为了**一次归因**（state 一眼可判，名字由 ftl_block_state_name 给）：
              *   BAD     = 坏块，重建按判据跳过（数据本已不可读）
              *   FREE    = 已归还空闲池 ⇒ 块还会被 allocator 复用，**丢数据**
-             *   LOG     = 元数据日志块 ⇒ 判据过宽（v0.69 已修 plane 掩码）
+             *   LOG     = 元数据日志块 ⇒ 重建判据过宽（元数据块的判定必须带 plane 掩码，
+             *             只比 per-plane 块号会把跨 plane 的块误认成日志块）
              *   NONE    = 重建从未认领（页 0 判空 / 未扫描到）
              * 代价 = 每次覆盖写多一次比较；收益 = 把「重启后写一次就死机」变成一条可读日志。 */
             if (ftl->alloc.blocks[gob].valid_count == 0U)
@@ -231,7 +235,7 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
  *             （**本服务函数拥有命令**）。
  *
  *             ⚠ 本函数**不得**同步等待（见 ftl_op.h）——它跑在完成泵里，再调
- *             ftl_sync_submit_wait 就是嵌套泵（阶段 4~8 逐步消灭剩余站点）。
+ *             ftl_sync_submit_wait 就是嵌套泵（泵里再开泵，完成顺序与栈深都失控）。
  * -------------------------------------------------------------------- */
 void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
@@ -253,7 +257,12 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
     {
         ssd_status_t sub_status = SSD_STATUS_OK;
 
-        if ((completion->status & FC_CW_STATUS_NAND_FAIL) == 0U)
+        /* 成败判据 = **全部**错误位（UNC / CRC / MATA_ERROR / NAND_FAIL / TIMEOUT / RAID），
+         * 不是单看 NAND_FAIL：ECC 不可纠只置 UNC（fc_data_path.c 的 ECC 分支），
+         * 页内 META 不符只置 MATA_ERROR——两者的 NAND_FAIL 都恒清，单看它会把
+         * 「内容不可信」当成功。且 UNC 时 FC 跳过后面的解扰/修正 pass，缓冲里
+         * 是**加扰垃圾**，搬给 host 就是静默数据损坏。判据见 fc_cw_status_has_error()。 */
+        if (!fc_cw_status_has_error(completion->status))
         {
             /* 判别依据是 pending->op（显式操作类型），不是 buffer——
              * 写请求的 buffer 是数据源、恒非空，用 buffer 判别会把写全判成读。 */
@@ -261,15 +270,24 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
             {
                 /* 读成功：拷贝数据到 caller buffer。
                  * desc 链序 == LBA 升序（plane-major + 段内 CW 升序，与
-                 * LBA 的 [plane][cw] 布局同序）⇒ 按链序连续拷出即 LBA 序。 */
+                 * LBA 的 [plane][cw] 布局同序）⇒ 按链序连续拷出即 LBA 序。
+                 * ⚠ 返回值必须查：desc 链比请求短时尾部不写（ftl_cmd_read_data 只
+                 * 在这一种情况报错），不查就等于把未初始化缓冲当数据交给 host。 */
                 uint32_t data_size = FTL_IU_BYTES * pending->n_cw; /* 子操作字节数 */
-                (void)ftl_cmd_read_data(cmd, pending->buffer, data_size);
 
-                /* Read Recovery：记录本次读的 ECC 纠正 bit 数（desc 链最大值），
-                 * 用于慢死预测（连续上升 → WARNING → 主动搬移）。
-                 * ECC 历史存于 BST（ftl->alloc.blocks[].rr）。
-                 * ⚠ 须在 fc_command_release(cmd) 之前调用——desc 释放后失效。 */
+                if (ftl_cmd_read_data(cmd, pending->buffer, data_size) != FTL_OK)
                 {
+                    LOGE("[FTL] read data short lba=%lu cmd=%u\r\n",
+                         (unsigned long)pending->lba,
+                         (unsigned)cmd_id);
+                    sub_status = SSD_STATUS_IO_ERROR;
+                }
+                else
+                {
+                    /* Read Recovery：记录本次读的 ECC 纠正 bit 数（desc 链最大值），
+                     * 用于慢死预测（连续上升 → WARNING → 主动搬移）。
+                     * ECC 历史存于 BST（ftl->alloc.blocks[].rr）。
+                     * ⚠ 须在 fc_command_release(cmd) 之前调用——desc 释放后失效。 */
                     /* cmd 是本 FTL 自己下发的 ⇒ 用它记着的 PBA 反查全局块号
                      * （FTL 层不直接读 cmd->paa —— 那是 FC/器件域的表示）。 */
                     uint16_t gblock = ftl_pba_gblock(ftl_cmd_pba(cmd));
@@ -281,15 +299,16 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
                     ftl->alloc.blocks[gblock].read_count++;
                 }
 
-                /* 读成功状态由组聚合（sub_status 保持 OK） */
+                /* 成功时 sub_status 保持 OK，由组聚合 */
             }
             else if (pending->cache_intermediate == 0U)
             {
                 /* 写成功（非 cache 中间页）：逐 CW 确认 Journal + L2P + 有效计数。
-                 * ⚠ region 未就绪（正在异步加载）⇒ **停泊**本项（阶段 5）：命令脱钩
+                 * ⚠ region 未就绪（正在异步加载）⇒ **停泊**本项：命令脱钩
                  * （command_id 置哨兵，本命令随即 release，id 会被复用）+ 组在飞数
                  * **不**递减（host 写组继续 pending），由 ftl_confirm_kick 每轮推进。
-                 * 与阶段 3 的托管同构，区别是推进者在本文件而非 RR 引擎。 */
+                 * 与读失败的托管同构（命令脱钩、组不结算），区别是推进者在本文件
+                 * 而非 RR 引擎。 */
                 if (ftl_confirm_write(ftl, pending) == FTL_AGAIN)
                 {
                     pending->op         = (uint8_t)PENDING_OP_WRITE_CONFIRM;
@@ -306,15 +325,14 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
             /* 同上：按 pending->op 判别，不用 io.buffer */
             if (pending_op_is_read(pending->op))
             {
-                /* 读失败 ⇒ **托管**给 Read Recovery job（阶段 3，见 read_recovery.c）：
+                /* 读失败 ⇒ **托管**给 Read Recovery job（见 read_recovery.c）：
                  *   · pending 项**保留**（不 pending_remove）、组在飞数**不**递减
                  *     ⇒ host 读组继续 pending，等 RR 收尾时统一结算；
                  *   · command_id 置哨兵：本命令随即 release，其 id 会被后续
                  *     fc_command_alloc 复用，留旧值会让新命令的完成误撞上本项；
-                 *   · 收尾（含一律报 IO_ERROR 的既有语义）在 rr_finish 里，见该处注释。
-                 * ⚠ 本分支**不**再当场恢复——原实现会在这里同步跑完三级恢复，
-                 *   即在完成泵里再开一个完成泵（嵌套泵），且整条 host 读流水线被
-                 *   一个坏页钉住。 */
+                 *   · 收尾（含一律报 IO_ERROR 的语义）在 rr_finish 里，见该处注释。
+                 * ⚠ 恢复**必须**异步：本函数跑在完成泵里，当场同步跑三级恢复就是
+                 *   泵里再开泵（嵌套泵），且整条 host 读流水线被一个坏页钉住。 */
                 pending->op         = (uint8_t)PENDING_OP_READ_RECOVERY;
                 pending->command_id = FTL_PENDING_CMD_NONE;
 
@@ -349,9 +367,14 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
 
         /* 子操作完成 → 组聚合：通知字段（complete_flag/status_out/
          * on_complete）只在组全部子操作完成后触发一次。
-         * ⚠ 页打包下一页可能由**多个组**拼成 ⇒ 按 owners 位掩码逐组递减。 */
+         * ⚠ 页打包下一页可能由**多个组**拼成 ⇒ 按 owners 位掩码逐组递减。
+         * ⚠ owners 必须在 pending_remove **之前**取走：组完成通知会调 on_complete，
+         *    回调可能重入 ftl_submit_* 并复用本槽 ⇒ 释放后再读就是读别人的字段。
+         *    （另外两处结算点 read_recovery.c / ftl_confirm_kick 同此顺序。） */
+        uint32_t owners = pending->owners;
+
         pending_remove(ftl, cmd_id);
-        pending_group_complete_subop_multi(ftl, pending->owners, sub_status);
+        pending_group_complete_subop_multi(ftl, owners, sub_status);
     }
 
     (void)fc_command_release(cmd);
@@ -359,7 +382,7 @@ void ftl_op_host_io(struct ftl_context *ftl, const fc_command_status_t *completi
 
 /* --------------------------------------------------------------------
  * ftl_confirm_kick
- *   功能：推进**停泊**的写确认（阶段 5）——那些 NAND 已编程成功、但因 L2P region
+ *   功能：推进**停泊**的写确认——那些 NAND 已编程成功、但因 L2P region
  *         尚未就绪（异步加载在飞）而挂起的写子操作。
  *   参数：ftl —— 实例。
  *   返回：无。
@@ -401,9 +424,8 @@ static void ftl_confirm_kick(ftl_context_t *ftl)
  *   功能：GC 的**统一触发求值点**——IDLE 与 NORMAL 两条后台路径都从这里过。
  *   参数：ftl —— FTL 实例。
  *   返回：GC_TRIGGER_* 位掩码；0 = 不触发（含节拍未到，此时不打印）。
- *   实现要点：触发只看**空间压力与磨损**（gc_check_triggers；T2 写入量 / T3 定时
- *             已随无出处判定退役，见 gc.h）。命中即打一行观测日志（victim 行由
- *             gc_select_victim 自己打）。
+ *   实现要点：触发只看**空间压力与磨损**（gc_check_triggers 的 T1/T4/T5，见 gc.h）。
+ *             命中即打一行观测日志（victim 行由 gc_select_victim 自己打）。
  *   ⚠ **BUSY 不调本函数**（host 饿着，后台让路）；"无块可写"由 ftl_issue_subop 的
  *     紧急 GC 兜底（⚠ 本仓自己的**写路径按需 GC**；SPDK 无此路径——它的 GC 全在
  *     core poller 里、判据是自由 band 水位，写路径取不到块就返 NULL 不就地回收）。
@@ -496,16 +518,15 @@ static const bg_level_cfg_t g_bg_level_cfg[BG_LEVEL_BUSY + 1U] = {
 
 /* ── 13 个适配器（包异构 kick → void(ftl_context_t*)）── */
 
-/* 位 0 · must_run（最先）—— 推进**已在飞**的 Checkpoint job（阶段 6）。
- * ⚠ 必须排在最前、且不占预算：CP 可能在 BUSY 档被紧急水位起（journal≥95%），后续阶段
- *   要跨多轮跨档位走完——排在预算 pass 里会被低优先级/预算耗尽饿死（旧实现也是先于
- *   三档统一推进，见 ftl_service 的阶段 6 注释）。 */
+/* 位 0 · must_run（最先）—— 推进**已在飞**的 Checkpoint job。
+ * ⚠ 必须排在最前、且不占预算：CP 可能在 BUSY 档被紧急水位起（journal≥95%），后续步骤
+ *   要跨多轮跨档位走完——排在预算 pass 里会被低优先级/预算耗尽饿死。 */
 static void bg_a_checkpoint(ftl_context_t *ftl)
 {
     checkpoint_kick(ftl);
 }
 
-/* 位 1 · must_run —— 推进 Read Recovery job（阶段 3）。
+/* 位 1 · must_run —— 推进 Read Recovery job。
  * host 读在等结果（托管的子操作占着组在飞数），不推进即死等；任何档位都要跑。 */
 static void bg_a_rr(ftl_context_t *ftl)
 {
@@ -520,7 +541,7 @@ static void bg_a_mig_service(ftl_context_t *ftl)
     mig_service(ftl);
 }
 
-/* 位 3 · must_run —— 元数据目录整理 job（阶段 8）。
+/* 位 3 · must_run —— 元数据目录整理 job。
  * compact_wanted 是 append_slot 在**前台写路径**上置的（池吃紧时换块），
  * 不推进就是写路径永久 FTL_AGAIN；任何档位都要跑。 */
 static void bg_a_metadata_dir(ftl_context_t *ftl)
@@ -539,8 +560,8 @@ static void bg_a_journal_erase(ftl_context_t *ftl)
 }
 
 /* 位 5 · must_run —— 紧急 Checkpoint（Journal ≥ 95%）。
- * 原只在 BUSY 档检查；移入 must-run 后每轮检查。checkpoint_begin 只装配 job、单飞行
- * （cp_job.active → FTL_AGAIN）幂等 ⇒ 这是**刻意的行为放宽**：紧急水位必须随时响应。 */
+ * 紧急水位必须**任何档位都随时响应**（BUSY 档也一样）。checkpoint_begin 只装配 job、
+ * 单飞行（cp_job.active → FTL_AGAIN）幂等 ⇒ 每轮检查无副作用。 */
 static void bg_a_emergency_cp(ftl_context_t *ftl)
 {
     if (checkpoint_is_emergency(ftl))
@@ -567,7 +588,7 @@ static void bg_a_wl(ftl_context_t *ftl)
 
 /* 位 8 · 预算 — 后台 flush 脏 L2P region，条数上界 = 档位 l2p_flush_max
  * （IDLE=L2P_CACHE_SIZE / NORMAL=BG_NORMAL_FLUSH_COUNT / BUSY=BG_BUSY_FLUSH_COUNT，
- * 经 ftl->bg.level 反查档位）。BUSY 仅此一项 ⇒ 「must-run + 1 flush」与旧档逐字等价。
+ * 经 ftl->bg.level 反查档位）。BUSY 仅此一项 ⇒ 最小预算 = 「must-run + 1 flush」。
  * ⚠ thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。 */
 static void bg_a_l2p_flush(ftl_context_t *ftl)
 {
@@ -578,22 +599,22 @@ static void bg_a_l2p_flush(ftl_context_t *ftl)
     l2p_flush_kick_owner(ftl->cache, ftl_topo_dim(ftl->topo), (uint8_t)g_bg_level_cfg[ftl->bg.level].l2p_flush_max);
 }
 
-/* 位 9 · 预算 — 推进 Journal 刷页 job（阶段 2；job 已在飞则空操作）。
+/* 位 9 · 预算 — 推进 Journal 刷页 job（job 已在飞则空操作）。
  * BUSY 档被掩掉（host 饱和档不主动起页写；页满时 journal_append 自己会起）。 */
 static void bg_a_journal_flush(ftl_context_t *ftl)
 {
     journal_kick(ftl->journal);
 }
 
-/* 位 10 · 预算 — BBT 持久化（阶段 7：攒批写 NAND BBT；job 起步/续跑，提交即返回） */
+/* 位 10 · 预算 — BBT 持久化（攒批写 NAND BBT；job 起步/续跑，提交即返回） */
 static void bg_a_bbt(ftl_context_t *ftl)
 {
     bbt_kick(&ftl->alloc);
 }
 
 /* 位 12 · 预算 — Checkpoint 触发检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）。
- * 语义同旧三档：定时基准无条件重置（触发即重置，不看成败）；job 装配由
- * checkpoint_begin（提交即返回），成败由 [CP] 心跳判。 */
+ * 定时基准**无条件**重置（触发即重置，不看成败——否则失败的 job 会每轮重触发）；
+ * job 装配由 checkpoint_begin（提交即返回），成败由 [CP] 心跳判。 */
 static void bg_a_cp_trigger(ftl_context_t *ftl)
 {
     uint32_t now_ms  = ftl_now_ms();
@@ -713,10 +734,10 @@ uint8_t ftl_bg_level_select(const ftl_context_t *ftl)
  *         / journal / metadata_dir / bbt / 各计时器。
  *   参数：ftl —— 实例（非 NULL，含自持表存储）；topo —— 绑定的 NAND 芯片路由；
  *         cache —— 本实例所属 (ch,ce) 的**共享** L2P cache（设备级已初始化，
- *                  本函数只绑定指针，不再 init / set_md_dir）。
+ *                  本函数只绑定指针，不 init、不 set_md_dir）。
  *   返回：FTL_OK / FTL_ERROR（初始化失败）。
- *   实现要点：描述符只持有指针（阶段 C）；四个大数组由 storage 提供，
- *             可能在 NOLOAD 段 ⇒ 本函数必须显式 memset。
+ *   实现要点：本实例只持有指针，四个大数组由 storage（HIL）提供，
+ *             位于 NOLOAD 段 ⇒ 本函数必须显式 memset。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cache, const ftl_storage_t *storage)
 {
@@ -736,7 +757,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
 
     ftl->topo = topo;
 
-    /* ├─ 绑定外部存储（阶段 C：四个大数组由 HIL 按域提供）──
+    /* ├─ 绑定外部存储（四个大数组由 HIL 按域提供）──
      * ⚠ .sram*_data 是 NOLOAD，启动代码不清零 ⇒ 下面必须整表 memset。 */
     ftl->tables       = storage->tables;
     ftl->metadata_dir = storage->metadata_dir;
@@ -750,13 +771,13 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
      *    （完成派发不需要在此注册 handler：命令自己带 op_tag，g_op_service[] 是
      *     编译期常量数组，见 ftl_op.c；旁表只回答"这条命令的私有状态在哪"。） */
 
-    /* ├─ Pending Request 表（F6：per-instance） ── */
+    /* ├─ Pending Request 表（per-instance） ── */
     pending_init(ftl);
 
-    /* ├─ 页打包写缓冲（§七 方案 A）── */
+    /* ├─ 页打包写缓冲 ── */
     memset(&ftl->wbuf, 0, sizeof(ftl->wbuf));
 
-    /* ├─ 慢死巡检时刻（F6：per-instance，原全局 g_rr_last_scan_ms） ── */
+    /* ├─ 慢死巡检时刻（per-instance） ── */
     ftl->rr_last_scan_ms = 0U;
 
     /* ├─ GC 触发求值节拍 + 触发日志节拍（per-instance，见 ftl.h 字段注释） ── */
@@ -802,7 +823,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     /* ├─ BBT 初始化（从 NAND 加载或出厂扫描）── */
     bbt_init(&ftl->alloc);
 
-    /* ├─ Checkpoint 池游标/序号 + 定时基准（序 4：per-instance）──
+    /* ├─ Checkpoint 池游标/序号 + 定时基准（per-instance）──
      * 游标在此归零 ⇒ 首次 Checkpoint job 会先扫池定位（cursor_valid==0，见 CP_HDR_PREP）。 */
     memset(&ftl->cp, 0, sizeof(ftl->cp));
     ftl->cp_timer_start = 0U;
@@ -810,7 +831,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     /* ├─ 统计 ── */
     ftl->total_writes = 0U;
 
-    /* ├─ 后台调度器任务表（v0.76：13 项；must-run + interval/budget/优先级）──
+    /* ├─ 后台调度器任务表（13 项；must-run + interval/budget/优先级）──
      * 必须在所有在飞的字段就绪后填（适配器只依赖实例字段与 kick，无额外依赖）。 */
     ftl_bg_init(ftl);
 
@@ -840,7 +861,7 @@ void ftl_service_pump(void)
         }
     }
 
-    /* Phase 2: 统一完成泵 — 替代原有 fc_poll_completion 循环 */
+    /* Phase 2: 统一完成泵（按命令 op_tag 派发到服务函数数组，见 completion_table.c） */
     completion_table_drain();
 }
 
@@ -850,7 +871,7 @@ void ftl_service_pump(void)
  *   参数：ftl —— FTL 实例（**恒非空**：调用方须传合法实例地址，NULL 属编程错误）。
  *   返回：无。
  *   实现要点：调用方须**先**调 ftl_service_pump()（全局泵，每轮一次），再对**每个**
- *             实例调本函数（序 4：多实例下所有实例都要推进，不能只跑 [0][0][0]）。
+ *             实例调本函数（多实例下所有实例都要推进，不能只跑 [0][0][0]）。
  *             Phase 3 用 inflight（pending + groups）选档（bg_suspend 置位时整体跳过，
  *             `bbt --erase` 后保护），档位 → bg_scheduler_run 执行 13 项任务表。
  * -------------------------------------------------------------------- */
@@ -861,7 +882,7 @@ void ftl_service(ftl_context_t *ftl)
      * 优于静默返回⇒该实例 journal/GC 永不推进的无声损坏）。 */
     ASSERT(ftl != NULL);
 
-    /* Phase 2.5 首：推进**停泊**的写确认（阶段 5）。必须早于补发——停泊意味着那个 LBA
+    /* Phase 2.5 首：推进**停泊**的写确认。必须早于补发——停泊意味着那个 LBA
      * 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作就会读到旧物理页（陈旧数据）。
      * 顺序与 Phase 2.5 的既有约定一致：先处理**已完成**的，再下发新的。 */
     ftl_confirm_kick(ftl);
@@ -911,11 +932,11 @@ void ftl_service(ftl_context_t *ftl)
     bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level]);
 }
 
-/* ── 页打包写缓冲（§七 方案 A）──
+/* ── 页打包写缓冲 ──
  *
  * 同一 pair 窗口内的多次 host 写攒进 ftl->wbuf，窗口填满 / 切到别的窗口 / 显式 flush /
  * 空闲时**一次编程**（两 plane 都有数据即一条 multi-plane）⇒ 写指针按页推进，消除
- * 「逐子操作分配整对页」的浪费（见 ftl_wbuf_t 与 ftl_optimization_plan.md P2-6）。
+ * 「逐子操作分配整对页」的浪费（见 ftl_wbuf_t）。
  *
  * ⚠ 掉电语义（无电容）：缓冲里的数据**不落 journal/L2P**——只有 flush 编程成功的
  *   completion 才确认映射（与既有顺序一致）。掉电时这些写组仍 outstanding（从未完成），
@@ -934,14 +955,14 @@ static bool ftl_wbuf_has(const ftl_context_t *ftl, lba_t internal_lba)
         return false;
     }
 
-    const uint8_t slot = (uint8_t)(ftl_lba_plane(internal_lba) * CW_NUM + ftl_lba_cw(internal_lba));
+    const uint8_t slot = ftl_lba_pair_slot(internal_lba);
     return (ftl->wbuf.occupied & (uint8_t)(1U << slot)) != 0U;
 }
 
 /* ftl_wbuf_read — 从写缓冲读一个 LBA（调用者已用 ftl_wbuf_has 确认命中） */
 static void ftl_wbuf_read(const ftl_context_t *ftl, lba_t internal_lba, void *out)
 {
-    const uint8_t slot = (uint8_t)(ftl_lba_plane(internal_lba) * CW_NUM + ftl_lba_cw(internal_lba));
+    const uint8_t slot = ftl_lba_pair_slot(internal_lba);
 
     (void)memcpy(out, &ftl->wbuf.data[(size_t)slot * FTL_IU_BYTES], FTL_IU_BYTES);
 }
@@ -976,14 +997,14 @@ static ftl_status_t ftl_wbuf_append(ftl_context_t *ftl, uint16_t gi, lba_t inter
     for (uint8_t k = 0U; k < n; k++)
     {
         const lba_t   l    = (lba_t)(internal_lba + (lba_t)k);
-        const uint8_t slot = (uint8_t)(ftl_lba_plane(l) * CW_NUM + ftl_lba_cw(l));
+        const uint8_t slot = ftl_lba_pair_slot(l);
 
         (void)memcpy(&ftl->wbuf.data[(size_t)slot * FTL_IU_BYTES],
                      src + ((size_t)k * FTL_IU_BYTES),
                      FTL_IU_BYTES);
         ftl->wbuf.occupied |= (uint8_t)(1U << slot);
     }
-    ftl->wbuf.owners |= (uint32_t)(1U << gi);
+    ftl->wbuf.owners |= ftl_group_bit(gi);
     ftl->groups[gi].outstanding++;
 
     /* 满：尝试立即编程（失败则留给 idle flush 重试；append 本身已成功 ⇒ 仍返 OK，
@@ -1007,7 +1028,7 @@ static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
         return FTL_OK; /* 空：nothing to do */
     }
 
-    /* 资源次序（IO-013）：**先查 pending 表余量，再动别的资源**。本函数末尾要用一个
+    /* 资源次序：**先查 pending 表余量，再动别的资源**。本函数末尾要用一个
      * pending 槽登记本次编程；若表已满却先把物理块和 desc 链配出来，那条链只能整条回滚
      * ——白配一场。单线程 superloop ⇒ 查到这里登记之间没有别的消费者。 */
     if (pending_count(ftl) >= (uint16_t)FTL_PENDING_MAX)
@@ -1026,7 +1047,7 @@ static ftl_status_t ftl_wbuf_flush(ftl_context_t *ftl)
      *   **死锁边界**：GC 自身搬移需要 free block ⇒ 靠 **OP 预留池**兜底（OP 池按 plane
      *   预留）；GC job 因池空而中止时（migrate.c 的 alloc 失败分支）不擦 victim、
      *   数据无损，下轮重试。
-     *   ⚠ 这里**不再**返回 FTL_ERROR：无 victim 可回收只是"暂时没空间"，下轮可能就有
+     *   ⚠ 这里**必须**返回 FTL_AGAIN 而不是 FTL_ERROR：无 victim 可回收只是"暂时没空间"，下轮可能就有
      *   （另一条写完成归还了块），报 IO_ERROR 会让 host 写永久失败。 */
     nand_pba_t new_pba[PLANE_NUM];
     if (allocator_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, new_pba) != FTL_OK)
@@ -1153,7 +1174,7 @@ static void ftl_wbuf_maybe_flush_idle(ftl_context_t *ftl)
     (void)ftl_wbuf_flush(ftl);
 }
 
-/* ── 子操作下发（S2：一条 host 请求 → 多个 FC 子操作）──
+/* ── 子操作下发（一条 host 请求 → 多个 FC 子操作）──
  *
  * ftl_issue_subop 下发**一个**子操作 = 一个 **pair 窗口内**的连续 LBA 段
  * （≤ FTL_LBA_PER_PAIR = 8 个 CW = 2 个 plane 页），三态返回：
@@ -1178,8 +1199,8 @@ static void ftl_wbuf_maybe_flush_idle(ftl_context_t *ftl)
  * ftl_issue_subop
  *   功能：下发**一个**子操作（pair 窗口内的连续 LBA 段）——查/分配 PBA、建 FC 命令、
  *         注册 pending、submit。
- *   参数：ftl —— 实例；gi —— 组下标；internal_lba —— **全局** host LBA（阶段 B 起
- *         数据通路不再预转 local；扇区号）；
+ *   参数：ftl —— 实例；gi —— 组下标；internal_lba —— **全局** host LBA（扇区号，
+ *         数据通路全程用全局 LBA，不预转 local）；
  *         buffer —— 数据缓冲；n_cw —— 入参兼出参（最大可提供 / 实际消费的 LBA 数）。
  *   返回：三态——FTL_OK 已下发（或如未映射读般**同步完成**，不进 outstanding）；
  *         FTL_AGAIN 瞬态背压（命令/desc/buffer 池满、SQ 满、pending 表满）→ 排队重试；
@@ -1206,7 +1227,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
     ASSERT(n > 0U);
 
     /* 写：攒进页打包缓冲（窗口满 / 切换窗口时内部触发编程），本函数对写**到此为止**。
-     * 数据在 ftl_wbuf_flush 里一次编程（§七 方案 A）——分配/建链/提交/确认全在那里。 */
+     * 数据在 ftl_wbuf_flush 里一次编程——分配/建链/提交/确认全在那里。 */
     if (!pending_op_is_read(g->op))
     {
         /* 回填窗口夹住后的实际消费数——调用者（ftl_drain_group）据此推进 g->next。
@@ -1253,9 +1274,9 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
                 break; /* 还在写缓冲（未编程）：收缩到此为止，下一轮同步从缓冲取 */
             }
 
-            /* ⚠ 三态（阶段 5）：FTL_AGAIN = region 未驻留（已起异步加载）。**必须**与
+            /* ⚠ 三态：FTL_AGAIN = region 未驻留（已起异步加载）。**必须**与
              * "未映射"（FTL_OK + INVALID）分清——把前者当后者会让 host 读到假数据。
-             * FTL_ERROR 仅越界，保持 p = INVALID（旧实现返回 INVALID，行为等价）。 */
+             * FTL_ERROR 仅越界，此时 p 保持 INVALID。 */
             if (l2p_cache_read(ftl->cache, l, &p) == FTL_AGAIN)
             {
                 ftl->l2p_defer = 1U; /* 告知 drain：这是加载在飞，不是卡死 */
@@ -1305,7 +1326,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
             }
 
             pba[pl] = pg;
-            cw_bitmap |= (uint32_t)1U << (((uint32_t)pl * CW_NUM) + (uint32_t)ftl_lba_cw(l));
+            cw_bitmap |= ftl_cw_bit(pl, ftl_lba_cw(l));
         }
 
         if (k == 0U)
@@ -1330,7 +1351,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
      * 值域断言在 ftl_plane_read_op 内（界 = PLANE_NUM）。 */
     uint8_t nplanes = ftl_cw_bitmap_plane_count(cw_bitmap);
 
-    /* 资源次序（IO-013）：**先查 pending 表余量，再配 desc 链**。末尾要用一个 pending 槽
+    /* 资源次序：**先查 pending 表余量，再配 desc 链**。末尾要用一个 pending 槽
      * 登记本子操作；表满却先建好链，只能整条回滚——白配一场。
      * ⚠ 必须在 wbuf 命中分支**之后**：那条路径同步完成、不占 pending 槽，不该被表满挡住。 */
     if (pending_count(ftl) >= (uint16_t)FTL_PENDING_MAX)
@@ -1380,7 +1401,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, uint16_t gi, lba_t inter
     }
 
     pending->command_id         = ftl_cmd_id(cmd);
-    pending->owners             = (uint32_t)(1U << gi);
+    pending->owners             = ftl_group_bit(gi);
     pending->op                 = (uint8_t)PENDING_OP_READ;
     pending->n_cw               = n;
     pending->cw_bitmap          = 0U;
@@ -1453,7 +1474,7 @@ static void ftl_drain_group(ftl_context_t *ftl, uint16_t gi)
         {
             /* 瞬态背压：本轮到此为止，下轮 ftl_service Phase 2.5 再补。
              * 连续无进展超预算 → 判真卡死，弃未下发者并报错（已下发的照常完成）。
-             * ⚠ **L2P region 加载在飞不算无进展**（阶段 5）：那是有确定完成时刻的
+             * ⚠ **L2P region 加载在飞不算无进展**：那是有确定完成时刻的
              *   forward progress（NAND 层 wait/jump 超时保证命令必有完成），计进来会让
              *   一次正常的 region 加载吃掉 8 轮预算里的一轮 ⇒ 随机读满盘时把好组误判
              *   成卡死报 IO_ERROR。真卡死（命令丢失）由 NAND 层超时兜底。 */
@@ -1486,14 +1507,20 @@ static void ftl_drain_group(ftl_context_t *ftl, uint16_t gi)
 }
 
 /* --------------------------------------------------------------------
- * ftl_submit_read
- *   功能：提交一条 host 读请求——建组（一条请求 = 一个组）+ 快路径下发。
- *   参数：ftl —— 实例；req —— 请求（count = 连续 LBA 数，buffer 非空）。
+ * ftl_submit_common
+ *   功能：读/写共用的提交骨架——入参校验 + 建组 + 快路径下发。
+ *   参数：ftl —— 实例；req —— 请求（count = 连续 LBA 数，buffer 非空）；
+ *         op —— PENDING_OP_READ / PENDING_OP_WRITE（决定组类型与日志标签）。
  *   返回：FTL_OK（已建组，可能仍有余量待 Phase 2.5 补发）/ FTL_ERROR（参数非法 /
  *         越界 / 组槽满）。
+ *   实现要点：两个公开入口的流程**逐字相同**（差异只有 op 与日志文案）⇒ 收敛到本函数
+ *             一份，避免两处各自漂移（H6：注释与代码不一致即缺陷，重复实现更甚）。
  * -------------------------------------------------------------------- */
-ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
+static ftl_status_t ftl_submit_common(ftl_context_t *ftl, const ftl_io_request_t *req, ftl_pending_op_t op)
 {
+    const char *label = (op == PENDING_OP_READ) ? "read" : "write";
+
+    /* host 入口：入参来自 HIL，属**不可信输入**（H29）⇒ 保留返回码，不转 ASSERT。 */
     if ((ftl == NULL) || (req == NULL) || (req->buffer == NULL))
     {
         return FTL_ERROR;
@@ -1506,24 +1533,26 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
         return FTL_ERROR;
     }
 
-    /* LBA 范围检查（含末 LBA） */
+    /* LBA 范围检查（含末 LBA）。req->lba 是 uint64_t ⇒ 加法按 64 位进行，不回绕。 */
     if ((req->lba + count) > FTL_LBA_MAX)
     {
-        LOGE("[FTL] read lba out of range lba=%lu count=%lu\r\n",
+        LOGE("[FTL] %s lba out of range lba=%lu count=%lu\r\n",
+             label,
              (unsigned long)req->lba,
              (unsigned long)count);
         return FTL_ERROR;
     }
 
-    /* 建完成组（一条 host 请求 = 一个组）。通知字段必须**早于任何下发**填入。 */
+    /* 建完成组（一条 host 请求 = 一个组）。通知字段必须**早于任何下发**填入：
+     * 下发可能当场完成整组，届时通知就要读它们。 */
     int gi = pending_group_alloc(ftl);
     if (gi < 0)
     {
-        LOGE("[FTL] read: no free group slot\r\n");
+        LOGE("[FTL] %s: no free group slot\r\n", label);
         return FTL_ERROR;
     }
     ftl_io_group_t *g  = &ftl->groups[gi];
-    g->op              = (uint8_t)PENDING_OP_READ;
+    g->op              = (uint8_t)op;
     g->total           = count; /* 进度以 **LBA** 计（子操作数由 drain 现场决定，可降级） */
     g->next            = 0U;
     g->outstanding     = 0U;
@@ -1538,10 +1567,23 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
     g->on_complete_ctx = req->on_complete_ctx;
 
     /* 快路径：小请求当场下发完；遇背压则余下留待 ftl_service Phase 2.5 补发。
-     * 数据在 completion_table_drain 中拷贝回 buffer。 */
+     * 数据在 completion_table_drain 中拷贝回 buffer（读），Journal + L2P 在完成
+     * handler 中确认 NAND PROGRAM 成功后执行（写）。 */
     ftl_drain_group(ftl, (uint16_t)gi);
 
     return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_submit_read
+ *   功能：提交一条 host 读请求——建组（一条请求 = 一个组）+ 快路径下发。
+ *   参数：ftl —— 实例；req —— 请求（count = 连续 LBA 数，buffer 非空）。
+ *   返回：FTL_OK（已建组，可能仍有余量待 Phase 2.5 补发）/ FTL_ERROR（参数非法 /
+ *         越界 / 组槽满）。
+ * -------------------------------------------------------------------- */
+ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
+{
+    return ftl_submit_common(ftl, req, PENDING_OP_READ);
 }
 
 /* --------------------------------------------------------------------
@@ -1554,54 +1596,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req)
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
 {
-    if ((ftl == NULL) || (req == NULL) || (req->buffer == NULL))
-    {
-        return FTL_ERROR;
-    }
-
-    /* 长度 = 连续 LBA 数（上层 block_count）；FTL 自行决定单/双 plane 拆分 */
-    uint32_t count = req->count;
-    if (count == 0U)
-    {
-        return FTL_ERROR;
-    }
-
-    /* LBA 范围检查（含末 LBA） */
-    if ((req->lba + count) > FTL_LBA_MAX)
-    {
-        LOGE("[FTL] write lba out of range lba=%lu count=%lu\r\n",
-             (unsigned long)req->lba,
-             (unsigned long)count);
-        return FTL_ERROR;
-    }
-
-    /* 建完成组（同 ftl_submit_read：通知字段必须早于任何下发填入）。 */
-    int gi = pending_group_alloc(ftl);
-    if (gi < 0)
-    {
-        LOGE("[FTL] write: no free group slot\r\n");
-        return FTL_ERROR;
-    }
-    ftl_io_group_t *g  = &ftl->groups[gi];
-    g->op              = (uint8_t)PENDING_OP_WRITE;
-    g->total           = count; /* 进度以 LBA 计，同 ftl_submit_read */
-    g->next            = 0U;
-    g->outstanding     = 0U;
-    g->stalls          = 0U;
-    g->lba             = req->lba;
-    g->buffer          = req->buffer;
-    g->count           = count;
-    g->agg_status      = SSD_STATUS_OK;
-    g->complete_flag   = req->complete_flag;
-    g->status_out      = req->status_out;
-    g->on_complete     = req->on_complete;
-    g->on_complete_ctx = req->on_complete_ctx;
-
-    /* 快路径下发；余量留待 Phase 2.5。Journal + L2P 在 completion handler 中
-     * 确认 NAND PROGRAM 成功后执行。 */
-    ftl_drain_group(ftl, (uint16_t)gi);
-
-    return FTL_OK;
+    return ftl_submit_common(ftl, req, PENDING_OP_WRITE);
 }
 
 /* ── 元数据落盘 / TRIM（供 HIL 调用）── */
@@ -1612,22 +1607,19 @@ ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req)
  *   参数：ftl —— 实例（**前置条件**，非法即 ASSERT）。
  *   返回：无。
  *   实现要点：**非** NVMe 式 barrier——不等待在飞 / 排队的写（CLI 靠 g_cli_pending.busy
- *             串行化）。
+ *             串行化）。L2P 与 journal 走**同步**逃生口（自旋泵）而非 kick：`fl` 的契约
+ *             就是"返回时脏数据真的已持久"，而它本就在 CLI 上下文，自旋不是嵌套泵。
+ *             后台攒批走 l2p_flush_kick（ftl_service 各档）。
  * -------------------------------------------------------------------- */
 void ftl_flush(ftl_context_t *ftl)
 {
     /* 前置条件（判据 2 / C5）：唯一调用者 controller.c 在调用前已 ASSERT 路由结果非空。 */
     ASSERT(ftl != NULL);
 
-    /* 语义 = "把已持久化映射落盘"：先把页打包缓冲里尚未编程的写编程掉（否则它们还没
-     * 进 L2P/journal，"落盘"不成立），再 L2P cache 全部写回 + journal 尾页刷出。
-     * **非** NVMe 式 barrier（不等待在飞/排队的写；当前 CLI 靠 g_cli_pending.busy 串行化）。
-     * ⚠ wbuf flush 遇瞬态背压会保留缓冲、下轮 ftl_service 重试；此处尽力而为。 */
+    /* 先把页打包缓冲里尚未编程的写编程掉：它们还没进 L2P/journal，"落盘"不成立。
+     * ⚠ 遇瞬态背压会保留缓冲、下轮 ftl_service 重试；此处尽力而为。 */
     (void)ftl_wbuf_flush(ftl);
 
-    /* ⚠ 阶段 5 用**同步**逃生口（自旋泵）而非 kick：`fl` 是显式的"把映射落盘"请求，
-     * 返回时脏 region 必须真的已持久（否则"落盘"这个词不成立——而它本就在 CLI 上下文，
-     * 自旋不是嵌套泵）。后台攒批走 l2p_flush_kick（ftl_service 各档）。 */
     (void)l2p_cache_flush_owner_sync(ftl->cache, ftl_topo_dim(ftl->topo));
 
     if (journal_flush_page(ftl->journal) != FTL_OK)
@@ -1642,8 +1634,11 @@ void ftl_flush(ftl_context_t *ftl)
  *   参数：ftl —— 实例；lba —— 起始 LBA；count —— LBA 数（0 视为 1，兼容单 LBA 调用）。
  *   返回：无。
  *   实现要点：CW 级映射下 1 个 LBA = 1 个 CW ⇒ 逐 LBA 减 1 个有效 CW 计数
- *             （valid_count 是**精确**的 CW 计数；v0.60 起无常驻位图，有效性逐 CW
+ *             （valid_count 是**精确**的 CW 计数；无常驻位图，有效性逐 CW
  *             由页内 META + L2P 反查判定——见 bst.h 文件头）。
+ *             ⚠ **Journal 先于 L2P 写**（同 host 写路径的顺序）：两步之间掉电时，
+ *             回放能重放这条 INVALID 条目，而不会因 L2P 已改、Journal 未记而把
+ *             已 TRIM 的 LBA 复活。
  * -------------------------------------------------------------------- */
 void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
 {
@@ -1669,7 +1664,7 @@ void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
          * 落盘，无旧映射可失效、也无映射变更需记。 */
         if (ftl_wbuf_has(ftl, l))
         {
-            const uint8_t slot = (uint8_t)(ftl_lba_plane(l) * CW_NUM + ftl_lba_cw(l));
+            const uint8_t slot = ftl_lba_pair_slot(l);
 
             ftl->wbuf.occupied &= (uint8_t) ~(uint8_t)(1U << slot);
             if (ftl->wbuf.occupied == 0U)
@@ -1684,24 +1679,28 @@ void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
             continue;
         }
 
-        /* 查旧映射：若非 INVALID，同步减该 CW 的有效计数（否则 valid_count 虚高，
-         * GC 选 victim 不准）。 */
-        /* ⚠ 阶段 5：TRIM 走**同步**逃生口（自旋泵）——它由 CLI 调用，不在完成派发里，
+        /* 查旧映射：TRIM 走**同步**逃生口（自旋泵）——它由 CLI 调用，不在完成派发里，
          * 且契约是"取消映射同步完成"。读得 INVALID 与"未映射"同义，两种都是"无旧映射"。 */
         (void)l2p_cache_read_sync(ftl->cache, l, &old_pba);
+
+        /* ⚠ **Journal 先于 L2P 写**（顺序不可换，同 host 写路径 ftl_confirm_write）。
+         * 取消映射也必须进 Journal（new_pba = INVALID）：L2P 的每一次变更都由 Journal
+         * 承载，掉电恢复靠回放重建——漏记这一条会让**掉电恢复把已 TRIM 的 LBA 复活**
+         * （region 虽被 flush 成 INVALID，但回放按序重放更早的写条目——page_seq 更小
+         * 但 > cp_sequence——会把它改回有效 PBA，且回放行标 DIRTY 后
+         * ftl_boot_apply_region_bitmap 会跳过预载，NAND 上的 INVALID 也不生效）。
+         * 反过来若先写 L2P 再记 Journal，掉电就落在这个窗口：L2P 已 INVALID 而 Journal
+         * 无条目 ⇒ 回放不覆盖 ⇒ 该 region 若随后被淘汰重载，映射复活。 */
+        (void)journal_append(ftl->journal, l, old_pba, NAND_PBA_INVALID);
+
+        (void)l2p_cache_write_sync(ftl->cache, l, NAND_PBA_INVALID);
+
+        /* 有效计数在两步之后减：它只是 RAM 统计（valid_count 虚高会让 GC 选 victim 不准），
+         * 不进 Journal，位置不影响掉电正确性。 */
         if (old_pba != NAND_PBA_INVALID)
         {
             uint16_t gblock = (uint16_t)ftl_pba_gblock(old_pba);
             ftl_block_sub_valid(&ftl->alloc.blocks[gblock]);
         }
-
-        (void)l2p_cache_write_sync(ftl->cache, l, NAND_PBA_INVALID);
-
-        /* ⚠ 取消映射也必须进 Journal（new_pba = INVALID）。L2P 的每一次变更都由
-         * Journal 承载，掉电恢复靠回放重建——漏记这一条会让**掉电恢复把已 TRIM
-         * 的 LBA 复活**：region 虽被 flush 成 INVALID，但回放按序重放更早的写条目
-         * （page_seq 更小但 > cp_sequence）会把它改回有效 PBA，且回放行标 DIRTY
-         * 后 ftl_boot_apply_region_bitmap 会跳过预载，NAND 上的 INVALID 也不生效。 */
-        (void)journal_append(ftl->journal, l, old_pba, NAND_PBA_INVALID);
     }
 }

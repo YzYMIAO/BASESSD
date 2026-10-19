@@ -4,17 +4,17 @@
 /*
  * ftl_service — 主循环调度器
  *
- * 每轮 superloop 两段（序 4：多实例化后**泵与实例分开**）：
+ * 每轮 superloop 两段（**泵与实例分开**）：
  *   ① ftl_service_pump()   —— **实例无关**：Phase 1 推进 NAND + Phase 2 抽干完成表。
  *                              全局的 NAND 引擎与完成表，每轮**只调一次**。
  *   ② ftl_service(ftl)     —— **单实例**：Phase 2.5 补发子操作 + Phase 3 三级后台。
  *                              对**每一个**实例都要调（多 LUN 下不能只跑 [0][0][0]）。
  *
- * 三级模式切换依据未决命令数（pending + 组 + 完成表占用），非"本轮提交了几条 NAND"。
+ * 三级模式切换依据未决命令数（pending + 组），非"本轮提交了几条 NAND"。
  */
 
 #include "allocator.h"    /* ftl_tables_t, super_block_t */
-#include "bg_scheduler.h" /* 时间预算后台调度器（v0.76，ftl_context_t 含调度器） */
+#include "bg_scheduler.h" /* 时间预算后台调度器（ftl_context_t 含调度器） */
 #include "checkpoint.h"
 #include "ftl_type.h" /* ftl_io_request_t */
 #include "gc.h"
@@ -91,19 +91,19 @@ typedef struct ftl_context
     /* L2P Cache（共享：指向 g_l2p_cache[ch][ce]，同一 (ch,ce) 下的所有 LUN 共用） */
     l2p_cache_t *cache;
 
-    /* Pending Request 表（F6：per-instance，本实例异步请求追踪）
+    /* Pending Request 表（per-instance，本实例异步请求追踪）
      * 由 pending.c 操作：每个子操作一个槽（command_id → 组 + 子操作字段）。 */
     ftl_pending_req_t pending[FTL_PENDING_MAX];
 
-    /* 完成组表（S1：一条 host 请求 = 一个组，聚合其全部子操作的完成通知）
+    /* 完成组表（一条 host 请求 = 一个组，聚合其全部子操作的完成通知）
      * 由 pending.c 操作（pending_group_*）。 */
     ftl_io_group_t groups[FTL_GROUP_MAX];
 
-    /* 页打包写缓冲（§七 方案 A）——同一 pair 窗口的多次写攒成一页再编程，
+    /* 页打包写缓冲——同一 pair 窗口的多次写攒成一页再编程，
      * 见 ftl_wbuf_t。由 ftl.c 的 ftl_wbuf_* 族操作。 */
     ftl_wbuf_t wbuf;
 
-    /* FTL 表指针（阶段 C：由 HIL 的 ftl_storage_t 提供并决定落哪个域）。
+    /* FTL 表指针（由 HIL 的 ftl_storage_t 提供并决定落哪个域）。
      * BST blocks(80KB) / free+op(16KB) / closed(32KB) / spare(200B)，见 ftl_tables_t。
      * allocator_init 会把 alloc 内部的指针直接绑到本表，故下游大多数表访问走
      * `ftl->alloc->...`，不经过本指针。 */
@@ -112,24 +112,23 @@ typedef struct ftl_context
     /* Allocator（各指针绑到上面的 tables，见 allocator_init） */
     ftl_allocator_t alloc;
 
-    /* Journal（阶段 C：指针，由 storage 提供；落 SRAM3） */
+    /* Journal（指针，由 storage 提供；落 SRAM3） */
     l2p_journal_t *journal;
 
-    /* Metadata Directory（阶段 C：指针，由 storage 提供；落 SRAM4） */
+    /* Metadata Directory（指针，由 storage 提供；落 SRAM4） */
     metadata_dir_cache_t *metadata_dir;
 
-    /* Checkpoint 池游标/序号（序 4：per-instance，原 checkpoint.c 的 file-scope static）。
+    /* Checkpoint 池游标/序号（per-instance）。
      * 开机由 checkpoint_find_latest 恢复，Checkpoint job 据此选池内下一槽续写。
-     * ⚠ 与 journal.sequence_counter 无关——本池自己的单调序号（见 l2p_cp_state_t）。
-     * 原 `uint32_t cp_sequence` 字段已删：只写不读，且与本字段语义重复（真正的
-     * checkpoint 序号是 cp.sequence；boot 日志里的 cp_seq 来自 ftl_boot_result_t）。 */
+     * ⚠ 与 journal.sequence_counter 无关——本池自己的单调序号（见 l2p_cp_state_t），
+     *   boot 日志里的 cp_seq 另来自 ftl_boot_result_t。 */
     l2p_cp_state_t cp;
 
-    /* Checkpoint 异步 job（阶段 6：脏区落盘 → Anchor → Header → 截断 journal 的
+    /* Checkpoint 异步 job（脏区落盘 → Anchor → Header → 截断 journal 的
      * 有序流水线，见 checkpoint.h 的 cp_job_t / 掉电安全契约）。
      * ⚠ 含 256B 的 region 脏位图**快照**——必须在 job 起点取定，不能沿用实时位图
      *   （flush 成功会清实时位，见 checkpoint.c 的"快照点前移"）。
-     * 阶段 C：指针，由 storage 提供；落 SRAM3。 */
+     * 指针，由 storage 提供；落 SRAM3。 */
     cp_job_t *cp_job;
 
     /* Checkpoint 定时触发基准（T3：elapsed_ms ≥ CP_TIME_INTERVAL_MS） */
@@ -146,7 +145,7 @@ typedef struct ftl_context
      * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
     uint8_t bg_suspend;
 
-    /* L2P 加载背压信号（v0.75 阶段 5，per-instance）。
+    /* L2P 加载背压信号（per-instance）。
      * ftl_issue_subop 因 **L2P region 未就绪**（异步加载在飞，l2p_cache_read 返
      * FTL_AGAIN）而返回 FTL_AGAIN 时置 1；ftl_drain_group 据此**不计** `stalls`——
      * 加载在飞 = 有进展，不是"下发不动"。否则一次正常的 region 加载会吃掉 8 轮预算
@@ -154,7 +153,7 @@ typedef struct ftl_context
      * 真卡死（命令丢失）由 NAND 层 wait/jump 超时兜底，不靠这个计数。 */
     uint8_t l2p_defer;
 
-    /* 慢死预测巡检节流（F6：per-instance，原全局 g_rr_last_scan_ms） */
+    /* 慢死预测巡检节流（per-instance） */
     uint32_t rr_last_scan_ms;
 
     /* GC 触发求值的节拍基准（per-instance）。
@@ -184,8 +183,8 @@ typedef struct ftl_context
     /* GC 进展计数（per-instance，只增不减，纯观测）。
      * ⚠ 为什么需要：`trig=` 常亮**不能区分**「在推进」与「卡死」——两种情况打的是同一行。
      * 卡死链路：gc_select_victim 选不出 victim ⇒ mig_begin_gc 返 0 ⇒ 空闲池只出不进
-     * （`allocator_close_sb` 的 is_open 顺序缺陷 cf604ba 就是这个形态：条目对 GC/WL 永久不可见
-     * ⇒ free_count 掉到 0 后永不回升、写最终永久失败）。
+     * ⇒ free_count 掉到 0 后永不回升、写最终永久失败。Closed 条目对 GC/WL 不可见
+     * （`allocator_close_sb` 的 is_open 顺序写错）就是这个形态。
      * 判据：两次心跳之间 gc_reclaimed_count 不动、gc_novictim_count 在涨 = 卡死。
      * 自增点：reclaimed 在 mig_finish 的 MIG_DONE（仅擦除成功且 closed 条目已移除），
      * novictim 在 mig_begin_gc ⇒ IDLE 补池与 NORMAL 单发两条路径都覆盖。 */
@@ -209,7 +208,7 @@ typedef struct ftl_context
 } ftl_context_t;
 
 /*
- * ftl_storage_t - 描述符的外部存储（阶段 C）
+ * ftl_storage_t - 描述符的外部存储
  *
  * 四个大数组由 HIL 提供并决定落哪个域（main.c：tables→SRAM12、md→SRAM4、
  * journal/cp_job→SRAM3）。ftl_init 只绑定指针；数组定义在 main.c，
@@ -228,9 +227,9 @@ typedef struct
 /*
  * ftl_init - 初始化 FTL 子系统
  *
- * 描述符只持有指针；四个大数组由调用者通过 storage 提供（阶段 C）。
+ * 描述符只持有指针；四个大数组由调用者通过 storage 提供。
  * L2P cache 是**设备级共享对象**（同一 (ch,ce) 一份），由调用者初始化一次后
- * 传入；本函数只绑定指针，不再 init/set_md_dir。
+ * 传入；本函数只绑定指针，不 init、不 set_md_dir。
  *
  * ⚠ storage 指向的数组可能在 NOLOAD 段（`.sram*_data`）：启动代码不清零，
  *   本函数会显式 memset 四个数组。
@@ -268,7 +267,7 @@ void ftl_service_pump(void);
 void ftl_service(ftl_context_t *ftl);
 
 /*
- * ftl_bg_init - 装配实例的时间预算后台调度器（v0.76）
+ * ftl_bg_init - 装配实例的时间预算后台调度器
  *
  * 填充 ftl->bg 的任务表（13 项：6 must-run 正确性关键集 + 7 预算任务，见 ftl.c
  * bg_a_* 适配器）并调用 bg_scheduler_init。由 ftl_init 末尾调用一次。
@@ -276,9 +275,9 @@ void ftl_service(ftl_context_t *ftl);
 void ftl_bg_init(ftl_context_t *ftl);
 
 /*
- * ftl_bg_level_select - 负载 → 后台档位（纯函数，v0.76）
+ * ftl_bg_level_select - 负载 → 后台档位（纯函数）
  *
- * 判据与 v0.75 三级分发逐字等价（ftl.c 旧 ftl_service :851-862）：
+ * 判据：
  *   inflight = pending_count + pending_group_count
  *   inflight==0 ⇒ IDLE；pending > FTL_PENDING_MAX/2 或 queued!=0 ⇒ BUSY；否则 NORMAL。
  * 返回 BG_LEVEL_IDLE / BG_LEVEL_NORMAL / BG_LEVEL_BUSY（bg_scheduler.h）。
@@ -307,7 +306,7 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req);
  * ftl_submit_write - 非阻塞提交写请求（长度任意）
  *
  * 与 ftl_submit_read 对称：FTL 按 count 拆子操作，每子操作分配新 PBA（**逐 plane
- * 独立选块**——Policy B：SB 两 plane 不再同号）+ 建 desc 链 + 异步写 NAND。
+ * 独立选块**——Policy B：SB 两 plane 的块号各自独立）+ 建 desc 链 + 异步写 NAND。
  * Journal + L2P 在 completion handler 中确认 NAND PROGRAM 成功后执行。
  *
  * @param ftl  FTL 上下文

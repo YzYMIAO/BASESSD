@@ -171,6 +171,15 @@ static inline lba_t ftl_lba_make(lba_t page_base, uint8_t cw)
     return (lba_t)(page_base | (lba_t)cw);
 }
 
+/* LBA → 它在「pair 窗口」内的槽位号（0..FTL_LBA_PER_PAIR-1 = 该 LBA 的 CW 在
+ * flat 位图中的**绝对编号**）。
+ * 写缓冲的 occupied 与命令的 cw_bitmap 都是这个 flat 布局（bit = plane*CW_NUM + cw），
+ * 且 LBA 低 3 位就是 [plane][cw] ⇒ 槽位号 = plane*CW_NUM + cw。 */
+static inline uint8_t ftl_lba_pair_slot(lba_t lba)
+{
+    return (uint8_t)(ftl_lba_plane(lba) * CW_NUM + ftl_lba_cw(lba));
+}
+
 /* LBA → 页索引（bit 0 = plane，与 PBA 的 plane 位对齐） */
 static inline lba_t ftl_lba_page(lba_t lba)
 {

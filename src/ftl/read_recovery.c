@@ -566,7 +566,7 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
 
         case RR_STAGE_READ:
             rr->retry_count = rr->attempt;
-            if ((completion->status & FC_CW_STATUS_ERROR_MASK) == 0U)
+            if (!fc_cw_status_has_error(completion->status))
             {
                 /* 重试成功：拷出数据（**release 之前**），本 plane 完成。
                  * ⚠ 不恢复模式 0 —— 原 rr_exec_retry 的成功分支亦然，保持不变。 */
@@ -588,7 +588,7 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
             break;
 
         case RR_STAGE_NB_READ:
-            if ((completion->status & FC_CW_STATUS_ERROR_MASK) == 0U)
+            if (!fc_cw_status_has_error(completion->status))
             {
                 /* 邻居读得出来 ⇒ 块本身没问题，可能是目标页局部 bit 错：再试目标页。
                  * 邻居数据本身不用 ⇒ 拷进
@@ -603,7 +603,7 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
             break;
 
         case RR_STAGE_NB_RETRY:
-            if ((completion->status & FC_CW_STATUS_ERROR_MASK) == 0U)
+            if (!fc_cw_status_has_error(completion->status))
             {
                 (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
                 rr->recovered = 1U;

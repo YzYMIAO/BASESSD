@@ -2622,6 +2622,8 @@ pending_group_complete_subop_multi(owners, status)
 | 子操作遇到 `FTL_AGAIN` | 保留 `next`，下轮重试 | 无 |
 | 连续 8 轮无进展 | 弃未下发子操作，组报 IO_ERROR | 已下发子操作照常完成 |
 | 读 NAND 失败 | 停泊 → RR；不递减 outstanding | 恢复成功则拷回，失败则 IO_ERROR |
+| 读成败判据 | **全错误位**（`fc_cw_status_has_error`），非仅 `NAND_FAIL` | UNC / MATA_ERROR 不带 `NAND_FAIL`，单看它会把加扰页当成功搬给 host |
+| 读 desc 链短于请求 | 立即 `SSD_STATUS_IO_ERROR` | 尾部缓冲未写，不得当数据交给 host |
 | 写 NAND 失败 | 关 SB + 标坏；L2P 不动 | 自动回滚到旧数据 |
 | 写成功但 L2P 未就绪 | 停泊 → `ftl_confirm_kick` | 下轮补齐，不重复记账 |
 
@@ -3193,7 +3195,9 @@ flowchart TD
 
 #### 3.14.5 关键流程
 
-1. host 读完成回调检测到 NAND_FAIL/ECC 超限：pending 项 `op = READ_RECOVERY`、
+1. host 读完成回调检测到**任一错误位**（`fc_cw_status_has_error`：NAND_FAIL / UNC /
+   CRC / MATA_ERROR / TIMEOUT / RAID 全集——UNC 与 MATA_ERROR **不**带 NAND_FAIL，
+   单看 NAND_FAIL 会把加扰页当成功交给 host）：pending 项 `op = READ_RECOVERY`、
    `command_id = NONE`，命令释放，`rr_kick`。
 2. `rr_kick` 领走托管项，进入 `PLANE`；选本 plane 目标页（L2P region 加载中则原地等）。
 3. `SF_SET` → `READ`：`SET_FEATURES(attempt)` 切读重试模式，重读目标页。
