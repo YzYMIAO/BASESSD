@@ -17,8 +17,8 @@
  *
  * 写模型与 Anchor / BBT 一致（见 ftl/metadata.h §元数据写模型）：
  * 只追加到擦除过的页 + 每条 record 带单调 sequence + 池内轮转 + 最新有效胜。
- * ⚠ 旧实现把 Header **就地重写**在固定 6 页上：第二次 checkpoint 起头即损坏 ⇒
- *   checkpoint_find_latest 失败 ⇒ 开机 ftl_boot_fresh_start ⇒ **映射全丢**。
+ * ⚠ Header 绝不就地重写：NAND 只能 1→0，第二次编程会静默损坏旧 Header，
+ *   使 checkpoint_find_latest 失败 ⇒ 开机误走 fresh ⇒ 映射全丢。
  */
 
 #include "allocator.h"
@@ -31,21 +31,19 @@
 /* ── 前向声明（ftl_context_t 在 ftl.h 中定义，ftl.h 会 include 本文件） ── */
 struct ftl_context;
 
-/* ── 异步 Checkpoint job（v0.75 阶段 6）──
+/* ── 异步 Checkpoint job ──
  *
- * checkpoint_create 原是**严格有序的同步流水线**（八步掉电安全契约，见 .c 头注释）。
- * 异步化后同一份顺序由本状态机的 phase 承载：每一步提交命令后即返回，完成由
- * g_op_service[FTL_OP_CHECKPOINT]（ftl_op_checkpoint）按 phase 收尾，下一轮
- * checkpoint_kick 续跑。
+ * CP 是严格有序的流水线（掉电安全契约，见 .c 头注释）；顺序由本状态机的 phase
+ * 承载：每一步提交命令后即返回，完成由 g_op_service[FTL_OP_CHECKPOINT]
+ * （ftl_op_checkpoint）按 phase 收尾，下一轮 checkpoint_kick 续跑。
  *
  * ⚠ **掉电安全契约不变**：先 flush region → 再 flush Anchor → 最后写 Header。
  *   Header 是"承诺书"——它一旦落盘，boot 就信 region_bitmap 里置位的 region 在
  *   NAND 上，故任何被 Header 声称的落盘必须**先于** Header 完成。
  *
- * ⚠ **快照点前移（与旧同步实现的刻意差异，见 checkpoint.c 的长注释）**：
- *   region_bitmap 与 journal_sequence 都在 job **起点**一次取定（旧实现取
- *   journal_sequence 是在 Anchor 之后）。异步 CP 跨多轮，CP 期间完成的 host 写
- *   会在 journal 里留下 > 快照水位的新条目——水位取早 ⇒ 它们一定被回放，不会丢。
+ * ⚠ **快照点在 job 起点**（见 checkpoint.c 的长注释）：region_bitmap 与
+ *   journal_sequence 在 job **起点**一次取定。CP 跨多轮，期间完成的 host 写会在
+ *   journal 里留下 > 快照水位的新条目——水位取早 ⇒ 它们一定被回放，不会丢。
  *
  * 完成服务函数 `ftl_op_checkpoint` 声明在 ftl/ftl_op.h（与其余 op 服务函数同处）；
  * 它按 phase 记结果并推进，**不**调用 checkpoint_kick（CP 阶段含同步原语，见 .c）。
@@ -113,7 +111,7 @@ typedef struct
     metadata_ring_t hdr_ring;
     nand_pba_t      hdr_addr;
     uint16_t        hdr_idx;                                  /* 写这条 Header 用的池内槽位 */
-    uint32_t        hdr_seq;                                  /* ++ftl->cp.sequence（prepare 时取，与旧序一致） */
+    uint32_t        hdr_seq;                                  /* ++ftl->cp.sequence（槽位确定后取） */
     uint8_t         hdr_need_erase;                           /* 1 = 写之前先擦 *hdr_addr 所在块 */
     uint8_t         block_page;                               /* 下一页要写的 块元数据页（0..CP_BLOCK_PAGES） */
     uint8_t         wear_page;                                /* 下一页要写的 磨损页（0..FTL_CHECKPOINT_WEAR_PAGES） */
@@ -138,11 +136,11 @@ _Static_assert(sizeof(((cp_job_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS 
 _Static_assert(sizeof(((cp_job_t *)0)->block_words) == (FTL_BLOCK_TOTAL * sizeof(uint16_t)),
                "cp_job_t.block_words 必须恰好覆盖全部块");
 
-/* ── Checkpoint 池游标/序号（序 4：per-instance）──
+/* ── Checkpoint 池游标/序号（per-instance）──
  *
- * **原先是 checkpoint.c 的 file-scope static**——单实例下无害，多实例（多 LUN）下
- * 所有实例共享同一份游标/序号 ⇒ 各自往同一个池槽写、sequence 互相踩。
- * 收进 ftl_context_t ⇒ 每实例一份；开机由 checkpoint_find_latest 恢复。
+ * 放在 ftl_context_t 里 ⇒ 每个 (ch,ce,lun) 一份；开机由
+ * checkpoint_find_latest 恢复。不能做成 file-scope static：多实例会共享同一份
+ * 游标/序号，各自往同一个池槽写、sequence 互相踩。
  *
  * ⚠ 与 journal / Anchor / BBT 的 sequence **互不相干**：本池自己的单调序号。 */
 typedef struct
@@ -219,7 +217,7 @@ static inline uint8_t checkpoint_block_word_pool(uint16_t word)
 /* 把当前 BST + OP/Spare 池归属编码成块元数据快照（Checkpoint 起点调用）。 */
 void checkpoint_block_snapshot(const ftl_allocator_t *alloc, uint16_t words[FTL_BLOCK_TOTAL]);
 
-/* ── 磨损快照（随 Checkpoint 原子落盘，取代旧的独立 Wear 块）──
+/* ── 磨损快照（随 Checkpoint 原子落盘）──
  * 每块 8 B，按 gblock 索引（数组下标即块号，条目里不再存 block 字段）：
  *   erase_count 4 / read_count 2 / last_ecc 1 / flags 1
  *   flags: bit0..3 = rising_count, bit4..5 = health, bit6..7 = reserved
@@ -245,21 +243,21 @@ _Static_assert((sizeof(cp_wear_entry_t) * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) 
 /* 把第 page_index 页磨损快照从 BST 组进 page（256 条 × 8 B）。 */
 void checkpoint_wear_page_build(const ftl_allocator_t *alloc, uint16_t page_index, uint8_t page[PAGE_MAIN_SIZE]);
 
-/* T3 定时的最小 journal 增量：21 页/CP 比旧 1 页/CP 磨损约 21×，
- * 加此门后轻载下不会每个定时拍都写一条 record（数值为本仓经验值）。 */
+/* T3 定时的最小 journal 增量：一条 CP record 是 21 页，加此门后轻载下不会每个
+ * 定时拍都写一条 record（数值为本仓经验值）。 */
 #define CP_T3_MIN_JOURNAL_DELTA (64U)
 
 /* ── Header 格式：**恰好一页主区**（2048 B）──
  * 字段 94 字 = 14 个标量 + region_bitmap[64] + wear_page_crc[16]；padding 补齐到 2048。
- * ⚠ padding 长度必须按实际字算（历史上算错 ⇒ sizeof > 一页 ⇒ 写入被静默截断）。
- * 本页**无独立 CRC**：完整性由下层 FC 的 per-CW CRC + ECC 保证（ADR v0.62，
- * DRAM-less 主流做法，见 docs/design/ftl_revision_history.md）。*/
+ * ⚠ padding 长度必须按实际字算：算错会让 sizeof > 一页 ⇒ 写入被静默截断。
+ * 本页**无独立 CRC**：完整性由下层 FC 的 per-CW CRC + ECC 保证
+ * （DRAM-less 主流做法，见 docs/design/ftl_revision_history.md）。*/
 typedef struct
 {
     uint32_t magic;                                    /* CHECKPOINT_MAGIC */
     uint32_t sequence;                                 /* 本池自己的单调序号（最新有效）*/
     uint32_t timestamp;                                /* timer_get_ms() 快照 */
-    uint32_t region_count;                             /* 本 checkpoint 包含的 region 数 */
+    uint32_t region_count;                             /* 非零 bitmap word 数（无消费方，仅信息量）*/
     uint32_t region_bitmap[64];                        /* 2048 bit，哪些 region 在 checkpoint 中 */
     uint32_t journal_sequence;                         /* 截断到此 sequence 之前的 journal */
     uint32_t layout_version;                           /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该记录作废）*/
@@ -288,16 +286,15 @@ _Static_assert(sizeof(((l2p_checkpoint_header_t *)0)->region_bitmap) == (L2P_LOC
  * → ③ flush Metadata Directory（Anchor）→ ④ 追加写 Header（池内下一槽）
  * → ⑤ 截断 Journal → ⑥ 复位水位标志
  *
- * ⚠ 顺序不可换：③ 必须早于 ④。旧序（header 先于 Anchor）在两者之间掉电会留下
+ * ⚠ 顺序不可换：③ 必须早于 ④。若 Header 先于 Anchor，两者之间掉电会留下
  *   「header 新 / Directory 旧」⇒ 已声称落盘的 region 在 Directory 里找不到 ⇒ 丢更新。
  *   现序掉电在 ④ 之前 ⇒ 本次 CP 未记录，boot 用上一个 CP 并回放 journal（⑤ 还没跑）⇒ 一致。
  *
  * ⚠ 本函数**只装配 job 并推进第一步**，不等任何 NAND 命令。此后由每轮 ftl_service
  *   调 checkpoint_kick 续跑，各阶段的完成由 g_op_service[FTL_OP_CHECKPOINT] 收尾。
- *   调用者**不能**据返回值判断 CP 成败（与旧 checkpoint_create 的差别）。
+ *   调用者**不能**据返回值判断 CP 成败。
  *
  * ⚠ 单飞行：已在跑（`ftl->cp_job->active`）⇒ 返回 FTL_AGAIN，不重入。
- *   （旧同步实现里 CP 是原子的一整段，不存在"上一次还没跑完"；异步化后必须挡住。）
  *
  * @param ftl  FTL 上下文
  * @return FTL_OK 已启动 / FTL_AGAIN job 忙 / FTL_ERROR 参数非法
@@ -322,7 +319,7 @@ void checkpoint_kick(struct ftl_context *ftl);
  * @param ftl            FTL 上下文（池路由取 ftl->topo；游标/序号写回 ftl->cp）
  * @param cp             输出：找到的 Header
  * @param out_record_idx 输出：该 Header 在池内的槽位（可为 NULL；块元数据快照 加载要用）
- * @return 0 找到，-1 无有效 Checkpoint
+ * @return FTL_OK 找到；FTL_ERROR 无有效 Checkpoint / 重读失败 / 校验不符
  */
 ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_header_t *cp, uint16_t *out_record_idx);
 

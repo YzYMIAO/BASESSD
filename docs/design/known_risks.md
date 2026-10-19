@@ -1,8 +1,8 @@
 # 已知残余风险登记
 
 > **用途**：把「暂不修 / 待上板 / 待测试源同步 / 待决策」的风险固定下来。
-> **复查 `metadata` / GC / migrate / journal / BBT / 掉电恢复 / L2P cache / 类型规则
-> 前先读本表**，避免重复分析、重复消耗。
+> **复查 `metadata` / GC / migrate / journal / BBT / 掉电恢复 / L2P cache /
+> Checkpoint / 类型规则前先读本表**，避免重复分析、重复消耗。
 >
 > 状态词：`待决策`（需要用户裁决）· `待后续`（已登记，独立任务）·
 > `待上板`（代码已改，板端未验）· `待测试源`（冻结 UT 待所有者同步）· `已修未上板`。
@@ -89,6 +89,16 @@
 
 ---
 
+## 2D. Checkpoint（本轮审查）
+
+| ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
+| RISK-CP-01 | 已修未上板 | ~~journal 预擦失败仍记 `pre_erased_block` ⇒ journal 回切时跳过擦除、写进未擦块~~ | 失败改 `journal_truncate_commit(JOURNAL_BLOCK_NONE)`：只复位水位、不记账；回切时由 journal 的 `need_erase` 重试，下一次 CP 的 plan 也会再报 NEEDS_ERASE | 上板：擦除失败注入，确认不跳过擦除、CP 不因 T1 反复触发 | `src/ftl/checkpoint.c` `ftl_op_checkpoint`（CP_TRUNC_ERASE） |
+| RISK-CP-02 | 已修未上板 | ~~`ftl_op_checkpoint` 无 `waiting` 守卫：重复/迟到完成会按当前 phase 再走一遍~~ | 入口 `ASSERT(waiting)` + release 拒绝（LOGE + release + return） | FC 重复完成注入 / 上板回归 | `src/ftl/checkpoint.c` `ftl_op_checkpoint` |
+| RISK-CP-03 | 待上板 | 本轮状态机改动未板验：提交状态传播（FTL_ERROR 立即中止）、`find_latest` 失败复位游标、水位公式精确到条目 | 编译零告警 | 正常 CP、各 phase 掉电、journal 回切、85%/95% 触发点 | `src/ftl/checkpoint.c` |
+
+---
+
 ## 3. 类型 / 显式强转（H44，提交 `6050703`）
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
@@ -126,6 +136,8 @@
   位图/命中记账收敛、删除零调用 helper；见 RISK-L2P-03。
 - Journal（本次审查）：擦除失败判据改用全集、drain 超时拒绝同步刷、resume 擦失败
   重新挂起、同步屏障返回状态、回放写失败可见；见 RISK-JN-02/04、RISK-BOOT-10。
+- Checkpoint（本次审查）：预擦失败不再记 `pre_erased_block`、完成服务 waiting 守卫、
+  提交状态传播、find_latest 失败复位、水位公式精确到条目；见 RISK-CP-01~03。
 - 板端最小回归：格式化启动 → 顺序写满多个 SB → GC → 并发覆盖写/TRIM → 断电重启 → WL →
   Journal/BBT 故障注入 → 格式化中途断电 → 长时 soak 后全量读回。
 
