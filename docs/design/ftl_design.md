@@ -555,6 +555,17 @@ CRC/读失败再换另一个 plane。
 **几何**：一条 record = 1 页（540 B ≤ 2048 B）；每块 64 条；池 2 块 ⇒ 128 条。
 **副本**：P0+P1 镜像；读侧任一副本有效。
 
+**校验**：`magic` + `total_blocks == FTL_BLOCK_TOTAL`（后者是布局兼容性的代理判据）；
+无本层 CRC——页完整性由 FC 的 per-CW CRC + ECC 保证。
+
+**写模型**：只追加、环形轮转、最新有效胜。`bbt_mark_bad` 幂等（已 BAD 不重复计数、
+不重复消耗 Spare）；dirty 置位同时推进 `dirty_gen`，写 job 完成时只有代际未变才清
+dirty（覆盖“写飞行期间又标坏”的丢更新窗口）。同步 `bbt_save`（开机/格式化）与异步
+`bbt_kick`（后台攒批）写出的 record 格式一致。
+
+**工厂标记**：只在空片读 Page 0 的 `spare[0]`（列 2048）；用过的介质该字节是 FTL 数据，
+`bbt_medium_has_ftl_data` 拒绝重扫。列读失败（含 NAND 错误）保守判坏。
+
 #### 2.3.4 Journal —— L2P 增量日志（环形）
 
 **用途**：写确认路径先追加一条 L2P 更新；掉电后回放恢复「Anchor 之后的增量」。
@@ -834,20 +845,21 @@ flowchart TD
     PWR["上电"] --> JI["ftl_init: journal_init"]
     JI --> MDL["metadata_dir_load: Anchor → Directory"]
     MDL --> BBTI["bbt_init: BBT 或出厂扫描"]
-    BBTI --> VER["介质版本检查"]
-    VER -- "版本不符" --> FMT["全片格式化"]
-    VER -- "版本匹配" --> BR["ftl_boot_recovery"]
+    BBTI --> VER["ftl_media_check_format: CP 介质状态"]
+    VER -- "NO_RECORD / 版本不符" --> FMT["全片格式化（两阶段 BBT）"]
+    VER -- "I/O 错误" --> HALT["拒绝格式化 / 启动失败"]
+    VER -- "CURRENT" --> BR["ftl_boot_recovery"]
     FMT --> BR
     BR --> JS["journal_scan_latest"]
     JS --> CPF["checkpoint_find_latest"]
-    CPF -- "无 CP" --> FRESH["fresh: reset + carve + F2"]
+    CPF -- "无 CP" --> FRESH["fresh: F2 → carve"]
     CPF -- "有 CP" --> LS["块元数据 + 磨损快照 load"]
     LS -- "干净关机" --> CL["块元数据快照恢复"]
     LS -- "异常掉电" --> JR["journal_replay"]
-    CL --> F4["F4 预载 bitmap"]
+    CL --> F4["F4 按 bitmap 逐 region 预载"]
     JR --> F4
-    F4 --> POOL["probe + build pools（快照路径）"]
-    POOL -- "失败" --> FB["reset + carve + F2 重建"]
+    F4 --> POOL["probe + build pools + Spare 补池（快照路径）"]
+    POOL -- "失败" --> FB["reset → F2 → carve"]
     POOL -- "成功" --> LOOP["superloop"]
     FRESH --> LOOP
     FB --> LOOP
@@ -961,11 +973,15 @@ L2P region log（追加块）
 ```
 
 - 版本写在**两处**：Checkpoint Header 与 Anchor 页；两处独立校验，任一不符即该记录作废。
-- **触发判据**（唯一、自终止）：本实例 `checkpoint_find_latest() != FTL_OK` ⇒ 需要格式化。
-  版本校验已包含在该函数内，所以判据自动覆盖“有当前版本 / 有但版本不符 / 完全没有”三种情况。
-- **执行**（`ftl_media_format`）：擦本实例全部块（**空片**的出厂标记已由 `bbt_init` 读入 BST；
-  已用介质的出厂标记早已被写操作覆盖，坏块表依赖已持久化的 BBT）→ 重新持久化 BBT →
-  复位 Directory → 写一条当前版本的空 Checkpoint 标记。标记使判据下次命中，格式化只发生一次。
+- **触发判据**（唯一、自终止）：`ftl_media_check_format` 调
+  `checkpoint_probe_media_status`，只有 **NO_RECORD（空片）/ 版本不符** 才需要格式化；
+  读到当前版本 CP 则不格式化；**CP 读不通（IO_ERROR）拒绝格式化**并返回错误——
+  一次瞬时读错不能变成整片擦除。
+- **执行**（`ftl_media_format`）：`bbt_format_erase` 两阶段——先把当前坏块图（工厂标记 +
+  CP 快照并集）追加成一条 BBT record 并置 `FORMAT_IN_PROGRESS`（失败则**不擦用户块**），
+  再擦除 **BBT 池之外**的全部块（擦失败标 BAD），最后清标志再落一次 BBT；
+  随后复位 Directory → 写一条当前版本的空 Checkpoint 标记。格式化中途掉电时
+  `FORMAT_IN_PROGRESS` 让下次开机继续格式化，同时工厂坏块图已持久化。
 - **钩子位置**：`ssd_ftl_boot()` 内、`ftl_init` 之后、Free Pool 回填之前。
 - **判据不是“结构体字节数变没变”**，而是“老固件的介质在新固件下会不会被误读/误用”。
   例如 OP/Spare 池改为按 plane 预留时结构体布局没变，但预留块集合变了 ⇒ 必须升版本。
@@ -1056,14 +1072,14 @@ FTL 的运行时状态分两类：
 flowchart TD
     BOOT["ftl_boot_recovery"] --> LATEST["journal_scan_latest 只读,不改状态"]
     LATEST --> FIND{"checkpoint_find_latest 有当前版本有效 Header"}
-    FIND -- "否" --> FRESH["fresh carve F2 全扫"]
+    FIND -- "否" --> FRESH["fresh F2 全扫 → carve"]
     FIND -- "是" --> LOAD{"checkpoint_load_block_table"}
     LOAD -- "否" --> PFALL["块元数据走 F2 兜底"]
     LOAD -- "是" --> WEAR["checkpoint_load_wear_table 软状态，失败只从 0 起算"]
     WEAR --> JUDGE{"page_seq entry_count 不高于 cp-journal_sequence"}
     JUDGE -- "是" --> CLEAN["clean restore probe build_pools"]
     JUDGE -- "否" --> PF["PF restore journal replay F4 probe build_pools"]
-    PFALL --> F2["reset carve F2"]
+    PFALL --> F2["reset → F2 → carve"]
     PF --> PFOk{"块元数据恢复一致"}
     PFOk -- "否" --> F2
     PFOk -- "是" --> READY["Controller 到 Ready"]
@@ -1081,15 +1097,18 @@ flowchart TD
    - 无有效 CP → **fresh**；
    - `page_seq + entry_count <= cp.journal_sequence` → **clean**（Journal 已全部落入 L2P）；
    - 否则 → **power failure**（有未回放的增量）。
-3. **fresh**：失效本 owner 的 cache 行/脏位 → carve 池 → F2 重建 Closed 列表 →
-   `journal_resume(floor=1)`。
-4. **clean**：块元数据快照有效时 `restore_blocks` → 按 CP 位图预载 region（F4）→ probe 池块 →
-   `build_pools`；任一步失败 → reset + carve + F2。最后 `journal_resume(floor=cp_seq)`。
+3. **fresh**：失效本 owner 的 cache 行/脏位 → **F2 重建 Closed 列表 → carve 池**
+   （carve 只把 state==NONE 的块入池）→ Spare 补池 → `journal_resume(floor=1)`。
+4. **clean**：块元数据快照有效时 `restore_blocks`（先全量校验再应用）→ 按 CP 位图
+   **逐 region 预载**（F4，不按 INVALID 行的 region_id 反查）→ probe 池块 →
+   `build_pools` → Spare 补池；任一步失败 → reset → F2 → carve。
+   最后 `journal_resume(floor=cp_seq)`。
 5. **PF**：先恢复块元数据 → `journal_replay`（所有 `page_seq+entry_count > cp_seq` 的页，
    按 `(page_seq, entry_idx)` 递增，last-write-wins；同步维护 valid_count）→ F4 →
-   probe + `build_pools`；失败 → F2。
-6. **F2**：逐 plane/块扫 page 0 判空、找写指针；坏块/元数据块跳过；写过的块从 Free Pool 拉出、
-   建成退化单 plane 的 Closed 条目；逐页读 META + 反查 L2P 回填 `valid_count`。
+   probe + `build_pools` + Spare 补池；失败 → reset → F2 → carve。
+6. **F2**：逐 plane/块扫 page 0 判空、找写指针；坏块/元数据块跳过；写过的块建退化单 plane
+   的 Closed 条目；逐页读 META + 反查 L2P 回填 `valid_count`。F2 **先于 carve**：
+   否则被 carve 放进 Spare/OP 的写过块会同时成为 Closed 条目。
 
 **启动时间量级**（观测值，不是编译期常量）：
 
@@ -1106,7 +1125,7 @@ flowchart TD
 | 无有效 CP | fresh + F2 | 旧映射不可达（介质已被格式化/版本不符时这是预期） |
 | 块元数据快照 CRC 失败 | 该快照丢弃，F2 重建 | 用户数据不丢；恢复时间变长 |
 | Journal 回放某页读失败 | 跳过该页，继续其余页 | 该页条目丢失；映射可能回退到上一版本 |
-| 块元数据恢复与 probe 不一致 | reset + carve + F2 | 以介质为准；块元数据重新计算 |
+| 块元数据恢复与 probe 不一致 | reset → F2 → carve | 以介质为准；块元数据重新计算 |
 | F2 中某块读失败 | 跳过该块 | 该块数据不可恢复；后续由 GC 处理 |
 
 ⚠ **恢复路径不在完成派发里**：它在 superloop 之前运行，无人 drain CQ，所以允许使用
@@ -3336,35 +3355,47 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 
 ### 4.1 首次上电 / 介质版本不匹配 → 格式化
 
-**触发**：`ssd_ftl_boot` 调 `ftl_media_needs_format()`；判据是
-`checkpoint_find_latest()` 失败（含版本不符）。
+**触发**：`ssd_ftl_boot` 调 `ftl_media_check_format()`；判据来自
+`checkpoint_probe_media_status()` 的四态：
+
+| CP 介质状态 | 判定 |
+|---|---|
+| `CP_MEDIA_CURRENT` | 不格式化，正常启动 4.2 / 4.3 |
+| `CP_MEDIA_NO_RECORD`（空片 / 上次格式化中断） | 需要格式化 |
+| `CP_MEDIA_VERSION_MISMATCH` | 需要格式化（介质布局版本变化） |
+| `CP_MEDIA_IO_ERROR`（CP 池读不通） | **拒绝格式化**，`FTL_ERROR`，停止启动 |
 
 ```mermaid
 flowchart TD
-    A["上电 ftl_init 完成"] --> B["ftl_media_needs_format"]
-    B -- "否" --> C["正常启动 4-2 4-3 节"]
-    B -- "是" --> D["ftl_media_format"]
-    D --> D1["bbt_erase_all_blocks 空片 出厂标记已在 bbt_init 读入 已用 依赖已持久化 BBT"]
-    D1 --> D2["bbt_save 重新持久化坏块图"]
-    D2 --> D3["metadata_dir_init 复位 Directory"]
-    D3 --> D4["checkpoint_write_initial 写当前版本空快照"]
-    D4 --> E["后续正常启动"]
+    A["上电 ftl_init 完成"] --> B["ftl_media_check_format"]
+    B -- "CURRENT" --> C["正常启动 4-2 4-3 节"]
+    B -- "NO_RECORD / VERSION_MISMATCH" --> D["ftl_media_format"]
+    B -- "IO_ERROR" --> H["拒绝格式化 / 启动失败"]
+    D --> D1["bbt_format_erase 阶段①：置 FORMAT_IN_PROGRESS + bbt_save"]
+    D1 -- "save 失败" --> H2["中止（不擦用户块）"]
+    D1 --> D2["阶段②：擦除 BBT 池之外的块，失败标 BAD"]
+    D2 --> D3["阶段③：best-effort bbt_save 并入新 BAD"]
+    D3 --> D4["metadata_dir_init 复位 Directory"]
+    D4 --> D5["checkpoint_write_initial 写当前版本空快照"]
+    D5 --> E["后续正常启动"]
 ```
 
 **状态变化**：
 
 | 对象 | 变化 |
 |---|---|
-| BST | 全部块擦除；坏块状态保留（来自 `bbt_init`） |
-| BBT | 重新写一条当前坏块图 |
+| BST | 除 BBT 池外的块被擦除；擦除失败标 BAD |
+| BBT | 先追加当前坏块图（带 `FORMAT_IN_PROGRESS`），擦除后再追加新 BAD；BBT 池旧 record 保留，新 record 以更高 sequence 胜出 |
 | Directory | 固定层重建，动态层清空 |
 | Checkpoint | 写一条当前版本、`sequence=1`、无块元数据快照的 Header |
 | Journal | `journal_init` 的初始游标；环形块已被擦 |
 
 **失败分支**：
 
+- 阶段① save 失败 ⇒ 直接返回 `FTL_ERROR`，不擦任何用户块。
 - 擦除失败 ⇒ 该块标坏；格式化继续。
-- `checkpoint_write_initial` 失败 ⇒ 下次开机会再次格式化（判据仍命中）。
+- `checkpoint_write_initial` 失败 ⇒ 下次开机会再次格式化（阶段①的 `FORMAT_IN_PROGRESS`
+  使 `checkpoint_probe_media_status` 继续返回 `NO_RECORD`，中断的格式化可续做）。
 - 版本只在 DIM>1 时比 DIM=1 高 1；DIM=1 的旧介质不会被误格式化。
 
 ### 4.2 干净启动（clean start）
@@ -3386,13 +3417,14 @@ sequenceDiagram
     B->>C: checkpoint_load_block_table
     alt 块元数据快照有效
         C-->>B: block_words
-        B->>A: ftl_recovery_restore_blocks
-        B->>L: 按 CP region_bitmap 预载 F4
+        B->>A: ftl_recovery_restore_blocks（先全量校验再应用）
+        B->>L: 按 CP region_bitmap 逐 region 预载 F4
         B->>A: ftl_recovery_probe_blocks 池块 page0
         B->>A: ftl_recovery_build_pools
     else 快照无效
-        B->>A: reset carve F2
+        B->>A: reset → F2（认领写过块）→ carve（只入池 state==NONE）
     end
+    B->>A: Spare 补池（Free → Spare，逐 plane）
     B->>J: journal_resume floor 为 cp_seq
     B-->>B: Controller 到 Ready
 ```
@@ -3411,7 +3443,8 @@ sequenceDiagram
 ⚠ **clean 也要 probe 池块**：本仓无关机 journal flush，“末页丢失”与干净关机在介质上
 不可区分。probe 只读池块 page 0，成本可控。
 
-**失败分支**：快照 CRC 失败/不一致 ⇒ reset + carve + F2；F2 中读失败 ⇒ 跳过该块。
+**失败分支**：快照 CRC 失败/不一致 ⇒ reset → F2 → carve（顺序不可颠倒：carve 只把
+`state == NONE` 的块入池，否则写过块会同时是池成员与 Closed 条目）；F2 中读失败 ⇒ 跳过该块。
 
 ### 4.3 掉电恢复（power-failure start）
 
@@ -3430,10 +3463,10 @@ sequenceDiagram
     J->>J: 第一遍收集晚于 cp_seq 的页
     J->>L: 第二遍按 page_seq 与 entry_idx 应用
     J->>A: block_ctx new 加一 old 减一
-    B->>L: F4 按 region_bitmap 预载
-    B->>A: probe build_pools
+    B->>L: F4 按 region_bitmap 逐 region 预载
+    B->>A: probe build_pools → Spare 补池
     alt 任一步不一致
-        B->>A: reset carve F2
+        B->>A: reset → F2 → carve → Spare 补池
     end
     B->>J: journal_resume floor 为 cp_seq
 ```
@@ -3450,7 +3483,8 @@ sequenceDiagram
 **失败分支**：
 
 - 某页读失败 ⇒ 跳过该页，继续其余页（该页条目丢失）。
-- `materialize` 越界/下溢 ⇒ `block_ctx.ok=0`，块元数据回退 F2。
+- `materialize` 的 PBA 非法（越界 / ch-ce-lun 与拓扑不符）或 valid 下溢 ⇒
+  `block_ctx.ok=0`，块元数据回退 F2。
 - F2 中某块读失败 ⇒ 跳过；该块数据不可恢复。
 
 ⚠ **回放必须覆盖所有 `page_seq > cp_seq` 的页**，不能只回放最大一页；跨多页掉电时

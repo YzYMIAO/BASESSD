@@ -114,7 +114,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 | | `nand_dispatch.c` | default → `ASSERT_UNREACHABLE()` | **9**（ch/ce/lun 界、整批前置校验、链成员同 ch/ce/lun、`sink != NULL`）；⚠️ **全仓 `ASSERT_UNREACHABLE` 命中 0** | ⚠️ 措辞与实现不符（见下注 1） |
 | | `nand_engine_start`/`step` | 前置条件（头文件已文档化） | 已含在 `nand_engine.c` 的 18 条内 | ✅ |
 | `ftl/` | `allocator.c` | Tier 1 | **24** | ✅（2026-10-17 §二十七 补做） |
-| | `power_failure_recovery.c` | Tier 1 | **4**（3 个对外入口 `ftl_media_needs_format`/`ftl_media_format`/`ftl_boot_recovery`） | ✅ |
+| | `power_failure_recovery.c` | Tier 1 | **34**（对外入口 `ftl_media_check_format`/`ftl_media_format`/`ftl_boot_recovery` + 恢复/重建/Carve 内部前置条件） | ✅（2026-10-19 掉电恢复审查） |
 | | `wear_leveling.c` | Tier 1 | **0** | ⚠️ 见下注 2 |
 | | `migrate.c` | Tier 1（**v0.75 阶段 4**：`ftl_op_migrate` 的 `completion`/`ctx` 非空与 `ctx == &ftl->mig`、`mig_begin_predict` 的 `closed_idx` 界内、`mig_finish` 的单飞行门） | **10** | ✅ |
 | | `pending.c` | Tier 2：6×`ftl == NULL` | **6**，但**全是下标越界**（`index < FTL_PENDING_MAX` / `gi < FTL_GROUP_MAX`），**没有 `ftl == NULL`** | ⚠️ 措辞与实现不符（见下注 3） |

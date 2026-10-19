@@ -197,10 +197,14 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | 用例 | 断言 |
 |---|---|
 | `mark_bad_sets_bits` | `bbt_mark_bad`：BAD 位 + `clear_valid` + `bad_count`+1 |
-| `mark_bad_idempotent` | 重复标坏**不**重复计数（负例） |
+| `mark_bad_idempotent` | 重复标坏**不**重复计数、**不**重复弹 Spare（负例）。⚠ 现有用例只钉位级；`bbt_mark_bad` 幂等修复后应由测试补钉 `bad_count` 与 `spare_count` |
 | `spare_pool_refill` | `bbt_spare_pool_refill(alloc, plane)`：spare→free 补充 + 该 plane 计数守恒；耗尽 / `NULL` / plane 越界 → `FTL_ERROR` 且不动 free pool |
 | **`spare_pool_plane_isolated`** | **回归用例（v0.74）**：refill plane 1 ⇒ 只减 `spare_count[1]`、`spare_count[0]` 不变，且补进 free pool 的是 **plane 1 的块**（修复前全局池 ⇒ 补的是 plane 0 的块） |
-| `is_bad_set_bad_inline` | `bbt_is_bad`/`bbt_set_bad` 纯 bitmap（含 `NULL`→0） |
+| `is_bad_set_bad_inline` | `bbt_is_bad`/`bbt_set_bad` 纯 bitmap（含 `NULL`→0；越界块保守判坏） |
+
+> **未覆盖**：`bbt_load` / `bbt_save` / `bbt_kick` 的池定位与持久化、`bbt_scan_factory`、
+> `bbt_format_erase`（两阶段格式化 / `FORMAT_IN_PROGRESS` 中断恢复）、
+> `bbt_medium_has_ftl_data`——需要 NAND seam 或上板验证。
 
 ### 4.6 `g_ftl_metadata_tests[]`（`src/ftl/metadata.c`）
 
@@ -209,8 +213,8 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | `dir_init_entries` | `metadata_dir_init` 后 `count==2048`（= `L2P_REGIONS_PER_INSTANCE`）、全 UNKNOWN |
 | `dir_update_lookup_roundtrip` | `metadata_dir_update` 写一个 region → `metadata_dir_lookup` 回同 entry |
 | `dir_lookup_missing_unknown` | 未写 region → `0xFFFFFFFF`（负例） |
-| `is_metadata_block` | `ftl_is_metadata_block(dir, plane, block)`：**0..62 true、63 false**（边界，判据 8）。区间来自 `g_ftl_partitions[]`：L2P[0,16)+Anchor[16,48)+Ckpt[48,56)+BBT[56,58)+Journal[58,62)+Wear[62,63) ⇒ `FTL_METADATA_BLOCK_END==63`。固定区**与 plane 无关**，用例一律传 `plane=0`。⚠ **勿写死旧单块布局**（Anchor 33/34、BBT 36/39… 是 P0-2 前的旧值，已随池化失效） |
-| `is_metadata_block_dynamic` | 动态 region：`metadata_dir_update(L2P_REGION, r, paa)` 登记 `block≥63` 后 `ftl_is_metadata_block` 命中；**`md_dir==NULL`** 时仍命中固定区（0..62）、动态块不命中。⚠ v0.69 起断言**另一个 plane 的同号块不受掩**（`(d, 1U, 100U) == 0`）——动态日志块取自用户区，只比块号会连 plane1 的用户块一起排除 |
+| `is_metadata_block` | `ftl_is_metadata_block(dir, plane, block)`：**0..45 true、46 false**（边界，判据 8）。区间来自分区表：Anchor[0,32)+Ckpt[32,40)+BBT[40,42)+Journal[42,46) ⇒ `FTL_METADATA_BLOCK_END==46`。固定区按 `plane_mask` 比较 plane，用例覆盖两 plane。⚠ **勿写死旧布局**（Wear 块已删；0..62/63 是旧值） |
+| `is_metadata_block_dynamic` | 动态 region：`metadata_dir_update(L2P_REGION, r, pba)` 登记 `block>=46` 后 `ftl_is_metadata_block` 命中；**`md_dir==NULL`** 时仍命中固定区（0..45）、动态块不命中。⚠ 断言**另一个 plane 的同号块不受掩**（`(d, 1U, 100U) == 0`）——动态日志块取自用户区，只比块号会连 plane1 的用户块一起排除 |
 | `ring_addr_geometry` | `metadata_ring_addr` 纯地址换算：idx∈{0, rpb-1, rpb, 末} → (block,page,plane) 期望值 |
 | `ring_addr_wrap` | 跨 block 边界换算 |
 
@@ -253,8 +257,9 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | | `backpressure_pool_exhaust` | 64 条 erase 提交在飞 → 第 65 次 `ftl_async_erase_block` | `FTL_AGAIN` + 在飞命令数不变；逐条伪完成 + release 收尾 |
 | **C.2 journal** | `write_complete_idle` | `journal_append`×2 → `journal_kick`（JRN_WRITE）→ 伪完成 | JRN_IDLE + 指针推进到 target + `current_entry==0` + `page_buf` 0xFF |
 | | `cross_block_erase_chain` | 预置 `current_page=PAGES_PER_BLOCK-1` → append → kick（need_erase）→ 伪完成 | 服务函数**当场起擦**（JRN_ERASE）→ 再伪完成 → IDLE + `current_block` 回绕 |
-| | `write_fail_no_advance` | kick 后伪完成 status=0x01 | 回 IDLE + 指针**不推进** + release 正常 |
-| **C.3 bbt** | `write_complete_clear_dirty` | 预置 `cursor_valid=1`、`dirty=1` → `bbt_kick`（WRITE）→ 伪完成 | IDLE + `dirty==0` + `write_idx` 前移 1 |
+| | `write_fail_advance_past_page` | kick 后伪完成 status=0x01 | 回 IDLE + 指针**推进到 target**（失败页不可复用）+ `write_fail_pending` 置位 + release 正常 |
+| **C.3 bbt** | `write_complete_clear_dirty` | 预置 `cursor_valid=1`、`dirty=1`，`dirty_gen` 不变 → `bbt_kick`（WRITE）→ 伪完成 | IDLE + `dirty==0` + `write_idx` 前移 1 |
+| | `write_complete_dirty_gen_advanced` | 写飞行期间 `bbt_mark_bad`（`dirty_gen++`）→ 伪完成成功 | IDLE + **`dirty` 保留**（本条 record 是旧快照，需再落一条） |
 | | `erase_then_write_chain` | 预置 `cursor_valid=1`、`dirty=1`、`write_idx=ring_total-1` → kick（ERASE）→ 伪完成 | 服务函数**链起 WRITE**（不回 IDLE）→ 再伪完成 → IDLE + `dirty==0` |
 | | `write_fail_keep_dirty` | 伪完成 status=0x01 | 游标**照推**（半编程槽不可复用）+ `dirty` 保留 |
 | **C.4 wear** | `incremental_batch` | `wear_mark_dirty`×2 → `wear_kick(alloc, DELTA+1)`（节拍到）→ 伪完成 | IDLE + `next_page==1` + 本批起点快照写全 |

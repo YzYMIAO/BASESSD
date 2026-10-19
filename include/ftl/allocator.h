@@ -89,19 +89,22 @@ typedef enum
 
 typedef struct
 {
-    uint8_t  phase;   /* bbt_job_phase_t */
-    uint8_t  waiting; /* 1 = 有命令在飞 */
+    uint8_t  phase;     /* bbt_job_phase_t */
+    uint8_t  waiting;   /* 1 = 有命令在飞 */
+    uint32_t dirty_gen; /* 本条 record 组 header 时的 dirty 代际快照 */
     uint32_t start_ms;
     uint32_t log_ms;
 } bbt_job_t;
 
 typedef struct
 {
-    uint32_t  sequence;     /* 本池单调序号 */
-    uint16_t  write_idx;    /* 池内下一个待写槽 */
-    uint8_t   cursor_valid; /* 游标是否已建立 */
-    uint8_t   dirty;        /* 是否有未写回变更 */
-    bbt_job_t job;          /* 异步持久化 job */
+    uint32_t  sequence;           /* 本池单调序号 */
+    uint16_t  write_idx;          /* 池内下一个待写槽 */
+    uint8_t   cursor_valid;       /* 游标是否已建立 */
+    uint8_t   dirty;              /* 是否有未写回变更 */
+    bool      format_in_progress; /* 最新 BBT record 带 FORMAT_IN_PROGRESS 标志 */
+    uint32_t  dirty_gen;          /* dirty 每次置位 +1；检测写飞行期间的新变更 */
+    bbt_job_t job;                /* 异步持久化 job */
 } bbt_state_t;
 
 /* ── Allocator 上下文 ── */
@@ -227,6 +230,18 @@ bool allocator_spare_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gb
  * 返回：true 取到；false 池空。
  */
 bool allocator_spare_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock);
+
+/*
+ * allocator_spare_refill_from_free - 从 Free Pool 补 Spare 池到目标（逐 plane）
+ *
+ * 开机恢复把 CP 快照的 BAD 并集应用后，原本在 Spare 池的块可能已变成 BAD，
+ * 池计数低于 FTL_SPARE_POOL_PER_PLANE。本函数按 plane 从 Free Pool 移块补足：
+ * 摘 Free → state 置 NONE → push Spare；无同 plane 空闲块时自然停止（容量下降）。
+ *
+ * @param alloc 分配器；plane 目标 plane
+ * @return true = 至少移了一块；false = 已满 / 无可补
+ */
+bool allocator_spare_refill_from_free(ftl_allocator_t *alloc, uint8_t plane);
 
 /* ── 对外接口 ── */
 

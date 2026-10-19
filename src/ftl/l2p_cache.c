@@ -200,6 +200,44 @@ static l2p_cache_line_t *l2p_cache_find(l2p_cache_t *cache, uint32_t region_id)
     return NULL;
 }
 
+bool l2p_cache_preload_region(l2p_cache_t *cache, uint32_t global_region, nand_pba_t pba)
+{
+    ASSERT(cache != NULL);
+    ASSERT(global_region < L2P_GLOBAL_REGIONS);
+    ASSERT(pba_is_valid(pba));
+
+    /* 已有驻留行（journal 回放的 DIRTY / 已预载）⇒ 维持「一 region 一行」。 */
+    if (l2p_cache_find(cache, global_region) != NULL)
+    {
+        return true;
+    }
+
+    for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
+    {
+        l2p_cache_line_t *line = &cache->lines[i];
+
+        if (line->state != L2P_CACHE_INVALID)
+        {
+            continue;
+        }
+
+        /* 先写 region_id 再读：读失败时置 INVALID，find 会忽略该行，
+         * 后续预载/懒加载可安全复用。 */
+        line->region_id = global_region;
+
+        if (ftl_sync_read_page(pba, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META()) == FTL_OK)
+        {
+            line->state = L2P_CACHE_CLEAN;
+            return true;
+        }
+
+        line->state = L2P_CACHE_INVALID;
+        return false;
+    }
+
+    return false; /* 无 INVALID 行（全 DIRTY/在飞）：交给懒加载 */
+}
+
 /*
  * 内部 CLOCK evict：从 clock_hand 开始扫描，选一个可驱逐的 line。
  *

@@ -35,6 +35,7 @@
 #include "checkpoint.h"
 
 #include "assertion.h"
+#include "bbt.h"         /* bbt_medium_has_ftl_data（CP 缺失时的空片判定） */
 #include "boot_policy.h" /* boot_crc32（块元数据快照跨页校验和） */
 #include "fc.h"
 #include "ftl.h"
@@ -86,6 +87,7 @@ typedef struct
 {
     ftl_topology_t  topo;
     metadata_ring_t ring;
+    bool            any_version; /* true = 只校验 magic（格式化判据探针），不校验 layout_version */
 } checkpoint_probe_ctx_t;
 
 /* Checkpoint record 探针（见 metadata_ring_probe_fn）。
@@ -109,9 +111,13 @@ static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, bool
         {
             continue;
         }
-        if ((!checkpoint_header_valid(&hdr)) || (hdr.sequence == 0U))
+        if ((hdr.magic != CHECKPOINT_MAGIC) || (hdr.sequence == 0U))
         {
             continue; /* sequence 从 1 起；0 = 未写 */
+        }
+        if ((!c->any_version) && (hdr.layout_version != FTL_MEDIA_LAYOUT_VERSION))
+        {
+            continue; /* 正常定位只认当前版本；格式化判据探针放宽到任意版本 */
         }
 
         *out_sequence = hdr.sequence;
@@ -450,8 +456,9 @@ static void cp_step(ftl_context_t *ftl)
                     uint16_t               newest = UINT16_MAX;
                     checkpoint_probe_ctx_t probe_ctx;
 
-                    probe_ctx.topo = ftl->topo;
-                    probe_ctx.ring = j->hdr_ring;
+                    probe_ctx.topo        = ftl->topo;
+                    probe_ctx.ring        = j->hdr_ring;
+                    probe_ctx.any_version = false;
 
                     if (metadata_ring_locate(&j->hdr_ring, checkpoint_record_probe, &probe_ctx, &newest, &ftl->cp.sequence, &ftl->cp.write_idx) != FTL_OK)
                     {
@@ -913,7 +920,8 @@ ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_head
 
     checkpoint_probe_ctx_t probe_ctx;
     checkpoint_ring_init(&probe_ctx.ring);
-    probe_ctx.topo = ftl->topo;
+    probe_ctx.topo        = ftl->topo;
+    probe_ctx.any_version = false;
 
     uint16_t newest = UINT16_MAX;
     if (metadata_ring_locate(&probe_ctx.ring, checkpoint_record_probe, &probe_ctx, &newest, &ftl->cp.sequence, &ftl->cp.write_idx) != FTL_OK)
@@ -963,6 +971,113 @@ ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_head
     }
 
     return FTL_OK;
+}
+
+cp_media_status_t checkpoint_probe_media_status(struct ftl_context *ftl, uint32_t *out_layout_version)
+{
+    ASSERT(ftl != NULL);
+
+    checkpoint_probe_ctx_t ctx;
+    checkpoint_ring_init(&ctx.ring);
+    ctx.topo        = ftl->topo;
+    ctx.any_version = true; /* 只校验 magic：版本不符也要能定位出来 */
+
+    uint16_t newest    = UINT16_MAX;
+    uint32_t seq       = 0U;
+    uint16_t write_idx = 0U;
+
+    if (metadata_ring_locate(&ctx.ring, checkpoint_record_probe, &ctx, &newest, &seq, &write_idx) != FTL_OK)
+    {
+        return CP_MEDIA_IO_ERROR; /* 池几何/配置错误：不格式化 */
+    }
+
+    if (newest != UINT16_MAX)
+    {
+        const uint8_t plane_count = metadata_ring_plane_count(ctx.ring.plane_mask);
+
+        for (uint8_t pi = 0U; pi < plane_count; pi++)
+        {
+            const uint8_t           plane = metadata_ring_plane_at(ctx.ring.plane_mask, pi);
+            nand_pba_t              addr  = metadata_ring_addr_plane(&ctx.ring, &ctx.topo, newest, 0U, plane);
+            l2p_checkpoint_header_t hdr;
+
+            if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != FTL_OK)
+            {
+                continue;
+            }
+            if ((hdr.magic != CHECKPOINT_MAGIC) || (hdr.sequence == 0U))
+            {
+                continue;
+            }
+
+            if (out_layout_version != NULL)
+            {
+                *out_layout_version = hdr.layout_version;
+            }
+            return (hdr.layout_version == FTL_MEDIA_LAYOUT_VERSION) ? CP_MEDIA_CURRENT
+                                                                    : CP_MEDIA_VERSION_MISMATCH;
+        }
+
+        return CP_MEDIA_IO_ERROR; /* locate 看到了 record，重读却读不通 */
+    }
+
+    /* BBT 最新 record 带 FORMAT_IN_PROGRESS ⇒ 上次格式化在擦除中途掉电：
+     * 继续格式化（BBT 坏块图已在擦用户块之前落盘）。 */
+    if (ftl->alloc.bbt.format_in_progress)
+    {
+        return CP_MEDIA_NO_RECORD;
+    }
+
+    /* 没有可定位的 record：raw 读 CP 池 slot 0 的 page 0（两 plane）区分三种情形：
+     *   · 命令走不通        ⇒ IO_ERROR（总线/超时，不格式化）
+     *   · 读到非 FF 内容    ⇒ 有介质内容但没有有效 CP（损坏，不格式化）
+     *   · 读到全 FF         ⇒ 再看固定元数据区是否已写过：空片 ⇒ NO_RECORD；
+     *                         其它元数据已写 ⇒ IO_ERROR（CP 缺失，不自动擦片）
+     * ⚠ 不要只用 bbt_medium_has_ftl_data 判空：它对“空片”和“总线读死”都返回 false。 */
+    bool cmd_ok = false;
+    bool non_ff = false;
+
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        nand_pba_t addr = metadata_ring_addr_plane(&ctx.ring, &ctx.topo, 0U, 0U, plane);
+        uint8_t    raw[PAGE_SIZE];
+
+        (void)memset(raw, 0xFF, sizeof(raw));
+        if (ftl_sync_read_page_raw(addr, raw) != FTL_OK)
+        {
+            continue;
+        }
+        cmd_ok = true;
+
+        for (uint8_t cw = 0U; cw < CW_NUM; cw++)
+        {
+            const uint8_t *p = raw + ((uint32_t)cw * FC_BUFFER_POOL_CW_SIZE);
+
+            for (uint8_t j = 0U; j < 16U; j++)
+            {
+                if (p[j] != 0xFFU)
+                {
+                    non_ff = true;
+                    break;
+                }
+            }
+            if (non_ff)
+            {
+                break;
+            }
+        }
+    }
+
+    if (!cmd_ok)
+    {
+        return CP_MEDIA_IO_ERROR;
+    }
+    if (non_ff)
+    {
+        return CP_MEDIA_IO_ERROR;
+    }
+
+    return bbt_medium_has_ftl_data(&ftl->alloc) ? CP_MEDIA_IO_ERROR : CP_MEDIA_NO_RECORD;
 }
 
 /* --------------------------------------------------------------------
@@ -1261,7 +1376,7 @@ ftl_status_t checkpoint_write_initial(ftl_topology_t topo)
     cp.sequence         = 1U;
     cp.layout_version   = FTL_MEDIA_LAYOUT_VERSION;
     cp.journal_sequence = 0U; /* 空快照：无 region、journal 从 0 起 */
-    /* initial CP 不带块元数据快照：首次开机走 carve + F2，下一次 CP 才写完整块元数据。 */
+    /* initial CP 不带块元数据快照：首次开机走 F2 → carve，下一次 CP 才写完整块元数据。 */
     cp.block_word_count = 0U;
     cp.block_word_bytes = 0U;
     cp.block_page_count = 0U;

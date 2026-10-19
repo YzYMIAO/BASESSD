@@ -68,11 +68,9 @@ typedef struct
 
 /* ── ftl_block_t 状态机（互斥态，枚举而非位图）──
  * 块**位置**同一时刻只能有一个，故用枚举而非位图：
- *   · 位图允许非法组合——原 RESERVED 位被「L2P 日志块」与「退役块」两种身份共用，
- *     且 bbt_mark_bad 不清它 ⇒「BAD|RESERVED」可表达且无断言拦（今天是不可达的
- *     潜在缺口，靠调用图碰巧如此，不是任何不变量保证的）；
- *   · 位图每次转换都要手写清位掩码——14 个转换点出现 7 种掩码，漏一位**编译期
- *     完全无声**（bbt_mark_bad 清温度而 bbt_scan_factory 不清，同文件内已不一致）。
+ *   · 枚举保证互斥，非法组合不可表达；
+ *   · 状态转移集中到 ftl_block_set_state，不需要手写清位掩码（漏一位编译期完全无声）。
+ * BAD 是终态；bbt_mark_bad 清 valid_count / sb_id，bbt_scan_factory / bbt_init 同样清。
  * 温度与位置**正交**（OPEN 块也有冷热），故单列字段，见 ftl_block_t.temp。
  *
  * ⚠ 无「预擦除 / 未擦除」分级态（P1-3）：Free Pool 是**一个**已擦除池（GC 先擦后归还），

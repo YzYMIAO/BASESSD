@@ -281,9 +281,16 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
      * （**只在空片时读**；用过的介质上那些字节是 FTL 数据不是标记，bbt_init 会拒绝重扫，
      * 见 bbt.c:bbt_medium_has_ftl_data），且此时回填尚未把未擦的旧块当空白块放进
      * free pool。格式化后写当前版本 Checkpoint 标记 ⇒ 下次开机判据命中，只发生一次。 */
-    if (ftl_media_needs_format(ftl))
+    bool need_format = false;
+
+    if (ftl_media_check_format(ftl, &need_format) != FTL_OK)
     {
-        LOGW("[FTL ] media layout mismatch -> format (erase all blocks)\r\n");
+        LOGE("[FTL ] CP media unreadable — refuse to format ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
+        return -1;
+    }
+    if (need_format)
+    {
+        LOGW("[FTL ] media blank / layout mismatch -> format\r\n");
         if (ftl_media_format(ftl) != FTL_OK)
         {
             LOGE("[FTL ] media format failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
@@ -293,9 +300,9 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
 
     /* 池回填 / F2 / 块元数据快照恢复全部在 ftl_boot_recovery 内完成：
      *   · 块元数据快照有效 ⇒ 直接按快照恢复 Free/OP/Spare（不再几何 carve）；
-     *   · 无快照 / 快照损坏 ⇒ carve + F2。
-     * ⚠ carve 必须先于 F2（F2 要把 written 块逐出 Free Pool），且**不能**在
-     *   块元数据快照恢复之前做——否则池条目会重复。 */
+     *   · 无快照 / 快照损坏 ⇒ F2 → carve。
+     * ⚠ **F2 必须先于 carve**（F2 认领写过的块，carve 只把 state==NONE 的块入池）；
+     *   carve 也**不能**在块元数据快照恢复之前做——否则池条目会重复。 */
     if (ftl_boot_recovery(ftl, &result) != FTL_OK)
     {
         LOGE("[FTL ] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);

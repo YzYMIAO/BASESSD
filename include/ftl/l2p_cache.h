@@ -301,6 +301,21 @@ static inline bool l2p_cache_is_thrashing(const l2p_cache_t *cache)
 void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce, l2p_owner_fn_t owner_of_region, void *owner_ctx);
 
 /*
+ * l2p_cache_preload_region - 开机恢复（F4）专用：把一个 region 页同步预载进 cache。
+ *
+ * 在 cache 中找一条 INVALID 行，先写 region_id，再把 pba 的 region 页同步读进 entries；
+ * 成功置 CLEAN，失败置 INVALID（交给懒加载兜底）。
+ * 若该 global_region 已有驻留行（journal 回放的 DIRTY / 已预载），直接返回 true，
+ * 从而维持「一个 region 只占一行」的不变量。
+ *
+ * @param cache         共享 cache
+ * @param global_region 全局 region（local × FTL_DIM_TOTAL + dim）
+ * @param pba           Directory 给出的 region 页物理地址
+ * @return true = 已驻留或预载成功；false = 无 INVALID 行 / 读失败
+ */
+bool l2p_cache_preload_region(l2p_cache_t *cache, uint32_t global_region, nand_pba_t pba);
+
+/*
  * l2p_cache_read - 读取**全局 LBA** 对应的 PBA 映射（**三态**）
  *
  *   hit（CLEAN / DIRTY / FLUSHING）→ *out = entry，返回 FTL_OK

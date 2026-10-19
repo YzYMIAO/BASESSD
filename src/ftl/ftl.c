@@ -800,7 +800,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     }
 
     /* ├─ BBT 初始化（从 NAND 加载或出厂扫描）── */
-    (void)bbt_init(&ftl->alloc);
+    bbt_init(&ftl->alloc);
 
     /* ├─ Checkpoint 池游标/序号 + 定时基准（序 4：per-instance）──
      * 游标在此归零 ⇒ 首次 Checkpoint job 会先扫池定位（cursor_valid==0，见 CP_HDR_PREP）。 */

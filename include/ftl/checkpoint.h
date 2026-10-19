@@ -327,6 +327,30 @@ void checkpoint_kick(struct ftl_context *ftl);
 ftl_status_t checkpoint_find_latest(struct ftl_context *ftl, l2p_checkpoint_header_t *cp, uint16_t *out_record_idx);
 
 /*
+ * checkpoint_probe_media_status - 开机格式化判据：区分“空片 / 版本不符 / 读失败”
+ *
+ * `checkpoint_find_latest` 把“无记录 / 版本不符 / 读失败”都压成 FTL_ERROR；
+ * 直接据此格式化会把一次瞬时读错误变成整片擦除。本函数只做只读探测：
+ *   · 用 magic-only 探针定位任意版本的 CP 头 → 比 layout_version；
+ *   · 找不到 record 时，raw 读 CP 池首页区分“空片”与“读不通/有内容但无有效 CP”；
+ *   · 再以 `bbt_medium_has_ftl_data` 判断固定元数据区是否已写过（用过介质上
+ *     CP 缺失/损坏 ⇒ IO_ERROR，不自动格式化）。
+ *
+ * @param ftl                 FTL 上下文
+ * @param out_layout_version  输出：读到的 CP layout_version（可 NULL）
+ * @return CP_MEDIA_CURRENT / NO_RECORD / VERSION_MISMATCH / IO_ERROR
+ */
+typedef enum
+{
+    CP_MEDIA_CURRENT = 0,      /* 读到当前版本 CP */
+    CP_MEDIA_NO_RECORD,        /* 空片：CP 池无内容 */
+    CP_MEDIA_VERSION_MISMATCH, /* 读到 CP 头，但布局版本不是当前 */
+    CP_MEDIA_IO_ERROR,         /* 有介质内容但 CP 读不通 / 头损坏 */
+} cp_media_status_t;
+
+cp_media_status_t checkpoint_probe_media_status(struct ftl_context *ftl, uint32_t *out_layout_version);
+
+/*
  * checkpoint_load_block_table - 读取并校验一条 Checkpoint 记录的 块元数据快照
  *
  * 校验 header 的 bit_* 字段、逐页读入 words、再用 boot_crc32 验证。

@@ -16,12 +16,13 @@
  * RAM 运行时坏块位统一存于 ftl_block_t.state（Block State Table 单数据源），
  * bbt_save 时从 BST 重建 bad_map。
  *
- * 写模型与 Anchor / Checkpoint 一致（见 ftl/metadata.h §元数据写模型）。
- * ⚠ 旧实现把同一份 6 页（主 + 备各 3 页）**就地重写**：第二个坏块出现时 BBT 即
- *   损坏 ⇒ bbt_load 失败 ⇒ 开机不知道哪些块坏 ⇒ 用到坏块丢数据。
+ * 写模型与 Anchor / Checkpoint 一致（见 ftl/metadata.h §元数据写模型）：
+ * **只追加、环形轮转、最新有效胜**。对同一份 record 就地重写会在第二个坏块出现时
+ * 损坏 BBT ⇒ bbt_load 失败 ⇒ 开机不知道哪些块坏 ⇒ 用到坏块丢数据。
  */
 
 #include "allocator.h"
+#include "assertion.h"
 #include "metadata.h" /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
 
 #include <stddef.h>
@@ -33,15 +34,22 @@
 /* ── BBT Header 格式 ── */
 #define BBT_MAGIC (0x424254ABUL) /* "BBT\xAB" */
 
+/* reserved[0] 的格式进行中标志：两阶段格式化在擦除用户块之前先落 BBT 时置位，
+ * 擦完并写完 CP 标记后清除。旧固件写 0（不进行中），语义兼容。 */
+#define BBT_FLAG_FORMAT_IN_PROGRESS (1UL)
+
 typedef struct
 {
-    uint32_t magic;        /* BBT_MAGIC */
-    uint32_t sequence;     /* 单调递增，最新有效 */
-    uint32_t total_blocks; /* 总 Block 数 */
-    uint32_t bad_count;    /* 坏块数 */
-    uint32_t reserved[3];
+    uint32_t magic;                     /* BBT_MAGIC */
+    uint32_t sequence;                  /* 单调递增，最新有效 */
+    uint32_t total_blocks;              /* 总 Block 数 */
+    uint32_t bad_count;                 /* 坏块数 */
+    uint32_t reserved[3];               /* [0] = BBT_FLAG_*；其余写 0 */
     uint8_t  bad_map[BBT_BITMAP_SIZE];  /* 4096 bit = 512B */
-} __attribute__((packed)) bbt_header_t; /* 4+4+4+4+12+512 = 540B（无独立 CRC，见 ADR v0.62）*/
+} __attribute__((packed)) bbt_header_t; /* 4+4+4+4+12+512 = 540B（无独立 CRC，页完整性由 FC 保证）*/
+
+_Static_assert(sizeof(bbt_header_t) == 540U, "BBT header 布局漂移（期望 540B）");
+_Static_assert(sizeof(bbt_header_t) <= PAGE_MAIN_SIZE, "BBT header 必须装得进一页主区");
 
 /* ── 接口 ── */
 
@@ -60,9 +68,24 @@ typedef struct
  *   Checkpoint/Wear）判成坏块并 bbt_save 落盘。详见 bbt.c 的 bbt_medium_has_ftl_data。
  *
  * @param alloc  Allocator 上下文（blocks、bad_count 等输出）；**前置条件**，非法即 ASSERT
- * @return 0 成功（含"拒绝扫描"），-1 BBT 加载路径失败
+ * @return 无。加载失败不是致命错误：走“拒绝重扫（已用过介质）”或“出厂扫描”回退；
+ *         坏块数只走 `alloc->bad_count`（H38：恒为常量的返回码改 void）。
  */
-ftl_status_t bbt_init(ftl_allocator_t *alloc);
+void bbt_init(ftl_allocator_t *alloc);
+
+/*
+ * bbt_medium_has_ftl_data - 介质固定元数据区里是否已有合法的 FTL 页
+ *
+ * 只读。用于两处判空：
+ *   · `bbt_init`：无有效 BBT 时，只有空片才允许出厂扫描；
+ *   · `checkpoint_probe_media_status`：CP 池没有可定位 record 时，区分“空片”与
+ *     “有元数据但 CP 缺失/损坏”。调用者应先用 raw 读确认命令通路正常，
+ *     否则“总线读死”也会返回 false。
+ *
+ * @param alloc Allocator 上下文（取 ch/ce/lun 与几何）；**前置条件**，非法即 ASSERT
+ * @return true = 至少一页是合法 FTL 页（介质已格式化过）；false = 空片
+ */
+bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc);
 
 /*
  * bbt_scan_factory - 出厂坏块扫描
@@ -105,8 +128,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc);
  *
  * ① 必须**先于任何 PROGRAM/ERASE** 读——器件手册（Micron AN1819）逐字：
  *   *"the bad block information is erasable and cannot be recovered once erased"*。
- *   旧实现先擦后读、且读的是 CW0 列 0（FC 逻辑 META），故永远读不到出厂标记。
- *   列 2048 由 ftl_sync_read_column()（OP_READ_COLUMN）够到。
+ *   必须先读后擦；列 2048 由 ftl_sync_read_column()（OP_READ_COLUMN）够到。
  *
  * 打印（每排 BBT_MAP_COLS_PER_PLANE 个块，各 plane 一组、组间留空；每格定宽 4）：
  *     CH=0  CE=0  LUN=0
@@ -124,19 +146,25 @@ int bbt_scan_factory(ftl_allocator_t *alloc);
 void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase);
 
 /*
- * bbt_erase_all_blocks - 擦除本实例全部块（所有 plane），供开机自动格式化调用
+ * bbt_format_erase - 格式化用的两阶段擦除：先落 BBT，再擦 BBT 池之外的块
  *
- * 逐块**无条件**擦（含已判坏的块）；擦除失败 ⇒ 判坏并落进 BST。
- * **不读出厂坏块标记**——用过的块 spare 首字节是 FTL 数据，读它会把写过的块全判坏
- * （版本升级这条正常路径上就是灾难：连元数据块一起标坏 ⇒ 开不了机）。标记的读取职责
- * 唯一归 bbt_init（且只在空片时做）。
- * ⚠ 因此「必须在 bbt_init 之后调用」是**承重的**（出厂标记此时已在 BST 里）；
- *   擦完由调用方 bbt_save() 重新持久化坏块图。
+ * ① `bbt_note_dirty + bbt_save`：把当前 BST 坏块图（含工厂标记 / CP 快照并集）
+ *    追加成一条 record，并置 `BBT_FLAG_FORMAT_IN_PROGRESS`。失败 ⇒ FTL_ERROR，
+ *    **不擦任何用户块**（工厂标记仍完整）。
+ * ② 擦除**除 BBT 池之外**的全部块（所有 plane）；擦失败的块标 BAD。
+ * ③ 清 `FORMAT_IN_PROGRESS`，再次 `bbt_save` 把新 BAD 并入（best-effort；
+ *    失败则 dirty 留给后台 bbt_kick；工厂坏块图已在 ① 落盘）。
  *
- * @param alloc  Allocator 上下文（取 ch/ce 与块几何）；**前置条件**，非法即 ASSERT
- * @return FTL_OK / FTL_ERROR（擦除失败）
+ * ⚠ **不读出厂坏块标记**：标记的读取职责唯一归 `bbt_init`（且只在空片时做）；
+ *   因此「必须在 bbt_init 之后调用」是承重的。
+ * ⚠ 掉电语义：① 成功后任何时候掉电，新 BBT record 都保留；② 中途掉电时
+ *   `FORMAT_IN_PROGRESS` 让下次开机识别“格式化未完成”并继续格式化，而不是把
+ *   “有 BBT、无 CP”误判成损坏介质。
+ *
+ * @param alloc  Allocator 上下文；**前置条件**，非法即 ASSERT
+ * @return FTL_OK；FTL_ERROR = ① 的 BBT save 失败（未擦用户块，可重试）。
  */
-ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc);
+ftl_status_t bbt_format_erase(ftl_allocator_t *alloc);
 
 /*
  * bbt_mark_bad - 运行时标记坏块
@@ -146,9 +174,14 @@ ftl_status_t bbt_erase_all_blocks(ftl_allocator_t *alloc);
  *
  * @param alloc  Allocator 上下文
  * @param gblock 坏 Block 编号（全局 Block 号）
- * @return 0 成功，-1 失败
+ * @return FTL_OK（含“已经是 BAD”的幂等早退）；FTL_ERROR 参数非法 / 越界。
+ *         ⚠ 已 BAD 时**不重复** `bad_count++`、不重复消耗 Spare、不重复置 dirty。
  */
 ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
+
+/* bbt_note_dirty - 标记 BBT 有未落盘变更（唯一 dirty 闸门）。
+ * 每次置位推进 `dirty_gen`；写 job 用它检测“组 header 之后又标坏”的丢更新。 */
+void bbt_note_dirty(ftl_allocator_t *alloc);
 
 /*
  * bbt_is_bad - 查询 Block 是否坏块
@@ -159,6 +192,12 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
  */
 static inline bool bbt_is_bad(const uint8_t *bad_map, uint16_t block)
 {
+    ASSERT(block < BBT_MAX_BLOCKS);
+
+    if (block >= BBT_MAX_BLOCKS)
+    {
+        return true; /* 越界是编程错误：release 下保守判坏，避免把非法块当好块使用 */
+    }
     if (bad_map == NULL)
     {
         return false;
@@ -174,7 +213,9 @@ static inline bool bbt_is_bad(const uint8_t *bad_map, uint16_t block)
  */
 static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
 {
-    if (bad_map != NULL)
+    ASSERT(block < BBT_MAX_BLOCKS);
+
+    if ((bad_map != NULL) && (block < BBT_MAX_BLOCKS))
     {
         bad_map[block >> 3] |= (uint8_t)(1U << (block & 7U));
     }
@@ -185,13 +226,13 @@ static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
  *
  * 池内下一槽追加一条 record（块满先擦池内下一块）。sequence 递增。
  *
- * @param alloc  Allocator 上下文（游标/序号在 alloc->bbt，序 4 起 per-instance）；**前置条件**，非法即 ASSERT
- * @return 0 成功，-1 失败
+ * @param alloc  Allocator 上下文（游标/序号在 alloc->bbt，per-instance）；**前置条件**，非法即 ASSERT
+ * @return FTL_OK 成功（含 dirty==0 早退）；FTL_ERROR 池定位 / prepare / 写失败。
  */
 ftl_status_t bbt_save(ftl_allocator_t *alloc);
 
 /*
- * bbt_kick - 后台批量持久化入口（**提交即返回**，v0.75 阶段 7）
+ * bbt_kick - 后台批量持久化入口（**提交即返回**）
  *
  * 当 alloc->bbt.dirty 置位时，装配一个 BBT job 并提交第一条命令：
  *   换块需擦 ⇒ 异步擦（phase = BBT_JOB_ERASE）→ 擦完成再起写；
@@ -199,8 +240,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc);
  * 成败由 g_op_service[FTL_OP_BBT]（ftl_op_bbt）收尾：写完成后推进池游标、
  * 成功清 dirty、失败保留 dirty 供下轮重试。
  *
- * ⚠ 与旧 bbt_flush 的差别：旧版在**一次调用内**同步写完并返回成败；本函数只保证
- *   「已起步」。判据从返回值变成「job 走完且 dirty 清零」。
+ * ⚠ 本函数只保证「已起步」；成败判据 = job 走完且 dirty 清零（同步路径见 bbt_save）。
  * ⚠ **单飞行**：命令在飞 ⇒ 空操作（池内一条 record 一次写，重入会争同一槽）；
  *   若上一步提交被背压拒（job 停在 WRITE 但无命令在飞），本函数只**续提交写**，
  *   不重走换块判定——擦已成功，重擦纯属磨损。
@@ -236,7 +276,7 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_co
  *
  * @param alloc  Allocator 上下文
  * @param plane  坏块所属 plane（取同 plane 的替换块）
- * @return 0 补充成功，-1 Spare Pool 耗尽 / 参数非法
+ * @return FTL_OK 补充成功；FTL_ERROR 参数非法 / 该 plane Spare Pool 耗尽（容量自然下降）
  */
 ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, uint8_t plane);
 

@@ -189,6 +189,49 @@ bool allocator_spare_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *ou
     return true;
 }
 
+/* 实现要点：逐 plane 从 Free Pool 摘块补 Spare；只补 state == FREE 的块，
+ * 摘出后置 NONE（Spare 池块无归属），push 失败则回滚到 Free。 */
+bool allocator_spare_refill_from_free(ftl_allocator_t *alloc, uint8_t plane)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(plane < PLANE_NUM);
+
+    bool moved = false;
+
+    while (alloc->spare_count[plane] < FTL_SPARE_POOL_PER_PLANE)
+    {
+        uint16_t pick = UINT16_MAX;
+
+        for (uint16_t i = 0U; i < alloc->free_count; i++)
+        {
+            const uint16_t g = alloc->free_blocks[i];
+
+            if (ftl_gblock_plane(g) == plane)
+            {
+                pick = g;
+                break;
+            }
+        }
+
+        if (pick == UINT16_MAX)
+        {
+            break; /* 该 plane 没有可补的空闲块 */
+        }
+
+        allocator_remove_from_free(alloc, pick);
+        ftl_block_set_state(&alloc->blocks[pick], FTL_BLOCK_STATE_NONE);
+
+        if (!allocator_spare_try_push(alloc, plane, pick))
+        {
+            allocator_free_block(alloc, pick); /* 回滚（目标未满时不应发生） */
+            break;
+        }
+        moved = true;
+    }
+
+    return moved;
+}
+
 /* 实现要点：遍历 PLANE_NUM 个 plane 求和。 */
 uint16_t allocator_op_total(const ftl_allocator_t *alloc)
 {

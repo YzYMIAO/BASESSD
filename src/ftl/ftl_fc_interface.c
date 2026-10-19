@@ -573,7 +573,7 @@ static fc_command_t *sync_page_prepare_cw(nand_pba_t pba, uint8_t operation, con
  *   功能：页级同步写——建链 + 搬入数据 + 提交等待 + 判 NAND 失败。
  *   参数：pba —— 目标页 PBA；data/length —— 源数据（可为 NULL/0 = 纯建链不搬）；
  *         cfg —— 页配置（crc/random/ldpc/lba）。
- *   返回：FTL_OK / FTL_ERROR（建链失败 / 提交等待失败 / NAND_FAIL）。
+ *   返回：FTL_OK / FTL_ERROR（建链失败 / 提交等待失败 / 任一错误位 FC_CW_STATUS_ERROR_MASK）。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_write_page(nand_pba_t pba, const void *data, uint32_t length, const ftl_page_cfg_t *cfg)
 {
@@ -594,7 +594,7 @@ ftl_status_t ftl_sync_write_page(nand_pba_t pba, const void *data, uint32_t leng
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
-    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    if (fc_cw_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -704,7 +704,7 @@ ftl_status_t ftl_sync_write_page_mirror(nand_pba_t pba, const void *data, uint32
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
-    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    if (fc_cw_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -720,7 +720,7 @@ ftl_status_t ftl_sync_write_page_mirror(nand_pba_t pba, const void *data, uint32
  *   参数：pba —— 目标页 PBA；page_buf —— **整页镜像**（FTL_READ_USER_SIZE 字节，
  *         CW c 的数据在 page_buf + c×512）；cw_bitmap —— 要编的 CW（flat 字面位图，
  *         须落在本命令 plane 段内）；cfg —— 页配置（lba 必须是**本页**的页 LBA）。
- *   返回：FTL_OK / FTL_ERROR（建链失败 / 提交等待失败 / NAND_FAIL）。
+ *   返回：FTL_OK / FTL_ERROR（建链失败 / 提交等待失败 / 任一错误位 FC_CW_STATUS_ERROR_MASK）。
  *   实现要点：GC/WL 搬移专用——源是整页镜像，只需搬其中几个有效 CW，且**必须保持
  *             原 CW 偏移**（页内 META 的 LBA 由 CW 号决定，挪位即错）。未置位的 CW
  *             不建链、不编程，读回为 0xFF（META 全 FF ⇒ 上层判无效）。
@@ -744,7 +744,7 @@ ftl_status_t ftl_sync_write_page_cw(nand_pba_t pba, const uint8_t *page_buf, uin
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
-    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    if (fc_cw_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -843,7 +843,7 @@ ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer)
  * ftl_sync_erase_block
  *   功能：块级同步擦除（**单 plane**）——建链（无数据）+ 提交等待 + 判 NAND 失败。
  *   参数：pba —— 目标块 PBA；FC 对 OP_ERASE_BLOCK 取 block + **PBA 的 plane** 擦一个 plane。
- *   返回：FTL_OK / FTL_ERROR（建链失败 / 提交等待失败 / NAND_FAIL）。
+ *   返回：FTL_OK / FTL_ERROR（建链失败 / 提交等待失败 / 任一错误位 FC_CW_STATUS_ERROR_MASK）。
  *   实现要点：擦除慢，超时放宽到 20ms（其余原语用默认 10ms）。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_erase_block(nand_pba_t pba)
@@ -862,7 +862,7 @@ ftl_status_t ftl_sync_erase_block(nand_pba_t pba)
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
-    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    if (fc_cw_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -895,7 +895,7 @@ ftl_status_t ftl_sync_erase_block_multi_plane(nand_pba_t pba)
         (void)fc_command_release(cmd);
         return FTL_ERROR;
     }
-    if ((completion.status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    if (fc_cw_status_has_error(completion.status))
     {
         (void)fc_command_release(cmd);
         return FTL_ERROR;
@@ -1136,9 +1136,11 @@ ftl_status_t ftl_async_set_features(fc_command_t **out_cmd, uint8_t ch, uint8_t 
  * ftl_sync_read_column
  *   功能：按任意列偏移读 4 字节（读 OOB/spare 区，判出厂坏块用）。
  *   参数：pba —— 目标页 PBA；column —— 列偏移；out[4] —— 输出 4 字节。
- *   返回：FTL_OK / FTL_ERROR（out 为 NULL / 列越界 ASSERT / 建链失败 / 提交等待失败）。
- *   实现要点：列地址走命令级 param 字节 0/1（小端）；**刻意不判 NAND_FAIL**——坏块
- *             spare 区也要拿到。
+ *   返回：FTL_OK / FTL_ERROR（out 为 NULL / 列越界 ASSERT / 建链失败 / 提交等待失败 /
+ *         任一错误位 FC_CW_STATUS_ERROR_MASK）。
+ *   实现要点：列地址走命令级 param 字节 0/1（小端）；4 字节先拷贝，再按
+ *             FC_CW_STATUS_ERROR_MASK 全集判错——读失败返回 FTL_ERROR，BBT 据此
+ *             保守判坏（否则失败页的 0xFF 参数会被误读成“好块”）。
  * -------------------------------------------------------------------- */
 ftl_status_t ftl_sync_read_column(nand_pba_t pba, uint16_t column, uint8_t out[4])
 {
@@ -1174,8 +1176,15 @@ ftl_status_t ftl_sync_read_column(nand_pba_t pba, uint16_t column, uint8_t out[4
     }
 
     /* 4 字节走控制器侧暂存（同 OP_READ_META），完成时已拷进 CQ 的 param。
-     * 刻意不判 NAND_FAIL：坏块的 spare 区也要拿到——判出厂坏块正是要看它。 */
+     * 先拷出再判错：即使页读失败，调用者仍能看到原始 4 字节用于诊断；
+     * 返回 FTL_ERROR 让 BBT 按“读失败 ⇒ 坏块（保守）”处理。 */
     (void)memcpy(out, completion.param.bytes, 4U);
+
+    if (fc_cw_status_has_error(completion.status))
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
 
     (void)fc_command_release(cmd);
     return FTL_OK;
