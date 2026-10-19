@@ -487,12 +487,86 @@ journal/checkpoint 账本同步），不是改 `migrate_handle_t` 入参能解�
 **规则**：每个共享字段只有一个写者；其他模块只读查询或走端口。
 `ftl_context_t` 是 device 描述符，不承载业务状态。
 
+### 8.1 `ftl_context_t` / `ftl_storage_t` 布局：内嵌 vs 挂载指针
+
+**主流不是“全部指针化”**。SPDK `spdk_ftl_dev` 也是混合的：`nv_cache`、
+`writer_user/gc` 等小/热状态内嵌，`l2p` / `reloc` / `valid_map` 用指针。
+判据是：
+
+1. **大小与放置域**：是否需要落特定 SRAM/AXI 段；
+2. **生命周期**：完成回调要持有到命令结束 ⇒ 静态存储，不能是栈；
+3. **共享 / 可选 / 后端相关**：共享或可替换的才需要指针；
+4. **访问热度**：每个 host IO 都摸的热数据优先内嵌，避免多一层间接。
+
+**现状**：`ftl_storage_t` 已把四个大数组外置成指针：
+`tables` / `metadata_dir` / `journal` / `checkpoint_handle`。
+`ftl_context_t` 仍内嵌 `pending[]` / `groups[]` / `wbuf` /
+`migrate_handle` / `rr_page_scratch`。
+
+**候选**（大小为量级估算，落地前用 DWARF `sizeof` 实证，C6）：
+
+| 成员 | 量级 | 热度 | 建议 |
+|---|---:|---|---|
+| `migrate_handle_t` | ~4.2 KB（`page_buf` 2×2048） | 冷/中 | **挂 storage 指针** |
+| `ftl_wbuf_t` | ~4.1 KB（`data` 4096B） | 热（写路径） | **挂 storage 指针**；或按域预算决定 |
+| `rr_page_scratch[2048]` | 2 KB | 冷 | **挂 storage 指针**（或并入 RR storage） |
+| `pending[32]` | ~1 KB | 很热（host IO） | 可选；域/局部性优先，没压力就内嵌 |
+| `groups[32]` | ~1 KB | 很热 | 可选；同上 |
+| `bg` | ~300 B | 中 | 内嵌 |
+| `alloc` | ~100 B | 中 | 内嵌（内部指针已指向 `tables`） |
+| `read_recovery_handle_t` | ~100 B | 中 | 内嵌 |
+| 定时器 / 计数 / flag | 几十 B | 热 | 内嵌 |
+
+**设计方向（本轮未改代码）**：
+
+- 挂到 `ftl_storage_t`：`migrate_handle_t *migrate`、`ftl_wbuf_t *wbuf`、
+  `uint8_t *rr_page_scratch`；
+- 暂不挂：`pending[]` / `groups[]`（热数据；除非域预算/实测证明需要）；
+- 保持内嵌：`bg` / `alloc` / `read_recovery_handle_t` / 定时器/计数/flag；
+- `cp` 按 handle 契约并入 `checkpoint_handle_t`，不再单独占 context。
+
+**`ftl_storage_t` 扩展草案**：
+
+```c
+typedef struct {
+    ftl_tables_t          *tables;
+    metadata_dir_cache_t  *metadata_dir;
+    l2p_journal_t         *journal;
+    checkpoint_handle_t   *checkpoint_handle;
+    migrate_handle_t      *migrate;          /* 新增 */
+    ftl_wbuf_t            *wbuf;             /* 新增 */
+    uint8_t               *rr_page_scratch;  /* 新增 */
+} ftl_storage_t;
+```
+
+`main.c` 定义这些数组并指定 `.sram*` / AXI 段；`ftl_init` 只绑指针；
+容量 `_Static_assert` 跟着改。
+
+**关键点：挂指针不减少总 RAM。** 数组仍在某个 SRAM/AXI 域里，总量不变；
+收益是 `ftl_context_t` 变小、放置可控、handle 挂载形态统一。若目标是省 RAM，
+只有共享/可选缓冲或真正删字段才有效。
+
+**代价**：
+
+- `wbuf` / `migrate` 从内嵌变指针后，调用点 `.` → `->`，diff 机械但不小；
+- 测试夹具（冻结）会再多一批编译错误（R4，不改测试源）；
+- 指针生命周期必须覆盖完成回调（静态存储即可，不能是栈）；
+- 跨 SRAM 域访问有 cache/局部性影响，需要上板量；
+- `pending` / `groups` 每个 host IO 都摸，挂指针可能得不偿失。
+
+**验证**：先 `arm-none-eabi-readelf --debug-dump=info` 取 `sizeof`/偏移
+（C6），再 `make all` / `make release`；收益（context 尺寸、域占用）上板后
+用实测确认，未上板不声称。
+
 ---
 
 ## 9. 迁移阶段（未来代码工作，不在本轮）
 
 1. **Phase 0**：本文件 + 字段所有权表（本轮）。
 2. **Phase 1**：BBT（依赖最少，先验证模式）。
+   **Phase 1.5（可选，独立小步）**：按 §8.1 把 `migrate_handle` / `wbuf` /
+   `rr_page_scratch` 挂到 `ftl_storage_t`；`pending` / `groups` 暂保持内嵌；
+   用 DWARF 实证 `sizeof` / 偏移，不靠估算。
 3. **Phase 2**：Journal（写状态并入 handle；提供 `journal_is_idle` /
    `journal_can_erase` / `journal_write_failed` / `journal_sequence` /
    `journal_set_merge_floor`）。
