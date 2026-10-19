@@ -16,31 +16,32 @@ FTL 自行决定**，Controller 只按 FTL 实例边界切连续 run 后提交�
 ### 1.1 核心数据结构
 
 ```c
-/* FTL 主上下文（完整定义见 include/ftl/ftl.h） */
+/* FTL 主上下文（完整定义见 include/ftl/ftl.h；模块契约见 ftl_module_contracts.md） */
 struct ftl_context {
-    ftl_topology_t      topo;               // 拓扑信息（ch/ce/lun）
-    l2p_cache_t        *cache;              // 共享 L2P cache（阶段 B；AXI）
-    ftl_pending_req_t   pending[FTL_PENDING_MAX];  // 子操作追踪（per-instance）
-    ftl_io_group_t      groups[FTL_GROUP_MAX];     // 完成组表（一次 submit = 一组）
-    ftl_wbuf_t          wbuf;               // 页打包写缓冲（结构见 include/ftl/wbuf.h）
-    ftl_tables_t       *tables;             // 大表指针（阶段 C；SRAM12）
-    ftl_allocator_t     alloc;              // 空闲 block / Super Block 写指针 + per-instance 块元数据游标
-    l2p_journal_t      *journal;            // log-structured journal（阶段 C；SRAM3）
-    metadata_dir_cache_t *metadata_dir;     // Metadata Directory（阶段 C；SRAM4）
-    checkpoint_handle_t           *checkpoint_handle;             // Checkpoint job（阶段 C；SRAM3）
-    l2p_cp_state_t      cp;                 // Checkpoint 池游标/序号（per-instance，v0.65）
-    uint32_t            cp_timer_start;     // Checkpoint 计时（T3）
-    uint32_t            total_writes;       // 写入总次数
-    uint8_t             bg_suspend;         // 后台写闸门（bbt --erase 置位，Phase 3 整体跳过）
-    uint32_t            rr_last_scan_ms;    // 慢死预测巡检节流
-    uint32_t            gc_eval_last_ms;    // GC 触发求值节拍（v0.68）
-    uint32_t            gc_log_last_ms;     // GC 触发日志节拍（v0.68）
-    uint32_t            gc_reclaimed_count; // GC 累计成功回收 SB 数（v0.68，纯观测）
-    uint32_t            gc_novictim_count;  // GC 累计「触发但选不出 victim」次数（v0.68）
-    read_recovery_handle_t rr;                 // Read Recovery 上下文
-    uint8_t             rr_page_scratch[FTL_READ_USER_SIZE]; // 恢复整页暂存
+    ftl_topology_t        topo;               // 拓扑信息（ch/ce/lun）
+    l2p_cache_t          *cache;              // 共享 L2P cache（设备级；AXI）
+    ftl_pending_req_t     pending[FTL_PENDING_MAX]; // 子操作追踪（per-instance）
+    ftl_io_group_t        groups[FTL_GROUP_MAX];    // 完成组表（一次 submit = 一组）
+    wbuf_handle_t        *wbuf;               // 页打包写缓冲（Phase 1.5 挂 storage）
+    ftl_tables_t         *tables;             // 大表指针（SRAM12）
+    ftl_allocator_t       alloc;              // allocator（指针已绑到 tables）
+    l2p_journal_t        *journal;            // journal（SRAM3）
+    metadata_dir_cache_t *metadata_dir;       // Metadata Directory（SRAM4）
+    checkpoint_handle_t  *checkpoint_handle;  // CP job + cp_state/last_ms + 端口（SRAM3）
+    uint32_t              total_writes;       // 写入总次数
+    uint8_t               bg_suspend;         // 后台写闸门（bbt --erase 置位，Phase 3 整体跳过）
+    uint8_t               md_load_failed;     // Directory 加载失败（RISK-BOOT-09）
+    uint8_t               l2p_defer;          // L2P region 加载在飞（drain 不计卡死）
+    bg_scheduler_t        bg;                 // 后台调度器（10 项任务）
+    migrate_handle_t     *migrate_handle;     // GC/WL/predict job + 自持节拍/计数（Phase 1.5）
+    read_recovery_handle_t read_recovery_handle; // RR job 状态机 + 端口
+    uint8_t              *rr_page_scratch;    // 恢复整页暂存（Phase 1.5 挂 storage）
 };
 ```
+
+> 模块执行状态（FSM / 单飞行 / 计时器 / 进度计数）在各自 handle 内；主流程只读
+> `*_status_t` 与查询，不窥探 handle 内部 phase。共享账本（L2P/BST/allocator/journal/
+> metadata/pending/completion）仍是单点。
 
 ### 1.2 接口列表
 
