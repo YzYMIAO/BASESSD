@@ -288,6 +288,25 @@ void allocator_note_erase(ftl_allocator_t *alloc, uint16_t gblock, uint32_t now)
 ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nand_pba_t out[PLANE_NUM]);
 
 /*
+ * allocator_rewind_pair - 撤销**紧邻的**一次 allocator_alloc_pair
+ * 功能：把指定温度 Open SB 的写指针退一页（next_page--），供「已取到页对、但在编程之前
+ *       失败」的调用者归还该页。
+ * 参数：alloc — 分配器；temperature — FTL_TEMP_HOT / FTL_TEMP_COLD（须与那次 alloc 相同）。
+ * 返回：无。
+ *
+ * ⚠ 两条前提（违反会**还错页**，且编译期完全无声）：
+ *   ① 自那次 allocator_alloc_pair 起**没有**其他页对分配发生——本函数只回退写指针，
+ *      不回退「可能刚发生过的开新 SB」；
+ *   ② 归还的页**从未被编程**（已下发的命令引用着它）。
+ *   ⚠ 若那次 alloc 顺带开了一个新 SB，归还后该 SB 处于 next_page == 0 的**合法态**
+ *     （等价于「刚开、未写」）：块仍由 Open SB 持有，无容量损失，且下次重试直接命中页 0。
+ *
+ * 用途：`ftl_wbuf_flush` 的取页后失败路径——不归还则每次重试白烧一对页，
+ *       表现为**容量无声流失**（CLAUDE.md §3.1）。
+ */
+void allocator_rewind_pair(ftl_allocator_t *alloc, uint8_t temperature);
+
+/*
  * allocator_alloc_log_block - 从指定 plane 独占分配一个整块（元数据日志块）
  * 功能：从 Free Pool 取擦除次数最少的块，出池并置 LOG。
  * 参数：alloc — 分配器；plane — 目标 plane；out_gblock — 出参 gblock。

@@ -38,7 +38,7 @@
 | RISK-PERF-01 | 待后续 | `gc_check_triggers` 与 `gc_select_victim` 各扫一次全表；`wl_should_trigger` 与 `wl_select_victim` 也各自扫描 | GC 10 ms / WL 5 s 节拍门兜成本 | 需要时把 `allocator_erase_stats_t` 从求值点透传（注意别把策略耦合进 mig API） | `src/ftl/gc.c` / `src/ftl/wear_leveling.c` |
 | RISK-PERF-02 | 待后续 | GC/WL 目的页仍逐 plane 单条写，没有 multi-plane 命令 | 正确性无影响 | 命令形式优化，需 FC 侧支持 | `docs/design/ftl_design.md §7.2` |
 | RISK-GC-05 | 待后续 | GC Bitmap（Layer 2）未实现：掉电后 GC 从块头重来 | 正确性由 F10 + 重试覆盖 | 性能优化项 | `docs/design/ftl_design.md §7.2` |
-| RISK-RR-01 | 待后续 | `read_recovery.c` 的 `rr_step` / `ftl_op_read_recovery` 超 H11 NBNC（状态机 switch 较大）。~~`RR_STAGE_ABORT` 死枚举~~ 已删除 | 与 GC/migrate 解耦；本轮只提取邻居页计算 | 独立重构任务（按 stage 拆 handler） | `src/ftl/read_recovery.c`；`include/ftl/read_recovery.h` |
+| RISK-RR-01 | 待后续 | `read_recovery.c` 的 `rr_step` 超 H11 NBNC（状态机 switch 较大）。~~`ftl_op_read_recovery`~~ 已完成按 stage 拆 `rr_complete_*`（2026-10-19，见 §2H）。~~`RR_STAGE_ABORT` 死枚举~~ 已删除 | 与 GC/migrate 解耦；本轮只提取邻居页计算 | 独立重构任务（`rr_step` 按 stage 拆 handler）；范围已收窄为 `rr_step` 本体 | `src/ftl/read_recovery.c`；`include/ftl/read_recovery.h` |
 | RISK-RR-02 | 已修未上板 | ~~恢复成功后仍以 `SSD_STATUS_IO_ERROR` 完成托管子操作；且 `recovered` 只是最后一个 plane 的结果~~ | 新增 `all_ok` 聚合位：job 起点置 1，任一 plane 失败或 abort 清零；`rr_finish` 按它报 OK/IO_ERROR | 上板：可恢复失败读应返回成功；单 plane 不可恢复整体报错 | `src/ftl/read_recovery.c` `rr_finish` / `rr_settle_plane` |
 | RISK-RR-03 | 已修未上板 | ~~`rr_record_ecc` 健康状态可降级：CRITICAL/DYING 块在低 ECC 连续上升时被打回 WARNING~~ | 改为单调 max 升级 | 上板/UT 负例：CRITICAL 后低 ECC 上升不得回落 | `src/ftl/read_recovery.c` `rr_record_ecc` |
 | RISK-RR-04 | 已修未上板 | ~~预测巡检返回的 CLOSED 块所在 SB 可能含 BAD plane ⇒ migrate 反复 abort 卡死~~ | `rr_predictive_scan` 命中候选后校验 SB，含 BAD plane 则跳过 | 上板：运行期标坏后预测路径仍能推进 | `src/ftl/read_recovery.c` `rr_predictive_scan` |
@@ -57,7 +57,7 @@
 | RISK-BBT-03 | 已修未上板 | ~~格式化先擦掉工厂标记再 save BBT~~ | 已改为两阶段 `bbt_format_erase`：① 置 `FORMAT_IN_PROGRESS` 并 save 失败即中止（不擦用户块）；② 擦除 BBT 池**之外**的块；③ 再 best-effort save 并入新 BAD。BBT 池旧 record 保留，新 record 以更高 sequence 胜出 | 上板：格式化过程中掉电注入（save 后 / erase 中 / CP marker 前），重启后 BBT 仍含工厂坏块图 | `src/ftl/bbt.c` `bbt_format_erase`；`src/ftl/power_failure_recovery.c` `ftl_media_format` |
 | RISK-BBT-04 | 待后续 | BBT header **无布局版本字段**；只靠 `total_blocks` 做代理。块数相同但 bitmap 语义变化的格式演进无法识别 | `bbt_header_valid` 校验 `total_blocks == FTL_BLOCK_TOTAL` | 下次 BBT 格式变更时用 `reserved[]` 加版本（属于介质格式变更，需 bump `FTL_MEDIA_LAYOUT_VERSION`） | `include/ftl/bbt.h` `bbt_header_t` |
 | RISK-BBT-05 | 待后续 | `bbt_medium_has_ftl_data` 只查固定元数据区；元数据被擦、用户区仍有数据时会被误判为空片并重扫（出厂标记已被覆盖 ⇒ 坏块图丢失） | **格式化决策已不再依赖它**：`checkpoint_probe_media_status` 先 raw 读 CP 池页区分空片/读死；本谓词只剩 `bbt_init` 内部决定“是否做出厂扫描” | 若要闭合：增加用户区抽样 / 独立介质标记点 | `src/ftl/bbt.c` `bbt_medium_has_ftl_data`；`src/ftl/checkpoint.c` `checkpoint_probe_media_status` |
-| RISK-BBT-06 | 待后续 | `ftl_op_bbt` 没有保存 in-flight `command_id`；擦完成与写完成若被重复投递，phase 可能误配 | `waiting==0` 的孤儿守卫只能挡 job 结束后的迟到完成 | 若 FC 层可能出现重复完成，保存 command_id 并比对 | `src/ftl/bbt.c` `ftl_op_bbt` |
+| RISK-BBT-06 | 待后续 | `ftl_op_bbt` 没有保存 in-flight `command_id`；擦完成与写完成若被重复投递，phase 可能误配 | `waiting==0` 的孤儿守卫只能挡 job 结束后的迟到完成 | **2026-10-19 核实**：FC 侧 `fc_complete_internal`（`fc.c:712-724`）**没有**「已 COMPLETED 就不重复入队」的守卫 ⇒ 是否重复完成完全取决于 NAND 层是否重复上报。当前 NAND 是单次轮询完成模型，无重复上报源 ⇒ 暂不修；换 NAND 引擎 / 加中断完成时**必须先补该守卫** | `src/ftl/bbt.c` `ftl_op_bbt`；`src/fc/fc.c` `fc_complete_internal` |
 | RISK-BBT-07 | 已修未上板 | ~~boot 期 CP 快照并集的 BAD 不补 Spare~~ | 新增 `allocator_spare_refill_from_free(alloc, plane)`：摘 Free → state 置 NONE → push Spare，直到 `FTL_SPARE_POOL_PER_PLANE` 或无同 plane 空闲块。三条启动路径（clean 快照 / clean F2 / PF F2）建池后逐 plane 补池并打印补后计数 | 上板：制造 CP 快照含 BAD、Spare 不足的介质，确认补回 50/plane；Free 不足时自然下降 | `src/ftl/allocator.c`；`src/ftl/power_failure_recovery.c` `recovery_refill_spare_pools` |
 | RISK-BBT-08 | 信息 | `bbt_scan_factory` 跳过 gblock 0，依赖“Block 0 出厂总是好块”的器件假设 | 器件手册（Micron AN1819）支持 | 换器件时复核 | `src/ftl/bbt.c` `bbt_scan_factory` |
 | RISK-BBT-09 | 信息 | CLI `bbt --erase` / `bbt_print_bad_map(do_erase)` 会擦全片，且运行时 BST 不更新 | CLI 先 suspend 后台并提示断电 | 只作为专用体检工具；不要放进开机路径 | `src/ftl/bbt.c` `bbt_print_bad_map`；`src/controller/cli.c` |
@@ -124,6 +124,7 @@
 | RISK-IF-02 | 已修未上板 | ~~`ftl_sync_submit_wait` 超时摘表后命令迟到完成 ⇒ dispatch `take` 得 NULL ctx，`ftl_op_sync_wait` 解引用 NULL + 命令槽位泄漏~~ | `ftl_op_sync_wait` 对 `ctx == NULL`：LOGE + `fc_command_release` | 上板/故障注入：超时后迟到完成不 HardFault、池不泄漏 | `src/ftl/ftl_op.c` |
 | RISK-IF-03 | 已修未上板 | ~~同步原语忽略数据搬运返回值（写失败仍编程、读失败仍 OK）；raw 读缺 CW 静默跳过；短链读返回 OK 且尾部未初始化~~ | 三处均检查返回值并返回 `FTL_ERROR` | 上板/故障注入 | `src/ftl/ftl_fc_interface.c` |
 | RISK-IF-04 | 待上板 | 本轮行为变化未板验：plane 1 迁移数据、wbuf 稀疏页、越段位图 release 拒绝、迟到完成路径 | 编译零告警（release 两条 unused 已消失） | 按 §5 板端清单回归 | `src/ftl/ftl_fc_interface.c` / `ftl_op.c` |
+| RISK-IF-05 | 待上板 | 旁表容量 `COMPLETION_TABLE_SIZE` 32 → `FC_COMMAND_POOL_DEPTH`（64）：**修复**原容量小于真实上界（表按 `command_id` 键，上界 = 在飞命令数 ≤ 池深）⇒ 原「满则 `FTL_ERROR`」路径实为可达，且 `bbt.c` 会把它当永久失败吞掉 BBT save | `src/ftl/completion_table.c` 加 `_Static_assert(COMPLETION_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH)`；RAM 代价 +256 B（8 B/项 × 32 项） | 上板：观察 `[FTL]` 心跳无异常；`completion_table_count` 上界变 64 | `include/ftl/completion_table.h` / `src/ftl/completion_table.c` |
 
 ---
 
@@ -135,6 +136,26 @@
 | RISK-HOST-02 | 待后续 | host 读成功路径的 `read_count++` / `rr_record_ecc` 只记 `ftl_cmd_pba(cmd)` 的**首个 desc** 所在 gblock；一个子操作可覆盖 2 个 plane，Policy B 下两 plane 是**独立块** ⇒ 第二块的 read-disturb / ECC 趋势漏记 | 无数据损失，只影响慢死预测准确度（搬移阈值要 2× 读数才到） | 需 FTL 侧逐 plane PBA 查询（现只有 `ftl_cmd_pba`；逐 plane 要摸 FC desc 链，属 H13 跨层）⇒ 待后续 | `src/ftl/ftl.c` `ftl_op_host_io` |
 | RISK-HOST-03 | 已修未上板 | ~~`ftl_cmd_read_data` 返回值被丢弃：desc 链比请求短时尾部不写，未初始化缓冲被当数据交给 host~~ | 检查返回值：失败 ⇒ `LOGE` + `SSD_STATUS_IO_ERROR`，并跳过该次的 ECC/read_count 记账 | 上板/故障注入：短链读必须报错 | `src/ftl/ftl.c` `ftl_op_host_io` |
 | RISK-HOST-04 | 已修未上板 | ~~`ftl_trim` 是 L2P-first / Journal-second，两步之间掉电 ⇒ 回放重放更早的写条目把已 TRIM 的 LBA 复活~~ | 改为 Journal-first（`journal_append` 早于 `l2p_cache_write_sync`），与 host 写路径 `ftl_confirm_write` 同序 | 上板：TRIM 后立即断电，重启确认该 LBA 不复活 | `src/ftl/ftl.c` `ftl_trim` |
+
+---
+
+## 2H. 完成路由与 op dispatch（`completion_table.c` + `ftl_op.c`，本轮审查）
+
+| ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
+| RISK-CR-01 | 已修未上板 | ~~`completion_table_add` 只找首个空槽、**不按 `command_id` 去重** ⇒ 旁表可存在两条同 id 项；而 `completion_table_take` 取**首个**匹配 ⇒ 泄漏之后 id 被复用，服务函数拿到**别人的 ctx**（可能是早已失效的 `cp_job_t *` / 栈上 `ftl_sync_waiter_t *`），本命令自己的表项永久泄漏~~。可达路径：`fc.c` CQ 满强制置 COMPLETED（注释自陈「CQ entry 丢失，FTL 无法感知」）⇒ 表项泄漏 → `fc_command_alloc` 复用 id → 再次 add | `completion_table_add` 改两遍扫：先全表查 `cmd_id`，命中则**原地覆盖 ctx** + `LOGW`；未命中才取空槽 ⇒ 「同一 cmd_id 至多一条表项」收进**唯一闸门**（H10） | **不可直接构造**（需 CQ 满 / 丢完成）⇒ 静态收口 + 新增 `LOGW` 使一旦发生即可见；随常规回归上板，**不宣称已取证** | `src/ftl/completion_table.c` `completion_table_add` |
+| RISK-CR-02 | 待上板 | 坐标类改动未板验：`completion_table_route_region` 的 dim→(ch,ce,lun) 分解改走 `ftl_dim_ch/ce/lun`（与 `lba_route_*` 收敛为同一套公式）。坐标属「编译期无声的三类量」 | 分解式与原手写式逐字同值；新增三个 `static inline` 纯函数（H42） | **必须上板**：跑一遍读写 + `map <lba>` | `include/ftl/l2p_cache.h` / `src/ftl/completion_table.c` |
+| RISK-CR-03 | 待上板 | 9 个服务函数按 phase 拆 handler（纯代码搬移）+ 注释收敛（H37）；`ftl_op_checkpoint` 额外把 `release + waiting=0` 提到 switch 之前（8 个 case 同构，`cp_abort` 不碰 `waiting`） | 判据 / 顺序 / 日志文案逐字不变；`switch` 的 `default` 副作用留在 dispatcher（§四） | 随常规回归上板（行为应逐字等价） | `src/ftl/{ftl,journal,bbt,read_recovery,checkpoint,metadata_job}.c` |
+
+---
+
+## 2I. 页打包写缓冲 wbuf（`wbuf.c` + `wbuf.h`，本轮审查）
+
+| ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
+| RISK-WB-01 | 已修未上板 | ~~`ftl_wbuf_flush` 取到页对后 4 条失败返回（命令池满 / 建链 / pending 满 / SQ 满）**丢弃**该页对，而 allocator 无归还 API ⇒ 缓冲保留、每轮重试**白烧 2 页**，表现为容量无声流失（CLAUDE.md §3.1）~~ | 资源次序改为**按有无归还路径排序**（命令槽先于页对）+ 新增 `allocator_rewind_pair` + 统一错误出口归还页对 | **必须上板**：`next_page` 属地址/容量类量（§3.2 编译期无声）。背压下命令池满不易人为构造 ⇒ 静态收口 + 可达路径结构性收窄，**不宣称已取证** | `src/ftl/wbuf.c` `ftl_wbuf_flush`；`src/ftl/allocator.c` `allocator_rewind_pair` |
+| RISK-WB-02 | 已修未上板 | ~~TRIM 清空窗口的**内部不变量**（清 `occupied` + 退 `owners` 在飞数 + 复位）由 `ftl_trim`（外部模块）手工维护；`cli.c` 的 `bbt --erase` 直接 `memset(&ftl->wbuf,…)` 丢弃 `owners` ⇒ 那些写组在飞数永不归零、host 写挂死~~ | 不变量收进 wbuf 模块：新增 `ftl_wbuf_drop`（TRIM）/ `ftl_wbuf_reset`（介质擦净，按写失败收尾）；调用点改为调接口（§3.1 / C3 / H13） | 上板：`trim` 走新路径不回归；`bbt --erase` 后不再有写组挂死 | `src/ftl/wbuf.c`；`src/ftl/ftl.c` `ftl_trim`；`src/controller/cli.c` |
+| RISK-WB-03 | 待上板 | 模块抽出（`ftl.c` §4 → `wbuf.c`/`wbuf.h`）+ 位运算收敛到 `ftl_cw_bit` + hot-path 日志降 `LOGD`：纯搬移与等价改写，但 wbuf 是写路径核心 | 逐段比对搬出前后函数体一致；`make all` / `make release` 零新告警 | 随常规回归上板（`wr`/`rd`/`fl`/`trim` + `wp <lba> 1 8` 合并仍为 1 次编程） | `src/ftl/wbuf.c` / `include/ftl/wbuf.h` |
 
 ---
 
@@ -188,6 +209,16 @@
   RISK-HOST-01/03/04、RISK-GC-03。**RISK-HOST-01 必须单独取证**（造 ECC 不可纠读）。
   ⚠ 本轮删了 `pending_add` / `pending_group_free`（零生产调用），UT 重构时改用
   `pending_alloc` + 就地填槽 + `pending_validate` 的生产写法。
+- 完成路由与 op dispatch（本次审查）：旁表按 `command_id` 去重、容量 32→64、
+  `completion_table_route` 注释与代码对齐、dim 分解收敛、9 个服务函数按 phase 拆 handler；
+  见 RISK-CR-01/02/03、RISK-IF-05。
+  ⚠ **RISK-CR-02 必须单独上板**（坐标 = 编译期无声的三类量之一），跑读写 + `map <lba>`。
+  ⚠ RISK-CR-01 的泄漏路径不可直接构造，只做静态收口 + `LOGW` 可见化。
+- 页打包写缓冲 wbuf（本次审查）：`ftl.c` §4 抽成 `wbuf.c`/`wbuf.h`、取页后失败归还页对
+  （`allocator_rewind_pair`）、TRIM/复位的不变量收进 `ftl_wbuf_drop`/`ftl_wbuf_reset`、
+  位运算收敛到 `ftl_cw_bit`、flush 日志降 `LOGD`；见 RISK-WB-01~03。
+  ⚠ **RISK-WB-01 必须上板**（`next_page` = 编译期无声的地址/容量类量）；背压路径不易构造，
+  只做静态收口，**不宣称已取证**。`trim` 走新 `ftl_wbuf_drop` 路径，**必测**。
 - 板端最小回归：格式化启动 → 顺序写满多个 SB → GC → 并发覆盖写/TRIM → 断电重启 → WL →
   Journal/BBT 故障注入 → 格式化中途断电 → 长时 soak 后全量读回。
 

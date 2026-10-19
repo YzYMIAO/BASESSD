@@ -12,7 +12,7 @@
  *   1. 服务函数数组    g_op_service
  *   2. 提交            ftl_op_submit
  *   3. 派发            ftl_op_dispatch
- *   4. 同步等待服务    ftl_op_sync_wait（原 ftl_sync_waiter_handler）
+ *   4. 同步等待服务    ftl_op_sync_wait
  */
 
 #include "ftl_op.h"
@@ -30,20 +30,19 @@ static void ftl_op_sync_wait(struct ftl_context *ftl, const fc_command_status_t 
 /* ── 1. 服务函数数组 ──
  *
  * C99 designated initializer 的 const 数组（非"注册函数"）：编译期即可发现重复/
- * 越界，且无 init-order 依赖。未列出的槽恒为 NULL（= 孤儿 tag）。
+ * 越界，且无 init-order 依赖。**每个非 NONE 的 ftl_op_id_t 都必须在这里有实现**——
+ * 未列出的槽恒为 NULL，派发时判为孤儿（release + LOGE）。
  *
- * 已点亮的槽：
  *   · FTL_OP_SYNC_WAIT：所有 ftl_sync_* 经 ftl_sync_submit_wait 登记 ctx 后走这里；
- *   · FTL_OP_HOST_IO  ：host 数据读写子操作（原 ftl_op_host_io 的 FTL 分支）；
- *   · FTL_OP_JOURNAL  ：Journal 刷页 job（阶段 2，ctx = ftl->journal）；
- *   · FTL_OP_READ_RECOVERY：Read Recovery job（阶段 3，ctx = &ftl->rr）；
- *   · FTL_OP_GC / FTL_OP_WL：搬移 job（阶段 4，ctx = &ftl->mig）——**同一台引擎**，
- *     tag 分开只为日志/调试可辨（GC/WL 回收 vs 慢死预测退役）。
- *   · FTL_OP_L2P      ：L2P region 加载 / 写回（阶段 5，ctx = 该 cache line）；
- *   · FTL_OP_CHECKPOINT：Checkpoint job（阶段 6，ctx = ftl->cp_job）；
- *   · FTL_OP_BBT：元数据表持久化 job（阶段 7，ctx = &ftl->alloc）。
- *   · FTL_OP_METADATA：L2P 日志块整理 job（阶段 8，ctx = ftl->metadata_dir->job）。
- * **全部槽已点亮**（阶段 8 是最后一阶段）。 */
+ *   · FTL_OP_HOST_IO  ：host 数据读写子操作（ctx 不用，服务函数自己 pending_lookup）；
+ *   · FTL_OP_JOURNAL  ：Journal 刷页 job（ctx = ftl->journal）；
+ *   · FTL_OP_READ_RECOVERY：Read Recovery job（ctx = &ftl->rr）；
+ *   · FTL_OP_GC / FTL_OP_WL：搬移 job（ctx = &ftl->mig）——**同一台引擎**，
+ *     tag 分开只为日志/调试可辨（GC/WL 回收 vs 慢死预测退役）；
+ *   · FTL_OP_L2P      ：L2P region 加载 / 写回（ctx = 该 cache line）；
+ *   · FTL_OP_CHECKPOINT：Checkpoint job（ctx = ftl->cp_job）；
+ *   · FTL_OP_BBT      ：元数据表持久化 job（ctx = &ftl->alloc）；
+ *   · FTL_OP_METADATA ：L2P 日志块整理 job（ctx = ftl->metadata_dir->job）。 */
 static ftl_op_service_fn_t const g_op_service[FTL_OP_COUNT] = {
     [FTL_OP_SYNC_WAIT]     = ftl_op_sync_wait,
     [FTL_OP_HOST_IO]       = ftl_op_host_io,
@@ -69,8 +68,9 @@ ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
     /* ① ID 上命令（FC 只做原样拷贝，完成时回传到 completion.op_tag）。 */
     cmd->op_tag = (DWORD)op;
 
-    /* ② 登记必须**早于**提交（见头文件）。ctx == NULL 时主动清表项：cmd_id 是池下标、
-     *    会复用，上一轮若有 job 因故没摘链而泄漏了表项，会毒到新命令——主动清是廉价保险。 */
+    /* ② 登记必须**早于**提交（见头文件）。
+     *    ctx == NULL（host I/O）：主动清表项——cmd_id 是池下标、会复用，主动清是廉价保险。
+     *    ctx != NULL：由 completion_table_add 保证同一 id 不出现第二条表项（见该函数）。 */
     if (ctx != NULL)
     {
         if (completion_table_add(cmd_id, ctx) != FTL_OK)
@@ -115,7 +115,7 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
 
     if (fn == NULL)
     {
-        /* 孤儿命令：tag 越界 / 该功能的服务函数尚未点亮（阶段 2~8 占位）。
+        /* 孤儿完成：tag 越界（≥ FTL_OP_COUNT）或 FTL_OP_NONE。
          * 不清旁表则可能泄漏一个槽位，故一并 remove（幂等）。 */
         LOGE("[FTL] orphan completion cmd=%u op=%u status=0x%02x\r\n",
              (unsigned)completion->command_id,

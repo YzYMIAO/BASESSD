@@ -515,13 +515,90 @@ void rr_kick(ftl_context_t *ftl)
     rr_step(ftl);
 }
 
+/* ── RR 各 stage 的完成处理（ftl_op_read_recovery 按 rr->stage 分派）──
+ *
+ * 共同约定：命令的 release 与 rr_step 续跑**不**在这里做（见 dispatcher）——
+ * 但需要 cmd 数据的分支（READ / NB_*）必须在此把数据拷进 rr_page_scratch，
+ * 因为 release 之后 desc 链失效。 */
+
+/* 切读重试模式（SET_FEATURES）完成。⚠ 判据只认 NAND_FAIL，不是全集：
+ * 模式命令不读数据，无 UNC/CRC 可言；用全集会把无关位置 1 当失败。 */
+static void rr_complete_sf_set(ftl_context_t *ftl, const fc_command_status_t *completion)
+{
+    if ((completion->status & FC_CW_STATUS_NAND_FAIL) != 0U)
+    {
+        rr_next_attempt(ftl); /* 切模式失败：**不**恢复模式，直接下一 attempt */
+    }
+    else
+    {
+        ftl->rr.stage = (uint8_t)RR_STAGE_READ;
+    }
+}
+
+/* 重试读完成。成功 ⇒ 拷出数据、本 plane 完成。
+ * ⚠ 不恢复模式 0 —— 原 rr_exec_retry 的成功分支亦然，保持不变。
+ * 失败 ⇒ 先恢复默认读模式（原 Step 3 无条件执行，含最后一次 attempt）。 */
+static void rr_complete_read(ftl_context_t *ftl, fc_command_t *cmd, const fc_command_status_t *completion)
+{
+    ftl->rr.retry_count = ftl->rr.attempt;
+
+    if (!fc_cw_status_has_error(completion->status))
+    {
+        (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
+        ftl->rr.recovered = 1U;
+        ftl->rr.stage     = (uint8_t)RR_STAGE_PLANE_END;
+    }
+    else
+    {
+        ftl->rr.stage = (uint8_t)RR_STAGE_SF_RESTORE;
+    }
+}
+
+/* 模式恢复完成：只管把读电压切回默认，**不看** NAND_FAIL，一律进入下一
+ * attempt（或 Stage 2）。 */
+static void rr_complete_sf_restore(ftl_context_t *ftl)
+{
+    rr_next_attempt(ftl);
+}
+
+/* 邻居读完成。得出来 ⇒ 块本身没问题，可能是目标页局部 bit 错：再试目标页。
+ * 邻居数据本身不用 ⇒ 拷进 rr_page_scratch 也无妨，它随后会被 NB_RETRY 的结果覆盖。 */
+static void rr_complete_nb_read(ftl_context_t *ftl, fc_command_t *cmd, const fc_command_status_t *completion)
+{
+    if (!fc_cw_status_has_error(completion->status))
+    {
+        (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
+        ftl->rr.stage = (uint8_t)RR_STAGE_NB_RETRY;
+    }
+    else
+    {
+        rr_next_neighbor(ftl);
+    }
+}
+
+/* 邻居重试读完成：成功 ⇒ 拷出数据并收尾；失败 ⇒ 换下一个邻居。 */
+static void rr_complete_nb_retry(ftl_context_t *ftl, fc_command_t *cmd, const fc_command_status_t *completion)
+{
+    if (!fc_cw_status_has_error(completion->status))
+    {
+        (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
+        ftl->rr.recovered = 1U;
+        ftl->rr.stage     = (uint8_t)RR_STAGE_PLANE_END;
+    }
+    else
+    {
+        rr_next_neighbor(ftl);
+    }
+}
+
 /* --------------------------------------------------------------------
  * ftl_op_read_recovery
  *   功能：Read Recovery 命令的完成服务函数（g_op_service[FTL_OP_READ_RECOVERY]）。
  *   参数：ftl —— 命令归属实例（ftl_op_dispatch 按命令自身 ch/ce/lun 解析后传入）；
  *         completion —— FC 完成状态；ctx —— &ftl->rr。
  *   返回：无。
- *   实现要点：按 stage 判完成结果 → 改 stage → release 命令 → rr_step 续跑。
+ *   实现要点：按 stage 分派到 rr_complete_* 判完成结果并改 stage，然后 release
+ *             命令 → rr_step 续跑。
  *             ⚠ 成功判据：SET_FEATURES 只认 NAND_FAIL；读认
  *               FC_CW_STATUS_ERROR_MASK 全集（同 ftl_sync_read_page）。
  *             ⚠ 本函数**不得**同步等待（见 ftl_op.h）。
@@ -533,9 +610,8 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
     uint16_t      cmd_id = (uint16_t)completion->command_id;
     fc_command_t *cmd    = fc_command_id_to_command(cmd_id);
 
-    /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①），
-     * 完成派发保证 ftl 恒非空。不留 release-and-return 兜底：debug 当场炸，
-     * release（NDEBUG 裁空）下若真走到则 NULL 解引用留现场。 */
+    /* ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
+     * ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。 */
     ASSERT(ftl != NULL);
 
     ftl_read_recovery_t *rr = (ftl_read_recovery_t *)ctx;
@@ -554,65 +630,23 @@ void ftl_op_read_recovery(struct ftl_context *ftl, const fc_command_status_t *co
     switch ((rr_stage_t)rr->stage)
     {
         case RR_STAGE_SF_SET:
-            if ((completion->status & FC_CW_STATUS_NAND_FAIL) != 0U)
-            {
-                rr_next_attempt(ftl); /* 切模式失败：**不**恢复模式，直接下一 attempt */
-            }
-            else
-            {
-                rr->stage = (uint8_t)RR_STAGE_READ;
-            }
+            rr_complete_sf_set(ftl, completion);
             break;
 
         case RR_STAGE_READ:
-            rr->retry_count = rr->attempt;
-            if (!fc_cw_status_has_error(completion->status))
-            {
-                /* 重试成功：拷出数据（**release 之前**），本 plane 完成。
-                 * ⚠ 不恢复模式 0 —— 原 rr_exec_retry 的成功分支亦然，保持不变。 */
-                (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
-                rr->recovered = 1U;
-                rr->stage     = (uint8_t)RR_STAGE_PLANE_END;
-            }
-            else
-            {
-                /* 失败 ⇒ 先恢复默认读模式（原 Step 3 无条件执行，含最后一次 attempt）。 */
-                rr->stage = (uint8_t)RR_STAGE_SF_RESTORE;
-            }
+            rr_complete_read(ftl, cmd, completion);
             break;
 
         case RR_STAGE_SF_RESTORE:
-            /* 模式恢复命令只管把读电压切回默认：不看 NAND_FAIL，一律进入下一
-             * attempt（或 Stage 2）。 */
-            rr_next_attempt(ftl);
+            rr_complete_sf_restore(ftl);
             break;
 
         case RR_STAGE_NB_READ:
-            if (!fc_cw_status_has_error(completion->status))
-            {
-                /* 邻居读得出来 ⇒ 块本身没问题，可能是目标页局部 bit 错：再试目标页。
-                 * 邻居数据本身不用 ⇒ 拷进
-                 * rr_page_scratch 也无妨，它随后会被 NB_RETRY 的结果覆盖。 */
-                (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
-                rr->stage = (uint8_t)RR_STAGE_NB_RETRY;
-            }
-            else
-            {
-                rr_next_neighbor(ftl);
-            }
+            rr_complete_nb_read(ftl, cmd, completion);
             break;
 
         case RR_STAGE_NB_RETRY:
-            if (!fc_cw_status_has_error(completion->status))
-            {
-                (void)ftl_cmd_read_data(cmd, ftl->rr_page_scratch, FTL_READ_USER_SIZE);
-                rr->recovered = 1U;
-                rr->stage     = (uint8_t)RR_STAGE_PLANE_END;
-            }
-            else
-            {
-                rr_next_neighbor(ftl);
-            }
+            rr_complete_nb_retry(ftl, cmd, completion);
             break;
 
         default:

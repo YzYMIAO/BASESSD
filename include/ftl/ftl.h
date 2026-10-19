@@ -25,6 +25,7 @@
 #include "pending.h"
 #include "read_recovery.h"
 #include "ssd_types.h"
+#include "wbuf.h"
 
 #include <stdint.h>
 
@@ -59,28 +60,6 @@
 /* 全局 LBA 上限必须与共享 cache 的键空间同源（C9：同一语义只允许一套范围）。 */
 _Static_assert((uint64_t)FTL_LBA_MAX == L2P_GLOBAL_LBA_MAX, "FTL_LBA_MAX 与共享 cache 的全局 LBA 上限不一致");
 
-/* ── 页打包写缓冲（§七 方案 A）──
- *
- * CW 级映射下子操作常只覆盖半个 pair 窗口（如一次 512B 写只落 plane0 的 CW0），
- * 而器件**按页编程**（参数页 Byte86-89 部分页单位 = 1 CW；Byte110 每 ECC user area
- * 只能编一次）。逐子操作分配页会让每次写都吃掉一整对页 ⇒ 利用率 12.5%~50%。
- *
- * 本缓冲把**同一 pair 窗口**内的多次 host 写攒成一页，窗口填满 / 切到别的窗口 /
- * 显式 flush / 空闲时**一次编程**（两 plane 都有数据即一条 multi-plane）⇒ 写指针
- * 按页推进，页内利用率回到 100%。
- *
- * data[slot] 的 slot = plane*CW_NUM + cw（与 LBA 低 3 位同构），occupied 逐位标记有效
- * 槽。owners 记录「哪些组向本页贡献过」——一页可能由多个组拼成，完成时必须**逐组**
- * 递减在飞数（见 pending_group_complete_subop_multi）。 */
-typedef struct
-{
-    uint8_t  data[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 CW × 512B = 4096B 页镜像 */
-    uint8_t  occupied;                              /* bit i = 槽 i 有数据（i = plane*CW_NUM+cw） */
-    uint8_t  open;                                  /* 1 = 正持有某窗口 */
-    lba_t    base;                                  /* 持有页的 pair 窗口基址（低 3 位清零） */
-    uint32_t owners;                                /* bit gi = 组 gi 贡献过本页（FTL_GROUP_MAX=32） */
-} ftl_wbuf_t;
-
 /* ── FTL 主上下文 ── */
 
 typedef struct ftl_context
@@ -100,7 +79,7 @@ typedef struct ftl_context
     ftl_io_group_t groups[FTL_GROUP_MAX];
 
     /* 页打包写缓冲——同一 pair 窗口的多次写攒成一页再编程，
-     * 见 ftl_wbuf_t。由 ftl.c 的 ftl_wbuf_* 族操作。 */
+     * 见 wbuf.h 的 ftl_wbuf_t。由 wbuf.c 的 ftl_wbuf_* 族操作。 */
     ftl_wbuf_t wbuf;
 
     /* FTL 表指针（由 HIL 的 ftl_storage_t 提供并决定落哪个域）。

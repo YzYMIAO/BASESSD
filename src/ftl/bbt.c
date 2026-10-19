@@ -831,14 +831,57 @@ void bbt_kick(ftl_allocator_t *alloc)
  *   参数：ftl —— 实例（**不用**：ctx 已是本实例的 allocator）；
  *         completion —— 完成状态；ctx —— `ftl_allocator_t *`（ftl_op_submit 时传）。
  *   返回：无。命令的 release 归本函数。
- *   实现要点：失败分支**逐条复刻**旧 bbt_save 的语义——
- *     · 擦失败 ⇒ write_idx **不推进**（旧 metadata_ring_prepare_write 返回 FTL_ERROR
- *       的那条分支），dirty 保留；
- *     · 写失败 ⇒ 游标**照推**（已写过的槽可能半编程，不可复用；旧 bbt_save 如此），
- *       dirty 保留供下次重试；
- *     · 写成功 ⇒ 游标照推 + 清 dirty。
+ *   实现要点：按 job.phase 分派到 bbt_complete_erase / bbt_complete_write（见各自注释）。
  *   ⚠ 本函数**只**收尾/续提交，不调 bbt_kick（续提交是提交侧动作，无需嵌套泵）。
  * -------------------------------------------------------------------- */
+/* 擦完成。失败 ⇒ 游标**不推进**（擦没成，该槽还没被消耗），dirty 保留供下轮重试。 */
+static void bbt_complete_erase(ftl_allocator_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
+{
+    if (fc_cw_status_has_error(completion->status))
+    {
+        LOGE("[BBT] ring block erase failed status=0x%02x — 游标不推进，下轮重试\r\n",
+             (unsigned)completion->status);
+        alloc->bbt.job.phase   = (uint8_t)BBT_JOB_IDLE;
+        alloc->bbt.job.waiting = 0U;
+        (void)fc_command_release(cmd);
+        return;
+    }
+
+    /* 擦成功 ⇒ 起写。先落 phase，提交被背压拒就停在 WRITE/waiting=0 等续跑
+     * （**不再回 IDLE**——回 IDLE 会让下轮 kick 重走 prepare_addr 再擦一次同一块）。 */
+    alloc->bbt.job.phase   = (uint8_t)BBT_JOB_WRITE;
+    alloc->bbt.job.waiting = 0U;
+    (void)bbt_submit_write(alloc);
+    (void)fc_command_release(cmd);
+}
+
+/* record 写完成。**无论成败都推进游标**：已写过的槽可能半编程，不可复用。
+ * dirty 的清除还要比 dirty_gen —— 写飞行期间若又标了坏块，本条 record 是旧快照。 */
+static void bbt_complete_write(ftl_allocator_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
+{
+    bbt_probe_ctx_t rctx;
+
+    bbt_ctx_init(alloc, &rctx);
+    alloc->bbt.write_idx = (uint16_t)((alloc->bbt.write_idx + 1U) % metadata_ring_total_records(&rctx.ring));
+
+    if (fc_cw_status_has_error(completion->status))
+    {
+        LOGE("[BBT] record write failed status=0x%02x — dirty 保留\r\n", (unsigned)completion->status);
+    }
+    else if (alloc->bbt.dirty_gen == alloc->bbt.job.dirty_gen)
+    {
+        alloc->bbt.dirty = 0U;
+    }
+    else
+    {
+        LOGE("[BBT] record written but dirty_gen advanced — 再落一条\r\n");
+    }
+
+    alloc->bbt.job.phase   = (uint8_t)BBT_JOB_IDLE;
+    alloc->bbt.job.waiting = 0U;
+    (void)fc_command_release(cmd);
+}
+
 void ftl_op_bbt(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
     ftl_allocator_t *alloc = (ftl_allocator_t *)ctx;
@@ -848,8 +891,7 @@ void ftl_op_bbt(struct ftl_context *ftl, const fc_command_status_t *completion, 
     ASSERT(alloc != NULL);
     ASSERT(completion != NULL);
 
-    fc_command_t *cmd    = fc_command_id_to_command((uint16_t)completion->command_id);
-    uint8_t       failed = fc_cw_status_has_error(completion->status) ? 1U : 0U;
+    fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
     /* 孤儿 / 迟到完成：当前没有在飞命令 ⇒ 只释放，不改状态。 */
     if (alloc->bbt.job.waiting == 0U)
@@ -861,57 +903,20 @@ void ftl_op_bbt(struct ftl_context *ftl, const fc_command_status_t *completion, 
 
     if (alloc->bbt.job.phase == (uint8_t)BBT_JOB_ERASE)
     {
-        if (failed != 0U)
-        {
-            LOGE("[BBT] ring block erase failed status=0x%02x — 游标不推进，下轮重试\r\n",
-                 (unsigned)completion->status);
-            alloc->bbt.job.phase   = (uint8_t)BBT_JOB_IDLE;
-            alloc->bbt.job.waiting = 0U;
-            (void)fc_command_release(cmd);
-            return;
-        }
-
-        /* 擦成功 ⇒ 起写。先落 phase，提交被背压拒就停在 WRITE/waiting=0 等续跑
-         * （**不再回 IDLE**——回 IDLE 会让下轮 kick 重走 prepare_addr 再擦一次同一块）。 */
-        alloc->bbt.job.phase   = (uint8_t)BBT_JOB_WRITE;
-        alloc->bbt.job.waiting = 0U;
-        (void)bbt_submit_write(alloc);
-        (void)fc_command_release(cmd);
-        return;
+        bbt_complete_erase(alloc, cmd, completion);
     }
-
-    if (alloc->bbt.job.phase == (uint8_t)BBT_JOB_WRITE)
+    else if (alloc->bbt.job.phase == (uint8_t)BBT_JOB_WRITE)
     {
-        bbt_probe_ctx_t rctx;
-
-        bbt_ctx_init(alloc, &rctx);
-        /* **无论成败都推进游标**（与旧 bbt_save 一致） */
-        alloc->bbt.write_idx = (uint16_t)((alloc->bbt.write_idx + 1U) % metadata_ring_total_records(&rctx.ring));
-
-        if (failed != 0U)
-        {
-            LOGE("[BBT] record write failed status=0x%02x — dirty 保留\r\n", (unsigned)completion->status);
-        }
-        else if (alloc->bbt.dirty_gen == alloc->bbt.job.dirty_gen)
-        {
-            alloc->bbt.dirty = 0U;
-        }
-        else
-        {
-            /* 写飞行期间又标坏了：本条 record 是旧快照，保留 dirty 触发下一次 save。 */
-            LOGE("[BBT] record written but dirty_gen advanced — 再落一条\r\n");
-        }
+        bbt_complete_write(alloc, cmd, completion);
+    }
+    else
+    {
+        /* 不该发生：一条命令对应一个 job，phase 必为 ERASE / WRITE。 */
+        LOGE("[BBT] unexpected completion phase=%u\r\n", (unsigned)alloc->bbt.job.phase);
         alloc->bbt.job.phase   = (uint8_t)BBT_JOB_IDLE;
         alloc->bbt.job.waiting = 0U;
         (void)fc_command_release(cmd);
-        return;
     }
-
-    /* 不该发生：一条命令对应一个 job，phase 必为 ERASE / WRITE */
-    LOGE("[BBT] unexpected completion phase=%u\r\n", (unsigned)alloc->bbt.job.phase);
-    alloc->bbt.job.phase   = (uint8_t)BBT_JOB_IDLE;
-    alloc->bbt.job.waiting = 0U;
-    (void)fc_command_release(cmd);
 }
 
 /* --------------------------------------------------------------------

@@ -20,6 +20,7 @@
 #include "ssd_request.h"
 #include "stack_guard.h"
 #include "usart.h"
+#include "wbuf.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -363,7 +364,7 @@ static int uart_cli_tr(int argc, char *argv[])
 }
 
 /*
- * wp <lba> <n> <k> — 页打包写缓冲合并诊断（§七 方案 A）
+ * wp <lba> <n> <k> — 页打包写缓冲合并诊断
  *
  * 一次提交 k 个「同一 pair 窗口内、各 n 个连续 LBA」的小写，**直接调 ftl_submit_write
  * 绕过 g_cli_pending.busy 闸门**——该闸门让连续 `wr` 串行，而串行下 idle flush 立即触发，
@@ -372,7 +373,8 @@ static int uart_cli_tr(int argc, char *argv[])
  * 约束：lba 必须 8 对齐（= 窗口基址）；n ≥ 1；k ≥ 2；k*n ≤ FTL_LBA_PER_PAIR（= 8）。
  * 各组源数据取自 g_wp_buf 的不相交切片，组 i 填字节 0xA0+i（错位时回读会串段）。
  *
- * 判据：`info` 的 total_writes 相对本次只 +1（对比逐组编程的 +k），ftl_wbuf_flush 打一行；
+ * 判据：`info` 的 total_writes 相对本次只 +1（对比逐组编程的 +k）——**主判据**；
+ *       ftl_wbuf_flush 的 `[FTL] wbuf flush` 行是辅助证据，且是 LOGD ⇒ **仅 debug 档可见**。
  *       随后 `rd <lba> <k*n>` 回读，第 (i*n+j) 段字节应为 0xA0+i。
  */
 static int uart_cli_wp(int argc, char *argv[])
@@ -767,8 +769,9 @@ static int uart_cli_bbt(int argc, char *argv[])
                     ftl->bg_suspend = 1U;
                     /* 页打包写缓冲里可能还攒着未编程的 CW——它们若在擦净后被 flush，
                      * 会把数据编到刚擦空的芯片上（介质状态与 RAM 描述不再一致）。
-                     * 一并复位（含 open/occupied/owners/base），后续只等复位。 */
-                    memset(&ftl->wbuf, 0, sizeof(ftl->wbuf));
+                     * 走 wbuf 的复位接口（不是裸 memset）：它会一并结算那些写组的在飞数，
+                     * 否则 host 写组永不完成。 */
+                    ftl_wbuf_reset(ftl);
                 }
                 bbt_print_bad_map(&ftl->alloc, do_erase);
             }

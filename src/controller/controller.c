@@ -22,9 +22,9 @@ uint64_t ssd_controller_run_end(ssd_controller_t *controller, uint64_t lba, uint
  */
 ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, uint64_t lba)
 {
-    uint32_t ch;
-    uint32_t ce;
-    uint32_t lun;
+    uint8_t ch;
+    uint8_t ce;
+    uint8_t lun;
 
     /* 唯一调用者 ssd_controller_submit / ssd_request_split 均已判过 controller */
     ASSERT(controller != NULL);

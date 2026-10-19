@@ -1010,7 +1010,7 @@ L2P region log（追加块）
 | Checkpoint | `checkpoint.c/h` | §3.8 |
 | Host 提交 / 组 / pending | `ftl.c`、`pending.c/h` | §3.9 |
 | 完成路由 / op dispatch | `completion_table.c/h`、`ftl_op.c/h` | §3.10 |
-| 页打包写缓冲 | `ftl.c`、`ftl.h` | §3.11 |
+| 页打包写缓冲 | `wbuf.c`、`wbuf.h` | §3.11 |
 | Service / 后台调度 | `ftl.c`、`bg_scheduler.c/h` | §3.12 |
 | GC / 迁移 | `gc.c/h`、`migrate.c/h` | §3.13 |
 | 读恢复 | `read_recovery.c/h` | §3.14 |
@@ -2673,7 +2673,7 @@ FTL 需要回答两个问题：
 
 | 结构 | 字段 | 说明 |
 |---|---|---|
-| `completion_entry_t` | cmd_id / ctx | 32 项旁表 |
+| `completion_entry_t` | cmd_id / ctx | `COMPLETION_TABLE_SIZE` 项旁表（容量推导见 §3.10.7） |
 | `g_route[CH][CE][LUN]` | `ftl_context_t *` | 实例路由 |
 | `ftl_op_id_t` | `FTL_OP_HOST_IO / L2P / JOURNAL / CHECKPOINT / METADATA / GC / WL / BBT / WEAR / READ_RECOVERY / ...` | `g_op_service[]` 下标 |
 | `ftl_sync_waiter_t` | cmd_id / done / status | 同步逃生口的等待器 |
@@ -2686,6 +2686,11 @@ FTL 需要回答两个问题：
 4. **服务函数不得自旋完成泵**：`l2p_sync_pump` 有 `ftl_op_in_dispatch()==0` 断言；
    服务函数只能提交命令或改状态，推进留给下一轮。
 5. **ctx 生命周期覆盖命令在飞期**：同步等待器用栈，其余用静态 job/line/pending 槽。
+6. **同一 cmd_id 至多一条表项**：由 `completion_table_add` 唯一闸门保证——它先全表查
+   cmd_id，命中则**原地覆盖 ctx** 并 `LOGW`，未命中才取空槽。
+   理由：`completion_table_take` 取的是**首个**匹配项；若允许两条，泄漏（如 FC 的 CQ 满
+   强制完成、FTL 观测不到）之后 cmd_id 被复用，`take` 就会把**别人的 ctx** 交给服务函数，
+   而本命令自己的表项永久泄漏。
 
 #### 3.10.4 完成路径
 
@@ -2718,7 +2723,7 @@ flowchart LR
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
 | 完成是孤儿（无表项/未知 tag） | release + LOGE | 该命令的资源不泄漏；上层 job 可能停摆，由 stall 计数兜底 |
-| 路由表项为空 | ASSERT（实例注册漏了） | debug 停机；release 下由上层保守处理 |
+| 路由表项为空 | 路由函数**原样返回 NULL**；ASSERT 在**被调方**服务函数入口 | debug 停机；release 下 NULL 解引用留现场。消费者已全覆盖：6 个服务函数 `ASSERT(ftl != NULL)`，journal / bbt 不用 ftl，sync_wait 与实例无关 |
 | 服务函数里调同步逃生口 | `ASSERT(ftl_op_in_dispatch()==0)` | debug 立刻暴露嵌套泵 |
 | 提交失败 | remove + release，返回错误/背压 | 调用者保留状态，下轮重试 |
 
@@ -2726,7 +2731,7 @@ flowchart LR
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `COMPLETION_TABLE_SIZE` | 32 | `include/ftl/completion_table.h` |
+| `COMPLETION_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH`（= 64） | `include/ftl/completion_table.h`。**推导**：表按 `command_id` 键 ⇒ 表项数 ≤ 同时在飞命令数 ≤ FC 命令池深度。原值 32 < 池深 64，满则 `ftl_op_submit` 返 `FTL_ERROR`（非背压）⇒ 结构性不可达；`src/ftl/completion_table.c` 有 `_Static_assert(COMPLETION_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH)` 防池深漂移 |
 | `g_op_service[]` 槽位 | 按 `ftl_op_id_t` 顺序 | `src/ftl/ftl_op.c` |
 | 同步自旋预算 | `L2P_SYNC_GUARD_MAX` / 各 job 的 stall 上限 | `include/ftl/l2p_cache.h` 等 |
 
@@ -2734,7 +2739,7 @@ flowchart LR
 
 “提交队列 + 完成队列 + 命令 id 旁表 + 按队列/实例路由”是 NVMe/主控数据面的基本模型；
 本仓把 NVMe 的 SQ/CQ 简化为 FC 的队列 + 全局完成表，op tag 对应完成服务函数选择器。
-**本仓自定**的是 32 项固定旁表与“先 take 再 dispatch”的防重入顺序。
+**本仓自定**的是固定容量旁表与“先 take 再 dispatch”的防重入顺序。
 
 ---
 
@@ -2757,11 +2762,20 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
 
 #### 3.11.2 职责与边界
 
+**实现位置**：`src/ftl/wbuf.c`（`ftl_wbuf_*` 族 + `static wbuf_program_page`），
+结构体与接口声明在 `include/ftl/wbuf.h`。它是 FTL 层唯一**独立成文件**的子模块中
+最晚抽出的一支（其余子模块各自成文件）；`ftl.c` 只调用其接口，不碰 `ftl_wbuf_t` 内部。
+
 - **做**：按窗口累积 CW（`slot = plane*CW_NUM + cw`）、记录占用位图与贡献组、切换窗口时
   flush、空闲 flush、页满尽力 flush、构造一条页写命令。
 - **不做**：不决定 L2P 更新（完成路径做，§3.9）；不分配块（调用 allocator，§3.2）；
   不做 GC（分配失败时起紧急 GC，§3.13）。
 - **读路径**也用它：未 flush 的窗口数据还在 wbuf，读要先从这里拿（§3.9）。
+- **对外接口**：`ftl_wbuf_has` / `ftl_wbuf_read`（读路径，命中即拷贝）/
+  `ftl_wbuf_drop`（TRIM 丢弃单槽）/ `ftl_wbuf_append` / `ftl_wbuf_flush` /
+  `ftl_wbuf_maybe_flush_idle` / `ftl_wbuf_reset`（介质被擦净后整体作废）。
+  ⚠ 缓冲的**内部不变量**（清空窗口 ⇒ 结算 `owners`）由 `ftl_wbuf_drop` / `ftl_wbuf_reset`
+  在模块内收口，**不**由调用者手工维护（CLAUDE.md §3.1 / C3）。
 
 #### 3.11.3 结构与不变量
 
@@ -2775,11 +2789,18 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
 
 **不变量**：
 
-1. `slot` 编码与 LBA 低 3 位同构（plane 位 + CW 位），不另立坐标。
+1. `slot` 编码与 LBA 低 3 位同构（plane 位 + CW 位），不另立坐标；位图里的位一律由
+   `ftl_cw_bit(plane, cw)` 构造（与全仓所有 CW 位图同一构造器，C9），
+   `ftl_lba_pair_slot` 只用作 `data[]` 的**数组下标**（不是位）。
 2. **只有提交成功后才清 wbuf**：提交失败（命令池/描述符池满）保留数据，下轮重试。
-3. **一页可能由多个组拼成**：`owners` 必须逐组记录，完成时逐组递减。
+3. **一页可能由多个组拼成**：`owners` 必须逐组记录，完成时逐组递减；
+   每个贡献组对该窗口**至多一次** append（`ftl_issue_subop` 把 `n` 夹到窗口边界）。
 4. **窗口切换先 flush**：不同窗口的 LBA 不能混进同一页。
 5. **页满尽力 flush**：失败不回滚已受理的写，留给后续 flush/空闲 flush。
+6. **`occupied` 清空 ⟺ `owners` 必须结算**：窗口被丢弃（TRIM 清空 / 介质擦净复位）时，
+   必须对贡献组按对应状态码逐组递减在飞数（TRIM ⇒ OK，复位 ⇒ IO_ERROR）；只清 `owners`
+   会让那些组的在飞数永不归零、host 写组挂死。该不变量由 `ftl_wbuf_drop` / `ftl_wbuf_reset`
+   在模块内收口（§3.1：不变量不得靠外部模块手工维护）。
 
 #### 3.11.4 流程
 
@@ -2796,19 +2817,27 @@ flowchart TD
     G --> H
 ```
 
-**`ftl_wbuf_flush`**：
+**`ftl_wbuf_flush`**（资源获取**按有无归还路径排序**：先查余量、再取可释放的命令槽、
+最后取不可归还的页对 —— 见下）：
 
 ```text
-① pending 表空间检查（不够 ⇒ FTL_AGAIN）
-② allocator_alloc_pair(FTL_TEMP_HOT, new_pba)
-     失败 ⇒ mig_begin_gc（紧急 GC）并返回 FTL_AGAIN
-③ nplanes = 两 plane 段是否都有数据；n_cw = popcount(occupied)
-④ 建 FC 命令：operation = multi-plane / normal；meta = window base
-⑤ ftl_cmd_setup_ppa_pair_cw + ftl_cmd_write_data_cw
+① pending 表空间检查（不够 ⇒ FTL_AGAIN；此时未占用任何资源）
+② fc_command_alloc（命令池空 ⇒ FTL_AGAIN；命令槽有 release ⇒ 排在页对之前）
+③ allocator_alloc_pair(FTL_TEMP_HOT, pba)
+     失败 ⇒ 释放命令槽 + mig_begin_gc（紧急 GC）+ FTL_AGAIN
+④ nplanes = ftl_cw_bitmap_plane_count(occupied)；n_cw = ftl_cw_bitmap_popcount(occupied)
+⑤ wbuf_program_page：命令头 + ftl_cmd_setup_ppa_pair_cw + ftl_cmd_write_data_cw
 ⑥ pending_alloc：owners、op=WRITE、n_cw、cw_bitmap、lba=base、new_pba/new_pba1
 ⑦ ftl_op_submit(FTL_OP_HOST_IO)
-⑧ 提交成功后才清 wbuf（open=0/occupied=0/owners=0）
+⑧ 提交成功后才清 wbuf（open=0/occupied=0/owners=0）；打一行 LOGD 观测
+
+错误出口（④~⑦ 任一失败，H8 的唯一 goto 出口）：
+     fc_command_release（幂等）+ allocator_rewind_pair（归还那对页）
+     缓冲原样保留 ⇒ 下轮重试
 ```
+
+⚠ 取到页对后**任何**失败都必须 `allocator_rewind_pair` 归还：命令从未提交 ⇒ 页从未被编程，
+归还是安全的；不归还则每次重试白烧 2 页，表现为**容量无声流失**（CLAUDE.md §3.1）。
 
 **空闲 flush**：`ftl_wbuf_maybe_flush_idle` 在 `ftl_service` Phase 2.5 检查“是否还有写组
 指向当前窗口”；没有就 flush，确保 host 收尾不会无限等待。
@@ -2817,10 +2846,13 @@ flowchart TD
 
 | 情况 | 结果 | 数据影响 |
 |---|---|---|
-| 分配不到页 | `FTL_AGAIN` + 紧急 GC | 数据仍在 wbuf，下轮重试 |
-| pending 表满 | `FTL_AGAIN` | 同上 |
-| 命令提交失败 | 保留 wbuf | 同上 |
+| 分配不到页 | 释放命令槽 + `FTL_AGAIN` + 紧急 GC | 数据仍在 wbuf，下轮重试 |
+| 命令池满（`fc_command_alloc` NULL） | `FTL_AGAIN`（尚未取页对） | 同上 |
+| pending 表满 | `FTL_AGAIN` + 归还页对 | 同上 |
+| 命令提交失败（SQ 满） | 先摘 pending，再归还页对 + `FTL_AGAIN` | 同上 |
+| 建链/填数据失败 | `FTL_ERROR` / 原样上抛 + 归还页对 | 同上（缓冲保留，但永久错误不再重试） |
 | PROGRAM 失败 | 关 SB + 标坏；L2P 不动 | 自动回滚旧数据 |
+| TRIM 清空窗口 / 介质擦净复位 | `ftl_wbuf_drop` / `ftl_wbuf_reset` 结算 `owners` | 未落盘写被丢弃（TRIM 无映射变更；复位按写失败收尾） |
 | 中途掉电 | wbuf 是 RAM，丢失未提交页 | 这些 host 写尚未 acked，属容忍窗口 |
 
 #### 3.11.6 常量与出处
@@ -4243,7 +4275,7 @@ flowchart TB
 | `FTL_PENDING_CMD_NONE` | `0xFFFF` | 同上 |
 | `FTL_DRAIN_STALL_MAX` | 8 | `include/ftl/ftl.h` |
 | `FTL_LBA_MAX` | `FTL_IU_TOTAL` | 同上 |
-| `COMPLETION_TABLE_SIZE` | 32 | `include/ftl/completion_table.h` |
+| `COMPLETION_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH`（= 64） | `include/ftl/completion_table.h`。**推导**：表按 `command_id` 键 ⇒ 表项数 ≤ 同时在飞命令数 ≤ FC 命令池深度。原值 32 < 池深 64，满则 `ftl_op_submit` 返 `FTL_ERROR`（非背压）⇒ 结构性不可达；`src/ftl/completion_table.c` 有 `_Static_assert(COMPLETION_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH)` 防池深漂移 |
 
 #### Journal
 

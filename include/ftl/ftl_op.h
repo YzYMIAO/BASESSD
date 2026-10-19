@@ -16,8 +16,8 @@
  * FTL_OP_JOURNAL 的标签，服务函数与调用者会对同一份状态各推进一次。
  * 某个功能站点被改成异步之后，该站点才把自己的 tag 换成它的功能 op ID。
  *
- * ⇒ 枚举一次性建全（"各功能一个 ID"），各 ID 随其站点改造**逐个点亮**。
- *   未点亮的槽为 NULL，派发时判为孤儿（release + LOGE）。
+ * ⇒ 枚举一次性建全（"各功能一个 ID"）；`g_op_service[]` 为每个非 NONE 的 ID 都填了
+ *   实现。落在表外（tag ≥ FTL_OP_COUNT）或 FTL_OP_NONE 的完成判为孤儿（release + LOGE）。
  *
  * ── 命令 release 归属（命令生命周期的唯一权威）──
  *
@@ -52,15 +52,15 @@ typedef enum
 {
     FTL_OP_NONE = 0,      /* 未标记：派发时判为孤儿（release + LOGE），正常不应出现 */
     FTL_OP_SYNC_WAIT,     /* 唤醒同步等待者（所有 ftl_sync_* 用） */
-    FTL_OP_HOST_IO,       /* host 读写子操作（原 FC_COMMAND_MODULE_FTL 分支） */
-    FTL_OP_JOURNAL,       /* Journal 刷页 job（journal.c，阶段 2 点亮） */
-    FTL_OP_READ_RECOVERY, /* Read Recovery job（read_recovery.c，阶段 3 点亮） */
-    FTL_OP_GC,            /* GC 搬移 job（migrate.c，阶段 4 点亮） */
-    FTL_OP_WL,            /* 静态 WL / 慢死预测搬移 job（migrate.c，阶段 4 点亮） */
-    FTL_OP_L2P,           /* L2P region 加载 / 写回（l2p_cache.c，阶段 5 点亮） */
-    FTL_OP_CHECKPOINT,    /* 阶段 6 */
-    FTL_OP_BBT,           /* 阶段 7 */
-    FTL_OP_METADATA,      /* 阶段 8 */
+    FTL_OP_HOST_IO,       /* host 读写子操作（ftl.c） */
+    FTL_OP_JOURNAL,       /* Journal 刷页 job（journal.c） */
+    FTL_OP_READ_RECOVERY, /* Read Recovery job（read_recovery.c） */
+    FTL_OP_GC,            /* GC 搬移 job（migrate.c） */
+    FTL_OP_WL,            /* 静态 WL / 慢死预测搬移 job（migrate.c，与 GC 共用引擎） */
+    FTL_OP_L2P,           /* L2P region 加载 / 写回（l2p_cache.c） */
+    FTL_OP_CHECKPOINT,    /* Checkpoint job（checkpoint.c） */
+    FTL_OP_BBT,           /* BBT 持久化 job（bbt.c） */
+    FTL_OP_METADATA,      /* L2P 日志块整理 job（metadata_job.c） */
     FTL_OP_COUNT          /* 计数哨兵 */
 } ftl_op_id_t;
 

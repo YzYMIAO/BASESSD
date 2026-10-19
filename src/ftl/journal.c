@@ -568,14 +568,9 @@ ftl_status_t journal_flush_page(l2p_journal_t *journal)
  *   参数：ftl —— 实例（**不用**：ctx 已是本实例的 journal）；completion —— 完成状态；
  *         ctx —— `l2p_journal_t *`（ftl_op_submit 时传 ftl->journal）。
  *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
- *   实现要点：
- *     · JRN_WRITE 成功 ⇒ 推进写指针（守卫见下）；跨块 ⇒ 起异步擦除，phase = JRN_ERASE。
- *     · JRN_WRITE 失败 ⇒ **推进到失败页之后**（失败页可能半编程，绝不复用；
- *       跨块时保留 need_erase 由 journal_kick 先擦）。条目已丢，置
- *       write_fail_pending + 强制 CP，阻止 GC 在 L2P 落盘前擦 victim。
- *     · JRN_ERASE ⇒ 记 LOGE（环形块擦失败 ⇒ 该块后续写入不可信），phase = JRN_IDLE。
- *     · **指针推进守卫**：drain 超时后 journal_flush_now 可能已把指针推过落点，
- *       此时 job 的落点已过期 ⇒ 只在「指针仍在起写位置」时推进。
+ *   实现要点：按 job.phase 分派到 journal_complete_write / journal_complete_erase
+ *             （见各自注释）。job.phase 只能取 WRITE / ERASE，其余是状态机破坏 ⇒
+ *             这里的 ASSERT 只覆盖 debug，release 兜底分支见函数体。
  * -------------------------------------------------------------------- */
 /* 记录一次 Journal 页写失败：条目已随 page_buf 清空而丢失。
  * 置 pending 阻止任何 victim 擦除，并强制一次 Checkpoint 把当前 L2P 落盘；
@@ -587,6 +582,74 @@ static void journal_note_write_failure(l2p_journal_t *journal)
     journal->write_fail_pending = 1U;
     journal->checkpoint_needed  = 1U;
     journal->emergency          = 1U;
+}
+
+/* Journal 页写完成（成功 / 失败共用）。两条路径都要推进落点并置 IDLE：
+ * **指针推进守卫** —— drain 超时后 journal_flush_now 可能已把指针推过落点，
+ * 此时 job 的落点已过期 ⇒ 只在「指针仍在起写位置」时推进。
+ * 失败页可能已半编程 ⇒ **绝不复用**；推进到 freeze 算好的下一落点，跨块时
+ * need_erase 保留，由 journal_kick 先擦目标块再写。条目已丢（page_buf 在提交时
+ * 清空），由 write_fail_pending 兜住：GC 不会擦 victim，直到 CP 把当前 L2P 落盘。 */
+static void journal_complete_write(l2p_journal_t *journal, fc_command_t *cmd, const fc_command_status_t *completion)
+{
+    const bool failed = fc_cw_status_has_error(completion->status);
+
+    if (failed)
+    {
+        LOGE("[JRN] page write failed pba=%08lx status=0x%02x — 跳过失败页\r\n",
+             (unsigned long)journal->job.waddr,
+             (unsigned)completion->status);
+        journal_note_write_failure(journal);
+    }
+
+    if ((journal->current_block == journal->job.from_block) && (journal->current_page == journal->job.from_page))
+    {
+        journal->current_block = journal->job.target_block;
+        journal->current_page  = journal->job.target_page;
+    }
+    journal->job.phase = JRN_IDLE;
+
+    if (failed)
+    {
+        /* 写都没成，不在此起换块擦除：need_erase 保留给 journal_kick 下轮处理。 */
+        (void)fc_command_release(cmd);
+        return;
+    }
+
+    /* 换块 ⇒ 起异步擦除；起不来就留着 need_erase，由 journal_kick 下轮重试。
+     * ⚠ 先查 pre_erased_block：journal_truncate 可能已在这段窗口里代擦了环形
+     *   下一块（正是本 job.target_block）⇒ 消费记账跳过，避免重复擦。 */
+    if (journal->job.need_erase != 0U)
+    {
+        if (journal->pre_erased_block == journal->job.target_block)
+        {
+            journal->pre_erased_block = JOURNAL_BLOCK_NONE;
+            journal->job.need_erase   = 0U;
+        }
+        else if (!journal_start_erase(journal))
+        {
+            LOGE("[JRN] erase kick failed blk=%u — 下轮重试\r\n", (unsigned)journal->job.target_block);
+        }
+    }
+
+    (void)fc_command_release(cmd);
+}
+
+/* Journal 环形块擦完成。失败判据必须是全集：只看 NAND_FAIL 会把 TIMEOUT / CRC
+ * 当成擦成功，后续页写进可能未擦的块（二次编程 = 静默损坏）。 */
+static void journal_complete_erase(l2p_journal_t *journal, fc_command_t *cmd, const fc_command_status_t *completion)
+{
+    if (fc_cw_status_has_error(completion->status))
+    {
+        LOGE("[JRN] ring block erase failed blk=%u status=0x%02x — 重新挂起\r\n",
+             (unsigned)journal->job.target_block,
+             (unsigned)completion->status);
+        /* 擦失败 ⇒ 目标块仍是脏的；绝不能把后续页写进去。重新挂起 need_erase，
+         * 由 journal_kick 下轮重试；F10 会看到 need_erase != 0 而继续等待/中止。 */
+        journal->job.need_erase = 1U;
+    }
+    journal->job.phase = JRN_IDLE;
+    (void)fc_command_release(cmd);
 }
 
 void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
@@ -605,77 +668,20 @@ void ftl_op_journal(struct ftl_context *ftl, const fc_command_status_t *completi
 
     if (journal->job.phase == JRN_WRITE)
     {
-        if (fc_cw_status_has_error(completion->status))
-        {
-            LOGE("[JRN] page write failed pba=%08lx status=0x%02x — 跳过失败页\r\n",
-                 (unsigned long)journal->job.waddr,
-                 (unsigned)completion->status);
-            journal_note_write_failure(journal);
-
-            /* 失败页可能已半编程 ⇒ **绝不复用**。推进到 freeze 算好的下一落点；
-             * 跨块时 need_erase 保留，由 journal_kick 先擦目标块再写。
-             * 条目已丢（page_buf 在提交时清空），由 write_fail_pending 兜住：
-             * GC 不会擦 victim，直到 CP 把当前 L2P 落盘。 */
-            if ((journal->current_block == journal->job.from_block) &&
-                (journal->current_page == journal->job.from_page))
-            {
-                journal->current_block = journal->job.target_block;
-                journal->current_page  = journal->job.target_page;
-            }
-            journal->job.phase = JRN_IDLE;
-            (void)fc_command_release(cmd);
-            return;
-        }
-
-        if ((journal->current_block == journal->job.from_block) && (journal->current_page == journal->job.from_page))
-        {
-            journal->current_block = journal->job.target_block;
-            journal->current_page  = journal->job.target_page;
-        }
-        journal->job.phase = JRN_IDLE;
-
-        /* 换块 ⇒ 起异步擦除；起不来就留着 need_erase，由 journal_kick 下轮重试。
-         * ⚠ 先查 pre_erased_block：journal_truncate 可能已在这段窗口里代擦了环形
-         *   下一块（正是本 job.target_block）⇒ 消费记账跳过，避免重复擦。 */
-        if (journal->job.need_erase != 0U)
-        {
-            if (journal->pre_erased_block == journal->job.target_block)
-            {
-                journal->pre_erased_block = JOURNAL_BLOCK_NONE;
-                journal->job.need_erase   = 0U;
-            }
-            else if (!journal_start_erase(journal))
-            {
-                LOGE("[JRN] erase kick failed blk=%u — 下轮重试\r\n", (unsigned)journal->job.target_block);
-            }
-        }
-
-        (void)fc_command_release(cmd);
-        return;
+        journal_complete_write(journal, cmd, completion);
     }
-
-    if (journal->job.phase == JRN_ERASE)
+    else if (journal->job.phase == JRN_ERASE)
     {
-        /* 失败判据必须是全集：只看 NAND_FAIL 会把 TIMEOUT / CRC 当成擦成功，
-         * 后续页写进可能未擦的块（二次编程 = 静默损坏）。 */
-        if (fc_cw_status_has_error(completion->status))
-        {
-            LOGE("[JRN] ring block erase failed blk=%u status=0x%02x — 重新挂起\r\n",
-                 (unsigned)journal->job.target_block,
-                 (unsigned)completion->status);
-            /* 擦失败 ⇒ 目标块仍是脏的；绝不能把后续页写进去。重新挂起 need_erase，
-             * 由 journal_kick 下轮重试；F10 会看到 need_erase != 0 而继续等待/中止。 */
-            journal->job.need_erase = 1U;
-        }
+        journal_complete_erase(journal, cmd, completion);
+    }
+    else
+    {
+        /* 上面的 ASSERT 在 release 下裁空 ⇒ 这里必须留运行期兜底：否则 job 永远
+         * 卡在非 IDLE，后续 flush 再也起不来（命令还不回收就是池泄漏）。 */
+        LOGE("[JRN] unexpected completion phase=%u\r\n", (unsigned)journal->job.phase);
         journal->job.phase = JRN_IDLE;
         (void)fc_command_release(cmd);
-        return;
     }
-
-    /* 不该发生：一条命令对应一个 job，phase 必为 WRITE / ERASE */
-    LOGE("[JRN] unexpected completion phase=%u\r\n", (unsigned)journal->job.phase);
-    journal->job.phase = JRN_IDLE;
-    (void)fc_command_release(cmd);
 }
 
 /* ══════════════════════════════════════════════════════════

@@ -733,9 +733,88 @@ void checkpoint_kick(ftl_context_t *ftl)
 
 /* ── Checkpoint job 的完成服务（g_op_service[FTL_OP_CHECKPOINT]）── */
 
+/* 每个提交阶段的完成处理（ftl_op_checkpoint 按 phase 分派）。
+ * 共同前提：命令已 release、job.waiting 已清零（由派发处统一做）。 */
+
+/* 换块擦完成：成功 ⇒ phase 推进到 next；失败 ⇒ 中止本次 CP（**不**推进游标，
+ * dirty 保留 ⇒ 下次在新槽重试整条）。 */
+static void cp_complete_erase(cp_job_t *j, bool failed, cp_phase_t next)
+{
+    if (failed)
+    {
+        cp_abort(j);
+        return;
+    }
+    j->phase = (uint8_t)next;
+}
+
+/* 快照页 / 磨损页写完成：失败 ⇒ 整条 record 作废（不写 Header——Header 是 commit），
+ * 游标推进一槽（本条记录的剩余页可能半编程，永不复用）。返回 true = 已中止。 */
+static bool cp_complete_page_write(ftl_context_t *ftl, cp_job_t *j, bool failed)
+{
+    if (!failed)
+    {
+        return false;
+    }
+    j->block_ok       = 0U;
+    ftl->cp.write_idx = (uint16_t)((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
+    cp_abort(j);
+    return true;
+}
+
+/* Anchor record 一页写完：无论成败都往后写下一页；失败 ⇒ 整条作废（不取半条）。 */
+static void cp_complete_anchor_write(cp_job_t *j, bool failed)
+{
+    if (failed)
+    {
+        j->anchor_ok = 0U;
+    }
+    j->anchor_chunk = (uint8_t)(j->anchor_chunk + 1U);
+}
+
+/* Header（commit 页）写完：无论成败都推进游标（已写过的槽可能半编程，不可复用）；
+ * 成功才提交 journal 水位并清持久性失败标记。 */
+static void cp_complete_hdr_write(ftl_context_t *ftl, cp_job_t *j, bool failed)
+{
+    ftl->cp.write_idx = (uint16_t)((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
+
+    if (failed)
+    {
+        /* 失败时不写 journal_truncate、不复位水位标志：脏数据仍由下个 checkpoint 重试。 */
+        cp_abort(j);
+        return;
+    }
+    ftl->cp.last_journal_sequence = j->journal_seq; /* T3 空转门 / 增量判据 */
+    /* Header 是 commit 页：此时快照的脏区都已落盘。若本次 CP 起点覆盖了
+     * Journal 的持久性失败点，可清除 pending（见 journal_clear_write_failure）。 */
+    journal_clear_write_failure(ftl->journal, j->journal_seq);
+    j->phase = (uint8_t)CP_TRUNC_PREP;
+}
+
+/* Journal 预擦完成：**擦成功才**记 pre_erased_block。失败时绝不能记账：
+ * journal_flush_page 回切到该块会跳过擦除 ⇒ 写进未擦块（二次编程 = 静默损坏）。
+ * commit(NONE) 只复位水位标志；该块保持"未预擦"，journal 回切时由 need_erase 重试，
+ * 下一次 CP 的 plan 也会再次返回 NEEDS_ERASE。 */
+static void cp_complete_trunc_erase(ftl_context_t *ftl, cp_job_t *j, bool failed)
+{
+    if (failed)
+    {
+        LOGW("[CP] journal pre-erase failed blk=%u — 不记账，等待重试\r\n",
+             (unsigned)j->trunc_next);
+        journal_truncate_commit(ftl->journal, JOURNAL_BLOCK_NONE);
+    }
+    else
+    {
+        /* commit 记账 + 复位水位标志（设计 §7.5.4：本次 CP 已把 seq ≤ 水位
+         * 的条目落盘并截断 ⇒ 清零。不复位会让 T1 永久命中——每圈必 CP）。 */
+        journal_truncate_commit(ftl->journal, j->trunc_next);
+    }
+    j->phase = (uint8_t)CP_DONE;
+}
+
 /* --------------------------------------------------------------------
  * ftl_op_checkpoint
- *   功能：Checkpoint 命令的完成服务函数——按 job.phase 记完成结果、改 phase、release。
+ *   功能：Checkpoint 命令的完成服务函数——按 job.phase 分派到 cp_complete_* 记结果。
  *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `cp_job_t *`（= ftl->cp_job）。
  *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
  *   实现要点：**本函数不推进状态机**（见文件头：阶段里有同步原语，在完成泵里跑就是
@@ -770,117 +849,45 @@ void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *compl
 
     const bool failed = fc_cw_status_has_error(completion->status);
 
+    /* 每个 phase 的完成都以「release + 清在飞标志」开头 ⇒ 提到 switch 之前统一做。
+     * cp_abort 只改 phase/failed，不碰 waiting ⇒ 与各分支内的原顺序等价。 */
+    (void)fc_command_release(cmd);
+    j->waiting = 0U;
+
     switch ((cp_phase_t)j->phase)
     {
         case CP_ANCHOR_ERASE:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-            if (failed)
-            {
-                /* 换块擦失败 ⇒ 不写、**不推进游标**（擦失败即中止），dirty 保留 ⇒ 下次在新槽重试整条。 */
-                cp_abort(j);
-                return;
-            }
-            j->phase = (uint8_t)CP_ANCHOR_WRITE;
+            cp_complete_erase(j, failed, CP_ANCHOR_WRITE);
             return;
 
         case CP_ANCHOR_WRITE:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-            if (failed)
-            {
-                j->anchor_ok = 0U; /* 本条 record 残缺 ⇒ 整条作废（不取半条） */
-            }
-            j->anchor_chunk = (uint8_t)(j->anchor_chunk + 1U); /* 无论成败都往后写下一页 */
+            cp_complete_anchor_write(j, failed);
             return;
 
         case CP_HDR_ERASE:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-            if (failed)
-            {
-                /* 换块擦失败 ⇒ 不写 Header、**不推进游标**，中止本次 CP。 */
-                cp_abort(j);
-                return;
-            }
-            j->phase = (uint8_t)CP_BLOCK_WRITE;
+            cp_complete_erase(j, failed, CP_BLOCK_WRITE);
             return;
 
         case CP_BLOCK_WRITE:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-
-            if (failed)
+            if (!cp_complete_page_write(ftl, j, failed))
             {
-                /* 快照页写失败 ⇒ 整条 record 作废，不写 Header（Header 是 commit）。
-                 * 游标推进一槽：本条记录的剩余页可能半编程，永不复用。 */
-                j->block_ok       = 0U;
-                ftl->cp.write_idx = (uint16_t)((j->hdr_idx + 1U) %
-                                               metadata_ring_total_records(&j->hdr_ring));
-                cp_abort(j);
-                return;
+                j->block_page = (uint8_t)(j->block_page + 1U);
             }
-            j->block_page = (uint8_t)(j->block_page + 1U);
             return;
 
         case CP_WEAR_WRITE:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-
-            if (failed)
+            if (!cp_complete_page_write(ftl, j, failed))
             {
-                /* 磨损页写失败 ⇒ 同块元数据页：整条 record 作废（不写 Header），游标推进一槽。 */
-                j->block_ok       = 0U;
-                ftl->cp.write_idx = (uint16_t)((j->hdr_idx + 1U) %
-                                               metadata_ring_total_records(&j->hdr_ring));
-                cp_abort(j);
-                return;
+                j->wear_page = (uint8_t)(j->wear_page + 1U);
             }
-            j->wear_page = (uint8_t)(j->wear_page + 1U);
             return;
 
         case CP_HDR_WRITE:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-
-            /* 无论成败都推进游标：已写过的槽（可能半编程）不可复用。 */
-            ftl->cp.write_idx = (uint16_t)((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
-
-            if (failed)
-            {
-                /* 失败时不写 journal_truncate、不复位水位标志：脏数据仍由下个 checkpoint
-                 * 重试。 */
-                cp_abort(j);
-                return;
-            }
-            ftl->cp.last_journal_sequence = j->journal_seq; /* T3 空转门 / 增量判据 */
-            /* Header 是 commit 页：此时快照的脏区都已落盘。若本次 CP 起点覆盖了
-             * Journal 的持久性失败点，可清除 pending（见 journal_clear_write_failure）。 */
-            journal_clear_write_failure(ftl->journal, j->journal_seq);
-            j->phase = (uint8_t)CP_TRUNC_PREP;
+            cp_complete_hdr_write(ftl, j, failed);
             return;
 
         case CP_TRUNC_ERASE:
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
-
-            /* 擦成功才记 pre_erased_block。失败时**绝不能**记账：journal_flush_page
-             * 回切到该块会跳过擦除 ⇒ 写进未擦块（二次编程 = 静默损坏）。
-             * commit(NONE) 只复位水位标志；该块保持“未预擦”，journal 回切时由
-             * need_erase 重试，下一次 CP 的 plan 也会再次返回 NEEDS_ERASE。 */
-            if (failed)
-            {
-                LOGW("[CP] journal pre-erase failed blk=%u — 不记账，等待重试\r\n",
-                     (unsigned)j->trunc_next);
-                journal_truncate_commit(ftl->journal, JOURNAL_BLOCK_NONE);
-            }
-            else
-            {
-                /* commit 记账 + 复位水位标志（设计 §7.5.4：本次 CP 已把 seq ≤ 水位
-                 * 的条目落盘并截断 ⇒ 清零。不复位会让 T1 永久命中——每圈必 CP）。 */
-                journal_truncate_commit(ftl->journal, j->trunc_next);
-            }
-            j->phase = (uint8_t)CP_DONE;
+            cp_complete_trunc_erase(ftl, j, failed);
             return;
 
         case CP_IDLE:
@@ -893,8 +900,6 @@ void ftl_op_checkpoint(struct ftl_context *ftl, const fc_command_status_t *compl
             /* 不该发生：一条命令对应一个提交阶段（ANCHOR_ERASE / ANCHOR_WRITE /
              * HDR_ERASE / HDR_WRITE / TRUNC_ERASE）。 */
             LOGE("[CP] unexpected completion phase=%u\r\n", (unsigned)j->phase);
-            (void)fc_command_release(cmd);
-            j->waiting = 0U;
             cp_abort(j);
             return;
     }

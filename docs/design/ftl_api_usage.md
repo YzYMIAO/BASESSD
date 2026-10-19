@@ -22,7 +22,7 @@ struct ftl_context {
     l2p_cache_t        *cache;              // 共享 L2P cache（阶段 B；AXI）
     ftl_pending_req_t   pending[FTL_PENDING_MAX];  // 子操作追踪（per-instance）
     ftl_io_group_t      groups[FTL_GROUP_MAX];     // 完成组表（一次 submit = 一组）
-    ftl_wbuf_t          wbuf;               // 页打包写缓冲（§七 方案 A）
+    ftl_wbuf_t          wbuf;               // 页打包写缓冲（结构见 include/ftl/wbuf.h）
     ftl_tables_t       *tables;             // 大表指针（阶段 C；SRAM12）
     ftl_allocator_t     alloc;              // 空闲 block / Super Block 写指针 + per-instance 块元数据游标
     l2p_journal_t      *journal;            // log-structured journal（阶段 C；SRAM3）

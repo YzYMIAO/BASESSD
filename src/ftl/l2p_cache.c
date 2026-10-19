@@ -892,9 +892,8 @@ void ftl_op_l2p(struct ftl_context *ftl, const fc_command_status_t *completion, 
 
     fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
 
-    /* 不该发生：路由表已在 main.c 逐实例 boot 之前设好（见 ssd_ftl_boot_all ①），
-     * 完成派发保证 ftl 恒非空。不留 release-and-return 兜底：debug 当场炸，
-     * release（NDEBUG 裁空）下若真走到则 NULL 解引用留现场。 */
+    /* ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
+     * ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。 */
     ASSERT(ftl != NULL);
 
     ASSERT(ftl->cache != NULL);

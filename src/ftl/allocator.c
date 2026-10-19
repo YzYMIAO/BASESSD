@@ -526,6 +526,21 @@ ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, n
     return FTL_OK;
 }
 
+/* 实现要点：只回退写指针——**不**回退可能刚发生的开新 SB（见头文件的两条前提）。
+ * 归还后若 SB 恰是刚开的，next_page == 0 是合法态（等价于「刚开、未写」）。 */
+void allocator_rewind_pair(ftl_allocator_t *alloc, uint8_t temperature)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(temperature < FTL_TEMP_NUM);
+
+    super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+
+    ASSERT(sb->is_open);
+    ASSERT(sb->next_page > 0U);
+
+    sb->next_page--;
+}
+
 /* 实现要点：从 Free Pool 取该 plane 擦除最少的块，出池并置 LOG。 */
 ftl_status_t allocator_alloc_log_block(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
 {

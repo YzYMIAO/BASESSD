@@ -728,14 +728,132 @@ void metadata_dir_kick(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 
 /* ── 整理 job 的完成服务（g_op_service[FTL_OP_METADATA]）── */
 
+/* 每个提交阶段的完成处理（ftl_op_metadata 按 phase 分派）。
+ * ⚠ 与 cp_complete_* 不同，**不能**把 release 提到派发处统一做：CP_READ 必须先
+ *   ftl_cmd_read_data 再 release（数据在 desc 链上）。 */
+
+/* 擦除成功后的统一收尾：元数据日志块不经 migrate 擦除路径，磨损计数在这里补记，
+ * 且**先记账再归还**（顺序颠倒会让 Free Pool 出现未记磨损的块）。 */
+static void md_note_block_erased(ftl_context_t *ftl, uint16_t gblock)
+{
+    allocator_note_erase(&ftl->alloc, gblock, ftl->total_writes);
+    allocator_free_block(&ftl->alloc, gblock); /* 已擦除 ⇒ 归还 Free Pool */
+}
+
+/* 待回收块擦完成：失败 ⇒ 位保持置位（下一轮 kick 重新取到它并重试，轮转游标保证
+ * 它不会永久挡住后续块）；成功 ⇒ 清位 + 归还。 */
+static void md_complete_reclaim(ftl_context_t *ftl, md_job_t *j, fc_command_t *cmd, bool failed)
+{
+    (void)fc_command_release(cmd);
+    j->waiting = false;
+
+    if (failed)
+    {
+        LOGW("[META] reclaim erase failed blk=%u — 位保留，下轮重试\r\n",
+             (unsigned)j->reclaim_gblock);
+    }
+    else
+    {
+        md_reclaim_clear(ftl->metadata_dir, j->reclaim_gblock);
+        md_note_block_erased(ftl, j->reclaim_gblock);
+    }
+
+    j->reclaim_gblock = UINT16_MAX;
+    j->phase          = (uint8_t)MD_JOB_IDLE;
+}
+
+/* 整理 CP_READ 完成：成功把 region 整页拷进 job.cp_buf（**必须早于 release**）；
+ * 读不回 ⇒ 中止——该 region 仍指向 victim 旧页，victim 不擦 ⇒ 无损失。 */
+static void md_complete_cp_read(ftl_context_t *ftl, md_job_t *j, fc_command_t *cmd, bool failed)
+{
+    if (!failed)
+    {
+        (void)ftl_cmd_read_data(cmd, j->cp_buf, (uint32_t)L2P_REGION_SIZE);
+    }
+    (void)fc_command_release(cmd);
+    j->waiting = false;
+
+    if (failed)
+    {
+        md_job_abort(ftl->metadata_dir);
+        return;
+    }
+    j->phase = (uint8_t)MD_JOB_CP_WRITE;
+}
+
+/* 整理 CP_WRITE 完成：成功登记新位置；失败 ⇒ 槽已消耗（可能半编程）⇒ **不登记**，
+ * region 仍指向 victim 旧页 ⇒ 无损失。 */
+static void md_complete_cp_write(ftl_context_t *ftl, md_job_t *j, fc_command_t *cmd, bool failed)
+{
+    (void)fc_command_release(cmd);
+    j->waiting = false;
+
+    if (failed)
+    {
+        md_job_abort(ftl->metadata_dir);
+        return;
+    }
+
+    metadata_dir_commit_region(ftl->metadata_dir, j->cur_region, j->slot);
+    j->slot  = NAND_PBA_INVALID;
+    j->moved = (uint16_t)(j->moved + 1U);
+    j->phase = (uint8_t)MD_JOB_CP_READ;
+}
+
+/* Anchor 换块擦完成：失败 ⇒ 不写、**不推进游标**，dirty 保留 ⇒ 下次在新槽重试整条。 */
+static void md_complete_anchor_erase(ftl_context_t *ftl, md_job_t *j, fc_command_t *cmd, bool failed)
+{
+    (void)fc_command_release(cmd);
+    j->waiting = false;
+
+    if (failed)
+    {
+        md_job_abort(ftl->metadata_dir);
+        return;
+    }
+    j->phase = (uint8_t)MD_JOB_CP_ANCHOR_WRITE;
+}
+
+/* Anchor 一页写完：无论成败都往后写下一页；失败 ⇒ 本条 record 残缺 ⇒ 整条作废。 */
+static void md_complete_anchor_write(md_job_t *j, fc_command_t *cmd, bool failed)
+{
+    (void)fc_command_release(cmd);
+    j->waiting = false;
+
+    if (failed)
+    {
+        j->anchor_ok = false; /* 整条作废（不取半条）*/
+    }
+    j->anchor_chunk = (uint8_t)(j->anchor_chunk + 1U); /* 无论成败都往后写下一页 */
+}
+
+/* Victim 擦完成：失败 ⇒ victim 已无引用（Anchor 已落盘）⇒ 登记给回收阶段重试。 */
+static void md_complete_cp_reclaim(ftl_context_t *ftl, md_job_t *j, fc_command_t *cmd, bool failed)
+{
+    (void)fc_command_release(cmd);
+    j->waiting = false;
+
+    if (failed)
+    {
+        LOGW("[META] compact: victim erase failed blk=%u — 登记重试\r\n",
+             (unsigned)j->victim);
+        (void)md_reclaim_mark(ftl->metadata_dir, j->victim);
+    }
+    else
+    {
+        md_note_block_erased(ftl, j->victim);
+    }
+
+    j->phase = (uint8_t)MD_JOB_DONE;
+}
+
 /* --------------------------------------------------------------------
  * ftl_op_metadata
- *   功能：日志块整理命令的完成服务函数——按 job.phase 记结果、改 phase、release。
+ *   功能：日志块整理命令的完成服务函数——按 job.phase 分派到 md_complete_* 记结果。
  *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `md_job_t *`（= ftl->metadata_dir->job）。
  *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
  *   实现要点：**本函数不推进状态机**（见本文件开头的说明）：只把 phase 改到"下一步该
  *             干什么"，由下一轮 metadata_dir_kick 续跑。
- *             ⚠ CP_READ 的 ftl_cmd_read_data **必须早于** release（数据在 desc 链上）。
  * -------------------------------------------------------------------- */
 void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
@@ -751,112 +869,32 @@ void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *complet
     ASSERT(ftl != NULL);
     ASSERT(&ftl->metadata_dir->job == j);
 
-    metadata_dir_cache_t *dir    = ftl->metadata_dir;
-    const bool            failed = fc_cw_status_has_error(completion->status);
+    const bool failed = fc_cw_status_has_error(completion->status);
 
     switch ((md_job_phase_t)j->phase)
     {
         case MD_JOB_RECLAIM:
-            (void)fc_command_release(cmd);
-            j->waiting = false;
-
-            if (failed)
-            {
-                /* 擦失败：位保持置位 ⇒ 下一轮 kick 重新取到它并重试。
-                 * 轮转游标保证它不会永久挡住后续块。 */
-                LOGW("[META] reclaim erase failed blk=%u — 位保留，下轮重试\r\n",
-                     (unsigned)j->reclaim_gblock);
-            }
-            else
-            {
-                md_reclaim_clear(dir, j->reclaim_gblock);
-                /* 元数据日志块不经 migrate 擦除路径，磨损计数在这里补记。 */
-                allocator_note_erase(&ftl->alloc, j->reclaim_gblock, ftl->total_writes);
-                allocator_free_block(&ftl->alloc, j->reclaim_gblock); /* 已擦除 ⇒ 归还 Free Pool */
-            }
-
-            j->reclaim_gblock = UINT16_MAX;
-            j->phase          = (uint8_t)MD_JOB_IDLE;
+            md_complete_reclaim(ftl, j, cmd, failed);
             return;
 
         case MD_JOB_CP_READ:
-            if (!failed)
-            {
-                /* 数据在 desc 链上 ⇒ 必须早于 release 拷出 */
-                (void)ftl_cmd_read_data(cmd, j->cp_buf, (uint32_t)L2P_REGION_SIZE);
-            }
-            (void)fc_command_release(cmd);
-            j->waiting = false;
-
-            if (failed)
-            {
-                /* 读不回：该 region 仍指向 victim 旧页，victim 不擦 ⇒ 无损失。 */
-                md_job_abort(dir);
-                return;
-            }
-            j->phase = (uint8_t)MD_JOB_CP_WRITE;
+            md_complete_cp_read(ftl, j, cmd, failed);
             return;
 
         case MD_JOB_CP_WRITE:
-            (void)fc_command_release(cmd);
-            j->waiting = false;
-
-            if (failed)
-            {
-                /* 槽已消耗（可能半编程）⇒ 不登记；region 仍指向 victim 旧页 ⇒ 无损失。 */
-                md_job_abort(dir);
-                return;
-            }
-
-            metadata_dir_commit_region(dir, j->cur_region, j->slot);
-            j->slot  = NAND_PBA_INVALID;
-            j->moved = (uint16_t)(j->moved + 1U);
-            j->phase = (uint8_t)MD_JOB_CP_READ;
+            md_complete_cp_write(ftl, j, cmd, failed);
             return;
 
         case MD_JOB_CP_ANCHOR_ERASE:
-            (void)fc_command_release(cmd);
-            j->waiting = false;
-
-            if (failed)
-            {
-                /* 换块擦失败 ⇒ 不写、**不推进游标**，dirty 保留 ⇒ 下次在新槽重试整条。 */
-                md_job_abort(dir);
-                return;
-            }
-            j->phase = (uint8_t)MD_JOB_CP_ANCHOR_WRITE;
+            md_complete_anchor_erase(ftl, j, cmd, failed);
             return;
 
         case MD_JOB_CP_ANCHOR_WRITE:
-            (void)fc_command_release(cmd);
-            j->waiting = false;
-
-            if (failed)
-            {
-                j->anchor_ok = false; /* 本条 record 残缺 ⇒ 整条作废（不取半条）*/
-            }
-            j->anchor_chunk = (uint8_t)(j->anchor_chunk + 1U); /* 无论成败都往后写下一页 */
+            md_complete_anchor_write(j, cmd, failed);
             return;
 
         case MD_JOB_CP_RECLAIM:
-            (void)fc_command_release(cmd);
-            j->waiting = false;
-
-            if (failed)
-            {
-                /* 擦失败：victim 已无引用（Anchor 已落盘）⇒ 登记给回收阶段重试。 */
-                LOGW("[META] compact: victim erase failed blk=%u — 登记重试\r\n",
-                     (unsigned)j->victim);
-                (void)md_reclaim_mark(dir, j->victim);
-            }
-            else
-            {
-                /* 元数据日志块不经 migrate 擦除路径，磨损计数在这里补记。 */
-                allocator_note_erase(&ftl->alloc, j->victim, ftl->total_writes);
-                allocator_free_block(&ftl->alloc, j->victim); /* 已擦除 ⇒ 归还 Free Pool */
-            }
-
-            j->phase = (uint8_t)MD_JOB_DONE;
+            md_complete_cp_reclaim(ftl, j, cmd, failed);
             return;
 
         case MD_JOB_IDLE:
@@ -868,7 +906,7 @@ void ftl_op_metadata(struct ftl_context *ftl, const fc_command_status_t *complet
             LOGE("[META] md job unexpected completion phase=%u\r\n", (unsigned)j->phase);
             (void)fc_command_release(cmd);
             j->waiting = false;
-            md_job_abort(dir);
+            md_job_abort(ftl->metadata_dir);
             return;
     }
 }

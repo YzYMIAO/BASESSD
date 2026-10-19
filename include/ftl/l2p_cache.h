@@ -68,10 +68,27 @@ _Static_assert((L2P_GLOBAL_REGIONS % 32U) == 0U, "全局 region 位图必须按 
 _Static_assert(L2P_GLOBAL_LBA_MAX <= (uint64_t)UINT32_MAX, "全局 LBA 超出 lba_t 位宽");
 _Static_assert(L2P_LOCAL_DIRTY_WORDS == 64U, "on-media Checkpoint 位图固定 64 word");
 
-/* 拓扑 → dim（lba_route_dim 的逆）：ch + CH*(ce + CE*lun)。 */
+/* 拓扑 → dim（ftl_dim_* 的逆）：ch + CH*(ce + CE*lun)。 */
 static inline uint32_t ftl_topo_dim(ftl_topology_t topo)
 {
     return (uint32_t)topo.ch + (CH_NUM * ((uint32_t)topo.ce + (CE_NUM * (uint32_t)topo.lun)));
+}
+
+/* dim → (ch,ce,lun)：ftl_topo_dim 的逆。
+ *
+ * **所有** dim → 坐标的分解都走这三个：手写第二份就是第二套 region→die 坐标（C9）。
+ * 返回值取自然宽度（0..*_NUM-1）⇒ 调用点不必窄化强转（H44）。 */
+static inline uint8_t ftl_dim_ch(uint32_t dim)
+{
+    return (uint8_t)(dim % CH_NUM);
+}
+static inline uint8_t ftl_dim_ce(uint32_t dim)
+{
+    return (uint8_t)((dim / CH_NUM) % CE_NUM);
+}
+static inline uint8_t ftl_dim_lun(uint32_t dim)
+{
+    return (uint8_t)(dim / (CH_NUM * CE_NUM));
 }
 
 /* 全局 LBA → 全局 region */
@@ -112,17 +129,17 @@ static inline uint32_t lba_route_dim(uint64_t lba)
 {
     return (uint32_t)((lba >> L2P_REGION_SHIFT) % FTL_DIM_TOTAL);
 }
-static inline uint32_t lba_route_ch(uint64_t lba)
+static inline uint8_t lba_route_ch(uint64_t lba)
 {
-    return lba_route_dim(lba) % CH_NUM;
+    return ftl_dim_ch(lba_route_dim(lba));
 }
-static inline uint32_t lba_route_ce(uint64_t lba)
+static inline uint8_t lba_route_ce(uint64_t lba)
 {
-    return (lba_route_dim(lba) / CH_NUM) % CE_NUM;
+    return ftl_dim_ce(lba_route_dim(lba));
 }
-static inline uint32_t lba_route_lun(uint64_t lba)
+static inline uint8_t lba_route_lun(uint64_t lba)
 {
-    return lba_route_dim(lba) / (CH_NUM * CE_NUM);
+    return ftl_dim_lun(lba_route_dim(lba));
 }
 
 /* 全局 LBA 是否路由到指定实例（META/journal 边界校验用；release 也生效）。 */
