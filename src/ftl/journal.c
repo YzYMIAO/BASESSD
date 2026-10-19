@@ -376,6 +376,27 @@ void journal_kick(l2p_journal_t *journal)
 }
 
 /* --------------------------------------------------------------------
+ * journal_kick_erase_only
+ *   功能：后台推进 Journal 的**换块擦除**，不起页写。
+ *   参数：journal —— Journal（非 NULL）。
+ *   返回：无。
+ *   实现要点：host 饱和档（BUSY）下 journal 页写要全部让路给前台（位掩码把
+ *             journal_flush 掩掉），但「新环形块没擦过就不能往里写」是硬约束——
+ *             擦除必须任何档位都能补。故本入口只走 journal_kick 的 need_erase 分支。
+ *             判据（有无待擦块 / 是否已有 job 在飞）全在本模块内，外部不读 job 字段。
+ * -------------------------------------------------------------------- */
+void journal_kick_erase_only(l2p_journal_t *journal)
+{
+    /* 前置条件（判据 2）：调用者一律传 ftl->journal。 */
+    ASSERT(journal != NULL);
+
+    if ((journal->job.phase == JRN_IDLE) && (journal->job.need_erase != 0U))
+    {
+        journal_kick(journal); /* need_erase 优先 ⇒ 必然走擦除分支 */
+    }
+}
+
+/* --------------------------------------------------------------------
  * journal_drain
  *   功能：自旋把在飞 journal job（写 / 擦）泵到 IDLE。
  *   参数：journal —— Journal。

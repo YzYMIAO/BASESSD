@@ -118,9 +118,9 @@ typedef struct ftl_context
 
     /* 后台写闸门（`bbt --erase` 置位）。
      * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的
-     * 布局 ⇒ 唯一正确的后续动作是复位。置位后 ftl_service 的 Phase 3（IDLE/NORMAL/BUSY
-     * 三级后台：checkpoint / bbt / journal / GC 全在这里）整体跳过，杜绝把旧
-     * RAM 状态写回擦净的芯片；Phase 1/2/2.5 照常（NAND 泵与 host IO 不受影响）。
+     * 布局 ⇒ 唯一正确的后续动作是复位。置位后 ftl_bg_service 整体跳过（含 must-run
+     * 集：checkpoint / journal / 元数据目录 / bbt / GC 全在那里），杜绝把旧 RAM 状态
+     * 写回擦净的芯片；Phase 1/2/2.5 照常（NAND 泵与 host IO 不受影响）。
      * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
     uint8_t bg_suspend;
 
@@ -155,8 +155,8 @@ typedef struct ftl_context
     uint32_t gc_log_last_ms;
 
     /* 时间预算后台调度器（per-instance）。
-     * 任务表（13 项：6 must-run + 7 预算）由 ftl_bg_init 填充；每轮 Phase 3 经
-     * ftl_bg_level_select 选档后跑 bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level])。 */
+     * 任务表（13 项：6 must-run + 7 预算）由 ftl_bg_init 从 `ftl/bg_wiring.c` 的静态表
+     * 装载；每轮 Phase 3 由 ftl_bg_service 选档后跑 bg_scheduler_run。 */
     bg_scheduler_t bg;
 
     /* GC 进展计数（per-instance，只增不减，纯观测）。
@@ -236,7 +236,7 @@ void ftl_service_pump(void);
  * ftl_service - 单个 FTL 实例的服务（对**每个**实例都要调）
  *
  * Phase 2.5: 补发本实例各组的待下发子操作（host IO 优先于后台）
- * Phase 3:   本实例的三级后台任务（IDLE / NORMAL / BUSY）
+ * Phase 3:   本实例的时间预算后台调度（ftl_bg_service：选档 → 任务表 → 预算）
  *
  * ⚠ 调用方须先调 ftl_service_pump()。多实例（多 LUN）下漏调某实例 ⇒ 它的
  *   journal / checkpoint / bbt / GC 永不推进。
@@ -248,10 +248,24 @@ void ftl_service(ftl_context_t *ftl);
 /*
  * ftl_bg_init - 装配实例的时间预算后台调度器
  *
- * 填充 ftl->bg 的任务表（13 项：6 must-run 正确性关键集 + 7 预算任务，见 ftl.c
- * bg_a_* 适配器）并调用 bg_scheduler_init。由 ftl_init 末尾调用一次。
+ * 把 `ftl/bg_wiring.c` 的静态任务表（13 项：6 must-run 正确性关键集 + 7 预算任务，
+ * 含 bg_a_* 适配器）装载进 ftl->bg。由 ftl_init 末尾调用一次。
+ *
+ * ⚠ 为什么不做成 ftl.c 直接调 bg_scheduler_init：任务表是 bg_wiring.c 的 static 数据，
+ *   外部模块（ftl.c）不该看到它——本函数是这张表的**唯一装配口**（H13 三问：隐藏数组 /
+ *   边界检查 / 单点读写，三者皆是）。
  */
 void ftl_bg_init(ftl_context_t *ftl);
+
+/*
+ * ftl_bg_service - Phase 3 入口：bg_suspend 判定 → 选档 → 档位配置 → 引擎跑一轮
+ *
+ * ⚠ bg_suspend 判定在函数内**最先**做（早于 must-run pass）：`bbt --erase` 之后介质已空
+ *   而 RAM 状态陈旧，任何后台写都是往干净芯片上倒垃圾。调用方不要在外层重复判。
+ *
+ * @param ftl  FTL 上下文（**非 NULL**；唯一调用点 ftl_service 已保证）
+ */
+void ftl_bg_service(ftl_context_t *ftl);
 
 /*
  * ftl_bg_level_select - 负载 → 后台档位（纯函数）

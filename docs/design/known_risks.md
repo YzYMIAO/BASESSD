@@ -2,11 +2,15 @@
 
 > **用途**：把「暂不修 / 待上板 / 待测试源同步 / 待决策」的风险固定下来。
 > **复查 `metadata` / GC / migrate / journal / BBT / 掉电恢复 / L2P cache /
-> Checkpoint / 磨损计数与 WL / Read Recovery / FTL↔FC 接口 / 类型规则前先读本表**，
-> 避免重复分析、重复消耗。
+> Checkpoint / 磨损计数与 WL / Read Recovery / FTL↔FC 接口 / 完成路由与 op dispatch /
+> 页打包写缓冲 wbuf / FTL service 与后台调度器 / 类型规则前先读本表**，避免重复分析、重复消耗。
+>
+> ⚠ **登记是硬约束（`CLAUDE.md` R11）**：缺陷与判定结论一经得出，当场登记在对应分节，
+> 只在对话里说 = 未完成。说不出失败场景/后果的归 §七 S，不进本表。
 >
 > 状态词：`待决策`（需要用户裁决）· `待后续`（已登记，独立任务）·
-> `待上板`（代码已改，板端未验）· `待测试源`（冻结 UT 待所有者同步）· `已修未上板`。
+> `待上板`（代码已改，板端未验）· `待测试源`（冻结 UT 待所有者同步）· `已修未上板` ·
+> `信息`（只记录，无动作）。
 >
 > ⚠ 本表只登记**当前仍成立**的风险；闭合后移到文末「已闭合」并注明提交。
 
@@ -161,6 +165,26 @@
 
 ---
 
+## 2J. FTL service 与后台调度器（`ftl.c` + `bg_scheduler.c/h` + `bg_wiring.c`，本轮审查）
+
+> 本轮把接线从 `ftl.c` 抽成 `src/ftl/bg_wiring.c`（任务表 / 13 个 `bg_a_*` 适配器 /
+> 档位预算 / Phase 3 入口 `ftl_bg_service`），`ftl.c` 只留一行调用。
+> 根因：`40f2bee`（磨损并入 Checkpoint）把任务表 14 → 13 项，只改了代码没改注释与结构。
+
+| ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
+| RISK-BG-01 | 已修未上板 | ~~`bg_a_rr_predict` 的内部门 `(now_ms - rr_last_scan_ms) >= RR_SCAN_INTERVAL_MS` 在时钟缺失（`ftl_now_ms()` 恒 0）下恒为假 ⇒ 慢死预测巡检**永久停摆**；与同族 `ftl_gc_evaluate` 的哨兵语义（退化为「每轮求值」）方向相反，也与注释宣称的「内部门兜底」相反~~ | 补 `\|\| (rr_last_scan_ms == 0U)` 哨兵，与 GC 同构 | 上板：确认 1 s 节流仍在（巡检不逐轮跑） | `src/ftl/bg_wiring.c` `bg_a_rr_predict` |
+| RISK-BG-02 | 待决策 | `ftl_gc_evaluate` 的 `gc_eval_last_ms` 节拍门与调度器 `interval_ms = GC_EVAL_INTERVAL_MS` **同源同值双门**（v0.76「节拍统一进任务表」的残留）。删任一门都不改变当前行为 | 保留双门 | 保留的理由是「调度器 interval 被误置 0 时仍不逐轮全表扫描」（本函数成本 = O(全表)）。若出现第二调用点或 interval 语义变更 ⇒ 重估是否合并 | `src/ftl/bg_wiring.c` `ftl_gc_evaluate` / `bg_a_gc_eval` |
+| RISK-BG-03 | 信息 | 时钟缺失降级分支（`clock_ok == 0`）在本板**不可达**：`ssd_platform_register` 拒绝 `time_us == NULL` ⇒ 整条降级路径从未被验证（RISK-BG-01 的缺陷就长在这条不可达路径上，靠读码而非运行发现） | 分支保留（引擎通用性 + 防御） | 换平台 / 改注册路径时重估；不要在这条路径上堆策略 | `src/platform/platform.c` `ssd_platform_register`；`src/ftl/bg_scheduler.c` |
+| RISK-BG-04 | 已修未上板 | ~~任务表装载**无边界检查**：加第 14 项会 `tasks[13]` 越界写踩掉 `task_count`（§3.2 静默失效，编译期无声）；且适配器注释里的位号（12 / 13）与真实下标（11 / 12）不符（H6）~~ | 改表驱动 `s_bg_tasks` + `_Static_assert` 容量门 + `bg_scheduler_init` 入口 `ASSERT(count <= BG_TASK_COUNT)`（**在拷贝循环之前**）+ 删写死位号（改为表序描述） | 上板：IDLE / NORMAL / BUSY 各跑一轮，确认 13 项照常执行 | `src/ftl/bg_wiring.c` `s_bg_tasks`；`src/ftl/bg_scheduler.c` `bg_scheduler_init` |
+| RISK-BG-05 | 已修未上板 | ~~`bg_scheduler_t` 死字段 `priority` / `round_total_us` / `round_used_us` / `round_seq` / `level` / `clock_ok` 无生产消费者（H5）；`priority` 与表序是**同一语义的两套坐标**且已漂移（取值跳过 5，缺口正是被删的 Wear 项）~~ | 删除；`clock_ok` 降为 `bg_scheduler_run` 局部变量；表序即优先级（C9） | 上板：确认无行为变化（表序未变） | `include/ftl/bg_scheduler.h`；`src/ftl/bg_scheduler.c` |
+| RISK-BG-06 | 已修未上板 | ~~`bg_a_l2p_flush` 经 `ftl->bg.level` **反查** `g_bg_level_cfg` 取 `l2p_flush_max` = 第二套配置读取路径，与引擎实际收到的 `cfg` 可能不同步（引擎按形参跑、适配器按字段读）~~ | 引擎在 `bg_scheduler_run` 起点发布 `sched->cfg = cfg`，适配器读 `ftl->bg.cfg->l2p_flush_max`（单写点） | 上板：BUSY 档 flush 条数应为 1（`BG_BUSY_FLUSH_COUNT`） | `src/ftl/bg_wiring.c` `bg_a_l2p_flush`；`src/ftl/bg_scheduler.c` |
+| RISK-BG-07 | 已修未上板 | ~~`bg_a_journal_erase` 手工读 journal 内部状态 `job.phase` / `job.need_erase`（§3.1 形态：判据属别的模块）。journal 一旦改内部表示（如换 phase 枚举），该守卫**静默恒假** ⇒ 换块擦除永不启动 ⇒ 新环形块未擦就写~~ | 判据收回 owner 模块：`journal_kick_erase_only()`（`journal.h` 声明 / `journal.c` 实现），行为与原守卫逐字等价（`phase == JRN_IDLE && need_erase != 0` 才调 `journal_kick`） | 上板：跑 journal 换块路径（写满一个环形块），确认擦除照常补起 | `src/ftl/journal.c` `journal_kick_erase_only` |
+| RISK-BG-08 | 信息（有意设计） | `bg_suspend` 由诊断命令直接写 FTL 上下文字段（跨模块字段写，§3.1 形态） | 字段契约已写明「只由诊断命令置位、无清除路径」；判定已收进 `ftl_bg_service` 首行 | 诊断命令增多 / 出现第二个写点时考虑加 `ftl_bg_suspend()` 闸门 | `src/controller/cli.c`（`bbt --erase`）；`include/ftl/ftl.h` `bg_suspend` |
+| RISK-BG-09 | 待测试源 | 本轮 API 变更后 `make tests UT=FTL` 失败：`test_ftl_bg.c` 仍用旧 `bg_scheduler_init(sched)` 单参签名、`bg_task_t.priority`、`bg_scheduler_t.round_total_us/round_used_us/round_seq`；`ftl_test_common.c` 另有既存旧字段（`F->metadata_dir` 取值、旧 `l2p_cache_init` 签名、`allocator.wear`） | 未改测试源（R4）；`make all` / `make release` 均通过 | 测试所有者按新 API 更新后重跑 `make tests UT=FTL` | `tests/unit/test_ftl_bg.c`、`tests/unit/ftl_test_common.c` |
+
+---
+
 ## 3. 类型 / 显式强转（H44，提交 `6050703`）
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
@@ -222,6 +246,11 @@
   位运算收敛到 `ftl_cw_bit`、flush 日志降 `LOGD`；见 RISK-WB-01~03。
   ⚠ **RISK-WB-01 必须上板**（`next_page` = 编译期无声的地址/容量类量）；背压路径不易构造，
   只做静态收口，**不宣称已取证**。`trim` 走新 `ftl_wbuf_drop` 路径，**必测**。
+- FTL service 与后台调度器（本次审查）：接线从 `ftl.c` 抽成 `bg_wiring.c`、任务表改
+  表驱动 + `_Static_assert` 容量门、`bg_scheduler_t` 删死字段、档位配置由引擎发布、
+  `journal_kick_erase_only` 收回判据、RR 巡检节拍门补哨兵；见 RISK-BG-01/04/05/06/07。
+  ⚠ 接线搬移属**地址/表序类量**，上板须确认 IDLE/NORMAL/BUSY 三档任务执行序与条数不变
+  （BUSY 档 l2p flush 条数 = 1）；`bg_scheduler` 的时钟缺失分支在本板不可达（RISK-BG-03）。
 - 板端最小回归：格式化启动 → 顺序写满多个 SB → GC → 并发覆盖写/TRIM → 断电重启 → WL →
   Journal/BBT 故障注入 → 格式化中途断电 → 长时 soak 后全量读回。
 

@@ -205,6 +205,12 @@ bool journal_append(l2p_journal_t *journal, lba_t lba, nand_pba_t old_pba, nand_
  *   由 ftl_service_idle/normal 每轮调用；job 已在飞或无事可做时为空操作。 */
 void journal_kick(l2p_journal_t *journal);
 
+/* journal_kick_erase_only - 后台推进 Journal 的**换块擦除**，不起页写。
+ *   与 journal_kick 的唯一区别是不做 freeze：host 饱和档（BUSY）要让路给前台，
+ *   但新环形块没擦过就不能往里写 ⇒ 擦除必须任何档位都能补。
+ *   判据（有无待擦块、是否已有 job 在飞）由本模块自己持有——外部不必读 job 内部字段。 */
+void journal_kick_erase_only(l2p_journal_t *journal);
+
 /* journal_flush_page - **同步**把 Journal 落盘：先排空在飞 job，再把当前页缓冲
  *   （含页头）写进 NAND 并推进写指针。
  *   · 本函数是**唯一**的同步环形块擦除点，块满换块时先擦后写（跳过 pre_erased_block 预擦块）；

@@ -1011,7 +1011,7 @@ L2P region log（追加块）
 | Host 提交 / 组 / pending | `ftl.c`、`pending.c/h` | §3.9 |
 | 完成路由 / op dispatch | `completion_table.c/h`、`ftl_op.c/h` | §3.10 |
 | 页打包写缓冲 | `wbuf.c`、`wbuf.h` | §3.11 |
-| Service / 后台调度 | `ftl.c`、`bg_scheduler.c/h` | §3.12 |
+| Service / 后台调度 | `ftl.c`、`bg_scheduler.c/h`、`bg_wiring.c` | §3.12 |
 | GC / 迁移 | `gc.c/h`、`migrate.c/h` | §3.13 |
 | 读恢复 | `read_recovery.c/h` | §3.14 |
 | FTL↔FC 接口 | `ftl_fc_interface.c/h`、`ftl_config.h` | §3.15 |
@@ -2893,19 +2893,31 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
 - **`ftl_service_pump()`**（实例无关，每轮一次）：`fc_service()` ≤ 4 次 + 完成表抽干。
 - **`ftl_service(ftl)`**（每实例一次）：
   - Phase 2.5：`ftl_confirm_kick` → 遍历组 `ftl_drain_group` → `wbuf_maybe_flush_idle`；
-  - Phase 3：`ftl_bg_level_select` → `bg_scheduler_run`。
-- **`bg_scheduler.c`**：纯引擎（must-run pass + 预算/interval/优先级 pass），策略无关。
-- **不做**：不实现各后台任务（各模块的 `*_kick`）；不决定档位（`ftl.c` 的策略表）。
+  - Phase 3：`ftl_bg_service(ftl)`（`ftl.c` 里只有这一行调用）。
+- **`bg_scheduler.c/h`**：纯引擎（must-run pass + 预算 pass + interval 门 + 预算截断），
+  零 kick 知识、策略无关；不 include 任何 kick 头。
+- **`bg_wiring.c`**：接线层——13 个 `static` 适配器（异构 kick → `void(ftl_context_t*)`）+
+  任务表 `s_bg_tasks` + 档位预算表 `g_bg_level_cfg` + `ftl_bg_init`（装载表）+
+  `ftl_bg_level_select`（负载 → 档位）+ `ftl_bg_service`（Phase 3 入口，含 `bg_suspend`
+  判定）+ `ftl_gc_evaluate`（GC 统一触发求值）。
+- **不做**：不实现各后台任务（各模块的 `*_kick`）；引擎不决定档位（档位是 FTL 域策略，
+  归 `bg_wiring.c`）。
 
 #### 3.12.3 结构与不变量
 
-`bg_task_t`：`func` / `interval_ms` / `last_run_ms` / `budget_us` / `priority` / `must_run`。
-`bg_scheduler_t`：`tasks[13]` / `task_count` / `level` / 轮次统计 / `clock_ok`。
+`bg_task_t`：`func` / `interval_ms` / `last_run_ms` / `budget_us` / `must_run`（`bool`）。
+`bg_scheduler_t`：`tasks[13]` / `task_count` / `cfg`（本轮生效的档位配置，引擎在 `run`
+起点发布，任务读它而不各自反查档位表）。
 `bg_level_cfg_t`：每轮总预算 / L2P flush 条数上界 / 任务掩码。
+
+⚠ **表序 = 执行序 = 优先级**：`bg_task_t` **没有** `priority` 字段——表序已是优先级坐标，
+再加一个平行数字就是第二套坐标（C9），且必然漂移。加任务 = 在 `s_bg_tasks` 里插一行 +
+同步 `g_bg_level_cfg` 的掩码位。表项数由 `_Static_assert` 挡在编译期（超 `BG_TASK_COUNT`
+即越界写 `tasks[]` 并踩掉 `task_count`，编译期无声）。
 
 **13 项任务**：
 
-| 位 | 任务 | 类型 | interval | 预算 | 语义 |
+| 表序 | 任务 | 类型 | interval | 预算 | 语义 |
 |---:|---|---|---:|---:|---|
 | 0 | Checkpoint 推进 | must-run | — | — | 在飞 CP 跨档位走完 |
 | 1 | RR 推进 | must-run | — | — | host 读在等结果 |
@@ -2925,9 +2937,9 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
 
 | 档位 | 条件 | 总预算 | 任务掩码 |
 |---|---|---:|---|
-| IDLE | `pending + groups == 0` | 2000 µs | 位 6..12 全开 |
-| NORMAL | 非 IDLE 且 `pending ≤ 16` 且 `queued == 0` | 2000 µs | 位 6..11 |
-| BUSY | `pending > 16` 或 `queued != 0` | 700 µs | 仅位 8（L2P flush） |
+| IDLE | `pending + groups == 0` | 2000 µs | 表序 6..12 全开 |
+| NORMAL | 非 IDLE 且 `pending ≤ 16` 且 `queued == 0` | 2000 µs | 表序 6..11 |
+| BUSY | `pending > 16` 或 `queued != 0` | 700 µs | 仅表序 8（L2P flush） |
 
 **不变量**：
 
@@ -2938,7 +2950,10 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
    `elapsed` 只反映 CPU 时间（SysTick 1 ms 量化）。
 5. **时钟缺失退化**：`time_us` 缺失或恒 0 ⇒ interval/预算失效，每轮都跑；
    防刷屏靠各任务内部单飞行/事件门。
+   ⚠ 本板 `ssd_platform_register` **拒绝** `time_us == NULL` ⇒ 该分支在本板**不可达**、
+   从未被运行验证（见 `known_risks.md` RISK-BG-03）。
 6. **`bg_suspend` 最先 return**：全片擦除后 RAM 状态已陈旧，任何后台写都是往干净芯片倒垃圾。
+   判定收在 `ftl_bg_service` 首行（早于 must-run pass）。
 
 #### 3.12.4 主循环
 
@@ -2950,12 +2965,12 @@ flowchart TB
     subgraph "ftl_service ftl 每实例"
         S1["ftl_confirm_kick"] --> S2["逐组 ftl_drain_group"]
         S2 --> S3["wbuf_maybe_flush_idle"]
-        S3 --> S4{"bg_suspend"}
+        S3 --> S4{"ftl_bg_service: bg_suspend"}
         S4 -- "是" --> S5["return"]
-        S4 -- "否" --> S6["ftl_bg_level_select"]
+        S4 -- "否" --> S6["ftl_bg_level_select 选档"]
         S6 --> S7["bg_scheduler_run"]
         S7 --> S8["Pass 0 must-run"]
-        S7 --> S9["Pass 1 interval 预算 优先级"]
+        S7 --> S9["Pass 1 interval 预算 表序"]
     end
     P2 --> S1
 ```
@@ -2966,7 +2981,7 @@ flowchart TB
 2. 档位选择：`inflight = pending_count + pending_group_count`；0 → IDLE；
    `pending > 16` 或 `queued != 0` → BUSY；否则 NORMAL。
 3. Pass 0：按表序跑所有 `must_run`，无条件、不计预算。
-4. Pass 1：按优先级扫预算任务；掩码允许、interval 到点才跑；`charge = MIN(elapsed, budget)`；
+4. Pass 1：按表序扫预算任务；掩码允许、interval 到点才跑；`charge = MIN(elapsed, budget)`；
    剩余预算 < 250 µs 即截断。
 5. 每个 kick 只提交一步/一条命令，真正的推进在下一轮或完成回调里。
 
@@ -2987,9 +3002,9 @@ flowchart TB
 | `BG_NORMAL_FLUSH_COUNT` / `BG_BUSY_FLUSH_COUNT` | 4 / 1 | 同上 |
 | `GC_EVAL_INTERVAL_MS` | 10 | 同上 |
 | `GC_LOG_INTERVAL_MS` | 1000 | 同上 |
-| `RR_SCAN_INTERVAL_MS` | 1000 | `src/ftl/ftl.c` |
+| `RR_SCAN_INTERVAL_MS` | 1000 | `src/ftl/bg_wiring.c` |
 | `BG_TASK_COUNT` | 13 | `include/ftl/bg_scheduler.h` |
-| 档位预算 | 2000 / 2000 / 700 µs | `src/ftl/ftl.c` |
+| 档位预算 | 2000 / 2000 / 700 µs | `src/ftl/bg_wiring.c` |
 | `MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
 
 #### 3.12.8 主流对照
