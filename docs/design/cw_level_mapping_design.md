@@ -528,7 +528,7 @@ SRAM 缓存热点 region**。
 - **Journal = `CW_NUM` 块（4）**：CW 级下每次页写 = **4 条 journal**（页级时 1 条）
   ⇒ 流量 **4×**、寿命 ÷4。容量取 `CW_NUM` 使 Journal 能容纳两次 checkpoint 之间的映射更新。
   （或做「同 region 多次写合并」。）
-- **磨损计数 = CP record 的一部分（介质版本 9）**：每块 8 B（erase/read/last_ecc/
+- **磨损计数 = CP record 的一部分（介质版本 9 起，v10 延续）**：每块 8 B（erase/read/last_ecc/
   flags），4096 块 = 32 KB = 16 页，随 Checkpoint 与块元数据一起原子落盘；不再有独立
   Wear 块。**软状态**——丢了只退化 WL，不丢数据；CP 间隔就是持久化窗口。
 - **Checkpoint = 8 块池（环形轮转）**：**硬状态**（丢了丢数据）⇒ 池内多副本 + sequence 最新胜；

@@ -67,7 +67,7 @@
 
 ### 2.3 FTL 后端匹配度
 
-- `FTL_LBA_MAX = 878,592`（429 MiB / 512 B；已扣除固定元数据/OP/Spare）
+- `FTL_LBA_MAX = 878,592`（429 MiB / 512 B；已扣除固定元数据/L2P 日志区/OP/Spare）
 - `FTL_IU_BYTES = 512`，1 LBA = 1 CW = 512 B
 - `ftl_submit_read` / `ftl_submit_write` 是**异步**的：提交后由
   `complete_flag` / `on_complete` 通知完成
