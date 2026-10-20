@@ -68,16 +68,20 @@ typedef struct
     bool is_open;                 /* true = 仍在写；false = 已关闭 */
 } super_block_t;
 
-/* ── FTL 表存储 ──
- * 大数组归 FTL 实例所有；由 ftl_storage_t 提供，内存预算单点可见。 */
+/* ── FTL 表的引用 ──
+ * 五张大数组由 HIL（main.c）**各自独立定义、独立选内存域**（section 属性），
+ * 本结构只持有它们的指针；表本体不在本结构里，故放置不受本类型约束。
+ * 由 ftl_storage_t 传入，内存预算在 main.c 的 _Static_assert 单点可见。 */
 typedef struct
 {
-    ftl_block_t   blocks[FTL_BLOCK_TOTAL];                           /* BST */
-    WORD          free_blocks[FTL_BLOCK_TOTAL];                      /* Free Pool */
-    WORD          op_blocks[PLANE_NUM][FTL_OP_POOL_CAP];             /* OP 预留池 */
-    WORD          spare_blocks[PLANE_NUM][FTL_SPARE_POOL_PER_PLANE]; /* Spare 池 */
-    super_block_t closed_sb_list[SUPER_BLOCK_LIST_MAX];              /* Closed 列表 */
-} ftl_tables_t;
+    ftl_block_t *blocks;      /* BST */
+    WORD        *free_blocks; /* Free Pool */
+    WORD(*op_blocks)
+    [FTL_OP_POOL_CAP]; /* OP 预留池 */
+    WORD(*spare_blocks)
+    [FTL_SPARE_POOL_PER_PLANE];    /* Spare 池 */
+    super_block_t *closed_sb_list; /* Closed 列表 */
+} ftl_table_refs_t;
 
 /* ── BBT 持久化状态（per-instance）──
  * 放在本头：bbt.c 使用，且 bbt.h 已 include 本文件，反向包含会成环。 */
@@ -250,11 +254,11 @@ bool allocator_spare_refill_from_free(ftl_allocator_t *alloc, BYTE plane);
 
 /*
  * allocator_init - 初始化分配器
- * 功能：绑定本实例表，清零计数与游标。
- * 参数：alloc — 分配器；topo — 本实例路由；tables — 表存储。
+ * 功能：绑定本实例的五个表指针，清零计数与游标。
+ * 参数：alloc — 分配器；topo — 本实例路由；refs — 表引用（五项非空）。
  * 返回：无。
  */
-void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
+void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, const ftl_table_refs_t *refs);
 
 /*
  * allocator_free_block - 归还一个已擦除块到 Free Pool
@@ -395,35 +399,6 @@ void allocator_erase_stats(const ftl_allocator_t *alloc, allocator_erase_stats_t
 WORD allocator_count_blocks_below(const ftl_allocator_t *alloc, DWORD threshold);
 
 /*
- * allocator_block_is_bad - gblock 是否已标记为坏块
- * 参数：alloc — 分配器；gblock — 全局块号。
- * 返回：true = BAD。
- */
-bool allocator_block_is_bad(const ftl_allocator_t *alloc, WORD gblock);
-
-/*
- * allocator_block_state - 读取 gblock 的块状态
- * 参数：alloc — 分配器；gblock — 全局块号。
- * 返回：块状态（FTL_BLOCK_STATE_*）。
- */
-ftl_block_state_t allocator_block_state(const ftl_allocator_t *alloc, WORD gblock);
-
-/*
- * allocator_block_sb_id - 读取 gblock 的 Closed 列表下标
- * 参数：alloc — 分配器；gblock — 全局块号。
- * 返回：Closed 列表下标（FTL_BLOCK_NO_PLANE / INVALID 语义同 BST 字段）。
- */
-WORD allocator_block_sb_id(const ftl_allocator_t *alloc, WORD gblock);
-
-/*
- * allocator_block_add_valid / sub_valid_if_live - 有效 CW 计数 ±1 的唯一入口
- * 参数：alloc — 分配器；gblock — 全局块号。
- * 返回：无。
- */
-void allocator_block_add_valid(ftl_allocator_t *alloc, WORD gblock);
-void allocator_block_sub_valid_if_live(ftl_allocator_t *alloc, WORD gblock);
-
-/*
  * allocator_bbt_format_in_progress - BBT 是否处于格式化中
  * 参数：alloc — 分配器。
  * 返回：true = 最新 BBT record 带 FORMAT_IN_PROGRESS。
@@ -455,12 +430,6 @@ void allocator_block_wear_get(const ftl_allocator_t *alloc,
                               BYTE                  *last_ecc,
                               BYTE                  *rising_count,
                               BYTE                  *health);
-
-/*
- * allocator_block_valid_count / allocator_block_temp - 块元数据只读访问
- */
-WORD allocator_block_valid_count(const ftl_allocator_t *alloc, WORD gblock);
-BYTE allocator_block_temp(const ftl_allocator_t *alloc, WORD gblock);
 
 /*
  * allocator_op_at / allocator_spare_at - OP / Spare 池元素只读访问

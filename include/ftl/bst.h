@@ -17,9 +17,9 @@
  *   避免 plane1 与 plane0 的 block 号碰撞（历史 bug）。
  *
  * 存储位置：
- *   表**自持**（P2-5）：数组在 `ftl_context_t.tables.blocks` 内（见 ftl_tables_t），
- *   与 free_blocks / op_blocks / spare_blocks / closed_sb_list 同处一份。
- *   多 LUN 前置：每实例一份表 = 每实例一个 ftl_context_t，本表代码零改动。
+ *   五张表由 HIL（main.c）各自独立定义、按实例独立放置；FTL 只持有
+ *   `ftl_table_refs_t`（见 allocator.h）里的指针。
+ *   多 LUN 前置：每实例一份表 = 每实例一组独立对象，本表代码零改动。
  *
  * 有效位（DRAM-less approach ③，2026-10-13 定）：
  *   本仓**不**维护任何常驻有效位图。有效性 = 逐 CW 读**页内 META**（即本仓的「OOB」
@@ -169,9 +169,9 @@ static inline WORD ftl_gblock_block(WORD g)
 /* ── 本文件全部访问器的入参约定 ──
  *
  * `b` 是**前置条件**（判据 2：`bst.h` 在层内模块头名单里），不是可空参数：
- * 调用者一律传 `&alloc->blocks[<索引>]`，而 `blocks` 指向 `ftl_context_t.tables.blocks`
- * 这个**内嵌数组**（非指针）⇒ 取元素地址**结构性恒非空**。全仓 11 个 .c 的调用点
- * 已逐一核实无一传 NULL。
+ * 调用者一律传 `&alloc->blocks[<索引>]`，而 `blocks` 指向分配到本实例的独立数组
+ * （由 `ftl_table_refs_t` 绑定，生命周期覆盖全程）⇒ 取元素地址**结构性恒非空**。
+ * 全仓调用点已逐一核实无一传 NULL。
  * ⇒ 指针非空由内嵌数组结构性保证，不保留 `if (b != NULL)` 恒真守卫；
  *   计数越界仍用 `ASSERT`（H14：debug 停机留现场，release 裁空 ⇒ 零开销）。 */
 

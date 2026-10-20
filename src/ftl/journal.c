@@ -102,7 +102,7 @@ static bool journal_ring_block_bad(const l2p_journal_t *journal, BYTE b)
     {
         const WORD gblock = ftl_gblock(p, (JOURNAL_BLOCK0 + b));
 
-        if (allocator_block_is_bad(journal->alloc, gblock))
+        if (ftl_block_is_bad(&journal->alloc->blocks[gblock]))
         {
             return true;
         }

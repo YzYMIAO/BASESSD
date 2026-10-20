@@ -394,14 +394,6 @@ static ftl_status_t ftl_confirm_handler(void *ctx, ftl_pending_req_t *pending)
     return ftl_confirm_write((ftl_context_t *)ctx, pending);
 }
 
-/* 统一的 wbuf 事件投递：适配器只构造 trigger，状态上报丢弃。 */
-static ftl_status_t ftl_wbuf_event(ftl_context_t *ftl, const wbuf_trigger_t *trigger)
-{
-    wbuf_status_t status;
-
-    return wbuf_handle(ftl->wbuf, trigger, NULL, &status);
-}
-
 /* ── 模块端口装配（每个 helper 只做一件事：建端口 + 绑定） ── */
 
 /* ── 对外接口 ── */
@@ -423,7 +415,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     ASSERT(ftl != NULL);
     ASSERT(cache != NULL);
     ASSERT(storage != NULL);
-    ASSERT(storage->tables != NULL);
+    ASSERT(storage->table_refs != NULL);
     ASSERT(storage->metadata_dir != NULL);
     ASSERT(storage->journal != NULL);
     ASSERT(storage->checkpoint_handle != NULL);
@@ -439,8 +431,8 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     ftl->topo = topo;
 
     /* ├─ 绑定外部存储（storage 数组/挂载块由 HIL 按域提供）──
-     * ⚠ .sram*_data 是 NOLOAD，启动代码不清零 ⇒ 下面必须整表 memset。 */
-    ftl->tables            = storage->tables;
+     * ⚠ .sram*_data 是 NOLOAD，启动代码不清零 ⇒ 下面必须逐表 memset。 */
+    ftl->table_refs        = *storage->table_refs;
     ftl->metadata_dir      = storage->metadata_dir;
     ftl->journal           = storage->journal;
     ftl->checkpoint_handle = storage->checkpoint_handle;
@@ -461,14 +453,18 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     pending_confirm_set_handler(ftl_confirm_handler);
 
     /* ├─ storage 数组显式清零（启动不碰 .sram*_data；Phase 1.5 挂载块同）──
-     * tables：allocator_init 逐块读 ftl_block_is_bad() ⇒ blocks 必须先清零；
-     *         free/op/spare/closed 的读者按 count 有界，整表清零让 NOLOAD 语义确定。
+     * 五张表：allocator_init 逐块读 ftl_block_is_bad() ⇒ blocks 必须先清零；
+     *         free/op/spare/closed 的读者按 count 有界，逐表清零让 NOLOAD 语义确定。
      * metadata_dir：load/init 不覆盖全部字段 ⇒ 先整表清零。
      * journal：init 只重置部分 job 字段 ⇒ 先整表清零。
      * checkpoint_handle：active 在 cp_begin 自己 memset 之前就会被读 ⇒ 必须先清零。
      * migrate / wbuf / rr_page_scratch：Phase 1.5 挂载块，与其余数组一致清零。
      * ⚠ 全部 memset 必须早于 metadata_dir_load。 */
-    memset(ftl->tables, 0, sizeof(*ftl->tables));
+    memset(ftl->table_refs.blocks, 0, FTL_BLOCK_TOTAL * sizeof(*ftl->table_refs.blocks));
+    memset(ftl->table_refs.free_blocks, 0, FTL_BLOCK_TOTAL * sizeof(*ftl->table_refs.free_blocks));
+    memset(ftl->table_refs.op_blocks, 0, PLANE_NUM * sizeof(*ftl->table_refs.op_blocks));
+    memset(ftl->table_refs.spare_blocks, 0, PLANE_NUM * sizeof(*ftl->table_refs.spare_blocks));
+    memset(ftl->table_refs.closed_sb_list, 0, SUPER_BLOCK_LIST_MAX * sizeof(*ftl->table_refs.closed_sb_list));
     memset(ftl->metadata_dir, 0, sizeof(*ftl->metadata_dir));
     memset(ftl->journal, 0, sizeof(*ftl->journal));
     memset(ftl->checkpoint_handle, 0, sizeof(*ftl->checkpoint_handle));
@@ -481,8 +477,8 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     /* ├─ 绑定共享 L2P Cache（设备级已初始化一次；metadata 依赖由 owner 解析）── */
     ftl->cache = cache;
 
-    /* ├─ Allocator（各指针绑到 tables） ── */
-    allocator_init(&ftl->alloc, ftl->topo, ftl->tables);
+    /* ├─ Allocator（各指针绑到 table_refs） ── */
+    allocator_init(&ftl->alloc, ftl->topo, &ftl->table_refs);
 
     /* ├─ Journal ── */
     /* 持续擦除失败的环形块要标进 BBT（RISK-JN-01）；journal 只持有 allocator 指针，
@@ -550,15 +546,19 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
 
 static void contract_check_handles(const ftl_context_t *ftl)
 {
-    ASSERT((ftl->cache != NULL) && (ftl->tables != NULL) && (ftl->metadata_dir != NULL) &&
+    ASSERT((ftl->cache != NULL) && (ftl->metadata_dir != NULL) &&
            (ftl->journal != NULL) && (ftl->checkpoint_handle != NULL) &&
            (ftl->migrate_handle != NULL) && (ftl->wbuf != NULL) && (ftl->rr_page_scratch != NULL));
 
-    ASSERT((ftl->alloc.blocks == ftl->tables->blocks) &&
-           (ftl->alloc.free_blocks == ftl->tables->free_blocks) &&
-           (ftl->alloc.op_blocks == ftl->tables->op_blocks) &&
-           (ftl->alloc.spare_blocks == ftl->tables->spare_blocks) &&
-           (ftl->alloc.closed_sb_list == ftl->tables->closed_sb_list));
+    ASSERT((ftl->table_refs.blocks != NULL) && (ftl->table_refs.free_blocks != NULL) &&
+           (ftl->table_refs.op_blocks != NULL) && (ftl->table_refs.spare_blocks != NULL) &&
+           (ftl->table_refs.closed_sb_list != NULL));
+
+    ASSERT((ftl->alloc.blocks == ftl->table_refs.blocks) &&
+           (ftl->alloc.free_blocks == ftl->table_refs.free_blocks) &&
+           (ftl->alloc.op_blocks == ftl->table_refs.op_blocks) &&
+           (ftl->alloc.spare_blocks == ftl->table_refs.spare_blocks) &&
+           (ftl->alloc.closed_sb_list == ftl->table_refs.closed_sb_list));
 }
 
 static void contract_check_topology(const ftl_context_t *ftl)
@@ -795,7 +795,7 @@ void ftl_service(ftl_context_t *ftl)
         wbuf_trigger_t trigger;
         memset(&trigger, 0, sizeof(trigger));
         trigger.kind = WBUF_TRIGGER_MAYBE_FLUSH_IDLE;
-        (void)ftl_wbuf_event(ftl, &trigger);
+        (void)wbuf_handle(ftl->wbuf, &trigger, NULL, NULL);
     }
 
     /* Phase 3: 时间预算后台调度 —— 档位选择 / 10 项任务表 / 预算规模 / bg_suspend
@@ -871,7 +871,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, WORD gi, DWORD internal_
         trigger.n    = n;
         trigger.gi   = gi;
 
-        return ftl_wbuf_event(ftl, &trigger);
+        return wbuf_handle(ftl->wbuf, &trigger, NULL, NULL);
     }
 
     /* ── 以下为读路径 ── */
@@ -1246,7 +1246,7 @@ void ftl_flush(ftl_context_t *ftl)
         wbuf_trigger_t trigger;
         memset(&trigger, 0, sizeof(trigger));
         trigger.kind = WBUF_TRIGGER_FLUSH;
-        (void)ftl_wbuf_event(ftl, &trigger);
+        (void)wbuf_handle(ftl->wbuf, &trigger, NULL, NULL);
     }
 
     const DWORD dim = ftl_topo_dim(ftl->topo);
@@ -1299,7 +1299,7 @@ void ftl_trim(ftl_context_t *ftl, QWORD lba, DWORD count)
             memset(&trigger, 0, sizeof(trigger));
             trigger.kind = WBUF_TRIGGER_DROP;
             trigger.lba  = l;
-            (void)ftl_wbuf_event(ftl, &trigger);
+            (void)wbuf_handle(ftl->wbuf, &trigger, NULL, NULL);
             continue;
         }
 

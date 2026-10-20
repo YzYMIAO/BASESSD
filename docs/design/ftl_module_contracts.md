@@ -323,7 +323,7 @@ void l2p_handle(l2p_cache_t *cache, uint32_t dim,
 
 ```c
 void wbuf_handle(wbuf_handle_t *h, const wbuf_trigger_t *t,
-                 wbuf_status_t *out);
+                 wbuf_status_t *out);   /* out 可为 NULL：只关心返回值时丢弃状态上报 */
 ```
 
 - 事件驱动：`APPEND(lba, data, n, gi)` / `FLUSH` / `DROP(range)` / `RESET` /
@@ -331,6 +331,7 @@ void wbuf_handle(wbuf_handle_t *h, const wbuf_trigger_t *t,
 - 上报：`state(IDLE/OPEN/FLUSHING/FAILED)`、`open`、`occupied`、`owners`、
   `flushed_pages`、`drop_count`、`wants_run`、`timed_out`、`error`。
 - 时间：仅提交背压。
+- `wbuf_handle` 的 `out` 为可选出参：调用者只判断返回值时传 NULL，不分配 dummy status。
 - 上下文：`alloc` + `ftl_pending_table_t *pending` + `migrate_handle_t *migrate`；
   直接调 `pending_*` / `migrate_trigger(GC_URGENT)` / FC 建链。
 - 移入 handle：`ftl->wbuf` 的 data/occupied/open/base/owners。
@@ -535,7 +536,7 @@ journal/checkpoint 账本同步），不是改 `migrate_handle_t` 入参能解�
 
 ```c
 typedef struct {
-    ftl_tables_t          *tables;
+    const ftl_table_refs_t *table_refs;
     metadata_dir_cache_t  *metadata_dir;
     l2p_journal_t         *journal;
     checkpoint_handle_t   *checkpoint_handle;

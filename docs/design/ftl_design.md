@@ -1241,7 +1241,7 @@ NAND 的写必须落在**已擦除**的页上，而擦除以块为单位。FTL �
 | `sb_id` | 2 B | 反向索引到 SB；`UINT16_MAX` = 无 |
 | `rr` | 3 B | `last_ecc` / `rising_count` / `health` |
 
-`ftl_tables_t`（每实例，落 SRAM12）：
+五张表（每实例；各自独立对象，可单独选内存域；当前全部落 SRAM12）：
 
 | 数组 | 大小 | 作用 |
 |---|---:|---|
@@ -3986,8 +3986,8 @@ flowchart TB
     end
 
     subgraph "每实例 g_ftl dim 描述符,AXI"
-        CTX["ftl_context_t topo cache* pending groups wbuf* tables* alloc journal* metadata_dir* checkpoint_handle* migrate_handle* rr_handle rr_page_scratch* bg"]
-        TAB["ftl_tables_t BST free op spare closed"]
+        CTX["ftl_context_t topo cache* pending groups wbuf* table_refs alloc journal* metadata_dir* checkpoint_handle* migrate_handle* rr_handle rr_page_scratch* bg"]
+        TAB["ftl_table_refs_t → blocks / free / op / spare / closed"]
         MD["metadata_dir_cache_t entries l2p_live job"]
         JRN["l2p_journal_t page_buf ring job"]
         CPJ["checkpoint_handle_t phase bitmap block_words cp_state"]
@@ -3997,7 +3997,7 @@ flowchart TB
     end
 
     subgraph "内存域 main-c 静态数组"
-        D12["SRAM12 g_ftl_tables"]
+        D12["SRAM12 g_ftl_blocks / g_ftl_free_blocks / g_ftl_op_blocks / g_ftl_spare_blocks / g_ftl_closed_sb_list"]
         D3["SRAM3 g_ftl_checkpoint_handle g_ftl_journal"]
         D4["SRAM4 g_ftl_md"]
         AX["AXI g_ftl g_ftl_migrate g_ftl_wbuf g_ftl_rr_page_scratch g_l2p_cache CLI buffer"]
@@ -4034,7 +4034,7 @@ flowchart TB
   （`g_ftl_migrate` / `g_ftl_wbuf` / `g_ftl_rr_page_scratch`）；`ftl_init` 只绑定指针并
   显式 memset。**挂指针不减少总 RAM**，收益是 `ftl_context_t` 变小、放置可控、handle
   挂载形态统一。
-- `alloc` 内部指针直接绑到 `tables`，多数下游走 `ftl->alloc.blocks/...`，不经过 `ftl->tables`。
+- `alloc` 内部指针直接绑到 `table_refs` 的五项，多数下游走 `ftl->alloc.blocks/...`，不经过 `ftl->table_refs`。
 - 共享 cache 的生命周期覆盖全程；它的 `ctx`（cache line）会进完成表，不能是栈对象。
 - 完成表的 `ctx` 可以是 `NULL`（host IO）、cache line、job、pending 槽；生命周期必须覆盖命令在飞期。
 - **模块执行状态 vs 共享数据面**：`ftl_context_t` 是 device 描述符，持有共享账本与
@@ -4649,7 +4649,7 @@ flowchart TB
 | `g_ftl_wbuf` | 4,164 B | AXI |
 | `g_ftl_rr_page_scratch` | 2,048 B | AXI |
 | `g_l2p_cache` | 132,136 B | AXI |
-| `g_ftl_tables` | 123,896 B | SRAM12 |
+| 五张表（`g_ftl_blocks` / `free` / `op` / `spare` / `closed`，合计） | 123,896 B | SRAM12（各自独立对象） |
 | `g_ftl_checkpoint_handle` | 10,636 B | SRAM3 |
 | `g_ftl_journal` | 2,104 B | SRAM3 |
 | `g_ftl_md` | 25,164 B | SRAM4 |
@@ -4671,7 +4671,7 @@ flowchart TB
 | `l2p_journal_t` / `journal_handle_t` | `include/ftl/journal.h` | 页缓冲 / 游标 / sequence / merge_floor / pre_erased_block / 失败观测 / `alloc`（坏块走 owner API） |
 | `l2p_checkpoint_header_t` / `checkpoint_handle_t` | `include/ftl/checkpoint.h` | Header / 块元数据快照 / 磨损快照 / phase / 快照位图 / `cp_state` / `last_ms` / 窄上下文 |
 | `metadata_entry_t` / `metadata_anchor_page_t` / `metadata_ring_t` / `metadata_dir_cache_t` / `metadata_handle_t` | `include/ftl/metadata.h` | Directory / Anchor / 池几何 / 回收压缩 job / `alloc`+`total_writes` 窄指针 |
-| `ftl_block_t` / `ftl_tables_t` / `ftl_allocator_t` / `super_block_t` | `include/ftl/bst.h` / `allocator.h` | BST / 四本账 / SB |
+| `ftl_block_t` / `ftl_table_refs_t` / `ftl_allocator_t` / `super_block_t` | `include/ftl/bst.h` / `allocator.h` | BST / 表引用 / 四本账 / SB |
 | `migrate_handle_t` | `include/ftl/migrate.h` | phase / kind / post / victim / cw_bitmap / page_buf / 窄上下文 / GC-WL-predict 节拍 / reclaimed-novictim 计数 |
 | `read_recovery_handle_t` | `include/ftl/read_recovery.h` | stage / waiting / pending_idx / page / owner / 窄上下文 |
 | `wbuf_handle_t` | `include/ftl/wbuf.h` | data / occupied / owners / open / base / 窄上下文 |

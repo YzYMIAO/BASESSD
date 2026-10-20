@@ -93,7 +93,7 @@ static BYTE mig_next_present_plane(const ftl_allocator_t *alloc, const migrate_h
 
         const WORD g = ftl_gblock(p, m->victim.plane_blocks[p]);
 
-        if (allocator_block_state(alloc, g) != FTL_BLOCK_STATE_CLOSED)
+        if (ftl_block_state(&alloc->blocks[g]) != FTL_BLOCK_STATE_CLOSED)
         {
             continue;
         }
@@ -344,7 +344,7 @@ static bool mig_begin_predict(migrate_handle_t *m)
     }
 
     /* 慢死块必在 closed_sb_list 中（scan 只返回 CLOSED 块）。 */
-    const WORD closed_idx   = allocator_block_sb_id(m->alloc, gblock);
+    const WORD closed_idx   = ftl_block_sb_id(&m->alloc->blocks[gblock]);
     const WORD closed_count = m->alloc->closed_sb_count;
 
     ASSERT(closed_idx < closed_count);
@@ -801,8 +801,8 @@ static bool mig_step_write_settle(migrate_handle_t *m)
              *   目的页，L2P 更新仍然正确；只跳过源侧计数。 */
             const WORD src_gblock = mig_src_gblock(m, plane);
             const WORD dst_gblock = ftl_pba_gblock(dst_cw);
-            allocator_block_sub_valid_if_live(m->alloc, src_gblock);
-            allocator_block_add_valid(m->alloc, dst_gblock);
+            ftl_block_sub_valid_if_live(&m->alloc->blocks[src_gblock]);
+            ftl_block_add_valid(&m->alloc->blocks[dst_gblock]);
 
             m->migrated++;
         }
@@ -1305,7 +1305,7 @@ static void mig_complete_erase(migrate_handle_t          *m,
     if (!fc_cw_status_has_error(completion->status))
     {
         m->erased++;
-        if (allocator_block_is_bad(m->alloc, gsrc))
+        if (ftl_block_is_bad(&m->alloc->blocks[gsrc]))
         {
             /* 迁移期间被 RR/BBT 标 BAD：擦成功也不能复活或入池。 */
             m->erase_failed = true;
@@ -1340,7 +1340,7 @@ static void mig_complete_erase(migrate_handle_t          *m,
 
         /* 擦除失败：标记坏块（BBT 单数据源，后台持久化）。
          * ⚠ 已 BAD 时不再重复标记：bbt_mark_bad 会再次 bad_count++ 并从 Spare 补池。 */
-        if (!allocator_block_is_bad(m->alloc, gsrc))
+        if (!ftl_block_is_bad(&m->alloc->blocks[gsrc]))
         {
             (void)bbt_mark_bad(m->alloc, gsrc);
         }

@@ -178,16 +178,16 @@ static void boot_report_console(void)
 /* ══════════════════════════════════════════════════════════════════
  * FTL 实例（v0.37 上线；P2-5 起**自持表**）
  *
- * 表所有权（P2-5）：BST / free / op / spare / closed 五个大数组**不再由本文件声明**，
- *   而是内含在 ftl_context_t 里（`ftl->tables`，见 ftl/allocator.h）——表归 FTL 本体
- *   所有，本文件只提供实例存储。与主流同构（OpenSSD 全局数组 / SPDK `spdk_ftl_dev`
- *   内含表）。好处：内存预算**单点可见**（下面的 _Static_assert 看 g_ftl + 共享 cache）。
+ * 表所有权：BST / free / op / spare / closed 五个大数组由**本文件各自独立定义**，
+ *   并决定落哪个域；FTL 只收 `ftl_table_refs_t`（五个指针，见 ftl/allocator.h）。
+ *   每张表一个对象 ⇒ 可以单独换内存域；内存预算由下面的 _Static_assert 单点核对。
  *
  * SRAM 布局（阶段 C：描述符 + 内存域散列）：
  *   AXI_RAM（.bss）：g_ftl 描述符 + g_ftl_migrate / g_ftl_wbuf / g_ftl_rr_page_scratch
  *                    （Phase 1.5 挂载块）+ g_l2p_cache（共享热 cache）
  *                    + CLI 写缓冲 + 其它 .bss
- *   SRAM1+SRAM2（.sram12_data）：g_ftl_tables[FTL_DIM_TOTAL]（BST/池/closed）
+ *   SRAM1+SRAM2（.sram12_data）：g_ftl_blocks / g_ftl_free_blocks / g_ftl_op_blocks /
+ *                                g_ftl_spare_blocks / g_ftl_closed_sb_list（各自独立对象）
  *   SRAM3（.sram3_data）：g_ftl_checkpoint_handle[] + g_ftl_journal[]
  *   SRAM4（.sram4_data）：g_ftl_md[]（Metadata Directory）
  *
@@ -201,8 +201,14 @@ static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM]; /* 描述符 → AXI_RAM（
  * 设备级初始化一次，由 ssd_l2p_owner_of_region 把全局 region 解析到 owner LUN。 */
 static l2p_cache_t g_l2p_cache[CH_NUM][CE_NUM];
 
-/* per-instance 大数组（阶段 C）：由 ftl_storage_t 绑定到描述符。 */
-static ftl_tables_t         g_ftl_tables[FTL_DIM_TOTAL] SRAM12_DATA;
+/* per-instance 大数组（阶段 C）：由 ftl_storage_t 绑定到描述符。
+ * 五张表**各自独立定义**，每张可单独换 section/内存域；当前全部落 SRAM12，
+ * 将来要挪某一张只改该行的 section 宏，不动别的表。 */
+static ftl_block_t          g_ftl_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD                 g_ftl_free_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD                 g_ftl_op_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
+static WORD                 g_ftl_spare_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
+static super_block_t        g_ftl_closed_sb_list[FTL_DIM_TOTAL][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
 static checkpoint_handle_t  g_ftl_checkpoint_handle[FTL_DIM_TOTAL] SRAM3_DATA;
 static l2p_journal_t        g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
 static metadata_dir_cache_t g_ftl_md[FTL_DIM_TOTAL] SRAM4_DATA;
@@ -234,7 +240,10 @@ _Static_assert(sizeof(g_ftl) + sizeof(g_ftl_migrate) + sizeof(g_ftl_wbuf) +
                        FTL_AXI_RAM_RESERVED + CLI_AXI_RAM_RESERVED <=
                    BOARD_AXI_RAM_SIZE,
                "FTL 描述符/挂载块/共享 cache/CLI 缓冲超出 AXI_RAM");
-_Static_assert(sizeof(g_ftl_tables) <= BOARD_SRAM12_SIZE, "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
+_Static_assert(sizeof(g_ftl_blocks) + sizeof(g_ftl_free_blocks) + sizeof(g_ftl_op_blocks) +
+                       sizeof(g_ftl_spare_blocks) + sizeof(g_ftl_closed_sb_list) <=
+                   BOARD_SRAM12_SIZE,
+               "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
 _Static_assert(sizeof(g_ftl_checkpoint_handle) + sizeof(g_ftl_journal) <= BOARD_SRAM3_SIZE, "checkpoint_handle/journal 超出 SRAM3");
 _Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4");
 
@@ -289,8 +298,15 @@ static ftl_status_t ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
 
     const DWORD dim = ftl_topo_dim(topo);
 
+    ftl_table_refs_t refs;
+    refs.blocks         = g_ftl_blocks[dim];
+    refs.free_blocks    = g_ftl_free_blocks[dim];
+    refs.op_blocks      = g_ftl_op_blocks[dim];
+    refs.spare_blocks   = g_ftl_spare_blocks[dim];
+    refs.closed_sb_list = g_ftl_closed_sb_list[dim];
+
     ftl_storage_t storage;
-    storage.tables            = &g_ftl_tables[dim];
+    storage.table_refs        = &refs;
     storage.metadata_dir      = &g_ftl_md[dim];
     storage.journal           = &g_ftl_journal[dim];
     storage.checkpoint_handle = &g_ftl_checkpoint_handle[dim];

@@ -1144,15 +1144,17 @@ void checkpoint_block_snapshot(const ftl_allocator_t      *alloc,
 {
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
-        WORD valid = allocator_block_valid_count(alloc, g);
-        BYTE st    = (BYTE)allocator_block_state(alloc, g);
-        BYTE temp  = allocator_block_temp(alloc, g);
+        const ftl_block_t *blk = &alloc->blocks[g];
+
+        WORD valid = blk->valid_count;
+        BYTE st    = (BYTE)ftl_block_state(blk);
+        BYTE temp  = ftl_block_get_temp(blk);
 
         /* Directory 是动态 LOG 块身份的唯一权威：它不属 allocator 池，合法编码是
          * LOG + no-pool。若 BST 因历史路径停在 NONE，照实编码会让下一次开机的
          * Pass 0 判为非法并拒绝**整份**快照（RISK-BOOT-15）⇒ 每次冷启动全盘 rebuild。
          * BAD 是终态，不得被 LOG 覆盖。 */
-        if ((md_dir != NULL) && (!allocator_block_is_bad(alloc, g)) && (metadata_live_count(md_dir, g) > 0U))
+        if ((md_dir != NULL) && (!ftl_block_is_bad(blk)) && (metadata_live_count(md_dir, g) > 0U))
         {
             valid = 0U;
             st    = FTL_BLOCK_STATE_LOG;
@@ -1168,7 +1170,7 @@ void checkpoint_block_snapshot(const ftl_allocator_t      *alloc,
         {
             const WORD g = allocator_op_at(alloc, p, i);
 
-            if (!allocator_block_is_bad(alloc, g))
+            if (!ftl_block_is_bad(&alloc->blocks[g]))
             {
                 words[g] = ((words[g] & ~(CP_BLOCK_WORD_POOL_MASK << CP_BLOCK_WORD_POOL_SHIFT)) |
                             (CP_BLOCK_POOL_OP << CP_BLOCK_WORD_POOL_SHIFT));
@@ -1178,7 +1180,7 @@ void checkpoint_block_snapshot(const ftl_allocator_t      *alloc,
         {
             const WORD g = allocator_spare_at(alloc, p, i);
 
-            if (!allocator_block_is_bad(alloc, g))
+            if (!ftl_block_is_bad(&alloc->blocks[g]))
             {
                 words[g] = ((words[g] & ~(CP_BLOCK_WORD_POOL_MASK << CP_BLOCK_WORD_POOL_SHIFT)) |
                             (CP_BLOCK_POOL_SPARE << CP_BLOCK_WORD_POOL_SHIFT));

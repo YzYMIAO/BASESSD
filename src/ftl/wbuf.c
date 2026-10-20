@@ -404,6 +404,9 @@ ftl_status_t wbuf_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const 
 
     h->error = (st == FTL_ERROR) ? (int32_t)FTL_ERROR : (int32_t)FTL_OK;
 
-    wbuf_status_fill(h, out);
+    if (out != NULL)
+    {
+        wbuf_status_fill(h, out);
+    }
     return st;
 }

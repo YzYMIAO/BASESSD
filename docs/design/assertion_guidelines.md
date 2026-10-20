@@ -1273,9 +1273,8 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
    （`gc_check_triggers(NULL) → 0` = "没有 allocator ⇒ 无触发"），后者的默认值是**连贯的**。
 3. **调用点普查：全仓零 NULL**（逐条核实 `src/` 11 个 .c + `tests/unit/test_ftl.c`）。
    实参只有两种形态：`&<…>->blocks[<索引>]`，或紧邻使用前赋值的局部/形参（其右值同样是
-   `&…blocks[<索引>]`）。**根因**：`ftl_allocator_t.blocks` 绑定到
-   `ftl_context_t.tables.blocks` 这个**内嵌数组**（`ftl_tables_t.blocks[FTL_BLOCK_TOTAL]`，
-   非指针）⇒ 取元素地址**结构性恒非空**。
+   `&…blocks[<索引>]`）。**根因**：`ftl_allocator_t.blocks` 由 `ftl_table_refs_t` 绑定到
+   HIL **独立定义**的数组（生命周期覆盖全程）⇒ 取元素地址**结构性恒非空**。
    （附带：调用点传的是 `&blocks[i]` 而非基址 `blocks`，故即使基址真为 NULL，
    `&blocks[i]`（`i > 0`）也不是 NULL 字面量 —— 守卫**连它想防的情形都拦不住**。）
 4. **「热路径」这条理由方向是反的**：现写法 `if (b != NULL) { … }` 在 release 档是**活的**

@@ -49,7 +49,7 @@ read disturb 慢死预测、坏块替换池、L2P thrashing、**组完成语义*
 | 1 | munit 无测试宏，`MunitTest` 数组（`tests/framework/munit.h`）+ `MunitSuite` 根套件（`ut_main.c`）逐项注册 | 新增 FTL 套件 = `extern MunitTest g_ftl_*_tests[]` + 根套件一行 |
 | 2 | **堆与栈共享 128KB DTCM**：`_Min_Heap_Size=0x200`（`linker/stm32h743xx_flash.ld:19`）**不是堆上限**，只是 `._user_heap_stack` 的**最小预留**（链接期静态溢出检查，`:146-153`）。真实堆 = DTCM 底部 `end` 向上长到 `MSP - SBRK_STACK_GUARD(0x400)`（`src/platform/syscalls.c:73-96`），测试期栈峰值≈55KB ⇒ 可用堆**数十 KB** | 新 FTL 测试一律**静态 fixture + setup 里 memset 复位**，**禁止 malloc**——理由不是「堆只有 512B」，而是**大夹具（如已删的 `test_rebuild.c` ~176KB）必然撞栈 ⇒ HardFault** |
 | 3 | `ftl_block_t`=**20B**（`bst.h:139` static_assert）；`super_block_t`=**12B**（`allocator.h:80`） | 见下预算表 |
-| 4 | **`allocator_init` 现取 `ftl_tables_t*`**（3 参，`allocator.c:49`）——大数组**按值内含**，HIL 不再传指针（P2-5 表自持） | **fixture 必须提供 `ftl_tables_t`**，不能再散落数组 |
+| 4 | **`allocator_init` 现取 `const ftl_table_refs_t *`**（3 参）——五张表由 HIL **独立定义**，FTL 只收五个指针 | **fixture 必须提供五个独立数组 + `ftl_table_refs_t`** |
 | 5 | `allocator_init` **不填 free pool**（只把非坏块置 FREE 状态、`free_count=0`），由 HIL/`main.c` 回填（`allocator.c:59` 注释 + `main.c:230`） | 用例须区分「init 后」与「回填后」两种状态 |
 | 6 | `pending_*` / `pending_group_*` 取 **`ftl_context_t*`**（`pending.h:134`），需**完整上下文** | 见下「fixture 内存」一节 |
 
@@ -57,11 +57,11 @@ read disturb 慢死预测、坏块替换池、L2P thrashing、**组完成语义*
 
 | 结构 | 组成 | 尺寸 |
 |---|---|---|
-| `ftl_tables_t` | `blocks[4096]×20B`=80KB + `free_blocks[4096]×2B`=8KB + `op_blocks[2][204]×2B`=816B + `closed_sb_list[1024]×12B`=12KB + `spare_blocks[2][50]×2B`=200B | **≈101KB** |
+| 五张表（独立对象，合计） | `blocks[4096]×20B`=80KB + `free_blocks[4096]×2B`=8KB + `op_blocks[2][204]×2B`=816B + `closed_sb_list[4096]×8B`=32KB + `spare_blocks[2][50]×2B`=200B | **123,896 B**（实测） |
 | `metadata_dir_cache_t` | `entries[2048]×7B` | **≈14.4KB** |
 | `ftl_context_t` | 内含 `tables`(101KB，**FTL 自持表** P2-5) + `cache`(128KB，**L2P 缓存**——非「表」；真 L2P 表在 NAND 的 region 池，SRAM 只驻 64 个 region) + `metadata_dir`(14.4KB) + journal + … | **≈263KB** |
 
-> **⚠ 关键约束**：`ftl_tables_t` 的数组尺寸由 `FTL_BLOCK_TOTAL`（=4096）**固定**——原文档
+> **⚠ 关键约束**：五张表的数组尺寸由 `FTL_BLOCK_TOTAL`（=4096）**固定**——原文档
 > 「用 2112 项省内存」**不可能**（结构体按值含全 4096 项）。
 > 且 **AXI_RAM(384KB) 已被 `main.c` 的 `g_ftl`(263KB，`sizeof(ftl_context_t)`) 占去 68.5%**
 > （`main.c:131` 的 `_Static_assert`），独立 263KB 的 `ftl_context_t` fixture **放不下**
@@ -104,7 +104,7 @@ metadata_dir_init(&F->metadata_dir);
 - **代价**：fixture 不再「独立」；须保证 `test` 执行期间**后台泵不并发**——`test` 命令在
   `cli_service_poll` 里**同步执行**（不重入泵），天然满足。
 - **备选**（不推荐）：独立 `ftl_context_t` 落 SRAM（`.sram1/2/3_data`=288KB，**仅 1KB 余量**），
-  或只对不需要上下文的用例用独立小 fixture（`ftl_tables_t`=108KB 落 SRAM1）。
+  或只对不需要上下文的用例用独立小 fixture（五张表合计 123,896 B 落 SRAM1）。
 
 ## 3. 测试文件组织（仿 fc_nand 一文件多套件）
 

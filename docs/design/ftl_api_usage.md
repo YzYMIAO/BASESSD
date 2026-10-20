@@ -23,7 +23,7 @@ struct ftl_context {
     ftl_pending_req_t     pending[FTL_PENDING_MAX]; // 子操作追踪（per-instance）
     ftl_io_group_t        groups[FTL_GROUP_MAX];    // 完成组表（一次 submit = 一组）
     wbuf_handle_t        *wbuf;               // 页打包写缓冲（Phase 1.5 挂 storage）
-    ftl_tables_t         *tables;             // 大表指针（SRAM12）
+    ftl_table_refs_t      table_refs;         // 五张表的引用（表本体各自独立、当前 SRAM12）
     ftl_allocator_t       alloc;              // allocator（指针已绑到 tables）
     l2p_journal_t        *journal;            // journal（SRAM3）
     metadata_dir_cache_t *metadata_dir;       // Metadata Directory（SRAM4）
@@ -132,7 +132,7 @@ typedef struct
 ```c
 ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cache,
                       const ftl_storage_t *storage);
-void         allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
+void         allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, const ftl_table_refs_t *refs);
 ```
 
 > **阶段 B/C 契约**：`cache` 是设备级共享 L2P cache（同一 `(ch,ce)` 一份，设备级 init 一次）；
@@ -436,21 +436,34 @@ nand_dispatch_set_armed(1U);            // ③ 放行 NAND 异步提交（submit
  * 阶段 C：四个大数组按 FTL_DIM_TOTAL 声明并按域放置（NOLOAD），
  * 由 ftl_storage_t 绑定；描述符本身在 AXI .bss。 */
 static ftl_context_t         g_ftl[CH_NUM][CE_NUM][LUN_NUM];
-static ftl_tables_t          g_ftl_tables[FTL_DIM_TOTAL] SRAM12_DATA;
+static ftl_block_t   g_ftl_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD          g_ftl_free_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD          g_ftl_op_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
+static WORD          g_ftl_spare_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
+static super_block_t g_ftl_closed_sb_list[FTL_DIM_TOTAL][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
 static checkpoint_handle_t              g_ftl_checkpoint_handle[FTL_DIM_TOTAL]  SRAM3_DATA;
 static l2p_journal_t         g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
 static metadata_dir_cache_t  g_ftl_md[FTL_DIM_TOTAL]      SRAM4_DATA;
 static ssd_controller_t      g_ctrl;
 
 /* ④ FTL 初始化（阶段 C：拓扑 + 共享 cache + storage）
- *    内部：绑定 storage → 四个 NOLOAD 数组 memset → pending_init
- *        → allocator_init（绑定 tables，free pool 空）
+ *    内部：绑定 storage → 五张表逐表 memset → pending_init
+ *        → allocator_init（绑定 table_refs，free pool 空）
  *        → journal_init → metadata_dir_load → bbt_init（填充 BST bad 位） */
 const uint32_t dim = ftl_topo_dim((ftl_topology_t){.ch = ch, .ce = ce, .lun = lun});
-const ftl_storage_t storage = {
-    .tables = &g_ftl_tables[dim], .metadata_dir = &g_ftl_md[dim],
-    .journal = &g_ftl_journal[dim], .checkpoint_handle = &g_ftl_checkpoint_handle[dim],
-};
+
+ftl_table_refs_t refs;
+refs.blocks         = g_ftl_blocks[dim];
+refs.free_blocks    = g_ftl_free_blocks[dim];
+refs.op_blocks      = g_ftl_op_blocks[dim];
+refs.spare_blocks   = g_ftl_spare_blocks[dim];
+refs.closed_sb_list = g_ftl_closed_sb_list[dim];
+
+ftl_storage_t storage;
+storage.table_refs        = &refs;
+storage.metadata_dir      = &g_ftl_md[dim];
+storage.journal           = &g_ftl_journal[dim];
+storage.checkpoint_handle = &g_ftl_checkpoint_handle[dim];
 ftl_init(&g_ftl[ch][ce][lun], (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun},
          &g_l2p_cache[ch][ce], &storage);
 
@@ -458,7 +471,7 @@ ftl_init(&g_ftl[ch][ce][lun], (ftl_topology_t){.ch = ch, .ce = ce, .lun = lun},
  *    allocator_init 不填 free pool（free_count 硬清零）、bbt 只标坏块不产 free_blocks。
  *    必须遍历 BST 非坏块逐个 allocator_free_block，否则首次写 allocator_alloc 失败。 */
 for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++) {
-    if (!ftl_block_is_bad(&g_ftl[ch][ce][lun].tables->blocks[g])) {
+    if (!ftl_block_is_bad(&g_ftl[ch][ce][lun].table_refs.blocks[g])) {
         allocator_free_block(&g_ftl[ch][ce][lun].alloc, g);
     }
 }
@@ -796,7 +809,7 @@ typedef struct {
 
 ```c
 /* 初始化 allocator（P2-5：形参 = 拓扑 + 自持表指针；第三参只绑定不复制） */
-void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables);
+void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, const ftl_table_refs_t *refs);
 
 /*
  * 分配一页的**各 plane** PBA（CW 级映射 + Policy B：每 plane 独立块）。

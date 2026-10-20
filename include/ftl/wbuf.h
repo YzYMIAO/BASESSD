@@ -105,7 +105,8 @@ void wbuf_init(wbuf_handle_t *h, ftl_allocator_t *alloc, ftl_pending_table_t *pe
  * wbuf_handle - 事件驱动入口（docs §4.8）
  *
  * 返回操作结果（**偏离 §4.8 的 void 签名**：写路径必须据此区分 FTL_AGAIN 背压与
- * FTL_ERROR 永久失败，P5 留痕）。`out` 恒填本轮上报。
+ * FTL_ERROR 永久失败，P5 留痕）。`out` 非 NULL 时填本轮上报；调用者只关心返回值时
+ * 可传 NULL（状态上报丢弃，不分配 dummy status）。
  *
  * APPEND / FLUSH / DROP / RESET / MAYBE_FLUSH_IDLE 失败时缓冲**原样保留**（可重试）；
  * 只有编程成功的 FLUSH 才清空缓冲。`info` 当前不参与决策（保留以统一 typed 入口）。

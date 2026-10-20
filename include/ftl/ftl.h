@@ -13,7 +13,7 @@
  * 三级模式切换依据未决命令数（pending + 组），非"本轮提交了几条 NAND"。
  */
 
-#include "allocator.h"    /* ftl_tables_t, super_block_t */
+#include "allocator.h"    /* ftl_table_refs_t, super_block_t */
 #include "bg_scheduler.h" /* 时间预算后台调度器（ftl_context_t 含调度器） */
 #include "checkpoint.h"
 #include "ftl_type.h" /* ftl_io_request_t */
@@ -98,13 +98,12 @@ typedef struct ftl_context
      * 指针，由 storage 提供并决定落哪个域（Phase 1.5）。 */
     wbuf_handle_t *wbuf;
 
-    /* FTL 表指针（由 HIL 的 ftl_storage_t 提供并决定落哪个域）。
-     * BST blocks(80KB) / free+op(16KB) / closed(32KB) / spare(200B)，见 ftl_tables_t。
-     * allocator_init 会把 alloc 内部的指针直接绑到本表，故下游大多数表访问走
-     * `ftl->alloc->...`，不经过本指针。 */
-    ftl_tables_t *tables;
+    /* 五张表的引用（表本体由 HIL 独立定义、各自选内存域）。
+     * 按值保存：多实例下把“本实例绑定的是哪组表”留成可审计的事实。
+     * 下游访问走 `ftl->alloc->...`（同一组指针），不经过本字段。 */
+    ftl_table_refs_t table_refs;
 
-    /* Allocator（各指针绑到上面的 tables，见 allocator_init） */
+    /* Allocator（各指针绑到上面的 table_refs，见 allocator_init） */
     ftl_allocator_t alloc;
 
     /* Journal（指针，由 storage 提供；落 SRAM3） */
@@ -168,20 +167,21 @@ typedef struct ftl_context
 /*
  * ftl_storage_t - 描述符的外部存储
  *
- * storage 数组由 HIL 提供并决定落哪个域（main.c：tables→SRAM12、md→SRAM4、
+ * storage 数组由 HIL 提供并决定落哪个域（main.c：五张表与 md→各自 section、
  * journal/checkpoint_handle→SRAM3；migrate/wbuf/rr_page_scratch→AXI .bss）。
+ * 五张表各自独立定义，本结构只收它们的引用（指针），不约束表本体的放置。
  * ftl_init 只绑定指针；数组定义在 main.c，
  * 生命周期覆盖全程（完成表的 ctx 会保存这些地址）。
  */
 typedef struct
 {
-    ftl_tables_t         *tables;
-    metadata_dir_cache_t *metadata_dir;
-    l2p_journal_t        *journal;
-    checkpoint_handle_t  *checkpoint_handle;
-    migrate_handle_t     *migrate;         /* Phase 1.5：挂载指针（不减少总 RAM） */
-    wbuf_handle_t        *wbuf;            /* Phase 1.5 */
-    BYTE                 *rr_page_scratch; /* Phase 1.5：FTL_READ_USER_SIZE */
+    const ftl_table_refs_t *table_refs;
+    metadata_dir_cache_t   *metadata_dir;
+    l2p_journal_t          *journal;
+    checkpoint_handle_t    *checkpoint_handle;
+    migrate_handle_t       *migrate;         /* Phase 1.5：挂载指针（不减少总 RAM） */
+    wbuf_handle_t          *wbuf;            /* Phase 1.5 */
+    BYTE                   *rr_page_scratch; /* Phase 1.5：FTL_READ_USER_SIZE */
 } ftl_storage_t;
 
 /* ── 接口 ── */

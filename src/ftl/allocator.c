@@ -22,22 +22,23 @@
 /* ── 1. 初始化 ── */
 
 /* 实现要点：只绑指针与清计数；不置 FREE（FREE ⟺ 在池，池由恢复路径回填）。
- * tables 的 state/temp/valid 依赖 BSS 清零，调用者不得传入脏存储。 */
-void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *tables)
+ * refs 指向的五张表由 HIL 独立定义；其 state/temp/valid 依赖显式清零，
+ * 调用者不得传入脏存储（ftl_init 逐表 memset）。 */
+void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, const ftl_table_refs_t *refs)
 {
     ASSERT(alloc != NULL);
-    ASSERT(tables != NULL);
+    ASSERT(refs != NULL);
 
     alloc->ch           = topo.ch;
     alloc->ce           = topo.ce;
     alloc->lun          = topo.lun;
     alloc->total_blocks = 0U; /* 恢复路径回填 */
 
-    alloc->free_blocks = tables->free_blocks;
+    alloc->free_blocks = refs->free_blocks;
     alloc->free_count  = 0U;
 
-    alloc->op_blocks    = tables->op_blocks;
-    alloc->spare_blocks = tables->spare_blocks;
+    alloc->op_blocks    = refs->op_blocks;
+    alloc->spare_blocks = refs->spare_blocks;
     memset(alloc->op_count, 0, sizeof(alloc->op_count));
     memset(alloc->spare_count, 0, sizeof(alloc->spare_count));
 
@@ -46,10 +47,10 @@ void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *t
     alloc->hot_sb.temperature  = FTL_TEMP_HOT;
     alloc->cold_sb.temperature = FTL_TEMP_COLD;
 
-    alloc->closed_sb_list  = tables->closed_sb_list;
+    alloc->closed_sb_list  = refs->closed_sb_list;
     alloc->closed_sb_count = 0U;
 
-    alloc->blocks    = tables->blocks;
+    alloc->blocks    = refs->blocks;
     alloc->bad_count = 0U;
 
     memset(&alloc->bbt, 0, sizeof(alloc->bbt));
@@ -371,14 +372,14 @@ static bool allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, BYTE te
 }
 
 /*
- * allocator_closed_sb_commit - 把一个 SB 追加进 closed_sb_list
+ * allocator_closed_sb_append - 把一个 SB 追加进 closed_sb_list
  * 功能：逐 plane 置 CLOSED / 温度 / sb_id；返回列表索引。
  * 参数：alloc — 分配器；sb — 源条目。
  * 返回：新条目在 closed_sb_list 的索引。
  * 实现要点：BAD 是终态——该 plane 在列表副本里改记哨兵，状态不动；
  *           容量 = FTL_BLOCK_TOTAL，满在结构上不可能。
  */
-static WORD allocator_closed_sb_commit(ftl_allocator_t *alloc, const super_block_t *sb)
+static WORD allocator_closed_sb_append(ftl_allocator_t *alloc, const super_block_t *sb)
 {
     ASSERT(alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX);
 
@@ -437,7 +438,7 @@ static WORD allocator_closed_sb_commit(ftl_allocator_t *alloc, const super_block
 static void allocator_close_sb(ftl_allocator_t *alloc, super_block_t *sb)
 {
     sb->is_open = false;
-    (void)allocator_closed_sb_commit(alloc, sb);
+    (void)allocator_closed_sb_append(alloc, sb);
 }
 
 /* ── 4. 分配与 SB 生命周期 ── */
@@ -528,7 +529,7 @@ WORD allocator_add_closed_sb(ftl_allocator_t *alloc,
         sb.plane_blocks[plane] = plane_blocks[plane];
     }
 
-    return allocator_closed_sb_commit(alloc, &sb);
+    return allocator_closed_sb_append(alloc, &sb);
 }
 
 /* 实现要点：swap-remove；末位条目搬家后修正其各 plane 的 sb_id。
@@ -715,51 +716,8 @@ void allocator_erase_stats(const ftl_allocator_t *alloc, allocator_erase_stats_t
     out->good_count = n;
 }
 
-/* 实现要点：口径与 allocator_erase_stats 相同。 */
-bool allocator_block_is_bad(const ftl_allocator_t *alloc, WORD gblock)
-{
-    ASSERT(alloc != NULL);
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
-    return ftl_block_is_bad(&alloc->blocks[gblock]);
-}
-
-ftl_block_state_t allocator_block_state(const ftl_allocator_t *alloc, WORD gblock)
-{
-    ASSERT(alloc != NULL);
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
-    return ftl_block_state(&alloc->blocks[gblock]);
-}
-
-WORD allocator_block_sb_id(const ftl_allocator_t *alloc, WORD gblock)
-{
-    ASSERT(alloc != NULL);
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
-    return ftl_block_sb_id(&alloc->blocks[gblock]);
-}
-
-void allocator_block_add_valid(ftl_allocator_t *alloc, WORD gblock)
-{
-    ASSERT(alloc != NULL);
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
-    ftl_block_add_valid(&alloc->blocks[gblock]);
-}
-
-void allocator_block_sub_valid_if_live(ftl_allocator_t *alloc, WORD gblock)
-{
-    ASSERT(alloc != NULL);
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
-    ftl_block_sub_valid_if_live(&alloc->blocks[gblock]);
-}
-
 bool allocator_bbt_format_in_progress(const ftl_allocator_t *alloc)
 {
-    ASSERT(alloc != NULL);
-
     return alloc->bbt.format_in_progress;
 }
 
@@ -771,8 +729,6 @@ void allocator_block_wear_get(const ftl_allocator_t *alloc,
                               BYTE                  *rising_count,
                               BYTE                  *health)
 {
-    ASSERT(alloc != NULL);
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
     ASSERT(erase_count != NULL);
     ASSERT(read_count != NULL);
     ASSERT(last_ecc != NULL);
@@ -788,25 +744,8 @@ void allocator_block_wear_get(const ftl_allocator_t *alloc,
     *health       = blk->rr.health;
 }
 
-WORD allocator_block_valid_count(const ftl_allocator_t *alloc, WORD gblock)
-{
-    ASSERT(alloc != NULL);
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
-    return alloc->blocks[gblock].valid_count;
-}
-
-BYTE allocator_block_temp(const ftl_allocator_t *alloc, WORD gblock)
-{
-    ASSERT(alloc != NULL);
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
-    return alloc->blocks[gblock].temp;
-}
-
 WORD allocator_op_at(const ftl_allocator_t *alloc, BYTE plane, WORD index)
 {
-    ASSERT(alloc != NULL);
     ASSERT(plane < PLANE_NUM);
     ASSERT(index < alloc->op_count[plane]);
 
@@ -815,7 +754,6 @@ WORD allocator_op_at(const ftl_allocator_t *alloc, BYTE plane, WORD index)
 
 WORD allocator_spare_at(const ftl_allocator_t *alloc, BYTE plane, WORD index)
 {
-    ASSERT(alloc != NULL);
     ASSERT(plane < PLANE_NUM);
     ASSERT(index < alloc->spare_count[plane]);
 
@@ -830,9 +768,6 @@ void allocator_block_restore_wear(ftl_allocator_t *alloc,
                                   BYTE             rising_count,
                                   BYTE             health)
 {
-    ASSERT(alloc != NULL);
-    ASSERT(gblock < FTL_BLOCK_TOTAL);
-
     ftl_block_t *blk = &alloc->blocks[gblock];
 
     blk->erase_count     = erase_count;
