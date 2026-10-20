@@ -1,11 +1,13 @@
 # USB MSC U 盘 — 可行性、架构与实施计划
 
-> 状态：**枚举 + 基础数据面已上板通过；掉电/性能未验证**（2026-10-20）。
+> 状态：**枚举 + 基础数据面 + 429 MiB 容量已上板通过（rev30）；大文件/掉电/吞吐待测**。
 > 目标平台：阿波罗 V2 核心板（STM32H743IIT6 + MT29F4G08 + Type-C USB）。
 > 编译：`make all` / `make release` / `make tests UT=FC` 零新告警。
-> 上板证据（rev27）：Windows 识别 512 MiB USB 磁盘 → MBR 分区 → FAT 格式化 →
+> 上板证据（rev27）：Windows 识别 USB 磁盘 → MBR 分区 → FAT 格式化 →
 > 写入 `notepad.exe`（360448B）与 16KB 非均匀 pattern → `Write-VolumeCache` →
 > 拔插 USB 后 SHA256 与 2KB 块指纹一致。
+> rev30 已确认：Windows `Get-Disk` = **449,839,104 B（429 MiB）**，FAT 格式化，
+> `usb_verify write/check` 拔插后 `RESULT=PASS`（含 2KB 块指纹）。
 > 大文件/GC 压力、`dd` 吞吐、写过程中掉电恢复仍未验证（R1）。
 
 ---
@@ -25,13 +27,13 @@
 
 ### 1.2 目标
 
-让 PC 通过 Type-C 把本板识别成 **512 MiB 的 USB 大容量存储设备（U 盘）**，可分区、
+让 PC 通过 Type-C 把本板识别成 **429 MiB 的 USB 大容量存储设备（U 盘）**，可分区、
 格式化、读写文件；底层仍由本仓 FTL 管理 NAND。
 
 ### 1.3 v1 范围
 
 - **USB FS 12 Mbps**（不是 HS 480 Mbps）
-- **固定 512 MiB**、**512 B block**、**单 LUN**
+- **固定 429 MiB**、**512 B block**、**单 LUN**
 - SCSI 最小命令集：`INQUIRY` / `TEST UNIT READY` / `REQUEST SENSE` /
   `READ CAPACITY(10)` / `READ(10)` / `WRITE(10)` / `SYNCHRONIZE CACHE(10)` /
   `MODE SENSE(6)`
@@ -65,7 +67,7 @@
 
 ### 2.3 FTL 后端匹配度
 
-- `FTL_LBA_MAX = 1,048,576`（512 MiB / 512 B）
+- `FTL_LBA_MAX = 878,592`（429 MiB / 512 B；已扣除固定元数据/OP/Spare）
 - `FTL_IU_BYTES = 512`，1 LBA = 1 CW = 512 B
 - `ftl_submit_read` / `ftl_submit_write` 是**异步**的：提交后由
   `complete_flag` / `on_complete` 通知完成
@@ -253,7 +255,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
   - `tud_msc_read10_cb` / `tud_msc_write10_cb`：登记到 `ssd_request_t`，
     提交后返回 `TUD_MSC_RET_ASYNC`；
   - `usb_msc_task()`：完成时回填 READ 数据并 `tud_msc_async_io_done()`；
-  - `tud_msc_capacity_cb`：512 MiB / 512B block / `FTL_LBA_MAX`；
+  - `tud_msc_capacity_cb`：429 MiB / 512B block / `FTL_LBA_MAX`；
   - `tud_msc_inquiry_cb` / `tud_msc_start_stop_cb` / `tud_msc_test_unit_ready_cb`；
   - SCSI SYNCHRONIZE CACHE → `SSD_REQUEST_FLUSH`（`ftl_flush`，仅主循环上下文）；
   - `tud_event_hook_cb`：总线复位/拔出时把在飞请求标记 `discard`。
@@ -267,7 +269,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 
 ### Phase 4：主机侧验证（**未做**）
 
-- Windows：设备管理器出现“USB 大容量存储设备”；磁盘管理显示 512 MiB；
+- Windows：设备管理器出现“USB 大容量存储设备”；磁盘管理显示 429 MiB；
   格式化 FAT32/exFAT；复制/读回文件。
 - Linux：`lsusb`、`dmesg`、`lsblk`/`fdisk -l`；`dd` 读写；`sync`；`fsck`。
 - 掉电：USB 写过程中断电，重启后 FTL 恢复，盘可重新挂载。
@@ -339,11 +341,10 @@ make tests UT=FC
 1. ✅ **已通过（2026-10-20）**：烧写后设备侧打印 `[USB ] mounted`，说明
    PA11/PA12（OTG_FS）接线、HSI48 时钟、VBUS sensing 关闭、描述符与
    `SET_CONFIGURATION` 全部成立。
-2. ✅ **已通过**：Windows `Get-Disk` 显示 512 MiB、BusType=USB；`Get-Volume`
-   显示 FAT、Healthy、536,584,192 B。
-3. ✅ **已通过**：Windows 新建 MBR 分区 + FAT 格式化；写入 `notepad.exe`
+2. ✅ **已通过（rev30）**：Windows `Get-Disk` 显示 **449,839,104 B（429 MiB）**、BusType=USB。
+3. ✅ **已通过（rev30）**：Windows 新建分区 + FAT 格式化；写入 `notepad.exe`
    （360448B）与 16KB 非均匀 pattern，`Write-VolumeCache` 后拔插 USB，
-   SHA256 与 2KB 块指纹一致（rev27）。
+   SHA256 与 2KB 块指纹一致（`RESULT=PASS`）。
 4. ⬜ `dd` 顺序读写；`sync`（大文件/GC 压力）。
 5. ⬜ USB 写过程中断电，重启后盘可重新挂载，FTL journal/CP 恢复。
 6. ⬜ 记录 `dd` 吞吐。

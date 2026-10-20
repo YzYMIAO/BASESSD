@@ -728,7 +728,7 @@ static ftl_status_t cp_begin(checkpoint_handle_t *h)
      * 单线程 superloop 里本函数不会被完成回调打断 ⇒ 三者是同一个 cut。
      * ⚠ 不要把 块元数据快照挪到 flush 之后：CP 期间完成的写会同时改 BST 与 journal，
      *   水位与快照会对不上。 */
-    checkpoint_block_snapshot(h->port.alloc, j->block_words);
+    checkpoint_block_snapshot(h->port.alloc, h->port.metadata_dir, j->block_words);
 
     /* CP 之后的同 LBA append 不得合并进水位之前的条目——否则 sequence 还是旧的、
      * new_pba 却是新的，delta 回放会漏记（见 journal.c 的 merge_floor）。 */
@@ -1134,17 +1134,34 @@ cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t
  *   实现要点：在 Checkpoint job 起点调用，与 region_bitmap / journal_sequence 同一
  *             协作点取定（单线程 superloop 不会被完成回调打断）。
  *             池归属不在 BST state 里（OP/Spare 都是 NONE）⇒ 从两个数组补写。
+ *             **动态 LOG 块以 Directory 为准**（metadata_live_count）：即使 BST state
+ *             因历史路径停在 NONE，也编码成 LOG + no-pool，保证快照自洽
+ *             （RISK-BOOT-15；否则一次 rebuild 之后的 CP 会让下次开机整份拒绝）。
  * -------------------------------------------------------------------- */
-void checkpoint_block_snapshot(const ftl_allocator_t *alloc, uint16_t words[FTL_BLOCK_TOTAL])
+void checkpoint_block_snapshot(const ftl_allocator_t      *alloc,
+                               const metadata_dir_cache_t *md_dir,
+                               uint16_t                    words[FTL_BLOCK_TOTAL])
 {
     for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
         const ftl_block_t *b = &alloc->blocks[g];
 
-        words[g] = checkpoint_block_word_pack(b->valid_count,
-                                              (uint8_t)ftl_block_state(b),
-                                              b->temp,
-                                              CP_BLOCK_POOL_NONE);
+        uint16_t valid = b->valid_count;
+        uint8_t  st    = (uint8_t)ftl_block_state(b);
+        uint8_t  temp  = b->temp;
+
+        /* Directory 是动态 LOG 块身份的唯一权威：它不属 allocator 池，合法编码是
+         * LOG + no-pool。若 BST 因历史路径停在 NONE，照实编码会让下一次开机的
+         * Pass 0 判为非法并拒绝**整份**快照（RISK-BOOT-15）⇒ 每次冷启动全盘 rebuild。
+         * BAD 是终态，不得被 LOG 覆盖。 */
+        if ((md_dir != NULL) && (!ftl_block_is_bad(b)) && (metadata_live_count(md_dir, g) > 0U))
+        {
+            valid = 0U;
+            st    = (uint8_t)FTL_BLOCK_STATE_LOG;
+            temp  = 0U;
+        }
+
+        words[g] = checkpoint_block_word_pack(valid, st, temp, CP_BLOCK_POOL_NONE);
     }
 
     for (uint8_t p = 0U; p < PLANE_NUM; p++)
@@ -1417,7 +1434,7 @@ ftl_status_t checkpoint_write_initial(struct ftl_context *ftl)
     uint16_t            *words = checkpoint_block_words(h);
 
     /* 完整 per-block metadata snapshot：与 carve 后的池归属一致（由调用者先 carve）。 */
-    checkpoint_block_snapshot(&ftl->alloc, words);
+    checkpoint_block_snapshot(&ftl->alloc, ftl->metadata_dir, words);
 
     metadata_ring_t ring;
     checkpoint_ring_init(&ring);

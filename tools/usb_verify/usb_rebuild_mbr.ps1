@@ -14,7 +14,7 @@
       连 MBR + 所有 EBR 一起清掉，再走正常的 Initialize-Disk / New-Partition。
 
     流程：
-      1. 校验目标确实是 SOFTSSD / 512MiB / USB（防误伤 NVMe）；
+      1. 校验目标确实是 SOFTSSD / 429MiB / USB（防误伤 NVMe）；
       2. dump 当前 MBR（前 512B 的分区表项）；
       3. 删除缓存分区对象 + Clear-Disk；
       4. raw 写零前 1MB，并读回确认（这一步同时验证 host 写是否真的到达设备）；
@@ -26,7 +26,7 @@
 
 .PARAMETER DiskNumber
     可选。显式指定 Windows 磁盘号。默认自动查找
-    BusType=USB、FriendlyName 含 SOFTSSD、Size=512 MiB 的磁盘。
+    BusType=USB、FriendlyName 含 SOFTSSD、Size=429 MiB 的磁盘。
 
 .NOTES
     运行方式：
@@ -56,7 +56,7 @@ $ErrorActionPreference = 'Stop'
 
 # 与 usb_verify.ps1 保持一致：目标识别 + 防误操作校验。
 $VolumeLabel  = 'SOFTSSD'
-$ExpectedSize = 536870912
+$ExpectedSize = 449839104
 $LogFile      = Join-Path $env:TEMP 'softssd_usb_rebuild_mbr.log'
 
 Start-Transcript -Path $LogFile -Force | Out-Null

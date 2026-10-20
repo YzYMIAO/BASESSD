@@ -213,7 +213,7 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | `dir_init_entries` | `metadata_dir_init` 后 `count==2048`（= `L2P_REGIONS_PER_INSTANCE`）、全 UNKNOWN |
 | `dir_update_lookup_roundtrip` | `metadata_dir_update` 写一个 region → `metadata_dir_lookup` 回同 entry |
 | `dir_lookup_missing_unknown` | 未写 region → `0xFFFFFFFF`（负例） |
-| `is_metadata_block` | `ftl_is_metadata_block(dir, plane, block)`：**0..45 true、46 false**（边界，判据 8）。区间来自分区表：Anchor[0,32)+Ckpt[32,40)+BBT[40,42)+Journal[42,46) ⇒ `FTL_METADATA_BLOCK_END==46`。固定区按 `plane_mask` 比较 plane，用例覆盖两 plane。⚠ **勿写死旧布局**（Wear 块已删；0..62/63 是旧值） |
+| `is_metadata_block` | `ftl_is_metadata_block(dir, plane, block)`：**0..77 true、78 false**（边界，判据 8）。区间来自分区表：Anchor[0,32)+Ckpt[32,40)+BBT[40,42)+Journal[42,46)+**L2P log[46,78)** ⇒ `FTL_METADATA_AREA_END==78`。固定区按 `plane_mask` 比较 plane，用例覆盖两 plane。⚠ **勿写死旧布局**（Wear 块已删；0..45/46 是 v9 旧值，介质版本 v10 已改）。⚠ 测试源当前冻结（RISK-MD-03），用例仍按旧边界，需测试所有者同步 |
 | `is_metadata_block_dynamic` | 动态 region：`metadata_dir_update(L2P_REGION, r, pba)` 登记 `block>=46` 后 `ftl_is_metadata_block` 命中；**`md_dir==NULL`** 时仍命中固定区（0..45）、动态块不命中。⚠ 断言**另一个 plane 的同号块不受掩**（`(d, 1U, 100U) == 0`）——动态日志块取自用户区，只比块号会连 plane1 的用户块一起排除 |
 | `ring_addr_geometry` | `metadata_ring_addr` 纯地址换算：idx∈{0, rpb-1, rpb, 末} → (block,page,plane) 期望值 |
 | `ring_addr_wrap` | 跨 block 边界换算 |

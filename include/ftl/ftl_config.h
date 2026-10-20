@@ -30,7 +30,9 @@
  *   CW 总数    = FTL_BLOCK_TOTAL × PAGES_PER_BLOCK × CW_NUM        （每实例）
  *   region 数  = CW 总数 ÷ 每 region 条目数                        （每实例）
  *   条目总数   = region 数 × 每 region 条目数 × FTL_DIM_TOTAL       （= FTL_IU_TOTAL）
- *   用户容量   = 条目总数 × 每 CW 用户字节
+ *   映射容量   = 条目总数 × 每 CW 用户字节
+ *   主机容量   = 数据块数 × 每块 CW 数 × 每 CW 用户字节
+ *                （数据块 = 总块数 − 固定元数据 − OP − Spare；见 ftl.h FTL_LBA_MAX）
  *
  * ⚠ **元数据区布局不在这里**——哪个分区占哪些块、每个池多大、每条 record 占几页、
  *   运行期分区表 `g_ftl_partitions[]`，全部在 **ftl/metadata.h**（运行期表在
@@ -78,13 +80,15 @@
  * ⚠ **每实例**量，不含 × 维度数——每个 die 一份自己的 L2P 表。*/
 #define L2P_REGIONS_PER_INSTANCE (FTL_CW_TOTAL / L2P_ENTRIES_PER_REGION)
 
-/* 全设备映射单元总数（= 可寻址条目总数 = 最大 LBA + 1）
- * —— 每实例条目数 × 设备维度数 */
+/* 全设备**映射表寻址空间**（= 可寻址条目总数 = 最大 LBA + 1）
+ * —— 每实例条目数 × 设备维度数。
+ * ⚠ 这不是主机可见容量：它包含固定元数据块、OP 预留与 Spare。
+ *   主机容量见 ftl.h 的 FTL_LBA_MAX（扣除这些块之后的 437 MiB）。 */
 #define FTL_IU_TOTAL ((uint64_t)L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION * FTL_DIM_TOTAL)
 
-/* 用户容量 = 条目总数 × 每条目用户字节
- * —— 由几何推出，非策略常量；当前几何下 = 器件主区容量 = 512 MiB。 */
-#define FTL_USER_CAPACITY_BYTES (FTL_IU_TOTAL * FTL_IU_BYTES)
+/* 映射表寻址容量（物理 CW 覆盖的字节数）——同样不是主机可见容量。
+ * 主机可见容量用 ftl.h 的 FTL_HOST_CAPACITY_BYTES。 */
+#define FTL_MAPPING_CAPACITY_BYTES (FTL_IU_TOTAL * FTL_IU_BYTES)
 
 /* lba → (region_id, entry_idx) 分解：1 << L2P_REGION_SHIFT == 每 region 条目数 */
 #define L2P_REGION_SHIFT (9U)

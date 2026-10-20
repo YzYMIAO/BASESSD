@@ -180,7 +180,9 @@ static ftl_status_t ftl_confirm_write(ftl_context_t *ftl, const ftl_pending_req_
                            new_state);
             }
 
-            ftl_block_sub_valid(&ftl->alloc.blocks[gob]);
+            /* 坏块 / count 已为 0 时跳过：bbt_mark_bad 清过账，再减会断言/回绕。
+             * 上面的 dangling 日志已把“L2P 仍指向该块”这件事留痕。 */
+            ftl_block_sub_valid_if_live(&ftl->alloc.blocks[gob]);
         }
     }
 
@@ -894,7 +896,7 @@ static void contract_check_jobs_idle(const ftl_context_t *ftl)
 
     ASSERT((!ftl->migrate_handle->active) && (!ftl->migrate_handle->waiting) &&
            (ftl->migrate_handle->phase == (uint8_t)MIG_IDLE) &&
-           (ftl->migrate_handle->fail_gblock == UINT16_MAX));
+           migrate_fail_state_clean(ftl->migrate_handle));
 
     ASSERT((ftl->read_recovery_handle.stage == (uint8_t)RR_STAGE_IDLE) &&
            (ftl->read_recovery_handle.waiting == 0U) &&
@@ -1537,7 +1539,9 @@ void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count)
         if (old_pba != NAND_PBA_INVALID)
         {
             uint16_t gblock = (uint16_t)ftl_pba_gblock(old_pba);
-            ftl_block_sub_valid(&ftl->alloc.blocks[gblock]);
+
+            /* 同写确认路径：BAD / count 已清时跳过，避免断言或 uint16 回绕。 */
+            ftl_block_sub_valid_if_live(&ftl->alloc.blocks[gblock]);
         }
     }
 }

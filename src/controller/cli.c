@@ -532,7 +532,7 @@ static int uart_cli_info(int argc, char *argv[])
                 {
                     continue;
                 }
-                (void)LOGI("ftl[%u][%u][%u] free=%u op=%u/%u spare=%u/%u bad=%u closed=%u thrash=%u miss=%u%%\r\n",
+                (void)LOGI("ftl[%u][%u][%u] free=%u op=%u/%u spare=%u/%u bad=%u closed=%u live=%u thrash=%u miss=%u%%\r\n",
                            (unsigned)ch,
                            (unsigned)ce,
                            (unsigned)lun,
@@ -543,6 +543,7 @@ static int uart_cli_info(int argc, char *argv[])
                            (unsigned)allocator_spare_count(&ftl->alloc, 1U),
                            (unsigned)ftl->alloc.bad_count,
                            (unsigned)ftl->alloc.closed_sb_count,
+                           (unsigned)metadata_dir_live_block_count(ftl->metadata_dir),
                            (unsigned)ftl->cache->thrashing,
                            (unsigned)ftl->cache->miss_pct);
 

@@ -14,7 +14,7 @@
  *
  * L2P region 的位置只有一层来源（见 metadata.h「固定元数据区布局」）：
  *   Directory 条目 = `NAND_PBA_INVALID` ⇒ region 从未写过（未映射，读取不碰 NAND）；
- *   非 INVALID ⇒ region 页在日志块上的真实 PBA（从 Free Pool 取块、追加写）。
+ *   非 INVALID ⇒ region 页在日志块上的真实 PBA（从固定 L2P 日志区取块、追加写）。
  *
  * 文件结构：
  *   一、元数据 record 池（环形轮转）—— Anchor / Checkpoint / BBT 共用
@@ -604,8 +604,8 @@ static void metadata_dir_rebuild_live(metadata_dir_cache_t *dir)
             continue; /* 未映射，不在任何日志块上 */
         }
 
-        /* ⚠ 不能用 "block >= FTL_METADATA_BLOCK_END"：P1 的 0..45 是镜像元数据、
-         *   46.. 才是用户区，动态日志块可以落在 END 之前。固定元数据块才不是日志块。 */
+        /* ⚠ 不能用 "block >= FTL_METADATA_AREA_END"：P1 的 0..77 也是保留区
+         *   （固定元数据 0..45 + L2P 日志区 46..77）；按分区表 + plane 判才是唯一判据。 */
         uint8_t  plane = pba_to_plane(dir->entries[i].pba);
         uint16_t block = pba_to_block(dir->entries[i].pba);
 
@@ -698,7 +698,7 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
     metadata_dir_fill_fixed(dir);
     metadata_dir_rebuild_live(dir);
 
-    /* 游标全部置无效：首次追加才从 Free Pool 取块（绝不复用可能已编程的旧页）*/
+    /* 游标全部置无效：首次追加才从固定 L2P 日志区取块（绝不复用可能已编程的旧页）*/
     dir->cur_metadata_block  = 0U;
     dir->cur_metadata_page   = 0U;
     dir->cur_block_valid     = false;
@@ -796,21 +796,174 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
  *（回收 / 压缩在 metadata_job.c；本区只维护写指针与 Directory 登记）
  * ══════════════════════════════════════════════════════════════════ */
 
+/* ── 固定 L2P 日志区：分配 / 归还 / 开机恢复（RISK-MD-07 / RISK-CAP-02）── */
+
+uint16_t metadata_log_alloc(metadata_dir_cache_t *dir, ftl_allocator_t *alloc, uint8_t plane)
+{
+    ASSERT(dir != NULL);
+    ASSERT(alloc != NULL);
+    ASSERT(plane < PLANE_NUM);
+
+    for (uint16_t block = L2P_LOG_BLOCK0; block < FTL_METADATA_AREA_END; block++)
+    {
+        const uint16_t g = ftl_gblock(plane, block);
+        ftl_block_t   *b = &alloc->blocks[g];
+
+        if (ftl_block_is_bad(b))
+        {
+            continue;
+        }
+        /* 只有“已擦净、空闲”的固定日志块可分配（NONE 是本区的 free 标记）。 */
+        if (ftl_block_state(b) != FTL_BLOCK_STATE_NONE)
+        {
+            continue;
+        }
+        if (dir->cur_block_valid && (g == dir->cur_metadata_block))
+        {
+            continue;
+        }
+
+        ftl_block_set_state(b, FTL_BLOCK_STATE_LOG);
+        ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+        return g;
+    }
+
+    return FTL_GBLOCK_INVALID;
+}
+
+void metadata_log_release(ftl_allocator_t *alloc, uint16_t gblock)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(ftl_is_l2p_log_gblock(gblock));
+
+    ftl_block_t *b = &alloc->blocks[gblock];
+
+    /* BAD 是终态：擦除失败后不得“释放”回可用池。 */
+    if (ftl_block_is_bad(b))
+    {
+        return;
+    }
+
+    ftl_block_set_state(b, FTL_BLOCK_STATE_NONE);
+    ftl_block_clear_valid(b);
+    ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+}
+
+uint16_t metadata_dir_live_block_count(const metadata_dir_cache_t *dir)
+{
+    ASSERT(dir != NULL);
+
+    uint16_t n = 0U;
+
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        for (uint16_t block = L2P_LOG_BLOCK0; block < FTL_METADATA_AREA_END; block++)
+        {
+            if (dir->l2p_live[ftl_gblock(plane, block)] > 0U)
+            {
+                n++;
+            }
+        }
+    }
+
+    return n;
+}
+
+/* 判固定日志块的整块是否已擦净：逐页读 META 判空。
+ * ⚠ 不能只看 page 0：日志是顺序追加、写失败页只消耗槽位不关闭块 ⇒ 可能
+ *   “page 0 空、后面有数据”（与 RISK-BOOT-14 的数据块假设不同）。把这种块当
+ *   空闲分配会在未擦页上编程 = 静默损坏。首块非空即提前返回。 */
+static bool metadata_log_block_erased(const ftl_allocator_t *alloc, uint8_t plane, uint16_t block)
+{
+    uint8_t raw[PAGE_SIZE];
+
+    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
+    {
+        const nand_pba_t pba = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, page, 0U);
+
+        if (!ftl_page_is_blank_raw(pba, raw))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void metadata_log_area_restore(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
+{
+    ASSERT(dir != NULL);
+    ASSERT(alloc != NULL);
+
+    uint16_t n_live    = 0U;
+    uint16_t n_free    = 0U;
+    uint16_t n_reclaim = 0U;
+
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        for (uint16_t block = L2P_LOG_BLOCK0; block < FTL_METADATA_AREA_END; block++)
+        {
+            const uint16_t g = ftl_gblock(plane, block);
+            ftl_block_t   *b = &alloc->blocks[g];
+
+            if (ftl_block_is_bad(b))
+            {
+                continue;
+            }
+
+            const bool cur  = dir->cur_block_valid && (g == dir->cur_metadata_block);
+            const bool live = (dir->l2p_live[g] > 0U);
+
+            if (live || cur)
+            {
+                ftl_block_set_state(b, FTL_BLOCK_STATE_LOG);
+                ftl_block_clear_valid(b);
+                ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+                n_live++;
+                continue;
+            }
+
+            /* 非活块：Directory 不引用它。整块逐页判空 ⇒ 已是擦净的空闲块；否则残留
+             * 旧数据，登记回收由后台擦除，完成后再 metadata_log_release 置 NONE。 */
+            if (metadata_log_block_erased(alloc, plane, block))
+            {
+                metadata_log_release(alloc, g);
+                n_free++;
+            }
+            else
+            {
+                ftl_block_set_state(b, FTL_BLOCK_STATE_LOG);
+                ftl_block_clear_valid(b);
+                ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
+                (void)md_reclaim_mark(dir, g);
+                n_reclaim++;
+            }
+        }
+    }
+
+    LOGI("[META] L2P log area: live=%u free=%u reclaim=%u (total=%u/plane)\r\n",
+         (unsigned)n_live,
+         (unsigned)n_free,
+         (unsigned)n_reclaim,
+         (unsigned)L2P_LOG_BLOCKS_PER_PLANE);
+}
+
 /*
  * metadata_dir_rotate_log_block - 当前块写满（或无当前块）时换一个新日志块。
  *
  * 返回：true = 已换到新块（cur_metadata_page == 0，可发放槽位）；
- *       false = 没换（两/全部 plane 的 Free Pool 皆空，或换块后池吃紧请求了压缩）。
+ *       false = 没换（固定日志区无空闲块，或活块数超水位请求了压缩）。
  * 实现要点：
  *   · 旧当前块已无活 region ⇒ 登记待回收；扫描全池只登记、不擦。
- *   · plane 从 cur_metadata_plane 起逐个尝试（H39：不写死两 plane）。
- *   · 换块后若 Free Pool 吃紧，只登记 `job.compact_wanted` 并返回 false——新块整块
- *     空槽，是唯一能一次搬空任意 victim 的时机。
+ *   · plane 从 cur_metadata_plane 起逐个尝试（H39：不写死两 plane），只从**固定
+ *     L2P 日志区**取块（metadata_log_alloc），不碰用户 Free Pool。
+ *   · 活日志块数超过 L2P_LOG_COMPACT_TRIGGER 时只登记 `job.compact_wanted` 并返回
+ *     false——新块整块空槽，正好把多个稀疏 victim 一次搬空。
  */
 static bool metadata_dir_rotate_log_block(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 {
     /* 当前块已写满且无活 region：先从"当前写块"身份上摘下来，否则 mark_all 会把它
-     * 永远排除；Free Pool 空时就再也换不了块（死等）。 */
+     * 永远排除；日志区没有空闲块时就再也换不了块（死等）。 */
     if (dir->cur_block_valid && (dir->cur_metadata_page >= PAGES_PER_BLOCK) &&
         (dir->l2p_live[dir->cur_metadata_block] == 0U))
     {
@@ -831,8 +984,11 @@ static bool metadata_dir_rotate_log_block(metadata_dir_cache_t *dir, ftl_allocat
     {
         const uint8_t p = (uint8_t)((start + attempt) % PLANE_NUM);
 
-        if (allocator_alloc_log_block(alloc, p, &gblock) == FTL_OK)
+        const uint16_t g = metadata_log_alloc(dir, alloc, p);
+
+        if (g != FTL_GBLOCK_INVALID)
         {
+            gblock    = g;
             plane     = p;
             allocated = true;
             break;
@@ -841,7 +997,9 @@ static bool metadata_dir_rotate_log_block(metadata_dir_cache_t *dir, ftl_allocat
 
     if (!allocated)
     {
-        return false; /* 全部 plane 空：本仓没有可回退的固定位置 */
+        /* 固定日志区无空闲块：所有块都是活/当前/待擦/BAD。压缩 + 回收 job 会腾块；
+         * 这里返回 false 让调用者按背压重试（不能回退到用户 Free Pool）。 */
+        return false;
     }
 
     const uint16_t old_cur = dir->cur_metadata_block;
@@ -859,12 +1017,13 @@ static bool metadata_dir_rotate_log_block(metadata_dir_cache_t *dir, ftl_allocat
         (void)md_reclaim_mark(dir, old_cur);
     }
 
-    /* 抗碎片：刚换到新日志块 ⇒ 块内有整 PAGES_PER_BLOCK 个空槽，正好够搬空任意
-     * 一个 victim。只在 Free Pool 吃紧时请求——稳态下每 PAGES_PER_BLOCK 次 region 写
-     * 最多压缩一块，既不抖也不制造写放大；池子宽裕时压缩纯属白写 NAND。
+    /* 抗碎片：刚换到新日志块 ⇒ 块内有整 PAGES_PER_BLOCK 个空槽，正好够把多个稀疏
+     * victim 一次搬空。触发判据是**元数据空间水位**（live 日志块数），不是用户
+     * Free Pool——旧实现只在 free≤32 时压，运行期大部分时间不压，日志碎片从理想
+     * 32 块一路涨到上千块，把用户容量吃光（RISK-MD-07 / RISK-CAP-02）。
      * 只**登记请求**，本次不发放槽位：调用者收到 NAND_PBA_INVALID 返回 FTL_AGAIN，
      * 下轮重试；若 job 已起则继续让路直到压缩走完。 */
-    if (alloc->free_count <= FREE_POOL_TARGET)
+    if (metadata_dir_live_block_count(dir) > L2P_LOG_COMPACT_TRIGGER)
     {
         dir->handle.compact_wanted = true;
         return false;
@@ -891,6 +1050,13 @@ nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir, ftl_allocator_t *
     if (!metadata_handle_idle(dir))
     {
         return NAND_PBA_INVALID;
+    }
+
+    /* 当前写块在运行期被标 BAD（擦除失败 / 读不可纠）⇒ 游标作废并换块。
+     * 不换会继续往不再分配的块追加，且回收/压缩会把它当“当前块”永久跳过。 */
+    if (dir->cur_block_valid && ftl_block_is_bad(&alloc->blocks[dir->cur_metadata_block]))
+    {
+        dir->cur_block_valid = false;
     }
 
     if ((!dir->cur_block_valid) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
@@ -1208,9 +1374,9 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
     dir->dirty_gen  = 0U;
     dir->anchor_gen = 0U;
 
-    /* 由装配后的 entries 重建活计数；**日志块游标不跨重启恢复**：首次追加时从 Free Pool
-     * 新取一块（绝不复用可能已编程的旧页）。旧日志块仍被 Directory 引用 ⇒ 由 l2p_live
-     * 保住，待其 region 全部改写后由后台整理 job 异步擦除归还。 */
+    /* 由装配后的 entries 重建活计数；**日志块游标不跨重启恢复**：首次追加时从**固定
+     * L2P 日志区**新取一块（绝不复用可能已编程的旧页）。旧日志块仍被 Directory 引用 ⇒
+     * 由 l2p_live 保住，待其 region 全部改写后由后台整理 job 异步擦除归还。 */
     metadata_dir_rebuild_live(dir);
     dir->cur_metadata_block = 0U;
     dir->cur_metadata_page  = 0U;
@@ -1241,10 +1407,13 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
  */
 static const ftl_partition_t g_ftl_partitions[] = {
   /* name, first_block, block_count, plane_mask, redundancy, table_bytes */
-    {    "Anchor",     ANCHOR_BLOCK0,     ANCHOR_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK,         ANCHOR_RECORDS_PER_BLOCK,     FTL_ANCHOR_TABLE_BYTES},
-    {"Checkpoint", CHECKPOINT_BLOCK0, CHECKPOINT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK, FTL_CHECKPOINT_RECORDS_PER_BLOCK, FTL_CHECKPOINT_TABLE_BYTES},
-    {       "BBT",         BBT_BLOCK,        BBT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK,                  PAGES_PER_BLOCK,        FTL_BBT_TABLE_BYTES},
-    {   "Journal",    JOURNAL_BLOCK0,    JOURNAL_BLOCK_COUNT, METADATA_MIRROR_PLANE_MASK,                               1U,    FTL_JOURNAL_TABLE_BYTES},
+    {    "Anchor",     ANCHOR_BLOCK0,       ANCHOR_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK,         ANCHOR_RECORDS_PER_BLOCK,                                FTL_ANCHOR_TABLE_BYTES},
+    {"Checkpoint", CHECKPOINT_BLOCK0,   CHECKPOINT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK, FTL_CHECKPOINT_RECORDS_PER_BLOCK,                            FTL_CHECKPOINT_TABLE_BYTES},
+    {       "BBT",         BBT_BLOCK,          BBT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK,                  PAGES_PER_BLOCK,                                   FTL_BBT_TABLE_BYTES},
+    {   "Journal",    JOURNAL_BLOCK0,      JOURNAL_BLOCK_COUNT, METADATA_MIRROR_PLANE_MASK,                               1U,                               FTL_JOURNAL_TABLE_BYTES},
+ /* L2P region 日志区：固定预留（RISK-MD-07/CAP-02）。redundancy 填 1（不是 record 池）；
+  * table_bytes = region 数 × 每个 region 的 2 KB。 */
+    {   "L2P log",    L2P_LOG_BLOCK0, L2P_LOG_BLOCKS_PER_PLANE, METADATA_MIRROR_PLANE_MASK,                               1U, (uint32_t)(L2P_REGIONS_PER_INSTANCE *L2P_REGION_SIZE)},
 };
 
 /* 分区数（表长）。sizeof 派生 ⇒ 加/删分区项时自动跟随。 */

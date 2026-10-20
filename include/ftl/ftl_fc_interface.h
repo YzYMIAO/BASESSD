@@ -404,6 +404,14 @@ ftl_status_t ftl_sync_read_page(nand_pba_t pba, void *buffer, uint32_t length, c
  */
 ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer);
 
+/*
+ * 判整页是否未写过：RAW 读后检查每个 CW 槽（META+CRC+USER 前缀 512B）是否全 FF。
+ * 读命令没走通 ⇒ 一律返回 false（判“非空”，保守方向）。
+ * raw_buf 需 >= PAGE_SIZE；判据与 full rebuild / BBT 探针 / L2P 日志区恢复共用
+ * （C2：唯一实现）。整段检查而非只看 META：半编程页的 META 可能仍是全 FF。
+ */
+bool ftl_page_is_blank_raw(nand_pba_t pba, void *raw_buf);
+
 /* 擦块（单 plane）：OP_ERASE_BLOCK，plane 取自 PBA，无数据链，20ms 超时。 */
 ftl_status_t ftl_sync_erase_block(nand_pba_t pba);
 

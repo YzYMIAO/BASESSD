@@ -52,7 +52,7 @@
 #include <string.h>
 
 /* 每次需要确认板上 ELF 是否更新时递增；仅用于开发阶段 UART 诊断。 */
-#define SSD_FIRMWARE_DEBUG_REVISION 27
+#define SSD_FIRMWARE_DEBUG_REVISION 33
 #define SSD_WATCHDOG_ENABLE         0U
 
 /* 编译期字符串化：把版本号宏拼进开机横幅。 */
@@ -479,7 +479,7 @@ static void ssd_ftl_boot_all(void)
     /* %lu 而非 %llu：newlib-nano 不支持 long long 格式化，见 usart.c 的 _Static_assert。 */
     LOGI("[FTL ] controller ready, lba_max=%lu (%luMiB)\r\n",
          (unsigned long)FTL_LBA_MAX,
-         (unsigned long)((unsigned long)FTL_LBA_MAX * FC_BUFFER_USER_SIZE / (1024UL * 1024UL)));
+         (unsigned long)(FTL_HOST_CAPACITY_BYTES / (1024UL * 1024UL)));
 }
 
 /* Newlib-nano calls this hook from __libc_init_array when no CRT provides it. */

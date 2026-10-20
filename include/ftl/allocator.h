@@ -303,14 +303,6 @@ ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, n
 void allocator_rewind_pair(ftl_allocator_t *alloc, uint8_t temperature);
 
 /*
- * allocator_alloc_log_block - 从指定 plane 独占分配一个整块（元数据日志块）
- * 功能：从 Free Pool 取擦除次数最少的块，出池并置 LOG。
- * 参数：alloc — 分配器；plane — 目标 plane；out_gblock — 出参 gblock。
- * 返回：FTL_OK；FTL_AGAIN = 该 plane Free Pool 空。
- */
-ftl_status_t allocator_alloc_log_block(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock);
-
-/*
  * allocator_close_open_sb - 关闭指定温度的 Open SB
  * 功能：置 CLOSED、进 closed_sb_list；已关闭时幂等早退。
  * 参数：alloc — 分配器；temperature — FTL_TEMP_HOT / FTL_TEMP_COLD。

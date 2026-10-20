@@ -7,7 +7,7 @@
     数据完整性 / 拔插持久性混在一次操作里（混在一起时失败无法归因）：
 
       inspect  只读。列出 USB 磁盘、分区、卷、扇区大小。
-               验证：枚举成功、容量 512 MiB、扇区 512B、分区/文件系统状态正常。
+               验证：枚举成功、容量 429 MiB、扇区 512B、分区/文件系统状态正常。
 
       format   破坏性，需管理员。删分区 → Clear-Disk → MBR → 新建分区 → FAT32。
                验证：主机写出的 MBR/分区表/FAT 引导扇区能被设备正确保存并读回。
@@ -38,7 +38,7 @@
 
 .PARAMETER DiskNumber
     可选。显式指定 Windows 磁盘号（Get-Disk 的 Number）。
-    默认自动查找：BusType=USB、FriendlyName 含 SOFTSSD、Size=512 MiB。
+    默认自动查找：BusType=USB、FriendlyName 含 SOFTSSD、Size=429 MiB。
 
 .PARAMETER DriveLetter
     可选。显式指定盘符（如 F）。默认按卷标 SOFTSSD 查找；卷标为空时退回
@@ -108,7 +108,7 @@ $ErrorActionPreference = 'Stop'
 # ── 目标识别常量 ──────────────────────────────────────────────────────────
 # 这三个常量同时用于“自动找盘”和“防误操作校验”；不要为了省事放宽。
 $VolumeLabel      = 'SOFTSSD'       # format 后写入的卷标
-$ExpectedSize     = 536870912       # 512 MiB = 1,048,576 × 512B
+$ExpectedSize     = 449839104       # 429 MiB = 878,592 × 512B（主机可见容量，见 ftl.h FTL_LBA_MAX）
 # 2KB = 一个 NAND plane 页；pattern 按 2KB 分组，专门抓 plane 镜像错误。
 $PatternBlockSize = 2048
 $TestFileName     = 'test.bin'
@@ -149,7 +149,7 @@ function Get-TargetDisk {
 
     if ($null -eq $disk) {
         throw ('SOFTSSD USB disk not found: need FriendlyName=*SOFTSSD*, ' +
-               'Size=536870912, BusType=USB')
+               'Size=449839104, BusType=USB')
     }
 
     if (($disk.BusType -ne 'USB') -or
@@ -279,7 +279,7 @@ function Show-DiskState {
 try {
     switch ($Step) {
         # ── inspect：只读 ──────────────────────────────────────────────────
-        # 验证：枚举成功、512 MiB、512/512 扇区、分区/卷状态。
+        # 验证：枚举成功、429 MiB、512/512 扇区、分区/卷状态。
         # 不改任何数据；失败时也只打印，不尝试修复。
         'inspect' {
             $null = Show-DiskState
@@ -327,7 +327,7 @@ try {
                 throw 'new partition has no drive letter (try tools/usb_verify/usb_rebuild_mbr.ps1)'
             }
 
-            # FAT32：512 MiB 下 Windows 也可以选 FAT16/FAT；这里固定 FAT32，
+            # FAT32：429 MiB 下 Windows 也可以选 FAT16/FAT；这里固定 FAT32，
             # 便于与 Linux mkfs.vfat 的测试口径对齐。
             $volume = Format-Volume -DriveLetter $partition.DriveLetter -FileSystem FAT32 `
                 -NewFileSystemLabel $VolumeLabel -Confirm:$false -Force

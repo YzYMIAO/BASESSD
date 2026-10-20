@@ -160,7 +160,7 @@ bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
 
     for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
     {
-        for (uint16_t block = 0U; block < FTL_METADATA_BLOCK_END; block++)
+        for (uint16_t block = 0U; block < FTL_METADATA_AREA_END; block++)
         {
             if (!ftl_is_metadata_block(NULL, plane, block))
             {
@@ -183,7 +183,7 @@ bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
      * 全部落在抽样点之外 ⇒ 仍会误判；概率低，且该介质已丢失元数据，属于灾后场景。 */
     {
         uint8_t        raw[PAGE_SIZE];
-        const uint16_t start = FTL_METADATA_BLOCK_END;
+        const uint16_t start = FTL_METADATA_AREA_END;
 
         if (start < BLOCKS_PER_PLANE)
         {
@@ -416,7 +416,7 @@ static bool bbt_probe_block_bad(ftl_allocator_t *alloc, uint8_t plane, uint16_t 
 
     /* ② 可选擦除——**无条件发**。
      * 擦除不能因为 ① 命中就提前 return：命中可能只是「写过」——元数据区
-     * （0..FTL_METADATA_BLOCK_END）里的 L2P/Anchor/Checkpoint/BBT/Journal 块正是
+     * （0..FTL_METADATA_AREA_END）里的 L2P/Anchor/Checkpoint/BBT/Journal 块正是
      * 列 2048 非 0xFF 的那批。跳过它们 ⇒ 擦完断电重启，FTL 仍从原处读回旧
      * checkpoint/BBT，`free`/`cp_seq` 一个不少。 */
     if (do_erase != 0U)

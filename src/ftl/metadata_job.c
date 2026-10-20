@@ -4,7 +4,7 @@
  * 与 metadata.c 的分工：
  *   metadata.c     —— Directory 结构、Anchor 落盘/加载、region 追加/登记（同步原语）；
  *   metadata_job.c —— 两件"要碰 NAND 的整理活"的异步状态机：
- *                     ① 回收：待回收位图（reclaim_pending）里的块 ⇒ 擦 + 归还 Free Pool；
+ *                     ① 回收：待回收位图（reclaim_pending）里的块 ⇒ 擦 + 归还固定 L2P 日志区；
  *                     ② 压缩：挑活 region 最少的 victim，搬进当前块，落 Anchor 后擦除。
  *   共享的内部原语（位图 / slot_now / job_reset）也定义在本文件，声明在
  *   include/ftl/metadata_job.h。
@@ -505,6 +505,39 @@ static md_compact_step_t md_compact_write(metadata_dir_cache_t *dir)
 }
 
 /* --------------------------------------------------------------------
+ * md_compact_next
+ *   功能：当前 victim 搬空后，继续挑下一个能装进当前块剩余空槽的稀疏 victim。
+ *   返回：true = 已切到下一个 victim（phase=CP_READ）；false = 没有可装下的 victim。
+ *   实现要点：victim 选择仍是“活 region 最少且 >0”；因为取的是最小值，若它也装不下，
+ *             更大的更装不下 ⇒ 直接结束本轮压缩，交给 Anchor/回收。
+ *             一次新生块可退多个稀疏块（每个 victim 约 1–2 个活 region），这是把
+ *             live_log_blocks 从上千块收敛到理想值的关键（RISK-MD-07）。
+ * -------------------------------------------------------------------- */
+static bool md_compact_next(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
+{
+    metadata_handle_t *j = &dir->handle;
+
+    const uint16_t free_slots = (uint16_t)(PAGES_PER_BLOCK - dir->cur_metadata_page);
+    const uint16_t victim     = metadata_dir_compact_victim(dir, alloc);
+
+    if (victim == UINT16_MAX)
+    {
+        return false;
+    }
+    if (((uint32_t)dir->l2p_live[victim] + MD_COMPACT_RESERVED_SLOTS) > (uint32_t)free_slots)
+    {
+        return false;
+    }
+
+    j->victim     = victim;
+    j->region_id  = 0U;
+    j->cur_region = 0U;
+    j->slot       = NAND_PBA_INVALID;
+    j->phase      = (uint8_t)MD_JOB_CP_READ;
+    return true;
+}
+
+/* --------------------------------------------------------------------
  * metadata_handle
  *   功能：推进整理 job 一步（每轮服务循环调一次）。见 metadata.h 的同名注释。
  *   参数：dir / alloc。
@@ -637,6 +670,13 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                 if (r != MD_COMPACT_SCANNED)
                 {
                     return; /* 已提交 / 背压 */
+                }
+                /* 本 victim 已搬空。当前块还有空槽、且还有能装下的稀疏 victim ⇒ 继续搬
+                 * 下一个（一次新生块退多个块）。旧实现“一个 rotation 只压一个”会让
+                 * 碎片稳态停在 live≈N，日志区永远收不回来（RISK-MD-07）。 */
+                if (md_compact_next(dir, alloc))
+                {
+                    break; /* phase 已置 CP_READ，循环继续 */
                 }
                 j->phase = (uint8_t)MD_JOB_CP_ANCHOR_PREP;
                 break;
@@ -858,13 +898,14 @@ void metadata_handle(metadata_dir_cache_t *dir, const ftl_bg_info_t *info, metad
  *   ftl_cmd_read_data 再 release（数据在 desc 链上）。 */
 
 /* 擦除成功后的统一收尾：元数据日志块不经 migrate 擦除路径，磨损计数在这里补记，
- * 且**先记账再归还**（顺序颠倒会让 Free Pool 出现未记磨损的块）。 */
+ * 且**先记账再归还**。归还目标是**固定 L2P 日志区**（置 NONE/空闲），不是用户
+ * Free Pool——该区是预留元数据区（RISK-MD-07 / RISK-CAP-02）。 */
 static void md_note_block_erased(metadata_dir_cache_t *dir, uint16_t gblock)
 {
     const uint32_t total_writes = *dir->port.total_writes;
 
     allocator_note_erase(dir->port.alloc, gblock, total_writes);
-    allocator_free_block(dir->port.alloc, gblock); /* 已擦除 ⇒ 归还 Free Pool */
+    metadata_log_release(dir->port.alloc, gblock);
 }
 
 /* 待回收块擦完成：失败 ⇒ 位保持置位（下一轮 kick 重新取到它并重试，轮转游标保证

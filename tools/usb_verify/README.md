@@ -43,7 +43,7 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect
 确认输出里有：
 
 - `FriendlyName = SOFTSSD NAND U-DISK`
-- `Size = 536870912`（512 MiB）
+- `Size = 449839104`（429 MiB，主机可见容量）
 - `BusType = USB`
 
 ### 2. 格式化（破坏性，需管理员）
@@ -54,7 +54,7 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect
 powershell -NoProfile -File .\usb_verify.ps1 -Step format
 ```
 
-默认自动找 `SOFTSSD / 512MiB / USB` 盘；也可以显式指定 `-DiskNumber 2`。
+默认自动找 `SOFTSSD / 429MiB / USB` 盘；也可以显式指定 `-DiskNumber 2`。
 
 ### 3. 写入测试数据
 
@@ -107,7 +107,7 @@ powershell -NoProfile -File .\usb_rebuild_mbr.ps1
 
 ## 安全约束
 
-- 所有脚本都会先校验 `FriendlyName=*SOFTSSD*`、`Size=536870912`、`BusType=USB`，
+- 所有脚本都会先校验 `FriendlyName=*SOFTSSD*`、`Size=449839104`、`BusType=USB`，
   不匹配直接中止。
 - **format / rebuild 会清空这块 U 盘**；不要对 NVMe 系统盘执行。
 - 主机操作期间不要同时敲板子 CLI（共用 host busy gate）。

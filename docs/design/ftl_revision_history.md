@@ -5532,6 +5532,22 @@ CP 记录 21 页读写与回绕正常。
    `fresh / load_fail_count` 共用对齐填充，行尺寸不变）；新增
    `l2p_cache_region_degraded()`；boot probe 与 journal replay 检测到降级时分别计入
    `l2p_read_errors` / 置 `block_ctx->ok=0`，回退 full metadata rebuild。
+4. **BAD 块后的减计数守卫**（`RISK-MIG-03`）：`bbt_mark_bad()` 清 `valid_count` 后，
+   L2P 仍可能指向该块（predictive 读失败标坏 / 重建漏认）。写确认与 TRIM 直接
+   `ftl_block_sub_valid()` 会在 debug 撞 `valid_count > 0U` 断言、release 回绕成
+   65535。新增 `ftl_block_sub_valid_if_live()`（BAD 或 count==0 跳过），写确认 /
+   TRIM / migrate 源块统一使用。
+5. **主机容量修正**（`RISK-CAP-01`）：`FTL_LBA_MAX` 原取 `FTL_IU_TOTAL`（全部物理 CW）
+   = 512 MiB，未扣固定元数据（92 块）、OP（408 块）、Spare（100 块），超卖 75 MiB。
+   改为 `FTL_HOST_DATA_BLOCKS_PER_INSTANCE = 总块数 − (元数据 + OP + Spare) × PLANE_NUM` = 3496 块，
+   `FTL_LBA_MAX` = **894,976（437 MiB）**；`FTL_USER_CAPACITY_BYTES` 更名
+   `FTL_MAPPING_CAPACITY_BYTES`，新增 `FTL_HOST_CAPACITY_BYTES`。L2P 表/Anchor/
+   Directory 布局不变；旧介质的越界映射需一次 CLI `format` 清掉。
+6. **full metadata rebuild 快速判空**（`RISK-BOOT-14`）：`ftl_recovery_scan_write_pointer`
+   原来对每个块逐页扫满 64 页，空闲块也要 64 次读（4096×64 ≈ 26 万次）。
+   改为 **page 0 的 4 个 CW META 全 FF ⇒ 整块空白**（1 次读），写过的块才从 page 1
+   继续找写指针并检测 hole。假设写模型顺序追加且 page 0 失败即关闭 SB；若开放续写
+   需恢复全块扫描或补读 page 63。
 
 **介质格式**：无变化（`FTL_MEDIA_LAYOUT_VERSION` 仍为 9）；新增字段均为 RAM 态。
 
@@ -5540,15 +5556,50 @@ CP 记录 21 页读写与回绕正常。
 - ✅ **`RISK-WB-06` 已上板验证**（rev27）：Windows FAT 格式化成功；`notepad.exe`
   写入 → `Write-VolumeCache` → 拔插 USB → SHA256 一致；16KB 非均匀 pattern 的 2KB
   块 0..7 内容分别为 0..7；
-- ⚠ `RISK-MD-06` / `RISK-L2P-04` **未做专项板端复现/注入**，保持 `known_risks` 的
-  “已修未上板”口径；
+- ⚠ `RISK-MD-06` / `RISK-L2P-04` / `RISK-MIG-03` **未做专项板端复现/注入**，保持
+  `known_risks` 的“已修未上板”口径；
+- ✅ `RISK-CAP-01` 容量参数已改（512 → 437 MiB）并 **rev30 上板确认**：启动日志
+  `lba_max=894976 (437MiB)`；Windows `Get-Disk = 458,227,712 B`；FAT 格式化；
+  `usb_verify write/check` 拔插后 `RESULT=PASS`；旧介质已由 CLI `format` 清理；
+- ⚠ `RISK-BOOT-14` rebuild 快速判空已改，**待上板**用 clean/PF/fresh + 部分写块验证
+  `partial`/`valid_cw` 与优化前一致（不能只测“启动变快”）；
 - ⚠ 同期观察到 predictive 迁移活锁 `RISK-MIG-02`（`kind=2 victim read failed` 反复重选），
-  **本轮未修**，单列。
+  **本轮未修**，单列；rev27 上板还触发了它导致的二级崩溃（见 `RISK-MIG-03`）。
 
 **回归判据（写进 `docs/design/usb_msc_verification.md`）**：
 - 不能用 CLI `wr/rd` 的固定 pattern 验证 pair 写（每 2KB 相同，缺陷不可见）；
 - 必须用每 2KB 互不相同的数据 + 拔插后读回；
 - 回收/Anchor 专项需要填满 64 页元数据日志块后冷启动，不能用“写两次 LBA 0”代替。
+
+---
+
+## v0.84 — L2P 日志区改为固定预留（方案 A，RISK-MD-07 / RISK-CAP-02）
+
+**日期**：2026-10-20
+
+**起因**：rev32 H2testw 写 343 MiB（约 79%）时报 Code 34。账本显示 L2P 日志块碎片到
+1076 块（134 MiB），叠加数据块后超过 4096；压缩只在 `free≤32` 时触发且一次只搬一个
+victim，运行期大部分时间不压缩。
+
+**改动**：
+- `include/ftl/metadata.h`：新增 `L2P_LOG_BLOCK0` / `L2P_LOG_BLOCKS_PER_PLANE` /
+  `FTL_METADATA_AREA_END` / `L2P_LOG_COMPACT_TRIGGER`；分区表加 `L2P log [46,78)`；
+  **介质版本 9 → 10**。
+- 容量：`FTL_HOST_DATA_BLOCKS_PER_INSTANCE` 改扣 `FTL_METADATA_AREA_END` ⇒ 数据块
+  **3432 = 429 MiB**；`FTL_LBA_MAX = 878,592`；`FTL_HOST_CAPACITY_BYTES = 449,839,104`。
+- `src/ftl/metadata.c`：`metadata_log_alloc` / `metadata_log_release` /
+  `metadata_log_area_restore` / `metadata_dir_live_block_count`；换块只从固定区取；
+  压缩触发改为 `live_log_blocks > 40`（理想 32 + 25%）。
+- `src/ftl/metadata_job.c`：`md_note_block_erased` 归还固定区（不回 Free Pool）；
+  `md_compact_next` 一次装满新块、连续搬多个稀疏 victim。
+- `ftl_fc_interface`：`ftl_page_is_blank_raw` 收敛为唯一实现（PFR + metadata 共用）。
+- CLI `info` 增加 `live=`（活日志块数）。
+- 删除无调用者的 `allocator_alloc_log_block`。
+
+**依据**：SPDK FTL 把元数据放在独立区/独立介质（nvcache + 每 band 尾部 P2L），spare 在
+device formation 时从 surfaced capacity 扣除（`docs/reference/pages/spdk_ftl.html`）。
+
+**状态**：编译零告警；**未上板**。介质版本 9→10 ⇒ 首启自动格式化是预期（用户已同意）。
 
 ---
 
@@ -5568,3 +5619,4 @@ CP 记录 21 页读写与回绕正常。
 | v7 | 删除 L2P 哨兵层（原固定分区 0..15）；未映射改由 Directory 条目 `NAND_PBA_INVALID` 表示；固定分区整体前移，`FTL_METADATA_BLOCK_END` 63 → 47 | 块布局变化 |
 | v8 | Anchor / Checkpoint / BBT 改 P0+P1 跨 plane 镜像；Journal 保持页号奇偶交错；换块擦除统一 multi-plane | 块的写语义与恢复路径变化 |
 | v9 | 删除独立 Wear 块（块 46）；erase/read/ECC 健康并入 Checkpoint（块元数据 4 页 + 磨损快照 16 页），record 5 页 → 21 页 | 块布局与记录格式变化 |
+| v10 | 新增固定预留的 L2P 日志区（46..77/plane，32 块/plane）；`FTL_METADATA_AREA_END` 46 → 78；主机容量 437 → 429 MiB | 块布局变化；老固件会把 46..77 当用户数据/动态日志块 |

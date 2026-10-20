@@ -127,7 +127,7 @@ typedef struct
  * pending_group_complete_subop 递减 outstanding → 全部完成（next==total 且
  * outstanding==0）时 pending_group_maybe_complete 一次性发通知并置 used=0。
  *
- * ⚠ total/next 必须 uint32_t：host 连续 LBA 数 count 可达 FTL_LBA_MAX（1,048,576），
+ * ⚠ total/next 必须 uint32_t：host 连续 LBA 数 count 可达 FTL_LBA_MAX（894,976），
  *   二者都以 **LBA 计**，uint16_t 会溢出。outstanding 被 FC buffer 池限到 ~16
  *   （128 buffer ÷ 每多 plane 命令 8 buffer），uint16_t 够。
  *

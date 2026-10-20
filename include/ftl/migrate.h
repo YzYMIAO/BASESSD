@@ -177,8 +177,13 @@ typedef struct
     uint32_t cmd_wait_ms;    /* 在飞命令的完成 deadline 起点（0 = 未计时） */
     uint8_t  timed_out;      /* 1 = 本次 job 因 deadline 中止 */
     uint8_t  timeout_phase;  /* 超时发生的 phase */
-    uint16_t fail_gblock;    /* 连续读失败计数对应的源块（RISK-GC-01，跨 job 保留） */
-    uint8_t  fail_count;     /* 该块连续读失败次数（跨 job 保留） */
+    /* 读失败计数**按 plane 的源块**分别记（RISK-GC-01，跨 job 保留）。
+     * ⚠ 判据是「该块整块迁移成功」才清零（mig_finish），**不是**「读到另一页没报错」：
+     *   坏页通常在第 N 页，重试时第 0..N-1 页会先成功读一遍；按「任一页成功」清零
+     *   会让阈值永不达到 ⇒ 每轮重选同一 victim、永久 abort、容量不再增长。
+     *   两个 plane 的块号不同，故计数不能共用一个槽位（交替失败会互相冲掉）。 */
+    uint16_t fail_gblock[PLANE_NUM]; /* 该 plane 的读失败计数对应的源块；UINT16_MAX = 无计数 */
+    uint8_t  fail_count[PLANE_NUM];  /* 该 plane 源块的连续读失败次数 */
 
     super_block_t victim; /* victim 的**副本**（closed_sb_list 会被 swap-remove 挪动，不持指针） */
 
@@ -213,6 +218,19 @@ typedef struct
 
     uint8_t page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
 } migrate_handle_t;
+
+/* 所有 plane 的读失败计数均已清空（boot 契约审计；纯函数）。 */
+static inline bool migrate_fail_state_clean(const migrate_handle_t *m)
+{
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        if (m->fail_gblock[plane] != UINT16_MAX)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 
 /* ── 接口 ── */
 

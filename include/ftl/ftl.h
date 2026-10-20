@@ -42,12 +42,40 @@
  * 预算取 8——正常背压在下轮 ftl_service 抽干完成后即恢复，连续 8 轮无进展属异常。 */
 #define FTL_DRAIN_STALL_MAX (8U)
 
-/* 最大有效 LBA（全局）= 映射单元总数（FTL_IU_TOTAL，见 ftl/ftl_config.h §一）。
- * 当前几何下 = 2048×512 = 1,048,576，与用户容量 512 MiB 逐条对应。 */
-#define FTL_LBA_MAX (FTL_IU_TOTAL)
+/*
+ * 主机可见的最大 LBA = 实际可用于用户数据的块 × 每块 CW 数。
+ *
+ * ⚠ `FTL_IU_TOTAL`（= 全部物理 CW）是**映射表寻址空间**，不是主机容量：
+ *   它把固定元数据、OP 预留、Spare、L2P 日志区全算成了可写空间。直接拿它当容量
+ *   会超卖，写满后 Free/OP 池耗尽、GC 没有搬移目标，前台写入失败。
+ *
+ * 每 plane 的预算：
+ *   FTL_METADATA_AREA_END（78 = 固定元数据 46 + **L2P 日志区 32**）
+ * + FTL_OP_BLOCKS_PER_PLANE（204，10% GC headroom）
+ * + FTL_SPARE_POOL_PER_PLANE（50，坏块替换）
+ * = 332 blocks/plane；数据块 = 2048 − 332 = 1716/plane，全设备 3432。
+ * 当前几何：3432 × 64 × 4 = 878,592 LBA = 429 MiB（不是 512/437 MiB）。
+ *
+ * ⚠ L2P 日志区必须计入：它是**固定预留**的元数据区（4 MiB 表本体 × 2 余量
+ *   = 8 MiB = 64 gblocks）。旧版把它从 Free Pool 动态分配且不扣容量，实测日志
+ *   碎片到 1076 块（134 MiB），导致容量未满就写失败（RISK-MD-07 / RISK-CAP-02）。
+ */
+#define FTL_HOST_DATA_BLOCKS_PER_INSTANCE                                  \
+    (FTL_BLOCK_TOTAL - ((FTL_METADATA_AREA_END + FTL_OP_BLOCKS_PER_PLANE + \
+                         FTL_SPARE_POOL_PER_PLANE) *                       \
+                        PLANE_NUM))
 
-/* 全局 LBA 上限必须与共享 cache 的键空间同源（C9：同一语义只允许一套范围）。 */
-_Static_assert((uint64_t)FTL_LBA_MAX == L2P_GLOBAL_LBA_MAX, "FTL_LBA_MAX 与共享 cache 的全局 LBA 上限不一致");
+/* 全局主机 LBA 上限 = 每实例数据块 × 每块 CW × 设备维度数
+ * （每 (ch,ce,lun) 是独立 FTL 实例；DIM=1 时 3432×256 = 878,592 = 429 MiB）。 */
+#define FTL_LBA_MAX \
+    ((uint64_t)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * FTL_DIM_TOTAL)
+
+/* 主机可见容量（字节）：给日志/文档用，和 USB MSC 的 READ CAPACITY 同源。 */
+#define FTL_HOST_CAPACITY_BYTES ((uint64_t)FTL_LBA_MAX * FTL_IU_BYTES)
+
+/* 主机范围必须落在共享 cache 的键空间内（C9：同一语义只允许一套上限）。 */
+_Static_assert((uint64_t)FTL_LBA_MAX <= L2P_GLOBAL_LBA_MAX,
+               "FTL_LBA_MAX 超出共享 cache 的全局 LBA 上限");
 
 /* ── FTL 主上下文 ── */
 

@@ -286,6 +286,26 @@ static inline void ftl_block_sub_valid(ftl_block_t *b)
     b->valid_count--;
 }
 
+/*
+ * ftl_block_sub_valid_if_live - 仅在块仍可记账时 -1
+ *
+ * 为什么不能直接调 ftl_block_sub_valid：
+ *   - `bbt_mark_bad()` 会把 `valid_count` 清 0（坏块不再产生有效 CW）；
+ *   - 但 L2P 可能仍指向该块（预测性迁移读失败后标坏 / full metadata rebuild 漏认）。
+ * 这时覆盖写旧位置或 TRIM 再减一次，debug 下会撞 `valid_count > 0` 断言，
+ * release 下 uint16 回绕成 65535 ⇒ valid_count 虚高，污染 GC/WL 的 victim 评分。
+ *
+ * 判据 = 块不是 BAD **且** count > 0；否则跳过（调用者负责把 dangling 记进日志）。
+ * 与 migrate.c / power_failure_recovery.c 的源块减计数守卫同一口径（C2/R9）。
+ */
+static inline void ftl_block_sub_valid_if_live(ftl_block_t *b)
+{
+    if ((!ftl_block_is_bad(b)) && (b->valid_count > 0U))
+    {
+        ftl_block_sub_valid(b);
+    }
+}
+
 /* 清账（擦除/坏块后调用）：valid_count=0（无位图可清） */
 static inline void ftl_block_clear_valid(ftl_block_t *b)
 {

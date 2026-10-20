@@ -1,7 +1,10 @@
 # USB MSC U 盘上板验证手册
 
-> 状态：**基础数据面已上板通过（rev27，2026-10-20）；掉电/性能/FTL 专项待测**。
+> 状态：**基础数据面 + 429 MiB 容量已上板通过（rev30，2026-10-20）；大文件/掉电/吞吐待测**。
 > 目标平台：阿波罗 V2 核心板（STM32H743IIT6 + MT29F4G08 + Type-C USB）。
+> rev30 已确认：Windows `Get-Disk` = 449,839,104 B（429 MiB），FAT 格式化，
+> `usb_verify -Step write/check` 拔插后 `RESULT=PASS`、2KB 块指纹全对。
+> 大文件/GC、掉电恢复、吞吐仍未验证（R1）。
 > 配套脚本：`tools/usb_verify/`（`usb_verify.ps1` / `usb_rebuild_mbr.ps1`）。
 > 设计与取舍：`docs/design/usb_msc_udisk.md`。已知风险：`docs/design/known_risks.md`。
 
@@ -36,7 +39,7 @@
 | 项 | 要求 |
 |---|---|
 | 板子 | STM32H743 + MT29F4G08，USB Type-C 接 **PA11/PA12（OTG_FS，AF10）** |
-| 固件 | 含本手册对应功能的 `debug.elf`；本手册实测为 **rev27** |
+| 固件 | 含本手册对应功能的 `debug.elf`；数据面实测为 **rev27**，容量修正为 **rev29（待复测）** |
 | 主机 | Windows 10/11（原生），管理员窗口仅用于分区/格式化/raw MBR 恢复 |
 | 串口 | USART1 115200，用于看板端日志（`[USB]` / `[FTL]` / `[L2P]` / `[MIG]`） |
 | 脚本 | `tools/usb_verify/usb_verify.ps1`、`usb_rebuild_mbr.ps1` |
@@ -72,7 +75,7 @@ Windows 磁盘缓存、旧镜像都会制造假象。
 
 ## 3. 安全规则
 
-1. **脚本只认 `FriendlyName=*SOFTSSD*`、`Size=536870912`、`BusType=USB`**；
+1. **脚本只认 `FriendlyName=*SOFTSSD*`、`Size=449839104`、`BusType=USB`**；
    任一不符立即中止。手工操作时也必须先用 `Get-Disk` 确认。
 2. **不要碰系统 NVMe**（Number 0/1）。`format` / `usb_rebuild_mbr.ps1` 都是破坏性的。
 3. 主机操作期间**不要同时敲板子 CLI**：两者共用 host busy gate，会互相让路或报 busy。
@@ -86,12 +89,12 @@ Windows 磁盘缓存、旧镜像都会制造假象。
 
 | ID | 验证什么 | 执行 | 期望 | 状态 |
 |---|---|---|---|---|
-| USB-V01 | USB 枚举与 MSC 挂载 | 上电，看串口 + `Get-Disk` | `[USB ] mounted`；Windows 出现 512MiB USB 磁盘 | ✅ rev27 |
-| USB-V02 | 容量 / 扇区 / 总线 | `-Step inspect` 或 `Get-Disk`/`Get-Volume` | Size=536,870,912；512/512 字节扇区；BusType=USB | ✅ rev27 |
-| USB-V03 | MBR 分区 + FAT 格式化 | 管理员 `-Step format`（或磁盘管理） | 新建主分区 + FAT，卷 Healthy/OK | ✅ rev27 |
-| USB-V04 | 非均匀多页写 → 读回 | `-Step write` | `SRC_HASH == DST_HASH` | ✅ rev27 |
-| USB-V05 | 4KB pair 镜像 / 2KB 块指纹 | `-Step check` | pattern 的 2KB 块 0..7 内容分别为 0..7 | ✅ rev27 |
-| USB-V06 | SYNCHRONIZE CACHE + 拔插持久性 | `write` → `Write-VolumeCache` → 拔插 → `check` | `RESULT=PASS`，哈希不变 | ✅ rev27 |
+| USB-V01 | USB 枚举与 MSC 挂载 | 上电，看串口 + `Get-Disk` | `[USB ] mounted`；Windows 出现 429MiB USB 磁盘 | ✅ rev30 |
+| USB-V02 | 容量 / 扇区 / 总线 | `-Step inspect` 或 `Get-Disk`/`Get-Volume` | Size=449,839,104；512/512 字节扇区；BusType=USB | ✅ rev30 |
+| USB-V03 | MBR 分区 + FAT 格式化 | 管理员 `-Step format`（或磁盘管理） | 新建主分区 + FAT，卷 Healthy/OK | ✅ rev30 |
+| USB-V04 | 非均匀多页写 → 读回 | `-Step write` | `SRC_HASH == DST_HASH` | ✅ rev30 |
+| USB-V05 | 4KB pair 镜像 / 2KB 块指纹 | `-Step check` | pattern 的 2KB 块 0..7 内容分别为 0..7 | ✅ rev30 |
+| USB-V06 | SYNCHRONIZE CACHE + 拔插持久性 | `write` → `Write-VolumeCache` → 拔插 → `check` | `RESULT=PASS`，哈希不变 | ✅ rev30 |
 | USB-V07 | 大文件 + GC/CP 压力 | 写 32–64MB 随机文件，flush，拔插，哈希 | 哈希一致；无 `[MIG]` 风暴 / 无 ASSERT | ⬜ 待测 |
 | USB-V08 | 写过程中掉电 | 写临时文件时断板子电源，重启重挂载 | 盘能重新挂载；FTL journal/CP 恢复；损坏范围可解释 | ⬜ 待测 |
 | USB-V09 | 吞吐 | 大文件复制 / `dd` 计时 | USB FS 预期 ~1 MB/s 量级；记录实测 | ⬜ 待测 |
@@ -113,7 +116,7 @@ Windows 磁盘缓存、旧镜像都会制造假象。
 
 ```text
 [INF] [USB ] device stack ready (USB2_OTG_FS, full speed)
-[INF] [USB ] mounted (MSC BOT, 1048576 sectors x 512 bytes)
+[INF] [USB ] mounted (MSC BOT, 878592 sectors x 512 bytes)
 ```
 
 2. Windows：
@@ -125,7 +128,7 @@ Get-Disk | Where-Object BusType -eq 'USB' | Format-Table Number,FriendlyName,Siz
 **期望**：
 
 - 设备侧有 `[USB ] mounted`；
-- 磁盘 `FriendlyName = SOFTSSD NAND U-DISK`、`Size = 536870912`、`BusType = USB`。
+- 磁盘 `FriendlyName = SOFTSSD NAND U-DISK`、`Size = 449839104`、`BusType = USB`。
 
 **证据**：串口原文 + `Get-Disk` 输出。⚠ 只有 `mounted` 不能证明数据面可用，继续 V02。
 
@@ -134,7 +137,7 @@ Get-Disk | Where-Object BusType -eq 'USB' | Format-Table Number,FriendlyName,Siz
 ### USB-V02 容量与扇区
 
 **验证什么**：SCSI READ CAPACITY / 扇区大小与 FTL 坐标一致（1 LBA = 512B，
-`FTL_LBA_MAX = 1,048,576`）。
+`FTL_LBA_MAX = 878,592`（429 MiB））。
 
 **执行**：
 
@@ -151,9 +154,15 @@ Get-Volume | Where-Object DriveType -eq 'Removable' | Format-Table DriveLetter,F
 
 **期望**：
 
-- `Size = 536870912`（512 MiB）；
+- `Size = 449839104`（429 MiB，主机可见容量）；
 - `LogicalSectorSize = PhysicalSectorSize = 512`；
-- 格式化后的卷 `Size ≈ 536,584,192`（扣除分区表/对齐）。
+- 格式化后的卷约为 429 MiB 减去分区表/对齐开销。
+
+> 为什么不是 512 MiB：原始 NAND 主区是 512 MiB，但固定元数据（含 L2P 日志区）
+> 156 块（19.5 MiB）、OP 预留 408 块（51 MiB）、Spare 100 块（12.5 MiB）不可用于用户数据。
+> 数据块 = 4096 − 156 − 408 − 100 = 3432 块 = 429 MiB；
+> 见 `include/ftl/ftl.h` 的 `FTL_HOST_DATA_BLOCKS_PER_INSTANCE` / `FTL_LBA_MAX`。
+> 对外上报这个数，避免主机把盘写满后 GC 无块可搬。
 
 ---
 
@@ -334,21 +343,24 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect -DiskNumber 2 -DriveL
 | rev24/25 host 格式化 | ❌ | Windows 报“无法完成格式化 / track 0 bad”；串口出现 `[L2P] region 0 load failed`、`[MIG]` 风暴；期间定位了 `RISK-L2P-04` / `RISK-MD-06` / `RISK-MIG-02` |
 | rev26 MBR 重建 + 文件测试 | ❌ | 能分区/挂载，但 `notepad.exe` 拔插后哈希不一致；2KB 块指纹显示块 1=源块 0、块 3=源块 2 ⇒ 定位 `RISK-WB-06` |
 | rev27 pair 镜像修复 | ✅ | FAT 格式化成功；`notepad.exe` 源/盘哈希一致；16KB pattern 的 2KB 块 0..7 全匹配；`Write-VolumeCache` OK；拔插后 `RESULT=PASS` |
+| rev28 dangling 减计数守卫 | ⏳ 未单独复现 | 需在 predictive 标坏后覆盖写同一 LBA，确认只打 `[FTL] dangling`、不再断言 |
+| rev29/rev30 容量修正 | ✅ | Windows `Get-Disk Size=449,839,104`（429 MiB）、FAT 格式化、`usb_verify write/check` 拔插后 `RESULT=PASS`；`lba_max=878592 (429MiB)` |
 
 **脚本形态的验证**：
 
 | 脚本步骤 | 状态 | 说明 |
 |---|---|---|
-| `usb_verify.ps1 -Step inspect` | ✅ | 自动识别 SOFTSSD/512MiB/USB，输出磁盘/分区/卷 |
-| `usb_verify.ps1 -Step write` | ✅ | 写 `test.bin` + `pattern.bin`，`SRC_HASH==DST_HASH`，`FLUSH_OK` |
+| `usb_verify.ps1 -Step inspect` | ✅（rev27/28，旧容量） | 自动识别 SOFTSSD/USB；⚠ 脚本的 ExpectedSize 已改为 449,839,104，rev29 前会被旧盘拒绝（预期） |
+| `usb_verify.ps1 -Step write` | ✅（rev27/28） | 写 `test.bin` + `pattern.bin`，`SRC_HASH==DST_HASH`，`FLUSH_OK` |
 | `usb_verify.ps1 -Step check` | ✅（逻辑） | 哈希 + 2KB 块指纹 `RESULT=PASS`；真实拔插判据用同一套检查手工做过 |
 | `usb_verify.ps1 -Step format` | ⚠ 未在最终脚本形态重跑 | 其步骤与手工验证过的“删分区→Clear-Disk→MBR→FAT32”一致；当前盘已被手工格式化，未再破坏性重跑 |
 | `usb_rebuild_mbr.ps1` | ⚠ 未在最终脚本形态重跑 | 手工版（raw 清零前 1MB → 重建 MBR）已执行成功；脚本是其整理版 |
 
 **已上板验证的结论**：
 
-- USB MSC 枚举、容量、MBR 分区、FAT 格式化、非均匀多页写、读回、SYNCHRONIZE CACHE、
-  拔插持久性均通过（rev27）。
+- rev27：USB MSC 枚举、MBR 分区、FAT 格式化、非均匀多页写、读回、SYNCHRONIZE CACHE、
+  拔插持久性通过；**但容量是旧 512 MiB 超卖值**。
+- rev30：容量修正为 429 MiB，Windows 确认 `449,839,104 B`；格式化 + `usb_verify` 写/拔插/读回通过。
 - `RISK-WB-06` 已修并上板验证（基础数据面）。
 
 **仍未验证**：

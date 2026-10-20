@@ -913,6 +913,47 @@ ftl_status_t ftl_sync_read_page_raw(nand_pba_t pba, void *buffer)
 }
 
 /* --------------------------------------------------------------------
+ * ftl_page_is_blank_raw
+ *   功能：判一整页是否“未写过”——RAW 读后检查每个 CW 槽（META+CRC+USER 前缀）
+ *         是否全 FF。
+ *   参数：pba —— 页基址（cw 位为 0）；raw_buf —— 输出缓冲（>= PAGE_SIZE）。
+ *   返回：true = 空白页；false = 写过 / 读命令没走通。
+ *   实现要点：RAW 读按 CW 拷回 **FC_BUFFER_USER_SIZE（512B，从 CW 基址起）**，
+ *             覆盖 META 4B + CRC 4B + USER 前缀 504B。检查整段而不是只看 META：
+ *             写失败可能留下半编程页（META 全 FF 但 USER 已被打掉），只查 META
+ *             会把它判空、随后在未擦页上编程 = 静默损坏。
+ *             读失败一律判“非空”（保守方向）：命令没走通时 buffer 内容未定义，
+ *             当空页会让调用者把写过块当空闲块复用（静默覆盖活数据）。
+ *             ⚠ 残留假空：RANDOM_DISABLE 且用户数据全 FF、META=FC_META_UNKNOWN
+ *               的页仍会被判空；FTL 的数据/元数据页都不写该哨兵。
+ * -------------------------------------------------------------------- */
+bool ftl_page_is_blank_raw(nand_pba_t pba, void *raw_buf)
+{
+    uint8_t *buf = (uint8_t *)raw_buf;
+
+    memset(buf, 0xFF, PAGE_SIZE);
+    if (ftl_sync_read_page_raw(pba, buf) != FTL_OK)
+    {
+        return false;
+    }
+
+    for (uint8_t cw = 0U; cw < CW_NUM; cw++)
+    {
+        const uint8_t *slot = buf + ((uint32_t)cw * FC_BUFFER_POOL_CW_SIZE);
+
+        for (uint32_t i = 0U; i < FC_BUFFER_USER_SIZE; i++)
+        {
+            if (slot[i] != 0xFFU)
+            {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+/* --------------------------------------------------------------------
  * ftl_sync_erase_block
  *   功能：块级同步擦除（**单 plane**）——建链（无数据）+ 提交等待 + 判 NAND 失败。
  *   参数：pba —— 目标块 PBA；FC 对 OP_ERASE_BLOCK 取 block + **PBA 的 plane** 擦一个 plane。

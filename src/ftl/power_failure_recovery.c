@@ -74,7 +74,6 @@ static ftl_status_t ftl_boot_power_failure(ftl_context_t                 *ftl,
                                            uint8_t                        blocks_valid,
                                            ftl_boot_result_t             *result);
 static void         ftl_rebuild_closed_sb_list(ftl_context_t *ftl, ftl_rebuild_stats_t *stats);
-static bool         ftl_recovery_page_is_blank(nand_pba_t pba, uint8_t *raw_buf);
 static uint8_t      ftl_recovery_scan_write_pointer(const ftl_context_t *ftl, uint8_t plane, uint16_t block, uint8_t *raw_buf);
 static void         ftl_recovery_close_block(ftl_context_t       *ftl,
                                              uint8_t              plane,
@@ -479,6 +478,10 @@ static ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_
     /* ⑤ 复位 Checkpoint 定时基准（本实例 cp 游标已由 checkpoint_find_latest 置空） */
     checkpoint_reset_timer(ftl->checkpoint_handle);
 
+    /* ⑥ 固定 L2P 日志区：活块/当前块置 LOG，其余按 page0 判空置 NONE 或登记回收。
+     *    必须在块状态重建（reset / rebuild / carve）之后。 */
+    metadata_log_area_restore(ftl->metadata_dir, &ftl->alloc);
+
     return FTL_OK;
 }
 
@@ -578,6 +581,9 @@ static ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
     /* ③ Controller → Ready */
     checkpoint_reset_timer(ftl->checkpoint_handle);
     *blocks_restored = restored;
+
+    /* ④ 固定 L2P 日志区：活块/当前块置 LOG，其余按 page0 判空置 NONE 或登记回收。 */
+    metadata_log_area_restore(ftl->metadata_dir, &ftl->alloc);
 
     return FTL_OK;
 }
@@ -760,7 +766,10 @@ static ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
     /* ⑥ Controller → Ready */
     checkpoint_reset_timer(ftl->checkpoint_handle);
 
-    /* ⑦ 输出结果 */
+    /* ⑦ 固定 L2P 日志区：活块/当前块置 LOG，其余按 page0 判空置 NONE 或登记回收。 */
+    metadata_log_area_restore(ftl->metadata_dir, &ftl->alloc);
+
+    /* ⑧ 输出结果 */
     result->boot_type       = BOOT_POWER_FAILURE;
     result->cp_sequence     = cp_sequence;
     result->journal_entries = entry_count;
@@ -782,43 +791,8 @@ static ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
  * plane 记 FTL_BLOCK_NO_PLANE 哨兵），配对无需恢复。
  * ══════════════════════════════════════════════════════════════════ */
 
-/* 判一页是否为全 0xFF 空白页。buffer 复用单个大缓冲——ftl_sync_read_page_raw 按
- * 每 CW 的 USER 区（512B）拷到 528B 槽位；缓冲必须 >= PAGE_SIZE（历史 buf[16] 即栈溢出）。
- *
- * ⚠ **读失败一律判「非空」**（保守方向）。ftl_sync_read_page_raw 刻意不判定 NAND 失败
- *   （坏页也要拿到原始位），故它返回 FTL_ERROR 只代表**命令本身**没走通（提交失败 /
- *   超时 / 无 buffer），此时契约规定 buffer 内容**未定义**。若把这种页当空白页，
- *   `ftl_recovery_scan_write_pointer` 会对该块返回 0 ⇒ 块被当成"没写过"**留在 Free Pool**
- *   ⇒ 既可能被 allocator 拿去复用覆盖活数据，又让 L2P 指向一个 valid_count 恒 0 的块
- *   （`bst.h` 断言的成因，与 plane 掩码缺失同类的缺陷）。
- *   判「非空」的代价：真为空的块会被拉出 Free Pool 交 GC 多擦一次——不丢数据。 */
-static bool ftl_recovery_page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
-{
-    memset(raw_buf, 0xFF, PAGE_SIZE);
-    if (ftl_sync_read_page_raw(pba, raw_buf) != FTL_OK)
-    {
-        return false; /* 命令没走通 ⇒ 内容不可知 ⇒ 一律判非空 */
-    }
-
-    /* 检查每个 CW 的 **META 字段**（4B，CW 基址偏移 0）。空页全 FF；写过的页 META
-     * 由 fc_data_path_meta_write 写成扇区 LBA（明文，加扰区从偏移 8 开始）⇒ 必然非 FF。
-     * ⚠ 不再依赖 USER 区加扰（RISK-BOOT-07）：引入 RANDOM_DISABLE 或写入全 FF 用户数据
-     *   都不会让已编程页被误判为空。残留风险：以 FC_META_UNKNOWN（全 FF）编程的页会
-     *   被当空页——FTL 的数据/元数据页都不写该哨兵。 */
-    for (uint8_t i = 0U; i < CW_NUM; i++)
-    {
-        const uint8_t *p = raw_buf + (uint32_t)i * FC_BUFFER_POOL_CW_SIZE;
-        for (uint8_t j = 0U; j < FC_CRC_META_SIZE; j++)
-        {
-            if (p[j] != 0xFFU)
-            {
-                return false;
-            }
-        }
-    }
-
-    return true;
-}
+/* 判空统一走 ftl_fc_interface.c 的 ftl_page_is_blank_raw（C2：唯一实现；
+ * full rebuild / BBT 探针 / 元数据日志区恢复共用）。 */
 
 /* 扫出某 Block 的写指针（第一个空白页），并检测写失败留下的 hole。
  *
@@ -832,13 +806,36 @@ static bool ftl_recovery_page_is_blank(nand_pba_t pba, uint8_t *raw_buf)
  *   victim 的前提。 */
 static uint8_t ftl_recovery_scan_write_pointer(const ftl_context_t *ftl, uint8_t plane, uint16_t block, uint8_t *raw_buf)
 {
+    /*
+     * 快速判空：page 0 的 4 个 CW META 全 FF ⇒ 整块空白。
+     *
+     * 正常写模型是**顺序追加**：块从 page 0 开始写；page 0 编程失败时写路径会
+     * 关闭 SB（ftl_host_io_callback 的失败分支），不会继续写后续页。因此
+     * “page 0 空白、但后面有数据”在当前写模型下不可达。
+     *
+     * 这一条把空闲块的扫描从 64 页降到 1 页：4096 块 × 64 页 → 约 4k 页，
+     * 是 full metadata rebuild 的主要提速点。
+     *
+     * ⚠ 若将来引入“page 0 失败后继续写”或开放 Open SB 续写，这个假设失效：
+     *   必须恢复全块扫描，或在 page 0 空白后补读 page 63（仍是 2 次/空闲块）。
+     *   见 known_risks RISK-BOOT-14。
+     */
+    nand_pba_t first = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, 0U, 0U);
+
+    if (ftl_page_is_blank_raw(first, raw_buf))
+    {
+        return 0U; /* 整块空白 */
+    }
+
+    /* page 0 已写过：从 page 1 起继续找第一个空白页，并检测 hole
+     * （空白页之后又出现写过的页 ⇒ 返回整块，让调用者逐页反查）。 */
     uint8_t first_blank = (uint8_t)PAGES_PER_BLOCK;
 
-    for (uint8_t page = 0U; page < PAGES_PER_BLOCK; page++)
+    for (uint8_t page = 1U; page < PAGES_PER_BLOCK; page++)
     {
         nand_pba_t addr = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
-        if (ftl_recovery_page_is_blank(addr, raw_buf))
+        if (ftl_page_is_blank_raw(addr, raw_buf))
         {
             if (first_blank == (uint8_t)PAGES_PER_BLOCK)
             {
@@ -1001,9 +998,30 @@ static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, ftl_rebuild_stat
             uint16_t     g = ftl_gblock(plane, block);
             ftl_block_t *b = &alloc->blocks[g];
 
-            /* ① 坏块 / 元数据块跳过（判据与 main.c free pool 回填一致，per-plane 块号） */
-            if (ftl_block_is_bad(b) || ftl_is_metadata_block(ftl->metadata_dir, plane, block))
+            /* ① 坏块跳过（判据与 main.c free pool 回填一致，per-plane 块号） */
+            if (ftl_block_is_bad(b))
             {
+                continue;
+            }
+
+            /* 固定元数据块不参与块账本，保持 NONE（恢复校验对固定块整段跳过）。 */
+            if (ftl_is_metadata_block(NULL, plane, block))
+            {
+                continue;
+            }
+
+            /* 动态 LOG 块归 metadata_dir 所有，不在 allocator 任何池里——但 BST state
+             * **必须显式写 LOG**，不能留 NONE。`checkpoint_block_snapshot()` 只按
+             * BST state + OP/Spare 池归属编码块表；NONE 且无池标签会被下一次开机的
+             * `ftl_recovery_restore_blocks()` Pass 0 判为非法并拒绝**整份**快照
+             * ⇒ 又走全盘 build，形成每次冷启动都 rebuild 的循环（RISK-BOOT-15）。
+             * Directory 是动态 LOG 块身份的唯一权威，这里按它落 state。 */
+            if (ftl_is_metadata_block(ftl->metadata_dir, plane, block))
+            {
+                ftl_block_set_state(b, FTL_BLOCK_STATE_LOG);
+                ftl_block_clear_valid(b);
+                ftl_block_set_temp(b, 0U);
+                ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
                 continue;
             }
 
@@ -1059,11 +1077,11 @@ static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, ftl_rebuild_stat
  * 任一步结构非法 ⇒ 调用者 `ftl_recovery_reset_blocks` + full metadata rebuild → carve。
  * ══════════════════════════════════════════════════════════════════ */
 
-/* 固定元数据区（分区表几何；动态 LOG 块不在此列） */
+/* 固定元数据区（分区表几何；含固定预留的 L2P 日志区）。 */
 static bool recovery_is_fixed_block(uint16_t g)
 {
-    /* 必须按分区的 plane_mask 判：plane 1 的 0..41/46.. 已是用户数据，
-     * 用 "block < FTL_METADATA_BLOCK_END" 会把它们误当固定元数据块跳过。 */
+    /* 必须按分区表的 plane_mask 判：分区只在 mask 覆盖的 plane 上预留，表外同号块
+     * 是用户数据。不要写死 "block < 某常量"——布局随介质版本演进。 */
     return ftl_is_metadata_block(NULL, ftl_gblock_plane(g), ftl_gblock_block(g));
 }
 
@@ -1124,7 +1142,11 @@ static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, uint16_t words[FTL_B
             LOGE("[BLK] g=%u FREE with valid=%u\r\n", (unsigned)g, (unsigned)valid);
             return false;
         }
-        if ((st == (uint8_t)FTL_BLOCK_STATE_NONE) && (pool == CP_BLOCK_POOL_NONE))
+        /* live 动态 LOG 块例外：它不属任何 allocator 池，旧版 full rebuild 留下的
+         * word 就是 NONE/no-pool。Directory 是身份的唯一权威 ⇒ 放行；Pass 2 会把它
+         * 修正为 LOG（RISK-BOOT-15 的自愈路径，不再为一处旧快照做全盘 rebuild）。 */
+        if ((st == (uint8_t)FTL_BLOCK_STATE_NONE) && (pool == CP_BLOCK_POOL_NONE) &&
+            (metadata_live_count(ftl->metadata_dir, g) == 0U))
         {
             LOGE("[BLK] g=%u NONE with no pool tag\r\n", (unsigned)g);
             return false;
@@ -1251,11 +1273,15 @@ static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, uint16_t words[FTL_B
         }
         if (metadata_live_count(ftl->metadata_dir, g) > 0U)
         {
-            if (ftl_block_state(b) != FTL_BLOCK_STATE_LOG)
+            /* NONE = 旧版 full rebuild 留下的 NONE/no-pool（RISK-BOOT-15 自愈路径，
+             * 可能上百块，不逐块告警）；其他非 LOG 状态才是真冲突，留痕一次。 */
+            const uint8_t prev = ftl_block_state(b);
+
+            if ((prev != (uint8_t)FTL_BLOCK_STATE_LOG) && (prev != (uint8_t)FTL_BLOCK_STATE_NONE))
             {
                 LOGW("[BLK] g=%u state=%u but Directory says LOG — Directory wins\r\n",
                      (unsigned)g,
-                     (unsigned)ftl_block_state(b));
+                     (unsigned)prev);
             }
             ftl_block_set_state(b, FTL_BLOCK_STATE_LOG);
             ftl_block_clear_valid(b);
@@ -1336,7 +1362,7 @@ static void ftl_recovery_probe_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLO
             {
                 nand_pba_t pba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
 
-                if (!ftl_recovery_page_is_blank(pba, raw_buf))
+                if (!ftl_page_is_blank_raw(pba, raw_buf))
                 {
                     any = true;
                     break;
@@ -1390,7 +1416,7 @@ static void ftl_recovery_probe_blocks(ftl_context_t *ftl, uint16_t words[FTL_BLO
          *   且被复用的块内容已无 L2P 引用；接受并在注释登记。 */
         nand_pba_t pba0 = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, 0U, 0U);
 
-        if (ftl_recovery_page_is_blank(pba0, raw_buf))
+        if (ftl_page_is_blank_raw(pba0, raw_buf))
         {
             continue;
         }

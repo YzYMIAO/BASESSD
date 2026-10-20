@@ -216,15 +216,21 @@ static void mig_start(migrate_handle_t *m, const super_block_t *victim, mig_kind
     ASSERT(!m->active);
 
     /* job 状态整体复位，但**端口 / 自持节拍 / 单调计数 / 连续失败计数**必须跨 job 保留。 */
-    const migrate_port_t port        = m->port;
-    const uint32_t       gc_eval     = m->gc_eval_last_ms;
-    const uint32_t       gc_log      = m->gc_log_last_ms;
-    const uint32_t       wl_eval     = m->wl_eval_last_ms;
-    const uint32_t       predict     = m->predict_last_ms;
-    const uint32_t       reclaimed   = m->reclaimed_count;
-    const uint32_t       novictim    = m->novictim_count;
-    const uint16_t       fail_gblock = m->fail_gblock;
-    const uint8_t        fail_count  = m->fail_count;
+    const migrate_port_t port      = m->port;
+    const uint32_t       gc_eval   = m->gc_eval_last_ms;
+    const uint32_t       gc_log    = m->gc_log_last_ms;
+    const uint32_t       wl_eval   = m->wl_eval_last_ms;
+    const uint32_t       predict   = m->predict_last_ms;
+    const uint32_t       reclaimed = m->reclaimed_count;
+    const uint32_t       novictim  = m->novictim_count;
+    uint16_t             fail_gblock[PLANE_NUM];
+    uint8_t              fail_count[PLANE_NUM];
+
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        fail_gblock[plane] = m->fail_gblock[plane];
+        fail_count[plane]  = m->fail_count[plane];
+    }
 
     memset(m, 0, sizeof(*m));
 
@@ -235,8 +241,11 @@ static void mig_start(migrate_handle_t *m, const super_block_t *victim, mig_kind
     m->predict_last_ms = predict;
     m->reclaimed_count = reclaimed;
     m->novictim_count  = novictim;
-    m->fail_gblock     = fail_gblock;
-    m->fail_count      = fail_count;
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        m->fail_gblock[plane] = fail_gblock[plane];
+        m->fail_count[plane]  = fail_count[plane];
+    }
 
     m->victim         = *victim;
     m->victim.is_open = false; /* 本引擎只处理 Closed SB（见 allocator.h） */
@@ -483,6 +492,22 @@ static void mig_finish(migrate_handle_t *m)
 {
     if (!m->aborted)
     {
+        /* 整块迁移成功 ⇒ 该块的历史读失败只是瞬态，清零。
+         * 只在**整个 job 完成**时清（所有有效页都读过），不能在单页读成功时清：
+         * 坏页之后的页永远读不到，按单页成功清零会让标坏阈值永不触发（RISK-GC-07）。 */
+        for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+        {
+            if (!super_block_has_plane(&m->victim, plane))
+            {
+                continue;
+            }
+            if (m->fail_gblock[plane] == mig_src_gblock(m, plane))
+            {
+                m->fail_gblock[plane] = UINT16_MAX;
+                m->fail_count[plane]  = 0U;
+            }
+        }
+
         uint16_t closed_idx;
         /* 逐 plane 擦除时条目可能已被 allocator_closed_drop_plane 摘空并移除
          * （最后一个 plane 摘除即删条目）⇒ 此时按原值查找必然失败。 */
@@ -530,7 +555,8 @@ static void mig_finish(migrate_handle_t *m)
     m->stall_ms       = 0U;
     m->wait_ms        = 0U;
     m->cmd_wait_ms    = 0U;
-    /* fail_gblock / fail_count 跨 job 保留（RISK-GC-01）：清零会让 3 次阈值永不生效。 */
+    /* fail_gblock[] / fail_count[] 跨 job 保留（RISK-GC-01/07）：只在本 job 正常完成
+     * （上方整块迁移成功）或该 plane 标 BAD 时清零，不在这里无条件清。 */
 }
 
 /* ── 5. 推进 ── */
@@ -775,10 +801,7 @@ static bool mig_step_write_settle(migrate_handle_t *m)
             const uint16_t dst_gblock = ftl_pba_gblock(dst_cw);
             ftl_block_t   *src_blk    = &m->port.alloc->blocks[src_gblock];
 
-            if ((!ftl_block_is_bad(src_blk)) && (src_blk->valid_count > 0U))
-            {
-                ftl_block_sub_valid(src_blk);
-            }
+            ftl_block_sub_valid_if_live(src_blk);
             ftl_block_add_valid(&m->port.alloc->blocks[dst_gblock]);
 
             m->migrated++;
@@ -966,9 +989,12 @@ static void mig_service_step(migrate_handle_t *m)
 void migrate_init(migrate_handle_t *m, const migrate_port_t *port)
 {
     memset(m, 0, sizeof(*m));
-    m->port        = *port;
-    m->fail_gblock = UINT16_MAX;
-    m->error       = (int32_t)FTL_OK;
+    m->port = *port;
+    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        m->fail_gblock[plane] = UINT16_MAX;
+    }
+    m->error = (int32_t)FTL_OK;
 }
 
 void migrate_trigger(migrate_handle_t *m, migrate_reason_t reason)
@@ -1187,41 +1213,39 @@ static void mig_complete_read(migrate_handle_t          *m,
         /* [待上板] 读错误 ⇒ 中止，victim 不擦。空页（decode false）不在此列。
          * 同一源块连续失败达上限 ⇒ 标 BAD 并摘除其 Closed plane（RISK-GC-01）：
          * 否则每轮 GC 都重选同一 victim、永久 abort，容量不再增长。
-         * 其他 plane 仍可迁移；数据不因标坏而丢失（坏块本来就读不回来）。 */
+         * 其他 plane 仍可迁移；数据不因标坏而丢失（坏块本来就读不回来）。
+         * ⚠ 计数按 **plane 的源块**分开：同一 victim 的两个 plane 块号不同，共用
+         *   一个槽位会让交替失败互相清零。 */
         const uint16_t gsrc = mig_src_gblock(m, plane);
 
-        if (m->fail_gblock != gsrc)
+        if (m->fail_gblock[plane] != gsrc)
         {
-            m->fail_gblock = gsrc;
-            m->fail_count  = 0U;
+            m->fail_gblock[plane] = gsrc;
+            m->fail_count[plane]  = 0U;
         }
-        m->fail_count++;
+        m->fail_count[plane]++;
 
-        if (m->fail_count >= MIG_VICTIM_READ_FAIL_MAX)
+        if (m->fail_count[plane] >= MIG_VICTIM_READ_FAIL_MAX)
         {
             LOGE("[MIG] victim read failed blk=%u x%u — mark BAD\r\n",
                  (unsigned)gsrc,
-                 (unsigned)m->fail_count);
+                 (unsigned)m->fail_count[plane]);
             (void)bbt_mark_bad(m->port.alloc, gsrc);
             if (allocator_closed_drop_plane(m->port.alloc, plane, m->victim.plane_blocks[plane]))
             {
                 m->closed_removed = true;
             }
-            m->fail_count  = 0U;
-            m->fail_gblock = UINT16_MAX;
+            m->fail_count[plane]  = 0U;
+            m->fail_gblock[plane] = UINT16_MAX;
         }
 
         mig_abort(m, "victim read failed");
     }
     else
     {
-        /* 只清**同一块**的连续失败计数：另一个 plane 的正常读不能把本块的失败
-         * 计数冲掉（否则两 plane 交替时永远达不到标坏阈值）。 */
-        if (m->fail_gblock == mig_src_gblock(m, plane))
-        {
-            m->fail_count  = 0U;
-            m->fail_gblock = UINT16_MAX;
-        }
+        /* 单页读成功**不**清零失败计数（RISK-GC-07）：坏页之前的页每轮都会成功读一遍，
+         * 若按单页成功清零，第 2 次重试永远从 0 开始 ⇒ MIG_VICTIM_READ_FAIL_MAX 不可达。
+         * 计数只在整个 job 完成（mig_finish）或该块标 BAD 时清。 */
         m->phase = (uint8_t)MIG_READ_SETTLE;
     }
 

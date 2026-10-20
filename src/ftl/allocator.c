@@ -499,27 +499,6 @@ void allocator_rewind_pair(ftl_allocator_t *alloc, uint8_t temperature)
     sb->next_page--;
 }
 
-/* 实现要点：从 Free Pool 取该 plane 擦除最少的块，出池并置 LOG。 */
-ftl_status_t allocator_alloc_log_block(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
-{
-    uint16_t gblock = allocator_select_plane_block_from_pool(alloc, plane);
-
-    if (gblock == FTL_GBLOCK_INVALID)
-    {
-        return FTL_AGAIN; /* 该 plane Free Pool 空；不向 OP 池借 */
-    }
-
-    allocator_remove_from_free(alloc, gblock);
-
-    ftl_block_t *b = &alloc->blocks[gblock];
-
-    ftl_block_set_state(b, FTL_BLOCK_STATE_LOG);
-    ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
-
-    *out_gblock = gblock;
-    return FTL_OK;
-}
-
 /* 实现要点：已关闭的槽再关一次是合法 no-op ⇒ 返回 FTL_ERROR，不转 ASSERT。 */
 ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature)
 {

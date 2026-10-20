@@ -231,8 +231,13 @@ static inline uint8_t checkpoint_block_word_pool(uint16_t word)
     return (uint8_t)((word >> CP_BLOCK_WORD_POOL_SHIFT) & CP_BLOCK_WORD_POOL_MASK);
 }
 
-/* 把当前 BST + OP/Spare 池归属编码成块元数据快照（Checkpoint 起点调用）。 */
-void checkpoint_block_snapshot(const ftl_allocator_t *alloc, uint16_t words[FTL_BLOCK_TOTAL]);
+/* 把当前 BST + OP/Spare 池归属编码成块元数据快照（Checkpoint 起点调用）。
+ * md_dir 是动态 LOG 块身份的权威：live 元数据块即使 BST state 不是 LOG，
+ * 也按 LOG 编码（否则下次开机快照校验整份失败，RISK-BOOT-15）。
+ * md_dir 允许为 NULL（只按 BST/池编码；格式化后的 initial CP 用）。 */
+void checkpoint_block_snapshot(const ftl_allocator_t      *alloc,
+                               const metadata_dir_cache_t *md_dir,
+                               uint16_t                    words[FTL_BLOCK_TOTAL]);
 
 /* ── 磨损快照（随 Checkpoint 原子落盘）──
  * 每块 8 B，按 gblock 索引（数组下标即块号，条目里不再存 block 字段）：

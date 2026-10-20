@@ -8,9 +8,9 @@
  *   ① **固定元数据区布局**（见下方「固定元数据区布局」大区）——哪个分区占哪些块、
  *      每个池多大、每条 record 占几页、介质布局版本。全部由 ftl_config.h §一 的几何量
  *      推出，**没有任何块号是写死的**。运行期分区表 `g_ftl_partitions[]` 在 metadata.c。
- *   ② **Metadata Directory** ——元数据和用户数据共享 Free Pool，通过 Directory 追踪
- *      每份元数据的当前物理位置。Directory SRAM 常驻（14.4KB = 2048 条 × 7B），
- *      启动时从 Anchor Block 加载。
+ *   ② **Metadata Directory** ——L2P region 页放在**固定预留的 L2P 日志区**（见下），
+ *      通过 Directory 追踪每份元数据的当前物理位置。Directory SRAM 常驻
+ *      （14.4KB = 2048 条 × 7B），启动时从 Anchor Block 加载。
  *
  * Anchor 池（固定元数据区内的 ANCHOR_POOL_BLOCKS 个块，出厂好块预留）：
  *   只存 Metadata Directory。一份 Directory 有 ANCHOR_PAGE_COUNT 页（chunk），
@@ -18,7 +18,7 @@
  *   **一条 record = 一整份 Directory（ANCHOR_PAGE_COUNT 页）**，任一条可独立重建
  *   整个 Directory。池内块顺序轮转（见 §元数据写模型），最新有效 record 胜。
  *
- * 元数据（从 Free Pool 动态分配）:
+ * 元数据（固定预留区；L2P region 日志在固定 L2P 日志区内追加）:
  *   L2P Region       — 日志块（通过 Directory 查找）；目录条目 = NAND_PBA_INVALID
  *                      即该 region 从未写过（未映射），读取不经 NAND
  *   Journal          — 固定元数据区（块位置见上方「固定元数据区布局」）
@@ -70,7 +70,18 @@
  *   32..39      Checkpoint  8     P0 + P1     元数据池：每块 3 份 record；**P1 镜像**
  *   40..41      BBT         2     P0 + P1     元数据池：每块 64 份坏块位图；**P1 镜像**
  *   42..45      Journal     4     P0 + P1     策略 = CW_NUM；页地址按页号奇偶跨 plane（单副本交错）
- *   46..       用户数据    —     P0 + P1     FTL_METADATA_BLOCK_END 之后（磨损计数在 CP 快照内）
+ *   46..77      L2P log     32    P0 + P1     **固定预留**的 L2P region 日志区（见下）
+ *   78..       用户数据    —     P0 + P1     FTL_METADATA_AREA_END 之后（磨损计数在 CP 快照内）
+ *
+ * ── L2P region 日志区（为什么固定预留）──
+ * L2P 表本体 = L2P_REGIONS_PER_INSTANCE × 2 KB = 4 MiB（= 32 块）；日志区取 **2×**
+ * 余量（current 块 / 压缩目标 / 坏块），共 L2P_LOG_BLOCKS_TOTAL = 64 块 = 8 MiB，
+ * 平均每 plane L2P_LOG_BLOCKS_PER_PLANE = 32 块。该区与 Anchor/CP/BBT/Journal 一样
+ * 属于**固定预留**，不从 Free Pool 动态取块、也不归还 Free Pool；容量公式已扣除。
+ * 依据：主流主控把元数据放在独立预留区/独立介质（SPDK FTL 的 nvcache + band tail
+ * metadata；spare 在 device formation 时从 surfaced capacity 扣除），不让元数据
+ * 日志与用户数据动态争抢同一个空闲池。本仓旧做法（动态从 Free Pool 取 LOG 块）
+ * 已被 RISK-MD-07 / RISK-CAP-02 证明会把容量吃光。
  *
  * ⚠ **固定分区只预留 plane_mask 里的 plane**：`ftl_is_metadata_block()` 同时比较
  *   (plane & plane_mask)。Anchor/CP/BBT/Journal 在 P1 都有元数据（镜像或交错）；
@@ -171,9 +182,41 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
 /* Journal：第 b 块 = JOURNAL_BLOCK0 + b（**环形 + 擦除**，唯一本来就正确的元数据）*/
 #define JOURNAL_BLOCK0 (BBT_BLOCK + BBT_POOL_BLOCKS)
 
-/* 固定元数据区末尾 = 第一个用户块；也用作动态元数据分配起点。
+/* 固定元数据区末尾 = L2P 日志区的起点。
  * 磨损计数在 Checkpoint 快照内，不占独立块。 */
 #define FTL_METADATA_BLOCK_END (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT)
+
+/* ── L2P region 日志区（固定预留，RISK-MD-07 / RISK-CAP-02）──
+ * 理想块数 = ceil(region 数 / 每块页数)（每页一个 region）；预留 2×（current /
+ * 压缩目标 / 坏块余量），按 plane 均分。该区是固定元数据的一部分：
+ *   · 不从 Free Pool 取块、也不归还 Free Pool；
+ *   · 容量公式用 FTL_METADATA_AREA_END 扣掉它；
+ *   · 恢复/重建时按固定分区跳过（ftl_is_metadata_block 分区表已含它）。 */
+#define L2P_LOG_IDEAL_BLOCKS ((L2P_REGIONS_PER_INSTANCE + PAGES_PER_BLOCK - 1U) / PAGES_PER_BLOCK)
+#define L2P_LOG_BLOCKS_TOTAL (2U * L2P_LOG_IDEAL_BLOCKS) /* 2× 余量：current + 压缩 + 坏块 */
+#define L2P_LOG_BLOCKS_PER_PLANE \
+    ((uint16_t)((L2P_LOG_BLOCKS_TOTAL + (uint32_t)PLANE_NUM - 1U) / (uint32_t)PLANE_NUM))
+#define L2P_LOG_BLOCK0 (FTL_METADATA_BLOCK_END)
+
+/* 压缩触发水位：活日志块超过“理想表 + 25% 碎片余量”就启动压缩。
+ * 25% 是策略值：留出 current/压缩目标/在飞写的余量，又不让碎片涨到 2× 以上。 */
+#define L2P_LOG_COMPACT_TRIGGER (L2P_LOG_IDEAL_BLOCKS + (L2P_LOG_IDEAL_BLOCKS / 4U))
+
+/* 固定元数据区（含 L2P 日志区）末尾 = 第一个用户块。 */
+#define FTL_METADATA_AREA_END (L2P_LOG_BLOCK0 + L2P_LOG_BLOCKS_PER_PLANE)
+
+/* 块号是否落在固定 L2P 日志区（各 plane 区间相同）。 */
+static inline bool ftl_is_l2p_log_block(uint16_t block)
+{
+    return (block >= L2P_LOG_BLOCK0) &&
+           (block < (uint16_t)(L2P_LOG_BLOCK0 + L2P_LOG_BLOCKS_PER_PLANE));
+}
+
+/* gblock 是否落在固定 L2P 日志区。 */
+static inline bool ftl_is_l2p_log_gblock(uint16_t g)
+{
+    return ftl_is_l2p_log_block(ftl_gblock_block(g));
+}
 
 /* 固定池使用的 plane 集合：Anchor/Checkpoint/BBT 用 multi-plane program 把同一页
  * 写全部 plane；Journal 用页号奇偶交错（i & 1）落在前两个 plane。
@@ -186,7 +229,7 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
  * （或介质上根本没有当前版本的 Checkpoint）⇒ ftl_media_format() 自动全片格式化
  * （见 power_failure_recovery.c），不需要上板前手动擦芯片。
  * 版本演进表见 docs/design/ftl_revision_history.md「介质布局版本」。 */
-#define FTL_MEDIA_LAYOUT_VERSION_BASE (9U)
+#define FTL_MEDIA_LAYOUT_VERSION_BASE (10U) /* v10：固定 L2P 日志区（46..77/plane） */
 
 /*
  * 数据通路用**全局 LBA**（页 META / journal 存 host 全局 LBA）。
@@ -232,6 +275,11 @@ _Static_assert(PLANE_NUM <= 8U, "plane_mask 是 uint8_t，PLANE_NUM 不能超过
 
 /* 固定元数据区不越界 */
 _Static_assert(FTL_METADATA_BLOCK_END <= BLOCKS_PER_PLANE, "固定元数据区超出每 plane 块数");
+_Static_assert(FTL_METADATA_AREA_END <= BLOCKS_PER_PLANE, "固定元数据区（含 L2P 日志）超出每 plane 块数");
+_Static_assert(L2P_LOG_BLOCKS_PER_PLANE >= (L2P_LOG_IDEAL_BLOCKS / PLANE_NUM + 1U),
+               "L2P 日志区至少要容纳理想表 + 1 个 current 块");
+_Static_assert((L2P_LOG_BLOCKS_PER_PLANE * PLANE_NUM) >= (L2P_LOG_IDEAL_BLOCKS + 2U),
+               "L2P 日志区预留不足（需理想表 + current + 压缩目标）");
 
 /* 元数据池：一条 record 装得进一块，每块至少一条；池至少 2 块
  * （换块流程是"先擦目标块再写" ⇒ 1 块的池会把自己擦掉）。*/
@@ -506,7 +554,7 @@ ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
 /* ── 元数据目录后台 job ──
  *
  * 承载 L2P 日志块的两件"要碰 NAND 的整理活"，让它们不在服务循环里阻塞：
- *   ① **回收**——某个日志块的活 region 数归零 ⇒ 擦块 + 归还 Free Pool；
+ *   ① **回收**——某个日志块的活 region 数归零 ⇒ 擦块 + 归还固定 L2P 日志区；
  *   ② **压缩**——抗碎片：挑活 region 最少的块做 victim，把它的活 region 搬进当前
  *      块，落 Anchor 后擦除归还。
  *
@@ -633,7 +681,7 @@ typedef struct
 
     /* ── L2P 日志块（元数据写模型：只追加 + 块池轮转）──
      * 每个 region 写进「当前日志块」的下一空槽（一 region = 一页）。块满则从
-     * Free Pool 取新块（Free Pool 保证已擦除）。l2p_live 记每个日志块上还有多少
+     * **固定 L2P 日志区**取新块（NONE = 已擦净）。l2p_live 记每个日志块上还有多少
      * region 的**最新位置**落在这里 —— 归零即置 reclaim_pending，由后台 job 异步擦除。
      * l2p_live 同时是 `ftl_is_metadata_block` 的唯一动态块判据（C9：不维护第二套坐标）。 */
     uint16_t l2p_live[FTL_BLOCK_TOTAL]; /* 每 gblock 的活 region 数 */
@@ -682,7 +730,7 @@ _Static_assert((FTL_BLOCK_TOTAL % 32U) == 0U, "FTL_BLOCK_TOTAL 必须是 32 的�
  * 日志块上的真实位置。
  *
  * 游标全部置**无效**（cur_block_valid = 0 / anchor_cursor_valid = 0）：首次追加
- * 才从 Free Pool 取块，避免"没拿块就用"。
+ * 才从固定 L2P 日志区取块，避免"没拿块就用"。
  *
  * @param dir  Directory cache（由调用者提供存储）
  */
@@ -728,15 +776,15 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
  * **只取槽，不登记**：调用方先往返回的地址写 region 页，写成功后再调
  * metadata_dir_commit_region 登记（写失败则位置不变，槽被跳过——已编程页不可复用）。
  *
- * 块满（或尚无日志块）⇒ 直接从 Free Pool 取**整块**新日志块
- * （allocator_alloc_log_block；Free Pool 保证已擦除，故无需擦）。无活 region 的旧块
- * 由后台整理 job 异步擦除归还——本函数只登记，不同步擦除。**绝不回退到固定位置**：
- * 分配失败返回 NAND_PBA_INVALID，由上层重试（待后台回收完成后自然成功）。
+ * 块满（或尚无日志块）⇒ 从**固定 L2P 日志区**取一整块已擦除的空闲块
+ * （`metadata_log_alloc`；NONE = 已擦净）。无活 region 的旧块由后台整理 job 异步擦除
+ * 归还——本函数只登记，不同步擦除。**绝不回退到用户 Free Pool**：分配失败返回
+ * NAND_PBA_INVALID，由上层重试（待压缩/回收腾出块后自然成功）。
  *
  * 日志块在哪个 plane 由 dir->cur_metadata_plane 轮转决定（写入目标与 region 归属
  * 无关：位置由 pba 自身携带，读回一律经 Directory 查 pba）。
  *
- * ⚠ **本函数不做压缩**：换块后若 Free Pool 吃紧，只登记 `job.compact_wanted` 并返回
+ * ⚠ **本函数不做压缩**：换块后若活日志块数超水位，只登记 `job.compact_wanted` 并返回
  *   NAND_PBA_INVALID——压缩由 metadata_handle 起异步 job 做，避免在写回路径上同步
  *   阻塞数十毫秒。
  * ⚠ **整理 job 在飞时一律返回 NAND_PBA_INVALID**（见函数内注释）：压缩的空槽预算按
@@ -744,18 +792,55 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
  *   （l2p_cache_flush_kick）据此返回 FTL_AGAIN，下轮重试。
  *
  * @param dir    Directory cache
- * @param alloc  Allocator（取 Free Pool 块）
+ * @param alloc  Allocator（固定 L2P 日志区的块状态在 BST 里）
  * @return 写点 PBA；失败返回 NAND_PBA_INVALID
  */
 nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir,
                                     ftl_allocator_t      *alloc);
+
+/* ── 固定 L2P 日志区（RISK-MD-07 / RISK-CAP-02）──
+ * 这 64 个 gblock 是**固定预留**的元数据区：只由 metadata 模块在
+ * [L2P_LOG_BLOCK0, FTL_METADATA_AREA_END) 内部分配/归还，不经过 allocator 的
+ * Free/OP/Spare 池。块状态约定：
+ *   LOG   = 当前写块 / 有活 region / 残留旧数据（待回收）
+ *   NONE  = 已擦除、空闲可用
+ *   BAD   = 终态，池容量永久减一
+ * 依据：主流主控把元数据放在独立预留区（SPDK FTL 的 nvcache + band tail），
+ * 元数据空间有界、可预测；旧版从 Free Pool 动态取块导致日志碎片吃掉用户容量。 */
+
+/*
+ * metadata_log_area_restore - 开机按 Directory 恢复固定日志区的块状态
+ * @param dir   已由 Anchor 加载好的 Directory（l2p_live / cur_metadata_block 有效）
+ * @param alloc 分配器（读 BST；本函数不改 Free/OP/Spare 池）
+ *
+ * 活块与当前写块置 LOG；非活块读 page 0 判空：空 ⇒ NONE（空闲），非空 ⇒ LOG +
+ * 登记回收（后台擦除后由 metadata_log_release 置 NONE）。只在开机路径调用（允许
+ * 同步 NAND 读）；每块一次 page 0 读，最多 L2P_LOG_BLOCKS_TOTAL 次。
+ */
+void metadata_log_area_restore(metadata_dir_cache_t *dir, ftl_allocator_t *alloc);
+
+/*
+ * metadata_log_alloc - 从固定日志区取一个已擦除空闲块（置 LOG，独占）
+ * @return gblock；无空闲块返回 FTL_GBLOCK_INVALID（调用者按背压处理）
+ */
+uint16_t metadata_log_alloc(metadata_dir_cache_t *dir, ftl_allocator_t *alloc, uint8_t plane);
+
+/*
+ * metadata_log_release - 擦除成功后把块归还固定日志区（置 NONE，不回 Free Pool）
+ * @param alloc  分配器
+ * @param gblock 固定日志区内的 gblock
+ */
+void metadata_log_release(ftl_allocator_t *alloc, uint16_t gblock);
+
+/* 当前仍有活 region 的日志块数（观测：应保持有界，理想 ~32）。 */
+uint16_t metadata_dir_live_block_count(const metadata_dir_cache_t *dir);
 
 /*
  * metadata_dir_commit_region - 写成功后登记 region 的新位置
  *
  * 更新 entries[region_id].pba + l2p_live（旧日志块 -1、新日志块 +1）+ dirty。
  * 旧块活计数归零且非当前块 ⇒ 把块号置进 `reclaim_pending` 位图，
- * 由后台 job 异步擦除 + 归还 Free Pool。
+ * 由后台 job 异步擦除后**归还固定 L2P 日志区**（置 NONE，不回用户 Free Pool）。
  *
  * ⚠ **本函数不擦 NAND**：它被 `ftl_l2p_callback`（L2P region 写回完成）调用，**运行在
  *   完成派发里** —— 就地擦会在完成泵内嵌套泵。登记后 `ftl_l2p_callback` 全路径无 NAND 访问。
@@ -889,8 +974,8 @@ void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t
  * ③ 读胜者各页装配覆盖对应区间（逐页再校验 chunk_index/sequence）；
  * ④ 由装配后的 entries 重建 l2p_live。
  *
- * **日志块游标不跨重启恢复**：cur_block_valid 置 false，首次追加时从 Free Pool 新取
- * 一块（绝不复用可能已编程的旧页）。旧日志块仍被 Directory 引用 ⇒ 由 l2p_live 保住，
+ * **日志块游标不跨重启恢复**：cur_block_valid 置 false，首次追加时从固定 L2P 日志区
+ * 新取一块（绝不复用可能已编程的旧页）。旧日志块仍被 Directory 引用 ⇒ 由 l2p_live 保住，
  * 待其 region 全部改写后由后台整理 job 异步擦除归还。
  * Anchor 游标则**由 locate 结果恢复**（anchor_write_idx / anchor_sequence），避免首次
  * flush 再扫一遍池。
