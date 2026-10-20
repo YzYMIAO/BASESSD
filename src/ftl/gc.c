@@ -11,14 +11,14 @@
  *         migrate.c 的搬移引擎；`gc_decode_cw_lba` 是搬移读与掉电重建共用的解码入口，
  *         `gc_read_page_with_lba` 只服务掉电重建的同步路径。
  *
- * 三条触发（gc_check_triggers，位掩码）：
+ * 三条触发（gc_should_trigger，位掩码）：
  *   T1 空闲水位 < FREE_POOL_TARGET；T4 紧急 ≤ FREE_POOL_EMERGENCY；T5 磨损比超标。
  *
  * 文件结构：
  *   1. 共用原语        gc_read_page_with_lba / gc_decode_cw_lba
  *   2. 全表极值        gc_table_extremes（static）
  *   3. 选 victim       gc_select_victim（四项加权评分）
- *   4. 触发判定        gc_check_triggers
+ *   4. 触发判定        gc_should_trigger
  *
  * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
  */
@@ -212,7 +212,7 @@ gc_decode_result_t gc_decode_cw_lba(fc_command_t *cmd,
  *
  * 两个消费方**各自调用一次**（不共享扫描）：
  *   ① gc_select_victim —— 评分归一化分母（max_erase / max_pe_ts）；
- *   ② gc_check_triggers 的 T5 —— 磨损比 max_erase/min_erase。
+ *   ② gc_should_trigger 的 T5 —— 磨损比 max_erase/min_erase。
  * 求值点由 `mig_gc_evaluate` 的 10 ms 节拍门兜成本；不要为省这一次扫描把
  * 结构体穿过 bg 适配器 / mig_begin_gc 的公开 API（会把策略耦合进引擎）。
  *
@@ -231,7 +231,7 @@ static void gc_table_extremes(const ftl_allocator_t *alloc, gc_extremes_t *out)
 {
     allocator_erase_stats_t st;
 
-    allocator_erase_stats(alloc, &st);
+    alc_get_erase_stats(alloc, &st);
 
     out->min_erase = st.erase_min;
     out->max_erase = (st.erase_max > 0U) ? st.erase_max : 1U;
@@ -268,7 +268,7 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
 
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
-        const super_block_t *sb = allocator_closed_at(alloc, i);
+        const super_block_t *sb = alc_closed_at(alloc, i);
 
         if (sb->is_open)
         {
@@ -278,7 +278,7 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
         /* 各 plane 的聚合值（有效 CW / 磨损 / 时间）由 allocator 统一计算：
          * 有效 CW = 各 plane valid_count 之和（CW 级真实计数）；退化单 plane 条目跳过哨兵 plane。 */
         allocator_sb_stats_t st;
-        allocator_sb_stats(alloc, sb, &st);
+        alc_get_sb_stats(alloc, sb, &st);
         if (st.plane_count == 0U)
         {
             continue; /* 全哨兵条目 */
@@ -338,7 +338,7 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
 /* ── 4. 触发判定 ── */
 
 /* --------------------------------------------------------------------
- * gc_check_triggers
+ * gc_should_trigger
  *   功能：算触发位掩码（调用点据此决定要不要回收、以及回收多少）。
  *   参数：alloc —— 分配器（前置条件：调用者持有实例；绑定由 ftl_contract_audit 证明）。
  *   返回：GC_TRIGGER_* 位掩码；0 无触发。
@@ -347,7 +347,7 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
  *             T5 磨损比 max/min 超标（min==0 不触发——"有块从未被擦"是静态 WL 的职责；
  *             max 地板防早期空跑）。
  * -------------------------------------------------------------------- */
-DWORD gc_check_triggers(const ftl_allocator_t *alloc)
+DWORD gc_should_trigger(const ftl_allocator_t *alloc)
 {
     /* NULL ⇒ 不触发：这是**文档化契约**（UT `test_gc_check_triggers` 钉住），
      * 不是静默吞（C5 判据 4）。 */

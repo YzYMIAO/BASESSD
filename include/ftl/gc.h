@@ -15,11 +15,11 @@
  *
  * ⚠ ②~⑤ 的执行体**不在本文件**：搬移是一个异步 job，GC 与 WL 共用同一台引擎，
  *   见 `ftl/migrate.h` / `migrate.c`（migrate_handle_t + mig_begin_gc / mig_begin_wl /
- *   migrate_handle + ftl_migrate_callback）。本文件只留**选 victim 与共用原语**：
+ *   mig_handle + ftl_migrate_callback）。本文件只留**选 victim 与共用原语**：
  *   · gc_select_victim   —— 四项加权评分（GC 侧选块策略）
  *   · gc_decode_cw_lba   —— 已完成读命令的逐 CW META 解码（异步搬移 + 掉电重建共用）
  *   · gc_read_page_with_lba —— 同步读 + 解码（只服务掉电重建）
- *   · gc_check_triggers  —— 触发判定
+ *   · gc_should_trigger  —— 触发判定
  *
  * 原子性：
  *   Journal 记录每一条 L2P 变更
@@ -49,7 +49,7 @@
 #define GC_WEIGHT_AGE   (100U) /* 时间（保证每个 Block 都有机会被回收） */
 
 /* ── GC 触发位（设计 §4.4：只有**空间压力与磨损**三条）──
- * gc_check_triggers() 返回的**位掩码**：命中的位即触发起因（可多位同时命中）。
+ * gc_should_trigger() 返回的**位掩码**：命中的位即触发起因（可多位同时命中）。
  * 只用于调用点打日志/调参，"要不要 GC" 的判定仍是 `!= 0`。
  *
  * ⚠ 位值是对外观测契约（`[GC] trig=` 日志 / 测试），**不得重排**；0x02 / 0x04 / 0x20
@@ -158,7 +158,7 @@ gc_decode_result_t gc_decode_cw_lba(fc_command_t *cmd,
 bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim);
 
 /*
- * gc_check_triggers - 检查是否需要触发 GC，并返回**触发起因位掩码**
+ * gc_should_trigger - 检查是否需要触发 GC，并返回**触发起因位掩码**
  *
  * 三条触发（设计 §4.4），可多位同时命中：
  *   T1 GC_TRIGGER_WATERMARK  free_count < FREE_POOL_TARGET          🔴 主动补池
@@ -180,6 +180,6 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
  * @param alloc  Allocator 上下文；NULL ⇒ 返回 0（UT 钉住的契约，不触发）
  * @return 触发起因位掩码（GC_TRIGGER_*），0=不需要触发
  */
-DWORD gc_check_triggers(const ftl_allocator_t *alloc);
+DWORD gc_should_trigger(const ftl_allocator_t *alloc);
 
 #endif /* FTL_GC_H */

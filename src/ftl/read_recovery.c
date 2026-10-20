@@ -17,7 +17,7 @@
  * 文件结构：
  *   1. 记录/判定   rr_record_ecc
  *   2. 恢复路径     rr_handle / rr_step（static）/ ftl_read_recovery_callback（异步 job 状态机）
- *   3. 判定扫描     rr_check_predictive / rr_get_health / rr_predictive_scan
+ *   3. 判定扫描     rr_should_predict / rr_get_health / rr_predictive_scan
  *   4. 退役         rr_retire_block
  *
  * ⚠ 层内接口（rr_record_ecc / rr_handle / rr_predictive_scan / rr_retire_block）
@@ -122,7 +122,7 @@ void rr_retire_block_at(ftl_allocator_t *alloc, WORD gblock)
  *
  * ⚠ 本文件的每一条命令都走 ftl_async_* + ftl_op_submit（**不同步等待**）——
  *   服务函数里再跑完成泵就是嵌套泵（见 ftl_op.h）。
- * ⚠ rr_select_plane 里的 l2p_cache_read 不同步加载：region 未命中时
+ * ⚠ rr_select_plane 里的 l2p_read 不同步加载：region 未命中时
  *   它起异步加载并返回 FTL_AGAIN，rr_step 原地等下轮（`stall_ms` 清零，
  *   加载在飞不算提交卡死）。本文件至此**零同步等待**。
  */
@@ -245,7 +245,7 @@ static rr_plane_step_t rr_select_plane(read_recovery_handle_t *rr)
         {
             DWORD cur;
 
-            if (l2p_cache_read(rr->cache, l, &cur) == FTL_AGAIN)
+            if (l2p_read(rr->cache, l, &cur) == FTL_AGAIN)
             {
                 return RR_PLANE_WAIT; /* region 在加载：下轮再来 */
             }
@@ -323,8 +323,8 @@ static void rr_finish(read_recovery_handle_t *rr)
     /* all_ok 是**所有被覆盖 plane 的聚合**：任一 plane 不可恢复或提交侧 abort
      * 都按 IO_ERROR 结算；全部恢复成功才报 OK（数据已由 rr_settle_plane 拷回）。
      * owners 已在 rr->owner 中按值保存；先释放槽再结算组，顺序与旧端口一致。 */
-    pending_release_index(rr->pending, rr->owner.pending_idx);
-    pending_group_complete_subop_multi(rr->pending, rr->owner.owners, status);
+    pend_release_index(rr->pending, rr->owner.pending_idx);
+    pend_group_complete_subop_multi(rr->pending, rr->owner.owners, status);
 
     rr->has_owner = 0U;
     rr->stage     = RR_STAGE_IDLE;
@@ -392,7 +392,7 @@ static void rr_step(read_recovery_handle_t *rr)
                     pending_op_view_t view;
                     rr_owner_t        owner;
 
-                    if (!pending_view_op(rr->pending, PENDING_OP_READ_RECOVERY, &view))
+                    if (!pend_view_op(rr->pending, PENDING_OP_READ_RECOVERY, &view))
                     {
                         return;
                     }
@@ -690,13 +690,6 @@ static void rr_complete_read(read_recovery_handle_t *rr, fc_command_t *cmd, cons
     }
 }
 
-/* 模式恢复完成：只管把读电压切回默认，**不看** NAND_FAIL，一律进入下一
- * attempt（或 Stage 2）。 */
-static void rr_complete_sf_restore(read_recovery_handle_t *rr)
-{
-    rr_next_attempt(rr);
-}
-
 /* 邻居读完成。得出来 ⇒ 块本身没问题，可能是目标页局部 bit 错：再试目标页。
  * 邻居数据本身不用 ⇒ 拷进 rr_page_scratch 也无妨，它随后会被 NB_RETRY 的结果覆盖。 */
 static void rr_complete_nb_read(read_recovery_handle_t *rr, fc_command_t *cmd, const fc_command_status_t *completion)
@@ -775,7 +768,8 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
             break;
 
         case RR_STAGE_SF_RESTORE:
-            rr_complete_sf_restore(rr);
+            /* 模式恢复完成：只管把读电压切回默认，不看 NAND_FAIL，一律进入下一 attempt。 */
+            rr_next_attempt(rr);
             break;
 
         case RR_STAGE_NB_READ:
@@ -798,9 +792,9 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
 }
 /* ── 3. 判定（块数组 / 全表扫描）── */
 
-/* rr_check_predictive — 在块数组 [0,max_blocks) 里找第一个 health ≥ CRITICAL 的块，
+/* rr_should_predict — 在块数组 [0,max_blocks) 里找第一个 health ≥ CRITICAL 的块，
  * 命中块号经 *gblock 出参给出（返回值只说"有没有命中"）。 */
-bool rr_check_predictive(const ftl_block_t *blocks, WORD max_blocks, WORD *gblock)
+bool rr_should_predict(const ftl_block_t *blocks, WORD max_blocks, WORD *gblock)
 {
     if ((blocks == NULL) || (gblock == NULL))
     {
@@ -869,7 +863,7 @@ bool rr_predictive_scan(const ftl_allocator_t *alloc, WORD *gblock)
                 continue; /* 状态与闭链表不一致（不应发生）：不拿它冒险 */
             }
 
-            const super_block_t *sb       = allocator_closed_at(alloc, sb_id);
+            const super_block_t *sb       = alc_closed_at(alloc, sb_id);
             bool                 bad_peer = false;
 
             for (BYTE p = 0U; p < PLANE_NUM; p++)
@@ -913,9 +907,9 @@ void rr_retire_block(ftl_block_t *b)
 
     /* 退役：不再分配新数据（RETIRED 态），不标坏（BBT 不删、仍可读）。
      * ⚠ **调用者负责先把该块驱逐出 Free Pool**（本函数只拿 ftl_block_t*，拿不到 gblock）——
-     *   只置 RETIRED 挡不住分配：allocator_select_plane_block_from_pool 的判据是
+     *   只置 RETIRED 挡不住分配：alc_select_plane_block_from_pool 的判据是
      *   Free Pool **数组**（只跳过 is_bad），留在池里的退役块照样会被选中。
-     *   由 migrate.c 的 MIG_ERASE RETIRE 分支调 allocator_remove_from_free 完成。 */
+     *   由 migrate.c 的 MIG_ERASE RETIRE 分支调 alc_remove_from_free 完成。 */
     ftl_block_set_state(b, FTL_BLOCK_STATE_RETIRED);
     ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 

@@ -27,6 +27,7 @@
 #include "ssd_types.h"
 #include "wbuf.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* ── 宏 ── */
@@ -94,7 +95,7 @@ typedef struct ftl_context
     ftl_pending_table_t pending;
 
     /* 页打包写缓冲——同一 pair 窗口的多次写攒成一页再编程，
-     * 见 wbuf.h 的 wbuf_handle_t。事件走 wbuf_handle()，读路径走 ftl_wbuf_has/read。
+     * 见 wbuf.h 的 wbuf_handle_t。事件走 wb_handle()，读路径走 wb_has/read。
      * 指针，由 storage 提供并决定落哪个域（Phase 1.5）。 */
     wbuf_handle_t *wbuf;
 
@@ -103,7 +104,7 @@ typedef struct ftl_context
      * 下游访问走 `ftl->alloc->...`（同一组指针），不经过本字段。 */
     ftl_table_refs_t table_refs;
 
-    /* Allocator（各指针绑到上面的 table_refs，见 allocator_init） */
+    /* Allocator（各指针绑到上面的 table_refs，见 alc_init） */
     ftl_allocator_t alloc;
 
     /* Journal（指针，由 storage 提供；落 SRAM3） */
@@ -116,7 +117,7 @@ typedef struct ftl_context
      * ⚠ 含 256B 的 region 脏位图**快照**——必须在 job 起点取定，不能沿用实时位图
      *   （flush 成功会清实时位，见 checkpoint.c 的"快照点前移"）。
      * 指针，由 storage 提供；落 SRAM3。 */
-    checkpoint_handle_t *checkpoint_handle;
+    checkpoint_handle_t *cp_handle;
 
     /* 统计 */
     DWORD total_writes;
@@ -127,21 +128,21 @@ typedef struct ftl_context
      * 集：checkpoint / journal / 元数据目录 / bbt / GC 全在那里），杜绝把旧 RAM 状态
      * 写回擦净的芯片；Phase 1/2/2.5 照常（NAND 泵与 host IO 不受影响）。
      * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
-    BYTE bg_suspend;
+    bool bg_suspend;
 
     /* Directory 加载失败（Anchor 池无有效 record / 读失败）。
      * ftl_init 仍建空 Directory（格式化/首次启动路径需要它），但**不能静默继续**：
      * 空 Directory 会让旧 region 映射整体丢失（RISK-BOOT-09）。ftl_boot_recovery 在
      * 介质存在有效 Checkpoint 时据此拒绝启动；无 Checkpoint（空片）才放行。 */
-    BYTE md_load_failed;
+    bool md_load_failed;
 
     /* L2P 加载背压信号（per-instance）。
-     * ftl_issue_subop 因 **L2P region 未就绪**（异步加载在飞，l2p_cache_read 返
+     * ftl_issue_subop 因 **L2P region 未就绪**（异步加载在飞，l2p_read 返
      * FTL_AGAIN）而返回 FTL_AGAIN 时置 1；ftl_drain_group 据此**不计** `stalls`——
      * 加载在飞 = 有进展，不是"下发不动"。否则一次正常的 region 加载会吃掉 8 轮预算
      * （FTL_DRAIN_STALL_MAX）里的一轮，随机读满盘时把组误判成卡死报 IO_ERROR。
      * 真卡死（命令丢失）由 NAND 层 wait/jump 超时兜底，不靠这个计数。 */
-    BYTE l2p_defer;
+    bool l2p_defer;
 
     /* 时间预算后台调度器（per-instance）。
      * 任务表（10 项：6 must-run + 4 预算）由 ftl_bg_init 从 `ftl/bg_wiring.c` 的静态表
@@ -151,7 +152,7 @@ typedef struct ftl_context
     /* 搬移 job（GC / 静态 WL / 慢死预测共用一台异步引擎，见 migrate.h）。
      * 观测计数（reclaimed / novictim）与求值节拍已收进 handle（migrate_status_t）。
      * 指针，由 storage 提供；含逐 plane 页镜像（page_buf，约 4KB），必须常驻。 */
-    migrate_handle_t *migrate_handle;
+    migrate_handle_t *mig_handle;
 
     /* Read Recovery：per-Block ECC 趋势追踪在 alloc.blocks[].rr（BST 单数据源）；
      * 本结构 = 异步恢复 job 状态机本体（见 read_recovery.h） */
@@ -168,7 +169,7 @@ typedef struct ftl_context
  * ftl_storage_t - 描述符的外部存储
  *
  * storage 数组由 HIL 提供并决定落哪个域（main.c：五张表与 md→各自 section、
- * journal/checkpoint_handle→SRAM3；migrate/wbuf/rr_page_scratch→AXI .bss）。
+ * journal/cp_handle→SRAM3；migrate/wbuf/rr_page_scratch→AXI .bss）。
  * 五张表各自独立定义，本结构只收它们的引用（指针），不约束表本体的放置。
  * ftl_init 只绑定指针；数组定义在 main.c，
  * 生命周期覆盖全程（完成表的 ctx 会保存这些地址）。
@@ -178,7 +179,7 @@ typedef struct
     const ftl_table_refs_t *table_refs;
     metadata_dir_cache_t   *metadata_dir;
     l2p_journal_t          *journal;
-    checkpoint_handle_t    *checkpoint_handle;
+    checkpoint_handle_t    *cp_handle;
     migrate_handle_t       *migrate;         /* Phase 1.5：挂载指针（不减少总 RAM） */
     wbuf_handle_t          *wbuf;            /* Phase 1.5 */
     BYTE                   *rr_page_scratch; /* Phase 1.5：FTL_READ_USER_SIZE */
@@ -219,7 +220,7 @@ void ftl_contract_audit(const ftl_context_t *ftl);
  * ftl_service_pump - 实例无关的每轮泵（superloop 每轮调一次）
  *
  * Phase 1: fc_service() 推进 NAND（≤ NAND_SUBMIT_BUDGET 次，首轮即抽干完成）
- * Phase 2: completion_table_drain() 处理完成回调（按命令 ch/ce/lun 路由回实例）
+ * Phase 2: ct_drain() 处理完成回调（按命令 ch/ce/lun 路由回实例）
  *
  * ⚠ 必须在所有 ftl_service() 之前调，且**每轮只调一次**——NAND 引擎与完成表都是
  *   全局单份，per-instance 调用会把 fc_service 预算重复消耗 N 遍。
@@ -265,11 +266,11 @@ void ftl_bg_service(ftl_context_t *ftl);
  * ftl_bg_level_select - 负载 → 后台档位（纯函数）
  *
  * 判据：
- *   inflight = pending_count + pending_group_count
+ *   inflight = pend_get_count + pend_get_group_count
  *   inflight==0 ⇒ IDLE；pending > FTL_PENDING_MAX/2 或 queued!=0 ⇒ BUSY；否则 NORMAL。
  * 返回 BG_LEVEL_IDLE / BG_LEVEL_NORMAL / BG_LEVEL_BUSY（bg_scheduler.h）。
  */
-BYTE ftl_bg_level_select(const ftl_context_t *ftl);
+bg_level_t ftl_bg_level_select(const ftl_context_t *ftl);
 
 /*
  * ftl_submit_read - 非阻塞提交读请求（长度任意）
@@ -278,7 +279,7 @@ BYTE ftl_bg_level_select(const ftl_context_t *ftl);
  *   ① 建完成组（一条 host 请求 = 一个组）
  *   ② 逐子操作下发（每个子操作 2 页 Multi-Plane，末条奇数页时单 plane）
  *   ③ 未映射子操作同步返回全零；余下子操作遇资源背压留待 ftl_service Phase 2.5
- *   ④ 数据在 completion_table_drain 中路由回 buffer
+ *   ④ 数据在 ct_drain 中路由回 buffer
  *
  * ⚠ 一次调用的完成通知（complete_flag/status_out/on_complete）**只在全部子操作
  *   完成后触发一次**。返回 FTL_OK 仅表示已受理（含部分子操作排队），不代表已完成。

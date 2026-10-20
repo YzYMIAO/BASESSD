@@ -10,7 +10,7 @@
  * 本头只放**声明**与**纯谓词**：
  *   · 改状态的闸门（位图置/清、写指针、job 复位）定义在 metadata_job.c，
  *     保证单一实现（H42）；
- *   · `metadata_handle_idle` / `md_compacting` / `md_log_block_idle` /
+ *   · `md_is_handle_idle` / `md_is_compacting` / `md_log_block_idle` /
  *     `md_log_block_reclaimable` 是纯读谓词，跨 TU 内联。
  */
 
@@ -43,7 +43,7 @@ void md_reclaim_mark_all(metadata_dir_cache_t *dir, const ftl_allocator_t *alloc
 /* 取当前日志块的**下一个空槽**并推进写指针（纯 RAM，不做任何块管理）。
  * 返回：槽位 PBA；无当前块 / 块已满 ⇒ NAND_PBA_INVALID。
  * 取到位置后**立即推进** cur_metadata_page：写失败时该页可能已半编程、不可复用。 */
-DWORD metadata_dir_slot_now(metadata_dir_cache_t *dir);
+DWORD md_take_slot(metadata_dir_cache_t *dir);
 
 /* ── job 状态 ── */
 
@@ -52,22 +52,22 @@ DWORD metadata_dir_slot_now(metadata_dir_cache_t *dir);
  * slot 的"未取"是 NAND_PBA_INVALID。漏一个 ⇒ append_slot 永久让路（phase 卡死）
  * 或下次压缩复用已消耗的槽（二次编程 = 静默损坏）。
  * ⚠ 不清 `reclaim_pending` / `reclaim_scan`：待回收知识不属于 job 状态。 */
-void metadata_handle_reset(metadata_dir_cache_t *dir);
+void md_handle_reset(metadata_dir_cache_t *dir);
 
-/* metadata_handle_idle — 整理 job 是否空闲（无回收/压缩在跑）。 */
-static inline bool metadata_handle_idle(const metadata_dir_cache_t *dir)
+/* md_is_handle_idle — 整理 job 是否空闲（无回收/压缩在跑）。 */
+static inline bool md_is_handle_idle(const metadata_dir_cache_t *dir)
 {
     return dir->handle.phase == MD_JOB_IDLE;
 }
 
 /*
- * md_compacting — 压缩 job 是否处于 CP_* 阶段。
+ * md_is_compacting — 压缩 job 是否处于 CP_* 阶段。
  *
  * `commit_region` 据此**抑制逐次立即回收**：搬移 victim 的最后一个 region 时其活
  * 计数归零，但 Anchor 还没指向新位置 ⇒ 此刻擦 victim 会在掉电后丢映射（③④ 契约）。
  * 压缩期间归零的块由 job 自己在 CP_RECLAIM 里擦。
  */
-static inline bool md_compacting(const metadata_dir_cache_t *dir)
+static inline bool md_is_compacting(const metadata_dir_cache_t *dir)
 {
     return (dir->handle.phase >= MD_JOB_CP_READ) && (dir->handle.phase <= MD_JOB_CP_RECLAIM);
 }

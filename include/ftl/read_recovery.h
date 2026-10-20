@@ -60,7 +60,7 @@ typedef struct ftl_context ftl_context_t;
 /* read disturb 慢死阈值——单块自上次擦除以来的累计读次数超此值即视为慢死候选。
  * read_count 由 host 读 completion（ftl.c）与 GC/WL 搬移读（migrate.c）共同累加；
  * 取 SLC MT29F4G08 读干扰容忍度量级（NAND 读寿命 ~10^5 次，保守取每块 1000 次
- * 触发搬移，远早于数据损坏）。擦除成功会把 read_count 清零（allocator_note_erase）。 */
+ * 触发搬移，远早于数据损坏）。擦除成功会把 read_count 清零（alc_note_erase）。 */
 #define RR_READ_DISTURB_THRESHOLD (1000U)
 
 /* 慢死预测巡检节拍（由 migrate handle 自持）：≥1s 才扫一轮（read disturb 是慢变量，
@@ -143,22 +143,22 @@ typedef struct
 
 typedef struct
 {
-    BYTE  stage;            /* rr_stage_t */
-    BYTE  waiting;          /* 1 = 有一条 RR 命令在飞（等 g_op_callbacks[FTL_OP_READ_RECOVERY]） */
-    BYTE  plane;            /* 当前 plane（0..PLANE_NUM-1）；== PLANE_NUM ⇒ 收尾 */
-    BYTE  attempt;          /* Stage 1 读重试计数（1..RR_MAX_RETRY） */
-    BYTE  neighbor_i;       /* Stage 2 邻居序号（0..RR_NEIGHBOR_ATTEMPTS-1） */
-    BYTE  pending_idx;      /* 被托管的 pending 槽下标（收尾据此释放） */
-    BYTE  first;            /* 本 plane 首个被覆盖 CW 在子操作内的偏移（诊断用 LBA） */
-    BYTE  recovered;        /* 本 plane 是否恢复成功（PLANE_END 结算用） */
-    BYTE  all_ok;           /* 1 = 本 job 覆盖的所有 plane 都恢复成功（收尾状态用） */
-    DWORD stall_ms;         /* 本轮连续「提交不出去」的起点（0 = 未计时） */
-    DWORD page_lba;         /* 本 plane 目标页的**页** LBA（META 比对用） */
-    DWORD page;             /* 本 plane 目标页 PBA（NAND_PBA_INVALID = 本子操作不覆盖本 plane） */
-    DWORD neighbor;         /* Stage 2 邻居页 PBA（NB_READ 提交前算好） */
-    BYTE  retry_count;      /* 本次恢复已用的读重试次数（观测，收尾 LOGE 用） */
-    BYTE  planes_recovered; /* 本次 job 恢复成功的 plane 数（观测） */
-    BYTE  planes_failed;    /* 本次 job 恢复失败的 plane 数（观测） */
+    rr_stage_t stage;            /* 异步恢复状态机 */
+    bool       waiting;          /* true = 有一条 RR 命令在飞（等 g_op_callbacks[FTL_OP_READ_RECOVERY]） */
+    BYTE       plane;            /* 当前 plane（0..PLANE_NUM-1）；== PLANE_NUM ⇒ 收尾 */
+    BYTE       attempt;          /* Stage 1 读重试计数（1..RR_MAX_RETRY） */
+    BYTE       neighbor_i;       /* Stage 2 邻居序号（0..RR_NEIGHBOR_ATTEMPTS-1） */
+    BYTE       pending_idx;      /* 被托管的 pending 槽下标（收尾据此释放） */
+    BYTE       first;            /* 本 plane 首个被覆盖 CW 在子操作内的偏移（诊断用 LBA） */
+    bool       recovered;        /* 本 plane 是否恢复成功（PLANE_END 结算用） */
+    bool       all_ok;           /* true = 本 job 覆盖的所有 plane 都恢复成功（收尾状态用） */
+    DWORD      stall_ms;         /* 本轮连续「提交不出去」的起点（0 = 未计时） */
+    DWORD      page_lba;         /* 本 plane 目标页的**页** LBA（META 比对用） */
+    DWORD      page;             /* 本 plane 目标页 PBA（NAND_PBA_INVALID = 本子操作不覆盖本 plane） */
+    DWORD      neighbor;         /* Stage 2 邻居页 PBA（NB_READ 提交前算好） */
+    BYTE       retry_count;      /* 本次恢复已用的读重试次数（观测，收尾 LOGE 用） */
+    BYTE       planes_recovered; /* 本次 job 恢复成功的 plane 数（观测） */
+    BYTE       planes_failed;    /* 本次 job 恢复失败的 plane 数（观测） */
 
     /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
     l2p_cache_t         *cache;
@@ -168,7 +168,7 @@ typedef struct
     ftl_pending_table_t *pending;
 
     rr_owner_t owner;     /* 当前被托管的子操作 */
-    BYTE       has_owner; /* 1 = owner 有效（rr_trigger 登记） */
+    bool       has_owner; /* true = owner 有效（rr_trigger 登记） */
     int32_t    error;     /* 最近一次 abort 的归因 */
 
     /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 stage/age */
@@ -181,13 +181,13 @@ typedef struct
 {
     ftl_module_status_t base;
 
-    BYTE stage; /* rr_stage_t（观测；外部不要据此驱动） */
-    bool waiting;
-    bool all_ok;  /* 本次 job 所有 plane 都恢复成功 */
-    BYTE retries; /* 已用读重试次数 */
-    BYTE planes_recovered;
-    BYTE planes_failed;
-    WORD desc_count; /* 保留的 desc 数（compact 机制恒 0） */
+    rr_stage_t stage; /* 观测；外部不要据此驱动 */
+    bool       waiting;
+    bool       all_ok;  /* 本次 job 所有 plane 都恢复成功 */
+    BYTE       retries; /* 已用读重试次数 */
+    BYTE       planes_recovered;
+    BYTE       planes_failed;
+    WORD       desc_count; /* 保留的 desc 数（compact 机制恒 0） */
 } rr_status_t;
 
 /* rr_init - 绑定窄上下文并复位 handle。 */
@@ -241,7 +241,7 @@ void rr_retire_block_at(ftl_allocator_t *alloc, WORD gblock);
  * 那里是"g_op_callbacks 各槽"的唯一权威列表，此处不再重复声明。 */
 
 /*
- * rr_check_predictive - 检查是否需要预测性搬移
+ * rr_should_predict - 检查是否需要预测性搬移
  *
  * ECC 趋势连续上升 ≥ RR_ECC_RISING_THRESHOLD 次
  * 或单次 ECC ≥ RR_ECC_HIGH_WATER → 返回该 Block。
@@ -251,7 +251,7 @@ void rr_retire_block_at(ftl_allocator_t *alloc, WORD gblock);
  * @param gblock    输出：需搬移的全局 Block 编号
  * @return true 需要搬移，false 不需要
  */
-bool rr_check_predictive(const ftl_block_t *blocks, WORD max_blocks, WORD *gblock);
+bool rr_should_predict(const ftl_block_t *blocks, WORD max_blocks, WORD *gblock);
 
 /*
  * rr_get_health - 获取 Block 健康状态

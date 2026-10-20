@@ -14,7 +14,7 @@
  *
  * data[slot] 的 slot = plane*CW_NUM + cw（与 LBA 低 3 位同构，见 ftl_lba_pair_slot），
  * occupied 逐位标记有效槽。owners 记录「哪些组向本页贡献过」——一页可能由多个组拼成，
- * 完成时必须**逐组**递减在飞数（见 pending_group_complete_subop_multi）。
+ * 完成时必须**逐组**递减在飞数（见 pend_group_complete_subop_multi）。
  *
  * ⚠ 掉电语义（无电容）：缓冲里的数据**不落 journal/L2P**——只有 flush 编程成功的
  *   completion 才确认映射（与既有顺序一致）。掉电时这些写组仍 outstanding（从未完成），
@@ -42,7 +42,7 @@ typedef struct
 {
     BYTE  data[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 CW × 512B = 4096B 页镜像 */
     BYTE  occupied;                              /* bit i = 槽 i 有数据（i = plane*CW_NUM+cw） */
-    BYTE  open;                                  /* 1 = 正持有某窗口 */
+    bool  open;                                  /* true = 正持有某窗口 */
     DWORD base;                                  /* 持有页的 pair 窗口基址（低 3 位清零） */
     DWORD owners;                                /* bit gi = 组 gi 贡献过本页（FTL_GROUP_MAX=32） */
 
@@ -52,9 +52,9 @@ typedef struct
     int32_t error;
 
     /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
-    ftl_allocator_t       *alloc;
-    ftl_pending_table_t   *pending;
-    struct migrate_handle *migrate;
+    ftl_allocator_t     *alloc;
+    ftl_pending_table_t *pending;
+    struct mig_handle   *migrate;
 } wbuf_handle_t;
 
 /* ── typed 入口 ── */
@@ -98,11 +98,11 @@ typedef struct
     bool         timed_out;
 } wbuf_status_t;
 
-/* wbuf_init - 绑定窄上下文并复位 handle。 */
-void wbuf_init(wbuf_handle_t *h, ftl_allocator_t *alloc, ftl_pending_table_t *pending, struct migrate_handle *migrate);
+/* wb_init - 绑定窄上下文并复位 handle。 */
+void wb_init(wbuf_handle_t *h, ftl_allocator_t *alloc, ftl_pending_table_t *pending, struct mig_handle *migrate);
 
 /*
- * wbuf_handle - 事件驱动入口（docs §4.8）
+ * wb_handle - 事件驱动入口（docs §4.8）
  *
  * 返回操作结果（**偏离 §4.8 的 void 签名**：写路径必须据此区分 FTL_AGAIN 背压与
  * FTL_ERROR 永久失败，P5 留痕）。`out` 非 NULL 时填本轮上报；调用者只关心返回值时
@@ -111,10 +111,10 @@ void wbuf_init(wbuf_handle_t *h, ftl_allocator_t *alloc, ftl_pending_table_t *pe
  * APPEND / FLUSH / DROP / RESET / MAYBE_FLUSH_IDLE 失败时缓冲**原样保留**（可重试）；
  * 只有编程成功的 FLUSH 才清空缓冲。`info` 当前不参与决策（保留以统一 typed 入口）。
  */
-ftl_status_t wbuf_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const ftl_bg_info_t *info, wbuf_status_t *out);
+ftl_status_t wb_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const ftl_bg_info_t *info, wbuf_status_t *out);
 
 /* ── 查询（读路径；只判不取） ── */
-bool ftl_wbuf_has(const wbuf_handle_t *h, DWORD lba);
-bool ftl_wbuf_read(const wbuf_handle_t *h, DWORD lba, void *out);
+bool wb_has(const wbuf_handle_t *h, DWORD lba);
+bool wb_read(const wbuf_handle_t *h, DWORD lba, void *out);
 
 #endif /* FTL_WBUF_H */

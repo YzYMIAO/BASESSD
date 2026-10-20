@@ -141,6 +141,7 @@ CPU_FLAGS := -mcpu=cortex-m7\
 # -fno-common            禁止公共块（防止多个文件定义同名全局变量）
 # -fno-unwind-tables     禁用异常处理展开表（减小固件体积）
 # -fno-asynchronous-unwind-tables  禁用异步异常展开表（进一步减小固件体积）
+# -fshort-enums          枚举按最小字节（本工具链默认已是；显式钉住，见 bst.h 的静态断言）
 FIRMWARE_CFLAGS :=$(CPU_FLAGS)\
                 -std=c11\
                 -ffreestanding\
@@ -149,7 +150,8 @@ FIRMWARE_CFLAGS :=$(CPU_FLAGS)\
                 -fdata-sections\
                 -fno-common\
                 -fno-unwind-tables\
-                -fno-asynchronous-unwind-tables
+                -fno-asynchronous-unwind-tables\
+                -fshort-enums
 
 #  通用选项
 BASE_FLAGS  = $(WARN_FLAGS) $(INC_FLAGS) $(FIRMWARE_CFLAGS)

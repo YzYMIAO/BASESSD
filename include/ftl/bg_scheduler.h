@@ -26,6 +26,7 @@
  *     防刷屏。⚠ 本板 `ssd_platform_register` 强制 time_us 非空 ⇒ 该分支不可达。
  */
 
+#include "ftl_type.h"  /* bg_level_t */
 #include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 
 #include <stdbool.h>
@@ -41,11 +42,8 @@ typedef struct ftl_context ftl_context_t;
  * bg_scheduler_init 另有一条运行期 ASSERT 兜其他调用者（见其注释）。 */
 #define BG_TASK_COUNT (10U)
 
-/* ── 档位（负载 → 预算规模，见 bg_wiring.c g_bg_level_cfg）── */
-#define BG_LEVEL_IDLE   (0U)
-#define BG_LEVEL_NORMAL (1U)
-#define BG_LEVEL_BUSY   (2U)
-#define BG_LEVEL_NUM    (3U) /* 值域上界：档位表数组维度 + 档位下标的边界断言 */
+/* ── 档位（负载 → 预算规模，见 bg_wiring.c g_bg_level_cfg；枚举在 ftl_type.h）── */
+#define BG_LEVEL_NUM (3U) /* 值域上界：档位表数组维度 + 档位下标的边界断言 */
 
 /* 统一任务签名：适配器包异构 kick → void(ftl_context_t*) */
 typedef void (*bg_task_func_t)(ftl_context_t *ftl);
@@ -76,7 +74,7 @@ typedef struct
     const bg_level_cfg_t *cfg;
     /* 本轮档位（BG_LEVEL_*），同样由 bg_scheduler_run 发布。
      * typed 模块入口的 ftl_bg_info_t.load_level 就取这里，避免适配器各自再选一次档。 */
-    BYTE level;
+    bg_level_t level;
 } bg_scheduler_t;
 
 /* 装载任务表：拷贝 table[0..count) 到 tasks[]、置 task_count、清 cfg。

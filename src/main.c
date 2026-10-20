@@ -244,7 +244,7 @@ _Static_assert(sizeof(g_ftl_blocks) + sizeof(g_ftl_free_blocks) + sizeof(g_ftl_o
                        sizeof(g_ftl_spare_blocks) + sizeof(g_ftl_closed_sb_list) <=
                    BOARD_SRAM12_SIZE,
                "FTL tables 超出 SRAM12（SRAM1+SRAM2）");
-_Static_assert(sizeof(g_ftl_checkpoint_handle) + sizeof(g_ftl_journal) <= BOARD_SRAM3_SIZE, "checkpoint_handle/journal 超出 SRAM3");
+_Static_assert(sizeof(g_ftl_checkpoint_handle) + sizeof(g_ftl_journal) <= BOARD_SRAM3_SIZE, "cp_handle/journal 超出 SRAM3");
 _Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4");
 
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
@@ -261,7 +261,7 @@ static l2p_owner_t g_l2p_owner[FTL_DIM_TOTAL];
  * ssd_l2p_owner_of_region - 全局 L2P region → owner FTL 实例
  *
  * 共享 cache 的 load/flush/commit 用它找 owner die。region→(ch,ce,lun) 的分解
- * 复用 completion_table_route_region（与 lba_route_* 同一套公式，避免第二套坐标）。
+ * 复用 ct_get_route_region（与 lba_route_* 同一套公式，避免第二套坐标）。
  */
 static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, DWORD global_region)
 {
@@ -279,7 +279,7 @@ static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, DWORD global_region
  * ssd_ftl_boot - 初始化单个 (ch,ce,lun) FTL 实例
  *
  * 顺序：ftl_init（内部含 bbt_init 标坏块）→ 遍历 BST 非坏块回填 free pool
- *       （allocator_init 不填 free pool、bbt 只标坏块——不回填则首次写失败）
+ *       （alc_init 不填 free pool、bbt 只标坏块——不回填则首次写失败）
  *       → ftl_boot_recovery → 日志。
  *
  * @param ch/ce/lun 本实例绑定拓扑
@@ -306,13 +306,13 @@ static ftl_status_t ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
     refs.closed_sb_list = g_ftl_closed_sb_list[dim];
 
     ftl_storage_t storage;
-    storage.table_refs        = &refs;
-    storage.metadata_dir      = &g_ftl_md[dim];
-    storage.journal           = &g_ftl_journal[dim];
-    storage.checkpoint_handle = &g_ftl_checkpoint_handle[dim];
-    storage.migrate           = &g_ftl_migrate[dim];
-    storage.wbuf              = &g_ftl_wbuf[dim];
-    storage.rr_page_scratch   = g_ftl_rr_page_scratch[dim];
+    storage.table_refs      = &refs;
+    storage.metadata_dir    = &g_ftl_md[dim];
+    storage.journal         = &g_ftl_journal[dim];
+    storage.cp_handle       = &g_ftl_checkpoint_handle[dim];
+    storage.migrate         = &g_ftl_migrate[dim];
+    storage.wbuf            = &g_ftl_wbuf[dim];
+    storage.rr_page_scratch = g_ftl_rr_page_scratch[dim];
 
     ASSERT(dim < FTL_DIM_TOTAL);
 
@@ -378,8 +378,8 @@ static ftl_status_t ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
          ce,
          lun,
          (unsigned)alloc->free_count,
-         (unsigned)allocator_op_total(alloc),
-         (unsigned)allocator_spare_total(alloc));
+         (unsigned)alc_get_op_total(alloc),
+         (unsigned)alc_get_spare_total(alloc));
 
     LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu bit=%s\r\n",
          (int)result.boot_type,
@@ -392,8 +392,8 @@ static ftl_status_t ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
 
 /* 完整初始化 FTL：全实例 boot + controller 绑定（boot_ok 才置 g_ftl_ready）
  *
- *   ① 建 g_ftl_ptrs 三维指针表 + completion_table_set_route —— **必须早于逐实例 boot**，
- *      理由见函数内注释（boot 期 full metadata rebuild会经 l2p_cache_read_sync 抽完成表）。
+ *   ① 建 g_ftl_ptrs 三维指针表 + ct_set_route —— **必须早于逐实例 boot**，
+ *      理由见函数内注释（boot 期 full metadata rebuild会经 l2p_read_sync 抽完成表）。
  *   ② 逐 (ch,ce,lun) boot —— 任一失败则 boot_ok=0，整体回退 fc_service。
  *   ③ ssd_controller_init(&g_ctrl, g_ftl_ptrs) —— 对外 controller 就绪。
  *   ④ g_ftl_ready = 1 —— 主循环切换到 ftl_service。
@@ -407,18 +407,18 @@ static void ssd_ftl_boot_all(void)
     ssd_status_t ctrl_ret;
 
     /* ① 全局完成旁表 + 路由表：清一次、填一次、设一次——**全部必须早于逐实例 boot**。
-     *    - completion_table_init() 清的是**全局**资源（旁表 + 路由表），只做一次。
+     *    - ct_init() 清的是**全局**资源（旁表 + 路由表），只做一次。
      *      ⚠ 它原在 ftl_init 里（逐实例调用）⇒ 实例 1 的 init 会抹掉实例 0 在飞的
      *      ctx 登记与已设好的路由表；已移到此处。
      *    - g_ftl_ptrs 只是对静态数组 g_ftl 取址，不依赖 ftl_init。
      *    - 为何路由不能等 boot 之后再设：`ssd_ftl_boot` 内部的 `ftl_boot_recovery`
-     *      （full metadata rebuild）会经 `l2p_cache_read_sync` → `l2p_sync_pump` → `ftl_service_pump()`
+     *      （full metadata rebuild）会经 `l2p_read_sync` → `l2p_sync_pump` → `ftl_service_pump()`
      *      抽完成表。此时若 route 仍为 NULL，`ftl_op_dispatch` 解析出的 ftl 为 NULL，
      *      服务函数只 release 不推进状态 ⇒ job 永久卡死
      *      （现象：[L2P] read_sync timeout + load_inflight 永久不减）。
      *    命令能在完成时拿到非 NULL 实例，前提是该实例的 ftl_init 已跑过——boot 循环
      *    逐实例推进，任一时刻在飞的命令只可能属于已 boot 的实例。 */
-    completion_table_init();
+    ct_init();
     for (ch = 0U; ch < CH_NUM; ch++)
     {
         for (ce = 0U; ce < CE_NUM; ce++)
@@ -434,7 +434,7 @@ static void ssd_ftl_boot_all(void)
             }
         }
     }
-    completion_table_set_route(g_ftl_ptrs);
+    ct_set_route(g_ftl_ptrs);
 
     /* ①.5 共享 L2P cache：每个 (ch,ce) 一份，**设备级只初始化一次**。
      * 必须早于逐实例 boot（ftl_boot_recovery 的 full metadata rebuild / journal 回放就会访问 cache）；
@@ -443,7 +443,7 @@ static void ssd_ftl_boot_all(void)
     {
         for (ce = 0U; ce < CE_NUM; ce++)
         {
-            l2p_cache_init(&g_l2p_cache[ch][ce], ch, ce, ssd_l2p_owner_of_region, NULL);
+            l2p_init(&g_l2p_cache[ch][ce], ch, ce, ssd_l2p_owner_of_region, NULL);
         }
     }
 
@@ -466,7 +466,7 @@ static void ssd_ftl_boot_all(void)
     {
         /* 实例未必 init 完成 ⇒ 撤销路由，恢复「路由未设」语义（此时主循环退回
          * fc_service，无人 drain 完成表，派发不会发生）。 */
-        completion_table_set_route(NULL);
+        ct_set_route(NULL);
         LOGE("[FTL ] boot failed, fallback to fc_service\r\n");
         return;
     }
@@ -477,12 +477,12 @@ static void ssd_ftl_boot_all(void)
      * （H14 判据 9 的同类：静默错路由比停机更贵）。 */
     for (DWORD dim = 0U; dim < FTL_DIM_TOTAL; dim++)
     {
-        const struct ftl_context *owner = completion_table_route_region(dim);
+        const struct ftl_context *owner = ct_get_route_region(dim);
 
         if ((owner == NULL) || (ftl_topo_dim(owner->topo) != dim))
         {
             LOGE("[FTL ] route/dim mismatch dim=%lu\r\n", dim);
-            completion_table_set_route(NULL);
+            ct_set_route(NULL);
             return;
         }
     }

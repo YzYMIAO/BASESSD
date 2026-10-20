@@ -34,13 +34,13 @@ static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_sta
  * 未列出的槽恒为 NULL，派发时判为孤儿（release + LOGE）。
  *
  *   · FTL_OP_SYNC_WAIT：所有 ftl_sync_* 经 ftl_sync_submit_wait 登记 ctx 后走这里；
- *   · FTL_OP_HOST_IO  ：host 数据读写子操作（ctx 不用，服务函数自己 pending_lookup）；
+ *   · FTL_OP_HOST_IO  ：host 数据读写子操作（ctx 不用，服务函数自己 pend_find）；
  *   · FTL_OP_JOURNAL  ：Journal 刷页 job（ctx = ftl->journal）；
  *   · FTL_OP_READ_RECOVERY：Read Recovery job（ctx = &ftl->read_recovery_handle）；
- *   · FTL_OP_GC / FTL_OP_WL：搬移 job（ctx = ftl->migrate_handle）——**同一台引擎**，
+ *   · FTL_OP_GC / FTL_OP_WL：搬移 job（ctx = ftl->mig_handle）——**同一台引擎**，
  *     tag 分开只为日志/调试可辨（GC/WL 回收 vs 慢死预测退役）；
  *   · FTL_OP_L2P      ：L2P region 加载 / 写回（ctx = 该 cache line）；
- *   · FTL_OP_CHECKPOINT：Checkpoint job（ctx = ftl->checkpoint_handle）；
+ *   · FTL_OP_CHECKPOINT：Checkpoint job（ctx = ftl->cp_handle）；
  *   · FTL_OP_BBT      ：元数据表持久化 job（ctx = &ftl->alloc）；
  *   · FTL_OP_METADATA ：L2P 日志块整理 job（ctx = ftl->metadata_dir->handle）。 */
 static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
@@ -67,23 +67,23 @@ ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
 
     /* ② 登记必须**早于**提交（见头文件）。
      *    ctx == NULL（host I/O）：主动清表项——cmd_id 是池下标、会复用，主动清是廉价保险。
-     *    ctx != NULL：由 completion_table_add 保证同一 id 不出现第二条表项（见该函数）。 */
+     *    ctx != NULL：由 ct_add 保证同一 id 不出现第二条表项（见该函数）。 */
     if (ctx != NULL)
     {
-        if (completion_table_add(cmd_id, ctx) != FTL_OK)
+        if (ct_add(cmd_id, ctx) != FTL_OK)
         {
             return FTL_ERROR; /* 旁表满（编程/容量错误，非背压） */
         }
     }
     else
     {
-        completion_table_remove(cmd_id);
+        ct_remove(cmd_id);
     }
 
     /* ③ 提交。失败 ⇒ 回滚登记（瞬态背压，调用者下轮重试）。 */
     if (fc_submit(cmd) != FC_STATUS_OK)
     {
-        completion_table_remove(cmd_id);
+        ct_remove(cmd_id);
         return FTL_AGAIN;
     }
 
@@ -92,10 +92,10 @@ ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
 
 /* ── 3. 派发 ── */
 
-/* 派发深度（见 ftl_op_in_dispatch）。单线程顺序主循环 ⇒ 普通变量即可，无需原子。 */
+/* 派发深度（见 ftl_op_is_in_dispatch）。单线程顺序主循环 ⇒ 普通变量即可，无需原子。 */
 static BYTE g_dispatch_depth = 0U;
 
-bool ftl_op_in_dispatch(void)
+bool ftl_op_is_in_dispatch(void)
 {
     return (g_dispatch_depth != 0U);
 }
@@ -113,26 +113,26 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
         /* 孤儿完成：tag 越界（≥ FTL_OP_COUNT）或 FTL_OP_NONE。
          * 不清旁表则可能泄漏一个槽位，故一并 remove（幂等）。 */
         LOGE("[FTL] orphan completion cmd=%u op=%u status=0x%02x\r\n", (unsigned)completion->command_id, (unsigned)op, completion->status);
-        completion_table_remove(completion->command_id);
+        ct_remove(completion->command_id);
         (void)fc_command_release(cmd);
         return;
     }
 
-    /* 先摘链再回调（同 completion_table_drain 的既有约定）——服务函数内部可能
+    /* 先摘链再回调（同 ct_drain 的既有约定）——服务函数内部可能
      * 重入登记/释放表项，先摘可避免它在自己的回调里踩到本项。 */
-    void *ctx = completion_table_take(completion->command_id);
+    void *ctx = ct_take(completion->command_id);
 
     /* 实例归属按**命令自身**的 ch/ce/lun 解析（不是"谁在 drain"）：单线程顺序主循环下
      * "实例 A 的 drain 遇到实例 B 的 completion"是必然事件。
      * 不变量：路由表由 main.c 在**逐实例 boot 之前**设好（见 ssd_ftl_boot_all ①：
-     * 先 completion_table_init 清一次、再 set_route），因为 boot 期 full metadata rebuild 就会经
-     * l2p_cache_read_sync 抽完成表。故此处解析出 NULL 只可能是编程错误，
+     * 先 ct_init 清一次、再 set_route），因为 boot 期 full metadata rebuild 就会经
+     * l2p_read_sync 抽完成表。故此处解析出 NULL 只可能是编程错误，
      * 不再是"开机早期"的正常状态。 */
-    struct ftl_context *ftl = completion_table_route(cmd->config.ch,
-                                                     cmd->config.ce,
-                                                     cmd->config.lun);
+    struct ftl_context *ftl = ct_get_route(cmd->config.ch,
+                                           cmd->config.ce,
+                                           cmd->config.lun);
 
-    /* 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_in_dispatch() 据此判断
+    /* 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_is_in_dispatch() 据此判断
      * "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。 */
     g_dispatch_depth++;
     fn(ftl, completion, ctx);
@@ -161,5 +161,5 @@ static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_sta
     ftl_sync_waiter_t *waiter = (ftl_sync_waiter_t *)ctx;
 
     waiter->completion = *completion;
-    waiter->done       = 1U;
+    waiter->done       = true;
 }

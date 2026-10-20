@@ -373,7 +373,7 @@ static int uart_cli_tr(int argc, char *argv[])
  * 各组源数据取自 g_wp_buf 的不相交切片，组 i 填字节 0xA0+i（错位时回读会串段）。
  *
  * 判据：`info` 的 total_writes 相对本次只 +1（对比逐组编程的 +k）——**主判据**；
- *       wbuf_handle(FLUSH) 的 `[FTL] wbuf flush` 行是辅助证据，且是 LOGD ⇒ **仅 debug 档可见**。
+ *       wb_handle(FLUSH) 的 `[FTL] wbuf flush` 行是辅助证据，且是 LOGD ⇒ **仅 debug 档可见**。
  *       随后 `rd <lba> <k*n>` 回读，第 (i*n+j) 段字节应为 0xA0+i。
  */
 static int uart_cli_wp(int argc, char *argv[])
@@ -537,13 +537,13 @@ static int uart_cli_info(int argc, char *argv[])
                            (unsigned)ce,
                            (unsigned)lun,
                            (unsigned)ftl->alloc.free_count,
-                           (unsigned)allocator_op_count(&ftl->alloc, 0U),
-                           (unsigned)allocator_op_count(&ftl->alloc, 1U),
-                           (unsigned)allocator_spare_count(&ftl->alloc, 0U),
-                           (unsigned)allocator_spare_count(&ftl->alloc, 1U),
+                           (unsigned)alc_get_op_count(&ftl->alloc, 0U),
+                           (unsigned)alc_get_op_count(&ftl->alloc, 1U),
+                           (unsigned)alc_get_spare_count(&ftl->alloc, 0U),
+                           (unsigned)alc_get_spare_count(&ftl->alloc, 1U),
                            (unsigned)ftl->alloc.bad_count,
                            (unsigned)ftl->alloc.closed_sb_count,
-                           (unsigned)metadata_dir_live_block_count(ftl->metadata_dir),
+                           (unsigned)md_get_live_block_count(ftl->metadata_dir),
                            (unsigned)ftl->cache->thrashing,
                            (unsigned)ftl->cache->miss_pct);
 
@@ -617,7 +617,7 @@ static int uart_cli_map(int argc, char *argv[])
     /* ⚠ CLI 上下文（不在完成派发里）：region 未驻留时自旋泵等加载完成。
      * 自旋失败（超预算）时 pba 保持 INVALID，输出按"未映射"处理——CLI 只读不写，
      * 误报一次"未映射"无副作用。 */
-    if (l2p_cache_read_sync(ftl->cache, (DWORD)lba, &pba) != FTL_OK)
+    if (l2p_read_sync(ftl->cache, (DWORD)lba, &pba) != FTL_OK)
     {
         pba = NAND_PBA_INVALID;
     }
@@ -786,7 +786,7 @@ static int uart_cli_bbt(int argc, char *argv[])
 
                         memset(&trigger, 0, sizeof(trigger));
                         trigger.kind = WBUF_TRIGGER_RESET;
-                        (void)wbuf_handle(ftl->wbuf, &trigger, NULL, &status);
+                        (void)wb_handle(ftl->wbuf, &trigger, NULL, &status);
                     }
                 }
                 bbt_print_bad_map(&ftl->alloc, do_erase);
@@ -845,7 +845,7 @@ static int uart_cli_format(int argc, char *argv[])
 
                     memset(&trigger, 0, sizeof(trigger));
                     trigger.kind = WBUF_TRIGGER_RESET;
-                    (void)wbuf_handle(ftl->wbuf, &trigger, NULL, &status);
+                    (void)wb_handle(ftl->wbuf, &trigger, NULL, &status);
                 }
 
                 if (ftl_media_format(ftl) != FTL_OK)

@@ -5,12 +5,12 @@
  * Wear Leveling — 动态 + 静态磨损均衡
  *
  * 动态磨损均衡（Dynamic WL）：
- *   allocator_select_plane_block_from_pool() 每次为**每个 plane 各自**从 Free Pool 选该 plane
+ *   alc_select_plane_block_from_pool() 每次为**每个 plane 各自**从 Free Pool 选该 plane
  *   擦除次数最少的 Block（Policy B：各 plane 独立分配，不要求 block 同号），
  *   确保新分配的 Block 磨损均匀。已在 allocator 中实现。
  *
  * 静态磨损均衡（Static WL）：
- *   `migrate_handle 的 WL 求值` 预算任务，按 WL_EVAL_INTERVAL_MS 节拍求值。
+ *   `mig_handle 的 WL 求值` 预算任务，按 WL_EVAL_INTERVAL_MS 节拍求值。
  *   主动搬移低擦除 Block 中的冷数据到 Cold Super Block，
  *   使这些 Block 被擦除一次，提升擦除次数。
  *
@@ -84,15 +84,15 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim);
 
 /*
  * 磨损统计访问器 —— 口径（好块 / 坏块排除）由 allocator 定义，这里只做本模块的查询入口。
- * 热路径（wl_should_trigger）直接调 allocator_erase_stats 一次取全，不逐个调用下面的 API。
+ * 热路径（wl_should_trigger）直接调 alc_get_erase_stats 一次取全，不逐个调用下面的 API。
  */
 
 /*
- * wl_min_erase - 获取最小擦除次数（无好块返回 0）
+ * wl_get_min_erase - 获取最小擦除次数（无好块返回 0）
  *
  * 唯一保留的统计访问器：wl_select_victim 用它确定低擦除区。
- * 热路径 wl_should_trigger 直接调 allocator_erase_stats 一次取全。
+ * 热路径 wl_should_trigger 直接调 alc_get_erase_stats 一次取全。
  */
-DWORD wl_min_erase(const ftl_allocator_t *alloc);
+DWORD wl_get_min_erase(const ftl_allocator_t *alloc);
 
 #endif /* FTL_WEAR_LEVELING_H */

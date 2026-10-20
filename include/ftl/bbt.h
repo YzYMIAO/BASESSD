@@ -79,7 +79,7 @@ void bbt_init(ftl_allocator_t *alloc);
  *
  * 只读。用于两处判空：
  *   · `bbt_init`：无有效 BBT 时，只有空片才允许出厂扫描；
- *   · `checkpoint_probe_media_status`：CP 池没有可定位 record 时，区分“空片”与
+ *   · `cp_probe_media_status`：CP 池没有可定位 record 时，区分“空片”与
  *     “有元数据但 CP 缺失/损坏”。调用者应先用 raw 读确认命令通路正常，
  *     否则“总线读死”也会返回 false。
  *
@@ -239,12 +239,12 @@ typedef struct
 {
     ftl_module_status_t base;
 
-    BYTE  phase;     /* BBT_JOB_IDLE / ERASE / WRITE（观测；外部不要据此驱动） */
-    bool  dirty;     /* 是否有未落盘变更 */
-    DWORD dirty_gen; /* dirty 代际（写飞行期间的新变更） */
-    DWORD sequence;  /* 本池单调序号 */
-    WORD  write_idx; /* 池内下一个待写槽 */
-    WORD  bad_count; /* 当前坏块数 */
+    bbt_handle_phase_t phase;     /* 观测；外部不要据此驱动 */
+    bool               dirty;     /* 是否有未落盘变更 */
+    DWORD              dirty_gen; /* dirty 代际（写飞行期间的新变更） */
+    DWORD              sequence;  /* 本池单调序号 */
+    WORD               write_idx; /* 池内下一个待写槽 */
+    WORD               bad_count; /* 当前坏块数 */
 } bbt_status_t;
 
 /*
@@ -274,7 +274,7 @@ void bbt_handle(ftl_allocator_t *alloc, const ftl_bg_info_t *info, bbt_status_t 
 /*
  * bbt_load - 从 NAND BBT 池加载 BBT
  *
- * 池内轮转扫描（metadata_ring_locate），选 magic 正确且 sequence 最大者。
+ * 池内轮转扫描（md_ring_locate），选 magic 正确且 sequence 最大者。
  * 命中时同时恢复本实例的 sequence 计数与写游标（alloc->bbt）。
  *
  * @param alloc       Allocator 上下文（池路由取其 ch/ce/lun；游标/序号写回 alloc->bbt）；

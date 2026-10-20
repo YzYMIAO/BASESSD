@@ -243,7 +243,7 @@ static void ftl_cmd_bind_pair_topo(fc_command_t *cmd, DWORD base_pba)
 ftl_status_t ftl_cmd_setup_ppa_pair_cw(fc_command_t *cmd, const DWORD pba[PLANE_NUM], DWORD cw_bitmap)
 {
     /* cmd 来自调用者的 fc_command_alloc()（已判空）、pba 是调用者的局部数组
-     * （见 ftl_issue_subop / wbuf_handle(FLUSH)）——两者给 NULL 都是调用者 bug ⇒ ASSERT
+     * （见 ftl_issue_subop / wb_handle(FLUSH)）——两者给 NULL 都是调用者 bug ⇒ ASSERT
      * （判据 2：层内模块头 = 前置条件，不返回码）。 */
 
     /* 基址 PBA 必须取自**被覆盖的 plane**，不是无条件的 pba[0]：CW 级子操作常只覆盖
@@ -497,7 +497,7 @@ ftl_status_t ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length)
  *   返回：FTL_OK 完成；FTL_ERROR 提交失败 / 超时 / 旁表满。
  *   实现要点：① ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) —— 打 tag、登记栈上
  *             waiter、提交（登记早于提交）；② 自旋 fc_service() +
- *             completion_table_drain() 直到 waiter.done；③ 超时摘链返回 FTL_ERROR。
+ *             ct_drain() 直到 waiter.done；③ 超时摘链返回 FTL_ERROR。
  *             ⚠ 非目标 completion 由 drain 按各自的 op_tag 派发，本函数无需处理。
  *             ⚠ **不 release**：调用者要在返回后读 cmd 数据才 release（见 ftl_op.h）。
  * -------------------------------------------------------------------- */
@@ -507,16 +507,16 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     DWORD max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
 
     /* ⚠ **服务函数内不得同步等待**（贯穿机制 2）：在完成派发里再开一个完成泵
-     * （本函数自旋 fc_service + completion_table_drain）= 嵌套泵，正是本次异步化要
+     * （本函数自旋 fc_service + ct_drain）= 嵌套泵，正是本次异步化要
      * 消灭的形态——调用者的栈帧被钉住，且泵里再跑泵使重入面不可枚举。
      * 目标终态：本函数只被开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI 调用
      * （那些路径在 superloop 之前，没有别人 drain CQ，必须同步）。
      * 新增调用点若触发本断言，说明该功能尚未 job 化——改用 ftl_async_* + ftl_op_submit。 */
-    ASSERT(!ftl_op_in_dispatch());
+    ASSERT(!ftl_op_is_in_dispatch());
 
     ftl_sync_waiter_t waiter;
     waiter.cmd_id = ftl_cmd_id(cmd);
-    waiter.done   = 0U;
+    waiter.done   = false;
 
     if (ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) != FTL_OK)
     {
@@ -526,9 +526,9 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     for (;;)
     {
         (void)fc_service();
-        completion_table_drain();
+        ct_drain();
 
-        if (waiter.done != 0U)
+        if (waiter.done)
         {
             break;
         }
@@ -537,7 +537,7 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
         elapsed++;
         if (elapsed > max_wait)
         {
-            completion_table_remove(waiter.cmd_id);
+            ct_remove(waiter.cmd_id);
             return FTL_ERROR;
         }
     }

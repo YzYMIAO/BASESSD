@@ -319,8 +319,8 @@ ftl_status_t ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length);
  *
  * 内部就是 ftl_op 机制的一个客户端：
  *   ① ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) —— 打 tag、登记栈上 waiter、提交；
- *   ② 自旋 fc_service() + completion_table_drain() 直到 waiter.done；
- *   ③ 超时则 completion_table_remove 后返回 FTL_ERROR。
+ *   ② 自旋 fc_service() + ct_drain() 直到 waiter.done；
+ *   ③ 超时则 ct_remove 后返回 FTL_ERROR。
  *
  * ⚠ **只在结构性必须顺序执行的路径上用**：开机初始化 / 全片格式化 / 出厂坏块扫描 /
  *   CLI。主循环里（ftl_service_pump 已存在）的路径一律异步化——在这些路径上同步等待
@@ -500,7 +500,7 @@ ftl_status_t ftl_async_read_page(fc_command_t **out_cmd, DWORD pba, const ftl_pa
  * 无 plane/page 语义（同 fc.c 中 OP_SET_FEATURES 分支的注释）。
  *
  * ⚠ ch/ce/lun 必须由调用者显式给：它们不是地址，而是**完成派发的实例路由键**
- *   （ftl_op_dispatch 按命令自身 ch/ce/lun 经 completion_table_route 解析归属实例）。
+ *   （ftl_op_dispatch 按命令自身 ch/ce/lun 经 ct_get_route 解析归属实例）。
  *   没有 PBA 可推 ⇒ 只能显式传。留 0 在多实例下会把本命令的完成派给实例 [0][0][0]。
  *
  * @return FTL_OK 命令已备好（须提交或 release）；FTL_AGAIN 命令池空。

@@ -322,6 +322,14 @@
 
 ---
 
+## 2Q. FTL 类型 / 命名 / 对齐收口（2026-10-21，未上板）
+
+| ID | 状态 | 判定 / 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
+| RISK-ARCH-12 | 已改未上板（2026-10-21） | ① `config.mk` 显式加 `-fshort-enums`（本工具链默认已是 1 字节，属钉住默认值）；② 上下文/句柄里的布尔语义字段改 `bool`、多状态字段改具名枚举（`ftl_block_t.state`、`cp_phase_t`、`metadata_handle_phase_t`、`rr_stage_t`、`bg_level_t` 等）；③ 公共 API 统一「模块缩写 + 动作」前缀（`alc_` / `jrn_` / `cp_` / `md_` / `mig_` / `rr_` / `wb_` / `l2p_` / `pend_` / `ct_`），并补 `get_`/`is_`/`has_`/`find_`；④ 删除 6 个 static 纯转发与 6 个零调用公共 API；⑤ `ftl_pending_req_t` 36→32 B、`ftl_io_group_t` 56→48 B（`ftl_context_t` 3,360→2,976 B）。 ⚠ 批量改名漏改会编译报错可发现；**语义改错不会**，必须 review + 上板。 ⚠ 若工具链默认枚举变 4 字节，`ftl_block_t` 会 20→24 B（+16 KB，N=2 超 SRAM12） | 静态断言钉住：`sizeof(ftl_block_state_t)==1`、`sizeof(ftl_block_t)==20`、`sizeof(ftl_pending_req_t)==32`、`sizeof(ftl_io_group_t)==48`；`make -B all/release` 零新告警 | 新增枚举字段 / 新增公共 API 时按同一约定；换工具链时先看 `-fshort-enums` 与四条静态断言。**上板判据**：启动/恢复、`info`、`wr/rd ... c`、GC、重启、`map` | `config.mk`（`FIRMWARE_CFLAGS`）；`include/ftl/bst.h`（枚举断言）；`include/ftl/pending.h`（重排 + 断言）；各 `*_handle_t` 头；`docs/design/ftl_design.md §8` |
+
+---
+
 ## 3. 类型 / 显式强转（H44，提交 `6050703`）
 
 | ID | 状态 | 风险 | 当前缓解 | 重访触发 / 下一步 | 证据 |

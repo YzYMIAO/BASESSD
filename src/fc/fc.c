@@ -1209,7 +1209,7 @@ static fc_status_t fc_build_request_data_planes(const fc_t *controller, const fc
          * 这条不变式此前只在测试夹具里守着（fc_test_common.c 的 test_cmd_build），生产侧
          * 无守卫——ftl_cmd_resolve_cw_bitmap 只查**越段**，部分位图对整段而言是"合法"的。
          * 生产路径不可达：FTL 的多 plane 入口自己保证位图覆盖段内每一个 plane
-         * （ftl_issue_subop / wbuf_handle(FLUSH) 由 cw_bitmap 构造保证）。踩进来 = 调用者直接调
+         * （ftl_issue_subop / wb_handle(FLUSH) 由 cw_bitmap 构造保证）。踩进来 = 调用者直接调
          * ftl_cmd_configure_descriptors(cmd, 部分位图) 配 multi_plane > 0。
          * 想只访问某个 plane ⇒ 用**单 plane op**（multi_plane = 0），别用多 plane op 配窄位图。 */
         ASSERT((planes_with_desc & all_planes) == all_planes);

@@ -19,7 +19,7 @@ ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lb
 
 /* ── 子请求完成回调 ──
  *
- * 由组的完成通知（pending_group_maybe_complete）调用，一次 host run 恰好一次。
+ * 由组的完成通知（pend_group_maybe_complete）调用，一次 host run 恰好一次。
  * 递减 sub_remaining 计数器，归零时置父请求 complete_flag。
  */
 static void on_sub_complete(void *ctx)

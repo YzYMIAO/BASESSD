@@ -6,7 +6,7 @@
  *
  * 把「命令提交」与「命令完成」解耦：
  *   提交侧  ftl_op_submit(cmd, op, ctx) —— 只保证**已提交**，不等待；
- *   完成侧  completion_table_drain() → ftl_op_dispatch() —— 按命令携带的 op tag
+ *   完成侧  ct_drain() → ftl_op_dispatch() —— 按命令携带的 op tag
  *           查 g_op_callbacks[] 执行对应服务函数。
  *
  * ── op tag 的语义：**完成服务函数选择器**，不是"这是哪个功能" ──
@@ -31,10 +31,10 @@
  * ── 实例归属 ──
  *
  * 服务函数签名里的 ftl 由 ftl_op_dispatch 从**命令自身**的 ch/ce/lun 经
- * completion_table_route 解析后传入（不是"谁在 drain"）。
+ * ct_get_route 解析后传入（不是"谁在 drain"）。
  *
  * 路由表在 main.c 的**逐实例 boot 之前**设好（ssd_ftl_boot_all ①：先
- * completion_table_init 清一次、再 set_route；boot 期 full metadata rebuild 就会抽完成表），
+ * ct_init 清一次、再 set_route；boot 期 full metadata rebuild 就会抽完成表），
  * 故服务函数收到的 ftl **不应**为 NULL——收到 NULL 是编程错误，不是"开机早期"
  * 的正常状态（FTL_OP_SYNC_WAIT 的服务函数不用 ftl，是唯一例外）。
  */
@@ -88,7 +88,7 @@ typedef void (*ftl_op_callback_fn_t)(struct ftl_context        *ftl,
 ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx);
 
 /*
- * ftl_op_dispatch - 完成派发（completion_table_drain 的唯一出口）。
+ * ftl_op_dispatch - 完成派发（ct_drain 的唯一出口）。
  *
  * 按 completion->op_tag 查 g_op_callbacks[]；未知 tag ⇒ 孤儿，release + LOGE。
  * ctx 从 completion_table 取出（先摘链再回调，容许服务函数重入登记）。
@@ -96,24 +96,24 @@ ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx);
 void ftl_op_dispatch(const fc_command_status_t *completion);
 
 /*
- * ftl_op_in_dispatch - 当前是否在完成服务函数（或其嵌套调用）里。
+ * ftl_op_is_in_dispatch - 当前是否在完成服务函数（或其嵌套调用）里。
  *
  * 用途：给"服务函数内不得同步等待"这条约定一个**可判定的**依据。服务函数里若再
- * 跑一遍完成泵（ftl_sync_submit_wait / journal_flush_page 的 drain），就是嵌套泵
+ * 跑一遍完成泵（ftl_sync_submit_wait / jrn_flush_page 的 drain），就是嵌套泵
  * ——那正是本次解耦要消除的东西。深度计数（不是布尔）：嵌套 drain 会再进一层。
  *
- * 已落地的一处用法：journal_append 页满时若异步刷页起不来，**不在**派发上下文里
+ * 已落地的一处用法：jrn_append 页满时若异步刷页起不来，**不在**派发上下文里
  * 同步回退（会嵌套），改为丢弃该条目 + LOGE 并返回 false（见 journal.c）。
  * 迁移侧必须把 false 当失败中止（victim 不擦）；host 写路径当前只能记日志继续。
  *
  * @return true = 在派发内；false = 不在。
  */
-bool ftl_op_in_dispatch(void);
+bool ftl_op_is_in_dispatch(void);
 
 /*
  * ftl_host_io_callback - host 读写子操作的完成服务函数（定义在 ftl.c）。
  *
- * 由 g_op_callbacks[FTL_OP_HOST_IO] 引用；ctx 不用（服务函数自己 pending_lookup）。
+ * 由 g_op_callbacks[FTL_OP_HOST_IO] 引用；ctx 不用（服务函数自己 pend_find）。
  */
 void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
@@ -139,7 +139,7 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
  * ftl_migrate_callback - 搬移 job（GC / 静态 WL / 慢死预测）的完成服务函数（定义在 migrate.c）。
  *
  * 由 g_op_callbacks[FTL_OP_GC] 与 [FTL_OP_WL] **共同**引用（同一台引擎，靠 job.kind
- * 区分 victim 来源、job.post 区分收尾）；ctx = `migrate_handle_t *`（= ftl->migrate_handle）。
+ * 区分 victim 来源、job.post 区分收尾）；ctx = `migrate_handle_t *`（= ftl->mig_handle）。
  * 服务函数按 job.phase 推进（读完成 ⇒ 解 META + 反查 L2P；写完成 ⇒ 改 L2P/Journal +
  * 迁移有效计数；擦完成 ⇒ 归还/退役/标坏），每条命令自己 fc_command_release。
  */
@@ -152,7 +152,7 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
  * 服务函数按 line->state 收尾：
  *   · LOADING  ⇒ 成功把整页 region 拷进 line->entries（**须早于 release**：读的数据在
  *                desc 链上），置 CLEAN；失败同样置 CLEAN（entries 保持全 INVALID = 未映射）。
- *   · FLUSHING ⇒ 成功 metadata_dir_commit_region 登记新位置 + CLEAN + 清 region 脏位；
+ *   · FLUSHING ⇒ 成功 md_commit_region 登记新位置 + CLEAN + 清 region 脏位；
  *                失败置回 DIRTY 保留下轮重试。
  * 每条命令自己 fc_command_release。
  */
@@ -161,11 +161,11 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
 /*
  * ftl_checkpoint_callback - Checkpoint job 的完成服务函数（定义在 checkpoint.c）。
  *
- * 由 g_op_callbacks[FTL_OP_CHECKPOINT] 引用；ctx = `checkpoint_handle_t *`（= ftl->checkpoint_handle）。
+ * 由 g_op_callbacks[FTL_OP_CHECKPOINT] 引用；ctx = `checkpoint_handle_t *`（= ftl->cp_handle）。
  * 服务函数按 job.phase 记完成结果、推进 phase、release 命令。
- * ⚠ 与 ftl_migrate_callback 的差别：本函数**不**推进状态机（不调 checkpoint_handle）——
+ * ⚠ 与 ftl_migrate_callback 的差别：本函数**不**推进状态机（不调 cp_handle）——
  *   CP 的阶段里有同步原语（游标未建立时要读池定位），在完成泵里跑就是嵌套泵。
- *   推进交给下一轮 ftl_service 的 checkpoint_handle。
+ *   推进交给下一轮 ftl_service 的 cp_handle。
  */
 void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
@@ -186,14 +186,14 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
  * 由 g_op_callbacks[FTL_OP_METADATA] 引用；ctx = `metadata_dir_cache_t *`
  * （模块上下文；服务函数内部取 `&dir->handle`）。
  * 服务函数按 job.phase 记完成结果、改 phase、release 命令：
- *   · RECLAIM     ⇒ 成功清待回收位 + allocator_free_block；失败保留位，下轮重试；
+ *   · RECLAIM     ⇒ 成功清待回收位 + alc_free_block；失败保留位，下轮重试；
  *   · CP_READ     ⇒ 成功 ftl_cmd_read_data 拷进 job.cp_buf（**须早于 release**）→ CP_WRITE；
- *   · CP_WRITE    ⇒ 成功 metadata_dir_commit_region 登记 → CP_READ；失败中止（victim 不擦）；
+ *   · CP_WRITE    ⇒ 成功 md_commit_region 登记 → CP_READ；失败中止（victim 不擦）；
  *   · CP_ANCHOR_* ⇒ 逐页写 + commit（无论成败都推进游标）；
  *   · CP_RECLAIM  ⇒ 擦完归还 victim → DONE。
- * ⚠ 与 ftl_migrate_callback 的差别：本函数**不**推进状态机（不调 metadata_handle）——
+ * ⚠ 与 ftl_migrate_callback 的差别：本函数**不**推进状态机（不调 md_handle）——
  *   整理 job 的 CP_ANCHOR_PREP 里有同步原语（游标未建立时要读池定位），在完成泵里跑
- *   就是嵌套泵。推进交给下一轮 ftl_service 的 metadata_handle。
+ *   就是嵌套泵。推进交给下一轮 ftl_service 的 md_handle。
  */
 void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx);
 
@@ -204,7 +204,7 @@ void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *c
 typedef struct
 {
     WORD                cmd_id;     /* 等待的 command_id */
-    BYTE                done;       /* 服务函数置 1 */
+    bool                done;       /* 服务函数置 true */
     fc_command_status_t completion; /* 服务函数保存的完整 completion 信息 */
 } ftl_sync_waiter_t;
 

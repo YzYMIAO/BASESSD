@@ -54,17 +54,17 @@ typedef enum
 
 /* ── ECC 健康记录（per-Block，自 read_recovery.h 迁入）──
  * 消费方：ftl_host_io_callback 读成功后 rr_record_ecc；
- *         rr_check_predictive / rr_get_health 查询健康度。
+ *         rr_should_predict / rr_get_health 查询健康度。
  *
  * 只保留「上一次 ECC bit 数」而非 N 深度环形缓冲：趋势判定（连续上升）
  * 只需与上一次比较，8 格环形缓冲实际供给的是最老那格的值（本次一并修复）。
  * 16B → 3B，4096 块省 52KB。 */
 typedef struct
 {
-    BYTE last_ecc;     /* 最近一次读的 ECC bit 数 */
-    BYTE rising_count; /* 连续上升计数（不上升即清零） */
-    BYTE health;       /* rr_block_health_t */
-} rr_ecc_track_t;      /* 3B */
+    BYTE              last_ecc;     /* 最近一次读的 ECC bit 数 */
+    BYTE              rising_count; /* 连续上升计数（不上升即清零） */
+    rr_block_health_t health;       /* 慢死趋势 */
+} rr_ecc_track_t;                   /* 3B */
 
 /* ── ftl_block_t 状态机（互斥态，枚举而非位图）──
  * 块**位置**同一时刻只能有一个，故用枚举而非位图：
@@ -89,6 +89,10 @@ typedef enum
 /* 状态存于 BYTE ⇒ 值域必须装得下（枚举成员一多就会静默截断） */
 _Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)UINT8_MAX,
                "ftl_block_state_t 超出 BYTE 值域");
+
+/* 枚举必须是 1 字节（-fshort-enums，见 config.mk）：否则 ftl_block_t 会从 20B 涨到 24B，
+ * 4096 个块多占 16KB，多 LUN 影子构建会超 SRAM12。 */
+_Static_assert(sizeof(ftl_block_state_t) == 1, "枚举不是 1 字节：检查 -fshort-enums");
 
 /* ── Block State Table 每行（per-block 条目）──
  * 全字段常驻 SRAM（纯块级聚合，**无**位图表；有效性现查 META+L2P，见文件头）。
@@ -129,10 +133,10 @@ typedef struct
     WORD  read_count;  /* 2B  @8   read disturb 计数 */
 
     /* ── 有效页聚合 + 状态 ── */
-    WORD valid_count; /* 2B  @10  双 Plane 合计有效 **CW** 0..512（逐 CW 真值，现查 META+L2P） */
-    BYTE state;       /* 1B  @12  状态机（ftl_block_state_t，互斥） */
-    BYTE temp;        /* 1B  @13  温度流（0=HOT / 1=COLD，同 FTL_TEMP_* 值域；正交于状态） */
-    WORD sb_id;       /* 2B  @14  block→SB 反向索引（UINT16_MAX=无） */
+    WORD              valid_count; /* 2B  @10  双 Plane 合计有效 **CW** 0..512（逐 CW 真值，现查 META+L2P） */
+    ftl_block_state_t state;       /* 1B @12 状态机（互斥） */
+    BYTE              temp;        /* 1B  @13  温度流（0=HOT / 1=COLD，同 FTL_TEMP_* 值域；正交于状态） */
+    WORD              sb_id;       /* 2B  @14  block→SB 反向索引（UINT16_MAX=无） */
 
     /* ── ECC 健康 ── */
     rr_ecc_track_t rr; /* 3B  @16  ECC 健康 */

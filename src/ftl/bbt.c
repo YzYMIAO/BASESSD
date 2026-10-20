@@ -91,7 +91,7 @@ typedef struct
 static void bbt_ctx_init(const ftl_allocator_t *alloc, bbt_probe_ctx_t *ctx)
 {
     bbt_ring_init(&ctx->ring);
-    ctx->topo = allocator_topo(alloc);
+    ctx->topo = alc_topo(alloc);
 }
 
 /* BBT record 探针（见 metadata_ring_probe_fn）。full 与廉价探针等价（record 只有一页）。 */
@@ -102,10 +102,10 @@ static ftl_status_t bbt_record_probe(void *ctx, WORD record_idx, bool full, DWOR
     bbt_probe_ctx_t *c = (bbt_probe_ctx_t *)ctx;
 
     /* 镜像池：任一 plane 的副本有效即可。 */
-    for (BYTE pi = 0U; pi < metadata_ring_plane_count(c->ring.plane_mask); pi++)
+    for (BYTE pi = 0U; pi < md_ring_plane_count(c->ring.plane_mask); pi++)
     {
-        const BYTE plane = metadata_ring_plane_at(c->ring.plane_mask, pi);
-        DWORD      addr  = metadata_ring_addr_plane(&c->ring, &c->topo, record_idx, 0U, plane);
+        const BYTE plane = md_ring_plane_at(c->ring.plane_mask, pi);
+        DWORD      addr  = md_ring_addr_plane(&c->ring, &c->topo, record_idx, 0U, plane);
 
         bbt_header_t hdr;
         if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != 0)
@@ -243,7 +243,7 @@ void bbt_init(ftl_allocator_t *alloc)
     alloc->bbt.dirty              = 0U;
     alloc->bbt.dirty_gen          = 0U;
     alloc->bbt.format_in_progress = false;
-    /* 清异步 job（allocator_init 已零化，此处再钉一次） */
+    /* 清异步 job（alc_init 已零化，此处再钉一次） */
     alloc->bbt.handle.phase       = BBT_JOB_IDLE;
     alloc->bbt.handle.waiting     = 0U;
 
@@ -614,12 +614,12 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, WORD gblock)
         return FTL_OK;
     }
 
-    /* 驱逐出 Free Pool —— **必须先于置 BAD**：allocator_remove_from_free 校验「在池 ⇒ state == FREE」
+    /* 驱逐出 Free Pool —— **必须先于置 BAD**：alc_remove_from_free 校验「在池 ⇒ state == FREE」
      * （allocator.h 不变量②）。块若在池里，此刻它正是 FREE；先置 BAD 再出池就会命中断言。
      * 不驱逐则留下「在池却不是 FREE」的反向不一致（运行时标坏：擦除失败 / 预测性标坏）。
-     * 不在池内 ⇒ no-op（allocator_remove_from_free 的文档化契约，判据 4）。
+     * 不在池内 ⇒ no-op（alc_remove_from_free 的文档化契约，判据 4）。
      * 注：出厂扫描 / BBT 加载路径跑在建池之前（池还是空的）⇒ 恒 no-op，无需特判。 */
-    allocator_remove_from_free(alloc, gblock);
+    alc_remove_from_free(alloc, gblock);
 
     /* BST 置 BAD（单数据源，后台 bbt_handle 持久化到 NAND）。BAD 是状态机**终态** ⇒
      * 一行赋值即抹掉 OPEN/CLOSED/FREE/LOG（原掩码漏位的风险消失）；温度字段不动（与状态正交）。
@@ -684,7 +684,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
     {
         WORD newest = UINT16_MAX;
 
-        if (metadata_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
+        if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
         {
             return FTL_ERROR;
         }
@@ -699,7 +699,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
     /* 追加写：池内下一槽（块满则先擦池内下一块）。
      * 无论成败都推进游标（已写过的槽可能半编程，不可复用）。 */
     DWORD addr;
-    if (metadata_ring_prepare_write(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, &addr) != FTL_OK)
+    if (md_ring_prepare_write(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, &addr) != FTL_OK)
     {
         return FTL_ERROR;
     }
@@ -707,11 +707,11 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
     /* 开机/格式化：同步镜像写到 P0+P1（没有服务泵可等）。 */
     if (ftl_sync_write_page_mirror(addr, &header, sizeof(header), FTL_PAGE_CFG_META()) != 0)
     {
-        alloc->bbt.write_idx = ((alloc->bbt.write_idx + 1U) % metadata_ring_total_records(&ctx.ring));
+        alloc->bbt.write_idx = ((alloc->bbt.write_idx + 1U) % md_ring_total_records(&ctx.ring));
         return FTL_ERROR; /* dirty 保留 ⇒ 下次重试 */
     }
 
-    alloc->bbt.write_idx = ((alloc->bbt.write_idx + 1U) % metadata_ring_total_records(&ctx.ring));
+    alloc->bbt.write_idx = ((alloc->bbt.write_idx + 1U) % md_ring_total_records(&ctx.ring));
 
     alloc->bbt.dirty = 0U;
     return FTL_OK;
@@ -728,7 +728,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
  *   实现要点：record 内容在**提交时**从 BST 重建（不是起步时快照）——换块擦的等待
  *             期间新标坏的块会被一并记进本条 record，是严格的信息超集。
  *             header 是**栈上** 540 B：ftl_async_write_page 在 prepare 时已把它拷进
- *             FC buffer 池（同 journal_freeze 的做法，不需要为异步保留快照缓冲）。
+ *             FC buffer 池（同 jrn_freeze 的做法，不需要为异步保留快照缓冲）。
  *             地址按 write_idx 重算（write_idx 写成功才推进 ⇒ 此刻它仍指向本槽）。
  * -------------------------------------------------------------------- */
 static ftl_status_t bbt_submit_write(ftl_allocator_t *alloc)
@@ -743,7 +743,7 @@ static ftl_status_t bbt_submit_write(ftl_allocator_t *alloc)
      * 完成时不能清 dirty，必须再落一条 record。 */
     alloc->bbt.handle.dirty_gen = alloc->bbt.dirty_gen;
 
-    DWORD addr = metadata_ring_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, 0U);
+    DWORD addr = md_ring_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, 0U);
 
     fc_command_t *cmd;
     if (ftl_async_write_page_mirror(&cmd, addr, &header, sizeof(header), FTL_PAGE_CFG_META()) != FTL_OK)
@@ -815,7 +815,7 @@ static void bbt_status_fill(const ftl_allocator_t *alloc, bbt_status_t *out)
  *     · **单飞行**：① 命令在飞 ⇒ 直接返回；② phase == WRITE 且不在飞 ⇒ 上一步提交
  *       被背压拒，只续提交写（**不重擦**——擦已成功，重擦纯属磨损）；③ 其余非 IDLE
  *       （= ERASE 在飞）⇒ 返回；④ IDLE 才装配新 job。
- *     · 游标未建立时的 `metadata_ring_locate` 是**同步**的（扫池逐页读），但只在
+ *     · 游标未建立时的 `md_ring_locate` 是**同步**的（扫池逐页读），但只在
  *       首次落盘发生一次，且本函数由后台调度调用（不在完成泵内）
  *       ⇒ 不是嵌套泵。job 的其余步骤全部"提交即返回"。
  *     · sequence 在**起步时**自增；续跑路径不会再自增。
@@ -868,7 +868,7 @@ static void bbt_handle_step(ftl_allocator_t *alloc)
     {
         WORD newest = UINT16_MAX;
 
-        if (metadata_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
+        if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
         {
             LOGE("[BBT] pool locate failed — 下轮重试\r\n");
             return;
@@ -880,7 +880,7 @@ static void bbt_handle_step(ftl_allocator_t *alloc)
 
     DWORD addr;
     bool  need_erase = false;
-    if (metadata_ring_prepare_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, &addr, &need_erase) != FTL_OK)
+    if (md_ring_prepare_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, &addr, &need_erase) != FTL_OK)
     {
         LOGE("[BBT] prepare failed idx=%u\r\n", (unsigned)alloc->bbt.write_idx);
         return;
@@ -959,7 +959,7 @@ static void bbt_complete_write(ftl_allocator_t *alloc, fc_command_t *cmd, const 
     bbt_probe_ctx_t rctx;
 
     bbt_ctx_init(alloc, &rctx);
-    alloc->bbt.write_idx = ((alloc->bbt.write_idx + 1U) % metadata_ring_total_records(&rctx.ring));
+    alloc->bbt.write_idx = ((alloc->bbt.write_idx + 1U) % md_ring_total_records(&rctx.ring));
 
     if (fc_cw_status_has_error(completion->status))
     {
@@ -1038,7 +1038,7 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, BYTE *bad_map, DWORD *bad_count, D
     bbt_ctx_init(alloc, &ctx);
 
     WORD newest = UINT16_MAX;
-    if (metadata_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
+    if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
     {
         return FTL_ERROR;
     }
@@ -1055,10 +1055,10 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, BYTE *bad_map, DWORD *bad_count, D
      * 镜像池：逐个 plane 试；sequence 必须等于 locate 选中的 record sequence。 */
     bbt_header_t best;
     bool         found = false;
-    for (BYTE pi = 0U; pi < metadata_ring_plane_count(ctx.ring.plane_mask); pi++)
+    for (BYTE pi = 0U; pi < md_ring_plane_count(ctx.ring.plane_mask); pi++)
     {
-        const BYTE plane = metadata_ring_plane_at(ctx.ring.plane_mask, pi);
-        DWORD      addr  = metadata_ring_addr_plane(&ctx.ring, &ctx.topo, newest, 0U, plane);
+        const BYTE plane = md_ring_plane_at(ctx.ring.plane_mask, pi);
+        DWORD      addr  = md_ring_addr_plane(&ctx.ring, &ctx.topo, newest, 0U, plane);
 
         if (ftl_sync_read_page(addr, &best, sizeof(best), FTL_PAGE_CFG_META()) != 0)
         {
@@ -1095,7 +1095,7 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, BYTE *bad_map, DWORD *bad_count, D
  *   参数：alloc —— 分配器；plane —— 坏块所属 plane（取同 plane 的替换块）。
  *   返回：FTL_OK 成功；FTL_ERROR 参数非法 / 该 plane Spare Pool 耗尽（容量自然下降）。
  *   实现要点：只出不进（出厂每 plane 预留 FTL_SPARE_POOL_PER_PLANE 个）。调用者保证
- *             该块已擦除（allocator_free_block 契约）。
+ *             该块已擦除（alc_free_block 契约）。
  *             ⚠ 必须按 plane 取：Spare 池按 super block 粒度预留，补错 plane 不恢复该
  *             plane 的配对能力（原实现从全局池 LIFO 弹出，实际总补 plane 0）。
  * -------------------------------------------------------------------- */
@@ -1104,7 +1104,7 @@ ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, BYTE plane)
     /*
      * Spare Pool 坏块替换：出厂时 main.c 已为**每个 plane** 预留
      * FTL_SPARE_POOL_PER_PLANE=50 个好块到 alloc->spare_blocks[plane]。运行时
-     * bbt_mark_bad 标坏一块后，从该块所属 plane 取一个好块 allocator_free_block
+     * bbt_mark_bad 标坏一块后，从该块所属 plane 取一个好块 alc_free_block
      * 补进 free pool，保用户容量水位。
      * 只出不进，该 plane Spare Pool 耗尽后返回 FTL_ERROR（容量自然下降）。
      */
@@ -1114,11 +1114,11 @@ ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, BYTE plane)
     }
 
     WORD gblock;
-    if (!allocator_spare_try_pop(alloc, plane, &gblock))
+    if (!alc_spare_try_pop(alloc, plane, &gblock))
     {
         return FTL_ERROR; /* 该 plane Spare Pool 耗尽 */
     }
-    allocator_free_block(alloc, gblock);
+    alc_free_block(alloc, gblock);
 
     return FTL_OK;
 }

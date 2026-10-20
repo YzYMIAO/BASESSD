@@ -18,7 +18,7 @@
  *   1. 静态资源     g_table / g_route
  *   2. 旁表操作     init / add / remove / take / count
  *   3. 实例路由     set_route / route
- *   4. CQ 排空      completion_table_drain
+ *   4. CQ 排空      ct_drain
  */
 
 #include "completion_table.h"
@@ -48,19 +48,19 @@ static struct ftl_context *g_route[CH_NUM][CE_NUM][LUN_NUM];
 
 /* ── 2. 旁表操作 ── */
 
-/* completion_table_init — 清空旁表 + 实例路由表（开机调用一次）
+/* ct_init — 清空旁表 + 实例路由表（开机调用一次）
  *
  * ⚠ 清的是**全局**资源（两个 file-static），只能调一次：由 main.c 的
  *   ssd_ftl_boot_all 在**所有实例 boot 之前**调用。**不可**放进逐实例的 ftl_init ——
  *   那样实例 N 的 init 会抹掉实例 N-1 在飞的 ctx 登记，以及已设好的路由表。 */
-void completion_table_init(void)
+void ct_init(void)
 {
     memset(g_table, 0, sizeof(g_table));
     memset(g_route, 0, sizeof(g_route));
 }
 
 /* --------------------------------------------------------------------
- * completion_table_add
+ * ct_add
  *   功能：为一个 command_id 登记 ctx。
  *   参数：cmd_id —— FC command_id；ctx —— 该命令的私有状态。
  *   返回：FTL_OK 成功；FTL_ERROR 表满（COMPLETION_TABLE_SIZE）。
@@ -68,12 +68,12 @@ void completion_table_init(void)
  *             不追加第二条。这个不变量必须在这里守：命令池只有 FC_COMMAND_POOL_DEPTH
  *             个 id，会被复用；若旧项因完成从未被观测而残留（CQ 满时 fc.c 强制置完成、
  *             FTL 感知不到那条 completion），再 add 同一 id 就会让表里出现两条同 id 项，
- *             而 completion_table_take 按**首个**匹配摘链 ⇒ 服务函数拿到**陈旧**的 ctx
+ *             而 ct_take 按**首个**匹配摘链 ⇒ 服务函数拿到**陈旧**的 ctx
  *             并据此改状态，本命令自己的表项则永久泄漏。
  *             覆盖时记 LOGW：这条路径一旦发生必须自己报出来，否则就是静默失效（C8）。
  *             ctx 允许为 NULL（表示"无私有状态"，服务函数自行派生）。
  * -------------------------------------------------------------------- */
-ftl_status_t completion_table_add(WORD cmd_id, void *ctx)
+ftl_status_t ct_add(WORD cmd_id, void *ctx)
 {
     for (BYTE i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
@@ -99,8 +99,8 @@ ftl_status_t completion_table_add(WORD cmd_id, void *ctx)
     return FTL_ERROR;
 }
 
-/* completion_table_remove — 按 command_id 释放表项（未找到则 no-op，幂等） */
-void completion_table_remove(WORD cmd_id)
+/* ct_remove — 按 command_id 释放表项（未找到则 no-op，幂等） */
+void ct_remove(WORD cmd_id)
 {
     for (BYTE i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
@@ -112,8 +112,8 @@ void completion_table_remove(WORD cmd_id)
     }
 }
 
-/* completion_table_take — 查 + 摘链 + 返回 ctx（未登记返回 NULL） */
-void *completion_table_take(WORD cmd_id)
+/* ct_take — 查 + 摘链 + 返回 ctx（未登记返回 NULL） */
+void *ct_take(WORD cmd_id)
 {
     for (BYTE i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
@@ -129,8 +129,8 @@ void *completion_table_take(WORD cmd_id)
     return NULL;
 }
 
-/* completion_table_count — 旁表当前占用项数（观测/自检用） */
-WORD completion_table_count(void)
+/* ct_get_count — 旁表当前占用项数（观测/自检用） */
+WORD ct_get_count(void)
 {
     WORD count = 0U;
 
@@ -148,14 +148,14 @@ WORD completion_table_count(void)
 /* ── 3. 实例路由 ── */
 
 /* --------------------------------------------------------------------
- * completion_table_set_route
+ * ct_set_route
  *   功能：把调用者的 route 数组内容逐格拷进 g_route（实例路由表）。
  *   参数：route —— [ch][ce][lun] → ftl_context_t* 数组；传 NULL 则清空 g_route。
  *   返回：无。
  *   实现要点：逐格拷贝而非存指针——调用者的数组可能是栈/局部量，逐格拷贝让 g_route
  *             成为唯一持有者，避免悬垂。
  * -------------------------------------------------------------------- */
-void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
+void ct_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
 {
     for (BYTE ch = 0U; ch < CH_NUM; ch++)
     {
@@ -170,7 +170,7 @@ void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
 }
 
 /* --------------------------------------------------------------------
- * completion_table_route
+ * ct_get_route
  *   功能：按命令 ch/ce/lun 取所属 FTL 实例（派发时用它找到正确实例）。
  *   参数：ch/ce/lun —— 命令自身 config 的三个坐标。
  *   返回：ftl_context_t*；set_route 之前为 NULL。
@@ -181,31 +181,31 @@ void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
  *             与各服务函数），此处再断一次只是把同一判据写两遍（C7：它不会独立失败）。
  *             不用 ftl 的服务函数（SYNC_WAIT / JOURNAL / BBT）收到 NULL 也无需处理。
  * -------------------------------------------------------------------- */
-struct ftl_context *completion_table_route(BYTE ch, BYTE ce, BYTE lun)
+struct ftl_context *ct_get_route(BYTE ch, BYTE ce, BYTE lun)
 {
     ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
     return g_route[ch][ce][lun];
 }
 
 /*
- * completion_table_route_region
+ * ct_get_route_region
  *   功能：按**全局 L2P region** 取 owner FTL 实例（共享 cache 的 owner 解析）。
  *   参数：global_region —— 全局 region 序号（lba >> L2P_REGION_SHIFT）。
  *   返回：owner 实例；set_route 之前为 NULL。
  *   实现要点：dim = region % FTL_DIM_TOTAL，再按 ftl_dim_ch/ce/lun 分解——分解式与
  *             lba_route_* **共用同一份实现**（l2p_cache.h 的 ftl_dim_*），不是各写一套（C9）。
  * -------------------------------------------------------------------- */
-struct ftl_context *completion_table_route_region(DWORD global_region)
+struct ftl_context *ct_get_route_region(DWORD global_region)
 {
     const DWORD dim = global_region % FTL_DIM_TOTAL;
 
-    return completion_table_route(ftl_dim_ch(dim), ftl_dim_ce(dim), ftl_dim_lun(dim));
+    return ct_get_route(ftl_dim_ch(dim), ftl_dim_ce(dim), ftl_dim_lun(dim));
 }
 
 /* ── 4. CQ 排空 ── */
 
 /*
- * completion_table_drain — 消费所有 CQ entry 并派发
+ * ct_drain — 消费所有 CQ entry 并派发
  *
  * 每条 completion 交 ftl_op_dispatch()：它按命令携带的 op_tag 查 g_op_callbacks[]，
  * 从旁表摘 ctx，再调对应服务函数。命令该跑什么**不由本表决定**。
@@ -213,7 +213,7 @@ struct ftl_context *completion_table_route_region(DWORD global_region)
  * ⚠ 摘链在调用服务函数**之前**（ftl_op_dispatch 内）——服务函数可能重入登记/释放
  *   表项，先摘可避免它在自己的回调里踩到本项。循环持续到 CQ 抽干为止。
  */
-void completion_table_drain(void)
+void ct_drain(void)
 {
     fc_command_status_t completion;
 

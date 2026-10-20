@@ -7,11 +7,11 @@
  *   「逐子操作分配整对页」的浪费（背景与不变量见 wbuf.h 文件头）。
  *
  * 文件结构：
- *   1. 槽位位 / 查询    wbuf_lba_bit / ftl_wbuf_has / ftl_wbuf_read（static 辅助）
- *   2. 攒入与编程       wbuf_append / wbuf_flush / wbuf_program_page（static）
- *   3. 丢弃 / 复位      wbuf_drop / wbuf_reset（static）
- *   4. 空闲 flush       wbuf_maybe_flush_idle（static）
- *   5. typed 入口       wbuf_handle（事件分发 + 状态上报）
+ *   1. 槽位位 / 查询    wb_lba_bit / wb_has / wb_read（static 辅助）
+ *   2. 攒入与编程       wb_append / wb_flush / wb_program_page（static）
+ *   3. 丢弃 / 复位      wb_drop / wb_reset（static）
+ *   4. 空闲 flush       wb_maybe_flush_idle（static）
+ *   5. typed 入口       wb_handle（事件分发 + 状态上报）
  *
  * ⚠ 模块边界：本文件不 include ftl.h。只持有 allocator / pending 表 / migrate handle
  *   三个窄指针，调用它们的 owner API。
@@ -25,7 +25,7 @@
 #include "ftl_fc_interface.h" /* ftl_cmd_* / ftl_plane_* */
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_HOST_IO */
 #include "log.h"
-#include "migrate.h" /* migrate_handle_t / migrate_trigger */
+#include "migrate.h" /* migrate_handle_t / mig_trigger */
 
 #include <string.h>
 
@@ -33,14 +33,14 @@
  * ⚠ 走 ftl_cw_bit 而非手写 `1U << ftl_lba_pair_slot(lba)`——两者逐值同构
  *   （slot ≡ plane*CW_NUM + cw），而 ftl_cw_bit 已文档化为**所有** CW 位图的唯一构造器
  *   （见 ftl_config.h）。ftl_lba_pair_slot 仍用于 data[] 的**数组下标**（不是位）。 */
-static BYTE wbuf_lba_bit(DWORD lba)
+static BYTE wb_lba_bit(DWORD lba)
 {
     return ftl_cw_bit(ftl_lba_plane(lba), ftl_lba_cw(lba));
 }
 
 /* ── 1. 查询 ── */
 
-bool ftl_wbuf_has(const wbuf_handle_t *h, DWORD lba)
+bool wb_has(const wbuf_handle_t *h, DWORD lba)
 {
     if (h->open == 0U)
     {
@@ -51,12 +51,12 @@ bool ftl_wbuf_has(const wbuf_handle_t *h, DWORD lba)
         return false;
     }
 
-    return (h->occupied & wbuf_lba_bit(lba)) != 0U;
+    return (h->occupied & wb_lba_bit(lba)) != 0U;
 }
 
-bool ftl_wbuf_read(const wbuf_handle_t *h, DWORD lba, void *out)
+bool wb_read(const wbuf_handle_t *h, DWORD lba, void *out)
 {
-    if (!ftl_wbuf_has(h, lba))
+    if (!wb_has(h, lba))
     {
         return false;
     }
@@ -69,14 +69,14 @@ bool ftl_wbuf_read(const wbuf_handle_t *h, DWORD lba, void *out)
 
 /* ── 2. 攒入与编程 ── */
 
-static ftl_status_t wbuf_flush(wbuf_handle_t *h);
+static ftl_status_t wb_flush(wbuf_handle_t *h);
 
-/* wbuf_program_page — 配置命令头 + 建 desc 链 + 按页内 CW 偏移散射填数据。
- * ⚠ 失败**不**释放 cmd——由 wbuf_flush 的统一错误出口释放（fc_command_release 幂等）。 */
-static ftl_status_t wbuf_program_page(wbuf_handle_t *h,
-                                      fc_command_t  *cmd,
-                                      const DWORD    pba[PLANE_NUM],
-                                      BYTE           nplanes)
+/* wb_program_page — 配置命令头 + 建 desc 链 + 按页内 CW 偏移散射填数据。
+ * ⚠ 失败**不**释放 cmd——由 wb_flush 的统一错误出口释放（fc_command_release 幂等）。 */
+static ftl_status_t wb_program_page(wbuf_handle_t *h,
+                                    fc_command_t  *cmd,
+                                    const DWORD    pba[PLANE_NUM],
+                                    BYTE           nplanes)
 {
     cmd->config.operation   = ftl_plane_write_op(nplanes);
     cmd->config.multi_plane = ftl_plane_multi_field(nplanes);
@@ -110,7 +110,7 @@ static ftl_status_t wbuf_program_page(wbuf_handle_t *h,
     return FTL_OK;
 }
 
-static ftl_status_t wbuf_flush(wbuf_handle_t *h)
+static ftl_status_t wb_flush(wbuf_handle_t *h)
 {
     if ((h->open == 0U) || (h->occupied == 0U))
     {
@@ -119,10 +119,10 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
 
     /* 资源次序：**按有无归还路径排序**——先查 pending 表余量（不占资源），再取**可释放**的
      * 命令槽，最后才取**不可归还**的页对。取不到命令槽时一个资源都还没占用；页对之后的
-     * 任何失败都由统一错误出口 allocator_rewind_pair 归还（否则页对凭空蒸发，
+     * 任何失败都由统一错误出口 alc_rewind_pair 归还（否则页对凭空蒸发，
      * 表现为容量无声流失，见 CLAUDE.md §3.1）。
      * 单线程 superloop ⇒ 查到这里登记之间没有别的消费者。 */
-    if (pending_count(h->pending) >= FTL_PENDING_MAX)
+    if (pend_get_count(h->pending) >= FTL_PENDING_MAX)
     {
         return FTL_AGAIN;
     }
@@ -138,13 +138,13 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
      * 登记紧急 GC 后返回 FTL_AGAIN，缓冲原样保留，由 ftl_drain_group 下轮重试。
      *
      * ⚠ 搬移是异步 job：在完成回调/写路径里同步等它会把 superloop 卡死。
-     *   这里**只登记**原因，由 must-run 的 migrate_handle 下一轮启动。 */
+     *   这里**只登记**原因，由 must-run 的 mig_handle 下一轮启动。 */
     DWORD pba[PLANE_NUM];
 
-    if (allocator_alloc_pair(h->alloc, FTL_TEMP_HOT, pba) != FTL_OK)
+    if (alc_alloc_pair(h->alloc, FTL_TEMP_HOT, pba) != FTL_OK)
     {
         (void)fc_command_release(cmd); /* 页对尚未取到 ⇒ 无页可还 */
-        migrate_trigger(h->migrate, MIGRATE_REASON_GC_URGENT);
+        mig_trigger(h->migrate, MIGRATE_REASON_GC_URGENT);
         return FTL_AGAIN;
     }
 
@@ -154,7 +154,7 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
     BYTE nplanes = ftl_cw_bitmap_plane_count(h->occupied);
     BYTE n_cw    = ftl_cw_bitmap_popcount(h->occupied);
 
-    ftl_status_t ret = wbuf_program_page(h, cmd, pba, nplanes);
+    ftl_status_t ret = wb_program_page(h, cmd, pba, nplanes);
 
     if (ret != FTL_OK)
     {
@@ -163,7 +163,7 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
 
     /* 注册 pending（owners = 贡献本页的组位掩码；lba = 窗口基址；buffer 传 NULL）。
      * 认领槽位后就地逐字段填——字段名即文档（见 ftl_pending_req_t 注释）。 */
-    ftl_pending_req_t *pending = pending_alloc(h->pending);
+    ftl_pending_req_t *pending = pend_alloc(h->pending);
 
     if (pending == NULL)
     {
@@ -181,7 +181,7 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
     pending->new_pba            = pba[0];
     pending->new_pba1           = pba[1];
     pending->cache_intermediate = 0U;
-    pending_validate(pending);
+    pend_validate(pending);
 
     /* 提交（tag = HOST_IO ⇒ 完成时由 g_op_callbacks[FTL_OP_HOST_IO] 收尾）。
      * ctx 传 NULL：host I/O 的私有状态在 pending 表里（比旁表 ctx 更全）。 */
@@ -189,8 +189,8 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
     {
         const WORD cmd_id = ftl_cmd_id(cmd);
 
-        pending_remove(h->pending, cmd_id); /* 先摘 pending */
-        ret = FTL_AGAIN;                    /* SQ 满：瞬态（缓冲保留，下次重试） */
+        pend_remove(h->pending, cmd_id); /* 先摘 pending */
+        ret = FTL_AGAIN;                 /* SQ 满：瞬态（缓冲保留，下次重试） */
         goto wbuf_flush_fail;
     }
 
@@ -211,18 +211,18 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
  * 页对尚未编程（命令从未提交）⇒ 归还是安全的。 */
 wbuf_flush_fail:
     (void)fc_command_release(cmd);
-    allocator_rewind_pair(h->alloc, FTL_TEMP_HOT);
+    alc_rewind_pair(h->alloc, FTL_TEMP_HOT);
     return ret;
 }
 
-static ftl_status_t wbuf_append(wbuf_handle_t *h, WORD gi, DWORD lba, const void *buffer, BYTE n)
+static ftl_status_t wb_append(wbuf_handle_t *h, WORD gi, DWORD lba, const void *buffer, BYTE n)
 {
     const DWORD window = ftl_lba_pair_base(lba);
 
     /* 换窗口：先把旧窗口编程掉。flush 失败（背压）则本子操作不消费，下轮重试。 */
     if ((h->open != 0U) && (h->base != window))
     {
-        ftl_status_t st = wbuf_flush(h);
+        ftl_status_t st = wb_flush(h);
 
         if (st != FTL_OK)
         {
@@ -248,16 +248,16 @@ static ftl_status_t wbuf_append(wbuf_handle_t *h, WORD gi, DWORD lba, const void
         const size_t src_offset = k * FTL_IU_BYTES;
 
         (void)memcpy(&h->data[dst_offset], src + src_offset, FTL_IU_BYTES);
-        h->occupied |= wbuf_lba_bit(l);
+        h->occupied |= wb_lba_bit(l);
     }
     h->owners |= ftl_group_bit(gi);
-    pending_group_add_subop(h->pending, gi);
+    pend_group_add_subop(h->pending, gi);
 
     /* 满：尝试立即编程（失败则留给 idle flush 重试；append 本身已成功 ⇒ 仍返 OK，
      * 否则调用者会重发同一子操作 ⇒ 重复计数）。 */
     if (h->occupied == ((1U << FTL_LBA_PER_PAIR) - 1U))
     {
-        (void)wbuf_flush(h);
+        (void)wb_flush(h);
     }
 
     return FTL_OK;
@@ -265,14 +265,14 @@ static ftl_status_t wbuf_append(wbuf_handle_t *h, WORD gi, DWORD lba, const void
 
 /* ── 3. 丢弃 / 复位 ── */
 
-static bool wbuf_drop(wbuf_handle_t *h, DWORD lba)
+static bool wb_drop(wbuf_handle_t *h, DWORD lba)
 {
-    if (!ftl_wbuf_has(h, lba))
+    if (!wb_has(h, lba))
     {
         return false;
     }
 
-    h->occupied &= ~wbuf_lba_bit(lba);
+    h->occupied &= ~wb_lba_bit(lba);
     h->drop_count++;
 
     if (h->occupied == 0U)
@@ -281,7 +281,7 @@ static bool wbuf_drop(wbuf_handle_t *h, DWORD lba)
          * 每个贡献组对该窗口至多一次 append ⇒ 逐组递减一次即在飞数配平。
          * ⚠ 本动作是 wbuf 的**内部不变量**（occupied 清空 ⟺ owners 必须结算），
          *   收在这里，不由调用者手工维护（CLAUDE.md §3.1）。 */
-        pending_group_complete_subop_multi(h->pending, h->owners, SSD_STATUS_OK);
+        pend_group_complete_subop_multi(h->pending, h->owners, SSD_STATUS_OK);
         h->open   = 0U;
         h->owners = 0U;
         h->base   = 0U;
@@ -290,13 +290,13 @@ static bool wbuf_drop(wbuf_handle_t *h, DWORD lba)
     return true;
 }
 
-static void wbuf_reset(wbuf_handle_t *h)
+static void wb_reset(wbuf_handle_t *h)
 {
     if (h->owners != 0U)
     {
         /* 缓冲里的写被整体丢弃（介质已擦净）⇒ 按**写失败**收尾。不能只清零 owners：
          * 那些组仍在等子操作完成，直接丢会让它们的在飞数永不归零、host 写挂死。 */
-        pending_group_complete_subop_multi(h->pending, h->owners, SSD_STATUS_IO_ERROR);
+        pend_group_complete_subop_multi(h->pending, h->owners, SSD_STATUS_IO_ERROR);
     }
 
     h->open     = 0U;
@@ -307,24 +307,24 @@ static void wbuf_reset(wbuf_handle_t *h)
 
 /* ── 4. 空闲 flush ── */
 
-static void wbuf_maybe_flush_idle(wbuf_handle_t *h)
+static void wb_maybe_flush_idle(wbuf_handle_t *h)
 {
     if (h->open == 0U)
     {
         return;
     }
 
-    if (pending_group_window_pending(h->pending, h->base))
+    if (pend_group_has_window_pending(h->pending, h->base))
     {
         return; /* 还有写组会把数据 append 进本窗口 → 先别 flush */
     }
 
-    (void)wbuf_flush(h);
+    (void)wb_flush(h);
 }
 
 /* ── 5. typed 入口 ── */
 
-void wbuf_init(wbuf_handle_t *h, ftl_allocator_t *alloc, ftl_pending_table_t *pending, struct migrate_handle *migrate)
+void wb_init(wbuf_handle_t *h, ftl_allocator_t *alloc, ftl_pending_table_t *pending, struct mig_handle *migrate)
 {
     ASSERT(alloc != NULL);
     ASSERT(pending != NULL);
@@ -336,7 +336,7 @@ void wbuf_init(wbuf_handle_t *h, ftl_allocator_t *alloc, ftl_pending_table_t *pe
     h->migrate = migrate;
 }
 
-static void wbuf_status_fill(const wbuf_handle_t *h, wbuf_status_t *out)
+static void wb_status_fill(const wbuf_handle_t *h, wbuf_status_t *out)
 {
     out->base.critical  = false; /* wbuf 是 host 写路径的一部分，由 Phase 2.5 驱动 */
     out->base.wants_run = (h->open != 0U) || (h->occupied != 0U);
@@ -368,7 +368,7 @@ static void wbuf_status_fill(const wbuf_handle_t *h, wbuf_status_t *out)
     out->timed_out     = false;
 }
 
-ftl_status_t wbuf_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const ftl_bg_info_t *info, wbuf_status_t *out)
+ftl_status_t wb_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const ftl_bg_info_t *info, wbuf_status_t *out)
 {
     /* info 当前不参与 wbuf 决策；保留形参以统一 typed 入口。 */
     (void)info;
@@ -378,23 +378,23 @@ ftl_status_t wbuf_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const 
     switch ((wbuf_trigger_kind_t)trigger->kind)
     {
         case WBUF_TRIGGER_APPEND:
-            st = wbuf_append(h, trigger->gi, trigger->lba, trigger->data, trigger->n);
+            st = wb_append(h, trigger->gi, trigger->lba, trigger->data, trigger->n);
             break;
 
         case WBUF_TRIGGER_FLUSH:
-            st = wbuf_flush(h);
+            st = wb_flush(h);
             break;
 
         case WBUF_TRIGGER_DROP:
-            (void)wbuf_drop(h, trigger->lba);
+            (void)wb_drop(h, trigger->lba);
             break;
 
         case WBUF_TRIGGER_RESET:
-            wbuf_reset(h);
+            wb_reset(h);
             break;
 
         case WBUF_TRIGGER_MAYBE_FLUSH_IDLE:
-            wbuf_maybe_flush_idle(h);
+            wb_maybe_flush_idle(h);
             break;
 
         default:
@@ -406,7 +406,7 @@ ftl_status_t wbuf_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const 
 
     if (out != NULL)
     {
-        wbuf_status_fill(h, out);
+        wb_status_fill(h, out);
     }
     return st;
 }

@@ -55,7 +55,7 @@ typedef struct
     ftl_boot_type_t boot_type;       /* 启动类型 */
     DWORD           cp_sequence;     /* Checkpoint sequence（0 = 无） */
     DWORD           journal_entries; /* 回放的 Journal entry 数 */
-    BYTE            blocks_restored; /* 1 = 块元数据快照已加载；0 = full metadata rebuild 兜底 */
+    bool            blocks_restored; /* true = 块元数据快照已加载；false = full metadata rebuild 兜底 */
 } ftl_boot_result_t;
 
 /* ── 块元数据快照恢复（Checkpoint 的 16-bit/块 word）──
@@ -78,7 +78,7 @@ typedef struct
 /*
  * ftl_media_check_format - 判定介质是否需要（重新）格式化（区分 I/O 错误）
  *
- * 判据来自 `checkpoint_probe_media_status`：
+ * 判据来自 `cp_probe_media_status`：
  *   · 当前版本 CP        ⇒ 不格式化；
  *   · 空片 / 版本不符    ⇒ 需要格式化；
  *   · CP 读不通（IO_ERROR）⇒ **拒绝格式化**，返回 FTL_ERROR——一次瞬时读错不能变成
@@ -94,8 +94,8 @@ ftl_status_t ftl_media_check_format(struct ftl_context *ftl, bool *out_need_form
  * ftl_media_format - 全量格式化（擦本实例全部块 + 复位易失元数据状态）
  *
  * ① `bbt_format_erase`（两阶段：先持久化当前坏块图 + FORMAT_IN_PROGRESS，再擦 BBT 池之外的块，
- *    最后 best-effort 并入新 BAD；阶段①失败则不擦用户块）→ ② `metadata_dir_init` 复位 Directory
- * → ③ `checkpoint_write_initial` 写当前版本标记。
+ *    最后 best-effort 并入新 BAD；阶段①失败则不擦用户块）→ ② `md_init` 复位 Directory
+ * → ③ `cp_write_initial` 写当前版本标记。
  *
  * ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。
  *
@@ -111,8 +111,8 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl);
  * 在 fc_init() 之后、ftl_service() 开始之前调用。
  *
  * 流程：
- *   ① 扫描 Journal（journal_scan_latest，获取最新页/sequence）
- *   ② 扫描 Checkpoint（checkpoint_find_latest）
+ *   ① 扫描 Journal（jrn_scan_latest，获取最新页/sequence）
+ *   ② 扫描 Checkpoint（cp_find_latest）
  *   ③ 判断类型 → fresh / clean / power failure
  *   ④ 对应恢复路径
  *

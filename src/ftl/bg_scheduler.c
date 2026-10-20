@@ -45,7 +45,7 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
     sched->cfg = cfg;
 
     /* ── Pass 0：must-run 正确性关键集（不 gate、不占预算）──
-     * 表序即执行序：checkpoint_handle（表首）必须最先——在飞的 CP 要跨轮推进，
+     * 表序即执行序：cp_handle（表首）必须最先——在飞的 CP 要跨轮推进，
      * 拖到预算 pass 里会被低优先级/预算耗尽饿死。 */
     for (BYTE i = 0U; i < sched->task_count; i++)
     {

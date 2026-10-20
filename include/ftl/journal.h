@@ -24,9 +24,9 @@
  *
  * 写模型：
  *   追加进 RAM 页缓冲（page_buf）——**页满异步落盘**，交给 job
- *   （journal_handle / g_op_callbacks[FTL_OP_JOURNAL]），使 host 写完成回调里不嵌套
- *   完成泵。需要屏障语义的调用者显式调 journal_flush_page（只剩结构性同步上下文：
- *   HIL `fl` / 开机路径 / CLI——GC/WL 的 F10 走 journal_handle 的异步等待 + 失败 pending）。
+ *   （jrn_handle / g_op_callbacks[FTL_OP_JOURNAL]），使 host 写完成回调里不嵌套
+ *   完成泵。需要屏障语义的调用者显式调 jrn_flush_page（只剩结构性同步上下文：
+ *   HIL `fl` / 开机路径 / CLI——GC/WL 的 F10 走 jrn_handle 的异步等待 + 失败 pending）。
  */
 
 #include "allocator.h"  /* ftl_allocator_t（持续擦除失败 → bbt_mark_bad） */
@@ -76,8 +76,8 @@ typedef struct
  * 在飞的只剩「写指针推进 + 换块擦除」这点记账，job 只需记住落点。
  *
  * 单飞行：phase != JRN_IDLE 时不再起新页写（否则两条写会争同一个页地址）。
- * 页满且 job 忙 ⇒ **非派发上下文**走同步回退（journal_flush_page）；派发上下文
- * （host 写完成 / 搬移完成）**丢弃本条 + LOGE**，整页留给 journal_handle 下轮刷。 */
+ * 页满且 job 忙 ⇒ **非派发上下文**走同步回退（jrn_flush_page）；派发上下文
+ * （host 写完成 / 搬移完成）**丢弃本条 + LOGE**，整页留给 jrn_handle 下轮刷。 */
 typedef enum
 {
     JRN_IDLE = 0, /* 无在飞 */
@@ -86,7 +86,7 @@ typedef enum
 } journal_phase_t;
 
 /*
- * jrn_truncate_step_t - journal_truncate_plan 的结果
+ * jrn_truncate_step_t - jrn_truncate_plan 的结果
  *
  * ⚠ 这里的 JRN_TRUNC_NO_TRUNCATE **不是硬失败**——是「水位不满足 ⇒ 安全方向地
  *   放弃预擦」，调用者照旧收尾（预擦只是磨损优化）。故它不能与 cp_flush_step_t /
@@ -111,13 +111,13 @@ typedef enum
 typedef struct
 {
     /* ── 异步刷页 job ── */
-    BYTE  phase;        /* journal_phase_t */
-    BYTE  need_erase;   /* 有**未起**的擦除：target_block 待擦（擦命令起不来时留待重试） */
-    BYTE  target_block; /* 页写成功后 current_block 的落点 */
-    BYTE  target_page;  /* 页写成功后 current_page 的落点（已做块内回绕） */
-    BYTE  from_block;   /* 起写时的 current_block（防指针回退的守卫，见 journal.c） */
-    BYTE  from_page;    /* 起写时的 current_page */
-    DWORD waddr;        /* 在飞页地址（诊断 / 心跳） */
+    journal_phase_t phase;        /* 异步刷页状态机 */
+    bool            need_erase;   /* 有**未起**的擦除：target_block 待擦（擦命令起不来时留待重试） */
+    BYTE            target_block; /* 页写成功后 current_block 的落点 */
+    BYTE            target_page;  /* 页写成功后 current_page 的落点（已做块内回绕） */
+    BYTE            from_block;   /* 起写时的 current_block（防指针回退的守卫，见 journal.c） */
+    BYTE            from_page;    /* 起写时的 current_page */
+    DWORD           waddr;        /* 在飞页地址（诊断 / 心跳） */
 
     /* ── 环形写游标 ── */
     BYTE  current_block;
@@ -138,8 +138,8 @@ typedef struct
 
     BYTE page_buf[JOURNAL_PAGE_SIZE];
 
-    BYTE checkpoint_needed;
-    BYTE emergency;
+    bool checkpoint_needed;
+    bool emergency;
 
     /* ── 环形块坏块策略（RISK-JN-01，全部 RAM 态）──
      *   bad_mask     —— 已判定不可用的环形块（bit b）；持久化由 allocator/BBT owner API 承担，
@@ -150,7 +150,7 @@ typedef struct
     BYTE bad_mask;
     BYTE erase_fail_count;
     BYTE erase_fail_block;
-    BYTE ring_full;
+    bool ring_full;
 
     /* ── 持久性失败观测（全部 RAM，不随介质持久化）──
      * 页写 / 换块擦失败时 +1 并置 pending。`write_fail_seq` 是失败时刻的
@@ -160,7 +160,7 @@ typedef struct
      * ⚠ 不尝试恢复已丢条目；pending 只负责“不撒谎地说屏障已达成”。 */
     DWORD write_fail_count;
     DWORD write_fail_seq;
-    BYTE  write_fail_pending;
+    bool  write_fail_pending;
 
     /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 phase/age */
     DWORD start_ms;
@@ -179,7 +179,7 @@ typedef struct
     journal_handle_t handle;
 } l2p_journal_t;
 
-/* Journal 环形页引用：位置 + 页序号 + 条目数（journal_scan_latest 出参） */
+/* Journal 环形页引用：位置 + 页序号 + 条目数（jrn_scan_latest 出参） */
 typedef struct
 {
     DWORD page_seq;    /* 页头记录的**首条**条目序号 */
@@ -189,7 +189,7 @@ typedef struct
 } journal_page_ref_t;
 
 /*
- * journal_scan_latest - 只读扫环，取**最新页**（最大 page_seq）。
+ * jrn_scan_latest - 只读扫环，取**最新页**（最大 page_seq）。
  *
  * 用途：① 启动判型（干净关机 / 掉电）；② 干净关机的写指针恢复。**不改 journal 状态**，
  * 与回放共用同一套页头判定。
@@ -199,12 +199,12 @@ typedef struct
  *        「干净/掉电」判型都不可信，启动恢复应走掉电回放路径
  * @return true = 环非空（*out 有效）；false = 环空（全部擦除 / 无有效页）
  */
-bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out, bool *out_read_error);
+bool jrn_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out, bool *out_read_error);
 
 /*
- * journal_resume - 恢复 Journal 的 RAM 写态（写指针 + 序号），**不回放任何条目**。
+ * jrn_resume - 恢复 Journal 的 RAM 写态（写指针 + 序号），**不回放任何条目**。
  *
- * 为什么必须做：`journal_init` 把写指针复位到 block0/page0、序号复位到 1，但
+ * 为什么必须做：`jrn_init` 把写指针复位到 block0/page0、序号复位到 1，但
  * **NAND 上的环形块并没有被擦**（`journal_truncate` 只预擦环形下一块）——「Journal
  * 是空的」这个前提只对刚格式化过的介质成立。不恢复会有两个后果：
  *   ① 序号从 1 重来 ⇒ 新条目的 page_seq 排到环内旧页**之后**，下次开机回放的
@@ -217,21 +217,21 @@ bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out, 
  * 绝不能把新页写进未擦块。
  *
  * @param journal Journal
- * @param latest  journal_scan_latest 的结果（NULL 或 page_seq==0 视为环空）
- * @param floor_sequence 序号下限 = Checkpoint 的 journal_sequence（「下一个待分配」），
+ * @param latest  jrn_scan_latest 的结果（NULL 或 page_seq==0 视为环空）
+ * @param floor_sequence 序号下限 = Checkpoint 的 jrn_get_sequence（「下一个待分配」），
  *        兜住「环空」与「环内最新页序号反而落后」两种情形（0 会被抬到 1）
  */
-void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, DWORD floor_sequence);
+void jrn_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, DWORD floor_sequence);
 
-/* journal_init - 初始化 Journal：记录拓扑、绑定 allocator、复位写指针与序号 */
-void journal_init(l2p_journal_t *journal, ftl_topology_t topo, ftl_allocator_t *alloc);
+/* jrn_init - 初始化 Journal：记录拓扑、绑定 allocator、复位写指针与序号 */
+void jrn_init(l2p_journal_t *journal, ftl_topology_t topo, ftl_allocator_t *alloc);
 
 /* 追加一条 L2P 更新。若当前页缓冲里已有**同一 LBA** 的条目，就地更新
  * （只改 old/new PBA，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。
  * 返回：true = 已追加 / 就地合并；false = 页满且异步刷页起不来，本条目被丢弃。
  * ⚠ 返回 false 时调用者必须按“映射未持久化”处理：迁移侧中止 job（victim 不擦）；
  *   host 写路径当前只能记日志继续（其 drop 分支按注释结构性不可达）。 */
-bool journal_append(l2p_journal_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba);
+bool jrn_append(l2p_journal_t *journal, DWORD lba, DWORD old_pba, DWORD new_pba);
 
 /* ── 模块 handle（typed 入口，docs/design/ftl_module_contracts.md §3.3 / §4.2）── */
 
@@ -273,66 +273,62 @@ typedef enum
 } journal_trigger_t;
 
 /*
- * journal_handle - 后台推进 Journal（提交即返回；job 在飞或无事可做时为空操作）
+ * jrn_handle - 后台推进 Journal（提交即返回；job 在飞或无事可做时为空操作）
  *
  * @param journal  Journal；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param trigger  本轮意图（NULL 视作 FLUSH）
  * @param info     本轮动态信息（now_ms / load_level；当前只用于观测，不改变判据）
  * @param out      出参：本轮结束后的上报（**非空**）
  */
-void journal_handle(l2p_journal_t *journal, const journal_trigger_t *trigger, const ftl_bg_info_t *info, journal_status_t *out);
+void jrn_handle(l2p_journal_t *journal, const journal_trigger_t *trigger, const ftl_bg_info_t *info, journal_status_t *out);
 
 /* ── 查询（替代外部直读 handle 字段）── */
 
-/* journal_is_idle — 无在飞 job（写 / 擦都完成）。 */
-bool journal_is_idle(const l2p_journal_t *journal);
+/* jrn_is_idle — 无在飞 job（写 / 擦都完成）。 */
+bool jrn_is_idle(const l2p_journal_t *journal);
 
-/* journal_can_erase_victim — F10 屏障：页写失败 pending 已清（迁移后的 L2P 已随
- * CP 落盘）⇒ 允许 GC/WL 擦 victim。 */
-bool journal_can_erase_victim(const l2p_journal_t *journal);
+/* jrn_get_sequence — 下一个待分配序号（= CP 截断水位）。 */
+DWORD jrn_get_sequence(const l2p_journal_t *journal);
 
-/* journal_sequence — 下一个待分配序号（= CP 截断水位）。 */
-DWORD journal_sequence(const l2p_journal_t *journal);
+/* jrn_get_watermark — 当前使用率（0..100，全局写位置 / 全环容量）。 */
+BYTE jrn_get_watermark(const l2p_journal_t *journal);
 
-/* journal_watermark — 当前使用率（0..100，全局写位置 / 全环容量）。 */
-BYTE journal_watermark(const l2p_journal_t *journal);
+/* jrn_has_write_failure — 持久性失败 pending 是否置位。 */
+bool jrn_has_write_failure(const l2p_journal_t *journal);
 
-/* journal_write_failed — 持久性失败 pending 是否置位。 */
-bool journal_write_failed(const l2p_journal_t *journal);
+/* jrn_has_pending_entries — 页缓冲里是否有未落盘条目。 */
+bool jrn_has_pending_entries(const l2p_journal_t *journal);
 
-/* journal_has_pending_entries — 页缓冲里是否有未落盘条目。 */
-bool journal_has_pending_entries(const l2p_journal_t *journal);
+/* jrn_has_erase_pending — 是否有「未起」的换块擦除（新环形块尚未擦）。 */
+bool jrn_has_erase_pending(const l2p_journal_t *journal);
 
-/* journal_erase_pending — 是否有「未起」的换块擦除（新环形块尚未擦）。 */
-bool journal_erase_pending(const l2p_journal_t *journal);
+/* jrn_needs_checkpoint / jrn_is_emergency — CP 水位标志（≥85% / ≥95%）。 */
+bool jrn_needs_checkpoint(const l2p_journal_t *journal);
+bool jrn_is_emergency(const l2p_journal_t *journal);
 
-/* journal_checkpoint_needed / journal_is_emergency — CP 水位标志（≥85% / ≥95%）。 */
-bool journal_checkpoint_needed(const l2p_journal_t *journal);
-bool journal_is_emergency(const l2p_journal_t *journal);
+/* jrn_set_merge_floor — CP Header 成功后设置合并边界（Checkpoint 模块调用）。 */
+void jrn_set_merge_floor(l2p_journal_t *journal, DWORD sequence);
 
-/* journal_set_merge_floor — CP Header 成功后设置合并边界（Checkpoint 模块调用）。 */
-void journal_set_merge_floor(l2p_journal_t *journal, DWORD sequence);
-
-/* journal_update_watermark - 按当前写位置重算并置位 CP 水位标志。
- * 由写确认路径在每次 L2P 更新后调用（原 journal_update_watermark 的归属收回
+/* jrn_update_watermark - 按当前写位置重算并置位 CP 水位标志。
+ * 由写确认路径在每次 L2P 更新后调用（原 jrn_update_watermark 的归属收回
  * journal 模块：它是 journal 自己的状态）。 */
-void journal_update_watermark(l2p_journal_t *journal);
+void jrn_update_watermark(l2p_journal_t *journal);
 
-/* journal_flush_page - **同步**把 Journal 落盘：先排空在飞 job，再把当前页缓冲
+/* jrn_flush_page - **同步**把 Journal 落盘：先排空在飞 job，再把当前页缓冲
  *   （含页头）写进 NAND 并推进写指针。
  *   · 本函数是**唯一**的同步环形块擦除点，块满换块时先擦后写（跳过 pre_erased_block 预擦块）；
- *   · 调用者用它当**屏障**（HIL `fl`）。host 写路径的常规刷页走 journal_handle 的异步路径。
+ *   · 调用者用它当**屏障**（HIL `fl`）。host 写路径的常规刷页走 jrn_handle 的异步路径。
  *   · drain 超时 ⇒ **拒绝同步刷**（在飞命令仍拥有当前页地址，再写同页 = 双重编程），
  *     置 write_fail_pending 并返回 FTL_ERROR。
  * @return FTL_OK = 屏障达成；FTL_ERROR = drain 超时 / 擦除失败 / 页写失败。 */
-ftl_status_t journal_flush_page(l2p_journal_t *journal);
+ftl_status_t jrn_flush_page(l2p_journal_t *journal);
 /* F10：全量回放**未进 L2P 表**的页（按 (page_seq, entry_index) 递增序应用，
- * per-LBA last-write-wins）。cp_sequence 为 checkpoint 截断水位（旧 journal_replay
+ * per-LBA last-write-wins）。cp_sequence 为 checkpoint 截断水位（旧 jrn_replay
  * 只回放最大一页，掉电跨 ≥2 页时其余条目静默丢失）。
  * ⚠ 判据是**整页**：`page_seq + entry_count > cp_sequence`。只看页首页序号
  *   （`page_seq > cp_sequence`）会把跨水位的那一页整页跳过，丢掉它的新条目。
  * out_entries（可为 NULL）回填**实际应用成功的条目数**（读失败的页不计入）。
- * ⚠ 该数**不能**由 journal 的 RAM 写指针反推：末尾 journal_resume 把落点放到最新页
+ * ⚠ 该数**不能**由 journal 的 RAM 写指针反推：末尾 jrn_resume 把落点放到最新页
  *   之后并清 current_entry ⇒ 用 current_entry/current_page 算出来恒为 0。
  * @return FTL_OK = 完整回放；FTL_ERROR = 环内存在读失败页（写态已恢复，但回放可能
  *         不完整 ⇒ 调用者应回退 full metadata rebuild）。 */
@@ -351,26 +347,26 @@ ftl_status_t journal_flush_page(l2p_journal_t *journal);
 typedef struct
 {
     bool (*materialize)(void *ctx, DWORD pba);
-    void (*valid_add)(void *ctx, DWORD pba, BYTE *ok);
-    void (*valid_sub)(void *ctx, DWORD pba, BYTE *ok);
+    void (*valid_add)(void *ctx, DWORD pba, bool *ok);
+    void (*valid_sub)(void *ctx, DWORD pba, bool *ok);
     void *ctx; /* 调用者自持（PFR 传 &g_ftl[...]） */
-    BYTE  ok;
+    bool  ok;
 } journal_replay_block_ctx_t;
 
-ftl_status_t journal_replay(l2p_journal_t              *journal,
-                            l2p_cache_t                *cache,
-                            DWORD                       cp_sequence,
-                            DWORD                      *out_entries,
-                            journal_replay_block_ctx_t *block_ctx);
+ftl_status_t jrn_replay(l2p_journal_t              *journal,
+                        l2p_cache_t                *cache,
+                        DWORD                       cp_sequence,
+                        DWORD                      *out_entries,
+                        journal_replay_block_ctx_t *block_ctx);
 /*
- * journal_truncate_plan - 截断 Journal 的**第一步**：水位校验 + 算出待预擦的块
+ * jrn_truncate_plan - 截断 Journal 的**第一步**：水位校验 + 算出待预擦的块
  *
  * 语义：Checkpoint 已把 sequence ≤ up_to_sequence 的条目 flush 进 NAND L2P 表 ⇒
  * 环形里**最旧的一块**（= 环形下一块）整块可弃。预擦该块并记账（pre_erased_block），
- * 使 journal_flush_page 回切到它时**跳过**擦除——保证同一块每圈只擦一次。
+ * 使 jrn_flush_page 回切到它时**跳过**擦除——保证同一块每圈只擦一次。
  *
  * 本函数只做**判定与算址**（纯 RAM，不动介质）：擦除由调用者提交（Checkpoint job
- * 提交异步擦命令），成功完成后再调 journal_truncate_commit 记账。
+ * 提交异步擦命令），成功完成后再调 jrn_truncate_commit 记账。
  *
  * @param journal        Journal
  * @param up_to_sequence 截断水位；**必须覆盖全部已写条目**（调用者传 CP 时刻的
@@ -382,31 +378,31 @@ ftl_status_t journal_replay(l2p_journal_t              *journal,
  *         JRN_TRUNC_ALREADY = 无需擦（水位 OK，该块已预擦过）；
  *         JRN_TRUNC_NO_TRUNCATE = 不截断（水位不满足）——**调用者不得据此复位水位标志**
  */
-jrn_truncate_step_t journal_truncate_plan(l2p_journal_t *journal,
-                                          DWORD          up_to_sequence,
-                                          DWORD         *out_addr,
-                                          BYTE          *out_block);
+jrn_truncate_step_t jrn_truncate_plan(l2p_journal_t *journal,
+                                      DWORD          up_to_sequence,
+                                      DWORD         *out_addr,
+                                      BYTE          *out_block);
 
 /*
- * journal_truncate_commit - 截断 Journal 的**第二步**：记账 + 复位水位标志
+ * jrn_truncate_commit - 截断 Journal 的**第二步**：记账 + 复位水位标志
  *
- * 在擦除命令**成功完成**后调用。记 pre_erased_block 使 journal_flush_page 回切时
+ * 在擦除命令**成功完成**后调用。记 pre_erased_block 使 jrn_flush_page 回切时
  * 跳过擦除；复位 emergency / checkpoint_needed（设计 §7.5.4：本次 CP 已把
  * sequence ≤ cp_seq 的条目落盘并截断，水位清零。不复位会让 T1 永久命中——每圈必 CP）。
  *
  * ⚠ erased_block == JOURNAL_BLOCK_NONE ⇒ **只复位水位标志，不动 pre_erased_block**
  *   ——"本次没有擦"（水位不满足 / 该块已被预擦过）时调用者用它收尾；若此时把
- *   pre_erased_block 覆写成 NONE，journal_flush_page 回切时会把已预擦的块再擦一次。
+ *   pre_erased_block 覆写成 NONE，jrn_flush_page 回切时会把已预擦的块再擦一次。
  *
  * @param journal   Journal
- * @param erased_block 刚擦成功的环形块号（journal_truncate_plan 的回传值）；
+ * @param erased_block 刚擦成功的环形块号（jrn_truncate_plan 的回传值）；
  *                     JOURNAL_BLOCK_NONE = 本次未擦
  */
-void journal_truncate_commit(l2p_journal_t *journal, BYTE erased_block);
+void jrn_truncate_commit(l2p_journal_t *journal, BYTE erased_block);
 
-/* journal_clear_write_failure - Checkpoint Header 成功后清除持久性失败 pending。
+/* jrn_clear_write_failure - Checkpoint Header 成功后清除持久性失败 pending。
  * 仅当该 CP 的 journal 水位（起点快照）≥ 失败时刻的 sequence 才清除：说明 CP 在
  * 失败之后启动，已把迁移后的 L2P 区域落盘；否则保留 pending，让下一次 CP 再试。 */
-void journal_clear_write_failure(l2p_journal_t *journal, DWORD cp_journal_seq);
+void jrn_clear_write_failure(l2p_journal_t *journal, DWORD cp_journal_seq);
 
 #endif /* FTL_JOURNAL_H */

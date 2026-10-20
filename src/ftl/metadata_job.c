@@ -11,10 +11,10 @@
  *
  * 设计约束（与 metadata.h 的 metadata_handle_t 长注释配套）：
  *   · **一次只提交一条命令**：提交阶段设 waiting 就返回；纯 RAM 阶段连续推进到下一个
- *     提交阶段或终态。推进一律由 metadata_handle 驱动（服务函数不推进，见下）。
+ *     提交阶段或终态。推进一律由 md_handle 驱动（服务函数不推进，见下）。
  *   · **服务函数不推进状态机**（同 ftl_checkpoint_callback）：CP_ANCHOR_PREP 要调
- *     metadata_dir_anchor_prepare，而它在游标未建立时会**同步**扫池定位
- *     （metadata_ring_locate → ftl_sync_read_page）——在完成泵里跑就是嵌套泵
+ *     md_anchor_prepare，而它在游标未建立时会**同步**扫池定位
+ *     （md_ring_locate → ftl_sync_read_page）——在完成泵里跑就是嵌套泵
  *     （l2p_sync_pump 首行有 ASSERT 挡）。故 ftl_metadata_callback 只记结果 + release + 改
  *     phase，下一轮 kick 接着走。
  *   · **提交失败（背压）保留现场**：压缩搬移的槽位取到后即消耗（写指针已推进），
@@ -60,12 +60,6 @@ static DWORD md_block_page_pba(const metadata_dir_cache_t *dir,
                     ftl_gblock_plane(gblock),
                     page,
                     0U);
-}
-
-/* 块第 0 页地址（擦除用）。 */
-static DWORD md_block_addr(const metadata_dir_cache_t *dir, WORD gblock)
-{
-    return md_block_page_pba(dir, gblock, 0U);
 }
 
 /* ── 待回收位图 / 写指针 / job 状态（H42：改状态的闸门定义在 .c）── */
@@ -148,7 +142,7 @@ void md_reclaim_mark_all(metadata_dir_cache_t *dir, const ftl_allocator_t *alloc
     }
 }
 
-DWORD metadata_dir_slot_now(metadata_dir_cache_t *dir)
+DWORD md_take_slot(metadata_dir_cache_t *dir)
 {
     if ((!dir->cur_block_valid) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
     {
@@ -162,7 +156,7 @@ DWORD metadata_dir_slot_now(metadata_dir_cache_t *dir)
     return md_block_page_pba(dir, dir->cur_metadata_block, page);
 }
 
-void metadata_handle_reset(metadata_dir_cache_t *dir)
+void md_handle_reset(metadata_dir_cache_t *dir)
 {
     /* reclaimed_count 是**单调进度计数**（跨 job 保留）；其余 job 状态清零。
      * error 也保留到下一次起 job 时再清（status 要能看到最近一次失败）。 */
@@ -179,7 +173,7 @@ void metadata_handle_reset(metadata_dir_cache_t *dir)
 }
 
 /* --------------------------------------------------------------------
- * metadata_dir_compact_victim
+ * md_compact_victim
  *   功能：选压缩 victim —— 活 region 数**最少**（但 > 0）的非当前日志块。
  *   参数：dir —— Directory；alloc —— 分配器（读 BST 判 LOG 身份）。
  *   返回：victim 的 gblock；无候选返回 UINT16_MAX。
@@ -187,8 +181,8 @@ void metadata_handle_reset(metadata_dir_cache_t *dir)
  *             直接擦除归还，无需搬移。平手取块号最小者：结果确定（跨复位可复现），
  *             且先分配的块通常收的是更早、更可能变冷的数据。
  * -------------------------------------------------------------------- */
-static WORD metadata_dir_compact_victim(metadata_dir_cache_t *dir,
-                                        ftl_allocator_t      *alloc)
+static WORD md_compact_victim(metadata_dir_cache_t *dir,
+                              ftl_allocator_t      *alloc)
 {
     WORD best      = UINT16_MAX;
     WORD best_live = UINT16_MAX;
@@ -223,7 +217,7 @@ static WORD metadata_dir_compact_victim(metadata_dir_cache_t *dir,
  * ⚠ **victim 不擦**（已登记的 region 已指向新页、未搬的仍指向 victim ⇒ 两边都有效），
  *   下次换块时重来即可——失败不回滚。
  * ⚠ 若 victim 已被搬空（live == 0），登记进待回收位图保持覆盖范围。 */
-static void metadata_handle_abort(metadata_dir_cache_t *dir)
+static void md_handle_abort(metadata_dir_cache_t *dir)
 {
     metadata_handle_t *j = &dir->handle;
 
@@ -234,7 +228,7 @@ static void metadata_handle_abort(metadata_dir_cache_t *dir)
         (void)md_reclaim_mark(dir, j->victim);
     }
 
-    metadata_handle_reset(dir);
+    md_handle_reset(dir);
     dir->handle.error = (int32_t)FTL_ERROR; /* status.error：最近一次中止的归因 */
 }
 
@@ -259,7 +253,7 @@ static bool md_stall(metadata_dir_cache_t *dir)
         LOGW("[META] md job submit stalled %lums — abort\r\n", (now_ms - j->stall_ms));
         j->timed_out     = 1U;
         j->timeout_phase = j->phase;
-        metadata_handle_abort(dir);
+        md_handle_abort(dir);
         return true;
     }
     return false;
@@ -383,7 +377,7 @@ static void md_compact_begin(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
         return; /* 无当前写块：无处可搬 */
     }
 
-    WORD victim = metadata_dir_compact_victim(dir, alloc);
+    WORD victim = md_compact_victim(dir, alloc);
 
     if (victim == UINT16_MAX)
     {
@@ -438,7 +432,7 @@ static md_compact_step_t md_compact_read(metadata_dir_cache_t *dir)
 
         j->region_id = (rid + 1U); /* 游标先走：本轮不命中也不回头 */
 
-        DWORD old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, rid);
+        DWORD old = md_find_entry(dir, METADATA_TYPE_L2P_REGION, rid);
 
         if (old == NAND_PBA_INVALID)
         {
@@ -477,7 +471,7 @@ static md_compact_step_t md_compact_write(metadata_dir_cache_t *dir)
 
     if (j->slot == NAND_PBA_INVALID)
     {
-        j->slot = metadata_dir_slot_now(dir);
+        j->slot = md_take_slot(dir);
         if (j->slot == NAND_PBA_INVALID)
         {
             /* 当前块无空槽 ⇒ 预算失准。最可能来源是 md_compact_begin 注释里的
@@ -513,7 +507,7 @@ static bool md_compact_next(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
     metadata_handle_t *j = &dir->handle;
 
     const WORD free_slots = (PAGES_PER_BLOCK - dir->cur_metadata_page);
-    const WORD victim     = metadata_dir_compact_victim(dir, alloc);
+    const WORD victim     = md_compact_victim(dir, alloc);
 
     if (victim == UINT16_MAX)
     {
@@ -533,14 +527,14 @@ static bool md_compact_next(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 }
 
 /* --------------------------------------------------------------------
- * metadata_handle
+ * md_handle
  *   功能：推进整理 job 一步（每轮服务循环调一次）。见 metadata.h 的同名注释。
  *   参数：dir / alloc。
  *   返回：无。
  *   实现要点：`for (;;)` 里每个分支要么设 waiting 后 return（提交阶段），要么推进 phase
  *             后 break（纯 RAM 阶段）。**不允许既不推进也不返回**——那会死循环。
  * -------------------------------------------------------------------- */
-static void metadata_handle_step(metadata_dir_cache_t *dir)
+static void md_handle_step(metadata_dir_cache_t *dir)
 {
     /* 前置条件（判据 2）：调用者一律传 dir；allocator 走已绑定端口。 */
 
@@ -640,7 +634,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                     break;
                 }
 
-                const DWORD addr = md_block_addr(dir, g);
+                const DWORD addr = md_block_page_pba(dir, g, 0U);
 
                 if (md_submit_erase(dir, addr) != FTL_OK)
                 {
@@ -659,7 +653,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
                 if (r == MD_COMPACT_FAILED)
                 {
-                    metadata_handle_abort(dir);
+                    md_handle_abort(dir);
                     break;
                 }
                 if (r != MD_COMPACT_SCANNED)
@@ -686,7 +680,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
                 if (r == MD_COMPACT_FAILED)
                 {
-                    metadata_handle_abort(dir);
+                    md_handle_abort(dir);
                     break;
                 }
                 return;
@@ -697,16 +691,16 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                 /* ③ Anchor：定位游标 + 取槽。游标未建立时会**同步**扫池定位——本 job
                  *   唯一可能瞬时阻塞的点，且只在冷启动后首次整理出现。 */
                 bool             need_erase = false;
-                md_anchor_step_t r          = metadata_dir_anchor_prepare(dir,
-                                                                 &j->anchor_ring,
-                                                                 &j->anchor_base,
-                                                                 &j->anchor_idx,
-                                                                 &j->anchor_seq,
-                                                                 &need_erase);
+                md_anchor_step_t r          = md_anchor_prepare(dir,
+                                                       &j->anchor_ring,
+                                                       &j->anchor_base,
+                                                       &j->anchor_idx,
+                                                       &j->anchor_seq,
+                                                       &need_erase);
 
                 if (r == MD_ANCHOR_FAILED)
                 {
-                    metadata_handle_abort(dir);
+                    md_handle_abort(dir);
                     break;
                 }
                 if (r == MD_ANCHOR_CLEAN)
@@ -740,12 +734,12 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                 {
                     /* 整条 record 写完：推进游标（无论成败），成功才清 dirty。
                      * 失败 ⇒ 整条残缺（locate 会整条丢弃）⇒ 中止，不擦 victim。 */
-                    metadata_dir_anchor_commit(dir, &j->anchor_ring, j->anchor_idx, j->anchor_ok);
+                    md_anchor_commit(dir, &j->anchor_ring, j->anchor_idx, j->anchor_ok);
 
                     if (!j->anchor_ok)
                     {
                         LOGW("[META] anchor write incomplete: idx=%u seq=%lu (chunk 写失败)\r\n", (unsigned)j->anchor_idx, j->anchor_seq);
-                        metadata_handle_abort(dir);
+                        md_handle_abort(dir);
                         break;
                     }
 
@@ -773,7 +767,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
                 metadata_anchor_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
 
-                metadata_dir_anchor_page(dir, j->anchor_seq, j->anchor_chunk, &page);
+                md_anchor_page(dir, j->anchor_seq, j->anchor_chunk, &page);
 
                 const DWORD page_size = sizeof(page);
 
@@ -802,7 +796,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                     break;
                 }
 
-                const DWORD addr = md_block_addr(dir, v);
+                const DWORD addr = md_block_page_pba(dir, v, 0U);
 
                 if (md_submit_erase(dir, addr) != FTL_OK)
                 {
@@ -813,13 +807,13 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
             case MD_JOB_DONE:
                 LOGD("[META] compact done victim=%u moved=%u\r\n", (unsigned)j->victim, (unsigned)j->moved);
-                metadata_handle_reset(dir);
+                md_handle_reset(dir);
                 break; /* 回 IDLE：继续循环（可能还有待回收的块）*/
 
             default:
                 /* 不该发生：phase 越界 ⇒ 清回 IDLE，否则 append_slot 永久让路。 */
                 LOGE("[META] md job bad phase=%u — reset\r\n", (unsigned)j->phase);
-                metadata_handle_reset(dir);
+                md_handle_reset(dir);
                 return;
         }
     }
@@ -827,7 +821,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
 /* ── 模块 handle（typed 入口） ── */
 
-static void metadata_status_fill(const metadata_dir_cache_t *dir, metadata_status_t *out)
+static void md_status_fill(const metadata_dir_cache_t *dir, metadata_status_t *out)
 {
     const metadata_handle_t *j = &dir->handle;
 
@@ -866,13 +860,13 @@ static void metadata_status_fill(const metadata_dir_cache_t *dir, metadata_statu
     out->timeout_phase   = j->timeout_phase;
 }
 
-void metadata_handle(metadata_dir_cache_t *dir, const ftl_bg_info_t *info, metadata_status_t *out)
+void md_handle(metadata_dir_cache_t *dir, const ftl_bg_info_t *info, metadata_status_t *out)
 {
     /* info 当前不参与目录整理决策（事件驱动）；保留形参以统一 typed 入口。 */
     (void)info;
 
-    metadata_handle_step(dir);
-    metadata_status_fill(dir, out);
+    md_handle_step(dir);
+    md_status_fill(dir, out);
 }
 
 /* ── 整理 job 的完成服务（g_op_callbacks[FTL_OP_METADATA]）── */
@@ -888,8 +882,8 @@ static void md_note_block_erased(metadata_dir_cache_t *dir, WORD gblock)
 {
     const DWORD total_writes = *dir->total_writes;
 
-    allocator_note_erase(dir->alloc, gblock, total_writes);
-    metadata_log_release(dir->alloc, gblock);
+    alc_note_erase(dir->alloc, gblock, total_writes);
+    md_log_release(dir->alloc, gblock);
 }
 
 /* 待回收块擦完成：失败 ⇒ 位保持置位（下一轮 kick 重新取到它并重试，轮转游标保证
@@ -953,7 +947,7 @@ static void md_complete_cp_read(metadata_dir_cache_t *dir, metadata_handle_t *j,
 
     if (failed)
     {
-        metadata_handle_abort(dir);
+        md_handle_abort(dir);
         return;
     }
     j->phase = MD_JOB_CP_WRITE;
@@ -968,11 +962,11 @@ static void md_complete_cp_write(metadata_dir_cache_t *dir, metadata_handle_t *j
 
     if (failed)
     {
-        metadata_handle_abort(dir);
+        md_handle_abort(dir);
         return;
     }
 
-    metadata_dir_commit_region(dir, j->cur_region, j->slot);
+    md_commit_region(dir, j->cur_region, j->slot);
     j->slot  = NAND_PBA_INVALID;
     j->moved = (j->moved + 1U);
     j->phase = MD_JOB_CP_READ;
@@ -986,7 +980,7 @@ static void md_complete_anchor_erase(metadata_dir_cache_t *dir, metadata_handle_
 
     if (failed)
     {
-        metadata_handle_abort(dir);
+        md_handle_abort(dir);
         return;
     }
     j->phase = MD_JOB_CP_ANCHOR_WRITE;
@@ -1030,7 +1024,7 @@ static void md_complete_cp_reclaim(metadata_dir_cache_t *dir, metadata_handle_t 
  *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `metadata_dir_cache_t *`（模块上下文）。
  *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
  *   实现要点：**本函数不推进状态机**（见本文件开头的说明）：只把 phase 改到"下一步该
- *             干什么"，由下一轮 metadata_handle 续跑。
+ *             干什么"，由下一轮 md_handle 续跑。
  * -------------------------------------------------------------------- */
 void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
@@ -1082,7 +1076,7 @@ void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *c
             LOGE("[META] md job unexpected completion phase=%u\r\n", (unsigned)j->phase);
             (void)fc_command_release(cmd);
             j->waiting = false;
-            metadata_handle_abort(dir);
+            md_handle_abort(dir);
             return;
     }
 }

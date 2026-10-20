@@ -72,8 +72,8 @@ typedef struct
  */
 typedef struct
 {
-    DWORD now_ms;     /* 单调毫秒（平台时钟缺失时为 0） */
-    BYTE  load_level; /* BG_LEVEL_IDLE / NORMAL / BUSY（bg_scheduler.h） */
+    DWORD      now_ms;     /* 单调毫秒（平台时钟缺失时为 0） */
+    bg_level_t load_level; /* 后台档位（ftl_type.h） */
 } ftl_bg_info_t;
 
 /* ── ms deadline（本仓取值，须上板标定；docs §6.3）──
