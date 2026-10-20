@@ -15,7 +15,7 @@
 #include "log.h"
 
 /* 外部：controller.c — 按 LBA 路由到 FTL 实例（内部函数，拆分循环共用） */
-ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, uint64_t lba);
+ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba);
 
 /* ── 子请求完成回调 ──
  *
@@ -49,17 +49,17 @@ static void on_sub_complete(void *ctx)
  * @param lba_limit  上界（开区间）
  * @return 本 run 的结束 LBA（> lba，<= lba_limit）
  */
-uint64_t ssd_controller_run_end(ssd_controller_t *controller, uint64_t lba, uint64_t lba_limit)
+QWORD ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWORD lba_limit)
 {
     ftl_context_t *ftl = ssd_controller_route(controller, lba);
-    uint64_t       end = lba + 1U;
+    QWORD          end = lba + 1U;
 
     /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
     ASSERT(ftl != NULL);
 
     while (end < lba_limit)
     {
-        uint64_t boundary;
+        QWORD boundary;
 
         if (ssd_controller_route(controller, end) != ftl)
         {
@@ -83,11 +83,11 @@ uint64_t ssd_controller_run_end(ssd_controller_t *controller, uint64_t lba, uint
  * 必须在提交前精确置位：run 的完成可能**同步**触发 on_sub_complete（如整段未映射读），
  * 计数为 0 时同步回调会把父请求提前置完成。
  */
-static uint32_t ssd_split_count(ssd_controller_t *controller, ssd_request_t *request)
+static DWORD ssd_split_count(ssd_controller_t *controller, ssd_request_t *request)
 {
-    uint64_t lba     = request->start_lba;
-    uint64_t lba_end = request->start_lba + request->block_count;
-    uint32_t count   = 0U;
+    QWORD lba     = request->start_lba;
+    QWORD lba_end = request->start_lba + request->block_count;
+    DWORD count   = 0U;
 
     while (lba < lba_end)
     {
@@ -98,11 +98,11 @@ static uint32_t ssd_split_count(ssd_controller_t *controller, ssd_request_t *req
     return count;
 }
 
-int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
+ssd_status_t ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
 {
-    uint64_t     lba;
-    uint64_t     lba_end;
-    uint32_t     submitted = 0U;
+    QWORD        lba;
+    QWORD        lba_end;
+    DWORD        submitted = 0U;
     ssd_status_t err_status;
 
     if ((controller == NULL) || (request == NULL) || (request->block_count == 0U))
@@ -135,8 +135,8 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
 
     while (lba < lba_end)
     {
-        uint64_t       run_end = ssd_controller_run_end(controller, lba, lba_end);
-        uint32_t       run_len = (uint32_t)(run_end - lba);
+        QWORD          run_end = ssd_controller_run_end(controller, lba, lba_end);
+        DWORD          run_len = (run_end - lba);
         ftl_context_t *ftl     = ssd_controller_route(controller, lba);
         ftl_status_t   st;
 
@@ -146,7 +146,7 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
         request->io.lba    = lba;
         /* 缓冲步进 = 映射单元（FTL_IU_BYTES = 512B）——CW 级映射下 1 LBA = 1 个 CW
          * （= 512B 扇区），不是 2KB 页。 */
-        request->io.buffer = (uint8_t *)request->buffer +
+        request->io.buffer = (BYTE *)request->buffer +
                              ((size_t)(lba - request->start_lba) * FTL_IU_BYTES);
         request->io.count = run_len; /* ★ 长度交给 FTL，plane 拆分由 FTL 决定 */
 
@@ -154,9 +154,7 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
                                                     : ftl_submit_read(ftl, &request->io);
         if (st != FTL_OK)
         {
-            LOGE("[CTRL] split submit failed lba=%lu count=%lu\r\n",
-                 (unsigned long)lba,
-                 (unsigned long)run_len);
+            LOGE("[CTRL] split submit failed lba=%lu count=%lu\r\n", (unsigned long)lba, run_len);
             request->completion_status = err_status;
             /* 已提交的 run 仍会回调 on_sub_complete → 把计数收敛到"实际在飞数"，
              * 避免父请求提前完成（旧实现在此处直接置 complete_flag 即此缺陷）。 */
@@ -165,7 +163,7 @@ int ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
             {
                 request->complete_flag = 1U;
             }
-            return (int)err_status;
+            return err_status;
         }
         submitted++;
         lba = run_end;

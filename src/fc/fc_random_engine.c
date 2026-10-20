@@ -36,10 +36,10 @@
  *     - 非零保护：LFSR 全零是吸收态。
  *   与物理地址无关：GC 搬页后逻辑地址不变 ⇒ 密文不变（存储主控惯例）。
  * -------------------------------------------------------------------- */
-uint32_t fc_random_seed_from_meta(uint32_t cw_meta)
+DWORD fc_random_seed_from_meta(DWORD cw_meta)
 {
     /* 折叠：高位并进低位，保住 32 位的全部信息 */
-    uint32_t seed = cw_meta ^ (cw_meta >> 16U);
+    DWORD seed = cw_meta ^ (cw_meta >> 16U);
 
     /* 雪崩混合（splitmix32 的乘法常量） */
     seed *= 0x9E3779B9UL;
@@ -91,20 +91,20 @@ uint32_t fc_random_seed_from_meta(uint32_t cw_meta)
 #    define FC_LFSR_PERIOD (65535U)
 
 /* 生成一个伪随机字节（8 bit 递推） */
-static uint8_t fc_lfsr_byte(uint32_t *state)
+static BYTE fc_lfsr_byte(DWORD *state)
 {
-    uint16_t lfsr = (uint16_t)(*state & 0xFFFFU);
-    uint8_t  i;
-    uint8_t  result = 0U;
+    WORD lfsr = (*state & 0xFFFFU);
+    BYTE i;
+    BYTE result = 0U;
 
     for (i = 0U; i < 8U; i++)
     {
-        result = (uint8_t)((result << 1U) | (uint8_t)(lfsr & 1U));
+        result = ((result << 1U) | (lfsr & 1U));
         /* 反馈位 = bit0 ^ bit2 ^ bit3 ^ bit5（含被移出的 bit0） */
         {
-            uint8_t fb = (uint8_t)((lfsr ^ (lfsr >> 2U) ^ (lfsr >> 3U) ^ (lfsr >> 5U)) & 1U);
+            BYTE fb = ((lfsr ^ (lfsr >> 2U) ^ (lfsr >> 3U) ^ (lfsr >> 5U)) & 1U);
 
-            lfsr = (uint16_t)((lfsr >> 1U) | ((uint16_t)fb << 15U));
+            lfsr = ((lfsr >> 1U) | (fb << 15U));
         }
     }
     *state = lfsr;
@@ -117,15 +117,15 @@ static uint8_t fc_lfsr_byte(uint32_t *state)
  *   实现要点：seed 低 16 位作初始状态（0 强制为 1，防全零卡死）；
  *         每字节 8 次移位递推取 8 bit。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint32_t seed)
+static fc_status_t fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 {
-    uint16_t index;
+    WORD index;
 
     /* data 前置条件由调用者保证（fc_data_path 传入 CW 缓冲） */
     ASSERT(data != NULL);
 
     /* 用 seed 初始化为非零 LFSR 状态 */
-    uint32_t lfsr_state = (seed & 0xFFFFU);
+    DWORD lfsr_state = (seed & 0xFFFFU);
     if (lfsr_state == 0U)
     {
         lfsr_state = 1U;
@@ -152,11 +152,11 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
  *   功能：用 seed 生成 64B 伪随机 pattern，循环异或 data。
  *   实现要点：pattern 由 XOR-shift 递推生成；性能开销最小。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint32_t seed)
+static fc_status_t fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 {
-    uint8_t  pattern[FC_SIMPLE_XOR_PATTERN_LEN];
-    uint8_t  i;
-    uint16_t index;
+    BYTE pattern[FC_SIMPLE_XOR_PATTERN_LEN];
+    BYTE i;
+    WORD index;
 
     /* data 前置条件由调用者保证（fc_data_path 传入 CW 缓冲） */
     ASSERT(data != NULL);
@@ -167,7 +167,7 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
         seed ^= seed << 13U;
         seed ^= seed >> 17U;
         seed ^= seed << 5U;
-        pattern[i] = (uint8_t)seed;
+        pattern[i] = seed;
     }
 
     /* 用 pattern 循环异或数据 */
@@ -186,9 +186,9 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
  *   实现要点：seed ^= seed<<13; ^= seed>>17; ^= seed<<5（周期 2^32-1）；
  *         seed 为 0 时无意义（返回 INVALID_ARGUMENT）。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint32_t seed)
+static fc_status_t fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 {
-    uint16_t index;
+    WORD index;
 
     /* data 前置条件由调用者保证；seed 由 fc_random_seed_from_meta 保证非零 */
     ASSERT(data != NULL);
@@ -199,7 +199,7 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
         seed ^= seed << 13U;
         seed ^= seed >> 17U;
         seed ^= seed << 5U;
-        data[index] ^= (uint8_t)seed;
+        data[index] ^= seed;
     }
     return FC_STATUS_OK;
 }
@@ -211,7 +211,7 @@ static fc_status_t fc_random_transform_impl(uint8_t *data, uint16_t length, uint
  * ══════════════════════════════════════════════════════════════════ */
 
 /* 加扰/解扰（XOR 对称；算法由编译宏决定） */
-fc_status_t fc_random_transform(uint8_t *data, uint16_t length, uint32_t seed)
+fc_status_t fc_random_transform(BYTE *data, WORD length, DWORD seed)
 {
     return fc_random_transform_impl(data, length, seed);
 }

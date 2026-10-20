@@ -45,14 +45,14 @@
  * ⚠ 调用方（fc_data_path.c）必须传**该 CW 的扇区 LBA**（desc->meta / 从页内读回的
  *   明文 META），而不是 command->meta（那是本命令的页级基值）。
  */
-uint32_t fc_random_seed_from_meta(uint32_t cw_meta);
+DWORD fc_random_seed_from_meta(DWORD cw_meta);
 
 /*
  * 对 data[0..length-1] 进行加扰/解扰。
  * 加扰和解扰是同一操作（XOR 对称）。
  * 算法由 FC_RANDOM_ALGO 编译宏控制。
  */
-fc_status_t fc_random_transform(uint8_t *data, uint16_t length, uint32_t seed);
+fc_status_t fc_random_transform(BYTE *data, WORD length, DWORD seed);
 
 /* 获取当前使用的加扰算法名称（调试用） */
 const char *fc_random_algo_name(void);

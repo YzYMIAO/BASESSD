@@ -26,6 +26,8 @@
  *     防刷屏。⚠ 本板 `ssd_platform_register` 强制 time_us 非空 ⇒ 该分支不可达。
  */
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -51,36 +53,36 @@ typedef void (*bg_task_func_t)(ftl_context_t *ftl);
 typedef struct
 {
     bg_task_func_t func;        /* 适配器（bg_wiring.c 定义） */
-    uint32_t       interval_ms; /* 最小执行间隔；0 = 不设调度器级间隔（内部事件门管） */
-    uint32_t       last_run_ms; /* 上次运行时刻；0 = 尚未运行 ⇒ 立即跑（哨兵） */
-    uint16_t       budget_us;   /* 单次计账上限：charge = MIN(elapsed, budget_us) */
+    DWORD          interval_ms; /* 最小执行间隔；0 = 不设调度器级间隔（内部事件门管） */
+    DWORD          last_run_ms; /* 上次运行时刻；0 = 尚未运行 ⇒ 立即跑（哨兵） */
+    WORD           budget_us;   /* 单次计账上限：charge = MIN(elapsed, budget_us) */
     bool           must_run;    /* true = 正确性关键集：不 gate、不占预算、无条件每轮跑 */
 } bg_task_t;
 
 /* 档位 → 预算规模（bg_wiring.c 政策表，引擎不持有） */
 typedef struct
 {
-    uint32_t total_budget_us; /* 每轮总预算（µs） */
-    uint32_t task_mask;       /* 本档位允许的 budgeted 任务掩码（bit = 任务下标） */
+    DWORD total_budget_us; /* 每轮总预算（µs） */
+    DWORD task_mask;       /* 本档位允许的 budgeted 任务掩码（bit = 任务下标） */
 } bg_level_cfg_t;
 
 typedef struct
 {
     bg_task_t tasks[BG_TASK_COUNT];
-    uint8_t   task_count; /* 已装载的项数 */
+    BYTE      task_count; /* 已装载的项数 */
     /* 本轮生效的档位配置，由 bg_scheduler_run 在起点发布。
      * 任务读本轮策略参数走这里，不各自反查档位表——反查是第二套读取路径，
      * 与引擎实际使用的那份配置可能不同步。 */
     const bg_level_cfg_t *cfg;
     /* 本轮档位（BG_LEVEL_*），同样由 bg_scheduler_run 发布。
      * typed 模块入口的 ftl_bg_info_t.load_level 就取这里，避免适配器各自再选一次档。 */
-    uint8_t level;
+    BYTE level;
 } bg_scheduler_t;
 
 /* 装载任务表：拷贝 table[0..count) 到 tasks[]、置 task_count、清 cfg。
  * ⚠ count > BG_TASK_COUNT 会越界写 tasks[] ⇒ 调用者先用 _Static_assert 在编译期挡住
  * （见 bg_wiring.c s_bg_tasks）。 */
-void bg_scheduler_init(bg_scheduler_t *sched, const bg_task_t *table, uint8_t count);
+void bg_scheduler_init(bg_scheduler_t *sched, const bg_task_t *table, BYTE count);
 
 /* 跑一轮：Pass 0 must-run（无条件）+ Pass 1 预算/interval（**表序即优先级**，预算不足截断）。
  * cfg 必须与 sched 当前档位配套（bg_wiring.c 传 &g_bg_level_cfg[level]）。

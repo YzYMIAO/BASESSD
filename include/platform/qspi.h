@@ -1,6 +1,8 @@
 #ifndef PLATFORM_QSPI_H
 #define PLATFORM_QSPI_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdint.h>
 
 /*
@@ -11,20 +13,20 @@
  * SoC 侧（include/platform/<soc>/qspi_port.h）。共享层只做空参检查与转发。
  */
 
-uint8_t qspi_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime);               /* 等待某个状态 */
-uint8_t qspi_init(void);                                                          /* 初始化QSPI */
-uint8_t qspi_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmcycle); /* 发送命令 */
-uint8_t qspi_receive(uint8_t *buf, uint32_t datalen);                             /* 接收数据 */
-uint8_t qspi_transmit(uint8_t *buf, uint32_t datalen);                            /* 发送数据 */
+BYTE qspi_wait_flag(DWORD flag, BYTE sta, DWORD wtime);            /* 等待某个状态 */
+BYTE qspi_init(void);                                              /* 初始化QSPI */
+BYTE qspi_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle); /* 发送命令 */
+BYTE qspi_receive(BYTE *buf, DWORD datalen);                       /* 接收数据 */
+BYTE qspi_transmit(BYTE *buf, DWORD datalen);                      /* 发送数据 */
 
 /* ─────────────────────────── port 接口 ───────────────────────────
  * 由 src/platform/<soc>/qspi_port.c 实现。
  */
 
-uint8_t qspi_port_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime);
-uint8_t qspi_port_init(void);
-uint8_t qspi_port_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmcycle);
-uint8_t qspi_port_receive(uint8_t *buf, uint32_t datalen);
-uint8_t qspi_port_transmit(uint8_t *buf, uint32_t datalen);
+BYTE qspi_port_wait_flag(DWORD flag, BYTE sta, DWORD wtime);
+BYTE qspi_port_init(void);
+BYTE qspi_port_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle);
+BYTE qspi_port_receive(BYTE *buf, DWORD datalen);
+BYTE qspi_port_transmit(BYTE *buf, DWORD datalen);
 
 #endif /* PLATFORM_QSPI_H */

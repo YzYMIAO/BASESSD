@@ -321,11 +321,11 @@ typedef struct {
     uint16_t group;              /* ★ 所属完成组 ftl->groups[] 下标 */
     uint8_t  op;                 /* ftl_pending_op_t：完成路径判别（读/写），显式给出不可反推 */
     uint8_t  n_cw;               /* ★ 本子操作搬运的 CW 数（字节数 ÷ FTL_IU_BYTES） */
-    lba_t    lba;                /* 子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B） */
+    DWORD    lba;                /* 子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B） */
     void    *buffer;             /* 子操作缓冲（= 组基缓冲 + LBA 偏移 × FTL_IU_BYTES） */
     /* ↓↓↓ 写完成确认（写专用，读请求时无效） ↓↓↓ */
-    nand_pba_t new_pba;            /* 新分配 plane0 页 PBA（未覆盖 plane0 ⇒ NAND_PBA_INVALID） */
-    nand_pba_t new_pba1;           /* 新分配 plane1 页 PBA（未覆盖 plane1 ⇒ NAND_PBA_INVALID） */
+    DWORD new_pba;            /* 新分配 plane0 页 PBA（未覆盖 plane0 ⇒ NAND_PBA_INVALID） */
+    DWORD new_pba1;           /* 新分配 plane1 页 PBA（未覆盖 plane1 ⇒ NAND_PBA_INVALID） */
     /* ⚠ 不存 old_pba：完成时按 LBA 重查 L2P 得"此刻被替换的映射"（比提交时快照更正确）*/
     uint8_t    cache_intermediate; /* 1: Cache Program 中间页（15h），跳过 L2P/Journal */
 } ftl_pending_req_t;
@@ -511,7 +511,7 @@ typedef enum {
 
 /* 单条 cache line = 2KB + 元数据 */
 typedef struct {
-    nand_pba_t  entries[L2P_ENTRIES_PER_REGION];   // 512 × 4B = 2048B
+    DWORD  entries[L2P_ENTRIES_PER_REGION];   // 512 × 4B = 2048B
     uint32_t    region_id;                           // **全局** region（共享 cache 的键）
     uint8_t     state;                               // l2p_cache_state_t
     uint16_t    access_count;                        // CLOCK 访问计数
@@ -543,7 +543,7 @@ static inline uint32_t lba_route_lun(uint64_t lba);
 static inline uint32_t l2p_global_to_local_region(uint32_t global_region);
 
 /* 全局 LBA → 片内 local LBA（地址原语；阶段 B 起数据通路不再调用） */
-static inline lba_t lba_to_local(uint64_t lba);
+static inline DWORD lba_to_local(uint64_t lba);
 
 /* ⚠ 本仓没有"region 的固定位置"：未写过的 region 在 Metadata Directory 里登记为
  * NAND_PBA_INVALID（未映射，读取不产生 NAND I/O）；写过的 region 只在日志块里，
@@ -565,7 +565,7 @@ void l2p_cache_init(l2p_cache_t *cache, uint8_t ch, uint8_t ce,
  *   FTL_ERROR 参数非法 / 越界 → *out = NAND_PBA_INVALID（**也回填**）
  * ⚠ FTL_OK + NAND_PBA_INVALID = **未映射**；FTL_AGAIN = **还不知道**。绝不可混同。
  */
-ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out);
+ftl_status_t l2p_cache_read(l2p_cache_t *cache, DWORD lba, DWORD *out);
 
 /*
  * 就绪前置探针：lba 所在 region 是否已在 RAM。
@@ -573,14 +573,14 @@ ftl_status_t l2p_cache_read(l2p_cache_t *cache, lba_t lba, nand_pba_t *out);
  * 供「先就绪、再一次性应用多条改动」的调用者用（写确认 / 搬移收尾）。
  * ⚠ 纯探针：命中不记账、不消费 fresh、不动 access_count；未命中记一次 miss。
  */
-int l2p_cache_ready(l2p_cache_t *cache, lba_t lba);
+int l2p_cache_ready(l2p_cache_t *cache, DWORD lba);
 
 /*
  * 写入 LBA 的 PBA 映射（三态）。
  * 只改 cache line + 置 DIRTY + region 脏位，不写 NAND（写回由 flush 起）。
  * 行在飞（LOADING / FLUSHING）→ FTL_AGAIN 且**不改任何状态**。
  */
-ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
+ftl_status_t l2p_cache_write(l2p_cache_t *cache, DWORD lba, DWORD pba);
 
 /*
  * 起一行 DIRTY 的**异步**写回（提交即返回；完成由 ftl_l2p_callback 收尾）。
@@ -594,8 +594,8 @@ ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx);
 void l2p_flush_kick_owner(l2p_cache_t *cache, uint32_t owner_dim, uint8_t max_kick);
 
 /* ── 同步逃生口（自旋泵；只许结构性同步上下文，服务函数禁用）── */
-ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t *out);
-ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
+ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out);
+ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
 ftl_status_t l2p_cache_flush_one_sync(l2p_cache_t *cache, int line_idx);
 ftl_status_t l2p_cache_flush_owner_sync(l2p_cache_t *cache, uint32_t owner_dim);
 
@@ -665,15 +665,15 @@ l2p_cache_load_start(cache, region_id):            ← static，由 read/ready/w
 /* Journal entry — 16B */
 typedef struct {
     uint32_t    lba;            // LBA
-    nand_pba_t  old_pba;        // 修改前的 PBA
-    nand_pba_t  new_pba;        // 修改后的 PBA
+    DWORD  old_pba;        // 修改前的 PBA
+    DWORD  new_pba;        // 修改后的 PBA
     uint32_t    sequence;       // 单调递增序号
 } __attribute__((packed)) l2p_journal_entry_t;
 
 /* Journal 上下文 */
 typedef struct {
     ftl_topology_t topo;                       // 目标 NAND 芯片路由
-    nand_pba_t     block_pba[JOURNAL_BLOCK_COUNT];  // 各 Journal Block PBA 基址
+    DWORD     block_pba[JOURNAL_BLOCK_COUNT];  // 各 Journal Block PBA 基址
     uint8_t        current_block;              // 当前写入 block (0..3)
     uint8_t        current_page;               // 当前写入 page (0..63)
     uint8_t        current_entry;              // 当前页内 entry 偏移 (0..126)
@@ -696,8 +696,8 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
  * 内部：写入 page_buf → page_buf 满时 flush 到 NAND。
  * v0.54：页缓冲里已有同一 LBA 时就地更新 new_pba（不新增条目、不消耗 sequence）。
  */
-void journal_append(l2p_journal_t *journal, lba_t lba,
-                    nand_pba_t old_pba, nand_pba_t new_pba);
+void journal_append(l2p_journal_t *journal, DWORD lba,
+                    DWORD old_pba, DWORD new_pba);
 
 /*
  * 将当前 page_buf 写入 NAND（即使未满也可强制写）。
@@ -805,7 +805,7 @@ void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *t
  * （旧的单 plane `allocator_alloc` 已删，见 v0.56/v0.65。）
  */
 ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
-                                  nand_pba_t out[PLANE_NUM]);
+                                  DWORD out[PLANE_NUM]);
 
 /* GC 擦除后归还 block 到 Free Pool */
 void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
@@ -825,7 +825,7 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
 
 ```c
 /* PBA→CH/CE/PAA + descriptor 链配置（static inline，include/ftl/ftl_fc_interface.h） */
-static inline ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba);
+static inline ftl_status_t pba_to_cmd(fc_command_t *cmd, DWORD pba);
 
 /* 用户数据写入 desc buffer */
 int ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t length);
@@ -836,19 +836,19 @@ int ftl_cmd_read_data(fc_command_t *cmd, void *buffer, uint32_t length);
 
 ### 5.2 地址入口：`pba_to_cmd`（v0.73 起）
 
-见 `include/ftl/ftl_fc_interface.h`。**FTL 层地址一律 `nand_pba_t`**——遍历路径不再
+见 `include/ftl/ftl_fc_interface.h`。**FTL 层地址一律 `DWORD`**——遍历路径不再
 经 `nand_addr_t` 展开，直接由 PBA 填 FC 命令；PAA 只在 `pba_to_cmd` 内部
 （`pba_to_paa()` 一次）转出，FC 层只见 PAA：
 
 ```c
-/* nand_pba_t → FC 命令（ch/ce/lun → config 位域，block/plane/page/cw → paa） */
-ftl_status_t pba_to_cmd(fc_command_t *cmd, nand_pba_t pba);
+/* DWORD → FC 命令（ch/ce/lun → config 位域，block/plane/page/cw → paa） */
+ftl_status_t pba_to_cmd(fc_command_t *cmd, DWORD pba);
 
-/* FC 命令 → nand_pba_t（反向：ch/ce 取 config 位域，其余由 paa_to_pba() 反重排） */
-nand_pba_t ftl_cmd_pba(const fc_command_t *cmd);
+/* FC 命令 → DWORD（反向：ch/ce 取 config 位域，其余由 paa_to_pba() 反重排） */
+DWORD ftl_cmd_pba(const fc_command_t *cmd);
 
 /* Super Block 中指定 Plane/Page 的 PBA（ch/ce/lun 取自 sb->topo） */
-nand_pba_t super_block_page_pba(uint8_t ch, uint8_t ce, const super_block_t *sb,
+DWORD super_block_page_pba(uint8_t ch, uint8_t ce, const super_block_t *sb,
                                 uint8_t plane, uint8_t page);
 ```
 
@@ -1040,7 +1040,7 @@ void ftl_service(ftl_context_t *ftl) {
 ```
 include/ftl/
 ├── ftl.h                        # FTL 对外 API + ftl_context_t
-├── ftl_type.h                   # lba_t / pba_t 基础类型
+├── ftl_type.h                   # DWORD / pba_t 基础类型
 ├── ftl_config.h                 # 几何推导（§一）+ 地址编码（§三：LBA 侧 + PBA 侧）
 ├── ftl_fc_interface.h           # PBA helper + 同步 NAND 操作
 ├── bst.h                        # Block State Table（ftl_block_t[4096]，20B/项）

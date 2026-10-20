@@ -8,6 +8,7 @@
 
 #include "btim.h"
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 #include "watchdog.h"
 
 #include <string.h>
@@ -16,8 +17,8 @@
 typedef struct
 {
     const char          *name;
-    uint32_t             first_delay_ms;
-    uint32_t             period_ms;
+    DWORD                first_delay_ms;
+    DWORD                period_ms;
     btim_task_callback_t callback;
     void                *context;
 } btim_static_task_t;
@@ -30,10 +31,10 @@ typedef struct
 {
     btim_task_callback_t callback;
     void                *context;
-    uint32_t             next_due_ms;
-    uint32_t             period_ms;
-    uint32_t             runs;
-    uint8_t              enabled;
+    DWORD                next_due_ms;
+    DWORD                period_ms;
+    DWORD                runs;
+    BYTE                 enabled;
 } btim_task_runtime_t;
 
 #define BTIM_ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
@@ -55,11 +56,11 @@ static const btim_static_task_t g_btim_task_table[] = {
 
 /* 私有运行态：前 N 项对应静态表；其余槽位保留给 btim_scheduler_add()。 */
 static btim_task_runtime_t g_btim_tasks[BTIM_SCHEDULER_MAX_TASKS];
-static volatile uint32_t   g_btim_tick_ms;
+static volatile DWORD      g_btim_tick_ms;
 
-static uint8_t btim_time_due(uint32_t now_ms, uint32_t due_ms)
+static BYTE btim_time_due(DWORD now_ms, DWORD due_ms)
 {
-    /* Signed difference makes deadline comparison work across uint32_t tick wrap. */
+    /* Signed difference makes deadline comparison work across DWORD tick wrap. */
     return ((int32_t)(now_ms - due_ms) >= 0) ? 1U : 0U;
 }
 
@@ -74,8 +75,8 @@ void btim_scheduler_tick(void)
 
 void btim_scheduler_init(void)
 {
-    uint32_t index;
-    uint32_t now_ms;
+    DWORD index;
+    DWORD now_ms;
 
     /* 固定表越界属于编译配置错误；此处防御性返回，避免运行时内存越界。 */
     if (BTIM_ARRAY_SIZE(g_btim_task_table) > BTIM_SCHEDULER_MAX_TASKS)
@@ -99,10 +100,10 @@ void btim_scheduler_init(void)
     }
 }
 
-bool btim_scheduler_add(btim_task_callback_t callback, void *context, uint32_t first_delay_ms, uint32_t period_ms, uint32_t *task_id)
+bool btim_scheduler_add(btim_task_callback_t callback, void *context, DWORD first_delay_ms, DWORD period_ms, DWORD *task_id)
 {
-    uint32_t index;
-    uint32_t now_ms;
+    DWORD index;
+    DWORD now_ms;
 
     if (callback == NULL)
     {
@@ -111,7 +112,7 @@ bool btim_scheduler_add(btim_task_callback_t callback, void *context, uint32_t f
 
     now_ms = btim_scheduler_now_ms();
     /* 固定任务的槽位不可被动态任务占用。 */
-    for (index = (uint32_t)BTIM_ARRAY_SIZE(g_btim_task_table); index < BTIM_SCHEDULER_MAX_TASKS; index++)
+    for (index = BTIM_ARRAY_SIZE(g_btim_task_table); index < BTIM_SCHEDULER_MAX_TASKS; index++)
     {
         if (g_btim_tasks[index].callback != NULL)
         {
@@ -134,7 +135,7 @@ bool btim_scheduler_add(btim_task_callback_t callback, void *context, uint32_t f
     return false;
 }
 
-bool btim_scheduler_enable(uint32_t task_id, bool enabled)
+bool btim_scheduler_enable(DWORD task_id, bool enabled)
 {
     if (task_id >= BTIM_SCHEDULER_MAX_TASKS || g_btim_tasks[task_id].callback == NULL)
     {
@@ -145,7 +146,7 @@ bool btim_scheduler_enable(uint32_t task_id, bool enabled)
     return true;
 }
 
-bool btim_scheduler_remove(uint32_t task_id)
+bool btim_scheduler_remove(DWORD task_id)
 {
     /* 静态表项是产品核心配置，不能被运行时 remove() 意外删除。 */
     if ((task_id < BTIM_ARRAY_SIZE(g_btim_task_table)) || (task_id >= BTIM_SCHEDULER_MAX_TASKS))
@@ -157,7 +158,7 @@ bool btim_scheduler_remove(uint32_t task_id)
     return true;
 }
 
-uint32_t btim_scheduler_now_ms(void)
+DWORD btim_scheduler_now_ms(void)
 {
     /* A naturally aligned 32-bit Cortex-M load is atomic; caller gets a time snapshot. */
     return g_btim_tick_ms;
@@ -165,13 +166,13 @@ uint32_t btim_scheduler_now_ms(void)
 
 void btim_scheduler_poll(void)
 {
-    uint32_t index;
-    uint32_t now_ms = btim_scheduler_now_ms();
+    DWORD index;
+    DWORD now_ms = btim_scheduler_now_ms();
 
     for (index = 0U; index < BTIM_SCHEDULER_MAX_TASKS; index++)
     {
         btim_task_runtime_t *task = &g_btim_tasks[index];
-        uint32_t             due_ms;
+        DWORD                due_ms;
 
         if ((task->callback == NULL) || (task->enabled == 0U) || !btim_time_due(now_ms, task->next_due_ms))
         {

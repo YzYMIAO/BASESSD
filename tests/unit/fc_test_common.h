@@ -191,13 +191,13 @@ void  test_tear_down(void *fixture);                              /* free(g_sour
  * idx < CW_TOTAL_MAX（8）；越界 ASSERT。 */
 uint8_t *test_cw_scratch(uint8_t idx);
 
-/* nand_addr_t → nand_pba_t（页 PBA）。
+/* nand_addr_t → DWORD（页 PBA）。
  *
  * v0.73 把 FTL 层地址全面 PBA 化时**删掉了生产的 `pba_from_addr()`**（它把
  * nand_addr_t 拖进 FTL 闭包）。但 FC 层的货币仍是 nand_addr_t，而页 helper 要拿
  * 「本页 PBA」当 meta ⇒ 测试侧保留同名薄壳。**逐位等价**：pba_make 就是旧函数那七个
  * 字段按同一组 PBA_*_SHIFT 打包，`addr->cw` 传 0 时即页 PBA。 */
-static inline nand_pba_t pba_from_addr(const nand_addr_t *addr)
+static inline DWORD pba_from_addr(const nand_addr_t *addr)
 {
     return pba_make(addr->ch, addr->ce, addr->lun, addr->block, addr->plane, addr->page, addr->cw);
 }
@@ -351,9 +351,9 @@ uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd
 /* ── 数据搬运 / 校验 ── */
 
 /* 单槽版：把 512B 槽填成 FC_BUFFER_USER_SIZE/4 个 paa。 */
-void test_fill_paa(uint8_t *slot, nand_paa_t paa);
+void test_fill_paa(uint8_t *slot, DWORD paa);
 /* 单槽版：1 = 槽内 FC_BUFFER_USER_SIZE/4 个 dword 全等 paa。 */
-uint8_t test_check_paa(const uint8_t *slot, nand_paa_t paa);
+uint8_t test_check_paa(const uint8_t *slot, DWORD paa);
 
 /* 活链版（内联用例用）：
  * test_fill_user_paa —— 逐 desc 填槽 + 拷进 desc 的 USER 区（写路径的「搬数据」那一步）；

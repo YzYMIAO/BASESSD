@@ -10,21 +10,21 @@
 static log_level_t      g_log_level = LOG_INFO;
 static log_sink_t       g_log_sink;
 static log_flush_sink_t g_log_flush_sink;
-static uint32_t         g_log_truncated;
-static uint32_t         g_log_write_failures;
+static DWORD            g_log_truncated;
+static DWORD            g_log_write_failures;
 
-int log_write(log_level_t level, const char *message)
+DWORD log_write(log_level_t level, const char *message)
 {
     const ssd_platform_ops_t *platform = ssd_platform_get();
-    uint32_t                  length;
-    int                       result;
+    DWORD                     length;
+    DWORD                     result;
 
     if ((message == NULL) || (level > g_log_level))
     {
-        return 0;
+        return 0U;
     }
 
-    length = (uint32_t)strlen(message);
+    length = strlen(message);
 
     /* An explicitly registered sink lets a bare-metal BSP log before platform registration. */
     if (g_log_sink != NULL)
@@ -34,35 +34,39 @@ int log_write(log_level_t level, const char *message)
     else if ((platform != NULL) && (platform->log_write != NULL))
     {
         platform->log_write(message);
-        result = (int)length;
+        result = length;
     }
     else
     {
-        result = -1;
+        return LOG_WRITE_INVALID;
     }
 
-    if (result != (int)length)
+    if (result != length)
     {
         g_log_write_failures++;
-        return (result < 0) ? result : -1;
+        return LOG_WRITE_INVALID;
     }
     return result;
 }
 
-int log_vprintf(log_level_t level, const char *format, va_list args)
+DWORD log_vprintf(log_level_t level, const char *format, va_list args)
 {
     char message[192];
     int  length;
 
     if ((format == NULL) || (level > g_log_level))
     {
-        return 0;
+        return 0U;
     }
 
     length = vsnprintf(message, sizeof(message), format, args);
-    if (length <= 0)
+    if (length < 0)
     {
-        return length;
+        return LOG_WRITE_INVALID;
+    }
+    if (length == 0)
+    {
+        return 0U;
     }
     if ((size_t)length >= sizeof(message))
     {
@@ -80,9 +84,9 @@ int log_vprintf(log_level_t level, const char *format, va_list args)
     return log_write(level, message);
 }
 
-int log_printf(log_level_t level, const char *format, ...)
+DWORD log_printf(log_level_t level, const char *format, ...)
 {
-    int     length;
+    DWORD   length;
     va_list args;
 
     va_start(args, format);
@@ -109,9 +113,9 @@ void log_set_sink(log_sink_t sink)
     g_log_sink = sink;
 }
 
-int log_flush(uint32_t timeout_ms)
+bool log_flush(DWORD timeout_ms)
 {
-    return (g_log_flush_sink != NULL) ? g_log_flush_sink(timeout_ms) : 0;
+    return (g_log_flush_sink != NULL) ? g_log_flush_sink(timeout_ms) : true;
 }
 
 void log_set_flush_sink(log_flush_sink_t sink)
@@ -119,12 +123,12 @@ void log_set_flush_sink(log_flush_sink_t sink)
     g_log_flush_sink = sink;
 }
 
-uint32_t log_get_truncated_count(void)
+DWORD log_get_truncated_count(void)
 {
     return g_log_truncated;
 }
 
-uint32_t log_get_write_failure_count(void)
+DWORD log_get_write_failure_count(void)
 {
     return g_log_write_failures;
 }

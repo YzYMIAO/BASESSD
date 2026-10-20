@@ -73,20 +73,19 @@ void completion_table_init(void)
  *             覆盖时记 LOGW：这条路径一旦发生必须自己报出来，否则就是静默失效（C8）。
  *             ctx 允许为 NULL（表示"无私有状态"，服务函数自行派生）。
  * -------------------------------------------------------------------- */
-ftl_status_t completion_table_add(uint16_t cmd_id, void *ctx)
+ftl_status_t completion_table_add(WORD cmd_id, void *ctx)
 {
-    for (uint8_t i = 0U; i < COMPLETION_TABLE_SIZE; i++)
+    for (BYTE i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
         if ((g_table[i].used != 0U) && (g_table[i].cmd_id == cmd_id))
         {
-            LOGW("[FTL] completion entry cmd=%u reused — stale ctx overwritten\r\n",
-                 (unsigned)cmd_id);
+            LOGW("[FTL] completion entry cmd=%u reused — stale ctx overwritten\r\n", (unsigned)cmd_id);
             g_table[i].ctx = ctx;
             return FTL_OK;
         }
     }
 
-    for (uint8_t i = 0U; i < COMPLETION_TABLE_SIZE; i++)
+    for (BYTE i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
         if (g_table[i].used == 0U)
         {
@@ -101,9 +100,9 @@ ftl_status_t completion_table_add(uint16_t cmd_id, void *ctx)
 }
 
 /* completion_table_remove — 按 command_id 释放表项（未找到则 no-op，幂等） */
-void completion_table_remove(uint16_t cmd_id)
+void completion_table_remove(WORD cmd_id)
 {
-    for (uint8_t i = 0U; i < COMPLETION_TABLE_SIZE; i++)
+    for (BYTE i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
         if ((g_table[i].used != 0U) && (g_table[i].cmd_id == cmd_id))
         {
@@ -114,9 +113,9 @@ void completion_table_remove(uint16_t cmd_id)
 }
 
 /* completion_table_take — 查 + 摘链 + 返回 ctx（未登记返回 NULL） */
-void *completion_table_take(uint16_t cmd_id)
+void *completion_table_take(WORD cmd_id)
 {
-    for (uint8_t i = 0U; i < COMPLETION_TABLE_SIZE; i++)
+    for (BYTE i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
         if ((g_table[i].used != 0U) && (g_table[i].cmd_id == cmd_id))
         {
@@ -131,11 +130,11 @@ void *completion_table_take(uint16_t cmd_id)
 }
 
 /* completion_table_count — 旁表当前占用项数（观测/自检用） */
-uint16_t completion_table_count(void)
+WORD completion_table_count(void)
 {
-    uint16_t count = 0U;
+    WORD count = 0U;
 
-    for (uint8_t i = 0U; i < COMPLETION_TABLE_SIZE; i++)
+    for (BYTE i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
         if (g_table[i].used != 0U)
         {
@@ -158,11 +157,11 @@ uint16_t completion_table_count(void)
  * -------------------------------------------------------------------- */
 void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
 {
-    for (uint8_t ch = 0U; ch < CH_NUM; ch++)
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
     {
-        for (uint8_t ce = 0U; ce < CE_NUM; ce++)
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
         {
-            for (uint8_t lun = 0U; lun < LUN_NUM; lun++)
+            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
             {
                 g_route[ch][ce][lun] = (route != NULL) ? route[ch][ce][lun] : NULL;
             }
@@ -182,7 +181,7 @@ void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
  *             与各服务函数），此处再断一次只是把同一判据写两遍（C7：它不会独立失败）。
  *             不用 ftl 的服务函数（SYNC_WAIT / JOURNAL / BBT）收到 NULL 也无需处理。
  * -------------------------------------------------------------------- */
-struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun)
+struct ftl_context *completion_table_route(BYTE ch, BYTE ce, BYTE lun)
 {
     ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
     return g_route[ch][ce][lun];
@@ -196,9 +195,9 @@ struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun)
  *   实现要点：dim = region % FTL_DIM_TOTAL，再按 ftl_dim_ch/ce/lun 分解——分解式与
  *             lba_route_* **共用同一份实现**（l2p_cache.h 的 ftl_dim_*），不是各写一套（C9）。
  * -------------------------------------------------------------------- */
-struct ftl_context *completion_table_route_region(uint32_t global_region)
+struct ftl_context *completion_table_route_region(DWORD global_region)
 {
-    const uint32_t dim = global_region % FTL_DIM_TOTAL;
+    const DWORD dim = global_region % FTL_DIM_TOTAL;
 
     return completion_table_route(ftl_dim_ch(dim), ftl_dim_ce(dim), ftl_dim_lun(dim));
 }

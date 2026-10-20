@@ -216,7 +216,7 @@ FTL 不直接碰 NAND，一律经 FC 接口下发命令，由 FC 保证 CRC + EC
 | 量 | 值 |
 |---|---|
 | 用户容量 | **429 MiB = 878,592 个 IU（512 B）**；物理映射空间 1,048,576 IU（含固定元数据/L2P 日志区/OP/Spare） |
-| L2P 每条 entry | 4 B（`nand_pba_t`） |
+| L2P 每条 entry | 4 B（`DWORD`） |
 | L2P 全表 | 4 MiB |
 | SRAM region cache | 64 行 × 2 KiB ≈ 128 KiB |
 | 覆盖的工作集 | 64 × 512 = 32,768 个 LBA = 16 MiB LBA 空间 |
@@ -629,7 +629,7 @@ Checkpoint 成功后按 `journal_sequence` 截断/回收。
 Directory 指向的 region 页放在**固定预留的 L2P 日志区** `[46,78)/plane`（32 块/plane，
 总 64 gblock = 8 MiB；见 §2.3 主表）。**不从 Free Pool 动态取块、也不归还 Free Pool**：
 
-- **一页 = 一个 region**：2048 B = 512 × 4 B `nand_pba_t`（无页头）；
+- **一页 = 一个 region**：2048 B = 512 × 4 B `DWORD`（无页头）；
   每条目是一个 CW 的物理位置，`NAND_PBA_INVALID` = 未映射。
 - **一块 = 64 页 = 64 个 region**；只追加，块满从固定区取下一块
   （`metadata_log_alloc`）；`l2p_live` 归零 ⇒ `reclaim_pending` ⇒ 后台擦除后
@@ -795,7 +795,7 @@ CP 磨损快照（16 页 × 256 条 × 8 B；随 Checkpoint 记录落盘）
 └─ 每页 CRC 存在 Header 的 wear_page_crc[p]
 
 L2P region（固定日志区 46..77）
-├─ 一页 = 512 × 4 B nand_pba_t = 2048 B（无页头）
+├─ 一页 = 512 × 4 B DWORD = 2048 B（无页头）
 └─ 一块 = 64 页 = 64 个 region
 ```
 
@@ -825,7 +825,7 @@ flags    bit0..3 rising_count | bit4..5 health | bit6..7 保留
 
 L2P region 页（2048 B）
 offset   0                                                         2048
-         [ 512 × nand_pba_t（4 B） = 2048 B；NAND_PBA_INVALID = 未映射 ]
+         [ 512 × DWORD（4 B） = 2048 B；NAND_PBA_INVALID = 未映射 ]
 ```
 
 > 尺上的字段名是缩写（为了排版）；完整字段名/类型见 2.3.1~2.3.5 的表与

@@ -37,8 +37,8 @@
  * ── 存储设计 ──
  *   所有查表结构均使用全局静态数组，无动态分配。
  *   基矩阵   = g_h_base[4][264]       int8_t   1.0 KB
- *   列→校验  = g_col_to_check[4224][3] uint8_t    12.0 KB
- *   行→变量  = g_row_to_var[64][198]  uint16_t   24.8 KB
+ *   列→校验  = g_col_to_check[4224][3] BYTE    12.0 KB
+ *   行→变量  = g_row_to_var[64][198]  WORD   24.8 KB
  *   （行重统计随列重计算得出）
  */
 
@@ -56,19 +56,19 @@
 static int8_t g_h_base[QC_BASE_R][QC_BASE_C];
 
 /* 列→校验方程链接：col_to_check[col][0..col_weight-1] */
-static uint8_t g_col_to_check[QC_N][3];
-static uint8_t g_col_weight[QC_N]; /* 每列权重（固定为 3） */
+static BYTE g_col_to_check[QC_N][3];
+static BYTE g_col_weight[QC_N]; /* 每列权重（固定为 3） */
 
 /* 行→变量节点链接 */
-static uint16_t g_row_to_var[QC_M][QC_N * 3U / QC_M + 1U]; /* 每行约 198 个 */
-static uint16_t g_row_weight[QC_M];
+static WORD g_row_to_var[QC_M][QC_N * 3U / QC_M + 1U]; /* 每行约 198 个 */
+static WORD g_row_weight[QC_M];
 
-static uint8_t g_initialized = 0U;
+static BYTE g_initialized = 0U;
 
 /* ── 伪随机数生成器（固定种子，保证每次编译生成相同 H） ────── */
 
 /* 线性同余 PRNG：state = state*1103515245 + 12345（标准 LCG 参数） */
-static uint32_t lcg_rand(uint32_t *state)
+static DWORD lcg_rand(DWORD *state)
 {
     *state = *state * 1103515245U + 12345U;
     return *state;
@@ -79,8 +79,8 @@ static uint32_t lcg_rand(uint32_t *state)
 /* 构建基矩阵：数据列随机指派 3 行 + 随机移位；校验列阶梯结构 */
 static void qc_build_base(void)
 {
-    uint32_t seed = 0x20250921UL;
-    uint32_t r, c;
+    DWORD seed = 0x20250921UL;
+    DWORD r, c;
 
     memset(g_h_base, -1, sizeof(g_h_base));
 
@@ -88,14 +88,14 @@ static void qc_build_base(void)
      * （列重 dv=3：随机选 3 个互不相同的行，各给随机循环移位量） */
     for (c = 0; c < QC_DATA_C; c++)
     {
-        uint32_t used_rows = 0U;
-        uint32_t i;
+        DWORD used_rows = 0U;
+        DWORD i;
 
         for (i = 0; i < 3U; i++)
         {
-            uint32_t row;
-            uint32_t shift;
-            uint32_t attempt;
+            DWORD row;
+            DWORD shift;
+            DWORD attempt;
 
             for (attempt = 0; attempt < 100U; attempt++)
             {
@@ -122,9 +122,9 @@ static void qc_build_base(void)
 /* 从基矩阵展开链接：每个子块条目展开成 Z 个变量↔校验连接 */
 static void qc_expand_links(void)
 {
-    uint32_t r, c, s;
-    uint32_t col_pos[QC_N];
-    uint32_t row_pos[QC_M];
+    DWORD r, c, s;
+    DWORD col_pos[QC_N];
+    DWORD row_pos[QC_M];
 
     /* 清零 */
     memset(g_col_weight, 0, sizeof(g_col_weight));
@@ -140,24 +140,24 @@ static void qc_expand_links(void)
             {
                 continue; /* 全零子块，无连接 */
             }
-            uint32_t shift = (uint32_t)g_h_base[r][c];
+            DWORD shift = g_h_base[r][c];
             for (s = 0; s < QC_Z; s++)
             {
                 /* 循环移位：变量 (c*Z+s) 连到校验 (r*Z + (s+shift)%Z) */
-                uint32_t var_idx = c * QC_Z + s;
-                uint32_t chk_idx = r * QC_Z + ((s + shift) % QC_Z);
-                uint32_t p;
+                DWORD var_idx = c * QC_Z + s;
+                DWORD chk_idx = r * QC_Z + ((s + shift) % QC_Z);
+                DWORD p;
 
                 /* 列→校验 */
                 p                          = col_pos[var_idx];
                 g_col_to_check[var_idx][p] = chk_idx;
-                g_col_weight[var_idx]      = (uint8_t)(p + 1U);
+                g_col_weight[var_idx]      = (p + 1U);
                 col_pos[var_idx]           = p + 1U;
 
                 /* 行→变量 */
                 p                        = row_pos[chk_idx];
-                g_row_to_var[chk_idx][p] = (uint16_t)var_idx;
-                g_row_weight[chk_idx]    = (uint16_t)(p + 1U);
+                g_row_to_var[chk_idx][p] = var_idx;
+                g_row_weight[chk_idx]    = (p + 1U);
                 row_pos[chk_idx]         = p + 1U;
             }
         }
@@ -179,11 +179,11 @@ static void qc_expand_links(void)
  *         fc_ldpc_qc_decode 的写法一致）；g_initialized 是运行时状态，保留静默返回。
  * -------------------------------------------------------------------- */
 void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
-                       const uint8_t      *data_in,
-                       uint8_t            *data_out)
+                       const BYTE         *data_in,
+                       BYTE               *data_out)
 {
-    uint8_t  parity[8];
-    uint32_t bit_pos, i;
+    BYTE  parity[8];
+    DWORD bit_pos, i;
 
     ASSERT(qc != NULL);
     ASSERT(data_in != NULL);
@@ -201,18 +201,18 @@ void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
 
     for (bit_pos = 0; bit_pos < QC_K; bit_pos++)
     {
-        uint8_t data_bit = (uint8_t)((data_in[bit_pos / 8U] >> (bit_pos % 8U)) & 1U);
+        BYTE data_bit = ((data_in[bit_pos / 8U] >> (bit_pos % 8U)) & 1U);
         if (data_bit == 0U)
         {
             continue;
         }
 
         /* 此数据位关联的所有校验位取反（列重固定为 3） */
-        uint32_t w = (uint32_t)g_col_weight[bit_pos];
+        DWORD w = g_col_weight[bit_pos];
         for (i = 0; i < w; i++)
         {
-            uint32_t chk = g_col_to_check[bit_pos][i];
-            parity[chk / 8U] ^= (uint8_t)(1U << (chk % 8U));
+            DWORD chk = g_col_to_check[bit_pos][i];
+            parity[chk / 8U] ^= (1U << (chk % 8U));
         }
     }
 
@@ -234,14 +234,14 @@ void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
  *     - 失败计数：对每个失败校验，其关联变量 fi++。
  *     - 翻转：fi ≥ min(3, syn_ones) 的变量翻转；无翻转则提前退出。
  * -------------------------------------------------------------------- */
-fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
+fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data)
 {
-    uint8_t  syndromes[QC_M];
-    uint8_t  col_failures[QC_N];
-    uint32_t iter;
-    uint32_t i, var, chk;
-    uint32_t threshold;
-    uint32_t max_iter;
+    BYTE  syndromes[QC_M];
+    BYTE  col_failures[QC_N];
+    DWORD iter;
+    DWORD i, var, chk;
+    DWORD threshold;
+    DWORD max_iter;
 
     /* qc/data 为入参前置条件；g_initialized 是运行时初始化状态，保留返回码 */
     ASSERT(qc != NULL);
@@ -251,24 +251,24 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
         return FC_STATUS_INVALID_ARGUMENT;
     }
 
-    max_iter = (uint32_t)qc->max_iter;
+    max_iter = qc->max_iter;
 
     for (iter = 0; iter < max_iter; iter++)
     {
-        uint32_t syn_ones = 0U;
+        DWORD syn_ones = 0U;
 
         /* ── 综合式 s = H × y^T ── */
         memset(syndromes, 0, sizeof(syndromes));
 
         for (chk = 0; chk < QC_M; chk++)
         {
-            uint32_t sum = 0U;
-            uint32_t w   = (uint32_t)g_row_weight[chk];
+            DWORD sum = 0U;
+            DWORD w   = g_row_weight[chk];
 
             for (i = 0; i < w; i++)
             {
-                var = (uint32_t)g_row_to_var[chk][i];
-                sum ^= (uint32_t)((data[var / 8U] >> (var % 8U)) & 1U);
+                var = g_row_to_var[chk][i];
+                sum ^= ((data[var / 8U] >> (var % 8U)) & 1U);
             }
             syndromes[chk] = sum;
             syn_ones += sum;
@@ -288,10 +288,10 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
             {
                 continue;
             }
-            uint32_t w = (uint32_t)g_row_weight[chk];
+            DWORD w = g_row_weight[chk];
             for (i = 0; i < w; i++)
             {
-                var = (uint32_t)g_row_to_var[chk][i];
+                var = g_row_to_var[chk][i];
                 col_failures[var]++;
             }
         }
@@ -308,14 +308,14 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
         }
 
         {
-            uint32_t flipped = 0U;
+            DWORD flipped = 0U;
 
             /* 翻转所有失败校验数 ≥ 阈值的变量 */
             for (var = 0; var < QC_N; var++)
             {
                 if (col_failures[var] >= threshold)
                 {
-                    data[var / 8U] ^= (uint8_t)(1U << (var % 8U));
+                    data[var / 8U] ^= (1U << (var % 8U));
                     flipped++;
                 }
             }
@@ -341,7 +341,7 @@ fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, uint8_t *data)
  *   参数：max_iter —— 最大解码迭代（0 时默认 15）。
  *   返回：引擎句柄（全局单例，静态）。
  * -------------------------------------------------------------------- */
-fc_ldpc_qc_t *fc_ldpc_qc_init(uint8_t max_iter)
+fc_ldpc_qc_t *fc_ldpc_qc_init(BYTE max_iter)
 {
     static fc_ldpc_qc_t g_qc;
 

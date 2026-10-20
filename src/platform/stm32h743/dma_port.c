@@ -12,7 +12,7 @@
 
 DMA_HandleTypeDef g_dma_handle;
 
-uint8_t dma_port_uart_tx_init(void)
+BYTE dma_port_uart_tx_init(void)
 {
     __HAL_RCC_DMA1_CLK_ENABLE();
     g_dma_handle.Instance                 = DMA1_Stream0;

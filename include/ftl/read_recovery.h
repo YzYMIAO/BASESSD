@@ -38,7 +38,7 @@
 #include "allocator.h"
 #include "bst.h"        /* rr_ecc_track_t, rr_block_health_t, ftl_block_t */
 #include "fc_command.h" /* fc_command_status_t（服务函数签名） */
-#include "ftl_config.h" /* nand_pba_t */
+#include "ftl_config.h" /* DWORD */
 #include "ftl_module.h" /* ftl_bg_info_t / ftl_module_status_t */
 #include "ftl_type.h"
 #include "l2p_cache.h"
@@ -108,15 +108,15 @@ typedef enum
 /*
  * rr_plane_step_t - rr_select_plane 的结果（RR_STAGE_PLANE 一步）
  *
- * ⚠ 这里的 -1（RR_PLANE_WAIT）**不是硬失败**——是「该 LBA 的 L2P region 还在异步加载，
+ * ⚠ 这里的 RR_PLANE_WAIT **不是硬失败**——是「该 LBA 的 L2P region 还在异步加载，
  *   原地等」；调用者据此**清零** stall 计数（加载在飞是有确定完成时刻的进展）。故它不能
- *   与 md_compact_step_t / cp_flush_step_t 共用一套名字（那两处的 -1 都要求 abort）。
+ *   与 md_compact_step_t / cp_flush_step_t 共用一套名字（那两处的 FAILED 都要求 abort）。
  */
 typedef enum
 {
-    RR_PLANE_WAIT  = -1, /* region 尚未就绪（加载在飞）：调用者原地等，不计卡死 */
-    RR_PLANE_SKIP  = 0,  /* 本子操作不覆盖本 plane：调用者 plane++ 跳过 */
-    RR_PLANE_READY = 1,  /* 找到本 plane 的目标页：进入 SF_SET */
+    RR_PLANE_SKIP  = 0U, /* 本子操作不覆盖本 plane：调用者 plane++ 跳过 */
+    RR_PLANE_READY = 1U, /* 找到本 plane 的目标页：进入 SF_SET */
+    RR_PLANE_WAIT  = 2U, /* region 尚未就绪（加载在飞）：调用者原地等，不计卡死 */
 } rr_plane_step_t;
 
 /* 提交 deadline：连续提交不出去超过 `FTL_SUBMIT_TIMEOUT_MS` 即判卡死，
@@ -133,11 +133,11 @@ typedef enum
  */
 typedef struct
 {
-    uint32_t owners;      /* 贡献过的完成组位掩码 */
-    uint16_t pending_idx; /* 被托管的 pending 槽 */
-    uint8_t *upper_buf;   /* host 数据缓冲（恢复结果按 CW 偏移写回） */
-    lba_t    lba;         /* 子操作起始全局 LBA */
-    uint8_t  n_cw;        /* 子操作覆盖的 CW 数 */
+    DWORD owners;      /* 贡献过的完成组位掩码 */
+    WORD  pending_idx; /* 被托管的 pending 槽 */
+    BYTE *upper_buf;   /* host 数据缓冲（恢复结果按 CW 偏移写回） */
+    DWORD lba;         /* 子操作起始全局 LBA */
+    BYTE  n_cw;        /* 子操作覆盖的 CW 数 */
 } rr_owner_t;
 
 /* pending 端口：RR 通过它领取「被托管的读子操作」并在收尾时结算组。 */
@@ -147,7 +147,7 @@ typedef struct
     /* 领取一个 PENDING_OP_READ_RECOVERY 项；true = 已填 *out。 */
     bool (*take)(void *ctx, rr_owner_t *out);
     /* 结算：释放 pending 槽 + 按 owners 递减组在飞数。 */
-    void (*complete)(void *ctx, uint16_t pending_idx, uint32_t owners, ssd_status_t status);
+    void (*complete)(void *ctx, WORD pending_idx, DWORD owners, ssd_status_t status);
 } rr_pending_port_t;
 
 typedef struct
@@ -155,37 +155,37 @@ typedef struct
     l2p_cache_t      *cache;
     ftl_allocator_t  *alloc;
     ftl_topology_t    topo;
-    uint8_t          *page_scratch; /* 整页恢复暂存（FTL_READ_USER_SIZE） */
+    BYTE             *page_scratch; /* 整页恢复暂存（FTL_READ_USER_SIZE） */
     rr_pending_port_t pending;
 } rr_port_t;
 
 typedef struct
 {
-    uint8_t    stage;            /* rr_stage_t */
-    uint8_t    waiting;          /* 1 = 有一条 RR 命令在飞（等 g_op_callbacks[FTL_OP_READ_RECOVERY]） */
-    uint8_t    plane;            /* 当前 plane（0..PLANE_NUM-1）；== PLANE_NUM ⇒ 收尾 */
-    uint8_t    attempt;          /* Stage 1 读重试计数（1..RR_MAX_RETRY） */
-    uint8_t    neighbor_i;       /* Stage 2 邻居序号（0..RR_NEIGHBOR_ATTEMPTS-1） */
-    uint8_t    pending_idx;      /* 被托管的 pending 槽下标（收尾据此释放） */
-    uint8_t    first;            /* 本 plane 首个被覆盖 CW 在子操作内的偏移（诊断用 LBA） */
-    uint8_t    recovered;        /* 本 plane 是否恢复成功（PLANE_END 结算用） */
-    uint8_t    all_ok;           /* 1 = 本 job 覆盖的所有 plane 都恢复成功（收尾状态用） */
-    uint32_t   stall_ms;         /* 本轮连续「提交不出去」的起点（0 = 未计时） */
-    lba_t      page_lba;         /* 本 plane 目标页的**页** LBA（META 比对用） */
-    nand_pba_t page;             /* 本 plane 目标页 PBA（NAND_PBA_INVALID = 本子操作不覆盖本 plane） */
-    nand_pba_t neighbor;         /* Stage 2 邻居页 PBA（NB_READ 提交前算好） */
-    uint8_t    retry_count;      /* 本次恢复已用的读重试次数（观测，收尾 LOGE 用） */
-    uint8_t    planes_recovered; /* 本次 job 恢复成功的 plane 数（观测） */
-    uint8_t    planes_failed;    /* 本次 job 恢复失败的 plane 数（观测） */
+    BYTE  stage;            /* rr_stage_t */
+    BYTE  waiting;          /* 1 = 有一条 RR 命令在飞（等 g_op_callbacks[FTL_OP_READ_RECOVERY]） */
+    BYTE  plane;            /* 当前 plane（0..PLANE_NUM-1）；== PLANE_NUM ⇒ 收尾 */
+    BYTE  attempt;          /* Stage 1 读重试计数（1..RR_MAX_RETRY） */
+    BYTE  neighbor_i;       /* Stage 2 邻居序号（0..RR_NEIGHBOR_ATTEMPTS-1） */
+    BYTE  pending_idx;      /* 被托管的 pending 槽下标（收尾据此释放） */
+    BYTE  first;            /* 本 plane 首个被覆盖 CW 在子操作内的偏移（诊断用 LBA） */
+    BYTE  recovered;        /* 本 plane 是否恢复成功（PLANE_END 结算用） */
+    BYTE  all_ok;           /* 1 = 本 job 覆盖的所有 plane 都恢复成功（收尾状态用） */
+    DWORD stall_ms;         /* 本轮连续「提交不出去」的起点（0 = 未计时） */
+    DWORD page_lba;         /* 本 plane 目标页的**页** LBA（META 比对用） */
+    DWORD page;             /* 本 plane 目标页 PBA（NAND_PBA_INVALID = 本子操作不覆盖本 plane） */
+    DWORD neighbor;         /* Stage 2 邻居页 PBA（NB_READ 提交前算好） */
+    BYTE  retry_count;      /* 本次恢复已用的读重试次数（观测，收尾 LOGE 用） */
+    BYTE  planes_recovered; /* 本次 job 恢复成功的 plane 数（观测） */
+    BYTE  planes_failed;    /* 本次 job 恢复失败的 plane 数（观测） */
 
     rr_port_t  port;      /* 共享服务端口（init 绑定） */
     rr_owner_t owner;     /* 当前被托管的子操作 */
-    uint8_t    has_owner; /* 1 = owner 有效（rr_trigger 登记） */
+    BYTE       has_owner; /* 1 = owner 有效（rr_trigger 登记） */
     int32_t    error;     /* 最近一次 abort 的归因 */
 
     /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 stage/age */
-    uint32_t start_ms;
-    uint32_t log_ms;
+    DWORD start_ms;
+    DWORD log_ms;
 } read_recovery_handle_t;
 
 /* ── 模块 handle（typed 入口） ── */
@@ -193,13 +193,13 @@ typedef struct
 {
     ftl_module_status_t base;
 
-    uint8_t  stage; /* rr_stage_t（观测；外部不要据此驱动） */
-    bool     waiting;
-    bool     all_ok;  /* 本次 job 所有 plane 都恢复成功 */
-    uint8_t  retries; /* 已用读重试次数 */
-    uint8_t  planes_recovered;
-    uint8_t  planes_failed;
-    uint16_t desc_count; /* 保留的 desc 数（compact 机制恒 0） */
+    BYTE stage; /* rr_stage_t（观测；外部不要据此驱动） */
+    bool waiting;
+    bool all_ok;  /* 本次 job 所有 plane 都恢复成功 */
+    BYTE retries; /* 已用读重试次数 */
+    BYTE planes_recovered;
+    BYTE planes_failed;
+    WORD desc_count; /* 保留的 desc 数（compact 机制恒 0） */
 } rr_status_t;
 
 /* rr_init - 绑定端口并复位 handle。 */
@@ -228,7 +228,7 @@ void rr_handle(read_recovery_handle_t *rr, const ftl_bg_info_t *info, rr_status_
  * @param track    per-Block ECC 追踪（&ftl->alloc.blocks[gblock].rr）
  * @param ecc_bits 本次读取的 ECC 纠正 bit 数（取 desc 链全链 CW 的最大值，见 fc_get_cmd_ecc_max）
  */
-void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits);
+void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits);
 
 /* 完成服务函数 ftl_read_recovery_callback 与其余服务函数同处声明（ftl_op.h）——
  * 那里是"g_op_callbacks 各槽"的唯一权威列表，此处不再重复声明。 */
@@ -244,7 +244,7 @@ void rr_record_ecc(rr_ecc_track_t *track, uint8_t ecc_bits);
  * @param gblock    输出：需搬移的全局 Block 编号
  * @return true 需要搬移，false 不需要
  */
-bool rr_check_predictive(const ftl_block_t *blocks, uint16_t max_blocks, uint16_t *gblock);
+bool rr_check_predictive(const ftl_block_t *blocks, WORD max_blocks, WORD *gblock);
 
 /*
  * rr_get_health - 获取 Block 健康状态
@@ -264,7 +264,7 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track);
  * @param gblock 输出：命中的全局 Block 号
  * @return true 命中，false 无
  */
-bool rr_predictive_scan(const ftl_allocator_t *alloc, uint16_t *gblock);
+bool rr_predictive_scan(const ftl_allocator_t *alloc, WORD *gblock);
 
 /*
  * rr_retire_block - 退役慢死块（不再分配新数据，不标坏）

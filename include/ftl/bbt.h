@@ -41,12 +41,12 @@
 
 typedef struct
 {
-    uint32_t magic;                     /* BBT_MAGIC */
-    uint32_t sequence;                  /* 单调递增，最新有效 */
-    uint32_t total_blocks;              /* 总 Block 数 */
-    uint32_t bad_count;                 /* 坏块数 */
-    uint32_t reserved[3];               /* [0] = BBT_FLAG_*；其余写 0 */
-    uint8_t  bad_map[BBT_BITMAP_SIZE];  /* 4096 bit = 512B */
+    DWORD magic;                        /* BBT_MAGIC */
+    DWORD sequence;                     /* 单调递增，最新有效 */
+    DWORD total_blocks;                 /* 总 Block 数 */
+    DWORD bad_count;                    /* 坏块数 */
+    DWORD reserved[3];                  /* [0] = BBT_FLAG_*；其余写 0 */
+    BYTE  bad_map[BBT_BITMAP_SIZE];     /* 4096 bit = 512B */
 } __attribute__((packed)) bbt_header_t; /* 4+4+4+4+12+512 = 540B（无独立 CRC，页完整性由 FC 保证）*/
 
 _Static_assert(sizeof(bbt_header_t) == 540U, "BBT header 布局漂移（期望 540B）");
@@ -144,7 +144,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc);
  * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param do_erase  0 = 只读（非破坏性）；非 0 = 逐块擦除并额外判擦除失败
  */
-void bbt_print_bad_map(ftl_allocator_t *alloc, uint8_t do_erase);
+void bbt_print_bad_map(ftl_allocator_t *alloc, BYTE do_erase);
 
 /*
  * bbt_format_erase - 格式化用的两阶段擦除：先落 BBT，再擦 BBT 池之外的块
@@ -178,7 +178,7 @@ ftl_status_t bbt_format_erase(ftl_allocator_t *alloc);
  * @return FTL_OK（含“已经是 BAD”的幂等早退）；FTL_ERROR 参数非法 / 越界。
  *         ⚠ 已 BAD 时**不重复** `bad_count++`、不重复消耗 Spare、不重复置 dirty。
  */
-ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, uint16_t gblock);
+ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, WORD gblock);
 
 /* bbt_note_dirty - 标记 BBT 有未落盘变更（唯一 dirty 闸门）。
  * 每次置位推进 `dirty_gen`；写 job 用它检测“组 header 之后又标坏”的丢更新。 */
@@ -191,7 +191,7 @@ void bbt_note_dirty(ftl_allocator_t *alloc);
  * @param block    Block 编号
  * @return true 坏块，false 好块
  */
-static inline bool bbt_is_bad(const uint8_t *bad_map, uint16_t block)
+static inline bool bbt_is_bad(const BYTE *bad_map, WORD block)
 {
     ASSERT(block < BBT_MAX_BLOCKS);
 
@@ -212,11 +212,11 @@ static inline bool bbt_is_bad(const uint8_t *bad_map, uint16_t block)
  * @param bad_map  BBT bitmap
  * @param block    Block 编号
  */
-static inline void bbt_set_bad(uint8_t *bad_map, uint16_t block)
+static inline void bbt_set_bad(BYTE *bad_map, WORD block)
 {
     if ((bad_map != NULL) && (block < BBT_MAX_BLOCKS))
     {
-        bad_map[block >> 3] |= (uint8_t)(1U << (block & 7U));
+        bad_map[block >> 3] |= (1U << (block & 7U));
     }
 }
 
@@ -239,12 +239,12 @@ typedef struct
 {
     ftl_module_status_t base;
 
-    uint8_t  phase;     /* BBT_JOB_IDLE / ERASE / WRITE（观测；外部不要据此驱动） */
-    bool     dirty;     /* 是否有未落盘变更 */
-    uint32_t dirty_gen; /* dirty 代际（写飞行期间的新变更） */
-    uint32_t sequence;  /* 本池单调序号 */
-    uint16_t write_idx; /* 池内下一个待写槽 */
-    uint16_t bad_count; /* 当前坏块数 */
+    BYTE  phase;     /* BBT_JOB_IDLE / ERASE / WRITE（观测；外部不要据此驱动） */
+    bool  dirty;     /* 是否有未落盘变更 */
+    DWORD dirty_gen; /* dirty 代际（写飞行期间的新变更） */
+    DWORD sequence;  /* 本池单调序号 */
+    WORD  write_idx; /* 池内下一个待写槽 */
+    WORD  bad_count; /* 当前坏块数 */
 } bbt_status_t;
 
 /*
@@ -284,7 +284,7 @@ void bbt_handle(ftl_allocator_t *alloc, const ftl_bg_info_t *info, bbt_status_t 
  * @param sequence    输出：最新 sequence
  * @return FTL_OK 成功，FTL_ERROR 无有效 BBT
  */
-ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_count, uint32_t *sequence);
+ftl_status_t bbt_load(ftl_allocator_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence);
 
 /*
  * bbt_spare_pool_refill - 从**指定 plane 的** Spare Pool 补充 Free Pool
@@ -299,6 +299,6 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, uint8_t *bad_map, uint32_t *bad_co
  * @param plane  坏块所属 plane（取同 plane 的替换块）
  * @return FTL_OK 补充成功；FTL_ERROR 参数非法 / 该 plane Spare Pool 耗尽（容量自然下降）
  */
-ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, uint8_t plane);
+ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, BYTE plane);
 
 #endif /* FTL_BBT_H */

@@ -1,6 +1,8 @@
 #ifndef PLATFORM_WATCHDOG_H
 #define PLATFORM_WATCHDOG_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -29,7 +31,7 @@ typedef enum
 } storage_wdg_domain_t;
 
 /* 将某个域转换成 required_domains 使用的位图，例如 HOST | NAND | FTL。 */
-#define STORAGE_WDG_DOMAIN_MASK(domain) (1UL << (uint32_t)(domain))
+#define STORAGE_WDG_DOMAIN_MASK(domain) (1UL << (domain))
 
 typedef enum
 {
@@ -53,32 +55,32 @@ typedef struct
      * IWDG 使用 LSI。超时 = (reload + 1) * prescaler / f_LSI；必须大于最长合法
      * 操作并留 LSI 频率误差余量，例如 NAND 擦除、读重试或受控掉电提交。
      */
-    uint32_t iwdg_prescaler;
-    uint32_t iwdg_reload;
+    DWORD iwdg_prescaler;
+    DWORD iwdg_reload;
 
     /*
      * 位图中置位的域是“本周期必需健康”的域。每个置位域必须在自己的 timeout 内
      * 调用 storage_wdg_report_progress()；timeout=0 被视为配置错误并立即判超时。
      */
-    uint32_t required_domains;
-    uint32_t domain_timeout_ms[STORAGE_WDG_DOMAIN_COUNT];
+    DWORD required_domains;
+    DWORD domain_timeout_ms[STORAGE_WDG_DOMAIN_COUNT];
 
     /*
      * WWDG 依赖 PCLK 和严格调度节奏，因此可选。其作用是发现 Supervisor 过快或
      * 过慢运行；IWDG 仍是最终、独立时钟驱动的复位保障。
      */
-    bool     enable_wwdg;
-    uint32_t wwdg_prescaler;
-    uint32_t wwdg_counter;
-    uint32_t wwdg_window;
+    bool  enable_wwdg;
+    DWORD wwdg_prescaler;
+    DWORD wwdg_counter;
+    DWORD wwdg_window;
 
     /*
      * 根据 PCLK1、prescaler、counter、window 算出的软件合法窗口，单位 ms。
      * service() 只会在 min <= elapsed <= max 时刷新 WWDG。min/max 应比理论窗口
      * 略窄，为时钟误差、时间戳粒度和高优先级中断延迟预留余量。
      */
-    uint32_t wwdg_refresh_min_ms;
-    uint32_t wwdg_refresh_max_ms;
+    DWORD wwdg_refresh_min_ms;
+    DWORD wwdg_refresh_max_ms;
 } storage_wdg_config_t;
 
 typedef struct
@@ -89,8 +91,8 @@ typedef struct
     bool                 wwdg_early_warning;                          /* 是否已经收到 WWDG 的 EWI。 */
     storage_wdg_fault_t  fault;                                       /* 首个故障原因，锁存后不被后续故障覆盖。 */
     storage_wdg_domain_t fault_domain;                                /* 首个超时或异常关联的健康域。 */
-    uint32_t             last_progress_ms[STORAGE_WDG_DOMAIN_COUNT];  /* 各域最后前进时刻。 */
-    uint32_t             recovery_attempts[STORAGE_WDG_DOMAIN_COUNT]; /* 每域本次启动的恢复请求次数。 */
+    DWORD                last_progress_ms[STORAGE_WDG_DOMAIN_COUNT];  /* 各域最后前进时刻。 */
+    DWORD                recovery_attempts[STORAGE_WDG_DOMAIN_COUNT]; /* 每域本次启动的恢复请求次数。 */
 } storage_wdg_status_t;
 
 /* 配置 IWDG 与可选 WWDG，并以当前系统毫秒计数作为所有域的初始心跳时刻。 */
@@ -109,7 +111,7 @@ void storage_wdg_service(void);
  * 调度器任务入口：由 btim_scheduler_poll() 在主循环上下文调用。
  * 任务实现属于看门狗模块，main.c 只负责把它装配进系统静态任务表。
  */
-void storage_watchdog_task(void *context, uint32_t now_ms);
+void storage_watchdog_task(void *context, DWORD now_ms);
 
 /* 获取状态快照，供 UART CLI、崩溃转储或遥测读取。 */
 void storage_wdg_get_status(storage_wdg_status_t *status);
@@ -127,11 +129,11 @@ void storage_wdg_wwdg_early_wakeup(void);
 /*
  * ---- port 接口：由 src/platform/<soc>/watchdog_port.c 实现 ----
  */
-bool     watchdog_port_iwdg_init(uint32_t prescaler, uint32_t reload);
-bool     watchdog_port_wwdg_init(uint32_t prescaler, uint32_t counter, uint32_t window);
-void     watchdog_port_iwdg_refresh(void);
-void     watchdog_port_wwdg_refresh(void);
-void     watchdog_port_wwdg_irq_handler(void);
-uint32_t watchdog_port_now_ms(void);
+bool  watchdog_port_iwdg_init(DWORD prescaler, DWORD reload);
+bool  watchdog_port_wwdg_init(DWORD prescaler, DWORD counter, DWORD window);
+void  watchdog_port_iwdg_refresh(void);
+void  watchdog_port_wwdg_refresh(void);
+void  watchdog_port_wwdg_irq_handler(void);
+DWORD watchdog_port_now_ms(void);
 
 #endif /* PLATFORM_WATCHDOG_H */

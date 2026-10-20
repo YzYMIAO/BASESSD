@@ -1,6 +1,8 @@
 #ifndef SSD_FIRMWARE_BOOT_POLICY_H
 #define SSD_FIRMWARE_BOOT_POLICY_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -22,13 +24,13 @@ typedef enum
 
 typedef enum
 {
-    BOOT_POLICY_OK               = 0,
-    BOOT_POLICY_INVALID_ARGUMENT = -1,
-    BOOT_POLICY_CORRUPT          = -2,
-    BOOT_POLICY_INCOMPATIBLE     = -3,
-    BOOT_POLICY_ROLLBACK         = -4,
-    BOOT_POLICY_AUTH_FAILED      = -5,
-    BOOT_POLICY_NO_BOOTABLE_SLOT = -6
+    BOOT_POLICY_OK               = 0U,
+    BOOT_POLICY_INVALID_ARGUMENT = 1U,
+    BOOT_POLICY_CORRUPT          = 2U,
+    BOOT_POLICY_INCOMPATIBLE     = 3U,
+    BOOT_POLICY_ROLLBACK         = 4U,
+    BOOT_POLICY_AUTH_FAILED      = 5U,
+    BOOT_POLICY_NO_BOOTABLE_SLOT = 6U
 } boot_policy_status_t;
 
 /*
@@ -37,21 +39,21 @@ typedef enum
  */
 typedef struct
 {
-    uint32_t magic;
-    uint32_t header_version;
-    uint32_t header_size;
-    uint32_t image_size;
-    uint32_t firmware_version;
-    uint32_t security_version;
-    uint32_t chip_id;
-    uint32_t min_hardware_revision;
-    uint32_t max_hardware_revision;
-    uint32_t load_address;
-    uint32_t entry_address;
-    uint32_t flags;
-    uint8_t  payload_hash[BOOT_SHA256_SIZE];
-    uint8_t  signature[BOOT_SIGNATURE_SIZE];
-    uint32_t header_crc32;
+    DWORD magic;
+    DWORD header_version;
+    DWORD header_size;
+    DWORD image_size;
+    DWORD firmware_version;
+    DWORD security_version;
+    DWORD chip_id;
+    DWORD min_hardware_revision;
+    DWORD max_hardware_revision;
+    DWORD load_address;
+    DWORD entry_address;
+    DWORD flags;
+    BYTE  payload_hash[BOOT_SHA256_SIZE];
+    BYTE  signature[BOOT_SIGNATURE_SIZE];
+    DWORD header_crc32;
 } boot_image_header_t;
 
 /*
@@ -60,51 +62,51 @@ typedef struct
  */
 typedef struct
 {
-    uint32_t magic;
-    uint32_t format_version;
-    uint32_t sequence;
-    uint32_t active_slot;
-    uint32_t pending_slot;
-    uint32_t retry_remaining;
-    uint32_t successful_mask;
-    uint32_t firmware_version[BOOT_SLOT_COUNT];
-    uint32_t crc32;
+    DWORD magic;
+    DWORD format_version;
+    DWORD sequence;
+    DWORD active_slot;
+    DWORD pending_slot;
+    DWORD retry_remaining;
+    DWORD successful_mask;
+    DWORD firmware_version[BOOT_SLOT_COUNT];
+    DWORD crc32;
 } boot_metadata_t;
 
 typedef struct
 {
-    uint32_t chip_id;
-    uint32_t hardware_revision;
-    uint32_t minimum_security_version;
-    uint32_t image_capacity;
-    uint32_t executable_start;
-    uint32_t executable_end; /* 半开区间 [start, end) */
+    DWORD chip_id;
+    DWORD hardware_revision;
+    DWORD minimum_security_version;
+    DWORD image_capacity;
+    DWORD executable_start;
+    DWORD executable_end; /* 半开区间 [start, end) */
 } boot_image_constraints_t;
 
 /* 返回 0 表示签名可信；非 0 表示验证失败。 */
 typedef int (*boot_signature_verify_fn)(const boot_image_header_t *header, void *context);
 
-uint32_t boot_crc32(const void *data, size_t size);
+DWORD boot_crc32(const void *data, size_t size);
 
 void boot_image_header_finalize(boot_image_header_t *header);
 int  boot_image_validate(const boot_image_header_t      *header,
                          const boot_image_constraints_t *constraints,
-                         const uint8_t                   actual_payload_hash[BOOT_SHA256_SIZE],
+                         const BYTE                      actual_payload_hash[BOOT_SHA256_SIZE],
                          boot_signature_verify_fn        verify_signature,
                          void                           *verify_context);
 
-void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_t active_slot, uint32_t active_firmware_version);
+void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_t active_slot, DWORD active_firmware_version);
 void boot_metadata_finalize(boot_metadata_t *metadata);
 int  boot_metadata_is_valid(const boot_metadata_t *metadata);
-int  boot_metadata_select_latest(const boot_metadata_t copies[2], boot_metadata_t *selected, uint32_t *selected_copy);
+int  boot_metadata_select_latest(const boot_metadata_t copies[2], boot_metadata_t *selected, DWORD *selected_copy);
 
 /*
  * 根据镜像验证结果选择本次槽位。函数会先扣减 pending 槽的尝试次数，调用者
  * 必须在启动镜像前将更新后的 metadata 原子地写入另一份元数据副本。
  */
-int boot_policy_select_slot(boot_metadata_t *metadata, const uint8_t slot_bootable[BOOT_SLOT_COUNT], boot_slot_t *selected_slot, int *metadata_changed);
+int boot_policy_select_slot(boot_metadata_t *metadata, const BYTE slot_bootable[BOOT_SLOT_COUNT], boot_slot_t *selected_slot, int *metadata_changed);
 
 /* 主固件完成最低可用自检后调用，并将返回的记录写入 Flash。 */
-int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_t running_slot, uint32_t firmware_version);
+int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_t running_slot, DWORD firmware_version);
 
 #endif /* SSD_FIRMWARE_BOOT_POLICY_H */

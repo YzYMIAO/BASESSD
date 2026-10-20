@@ -17,28 +17,28 @@ static storage_wdg_config_t        g_storage_wdg_config;
 static storage_wdg_status_t        g_storage_wdg_status;
 static storage_wdg_recovery_hook_t g_storage_wdg_recovery_hook;
 /* 上一次成功刷新 WWDG 的时刻，用来判断当前是否已进入允许刷新窗口。 */
-static uint32_t g_storage_wdg_last_wwdg_refresh_ms;
+static DWORD g_storage_wdg_last_wwdg_refresh_ms;
 
 static bool storage_wdg_domain_is_valid(storage_wdg_domain_t domain)
 {
     /* 防止调用方传入损坏的枚举值并越界访问 per-domain 数组。 */
-    return ((uint32_t)domain < (uint32_t)STORAGE_WDG_DOMAIN_COUNT);
+    return (domain < STORAGE_WDG_DOMAIN_COUNT);
 }
 
-static bool storage_wdg_elapsed(uint32_t now_ms, uint32_t since_ms, uint32_t limit_ms)
+static bool storage_wdg_elapsed(DWORD now_ms, DWORD since_ms, DWORD limit_ms)
 {
     /* 毫秒计数约 49 天回绕一次；无符号减法可正确表示短时间间隔。 */
-    return ((uint32_t)(now_ms - since_ms) > limit_ms);
+    return ((now_ms - since_ms) > limit_ms);
 }
 
-static bool storage_wdg_all_required_domains_healthy(uint32_t now_ms, storage_wdg_domain_t *timed_out_domain)
+static bool storage_wdg_all_required_domains_healthy(DWORD now_ms, storage_wdg_domain_t *timed_out_domain)
 {
-    uint32_t index;
+    DWORD index;
 
-    for (index = 0U; index < (uint32_t)STORAGE_WDG_DOMAIN_COUNT; index++)
+    for (index = 0U; index < STORAGE_WDG_DOMAIN_COUNT; index++)
     {
-        uint32_t mask       = STORAGE_WDG_DOMAIN_MASK(index);
-        uint32_t timeout_ms = g_storage_wdg_config.domain_timeout_ms[index];
+        DWORD mask       = STORAGE_WDG_DOMAIN_MASK(index);
+        DWORD timeout_ms = g_storage_wdg_config.domain_timeout_ms[index];
 
         /* 未列入 required_domains 的后台域不影响本次 IWDG 喂狗决定。 */
         if ((g_storage_wdg_config.required_domains & mask) == 0U)
@@ -81,8 +81,8 @@ static void storage_wdg_latch_fault(storage_wdg_domain_t domain, storage_wdg_fau
 
 bool storage_wdg_init(const storage_wdg_config_t *config)
 {
-    uint32_t now_ms;
-    uint32_t index;
+    DWORD now_ms;
+    DWORD index;
 
     /* WWDG 的软件窗口不合法时，拒绝启动，避免“看似启用、实际必然复位”。 */
     if (config == NULL)
@@ -99,7 +99,7 @@ bool storage_wdg_init(const storage_wdg_config_t *config)
     memset(&g_storage_wdg_status, 0, sizeof(g_storage_wdg_status));
     g_storage_wdg_config = *config;
     now_ms               = watchdog_port_now_ms();
-    for (index = 0U; index < (uint32_t)STORAGE_WDG_DOMAIN_COUNT; index++)
+    for (index = 0U; index < STORAGE_WDG_DOMAIN_COUNT; index++)
     {
         g_storage_wdg_status.last_progress_ms[index] = now_ms;
     }
@@ -147,8 +147,8 @@ void storage_wdg_report_progress(storage_wdg_domain_t domain)
 void storage_wdg_service(void)
 {
     storage_wdg_domain_t timed_out_domain = STORAGE_WDG_DOMAIN_COUNT;
-    uint32_t             now_ms;
-    uint32_t             since_wwdg_refresh_ms;
+    DWORD                now_ms;
+    DWORD                since_wwdg_refresh_ms;
 
     /* 未初始化或已锁存故障时，一律不继续喂任何看门狗。 */
     if ((!g_storage_wdg_status.initialized) || (!g_storage_wdg_status.iwdg_feeding))
@@ -183,7 +183,7 @@ void storage_wdg_service(void)
     watchdog_port_iwdg_refresh();
 }
 
-void storage_watchdog_task(void *context, uint32_t now_ms)
+void storage_watchdog_task(void *context, DWORD now_ms)
 {
     (void)context;
     (void)now_ms;

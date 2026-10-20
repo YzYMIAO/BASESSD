@@ -293,6 +293,10 @@ release 运行期拒绝。判别法与例外见 **H14**（`ASSERT` 与 `return` 
 | **H42** | **本仓自定**（2026-10-19 用户要求：内联函数与宏的分层） |
 | **H43** | **本仓自定**（2026-10-19 用户要求：显式强转的必要性） |
 | **H44** | **本仓自定**（2026-10-19 用户要求：强转先查返回值设计） |
+| **H45** | **本仓自定**（2026-10-19 用户要求：实参不承载第二段逻辑） |
+| **H46** | **本仓自定**（2026-10-20 用户要求：状态码一律非负） |
+| **H47** | **本仓自定**（2026-10-20 用户要求：局部结构体声明后逐字段赋值） |
+| **H48** | **本仓自定**（2026-10-20 用户要求：优先用声明宽度 / 有界值 / 赋值转换消除强转） |
 
 **H1 资源申请与释放必须配对。**（华为规则6.5）
 本项目最常返工的一类：三池（命令/描述符/缓冲）、op release 归属（`SYNC_WAIT` 不 release，
@@ -323,9 +327,17 @@ release 运行期拒绝。判别法与例外见 **H14**（`ASSERT` 与 `return` 
 
 **H8 禁止 `goto`，唯一例外是统一错误出口。**（华为规则2.8）见 §四。
 
-**H9 用精确宽度整数类型。**（华为建议4.6）
-本项目现状即事实标准：`src/` 下 `uint32_t`/`uint8_t` 约 2500 处，`DWORD` 别名仅 25 处。
-`DWORD`/`WORD`/`BYTE`（`common/ssd_types.h`）是 FC 命令/描述符位域的历史遗留，**新代码不要再用**。
+**H9 固定宽度整数统一用项目别名 `BYTE / WORD / DWORD / QWORD`。**（华为建议4.6 + 本仓 2026-10-20 定稿）
+- 项目代码（`src/` / `include/`，非第三方）统一用 `BYTE/WORD/DWORD/QWORD`
+  （`include/common/ssd_types.h`，分别直接 `typedef` 自 `uint8_t/uint16_t/uint32_t/uint64_t`），
+  **不再直接写 `uint8_t/...`**；小写 `uint8/16/32/64` 别名已删除（C9：同一语义只允许一套坐标）。
+- **不设二级地址别名**：`lba_t` / `nand_paa_t` / `nand_pba_t` 已删除，逻辑 LBA、芯片 PAA、
+  FTL PBA 一律直接写 `DWORD`（32-bit 地址字）。容量口径：32-bit LBA × 4 KiB AU
+  = **16 TiB**，覆盖消费级容量；本仓当前 IU=512 B 时对应 2 TiB。
+- **第三方/厂商边界**（`third_party/`、CMSIS/HAL、`src/platform/stm32h7r3/`）保持其原生
+  `uint*_t`；跨边界按值传递即可（别名与 `uint*_t` 是同一类型，不需要强转）。
+- 头文件使用别名必须 `#include "ssd_types.h"`（裸名，H41）。它是 freestanding 头，只依赖
+  `<stdint.h>`/`<stdbool.h>`，不会把 libc 拉进 FTL 的 include 闭包。
 
 **H10 全局可变状态必须单点修改。**（华为建议4.1 + 原则4.3 改写）
 嵌入式静态分配是常态（`g_ftl[]` 等），「少用全局变量」不适用；适用的是**唯一闸门**——
@@ -445,6 +457,8 @@ ISR 只做「置完成标志 / 搬数据」，重活留给主循环（本仓 FC 
 本仓已有实例：§3.2 的 `expected_byte` 用 `(block << 8 | page << 4 | plane)` 后 `(uint8_t)` 截断
 ⇒ **block 参数完全不影响结果**，而 102 与 100 **碰巧截断相同** ⇒ 测试碰巧通过。
 **判据**：凡「值域放得下但类型放不下」的赋值，必须有显式 `(uint8_t)` 或先 `& MASK`。
+⚠ H48 是其落地细则：**目标本身已是窄类型**时，赋值转换就是那次显式截断，不必再写同宽 cast；
+H22 约束的是**表达式内部**（移位 / 乘法 / 比较前）与**不可信来源**的截断。
 
 **H23 移位量必须小于类型位宽；位运算只用于无符号类型。**（MISRA Rule 12.2 + 10.1）
 `x << n` 中 `n >= 位宽` 是 **UB**；对有符号负数移位同样是 UB。
@@ -621,7 +635,8 @@ ISR 只做「置完成标志 / 搬数据」，重活留给主循环（本仓 FC 
 - ⚠ 本仓未开 `-Wconversion` / `-Wsign-conversion`；判据是「有没有信息损失」，
   不是「编译器是否告警」。
 - **审视方法**：review 时每个显式强转必须能回答「它损失/改变了什么」；答不出就删。
-  典型可删：容量宏上的 `(uint16_t)`、字段类型已匹配的 `(uint32_t)`。
+  典型可删：容量宏上的 `(uint16_t)`、字段类型已匹配的 `(uint32_t)`、目标已是同宽的窄化 cast
+  （双重截断，见 H48）。
   典型保留：`(uint16_t)(a + b)`（整型提升后赋回窄类型）、`(unsigned)u16`（`%u` ABI）。
 
 **H44 强转先查被调方：调用点反复出现的窄化强转，多半是返回值类型设计过宽。**
@@ -647,6 +662,8 @@ ISR 只做「置完成标志 / 搬数据」，重活留给主循环（本仓 FC 
 - **与 H22 / H43 的关系**：H22 要求「窄化必须显式」；H44 补充「显式的位置应在生产者，
   不是每个消费者」。H43 判单个强转该不该留；H44 判「为什么会有这个强转」。
 - **与 C9 同源**：同一语义的转换只允许一个漏斗；类型窄化也是转换。
+- **优先改声明而不是加 cast**：同一个局部变量在多个使用点被窄化 ⇒ 先看它的声明宽度是否
+  本就不该那么窄（H48 的消除顺序 ①）。
 - ⚠ **不要为了消强转而过度收窄**：没有自然上界的量（计数 / 容量 / 地址）保持宽类型；
   也不要用位域作为返回值。
 - **printf 的格式匹配是例外，但要分清两种**（2026-10-19）：
@@ -663,7 +680,7 @@ ISR 只做「置完成标志 / 搬数据」，重活留给主循环（本仓 FC 
 三元/逻辑式、`ftl_topo_dim(...)`、`*port->total_writes`、`allocator_closed_at(...)->field`
 之类。是 ⇒ 先在调用点之前建局部变量（H35 就近声明），再传名字。
 
-- 端口装配：`const migrate_port_t port = {...}; migrate_init(h, &port);`
+- 端口装配：先声明 `migrate_port_t port`、逐字段赋值（H47），再 `migrate_init(h, &port);`。
 - 端口分发表：`const x_port_t *port = &h->port;`，不反复写 `h->port.ctx` / `h->port.fn`。
 - 嵌套调用 / 下标 / 解引用：`const uint16_t gblock = ftl_pba_gblock(pba);`
 - 装配类长函数按模块拆短 helper（`ftl_bind_<module>_port()`），主函数只留一行调用。
@@ -673,6 +690,90 @@ ISR 只做「置完成标志 / 搬数据」，重活留给主循环（本仓 FC 
 临时值，**不产生任何运行期收益**。反例（本轮已清理）：`migrate_init(h, &(migrate_port_t){...})`、
 `metadata_dir_compact_victim(...)` 里塞 `allocator_closed_at(...)->plane_blocks`、
 `l2p_flush_kick_owner(..., s_l2p_flush_max[info->load_level])`。
+
+### 5.10 状态码取值（H46）
+
+**H46 返回值状态码一律非负：0 = 成功/默认，其余为具名非负码；禁止 `-1/-2` 错误码。**
+（本仓自定，2026-10-20 用户要求）
+
+- **范围（第一轮）**：状态枚举与步进枚举（`ftl_status_t` / `ssd_status_t` /
+  `fc_status_t` / `boot_policy_status_t` / `md_compact_step_t` / `md_anchor_step_t` /
+  `cp_flush_step_t` / `jrn_truncate_step_t` / `rr_plane_step_t`），以及返回这些码的
+  函数（`ssd_controller_init/submit`、`ssd_request_split`、`ssd_ftl_boot`）。
+- **范围（第二轮，全项目非第三方）**：
+  - **字节数/索引 + 显式哨兵**：`uart_log_write` → `uint32_t` 字节数，错误
+    `UART_LOG_INVALID`（`UINT32_MAX`）；`log_write/log_vprintf/log_printf` →
+    `uint32_t` 长度，错误 `LOG_WRITE_INVALID`；CLI 解析 → `bool`；tokenizer 返回
+    `uint32_t` + `UART_CLI_ARGC_INVALID`；`strStr` / `canCompleteCircuit` 返回
+    `uint32_t` + `UINT32_MAX`。
+  - **bool + 出参**：`uart_log_flush` / `log_flush` → `bool`；`usart_port_tx_dma_start`
+    → `bool`；`fc_bch_decode` → `bool` + `*out_nerr`（原「错误数 or -1」）。
+- **分派方式**：按**具名常量**比较（`== FTL_AGAIN` / `== UART_LOG_INVALID`），禁止
+  `status < 0` / `status >= 0` 这类依赖符号的判据——值域改了以后编译期完全无声。
+- **已有 0 语义的步进枚举不重排**：`MD_COMPACT_BACKPRESSURE` / `MD_ANCHOR_CLEAN` /
+  `CP_FLUSH_PENDING` / `JRN_TRUNC_ALREADY` / `RR_PLANE_SKIP` 等 0 值保持原义
+  （zero-init 语义不变）；把原来的负值成员改为**下一个未用正数**，不要整体平移。
+- **明确例外（不是状态码，不改）**：
+  - libc ABI 钩子：newlib `_write()` 必须返回 `int`，失败 `-1`（tty 语义）。
+  - 比较器：`cmp(a,b)` 的 `-1/0/1` 是**排序契约**，不是错误码。
+  - 数学约定：BCH `deg(0) = -1`（零多项式次数无定义）；BM 内部 `pp = -1`、
+    数组算法的 `first_low_index = -1` 是**局部算术/下标**，不是返回值。
+  - 第三方/厂商代码：`third_party/`、CMSIS/HAL、`tests/framework/munit`、
+    `src/platform/stm32h7r3/`（未构建的备用平台）保持上游写法。
+- **证据**：debug 档 DWARF 可直接核对枚举值：
+  `arm-none-eabi-readelf --debug-dump=info build/firmware/debug/bin/debug.elf | grep -A1 FTL_ERROR`。
+
+### 5.11 结构体初始化（H47）
+
+**H47 局部结构体一律「先声明、后逐字段赋值」；初始化列表只用于数组表与文件级/全局结构体。**
+（本仓自定，2026-10-20 用户要求）
+
+- **局部（函数内）结构体**：
+  - 禁止 `const wbuf_trigger_t trigger = {.kind = ..., ...};`
+  - 禁止赋值式复合字面量 `task->request = (nand_fc_request_t){...};`
+  - 禁止局部 `T x = {0};` —— 改为 `T x; memset(&x, 0, sizeof(x));`（含 HAL 初始化结构体）。
+  - 正确形态：声明、`memset`（需要零值时）、逐字段赋值，再使用/传指针。
+- **允许初始化列表的场合**：
+  - **数组表**：`const nand_operation_map_t g_nand_operation_map[] = {...};`
+  - **文件级 / 全局 / `static` 结构体**：`static const ftl_page_cfg_t s_page_cfg_raw = {...};`
+  - **位域自检等编译期数据**：需要常量表达式的表项。
+- **理由**：
+  - 初始化列表**静默补零**未写字段——读者看不出「这个字段是刻意 0」还是「漏了」；
+    逐字段赋值让**缺失字段变成可见事实**，也让「结构体新增字段后忘了初始化」暴露在 diff 里。
+  - 复合字面量把「构造」和「赋值/传参」压在同一行（与 H45 同源），调用点要先解析字面量
+    才看得到调用本身；先落局部变量则调用点只留名字。
+  - 局部 `{0}` 与 `memset` 语义相同，但后者明确写出「整块清零」，且不会因结构体含柔性
+    数组成员或后续加字段而改变初始化范围。
+- **例外**：`third_party/`、CMSIS/HAL 厂商示例、`src/platform/stm32h7r3/`（未构建的备用
+  平台）保持上游写法；只读常量表不受「逐字段赋值」约束（上面已列）。
+
+### 5.12 强转最小化（H48）
+
+**H48 优先用「声明宽度 / 有界值 / 赋值转换」消除强转，不要在每个使用点重复 cast。**
+（本仓自定，2026-10-20 用户要求）
+
+- **消除顺序**：
+  1. **改声明**：局部循环变量 / 偏移量 / 环形索引反复被窄化时，直接声明成 `DWORD` / `WORD`
+     （例：USART TX 的 `tail` / `length` 由 `WORD` 改 `DWORD`，同时消掉三处 cast 与
+     `?:` 的 signedness 告警）。
+  2. **有界值可隐式截断**：枚举常量、`x % N`、`x & MASK`、已做范围检查的值，在赋值 / 实参处
+     由 C 的转换完成截断，不再写 `(BYTE)` / `(WORD)`。
+  3. **外层 cast 冗余则删**：目标类型已能容纳（宽化），或目标本来就窄于 cast 类型时，
+     外层 cast 与赋值转换重复，删。
+- **必须保留的 cast**（判据 = 它改变了**中间表达式类型**或 **ABI**）：
+  - 指针↔整数（`(DWORD)buffer`、(uintptr_t)`）；
+  - printf 可变参数 ABI：`%u` 配 `BYTE/WORD/enum/bool` 的 `(unsigned)`；`%lu` 配
+    `QWORD` / `size_t` / `uintptr_t` 的 `(unsigned long)`（加宽到 ABI 类型）。
+    ⚠ **`DWORD` 配 `%lu` 的 `(unsigned long)` 是同型转换**（本工具链 `DWORD` ≡
+    `unsigned long`），属于冗余，删；
+  - **移位 / 乘法之前**的加宽：`(DWORD)id[1] << 24`、`(DWORD)swap_bits(...) << 24`、
+    `(QWORD)x * 1000`；
+  - 有符号 / 无符号在 API 边界的转换（如 `(DWORD)start` 与 `UINT32_MAX` 同处一个 `?:`）；
+  - **不可信输入**（CLI / 介质读回）的窄化：保留显式 cast 或先校验（H22 / H29）。
+- **不要为了消 cast 过度收窄 / 加宽声明**：没有自然上界的量保持宽类型（H44）。
+- **判据**：删掉后语义不变且不产生新告警 ⇒ 删；改变中间运算宽度 / 符号 / ABI ⇒ 留。
+- 与 H22（显式窄化）、H43（强转的必要性）、H44（先查返回值宽度）同源：H22 管「表达式内部
+  或不可信来源的截断必须可见」，H48 管「目标类型已发生的转换不必再手写一遍」。
 
 ### 条目去向表（避免以后再翻一遍华为规范）
 
@@ -814,3 +915,7 @@ FC 层已有完整判据体系：**判据 9**（配置错误的后果是静默�
 | 2026-10-19 | 新增 **H44**（强转先查被调方：调用点反复的窄化强转 = 返回值类型过宽；审视顺序 = 先自然值域、后 API；同步修正 `pba_to_*` getter 为自然宽度并删除 16 处调用点强转） | 用户：「审视强转是否真的有必要，有可能原函数的返回值设计就不规范，导致调用需要强转，建议加上相应规则」 |
 | 2026-10-19 | 新增 **R11**（缺陷与判定结论必须当场登记；五要素缺一即未登记；说不出后果归 §七 S 不进表）；§八 速查表该行标为「R11 登记处」；`c-review` skill 输出格式挂一条指针 | 用户：「把待做和缺陷都需要登记写入规则避免重复分析浪费 token」。起因：wbuf 审查的三处观察只在对话里说了、没登记，用户追问「登记了没有」 |
 | 2026-10-19 | 从 memory 固化反馈类规则：新增 **R12**（硬件/协议断言先查原文）、**H45**（实参不得承载第二段逻辑，先落局部变量 / 拆短 helper）、**P7~P9**（一次性改完 / 机械改词批量替换 / 「看效果」归用户）；**H43/H44** 补实测口径（本工具链 `uint32_t` 就是 `unsigned long` ⇒ `%lu` 删 `(unsigned long)`；`%u` 配 `uint8_t/uint16_t/enum/bool` 的 `(unsigned)` 是格式匹配，保留）；**R2** 补 UT 测试源归属（冻结/既有错误如实报告，不为编过回退生产代码） | 用户：「获取记忆体中的东西，把相应规则写入 claude.md 之中」。对应 memory：`no-inline-struct-literals-as-args` / `no-unverified-protocol-claims` / `user-prefers-one-shot-fixes` / `user-prefers-batch-replace` / `user-owns-effect-observation` / `ftl-refactor-ut-frozen` / `no-gratuitous-casts-in-print` |
+| 2026-10-20 | 新增 **H46**（状态码一律非负；0=成功/默认，禁止 `-1/-2`；步进枚举保持 0 语义、原负值改为下一个未用正数；`status < 0` 类判据禁止）；第一轮：`ftl_status_t` / `ssd_status_t` / `fc_status_t` / `boot_policy_status_t` / 5 个步进枚举改为非负，`ssd_controller_init/submit`、`ssd_request_split`、`ssd_ftl_boot` 返回类型同步为枚举。第二轮（用户要求「非第三方代码同一风格」）：`uart_log_write`/`log_write` 改 `uint32_t`+`UINT32_MAX` 哨兵，`uart_log_flush`/`log_flush`/`usart_port_tx_dma_start` 改 `bool`，`fc_bch_decode` 改 `bool`+出参，CLI 解析改 `bool`、tokenizer 改 `uint32_t`+`UART_CLI_ARGC_INVALID`，`strStr`/`canCompleteCircuit` 改 `uint32_t`+`UINT32_MAX`；libc `_write`/比较器/数学 `deg(0)`/厂商平台列为明确例外 | 用户：「再做一轮，把本项目非第三方的代码都改为同一个风格」 |
+| 2026-10-20 | 新增 **H47**（局部结构体先声明、后逐字段赋值；初始化列表只用于数组表与文件级/全局结构体；局部 `{0}` 改 `memset`；复合字面量同禁）；`fc.c`/`fc_queue.c`/`nand_dispatch*.c`/`mt29f___g08a.c`/`ftl_config.h`/`allocator.h`/`stm32h743` 平台端口按此收敛，`nand_dispatch_tables.c` 新增 `req_init()` 统一 request 构造 | 用户：「这种直接在结构体中赋值的只有在数组表和全局结构体初始化时使用呀」 |
+| 2026-10-20 | 新增 **H48**（强转最小化：优先改声明宽度 → 有界值隐式截断 → 删外层冗余 cast；指针/printf ABI/移位前加宽/边界符号转换保留）；`src/` + `include/` 的 token 计数：`(BYTE)` 399→2、`(WORD)` 164→15、`(DWORD)` 302→69、`(unsigned long)` 120→21；USART TX 的 `tail/length` 由 `WORD` 改 `DWORD` 消掉 `?:` 符号告警；剩余强转均为指针↔整数、`sizeof`、移位/乘前加宽、printf ABI、QWORD/`size_t`→`%lu`、厂商 BSP 宏或不可信输入窄化；`(uint*_t)` 仅剩未构建的 `stm32h7r3` 备用平台 | 用户：「当前代码中好多强转都是没必要的，有写是把变量声明尺寸变一下就能很好的规避，而有些可以隐式截断」 |
+| 2026-10-20 | **H9 改向**：固定宽度整数统一用 `BYTE/WORD/DWORD/QWORD`（`ssd_types.h` 直接 typedef 自 `uint*_t`），项目代码不再直接写 `uint8_t/...`；小写 `uint8/16/32/64` 别名已删除；`src/` + `include/` 批量替换 4210 处，补齐 `ssd_types.h` 裸名 include；第三方/HAL/厂商平台保持 `uint*_t`。**二级地址别名 `lba_t` / `nand_paa_t` / `nand_pba_t` 同步删除**，`src/` + `include/` + `tests/` 491 处直接改 `DWORD`（32-bit 地址字；AU=4 KiB 时覆盖 16 TiB） | 用户：「好现在把这个用起来……然后在代码中用起来」；「这个可以删掉了」；「把 lba_t nand_paa_t nand_pba_t 这种别名去掉，直接用 DWORD」 |

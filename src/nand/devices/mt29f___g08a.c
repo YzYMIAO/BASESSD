@@ -27,6 +27,7 @@
 #include "nand_fmc.h"
 
 #include <stddef.h>
+#include <string.h>
 
 /* 全局 HAL NAND 句柄：生命周期从 nand_init 起，供 FMC 初始化/时序更新复用 */
 static NAND_HandleTypeDef g_nand_handle;
@@ -133,13 +134,13 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
 {
     /* FMC kernel clock period in ns, fixed at compile time for STM32H743
      * 220MHz 周期 4.55ns，保守取整到 5ns（偏慢，安全方向） */
-    const uint32_t hclk_ns = 5U;
+    const DWORD hclk_ns = 5U;
 
 #    define CEIL_DIV(a, b) (((a) + (b)-1U) / (b)) /* 向上取整除法（本函数内局部宏，末尾 undef） */
 
     /* max(tCLS, tALS, tCS) → SetupTime：命令/地址建立窗口取三者最大 */
     {
-        uint32_t max_ns = onfi->t_cls_ns;
+        DWORD max_ns = onfi->t_cls_ns;
         if (onfi->t_als_ns > max_ns)
         {
             max_ns = onfi->t_als_ns;
@@ -148,22 +149,22 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
         {
             max_ns = onfi->t_cs_ns;
         }
-        pcc->SetupTime = (uint8_t)CEIL_DIV(max_ns, hclk_ns);
+        pcc->SetupTime = CEIL_DIV(max_ns, hclk_ns);
     }
 
     /* max(tRP, tWP) → WaitSetupTime：读/写脉冲低电平宽度取最大 */
     {
-        uint32_t max_ns = onfi->t_rp_ns;
+        DWORD max_ns = onfi->t_rp_ns;
         if (onfi->t_wp_ns > max_ns)
         {
             max_ns = onfi->t_wp_ns;
         }
-        pcc->WaitSetupTime = (uint8_t)CEIL_DIV(max_ns, hclk_ns);
+        pcc->WaitSetupTime = CEIL_DIV(max_ns, hclk_ns);
     }
 
     /* max(tCH, tALH, tCLH, tDH) → HoldSetupTime：各保持时间取最大 */
     {
-        uint32_t max_ns = onfi->t_ch_ns;
+        DWORD max_ns = onfi->t_ch_ns;
         if (onfi->t_alh_ns > max_ns)
         {
             max_ns = onfi->t_alh_ns;
@@ -176,15 +177,15 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
         {
             max_ns = onfi->t_dh_ns;
         }
-        pcc->HoldSetupTime = (uint8_t)CEIL_DIV(max_ns, hclk_ns);
+        pcc->HoldSetupTime = CEIL_DIV(max_ns, hclk_ns);
     }
 
     /* HiZSetupTime：写方向总线高阻窗口。ST 官方式：
      *     HiZ × tHCLK ≥ max(tCS, tCLS, tALS) + (tWP − tDS)
      * ⚠ 与读方向的 tRHZ 无关（早期误用 tRHZ，已更正）。 */
     {
-        uint32_t max_ns = onfi->t_cs_ns;
-        uint32_t wp_ds  = (onfi->t_wp_ns > onfi->t_ds_ns) ? ((uint32_t)onfi->t_wp_ns - (uint32_t)onfi->t_ds_ns) : 0U;
+        DWORD max_ns = onfi->t_cs_ns;
+        DWORD wp_ds  = (onfi->t_wp_ns > onfi->t_ds_ns) ? (onfi->t_wp_ns - onfi->t_ds_ns) : 0U;
 
         if (onfi->t_cls_ns > max_ns)
         {
@@ -194,7 +195,7 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
         {
             max_ns = onfi->t_als_ns;
         }
-        pcc->HiZSetupTime = (uint8_t)CEIL_DIV(max_ns + wp_ds, hclk_ns);
+        pcc->HiZSetupTime = CEIL_DIV(max_ns + wp_ds, hclk_ns);
     }
 
 #    undef CEIL_DIV
@@ -212,12 +213,12 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
  *         后调用 nand_engine_execute 阻塞执行。
  *         契约：仅初始化阶段（armed==0）可调，见下 ASSERT。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *request, nand_fc_completion_t *completion)
+nand_result_t nand_fc_execute(BYTE operation, const nand_fc_request_t *request, nand_fc_completion_t *completion)
 {
     const nand_operation_map_t *map;
     nand_command_request_t      command_request;
     nand_command_completion_t   command_completion;
-    uint8_t                     status;
+    BYTE                        status;
 
     /* 入参前置条件由调用者保证（本文件内 typed 包装 / nand_init） */
     ASSERT(operation < OP_COUNT);
@@ -233,10 +234,13 @@ nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *reques
         return NAND_RESULT_INVALID_ARGUMENT;
     }
 
-    command_request = (nand_command_request_t){
-        operation, request->column, {0U}, request->data, request->data_length};
+    memset(&command_request, 0, sizeof(command_request));
+    command_request.operation   = operation;
+    command_request.column      = request->column;
+    command_request.buffer      = request->data;
+    command_request.data_length = request->data_length;
     /* 行地址按 NAND_PLANE_MAX 整体搬运，不写死 plane 下标（H39）。 */
-    for (uint8_t plane = 0U; plane < NAND_PLANE_MAX; plane++)
+    for (BYTE plane = 0U; plane < NAND_PLANE_MAX; plane++)
     {
         command_request.row[plane] = request->row[plane];
     }
@@ -258,10 +262,10 @@ nand_result_t nand_fc_execute(uint8_t operation, const nand_fc_request_t *reques
  *     - engine.backend 由调用者（nand_dispatch_task_load）绑定，恒非空（前置条件断言）。
  *     - nand_engine_start 末尾即 step 一次：无 busy 阶段命令直接完成。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operation, const nand_fc_request_t *request)
+nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, const nand_fc_request_t *request)
 {
     const nand_operation_map_t *map;
-    uint8_t                     result;
+    BYTE                        result;
 
     /* 入参前置条件由调用者保证（nand_dispatch 由已校验的 task 发起） */
     ASSERT(transaction != NULL);
@@ -284,14 +288,17 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
              (const void *)request->data,
              (unsigned)request->data_length);
 
-    transaction->request = (nand_command_request_t){
-        operation, request->column, {0U}, request->data, request->data_length};
+    memset(&transaction->request, 0, sizeof(transaction->request));
+    transaction->request.operation   = operation;
+    transaction->request.column      = request->column;
+    transaction->request.buffer      = request->data;
+    transaction->request.data_length = request->data_length;
     /* 行地址按 NAND_PLANE_MAX 整体搬运，不写死 plane 下标（H39）。 */
-    for (uint8_t plane = 0U; plane < NAND_PLANE_MAX; plane++)
+    for (BYTE plane = 0U; plane < NAND_PLANE_MAX; plane++)
     {
         transaction->request.row[plane] = request->row[plane];
     }
-    transaction->completion = (nand_command_completion_t){0};
+    memset(&transaction->completion, 0, sizeof(transaction->completion));
     /* engine.backend 由 nand_dispatch_task_load 随事务绑定（全工程唯一写点，恒非空）；
      * 未绑定属调用者违约，按断言纪律转 ASSERT 而非静默回退 */
     ASSERT(transaction->engine.backend != NULL);
@@ -317,7 +324,7 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, uint8_t operatio
  * -------------------------------------------------------------------- */
 nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *completion)
 {
-    uint8_t result;
+    BYTE result;
 
     /* 调用者只在事务 active 时推进（nand_dispatch.c 已先判 active） */
     ASSERT(transaction != NULL);
@@ -342,7 +349,11 @@ nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completio
  * -------------------------------------------------------------------- */
 nand_result_t nand_fc_reset(nand_fc_completion_t *completion)
 {
-    const nand_fc_request_t request = {.column = 0U, .row = {0U}, .data = NULL, .data_length = 0U};
+    nand_fc_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.column      = 0U;
+    request.data        = NULL;
+    request.data_length = 0U;
 
     return nand_fc_execute(OP_RESET, &request, completion);
 }
@@ -353,11 +364,16 @@ nand_result_t nand_fc_reset(nand_fc_completion_t *completion)
  *   参数：id —— 输出缓冲（≥5 字节）；completion —— 状态。
  *   返回：NAND_RESULT_OK / 错误码。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion)
+nand_result_t nand_fc_read_id(BYTE id[5], nand_fc_completion_t *completion)
 {
-    const nand_fc_request_t request = {.column = 0U, .row = {0U}, .data = id, .data_length = 5U};
-
     ASSERT(id != NULL);
+
+    nand_fc_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.column      = 0U;
+    request.data        = id;
+    request.data_length = 5U;
+
     return nand_fc_execute(OP_READ_ID, &request, completion);
 }
 
@@ -368,11 +384,16 @@ nand_result_t nand_fc_read_id(uint8_t id[5], nand_fc_completion_t *completion)
  *   返回：NAND_RESULT_OK / 错误码。
  *   实现要点：column / row 恒 0——ECh 无地址语义（uop 序列只有 COLUMN_0 = 0）。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_read_parameter_page(uint8_t page[NAND_ONFI_PARAM_PAGE_SIZE], nand_fc_completion_t *completion)
+nand_result_t nand_fc_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_fc_completion_t *completion)
 {
-    const nand_fc_request_t request = {.column = 0U, .row = {0U}, .data = page, .data_length = NAND_ONFI_PARAM_PAGE_SIZE};
-
     ASSERT(page != NULL);
+
+    nand_fc_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.column      = 0U;
+    request.data        = page;
+    request.data_length = NAND_ONFI_PARAM_PAGE_SIZE;
+
     return nand_fc_execute(OP_READ_PARAMETER_PAGE, &request, completion);
 }
 
@@ -383,11 +404,16 @@ nand_result_t nand_fc_read_parameter_page(uint8_t page[NAND_ONFI_PARAM_PAGE_SIZE
  *   返回：NAND_RESULT_OK / 错误码。
  *   实现要点：column 复用为 feature 地址，data 长度固定 4。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_set_features(uint8_t feature_address, const uint8_t feature_data[4], nand_fc_completion_t *completion)
+nand_result_t nand_fc_set_features(BYTE feature_address, const BYTE feature_data[4], nand_fc_completion_t *completion)
 {
-    const nand_fc_request_t request = {.column = feature_address, .row = {0U}, .data = (uint8_t *)feature_data, .data_length = 4U};
-
     ASSERT(feature_data != NULL);
+
+    nand_fc_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.column      = feature_address;
+    request.data        = (BYTE *)feature_data;
+    request.data_length = 4U;
+
     return nand_fc_execute(OP_SET_FEATURES, &request, completion);
 }
 
@@ -405,7 +431,7 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
 {
     /* 器件总容量（MiB）= 页主区 × 页/块 × 块/单元 × 逻辑单元。
      * 本器件 = 2^29 B；>4 GiB 器件在 32 位 unsigned long 下会溢出（本工程只跑 MT29F4G08）。 */
-    unsigned long capacity_mib = (unsigned long)info->data_bytes_per_page * info->pages_per_block * info->blocks_per_unit *
+    unsigned long capacity_mib = info->data_bytes_per_page * info->pages_per_block * info->blocks_per_unit *
                                  info->logical_units / (1024UL * 1024UL);
 
     LOGI("[NAND] ONFI sig=%c%c%c%c rev=0x%04X model=%s\r\n",
@@ -417,12 +443,12 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
          info->model);
     LOGI("[NAND] ONFI %luMiB page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X(C%u/R%u) bitcell=%u\r\n",
          capacity_mib,
-         (unsigned long)info->data_bytes_per_page,
+         info->data_bytes_per_page,
          (unsigned int)info->spare_bytes_per_page,
-         (unsigned long)info->data_bytes_per_partial_page,
+         info->data_bytes_per_partial_page,
          (unsigned int)info->spare_bytes_per_partial_page,
-         (unsigned long)info->pages_per_block,
-         (unsigned long)info->blocks_per_unit,
+         info->pages_per_block,
+         info->blocks_per_unit,
          (unsigned int)info->logical_units,
          (unsigned int)info->address_cycles,
          (unsigned int)info->column_cycles,
@@ -465,13 +491,16 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
  *          nand_fc_read_parameter_page}
  *   流程图见 docs/design/fc_nand_design.md §22（图 16）。
  * -------------------------------------------------------------------- */
-uint8_t nand_init(void)
+BYTE nand_init(void)
 {
-    FMC_NAND_PCC_TimingTypeDef common_timing    = {0};
-    FMC_NAND_PCC_TimingTypeDef attribute_timing = {0};
+    FMC_NAND_PCC_TimingTypeDef common_timing;
+    FMC_NAND_PCC_TimingTypeDef attribute_timing;
     nand_fc_completion_t       completion;
-    uint8_t                    id[5];
-    uint8_t                    result;
+    BYTE                       id[5];
+    BYTE                       result;
+
+    memset(&common_timing, 0, sizeof(common_timing));
+    memset(&attribute_timing, 0, sizeof(attribute_timing));
 
     /* ── Step 1: FMC 句柄 + PCC 时序（纯软件，尚未碰硬件）──
      * Bank3 / 8 位总线 / ECC 关闭；时序先给 power-on 默认 Mode 0 的保守值。 */
@@ -521,21 +550,19 @@ uint8_t nand_init(void)
         LOGE("[NAND] HAL_NAND_Init failed\r\n");
         return NAND_RESULT_OPERATION_FAILED;
     }
-    LOGI("[NAND] FMC ready, R/B#=%u\r\n",
-         (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT,
-                                        NAND_RB_GPIO_PIN));
+    LOGI("[NAND] FMC ready, R/B#=%u\r\n", (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN));
 
     {
         /* ── Step 3: FMC 后端实例（单 bank：全 LUN 共享窗口/时序） ──
          * 数据/命令/地址窗口 = FMC_BASE | 0 / A16 / A17。
          * FMC 时序寄存器是 bank 级，同 bank 各 LUN 共享窗口与时序，
          * 故一个后端实例即够——无需按 [CH][CE][LUN] 循环分化。 */
-        const nand_fmc_config_t fmc_config = {
-            .data    = (volatile uint8_t *)NAND_FMC_BASE_ADDR,
-            .command = (volatile uint8_t *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET),
-            .address = (volatile uint8_t *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET),
-            .timing  = g_nand_timing_slow,
-        };
+        nand_fmc_config_t fmc_config;
+        memset(&fmc_config, 0, sizeof(fmc_config));
+        fmc_config.data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
+        fmc_config.command = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET);
+        fmc_config.address = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET);
+        fmc_config.timing  = g_nand_timing_slow;
 
         if (nand_fmc_init(&fmc_config) != NAND_RESULT_OK)
         {
@@ -571,14 +598,12 @@ uint8_t nand_init(void)
     result = nand_fc_read_id(id, &completion);
     if (result != NAND_RESULT_OK)
     {
-        LOGE("[NAND] read ID failed, result=0x%02X status=0x%02X\r\n",
-             (unsigned int)result,
-             (unsigned int)completion.nand_status);
+        LOGE("[NAND] read ID failed, result=0x%02X status=0x%02X\r\n", (unsigned int)result, (unsigned int)completion.nand_status);
         return result;
     }
     LOGI("[NAND] ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0], (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3], (unsigned int)id[4]);
     /* 拼 id[1..4]（跳过厂商字节 id[0]=0x2C）与宏值比较，见 nand/devices/mt29f___g08a.h */
-    if ((((uint32_t)id[1] << 24U) | ((uint32_t)id[2] << 16U) | ((uint32_t)id[3] << 8U) | id[4]) != NAND_CHIP_ID)
+    if ((((DWORD)id[1] << 24U) | ((DWORD)id[2] << 16U) | ((DWORD)id[3] << 8U) | id[4]) != NAND_CHIP_ID)
     {
         LOGE("[NAND] unexpected ID\r\n");
         return NAND_RESULT_OPERATION_FAILED;
@@ -591,7 +616,7 @@ uint8_t nand_init(void)
      * NAND_COLUMN_ADDR_CYCLES 列 + NAND_ROW_ADDR_CYCLES 行，器件报告的周期数不同
      * ⇒ 每条命令都发错地址（静默写坏介质）⇒ release 档也必须拒绝启动。 */
     {
-        uint8_t                page[NAND_ONFI_PARAM_PAGE_SIZE];
+        BYTE                   page[NAND_ONFI_PARAM_PAGE_SIZE];
         nand_onfi_param_info_t info;
 
         result = nand_fc_read_parameter_page(page, &completion);
@@ -627,8 +652,10 @@ uint8_t nand_init(void)
 #if CONFIG_NAND_TIMING_MODE_4
     /* ── Step 7: 高速模式：切 NAND 到 Mode 4 + 更新 FMC 硬件时序 ── */
     {
-        const uint8_t              mode_4[4] = {4U, 0U, 0U, 0U};
-        FMC_NAND_PCC_TimingTypeDef fast_pcc  = {0};
+        const BYTE                 mode_4[4] = {4U, 0U, 0U, 0U};
+        FMC_NAND_PCC_TimingTypeDef fast_pcc;
+
+        memset(&fast_pcc, 0, sizeof(fast_pcc));
 
         /* 0x01 = ONFI 时序模式 Feature 寄存器地址，值 4 = Mode 4 */
         result = nand_fc_set_features(0x01U, mode_4, &completion);
@@ -655,12 +682,12 @@ uint8_t nand_init(void)
         /* 更新 FMC 后端时序，供 UOP handler 使用。
          * 单 bank：同一实例直接覆盖（无需按 [CH][CE][LUN] 循环）。 */
         {
-            nand_fmc_config_t fast_fmc = {
-                .data    = (volatile uint8_t *)NAND_FMC_BASE_ADDR,
-                .command = (volatile uint8_t *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET),
-                .address = (volatile uint8_t *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET),
-                .timing  = g_nand_timing_fast,
-            };
+            nand_fmc_config_t fast_fmc;
+            memset(&fast_fmc, 0, sizeof(fast_fmc));
+            fast_fmc.data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
+            fast_fmc.command = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET);
+            fast_fmc.address = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET);
+            fast_fmc.timing  = g_nand_timing_fast;
 
             if (nand_fmc_init(&fast_fmc) != NAND_RESULT_OK)
             {
@@ -693,8 +720,9 @@ uint8_t nand_init(void)
  * -------------------------------------------------------------------- */
 void HAL_NAND_MspInit(NAND_HandleTypeDef *hnand)
 {
-    GPIO_InitTypeDef gpio = {0};
+    GPIO_InitTypeDef gpio;
 
+    memset(&gpio, 0, sizeof(gpio));
     (void)hnand;
     __HAL_RCC_FMC_CLK_ENABLE();
     __HAL_RCC_GPIOD_CLK_ENABLE();

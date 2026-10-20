@@ -1,6 +1,8 @@
 #ifndef SSD_PLATFORM_H
 #define SSD_PLATFORM_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -11,7 +13,8 @@
 typedef struct
 {
     void (*log_write)(const char *message);
-    uint64_t (*time_us)(void);
+    QWORD(*time_us)
+    (void);
     void *(*memory_allocate)(size_t size);
     void (*memory_free)(void *memory);
 } ssd_platform_ops_t;

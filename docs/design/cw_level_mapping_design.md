@@ -51,7 +51,7 @@
 
 **物理槽位数 = L2P entry 数，精确 1:1**（每实例都是 1,048,576）。这是 CW 级与页级的本质差别——
 页级时表会超额 4×（表 1,048,576 vs 物理页 262,144）。选 CW 后
-`FTL_LBA_MAX`（`ftl.h`）、`L2P_REGIONS_PER_INSTANCE`（`ftl_config.h` §一）、`lba_t = 512B`
+`FTL_LBA_MAX`（`ftl.h`）、`L2P_REGIONS_PER_INSTANCE`（`ftl_config.h` §一）、`DWORD = 512B`
 （`ftl_type.h`）全部自洽，**不用改常量**。
 
 ⚠ **扇区写落页**：器件编程单位仍是 page（2048B），**不能单独编 1 个 CW**。512B 写必须变成
@@ -567,7 +567,7 @@ SRAM 缓存热点 region**。
 
 | 层 | 改动 | 文件 |
 |---|---|---|
-| 地址辅助 | `ftl_lba_cw/plane/page/pair_base`、`ftl_cw_span_mask`（§三.1）+ **PBA 全套**（`nand_pba_t` / `pba_*` / `pba_to_paa`，§三.2） | `include/ftl/ftl_config.h` §三 |
+| 地址辅助 | `ftl_lba_cw/plane/page/pair_base`、`ftl_cw_span_mask`（§三.1）+ **PBA 全套**（`DWORD` / `pba_*` / `pba_to_paa`，§三.2） | `include/ftl/ftl_config.h` §三 |
 | 请求层 | 缓冲步进 = `FTL_IU_BYTES`（512B/扇区）；`io.count` = 扇区数 | `src/controller/request.c`、`controller.c` |
 | FTL 写路径 | 1 子操作 → 逐 CW 一条 L2P entry + 一条 journal；`allocator_alloc_pair` 成对取页 | `src/ftl/ftl.c`（`ftl_issue_subop`/`ftl_confirm_write`） |
 | FTL 读路径 | 逐 LBA 查 L2P，按**物理 plane** 分组（同 plane 换页即收缩），pair 窗口内至多两 plane 段 | `src/ftl/ftl.c`（`ftl_issue_subop`） |
@@ -662,7 +662,7 @@ SRAM 缓存热点 region**。
 | 写 / 读路径 | `src/ftl/ftl.c` |
 | 请求拆分 / **路由调用点** | `src/controller/request.c`、`src/controller/controller.c` |
 | 几何 / 器件地址（PAA、`nand_addr_t`） | `include/nand/nand_config.h` |
-| 系统物理地址（PBA、`nand_pba_t`） | `include/ftl/ftl_config.h` §三.2 |
+| 系统物理地址（PBA、`DWORD`） | `include/ftl/ftl_config.h` §三.2 |
 | 内存预算断言 | `src/main.c`（`BOARD_AXI_RAM_SIZE` / `FTL_AXI_RAM_RESERVED`） |
 | 分层判据 | `docs/design/fc_nand_design.md` §26 |
 | 优化计划 | `docs/design/ftl_optimization_plan.md` |

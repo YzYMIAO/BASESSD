@@ -23,7 +23,7 @@
 typedef struct
 {
     fc_command_id_t ids[FC_SCHEDULER_CHAIN_MAX];
-    uint8_t         count; /* 0=空, 1=单命令, 2+=链 */
+    BYTE            count; /* 0=空, 1=单命令, 2+=链 */
 } fc_scheduler_chain_t;
 
 /* ── 链归属队列（per-LUN 链锁）──
@@ -64,7 +64,7 @@ typedef struct
      * memset 清零，做不到跨趟保留，所以这份状态必须挂在控制器上。
      * 生产路径恒 NONE：FTL 全仓恒 FC_CHAIN_END（链长恒 1）⇒ 本表恒不被置位 ⇒ 准入
      * 判断恒假、更新恒写 NONE ⇒ 对既有命令流零行为变化。 */
-    uint8_t chain_owner[CH_NUM][CE_NUM][LUN_NUM];
+    BYTE chain_owner[CH_NUM][CE_NUM][LUN_NUM];
 } fc_scheduler_t;
 
 fc_status_t fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq);

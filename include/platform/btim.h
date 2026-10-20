@@ -1,6 +1,8 @@
 #ifndef PLATFORM_BTIM_H
 #define PLATFORM_BTIM_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -19,13 +21,13 @@
  * task-table iteration, so a callback should not assume it changes while it runs.
  * Callbacks execute in main/task context and may not block for long periods.
  */
-typedef void (*btim_task_callback_t)(void *context, uint32_t now_ms);
+typedef void (*btim_task_callback_t)(void *context, DWORD now_ms);
 
 /*
  * 按给定时基启动硬件心跳（周期中断）并开始计时。
  * 参数含义与具体定时器有关，例如「重装值 / 预分频」，由 SoC 侧解释。
  */
-void btim_timx_int_init(uint16_t arr, uint16_t psc);
+void btim_timx_int_init(WORD arr, WORD psc);
 
 /*
  * 初始化 btim.c 内部的固定任务表。
@@ -35,16 +37,16 @@ void btim_timx_int_init(uint16_t arr, uint16_t psc);
 void btim_scheduler_init(void);
 
 /* 可选运行时注册接口，适合确实随模块生命周期出现/撤销的临时任务。 */
-bool btim_scheduler_add(btim_task_callback_t callback, void *context, uint32_t first_delay_ms, uint32_t period_ms, uint32_t *task_id);
+bool btim_scheduler_add(btim_task_callback_t callback, void *context, DWORD first_delay_ms, DWORD period_ms, DWORD *task_id);
 
 /* Enable/disable a registered task without losing its timing configuration. */
-bool btim_scheduler_enable(uint32_t task_id, bool enabled);
+bool btim_scheduler_enable(DWORD task_id, bool enabled);
 
 /* Remove a task and return its static slot to the table. */
-bool btim_scheduler_remove(uint32_t task_id);
+bool btim_scheduler_remove(DWORD task_id);
 
 /* Return the hardware-heartbeat-derived monotonic millisecond time base. */
-uint32_t btim_scheduler_now_ms(void);
+DWORD btim_scheduler_now_ms(void);
 
 /*
  * Execute due tasks. Call frequently from the main loop or one scheduler task;

@@ -46,7 +46,7 @@
  *             ≥ WL_DELTA_THRESHOLD；条件 2 最大 ≥ 平均 × WL_MAX_AVG_RATIO；
  *             条件 3 低擦除区（min + WL_LOW_ZONE_WIDTH 以下）块占比 **>** WL_LOW_BLOCK_PCT%。
  * -------------------------------------------------------------------- */
-bool wl_should_trigger(const ftl_allocator_t *alloc, uint32_t total_writes)
+bool wl_should_trigger(const ftl_allocator_t *alloc, DWORD total_writes)
 {
     /* 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
      * 周期节拍由 migrate_handle 的 WL 求值 的 WL_EVAL_INTERVAL_MS 负责。 */
@@ -59,9 +59,9 @@ bool wl_should_trigger(const ftl_allocator_t *alloc, uint32_t total_writes)
     allocator_erase_stats_t est;
     allocator_erase_stats(alloc, &est);
 
-    const uint32_t max_ec = est.erase_max;
-    const uint32_t min_ec = est.erase_min;
-    const uint32_t avg_ec = (est.good_count == 0U) ? 0U : (est.erase_sum / est.good_count);
+    const DWORD max_ec = est.erase_max;
+    const DWORD min_ec = est.erase_min;
+    const DWORD avg_ec = (est.good_count == 0U) ? 0U : (est.erase_sum / est.good_count);
 
     /* 条件 1：最大/最小差值 */
     if ((max_ec - min_ec) >= WL_DELTA_THRESHOLD)
@@ -79,9 +79,9 @@ bool wl_should_trigger(const ftl_allocator_t *alloc, uint32_t total_writes)
      * ⚠ 分子由 allocator_count_blocks_below 统计（非 BAD/NONE 的全部块，含 RETIRED），
      *   分母是 alloc->total_blocks（用户区好块数）。RETIRED 极少时两者近似一致；
      *   分子集合更大 ⇒ 占比略偏高，判据偏保守（更容易触发，均衡方向安全）。 */
-    const uint32_t low_zone  = min_ec + WL_LOW_ZONE_WIDTH;
-    const uint32_t low_count = allocator_count_blocks_below(alloc, low_zone);
-    if (low_count > (uint32_t)alloc->total_blocks * WL_LOW_BLOCK_PCT / 100U)
+    const DWORD low_zone  = min_ec + WL_LOW_ZONE_WIDTH;
+    const DWORD low_count = allocator_count_blocks_below(alloc, low_zone);
+    if (low_count > alloc->total_blocks * WL_LOW_BLOCK_PCT / 100U)
     {
         return true;
     }
@@ -103,13 +103,13 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim)
     wl_victim_t best;
     memset(&best, 0, sizeof(best));
 
-    uint32_t min_ec = wl_min_erase(alloc);
+    DWORD min_ec = wl_min_erase(alloc);
 
     /* 门限单位是**有效 CW**（CW 级映射：1 页 = CW_NUM 个映射单元） */
-    uint16_t total_cw_per_sb = FTL_CW_PER_SB;
-    uint16_t min_valid_cw    = (uint16_t)(total_cw_per_sb * WL_MIN_VALID_RATIO / 100U);
+    WORD total_cw_per_sb = FTL_CW_PER_SB;
+    WORD min_valid_cw    = (total_cw_per_sb * WL_MIN_VALID_RATIO / 100U);
 
-    for (uint16_t i = 0U; i < alloc->closed_sb_count; i++)
+    for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
         const super_block_t *sb = allocator_closed_at(alloc, i);
 
@@ -123,14 +123,14 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim)
          * 而该 SB 仍可能是“有效 CW 最多”的候选 ⇒ 每轮重选、WL 永久卡死。 */
         bool has_bad_plane = false;
 
-        for (uint8_t p = 0U; p < PLANE_NUM; p++)
+        for (BYTE p = 0U; p < PLANE_NUM; p++)
         {
             if (!super_block_has_plane(sb, p))
             {
                 continue;
             }
-            const uint16_t block  = sb->plane_blocks[p];
-            const uint16_t gblock = ftl_gblock(p, block);
+            const WORD block  = sb->plane_blocks[p];
+            const WORD gblock = ftl_gblock(p, block);
 
             if (ftl_block_is_bad(&alloc->blocks[gblock]))
             {
@@ -153,7 +153,7 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim)
             continue; /* 全哨兵条目 */
         }
 
-        const uint32_t sb_ec = st.erase_sum / st.plane_count;
+        const DWORD sb_ec = st.erase_sum / st.plane_count;
 
         /* 不在低擦除区 → 跳过（擦除够多了） */
         if (sb_ec > (min_ec + WL_LOW_ZONE_WIDTH))
@@ -172,7 +172,7 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim)
             best.found      = true;
             best.valid_cw   = st.valid_cw;
             best.read_count = st.read_sum;
-            for (uint8_t p = 0U; p < PLANE_NUM; p++)
+            for (BYTE p = 0U; p < PLANE_NUM; p++)
             {
                 best.plane_blocks[p] = sb->plane_blocks[p];
             }
@@ -195,7 +195,7 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim)
  * wl_select_victim 的低擦除区判定。 */
 
 /* wl_min_erase — 全体好块擦除次数的最小值（无好块返回 0） */
-uint32_t wl_min_erase(const ftl_allocator_t *alloc)
+DWORD wl_min_erase(const ftl_allocator_t *alloc)
 {
     allocator_erase_stats_t st;
 

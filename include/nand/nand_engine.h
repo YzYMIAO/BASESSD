@@ -1,6 +1,8 @@
 #ifndef PLATFORM_STM32H743_NAND_ENGINE_H
 #define PLATFORM_STM32H743_NAND_ENGINE_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdint.h>
 
 /* --------------------------------------------------------------------
@@ -67,7 +69,7 @@ typedef enum
 typedef struct
 {
     nand_uop_type_t type;
-    uint32_t        operand;
+    DWORD           operand;
 } nand_uop_t;
 
 #include "nand_config.h"
@@ -76,28 +78,28 @@ typedef struct
  * 单 plane 只用 row[0]，多 plane 填 row[0..plane_count-1]。 */
 typedef struct
 {
-    uint8_t  operation;
-    uint16_t column;
-    uint32_t row[NAND_PLANE_MAX]; /* 按 plane 索引，uop ROW  handler 通过 operand 选取 */
-    uint8_t *buffer;
-    uint16_t data_length;
+    BYTE  operation;
+    WORD  column;
+    DWORD row[NAND_PLANE_MAX]; /* 按 plane 索引，uop ROW  handler 通过 operand 选取 */
+    BYTE *buffer;
+    WORD  data_length;
 } nand_command_request_t;
 
 /* 命令完成信息：nand_status = 70h 原始状态字节；
  * transfer_status = NAND_RESULT_* 执行结果。两字段语义不同。 */
 typedef struct
 {
-    uint8_t nand_status;
-    uint8_t transfer_status;
+    BYTE nand_status;
+    BYTE transfer_status;
 } nand_command_completion_t;
 
 /* 操作时序参数：busy_timeout_us 供引擎和 FMC handler 共用超时 */
 typedef struct
 {
-    uint16_t twb_us;
-    uint16_t trst_us;
-    uint16_t twh_us;
-    uint16_t busy_timeout_us;
+    WORD twb_us;
+    WORD trst_us;
+    WORD twh_us;
+    WORD busy_timeout_us;
 } nand_operation_timing_t;
 
 /* UOP handler 签名：context 透传给后端（各 handler 自行转换） */
@@ -114,9 +116,9 @@ typedef struct
  * （饱和递增）；两者任一超限即判超时。 */
 typedef struct
 {
-    uint32_t start_cycles; /* DWT 起点 */
-    uint16_t polls;        /* 轮询计数 */
-    uint8_t  started;      /* 起点已锁存 */
+    DWORD start_cycles; /* DWT 起点 */
+    WORD  polls;        /* 轮询计数 */
+    BYTE  started;      /* 起点已锁存 */
 } nand_engine_wait_t;
 
 /*
@@ -137,9 +139,9 @@ typedef struct
     const nand_operation_timing_t *timing;
     const nand_command_request_t  *request;
     nand_command_completion_t     *completion;
-    uint16_t                       uop_index;
-    uint16_t                       debug_polls;
-    uint8_t                        active;
+    WORD                           uop_index;
+    WORD                           debug_polls;
+    BYTE                           active;
     nand_engine_wait_t             wait; /* WAIT_READY 忙等状态 */
     nand_engine_wait_t             jump; /* JUMP_IF_NOT_READY 忙等状态 */
 } nand_engine_state_t;

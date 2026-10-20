@@ -49,36 +49,36 @@
 
 /* md_block_page_pba — gblock + 页号 → PBA（ch/ce/lun 取本 Directory 拓扑）。
  * ⚠ 单一转换漏斗（C9）：block/plane 的字段序只在这里出现一次，调用点不手写 pba_make。 */
-static nand_pba_t md_block_page_pba(const metadata_dir_cache_t *dir,
-                                    uint16_t                    gblock,
-                                    uint8_t                     page)
+static DWORD md_block_page_pba(const metadata_dir_cache_t *dir,
+                               WORD                        gblock,
+                               BYTE                        page)
 {
     return pba_make(dir->topo.ch,
                     dir->topo.ce,
                     dir->topo.lun,
-                    (uint32_t)ftl_gblock_block(gblock),
-                    (uint32_t)ftl_gblock_plane(gblock),
-                    (uint32_t)page,
+                    ftl_gblock_block(gblock),
+                    ftl_gblock_plane(gblock),
+                    page,
                     0U);
 }
 
 /* 块第 0 页地址（擦除用）。 */
-static nand_pba_t md_block_addr(const metadata_dir_cache_t *dir, uint16_t gblock)
+static DWORD md_block_addr(const metadata_dir_cache_t *dir, WORD gblock)
 {
     return md_block_page_pba(dir, gblock, 0U);
 }
 
 /* ── 待回收位图 / 写指针 / job 状态（H42：改状态的闸门定义在 .c）── */
 
-bool md_reclaim_mark(metadata_dir_cache_t *dir, uint16_t g)
+bool md_reclaim_mark(metadata_dir_cache_t *dir, WORD g)
 {
     if (g >= FTL_BLOCK_TOTAL)
     {
         return false;
     }
 
-    uint32_t *word = &dir->reclaim_pending[g >> 5U];
-    uint32_t  bit  = 1UL << (g & 31U);
+    DWORD *word = &dir->reclaim_pending[g >> 5U];
+    DWORD  bit  = 1UL << (g & 31U);
 
     if ((*word & bit) != 0U)
     {
@@ -90,18 +90,18 @@ bool md_reclaim_mark(metadata_dir_cache_t *dir, uint16_t g)
     return true;
 }
 
-bool md_reclaim_take(metadata_dir_cache_t *dir, uint16_t *out)
+bool md_reclaim_take(metadata_dir_cache_t *dir, WORD *out)
 {
     /* 从上次取走的位置继续扫描并环绕：擦除持续失败的块保留位，但不再永久占住
      * 扫描起点，后续块仍能被回收。 */
-    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    for (WORD i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
-        const uint16_t g = (uint16_t)((dir->reclaim_scan + i) % FTL_BLOCK_TOTAL);
+        const WORD g = ((dir->reclaim_scan + i) % FTL_BLOCK_TOTAL);
 
         if ((dir->reclaim_pending[g >> 5U] & (1UL << (g & 31U))) != 0U)
         {
             *out              = g;
-            dir->reclaim_scan = (uint16_t)((g + 1U) % FTL_BLOCK_TOTAL);
+            dir->reclaim_scan = ((g + 1U) % FTL_BLOCK_TOTAL);
             return true;
         }
     }
@@ -109,15 +109,15 @@ bool md_reclaim_take(metadata_dir_cache_t *dir, uint16_t *out)
     return false;
 }
 
-void md_reclaim_clear(metadata_dir_cache_t *dir, uint16_t g)
+void md_reclaim_clear(metadata_dir_cache_t *dir, WORD g)
 {
     if (g >= FTL_BLOCK_TOTAL)
     {
         return;
     }
 
-    uint32_t *word = &dir->reclaim_pending[g >> 5U];
-    uint32_t  bit  = 1UL << (g & 31U);
+    DWORD *word = &dir->reclaim_pending[g >> 5U];
+    DWORD  bit  = 1UL << (g & 31U);
 
     if ((*word & bit) != 0U)
     {
@@ -138,7 +138,7 @@ void md_reclaim_reset(metadata_dir_cache_t *dir)
 
 void md_reclaim_mark_all(metadata_dir_cache_t *dir, const ftl_allocator_t *alloc)
 {
-    for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++)
+    for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
         if (!md_log_block_reclaimable(dir, alloc, g))
         {
@@ -148,14 +148,14 @@ void md_reclaim_mark_all(metadata_dir_cache_t *dir, const ftl_allocator_t *alloc
     }
 }
 
-nand_pba_t metadata_dir_slot_now(metadata_dir_cache_t *dir)
+DWORD metadata_dir_slot_now(metadata_dir_cache_t *dir)
 {
     if ((!dir->cur_block_valid) || (dir->cur_metadata_page >= PAGES_PER_BLOCK))
     {
         return NAND_PBA_INVALID;
     }
 
-    const uint8_t page = dir->cur_metadata_page;
+    const BYTE page = dir->cur_metadata_page;
 
     dir->cur_metadata_page++;
 
@@ -166,8 +166,8 @@ void metadata_handle_reset(metadata_dir_cache_t *dir)
 {
     /* reclaimed_count 是**单调进度计数**（跨 job 保留）；其余 job 状态清零。
      * error 也保留到下一次起 job 时再清（status 要能看到最近一次失败）。 */
-    const uint32_t reclaimed  = dir->handle.reclaimed_count;
-    const int32_t  last_error = dir->handle.error;
+    const DWORD   reclaimed  = dir->handle.reclaimed_count;
+    const int32_t last_error = dir->handle.error;
 
     memset(&dir->handle, 0, sizeof(dir->handle));
     dir->handle.victim              = UINT16_MAX;
@@ -187,15 +187,15 @@ void metadata_handle_reset(metadata_dir_cache_t *dir)
  *             直接擦除归还，无需搬移。平手取块号最小者：结果确定（跨复位可复现），
  *             且先分配的块通常收的是更早、更可能变冷的数据。
  * -------------------------------------------------------------------- */
-static uint16_t metadata_dir_compact_victim(metadata_dir_cache_t *dir,
-                                            ftl_allocator_t      *alloc)
+static WORD metadata_dir_compact_victim(metadata_dir_cache_t *dir,
+                                        ftl_allocator_t      *alloc)
 {
-    uint16_t best      = UINT16_MAX;
-    uint16_t best_live = UINT16_MAX;
+    WORD best      = UINT16_MAX;
+    WORD best_live = UINT16_MAX;
 
-    for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++)
+    for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
-        const uint16_t live = dir->l2p_live[g];
+        const WORD live = dir->l2p_live[g];
 
         if (live == 0U)
         {
@@ -227,10 +227,7 @@ static void metadata_handle_abort(metadata_dir_cache_t *dir)
 {
     metadata_handle_t *j = &dir->handle;
 
-    LOGW("[META] md job abort phase=%u victim=%u moved=%u (victim 不擦)\r\n",
-         (unsigned)j->phase,
-         (unsigned)j->victim,
-         (unsigned)j->moved);
+    LOGW("[META] md job abort phase=%u victim=%u moved=%u (victim 不擦)\r\n", (unsigned)j->phase, (unsigned)j->victim, (unsigned)j->moved);
 
     if ((j->victim != UINT16_MAX) && (dir->l2p_live[j->victim] == 0U))
     {
@@ -246,7 +243,7 @@ static void metadata_handle_abort(metadata_dir_cache_t *dir)
 static bool md_stall(metadata_dir_cache_t *dir)
 {
     metadata_handle_t *j      = &dir->handle;
-    const uint32_t     now_ms = ftl_job_now_ms();
+    const DWORD        now_ms = ftl_job_now_ms();
 
     if (now_ms == 0U)
     {
@@ -259,8 +256,7 @@ static bool md_stall(metadata_dir_cache_t *dir)
     }
     if ((now_ms - j->stall_ms) >= FTL_SUBMIT_TIMEOUT_MS)
     {
-        LOGW("[META] md job submit stalled %lums — abort\r\n",
-             (now_ms - j->stall_ms));
+        LOGW("[META] md job submit stalled %lums — abort\r\n", (now_ms - j->stall_ms));
         j->timed_out     = 1U;
         j->timeout_phase = j->phase;
         metadata_handle_abort(dir);
@@ -296,7 +292,7 @@ static ftl_status_t md_submit(metadata_dir_cache_t *dir, fc_command_t *cmd)
 
 /* 提交一条异步写（搬移页 / Anchor 分页共用）。data 在 ftl_async_write_page 内已拷进
  * FC buffer ⇒ 调用者的缓冲随即可复用。 */
-static ftl_status_t md_submit_write(metadata_dir_cache_t *dir, nand_pba_t addr, const void *data, uint32_t length)
+static ftl_status_t md_submit_write(metadata_dir_cache_t *dir, DWORD addr, const void *data, DWORD length)
 {
     fc_command_t *cmd = NULL;
 
@@ -310,7 +306,7 @@ static ftl_status_t md_submit_write(metadata_dir_cache_t *dir, nand_pba_t addr, 
 
 /* 提交一条**镜像**异步写（固定元数据池：同一页用 multi-plane 写全部 plane）。
  * 只用于 Anchor/CP/BBT 的元数据页；L2P region 搬移仍走单 plane 的 md_submit_write。 */
-static ftl_status_t md_submit_write_mirror(metadata_dir_cache_t *dir, nand_pba_t addr, const void *data, uint32_t length)
+static ftl_status_t md_submit_write_mirror(metadata_dir_cache_t *dir, DWORD addr, const void *data, DWORD length)
 {
     fc_command_t *cmd = NULL;
 
@@ -323,7 +319,7 @@ static ftl_status_t md_submit_write_mirror(metadata_dir_cache_t *dir, nand_pba_t
 }
 
 /* 提交一条异步擦除（日志块回收 / Anchor 换块 / victim 擦除共用）。 */
-static ftl_status_t md_submit_erase(metadata_dir_cache_t *dir, nand_pba_t addr)
+static ftl_status_t md_submit_erase(metadata_dir_cache_t *dir, DWORD addr)
 {
     fc_command_t *cmd = NULL;
 
@@ -336,7 +332,7 @@ static ftl_status_t md_submit_erase(metadata_dir_cache_t *dir, nand_pba_t addr)
 }
 
 /* 提交一条**镜像**异步擦除（固定元数据池的换块：所有 plane 一起擦）。 */
-static ftl_status_t md_submit_erase_multi(metadata_dir_cache_t *dir, nand_pba_t addr)
+static ftl_status_t md_submit_erase_multi(metadata_dir_cache_t *dir, DWORD addr)
 {
     fc_command_t *cmd = NULL;
 
@@ -351,7 +347,7 @@ static ftl_status_t md_submit_erase_multi(metadata_dir_cache_t *dir, nand_pba_t 
 /* 提交一条异步读（搬移 victim 的 region 页 → job.cp_buf）。
  * ⚠ 读的数据**留在 desc 链上** ⇒ 目标缓冲必须活到完成，ftl_cmd_read_data 必须早于
  *   release —— 二者都在 ftl_metadata_callback 里，缓冲就是 job.cp_buf（job 常驻 ⇒ 稳定）。 */
-static ftl_status_t md_submit_read(metadata_dir_cache_t *dir, nand_pba_t addr)
+static ftl_status_t md_submit_read(metadata_dir_cache_t *dir, DWORD addr)
 {
     fc_command_t *cmd = NULL;
 
@@ -387,7 +383,7 @@ static void md_compact_begin(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
         return; /* 无当前写块：无处可搬 */
     }
 
-    uint16_t victim = metadata_dir_compact_victim(dir, alloc);
+    WORD victim = metadata_dir_compact_victim(dir, alloc);
 
     if (victim == UINT16_MAX)
     {
@@ -400,9 +396,9 @@ static void md_compact_begin(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
      *     不预留时，在飞写落回 victim 会让实际需搬数超过预算 ⇒ slot_now 取不到槽 ⇒
      *     本次压缩中止（良性但白做）。预留槽把该竞态从「中止」降为「容量少一页」。
      *     代价：victim 活 region 数等于剩余槽位时本轮到不了它，换块后再来。 */
-    const uint16_t free_slots = (uint16_t)(PAGES_PER_BLOCK - dir->cur_metadata_page);
+    const WORD free_slots = (PAGES_PER_BLOCK - dir->cur_metadata_page);
 
-    if ((uint32_t)dir->l2p_live[victim] + MD_COMPACT_RESERVED_SLOTS > (uint32_t)free_slots)
+    if (dir->l2p_live[victim] + MD_COMPACT_RESERVED_SLOTS > free_slots)
     {
         return;
     }
@@ -414,7 +410,7 @@ static void md_compact_begin(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
     j->slot       = NAND_PBA_INVALID;
     j->anchor_ok  = false;
     j->stall_ms   = 0U;
-    j->phase      = (uint8_t)MD_JOB_CP_READ;
+    j->phase      = MD_JOB_CP_READ;
 
     LOGD("[META] compact start victim=%u live=%u cur_page=%u\r\n",
          (unsigned)victim,
@@ -438,11 +434,11 @@ static md_compact_step_t md_compact_read(metadata_dir_cache_t *dir)
 
     while (j->region_id < METADATA_DIR_ENTRIES)
     {
-        const uint16_t rid = j->region_id;
+        const WORD rid = j->region_id;
 
-        j->region_id = (uint16_t)(rid + 1U); /* 游标先走：本轮不命中也不回头 */
+        j->region_id = (rid + 1U); /* 游标先走：本轮不命中也不回头 */
 
-        nand_pba_t old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, rid);
+        DWORD old = metadata_dir_lookup(dir, METADATA_TYPE_L2P_REGION, rid);
 
         if (old == NAND_PBA_INVALID)
         {
@@ -486,8 +482,7 @@ static md_compact_step_t md_compact_write(metadata_dir_cache_t *dir)
         {
             /* 当前块无空槽 ⇒ 预算失准。最可能来源是 md_compact_begin 注释里的
              * "启动前已在飞的前台写落回 victim"：中止是安全的（victim 不擦）。 */
-            LOGW("[META] compact: 当前块无空槽 (page=%u) — 中止\r\n",
-                 (unsigned)dir->cur_metadata_page);
+            LOGW("[META] compact: 当前块无空槽 (page=%u) — 中止\r\n", (unsigned)dir->cur_metadata_page);
             return MD_COMPACT_FAILED;
         }
     }
@@ -517,14 +512,14 @@ static bool md_compact_next(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
 {
     metadata_handle_t *j = &dir->handle;
 
-    const uint16_t free_slots = (uint16_t)(PAGES_PER_BLOCK - dir->cur_metadata_page);
-    const uint16_t victim     = metadata_dir_compact_victim(dir, alloc);
+    const WORD free_slots = (PAGES_PER_BLOCK - dir->cur_metadata_page);
+    const WORD victim     = metadata_dir_compact_victim(dir, alloc);
 
     if (victim == UINT16_MAX)
     {
         return false;
     }
-    if (((uint32_t)dir->l2p_live[victim] + MD_COMPACT_RESERVED_SLOTS) > (uint32_t)free_slots)
+    if ((dir->l2p_live[victim] + MD_COMPACT_RESERVED_SLOTS) > free_slots)
     {
         return false;
     }
@@ -533,7 +528,7 @@ static bool md_compact_next(metadata_dir_cache_t *dir, ftl_allocator_t *alloc)
     j->region_id  = 0U;
     j->cur_region = 0U;
     j->slot       = NAND_PBA_INVALID;
-    j->phase      = (uint8_t)MD_JOB_CP_READ;
+    j->phase      = MD_JOB_CP_READ;
     return true;
 }
 
@@ -553,7 +548,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
     /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age。
      * 默认档（INFO）不打印；需要现场观测时 `log level debug`。 */
-    if (dir->handle.phase == (uint8_t)MD_JOB_IDLE)
+    if (dir->handle.phase == MD_JOB_IDLE)
     {
         dir->handle.log_ms   = 0U;
         dir->handle.start_ms = 0U;
@@ -593,10 +588,10 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                     {
                         j->anchor_for_reclaim = true;
                         j->victim             = UINT16_MAX;
-                        j->phase              = (uint8_t)MD_JOB_CP_ANCHOR_PREP;
+                        j->phase              = MD_JOB_CP_ANCHOR_PREP;
                         break;
                     }
-                    j->phase = (uint8_t)MD_JOB_RECLAIM;
+                    j->phase = MD_JOB_RECLAIM;
                     break;
                 }
                 if (!j->compact_wanted)
@@ -604,7 +599,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                     return; /* 无事可做 */
                 }
                 md_compact_begin(dir, alloc);
-                if (j->phase == (uint8_t)MD_JOB_IDLE)
+                if (j->phase == MD_JOB_IDLE)
                 {
                     return; /* 起不动（无候选 / 空槽不够）——compact_wanted 已被清 */
                 }
@@ -617,11 +612,11 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                  * 回 IDLE，下一轮先写 Anchor（上面的 dirty 分支）。 */
                 if (dir->dirty)
                 {
-                    j->phase = (uint8_t)MD_JOB_IDLE;
+                    j->phase = MD_JOB_IDLE;
                     break;
                 }
 
-                uint16_t g = 0U;
+                WORD g = 0U;
 
                 if (!md_reclaim_take(dir, &g))
                 {
@@ -629,7 +624,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                      * 清计数回 IDLE，避免每轮空转。 */
                     ASSERT(dir->reclaim_pending_count == 0U);
                     dir->reclaim_pending_count = 0U;
-                    j->phase                   = (uint8_t)MD_JOB_IDLE;
+                    j->phase                   = MD_JOB_IDLE;
                     break;
                 }
 
@@ -641,11 +636,11 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                 if (!md_log_block_reclaimable(dir, alloc, g))
                 {
                     md_reclaim_clear(dir, g);
-                    j->phase = (uint8_t)MD_JOB_IDLE;
+                    j->phase = MD_JOB_IDLE;
                     break;
                 }
 
-                const nand_pba_t addr = md_block_addr(dir, g);
+                const DWORD addr = md_block_addr(dir, g);
 
                 if (md_submit_erase(dir, addr) != FTL_OK)
                 {
@@ -678,7 +673,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                 {
                     break; /* phase 已置 CP_READ，循环继续 */
                 }
-                j->phase = (uint8_t)MD_JOB_CP_ANCHOR_PREP;
+                j->phase = MD_JOB_CP_ANCHOR_PREP;
                 break;
             }
 
@@ -721,14 +716,14 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                     const bool for_reclaim = j->anchor_for_reclaim;
 
                     j->anchor_for_reclaim = false;
-                    j->phase              = for_reclaim ? (uint8_t)MD_JOB_RECLAIM : (uint8_t)MD_JOB_CP_RECLAIM;
+                    j->phase              = for_reclaim ? MD_JOB_RECLAIM : MD_JOB_CP_RECLAIM;
                     break;
                 }
 
                 j->anchor_need_erase = need_erase;
                 j->anchor_chunk      = 0U;
                 j->anchor_ok         = true;
-                j->phase             = need_erase ? (uint8_t)MD_JOB_CP_ANCHOR_ERASE : (uint8_t)MD_JOB_CP_ANCHOR_WRITE;
+                j->phase             = need_erase ? MD_JOB_CP_ANCHOR_ERASE : MD_JOB_CP_ANCHOR_WRITE;
                 break;
             }
 
@@ -749,9 +744,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
                     if (!j->anchor_ok)
                     {
-                        LOGW("[META] anchor write incomplete: idx=%u seq=%lu (chunk 写失败)\r\n",
-                             (unsigned)j->anchor_idx,
-                             j->anchor_seq);
+                        LOGW("[META] anchor write incomplete: idx=%u seq=%lu (chunk 写失败)\r\n", (unsigned)j->anchor_idx, j->anchor_seq);
                         metadata_handle_abort(dir);
                         break;
                     }
@@ -767,22 +760,22 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                     {
                         j->anchor_for_reclaim = false;
                         /* 写入期间又有 commit ⇒ 回 IDLE 再写一条 Anchor，不能擦。 */
-                        j->phase              = dir->dirty ? (uint8_t)MD_JOB_IDLE : (uint8_t)MD_JOB_RECLAIM;
+                        j->phase              = dir->dirty ? MD_JOB_IDLE : MD_JOB_RECLAIM;
                         break;
                     }
 
-                    j->phase = (uint8_t)MD_JOB_CP_RECLAIM;
+                    j->phase = MD_JOB_CP_RECLAIM;
                     break;
                 }
 
-                const uint32_t anchor_page = pba_to_page(j->anchor_base) + j->anchor_chunk;
-                nand_pba_t     aaddr       = pba_with_page(j->anchor_base, anchor_page);
+                const DWORD anchor_page = pba_to_page(j->anchor_base) + j->anchor_chunk;
+                DWORD       aaddr       = pba_with_page(j->anchor_base, anchor_page);
 
                 metadata_anchor_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
 
                 metadata_dir_anchor_page(dir, j->anchor_seq, j->anchor_chunk, &page);
 
-                const uint32_t page_size = sizeof(page);
+                const DWORD page_size = sizeof(page);
 
                 if (md_submit_write_mirror(dir, aaddr, &page, page_size) != FTL_OK)
                 {
@@ -793,25 +786,23 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
             case MD_JOB_CP_RECLAIM:
             {
-                const uint16_t v = j->victim;
+                const WORD v = j->victim;
 
                 /* ④ 擦 victim —— 只在它**确实已无引用**时（③ Anchor 已落盘）。 */
                 if (v == UINT16_MAX)
                 {
-                    j->phase = (uint8_t)MD_JOB_DONE;
+                    j->phase = MD_JOB_DONE;
                     break;
                 }
                 if (!md_log_block_reclaimable(dir, alloc, v))
                 {
                     /* 扫描期间又有 region 落回 victim（在飞的写回完成）⇒ 不能擦，留给下次。 */
-                    LOGD("[META] compact: victim %u 仍有 %u 活 region — 不擦\r\n",
-                         (unsigned)v,
-                         (unsigned)dir->l2p_live[v]);
-                    j->phase = (uint8_t)MD_JOB_DONE;
+                    LOGD("[META] compact: victim %u 仍有 %u 活 region — 不擦\r\n", (unsigned)v, (unsigned)dir->l2p_live[v]);
+                    j->phase = MD_JOB_DONE;
                     break;
                 }
 
-                const nand_pba_t addr = md_block_addr(dir, v);
+                const DWORD addr = md_block_addr(dir, v);
 
                 if (md_submit_erase(dir, addr) != FTL_OK)
                 {
@@ -821,9 +812,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
             }
 
             case MD_JOB_DONE:
-                LOGD("[META] compact done victim=%u moved=%u\r\n",
-                     (unsigned)j->victim,
-                     (unsigned)j->moved);
+                LOGD("[META] compact done victim=%u moved=%u\r\n", (unsigned)j->victim, (unsigned)j->moved);
                 metadata_handle_reset(dir);
                 break; /* 回 IDLE：继续循环（可能还有待回收的块）*/
 
@@ -848,7 +837,7 @@ static void metadata_status_fill(const metadata_dir_cache_t *dir, metadata_statu
     const metadata_handle_t *j = &dir->handle;
 
     out->base.critical  = false; /* 由 must-run 适配器保证 liveness */
-    out->base.wants_run = (j->phase != (uint8_t)MD_JOB_IDLE) || dir->reclaim_pending_count != 0U ||
+    out->base.wants_run = (j->phase != MD_JOB_IDLE) || dir->reclaim_pending_count != 0U ||
                           j->compact_wanted;
     out->base.progress = j->reclaimed_count;
     out->base.next_ms  = 0U; /* 事件驱动，无周期 */
@@ -858,7 +847,7 @@ static void metadata_status_fill(const metadata_dir_cache_t *dir, metadata_statu
     {
         out->base.state = FTL_MODULE_WAITING;
     }
-    else if (j->phase != (uint8_t)MD_JOB_IDLE)
+    else if (j->phase != MD_JOB_IDLE)
     {
         out->base.state = FTL_MODULE_RUNNING;
     }
@@ -900,9 +889,9 @@ void metadata_handle(metadata_dir_cache_t *dir, const ftl_bg_info_t *info, metad
 /* 擦除成功后的统一收尾：元数据日志块不经 migrate 擦除路径，磨损计数在这里补记，
  * 且**先记账再归还**。归还目标是**固定 L2P 日志区**（置 NONE/空闲），不是用户
  * Free Pool——该区是预留元数据区（RISK-MD-07 / RISK-CAP-02）。 */
-static void md_note_block_erased(metadata_dir_cache_t *dir, uint16_t gblock)
+static void md_note_block_erased(metadata_dir_cache_t *dir, WORD gblock)
 {
-    const uint32_t total_writes = *dir->port.total_writes;
+    const DWORD total_writes = *dir->port.total_writes;
 
     allocator_note_erase(dir->port.alloc, gblock, total_writes);
     metadata_log_release(dir->port.alloc, gblock);
@@ -929,9 +918,7 @@ static void md_complete_reclaim(metadata_dir_cache_t *dir, metadata_handle_t *j,
 
         if (j->reclaim_fail_count >= MD_RECLAIM_FAIL_MAX)
         {
-            LOGE("[META] reclaim erase failed blk=%u x%u — mark BAD\r\n",
-                 (unsigned)j->reclaim_gblock,
-                 (unsigned)j->reclaim_fail_count);
+            LOGE("[META] reclaim erase failed blk=%u x%u — mark BAD\r\n", (unsigned)j->reclaim_gblock, (unsigned)j->reclaim_fail_count);
             (void)bbt_mark_bad(dir->port.alloc, j->reclaim_gblock);
             md_reclaim_clear(dir, j->reclaim_gblock);
             j->reclaim_fail_count  = 0U;
@@ -955,7 +942,7 @@ static void md_complete_reclaim(metadata_dir_cache_t *dir, metadata_handle_t *j,
     }
 
     j->reclaim_gblock = UINT16_MAX;
-    j->phase          = (uint8_t)MD_JOB_IDLE;
+    j->phase          = MD_JOB_IDLE;
 }
 
 /* 整理 CP_READ 完成：成功把 region 整页拷进 job.cp_buf（**必须早于 release**）；
@@ -974,7 +961,7 @@ static void md_complete_cp_read(metadata_dir_cache_t *dir, metadata_handle_t *j,
         metadata_handle_abort(dir);
         return;
     }
-    j->phase = (uint8_t)MD_JOB_CP_WRITE;
+    j->phase = MD_JOB_CP_WRITE;
 }
 
 /* 整理 CP_WRITE 完成：成功登记新位置；失败 ⇒ 槽已消耗（可能半编程）⇒ **不登记**，
@@ -992,8 +979,8 @@ static void md_complete_cp_write(metadata_dir_cache_t *dir, metadata_handle_t *j
 
     metadata_dir_commit_region(dir, j->cur_region, j->slot);
     j->slot  = NAND_PBA_INVALID;
-    j->moved = (uint16_t)(j->moved + 1U);
-    j->phase = (uint8_t)MD_JOB_CP_READ;
+    j->moved = (j->moved + 1U);
+    j->phase = MD_JOB_CP_READ;
 }
 
 /* Anchor 换块擦完成：失败 ⇒ 不写、**不推进游标**，dirty 保留 ⇒ 下次在新槽重试整条。 */
@@ -1007,7 +994,7 @@ static void md_complete_anchor_erase(metadata_dir_cache_t *dir, metadata_handle_
         metadata_handle_abort(dir);
         return;
     }
-    j->phase = (uint8_t)MD_JOB_CP_ANCHOR_WRITE;
+    j->phase = MD_JOB_CP_ANCHOR_WRITE;
 }
 
 /* Anchor 一页写完：无论成败都往后写下一页；失败 ⇒ 本条 record 残缺 ⇒ 整条作废。 */
@@ -1020,7 +1007,7 @@ static void md_complete_anchor_write(metadata_handle_t *j, fc_command_t *cmd, bo
     {
         j->anchor_ok = false; /* 整条作废（不取半条）*/
     }
-    j->anchor_chunk = (uint8_t)(j->anchor_chunk + 1U); /* 无论成败都往后写下一页 */
+    j->anchor_chunk = (j->anchor_chunk + 1U); /* 无论成败都往后写下一页 */
 }
 
 /* Victim 擦完成：失败 ⇒ victim 已无引用（Anchor 已落盘）⇒ 登记给回收阶段重试。 */
@@ -1031,8 +1018,7 @@ static void md_complete_cp_reclaim(metadata_dir_cache_t *dir, metadata_handle_t 
 
     if (failed)
     {
-        LOGW("[META] compact: victim erase failed blk=%u — 登记重试\r\n",
-             (unsigned)j->victim);
+        LOGW("[META] compact: victim erase failed blk=%u — 登记重试\r\n", (unsigned)j->victim);
         (void)md_reclaim_mark(dir, j->victim);
     }
     else
@@ -1040,7 +1026,7 @@ static void md_complete_cp_reclaim(metadata_dir_cache_t *dir, metadata_handle_t 
         md_note_block_erased(dir, j->victim);
     }
 
-    j->phase = (uint8_t)MD_JOB_DONE;
+    j->phase = MD_JOB_DONE;
 }
 
 /* --------------------------------------------------------------------
@@ -1058,7 +1044,7 @@ void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *c
     metadata_dir_cache_t *dir = (metadata_dir_cache_t *)ctx;
     metadata_handle_t    *j   = (dir != NULL) ? &dir->handle : NULL;
 
-    fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
+    fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
 
     /* 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，二者必须一致
      * ——不一致说明派发路由错了。 */

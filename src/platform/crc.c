@@ -37,7 +37,7 @@ void crc_init(void)
  *   对 data 起 length_bytes 字节算 CRC-32，每次从 INIT 值重新起算。
  *   前置：data 非空且 4 字节对齐、length_bytes 为 4 的倍数。
  */
-uint32_t crc_compute(const uint8_t *data, uint32_t length_bytes)
+DWORD crc_compute(const BYTE *data, DWORD length_bytes)
 {
     ASSERT(data != NULL);
     ASSERT((length_bytes % 4U) == 0U); /* WORDS 格式：长度必须是 4 的倍数 */

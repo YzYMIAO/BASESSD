@@ -18,13 +18,13 @@ typedef enum
 typedef struct
 {
     ssd_request_opcode_t opcode;
-    uint64_t             start_lba;
-    uint32_t             block_count;
+    QWORD                start_lba;
+    DWORD                block_count;
     void                *buffer;
     size_t               buffer_size;
     ssd_status_t         completion_status;
-    volatile uint8_t     complete_flag; /* FTL completion handler 置 1 */
-    volatile uint32_t    sub_remaining; /* 未完成的子请求数（Controller 拆分用） */
+    volatile BYTE        complete_flag; /* FTL completion handler 置 1 */
+    volatile DWORD       sub_remaining; /* 未完成的子请求数（Controller 拆分用） */
     ftl_io_request_t     io;            /* 子请求复用模板（lba/buffer/pages 循环内改写） */
 } ssd_request_t;
 

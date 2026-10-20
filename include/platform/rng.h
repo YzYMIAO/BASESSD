@@ -1,6 +1,8 @@
 #ifndef PLATFORM_RNG_H
 #define PLATFORM_RNG_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdint.h>
 
 /*
@@ -12,10 +14,10 @@
  */
 
 /* 初始化 RNG；返回 0 = 成功（FUNC_STATUS_SUCCESS），非 0 = 失败。 */
-uint8_t rng_init(void);
+BYTE rng_init(void);
 
 /* 取一个 32 位随机数。 */
-uint32_t rng_get_random_num(void);
+DWORD rng_get_random_num(void);
 
 /* 取 [min, max] 范围内的随机数。 */
 int rng_get_random_range(int min, int max);
@@ -24,8 +26,8 @@ int rng_get_random_range(int min, int max);
  * 由 src/platform/<soc>/rng_port.c 实现。
  */
 
-void     rng_port_init(void);
-uint8_t  rng_port_data_ready(void);
-uint32_t rng_port_get_random(void);
+void  rng_port_init(void);
+BYTE  rng_port_data_ready(void);
+DWORD rng_port_get_random(void);
 
 #endif /* PLATFORM_RNG_H */

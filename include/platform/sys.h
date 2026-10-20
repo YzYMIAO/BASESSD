@@ -1,6 +1,8 @@
 #ifndef PLATFORM_SYS_H
 #define PLATFORM_SYS_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdint.h>
 
 /*
@@ -20,53 +22,53 @@ void sys_init(void);
 void sys_mpu_config(void);
 void sys_cache_enable(void);
 
-uint8_t  get_icache_sta(void);
-uint8_t  get_dcache_sta(void);
-uint32_t sys_mpu_region_count(void);
+BYTE  get_icache_sta(void);
+BYTE  get_dcache_sta(void);
+DWORD sys_mpu_region_count(void);
 
 /* 时钟树快照（单位 Hz）。各字段由 SoC 侧经 HAL 实读回读；共享层只转发，
  * 不解析任何 RCC 寄存器。FMC / USART1 两项是 NAND 时序与控制台波特率的基准。 */
 typedef struct
 {
-    uint32_t sysclk_hz; /* SYSCLK / CPU */
-    uint32_t hclk_hz;   /* AHB */
-    uint32_t pclk1_hz;  /* APB1 */
-    uint32_t pclk2_hz;  /* APB2 */
-    uint32_t pclk3_hz;  /* APB3 */
-    uint32_t pclk4_hz;  /* APB4 */
-    uint32_t fmc_hz;    /* FMC 内核时钟 */
-    uint32_t qspi_hz;   /* QSPI 内核时钟 */
-    uint32_t uart_hz;   /* USART1 内核时钟 */
+    DWORD sysclk_hz; /* SYSCLK / CPU */
+    DWORD hclk_hz;   /* AHB */
+    DWORD pclk1_hz;  /* APB1 */
+    DWORD pclk2_hz;  /* APB2 */
+    DWORD pclk3_hz;  /* APB3 */
+    DWORD pclk4_hz;  /* APB4 */
+    DWORD fmc_hz;    /* FMC 内核时钟 */
+    DWORD qspi_hz;   /* QSPI 内核时钟 */
+    DWORD uart_hz;   /* USART1 内核时钟 */
 } sys_clock_tree_t;
 
 void sys_clock_tree_get(sys_clock_tree_t *out);
 
-void sys_nvic_set_vector_table(uint32_t base_address, uint32_t offset);
+void sys_nvic_set_vector_table(DWORD base_address, DWORD offset);
 void sys_wfi_set(void);
 void sys_intx_disable(void);
 void sys_intx_enable(void);
-void sys_msr_msp(uint32_t address);
+void sys_msr_msp(DWORD address);
 
 /* 参数顺序：预分频、倍频、SYSCLK分频、外设输出分频；HSE=25 MHz 时传入 5,160,2,4 得到 CPU=400 MHz。
  * 返回 0 = 成功（FUNC_STATUS_SUCCESS 语义），非 0 = 失败。 */
-uint8_t sys_stm32_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sysclk_div, uint32_t peripheral_div);
+BYTE sys_stm32_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div);
 
 /* ─────────────────────────── port 接口 ───────────────────────────
  * 由 src/platform/<soc>/sys_port.c 实现；共享层只通过这些函数触碰 SoC。
  */
 
-void     sys_port_mpu_config(void);
-void     sys_port_cache_enable(void);
-uint8_t  sys_port_icache_enabled(void);
-uint8_t  sys_port_dcache_enabled(void);
-uint32_t sys_port_mpu_region_count(void);
-void     sys_port_clock_tree_get(sys_clock_tree_t *out);
-void     sys_port_set_vector_table(uint32_t base_address, uint32_t offset);
-void     sys_port_wfi(void);
-void     sys_port_irq_disable(void);
-void     sys_port_irq_enable(void);
-void     sys_port_set_msp(uint32_t address);
-void     sys_port_hal_init(void);
-uint8_t  sys_port_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sysclk_div, uint32_t peripheral_div);
+void  sys_port_mpu_config(void);
+void  sys_port_cache_enable(void);
+BYTE  sys_port_icache_enabled(void);
+BYTE  sys_port_dcache_enabled(void);
+DWORD sys_port_mpu_region_count(void);
+void  sys_port_clock_tree_get(sys_clock_tree_t *out);
+void  sys_port_set_vector_table(DWORD base_address, DWORD offset);
+void  sys_port_wfi(void);
+void  sys_port_irq_disable(void);
+void  sys_port_irq_enable(void);
+void  sys_port_set_msp(DWORD address);
+void  sys_port_hal_init(void);
+BYTE  sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div);
 
 #endif /* PLATFORM_SYS_H */

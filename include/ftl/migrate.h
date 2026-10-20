@@ -65,9 +65,9 @@
 
 #include "allocator.h"   /* super_block_t */
 #include "fc_command.h"  /* fc_command_status_t（服务函数签名） */
-#include "ftl_config.h"  /* nand_pba_t, CW_NUM, PAGE_MAIN_SIZE */
+#include "ftl_config.h"  /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
 #include "ftl_module.h"  /* ftl_bg_info_t / ftl_module_status_t */
-#include "ftl_type.h"    /* lba_t */
+#include "ftl_type.h"    /* DWORD */
 #include "journal.h"     /* l2p_journal_t（端口） */
 #include "l2p_cache.h"   /* l2p_cache_t（端口） */
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
@@ -146,7 +146,7 @@ typedef struct
     ftl_allocator_t *alloc;
     l2p_journal_t   *journal;
     l2p_cache_t     *cache;
-    const uint32_t  *total_writes; /* allocator_note_erase 的磨损时钟 */
+    const DWORD     *total_writes; /* allocator_note_erase 的磨损时钟 */
     ftl_topology_t   topo;         /* 本实例路由（源页地址 / LBA 归属校验） */
 } migrate_port_t;
 
@@ -160,69 +160,69 @@ typedef struct
 {
     migrate_port_t port; /* 共享服务端口（init 绑定） */
 
-    bool     active;         /* true = job 在跑（单飞行门） */
-    bool     waiting;        /* true = 有一条搬移命令在飞（等 g_op_callbacks[FTL_OP_GC]/[FTL_OP_WL]） */
-    bool     aborted;        /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
-    bool     decode_ok;      /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
-    bool     write_ok;       /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
-    bool     erase_failed;   /* true = 任一 plane 擦除失败/处置失败（回收计数与 predict 日志不计） */
-    bool     closed_removed; /* true = 逐 plane 摘除后 Closed 条目已被移除（RISK-GC-04） */
-    uint8_t  phase;          /* mig_phase_t */
-    uint8_t  kind;           /* mig_kind_t */
-    uint8_t  post;           /* mig_post_t */
-    uint8_t  page;           /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
-    uint8_t  plane;          /* 当前 plane（读/写/擦各自迭代） */
-    uint32_t stall_ms;       /* 本轮连续「提交不出去」的起点（0 = 未计时） */
-    uint32_t wait_ms;        /* 等外部模块（L2P / Journal）的起点（0 = 未计时） */
-    uint32_t cmd_wait_ms;    /* 在飞命令的完成 deadline 起点（0 = 未计时） */
-    uint8_t  timed_out;      /* 1 = 本次 job 因 deadline 中止 */
-    uint8_t  timeout_phase;  /* 超时发生的 phase */
+    bool  active;         /* true = job 在跑（单飞行门） */
+    bool  waiting;        /* true = 有一条搬移命令在飞（等 g_op_callbacks[FTL_OP_GC]/[FTL_OP_WL]） */
+    bool  aborted;        /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
+    bool  decode_ok;      /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
+    bool  write_ok;       /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
+    bool  erase_failed;   /* true = 任一 plane 擦除失败/处置失败（回收计数与 predict 日志不计） */
+    bool  closed_removed; /* true = 逐 plane 摘除后 Closed 条目已被移除（RISK-GC-04） */
+    BYTE  phase;          /* mig_phase_t */
+    BYTE  kind;           /* mig_kind_t */
+    BYTE  post;           /* mig_post_t */
+    BYTE  page;           /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
+    BYTE  plane;          /* 当前 plane（读/写/擦各自迭代） */
+    DWORD stall_ms;       /* 本轮连续「提交不出去」的起点（0 = 未计时） */
+    DWORD wait_ms;        /* 等外部模块（L2P / Journal）的起点（0 = 未计时） */
+    DWORD cmd_wait_ms;    /* 在飞命令的完成 deadline 起点（0 = 未计时） */
+    BYTE  timed_out;      /* 1 = 本次 job 因 deadline 中止 */
+    BYTE  timeout_phase;  /* 超时发生的 phase */
     /* 读失败计数**按 plane 的源块**分别记（RISK-GC-01，跨 job 保留）。
      * ⚠ 判据是「该块整块迁移成功」才清零（mig_finish），**不是**「读到另一页没报错」：
      *   坏页通常在第 N 页，重试时第 0..N-1 页会先成功读一遍；按「任一页成功」清零
      *   会让阈值永不达到 ⇒ 每轮重选同一 victim、永久 abort、容量不再增长。
      *   两个 plane 的块号不同，故计数不能共用一个槽位（交替失败会互相冲掉）。 */
-    uint16_t fail_gblock[PLANE_NUM]; /* 该 plane 的读失败计数对应的源块；UINT16_MAX = 无计数 */
-    uint8_t  fail_count[PLANE_NUM];  /* 该 plane 源块的连续读失败次数 */
+    WORD fail_gblock[PLANE_NUM]; /* 该 plane 的读失败计数对应的源块；UINT16_MAX = 无计数 */
+    BYTE fail_count[PLANE_NUM];  /* 该 plane 源块的连续读失败次数 */
 
     super_block_t victim; /* victim 的**副本**（closed_sb_list 会被 swap-remove 挪动，不持指针） */
 
-    uint32_t   cw_bitmap[PLANE_NUM];      /* 本页逐 CW 有效位（bit = plane*CW_NUM+cw） */
-    lba_t      base[PLANE_NUM];           /* 本页各 plane 的页基址（CW0 的扇区 LBA） */
-    lba_t      cw_lba[PLANE_NUM][CW_NUM]; /* 本页逐 CW 的扇区 LBA（未写过 = FTL_LBA_INVALID） */
-    nand_pba_t src[PLANE_NUM];            /* 本页各 plane 的源 PBA */
-    nand_pba_t dst[PLANE_NUM];            /* 本页各 plane 的目标 PBA（allocator_alloc_pair 出参） */
+    DWORD cw_bitmap[PLANE_NUM];      /* 本页逐 CW 有效位（bit = plane*CW_NUM+cw） */
+    DWORD base[PLANE_NUM];           /* 本页各 plane 的页基址（CW0 的扇区 LBA） */
+    DWORD cw_lba[PLANE_NUM][CW_NUM]; /* 本页逐 CW 的扇区 LBA（未写过 = FTL_LBA_INVALID） */
+    DWORD src[PLANE_NUM];            /* 本页各 plane 的源 PBA */
+    DWORD dst[PLANE_NUM];            /* 本页各 plane 的目标 PBA（allocator_alloc_pair 出参） */
 
     /* ⚠ 源块的全局块号（BST 索引）**不缓存**在 job 里：真值是 victim.plane_blocks[plane]，
      *   快路径（valid_total == 0 ⇒ 直接 ERASE）不经过 READ 阶段，缓存的字段在快路径下
      *   是 0 ⇒ 擦除收尾会改块 0 的元数据。见 migrate.c 的 mig_src_gblock。 */
 
-    uint32_t migrated; /* 本 job 累计搬移的有效 CW 数（>0 才需要 F10 屏障） */
-    uint16_t erased;   /* 本 job 已成功擦除的 plane 数（观测） */
+    DWORD migrated; /* 本 job 累计搬移的有效 CW 数（>0 才需要 F10 屏障） */
+    WORD  erased;   /* 本 job 已成功擦除的 plane 数（观测） */
 
     /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 kind/phase/page/age */
-    uint32_t start_ms;
-    uint32_t log_ms;
+    DWORD start_ms;
+    DWORD log_ms;
 
     /* ── handle 自持的求值节拍（docs §4.4：GC 10ms / WL 5s / predict 1s）── */
-    uint32_t gc_eval_last_ms;
-    uint32_t gc_log_last_ms;
-    uint32_t wl_eval_last_ms;
-    uint32_t predict_last_ms;
+    DWORD gc_eval_last_ms;
+    DWORD gc_log_last_ms;
+    DWORD wl_eval_last_ms;
+    DWORD predict_last_ms;
 
     /* ── 观测计数（单调，只增不减）── */
-    uint32_t reclaimed_count; /* 成功回收的 SB 数（GC/WL） */
-    uint32_t novictim_count;  /* 触发但选不出 victim 的次数 */
-    uint8_t  urgent_gc;       /* migrate_trigger(GC_URGENT) 登记（被 handle 消费） */
-    int32_t  error;           /* 最近一次中止的归因 */
+    DWORD   reclaimed_count; /* 成功回收的 SB 数（GC/WL） */
+    DWORD   novictim_count;  /* 触发但选不出 victim 的次数 */
+    BYTE    urgent_gc;       /* migrate_trigger(GC_URGENT) 登记（被 handle 消费） */
+    int32_t error;           /* 最近一次中止的归因 */
 
-    uint8_t page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
+    BYTE page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
 } migrate_handle_t;
 
 /* 所有 plane 的读失败计数均已清空（boot 契约审计；纯函数）。 */
 static inline bool migrate_fail_state_clean(const migrate_handle_t *m)
 {
-    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         if (m->fail_gblock[plane] != UINT16_MAX)
         {
@@ -260,16 +260,16 @@ typedef struct
 {
     ftl_module_status_t base;
 
-    uint8_t  phase;    /* mig_phase_t（观测；外部不要据此驱动） */
-    uint8_t  kind;     /* mig_kind_t（GC / WL / PREDICT） */
-    uint16_t migrated; /* 本次 job 已搬 CW 数 */
-    uint16_t erased;   /* 本次 job 已擦 plane 数 */
-    bool     aborted;
-    bool     erase_failed;
-    bool     timed_out;
-    uint8_t  timeout_phase;
-    uint32_t reclaimed; /* 累计成功回收 SB 数（单调） */
-    uint32_t novictim;  /* 累计「触发但选不出 victim」次数 */
+    BYTE  phase;    /* mig_phase_t（观测；外部不要据此驱动） */
+    BYTE  kind;     /* mig_kind_t（GC / WL / PREDICT） */
+    WORD  migrated; /* 本次 job 已搬 CW 数 */
+    WORD  erased;   /* 本次 job 已擦 plane 数 */
+    bool  aborted;
+    bool  erase_failed;
+    bool  timed_out;
+    BYTE  timeout_phase;
+    DWORD reclaimed; /* 累计成功回收 SB 数（单调） */
+    DWORD novictim;  /* 累计「触发但选不出 victim」次数 */
 } migrate_status_t;
 
 /*
@@ -288,9 +288,9 @@ typedef struct
 void migrate_handle(migrate_handle_t *m, const ftl_bg_info_t *info, migrate_status_t *out);
 
 /* ── 查询（替代外部读 handle 内部） ── */
-bool     migrate_is_active(const migrate_handle_t *m);
-uint32_t migrate_reclaimed_count(const migrate_handle_t *m);
-uint32_t migrate_novictim_count(const migrate_handle_t *m);
+bool  migrate_is_active(const migrate_handle_t *m);
+DWORD migrate_reclaimed_count(const migrate_handle_t *m);
+DWORD migrate_novictim_count(const migrate_handle_t *m);
 
 /* 完成服务函数 ftl_migrate_callback 的声明在 ftl_op.h —— 那里是 g_op_callbacks 各槽的唯一权威列表。 */
 

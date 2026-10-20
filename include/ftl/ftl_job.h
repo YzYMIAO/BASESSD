@@ -19,7 +19,7 @@
  *       job.start_ms = 0U;
  *   } else if (ftl_job_heartbeat(&job.log_ms, &job.start_ms)) {
  *       LOGI("[XX] job phase=%u ... age=%lums\r\n",
- *            (unsigned)job.phase, ..., (unsigned long)ftl_job_age_ms(&job.start_ms));
+ *            (unsigned)job.phase, ..., ftl_job_age_ms(&job.start_ms));
  *   }
  *
  * 基准由 ftl_job_heartbeat **懒初始化**（首次见到在飞时记 start）⇒ job 起点无需显式
@@ -46,7 +46,7 @@
  *   **观测**心跳）。两份各自 static / static inline，未合并：合并要把观测心跳的
  *   归属从本头挪走，而本头是各 job 心跳节拍的唯一来源。
  */
-static inline uint32_t ftl_job_now_ms(void)
+static inline DWORD ftl_job_now_ms(void)
 {
     const ssd_platform_ops_t *platform = ssd_platform_get();
 
@@ -54,15 +54,15 @@ static inline uint32_t ftl_job_now_ms(void)
     {
         return 0U;
     }
-    return (uint32_t)(platform->time_us() / 1000U);
+    return (platform->time_us() / 1000U);
 }
 
 /*
  * ftl_job_age_ms - job 已运行时长（毫秒）。基准未建立（*start_ms == 0）时返回 0。
  */
-static inline uint32_t ftl_job_age_ms(const uint32_t *start_ms)
+static inline DWORD ftl_job_age_ms(const DWORD *start_ms)
 {
-    const uint32_t start = *start_ms;
+    const DWORD start = *start_ms;
 
     return (start == 0U) ? 0U : (ftl_job_now_ms() - start);
 }
@@ -74,9 +74,9 @@ static inline uint32_t ftl_job_age_ms(const uint32_t *start_ms)
  * FTL_JOB_LOG_INTERVAL_MS 更新 *log_ms 并返回 true。
  * 返回 true 时调用方打一行，age 用 ftl_job_age_ms(start_ms) 取。
  */
-static inline bool ftl_job_heartbeat(uint32_t *log_ms, uint32_t *start_ms)
+static inline bool ftl_job_heartbeat(DWORD *log_ms, DWORD *start_ms)
 {
-    const uint32_t now_ms = ftl_job_now_ms();
+    const DWORD now_ms = ftl_job_now_ms();
 
     if (*start_ms == 0U)
     {
@@ -101,9 +101,9 @@ static inline bool ftl_job_heartbeat(uint32_t *log_ms, uint32_t *start_ms)
  * line（load / flush），没有"某个 job 从哪一刻开始"可言 ⇒ 调用方只报计数，不报 age。
  * 调用方在**无在飞**时把 *log_ms 直接置 0 清基准（无 start 可清）。
  */
-static inline bool ftl_job_tick(uint32_t *log_ms)
+static inline bool ftl_job_tick(DWORD *log_ms)
 {
-    const uint32_t now_ms = ftl_job_now_ms();
+    const DWORD now_ms = ftl_job_now_ms();
 
     if (*log_ms == 0U)
     {

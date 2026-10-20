@@ -43,7 +43,7 @@
  *             触发；GC 求值的节拍门则因 0 作「尚未求值」哨兵而退化为「每轮求值」
  *             （GC 不能因缺时钟停摆）。
  * -------------------------------------------------------------------- */
-static uint32_t ftl_now_ms(void)
+static DWORD ftl_now_ms(void)
 {
     const ssd_platform_ops_t *platform = ssd_platform_get();
 
@@ -51,7 +51,7 @@ static uint32_t ftl_now_ms(void)
     {
         return 0U;
     }
-    return (uint32_t)(platform->time_us() / 1000U);
+    return (platform->time_us() / 1000U);
 }
 
 /* --------------------------------------------------------------------
@@ -91,9 +91,9 @@ typedef enum
     BG_TASK_NUM
 } bg_task_id_t;
 
-#define BG_TASK_BIT(id) (1U << (uint32_t)(id))
+#define BG_TASK_BIT(id) (1U << id)
 
-_Static_assert((uint32_t)BG_TASK_NUM <= BG_TASK_COUNT, "任务 ID 数超出调度器 tasks[] 容量");
+_Static_assert(BG_TASK_NUM <= BG_TASK_COUNT, "任务 ID 数超出调度器 tasks[] 容量");
 
 /* 档位 → 预算规模（IDLE/NORMAL/BUSY）。锚定 onfi_1_0.c 时序（NAND_TIME_TPROG_US=700）：
  *  IDLE/NORMAL 2000µs ≈ 2~3 页写 + GC 全表求值；BUSY 700µs ≈ 恰 1 页写。
@@ -127,7 +127,7 @@ static checkpoint_trigger_t bg_cp_trigger(const ftl_context_t *ftl, checkpoint_r
     trigger.journal_watermark = journal_watermark(ftl->journal);
     trigger.emergency         = journal_is_emergency(ftl->journal);
     trigger.force             = force;
-    trigger.reason            = (uint8_t)reason;
+    trigger.reason            = reason;
     return trigger;
 }
 
@@ -205,7 +205,7 @@ static void bg_a_l2p_flush(ftl_context_t *ftl)
 
     /* typed 入口：档位 → max_kick 的 static const 表在 l2p 模块内；
      * thrashing 降级也在模块内判定。 */
-    const uint32_t dim = ftl_topo_dim(ftl->topo);
+    const DWORD dim = ftl_topo_dim(ftl->topo);
 
     l2p_handle(ftl->cache, dim, &info, &status);
 }
@@ -269,15 +269,15 @@ _Static_assert((sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])) == BG_TASK_NUM,
 /* ftl_bg_init —— 把 s_bg_tasks 装载进本实例的调度器。由 ftl_init 在装配末尾调用一次。 */
 void ftl_bg_init(ftl_context_t *ftl)
 {
-    bg_scheduler_init(&ftl->bg, s_bg_tasks, (uint8_t)(sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])));
+    bg_scheduler_init(&ftl->bg, s_bg_tasks, (sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])));
 }
 
 /* ftl_bg_level_select — 负载 → 档位（纯函数，无副作用）：
  * inflight 全空 = IDLE；pending > 半池 或 有未决组 = BUSY；中间 = NORMAL。 */
-uint8_t ftl_bg_level_select(const ftl_context_t *ftl)
+BYTE ftl_bg_level_select(const ftl_context_t *ftl)
 {
-    const uint16_t pending = pending_count(ftl);
-    const uint16_t queued  = pending_group_count(ftl);
+    const WORD pending = pending_count(ftl);
+    const WORD queued  = pending_group_count(ftl);
 
     if ((pending == 0U) && (queued == 0U))
     {
@@ -311,9 +311,9 @@ void ftl_bg_service(ftl_context_t *ftl)
         return;
     }
 
-    const uint8_t level = ftl_bg_level_select(ftl);
+    const BYTE level = ftl_bg_level_select(ftl);
     /* 档位下标越界不会崩：会静默读到相邻静态数据 ⇒ 预算/掩码全错而无声（H31/H40）。 */
     /* 档位先发布到调度器：typed 模块入口的 ftl_bg_info_t.load_level 取这里。 */
-    ftl->bg.level       = level;
+    ftl->bg.level    = level;
     bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level]);
 }

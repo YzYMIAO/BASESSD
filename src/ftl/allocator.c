@@ -55,7 +55,7 @@ void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *t
     memset(&alloc->bbt, 0, sizeof(alloc->bbt));
 
     /* 反向索引：未坏块置 NO_SB；坏块由 bbt_init 置 BAD，不在此动。 */
-    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    for (WORD i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
         if (!ftl_block_is_bad(&alloc->blocks[i]))
         {
@@ -68,7 +68,7 @@ void allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, ftl_tables_t *t
 
 /* 实现要点：调用者保证块已擦除。入池前拒绝越界、BAD、重复归还、池满；
  * debug ASSERT + release 拒绝（后果是静默漏账或坏块复活）。 */
-void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
+void allocator_free_block(ftl_allocator_t *alloc, WORD gblock)
 {
     ASSERT(gblock < FTL_BLOCK_TOTAL);
     if (gblock >= FTL_BLOCK_TOTAL)
@@ -111,9 +111,9 @@ void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock)
 
 /* 实现要点：线性查找 + swap-remove（查找 O(free_count)，交换 O(1)）。
  * 不在池内是文档化 no-op；出池只校验 state == FREE，不赋新态。 */
-void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock)
+void allocator_remove_from_free(ftl_allocator_t *alloc, WORD gblock)
 {
-    for (uint16_t i = 0U; i < alloc->free_count; i++)
+    for (WORD i = 0U; i < alloc->free_count; i++)
     {
         if (alloc->free_blocks[i] == gblock)
         {
@@ -125,7 +125,7 @@ void allocator_remove_from_free(ftl_allocator_t *alloc, uint16_t gblock)
 }
 
 /* 实现要点：与 migrate 擦除完成同口径；供元数据日志块等不经 migrate 的擦除路径调用。 */
-void allocator_note_erase(ftl_allocator_t *alloc, uint16_t gblock, uint32_t now)
+void allocator_note_erase(ftl_allocator_t *alloc, WORD gblock, DWORD now)
 {
     ASSERT(!ftl_block_is_bad(&alloc->blocks[gblock]));
 
@@ -141,7 +141,7 @@ void allocator_note_erase(ftl_allocator_t *alloc, uint16_t gblock, uint32_t now)
 }
 
 /* 实现要点：按 plane 追加到 op_blocks；容量由 FTL_OP_BLOCKS_PER_PLANE 限定。 */
-bool allocator_op_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gblock)
+bool allocator_op_try_push(ftl_allocator_t *alloc, BYTE plane, WORD gblock)
 {
     if (alloc->op_count[plane] >= FTL_OP_BLOCKS_PER_PLANE)
     {
@@ -154,7 +154,7 @@ bool allocator_op_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gbloc
 }
 
 /* 实现要点：按 plane 追加到 spare_blocks；容量由 FTL_SPARE_POOL_PER_PLANE 限定。 */
-bool allocator_spare_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gblock)
+bool allocator_spare_try_push(ftl_allocator_t *alloc, BYTE plane, WORD gblock)
 {
     if (alloc->spare_count[plane] >= FTL_SPARE_POOL_PER_PLANE)
     {
@@ -167,7 +167,7 @@ bool allocator_spare_try_push(ftl_allocator_t *alloc, uint8_t plane, uint16_t gb
 }
 
 /* 实现要点：LIFO 弹出；调用者保证 out_gblock 非空。 */
-bool allocator_spare_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
+bool allocator_spare_try_pop(ftl_allocator_t *alloc, BYTE plane, WORD *out_gblock)
 {
     if (alloc->spare_count[plane] == 0U)
     {
@@ -181,17 +181,17 @@ bool allocator_spare_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *ou
 
 /* 实现要点：逐 plane 从 Free Pool 摘块补 Spare；只补 state == FREE 的块，
  * 摘出后置 NONE（Spare 池块无归属），push 失败则回滚到 Free。 */
-bool allocator_spare_refill_from_free(ftl_allocator_t *alloc, uint8_t plane)
+bool allocator_spare_refill_from_free(ftl_allocator_t *alloc, BYTE plane)
 {
     bool moved = false;
 
     while (alloc->spare_count[plane] < FTL_SPARE_POOL_PER_PLANE)
     {
-        uint16_t pick = UINT16_MAX;
+        WORD pick = UINT16_MAX;
 
-        for (uint16_t i = 0U; i < alloc->free_count; i++)
+        for (WORD i = 0U; i < alloc->free_count; i++)
         {
-            const uint16_t g = alloc->free_blocks[i];
+            const WORD g = alloc->free_blocks[i];
 
             if (ftl_gblock_plane(g) == plane)
             {
@@ -220,25 +220,25 @@ bool allocator_spare_refill_from_free(ftl_allocator_t *alloc, uint8_t plane)
 }
 
 /* 实现要点：遍历 PLANE_NUM 个 plane 求和。 */
-uint16_t allocator_op_total(const ftl_allocator_t *alloc)
+WORD allocator_op_total(const ftl_allocator_t *alloc)
 {
-    uint16_t n = 0U;
+    WORD n = 0U;
 
-    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        n = (uint16_t)(n + alloc->op_count[p]);
+        n = (n + alloc->op_count[p]);
     }
     return n;
 }
 
 /* 实现要点：遍历 PLANE_NUM 个 plane 求和。 */
-uint16_t allocator_spare_total(const ftl_allocator_t *alloc)
+WORD allocator_spare_total(const ftl_allocator_t *alloc)
 {
-    uint16_t n = 0U;
+    WORD n = 0U;
 
-    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        n = (uint16_t)(n + alloc->spare_count[p]);
+        n = (n + alloc->spare_count[p]);
     }
     return n;
 }
@@ -252,7 +252,7 @@ uint16_t allocator_spare_total(const ftl_allocator_t *alloc)
  * 返回：true 取到；false 池空。
  * 实现要点：LIFO 弹出；容量由 op_count 维护。
  */
-static bool allocator_op_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
+static bool allocator_op_try_pop(ftl_allocator_t *alloc, BYTE plane, WORD *out_gblock)
 {
     if (alloc->op_count[plane] == 0U)
     {
@@ -271,9 +271,9 @@ static bool allocator_op_try_pop(ftl_allocator_t *alloc, uint8_t plane, uint16_t
  * 返回：true 取到；false 该 plane OP 池已空。
  * 实现要点：跳过运行时被标坏的块；坏块弹出即丢弃，不回 Free Pool。
  */
-static bool allocator_pull_from_op(ftl_allocator_t *alloc, uint8_t plane, uint16_t *out_gblock)
+static bool allocator_pull_from_op(ftl_allocator_t *alloc, BYTE plane, WORD *out_gblock)
 {
-    uint16_t gblock;
+    WORD gblock;
 
     while (allocator_op_try_pop(alloc, plane, &gblock))
     {
@@ -297,14 +297,14 @@ static bool allocator_pull_from_op(ftl_allocator_t *alloc, uint8_t plane, uint16
  * 实现要点：判据是 Free Pool 数组成员关系，不是 BST 的 FREE 位；
  *           选中 ⇒ allocator_remove_from_free 必然成功。
  */
-static uint16_t allocator_select_plane_block_from_pool(const ftl_allocator_t *alloc, uint8_t plane)
+static WORD allocator_select_plane_block_from_pool(const ftl_allocator_t *alloc, BYTE plane)
 {
-    uint16_t best      = FTL_GBLOCK_INVALID;
-    uint32_t min_erase = UINT32_MAX;
+    WORD  best      = FTL_GBLOCK_INVALID;
+    DWORD min_erase = UINT32_MAX;
 
-    for (uint16_t i = 0U; i < alloc->free_count; i++)
+    for (WORD i = 0U; i < alloc->free_count; i++)
     {
-        uint16_t gblock = alloc->free_blocks[i];
+        WORD gblock = alloc->free_blocks[i];
 
         if (ftl_gblock_plane(gblock) != plane)
         {
@@ -334,11 +334,11 @@ static uint16_t allocator_select_plane_block_from_pool(const ftl_allocator_t *al
  * 返回：true 成功；false 某 plane 无块。
  * 实现要点：选块阶段无副作用；全部就位后才出池并置 OPEN，失败无需回滚。
  */
-static bool allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint8_t temperature)
+static bool allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, BYTE temperature)
 {
-    uint16_t gblock[PLANE_NUM];
+    WORD gblock[PLANE_NUM];
 
-    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         gblock[plane] = allocator_select_plane_block_from_pool(alloc, plane);
         if (gblock[plane] == FTL_GBLOCK_INVALID)
@@ -350,7 +350,7 @@ static bool allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint8_t
         }
     }
 
-    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         /* 先出池（校验 state == FREE），再由本转移赋 OPEN。 */
         allocator_remove_from_free(alloc, gblock[plane]);
@@ -378,7 +378,7 @@ static bool allocator_open_sb(ftl_allocator_t *alloc, super_block_t *sb, uint8_t
  * 实现要点：BAD 是终态——该 plane 在列表副本里改记哨兵，状态不动；
  *           容量 = FTL_BLOCK_TOTAL，满在结构上不可能。
  */
-static uint16_t allocator_closed_sb_commit(ftl_allocator_t *alloc, const super_block_t *sb)
+static WORD allocator_closed_sb_commit(ftl_allocator_t *alloc, const super_block_t *sb)
 {
     ASSERT(alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX);
 
@@ -389,12 +389,12 @@ static uint16_t allocator_closed_sb_commit(ftl_allocator_t *alloc, const super_b
         return FTL_BLOCK_NO_SB;
     }
 
-    const uint16_t closed_idx = alloc->closed_sb_count;
-    super_block_t  entry      = *sb;
+    const WORD    closed_idx = alloc->closed_sb_count;
+    super_block_t entry      = *sb;
 
     entry.is_open = false;
 
-    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         if (!super_block_has_plane(&entry, plane))
         {
@@ -405,9 +405,7 @@ static uint16_t allocator_closed_sb_commit(ftl_allocator_t *alloc, const super_b
         ASSERT(entry.plane_blocks[plane] < BLOCKS_PER_PLANE);
         if (entry.plane_blocks[plane] >= BLOCKS_PER_PLANE)
         {
-            LOGE("[FTL] closed_sb: plane%u block %u out of range\r\n",
-                 (unsigned)plane,
-                 (unsigned)entry.plane_blocks[plane]);
+            LOGE("[FTL] closed_sb: plane%u block %u out of range\r\n", (unsigned)plane, (unsigned)entry.plane_blocks[plane]);
             entry.plane_blocks[plane] = FTL_BLOCK_NO_PLANE;
             continue;
         }
@@ -445,14 +443,14 @@ static void allocator_close_sb(ftl_allocator_t *alloc, super_block_t *sb)
 /* ── 4. 分配与 SB 生命周期 ── */
 
 /* 实现要点：SB 未开、写满或含已标坏块时先换新 SB；各 plane 取同一页。 */
-ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, nand_pba_t out[PLANE_NUM])
+ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, BYTE temperature, DWORD out[PLANE_NUM])
 {
     super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
     /* 读恢复可能把 Open SB 内的块标 BAD；BAD 终态不能再写。 */
     if (sb->is_open)
     {
-        for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+        for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
         {
             if (!super_block_has_plane(sb, plane))
             {
@@ -478,7 +476,7 @@ ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, n
         }
     }
 
-    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         out[plane] = super_block_page_pba(allocator_topo(alloc), sb, plane, sb->next_page);
     }
@@ -489,7 +487,7 @@ ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature, n
 
 /* 实现要点：只回退写指针——**不**回退可能刚发生的开新 SB（见头文件的两条前提）。
  * 归还后若 SB 恰是刚开的，next_page == 0 是合法态（等价于「刚开、未写」）。 */
-void allocator_rewind_pair(ftl_allocator_t *alloc, uint8_t temperature)
+void allocator_rewind_pair(ftl_allocator_t *alloc, BYTE temperature)
 {
     super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
@@ -500,7 +498,7 @@ void allocator_rewind_pair(ftl_allocator_t *alloc, uint8_t temperature)
 }
 
 /* 实现要点：已关闭的槽再关一次是合法 no-op ⇒ 返回 FTL_ERROR，不转 ASSERT。 */
-ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature)
+ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, BYTE temperature)
 {
     super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
 
@@ -514,18 +512,18 @@ ftl_status_t allocator_close_open_sb(ftl_allocator_t *alloc, uint8_t temperature
 }
 
 /* 实现要点：重建按单个物理块建条目，另一 plane 记哨兵；next_page 记满。 */
-uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
-                                 const uint16_t   plane_blocks[PLANE_NUM],
-                                 uint8_t          temperature)
+WORD allocator_add_closed_sb(ftl_allocator_t *alloc,
+                             const WORD       plane_blocks[PLANE_NUM],
+                             BYTE             temperature)
 {
     super_block_t sb;
 
     memset(&sb, 0, sizeof(sb));
-    sb.next_page   = (uint8_t)PAGES_PER_BLOCK;
+    sb.next_page   = PAGES_PER_BLOCK;
     sb.temperature = temperature;
     sb.is_open     = false;
 
-    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         sb.plane_blocks[plane] = plane_blocks[plane];
     }
@@ -535,9 +533,9 @@ uint16_t allocator_add_closed_sb(ftl_allocator_t *alloc,
 
 /* 实现要点：swap-remove；末位条目搬家后修正其各 plane 的 sb_id。
  * 首循环兜住“free/retire 被拒绝、sb_id 未清”的路径。 */
-void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
+void allocator_remove_closed_sb(ftl_allocator_t *alloc, WORD closed_idx)
 {
-    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         if (alloc->closed_sb_list[closed_idx].plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
         {
@@ -558,7 +556,7 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
         super_block_t *moved = &alloc->closed_sb_list[closed_idx];
         *moved               = alloc->closed_sb_list[alloc->closed_sb_count];
 
-        for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+        for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
         {
             if (moved->plane_blocks[plane] == FTL_BLOCK_NO_PLANE)
             {
@@ -588,9 +586,9 @@ void allocator_remove_closed_sb(ftl_allocator_t *alloc, uint16_t closed_idx)
  *             ⚠ 擦除成功路径已由 allocator_free_block/retire 改过 BST 状态；本函数只
  *             负责 Closed 条目与 sb_id 的同步，不碰池。
  * -------------------------------------------------------------------- */
-bool allocator_closed_drop_plane(ftl_allocator_t *alloc, uint8_t plane, uint16_t block)
+bool allocator_closed_drop_plane(ftl_allocator_t *alloc, BYTE plane, WORD block)
 {
-    for (uint16_t i = 0U; i < alloc->closed_sb_count; i++)
+    for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
         super_block_t *e = &alloc->closed_sb_list[i];
 
@@ -607,7 +605,7 @@ bool allocator_closed_drop_plane(ftl_allocator_t *alloc, uint8_t plane, uint16_t
         }
         e->plane_blocks[plane] = FTL_BLOCK_NO_PLANE;
 
-        for (uint8_t p = 0U; p < PLANE_NUM; p++)
+        for (BYTE p = 0U; p < PLANE_NUM; p++)
         {
             if (e->plane_blocks[p] != FTL_BLOCK_NO_PLANE)
             {
@@ -634,14 +632,14 @@ static bool allocator_block_is_wear_counted(const ftl_block_t *b)
 /* 实现要点：跳过哨兵与 BAD plane；valid_count 单位是 CW。 */
 void allocator_sb_stats(const ftl_allocator_t *alloc, const super_block_t *sb, allocator_sb_stats_t *out)
 {
-    uint16_t valid     = 0U;
-    uint32_t erase_max = 0U;
-    uint32_t erase_sum = 0U;
-    uint32_t pe_min    = UINT32_MAX;
-    uint32_t read_sum  = 0U;
-    uint8_t  n         = 0U;
+    WORD  valid     = 0U;
+    DWORD erase_max = 0U;
+    DWORD erase_sum = 0U;
+    DWORD pe_min    = UINT32_MAX;
+    DWORD read_sum  = 0U;
+    BYTE  n         = 0U;
 
-    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         if (!super_block_has_plane(sb, plane))
         {
@@ -655,7 +653,7 @@ void allocator_sb_stats(const ftl_allocator_t *alloc, const super_block_t *sb, a
             continue;
         }
 
-        valid = (uint16_t)(valid + blk->valid_count);
+        valid = (valid + blk->valid_count);
         erase_sum += blk->erase_count;
         if (blk->erase_count > erase_max)
         {
@@ -680,13 +678,13 @@ void allocator_sb_stats(const ftl_allocator_t *alloc, const super_block_t *sb, a
 /* 实现要点：一次扫描；跳过 BAD 与 NONE（固定元数据 / OP / Spare / 未初始化）。 */
 void allocator_erase_stats(const ftl_allocator_t *alloc, allocator_erase_stats_t *out)
 {
-    uint32_t min_ec = UINT32_MAX;
-    uint32_t max_ec = 0U;
-    uint32_t sum    = 0U;
-    uint32_t max_t  = 0U;
-    uint16_t n      = 0U;
+    DWORD min_ec = UINT32_MAX;
+    DWORD max_ec = 0U;
+    DWORD sum    = 0U;
+    DWORD max_t  = 0U;
+    WORD  n      = 0U;
 
-    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    for (WORD i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
         const ftl_block_t *blk = &alloc->blocks[i];
 
@@ -718,11 +716,11 @@ void allocator_erase_stats(const ftl_allocator_t *alloc, allocator_erase_stats_t
 }
 
 /* 实现要点：口径与 allocator_erase_stats 相同。 */
-uint16_t allocator_count_blocks_below(const ftl_allocator_t *alloc, uint32_t threshold)
+WORD allocator_count_blocks_below(const ftl_allocator_t *alloc, DWORD threshold)
 {
-    uint16_t count = 0U;
+    WORD count = 0U;
 
-    for (uint16_t i = 0U; i < FTL_BLOCK_TOTAL; i++)
+    for (WORD i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
         const ftl_block_t *blk = &alloc->blocks[i];
 
@@ -740,14 +738,14 @@ uint16_t allocator_count_blocks_below(const ftl_allocator_t *alloc, uint32_t thr
 }
 
 /* 实现要点：比较全部 plane——不同 SB 的哨兵 plane 可能相同，只比一个会误中。 */
-bool allocator_find_closed_sb(const ftl_allocator_t *alloc, const super_block_t *sb, uint16_t *out_idx)
+bool allocator_find_closed_sb(const ftl_allocator_t *alloc, const super_block_t *sb, WORD *out_idx)
 {
-    for (uint16_t i = 0U; i < alloc->closed_sb_count; i++)
+    for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
         const super_block_t *e    = &alloc->closed_sb_list[i];
         bool                 same = true;
 
-        for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+        for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
         {
             if (e->plane_blocks[plane] != sb->plane_blocks[plane])
             {

@@ -29,7 +29,7 @@ static fc_raid_context_t g_raid_ctx[LUN_NUM];
 static fc_raid_context_t g_raid_shadow[LUN_NUM];
 
 /* 初始化指定 LUN 的 RAID 上下文 */
-void fc_raid_init_ctx(uint8_t lun)
+void fc_raid_init_ctx(BYTE lun)
 {
     /* 前置条件由调用者保证（fc.c 按 LUN_NUM 循环传入） */
     ASSERT(lun < LUN_NUM);
@@ -44,7 +44,7 @@ void fc_raid_init_ctx(uint8_t lun)
  *   参数：lun —— LUN；cw_buffer —— 第一个 CW；total —— 期望 CW 总数。
  *   返回：FC_STATUS_OK / INVALID_ARGUMENT / NOT_READY（该 LUN 序列进行中）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total)
+fc_status_t fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total)
 {
     /* 入参前置条件由调用者保证 */
     ASSERT(lun < LUN_NUM);
@@ -73,11 +73,11 @@ fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total)
  *         已超 total 属调用者计数 bug，转 ASSERT（v20）。
  *   实现要点：按 32 位字对齐 XOR（528B / 4 = 132 字）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer)
+fc_status_t fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer)
 {
-    uint16_t        i;
-    uint32_t       *acc32;
-    const uint32_t *buf32;
+    WORD         i;
+    DWORD       *acc32;
+    const DWORD *buf32;
 
     /* 入参前置条件由调用者保证 */
     ASSERT(lun < LUN_NUM);
@@ -94,9 +94,9 @@ fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer)
     ASSERT(ctx->processed < ctx->total);
 
     /* 32 位对齐 XOR */
-    acc32 = (uint32_t *)(void *)ctx->acc_buf;
-    buf32 = (const uint32_t *)(const void *)cw_buffer;
-    for (i = 0; i < (FC_BUFFER_POOL_CW_SIZE / sizeof(uint32_t)); i++)
+    acc32 = (DWORD *)(void *)ctx->acc_buf;
+    buf32 = (const DWORD *)(const void *)cw_buffer;
+    for (i = 0; i < (FC_BUFFER_POOL_CW_SIZE / sizeof(DWORD)); i++)
     {
         acc32[i] ^= buf32[i];
     }
@@ -111,7 +111,7 @@ fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer)
  *   参数：lun —— LUN；parity_buffer —— 输出。
  *   返回：FC_STATUS_OK / INVALID_ARGUMENT（序列未开始）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_raid_end(uint8_t lun, uint8_t *parity_buffer)
+fc_status_t fc_raid_end(BYTE lun, BYTE *parity_buffer)
 {
     /* 入参前置条件由调用者保证 */
     ASSERT(lun < LUN_NUM);
@@ -133,7 +133,7 @@ fc_status_t fc_raid_end(uint8_t lun, uint8_t *parity_buffer)
 }
 
 /* HSQ 打断保护：保存/恢复上下文（中断路径用） */
-void fc_raid_save(uint8_t lun)
+void fc_raid_save(BYTE lun)
 {
     if (lun < LUN_NUM)
     {
@@ -141,7 +141,7 @@ void fc_raid_save(uint8_t lun)
     }
 }
 
-void fc_raid_restore(uint8_t lun)
+void fc_raid_restore(BYTE lun)
 {
     if (lun < LUN_NUM)
     {
@@ -158,15 +158,15 @@ void fc_raid_restore(uint8_t lun)
  *   实现要点：recovered 初始为 0，异或跳过 failed_idx 的所有 buffer；
  *         结果即 = 其余所有 buffer 的 XOR（RAID-5 重建公式）。
  * -------------------------------------------------------------------- */
-void fc_raid_recover(uint8_t *recovered,
-                     uint8_t *buffers[],
-                     uint8_t  count,
-                     uint8_t  failed_idx,
-                     uint16_t length)
+void fc_raid_recover(BYTE *recovered,
+                     BYTE *buffers[],
+                     BYTE  count,
+                     BYTE  failed_idx,
+                     WORD  length)
 {
-    uint8_t   i;
-    uint32_t *rec32    = (uint32_t *)(void *)recovered;
-    uint16_t  word_len = length / sizeof(uint32_t);
+    BYTE   i;
+    DWORD *rec32    = (DWORD *)(void *)recovered;
+    WORD   word_len = length / sizeof(DWORD);
 
     /* 入参前置条件由调用者保证（fc_data_path 传入全 CW 收集结果） */
     ASSERT(recovered != NULL);
@@ -183,9 +183,9 @@ void fc_raid_recover(uint8_t *recovered,
         {
             continue;
         }
-        for (uint16_t w = 0U; w < word_len; w++)
+        for (WORD w = 0U; w < word_len; w++)
         {
-            rec32[w] ^= ((const uint32_t *)(const void *)buffers[i])[w];
+            rec32[w] ^= ((const DWORD *)(const void *)buffers[i])[w];
         }
     }
 }

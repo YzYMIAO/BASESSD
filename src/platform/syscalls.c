@@ -29,15 +29,17 @@
  *   ② _sbrk()          —— 带上下界检查的堆生长
  */
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stddef.h>
 #include <stdint.h>
 
 /* 本文件是**跨 target 共享**的平台源文件（放这里而不是 src/platform/<soc>/）：
  * 不 include 任何 SoC 头，也不出现 HAL 类型。唯一需要架构知识的是读 MSP ——
  * 用内联汇编直接取，不走内核头（那会依赖设备头提供 IRQn_Type，裸包含编译不过）。 */
-static uint32_t syscalls_current_msp(void)
+static DWORD syscalls_current_msp(void)
 {
-    uint32_t msp;
+    DWORD msp;
 
     __asm__ volatile("mrs %0, msp"
                      : "=r"(msp));

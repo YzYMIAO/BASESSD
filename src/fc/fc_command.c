@@ -24,11 +24,11 @@
  *   用途：RAID / stripe 的 XOR 按 CW 配对，要求两 plane 同集合
  *         （见 fc_data_path_generate_stripe_parity 的前置断言）。
  * -------------------------------------------------------------------- */
-uint8_t fc_cw_bitmap_is_plane_symmetric(uint32_t mask)
+BYTE fc_cw_bitmap_is_plane_symmetric(DWORD mask)
 {
-    const uint32_t plane_bits = (uint32_t)((1U << CW_NUM) - 1U);
-    const uint32_t low        = mask & plane_bits;
-    uint8_t        plane;
+    const DWORD plane_bits = ((1U << CW_NUM) - 1U);
+    const DWORD low        = mask & plane_bits;
+    BYTE        plane;
 
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
@@ -65,7 +65,7 @@ fc_status_t fc_command_validate(const fc_command_t *command)
     /* 非 SET/GET_FEATURES 且涉及数据传输的操作，必须已配置 desc 链（无 buffer 无法搬运数据） */
     ASSERT((command->config.operation == OP_SET_FEATURES) ||
            (command->config.operation == OP_GET_FEATURES) ||
-           !nand_operation_has_data((uint8_t)command->config.operation) ||
+           !nand_operation_has_data(command->config.operation) ||
            (command->desc_id != FC_DESCRIPTOR_ID_INVALID));
     /* NDEBUG 下断言整段裁空 → command 变未用形参，吞掉（同 fc_submit 的 (void)command_id;） */
     (void)command;

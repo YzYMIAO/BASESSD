@@ -56,8 +56,8 @@ typedef struct
     ftl_module_state_t state;
     bool               critical;
     bool               wants_run;
-    uint32_t           progress;
-    uint32_t           next_ms;
+    DWORD              progress;
+    DWORD              next_ms;
     int32_t            error;
 } ftl_module_status_t;
 
@@ -72,8 +72,8 @@ typedef struct
  */
 typedef struct
 {
-    uint32_t now_ms;     /* 单调毫秒（平台时钟缺失时为 0） */
-    uint8_t  load_level; /* BG_LEVEL_IDLE / NORMAL / BUSY（bg_scheduler.h） */
+    DWORD now_ms;     /* 单调毫秒（平台时钟缺失时为 0） */
+    BYTE  load_level; /* BG_LEVEL_IDLE / NORMAL / BUSY（bg_scheduler.h） */
 } ftl_bg_info_t;
 
 /* ── ms deadline（本仓取值，须上板标定；docs §6.3）──

@@ -30,12 +30,16 @@
  *   参数：queue —— 队列；storage —— 槽位数组；depth —— 容量。
  *   返回：FC_STATUS_OK（空指针 / depth=0 由断言拦截）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, uint16_t depth)
+fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth)
 {
     ASSERT(queue != NULL);
     ASSERT(storage != NULL);
     ASSERT(depth != 0U);
-    *queue = (fc_submission_queue_t){storage, depth, 0U, 0U, 0U};
+    queue->entries = storage;
+    queue->depth   = depth;
+    queue->head    = 0U;
+    queue->tail    = 0U;
+    queue->count   = 0U;
     return FC_STATUS_OK;
 }
 
@@ -45,12 +49,16 @@ fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id
  *   参数：queue —— 队列；storage —— 完成项数组；depth —— 容量。
  *   返回：FC_STATUS_OK（空指针 / depth=0 由断言拦截）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, uint16_t depth)
+fc_status_t fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth)
 {
     ASSERT(queue != NULL);
     ASSERT(storage != NULL);
     ASSERT(depth != 0U);
-    *queue = (fc_completion_queue_t){storage, depth, 0U, 0U, 0U};
+    queue->entries = storage;
+    queue->depth   = depth;
+    queue->head    = 0U;
+    queue->tail    = 0U;
+    queue->count   = 0U;
     return FC_STATUS_OK;
 }
 
@@ -71,7 +79,7 @@ fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id
         return FC_STATUS_QUEUE_FULL;
     }
     queue->entries[queue->tail] = command_id;
-    queue->tail                 = (uint16_t)((queue->tail + 1U) % queue->depth);
+    queue->tail                 = ((queue->tail + 1U) % queue->depth);
     queue->count++;
     return FC_STATUS_OK;
 }
@@ -91,7 +99,7 @@ fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_
         return FC_STATUS_QUEUE_EMPTY;
     }
     *command_id = queue->entries[queue->head];
-    queue->head = (uint16_t)((queue->head + 1U) % queue->depth);
+    queue->head = ((queue->head + 1U) % queue->depth);
     queue->count--;
     return FC_STATUS_OK;
 }
@@ -111,7 +119,7 @@ fc_status_t fc_completion_queue_push(fc_completion_queue_t *queue, const fc_comm
         return FC_STATUS_QUEUE_FULL;
     }
     queue->entries[queue->tail] = *completion;
-    queue->tail                 = (uint16_t)((queue->tail + 1U) % queue->depth);
+    queue->tail                 = ((queue->tail + 1U) % queue->depth);
     queue->count++;
     return FC_STATUS_OK;
 }
@@ -131,7 +139,7 @@ fc_status_t fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_sta
         return FC_STATUS_QUEUE_EMPTY;
     }
     *completion = queue->entries[queue->head];
-    queue->head = (uint16_t)((queue->head + 1U) % queue->depth);
+    queue->head = ((queue->head + 1U) % queue->depth);
     queue->count--;
     return FC_STATUS_OK;
 }
@@ -142,7 +150,7 @@ fc_status_t fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_sta
  *   参数：queue —— 队列；offset —— 偏移（0=队头）。
  *   返回：命令 ID；越界返回 FC_COMMAND_ID_INVALID。
  * -------------------------------------------------------------------- */
-fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, uint16_t offset)
+fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, WORD offset)
 {
     ASSERT(queue != NULL);
     /* 值域校验保留返回码：offset 越界返回 INVALID 哨兵（调用方按哨兵判链尾） */
@@ -150,6 +158,6 @@ fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, uin
     {
         return FC_COMMAND_ID_INVALID;
     }
-    uint16_t index = (uint16_t)((queue->head + offset) % queue->depth);
+    WORD index = ((queue->head + offset) % queue->depth);
     return queue->entries[index];
 }

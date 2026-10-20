@@ -35,7 +35,7 @@
 #define FAULT_DTCM_BEGIN  0x20000000U
 
 /* 栈顶符号由链接脚本提供（_estack = DTCM 末尾），用于给栈扫描设界。 */
-extern uint32_t _estack;
+extern DWORD _estack;
 
 /* ────────────────────────────── 轮询控制台 ────────────────────────────── */
 
@@ -48,9 +48,9 @@ static void fault_puts(const char *text)
 }
 
 /* 定长上限的打印：崩溃记录里的文本来自 .noinit，理论上可能没有终止符。 */
-static void fault_puts_n(const char *text, uint32_t capacity)
+static void fault_puts_n(const char *text, DWORD capacity)
 {
-    uint32_t index;
+    DWORD index;
 
     for (index = 0U; index < capacity; index++)
     {
@@ -62,7 +62,7 @@ static void fault_puts_n(const char *text, uint32_t capacity)
     }
 }
 
-static void fault_hex32(uint32_t value)
+static void fault_hex32(DWORD value)
 {
     static const char digits[] = "0123456789abcdef";
     int               shift;
@@ -70,14 +70,14 @@ static void fault_hex32(uint32_t value)
     fault_puts("0x");
     for (shift = 28; shift >= 0; shift -= 4)
     {
-        fault_port_putc(digits[(value >> (uint32_t)shift) & 0xFU]);
+        fault_port_putc(digits[(value >> shift) & 0xFU]);
     }
 }
 
-static void fault_dec(uint32_t value)
+static void fault_dec(DWORD value)
 {
-    char     buffer[10];
-    uint32_t index = 0U;
+    char  buffer[10];
+    DWORD index = 0U;
 
     if (value == 0U)
     {
@@ -97,7 +97,7 @@ static void fault_dec(uint32_t value)
 
 /* ────────────────────────────── 寄存器解码 ────────────────────────────── */
 
-static const char *fault_kind_name(uint32_t kind)
+static const char *fault_kind_name(DWORD kind)
 {
     switch (kind)
     {
@@ -116,7 +116,7 @@ static const char *fault_kind_name(uint32_t kind)
     }
 }
 
-static void fault_bit(uint32_t value, uint32_t mask, const char *name)
+static void fault_bit(DWORD value, DWORD mask, const char *name)
 {
     if ((value & mask) != 0U)
     {
@@ -126,7 +126,7 @@ static void fault_bit(uint32_t value, uint32_t mask, const char *name)
 }
 
 /* HFSR：FORCED 表示由可配置故障升级而来，需再看 CFSR 三段定位真因。 */
-static void fault_decode_hfsr(uint32_t hfsr)
+static void fault_decode_hfsr(DWORD hfsr)
 {
     fault_puts("HFSR   :");
     if (hfsr == 0U)
@@ -139,11 +139,11 @@ static void fault_decode_hfsr(uint32_t hfsr)
     fault_puts("\r\n");
 }
 
-static void fault_decode_cfsr(uint32_t cfsr, uint32_t mmfar, uint32_t bfar)
+static void fault_decode_cfsr(DWORD cfsr, DWORD mmfar, DWORD bfar)
 {
-    uint32_t mmfsr = cfsr & 0xFFU;
-    uint32_t bfsr  = (cfsr >> 8U) & 0xFFU;
-    uint32_t ufsr  = (cfsr >> 16U) & 0xFFFFU;
+    DWORD mmfsr = cfsr & 0xFFU;
+    DWORD bfsr  = (cfsr >> 8U) & 0xFFU;
+    DWORD ufsr  = (cfsr >> 16U) & 0xFFFFU;
 
     fault_puts("MMFSR  :");
     if (mmfsr == 0U)
@@ -197,10 +197,10 @@ static void fault_decode_cfsr(uint32_t cfsr, uint32_t mmfar, uint32_t bfar)
 }
 
 /* 有界栈扫描：栈上落在 Flash 区间的字视为候选返回地址（穷人的 backtrace）。 */
-static void fault_dump_stack(uint32_t sp)
+static void fault_dump_stack(DWORD sp)
 {
-    uint32_t limit = (uint32_t)(uintptr_t)&_estack;
-    uint32_t index;
+    DWORD limit = (uintptr_t)&_estack;
+    DWORD index;
 
     if ((sp < FAULT_DTCM_BEGIN) || (sp >= limit))
     {
@@ -212,14 +212,14 @@ static void fault_dump_stack(uint32_t sp)
     fault_puts("stack  : candidate return addresses\r\n");
     for (index = 0U; index < FAULT_STACK_SCAN_WORDS; index++)
     {
-        uint32_t address = sp + (index * 4U);
-        uint32_t value;
+        DWORD address = sp + (index * 4U);
+        DWORD value;
 
         if ((address + 4U) > limit)
         {
             break;
         }
-        value = *(const volatile uint32_t *)(uintptr_t)address;
+        value = *(const volatile DWORD *)(uintptr_t)address;
         if ((value >= FAULT_FLASH_BEGIN) && (value < FAULT_FLASH_END))
         {
             fault_puts("  ");
@@ -312,7 +312,7 @@ static void fault_dump_record(const crash_record_t *record)
     }
 
     fault_puts("\r\n=== CRASH RECORD ===\r\n");
-    if (record->kind == (uint32_t)CRASH_KIND_FAULT)
+    if (record->kind == CRASH_KIND_FAULT)
     {
         fault_puts("kind   : FAULT ");
         fault_puts(fault_kind_name(record->fault.fault_kind));
@@ -335,7 +335,7 @@ static void fault_dump_record(const crash_record_t *record)
     else
     {
         fault_puts("kind   : ");
-        fault_puts((record->kind == (uint32_t)CRASH_KIND_ABORT) ? "ABORT\r\n" : "ASSERT\r\n");
+        fault_puts((record->kind == CRASH_KIND_ABORT) ? "ABORT\r\n" : "ASSERT\r\n");
         fault_puts("expr   : ");
         fault_puts_n(record->expression, CRASH_TEXT_CAPACITY);
         fault_puts("\r\n");
@@ -390,34 +390,31 @@ void fault_init(void)
 void fault_report_boot(void)
 {
     char                  reason[64];
-    uint32_t              flags  = fault_port_reset_flags();
+    DWORD                 flags  = fault_port_reset_flags();
     const crash_record_t *record = crash_record_get();
 
     fault_port_reset_reason_text(flags, reason, sizeof(reason));
 
-    LOGI("[FAULT] reset reason:%s (rsr=0x%08lx)\r\n", reason, (unsigned long)flags);
+    LOGI("[FAULT] reset reason:%s (rsr=0x%08lx)\r\n", reason, flags);
 
     if (record != NULL)
     {
-        if (record->kind == (uint32_t)CRASH_KIND_FAULT)
+        if (record->kind == CRASH_KIND_FAULT)
         {
             LOGE("[FAULT] previous crash: %s PC=0x%08lx LR=0x%08lx CFSR=0x%08lx HFSR=0x%08lx\r\n",
                  fault_kind_name(record->fault.fault_kind),
-                 (unsigned long)record->fault.pc,
-                 (unsigned long)record->fault.lr,
-                 (unsigned long)record->fault.cfsr,
-                 (unsigned long)record->fault.hfsr);
+                 record->fault.pc,
+                 record->fault.lr,
+                 record->fault.cfsr,
+                 record->fault.hfsr);
         }
-        else if (record->kind == (uint32_t)CRASH_KIND_ABORT)
+        else if (record->kind == CRASH_KIND_ABORT)
         {
             LOGE("[FAULT] previous abort (assertion/test terminal)\r\n");
         }
         else
         {
-            LOGE("[FAULT] previous assert: %s (%s:%lu)\r\n",
-                 record->expression,
-                 record->file,
-                 (unsigned long)record->line);
+            LOGE("[FAULT] previous assert: %s (%s:%lu)\r\n", record->expression, record->file, record->line);
         }
     }
 

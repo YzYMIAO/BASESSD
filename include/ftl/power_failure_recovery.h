@@ -35,10 +35,10 @@ struct ftl_context;
 /* ── 掉电重建闭环的标志量（上板验证用，UART 可读） ── */
 typedef struct
 {
-    uint16_t blocks_rebuilt;  /* 重建的 Closed 条目数（= 扫到的写过物理块数，per-plane） */
-    uint16_t partial_blocks;  /* 其中部分写块数（写指针 < PAGES_PER_BLOCK，整块交 GC） */
-    uint16_t l2p_read_errors; /* 逐 CW 反查 L2P 的读失败次数（valid_cw 可能少算） */
-    uint32_t valid_cw;        /* 重建回填的有效 **CW** 总数（全实例；最大 4096×256=1,048,576） */
+    WORD  blocks_rebuilt;  /* 重建的 Closed 条目数（= 扫到的写过物理块数，per-plane） */
+    WORD  partial_blocks;  /* 其中部分写块数（写指针 < PAGES_PER_BLOCK，整块交 GC） */
+    WORD  l2p_read_errors; /* 逐 CW 反查 L2P 的读失败次数（valid_cw 可能少算） */
+    DWORD valid_cw;        /* 重建回填的有效 **CW** 总数（全实例；最大 4096×256=1,048,576） */
 } ftl_rebuild_stats_t;
 
 /* ── 启动类型 ── */
@@ -53,9 +53,9 @@ typedef enum
 typedef struct
 {
     ftl_boot_type_t boot_type;       /* 启动类型 */
-    uint32_t        cp_sequence;     /* Checkpoint sequence（0 = 无） */
-    uint32_t        journal_entries; /* 回放的 Journal entry 数 */
-    uint8_t         blocks_restored; /* 1 = 块元数据快照已加载；0 = full metadata rebuild 兜底 */
+    DWORD           cp_sequence;     /* Checkpoint sequence（0 = 无） */
+    DWORD           journal_entries; /* 回放的 Journal entry 数 */
+    BYTE            blocks_restored; /* 1 = 块元数据快照已加载；0 = full metadata rebuild 兜底 */
 } ftl_boot_result_t;
 
 /* ── 块元数据快照恢复（Checkpoint 的 16-bit/块 word）──
@@ -63,11 +63,11 @@ typedef struct
  * 统计仅用于观测日志。 */
 typedef struct
 {
-    uint16_t closed_blocks;   /* 恢复出的 Closed 条目数（退化单 plane 计） */
-    uint16_t log_blocks;      /* 恢复出的活 LOG 块数 */
-    uint16_t anomalies;       /* 探测发现的「池块却有数据」块数 */
-    uint16_t l2p_read_errors; /* 探测中 L2P 反查失败次数（非 0 ⇒ 快照结果不完整，回退 full metadata rebuild） */
-    uint32_t valid_cw;        /* 探测补算出的有效 CW 数 */
+    WORD  closed_blocks;   /* 恢复出的 Closed 条目数（退化单 plane 计） */
+    WORD  log_blocks;      /* 恢复出的活 LOG 块数 */
+    WORD  anomalies;       /* 探测发现的「池块却有数据」块数 */
+    WORD  l2p_read_errors; /* 探测中 L2P 反查失败次数（非 0 ⇒ 快照结果不完整，回退 full metadata rebuild） */
+    DWORD valid_cw;        /* 探测补算出的有效 CW 数 */
 } ftl_block_restore_stats_t;
 
 /* ── full metadata rebuild / 块元数据恢复原语是**模块内部实现**（static，定义在 .c）──

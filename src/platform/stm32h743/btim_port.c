@@ -13,7 +13,7 @@
 /* TIM6 is used only as the scheduler's millisecond hardware heartbeat. */
 static TIM_HandleTypeDef g_btimx_handle = {0};
 
-void btim_timx_int_init(uint16_t arr, uint16_t psc)
+void btim_timx_int_init(WORD arr, WORD psc)
 {
     g_btimx_handle.Instance               = BTIM_TIMX;
     g_btimx_handle.Init.Prescaler         = psc;

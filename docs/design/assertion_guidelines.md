@@ -367,12 +367,12 @@ v18 / v19（§十三 / §十四）清完了 FC 的**公开 API 壳**。本轮（
 |---|---|---|---|
 | `fc_command.c` `fc_command_validate` | `command==NULL` / `operation ≥ OP_COUNT` / 数据操作无 desc 链 | 三处 `return INVALID_ARGUMENT` | **三条 `ASSERT`**；恒返回 `OK` |
 | `fc_queue.c` `fc_submission_queue_push` | `command_id == FC_COMMAND_ID_INVALID` | `return INVALID_ARGUMENT` | **`ASSERT`**；只留 `OK` / `QUEUE_FULL` |
-| `fc_bch_engine.c` `fc_bch_decode` | `8*len > n - ecc_bits` / `!data \|\| !recv_ecc` | 两处 `return -1` | **三条 `ASSERT`** |
+| `fc_bch_engine.c` `fc_bch_decode` | `8*len > n - ecc_bits` / `!data \|\| !recv_ecc` | 两处参数错误返回 | **三条 `ASSERT`**；现行 API 为 `bool` + `*out_nerr` |
 
 **要点**
 
 - **`fc_command_validate`**：撤销 §九 的保留理由——查证 `operation` **全仓都是 FTL 硬编码常量**（`sync_page_prepare` 的实参是 `OP_NORMAL_PROGRAM_PAGE` / `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` / `OP_ERASE_BLOCK` 等），**从不是 host 输入**，三处皆判据 2。函数退化为「恒 OK」的校验钩子；debug 跑内层断言，release 下调用点 `fc_submit` 的 `ASSERT(... == OK)` 整条裁空。
-- **`fc_bch_decode`**：`-1` 既是「不可纠」哨兵又是参数错误返回——**撞车**会让参数错误被 `fc_ldpc_engine` 误判为不可纠、CW 静默置 UNC。转 `ASSERT` 后哨兵语义唯一。`:927` 的 `ASSERT(recv_ecc != NULL)` 只在该分支成立（另一分支的 `if (recv_ecc)` 是可选语义，不受影响）。
+- **`fc_bch_decode`**：现行 API 是 `bool` + `*out_nerr`（`false` = 不可纠），参数错误一律 `ASSERT`——「不可纠」与「参数错误」不再共用返回值，`fc_ldpc_engine` 不会把参数错误误判为不可纠。`ASSERT(recv_ecc != NULL)` 只在该分支成立（另一分支的 `if (recv_ecc)` 是可选语义，不受影响）。
 
 ### RAID-off（`#if CONFIG_FC_RAID`，默认不编译）
 
@@ -608,7 +608,7 @@ v24 把 PBA 从"与 PAA 共用位序"改为"与 LBA 逐位同构"，并把加扰
 
 ### 沿用 §十三：`fc_command_configure_descriptor` 的 row 校验
 
-v24 把该入口的第三个形参由 `nand_paa_t row_paa` 改为 `nand_pba_t row_pba`，原有那一条
+v24 把该入口的第三个形参由 `DWORD row_paa` 改为 `DWORD row_pba`，原有那一条
 
 ```c
 ASSERT((uint8_t)pba_to_plane(row_pba) == plane);
@@ -680,9 +680,9 @@ debug / release / tests / RAID=1 四档 0 warning 0 error（149920 / 84988 / 197
 **首个案例**：`include/nand/nand_config.h` 里
 
 ```c
-static inline nand_pba_t pba_make(uint32_t ch, uint32_t ce, uint32_t page, uint32_t plane,
+static inline DWORD pba_make(uint32_t ch, uint32_t ce, uint32_t page, uint32_t plane,
                                   uint32_t block, uint32_t lun, uint32_t cw);
-static inline nand_pba_t pba_from_addr(const nand_addr_t *addr);   /* 体内就是上一行 */
+static inline DWORD pba_from_addr(const nand_addr_t *addr);   /* 体内就是上一行 */
 ```
 
 `pba_from_addr` 的函数体**逐字**就是 `pba_make(addr->ch, addr->ce, addr->page, addr->plane,
@@ -712,7 +712,7 @@ page, cw`）与 `paa_make` / `pba_make` 的形参序（`…, page, plane, block,
 （v0.73 更新：`pba_to_nand_row` 已随 `nand_addr_t` 退出 FTL 而删除；`paa_to_pba` 保留，
 作为 `ftl_fc_interface.h` `ftl_cmd_pba()` 用的边界转换器。）
 
-**已跟进（v0.73）**：`nand_addr_t` 从 FTL 层**整体退出**——FTL 的地址一律 `nand_pba_t`，
+**已跟进（v0.73）**：`nand_addr_t` 从 FTL 层**整体退出**——FTL 的地址一律 `DWORD`，
 具名字段访问改经**位域视图** `nand_pba_fields_t`（`pba_fields()` / `pba_pack()` /
 `pba_make()`，定义见 `include/ftl/ftl_config.h §三.2`）。视图是 4 字节位域、位序与 PBA
 一致，可强转。⚠ **v25 否决它的那两条硬约束依然成立**，本轮是**逐条给了应对**而非推翻：
@@ -723,7 +723,7 @@ page, cw`）与 `paa_make` / `pba_make` 的形参序（`…, page, plane, block,
 能证明它与 `PBA_*_SHIFT` 一致（复合字面量的 union 读不是 C11 整型常量表达式，GCC 实测报
 `expression in static assertion is not constant`）⇒ 退化为 **boot 期一次性自检**
 `pba_fields_layout_matches()`（`ftl_init` 里 `ASSERT`）：逐字段置单比特、双关读出，证明
-`*(nand_pba_t *)&fields == pba_pack(fields)`。**值语义路径（`pba_pack` / `pba_fields`）
+`*(DWORD *)&fields == pba_pack(fields)`。**值语义路径（`pba_pack` / `pba_fields`）
 走 `PBA_*_SHIFT` 宏，与位域布局无关**——自检只保证"强转可用"这一条性质。
 
 **验证**：debug / release / RAID=1 三档 0 warning 0 error（150028 / 84944 / 154372 B）；

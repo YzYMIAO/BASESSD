@@ -51,16 +51,16 @@ static inline int fls(unsigned int x)
 }
 
 /* 8-bit 位序反转（swap_bits 模式：NAND 数据位序与算法假设相反时用） */
-static inline uint8_t bitrev8(uint8_t x)
+static inline BYTE bitrev8(BYTE x)
 {
-    x = (uint8_t)((x & 0xF0U) >> 4U) | (uint8_t)((x & 0x0FU) << 4U);
-    x = (uint8_t)((x & 0xCCU) >> 2U) | (uint8_t)((x & 0x33U) << 2U);
-    x = (uint8_t)((x & 0xAAU) >> 1U) | (uint8_t)((x & 0x55U) << 1U);
+    x = ((x & 0xF0U) >> 4U) | ((x & 0x0FU) << 4U);
+    x = ((x & 0xCCU) >> 2U) | ((x & 0x33U) << 2U);
+    x = ((x & 0xAAU) >> 1U) | ((x & 0x55U) << 1U);
     return x;
 }
 
 /* 大端序转换（数据按 BE 语义输入 BCH 引擎） */
-static inline uint32_t cpu_to_be32(uint32_t x)
+static inline DWORD cpu_to_be32(DWORD x)
 {
     return __builtin_bswap32(x);
 }
@@ -88,17 +88,17 @@ struct fc_bch_control
     unsigned int    t;
     unsigned int    ecc_bits;
     unsigned int    ecc_bytes;
-    uint16_t       *a_pow_tab;
-    uint16_t       *a_log_tab;
-    uint32_t       *mod8_tab;
-    uint32_t       *ecc_buf;
-    uint32_t       *ecc_buf2;
+    WORD           *a_pow_tab;
+    WORD           *a_log_tab;
+    DWORD          *mod8_tab;
+    DWORD          *ecc_buf;
+    DWORD          *ecc_buf2;
     unsigned int   *xi_tab;
     unsigned int   *syn;
     int            *cache;
     struct gf_poly *elp;
     struct gf_poly *poly_2t[4];
-    uint8_t         swap_bits;
+    BYTE            swap_bits;
 };
 
 #define GF_M(_p)          ((_p)->m)
@@ -125,9 +125,9 @@ struct gf_poly_deg1
 
 /* ── 前向声明 ────────────────────────────────────────────────────── */
 
-static uint8_t      swap_bits(struct fc_bch_control *bch, uint8_t in);
-static void         load_ecc8(struct fc_bch_control *bch, uint32_t *dst, const uint8_t *src);
-static void         store_ecc8(struct fc_bch_control *bch, uint8_t *dst, const uint32_t *src);
+static BYTE         swap_bits(struct fc_bch_control *bch, BYTE in);
+static void         load_ecc8(struct fc_bch_control *bch, DWORD *dst, const BYTE *src);
+static void         store_ecc8(struct fc_bch_control *bch, BYTE *dst, const DWORD *src);
 static int          modulo(struct fc_bch_control *bch, unsigned int v);
 static int          mod_s(struct fc_bch_control *bch, unsigned int v);
 static int          deg(unsigned int poly);
@@ -138,19 +138,19 @@ static unsigned int gf_inv(struct fc_bch_control *bch, unsigned int a);
 static unsigned int a_pow(struct fc_bch_control *bch, int i);
 static int          a_log(struct fc_bch_control *bch, unsigned int x);
 static int          a_ilog(struct fc_bch_control *bch, unsigned int x);
-static void         compute_syndromes(struct fc_bch_control *bch, uint32_t *ecc, unsigned int *syn);
-static int          compute_error_locator_polynomial(struct fc_bch_control *bch, const unsigned int *syn);
+static void         compute_syndromes(struct fc_bch_control *bch, DWORD *ecc, unsigned int *syn);
+static bool         compute_error_locator_polynomial(struct fc_bch_control *bch, const unsigned int *syn, unsigned int *out_deg);
 static int          find_poly_roots(struct fc_bch_control *bch, unsigned int k, struct gf_poly *poly, unsigned int *roots);
-static int          build_gf_tables(struct fc_bch_control *bch, unsigned int poly);
-static void         build_mod8_tables(struct fc_bch_control *bch, const uint32_t *g);
-static int          build_deg2_base(struct fc_bch_control *bch);
-static uint32_t    *compute_generator_polynomial(struct fc_bch_control *bch);
+static bool         build_gf_tables(struct fc_bch_control *bch, unsigned int poly);
+static void         build_mod8_tables(struct fc_bch_control *bch, const DWORD *g);
+static bool         build_deg2_base(struct fc_bch_control *bch);
+static DWORD       *compute_generator_polynomial(struct fc_bch_control *bch);
 
 /* ═══════════════════════════════════════════════════════════════════
  * 辅助函数
  * ═══════════════════════════════════════════════════════════════════ */
 
-static uint8_t swap_bits(struct fc_bch_control *bch, uint8_t in)
+static BYTE swap_bits(struct fc_bch_control *bch, BYTE in)
 {
     return bch->swap_bits ? bitrev8(in) : in;
 }
@@ -163,17 +163,17 @@ static uint8_t swap_bits(struct fc_bch_control *bch, uint8_t in)
 static void bch_encode_unaligned(struct fc_bch_control *bch,
                                  const unsigned char   *data,
                                  unsigned int           len,
-                                 uint32_t              *ecc)
+                                 DWORD                 *ecc)
 {
-    int             i;
-    const uint32_t *p;
-    const int       l = (int)BCH_ECC_WORDS(bch) - 1;
+    int          i;
+    const DWORD *p;
+    const int    l = (int)BCH_ECC_WORDS(bch) - 1;
 
     while (len--)
     {
-        uint8_t tmp = swap_bits(bch, *data++);
+        BYTE tmp = swap_bits(bch, *data++);
         /* 最高字节 ⊕ 输入字节 → 查表，表项与其余校验字异或移位 */
-        p           = bch->mod8_tab + (unsigned int)(l + 1) * (((ecc[0] >> 24) ^ (uint32_t)tmp) & 0xFFU);
+        p        = bch->mod8_tab + (unsigned int)(l + 1) * (((ecc[0] >> 24) ^ tmp) & 0xFFU);
         for (i = 0; i < l; i++)
         {
             ecc[i] = ((ecc[i] << 8) | (ecc[i + 1] >> 24)) ^ (*p++);
@@ -183,42 +183,42 @@ static void bch_encode_unaligned(struct fc_bch_control *bch,
 }
 
 /* 把 ECC 字节（可选位序交换）载入工作区（32bit 字） */
-static void load_ecc8(struct fc_bch_control *bch, uint32_t *dst, const uint8_t *src)
+static void load_ecc8(struct fc_bch_control *bch, DWORD *dst, const BYTE *src)
 {
-    uint8_t      pad[4] = {0, 0, 0, 0};
+    BYTE         pad[4] = {0, 0, 0, 0};
     unsigned int i, nwords = BCH_ECC_WORDS(bch) - 1;
 
     for (i = 0; i < nwords; i++, src += 4)
     {
-        dst[i] = ((uint32_t)swap_bits(bch, src[0]) << 24) |
-                 ((uint32_t)swap_bits(bch, src[1]) << 16) |
-                 ((uint32_t)swap_bits(bch, src[2]) << 8) |
-                 (uint32_t)swap_bits(bch, src[3]);
+        dst[i] = ((DWORD)swap_bits(bch, src[0]) << 24) |
+                 ((DWORD)swap_bits(bch, src[1]) << 16) |
+                 ((DWORD)swap_bits(bch, src[2]) << 8) |
+                 (DWORD)swap_bits(bch, src[3]);
     }
     memcpy(pad, src, BCH_ECC_BYTES(bch) - 4 * nwords);
-    dst[nwords] = ((uint32_t)swap_bits(bch, pad[0]) << 24) |
-                  ((uint32_t)swap_bits(bch, pad[1]) << 16) |
-                  ((uint32_t)swap_bits(bch, pad[2]) << 8) |
-                  (uint32_t)swap_bits(bch, pad[3]);
+    dst[nwords] = ((DWORD)swap_bits(bch, pad[0]) << 24) |
+                  ((DWORD)swap_bits(bch, pad[1]) << 16) |
+                  ((DWORD)swap_bits(bch, pad[2]) << 8) |
+                  (DWORD)swap_bits(bch, pad[3]);
 }
 
 /* 把工作区写回 ECC 字节（与 load 对称） */
-static void store_ecc8(struct fc_bch_control *bch, uint8_t *dst, const uint32_t *src)
+static void store_ecc8(struct fc_bch_control *bch, BYTE *dst, const DWORD *src)
 {
-    uint8_t      pad[4];
+    BYTE         pad[4];
     unsigned int i, nwords = BCH_ECC_WORDS(bch) - 1;
 
     for (i = 0; i < nwords; i++)
     {
-        *dst++ = swap_bits(bch, (uint8_t)(src[i] >> 24));
-        *dst++ = swap_bits(bch, (uint8_t)(src[i] >> 16));
-        *dst++ = swap_bits(bch, (uint8_t)(src[i] >> 8));
-        *dst++ = swap_bits(bch, (uint8_t)(src[i]));
+        *dst++ = swap_bits(bch, (src[i] >> 24));
+        *dst++ = swap_bits(bch, (src[i] >> 16));
+        *dst++ = swap_bits(bch, (src[i] >> 8));
+        *dst++ = swap_bits(bch, (src[i]));
     }
-    pad[0] = swap_bits(bch, (uint8_t)(src[nwords] >> 24));
-    pad[1] = swap_bits(bch, (uint8_t)(src[nwords] >> 16));
-    pad[2] = swap_bits(bch, (uint8_t)(src[nwords] >> 8));
-    pad[3] = swap_bits(bch, (uint8_t)(src[nwords]));
+    pad[0] = swap_bits(bch, (src[nwords] >> 24));
+    pad[1] = swap_bits(bch, (src[nwords] >> 16));
+    pad[2] = swap_bits(bch, (src[nwords] >> 8));
+    pad[3] = swap_bits(bch, (src[nwords]));
     memcpy(dst, pad, BCH_ECC_BYTES(bch) - 4 * nwords);
 }
 
@@ -232,20 +232,20 @@ static void store_ecc8(struct fc_bch_control *bch, uint8_t *dst, const uint32_t 
  *         入参前置违反（bch/data 为空）一律 ASSERT（v21）；ecc 可为 NULL 是
  *         有意的可选参数语义（增量计算），保留。
  * -------------------------------------------------------------------- */
-void fc_bch_encode(struct fc_bch_control *bch, const uint8_t *data, unsigned int len, uint8_t *ecc)
+void fc_bch_encode(struct fc_bch_control *bch, const BYTE *data, unsigned int len, BYTE *ecc)
 {
     ASSERT(bch != NULL);
     ASSERT(data != NULL);
-    const unsigned int    l = BCH_ECC_WORDS(bch) - 1;
-    unsigned int          i, mlen;
-    unsigned long         m;
-    uint32_t              w, r[BCH_ECC_MAX_WORDS];
-    const size_t          r_bytes = BCH_ECC_WORDS(bch) * sizeof(*r);
-    const uint32_t *const tab0    = bch->mod8_tab;
-    const uint32_t *const tab1    = tab0 + 256 * (l + 1);
-    const uint32_t *const tab2    = tab1 + 256 * (l + 1);
-    const uint32_t *const tab3    = tab2 + 256 * (l + 1);
-    const uint32_t       *pdata, *p0, *p1, *p2, *p3;
+    const unsigned int l = BCH_ECC_WORDS(bch) - 1;
+    unsigned int       i, mlen;
+    unsigned long      m;
+    DWORD              w, r[BCH_ECC_MAX_WORDS];
+    const size_t       r_bytes = BCH_ECC_WORDS(bch) * sizeof(*r);
+    const DWORD *const tab0    = bch->mod8_tab;
+    const DWORD *const tab1    = tab0 + 256 * (l + 1);
+    const DWORD *const tab2    = tab1 + 256 * (l + 1);
+    const DWORD *const tab3    = tab2 + 256 * (l + 1);
+    const DWORD       *pdata, *p0, *p1, *p2, *p3;
 
     if (ecc)
     {
@@ -265,7 +265,7 @@ void fc_bch_encode(struct fc_bch_control *bch, const uint8_t *data, unsigned int
         len -= mlen;
     }
 
-    pdata = (const uint32_t *)(const void *)data;
+    pdata = (const DWORD *)(const void *)data;
     mlen  = len / 4U;
     data += 4U * mlen;
     len -= 4U * mlen;
@@ -276,10 +276,10 @@ void fc_bch_encode(struct fc_bch_control *bch, const uint8_t *data, unsigned int
         w = cpu_to_be32(*pdata++);
         if (bch->swap_bits)
         {
-            w = (uint32_t)swap_bits(bch, (uint8_t)(w >> 0)) |
-                ((uint32_t)swap_bits(bch, (uint8_t)(w >> 8)) << 8) |
-                ((uint32_t)swap_bits(bch, (uint8_t)(w >> 16)) << 16) |
-                ((uint32_t)swap_bits(bch, (uint8_t)(w >> 24)) << 24);
+            w = (DWORD)swap_bits(bch, (w >> 0)) |
+                ((DWORD)swap_bits(bch, (w >> 8)) << 8) |
+                ((DWORD)swap_bits(bch, (w >> 16)) << 16) |
+                ((DWORD)swap_bits(bch, (w >> 24)) << 24);
         }
         w ^= r[0];
         p0 = tab0 + (l + 1) * ((w >> 0) & 0xFFU);
@@ -395,11 +395,11 @@ static inline int a_ilog(struct fc_bch_control *bch, unsigned int x)
  * 校验字部分（ecc 字）参与其中；最终 S_(2j+1) = S_j²（GF 平方，域特性）。
  * ═══════════════════════════════════════════════════════════════════ */
 
-static void compute_syndromes(struct fc_bch_control *bch, uint32_t *ecc, unsigned int *syn)
+static void compute_syndromes(struct fc_bch_control *bch, DWORD *ecc, unsigned int *syn)
 {
     int          i, j, s;
     unsigned int m;
-    uint32_t     poly;
+    DWORD        poly;
     const int    t = (int)GF_T(bch);
 
     s = (int)bch->ecc_bits;
@@ -441,8 +441,8 @@ static void gf_poly_copy(struct gf_poly *dst, struct gf_poly *src)
     memcpy(dst, src, GF_POLY_SZ(src->deg));
 }
 
-/* BM 算法：返回 σ 的次数（= 错误数），>t 表示不可纠返回 -1 */
-static int compute_error_locator_polynomial(struct fc_bch_control *bch, const unsigned int *syn)
+/* BM 算法：true = 成功（*out_deg = σ 的次数 = 错误数）；false = >t，不可纠。 */
+static bool compute_error_locator_polynomial(struct fc_bch_control *bch, const unsigned int *syn, unsigned int *out_deg)
 {
     const unsigned int t = GF_T(bch), n = GF_N(bch);
     unsigned int       i, j, tmp, l, pd = 1, d = syn[0];
@@ -489,7 +489,12 @@ static int compute_error_locator_polynomial(struct fc_bch_control *bch, const un
             }
         }
     }
-    return ((int)elp->deg > (int)t) ? -1 : (int)elp->deg;
+    if ((int)elp->deg > (int)t)
+    {
+        return false;
+    }
+    *out_deg = (unsigned int)elp->deg;
+    return true;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -923,13 +928,15 @@ static int find_poly_roots(struct fc_bch_control *bch, unsigned int k, struct gf
  *       （含 swap_bits / 位序翻转修正）。
  *     - 错误数 ≠ 根数 → 不可纠。
  * -------------------------------------------------------------------- */
-int fc_bch_decode(struct fc_bch_control *bch, const uint8_t *data, unsigned int len, const uint8_t *recv_ecc, const uint8_t *calc_ecc, const unsigned int *syn, unsigned int *errloc)
+bool fc_bch_decode(struct fc_bch_control *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, const BYTE *calc_ecc, const unsigned int *syn, unsigned int *errloc, unsigned int *out_nerr)
 {
     ASSERT(bch != NULL);
+    ASSERT(out_nerr != NULL);
     const unsigned int ecc_words = BCH_ECC_WORDS(bch);
     unsigned int       nbits;
-    int                i, err, nroots;
-    uint32_t           sum;
+    unsigned int       nerr = 0U;
+    int                i, nroots;
+    DWORD              sum;
 
     ASSERT(8U * len <= (bch->n - bch->ecc_bits));
 
@@ -955,30 +962,30 @@ int fc_bch_decode(struct fc_bch_control *bch, const uint8_t *data, unsigned int 
             }
             if (!sum)
             {
-                return 0;
+                *out_nerr = 0U;
+                return true;
             }
         }
         compute_syndromes(bch, bch->ecc_buf, bch->syn);
         syn = bch->syn;
     }
-    err = compute_error_locator_polynomial(bch, syn);
-    if (err > 0)
+    if (!compute_error_locator_polynomial(bch, syn, &nerr))
+    {
+        return false;
+    }
+    if (nerr > 0U)
     {
         nroots = find_poly_roots(bch, 1, bch->elp, errloc);
-        if (err != nroots)
+        if ((unsigned int)nroots != nerr)
         {
-            err = -1;
+            return false;
         }
-    }
-    if (err > 0)
-    {
         nbits = len * 8U + bch->ecc_bits;
-        for (i = 0; i < err; i++)
+        for (i = 0; i < (int)nerr; i++)
         {
             if (errloc[i] >= nbits)
             {
-                err = -1;
-                break;
+                return false;
             }
             errloc[i] = nbits - 1 - errloc[i];
             if (!bch->swap_bits)
@@ -987,7 +994,8 @@ int fc_bch_decode(struct fc_bch_control *bch, const uint8_t *data, unsigned int 
             }
         }
     }
-    return (err >= 0) ? err : -1;
+    *out_nerr = nerr;
+    return true;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -995,21 +1003,21 @@ int fc_bch_decode(struct fc_bch_control *bch, const uint8_t *data, unsigned int 
  * ═══════════════════════════════════════════════════════════════════ */
 
 /* 构建 GF(2^m) 对数/反对数表：x 左移递推，遇本原多项式归约 */
-static int build_gf_tables(struct fc_bch_control *bch, unsigned int poly)
+static bool build_gf_tables(struct fc_bch_control *bch, unsigned int poly)
 {
     unsigned int       i, x = 1;
     const unsigned int k = 1U << (unsigned int)deg(poly);
     if (k != (1U << GF_M(bch)))
     {
-        return -1;
+        return false;
     }
     for (i = 0; i < GF_N(bch); i++)
     {
-        bch->a_pow_tab[i] = (uint16_t)x;
-        bch->a_log_tab[x] = (uint16_t)i;
+        bch->a_pow_tab[i] = x;
+        bch->a_log_tab[x] = i;
         if (i && (x == 1))
         {
-            return -1;
+            return false;
         }
         x <<= 1;
         if (x & k)
@@ -1019,24 +1027,24 @@ static int build_gf_tables(struct fc_bch_control *bch, unsigned int poly)
     }
     bch->a_pow_tab[GF_N(bch)] = 1;
     bch->a_log_tab[0]         = 0;
-    return 0;
+    return true;
 }
 
 /* 构建 mod8 编码查找表：每输入字节偏移 8b，与生成多项式做多项式模除 */
-static void build_mod8_tables(struct fc_bch_control *bch, const uint32_t *g)
+static void build_mod8_tables(struct fc_bch_control *bch, const DWORD *g)
 {
     int       i, j, b, d;
-    uint32_t  data, hi, lo, *tab;
+    DWORD     data, hi, lo, *tab;
     const int l      = (int)BCH_ECC_WORDS(bch);
     const int plen   = (int)DIV_ROUND_UP(bch->ecc_bits + 1U, 32);
     const int ecclen = (int)DIV_ROUND_UP(bch->ecc_bits, 32);
-    memset(bch->mod8_tab, 0, (size_t)(4 * 256 * l) * sizeof(*bch->mod8_tab));
+    memset(bch->mod8_tab, 0, (4 * 256 * l) * sizeof(*bch->mod8_tab));
     for (i = 0; i < 256; i++)
     {
         for (b = 0; b < 4; b++)
         {
-            tab  = bch->mod8_tab + (size_t)((b * 256 + i) * (unsigned int)l);
-            data = (uint32_t)i << (unsigned int)(8 * b);
+            tab  = bch->mod8_tab + ((b * 256 + i) * (unsigned int)l);
+            data = i << (unsigned int)(8 * b);
             while (data)
             {
                 d = (int)deg(data);
@@ -1053,7 +1061,7 @@ static void build_mod8_tables(struct fc_bch_control *bch, const uint32_t *g)
 }
 
 /* 构建度 2 多项式求根用的迹映射表 xi_tab（二次方程判别式映射） */
-static int build_deg2_base(struct fc_bch_control *bch)
+static bool build_deg2_base(struct fc_bch_control *bch)
 {
     const int    m = (int)GF_M(bch);
     int          i, j, r;
@@ -1087,7 +1095,7 @@ static int build_deg2_base(struct fc_bch_control *bch)
             y ^= ak;
         }
     }
-    return remaining ? -1 : 0;
+    return remaining == 0U;
 }
 
 /* --------------------------------------------------------------------
@@ -1097,17 +1105,17 @@ static int build_deg2_base(struct fc_bch_control *bch)
  *         乘积展开得系数，打包为 32bit 大端字。
  *         输出同时设 bch->ecc_bits = deg(g) = m·t。
  * -------------------------------------------------------------------- */
-static uint32_t *compute_generator_polynomial(struct fc_bch_control *bch)
+static DWORD *compute_generator_polynomial(struct fc_bch_control *bch)
 {
     const unsigned int m = GF_M(bch), t = GF_T(bch);
     int                n;
     unsigned int       i, j, r, word, *roots;
-    uint32_t          *genpoly;
+    DWORD             *genpoly;
     struct gf_poly    *g;
 
     g       = (struct gf_poly *)malloc(GF_POLY_SZ(m * t));
     roots   = (unsigned int *)calloc((bch->n + 1U), sizeof(unsigned int));
-    genpoly = (uint32_t *)calloc(DIV_ROUND_UP(m * t + 1U, 32), sizeof(uint32_t));
+    genpoly = calloc(DIV_ROUND_UP(m * t + 1U, 32), sizeof(DWORD));
     if (!g || !roots || !genpoly)
     {
         free(g);
@@ -1174,11 +1182,11 @@ static uint32_t *compute_generator_polynomial(struct fc_bch_control *bch)
  *     - 建域表 → 生成多项式 → mod8 查表 → 度 2 基底；
  *       任一步失败即整体释放返回 NULL。
  * -------------------------------------------------------------------- */
-fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, uint8_t swap_bits)
+fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits)
 {
-    int                       err = 0;
+    bool                      err = false;
     unsigned int              i, words;
-    uint32_t                 *genpoly;
+    DWORD                    *genpoly;
     fc_bch_control_t         *bch             = NULL;
     static const unsigned int prim_poly_tab[] = {
         0x25,
@@ -1212,33 +1220,33 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, uint8_t swap
     words          = DIV_ROUND_UP((unsigned int)(m * t), 32U);
     bch->ecc_bytes = (unsigned int)DIV_ROUND_UP((unsigned int)(m * t), 8U);
     bch->swap_bits = swap_bits;
-    bch->a_pow_tab = (uint16_t *)calloc((size_t)(1 + bch->n), sizeof(uint16_t));
-    bch->a_log_tab = (uint16_t *)calloc((size_t)(1 + bch->n), sizeof(uint16_t));
-    bch->mod8_tab  = (uint32_t *)calloc(words * 1024U, sizeof(uint32_t));
-    bch->ecc_buf   = (uint32_t *)calloc(words, sizeof(uint32_t));
-    bch->ecc_buf2  = (uint32_t *)calloc(words, sizeof(uint32_t));
+    bch->a_pow_tab = calloc(1 + bch->n, sizeof(WORD));
+    bch->a_log_tab = calloc(1 + bch->n, sizeof(WORD));
+    bch->mod8_tab  = calloc(words * 1024U, sizeof(DWORD));
+    bch->ecc_buf   = calloc(words, sizeof(DWORD));
+    bch->ecc_buf2  = calloc(words, sizeof(DWORD));
     bch->xi_tab    = (unsigned int *)calloc((unsigned int)m, sizeof(unsigned int));
     bch->syn       = (unsigned int *)calloc(2U * (unsigned int)t, sizeof(unsigned int));
     bch->cache     = (int *)calloc(2U * (unsigned int)t, sizeof(int));
-    bch->elp       = (struct gf_poly *)calloc((size_t)((unsigned int)t + 1U), sizeof(struct gf_poly_deg1));
+    bch->elp       = (struct gf_poly *)calloc((unsigned int)t + 1U, sizeof(struct gf_poly_deg1));
     for (i = 0; i < 4; i++)
     {
         bch->poly_2t[i] = (struct gf_poly *)malloc(GF_POLY_SZ(2U * (unsigned int)t));
     }
     if (!bch->a_pow_tab || !bch->a_log_tab || !bch->mod8_tab || !bch->ecc_buf || !bch->ecc_buf2 || !bch->xi_tab || !bch->syn || !bch->cache || !bch->elp)
     {
-        err = 1;
+        err = true;
     }
     for (i = 0; i < 4; i++)
     {
         if (!bch->poly_2t[i])
         {
-            err = 1;
+            err = true;
         }
     }
     if (!err)
     {
-        err = build_gf_tables(bch, prim_poly);
+        err = !build_gf_tables(bch, prim_poly);
     }
     if (!err)
     {
@@ -1250,12 +1258,12 @@ fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, uint8_t swap
         }
         else
         {
-            err = 1;
+            err = true;
         }
     }
     if (!err)
     {
-        err = build_deg2_base(bch);
+        err = !build_deg2_base(bch);
     }
     if (err)
     {

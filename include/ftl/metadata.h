@@ -152,7 +152,7 @@ _Static_assert((FTL_CHECKPOINT_BLOCK_PAGES * FTL_CHECKPOINT_BLOCK_WORDS_PER_PAGE
                "块元数据快照页数必须恰好覆盖全部块");
 _Static_assert((FTL_CHECKPOINT_WEAR_PAGES * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) == FTL_BLOCK_TOTAL,
                "磨损快照页数必须恰好覆盖全部块");
-_Static_assert(FTL_CHECKPOINT_WEAR_PAGES <= UINT8_MAX, "磨损快照页数必须装进 uint8_t");
+_Static_assert(FTL_CHECKPOINT_WEAR_PAGES <= UINT8_MAX, "磨损快照页数必须装进 BYTE");
 _Static_assert(FTL_CHECKPOINT_RECORD_PAGES <= PAGES_PER_BLOCK,
                "一条 Checkpoint record 必须装得进一个块");
 _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
@@ -195,7 +195,7 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
 #define L2P_LOG_IDEAL_BLOCKS ((L2P_REGIONS_PER_INSTANCE + PAGES_PER_BLOCK - 1U) / PAGES_PER_BLOCK)
 #define L2P_LOG_BLOCKS_TOTAL (2U * L2P_LOG_IDEAL_BLOCKS) /* 2× 余量：current + 压缩 + 坏块 */
 #define L2P_LOG_BLOCKS_PER_PLANE \
-    ((uint16_t)((L2P_LOG_BLOCKS_TOTAL + (uint32_t)PLANE_NUM - 1U) / (uint32_t)PLANE_NUM))
+    (((L2P_LOG_BLOCKS_TOTAL + PLANE_NUM - 1U) / PLANE_NUM))
 #define L2P_LOG_BLOCK0 (FTL_METADATA_BLOCK_END)
 
 /* 压缩触发水位：活日志块超过“理想表 + 25% 碎片余量”就启动压缩。
@@ -206,14 +206,14 @@ _Static_assert(FTL_CHECKPOINT_RECORDS_PER_BLOCK >= 2U,
 #define FTL_METADATA_AREA_END (L2P_LOG_BLOCK0 + L2P_LOG_BLOCKS_PER_PLANE)
 
 /* 块号是否落在固定 L2P 日志区（各 plane 区间相同）。 */
-static inline bool ftl_is_l2p_log_block(uint16_t block)
+static inline bool ftl_is_l2p_log_block(WORD block)
 {
     return (block >= L2P_LOG_BLOCK0) &&
-           (block < (uint16_t)(L2P_LOG_BLOCK0 + L2P_LOG_BLOCKS_PER_PLANE));
+           (block < (L2P_LOG_BLOCK0 + L2P_LOG_BLOCKS_PER_PLANE));
 }
 
 /* gblock 是否落在固定 L2P 日志区。 */
-static inline bool ftl_is_l2p_log_gblock(uint16_t g)
+static inline bool ftl_is_l2p_log_gblock(WORD g)
 {
     return ftl_is_l2p_log_block(ftl_gblock_block(g));
 }
@@ -221,7 +221,7 @@ static inline bool ftl_is_l2p_log_gblock(uint16_t g)
 /* 固定池使用的 plane 集合：Anchor/Checkpoint/BBT 用 multi-plane program 把同一页
  * 写全部 plane；Journal 用页号奇偶交错（i & 1）落在前两个 plane。
  * 由 PLANE_NUM 派生，不写死 0x03。 */
-#define METADATA_MIRROR_PLANE_MASK ((uint8_t)((1U << PLANE_NUM) - 1U))
+#define METADATA_MIRROR_PLANE_MASK (((1U << PLANE_NUM) - 1U))
 
 /* ── 介质布局版本（NAND 上持久化格式的版本号）──
  * 任何改变**介质格式或块布局**的改动（结构体字段 / 块号 / 记录格式 / 字段位序语义）
@@ -242,7 +242,7 @@ static inline bool ftl_is_l2p_log_gblock(uint16_t g)
 /* ── 逻辑表字节（公式①：覆盖实体数 × 每实体字节）── */
 
 /* Anchor：每份 Directory = ANCHOR_PAGE_COUNT 页 */
-#define FTL_ANCHOR_TABLE_BYTES ((uint32_t)ANCHOR_PAGE_COUNT * PAGE_MAIN_SIZE)
+#define FTL_ANCHOR_TABLE_BYTES (ANCHOR_PAGE_COUNT * PAGE_MAIN_SIZE)
 
 /* BBT：每块 1 bit */
 #define FTL_BBT_TABLE_BYTES (BBT_BITMAP_SIZE)
@@ -251,7 +251,7 @@ static inline bool ftl_is_l2p_log_gblock(uint16_t g)
 #define FTL_CHECKPOINT_TABLE_BYTES (FTL_CHECKPOINT_RECORD_PAGES * PAGE_MAIN_SIZE)
 
 /* Journal：块数 × 每块页数 × 页主区 */
-#define FTL_JOURNAL_TABLE_BYTES ((uint32_t)JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK * PAGE_MAIN_SIZE)
+#define FTL_JOURNAL_TABLE_BYTES (JOURNAL_BLOCK_COUNT * PAGES_PER_BLOCK * PAGE_MAIN_SIZE)
 
 /* ── 分区表（固定元数据区的可枚举视图）──
  * 只在 metadata.c 内部使用：`ftl_is_metadata_block` 与文档化布局共用同一份数据。 */
@@ -259,17 +259,17 @@ static inline bool ftl_is_l2p_log_gblock(uint16_t g)
 typedef struct
 {
     const char *name;        /* 分区名 */
-    uint16_t    first_block; /* 起始块（per-plane 号；各 die 相同）*/
-    uint16_t    block_count; /* 块数 */
-    uint8_t     plane_mask;  /* 本分区**实际使用**的 plane：bit0=P0, bit1=P1。
+    WORD        first_block; /* 起始块（per-plane 号；各 die 相同）*/
+    WORD        block_count; /* 块数 */
+    BYTE        plane_mask;  /* 本分区**实际使用**的 plane：bit0=P0, bit1=P1。
                               * 固定池只预留 mask 里的 plane；其余 plane 的同号块
                               * 是用户数据（不被 ftl_is_metadata_block 排除）。*/
-    uint8_t redundancy;      /* 每块容纳的 record 数（池内块轮转）；
+    BYTE redundancy;         /* 每块容纳的 record 数（池内块轮转）；
                               * Journal 不是 record 池，填 1 */
-    uint32_t table_bytes;    /* 逻辑表大小 */
+    DWORD table_bytes;       /* 逻辑表大小 */
 } ftl_partition_t;
 
-_Static_assert(PLANE_NUM <= 8U, "plane_mask 是 uint8_t，PLANE_NUM 不能超过 8");
+_Static_assert(PLANE_NUM <= 8U, "plane_mask 是 BYTE，PLANE_NUM 不能超过 8");
 
 /* ── 编译期自检（池几何与分区不重叠）── */
 
@@ -322,9 +322,9 @@ _Static_assert((JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT) == FTL_METADATA_BLOCK_END,
 
 typedef struct
 {
-    uint8_t    type; /* METADATA_TYPE_* */
-    uint16_t   id;   /* L2P region_id / 0 for others */
-    nand_pba_t pba;  /* 物理位置（PBA，自带 CH/CE ⇒ 不依赖"本实例元数据必在本实例 ch/ce"假设）*/
+    BYTE  type; /* METADATA_TYPE_* */
+    WORD  id;   /* L2P region_id / 0 for others */
+    DWORD pba;  /* 物理位置（PBA，自带 CH/CE ⇒ 不依赖"本实例元数据必在本实例 ch/ce"假设）*/
 } __attribute__((packed)) metadata_entry_t;
 
 _Static_assert(sizeof(metadata_entry_t) == METADATA_ENTRY_BYTES, "metadata_entry_t 必须是 7 字节");
@@ -338,26 +338,26 @@ _Static_assert(sizeof(metadata_entry_t) == METADATA_ENTRY_BYTES, "metadata_entry
 
 typedef struct
 {
-    uint32_t         magic;                                  /* ANCHOR_MAGIC */
-    uint32_t         sequence;                               /* 单调递增（同一份的各 chunk 相同）*/
-    uint16_t         chunk_index;                            /* 0..ANCHOR_PAGE_COUNT-1 */
-    uint16_t         chunk_count;                            /* = ANCHOR_PAGE_COUNT */
-    uint32_t         entry_count;                            /* 本 chunk 有效 entry 数 */
-    uint32_t         layout_version;                         /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该页作废）*/
+    DWORD            magic;                                  /* ANCHOR_MAGIC */
+    DWORD            sequence;                               /* 单调递增（同一份的各 chunk 相同）*/
+    WORD             chunk_index;                            /* 0..ANCHOR_PAGE_COUNT-1 */
+    WORD             chunk_count;                            /* = ANCHOR_PAGE_COUNT */
+    DWORD            entry_count;                            /* 本 chunk 有效 entry 数 */
+    DWORD            layout_version;                         /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该页作废）*/
     metadata_entry_t entries[METADATA_DIR_ENTRIES_PER_PAGE]; /* 256 × 7 = 1792B */
-    uint8_t          padding[PAGE_MAIN_SIZE - METADATA_ANCHOR_HEADER_BYTES -
-                    (METADATA_DIR_ENTRIES_PER_PAGE * METADATA_ENTRY_BYTES)]; /* 填满一页主区 */
+    BYTE             padding[PAGE_MAIN_SIZE - METADATA_ANCHOR_HEADER_BYTES -
+                 (METADATA_DIR_ENTRIES_PER_PAGE * METADATA_ENTRY_BYTES)]; /* 填满一页主区 */
 } metadata_anchor_page_t;
 
 /* 页头前缀：廉价探针只读这 20 字节（整页 CRC/ECC 仍由 FC 校验）。 */
 typedef struct
 {
-    uint32_t magic;
-    uint32_t sequence;
-    uint16_t chunk_index;
-    uint16_t chunk_count;
-    uint32_t entry_count;
-    uint32_t layout_version;
+    DWORD magic;
+    DWORD sequence;
+    WORD  chunk_index;
+    WORD  chunk_count;
+    DWORD entry_count;
+    DWORD layout_version;
 } metadata_anchor_header_t;
 
 /* 一页必须装得下：头 20B + 每页条目（无独立 CRC，页完整性由 FC 的 per-CW CRC + ECC 保证）*/
@@ -384,18 +384,18 @@ _Static_assert((METADATA_DIR_ENTRIES % METADATA_DIR_ENTRIES_PER_PAGE) == 0U, "�
  * ══════════════════════════════════════════════════════════════════ */
 typedef struct
 {
-    uint16_t first_block;      /* 池首块（per-plane 块号）*/
-    uint16_t block_count;      /* 池块数（>= 2）*/
-    uint8_t  pages_per_record; /* 一条 record 占几页（向下取整到每块 record 数；
-                                * 不能整除时块尾剩余页不用——metadata_ring 的地址公式已按 floor 处理）*/
-    uint8_t plane_mask;        /* 池实际使用的 plane：bit0=P0, bit1=P1。
-                                * 0x03 = 镜像（同一 record 写两个 plane）；0x01 = 单副本。*/
+    WORD first_block;      /* 池首块（per-plane 块号）*/
+    WORD block_count;      /* 池块数（>= 2）*/
+    BYTE pages_per_record; /* 一条 record 占几页（向下取整到每块 record 数；
+                            * 不能整除时块尾剩余页不用——metadata_ring 的地址公式已按 floor 处理）*/
+    BYTE plane_mask;       /* 池实际使用的 plane：bit0=P0, bit1=P1。
+                            * 0x03 = 镜像（同一 record 写两个 plane）；0x01 = 单副本。*/
 } metadata_ring_t;
 
 /* plane_mask 里第 idx 个置位的 plane 号（idx 从 0 起）；越界返回 PLANE_NUM。 */
-static inline uint8_t metadata_ring_plane_at(uint8_t plane_mask, uint8_t idx)
+static inline BYTE metadata_ring_plane_at(BYTE plane_mask, BYTE idx)
 {
-    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
         if ((plane_mask & (1U << p)) != 0U)
         {
@@ -406,15 +406,15 @@ static inline uint8_t metadata_ring_plane_at(uint8_t plane_mask, uint8_t idx)
             idx--;
         }
     }
-    return (uint8_t)PLANE_NUM;
+    return PLANE_NUM;
 }
 
 /* plane_mask 里的 plane 个数。 */
-static inline uint8_t metadata_ring_plane_count(uint8_t plane_mask)
+static inline BYTE metadata_ring_plane_count(BYTE plane_mask)
 {
-    uint8_t n = 0U;
+    BYTE n = 0U;
 
-    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
         if ((plane_mask & (1U << p)) != 0U)
         {
@@ -425,39 +425,39 @@ static inline uint8_t metadata_ring_plane_count(uint8_t plane_mask)
 }
 
 /* 每块容纳的 record 数 */
-static inline uint16_t metadata_ring_records_per_block(const metadata_ring_t *ring)
+static inline WORD metadata_ring_records_per_block(const metadata_ring_t *ring)
 {
-    return (uint16_t)(PAGES_PER_BLOCK / ring->pages_per_record);
+    return (PAGES_PER_BLOCK / ring->pages_per_record);
 }
 
 /* 池内 record 槽位总数 */
-static inline uint16_t metadata_ring_total_records(const metadata_ring_t *ring)
+static inline WORD metadata_ring_total_records(const metadata_ring_t *ring)
 {
-    return (uint16_t)(ring->block_count * metadata_ring_records_per_block(ring));
+    return (ring->block_count * metadata_ring_records_per_block(ring));
 }
 
-/* 各池槽位数必须装得进 uint16_t（写游标 / record 下标都是 16 位）*/
-_Static_assert((ANCHOR_POOL_BLOCKS * ANCHOR_RECORDS_PER_BLOCK) <= UINT16_MAX, "Anchor 池槽位数超出 uint16_t");
-_Static_assert((CHECKPOINT_POOL_BLOCKS * PAGES_PER_BLOCK) <= UINT16_MAX, "Checkpoint 池槽位数超出 uint16_t");
-_Static_assert((BBT_POOL_BLOCKS * PAGES_PER_BLOCK) <= UINT16_MAX, "BBT 池槽位数超出 uint16_t");
+/* 各池槽位数必须装得进 WORD（写游标 / record 下标都是 16 位）*/
+_Static_assert((ANCHOR_POOL_BLOCKS * ANCHOR_RECORDS_PER_BLOCK) <= UINT16_MAX, "Anchor 池槽位数超出 WORD");
+_Static_assert((CHECKPOINT_POOL_BLOCKS * PAGES_PER_BLOCK) <= UINT16_MAX, "Checkpoint 池槽位数超出 WORD");
+_Static_assert((BBT_POOL_BLOCKS * PAGES_PER_BLOCK) <= UINT16_MAX, "BBT 池槽位数超出 WORD");
 
 /*
  * record 槽位 → 芯片地址
  *
  * record_idx ∈ [0, total)；page_in_record ∈ [0, pages_per_record)。
  */
-nand_pba_t metadata_ring_addr(const metadata_ring_t *ring,
-                              const ftl_topology_t  *topo,
-                              uint16_t               record_idx,
-                              uint8_t                page_in_record);
+DWORD metadata_ring_addr(const metadata_ring_t *ring,
+                         const ftl_topology_t  *topo,
+                         WORD                   record_idx,
+                         BYTE                   page_in_record);
 
 /* 指定 plane 的同一个 record 槽地址（镜像池的读回退 / 写镜像用）。
  * plane 必须落在 ring->plane_mask 内；越界是调用者 bug ⇒ ASSERT。 */
-nand_pba_t metadata_ring_addr_plane(const metadata_ring_t *ring,
-                                    const ftl_topology_t  *topo,
-                                    uint16_t               record_idx,
-                                    uint8_t                page_in_record,
-                                    uint8_t                plane);
+DWORD metadata_ring_addr_plane(const metadata_ring_t *ring,
+                               const ftl_topology_t  *topo,
+                               WORD                   record_idx,
+                               BYTE                   page_in_record,
+                               BYTE                   plane);
 
 /*
  * metadata_ring_probe_fn - 调用方的 record 探针（由 ring 模块回调）
@@ -476,10 +476,10 @@ nand_pba_t metadata_ring_addr_plane(const metadata_ring_t *ring,
  * ⚠ 契约：**失败时不写 *out_sequence**（调用者据此把"探针失败"与"sequence=0"分开）。
  *   写侧用 sequence 从 1 起，故 0 恒表示"未写"。
  */
-typedef ftl_status_t (*metadata_ring_probe_fn)(void     *ctx,
-                                               uint16_t  record_idx,
-                                               bool      full,
-                                               uint32_t *out_sequence);
+typedef ftl_status_t (*metadata_ring_probe_fn)(void  *ctx,
+                                               WORD   record_idx,
+                                               bool   full,
+                                               DWORD *out_sequence);
 
 /*
  * metadata_ring_locate - 定位池内最新有效 record 与下一个可写槽
@@ -509,9 +509,9 @@ typedef ftl_status_t (*metadata_ring_probe_fn)(void     *ctx,
 ftl_status_t metadata_ring_locate(const metadata_ring_t *ring,
                                   metadata_ring_probe_fn probe,
                                   void                  *ctx,
-                                  uint16_t              *out_newest_idx,
-                                  uint32_t              *out_sequence,
-                                  uint16_t              *out_write_idx);
+                                  WORD                  *out_newest_idx,
+                                  DWORD                 *out_sequence,
+                                  WORD                  *out_write_idx);
 
 /*
  * metadata_ring_prepare_addr - 算写点槽位地址 + 判定是否需先擦该块（**不动介质**）
@@ -530,8 +530,8 @@ ftl_status_t metadata_ring_locate(const metadata_ring_t *ring,
  */
 ftl_status_t metadata_ring_prepare_addr(const metadata_ring_t *ring,
                                         const ftl_topology_t  *topo,
-                                        uint16_t               write_idx,
-                                        nand_pba_t            *out_addr,
+                                        WORD                   write_idx,
+                                        DWORD                 *out_addr,
                                         bool                  *out_need_erase);
 
 /*
@@ -548,8 +548,8 @@ ftl_status_t metadata_ring_prepare_addr(const metadata_ring_t *ring,
  */
 ftl_status_t metadata_ring_prepare_write(const metadata_ring_t *ring,
                                          const ftl_topology_t  *topo,
-                                         uint16_t               write_idx,
-                                         nand_pba_t            *out_addr);
+                                         WORD                   write_idx,
+                                         DWORD                 *out_addr);
 
 /* ── 元数据目录后台 job ──
  *
@@ -596,14 +596,14 @@ typedef enum
  * md_compact_step_t - 压缩 job「搬一条 region」一步的结果
  *
  * md_compact_read / md_compact_write 共用本契约（write 永不返回 MD_COMPACT_SCANNED：
- * 写一条就回去读下一条）。调用者按**具名值**分派，不再靠 `r < 0` / `r != 2` 这类魔法数字。
+ * 写一条就回去读下一条）。调用者按**具名值**分派，不写数值魔法。
  */
 typedef enum
 {
-    MD_COMPACT_FAILED       = -1, /* 硬失败（md_stall 无进展）：调用者 metadata_handle_abort */
-    MD_COMPACT_BACKPRESSURE = 0,  /* 背压未提交：保留游标/槽，**下轮重试**（调用者 return）*/
-    MD_COMPACT_SUBMITTED    = 1,  /* 已提交异步命令：等完成服务函数 */
-    MD_COMPACT_SCANNED      = 2,  /* 全表扫完、无更多 region 待搬（read 专有）*/
+    MD_COMPACT_BACKPRESSURE = 0U, /* 背压未提交：保留游标/槽，**下轮重试**（调用者 return）*/
+    MD_COMPACT_SUBMITTED    = 1U, /* 已提交异步命令：等完成服务函数 */
+    MD_COMPACT_SCANNED      = 2U, /* 全表扫完、无更多 region 待搬（read 专有）*/
+    MD_COMPACT_FAILED       = 3U, /* 硬失败（md_stall 无进展）：调用者 metadata_handle_abort */
 } md_compact_step_t;
 
 /*
@@ -615,47 +615,47 @@ typedef enum
  */
 typedef enum
 {
-    MD_ANCHOR_FAILED = -1, /* 定位/取槽失败：调用者中止 job */
-    MD_ANCHOR_CLEAN  = 0,  /* dir 不脏、无需写 Anchor：调用者整段跳过 */
-    MD_ANCHOR_READY  = 1,  /* 出参全部有效，可以写 Anchor */
+    MD_ANCHOR_CLEAN  = 0U, /* dir 不脏、无需写 Anchor：调用者整段跳过 */
+    MD_ANCHOR_READY  = 1U, /* 出参全部有效，可以写 Anchor */
+    MD_ANCHOR_FAILED = 2U, /* 定位/取槽失败：调用者中止 job */
 } md_anchor_step_t;
 
 /* 布尔量直接用 bool；**不压位域**——位域布局是 implementation-defined，
  * `_Static_assert` 证不了（C4），且这里没有 RAM 压力。 */
 typedef struct
 {
-    uint8_t         phase;               /* metadata_handle_phase_t */
+    BYTE            phase;               /* metadata_handle_phase_t */
     bool            waiting;             /* 有命令在飞（完成服务函数清）*/
     bool            compact_wanted;      /* append_slot 换块后池吃紧 ⇒ 请求压缩 */
     bool            anchor_ok;           /* Anchor 分页写是否全部成功（false = 整条作废）*/
     bool            anchor_need_erase;   /* Anchor 写点是否需先擦块 */
     bool            anchor_for_reclaim;  /* 本次 Anchor 仅为「回收前落盘」：完成后回 RECLAIM */
-    uint8_t         anchor_chunk;        /* 已写的 Anchor 页序 */
-    uint16_t        victim;              /* 压缩 victim 的 gblock（UINT16_MAX = 无）*/
-    uint16_t        region_id;           /* 搬移游标（下一个待查 region_id）*/
-    uint16_t        cur_region;          /* 当前搬移中的 region_id（CP_READ 命中时设定）*/
-    uint16_t        moved;               /* 本次压缩已搬 region 数（观测）*/
-    uint16_t        reclaim_gblock;      /* 在飞擦除的块（完成时归还它）*/
-    uint16_t        reclaim_fail_gblock; /* 连续擦除失败计数对应的块（RISK-MD-01）*/
-    uint8_t         reclaim_fail_count;  /* 该块连续擦除失败次数；达上限即标坏并清位 */
-    uint32_t        stall_ms;            /* 连续「提交不出去」的起点（0 = 未计时） */
-    uint8_t         timed_out;           /* 1 = 本次 job 因 deadline 中止 */
-    uint8_t         timeout_phase;       /* 超时发生的 phase */
-    uint16_t        anchor_idx;          /* 本 Anchor record 的池内槽位 */
-    uint32_t        anchor_seq;          /* 本 Anchor record 的序号 */
-    nand_pba_t      anchor_base;         /* 本 Anchor record 第 0 页地址 */
-    nand_pba_t      slot;                /* 压缩搬移已取到、待写的槽（NAND_PBA_INVALID = 未取）*/
+    BYTE            anchor_chunk;        /* 已写的 Anchor 页序 */
+    WORD            victim;              /* 压缩 victim 的 gblock（UINT16_MAX = 无）*/
+    WORD            region_id;           /* 搬移游标（下一个待查 region_id）*/
+    WORD            cur_region;          /* 当前搬移中的 region_id（CP_READ 命中时设定）*/
+    WORD            moved;               /* 本次压缩已搬 region 数（观测）*/
+    WORD            reclaim_gblock;      /* 在飞擦除的块（完成时归还它）*/
+    WORD            reclaim_fail_gblock; /* 连续擦除失败计数对应的块（RISK-MD-01）*/
+    BYTE            reclaim_fail_count;  /* 该块连续擦除失败次数；达上限即标坏并清位 */
+    DWORD           stall_ms;            /* 连续「提交不出去」的起点（0 = 未计时） */
+    BYTE            timed_out;           /* 1 = 本次 job 因 deadline 中止 */
+    BYTE            timeout_phase;       /* 超时发生的 phase */
+    WORD            anchor_idx;          /* 本 Anchor record 的池内槽位 */
+    DWORD           anchor_seq;          /* 本 Anchor record 的序号 */
+    DWORD           anchor_base;         /* 本 Anchor record 第 0 页地址 */
+    DWORD           slot;                /* 压缩搬移已取到、待写的槽（NAND_PBA_INVALID = 未取）*/
     metadata_ring_t anchor_ring;         /* Anchor 池几何（prepare 出参，commit 要用）*/
-    uint32_t        reclaimed_count;     /* 累计擦除成功并归还的日志块数（单调进度） */
+    DWORD           reclaimed_count;     /* 累计擦除成功并归还的日志块数（单调进度） */
     int32_t         error;               /* 最近一次中止的 FTL_*（回 IDLE 时清） */
 
     /* 心跳基准（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/victim/age */
-    uint32_t start_ms;
-    uint32_t log_ms;
+    DWORD start_ms;
+    DWORD log_ms;
 
     /* victim region 页搬运缓冲：**必须常驻**——异步读完成与随后的写之间隔着若干轮
      * 服务循环，栈帧早已返回。放 job 而非栈（同 migrate_handle.page_buf / rr_page_scratch）。 */
-    uint8_t cp_buf[L2P_REGION_SIZE];
+    BYTE cp_buf[L2P_REGION_SIZE];
 } metadata_handle_t;
 
 /* ── 模块端口（docs/design/ftl_module_contracts.md §4.3）──
@@ -666,38 +666,38 @@ typedef struct
 typedef struct
 {
     ftl_allocator_t *alloc;
-    const uint32_t  *total_writes;
+    const DWORD     *total_writes;
 } metadata_port_t;
 
 /* ── 常驻 Directory Cache（约 24.6 KiB，`g_ftl_md[]` 落 SRAM4，见 src/main.c） ── */
 typedef struct
 {
     metadata_entry_t entries[METADATA_DIR_ENTRIES];
-    uint16_t         count;           /* 有效 entry 数 */
-    uint32_t         anchor_sequence; /* 当前 Anchor sequence */
+    WORD             count;           /* 有效 entry 数 */
+    DWORD            anchor_sequence; /* 当前 Anchor sequence */
     bool             dirty;           /* 是否有未写回 Anchor 的变更 */
-    uint32_t         dirty_gen;       /* Directory 变更代数：每次 update 自增 */
-    uint32_t         anchor_gen;      /* 本次 Anchor 写入所覆盖的 dirty_gen 快照 */
+    DWORD            dirty_gen;       /* Directory 变更代数：每次 update 自增 */
+    DWORD            anchor_gen;      /* 本次 Anchor 写入所覆盖的 dirty_gen 快照 */
 
     /* ── L2P 日志块（元数据写模型：只追加 + 块池轮转）──
      * 每个 region 写进「当前日志块」的下一空槽（一 region = 一页）。块满则从
      * **固定 L2P 日志区**取新块（NONE = 已擦净）。l2p_live 记每个日志块上还有多少
      * region 的**最新位置**落在这里 —— 归零即置 reclaim_pending，由后台 job 异步擦除。
      * l2p_live 同时是 `ftl_is_metadata_block` 的唯一动态块判据（C9：不维护第二套坐标）。 */
-    uint16_t l2p_live[FTL_BLOCK_TOTAL]; /* 每 gblock 的活 region 数 */
-    uint16_t cur_metadata_block;        /* 当前日志块 gblock（cur_block_valid=false 时无意义）*/
-    uint8_t  cur_metadata_page;         /* 当前日志块内下一可用页 */
-    bool     cur_block_valid;           /* 游标是否已建立（false = 尚未分配日志块）*/
-    uint8_t  cur_metadata_plane;        /* 下一个新日志块选哪个 plane（轮转）*/
+    WORD l2p_live[FTL_BLOCK_TOTAL]; /* 每 gblock 的活 region 数 */
+    WORD cur_metadata_block;        /* 当前日志块 gblock（cur_block_valid=false 时无意义）*/
+    BYTE cur_metadata_page;         /* 当前日志块内下一可用页 */
+    bool cur_block_valid;           /* 游标是否已建立（false = 尚未分配日志块）*/
+    BYTE cur_metadata_plane;        /* 下一个新日志块选哪个 plane（轮转）*/
 
     /* ── 待回收日志块位图（RAM 态，不跨重启）──
      * commit_region 在活计数归零时置位；append_slot 换走旧当前块时若其已空也置位。
      * 运行期擦除全部由 metadata_handle 的 MD_JOB_RECLAIM 异步做——append_slot 不做
      * 同步擦除（3 ms tERASE 会击穿服务预算）。
      * 位在"擦除在飞"期间保持置位：完成成功才清；失败保留，下轮重试。 */
-    uint32_t reclaim_pending[FTL_BLOCK_TOTAL / 32U];
-    uint16_t reclaim_pending_count;
-    uint16_t reclaim_scan; /* 轮转起点：擦除持续失败的块不再永久挡住后续块 */
+    DWORD reclaim_pending[FTL_BLOCK_TOTAL / 32U];
+    WORD  reclaim_pending_count;
+    WORD  reclaim_scan; /* 轮转起点：擦除持续失败的块不再永久挡住后续块 */
 
     /* 后台整理 job（回收 + 压缩，见 metadata_handle_t）。两个作用：
      *   ① **抑制逐次立即回收**（搬移 victim 的最后一个活 region 时 l2p_live[victim]
@@ -707,8 +707,8 @@ typedef struct
     metadata_handle_t handle;
 
     /* Anchor 池游标（ring 写点槽位；anchor_cursor_valid=false 时尚未定位）*/
-    uint16_t anchor_write_idx;
-    bool     anchor_cursor_valid;
+    WORD anchor_write_idx;
+    bool anchor_cursor_valid;
 
     /* 拓扑信息（元数据所在芯片路由） */
     ftl_topology_t topo;
@@ -745,9 +745,9 @@ void metadata_dir_init(metadata_dir_cache_t *dir);
  * @return PBA；NAND_PBA_INVALID = 未找到。对 L2P region 而言"未找到"与"未映射"
  *         同义：`fill_fixed` 为每个 region 预登记一条，之后只在刷盘时覆盖。
  */
-nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
-                               uint8_t                     type,
-                               uint16_t                    id);
+DWORD metadata_dir_lookup(const metadata_dir_cache_t *dir,
+                          BYTE                        type,
+                          WORD                        id);
 
 /*
  * metadata_live_count - 某个 gblock 上还有多少 region 的**最新位置**落在它上面。
@@ -755,7 +755,7 @@ nand_pba_t metadata_dir_lookup(const metadata_dir_cache_t *dir,
  * 供开机恢复（PFR）判断「该块是否仍被 Directory 引用」。越界返回 0（不是 ASSERT：
  * 调用者的 g 来自介质/快照，属不可信输入，H29）。
  */
-uint16_t metadata_live_count(const metadata_dir_cache_t *dir, uint16_t gblock);
+WORD metadata_live_count(const metadata_dir_cache_t *dir, WORD gblock);
 
 /*
  * metadata_dir_update - 添加或更新元数据位置
@@ -766,9 +766,9 @@ uint16_t metadata_live_count(const metadata_dir_cache_t *dir, uint16_t gblock);
  * @param new_pba 新物理位置（PBA）
  */
 void metadata_dir_update(metadata_dir_cache_t *dir,
-                         uint8_t               type,
-                         uint16_t              id,
-                         nand_pba_t            new_pba);
+                         BYTE                  type,
+                         WORD                  id,
+                         DWORD                 new_pba);
 
 /*
  * metadata_dir_append_slot - 取当前日志块的下一个空槽（L2P region 的写点）
@@ -795,8 +795,8 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
  * @param alloc  Allocator（固定 L2P 日志区的块状态在 BST 里）
  * @return 写点 PBA；失败返回 NAND_PBA_INVALID
  */
-nand_pba_t metadata_dir_append_slot(metadata_dir_cache_t *dir,
-                                    ftl_allocator_t      *alloc);
+DWORD metadata_dir_append_slot(metadata_dir_cache_t *dir,
+                               ftl_allocator_t      *alloc);
 
 /* ── 固定 L2P 日志区（RISK-MD-07 / RISK-CAP-02）──
  * 这 64 个 gblock 是**固定预留**的元数据区：只由 metadata 模块在
@@ -823,17 +823,17 @@ void metadata_log_area_restore(metadata_dir_cache_t *dir, ftl_allocator_t *alloc
  * metadata_log_alloc - 从固定日志区取一个已擦除空闲块（置 LOG，独占）
  * @return gblock；无空闲块返回 FTL_GBLOCK_INVALID（调用者按背压处理）
  */
-uint16_t metadata_log_alloc(metadata_dir_cache_t *dir, ftl_allocator_t *alloc, uint8_t plane);
+WORD metadata_log_alloc(metadata_dir_cache_t *dir, ftl_allocator_t *alloc, BYTE plane);
 
 /*
  * metadata_log_release - 擦除成功后把块归还固定日志区（置 NONE，不回 Free Pool）
  * @param alloc  分配器
  * @param gblock 固定日志区内的 gblock
  */
-void metadata_log_release(ftl_allocator_t *alloc, uint16_t gblock);
+void metadata_log_release(ftl_allocator_t *alloc, WORD gblock);
 
 /* 当前仍有活 region 的日志块数（观测：应保持有界，理想 ~32）。 */
-uint16_t metadata_dir_live_block_count(const metadata_dir_cache_t *dir);
+WORD metadata_dir_live_block_count(const metadata_dir_cache_t *dir);
 
 /*
  * metadata_dir_commit_region - 写成功后登记 region 的新位置
@@ -853,8 +853,8 @@ uint16_t metadata_dir_live_block_count(const metadata_dir_cache_t *dir);
  * @param new_pba   刚写成功的位置（PBA，内部调用者保证非 NAND_PBA_INVALID）
  */
 void metadata_dir_commit_region(metadata_dir_cache_t *dir,
-                                uint16_t              region_id,
-                                nand_pba_t            new_pba);
+                                WORD                  region_id,
+                                DWORD                 new_pba);
 
 /*
  * metadata_handle - 推进元数据目录后台 job（回收 / 压缩）一步
@@ -877,15 +877,15 @@ typedef struct
 {
     ftl_module_status_t base;
 
-    uint8_t  phase;           /* metadata_handle_phase_t（观测；外部不要据此驱动） */
-    uint16_t victim;          /* 压缩 victim（UINT16_MAX = 无） */
-    uint16_t moved;           /* 本次压缩已搬 region 数 */
-    uint32_t reclaimed;       /* 累计擦除成功的日志块数（单调进度） */
-    bool     compact_wanted;  /* 池吃紧，请求压缩 */
-    bool     anchor_ok;       /* Anchor 分页写是否全部成功 */
-    bool     reclaim_pending; /* 有已登记待回收的日志块 */
-    bool     timed_out;       /* 本次 job 因 deadline 中止 */
-    uint8_t  timeout_phase;   /* 超时发生的 phase */
+    BYTE  phase;           /* metadata_handle_phase_t（观测；外部不要据此驱动） */
+    WORD  victim;          /* 压缩 victim（UINT16_MAX = 无） */
+    WORD  moved;           /* 本次压缩已搬 region 数 */
+    DWORD reclaimed;       /* 累计擦除成功的日志块数（单调进度） */
+    bool  compact_wanted;  /* 池吃紧，请求压缩 */
+    bool  anchor_ok;       /* Anchor 分页写是否全部成功 */
+    bool  reclaim_pending; /* 有已登记待回收的日志块 */
+    bool  timed_out;       /* 本次 job 因 deadline 中止 */
+    BYTE  timeout_phase;   /* 超时发生的 phase */
 } metadata_status_t;
 
 /*
@@ -917,7 +917,7 @@ void metadata_handle(metadata_dir_cache_t *dir, const ftl_bg_info_t *info, metad
  */
 static inline bool metadata_dir_busy(const metadata_dir_cache_t *dir)
 {
-    return (dir != NULL) && (dir->handle.phase != (uint8_t)MD_JOB_IDLE);
+    return (dir != NULL) && (dir->handle.phase != MD_JOB_IDLE);
 }
 
 /* ── Anchor 落盘的三段式（唯一形态）──
@@ -941,9 +941,9 @@ static inline bool metadata_dir_busy(const metadata_dir_cache_t *dir)
  */
 md_anchor_step_t metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
                                              metadata_ring_t      *out_ring,
-                                             nand_pba_t           *out_base,
-                                             uint16_t             *out_idx,
-                                             uint32_t             *out_seq,
+                                             DWORD                *out_base,
+                                             WORD                 *out_idx,
+                                             DWORD                *out_seq,
                                              bool                 *out_need_erase);
 
 /*
@@ -954,7 +954,7 @@ md_anchor_step_t metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
  * @param chunk  页序（0..ANCHOR_PAGE_COUNT-1）
  * @param page   出参：组好的页（调用者提供 2KB 缓冲）
  */
-void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, uint32_t seq, uint8_t chunk, metadata_anchor_page_t *page);
+void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, DWORD seq, BYTE chunk, metadata_anchor_page_t *page);
 
 /*
  * metadata_dir_anchor_commit - 收尾：推进游标（无论成败），成功才清 dirty
@@ -964,7 +964,7 @@ void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, uint32_t seq, uin
  * @param idx   prepare 回传的槽位号
  * @param ok    false = 有条分页写失败（整条作废，保留 dirty）
  */
-void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t *ring, uint16_t idx, bool ok);
+void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t *ring, WORD idx, bool ok);
 
 /*
  * metadata_dir_load - 从 Anchor 池加载 Directory
@@ -1009,6 +1009,6 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir);
  * @param block  物理 Block 号（per-plane 号，0..BLOCKS_PER_PLANE-1）
  * @return true = 元数据块，false = 用户数据块
  */
-bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, uint8_t plane, uint16_t block);
+bool ftl_is_metadata_block(const metadata_dir_cache_t *md_dir, BYTE plane, WORD block);
 
 #endif /* FTL_METADATA_H */

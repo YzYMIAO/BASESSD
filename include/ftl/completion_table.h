@@ -39,9 +39,9 @@ struct ftl_context;
  * 8 B/项（2 B 位域 + 2 B 补齐 + 4 B 指针，Cortex-M 指针 4 B）。 */
 typedef struct
 {
-    uint16_t used   : 1;  /* 1=槽位占用 */
-    uint16_t cmd_id : 15; /* FC command_id */
-    void    *ctx;         /* 该命令的私有状态（同步等待 = ftl_sync_waiter_t*；job = &job） */
+    WORD  used   : 1;  /* 1=槽位占用 */
+    WORD  cmd_id : 15; /* FC command_id */
+    void *ctx;         /* 该命令的私有状态（同步等待 = ftl_sync_waiter_t*；job = &job） */
 } completion_entry_t;
 
 /* 旁表容量。
@@ -72,17 +72,17 @@ void completion_table_init(void);
  *
  * @return FTL_OK；FTL_ERROR 表满（COMPLETION_TABLE_SIZE，见容量推导）。
  */
-ftl_status_t completion_table_add(uint16_t cmd_id, void *ctx);
+ftl_status_t completion_table_add(WORD cmd_id, void *ctx);
 
 /* completion_table_remove - 释放 cmd_id 的表项（未找到 no-op，幂等） */
-void completion_table_remove(uint16_t cmd_id);
+void completion_table_remove(WORD cmd_id);
 
 /*
  * completion_table_take - 查 + **摘链** + 返回 ctx（未登记返回 NULL）。
  *
  * 派发路径专用：先摘链再回调，容许服务函数在自己的回调里重入登记/释放表项。
  */
-void *completion_table_take(uint16_t cmd_id);
+void *completion_table_take(WORD cmd_id);
 
 /*
  * completion_table_count - 当前占用（未决）的表项数（观测 / 自检口）。
@@ -93,7 +93,7 @@ void *completion_table_take(uint16_t cmd_id);
  *
  * @return 占用槽位数（0..COMPLETION_TABLE_SIZE）
  */
-uint16_t completion_table_count(void);
+WORD completion_table_count(void);
 
 /*
  * completion_table_set_route - 设置实例路由表。
@@ -110,7 +110,7 @@ void completion_table_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM]);
 /*
  * completion_table_route - 按 (ch,ce,lun) 取实例（未设置返回 NULL；越界断言）
  */
-struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun);
+struct ftl_context *completion_table_route(BYTE ch, BYTE ce, BYTE lun);
 
 /*
  * completion_table_route_region - 按全局 L2P region 取 owner 实例
@@ -119,7 +119,7 @@ struct ftl_context *completion_table_route(uint8_t ch, uint8_t ce, uint8_t lun);
  * completion_table_route。共享 L2P cache 的 owner 解析用它，避免把 region→die 的分解
  * 散落在 cache/CLI 各处（H13）；分解式只有 ftl_dim_* 一份实现（C9）。
  */
-struct ftl_context *completion_table_route_region(uint32_t global_region);
+struct ftl_context *completion_table_route_region(DWORD global_region);
 
 /*
  * completion_table_drain - 消费所有 CQ entry 并派发（ftl_service_pump Phase 2 调用）。

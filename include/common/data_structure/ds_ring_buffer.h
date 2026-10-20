@@ -15,6 +15,7 @@ extern "C"
 #endif
 
 #include "config.h"
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 
 #include <stdint.h>
 
@@ -29,13 +30,13 @@ extern "C"
     ds_Stat cc_rbuf_conf_new(CC_RbufConf *rconf, CC_Rbuf **rbuf);
     size_t  cc_rbuf_struct_size();
 
-    void     cc_rbuf_enqueue(CC_Rbuf *rbuf, uint64_t item);
-    ds_Stat  cc_rbuf_dequeue(CC_Rbuf *rbuf, uint64_t *out);
-    bool     cc_rbuf_is_empty(CC_Rbuf *rbuf);
-    size_t   cc_rbuf_size(CC_Rbuf *rbuf);
-    size_t   cc_rbuf_capacity(CC_Rbuf *rbuf);
-    void     cc_rbuf_destroy(CC_Rbuf *rbuf);
-    uint64_t cc_rbuf_peek(CC_Rbuf *rbuf, int index);
+    void    cc_rbuf_enqueue(CC_Rbuf *rbuf, QWORD item);
+    ds_Stat cc_rbuf_dequeue(CC_Rbuf *rbuf, QWORD *out);
+    bool    cc_rbuf_is_empty(CC_Rbuf *rbuf);
+    size_t  cc_rbuf_size(CC_Rbuf *rbuf);
+    size_t  cc_rbuf_capacity(CC_Rbuf *rbuf);
+    void    cc_rbuf_destroy(CC_Rbuf *rbuf);
+    QWORD   cc_rbuf_peek(CC_Rbuf *rbuf, int index);
 
 #ifdef __cplusplus
 }

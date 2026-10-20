@@ -11,26 +11,29 @@
  * 地址体系（行业标准）：
  *
  *   LBA (Host)  →  PBA (FTL full physical)  →  PAA (per-chip address)
- *   cmd->meta        L2P 表存的值               nand_paa_t
+ *   cmd->meta        L2P 表存的值               DWORD
  *   逻辑地址         [CH][CE][PAA]             [LUN][BLOCK][PLANE][PAGE][CW]
  *
- * lba_t — Host 逻辑地址（uint32_t）。
- *   当前容量 512MiB ÷ 512B = 1,048,576 个 LBA，uint32_t 足够。
+ * Host 逻辑地址 = DWORD（32-bit）。
+ *   容量口径：32-bit LBA × 4 KiB AU = 2^32 × 4 KiB = **16 TiB**（主流消费级上限）；
+ *   本仓当前 IU = 512 B（1 CW），32-bit 对应 2 TiB，同样足够。
  *   作为 cmd->meta 传入 FC 用于 META 校验。
  */
-typedef uint32_t lba_t;
 
 /* 非法 LBA 哨兵：容量上限 1,048,576 ⇒ 0xFFFFFFFF 恒不可达。
  * 用于「本 CW 未写过 / 无映射」的逐 CW 输出（GC/WL 从页内 META 取回）。 */
-#define FTL_LBA_INVALID ((lba_t)0xFFFFFFFFU)
+#define FTL_LBA_INVALID (0xFFFFFFFFU)
 
 /*
  * ftl_status_t — FTL 内部操作通用返回状态
  *
- *   FTL_OK      =  0  操作成功
- *   FTL_ERROR   = -1  永久失败（配置错误 / 无可用空间）——重试无意义
- *   FTL_AGAIN   = -2  瞬态背压（资源暂空）——调用者应**排队重试**
- *   FTL_TIMEOUT = -3  等待超时（ms deadline 到期）——调用者按失败收尾
+ *   FTL_OK      = 0  操作成功
+ *   FTL_ERROR   = 1  永久失败（配置错误 / 无可用空间）——重试无意义
+ *   FTL_AGAIN   = 2  瞬态背压（资源暂空）——调用者应**排队重试**
+ *   FTL_TIMEOUT = 3  等待超时（ms deadline 到期）——调用者按失败收尾
+ *
+ * ⚠ 状态值一律**非负**：0 = 成功，其余为具名错误码。调用者按具名值分派，
+ *   不要写 `status < 0` 这类依赖符号的判据。
  *
  * FTL_AGAIN 的存在是为了把「资源暂空」与「真失败」分开：FC 命令/desc/buffer 池、
  * SQ、pending 表都可能在某一瞬间满（如 16 个多 plane 子操作同时在飞），但下一轮
@@ -43,10 +46,10 @@ typedef uint32_t lba_t;
  */
 typedef enum
 {
-    FTL_OK      = 0,  /* 成功 */
-    FTL_ERROR   = -1, /* 永久失败（通用，不细分错误码） */
-    FTL_AGAIN   = -2, /* 瞬态背压（资源暂空，可重试） */
-    FTL_TIMEOUT = -3, /* 等待超时（ms deadline 到期） */
+    FTL_OK      = 0U, /* 成功 */
+    FTL_ERROR   = 1U, /* 永久失败（通用，不细分错误码） */
+    FTL_AGAIN   = 2U, /* 瞬态背压（资源暂空，可重试） */
+    FTL_TIMEOUT = 3U, /* 等待超时（ms deadline 到期） */
 } ftl_status_t;
 
 /*
@@ -73,9 +76,9 @@ typedef enum
  */
 typedef struct
 {
-    uint8_t ch;
-    uint8_t ce;
-    uint8_t lun;
+    BYTE ch;
+    BYTE ce;
+    BYTE lun;
 } ftl_topology_t;
 
 /* ── 对外请求类型 ──
@@ -91,10 +94,10 @@ typedef struct
  *   ftl_io_request_t  — 一次读写请求的完整描述（含通知/回调字段，Step 3 嵌入 pending）
  *
  * 设计原则：请求结构体用普通字段而非位域（访问更快，C 编译器无
- * 位域可移植性问题）；**地址一律用 nand_pba_t**（ftl/ftl_config.h §三.2）。
+ * 位域可移植性问题）；**地址一律用 DWORD**（ftl/ftl_config.h §三.2）。
  * 具名字段访问经 pba_fields() 值语义视图（4 字节位域，仅内存内，不落介质；
  * 见 ftl_config.h §三.2）。本文件属 FTL 公共层 ⇒ 不出现 nand_addr_t /
- * nand_paa_t——那是 NAND 层的表示。
+ * DWORD——那是 NAND 层的表示。
  */
 
 /* pending 完成回调 — 在 ftl_host_io_callback 数据拷贝 + 标志置位后调用。
@@ -113,10 +116,10 @@ typedef void (*pending_cb_t)(void *ctx);
  */
 typedef struct
 {
-    uint64_t               lba;             /* Host 逻辑地址（NVMe 协议宽度） */
+    QWORD                  lba;             /* Host 逻辑地址（NVMe 协议宽度） */
     void                  *buffer;          /* 读：caller 数据 buffer（数据写回处）；写：数据源 */
-    uint32_t               count;           /* ★ 连续 LBA 数（= 上层 block_count）；FTL 自行决定单/双 plane 拆分 */
-    volatile uint8_t      *complete_flag;   /* 非 NULL 时全部子操作完成后置 1（异步跟踪） */
+    DWORD                  count;           /* ★ 连续 LBA 数（= 上层 block_count）；FTL 自行决定单/双 plane 拆分 */
+    volatile BYTE         *complete_flag;   /* 非 NULL 时全部子操作完成后置 1（异步跟踪） */
     volatile ssd_status_t *status_out;      /* 非 NULL 时组完成后写入 SSD_STATUS_OK/IO_ERROR */
     pending_cb_t           on_complete;     /* 组完成后回调（可选，Controller 子请求聚合） */
     void                  *on_complete_ctx; /* 回调上下文（ssd_request_t*） */

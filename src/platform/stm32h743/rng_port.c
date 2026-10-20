@@ -18,14 +18,14 @@ void rng_port_init(void)
     HAL_RNG_Init(&g_rng_handle); /* 初始化RNG */
 }
 
-uint8_t rng_port_data_ready(void)
+BYTE rng_port_data_ready(void)
 {
     return (__HAL_RNG_GET_FLAG(&g_rng_handle, RNG_FLAG_DRDY) != RESET) ? 1U : 0U;
 }
 
-uint32_t rng_port_get_random(void)
+DWORD rng_port_get_random(void)
 {
-    uint32_t randomnum;
+    DWORD randomnum;
 
     HAL_RNG_GenerateRandomNumber(&g_rng_handle, &randomnum);
 

@@ -1,6 +1,8 @@
 #ifndef PLATFORM_DELAY_H
 #define PLATFORM_DELAY_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -25,8 +27,8 @@ typedef enum
 } delay_status_t;
 
 /* tick_clock_hz 为 SysTick 时钟 Hz；传入 0 时读取当前 HCLK。 */
-void delay_init(uint32_t tick_clock_hz);
-void delay_reconfigure(uint32_t tick_clock_hz);
+void delay_init(DWORD tick_clock_hz);
+void delay_reconfigure(DWORD tick_clock_hz);
 bool delay_is_initialized(void);
 
 /*
@@ -34,33 +36,33 @@ bool delay_is_initialized(void);
  * 这组接口只读取 CYCCNT，不会忙等待；start_cycles 允许在一次 32 位回绕内
  * 使用。NAND 的单次 tR/tPROG/tBERS 均远小于该范围。
  */
-bool delay_dwt_cycles_now(uint32_t *cycles);
-bool delay_dwt_elapsed_us(uint32_t start_cycles, uint16_t timeout_us);
+bool delay_dwt_cycles_now(DWORD *cycles);
+bool delay_dwt_elapsed_us(DWORD start_cycles, WORD timeout_us);
 
 /* 忙等待接口：适用于短硬件时序，不适合等待业务事件。 */
-delay_status_t delay_us_busy(uint32_t us);
-delay_status_t delay_ms_busy(uint32_t ms);
-uint32_t       delay_max_busy_us(void);
+delay_status_t delay_us_busy(DWORD us);
+delay_status_t delay_ms_busy(DWORD ms);
+DWORD          delay_max_busy_us(void);
 
 /* 兼容传统接口：忽略忙等待状态；短硬件时序优先使用上面的带状态接口。 */
-void delay_us(uint32_t us);
-void delay_ms(uint32_t ms);
+void delay_us(DWORD us);
+void delay_ms(DWORD ms);
 
 /* 毫秒计数的回绕安全超时工具。 */
-uint32_t delay_now_ms(void);
-bool     delay_elapsed_ms(uint32_t start_ms, uint32_t timeout_ms);
+DWORD delay_now_ms(void);
+bool  delay_elapsed_ms(DWORD start_ms, DWORD timeout_ms);
 
 /*
  * ---- port 接口：由 src/platform/<soc>/delay_port.c 实现 ----
  * 共享逻辑（src/platform/delay.c）只通过这几个函数触碰 SoC —— 它自己不 include
  * 任何 SoC 头、不出现任何 HAL 类型，连 DWT/SysTick 寄存器都不直接读。
  */
-uint32_t delay_port_hclk_hz(void);       /* delay_init(0) 的「读 HCLK」回退 */
-uint32_t delay_port_core_clock_hz(void); /* CYCCNT 速率（SYSCLK，非 HCLK） */
-uint32_t delay_port_now_ms(void);        /* 系统单调毫秒计数 */
-bool     delay_port_dwt_enable(void);    /* 使能 CYCCNT；返回硬件是否接受 */
-uint32_t delay_port_dwt_cycles(void);    /* DWT 自由运行周期计数器的当前值 */
-uint32_t delay_port_systick_load(void);  /* SysTick 重装值（一个周期的 tick 数） */
-uint32_t delay_port_systick_value(void); /* SysTick 当前计数值 */
+DWORD delay_port_hclk_hz(void);       /* delay_init(0) 的「读 HCLK」回退 */
+DWORD delay_port_core_clock_hz(void); /* CYCCNT 速率（SYSCLK，非 HCLK） */
+DWORD delay_port_now_ms(void);        /* 系统单调毫秒计数 */
+bool  delay_port_dwt_enable(void);    /* 使能 CYCCNT；返回硬件是否接受 */
+DWORD delay_port_dwt_cycles(void);    /* DWT 自由运行周期计数器的当前值 */
+DWORD delay_port_systick_load(void);  /* SysTick 重装值（一个周期的 tick 数） */
+DWORD delay_port_systick_value(void); /* SysTick 当前计数值 */
 
 #endif /* PLATFORM_DELAY_H */

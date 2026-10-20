@@ -115,7 +115,7 @@ char *addBinary(char *a, char *b)
     return result;
 }
 
-uint32_t reverseBits(uint32_t n)
+DWORD reverseBits(DWORD n)
 {
     // 步骤1：交换相邻位 (1位一组 → 2位一组)
     n = ((n & 0x55555555) << 1) | ((n & 0xAAAAAAAA) >> 1);

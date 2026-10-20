@@ -7,7 +7,9 @@
 
 #include "mpu.h"
 
-void mpu_set_protection(uint32_t baseaddr, uint32_t size, uint32_t rnum, uint8_t de, uint8_t ap, uint8_t sen, uint8_t cen, uint8_t ben)
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
+void mpu_set_protection(DWORD baseaddr, DWORD size, DWORD rnum, BYTE de, BYTE ap, BYTE sen, BYTE cen, BYTE ben)
 {
     mpu_port_set_protection(baseaddr, size, rnum, de, ap, sen, cen, ben);
 }

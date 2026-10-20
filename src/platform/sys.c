@@ -42,17 +42,17 @@ void sys_cache_enable(void)
     sys_port_cache_enable();
 }
 
-uint8_t get_icache_sta(void)
+BYTE get_icache_sta(void)
 {
     return sys_port_icache_enabled();
 }
 
-uint8_t get_dcache_sta(void)
+BYTE get_dcache_sta(void)
 {
     return sys_port_dcache_enabled();
 }
 
-uint32_t sys_mpu_region_count(void)
+DWORD sys_mpu_region_count(void)
 {
     return sys_port_mpu_region_count();
 }
@@ -62,7 +62,7 @@ void sys_clock_tree_get(sys_clock_tree_t *out)
     sys_port_clock_tree_get(out);
 }
 
-void sys_nvic_set_vector_table(uint32_t base_address, uint32_t offset)
+void sys_nvic_set_vector_table(DWORD base_address, DWORD offset)
 {
     sys_port_set_vector_table(base_address, offset);
 }
@@ -82,12 +82,12 @@ void sys_intx_enable(void)
     sys_port_irq_enable();
 }
 
-void sys_msr_msp(uint32_t address)
+void sys_msr_msp(DWORD address)
 {
     sys_port_set_msp(address);
 }
 
-uint8_t sys_stm32_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sysclk_div, uint32_t peripheral_div)
+BYTE sys_stm32_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div)
 {
     return sys_port_clock_init(pll_prediv, pll_mul, sysclk_div, peripheral_div);
 }

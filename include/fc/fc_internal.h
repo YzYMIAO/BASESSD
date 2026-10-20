@@ -37,14 +37,14 @@ extern "C"
  * 由 fc_poll_stripe_accumulate()（待实现）管理。 */
 
 /* 单组 stripe 的最大数据命令数 = PLANE_NUM - 1 */
-#    define FC_STRIPE_DATA_MAX ((uint8_t)(PLANE_NUM - 1U))
+#    define FC_STRIPE_DATA_MAX ((PLANE_NUM - 1U))
 
     /* 每个 LUN 的 stripe 积累状态（PLANE_NUM>=4 扩展预留） */
     typedef struct
     {
-        uint8_t         active;                       /* 0=空闲, 1=积累中 */
-        uint8_t         ch, ce, lun;                  /* 目标 LUN */
-        uint8_t         count;                        /* 已积累的数据命令数 */
+        BYTE            active;                       /* 0=空闲, 1=积累中 */
+        BYTE            ch, ce, lun;                  /* 目标 LUN */
+        BYTE            count;                        /* 已积累的数据命令数 */
         fc_command_id_t data_ids[FC_STRIPE_DATA_MAX]; /* 已积累的数据命令 ID */
         fc_command_id_t parity_id;                    /* 已分配的 parity 命令 ID */
     } fc_stripe_accum_t;
@@ -61,18 +61,19 @@ extern "C"
         fc_scheduler_t        scheduler;
         fc_command_t         *command_pool;
         fc_descriptor_t      *descriptor_pool;
-        uint8_t (*buffer_pool)[FC_BUFFER_POOL_CW_SIZE];
+        BYTE(*buffer_pool)
+        [FC_BUFFER_POOL_CW_SIZE];
         fc_command_id_t *descriptor_owner;
-        uint8_t         *command_state;
+        BYTE            *command_state;
         fc_command_id_t *command_free_next;
-        uint16_t        *descriptor_free_next;
-        uint16_t        *buffer_free_next;
-        uint8_t         *buffer_state;
+        WORD            *descriptor_free_next;
+        WORD            *buffer_free_next;
+        BYTE            *buffer_state;
         fc_command_id_t  command_free_head;
-        uint16_t         descriptor_free_head;
-        uint16_t         buffer_free_head;
+        WORD             descriptor_free_head;
+        WORD             buffer_free_head;
         fc_command_id_t  active_handle;
-        uint8_t          active_valid;
+        BYTE             active_valid;
 
         /* ── Stripe RAID 积累状态 ── */
 #if CONFIG_FC_RAID
@@ -132,7 +133,7 @@ extern "C"
     /* 从 CQ 批量取完成项：最多 max_count 条，实际条数写入 *count。
      * 上限由调用方给（FC 不写死）；循环被 CQ 占用数天然封顶。
      * 返回：取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY。 */
-    fc_status_t fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, uint16_t max_count, uint16_t *count);
+    fc_status_t fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, WORD max_count, WORD *count);
 
     /* 释放命令全部资源（desc 链 + buffer + command 槽位）；调用方须已保证状态合法 */
     fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *command);
@@ -152,27 +153,27 @@ extern "C"
 
     /* 直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移。
      * buffer_id 越界一律 ASSERT（调用者已先校验占用）。 */
-    uint8_t *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id);
+    BYTE *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id);
 
     /* 命令/描述符 ID → 指针（越界返回 NULL）——薄壳校验与便利函数使用 */
-    fc_command_t    *fc_command_id_to_command_internal(fc_t *controller, uint16_t command_id);
-    fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, uint16_t descriptor_id);
+    fc_command_t    *fc_command_id_to_command_internal(fc_t *controller, WORD command_id);
+    fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, WORD descriptor_id);
 
     /* 指针 → 命令池索引（**唯一一份实现**；前置条件：command 属于 controller->command_pool） */
     fc_command_id_t fc_command_to_id_internal(const fc_t *controller, const fc_command_t *command);
 
     /* 校验命令的 desc 链是否全部归该命令所有（所有权一致性，fc_submit 使用） */
-    uint8_t fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command);
+    BYTE fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command);
 
     /* 资源统计读取器（fc_get_resource_stats 使用）。
      * 三个状态读取器的 ID 恒由池派生或循环上界保证在范围内，越界一律 ASSERT
      * （原先静默回退默认值，v21 改）。 */
-    uint16_t        fc_get_sq_count(const fc_t *controller);
-    uint16_t        fc_get_hsq_count(const fc_t *controller);
-    uint16_t        fc_get_cq_count(const fc_t *controller);
-    uint8_t         fc_command_state_get(const fc_t *controller, fc_command_id_t command_id);
-    fc_command_id_t fc_descriptor_owner_get(const fc_t *controller, uint16_t descriptor_id);
-    uint8_t         fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id);
+    WORD            fc_get_sq_count(const fc_t *controller);
+    WORD            fc_get_hsq_count(const fc_t *controller);
+    WORD            fc_get_cq_count(const fc_t *controller);
+    BYTE            fc_command_state_get(const fc_t *controller, fc_command_id_t command_id);
+    fc_command_id_t fc_descriptor_owner_get(const fc_t *controller, WORD descriptor_id);
+    BYTE            fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id);
 
 #ifdef __cplusplus
 }

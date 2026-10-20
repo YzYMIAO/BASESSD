@@ -47,14 +47,14 @@ static nand_dispatch_lun_queue_t g_nand_dispatch_queues[CH_NUM][CE_NUM][LUN_NUM]
  * ⚠ 这不是 ONFI 的 "device ready"（R/B# / status bit 6，per-die 且瞬态）——
  *   那由引擎的 WAIT_READY（70h 状态轮询）现查，不在此缓存。
  * 仅在 nand_dispatch_enqueue() 一处检查（submit 与 submit_chain 共用的漏斗），poll 不检查。 */
-static uint8_t g_nand_dispatch_armed;
+static BYTE g_nand_dispatch_armed;
 
 /* 页缓冲：置于 noncacheable_buffer 段（DMA/FMC 直访，D-Cache 关闭）。
  * 按 (ch, ce, lun) 各持一块——同通道各 LUN 由 poll 轮流驱动，且 request.data
  * 指针会跨多次 poll 存活（如 program ISSUE 卡在 70h 忙轮询），共享一块会被后驱动的
  * LUN 覆盖（详见 nand_dispatch_tables.c 顶部注释）。
  * 多 plane 时拼接双页（plane stride = PAGE_SIZE），scatter 拆页依赖它。 */
-uint8_t g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
+BYTE g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE] __attribute__((section(".noncacheable_buffer")));
 
 /* ======================================================================
  * 辅助函数
@@ -71,11 +71,11 @@ uint8_t g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE] __
  *     - cw_status 用 CW_TOTAL_MAX（=8，单/多 plane 最大值）全量预置
  *       FC_CW_STATUS_UNUSED，避免脏数据（掩码内的格稍后由 completion handler 覆写）。
  * -------------------------------------------------------------------- */
-static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion, uint16_t command_id)
+static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion, WORD command_id)
 {
-    uint8_t i;
+    BYTE i;
 
-    *completion                      = (nand_dispatch_completion_t){0};
+    memset(completion, 0, sizeof(*completion));
     completion->command_id           = command_id;
     completion->failed_descriptor_id = FC_DESCRIPTOR_ID_INVALID;
     for (i = 0U; i < CW_TOTAL_MAX; i++)
@@ -95,7 +95,7 @@ static void nand_dispatch_completion_init(nand_dispatch_completion_t *completion
  *         注意 poll 中多处先改写 task->operation 再 complete，handler 按
  *         最新 operation 匹配（如 LOAD→WAIT 切换）。
  * -------------------------------------------------------------------- */
-static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
+static void nand_dispatch_task_complete(nand_dispatch_task_t *task, BYTE result, const nand_fc_completion_t *nand_completion)
 {
     task->completion.execution_status = result;
     task->completion.nand_status      = nand_completion->nand_status;
@@ -121,8 +121,8 @@ static void nand_dispatch_task_complete(nand_dispatch_task_t *task, uint8_t resu
  * -------------------------------------------------------------------- */
 static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispatch_request_t *request)
 {
-    uint8_t n;
-    uint8_t plane;
+    BYTE n;
+    BYTE plane;
 
     nand_dispatch_completion_init(&task->completion, request->command_id);
     task->command_id                    = request->command_id;
@@ -148,7 +148,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
     task->cw_index                      = nand_dispatch_cw_first(request->cw_bitmap);
     /* 逐格搬掩码内的 CW buffer；不在掩码里的格保持零值。 */
     for (n = nand_dispatch_cw_next(request->cw_bitmap, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(request->cw_bitmap, (uint8_t)(n + 1U)))
+         n = nand_dispatch_cw_next(request->cw_bitmap, (n + 1U)))
     {
         task->cw_buffers[n] = request->cw_buffers[n];
     }
@@ -193,7 +193,7 @@ nand_result_t nand_dispatch_init(void)
  *   返回：无。
  *   实现要点：归一化到 0/1；仅在 nand_dispatch_enqueue() 一处检查，poll 不检查。
  * -------------------------------------------------------------------- */
-void nand_dispatch_set_armed(uint8_t armed)
+void nand_dispatch_set_armed(BYTE armed)
 {
     g_nand_dispatch_armed = (armed != 0U) ? 1U : 0U;
 }
@@ -205,7 +205,7 @@ void nand_dispatch_set_armed(uint8_t armed)
  *   实现要点：与 set_armed 归一化语义一致，恒返回 0/1；
  *         供 nand_fc_execute 的"仅初始化可调"契约断言使用。
  * -------------------------------------------------------------------- */
-uint8_t nand_dispatch_is_armed(void)
+BYTE nand_dispatch_is_armed(void)
 {
     return g_nand_dispatch_armed;
 }
@@ -218,12 +218,12 @@ uint8_t nand_dispatch_is_armed(void)
  *   实现要点：FC 填充 pass 靠它判断能否放下整条链（need ≤ free 才下发）。
  *         ch/ce/lun 由调用者保证在界内（唯一调用者 fc_poll_fill 调用前已断言）。
  * -------------------------------------------------------------------- */
-uint8_t nand_dispatch_lun_free(uint8_t ch, uint8_t ce, uint8_t lun)
+BYTE nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun)
 {
     /* 唯一调用者是 fc_poll_fill，且调用前已 ASSERT 过 ch/ce/lun（同源值）。
      * 保留防御会退化成静默活锁（越界 → 恒 0 → 该 LUN 永久挂起），断言停机更好定位。 */
     ASSERT((ch < CH_NUM) && (ce < CE_NUM) && (lun < LUN_NUM));
-    return (uint8_t)(NAND_DISPATCH_CHAIN_DEPTH - g_nand_dispatch_queues[ch][ce][lun].count);
+    return (NAND_DISPATCH_CHAIN_DEPTH - g_nand_dispatch_queues[ch][ce][lun].count);
 }
 
 /* ======================================================================
@@ -242,15 +242,15 @@ uint8_t nand_dispatch_lun_free(uint8_t ch, uint8_t ce, uint8_t lun)
  *   返回：NAND_RESULT_OK / INVALID_ARGUMENT（异步路径未放行）/ NOT_READY（剩余深度不足整批，无副作用）。
  *   实现要点：
  *     - 放行闩锁在此检查：单命令与整链共用本漏斗，避免两入口再分叉。
- *     - 空间原子检查用 (uint16_t)(count+queue->count) 无符号比较；
+ *     - 空间原子检查用 (count+queue->count) 无符号比较；
  *       count≤4、queue->count≤4，无溢出风险。
  *     - 逐槽 nand_dispatch_task_load() 到 tasks[(head+count+i)%DEPTH]；
  *       全部预加载完成后才提交 count（poll 不会看到半挂载的批）。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_dispatch_enqueue(const nand_dispatch_request_t *requests, uint8_t count)
+static nand_result_t nand_dispatch_enqueue(const nand_dispatch_request_t *requests, BYTE count)
 {
     nand_dispatch_lun_queue_t *queue;
-    uint8_t                    i;
+    BYTE                       i;
 
     /* 异步路径放行闩锁：单命令与整链两个入口共用同一道门，结构上不会再分叉。
      * 未放行是运行时状态（非调用者编程错误）→ 保留返回码，不转 ASSERT。 */
@@ -271,24 +271,24 @@ static nand_result_t nand_dispatch_enqueue(const nand_dispatch_request_t *reques
         ASSERT(requests[i].lun < LUN_NUM);
         ASSERT((requests[i].ch == requests[0U].ch) && (requests[i].ce == requests[0U].ce) &&
                (requests[i].lun == requests[0U].lun));
-        ASSERT((requests[i].cw_bitmap & ~((uint32_t)((1UL << CW_TOTAL_MAX) - 1UL))) == 0UL);
+        ASSERT((requests[i].cw_bitmap & ~(((1UL << CW_TOTAL_MAX) - 1UL))) == 0UL);
     }
 
     queue = &g_nand_dispatch_queues[requests[0U].ch][requests[0U].ce][requests[0U].lun];
 
     /* 原子性检查：剩余深度必须容纳整批 */
-    if ((uint16_t)(queue->count + count) > NAND_DISPATCH_CHAIN_DEPTH)
+    if ((queue->count + count) > NAND_DISPATCH_CHAIN_DEPTH)
     {
         return NAND_RESULT_NOT_READY;
     }
 
     for (i = 0U; i < count; i++)
     {
-        uint8_t slot = (uint8_t)((queue->head + queue->count + i) % NAND_DISPATCH_CHAIN_DEPTH);
+        BYTE slot = ((queue->head + queue->count + i) % NAND_DISPATCH_CHAIN_DEPTH);
         nand_dispatch_task_load(&queue->tasks[slot], &requests[i]);
     }
     /* 全部预加载后才提交 count：poll 不会看到半挂载的批 */
-    queue->count = (uint8_t)(queue->count + count);
+    queue->count = (queue->count + count);
     return NAND_RESULT_OK;
 }
 
@@ -311,7 +311,7 @@ nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request)
  *   参数：requests —— 命令数组；count —— 链长（1..NAND_DISPATCH_CHAIN_DEPTH）。
  *   返回：NAND_RESULT_OK / INVALID_ARGUMENT（异步路径未放行）/ NOT_READY（剩余深度不足整链，无副作用）。
  * -------------------------------------------------------------------- */
-nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, uint8_t count)
+nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, BYTE count)
 {
     return nand_dispatch_enqueue(requests, count);
 }
@@ -371,7 +371,7 @@ typedef struct
     nand_dispatch_completion_t *completion; /* 完成输出目标 */
     nand_dispatch_lun_queue_t  *queue;
     nand_fc_completion_t        nand_completion; /* 读前必写（active==0 分支依赖同轮先写） */
-    uint8_t                     result;
+    BYTE                        result;
 } nand_dispatch_lun_ctx_t;
 
 /* --------------------------------------------------------------------
@@ -386,9 +386,9 @@ typedef struct
  * -------------------------------------------------------------------- */
 static nand_dispatch_start_outcome_t nand_dispatch_task_fc_start(nand_dispatch_lun_queue_t *queue,
                                                                  nand_dispatch_task_t      *task,
-                                                                 uint8_t                   *fc_result)
+                                                                 BYTE                      *fc_result)
 {
-    uint8_t result;
+    BYTE result;
 
     result        = nand_fc_start(&task->transaction, task->operation, &task->request);
     task->started = 1U;
@@ -415,7 +415,7 @@ static nand_dispatch_start_outcome_t nand_dispatch_task_fc_start(nand_dispatch_l
  * -------------------------------------------------------------------- */
 static nand_dispatch_start_outcome_t nand_dispatch_task_start(nand_dispatch_lun_queue_t *queue,
                                                               nand_dispatch_task_t      *task,
-                                                              uint8_t                   *fc_result)
+                                                              BYTE                      *fc_result)
 {
     g_nand_dispatch_req_table[task->operation](task);
 
@@ -424,7 +424,7 @@ static nand_dispatch_start_outcome_t nand_dispatch_task_start(nand_dispatch_lun_
               (void *)task->request.data,
               task->request.data_length,
               task->request.column,
-              (unsigned long)task->request.row[0]);
+              task->request.row[0]);
 
     return nand_dispatch_task_fc_start(queue, task, fc_result);
 }
@@ -445,9 +445,9 @@ static nand_dispatch_start_outcome_t nand_dispatch_task_start(nand_dispatch_lun_
 static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lun_ctx_t *ctx)
 {
     nand_dispatch_task_t *task   = &ctx->queue->tasks[ctx->queue->head];
-    uint16_t              min_us = g_nand_operation_map[task->operation].min_busy_us;
-    uint8_t               pair_op;
-    uint8_t               result;
+    WORD                  min_us = g_nand_operation_map[task->operation].min_busy_us;
+    BYTE                  pair_op;
+    BYTE                  result;
 
     /* ISSUE 段已完成但失败（如起始 70h 状态 FAIL）⇒ 别再发 WAIT/取数。
      * 否则后续逐 CW 取数可能把已标失败的状态覆盖成成功。 */
@@ -497,7 +497,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_issued_advance(nand_dispatch_lu
 static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx_t *ctx)
 {
     nand_dispatch_task_t *task = &ctx->queue->tasks[ctx->queue->head];
-    uint8_t               result;
+    BYTE                  result;
 
     if (task->started == 0U)
     {
@@ -550,7 +550,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_drive(nand_dispatch_lun_ctx
  *         · OP_READ_PAGE_WAIT（LUN>1 的 Phase V：LOAD ISSUE 发完后由 WAIT 收尾）
  *     - fetch：从页缓冲按列地址取单个 CW；每完成一个推进一个置位。
  * -------------------------------------------------------------------- */
-static uint8_t nand_dispatch_is_load_complete_op(uint8_t operation)
+static BYTE nand_dispatch_is_load_complete_op(BYTE operation)
 {
     return ((operation == OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT) ||
             (operation == OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT) ||
@@ -559,7 +559,7 @@ static uint8_t nand_dispatch_is_load_complete_op(uint8_t operation)
                : 0U;
 }
 
-static uint8_t nand_dispatch_is_fetch_op(uint8_t operation)
+static BYTE nand_dispatch_is_fetch_op(BYTE operation)
 {
     return ((operation == OP_RANDOM_DATA_READ) || (operation == OP_RANDOM_DATA_READ_MULTI_PLANE)) ? 1U : 0U;
 }
@@ -591,11 +591,11 @@ static uint8_t nand_dispatch_is_fetch_op(uint8_t operation)
 static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_ctx_t *ctx)
 {
     nand_dispatch_task_t *task   = &ctx->queue->tasks[ctx->queue->head];
-    uint8_t               result = ctx->result;
+    BYTE                  result = ctx->result;
 
     for (;;)
     {
-        uint8_t n;
+        BYTE n;
 
         nand_dispatch_task_complete(task, result, &ctx->nand_completion);
         if (result != NAND_RESULT_OK)
@@ -616,7 +616,7 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
         else if (nand_dispatch_is_fetch_op(task->operation) != 0U)
         {
             /* 取数：推进到下一个置位，链尾则结束 */
-            n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(task->cw_index + 1U));
+            n = nand_dispatch_cw_next(task->cw_bitmap, (task->cw_index + 1U));
             if (n == CW_TOTAL_MAX)
             {
                 break;
@@ -625,7 +625,7 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
         }
         else if (((task->operation == OP_NORMAL_READ_PAGE_WITH_DATA_OUT) ||
                   (task->operation == OP_OTP_DATA_READ)) &&
-                 ((n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(task->cw_index + 1U))) != CW_TOTAL_MAX))
+                 ((n = nand_dispatch_cw_next(task->cw_bitmap, (task->cw_index + 1U))) != CW_TOTAL_MAX))
         {
             /* 旧语义：最低位那个 CW 已由加载 op 的 DATA_OUT 取回，其余逐 CW 随机读 */
             task->cw_index = n;
@@ -635,14 +635,18 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
             break;
         }
 
-        task->operation = (task->plane_count > 0U) ? (uint8_t)OP_RANDOM_DATA_READ_MULTI_PLANE : (uint8_t)OP_RANDOM_DATA_READ;
+        task->operation = (task->plane_count > 0U) ? OP_RANDOM_DATA_READ_MULTI_PLANE : OP_RANDOM_DATA_READ;
         task->started   = 1U; /* 复用 start 路径但标记已启动 */
         {
-            uint8_t  plane     = (uint8_t)(task->cw_index / CW_NUM);
-            uint8_t  cw        = (uint8_t)(task->cw_index % CW_NUM);
-            uint16_t cw_column = (uint16_t)(cw * CW_SIZE);
+            BYTE plane     = (task->cw_index / CW_NUM);
+            BYTE cw        = (task->cw_index % CW_NUM);
+            WORD cw_column = (cw * CW_SIZE);
 
-            task->request = (nand_fc_request_t){.column = cw_column, .row = {paa_to_nand_row(task->plane_paa[plane])}, .data = task->cw_buffers[task->cw_index], .data_length = (uint16_t)CW_SIZE};
+            memset(&task->request, 0, sizeof(task->request));
+            task->request.column      = cw_column;
+            task->request.row[0]      = paa_to_nand_row(task->plane_paa[plane]);
+            task->request.data        = task->cw_buffers[task->cw_index];
+            task->request.data_length = CW_SIZE;
         }
         result = nand_fc_start(&task->transaction, task->operation, &task->request);
         if (result == NAND_RESULT_NOT_READY)
@@ -672,16 +676,16 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
  * -------------------------------------------------------------------- */
 static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
 {
-    uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
-    uint8_t  n;
+    BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
+    BYTE  n;
 
     if ((task->operation == OP_READ_PAGE_CACHE_SEQ) || (task->operation == OP_READ_PAGE_CACHE_RANDOM) ||
         (task->operation == OP_READ_PAGE_CACHE_LAST))
     {
         for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
-             n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
+             n = nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
         {
-            uint8_t cw_num = (uint8_t)(n % CW_NUM);
+            BYTE cw_num = (n % CW_NUM);
             memcpy(task->cw_buffers[n], &page_buffer[cw_num * CW_SIZE], CW_SIZE);
         }
     }
@@ -689,11 +693,11 @@ static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
     if (task->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
     {
         for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
-             n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
+             n = nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
         {
-            uint8_t  plane  = (uint8_t)(n / CW_NUM);
-            uint8_t  cw_num = (uint8_t)(n % CW_NUM);
-            uint8_t *src    = &page_buffer[plane * PAGE_SIZE + cw_num * CW_SIZE];
+            BYTE  plane  = (n / CW_NUM);
+            BYTE  cw_num = (n % CW_NUM);
+            BYTE *src    = &page_buffer[plane * PAGE_SIZE + cw_num * CW_SIZE];
             memcpy(task->cw_buffers[n], src, CW_SIZE);
         }
     }
@@ -747,7 +751,7 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_step(nand_dispatch_lun_ctx_
 
     /* ── 队头命令完成：回填 completion、出队、复位相位 ── */
     *ctx->completion = task->completion;
-    ctx->queue->head = (uint8_t)((ctx->queue->head + 1U) % NAND_DISPATCH_CHAIN_DEPTH);
+    ctx->queue->head = ((ctx->queue->head + 1U) % NAND_DISPATCH_CHAIN_DEPTH);
     ctx->queue->count--;
     ctx->queue->phase = LUN_PHASE_IDLE;
     return NAND_DISPATCH_LUN_DONE;
@@ -768,13 +772,13 @@ static nand_dispatch_lun_outcome_t nand_dispatch_lun_step(nand_dispatch_lun_ctx_
  *     - 命令执行状态不体现在返回值里：它已由 completion.cw_status 承载
  *       （completion handler 把 NAND_RESULT_* 映射成 FC_CW_STATUS_*）。
  * -------------------------------------------------------------------- */
-uint8_t nand_dispatch_poll(nand_dispatch_sink_t sink, void *ctx)
+BYTE nand_dispatch_poll(nand_dispatch_sink_t sink, void *ctx)
 {
     nand_dispatch_completion_t completion;
-    uint8_t                    delivered = 0U;
-    uint8_t                    channel;
-    uint8_t                    ce;
-    uint8_t                    lun_idx;
+    BYTE                       delivered = 0U;
+    BYTE                       channel;
+    BYTE                       ce;
+    BYTE                       lun_idx;
 
     /* 回调前置条件由调用者保证（fc.c 轮询路径恒传有效 sink） */
     ASSERT(sink != NULL);
@@ -795,10 +799,10 @@ uint8_t nand_dispatch_poll(nand_dispatch_sink_t sink, void *ctx)
                 }
 
                 /* completion 只在 lun_step 返回 DONE 时被写入，此处复用同一槽 */
-                lun_ctx.completion      = &completion;
-                lun_ctx.queue           = queue;
-                lun_ctx.nand_completion = (nand_fc_completion_t){0};
-                lun_ctx.result          = NAND_RESULT_OK;
+                lun_ctx.completion = &completion;
+                lun_ctx.queue      = queue;
+                memset(&lun_ctx.nand_completion, 0, sizeof(lun_ctx.nand_completion));
+                lun_ctx.result = NAND_RESULT_OK;
 
                 out = nand_dispatch_lun_step(&lun_ctx);
                 if (out == NAND_DISPATCH_LUN_DONE)

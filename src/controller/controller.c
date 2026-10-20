@@ -6,8 +6,8 @@
 #include <stddef.h>
 
 /* 外部：request.c — 按实例边界切 run / 提交子请求 */
-int      ssd_request_split(ssd_controller_t *controller, ssd_request_t *request);
-uint64_t ssd_controller_run_end(ssd_controller_t *controller, uint64_t lba, uint64_t lba_limit);
+ssd_status_t ssd_request_split(ssd_controller_t *controller, ssd_request_t *request);
+QWORD        ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWORD lba_limit);
 
 /*
  * ssd_controller_route - 按全局 LBA 路由到对应 FTL 实例
@@ -17,14 +17,14 @@ uint64_t ssd_controller_run_end(ssd_controller_t *controller, uint64_t lba, uint
  * 非 static：request.c 拆分循环共用（前向声明在 request.c），不暴露进公共头。
  *
  * @param controller Controller 上下文（调用者保证非 NULL）
- * @param lba        Host 全局 LBA（uint64_t）
+ * @param lba        Host 全局 LBA（QWORD）
  * @return 路由到的 FTL 实例指针
  */
-ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, uint64_t lba)
+ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba)
 {
-    uint8_t ch;
-    uint8_t ce;
-    uint8_t lun;
+    BYTE ch;
+    BYTE ce;
+    BYTE lun;
 
     /* 唯一调用者 ssd_controller_submit / ssd_request_split 均已判过 controller */
     ASSERT(controller != NULL);
@@ -41,12 +41,12 @@ ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, uint64_t
     return controller->ftl[ch][ce][lun];
 }
 
-int ssd_controller_init(ssd_controller_t *controller,
-                        ftl_context_t    *ftl[CH_NUM][CE_NUM][LUN_NUM])
+ssd_status_t ssd_controller_init(ssd_controller_t *controller,
+                                 ftl_context_t    *ftl[CH_NUM][CE_NUM][LUN_NUM])
 {
-    uint8_t ch;
-    uint8_t ce;
-    uint8_t lun;
+    BYTE ch;
+    BYTE ce;
+    BYTE lun;
 
     if ((controller == NULL) || (ftl == NULL))
     {
@@ -87,7 +87,7 @@ int ssd_controller_init(ssd_controller_t *controller,
     return SSD_STATUS_OK;
 }
 
-uint8_t ssd_controller_is_complete(const ssd_request_t *request)
+BYTE ssd_controller_is_complete(const ssd_request_t *request)
 {
     if (request == NULL)
     {
@@ -96,9 +96,9 @@ uint8_t ssd_controller_is_complete(const ssd_request_t *request)
     return request->complete_flag;
 }
 
-bool ssd_controller_lba_range_ok(uint64_t lba, uint32_t count)
+bool ssd_controller_lba_range_ok(QWORD lba, DWORD count)
 {
-    /* lba 与 count 的上界之和 < 2^33，uint64 加法不会回绕；先判起点再判终点。 */
+    /* lba 与 count 的上界之和 < 2^33，`QWORD` 加法不会回绕；先判起点再判终点。 */
     if ((count == 0U) || (lba >= FTL_LBA_MAX))
     {
         return false;
@@ -107,9 +107,9 @@ bool ssd_controller_lba_range_ok(uint64_t lba, uint32_t count)
     return (lba + count) <= FTL_LBA_MAX;
 }
 
-int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
+ssd_status_t ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
 {
-    int ret;
+    ssd_status_t ret;
 
     if ((controller == NULL) || (request == NULL) || (controller->state != SSD_CONTROLLER_READY))
     {
@@ -139,11 +139,13 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
         case SSD_REQUEST_WRITE:
             /* 缓冲容量校验：block_count 个映射单元 × 512B 必须不超过调用者给的
              * buffer_size（CW 级映射下 1 个 LBA = 1 个 CW = 512B 扇区，不是 2KB 页）。
-             * 真实隐患：wr 0 64 会写爆 CLI 的 g_wr_buf。 */
+             * 真实隐患：wr 0 64 会写爆 CLI 的 g_wr_buf。
+             * ⚠ 保留 `(size_t)`：先加宽再相乘，避免 32 位运算溢出后绕过本检查
+             *   （H44 的「刻意加宽避免溢出」例外）。 */
             if (request->buffer_size < ((size_t)request->block_count * FTL_IU_BYTES))
             {
                 LOGE("[CTRL] buffer too small count=%lu need=%lu have=%lu\r\n",
-                     (unsigned long)request->block_count,
+                     request->block_count,
                      (unsigned long)((size_t)request->block_count * FTL_IU_BYTES),
                      (unsigned long)request->buffer_size);
                 request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
@@ -155,7 +157,7 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
             ret = ssd_request_split(controller, request);
             if (ret != SSD_STATUS_OK)
             {
-                request->completion_status = (ssd_status_t)ret;
+                request->completion_status = ret;
                 request->complete_flag     = 1U;
                 return ret;
             }
@@ -163,18 +165,18 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
 
         case SSD_REQUEST_TRIM:
         {
-            uint64_t lba = request->start_lba;
-            uint64_t end = request->start_lba + request->block_count;
+            QWORD lba = request->start_lba;
+            QWORD end = request->start_lba + request->block_count;
 
             /* TRIM 同步完成（无异步回调）；跨实例时逐 run 提交 */
             while (lba < end)
             {
-                uint64_t       run_end = ssd_controller_run_end(controller, lba, end);
+                QWORD          run_end = ssd_controller_run_end(controller, lba, end);
                 ftl_context_t *tftl    = ssd_controller_route(controller, lba);
 
                 /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
                 ASSERT(tftl != NULL);
-                ftl_trim(tftl, lba, (uint32_t)(run_end - lba));
+                ftl_trim(tftl, lba, (run_end - lba));
                 lba = run_end;
             }
 
@@ -189,9 +191,9 @@ int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
              * 标志可直接同步置 1，无需走 pending 异步。
              * HIL 只调 FTL 对外接口，不再伸手进 FTL 内部原语（对齐主流）。 */
             {
-                uint8_t fch;
-                uint8_t fce;
-                uint8_t flun;
+                BYTE fch;
+                BYTE fce;
+                BYTE flun;
 
                 for (fch = 0U; fch < CH_NUM; fch++)
                 {

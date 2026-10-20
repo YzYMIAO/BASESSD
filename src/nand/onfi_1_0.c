@@ -907,17 +907,17 @@ const nand_operation_map_t g_nand_operation_map[OP_COUNT] =
  *         onfi_1_0.h 的 NAND_ONFI_PARAM_OFF_*；多字节一律小端；
  *         model 串按器件约定去尾部空格填充（解成可比的 C 串）。
  * -------------------------------------------------------------------- */
-uint8_t nand_onfi_parameter_page_decode(const uint8_t page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_t *info)
+BYTE nand_onfi_parameter_page_decode(const BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_t *info)
 {
-    uint8_t i;
-    uint8_t signature_ok;
+    BYTE i;
+    BYTE signature_ok;
 
     for (i = 0U; i < 4U; i++)
     {
         info->signature[i] = page[NAND_ONFI_PARAM_OFF_SIGNATURE + i];
     }
-    signature_ok = (uint8_t)((info->signature[0] == 0x4FU) && (info->signature[1] == 0x4EU) &&
-                             (info->signature[2] == 0x46U) && (info->signature[3] == 0x49U));
+    signature_ok = ((info->signature[0] == 0x4FU) && (info->signature[1] == 0x4EU) &&
+                    (info->signature[2] == 0x46U) && (info->signature[3] == 0x49U));
 
     info->revision = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_REVISION]);
     info->features = nand_onfi_le16(&page[NAND_ONFI_PARAM_OFF_FEATURES]);
@@ -943,8 +943,8 @@ uint8_t nand_onfi_parameter_page_decode(const uint8_t page[NAND_ONFI_PARAM_PAGE_
     info->blocks_per_unit              = nand_onfi_le32(&page[NAND_ONFI_PARAM_OFF_BLOCKS_PER_UNIT]);
     info->logical_units                = page[NAND_ONFI_PARAM_OFF_LOGICAL_UNITS];
     info->address_cycles               = page[NAND_ONFI_PARAM_OFF_ADDRESS_CYCLES];
-    info->column_cycles                = (uint8_t)(info->address_cycles >> 4U);   /* bits 7:4 */
-    info->row_cycles                   = (uint8_t)(info->address_cycles & 0x0FU); /* bits 3:0 */
+    info->column_cycles                = (info->address_cycles >> 4U);   /* bits 7:4 */
+    info->row_cycles                   = (info->address_cycles & 0x0FU); /* bits 3:0 */
     info->bits_per_cell                = page[NAND_ONFI_PARAM_OFF_BITS_PER_CELL];
     info->programs_per_page            = page[NAND_ONFI_PARAM_OFF_PROGRAMS_PER_PAGE];
     info->ecc_bits                     = page[NAND_ONFI_PARAM_OFF_ECC_BITS];

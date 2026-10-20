@@ -68,13 +68,13 @@
 /* 全局主机 LBA 上限 = 每实例数据块 × 每块 CW × 设备维度数
  * （每 (ch,ce,lun) 是独立 FTL 实例；DIM=1 时 3432×256 = 878,592 = 429 MiB）。 */
 #define FTL_LBA_MAX \
-    ((uint64_t)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * FTL_DIM_TOTAL)
+    ((QWORD)FTL_HOST_DATA_BLOCKS_PER_INSTANCE * PAGES_PER_BLOCK * CW_NUM * FTL_DIM_TOTAL)
 
 /* 主机可见容量（字节）：给日志/文档用，和 USB MSC 的 READ CAPACITY 同源。 */
-#define FTL_HOST_CAPACITY_BYTES ((uint64_t)FTL_LBA_MAX * FTL_IU_BYTES)
+#define FTL_HOST_CAPACITY_BYTES ((QWORD)FTL_LBA_MAX * FTL_IU_BYTES)
 
 /* 主机范围必须落在共享 cache 的键空间内（C9：同一语义只允许一套上限）。 */
-_Static_assert((uint64_t)FTL_LBA_MAX <= L2P_GLOBAL_LBA_MAX,
+_Static_assert((QWORD)FTL_LBA_MAX <= L2P_GLOBAL_LBA_MAX,
                "FTL_LBA_MAX 超出共享 cache 的全局 LBA 上限");
 
 /* ── FTL 主上下文 ── */
@@ -122,7 +122,7 @@ typedef struct ftl_context
     checkpoint_handle_t *checkpoint_handle;
 
     /* 统计 */
-    uint32_t total_writes;
+    DWORD total_writes;
 
     /* 后台写闸门（`bbt --erase` 置位）。
      * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的
@@ -130,13 +130,13 @@ typedef struct ftl_context
      * 集：checkpoint / journal / 元数据目录 / bbt / GC 全在那里），杜绝把旧 RAM 状态
      * 写回擦净的芯片；Phase 1/2/2.5 照常（NAND 泵与 host IO 不受影响）。
      * ⚠ 只由诊断命令置位，且**无清除路径**——清它只能靠复位。 */
-    uint8_t bg_suspend;
+    BYTE bg_suspend;
 
     /* Directory 加载失败（Anchor 池无有效 record / 读失败）。
      * ftl_init 仍建空 Directory（格式化/首次启动路径需要它），但**不能静默继续**：
      * 空 Directory 会让旧 region 映射整体丢失（RISK-BOOT-09）。ftl_boot_recovery 在
      * 介质存在有效 Checkpoint 时据此拒绝启动；无 Checkpoint（空片）才放行。 */
-    uint8_t md_load_failed;
+    BYTE md_load_failed;
 
     /* L2P 加载背压信号（per-instance）。
      * ftl_issue_subop 因 **L2P region 未就绪**（异步加载在飞，l2p_cache_read 返
@@ -144,7 +144,7 @@ typedef struct ftl_context
      * 加载在飞 = 有进展，不是"下发不动"。否则一次正常的 region 加载会吃掉 8 轮预算
      * （FTL_DRAIN_STALL_MAX）里的一轮，随机读满盘时把组误判成卡死报 IO_ERROR。
      * 真卡死（命令丢失）由 NAND 层 wait/jump 超时兜底，不靠这个计数。 */
-    uint8_t l2p_defer;
+    BYTE l2p_defer;
 
     /* 时间预算后台调度器（per-instance）。
      * 任务表（10 项：6 must-run + 4 预算）由 ftl_bg_init 从 `ftl/bg_wiring.c` 的静态表
@@ -164,7 +164,7 @@ typedef struct ftl_context
      * 而恢复读内部是**整页读**、从 CW0 起连续拷出。故恢复结果先落本页
      * 镜像，再按各 CW 的真实偏移搬回 caller 缓冲（见 rr_settle_plane）。
      * 指针，由 storage 提供；必须是常驻存储（不能是栈）。 */
-    uint8_t *rr_page_scratch;
+    BYTE *rr_page_scratch;
 } ftl_context_t;
 
 /*
@@ -183,7 +183,7 @@ typedef struct
     checkpoint_handle_t  *checkpoint_handle;
     migrate_handle_t     *migrate;         /* Phase 1.5：挂载指针（不减少总 RAM） */
     wbuf_handle_t        *wbuf;            /* Phase 1.5 */
-    uint8_t              *rr_page_scratch; /* Phase 1.5：FTL_READ_USER_SIZE */
+    BYTE                 *rr_page_scratch; /* Phase 1.5：FTL_READ_USER_SIZE */
 } ftl_storage_t;
 
 /* ── 接口 ── */
@@ -271,7 +271,7 @@ void ftl_bg_service(ftl_context_t *ftl);
  *   inflight==0 ⇒ IDLE；pending > FTL_PENDING_MAX/2 或 queued!=0 ⇒ BUSY；否则 NORMAL。
  * 返回 BG_LEVEL_IDLE / BG_LEVEL_NORMAL / BG_LEVEL_BUSY（bg_scheduler.h）。
  */
-uint8_t ftl_bg_level_select(const ftl_context_t *ftl);
+BYTE ftl_bg_level_select(const ftl_context_t *ftl);
 
 /*
  * ftl_submit_read - 非阻塞提交读请求（长度任意）
@@ -317,9 +317,9 @@ void ftl_flush(ftl_context_t *ftl);
  * ftl_trim - 取消 [lba, lba+count) 的 LBA 映射（非阻塞、同步完成）
  *
  * @param ftl   FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
- * @param lba   起始逻辑地址（uint64_t）
+ * @param lba   起始逻辑地址（QWORD）
  * @param count 连续 LBA 数（0 视作 1，兼容单 LBA 调用）
  */
-void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count);
+void ftl_trim(ftl_context_t *ftl, QWORD lba, DWORD count);
 
 #endif /* FTL_SERVICE_H */

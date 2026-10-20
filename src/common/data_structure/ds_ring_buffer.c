@@ -8,6 +8,8 @@
 
 #include "ds_ring_buffer.h"
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 struct ring_buffer_conf
 {
     size_t capacity;
@@ -19,9 +21,9 @@ struct ring_buffer_conf
 
 struct ring_buffer
 {
-    size_t    size, capacity;
-    size_t    head, tail;
-    uint64_t *buf;
+    size_t size, capacity;
+    size_t head, tail;
+    QWORD *buf;
 
     void *(*mem_alloc)(size_t size);
     void *(*mem_calloc)(size_t blocks, size_t size);
@@ -59,7 +61,7 @@ ds_Stat cc_rbuf_conf_new(CC_RbufConf *rconf, CC_Rbuf **rbuf)
         return DS_ERR_ALLOC;
     }
 
-    if (!(ringbuf->buf = rconf->mem_calloc(rconf->capacity, sizeof(uint64_t))))
+    if (!(ringbuf->buf = rconf->mem_calloc(rconf->capacity, sizeof(QWORD))))
     {
         rconf->mem_free(ringbuf);
         return DS_ERR_ALLOC;
@@ -106,7 +108,7 @@ size_t cc_rbuf_capacity(CC_Rbuf *rbuf)
     return rbuf->capacity;
 }
 
-void cc_rbuf_enqueue(CC_Rbuf *rbuf, uint64_t item)
+void cc_rbuf_enqueue(CC_Rbuf *rbuf, QWORD item)
 {
     if (rbuf->size == rbuf->capacity)
     {
@@ -123,7 +125,7 @@ void cc_rbuf_enqueue(CC_Rbuf *rbuf, uint64_t item)
     rbuf->head = (rbuf->head + 1) % rbuf->capacity;
 }
 
-ds_Stat cc_rbuf_dequeue(CC_Rbuf *rbuf, uint64_t *out)
+ds_Stat cc_rbuf_dequeue(CC_Rbuf *rbuf, QWORD *out)
 {
     if (cc_rbuf_is_empty(rbuf))
     {
@@ -137,7 +139,7 @@ ds_Stat cc_rbuf_dequeue(CC_Rbuf *rbuf, uint64_t *out)
     return DS_OK;
 }
 
-uint64_t cc_rbuf_peek(CC_Rbuf *rbuf, int index)
+QWORD cc_rbuf_peek(CC_Rbuf *rbuf, int index)
 {
     return rbuf->buf[index];
 }

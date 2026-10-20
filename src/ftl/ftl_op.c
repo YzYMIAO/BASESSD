@@ -60,7 +60,7 @@ static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
 
 ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
 {
-    uint16_t cmd_id = ftl_cmd_id(cmd);
+    WORD cmd_id = ftl_cmd_id(cmd);
 
     /* ① ID 上命令（FC 只做原样拷贝，完成时回传到 completion.op_tag）。 */
     cmd->op_tag = op;
@@ -93,7 +93,7 @@ ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
 /* ── 3. 派发 ── */
 
 /* 派发深度（见 ftl_op_in_dispatch）。单线程顺序主循环 ⇒ 普通变量即可，无需原子。 */
-static uint8_t g_dispatch_depth = 0U;
+static BYTE g_dispatch_depth = 0U;
 
 bool ftl_op_in_dispatch(void)
 {
@@ -102,28 +102,25 @@ bool ftl_op_in_dispatch(void)
 
 void ftl_op_dispatch(const fc_command_status_t *completion)
 {
-    uint8_t              op = (uint8_t)completion->op_tag;
-    ftl_op_callback_fn_t fn = (op < (uint8_t)FTL_OP_COUNT) ? g_op_callbacks[op] : NULL;
+    BYTE                 op = completion->op_tag;
+    ftl_op_callback_fn_t fn = (op < FTL_OP_COUNT) ? g_op_callbacks[op] : NULL;
 
     /* command_id 由 NAND 从本命令回填；公共壳已断言 ID 在池内。 */
-    fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
+    fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
 
     if (fn == NULL)
     {
         /* 孤儿完成：tag 越界（≥ FTL_OP_COUNT）或 FTL_OP_NONE。
          * 不清旁表则可能泄漏一个槽位，故一并 remove（幂等）。 */
-        LOGE("[FTL] orphan completion cmd=%u op=%u status=0x%02x\r\n",
-             (unsigned)completion->command_id,
-             (unsigned)op,
-             completion->status);
-        completion_table_remove((uint16_t)completion->command_id);
+        LOGE("[FTL] orphan completion cmd=%u op=%u status=0x%02x\r\n", (unsigned)completion->command_id, (unsigned)op, completion->status);
+        completion_table_remove(completion->command_id);
         (void)fc_command_release(cmd);
         return;
     }
 
     /* 先摘链再回调（同 completion_table_drain 的既有约定）——服务函数内部可能
      * 重入登记/释放表项，先摘可避免它在自己的回调里踩到本项。 */
-    void *ctx = completion_table_take((uint16_t)completion->command_id);
+    void *ctx = completion_table_take(completion->command_id);
 
     /* 实例归属按**命令自身**的 ch/ce/lun 解析（不是"谁在 drain"）：单线程顺序主循环下
      * "实例 A 的 drain 遇到实例 B 的 completion"是必然事件。
@@ -131,9 +128,9 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
      * 先 completion_table_init 清一次、再 set_route），因为 boot 期 full metadata rebuild 就会经
      * l2p_cache_read_sync 抽完成表。故此处解析出 NULL 只可能是编程错误，
      * 不再是"开机早期"的正常状态。 */
-    struct ftl_context *ftl = completion_table_route((uint8_t)cmd->config.ch,
-                                                     (uint8_t)cmd->config.ce,
-                                                     (uint8_t)cmd->config.lun);
+    struct ftl_context *ftl = completion_table_route(cmd->config.ch,
+                                                     cmd->config.ce,
+                                                     cmd->config.lun);
 
     /* 深度计数包住服务函数（含它内部的嵌套派发）：ftl_op_in_dispatch() 据此判断
      * "现在不能同步等待"。溢出（255 层嵌套）不可能发生——每层都要消费一条命令。 */
@@ -156,10 +153,8 @@ static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_sta
      * 早已失效，绝不能再解引用；但命令槽位仍必须回收，否则命令池泄漏。 */
     if (ctx == NULL)
     {
-        LOGE("[FTL] late sync completion cmd=%u status=0x%02x — released\r\n",
-             (unsigned)completion->command_id,
-             completion->status);
-        (void)fc_command_release(fc_command_id_to_command((uint16_t)completion->command_id));
+        LOGE("[FTL] late sync completion cmd=%u status=0x%02x — released\r\n", (unsigned)completion->command_id, completion->status);
+        (void)fc_command_release(fc_command_id_to_command(completion->command_id));
         return;
     }
 

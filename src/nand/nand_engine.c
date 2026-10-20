@@ -28,6 +28,7 @@
 #include "onfi_1_0.h"
 
 #include <stddef.h>
+#include <string.h>
 
 #define NAND_ENGINE_MAX_UOPS 64U
 
@@ -43,12 +44,12 @@
 nand_result_t nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion)
 {
     /* 引擎上下文的 backend/request/completion 三指针随 state 固定，先绑定再 start */
-    nand_engine_state_t state = {
-        .backend    = backend,
-        .request    = request,
-        .completion = completion,
-    };
-    uint8_t result;
+    nand_engine_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.backend    = backend;
+    state.request    = request;
+    state.completion = completion;
+    BYTE result;
 
     result = nand_engine_start(&state, uops, timing);
     while (result == NAND_RESULT_NOT_READY)
@@ -108,7 +109,7 @@ nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uo
  *   实现要点：WAIT_READY 与 JUMP_IF_NOT_READY 各持一组状态、走同一入口；
  *         失败时清 active，调用方直接返回。
  * -------------------------------------------------------------------- */
-static uint8_t nand_engine_wait_latch(nand_engine_state_t *state, nand_engine_wait_t *w)
+static BYTE nand_engine_wait_latch(nand_engine_state_t *state, nand_engine_wait_t *w)
 {
     if (w->started != 0U)
     {
@@ -132,7 +133,7 @@ static uint8_t nand_engine_wait_latch(nand_engine_state_t *state, nand_engine_wa
  *   实现要点：DWT 周期预算与轮询计数任一超限即判超时（DWT 防计数单位误解，
  *         计数防 DWT 不可用/漂移）；polls 饱和递增防回绕。
  * -------------------------------------------------------------------- */
-static uint8_t nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wait_t *w, const char *op_name)
+static BYTE nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wait_t *w, const char *op_name)
 {
     if (w->polls < UINT16_MAX)
     {
@@ -163,7 +164,7 @@ static uint8_t nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_
  * -------------------------------------------------------------------- */
 static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
 {
-    uint8_t type = state->uops[state->uop_index].type;
+    BYTE type = state->uops[state->uop_index].type;
 
     if ((type == NAND_UOP_DATA_IN) || (type == NAND_UOP_DATA_OUT) || (type == NAND_UOP_WAIT_READY) ||
         (type == NAND_UOP_CHECK_FAIL))
@@ -197,7 +198,7 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
 {
     const nand_uop_t  *uop;
     nand_uop_handler_t handler;
-    uint8_t            result;
+    BYTE               result;
 
     /* 前置条件由调用者保证（见 nand_engine.h）：active==0 后不得再调；游标字段由
      * nand_engine_start 填好。nand_fc_step 已先判 active，nand_engine_execute 的
@@ -249,7 +250,7 @@ nand_result_t nand_engine_step(nand_engine_state_t *state)
             }
 
             /* 未超时：回跳 operand 步，重执行 70h 轮询序列（状态读→延时→再读） */
-            state->uop_index -= (uint16_t)uop->operand;
+            state->uop_index -= uop->operand;
             return NAND_RESULT_NOT_READY;
         }
 

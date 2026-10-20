@@ -5603,6 +5603,41 @@ device formation 时从 surfaced capacity 扣除（`docs/reference/pages/spdk_ft
 
 ---
 
+## v0.85 — 返回值状态码统一为非负（H46）
+
+**日期**：2026-10-20
+
+**起因**：用户要求「本仓所有返回值状态位改为无符号值，不用负值」。
+
+**改动**：
+- `ftl_status_t`：0/1/2/3（原 0/-1/-2/-3）。
+- `ssd_status_t`：0..4（原 0/-1..-4）。
+- `fc_status_t`：0..7（原 0/-1..-7）。
+- `boot_policy_status_t`：0..6。
+- 5 个步进枚举只把原负值成员改为下一个未用正数，**保持已有 0 语义不重排**：
+  `MD_COMPACT_FAILED=3`、`MD_ANCHOR_FAILED=2`、`CP_FLUSH_FAILED=2`、
+  `JRN_TRUNC_NO_TRUNCATE=2`、`RR_PLANE_WAIT=2`。
+- `ssd_controller_init/submit`、`ssd_request_split`、`ssd_ftl_boot` 的返回类型由
+  `int` 改为对应状态枚举；`ssd_platform_register` 的 `-1` 改为 `FUNC_STATUS_ERROR`。
+- 第二轮（用户要求「非第三方代码同一风格」）：
+  - `uart_log_write` / `log_write` / `log_vprintf` / `log_printf` → `uint32_t`，
+    错误用 `UART_LOG_INVALID` / `LOG_WRITE_INVALID`（`UINT32_MAX`）显式哨兵；
+  - `uart_log_flush` / `log_flush` / `usart_port_tx_dma_start` → `bool`；
+  - `fc_bch_decode` → `bool` + `*out_nerr`（原「错误数 or -1」）；BCH 内部
+    `compute_error_locator_polynomial` / `build_gf_tables` / `build_deg2_base` 同步；
+  - CLI 数值解析 → `bool`；tokenizer → `uint32_t` + `UART_CLI_ARGC_INVALID`；
+    `uart_cli_log` 的 `-1` → `FUNC_STATUS_ERROR`；
+  - `strStr` / `canCompleteCircuit` → `uint32_t` + `UINT32_MAX`。
+  - 明确例外：newlib `_write()`（libc ABI 要求 int/-1）、比较器（排序契约）、
+    BCH `deg(0)` 与局部下标算术、`third_party/` / CMSIS/HAL / munit /
+    `src/platform/stm32h7r3/`（未构建的备用平台）。
+- 全仓无 `status < 0` 类判据（已核对）。
+
+**验证**：`make all` / `make release` / `make tests UT=FC` 零新告警；debug DWARF 已核对
+`FTL_ERROR=1 / FTL_AGAIN=2 / FTL_TIMEOUT=3`；UT=FTL 仍因冻结测试源编不过（RISK-MD-03）。
+
+---
+
 ## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
 
 当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（9）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。

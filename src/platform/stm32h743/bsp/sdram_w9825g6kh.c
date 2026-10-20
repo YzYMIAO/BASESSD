@@ -11,7 +11,7 @@ SDRAM_HandleTypeDef g_sdram_handle; /* SRAM句柄 */
  * @param       无
  * @retval      无
  */
-uint8_t sdram_init(void)
+BYTE sdram_init(void)
 {
     FMC_SDRAM_TimingTypeDef sdram_timing;
 
@@ -62,9 +62,9 @@ uint8_t sdram_init(void)
  * @param       无
  * @retval      无
  */
-uint8_t sdram_initialization_sequence(void)
+BYTE sdram_initialization_sequence(void)
 {
-    uint32_t temp = 0;
+    DWORD temp = 0;
 
     /* SDRAM控制器初始化完成以后还需要按照如下顺序初始化SDRAM */
     if (sdram_send_cmd(0U, FMC_SDRAM_CMD_CLK_ENABLE, 1U, 0U) != 0U)
@@ -84,12 +84,12 @@ uint8_t sdram_initialization_sequence(void)
     /* 配置模式寄存器,SDRAM的bit0~bit2为指定突发访问的长度，
      * bit3为指定突发访问的类型，bit4~bit6为CAS值，bit7和bit8为运行模式
      * bit9为指定的写突发模式，bit10和bit11位保留位 */
-    temp = (uint32_t)SDRAM_MODEREG_BURST_LENGTH_1 | /* 设置突发长度:1(可以是1/2/4/8) */
-           SDRAM_MODEREG_BURST_TYPE_SEQUENTIAL |    /* 设置突发类型:连续(可以是连续/交错) */
-           SDRAM_MODEREG_CAS_LATENCY_2 |            /* 设置CAS值:2(可以是2/3) */
-           SDRAM_MODEREG_OPERATING_MODE_STANDARD |  /* 设置操作模式:0,标准模式 */
-           SDRAM_MODEREG_WRITEBURST_MODE_SINGLE;    /* 设置突发写模式:1,单点访问 */
-    if (sdram_send_cmd(0U, FMC_SDRAM_CMD_LOAD_MODE, 1U, (uint16_t)temp) != 0U)
+    temp = SDRAM_MODEREG_BURST_LENGTH_1 |          /* 设置突发长度:1(可以是1/2/4/8) */
+           SDRAM_MODEREG_BURST_TYPE_SEQUENTIAL |   /* 设置突发类型:连续(可以是连续/交错) */
+           SDRAM_MODEREG_CAS_LATENCY_2 |           /* 设置CAS值:2(可以是2/3) */
+           SDRAM_MODEREG_OPERATING_MODE_STANDARD | /* 设置操作模式:0,标准模式 */
+           SDRAM_MODEREG_WRITEBURST_MODE_SINGLE;   /* 设置突发写模式:1,单点访问 */
+    if (sdram_send_cmd(0U, FMC_SDRAM_CMD_LOAD_MODE, 1U, temp) != 0U)
     {
         return 4U;
     }
@@ -144,9 +144,9 @@ void HAL_SDRAM_MspInit(SDRAM_HandleTypeDef *hsdram)
  * @retval      返回值:0,正常;1,失败.
  * @retval      模式寄存器的定义
  */
-uint8_t sdram_send_cmd(uint8_t bankx, uint8_t cmd, uint8_t refresh, uint16_t regval)
+BYTE sdram_send_cmd(BYTE bankx, BYTE cmd, BYTE refresh, WORD regval)
 {
-    uint32_t                 target_bank = 0;
+    DWORD                    target_bank = 0;
     FMC_SDRAM_CommandTypeDef command;
 
     if (bankx == 0)
@@ -180,11 +180,11 @@ uint8_t sdram_send_cmd(uint8_t bankx, uint8_t cmd, uint8_t refresh, uint16_t reg
  * @param       n         : 要写入的字节数
  * @retval      无
  */
-void fmc_sdram_write_buffer(uint8_t *pbuf, uint32_t writeaddr, uint32_t n)
+void fmc_sdram_write_buffer(BYTE *pbuf, DWORD writeaddr, DWORD n)
 {
     for (; n != 0; n--)
     {
-        *(volatile uint8_t *)(SDRAM_BASE_ADDR + writeaddr) = *pbuf;
+        *(volatile BYTE *)(SDRAM_BASE_ADDR + writeaddr) = *pbuf;
         writeaddr++;
         pbuf++;
     }
@@ -197,11 +197,11 @@ void fmc_sdram_write_buffer(uint8_t *pbuf, uint32_t writeaddr, uint32_t n)
  * @param       n        : 要写入的字节数
  * @retval      无
  */
-void fmc_sdram_read_buffer(uint8_t *pbuf, uint32_t readaddr, uint32_t n)
+void fmc_sdram_read_buffer(BYTE *pbuf, DWORD readaddr, DWORD n)
 {
     for (; n != 0; n--)
     {
-        *pbuf++ = *(volatile uint8_t *)(SDRAM_BASE_ADDR + readaddr);
+        *pbuf++ = *(volatile BYTE *)(SDRAM_BASE_ADDR + readaddr);
         readaddr++;
     }
 }

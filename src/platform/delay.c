@@ -6,28 +6,28 @@
  * src/platform/<soc>/delay_port.c —— 内核头无法单独使用（它依赖设备头提供
  * IRQn_Type/__NVIC_PRIO_BITS），故共享层不能直接碰这些寄存器。 */
 
-static uint32_t g_core_clock_hz;
-static bool     g_delay_initialized;
-static uint32_t g_dwt_cycles_per_us;
-static bool     g_dwt_initialized;
+static DWORD g_core_clock_hz;
+static bool  g_delay_initialized;
+static DWORD g_dwt_cycles_per_us;
+static bool  g_dwt_initialized;
 
 #if !DELAY_USE_DWT
-static uint32_t g_systick_cycles_per_us;
+static DWORD g_systick_cycles_per_us;
 #endif
 
-static uint32_t delay_resolve_clock(uint32_t core_clock_hz)
+static DWORD delay_resolve_clock(DWORD core_clock_hz)
 {
     return (core_clock_hz != 0U) ? core_clock_hz : delay_port_hclk_hz();
 }
 
 #if !DELAY_USE_DWT
-static delay_status_t delay_systick_us_busy(uint32_t us)
+static delay_status_t delay_systick_us_busy(DWORD us)
 {
-    uint32_t reload;
-    uint32_t ticks;
-    uint32_t previous;
-    uint32_t current;
-    uint32_t elapsed = 0U;
+    DWORD reload;
+    DWORD ticks;
+    DWORD previous;
+    DWORD current;
+    DWORD elapsed = 0U;
 
     if (!g_delay_initialized)
     {
@@ -67,7 +67,7 @@ static delay_status_t delay_systick_us_busy(uint32_t us)
  *          微秒延时通过读取该计数器的增量换算时间。
  */
 
-void delay_init(uint32_t core_clock_hz)
+void delay_init(DWORD core_clock_hz)
 {
     g_core_clock_hz     = delay_resolve_clock(core_clock_hz);
     /* CYCCNT follows the Cortex-M7 core clock, not the AHB/SysTick clock. */
@@ -91,7 +91,7 @@ void delay_init(uint32_t core_clock_hz)
  *       临界初始化阶段调用。该函数不会替应用配置 SysTick。
  */
 
-void delay_reconfigure(uint32_t core_clock_hz)
+void delay_reconfigure(DWORD core_clock_hz)
 {
     /* 动态调频、PLL 切换或从低功耗恢复后调用此函数。 */
     delay_init(core_clock_hz);
@@ -108,7 +108,7 @@ bool delay_is_initialized(void)
     return g_delay_initialized;
 }
 
-bool delay_dwt_cycles_now(uint32_t *cycles)
+bool delay_dwt_cycles_now(DWORD *cycles)
 {
     if ((cycles == NULL) || !g_dwt_initialized)
     {
@@ -118,16 +118,16 @@ bool delay_dwt_cycles_now(uint32_t *cycles)
     return true;
 }
 
-bool delay_dwt_elapsed_us(uint32_t start_cycles, uint16_t timeout_us)
+bool delay_dwt_elapsed_us(DWORD start_cycles, WORD timeout_us)
 {
-    uint64_t timeout_cycles;
+    QWORD timeout_cycles;
 
     if (!g_dwt_initialized)
     {
         return false;
     }
-    timeout_cycles = (uint64_t)timeout_us * g_dwt_cycles_per_us;
-    return (uint32_t)(delay_port_dwt_cycles() - start_cycles) >= timeout_cycles;
+    timeout_cycles = (QWORD)timeout_us * g_dwt_cycles_per_us;
+    return (delay_port_dwt_cycles() - start_cycles) >= timeout_cycles;
 }
 /**
  * @brief 获取单次 DWT 忙等待允许的最大时长。
@@ -140,7 +140,7 @@ bool delay_dwt_elapsed_us(uint32_t start_cycles, uint16_t timeout_us)
  *          中间结果避免计算溢出。
  */
 
-uint32_t delay_max_busy_us(void)
+DWORD delay_max_busy_us(void)
 {
     if (!g_delay_initialized || (g_core_clock_hz == 0U))
     {
@@ -148,11 +148,11 @@ uint32_t delay_max_busy_us(void)
     }
 
 #if DELAY_USE_DWT
-    uint64_t max_us;
+    QWORD max_us;
     /* DWT 为 32 位自由运行计数器，等待区间必须小于一个完整回绕周期。 */
 
-    max_us = ((uint64_t)UINT32_MAX * 1000000ULL) / g_core_clock_hz;
-    return (max_us > UINT32_MAX) ? UINT32_MAX : (uint32_t)max_us;
+    max_us = ((QWORD)UINT32_MAX * 1000000ULL) / g_core_clock_hz;
+    return (max_us > UINT32_MAX) ? UINT32_MAX : max_us;
 #else
     return UINT32_MAX / g_systick_cycles_per_us;
 #endif
@@ -166,16 +166,16 @@ uint32_t delay_max_busy_us(void)
  *       中断服务函数中等待业务事件，也不建议在 RTOS 任务中长时间调用。
  *       中断仍可抢占本函数，因此实际延时可能大于请求值。
  * @details 函数把 us 转换为 CPU 周期数，向上取整后记录起始 CYCCNT；循环
- *          使用 (当前值 - 起始值) 的 uint32_t 差值，因而能够正确处理一次
+ *          使用 (当前值 - 起始值) 的 DWORD 差值，因而能够正确处理一次
  *          计数器回绕。最大误差主要来自函数调用和循环本身的固定开销。
  */
 
-delay_status_t delay_us_busy(uint32_t us)
+delay_status_t delay_us_busy(DWORD us)
 {
 #if DELAY_USE_DWT
-    uint64_t cycles64;
-    uint32_t start;
-    uint32_t cycles;
+    QWORD cycles64;
+    DWORD start;
+    DWORD cycles;
 
     if (!g_delay_initialized)
     {
@@ -190,16 +190,16 @@ delay_status_t delay_us_busy(uint32_t us)
         return DELAY_ERR_OUT_OF_RANGE;
     }
 
-    cycles64 = ((uint64_t)us * g_core_clock_hz + 999999ULL) / 1000000ULL;
+    cycles64 = ((QWORD)us * g_core_clock_hz + 999999ULL) / 1000000ULL;
     if ((cycles64 == 0U) || (cycles64 > UINT32_MAX))
     {
         return DELAY_ERR_OUT_OF_RANGE;
     }
 
-    cycles = (uint32_t)cycles64;
+    cycles = cycles64;
     start  = delay_port_dwt_cycles();
     /* 空循环体即可：delay_port_dwt_cycles() 是外部函数，编译器不能把它提到循环外。 */
-    while ((uint32_t)(delay_port_dwt_cycles() - start) < cycles)
+    while ((delay_port_dwt_cycles() - start) < cycles)
     {
     }
 
@@ -220,9 +220,9 @@ delay_status_t delay_us_busy(uint32_t us)
  *          直接使用 32 位乘法造成超时截断。
  */
 
-delay_status_t delay_ms_busy(uint32_t ms)
+delay_status_t delay_ms_busy(DWORD ms)
 {
-    uint32_t max_us;
+    DWORD max_us;
 
     if (ms == 0U)
     {
@@ -230,7 +230,7 @@ delay_status_t delay_ms_busy(uint32_t ms)
     }
 
     max_us = delay_max_busy_us();
-    if ((max_us == 0U) || ((uint64_t)ms * 1000ULL > max_us))
+    if ((max_us == 0U) || ((QWORD)ms * 1000ULL > max_us))
     {
         return (max_us == 0U) ? DELAY_ERR_NOT_INITIALIZED : DELAY_ERR_OUT_OF_RANGE;
     }
@@ -238,12 +238,12 @@ delay_status_t delay_ms_busy(uint32_t ms)
     return delay_us_busy(ms * 1000U);
 }
 
-void delay_us(uint32_t us)
+void delay_us(DWORD us)
 {
     (void)delay_us_busy(us);
 }
 
-void delay_ms(uint32_t ms)
+void delay_ms(DWORD ms)
 {
     (void)delay_ms_busy(ms);
 }
@@ -252,12 +252,12 @@ void delay_ms(uint32_t ms)
  * @brief 读取系统单调毫秒计数。
  * @param 无。
  * @return 当前毫秒计数。
- * @note 计数器为 uint32_t，持续运行约 49.7 天后回绕；调用者应使用
+ * @note 计数器为 DWORD，持续运行约 49.7 天后回绕；调用者应使用
  *       delay_elapsed_ms() 进行差值比较，不要直接比较绝对大小。该计数的
  *       硬件来源由 delay_port_now_ms() 提供，本模块不定义 SysTick_Handler。
  */
 
-uint32_t delay_now_ms(void)
+DWORD delay_now_ms(void)
 {
     return delay_port_now_ms();
 }
@@ -273,7 +273,7 @@ uint32_t delay_now_ms(void)
  * @details 该函数只读时钟，不阻塞、不等待，也不会清除或修改任何定时器。
  */
 
-bool delay_elapsed_ms(uint32_t start_ms, uint32_t timeout_ms)
+bool delay_elapsed_ms(DWORD start_ms, DWORD timeout_ms)
 {
-    return (uint32_t)(delay_now_ms() - start_ms) >= timeout_ms;
+    return (delay_now_ms() - start_ms) >= timeout_ms;
 }

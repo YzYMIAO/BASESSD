@@ -32,12 +32,12 @@ static DMA_HandleTypeDef g_nand_dma_in;  /* DMA2_Stream1: FMC→memory (READ)  *
 static DMA_HandleTypeDef g_nand_dma_out; /* DMA2_Stream0: memory→FMC (PROGRAM) */
 
 /* ── 中断完成标志（volatile 防编译器优化） ── */
-static volatile uint8_t g_dma_data_out_done; /* PROGRAM 方向 DMA 完成标志 */
-static volatile uint8_t g_dma_data_in_done;  /* READ 方向 DMA 完成标志 */
+static volatile BYTE g_dma_data_out_done; /* PROGRAM 方向 DMA 完成标志 */
+static volatile BYTE g_dma_data_in_done;  /* READ 方向 DMA 完成标志 */
 
 /* 运行态 DMA 使能标志。默认等于 CONFIG_NAND_DMA。
  * 可在 nand 空闲时动态切换。 */
-uint8_t g_nand_dma_enable = CONFIG_NAND_DMA;
+BYTE g_nand_dma_enable = CONFIG_NAND_DMA;
 
 /*
  * HAL_DMA_MspInit — DMA 硬件平台初始化（弱函数重写）。
@@ -47,7 +47,7 @@ uint8_t g_nand_dma_enable = CONFIG_NAND_DMA;
  */
 void HAL_DMA_MspInit(DMA_HandleTypeDef *hdma)
 {
-    static uint8_t dma2_clock_enabled = 0U;
+    static BYTE dma2_clock_enabled = 0U;
 
     if (dma2_clock_enabled == 0U)
     {
@@ -105,9 +105,9 @@ nand_dma_result_t nand_dma_init(void)
  * 轮询版（保留做后备，DMA 失败时回退到 PIO 前使用）
  * ══════════════════════════════════════════════════════════════════ */
 
-nand_dma_result_t nand_dma_memory_to_fmc(volatile uint8_t *fmc_data_reg,
-                                         const uint8_t    *buffer,
-                                         uint16_t          length)
+nand_dma_result_t nand_dma_memory_to_fmc(volatile BYTE *fmc_data_reg,
+                                         const BYTE    *buffer,
+                                         WORD           length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -119,8 +119,8 @@ nand_dma_result_t nand_dma_memory_to_fmc(volatile uint8_t *fmc_data_reg,
 
     /* 启动 DMA: memory → FMC data reg (memory-to-memory) */
     if (HAL_DMA_Start(&g_nand_dma_out,
-                      (uint32_t)buffer,
-                      (uint32_t)fmc_data_reg,
+                      (DWORD)buffer,
+                      (DWORD)fmc_data_reg,
                       length) != HAL_OK)
     {
         return DMA_RESULT_ERROR;
@@ -135,9 +135,9 @@ nand_dma_result_t nand_dma_memory_to_fmc(volatile uint8_t *fmc_data_reg,
     return DMA_RESULT_OK;
 }
 
-nand_dma_result_t nand_dma_fmc_to_memory(volatile uint8_t *fmc_data_reg,
-                                         uint8_t          *buffer,
-                                         uint16_t          length)
+nand_dma_result_t nand_dma_fmc_to_memory(volatile BYTE *fmc_data_reg,
+                                         BYTE          *buffer,
+                                         WORD           length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -146,8 +146,8 @@ nand_dma_result_t nand_dma_fmc_to_memory(volatile uint8_t *fmc_data_reg,
 
     /* 启动 DMA: FMC data reg → memory (memory-to-memory) */
     if (HAL_DMA_Start(&g_nand_dma_in,
-                      (uint32_t)fmc_data_reg,
-                      (uint32_t)buffer,
+                      (DWORD)fmc_data_reg,
+                      (DWORD)buffer,
                       length) != HAL_OK)
     {
         return DMA_RESULT_ERROR;
@@ -169,9 +169,9 @@ nand_dma_result_t nand_dma_fmc_to_memory(volatile uint8_t *fmc_data_reg,
  * 中断版（非阻塞）
  * ══════════════════════════════════════════════════════════════════ */
 
-nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile uint8_t *fmc_data_reg,
-                                                  const uint8_t    *buffer,
-                                                  uint16_t          length)
+nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile BYTE *fmc_data_reg,
+                                                  const BYTE    *buffer,
+                                                  WORD           length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -184,8 +184,8 @@ nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile uint8_t *fmc_data_reg
     g_dma_data_out_done = 0U;
 
     if (HAL_DMA_Start_IT(&g_nand_dma_out,
-                         (uint32_t)buffer,
-                         (uint32_t)fmc_data_reg,
+                         (DWORD)buffer,
+                         (DWORD)fmc_data_reg,
                          length) != HAL_OK)
     {
         return DMA_RESULT_ERROR;
@@ -194,9 +194,9 @@ nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile uint8_t *fmc_data_reg
     return DMA_RESULT_OK;
 }
 
-nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile uint8_t *fmc_data_reg,
-                                                  uint8_t          *buffer,
-                                                  uint16_t          length)
+nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile BYTE *fmc_data_reg,
+                                                  BYTE          *buffer,
+                                                  WORD           length)
 {
     if ((fmc_data_reg == NULL) || (buffer == NULL) || (length == 0U))
     {
@@ -206,8 +206,8 @@ nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile uint8_t *fmc_data_reg
     g_dma_data_in_done = 0U;
 
     if (HAL_DMA_Start_IT(&g_nand_dma_in,
-                         (uint32_t)fmc_data_reg,
-                         (uint32_t)buffer,
+                         (DWORD)fmc_data_reg,
+                         (DWORD)buffer,
                          length) != HAL_OK)
     {
         return DMA_RESULT_ERROR;
@@ -216,12 +216,12 @@ nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile uint8_t *fmc_data_reg
     return DMA_RESULT_OK;
 }
 
-uint8_t nand_dma_data_out_done(void)
+BYTE nand_dma_data_out_done(void)
 {
     return g_dma_data_out_done;
 }
 
-uint8_t nand_dma_data_in_done(void)
+BYTE nand_dma_data_in_done(void)
 {
     return g_dma_data_in_done;
 }
@@ -232,13 +232,13 @@ void nand_dma_clear_flags(void)
     g_dma_data_in_done  = 0U;
 }
 
-uint8_t nand_dma_is_out_busy(void)
+BYTE nand_dma_is_out_busy(void)
 {
     /* 读 DMA2 Stream0 CR.EN 位 — 1 = 传输进行中 */
     return (DMA2_Stream0->CR & DMA_SxCR_EN) != 0U ? 1U : 0U;
 }
 
-uint8_t nand_dma_is_in_busy(void)
+BYTE nand_dma_is_in_busy(void)
 {
     /* 读 DMA2 Stream1 CR.EN 位 — 1 = 传输进行中 */
     return (DMA2_Stream1->CR & DMA_SxCR_EN) != 0U ? 1U : 0U;
@@ -274,7 +274,7 @@ void nand_dma_irq_handler_data_out(void)
      * STM32H7 HAL 的 IRQHandler 内部会调用 __HAL_DMA_CLEAR_FLAG，
      * 如果在之后才检查标志就永远读不到了。
      */
-    uint32_t tcif = __HAL_DMA_GET_FLAG(&g_nand_dma_out, DMA_FLAG_TCIF0_4);
+    DWORD tcif = __HAL_DMA_GET_FLAG(&g_nand_dma_out, DMA_FLAG_TCIF0_4);
 
     HAL_DMA_IRQHandler(&g_nand_dma_out);
 
@@ -296,7 +296,7 @@ void nand_dma_irq_handler_data_out(void)
 void nand_dma_irq_handler_data_in(void)
 {
     /* 同 data_out：HAL 清除标志前先捕获 */
-    uint32_t tcif = __HAL_DMA_GET_FLAG(&g_nand_dma_in, DMA_FLAG_TCIF1_5);
+    DWORD tcif = __HAL_DMA_GET_FLAG(&g_nand_dma_in, DMA_FLAG_TCIF1_5);
 
     HAL_DMA_IRQHandler(&g_nand_dma_in);
 
@@ -330,7 +330,7 @@ void DMA2_Stream1_IRQHandler(void)
  * D-Cache 维护（轮询版和中断版共用）
  * ══════════════════════════════════════════════════════════════════ */
 
-void nand_dma_cache_clean(const uint8_t *buffer, uint16_t length)
+void nand_dma_cache_clean(const BYTE *buffer, WORD length)
 {
 #    if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
     /*
@@ -338,9 +338,9 @@ void nand_dma_cache_clean(const uint8_t *buffer, uint16_t length)
      * FC Buffer Pool 中的 buffer 起始地址已对齐（528 = 16×33，16 字节对齐），
      * 但 D-Cache 行是 32 字节，用当前地址向下取整，长度向上取整到 32 倍数。
      */
-    uint32_t addr         = (uint32_t)buffer;
-    uint32_t aligned_addr = addr & ~0x1FUL;
-    uint32_t aligned_len  = (uint32_t)((addr - aligned_addr) + length + 31U) & ~0x1FUL;
+    DWORD addr         = (DWORD)buffer;
+    DWORD aligned_addr = addr & ~0x1FUL;
+    DWORD aligned_len  = ((addr - aligned_addr) + length + 31U) & ~0x1FUL;
     SCB_CleanDCache_by_Addr((void *)aligned_addr, (int32_t)aligned_len);
 #    else
     (void)buffer;
@@ -348,12 +348,12 @@ void nand_dma_cache_clean(const uint8_t *buffer, uint16_t length)
 #    endif
 }
 
-void nand_dma_cache_invalidate(uint8_t *buffer, uint16_t length)
+void nand_dma_cache_invalidate(BYTE *buffer, WORD length)
 {
 #    if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
-    uint32_t addr         = (uint32_t)buffer;
-    uint32_t aligned_addr = addr & ~0x1FUL;
-    uint32_t aligned_len  = (uint32_t)((addr - aligned_addr) + length + 31U) & ~0x1FUL;
+    DWORD addr         = (DWORD)buffer;
+    DWORD aligned_addr = addr & ~0x1FUL;
+    DWORD aligned_len  = ((addr - aligned_addr) + length + 31U) & ~0x1FUL;
     SCB_InvalidateDCache_by_Addr((void *)aligned_addr, (int32_t)aligned_len);
 #    else
     (void)buffer;

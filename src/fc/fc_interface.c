@@ -34,7 +34,7 @@
 
 /* 命令指针 → 池索引。区间检查 + 减法，O(1)（原为 O(256) 线性扫描）。
  * 返回 0 = 指针不落在命令池区间内（例如栈上的 fc_command_t），没有对应 ID。 */
-uint8_t fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
+BYTE fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_id)
 {
     const fc_command_t *pool = g_fc_controller.command_pool;
 
@@ -52,15 +52,15 @@ uint8_t fc_command_to_id(const fc_command_t *command, fc_command_id_t *command_i
 }
 
 /* buffer ID 有效性（< 池深度且已占用） */
-static uint8_t fc_buffer_id_is_valid(fc_buffer_id_t buffer_id)
+static BYTE fc_buffer_id_is_valid(fc_buffer_id_t buffer_id)
 {
-    return (uint8_t)(buffer_id < FC_BUFFER_POOL_DEPTH);
+    return (buffer_id < FC_BUFFER_POOL_DEPTH);
 }
 
 /* 是否占用（供 fc_buffer_release / id_to_real_buffer / get_base 的前置 ASSERT 用）。
  * 仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
  * 否则触发 -Wunused-function）——与 fc_command_cw_attached 同法。 */
-static uint8_t __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_id)
+static BYTE __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_id)
 {
     return (fc_buffer_id_is_valid(buffer_id) != 0U) &&
            (fc_buffer_state_get(&g_fc_controller, buffer_id) != 0U);
@@ -95,7 +95,7 @@ fc_command_t *fc_command_alloc(void)
  *         仅用于 ASSERT，故标 __attribute__((unused))（NDEBUG 下 ASSERT 被裁空，
  *         否则触发 -Wunused-function）。
  * -------------------------------------------------------------------- */
-static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t *command, uint8_t plane, uint8_t cw)
+static BYTE __attribute__((unused)) fc_command_cw_attached(const fc_command_t *command, BYTE plane, BYTE cw)
 {
     fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id;
 
@@ -103,7 +103,7 @@ static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t
     {
         const fc_descriptor_t *descriptor = &g_fc_controller.descriptor_pool[descriptor_id];
 
-        if (((uint8_t)paa_to_plane(descriptor->paa) == plane) && ((uint8_t)paa_to_cw(descriptor->paa) == cw))
+        if ((paa_to_plane(descriptor->paa) == plane) && (paa_to_cw(descriptor->paa) == cw))
         {
             return 1U;
         }
@@ -158,14 +158,14 @@ static uint8_t __attribute__((unused)) fc_command_cw_attached(const fc_command_t
  *       传进来的 buffer_id（无失败路径）；FC 申请（默认）时保持既有的「挂链后申请、
  *       池空 → RESOURCE_EMPTY、desc 留链上」语义。归属语义见 fc_buf_own_t。
  * -------------------------------------------------------------------- */
-fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa, fc_buffer_id_t buffer_id)
+fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa, fc_buffer_id_t buffer_id)
 {
     fc_command_id_t  command_id;
-    uint8_t          plane_first;
-    uint8_t          plane_last;
+    BYTE             plane_first;
+    BYTE             plane_last;
     fc_descriptor_t *descriptor;
     fc_buffer_id_t   alloc_id;
-    uint32_t         plane_cw;
+    DWORD            plane_cw;
 
     /* ── 校验段：不得触碰任何池 ──
      * 本函数**只有一种**合法失败：资源申请不到（desc / buffer 池空）→ RESOURCE_EMPTY，
@@ -183,7 +183,7 @@ fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, u
     /* 同一 n 被追加两次 = 链构造错误（掩码是集合，重复置位会静默丢数据） */
     ASSERT(fc_command_cw_attached(command, plane, cw) == 0U);
     /* row_paa 必须就是 plane 的行地址（否则 desc 的 plane 位与调用者意图不符） */
-    ASSERT((uint8_t)paa_to_plane(row_paa) == plane);
+    ASSERT(paa_to_plane(row_paa) == plane);
     /* buffer 归属（buf_own）与 buffer_id 实参必须一致（v53）：
      *   上层申请（10/11）⇒ 调用者已 fc_buffer_alloc，必须传一个池内 id；
      *   FC 申请（00/01，默认）⇒ 不得自带 id，FC 建链时自己申请。 */
@@ -211,7 +211,7 @@ fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, u
      *                 行地址取自实参 row_paa（每 plane 独立，Policy B 两 plane 可不同块）。
      *   desc->meta —— LBA 空间：plane/cw 低 3 位相邻（PLANE_CW_MASK 有效），
      *                 高位取自 command->meta（本命令扇区 LBA）。 */
-    plane_cw              = ((uint32_t)plane << PLANE_CW_SHIFT) | (uint32_t)cw;
+    plane_cw              = (plane << PLANE_CW_SHIFT) | cw;
     descriptor->paa       = paa_with_cw(paa_with_plane(row_paa, plane), cw);
     descriptor->config    = command->config;
     descriptor->config.cw = cw;
@@ -240,7 +240,7 @@ fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, u
 
 /* 建链入口（FC 申请，默认路径）：等价于 _with_buffer(..., FC_BUFFER_ID_INVALID)。
  * 4 参签名保持不变——FTL 的两个调用点、RAID parity 建链、既有单测都无需改动。 */
-fc_status_t fc_command_configure_descriptor(fc_command_t *command, uint8_t plane, uint8_t cw, nand_paa_t row_paa)
+fc_status_t fc_command_configure_descriptor(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa)
 {
     return fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, FC_BUFFER_ID_INVALID);
 }
@@ -312,7 +312,7 @@ fc_status_t fc_poll_completion(fc_command_status_t *completion)
  *   返回：取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY（含 max_count==0）。
  *   前置（违反一律 ASSERT）：completions、count 均非空。
  * -------------------------------------------------------------------- */
-fc_status_t fc_poll_completions(fc_command_status_t *completions, uint16_t max_count, uint16_t *count)
+fc_status_t fc_poll_completions(fc_command_status_t *completions, WORD max_count, WORD *count)
 {
     ASSERT(completions != NULL);
     ASSERT(count != NULL);
@@ -363,9 +363,9 @@ fc_status_t fc_buffer_release(fc_buffer_id_t buffer_id)
 
 /* 对外：返回 USER 数据区指针（跳过 META+CRC 8 字节）。
  * 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。 */
-uint8_t *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
+BYTE *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
 {
-    uint8_t *base;
+    BYTE *base;
 
     ASSERT(fc_buffer_is_occupied(buffer_id) != 0U);
     /* 占用即保证池内指针非空（_internal 只做数组下标），无需再判 NULL */
@@ -377,7 +377,7 @@ uint8_t *fc_buffer_id_to_real_buffer(fc_buffer_id_t buffer_id)
 
 /* FC 内部：返回 CW 基址（528B，含 META/CRC/PARITY，数据路径用）。
  * 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。 */
-uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id)
+BYTE *fc_buffer_get_base(fc_buffer_id_t buffer_id)
 {
     ASSERT(fc_buffer_is_occupied(buffer_id) != 0U);
     return fc_buffer_id_to_real_buffer_internal(&g_fc_controller, buffer_id);
@@ -385,7 +385,7 @@ uint8_t *fc_buffer_get_base(fc_buffer_id_t buffer_id)
 
 /* 返回命令中 **CW 号 == cw_index** 的 CW 的 META 指针（校验物理地址用）。
  * 按 paa_to_cw(desc->paa) 匹配，不是链走位——flat CW 掩码下两者会分叉。 */
-uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index)
+BYTE *fc_buffer_get_meta(fc_command_t *command, BYTE cw_index)
 {
     fc_descriptor_id_t did;
 
@@ -397,7 +397,7 @@ uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index)
     {
         fc_descriptor_t *d = fc_descriptor_id_to_descriptor(did);
 
-        if ((uint8_t)paa_to_cw(d->paa) == cw_index)
+        if (paa_to_cw(d->paa) == cw_index)
         {
             return (d->buffer_id != FC_BUFFER_ID_INVALID)
                        ? fc_buffer_id_to_real_buffer_internal(&g_fc_controller, d->buffer_id)
@@ -422,7 +422,7 @@ uint8_t *fc_buffer_get_meta(fc_command_t *command, uint8_t cw_index)
  *   实现要点：按 `paa_to_cw(desc->paa)` 匹配，**不是**链走位——flat CW 掩码下
  *         两者会分叉（见 fc_command.h 不变量 2）。uniform 命令下等价。
  * -------------------------------------------------------------------- */
-uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
+BYTE *fc_get_cmd_data_ptr(fc_command_t *command, BYTE cw_index)
 {
     fc_descriptor_id_t desc_id;
 
@@ -435,7 +435,7 @@ uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
     {
         fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
 
-        if ((uint8_t)paa_to_cw(descriptor->paa) == cw_index)
+        if (paa_to_cw(descriptor->paa) == cw_index)
         {
             if (descriptor->buffer_id == FC_BUFFER_ID_INVALID)
             {
@@ -459,10 +459,10 @@ uint8_t *fc_get_cmd_data_ptr(fc_command_t *command, uint8_t cw_index)
  *         一律先在此按链重建。
  *         调用者须在 fc_command_release() 之前调用（desc 释放后失效）。
  * -------------------------------------------------------------------- */
-uint32_t fc_get_cmd_cw_bitmap(const fc_command_t *command)
+DWORD fc_get_cmd_cw_bitmap(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
-    uint32_t           mask = 0U;
+    DWORD              mask = 0U;
 
     ASSERT(command != NULL);
 
@@ -470,12 +470,12 @@ uint32_t fc_get_cmd_cw_bitmap(const fc_command_t *command)
     while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
         const fc_descriptor_t *descriptor = fc_descriptor_id_to_descriptor(desc_id);
-        const uint8_t          plane      = (uint8_t)paa_to_plane(descriptor->paa);
-        const uint8_t          n          = (uint8_t)(plane * CW_NUM + paa_to_cw(descriptor->paa));
+        const BYTE             plane      = paa_to_plane(descriptor->paa);
+        const BYTE             n          = (plane * CW_NUM + paa_to_cw(descriptor->paa));
 
         /* 与 fc_build_request_data_planes 的同源断言一致：链上的 CW 编号必须在 flat 空间内 */
         ASSERT(n < CW_TOTAL_MAX);
-        mask |= (uint32_t)(1U << n);
+        mask |= (1U << n);
         desc_id = (fc_descriptor_id_t)descriptor->next_id;
     }
     return mask;
@@ -491,10 +491,10 @@ uint32_t fc_get_cmd_cw_bitmap(const fc_command_t *command)
  *         desc->ecc_bits 由该函数对链上**每个** desc 填写，全链取值无损。
  *         调用者须在 fc_command_release() 之前调用（desc 释放后失效）。
  * -------------------------------------------------------------------- */
-uint8_t fc_get_cmd_ecc_max(const fc_command_t *command)
+BYTE fc_get_cmd_ecc_max(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
-    uint8_t            ecc_max = 0U;
+    BYTE               ecc_max = 0U;
 
     ASSERT(command != NULL);
 
@@ -505,7 +505,7 @@ uint8_t fc_get_cmd_ecc_max(const fc_command_t *command)
 
         if (descriptor->ecc_bits > ecc_max)
         {
-            ecc_max = (uint8_t)descriptor->ecc_bits;
+            ecc_max = descriptor->ecc_bits;
         }
         desc_id = (fc_descriptor_id_t)descriptor->next_id;
     }
@@ -517,7 +517,7 @@ uint8_t fc_get_cmd_ecc_max(const fc_command_t *command)
  * ══════════════════════════════════════════════════════════ */
 
 /* 命令 ID → 命令指针（ID 恒为池内 ID，越界是调用者编程错误） */
-fc_command_t *fc_command_id_to_command(uint16_t command_id)
+fc_command_t *fc_command_id_to_command(WORD command_id)
 {
     /* command_id 只来自 fc_command_alloc() 铸出的 ID（队列里只存分配产出的 ID），
      * 任何调用者都不可能传入越界值——越界即不变量破坏，留现场。 */
@@ -526,7 +526,7 @@ fc_command_t *fc_command_id_to_command(uint16_t command_id)
 }
 
 /* 描述符 ID → 描述符指针（ID 恒为池内 ID，越界是调用者编程错误） */
-fc_descriptor_t *fc_descriptor_id_to_descriptor(uint16_t descriptor_id)
+fc_descriptor_t *fc_descriptor_id_to_descriptor(WORD descriptor_id)
 {
     /* descriptor_id 只来自命令 desc 链（configure_descriptors 铸出），恒在池内。 */
     ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
@@ -541,7 +541,7 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor(uint16_t descriptor_id)
  * -------------------------------------------------------------------- */
 fc_status_t fc_get_resource_stats(fc_resource_stats_t *stats)
 {
-    uint16_t index;
+    WORD index;
 
     /* stats 为出参前置条件（调用者恒传有效指针） */
     ASSERT(stats != NULL);

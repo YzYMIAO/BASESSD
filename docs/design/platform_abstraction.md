@@ -388,14 +388,14 @@ uint8_t  sys_port_clock_init(uint32_t plln, uint32_t pllm, uint32_t pllp, uint32
 
 /* usart —— include/platform/usart.h（Stage 3） */
 void     usart_init(uint32_t baudrate);                       /* 共享入口，名字被 sys.c 冻结 */
-int      uart_log_write(const char *data, uint32_t length);   /* 共享 */
-int      uart_log_flush(uint32_t timeout_ms);                 /* 共享 */
+uint32_t uart_log_write(const char *data, uint32_t length);   /* 共享；失败 UART_LOG_INVALID */
+bool     uart_log_flush(uint32_t timeout_ms);                 /* 共享 */
 void     uart_get_stats(uart_stats_t *stats);                 /* 共享 */
 uint8_t  uart_rx_read(uint8_t *byte);                         /* 共享；cli.c 消费 */
 /*   ↑ 共享入口；↓ port 接口（15 个） */
 uint8_t  usart_port_hw_init(uint32_t baudrate);
 void     usart_port_irq_handler(void);
-int      usart_port_tx_dma_start(const uint8_t *buffer, uint32_t length);
+bool     usart_port_tx_dma_start(const uint8_t *buffer, uint32_t length);
 void     usart_port_tx_dma_detach(void);
 uint16_t usart_port_tx_dma_remaining(void);
 void     usart_port_tx_irq_enable(void);

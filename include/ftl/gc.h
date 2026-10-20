@@ -28,8 +28,8 @@
 
 #include "allocator.h"   /* ftl_allocator_t, super_block_t */
 #include "fc_command.h"  /* fc_command_t（gc_decode_cw_lba 的形参） */
-#include "ftl_config.h"  /* nand_pba_t */
-#include "ftl_type.h"    /* lba_t */
+#include "ftl_config.h"  /* DWORD */
+#include "ftl_type.h"    /* DWORD */
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
 
 #include <stdint.h>
@@ -99,7 +99,7 @@
  * @param cw_lba  输出：逐 CW 的扇区 LBA，CW_NUM 项；未写过 = FTL_LBA_INVALID（不可为 NULL）
  * @return FTL_OK 成功；FTL_AGAIN 命令池空；FTL_ERROR 读失败 / 全页无写过 CW
  */
-ftl_status_t gc_read_page_with_lba(nand_pba_t pba, lba_t cw_lba[CW_NUM]);
+ftl_status_t gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM]);
 
 /*
  * gc_decode_cw_lba - 从**已完成的读命令**的 desc 链解出逐 CW 的扇区 LBA + 页基址
@@ -126,9 +126,9 @@ typedef enum
 } gc_decode_result_t;
 
 gc_decode_result_t gc_decode_cw_lba(fc_command_t *cmd,
-                                    nand_pba_t    pba,
-                                    lba_t         cw_lba[CW_NUM],
-                                    lba_t        *page_base_out);
+                                    DWORD         pba,
+                                    DWORD         cw_lba[CW_NUM],
+                                    DWORD        *page_base_out);
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block
@@ -180,6 +180,6 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
  * @param alloc  Allocator 上下文；NULL ⇒ 返回 0（UT 钉住的契约，不触发）
  * @return 触发起因位掩码（GC_TRIGGER_*），0=不需要触发
  */
-uint32_t gc_check_triggers(const ftl_allocator_t *alloc);
+DWORD gc_check_triggers(const ftl_allocator_t *alloc);
 
 #endif /* FTL_GC_H */

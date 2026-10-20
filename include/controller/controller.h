@@ -34,10 +34,10 @@ typedef struct
  * @param ftl        FTL 实例三维数组 ftl[CH_NUM][CE_NUM][LUN_NUM]
  * @return SSD_STATUS_OK 成功，SSD_STATUS_INVALID_ARGUMENT 入参非法/槽位缺失/拓扑不符
  */
-int     ssd_controller_init(ssd_controller_t *controller,
-                            ftl_context_t    *ftl[CH_NUM][CE_NUM][LUN_NUM]);
-int     ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
-uint8_t ssd_controller_is_complete(const ssd_request_t *request);
+ssd_status_t ssd_controller_init(ssd_controller_t *controller,
+                                 ftl_context_t    *ftl[CH_NUM][CE_NUM][LUN_NUM]);
+ssd_status_t ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
+BYTE         ssd_controller_is_complete(const ssd_request_t *request);
 
 /*
  * ssd_controller_lba_range_ok - host LBA 区间是否落在设备容量内
@@ -49,7 +49,7 @@ uint8_t ssd_controller_is_complete(const ssd_request_t *request);
  * @param count  连续 LBA 数
  * @return true  区间完整落在 [0, FTL_LBA_MAX)
  */
-bool ssd_controller_lba_range_ok(uint64_t lba, uint32_t count);
+bool ssd_controller_lba_range_ok(QWORD lba, DWORD count);
 
 /*
  * ssd_controller_state_transition - Controller 最小状态机（C1，state_machine.c）

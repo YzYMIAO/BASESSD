@@ -1,6 +1,8 @@
 #ifndef PLATFORM_FAULT_H
 #define PLATFORM_FAULT_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdint.h>
 
 /*
@@ -27,30 +29,30 @@ typedef enum
 /* 捕获到的故障现场。 */
 typedef struct
 {
-    uint32_t kind;       /* fault_kind_t */
-    uint32_t sp;         /* 出错时使用的栈指针（MSP 或 PSP） */
-    uint32_t msp;        /* 当前 MSP */
-    uint32_t psp;        /* 当前 PSP */
-    uint32_t exc_return; /* 进入异常时的 LR */
-    uint32_t fp_frame;   /* 1 = 叠加了 FPU 扩展帧（EXC_RETURN bit4=0） */
+    DWORD kind;       /* fault_kind_t */
+    DWORD sp;         /* 出错时使用的栈指针（MSP 或 PSP） */
+    DWORD msp;        /* 当前 MSP */
+    DWORD psp;        /* 当前 PSP */
+    DWORD exc_return; /* 进入异常时的 LR */
+    DWORD fp_frame;   /* 1 = 叠加了 FPU 扩展帧（EXC_RETURN bit4=0） */
 
     /* 硬件压栈帧 */
-    uint32_t r0;
-    uint32_t r1;
-    uint32_t r2;
-    uint32_t r3;
-    uint32_t r12;
-    uint32_t lr;
-    uint32_t pc;
-    uint32_t xpsr;
+    DWORD r0;
+    DWORD r1;
+    DWORD r2;
+    DWORD r3;
+    DWORD r12;
+    DWORD lr;
+    DWORD pc;
+    DWORD xpsr;
 
     /* 故障状态寄存器 */
-    uint32_t cfsr;
-    uint32_t hfsr;
-    uint32_t mmfar;
-    uint32_t bfar;
-    uint32_t afsr;
-    uint32_t shcsr;
+    DWORD cfsr;
+    DWORD hfsr;
+    DWORD mmfar;
+    DWORD bfar;
+    DWORD afsr;
+    DWORD shcsr;
 } fault_ctx_t;
 
 /* 使能 MemManage/BusFault/UsageFault，避免全部升级成 HardFault，便于区分。 */
@@ -83,8 +85,8 @@ void fault_port_console_drain(void);
 void fault_port_enable_configurable_faults(void);
 
 /* 复位原因：读原始标志位、把它翻成可读文本、报告后清标志。 */
-uint32_t fault_port_reset_flags(void);
-void     fault_port_reset_reason_text(uint32_t flags, char *buffer, uint32_t capacity);
-void     fault_port_reset_flags_clear(void);
+DWORD fault_port_reset_flags(void);
+void  fault_port_reset_reason_text(DWORD flags, char *buffer, DWORD capacity);
+void  fault_port_reset_flags_clear(void);
 
 #endif /* PLATFORM_FAULT_H */

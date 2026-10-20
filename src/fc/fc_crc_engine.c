@@ -53,10 +53,10 @@ void fc_crc_init(void)
  *   返回：CRC-32 值。
  *   实现要点：
  *     - 平台层每次先 RESET 引擎回 INIT 值，保证独立计算。
- *     - 对齐是硬性前置条件：HAL 的 WORDS 分支直接按 uint32_t* 解引用。
+ *     - 对齐是硬性前置条件：HAL 的 WORDS 分支直接按 DWORD* 解引用。
  *       实测三个调用点（buffer 池 +8、测试夹具两块 malloc 缓冲）全部满足。
  * -------------------------------------------------------------------- */
-uint32_t fc_crc_compute(const uint8_t *user_data)
+DWORD fc_crc_compute(const BYTE *user_data)
 {
     /* user_data 前置条件由调用者保证 */
     ASSERT(user_data != NULL);
@@ -70,7 +70,7 @@ uint32_t fc_crc_compute(const uint8_t *user_data)
  *   参数：user_data —— USER 指针；stored_crc —— 存储的 CRC 值。
  *   返回：FC_CRC_RESULT_OK / FC_CRC_RESULT_ERROR。
  * -------------------------------------------------------------------- */
-uint8_t fc_crc_verify(const uint8_t *user_data, uint32_t stored_crc)
+BYTE fc_crc_verify(const BYTE *user_data, DWORD stored_crc)
 {
     /* user_data 前置条件由调用者保证 */
     ASSERT(user_data != NULL);

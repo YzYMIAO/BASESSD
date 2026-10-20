@@ -98,7 +98,7 @@ static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
     if (HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN) == 0U)
     {
         /* RB# LOW → NAND busy，spin-wait 直到 ready */
-        uint32_t polls = 0U;
+        DWORD polls = 0U;
         FMC_LOGD("WAIT_READY start op=%u\r\n", (unsigned)request->operation);
         while (HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN) == 0U)
         {
@@ -134,7 +134,7 @@ static nand_result_t nand_fmc_exec_command(void *context, const nand_uop_t *uop,
     (void)request;
     (void)timing;
     (void)completion;
-    *config->command = (uint8_t)uop->operand;
+    *config->command = uop->operand;
     return NAND_RESULT_OK;
 }
 
@@ -152,7 +152,7 @@ static nand_result_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop
     (void)uop;
     (void)timing;
     (void)completion;
-    *config->address = (uint8_t)request->column;
+    *config->address = request->column;
     return NAND_RESULT_OK;
 }
 
@@ -170,7 +170,7 @@ static nand_result_t nand_fmc_exec_column_1(void *context, const nand_uop_t *uop
     (void)uop;
     (void)timing;
     (void)completion;
-    *config->address = (uint8_t)(request->column >> 8U);
+    *config->address = (request->column >> 8U);
     return NAND_RESULT_OK;
 }
 
@@ -188,7 +188,7 @@ static nand_result_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, c
 
     (void)timing;
     (void)completion;
-    *config->address = (uint8_t)request->row[uop->operand];
+    *config->address = request->row[uop->operand];
     return NAND_RESULT_OK;
 }
 
@@ -205,7 +205,7 @@ static nand_result_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, c
 
     (void)timing;
     (void)completion;
-    *config->address = (uint8_t)(request->row[uop->operand] >> 8U);
+    *config->address = (request->row[uop->operand] >> 8U);
     return NAND_RESULT_OK;
 }
 
@@ -222,7 +222,7 @@ static nand_result_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, c
 
     (void)timing;
     (void)completion;
-    *config->address = (uint8_t)(request->row[uop->operand] >> 16U);
+    *config->address = (request->row[uop->operand] >> 16U);
     return NAND_RESULT_OK;
 }
 
@@ -243,8 +243,8 @@ static nand_result_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, c
 static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-    uint16_t                 index;
-    uint8_t                  dma_ok;
+    WORD                     index;
+    BYTE                     dma_ok;
 
     (void)timing;
 
@@ -253,7 +253,7 @@ static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
     ASSERT(request->data_length != 0U);
 
     /* uop->operand 作为 buffer 偏移量（用于 Multi-Plane Program 第二 Plane） */
-    const uint8_t *src = request->buffer + uop->operand;
+    const BYTE *src = request->buffer + uop->operand;
 
     /* ── DMA 路径（非阻塞中断模式） ── */
     if (g_nand_dma_enable != 0U)
@@ -311,8 +311,8 @@ static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
 static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-    uint16_t                 index;
-    uint8_t                  dma_ok;
+    WORD                     index;
+    BYTE                     dma_ok;
 
     (void)timing;
 
@@ -321,7 +321,7 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
     ASSERT(request->data_length != 0U);
 
     /* uop->operand 作为 buffer 偏移量（用于 Multi-Plane Read 的第二 Plane） */
-    uint8_t *dst = request->buffer + uop->operand;
+    BYTE *dst = request->buffer + uop->operand;
 
     /* ── DMA 路径（非阻塞中断模式） ── */
     if (g_nand_dma_enable != 0U)
@@ -402,7 +402,7 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
 static nand_result_t nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
-    uint8_t                  status;
+    BYTE                     status;
 
     (void)uop;
     (void)timing;

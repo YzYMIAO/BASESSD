@@ -44,10 +44,10 @@
 
 typedef struct
 {
-    bool     found;                   /* 是否找到 victim */
-    uint16_t plane_blocks[PLANE_NUM]; /* 各 plane Block 号 */
-    uint16_t valid_cw;                /* 有效 **CW** 数（各 plane valid_count 之和；CW 级映射） */
-    uint32_t read_count;              /* 各 plane read disturb 计数之和（冷块优先权重） */
+    bool  found;                   /* 是否找到 victim */
+    WORD  plane_blocks[PLANE_NUM]; /* 各 plane Block 号 */
+    WORD  valid_cw;                /* 有效 **CW** 数（各 plane valid_count 之和；CW 级映射） */
+    DWORD read_count;              /* 各 plane read disturb 计数之和（冷块优先权重） */
 } wl_victim_t;
 
 /* ── 接口 ── */
@@ -63,7 +63,7 @@ typedef struct
  * @param ftl  FTL 上下文
  * @return true 需要触发，false 不需要
  */
-bool wl_should_trigger(const ftl_allocator_t *alloc, uint32_t total_writes);
+bool wl_should_trigger(const ftl_allocator_t *alloc, DWORD total_writes);
 
 /*
  * wl_select_victim - 选择 WL victim Super Block
@@ -93,6 +93,6 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim);
  * 唯一保留的统计访问器：wl_select_victim 用它确定低擦除区。
  * 热路径 wl_should_trigger 直接调 allocator_erase_stats 一次取全。
  */
-uint32_t wl_min_erase(const ftl_allocator_t *alloc);
+DWORD wl_min_erase(const ftl_allocator_t *alloc);
 
 #endif /* FTL_WEAR_LEVELING_H */

@@ -18,7 +18,7 @@
 #define FAULT_DMA_GUARD 100000U /* 等 DMA 关闭的自旋上限 */
 
 /* 控制台是否可用：USART 未使能时（极早期故障）只写记录、不打印。 */
-static volatile uint8_t g_fault_console_ready;
+static volatile BYTE g_fault_console_ready;
 
 /*
  * 抢占异步 TX 通路：关 TXE 中断、关 DMA 请求、abort DMA1_Stream0。
@@ -26,7 +26,7 @@ static volatile uint8_t g_fault_console_ready;
  */
 void fault_port_console_init(void)
 {
-    uint32_t guard;
+    DWORD guard;
 
     FAULT_CONSOLE->CR1 &= ~USART_CR1_TXEIE_TXFNFIE;
     FAULT_CONSOLE->CR3 &= ~USART_CR3_DMAT;
@@ -40,7 +40,7 @@ void fault_port_console_init(void)
 
 void fault_port_putc(char character)
 {
-    uint32_t guard;
+    DWORD guard;
 
     if (g_fault_console_ready == 0U)
     {
@@ -49,13 +49,13 @@ void fault_port_putc(char character)
     for (guard = 0U; (guard < FAULT_TX_GUARD) && ((FAULT_CONSOLE->ISR & USART_ISR_TXE_TXFNF) == 0U); guard++)
     {
     }
-    FAULT_CONSOLE->TDR = (uint32_t)(uint8_t)character;
+    FAULT_CONSOLE->TDR = (DWORD)(BYTE)character;
 }
 
 /* 等最后一个字节离开 TX 引脚（TC），否则停机后尾部字符会丢。 */
 void fault_port_console_drain(void)
 {
-    uint32_t guard;
+    DWORD guard;
 
     if (g_fault_console_ready == 0U)
     {
@@ -76,7 +76,7 @@ void fault_port_enable_configurable_faults(void)
 
 /* ────────────────────────────── 复位原因 ────────────────────────────── */
 
-uint32_t fault_port_reset_flags(void)
+DWORD fault_port_reset_flags(void)
 {
     return RCC->RSR;
 }
@@ -87,7 +87,7 @@ void fault_port_reset_flags_clear(void)
     RCC->RSR |= RCC_RSR_RMVF;
 }
 
-static uint32_t fault_append_text(char *buffer, uint32_t capacity, uint32_t length, const char *text)
+static DWORD fault_append_text(char *buffer, DWORD capacity, DWORD length, const char *text)
 {
     while ((*text != '\0') && (length < (capacity - 1U)))
     {
@@ -97,9 +97,9 @@ static uint32_t fault_append_text(char *buffer, uint32_t capacity, uint32_t leng
     return length;
 }
 
-void fault_port_reset_reason_text(uint32_t flags, char *buffer, uint32_t capacity)
+void fault_port_reset_reason_text(DWORD flags, char *buffer, DWORD capacity)
 {
-    uint32_t length = 0U;
+    DWORD length = 0U;
 
     if ((flags & RCC_RSR_PORRSTF) != 0U)
     {
@@ -142,13 +142,13 @@ void fault_port_reset_reason_text(uint32_t flags, char *buffer, uint32_t capacit
  * 故障主处理：frame 指向硬件压栈帧，exc_return 为进入异常时的 LR。
  * 现场在此抓取（只有 port 侧够得着 CMSIS/寄存器），随后转交共享层，不返回。
  */
-void fault_port_entry_c(uint32_t *frame, uint32_t exc_return) __attribute__((used, noinline));
-void fault_port_entry_c(uint32_t *frame, uint32_t exc_return)
+void fault_port_entry_c(DWORD *frame, DWORD exc_return) __attribute__((used, noinline));
+void fault_port_entry_c(DWORD *frame, DWORD exc_return)
 {
     fault_ctx_t ctx;
 
     ctx.kind       = __get_IPSR();
-    ctx.sp         = (uint32_t)(uintptr_t)frame;
+    ctx.sp         = (uintptr_t)frame;
     ctx.msp        = __get_MSP();
     ctx.psp        = __get_PSP();
     ctx.exc_return = exc_return;

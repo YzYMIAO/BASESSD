@@ -577,11 +577,11 @@ static MunitResult test_scramble_whiten(const MunitParameter params[], void *dat
             .page  = (uint8_t)munit_rand_int_range(0, PAGES_PER_BLOCK - 1),
             .cw    = (uint8_t)munit_rand_int_range(0, CW_NUM - 1),
         };
-        const nand_paa_t paa  = paa_from_addr(&addr);
-        const uint32_t   meta = (uint32_t)pba_from_addr(&addr);
-        const uint32_t   seed = fc_random_seed_from_meta(meta);
-        l2_bit01_t       before;
-        l2_bit01_t       after;
+        const DWORD    paa  = paa_from_addr(&addr);
+        const uint32_t meta = (uint32_t)pba_from_addr(&addr);
+        const uint32_t seed = fc_random_seed_from_meta(meta);
+        l2_bit01_t     before;
+        l2_bit01_t     after;
 
         /* 明文：常量图案，或本 CW 的 PAA 重复（后者是真实写路径的图案） */
         if (kind == 2U)

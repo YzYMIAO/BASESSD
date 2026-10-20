@@ -376,7 +376,7 @@ static MunitResult test_bg_level_select(const MunitParameter params[], void *fix
     /* pending=20 > MAX/2(=16) → BUSY */
     for (i = 0U; i < 20U; i++)
     {
-        munit_assert_int(pending_add(F, (uint16_t)i, 1U, 0, NULL, 1U, (nand_pba_t){0U}, (nand_pba_t){0U}, 0U, PENDING_OP_WRITE, 0xFFU),
+        munit_assert_int(pending_add(F, (uint16_t)i, 1U, 0, NULL, 1U, (DWORD){0U}, (DWORD){0U}, 0U, PENDING_OP_WRITE, 0xFFU),
                          ==,
                          0);
     }
@@ -389,7 +389,7 @@ static MunitResult test_bg_level_select(const MunitParameter params[], void *fix
     }
     for (i = 0U; i < 8U; i++)
     {
-        munit_assert_int(pending_add(F, (uint16_t)i, 1U, 0, NULL, 1U, (nand_pba_t){0U}, (nand_pba_t){0U}, 0U, PENDING_OP_WRITE, 0xFFU),
+        munit_assert_int(pending_add(F, (uint16_t)i, 1U, 0, NULL, 1U, (DWORD){0U}, (DWORD){0U}, 0U, PENDING_OP_WRITE, 0xFFU),
                          ==,
                          0);
     }
@@ -402,7 +402,7 @@ static MunitResult test_bg_level_select(const MunitParameter params[], void *fix
     }
     for (i = 0U; i < 5U; i++)
     {
-        munit_assert_int(pending_add(F, (uint16_t)i, 1U, 0, NULL, 1U, (nand_pba_t){0U}, (nand_pba_t){0U}, 0U, PENDING_OP_WRITE, 0xFFU),
+        munit_assert_int(pending_add(F, (uint16_t)i, 1U, 0, NULL, 1U, (DWORD){0U}, (DWORD){0U}, 0U, PENDING_OP_WRITE, 0xFFU),
                          ==,
                          0);
     }

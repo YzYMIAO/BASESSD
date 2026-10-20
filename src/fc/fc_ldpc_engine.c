@@ -33,7 +33,7 @@ static fc_ldpc_qc_t *g_qc = NULL;
 #endif
 
 /* 惰性初始化 BCH 引擎（m=13, t=4，本工程 CW 参数） */
-static uint8_t fc_ecc_init_bch(void)
+static BYTE fc_ecc_init_bch(void)
 {
     if (g_bch == NULL)
     {
@@ -44,7 +44,7 @@ static uint8_t fc_ecc_init_bch(void)
 
 #if (FC_ECC_ALGO == FC_ECC_ALGO_LDPC)
 /* 惰性初始化 QC-LDPC 引擎（最大迭代 15） */
-static uint8_t fc_ecc_init_ldpc(void)
+static BYTE fc_ecc_init_ldpc(void)
 {
     if (g_qc == NULL)
     {
@@ -74,7 +74,7 @@ const char *fc_ecc_algo_name(void)
  *     - BCH 分支：fc_bch_encode 生成 8B parity 写 data[520..527]。
  *     - LDPC 分支：qc_encode 输入输出均为 528B 完整码字。
  * -------------------------------------------------------------------- */
-fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length)
+fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length)
 {
     (void)config;
 
@@ -93,7 +93,7 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
     }
 
     {
-        uint8_t ecc_buf[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        BYTE ecc_buf[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
         /* data_length 恒 ≥ 8（520），parity 尾区足够 */
         ASSERT(data_length >= 8U);
@@ -114,8 +114,8 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
 
     {
         /* data_length = 520（数据区），后 8B = parity 输出区 */
-        uint16_t full_len = (uint16_t)(data_length + 8U);
-        uint8_t  tmp[FC_BUFFER_POOL_CW_SIZE];
+        WORD full_len = (data_length + 8U);
+        BYTE tmp[FC_BUFFER_POOL_CW_SIZE];
 
         memcpy(tmp, data, full_len);
         fc_ldpc_qc_encode(g_qc, tmp, data);
@@ -140,7 +140,7 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, uint8_t *data, uint16
  *       错误，按位翻转纠正；err_bits = 纠正数（0..t）。
  *     - LDPC 分支：qc_decode 内部按 528B 码字直接操作。
  * -------------------------------------------------------------------- */
-fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16_t data_length, uint8_t *err_bits)
+fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length, BYTE *err_bits)
 {
     (void)config;
 
@@ -165,17 +165,15 @@ fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16
     }
 
     {
-        uint8_t     *recv_ecc = data + data_length;
+        BYTE        *recv_ecc = data + data_length;
         unsigned int errloc[4];
-        int          nerr;
-        uint16_t     i;
+        unsigned int nerr;
+        WORD         i;
 
         /* data_length 恒 ≥ 8（520），parity 尾区足够 */
         ASSERT(data_length >= 8U);
 
-        nerr = fc_bch_decode(g_bch, data, data_length, recv_ecc, NULL, NULL, errloc);
-
-        if (nerr < 0)
+        if (!fc_bch_decode(g_bch, data, data_length, recv_ecc, NULL, NULL, errloc, &nerr))
         {
             return FC_STATUS_IO_ERROR;
         }
@@ -183,15 +181,15 @@ fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, uint8_t *data, uint16
         /* BCH 成功解码：报告纠正的 bit 数（0..t） */
         if (err_bits != NULL)
         {
-            *err_bits = (uint8_t)(unsigned int)nerr;
+            *err_bits = nerr;
         }
 
-        for (i = 0U; i < (uint16_t)nerr; i++)
+        for (i = 0U; i < nerr; i++)
         {
             unsigned int bit_pos = errloc[i];
             if (bit_pos < (unsigned int)(data_length * 8U))
             {
-                data[bit_pos / 8U] ^= (uint8_t)(1U << (bit_pos % 8U));
+                data[bit_pos / 8U] ^= (1U << (bit_pos % 8U));
             }
         }
 

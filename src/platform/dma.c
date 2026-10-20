@@ -8,7 +8,9 @@
 
 #include "dma.h"
 
-uint8_t uart_tx_dma_init(void)
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
+BYTE uart_tx_dma_init(void)
 {
     return dma_port_uart_tx_init();
 }

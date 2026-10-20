@@ -13,6 +13,8 @@
 
 #include "usart.h"
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -31,31 +33,31 @@
  * RX 环形队列：USART IRQ 是唯一生产者，uart_rx_read() 是唯一消费者。
  * IRQ 只发布 g_rx_head，主循环只推进 g_rx_tail，这是无锁 SPSC 队列成立的前提。
  */
-static uint8_t           g_rx_ring[USART_RX_RING_CAPACITY];
-static volatile uint16_t g_rx_head;
-static volatile uint16_t g_rx_tail;
+static BYTE          g_rx_ring[USART_RX_RING_CAPACITY];
+static volatile WORD g_rx_head;
+static volatile WORD g_rx_tail;
 
 /*
  * TX 环形队列：普通固件上下文是生产者，USART IRQ 是消费者。
  * uart_log_write() 用极短的关中断区保护“入队 + 打开 TXEIE/DMA”的交接，防止日志丢在队列中。
  */
 /* The padding makes final cache-line maintenance safe when a DMA segment ends at ring end. */
-static uint8_t           g_tx_ring[USART_TX_RING_CAPACITY + 31U] __attribute__((aligned(32)));
-static volatile uint16_t g_tx_head;
-static volatile uint16_t g_tx_tail;
-static volatile uint16_t g_tx_dma_length;
-static volatile uint8_t  g_tx_dma_active;
-static uint8_t           g_tx_dma_ready;
-static volatile uint8_t  g_tx_transport_fault;
+static BYTE          g_tx_ring[USART_TX_RING_CAPACITY + 31U] __attribute__((aligned(32)));
+static volatile WORD g_tx_head;
+static volatile WORD g_tx_tail;
+static volatile WORD g_tx_dma_length;
+static volatile BYTE g_tx_dma_active;
+static BYTE          g_tx_dma_ready;
+static volatile BYTE g_tx_transport_fault;
 
 static uart_stats_t g_uart_stats;
-static uint8_t      g_usart_ready;
+static BYTE         g_usart_ready;
 
 /* ─────────────────────────── 队列原语（供 port / CLI 调用）─────────────────────────── */
 
-uint8_t uart_rx_read(uint8_t *byte)
+BYTE uart_rx_read(BYTE *byte)
 {
-    uint16_t tail = g_rx_tail;
+    WORD tail = g_rx_tail;
 
     if (tail == g_rx_head)
     {
@@ -72,10 +74,10 @@ uint8_t uart_rx_read(uint8_t *byte)
     return 1U;
 }
 
-void uart_rx_ring_push(uint8_t byte)
+void uart_rx_ring_push(BYTE byte)
 {
-    uint16_t head = g_rx_head;
-    uint16_t next = (head + 1U) & USART_RX_RING_MASK;
+    WORD head = g_rx_head;
+    WORD next = (head + 1U) & USART_RX_RING_MASK;
 
     if (next == g_rx_tail)
     {
@@ -89,9 +91,9 @@ void uart_rx_ring_push(uint8_t byte)
     g_rx_head = next;
 }
 
-uint8_t uart_tx_ring_pop(uint8_t *byte)
+BYTE uart_tx_ring_pop(BYTE *byte)
 {
-    uint16_t tail = g_tx_tail;
+    WORD tail = g_tx_tail;
 
     if (tail == g_tx_head)
     {
@@ -106,17 +108,17 @@ uint8_t uart_tx_ring_pop(uint8_t *byte)
     return 1U;
 }
 
-uint8_t uart_tx_ring_is_empty(void)
+BYTE uart_tx_ring_is_empty(void)
 {
     return (g_tx_tail == g_tx_head) ? 1U : 0U;
 }
 
-uint8_t uart_tx_dma_ready(void)
+BYTE uart_tx_dma_ready(void)
 {
     return g_tx_dma_ready;
 }
 
-void uart_stats_count_rx_error(uint32_t kinds)
+void uart_stats_count_rx_error(DWORD kinds)
 {
     if ((kinds & UART_RX_ERROR_PARITY) != 0U)
     {
@@ -141,19 +143,19 @@ void uart_stats_count_rx_error(uint32_t kinds)
 /* Called with IRQs masked by uart_log_write(), or from the DMA completion ISR. */
 static void uart_tx_dma_start_locked(void)
 {
-    uint16_t tail;
-    uint16_t length;
+    DWORD tail;
+    DWORD length;
 
     if ((g_tx_dma_ready == 0U) || (g_tx_dma_active != 0U) || (g_tx_tail == g_tx_head))
     {
         return;
     }
     tail   = g_tx_tail;
-    length = (g_tx_head > tail) ? (uint16_t)(g_tx_head - tail) : (uint16_t)(USART_TX_RING_CAPACITY - tail);
+    length = (g_tx_head > tail) ? (g_tx_head - tail) : (USART_TX_RING_CAPACITY - tail);
 
     g_tx_dma_length = length;
     g_tx_dma_active = 1U;
-    if (usart_port_tx_dma_start(&g_tx_ring[tail], length) != 0)
+    if (!usart_port_tx_dma_start(&g_tx_ring[tail], length))
     {
         g_tx_dma_active = 0U;
         g_uart_stats.tx_dma_errors++;
@@ -169,12 +171,12 @@ static void uart_tx_dma_start_locked(void)
 
 void uart_tx_dma_complete_handler(void)
 {
-    uint16_t transferred;
+    WORD transferred;
 
     usart_port_tx_dma_detach();
     transferred     = g_tx_dma_length;
     g_tx_dma_length = 0U;
-    g_tx_tail       = (uint16_t)((g_tx_tail + transferred) & USART_TX_RING_MASK);
+    g_tx_tail       = ((g_tx_tail + transferred) & USART_TX_RING_MASK);
     usart_port_memory_barrier();
     g_tx_dma_active = 0U;
     usart_port_event_signal();
@@ -183,8 +185,8 @@ void uart_tx_dma_complete_handler(void)
 
 void uart_tx_dma_error_handler(void)
 {
-    uint16_t remaining;
-    uint16_t transferred;
+    WORD remaining;
+    WORD transferred;
 
     usart_port_tx_dma_detach();
     remaining = usart_port_tx_dma_remaining();
@@ -192,8 +194,8 @@ void uart_tx_dma_error_handler(void)
     {
         remaining = g_tx_dma_length;
     }
-    transferred     = (uint16_t)(g_tx_dma_length - remaining);
-    g_tx_tail       = (uint16_t)((g_tx_tail + transferred) & USART_TX_RING_MASK);
+    transferred     = (g_tx_dma_length - remaining);
+    g_tx_tail       = ((g_tx_tail + transferred) & USART_TX_RING_MASK);
     g_tx_dma_length = 0U;
     g_tx_dma_active = 0U;
     g_uart_stats.tx_dma_errors++;
@@ -207,7 +209,7 @@ void uart_tx_dma_error_handler(void)
 
 /* ─────────────────────────── 初始化 / 发送 / 计数 ─────────────────────────── */
 
-void usart_init(uint32_t baudrate)
+void usart_init(DWORD baudrate)
 {
     g_tx_dma_ready = usart_port_hw_init(baudrate);
     g_usart_ready  = 1U;
@@ -215,7 +217,9 @@ void usart_init(uint32_t baudrate)
 
 /*
  * newlib-nano 的 printf 最终会调用 _write()。把它接到软件 TX 队列后，现有 printf
- * 自动变成非阻塞日志；返回短写表示队列已满，业务代码不应据此重试或等待。
+ * 自动变成非阻塞日志。
+ * ⚠ libc ABI 要求 `int _write()` 且失败返回 -1（H46 的明确例外）；项目内部的
+ *   `uart_log_write()` 已改为 `DWORD` + `UART_LOG_INVALID` 哨兵，本函数只做 ABI 转换。
  *
  * 行尾归一化：裸机串口终端（PuTTY/minicom 等）要求 \r\n 才能正确换行。
  * printf/puts/fprintf 在 newlib-nano 中只输出 \n，此处扫描 buffer，
@@ -226,7 +230,7 @@ void usart_init(uint32_t baudrate)
 int _write(int file, char *buffer, int length)
 {
     int          i;
-    uint8_t      needs_cr;
+    BYTE         needs_cr;
     int          src_i;
     unsigned int dst_len;
 
@@ -249,13 +253,16 @@ int _write(int file, char *buffer, int length)
     }
     if (needs_cr == 0U)
     {
-        return uart_log_write(buffer, (uint32_t)length);
+        const DWORD written = uart_log_write(buffer, length);
+
+        return (written == UART_LOG_INVALID) ? -1 : (int)written;
     }
 
     /* ── 慢速路径：在裸 \n 前插入 \r ── */
 #define WRITE_BUF_SIZE 512U
     static char converted[WRITE_BUF_SIZE];
-    dst_len = 0;
+    bool        ok = true;
+    dst_len        = 0;
 
     for (src_i = 0; src_i < length; src_i++)
     {
@@ -265,7 +272,7 @@ int _write(int file, char *buffer, int length)
             if (dst_len + 2 > WRITE_BUF_SIZE)
             {
                 /* 刷新已转换部分再继续 */
-                (void)uart_log_write(converted, (uint32_t)dst_len);
+                ok      = (uart_log_write(converted, dst_len) != UART_LOG_INVALID) && ok;
                 dst_len = 0;
             }
             converted[dst_len++] = '\r';
@@ -275,7 +282,7 @@ int _write(int file, char *buffer, int length)
         {
             if (dst_len + 1 > WRITE_BUF_SIZE)
             {
-                (void)uart_log_write(converted, (uint32_t)dst_len);
+                ok      = (uart_log_write(converted, dst_len) != UART_LOG_INVALID) && ok;
                 dst_len = 0;
             }
             converted[dst_len++] = buffer[src_i];
@@ -285,57 +292,57 @@ int _write(int file, char *buffer, int length)
     /* 刷剩余 */
     if (dst_len > 0)
     {
-        (void)uart_log_write(converted, (uint32_t)dst_len);
+        ok = (uart_log_write(converted, dst_len) != UART_LOG_INVALID) && ok;
     }
 
-    /* 告知上层全部发出（不重试） */
-    return length;
+    /* 告知上层全部发出（不重试）；libc `_write` 约定失败返回 -1。 */
+    return ok ? length : -1;
 #undef WRITE_BUF_SIZE
 }
 
-int uart_log_write(const char *data, uint32_t length)
+DWORD uart_log_write(const char *data, DWORD length)
 {
-    uint32_t written = 0U;
+    DWORD written = 0U;
 
     if ((!g_usart_ready) || (data == NULL) || (length == 0U))
     {
-        return 0;
+        return 0U;
     }
 
     /* A DMA transport error has an ambiguous byte boundary; do not claim later writes are reliable. */
     if (g_tx_transport_fault != 0U)
     {
-        return -1;
+        return UART_LOG_INVALID;
     }
 
     if (usart_port_context_is_atomic() != 0U)
     {
         g_uart_stats.tx_context_errors++;
-        return -1;
+        return UART_LOG_INVALID;
     }
 
     while (written < length)
     {
-        uint32_t primask = usart_port_irq_state();
+        DWORD primask = usart_port_irq_state();
 
         if (g_tx_transport_fault != 0U)
         {
-            return -1;
+            return UART_LOG_INVALID;
         }
 
         /* Publish bytes and arm the consumer atomically; never wait with IRQs masked. */
         usart_port_irq_disable();
         while (written < length)
         {
-            uint16_t head = g_tx_head;
-            uint16_t next = (head + 1U) & USART_TX_RING_MASK;
+            WORD head = g_tx_head;
+            WORD next = (head + 1U) & USART_TX_RING_MASK;
 
             if (next == g_tx_tail)
             {
                 break;
             }
 
-            g_tx_ring[head] = (uint8_t)data[written++];
+            g_tx_ring[head] = data[written++];
             usart_port_memory_barrier();
             g_tx_head = next;
         }
@@ -357,24 +364,24 @@ int uart_log_write(const char *data, uint32_t length)
         }
     }
 
-    return (int)written;
+    return written;
 }
 
-int uart_log_flush(uint32_t timeout_ms)
+bool uart_log_flush(DWORD timeout_ms)
 {
-    uint32_t start_tick;
+    DWORD start_tick;
 
     if ((g_usart_ready == 0U) || (usart_port_context_is_atomic() != 0U))
     {
-        return -1;
+        return false;
     }
 
     start_tick = usart_port_now_ms();
     for (;;)
     {
-        uint8_t  empty;
-        uint8_t  dma_active;
-        uint32_t primask = usart_port_irq_state();
+        BYTE  empty;
+        BYTE  dma_active;
+        DWORD primask = usart_port_irq_state();
 
         usart_port_irq_disable();
         empty      = (g_tx_head == g_tx_tail) ? 1U : 0U;
@@ -382,19 +389,19 @@ int uart_log_flush(uint32_t timeout_ms)
         if (g_tx_transport_fault != 0U)
         {
             usart_port_irq_restore(primask);
-            return -1;
+            return false;
         }
         if ((empty != 0U) && (dma_active == 0U) && (usart_port_tx_complete() != 0U))
         {
             usart_port_irq_restore(primask);
-            return 0;
+            return true;
         }
         usart_port_irq_restore(primask);
 
         if ((timeout_ms != UART_LOG_FLUSH_FOREVER) && ((usart_port_now_ms() - start_tick) >= timeout_ms))
         {
             g_uart_stats.tx_flush_timeouts++;
-            return -1;
+            return false;
         }
         if ((empty == 0U) || (dma_active != 0U))
         {

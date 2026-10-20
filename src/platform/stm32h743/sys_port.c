@@ -10,6 +10,8 @@
 
 #include "common.h"
 
+#include <string.h>
+
 static const MPU_Region_InitTypeDef g_sys_mpu_regions[] = {
   /* Flash: executable read-only firmware. */
     {.Enable = MPU_REGION_ENABLE,  .Number = 0U, .BaseAddress = 0x08000000U,   .Size = MPU_REGION_SIZE_2MB, .SubRegionDisable = 0U, .TypeExtField = MPU_TEX_LEVEL0, .AccessPermission = MPU_REGION_PRIV_RO_URO,  .DisableExec = MPU_INSTRUCTION_ACCESS_ENABLE, .IsShareable = MPU_ACCESS_NOT_SHAREABLE,     .IsCacheable = MPU_ACCESS_CACHEABLE,     .IsBufferable = MPU_ACCESS_BUFFERABLE},
@@ -36,7 +38,7 @@ static const MPU_Region_InitTypeDef g_sys_mpu_regions[] = {
 
 void sys_port_mpu_config(void)
 {
-    uint32_t index;
+    DWORD index;
     HAL_MPU_Disable();
     for (index = 0U; index < (sizeof(g_sys_mpu_regions) / sizeof(g_sys_mpu_regions[0])); ++index)
     {
@@ -51,23 +53,23 @@ void sys_port_cache_enable(void)
     SCB_EnableDCache();
 }
 
-uint8_t sys_port_icache_enabled(void)
+BYTE sys_port_icache_enabled(void)
 {
-    return (uint8_t)((SCB->CCR >> 17U) & 1U);
+    return ((SCB->CCR >> 17U) & 1U);
 }
 
-uint8_t sys_port_dcache_enabled(void)
+BYTE sys_port_dcache_enabled(void)
 {
-    return (uint8_t)((SCB->CCR >> 16U) & 1U);
+    return ((SCB->CCR >> 16U) & 1U);
 }
 
-uint32_t sys_port_mpu_region_count(void)
+DWORD sys_port_mpu_region_count(void)
 {
-    return (uint32_t)(sizeof(g_sys_mpu_regions) / sizeof(g_sys_mpu_regions[0]));
+    return (sizeof(g_sys_mpu_regions) / sizeof(g_sys_mpu_regions[0]));
 }
 
 /* per_ck：FMC / QSPI 的 CLKP 备选源（HSI/CSI/HSE）。 */
-static uint32_t sys_port_per_ck_hz(void)
+static DWORD sys_port_per_ck_hz(void)
 {
     switch (__HAL_RCC_GET_CLKP_SOURCE())
     {
@@ -92,12 +94,15 @@ static uint32_t sys_port_per_ck_hz(void)
  */
 void sys_port_clock_tree_get(sys_clock_tree_t *out)
 {
-    PLL1_ClocksTypeDef pll1 = {0};
-    PLL2_ClocksTypeDef pll2 = {0};
-    PLL3_ClocksTypeDef pll3 = {0};
-    uint32_t           hclk;
-    uint32_t           per_ck;
+    PLL1_ClocksTypeDef pll1;
+    PLL2_ClocksTypeDef pll2;
+    PLL3_ClocksTypeDef pll3;
+    DWORD              hclk;
+    DWORD              per_ck;
 
+    memset(&pll1, 0, sizeof(pll1));
+    memset(&pll2, 0, sizeof(pll2));
+    memset(&pll3, 0, sizeof(pll3));
     HAL_RCCEx_GetPLL1ClockFreq(&pll1);
     HAL_RCCEx_GetPLL2ClockFreq(&pll2);
     HAL_RCCEx_GetPLL3ClockFreq(&pll3);
@@ -175,7 +180,7 @@ void sys_port_clock_tree_get(sys_clock_tree_t *out)
     }
 }
 
-void sys_port_set_vector_table(uint32_t base_address, uint32_t offset)
+void sys_port_set_vector_table(DWORD base_address, DWORD offset)
 {
     SCB->VTOR = base_address | (offset & 0xFFFFFE00UL);
 }
@@ -195,7 +200,7 @@ void sys_port_irq_enable(void)
     __enable_irq();
 }
 
-void sys_port_set_msp(uint32_t address)
+void sys_port_set_msp(DWORD address)
 {
     __set_MSP(address);
 }
@@ -216,11 +221,15 @@ void sys_port_hal_init(void)
  *   PLL2R = 2 -> PLL2_R = 220 MHz（FMC 时钟源；SDRAM SDCLK=220/2=110 MHz）
  */
 
-uint8_t sys_port_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sysclk_div, uint32_t peripheral_div)
+BYTE sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div)
 {
-    RCC_OscInitTypeDef       oscillator        = {0};
-    RCC_ClkInitTypeDef       clocks            = {0};
-    RCC_PeriphCLKInitTypeDef peripheral_clocks = {0};
+    RCC_OscInitTypeDef       oscillator;
+    RCC_ClkInitTypeDef       clocks;
+    RCC_PeriphCLKInitTypeDef peripheral_clocks;
+
+    memset(&oscillator, 0, sizeof(oscillator));
+    memset(&clocks, 0, sizeof(clocks));
+    memset(&peripheral_clocks, 0, sizeof(peripheral_clocks));
 
     /* 电源：VOS1，允许 CPU 运行到 400 MHz。 */
     MODIFY_REG(PWR->CR3, PWR_CR3_SCUEN, 0U);
@@ -313,7 +322,7 @@ void SysTick_Handler(void)
 }
 
 #ifdef USE_FULL_ASSERT
-void assert_failed(uint8_t *file, uint32_t line)
+void assert_failed(BYTE *file, DWORD line)
 {
     (void)file;
     (void)line;

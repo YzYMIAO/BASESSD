@@ -2,7 +2,9 @@
 #define FC_BCH_ENGINE_H
 
 #include "fc_types.h"
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -27,7 +29,7 @@ typedef struct fc_bch_control fc_bch_control_t;
  * @swap_bits:  是否交换数据字节内的 bit 顺序
  * @return      BCH 控制句柄，失败返回 NULL
  */
-fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, uint8_t swap_bits);
+fc_bch_control_t *fc_bch_init(int m, int t, unsigned int prim_poly, BYTE swap_bits);
 
 /* 释放 BCH 引擎资源 */
 void fc_bch_free(fc_bch_control_t *bch);
@@ -39,20 +41,20 @@ void fc_bch_free(fc_bch_control_t *bch);
  *       ecc 可为 NULL（增量计算语义）。
  * bch / data 非空为前置条件（违反一律 ASSERT）。
  */
-void fc_bch_encode(fc_bch_control_t *bch, const uint8_t *data, unsigned int len, uint8_t *ecc);
+void fc_bch_encode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, BYTE *ecc);
 
 /*
  * BCH 解码：检测并定位 data+recv_ecc 中的错误。
  * @errloc 输出错误位置数组（至少 t 个元素）。
- * @return  错误数量（≥0），不可纠返回 -1。
- *          入参前置违反（len 超码长 / data·recv_ecc 为空）一律 ASSERT，不走 -1
- *          （避免与"不可纠"哨兵撞车，见 assertion_guidelines.md §十五）。
+ * @return  true = 解码完成（*out_nerr 为纠正的错误数，0..t）；false = 不可纠。
+ *          入参前置违反（len 超码长 / data·recv_ecc 为空）一律 ASSERT
+ *          （见 assertion_guidelines.md §十五）。
  *          对于返回的错误位置 errloc[i]：
  *            errloc[i] < 8*len → 数据区错误
  *            errloc[i] >= 8*len → ECC 区错误
  *          纠正：data[errloc/8] ^= (1 << (errloc%8))
  */
-int fc_bch_decode(fc_bch_control_t *bch, const uint8_t *data, unsigned int len, const uint8_t *recv_ecc, const uint8_t *calc_ecc, const unsigned int *syn, unsigned int *errloc);
+bool fc_bch_decode(fc_bch_control_t *bch, const BYTE *data, unsigned int len, const BYTE *recv_ecc, const BYTE *calc_ecc, const unsigned int *syn, unsigned int *errloc, unsigned int *out_nerr);
 
 /* 辅助函数：获取 BCH 引擎的 ECC 字节数 */
 unsigned int fc_bch_ecc_bytes(const fc_bch_control_t *bch);

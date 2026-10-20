@@ -2,7 +2,7 @@
 #define FC_DATA_PATH_H
 
 #include "fc_types.h"
-#include "nand_config.h" /* PLANE_NUM / nand_paa_t */
+#include "nand_config.h" /* PLANE_NUM / DWORD */
 
 /*
  * FC 数据路径管线接口。
@@ -60,7 +60,7 @@ fc_status_t fc_data_path_encode(const fc_command_t *command);
  */
 fc_status_t fc_data_path_generate_stripe_parity(
     const fc_command_t *data_cmds[],
-    uint8_t             data_count,
+    BYTE                data_count,
     const fc_command_t *parity_cmd);
 #endif /* CONFIG_FC_RAID */
 
@@ -99,7 +99,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command);
  *         FC_STATUS_IO_ERROR        恢复后 ECC 仍失败
  *         FC_STATUS_INVALID_ARGUMENT 参数无效
  */
-fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw_idx);
+fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_idx);
 
 /* ── 单 CW 步骤原语（管线与单测共用） ──
  *
@@ -116,28 +116,28 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
  */
 
 /* 把本 CW 的逻辑地址（扇区 LBA）写进 [0,4)。写路径 Stage 0 的唯一写入者。 */
-void fc_data_path_meta_write(uint8_t *cw, uint32_t meta);
+void fc_data_path_meta_write(BYTE *cw, DWORD meta);
 
 /* 对 USER 区 [8,520) 算 CRC-32 并写入 [4,8)。需先有明文 USER 数据。 */
-void fc_data_path_crc_write(uint8_t *cw);
+void fc_data_path_crc_write(BYTE *cw);
 
 /* 加扰/解扰（同一个 XOR 变换，自反）。作用于 USER 区 [8,520)，
  * META/CRC 保持明文——读侧才能从页内 META 自举出同一个种子。 */
-void fc_data_path_scramble(uint8_t *cw, uint32_t seed);
+void fc_data_path_scramble(BYTE *cw, DWORD seed);
 
 /* ECC 编码：对 520B 数据区算 8B parity 写入 [520,528)。
  * 引擎未实现（NOT_SUPPORTED）时吞掉返回 OK——与管线行为一致。 */
-fc_status_t fc_data_path_ecc_encode(uint8_t *cw);
+fc_status_t fc_data_path_ecc_encode(BYTE *cw);
 
 /* ECC 解码。ecc_bits 出参可为 NULL（不需要纠正位数时）。 */
-fc_status_t fc_data_path_ecc_decode(uint8_t *cw, uint8_t *ecc_bits);
+fc_status_t fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits);
 
 /* CRC 校验：1 = 重算值与 [4,8) 存的相等（通过），0 = 不通过。 */
-uint8_t fc_data_path_crc_check(const uint8_t *cw);
+BYTE fc_data_path_crc_check(const BYTE *cw);
 
 /* META 读回校验（Pass 4 的两项）：① 低 3 位自洽 == paa 的 plane/cw；
  * ② command_meta 非 FC_META_UNKNOWN 时须等于 lba_to_meta(command_meta, plane, cw)。
  * 返回 FC_CW_STATUS_MATA_ERROR（任一不符）或 0（通过）。 */
-uint32_t fc_data_path_meta_check(const uint8_t *cw, uint32_t command_meta, nand_paa_t paa);
+DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa);
 
 #endif /* FC_DATA_PATH_H */

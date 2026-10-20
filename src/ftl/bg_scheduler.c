@@ -19,12 +19,12 @@
  * 语义：预算剩余太少时，再跑一个任务既不划算也无法被诚实度量。 */
 #define MIN_TASK_BUDGET_US (250U)
 
-void bg_scheduler_init(bg_scheduler_t *sched, const bg_task_t *table, uint8_t count)
+void bg_scheduler_init(bg_scheduler_t *sched, const bg_task_t *table, BYTE count)
 {
     /* 前置条件（判据 2）：调用者传自持的 sched 与静态任务表。 */
     /* ⚠ 必须在拷贝循环**之前**：count 超容量时循环本身就会越界写 tasks[]。 */
 
-    for (uint8_t i = 0U; i < count; i++)
+    for (BYTE i = 0U; i < count; i++)
     {
         sched->tasks[i] = table[i];
     }
@@ -47,7 +47,7 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
     /* ── Pass 0：must-run 正确性关键集（不 gate、不占预算）──
      * 表序即执行序：checkpoint_handle（表首）必须最先——在飞的 CP 要跨轮推进，
      * 拖到预算 pass 里会被低优先级/预算耗尽饿死。 */
-    for (uint8_t i = 0U; i < sched->task_count; i++)
+    for (BYTE i = 0U; i < sched->task_count; i++)
     {
         if ((sched->tasks[i].func != NULL) && sched->tasks[i].must_run)
         {
@@ -56,9 +56,9 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
     }
 
     /* ── Pass 1：预算 + interval + 优先级（表按执行序预排序，线性扫）── */
-    uint32_t budget_remaining = cfg->total_budget_us;
+    DWORD budget_remaining = cfg->total_budget_us;
 
-    for (uint8_t i = 0U; i < sched->task_count; i++)
+    for (BYTE i = 0U; i < sched->task_count; i++)
     {
         bg_task_t *task = &sched->tasks[i];
 
@@ -74,7 +74,7 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
         /* interval 门：仅时钟可用时生效；last_run_ms==0 = 尚未运行 ⇒ 立即跑（哨兵） */
         if (clock_ok && (task->interval_ms != 0U))
         {
-            uint32_t now_ms = (uint32_t)(platform->time_us() / 1000U);
+            DWORD now_ms = (platform->time_us() / 1000U);
             if ((task->last_run_ms != 0U) && ((now_ms - task->last_run_ms) < task->interval_ms))
             {
                 continue;
@@ -83,17 +83,17 @@ void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_
 
         /* 执行 + 计账：charge = MIN(elapsed, budget_us)。时钟缺失（clock_ok=0 或恒 0）
          * ⇒ elapsed=0、永不截断 —— 退化为「无门控」，防刷屏靠任务内部事件门。 */
-        uint32_t now_us = clock_ok ? (uint32_t)platform->time_us() : 0U;
+        DWORD now_us = clock_ok ? platform->time_us() : 0U;
         task->func(ftl);
         if (clock_ok)
         {
-            uint32_t elapsed = (uint32_t)(platform->time_us() - now_us);
-            uint32_t charge  = (elapsed < task->budget_us) ? elapsed : task->budget_us;
+            DWORD elapsed = (platform->time_us() - now_us);
+            DWORD charge  = (elapsed < task->budget_us) ? elapsed : task->budget_us;
 
             budget_remaining = (budget_remaining > charge) ? (budget_remaining - charge) : 0U;
             if (task->interval_ms != 0U)
             {
-                task->last_run_ms = (uint32_t)(platform->time_us() / 1000U);
+                task->last_run_ms = (platform->time_us() / 1000U);
             }
         }
 

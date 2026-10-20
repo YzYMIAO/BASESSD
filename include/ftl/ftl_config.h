@@ -10,10 +10,10 @@
  *   ② **编译期自检**（§二）——几何量之间的一致性。
  *   ③ **地址编码**（§三）——FTL 的两套地址：
  *        §三.1 LBA 侧：映射单元（IU = 1 CW = 512 B）、页基址、页内 CW、物理 plane、pair 窗口；
- *        §三.2 PBA 侧：系统物理地址 `nand_pba_t` 的位序、字段提取、与 PAA 的字段重排。
+ *        §三.2 PBA 侧：系统物理地址 `DWORD` 的位序、字段提取、与 PAA 的字段重排。
  *      LBA 与 PBA 的低 3 位 [plane:1][cw:2] 是同一套编码（编码宏在 nand_config.h）。
  *
- * ⚠ 芯片内地址 PAA（`nand_paa_t`）与展开式地址 `nand_addr_t` **不在本文件**——它们是
+ * ⚠ 芯片内地址 PAA（`DWORD`）与展开式地址 `nand_addr_t` **不在本文件**——它们是
  *   器件域的事实，在 **nand/nand_config.h**。PBA↔PAA 的转换函数在本文件，因为 PBA 是
  *   FTL 的地址货币（`pba_to_paa()` 一次转出 PAA 才跨进 FC）。
  *
@@ -43,7 +43,7 @@
 
 #include "assertion.h" /* ASSERT —— CW 级地址辅助的参数自检 */
 #include "fc.h"        /* FC_BUFFER_USER_SIZE —— 映射单元的用户数据字节数 */
-#include "ftl_type.h"  /* lba_t —— CW 级地址辅助的形参/返回类型 */
+#include "ftl_type.h"  /* DWORD —— CW 级地址辅助的形参/返回类型 */
 #include "nand_config.h"
 
 #include <stddef.h>
@@ -63,10 +63,10 @@
 #define FTL_IU_BYTES (FC_BUFFER_USER_SIZE)
 
 /* 每 region 条目数 = 一页主区 ÷ 每条 4 B（一个 PBA）*/
-#define L2P_ENTRIES_PER_REGION (PAGE_MAIN_SIZE / sizeof(uint32_t))
+#define L2P_ENTRIES_PER_REGION (PAGE_MAIN_SIZE / sizeof(DWORD))
 
 /* 每 region 字节数 = 一页主区 */
-#define L2P_REGION_SIZE (L2P_ENTRIES_PER_REGION * sizeof(uint32_t))
+#define L2P_REGION_SIZE (L2P_ENTRIES_PER_REGION * sizeof(DWORD))
 
 /* 设备维度总数 = 通道 × 片选 × 每片选 LUN 数
  * —— 每个 (ch,ce,lun) 是一个**独立 FTL 实例**（分片模型，见 l2p_cache.h 路由）*/
@@ -84,7 +84,7 @@
  * —— 每实例条目数 × 设备维度数。
  * ⚠ 这不是主机可见容量：它包含固定元数据块、OP 预留与 Spare。
  *   主机容量见 ftl.h 的 FTL_LBA_MAX（扣除这些块之后的 437 MiB）。 */
-#define FTL_IU_TOTAL ((uint64_t)L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION * FTL_DIM_TOTAL)
+#define FTL_IU_TOTAL ((QWORD)L2P_REGIONS_PER_INSTANCE * L2P_ENTRIES_PER_REGION * FTL_DIM_TOTAL)
 
 /* 映射表寻址容量（物理 CW 覆盖的字节数）——同样不是主机可见容量。
  * 主机可见容量用 ftl.h 的 FTL_HOST_CAPACITY_BYTES。 */
@@ -150,50 +150,50 @@ _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能�
 #define FTL_LBA_PER_PAIR (PLANE_NUM * CW_NUM)
 
 /* LBA → 页基址（低 CW_WIDTH 位 = cw 清零；plane 位保留） */
-static inline lba_t ftl_lba_page_base(lba_t lba)
+static inline DWORD ftl_lba_page_base(DWORD lba)
 {
-    return (lba_t)(lba & ~(lba_t)(CW_NUM - 1U));
+    return (lba & ~(CW_NUM - 1U));
 }
 
 /* LBA → 页内 CW 号（0..CW_NUM-1） */
-static inline uint8_t ftl_lba_cw(lba_t lba)
+static inline BYTE ftl_lba_cw(DWORD lba)
 {
-    return (uint8_t)(lba & (lba_t)(CW_NUM - 1U));
+    return (lba & (CW_NUM - 1U));
 }
 
 /* LBA → 该 LBA 应落在的**物理 plane**（bit CW_WIDTH 起，与 PBA 的 plane 位同源）。
  * 写路径按它选 plane、GC/WL 按它校验搬移目标 plane——「物理 plane == LBA 的 plane 位」
  * 是页内 META 可自洽还原 LBA 的前提（见本节头）。 */
-static inline uint8_t ftl_lba_plane(lba_t lba)
+static inline BYTE ftl_lba_plane(DWORD lba)
 {
-    return (uint8_t)((lba >> CW_WIDTH) & (lba_t)(PLANE_NUM - 1U));
+    return ((lba >> CW_WIDTH) & (PLANE_NUM - 1U));
 }
 
 /* 页基址 + CW 号 → LBA（ftl_lba_page_base 的逆） */
-static inline lba_t ftl_lba_make(lba_t page_base, uint8_t cw)
+static inline DWORD ftl_lba_make(DWORD page_base, BYTE cw)
 {
-    return (lba_t)(page_base | (lba_t)cw);
+    return (page_base | cw);
 }
 
 /* LBA → 它在「pair 窗口」内的槽位号（0..FTL_LBA_PER_PAIR-1 = 该 LBA 的 CW 在
  * flat 位图中的**绝对编号**）。
  * 写缓冲的 occupied 与命令的 cw_bitmap 都是这个 flat 布局（bit = plane*CW_NUM + cw），
  * 且 LBA 低 3 位就是 [plane][cw] ⇒ 槽位号 = plane*CW_NUM + cw。 */
-static inline uint8_t ftl_lba_pair_slot(lba_t lba)
+static inline BYTE ftl_lba_pair_slot(DWORD lba)
 {
-    return (uint8_t)(ftl_lba_plane(lba) * CW_NUM + ftl_lba_cw(lba));
+    return (ftl_lba_plane(lba) * CW_NUM + ftl_lba_cw(lba));
 }
 
 /* LBA → 页索引（bit 0 = plane，与 PBA 的 plane 位对齐） */
-static inline lba_t ftl_lba_page(lba_t lba)
+static inline DWORD ftl_lba_page(DWORD lba)
 {
-    return (lba_t)(lba >> CW_WIDTH);
+    return (lba >> CW_WIDTH);
 }
 
 /* LBA → 所属「pair 窗口」基址（8 个 LBA 一组：低 3 位全清零） */
-static inline lba_t ftl_lba_pair_base(lba_t lba)
+static inline DWORD ftl_lba_pair_base(DWORD lba)
 {
-    return (lba_t)(lba & ~(lba_t)(FTL_LBA_PER_PAIR - 1U));
+    return (lba & ~(FTL_LBA_PER_PAIR - 1U));
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -201,11 +201,11 @@ static inline lba_t ftl_lba_pair_base(lba_t lba)
  *
  * 本工程有三套地址，位序**刻意不同**，各司其职：
  *
- *   PAA（nand_paa_t）  芯片内地址，低位优先 [CW:2][PAGE:6][PLANE:1][BLOCK:11][LUN]
+ *   PAA（DWORD）  芯片内地址，低位优先 [CW:2][PAGE:6][PLANE:1][BLOCK:11][LUN]
  *                      —— 位序由 MT29F4G08 的 BA6/PA 规则决定，**不可随意改**；
  *                         paa_to_nand_row() 负责把它编成器件的行地址。
  *                         **定义于 nand/nand_config.h（器件域）**。
- *   PBA（nand_pba_t）  系统物理地址，低位优先 [CW:2][PLANE:1][PAGE:6][BLOCK:11][LUN][CE][CH]
+ *   PBA（DWORD）  系统物理地址，低位优先 [CW:2][PLANE:1][PAGE:6][BLOCK:11][LUN][CE][CH]
  *                      —— 位序由本工程自定，**按 LBA 的结构排**（见下）；
  *                         L2P 表 / Journal / BST 存的就是它。**就是本节**。
  *   LBA               逻辑地址，与 PBA 逐位同构：[CH][CE][LUN][BLOCK][PAGE][PLANE][CW]
@@ -245,8 +245,6 @@ static inline lba_t ftl_lba_pair_base(lba_t lba)
 #define PBA_CE_MASK    NAND_FIELD_MASK(PBA_CE_WIDTH)
 #define PBA_CH_MASK    NAND_FIELD_MASK(PBA_CH_WIDTH)
 
-typedef uint32_t nand_pba_t;
-
 /* 无效 PBA 值。PBA 编码最多 26 bit，全 F 不可能是合法地址。 */
 #define NAND_PBA_INVALID (0xFFFFFFFFU)
 
@@ -254,69 +252,69 @@ typedef uint32_t nand_pba_t;
  *
  * 返回类型 = 字段的**自然宽度**：窄化在 getter 内完成一次，调用点不再逐个强转。 */
 
-static inline uint8_t pba_to_ch(nand_pba_t pba)
+static inline BYTE pba_to_ch(DWORD pba)
 {
-    return (uint8_t)((pba >> PBA_CH_SHIFT) & PBA_CH_MASK);
+    return ((pba >> PBA_CH_SHIFT) & PBA_CH_MASK);
 }
 
-static inline uint8_t pba_to_ce(nand_pba_t pba)
+static inline BYTE pba_to_ce(DWORD pba)
 {
-    return (uint8_t)((pba >> PBA_CE_SHIFT) & PBA_CE_MASK);
+    return ((pba >> PBA_CE_SHIFT) & PBA_CE_MASK);
 }
 
-static inline uint8_t pba_to_lun(nand_pba_t pba)
+static inline BYTE pba_to_lun(DWORD pba)
 {
-    return (uint8_t)((pba >> PBA_LUN_SHIFT) & PBA_LUN_MASK);
+    return ((pba >> PBA_LUN_SHIFT) & PBA_LUN_MASK);
 }
 
-static inline uint16_t pba_to_block(nand_pba_t pba)
+static inline WORD pba_to_block(DWORD pba)
 {
-    return (uint16_t)((pba >> PBA_BLOCK_SHIFT) & PBA_BLOCK_MASK);
+    return ((pba >> PBA_BLOCK_SHIFT) & PBA_BLOCK_MASK);
 }
 
-static inline uint8_t pba_to_page(nand_pba_t pba)
+static inline BYTE pba_to_page(DWORD pba)
 {
-    return (uint8_t)((pba >> PBA_PAGE_SHIFT) & PBA_PAGE_MASK);
+    return ((pba >> PBA_PAGE_SHIFT) & PBA_PAGE_MASK);
 }
 
-static inline uint8_t pba_to_plane(nand_pba_t pba)
+static inline BYTE pba_to_plane(DWORD pba)
 {
-    return (uint8_t)((pba >> PLANE_CW_SHIFT) & PBA_PLANE_MASK);
+    return ((pba >> PLANE_CW_SHIFT) & PBA_PLANE_MASK);
 }
 
-static inline uint8_t pba_to_cw(nand_pba_t pba)
+static inline BYTE pba_to_cw(DWORD pba)
 {
-    return (uint8_t)((pba >> PBA_CW_SHIFT) & NAND_FIELD_MASK(CW_WIDTH));
+    return ((pba >> PBA_CW_SHIFT) & NAND_FIELD_MASK(CW_WIDTH));
 }
 
-/* ── PBA 字段视图（4 字节位域，位序与 nand_pba_t 一致）──
+/* ── PBA 字段视图（4 字节位域，位序与 DWORD 一致）──
  *
  * 用途 = **具名构造 / 读取 FTL 地址**，取代原先借道 nand_addr_t 的
- * pba_from_addr() / addr_from_pba()。FTL 层的地址自此只有 nand_pba_t 一种表示，
+ * pba_from_addr() / addr_from_pba()。FTL 层的地址自此只有 DWORD 一种表示，
  * nand_addr_t 整体退出 FTL（只在 pba_to_paa() 这一个跨层转换器内部出现）。
  *
  * ⚠ 位域布局是 implementation-defined：本仓只跑 arm-none-eabi-gcc + 小端
  *   （config.mk 的 -mlittle-endian），该组合下位域自 LSB 起、按声明序分配 ⇒ 与
  *   PBA_*_SHIFT 一致。换编译器 / 大端即失效 ⇒ 由 pba_fields_layout_matches()
  *   在 ftl_init 里开机自检一次，不一致即断言，绝不静默算错地址。
- * ⚠ 只作**内存内视图**，不落介质 —— 介质一律写 nand_pba_t 的裸 4 字节。
+ * ⚠ 只作**内存内视图**，不落介质 —— 介质一律写 DWORD 的裸 4 字节。
  * ⚠ LUN_ADDR_WIDTH == 0 时**不能**声明 `lun : 0`（C11 6.7.2.1p4 禁止零宽位域），
  *   故用 #if 隐去；此时 CE 恰好落在 LUN 本应在的位上（PBA_CE_SHIFT == PBA_LUN_SHIFT）。
  */
 typedef struct
 {
-    uint32_t cw : CW_WIDTH;
-    uint32_t plane : PLANE_ADDR_WIDTH;
-    uint32_t page : PAGE_ADDR_WIDTH;
-    uint32_t block : BLOCK_ADDR_WIDTH;
+    DWORD cw : CW_WIDTH;
+    DWORD plane : PLANE_ADDR_WIDTH;
+    DWORD page : PAGE_ADDR_WIDTH;
+    DWORD block : BLOCK_ADDR_WIDTH;
 #if (LUN_ADDR_WIDTH > 0U)
-    uint32_t lun : LUN_ADDR_WIDTH;
+    DWORD lun : LUN_ADDR_WIDTH;
 #endif
-    uint32_t ce : PBA_CE_WIDTH;
-    uint32_t ch : PBA_CH_WIDTH;
+    DWORD ce : PBA_CE_WIDTH;
+    DWORD ch : PBA_CH_WIDTH;
 } nand_pba_fields_t;
 
-_Static_assert(sizeof(nand_pba_fields_t) == sizeof(nand_pba_t), "PBA 字段视图必须与 nand_pba_t 同为 4 字节");
+_Static_assert(sizeof(nand_pba_fields_t) == sizeof(DWORD), "PBA 字段视图必须与 DWORD 同为 4 字节");
 
 /* PBA 实际占用的低位位数 —— 屏蔽位域结构体尾部的填充位 */
 #define PBA_USED_BITS (PBA_CH_SHIFT + PBA_CH_WIDTH)
@@ -331,19 +329,19 @@ _Static_assert(PBA_USED_BITS <= 32U, "PBA 编码超出 32 位");
  * **按 PBA_*_SHIFT 宏打包**，不依赖位域布局（尾部位恒 0，无填充位垃圾）。
  * 这是 FTL 层「手搭地址」的唯一入口——位域结构体不能在 LUN_ADDR_WIDTH == 0 时
  * 声明 lun 成员，故把那一处 #if 收敛在本函数里（PBA_LUN_MASK 为 0 ⇒ lun 自然被忽略）。 */
-static inline nand_pba_t pba_make(uint32_t ch, uint32_t ce, uint32_t lun, uint32_t block, uint32_t plane, uint32_t page, uint32_t cw)
+static inline DWORD pba_make(DWORD ch, DWORD ce, DWORD lun, DWORD block, DWORD plane, DWORD page, DWORD cw)
 {
-    return ((nand_pba_t)(cw & NAND_FIELD_MASK(CW_WIDTH)) << PBA_CW_SHIFT) |
-           ((nand_pba_t)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT) |
-           ((nand_pba_t)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT) |
-           ((nand_pba_t)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT) |
-           ((nand_pba_t)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT) |
-           ((nand_pba_t)(ce & PBA_CE_MASK) << PBA_CE_SHIFT) |
-           ((nand_pba_t)(ch & PBA_CH_MASK) << PBA_CH_SHIFT);
+    return ((DWORD)(cw & NAND_FIELD_MASK(CW_WIDTH)) << PBA_CW_SHIFT) |
+           ((DWORD)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT) |
+           ((DWORD)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT) |
+           ((DWORD)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT) |
+           ((DWORD)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT) |
+           ((DWORD)(ce & PBA_CE_MASK) << PBA_CE_SHIFT) |
+           ((DWORD)(ch & PBA_CH_MASK) << PBA_CH_SHIFT);
 }
 
 /* 字段视图 → PBA 字（值语义，pba_fields 的逆）。 */
-static inline nand_pba_t pba_pack(nand_pba_fields_t f)
+static inline DWORD pba_pack(nand_pba_fields_t f)
 {
 #if (LUN_ADDR_WIDTH > 0U)
     return pba_make(f.ch, f.ce, f.lun, f.block, f.plane, f.page, f.cw);
@@ -353,7 +351,7 @@ static inline nand_pba_t pba_pack(nand_pba_fields_t f)
 }
 
 /* PBA 字 → 字段视图（值语义）。逐字段走 pba_to_*（编译期可证的解码路径）。 */
-static inline nand_pba_fields_t pba_fields(nand_pba_t pba)
+static inline nand_pba_fields_t pba_fields(DWORD pba)
 {
     nand_pba_fields_t f;
 
@@ -379,7 +377,7 @@ static inline nand_pba_fields_t pba_fields(nand_pba_t pba)
  * 该字段在 PBA_*_SHIFT 上的单比特值。
  *
  * 值语义（pba_pack / pba_fields）本身**不依赖**本结论 —— 它们走宏。本检查保证的是
- * **强转可用**：`*(nand_pba_t *)&fields` 与 pba_pack(fields) 同值。
+ * **强转可用**：`*(DWORD *)&fields` 与 pba_pack(fields) 同值。
  *
  * @return true = 布局与 PBA_*_SHIFT 一致；false = 不一致（调用者应断言）
  */
@@ -388,113 +386,125 @@ static inline bool pba_fields_layout_matches(void)
     union
     {
         nand_pba_fields_t f;
-        nand_pba_t        u;
+        DWORD             u;
     } v;
-    uint8_t ok = 1U;
+    BYTE ok = 1U;
 
-    v.f = (nand_pba_fields_t){.cw = 1U};
-    ok  = (uint8_t)(ok & (uint8_t)((v.u & PBA_USED_MASK) == (1U << PBA_CW_SHIFT)));
-    v.f = (nand_pba_fields_t){.plane = 1U};
-    ok  = (uint8_t)(ok & (uint8_t)((v.u & PBA_USED_MASK) == (1U << PLANE_CW_SHIFT)));
-    v.f = (nand_pba_fields_t){.page = 1U};
-    ok  = (uint8_t)(ok & (uint8_t)((v.u & PBA_USED_MASK) == (1U << PBA_PAGE_SHIFT)));
-    v.f = (nand_pba_fields_t){.block = 1U};
-    ok  = (uint8_t)(ok & (uint8_t)((v.u & PBA_USED_MASK) == (1U << PBA_BLOCK_SHIFT)));
-    v.f = (nand_pba_fields_t){.ce = 1U};
-    ok  = (uint8_t)(ok & (uint8_t)((v.u & PBA_USED_MASK) == (1U << PBA_CE_SHIFT)));
-    v.f = (nand_pba_fields_t){.ch = 1U};
-    ok  = (uint8_t)(ok & (uint8_t)((v.u & PBA_USED_MASK) == (1U << PBA_CH_SHIFT)));
+    v.u       = 0U;
+    v.f.cw    = 1U;
+    ok        = (ok & ((v.u & PBA_USED_MASK) == (1U << PBA_CW_SHIFT)));
+    v.u       = 0U;
+    v.f.plane = 1U;
+    ok        = (ok & ((v.u & PBA_USED_MASK) == (1U << PLANE_CW_SHIFT)));
+    v.u       = 0U;
+    v.f.page  = 1U;
+    ok        = (ok & ((v.u & PBA_USED_MASK) == (1U << PBA_PAGE_SHIFT)));
+    v.u       = 0U;
+    v.f.block = 1U;
+    ok        = (ok & ((v.u & PBA_USED_MASK) == (1U << PBA_BLOCK_SHIFT)));
+    v.u       = 0U;
+    v.f.ce    = 1U;
+    ok        = (ok & ((v.u & PBA_USED_MASK) == (1U << PBA_CE_SHIFT)));
+    v.u       = 0U;
+    v.f.ch    = 1U;
+    ok        = (ok & ((v.u & PBA_USED_MASK) == (1U << PBA_CH_SHIFT)));
 #if (LUN_ADDR_WIDTH > 0U)
-    v.f = (nand_pba_fields_t){.lun = 1U};
-    ok  = (uint8_t)(ok & (uint8_t)((v.u & PBA_USED_MASK) == (1U << PBA_LUN_SHIFT)));
+    v.u     = 0U;
+    v.f.lun = 1U;
+    ok      = (ok & ((v.u & PBA_USED_MASK) == (1U << PBA_LUN_SHIFT)));
 #endif
 
     /* 值语义往返（走宏，与位域布局无关）：pba_pack(pba_fields(p)) == p。
      * 用 PBA_USED_MASK 而不是固定 0x00FFFFFF：LUN 位宽变化后仍覆盖全部字段。 */
-    ok = (uint8_t)(ok & (uint8_t)(pba_pack(pba_fields((nand_pba_t)PBA_USED_MASK)) == (nand_pba_t)PBA_USED_MASK));
+    ok = (ok & (pba_pack(pba_fields(PBA_USED_MASK)) == PBA_USED_MASK));
 
     return ok;
 }
 
 /* 从 PBA 提取芯片内地址（PAA）。两套位序不同 ⇒ **真正的字段重排**，不是掩码截取。 */
-static inline nand_paa_t pba_to_paa(nand_pba_t pba)
+static inline DWORD pba_to_paa(DWORD pba)
 {
-    return paa_from_addr(&(nand_addr_t){.lun   = pba_to_lun(pba),
-                                        .block = pba_to_block(pba),
-                                        .plane = pba_to_plane(pba),
-                                        .page  = pba_to_page(pba),
-                                        .cw    = pba_to_cw(pba)});
+    nand_addr_t addr;
+
+    addr.ch    = 0U;
+    addr.ce    = 0U;
+    addr.lun   = pba_to_lun(pba);
+    addr.block = pba_to_block(pba);
+    addr.plane = pba_to_plane(pba);
+    addr.page  = pba_to_page(pba);
+    addr.cw    = pba_to_cw(pba);
+    return paa_from_addr(&addr);
 }
 
 /* ── 便利构造 ── */
 
 /* 从芯片内地址 PAA + CH/CE 构造 PBA（字段重排，pba_to_paa 的逆）。
  * 仅作为跨层桥接：PAA 从 FC 侧回来时用它还原 PBA（见 ftl_fc_interface.h 的 ftl_cmd_pba）。 */
-static inline nand_pba_t paa_to_pba(uint32_t ch, uint32_t ce, nand_paa_t paa)
+static inline DWORD paa_to_pba(DWORD ch, DWORD ce, DWORD paa)
 {
     return pba_make(ch, ce, paa_to_lun(paa), paa_to_block(paa), paa_to_plane(paa), paa_to_page(paa), paa_to_cw(paa));
 }
 
 /* 取 PBA 的**页**（CW 位清零）——同一物理页的 4 个 CW 共享它 */
-static inline nand_pba_t pba_page(nand_pba_t pba)
+static inline DWORD pba_page(DWORD pba)
 {
-    return (nand_pba_t)(pba & ~(nand_pba_t)(CW_NUM - 1U));
+    return (pba & ~(CW_NUM - 1U));
 }
 
 /* 同 page 内换 CW */
-static inline nand_pba_t pba_with_cw(nand_pba_t pba, uint32_t cw)
+static inline DWORD pba_with_cw(DWORD pba, DWORD cw)
 {
-    return (pba & ~(nand_pba_t)NAND_FIELD_MASK(CW_WIDTH)) |
+    return (pba & ~NAND_FIELD_MASK(CW_WIDTH)) |
            ((cw & NAND_FIELD_MASK(CW_WIDTH)) << CW_WIDTH_SHIFT);
 }
 
 /* 替换 PBA 中的各字段（直接按 PBA 移位，不经 PAA 往返） */
-static inline nand_pba_t pba_with_page(nand_pba_t pba, uint32_t page)
+static inline DWORD pba_with_page(DWORD pba, DWORD page)
 {
-    return (nand_pba_t)((pba & ~(nand_pba_t)(PBA_PAGE_MASK << PBA_PAGE_SHIFT)) |
-                        ((nand_pba_t)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT));
+    return ((pba & ~(PBA_PAGE_MASK << PBA_PAGE_SHIFT)) |
+            ((DWORD)(page & PBA_PAGE_MASK) << PBA_PAGE_SHIFT));
 }
 
-static inline nand_pba_t pba_with_plane(nand_pba_t pba, uint32_t plane)
+static inline DWORD pba_with_plane(DWORD pba, DWORD plane)
 {
-    return (nand_pba_t)((pba & ~(nand_pba_t)(PBA_PLANE_MASK << PLANE_CW_SHIFT)) |
-                        ((nand_pba_t)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT));
+    return ((pba & ~(PBA_PLANE_MASK << PLANE_CW_SHIFT)) |
+            ((DWORD)(plane & PBA_PLANE_MASK) << PLANE_CW_SHIFT));
 }
 
-static inline nand_pba_t pba_with_block(nand_pba_t pba, uint32_t block)
+static inline DWORD pba_with_block(DWORD pba, DWORD block)
 {
-    return (nand_pba_t)((pba & ~(nand_pba_t)(PBA_BLOCK_MASK << PBA_BLOCK_SHIFT)) |
-                        ((nand_pba_t)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT));
+    return ((pba & ~(PBA_BLOCK_MASK << PBA_BLOCK_SHIFT)) |
+            ((DWORD)(block & PBA_BLOCK_MASK) << PBA_BLOCK_SHIFT));
 }
 
-static inline nand_pba_t pba_with_lun(nand_pba_t pba, uint32_t lun)
+static inline DWORD pba_with_lun(DWORD pba, DWORD lun)
 {
-    return (nand_pba_t)((pba & ~(nand_pba_t)(PBA_LUN_MASK << PBA_LUN_SHIFT)) |
-                        ((nand_pba_t)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT));
+    return ((pba & ~(PBA_LUN_MASK << PBA_LUN_SHIFT)) |
+            ((DWORD)(lun & PBA_LUN_MASK) << PBA_LUN_SHIFT));
 }
 
-static inline nand_pba_t pba_with_ch(nand_pba_t pba, uint32_t ch)
+static inline DWORD pba_with_ch(DWORD pba, DWORD ch)
 {
-    return (nand_pba_t)((pba & ~(PBA_CH_MASK << PBA_CH_SHIFT)) |
-                        ((ch & PBA_CH_MASK) << PBA_CH_SHIFT));
+    return ((pba & ~(PBA_CH_MASK << PBA_CH_SHIFT)) |
+            ((ch & PBA_CH_MASK) << PBA_CH_SHIFT));
 }
 
-static inline nand_pba_t pba_with_ce(nand_pba_t pba, uint32_t ce)
+static inline DWORD pba_with_ce(DWORD pba, DWORD ce)
 {
-    return (nand_pba_t)((pba & ~(PBA_CE_MASK << PBA_CE_SHIFT)) |
-                        ((ce & PBA_CE_MASK) << PBA_CE_SHIFT));
+    return ((pba & ~(PBA_CE_MASK << PBA_CE_SHIFT)) |
+            ((ce & PBA_CE_MASK) << PBA_CE_SHIFT));
 }
 
 /* ── 比较与校验 ── */
 
 /* 是否同 Page（无视 CW） */
-static inline bool pba_same_page(nand_pba_t a, nand_pba_t b)
+static inline bool pba_same_page(DWORD a, DWORD b)
 {
     return pba_page(a) == pba_page(b);
 }
 
 /* 各字段是否在芯片规格范围内 */
-static inline bool pba_is_valid(nand_pba_t pba)
+static inline bool pba_is_valid(DWORD pba)
 {
     return (pba_to_page(pba) < PAGES_PER_BLOCK) &&
            (pba_to_plane(pba) < PLANE_NUM) &&
@@ -510,33 +520,33 @@ static inline bool pba_is_valid(nand_pba_t pba)
  * ══════════════════════════════════════════════════════════════════ */
 
 /* 单 plane 段内、CW [cw_lo, cw_hi] 的 flat 位图（段起点由调用者左移） */
-static inline uint32_t ftl_cw_span_mask(uint8_t cw_lo, uint8_t cw_hi)
+static inline DWORD ftl_cw_span_mask(BYTE cw_lo, BYTE cw_hi)
 {
-    return (uint32_t)((1U << (uint32_t)(cw_hi + 1U)) - 1U) & ~((1U << (uint32_t)cw_lo) - 1U);
+    return ((1U << (cw_hi + 1U)) - 1U) & ~((1U << cw_lo) - 1U);
 }
 
 /* 单个 plane 的全 CW 掩码（已左移到该 plane 的段）。
  * 一位一段：plane p 占 bit [p*CW_NUM, (p+1)*CW_NUM)——见 §三.3 的 flat 编号约定。 */
-static inline uint32_t ftl_cw_plane_mask(uint8_t plane)
+static inline DWORD ftl_cw_plane_mask(BYTE plane)
 {
-    return (uint32_t)(ftl_cw_span_mask(0U, CW_NUM - 1U) << ((uint32_t)plane * CW_NUM));
+    return (ftl_cw_span_mask(0U, CW_NUM - 1U) << (plane * CW_NUM));
 }
 
 /* 单 plane 内单个 CW 的 flat 位（已左移到该 plane 的段）。
  * ⚠ flat 是**绝对**编号：plane 1 的 CW0 是 bit CW_NUM，不是 bit 0。
  *   所有 CW 位图（含逐 plane 保存的 `migrate_handle_t.cw_bitmap[]`）都用本函数构造，
  *   避免同一份位图出现「绝对位置、相对位判」两种写法。 */
-static inline uint32_t ftl_cw_bit(uint8_t plane, uint8_t cw)
+static inline DWORD ftl_cw_bit(BYTE plane, BYTE cw)
 {
-    return (uint32_t)1U << ((uint32_t)plane * CW_NUM + cw);
+    return 1U << (plane * CW_NUM + cw);
 }
 
 /* 位图覆盖了几个 plane（= 本命令的 multi-plane 数；全空 → 0，调用者自判非法）。
  * ⚠ 界走 PLANE_NUM（几何常量），与 fc_command_plane_span 的上界同源。 */
-static inline uint8_t ftl_cw_bitmap_plane_count(uint32_t bitmap)
+static inline BYTE ftl_cw_bitmap_plane_count(DWORD bitmap)
 {
-    uint8_t plane;
-    uint8_t n = 0U;
+    BYTE plane;
+    BYTE n = 0U;
 
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
@@ -550,11 +560,11 @@ static inline uint8_t ftl_cw_bitmap_plane_count(uint32_t bitmap)
 
 /* 位图的置位数（= 本页实际 CW 数，即 n_cw）。只看前 FTL_LBA_PER_PAIR 位——
  * 那是一页的总 CW 数，段外的高位不参与。 */
-static inline uint8_t ftl_cw_bitmap_popcount(uint32_t bitmap)
+static inline BYTE ftl_cw_bitmap_popcount(DWORD bitmap)
 {
-    uint8_t n = 0U;
+    BYTE n = 0U;
 
-    bitmap &= (uint32_t)((1U << (uint32_t)FTL_LBA_PER_PAIR) - 1U);
+    bitmap &= ((1U << FTL_LBA_PER_PAIR) - 1U);
     while (bitmap != 0U)
     {
         n++;

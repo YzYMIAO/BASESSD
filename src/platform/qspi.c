@@ -9,22 +9,22 @@
 
 #include "common.h"
 
-uint8_t qspi_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime)
+BYTE qspi_wait_flag(DWORD flag, BYTE sta, DWORD wtime)
 {
     return qspi_port_wait_flag(flag, sta, wtime);
 }
 
-uint8_t qspi_init(void)
+BYTE qspi_init(void)
 {
     return qspi_port_init();
 }
 
-uint8_t qspi_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmcycle)
+BYTE qspi_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle)
 {
     return qspi_port_send_cmd(cmd, addr, mode, dmcycle);
 }
 
-uint8_t qspi_receive(uint8_t *buf, uint32_t datalen)
+BYTE qspi_receive(BYTE *buf, DWORD datalen)
 {
     if ((buf == NULL) || (datalen == 0U))
     {
@@ -33,7 +33,7 @@ uint8_t qspi_receive(uint8_t *buf, uint32_t datalen)
     return qspi_port_receive(buf, datalen);
 }
 
-uint8_t qspi_transmit(uint8_t *buf, uint32_t datalen)
+BYTE qspi_transmit(BYTE *buf, DWORD datalen)
 {
     if ((buf == NULL) || (datalen == 0U))
     {

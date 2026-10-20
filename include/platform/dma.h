@@ -1,6 +1,8 @@
 #ifndef PLATFORM_DMA_H
 #define PLATFORM_DMA_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdint.h>
 
 /*
@@ -13,12 +15,12 @@
 
 /* ── UART TX DMA（USART1；平台内部使用）── */
 
-uint8_t uart_tx_dma_init(void);
-void    uart_tx_dma_irq_handler(void);
+BYTE uart_tx_dma_init(void);
+void uart_tx_dma_irq_handler(void);
 
 /* port 接口：由 src/platform/<soc>/dma_port.c 实现；共享 src/platform/dma.c 只转发。 */
-uint8_t dma_port_uart_tx_init(void);
-void    dma_port_uart_tx_irq_handler(void);
+BYTE dma_port_uart_tx_init(void);
+void dma_port_uart_tx_irq_handler(void);
 
 /* ── NAND 数据搬移模式 ──
  *
@@ -47,35 +49,35 @@ typedef enum
     DMA_RESULT_ERROR = 1U,
 } nand_dma_result_t;
 
-extern uint8_t g_nand_dma_enable;
+extern BYTE g_nand_dma_enable;
 
 nand_dma_result_t nand_dma_init(void);
 
-nand_dma_result_t nand_dma_memory_to_fmc(volatile uint8_t *fmc_data_reg,
-                                         const uint8_t    *buffer,
-                                         uint16_t          length);
-nand_dma_result_t nand_dma_fmc_to_memory(volatile uint8_t *fmc_data_reg,
-                                         uint8_t          *buffer,
-                                         uint16_t          length);
+nand_dma_result_t nand_dma_memory_to_fmc(volatile BYTE *fmc_data_reg,
+                                         const BYTE    *buffer,
+                                         WORD           length);
+nand_dma_result_t nand_dma_fmc_to_memory(volatile BYTE *fmc_data_reg,
+                                         BYTE          *buffer,
+                                         WORD           length);
 
-nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile uint8_t *fmc_data_reg,
-                                                  const uint8_t    *buffer,
-                                                  uint16_t          length);
-nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile uint8_t *fmc_data_reg,
-                                                  uint8_t          *buffer,
-                                                  uint16_t          length);
+nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile BYTE *fmc_data_reg,
+                                                  const BYTE    *buffer,
+                                                  WORD           length);
+nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile BYTE *fmc_data_reg,
+                                                  BYTE          *buffer,
+                                                  WORD           length);
 
-uint8_t nand_dma_data_out_done(void);
-uint8_t nand_dma_data_in_done(void);
-void    nand_dma_clear_flags(void);
-uint8_t nand_dma_is_out_busy(void);
-uint8_t nand_dma_is_in_busy(void);
-void    nand_dma_abort_out(void);
-void    nand_dma_abort_in(void);
-void    nand_dma_irq_handler_data_out(void);
-void    nand_dma_irq_handler_data_in(void);
-void    nand_dma_cache_clean(const uint8_t *buffer, uint16_t length);
-void    nand_dma_cache_invalidate(uint8_t *buffer, uint16_t length);
+BYTE nand_dma_data_out_done(void);
+BYTE nand_dma_data_in_done(void);
+void nand_dma_clear_flags(void);
+BYTE nand_dma_is_out_busy(void);
+BYTE nand_dma_is_in_busy(void);
+void nand_dma_abort_out(void);
+void nand_dma_abort_in(void);
+void nand_dma_irq_handler_data_out(void);
+void nand_dma_irq_handler_data_in(void);
+void nand_dma_cache_clean(const BYTE *buffer, WORD length);
+void nand_dma_cache_invalidate(BYTE *buffer, WORD length);
 
 #else /* !CONFIG_NAND_DMA */
 
@@ -94,28 +96,28 @@ static inline nand_dma_result_t nand_dma_init(void)
     (void)0;
     return DMA_RESULT_OK;
 }
-static inline nand_dma_result_t nand_dma_memory_to_fmc(volatile uint8_t *a, const uint8_t *b, uint16_t c)
+static inline nand_dma_result_t nand_dma_memory_to_fmc(volatile BYTE *a, const BYTE *b, WORD c)
 {
     (void)a;
     (void)b;
     (void)c;
     return DMA_RESULT_OK;
 }
-static inline nand_dma_result_t nand_dma_fmc_to_memory(volatile uint8_t *a, uint8_t *b, uint16_t c)
+static inline nand_dma_result_t nand_dma_fmc_to_memory(volatile BYTE *a, BYTE *b, WORD c)
 {
     (void)a;
     (void)b;
     (void)c;
     return DMA_RESULT_OK;
 }
-static inline nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile uint8_t *a, const uint8_t *b, uint16_t c)
+static inline nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile BYTE *a, const BYTE *b, WORD c)
 {
     (void)a;
     (void)b;
     (void)c;
     return DMA_RESULT_OK;
 }
-static inline nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile uint8_t *a, uint8_t *b, uint16_t c)
+static inline nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile BYTE *a, BYTE *b, WORD c)
 {
     (void)a;
     (void)b;
@@ -125,19 +127,19 @@ static inline nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile uint8_t
 static inline void nand_dma_clear_flags(void)
 {
 }
-static inline uint8_t nand_dma_data_out_done(void)
+static inline BYTE nand_dma_data_out_done(void)
 {
     return 0U;
 }
-static inline uint8_t nand_dma_data_in_done(void)
+static inline BYTE nand_dma_data_in_done(void)
 {
     return 0U;
 }
-static inline uint8_t nand_dma_is_out_busy(void)
+static inline BYTE nand_dma_is_out_busy(void)
 {
     return 0U;
 }
-static inline uint8_t nand_dma_is_in_busy(void)
+static inline BYTE nand_dma_is_in_busy(void)
 {
     return 0U;
 }
@@ -153,12 +155,12 @@ static inline void nand_dma_irq_handler_data_out(void)
 static inline void nand_dma_irq_handler_data_in(void)
 {
 }
-static inline void nand_dma_cache_clean(const uint8_t *buffer, uint16_t length)
+static inline void nand_dma_cache_clean(const BYTE *buffer, WORD length)
 {
     (void)buffer;
     (void)length;
 }
-static inline void nand_dma_cache_invalidate(uint8_t *buffer, uint16_t length)
+static inline void nand_dma_cache_invalidate(BYTE *buffer, WORD length)
 {
     (void)buffer;
     (void)length;

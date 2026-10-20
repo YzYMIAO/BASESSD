@@ -8,6 +8,8 @@
 #include "mpu.h"
 #include "sys_port.h"
 
+#include <string.h>
+
 /**
  * @brief   设置MPU区域保护
  * @param   baseaddr: 区域基地址
@@ -50,9 +52,11 @@
  * @arg     MPU_ACCESS_NOT_BUFFERABLE: 禁止缓冲
  * @retval  无
  */
-void mpu_port_set_protection(uint32_t baseaddr, uint32_t size, uint32_t rnum, uint8_t de, uint8_t ap, uint8_t sen, uint8_t cen, uint8_t ben)
+void mpu_port_set_protection(DWORD baseaddr, DWORD size, DWORD rnum, BYTE de, BYTE ap, BYTE sen, BYTE cen, BYTE ben)
 {
-    MPU_Region_InitTypeDef mpu_region_init_struct = {0};
+    MPU_Region_InitTypeDef mpu_region_init_struct;
+
+    memset(&mpu_region_init_struct, 0, sizeof(mpu_region_init_struct));
 
     mpu_region_init_struct.Enable           = MPU_REGION_ENABLE;
     mpu_region_init_struct.Number           = rnum;

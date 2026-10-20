@@ -39,11 +39,11 @@
 /* 每个 LUN 的 RAID 上下文 */
 typedef struct
 {
-    uint8_t  active;                          /* 0=空闲, 1=RAID 序列进行中 */
-    uint8_t  acc_buf[FC_BUFFER_POOL_CW_SIZE]; /* XOR 累加器缓冲（一个 CW 大小） */
-    uint8_t  processed;                       /* 已累加的 CW 数（含 START） */
-    uint8_t  total;                           /* 期望累加的总 CW 数 */
-    uint32_t start_paa;                       /* 起始 PAA（调试用） */
+    BYTE  active;                          /* 0=空闲, 1=RAID 序列进行中 */
+    BYTE  acc_buf[FC_BUFFER_POOL_CW_SIZE]; /* XOR 累加器缓冲（一个 CW 大小） */
+    BYTE  processed;                       /* 已累加的 CW 数（含 START） */
+    BYTE  total;                           /* 期望累加的总 CW 数 */
+    DWORD start_paa;                       /* 起始 PAA（调试用） */
 } fc_raid_context_t;
 
 /*
@@ -55,7 +55,7 @@ typedef struct
 /* ── 上下文管理 ── */
 
 /* 初始化指定 LUN 的 RAID 上下文 */
-void fc_raid_init_ctx(uint8_t lun);
+void fc_raid_init_ctx(BYTE lun);
 
 /* ── RAID 序列 ── */
 
@@ -68,7 +68,7 @@ void fc_raid_init_ctx(uint8_t lun);
  * @param total     本次序列期望的 CW 总数（含第一个）
  * @return          FC_STATUS_OK 或 FC_STATUS_NOT_READY（LUN 忙）
  */
-fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total);
+fc_status_t fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total);
 
 /*
  * 累加一个 CW 到 RAID 累加器。acc_buf ^= cw_buffer。
@@ -78,7 +78,7 @@ fc_status_t fc_raid_start(uint8_t lun, const uint8_t *cw_buffer, uint8_t total);
  * @return          FC_STATUS_OK 或 FC_STATUS_INVALID_ARGUMENT（序列未开始）。
  *                  超出 total 的累加属调用者计数 bug → ASSERT。
  */
-fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer);
+fc_status_t fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer);
 
 /*
  * 结束 RAID 序列，将累加器结果写入 parity_buffer。
@@ -88,15 +88,15 @@ fc_status_t fc_raid_accumulate(uint8_t lun, const uint8_t *cw_buffer);
  * @param parity_buffer 输出：XOR 结果写入此 buffer
  * @return              FC_STATUS_OK 或 FC_STATUS_INVALID_ARGUMENT
  */
-fc_status_t fc_raid_end(uint8_t lun, uint8_t *parity_buffer);
+fc_status_t fc_raid_end(BYTE lun, BYTE *parity_buffer);
 
 /* ── 中断保护 ── */
 
 /* 保存 RAID 上下文到影子缓冲（HSQ 打断前调用） */
-void fc_raid_save(uint8_t lun);
+void fc_raid_save(BYTE lun);
 
 /* 从影子缓冲恢复 RAID 上下文（HSQ 完成后调回） */
-void fc_raid_restore(uint8_t lun);
+void fc_raid_restore(BYTE lun);
 
 /* ── 静态恢复（ECC 失败后使用，不需要 LUN 上下文） ── */
 
@@ -111,11 +111,11 @@ void fc_raid_restore(uint8_t lun);
  * @param failed_idx  失败的 buffer 索引（0..count-1）
  * @param length      每个 buffer 的长度
  */
-void fc_raid_recover(uint8_t *recovered,
-                     uint8_t *buffers[],
-                     uint8_t  count,
-                     uint8_t  failed_idx,
-                     uint16_t length);
+void fc_raid_recover(BYTE *recovered,
+                     BYTE *buffers[],
+                     BYTE  count,
+                     BYTE  failed_idx,
+                     WORD  length);
 
 #endif /* CONFIG_FC_RAID */
 #endif /* FC_RAID_ENGINE_H */

@@ -1,6 +1,8 @@
 #ifndef FC_CRC_ENGINE_H_
 #define FC_CRC_ENGINE_H_
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdint.h>
 
 /*
@@ -37,9 +39,9 @@ void fc_crc_init(void);
  * @param   user_data  指向 USER 数据的指针（buffer + 8）
  * @return  CRC-32 值
  * @note    user_data **必须 4 字节对齐**——硬性前置条件：硬件按 32 位字喂入，
- *          HAL 直接按 uint32_t* 解引用。违反属未对齐访问。
+ *          HAL 直接按 DWORD* 解引用。违反属未对齐访问。
  */
-uint32_t fc_crc_compute(const uint8_t *user_data);
+DWORD fc_crc_compute(const BYTE *user_data);
 
 /**
  * @brief   校验 CRC：重算 USER 数据的 CRC 并与存储值比较
@@ -47,6 +49,6 @@ uint32_t fc_crc_compute(const uint8_t *user_data);
  * @param   stored_crc   之前存储的 CRC 值（buffer[4..8] 读取）
  * @return  FC_CRC_RESULT_OK 或 FC_CRC_RESULT_ERROR
  */
-uint8_t fc_crc_verify(const uint8_t *user_data, uint32_t stored_crc);
+BYTE fc_crc_verify(const BYTE *user_data, DWORD stored_crc);
 
 #endif /* FC_CRC_ENGINE_H_ */

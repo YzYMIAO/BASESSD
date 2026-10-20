@@ -31,14 +31,14 @@
  * ⚠ 走 ftl_cw_bit 而非手写 `1U << ftl_lba_pair_slot(lba)`——两者逐值同构
  *   （slot ≡ plane*CW_NUM + cw），而 ftl_cw_bit 已文档化为**所有** CW 位图的唯一构造器
  *   （见 ftl_config.h）。ftl_lba_pair_slot 仍用于 data[] 的**数组下标**（不是位）。 */
-static uint8_t wbuf_lba_bit(lba_t lba)
+static BYTE wbuf_lba_bit(DWORD lba)
 {
-    return (uint8_t)ftl_cw_bit(ftl_lba_plane(lba), ftl_lba_cw(lba));
+    return ftl_cw_bit(ftl_lba_plane(lba), ftl_lba_cw(lba));
 }
 
 /* ── 1. 查询 ── */
 
-bool ftl_wbuf_has(const wbuf_handle_t *h, lba_t lba)
+bool ftl_wbuf_has(const wbuf_handle_t *h, DWORD lba)
 {
     if (h->open == 0U)
     {
@@ -52,16 +52,16 @@ bool ftl_wbuf_has(const wbuf_handle_t *h, lba_t lba)
     return (h->occupied & wbuf_lba_bit(lba)) != 0U;
 }
 
-bool ftl_wbuf_read(const wbuf_handle_t *h, lba_t lba, void *out)
+bool ftl_wbuf_read(const wbuf_handle_t *h, DWORD lba, void *out)
 {
     if (!ftl_wbuf_has(h, lba))
     {
         return false;
     }
 
-    const uint8_t slot = ftl_lba_pair_slot(lba);
+    const BYTE slot = ftl_lba_pair_slot(lba);
 
-    (void)memcpy(out, &h->data[(size_t)slot * FTL_IU_BYTES], FTL_IU_BYTES);
+    (void)memcpy(out, &h->data[slot * FTL_IU_BYTES], FTL_IU_BYTES);
     return true;
 }
 
@@ -71,10 +71,10 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h);
 
 /* wbuf_program_page — 配置命令头 + 建 desc 链 + 按页内 CW 偏移散射填数据。
  * ⚠ 失败**不**释放 cmd——由 wbuf_flush 的统一错误出口释放（fc_command_release 幂等）。 */
-static ftl_status_t wbuf_program_page(wbuf_handle_t   *h,
-                                      fc_command_t    *cmd,
-                                      const nand_pba_t pba[PLANE_NUM],
-                                      uint8_t          nplanes)
+static ftl_status_t wbuf_program_page(wbuf_handle_t *h,
+                                      fc_command_t  *cmd,
+                                      const DWORD    pba[PLANE_NUM],
+                                      BYTE           nplanes)
 {
     cmd->config.operation   = ftl_plane_write_op(nplanes);
     cmd->config.multi_plane = ftl_plane_multi_field(nplanes);
@@ -139,7 +139,7 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
      *
      * ⚠ 搬移是异步 job：在完成回调/写路径里同步等它会把 superloop 卡死。
      *   这里**只登记**原因，由 must-run 的 migrate_handle 下一轮启动。 */
-    nand_pba_t pba[PLANE_NUM];
+    DWORD pba[PLANE_NUM];
 
     if (allocator_alloc_pair(port->alloc, FTL_TEMP_HOT, pba) != FTL_OK)
     {
@@ -154,8 +154,8 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
     /* 本页覆盖的 plane 数（决定 operation 码与 plane 段）与实际 CW 数。
      * nplanes 的值域断言在 ftl_plane_write_op 内（界 = PLANE_NUM，与
      * fc_command_plane_span 同源）——不再在这里复检。 */
-    uint8_t nplanes = ftl_cw_bitmap_plane_count(h->occupied);
-    uint8_t n_cw    = ftl_cw_bitmap_popcount(h->occupied);
+    BYTE nplanes = ftl_cw_bitmap_plane_count(h->occupied);
+    BYTE n_cw    = ftl_cw_bitmap_popcount(h->occupied);
 
     ftl_status_t ret = wbuf_program_page(h, cmd, pba, nplanes);
 
@@ -176,7 +176,7 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
 
     pending->command_id         = ftl_cmd_id(cmd);
     pending->owners             = h->owners;
-    pending->op                 = (uint8_t)PENDING_OP_WRITE;
+    pending->op                 = PENDING_OP_WRITE;
     pending->n_cw               = n_cw;
     pending->cw_bitmap          = h->occupied;
     pending->lba                = h->base;
@@ -195,7 +195,7 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
     {
         if (port->pending_remove != NULL)
         {
-            const uint16_t cmd_id = ftl_cmd_id(cmd);
+            const WORD cmd_id = ftl_cmd_id(cmd);
 
             port->pending_remove(port->pending_ctx, cmd_id); /* 先摘 pending */
         }
@@ -205,11 +205,7 @@ static ftl_status_t wbuf_flush(wbuf_handle_t *h)
 
     /* 观测口：一页一次编程；base/cw/nplanes/owners 即"合并了多少"的判据。
      * ⚠ LOGD（不是 LOGI）：批量写下每 4KB 一行、UART 阻塞 ~5ms，比 NAND 编程慢一个量级。 */
-    LOGD("[FTL] wbuf flush base=%lu cw=%u nplanes=%u owners=0x%lx\r\n",
-         h->base,
-         (unsigned)n_cw,
-         (unsigned)nplanes,
-         h->owners);
+    LOGD("[FTL] wbuf flush base=%lu cw=%u nplanes=%u owners=0x%lx\r\n", h->base, (unsigned)n_cw, (unsigned)nplanes, h->owners);
 
     /* 提交成功才清缓冲 */
     h->open     = 0U;
@@ -228,11 +224,11 @@ wbuf_flush_fail:
     return ret;
 }
 
-static ftl_status_t wbuf_append(wbuf_handle_t *h, uint16_t gi, lba_t lba, const void *buffer, uint8_t n)
+static ftl_status_t wbuf_append(wbuf_handle_t *h, WORD gi, DWORD lba, const void *buffer, BYTE n)
 {
     const wbuf_port_t *port = &h->port;
 
-    const lba_t window = ftl_lba_pair_base(lba);
+    const DWORD window = ftl_lba_pair_base(lba);
 
     /* 换窗口：先把旧窗口编程掉。flush 失败（背压）则本子操作不消费，下轮重试。 */
     if ((h->open != 0U) && (h->base != window))
@@ -253,14 +249,14 @@ static ftl_status_t wbuf_append(wbuf_handle_t *h, uint16_t gi, lba_t lba, const 
         h->owners   = 0U;
     }
 
-    const uint8_t *src = (const uint8_t *)buffer;
+    const BYTE *src = (const BYTE *)buffer;
 
-    for (uint8_t k = 0U; k < n; k++)
+    for (BYTE k = 0U; k < n; k++)
     {
-        const lba_t   l          = (lba_t)(lba + (lba_t)k);
-        const uint8_t slot       = ftl_lba_pair_slot(l);
-        const size_t  dst_offset = (size_t)slot * FTL_IU_BYTES;
-        const size_t  src_offset = (size_t)k * FTL_IU_BYTES;
+        const DWORD  l          = (lba + k);
+        const BYTE   slot       = ftl_lba_pair_slot(l);
+        const size_t dst_offset = slot * FTL_IU_BYTES;
+        const size_t src_offset = k * FTL_IU_BYTES;
 
         (void)memcpy(&h->data[dst_offset], src + src_offset, FTL_IU_BYTES);
         h->occupied |= wbuf_lba_bit(l);
@@ -270,7 +266,7 @@ static ftl_status_t wbuf_append(wbuf_handle_t *h, uint16_t gi, lba_t lba, const 
 
     /* 满：尝试立即编程（失败则留给 idle flush 重试；append 本身已成功 ⇒ 仍返 OK，
      * 否则调用者会重发同一子操作 ⇒ 重复计数）。 */
-    if (h->occupied == (uint8_t)((1U << FTL_LBA_PER_PAIR) - 1U))
+    if (h->occupied == ((1U << FTL_LBA_PER_PAIR) - 1U))
     {
         (void)wbuf_flush(h);
     }
@@ -280,14 +276,14 @@ static ftl_status_t wbuf_append(wbuf_handle_t *h, uint16_t gi, lba_t lba, const 
 
 /* ── 3. 丢弃 / 复位 ── */
 
-static bool wbuf_drop(wbuf_handle_t *h, lba_t lba)
+static bool wbuf_drop(wbuf_handle_t *h, DWORD lba)
 {
     if (!ftl_wbuf_has(h, lba))
     {
         return false;
     }
 
-    h->occupied &= (uint8_t)~wbuf_lba_bit(lba);
+    h->occupied &= ~wbuf_lba_bit(lba);
     h->drop_count++;
 
     if (h->occupied == 0U)

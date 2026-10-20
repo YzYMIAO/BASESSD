@@ -74,9 +74,9 @@ typedef struct
     volatile usb_msc_io_state_t state;
     bool                        is_write;
     volatile bool               discard; /* 主机已复位/拔出：完成后丢弃结果，不回写 USB 缓冲 */
-    uint32_t                    lba;
-    uint32_t                    offset;
-    uint32_t                    length;
+    DWORD                       lba;
+    DWORD                       offset;
+    DWORD                       length;
     void                       *usb_buffer; /* TinyUSB 端点缓冲；ASYNC 期间协议栈不会复用 */
     ssd_request_t               request;
 } usb_msc_io_t;
@@ -85,7 +85,7 @@ static usb_msc_io_t s_msc_io;
 
 /* FTL 只认这一块缓冲；USB 端点缓冲随时可能被协议栈复用，不能直接交给 FTL。
  * 该缓冲只被 CPU 读写（DWC2 走 PIO），放普通 .bss 即可；4B 对齐满足 FTL 的字访问。 */
-static uint8_t s_msc_bounce[CFG_TUD_MSC_EP_BUFSIZE] __attribute__((aligned(4)));
+static BYTE s_msc_bounce[CFG_TUD_MSC_EP_BUFSIZE] __attribute__((aligned(4)));
 
 /* CLI 与 USB 共用 host busy gate（本仓自拟）：任一前端有未完成请求时，另一个不提交。 */
 bool usb_msc_host_busy(void)
@@ -104,7 +104,7 @@ static bool usb_msc_ready(void)
     return g_ctrl.state == SSD_CONTROLLER_READY;
 }
 
-static bool usb_msc_io_matches(bool is_write, uint32_t lba, uint32_t offset, uint32_t length)
+static bool usb_msc_io_matches(bool is_write, DWORD lba, DWORD offset, DWORD length)
 {
     return (s_msc_io.is_write == is_write) && (s_msc_io.lba == lba) &&
            (s_msc_io.offset == offset) && (s_msc_io.length == length);
@@ -125,7 +125,7 @@ static bool usb_msc_submit(void)
 
     memset(request, 0, sizeof(*request));
 
-    const uint32_t blocks = s_msc_io.length / USB_MSC_BLOCK_SIZE;
+    const DWORD blocks = s_msc_io.length / USB_MSC_BLOCK_SIZE;
 
     request->opcode      = s_msc_io.is_write ? SSD_REQUEST_WRITE : SSD_REQUEST_READ;
     request->start_lba   = s_msc_io.lba;
@@ -149,7 +149,7 @@ static bool usb_msc_submit(void)
  * ⚠ 不能返回 TUD_MSC_RET_BUSY：TinyUSB 会在 tud_task() 循环里立即重入回调，
  *    单线程主循环下 FTL 永远得不到推进机会（饿死）。
  */
-static int32_t usb_msc_transfer(bool is_write, uint32_t lba, uint32_t offset, void *buffer, uint32_t length)
+static int32_t usb_msc_transfer(bool is_write, DWORD lba, DWORD offset, void *buffer, DWORD length)
 {
     if (s_msc_io.state != USB_MSC_IO_IDLE)
     {
@@ -177,7 +177,7 @@ static int32_t usb_msc_transfer(bool is_write, uint32_t lba, uint32_t offset, vo
         return TUD_MSC_RET_ERROR;
     }
 
-    const uint32_t blocks = length / USB_MSC_BLOCK_SIZE;
+    const DWORD blocks = length / USB_MSC_BLOCK_SIZE;
 
     if (!ssd_controller_lba_range_ok(lba, blocks))
     {
@@ -273,7 +273,7 @@ void usb_msc_task(void)
 
 /* ─────────────────────────── MSC 回调 ─────────────────────────── */
 
-int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize)
+int32_t tud_msc_read10_cb(BYTE lun, DWORD lba, DWORD offset, void *buffer, DWORD bufsize)
 {
     /* 单 LUN 设备：lun 是主机输入，越界直接拒绝（H29/H31）。 */
     if (lun != 0U)
@@ -284,7 +284,7 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buff
     return usb_msc_transfer(false, lba, offset, buffer, bufsize);
 }
 
-int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize)
+int32_t tud_msc_write10_cb(BYTE lun, DWORD lba, DWORD offset, BYTE *buffer, DWORD bufsize)
 {
     if (lun != 0U)
     {
@@ -294,13 +294,13 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
     return usb_msc_transfer(true, lba, offset, buffer, bufsize);
 }
 
-void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8], uint8_t product_id[16], uint8_t product_rev[4])
+void tud_msc_inquiry_cb(BYTE lun, BYTE vendor_id[8], BYTE product_id[16], BYTE product_rev[4])
 {
     /* 回调参数是 8/16/4 字节定长数组（见 msc_device.h）；字符串字面量长度
      * 小于目标，直接 memcpy 会越界读，所以显式补空格到定长。 */
-    static const uint8_t vendor_id_src[8]   = {'S', 'O', 'F', 'T', 'S', 'S', 'D', ' '};
-    static const uint8_t product_id_src[16] = {'N', 'A', 'N', 'D', ' ', 'U', '-', 'D', 'I', 'S', 'K', ' ', ' ', ' ', ' ', ' '};
-    static const uint8_t product_rev_src[4] = {'1', '.', '0', '0'};
+    static const BYTE vendor_id_src[8]   = {'S', 'O', 'F', 'T', 'S', 'S', 'D', ' '};
+    static const BYTE product_id_src[16] = {'N', 'A', 'N', 'D', ' ', 'U', '-', 'D', 'I', 'S', 'K', ' ', ' ', ' ', ' ', ' '};
+    static const BYTE product_rev_src[4] = {'1', '.', '0', '0'};
 
     if (lun != 0U)
     {
@@ -312,12 +312,12 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8], uint8_t product_id[16
     memcpy(product_rev, product_rev_src, sizeof(product_rev_src));
 }
 
-bool tud_msc_test_unit_ready_cb(uint8_t lun)
+bool tud_msc_test_unit_ready_cb(BYTE lun)
 {
     return (lun == 0U) && usb_msc_ready();
 }
 
-void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_size)
+void tud_msc_capacity_cb(BYTE lun, DWORD *block_count, WORD *block_size)
 {
     if (lun != 0U)
     {
@@ -326,11 +326,11 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_siz
         return;
     }
 
-    *block_count = (uint32_t)FTL_LBA_MAX;
-    *block_size  = (uint16_t)USB_MSC_BLOCK_SIZE;
+    *block_count = FTL_LBA_MAX;
+    *block_size  = USB_MSC_BLOCK_SIZE;
 }
 
-bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, bool load_eject)
+bool tud_msc_start_stop_cb(BYTE lun, BYTE power_condition, bool start, bool load_eject)
 {
     (void)power_condition;
     (void)start;
@@ -339,7 +339,7 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, boo
     return lun == 0U;
 }
 
-bool tud_msc_is_writable_cb(uint8_t lun)
+bool tud_msc_is_writable_cb(BYTE lun)
 {
     return lun == 0U;
 }
@@ -351,7 +351,7 @@ bool tud_msc_is_writable_cb(uint8_t lun)
  * 落盘。这里转成 controller 的 FLUSH（L2P journal 尾页 + cache 写回）。
  * ⚠ ftl_flush 是 best-effort，不是掉电屏障语义；详见设计文档 §9。
  */
-int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer, uint16_t bufsize)
+int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bufsize)
 {
     (void)buffer;
     (void)bufsize;
@@ -360,9 +360,7 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer, u
     {
         /* 未知命令一律 ILLEGAL REQUEST；打印 opcode 便于定位主机实际下发什么
          * （Windows format/diskpart 会用到 VERIFY / SYNCHRONIZE CACHE(16) 等）。 */
-        LOGW("[USB ] unsupported SCSI opcode=0x%02X lun=%u\r\n",
-             (unsigned)scsi_cmd[0],
-             (unsigned)lun);
+        LOGW("[USB ] unsupported SCSI opcode=0x%02X lun=%u\r\n", (unsigned)scsi_cmd[0], (unsigned)lun);
         return TUD_MSC_RET_ERROR;
     }
 
@@ -376,7 +374,7 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer, u
     memset(&request, 0, sizeof(request));
     request.opcode = SSD_REQUEST_FLUSH;
 
-    const int status = ssd_controller_submit(&g_ctrl, &request);
+    const ssd_status_t status = ssd_controller_submit(&g_ctrl, &request);
 
     if (status != SSD_STATUS_OK)
     {
@@ -386,7 +384,7 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer, u
     return 0; /* 无数据阶段 */
 }
 
-void tud_msc_read10_complete_cb(uint8_t lun)
+void tud_msc_read10_complete_cb(BYTE lun)
 {
     /* READ 的数据与状态已在 usb_msc_task() 里交付；完成回调不需要额外动作。 */
     (void)lun;
@@ -401,7 +399,7 @@ void tud_msc_read10_complete_cb(uint8_t lun)
  *
  * ⚠ ISR 上下文：只写标志，不打印、不等待（H21）。
  */
-void tud_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr)
+void tud_event_hook_cb(BYTE rhport, DWORD eventid, bool in_isr)
 {
     (void)rhport;
     (void)in_isr;
@@ -422,7 +420,7 @@ void tud_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr)
     }
 }
 
-void tud_msc_write10_complete_cb(uint8_t lun)
+void tud_msc_write10_complete_cb(BYTE lun)
 {
     /* 不在这里 flush：每个 4KB 块都落盘会把 USB 写吞吐拖到 NAND 随机写水平。
      * 持久化由主机的 SYNCHRONIZE CACHE 驱动。 */
@@ -459,28 +457,28 @@ static const tusb_desc_device_t s_device_desc = {
 
 #define USB_MSC_CONFIG_LEN (TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN)
 
-static const uint8_t s_config_desc[] = {
+static const BYTE s_config_desc[] = {
     /* config, itf count, string idx, total len, attributes, power(2mA) */
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, USB_MSC_CONFIG_LEN, 0x00, USB_MSC_POWER_MA),
     /* itf, string idx, EP out, EP in, EP size */
     TUD_MSC_DESCRIPTOR(0, 0, USB_MSC_EP_OUT, USB_MSC_EP_IN, USB_MSC_EP_SIZE),
 };
 
-uint8_t const *tud_descriptor_device_cb(void)
+BYTE const *tud_descriptor_device_cb(void)
 {
-    return (uint8_t const *)&s_device_desc;
+    return (BYTE const *)&s_device_desc;
 }
 
-uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
+BYTE const *tud_descriptor_configuration_cb(BYTE index)
 {
     (void)index;
     return s_config_desc;
 }
 
-uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
+WORD const *tud_descriptor_string_cb(BYTE index, WORD langid)
 {
-    static uint16_t desc_str[1U + USB_MSC_STRING_MAX_CHARS];
-    uint8_t         char_count;
+    static WORD desc_str[1U + USB_MSC_STRING_MAX_CHARS];
+    BYTE        char_count;
 
     (void)langid;
 
@@ -498,22 +496,22 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 
         const char *str = s_string_desc[index - 1U];
 
-        char_count = (uint8_t)strlen(str);
+        char_count = strlen(str);
         if (char_count > USB_MSC_STRING_MAX_CHARS)
         {
             char_count = USB_MSC_STRING_MAX_CHARS;
         }
 
-        for (uint8_t i = 0U; i < char_count; i++)
+        for (BYTE i = 0U; i < char_count; i++)
         {
-            desc_str[1U + i] = (uint16_t)(uint8_t)str[i];
+            desc_str[1U + i] = (WORD)(BYTE)str[i];
         }
     }
 
     /* bLength = 2 字节头 + 每个 UTF-16 单元 2 字节；bDescriptorType 在高字节。 */
-    const uint16_t desc_len = (uint16_t)(2U * char_count + 2U);
+    const WORD desc_len = (2U * char_count + 2U);
 
-    desc_str[0] = (uint16_t)((TUSB_DESC_STRING << 8) | desc_len);
+    desc_str[0] = ((TUSB_DESC_STRING << 8) | desc_len);
     return desc_str;
 }
 
@@ -522,7 +520,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 void tud_mount_cb(void)
 {
     /* 容量按 SCSI 坐标打印：sector 数 × 每 sector 字节。 */
-    const uint32_t block_count = (uint32_t)FTL_LBA_MAX;
+    const DWORD block_count = FTL_LBA_MAX;
 
     LOGI("[USB ] mounted (MSC BOT, %lu sectors x %u bytes)\r\n", block_count, USB_MSC_BLOCK_SIZE);
 }

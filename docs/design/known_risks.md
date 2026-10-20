@@ -312,7 +312,7 @@
 |---|---|---|---|---|---|
 | RISK-TYPE-01 | 已修未上板 | ~~release 下 `ftl_fc_interface.c` 的 `allowed` / `plane_bits` 只在 `ASSERT` 里使用 ⇒ 检查被裁空、两条 unused 告警；注释声称的 FC 侧 release 拒绝已不存在（FC 建链校验全 ASSERT）~~ | `ftl_cmd_validate_cw_bitmap` 改为返回 `ftl_status_t`：ASSERT + release 运行期拒绝（空集 / 越段 / multi-plane 未覆盖每个 plane）；两个建链入口统一处理 | 上板：release 下越段位图应被拒绝而不是发空链 | `src/ftl/ftl_fc_interface.c` |
 | RISK-TYPE-02 | 已修未上板 | 与 RISK-MD-04 同一项 H15 欠账，不重复登记 | — | 见 RISK-MD-04 | — |
-| RISK-TYPE-03 | 已修未上板 | `cmd->meta = (DWORD)<lba_t>` 是**同类型强转**（`DWORD` ≡ `uint32` ≡ `uint32_t` ≡ `lba_t`，见 `ssd_types.h`）⇒ 按 H43 属可删；但这是**全仓既有习语**（`ftl.c`、`ftl_fc_interface.c`、`wbuf.c` 三处同款），只改一处反而不一致（S1） | 逐处删等于制造风格分裂，暂不动 | 待一次全局收敛（连同 `cmd->meta` 的字段类型一起看，可能应由 H44 从生产者侧收窄） | `grep -rn 'meta\s*=\s*(DWORD)' src/ftl` |
+| RISK-TYPE-03 | 已修未上板 | `cmd->meta = (DWORD)<DWORD>` 是**同类型强转**（`DWORD` ≡ `uint32_t` ≡ `DWORD`，见 `ssd_types.h`）⇒ 按 H43 属可删；但这是**全仓既有习语**（`ftl.c`、`ftl_fc_interface.c`、`wbuf.c` 三处同款），只改一处反而不一致（S1） | 逐处删等于制造风格分裂，暂不动 | 待一次全局收敛（连同 `cmd->meta` 的字段类型一起看，可能应由 H44 从生产者侧收窄） | `grep -rn 'meta\s*=\s*(DWORD)' src/ftl` |
 
 ---
 

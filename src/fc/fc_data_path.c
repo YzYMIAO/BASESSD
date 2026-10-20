@@ -49,10 +49,10 @@
  *   ⚠ 不再输出 PAA 数组（v24）：解扰种子改为从 buffer 内的**明文 META** 自举，
  *     PAA 这个唯一用途消失（§十七 判据 5）。
  * -------------------------------------------------------------------- */
-static uint8_t fc_collect_decode_buffers(const fc_command_t *cmd, uint8_t *buffers[], uint8_t max_count)
+static BYTE fc_collect_decode_buffers(const fc_command_t *cmd, BYTE *buffers[], BYTE max_count)
 {
     fc_descriptor_id_t desc_id;
-    uint8_t            count = 0U;
+    BYTE               count = 0U;
 
     for (desc_id = (fc_descriptor_id_t)cmd->desc_id;
          (desc_id != FC_DESCRIPTOR_ID_INVALID) && (count < max_count);)
@@ -88,15 +88,15 @@ static const fc_ldpc_config_t FC_DATA_PATH_LDPC_CFG = {
     .max_iterations = 4U,
 };
 
-void fc_data_path_meta_write(uint8_t *cw, uint32_t meta)
+void fc_data_path_meta_write(BYTE *cw, DWORD meta)
 {
     ASSERT(cw != NULL);
     (void)memcpy(cw, &meta, FC_CRC_META_SIZE);
 }
 
-void fc_data_path_crc_write(uint8_t *cw)
+void fc_data_path_crc_write(BYTE *cw)
 {
-    uint32_t crc;
+    DWORD crc;
 
     ASSERT(cw != NULL);
 
@@ -105,7 +105,7 @@ void fc_data_path_crc_write(uint8_t *cw)
     (void)memcpy(cw + FC_CRC_META_SIZE, &crc, FC_CRC_FIELD_SIZE);
 }
 
-void fc_data_path_scramble(uint8_t *cw, uint32_t seed)
+void fc_data_path_scramble(BYTE *cw, DWORD seed)
 {
     ASSERT(cw != NULL);
 
@@ -114,7 +114,7 @@ void fc_data_path_scramble(uint8_t *cw, uint32_t seed)
     (void)fc_random_transform(cw + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, seed);
 }
 
-fc_status_t fc_data_path_ecc_encode(uint8_t *cw)
+fc_status_t fc_data_path_ecc_encode(BYTE *cw)
 {
     fc_status_t result;
 
@@ -126,7 +126,7 @@ fc_status_t fc_data_path_ecc_encode(uint8_t *cw)
     return (result == FC_STATUS_NOT_SUPPORTED) ? FC_STATUS_OK : result;
 }
 
-fc_status_t fc_data_path_ecc_decode(uint8_t *cw, uint8_t *ecc_bits)
+fc_status_t fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
 {
     ASSERT(cw != NULL);
 
@@ -134,10 +134,10 @@ fc_status_t fc_data_path_ecc_decode(uint8_t *cw, uint8_t *ecc_bits)
     return fc_ldpc_decode(&FC_DATA_PATH_LDPC_CFG, cw, FC_BUFFER_DATA_SIZE, ecc_bits);
 }
 
-uint8_t fc_data_path_crc_check(const uint8_t *cw)
+BYTE fc_data_path_crc_check(const BYTE *cw)
 {
-    uint32_t stored_crc;
-    uint32_t computed_crc;
+    DWORD stored_crc;
+    DWORD computed_crc;
 
     ASSERT(cw != NULL);
 
@@ -148,10 +148,10 @@ uint8_t fc_data_path_crc_check(const uint8_t *cw)
     return (computed_crc == stored_crc) ? 1U : 0U;
 }
 
-uint32_t fc_data_path_meta_check(const uint8_t *cw, uint32_t command_meta, nand_paa_t paa)
+DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
 {
-    uint32_t read_meta;
-    uint32_t expected_low;
+    DWORD read_meta;
+    DWORD expected_low;
 
     ASSERT(cw != NULL);
 
@@ -165,7 +165,7 @@ uint32_t fc_data_path_meta_check(const uint8_t *cw, uint32_t command_meta, nand_
      *   两者不同（v22 已确立）。
      * ⚠ command_meta == FC_META_UNKNOWN 时第二项被跳过，本函数只剩这项 3 位自洽；
      *   META 的其余保护来自「种子耦合」——见 fc_nand_design.md §5.3 的 META 保护矩阵。 */
-    expected_low = ((uint32_t)paa_to_plane(paa) << PLANE_CW_SHIFT) | (uint32_t)paa_to_cw(paa);
+    expected_low = (paa_to_plane(paa) << PLANE_CW_SHIFT) | paa_to_cw(paa);
 
     if ((read_meta & PLANE_CW_MASK) != expected_low)
     {
@@ -175,7 +175,7 @@ uint32_t fc_data_path_meta_check(const uint8_t *cw, uint32_t command_meta, nand_
     /* 自洽但与本命令的 LBA 不符 = 读到了别的页（GC 路径 meta 为
      * FC_META_UNKNOWN，跳过本项，只做上面的自洽校验）。 */
     if ((command_meta != FC_META_UNKNOWN) &&
-        (read_meta != lba_to_meta(command_meta, (uint8_t)paa_to_plane(paa), (uint8_t)paa_to_cw(paa))))
+        (read_meta != lba_to_meta(command_meta, paa_to_plane(paa), paa_to_cw(paa))))
     {
         return FC_CW_STATUS_MATA_ERROR;
     }
@@ -204,7 +204,7 @@ uint32_t fc_data_path_meta_check(const uint8_t *cw, uint32_t command_meta, nand_
 fc_status_t fc_data_path_encode(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
-    uint8_t           *buffer;
+    BYTE              *buffer;
     fc_status_t        result;
 
     /* 入参前置条件由调用者保证（fc.c 写路径传入有效命令） */
@@ -327,13 +327,13 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
  * -------------------------------------------------------------------- */
 fc_status_t fc_data_path_generate_stripe_parity(
     const fc_command_t *data_cmds[],
-    uint8_t             data_count,
+    BYTE                data_count,
     const fc_command_t *parity_cmd)
 {
-    uint8_t            cw_count;
-    uint8_t            cw;
+    BYTE               cw_count;
+    BYTE               cw;
     fc_descriptor_id_t desc_id;
-    uint8_t            d;
+    BYTE               d;
 
     /* 入参由 fc_stripe_submit 组装（stripe 路径），非外部输入 */
     ASSERT(data_cmds != NULL);
@@ -349,8 +349,8 @@ fc_status_t fc_data_path_generate_stripe_parity(
 
     /* parity 命令的 CW 数量必须与数据命令一致（stripe 命令 plane 对称，
      * 故 config.cw+1 即**每-plane** CW 数） */
-    cw_count = (uint8_t)(data_cmds[0]->config.cw + 1U);
-    ASSERT((uint8_t)(parity_cmd->config.cw + 1U) == cw_count);
+    cw_count = (data_cmds[0]->config.cw + 1U);
+    ASSERT((parity_cmd->config.cw + 1U) == cw_count);
 
     /*
      * 逐 CW 做 XOR：
@@ -361,14 +361,14 @@ fc_status_t fc_data_path_generate_stripe_parity(
      */
     for (cw = 0U; cw < cw_count; cw++)
     {
-        uint8_t *parity_buf;
-        uint8_t  first = 1U;
+        BYTE *parity_buf;
+        BYTE  first = 1U;
 
         /* 获取 parity 命令第 cw 个 CW 的 buffer 基址。
          * 链内 id 由 fc_descriptor_id_to_descriptor 内部断言（恒在池内），buffer 由
          * fc_buffer_get_base 内部断言（恒已占用）——两处 NULL 判都是死守卫，转 ASSERT（v20）。 */
         desc_id = (fc_descriptor_id_t)parity_cmd->desc_id;
-        for (uint8_t s = 0U; s < cw; s++)
+        for (BYTE s = 0U; s < cw; s++)
         {
             fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(desc_id);
             ASSERT(dsc != NULL);
@@ -384,11 +384,11 @@ fc_status_t fc_data_path_generate_stripe_parity(
         /* XOR 所有数据命令的对应 CW 数据区 */
         for (d = 0U; d < data_count; d++)
         {
-            uint8_t           *data_buf;
+            BYTE              *data_buf;
             fc_descriptor_id_t data_desc_id;
 
             data_desc_id = (fc_descriptor_id_t)data_cmds[d]->desc_id;
-            for (uint8_t s = 0U; s < cw; s++)
+            for (BYTE s = 0U; s < cw; s++)
             {
                 fc_descriptor_t *dsc = fc_descriptor_id_to_descriptor(data_desc_id);
                 ASSERT(dsc != NULL);
@@ -410,9 +410,9 @@ fc_status_t fc_data_path_generate_stripe_parity(
             else
             {
                 /* 后续数据命令：XOR 累加 */
-                uint32_t       *parity32 = (uint32_t *)(void *)parity_buf;
-                const uint32_t *data32   = (const uint32_t *)(const void *)data_buf;
-                for (uint16_t w = 0U; w < (FC_BUFFER_DATA_SIZE / sizeof(uint32_t)); w++)
+                DWORD       *parity32 = (DWORD *)(void *)parity_buf;
+                const DWORD *data32   = (const DWORD *)(const void *)data_buf;
+                for (WORD w = 0U; w < (FC_BUFFER_DATA_SIZE / sizeof(DWORD)); w++)
                 {
                     parity32[w] ^= data32[w];
                 }
@@ -429,7 +429,7 @@ fc_status_t fc_data_path_generate_stripe_parity(
             fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
             ASSERT(desc != NULL);
 
-            uint8_t *buf = fc_buffer_get_base(desc->buffer_id);
+            BYTE *buf = fc_buffer_get_base(desc->buffer_id);
             if (buf != NULL)
             {
                 fc_status_t result;
@@ -475,16 +475,16 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
     fc_descriptor_t   *desc;
-    uint8_t           *buffer;
+    BYTE              *buffer;
     fc_status_t        result;
-    uint8_t            all_ok = 1U;
-    uint8_t            cw;
+    BYTE               all_ok = 1U;
+    BYTE               cw;
 
     /* 入参前置条件由调用者保证（fc.c 读路径 Stage 1） */
     ASSERT(command != NULL);
 
     /* 链长度即 CW 数（不再由 config.cw / multi_plane 推导；flat 掩码下两者会分叉） */
-    uint8_t total_desc = 0U;
+    BYTE total_desc = 0U;
     {
         fc_descriptor_id_t did = (fc_descriptor_id_t)command->desc_id;
 
@@ -510,8 +510,8 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
 
         if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
         {
-            uint8_t ecc_bits = 0U;
-            result           = fc_data_path_ecc_decode(buffer, &ecc_bits);
+            BYTE ecc_bits = 0U;
+            result        = fc_data_path_ecc_decode(buffer, &ecc_bits);
 
             if (result == FC_STATUS_IO_ERROR)
             {
@@ -561,7 +561,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             {
                 /* 种子**自举**：META 在加扰区之外、保持明文，直接读回本 CW 的扇区 LBA
                  * 当种子——GC / 掉电重建因此不必预先知道 LBA（v24）。 */
-                uint32_t cw_meta;
+                DWORD cw_meta;
                 (void)memcpy(&cw_meta, buffer, FC_CRC_META_SIZE);
                 fc_data_path_scramble(buffer, fc_random_seed_from_meta(cw_meta));
             }
@@ -614,7 +614,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
             {
-                uint32_t read_meta;
+                DWORD read_meta;
                 (void)memcpy(&read_meta, buffer, FC_CRC_META_SIZE);
                 desc->meta = read_meta;
 
@@ -653,12 +653,12 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
  *     - 解扰所有 CW（seed 从各 CW 的明文 META 自举）。
  *     - 沿 desc 链把所有 desc status 置 READY。
  * -------------------------------------------------------------------- */
-fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw_idx)
+fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_idx)
 {
-    uint8_t           *buffers[CW_TOTAL_MAX];
-    uint8_t            count;
+    BYTE              *buffers[CW_TOTAL_MAX];
+    BYTE               count;
     fc_descriptor_id_t desc_id;
-    uint8_t            i;
+    BYTE               i;
 
     /* 入参前置条件由调用者保证（FTL 仅在带 desc 链的命令 ECC 失败时触发） */
     ASSERT(cmd != NULL);
@@ -672,7 +672,7 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
 
     /* ── RAID XOR 重建 failed CW ── */
     {
-        uint8_t recovered[FC_BUFFER_POOL_CW_SIZE];
+        BYTE recovered[FC_BUFFER_POOL_CW_SIZE];
 
         /* XOR 所有非 failed 的 CW（均为 ECC-corrected + scrambled），
          * 重建结果与被恢复 CW 处于 same scrambled domain。 */
@@ -702,7 +702,7 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, uint8_t failed_cw
             {
                 /* 种子自举：META 明文（加扰区外）。重建出的 CW 其 META 由 XOR 线性还原，
                  * 与其它 CW 一样可直接读回（v24）。 */
-                uint32_t cw_meta;
+                DWORD cw_meta;
                 (void)memcpy(&cw_meta, buffers[i], FC_CRC_META_SIZE);
                 fc_data_path_scramble(buffers[i], fc_random_seed_from_meta(cw_meta));
             }

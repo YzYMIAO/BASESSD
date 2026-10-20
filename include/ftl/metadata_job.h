@@ -22,14 +22,14 @@
 /* ── 待回收日志块位图 ── */
 
 /* 置位；已置位返回 false。g 越界是内部调用者的编程错误 ⇒ 运行期拒绝（H31/C5）。 */
-bool md_reclaim_mark(metadata_dir_cache_t *dir, uint16_t g);
+bool md_reclaim_mark(metadata_dir_cache_t *dir, WORD g);
 
 /* 从轮转游标起找第一个置位的块号；**保持置位**（擦除在飞期间不丢，完成成功才清）。
  * 游标推进到 g+1：擦除持续失败的块不会永久挡住后续块。 */
-bool md_reclaim_take(metadata_dir_cache_t *dir, uint16_t *out);
+bool md_reclaim_take(metadata_dir_cache_t *dir, WORD *out);
 
 /* 清位（置位过才减计数）。 */
-void md_reclaim_clear(metadata_dir_cache_t *dir, uint16_t g);
+void md_reclaim_clear(metadata_dir_cache_t *dir, WORD g);
 
 /* 清空全部待回收登记（RAM 态，不跨重启；init / load / 格式化时调用）。 */
 void md_reclaim_reset(metadata_dir_cache_t *dir);
@@ -43,7 +43,7 @@ void md_reclaim_mark_all(metadata_dir_cache_t *dir, const ftl_allocator_t *alloc
 /* 取当前日志块的**下一个空槽**并推进写指针（纯 RAM，不做任何块管理）。
  * 返回：槽位 PBA；无当前块 / 块已满 ⇒ NAND_PBA_INVALID。
  * 取到位置后**立即推进** cur_metadata_page：写失败时该页可能已半编程、不可复用。 */
-nand_pba_t metadata_dir_slot_now(metadata_dir_cache_t *dir);
+DWORD metadata_dir_slot_now(metadata_dir_cache_t *dir);
 
 /* ── job 状态 ── */
 
@@ -57,7 +57,7 @@ void metadata_handle_reset(metadata_dir_cache_t *dir);
 /* metadata_handle_idle — 整理 job 是否空闲（无回收/压缩在跑）。 */
 static inline bool metadata_handle_idle(const metadata_dir_cache_t *dir)
 {
-    return dir->handle.phase == (uint8_t)MD_JOB_IDLE;
+    return dir->handle.phase == MD_JOB_IDLE;
 }
 
 /*
@@ -69,14 +69,14 @@ static inline bool metadata_handle_idle(const metadata_dir_cache_t *dir)
  */
 static inline bool md_compacting(const metadata_dir_cache_t *dir)
 {
-    return (dir->handle.phase >= (uint8_t)MD_JOB_CP_READ) && (dir->handle.phase <= (uint8_t)MD_JOB_CP_RECLAIM);
+    return (dir->handle.phase >= MD_JOB_CP_READ) && (dir->handle.phase <= MD_JOB_CP_RECLAIM);
 }
 
 /*
  * md_log_block_idle — 该块是否"已无可回收的顾虑"：在范围内、活 region 为 0、
  * 且不是当前写块。**纯账本判据**，不含 BST 状态。
  */
-static inline bool md_log_block_idle(const metadata_dir_cache_t *dir, uint16_t g)
+static inline bool md_log_block_idle(const metadata_dir_cache_t *dir, WORD g)
 {
     if (g >= FTL_BLOCK_TOTAL)
     {
@@ -100,7 +100,7 @@ static inline bool md_log_block_idle(const metadata_dir_cache_t *dir, uint16_t g
  */
 static inline bool md_log_block_reclaimable(const metadata_dir_cache_t *dir,
                                             const ftl_allocator_t      *alloc,
-                                            uint16_t                    g)
+                                            WORD                        g)
 {
     return md_log_block_idle(dir, g) &&
            (ftl_block_state(&alloc->blocks[g]) == FTL_BLOCK_STATE_LOG);

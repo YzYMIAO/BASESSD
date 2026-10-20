@@ -82,23 +82,23 @@
 
 static fc_command_t        g_fc_command_pool[FC_COMMAND_POOL_DEPTH];
 static fc_descriptor_t     g_fc_descriptor_pool[FC_DESCRIPTOR_POOL_DEPTH];
-static uint8_t             g_fc_buffer_pool[FC_BUFFER_POOL_DEPTH][FC_BUFFER_POOL_CW_SIZE] __attribute__((section(".noncacheable_buffer")));
+static BYTE                g_fc_buffer_pool[FC_BUFFER_POOL_DEPTH][FC_BUFFER_POOL_CW_SIZE] __attribute__((section(".noncacheable_buffer")));
 static fc_command_id_t     g_fc_sq_storage[FC_SQ_DEPTH];
 static fc_command_id_t     g_fc_hsq_storage[FC_HSQ_DEPTH];
 static fc_command_status_t g_fc_cq_storage[FC_CQ_DEPTH];
 static fc_command_id_t     g_fc_descriptor_owner[FC_DESCRIPTOR_POOL_DEPTH];
-static uint8_t             g_fc_command_state[FC_COMMAND_POOL_DEPTH];
+static BYTE                g_fc_command_state[FC_COMMAND_POOL_DEPTH];
 static fc_command_id_t     g_fc_command_free_next[FC_COMMAND_POOL_DEPTH];
-static uint16_t            g_fc_descriptor_free_next[FC_DESCRIPTOR_POOL_DEPTH];
-static uint16_t            g_fc_buffer_free_next[FC_BUFFER_POOL_DEPTH];
-static uint8_t             g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
+static WORD                g_fc_descriptor_free_next[FC_DESCRIPTOR_POOL_DEPTH];
+static WORD                g_fc_buffer_free_next[FC_BUFFER_POOL_DEPTH];
+static BYTE                g_fc_buffer_state[FC_BUFFER_POOL_DEPTH];
 
 /* GET/SET_FEATURES 的 4 字节内联数据暂存，按 command_id（= 命令池槽位号）索引。
  * 为什么需要：SQ 命令提交后不可写（见 fc_command.h「SQ 不可变」），而引擎需要一个
  * 稳定的 4 字节落点写回寄存器值；返回值唯一的归宿是 CQ 的 param 联合体，
  * 故这里只做提交→完成之间的中转。索引用的 command_id 是「指针 − command_pool 基址」
  * 派生出来的池内下标，恒 < FC_COMMAND_POOL_DEPTH。 */
-static uint8_t g_fc_return_staging[FC_COMMAND_POOL_DEPTH][4];
+static BYTE g_fc_return_staging[FC_COMMAND_POOL_DEPTH][4];
 
 /* 全局单例控制器：对 API 薄壳（fc_interface.c）可见，FTL 不可见 */
 fc_t g_fc_controller;
@@ -115,7 +115,7 @@ fc_t g_fc_controller;
  * READ_ID / READ_STATUS / GET_FEATURES 等虽然也有数据返回，
  * 但它们不是 ECC 编码的 Page Data，不应走 Data Path 处理。
  */
-static uint8_t fc_is_page_read(uint8_t operation)
+static BYTE fc_is_page_read(BYTE operation)
 {
     switch (operation)
     {
@@ -138,7 +138,7 @@ static uint8_t fc_is_page_read(uint8_t operation)
  *
  * SET_FEATURES 虽然也写数据，但不是 ECC 编码的 Page Data，不应走 Data Path。
  */
-static uint8_t fc_is_page_write(uint8_t operation)
+static BYTE fc_is_page_write(BYTE operation)
 {
     switch (operation)
     {
@@ -154,39 +154,39 @@ static uint8_t fc_is_page_write(uint8_t operation)
 }
 
 /* ── 资源统计读取器（fc_get_resource_stats 用，fc_interface.c 调用） ── */
-uint16_t fc_get_sq_count(const fc_t *controller)
+WORD fc_get_sq_count(const fc_t *controller)
 {
     return controller->sq.count;
 }
-uint16_t fc_get_hsq_count(const fc_t *controller)
+WORD fc_get_hsq_count(const fc_t *controller)
 {
     return controller->hsq.count;
 }
-uint16_t fc_get_cq_count(const fc_t *controller)
+WORD fc_get_cq_count(const fc_t *controller)
 {
     return controller->cq.count;
 }
 /* 三个状态读取器：ID 恒由池派生（fc_command_to_id）或循环上界保证在范围内，
  * 越界即不变量破坏——原先静默回退默认值（v21 改断言），尤其 FC_COMMAND_STATE_FREE
  * 会把"没有这个槽位"说成"槽位空闲可用"。与同文件 fc_command_id_to_command_internal 同法。 */
-uint8_t fc_command_state_get(const fc_t *controller, fc_command_id_t command_id)
+BYTE fc_command_state_get(const fc_t *controller, fc_command_id_t command_id)
 {
     ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
     return controller->command_state[command_id];
 }
-fc_command_id_t fc_descriptor_owner_get(const fc_t *controller, uint16_t descriptor_id)
+fc_command_id_t fc_descriptor_owner_get(const fc_t *controller, WORD descriptor_id)
 {
     ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
     return controller->descriptor_owner[descriptor_id];
 }
-uint8_t fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id)
+BYTE fc_buffer_state_get(const fc_t *controller, fc_buffer_id_t buffer_id)
 {
     ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
     return controller->buffer_state[buffer_id];
 }
 
 /* ── 命令/描述符 ID ↔ 指针（范围由公共壳 fc_interface.c 校验） ── */
-fc_command_t *fc_command_id_to_command_internal(fc_t *controller, uint16_t command_id)
+fc_command_t *fc_command_id_to_command_internal(fc_t *controller, WORD command_id)
 {
     /* 公共壳 fc_command_id_to_command() 已断言过 command_id < FC_COMMAND_POOL_DEPTH */
     ASSERT(command_id < FC_COMMAND_POOL_DEPTH);
@@ -206,7 +206,7 @@ fc_command_id_t fc_command_to_id_internal(const fc_t *controller, const fc_comma
     return (fc_command_id_t)(command - controller->command_pool);
 }
 
-fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, uint16_t descriptor_id)
+fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, WORD descriptor_id)
 {
     /* 公共壳 fc_descriptor_id_to_descriptor() 已断言过 descriptor_id < FC_DESCRIPTOR_POOL_DEPTH */
     ASSERT(descriptor_id < FC_DESCRIPTOR_POOL_DEPTH);
@@ -216,7 +216,7 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor_internal(fc_t *controller, uint1
 /* 内部：直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移。
  * buffer_id 恒由池派生、且调用者已先校验占用（公共壳 ASSERT 占用 / 链释放前判
  * != FC_BUFFER_ID_INVALID）——越界即不变量破坏，v21 补断言（同 fc_command_id_to_command_internal）。 */
-uint8_t *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id)
+BYTE *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
     ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
     return controller->buffer_pool[buffer_id];
@@ -238,10 +238,10 @@ fc_status_t fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_i
  * 结束条件是链自己的哨兵（`descriptor_id < FC_DESCRIPTOR_POOL_DEPTH` 即 next_id != INVALID），
  * 不另设计数上界——「链长 ≤ CW_TOTAL_MAX」是结构不变量（掩码位宽决定的），
  * 走链时无需重复它；与 fc_complete_from_nand 等其余走链循环同一写法。 */
-static uint8_t fc_command_descriptor_count(const fc_t *controller, const fc_command_t *command)
+static BYTE fc_command_descriptor_count(const fc_t *controller, const fc_command_t *command)
 {
     fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id;
-    uint8_t            count         = 0U;
+    BYTE               count         = 0U;
 
     while (descriptor_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
@@ -252,10 +252,10 @@ static uint8_t fc_command_descriptor_count(const fc_t *controller, const fc_comm
 }
 
 /* 校验命令的 desc 链是否全部归该命令所有（所有权一致性） */
-uint8_t fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command)
+BYTE fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id_t command_id, const fc_command_t *command)
 {
     fc_descriptor_id_t descriptor_id = (fc_descriptor_id_t)command->desc_id;
-    uint8_t            remaining     = fc_command_descriptor_count(controller, command);
+    BYTE               remaining     = fc_command_descriptor_count(controller, command);
 
     while (remaining > 0U)
     {
@@ -297,7 +297,7 @@ uint8_t fc_command_descriptors_owned_internal(const fc_t *controller, fc_command
 fc_status_t fc_init_internal(fc_t *controller)
 {
     fc_status_t result;
-    uint16_t    index;
+    WORD        index;
 
     /* ── ① 清底：三池本体 + 三条队列的存储 + 命令状态位图全部归零。
      *    这些数组都是文件作用域 static（见 §1 静态资源），此处只清内容，
@@ -313,7 +313,7 @@ fc_status_t fc_init_internal(fc_t *controller)
 
     /* ── ② 把池地址挂进 controller。三池本体与各簿记数组是 static，
      *    fc_t 只存指针——这样 fc_t 可以整体赋值/传递而不搬运大数组。 ── */
-    *controller                      = (fc_t){0};
+    memset(controller, 0, sizeof(*controller));
     controller->command_pool         = g_fc_command_pool;
     controller->descriptor_pool      = g_fc_descriptor_pool;
     controller->buffer_pool          = g_fc_buffer_pool;
@@ -358,7 +358,7 @@ fc_status_t fc_init_internal(fc_t *controller)
 
     /* 初始化 RAID 引擎上下文（每个 LUN 独立） */
 #if CONFIG_FC_RAID
-    for (uint8_t lun = 0U; lun < LUN_NUM; lun++)
+    for (BYTE lun = 0U; lun < LUN_NUM; lun++)
     {
         fc_raid_init_ctx(lun);
     }
@@ -369,9 +369,9 @@ fc_status_t fc_init_internal(fc_t *controller)
 
     /* 初始化 Stripe RAID 积累状态 */
 #if CONFIG_FC_RAID
-    for (uint8_t lun = 0U; lun < LUN_NUM; lun++)
+    for (BYTE lun = 0U; lun < LUN_NUM; lun++)
     {
-        controller->stripe_accum[lun] = (fc_stripe_accum_t){0};
+        memset(&controller->stripe_accum[lun], 0, sizeof(controller->stripe_accum[lun]));
     }
     for (index = 0U; index < FC_COMMAND_POOL_DEPTH; index++)
     {
@@ -392,12 +392,12 @@ fc_status_t fc_init_internal(fc_t *controller)
     for (index = 0U; index < FC_DESCRIPTOR_POOL_DEPTH; index++)
     {
         controller->descriptor_owner[index]     = FC_COMMAND_ID_INVALID;
-        controller->descriptor_free_next[index] = ((index + 1U) < FC_DESCRIPTOR_POOL_DEPTH) ? (uint16_t)(index + 1U) : UINT16_MAX;
+        controller->descriptor_free_next[index] = ((index + 1U) < FC_DESCRIPTOR_POOL_DEPTH) ? (index + 1U) : UINT16_MAX;
     }
     /* 串接 buffer 空闲链表 + 清占用态 */
     for (index = 0U; index < FC_BUFFER_POOL_DEPTH; index++)
     {
-        controller->buffer_free_next[index] = ((index + 1U) < FC_BUFFER_POOL_DEPTH) ? (uint16_t)(index + 1U) : UINT16_MAX;
+        controller->buffer_free_next[index] = ((index + 1U) < FC_BUFFER_POOL_DEPTH) ? (index + 1U) : UINT16_MAX;
         controller->buffer_state[index]     = 0U;
     }
     controller->command_free_head    = 0U;
@@ -429,8 +429,8 @@ fc_command_t *fc_command_alloc_internal(fc_t *controller)
     {
         return NULL;
     }
-    controller->command_free_head                = controller->command_free_next[command_id];
-    controller->command_pool[command_id]         = (fc_command_t){0};
+    controller->command_free_head = controller->command_free_next[command_id];
+    memset(&controller->command_pool[command_id], 0, sizeof(controller->command_pool[command_id]));
     controller->command_pool[command_id].desc_id = FC_DESCRIPTOR_ID_INVALID;
     controller->command_state[command_id]        = FC_COMMAND_STATE_ALLOCATED;
     return &controller->command_pool[command_id];
@@ -451,7 +451,7 @@ fc_command_t *fc_command_alloc_internal(fc_t *controller)
  * -------------------------------------------------------------------- */
 fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_command_t *command)
 {
-    uint16_t        descriptor_index;
+    WORD            descriptor_index;
     fc_command_id_t command_id;
 
     command_id       = fc_command_to_id_internal(controller, command);
@@ -460,8 +460,8 @@ fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_command_t *co
     {
         return NULL;
     }
-    controller->descriptor_free_head                        = controller->descriptor_free_next[descriptor_index];
-    controller->descriptor_pool[descriptor_index]           = (fc_descriptor_t){0};
+    controller->descriptor_free_head = controller->descriptor_free_next[descriptor_index];
+    memset(&controller->descriptor_pool[descriptor_index], 0, sizeof(controller->descriptor_pool[descriptor_index]));
     controller->descriptor_pool[descriptor_index].next_id   = FC_DESCRIPTOR_ID_INVALID;
     controller->descriptor_pool[descriptor_index].buffer_id = FC_BUFFER_ID_INVALID;
     controller->descriptor_owner[descriptor_index]          = command_id;
@@ -476,9 +476,9 @@ fc_descriptor_t *fc_descriptor_alloc_internal(fc_t *controller, fc_command_t *co
  *   实现要点：**不碰数据链、不碰 buffer**——只把 desc 本体还池。调用者负责
  *         先把该 desc 从链上摘掉（见 fc_descriptor_chain_release_head_internal）。
  * -------------------------------------------------------------------- */
-static void fc_descriptor_release_internal(fc_t *controller, uint16_t descriptor_index)
+static void fc_descriptor_release_internal(fc_t *controller, WORD descriptor_index)
 {
-    controller->descriptor_pool[descriptor_index]      = (fc_descriptor_t){0};
+    memset(&controller->descriptor_pool[descriptor_index], 0, sizeof(controller->descriptor_pool[descriptor_index]));
     controller->descriptor_owner[descriptor_index]     = FC_COMMAND_ID_INVALID;
     controller->descriptor_free_next[descriptor_index] = controller->descriptor_free_head;
     controller->descriptor_free_head                   = descriptor_index;
@@ -575,7 +575,7 @@ static void fc_command_release_buffers_internal(fc_t *controller, fc_command_t *
  * -------------------------------------------------------------------- */
 fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
 {
-    uint16_t buffer_index;
+    WORD buffer_index;
 
     buffer_index = controller->buffer_free_head;
     if (buffer_index == UINT16_MAX)
@@ -622,7 +622,7 @@ fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *comm
     head = (fc_descriptor_id_t)command->desc_id;
     fc_descriptor_chain_release_all_internal(controller, &head);
 
-    controller->command_pool[command_id]      = (fc_command_t){0};
+    memset(&controller->command_pool[command_id], 0, sizeof(controller->command_pool[command_id]));
     controller->command_state[command_id]     = FC_COMMAND_STATE_FREE;
     controller->command_free_next[command_id] = controller->command_free_head;
     controller->command_free_head             = command_id;
@@ -757,8 +757,8 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
         while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
         {
             fc_descriptor_t *descriptor = &controller->descriptor_pool[desc_id];
-            uint8_t          n          = (uint8_t)((uint8_t)paa_to_plane(descriptor->paa) * CW_NUM +
-                                  (uint8_t)paa_to_cw(descriptor->paa));
+            BYTE             n          = (paa_to_plane(descriptor->paa) * CW_NUM +
+                      paa_to_cw(descriptor->paa));
 
             ASSERT(n < CW_TOTAL_MAX);
             descriptor->status   = nand_completion->cw_status[n];
@@ -770,7 +770,7 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     /* ── Step 2: Data path processing (ECC decode + conditional descramble) ──
      * 仅对 Page Read 命令执行。READ_ID / GET_FEATURES 等命令
      * 返回的数据不是 ECC 编码的 NAND 页数据，不应进入 Data Path。 */
-    if (fc_is_page_read((uint8_t)command->config.operation) != 0U)
+    if (fc_is_page_read(command->config.operation) != 0U)
     {
         (void)fc_data_path_process_read(command);
         /* 即使 process_read 返回 IO_ERROR（有 CW 不可纠），
@@ -785,16 +785,16 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     completion.desc_id    = nand_completion->failed_descriptor_id;
     completion.op_tag     = command->op_tag;
     completion.status     = 0U;
-    completion.param      = (fc_param_t){0}; /* 联合体整体清零（4 字节）；仅 GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN / BLOCK_LOCK_STATUS 会再填 */
+    memset(&completion.param, 0, sizeof(completion.param)); /* 联合体整体清零（4 字节）；仅 GET_FEATURES / OP_READ_META / OP_READ_ONFI_SIGNATURE / OP_READ_COLUMN / BLOCK_LOCK_STATUS 会再填 */
 
     if ((command->desc_id != FC_DESCRIPTOR_ID_INVALID) &&
-        (fc_is_page_read((uint8_t)command->config.operation) != 0U))
+        (fc_is_page_read(command->config.operation) != 0U))
     {
         /* 走 desc 链聚合：status 全链 OR；首个失败 CW 的 desc_id。
          * v28：**不再**聚合失败 CW 位图——上层要定位失败 CW，遍历 desc 链 OR 各 desc->status
          * 即可（desc 链本来就完整留在池里直到 fc_command_release），FC 不必代为派生。 */
         fc_descriptor_id_t did        = (fc_descriptor_id_t)command->desc_id;
-        uint8_t            found_fail = 0U;
+        BYTE               found_fail = 0U;
 
         while (did < FC_DESCRIPTOR_POOL_DEPTH)
         {
@@ -818,7 +818,7 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
     {
         /* 非 page read：直接透传 NAND completion 状态（无 per-CW 解码）。
          * 未用到的槽位由 nand_dispatch_completion_init() 预置 FC_CW_STATUS_UNUSED(=0)。 */
-        uint8_t slot;
+        BYTE slot;
 
         for (slot = 0U; slot < CW_TOTAL_MAX; slot++)
         {
@@ -843,7 +843,7 @@ static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_c
                  (command->config.operation == OP_READ_ONFI_SIGNATURE) ||
                  (command->config.operation == OP_READ_COLUMN))
         {
-            uint8_t i;
+            BYTE i;
 
             for (i = 0U; i < 4U; i++)
             {
@@ -922,12 +922,12 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     fc_command_t           *parity_cmd;
     fc_command_id_t         parity_id;
     nand_dispatch_request_t mp_req;
-    uint8_t                 cw_count;
-    uint8_t                 cw;
+    BYTE                    cw_count;
+    BYTE                    cw;
     fc_descriptor_id_t      desc_id;
     const fc_command_t     *data_ptrs[FC_STRIPE_DATA_MAX];
 
-    cw_count = (uint8_t)(data_cmd->config.cw + 1U);
+    cw_count = (data_cmd->config.cw + 1U);
 
     /* RAID/stripe 的 XOR 按 CW 配对：两个 plane 必须访问**同一组 CW**，
      * flat 掩码（plane 不对称）与 stripe 语义不兼容，直接断言拒绝。
@@ -966,11 +966,11 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
      *      将来启用多实例前需先把这条路径改回 controller 参数化入口。
      *    行地址：同一 plane 内所有 CW 共用 parity_cmd->paa（page/block/lun）。 */
     {
-        const uint8_t    parity_plane = (uint8_t)paa_to_plane(parity_cmd->paa);
-        const nand_paa_t parity_paa   = parity_cmd->paa;
-        uint8_t          pcw;
+        const BYTE  parity_plane = paa_to_plane(parity_cmd->paa);
+        const DWORD parity_paa   = parity_cmd->paa;
+        BYTE        pcw;
 
-        for (pcw = 0U; pcw <= (uint8_t)parity_cmd->config.cw; pcw++)
+        for (pcw = 0U; pcw <= parity_cmd->config.cw; pcw++)
         {
             if (fc_command_configure_descriptor(parity_cmd, parity_plane, pcw, parity_paa) != FC_STATUS_OK)
             {
@@ -1009,23 +1009,23 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
     }
 
     /* ⑤ 构建 Multi-Plane dispatch request */
-    mp_req             = (nand_dispatch_request_t){0};
-    mp_req.command_id  = (uint16_t)data_cmd_id; /* 完成路由回数据命令 */
+    memset(&mp_req, 0, sizeof(mp_req));
+    mp_req.command_id  = data_cmd_id; /* 完成路由回数据命令 */
     mp_req.operation   = OP_PROGRAM_PAGE_MULTI_PLANE;
-    mp_req.ch          = (uint8_t)data_cmd->config.ch;
-    mp_req.ce          = (uint8_t)data_cmd->config.ce;
-    mp_req.lun         = (uint8_t)data_cmd->config.lun;
+    mp_req.ch          = data_cmd->config.ch;
+    mp_req.ce          = data_cmd->config.ce;
+    mp_req.lun         = data_cmd->config.lun;
     mp_req.plane_count = PLANE_NUM;
     mp_req.plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
-    mp_req.page_type   = (uint8_t)data_cmd->config.page_type;
+    mp_req.page_type   = data_cmd->config.page_type;
     /* 两 plane 的行地址 + 掩码：stripe 命令 plane 对称（见上方 ASSERT），
      * 两 plane 访问同一组 CW → 掩码 = 两组相同的低位。 */
-    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
         mp_req.plane_paa[p] = paa_with_plane(data_cmd->paa, p);
         for (cw = 0U; cw < cw_count; cw++)
         {
-            mp_req.cw_bitmap |= (uint32_t)(1UL << (p * CW_NUM + cw));
+            mp_req.cw_bitmap |= (1UL << (p * CW_NUM + cw));
         }
     }
 
@@ -1072,10 +1072,12 @@ static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc
 stripe_error:
     /* 数据命令注 error completion，让 FTL 感知失败 */
     {
-        nand_dispatch_completion_t fail_comp = (nand_dispatch_completion_t){0};
-        fail_comp.command_id                 = (uint16_t)data_cmd_id;
-        fail_comp.execution_status           = NAND_RESULT_NOT_READY;
-        fail_comp.cw_status[0]               = FC_CW_STATUS_NAND_FAIL;
+        nand_dispatch_completion_t fail_comp;
+
+        memset(&fail_comp, 0, sizeof(fail_comp));
+        fail_comp.command_id       = data_cmd_id;
+        fail_comp.execution_status = NAND_RESULT_NOT_READY;
+        fail_comp.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
         (void)fc_complete_from_nand(controller, &fail_comp);
     }
     return FC_STATUS_IO_ERROR;
@@ -1106,9 +1108,10 @@ stripe_error:
  * -------------------------------------------------------------------- */
 static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
 {
-    nand_dispatch_completion_t fail_comp = (nand_dispatch_completion_t){0};
+    nand_dispatch_completion_t fail_comp;
 
-    fail_comp.command_id       = (uint16_t)command_id;
+    memset(&fail_comp, 0, sizeof(fail_comp));
+    fail_comp.command_id       = command_id;
     fail_comp.execution_status = NAND_RESULT_NOT_READY;
     fail_comp.cw_status[0]     = FC_CW_STATUS_NAND_FAIL;
     (void)fc_complete_from_nand(controller, &fail_comp);
@@ -1135,26 +1138,26 @@ static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
 static fc_status_t fc_build_request_data_planes(const fc_t *controller, const fc_command_t *command, nand_dispatch_request_t *request)
 {
     fc_descriptor_id_t desc_id          = (fc_descriptor_id_t)command->desc_id;
-    uint8_t            planes_with_desc = 0U; /* bit p = plane p 链上有 desc */
-    nand_paa_t         plane_row[PLANE_NUM];  /* 各 plane 的行地址（链上第一条 desc） */
+    BYTE               planes_with_desc = 0U; /* bit p = plane p 链上有 desc */
+    DWORD              plane_row[PLANE_NUM];  /* 各 plane 的行地址（链上第一条 desc） */
 
     while (desc_id < FC_DESCRIPTOR_POOL_DEPTH)
     {
         const fc_descriptor_t *descriptor = &controller->descriptor_pool[desc_id];
-        uint8_t                plane      = (uint8_t)paa_to_plane(descriptor->paa);
-        uint8_t                n          = (uint8_t)(plane * CW_NUM + paa_to_cw(descriptor->paa));
+        BYTE                   plane      = paa_to_plane(descriptor->paa);
+        BYTE                   n          = (plane * CW_NUM + paa_to_cw(descriptor->paa));
 
         ASSERT(plane < PLANE_NUM);
         ASSERT(n < CW_TOTAL_MAX);
         /* 同一个 CW 被两条 desc 覆盖 = desc 链构造错误（掩码是集合，重复置位会丢数据） */
-        ASSERT((request->cw_bitmap & (uint32_t)(1UL << n)) == 0UL);
+        ASSERT((request->cw_bitmap & (1UL << n)) == 0UL);
 
-        if ((planes_with_desc & (uint8_t)(1U << plane)) == 0U)
+        if ((planes_with_desc & (1U << plane)) == 0U)
         {
             /* 该 plane 的行地址取链上第一条 desc（行地址只含 page/block/lun+plane，CW 位丢掉）：
              * paa_page_base 清 CW 位、paa_with_plane 换 plane —— 与逐字段重排逐位等价。 */
             plane_row[plane] = paa_with_plane(paa_page_base(descriptor->paa), plane);
-            planes_with_desc |= (uint8_t)(1U << plane);
+            planes_with_desc |= (1U << plane);
         }
         else
         {
@@ -1164,15 +1167,15 @@ static fc_status_t fc_build_request_data_planes(const fc_t *controller, const fc
             ASSERT(paa_to_lun(descriptor->paa) == paa_to_lun(plane_row[plane]));
         }
 
-        request->cw_bitmap |= (uint32_t)(1UL << n);
+        request->cw_bitmap |= (1UL << n);
         if (descriptor->buffer_id != FC_BUFFER_ID_INVALID)
         {
             /* Page read/write 需要 CW 基址（ECC 在完整 528B CW 上处理）；
              * 非 page 命令数据直接写入 USER 区域，test/FTL 通过
              * fc_buffer_id_to_real_buffer 直接读取。 */
             request->cw_buffers[n] =
-                (fc_is_page_read((uint8_t)command->config.operation) != 0U) ||
-                        (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+                (fc_is_page_read(command->config.operation) != 0U) ||
+                        (fc_is_page_write(command->config.operation) != 0U)
                     ? fc_buffer_get_base(descriptor->buffer_id)
                     : fc_buffer_id_to_real_buffer(descriptor->buffer_id);
         }
@@ -1185,9 +1188,9 @@ static fc_status_t fc_build_request_data_planes(const fc_t *controller, const fc
 
     if (command->config.multi_plane > 0U)
     {
-        const uint8_t plane_count = (uint8_t)command->config.multi_plane;
-        const uint8_t all_planes  = (uint8_t)((1U << plane_count) - 1U);
-        uint8_t       plane;
+        const BYTE plane_count = command->config.multi_plane;
+        const BYTE all_planes  = ((1U << plane_count) - 1U);
+        BYTE       plane;
 
         request->plane_count = plane_count;
         request->plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
@@ -1226,7 +1229,7 @@ static fc_status_t fc_build_request_data_planes(const fc_t *controller, const fc
          * （回退到 command->paa 的同页地址 = v11 及以前的行为），生产不可达。 */
         for (plane = 0U; plane < plane_count; plane++)
         {
-            request->plane_paa[plane] = ((planes_with_desc & (uint8_t)(1U << plane)) != 0U)
+            request->plane_paa[plane] = ((planes_with_desc & (1U << plane)) != 0U)
                                             ? plane_row[plane]
                                             : paa_with_plane(command->paa, plane);
         }
@@ -1239,9 +1242,9 @@ static fc_status_t fc_build_request_data_planes(const fc_t *controller, const fc
          * ASSERT 把它显式化（有 desc 时链上地址 == command->paa）。
          * 「无重复 n」（掩码位数 == 链长）由 fc_command_configure_descriptor 的 attach 侧
          * ASSERT(fc_command_cw_attached(...)) 在污染点拦下，此处不再复核。 */
-        request->plane                     = (uint8_t)paa_to_plane(command->paa);
+        request->plane                     = paa_to_plane(command->paa);
         request->plane_paa[request->plane] = command->paa;
-        ASSERT(((planes_with_desc & (uint8_t)(1U << request->plane)) == 0U) ||
+        ASSERT(((planes_with_desc & (1U << request->plane)) == 0U) ||
                ((paa_to_block(plane_row[request->plane]) == paa_to_block(command->paa)) &&
                 (paa_to_page(plane_row[request->plane]) == paa_to_page(command->paa))));
     }
@@ -1326,26 +1329,26 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
 static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *command, fc_command_id_t command_id, nand_dispatch_request_t *request)
 {
     /* Pre-resolve descriptor-chain data into a self-contained dispatch request. */
-    *request              = (nand_dispatch_request_t){0};
-    request->command_id   = (uint16_t)command_id;
-    request->operation    = (uint8_t)command->config.operation;
-    request->ch           = (uint8_t)command->config.ch;
-    request->ce           = (uint8_t)command->config.ce;
-    request->lun          = (uint8_t)command->config.lun;
-    request->page_type    = (uint8_t)command->config.page_type;
-    request->feature_addr = (uint8_t)command->feature_addr;
+    memset(request, 0, sizeof(*request));
+    request->command_id   = command_id;
+    request->operation    = command->config.operation;
+    request->ch           = command->config.ch;
+    request->ce           = command->config.ce;
+    request->lun          = command->config.lun;
+    request->page_type    = command->config.page_type;
+    request->feature_addr = command->feature_addr;
 
     if (command->config.operation == OP_ERASE_BLOCK)
     {
         /* 单 plane 擦除：目标 plane 取自 command->paa（本分支无 desc 可用）。
          * v28：**不置 cw_bitmap**——擦除无逐 CW 数据，请求位图是合法空集；
          * completion_all_cws 对空集写 cw_status[0]，CQ 聚合照样读得到擦除成败。 */
-        request->plane                     = (uint8_t)paa_to_plane(command->paa);
+        request->plane                     = paa_to_plane(command->paa);
         request->plane_paa[request->plane] = command->paa;
     }
     else if (command->config.operation == OP_ERASE_BLOCK_MULTI_PLANE)
     {
-        uint8_t plane;
+        BYTE plane;
 
         request->plane_count = PLANE_NUM;
         request->plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
@@ -1368,7 +1371,7 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
          * 行地址取自 command->paa（无 desc 可用）：单 plane 取本 plane；多 plane 逐 plane 补 plane 位。 */
         if (command->config.operation == OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT)
         {
-            uint8_t plane;
+            BYTE plane;
 
             request->plane_count = PLANE_NUM;
             request->plane       = 0U; /* multi-plane：起始 plane 恒 0（uop 硬编码 row[0]/row[1]） */
@@ -1379,7 +1382,7 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
         }
         else
         {
-            request->plane                     = (uint8_t)paa_to_plane(command->paa);
+            request->plane                     = paa_to_plane(command->paa);
             request->plane_paa[request->plane] = command->paa;
         }
         /* 不置 cw_bitmap（空集 = 无 CW 可访问）：加载 op 的 uop 无 DATA_OUT，位图/缓冲皆不用。 */
@@ -1394,8 +1397,8 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
          * SET 先把命令里的字节拷进暂存，GET 由引擎写回，完成时再拷进 CQ 的 param。
          * 掩码只置该 plane 的 CW0 位：Feature 恒为 4 字节单次传输，与 config.cw 无关
          * （旧实现用 config.cw+1 个槽位，但只有槽位 0 承载数据，其余是零值摆设）。 */
-        request->plane                               = (uint8_t)paa_to_plane(command->paa);
-        request->cw_bitmap                           = (uint32_t)(1UL << (request->plane * CW_NUM));
+        request->plane                               = paa_to_plane(command->paa);
+        request->cw_bitmap                           = (1UL << (request->plane * CW_NUM));
         request->cw_buffers[request->plane * CW_NUM] = g_fc_return_staging[command_id];
         if (command->config.operation == OP_SET_FEATURES)
         {
@@ -1414,9 +1417,9 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
          * paa_to_cw(plane_paa[plane]) * CW_SIZE 算列地址；行地址取自同一 PAA。
          * 4 字节落**控制器侧暂存**（同 GET_FEATURES，SQ 提交后不可写），完成时拷进 CQ 的 param。
          * 掩码只置该 plane 的 CW0 位（暂存落点恒在 cw_buffers[plane*CW_NUM]）。 */
-        request->plane                               = (uint8_t)paa_to_plane(command->paa);
+        request->plane                               = paa_to_plane(command->paa);
         request->plane_paa[request->plane]           = command->paa;
-        request->cw_bitmap                           = (uint32_t)(1UL << (request->plane * CW_NUM));
+        request->cw_bitmap                           = (1UL << (request->plane * CW_NUM));
         request->cw_buffers[request->plane * CW_NUM] = g_fc_return_staging[command_id];
         (void)memset(g_fc_return_staging[command_id], 0, 4U);
     }
@@ -1428,8 +1431,8 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
          * 4 字节落**控制器侧暂存**（同 GET_FEATURES / READ_META），完成时拷进 CQ 的 param。
          * ⚠ 必须建这一支：否则落进末尾 else，位图保持空集 ⇒ nand_dispatch_task_load 一格
          *   cw_buffers[] 都不搬 ⇒ NAND 侧拿到残留指针，DATA_OUT 写向野地址。 */
-        request->plane                               = (uint8_t)paa_to_plane(command->paa);
-        request->cw_bitmap                           = (uint32_t)(1UL << (request->plane * CW_NUM));
+        request->plane                               = paa_to_plane(command->paa);
+        request->cw_bitmap                           = (1UL << (request->plane * CW_NUM));
         request->cw_buffers[request->plane * CW_NUM] = g_fc_return_staging[command_id];
         (void)memset(g_fc_return_staging[command_id], 0, 4U);
     }
@@ -1442,11 +1445,11 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
          * CQ 的 param。
          * ⚠ 必须建这一支：否则落进末尾 else，位图保持空集 ⇒ nand_dispatch_task_load 一格
          *   cw_buffers[] 都不搬 ⇒ NAND 侧拿到残留指针，DATA_OUT 写向野地址。 */
-        request->plane                               = (uint8_t)paa_to_plane(command->paa);
+        request->plane                               = paa_to_plane(command->paa);
         request->plane_paa[request->plane]           = command->paa;
-        request->cw_bitmap                           = (uint32_t)(1UL << (request->plane * CW_NUM));
+        request->cw_bitmap                           = (1UL << (request->plane * CW_NUM));
         request->cw_buffers[request->plane * CW_NUM] = g_fc_return_staging[command_id];
-        request->column                              = (uint16_t)((uint16_t)command->param.bytes[0] | ((uint16_t)command->param.bytes[1] << 8U));
+        request->column                              = (command->param.bytes[0] | (command->param.bytes[1] << 8U));
         (void)memset(g_fc_return_staging[command_id], 0, 4U);
     }
     else if ((command->config.operation == OP_BLOCK_UNLOCK_LOW) ||
@@ -1463,10 +1466,10 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
          * 记在一处——对它们只是多填一个不会被下发的行地址。
          * 不置 cw_bitmap：7Ah 的状态字节走 DQ 总线直读（NAND_UOP_DATA_OUT_STATUS →
          * completion->nand_status，不写 request->data），不经任何数据缓冲。 */
-        request->plane                     = (uint8_t)paa_to_plane(command->paa);
+        request->plane                     = paa_to_plane(command->paa);
         request->plane_paa[request->plane] = command->paa;
     }
-    else if (nand_operation_has_data((uint8_t)command->config.operation))
+    else if (nand_operation_has_data(command->config.operation))
     {
         const fc_status_t build_result = fc_build_request_data_planes(controller, command, request);
         if (build_result != FC_STATUS_OK)
@@ -1521,14 +1524,14 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
 
     /* ── Data Path encode: Random 加扰 → ECC 编码（RAID XOR 已移至 stripe 路径）──
      * 在 NAND 编程前对 buffer 数据做编码，对 FTL 完全透明。 */
-    if (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+    if (fc_is_page_write(command->config.operation) != 0U)
     {
         (void)fc_data_path_encode(command);
     }
 
     /* ── Stripe RAID 分支：raid=ENCODE 的 page write 走 Multi-Plane 提交 ── */
 #if CONFIG_FC_RAID
-    if ((fc_is_page_write((uint8_t)command->config.operation) != 0U) &&
+    if ((fc_is_page_write(command->config.operation) != 0U) &&
         (command->config.raid == FC_RAID_MODE_ENCODE))
     {
         fc_status_t stripe_result = fc_stripe_submit(controller, command, command_id);
@@ -1549,7 +1552,7 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
         return FC_STATUS_IO_ERROR;
     }
 
-    const uint8_t submit_result = nand_dispatch_submit(&request);
+    const BYTE submit_result = nand_dispatch_submit(&request);
 
     /* 填充 pass（fc_poll_fill）已按 nand_dispatch_lun_free() 预留槽位，
      * 此处不应再遇到 NOT_READY；其余失败（设备未就绪等）才是真错误。 */
@@ -1583,10 +1586,10 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
  * -------------------------------------------------------------------- */
 static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_chain_t *chain)
 {
-    uint8_t                 chain_count = chain->count;
+    BYTE                    chain_count = chain->count;
     nand_dispatch_request_t reqs[FC_SCHEDULER_CHAIN_MAX];
-    uint8_t                 i;
-    uint8_t                 j;
+    BYTE                    i;
+    BYTE                    j;
 
     for (i = 0U; i < chain_count; i++)
     {
@@ -1601,7 +1604,7 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
 
         /* ── Data Path encode: Random 加扰 → ECC 编码 → RAID XOR ──
          * 在 NAND 编程前对 buffer 数据做编码，对 FTL 完全透明。 */
-        if (fc_is_page_write((uint8_t)command->config.operation) != 0U)
+        if (fc_is_page_write(command->config.operation) != 0U)
         {
             (void)fc_data_path_encode(command);
         }
@@ -1624,7 +1627,7 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
         }
     }
 
-    const uint8_t submit_result = nand_dispatch_submit_chain(reqs, chain_count);
+    const BYTE submit_result = nand_dispatch_submit_chain(reqs, chain_count);
 
     /* 填充 pass 已按 nand_dispatch_lun_free() 预留整链槽位，此处不应再遇到 NOT_READY。 */
     ASSERT(submit_result != NAND_RESULT_NOT_READY);
@@ -1652,9 +1655,9 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
  *     - 否则 peek 后续，收集同一 (ch,ce,lun) 的连续命令，直到 chain==END 或链满。
  *     - 只 peek 不消耗——真正弹出在 fc_poll_fill_queue 里，链放不下时可原样留在队列。
  * -------------------------------------------------------------------- */
-static uint8_t fc_poll_chain_length(const fc_submission_queue_t *queue, const fc_command_t *head)
+static BYTE fc_poll_chain_length(const fc_submission_queue_t *queue, const fc_command_t *head)
 {
-    uint8_t need = 1U;
+    BYTE need = 1U;
 
     ASSERT(queue != NULL);
     ASSERT(head != NULL);
@@ -1666,7 +1669,7 @@ static uint8_t fc_poll_chain_length(const fc_submission_queue_t *queue, const fc
 
     while (need < FC_SCHEDULER_CHAIN_MAX)
     {
-        fc_command_id_t     next_id = fc_submission_queue_peek(queue, (uint16_t)(need - 1U));
+        fc_command_id_t     next_id = fc_submission_queue_peek(queue, (need - 1U));
         const fc_command_t *next;
 
         if (next_id == FC_COMMAND_ID_INVALID)
@@ -1712,10 +1715,10 @@ static uint8_t fc_poll_chain_length(const fc_submission_queue_t *queue, const fc
  *       链成员连续且逐个回推，链头永远排在成员之前，链序不破。
  *     - 提交失败即中止本轮，剩余命令仍在队列里（未被取出），下轮重试。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *queue, uint8_t owner, uint8_t suspended[CH_NUM][CE_NUM][LUN_NUM], uint8_t *dispatched)
+static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *queue, BYTE owner, BYTE suspended[CH_NUM][CE_NUM][LUN_NUM], BYTE *dispatched)
 {
-    uint16_t total;
-    uint16_t k;
+    WORD total;
+    WORD k;
 
     ASSERT(queue != NULL);
     ASSERT(dispatched != NULL);
@@ -1728,19 +1731,19 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
         fc_command_t        *cmd;
         fc_scheduler_chain_t chain;
         fc_status_t          dispatch_status;
-        uint8_t              ch;
-        uint8_t              ce;
-        uint8_t              lun;
-        uint8_t              need;
-        uint8_t              j;
+        BYTE                 ch;
+        BYTE                 ce;
+        BYTE                 lun;
+        BYTE                 need;
+        BYTE                 j;
 
         (void)fc_submission_queue_pop(queue, &id);
         cmd = fc_command_id_to_command(id);
         ASSERT(cmd != NULL);
 
-        ch  = (uint8_t)cmd->config.ch;
-        ce  = (uint8_t)cmd->config.ce;
-        lun = (uint8_t)cmd->config.lun;
+        ch  = cmd->config.ch;
+        ce  = cmd->config.ce;
+        lun = cmd->config.lun;
         /* 路由字段越界是编程错误：值由 FTL 从 PBA 经 pba_to_ch/ce/lun 灌入，
          * PBA 已过 pba_is_valid() 校验。此处必须断言而非防御——suspended[] 按
          * [ch][ce][lun] 直接索引，放行即栈越界写；且越界命令会因
@@ -1758,7 +1761,7 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
          * ⚠ **只回推、不置 suspended**——置了会把链自己的续批也一并锁死（该 LUN 从此
          *   既不接受另一队列、也不接受本链，活锁）。
          * 生产路径恒假：FTL 恒 FC_CHAIN_END ⇒ chain_owner 恒 NONE。 */
-        if ((controller->scheduler.chain_owner[ch][ce][lun] != (uint8_t)FC_CHAIN_OWNER_NONE) &&
+        if ((controller->scheduler.chain_owner[ch][ce][lun] != FC_CHAIN_OWNER_NONE) &&
             (controller->scheduler.chain_owner[ch][ce][lun] != owner))
         {
             (void)fc_submission_queue_push(queue, id);
@@ -1780,7 +1783,7 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
         {
             (void)fc_submission_queue_pop(queue, &chain.ids[j]);
         }
-        k = (uint16_t)(k + need - 1U); /* 跳过已取出的链成员 */
+        k = (k + need - 1U); /* 跳过已取出的链成员 */
 
         /* 单命令走 single，链走 chain——按 need 分流（不写成条件里的三目，
          * 两个分支都是带副作用的提交，塞进 if 里读不出"做了什么事"） */
@@ -1798,7 +1801,7 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
             /* 下发失败 = fc_poll_dispatch_chain 已把整链注 NAND_FAIL（构建失败或 submit
              * 失败都如此），这条链已经死了、不会再续批 ⇒ 必须清锁。不清的话该 LUN 会
              * 一直只认本队列，而那条链又不存在了，等于把 LUN 永久锁死。 */
-            controller->scheduler.chain_owner[ch][ce][lun] = (uint8_t)FC_CHAIN_OWNER_NONE;
+            controller->scheduler.chain_owner[ch][ce][lun] = FC_CHAIN_OWNER_NONE;
             return FC_STATUS_IO_ERROR;
         }
         /* 链锁更新：看**批尾**（chain.ids[need-1]，本批最后一条）的 chain 位——
@@ -1806,7 +1809,7 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
          *   END  ⇒ 链在此收尾，解锁，另一条队列可以喂这个 LUN 了。
          * 单命令（need == 1）批尾恒 END ⇒ 恒写 NONE，即生产路径只是多一次无副作用的写。 */
         controller->scheduler.chain_owner[ch][ce][lun] =
-            (controller->command_pool[chain.ids[need - 1U]].config.chain == FC_CHAIN_MORE) ? owner : (uint8_t)FC_CHAIN_OWNER_NONE;
+            (controller->command_pool[chain.ids[need - 1U]].config.chain == FC_CHAIN_MORE) ? owner : FC_CHAIN_OWNER_NONE;
         (*dispatched)++;
     }
 
@@ -1832,17 +1835,17 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
 static fc_status_t fc_poll_fill(fc_t *controller)
 {
     fc_scheduler_t *scheduler = &controller->scheduler;
-    uint8_t         suspended[CH_NUM][CE_NUM][LUN_NUM];
-    uint8_t         dispatched = 0U;
+    BYTE            suspended[CH_NUM][CE_NUM][LUN_NUM];
+    BYTE            dispatched = 0U;
 
     memset(suspended, 0, sizeof(suspended));
 
     /* ── HSQ 优先：先扫 HSQ，再扫 SQ；同一套扫描逻辑，共享同一张 suspended 表 ── */
-    if (fc_poll_fill_queue(controller, scheduler->hsq, (uint8_t)FC_CHAIN_OWNER_HSQ, suspended, &dispatched) != FC_STATUS_OK)
+    if (fc_poll_fill_queue(controller, scheduler->hsq, FC_CHAIN_OWNER_HSQ, suspended, &dispatched) != FC_STATUS_OK)
     {
         return FC_STATUS_IO_ERROR;
     }
-    if (fc_poll_fill_queue(controller, scheduler->sq, (uint8_t)FC_CHAIN_OWNER_SQ, suspended, &dispatched) != FC_STATUS_OK)
+    if (fc_poll_fill_queue(controller, scheduler->sq, FC_CHAIN_OWNER_SQ, suspended, &dispatched) != FC_STATUS_OK)
     {
         return FC_STATUS_IO_ERROR;
     }
@@ -1876,8 +1879,8 @@ static fc_status_t fc_poll_fill(fc_t *controller)
  * （写 desc/ECC、跑数据路径、组 CQ 项、清 stripe parity），不跨条缓存。 */
 typedef struct
 {
-    fc_t   *controller;
-    uint8_t failed; /* fc_complete_from_nand 返回非 OK（CQ 满强制 COMPLETED 防泄漏）时置位 */
+    fc_t *controller;
+    BYTE  failed; /* fc_complete_from_nand 返回非 OK（CQ 满强制 COMPLETED 防泄漏）时置位 */
 } fc_nand_sink_ctx_t;
 
 static void fc_nand_completion_sink(const nand_dispatch_completion_t *nand_completion, void *ctx)
@@ -1957,9 +1960,9 @@ fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_status_t *c
  *   要点：循环被 CQ 占用数（≤ FC_CQ_DEPTH）天然封顶，max_count 给多大都不会越界；
  *         语义与单条版一致（有取到 = OK / 一条没有 = QUEUE_EMPTY）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, uint16_t max_count, uint16_t *count)
+fc_status_t fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, WORD max_count, WORD *count)
 {
-    uint16_t n = 0U;
+    WORD n = 0U;
 
     while ((n < max_count) && (fc_completion_queue_pop(&controller->cq, &completions[n]) == FC_STATUS_OK))
     {

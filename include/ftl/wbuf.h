@@ -29,7 +29,7 @@
  */
 
 #include "allocator.h"  /* ftl_allocator_t */
-#include "ftl_config.h" /* FTL_LBA_PER_PAIR / FTL_IU_BYTES / lba_t / ftl_status_t */
+#include "ftl_config.h" /* FTL_LBA_PER_PAIR / FTL_IU_BYTES / DWORD / ftl_status_t */
 #include "ftl_module.h" /* ftl_bg_info_t / ftl_module_status_t */
 #include "pending.h"    /* ftl_pending_req_t（端口出参类型） */
 #include "ssd_types.h"  /* ssd_status_t */
@@ -49,13 +49,14 @@ typedef struct
     ftl_allocator_t *alloc;
 
     void *pending_ctx;
-    uint16_t (*pending_count)(void *ctx);
+    WORD(*pending_count)
+    (void *ctx);
     ftl_pending_req_t *(*pending_alloc)(void *ctx);
-    void (*pending_remove)(void *ctx, uint16_t command_id);
+    void (*pending_remove)(void *ctx, WORD command_id);
     void (*pending_validate)(ftl_pending_req_t *pending);
-    void (*group_add_subop)(void *ctx, uint16_t gi);
-    void (*group_complete_multi)(void *ctx, uint32_t owners, ssd_status_t status);
-    bool (*group_window_pending)(void *ctx, lba_t window);
+    void (*group_add_subop)(void *ctx, WORD gi);
+    void (*group_complete_multi)(void *ctx, DWORD owners, ssd_status_t status);
+    bool (*group_window_pending)(void *ctx, DWORD window);
 
     void *migrate_ctx;
     void (*gc_urgent)(void *ctx);
@@ -64,16 +65,16 @@ typedef struct
 /* ── 写缓冲状态（handle）── */
 typedef struct
 {
-    uint8_t  data[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 CW × 512B = 4096B 页镜像 */
-    uint8_t  occupied;                              /* bit i = 槽 i 有数据（i = plane*CW_NUM+cw） */
-    uint8_t  open;                                  /* 1 = 正持有某窗口 */
-    lba_t    base;                                  /* 持有页的 pair 窗口基址（低 3 位清零） */
-    uint32_t owners;                                /* bit gi = 组 gi 贡献过本页（FTL_GROUP_MAX=32） */
+    BYTE  data[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 CW × 512B = 4096B 页镜像 */
+    BYTE  occupied;                              /* bit i = 槽 i 有数据（i = plane*CW_NUM+cw） */
+    BYTE  open;                                  /* 1 = 正持有某窗口 */
+    DWORD base;                                  /* 持有页的 pair 窗口基址（低 3 位清零） */
+    DWORD owners;                                /* bit gi = 组 gi 贡献过本页（FTL_GROUP_MAX=32） */
 
     /* 观测计数（单调） */
-    uint32_t flushed_pages;
-    uint32_t drop_count;
-    int32_t  error;
+    DWORD   flushed_pages;
+    DWORD   drop_count;
+    int32_t error;
 
     wbuf_port_t port; /* 装配层绑定 */
 } wbuf_handle_t;
@@ -92,10 +93,10 @@ typedef struct
 {
     wbuf_trigger_kind_t kind;
 
-    lba_t       lba;  /* APPEND / DROP */
+    DWORD       lba;  /* APPEND / DROP */
     const void *data; /* APPEND：数据源（n × FTL_IU_BYTES） */
-    uint8_t     n;    /* APPEND：CW 数 */
-    uint16_t    gi;   /* APPEND：贡献组号 */
+    BYTE        n;    /* APPEND：CW 数 */
+    WORD        gi;   /* APPEND：贡献组号 */
 } wbuf_trigger_t;
 
 typedef enum
@@ -112,10 +113,10 @@ typedef struct
 
     wbuf_state_t state;
     bool         open;
-    uint8_t      occupied;
-    uint32_t     owners;
-    uint32_t     flushed_pages;
-    uint32_t     drop_count;
+    BYTE         occupied;
+    DWORD        owners;
+    DWORD        flushed_pages;
+    DWORD        drop_count;
     bool         timed_out;
 } wbuf_status_t;
 
@@ -134,7 +135,7 @@ void wbuf_init(wbuf_handle_t *h, const wbuf_port_t *port);
 ftl_status_t wbuf_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const ftl_bg_info_t *info, wbuf_status_t *out);
 
 /* ── 查询（读路径；只判不取） ── */
-bool ftl_wbuf_has(const wbuf_handle_t *h, lba_t lba);
-bool ftl_wbuf_read(const wbuf_handle_t *h, lba_t lba, void *out);
+bool ftl_wbuf_has(const wbuf_handle_t *h, DWORD lba);
+bool ftl_wbuf_read(const wbuf_handle_t *h, DWORD lba, void *out);
 
 #endif /* FTL_WBUF_H */

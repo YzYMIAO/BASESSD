@@ -15,17 +15,17 @@
 #include "delay.h"
 #include "sys_port.h"
 
-uint32_t delay_port_hclk_hz(void)
+DWORD delay_port_hclk_hz(void)
 {
     return HAL_RCC_GetHCLKFreq();
 }
 
-uint32_t delay_port_core_clock_hz(void)
+DWORD delay_port_core_clock_hz(void)
 {
     return HAL_RCC_GetSysClockFreq();
 }
 
-uint32_t delay_port_now_ms(void)
+DWORD delay_port_now_ms(void)
 {
     return HAL_GetTick();
 }
@@ -45,17 +45,17 @@ bool delay_port_dwt_enable(void)
     return (DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U;
 }
 
-uint32_t delay_port_dwt_cycles(void)
+DWORD delay_port_dwt_cycles(void)
 {
     return DWT->CYCCNT;
 }
 
-uint32_t delay_port_systick_load(void)
+DWORD delay_port_systick_load(void)
 {
     return SysTick->LOAD;
 }
 
-uint32_t delay_port_systick_value(void)
+DWORD delay_port_systick_value(void)
 {
     return SysTick->VAL;
 }

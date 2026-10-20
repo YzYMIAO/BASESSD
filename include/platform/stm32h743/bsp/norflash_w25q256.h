@@ -26,7 +26,7 @@
 #define NORFLASH_BLOCK_SIZE       (64UL * 1024UL)
 #define NORFLASH_BUSY_TIMEOUT_MS  (1000U)
 
-extern uint16_t g_norflash_type;
+extern WORD g_norflash_type;
 
 /* 指令表 */
 #define FLASH_WriteEnable      0x06
@@ -62,17 +62,17 @@ extern uint16_t g_norflash_type;
 /******************************************************************************************/
 
 /* 返回 0 表示成功；非 0 表示 QSPI、识别、QE 或 4-byte address 配置失败。 */
-uint8_t  norflash_init(void);
-uint16_t norflash_read_id(void);                       /* 读取FLASH ID */
-uint32_t norflash_read_jedec_id(void);                 /* 读取 JEDEC ID，W25Q256 应为 EF 40 19 */
-void     norflash_write_enable(void);                  /* 写使能 */
-void     norflash_write_disable(void);                 /* 写保护 */
-uint8_t  norflash_read_sr(uint8_t regno);              /* 读取状态寄存器 */
-void     norflash_write_sr(uint8_t regno, uint8_t sr); /* 写状态寄存器 */
+BYTE  norflash_init(void);
+WORD  norflash_read_id(void);                 /* 读取FLASH ID */
+DWORD norflash_read_jedec_id(void);           /* 读取 JEDEC ID，W25Q256 应为 EF 40 19 */
+void  norflash_write_enable(void);            /* 写使能 */
+void  norflash_write_disable(void);           /* 写保护 */
+BYTE  norflash_read_sr(BYTE regno);           /* 读取状态寄存器 */
+void  norflash_write_sr(BYTE regno, BYTE sr); /* 写状态寄存器 */
 
-void norflash_erase_chip(void);                                      /* 整片擦除 */
-void norflash_erase_sector(uint32_t saddr);                          /* 扇区擦除 */
-void norflash_read(uint8_t *pbuf, uint32_t addr, uint16_t datalen);  /* 读取flash */
-void norflash_write(uint8_t *pbuf, uint32_t addr, uint16_t datalen); /* 写入flash */
+void norflash_erase_chip(void);                            /* 整片擦除 */
+void norflash_erase_sector(DWORD saddr);                   /* 扇区擦除 */
+void norflash_read(BYTE *pbuf, DWORD addr, WORD datalen);  /* 读取flash */
+void norflash_write(BYTE *pbuf, DWORD addr, WORD datalen); /* 写入flash */
 
 #endif /* PLATFORM_STM32H743_BSP_NORFLASH_W25Q256_H */

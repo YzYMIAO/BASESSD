@@ -43,21 +43,21 @@ void crc_port_init(void)
     ASSERT(status == HAL_OK);
 }
 
-void crc_port_set_idr(uint32_t value)
+void crc_port_set_idr(DWORD value)
 {
     __HAL_CRC_SET_IDR(&g_crc_handle, value);
 }
 
-uint32_t crc_port_get_idr(void)
+DWORD crc_port_get_idr(void)
 {
     return __HAL_CRC_GET_IDR(&g_crc_handle);
 }
 
-uint32_t crc_port_compute(const uint8_t *data, uint32_t length_bytes)
+DWORD crc_port_compute(const BYTE *data, DWORD length_bytes)
 {
     /*
      * 4 字节对齐由调用者保证（见 include/fc/fc_crc_engine.h）。
      * 经 (const void *) 中转只为过 -Wcast-align。
      */
-    return HAL_CRC_Calculate(&g_crc_handle, (const uint32_t *)(const void *)data, length_bytes / 4U);
+    return HAL_CRC_Calculate(&g_crc_handle, (const DWORD *)(const void *)data, length_bytes / 4U);
 }

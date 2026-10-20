@@ -85,12 +85,12 @@ static const storage_wdg_config_t g_storage_wdg_config = {
 #endif
 
 /* Common logging stays transport-neutral; this BSP binds it to the non-blocking UART queue. */
-static int stm32_uart_log_sink(const char *message, uint32_t length)
+static DWORD stm32_uart_log_sink(const char *message, DWORD length)
 {
     return uart_log_write(message, length);
 }
 
-static int stm32_uart_log_flush_sink(uint32_t timeout_ms)
+static bool stm32_uart_log_flush_sink(DWORD timeout_ms)
 {
     return uart_log_flush(timeout_ms);
 }
@@ -102,7 +102,7 @@ static int stm32_uart_log_flush_sink(uint32_t timeout_ms)
 static void boot_section(const char *name)
 {
     (void)uart_log_write("--- ", 4U);
-    (void)uart_log_write(name, (uint32_t)strlen(name));
+    (void)uart_log_write(name, strlen(name));
     (void)uart_log_write(" ---\r\n", 6U);
 }
 
@@ -129,34 +129,34 @@ static void boot_report_system(void)
 
     boot_section("system");
     LOGI("[SYS ] CPU=%luMHz HCLK=%luMHz ICache=%s DCache=%s MPU=%lu\r\n",
-         (unsigned long)(delay_port_core_clock_hz() / 1000000U),
-         (unsigned long)(delay_port_hclk_hz() / 1000000U),
+         (delay_port_core_clock_hz() / 1000000U),
+         (delay_port_hclk_hz() / 1000000U),
          (get_icache_sta() != 0U) ? "on" : "off",
          (get_dcache_sta() != 0U) ? "on" : "off",
-         (unsigned long)sys_mpu_region_count());
+         sys_mpu_region_count());
     /* 时钟树：APB1/2/3/4 相等时压成一个 pclk，不等则四个全列。 */
     sys_clock_tree_get(&clk);
     if ((clk.pclk1_hz == clk.pclk2_hz) && (clk.pclk2_hz == clk.pclk3_hz) && (clk.pclk3_hz == clk.pclk4_hz))
     {
         LOGI("[SYS ] clk sys=%lu hclk=%lu pclk=%lu fmc=%lu qspi=%lu uart=%lu\r\n",
-             (unsigned long)(clk.sysclk_hz / 1000000U),
-             (unsigned long)(clk.hclk_hz / 1000000U),
-             (unsigned long)(clk.pclk1_hz / 1000000U),
-             (unsigned long)(clk.fmc_hz / 1000000U),
-             (unsigned long)(clk.qspi_hz / 1000000U),
-             (unsigned long)(clk.uart_hz / 1000000U));
+             (clk.sysclk_hz / 1000000U),
+             (clk.hclk_hz / 1000000U),
+             (clk.pclk1_hz / 1000000U),
+             (clk.fmc_hz / 1000000U),
+             (clk.qspi_hz / 1000000U),
+             (clk.uart_hz / 1000000U));
     }
     else
     {
         LOGI("[SYS ] clk sys=%lu hclk=%lu pclk1/2/3/4=%lu/%lu/%lu/%lu fmc=%lu qspi=%lu uart=%lu\r\n",
-             (unsigned long)(clk.sysclk_hz / 1000000U),
-             (unsigned long)(clk.hclk_hz / 1000000U),
-             (unsigned long)(clk.pclk1_hz / 1000000U),
-             (unsigned long)(clk.pclk2_hz / 1000000U),
-             (unsigned long)(clk.pclk3_hz / 1000000U),
-             (unsigned long)(clk.pclk4_hz / 1000000U),
-             (unsigned long)(clk.fmc_hz / 1000000U),
-             (unsigned long)(clk.uart_hz / 1000000U));
+             (clk.sysclk_hz / 1000000U),
+             (clk.hclk_hz / 1000000U),
+             (clk.pclk1_hz / 1000000U),
+             (clk.pclk2_hz / 1000000U),
+             (clk.pclk3_hz / 1000000U),
+             (clk.pclk4_hz / 1000000U),
+             (clk.fmc_hz / 1000000U),
+             (clk.uart_hz / 1000000U));
     }
 }
 
@@ -211,7 +211,7 @@ static metadata_dir_cache_t g_ftl_md[FTL_DIM_TOTAL] SRAM4_DATA;
  * 挂指针**不减少总 RAM**，只让 ftl_context_t 变小、放置可控、handle 形态统一。 */
 static migrate_handle_t g_ftl_migrate[FTL_DIM_TOTAL];
 static wbuf_handle_t    g_ftl_wbuf[FTL_DIM_TOTAL];
-static uint8_t          g_ftl_rr_page_scratch[FTL_DIM_TOTAL][FTL_READ_USER_SIZE];
+static BYTE             g_ftl_rr_page_scratch[FTL_DIM_TOTAL][FTL_READ_USER_SIZE];
 
 ssd_controller_t g_ctrl; /* controller 路由表（收 g_ftl 三维指针）；非 static：
                           * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
@@ -254,11 +254,11 @@ static l2p_owner_t g_l2p_owner[FTL_DIM_TOTAL];
  * 共享 cache 的 load/flush/commit 用它找 owner die。region→(ch,ce,lun) 的分解
  * 复用 completion_table_route_region（与 lba_route_* 同一套公式，避免第二套坐标）。
  */
-static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, uint32_t global_region)
+static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, DWORD global_region)
 {
     (void)ctx;
 
-    const uint32_t dim = global_region % FTL_DIM_TOTAL;
+    const DWORD dim = global_region % FTL_DIM_TOTAL;
 
     ASSERT(dim < FTL_DIM_TOTAL);
     ASSERT(g_l2p_owner[dim].metadata_dir != NULL);
@@ -276,29 +276,34 @@ static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, uint32_t global_reg
  * @param ch/ce/lun 本实例绑定拓扑
  * @return 0 成功，负值失败
  */
-static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
+static ftl_status_t ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
 {
-    ftl_context_t       *ftl = &g_ftl[ch][ce][lun];
-    ftl_allocator_t     *alloc;
-    ftl_boot_result_t    result;
-    const ftl_topology_t topo    = {.ch = ch, .ce = ce, .lun = lun};
-    const uint32_t       dim     = ftl_topo_dim(topo);
-    const ftl_storage_t  storage = {
-         .tables            = &g_ftl_tables[dim],
-         .metadata_dir      = &g_ftl_md[dim],
-         .journal           = &g_ftl_journal[dim],
-         .checkpoint_handle = &g_ftl_checkpoint_handle[dim],
-         .migrate           = &g_ftl_migrate[dim],
-         .wbuf              = &g_ftl_wbuf[dim],
-         .rr_page_scratch   = g_ftl_rr_page_scratch[dim],
-    };
+    ftl_context_t    *ftl = &g_ftl[ch][ce][lun];
+    ftl_allocator_t  *alloc;
+    ftl_boot_result_t result;
+
+    ftl_topology_t topo;
+    topo.ch  = ch;
+    topo.ce  = ce;
+    topo.lun = lun;
+
+    const DWORD dim = ftl_topo_dim(topo);
+
+    ftl_storage_t storage;
+    storage.tables            = &g_ftl_tables[dim];
+    storage.metadata_dir      = &g_ftl_md[dim];
+    storage.journal           = &g_ftl_journal[dim];
+    storage.checkpoint_handle = &g_ftl_checkpoint_handle[dim];
+    storage.migrate           = &g_ftl_migrate[dim];
+    storage.wbuf              = &g_ftl_wbuf[dim];
+    storage.rr_page_scratch   = g_ftl_rr_page_scratch[dim];
 
     ASSERT(dim < FTL_DIM_TOTAL);
 
     if (ftl_init(ftl, topo, &g_l2p_cache[ch][ce], &storage) != FTL_OK)
     {
         LOGE("[FTL ] init failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
-        return -1;
+        return FTL_ERROR;
     }
 
     alloc = &ftl->alloc;
@@ -329,7 +334,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     if (ftl_media_check_format(ftl, &need_format) != FTL_OK)
     {
         LOGE("[FTL ] CP media unreadable — refuse to format ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
-        return -1;
+        return FTL_ERROR;
     }
     if (need_format)
     {
@@ -337,7 +342,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
         if (ftl_media_format(ftl) != FTL_OK)
         {
             LOGE("[FTL ] media format failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
-            return -1;
+            return FTL_ERROR;
         }
     }
 
@@ -349,7 +354,7 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
     if (ftl_boot_recovery(ftl, &result) != FTL_OK)
     {
         LOGE("[FTL ] boot recovery failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
-        return -1;
+        return FTL_ERROR;
     }
 
     LOGI("[FTL ] instance ch=%u ce=%u lun=%u free=%u op=%u spare=%u\r\n",
@@ -362,8 +367,8 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
 
     LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu bit=%s\r\n",
          (int)result.boot_type,
-         (unsigned long)result.cp_sequence,
-         (unsigned long)result.journal_entries,
+         result.cp_sequence,
+         result.journal_entries,
          (result.blocks_restored != 0U) ? "restored" : "fallback");
 
     return 0;
@@ -379,11 +384,11 @@ static int ssd_ftl_boot(uint8_t ch, uint8_t ce, uint8_t lun)
  */
 static void ssd_ftl_boot_all(void)
 {
-    uint8_t ch;
-    uint8_t ce;
-    uint8_t lun;
-    int     boot_ok = 1;
-    int     ctrl_ret;
+    BYTE         ch;
+    BYTE         ce;
+    BYTE         lun;
+    int          boot_ok = 1;
+    ssd_status_t ctrl_ret;
 
     /* ① 全局完成旁表 + 路由表：清一次、填一次、设一次——**全部必须早于逐实例 boot**。
      *    - completion_table_init() 清的是**全局**资源（旁表 + 路由表），只做一次。
@@ -433,7 +438,7 @@ static void ssd_ftl_boot_all(void)
         {
             for (lun = 0U; lun < LUN_NUM; lun++)
             {
-                if (ssd_ftl_boot(ch, ce, lun) != 0)
+                if (ssd_ftl_boot(ch, ce, lun) != FTL_OK)
                 {
                     boot_ok = 0;
                 }
@@ -454,13 +459,13 @@ static void ssd_ftl_boot_all(void)
      * ftl_topo_dim(route(dim)) 必须等于 dim；公式漂移会让每次 cache 操作找不到 owner。
      * 必须在逐实例 ftl_init 之后做（topo 那时才有值），且 release 也拒绝启动
      * （H14 判据 9 的同类：静默错路由比停机更贵）。 */
-    for (uint32_t dim = 0U; dim < FTL_DIM_TOTAL; dim++)
+    for (DWORD dim = 0U; dim < FTL_DIM_TOTAL; dim++)
     {
         const struct ftl_context *owner = completion_table_route_region(dim);
 
         if ((owner == NULL) || (ftl_topo_dim(owner->topo) != dim))
         {
-            LOGE("[FTL ] route/dim mismatch dim=%lu\r\n", (unsigned long)dim);
+            LOGE("[FTL ] route/dim mismatch dim=%lu\r\n", dim);
             completion_table_set_route(NULL);
             return;
         }
@@ -500,7 +505,7 @@ void SysTick_Handler(void)
 
 int main(void)
 {
-    uint8_t nand_init_result;
+    BYTE nand_init_result;
 
     sys_init();
     cli_init(); /* 预填 CLI 固定 pattern buffer（.sram2_data NOLOAD） */
@@ -602,9 +607,9 @@ int main(void)
         cli_service_poll();
         if (g_ftl_ready)
         {
-            uint8_t ch;
-            uint8_t ce;
-            uint8_t lun;
+            BYTE ch;
+            BYTE ce;
+            BYTE lun;
 
             /* ① 全局泵：NAND 推进 + 完成表抽干（实例无关，每轮一次） */
             ftl_service_pump();

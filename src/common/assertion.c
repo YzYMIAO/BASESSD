@@ -32,9 +32,9 @@
 /* ── ① 64 位十进制打印 ──
  * newlib-nano 不支持 "%ll"（静默打成字面量，GCC 不警告），故不走 printf 家族。 */
 
-static void assertion_u64_to_decimal(uint64_t value, char *out, size_t out_size)
+static void assertion_u64_to_decimal(QWORD value, char *out, size_t out_size)
 {
-    char   digits[20]; /* uint64 十进制最多 20 位 */
+    char   digits[20]; /* 64 位无符号十进制最多 20 位 */
     size_t count = 0U;
     size_t i;
 
@@ -61,18 +61,18 @@ static void assertion_i64_to_decimal(int64_t value, char *out, size_t out_size)
     {
         /* 取模转换避免 INT64_MIN 取负的 UB。 */
         out[0] = '-';
-        assertion_u64_to_decimal((uint64_t)0 - (uint64_t)value, out + 1, out_size - 1U);
+        assertion_u64_to_decimal((QWORD)0 - (QWORD)value, out + 1, out_size - 1U);
         return;
     }
 
-    assertion_u64_to_decimal((uint64_t)value, out, out_size);
+    assertion_u64_to_decimal((QWORD)value, out, out_size);
 }
 
 /* ── ② 公共终端：落记录 → 日志 → 停机 ── */
 
 static _Noreturn void assertion_report_and_terminate(const char *text, const char *file, int line)
 {
-    crash_record_assert(text, file, (uint32_t)line);
+    crash_record_assert(text, file, line);
     LOGE("assertion failed: %s (%s:%d)\r\n", text, file, line);
     assertion_terminate();
 }
@@ -116,7 +116,7 @@ _Noreturn void assertion_fail_i64(const char *expression_a, const char *op, cons
     assertion_fail_64(expression_a, op, expression_b, a_text, b_text, file, line);
 }
 
-_Noreturn void assertion_fail_u64(const char *expression_a, const char *op, const char *expression_b, uint64_t a, uint64_t b, const char *file, int line)
+_Noreturn void assertion_fail_u64(const char *expression_a, const char *op, const char *expression_b, QWORD a, QWORD b, const char *file, int line)
 {
     char a_text[24];
     char b_text[24];

@@ -57,13 +57,13 @@ void pending_confirm_set_handler(pending_confirm_handler_t handler)
     s_confirm_handler = handler;
 }
 
-void pending_confirm_park(ftl_context_t *ftl, uint16_t pending_idx, uint32_t owners)
+void pending_confirm_park(ftl_context_t *ftl, WORD pending_idx, DWORD owners)
 {
     ftl_pending_req_t *pending = &ftl->pending[pending_idx];
 
     ASSERT(pending->used != 0U);
 
-    pending->op         = (uint8_t)PENDING_OP_WRITE_CONFIRM;
+    pending->op         = PENDING_OP_WRITE_CONFIRM;
     pending->command_id = FTL_PENDING_CMD_NONE;
     pending->owners     = owners;
     pending->park_ms    = ftl_job_now_ms();
@@ -71,7 +71,7 @@ void pending_confirm_park(ftl_context_t *ftl, uint16_t pending_idx, uint32_t own
 
 bool pending_confirm_has_parked(const ftl_context_t *ftl)
 {
-    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if ((ftl->pending[i].used != 0U) && pending_op_is_write_confirm(ftl->pending[i].op))
         {
@@ -83,9 +83,9 @@ bool pending_confirm_has_parked(const ftl_context_t *ftl)
 
 void pending_confirm_service(ftl_context_t *ftl, const ftl_bg_info_t *info)
 {
-    const uint32_t now_ms = ((info != NULL) && (info->now_ms != 0U)) ? info->now_ms : ftl_job_now_ms();
+    const DWORD now_ms = ((info != NULL) && (info->now_ms != 0U)) ? info->now_ms : ftl_job_now_ms();
 
-    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
         ftl_pending_req_t *pending = &ftl->pending[i];
 
@@ -107,9 +107,7 @@ void pending_confirm_service(ftl_context_t *ftl, const ftl_bg_info_t *info)
             {
                 continue; /* region 仍在加载：保留停泊，下轮再来 */
             }
-            LOGE("[FTL] confirm park timeout lba=%lu idx=%u\r\n",
-                 pending->lba,
-                 (unsigned)i);
+            LOGE("[FTL] confirm park timeout lba=%lu idx=%u\r\n", pending->lba, (unsigned)i);
         }
         else if (st != FTL_OK)
         {
@@ -117,7 +115,7 @@ void pending_confirm_service(ftl_context_t *ftl, const ftl_bg_info_t *info)
         }
 
         /* 结算：owners 必须在释放**之前**取走（组完成通知可能重入复用本槽）。 */
-        const uint32_t     owners = pending->owners;
+        const DWORD        owners = pending->owners;
         const ssd_status_t status = (st == FTL_OK) ? SSD_STATUS_OK : SSD_STATUS_IO_ERROR;
 
         pending_release_index(ftl, i);
@@ -136,7 +134,7 @@ void pending_confirm_service(ftl_context_t *ftl, const ftl_bg_info_t *info)
  * -------------------------------------------------------------------- */
 ftl_pending_req_t *pending_alloc(ftl_context_t *ftl)
 {
-    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if (ftl->pending[i].used == 0U)
         {
@@ -150,9 +148,9 @@ ftl_pending_req_t *pending_alloc(ftl_context_t *ftl)
 }
 
 /* pending_lookup — 按 command_id 查本实例 pending 项；未找到返回 NULL（线性扫描，表深仅 32） */
-ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, uint16_t cmd_id)
+ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, WORD cmd_id)
 {
-    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if ((ftl->pending[i].used != 0U) &&
             (ftl->pending[i].command_id == cmd_id))
@@ -165,7 +163,7 @@ ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, uint16_t cmd_id)
 }
 
 /* pending_remove — 置 used=0 释放槽位；未找到则 no-op（幂等，供完成路径重复调用） */
-void pending_remove(ftl_context_t *ftl, uint16_t cmd_id)
+void pending_remove(ftl_context_t *ftl, WORD cmd_id)
 {
     ftl_pending_req_t *req = pending_lookup(ftl, cmd_id);
 
@@ -184,11 +182,11 @@ void pending_remove(ftl_context_t *ftl, uint16_t cmd_id)
  *             FTL_PENDING_CMD_NONE，pending_lookup 查不到，只能按 op 找。
  *             按下标升序 = 先进先出，与「托管顺序」一致（append-only，无移动）。
  * -------------------------------------------------------------------- */
-bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_index)
+bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, BYTE *out_index)
 {
-    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
-        if ((ftl->pending[i].used != 0U) && (ftl->pending[i].op == (uint8_t)op))
+        if ((ftl->pending[i].used != 0U) && (ftl->pending[i].op == op))
         {
             if (out_index != NULL)
             {
@@ -210,7 +208,7 @@ bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out
  *             收尾只能按下标。⚠ 下标由 pending_find_op 产出且表无移动 ⇒ 恒有效，
  *             故越界一律 ASSERT（判据 2：调用者保证的前置条件），不静默 no-op。
  * -------------------------------------------------------------------- */
-void pending_release_index(ftl_context_t *ftl, uint8_t index)
+void pending_release_index(ftl_context_t *ftl, BYTE index)
 {
     ASSERT(ftl->pending[index].used != 0U); /* 重复释放即簿记错误，留现场 */
 
@@ -218,11 +216,11 @@ void pending_release_index(ftl_context_t *ftl, uint8_t index)
 }
 
 /* pending_count — 本实例占用槽位数（ftl_service 档位判定用它近似 host IO 空闲度） */
-uint16_t pending_count(const ftl_context_t *ftl)
+WORD pending_count(const ftl_context_t *ftl)
 {
-    uint16_t count = 0U;
+    WORD count = 0U;
 
-    for (uint8_t i = 0U; i < FTL_PENDING_MAX; i++)
+    for (BYTE i = 0U; i < FTL_PENDING_MAX; i++)
     {
         if (ftl->pending[i].used != 0U)
         {
@@ -245,7 +243,7 @@ uint16_t pending_count(const ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 int pending_group_alloc(ftl_context_t *ftl)
 {
-    for (uint8_t i = 0U; i < FTL_GROUP_MAX; i++)
+    for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
         if (ftl->groups[i].used == 0U)
         {
@@ -259,11 +257,11 @@ int pending_group_alloc(ftl_context_t *ftl)
 }
 
 /* pending_group_count — 占用（未完成）组数（有未完成组 = host 工作饿着 → 归 BUSY） */
-uint16_t pending_group_count(const ftl_context_t *ftl)
+WORD pending_group_count(const ftl_context_t *ftl)
 {
-    uint16_t count = 0U;
+    WORD count = 0U;
 
-    for (uint8_t i = 0U; i < FTL_GROUP_MAX; i++)
+    for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
         if (ftl->groups[i].used != 0U)
         {
@@ -287,7 +285,7 @@ uint16_t pending_group_count(const ftl_context_t *ftl)
  *     · ⚠ used=0 必须在**通知之后**：on_complete 回调可能重入 ftl_submit_*
  *       再申请组槽，若先清零则本槽可能被该重入立刻复用、又被这里清零。
  * -------------------------------------------------------------------- */
-void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi)
+void pending_group_maybe_complete(ftl_context_t *ftl, WORD gi)
 {
     ftl_io_group_t *g = &ftl->groups[gi];
     if ((g->used == 0U) || (g->next < g->total) || (g->outstanding != 0U))
@@ -324,7 +322,7 @@ void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi)
  *             pending_group_complete_subop*（带聚合状态与完成通知），
  *             提交失败回滚走 drop（不触发完成通知）。
  * -------------------------------------------------------------------- */
-void pending_group_add_subop(ftl_context_t *ftl, uint16_t gi)
+void pending_group_add_subop(ftl_context_t *ftl, WORD gi)
 {
     ftl_io_group_t *g = &ftl->groups[gi];
     ASSERT(g->used != 0U);
@@ -333,7 +331,7 @@ void pending_group_add_subop(ftl_context_t *ftl, uint16_t gi)
     g->outstanding++;
 }
 
-void pending_group_drop_subop(ftl_context_t *ftl, uint16_t gi)
+void pending_group_drop_subop(ftl_context_t *ftl, WORD gi)
 {
     ftl_io_group_t *g = &ftl->groups[gi];
     ASSERT(g->used != 0U);
@@ -354,7 +352,7 @@ void pending_group_drop_subop(ftl_context_t *ftl, uint16_t gi)
  *       后续成功不覆盖（组整体语义 = 任一子操作失败则整组 IO_ERROR）。
  *     · outstanding-- 后交 pending_group_maybe_complete 判是否整组完成。
  * -------------------------------------------------------------------- */
-void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t sub_status)
+void pending_group_complete_subop(ftl_context_t *ftl, WORD gi, ssd_status_t sub_status)
 {
     ftl_io_group_t *g = &ftl->groups[gi];
     ASSERT(g->used != 0U); /* 组已释放 = 重复完成/簿记错误，debug 当场炸 */
@@ -380,9 +378,9 @@ void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t 
  *   实现要点：owners 按值传入即局部副本，遍历它安全——回调（on_complete）可能重入
  *             复用组槽，但本循环只认传入的位掩码，不受槽位变动影响。
  * -------------------------------------------------------------------- */
-void pending_group_complete_subop_multi(ftl_context_t *ftl, uint32_t owners, ssd_status_t sub_status)
+void pending_group_complete_subop_multi(ftl_context_t *ftl, DWORD owners, ssd_status_t sub_status)
 {
-    for (uint16_t gi = 0U; gi < FTL_GROUP_MAX; gi++)
+    for (WORD gi = 0U; gi < FTL_GROUP_MAX; gi++)
     {
         if ((owners & ftl_group_bit(gi)) != 0U)
         {

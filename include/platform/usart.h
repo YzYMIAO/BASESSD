@@ -1,6 +1,9 @@
 #ifndef PLATFORM_USART_H
 #define PLATFORM_USART_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -36,16 +39,16 @@
  */
 typedef struct
 {
-    uint32_t rx_overflow;         /* Software RX ring was full. */
-    uint32_t tx_dropped;          /* New log bytes rejected because TX ring was full. */
-    uint32_t tx_context_errors;   /* Logging attempted from an ISR or while interrupts were masked. */
-    uint32_t tx_flush_timeouts;   /* Flush could not observe queue empty, DMA idle, and TC before its deadline. */
-    uint32_t tx_dma_errors;       /* DMA transfer errors; TXE interrupt fallback remains active. */
-    uint32_t tx_transport_errors; /* A UART/DMA transport fault makes reliable delivery unprovable. */
-    uint32_t overrun_errors;      /* USART ORE: peripheral/FIFO was not drained in time. */
-    uint32_t framing_errors;      /* USART FE: stop bit was invalid. */
-    uint32_t noise_errors;        /* USART NE: noise was detected while sampling. */
-    uint32_t parity_errors;       /* USART PE: received parity did not match. */
+    DWORD rx_overflow;         /* Software RX ring was full. */
+    DWORD tx_dropped;          /* New log bytes rejected because TX ring was full. */
+    DWORD tx_context_errors;   /* Logging attempted from an ISR or while interrupts were masked. */
+    DWORD tx_flush_timeouts;   /* Flush could not observe queue empty, DMA idle, and TC before its deadline. */
+    DWORD tx_dma_errors;       /* DMA transfer errors; TXE interrupt fallback remains active. */
+    DWORD tx_transport_errors; /* A UART/DMA transport fault makes reliable delivery unprovable. */
+    DWORD overrun_errors;      /* USART ORE: peripheral/FIFO was not drained in time. */
+    DWORD framing_errors;      /* USART FE: stop bit was invalid. */
+    DWORD noise_errors;        /* USART NE: noise was detected while sampling. */
+    DWORD parity_errors;       /* USART PE: received parity did not match. */
 } uart_stats_t;
 
 /* 接收错误种类位掩码（中性命名，port 侧把 USART 硬件标志翻译成这些位）。 */
@@ -59,17 +62,22 @@ typedef struct
  */
 
 /* 初始化串口（波特率）并置就绪位；由 sys_init 调用。 */
-void usart_init(uint32_t baudrate);
+void usart_init(DWORD baudrate);
 
 /*
  * 可靠发送接口：正常任务上下文返回前，data 的全部字节均已进入 TX 队列。队列满时
  * 等待 DMA/USART IRQ 推进 tail，形成反压，不短写、不丢弃。不得从 ISR、持有不可等待
- * 锁的临界区或中断已屏蔽的上下文调用；这些调用返回 -1 并累计 tx_context_errors。
+ * 锁的临界区或中断已屏蔽的上下文调用；这些调用返回 UART_LOG_INVALID 并累计
+ * tx_context_errors。
+ *
+ * @return 实际接受的字节数（0..length）；失败返回 UART_LOG_INVALID（显式哨兵）。
  */
-int uart_log_write(const char *data, uint32_t length);
+#define UART_LOG_INVALID (UINT32_MAX)
+DWORD uart_log_write(const char *data, DWORD length);
 
-/* Wait until the TX queue is empty, DMA is idle, and USART TC confirms the final stop bit left TX. */
-int uart_log_flush(uint32_t timeout_ms);
+/* Wait until the TX queue is empty, DMA is idle, and USART TC confirms the final stop bit left TX.
+ * @return true = 已排空；false = 未就绪 / 上下文非法 / 超时。 */
+bool uart_log_flush(DWORD timeout_ms);
 
 void uart_get_stats(uart_stats_t *stats);
 
@@ -77,25 +85,25 @@ void uart_get_stats(uart_stats_t *stats);
  * 从 RX 软件队列取出一个字节。返回非 0 = 取到（*byte 有效），0 = 队列为空。
  * 仅由主循环 CLI（cli_service_poll）消费；USART IRQ 是唯一生产者。
  */
-uint8_t uart_rx_read(uint8_t *byte);
+BYTE uart_rx_read(BYTE *byte);
 
 /*
  * ---- 共享入口：由 port 侧的中断/回调调用 ----
  */
 
 /* RX 生产者：IRQ 抽干硬件 FIFO 时逐字节调用；队列满时丢弃新字节并累计 rx_overflow。 */
-void uart_rx_ring_push(uint8_t byte);
+void uart_rx_ring_push(BYTE byte);
 
 /* TX 消费者：TXE 回退路径逐字节取出发送；返回非 0 = 取到，0 = 队列为空。 */
-uint8_t uart_tx_ring_pop(uint8_t *byte);
+BYTE uart_tx_ring_pop(BYTE *byte);
 
-uint8_t uart_tx_ring_is_empty(void);
+BYTE uart_tx_ring_is_empty(void);
 
 /* DMA 传输是否可用（uart_tx_dma_init 是否成功）；供 IRQ 决定走 DMA 还是 TXE 回退。 */
-uint8_t uart_tx_dma_ready(void);
+BYTE uart_tx_dma_ready(void);
 
 /* 把 port 侧翻译好的错误位累计进诊断计数。 */
-void uart_stats_count_rx_error(uint32_t kinds);
+void uart_stats_count_rx_error(DWORD kinds);
 
 /* DMA 完成/出错回调的簿记入口；由 port 侧 HAL 签名的回调转发。 */
 void uart_tx_dma_complete_handler(void);
@@ -108,28 +116,28 @@ void uart_tx_dma_error_handler(void);
  */
 
 /* 硬件初始化（串口外设 + GPIO + DMA + 接收中断使能）；返回 DMA 是否可用。 */
-uint8_t usart_port_hw_init(uint32_t baudrate);
+BYTE usart_port_hw_init(DWORD baudrate);
 
 /* 串口中断入口：抽干 RX FIFO、清错误标志、TXE 回退填充；由 USART1_IRQHandler 调用。 */
 void usart_port_irq_handler(void);
 
-/* TX DMA 启动：D-cache 清理 + DMA 启动 + CR3 DMAT。返回 0 = 成功，非 0 = 失败。 */
-int usart_port_tx_dma_start(const uint8_t *buffer, uint32_t length);
+/* TX DMA 启动：D-cache 清理 + DMA 启动 + CR3 DMAT。返回 true = 已启动。 */
+bool usart_port_tx_dma_start(const BYTE *buffer, DWORD length);
 
 /* 断开 TX DMA（清 CR3 DMAT）。 */
 void usart_port_tx_dma_detach(void);
 
 /* DMA 剩余未搬运字节数（出错时估算已搬运前缀）。 */
-uint16_t usart_port_tx_dma_remaining(void);
+WORD usart_port_tx_dma_remaining(void);
 
 /* 打开 TXE 中断（TXE 回退路径的驱动源）。 */
 void usart_port_tx_irq_enable(void);
 
 /* TX 完成标志（最后一个停止位是否已离开引脚）。 */
-uint8_t usart_port_tx_complete(void);
+BYTE usart_port_tx_complete(void);
 
 /* 系统单调毫秒计数（flush 超时用）。 */
-uint32_t usart_port_now_ms(void);
+DWORD usart_port_now_ms(void);
 
 /* 内核内建包装：屏障 / 事件信号 / 事件等待。 */
 void usart_port_memory_barrier(void);
@@ -137,11 +145,11 @@ void usart_port_event_signal(void);
 void usart_port_event_wait(void);
 
 /* 当前是否处于原子上下文（在 ISR 中或中断已屏蔽）。 */
-uint8_t usart_port_context_is_atomic(void);
+BYTE usart_port_context_is_atomic(void);
 
 /* 中断状态保存/关闭/恢复（PRIMASK）。 */
-uint32_t usart_port_irq_state(void);
-void     usart_port_irq_disable(void);
-void     usart_port_irq_restore(uint32_t state);
+DWORD usart_port_irq_state(void);
+void  usart_port_irq_disable(void);
+void  usart_port_irq_restore(DWORD state);
 
 #endif /* PLATFORM_USART_H */

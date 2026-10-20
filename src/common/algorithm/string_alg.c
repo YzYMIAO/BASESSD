@@ -275,7 +275,7 @@ void computeLPS(char *pattern, int m, int *lps)
     }
 }
 
-int strStr(char *haystack, char *needle)
+DWORD strStr(char *haystack, char *needle)
 {
     int n = strlen(haystack);
     int m = strlen(needle);
@@ -303,7 +303,7 @@ int strStr(char *haystack, char *needle)
         if (j == m)
         {
             free(lps);
-            return i - j; // 找到匹配
+            return (i - j); // 找到匹配
         }
         else if (i < n && haystack[i] != needle[j])
         {
@@ -319,5 +319,5 @@ int strStr(char *haystack, char *needle)
     }
 
     free(lps);
-    return -1;
+    return UINT32_MAX; /* 显式「未找到」哨兵（非负） */
 }

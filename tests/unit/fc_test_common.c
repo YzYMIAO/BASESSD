@@ -14,9 +14,9 @@
 #include <string.h>
 
 /* test_fill_paa / test_check_paa 按 **dword** 步进（`FC_BUFFER_USER_SIZE / 4U` 次 ×
- * `sizeof(nand_paa_t)` 字节）：只有 PAA 正好 4 字节、且 USER 区是 4 的整数倍，
+ * `sizeof(DWORD)` 字节）：只有 PAA 正好 4 字节、且 USER 区是 4 的整数倍，
  * 「128 个 dword 填满 512B 槽」才成立。两者任一漂移都会**静默**写穿 / 漏填槽。 */
-_Static_assert(sizeof(nand_paa_t) == sizeof(uint32_t), "nand_paa_t 非 4 字节：dword 步进填槽失效");
+_Static_assert(sizeof(DWORD) == sizeof(uint32_t), "DWORD 非 4 字节：dword 步进填槽失效");
 _Static_assert((FC_BUFFER_USER_SIZE % sizeof(uint32_t)) == 0U, "USER 区非 4 的整数倍");
 
 uint8_t *g_source_data = NULL;
@@ -992,7 +992,7 @@ uint8_t test_block_lock_status(uint16_t block_index, uint8_t plane, const fc_cmd
  *  数据搬运 / 校验
  **************************************************************************/
 
-void test_fill_paa(uint8_t *slot, nand_paa_t paa)
+void test_fill_paa(uint8_t *slot, DWORD paa)
 {
     ASSERT(slot != NULL);
 
@@ -1004,7 +1004,7 @@ void test_fill_paa(uint8_t *slot, nand_paa_t paa)
     }
 }
 
-uint8_t test_check_paa(const uint8_t *slot, nand_paa_t paa)
+uint8_t test_check_paa(const uint8_t *slot, DWORD paa)
 {
     uint32_t word;
 
@@ -1080,7 +1080,7 @@ void test_verify_page_paa(const uint8_t *data, uint16_t block_index, uint16_t pa
         for (uint8_t cw = 0U; cw < CW_NUM; cw++)
         {
             const uint8_t *slot = &data[((uint32_t)plane * CW_NUM + (uint32_t)cw) * FC_BUFFER_USER_SIZE];
-            nand_paa_t     expected =
+            DWORD          expected =
                 paa_from_addr(&(nand_addr_t){.block = block_index, .plane = plane, .page = page_index, .cw = cw});
 
             if (test_check_paa(slot, expected) == 0U)

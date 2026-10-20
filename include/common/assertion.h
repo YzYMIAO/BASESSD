@@ -16,6 +16,8 @@
  * 上游后只调 abort()，由 assertion.c 里的 abort() 重定向承接终端路径。
  */
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD（项目统一固定宽度类型）*/
+
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -53,7 +55,7 @@ _Noreturn void assertion_failf(const char *file, int line, const char *format, .
  * 因此 64 位变体不走 printf 家族，由 assertion.c 里的十进制拆解打印。
  */
 _Noreturn void assertion_fail_i64(const char *expression_a, const char *op, const char *expression_b, int64_t a, int64_t b, const char *file, int line);
-_Noreturn void assertion_fail_u64(const char *expression_a, const char *op, const char *expression_b, uint64_t a, uint64_t b, const char *file, int line);
+_Noreturn void assertion_fail_u64(const char *expression_a, const char *op, const char *expression_b, QWORD a, QWORD b, const char *file, int line);
 
 /* ── 终端路径：flush → 平台上下文 → 崩溃记录 dump → 停机 ── */
 
@@ -146,11 +148,11 @@ void assertion_platform_context(void);
 #define ASSERT_SIZE(a, op, b)   ASSERT_TYPE(size_t, "u", a, op, b)
 
 #define ASSERT_INT8(a, op, b)   ASSERT_TYPE(int8_t, "i", a, op, b)
-#define ASSERT_UINT8(a, op, b)  ASSERT_TYPE(uint8_t, "u", a, op, b)
+#define ASSERT_UINT8(a, op, b)  ASSERT_TYPE(BYTE, "u", a, op, b)
 #define ASSERT_INT16(a, op, b)  ASSERT_TYPE(int16_t, "i", a, op, b)
-#define ASSERT_UINT16(a, op, b) ASSERT_TYPE(uint16_t, "u", a, op, b)
+#define ASSERT_UINT16(a, op, b) ASSERT_TYPE(WORD, "u", a, op, b)
 #define ASSERT_INT32(a, op, b)  ASSERT_TYPE(int32_t, "li", a, op, b)
-#define ASSERT_UINT32(a, op, b) ASSERT_TYPE(uint32_t, "lu", a, op, b)
+#define ASSERT_UINT32(a, op, b) ASSERT_TYPE(DWORD, "lu", a, op, b)
 
 #define ASSERT_INT64(a, op, b)                                                                       \
     do                                                                                               \
@@ -166,8 +168,8 @@ void assertion_platform_context(void);
 #define ASSERT_UINT64(a, op, b)                                                                      \
     do                                                                                               \
     {                                                                                                \
-        uint64_t assertion_tmp_a_ = (a);                                                             \
-        uint64_t assertion_tmp_b_ = (b);                                                             \
+        QWORD assertion_tmp_a_ = (a);                                                                \
+        QWORD assertion_tmp_b_ = (b);                                                                \
         if (ASSERT_UNLIKELY(!(assertion_tmp_a_ op assertion_tmp_b_)))                                \
         {                                                                                            \
             assertion_fail_u64(#a, #op, #b, assertion_tmp_a_, assertion_tmp_b_, __FILE__, __LINE__); \

@@ -41,7 +41,18 @@
  *   由 req_* 拼接写入 / poll 拆回各 CW buffer。
  *   归属模块：nand_dispatch.c（定义）与本文件（引用）。
  * -------------------------------------------------------------------- */
-extern uint8_t g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE];
+extern BYTE g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_SIZE];
+
+/* 清零 request 并填非行地址字段；row[] 由各 handler 按 plane 填写，
+ * 未用到的 plane 必须保持 0（H39：按 NAND_PLANE_MAX 整体清零）。
+ * 局部结构体一律先声明再逐字段赋值，不用复合字面量初始化（H47）。 */
+static void req_init(nand_dispatch_task_t *task, WORD column, BYTE *data, WORD data_length)
+{
+    memset(&task->request, 0, sizeof(task->request));
+    task->request.column      = column;
+    task->request.data        = data;
+    task->request.data_length = data_length;
+}
 
 /* --------------------------------------------------------------------
  * completion_all_cws
@@ -59,12 +70,12 @@ extern uint8_t g_nand_channel_page_buffer[CH_NUM][CE_NUM][LUN_NUM][PAGE_BUFFER_S
  *         ERASE 不再由 FC 伪造一个 CW0 位，擦除请求的位图是**合法空集**；FC 的非 page
  *         read 聚合分支是全表 OR，靠这一格读到擦除成败（否则失败被静默吞掉）。
  * -------------------------------------------------------------------- */
-static void completion_all_cws(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
+static void completion_all_cws(nand_dispatch_task_t *task, BYTE result, const nand_fc_completion_t *nand_completion)
 {
-    uint8_t status = (result == NAND_RESULT_OK)        ? FC_CW_STATUS_SUCCESS
-                     : (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT
-                                                       : FC_CW_STATUS_NAND_FAIL;
-    uint8_t n;
+    BYTE status = (result == NAND_RESULT_OK)        ? FC_CW_STATUS_SUCCESS
+                  : (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT
+                                                    : FC_CW_STATUS_NAND_FAIL;
+    BYTE n;
 
     (void)nand_completion;
     if (task->cw_bitmap == 0U)
@@ -77,7 +88,7 @@ static void completion_all_cws(nand_dispatch_task_t *task, uint8_t result, const
         return;
     }
     for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
+         n = nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
     {
         task->completion.cw_status[n] = status;
     }
@@ -98,11 +109,11 @@ static void completion_all_cws(nand_dispatch_task_t *task, uint8_t result, const
  *         上报 task->cw_index（= 当前 CW 的 flat 绝对编号 n）而非固定 0，
  *         供上层定位具体 CW。
  * -------------------------------------------------------------------- */
-static void completion_per_cw(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
+static void completion_per_cw(nand_dispatch_task_t *task, BYTE result, const nand_fc_completion_t *nand_completion)
 {
-    uint8_t status = (result == NAND_RESULT_OK)        ? FC_CW_STATUS_SUCCESS
-                     : (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT
-                                                       : FC_CW_STATUS_NAND_FAIL;
+    BYTE status = (result == NAND_RESULT_OK)        ? FC_CW_STATUS_SUCCESS
+                  : (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT
+                                                    : FC_CW_STATUS_NAND_FAIL;
 
     (void)nand_completion;
     task->completion.cw_status[task->cw_index] = status;
@@ -124,12 +135,12 @@ static void completion_per_cw(nand_dispatch_task_t *task, uint8_t result, const 
  *         掩码非空（如 FEATURES）时逐位置位，避免"状态写在下标 0、FC 却按 n 读"
  *         而丢失。
  * -------------------------------------------------------------------- */
-static void completion_single(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
+static void completion_single(nand_dispatch_task_t *task, BYTE result, const nand_fc_completion_t *nand_completion)
 {
-    uint8_t status = (result == NAND_RESULT_OK)        ? FC_CW_STATUS_SUCCESS
-                     : (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT
-                                                       : FC_CW_STATUS_NAND_FAIL;
-    uint8_t n;
+    BYTE status = (result == NAND_RESULT_OK)        ? FC_CW_STATUS_SUCCESS
+                  : (result == NAND_RESULT_TIMEOUT) ? FC_CW_STATUS_TIMEOUT
+                                                    : FC_CW_STATUS_NAND_FAIL;
+    BYTE n;
 
     (void)nand_completion;
     if (task->cw_bitmap == 0U)
@@ -138,7 +149,7 @@ static void completion_single(nand_dispatch_task_t *task, uint8_t result, const 
         return;
     }
     for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
+         n = nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
     {
         task->completion.cw_status[n] = status;
     }
@@ -154,10 +165,10 @@ static void completion_single(nand_dispatch_task_t *task, uint8_t result, const 
  *         （05h/06h）逐个填入；失败时把失败状态刷满整张表，因为加载失败后
  *         取数链不会再启动，没有其它来源能反映这次失败。
  * -------------------------------------------------------------------- */
-static void completion_load(nand_dispatch_task_t *task, uint8_t result, const nand_fc_completion_t *nand_completion)
+static void completion_load(nand_dispatch_task_t *task, BYTE result, const nand_fc_completion_t *nand_completion)
 {
-    uint8_t status;
-    uint8_t i;
+    BYTE status;
+    BYTE i;
 
     (void)nand_completion;
     if (result == NAND_RESULT_OK)
@@ -187,12 +198,12 @@ static void completion_load(nand_dispatch_task_t *task, uint8_t result, const na
  * -------------------------------------------------------------------- */
 static void req_program_page(nand_dispatch_task_t *task)
 {
-    uint8_t  n;
-    uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
+    BYTE  n;
+    BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
 
     memset(page_buffer, 0xFF, PAGE_SIZE);
     for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
+         n = nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
     {
         /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
         ASSERT(task->cw_buffers[n] != NULL);
@@ -200,7 +211,8 @@ static void req_program_page(nand_dispatch_task_t *task)
          * （未写到的 CW 保持上面的 0xFF 擦除态）。 */
         memcpy(&page_buffer[(n % CW_NUM) * CW_SIZE], task->cw_buffers[n], CW_SIZE);
     }
-    task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->plane_paa[task->plane])}, .data = page_buffer, .data_length = PAGE_SIZE};
+    req_init(task, 0U, page_buffer, PAGE_SIZE);
+    task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
 }
 
 /* --------------------------------------------------------------------
@@ -219,14 +231,15 @@ static void req_program_page(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_read_page(nand_dispatch_task_t *task)
 {
-    uint8_t *cw_buffer;
+    BYTE *cw_buffer;
 
     /* 空掩码 = 无 desc 的「纯加载」op（v45，op 33 直接下发）：uop 无 DATA_OUT，data 不被读，
      * 且 cw_buffers[] 是上一次占用该 slot 的残留值（见 nand_dispatch_internal.h 的契约注释）
      * ⇒ 显式置 NULL/0，不把残留指针挂到请求上。 */
     if (task->cw_bitmap == 0U)
     {
-        task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->plane_paa[task->plane])}, .data = NULL, .data_length = 0U};
+        req_init(task, 0U, NULL, 0U);
+        task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
         return;
     }
 
@@ -234,7 +247,8 @@ static void req_read_page(nand_dispatch_task_t *task)
     cw_buffer = task->cw_buffers[nand_dispatch_cw_first(task->cw_bitmap)];
 
     ASSERT(cw_buffer != NULL);
-    task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->plane_paa[task->plane])}, .data = cw_buffer, .data_length = (uint16_t)CW_SIZE};
+    req_init(task, 0U, cw_buffer, CW_SIZE);
+    task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
 }
 
 /* --------------------------------------------------------------------
@@ -247,17 +261,18 @@ static void req_read_page(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_cache_read(nand_dispatch_task_t *task)
 {
-    uint8_t  n;
-    uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
+    BYTE  n;
+    BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
 
     for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
+         n = nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
     {
         /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
         ASSERT(task->cw_buffers[n] != NULL);
     }
     memset(page_buffer, 0x00, PAGE_SIZE);
-    task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->plane_paa[task->plane])}, .data = page_buffer, .data_length = PAGE_SIZE};
+    req_init(task, 0U, page_buffer, PAGE_SIZE);
+    task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
 }
 
 /* --------------------------------------------------------------------
@@ -269,7 +284,8 @@ static void req_cache_read(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_erase(nand_dispatch_task_t *task)
 {
-    task->request = (nand_fc_request_t){.column = 0U, .row = {paa_to_nand_row(task->plane_paa[task->plane])}, .data = NULL, .data_length = 0U};
+    req_init(task, 0U, NULL, 0U);
+    task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
 }
 
 /* --------------------------------------------------------------------
@@ -286,7 +302,7 @@ static void req_erase(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_feature(nand_dispatch_task_t *task)
 {
-    task->request = (nand_fc_request_t){.column = (uint16_t)task->feature_addr, .row = {0U}, .data = task->cw_buffers[(uint8_t)(task->plane * CW_NUM)], .data_length = 4U};
+    req_init(task, task->feature_addr, task->cw_buffers[(task->plane * CW_NUM)], 4U);
 }
 
 /* --------------------------------------------------------------------
@@ -303,13 +319,13 @@ static void req_feature(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_meta_read(nand_dispatch_task_t *task)
 {
-    const uint8_t plane = task->plane;
+    const BYTE plane = task->plane;
 
-    task->request = (nand_fc_request_t){
-        .column      = (uint16_t)(paa_to_cw(task->plane_paa[plane]) * CW_SIZE),
-        .row         = {paa_to_nand_row(task->plane_paa[plane])},
-        .data        = task->cw_buffers[(uint8_t)(plane * CW_NUM)],
-        .data_length = 4U};
+    req_init(task,
+             (paa_to_cw(task->plane_paa[plane]) * CW_SIZE),
+             task->cw_buffers[(plane * CW_NUM)],
+             4U);
+    task->request.row[0] = paa_to_nand_row(task->plane_paa[plane]);
 }
 
 /* --------------------------------------------------------------------
@@ -327,13 +343,10 @@ static void req_meta_read(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_read_column(nand_dispatch_task_t *task)
 {
-    const uint8_t plane = task->plane;
+    const BYTE plane = task->plane;
 
-    task->request = (nand_fc_request_t){
-        .column      = task->column,
-        .row         = {paa_to_nand_row(task->plane_paa[plane])},
-        .data        = task->cw_buffers[(uint8_t)(plane * CW_NUM)],
-        .data_length = 4U};
+    req_init(task, task->column, task->cw_buffers[(plane * CW_NUM)], 4U);
+    task->request.row[0] = paa_to_nand_row(task->plane_paa[plane]);
 }
 
 /* --------------------------------------------------------------------
@@ -351,11 +364,10 @@ static void req_read_column(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_onfi_signature(nand_dispatch_task_t *task)
 {
-    task->request = (nand_fc_request_t){
-        .column      = NAND_READ_ID_ADDR_ONFI_SIGNATURE,
-        .row         = {0U},
-        .data        = task->cw_buffers[(uint8_t)(task->plane * CW_NUM)],
-        .data_length = 4U};
+    req_init(task,
+             NAND_READ_ID_ADDR_ONFI_SIGNATURE,
+             task->cw_buffers[(task->plane * CW_NUM)],
+             4U);
 }
 
 /* --------------------------------------------------------------------
@@ -369,13 +381,13 @@ static void req_onfi_signature(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_single(nand_dispatch_task_t *task)
 {
-    uint16_t data_length = g_nand_operation_map[task->operation].data_length;
+    WORD data_length = g_nand_operation_map[task->operation].data_length;
 
-    task->request = (nand_fc_request_t){
-        .column      = 0U,
-        .row         = {paa_to_nand_row(task->plane_paa[task->plane])},
-        .data        = task->cw_buffers[nand_dispatch_cw_first(task->cw_bitmap)],
-        .data_length = data_length};
+    req_init(task,
+             0U,
+             task->cw_buffers[nand_dispatch_cw_first(task->cw_bitmap)],
+             data_length);
+    task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
 }
 
 /* --------------------------------------------------------------------
@@ -391,13 +403,13 @@ static void req_single(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_random_read(nand_dispatch_task_t *task)
 {
-    uint8_t n = nand_dispatch_cw_first(task->cw_bitmap);
+    BYTE n = nand_dispatch_cw_first(task->cw_bitmap);
 
-    task->request = (nand_fc_request_t){
-        .column      = (uint16_t)((n % CW_NUM) * CW_SIZE),
-        .row         = {paa_to_nand_row(task->plane_paa[n / CW_NUM])},
-        .data        = task->cw_buffers[n],
-        .data_length = (uint16_t)CW_SIZE};
+    req_init(task,
+             ((n % CW_NUM) * CW_SIZE),
+             task->cw_buffers[n],
+             CW_SIZE);
+    task->request.row[0] = paa_to_nand_row(task->plane_paa[n / CW_NUM]);
 }
 
 /* --------------------------------------------------------------------
@@ -410,11 +422,8 @@ static void req_random_read(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_no_data(nand_dispatch_task_t *task)
 {
-    task->request = (nand_fc_request_t){
-        .column      = 0U,
-        .row         = {paa_to_nand_row(task->plane_paa[task->plane])},
-        .data        = NULL,
-        .data_length = 0U};
+    req_init(task, 0U, NULL, 0U);
+    task->request.row[0] = paa_to_nand_row(task->plane_paa[task->plane]);
 }
 
 /* --------------------------------------------------------------------
@@ -432,18 +441,18 @@ static void req_no_data(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_multi_plane_read(nand_dispatch_task_t *task)
 {
-    uint8_t  plane;
-    uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
+    BYTE  plane;
+    BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
 
     memset(page_buffer, 0x00, PAGE_BUFFER_SIZE);
 
     /* 每次 DATA_OUT 只读 1 个 Plane（PAGE_SIZE）；第二个 Plane 由 06h-E0h +
      * DATA_OUT operand=PAGE_SIZE 分两次读取。 */
-    task->request = (nand_fc_request_t){.column = 0U, .data = page_buffer, .data_length = PAGE_SIZE};
+    req_init(task, 0U, page_buffer, PAGE_SIZE);
 
     /* ⚠ 上界写死 PLANE_NUM，不看 task->plane_count：本 handler 只由 multi-plane OP
      *   选中，那条路径上 plane_count 恒 = PLANE_NUM。改 plane 语义时两处要一起动。
-     * row[PLANE_NUM..NAND_PLANE_MAX-1] 由上面的复合字面量零填充。 */
+     * row[PLANE_NUM..NAND_PLANE_MAX-1] 由 req_init 的 memset 零填充。 */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
         task->request.row[plane] = paa_to_nand_row(task->plane_paa[plane]);
@@ -461,12 +470,12 @@ static void req_multi_plane_read(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_multi_plane_program(nand_dispatch_task_t *task)
 {
-    uint8_t  n, plane;
-    uint8_t *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
+    BYTE  n, plane;
+    BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
 
     memset(page_buffer, 0xFF, PAGE_BUFFER_SIZE);
     for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
-         n = nand_dispatch_cw_next(task->cw_bitmap, (uint8_t)(n + 1U)))
+         n = nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
     {
         /* CW 缓冲由 FC 数据路径填满，掩码内的指针恒非空 */
         ASSERT(task->cw_buffers[n] != NULL);
@@ -475,9 +484,9 @@ static void req_multi_plane_program(nand_dispatch_task_t *task)
 
     /* 每次 DATA_IN 只发 1 个 Plane（PAGE_SIZE），第二个 Plane 由 DATA_IN
      * operand=PAGE_SIZE 偏移读取。 */
-    task->request = (nand_fc_request_t){.column = 0U, .data = page_buffer, .data_length = PAGE_SIZE};
+    req_init(task, 0U, page_buffer, PAGE_SIZE);
 
-    /* ⚠ 上界写死 PLANE_NUM，理由同上。row[PLANE_NUM..] 由复合字面量零填充。 */
+    /* ⚠ 上界写死 PLANE_NUM，理由同上。row[PLANE_NUM..] 由 req_init 的 memset 零填充。 */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
         task->request.row[plane] = paa_to_nand_row(task->plane_paa[plane]);
@@ -493,13 +502,13 @@ static void req_multi_plane_program(nand_dispatch_task_t *task)
  * -------------------------------------------------------------------- */
 static void req_multi_plane_erase(nand_dispatch_task_t *task)
 {
-    uint8_t plane;
+    BYTE plane;
 
-    task->request = (nand_fc_request_t){.column = 0U, .data = NULL, .data_length = 0U};
+    req_init(task, 0U, NULL, 0U);
 
     /* ⚠ 上界写死 PLANE_NUM，不看 task->plane_count：本 handler 只由 multi-plane OP
      *   选中，那条路径上 plane_count 恒 = PLANE_NUM。改 plane 语义时两处要一起动。
-     * row[PLANE_NUM..NAND_PLANE_MAX-1] 由上面的复合字面量零填充。 */
+     * row[PLANE_NUM..NAND_PLANE_MAX-1] 由 req_init 的 memset 零填充。 */
     for (plane = 0U; plane < PLANE_NUM; plane++)
     {
         task->request.row[plane] = paa_to_nand_row(task->plane_paa[plane]);

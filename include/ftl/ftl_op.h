@@ -65,7 +65,7 @@ typedef enum
 } ftl_op_id_t;
 
 /* op_tag 只有 7 位（fc_command_t.op_tag）⇒ 槽数上限 128。 */
-_Static_assert((uint32_t)FTL_OP_COUNT <= 128U, "ftl_op_id_t 必须装进 fc_command_t.op_tag:7");
+_Static_assert(FTL_OP_COUNT <= 128U, "ftl_op_id_t 必须装进 fc_command_t.op_tag:7");
 
 typedef void (*ftl_op_callback_fn_t)(struct ftl_context        *ftl,
                                      const fc_command_status_t *completion,
@@ -203,8 +203,8 @@ void ftl_metadata_callback(struct ftl_context *ftl, const fc_command_status_t *c
  * 登记进旁表；服务函数（ftl_sync_wait_callback）在完成时回填并置 done。 */
 typedef struct
 {
-    uint16_t            cmd_id;     /* 等待的 command_id */
-    uint8_t             done;       /* 服务函数置 1 */
+    WORD                cmd_id;     /* 等待的 command_id */
+    BYTE                done;       /* 服务函数置 1 */
     fc_command_status_t completion; /* 服务函数保存的完整 completion 信息 */
 } ftl_sync_waiter_t;
 

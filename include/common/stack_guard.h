@@ -30,6 +30,8 @@
  *           check/report 任意上下文可调（只读 MSP + 只读内存）。
  */
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdint.h>
 
 /* 告警位（stack_guard_report 打印，可组合）。 */
@@ -46,6 +48,6 @@ void stack_guard_check(void);
 void stack_guard_report(void);
 
 /* 当前告警位（0 = 无）。供上层自检用。 */
-uint32_t stack_guard_alarm(void);
+DWORD stack_guard_alarm(void);
 
 #endif /* COMMON_STACK_GUARD_H */

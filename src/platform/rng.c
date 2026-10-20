@@ -10,9 +10,9 @@
 #include "common.h"
 #include "delay.h"
 
-uint8_t rng_init(void)
+BYTE rng_init(void)
 {
-    uint16_t retry = 0;
+    WORD retry = 0;
 
     rng_port_init();
     while ((rng_port_data_ready() == 0U) && (retry < 10000U)) /* 等待RNG准备就绪 */
@@ -28,14 +28,14 @@ uint8_t rng_init(void)
     return FUNC_STATUS_SUCCESS;
 }
 
-uint32_t rng_get_random_num(void)
+DWORD rng_get_random_num(void)
 {
     return rng_port_get_random();
 }
 
 int rng_get_random_range(int min, int max)
 {
-    uint32_t randomnum;
+    DWORD randomnum;
 
     randomnum = rng_get_random_num();
 

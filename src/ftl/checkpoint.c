@@ -92,19 +92,19 @@ typedef struct
 
 /* Checkpoint record 探针（见 metadata_ring_probe_fn）。
  * full 与廉价探针等价（一条 record 只有一页），故忽略。 */
-static ftl_status_t checkpoint_record_probe(void *ctx, uint16_t record_idx, bool full, uint32_t *out_sequence)
+static ftl_status_t checkpoint_record_probe(void *ctx, WORD record_idx, bool full, DWORD *out_sequence)
 {
     checkpoint_probe_ctx_t *c = (checkpoint_probe_ctx_t *)ctx;
 
     (void)full;
 
     /* 镜像池：任一 plane 的副本有效即可。 */
-    const uint8_t plane_count = metadata_ring_plane_count(c->ring.plane_mask);
+    const BYTE plane_count = metadata_ring_plane_count(c->ring.plane_mask);
 
-    for (uint8_t pi = 0U; pi < plane_count; pi++)
+    for (BYTE pi = 0U; pi < plane_count; pi++)
     {
-        const uint8_t           plane = metadata_ring_plane_at(c->ring.plane_mask, pi);
-        nand_pba_t              addr  = metadata_ring_addr_plane(&c->ring, &c->topo, record_idx, 0U, plane);
+        const BYTE              plane = metadata_ring_plane_at(c->ring.plane_mask, pi);
+        DWORD                   addr  = metadata_ring_addr_plane(&c->ring, &c->topo, record_idx, 0U, plane);
         l2p_checkpoint_header_t hdr;
 
         if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != FTL_OK)
@@ -163,14 +163,14 @@ static void cp_abort(checkpoint_handle_t *j)
 {
     j->failed     = 1U;
     j->fail_phase = j->phase;
-    j->phase      = (uint8_t)CP_DONE;
+    j->phase      = CP_DONE;
 }
 
 /* 提交不出去超过 FTL_SUBMIT_TIMEOUT_MS ⇒ 中止 job（与 MIG/RR 同族）。
  * 返回 true = 已中止。时钟缺失时 deadline 不生效。 */
 static bool cp_stall(checkpoint_handle_t *j)
 {
-    const uint32_t now_ms = ftl_job_now_ms();
+    const DWORD now_ms = ftl_job_now_ms();
 
     if (now_ms == 0U)
     {
@@ -183,9 +183,7 @@ static bool cp_stall(checkpoint_handle_t *j)
     }
     if ((now_ms - j->stall_ms) >= FTL_SUBMIT_TIMEOUT_MS)
     {
-        LOGW("[CP] submit stalled %lums — abort phase=%u\r\n",
-             (now_ms - j->stall_ms),
-             (unsigned)j->phase);
+        LOGW("[CP] submit stalled %lums — abort phase=%u\r\n", (now_ms - j->stall_ms), (unsigned)j->phase);
         j->timed_out     = 1U;
         j->timeout_phase = j->phase;
         cp_abort(j);
@@ -233,7 +231,7 @@ static bool cp_submit_result(checkpoint_handle_t *j, ftl_status_t st)
 /* 提交一条异步写（Anchor 分页 / Checkpoint Header 共用）。同步镜像到 P0+P1：
  * 同一页数据用 multi-plane 一次写两个 plane；data 在本函数内已拷进 FC buffer
  * ⇒ 调用者的栈缓冲随即可复用。 */
-static ftl_status_t cp_submit_write(checkpoint_handle_t *j, nand_pba_t addr, const void *data, uint32_t length)
+static ftl_status_t cp_submit_write(checkpoint_handle_t *j, DWORD addr, const void *data, DWORD length)
 {
     fc_command_t *cmd;
 
@@ -248,7 +246,7 @@ static ftl_status_t cp_submit_write(checkpoint_handle_t *j, nand_pba_t addr, con
 
 /* 提交一条异步擦除（Anchor 换块 / Checkpoint 换块 / Journal 预擦共用）。
  * 固定元数据池是 P0+P1 镜像 ⇒ 换块必须 multi-plane 擦，否则副本 plane 不会清。 */
-static ftl_status_t cp_submit_erase(checkpoint_handle_t *j, nand_pba_t addr)
+static ftl_status_t cp_submit_erase(checkpoint_handle_t *j, DWORD addr)
 {
     fc_command_t *cmd;
 
@@ -268,9 +266,9 @@ static void cp_build_header(const checkpoint_handle_t *j, l2p_checkpoint_header_
     memcpy(cp->region_bitmap, j->region_bitmap, sizeof(cp->region_bitmap));
 
     /* region_count = 非零 bitmap word 数（无消费方，仅信息量）。 */
-    uint32_t region_words = 0U;
+    DWORD region_words = 0U;
 
-    for (uint8_t i = 0U; i < (uint8_t)L2P_LOCAL_DIRTY_WORDS; i++)
+    for (BYTE i = 0U; i < L2P_LOCAL_DIRTY_WORDS; i++)
     {
         if (cp->region_bitmap[i] != 0U)
         {
@@ -308,16 +306,16 @@ static void cp_build_header(const checkpoint_handle_t *j, l2p_checkpoint_header_
  * -------------------------------------------------------------------- */
 static cp_flush_step_t cp_flush_regions(checkpoint_handle_t *h, checkpoint_handle_t *j)
 {
-    const uint32_t dim     = ftl_topo_dim(h->port.topo);
-    bool           pending = false;
+    const DWORD dim     = ftl_topo_dim(h->port.topo);
+    bool        pending = false;
 
-    for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
+    for (WORD i = 0U; i < L2P_CACHE_SIZE; i++)
     {
         l2p_line_info_t line;
 
         l2p_cache_line_get(h->port.cache, i, &line);
 
-        if (line.state == (uint8_t)L2P_CACHE_INVALID)
+        if (line.state == L2P_CACHE_INVALID)
         {
             continue; /* 空行（region_id 无意义，脏位查询无意义） */
         }
@@ -326,25 +324,25 @@ static cp_flush_step_t cp_flush_regions(checkpoint_handle_t *h, checkpoint_handl
             continue; /* 别的 LUN 的行：由它自己的 Checkpoint 负责 */
         }
 
-        const uint32_t local_region = l2p_global_to_local_region(line.region_id);
+        const DWORD local_region = l2p_global_to_local_region(line.region_id);
 
-        uint32_t word = j->region_bitmap[local_region / 32U];
-        uint32_t mask = (1UL << (local_region & 31U));
+        DWORD word = j->region_bitmap[local_region / 32U];
+        DWORD mask = (1UL << (local_region & 31U));
         if ((word & mask) == 0U)
         {
             continue; /* 本次 CP 起点时不脏（此后新脏的由 journal 兜底，见文件头） */
         }
 
-        if (line.state == (uint8_t)L2P_CACHE_CLEAN)
+        if (line.state == L2P_CACHE_CLEAN)
         {
             continue; /* 已落盘：本次 CP 期间由我们（或后台）写回成功，commit 已清脏位 */
         }
-        if (line.state == (uint8_t)L2P_CACHE_FLUSHING)
+        if (line.state == L2P_CACHE_FLUSHING)
         {
             pending = true; /* 已提交、未落盘：等它 */
             continue;
         }
-        if (line.state == (uint8_t)L2P_CACHE_DIRTY)
+        if (line.state == L2P_CACHE_DIRTY)
         {
             const ftl_status_t st = l2p_cache_flush_kick(h->port.cache, i);
 
@@ -364,9 +362,7 @@ static cp_flush_step_t cp_flush_regions(checkpoint_handle_t *h, checkpoint_handl
          * FLUSHING 行上清位）。**中止**而非放过：此刻既没在写回、也没有有效数据，
          * 若当作"已持久"写进 Header，boot 会按 bitmap 预载这一区 ⇒ **静默丢映射**。
          * 中止的代价只是本次 CP 不做（journal 与脏位全保留，下轮重来），方向安全。 */
-        LOGW("[CP] region=%lu dirty but state=%u (LOADING) — abort\r\n",
-             line.region_id,
-             (unsigned)line.state);
+        LOGW("[CP] region=%lu dirty but state=%u (LOADING) — abort\r\n", line.region_id, (unsigned)line.state);
         return CP_FLUSH_FAILED;
     }
 
@@ -427,7 +423,7 @@ static void cp_step(checkpoint_handle_t *h)
                 {
                     return; /* 仍有脏行在飞 */
                 }
-                j->phase = (uint8_t)CP_ANCHOR_PREP;
+                j->phase = CP_ANCHOR_PREP;
                 break;
             }
 
@@ -453,14 +449,14 @@ static void cp_step(checkpoint_handle_t *h)
                     /* Directory 无变更：整段跳过（Anchor 每写一条都消耗池内槽位，
                      * 空转会让池无谓轮转）。 */
                     j->anchor_skip = 1U;
-                    j->phase       = (uint8_t)CP_HDR_PREP;
+                    j->phase       = CP_HDR_PREP;
                     break;
                 }
 
                 j->anchor_need_erase = need_erase;
                 j->anchor_chunk      = 0U;
                 j->anchor_ok         = 1U;
-                j->phase             = need_erase ? (uint8_t)CP_ANCHOR_ERASE : (uint8_t)CP_ANCHOR_WRITE;
+                j->phase             = need_erase ? CP_ANCHOR_ERASE : CP_ANCHOR_WRITE;
                 break;
             }
 
@@ -480,23 +476,21 @@ static void cp_step(checkpoint_handle_t *h)
 
                     if (!anchor_ok)
                     {
-                        LOGW("[META] anchor write incomplete: idx=%u seq=%lu (chunk 写失败)\r\n",
-                             (unsigned)j->anchor_idx,
-                             j->anchor_seq);
+                        LOGW("[META] anchor write incomplete: idx=%u seq=%lu (chunk 写失败)\r\n", (unsigned)j->anchor_idx, j->anchor_seq);
                         cp_abort(j);
                         break;
                     }
-                    j->phase = (uint8_t)CP_DONE;
+                    j->phase = CP_DONE;
                     break;
                 }
 
-                const uint32_t         anchor_page = pba_to_page(j->anchor_base) + j->anchor_chunk;
-                nand_pba_t             aaddr       = pba_with_page(j->anchor_base, anchor_page);
+                const DWORD            anchor_page = pba_to_page(j->anchor_base) + j->anchor_chunk;
+                DWORD                  aaddr       = pba_with_page(j->anchor_base, anchor_page);
                 metadata_anchor_page_t page; /* 2KB 栈缓冲：按页组好后写入 */
 
                 metadata_dir_anchor_page(h->port.metadata_dir, j->anchor_seq, j->anchor_chunk, &page);
 
-                const uint32_t     page_size = sizeof(page);
+                const DWORD        page_size = sizeof(page);
                 const ftl_status_t st        = cp_submit_write(j, aaddr, &page, page_size);
 
                 (void)cp_submit_result(j, st);
@@ -511,7 +505,7 @@ static void cp_step(checkpoint_handle_t *h)
 
                 if (h->cp_state.cursor_valid == 0U)
                 {
-                    uint16_t               newest = UINT16_MAX;
+                    WORD                   newest = UINT16_MAX;
                     checkpoint_probe_ctx_t probe_ctx;
 
                     probe_ctx.topo        = h->port.topo;
@@ -544,7 +538,7 @@ static void cp_step(checkpoint_handle_t *h)
                  * 只在 need_erase==0 时跳（块边界本来就会擦，不需要额外浪费）。 */
                 if ((h->cp_state.advance_next != 0U) && (need_erase == 0))
                 {
-                    j->hdr_idx = (uint16_t)((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
+                    j->hdr_idx = ((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
                     if (metadata_ring_prepare_addr(&j->hdr_ring, &h->port.topo, j->hdr_idx, &j->hdr_addr, &need_erase) != FTL_OK)
                     {
                         cp_abort(j);
@@ -558,8 +552,8 @@ static void cp_step(checkpoint_handle_t *h)
 
                 j->block_page     = 0U;
                 j->block_ok       = 1U;
-                j->hdr_need_erase = (uint8_t)need_erase;
-                j->phase          = (need_erase != 0) ? (uint8_t)CP_HDR_ERASE : (uint8_t)CP_BLOCK_WRITE;
+                j->hdr_need_erase = need_erase;
+                j->phase          = (need_erase != 0) ? CP_HDR_ERASE : CP_BLOCK_WRITE;
                 break;
             }
 
@@ -574,19 +568,19 @@ static void cp_step(checkpoint_handle_t *h)
                     if (j->block_ok == 0U)
                     {
                         /* 半编程槽：游标推进一槽，永不复用本条 record 的剩余页。 */
-                        h->cp_state.write_idx = (uint16_t)((j->hdr_idx + 1U) %
-                                                           metadata_ring_total_records(&j->hdr_ring));
+                        h->cp_state.write_idx = ((j->hdr_idx + 1U) %
+                                                 metadata_ring_total_records(&j->hdr_ring));
                         cp_abort(j);
                         break;
                     }
                     j->wear_page = 0U;
-                    j->phase     = (uint8_t)CP_WEAR_WRITE;
+                    j->phase     = CP_WEAR_WRITE;
                     break;
                 }
 
-                const uint8_t      page_index = (uint8_t)(1U + j->block_page);
-                const uint16_t    *words      = &j->block_words[j->block_page * CP_BLOCK_WORDS_PER_PAGE];
-                nand_pba_t         a          = metadata_ring_addr(&j->hdr_ring, &h->port.topo, j->hdr_idx, page_index);
+                const BYTE         page_index = (1U + j->block_page);
+                const WORD        *words      = &j->block_words[j->block_page * CP_BLOCK_WORDS_PER_PAGE];
+                DWORD              a          = metadata_ring_addr(&j->hdr_ring, &h->port.topo, j->hdr_idx, page_index);
                 const ftl_status_t st         = cp_submit_write(j, a, words, PAGE_MAIN_SIZE);
 
                 (void)cp_submit_result(j, st);
@@ -599,12 +593,12 @@ static void cp_step(checkpoint_handle_t *h)
                 {
                     if (j->block_ok == 0U)
                     {
-                        h->cp_state.write_idx = (uint16_t)((j->hdr_idx + 1U) %
-                                                           metadata_ring_total_records(&j->hdr_ring));
+                        h->cp_state.write_idx = ((j->hdr_idx + 1U) %
+                                                 metadata_ring_total_records(&j->hdr_ring));
                         cp_abort(j);
                         break;
                     }
-                    j->phase = (uint8_t)CP_HDR_WRITE;
+                    j->phase = CP_HDR_WRITE;
                     break;
                 }
 
@@ -612,11 +606,11 @@ static void cp_step(checkpoint_handle_t *h)
                 checkpoint_wear_page_build(h->port.alloc, j->wear_page, j->wear_page_buf);
                 j->wear_page_crc[j->wear_page] = boot_crc32(j->wear_page_buf, PAGE_MAIN_SIZE);
 
-                const uint8_t wear_page_index = (uint8_t)(1U + CP_BLOCK_PAGES + j->wear_page);
-                nand_pba_t    a               = metadata_ring_addr(&j->hdr_ring,
-                                                  &h->port.topo,
-                                                  j->hdr_idx,
-                                                  wear_page_index);
+                const BYTE wear_page_index = (1U + CP_BLOCK_PAGES + j->wear_page);
+                DWORD      a               = metadata_ring_addr(&j->hdr_ring,
+                                             &h->port.topo,
+                                             j->hdr_idx,
+                                             wear_page_index);
 
                 const ftl_status_t st = cp_submit_write(j, a, j->wear_page_buf, PAGE_MAIN_SIZE);
 
@@ -629,7 +623,7 @@ static void cp_step(checkpoint_handle_t *h)
                 l2p_checkpoint_header_t cp; /* 2KB 栈缓冲：恰好一页主区 */
 
                 cp_build_header(j, &cp);
-                const uint32_t     cp_size = sizeof(cp);
+                const DWORD        cp_size = sizeof(cp);
                 const ftl_status_t st      = cp_submit_write(j, j->hdr_addr, &cp, cp_size);
 
                 (void)cp_submit_result(j, st);
@@ -643,17 +637,17 @@ static void cp_step(checkpoint_handle_t *h)
                  *   JRN_TRUNC_NO_TRUNCATE（水位不满足），本 CP 都已**完成**它承诺的事
                  *   （region 已落盘、Anchor/Header 已写）⇒ 复位水位标志并收尾；
                  *   是否真的擦了只影响磨损优化，不影响本次 CP 的正确性。 */
-                nand_pba_t addr;
+                DWORD addr;
                 if (journal_truncate_plan(h->port.journal, j->journal_seq, &addr, &j->trunc_next) !=
                     JRN_TRUNC_NEEDS_ERASE)
                 {
                     journal_truncate_commit(h->port.journal, JOURNAL_BLOCK_NONE);
-                    j->phase = (uint8_t)CP_DONE;
+                    j->phase = CP_DONE;
                     break;
                 }
 
                 j->trunc_addr = addr;
-                j->phase      = (uint8_t)CP_TRUNC_ERASE;
+                j->phase      = CP_TRUNC_ERASE;
                 break;
             }
 
@@ -665,8 +659,7 @@ static void cp_step(checkpoint_handle_t *h)
             {
                 if (j->failed != 0U)
                 {
-                    LOGW("[CP] abort at phase=%u (不写 Header / 不截断，脏区与 journal 保留)\r\n",
-                         (unsigned)j->fail_phase);
+                    LOGW("[CP] abort at phase=%u (不写 Header / 不截断，脏区与 journal 保留)\r\n", (unsigned)j->fail_phase);
                 }
                 else
                 {
@@ -678,7 +671,7 @@ static void cp_step(checkpoint_handle_t *h)
                 }
 
                 j->active   = 0U;
-                j->phase    = (uint8_t)CP_IDLE;
+                j->phase    = CP_IDLE;
                 j->waiting  = 0U;
                 j->failed   = 0U;
                 j->stall_ms = 0U;
@@ -708,7 +701,7 @@ static ftl_status_t cp_begin(checkpoint_handle_t *h)
     /* 端口与池游标跨 job 保留；其余执行状态整体复位。 */
     const checkpoint_port_t port = h->port;
     const l2p_cp_state_t    cps  = h->cp_state;
-    const uint32_t          last = h->last_ms;
+    const DWORD             last = h->last_ms;
 
     memset(j, 0, sizeof(*j));
 
@@ -719,7 +712,7 @@ static ftl_status_t cp_begin(checkpoint_handle_t *h)
     /* ① 起点快照（**必须早于任何 flush**，见文件头"快照点前移"的长注释）：
      *    flush 成功会清 region 脏位 ⇒ 快照必须先行；journal 水位同理。
      *    共享 cache 的脏位图是全局的；本 job 只需要本 die 的局部 2048-bit 快照。 */
-    const uint32_t dim = ftl_topo_dim(h->port.topo);
+    const DWORD dim = ftl_topo_dim(h->port.topo);
 
     l2p_cache_snapshot_owner_bitmap(h->port.cache, dim, j->region_bitmap);
     j->journal_seq = journal_sequence(h->port.journal);
@@ -735,7 +728,7 @@ static ftl_status_t cp_begin(checkpoint_handle_t *h)
     journal_set_merge_floor(h->port.journal, j->journal_seq);
 
     j->active   = 1U;
-    j->phase    = (uint8_t)CP_FLUSH_REGIONS;
+    j->phase    = CP_FLUSH_REGIONS;
     j->start_ms = ftl_job_now_ms();
     j->log_ms   = j->start_ms;
 
@@ -781,7 +774,7 @@ static void cp_complete_erase(checkpoint_handle_t *j, bool failed, cp_phase_t ne
         cp_abort(j);
         return;
     }
-    j->phase = (uint8_t)next;
+    j->phase = next;
 }
 
 /* 快照页 / 磨损页写完成：失败 ⇒ 整条 record 作废（不写 Header——Header 是 commit），
@@ -793,7 +786,7 @@ static bool cp_complete_page_write(checkpoint_handle_t *h, checkpoint_handle_t *
         return false;
     }
     j->block_ok           = 0U;
-    h->cp_state.write_idx = (uint16_t)((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
+    h->cp_state.write_idx = ((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
     cp_abort(j);
     return true;
 }
@@ -805,14 +798,14 @@ static void cp_complete_anchor_write(checkpoint_handle_t *j, bool failed)
     {
         j->anchor_ok = 0U;
     }
-    j->anchor_chunk = (uint8_t)(j->anchor_chunk + 1U);
+    j->anchor_chunk = (j->anchor_chunk + 1U);
 }
 
 /* Header（commit 页）写完：无论成败都推进游标（已写过的槽可能半编程，不可复用）；
  * 成功才提交 journal 水位并清持久性失败标记。 */
 static void cp_complete_hdr_write(checkpoint_handle_t *h, checkpoint_handle_t *j, bool failed)
 {
-    h->cp_state.write_idx = (uint16_t)((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
+    h->cp_state.write_idx = ((j->hdr_idx + 1U) % metadata_ring_total_records(&j->hdr_ring));
 
     if (failed)
     {
@@ -824,7 +817,7 @@ static void cp_complete_hdr_write(checkpoint_handle_t *h, checkpoint_handle_t *j
     /* Header 是 commit 页：此时快照的脏区都已落盘。若本次 CP 起点覆盖了
      * Journal 的持久性失败点，可清除 pending（见 journal_clear_write_failure）。 */
     journal_clear_write_failure(h->port.journal, j->journal_seq);
-    j->phase = (uint8_t)CP_TRUNC_PREP;
+    j->phase = CP_TRUNC_PREP;
 }
 
 /* Journal 预擦完成：**擦成功才**记 pre_erased_block。失败时绝不能记账：
@@ -835,8 +828,7 @@ static void cp_complete_trunc_erase(checkpoint_handle_t *h, checkpoint_handle_t 
 {
     if (failed)
     {
-        LOGW("[CP] journal pre-erase failed blk=%u — 不记账，等待重试\r\n",
-             (unsigned)j->trunc_next);
+        LOGW("[CP] journal pre-erase failed blk=%u — 不记账，等待重试\r\n", (unsigned)j->trunc_next);
         journal_truncate_commit(h->port.journal, JOURNAL_BLOCK_NONE);
     }
     else
@@ -845,7 +837,7 @@ static void cp_complete_trunc_erase(checkpoint_handle_t *h, checkpoint_handle_t 
          * 的条目落盘并截断 ⇒ 清零。不复位会让 T1 永久命中——每圈必 CP）。 */
         journal_truncate_commit(h->port.journal, j->trunc_next);
     }
-    j->phase = (uint8_t)CP_DONE;
+    j->phase = CP_DONE;
 }
 
 /* --------------------------------------------------------------------
@@ -865,7 +857,7 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
     checkpoint_handle_t *h = (checkpoint_handle_t *)ctx;
     checkpoint_handle_t *j = h;
 
-    fc_command_t *cmd = fc_command_id_to_command((uint16_t)completion->command_id);
+    fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
 
     /* 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，
      * 二者必须一致——不一致说明派发路由错了。 */
@@ -906,14 +898,14 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
         case CP_BLOCK_WRITE:
             if (!cp_complete_page_write(h, j, failed))
             {
-                j->block_page = (uint8_t)(j->block_page + 1U);
+                j->block_page = (j->block_page + 1U);
             }
             return;
 
         case CP_WEAR_WRITE:
             if (!cp_complete_page_write(h, j, failed))
             {
-                j->wear_page = (uint8_t)(j->wear_page + 1U);
+                j->wear_page = (j->wear_page + 1U);
             }
             return;
 
@@ -960,7 +952,7 @@ static void cp_reset_cursor(l2p_cp_state_t *cp)
  *             metadata_ring_locate 只回序号，Header 本体要按该序号**再读一次**，
  *             并复核 sequence 与 locate 报的一致（防止 locate 后池被改动）。
  * -------------------------------------------------------------------- */
-ftl_status_t checkpoint_find_latest(checkpoint_handle_t *h, l2p_checkpoint_header_t *cp, uint16_t *out_record_idx)
+ftl_status_t checkpoint_find_latest(checkpoint_handle_t *h, l2p_checkpoint_header_t *cp, WORD *out_record_idx)
 {
     /* 复位本实例池状态：找不到有效 Header 时保持 0/无效（后续 create 从池首开始） */
     cp_reset_cursor(&h->cp_state);
@@ -970,7 +962,7 @@ ftl_status_t checkpoint_find_latest(checkpoint_handle_t *h, l2p_checkpoint_heade
     probe_ctx.topo        = h->port.topo;
     probe_ctx.any_version = false;
 
-    uint16_t newest = UINT16_MAX;
+    WORD newest = UINT16_MAX;
     if (metadata_ring_locate(&probe_ctx.ring, checkpoint_record_probe, &probe_ctx, &newest, &h->cp_state.sequence, &h->cp_state.write_idx) != FTL_OK)
     {
         return FTL_ERROR;
@@ -986,10 +978,10 @@ ftl_status_t checkpoint_find_latest(checkpoint_handle_t *h, l2p_checkpoint_heade
     /* 重读胜者（locate 只返回序号，Header 本体要再读一次）。
      * 镜像池：逐个 plane 试；sequence 必须等于 locate 选中的 record sequence。 */
     bool found = false;
-    for (uint8_t pi = 0U; pi < metadata_ring_plane_count(probe_ctx.ring.plane_mask); pi++)
+    for (BYTE pi = 0U; pi < metadata_ring_plane_count(probe_ctx.ring.plane_mask); pi++)
     {
-        const uint8_t plane = metadata_ring_plane_at(probe_ctx.ring.plane_mask, pi);
-        nand_pba_t    addr  = metadata_ring_addr_plane(&probe_ctx.ring, &probe_ctx.topo, newest, 0U, plane);
+        const BYTE plane = metadata_ring_plane_at(probe_ctx.ring.plane_mask, pi);
+        DWORD      addr  = metadata_ring_addr_plane(&probe_ctx.ring, &probe_ctx.topo, newest, 0U, plane);
 
         if (ftl_sync_read_page(addr, cp, sizeof(*cp), FTL_PAGE_CFG_META()) != FTL_OK)
         {
@@ -1022,16 +1014,16 @@ ftl_status_t checkpoint_find_latest(checkpoint_handle_t *h, l2p_checkpoint_heade
     return FTL_OK;
 }
 
-cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t *out_layout_version)
+cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, DWORD *out_layout_version)
 {
     checkpoint_probe_ctx_t ctx;
     checkpoint_ring_init(&ctx.ring);
     ctx.topo        = h->port.topo;
     ctx.any_version = true; /* 只校验 magic：版本不符也要能定位出来 */
 
-    uint16_t newest    = UINT16_MAX;
-    uint32_t seq       = 0U;
-    uint16_t write_idx = 0U;
+    WORD  newest    = UINT16_MAX;
+    DWORD seq       = 0U;
+    WORD  write_idx = 0U;
 
     if (metadata_ring_locate(&ctx.ring, checkpoint_record_probe, &ctx, &newest, &seq, &write_idx) != FTL_OK)
     {
@@ -1040,12 +1032,12 @@ cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t
 
     if (newest != UINT16_MAX)
     {
-        const uint8_t plane_count = metadata_ring_plane_count(ctx.ring.plane_mask);
+        const BYTE plane_count = metadata_ring_plane_count(ctx.ring.plane_mask);
 
-        for (uint8_t pi = 0U; pi < plane_count; pi++)
+        for (BYTE pi = 0U; pi < plane_count; pi++)
         {
-            const uint8_t           plane = metadata_ring_plane_at(ctx.ring.plane_mask, pi);
-            nand_pba_t              addr  = metadata_ring_addr_plane(&ctx.ring, &ctx.topo, newest, 0U, plane);
+            const BYTE              plane = metadata_ring_plane_at(ctx.ring.plane_mask, pi);
+            DWORD                   addr  = metadata_ring_addr_plane(&ctx.ring, &ctx.topo, newest, 0U, plane);
             l2p_checkpoint_header_t hdr;
 
             if (ftl_sync_read_page(addr, &hdr, sizeof(hdr), FTL_PAGE_CFG_META()) != FTL_OK)
@@ -1084,10 +1076,10 @@ cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t
     bool cmd_ok = false;
     bool non_ff = false;
 
-    for (uint8_t plane = 0U; plane < PLANE_NUM; plane++)
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
-        nand_pba_t addr = metadata_ring_addr_plane(&ctx.ring, &ctx.topo, 0U, 0U, plane);
-        uint8_t    raw[PAGE_SIZE];
+        DWORD addr = metadata_ring_addr_plane(&ctx.ring, &ctx.topo, 0U, 0U, plane);
+        BYTE  raw[PAGE_SIZE];
 
         (void)memset(raw, 0xFF, sizeof(raw));
         if (ftl_sync_read_page_raw(addr, raw) != FTL_OK)
@@ -1096,11 +1088,11 @@ cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t
         }
         cmd_ok = true;
 
-        for (uint8_t cw = 0U; cw < CW_NUM; cw++)
+        for (BYTE cw = 0U; cw < CW_NUM; cw++)
         {
-            const uint8_t *p = raw + ((uint32_t)cw * FC_BUFFER_POOL_CW_SIZE);
+            const BYTE *p = raw + (cw * FC_BUFFER_POOL_CW_SIZE);
 
-            for (uint8_t j = 0U; j < 16U; j++)
+            for (BYTE j = 0U; j < 16U; j++)
             {
                 if (p[j] != 0xFFU)
                 {
@@ -1140,15 +1132,15 @@ cp_media_status_t checkpoint_probe_media_status(checkpoint_handle_t *h, uint32_t
  * -------------------------------------------------------------------- */
 void checkpoint_block_snapshot(const ftl_allocator_t      *alloc,
                                const metadata_dir_cache_t *md_dir,
-                               uint16_t                    words[FTL_BLOCK_TOTAL])
+                               WORD                        words[FTL_BLOCK_TOTAL])
 {
-    for (uint16_t g = 0U; g < FTL_BLOCK_TOTAL; g++)
+    for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
         const ftl_block_t *b = &alloc->blocks[g];
 
-        uint16_t valid = b->valid_count;
-        uint8_t  st    = (uint8_t)ftl_block_state(b);
-        uint8_t  temp  = b->temp;
+        WORD valid = b->valid_count;
+        BYTE st    = ftl_block_state(b);
+        BYTE temp  = b->temp;
 
         /* Directory 是动态 LOG 块身份的唯一权威：它不属 allocator 池，合法编码是
          * LOG + no-pool。若 BST 因历史路径停在 NONE，照实编码会让下一次开机的
@@ -1157,33 +1149,33 @@ void checkpoint_block_snapshot(const ftl_allocator_t      *alloc,
         if ((md_dir != NULL) && (!ftl_block_is_bad(b)) && (metadata_live_count(md_dir, g) > 0U))
         {
             valid = 0U;
-            st    = (uint8_t)FTL_BLOCK_STATE_LOG;
+            st    = FTL_BLOCK_STATE_LOG;
             temp  = 0U;
         }
 
         words[g] = checkpoint_block_word_pack(valid, st, temp, CP_BLOCK_POOL_NONE);
     }
 
-    for (uint8_t p = 0U; p < PLANE_NUM; p++)
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        for (uint16_t i = 0U; i < alloc->op_count[p]; i++)
+        for (WORD i = 0U; i < alloc->op_count[p]; i++)
         {
-            const uint16_t g = alloc->op_blocks[p][i];
+            const WORD g = alloc->op_blocks[p][i];
 
             if (!ftl_block_is_bad(&alloc->blocks[g]))
             {
-                words[g] = (uint16_t)((words[g] & ~((uint16_t)CP_BLOCK_WORD_POOL_MASK << CP_BLOCK_WORD_POOL_SHIFT)) |
-                                      ((uint16_t)CP_BLOCK_POOL_OP << CP_BLOCK_WORD_POOL_SHIFT));
+                words[g] = ((words[g] & ~(CP_BLOCK_WORD_POOL_MASK << CP_BLOCK_WORD_POOL_SHIFT)) |
+                            (CP_BLOCK_POOL_OP << CP_BLOCK_WORD_POOL_SHIFT));
             }
         }
-        for (uint16_t i = 0U; i < alloc->spare_count[p]; i++)
+        for (WORD i = 0U; i < alloc->spare_count[p]; i++)
         {
-            const uint16_t g = alloc->spare_blocks[p][i];
+            const WORD g = alloc->spare_blocks[p][i];
 
             if (!ftl_block_is_bad(&alloc->blocks[g]))
             {
-                words[g] = (uint16_t)((words[g] & ~((uint16_t)CP_BLOCK_WORD_POOL_MASK << CP_BLOCK_WORD_POOL_SHIFT)) |
-                                      ((uint16_t)CP_BLOCK_POOL_SPARE << CP_BLOCK_WORD_POOL_SHIFT));
+                words[g] = ((words[g] & ~(CP_BLOCK_WORD_POOL_MASK << CP_BLOCK_WORD_POOL_SHIFT)) |
+                            (CP_BLOCK_POOL_SPARE << CP_BLOCK_WORD_POOL_SHIFT));
             }
         }
     }
@@ -1198,24 +1190,24 @@ void checkpoint_block_snapshot(const ftl_allocator_t      *alloc,
  *             health 截到 2 bit。软状态：调用时从 BST 现取，CP 期间的计数变化
  *             允许漏到下一个 CP。
  * -------------------------------------------------------------------- */
-void checkpoint_wear_page_build(const ftl_allocator_t *alloc, uint16_t page_index, uint8_t page[PAGE_MAIN_SIZE])
+void checkpoint_wear_page_build(const ftl_allocator_t *alloc, WORD page_index, BYTE page[PAGE_MAIN_SIZE])
 {
     cp_wear_entry_t *entries = (cp_wear_entry_t *)page;
 
-    for (uint16_t i = 0U; i < FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE; i++)
+    for (WORD i = 0U; i < FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE; i++)
     {
-        const uint32_t g = ((uint32_t)page_index * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) + i;
+        const DWORD g = (page_index * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) + i;
 
         if (g < FTL_BLOCK_TOTAL)
         {
             const ftl_block_t *b      = &alloc->blocks[g];
-            uint8_t            rising = (b->rr.rising_count > CP_WEAR_RISING_MASK) ? CP_WEAR_RISING_MASK : b->rr.rising_count;
+            BYTE               rising = (b->rr.rising_count > CP_WEAR_RISING_MASK) ? CP_WEAR_RISING_MASK : b->rr.rising_count;
 
             entries[i].erase_count = b->erase_count;
             entries[i].read_count  = b->read_count;
             entries[i].last_ecc    = b->rr.last_ecc;
-            entries[i].flags       = (uint8_t)((rising & CP_WEAR_RISING_MASK) |
-                                         ((b->rr.health & CP_WEAR_HEALTH_MASK) << CP_WEAR_HEALTH_SHIFT));
+            entries[i].flags       = ((rising & CP_WEAR_RISING_MASK) |
+                                ((b->rr.health & CP_WEAR_HEALTH_MASK) << CP_WEAR_HEALTH_SHIFT));
         }
         else
         {
@@ -1237,7 +1229,7 @@ void checkpoint_wear_page_build(const ftl_allocator_t *alloc, uint16_t page_inde
  * -------------------------------------------------------------------- */
 bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
                                 const l2p_checkpoint_header_t *cp,
-                                uint16_t                       record_idx)
+                                WORD                           record_idx)
 {
     /* 读缓冲复用 checkpoint_handle 的 wear_page_buf ⇒ 只能在开机（job 未在跑）调用。 */
     ASSERT(h->active == 0U);
@@ -1263,21 +1255,21 @@ bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
     checkpoint_ring_init(&ring);
 
     /* 开机路径专用：CP job 未在跑（入口 ASSERT），可复用它的页缓冲作读缓冲。 */
-    uint8_t *page = h->wear_page_buf;
+    BYTE *page = h->wear_page_buf;
 
-    for (uint8_t p = 0U; p < FTL_CHECKPOINT_WEAR_PAGES; p++)
+    for (BYTE p = 0U; p < FTL_CHECKPOINT_WEAR_PAGES; p++)
     {
         bool loaded = false;
 
-        for (uint8_t pi = 0U; pi < metadata_ring_plane_count(ring.plane_mask); pi++)
+        for (BYTE pi = 0U; pi < metadata_ring_plane_count(ring.plane_mask); pi++)
         {
-            const uint8_t plane      = metadata_ring_plane_at(ring.plane_mask, pi);
-            const uint8_t page_index = (uint8_t)(1U + CP_BLOCK_PAGES + p);
-            nand_pba_t    addr       = metadata_ring_addr_plane(&ring,
-                                                       &h->port.topo,
-                                                       record_idx,
-                                                       page_index,
-                                                       plane);
+            const BYTE plane      = metadata_ring_plane_at(ring.plane_mask, pi);
+            const BYTE page_index = (1U + CP_BLOCK_PAGES + p);
+            DWORD      addr       = metadata_ring_addr_plane(&ring,
+                                                  &h->port.topo,
+                                                  record_idx,
+                                                  page_index,
+                                                  plane);
 
             if (ftl_sync_read_page(addr, page, PAGE_MAIN_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
             {
@@ -1285,18 +1277,15 @@ bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
             }
             if (boot_crc32(page, PAGE_MAIN_SIZE) != cp->wear_page_crc[p])
             {
-                LOGW("[WEAR] page %u crc mismatch (plane=%u rec=%u)\r\n",
-                     (unsigned)p,
-                     (unsigned)plane,
-                     (unsigned)record_idx);
+                LOGW("[WEAR] page %u crc mismatch (plane=%u rec=%u)\r\n", (unsigned)p, (unsigned)plane, (unsigned)record_idx);
                 continue;
             }
 
             const cp_wear_entry_t *entries = (const cp_wear_entry_t *)page;
 
-            for (uint16_t i = 0U; i < FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE; i++)
+            for (WORD i = 0U; i < FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE; i++)
             {
-                const uint32_t g = ((uint32_t)p * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) + i;
+                const DWORD g = (p * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) + i;
 
                 if (g >= FTL_BLOCK_TOTAL)
                 {
@@ -1308,8 +1297,8 @@ bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
                 b->erase_count     = entries[i].erase_count;
                 b->read_count      = entries[i].read_count;
                 b->rr.last_ecc     = entries[i].last_ecc;
-                b->rr.rising_count = (uint8_t)(entries[i].flags & CP_WEAR_RISING_MASK);
-                b->rr.health       = (uint8_t)((entries[i].flags >> CP_WEAR_HEALTH_SHIFT) & CP_WEAR_HEALTH_MASK);
+                b->rr.rising_count = (entries[i].flags & CP_WEAR_RISING_MASK);
+                b->rr.health       = ((entries[i].flags >> CP_WEAR_HEALTH_SHIFT) & CP_WEAR_HEALTH_MASK);
             }
 
             loaded = true;
@@ -1319,9 +1308,7 @@ bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
         if (!loaded)
         {
             /* 逐页应用：前面的页已回填 BST，其余块保持默认计数（软状态，可接受）。 */
-            LOGW("[WEAR] snapshot page %u unavailable (rec=%u) — 已读页保留，其余从 0\r\n",
-                 (unsigned)p,
-                 (unsigned)record_idx);
+            LOGW("[WEAR] snapshot page %u unavailable (rec=%u) — 已读页保留，其余从 0\r\n", (unsigned)p, (unsigned)record_idx);
             return false;
         }
     }
@@ -1341,8 +1328,8 @@ bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
  * -------------------------------------------------------------------- */
 bool checkpoint_load_block_table(checkpoint_handle_t           *h,
                                  const l2p_checkpoint_header_t *cp,
-                                 uint16_t                       record_idx,
-                                 uint16_t                       block_words[FTL_BLOCK_TOTAL])
+                                 WORD                           record_idx,
+                                 WORD                           block_words[FTL_BLOCK_TOTAL])
 {
     if (cp->block_page_count == 0U)
     {
@@ -1366,18 +1353,18 @@ bool checkpoint_load_block_table(checkpoint_handle_t           *h,
 
     /* 镜像池：整条快照从**同一个 plane** 读（不在 plane 间拼页）；该副本读失败或
      * CRC 不符时换另一个 plane 重读整条。 */
-    for (uint8_t pi = 0U; pi < metadata_ring_plane_count(ring.plane_mask); pi++)
+    for (BYTE pi = 0U; pi < metadata_ring_plane_count(ring.plane_mask); pi++)
     {
-        const uint8_t plane = metadata_ring_plane_at(ring.plane_mask, pi);
+        const BYTE plane = metadata_ring_plane_at(ring.plane_mask, pi);
 
-        uint8_t fail_page = 0U;
-        bool    ok        = true;
+        BYTE fail_page = 0U;
+        bool ok        = true;
 
-        for (uint8_t p = 0U; p < CP_BLOCK_PAGES; p++)
+        for (BYTE p = 0U; p < CP_BLOCK_PAGES; p++)
         {
-            const uint8_t  page_index  = (uint8_t)(1U + p);
-            const uint32_t word_offset = (uint32_t)p * CP_BLOCK_WORDS_PER_PAGE;
-            nand_pba_t     addr        = metadata_ring_addr_plane(&ring, &h->port.topo, record_idx, page_index, plane);
+            const BYTE  page_index  = (1U + p);
+            const DWORD word_offset = p * CP_BLOCK_WORDS_PER_PAGE;
+            DWORD       addr        = metadata_ring_addr_plane(&ring, &h->port.topo, record_idx, page_index, plane);
 
             if (ftl_sync_read_page(addr,
                                    &block_words[word_offset],
@@ -1392,27 +1379,17 @@ bool checkpoint_load_block_table(checkpoint_handle_t           *h,
 
         if (!ok)
         {
-            LOGW("[BLK] read failed plane=%u page=%u rec=%u\r\n",
-                 (unsigned)plane,
-                 (unsigned)fail_page,
-                 (unsigned)record_idx);
+            LOGW("[BLK] read failed plane=%u page=%u rec=%u\r\n", (unsigned)plane, (unsigned)fail_page, (unsigned)record_idx);
             continue;
         }
 
-        if (boot_crc32(block_words, sizeof(uint16_t) * FTL_BLOCK_TOTAL) != cp->block_crc32)
+        if (boot_crc32(block_words, sizeof(WORD) * FTL_BLOCK_TOTAL) != cp->block_crc32)
         {
-            LOGW("[BLK] crc mismatch plane=%u rec=%u seq=%lu\r\n",
-                 (unsigned)plane,
-                 (unsigned)record_idx,
-                 cp->sequence);
+            LOGW("[BLK] crc mismatch plane=%u rec=%u seq=%lu\r\n", (unsigned)plane, (unsigned)record_idx, cp->sequence);
             continue;
         }
 
-        LOGI("[BLK] load plane=%u rec=%u seq=%lu pages=%u crc=ok\r\n",
-             (unsigned)plane,
-             (unsigned)record_idx,
-             cp->sequence,
-             CP_BLOCK_PAGES);
+        LOGI("[BLK] load plane=%u rec=%u seq=%lu pages=%u crc=ok\r\n", (unsigned)plane, (unsigned)record_idx, cp->sequence, CP_BLOCK_PAGES);
         return true;
     }
 
@@ -1431,7 +1408,7 @@ bool checkpoint_load_block_table(checkpoint_handle_t           *h,
 ftl_status_t checkpoint_write_initial(struct ftl_context *ftl)
 {
     checkpoint_handle_t *h     = ftl->checkpoint_handle;
-    uint16_t            *words = checkpoint_block_words(h);
+    WORD                *words = checkpoint_block_words(h);
 
     /* 完整 per-block metadata snapshot：与 carve 后的池归属一致（由调用者先 carve）。 */
     checkpoint_block_snapshot(&ftl->alloc, ftl->metadata_dir, words);
@@ -1439,17 +1416,17 @@ ftl_status_t checkpoint_write_initial(struct ftl_context *ftl)
     metadata_ring_t ring;
     checkpoint_ring_init(&ring);
 
-    nand_pba_t base;
+    DWORD base;
     if (metadata_ring_prepare_write(&ring, &ftl->topo, 0U, &base) != FTL_OK)
     {
         return FTL_ERROR;
     }
 
     /* 记录页序：0=Header（最后写），1..4=块元数据，5..20=磨损快照。 */
-    for (uint8_t p = 1U; p <= CP_BLOCK_PAGES; p++)
+    for (BYTE p = 1U; p <= CP_BLOCK_PAGES; p++)
     {
-        const nand_pba_t addr = metadata_ring_addr(&ring, &ftl->topo, 0U, p);
-        const uint8_t   *data = (const uint8_t *)(words + ((uint16_t)(p - 1U) * CP_BLOCK_WORDS_PER_PAGE));
+        const DWORD addr = metadata_ring_addr(&ring, &ftl->topo, 0U, p);
+        const BYTE *data = (const BYTE *)(words + ((p - 1U) * CP_BLOCK_WORDS_PER_PAGE));
 
         if (ftl_sync_write_page_mirror(addr, data, PAGE_MAIN_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
         {
@@ -1457,15 +1434,15 @@ ftl_status_t checkpoint_write_initial(struct ftl_context *ftl)
         }
     }
 
-    uint32_t wear_crc[FTL_CHECKPOINT_WEAR_PAGES];
-    uint8_t  wear_page[PAGE_MAIN_SIZE];
+    DWORD wear_crc[FTL_CHECKPOINT_WEAR_PAGES];
+    BYTE  wear_page[PAGE_MAIN_SIZE];
 
-    for (uint8_t i = 0U; i < FTL_CHECKPOINT_WEAR_PAGES; i++)
+    for (BYTE i = 0U; i < FTL_CHECKPOINT_WEAR_PAGES; i++)
     {
         checkpoint_wear_page_build(&ftl->alloc, i, wear_page);
         wear_crc[i] = boot_crc32(wear_page, PAGE_MAIN_SIZE);
 
-        const nand_pba_t addr = metadata_ring_addr(&ring, &ftl->topo, 0U, (uint8_t)(1U + CP_BLOCK_PAGES + i));
+        const DWORD addr = metadata_ring_addr(&ring, &ftl->topo, 0U, (1U + CP_BLOCK_PAGES + i));
 
         if (ftl_sync_write_page_mirror(addr, wear_page, PAGE_MAIN_SIZE, FTL_PAGE_CFG_META()) != FTL_OK)
         {
@@ -1491,7 +1468,7 @@ ftl_status_t checkpoint_write_initial(struct ftl_context *ftl)
     cp.record_pages = CHECKPOINT_RECORD_PAGES;
 
     /* Header 最后写 = commit：前面任何一页失败都不会留下有效 record。 */
-    const nand_pba_t hdr_addr = metadata_ring_addr(&ring, &ftl->topo, 0U, 0U);
+    const DWORD hdr_addr = metadata_ring_addr(&ring, &ftl->topo, 0U, 0U);
 
     if (ftl_sync_write_page_mirror(hdr_addr, &cp, sizeof(cp), FTL_PAGE_CFG_META()) != FTL_OK)
     {
@@ -1553,8 +1530,8 @@ static bool cp_should_start(const checkpoint_handle_t *h, const checkpoint_trigg
      *   自上次 CP 没有足够新条目 ⇒ 不写。 */
     if ((trigger->now_ms - h->last_ms) >= CP_TIME_INTERVAL_MS)
     {
-        const uint32_t seq  = trigger->journal_seq;
-        const uint32_t last = h->cp_state.last_journal_sequence;
+        const DWORD seq  = trigger->journal_seq;
+        const DWORD last = h->cp_state.last_journal_sequence;
 
         if ((seq >= last) && ((seq - last) >= CP_T3_MIN_JOURNAL_DELTA))
         {
@@ -1594,8 +1571,8 @@ static void checkpoint_status_fill(const checkpoint_handle_t *h, checkpoint_stat
     out->active         = (h->active != 0U);
     out->journal_seq    = h->journal_seq;
     out->anchor_pages   = h->anchor_chunk;
-    out->header_written = (h->phase > (uint8_t)CP_HDR_WRITE) || (h->failed != 0U && h->fail_phase == (uint8_t)CP_HDR_WRITE);
-    out->truncated      = (h->phase > (uint8_t)CP_TRUNC_ERASE);
+    out->header_written = (h->phase > CP_HDR_WRITE) || (h->failed != 0U && h->fail_phase == CP_HDR_WRITE);
+    out->truncated      = (h->phase > CP_TRUNC_ERASE);
     out->fail_phase     = h->fail_phase;
     out->timed_out      = (h->timed_out != 0U);
     out->timeout_phase  = h->timeout_phase;
@@ -1607,7 +1584,7 @@ void checkpoint_handle(checkpoint_handle_t *h, const checkpoint_trigger_t *trigg
     {
         /* 每轮**只推进一次**：只有表首的 ADVANCE 入口跑状态机；紧急/周期入口在
          * job 在飞时只上报、不再推进（否则一轮会被推进 3 次，行为漂移）。 */
-        if (trigger->reason == (uint8_t)CHECKPOINT_REASON_ADVANCE)
+        if (trigger->reason == CHECKPOINT_REASON_ADVANCE)
         {
             cp_kick(h);
         }
@@ -1618,7 +1595,7 @@ void checkpoint_handle(checkpoint_handle_t *h, const checkpoint_trigger_t *trigg
 
         /* 定时/水位触发后重置 T3 基准（紧急触发不重置——它不代表周期拍点）。
          * 无论 cp_begin 成败都重置，否则一次失败会每轮重触发。 */
-        if (trigger->reason != (uint8_t)CHECKPOINT_REASON_EMERGENCY)
+        if (trigger->reason != CHECKPOINT_REASON_EMERGENCY)
         {
             h->last_ms = trigger->now_ms;
         }
@@ -1637,7 +1614,7 @@ void checkpoint_reset_timer(checkpoint_handle_t *h)
     h->last_ms = 0U;
 }
 
-uint16_t *checkpoint_block_words(checkpoint_handle_t *h)
+WORD *checkpoint_block_words(checkpoint_handle_t *h)
 {
     return h->block_words;
 }

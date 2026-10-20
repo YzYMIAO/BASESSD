@@ -15,9 +15,9 @@
  *   **buffer 非空 ≠ 写。**
  */
 
-#include "ftl_config.h" /* nand_pba_t, NAND_PBA_INVALID */
+#include "ftl_config.h" /* DWORD, NAND_PBA_INVALID */
 #include "ftl_module.h" /* ftl_bg_info_t（confirm service 入参） */
-#include "ftl_type.h"   /* lba_t, ftl_status_t, ftl_io_request_t, pending_cb_t */
+#include "ftl_type.h"   /* DWORD, ftl_status_t, ftl_io_request_t, pending_cb_t */
 
 #include <stdint.h>
 
@@ -41,11 +41,11 @@
 #define FTL_GROUP_NONE (0xFFFFU) /* 「无组」哨兵（当前无使用者；留作显式语义） */
 
 /* 组 gi 在 owners 位掩码里的位（ftl_pending_req_t.owners / ftl_io_group_t 的约定）。
- * 组号由 pending_group_alloc 给出，恒 < FTL_GROUP_MAX ⇒ 移位量恒小于 uint32_t 位宽。
+ * 组号由 pending_group_alloc 给出，恒 < FTL_GROUP_MAX ⇒ 移位量恒小于 DWORD 位宽。
  * 掩码运算一律经本函数：调用点不手写 `1U << gi`（位宽/移位量对不上时是 UB，且无从审查）。 */
-static inline uint32_t ftl_group_bit(uint16_t gi)
+static inline DWORD ftl_group_bit(WORD gi)
 {
-    return (uint32_t)1U << gi;
+    return 1U << gi;
 }
 
 /* 前向声明（ftl_context_t 在 ftl.h 中定义；本文件被 ftl.h include，
@@ -74,50 +74,50 @@ typedef enum
 } ftl_pending_op_t;
 
 /* ── op 谓词（判别一律走这里，调用点不裸比枚举值）──
- * 形参取 uint8_t：ftl_pending_req_t.op / ftl_io_group_t.op 都是 uint8_t 字段。
+ * 形参取 BYTE：ftl_pending_req_t.op / ftl_io_group_t.op 都是 BYTE 字段。
  *
  * 语义：
  *   is_read / is_write —— **活跃**子操作，完成路径按它们分派（拷数据 / 确认记账）。
  *   is_write_confirm   —— **停泊**态（命令已脱钩、组在飞数不递减），由 pending_confirm_service
  *                         每轮扫描推进，完成路径不碰它。
  *   （READ_RECOVERY 同为停泊态，但判别走 pending_find_op 的**搜索实参**，不是谓词。） */
-static inline bool pending_op_is_read(uint8_t op)
+static inline bool pending_op_is_read(BYTE op)
 {
-    return op == (uint8_t)PENDING_OP_READ;
+    return op == PENDING_OP_READ;
 }
 
-static inline bool pending_op_is_write(uint8_t op)
+static inline bool pending_op_is_write(BYTE op)
 {
-    return op == (uint8_t)PENDING_OP_WRITE;
+    return op == PENDING_OP_WRITE;
 }
 
-static inline bool pending_op_is_write_confirm(uint8_t op)
+static inline bool pending_op_is_write_confirm(BYTE op)
 {
-    return op == (uint8_t)PENDING_OP_WRITE_CONFIRM;
+    return op == PENDING_OP_WRITE_CONFIRM;
 }
 
 typedef struct
 {
-    uint16_t used;       /* 1: 槽位占用 */
-    uint16_t command_id; /* FC command_id */
-    uint32_t owners;     /* ★ 贡献本子操作的**组位掩码**（bit gi = ftl_group_bit(gi)）。读恒单组；
-                          *   写页打包下一页可能由多个组拼成 ⇒ 完成时逐组递减（见
-                          *   pending_group_complete_subop_multi）。 */
-    uint8_t op;          /* ftl_pending_op_t：完成路径判别（读/写），见文件头 ⚠ */
-    uint8_t n_cw;        /* ★ 本子操作搬运的 **CW 数**（写 = popcount(cw_bitmap)；读 = 写回长度/512） */
-    uint8_t cw_bitmap;   /* ★ 写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读：0 */
-    lba_t   lba;         /* 子操作起始 **全局** host LBA（CW 级：1 LBA = 1 CW = 512B）。
-                          * ⚠ 写页打包：lba = **窗口基址**，逐 CW 的 LBA = lba + bit（bit 同 cw_bitmap） */
-    void *buffer;        /* 子操作缓冲（读=写回处，= 组基缓冲 + LBA 偏移 × FTL_IU_BYTES；
-                          *   写页打包后恒 NULL——数据在 ftl->wbuf.data，完成时不读它） */
+    WORD  used;       /* 1: 槽位占用 */
+    WORD  command_id; /* FC command_id */
+    DWORD owners;     /* ★ 贡献本子操作的**组位掩码**（bit gi = ftl_group_bit(gi)）。读恒单组；
+                       *   写页打包下一页可能由多个组拼成 ⇒ 完成时逐组递减（见
+                       *   pending_group_complete_subop_multi）。 */
+    BYTE  op;         /* ftl_pending_op_t：完成路径判别（读/写），见文件头 ⚠ */
+    BYTE  n_cw;       /* ★ 本子操作搬运的 **CW 数**（写 = popcount(cw_bitmap)；读 = 写回长度/512） */
+    BYTE  cw_bitmap;  /* ★ 写：本页有效 CW 位图（bit = plane*CW_NUM+cw）；读：0 */
+    DWORD lba;        /* 子操作起始 **全局** host LBA（CW 级：1 LBA = 1 CW = 512B）。
+                       * ⚠ 写页打包：lba = **窗口基址**，逐 CW 的 LBA = lba + bit（bit 同 cw_bitmap） */
+    void *buffer;     /* 子操作缓冲（读=写回处，= 组基缓冲 + LBA 偏移 × FTL_IU_BYTES；
+                       *   写页打包后恒 NULL——数据在 ftl->wbuf.data，完成时不读它） */
     /* ↓↓↓ 写完成确认/回滚（写专用，读请求时无效） ↓↓↓ */
-    nand_pba_t new_pba;  /* 新分配的 **plane0 页** PBA（本页未覆盖 plane0 ⇒ NAND_PBA_INVALID） */
-    nand_pba_t new_pba1; /* 新分配的 **plane1 页** PBA（未覆盖 plane1 ⇒ NAND_PBA_INVALID） */
+    DWORD new_pba;  /* 新分配的 **plane0 页** PBA（本页未覆盖 plane0 ⇒ NAND_PBA_INVALID） */
+    DWORD new_pba1; /* 新分配的 **plane1 页** PBA（未覆盖 plane1 ⇒ NAND_PBA_INVALID） */
     /* ⚠ **不存 old_pba**：完成时按 LBA 重查 L2P 得到"此刻被替换的映射"。这比提交时快照
      *   更正确——同一 LBA 的两次写在飞时，先完成的先改 L2P，后完成的重查即得前者，
      *   提交时快照会让两条 journal 都指向最初映射（链断）。 */
-    uint8_t  cache_intermediate; /* 1: Cache Program 中间页（15h），completion 时不更新 L2P/Journal */
-    uint32_t park_ms;            /* WRITE_CONFIRM 停泊起点（ms；内部字段，外部不要读） */
+    BYTE  cache_intermediate; /* 1: Cache Program 中间页（15h），completion 时不更新 L2P/Journal */
+    DWORD park_ms;            /* WRITE_CONFIRM 停泊起点（ms；内部字段，外部不要读） */
 } ftl_pending_req_t;
 
 /*
@@ -127,9 +127,9 @@ typedef struct
  * pending_group_complete_subop 递减 outstanding → 全部完成（next==total 且
  * outstanding==0）时 pending_group_maybe_complete 一次性发通知并置 used=0。
  *
- * ⚠ total/next 必须 uint32_t：host 连续 LBA 数 count 可达 FTL_LBA_MAX（894,976），
- *   二者都以 **LBA 计**，uint16_t 会溢出。outstanding 被 FC buffer 池限到 ~16
- *   （128 buffer ÷ 每多 plane 命令 8 buffer），uint16_t 够。
+ * ⚠ total/next 必须 DWORD：host 连续 LBA 数 count 可达 FTL_LBA_MAX（894,976），
+ *   二者都以 **LBA 计**，WORD 会溢出。outstanding 被 FC buffer 池限到 ~16
+ *   （128 buffer ÷ 每多 plane 命令 8 buffer），WORD 够。
  *
  * ⚠ 进度以 **LBA 偏移**计（total = count，next = 已下发到的 LBA 偏移），不是
  *   "子操作序号"：CW 级下一个子操作最多消费 FTL_LBA_PER_PAIR（= 8）个 LBA——
@@ -139,17 +139,17 @@ typedef struct
  */
 typedef struct
 {
-    uint8_t                used;            /* 1: 槽位占用 */
-    uint8_t                op;              /* PENDING_OP_READ / PENDING_OP_WRITE */
-    uint8_t                stalls;          /* 连续无进展 drain 轮数（背压预算，见 FTL_DRAIN_STALL_MAX） */
-    uint16_t               outstanding;     /* 已下发、未完成的子操作数 */
-    uint32_t               total;           /* 本请求 LBA 总数（= count） */
-    uint32_t               next;            /* 已下发到的 LBA 偏移（0..count） */
-    uint64_t               lba;             /* host 起始 LBA */
+    BYTE                   used;            /* 1: 槽位占用 */
+    BYTE                   op;              /* PENDING_OP_READ / PENDING_OP_WRITE */
+    BYTE                   stalls;          /* 连续无进展 drain 轮数（背压预算，见 FTL_DRAIN_STALL_MAX） */
+    WORD                   outstanding;     /* 已下发、未完成的子操作数 */
+    DWORD                  total;           /* 本请求 LBA 总数（= count） */
+    DWORD                  next;            /* 已下发到的 LBA 偏移（0..count） */
+    QWORD                  lba;             /* host 起始 LBA */
     void                  *buffer;          /* host 基缓冲 */
-    uint32_t               count;           /* host 连续 LBA 数 */
+    DWORD                  count;           /* host 连续 LBA 数 */
     ssd_status_t           agg_status;      /* 粘性错误：任一子操作失败 → 非 OK */
-    volatile uint8_t      *complete_flag;   /* 全部子操作完成后置 1 */
+    volatile BYTE         *complete_flag;   /* 全部子操作完成后置 1 */
     volatile ssd_status_t *status_out;      /* 全部子操作完成后写入 agg_status */
     pending_cb_t           on_complete;     /* 全部子操作完成后调用一次 */
     void                  *on_complete_ctx; /* 回调上下文 */
@@ -179,7 +179,7 @@ typedef ftl_status_t (*pending_confirm_handler_t)(void *ctx, ftl_pending_req_t *
 void pending_confirm_set_handler(pending_confirm_handler_t handler);
 
 /* 把一个已成功编程、但确认尚未完成的写子操作登记进停泊列表。 */
-void pending_confirm_park(ftl_context_t *ftl, uint16_t pending_idx, uint32_t owners);
+void pending_confirm_park(ftl_context_t *ftl, WORD pending_idx, DWORD owners);
 
 /* 推进停泊列表（ftl_service Phase 2.5 开头调用；info 可为 NULL，此时用平台时钟）。 */
 void pending_confirm_service(ftl_context_t *ftl, const ftl_bg_info_t *info);
@@ -228,7 +228,7 @@ static inline void pending_validate(const ftl_pending_req_t *req)
  * @param cmd_id  FC command_id
  * @return 指向 pending 项的指针, NULL 未找到
  */
-ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, uint16_t cmd_id);
+ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, WORD cmd_id);
 
 /*
  * pending_remove - 移除本实例中已完成的 pending 项
@@ -236,7 +236,7 @@ ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, uint16_t cmd_id);
  * @param ftl     FTL 上下文
  * @param cmd_id  FC command_id
  */
-void pending_remove(ftl_context_t *ftl, uint16_t cmd_id);
+void pending_remove(ftl_context_t *ftl, WORD cmd_id);
 
 /*
  * pending_find_op - 找**第一个** op 类型匹配的 pending 项（按下标升序）
@@ -249,7 +249,7 @@ void pending_remove(ftl_context_t *ftl, uint16_t cmd_id);
  * @param out_index  输出：命中项的下标（仅返回 1 时有效）
  * @return true 找到，false 无
  */
-bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out_index);
+bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, BYTE *out_index);
 
 /*
  * pending_release_index - 按下标释放 pending 项（used=0）
@@ -260,7 +260,7 @@ bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, uint8_t *out
  * @param ftl    FTL 上下文
  * @param index  pending 槽下标（0..FTL_PENDING_MAX-1）
  */
-void pending_release_index(ftl_context_t *ftl, uint8_t index);
+void pending_release_index(ftl_context_t *ftl, BYTE index);
 
 /*
  * pending_count - 本实例当前未决（占用）的 pending 项数
@@ -271,7 +271,7 @@ void pending_release_index(ftl_context_t *ftl, uint8_t index);
  * @param ftl  FTL 上下文
  * @return 占用槽位数（0..FTL_PENDING_MAX）
  */
-uint16_t pending_count(const ftl_context_t *ftl);
+WORD pending_count(const ftl_context_t *ftl);
 
 /* ── 完成组 API（ftl_io_group_t）── */
 
@@ -292,7 +292,7 @@ int pending_group_alloc(ftl_context_t *ftl);
  * @param ftl  FTL 上下文
  * @return 占用组数（0..FTL_GROUP_MAX）
  */
-uint16_t pending_group_count(const ftl_context_t *ftl);
+WORD pending_group_count(const ftl_context_t *ftl);
 
 /*
  * pending_group_add_subop / pending_group_drop_subop - 组在飞数增减的唯一闸门
@@ -303,8 +303,8 @@ uint16_t pending_group_count(const ftl_context_t *ftl);
  * @param ftl  FTL 上下文
  * @param gi   组下标（0..FTL_GROUP_MAX-1；组必须 used）
  */
-void pending_group_add_subop(ftl_context_t *ftl, uint16_t gi);
-void pending_group_drop_subop(ftl_context_t *ftl, uint16_t gi);
+void pending_group_add_subop(ftl_context_t *ftl, WORD gi);
+void pending_group_drop_subop(ftl_context_t *ftl, WORD gi);
 
 /*
  * pending_group_complete_subop - 一个子操作完成：聚合状态 + 递减 + 试触发
@@ -316,7 +316,7 @@ void pending_group_drop_subop(ftl_context_t *ftl, uint16_t gi);
  * @param gi         组下标
  * @param sub_status 本子操作的完成状态（SSD_STATUS_OK / IO_ERROR）
  */
-void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t sub_status);
+void pending_group_complete_subop(ftl_context_t *ftl, WORD gi, ssd_status_t sub_status);
 
 /*
  * pending_group_complete_subop_multi - 一个子操作完成、归属**多个组**：逐组聚合
@@ -329,7 +329,7 @@ void pending_group_complete_subop(ftl_context_t *ftl, uint16_t gi, ssd_status_t 
  * @param owners     贡献组位掩码（bit gi）
  * @param sub_status 本子操作的完成状态（SSD_STATUS_OK / IO_ERROR）
  */
-void pending_group_complete_subop_multi(ftl_context_t *ftl, uint32_t owners, ssd_status_t sub_status);
+void pending_group_complete_subop_multi(ftl_context_t *ftl, DWORD owners, ssd_status_t sub_status);
 
 /*
  * pending_group_maybe_complete - 若组已全部下发且全部完成则发通知并释放槽
@@ -340,6 +340,6 @@ void pending_group_complete_subop_multi(ftl_context_t *ftl, uint32_t owners, ssd
  * @param ftl  FTL 上下文
  * @param gi   组下标
  */
-void pending_group_maybe_complete(ftl_context_t *ftl, uint16_t gi);
+void pending_group_maybe_complete(ftl_context_t *ftl, WORD gi);
 
 #endif /* FTL_PENDING_H */

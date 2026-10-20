@@ -10,6 +10,8 @@
 #include "common.h"
 #include "qspi.h"
 
+#include <string.h>
+
 static QSPI_HandleTypeDef g_qspi_handle; /* QSPI句柄 */
 
 /**
@@ -19,9 +21,9 @@ static QSPI_HandleTypeDef g_qspi_handle; /* QSPI句柄 */
  * @param       wtime: 等待时间
  * @retval      0, 等待成功; 1, 等待失败.
  */
-uint8_t qspi_port_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime)
+BYTE qspi_port_wait_flag(DWORD flag, BYTE sta, DWORD wtime)
 {
-    uint8_t flagsta = 0;
+    BYTE flagsta = 0;
 
     while (wtime)
     {
@@ -50,7 +52,7 @@ uint8_t qspi_port_wait_flag(uint32_t flag, uint8_t sta, uint32_t wtime)
  * @param       无
  * @retval      0, 成功; 1, 失败.
  */
-uint8_t qspi_port_init(void)
+BYTE qspi_port_init(void)
 {
     g_qspi_handle.Instance                = QUADSPI;                        /* QSPI */
     g_qspi_handle.Init.ClockPrescaler     = 1;                              /* QPSI分频比，W25Q256最大频率为133M，
@@ -83,7 +85,9 @@ uint8_t qspi_port_init(void)
 void HAL_QSPI_MspInit(QSPI_HandleTypeDef *hqspi)
 {
     GPIO_InitTypeDef         gpio_init_struct;
-    RCC_PeriphCLKInitTypeDef peripheral_clocks = {0};
+    RCC_PeriphCLKInitTypeDef peripheral_clocks;
+
+    memset(&peripheral_clocks, 0, sizeof(peripheral_clocks));
 
     if (hqspi->Instance != QUADSPI)
     {
@@ -144,9 +148,11 @@ void HAL_QSPI_MspInit(QSPI_HandleTypeDef *hqspi)
  * @param       dmcycle: 空指令周期数
  * @retval      无
  */
-uint8_t qspi_port_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmcycle)
+BYTE qspi_port_send_cmd(BYTE cmd, DWORD addr, BYTE mode, BYTE dmcycle)
 {
-    QSPI_CommandTypeDef qspi_command_handle = {0};
+    QSPI_CommandTypeDef qspi_command_handle;
+
+    memset(&qspi_command_handle, 0, sizeof(qspi_command_handle));
 
     qspi_command_handle.Instruction = cmd;     /* 指令 */
     qspi_command_handle.Address     = addr;    /* 地址 */
@@ -235,7 +241,7 @@ uint8_t qspi_port_send_cmd(uint8_t cmd, uint32_t addr, uint8_t mode, uint8_t dmc
  * @retval      0, 成功; 其他, 错误代码.
  * @note        空参检查在共享 src/platform/qspi.c。
  */
-uint8_t qspi_port_receive(uint8_t *buf, uint32_t datalen)
+BYTE qspi_port_receive(BYTE *buf, DWORD datalen)
 {
     g_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
     if (HAL_QSPI_Receive(&g_qspi_handle, buf, 5000) == HAL_OK)
@@ -255,7 +261,7 @@ uint8_t qspi_port_receive(uint8_t *buf, uint32_t datalen)
  * @retval      0, 成功; 其他, 错误代码.
  * @note        空参检查在共享 src/platform/qspi.c。
  */
-uint8_t qspi_port_transmit(uint8_t *buf, uint32_t datalen)
+BYTE qspi_port_transmit(BYTE *buf, DWORD datalen)
 {
     g_qspi_handle.Instance->DLR = datalen - 1; /* 配置数据长度 */
     if (HAL_QSPI_Transmit(&g_qspi_handle, buf, 5000) == HAL_OK)

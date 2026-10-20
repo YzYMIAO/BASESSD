@@ -25,7 +25,7 @@
 
 /* mask 中 ≥ n 的第一个置位的绝对编号；没有则返回 CW_TOTAL_MAX（哨兵，越界即"到头"）。
  * 用法：`for (k = nand_dispatch_cw_next(mask, 0U); k < CW_TOTAL_MAX; k = nand_dispatch_cw_next(mask, k + 1U))`。 */
-static inline uint8_t nand_dispatch_cw_next(uint32_t cw_bitmap, uint8_t n)
+static inline BYTE nand_dispatch_cw_next(DWORD cw_bitmap, BYTE n)
 {
     while (n < CW_TOTAL_MAX)
     {
@@ -35,14 +35,14 @@ static inline uint8_t nand_dispatch_cw_next(uint32_t cw_bitmap, uint8_t n)
         }
         n++;
     }
-    return (uint8_t)CW_TOTAL_MAX;
+    return CW_TOTAL_MAX;
 }
 
 /* mask 最低位的绝对编号；mask 为空（退化命令）时返回 0 —— 只用于"取一个不越界的下标"，
  * 需要区分"空掩码"时用 nand_dispatch_cw_next() 的哨兵。 */
-static inline uint8_t nand_dispatch_cw_first(uint32_t cw_bitmap)
+static inline BYTE nand_dispatch_cw_first(DWORD cw_bitmap)
 {
-    uint8_t n = nand_dispatch_cw_next(cw_bitmap, 0U);
+    BYTE n = nand_dispatch_cw_next(cw_bitmap, 0U);
 
     return (n < CW_TOTAL_MAX) ? n : 0U;
 }
@@ -52,40 +52,40 @@ static inline uint8_t nand_dispatch_cw_first(uint32_t cw_bitmap)
  * poll 依此驱动 nand_fc_start/step。 */
 typedef struct
 {
-    uint16_t command_id;
-    uint8_t  operation;
-    uint8_t  ch;            /* Channel — needed for page_buffer access. */
-    uint8_t  ce;            /* Chip-enable — needed for routing. */
-    uint8_t  lun;           /* LUN — needed for routing. */
-    uint8_t  page_type : 2; /* Copy from dispatch request for LDPC engine. */
-    uint8_t  reserved  : 6;
-    uint32_t cw_bitmap;    /* 选中的 CW 集合：bit n = plane*CW_NUM + cw（flat 绝对编号）。
-                            * 与 request->cw_bitmap 同一值；是 cw_buffers / cw_index 的唯一依据
-                            * （"本任务有几个 CW"= popcount(mask)，"第 k 个"= 第 k 个置位）。 */
-    uint8_t cw_index;      /* 当前 CW 的 **flat 绝对编号 n**（∈ cw_bitmap），不是密排槽位。
-                            * 生产：task_load 置为掩码最低位；cw_chain 每取完一个推进到下一个置位。
-                            * 消费：completion_per_cw 用它当下标写 cw_status[n]，
-                            *   并把它作为 failed_descriptor_id 上报。 */
-    uint8_t plane_count;   /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
-                            * 见 nand_dispatch.h 同名字段的完整说明。 */
-    uint8_t plane;         /* 本命令目标物理 plane 索引。
-                            * 单 plane：= request->plane，所有单 plane req_* handler / cw_chain /
-                            *   scatter 一律读 plane_paa[plane]。
-                            * multi-plane：恒 0；multi-plane handler 不读本字段，仍写死 [0]/[1]。
-                            * ⚠ 必须无条件赋值：task slot 会被链内后续命令复用（task_load 不做整体
-                            *   memset），漏赋值会读到上一条命令的残值。 */
-    uint8_t  started;      /* 0=未启动；1=已 nand_fc_start（含 start 内同步完成） */
-    uint8_t  feature_addr; /* SET/GET_FEATURES 的寄存器地址（column）。内联数据走 cw_buffers，不走本层。 */
-    uint16_t column;       /* **显式列地址**（仅 OP_READ_COLUMN 用，见 nand_dispatch.h 同名字段）。
-                            * 其余 op 恒 0；req_read_column 直接把它当列地址，不再从 paa 的 cw 推。 */
+    WORD  command_id;
+    BYTE  operation;
+    BYTE  ch;            /* Channel — needed for page_buffer access. */
+    BYTE  ce;            /* Chip-enable — needed for routing. */
+    BYTE  lun;           /* LUN — needed for routing. */
+    BYTE  page_type : 2; /* Copy from dispatch request for LDPC engine. */
+    BYTE  reserved  : 6;
+    DWORD cw_bitmap;   /* 选中的 CW 集合：bit n = plane*CW_NUM + cw（flat 绝对编号）。
+                        * 与 request->cw_bitmap 同一值；是 cw_buffers / cw_index 的唯一依据
+                        * （"本任务有几个 CW"= popcount(mask)，"第 k 个"= 第 k 个置位）。 */
+    BYTE cw_index;     /* 当前 CW 的 **flat 绝对编号 n**（∈ cw_bitmap），不是密排槽位。
+                        * 生产：task_load 置为掩码最低位；cw_chain 每取完一个推进到下一个置位。
+                        * 消费：completion_per_cw 用它当下标写 cw_status[n]，
+                        *   并把它作为 failed_descriptor_id 上报。 */
+    BYTE plane_count;  /* 0 = 单 plane（FC 只对 multi-plane 分支赋值），N = multi-plane。
+                        * 见 nand_dispatch.h 同名字段的完整说明。 */
+    BYTE plane;        /* 本命令目标物理 plane 索引。
+                        * 单 plane：= request->plane，所有单 plane req_* handler / cw_chain /
+                        *   scatter 一律读 plane_paa[plane]。
+                        * multi-plane：恒 0；multi-plane handler 不读本字段，仍写死 [0]/[1]。
+                        * ⚠ 必须无条件赋值：task slot 会被链内后续命令复用（task_load 不做整体
+                        *   memset），漏赋值会读到上一条命令的残值。 */
+    BYTE started;      /* 0=未启动；1=已 nand_fc_start（含 start 内同步完成） */
+    BYTE feature_addr; /* SET/GET_FEATURES 的寄存器地址（column）。内联数据走 cw_buffers，不走本层。 */
+    WORD column;       /* **显式列地址**（仅 OP_READ_COLUMN 用，见 nand_dispatch.h 同名字段）。
+                        * 其余 op 恒 0；req_read_column 直接把它当列地址，不再从 paa 的 cw 推。 */
 
     /* Pre-resolved per-CW data（定容数组，容量 = 硬件上限 CW_TOTAL_MAX = PLANE_NUM×CW_NUM）。
      * ⚠ 下标是 **flat 绝对 CW 号 n = plane*CW_NUM + cw**，与 cw_bitmap 的 bit 号、
      *   completion.cw_status[] 的下标三者同一空间——"哪些格有效"完全由 cw_bitmap 决定，
      *   不在掩码里的格是确定性零值（request 整体 {0} 初始化后只填掩码内的格）。
      *   物理 plane 由 n / CW_NUM 得出，CW 号由 n % CW_NUM 得出，不再各存一份。 */
-    nand_paa_t plane_paa[PLANE_NUM];     /* 各 plane 的行地址承载 PAA（CW 位被 paa_to_nand_row 丢弃）。 */
-    uint8_t   *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_bitmap 有效。 */
+    DWORD plane_paa[PLANE_NUM];     /* 各 plane 的行地址承载 PAA（CW 位被 paa_to_nand_row 丢弃）。 */
+    BYTE *cw_buffers[CW_TOTAL_MAX]; /* [n]，仅 n ∈ cw_bitmap 有效。 */
 
     /* ── 引擎上下文四件套（Phase V）──
      * 全部随 task slot 常驻，跨多次 poll 调用存活；生产/消费阶段见各字段。 */
@@ -171,10 +171,10 @@ typedef struct
 typedef struct
 {
     nand_dispatch_task_t tasks[NAND_DISPATCH_CHAIN_DEPTH];
-    uint8_t              head;              /* 出队游标（当前执行/待执行槽） */
-    uint8_t              count;             /* 占用槽数 */
-    uint8_t              phase;             /* 当前执行槽的 LUN_PHASE_* */
-    uint32_t             wait_start_cycles; /* Phase V: ISSUE 完成时 DWT 时间戳 */
+    BYTE                 head;              /* 出队游标（当前执行/待执行槽） */
+    BYTE                 count;             /* 占用槽数 */
+    BYTE                 phase;             /* 当前执行槽的 LUN_PHASE_* */
+    DWORD                wait_start_cycles; /* Phase V: ISSUE 完成时 DWT 时间戳 */
 } nand_dispatch_lun_queue_t;
 
 /* ======================================================================
@@ -189,7 +189,7 @@ typedef void (*nand_dispatch_req_handler_t)(nand_dispatch_task_t *task);
 /* Completion 策略 handler：根据不同操作类型设置 cw_status 和 failed_descriptor_id。 */
 typedef void (*nand_dispatch_completion_handler_t)(
     nand_dispatch_task_t       *task,
-    uint8_t                     result,
+    BYTE                        result,
     const nand_fc_completion_t *nand_completion);
 
 /* OP_COUNT 项，OP_* 直接作为下标。 */

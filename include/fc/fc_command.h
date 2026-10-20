@@ -158,7 +158,7 @@ typedef enum
  * 页内容不可信却照常搬出，见 ftl_sync_read_page 的注释）。 */
 static inline bool fc_cw_status_has_error(DWORD status)
 {
-    return (status & (DWORD)FC_CW_STATUS_ERROR_MASK) != 0U;
+    return (status & FC_CW_STATUS_ERROR_MASK) != 0U;
 }
 
 /* Command 与 Descriptor 共用 32 位操作配置（位域布局见下） */
@@ -213,7 +213,7 @@ struct fc_descriptor_t
  *   parameter0..3 / bytes[4]：SET_FEATURES 的内联数据（SQ）/ GET_FEATURES 读回的寄存器值（CQ）
  * 小端（Cortex-M7）下 parameter0 是最低字节。
  *
- * 历史（v28 删除）：本联合体曾另有 `uint32_t cw_bitmap` 视图（flat CW 位图，
+ * 历史（v28 删除）：本联合体曾另有 `DWORD cw_bitmap` 视图（flat CW 位图，
  * bit n = plane*CW_NUM + cw）——SQ 侧作「请求集」（FTL 想让本命令访问哪些 CW）、
  * CQ 侧作「失败集」（UNC / CRC_ERROR 置位）。两者均已删除，因为**它们都是派生量**：
  *   · 请求集：读者只有 FTL，且它是**建链的输入**⇒ 改由 ftl_cmd_configure_descriptors()
@@ -228,12 +228,12 @@ typedef union
 {
     struct
     {
-        uint8_t parameter0; /* Command parameter byte 0. */
-        uint8_t parameter1; /* Command parameter byte 1. */
-        uint8_t parameter2; /* Command parameter byte 2. */
-        uint8_t parameter3; /* Command parameter byte 3. */
+        BYTE parameter0; /* Command parameter byte 0. */
+        BYTE parameter1; /* Command parameter byte 1. */
+        BYTE parameter2; /* Command parameter byte 2. */
+        BYTE parameter3; /* Command parameter byte 3. */
     };
-    uint8_t bytes[4]; /* 内联数据的字节视图。 */
+    BYTE bytes[4]; /* 内联数据的字节视图。 */
 } fc_param_t;
 
 /*
@@ -321,14 +321,14 @@ struct fc_command_status_t
  *     都按 PLANE_NUM 定尺。改 plane 语义时这里与 nand_dispatch_tables.c 的
  *     multi-plane handler 要一起动。
  * -------------------------------------------------------------------- */
-static inline uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t *plane_first, uint8_t *plane_last)
+static inline BYTE fc_command_plane_span(const fc_command_t *command, BYTE *plane_first, BYTE *plane_last)
 {
-    const uint8_t plane_count = (command->config.multi_plane > 0U) ? (uint8_t)command->config.multi_plane : 1U;
+    const BYTE plane_count = (command->config.multi_plane > 0U) ? command->config.multi_plane : 1U;
 
     ASSERT(plane_count <= PLANE_NUM);
 
-    *plane_first = (plane_count == 1U) ? (uint8_t)paa_to_plane(command->paa) : 0U;
-    *plane_last  = (uint8_t)(*plane_first + plane_count);
+    *plane_first = (plane_count == 1U) ? paa_to_plane(command->paa) : 0U;
+    *plane_last  = (*plane_first + plane_count);
     return plane_count;
 }
 
@@ -342,16 +342,16 @@ static inline uint8_t fc_command_plane_span(const fc_command_t *command, uint8_t
  *         形参交给建链入口。（v27 前它写进 cmd->param.cw_bitmap；v28 起该字段已删。）
  *   ⚠ 必须在 paa 与 multi_plane **都写好之后**调用——它读的就是这两个字段。
  * -------------------------------------------------------------------- */
-static inline uint32_t fc_command_plane_span_cw_bitmap(const fc_command_t *command)
+static inline DWORD fc_command_plane_span_cw_bitmap(const fc_command_t *command)
 {
-    uint8_t plane_first;
-    uint8_t plane_last;
+    BYTE plane_first;
+    BYTE plane_last;
 
     (void)fc_command_plane_span(command, &plane_first, &plane_last);
-    return (uint32_t)((1U << ((uint32_t)(plane_last - plane_first) * CW_NUM)) - 1U) << ((uint32_t)plane_first * CW_NUM);
+    return ((1U << ((plane_last - plane_first) * CW_NUM)) - 1U) << (plane_first * CW_NUM);
 }
 
 fc_status_t fc_command_validate(const fc_command_t *command);
-uint8_t     fc_cw_bitmap_is_plane_symmetric(uint32_t mask);
+BYTE        fc_cw_bitmap_is_plane_symmetric(DWORD mask);
 
 #endif /* FC_COMMAND_H */

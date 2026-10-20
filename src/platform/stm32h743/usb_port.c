@@ -13,9 +13,12 @@
  *     端点 FIFO 由 CPU 搬运，缓冲仍在普通 .bss。
  */
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 #include "stm32h7xx_hal.h"
 #include "tusb.h"
 #include "usb.h"
+
+#include <string.h>
 
 /* RHPORT0 = USB2_OTG_FS（TinyUSB 的控制器表按 FS/HS 顺序编号）。 */
 #define USB_PORT_RHPORT 0U
@@ -24,7 +27,7 @@
 #define USB_PORT_IRQ_PRIORITY 5U
 
 /* TinyUSB 在 OPT_OS_NONE 下要求应用提供毫秒时基（dwc2 PHY/复位延时用）。 */
-uint32_t tusb_time_millis_api(void)
+DWORD tusb_time_millis_api(void)
 {
     return HAL_GetTick();
 }
@@ -36,8 +39,9 @@ bool usb_device_init(void)
     __HAL_RCC_GPIOA_CLK_ENABLE();
 
     /* PA11 = OTG_FS_DM, PA12 = OTG_FS_DP, AF10（USB2_OTG_FS）。 */
-    GPIO_InitTypeDef gpio = {0};
+    GPIO_InitTypeDef gpio;
 
+    memset(&gpio, 0, sizeof(gpio));
     gpio.Pin       = GPIO_PIN_11 | GPIO_PIN_12;
     gpio.Mode      = GPIO_MODE_AF_PP;
     gpio.Pull      = GPIO_NOPULL;
@@ -48,7 +52,8 @@ bool usb_device_init(void)
     HAL_NVIC_SetPriority(OTG_FS_IRQn, USB_PORT_IRQ_PRIORITY, 0U);
 
     /* 只支持全速设备；VBUS sensing 由 CFG_TUD_VBUS_DETECT_HW=0 关闭。 */
-    tusb_rhport_init_t rh_init = {0};
+    tusb_rhport_init_t rh_init;
+    memset(&rh_init, 0, sizeof(rh_init));
 
     rh_init.role  = TUSB_ROLE_DEVICE;
     rh_init.speed = TUSB_SPEED_FULL;

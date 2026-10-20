@@ -19,8 +19,8 @@
 /* 堆起点 = DTCM 空闲区底部；栈顶 = DTCM 顶。两符号都来自
  * linker/stm32h743xx_flash.ld（`PROVIDE(end = .)` / `_estack = ORIGIN+LENGTH`），
  * 与 src/platform/syscalls.c 取 &end 的方式一致。 */
-extern char     end;
-extern uint32_t _estack;
+extern char  end;
+extern DWORD _estack;
 
 /* pattern 用可读 ASCII："STAK"。不用 0xDEADBEEF/0xA5A5A5A5 这类常见填充——
  * 它们可能是别的代码/协议里正常出现的值，会制造假阴性。 */
@@ -34,9 +34,9 @@ extern uint32_t _estack;
 
 /* 本文件跨 target 共享（同 syscalls.c）：只读 MSP，不 include 任何 SoC 头
  * ——那会依赖设备头提供 IRQn_Type，裸包含编译不过。 */
-static uint32_t stack_guard_msp(void)
+static DWORD stack_guard_msp(void)
 {
-    uint32_t msp;
+    DWORD msp;
 
     __asm__ volatile("mrs %0, msp"
                      : "=r"(msp));
@@ -45,13 +45,13 @@ static uint32_t stack_guard_msp(void)
 
 /* ── 2. 状态 ── */
 
-static uint32_t g_paint_lo;   /* 最低被填 pattern 的地址（= &end，4 对齐） */
-static uint32_t g_paint_hi;   /* 最高被填 pattern 的地址（= init 时的 SP，4 对齐） */
-static uint32_t g_low_mark;   /* 当前已知**被踩到**的最低地址，单调下移 */
-static uint32_t g_boot_msp;   /* init 时的 SP，报告里做基准 */
-static uint32_t g_armed;      /* init 过才允许 check */
-static uint32_t g_alarm;      /* STACK_GUARD_ALARM_* 位或 */
-static uint32_t g_alarm_hits; /* 告警次数（含重复；用于看"是一次还是持续"） */
+static DWORD g_paint_lo;   /* 最低被填 pattern 的地址（= &end，4 对齐） */
+static DWORD g_paint_hi;   /* 最高被填 pattern 的地址（= init 时的 SP，4 对齐） */
+static DWORD g_low_mark;   /* 当前已知**被踩到**的最低地址，单调下移 */
+static DWORD g_boot_msp;   /* init 时的 SP，报告里做基准 */
+static DWORD g_armed;      /* init 过才允许 check */
+static DWORD g_alarm;      /* STACK_GUARD_ALARM_* 位或 */
+static DWORD g_alarm_hits; /* 告警次数（含重复；用于看"是一次还是持续"） */
 
 /* ── 3. 实现 ── */
 
@@ -65,9 +65,9 @@ static uint32_t g_alarm_hits; /* 告警次数（含重复；用于看"是一次�
  * -------------------------------------------------------------------- */
 void stack_guard_init(void)
 {
-    uint32_t lo = ((uint32_t)(uintptr_t)&end + 3U) & ~3U;
-    uint32_t hi = stack_guard_msp() & ~3U;
-    uint32_t addr;
+    DWORD lo = ((uintptr_t)&end + 3U) & ~3U;
+    DWORD hi = stack_guard_msp() & ~3U;
+    DWORD addr;
 
     if (hi <= lo)
     {
@@ -83,15 +83,15 @@ void stack_guard_init(void)
 
     for (addr = lo; addr < hi; addr += 4U)
     {
-        *(volatile uint32_t *)addr = STACK_GUARD_PATTERN;
+        *(volatile DWORD *)addr = STACK_GUARD_PATTERN;
     }
 
     g_armed = 1U;
 
     (void)LOGI("[STK ] guard armed paint=[%08lx,%08lx) size=%lu B\r\n",
-               (unsigned long)lo,
-               (unsigned long)hi,
-               (unsigned long)(hi - lo));
+               lo,
+               hi,
+               (hi - lo));
 }
 
 /* --------------------------------------------------------------------
@@ -106,9 +106,9 @@ void stack_guard_init(void)
  * -------------------------------------------------------------------- */
 void stack_guard_check(void)
 {
-    uint32_t msp;
-    uint32_t mark;
-    uint32_t budget;
+    DWORD msp;
+    DWORD mark;
+    DWORD budget;
 
     if (g_armed == 0U)
     {
@@ -116,16 +116,16 @@ void stack_guard_check(void)
     }
 
     msp = stack_guard_msp();
-    if ((msp < g_paint_lo) || (msp >= (uint32_t)(uintptr_t)&_estack))
+    if ((msp < g_paint_lo) || (msp >= (uintptr_t)&_estack))
     {
         g_alarm_hits++;
         if ((g_alarm & STACK_GUARD_ALARM_MSP) == 0U)
         {
             g_alarm |= STACK_GUARD_ALARM_MSP;
             (void)LOGE("[STK ] MSP out of range: %08lx (valid [%08lx,%08lx))\r\n",
-                       (unsigned long)msp,
-                       (unsigned long)g_paint_lo,
-                       (unsigned long)(uint32_t)(uintptr_t)&_estack);
+                       msp,
+                       g_paint_lo,
+                       (unsigned long)(uintptr_t)&_estack);
         }
         return;
     }
@@ -134,7 +134,7 @@ void stack_guard_check(void)
     budget = STACK_GUARD_SCAN_WORDS_PER_CALL;
     while ((mark > g_paint_lo) && (budget > 0U))
     {
-        if (*(volatile const uint32_t *)(mark - 4U) == STACK_GUARD_PATTERN)
+        if (*(volatile const DWORD *)(mark - 4U) == STACK_GUARD_PATTERN)
         {
             break;
         }
@@ -144,16 +144,16 @@ void stack_guard_check(void)
     g_low_mark = mark;
 
     /* 触底且底字已被改写 ⇒ 有东西写到了 paint 区最低处（栈触底 / 堆撞上来）。 */
-    if ((mark == g_paint_lo) && (*(volatile const uint32_t *)mark != STACK_GUARD_PATTERN))
+    if ((mark == g_paint_lo) && (*(volatile const DWORD *)mark != STACK_GUARD_PATTERN))
     {
         g_alarm_hits++;
         if ((g_alarm & STACK_GUARD_ALARM_OVERFLOW) == 0U)
         {
             g_alarm |= STACK_GUARD_ALARM_OVERFLOW;
             (void)LOGE("[STK ] paint bottom clobbered @%08lx (peak=%lu B of %lu B)\r\n",
-                       (unsigned long)g_paint_lo,
-                       (unsigned long)(g_paint_hi - g_low_mark),
-                       (unsigned long)(g_paint_hi - g_paint_lo));
+                       g_paint_lo,
+                       (g_paint_hi - g_low_mark),
+                       (g_paint_hi - g_paint_lo));
         }
     }
 }
@@ -166,7 +166,7 @@ void stack_guard_check(void)
  * -------------------------------------------------------------------- */
 void stack_guard_report(void)
 {
-    uint32_t msp = stack_guard_msp();
+    DWORD msp = stack_guard_msp();
 
     if (g_armed == 0U)
     {
@@ -175,24 +175,24 @@ void stack_guard_report(void)
     }
 
     (void)LOGI("[STK ] paint=[%08lx,%08lx) size=%lu B  dtcm_bottom=%08lx\r\n",
-               (unsigned long)g_paint_lo,
-               (unsigned long)g_paint_hi,
-               (unsigned long)(g_paint_hi - g_paint_lo),
-               (unsigned long)(uint32_t)(uintptr_t)&end);
+               g_paint_lo,
+               g_paint_hi,
+               (g_paint_hi - g_paint_lo),
+               (unsigned long)(uintptr_t)&end);
     (void)LOGI("[STK ] boot_msp=%08lx now_msp=%08lx peak=%lu B low=%08lx headroom=%lu B\r\n",
-               (unsigned long)g_boot_msp,
-               (unsigned long)msp,
-               (unsigned long)(g_paint_hi - g_low_mark),
-               (unsigned long)g_low_mark,
-               (unsigned long)(g_low_mark - g_paint_lo));
+               g_boot_msp,
+               msp,
+               (g_paint_hi - g_low_mark),
+               g_low_mark,
+               (g_low_mark - g_paint_lo));
     (void)LOGI("[STK ] alarm=0x%lx hits=%lu %s%s\r\n",
-               (unsigned long)g_alarm,
-               (unsigned long)g_alarm_hits,
+               g_alarm,
+               g_alarm_hits,
                ((g_alarm & STACK_GUARD_ALARM_OVERFLOW) != 0U) ? "OVERFLOW " : "",
                ((g_alarm & STACK_GUARD_ALARM_MSP) != 0U) ? "MSP " : "");
 }
 
-uint32_t stack_guard_alarm(void)
+DWORD stack_guard_alarm(void)
 {
     return g_alarm;
 }

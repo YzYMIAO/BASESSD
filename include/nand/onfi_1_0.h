@@ -483,19 +483,19 @@
 
 typedef struct
 {
-    uint8_t                 operation;                     /* OP_* 码（== 数组下标） */
+    BYTE                    operation;                     /* OP_* 码（== 数组下标） */
     const char             *name;                          /* 可读名（日志用） */
-    uint8_t                 command_1;                     /* 命令值 1（如读页 00h / 编程 80h；无则 0） */
-    uint8_t                 command_2;                     /* 命令值 2（如读页 30h / 编程 10h；无则 0） */
-    uint8_t                 address_cycles;                /* 地址周期数（列+行；多 plane 为两倍） */
-    uint8_t                 data_input_cycles;             /* DATA_IN 段数（写类操作） */
-    uint8_t                 valid_while_selected_lun_busy; /* 本 LUN busy 时可否下发 */
-    uint8_t                 valid_while_other_lun_busy;    /* 其他 LUN busy 时可否下发（多 LUN 准入） */
-    uint8_t                 has_data;                      /* 是否涉及用户数据传输（需 descriptor+buffer） */
-    uint16_t                data_length;                   /* 数据传输字节数 */
-    uint8_t                 op_type : 2;                   /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
-    uint8_t                 pair_op;                       /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
-    uint16_t                min_busy_us;                   /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ 带余量） */
+    BYTE                    command_1;                     /* 命令值 1（如读页 00h / 编程 80h；无则 0） */
+    BYTE                    command_2;                     /* 命令值 2（如读页 30h / 编程 10h；无则 0） */
+    BYTE                    address_cycles;                /* 地址周期数（列+行；多 plane 为两倍） */
+    BYTE                    data_input_cycles;             /* DATA_IN 段数（写类操作） */
+    BYTE                    valid_while_selected_lun_busy; /* 本 LUN busy 时可否下发 */
+    BYTE                    valid_while_other_lun_busy;    /* 其他 LUN busy 时可否下发（多 LUN 准入） */
+    BYTE                    has_data;                      /* 是否涉及用户数据传输（需 descriptor+buffer） */
+    WORD                    data_length;                   /* 数据传输字节数 */
+    BYTE                    op_type : 2;                   /* OP_TYPE_ATOMIC / ISSUE / WAIT / FETCH */
+    BYTE                    pair_op;                       /* 配对 OP 码：ISSUE→WAIT|FETCH，反之亦然 */
+    WORD                    min_busy_us;                   /* LUN 内部操作最小等待时间（tR/tPROG/tBERS typ 带余量） */
     const nand_uop_t       *uops;                          /* UOP 序列（onfi_1_0.c 定义） */
     nand_operation_timing_t timing;                        /* 操作时序参数（twb/trst/twh/busy_timeout） */
 } nand_operation_map_t;
@@ -574,43 +574,43 @@ extern const nand_operation_map_t g_nand_operation_map[OP_COUNT];
 #define NAND_ONFI_PARAM_OFF_TCCS_MIN             139U /* 139–140 小端 */
 
 /* 小端读取（参数页多字节字段一律小端；全仓无现成 LE helper）。 */
-static inline uint16_t nand_onfi_le16(const uint8_t *p)
+static inline WORD nand_onfi_le16(const BYTE *p)
 {
-    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8U));
+    return (p[0] | (p[1] << 8U));
 }
 
-static inline uint32_t nand_onfi_le32(const uint8_t *p)
+static inline DWORD nand_onfi_le32(const BYTE *p)
 {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8U) | ((uint32_t)p[2] << 16U) | ((uint32_t)p[3] << 24U);
+    return (DWORD)p[0] | ((DWORD)p[1] << 8U) | ((DWORD)p[2] << 16U) | ((DWORD)p[3] << 24U);
 }
 
 /* ONFI 参数页解码结果（只含校验 / 打印用得到的字段）。 */
 typedef struct
 {
-    uint8_t  signature[4];                          /* "ONFI" = 4F 4E 46 49 */
-    uint16_t revision;                              /* 版本号（小端原值） */
-    uint16_t features;                              /* 支持的特性位 */
-    char     model[NAND_ONFI_PARAM_MODEL_LEN + 1U]; /* 型号串（去尾部空格 + 补 NUL） */
-    uint8_t  manufacturer_id;                       /* 厂商 ID（Micron = 2Ch） */
-    uint32_t data_bytes_per_page;
-    uint16_t spare_bytes_per_page;
-    uint32_t data_bytes_per_partial_page;
-    uint16_t spare_bytes_per_partial_page;
-    uint32_t pages_per_block;
-    uint32_t blocks_per_unit;
-    uint8_t  logical_units;
-    uint8_t  address_cycles; /* 字节原值（Table 11 的 23h） */
-    uint8_t  column_cycles;  /* bits 7:4：列地址周期数 */
-    uint8_t  row_cycles;     /* bits 3:0：行地址周期数 */
-    uint8_t  bits_per_cell;
-    uint8_t  programs_per_page;
-    uint8_t  ecc_bits;
-    uint16_t timing_mode_support; /* 位图：bit n = 支持 Mode n */
-    uint16_t program_cache_timing;
-    uint16_t tprog_max; /* 以下四项：量纲见手册 Table 11，仓库内未查证 ⇒ 只存原值、不打单位 */
-    uint16_t tbers_max;
-    uint16_t tr_max;
-    uint16_t tccs_min;
+    BYTE  signature[4];                          /* "ONFI" = 4F 4E 46 49 */
+    WORD  revision;                              /* 版本号（小端原值） */
+    WORD  features;                              /* 支持的特性位 */
+    char  model[NAND_ONFI_PARAM_MODEL_LEN + 1U]; /* 型号串（去尾部空格 + 补 NUL） */
+    BYTE  manufacturer_id;                       /* 厂商 ID（Micron = 2Ch） */
+    DWORD data_bytes_per_page;
+    WORD  spare_bytes_per_page;
+    DWORD data_bytes_per_partial_page;
+    WORD  spare_bytes_per_partial_page;
+    DWORD pages_per_block;
+    DWORD blocks_per_unit;
+    BYTE  logical_units;
+    BYTE  address_cycles; /* 字节原值（Table 11 的 23h） */
+    BYTE  column_cycles;  /* bits 7:4：列地址周期数 */
+    BYTE  row_cycles;     /* bits 3:0：行地址周期数 */
+    BYTE  bits_per_cell;
+    BYTE  programs_per_page;
+    BYTE  ecc_bits;
+    WORD  timing_mode_support; /* 位图：bit n = 支持 Mode n */
+    WORD  program_cache_timing;
+    WORD  tprog_max; /* 以下四项：量纲见手册 Table 11，仓库内未查证 ⇒ 只存原值、不打单位 */
+    WORD  tbers_max;
+    WORD  tr_max;
+    WORD  tccs_min;
 } nand_onfi_param_info_t;
 
 /*
@@ -622,6 +622,6 @@ typedef struct
  *   实现要点：纯函数——零 HAL / 零日志 / 零硬件 ⇒ 可纯 RAM 单测。
  *         model 按 20 字节拷贝并补结尾 NUL（尾部空格填充**不裁剪**）。
  */
-uint8_t nand_onfi_parameter_page_decode(const uint8_t page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_t *info);
+BYTE nand_onfi_parameter_page_decode(const BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_onfi_param_info_t *info);
 
 #endif /* PLATFORM_STM32H743_ONFI_1_0_H */

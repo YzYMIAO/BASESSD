@@ -926,7 +926,7 @@ int *productExceptSelf(int *nums, int numsSize, int *returnSize)
     return result;
 }
 
-int canCompleteCircuit(int *gas, int gasSize, int *cost, int costSize)
+DWORD canCompleteCircuit(int *gas, int gasSize, int *cost, int costSize)
 {
     (void)costSize;      // 避免编译器警告
     int total_gas   = 0; // 总油量差
@@ -950,7 +950,7 @@ int canCompleteCircuit(int *gas, int gasSize, int *cost, int costSize)
     }
 
     // 如果总油量 < 总消耗，不可能走完
-    return (total_gas >= 0) ? start : -1;
+    return (total_gas >= 0) ? (DWORD)start : UINT32_MAX; /* 显式「不可达」哨兵；start 是非负 int，需转无符号 */
 }
 
 int candy(int *ratings, int ratingsSize)

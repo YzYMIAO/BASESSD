@@ -1,7 +1,10 @@
 #ifndef LOG_H
 #define LOG_H
 
+#include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
+
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 /* 日志等级按严重程度从高到低排列，运行时过滤比较只需一次数值比较。 */
@@ -13,24 +16,25 @@ typedef enum
     LOG_DEBUG
 } log_level_t;
 
-/* A sink owns transport policy and returns the accepted byte count or a negative error. */
-typedef int (*log_sink_t)(const char *message, uint32_t length);
-typedef int (*log_flush_sink_t)(uint32_t timeout_ms);
+/* A sink owns transport policy and returns the accepted byte count or LOG_WRITE_INVALID. */
+#define LOG_WRITE_INVALID (UINT32_MAX)
+typedef DWORD (*log_sink_t)(const char *message, DWORD length);
+typedef bool (*log_flush_sink_t)(DWORD timeout_ms);
 
 /*
  * 运行时日志接口。sink 由已注册的平台提供，例如 firmware 的 UART 或 host 的 stderr。
  * 业务模块只依赖本头文件，不应直接操作 UART、文件描述符或平台寄存器。
  */
-int         log_write(log_level_t level, const char *message);
-int         log_printf(log_level_t level, const char *format, ...);
-int         log_vprintf(log_level_t level, const char *format, va_list args);
+DWORD       log_write(log_level_t level, const char *message);
+DWORD       log_printf(log_level_t level, const char *format, ...);
+DWORD       log_vprintf(log_level_t level, const char *format, va_list args);
 void        log_set_level(log_level_t level);
 log_level_t log_get_level(void);
 void        log_set_sink(log_sink_t sink);
-int         log_flush(uint32_t timeout_ms);
+bool        log_flush(DWORD timeout_ms);
 void        log_set_flush_sink(log_flush_sink_t sink);
-uint32_t    log_get_truncated_count(void);
-uint32_t    log_get_write_failure_count(void);
+DWORD       log_get_truncated_count(void);
+DWORD       log_get_write_failure_count(void);
 
 /*
  * 企业固件中的业务代码使用这些宏。DEBUG 日志可在 release 构建中完全裁剪，

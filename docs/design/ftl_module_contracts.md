@@ -411,8 +411,8 @@ void pending_confirm_service(const ftl_bg_info_t *info);
   `FTL_WAIT_TIMEOUT_MS = 50`、`FTL_SUBMIT_TIMEOUT_MS = 10`、
   `FTL_GROUP_DRAIN_TIMEOUT_MS = 100`。
 - 模块 deadline 必须 > NAND 超时 + 余量；NAND 已返回 TIMEOUT 时不再叠加。
-- 上报：`ftl_status_t` 增加 `FTL_TIMEOUT`（与 NVMe timeout /
-  `-ETIMEDOUT` 同构），模块 status 带 `timeout_phase`。
+- 上报：`ftl_status_t` 增加 `FTL_TIMEOUT`（值 3，语义与 NVMe timeout /
+  `-ETIMEDOUT` 同构；**本仓状态值一律非负**），模块 status 带 `timeout_phase`。
 - 命令槽：NAND 保证在飞命令必有完成；超时模块不得擅自释放可能仍在飞的命令，
   迟到完成走 orphan 守卫。
 

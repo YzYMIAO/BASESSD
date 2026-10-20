@@ -13,6 +13,7 @@
 #include "usart.h"
 
 #include <stdint.h>
+#include <string.h>
 
 UART_HandleTypeDef g_uart1_handle = {0};
 
@@ -22,9 +23,9 @@ extern DMA_HandleTypeDef g_dma_handle;
 static void usart_tx_dma_complete_cb(DMA_HandleTypeDef *dma_handle);
 static void usart_tx_dma_error_cb(DMA_HandleTypeDef *dma_handle);
 
-uint8_t usart_port_hw_init(uint32_t baudrate)
+BYTE usart_port_hw_init(DWORD baudrate)
 {
-    uint8_t dma_ready;
+    BYTE dma_ready;
 
     g_uart1_handle.Instance                    = USART_UX;
     g_uart1_handle.Init.BaudRate               = baudrate;
@@ -59,8 +60,11 @@ uint8_t usart_port_hw_init(uint32_t baudrate)
 
 void HAL_UART_MspInit(UART_HandleTypeDef *huart)
 {
-    RCC_PeriphCLKInitTypeDef rcc_periph_clk_init_struct = {0};
-    GPIO_InitTypeDef         gpio_init_struct           = {0};
+    RCC_PeriphCLKInitTypeDef rcc_periph_clk_init_struct;
+    GPIO_InitTypeDef         gpio_init_struct;
+
+    memset(&rcc_periph_clk_init_struct, 0, sizeof(rcc_periph_clk_init_struct));
+    memset(&gpio_init_struct, 0, sizeof(gpio_init_struct));
 
     if (huart->Instance != USART_UX)
     {
@@ -113,10 +117,10 @@ void USART1_IRQHandler(void)
 
 void usart_port_irq_handler(void)
 {
-    uint32_t status      = USART_UX->ISR;
-    uint32_t clear_flags = 0U;
-    uint32_t error_kinds = 0U;
-    uint8_t  byte;
+    DWORD status      = USART_UX->ISR;
+    DWORD clear_flags = 0U;
+    DWORD error_kinds = 0U;
+    BYTE  byte;
 
     /*
      * 先累计原因再清标志。即便出现 FE/NE/ORE，也要继续读取 RDR 抽干 RX FIFO，
@@ -153,7 +157,7 @@ void usart_port_irq_handler(void)
      */
     while ((USART_UX->ISR & USART_ISR_RXNE_RXFNE) != 0U)
     {
-        byte = (uint8_t)USART_UX->RDR;
+        byte = USART_UX->RDR;
         uart_rx_ring_push(byte);
     }
 
@@ -184,16 +188,16 @@ void usart_port_irq_handler(void)
 
 /* ─────────────────────────── port 原语（供共享层调用）─────────────────────────── */
 
-int usart_port_tx_dma_start(const uint8_t *buffer, uint32_t length)
+bool usart_port_tx_dma_start(const BYTE *buffer, DWORD length)
 {
     /* TX Ring is cacheable AXI SRAM; DMA must see bytes written by the CPU before it starts. */
-    SCB_CleanDCache_by_Addr((uint32_t *)(uintptr_t)buffer, (int32_t)((length + 31U) & ~31U));
-    if (HAL_DMA_Start_IT(&g_dma_handle, (uint32_t)(uintptr_t)buffer, (uint32_t)&USART_UX->TDR, length) != HAL_OK)
+    SCB_CleanDCache_by_Addr((DWORD *)(uintptr_t)buffer, (int32_t)((length + 31U) & ~31U));
+    if (HAL_DMA_Start_IT(&g_dma_handle, (uintptr_t)buffer, (DWORD)&USART_UX->TDR, length) != HAL_OK)
     {
-        return -1;
+        return false;
     }
     USART_UX->CR3 |= USART_CR3_DMAT;
-    return 0;
+    return true;
 }
 
 void usart_port_tx_dma_detach(void)
@@ -201,9 +205,9 @@ void usart_port_tx_dma_detach(void)
     USART_UX->CR3 &= ~USART_CR3_DMAT;
 }
 
-uint16_t usart_port_tx_dma_remaining(void)
+WORD usart_port_tx_dma_remaining(void)
 {
-    return (uint16_t)__HAL_DMA_GET_COUNTER(&g_dma_handle);
+    return __HAL_DMA_GET_COUNTER(&g_dma_handle);
 }
 
 void usart_port_tx_irq_enable(void)
@@ -211,12 +215,12 @@ void usart_port_tx_irq_enable(void)
     USART_UX->CR1 |= USART_CR1_TXEIE_TXFNFIE;
 }
 
-uint8_t usart_port_tx_complete(void)
+BYTE usart_port_tx_complete(void)
 {
     return ((USART_UX->ISR & USART_ISR_TC) != 0U) ? 1U : 0U;
 }
 
-uint32_t usart_port_now_ms(void)
+DWORD usart_port_now_ms(void)
 {
     return HAL_GetTick();
 }
@@ -236,12 +240,12 @@ void usart_port_event_wait(void)
     __WFE();
 }
 
-uint8_t usart_port_context_is_atomic(void)
+BYTE usart_port_context_is_atomic(void)
 {
     return ((__get_IPSR() != 0U) || (__get_PRIMASK() != 0U)) ? 1U : 0U;
 }
 
-uint32_t usart_port_irq_state(void)
+DWORD usart_port_irq_state(void)
 {
     return __get_PRIMASK();
 }
@@ -251,7 +255,7 @@ void usart_port_irq_disable(void)
     __disable_irq();
 }
 
-void usart_port_irq_restore(uint32_t state)
+void usart_port_irq_restore(DWORD state)
 {
     __set_PRIMASK(state);
 }

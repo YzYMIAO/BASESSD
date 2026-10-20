@@ -13,7 +13,7 @@
 static IWDG_HandleTypeDef g_storage_iwdg;
 static WWDG_HandleTypeDef g_storage_wwdg;
 
-bool watchdog_port_iwdg_init(uint32_t prescaler, uint32_t reload)
+bool watchdog_port_iwdg_init(DWORD prescaler, DWORD reload)
 {
     g_storage_iwdg.Instance       = IWDG1;
     g_storage_iwdg.Init.Prescaler = prescaler;
@@ -22,7 +22,7 @@ bool watchdog_port_iwdg_init(uint32_t prescaler, uint32_t reload)
     return HAL_IWDG_Init(&g_storage_iwdg) == HAL_OK;
 }
 
-bool watchdog_port_wwdg_init(uint32_t prescaler, uint32_t counter, uint32_t window)
+bool watchdog_port_wwdg_init(DWORD prescaler, DWORD counter, DWORD window)
 {
     g_storage_wwdg.Instance       = WWDG1;
     g_storage_wwdg.Init.Prescaler = prescaler;
@@ -59,7 +59,7 @@ void WWDG_IRQHandler(void)
     storage_wdg_wwdg_irq_handler();
 }
 
-uint32_t watchdog_port_now_ms(void)
+DWORD watchdog_port_now_ms(void)
 {
     return HAL_GetTick();
 }
