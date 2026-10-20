@@ -97,17 +97,6 @@ typedef struct
     BYTE  advance_next;          /* 1 = 本 session 首次 CP 先跳过一槽（避开掉电残留的半编程槽） */
 } l2p_cp_state_t;
 
-/* ── 端口（装配层绑定；docs §4.6）── */
-typedef struct
-{
-    l2p_cache_t          *cache;
-    l2p_journal_t        *journal;
-    metadata_dir_cache_t *metadata_dir;
-    ftl_allocator_t      *alloc;
-    const DWORD          *total_writes;
-    ftl_topology_t        topo;
-} checkpoint_port_t;
-
 typedef struct
 {
     BYTE  active;        /* 1 = job 在跑（单飞行：ftl_service 每轮推进它） */
@@ -152,10 +141,16 @@ typedef struct
     DWORD trunc_addr; /* 待预擦块基地址（plan 回传） */
     BYTE  trunc_next; /* 待预擦的环形块号（plan 回传） */
 
-    /* 端口 + 池游标（装配层绑定 / 开机恢复；跨 job 保留，不能随 memset 清） */
-    checkpoint_port_t port;
-    l2p_cp_state_t    cp_state;
-    DWORD             last_ms; /* 上次触发的 ms 时基（T3） */
+    /* 窄上下文：只持有实际使用的 owner 指针（total_writes 端口原本无人读，已删）。
+     * 跨 job 保留，不能随 memset 清。 */
+    l2p_cache_t          *cache;
+    l2p_journal_t        *journal;
+    metadata_dir_cache_t *metadata_dir;
+    ftl_allocator_t      *alloc;
+    ftl_topology_t        topo;
+
+    l2p_cp_state_t cp_state;
+    DWORD          last_ms; /* 上次触发的 ms 时基（T3） */
 
     /* 心跳 */
     DWORD start_ms; /* job 起点（观测用） */
@@ -373,7 +368,7 @@ WORD *checkpoint_block_words(checkpoint_handle_t *h);
  * 池内轮转扫描（metadata_ring_locate）：magic 正确且 sequence 最大者胜。
  * 命中时同时恢复本实例的 sequence 计数与写游标（后续 Checkpoint job 从下一槽续写）。
  *
- * @param h              Checkpoint handle（池路由取 h->port.topo；游标/序号写回 h->cp_state）
+ * @param h              Checkpoint handle（池路由取 h->topo；游标/序号写回 h->cp_state）
  * @param cp             输出：找到的 Header
  * @param out_record_idx 输出：该 Header 在池内的槽位（可为 NULL；块元数据快照 加载要用）
  * @return FTL_OK 找到；FTL_ERROR 无有效 Checkpoint / 重读失败 / 校验不符
@@ -439,6 +434,23 @@ bool checkpoint_load_block_table(checkpoint_handle_t           *h,
 bool checkpoint_load_wear_table(checkpoint_handle_t           *h,
                                 const l2p_checkpoint_header_t *cp,
                                 WORD                           record_idx);
+
+/*
+ * checkpoint_init - 复位 checkpoint handle 并绑定窄上下文
+ *
+ * @param h            checkpoint handle（由 storage 提供）
+ * @param cache        L2P cache
+ * @param journal      Journal
+ * @param metadata_dir Directory
+ * @param alloc        allocator
+ * @param topo         本实例拓扑
+ */
+void checkpoint_init(checkpoint_handle_t  *h,
+                     l2p_cache_t          *cache,
+                     l2p_journal_t        *journal,
+                     metadata_dir_cache_t *metadata_dir,
+                     ftl_allocator_t      *alloc,
+                     ftl_topology_t        topo);
 
 /*
  * checkpoint_write_initial - 全量格式化后写一条完整的 initial Checkpoint

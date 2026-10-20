@@ -134,31 +134,20 @@ typedef enum
     MIG_KIND_PREDICT /* 慢死预测旁路（rr_predictive_scan） */
 } mig_kind_t;
 
-/*
- * migrate_port_t — 搬移引擎的端口（装配层在 init 时绑定；docs §4.4）
- *
- * 只放**共享数据面服务**的指针与每实例不可变配置；GC/WL/predict 的选块策略仍是
- * 编译期链接的静态调用（gc_select_victim / wl_select_victim / rr_predictive_scan），
- * 不做运行期 vtable（§3.3 明确不引入）。
- */
-typedef struct
-{
-    ftl_allocator_t *alloc;
-    l2p_journal_t   *journal;
-    l2p_cache_t     *cache;
-    const DWORD     *total_writes; /* allocator_note_erase 的磨损时钟 */
-    ftl_topology_t   topo;         /* 本实例路由（源页地址 / LBA 归属校验） */
-} migrate_port_t;
-
 /* ── 搬移 job（per-instance，放 ftl->migrate_handle）──
  *
  * ⚠ page_buf 是 **逐 plane** 的页镜像（`PLANE_NUM × PAGE_MAIN_SIZE`，当前共 4KB），
  *   常驻上下文而非调用栈：异步 job 的栈帧在提交命令时就已返回，数据必须活到完成
  *   回调。它是真实的 `.bss` 占用（见内存预算）。
  */
-typedef struct
+typedef struct migrate_handle
 {
-    migrate_port_t port; /* 共享服务端口（init 绑定） */
+    /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
+    ftl_allocator_t *alloc;
+    l2p_journal_t   *journal;
+    l2p_cache_t     *cache;
+    const DWORD     *total_writes;
+    ftl_topology_t   topo;
 
     bool  active;         /* true = job 在跑（单飞行门） */
     bool  waiting;        /* true = 有一条搬移命令在飞（等 g_op_callbacks[FTL_OP_GC]/[FTL_OP_WL]） */
@@ -235,12 +224,12 @@ static inline bool migrate_fail_state_clean(const migrate_handle_t *m)
 /* ── 接口 ── */
 
 /*
- * migrate_init - 绑定端口并复位 handle。
+ * migrate_init - 绑定窄上下文并复位 handle。
  *
  * @param m     handle（= ftl->migrate_handle）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param port  共享服务端口（allocator / journal / l2p / total_writes / topo）
+ * @param alloc / journal / cache / total_writes / topo  窄上下文（init 绑定）
  */
-void migrate_init(migrate_handle_t *m, const migrate_port_t *port);
+void migrate_init(migrate_handle_t *m, ftl_allocator_t *alloc, l2p_journal_t *journal, l2p_cache_t *cache, const DWORD *total_writes, ftl_topology_t topo);
 
 /* 显式触发原因（设计 §4.4：只登记紧急/显式原因，周期评估由 handle 自持） */
 typedef enum

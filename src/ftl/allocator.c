@@ -716,6 +716,132 @@ void allocator_erase_stats(const ftl_allocator_t *alloc, allocator_erase_stats_t
 }
 
 /* 实现要点：口径与 allocator_erase_stats 相同。 */
+bool allocator_block_is_bad(const ftl_allocator_t *alloc, WORD gblock)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    return ftl_block_is_bad(&alloc->blocks[gblock]);
+}
+
+ftl_block_state_t allocator_block_state(const ftl_allocator_t *alloc, WORD gblock)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    return ftl_block_state(&alloc->blocks[gblock]);
+}
+
+WORD allocator_block_sb_id(const ftl_allocator_t *alloc, WORD gblock)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    return ftl_block_sb_id(&alloc->blocks[gblock]);
+}
+
+void allocator_block_add_valid(ftl_allocator_t *alloc, WORD gblock)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    ftl_block_add_valid(&alloc->blocks[gblock]);
+}
+
+void allocator_block_sub_valid_if_live(ftl_allocator_t *alloc, WORD gblock)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    ftl_block_sub_valid_if_live(&alloc->blocks[gblock]);
+}
+
+bool allocator_bbt_format_in_progress(const ftl_allocator_t *alloc)
+{
+    ASSERT(alloc != NULL);
+
+    return alloc->bbt.format_in_progress;
+}
+
+void allocator_block_wear_get(const ftl_allocator_t *alloc,
+                              WORD                   gblock,
+                              DWORD                 *erase_count,
+                              DWORD                 *read_count,
+                              BYTE                  *last_ecc,
+                              BYTE                  *rising_count,
+                              BYTE                  *health)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+    ASSERT(erase_count != NULL);
+    ASSERT(read_count != NULL);
+    ASSERT(last_ecc != NULL);
+    ASSERT(rising_count != NULL);
+    ASSERT(health != NULL);
+
+    const ftl_block_t *blk = &alloc->blocks[gblock];
+
+    *erase_count  = blk->erase_count;
+    *read_count   = blk->read_count;
+    *last_ecc     = blk->rr.last_ecc;
+    *rising_count = blk->rr.rising_count;
+    *health       = blk->rr.health;
+}
+
+WORD allocator_block_valid_count(const ftl_allocator_t *alloc, WORD gblock)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    return alloc->blocks[gblock].valid_count;
+}
+
+BYTE allocator_block_temp(const ftl_allocator_t *alloc, WORD gblock)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    return alloc->blocks[gblock].temp;
+}
+
+WORD allocator_op_at(const ftl_allocator_t *alloc, BYTE plane, WORD index)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(plane < PLANE_NUM);
+    ASSERT(index < alloc->op_count[plane]);
+
+    return alloc->op_blocks[plane][index];
+}
+
+WORD allocator_spare_at(const ftl_allocator_t *alloc, BYTE plane, WORD index)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(plane < PLANE_NUM);
+    ASSERT(index < alloc->spare_count[plane]);
+
+    return alloc->spare_blocks[plane][index];
+}
+
+void allocator_block_restore_wear(ftl_allocator_t *alloc,
+                                  WORD             gblock,
+                                  DWORD            erase_count,
+                                  DWORD            read_count,
+                                  BYTE             last_ecc,
+                                  BYTE             rising_count,
+                                  BYTE             health)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    ftl_block_t *blk = &alloc->blocks[gblock];
+
+    blk->erase_count     = erase_count;
+    blk->read_count      = read_count;
+    blk->rr.last_ecc     = last_ecc;
+    blk->rr.rising_count = rising_count;
+    blk->rr.health       = health;
+}
+
 WORD allocator_count_blocks_below(const ftl_allocator_t *alloc, DWORD threshold)
 {
     WORD count = 0U;

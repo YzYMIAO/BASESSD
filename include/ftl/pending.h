@@ -156,11 +156,39 @@ typedef struct
 } ftl_io_group_t;
 
 /*
- * pending_init - 清空本 FTL 实例的 pending 表（表是 per-instance 的）
+ * ftl_pending_table_t — pending / group 两张表的 owner 上下文
  *
- * @param ftl  FTL 上下文（含 pending 数组存储）
+ * 从 ftl_context_t 中提取出来，让需要 pending 的模块（RR / wbuf）只拿这一张表，
+ * 而不是整个 FTL 上下文。表仍内嵌在 ftl_context_t 中、常驻不拷贝；模块只持有
+ * `ftl_pending_table_t *`，所有访问走 pending.c 的 owner API。
  */
-void pending_init(ftl_context_t *ftl);
+typedef struct
+{
+    ftl_pending_req_t slots[FTL_PENDING_MAX];
+    ftl_io_group_t    groups[FTL_GROUP_MAX];
+} ftl_pending_table_t;
+
+/*
+ * pending_op_view_t — 按 op 查找一个 pending 槽的只读视图
+ *
+ * `pending_view_op` 只拷贝字段、**不释放槽**；槽的释放仍由调用者在收尾时走
+ * `pending_release_index`。RR 在领取被托管的读子操作时使用。
+ */
+typedef struct
+{
+    BYTE  index;  /* 槽下标（释放时用） */
+    DWORD owners; /* 贡献组位掩码 */
+    void *buffer; /* 子操作缓冲 */
+    DWORD lba;    /* 子操作起始 LBA */
+    BYTE  n_cw;   /* 子操作覆盖的 CW 数 */
+} pending_op_view_t;
+
+/*
+ * pending_init - 清空 pending / group 两张表（per-instance）
+ *
+ * @param table  pending 表（由 ftl_context_t 内嵌持有）
+ */
+void pending_init(ftl_pending_table_t *table);
 
 /* ── write-confirm park（docs §5「Confirm → pending 服务」）──
  *
@@ -179,13 +207,13 @@ typedef ftl_status_t (*pending_confirm_handler_t)(void *ctx, ftl_pending_req_t *
 void pending_confirm_set_handler(pending_confirm_handler_t handler);
 
 /* 把一个已成功编程、但确认尚未完成的写子操作登记进停泊列表。 */
-void pending_confirm_park(ftl_context_t *ftl, WORD pending_idx, DWORD owners);
+void pending_confirm_park(ftl_pending_table_t *table, WORD pending_idx, DWORD owners);
 
 /* 推进停泊列表（ftl_service Phase 2.5 开头调用；info 可为 NULL，此时用平台时钟）。 */
-void pending_confirm_service(ftl_context_t *ftl, const ftl_bg_info_t *info);
+void pending_confirm_service(ftl_pending_table_t *table, void *confirm_ctx, const ftl_bg_info_t *info);
 
 /* 是否还有停泊项（观测/测试）。 */
-bool pending_confirm_has_parked(const ftl_context_t *ftl);
+bool pending_confirm_has_parked(const ftl_pending_table_t *table);
 
 /*
  * pending_alloc - 认领一个空闲 pending 槽（**调用者就地逐字段填**）
@@ -203,7 +231,7 @@ bool pending_confirm_has_parked(const ftl_context_t *ftl);
  * @param ftl  FTL 上下文
  * @return 空闲槽指针；NULL = 表满
  */
-ftl_pending_req_t *pending_alloc(ftl_context_t *ftl);
+ftl_pending_req_t *pending_alloc(ftl_pending_table_t *table);
 
 /*
  * pending_validate - 校验已填好的 pending 项的自洽不变量（只断言，无副作用）
@@ -228,7 +256,7 @@ static inline void pending_validate(const ftl_pending_req_t *req)
  * @param cmd_id  FC command_id
  * @return 指向 pending 项的指针, NULL 未找到
  */
-ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, WORD cmd_id);
+ftl_pending_req_t *pending_lookup(ftl_pending_table_t *table, WORD cmd_id);
 
 /*
  * pending_remove - 移除本实例中已完成的 pending 项
@@ -236,7 +264,7 @@ ftl_pending_req_t *pending_lookup(ftl_context_t *ftl, WORD cmd_id);
  * @param ftl     FTL 上下文
  * @param cmd_id  FC command_id
  */
-void pending_remove(ftl_context_t *ftl, WORD cmd_id);
+void pending_remove(ftl_pending_table_t *table, WORD cmd_id);
 
 /*
  * pending_find_op - 找**第一个** op 类型匹配的 pending 项（按下标升序）
@@ -244,12 +272,25 @@ void pending_remove(ftl_context_t *ftl, WORD cmd_id);
  * 供 Read Recovery 引擎取走被托管的子操作：那些项的 command_id 已置哨兵
  * （FTL_PENDING_CMD_NONE），按 id 查不到，只能按 op 找。
  *
- * @param ftl        FTL 上下文
+ * @param table      pending 表
  * @param op         目标操作类型
  * @param out_index  输出：命中项的下标（仅返回 1 时有效）
  * @return true 找到，false 无
  */
-bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, BYTE *out_index);
+bool pending_find_op(const ftl_pending_table_t *table, ftl_pending_op_t op, BYTE *out_index);
+
+/*
+ * pending_view_op - 按 op 取一个 pending 槽的只读视图（不释放槽）
+ *
+ * 与 pending_find_op 的差别：一次填好 RR 需要的字段（owners/index/buffer/lba/n_cw），
+ * 槽的释放仍由调用者在收尾时走 pending_release_index。字段拷贝即“视图”，不是第二套坐标。
+ *
+ * @param table  pending 表
+ * @param op     目标操作类型
+ * @param out    输出视图（仅返回 true 时有效）
+ * @return true 找到，false 无
+ */
+bool pending_view_op(const ftl_pending_table_t *table, ftl_pending_op_t op, pending_op_view_t *out);
 
 /*
  * pending_release_index - 按下标释放 pending 项（used=0）
@@ -260,7 +301,7 @@ bool pending_find_op(const ftl_context_t *ftl, ftl_pending_op_t op, BYTE *out_in
  * @param ftl    FTL 上下文
  * @param index  pending 槽下标（0..FTL_PENDING_MAX-1）
  */
-void pending_release_index(ftl_context_t *ftl, BYTE index);
+void pending_release_index(ftl_pending_table_t *table, BYTE index);
 
 /*
  * pending_count - 本实例当前未决（占用）的 pending 项数
@@ -271,7 +312,7 @@ void pending_release_index(ftl_context_t *ftl, BYTE index);
  * @param ftl  FTL 上下文
  * @return 占用槽位数（0..FTL_PENDING_MAX）
  */
-WORD pending_count(const ftl_context_t *ftl);
+WORD pending_count(const ftl_pending_table_t *table);
 
 /* ── 完成组 API（ftl_io_group_t）── */
 
@@ -281,7 +322,7 @@ WORD pending_count(const ftl_context_t *ftl);
  * @param ftl  FTL 上下文
  * @return 组下标（0..FTL_GROUP_MAX-1），无空闲槽返回 FTL_ERROR
  */
-int pending_group_alloc(ftl_context_t *ftl);
+int pending_group_alloc(ftl_pending_table_t *table);
 
 /*
  * pending_group_count - 当前占用（未完成）的组数
@@ -292,7 +333,7 @@ int pending_group_alloc(ftl_context_t *ftl);
  * @param ftl  FTL 上下文
  * @return 占用组数（0..FTL_GROUP_MAX）
  */
-WORD pending_group_count(const ftl_context_t *ftl);
+WORD pending_group_count(const ftl_pending_table_t *table);
 
 /*
  * pending_group_add_subop / pending_group_drop_subop - 组在飞数增减的唯一闸门
@@ -303,8 +344,8 @@ WORD pending_group_count(const ftl_context_t *ftl);
  * @param ftl  FTL 上下文
  * @param gi   组下标（0..FTL_GROUP_MAX-1；组必须 used）
  */
-void pending_group_add_subop(ftl_context_t *ftl, WORD gi);
-void pending_group_drop_subop(ftl_context_t *ftl, WORD gi);
+void pending_group_add_subop(ftl_pending_table_t *table, WORD gi);
+void pending_group_drop_subop(ftl_pending_table_t *table, WORD gi);
 
 /*
  * pending_group_complete_subop - 一个子操作完成：聚合状态 + 递减 + 试触发
@@ -316,7 +357,7 @@ void pending_group_drop_subop(ftl_context_t *ftl, WORD gi);
  * @param gi         组下标
  * @param sub_status 本子操作的完成状态（SSD_STATUS_OK / IO_ERROR）
  */
-void pending_group_complete_subop(ftl_context_t *ftl, WORD gi, ssd_status_t sub_status);
+void pending_group_complete_subop(ftl_pending_table_t *table, WORD gi, ssd_status_t sub_status);
 
 /*
  * pending_group_complete_subop_multi - 一个子操作完成、归属**多个组**：逐组聚合
@@ -329,7 +370,7 @@ void pending_group_complete_subop(ftl_context_t *ftl, WORD gi, ssd_status_t sub_
  * @param owners     贡献组位掩码（bit gi）
  * @param sub_status 本子操作的完成状态（SSD_STATUS_OK / IO_ERROR）
  */
-void pending_group_complete_subop_multi(ftl_context_t *ftl, DWORD owners, ssd_status_t sub_status);
+void pending_group_complete_subop_multi(ftl_pending_table_t *table, DWORD owners, ssd_status_t sub_status);
 
 /*
  * pending_group_maybe_complete - 若组已全部下发且全部完成则发通知并释放槽
@@ -337,9 +378,20 @@ void pending_group_complete_subop_multi(ftl_context_t *ftl, DWORD owners, ssd_st
  * 条件：used 且 next==total 且 outstanding==0。满足则写 status_out/complete_flag、
  * 调 on_complete（**最后**才 used=0，因回调可能重入 submit 再申请组）。
  *
- * @param ftl  FTL 上下文
- * @param gi   组下标
+ * @param table pending 表
+ * @param gi    组下标
  */
-void pending_group_maybe_complete(ftl_context_t *ftl, WORD gi);
+void pending_group_maybe_complete(ftl_pending_table_t *table, WORD gi);
+
+/*
+ * pending_group_window_pending - 是否还有写组的下一个 LBA 落在指定 pair 窗口
+ *
+ * 供 wbuf 的空闲 flush 判据使用；扫描 pending 表内的 groups[]，不暴露数组本身。
+ *
+ * @param table  pending 表
+ * @param window pair 窗口基址
+ * @return true 有写组的 next 落在本窗口
+ */
+bool pending_group_window_pending(const ftl_pending_table_t *table, DWORD window);
 
 #endif /* FTL_PENDING_H */

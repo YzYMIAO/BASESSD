@@ -142,7 +142,7 @@ typedef struct
     BYTE emergency;
 
     /* ── 环形块坏块策略（RISK-JN-01，全部 RAM 态）──
-     *   bad_mask     —— 已判定不可用的环形块（bit b）；持久化由 bad_block_port 承担，
+     *   bad_mask     —— 已判定不可用的环形块（bit b）；持久化由 allocator/BBT owner API 承担，
      *                   重启后 BST BAD 会重新挡住这些块。
      *   erase_fail_count / erase_fail_block —— 同一块连续擦除失败计数；
      *                   达 JRN_ERASE_FAIL_MAX 即标坏并跳到下一可用块。
@@ -167,25 +167,13 @@ typedef struct
     DWORD log_ms;
 } journal_handle_t;
 
-/*
- * journal_bad_block_port_t — 环形块坏块查询/标记端口（docs §4.2）
- *
- * journal 不持有 allocator，也不 include BST 语义：只通过端口问「这块坏吗」、
- * 「把这块标坏」。端口实现由 FTL 装配层（ftl.c）提供，ctx 自持。
- */
-typedef struct
-{
-    void *ctx;
-    bool (*block_is_bad)(void *ctx, WORD gblock);
-    void (*mark_bad)(void *ctx, WORD gblock);
-} journal_bad_block_port_t;
-
 typedef struct
 {
     ftl_topology_t topo; /* 目标 NAND 芯片路由 */
 
-    /* 坏块端口（持续擦除失败 → 标坏）。未绑定时只维护 RAM bad_mask。 */
-    journal_bad_block_port_t bad_block_port;
+    /* 坏块查询/标坏只走 allocator 的 owner API（持续擦除失败 → 标坏）。
+     * journal 不直接读写 allocator 的 BST/BBT 内部字段。 */
+    ftl_allocator_t *alloc;
 
     /* 异步刷页 job / 环形写游标 / 失败观测（见 journal_handle_t） */
     journal_handle_t handle;
@@ -235,12 +223,9 @@ bool journal_scan_latest(const l2p_journal_t *journal, journal_page_ref_t *out, 
  */
 void journal_resume(l2p_journal_t *journal, const journal_page_ref_t *latest, DWORD floor_sequence);
 
-/* journal_init - 初始化 Journal：记录拓扑、复位写指针与序号、清空端口 */
-void journal_init(l2p_journal_t *journal, ftl_topology_t topo);
+/* journal_init - 初始化 Journal：记录拓扑、绑定 allocator、复位写指针与序号 */
+void journal_init(l2p_journal_t *journal, ftl_topology_t topo, ftl_allocator_t *alloc);
 
-/* journal_bind_bad_block_port - 绑定坏块端口（装配层在 journal_init 之后调用）。
- * 端口为纯函数指针 + ctx，生命周期须覆盖 Journal；未绑定时只维护 RAM bad_mask。 */
-void journal_bind_bad_block_port(l2p_journal_t *journal, const journal_bad_block_port_t *port);
 /* 追加一条 L2P 更新。若当前页缓冲里已有**同一 LBA** 的条目，就地更新
  * （只改 old/new PBA，不新增条目、不消耗 sequence）——覆盖写工作集下减少 Journal 页数。
  * 返回：true = 已追加 / 就地合并；false = 页满且异步刷页起不来，本条目被丢弃。

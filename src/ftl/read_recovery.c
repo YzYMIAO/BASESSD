@@ -85,6 +85,25 @@ void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits)
     track->health = level;
 }
 
+void rr_record_block_ecc(ftl_allocator_t *alloc, WORD gblock, BYTE ecc_bits)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    ftl_block_t *blk = &alloc->blocks[gblock];
+
+    rr_record_ecc(&blk->rr, ecc_bits);
+    blk->read_count++;
+}
+
+void rr_retire_block_at(ftl_allocator_t *alloc, WORD gblock)
+{
+    ASSERT(alloc != NULL);
+    ASSERT(gblock < FTL_BLOCK_TOTAL);
+
+    rr_retire_block(&alloc->blocks[gblock]);
+}
+
 /* ── 2. 恢复路径（异步 job 状态机）──
  *
  * 三级管线的**分步**实现：rr_step 的 stage 序列每步只提交一条命令就返回。
@@ -113,7 +132,7 @@ static ftl_status_t rr_submit_set_features(read_recovery_handle_t *rr, BYTE mode
 {
     fc_command_t *cmd;
 
-    const ftl_status_t st = ftl_async_set_features(&cmd, rr->port.topo.ch, rr->port.topo.ce, rr->port.topo.lun, RR_FEATURE_READ_RETRY, mode);
+    const ftl_status_t st = ftl_async_set_features(&cmd, rr->topo.ch, rr->topo.ce, rr->topo.lun, RR_FEATURE_READ_RETRY, mode);
     if (st != FTL_OK)
     {
         return st; /* FTL_AGAIN 命令池空 / FTL_ERROR 建链失败 */
@@ -138,7 +157,7 @@ static ftl_status_t rr_submit_set_features(read_recovery_handle_t *rr, BYTE mode
     return FTL_OK;
 }
 
-/* 提交一条页读（目标页或邻居页）。数据在完成时由服务函数拷进 rr->port.page_scratch
+/* 提交一条页读（目标页或邻居页）。数据在完成时由服务函数拷进 rr->page_scratch
  * ——**读**不像写那样在 prepare 阶段搬数据（见 ftl_async_read_page 的注释）。 */
 static ftl_status_t rr_submit_read(read_recovery_handle_t *rr, DWORD pba, const ftl_page_cfg_t *cfg)
 {
@@ -226,7 +245,7 @@ static rr_plane_step_t rr_select_plane(read_recovery_handle_t *rr)
         {
             DWORD cur;
 
-            if (l2p_cache_read(rr->port.cache, l, &cur) == FTL_AGAIN)
+            if (l2p_cache_read(rr->cache, l, &cur) == FTL_AGAIN)
             {
                 return RR_PLANE_WAIT; /* region 在加载：下轮再来 */
             }
@@ -267,7 +286,7 @@ static void rr_settle_plane(read_recovery_handle_t *rr)
 
         if (rr->recovered != 0U)
         {
-            memcpy(dst, rr->port.page_scratch + (ftl_lba_cw(l) * FTL_IU_BYTES), FTL_IU_BYTES);
+            memcpy(dst, rr->page_scratch + (ftl_lba_cw(l) * FTL_IU_BYTES), FTL_IU_BYTES);
         }
         else
         {
@@ -286,7 +305,7 @@ static void rr_settle_plane(read_recovery_handle_t *rr)
         /* Stage 1（读重试）+ Stage 2（邻居辅助）全失败 ⇒ 页面已损坏提升为块级不可靠，
          * 显式标记坏块（RR Stage 3 XOR/RAID 恢复属后续阶段，当前不做）。 */
         LOGE("[FTL] read unrecoverable lba=%lu gblock=%u retry=%u\r\n", lba, (unsigned)gblock, (unsigned)rr->retry_count);
-        (void)bbt_mark_bad(rr->port.alloc, gblock);
+        (void)bbt_mark_bad(rr->alloc, gblock);
     }
     else
     {
@@ -303,10 +322,9 @@ static void rr_finish(read_recovery_handle_t *rr)
 
     /* all_ok 是**所有被覆盖 plane 的聚合**：任一 plane 不可恢复或提交侧 abort
      * 都按 IO_ERROR 结算；全部恢复成功才报 OK（数据已由 rr_settle_plane 拷回）。
-     * 释放 pending 槽与组结算都走端口（RR 不直接摸 pending 表）。 */
-    const rr_pending_port_t *pending = &rr->port.pending;
-
-    pending->complete(pending->ctx, rr->owner.pending_idx, rr->owner.owners, status);
+     * owners 已在 rr->owner 中按值保存；先释放槽再结算组，顺序与旧端口一致。 */
+    pending_release_index(rr->pending, rr->owner.pending_idx);
+    pending_group_complete_subop_multi(rr->pending, rr->owner.owners, status);
 
     rr->has_owner = 0U;
     rr->stage     = RR_STAGE_IDLE;
@@ -367,19 +385,24 @@ static void rr_step(read_recovery_handle_t *rr)
         {
             case RR_STAGE_IDLE:
             {
-                /* 优先用 rr_trigger 登记的 owner；否则问 pending 端口要一个
+                /* 优先用 rr_trigger 登记的 owner；否则向 pending owner API 领取一个
                  * 被托管的读子操作。都没有就空闲退出。 */
                 if (rr->has_owner == 0U)
                 {
-                    const rr_pending_port_t *pending = &rr->port.pending;
-                    rr_owner_t               owner;
+                    pending_op_view_t view;
+                    rr_owner_t        owner;
 
-                    if ((pending->take == NULL) || (!pending->take(pending->ctx, &owner)))
+                    if (!pending_view_op(rr->pending, PENDING_OP_READ_RECOVERY, &view))
                     {
                         return;
                     }
-                    rr->owner     = owner;
-                    rr->has_owner = 1U;
+                    owner.owners      = view.owners;
+                    owner.pending_idx = view.index;
+                    owner.upper_buf   = (BYTE *)view.buffer;
+                    owner.lba         = view.lba;
+                    owner.n_cw        = view.n_cw;
+                    rr->owner         = owner;
+                    rr->has_owner     = 1U;
                 }
 
                 rr->plane            = 0U;
@@ -558,11 +581,20 @@ static void rr_service_step(read_recovery_handle_t *rr)
 
 /* ── typed handle（端口装配 / 触发 / 上报） ── */
 
-void rr_init(read_recovery_handle_t *rr, const rr_port_t *port)
+void rr_init(read_recovery_handle_t *rr, l2p_cache_t *cache, ftl_allocator_t *alloc, ftl_topology_t topo, BYTE *page_scratch, ftl_pending_table_t *pending)
 {
+    ASSERT(cache != NULL);
+    ASSERT(alloc != NULL);
+    ASSERT(page_scratch != NULL);
+    ASSERT(pending != NULL);
+
     memset(rr, 0, sizeof(*rr));
-    rr->port  = *port;
-    rr->error = (int32_t)FTL_OK;
+    rr->cache        = cache;
+    rr->alloc        = alloc;
+    rr->topo         = topo;
+    rr->page_scratch = page_scratch;
+    rr->pending      = pending;
+    rr->error        = (int32_t)FTL_OK;
 }
 
 void rr_trigger(read_recovery_handle_t *rr, const rr_owner_t *owner)
@@ -648,7 +680,7 @@ static void rr_complete_read(read_recovery_handle_t *rr, fc_command_t *cmd, cons
 
     if (!fc_cw_status_has_error(completion->status))
     {
-        (void)ftl_cmd_read_data(cmd, rr->port.page_scratch, FTL_READ_USER_SIZE);
+        (void)ftl_cmd_read_data(cmd, rr->page_scratch, FTL_READ_USER_SIZE);
         rr->recovered = 1U;
         rr->stage     = RR_STAGE_PLANE_END;
     }
@@ -671,7 +703,7 @@ static void rr_complete_nb_read(read_recovery_handle_t *rr, fc_command_t *cmd, c
 {
     if (!fc_cw_status_has_error(completion->status))
     {
-        (void)ftl_cmd_read_data(cmd, rr->port.page_scratch, FTL_READ_USER_SIZE);
+        (void)ftl_cmd_read_data(cmd, rr->page_scratch, FTL_READ_USER_SIZE);
         rr->stage = RR_STAGE_NB_RETRY;
     }
     else
@@ -685,7 +717,7 @@ static void rr_complete_nb_retry(read_recovery_handle_t *rr, fc_command_t *cmd, 
 {
     if (!fc_cw_status_has_error(completion->status))
     {
-        (void)ftl_cmd_read_data(cmd, rr->port.page_scratch, FTL_READ_USER_SIZE);
+        (void)ftl_cmd_read_data(cmd, rr->page_scratch, FTL_READ_USER_SIZE);
         rr->recovered = 1U;
         rr->stage     = RR_STAGE_PLANE_END;
     }
@@ -811,7 +843,7 @@ rr_block_health_t rr_get_health(const rr_ecc_track_t *track)
  * -------------------------------------------------------------------- */
 bool rr_predictive_scan(const ftl_allocator_t *alloc, WORD *gblock)
 {
-    /* 层内接口：唯一调用者 mig_begin_predict 传 rr->port.alloc 与局部 gblock */
+    /* 层内接口：唯一调用者 mig_begin_predict 传 rr->alloc 与局部 gblock */
 
     for (WORD i = 0U; i < FTL_BLOCK_TOTAL; i++)
     {
@@ -877,7 +909,7 @@ bool rr_predictive_scan(const ftl_allocator_t *alloc, WORD *gblock)
  * -------------------------------------------------------------------- */
 void rr_retire_block(ftl_block_t *b)
 {
-    /* 层内接口：唯一调用者 ftl_migrate_callback（MIG_ERASE 完成分支）传 rr->port.alloc.blocks[gblock] */
+    /* 层内接口：唯一调用者 ftl_migrate_callback（MIG_ERASE 完成分支）传 rr->alloc.blocks[gblock] */
 
     /* 退役：不再分配新数据（RETIRED 态），不标坏（BBT 不删、仍可读）。
      * ⚠ **调用者负责先把该块驱逐出 Free Pool**（本函数只拿 ftl_block_t*，拿不到 gblock）——

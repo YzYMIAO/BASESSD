@@ -87,13 +87,11 @@ typedef struct ftl_context
     /* L2P Cache（共享：指向 g_l2p_cache[ch][ce]，同一 (ch,ce) 下的所有 LUN 共用） */
     l2p_cache_t *cache;
 
-    /* Pending Request 表（per-instance，本实例异步请求追踪）
-     * 由 pending.c 操作：每个子操作一个槽（command_id → 组 + 子操作字段）。 */
-    ftl_pending_req_t pending[FTL_PENDING_MAX];
-
-    /* 完成组表（一条 host 请求 = 一个组，聚合其全部子操作的完成通知）
-     * 由 pending.c 操作（pending_group_*）。 */
-    ftl_io_group_t groups[FTL_GROUP_MAX];
+    /* Pending Request 表 + 完成组表（per-instance）
+     * 由 pending.c 操作：每个子操作一个槽（command_id → 组 + 子操作字段），
+     * 一条 host 请求一个组（聚合其全部子操作的完成通知）。
+     * 提取为 ftl_pending_table_t，让 RR / wbuf 只持有该表的指针，而不是整个 FTL 上下文。 */
+    ftl_pending_table_t pending;
 
     /* 页打包写缓冲——同一 pair 窗口的多次写攒成一页再编程，
      * 见 wbuf.h 的 wbuf_handle_t。事件走 wbuf_handle()，读路径走 ftl_wbuf_has/read。

@@ -318,7 +318,7 @@ ftl_submit_write(ftl, &req)
 typedef struct {
     uint16_t used;               /* 1: 槽位占用 */
     uint16_t command_id;         /* FC command_id */
-    uint16_t group;              /* ★ 所属完成组 ftl->groups[] 下标 */
+    uint16_t group;              /* ★ 所属完成组 ftl->pending.groups[] 下标 */
     uint8_t  op;                 /* ftl_pending_op_t：完成路径判别（读/写），显式给出不可反推 */
     uint8_t  n_cw;               /* ★ 本子操作搬运的 CW 数（字节数 ÷ FTL_IU_BYTES） */
     DWORD    lba;                /* 子操作起始 local LBA（CW 级：1 LBA = 1 CW = 512B） */
@@ -331,7 +331,7 @@ typedef struct {
 } ftl_pending_req_t;
 ```
 
-**完成组 `ftl_io_group_t`**（`ftl->groups[FTL_GROUP_MAX]`，`FTL_GROUP_MAX = FTL_PENDING_MAX = 32`）：
+**完成组 `ftl_io_group_t`**（`ftl->pending.groups[FTL_GROUP_MAX]`，`FTL_GROUP_MAX = FTL_PENDING_MAX = 32`）：
 
 ```c
 typedef struct {
@@ -1011,7 +1011,7 @@ void ftl_service(ftl_context_t *ftl) {
 
     /* Phase 2.5: 补发本实例各组的待下发子操作 */
     for (uint8_t i = 0U; i < FTL_GROUP_MAX; i++) {
-        if (ftl->groups[i].used != 0U) {
+        if (ftl->pending.groups[i].used != 0U) {
             ftl_drain_group(ftl, (uint16_t)i);
         }
     }

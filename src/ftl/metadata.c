@@ -681,9 +681,14 @@ static void metadata_dir_boot_log(const metadata_dir_cache_t *dir)
  *   实现要点：游标置无效是"绝不复用可能已编程的旧页"的保证——首次追加才从 Free
  *             Pool 新取块。
  * -------------------------------------------------------------------- */
-void metadata_dir_init(metadata_dir_cache_t *dir)
+void metadata_dir_init(metadata_dir_cache_t *dir, ftl_allocator_t *alloc, const DWORD *total_writes)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
+    ASSERT(alloc != NULL);
+    ASSERT(total_writes != NULL);
+
+    dir->alloc        = alloc;
+    dir->total_writes = total_writes;
 
     dir->anchor_sequence = 0U;
     dir->dirty           = false;
@@ -1313,9 +1318,14 @@ static void metadata_dir_load_assemble(metadata_dir_cache_t *dir, const metadata
  *             定位失败或无有效记录 ⇒ 清游标返回错误；读胜者逐页校验，坏页保留基础层；
  *             **日志块游标不跨重启恢复**；Anchor 游标由 locate 结果恢复。
  * -------------------------------------------------------------------- */
-ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
+ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir, ftl_allocator_t *alloc, const DWORD *total_writes)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
+    ASSERT(alloc != NULL);
+    ASSERT(total_writes != NULL);
+
+    dir->alloc        = alloc;
+    dir->total_writes = total_writes;
 
     /* 基础层：全部 region = NAND_PBA_INVALID（未映射）。
      * Anchor 缺页/损坏时该区间回落"未映射"，不会出现"未登记"的空洞。 */

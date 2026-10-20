@@ -658,17 +658,6 @@ typedef struct
     BYTE cp_buf[L2P_REGION_SIZE];
 } metadata_handle_t;
 
-/* ── 模块端口（docs/design/ftl_module_contracts.md §4.3）──
- *
- * metadata job 需要：allocator（取新日志块 / 归还 victim / 标坏 / 池状态）与
- * total_writes（策略计数）。两者都由装配层在 init 时绑定；模块不持有 ftl_context。
- */
-typedef struct
-{
-    ftl_allocator_t *alloc;
-    const DWORD     *total_writes;
-} metadata_port_t;
-
 /* ── 常驻 Directory Cache（约 24.6 KiB，`g_ftl_md[]` 落 SRAM4，见 src/main.c） ── */
 typedef struct
 {
@@ -713,8 +702,9 @@ typedef struct
     /* 拓扑信息（元数据所在芯片路由） */
     ftl_topology_t topo;
 
-    /* allocator / total_writes 端口（装配层绑定；docs §4.3） */
-    metadata_port_t port;
+    /* allocator / total_writes：只持有指针，操作走 allocator owner API。 */
+    ftl_allocator_t *alloc;
+    const DWORD     *total_writes;
 } metadata_dir_cache_t;
 
 /* 待回收位图按 32 位字切分，块总数必须能整除一个字。 */
@@ -734,7 +724,7 @@ _Static_assert((FTL_BLOCK_TOTAL % 32U) == 0U, "FTL_BLOCK_TOTAL 必须是 32 的�
  *
  * @param dir  Directory cache（由调用者提供存储）
  */
-void metadata_dir_init(metadata_dir_cache_t *dir);
+void metadata_dir_init(metadata_dir_cache_t *dir, ftl_allocator_t *alloc, const DWORD *total_writes);
 
 /*
  * metadata_dir_lookup - 查找元数据物理位置
@@ -889,12 +879,6 @@ typedef struct
 } metadata_status_t;
 
 /*
- * metadata_dir_bind_port - 绑定 allocator / total_writes 端口。
- * 由装配层（ftl.c）在 metadata 初始化之后、后台调度之前调用一次。
- */
-void metadata_dir_bind_port(metadata_dir_cache_t *dir, const metadata_port_t *port);
-
-/*
  * metadata_handle - 推进元数据目录整理 job（typed handle；提交即返回）
  *
  * 事件驱动（reclaim_pending / compact_wanted 由 Directory 函数置位），`info` 当前
@@ -983,7 +967,7 @@ void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t
  * @param dir  Directory cache（输出）
  * @return FTL_OK / FTL_ERROR（无有效 Anchor：调用者转 metadata_dir_init）
  */
-ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir);
+ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir, ftl_allocator_t *alloc, const DWORD *total_writes);
 
 /*
  * ftl_is_metadata_block - 判断物理 Block 是否属于固定/动态元数据区

@@ -395,6 +395,80 @@ void allocator_erase_stats(const ftl_allocator_t *alloc, allocator_erase_stats_t
 WORD allocator_count_blocks_below(const ftl_allocator_t *alloc, DWORD threshold);
 
 /*
+ * allocator_block_is_bad - gblock 是否已标记为坏块
+ * 参数：alloc — 分配器；gblock — 全局块号。
+ * 返回：true = BAD。
+ */
+bool allocator_block_is_bad(const ftl_allocator_t *alloc, WORD gblock);
+
+/*
+ * allocator_block_state - 读取 gblock 的块状态
+ * 参数：alloc — 分配器；gblock — 全局块号。
+ * 返回：块状态（FTL_BLOCK_STATE_*）。
+ */
+ftl_block_state_t allocator_block_state(const ftl_allocator_t *alloc, WORD gblock);
+
+/*
+ * allocator_block_sb_id - 读取 gblock 的 Closed 列表下标
+ * 参数：alloc — 分配器；gblock — 全局块号。
+ * 返回：Closed 列表下标（FTL_BLOCK_NO_PLANE / INVALID 语义同 BST 字段）。
+ */
+WORD allocator_block_sb_id(const ftl_allocator_t *alloc, WORD gblock);
+
+/*
+ * allocator_block_add_valid / sub_valid_if_live - 有效 CW 计数 ±1 的唯一入口
+ * 参数：alloc — 分配器；gblock — 全局块号。
+ * 返回：无。
+ */
+void allocator_block_add_valid(ftl_allocator_t *alloc, WORD gblock);
+void allocator_block_sub_valid_if_live(ftl_allocator_t *alloc, WORD gblock);
+
+/*
+ * allocator_bbt_format_in_progress - BBT 是否处于格式化中
+ * 参数：alloc — 分配器。
+ * 返回：true = 最新 BBT record 带 FORMAT_IN_PROGRESS。
+ */
+bool allocator_bbt_format_in_progress(const ftl_allocator_t *alloc);
+
+/*
+ * allocator_block_restore_wear - 从 Checkpoint 磨损快照恢复一个块的磨损/ECC 状态
+ * 参数：alloc — 分配器；gblock — 全局块号；其余为快照字段。
+ * 返回：无。
+ */
+void allocator_block_restore_wear(ftl_allocator_t *alloc,
+                                  WORD             gblock,
+                                  DWORD            erase_count,
+                                  DWORD            read_count,
+                                  BYTE             last_ecc,
+                                  BYTE             rising_count,
+                                  BYTE             health);
+
+/*
+ * allocator_block_wear_get - 读取一个块的磨损/ECC 快照字段
+ * 参数：alloc — 分配器；gblock — 全局块号；其余为出参。
+ * 返回：无。
+ */
+void allocator_block_wear_get(const ftl_allocator_t *alloc,
+                              WORD                   gblock,
+                              DWORD                 *erase_count,
+                              DWORD                 *read_count,
+                              BYTE                  *last_ecc,
+                              BYTE                  *rising_count,
+                              BYTE                  *health);
+
+/*
+ * allocator_block_valid_count / allocator_block_temp - 块元数据只读访问
+ */
+WORD allocator_block_valid_count(const ftl_allocator_t *alloc, WORD gblock);
+BYTE allocator_block_temp(const ftl_allocator_t *alloc, WORD gblock);
+
+/*
+ * allocator_op_at / allocator_spare_at - OP / Spare 池元素只读访问
+ */
+WORD allocator_op_at(const ftl_allocator_t *alloc, BYTE plane, WORD index);
+WORD allocator_spare_at(const ftl_allocator_t *alloc, BYTE plane, WORD index);
+
+/*
  * allocator_find_closed_sb - 按全部 plane 块号在 Closed 列表定位条目
  * 参数：alloc — 分配器；sb — 目标条目；out_idx — 出参索引。
  * 返回：true = 找到；false = 不在列表。

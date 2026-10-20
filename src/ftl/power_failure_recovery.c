@@ -202,7 +202,7 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
         return FTL_ERROR;
     }
 
-    metadata_dir_init(ftl->metadata_dir);
+    metadata_dir_init(ftl->metadata_dir, &ftl->alloc, &ftl->total_writes);
 
     /* 空 Directory 必须先落 Anchor，否则下次开机 CP 存在但 Directory 加载失败。 */
     if (ftl_format_write_initial_anchor(ftl) != FTL_OK)

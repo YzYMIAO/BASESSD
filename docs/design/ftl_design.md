@@ -1684,7 +1684,7 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `anchor_write_idx` | 2 B | Anchor 池写点槽位 |
 | `anchor_cursor_valid` | 1 B | Anchor 游标是否已定位 |
 | `topo` | 3 B | 元数据所在芯片路由 |
-| `port` | 2 指针 | allocator + total_writes 端口（init 绑定） |
+| `alloc` / `total_writes` | 2 指针 | allocator + total_writes 窄指针（init 绑定；无端口结构体） |
 
 **`metadata_handle_t` 关键字段**
 
@@ -2284,7 +2284,7 @@ Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
 | 对象 | 字段 | 含义 |
 |---|---|---|
 | `l2p_journal_t` | `topo` | 目标芯片路由 |
-| | `bad_block_port` | `block_is_bad` / `mark_bad` 端口（ctx + 函数指针；替代直接持有 allocator） |
+| | `alloc` | 坏块查询/标坏走 `allocator_block_is_bad` / `bbt_mark_bad`（无端口结构体） |
 | | `handle` | `journal_handle_t`（本模块全部执行状态，见下） |
 | `journal_handle_t` | `phase` / `need_erase` / `target_*` / `from_*` / `waddr` | 异步刷页 job（IDLE/WRITE/ERASE） |
 | | `current_block` / `current_page` / `current_entry` | RAM 写游标 |
@@ -2480,7 +2480,7 @@ pool: 0=NONE / 1=OP / 2=SPARE
 | `trunc_addr` / `trunc_next` | Journal 预擦块 |
 | `cp_state` | `l2p_cp_state_t`：池 unique 序号 / 上次 CP 水位 / 写游标 / 游标有效位 / advance_next |
 | `last_ms` | T3 定时基准（上次触发时刻） |
-| `port` | l2p cache / journal / metadata_dir / allocator / total_writes / topo |
+| `cache` / `journal` / `metadata_dir` / `alloc` / `topo` | 窄指针；total_writes 原端口字段无人读，已删 |
 
 **不变量**：
 
@@ -2917,7 +2917,7 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
 | `base` | 窗口基址（低 3 位清零） |
 | `owners` | bit gi = 组 gi 贡献过本页 |
 | `flushed_pages` / `drop_count` / `error` | 单调观测计数 / 最近一次失败归因 |
-| `port` | alloc / pending / migrate(GC_URGENT) 端口（init 绑定） |
+| `alloc` / `pending` / `migrate` | 窄指针（init 绑定；无端口结构体） |
 
 **不变量**：
 
@@ -3189,7 +3189,7 @@ flowchart TB
 | `cw_bitmap[plane]` / `base` / `cw_lba` / `src` / `dst` | 本页逐 CW 有效位、页基址、META LBA、源/目标 PBA |
 | `migrated` | 已搬有效 CW 数（>0 才需要 F10 屏障） |
 | `page_buf[plane][2048]` | 页镜像（异步读落此、写从此取） |
-| `port` | alloc / journal / cache / total_writes / topo（init 绑定） |
+| `alloc` / `journal` / `cache` / `total_writes` / `topo` | 窄指针（init 绑定；无端口结构体） |
 | `stall_ms` / `wait_ms` | 提交背压 / 等外部模块的 deadline 起点 |
 | `timed_out` / `timeout_phase` | 超时归因（status 上报） |
 | `fail_gblock[plane]` / `fail_count[plane]` | **每个 plane 源块**的连续读失败计数（跨 job 保留；整块迁移成功或标 BAD 才清） |
@@ -3351,7 +3351,7 @@ NAND 读会失败：retention、read disturb、编程干扰都表现为 ECC 纠�
 | 结构 | 字段 | 说明 |
 |---|---|---|
 | `read_recovery_handle_t` | `stage` / `waiting` / `plane` / `attempt` / `neighbor_i` / `pending_idx` / `page` / `neighbor` / `recovered` / `all_ok` / `stall_ms` | 单 job |
-| | `owner` / `has_owner` / `port` | `rr_trigger` 登记的 owner；cache/alloc/topo/page_scratch/pending 端口 |
+| | `owner` / `has_owner` / 窄上下文 | `rr_trigger` 登记的 owner；cache/alloc/topo/page_scratch/pending 窄指针 |
 | | `planes_recovered` / `planes_failed` / `error` | 观测计数与最近一次 abort 归因 |
 | `rr_ecc_track_t`（BST） | `last_ecc` / `rising_count` / `health` | 每块 |
 | `rr_block_health_t` | HEALTHY / WARNING / CRITICAL / DYING | 只升不降 |
@@ -3992,7 +3992,7 @@ flowchart TB
         JRN["l2p_journal_t page_buf ring job"]
         CPJ["checkpoint_handle_t phase bitmap block_words cp_state"]
         MIG["migrate_handle_t phase victim page_buf timers/counters"]
-        WB["wbuf_handle_t data occupied owners port"]
+        WB["wbuf_handle_t data occupied owners alloc/pending/migrate"]
         RRS["rr_page_scratch 2KB"]
     end
 
@@ -4041,7 +4041,7 @@ flowchart TB
   per-instance 模块 handle；模块只拥有执行状态（FSM / 单飞行 / 计时器 / 进度计数）。
   主流程通过 typed `*_handle(module_handle, trigger, status)` 推进模块，
   **不得读/写** `*.handle.phase` / `waiting` / `active`，只经 poll/status/查询；
-  跨模块字段走语义查询或端口。完整契约见 `docs/design/ftl_module_contracts.md`。
+  跨模块字段走 owner API 或只读实例字段（无端口结构体）。完整契约见 `docs/design/ftl_module_contracts.md`。
 
 ### 5.1.1 模块 handle 与上报契约
 
@@ -4667,14 +4667,14 @@ flowchart TB
 | `ftl_io_request_t` | `include/ftl/ftl_type.h` | lba / buffer / count / 完成通知 |
 | `ftl_pending_req_t` | `include/ftl/pending.h` | owners / op / n_cw / cw_bitmap / lba / new_pba / new_pba1 |
 | `ftl_io_group_t` | 同上 | next / total / outstanding / agg_status |
-| `l2p_cache_t` / `l2p_cache_line_t` / `l2p_owner_t` | `include/ftl/l2p_cache.h` | 行状态 / entries / clock / 脏位图；owner 端口 `{dim, metadata_dir, alloc, topo}` |
-| `l2p_journal_t` / `journal_handle_t` | `include/ftl/journal.h` | 页缓冲 / 游标 / sequence / merge_floor / pre_erased_block / 失败观测 / 坏块端口 |
-| `l2p_checkpoint_header_t` / `checkpoint_handle_t` | `include/ftl/checkpoint.h` | Header / 块元数据快照 / 磨损快照 / phase / 快照位图 / `cp_state` / `last_ms` / port |
-| `metadata_entry_t` / `metadata_anchor_page_t` / `metadata_ring_t` / `metadata_dir_cache_t` / `metadata_handle_t` | `include/ftl/metadata.h` | Directory / Anchor / 池几何 / 回收压缩 job / allocator+total_writes 端口 |
+| `l2p_cache_t` / `l2p_cache_line_t` / `l2p_owner_t` | `include/ftl/l2p_cache.h` | 行状态 / entries / clock / 脏位图；owner 回调 `{dim, metadata_dir, alloc, topo}` |
+| `l2p_journal_t` / `journal_handle_t` | `include/ftl/journal.h` | 页缓冲 / 游标 / sequence / merge_floor / pre_erased_block / 失败观测 / `alloc`（坏块走 owner API） |
+| `l2p_checkpoint_header_t` / `checkpoint_handle_t` | `include/ftl/checkpoint.h` | Header / 块元数据快照 / 磨损快照 / phase / 快照位图 / `cp_state` / `last_ms` / 窄上下文 |
+| `metadata_entry_t` / `metadata_anchor_page_t` / `metadata_ring_t` / `metadata_dir_cache_t` / `metadata_handle_t` | `include/ftl/metadata.h` | Directory / Anchor / 池几何 / 回收压缩 job / `alloc`+`total_writes` 窄指针 |
 | `ftl_block_t` / `ftl_tables_t` / `ftl_allocator_t` / `super_block_t` | `include/ftl/bst.h` / `allocator.h` | BST / 四本账 / SB |
-| `migrate_handle_t` | `include/ftl/migrate.h` | phase / kind / post / victim / cw_bitmap / page_buf / port / GC-WL-predict 节拍 / reclaimed-novictim 计数 |
-| `read_recovery_handle_t` | `include/ftl/read_recovery.h` | stage / waiting / pending_idx / page / owner / port |
-| `wbuf_handle_t` | `include/ftl/wbuf.h` | data / occupied / owners / open / base / port |
+| `migrate_handle_t` | `include/ftl/migrate.h` | phase / kind / post / victim / cw_bitmap / page_buf / 窄上下文 / GC-WL-predict 节拍 / reclaimed-novictim 计数 |
+| `read_recovery_handle_t` | `include/ftl/read_recovery.h` | stage / waiting / pending_idx / page / owner / 窄上下文 |
+| `wbuf_handle_t` | `include/ftl/wbuf.h` | data / occupied / owners / open / base / 窄上下文 |
 | `ftl_module_state_t` / `ftl_module_status_t` / `ftl_bg_info_t` | `include/ftl/ftl_module.h` | 模块状态 / 公共 status 前缀 / 每轮动态信息 |
 | `bg_scheduler_t` / `bg_task_t` | `include/ftl/bg_scheduler.h` | 任务表 / 预算 / 档位（10 项） |
 | `bbt_header_t` / `bbt_state_t` | `include/ftl/bbt.h` / `allocator.h` | 坏块位图 / 池游标 / 异步持久化 handle |

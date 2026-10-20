@@ -42,6 +42,7 @@
 #include "ftl_module.h" /* ftl_bg_info_t / ftl_module_status_t */
 #include "ftl_type.h"
 #include "l2p_cache.h"
+#include "pending.h" /* ftl_pending_table_t */
 
 #include <stdint.h>
 
@@ -129,7 +130,7 @@ typedef enum
  *
  * 本仓采用**compact 重下发**机制（与主流一致：失败读释放后按 LBA/PBA 重新下发新命令
  * + 新 buffer），不保留失败命令的 desc 链。owner 只携带结算与数据回填所需的最小信息。
- * RR 不直接访问 pending 表：托管项的领取/结算走 rr_pending_port_t。
+ * RR 只持有 pending 表指针：托管项的领取/结算走 pending owner API。
  */
 typedef struct
 {
@@ -139,25 +140,6 @@ typedef struct
     DWORD lba;         /* 子操作起始全局 LBA */
     BYTE  n_cw;        /* 子操作覆盖的 CW 数 */
 } rr_owner_t;
-
-/* pending 端口：RR 通过它领取「被托管的读子操作」并在收尾时结算组。 */
-typedef struct
-{
-    void *ctx;
-    /* 领取一个 PENDING_OP_READ_RECOVERY 项；true = 已填 *out。 */
-    bool (*take)(void *ctx, rr_owner_t *out);
-    /* 结算：释放 pending 槽 + 按 owners 递减组在飞数。 */
-    void (*complete)(void *ctx, WORD pending_idx, DWORD owners, ssd_status_t status);
-} rr_pending_port_t;
-
-typedef struct
-{
-    l2p_cache_t      *cache;
-    ftl_allocator_t  *alloc;
-    ftl_topology_t    topo;
-    BYTE             *page_scratch; /* 整页恢复暂存（FTL_READ_USER_SIZE） */
-    rr_pending_port_t pending;
-} rr_port_t;
 
 typedef struct
 {
@@ -178,7 +160,13 @@ typedef struct
     BYTE  planes_recovered; /* 本次 job 恢复成功的 plane 数（观测） */
     BYTE  planes_failed;    /* 本次 job 恢复失败的 plane 数（观测） */
 
-    rr_port_t  port;      /* 共享服务端口（init 绑定） */
+    /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
+    l2p_cache_t         *cache;
+    ftl_allocator_t     *alloc;
+    ftl_topology_t       topo;
+    BYTE                *page_scratch;
+    ftl_pending_table_t *pending;
+
     rr_owner_t owner;     /* 当前被托管的子操作 */
     BYTE       has_owner; /* 1 = owner 有效（rr_trigger 登记） */
     int32_t    error;     /* 最近一次 abort 的归因 */
@@ -202,8 +190,8 @@ typedef struct
     WORD desc_count; /* 保留的 desc 数（compact 机制恒 0） */
 } rr_status_t;
 
-/* rr_init - 绑定端口并复位 handle。 */
-void rr_init(read_recovery_handle_t *rr, const rr_port_t *port);
+/* rr_init - 绑定窄上下文并复位 handle。 */
+void rr_init(read_recovery_handle_t *rr, l2p_cache_t *cache, ftl_allocator_t *alloc, ftl_topology_t topo, BYTE *page_scratch, ftl_pending_table_t *pending);
 
 /* rr_trigger - 登记一个被托管的读子操作（不立即推进）。 */
 void rr_trigger(read_recovery_handle_t *rr, const rr_owner_t *owner);
@@ -229,6 +217,25 @@ void rr_handle(read_recovery_handle_t *rr, const ftl_bg_info_t *info, rr_status_
  * @param ecc_bits 本次读取的 ECC 纠正 bit 数（取 desc 链全链 CW 的最大值，见 fc_get_cmd_ecc_max）
  */
 void rr_record_ecc(rr_ecc_track_t *track, BYTE ecc_bits);
+
+/*
+ * rr_record_block_ecc - 记录 gblock 一次读的 ECC 趋势并累加 read_count
+ *
+ * 迁移读路径不直接摸 allocator->blocks[]：由 RR（趋势数据 owner）提供唯一写入点。
+ *
+ * @param alloc    分配器（持有 BST）
+ * @param gblock   全局块号
+ * @param ecc_bits 本次读最大纠正 bit 数
+ */
+void rr_record_block_ecc(ftl_allocator_t *alloc, WORD gblock, BYTE ecc_bits);
+
+/*
+ * rr_retire_block_at - 退役 gblock（复位 read_count/ECC 趋势）
+ *
+ * @param alloc   分配器（持有 BST）
+ * @param gblock  全局块号
+ */
+void rr_retire_block_at(ftl_allocator_t *alloc, WORD gblock);
 
 /* 完成服务函数 ftl_read_recovery_callback 与其余服务函数同处声明（ftl_op.h）——
  * 那里是"g_op_callbacks 各槽"的唯一权威列表，此处不再重复声明。 */

@@ -93,7 +93,7 @@ static BYTE mig_next_present_plane(const ftl_allocator_t *alloc, const migrate_h
 
         const WORD g = ftl_gblock(p, m->victim.plane_blocks[p]);
 
-        if (ftl_block_state(&alloc->blocks[g]) != FTL_BLOCK_STATE_CLOSED)
+        if (allocator_block_state(alloc, g) != FTL_BLOCK_STATE_CLOSED)
         {
             continue;
         }
@@ -185,7 +185,7 @@ static ftl_status_t mig_submit_write(migrate_handle_t *m)
 /* 提交一条 victim 块擦除。 */
 static ftl_status_t mig_submit_erase(migrate_handle_t *m)
 {
-    const DWORD block_addr = super_block_page_pba(m->port.topo, &m->victim, m->plane, 0U);
+    const DWORD block_addr = super_block_page_pba(m->topo, &m->victim, m->plane, 0U);
 
     fc_command_t      *cmd;
     const ftl_status_t ret = ftl_async_erase_block(&cmd, block_addr);
@@ -215,16 +215,20 @@ static void mig_start(migrate_handle_t *m, const super_block_t *victim, mig_kind
      * active 是运行时状态（单飞行），由调用者在选块**之前**判过 ⇒ 这里是死守卫。 */
     ASSERT(!m->active);
 
-    /* job 状态整体复位，但**端口 / 自持节拍 / 单调计数 / 连续失败计数**必须跨 job 保留。 */
-    const migrate_port_t port      = m->port;
-    const DWORD          gc_eval   = m->gc_eval_last_ms;
-    const DWORD          gc_log    = m->gc_log_last_ms;
-    const DWORD          wl_eval   = m->wl_eval_last_ms;
-    const DWORD          predict   = m->predict_last_ms;
-    const DWORD          reclaimed = m->reclaimed_count;
-    const DWORD          novictim  = m->novictim_count;
-    WORD                 fail_gblock[PLANE_NUM];
-    BYTE                 fail_count[PLANE_NUM];
+    /* job 状态整体复位，但**窄上下文 / 自持节拍 / 单调计数 / 连续失败计数**必须跨 job 保留。 */
+    ftl_allocator_t *const alloc        = m->alloc;
+    l2p_journal_t *const   journal      = m->journal;
+    l2p_cache_t *const     cache        = m->cache;
+    const DWORD *const     total_writes = m->total_writes;
+    const ftl_topology_t   topo         = m->topo;
+    const DWORD            gc_eval      = m->gc_eval_last_ms;
+    const DWORD            gc_log       = m->gc_log_last_ms;
+    const DWORD            wl_eval      = m->wl_eval_last_ms;
+    const DWORD            predict      = m->predict_last_ms;
+    const DWORD            reclaimed    = m->reclaimed_count;
+    const DWORD            novictim     = m->novictim_count;
+    WORD                   fail_gblock[PLANE_NUM];
+    BYTE                   fail_count[PLANE_NUM];
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
@@ -234,7 +238,11 @@ static void mig_start(migrate_handle_t *m, const super_block_t *victim, mig_kind
 
     memset(m, 0, sizeof(*m));
 
-    m->port            = port;
+    m->alloc           = alloc;
+    m->journal         = journal;
+    m->cache           = cache;
+    m->total_writes    = total_writes;
+    m->topo            = topo;
     m->gc_eval_last_ms = gc_eval;
     m->gc_log_last_ms  = gc_log;
     m->wl_eval_last_ms = wl_eval;
@@ -256,7 +264,7 @@ static void mig_start(migrate_handle_t *m, const super_block_t *victim, mig_kind
 
     /* 快路径：无任何有效 CW ⇒ 无可搬移，直接进擦除。 */
     allocator_sb_stats_t st;
-    allocator_sb_stats(m->port.alloc, &m->victim, &st);
+    allocator_sb_stats(m->alloc, &m->victim, &st);
     m->phase = (st.valid_cw == 0U) ? MIG_ERASE : MIG_READ;
 
     mig_step(m);
@@ -269,13 +277,13 @@ static bool mig_begin_gc(migrate_handle_t *m)
     {
         return false;
     }
-    if (journal_write_failed(m->port.journal))
+    if (journal_write_failed(m->journal))
     {
         return false; /* L2P 尚未 durable：禁止回收，等 CP 清 pending */
     }
 
     const super_block_t *victim;
-    if (!gc_select_victim(m->port.alloc, &victim))
+    if (!gc_select_victim(m->alloc, &victim))
     {
         /* 触发但选不出 victim = 卡死嫌疑（观测计数，见 ftl.h）。 */
         m->novictim_count++;
@@ -293,19 +301,19 @@ static bool mig_begin_wl(migrate_handle_t *m)
     {
         return false;
     }
-    if (journal_write_failed(m->port.journal))
+    if (journal_write_failed(m->journal))
     {
         return false; /* L2P 尚未 durable：禁止回收，等 CP 清 pending */
     }
-    const DWORD total_writes = *m->port.total_writes;
+    const DWORD total_writes = *m->total_writes;
 
-    if (!wl_should_trigger(m->port.alloc, total_writes))
+    if (!wl_should_trigger(m->alloc, total_writes))
     {
         return false;
     }
 
     wl_victim_t victim;
-    if (!wl_select_victim(m->port.alloc, &victim))
+    if (!wl_select_victim(m->alloc, &victim))
     {
         return false;
     }
@@ -324,20 +332,20 @@ static bool mig_begin_predict(migrate_handle_t *m)
     {
         return false;
     }
-    if (journal_write_failed(m->port.journal))
+    if (journal_write_failed(m->journal))
     {
         return false; /* L2P 尚未 durable：禁止回收，等 CP 清 pending */
     }
 
     WORD gblock;
-    if (!rr_predictive_scan(m->port.alloc, &gblock))
+    if (!rr_predictive_scan(m->alloc, &gblock))
     {
         return false;
     }
 
     /* 慢死块必在 closed_sb_list 中（scan 只返回 CLOSED 块）。 */
-    const WORD closed_idx   = ftl_block_sb_id(&m->port.alloc->blocks[gblock]);
-    const WORD closed_count = m->port.alloc->closed_sb_count;
+    const WORD closed_idx   = allocator_block_sb_id(m->alloc, gblock);
+    const WORD closed_count = m->alloc->closed_sb_count;
 
     ASSERT(closed_idx < closed_count);
 
@@ -349,7 +357,7 @@ static bool mig_begin_predict(migrate_handle_t *m)
         return false;
     }
 
-    const super_block_t *closed = allocator_closed_at(m->port.alloc, closed_idx);
+    const super_block_t *closed = allocator_closed_at(m->alloc, closed_idx);
     super_block_t        sb;
 
     mig_victim_from_planes(&sb, closed->plane_blocks);
@@ -466,12 +474,12 @@ static void mig_dst_fail_cleanup(migrate_handle_t *m, bool command_attempted)
     if (command_attempted || mig_dst_pair_has_programmed_plane(m))
     {
         LOGW("[MIG] dst failure plane=%u — close cold SB\r\n", (unsigned)m->plane);
-        (void)allocator_close_open_sb(m->port.alloc, FTL_TEMP_COLD);
+        (void)allocator_close_open_sb(m->alloc, FTL_TEMP_COLD);
     }
     else
     {
         LOGW("[MIG] dst failure plane=%u — rewind pair\r\n", (unsigned)m->plane);
-        allocator_rewind_pair(m->port.alloc, FTL_TEMP_COLD);
+        allocator_rewind_pair(m->alloc, FTL_TEMP_COLD);
     }
 }
 
@@ -512,9 +520,9 @@ static void mig_finish(migrate_handle_t *m)
         /* 移除已回收条目（swap-remove）——防 closed_sb_count 只增不减导致列表爆炸
          * + 已回收 SB 被再次选为 victim 的无限 GC 空转。
          * 擦除失败也移除：该 SB 已坏/不可再用，留在列表里只会反复被选。 */
-        if ((!removed) && allocator_find_closed_sb(m->port.alloc, &m->victim, &closed_idx))
+        if ((!removed) && allocator_find_closed_sb(m->alloc, &m->victim, &closed_idx))
         {
-            allocator_remove_closed_sb(m->port.alloc, closed_idx);
+            allocator_remove_closed_sb(m->alloc, closed_idx);
             removed = true;
         }
 
@@ -570,7 +578,7 @@ static bool mig_step_read(migrate_handle_t *m)
     }
 
     /* 找本页下一个有物理块的 plane */
-    m->plane = mig_next_present_plane(m->port.alloc, m, m->plane);
+    m->plane = mig_next_present_plane(m->alloc, m, m->plane);
 
     if (m->plane >= PLANE_NUM)
     {
@@ -592,7 +600,7 @@ static bool mig_step_read(migrate_handle_t *m)
 
         /* 成对分配目标页（Cold 流）。池耗尽 ⇒ 中止（不擦 victim，源数据仍在、
          * L2P 未动，下轮 GC 再来）——**不得**先擦后搬。 */
-        if (allocator_alloc_pair(m->port.alloc, FTL_TEMP_COLD, m->dst) != FTL_OK)
+        if (allocator_alloc_pair(m->alloc, FTL_TEMP_COLD, m->dst) != FTL_OK)
         {
             mig_abort(m, "no free block");
             return false;
@@ -604,7 +612,7 @@ static bool mig_step_read(migrate_handle_t *m)
     }
 
     /* 本页本 plane 的源地址（页基址）。全局块号不缓存——现算，见 mig_src_gblock。 */
-    m->src[m->plane] = super_block_page_pba(m->port.topo, &m->victim, m->plane, m->page);
+    m->src[m->plane] = super_block_page_pba(m->topo, &m->victim, m->plane, m->page);
     memset(m->page_buf[m->plane], 0, PAGE_MAIN_SIZE);
 
     const ftl_status_t ret = mig_submit_read(m);
@@ -625,7 +633,7 @@ static bool mig_lba_usable(const migrate_handle_t *m, DWORD lba)
 {
     return (lba != FTL_LBA_INVALID) &&
            ((QWORD)lba < L2P_GLOBAL_LBA_MAX) &&
-           lba_routes_to(lba, m->port.topo);
+           lba_routes_to(lba, m->topo);
 }
 
 static bool mig_step_read_settle(migrate_handle_t *m)
@@ -649,7 +657,7 @@ static bool mig_step_read_settle(migrate_handle_t *m)
             {
                 continue;
             }
-            if (!l2p_cache_ready(m->port.cache, m->cw_lba[plane][cw]))
+            if (!l2p_cache_ready(m->cache, m->cw_lba[plane][cw]))
             {
                 /* 加载在飞不计提交卡死，但**必须**计入独立的等待上限：
                  * 加载永久卡住时 job 否则永不中止（RISK-MIG-01）。 */
@@ -671,7 +679,7 @@ static bool mig_step_read_settle(migrate_handle_t *m)
                 continue;
             }
             /* 用**该 CW 自己的 META** 查，仍指向 (本页, 本 CW) 才算有效 */
-            if ((l2p_cache_read(m->port.cache, m->cw_lba[plane][cw], &cur) == FTL_OK) &&
+            if ((l2p_cache_read(m->cache, m->cw_lba[plane][cw], &cur) == FTL_OK) &&
                 (cur == pba_with_cw(m->src[plane], cw)))
             {
                 m->cw_bitmap[plane] |= ftl_cw_bit(plane, cw);
@@ -731,7 +739,7 @@ static bool mig_step_write_settle(migrate_handle_t *m)
             {
                 continue;
             }
-            if (!l2p_cache_ready(m->port.cache, m->cw_lba[plane][cw]))
+            if (!l2p_cache_ready(m->cache, m->cw_lba[plane][cw]))
             {
                 (void)mig_wait(m, "l2p load timeout");
                 return true;
@@ -759,7 +767,7 @@ static bool mig_step_write_settle(migrate_handle_t *m)
              * 覆盖新映射、valid_count 双降。被抢先的 CW 跳过（它已不再引用 victim）。 */
             DWORD cur;
 
-            if (l2p_cache_read(m->port.cache, l, &cur) != FTL_OK)
+            if (l2p_cache_read(m->cache, l, &cur) != FTL_OK)
             {
                 mig_abort(m, "l2p read failed"); /* [待上板] */
                 return false;
@@ -776,12 +784,12 @@ static bool mig_step_write_settle(migrate_handle_t *m)
 
             /* journal 先于 L2P（与 host 写路径同序）：append 失败 ⇒ 该映射未持久化，
              * 立即中止，victim 不擦。 */
-            if (!journal_append(m->port.journal, l, src_cw, dst_cw))
+            if (!journal_append(m->journal, l, src_cw, dst_cw))
             {
                 mig_abort(m, "journal append failed"); /* [待上板] */
                 return false;
             }
-            if (l2p_cache_write(m->port.cache, l, dst_cw) != FTL_OK)
+            if (l2p_cache_write(m->cache, l, dst_cw) != FTL_OK)
             {
                 mig_abort(m, "l2p write failed"); /* [待上板] */
                 return false;
@@ -791,12 +799,10 @@ static bool mig_step_write_settle(migrate_handle_t *m)
              * ⚠ 源块可能在迁移期间被 RR 标 BAD（valid_count 已被清 0）；此时不能再
              *   减（debug 下会撞 sub_valid 断言，release 下会回绕）。数据已读到并写进
              *   目的页，L2P 更新仍然正确；只跳过源侧计数。 */
-            const WORD   src_gblock = mig_src_gblock(m, plane);
-            const WORD   dst_gblock = ftl_pba_gblock(dst_cw);
-            ftl_block_t *src_blk    = &m->port.alloc->blocks[src_gblock];
-
-            ftl_block_sub_valid_if_live(src_blk);
-            ftl_block_add_valid(&m->port.alloc->blocks[dst_gblock]);
+            const WORD src_gblock = mig_src_gblock(m, plane);
+            const WORD dst_gblock = ftl_pba_gblock(dst_cw);
+            allocator_block_sub_valid_if_live(m->alloc, src_gblock);
+            allocator_block_add_valid(m->alloc, dst_gblock);
 
             m->migrated++;
         }
@@ -813,7 +819,7 @@ static bool mig_step_flush_jrn(migrate_handle_t *m)
     /* Journal 持久性失败 pending（页写失败 ⇒ 条目已丢）：
      * 在 CP 确认当前 L2P 已落盘之前，任何 victim 都不许擦——包括本 job 没有搬移
      * 任何 CW（migrated == 0）的情况，因为上一次 job 的迁移映射可能只在 RAM 里。 */
-    if (journal_write_failed(m->port.journal))
+    if (journal_write_failed(m->journal))
     {
         mig_abort(m, "journal write failure pending"); /* [待上板] */
         return false;
@@ -834,17 +840,17 @@ static bool mig_step_flush_jrn(migrate_handle_t *m)
         /* typed 入口：job 空闲且有待写页 ⇒ 起异步刷页。info 由 migrate 的调用方
          * 在本阶段后续传入；这里位移推进不依赖动态信息。 */
         journal_status_t jst;
-        journal_handle(m->port.journal, NULL, NULL, &jst);
+        journal_handle(m->journal, NULL, NULL, &jst);
     }
 
-    if (!journal_is_idle(m->port.journal))
+    if (!journal_is_idle(m->journal))
     {
         /* 有命令在飞不计提交卡死，但计入独立的等待上限：Journal job 永久卡住时
          * job 否则永不中止（RISK-MIG-01）。 */
         (void)mig_wait(m, "journal flush timeout");
         return true;
     }
-    if ((journal_erase_pending(m->port.journal)) || (journal_has_pending_entries(m->port.journal)))
+    if ((journal_erase_pending(m->journal)) || (journal_has_pending_entries(m->journal)))
     {
         /* 想刷却刷不动（命令池空）⇒ 计卡死轮数；超限中止（**不擦 victim**） */
         (void)mig_stall(m);
@@ -860,7 +866,7 @@ static bool mig_step_flush_jrn(migrate_handle_t *m)
 
 static bool mig_step_erase(migrate_handle_t *m)
 {
-    m->plane = mig_next_present_plane(m->port.alloc, m, m->plane);
+    m->plane = mig_next_present_plane(m->alloc, m, m->plane);
 
     if (m->plane >= PLANE_NUM)
     {
@@ -980,10 +986,24 @@ static void mig_service_step(migrate_handle_t *m)
 
 /* ── 7. typed handle（端口装配 / 触发 / 自持节拍 / 上报）── */
 
-void migrate_init(migrate_handle_t *m, const migrate_port_t *port)
+void migrate_init(migrate_handle_t *m,
+                  ftl_allocator_t  *alloc,
+                  l2p_journal_t    *journal,
+                  l2p_cache_t      *cache,
+                  const DWORD      *total_writes,
+                  ftl_topology_t    topo)
 {
+    ASSERT(alloc != NULL);
+    ASSERT(journal != NULL);
+    ASSERT(cache != NULL);
+    ASSERT(total_writes != NULL);
+
     memset(m, 0, sizeof(*m));
-    m->port = *port;
+    m->alloc        = alloc;
+    m->journal      = journal;
+    m->cache        = cache;
+    m->total_writes = total_writes;
+    m->topo         = topo;
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         m->fail_gblock[plane] = UINT16_MAX;
@@ -1015,20 +1035,20 @@ static DWORD mig_gc_evaluate(migrate_handle_t *m, DWORD now_ms)
     }
     m->gc_eval_last_ms = now_ms;
 
-    const DWORD triggers = gc_check_triggers(m->port.alloc);
+    const DWORD triggers = gc_check_triggers(m->alloc);
 
     if (triggers != 0U)
     {
         if ((m->gc_log_last_ms == 0U) || ((now_ms - m->gc_log_last_ms) >= GC_LOG_INTERVAL_MS))
         {
-            const WORD  op0    = allocator_op_count(m->port.alloc, 0U);
-            const WORD  op1    = allocator_op_count(m->port.alloc, 1U);
-            const DWORD writes = *m->port.total_writes;
+            const WORD  op0    = allocator_op_count(m->alloc, 0U);
+            const WORD  op1    = allocator_op_count(m->alloc, 1U);
+            const DWORD writes = *m->total_writes;
 
             m->gc_log_last_ms = now_ms;
             LOGI("[GC] trig=0x%02lx free=%u op=%u/%u writes=%lu reclaimed=%lu novictim=%lu\r\n",
                  triggers,
-                 (unsigned)m->port.alloc->free_count,
+                 (unsigned)m->alloc->free_count,
                  (unsigned)op0,
                  (unsigned)op1,
                  writes,
@@ -1177,14 +1197,13 @@ static void mig_complete_read(migrate_handle_t          *m,
 
         if (dr == GC_DECODE_OK)
         {
-            const WORD   gsrc    = mig_src_gblock(m, plane);
-            ftl_block_t *src_blk = &m->port.alloc->blocks[gsrc];
-            const BYTE   ecc     = fc_get_cmd_ecc_max(cmd);
+            const WORD gsrc = mig_src_gblock(m, plane);
+            const BYTE ecc  = fc_get_cmd_ecc_max(cmd);
 
             /* B4：搬移读记录 ECC 趋势 + read disturb 计数（慢死预测闭环）。
-             * 判定只用 ecc_bits 与上一次读数比较，不涉及时间维度。 */
-            rr_record_ecc(&src_blk->rr, ecc);
-            src_blk->read_count++;
+             * 判定只用 ecc_bits 与上一次读数比较，不涉及时间维度。
+             * 趋势/read_count 的写入点是 RR owner API，migrate 不直接摸 BST。 */
+            rr_record_block_ecc(m->alloc, gsrc, ecc);
 
             m->decode_ok = true;
         }
@@ -1222,8 +1241,8 @@ static void mig_complete_read(migrate_handle_t          *m,
         if (m->fail_count[plane] >= MIG_VICTIM_READ_FAIL_MAX)
         {
             LOGE("[MIG] victim read failed blk=%u x%u — mark BAD\r\n", (unsigned)gsrc, (unsigned)m->fail_count[plane]);
-            (void)bbt_mark_bad(m->port.alloc, gsrc);
-            if (allocator_closed_drop_plane(m->port.alloc, plane, m->victim.plane_blocks[plane]))
+            (void)bbt_mark_bad(m->alloc, gsrc);
+            if (allocator_closed_drop_plane(m->alloc, plane, m->victim.plane_blocks[plane]))
             {
                 m->closed_removed = true;
             }
@@ -1279,15 +1298,14 @@ static void mig_complete_erase(migrate_handle_t          *m,
                                fc_command_t              *cmd,
                                const fc_command_status_t *completion)
 {
-    const BYTE   plane        = m->plane;
-    const WORD   gsrc         = mig_src_gblock(m, plane);
-    const DWORD  total_writes = *m->port.total_writes;
-    ftl_block_t *blk          = &m->port.alloc->blocks[gsrc];
+    const BYTE  plane        = m->plane;
+    const WORD  gsrc         = mig_src_gblock(m, plane);
+    const DWORD total_writes = *m->total_writes;
 
     if (!fc_cw_status_has_error(completion->status))
     {
         m->erased++;
-        if (ftl_block_is_bad(blk))
+        if (allocator_block_is_bad(m->alloc, gsrc))
         {
             /* 迁移期间被 RR/BBT 标 BAD：擦成功也不能复活或入池。 */
             m->erase_failed = true;
@@ -1296,7 +1314,7 @@ static void mig_complete_erase(migrate_handle_t          *m,
         else
         {
             /* 擦除成功：统一走 allocator 的擦除记账（含 !bad 断言 + 清 valid）。 */
-            allocator_note_erase(m->port.alloc, gsrc, total_writes);
+            allocator_note_erase(m->alloc, gsrc, total_writes);
 
             /* 去向二选一——**退役块不得先进池**：
              * 退役直接 RETIRED，与「state == FREE ⟺ 在池」不变量一致（allocator.h ②）。 */
@@ -1307,12 +1325,12 @@ static void mig_complete_erase(migrate_handle_t          *m,
                  * victim 正常是 CLOSED、从未入池 ⇒ remove_from_free 是文档化 no-op
                  * （allocator.h 判据 4）；保留它是为了让「退役块绝不留在池里」不依赖调用顺序。
                  * rr_retire_block 内部把 read_count 归零（read disturb 重计）。 */
-                allocator_remove_from_free(m->port.alloc, gsrc);
-                rr_retire_block(blk);
+                allocator_remove_from_free(m->alloc, gsrc);
+                rr_retire_block_at(m->alloc, gsrc);
             }
             else
             {
-                allocator_free_block(m->port.alloc, gsrc);
+                allocator_free_block(m->alloc, gsrc);
             }
         }
     }
@@ -1322,9 +1340,9 @@ static void mig_complete_erase(migrate_handle_t          *m,
 
         /* 擦除失败：标记坏块（BBT 单数据源，后台持久化）。
          * ⚠ 已 BAD 时不再重复标记：bbt_mark_bad 会再次 bad_count++ 并从 Spare 补池。 */
-        if (!ftl_block_is_bad(blk))
+        if (!allocator_block_is_bad(m->alloc, gsrc))
         {
-            (void)bbt_mark_bad(m->port.alloc, gsrc);
+            (void)bbt_mark_bad(m->alloc, gsrc);
         }
         else
         {
@@ -1335,7 +1353,7 @@ static void mig_complete_erase(migrate_handle_t          *m,
     /* 逐 plane 摘除已处理的块：擦完后该块已归还 Free Pool（或已标坏），旧 Closed 条目
      * 不得继续引用它——否则块被重新分配并再次 Closed 后会被旧条目误认（RISK-GC-04）。
      * 条目在最后一个 plane 摘除时自动移除。 */
-    if (allocator_closed_drop_plane(m->port.alloc, plane, m->victim.plane_blocks[plane]))
+    if (allocator_closed_drop_plane(m->alloc, plane, m->victim.plane_blocks[plane]))
     {
         m->closed_removed = true;
     }

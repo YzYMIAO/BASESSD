@@ -246,9 +246,9 @@ static bool ftl_host_io_write_ok(ftl_context_t *ftl, ftl_pending_req_t *pending)
 
     /* 停泊：命令脱钩、组在飞数不递减；停泊列表与超时归 pending 模块
      * （docs §5「Confirm → pending 服务」）。 */
-    const WORD pending_idx = (pending - ftl->pending);
+    const WORD pending_idx = (pending - ftl->pending.slots);
 
-    pending_confirm_park(ftl, pending_idx, pending->owners);
+    pending_confirm_park(&ftl->pending, pending_idx, pending->owners);
     return true;
 }
 
@@ -267,7 +267,7 @@ static void ftl_host_io_read_fail(ftl_context_t *ftl, ftl_pending_req_t *pending
 
     /* typed 触发：把 owner 交给 RR handle；RR busy 时该项仍留在 pending 表，
      * 当前 job 收尾后由 pending 端口的 take 领走（行为与旧扫描一致）。 */
-    const WORD pending_idx = (pending - ftl->pending);
+    const WORD pending_idx = (pending - ftl->pending.slots);
     rr_owner_t owner;
 
     owner.owners      = pending->owners;
@@ -329,7 +329,7 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
     /* ftl 恒非空（路由表早于逐实例 boot 设好，见 ftl_op.h）；NULL = 编程错误 ⇒
      * ASSERT 而非 if-guard：release 下解引用留现场，比静默吞完成可定位。 */
 
-    ftl_pending_req_t *pending = pending_lookup(ftl, cmd_id);
+    ftl_pending_req_t *pending = pending_lookup(&ftl->pending, cmd_id);
 
     if (pending != NULL)
     {
@@ -381,8 +381,8 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
          *    （另外两处结算点 read_recovery.c / pending_confirm_service 同此顺序。） */
         DWORD owners = pending->owners;
 
-        pending_remove(ftl, cmd_id);
-        pending_group_complete_subop_multi(ftl, owners, sub_status);
+        pending_remove(&ftl->pending, cmd_id);
+        pending_group_complete_subop_multi(&ftl->pending, owners, sub_status);
     }
 
     (void)fc_command_release(cmd);
@@ -394,114 +394,6 @@ static ftl_status_t ftl_confirm_handler(void *ctx, ftl_pending_req_t *pending)
     return ftl_confirm_write((ftl_context_t *)ctx, pending);
 }
 
-/* ── Journal 坏块端口（装配层适配：journal 不直接摸 allocator/BST） ── */
-
-static bool ftl_journal_block_is_bad(void *ctx, WORD gblock)
-{
-    const ftl_allocator_t *alloc = (const ftl_allocator_t *)ctx;
-
-    return ftl_block_is_bad(&alloc->blocks[gblock]);
-}
-
-static void ftl_journal_mark_bad(void *ctx, WORD gblock)
-{
-    ftl_allocator_t *alloc = (ftl_allocator_t *)ctx;
-
-    (void)bbt_mark_bad(alloc, gblock);
-}
-
-/* ── Read Recovery 的 pending 端口（RR 不直接摸 pending 表） ── */
-
-static bool ftl_rr_pending_take(void *ctx, rr_owner_t *out)
-{
-    ftl_context_t *ftl = (ftl_context_t *)ctx;
-    BYTE           idx = 0U;
-
-    if (!pending_find_op(ftl, PENDING_OP_READ_RECOVERY, &idx))
-    {
-        return false;
-    }
-
-    const ftl_pending_req_t *pending = &ftl->pending[idx];
-
-    out->owners      = pending->owners;
-    out->pending_idx = idx;
-    out->upper_buf   = (BYTE *)pending->buffer;
-    out->lba         = pending->lba;
-    out->n_cw        = pending->n_cw;
-    return true;
-}
-
-static void ftl_rr_pending_complete(void *ctx, WORD pending_idx, DWORD owners, ssd_status_t status)
-{
-    ftl_context_t *ftl = (ftl_context_t *)ctx;
-
-    /* owners 已由 RR 在释放**之前**取走并按值传入（组完成通知可能重入复用本槽）。 */
-    pending_release_index(ftl, pending_idx);
-    pending_group_complete_subop_multi(ftl, owners, status);
-}
-
-/* ── Wbuf 端口（wbuf 不持有 ftl_context / pending 表） ── */
-
-static WORD ftl_wbuf_pending_count(void *ctx)
-{
-    return pending_count((const ftl_context_t *)ctx);
-}
-
-static ftl_pending_req_t *ftl_wbuf_pending_alloc(void *ctx)
-{
-    return pending_alloc((ftl_context_t *)ctx);
-}
-
-static void ftl_wbuf_pending_remove(void *ctx, WORD command_id)
-{
-    pending_remove((ftl_context_t *)ctx, command_id);
-}
-
-static void ftl_wbuf_pending_validate(ftl_pending_req_t *pending)
-{
-    pending_validate(pending);
-}
-
-static void ftl_wbuf_group_add_subop(void *ctx, WORD gi)
-{
-    pending_group_add_subop((ftl_context_t *)ctx, gi);
-}
-
-static void ftl_wbuf_group_complete_multi(void *ctx, DWORD owners, ssd_status_t status)
-{
-    pending_group_complete_subop_multi((ftl_context_t *)ctx, owners, status);
-}
-
-/* 是否还有写组的下一个 LBA 落在本窗口（空闲 flush 的判据）。 */
-static bool ftl_wbuf_group_window_pending(void *ctx, DWORD window)
-{
-    ftl_context_t *ftl = (ftl_context_t *)ctx;
-
-    for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
-    {
-        const ftl_io_group_t *g = &ftl->groups[i];
-
-        if ((g->used == 0U) || (!pending_op_is_write(g->op)) || (g->next >= g->total))
-        {
-            continue;
-        }
-        if (ftl_lba_pair_base((g->lba + g->next)) == window)
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static void ftl_wbuf_gc_urgent(void *ctx)
-{
-    ftl_context_t *ftl = (ftl_context_t *)ctx;
-
-    migrate_trigger(ftl->migrate_handle, MIGRATE_REASON_GC_URGENT);
-}
-
 /* 统一的 wbuf 事件投递：适配器只构造 trigger，状态上报丢弃。 */
 static ftl_status_t ftl_wbuf_event(ftl_context_t *ftl, const wbuf_trigger_t *trigger)
 {
@@ -511,92 +403,6 @@ static ftl_status_t ftl_wbuf_event(ftl_context_t *ftl, const wbuf_trigger_t *tri
 }
 
 /* ── 模块端口装配（每个 helper 只做一件事：建端口 + 绑定） ── */
-
-static void ftl_bind_journal_port(ftl_context_t *ftl)
-{
-    journal_bad_block_port_t port;
-    memset(&port, 0, sizeof(port));
-    port.ctx          = &ftl->alloc;
-    port.block_is_bad = ftl_journal_block_is_bad;
-    port.mark_bad     = ftl_journal_mark_bad;
-
-    journal_bind_bad_block_port(ftl->journal, &port);
-}
-
-static void ftl_bind_metadata_port(ftl_context_t *ftl)
-{
-    metadata_port_t port;
-    memset(&port, 0, sizeof(port));
-    port.alloc        = &ftl->alloc;
-    port.total_writes = &ftl->total_writes;
-
-    metadata_dir_bind_port(ftl->metadata_dir, &port);
-}
-
-static void ftl_bind_migrate_port(ftl_context_t *ftl)
-{
-    migrate_port_t port;
-    memset(&port, 0, sizeof(port));
-    port.alloc        = &ftl->alloc;
-    port.journal      = ftl->journal;
-    port.cache        = ftl->cache;
-    port.total_writes = &ftl->total_writes;
-    port.topo         = ftl->topo;
-
-    migrate_init(ftl->migrate_handle, &port);
-}
-
-static void ftl_bind_rr_port(ftl_context_t *ftl)
-{
-    rr_pending_port_t pending;
-    memset(&pending, 0, sizeof(pending));
-    pending.ctx      = ftl;
-    pending.take     = ftl_rr_pending_take;
-    pending.complete = ftl_rr_pending_complete;
-
-    rr_port_t port;
-    memset(&port, 0, sizeof(port));
-    port.cache        = ftl->cache;
-    port.alloc        = &ftl->alloc;
-    port.topo         = ftl->topo;
-    port.page_scratch = ftl->rr_page_scratch;
-    port.pending      = pending;
-
-    rr_init(&ftl->read_recovery_handle, &port);
-}
-
-static void ftl_bind_wbuf_port(ftl_context_t *ftl)
-{
-    wbuf_port_t port;
-    memset(&port, 0, sizeof(port));
-    port.alloc                = &ftl->alloc;
-    port.pending_ctx          = ftl;
-    port.pending_count        = ftl_wbuf_pending_count;
-    port.pending_alloc        = ftl_wbuf_pending_alloc;
-    port.pending_remove       = ftl_wbuf_pending_remove;
-    port.pending_validate     = ftl_wbuf_pending_validate;
-    port.group_add_subop      = ftl_wbuf_group_add_subop;
-    port.group_complete_multi = ftl_wbuf_group_complete_multi;
-    port.group_window_pending = ftl_wbuf_group_window_pending;
-    port.migrate_ctx          = ftl;
-    port.gc_urgent            = ftl_wbuf_gc_urgent;
-
-    wbuf_init(ftl->wbuf, &port);
-}
-
-static void ftl_bind_checkpoint_port(ftl_context_t *ftl)
-{
-    checkpoint_port_t port;
-    memset(&port, 0, sizeof(port));
-    port.cache        = ftl->cache;
-    port.journal      = ftl->journal;
-    port.metadata_dir = ftl->metadata_dir;
-    port.alloc        = &ftl->alloc;
-    port.total_writes = &ftl->total_writes;
-    port.topo         = ftl->topo;
-
-    ftl->checkpoint_handle->port = port;
-}
 
 /* ── 对外接口 ── */
 
@@ -651,7 +457,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
 
     /* ├─ Pending Request 表（per-instance） ──
      * confirm 停泊的推进归 pending 模块；事务 handler 由 FTL 注入一次。 */
-    pending_init(ftl);
+    pending_init(&ftl->pending);
     pending_confirm_set_handler(ftl_confirm_handler);
 
     /* ├─ storage 数组显式清零（启动不碰 .sram*_data；Phase 1.5 挂载块同）──
@@ -679,15 +485,15 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
     allocator_init(&ftl->alloc, ftl->topo, ftl->tables);
 
     /* ├─ Journal ── */
-    journal_init(ftl->journal, ftl->topo);
-    /* 持续擦除失败的环形块要标进 BBT（RISK-JN-01）；journal 通过端口访问坏块账本，
-     * 不直接持有 allocator（docs/design/ftl_module_contracts.md §4.2）。 */
-    ftl_bind_journal_port(ftl);
+    /* 持续擦除失败的环形块要标进 BBT（RISK-JN-01）；journal 只持有 allocator 指针，
+     * 通过 allocator/bbt 的 owner API 查询与标坏，不直接改其内部字段。 */
+    journal_init(ftl->journal, ftl->topo, &ftl->alloc);
 
     /* ├─ Metadata Directory ── */
     ftl->metadata_dir->topo = ftl->topo;
+    ftl->total_writes       = 0U; /* 元数据 job 的 total_writes 指针在建目录前就有效 */
     {
-        const ftl_status_t md_ret = metadata_dir_load(ftl->metadata_dir);
+        const ftl_status_t md_ret = metadata_dir_load(ftl->metadata_dir, &ftl->alloc, &ftl->total_writes);
 
         /* 失败时仍建空 Directory（空片首启 / 格式化路径需要），但把失败状态留给
          * ftl_boot_recovery：介质若已有有效 Checkpoint，空 Directory = 映射整体丢失
@@ -696,33 +502,27 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
 
         if (md_ret != FTL_OK)
         {
-            metadata_dir_init(ftl->metadata_dir);
+            metadata_dir_init(ftl->metadata_dir, &ftl->alloc, &ftl->total_writes);
         }
     }
 
-    /* 目录整理 job 的端口：allocator + total_writes（docs §4.3）。 */
-    ftl_bind_metadata_port(ftl);
+    /* ├─ 搬移引擎（GC / WL / 慢死预测）：窄上下文 + 自持节拍 ── */
+    migrate_init(ftl->migrate_handle, &ftl->alloc, ftl->journal, ftl->cache, &ftl->total_writes, ftl->topo);
 
-    /* ├─ 搬移引擎（GC / WL / 慢死预测）端口 + 自持节拍 ── */
-    ftl_bind_migrate_port(ftl);
+    /* ├─ Read Recovery：窄上下文（L2P / allocator / 整页暂存 / pending 表）── */
+    rr_init(&ftl->read_recovery_handle, ftl->cache, &ftl->alloc, ftl->topo, ftl->rr_page_scratch, &ftl->pending);
 
-    /* ├─ Read Recovery 端口（L2P / allocator / 整页暂存 / pending 端口）── */
-    ftl_bind_rr_port(ftl);
-
-    /* ├─ Wbuf（alloc / pending / migrate 端口）── */
-    ftl_bind_wbuf_port(ftl);
+    /* ├─ Wbuf：窄上下文（allocator / pending 表 / migrate handle）── */
+    wbuf_init(ftl->wbuf, &ftl->alloc, &ftl->pending, ftl->migrate_handle);
 
     /* ├─ BBT 初始化（从 NAND 加载或出厂扫描）── */
     bbt_init(&ftl->alloc);
 
-    /* ├─ Checkpoint 端口（l2p / journal / metadata / allocator / total_writes / topo）──
-     * handle 已在上面整体清零 ⇒ 池游标 cursor_valid==0，首次 job 会先扫池定位。
-     * ⚠ 端口必须在 memset(handle) **之后**绑定。 */
-    ftl_bind_checkpoint_port(ftl);
+    /* ├─ Checkpoint：窄上下文（l2p / journal / metadata / allocator / topo）──
+     * checkpoint_init 内部整体 memset ⇒ 池游标 cursor_valid==0，首次 job 先扫池定位。 */
+    checkpoint_init(ftl->checkpoint_handle, ftl->cache, ftl->journal, ftl->metadata_dir, &ftl->alloc, ftl->topo);
 
     /* ├─ 统计 ── */
-    ftl->total_writes = 0U;
-
     /* ├─ 后台调度器任务表（10 项；must-run + interval/budget）──
      * 必须在所有在飞的字段就绪后装载（适配器只依赖实例字段与 kick，无额外依赖）。 */
     ftl_bg_init(ftl);
@@ -733,7 +533,7 @@ ftl_status_t ftl_init(ftl_context_t *ftl, ftl_topology_t topo, l2p_cache_t *cach
 /* ── 初始化契约自检（debug-only）──
  *
  * 只在 ftl_init + 设备级 owner 登记完成后跑一次，证明“初始化后不可变”的绑定。
- * 覆盖：句柄、storage 数组、端口回调、topology 副本、PBA 布局、bg 任务表、
+ * 覆盖：句柄、storage 数组、模块窄上下文、topology 副本、PBA 布局、bg 任务表、
  *       L2P owner / completion route 身份、各 job 的初始 idle 状态。
  *
  * ⚠ 边界（不要据此删运行期断言）：
@@ -781,52 +581,44 @@ static void contract_check_topology(const ftl_context_t *ftl)
            (ftl->journal->topo.ch == topo->ch) && (ftl->journal->topo.ce == topo->ce) &&
            (ftl->journal->topo.lun == topo->lun));
 
-    ASSERT((ftl->checkpoint_handle->port.topo.ch == topo->ch) &&
-           (ftl->checkpoint_handle->port.topo.ce == topo->ce) &&
-           (ftl->checkpoint_handle->port.topo.lun == topo->lun) &&
-           (ftl->migrate_handle->port.topo.ch == topo->ch) &&
-           (ftl->migrate_handle->port.topo.ce == topo->ce) &&
-           (ftl->migrate_handle->port.topo.lun == topo->lun) &&
-           (ftl->read_recovery_handle.port.topo.ch == topo->ch) &&
-           (ftl->read_recovery_handle.port.topo.ce == topo->ce) &&
-           (ftl->read_recovery_handle.port.topo.lun == topo->lun));
+    ASSERT((ftl->checkpoint_handle->topo.ch == topo->ch) &&
+           (ftl->checkpoint_handle->topo.ce == topo->ce) &&
+           (ftl->checkpoint_handle->topo.lun == topo->lun) &&
+           (ftl->migrate_handle->topo.ch == topo->ch) &&
+           (ftl->migrate_handle->topo.ce == topo->ce) &&
+           (ftl->migrate_handle->topo.lun == topo->lun) &&
+           (ftl->read_recovery_handle.topo.ch == topo->ch) &&
+           (ftl->read_recovery_handle.topo.ce == topo->ce) &&
+           (ftl->read_recovery_handle.topo.lun == topo->lun));
 }
 
-static void contract_check_ports(const ftl_context_t *ftl)
+static void contract_check_module_contexts(const ftl_context_t *ftl)
 {
-    const metadata_port_t *md = &ftl->metadata_dir->port;
+    const metadata_dir_cache_t *md = ftl->metadata_dir;
 
     ASSERT((md->alloc == &ftl->alloc) && (md->total_writes == &ftl->total_writes));
 
-    const journal_bad_block_port_t *jbb = &ftl->journal->bad_block_port;
+    ASSERT(ftl->journal->alloc == &ftl->alloc);
 
-    ASSERT((jbb->ctx == &ftl->alloc) && (jbb->block_is_bad != NULL) && (jbb->mark_bad != NULL));
-
-    const checkpoint_port_t *cp = &ftl->checkpoint_handle->port;
+    const checkpoint_handle_t *cp = ftl->checkpoint_handle;
 
     ASSERT((cp->cache == ftl->cache) && (cp->journal == ftl->journal) &&
-           (cp->metadata_dir == ftl->metadata_dir) && (cp->alloc == &ftl->alloc) &&
-           (cp->total_writes == &ftl->total_writes));
+           (cp->metadata_dir == ftl->metadata_dir) && (cp->alloc == &ftl->alloc));
 
-    const migrate_port_t *mg = &ftl->migrate_handle->port;
+    const migrate_handle_t *mg = ftl->migrate_handle;
 
     ASSERT((mg->alloc == &ftl->alloc) && (mg->journal == ftl->journal) &&
            (mg->cache == ftl->cache) && (mg->total_writes == &ftl->total_writes));
 
-    const rr_port_t *rr = &ftl->read_recovery_handle.port;
+    const read_recovery_handle_t *rr = &ftl->read_recovery_handle;
 
     ASSERT((rr->cache == ftl->cache) && (rr->alloc == &ftl->alloc) &&
-           (rr->page_scratch == ftl->rr_page_scratch) && (rr->pending.ctx == ftl) &&
-           (rr->pending.take != NULL) && (rr->pending.complete != NULL));
+           (rr->page_scratch == ftl->rr_page_scratch) && (rr->pending == &ftl->pending));
 
-    const wbuf_port_t *wb = &ftl->wbuf->port;
+    const wbuf_handle_t *wb = ftl->wbuf;
 
-    ASSERT((wb->alloc == &ftl->alloc) && (wb->pending_ctx == ftl) &&
-           (wb->pending_count != NULL) && (wb->pending_alloc != NULL) &&
-           (wb->pending_remove != NULL) && (wb->pending_validate != NULL) &&
-           (wb->group_add_subop != NULL) && (wb->group_complete_multi != NULL) &&
-           (wb->group_window_pending != NULL) && (wb->migrate_ctx == ftl) &&
-           (wb->gc_urgent != NULL));
+    ASSERT((wb->alloc == &ftl->alloc) && (wb->pending == &ftl->pending) &&
+           (wb->migrate == ftl->migrate_handle));
 }
 
 static void contract_check_identity(const ftl_context_t *ftl)
@@ -904,7 +696,7 @@ static void contract_check_jobs_idle(const ftl_context_t *ftl)
 
 static void contract_check_boot_zero(const ftl_context_t *ftl)
 {
-    ASSERT((pending_count(ftl) == 0U) && (pending_group_count(ftl) == 0U) &&
+    ASSERT((pending_count(&ftl->pending) == 0U) && (pending_group_count(&ftl->pending) == 0U) &&
            (ftl->total_writes == 0U) && (ftl->cache->load_inflight == 0U) &&
            (ftl->cache->flush_inflight == 0U) && (ftl->bg_suspend == 0U) &&
            (ftl->l2p_defer == 0U));
@@ -922,7 +714,7 @@ void ftl_contract_audit(const ftl_context_t *ftl)
 
     contract_check_handles(ftl);
     contract_check_topology(ftl);
-    contract_check_ports(ftl);
+    contract_check_module_contexts(ftl);
     contract_check_identity(ftl);
     contract_check_bg(ftl);
     contract_check_jobs_idle(ftl);
@@ -983,14 +775,14 @@ void ftl_service(ftl_context_t *ftl)
     /* Phase 2.5 首：推进**停泊**的写确认。必须早于补发——停泊意味着那个 LBA
      * 的 L2P 还是旧映射，先补发一条读同一 LBA 的子操作就会读到旧物理页（陈旧数据）。
      * 顺序与 Phase 2.5 的既有约定一致：先处理**已完成**的，再下发新的。 */
-    pending_confirm_service(ftl, NULL);
+    pending_confirm_service(&ftl->pending, ftl, NULL);
 
     /* Phase 2.5: 补发 host 子操作。完成先腾出 FC 资源（命令/desc/buffer 池、SQ 空位），
      * 再把各组的待下发子操作补上；顺序保证 host IO 优先于 Phase 3 的后台任务。
      * 只遍历**本实例**的组（每实例一份 groups 表）。 */
     for (BYTE i = 0U; i < FTL_GROUP_MAX; i++)
     {
-        if (ftl->groups[i].used != 0U)
+        if (ftl->pending.groups[i].used != 0U)
         {
             ftl_drain_group(ftl, i);
         }
@@ -1050,7 +842,7 @@ void ftl_service(ftl_context_t *ftl)
  * -------------------------------------------------------------------- */
 static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, WORD gi, DWORD internal_lba, void *buffer, BYTE *n_cw)
 {
-    ftl_io_group_t *g = &ftl->groups[gi];
+    ftl_io_group_t *g = &ftl->pending.groups[gi];
 
     /* 夹到 pair 窗口：一个子操作不跨窗口（窗口内最多两个 plane 段、每段一个页）。
      * ⚠ L2P region 512 对齐且 pair 窗口只有 8 个 LBA ⇒ 窗口绝不跨 region。 */
@@ -1196,7 +988,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, WORD gi, DWORD internal_
     /* 资源次序：**先查 pending 表余量，再配 desc 链**。末尾要用一个 pending 槽
      * 登记本子操作；表满却先建好链，只能整条回滚——白配一场。
      * ⚠ 必须在 wbuf 命中分支**之后**：那条路径同步完成、不占 pending 槽，不该被表满挡住。 */
-    if (pending_count(ftl) >= FTL_PENDING_MAX)
+    if (pending_count(&ftl->pending) >= FTL_PENDING_MAX)
     {
         return FTL_AGAIN;
     }
@@ -1234,7 +1026,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, WORD gi, DWORD internal_
 
     /* 注册 pending 子操作（必须早于 submit，避免竞态）。读：owners = 单组位、写专用字段传
      * INVALID、cw_bitmap 传 0；lba 传**全局** LBA（L2P/Journal/META 均按全局索引）。 */
-    ftl_pending_req_t *pending = pending_alloc(ftl);
+    ftl_pending_req_t *pending = pending_alloc(&ftl->pending);
 
     if (pending == NULL)
     {
@@ -1257,14 +1049,14 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, WORD gi, DWORD internal_
     *n_cw = n; /* 回填实际消费的 LBA 数（调用者据此推进） */
 
     /* 记账（**必须早于 submit**——submit 之后 completion 可能立即被 drain 处理） */
-    pending_group_add_subop(ftl, gi);
+    pending_group_add_subop(&ftl->pending, gi);
 
     /* 提交（tag = HOST_IO；ctx 传 NULL —— 私有状态在 pending 表） */
     if (ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL) != FTL_OK)
     {
-        pending_remove(ftl, ftl_cmd_id(cmd));
+        pending_remove(&ftl->pending, ftl_cmd_id(cmd));
         (void)fc_command_release(cmd);
-        pending_group_drop_subop(ftl, gi);
+        pending_group_drop_subop(&ftl->pending, gi);
         return FTL_AGAIN; /* SQ 满：瞬态 */
     }
 
@@ -1287,7 +1079,7 @@ static ftl_status_t ftl_issue_subop(ftl_context_t *ftl, WORD gi, DWORD internal_
  * -------------------------------------------------------------------- */
 static void ftl_drain_group(ftl_context_t *ftl, WORD gi)
 {
-    ftl_io_group_t *g = &ftl->groups[gi];
+    ftl_io_group_t *g = &ftl->pending.groups[gi];
 
     while ((g->used != 0U) && (g->next < g->total))
     {
@@ -1303,7 +1095,7 @@ static void ftl_drain_group(ftl_context_t *ftl, WORD gi)
         ftl->l2p_defer        = 0U; /* 每次下发前清零：本轮的背压原因由本次下发重新判定 */
         const ftl_status_t st = ftl_issue_subop(ftl, gi, glba, buffer, &n_cw);
 
-        g = &ftl->groups[gi]; /* 重取：下发可能改变组状态 */
+        g = &ftl->pending.groups[gi]; /* 重取：下发可能改变组状态 */
 
         if (st == FTL_OK)
         {
@@ -1339,7 +1131,7 @@ static void ftl_drain_group(ftl_context_t *ftl, WORD gi)
         break;
     }
 
-    pending_group_maybe_complete(ftl, gi);
+    pending_group_maybe_complete(&ftl->pending, gi);
 }
 
 /* --------------------------------------------------------------------
@@ -1378,13 +1170,13 @@ static ftl_status_t ftl_submit_common(ftl_context_t *ftl, const ftl_io_request_t
 
     /* 建完成组（一条 host 请求 = 一个组）。通知字段必须**早于任何下发**填入：
      * 下发可能当场完成整组，届时通知就要读它们。 */
-    int gi = pending_group_alloc(ftl);
+    int gi = pending_group_alloc(&ftl->pending);
     if (gi < 0)
     {
         LOGE("[FTL] %s: no free group slot\r\n", label);
         return FTL_ERROR;
     }
-    ftl_io_group_t *g  = &ftl->groups[gi];
+    ftl_io_group_t *g  = &ftl->pending.groups[gi];
     g->op              = op;
     g->total           = count; /* 进度以 **LBA** 计（子操作数由 drain 现场决定，可降级） */
     g->next            = 0U;

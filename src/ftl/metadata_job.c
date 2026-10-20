@@ -27,7 +27,7 @@
 #include "assertion.h"
 #include "bbt.h" /* bbt_mark_bad（持续擦除失败标坏，RISK-MD-01） */
 #include "fc.h"
-#include "ftl.h" /* ftl_context_t（服务函数要从实例取 dir->port.alloc） */
+#include "ftl.h" /* ftl_context_t（完成回调签名） */
 #include "ftl_fc_interface.h"
 #include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
 #include "ftl_op.h"  /* ftl_op_submit / FTL_OP_METADATA */
@@ -544,7 +544,7 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 {
     /* 前置条件（判据 2）：调用者一律传 dir；allocator 走已绑定端口。 */
 
-    ftl_allocator_t *alloc = dir->port.alloc;
+    ftl_allocator_t *alloc = dir->alloc;
 
     /* 心跳（见 ftl_job.h）：job 在飞期间每满 1s 打一行 phase/age。
      * 默认档（INFO）不打印；需要现场观测时 `log level debug`。 */
@@ -827,11 +827,6 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
 /* ── 模块 handle（typed 入口） ── */
 
-void metadata_dir_bind_port(metadata_dir_cache_t *dir, const metadata_port_t *port)
-{
-    dir->port = *port;
-}
-
 static void metadata_status_fill(const metadata_dir_cache_t *dir, metadata_status_t *out)
 {
     const metadata_handle_t *j = &dir->handle;
@@ -891,10 +886,10 @@ void metadata_handle(metadata_dir_cache_t *dir, const ftl_bg_info_t *info, metad
  * Free Pool——该区是预留元数据区（RISK-MD-07 / RISK-CAP-02）。 */
 static void md_note_block_erased(metadata_dir_cache_t *dir, WORD gblock)
 {
-    const DWORD total_writes = *dir->port.total_writes;
+    const DWORD total_writes = *dir->total_writes;
 
-    allocator_note_erase(dir->port.alloc, gblock, total_writes);
-    metadata_log_release(dir->port.alloc, gblock);
+    allocator_note_erase(dir->alloc, gblock, total_writes);
+    metadata_log_release(dir->alloc, gblock);
 }
 
 /* 待回收块擦完成：失败 ⇒ 位保持置位（下一轮 kick 重新取到它并重试，轮转游标保证
@@ -919,7 +914,7 @@ static void md_complete_reclaim(metadata_dir_cache_t *dir, metadata_handle_t *j,
         if (j->reclaim_fail_count >= MD_RECLAIM_FAIL_MAX)
         {
             LOGE("[META] reclaim erase failed blk=%u x%u — mark BAD\r\n", (unsigned)j->reclaim_gblock, (unsigned)j->reclaim_fail_count);
-            (void)bbt_mark_bad(dir->port.alloc, j->reclaim_gblock);
+            (void)bbt_mark_bad(dir->alloc, j->reclaim_gblock);
             md_reclaim_clear(dir, j->reclaim_gblock);
             j->reclaim_fail_count  = 0U;
             j->reclaim_fail_gblock = UINT16_MAX;

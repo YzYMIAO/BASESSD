@@ -276,8 +276,8 @@ void ftl_bg_init(ftl_context_t *ftl)
  * inflight 全空 = IDLE；pending > 半池 或 有未决组 = BUSY；中间 = NORMAL。 */
 BYTE ftl_bg_level_select(const ftl_context_t *ftl)
 {
-    const WORD pending = pending_count(ftl);
-    const WORD queued  = pending_group_count(ftl);
+    const WORD pending = pending_count(&ftl->pending);
+    const WORD queued  = pending_group_count(&ftl->pending);
 
     if ((pending == 0U) && (queued == 0U))
     {

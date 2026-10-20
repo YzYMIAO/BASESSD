@@ -25,7 +25,7 @@
  *   **不**由调用者手工维护（见 CLAUDE.md §3.1）。
  *
  * ⚠ 模块边界（docs/design/ftl_module_contracts.md §4.8）：wbuf 不持有 ftl_context；
- *   alloc / pending / migrate 全部走 `wbuf_port_t`，由装配层在 ftl_init 绑定。
+ *   只持有 allocator / pending 表 / migrate handle 三个窄指针，调用它们的 owner API。
  */
 
 #include "allocator.h"  /* ftl_allocator_t */
@@ -36,31 +36,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-
-/* ── 端口 ──
- *
- * 全部是**共享数据面服务**的窄接口：
- *   alloc      —— 页对分配 / 归还；
- *   pending    —— 表余量、槽申请/摘除、组在飞数增减、窗口是否有待写组；
- *   gc_urgent  —— 取不到页对时登记紧急 GC（不就地启动）。
- */
-typedef struct
-{
-    ftl_allocator_t *alloc;
-
-    void *pending_ctx;
-    WORD(*pending_count)
-    (void *ctx);
-    ftl_pending_req_t *(*pending_alloc)(void *ctx);
-    void (*pending_remove)(void *ctx, WORD command_id);
-    void (*pending_validate)(ftl_pending_req_t *pending);
-    void (*group_add_subop)(void *ctx, WORD gi);
-    void (*group_complete_multi)(void *ctx, DWORD owners, ssd_status_t status);
-    bool (*group_window_pending)(void *ctx, DWORD window);
-
-    void *migrate_ctx;
-    void (*gc_urgent)(void *ctx);
-} wbuf_port_t;
 
 /* ── 写缓冲状态（handle）── */
 typedef struct
@@ -76,7 +51,10 @@ typedef struct
     DWORD   drop_count;
     int32_t error;
 
-    wbuf_port_t port; /* 装配层绑定 */
+    /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
+    ftl_allocator_t       *alloc;
+    ftl_pending_table_t   *pending;
+    struct migrate_handle *migrate;
 } wbuf_handle_t;
 
 /* ── typed 入口 ── */
@@ -120,8 +98,8 @@ typedef struct
     bool         timed_out;
 } wbuf_status_t;
 
-/* wbuf_init - 绑定端口并复位 handle。 */
-void wbuf_init(wbuf_handle_t *h, const wbuf_port_t *port);
+/* wbuf_init - 绑定窄上下文并复位 handle。 */
+void wbuf_init(wbuf_handle_t *h, ftl_allocator_t *alloc, ftl_pending_table_t *pending, struct migrate_handle *migrate);
 
 /*
  * wbuf_handle - 事件驱动入口（docs §4.8）

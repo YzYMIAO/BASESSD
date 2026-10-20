@@ -98,17 +98,11 @@ static bool journal_ring_block_bad(const l2p_journal_t *journal, BYTE b)
     {
         return true;
     }
-    const journal_bad_block_port_t *port = &journal->bad_block_port;
-
-    if (port->block_is_bad == NULL)
-    {
-        return false;
-    }
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
         const WORD gblock = ftl_gblock(p, (JOURNAL_BLOCK0 + b));
 
-        if (port->block_is_bad(port->ctx, gblock))
+        if (allocator_block_is_bad(journal->alloc, gblock))
         {
             return true;
         }
@@ -156,12 +150,14 @@ static BYTE journal_first_usable(const l2p_journal_t *journal)
  *   实现要点：sequence_counter 从 1 起（0 保留作「无序号」）；page_buf 填 0xFF 表示
  *             空页（与 NAND 擦除态一致）。
  * -------------------------------------------------------------------- */
-void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
+void journal_init(l2p_journal_t *journal, ftl_topology_t topo, ftl_allocator_t *alloc)
 {
     /* 前置条件（判据 2 / §二十六「子模块公开入口」）：调用者一律传 ftl->journal。 */
 
-    journal->topo = topo;
-    memset(&journal->bad_block_port, 0, sizeof(journal->bad_block_port)); /* 由装配层绑定 */
+    ASSERT(alloc != NULL);
+
+    journal->topo  = topo;
+    journal->alloc = alloc;
 
     journal->handle.current_block    = 0U;
     journal->handle.current_page     = 0U;
@@ -182,11 +178,6 @@ void journal_init(l2p_journal_t *journal, ftl_topology_t topo)
     /* 异步刷页 job 复位：无在飞、无待偿擦除 */
     journal->handle.phase      = JRN_IDLE;
     journal->handle.need_erase = 0U;
-}
-
-void journal_bind_bad_block_port(l2p_journal_t *journal, const journal_bad_block_port_t *port)
-{
-    journal->bad_block_port = *port;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -460,16 +451,11 @@ static void journal_erase_failed(l2p_journal_t *journal, BYTE block)
 
     journal->handle.bad_mask |= (1U << block);
 
-    const journal_bad_block_port_t *port = &journal->bad_block_port;
-
-    if (port->mark_bad != NULL)
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        for (BYTE p = 0U; p < PLANE_NUM; p++)
-        {
-            const WORD gblock = ftl_gblock(p, (JOURNAL_BLOCK0 + block));
+        const WORD gblock = ftl_gblock(p, (JOURNAL_BLOCK0 + block));
 
-            port->mark_bad(port->ctx, gblock);
-        }
+        (void)bbt_mark_bad(journal->alloc, gblock);
     }
     journal->handle.erase_fail_count = 0U;
     journal->handle.erase_fail_block = JOURNAL_BLOCK_NONE;
