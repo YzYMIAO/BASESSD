@@ -96,9 +96,10 @@ static ftl_status_t wbuf_program_page(wbuf_handle_t   *h,
         return ret; /* FTL_AGAIN（池空，瞬态）/ FTL_ERROR 原样上抛 */
     }
 
-    /* 按页内 CW 偏移从整页镜像**散射**取数（稀疏页必须散射——顺序打包会把槽 0 的数据
-     * 塞进第一个链槽而非它自己的 CW 偏移）。 */
-    ret = ftl_cmd_write_data_cw(cmd, h->data, h->occupied);
+    /* 按 plane-major pair 镜像的槽位**散射**取数（槽位 = plane*CW_NUM + cw）。
+     * 稀疏页必须散射——顺序打包会把槽 0 的数据塞进第一个链槽而非它自己的 CW 偏移。
+     * ⚠ 必须用 pair 版本：单页版本会让 plane1 复制 plane0 的前 2KB。 */
+    ret = ftl_cmd_write_data_pair_cw(cmd, h->data, h->occupied);
     if (ret != FTL_OK)
     {
         return FTL_ERROR;

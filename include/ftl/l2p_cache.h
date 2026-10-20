@@ -211,6 +211,13 @@ typedef struct
      * 由 2056B 增至 2060B（64 行共 +256B）。 */
     uint8_t fresh;
 
+    /* 1 = 本行最近一次加载在重试耗尽后降级为「全未映射」（RISK-L2P-04）。
+     * 开机恢复用它区分「合法的未映射」与「读不出来被迫当成未映射」：
+     * 后者必须让 probe 计入读错误、回退 full metadata rebuild，不能报 restored。
+     * 每次 load_start 清零；加载成功清零；降级时置 1。与 load_fail_count 共用对齐填充，
+     * 行结构体尺寸不变。 */
+    uint8_t degraded;
+
     /* 本 region 连续加载失败次数（RISK-L2P-01）。
      * 失败后先置 INVALID 重试，达到 L2P_LOAD_RETRY_MAX 才降级为「全未映射的
      * CLEAN 行」——既不每次访问都重读坏 region（活锁），也不把一次瞬态读错
@@ -375,6 +382,17 @@ ftl_status_t l2p_cache_write(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
  * @return 同 l2p_cache_read / l2p_cache_write；自旋超预算 ⇒ FTL_ERROR。
  */
 ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t *out);
+
+/*
+ * l2p_cache_region_degraded - 该 region 最近一次加载是否降级为「全未映射」
+ *
+ * 仅用于开机恢复判定（RISK-L2P-04）：host 路径仍按“未映射”继续，不因降级报错。
+ *
+ * @param cache         共享 L2P cache
+ * @param global_region 全局 region（lba_to_global_region(lba)）
+ * @return true = 发生过加载失败降级；false = 未驻留 / 合法未映射 / 正常加载
+ */
+bool         l2p_cache_region_degraded(const l2p_cache_t *cache, uint32_t global_region);
 ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba);
 
 /*

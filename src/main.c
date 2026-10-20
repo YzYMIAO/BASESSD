@@ -6,8 +6,9 @@
  *   main() → sys_init → ssd_log 绑定 → fc_init → nand_init
  *          → nand_dispatch_set_armed(1) → stm32_platform_register
  *          → ssd_ftl_boot_all（含 ssd_ftl_boot / ssd_controller_init）
+ *          → usb_msc_init → usb_device_init
  *          → while(1) { cli_service_poll; ftl_service | fc_service;
- *                       btim_scheduler_poll; }
+ *                       usb_msc_task; usb_device_task; btim_scheduler_poll; }
  * 关键约定：
  *   - 初始化是**严格 if/else-if 级联**：前一步失败会整段跳过后面的，
  *     因此 fc_init 失败时 NAND 根本不会被初始化。
@@ -44,12 +45,14 @@
 #include "stm32h7xx_hal.h"
 #include "sys.h"
 #include "usart.h"
+#include "usb.h"
+#include "usb_msc.h"
 #include "watchdog.h"
 
 #include <string.h>
 
 /* 每次需要确认板上 ELF 是否更新时递增；仅用于开发阶段 UART 诊断。 */
-#define SSD_FIRMWARE_DEBUG_REVISION 24
+#define SSD_FIRMWARE_DEBUG_REVISION 27
 #define SSD_WATCHDOG_ENABLE         0U
 
 /* 编译期字符串化：把版本号宏拼进开机横幅。 */
@@ -547,6 +550,21 @@ int main(void)
             ssd_ftl_boot_all();
         }
     }
+
+    /* USB device：MSC 前端 + TinyUSB 协议栈。放在 FTL boot 之后 —— 主机枚举
+     * 后第一条 TEST UNIT READY 就能反映 controller 是否 READY；boot 失败时
+     * 设备仍然枚举，但 USB MSC 块设备不可用（而不是整块板子不再出现 USB 设备）。 */
+    boot_section("usb");
+    usb_msc_init();
+    if (!usb_device_init())
+    {
+        LOGE("usb device init failed\r\n");
+    }
+    else
+    {
+        LOGI("[USB ] device stack ready (USB2_OTG_FS, full speed)\r\n");
+    }
+
     /* APB1=100 MHz and APB1 prescaler=2, so TIM6 kernel clock is 200 MHz. */
     btim_timx_int_init(1000 - 1, 200 - 1);
     boot_report_console();
@@ -607,6 +625,12 @@ int main(void)
         {
             (void)fc_service();
         }
+
+        /* USB：先让 MSC 前端检查在飞请求（提交/回填），再让协议栈处理事件
+         * （tud_msc_async_io_done 会在这里把数据/CSW 发出去）。两者都非阻塞。 */
+        usb_msc_task();
+        usb_device_task();
+
         btim_scheduler_poll();
     }
 }

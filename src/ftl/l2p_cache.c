@@ -259,11 +259,13 @@ bool l2p_cache_preload_region(l2p_cache_t *cache, uint32_t global_region, nand_p
 
         if (ftl_sync_read_page(pba, line->entries, L2P_REGION_SIZE, FTL_PAGE_CFG_META()) == FTL_OK)
         {
-            line->state = L2P_CACHE_CLEAN;
+            line->state    = L2P_CACHE_CLEAN;
+            line->degraded = 0U;
             return true;
         }
 
-        line->state = L2P_CACHE_INVALID;
+        line->state    = L2P_CACHE_INVALID;
+        line->degraded = 0U;
         return false;
     }
 
@@ -376,6 +378,7 @@ static bool l2p_cache_load_start(l2p_cache_t *cache, uint32_t region_id)
     line->access_count = 1U;
     line->state        = L2P_CACHE_LOADING;
     line->fresh        = 0U; /* 完成时置 1（见 l2p_cache_line_t.fresh） */
+    line->degraded     = 0U; /* 新一次加载尝试：降级标志只反映最近一次结果 */
 
     nand_pba_t region_addr = metadata_dir_lookup(owner->metadata_dir,
                                                  METADATA_TYPE_L2P_REGION,
@@ -568,6 +571,26 @@ ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t *out)
 
     LOGE("[L2P] read_sync timeout lba=%lu\r\n", lba);
     return FTL_ERROR;
+}
+
+bool l2p_cache_region_degraded(const l2p_cache_t *cache, uint32_t global_region)
+{
+    if ((cache == NULL) || (global_region >= L2P_GLOBAL_REGIONS))
+    {
+        return false;
+    }
+
+    for (uint16_t i = 0U; i < L2P_CACHE_SIZE; i++)
+    {
+        const l2p_cache_line_t *line = &cache->lines[i];
+
+        if ((line->state != L2P_CACHE_INVALID) && (line->region_id == global_region))
+        {
+            return line->degraded != 0U;
+        }
+    }
+
+    return false;
 }
 
 ftl_status_t l2p_cache_write_sync(l2p_cache_t *cache, lba_t lba, nand_pba_t pba)
@@ -902,6 +925,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
         if (load_failed == 0U)
         {
             line->load_fail_count = 0U;
+            line->degraded        = 0U;
             line->state           = L2P_CACHE_CLEAN;
             line->fresh           = 1U; /* 下一次命中是本次访问的重试，不计 hit */
         }
@@ -920,8 +944,9 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
             }
             else
             {
-                line->state = L2P_CACHE_CLEAN;
-                line->fresh = 1U;
+                line->state    = L2P_CACHE_CLEAN;
+                line->fresh    = 1U;
+                line->degraded = 1U;
                 LOGE("[L2P] region %lu load failed %u times — degrade to unmapped\r\n",
                      line->region_id,
                      (unsigned)line->load_fail_count);
@@ -1117,7 +1142,8 @@ void l2p_cache_line_get(const l2p_cache_t *cache, uint16_t idx, l2p_line_info_t 
 
 void l2p_cache_invalidate_line(l2p_cache_t *cache, uint16_t idx)
 {
-    cache->lines[idx].state = L2P_CACHE_INVALID;
+    cache->lines[idx].state    = L2P_CACHE_INVALID;
+    cache->lines[idx].degraded = 0U;
 }
 
 bool l2p_cache_has_flush_inflight(const l2p_cache_t *cache)

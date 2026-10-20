@@ -939,6 +939,22 @@ static void ftl_recovery_close_block(ftl_context_t       *ftl,
                 }
                 continue;
             }
+
+            /* 读成功也可能来自“重试耗尽 → 降级为全未映射”：返回值同样是 OK + INVALID。
+             * boot 必须把这种情况当读错误，否则会误报 restored（RISK-L2P-04）。 */
+            const uint32_t global_region = lba_to_global_region(cw_lba[cw]);
+
+            if (l2p_cache_region_degraded(ftl->cache, global_region))
+            {
+                LOGW("[BLK] L2P region %lu degraded — snapshot incomplete\r\n",
+                     (unsigned long)global_region);
+                if (stats != NULL)
+                {
+                    stats->l2p_read_errors++;
+                }
+                continue;
+            }
+
             if ((cur != NAND_PBA_INVALID) && (cur == pba_with_cw(pba, cw)))
             {
                 ftl_block_add_valid(b); /* valid_count 单位 = CW */

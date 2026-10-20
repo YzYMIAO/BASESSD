@@ -1345,6 +1345,20 @@ static uint32_t jrn_replay_apply_page(l2p_journal_t              *journal,
             if (l2p_cache_write_sync(cache, (lba_t)entry_lba, (nand_pba_t)entry_new_pba) == FTL_OK)
             {
                 applied++;
+
+                /* 基线若是“降级后的空表”，该 region 的旧映射已不可信：快照结果
+                 * 不能算 restored（RISK-L2P-04）。 */
+                const uint32_t global_region = lba_to_global_region((lba_t)entry_lba);
+
+                if (l2p_cache_region_degraded(cache, global_region))
+                {
+                    LOGW("[JRN] replay: L2P region %lu degraded — force full metadata rebuild\r\n",
+                         (unsigned long)global_region);
+                    if (block_ctx != NULL)
+                    {
+                        block_ctx->ok = 0U;
+                    }
+                }
             }
             else
             {

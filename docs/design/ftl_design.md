@@ -883,7 +883,7 @@ sequenceDiagram
     F->>L: l2p_cache_write（行 DIRTY）
     L->>LB: flush region 页（append slot）
     LB-->>D: commit_region(region → new PBA)
-    D->>D: l2p_live 旧减/新加；归零 → reclaim_pending
+    D->>D: l2p_live 旧减/新加；归零 → reclaim_pending（擦前若 dirty 先写 Anchor）
     Note over C: CP 触发（水位 / 定时 / 强制）
     C->>L: 快照脏 bitmap + journal 水位
     C->>LB: flush 脏 region
@@ -902,7 +902,7 @@ flowchart LR
     CL --> BBTJ["BBT job（如有坏块）"]
     CL --> WJ["BST 计数更新（随下次 CP 落盘）"]
     L2P["L2P log block l2p_live == 0"] --> RP["reclaim_pending 位图"]
-    RP --> RJ["MD job RECLAIM：单 plane 擦 → Free Pool"]
+    RP --> RJ["MD job RECLAIM：dirty 先写 Anchor → 单 plane 擦 → Free Pool"]
     COLD["L2P log block 冷热混合"] --> MC["MD job 压缩：搬活 region → Anchor → 擦 victim"]
     MC --> RP
 ```
@@ -937,7 +937,7 @@ Checkpoint（21 页/record：Header 1 + 块元数据 4 + 磨损 16）
 
 L2P region log（追加块）
   region 页追加到当前块 page 0..63 → 换新块 page 0
-  l2p_live 归零 ⇒ reclaim_pending ⇒ job 异步擦除归还
+  l2p_live 归零 ⇒ reclaim_pending ⇒（dirty 先写 Anchor）⇒ job 异步擦除归还
   冷热混合且池吃紧 ⇒ compaction：搬活 region 到当前块 → Anchor 落盘 → 擦 victim
 ```
 
@@ -1106,6 +1106,12 @@ flowchart TD
 5. **PF**：先恢复块元数据 → `journal_replay`（所有 `page_seq+entry_count > cp_seq` 的页，
    按 `(page_seq, entry_idx)` 递增，last-write-wins；同步维护 valid_count）→ F4 →
    probe + `build_pools` + Spare 补池；失败 → reset → full metadata rebuild → carve。
+   ⚠ **降级检测**：`l2p_cache_read_sync` 返回 OK **不等于**读到合法映射——连续加载失败后
+   行会降级为“全未映射”。因此：
+   - `ftl_recovery_probe_blocks` 在每次成功读后检查 `l2p_cache_region_degraded()`，
+     命中则计入 `l2p_read_errors`；
+   - `journal_replay` 在降级基线上成功写入条目时，把 `block_ctx->ok = 0`。
+   两者都会让启动回退 full metadata rebuild，而不是把“读失败降级”报成 `restored`。
 6. **full metadata rebuild**：逐 plane/块扫 page 0 判空、找写指针；坏块/元数据块跳过；写过的块建退化单 plane
    的 Closed 条目；逐页读 META + 反查 L2P 回填 `valid_count`。full metadata rebuild **先于 carve**：
    否则被 carve 放进 Spare/OP 的写过块会同时成为 Closed 条目。
@@ -1125,6 +1131,7 @@ flowchart TD
 | 无有效 CP | fresh + full metadata rebuild | 旧映射不可达（介质已被格式化/版本不符时这是预期） |
 | 块元数据快照 CRC 失败 | 该快照丢弃，走 full metadata rebuild | 用户数据不丢；恢复时间变长 |
 | Journal 回放某页读失败 | 跳过该页，继续其余页 | 该页条目丢失；映射可能回退到上一版本 |
+| L2P region 加载降级（读失败 3 次） | 行 CLEAN + 全 INVALID + `degraded=1` | **不能报 `restored`**：probe / journal replay 用 `l2p_cache_region_degraded()` 检测，回退 full metadata rebuild；旧映射可能丢失（`RISK-L2P-04`） |
 | 块元数据恢复与 probe 不一致 | reset → full metadata rebuild → carve | 以介质为准；块元数据重新计算 |
 | full metadata rebuild 中某块读失败 | 跳过该块 | 该块数据不可恢复；后续由 GC 处理 |
 
@@ -1610,6 +1617,8 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `count` | 2 B | 有效 entry 数（固定层全填，通常 = 2048） |
 | `anchor_sequence` | 4 B | 当前 Anchor 序号 |
 | `dirty` | 1 B | 有未写回 Anchor 的变更 |
+| `dirty_gen` | 4 B | Directory 变更代数；每次 `metadata_dir_update` 自增 |
+| `anchor_gen` | 4 B | 本次 Anchor 写入所覆盖的 `dirty_gen` 快照（过期保护） |
 | `l2p_live[4096]` | 8 KiB | 每个 gblock 上还有多少 region 的**最新位置**；也是 `ftl_is_metadata_block` 的动态块判据 |
 | `cur_metadata_block` | 2 B | 当前日志块 gblock |
 | `cur_metadata_page` | 1 B | 当前日志块下一可用页 |
@@ -1793,16 +1802,25 @@ Anchor 装配、测试使用；运行期 L2P region 的更新走 `commit_region`
 region 全部被改写、最新位置都迁到别处后，这个块才没有活引用，才能擦。`l2p_live[g]`
 就是这个计数；它只在 `commit_region` 里增减，并在 `metadata_dir_load` 里重建。
 
-**回收**（`reclaim_pending` 位图 + `MD_JOB_RECLAIM`）：块进入回收前必须满足三条：
+**回收**（`reclaim_pending` 位图 + `MD_JOB_RECLAIM`）：块进入回收前必须满足四条：
 
 1. `l2p_live[g] == 0`；
 2. `g != cur_metadata_block`（已满且零活的当前块会先被摘掉当前身份）；
-3. BST 状态为 `LOG`（确实是本池独占的日志块，而不是恰好计数为 0 的用户块）。
+3. BST 状态为 `LOG`（确实是本池独占的日志块，而不是恰好计数为 0 的用户块）；
+4. **`dir->dirty == false`**（on-media Anchor 已覆盖当前 Directory；见下方 ③→④ 契约）。
 
 登记点：`commit_region` 旧位置归零、`append_slot` 换走零活旧块、换块时的
 `md_reclaim_mark_all` 扫描、压缩/擦除失败重试。**登记只置位，不碰 NAND**；
 `metadata_handle` 的 RECLAIM 阶段逐块异步擦除，成功才清位并归还 Free Pool，
 失败保留位下轮重试。运行期没有任何同步 `tERASE`（3 ms 会击穿服务预算）。
+
+⚠ **登记 ≠ 可擦**：普通 L2P flush 在 `commit_region` 里登记回收候选时，新位置还只在
+RAM Directory 里，on-media Anchor 仍指向旧块。因此 `MD_JOB_RECLAIM` 在擦除前要求
+`dir->dirty == false`；脏则先走 `CP_ANCHOR_*` 写一条 Anchor（`anchor_for_reclaim`），
+落盘成功后才回到 RECLAIM。压缩路径原本就是 `CP_ANCHOR → CP_RECLAIM`，现在两条路径
+共用同一条 ③→④ 契约。`dirty_gen` / `anchor_gen` 保证写入期间有新 commit 时 Anchor
+不会被误标为"已覆盖当前 Directory"；Anchor 成功且未过期后才调用
+`md_reclaim_mark_all()`，保证新登记的候选都不在刚写下的 Anchor 引用集合里。
 
 **压缩**（抗碎片）：某日志块可能混着“永不再写的冷 region”（63 冷 + 1 热），
 `l2p_live` 永远不归零，最坏吃掉近半个 die。压缩挑**活 region 最少**的块做 victim，
@@ -1821,7 +1839,9 @@ flowchart TD
     AWRITE["CP_ANCHOR_WRITE"]
     CPRECLAIM["CP_RECLAIM"]
     DONE["DONE"]
-    IDLE -- "reclaim_pending 非空" --> RECLAIM
+    IDLE -- "reclaim_pending 非空 且 dirty" --> APREP
+    IDLE -- "reclaim_pending 非空 且 Anchor 已同步" --> RECLAIM
+    APREP -- "for_reclaim + Anchor 已落盘" --> RECLAIM
     RECLAIM -- "异步擦完 清位 归还" --> IDLE
     IDLE -- "compact_wanted" --> CP_READ
     CP_READ -- "读到一条活 region" --> CP_WRITE
@@ -1844,6 +1864,14 @@ flowchart TD
 ```
 
 ③ 必须早于 ④：否则掉电后 Anchor 仍指向已擦块，那些 region 的映射永久丢失。
+**普通回收**（没有搬移，只有 ③→④）同样适用：`commit_region` 释放旧日志块时就会登记
+回收候选，但此时新位置只在 RAM Directory 里；所以 RECLAIM 必须先让 Anchor 追上
+Directory（`anchor_for_reclaim`），否则就是同一个掉电丢映射。
+
+`dirty_gen / anchor_gen` 是这条契约的并发保护：Anchor 分 8 页异步写，期间可能有新的
+`commit_region`。`anchor_prepare` 记录当时的 `dirty_gen`，`anchor_commit` 只有
+`ok && dirty_gen == anchor_gen` 才清 dirty；否则保留 dirty，写下一整条 Anchor。
+
 
 **失败不回滚**：任一 phase 失败 ⇒ 中止。已登记的 region 指向新页，未搬的仍指向 victim
 （victim 不擦）⇒ 两边都有效，下次换块时重来。这是“宁可多占一个块，不丢映射”的取舍。
@@ -1861,7 +1889,7 @@ flowchart TD
 | 池 | 32 块，每块 8 条 record（64 页 / 8 页） |
 | 写序 | 池内 ring 轮转；写满一块先擦池内下一块 |
 | 读取 | 找“整条校验通过”中 sequence 最大者；不取半条 |
-| 触发 | `dirty` 置位后由元数据 job 异步 flush（无变更阈值）；Checkpoint 前也要求 flush；不在 `metadata_dir_update` 里同步做 |
+| 触发 | `dirty` 置位后由元数据 job 异步 flush（无变更阈值），**或** 普通回收在擦除前强制 flush（`anchor_for_reclaim`）；Checkpoint 前也要求 flush；不在 `metadata_dir_update` 里同步做 |
 | CRC | 无本层 CRC；完整性由下层 FC 的 per-CW CRC + ECC 保证 |
 
 三段式（所有落盘站点统一）：
@@ -1875,11 +1903,16 @@ metadata_dir_anchor_page(dir, seq, chunk, &page) × 8   ← 纯 RAM 组页
 写 8 页（异步命令）
 metadata_dir_anchor_commit(dir, &ring, idx, ok)
     ├─ 无论成败推进游标（半编程槽不可复用）
-    └─ ok 才清 dirty；失败整条作废，保留 dirty
+    └─ ok **且** dirty_gen == anchor_gen 才清 dirty；失败/过期整条作废，保留 dirty
 ```
 
 **torn write**：单页损坏只让该页作废；一条 record 要求所有页 sequence 一致，
 所以半条 record 不会被采用，旧 record 仍在池里可用。
+
+**“过期”保护**：prepare 时记下 `anchor_gen = dirty_gen`；8 页异步写期间若有新的
+`commit_region`，`dirty_gen` 会前进。commit 发现不相等时保留 dirty，下一次 job
+在新槽重写整条；**不允许**把“旧快照 + 新变更”误标为已落盘（否则回收会擦掉
+Anchor 仍引用的旧块）。
 
 #### 3.5.10 与 L2P cache / Checkpoint 的交界
 
@@ -1909,11 +1942,12 @@ metadata_dir_anchor_commit(dir, &ring, idx, ok)
 |---|---|---|
 | `append_slot` 之后、写页之前 | 槽位已推进，页仍是擦除态 | 该槽作废；Directory 指旧位置；Journal 回放恢复映射 |
 | 写页成功、`commit_region` 之前 | 新页有数据，Directory 未登记 | 新页成孤儿；Directory 指旧位置；Journal 回放恢复 |
-| `commit_region` 之后 | Directory 已指向新页 | Anchor 可能还是旧的 ⇒ boot 从旧 Anchor 加载后，靠 Journal 回放补齐 |
+| `commit_region` 之后 | Directory 已指向新页 | Anchor 可能还是旧的 ⇒ boot 从旧 Anchor 加载后，靠 Journal 回放补齐；**若该 commit 释放了旧日志块，回收 gate 会先写 Anchor 再擦** |
 | Anchor 写一半 | 部分页新、部分页旧 | 整条 record 校验失败；旧 record 仍有效 |
+| Anchor 写入期间有新 commit | 新 entry 不在本条 record 里 | `dirty_gen != anchor_gen` ⇒ commit 不清 dirty；job 在下一槽重写整条，期间**不允许**回收 |
 | Anchor 已落盘、擦 victim 之前 | 新位置已登记且落盘 | victim 未擦，映射完整；下次压缩重来 |
 | 擦 victim 中掉电 | victim 部分块擦除 | `l2p_live == 0` 才擦，且 Anchor 已先落盘 ⇒ 无映射指向 victim |
-| 回收日志块时掉电 | 无活 region 的块被擦 | 无映射引用它，安全 |
+| 回收日志块时掉电 | 无活 region 的块被擦 | 仅在 `l2p_live == 0`、Anchor 已覆盖当前 Directory（`!dirty`）时擦；满足后无映射引用它，安全 |
 | Anchor 池/日志块 NAND 读失败 | record/页作废 | 回退到上一个有效 Anchor；最坏走 full metadata rebuild |
 | 介质版本不符 | 记录作废 | `ftl_media_format` 全片格式化（§2.5） |
 
@@ -1994,6 +2028,8 @@ Cache 带来三个新问题，模块必须正面回答：
 | `state` | 1 B | INVALID / CLEAN / DIRTY / FLUSHING / LOADING |
 | `access_count` | 2 B | CLOCK 访问计数 |
 | `fresh` | 1 B | 本次加载正是为当前访问而起；首次触碰不计命中 |
+| `load_fail_count` | 1 B | 同一 region 连续加载失败次数（`L2P_LOAD_RETRY_MAX = 3`） |
+| `degraded` | 1 B | 最近一次加载在重试耗尽后降级为“全未映射”（`RISK-L2P-04`） |
 
 `l2p_cache_t`：
 
@@ -2039,6 +2075,10 @@ flowchart LR
 5. **`flush_inflight` 是共享 credit 池**：上限 4，防止写回把 FC 命令/缓冲池吃光。
 6. **同步逃生口只许结构性同步上下文**：开机、CLI、`fl`、CP；服务函数禁止调用
    （`l2p_sync_pump` 有 `ftl_op_in_dispatch()==0` 断言）。
+7. **降级不是“合法未映射”**：连续 `L2P_LOAD_RETRY_MAX` 次加载失败后，行置
+   CLEAN + entries 全 INVALID + `degraded = 1`。host 路径按“未映射”继续（避免活锁），
+   但**开机恢复**必须用 `l2p_cache_region_degraded()` 区分两者：降级要计入
+   `l2p_read_errors`，回退 full metadata rebuild，不能报 `restored`。
 
 #### 3.6.4 读路径
 
@@ -2112,7 +2152,7 @@ l2p_cache_flush_kick(line)
 | `FTL_AGAIN` | 加载中/背压/行在飞 | 调用者下轮重试；不是错误 |
 | `FTL_OK` + `NAND_PBA_INVALID` | **未映射**（合法结果） | 读路径零填充；写路径分配新位置 |
 | `FTL_ERROR`（越界） | 也回填 `INVALID` | 调用者按未映射处理 |
-| 加载失败 | 行 CLEAN + 全 INVALID | 该 region 视为全未映射；不反复重试 |
+| 加载失败 | 行 CLEAN + 全 INVALID + `degraded=1` | 该 region 视为全未映射；不反复重试。**boot 恢复**用 `l2p_cache_region_degraded()` 区分“合法未映射”与“读失败降级”：后者计入 `l2p_read_errors`，回退 full metadata rebuild，不再报 `restored` |
 | 写回失败 | 行回 DIRTY | Directory 仍指旧位置；Journal 可恢复 |
 | 所有行在飞 | 驱逐返回 -1 | 调用者 FTL_AGAIN |
 
@@ -2238,6 +2278,9 @@ journal_replay(journal, cache, cp_sequence, &entries, block_ctx)
           → replay_pages[256]（栈上 2 KiB；下标必须 uint16_t）
   第二遍：按 (page_seq, entry_idx) 递增排序，逐页读、逐条应用
           - l2p_cache_write_sync(lba, new_pba)（开机无人 drain CQ，用同步逃生口）
+          - 写成功后检查 l2p_cache_region_degraded(region)：若该行是“加载失败降级”
+            的空基线，说明旧映射不可信 ⇒ block_ctx->ok = 0（回退 full metadata
+            rebuild，不能报 restored；RISK-L2P-04）
           - block_ctx 有效时同步维护 valid_count：new +1 / old -1
             （TRIM 只减 old；old == new 跳过）
           - materialize 失败/越界/下溢 ⇒ ok=0，调用者回退 full metadata rebuild
@@ -2268,6 +2311,7 @@ journal_replay(journal, cache, cp_sequence, &entries, block_ctx)
 | 截断水位不覆盖全部已写条目 | `JRN_TRUNC_NO_TRUNCATE`，不截断 | 最旧块仍持有回放条目，安全 |
 | 页写失败 | 条目已随页缓冲丢弃；置 `write_fail_pending` + `checkpoint_needed/emergency` | 迁移侧中止且不擦 victim；CP 把当前 L2P 落盘后清 pending |
 | 回放某页读失败 | 跳过该页 | 该页条目丢失；映射回退一版 |
+| 回放基线 region 降级 | `l2p_cache_region_degraded()` 命中 ⇒ `block_ctx->ok=0` | 旧映射不可信：回退 full metadata rebuild，不报 restored（`RISK-L2P-04`） |
 | 序号不连续 | 在该处截断 | 之后的页不应用 |
 
 #### 3.7.8 常量与出处
@@ -2822,6 +2866,13 @@ plane0/plane1 各写 1 个 CW ⇒ 一对页只用 2/8 ⇒ 75% 浪费
    必须对贡献组按对应状态码逐组递减在飞数（TRIM ⇒ OK，复位 ⇒ IO_ERROR）；只清 `owners`
    会让那些组的在飞数永不归零、host 写组挂死。该不变量由 `wbuf_handle(DROP)` / `wbuf_handle(RESET)`
    在模块内收口（§3.1：不变量不得靠外部模块手工维护）。
+7. **取数函数必须匹配 `data[]` 布局**：wbuf 的 `data[]` 是 **plane-major pair 镜像**
+   （slot = `plane*CW_NUM + cw`），页写必须用 `ftl_cmd_write_data_pair_cw`。
+   `ftl_cmd_write_data_cw` 的契约是**单页镜像**（mirror / GC / WL：两个 plane 共用
+   `cw*512` 偏移）；误用它会让 plane1 的 4 个 CW 复制 plane0 的前 2KB，表现为
+   host 大文件“每 4KB 的后 2KB 重复前 2KB”（`RISK-WB-06`）。
+   ⚠ 回归判据不能用 CLI 的 `wr/rd` 固定 pattern（每 2KB 相同，缺陷不可见），
+   必须用每 2KB 互不相同的数据（见 `docs/design/usb_msc_verification.md` USB-V05）。
 
 #### 3.11.4 流程
 
@@ -2847,7 +2898,7 @@ flowchart TD
 ③ allocator_alloc_pair(FTL_TEMP_HOT, pba)
      失败 ⇒ 释放命令槽 + migrate_trigger(GC_URGENT) + FTL_AGAIN
 ④ nplanes = ftl_cw_bitmap_plane_count(occupied)；n_cw = ftl_cw_bitmap_popcount(occupied)
-⑤ wbuf_program_page：命令头 + ftl_cmd_setup_ppa_pair_cw + ftl_cmd_write_data_cw
+⑤ wbuf_program_page：命令头 + ftl_cmd_setup_ppa_pair_cw + ftl_cmd_write_data_pair_cw（plane-major pair 镜像）
 ⑥ pending_alloc：owners、op=WRITE、n_cw、cw_bitmap、lba=base、new_pba/new_pba1
 ⑦ ftl_op_submit(FTL_OP_HOST_IO)
 ⑧ 提交成功后才清 wbuf（open=0/occupied=0/owners=0）；打一行 LOGD 观测
@@ -3372,7 +3423,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
    cmd->config.crc/random/ldpc/page_type 按上表
    cmd->meta = 窗口基址
 ③ ftl_cmd_setup_ppa_pair_cw(cmd, new_pba, cw_bitmap)   // desc 链
-④ ftl_cmd_write_data_cw(cmd, wbuf.data, cw_bitmap)     // 按页内 CW 偏移散射取数
+④ ftl_cmd_write_data_pair_cw(cmd, wbuf.data, cw_bitmap) // 按 plane-major 槽位散射取数
 ⑤ ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL)
 ⑥ 完成：检查 per-CW status/ECC；成功才走 confirm 路径
 ```
@@ -4268,6 +4319,12 @@ flowchart TB
 | 阶段 D（审计/文档/验证） | 未开始 | 不是新功能；见 §7.3 |
 | FTL UT | **冻结** | `tests/unit/test_ftl.c` 仍引用已删字段；不为让 UT 编过而回退生产代码 |
 | 文档重构 | 本文 | 文档改动不涉及固件，不需要上板；不得写成“功能已验证” |
+| v0.83 回收前 Anchor + L2P 降级可见性（`RISK-MD-06` / `RISK-L2P-04`） | **已提交、未专项上板** | 编译三关通过；需按 `known_risks` 的 64-region 复现 / 故障注入；**不得**据“普通读写通过”声称已验证 |
+| `RISK-MIG-02` predictive 迁移活锁 | **已观测、未修复** | `kind=2 victim read failed` 反复重选同一 victim；当前用 CLI `format` + 断电规避，单列修复 |
+
+> `RISK-WB-06`（wbuf pair 镜像填装）已于 **rev27 上板验证**：Windows FAT 格式化 +
+> `notepad.exe` / 16KB 非均匀 pattern 写入 → `Write-VolumeCache` → 拔插 USB →
+> SHA256 与 2KB 块指纹一致。验证步骤见 `docs/design/usb_msc_verification.md`。
 
 ### 7.2 已知限制
 

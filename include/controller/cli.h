@@ -3,6 +3,8 @@
 
 #include "controller.h"
 
+#include <stdbool.h>
+
 /*
  * UART CLI（应用层）—— 行编辑、命令表与 wr/rd/tr/fl/info/test 等命令。
  *
@@ -17,6 +19,9 @@ extern ssd_controller_t g_ctrl;
 /* 初始化 CLI：预填 g_wr_buf 固定 pattern（.sram2_data 为 NOLOAD，上电不清零）。
  * 在 sys_init 之后、superloop 之前调用一次。 */
 void cli_init(void);
+
+/* CLI 侧是否有未完成的 host 请求；USB MSC 据此让路（共用 host busy gate，本仓自拟）。 */
+bool cli_host_busy(void);
 
 /*
  * 在主循环或唯一的低优先级控制台任务中周期调用，负责回显、组装一行并执行 CLI，

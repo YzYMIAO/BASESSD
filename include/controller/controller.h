@@ -4,6 +4,8 @@
 #include "ftl.h"
 #include "ssd_request.h"
 
+#include <stdbool.h>
+
 typedef enum
 {
     SSD_CONTROLLER_RESET = 0,
@@ -36,6 +38,18 @@ int     ssd_controller_init(ssd_controller_t *controller,
                             ftl_context_t    *ftl[CH_NUM][CE_NUM][LUN_NUM]);
 int     ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
 uint8_t ssd_controller_is_complete(const ssd_request_t *request);
+
+/*
+ * ssd_controller_lba_range_ok - host LBA 区间是否落在设备容量内
+ *
+ * 唯一实现：CLI 与 USB MSC 两个 host 前端在提交前共用（C2/R9）。
+ * 区间为 [lba, lba + count)，count > 0。
+ *
+ * @param lba    起始 LBA（host 全局坐标）
+ * @param count  连续 LBA 数
+ * @return true  区间完整落在 [0, FTL_LBA_MAX)
+ */
+bool ssd_controller_lba_range_ok(uint64_t lba, uint32_t count);
 
 /*
  * ssd_controller_state_transition - Controller 最小状态机（C1，state_machine.c）

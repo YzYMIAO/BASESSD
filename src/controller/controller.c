@@ -96,6 +96,17 @@ uint8_t ssd_controller_is_complete(const ssd_request_t *request)
     return request->complete_flag;
 }
 
+bool ssd_controller_lba_range_ok(uint64_t lba, uint32_t count)
+{
+    /* lba 与 count 的上界之和 < 2^33，uint64 加法不会回绕；先判起点再判终点。 */
+    if ((count == 0U) || (lba >= FTL_LBA_MAX))
+    {
+        return false;
+    }
+
+    return (lba + count) <= FTL_LBA_MAX;
+}
+
 int ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request)
 {
     int ret;

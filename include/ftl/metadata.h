@@ -581,6 +581,7 @@ typedef struct
     bool            compact_wanted;      /* append_slot 换块后池吃紧 ⇒ 请求压缩 */
     bool            anchor_ok;           /* Anchor 分页写是否全部成功（false = 整条作废）*/
     bool            anchor_need_erase;   /* Anchor 写点是否需先擦块 */
+    bool            anchor_for_reclaim;  /* 本次 Anchor 仅为「回收前落盘」：完成后回 RECLAIM */
     uint8_t         anchor_chunk;        /* 已写的 Anchor 页序 */
     uint16_t        victim;              /* 压缩 victim 的 gblock（UINT16_MAX = 无）*/
     uint16_t        region_id;           /* 搬移游标（下一个待查 region_id）*/
@@ -627,6 +628,8 @@ typedef struct
     uint16_t         count;           /* 有效 entry 数 */
     uint32_t         anchor_sequence; /* 当前 Anchor sequence */
     bool             dirty;           /* 是否有未写回 Anchor 的变更 */
+    uint32_t         dirty_gen;       /* Directory 变更代数：每次 update 自增 */
+    uint32_t         anchor_gen;      /* 本次 Anchor 写入所覆盖的 dirty_gen 快照 */
 
     /* ── L2P 日志块（元数据写模型：只追加 + 块池轮转）──
      * 每个 region 写进「当前日志块」的下一空槽（一 region = 一页）。块满则从

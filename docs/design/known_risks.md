@@ -3,7 +3,7 @@
 > **用途**：把「暂不修 / 待上板 / 待测试源同步 / 待决策」的风险固定下来。
 > **复查 `metadata` / GC / migrate / journal / BBT / 掉电恢复 / L2P cache /
 > Checkpoint / 磨损计数与 WL / Read Recovery / FTL↔FC 接口 / 完成路由与 op dispatch /
-> 页打包写缓冲 wbuf / FTL service 与后台调度器 / 类型规则前先读本表**，避免重复分析、重复消耗。
+> 页打包写缓冲 wbuf / FTL service 与后台调度器 / 类型规则 / USB MSC 前先读本表**，避免重复分析、重复消耗。
 >
 > ⚠ **登记是硬约束（`CLAUDE.md` R11）**：缺陷与判定结论一经得出，当场登记在对应分节，
 > 只在对话里说 = 未完成。说不出失败场景/后果的归 §七 S，不进本表。
@@ -25,6 +25,7 @@
 | RISK-MD-03 | 待测试源 | `tests/unit/test_ftl.c` 仍引用已删字段/旧签名：`change_count`、`ring.plane`、`have_dynamic`、旧 `metadata_dir_commit_region` 签名、`super_block_t.valid/topo` 等；`make tests UT=FTL` 失败 | 未改测试源（R4） | 测试所有者更新后重新跑 `make tests UT=FTL` | `tests/unit/test_ftl.c` |
 | RISK-MD-04 | 已修未上板 | H15 跨模块欠账已基本收敛：`src/ftl` 下再无手写 `FC_CW_STATUS_ERROR_MASK`（本轮收掉 read_recovery.c 3 处、bbt.c 1 处）；**剩 `src/fc/fc.c:809`** 一处，属 FC 层内部（取首个失败 desc 供日志归因，非成败判定） | 其余消费方一律走 `fc_cw_status_has_error()` | 若要彻底归零：给 FC 侧补一个「首个失败 desc」helper | `include/fc/fc_command.h`（helper）；`grep -rn FC_CW_STATUS_ERROR_MASK src` |
 | RISK-MD-05 | 待上板 | 介质布局 v9（P0+P1 镜像 / Journal multi-plane 擦 / Wear 并入 CP）+ 本轮 metadata 重构均未上板 | 已有独立 memory 记录 | 见 memory `ftl-media-layout-v9-unverified.md` 的板端清单 | `docs/design/ftl_design.md §7.1` |
+| RISK-MD-06 | 已修未上板（**未被本次冷启动覆盖**） | **回收旧日志块不等 Anchor 落盘**：普通 L2P flush 在 `commit_region` 里就登记回收候选，而新位置只在 RAM Directory；`MD_JOB_RECLAIM` 原来只检查 live/current/LOG 就擦。掉电后 on-media Anchor 仍指向**已擦块** ⇒ 重启 L2P region 读失败（修前上板 `region 0 load failed 3 times`）。 | 修法：① `MD_JOB_RECLAIM` 擦前要求 `dir->dirty == false`；脏则先走 `CP_ANCHOR_*` 写 Anchor（`anchor_for_reclaim`），成功后回 RECLAIM。② `dirty_gen/anchor_gen` 防止 Anchor 写入期间的新 commit 被误标为已覆盖。③ Anchor 落盘成功后才 `md_reclaim_mark_all`。 | 上板复现必须**释放一个元数据日志块**：只对 LBA 0 写两次 + `fl` 只是往同一个 64 页块追加 2 页，`anchor_seq` 不变（已实测 rev25：`anchor_seq=1 cp_seq=1`，**未触发**本路径）。需写满 64 页（64 个不同 region，LBA = r×512）再整体改写使其轮转；或加 debug 测试钩子。验证判据：`anchor_seq > cp_seq`、冷启动无 `[L2P] load failed` | `src/ftl/metadata_job.c`（IDLE/RECLAIM/CP_ANCHOR）；`src/ftl/metadata.c`（dirty_gen/anchor_gen）；rev25 实测：format→POR→`wr 0 1`+`fl`×2→POR，`boot type=2 journal_entries=2`、无 L2P 错误但 `anchor_seq` 未增 |
 
 ---
 
@@ -49,6 +50,7 @@
 | RISK-GC-06 | 待上板 | 本轮行为变化未板验：T5 交叉相乘、WL 5 s 节拍、CLOSED plane 门控、`valid_count` 单块上界、`gc_decode_cw_lba` 三态 | 编译零告警 | 按 §2 板端清单回归（GC 并发覆盖写/TRIM、断电、WL、fault injection） | 提交 `fdc7c7f` |
 | RISK-JN-03 | 待上板 | `write_fail_pending` + CP 清账逻辑未做故障注入：页写失败 / 擦失败 / CP 早于失败点三种时序未实测 | 静态路径已审查 | 注入 Journal 页写失败，确认 victim 未擦、CP 后恢复 | `src/ftl/journal.c` / `src/ftl/checkpoint.c` |
 | RISK-JN-04 | 已修未上板 | ~~drain 超时后 `journal_flush_page` 仍同步刷页；在飞写命令仍拥有当前页地址 ⇒ 双重编程~~ | drain 失败 ⇒ `LOGE` + 置 pending + `FTL_ERROR`，**不再**同步刷；`journal_flush_now` 入口加 `job.phase == JRN_IDLE` 守卫 | 上板：注入命令丢失/超时（drain 超时），确认不发生同页二次编程、后续可恢复 | `src/ftl/journal.c` `journal_flush_page` / `journal_flush_now` |
+| RISK-MIG-02 | 待定位（上板观测 2026-10-20） | **predictive 迁移活锁**：`kind=2`（RR 慢死预测）反复选中同一 SB（plane0=453 / plane1=1964），page 17 读失败 → `mig_abort` → 立刻重选，约 1 Hz 刷屏；`MIG_VICTIM_READ_FAIL_MAX=3` 的标坏路径没有触发。可疑原因：`fail_count` 在**同一 gblock 的其它页/其它 kind job 读成功**时被清零（`migrate.c:1220`），或 predict 与 WL 交替使连续失败计数永远到不了 3。后果：NAND/CPU 被空转风暴占满，host 格式化超时失败（Windows 报“无法完成格式化”），坏块也不会被隔离 | 只有 LOGW 可见；未标坏/未降速 | ① 先把媒体 CLI `format` 后观察风暴是否消失；② 若复现：改为**按 gblock 的失败计数**（成功读不清零，或只在成功迁移该块时清零），或在 predict 路径加窗口内 abort 次数上限 + 黑名单；③ 上板确认 `bbt_mark_bad` / `allocator_closed_drop_plane` 在阈值触发时确实执行 | `src/ftl/migrate.c` `mig_complete_read`（1185-1225）/ `mig_abort`；上板日志 rev25/26：`victim read failed blk=453/1964` 反复出现 |
 
 ---
 
@@ -84,6 +86,7 @@
 | RISK-BOOT-09 | 已修未上板 | `metadata_dir_load` 失败时静默回退到新建 Directory：旧 region 映射可能整体丢失，但启动继续 | 失败后有 LOGW（无返回码） | 决定是否把“Directory 读失败”升级为启动失败 / 重扫 | `src/ftl/metadata.c` `metadata_dir_load` |
 | RISK-BOOT-10 | 已修未上板 | ~~`journal_resume` 恢复写态时忽略跨块擦除结果：擦失败后首次写会落在未擦页~~ | 擦失败 ⇒ `LOGE` + 重新挂起 `job.need_erase`（在 job 复位之后写入）；`journal_handle` / `flush_now` 先补擦，`journal_freeze` 在 `need_erase != 0` 时拒绝写 | 上板：注入 resume 跨块擦失败，首次写前必须补擦成功 | `src/ftl/journal.c` `journal_resume` |
 | RISK-BOOT-11 | 已修未上板 | 快照 probe 的 `l2p_cache_read_sync` 失败只记 LOGW 并计入 `anomalies`，`blocks_restored` 仍为 1 ⇒ valid_count 少算 | 读失败日志可见；不触发 full metadata rebuild | 若读失败频繁，升级为 full metadata rebuild 或按块隔离 | `src/ftl/power_failure_recovery.c` `ftl_recovery_probe_blocks` |
+| RISK-BOOT-13 | 待定位（归属未确认；POR 后未复现） | `format` 完成后未按提示 `POWER-CYCLE NOW` 就下发 `wr`：曾出现 CLI 请求永久 `busy`；同一会话的 `.noinit` 记录显示 **HardFault** `PC=0x2400038c LR=0x24000b09 CFSR=IACCVIOL HFSR=FORCED`（按 rev25 解析落在 CLI 16 KB `g_wr_buf` 内，属执行流跳进非可执行 RAM）。**但一次 POR 后 `previous crash` 行消失，且 format→POR→wr/fl 正常** ⇒ 该记录至少可能是 rev24/旧会话的陈旧记录，不能归因于本轮 FTL 改动。另：format 后未重启的 `wr` 本次返回 `status=-3`，未再挂死 | `format` 已打印 `POWER-CYCLE NOW`；未做运行期拒绝 | ① 继续在 rev25 上做正常读写/断电回归；② 若 `previous crash` 再次出现：立即 `crash` + 记录命令序列，按**当次镜像**符号表定位；③ 考虑让 format 后置 FTL 为不可提交状态直到重启 | rev25 日志 2026-10-20：首次 `.noinit` 有 HardFault；**POR 后无该行**；`arm-none-eabi-nm` `g_wr_buf=0x240002dc` |
 
 ---
 
@@ -94,6 +97,7 @@
 | RISK-L2P-01 | 已修未上板 | region 页加载失败时行被置 CLEAN + entries 全 `NAND_PBA_INVALID`（= 该 region 全部未映射），host 读到零填充；映射在行被驱逐前**静默不可用**，且不升级到 read recovery | 避免「坏 region 每次访问都重读 + host 永久停在 FTL_AGAIN」的活锁；行为与「从未写过」一致 | 接入 RR 后：失败改为 RR / 标块坏，或按 region 限次重试后再降级 | `src/ftl/l2p_cache.c` `ftl_l2p_callback`（LOADING 失败分支） |
 | RISK-L2P-02 | 已修未上板 | ~~先取槽后建链，命令池空重试浪费 L2P 日志槽~~ | `flush_kick` 在 `append_slot` 前用 `fc_get_resource_stats()` 预检命令/描述符/buffer/SQ/HSQ；不足即返 `FTL_AGAIN`，不消耗槽位 | 上板：命令池高压下长时写，日志块换块频率不异常 | `src/ftl/l2p_cache.c` `l2p_flush_resources_available` |
 | RISK-L2P-03 | 待上板 | 本轮行为变化未板验：`flush_kick` 背压改报 `FTL_AGAIN`、写回前资源预检、CLOCK 引用位置 1、加载失败降级为全未映射 | 编译零告警 | 上板：命令池压力下 `fl`/Checkpoint 不中止且不烧日志槽；热点 region 不被长期钉住；坏 region 读不活锁 | `src/ftl/l2p_cache.c` |
+| RISK-L2P-04 | 已修未上板 | 上板复位后启动出现 `[L2P] region 0 load failed 3 times — degrade to unmapped`。降级路径把行置 CLEAN + entries 全 INVALID 并让 `l2p_cache_read_sync` 返回 **OK** ⇒ probe 的 `l2p_read_errors` 保持 0，启动仍报 `restored`。**后果**：若该 region 有 journal 未覆盖的旧映射，会静默丢失且不触发 full metadata rebuild。| 修法：① `l2p_cache_line_t` 增 `degraded` 标志（与 `fresh/load_fail_count` 共用对齐填充，行尺寸不变）；② 新增 `l2p_cache_region_degraded()`；③ boot probe 读成功后检查该标志，计入 `l2p_read_errors` → 回退 full metadata rebuild；④ journal replay 在降级基线上应用条目时同样置 `block_ctx->ok=0`。 | 上板验证：正常启动不得误报（`restored` 仍正常）；故障注入（人工破坏一个 L2P region 页）后启动应出现 `L2P region N degraded — snapshot incomplete` 并回退 full metadata rebuild，而不是 `restored` | `src/ftl/l2p_cache.c` / `include/ftl/l2p_cache.h`；`src/ftl/power_failure_recovery.c` `ftl_recovery_probe_blocks`；`src/ftl/journal.c` `journal_replay` |
 
 ---
 
@@ -162,6 +166,7 @@
 | RISK-WB-03 | 待上板 | 模块抽出（`ftl.c` §4 → `wbuf.c`/`wbuf.h`）+ 位运算收敛到 `ftl_cw_bit` + hot-path 日志降 `LOGD`：纯搬移与等价改写，但 wbuf 是写路径核心 | 逐段比对搬出前后函数体一致；`make all` / `make release` 零新告警 | 随常规回归上板（`wr`/`rd`/`fl`/`trim` + `wp <lba> 1 8` 合并仍为 1 次编程） | `src/ftl/wbuf.c` / `include/ftl/wbuf.h` |
 | RISK-WB-04 | 已修未上板 | `ftl->groups[gi].outstanding++` 是**跨模块字段写**（§3.1 形态）：写点 `wbuf.c`（append）与 `ftl.c`（`ftl_confirm_write`），递减点在 `ftl.c` 与 `pending.c` —— 组在飞数这一不变量由多个模块各自手工维护，任一处漏掉即 host 写组挂死 | 目前两处写点都紧邻 `pending_group_*` 调用，人工可核；本轮**未**加闸门（不在批准范围） | 若再出现第三个写点 ⇒ 加 `pending_group_add_subop()` 唯一闸门，与 `pending_group_complete_subop*` 配对（H10 / §3.1） | `src/ftl/wbuf.c` `wbuf_handle(APPEND)`；`src/ftl/ftl.c` `ftl_confirm_write`；`src/ftl/pending.c` |
 | RISK-WB-05 | 信息 | `ftl_init` 的 `memset(&ftl->wbuf, 0, sizeof(ftl->wbuf))` **有意保留**，不换成 `wbuf_handle(RESET)`：init 期构造，`g_ftl` 在 `.bss` 已零；换 `wbuf_handle(RESET)` 会在 `pending_init` 已清组表后带着陈旧 `owners` 调 `pending_group_complete_subop_multi` ⇒ 风险大于收益 | 有意不改（P5 留痕） | 若 `ftl_init` 的顺序变化（`pending_init` 之前有 wbuf 写入）需重估 | `src/ftl/ftl.c` `ftl_init` |
+| RISK-WB-06 | **已修并上板（基础数据面）** | **wbuf 误用单页版填装函数**：`wbuf_program_page` 的源是 plane-major pair 镜像（`slot = plane*CW_NUM + cw`），却调用 `ftl_cmd_write_data_cw`（契约是**单页镜像**，只按 `cw*512` 取数）⇒ plane1 的 4 个 CW 全部复制 plane0 的数据。表现：host 大文件每 4KB 的后 2KB 重复前 2KB（rev26 `notepad.exe` 360448B：2KB 块 1=src0、块 3=src2 …）。CLI `wr 0 32 c` 的 pattern 每 2KB 相同，**完全看不见** | 新增 `ftl_cmd_write_data_pair_cw`（槽位 plane*CW_NUM+cw），wbuf 改用它；`ftl_cmd_write_data_cw` 保持单页语义给 mirror/GC/WL | **rev27 已上板验证**：Windows FAT 格式化成功；写 `notepad.exe` + 16KB 非均匀 pattern → `Write-VolumeCache` → 拔插 USB → `SRC==DST`、`PAT` 一致、2KB 块 0..7 内容分别为 0..7（`all_match=True`）。剩余：大文件/GC/掉电回归 | `src/ftl/wbuf.c` `wbuf_program_page`；`src/ftl/ftl_fc_interface.c` `cmd_write_data_cw_core`；上板 rev27 哈希/块指纹证据 |
 
 ---
 
@@ -252,6 +257,21 @@
 | RISK-ARCH-08 | 已改未上板 | migrate / RR / CP 的提交/等待计数已由**轮数**改为绝对 ms deadline：`FTL_SUBMIT_TIMEOUT_MS = 10` / `FTL_WAIT_TIMEOUT_MS = 50`；confirm park 用 `FTL_GROUP_DRAIN_TIMEOUT_MS = 100` | 时钟缺失（now_ms == 0）时 deadline 不生效（退化为无超时；本板 time_us 恒非空 ⇒ 不可达） | 上板标定这三个值（NAND 页操作 ~700µs + 主循环轮速）；观察 `timed_out`/`timeout_phase` 上报 | `include/ftl/ftl_module.h`；`migrate.c` / `read_recovery.c` / `checkpoint.c` / `pending.c` |
 | RISK-ARCH-09 | 已改未上板 | §5 PFR 收为 boot orchestrator：fresh/clean/PF 子流程与 full metadata rebuild 原语（restore/probe/build_pools/reset/page_is_blank/scan_write_pointer/close_block/carve/rebuild）全部改为 `static`；公开头只留 `ftl_media_check_format` / `ftl_media_format` / `ftl_boot_recovery` | `checkpoint_block_words()` / `metadata_live_count()` / `l2p_cache_invalidate_line()` 三个穿透已收口 | 上板回归 fresh/clean/PF/full metadata rebuild 四条启动路径 | `src/ftl/power_failure_recovery.c`；`include/ftl/power_failure_recovery.h` |
 | RISK-ARCH-10 | 信息（有意偏离） | 为适配本仓 **per-instance** 架构，typed 入口有几处签名偏离设计文档原文：`journal_handle` 增加 `journal_trigger_t`（区分 FLUSH / ERASE_ONLY）；`wbuf_handle` 返回 `ftl_status_t`（调用者必须分支 FTL_AGAIN/ERROR）；`pending_confirm_*` 带 `ftl_context_t *`；`rr_handle` 的 `rr_trigger` 仍登记 owner 而非 desc 链 | 各偏差已在头文件与 P2/P5 注明 | 若未来引入设备级 pending/wbuf 上下文，再评估收回这些实参 | `include/ftl/journal.h` / `wbuf.h` / `pending.h`；`docs/design/ftl_module_contracts.md` §3.3 |
+
+---
+
+## 2M. USB MSC / 平台（2026-10-20，代码已落地）
+
+> 设计文档：`docs/design/usb_msc_udisk.md`。本节只登记「未上板 / 待确认」项。
+
+| ID | 状态 | 风险 / 判定 | 当前缓解 | 重访触发 / 下一步 | 证据 |
+|---|---|---|---|---|---|
+| RISK-USB-01 | 已上板（基础数据面）；掉电/性能待测 | **已通过**：枚举（`[USB] mounted`）、512 MiB 容量、Windows 新建 MBR 分区 + FAT 格式化、`notepad.exe` 与 16KB 非均匀 pattern 写入 → `Write-VolumeCache` → 拔插后 SHA256/块指纹一致（rev27）。**未测**：大文件/GC 压力、`dd` 吞吐、写过程中掉电恢复、长时间稳定性 | `make all` / `make release` / `UT=FC` 零告警；`RISK-WB-06` 已修并上板 | 继续按设计文档 §11.2 第 4~6 项：大文件 `dd`、写中断电、吞吐记录；然后再做 `RISK-MD-06` 的专项复现 | `src/controller/usb_msc.c`；`src/platform/stm32h743/usb_port.c`；rev27 上板哈希证据 |
+| RISK-USB-02 | 待上板 | MSC 异步完成路径未实测：`tud_msc_async_io_done()` 的 deferred 回调、主机复位期间的 `discard` 收尾都只在静态路径成立 | `discard` 标志 + `tud_ready()` 守卫；FTL 只持有静态 bounce buffer | 上板：读写过程中拔线/总线复位/重新枚举，确认无死命令、无残留 CSW 错误；确认不会出现 `pending_io` 永久为真 | `src/controller/usb_msc.c` `usb_msc_task` / `tud_umount_cb` |
+| RISK-USB-03 | 已确认（上板枚举通过） | PA11/PA12 = OTG_FS 的接线曾未确认（Apollo V2 也可能引到 PB14/PB15）；2026-10-20 上板 `[USB ] mounted` 证明当前板走 PA11/PA12 AF10 可用 | 代码按 PA11/PA12 AF10 实现；`CFG_TUD_VBUS_DETECT_HW=0` 避开 PA9 冲突 | 换板/换核心板时重新确认；若某板无枚举，再查 PB14/PB15（OTG_HS 内嵌 FS PHY，AF12） | `docs/hardware_contract.md` USB 节；上板日志 `[USB ] mounted` |
+| RISK-USB-04 | 信息（有意设计） | USB MSC/BOT 是**单命令在飞**；UASP 需要 USB 3.0 bulk streams，本板不可用 ⇒ 不能作为「多命令在飞」的学习载体 | 设计文档 §5 已写明；FTL 内部仍可把一条命令拆多个子操作并行 | 若目标是学主控队列/门铃，另做 NVMe 风格 SQ/CQ 软件模型，不要改 USB 路径 | `docs/design/usb_msc_udisk.md` §5 |
+| RISK-USB-05 | 待上板 | WRITE(10) 的 **FUA** 位未处理：主机若只发 FUA 而不发 SYNCHRONIZE CACHE，命令完成时数据仍在 FTL 缓冲/日志，不保证已编程到 NAND | 主机 fsync 路径通常随后发 SYNCHRONIZE CACHE；`ftl_flush` 会先刷 wbuf 再刷 L2P/journal | 上板抓包确认主机是否使用 FUA；若使用，需要在写完成路径补 flush（或在 MSC 回调里记录 FUA 并要求 `usb_msc_task` 完成后 flush） | `src/controller/usb_msc.c` `usb_msc_transfer`；`src/ftl/ftl.c` `ftl_flush` |
+| RISK-PLAT-01 | 待决策 | linker 的 `.noncacheable_buffer` 输入段匹配漏了前导点（写成 `*(noncacheable_buffer)`），这些段被 ld 当**孤儿段**按启发式放置：加入 USB 描述符前 `g_nand_channel_page_buffer` 实测在可缓存 AXI RAM `0x24000204`，加入后 `.data` 变大又变成非缓存区 `0x24070800`。落点随链接器启发式漂移，与源文件注释「D-Cache 关闭」不构成保证 | **本轮未改**（USB 补丁不依赖该段）。NAND DMA 路径在 `nand_fmc.c` 有显式 `nand_dma_cache_invalidate`，当前不是活 bug | 单独一轮修：`KEEP(*(.noncacheable_buffer))` + 删除重复输出段；改后地址固定会变，属 R2 的「地址」类改动，**必须上板**回归 NAND 读写/GC/掉电。不要与 USB 补丁混在一起 | `linker/stm32h743xx_flash.ld`；`arm-none-eabi-nm -n build/firmware/debug/bin/debug.elf \| grep -E 'g_nand_channel_page_buffer\|g_fc_buffer_pool'` |
 
 ---
 

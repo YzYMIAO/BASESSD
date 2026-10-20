@@ -692,6 +692,8 @@ void metadata_dir_init(metadata_dir_cache_t *dir)
 
     dir->anchor_sequence = 0U;
     dir->dirty           = false;
+    dir->dirty_gen       = 0U;
+    dir->anchor_gen      = 0U;
 
     metadata_dir_fill_fixed(dir);
     metadata_dir_rebuild_live(dir);
@@ -768,6 +770,7 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
     {
         dir->entries[i].pba = new_pba;
         dir->dirty          = true;
+        dir->dirty_gen++;
         return;
     }
 
@@ -779,6 +782,7 @@ void metadata_dir_update(metadata_dir_cache_t *dir,
         dir->entries[dir->count].pba  = new_pba;
         dir->count++;
         dir->dirty = true;
+        dir->dirty_gen++;
         return;
     }
 
@@ -1001,6 +1005,10 @@ md_anchor_step_t metadata_dir_anchor_prepare(metadata_dir_cache_t *dir,
         return MD_ANCHOR_CLEAN; /* 无变更早退：Anchor 每写一条都消耗池内槽位，空转会让池无谓轮转 */
     }
 
+    /* 记录本次 Anchor 覆盖的变更代数：写入期间若有新的 commit，commit 时不得把
+     * dirty 清掉（否则 on-media Anchor 落后于 RAM Directory，旧块可能被误回收）。 */
+    dir->anchor_gen = dir->dirty_gen;
+
     anchor_ring_init(out_ring);
 
     /* 游标未建立（冷启动后首次 flush）⇒ 先定位池内最新有效 record 的下一槽 */
@@ -1081,10 +1089,10 @@ void metadata_dir_anchor_page(const metadata_dir_cache_t *dir, uint32_t seq, uin
 }
 
 /*
- * metadata_dir_anchor_commit - Anchor 落盘收尾：推进游标（无论成败），成功才清 dirty
+ * metadata_dir_anchor_commit - Anchor 落盘收尾：推进游标（无论成败），成功且未过期才清 dirty
  *
- * ⚠ **无论成败都推进游标**：已写过的槽（可能半编程）不可复用。ok == false 时保留
- *   dirty ⇒ 下次在新槽重试整条（整条残缺的 record 会被 locate 丢弃，不取半条）。
+ * ⚠ **无论成败都推进游标**：已写过的槽（可能半编程）不可复用。ok == false 或
+ *   `dirty_gen` 在写入期间又前进（期间有新的 commit）时保留 dirty ⇒ 下次在新槽重试整条。
  */
 void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t *ring, uint16_t idx, bool ok)
 {
@@ -1092,7 +1100,7 @@ void metadata_dir_anchor_commit(metadata_dir_cache_t *dir, const metadata_ring_t
 
     dir->anchor_write_idx = (uint16_t)((idx + 1U) % metadata_ring_total_records(ring));
 
-    if (ok)
+    if (ok && (dir->dirty_gen == dir->anchor_gen))
     {
         dir->dirty = false;
     }
@@ -1185,6 +1193,8 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
             dir->anchor_write_idx    = 0U;
             dir->anchor_cursor_valid = false;
             dir->dirty               = false;
+            dir->dirty_gen           = 0U;
+            dir->anchor_gen          = 0U;
             metadata_dir_boot_log(dir);
             return FTL_ERROR; /* 无有效 Anchor：调用者转 metadata_dir_init */
         }
@@ -1194,7 +1204,9 @@ ftl_status_t metadata_dir_load(metadata_dir_cache_t *dir)
 
     metadata_dir_load_assemble(dir, &ring, newest);
 
-    dir->dirty = false;
+    dir->dirty      = false;
+    dir->dirty_gen  = 0U;
+    dir->anchor_gen = 0U;
 
     /* 由装配后的 entries 重建活计数；**日志块游标不跨重启恢复**：首次追加时从 Free Pool
      * 新取一块（绝不复用可能已编程的旧页）。旧日志块仍被 Directory 引用 ⇒ 由 l2p_live

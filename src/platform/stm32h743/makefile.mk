@@ -1,7 +1,10 @@
 include $(PROJECT_ROOT)/third_party/stm32h743_vendor.mk
+include $(PROJECT_ROOT)/third_party/tinyusb_vendor.mk
 
 MODULE_INCS += $(STM32H743_INCS)
+MODULE_INCS += $(TINYUSB_INCS)
 THIRD_PARTY_C_SRCS += $(STM32H743_SRCS)
+THIRD_PARTY_C_SRCS += $(TINYUSB_SRCS)
 THIRD_PARTY_S_SRCS += $(STM32H743_S_SRCS)
 
 #它们是传给 GCC 和汇编器的预处理宏定义，不是编译优化参数。

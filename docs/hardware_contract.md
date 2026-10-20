@@ -40,6 +40,21 @@ access MMIO registers directly; register access lives in
 > 实测值取自 `build/firmware/debug/bin/debug.map`（2026-10-13）。`src/main.c:138` 有
 > `_Static_assert` 挡住 AXI_RAM 超预算——**提高 CH/CE/LUN 维度前必须先重新规划内存**。
 
+## USB device (USB MSC U-disk)
+
+| Item | Value |
+| --- | --- |
+| Controller | `USB2_OTG_FS`, device mode, full speed 12 Mbps (no ULPI/HS) |
+| Pins | `PA11` = OTG_FS_DM, `PA12` = OTG_FS_DP, AF10 |
+| Kernel clock | HSI48 = 48 MHz, `RCC_PERIPHCLK_USB` in `sys_port_clock_init` |
+| VBUS sensing | **disabled** (`CFG_TUD_VBUS_DETECT_HW = 0`) — PA9 is USART1_TX |
+| IRQ | `OTG_FS_IRQn`, preempt priority 5 (lower than USART1=3) |
+| Class | MSC / SCSI transparent / BOT, single LUN, 512 B block, 512 MiB |
+| Stack | TinyUSB 0.21.0 (MIT), pruned to device+MSC+DWC2 (see `third_party/tinyusb/README.soft_ssd.md`) |
+
+> ⚠ Pin mapping is **not confirmed by schematic** (board: Apollo V2). If enumeration
+> fails, check `PB14/PB15` (OTG_HS with internal FS PHY, AF12) before changing anything else.
+
 ## Build selection
 
 ```sh

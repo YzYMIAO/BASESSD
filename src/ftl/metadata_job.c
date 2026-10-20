@@ -553,6 +553,16 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
                 if (dir->reclaim_pending_count != 0U)
                 {
+                    /* ③→④ 契约（同压缩路径）：普通 L2P flush 在活计数归零时就登记了
+                     * 回收候选，但新位置只在 RAM Directory 里。擦除前必须先把当前
+                     * Directory 写成 Anchor；否则掉电后 on-media Anchor 仍指向该块。 */
+                    if (dir->dirty)
+                    {
+                        j->anchor_for_reclaim = true;
+                        j->victim             = UINT16_MAX;
+                        j->phase              = (uint8_t)MD_JOB_CP_ANCHOR_PREP;
+                        break;
+                    }
                     j->phase = (uint8_t)MD_JOB_RECLAIM;
                     break;
                 }
@@ -570,6 +580,14 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
 
             case MD_JOB_RECLAIM:
             {
+                /* Anchor 落后于 Directory（登记之后、擦除之前又有 commit）⇒ 不能擦；
+                 * 回 IDLE，下一轮先写 Anchor（上面的 dirty 分支）。 */
+                if (dir->dirty)
+                {
+                    j->phase = (uint8_t)MD_JOB_IDLE;
+                    break;
+                }
+
                 uint16_t g = 0U;
 
                 if (!md_reclaim_take(dir, &g))
@@ -658,8 +676,12 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                 }
                 if (r == MD_ANCHOR_CLEAN)
                 {
-                    /* Directory 无变更（本次没搬成任何 region）：跳过 Anchor 直接擦 victim。 */
-                    j->phase = (uint8_t)MD_JOB_CP_RECLAIM;
+                    /* Directory 已与 on-media Anchor 一致：跳过写入，直接进入下一步。
+                     * 普通回收路径回 RECLAIM；压缩路径回 CP_RECLAIM 擦 victim。 */
+                    const bool for_reclaim = j->anchor_for_reclaim;
+
+                    j->anchor_for_reclaim = false;
+                    j->phase              = for_reclaim ? (uint8_t)MD_JOB_RECLAIM : (uint8_t)MD_JOB_CP_RECLAIM;
                     break;
                 }
 
@@ -693,6 +715,22 @@ static void metadata_handle_step(metadata_dir_cache_t *dir)
                         metadata_handle_abort(dir);
                         break;
                     }
+
+                    /* 只有 Anchor 确实覆盖了当前 Directory 时才允许登记新的回收候选：
+                     * 否则 on-media Anchor 仍引用「看起来已死」的块，擦了就是掉电丢映射。 */
+                    if (!dir->dirty)
+                    {
+                        md_reclaim_mark_all(dir, alloc);
+                    }
+
+                    if (j->anchor_for_reclaim)
+                    {
+                        j->anchor_for_reclaim = false;
+                        /* 写入期间又有 commit ⇒ 回 IDLE 再写一条 Anchor，不能擦。 */
+                        j->phase              = dir->dirty ? (uint8_t)MD_JOB_IDLE : (uint8_t)MD_JOB_RECLAIM;
+                        break;
+                    }
+
                     j->phase = (uint8_t)MD_JOB_CP_RECLAIM;
                     break;
                 }

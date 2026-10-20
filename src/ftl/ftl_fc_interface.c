@@ -387,7 +387,10 @@ ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t le
  *             位图外的 CW 若仍在链上（调用者与链不同源）填 0xFF，绝不把镜像里的
  *             无效 CW 数据带进新页。
  * -------------------------------------------------------------------- */
-ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, uint32_t cw_bitmap)
+static ftl_status_t cmd_write_data_cw_core(fc_command_t  *cmd,
+                                           const uint8_t *page_buf,
+                                           uint32_t       cw_bitmap,
+                                           bool           pair_major)
 {
     fc_descriptor_id_t desc_id = (fc_descriptor_id_t)cmd->desc_id;
 
@@ -410,7 +413,12 @@ ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, u
 
         if ((cw_bitmap & ftl_cw_bit(plane, cw)) != 0U)
         {
-            (void)memcpy(buf, page_buf + ((size_t)cw * FC_BUFFER_USER_SIZE), (size_t)FC_BUFFER_USER_SIZE);
+            /* 源偏移必须与调用者的镜像布局一致：
+             *   · pair 镜像（wbuf）：槽位 = plane*CW_NUM + cw；
+             *   · 单页镜像（mirror/GC/WL）：两个 plane 共用 cw 偏移。 */
+            const size_t slot = pair_major ? ((size_t)plane * CW_NUM + (size_t)cw) : (size_t)cw;
+
+            (void)memcpy(buf, page_buf + (slot * FC_BUFFER_USER_SIZE), (size_t)FC_BUFFER_USER_SIZE);
         }
         else
         {
@@ -421,6 +429,16 @@ ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, u
     }
 
     return FTL_OK;
+}
+
+ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, uint32_t cw_bitmap)
+{
+    return cmd_write_data_cw_core(cmd, page_buf, cw_bitmap, false);
+}
+
+ftl_status_t ftl_cmd_write_data_pair_cw(fc_command_t *cmd, const uint8_t *pair_buf, uint32_t cw_bitmap)
+{
+    return cmd_write_data_cw_core(cmd, pair_buf, cw_bitmap, true);
 }
 
 /* --------------------------------------------------------------------

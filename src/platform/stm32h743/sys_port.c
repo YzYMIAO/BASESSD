@@ -269,8 +269,9 @@ uint8_t sys_port_clock_init(uint32_t pll_prediv, uint32_t pll_mul, uint32_t sysc
      * PLL2 专门给 FMC：25/25*440=440 MHz VCO，PLL2_R=2，
      * 所以 FMC kernel clock=220 MHz；SDRAM 配置 SDCLK=2，最终为 110 MHz。
      */
-    peripheral_clocks.PeriphClockSelection = RCC_PERIPHCLK_FMC;
-    peripheral_clocks.FmcClockSelection    = RCC_FMCCLKSOURCE_PLL2; /* FMC=220 MHz */
+    peripheral_clocks.PeriphClockSelection = RCC_PERIPHCLK_FMC | RCC_PERIPHCLK_USB;
+    peripheral_clocks.FmcClockSelection    = RCC_FMCCLKSOURCE_PLL2;  /* FMC=220 MHz */
+    peripheral_clocks.UsbClockSelection    = RCC_USBCLKSOURCE_HSI48; /* USB OTG_FS=48 MHz */
     peripheral_clocks.PLL2.PLL2M           = 25U;
     peripheral_clocks.PLL2.PLL2N           = 440U;
     peripheral_clocks.PLL2.PLL2P           = 2U;

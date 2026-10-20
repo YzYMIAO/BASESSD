@@ -21,6 +21,7 @@
 #include "ssd_request.h"
 #include "stack_guard.h"
 #include "usart.h"
+#include "usb_msc.h"
 #include "wbuf.h"
 
 #include <stdio.h>
@@ -40,7 +41,7 @@
  * 本工具链的 newlib-nano（-specs=nano.specs，newlib 3.3.0）不带 long long
  * 格式化支持，%llu 会把 "lu" 当字面量原样打出来（`lba_max=%llu` → `lba_max=lu`），
  * 而 GCC 的 -Wformat 按标准语义检查，编译期不会报。这些值都受
- * uart_cli_lba_range_ok() 约束在 FTL_LBA_MAX 以内，装得下 32 位才安全。
+ * ssd_controller_lba_range_ok() 约束在 FTL_LBA_MAX 以内，装得下 32 位才安全。
  */
 _Static_assert(FTL_LBA_MAX <= 0xFFFFFFFFUL, "FTL_LBA_MAX 超出 32 位，CLI 的 %lu 打印会截断");
 
@@ -147,6 +148,11 @@ typedef struct
 
 static uart_cli_pending_t g_cli_pending;
 
+bool cli_host_busy(void)
+{
+    return g_cli_pending.busy != 0U;
+}
+
 /* 预填 g_wr_buf pattern（.sram2_data NOLOAD，必须主动初始化） */
 static void uart_cli_pattern_init(void)
 {
@@ -168,14 +174,6 @@ static uint32_t uart_cli_expect_word(uint32_t byte_offset)
     return (byte_offset < (uint32_t)(FTL_READ_USER_SIZE * CW_NUM))
                ? 0x55555555U
                : 0xAAAAAAAAU;
-}
-
-/* 提交前的 LBA 范围检查（lba+n ≤ FTL_LBA_MAX） */
-static int uart_cli_lba_range_ok(uint64_t lba, uint32_t n)
-{
-    uint64_t end = lba + (uint64_t)n;
-
-    return (lba < FTL_LBA_MAX) && (end <= FTL_LBA_MAX);
 }
 
 /* CLI 诊断命令（map / pair 窗口）按 LBA 取所属 FTL 实例。
@@ -216,7 +214,7 @@ static int uart_cli_wr(int argc, char *argv[])
 
     (void)argc;
 
-    if (g_cli_pending.busy != 0U)
+    if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
     {
         (void)uart_log_write("error: busy, pending request\r\n", 29U);
         return FUNC_STATUS_ERROR;
@@ -235,7 +233,7 @@ static int uart_cli_wr(int argc, char *argv[])
         (void)uart_log_write("error: n exceeds g_wr_buf (max 32 sectors)\r\n", 44U);
         return FUNC_STATUS_ERROR;
     }
-    if (!uart_cli_lba_range_ok(lba, n))
+    if (!ssd_controller_lba_range_ok(lba, n))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
         return FUNC_STATUS_ERROR;
@@ -272,7 +270,7 @@ static int uart_cli_rd(int argc, char *argv[])
     uint32_t n;
     char    *end = NULL;
 
-    if (g_cli_pending.busy != 0U)
+    if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
     {
         (void)uart_log_write("error: busy, pending request\r\n", 29U);
         return FUNC_STATUS_ERROR;
@@ -291,7 +289,7 @@ static int uart_cli_rd(int argc, char *argv[])
         (void)uart_log_write("error: n exceeds g_wr_buf (max 32 sectors)\r\n", 44U);
         return FUNC_STATUS_ERROR;
     }
-    if (!uart_cli_lba_range_ok(lba, n))
+    if (!ssd_controller_lba_range_ok(lba, n))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
         return FUNC_STATUS_ERROR;
@@ -326,7 +324,7 @@ static int uart_cli_tr(int argc, char *argv[])
 
     (void)argc;
 
-    if (g_cli_pending.busy != 0U)
+    if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
     {
         (void)uart_log_write("error: busy, pending request\r\n", 29U);
         return FUNC_STATUS_ERROR;
@@ -336,7 +334,7 @@ static int uart_cli_tr(int argc, char *argv[])
         (void)uart_log_write("error: invalid lba\r\n", 19U);
         return FUNC_STATUS_ERROR;
     }
-    if (!uart_cli_lba_range_ok(lba, 1U))
+    if (!ssd_controller_lba_range_ok(lba, 1U))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
         return FUNC_STATUS_ERROR;
@@ -391,6 +389,13 @@ static int uart_cli_wp(int argc, char *argv[])
 
     (void)argc;
 
+    /* wp 只绕过 CLI 自己的 busy 闸门（要在飞多组），仍须让路给 USB host 请求。 */
+    if (usb_msc_host_busy())
+    {
+        (void)uart_log_write("error: busy, USB host request\r\n", 31U);
+        return FUNC_STATUS_ERROR;
+    }
+
     if ((uart_cli_parse_uint(argv[1], &lba) != 0) ||
         (uart_cli_parse_uint(argv[2], &n_parsed) != 0) ||
         (uart_cli_parse_uint(argv[3], &k_parsed) != 0) ||
@@ -411,7 +416,9 @@ static int uart_cli_wp(int argc, char *argv[])
         (void)uart_log_write("error: lba must be 8-aligned (pair window base)\r\n", 47U);
         return FUNC_STATUS_ERROR;
     }
-    if (!uart_cli_lba_range_ok(lba, n * k))
+    const uint32_t sectors = n * k;
+
+    if (!ssd_controller_lba_range_ok(lba, sectors))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
         return FUNC_STATUS_ERROR;
@@ -470,7 +477,7 @@ static int uart_cli_fl(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    if (g_cli_pending.busy != 0U)
+    if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
     {
         (void)uart_log_write("error: busy, pending request\r\n", 29U);
         return FUNC_STATUS_ERROR;
@@ -593,7 +600,7 @@ static int uart_cli_map(int argc, char *argv[])
         (void)uart_log_write("error: invalid lba\r\n", 19U);
         return FUNC_STATUS_ERROR;
     }
-    if (!uart_cli_lba_range_ok(lba, 1U))
+    if (!ssd_controller_lba_range_ok(lba, 1U))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
         return FUNC_STATUS_ERROR;

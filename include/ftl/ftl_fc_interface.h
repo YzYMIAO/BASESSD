@@ -284,6 +284,23 @@ ftl_status_t ftl_cmd_write_data(fc_command_t *cmd, const void *data, uint32_t le
 ftl_status_t ftl_cmd_write_data_cw(fc_command_t *cmd, const uint8_t *page_buf, uint32_t cw_bitmap);
 
 /*
+ * ftl_cmd_write_data_pair_cw - CW 级数据填装（**plane-major pair 镜像**）
+ *
+ * 与 ftl_cmd_write_data_cw 的唯一差别是源布局：
+ *   · `ftl_cmd_write_data_cw`：单页镜像（2KB），两个 plane 读同一份数据（mirror/GC/WL）；
+ *   · 本函数：pair 镜像（4KB），槽位按 `plane*CW_NUM + cw` 排布（页打包 wbuf
+ *     的 `h->data` 就是这个布局）。
+ * ⚠ 两者不能合并成同一套取数：wbuf 的 plane1 数据在 `page_buf + 4*512`，而 mirror
+ *   的两个 plane 本来就该相同；误用会让 plane1 复制 plane0（host 大文件静默损坏）。
+ *
+ * @param cmd        已建链的命令（链上 CW ⊆ cw_bitmap，可跨两个 plane）
+ * @param pair_buf   pair 镜像（`FTL_LBA_PER_PAIR * FTL_IU_BYTES` 字节）
+ * @param cw_bitmap  本页哪些 CW 有效（flat 位图，bit = plane*CW_NUM + cw）
+ * @return FTL_OK / FTL_ERROR（链上 desc 无 buffer）
+ */
+ftl_status_t ftl_cmd_write_data_pair_cw(fc_command_t *cmd, const uint8_t *pair_buf, uint32_t cw_bitmap);
+
+/*
  * ftl_cmd_read_data - 从 desc 链各 CW 的 USER 区按链序拷出到外部缓冲
  *
  * 与 ftl_cmd_write_data 对称；遍历界走 desc 链，数据够即停。

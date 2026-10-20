@@ -5502,6 +5502,56 @@ unused-variable 告警；`make tests UT=FTL` 仍因既有测试符号 + `ring.pl
 顺序写/GC 后 `erase_count` 非零且跨重启保持；损坏磨损页 CRC 后计数从 0 且不触发格式化；
 CP 记录 21 页读写与回绕正常。
 
+## v0.83 — USB 数据面暴露的三处 FTL 修复（wbuf plane 镜像 / 回收前 Anchor / L2P 降级可见性）
+
+**日期**：2026-10-20
+
+**动机**：把板子接到 Windows 当 U 盘用，暴露了三类此前被“均匀 pattern / 旧测试口径”掩盖的问题：
+
+1. **host 写数据损坏**：4KB 写入的后 2KB 重复前 2KB，Windows 格式化报 “track 0 bad”、
+   大文件重插后 SHA256 不一致；
+2. **回收旧日志块不等 Anchor 落盘**：掉电后 on-media Anchor 指向已擦块，重启出现
+   `[L2P] region 0 load failed`；
+3. **L2P 加载降级被误报成“合法未映射”**：boot 把“读失败降级”报成 `restored`，不触发
+   full metadata rebuild。
+
+**修法**：
+
+1. **wbuf / pair 镜像**（`RISK-WB-06`）：`wbuf_program_page` 的源是 plane-major pair 镜像
+   （`slot = plane*CW_NUM + cw`），却调用单页语义的 `ftl_cmd_write_data_cw`（只按
+   `cw*512` 取数）⇒ plane1 复制 plane0。新增 `ftl_cmd_write_data_pair_cw`（同一 core，
+   `pair_major = true`），wbuf 改用它；`ftl_cmd_write_data_cw` 保持单页语义给
+   mirror / GC / WL。
+2. **Metadata 回收前先落 Anchor**（`RISK-MD-06`）：
+   - `MD_JOB_RECLAIM` 擦前要求 `dir->dirty == false`；脏则先走 `CP_ANCHOR_*`
+     写 Anchor（`anchor_for_reclaim`），成功后才回 RECLAIM；
+   - `dirty_gen / anchor_gen`：Anchor 8 页异步写期间若有新 commit，commit 不清 dirty，
+     下一槽重写整条；
+   - Anchor 成功且未过期后才 `md_reclaim_mark_all()`。
+3. **L2P 降级可见性**（`RISK-L2P-04`）：`l2p_cache_line_t` 增 `degraded`（与
+   `fresh / load_fail_count` 共用对齐填充，行尺寸不变）；新增
+   `l2p_cache_region_degraded()`；boot probe 与 journal replay 检测到降级时分别计入
+   `l2p_read_errors` / 置 `block_ctx->ok=0`，回退 full metadata rebuild。
+
+**介质格式**：无变化（`FTL_MEDIA_LAYOUT_VERSION` 仍为 9）；新增字段均为 RAM 态。
+
+**验证状态**：
+- ✅ `make all` / `make release` / `make tests UT=FC` 零新告警；
+- ✅ **`RISK-WB-06` 已上板验证**（rev27）：Windows FAT 格式化成功；`notepad.exe`
+  写入 → `Write-VolumeCache` → 拔插 USB → SHA256 一致；16KB 非均匀 pattern 的 2KB
+  块 0..7 内容分别为 0..7；
+- ⚠ `RISK-MD-06` / `RISK-L2P-04` **未做专项板端复现/注入**，保持 `known_risks` 的
+  “已修未上板”口径；
+- ⚠ 同期观察到 predictive 迁移活锁 `RISK-MIG-02`（`kind=2 victim read failed` 反复重选），
+  **本轮未修**，单列。
+
+**回归判据（写进 `docs/design/usb_msc_verification.md`）**：
+- 不能用 CLI `wr/rd` 的固定 pattern 验证 pair 写（每 2KB 相同，缺陷不可见）；
+- 必须用每 2KB 互不相同的数据 + 拔插后读回；
+- 回收/Anchor 专项需要填满 64 页元数据日志块后冷启动，不能用“写两次 LBA 0”代替。
+
+---
+
 ## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
 
 当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（9）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。
