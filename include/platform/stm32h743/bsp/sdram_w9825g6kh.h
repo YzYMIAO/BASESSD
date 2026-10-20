@@ -10,10 +10,10 @@ extern SDRAM_HandleTypeDef g_sdram_handle; /* SDRAM句柄 */
 /* W9825G6KH：256 Mbit，4M x 16 bit，4 Bank，容量 32 MiB。 */
 #define SDRAM_BASE_ADDR             (0xC0000000UL)
 #define SDRAM_SIZE_BYTES            (32UL * 1024UL * 1024UL)
-#define SDRAM_REFRESH_RATE          (839U) /* 64 ms / 8192 行，SDCLK=110 MHz */
+#define SDRAM_REFRESH_RATE          (761U) /* 64 ms / 8192 行 - 20，SDCLK=100 MHz */
 #define SDRAM_AUTO_REFRESH_COMMANDS (8U)
 
-/* FMC 时序参数，单位为 SDRAM 时钟周期（SDCLK=110 MHz，周期约 9.09 ns）。 */
+/* FMC 时序参数，单位为 SDRAM 时钟周期（SDCLK=100 MHz，周期 10 ns）。 */
 #define SDRAM_TMR_LOAD_TO_ACTIVE    (2U)
 #define SDRAM_TMR_EXIT_SELF_REFRESH (8U)
 #define SDRAM_TMR_SELF_REFRESH      (7U)

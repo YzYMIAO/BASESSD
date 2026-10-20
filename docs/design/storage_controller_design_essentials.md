@@ -248,7 +248,9 @@ channel（通道，主控的一组数据总线）
 
 - 器件支持多种时序模式（不同 tRC/tADL/tWC 组合），**模式越高越快但信号完整性要求越高**。
 - 主控在初始化时用 `Set Features` 切到目标模式；切之前要按默认模式读参数页。
-- ⚠ 本仓踩坑：`CONFIG_NAND_TIMING_MODE_4` 默认关，保持默认时序（见 `fc_nand_design.md` §19）。
+- ⚠ 本仓现状：`CONFIG_NAND_TIMING_MODE=5`，启动全程 Mode 0，FTL boot/恢复完成后切 Mode 5
+  （3.3V 专用的 Mode 5；Table 29/31 的 3.3V AC 参数对应 Mode 5。Table 32 的 1.8V 参数
+  对应 Mode 4；本板 3.3V，故不用 Mode 4）。见 `fc_nand_design.md` §19。
 
 ### 3.6 ECC 与器件的契约
 

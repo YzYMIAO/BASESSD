@@ -531,6 +531,7 @@ int main(void)
      *                             （此前一律返回 INVALID_ARGUMENT）。
      *   ④ platform_register()  —— 注册 time_us，供 FTL 的 T3 定时触发（CP/GC）使用。
      *   ⑤ ssd_ftl_boot_all()   —— FTL 全实例 boot + controller 绑定 → 置 g_ftl_ready=1。
+     *   ⑥ nand_enable_high_speed() —— 全部初始化完成后才切 Mode 5；失败保持低速。
      *   详见 docs/design/fc_nand_design.md §22「初始化全流程」。 */
     if (fc_init() != FC_STATUS_OK)
     {
@@ -553,6 +554,23 @@ int main(void)
             LOGE_IF(stm32_platform_register() != 0, "platform register failed; T3 timers disabled\r\n");
             boot_section("ftl");
             ssd_ftl_boot_all();
+
+            /* ⑥ 高速模式：只有初始化（NAND + FTL boot/恢复）全部完成后才切换，
+             *    保证上电路径始终跑在保守低速时序。失败仅告警，保持低速可用。 */
+            if (g_ftl_ready != 0)
+            {
+                sys_clock_tree_t clk;
+
+                sys_clock_tree_get(&clk);
+
+                const BYTE high_speed_result = nand_enable_high_speed(clk.fmc_hz);
+
+                if (high_speed_result != NAND_RESULT_OK)
+                {
+                    LOGW("[NAND] high-speed enable failed: 0x%02X — keep low speed\r\n",
+                         (unsigned)high_speed_result);
+                }
+            }
         }
     }
 

@@ -8,7 +8,7 @@
  *       nand_fc_execute/start/step → nand_engine → UOP → FMC 后端
  *
  * 芯片：当前封装为 Micron MT29F4G08ABADAWP，512MB SLC，
- *       tRC=50ns（Mode 0）/ 20ns（Mode 4）。
+ *       tRC=50ns（Mode 0）/ 20ns（Mode 5）。
  * 器件事实见 nand/devices/mt29f___g08a.h；通用布局见 nand/nand_config.h。
  *
  * 时序来源：本文件两张静态表（slow/fast，MT29 数据手册参数）
@@ -33,9 +33,11 @@
 static NAND_HandleTypeDef g_nand_handle;
 
 /* --------------------------------------------------------------------
- * g_nand_timing_slow — 低速时序（NAND 默认 Mode 0，tRC=50ns）
+ * g_nand_timing_high — MT29F4G08 3.3V 时序（数据手册 Table 29/31）
  *   29 个值按 nand_fmc_timing_t 字段顺序初始化（顺序耦合，错一位全错）。
- *   数值来源：MT29F4G08 数据手册时序参数表（Mode 0 值）。
+ *   本表固定使用 Table 29/31 的 3.3V AC 参数；CONFIG_NAND_TIMING_MODE 只改变
+ *   SET_FEATURES 的模式值（4 或 5），用于在**相同 FMC 时序**下对比两种模式。
+ *   注意：Mode 4 的独立 AC 表在数据手册 Table 32（1.8V），本板 3.3V 实验不采用它。
  *   按组划分：
  *     地址锁存组  : tADL / tALH / tALS / tCS / tCH / tCLH / tCLS
  *     数据读写组  : tDH / tDS / tWC / tWH / tWP / tAR / tIR / tRC / tREA / tREH /
@@ -43,7 +45,7 @@ static NAND_HandleTypeDef g_nand_handle;
  *     就绪/复电组 : tCEA / tCHZ / tCLR / tCOH
  *   （Mode 0 典型值；本表被 nand_init 低速分支的初始 config 引用）
  * -------------------------------------------------------------------- */
-static const nand_fmc_timing_t g_nand_timing_slow = {
+static const nand_fmc_timing_t g_nand_timing_high = {
     70U,  /* tADL   地址→数据加载延时 */
     5U,   /* tALH   ALE 保持 */
     10U,  /* tALS   ALE 建立 */
@@ -75,51 +77,11 @@ static const nand_fmc_timing_t g_nand_timing_slow = {
     60U,  /* tWHR   状态→RE 高延时 */
 };
 
-/* --------------------------------------------------------------------
- * g_nand_timing_fast — 高速时序（ONFI Mode 4，tRC=20ns）
- *   29 个值同样按字段顺序初始化；仅 CONFIG_NAND_TIMING_MODE_4 编译。
- *   数值来源：MT29F4G08 数据手册 Mode 4 时序参数表。
- *   本表被 nand_init 高速分支（nand_fmc_timing_to_pcc + fast_fmc config）引用。
- * -------------------------------------------------------------------- */
-#if (CONFIG_NAND_TIMING_MODE_4 != 0U)
-static const nand_fmc_timing_t g_nand_timing_fast = {
-    20U, /* tADL */
-    5U,  /* tALH */
-    5U,  /* tALS */
-    5U,  /* tCH */
-    5U,  /* tCLH */
-    5U,  /* tCLS */
-    10U, /* tCS */
-    5U,  /* tDH */
-    5U,  /* tDS */
-    10U, /* tWC */
-    5U,  /* tWH */
-    5U,  /* tWP */
-    10U, /* tAR */
-    20U, /* tCEA（max） */
-    30U, /* tCHZ（max） */
-    10U, /* tCLR */
-    10U, /* tCOH */
-    0U,  /* tIR */
-    10U, /* tRC */
-    12U, /* tREA（max） */
-    5U,  /* tREH */
-    5U,  /* tRHOH */
-    50U, /* tRHW */
-    50U, /* tRHZ（max） */
-    5U,  /* tRLOH */
-    5U,  /* tRP */
-    20U, /* tRR */
-    50U, /* tWB（max） */
-    30U, /* tWHR */
-};
-#endif /* CONFIG_NAND_TIMING_MODE_4 */
-
 /*
  * 根据 ONFI 时序参数 nand_fmc_timing_t 和 FMC 时钟频率，
  * 计算 FMC PCC 硬件寄存器值。
  *
- * FMC kernel clock = 220 MHz → tHCLK ≈ 4.55 ns。
+ * FMC kernel clock 由调用者传入（当前 200 MHz → tHCLK = 5 ns）。
  * 所有 ONFI 时序量纲为 ns，向上取整到整周期数（保守偏慢）。
  *
  * 当前实现基于 MT29F4G08ABADAWP 异步时序协商规则：
@@ -128,64 +90,39 @@ static const nand_fmc_timing_t g_nand_timing_fast = {
  *   HoldSetupTime = max(tCH, tALH, tCLH, tDH)      / tHCLK
  *   HiZSetupTime  = tRHZ / tHCLK
  */
-#if (CONFIG_NAND_TIMING_MODE_4 != 0U)
+#if (CONFIG_NAND_TIMING_MODE != 0U)
+/* FMC 周期由调用者传入实际 fmc_hz 计算（1e12 / fmc_hz ps，向下取整）。
+ * 当前 sys_port.c 配 PLL2R=200MHz（D1 域 FMC 上限 200MHz）⇒ tHCLK = 5000 ps。 */
+/* 首次 Mode 5 上板留 1 个 FMC 周期的余量；稳定后可收紧到 0。 */
+#    define NAND_PCC_MARGIN_CYCLES (1U)
+/* 板级时序余量（单位：FMC 周期）：Setup/Wait 在通用 margin 之上再各 +1。
+ * 2× 曾用于 bring-up 确认“失败来自余量”；当前值 FCUT 55/55 通过，
+ * 200MHz 下各相相对数据手册最小值 ≥ +5ns。再减 1 周期即 0ns 余量，不再收紧。 */
+#    define NAND_PCC_SETUP_EXTRA          (1U)
+#    define NAND_PCC_WAIT_EXTRA           (1U)
+#    define NS_TO_PCC_CYCLES(ns, tclk_ps) ((((ns)*1000U) + (tclk_ps)-1U) / (tclk_ps))
+
+/*
+ * ST 精确式（tHCLK = 1e12 / fmc_hz ps，当前 5000 ps）：
+ *   (SET+1)  * tHCLK >= max(tCS,tCLS,tALS,tCLR,tAR) - tWP
+ *   (WAIT+1) * tHCLK >= max(tWP,tRP)
+ *   HOLD     * tHCLK >= max(tCH,tCLH,tALH)
+ *   HiZ      * tHCLK >= max(tCS,tCLS,tALS) + (tWP - tDS)
+ * 旧实现硬编码 5ns/4545ps，FMC 时钟一变就失真；现按实际 fmc_hz 算。
+ * 旧实现（Mode 4 表）实测 HOLD/HiZ 各短 1 周期，命令/地址采样失败（RISK-NAND-03）。
+ */
 static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
-                                   FMC_NAND_PCC_TimingTypeDef *pcc)
+                                   FMC_NAND_PCC_TimingTypeDef *pcc,
+                                   DWORD                       fmc_hz)
 {
-    /* FMC kernel clock period in ns, fixed at compile time for STM32H743
-     * 220MHz 周期 4.55ns，保守取整到 5ns（偏慢，安全方向） */
-    const DWORD hclk_ns = 5U;
+    ASSERT(fmc_hz != 0U);
 
-#    define CEIL_DIV(a, b) (((a) + (b)-1U) / (b)) /* 向上取整除法（本函数内局部宏，末尾 undef） */
+    const DWORD tclk_ps = (DWORD)(1000000000000ULL / (QWORD)fmc_hz);
 
-    /* max(tCLS, tALS, tCS) → SetupTime：命令/地址建立窗口取三者最大 */
-    {
-        DWORD max_ns = onfi->t_cls_ns;
-        if (onfi->t_als_ns > max_ns)
-        {
-            max_ns = onfi->t_als_ns;
-        }
-        if (onfi->t_cs_ns > max_ns)
-        {
-            max_ns = onfi->t_cs_ns;
-        }
-        pcc->SetupTime = CEIL_DIV(max_ns, hclk_ns);
-    }
-
-    /* max(tRP, tWP) → WaitSetupTime：读/写脉冲低电平宽度取最大 */
-    {
-        DWORD max_ns = onfi->t_rp_ns;
-        if (onfi->t_wp_ns > max_ns)
-        {
-            max_ns = onfi->t_wp_ns;
-        }
-        pcc->WaitSetupTime = CEIL_DIV(max_ns, hclk_ns);
-    }
-
-    /* max(tCH, tALH, tCLH, tDH) → HoldSetupTime：各保持时间取最大 */
-    {
-        DWORD max_ns = onfi->t_ch_ns;
-        if (onfi->t_alh_ns > max_ns)
-        {
-            max_ns = onfi->t_alh_ns;
-        }
-        if (onfi->t_clh_ns > max_ns)
-        {
-            max_ns = onfi->t_clh_ns;
-        }
-        if (onfi->t_dh_ns > max_ns)
-        {
-            max_ns = onfi->t_dh_ns;
-        }
-        pcc->HoldSetupTime = CEIL_DIV(max_ns, hclk_ns);
-    }
-
-    /* HiZSetupTime：写方向总线高阻窗口。ST 官方式：
-     *     HiZ × tHCLK ≥ max(tCS, tCLS, tALS) + (tWP − tDS)
-     * ⚠ 与读方向的 tRHZ 无关（早期误用 tRHZ，已更正）。 */
+    ASSERT(tclk_ps != 0U);
+    /* max(tCS, tCLS, tALS, tCLR, tAR) → SetupTime：命令/地址建立窗口。 */
     {
         DWORD max_ns = onfi->t_cs_ns;
-        DWORD wp_ds  = (onfi->t_wp_ns > onfi->t_ds_ns) ? (onfi->t_wp_ns - onfi->t_ds_ns) : 0U;
 
         if (onfi->t_cls_ns > max_ns)
         {
@@ -195,12 +132,91 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
         {
             max_ns = onfi->t_als_ns;
         }
-        pcc->HiZSetupTime = CEIL_DIV(max_ns + wp_ds, hclk_ns);
+        if (onfi->t_clr_ns > max_ns)
+        {
+            max_ns = onfi->t_clr_ns;
+        }
+        if (onfi->t_ar_ns > max_ns)
+        {
+            max_ns = onfi->t_ar_ns;
+        }
+
+        const DWORD setup_ns = (max_ns > onfi->t_wp_ns) ? (max_ns - onfi->t_wp_ns) : 0U;
+        DWORD       cycles   = NS_TO_PCC_CYCLES(setup_ns, tclk_ps);
+
+        if (cycles > 0U)
+        {
+            cycles--; /* 精确式的 (SET+1) 项 */
+        }
+        DWORD setup = cycles + NAND_PCC_MARGIN_CYCLES;
+
+        /* CE# setup 下限：FMC MEMSET 的 setup 相必须至少覆盖 tCS。
+         * ST 精确式减去了 tWP，单看该式会把 Setup 压到 1 个周期（200MHz 下 5ns），
+         * 而 3.3V Mode 5 的 tCS=15ns；地址/擦除命令在这种 Setup 下会失败（实测
+         * op=18/16 status=0xFF，而纯命令的 status_query 能过）。 */
+        const DWORD setup_min = NS_TO_PCC_CYCLES(onfi->t_cs_ns, tclk_ps);
+
+        if (setup < setup_min)
+        {
+            setup = setup_min;
+        }
+        pcc->SetupTime = setup + NAND_PCC_SETUP_EXTRA;
     }
 
-#    undef CEIL_DIV
+    /* max(tWP, tRP) → WaitSetupTime：RE/WE 低电平宽度。 */
+    {
+        DWORD max_ns = onfi->t_wp_ns;
+
+        if (onfi->t_rp_ns > max_ns)
+        {
+            max_ns = onfi->t_rp_ns;
+        }
+
+        DWORD cycles = NS_TO_PCC_CYCLES(max_ns, tclk_ps);
+
+        if (cycles > 0U)
+        {
+            cycles--; /* 精确式的 (WAIT+1) 项 */
+        }
+        pcc->WaitSetupTime = cycles + NAND_PCC_MARGIN_CYCLES + NAND_PCC_WAIT_EXTRA;
+    }
+
+    /* max(tCH, tCLH, tALH, tDH) → HoldSetupTime：控制/数据保持。 */
+    {
+        DWORD max_ns = onfi->t_ch_ns;
+
+        if (onfi->t_clh_ns > max_ns)
+        {
+            max_ns = onfi->t_clh_ns;
+        }
+        if (onfi->t_alh_ns > max_ns)
+        {
+            max_ns = onfi->t_alh_ns;
+        }
+        if (onfi->t_dh_ns > max_ns)
+        {
+            max_ns = onfi->t_dh_ns;
+        }
+        pcc->HoldSetupTime = NS_TO_PCC_CYCLES(max_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
+    }
+
+    /* HiZSetupTime：写方向总线高阻窗口（与读方向 tRHZ 无关）。 */
+    {
+        DWORD       max_ns = onfi->t_cs_ns;
+        const DWORD wp_ds  = (onfi->t_wp_ns > onfi->t_ds_ns) ? (onfi->t_wp_ns - onfi->t_ds_ns) : 0;
+
+        if (onfi->t_cls_ns > max_ns)
+        {
+            max_ns = onfi->t_cls_ns;
+        }
+        if (onfi->t_als_ns > max_ns)
+        {
+            max_ns = onfi->t_als_ns;
+        }
+        pcc->HiZSetupTime = NS_TO_PCC_CYCLES(max_ns + wp_ds, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
+    }
 }
-#endif /* CONFIG_NAND_TIMING_MODE_4 */
+#endif /* CONFIG_NAND_TIMING_MODE */
 
 /* --------------------------------------------------------------------
  * nand_fc_execute
@@ -466,16 +482,16 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
 
 /* --------------------------------------------------------------------
  * nand_init
- *   功能：NAND 芯片全初始化（FMC 硬件 + MSP + DMA +
- *         RESET + READ_ID 校验 + 可选 Mode 4 切换）。
+ *   功能：NAND 芯片低速全初始化（FMC 硬件 + MSP + DMA +
+ *         RESET + READ_ID + ONFI 参数页校验）。
  *   参数：无。
  *   返回：NAND_RESULT_OK / 错误码。
  *   实现要点：
  *     - FMC 用 Bank3、8 位总线、ECC 关闭；初始时序为 power-on
  *       默认 Mode 0 的保守寄存器周期数（4/6/2/3）。
  *     - RESET/READ_ID 在低速时序下完成；ID 校验跳过厂商字节 id[0]。
- *     - CONFIG_NAND_TIMING_MODE_4 时：SET_FEATURES(01h,4) 切 Mode 4，
- *       重新算 PCC 周期数并重配 FMC + 后端时序。
+ *     - 本函数**不切高速模式**：启动全程保持低速，保证初始化时序余量；
+ *       切换由 nand_enable_high_speed() 在 FTL boot/恢复完成后单独执行。
  *     - DMA 初始化失败仅回退 PIO，非致命。
  *   步骤编号（与函数体内 Step 标记一一对应）：
  *     Step 1 FMC 句柄 + PCC 时序（纯软件填结构体）
@@ -485,10 +501,11 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
  *     Step 5 RESET（FFh）★启动命令绕过 dispatch，直连 engine
  *     Step 6 READ_ID + 厂商 ID 校验
  *     Step 6b 读 ONFI 参数页（Table 11）+ 打印设备信息（非致命，失败仅 LOGW）
- *     Step 7 Mode 4 切换（CONFIG_NAND_TIMING_MODE_4=0 时整段编掉）
- *   调用链：main.c:320 → nand_init → {HAL_NAND_Init,
+ *   高速模式切换不在这里：见 nand_enable_high_speed()。
+ *   调用链：main.c → nand_init → {HAL_NAND_Init,
  *          nand_fmc_init, nand_fc_reset, nand_fc_read_id,
- *          nand_fc_read_parameter_page}
+ *          nand_fc_read_parameter_page}；
+ *          随后 main.c 在 ssd_ftl_boot_all() 成功后调 nand_enable_high_speed()。
  *   流程图见 docs/design/fc_nand_design.md §22（图 16）。
  * -------------------------------------------------------------------- */
 BYTE nand_init(void)
@@ -510,22 +527,22 @@ BYTE nand_init(void)
     g_nand_handle.Init.MemoryDataWidth = FMC_NAND_PCC_MEM_BUS_WIDTH_8;
     g_nand_handle.Init.EccComputation  = FMC_NAND_ECC_DISABLE;
     g_nand_handle.Init.ECCPageSize     = FMC_NAND_ECC_PAGE_SIZE_512BYTE;
-    /* Start with the board-vendor's conservative timings before switching NAND to Mode 4. */
+    /* Start with the board-vendor's conservative timings before switching to the high-speed mode. */
     g_nand_handle.Init.TCLRSetupTime   = 8U;
     g_nand_handle.Init.TARSetupTime    = 8U;
     /*
-     * TCLR/TAR 单位是 FMC 内核时钟周期（fmc_ker_ck，见 sys.c PLL2 = 220 MHz，
-     * T ≈ 4.55 ns），不是 ns。取值下限由数据手册最小建立时间决定：
+     * TCLR/TAR 单位是 FMC 内核时钟周期（fmc_ker_ck，当前 PLL2 = 200 MHz，
+     * T = 5 ns），不是 ns。取值下限由数据手册最小建立时间决定：
      *     周期数 = ceil(t_min_ns / T_fmc)
-     * MT29F4G08ABADAWP：tCLR = 10 ns、tAR = 10 ns（见 g_nand_timing_slow）
+     * MT29F4G08ABADAWP：tCLR = 10 ns、tAR = 10 ns（见 g_nand_timing_high）
      *     → 理论下限 = ceil(10 / 4.55) = 3 周期
      * 这里填 8 是板厂给的保守值（≈ 36 ns，约 3.6× 余量），并非按公式推得；
-     * Mode 4 分支再收紧到 4（≈ 18 ns，仍 ≥ 10 ns 下限）。
+     * Mode 5 分支再收紧到 4（≈ 18 ns，仍 ≥ 10 ns 下限）。
      */
 
     /*
      * FMC PCC 时序 → PMEM(通用空间)/PATT(属性空间) 寄存器，单位同为
-     * fmc_ker_ck 周期（220 MHz，≈ 4.55 ns）。四字段 = NAND 访问三相 + 写向 HiZ：
+     * fmc_ker_ck 周期（200 MHz，5 ns）。四字段 = NAND 访问三相 + 写向 HiZ：
      *     SetupTime     = max(tCLS, tALS, tCS)          命令/地址建立窗口
      *     WaitSetupTime = max(tRP, tWP)                 RE/WE 低电平脉宽
      *     HoldSetupTime = max(tCH, tALH, tCLH, tDH)     控制/数据保持
@@ -535,7 +552,7 @@ BYTE nand_init(void)
      *     SET ≥ 1、WAIT ≥ 2、HOLD ≥ 2 → 本值 4/6/2 均有富余；
      *     HiZ 需 ≥ ceil(18/4.545) = 4 → 原厂商值 3 差 1 周期（疑似按 ~166 MHz
      *     时钟算得），已上调为 4。HiZ 属写方向，需上板写压力测试复核。
-     * Mode 4 分支改由 nand_fmc_timing_to_pcc() 按同一公式重算。
+     * Mode 5 分支改由 nand_fmc_timing_to_pcc() 按同一公式重算。
      */
     common_timing.SetupTime     = 4U;
     common_timing.WaitSetupTime = 6U;
@@ -562,7 +579,7 @@ BYTE nand_init(void)
         fmc_config.data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
         fmc_config.command = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET);
         fmc_config.address = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET);
-        fmc_config.timing  = g_nand_timing_slow;
+        fmc_config.timing  = g_nand_timing_high;
 
         if (nand_fmc_init(&fmc_config) != NAND_RESULT_OK)
         {
@@ -649,60 +666,113 @@ BYTE nand_init(void)
         }
     }
 
-#if CONFIG_NAND_TIMING_MODE_4
-    /* ── Step 7: 高速模式：切 NAND 到 Mode 4 + 更新 FMC 硬件时序 ── */
+    LOGI("[NAND] init complete (low speed)\r\n");
+    return NAND_RESULT_OK;
+}
+
+/* --------------------------------------------------------------------
+ * nand_enable_high_speed
+ *   功能：初始化全部完成后，把 NAND 切到 CONFIG_NAND_TIMING_MODE 并同步更新 FMC 时序。
+ *   返回：NAND_RESULT_OK / 错误码。
+ *   实现要点：
+ *     - 上电初始化（RESET/READ_ID/ONFI/FTL 元数据恢复）全程保持低速 Mode 0，
+ *       保证启动路径的时序余量；本函数只在 boot 完成后调用一次。
+ *     - armed 已置位，不能再走阻塞式 nand_fc_execute：用 nand_fc_start/step
+ *       直接推进一次 SET_FEATURES 事务（此时无其它命令在飞）。
+ *     - SET_FEATURES 成功后才改 FMC 时序；失败则保持低速，不影响功能。
+ * -------------------------------------------------------------------- */
+BYTE nand_enable_high_speed(DWORD fmc_hz)
+{
+#if (CONFIG_NAND_TIMING_MODE != 0U)
+    const BYTE                 mode[4] = {(BYTE)CONFIG_NAND_TIMING_MODE, 0U, 0U, 0U};
+    nand_fc_request_t          request;
+    nand_fc_completion_t       completion;
+    nand_fc_transaction_t      transaction;
+    FMC_NAND_PCC_TimingTypeDef fast_pcc;
+    BYTE                       result;
+
+    if (fmc_hz == 0U)
     {
-        const BYTE                 mode_4[4] = {4U, 0U, 0U, 0U};
-        FMC_NAND_PCC_TimingTypeDef fast_pcc;
+        /* 时钟树读取失败：按当前 sys_port.c 的 200 MHz 兜底，保证不出 0 周期 */
+        LOGE("[NAND] FMC clock unknown, fallback to 200MHz\r\n");
+        fmc_hz = 200000000U;
+    }
 
-        memset(&fast_pcc, 0, sizeof(fast_pcc));
+    memset(&request, 0, sizeof(request));
+    request.column      = 0x01U; /* ONFI timing mode feature address */
+    request.data        = (BYTE *)mode;
+    request.data_length = 4U;
 
-        /* 0x01 = ONFI 时序模式 Feature 寄存器地址，值 4 = Mode 4 */
-        result = nand_fc_set_features(0x01U, mode_4, &completion);
-        if (result != NAND_RESULT_OK)
+    memset(&completion, 0, sizeof(completion));
+    memset(&transaction, 0, sizeof(transaction));
+    transaction.engine.backend    = nand_fmc_backend_get();
+    transaction.engine.request    = &transaction.request;
+    transaction.engine.completion = &transaction.completion;
+
+    result = nand_fc_start(&transaction, OP_SET_FEATURES, &request);
+    while (result == NAND_RESULT_NOT_READY)
+    {
+        result = nand_fc_step(&transaction, &completion);
+    }
+    if (result != NAND_RESULT_OK)
+    {
+        LOGE("[NAND] set feature 01h (Mode %u) failed, result=0x%02X status=0x%02X\r\n",
+             (unsigned)CONFIG_NAND_TIMING_MODE,
+             (unsigned)result,
+             (unsigned)transaction.completion.nand_status);
+        return result;
+    }
+    LOGI("[NAND] switched NAND to ONFI Mode %u\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+
+    const DWORD tclk_ps = (DWORD)(1000000000000ULL / (QWORD)fmc_hz);
+
+    memset(&fast_pcc, 0, sizeof(fast_pcc));
+    nand_fmc_timing_to_pcc(&g_nand_timing_high, &fast_pcc, fmc_hz);
+
+    const DWORD tclr = NS_TO_PCC_CYCLES(g_nand_timing_high.t_clr_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
+    const DWORD tar  = NS_TO_PCC_CYCLES(g_nand_timing_high.t_ar_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
+
+    LOGI("[NAND] Mode %u PCC SET=%lu WAIT=%lu HOLD=%lu HiZ=%lu TCLR=%lu TAR=%lu (fmc=%luHz tHCLK=%lups)\r\n",
+         (unsigned)CONFIG_NAND_TIMING_MODE,
+         fast_pcc.SetupTime,
+         fast_pcc.WaitSetupTime,
+         fast_pcc.HoldSetupTime,
+         fast_pcc.HiZSetupTime,
+         tclr,
+         tar,
+         fmc_hz,
+         tclk_ps);
+
+    g_nand_handle.Init.TCLRSetupTime = tclr;
+    g_nand_handle.Init.TARSetupTime  = tar;
+    if (HAL_NAND_Init(&g_nand_handle, &fast_pcc, &fast_pcc) != HAL_OK)
+    {
+        LOGE("[NAND] HAL_NAND_Init (Mode %u) failed\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+        return NAND_RESULT_OPERATION_FAILED;
+    }
+    LOGI("[NAND] FMC timing updated for Mode %u\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+
+    {
+        nand_fmc_config_t fast_fmc;
+
+        memset(&fast_fmc, 0, sizeof(fast_fmc));
+        fast_fmc.data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
+        fast_fmc.command = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET);
+        fast_fmc.address = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET);
+        fast_fmc.timing  = g_nand_timing_high;
+
+        if (nand_fmc_init(&fast_fmc) != NAND_RESULT_OK)
         {
-            LOGE("[NAND] set feature 01h (Mode 4) failed, result=0x%02X status=0x%02X\r\n",
-                 (unsigned int)result,
-                 (unsigned int)completion.nand_status);
-            return result;
-        }
-        LOGI("[NAND] switched NAND to ONFI Mode 4\r\n");
-
-        /* 根据 Mode 4 时序重新计算 FMC PCC 硬件参数 */
-        nand_fmc_timing_to_pcc(&g_nand_timing_fast, &fast_pcc);
-        g_nand_handle.Init.TCLRSetupTime = 4U; /* Mode 4 下 CLE→RE 延时收紧 */
-        g_nand_handle.Init.TARSetupTime  = 4U; /* Mode 4 下 ALE→RE 延时收紧 */
-        if (HAL_NAND_Init(&g_nand_handle, &fast_pcc, &fast_pcc) != HAL_OK)
-        {
-            LOGE("[NAND] HAL_NAND_Init (Mode 4) failed\r\n");
+            LOGE("[NAND] FMC backend configure (Mode %u) failed\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
             return NAND_RESULT_OPERATION_FAILED;
         }
-        LOGI("[NAND] FMC timing updated for Mode 4\r\n");
-
-        /* 更新 FMC 后端时序，供 UOP handler 使用。
-         * 单 bank：同一实例直接覆盖（无需按 [CH][CE][LUN] 循环）。 */
-        {
-            nand_fmc_config_t fast_fmc;
-            memset(&fast_fmc, 0, sizeof(fast_fmc));
-            fast_fmc.data    = (volatile BYTE *)NAND_FMC_BASE_ADDR;
-            fast_fmc.command = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_CMD_OFFSET);
-            fast_fmc.address = (volatile BYTE *)(NAND_FMC_BASE_ADDR | NAND_FMC_ADDR_OFFSET);
-            fast_fmc.timing  = g_nand_timing_fast;
-
-            if (nand_fmc_init(&fast_fmc) != NAND_RESULT_OK)
-            {
-                LOGE("[NAND] FMC backend configure (Mode 4) failed\r\n");
-                return NAND_RESULT_OPERATION_FAILED;
-            }
-        }
     }
-#else
-    /* ── Step 7（编掉）：低速模式：跳过 Mode 4 切换，NAND 和 FMC 都运行在默认慢速时序 ── */
-    LOGI("[NAND] keeping NAND at default timing (CONFIG_NAND_TIMING_MODE_4=0)\r\n");
-#endif /* CONFIG_NAND_TIMING_MODE_4 */
 
-    LOGI("[NAND] init complete\r\n");
     return NAND_RESULT_OK;
+#else
+    LOGI("[NAND] high-speed mode disabled (CONFIG_NAND_TIMING_MODE=0)\r\n");
+    return NAND_RESULT_OK;
+#endif /* CONFIG_NAND_TIMING_MODE */
 }
 
 /* --------------------------------------------------------------------

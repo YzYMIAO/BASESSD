@@ -23,7 +23,7 @@ BYTE sdram_init(void)
     g_sdram_handle.Init.InternalBankNumber = FMC_SDRAM_INTERN_BANKS_NUM_4;       /* 一共4个BANK */
     g_sdram_handle.Init.CASLatency         = FMC_SDRAM_CAS_LATENCY_2;            /* CAS为2 */
     g_sdram_handle.Init.WriteProtection    = FMC_SDRAM_WRITE_PROTECTION_DISABLE; /* 失能写保护 */
-    g_sdram_handle.Init.SDClockPeriod      = FMC_SDRAM_CLOCK_PERIOD_2;           /* SDCLK=220/2=110 MHz */
+    g_sdram_handle.Init.SDClockPeriod      = FMC_SDRAM_CLOCK_PERIOD_2;           /* SDCLK=200/2=100 MHz */
     g_sdram_handle.Init.ReadBurst          = FMC_SDRAM_RBURST_ENABLE;            /* 使能突发 */
     g_sdram_handle.Init.ReadPipeDelay      = FMC_SDRAM_RPIPE_DELAY_1;            /* 读通道延时 */
 
@@ -47,8 +47,8 @@ BYTE sdram_init(void)
     /**
      * 刷新频率计数器(以SDCLK频率计数),计算方法:
      * COUNT=SDRAM刷新周期/行数-20=SDRAM刷新周期(us)*SDCLK频率(Mhz)/行数
-     * 我们使用的SDRAM刷新周期为64ms,SDCLK=220/2=110Mhz,行数为8192(2^13).
-     * 所以,COUNT=64*1000*110/8192-20=839
+     * 我们使用的SDRAM刷新周期为64ms,SDCLK=200/2=100Mhz,行数为8192(2^13).
+     * 所以,COUNT=64*1000*100/8192-20=761
      */
     if (HAL_SDRAM_ProgramRefreshRate(&g_sdram_handle, SDRAM_REFRESH_RATE) != HAL_OK)
     {

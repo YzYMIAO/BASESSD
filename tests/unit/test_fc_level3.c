@@ -65,6 +65,18 @@
 
 #include <string.h>
 
+/*
+ * 高速 mode（CONFIG_NAND_TIMING_MODE != 0）下跳过「依赖器件默认 Mode 0」的用例：
+ *   - init_sequence：发 RESET(FFh) ⇒ 器件回默认 Mode 0，而 FMC 仍按 Mode 5 时序；
+ *   - feature_write_read / chain_priority_lock：直接改写 timing mode，并断言默认 0。
+ * 这些用例在「启动低速、运行高速」配置下自洽性不成立；Mode 0 回归仍照常执行。
+ */
+#if (CONFIG_NAND_TIMING_MODE != 0U)
+#    define L3_SKIP_IF_HIGH_SPEED() return MUNIT_SKIP
+#else
+#    define L3_SKIP_IF_HIGH_SPEED() ((void)0)
+#endif
+
 /**************************************************************************
  *  夹具
  *
@@ -467,6 +479,8 @@ static MunitResult test_init_sequence(const MunitParameter params[], void *data)
     (void)params;
     (void)data;
 
+    L3_SKIP_IF_HIGH_SPEED();
+
     test_trace_begin();
 
     /* Step 1: RESET —— 无数据负载，不需要 desc 链（cw_bitmap = 0 走短路分支） */
@@ -725,6 +739,8 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
     (void)params;
     (void)data;
 
+    L3_SKIP_IF_HIGH_SPEED();
+
     test_trace_begin();
 
     /* Phase 1：手册里的四个寄存器各读一次。只读 ⇒ 一个器件状态都不动。
@@ -745,7 +761,7 @@ static MunitResult test_feature_write_read(const MunitParameter params[], void *
 
     /* 手册：「The default timing mode is mode 0」——先钉住这个前提，否则下面
      * 「写 01h 再读回 01h」在器件本来就非模式 0 时是空转（探针恰好等于原值）。
-     * 本项目 CONFIG_NAND_TIMING_MODE_4 = 0，从不设它，所以这里必须是 00h。 */
+     * 本用例只在 Mode 0 下执行（Mode 5 由 L3_SKIP_IF_HIGH_SPEED 跳过），所以这里必须是 00h。 */
     munit_assert_uint8(original[0], ==, L3_TIMING_MODE_0);
 
     l3_feature_set(L3_FEATURE_TIMING_MODE, probe);
@@ -899,6 +915,8 @@ static MunitResult test_chain_priority_lock(const MunitParameter params[], void 
 
     (void)params;
     (void)data;
+
+    L3_SKIP_IF_HIGH_SPEED();
 
     test_trace_begin();
 

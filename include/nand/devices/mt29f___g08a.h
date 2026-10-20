@@ -70,21 +70,39 @@
 /*
  * ONFI 时序模式控制
  *
- * 0 = 低速模式（NAND 默认 Mode 0，tRC=50ns）：nand_init 跳过 Mode 4 切换。
- * 1 = 高速模式（ONFI Mode 4，tRC=20ns）：低速初始化后 SET_FEATURES 切 Mode 4，
- *     再按 Mode 4 参数重配 FMC 时序寄存器。
+ * 0 = 低速：启动和运行期都保持 Mode 0。
+ * 4 = Mode 4：3.3V 实验档；FMC AC 参数仍用 Table 29/31（3.3V），
+ *     只把 SET_FEATURES 的模式值改成 4，用于和 Mode 5 同配置对比。
+ * 5 = Mode 5：正式配置；AC 参数同样用 Table 29/31（3.3V）。
+ *
+ * 启动全程低速（nand_init + FTL boot/恢复），全部初始化完成后由
+ * nand_enable_high_speed() 切到 CONFIG_NAND_TIMING_MODE 并重配 FMC 时序。
  */
-#ifndef CONFIG_NAND_TIMING_MODE_4
-#    define CONFIG_NAND_TIMING_MODE_4 (0U)
+#ifndef CONFIG_NAND_TIMING_MODE
+#    define CONFIG_NAND_TIMING_MODE (5U) /* 3.3V 正式配置；可改 0（低速）或 4（对比实验） */
+#endif
+
+#if (CONFIG_NAND_TIMING_MODE != 0U) && (CONFIG_NAND_TIMING_MODE != 4U) && (CONFIG_NAND_TIMING_MODE != 5U)
+#    error "CONFIG_NAND_TIMING_MODE must be 0, 4, or 5"
 #endif
 
 /*
  * nand_init
- *   功能：初始化 FMC 硬件并通过 OP_RESET/OP_READ_ID/OP_SET_FEATURES
- *         验证 NAND（含 R/B# 中断、DMA、可选 Mode 4 切换）。
+ *   功能：低速初始化 FMC 硬件并通过 OP_RESET/OP_READ_ID/ONFI 参数页验证 NAND。
+ *         启动全程保持默认 Mode 0；高速切换由 nand_enable_high_speed() 在
+ *         boot 完成后单独执行。
  *   参数：无。
  * @return NAND_RESULT_OK on success; otherwise a NAND_RESULT_* failure code.
  */
 BYTE nand_init(void);
+
+/*
+ * nand_enable_high_speed
+ *   功能：初始化完成后切到 ONFI Mode 5 并更新 FMC 时序。
+ *   参数：fmc_hz —— 当前 FMC 内核时钟（Hz，来自 sys_clock_tree_get）。
+ * @return NAND_RESULT_OK（含 CONFIG_NAND_TIMING_MODE=0 的 no-op）/
+ *         错误码（切换失败时保持调用前的低速状态）。
+ */
+BYTE nand_enable_high_speed(DWORD fmc_hz);
 
 #endif /* NAND_DEVICE_MT29F_G08A_H */

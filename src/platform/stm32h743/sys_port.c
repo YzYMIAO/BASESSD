@@ -218,7 +218,8 @@ void sys_port_hal_init(void)
  *   APB1/2/3/4 分频 = 2 -> PCLK1/2/3/4 = 100 MHz
  *   APB 分频不为 1 时，挂在 APB1/2 上的定时器内核时钟为 2*PCLK = 200 MHz
  *   PLL1Q = 4 -> PLL1_Q = 200 MHz（QSPI、RNG 等外设时钟源）
- *   PLL2R = 2 -> PLL2_R = 220 MHz（FMC 时钟源；SDRAM SDCLK=220/2=110 MHz）
+ *   PLL2R = 2 -> PLL2_R = 200 MHz（FMC 时钟源，且 ≤ D1 域 FMC 上限 200 MHz；
+ *                          SDRAM SDCLK=200/2=100 MHz）
  */
 
 BYTE sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWORD peripheral_div)
@@ -275,14 +276,15 @@ BYTE sys_port_clock_init(DWORD pll_prediv, DWORD pll_mul, DWORD sysclk_div, DWOR
     }
 
     /*
-     * PLL2 专门给 FMC：25/25*440=440 MHz VCO，PLL2_R=2，
-     * 所以 FMC kernel clock=220 MHz；SDRAM 配置 SDCLK=2，最终为 110 MHz。
+     * PLL2 专门给 FMC：25/25*400=400 MHz VCO，PLL2_R=2，
+     * 所以 FMC kernel clock=200 MHz（D1 域 FMC 最大允许 200 MHz，不能配 220）；
+     * SDRAM 配置 SDCLK=2，最终为 100 MHz。
      */
     peripheral_clocks.PeriphClockSelection = RCC_PERIPHCLK_FMC | RCC_PERIPHCLK_USB;
-    peripheral_clocks.FmcClockSelection    = RCC_FMCCLKSOURCE_PLL2;  /* FMC=220 MHz */
+    peripheral_clocks.FmcClockSelection    = RCC_FMCCLKSOURCE_PLL2;  /* FMC=200 MHz */
     peripheral_clocks.UsbClockSelection    = RCC_USBCLKSOURCE_HSI48; /* USB OTG_FS=48 MHz */
     peripheral_clocks.PLL2.PLL2M           = 25U;
-    peripheral_clocks.PLL2.PLL2N           = 440U;
+    peripheral_clocks.PLL2.PLL2N           = 400U;
     peripheral_clocks.PLL2.PLL2P           = 2U;
     peripheral_clocks.PLL2.PLL2Q           = 2U;
     peripheral_clocks.PLL2.PLL2R           = 2U;

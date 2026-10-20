@@ -3719,71 +3719,88 @@ LUN 1:                                                   ← FETCH(Dout)
 
 ### 19.1 问题背景
 
-`nand_init()` 在 FMC 初始化时配置了保守时序，随后通过 SET_FEATURES(01h) 将 NAND 芯片切换到高速 Mode 4（tRC=20ns），但 **FMC 硬件时序寄存器从未更新**，FMC 始终跑在低速时序，浪费了 Mode 4 的速度提升。
+3.3V 的 MT29F4G08ABADAWP 数据手册 **Table 29/31 明确按 ONFI timing mode 5 给出 AC 参数**
+（Table 29 Note 1: "Operating mode timings meet ONFI timing mode 5 parameters"），
+且 Mode 5 为 3.3V-only（Table 15 Note 3）。
+
+⚠ 电压域与模式对应（订正）：
+- **Table 32（1.8V）Note 1 = Mode 4**；
+- **Table 29/31（3.3V）Note 1 = Mode 5**；
+- Table 15 Note 2 只表示 **Mode 4 特性**在 1.8V/3.3V 都支持，具体 AC 仍按电压域选表。
+
+2026-10-20 的失败不是“Mode 4 不支持 3.3V”，而是把 **1.8V 口径的 fast 表**用在了 3.3V 上，
+外加旧 PCC 公式少算周期；该表已删除。本板是 3.3V，故统一采用 Table 29/31 + Mode 5。
+
+因此本仓改为：**启动全程 Mode 0 低速，FTL boot/恢复完成后切 Mode 5**，FMC 时序按
+Table 29/31 的 3.3V 参数重算。
 
 ### 19.2 控制宏
 
 ```c
-// nand_config.h
-#define CONFIG_NAND_TIMING_MODE_4 (0U)
+// include/nand/devices/mt29f___g08a.h
+#define CONFIG_NAND_TIMING_MODE (5U)   /* 0=低速；4=Mode4 对比；5=Mode5 正式 */
 ```
 
 | 值 | 模式 | 说明 |
 |----|------|------|
-| 0（默认） | 低速 | NAND 默认 Mode 0（tRC=50ns），FMC 保守时序。用于功能验证初期 |
-| 1 | 高速 | NAND 切 Mode 4（tRC=20ns），FMC 重新初始化为匹配快速时序 |
+| 0 | 低速 | `nand_init` / FTL boot / 运行期都保持 Mode 0 |
+| 4 | Mode 4 | 实验档：只改 `SET_FEATURES` 值，FMC AC 仍用 Table 29/31；已上板对比 |
+| 5（默认） | Mode 5 | 启动全程 Mode 0；boot 完成后切 Mode 5（3.3V 正式配置） |
 
-### 19.3 两套时序参数
+### 19.3 时序参数表
+
+只剩一张表（Mode 4/5 实验共用；`nand_init` 低速初始化也引用它）：
 
 ```c
-// nand_mt29f4g08abadawp.c
-static const nand_fmc_timing_t g_nand_timing_slow = { 70U, 5U, 10U, ... };  // Mode 0
-static const nand_fmc_timing_t g_nand_timing_fast = { 20U, 5U,  5U, ... };  // Mode 4
+// src/nand/devices/mt29f___g08a.c
+static const nand_fmc_timing_t g_nand_timing_high = {
+    70U, 5U, 10U, ...   /* Table 29/31, 3.3V */
+};
 ```
+
+`tRC = 20 ns` 来自 Table 31（3.3V, Mode 5）；旧的 `g_nand_timing_fast`（1.8V 口径）已删除。
 
 ### 19.4 ONFI → FMC 换算
 
 ```c
 static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t *onfi,
-                                    FMC_NAND_PCC_TimingTypeDef *pcc);
+                                    FMC_NAND_PCC_TimingTypeDef *pcc,
+                                    DWORD fmc_hz);
 ```
 
-| FMC 寄存器 | 含义 | 近似式（`nand_fmc_timing_to_pcc()` 实现，按 5ns 向上取整） |
+| FMC 寄存器 | 含义 | ST 精确式（`nand_fmc_timing_to_pcc()` 实现，tHCLK=5000 ps，另加 1 周期余量） |
 |-----------|------|------|
-| `SetupTime` | 命令/地址建立 | max(tCLS, tALS, tCS) / 5ns |
-| `WaitSetupTime` | RE/WE 低电平脉宽 | max(tRP, tWP) / 5ns |
-| `HoldSetupTime` | 控制/数据保持 | max(tCH, tALH, tCLH, tDH) / 5ns |
-| `HiZSetupTime` | **写方向**总线高阻窗口 | [max(tCS, tCLS, tALS) + (tWP − tDS)] / 5ns |
+| `SetupTime` | 命令/地址建立 | `(SET+1)·tHCLK ≥ max(tCS,tCLS,tALS,tCLR,tAR) − tWP` |
+| `WaitSetupTime` | RE/WE 低电平脉宽 | `(WAIT+1)·tHCLK ≥ max(tWP,tRP)` |
+| `HoldSetupTime` | 控制/数据保持 | `HOLD·tHCLK ≥ max(tCH,tCLH,tALH[,tDH])` |
+| `HiZSetupTime` | **写方向**总线高阻窗口 | `HiZ·tHCLK ≥ max(tCS,tCLS,tALS) + (tWP − tDS)` |
 
-FMC kernel clock = 220 MHz，tHCLK ≈ 4.55ns，取整为 5ns 计算。
+FMC kernel clock = **200 MHz**（PLL2 VCO 400 MHz / R=2；D1 域 FMC 上限就是 200 MHz，
+见数据手册 Table 50），tHCLK = 5 ns。2026-10-20 曾配 220 MHz（超上限）且 PCC 硬编码
+4545 ps，导致周期少算；现改为 200 MHz，并由 `sys_clock_tree_get().fmc_hz` 实算
+`tclk_ps = 1e12 / fmc_hz`。当前对 SET/WAIT/HOLD/HiZ 各加 1 周期上板余量；
+Mode 5 当前选定值为 **SET=4 / WAIT=3 / HOLD=2 / HiZ=5**（Setup 另有 `ceil(tCS/tHCLK)` 下限；Setup/Wait 各留 1 周期板级余量），`TCLR=TAR=3`；200MHz 下各相相对手册最小值至少 +5ns。init 会打印
+`[NAND] Mode 5 PCC ... (fmc=...Hz tHCLK=...ps)` 供核对。
 
-> ⚠ **本表是近似式**。ST 官方知识库给的精确式多 `±1` 与 `−tWP` 项：
-> `(SET+1)·tHCLK ≥ max(tCS,tCLS,tALS,tCLR,tAR) − tWP`、`(WAIT+1)·tHCLK ≥ max(tWP,tRP)`、
-> `HOLD·tHCLK ≥ max(tCH,tCLH,tALH)`、`HiZ·tHCLK ≥ max(tCS,tCLS,tALS) + (tWP − tDS)`。
-> 近似式在前三项上更保守（无害）。
->
-> ⚠ **`HiZSetupTime` 早期误用读方向的 `tRHZ`，2026-10-05 更正为写方向公式**：`MEMHIZ` 是**写访问**期间"地址有效 → 数据被驱动"的总线高阻时长，与读方向的 `RE#↑ → 输出高阻`（`tRHZ`）是**两个方向相反、互不相关的量**。据此 slow 表算得 HiZ 下限 = ceil(18/4.545) = 4，`nand_init` 初值已由 3 上调为 4。
+> ⚠ **`HiZSetupTime` 早期误用读方向的 `tRHZ`，2026-10-05 更正为写方向公式**：`MEMHIZ` 是**写访问**期间"地址有效 → 数据被驱动"的总线高阻时长，与读方向的 `RE#↑ → 输出高阻`（`tRHZ`）是**两个方向相反、互不相关的量**。
 
-### 19.5 nand_init() 双路径
+### 19.5 启动与运行期路径
 
-低速模式：
 ```
-HAL_NAND_Init(保守) → RESET/READ_ID/校验 → 跳过 Mode 4 → 完成
-  NAND: Mode 0（tRC=50ns）
-  FMC:  保守时序
-```
-
-高速模式：
-```
-HAL_NAND_Init(保守) → RESET/READ_ID/校验 → SET_FEATURES(Mode 4)
-  → nand_fmc_timing_to_pcc(fast) → HAL_NAND_Init(快速) → nand_fmc_init(fast) → 完成
-  NAND: Mode 4（tRC=20ns）
+nand_init: HAL_NAND_Init(保守 4/6/2/4) → RESET/READ_ID/ONFI 参数页校验 → 保持 Mode 0
+FTL boot/恢复: 全程 Mode 0（Anchor / CP / Journal / rebuild 都在保守时序下完成）
+boot 完成后: nand_enable_high_speed() → SET_FEATURES(01h, 5)
+  → nand_fmc_timing_to_pcc(g_nand_timing_high) → HAL_NAND_Init(快速)
+  → nand_fmc_init(g_nand_timing_high)
+  NAND: Mode 5（Table 29/31，tRC=20ns）
   FMC:  快速时序
 ```
+切换失败只告警并保持低速；启动路径不依赖高速时序（见 `main.c` ⑥）。
 
 ### 19.6 已知限制
 
-`nand_fmc_timing_to_pcc()` 当前用 `/5ns` 简单除法向上取整，未考虑 FMC 建立/保持时间的余量。如需更精确的时序适配，需引入 FMC 时序模型根据 HCLK 频率动态计算。
+- 余量固定为 1 个 FMC 周期，需上板用擦除/编程/读压力确认；稳定后可评估收紧到 0。
+- 3.3V 器件最高异步模式是 Mode 5；Mode 4 不再使用。
 
 ---
 
@@ -3884,7 +3901,7 @@ SQ 是环形 FIFO，旋转通过 `pop(队头) + push(队尾)` 实现。只动 `h
 - **行业**：企业级 8~32 通道并行，命令级并发是常态。
 - **硬件限制**：STM32H743 的 **FMC 是共享总线控制器**，不是多通道 NAND 控制器。接多片 NAND 只能 CE 分时复用一条总线，任何时候只有一片在传数据（见 §18）。
 - **无奈选择**：`CH_NUM=1` 单通道；用 **Phase V ISSUE/WAIT/FETCH 拆分**在软件层模拟"并发"——发完命令（ISSUE）释放总线，等 tR/tPROG 时（WAIT）切其他 LUN。这是对多 LUN 并发的软件近似，**总线本身无法同时传两片 NAND 数据**。
-- **代价**：多 LUN 只是"重叠等待时间"，不是真正并行搬移数据；单通道吞吐上限 ~50MB/s（SLC Mode 4）。
+- **代价**：多 LUN 只是"重叠等待时间"，不是真正并行搬移数据；单通道吞吐受 SLC 读/编程时序限制（本仓异步 Mode 5）。
 
 #### 21.3.3 无硬件 ECC → 软件 BCH/LDPC
 
@@ -4069,7 +4086,7 @@ main() (src/main.c)          fc_init()                  nand_init()             
   │                              Step4 nand_dma_init（本配置 no-op）
   │                              Step5 nand_fc_reset      ★绕过 dispatch，直连 engine
   │                              Step6 nand_fc_read_id + ID 校验
-  │                              Step7 Mode 4（CONFIG_NAND_TIMING_MODE_4=0 → 整段编掉）
+  │                              Step7 不切模式；boot 完成后由 main.c 调 nand_enable_high_speed()（CONFIG_NAND_TIMING_MODE=0 时 no-op）
   │
   ├─ else nand_dispatch_set_armed(1)        ★放行 submit/submit_chain
   ├─ stm32_platform_register()               （注册 time_us，FTL 的 Checkpoint 定时触发依赖）
@@ -4115,8 +4132,7 @@ nand_init()
   ├─ Step4  nand_dma_init（CONFIG_NAND_DMA=0 → no-op；失败仅回退 PIO，非致命）
   ├─ Step5  delay_ms(1) → nand_fc_reset(FFh)      ★经 nand_fc_execute 直连 engine，绕过 dispatch
   ├─ Step6  nand_fc_read_id + 拼 id[1..4] 校验 MT29F4G08ABADAWP_ID（跳过厂商字节 id[0]=0x2C）
-  └─ Step7  [CONFIG_NAND_TIMING_MODE_4] SET_FEATURES(01h,4) 切 Mode 4 + 重算 PCC + 重配 FMC
-             （本固件 =0，整段编掉，NAND / FMC 停在默认慢速时序）
+  └─ boot 完成后 [CONFIG_NAND_TIMING_MODE != 0] nand_enable_high_speed()：SET_FEATURES(01h,5) 切 Mode 5 + 重算 PCC + 重配 FMC
 ```
 
 ### 22.5 上电走读：一次冷启动
@@ -4138,7 +4154,7 @@ nand_init()
 | 开关 | 当前值 | 影响 |
 |------|-------|------|
 | `CONFIG_FC_RAID` | 0 | 图 15 的 stripe 积累/RAID 编解码不参与；`fc_stripe_submit` 分支编掉（等硬件闭环后开启） |
-| `CONFIG_NAND_TIMING_MODE_4` | 0 | 图 14/16 的 Step7 整段编掉，NAND/FMC 停在默认慢速时序 |
+| `CONFIG_NAND_TIMING_MODE` | 5 | boot 完成后切 Mode 5；0 = 不切，NAND/FMC 停在默认慢速时序 |
 | `CONFIG_NAND_DMA` | 0 | Step4 退化为 no-op，数据搬运走 PIO（CPU 逐字节） |
 
 ---
