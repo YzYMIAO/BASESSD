@@ -9,7 +9,7 @@
  *
  * 两张表：
  *   ① g_table[COMPLETION_TABLE_SIZE] —— command_id → ctx，**精确旁表**；
- *   ② g_route[CH][CE][LUN]           —— 命令 ch/ce/lun → ftl_context_t（实例路由）。
+ *   ② g_route[CH][CE][LUN]           —— 命令 ch/ce/lun → ftl_ctx_t（实例路由）。
  *
  * 为什么需要旁表（而不是让 job 自识别 cmd_id）：
  *   同步等待的 ctx 是**调用者栈上的 waiter**，没有 per-instance 的家；若走
@@ -24,12 +24,12 @@
  * 线程安全：无（裸机单线程，不在中断中访问）。
  */
 
-#include "ftl_type.h"    /* ftl_status_t */
+#include "ftl_type.h"    /* ftl_status_e */
 #include "nand_config.h" /* CE_NUM / LUN_NUM（实例路由表形参维度）*/
 
 #include <stdint.h>
 
-/* ── 前向声明（ftl_context_t 在 ftl.h 中定义）── */
+/* ── 前向声明（ftl_ctx_t 在 ftl.h 中定义）── */
 struct ftl_context;
 
 /* ── 旁表表项 ──
@@ -42,7 +42,7 @@ typedef struct
     WORD  used   : 1;  /* 1=槽位占用 */
     WORD  cmd_id : 15; /* FC command_id */
     void *ctx;         /* 该命令的私有状态（同步等待 = ftl_sync_waiter_t*；job = &job） */
-} completion_entry_t;
+} ct_entry_t;
 
 /* 旁表容量。
  *
@@ -72,7 +72,7 @@ void ct_init(void);
  *
  * @return FTL_OK；FTL_ERROR 表满（COMPLETION_TABLE_SIZE，见容量推导）。
  */
-ftl_status_t ct_add(WORD cmd_id, void *ctx);
+ftl_status_e ct_add(WORD cmd_id, void *ctx);
 
 /* ct_remove - 释放 cmd_id 的表项（未找到 no-op，幂等） */
 void ct_remove(WORD cmd_id);
@@ -103,7 +103,7 @@ WORD ct_get_count(void);
  * ⚠ **必须早于逐实例 boot**：boot 期的 full metadata rebuild 就会经 l2p_read_sync 抽完成表。
  * 传 NULL 则清空（boot 失败回退 fc_service 时用）。
  *
- * @param route  CH_NUM×CE_NUM×LUN_NUM 三维 ftl_context_t* 表（仿 main.c g_ftl_ptrs）
+ * @param route  CH_NUM×CE_NUM×LUN_NUM 三维 ftl_ctx_t* 表（仿 main.c g_ftl_ptrs）
  */
 void ct_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM]);
 

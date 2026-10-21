@@ -24,12 +24,12 @@ typedef enum
     FAULT_KIND_MEMMANAGE  = 4,
     FAULT_KIND_BUSFAULT   = 5,
     FAULT_KIND_USAGEFAULT = 6,
-} fault_kind_t;
+} fault_kind_e;
 
 /* 捕获到的故障现场。 */
 typedef struct
 {
-    DWORD kind;       /* fault_kind_t */
+    DWORD kind;       /* fault_kind_e */
     DWORD sp;         /* 出错时使用的栈指针（MSP 或 PSP） */
     DWORD msp;        /* 当前 MSP */
     DWORD psp;        /* 当前 PSP */

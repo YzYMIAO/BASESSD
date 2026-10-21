@@ -40,11 +40,11 @@
  */
 
 #include "fc_command.h" /* fc_command_t / fc_command_status_t */
-#include "ftl_type.h"   /* ftl_status_t */
+#include "ftl_type.h"   /* ftl_status_e */
 
 #include <stdint.h>
 
-/* ── 前向声明（ftl_context_t 在 ftl.h 中定义）── */
+/* ── 前向声明（ftl_ctx_t 在 ftl.h 中定义）── */
 struct ftl_context;
 
 /* 完成服务函数选择器。每一项 = 一个 g_op_callbacks[] 槽 = 一个"功能"。 */
@@ -62,10 +62,10 @@ typedef enum
     FTL_OP_BBT,           /* BBT 持久化 job（bbt.c） */
     FTL_OP_METADATA,      /* L2P 日志块整理 job（metadata_job.c） */
     FTL_OP_COUNT          /* 计数哨兵 */
-} ftl_op_id_t;
+} ftl_op_id_e;
 
 /* op_tag 只有 7 位（fc_command_t.op_tag）⇒ 槽数上限 128。 */
-_Static_assert(FTL_OP_COUNT <= 128U, "ftl_op_id_t 必须装进 fc_command_t.op_tag:7");
+_Static_assert(FTL_OP_COUNT <= 128U, "ftl_op_id_e 必须装进 fc_command_t.op_tag:7");
 
 typedef void (*ftl_op_callback_fn_t)(struct ftl_context        *ftl,
                                      const fc_command_status_t *completion,
@@ -85,7 +85,7 @@ typedef void (*ftl_op_callback_fn_t)(struct ftl_context        *ftl,
  *
  * @return FTL_OK 已提交；FTL_AGAIN 提交被背压拒（SQ 满等瞬态）；FTL_ERROR 旁表满。
  */
-ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx);
+ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx);
 
 /*
  * ftl_op_dispatch - 完成派发（ct_drain 的唯一出口）。
@@ -120,7 +120,7 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
 /*
  * ftl_journal_callback - Journal 刷页 job 的完成服务函数（定义在 journal.c）。
  *
- * 由 g_op_callbacks[FTL_OP_JOURNAL] 引用；ctx = `l2p_journal_t *`（= ftl->journal），
+ * 由 g_op_callbacks[FTL_OP_JOURNAL] 引用；ctx = `l2p_jrn_t *`（= ftl->journal），
  * 服务函数按 job.phase 推进状态机（页写完成 ⇒ 推进写指针 / 起换块擦除；擦完成 ⇒ 收尾）。
  * 每条命令自己 fc_command_release。
  */
@@ -129,7 +129,7 @@ void ftl_journal_callback(struct ftl_context *ftl, const fc_command_status_t *co
 /*
  * ftl_read_recovery_callback - Read Recovery job 的完成服务函数（定义在 read_recovery.c）。
  *
- * 由 g_op_callbacks[FTL_OP_READ_RECOVERY] 引用；ctx = `read_recovery_handle_t *`（= &ftl->read_recovery_handle）。
+ * 由 g_op_callbacks[FTL_OP_READ_RECOVERY] 引用；ctx = `rr_handle_t *`（= &ftl->read_recovery_handle）。
  * 服务函数按 job.stage 推进（切读重试模式 / 重试读 / 恢复默认模式 / 邻居读），终态
  * 释放被托管的 pending 槽并让 host 读组结算。每条命令自己 fc_command_release。
  */
@@ -139,7 +139,7 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
  * ftl_migrate_callback - 搬移 job（GC / 静态 WL / 慢死预测）的完成服务函数（定义在 migrate.c）。
  *
  * 由 g_op_callbacks[FTL_OP_GC] 与 [FTL_OP_WL] **共同**引用（同一台引擎，靠 job.kind
- * 区分 victim 来源、job.post 区分收尾）；ctx = `migrate_handle_t *`（= ftl->mig_handle）。
+ * 区分 victim 来源、job.post 区分收尾）；ctx = `mig_handle_t *`（= ftl->mig_handle）。
  * 服务函数按 job.phase 推进（读完成 ⇒ 解 META + 反查 L2P；写完成 ⇒ 改 L2P/Journal +
  * 迁移有效计数；擦完成 ⇒ 归还/退役/标坏），每条命令自己 fc_command_release。
  */
@@ -161,7 +161,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
 /*
  * ftl_checkpoint_callback - Checkpoint job 的完成服务函数（定义在 checkpoint.c）。
  *
- * 由 g_op_callbacks[FTL_OP_CHECKPOINT] 引用；ctx = `checkpoint_handle_t *`（= ftl->cp_handle）。
+ * 由 g_op_callbacks[FTL_OP_CHECKPOINT] 引用；ctx = `cp_handle_t *`（= ftl->cp_handle）。
  * 服务函数按 job.phase 记完成结果、推进 phase、release 命令。
  * ⚠ 与 ftl_migrate_callback 的差别：本函数**不**推进状态机（不调 cp_handle）——
  *   CP 的阶段里有同步原语（游标未建立时要读池定位），在完成泵里跑就是嵌套泵。
@@ -172,7 +172,7 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
 /*
  * ftl_bbt_callback - BBT 持久化 job 的完成服务函数（定义在 bbt.c）。
  *
- * 由 g_op_callbacks[FTL_OP_BBT] 引用；ctx = `ftl_allocator_t *`（= &ftl->alloc，
+ * 由 g_op_callbacks[FTL_OP_BBT] 引用；ctx = `alc_t *`（= &ftl->alloc，
  * 即命令的实例归属；形参 ftl 不用）。服务函数按 alloc->bbt.handle.phase 收尾：
  *   · ERASE 成功 ⇒ 起写 record；失败 ⇒ 游标不推进、dirty 保留；
  *   · WRITE 完成 ⇒ **无论成败都推进池游标**（半编程槽不可复用），成功清 dirty。
@@ -183,7 +183,7 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
 /*
  * ftl_metadata_callback - L2P 日志块整理 job（回收 / 抗碎片压缩）的完成服务函数（定义在 metadata_job.c）。
  *
- * 由 g_op_callbacks[FTL_OP_METADATA] 引用；ctx = `metadata_dir_cache_t *`
+ * 由 g_op_callbacks[FTL_OP_METADATA] 引用；ctx = `md_dir_cache_t *`
  * （模块上下文；服务函数内部取 `&dir->handle`）。
  * 服务函数按 job.phase 记完成结果、改 phase、release 命令：
  *   · RECLAIM     ⇒ 成功清待回收位 + alc_free_block；失败保留位，下轮重试；

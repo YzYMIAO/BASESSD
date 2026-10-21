@@ -9,6 +9,8 @@
  *     NAND Read 完成后、CQ push 前，FC 内部自动调用。
  *     遍历 desc 链：ECC 解码 → 更新 desc->status。
  *     全部成功才解扰；有失败则保持加扰（供 RAID XOR 在 scrambled domain 恢复）。
+ *     **擦除页单独识别**（整条 CW 全 0xFF ⇒ FC_CW_STATUS_BLANK）：它不是读错误，
+ *     跳过解扰/CRC/META 校验；否则 GC 读到半写块的空洞页会把整块误标坏（RISK-GC-11）。
  *
  *   Stage 2: fc_data_path_raid_recover()
  *     FTL 从 CQ 拿到 completion 后检查 desc 链，当发现 status=UNC
@@ -37,6 +39,27 @@
 
 #include <stddef.h>
 #include <string.h>
+
+/* --------------------------------------------------------------------
+ * fc_cw_is_blank
+ *   功能：判断一条 CW 缓冲是否为**擦除页**（整条 528B 全 0xFF）。
+ *   返回：true = 物理上从未编程。
+ *   实现要点：判据是**整条 CW**（META+CRC+USER+ECC），不是只看 USER 区——
+ *     用户数据可能恰好全 0xFF，但那种页的 ECC 校验字节必然不是 0xFF；
+ *     只有从未编程的页才整条全 0xFF。
+ *   ⚠ 只在 ECC 解码失败后调用：解码成功的页不解此判据（避免误吞真实数据）。
+ * -------------------------------------------------------------------- */
+static bool fc_cw_is_blank(const BYTE *cw)
+{
+    for (DWORD i = 0U; i < FC_BUFFER_POOL_CW_SIZE; i++)
+    {
+        if (cw[i] != 0xFFU)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 
 #if CONFIG_FC_RAID
 /* --------------------------------------------------------------------
@@ -114,9 +137,9 @@ void fc_data_path_scramble(BYTE *cw, DWORD seed)
     (void)fc_random_transform(cw + FC_CRC_USER_OFFSET, FC_BUFFER_USER_SIZE, seed);
 }
 
-fc_status_t fc_data_path_ecc_encode(BYTE *cw)
+fc_status_e fc_data_path_ecc_encode(BYTE *cw)
 {
-    fc_status_t result;
+    fc_status_e result;
 
     ASSERT(cw != NULL);
 
@@ -126,7 +149,7 @@ fc_status_t fc_data_path_ecc_encode(BYTE *cw)
     return (result == FC_STATUS_NOT_SUPPORTED) ? FC_STATUS_OK : result;
 }
 
-fc_status_t fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
+fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits)
 {
     ASSERT(cw != NULL);
 
@@ -201,11 +224,11 @@ DWORD fc_data_path_meta_check(const BYTE *cw, DWORD command_meta, DWORD paa)
  *     - Stage 2：ECC 编码（非 LDPC_RAW 模式）——对 520B 数据区编码，8B parity 写入。
  *     - Stage 3 已被移除：跨命令 stripe RAID 在 generate_stripe_parity() 单独处理。
  * -------------------------------------------------------------------- */
-fc_status_t fc_data_path_encode(const fc_command_t *command)
+fc_status_e fc_data_path_encode(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
     BYTE              *buffer;
-    fc_status_t        result;
+    fc_status_e        result;
 
     /* 入参前置条件由调用者保证（fc.c 写路径传入有效命令） */
     ASSERT(command != NULL);
@@ -325,7 +348,7 @@ fc_status_t fc_data_path_encode(const fc_command_t *command)
  *       [520..528] 不参与（由后续 ECC 编码生成）。
  *     - XOR 累加：首条数据命令 memcpy 作初值，后续按 32-bit 字异或。
  * -------------------------------------------------------------------- */
-fc_status_t fc_data_path_generate_stripe_parity(
+fc_status_e fc_data_path_generate_stripe_parity(
     const fc_command_t *data_cmds[],
     BYTE                data_count,
     const fc_command_t *parity_cmd)
@@ -432,7 +455,7 @@ fc_status_t fc_data_path_generate_stripe_parity(
             BYTE *buf = fc_buffer_get_base(desc->buffer_id);
             if (buf != NULL)
             {
-                fc_status_t result;
+                fc_status_e result;
                 result = fc_data_path_ecc_encode(buf);
                 if (result != FC_STATUS_OK)
                 {
@@ -463,7 +486,8 @@ fc_status_t fc_data_path_generate_stripe_parity(
  *         FC_STATUS_IO_ERROR（存在不可纠 CW，buffer 保持 scrambled+corrected）/
  *         INVALID_ARGUMENT。
  *   实现要点：
- *     - Pass 1：逐 CW ECC 解码；失败置 UNC 并记录 all_ok=0。
+ *     - Pass 1：逐 CW ECC 解码；失败置 UNC 并记录 all_ok=0。整条 CW 全 0xFF 的
+ *       擦除页不算失败，置 BLANK 后由后续 Pass 跳过。
  *     - 有失败直接返回 IO_ERROR（不解扰，供 FTL RAID 在 scrambled domain 恢复）。
  *     - Pass 2：全部成功才解扰——seed **从页内明文 META 自举**（META 在加扰区之外，
  *       v24），故 GC / 掉电重建不必预先知道 LBA。
@@ -471,12 +495,12 @@ fc_status_t fc_data_path_generate_stripe_parity(
  *     - Pass 4：META 读回 + 两项校验（v24）：① 自洽（低 3 位 == 本 desc 的 plane/cw）；
  *       ② 与本命令的 LBA 比对（command->meta 为 FC_META_UNKNOWN 时跳过）。任一不符置 MATA_ERROR。
  * -------------------------------------------------------------------- */
-fc_status_t fc_data_path_process_read(const fc_command_t *command)
+fc_status_e fc_data_path_process_read(const fc_command_t *command)
 {
     fc_descriptor_id_t desc_id;
     fc_descriptor_t   *desc;
     BYTE              *buffer;
-    fc_status_t        result;
+    fc_status_e        result;
     BYTE               all_ok = 1U;
     BYTE               cw;
 
@@ -515,9 +539,20 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
 
             if (result == FC_STATUS_IO_ERROR)
             {
-                /* ECC 不可纠：buffer 保持 scrambled，desc status 置 UNC */
-                desc->status = FC_CW_STATUS_UNC;
-                all_ok       = 0U;
+                if (fc_cw_is_blank(buffer))
+                {
+                    /* 擦除页：全 0xFF 不是合法 BCH 码字，解码必然失败——但这是
+                     * 「页从未编程」，不是读错误。置 BLANK（非错误位），让上层
+                     * （GC 搬移 / 掉电重建）按空页跳过，而不是把整块标坏。 */
+                    desc->status   = FC_CW_STATUS_BLANK;
+                    desc->ecc_bits = 0U;
+                }
+                else
+                {
+                    /* ECC 不可纠：buffer 保持 scrambled，desc status 置 UNC */
+                    desc->status = FC_CW_STATUS_UNC;
+                    all_ok       = 0U;
+                }
             }
             else if ((result == FC_STATUS_OK) || (result == FC_STATUS_NOT_SUPPORTED))
             {
@@ -557,10 +592,11 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             }
 
             buffer = fc_buffer_get_base(desc->buffer_id);
-            if (buffer != NULL)
+            if ((buffer != NULL) && (!fc_cw_status_is_blank(desc->status)))
             {
                 /* 种子**自举**：META 在加扰区之外、保持明文，直接读回本 CW 的扇区 LBA
-                 * 当种子——GC / 掉电重建因此不必预先知道 LBA（v24）。 */
+                 * 当种子——GC / 掉电重建因此不必预先知道 LBA（v24）。
+                 * 擦除页没有种子（META 全 FF）⇒ 跳过解扰，缓冲保持全 FF。 */
                 DWORD cw_meta;
                 (void)memcpy(&cw_meta, buffer, FC_CRC_META_SIZE);
                 fc_data_path_scramble(buffer, fc_random_seed_from_meta(cw_meta));
@@ -584,7 +620,8 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             }
 
             buffer = fc_buffer_get_base(desc->buffer_id);
-            if (buffer != NULL)
+            /* 擦除页未编程、也未解扰：CRC 字段全 FF 与 USER 区无对应关系，跳过。 */
+            if ((buffer != NULL) && (!fc_cw_status_is_blank(desc->status)))
             {
                 /*
                  * CRC 校验失败：标记 desc status。
@@ -614,13 +651,26 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
             buffer = fc_buffer_get_base(desc->buffer_id);
             if (buffer != NULL)
             {
-                DWORD read_meta;
-                (void)memcpy(&read_meta, buffer, FC_CRC_META_SIZE);
-                desc->meta = read_meta;
+                /* 擦除页**永远**按「无 LBA」处理，与 command->meta 是否已知无关。
+                 * 原因：FC 的整页读（pba_to_cmd）恒覆盖本 plane 的全部 CW，而 host 写的
+                 * 稀疏页只编程部分 CW（512B 写只落 1 个 CW）⇒ 同一页里必然有**空兄弟 CW**。
+                 * 若对这些空 CW 做 META 校验，整条命令会被判 MATA_ERROR，RR/GC 拿着
+                 * 明明可读的好页去标坏块（RISK-GC-12）。
+                 * 「映射指向未编程页」由 FTL 的 dangling 守卫与 L2P 反查负责，不在 FC 判。 */
+                if (fc_cw_status_is_blank(desc->status))
+                {
+                    desc->meta = FC_META_UNKNOWN;
+                }
+                else
+                {
+                    DWORD read_meta;
+                    (void)memcpy(&read_meta, buffer, FC_CRC_META_SIZE);
+                    desc->meta = read_meta;
 
-                /* 两项校验（自洽 + 与本命令 LBA 比对）见 fc_data_path_meta_check；
-                 * 返回 0（通过）时 OR 进去是空操作。 */
-                desc->status |= fc_data_path_meta_check(buffer, command->meta, desc->paa);
+                    /* 两项校验（自洽 + 与本命令 LBA 比对）见 fc_data_path_meta_check；
+                     * 返回 0（通过）时 OR 进去是空操作。 */
+                    desc->status |= fc_data_path_meta_check(buffer, command->meta, desc->paa);
+                }
             }
             desc_id = (fc_descriptor_id_t)desc->next_id;
         }
@@ -653,7 +703,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command)
  *     - 解扰所有 CW（seed 从各 CW 的明文 META 自举）。
  *     - 沿 desc 链把所有 desc status 置 READY。
  * -------------------------------------------------------------------- */
-fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_idx)
+fc_status_e fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_idx)
 {
     BYTE              *buffers[CW_TOTAL_MAX];
     BYTE               count;
@@ -683,7 +733,7 @@ fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_id
     /* ── ECC 重试 ── */
     if (cmd->config.ldpc != FC_ECC_MODE_LDPC_RAW)
     {
-        fc_status_t ecc_result;
+        fc_status_e ecc_result;
 
         ecc_result = fc_data_path_ecc_decode(buffers[failed_cw_idx], NULL);
         if (ecc_result == FC_STATUS_IO_ERROR)

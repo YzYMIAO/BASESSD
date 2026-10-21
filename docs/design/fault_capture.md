@@ -241,9 +241,9 @@ void fault_hook(const fault_ctx_t *ctx);   /* 弱符号，默认空实现 */
 `test_rebuild.c` 文件本身未删未改。夹具落地区域另议（AXI_RAM 实测只剩约 71 KB，不够；SDRAM 未接线）。
 
 > **2026-10-13 后续**：该文件**已删除**——其两条仍有效的用例（`add_closed_sb_full` 满列表边界、
-> `is_metadata_block_dynamic` 动态 region）并入 `ftl_ut_munit.md §4.1/§4.6` 的 FTL 套件设计；
+> `is_metadata_block_dynamic` 动态 region）并入 `../archive/ftl_ut_munit.md §4.1/§4.6` 的 FTL 套件设计；
 > 其余用例与 §4 既有条目重合，且 `is_metadata_block` 断言的是 P0-2 前的**旧单块布局**（已失效）。
-> 夹具超容的根因由 FTL 套件的「复用活实例」方案（`ftl_ut_munit.md §2.2`）化解，不再需要独立大夹具。
+> 夹具超容的根因由 FTL 套件的「复用活实例」方案（`../archive/ftl_ut_munit.md §2.2`）化解，不再需要独立大夹具。
 
 ### 7.2 CLI 的 `%llu` → `%lu` 修复（newlib-nano 不支持 long long）
 
@@ -259,6 +259,14 @@ void fault_hook(const fault_ctx_t *ctx);   /* 弱符号，默认空实现 */
 - **栈溢出型故障可能打不出来**：处理器本身跑在 MSP 上。若故障根因就是栈已经压穿 DTCM（`STKERR/MSTKERR` 或 SP 越界），入异常时压帧会再次失败 → 双重故障 → Lockup，连 dump 的机会都没有。这类只能靠 SWD 看 `CFSR`。`_sbrk` 堆守卫（`syscalls.c`）挡的是堆撞栈，不是栈自己溢出。
 - **故障发生在 `usart_init()` 之前**：`UE=0`，控制台不可用，只写记录不打印。
 - **`.noinit` 只跨软复位**：硬复位/掉电后记录丢失（VBAT 未供电，BKPSRAM 用不了）。
+- **烧录 / 软复位都不清 `.noinit`**：记录只在**断电**时丢失。由此有两个陷阱：
+  ① 同一份 dump 在多次复位后**原样重复打印**（连 SP/寄存器都相同）——这**不构成**
+     「又崩了一次」；§3.3 的「又看到同一行」判据即指此。
+  ② 重新烧录后看到的 dump 可能属于**上一份镜像**：用当前 ELF 解 `PC`/`LR` 会落在
+     错的位置（症状：LR 落在毫无间接调用的函数中间）。
+  复现步骤必须是：**烧录 → 拔电（不是按复位）→ 上电确认 `crash` 无记录 → 再跑**。
+  ⚠ 横幅的 `__DATE__/__TIME__` 只在 **main.c 重编**时更新，增量构建下会过期，
+  **不能**用它证明当前镜像（待引入真正的 build id）。
 - **IMPRECISERR**：写缓冲导致的不精确总线错误，栈里的 PC 可能已经跑远，`PC` 不一定是出错指令。
 - **轮询输出期间中断是关的**：dump 期间若还有别的故障源在跑，会直接锁死。这是"停机保留现场"语义的必然代价。
 

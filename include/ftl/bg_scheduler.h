@@ -6,9 +6,9 @@
  *
  * 模块边界（本文件是**通用引擎**，零 kick 知识、策略无关）：
  *   · bg_scheduler.h/c —— 引擎：must-run pass + 预算 pass（interval 门 / charge 计账 /
- *     预算不足截断）。不 include 任何 kick 头，只前向声明 ftl_context_t。
+ *     预算不足截断）。不 include 任何 kick 头，只前向声明 ftl_ctx_t。
  *   · bg_wiring.c —— 接线：任务表 s_bg_tasks + 10 个 static 适配器（包异构 kick →
- *     void(ftl_context_t*)）+ 档位→预算映射（g_bg_level_cfg）+ 档位选择
+ *     void(ftl_ctx_t*)）+ 档位→预算映射（g_bg_level_cfg）+ 档位选择
  *     （ftl_bg_level_select）+ Phase 3 入口（ftl_bg_service）。档位策略是 FTL 域政策，
  *     引擎不持有。设计见 docs/design/ftl_design.md §3.12。
  *
@@ -26,16 +26,16 @@
  *     防刷屏。⚠ 本板 `ssd_platform_register` 强制 time_us 非空 ⇒ 该分支不可达。
  */
 
-#include "ftl_type.h"  /* bg_level_t */
+#include "ftl_type.h"  /* bg_level_e */
 #include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 
 #include <stdbool.h>
 #include <stdint.h>
 
-/* 前向声明（ftl_context_t 在 ftl.h 中定义；本文件被 ftl.h include，
+/* 前向声明（ftl_ctx_t 在 ftl.h 中定义；本文件被 ftl.h include，
  * 用 struct 标签前向引用打破环） */
 struct ftl_context;
-typedef struct ftl_context ftl_context_t;
+typedef struct ftl_context ftl_ctx_t;
 
 /* tasks[] 容量。装载表的项数不得超出——超出即越界写 tasks[] 并踩掉 task_count。
  * 装载点 bg_wiring.c 用 _Static_assert 在编译期挡住（那里同时看得见表与容量），
@@ -45,8 +45,8 @@ typedef struct ftl_context ftl_context_t;
 /* ── 档位（负载 → 预算规模，见 bg_wiring.c g_bg_level_cfg；枚举在 ftl_type.h）── */
 #define BG_LEVEL_NUM (3U) /* 值域上界：档位表数组维度 + 档位下标的边界断言 */
 
-/* 统一任务签名：适配器包异构 kick → void(ftl_context_t*) */
-typedef void (*bg_task_func_t)(ftl_context_t *ftl);
+/* 统一任务签名：适配器包异构 kick → void(ftl_ctx_t*) */
+typedef void (*bg_task_func_t)(ftl_ctx_t *ftl);
 
 typedef struct
 {
@@ -73,18 +73,18 @@ typedef struct
      * 与引擎实际使用的那份配置可能不同步。 */
     const bg_level_cfg_t *cfg;
     /* 本轮档位（BG_LEVEL_*），同样由 bg_scheduler_run 发布。
-     * typed 模块入口的 ftl_bg_info_t.load_level 就取这里，避免适配器各自再选一次档。 */
-    bg_level_t level;
-} bg_scheduler_t;
+     * typed 模块入口的 bg_info_t.load_level 就取这里，避免适配器各自再选一次档。 */
+    bg_level_e level;
+} bg_sched_t;
 
 /* 装载任务表：拷贝 table[0..count) 到 tasks[]、置 task_count、清 cfg。
  * ⚠ count > BG_TASK_COUNT 会越界写 tasks[] ⇒ 调用者先用 _Static_assert 在编译期挡住
  * （见 bg_wiring.c s_bg_tasks）。 */
-void bg_scheduler_init(bg_scheduler_t *sched, const bg_task_t *table, BYTE count);
+void bg_scheduler_init(bg_sched_t *sched, const bg_task_t *table, BYTE count);
 
 /* 跑一轮：Pass 0 must-run（无条件）+ Pass 1 预算/interval（**表序即优先级**，预算不足截断）。
  * cfg 必须与 sched 当前档位配套（bg_wiring.c 传 &g_bg_level_cfg[level]）。
- * 档位本身由策略层在调用前写入 sched->level（typed 模块入口据此构造 ftl_bg_info_t）。 */
-void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_cfg_t *cfg);
+ * 档位本身由策略层在调用前写入 sched->level（typed 模块入口据此构造 bg_info_t）。 */
+void bg_scheduler_run(bg_sched_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg);
 
 #endif /* FTL_BG_SCHEDULER_H */

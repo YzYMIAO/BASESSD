@@ -19,7 +19,7 @@ static storage_wdg_recovery_hook_t g_storage_wdg_recovery_hook;
 /* 上一次成功刷新 WWDG 的时刻，用来判断当前是否已进入允许刷新窗口。 */
 static DWORD g_storage_wdg_last_wwdg_refresh_ms;
 
-static bool storage_wdg_domain_is_valid(storage_wdg_domain_t domain)
+static bool storage_wdg_domain_is_valid(wdg_domain_e domain)
 {
     /* 防止调用方传入损坏的枚举值并越界访问 per-domain 数组。 */
     return (domain < STORAGE_WDG_DOMAIN_COUNT);
@@ -31,7 +31,7 @@ static bool storage_wdg_elapsed(DWORD now_ms, DWORD since_ms, DWORD limit_ms)
     return ((now_ms - since_ms) > limit_ms);
 }
 
-static bool storage_wdg_all_required_domains_healthy(DWORD now_ms, storage_wdg_domain_t *timed_out_domain)
+static bool storage_wdg_all_required_domains_healthy(DWORD now_ms, wdg_domain_e *timed_out_domain)
 {
     DWORD index;
 
@@ -47,7 +47,7 @@ static bool storage_wdg_all_required_domains_healthy(DWORD now_ms, storage_wdg_d
         }
         if ((timeout_ms == 0U) || storage_wdg_elapsed(now_ms, g_storage_wdg_status.last_progress_ms[index], timeout_ms))
         {
-            *timed_out_domain = (storage_wdg_domain_t)index;
+            *timed_out_domain = (wdg_domain_e)index;
             return false;
         }
     }
@@ -55,7 +55,7 @@ static bool storage_wdg_all_required_domains_healthy(DWORD now_ms, storage_wdg_d
     return true;
 }
 
-static void storage_wdg_latch_fault(storage_wdg_domain_t domain, storage_wdg_fault_t fault)
+static void storage_wdg_latch_fault(wdg_domain_e domain, wdg_fault_e fault)
 {
     /*
      * 首故障优先：后续错误不能覆盖它，便于复位后日志/备份寄存器记录根因。
@@ -130,7 +130,7 @@ void storage_wdg_set_recovery_hook(storage_wdg_recovery_hook_t hook)
     g_storage_wdg_recovery_hook = hook;
 }
 
-void storage_wdg_report_progress(storage_wdg_domain_t domain)
+void storage_wdg_report_progress(wdg_domain_e domain)
 {
     if ((!g_storage_wdg_status.initialized) || !storage_wdg_domain_is_valid(domain))
     {
@@ -146,9 +146,9 @@ void storage_wdg_report_progress(storage_wdg_domain_t domain)
 
 void storage_wdg_service(void)
 {
-    storage_wdg_domain_t timed_out_domain = STORAGE_WDG_DOMAIN_COUNT;
-    DWORD                now_ms;
-    DWORD                since_wwdg_refresh_ms;
+    wdg_domain_e timed_out_domain = STORAGE_WDG_DOMAIN_COUNT;
+    DWORD        now_ms;
+    DWORD        since_wwdg_refresh_ms;
 
     /* 未初始化或已锁存故障时，一律不继续喂任何看门狗。 */
     if ((!g_storage_wdg_status.initialized) || (!g_storage_wdg_status.iwdg_feeding))

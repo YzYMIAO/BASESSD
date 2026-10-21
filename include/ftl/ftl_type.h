@@ -1,7 +1,7 @@
 #ifndef FTL_TYPE_H
 #define FTL_TYPE_H
 
-#include "ssd_types.h" /* ssd_status_t（ftl_io_request_t 的完成状态字段） */
+#include "ssd_types.h" /* ssd_status_e（ftl_io_req_t 的完成状态字段） */
 
 #include <stdint.h>
 
@@ -25,7 +25,7 @@
 #define FTL_LBA_INVALID (0xFFFFFFFFU)
 
 /*
- * ftl_status_t — FTL 内部操作通用返回状态
+ * ftl_status_e — FTL 内部操作通用返回状态
  *
  *   FTL_OK      = 0  操作成功
  *   FTL_ERROR   = 1  永久失败（配置错误 / 无可用空间）——重试无意义
@@ -42,7 +42,7 @@
  *
  * FTL_TIMEOUT 与 NVMe timeout / POSIX -ETIMEDOUT 同构：它**不是** FTL_AGAIN
  * （重试无意义），也**不是** FTL_ERROR（失败原因可归因到等待者）。模块的
- * `*_status_t.timeout_phase` 给出超时发生在哪一步（docs/design/ftl_module_contracts.md §6.3）。
+ * `*_status_t.timeout_phase` 给出超时发生在哪一步（docs/archive/ftl_module_contracts.md §6.3）。
  */
 typedef enum
 {
@@ -50,7 +50,7 @@ typedef enum
     FTL_ERROR   = 1U, /* 永久失败（通用，不细分错误码） */
     FTL_AGAIN   = 2U, /* 瞬态背压（资源暂空，可重试） */
     FTL_TIMEOUT = 3U, /* 等待超时（ms deadline 到期） */
-} ftl_status_t;
+} ftl_status_e;
 
 /* 后台档位（load level）：bg_wiring 选择、bg_scheduler 发布、typed 模块入口消费。
  * 三档决定 must-run 之外的任务条数与预算，见 bg_scheduler.h。 */
@@ -59,10 +59,10 @@ typedef enum
     BG_LEVEL_IDLE   = 0,
     BG_LEVEL_NORMAL = 1,
     BG_LEVEL_BUSY   = 2,
-} bg_level_t;
+} bg_level_e;
 
 /*
- * ftl_topology_t — FTL 拓扑描述
+ * ftl_topo_t — FTL 拓扑描述
  *
  * 描述本 FTL 实例管理的芯片路由。
  *   ch/ce/lun — 本 FTL 绑定的 NAND 芯片。
@@ -88,7 +88,7 @@ typedef struct
     BYTE ch;
     BYTE ce;
     BYTE lun;
-} ftl_topology_t;
+} ftl_topo_t;
 
 /* ── 对外请求类型 ──
  *
@@ -99,7 +99,7 @@ typedef struct
  * 五张表由 HIL 独立定义、FTL 只收引用（`ftl_table_refs_t`，定义于
  * include/ftl/allocator.h —— 因其依赖 super_block_t，放此处会形成循环 include）：
  *   pending_cb_t      — pending 完成回调（Step 3 从 pending.h 迁入，打破循环 include）
- *   ftl_io_request_t  — 一次读写请求的完整描述（含通知/回调字段，Step 3 嵌入 pending）
+ *   ftl_io_req_t  — 一次读写请求的完整描述（含通知/回调字段，Step 3 嵌入 pending）
  *
  * 设计原则：请求结构体用普通字段而非位域（访问更快，C 编译器无
  * 位域可移植性问题）；**地址一律用 DWORD**（ftl/ftl_config.h §三.2）。
@@ -115,7 +115,7 @@ typedef void (*pending_cb_t)(void *ctx);
 /* ── 请求参数 ── */
 
 /*
- * ftl_io_request_t — 一次 FTL 读写请求的完整参数。
+ * ftl_io_req_t — 一次 FTL 读写请求的完整参数。
  *
  * 由 Controller 层构造后整体传入 ftl_submit_read / ftl_submit_write
  * （形参 (ftl, req) 共 2 个，替换原先 8 个散落形参）。
@@ -128,9 +128,9 @@ typedef struct
     void                  *buffer;          /* 读：caller 数据 buffer（数据写回处）；写：数据源 */
     DWORD                  count;           /* ★ 连续 LBA 数（= 上层 block_count）；FTL 自行决定单/双 plane 拆分 */
     volatile BYTE         *complete_flag;   /* 非 NULL 时全部子操作完成后置 1（异步跟踪） */
-    volatile ssd_status_t *status_out;      /* 非 NULL 时组完成后写入 SSD_STATUS_OK/IO_ERROR */
+    volatile ssd_status_e *status_out;      /* 非 NULL 时组完成后写入 SSD_STATUS_OK/IO_ERROR */
     pending_cb_t           on_complete;     /* 组完成后回调（可选，Controller 子请求聚合） */
     void                  *on_complete_ctx; /* 回调上下文（ssd_request_t*） */
-} ftl_io_request_t;
+} ftl_io_req_t;
 
 #endif /* FTL_TYPE_H */

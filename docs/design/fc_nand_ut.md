@@ -22,7 +22,7 @@
 
 ## 2. 测试分层
 
-参考 [UT Plan FC-NAND munit](ut-plan-fc-nand-munit.md)，测试分三个层级：
+框架与运行方式见 [`munit_adapter.md`](munit_adapter.md)，测试分三个层级：
 
 ```
 Level 1: Pure Logic ──── 零硬件依赖，纯函数测试

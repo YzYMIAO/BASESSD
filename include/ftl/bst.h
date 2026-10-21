@@ -28,7 +28,7 @@
  *   （DFTL / arXiv 1504.01666 / LeaFTL / VPFTL 同构）：逐页位图在 DRAM-less 下装不下
  *   （RAM ∝ 页数），且落 flash 后失效清位会引发大量 flash I/O ⇒ 主流不做。
  *   故本仓：
- *     · ftl_block_t = 块级聚合条目（valid_count 是 **CW 级真值**），20B/块，全常驻；
+ *     · bst_block_t = 块级聚合条目（valid_count 是 **CW 级真值**），20B/块，全常驻；
  *     · 无独立位图表——GC/WL 迁移逐页读 META 反查 L2P 判定，不靠任何 RAM 位图。
  *   块级聚合（valid_count）供 GC/WL 选 victim（对齐主流 validity ratio）；逐 CW 真值现查 L2P。
  */
@@ -50,7 +50,7 @@ typedef enum
     RR_BLOCK_WARNING  = 1, /* ECC 上升趋势中 */
     RR_BLOCK_CRITICAL = 2, /* ECC 接近上限 */
     RR_BLOCK_DYING    = 3, /* 预计即将坏块，准备搬移 */
-} rr_block_health_t;
+} rr_block_health_e;
 
 /* ── ECC 健康记录（per-Block，自 read_recovery.h 迁入）──
  * 消费方：ftl_host_io_callback 读成功后 rr_record_ecc；
@@ -63,15 +63,15 @@ typedef struct
 {
     BYTE              last_ecc;     /* 最近一次读的 ECC bit 数 */
     BYTE              rising_count; /* 连续上升计数（不上升即清零） */
-    rr_block_health_t health;       /* 慢死趋势 */
+    rr_block_health_e health;       /* 慢死趋势 */
 } rr_ecc_track_t;                   /* 3B */
 
-/* ── ftl_block_t 状态机（互斥态，枚举而非位图）──
+/* ── bst_block_t 状态机（互斥态，枚举而非位图）──
  * 块**位置**同一时刻只能有一个，故用枚举而非位图：
  *   · 枚举保证互斥，非法组合不可表达；
  *   · 状态转移集中到 ftl_block_set_state，不需要手写清位掩码（漏一位编译期完全无声）。
  * BAD 是终态；bbt_mark_bad 清 valid_count / sb_id，bbt_scan_factory / bbt_init 同样清。
- * 温度与位置**正交**（OPEN 块也有冷热），故单列字段，见 ftl_block_t.temp。
+ * 温度与位置**正交**（OPEN 块也有冷热），故单列字段，见 bst_block_t.temp。
  *
  * ⚠ 无「预擦除 / 未擦除」分级态（P1-3）：Free Pool 是**一个**已擦除池（GC 先擦后归还），
  *   三级是**水位**不是**分区**——见 allocator.h 的「Free Pool 三级水位」。 */
@@ -84,15 +84,15 @@ typedef enum
     FTL_BLOCK_STATE_LOG     = 4U, /* L2P 日志块（动态元数据块，本池独占；metadata 回收判据） */
     FTL_BLOCK_STATE_RETIRED = 5U, /* 退役：不再分配新数据、不标坏、仍可读（read_recovery） */
     FTL_BLOCK_STATE_BAD     = 6U, /* 坏块（终态；合并 bad_blocks[] + bbt bitmap） */
-} ftl_block_state_t;
+} bst_state_e;
 
 /* 状态存于 BYTE ⇒ 值域必须装得下（枚举成员一多就会静默截断） */
 _Static_assert((unsigned)FTL_BLOCK_STATE_BAD <= (unsigned)UINT8_MAX,
-               "ftl_block_state_t 超出 BYTE 值域");
+               "bst_state_e 超出 BYTE 值域");
 
-/* 枚举必须是 1 字节（-fshort-enums，见 config.mk）：否则 ftl_block_t 会从 20B 涨到 24B，
+/* 枚举必须是 1 字节（-fshort-enums，见 config.mk）：否则 bst_block_t 会从 20B 涨到 24B，
  * 4096 个块多占 16KB，多 LUN 影子构建会超 SRAM12。 */
-_Static_assert(sizeof(ftl_block_state_t) == 1, "枚举不是 1 字节：检查 -fshort-enums");
+_Static_assert(sizeof(bst_state_e) == 1, "枚举不是 1 字节：检查 -fshort-enums");
 
 /* ── Block State Table 每行（per-block 条目）──
  * 全字段常驻 SRAM（纯块级聚合，**无**位图表；有效性现查 META+L2P，见文件头）。
@@ -107,7 +107,7 @@ _Static_assert(sizeof(ftl_block_state_t) == 1, "枚举不是 1 字节：检查 -
  *   last_pe_ts    最近擦除时间戳（GC victim youth_penalty 消费）
  *   read_count    read disturb 计数（读成功++，擦除成功清零；read recovery 消费）
  *   valid_count   双 Plane 合计有效 **CW** 0..512（GC/WL victim 选真值，O(1)）
- *   state         状态机（ftl_block_state_t，互斥态：NONE/FREE/OPEN/CLOSED/LOG/RETIRED/BAD）
+ *   state         状态机（bst_state_e，互斥态：NONE/FREE/OPEN/CLOSED/LOG/RETIRED/BAD）
  *   temp          温度流（0=HOT / 1=COLD，与位置**正交**）
  *   sb_id         block→SB 反向索引（UINT16_MAX=未归属，allocator 维护）
  *   rr            ECC 健康（last_ecc + rising_count + health，read recovery 供电）
@@ -133,17 +133,17 @@ typedef struct
     WORD  read_count;  /* 2B  @8   read disturb 计数 */
 
     /* ── 有效页聚合 + 状态 ── */
-    WORD              valid_count; /* 2B  @10  双 Plane 合计有效 **CW** 0..512（逐 CW 真值，现查 META+L2P） */
-    ftl_block_state_t state;       /* 1B @12 状态机（互斥） */
-    BYTE              temp;        /* 1B  @13  温度流（0=HOT / 1=COLD，同 FTL_TEMP_* 值域；正交于状态） */
-    WORD              sb_id;       /* 2B  @14  block→SB 反向索引（UINT16_MAX=无） */
+    WORD        valid_count; /* 2B  @10  双 Plane 合计有效 **CW** 0..512（逐 CW 真值，现查 META+L2P） */
+    bst_state_e state;       /* 1B @12 状态机（互斥） */
+    BYTE        temp;        /* 1B  @13  温度流（0=HOT / 1=COLD，同 FTL_TEMP_* 值域；正交于状态） */
+    WORD        sb_id;       /* 2B  @14  block→SB 反向索引（UINT16_MAX=无） */
 
     /* ── ECC 健康 ── */
     rr_ecc_track_t rr; /* 3B  @16  ECC 健康 */
-} ftl_block_t;         /* 19B → 20B（u32 对齐） */
+} bst_block_t;         /* 19B → 20B（u32 对齐） */
 
 /* 布局守卫：字段顺序/类型漂移会让结构体悄悄变大，编译期拦住。 */
-_Static_assert(sizeof(ftl_block_t) == 20, "ftl_block_t 布局漂移（期望 20B）");
+_Static_assert(sizeof(bst_block_t) == 20, "bst_block_t 布局漂移（期望 20B）");
 
 /* ── 全局 Block 号转换（单点，修复 per-plane 碰撞的关键）── */
 
@@ -184,12 +184,12 @@ static inline WORD ftl_gblock_block(WORD g)
  * ⚠ H15（位运算与位判断走公共宏）在本字段**不适用**：拍平后没有任何位掩码/位标志运算
  *   ⇒「任一位置位 vs 全部位置位」那类歧义消失（原 `FTL_BLOCK_STATE_MASK` 零调用者，已删）。 */
 
-static inline ftl_block_state_t ftl_block_state(const ftl_block_t *b)
+static inline bst_state_e ftl_block_state(const bst_block_t *b)
 {
-    return (ftl_block_state_t)b->state;
+    return (bst_state_e)b->state;
 }
 
-static inline void ftl_block_set_state(ftl_block_t *b, ftl_block_state_t st)
+static inline void ftl_block_set_state(bst_block_t *b, bst_state_e st)
 {
     b->state = st;
 }
@@ -198,12 +198,12 @@ static inline void ftl_block_set_state(ftl_block_t *b, ftl_block_state_t st)
  * 坏块是状态机的**终态**，不再是独立位 ⇒ 与其余 6 态天然互斥
  * （原「BAD|RESERVED」并存不再可表达）。 */
 
-static inline bool ftl_block_is_bad(const ftl_block_t *b)
+static inline bool ftl_block_is_bad(const bst_block_t *b)
 {
     return ftl_block_state(b) == FTL_BLOCK_STATE_BAD;
 }
 
-static inline void ftl_block_set_bad(ftl_block_t *b)
+static inline void ftl_block_set_bad(bst_block_t *b)
 {
     ftl_block_set_state(b, FTL_BLOCK_STATE_BAD);
 }
@@ -213,20 +213,20 @@ static inline void ftl_block_set_bad(ftl_block_t *b)
  * **不另立 `ftl_block_temp_t` 枚举**——同值域再来一套名字就是第二套坐标（C9）。
  * 温度与状态**正交** ⇒ `ftl_block_set_state` 不碰本字段；每次分配都显式写入，
  * 故 FREE/BAD 块上残留的温度不会被任何读者读到（`ftl_block_get_temp` 生产侧零读者）。 */
-static inline void ftl_block_set_temp(ftl_block_t *b, BYTE temperature)
+static inline void ftl_block_set_temp(bst_block_t *b, BYTE temperature)
 {
     b->temp = temperature;
 }
 
 /* ⚠ 返回值 0=HOT / 1=COLD 是**两值域不是真值域**，不是 bool（UT 逐条钉住该值域）。 */
-static inline BYTE ftl_block_get_temp(const ftl_block_t *b)
+static inline BYTE ftl_block_get_temp(const bst_block_t *b)
 {
     return b->temp;
 }
 
 /* 状态名（诊断日志用）。两个调用者：ftl.c 的 dangling 守卫、controller/cli.c 的 map。
  * H7：switch 必须有 default（非枚举值只可能来自内存损坏，返回 "?" 而不是静默取一支）。 */
-static inline const char *ftl_block_state_name(ftl_block_state_t st)
+static inline const char *ftl_block_state_name(bst_state_e st)
 {
     switch (st)
     {
@@ -252,12 +252,12 @@ static inline const char *ftl_block_state_name(ftl_block_state_t st)
 /* 反向索引 sb_id（UINT16_MAX = 未归属任何 SB） */
 #define FTL_BLOCK_NO_SB (UINT16_MAX)
 
-static inline WORD ftl_block_sb_id(const ftl_block_t *b)
+static inline WORD ftl_block_sb_id(const bst_block_t *b)
 {
     return b->sb_id;
 }
 
-static inline void ftl_block_set_sb(ftl_block_t *b, WORD sb_id)
+static inline void ftl_block_set_sb(bst_block_t *b, WORD sb_id)
 {
     b->sb_id = sb_id;
 }
@@ -267,7 +267,7 @@ static inline void ftl_block_set_sb(ftl_block_t *b, WORD sb_id)
  * CW 级映射（IU = 1 CW = 512B）下，一个物理页内 4 个 CW 各自独立有效：
  * 主机只改写其中 1 个 CW 时，同页另 3 个 CW 仍然有效。
  *
- * valid_count（在 ftl_block_t 内）是**真值**，单位 **CW**，值域
+ * valid_count（在 bst_block_t 内）是**真值**，单位 **CW**，值域
  * 0 .. FTL_CW_PER_BLOCK（单物理块，当前 0..256）。每次「某 LBA 的映射
  * 指向本块某页某 CW」+1、「某 LBA 不再指向本块某页某 CW」-1，与 L2P 逐条同步。
  * SB 层的 `valid_cw` 是各 plane 之和（0..FTL_CW_PER_SB，当前 0..512），只用于
@@ -277,14 +277,14 @@ static inline void ftl_block_set_sb(ftl_block_t *b, WORD sb_id)
  *   逐 CW 现判（DRAM-less approach ③，见文件头）；本计数只服务 victim 选择。 */
 
 /* 有效 CW 计数 +1（写成功、GC/WL 搬入新页时各 CW 调一次） */
-static inline void ftl_block_add_valid(ftl_block_t *b)
+static inline void ftl_block_add_valid(bst_block_t *b)
 {
     ASSERT(b->valid_count < FTL_CW_PER_BLOCK);
     b->valid_count++;
 }
 
 /* 有效 CW 计数 -1（覆盖写旧位置、GC/WL 搬离、TRIM、擦除前清账） */
-static inline void ftl_block_sub_valid(ftl_block_t *b)
+static inline void ftl_block_sub_valid(bst_block_t *b)
 {
     ASSERT(b->valid_count > 0U);
     b->valid_count--;
@@ -302,7 +302,7 @@ static inline void ftl_block_sub_valid(ftl_block_t *b)
  * 判据 = 块不是 BAD **且** count > 0；否则跳过（调用者负责把 dangling 记进日志）。
  * 与 migrate.c / power_failure_recovery.c 的源块减计数守卫同一口径（C2/R9）。
  */
-static inline void ftl_block_sub_valid_if_live(ftl_block_t *b)
+static inline void ftl_block_sub_valid_if_live(bst_block_t *b)
 {
     if ((!ftl_block_is_bad(b)) && (b->valid_count > 0U))
     {
@@ -311,14 +311,14 @@ static inline void ftl_block_sub_valid_if_live(ftl_block_t *b)
 }
 
 /* 清账（擦除/坏块后调用）：valid_count=0（无位图可清） */
-static inline void ftl_block_clear_valid(ftl_block_t *b)
+static inline void ftl_block_clear_valid(bst_block_t *b)
 {
     b->valid_count = 0U;
 }
 
 /* 直接设置 `valid_count`（块元数据快照恢复 / 重建用；日常增量仍走 add/sub）。
  * ⚠ 上界是**单物理块**的 CW 数（FTL_CW_PER_BLOCK），不是 SB 合计。 */
-static inline void ftl_block_set_valid(ftl_block_t *b, WORD valid)
+static inline void ftl_block_set_valid(bst_block_t *b, WORD valid)
 {
     b->valid_count = valid;
 }

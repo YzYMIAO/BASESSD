@@ -21,7 +21,7 @@
  *     动态 WL 优先选中写入，擦除计数回升；**不退役**（退役只属于慢死预测/RR）
  */
 
-#include "allocator.h" /* ftl_allocator_t（共享数据面账本，策略只读） */
+#include "allocator.h" /* alc_t（共享数据面账本，策略只读） */
 #include "nand_config.h"
 #include "ssd_types.h" /* bool */
 
@@ -29,15 +29,18 @@
 
 /* ── WL 参数 ── */
 
-#define WL_DELTA_THRESHOLD (5000U) /* max-min 差值触发 */
-#define WL_MAX_AVG_RATIO   (3U)    /* max/avg 比值触发 */
-#define WL_LOW_ZONE_WIDTH  (1000U) /* 低擦除区宽度 */
-#define WL_LOW_BLOCK_PCT   (5U)    /* 低区 Block 占比阈值（代码判据是严格 >）*/
+#define WL_THRESHOLD       (200U)  /* 触发差值：高擦除空闲块 − 最冷 used SB（本仓自拟，见下） */
 #define WL_MIN_WRITES      (1000U) /* 启动门：累计编程次数达到后才开始求值（一次性，不是周期）*/
 #define WL_MIN_VALID_RATIO (70U)   /* 只搬有效 **CW** ≥ 70% 的冷 Block（CW 级映射） */
+/* ⚠ WL_THRESHOLD 的出处与缩放：
+ *   Linux MTD UBI 的 `MTD_UBI_WL_THRESHOLD` 默认 4096，含义是「最高与最低擦除计数
+ *   的最大差值」，超过即把最冷 used PEB 搬到高擦除空闲 PEB
+ *   （drivers/mtd/ubi/Kconfig / wl.c）。默认值面向高耐久 SLC；本器件无本地 P/E 一手
+ *   数据，按本仓磨损量级取 200（本仓自拟，不是器件规格）。上板观察后可调。 */
 
-/* 静态 WL 的**求值节拍**（调度器 interval_ms）：三条件判定要扫全表，不能每轮都跑。
- * 静态 WL 本身是慢过程，5 s 一次足以收敛，同时把 4096 块扫描的 CPU 成本压到可忽略。 */
+/* 静态 WL 的**求值节拍**（调度器 interval_ms）：判据要扫 Closed 列表 + Free Pool，
+ * 不能每轮都跑。静态 WL 本身是慢过程，5 s 一次足以收敛，同时把 4096 块扫描的
+ * CPU 成本压到可忽略。 */
 #define WL_EVAL_INTERVAL_MS (5000U)
 
 /* ── WL Victim 选择结果 ── */
@@ -46,6 +49,7 @@ typedef struct
 {
     bool  found;                   /* 是否找到 victim */
     WORD  plane_blocks[PLANE_NUM]; /* 各 plane Block 号 */
+    BYTE  next_page;               /* 该 SB 已编程页数上界（搬移只读 [0, next_page)） */
     WORD  valid_cw;                /* 有效 **CW** 数（各 plane valid_count 之和；CW 级映射） */
     DWORD read_count;              /* 各 plane read disturb 计数之和（冷块优先权重） */
 } wl_victim_t;
@@ -53,29 +57,33 @@ typedef struct
 /* ── 接口 ── */
 
 /*
- * wl_should_trigger - 检查是否需要触发静态 WL
+ * wl_should_trigger - 检查是否需要触发静态 WL（UBI 模型）
  *
- * 三条件 OR（**本仓自拟**：数值为本仓经验值，无公开出处）：
- *   条件 1：max_ec - min_ec ≥ WL_DELTA_THRESHOLD（5000）
- *   条件 2：max_ec / avg_ec ≥ WL_MAX_AVG_RATIO（3x）
- *   条件 3：低擦除区（min ~ min+1000）中的 Block 占比 **> 5%**（代码是严格大于）
+ * 判据只有一条：
+ *   max_free_ec − min_used_ec ≥ WL_THRESHOLD
+ *   · min_used_ec = Closed SB 中**平均擦除次数最小**者（最冷的 used SB）；
+ *   · max_free_ec = Free Pool 中最大的 erase_count（可接收冷数据的高磨损块）。
+ * 含义与 UBI 一致：只有当存在「显著更旧」的空闲块时，才值得把冷数据搬过去，
+ * 让低磨损块空出来给热数据。搬移本身不改变擦除计数，差值不满足时必须停止。
  *
- * @param ftl  FTL 上下文
+ * @param alloc        分配器
+ * @param total_writes 累计编程次数（启动门）
  * @return true 需要触发，false 不需要
  */
-bool wl_should_trigger(const ftl_allocator_t *alloc, DWORD total_writes);
+bool wl_should_trigger(const alc_t *alloc, DWORD total_writes);
 
 /*
  * wl_select_victim - 选择 WL victim Super Block
  *
- * 与 GC 相反：选有效 CW 最多 + 擦除次数最少的 Super Block。
- * 只遍历 closed_sb_list，跳过打开的 SB。
+ * 与 GC 相反：选**平均擦除次数最少**（最冷）且有效 CW ≥ 70% 的 Closed SB
+ * （UBI 的 e1）；同擦除次数下按 valid_cw 多、read_sum 高排序。
+ * 只遍历 closed_sb_list，跳过打开的 SB 与含坏 plane 的 SB。
  *
- * @param ftl    FTL 上下文
+ * @param alloc  分配器
  * @param victim 输出：选中的 victim
  * @return true 找到，false 无合适 victim
  */
-bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim);
+bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim);
 
 /*
  * ⚠ 搬移在 `ftl/migrate.h` 的异步 job 里完成：GC 与 WL 共用同一台引擎，
@@ -83,16 +91,8 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim);
  */
 
 /*
- * 磨损统计访问器 —— 口径（好块 / 坏块排除）由 allocator 定义，这里只做本模块的查询入口。
- * 热路径（wl_should_trigger）直接调 alc_get_erase_stats 一次取全，不逐个调用下面的 API。
+ * 磨损统计 —— 口径（好块 / 坏块排除）由 allocator 定义。本模块只用
+ * `alc_free_max_erase` 与文件内的 used-SB 最小值，不再导出单点访问器。
  */
-
-/*
- * wl_get_min_erase - 获取最小擦除次数（无好块返回 0）
- *
- * 唯一保留的统计访问器：wl_select_victim 用它确定低擦除区。
- * 热路径 wl_should_trigger 直接调 alc_get_erase_stats 一次取全。
- */
-DWORD wl_get_min_erase(const ftl_allocator_t *alloc);
 
 #endif /* FTL_WEAR_LEVELING_H */

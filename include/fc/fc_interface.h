@@ -43,7 +43,7 @@ extern "C"
 
     /* ═══════ ① 初始化 ═══════ */
     /* 初始化所有资源池和队列（幂等，可重复调用以重置） */
-    fc_status_t fc_init(void);
+    fc_status_e fc_init(void);
 
     /* ═══════ ② 命令生命周期 ═══════ */
     /* 申请命令，失败返回 NULL */
@@ -68,14 +68,14 @@ extern "C"
      * 返回：OK / RESOURCE_EMPTY（desc 或 buffer 池空）——只有「申请不到」才走返回码（模仿硬件行为）。
      * **失败时链上可能已有 desc（含本条）**：本层不回滚，「已分配的 desc 全部在链上」
      * 是不变量，调用方沿链释放即完整回收（见下两个函数）。 */
-    fc_status_t fc_command_configure_descriptor(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa);
+    fc_status_e fc_command_configure_descriptor(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa);
 
     /* 建链入口（**上层申请 buffer**）——与上一个的唯一差别是 buffer 从哪来。
      * 仅当 command->config.buf_own 的申请位 = 上层申请（FC_BUF_OWN_ALLOC_BY_UPPER，即 10/11）
      * 时合法：调用者须先 `fc_buffer_alloc()` 拿到 buffer_id 再传进来，FC 建链时**不再申请**。
      * buf_own = FC 申请（00/01）时必须传 FC_BUFFER_ID_INVALID（否则是配置错误 → ASSERT）。
      * 其余前置、返回码、失败语义与 fc_command_configure_descriptor 完全一致。 */
-    fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa, fc_buffer_id_t buffer_id);
+    fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa, fc_buffer_id_t buffer_id);
 
     /* 释放链头那一个 desc（含其 buffer），返回新链头；空链（head 越界）原样返回。
      * 传链头 ID 而非命令：command->desc_id 是位域取不了地址，故按值传入、按值取回。
@@ -93,13 +93,13 @@ extern "C"
      * 前置（违反一律 ASSERT，不返回错误码）：指针在命令池内；状态 ALLOCATED；
      * validate 通过；desc 链所有权完整。配置错误绝不发到硬件。
      * 返回：OK / QUEUE_FULL（队列满 = 资源，模仿硬件行为）。 */
-    fc_status_t fc_submit(fc_command_t *command);
+    fc_status_e fc_submit(fc_command_t *command);
 
     /* 调度执行（上层 while(1) 轮询调用） */
-    fc_status_t fc_service(void);
+    fc_status_e fc_service(void);
 
     /* 从 CQ 取完成项 */
-    fc_status_t fc_poll_completion(fc_command_status_t *completion);
+    fc_status_e fc_poll_completion(fc_command_status_t *completion);
 
     /* 从 CQ 批量取完成项：最多取 max_count 条，实际条数写入 *count。
      * **上限由调用方给**（FC 不写死任何批量常量）——常见取值是 nand_dispatch_poll
@@ -107,12 +107,12 @@ extern "C"
      * 前置（违反一律 ASSERT）：completions 与 count 均非空。max_count 给多大都不会越界——
      * 循环被 CQ 占用数（≤ FC_CQ_DEPTH）天然封顶。
      * 返回：取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY（含 max_count==0）。 */
-    fc_status_t fc_poll_completions(fc_command_status_t *completions, WORD max_count, WORD *count);
+    fc_status_e fc_poll_completions(fc_command_status_t *completions, WORD max_count, WORD *count);
 
     /* 释放命令及关联 Descriptor 链 + 各 CW buffer（须已 COMPLETED 或 ALLOCATED 且不在 CQ 中）。
      * 前置（违反一律 ASSERT）：指针落在命令池内。**幂等**——已 FREE 时直接返回 OK。
      * 返回：恒 FC_STATUS_OK。 */
-    fc_status_t fc_command_release(fc_command_t *command);
+    fc_status_e fc_command_release(fc_command_t *command);
 
     /* ═══════ ③ buffer 访问 ═══════ */
     /* 申请 Buffer（返回 ID），失败返回 FC_BUFFER_ID_INVALID。
@@ -120,7 +120,7 @@ extern "C"
     fc_buffer_id_t fc_buffer_alloc(void);
 
     /* 释放 Buffer。前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT）。返回：恒 OK。 */
-    fc_status_t fc_buffer_release(fc_buffer_id_t buffer_id);
+    fc_status_e fc_buffer_release(fc_buffer_id_t buffer_id);
 
     /* ID→指针，返回 USER 数据区首地址（跳过 META+CRC 共 8B）。
      * 前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不再返回 NULL）。 */
@@ -165,7 +165,7 @@ extern "C"
     fc_descriptor_t *fc_descriptor_id_to_descriptor(WORD descriptor_id);
 
     /* 资源使用统计（测试/监控用） */
-    fc_status_t fc_get_resource_stats(fc_resource_stats_t *stats);
+    fc_status_e fc_get_resource_stats(fc_resource_stats_t *stats);
 
 #ifdef __cplusplus
 }

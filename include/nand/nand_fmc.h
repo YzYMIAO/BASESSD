@@ -91,6 +91,6 @@ typedef struct
 } nand_fmc_instance_t;
 
 /* ── 后端初始化：填唯一实例的 config + handler 表（nand_init 调用） ── */
-nand_result_t nand_fmc_init(const nand_fmc_config_t *config);
+nand_result_e nand_fmc_init(const nand_fmc_config_t *config);
 
 #endif /* PLATFORM_STM32H743_NAND_FMC_H */

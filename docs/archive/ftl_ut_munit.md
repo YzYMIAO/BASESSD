@@ -18,8 +18,8 @@
 >
 > | 内容 | 归属 | 文档 |
 > |---|---|---|
-> | HIL 层（`src/controller/`）纯逻辑 UT | L0 | **`hil_ut_design.md` Part A** |
-> | 对外接口 / 拆分聚合 / 跨重启 / 后台观测（真 NAND + CLI） | L2 系统集成 | **`hil_ut_design.md` Part B~D** |
+> | HIL 层（`src/controller/`）纯逻辑 UT | L0 | **`../archive/hil_ut_design.md` Part A** |
+> | 对外接口 / 拆分聚合 / 跨重启 / 后台观测（真 NAND + CLI） | L2 系统集成 | **`../archive/hil_ut_design.md` Part B~D** |
 > | FC-NAND 三级 UT | — | `fc_nand_ut.md` |
 >
 > **为什么这样分**：`src/controller/` 是 **HIL**，与 FTL **平级**（不是 FTL 的一部分）。
@@ -40,7 +40,7 @@ read disturb 慢死预测、坏块替换池、L2P thrashing、**组完成语义*
 - 复用 FC-NAND 的 munit 架构（`MunitTest` 数组 + `ut_main.c` 根套件 + `make tests` + UART `test`），
   零改动 `tests/framework`
 - **只测纯 RAM 函数**（不碰 NAND、不需要 mock），上板稳、不依赖真 NAND 时序
-- 需真 NAND 的路径（GC 搬移 / journal replay / boot recovery / 跨重启）→ **`hil_ut_design.md`**
+- 需真 NAND 的路径（GC 搬移 / journal replay / boot recovery / 跨重启）→ **`../archive/hil_ut_design.md`**
 
 ## 2. 关键架构约束（决定 fixture 形态）
 
@@ -172,14 +172,17 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | `gc_victim_lowest_vpc` | `gc_select_victim` 选 VPC 最低 closed SB |
 | `gc_victim_skips_open` | 跳过 `valid!=0` 的 open SB（负例，判据 8） |
 | `gc_trigger_T1_T4_T5` | `gc_check_triggers` **三位**各自置位（参数化）：T1 `GC_TRIGGER_WATERMARK(0x01)` / T4 `GC_TRIGGER_EMERGENCY(0x08)` / T5 `GC_TRIGGER_WEAR(0x10)`（`GC_TRIGGER_*`）——T2 写数 / T3 定时不实现 |
-| `wl_trigger_delta` | 条件 1：`max-min ≥ WL_DELTA_THRESHOLD(5000)` |
-| `wl_trigger_ratio` | 条件 2：`max ≥ avg×WL_MAX_AVG_RATIO(3)` |
-| `wl_trigger_low_zone` | 条件 3：低擦除区块占比 **>** `WL_LOW_BLOCK_PCT(5)%` |
-| `wl_victim_high_valid_low_erase` | `wl_select_victim` 选有效页最多 + 擦除最少（`valid≥89`） |
-| `wl_victim_read_count_weight` | 平手时 `read_count` 高者优先（B5 权重） |
+| `wl_trigger_free_delta` | UBI 判据：`max_free_ec − min_used_ec ≥ WL_THRESHOLD(200)`；差值不足（负例）不触发 |
+| `wl_trigger_min_used_eligible` | `min_used_ec` 只统计有效 CW ≥ 70% 且无坏 plane 的 Closed SB（与选块同门限） |
+| `wl_victim_coldest` | `wl_select_victim` 选平均擦除次数最少的 SB（UBI 的 e1） |
+| `wl_victim_valid_gate` | 有效 CW < 70% 的 SB 不被选中（负例，判据 8） |
+| `wl_victim_read_count_weight` | 同擦除次数下 `read_count` 高者优先（B5 权重） |
+| `wl_dst_high_wear` | `alc_alloc_pair_high_wear` 每 plane 取擦除最多的空闲块；无块 ⇒ `FTL_AGAIN` |
+| `wl_prepare_destination` | `alc_prepare_wl_destination` 对 `next_page==0` 的 cold SB 归还块、不产生空 Closed 条目 |
 
-> `wl_max_erase` / `wl_avg_erase` / `wl_count_blocks_below` 已删除（零生产消费者）；
-> 原 `wl_max_min_avg_erase` / `wl_count_blocks_below` 两个用例需由测试源所有者同步删除。
+> `wl_max_erase` / `wl_avg_erase` / `wl_count_blocks_below` / `wl_get_min_erase` /
+> `alc_count_blocks_below` 已删除（零生产消费者）；原 `wl_max_min_avg_erase` /
+> `wl_count_blocks_below` 两个用例需由测试源所有者同步删除。
 
 ### 4.4 `g_ftl_rr_tests[]`（`src/ftl/read_recovery.c`）
 
@@ -213,7 +216,7 @@ setup 统一 `ftl_fixture_reset()`，teardown NULL，`SINGLE_ITERATION`。
 | `dir_init_entries` | `metadata_dir_init` 后 `count==2048`（= `L2P_REGIONS_PER_INSTANCE`）、全 UNKNOWN |
 | `dir_update_lookup_roundtrip` | `metadata_dir_update` 写一个 region → `metadata_dir_lookup` 回同 entry |
 | `dir_lookup_missing_unknown` | 未写 region → `0xFFFFFFFF`（负例） |
-| `is_metadata_block` | `ftl_is_metadata_block(dir, plane, block)`：**0..77 true、78 false**（边界，判据 8）。区间来自分区表：Anchor[0,32)+Ckpt[32,40)+BBT[40,42)+Journal[42,46)+**L2P log[46,78)** ⇒ `FTL_METADATA_AREA_END==78`。固定区按 `plane_mask` 比较 plane，用例覆盖两 plane。⚠ **勿写死旧布局**（Wear 块已删；0..45/46 是 v9 旧值，介质版本 v10 已改）。⚠ 测试源当前冻结（RISK-MD-03），用例仍按旧边界，需测试所有者同步 |
+| `is_metadata_block` | `ftl_is_metadata_block(dir, plane, block)`：**0..97 true、98 false**（边界，判据 8）。区间来自分区表：Anchor[0,32)+Ckpt[32,40)+BBT[40,42)+Journal[42,46)+**L2P log[46,94)**+shared spare[94,98) ⇒ `FTL_METADATA_AREA_END==98`。固定区按 `plane_mask` 比较 plane，用例覆盖两 plane。⚠ **勿写死旧布局**（Wear 块已删；0..45/46 是 v9 旧值）。⚠ 测试源当前冻结（RISK-MD-03），用例仍按旧边界，需测试所有者同步 |
 | `is_metadata_block_dynamic` | 动态 region：`metadata_dir_update(L2P_REGION, r, pba)` 登记 `block>=46` 后 `ftl_is_metadata_block` 命中；**`md_dir==NULL`** 时仍命中固定区（0..45）、动态块不命中。⚠ 断言**另一个 plane 的同号块不受掩**（`(d, 1U, 100U) == 0`）——动态日志块取自用户区，只比块号会连 plane1 的用户块一起排除 |
 | `ring_addr_geometry` | `metadata_ring_addr` 纯地址换算：idx∈{0, rpb-1, rpb, 末} → (block,page,plane) 期望值 |
 | `ring_addr_wrap` | 跨 block 边界换算 |
@@ -343,7 +346,7 @@ FTL 层**确定性**（无 PRNG；`config.random` 是 FC 配置位，非 FTL 逻
   - `free_count + open(2) + closed + bad == total_blocks`
   - 反复 alloc/free N 次后各池计数守恒、无重复块
   - 随机 `owners` 掩码下 `pending_group_count` 增减恒等
-- **L2**：长循环 `wr`/`rd`/`tr`（真 NAND，见 `hil_ut_design.md` B.4）。
+- **L2**：长循环 `wr`/`rd`/`tr`（真 NAND，见 `../archive/hil_ut_design.md` B.4）。
 
 ### 5.4 异步（v0.75 提交/完成解耦后重写）
 
@@ -525,7 +528,7 @@ endif
    - **fresh boot 后单独 `test /ftl-hil/`**（不得并入全量 `test`——FC level3 会重置 FC 池 + 破坏 NAND）；
      全绿：`async_pipeline` 恰一次完成 + 回读一致；`group_complete_once` 钉死提前完成。
    - 确认 `test` 返回后 superloop 继续跑不崩（HIL 用真完成路径，天然无 stale 问题）。
-5. 随后执行 **`hil_ut_design.md` Part B~D**（接口行为 / 跨重启 / 后台观测）
+5. 随后执行 **`../archive/hil_ut_design.md` Part B~D**（接口行为 / 跨重启 / 后台观测）
 
 ## 8. 不做（边界）
 
@@ -541,7 +544,7 @@ endif
   本方案落在一个**新**的独立测试文件（`test_ftl.c`，用户自建）
 - 不扩 linker 加 region
 - **不纳入（仍属 HIL）**：`allocator_alloc`（v0.66 已删死码）；`ftl_wbuf_*`（全 `static`，
-  需真 NAND → `hil_ut_design.md` + §4.10 的 wbuf flush 泵）。`metadata_handle` 已**改纳入**
+  需真 NAND → `../archive/hil_ut_design.md` + §4.10 的 wbuf flush 泵）。`metadata_handle` 已**改纳入**
   L0 异步套件（§4.9 C.6 的 `md_reclaim_kick_complete`——kick 与伪完成交替即可驱动整理 job，
   不再需要真 NAND 擦写）。
 - **不做（待 FTL 层改动落定）**：§4.9 的异步套件实现（计划已定、seam 已编译锚定，
@@ -555,7 +558,7 @@ endif
 |---|---|---|---|
 | **L0 单元** | 板上 RAM（纯函数） | 纯算法：allocator / L2P / GC-WL victim / 水位 / 坏块 / 磨损 / 组语义 | **本文档 §4** |
 | L1 固件集成 | 板上 + Mock NAND | write / GC / 掉电恢复全生命周期 | **不做**（见 §9.2） |
-| L2 系统 | 真 NAND 上板 | 压力 / 写后读 / **跨重启** | **`hil_ut_design.md` Part B~D** |
+| L2 系统 | 真 NAND 上板 | 压力 / 写后读 / **跨重启** | **`../archive/hil_ut_design.md` Part B~D** |
 | L3 HIL | host 协议模型 | 协议级命令流（NVMe/UFS） | 不适用（本项目无 NVMe） |
 
 ### 9.2 本项目路线：**不做 mock，全用板子**
@@ -564,7 +567,7 @@ endif
 - Mock NAND 的唯一拦截点是 `fc_submit`（`include/fc/fc_interface.h:95`）。**桩不存在，且用户定调不建**。
 - 纯逻辑（水位 / victim / 磨损 / 组语义）本就能在 **L0** 用静态 fixture 钉死，不需要 NAND 替身。
 - 需要真 NAND 的路径（GC 搬移 / journal replay / boot recovery / **跨重启持久化**）直接在**真板上**
-  跑——尤其跨重启**只能用物理断电**，反而更接近真实失效场景。**见 `hil_ut_design.md` Part B~D。**
+  跑——尤其跨重启**只能用物理断电**，反而更接近真实失效场景。**见 `../archive/hil_ut_design.md` Part B~D。**
 
 ### 9.3 断言套路（行业经典，抄入用例）
 
@@ -613,7 +616,7 @@ endif
 | `src/fc/makefile.mk` | 实施：拆「框架+入口（恒编）」与「FC 三级（`UT_FC_ENABLE` 门控）」 |
 | `makefile` §1.5 / `config.mk` | 实施：`UT` 解析 + 对象目录按测试配置分置 |
 | `tests/unit/ut_main.c` | 实施：两套 extern + 根套件项各包 `#if defined(UT_*_ENABLE)` |
-| `docs/design/hil_ut_design.md` | HIL 层 UT + 系统集成验收（非 FTL 部分） |
+| `docs/archive/hil_ut_design.md` | HIL 层 UT + 系统集成验收（非 FTL 部分） |
 
 ## 登记（本轮不做）
 

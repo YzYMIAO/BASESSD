@@ -52,7 +52,7 @@ DWORD fc_random_seed_from_meta(DWORD cw_meta);
  * 加扰和解扰是同一操作（XOR 对称）。
  * 算法由 FC_RANDOM_ALGO 编译宏控制。
  */
-fc_status_t fc_random_transform(BYTE *data, WORD length, DWORD seed);
+fc_status_e fc_random_transform(BYTE *data, WORD length, DWORD seed);
 
 /* 获取当前使用的加扰算法名称（调试用） */
 const char *fc_random_algo_name(void);

@@ -1,6 +1,6 @@
 # USB MSC U 盘 — 可行性、架构与实施计划
 
-> 状态：**枚举 + 基础数据面 + 429 MiB 容量已上板通过（rev30）；大文件/掉电/吞吐待测**。
+> 状态：**枚举 + 基础数据面已上板通过（rev30）；v12 容量口径已回归（2026-10-22 全盘 H2testw 415/423 MB）；掉电/吞吐/多分区待测**。
 > 目标平台：阿波罗 V2 核心板（STM32H743IIT6 + MT29F4G08 + Type-C USB）。
 > 编译：`make all` / `make release` / `make tests UT=FC` 零新告警。
 > 上板证据（rev27）：Windows 识别 USB 磁盘 → MBR 分区 → FAT 格式化 →
@@ -8,6 +8,10 @@
 > 拔插 USB 后 SHA256 与 2KB 块指纹一致。
 > rev30 已确认：Windows `Get-Disk` = **449,839,104 B（429 MiB）**，FAT 格式化，
 > `usb_verify write/check` 拔插后 `RESULT=PASS`（含 2KB 块指纹）。
+> ⚠ 介质版本 12（2026-10-22）起 L2P 日志区扩为 96 块（每 region 主+备两份），
+> 编译期上限 `FTL_LBA_MAX` 变为 **868,352（424 MiB）**；运行时按实际坏块取
+> min(plane)/min(instance)，以 boot `[CAP]` / USB READ CAPACITY 为准。
+> 上文 rev30 的 429 MiB 是历史证据，不重写。
 > 大文件/GC 压力、`dd` 吞吐、写过程中掉电恢复仍未验证（R1）。
 
 ---
@@ -27,13 +31,13 @@
 
 ### 1.2 目标
 
-让 PC 通过 Type-C 把本板识别成 **429 MiB 的 USB 大容量存储设备（U 盘）**，可分区、
+让 PC 通过 Type-C 把本板识别成 **424 MiB 的 USB 大容量存储设备（U 盘）**，可分区、
 格式化、读写文件；底层仍由本仓 FTL 管理 NAND。
 
 ### 1.3 v1 范围
 
 - **USB FS 12 Mbps**（不是 HS 480 Mbps）
-- **固定 429 MiB**、**512 B block**、**单 LUN**
+- **固定 424 MiB**、**512 B block**、**单 LUN**
 - SCSI 最小命令集：`INQUIRY` / `TEST UNIT READY` / `REQUEST SENSE` /
   `READ CAPACITY(10)` / `READ(10)` / `WRITE(10)` / `SYNCHRONIZE CACHE(10)` /
   `MODE SENSE(6)`
@@ -67,7 +71,7 @@
 
 ### 2.3 FTL 后端匹配度
 
-- `FTL_LBA_MAX = 878,592`（429 MiB / 512 B；已扣除固定元数据/L2P 日志区/OP/Spare）
+- `FTL_LBA_MAX = 868,352`（424 MiB / 512 B；已扣除固定元数据/L2P 日志区/OP/Spare）
 - `FTL_IU_BYTES = 512`，1 LBA = 1 CW = 512 B
 - `ftl_submit_read` / `ftl_submit_write` 是**异步**的：提交后由
   `complete_flag` / `on_complete` 通知完成
@@ -229,14 +233,14 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 
 ## 7. 实施阶段
 
-### Phase 0：确认硬件接线（**待上板**）
+### Phase 0：确认硬件接线（**✅ rev30 已确认**）
 
 - 查核心板原理图/万用表确认 Type-C 的 D+/D- 接的是 PA11/PA12 还是 PB14/PB15。
 - 本文先按 PA11/PA12 实现；枚举失败再改 PB14/PB15（OTG_HS 内嵌 FS PHY，AF12）。
 - 确认 VBUS sensing 必须 disable（PA9 是 USART1_TX）——已通过
   `CFG_TUD_VBUS_DETECT_HW = 0` 落实。
 
-### Phase 1：USB 传输 bring-up（**代码已完成，未上板**）
+### Phase 1：USB 传输 bring-up（**✅ rev30 已上板**）
 
 - 引入 `third_party/tinyusb`（MIT），使用 DWC2 port。
 - `tusb_config.h`：`CFG_TUD_MSC=1`、`CFG_TUSB_OS=OPT_OS_NONE`。
@@ -249,27 +253,27 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
   - VBUS sensing disable。
 - 先只枚举出设备（不接存储），确认 PC 能识别。
 
-### Phase 2：MSC class + FTL adapter（**代码已完成，未上板**）
+### Phase 2：MSC class + FTL adapter（**✅ rev30 已上板**）
 
 - 新增 `src/controller/usb_msc.c` / `include/controller/usb_msc.h`：
   - `tud_msc_read10_cb` / `tud_msc_write10_cb`：登记到 `ssd_request_t`，
     提交后返回 `TUD_MSC_RET_ASYNC`；
   - `usb_msc_task()`：完成时回填 READ 数据并 `tud_msc_async_io_done()`；
-  - `tud_msc_capacity_cb`：429 MiB / 512B block / `FTL_LBA_MAX`；
+  - `tud_msc_capacity_cb`：424 MiB / 512B block / `FTL_LBA_MAX`；
   - `tud_msc_inquiry_cb` / `tud_msc_start_stop_cb` / `tud_msc_test_unit_ready_cb`；
   - SCSI SYNCHRONIZE CACHE → `SSD_REQUEST_FLUSH`（`ftl_flush`，仅主循环上下文）；
   - `tud_event_hook_cb`：总线复位/拔出时把在飞请求标记 `discard`。
 - 静态 bounce buffer；单命令在飞。
 
-### Phase 3：主循环与仲裁（**代码已完成，未上板**）
+### Phase 3：主循环与仲裁（**✅ rev30 已上板**）
 
 - `src/main.c` 主循环在 `ftl_service()` 之后调用 `tud_task()` / `usb_msc_task()`。
 - CLI 与 USB 共用 host busy 闸门。
 - 所有 `ftl_flush` / `ftl_trim` 只在主循环调用。
 
-### Phase 4：主机侧验证（**未做**）
+### Phase 4：主机侧验证（**✅ 基础项已通过；掉电/吞吐/多分区待测**）
 
-- Windows：设备管理器出现“USB 大容量存储设备”；磁盘管理显示 429 MiB；
+- Windows：设备管理器出现“USB 大容量存储设备”；磁盘管理显示 424 MiB；
   格式化 FAT32/exFAT；复制/读回文件。
 - Linux：`lsusb`、`dmesg`、`lsblk`/`fdisk -l`；`dd` 读写；`sync`；`fsck`。
 - 掉电：USB 写过程中断电，重启后 FTL 恢复，盘可重新挂载。

@@ -24,7 +24,7 @@ typedef enum
     DELAY_OK = 0,
     DELAY_ERR_NOT_INITIALIZED,
     DELAY_ERR_OUT_OF_RANGE
-} delay_status_t;
+} delay_status_e;
 
 /* tick_clock_hz 为 SysTick 时钟 Hz；传入 0 时读取当前 HCLK。 */
 void delay_init(DWORD tick_clock_hz);
@@ -40,8 +40,8 @@ bool delay_dwt_cycles_now(DWORD *cycles);
 bool delay_dwt_elapsed_us(DWORD start_cycles, WORD timeout_us);
 
 /* 忙等待接口：适用于短硬件时序，不适合等待业务事件。 */
-delay_status_t delay_us_busy(DWORD us);
-delay_status_t delay_ms_busy(DWORD ms);
+delay_status_e delay_us_busy(DWORD us);
+delay_status_e delay_ms_busy(DWORD ms);
 DWORD          delay_max_busy_us(void);
 
 /* 兼容传统接口：忽略忙等待状态；短硬件时序优先使用上面的带状态接口。 */

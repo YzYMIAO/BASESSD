@@ -24,7 +24,7 @@ typedef enum
     FC_STATUS_IO_ERROR         = 5U,
     FC_STATUS_NOT_SUPPORTED    = 6U,
     FC_STATUS_RESOURCE_EMPTY   = 7U,
-} fc_status_t;
+} fc_status_e;
 
 /* 固定 Pool 的 16 位资源 ID；0xFFFF 表示无效句柄。 */
 typedef WORD fc_command_id_t;

@@ -43,6 +43,19 @@ endif
 
 BUILD_DIR := $(PROJECT_ROOT)/build/$(BUILD_TARGET)/$(BUILD_TYPE)
 
+# 开卡镜像（make format-image）：**bin 输出路径保持标准**
+#   build/firmware/<type>/bin/debug.bin —— 用户的烧录/调试配置不用改。
+# 只有对象/库/依赖目录按 CFLAGS 分置，避免正常镜像与开卡镜像互相复用陈旧 .o
+# （本工程没有「CFLAGS 变化 ⇒ 重编译」依赖）。
+FORMAT_OBJ_SUFFIX :=
+ifeq ($(FORMAT_ON_BOOT),1)
+    FORMAT_OBJ_SUFFIX := _fmt
+    # FORMAT_VERIFY 也改变 CFLAGS ⇒ 对象目录再分一级。
+    ifeq ($(FORMAT_VERIFY),1)
+        FORMAT_OBJ_SUFFIX := $(FORMAT_OBJ_SUFFIX)_vf
+    endif
+endif
+
 # 对象目录按「影响编译结果的配置」分置：
 #   obj            产品固件（make all）
 #   obj_ut         `make tests`（-DFC_NAND_TEST_ENABLE 会改变 cli.c 的 test 命令注册）
@@ -58,10 +71,10 @@ BUILD_DIR := $(PROJECT_ROOT)/build/$(BUILD_TARGET)/$(BUILD_TYPE)
 NAND_DEVICE_DEFAULT := MT29F___G08A
 NAND_DEVICE         ?= $(NAND_DEVICE_DEFAULT)
 
-OBJ_DIR   := $(BUILD_DIR)/obj$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))$(if $(filter-out $(NAND_DEVICE_DEFAULT),$(NAND_DEVICE)),_$(NAND_DEVICE))
-LIB_DIR   := $(BUILD_DIR)/lib
+OBJ_DIR   := $(BUILD_DIR)/obj$(if $(FC_NAND_TEST_ENABLE),_ut)$(if $(UT),_$(UT))$(if $(filter-out $(NAND_DEVICE_DEFAULT),$(NAND_DEVICE)),_$(NAND_DEVICE))$(FORMAT_OBJ_SUFFIX)
+LIB_DIR   := $(BUILD_DIR)/lib$(FORMAT_OBJ_SUFFIX)
 BIN_DIR   := $(BUILD_DIR)/bin
-DEP_DIR   := $(BUILD_DIR)/dep
+DEP_DIR   := $(BUILD_DIR)/dep$(FORMAT_OBJ_SUFFIX)
 
 # 目标文件命名
 APP_NAME = $(BUILD_TYPE)$(APP_SUFFIX)
@@ -173,6 +186,14 @@ endif
 CFLAGS  = $(BASE_FLAGS) $(OPT_FLAGS) $(DBG_FLAGS) $(SAN_FLAGS)
 # 器件选择宏：nand/nand_config.h 用它决定包含哪个 devices/<family>.h。
 CFLAGS += -DNAND_DEVICE_$(NAND_DEVICE)
+
+# 开卡镜像：每次启动先擦全片并写初始元数据（main.c 的 boot 路径消费）。
+ifeq ($(FORMAT_ON_BOOT),1)
+    CFLAGS += -DFORCE_FORMAT_ON_BOOT=1
+    ifeq ($(FORMAT_VERIFY),1)
+        CFLAGS += -DFORCE_FORMAT_VERIFY=1
+    endif
+endif
 
 
 # -x assembler-with-cpp  指定汇编文件使用 C 预处理器处理（支持 #include、#define 等）

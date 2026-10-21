@@ -13,7 +13,7 @@
  * **一条 record = 1 页**，块满换池内下一块并先擦）——池首块/块数由
  * ftl/metadata.h 按几何推导（「固定元数据区布局」）。
  * bad_map 覆盖全部 FTL_BLOCK_TOTAL 个 Block（NAND 持久化格式，保持不变）。
- * RAM 运行时坏块位统一存于 ftl_block_t.state（Block State Table 单数据源），
+ * RAM 运行时坏块位统一存于 bst_block_t.state（Block State Table 单数据源），
  * bbt_save 时从 BST 重建 bad_map。
  *
  * 写模型与 Anchor / Checkpoint 一致（见 ftl/metadata.h §元数据写模型）：
@@ -23,7 +23,7 @@
 
 #include "allocator.h"
 #include "assertion.h"
-#include "ftl_module.h" /* ftl_bg_info_t / ftl_module_status_t */
+#include "ftl_module.h" /* bg_info_t / ftl_mod_status_t */
 #include "metadata.h"   /* BBT_BLOCK / BBT_POOL_BLOCKS / BBT_MAX_BLOCKS / BBT_BITMAP_SIZE */
 
 #include <stddef.h>
@@ -39,13 +39,18 @@
  * 擦完并写完 CP 标记后清除。旧固件写 0（不进行中），语义兼容。 */
 #define BBT_FLAG_FORMAT_IN_PROGRESS (1UL)
 
+/* reserved[1] 的「下次开机必须 full metadata rebuild」标志（本仓自拟）。
+ * Journal / L2P 日志块运行期变坏时置位：丢失的映射无法在当前上电周期内恢复，
+ * 只能靠全量重建数据页 META 兜底。成功重建后清除。 */
+#define BBT_FLAG_REBUILD_REQUIRED (1UL)
+
 typedef struct
 {
     DWORD magic;                        /* BBT_MAGIC */
     DWORD sequence;                     /* 单调递增，最新有效 */
     DWORD total_blocks;                 /* 总 Block 数 */
     DWORD bad_count;                    /* 坏块数 */
-    DWORD reserved[3];                  /* [0] = BBT_FLAG_*；其余写 0 */
+    DWORD reserved[3];                  /* [0] = FORMAT_IN_PROGRESS；[1] = REBUILD_REQUIRED；其余写 0 */
     BYTE  bad_map[BBT_BITMAP_SIZE];     /* 4096 bit = 512B */
 } __attribute__((packed)) bbt_header_t; /* 4+4+4+4+12+512 = 540B（无独立 CRC，页完整性由 FC 保证）*/
 
@@ -72,7 +77,7 @@ _Static_assert(sizeof(bbt_header_t) <= PAGE_MAIN_SIZE, "BBT header 必须装得�
  * @return 无。加载失败不是致命错误：走“拒绝重扫（已用过介质）”或“出厂扫描”回退；
  *         坏块数只走 `alloc->bad_count`（H38：恒为常量的返回码改 void）。
  */
-void bbt_init(ftl_allocator_t *alloc);
+void bbt_init(alc_t *alloc);
 
 /*
  * bbt_medium_has_ftl_data - 介质固定元数据区里是否已有合法的 FTL 页
@@ -86,7 +91,7 @@ void bbt_init(ftl_allocator_t *alloc);
  * @param alloc Allocator 上下文（取 ch/ce/lun 与几何）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @return true = 至少一页是合法 FTL 页（介质已格式化过）；false = 空片
  */
-bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc);
+bool bbt_medium_has_ftl_data(alc_t *alloc);
 
 /*
  * bbt_scan_factory - 出厂坏块扫描
@@ -109,7 +114,7 @@ bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc);
  * @param alloc   Allocator 上下文（blocks 输出）
  * @return 检测到的坏块数
  */
-int bbt_scan_factory(ftl_allocator_t *alloc);
+int bbt_scan_factory(alc_t *alloc);
 
 /*
  * bbt_print_bad_map - 逐块探测并打印坏块图（**诊断用**）
@@ -144,7 +149,7 @@ int bbt_scan_factory(ftl_allocator_t *alloc);
  * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param do_erase  0 = 只读（非破坏性）；非 0 = 逐块擦除并额外判擦除失败
  */
-void bbt_print_bad_map(ftl_allocator_t *alloc, BYTE do_erase);
+void bbt_print_bad_map(alc_t *alloc, BYTE do_erase);
 
 /*
  * bbt_format_erase - 格式化用的两阶段擦除：先落 BBT，再擦 BBT 池之外的块
@@ -165,12 +170,12 @@ void bbt_print_bad_map(ftl_allocator_t *alloc, BYTE do_erase);
  * @param alloc  Allocator 上下文；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @return FTL_OK；FTL_ERROR = ① 的 BBT save 失败（未擦用户块，可重试）。
  */
-ftl_status_t bbt_format_erase(ftl_allocator_t *alloc);
+ftl_status_e bbt_format_erase(alc_t *alloc);
 
 /*
  * bbt_mark_bad - 运行时标记坏块
  *
- * ① ftl_block_t.state 置 BAD + 清有效页位图（BST 单数据源）
+ * ① bst_block_t.state 置 BAD + 清有效页位图（BST 单数据源）
  * ② 只置 alloc->bbt.dirty —— 写回 NAND 由后台 bbt_handle 攒批执行
  *
  * @param alloc  Allocator 上下文
@@ -178,11 +183,11 @@ ftl_status_t bbt_format_erase(ftl_allocator_t *alloc);
  * @return FTL_OK（含“已经是 BAD”的幂等早退）；FTL_ERROR 参数非法 / 越界。
  *         ⚠ 已 BAD 时**不重复** `bad_count++`、不重复消耗 Spare、不重复置 dirty。
  */
-ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, WORD gblock);
+ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock);
 
 /* bbt_note_dirty - 标记 BBT 有未落盘变更（唯一 dirty 闸门）。
  * 每次置位推进 `dirty_gen`；写 job 用它检测“组 header 之后又标坏”的丢更新。 */
-void bbt_note_dirty(ftl_allocator_t *alloc);
+void bbt_note_dirty(alc_t *alloc);
 
 /*
  * bbt_is_bad - 查询 Block 是否坏块
@@ -228,18 +233,18 @@ static inline void bbt_set_bad(BYTE *bad_map, WORD block)
  * @param alloc  Allocator 上下文（游标/序号在 alloc->bbt，per-instance）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @return FTL_OK 成功（含 dirty==0 早退）；FTL_ERROR 池定位 / prepare / 写失败。
  */
-ftl_status_t bbt_save(ftl_allocator_t *alloc);
+ftl_status_e bbt_save(alc_t *alloc);
 
-/* ── BBT 模块 handle 的上报结构（docs/design/ftl_module_contracts.md §4.1）──
+/* ── BBT 模块 handle 的上报结构（docs/archive/ftl_module_contracts.md §4.1）──
  *
  * `base` 是公共前缀（state / critical / wants_run / progress / next_ms / error）。
  * BBT 只做提交背压，**无周期** ⇒ next_ms 恒 0。
  */
 typedef struct
 {
-    ftl_module_status_t base;
+    ftl_mod_status_t base;
 
-    bbt_handle_phase_t phase;     /* 观测；外部不要据此驱动 */
+    bbt_handle_phase_e phase;     /* 观测；外部不要据此驱动 */
     bool               dirty;     /* 是否有未落盘变更 */
     DWORD              dirty_gen; /* dirty 代际（写飞行期间的新变更） */
     DWORD              sequence;  /* 本池单调序号 */
@@ -257,7 +262,7 @@ typedef struct
  * 成功清 dirty、失败保留 dirty 供下轮重试。
  *
  * `info` 当前不参与决策（BBT 是 dirty 驱动、无周期），保留参数是为了统一 typed 入口
- * （docs/design/ftl_module_contracts.md §3.3）。
+ * （docs/archive/ftl_module_contracts.md §3.3）。
  *
  * ⚠ 本函数只保证「已起步」；成败判据 = job 走完且 dirty 清零（同步路径见 bbt_save）。
  * ⚠ **单飞行**：命令在飞 ⇒ 空操作（池内一条 record 一次写，重入会争同一槽）；
@@ -269,7 +274,7 @@ typedef struct
  * @param info   本轮动态信息（当前未用，可传 NULL）
  * @param out    出参：本轮结束后的上报（**非空**，由调用者提供）
  */
-void bbt_handle(ftl_allocator_t *alloc, const ftl_bg_info_t *info, bbt_status_t *out);
+void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out);
 
 /*
  * bbt_load - 从 NAND BBT 池加载 BBT
@@ -284,7 +289,7 @@ void bbt_handle(ftl_allocator_t *alloc, const ftl_bg_info_t *info, bbt_status_t 
  * @param sequence    输出：最新 sequence
  * @return FTL_OK 成功，FTL_ERROR 无有效 BBT
  */
-ftl_status_t bbt_load(ftl_allocator_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence);
+ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence);
 
 /*
  * bbt_spare_pool_refill - 从**指定 plane 的** Spare Pool 补充 Free Pool
@@ -299,6 +304,6 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, BYTE *bad_map, DWORD *bad_count, D
  * @param plane  坏块所属 plane（取同 plane 的替换块）
  * @return FTL_OK 补充成功；FTL_ERROR 参数非法 / 该 plane Spare Pool 耗尽（容量自然下降）
  */
-ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, BYTE plane);
+ftl_status_e bbt_spare_pool_refill(alc_t *alloc, BYTE plane);
 
 #endif /* FTL_BBT_H */

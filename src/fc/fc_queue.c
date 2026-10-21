@@ -30,7 +30,7 @@
  *   参数：queue —— 队列；storage —— 槽位数组；depth —— 容量。
  *   返回：FC_STATUS_OK（空指针 / depth=0 由断言拦截）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth)
+fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth)
 {
     ASSERT(queue != NULL);
     ASSERT(storage != NULL);
@@ -49,7 +49,7 @@ fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id
  *   参数：queue —— 队列；storage —— 完成项数组；depth —— 容量。
  *   返回：FC_STATUS_OK（空指针 / depth=0 由断言拦截）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth)
+fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth)
 {
     ASSERT(queue != NULL);
     ASSERT(storage != NULL);
@@ -70,7 +70,7 @@ fc_status_t fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_st
  *   实现要点：INVALID 哨兵入队 = 调用者 bug（入队 ID 全由 FC 自铸，见 fc.c），
  *             按判据 2 转 ASSERT（v20）；只有「队列满」才是预期内的运行结果。
  * -------------------------------------------------------------------- */
-fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id)
+fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id)
 {
     ASSERT(queue != NULL);
     ASSERT(command_id != FC_COMMAND_ID_INVALID);
@@ -90,7 +90,7 @@ fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id
  *   参数：queue —— 队列；command_id —— 输出。
  *   返回：FC_STATUS_OK / QUEUE_EMPTY。
  * -------------------------------------------------------------------- */
-fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id)
+fc_status_e fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id)
 {
     ASSERT(queue != NULL);
     ASSERT(command_id != NULL);
@@ -110,7 +110,7 @@ fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_
  *   参数：queue —— 队列；completion —— 待入队完成项。
  *   返回：FC_STATUS_OK / QUEUE_FULL。
  * -------------------------------------------------------------------- */
-fc_status_t fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion)
+fc_status_e fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion)
 {
     ASSERT(queue != NULL);
     ASSERT(completion != NULL);
@@ -130,7 +130,7 @@ fc_status_t fc_completion_queue_push(fc_completion_queue_t *queue, const fc_comm
  *   参数：queue —— 队列；completion —— 输出。
  *   返回：FC_STATUS_OK / QUEUE_EMPTY。
  * -------------------------------------------------------------------- */
-fc_status_t fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion)
+fc_status_e fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion)
 {
     ASSERT(queue != NULL);
     ASSERT(completion != NULL);

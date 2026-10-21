@@ -174,6 +174,18 @@ docs/reference/
 - **价值**：**极简 FTL 的范式**——没有 DRAM、没有复杂 GC，只有磨损均衡 + 坏块 + 日志。
   本仓 FTL 虽大得多，但 dhara 的「小到极致」能帮你想清楚**哪些机制是必需的、哪些是奢侈的**。
 
+#### D3. Linux MTD UBI 的静态磨损均衡（**未备份**，见 §三）
+- **是什么**：Linux 内核 UBI 卷管理层（`drivers/mtd/ubi/`）。`wl.c` 的静态 WL：
+  取**擦除最少的 used PEB**（e1），从 Free Pool 取擦除显著更高的 PEB（e2），当
+  `e2->ec - e1->ec >= ubi->wl_threshold` 时把 e1 的数据搬到 e2；`Kconfig` 的
+  `MTD_UBI_WL_THRESHOLD` 默认 **4096**（最高与最低擦除计数的最大差值）。
+- **价值**：本仓静态 WL 的**判据出处**（`docs/design/ftl_design.md` §3.4 /
+  `RISK-WL-08`）：磨损差触发 + 「低擦除 → 高擦除」方向。与 dhara 的完美 WL 属
+  **不同分岔**：UBI 面向大容量映射 FTL，dhara 面向小容量 raw flash。
+- **URL**：
+  <https://raw.githubusercontent.com/torvalds/linux/master/drivers/mtd/ubi/wl.c>、
+  <https://raw.githubusercontent.com/torvalds/linux/master/drivers/mtd/ubi/Kconfig>
+
 ### E. 协议 / 接口规范（判据依据）
 
 #### E1. ONFI（**未备份**，见 §三）
@@ -203,6 +215,7 @@ docs/reference/
 | `ConfZNS`（SYSTOR '23） | **ACM 付费墙**；作者实验室站 `embedded.dankook.ac.kr` 直连 **HTTP 000**（网络不通） | ACM DL 有账号时下；或用后继工作 **ConfZNS++**（atlarge-research.com，可访问） |
 | `jasmine_software_components.html` | deepwiki 文档站在 **Vercel 机器人墙**后，curl 拿到 34K 的 "Vercel Security Checkpoint" 页、**真实内容 0 匹配**；WebFetch 报 "stream has been aborted" | 读 GitHub 仓库 `openssd/jasmine` 源码（GPLv3） |
 | `NandFlashController`（Verilog/AXI） | 本轮未抓（GitHub 仓库，非「文档」） | 直接 clone `cjhonlyone/NandFlashController` |
+| Linux UBI `wl.c` / `Kconfig` | 本轮未备份（单独源码文件，引用为主） | 按 D3 的 raw URL 直接读；或查本机内核源码 `drivers/mtd/ubi/` |
 
 > **说明**：GitHub 代码仓库（Cosmos+/Jasmine/SoftSSD/FEMU/MQSim/ConfZNS/NandFlashController/
 > SPIFTL/dhara/zns-tools）**未克隆**——克隆会把嵌套 `.git` 塞进本仓，污染版本库。

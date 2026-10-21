@@ -117,7 +117,7 @@ static BYTE fc_lfsr_byte(DWORD *state)
  *   实现要点：seed 低 16 位作初始状态（0 强制为 1，防全零卡死）；
  *         每字节 8 次移位递推取 8 bit。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
+static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 {
     WORD index;
 
@@ -152,7 +152,7 @@ static fc_status_t fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
  *   功能：用 seed 生成 64B 伪随机 pattern，循环异或 data。
  *   实现要点：pattern 由 XOR-shift 递推生成；性能开销最小。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
+static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 {
     BYTE pattern[FC_SIMPLE_XOR_PATTERN_LEN];
     BYTE i;
@@ -186,7 +186,7 @@ static fc_status_t fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
  *   实现要点：seed ^= seed<<13; ^= seed>>17; ^= seed<<5（周期 2^32-1）；
  *         seed 为 0 时无意义（返回 INVALID_ARGUMENT）。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
+static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 {
     WORD index;
 
@@ -211,7 +211,7 @@ static fc_status_t fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
  * ══════════════════════════════════════════════════════════════════ */
 
 /* 加扰/解扰（XOR 对称；算法由编译宏决定） */
-fc_status_t fc_random_transform(BYTE *data, WORD length, DWORD seed)
+fc_status_e fc_random_transform(BYTE *data, WORD length, DWORD seed)
 {
     return fc_random_transform_impl(data, length, seed);
 }

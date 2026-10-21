@@ -44,7 +44,7 @@ typedef enum
     FC_ECC_MODE_LDPC_HARD = 1U, /* LDPC hard-decision */
     FC_ECC_MODE_LDPC_SOFT = 2U, /* LDPC soft-decision */
     FC_ECC_MODE_LDPC_RAW  = 3U, /* LDPC raw (no decode) */
-} fc_ecc_mode_t;
+} fc_ecc_mode_e;
 
 /* RAID 模式（配置写入 fc_cmd_conf_t.raid） */
 typedef enum
@@ -54,7 +54,7 @@ typedef enum
     FC_RAID_MODE_ENCODE  = 2U, /* RAID 编码（生成 parity） */
     FC_RAID_MODE_RECOVER = 3U, /* RAID 恢复（同 decode） */
     FC_RAID_MODE_CHECK   = 4U, /* RAID 校验（暂未实现） */
-} fc_raid_mode_t;
+} fc_raid_mode_e;
 
 /* NAND 页类型（TLC/QLC 多页编程时区分；SLC 只有 LP） */
 typedef enum
@@ -63,28 +63,28 @@ typedef enum
     FC_PAGE_TYPE_MP = 1U, /* Middle Page (TLC MP) */
     FC_PAGE_TYPE_UP = 2U, /* Upper Page (TLC UP) */
     FC_PAGE_TYPE_TP = 3U, /* Triple Page (QLC TP) */
-} fc_page_type_t;
+} fc_page_type_e;
 
 /* CRC 校验开关（配置写入 fc_cmd_conf_t.crc） */
 typedef enum
 {
     FC_CRC_ENABLE  = 0U, /* CRC 校验使能 */
     FC_CRC_DISABLE = 1U, /* CRC 校验禁用 */
-} fc_crc_mode_t;
+} fc_crc_mode_e;
 
 /* 数据加扰开关（配置写入 fc_cmd_conf_t.random） */
 typedef enum
 {
     FC_RANDOM_ENABLE  = 0U, /* 数据加扰使能 */
     FC_RANDOM_DISABLE = 1U, /* 数据加扰禁用 */
-} fc_random_mode_t;
+} fc_random_mode_e;
 
 /* 链式命令标记（配置写入 fc_cmd_conf_t.chain） */
 typedef enum
 {
     FC_CHAIN_END  = 0U, /* 链结束，单命令 */
     FC_CHAIN_MORE = 1U, /* 链中间，后续还有命令 */
-} fc_chain_mode_t;
+} fc_chain_mode_e;
 
 /* buffer 归属（配置写入 fc_cmd_conf_t.buf_own）：本命令的数据 buffer **谁申请、谁释放**。
  *
@@ -101,7 +101,7 @@ typedef enum
     FC_BUF_OWN_FC_ALLOC_FC_FREE       = 1U, /* 01：FC 申请，FC 释放——读，只要命令状态 */
     FC_BUF_OWN_UPPER_ALLOC_UPPER_FREE = 2U, /* 10：上层申请，上层释放——上层把控数据场景 */
     FC_BUF_OWN_UPPER_ALLOC_FC_FREE    = 3U, /* 11：上层申请，FC 释放——写命令等，只要命令状态 */
-} fc_buf_own_t;
+} fc_buf_own_e;
 
 #define FC_BUF_OWN_ALLOC_BY_UPPER (0x2U) /* bit1：1 = 上层申请（上层自行 fc_buffer_alloc 并传入） */
 #define FC_BUF_OWN_FREE_BY_FC     (0x1U) /* bit0：1 = FC 在完成时归还 */
@@ -111,13 +111,13 @@ typedef enum
 {
     FC_PRIORITY_SQ  = 0U, /* 普通优先级（Submission Queue） */
     FC_PRIORITY_HSQ = 1U, /* 高优先级（High-priority SQ） */
-} fc_priority_t;
+} fc_priority_e;
 
 /* ⚠ 本头文件**不再**声明"完成路由归属模块"枚举（原 fc_command_module_t，v0.75 删）。
  *
  * 它是 FTL 的概念（哪个功能拥有这条命令），不该由 FC 层声明。FC 只认
  * `fc_command_t.op_tag` 这个**不透明 7 位整数**：不解释、不分支，完成时原样拷进
- * `fc_command_status_t.op_tag`。语义（= FTL 的 `ftl_op_id_t`）由 FTL 侧定义，
+ * `fc_command_status_t.op_tag`。语义（= FTL 的 `ftl_op_id_e`）由 FTL 侧定义，
  * 见 include/ftl/ftl_op.h。 */
 
 /*
@@ -131,6 +131,7 @@ typedef enum
 | `RAID_ERROR` | 任意 CW 置位即置位 |
 | `READY` | 建议所有有效 CW 都 Ready 后才算命令 Ready |
 | `PROTECTED` | 任意 CW 或目标块受保护即置位 |
+| `BLANK` | 任意 CW 置位即置位；**不是错误位**——表示该 CW 物理上是擦除页 |
 */
 /* 每 CW 状态位：命令级聚合状态 = 各 CW 状态按上表规则 OR 合并 */
 #define FC_CW_STATUS_NAND_FAIL  (1U << 0)
@@ -141,8 +142,13 @@ typedef enum
 #define FC_CW_STATUS_RAID_ERROR (1U << 5)
 #define FC_CW_STATUS_READY      (1U << 6)
 #define FC_CW_STATUS_PROTECTED  (1U << 7)
-#define FC_CW_STATUS_UNUSED     (0U)
-#define FC_CW_STATUS_SUCCESS    (FC_CW_STATUS_READY)
+/* 擦除页（erased page）：整条 CW（META+CRC+USER+ECC）全 0xFF。
+ * 全 0xFF 不是合法 BCH 码字 ⇒ 解码必然报 UNC；若不单独识别，GC 读到半写块的空洞页
+ * 就会把整块当坏块退役（RISK-GC-11）。**不属于 FC_CW_STATUS_ERROR_MASK**：
+ * 「页从未编程」是介质的合法状态，不是读错误。 */
+#define FC_CW_STATUS_BLANK   (1U << 8)
+#define FC_CW_STATUS_UNUSED  (0U)
+#define FC_CW_STATUS_SUCCESS (FC_CW_STATUS_READY)
 
 /* 「失败位」的规范集合——上表六个错误位的并集（READY / PROTECTED / UNUSED 不算失败）。
  * 它是失败判定的**唯一定义**：fc_complete_from_nand()（fc.c）用它挑出**首个失败 CW**
@@ -161,6 +167,24 @@ static inline bool fc_cw_status_has_error(DWORD status)
     return (status & FC_CW_STATUS_ERROR_MASK) != 0U;
 }
 
+/* 该 CW 是否被判定为擦除页（未编程）。与 has_error 正交：
+ * 擦除页既不表示读成功，也不表示读失败——页上没有任何数据。 */
+static inline bool fc_cw_status_is_blank(DWORD status)
+{
+    return (status & FC_CW_STATUS_BLANK) != 0U;
+}
+
+/*
+ * fc_cw_status_str - 把 FC_CW_STATUS_* 位解码成短字符串（日志用）
+ *
+ * 输出例："READY|UNC"、"NAND|TIMEOUT"；未知位以 '?' 表示。
+ * @param status 完成状态（FC_CW_STATUS_* 位或）
+ * @param buf    输出缓冲；非空
+ * @param buflen 缓冲长度
+ * @return buf（便于直接放进 LOG 实参）
+ */
+const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen);
+
 /* Command 与 Descriptor 共用 32 位操作配置（位域布局见下） */
 typedef struct fc_cmd_conf_t
 {
@@ -173,13 +197,13 @@ typedef struct fc_cmd_conf_t
                             *          FC 内 RAID stripe 的 cw_count 与测试，写者保留；
                             * Descriptor: 本 desc 在 plane 内是第几个 CW（0..CW_NUM-1）。 */
     DWORD crc         : 1; /* FC_CRC_ENABLE / FC_CRC_DISABLE. */
-    DWORD ldpc        : 2; /* fc_ecc_mode_t: BCH/LDPC_HARD/LDPC_SOFT/LDPC_RAW. */
-    DWORD raid        : 3; /* fc_raid_mode_t: NORMAL/DECODE/ENCODE/RECOVER/CHECK. */
+    DWORD ldpc        : 2; /* fc_ecc_mode_e: BCH/LDPC_HARD/LDPC_SOFT/LDPC_RAW. */
+    DWORD raid        : 3; /* fc_raid_mode_e: NORMAL/DECODE/ENCODE/RECOVER/CHECK. */
     DWORD random      : 1; /* FC_RANDOM_ENABLE / FC_RANDOM_DISABLE. */
     DWORD chain       : 1; /* FC_CHAIN_END / FC_CHAIN_MORE. */
-    DWORD page_type   : 2; /* fc_page_type_t: LP/MP/UP/TP. */
+    DWORD page_type   : 2; /* fc_page_type_e: LP/MP/UP/TP. */
     DWORD multi_plane : 3; /* 0=single; N=N-plane。总 desc 数以 desc 链长度为真值，不由本字段推导。 */
-    DWORD buf_own     : 2; /* fc_buf_own_t：本命令数据 buffer 的归属（bit1=申请方 0=FC 1=上层；
+    DWORD buf_own     : 2; /* fc_buf_own_e：本命令数据 buffer 的归属（bit1=申请方 0=FC 1=上层；
                             *                 bit0=释放方 0=上层 1=FC）。默认 0 = 既有行为。 */
     DWORD reserved : 1;    /* Reserved for future configuration. */
 } fc_cmd_conf_t;
@@ -204,7 +228,7 @@ struct fc_descriptor_t
 
     /* 注意：meta 的高位来自 command->meta（本命令的扇区 LBA），低 3 位
      * [plane][cw] 由本 desc 决定——两者同一套编码（PLANE_CW_MASK）。 */
-    DWORD status   : 8; /* CW status, using FC_CW_STATUS_* bits. */
+    DWORD status   : 9; /* CW status, using FC_CW_STATUS_* bits. */
     DWORD ecc_bits : 8; /* ECC corrected bit count from last completion; 0 if no error. */
 };
 
@@ -259,7 +283,7 @@ struct fc_command_t
 {
     DWORD desc_id       : 16; /* First Descriptor ID; 0xFFFF means no Descriptor. */
     DWORD high_priority : 1;  /* 0=SQ, 1=HSQ. */
-    DWORD op_tag        : 7;  /* 不透明 7 位完成标签（= FTL 的 ftl_op_id_t，见 ftl_op.h）。
+    DWORD op_tag        : 7;  /* 不透明 7 位完成标签（= FTL 的 ftl_op_id_e，见 ftl_op.h）。
                                * FC **不解释、不分支**，只在完成时原样拷进
                                * fc_command_status_t.op_tag（fc.c 的 fc_complete_from_nand）。
                                * 上层据它查"完成服务函数数组"派发 ⇒ ID 真的在命令上。
@@ -298,8 +322,8 @@ struct fc_command_status_t
     DWORD desc_id    : 16;    /* 首个失败 CW 的 descriptor id；0xFFFF = 无失败。详见上方说明。 */
     DWORD op_tag     : 7;     /* Copy of command->op_tag —— 上层**不必反查命令**即可派发
                                * （g_op_callbacks[completion.op_tag]）。 */
-    DWORD      status   : 8;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
-    DWORD      reserved : 17; /* Reserved. */
+    DWORD      status   : 9;  /* Aggregated command-level status; FC_CW_STATUS_* bits ORed from all CWs. */
+    DWORD      reserved : 16; /* Reserved. */
     fc_param_t param;         /* 命令级返回：仅 GET_FEATURES = 寄存器值 param.bytes；其余命令恒 0
                                * （失败 CW 的定位走 desc 链，v28 起不在此聚合）。 */
 };
@@ -351,7 +375,7 @@ static inline DWORD fc_command_plane_span_cw_bitmap(const fc_command_t *command)
     return ((1U << ((plane_last - plane_first) * CW_NUM)) - 1U) << (plane_first * CW_NUM);
 }
 
-fc_status_t fc_command_validate(const fc_command_t *command);
+fc_status_e fc_command_validate(const fc_command_t *command);
 BYTE        fc_cw_bitmap_is_plane_symmetric(DWORD mask);
 
 #endif /* FC_COMMAND_H */

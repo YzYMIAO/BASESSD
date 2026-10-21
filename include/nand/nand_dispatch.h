@@ -83,7 +83,7 @@ typedef struct
 #endif
 
 /* Initialize fixed Channel Dispatch Queues. This function does not initialize FMC hardware. */
-nand_result_t nand_dispatch_init(void);
+nand_result_e nand_dispatch_init(void);
 
 /* NAND/FMC initialisation succeeded; FC may submit media commands after this.
  * ⚠ 这不是 ONFI 的 "device ready"（R/B# / status bit 6，per-die 且瞬态）——
@@ -98,7 +98,7 @@ void nand_dispatch_set_armed(BYTE armed);
 BYTE nand_dispatch_is_armed(void);
 
 /* Submit one pre-resolved command to its LUN FIFO (count = 1). */
-nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request);
+nand_result_e nand_dispatch_submit(const nand_dispatch_request_t *request);
 
 /*
  * 原子提交整条命令链到目标 LUN 的 FIFO（追加 count 槽）。
@@ -108,7 +108,7 @@ nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request);
  * 追加后链占据连续槽位、按 FIFO 顺序执行，中间不可被后续命令插入。
  * 每条命令各回一份 completion（由 poll 逐条返回）。
  */
-nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, BYTE count);
+nand_result_e nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, BYTE count);
 
 /* 完成回调：poll 每产出一条完成就调用一次，调用方在回调里当场消费即可，无需缓存。 */
 typedef void (*nand_dispatch_sink_t)(const nand_dispatch_completion_t *completion, void *ctx);

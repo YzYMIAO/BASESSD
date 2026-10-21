@@ -8,26 +8,29 @@
 
 | 任务 | 读（按序） |
 |---|---|
-| FTL 改动 / 新功能 | `design/ftl_design.md` → `design/ftl_optimization_plan.md`（波次）→ `design/ftl_revision_history.md`（决策史） |
-| FTL 对外接口 | `design/ftl_api_usage.md` + `design/ftl_host_interface.md` |
+| FTL 改动 / 新功能 | `design/ftl_design.md`（主设计）→ `design/ftl_revision_history.md`（逐版本决策史）→ `design/known_iss.md`（未实现项）→ `design/known_risks.md`（风险） |
+| FTL 对外接口 | `design/ftl_api_usage.md`（API 权威；历史契约见 `archive/ftl_host_interface.md`） |
 | FC-NAND 层改动 | `design/fc_nand_design.md`（§26 行业对照 = 判据） |
-| FC 对外接口 | `design/fc_api_usage.md` |
-| 写 / 跑 UT | `design/ftl_ut_munit.md` + `design/fc_nand_ut.md` + `design/munit_adapter.md` |
+| **NAND OP 选型 / cache / copy-back / GC 多 plane** | `design/known_iss.md` §2（ISS-OP，方案已归档）→ `design/fc_nand_design.md` §17.6/§25.8 → `design/ftl_design.md` ADR-15 |
+| FC 对外接口 | `design/fc_nand_design.md` §2.9/§2.10（`archive/fc_api_usage.md` 为历史使用指南） |
+| 写 / 跑 UT | `design/fc_nand_ut.md` + `design/munit_adapter.md`；FTL UT 设计与冻结状态见 `archive/ftl_ut_munit.md` + `design/known_iss.md` ISS-UT-01；HIL UT 未实现见 `known_iss.md` §1 |
 | 平台 / 移植 / 调试链 | `design/platform_abstraction.md` + `design/wsl_debug_environment.md` + `hardware_contract.md` |
-| 断言 / 日志 / 故障捕获 | `design/assertion_guidelines.md` + `design/fault_capture.md` |
-| 设计原则 / 学习 | `design/storage_controller_design_essentials.md` + `design/cw_level_mapping_design.md` |
-| **模块接口 / 解耦判据** | `design/ftl_module_contracts.md`（handle 契约 / 字段所有权 / 超时 / 多 LUN） |
+| 断言 / 日志 / 故障捕获 | `design/logging_design.md`（预期/非预期 + 打印预算 + 飞行记录器）+ `design/assertion_guidelines.md` + `design/fault_capture.md` |
+| 设计原则 / 学习 | `design/storage_controller_design_essentials.md` + `design/storage_controller_learning.md`；CW 布局事实已并入 `design/ftl_design.md` §2.1/§2.2 |
+| **模块接口 / 解耦判据** | `design/ftl_design.md` §5.1.1/§5.1.2（handle 契约 / 字段所有权 / 超时 / 多 LUN；全文在 `archive/ftl_module_contracts.md`） |
 | **USB MSC / U 盘** | `design/usb_msc_udisk.md`（可行性 / TinyUSB / BOT 单命令 / 与主控差距）→ `design/usb_msc_verification.md`（上板验证手册 + 判据 + 脚本） |
-| 多 LUN / 共享 L2P cache / 内存域 | `design/multi_lun_generalization.md` |
-| **复查已知风险 / 判断是否该修** | **先读 `design/known_risks.md`**（暂不修 / 待上板 / 待测试源 / 待决策）→ 再进对应模块文档 |
+| 多 LUN / 共享 L2P cache / 内存域 | `design/ftl_design.md` §2.1/§5.4 + `design/known_iss.md` §4（实施计划已归档） |
+| **未实现 / 未验证项（feature backlog）** | `design/known_iss.md` |
+| **复查已知风险 / 判断是否该修** | **先读 `design/known_risks.md`**（缺陷/残余风险；已闭合条目在文末）→ 再进对应模块文档 |
+| **质疑某条项目规则（`CLAUDE.md`）的出处** | `archive/claude_md_history.md`（规则何时、因为什么改过；日常不读） |
 
 ## 目录
 
 ```
 docs/
 ├── README.md                  ← 本文件（导航）
-├── archive/                   ← 历史区（日常不读）：changelog 70 个 + dated 6 个，见 archive/README.md
-├── design/                    ← 活跃权威设计文档（23 个）
+├── archive/                   ← 历史区（日常不读）：changelog 70 + dated 6 + 计划/历史 10，见 archive/README.md
+├── design/                    ← 活跃权威设计文档（17 个）+ known_iss/known_risks
 ├── reference/                 ← 资料区：论文 PDF / 网页存档离线备份
 ├── diagrams/                  ← 示意图
 ├── architecture.md            ← 软件架构总览
@@ -40,6 +43,9 @@ docs/
 
 ## 边界
 
-- **活跃** = 代码注释 / 测试 / 构建仍引用它（判据：`grep -rn <文档名> src include tests` 有命中）。
-- **归档** = 已闭合的阶段性记录（单版本落地 / 上板验证 / 一次性调试）。
-  新增已落地变更记录 → 放 `archive/changelog/`；对当前设计仍有约束力的决策 → 进 `design/` 对应文档。
+- **活跃** = 代码注释 / 测试 / 构建仍引用它（判据：`grep -rn <文档名> src include tests` 有命中），
+  或它是某一层/某类 UT 的权威设计文档。
+- **归档** = 已闭合的阶段性记录（单版本落地 / 上板验证 / 一次性调试）、**已被主干取代的计划稿**、
+  以及纯历史（版本变更史 / 规则变更史）。
+  新增已落地变更记录 → 放 `archive/changelog/`；对当前设计仍有约束力的决策 → 进 `design/` 对应文档；
+  未实现/未验证的设计项 → 进 `design/known_iss.md`，不要留在计划稿里。

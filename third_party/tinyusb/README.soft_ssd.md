@@ -47,9 +47,9 @@ src/portable/synopsys/dwc2/dwc2_type.h
 
 需要新增 class 或端口时，按同一版本从上游重新拷入对应文件，不要手改保留的核心文件。
 
-## 适配边界（核心文件零修改）
+## 适配边界
 
-本仓**没有修改** `third_party/tinyusb/src/` 下的任何文件。适配全部走上游约定的扩展点：
+适配优先走上游约定的扩展点：
 
 | 适配点 | 位置 |
 |---|---|
@@ -58,4 +58,18 @@ src/portable/synopsys/dwc2/dwc2_type.h
 | SoC 时钟/引脚/IRQ/毫秒时基 | `src/platform/stm32h743/usb_port.c` |
 | 描述符、MSC/SCSI 回调 | `src/controller/usb_msc.c`（实现上游 weak 回调） |
 
-升级 TinyUSB 时只需替换上述文件集合并重跑构建；本仓的适配代码不进入上游源码树。
+## 本仓补丁（**唯一的 src/ 修改**，RISK-USB-06）
+
+上游 MSC 的异步完成只覆盖 READ_10 / WRITE_10；无数据 SCSI 命令（`SYNCHRONIZE
+CACHE(10)`）的 `TUD_MSC_RET_ASYNC` 会被当成失败。本仓的 FLUSH 必须异步（否则
+host 回调里自旋会饿死 USB 事件队列），故在 `src/class/msc/msc_device.c` 打了三处
+最小补丁，全部带 `【本仓补丁】` 注释：
+
+| 位置（函数） | 修改 |
+|---|---|
+| `tud_msc_async_io_done` | 仅 READ_10/WRITE_10 把 `bytes_io == 0` 当错误；无数据命令允许 0 = 成功 |
+| `proc_async_io_done` | `default` 分支：无数据命令完成 ⇒ 进入 `MSC_STAGE_STATUS`（失败则 `fail_scsi_op`） |
+| `mscd_xfer_cb`（SCSI CMD 阶段） | `resplen == TUD_MSC_RET_ASYNC && total_bytes == 0` ⇒ 置 `pending_io` 并返回，等 `tud_msc_async_io_done` |
+
+升级 TinyUSB 时必须**重新套用**这三处补丁并回归「H2testw 跑到结束不 halt /
+`[FTL] flush took` 正常」；其余适配代码不进入上游源码树。

@@ -7,13 +7,13 @@
 #include <string.h>
 
 /* This filter applies before formatting, so suppressed logs consume no TX queue space. */
-static log_level_t      g_log_level = LOG_INFO;
+static log_level_e      g_log_level = LOG_INFO;
 static log_sink_t       g_log_sink;
 static log_flush_sink_t g_log_flush_sink;
 static DWORD            g_log_truncated;
 static DWORD            g_log_write_failures;
 
-DWORD log_write(log_level_t level, const char *message)
+DWORD log_write(log_level_e level, const char *message)
 {
     const ssd_platform_ops_t *platform = ssd_platform_get();
     DWORD                     length;
@@ -49,7 +49,7 @@ DWORD log_write(log_level_t level, const char *message)
     return result;
 }
 
-DWORD log_vprintf(log_level_t level, const char *format, va_list args)
+DWORD log_vprintf(log_level_e level, const char *format, va_list args)
 {
     char message[192];
     int  length;
@@ -84,7 +84,7 @@ DWORD log_vprintf(log_level_t level, const char *format, va_list args)
     return log_write(level, message);
 }
 
-DWORD log_printf(log_level_t level, const char *format, ...)
+DWORD log_printf(log_level_e level, const char *format, ...)
 {
     DWORD   length;
     va_list args;
@@ -95,7 +95,7 @@ DWORD log_printf(log_level_t level, const char *format, ...)
     return length;
 }
 
-void log_set_level(log_level_t level)
+void log_set_level(log_level_e level)
 {
     if (level <= LOG_DEBUG)
     {
@@ -103,7 +103,7 @@ void log_set_level(log_level_t level)
     }
 }
 
-log_level_t log_get_level(void)
+log_level_e log_get_level(void)
 {
     return g_log_level;
 }

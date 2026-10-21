@@ -1,10 +1,20 @@
 # USB MSC U 盘上板验证手册
 
-> 状态：**基础数据面 + 429 MiB 容量已上板通过（rev30，2026-10-20）；大文件/掉电/吞吐待测**。
+> 状态：**基础数据面已上板通过（rev30）；v12 容量口径已回归（2026-10-22 全盘 H2testw 415/423 MB 无错误）；掉电/吞吐/多分区待测**。
+>
+> 📷 **历史证据**：[`h2testw_pass_20261022.png`](../archive/images/h2testw_pass_20261022.png)
+> —— v12 介质、0 坏块、写+校验无错误（读 297 KB/s；415/423 MB 的差额为 FAT32 元数据）。
 > 目标平台：阿波罗 V2 核心板（STM32H743IIT6 + MT29F4G08 + Type-C USB）。
 > rev30 已确认：Windows `Get-Disk` = 449,839,104 B（429 MiB），FAT 格式化，
 > `usb_verify -Step write/check` 拔插后 `RESULT=PASS`、2KB 块指纹全对。
+> ⚠ 介质版本 12（2026-10-22）起容量口径变为编译期 **868,352（424 MiB）**、运行时按实际
+> 坏块动态取 min(plane)/min(instance)；以 boot `[CAP]` 与 USB READ CAPACITY 为准。
+> 上文 rev30 的 429 MiB 是历史证据，不重写。
 > 大文件/GC、掉电恢复、吞吐仍未验证（R1）。
+> ⚠ rev33（v11，2026-10-21）：**128 MB 分区 H2testw 写入+校验通过**（127 MB，写 261 KB/s /
+> 读 296 KB/s）。该结果只覆盖 407 MiB 的约 1/3，且**未重启**，不满足全盘/GC/掉电判据。
+> ⚠ 同夜第二个 279 MB 分区**复现失败**：GC 启动后 `mark BAD` 156→420、`dng=55`、
+> Free/OP/Spare 耗尽、写入冻结（`RISK-MIG-07` / `RISK-GC-10`）。全盘判据仍未通过。
 > 配套脚本：`tools/usb_verify/`（`usb_verify.ps1` / `usb_rebuild_mbr.ps1`）。
 > 设计与取舍：`docs/design/usb_msc_udisk.md`。已知风险：`docs/design/known_risks.md`。
 
@@ -75,7 +85,8 @@ Windows 磁盘缓存、旧镜像都会制造假象。
 
 ## 3. 安全规则
 
-1. **脚本只认 `FriendlyName=*SOFTSSD*`、`Size=449839104`、`BusType=USB`**；
+1. **脚本认 `FriendlyName=*SOFTSSD*`、`BusType=USB`，容量按 424 MiB ±64 MiB 窗口**
+   （主机容量按实际坏块动态扣减，精确相等只在 0 坏块时成立，RISK-CAP-03）；
    任一不符立即中止。手工操作时也必须先用 `Get-Disk` 确认。
 2. **不要碰系统 NVMe**（Number 0/1）。`format` / `usb_rebuild_mbr.ps1` 都是破坏性的。
 3. 主机操作期间**不要同时敲板子 CLI**：两者共用 host busy gate，会互相让路或报 busy。
@@ -95,7 +106,12 @@ Windows 磁盘缓存、旧镜像都会制造假象。
 | USB-V04 | 非均匀多页写 → 读回 | `-Step write` | `SRC_HASH == DST_HASH` | ✅ rev30 |
 | USB-V05 | 4KB pair 镜像 / 2KB 块指纹 | `-Step check` | pattern 的 2KB 块 0..7 内容分别为 0..7 | ✅ rev30 |
 | USB-V06 | SYNCHRONIZE CACHE + 拔插持久性 | `write` → `Write-VolumeCache` → 拔插 → `check` | `RESULT=PASS`，哈希不变 | ✅ rev30 |
-| USB-V07 | 大文件 + GC/CP 压力 | 写 32–64MB 随机文件，flush，拔插，哈希 | 哈希一致；无 `[MIG]` 风暴 / 无 ASSERT | ⬜ 待测 |
+| USB-V07 | 大文件 + GC/CP 压力 | 写 32–64MB 随机文件，flush，拔插，哈希 | 哈希一致；无 `[MIG]` 风暴 / 无 ASSERT | ✅ 2026-10-22 全盘 H2testw（GC/CP 覆盖） |
+| USB-V08 | 写过程中掉电 | 写 32–64MB 中途拔电，重启后挂载并读回 | 卷可挂载；已写入部分哈希一致；无 `[FTL] dangling` | ⬜ 待测（`known_iss` ISS-USB-01） |
+| USB-V09 | 吞吐基线 | `dd`/H2testw 记录顺序写读 | 与 RISK-NAND-04 的瓶颈结论一致 | ⬜ 待测（`known_iss` ISS-USB-02） |
+
+> USB-V01/V02 的 `429 MiB / 449,839,104` 是 **rev30 历史证据**；当前 v12 期望为
+> **424 MiB / 444,596,224**（0 坏块）或按 `[CAP]` 动态值，见 §5 与 `known_iss.md`。
 | USB-V08 | 写过程中掉电 | 写临时文件时断板子电源，重启重挂载 | 盘能重新挂载；FTL journal/CP 恢复；损坏范围可解释 | ⬜ 待测 |
 | USB-V09 | 吞吐 | 大文件复制 / `dd` 计时 | USB FS 预期 ~1 MB/s 量级；记录实测 | ⬜ 待测 |
 | FTL-V01 | `RISK-MD-06` 回收前 Anchor | 填满一个元数据日志块（64 个 region）后冷启动 | 无 `[L2P] load failed`；`anchor_seq > cp_seq` | ⬜ 待测 |
@@ -116,7 +132,7 @@ Windows 磁盘缓存、旧镜像都会制造假象。
 
 ```text
 [INF] [USB ] device stack ready (USB2_OTG_FS, full speed)
-[INF] [USB ] mounted (MSC BOT, 878592 sectors x 512 bytes)
+[INF] [USB ] mounted (MSC BOT, 868352 sectors x 512 bytes)
 ```
 
 2. Windows：
@@ -128,7 +144,7 @@ Get-Disk | Where-Object BusType -eq 'USB' | Format-Table Number,FriendlyName,Siz
 **期望**：
 
 - 设备侧有 `[USB ] mounted`；
-- 磁盘 `FriendlyName = SOFTSSD NAND U-DISK`、`Size = 449839104`、`BusType = USB`。
+- 磁盘 `FriendlyName = SOFTSSD NAND U-DISK`、`Size = 444596224`、`BusType = USB`。
 
 **证据**：串口原文 + `Get-Disk` 输出。⚠ 只有 `mounted` 不能证明数据面可用，继续 V02。
 
@@ -137,7 +153,7 @@ Get-Disk | Where-Object BusType -eq 'USB' | Format-Table Number,FriendlyName,Siz
 ### USB-V02 容量与扇区
 
 **验证什么**：SCSI READ CAPACITY / 扇区大小与 FTL 坐标一致（1 LBA = 512B，
-`FTL_LBA_MAX = 878,592`（429 MiB））。
+`FTL_LBA_MAX = 868,352`（424 MiB））。
 
 **执行**：
 
@@ -154,13 +170,13 @@ Get-Volume | Where-Object DriveType -eq 'Removable' | Format-Table DriveLetter,F
 
 **期望**：
 
-- `Size = 449839104`（429 MiB，主机可见容量）；
+- `Size = 444596224`（424 MiB，主机可见容量）；
 - `LogicalSectorSize = PhysicalSectorSize = 512`；
-- 格式化后的卷约为 429 MiB 减去分区表/对齐开销。
+- 格式化后的卷约为 424 MiB 减去分区表/对齐开销。
 
 > 为什么不是 512 MiB：原始 NAND 主区是 512 MiB，但固定元数据（含 L2P 日志区）
-> 156 块（19.5 MiB）、OP 预留 408 块（51 MiB）、Spare 100 块（12.5 MiB）不可用于用户数据。
-> 数据块 = 4096 − 156 − 408 − 100 = 3432 块 = 429 MiB；
+> 196 块（24.5 MiB）、OP 预留 408 块（51 MiB）、Spare 100 块（12.5 MiB）不可用于用户数据。
+> 数据块 = 4096 − 196 − 408 − 100 = 3392 块 = 424 MiB；
 > 见 `include/ftl/ftl.h` 的 `FTL_HOST_DATA_BLOCKS_PER_INSTANCE` / `FTL_LBA_MAX`。
 > 对外上报这个数，避免主机把盘写满后 GC 无块可搬。
 
@@ -326,6 +342,7 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect -DiskNumber 2 -DriveL
 |---|---|---|
 | Windows 完全看不到盘 | 串口是否有 `[USB ] mounted`；设备管理器有无未知设备 | 无 mounted：查 PA11/PA12、HSI48、VBUS sensing；有 mounted 无磁盘：查 SCSI 容量/inquiry |
 | 能看到盘，格式化失败 | 串口 `[USB ] unsupported SCSI opcode=0xXX` | 记录 opcode；补对应 SCSI 命令（`0x91` = SYNCHRONIZE CACHE(16)、`0x2F` = VERIFY(10)、`0x42` = UNMAP） |
+| **卷可用空间只有一半**（如 219/427 MB）；「删除卷」报「不支持该请求」且串口**没有** SCSI opcode 日志 | 旧 FAT / 卷状态残留（多次测试后 Windows 侧缓存），固件侧 `free` 正常、`rd` 读回为未映射零 | 固件 CLI `format` → 断电重启 → Windows `diskpart clean` → 新建卷 → FAT 快速格式化；实测恢复 **425 MB 可用 / 共 425 MB**（2026-10-22） |
 | 格式化失败且串口有 `[MIG] ... victim read failed` 风暴 | `RISK-MIG-02` | 先 CLI `format` + 断电；仍复现则修 predictive 失败计数/黑名单 |
 | 重插后哈希不一致 | V05 的 2KB 块指纹 | 若块 1=块 0：`RISK-WB-06`（pair 镜像填装）；确认 rev 已含 `ftl_cmd_write_data_pair_cw` |
 | 分区表 offset 异常 / Logical 分区 / Not enough capacity | `Get-Partition` 的 Offset/MbrType | 跑 `usb_rebuild_mbr.ps1` |
@@ -346,11 +363,28 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect -DiskNumber 2 -DriveL
 | rev28 dangling 减计数守卫 | ⏳ 未单独复现 | 需在 predictive 标坏后覆盖写同一 LBA，确认只打 `[FTL] dangling`、不再断言 |
 | rev29/rev30 容量修正 | ✅ | Windows `Get-Disk Size=449,839,104`（429 MiB）、FAT 格式化、`usb_verify write/check` 拔插后 `RESULT=PASS`；`lba_max=878592 (429MiB)` |
 
+### 2026-10-21 rev33（v11，运行时 407 MiB）
+
+| 步骤 | 结果 | 说明 |
+|---|---|---|
+| 介质恢复 | ✅ | `make format-image` 开卡后换回正常镜像（`.build_cfg=0/0`）；`[CAP] lba_max=833536 (407MiB)`，与磁盘管理 407 MB 一致 |
+| 128 MB 分区 | ✅ | 磁盘 2（可移动，407 MB）：128 MB 主分区 + 279 MB 未分配 |
+| H2testw（127 MB，写 + 校验） | ✅ | “Test finished without errors”；写 8:17 / 读 7:19；写 261 KB/s / 读 296 KB/s（USB-V09 首个数据点） |
+| 第二个 279 MB 分区 H2testw | ❌ | `free` 1178→32 触发 GC 后，`mark BAD` 156→**420**（+264，全部 UNC）、`dng=55`、`op=11/0`、`spare=0/29`，写指针停在 `wr=53120`，USB 反复重挂载 ⇒ 死锁。悬空 LBA 自 262346 起（第二分区起点）。归入 `RISK-MIG-07` / `RISK-GC-10` |
+
+**适用边界（不能当全盘结论）**：
+
+- 只写 127 MB ⇒ Free Pool 基本没被压低，**GC / 迁移路径几乎没跑**（boot `free=3268` 未见显著下降）；
+- H2testw **不重启** ⇒ 上次的失败形态（`[L2P] region 49 load failed` → full metadata rebuild）
+  是重启读回元数据时才暴露的，本次未覆盖；
+- 介质是刚开卡格式化的干净状态，旧的元数据损坏已被清除。
+- 因此 `RISK-MD-07` / `RISK-CAP-02` 的“全盘写到分区末端”判据**仍未满足**。
+
 **脚本形态的验证**：
 
 | 脚本步骤 | 状态 | 说明 |
 |---|---|---|
-| `usb_verify.ps1 -Step inspect` | ✅（rev27/28，旧容量） | 自动识别 SOFTSSD/USB；⚠ 脚本的 ExpectedSize 已改为 449,839,104，rev29 前会被旧盘拒绝（预期） |
+| `usb_verify.ps1 -Step inspect` | ✅（rev27/28，旧容量） | 自动识别 SOFTSSD/USB；⚠ 脚本的 ExpectedSize 现为 444,596,224（424 MiB ±64 MiB 窗口），旧容量盘会被拒绝（预期） |
 | `usb_verify.ps1 -Step write` | ✅（rev27/28） | 写 `test.bin` + `pattern.bin`，`SRC_HASH==DST_HASH`，`FLUSH_OK` |
 | `usb_verify.ps1 -Step check` | ✅（逻辑） | 哈希 + 2KB 块指纹 `RESULT=PASS`；真实拔插判据用同一套检查手工做过 |
 | `usb_verify.ps1 -Step format` | ⚠ 未在最终脚本形态重跑 | 其步骤与手工验证过的“删分区→Clear-Disk→MBR→FAT32”一致；当前盘已被手工格式化，未再破坏性重跑 |
@@ -373,12 +407,20 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect -DiskNumber 2 -DriveL
 
 ## 9. 下一步
 
-1. **USB-V07**：写 32–64 MB 随机文件（`fsutil`/PowerShell 生成）→ flush → 拔插 → 哈希。
-2. **USB-V08**：写临时文件时断板子电源 → 重启重挂载 → 检查 FTL 恢复日志
+**2026-10-21 起的优先顺序**（先把范围逐步放大，再谈“修复”结论）：
+
+1. H2testw “verify them again”：**断电重启后**重读 127 MB（约 7 分钟）→ 覆盖 L2P / journal 恢复路径。
+2. 256 MB 分区重跑 H2testw（约 30 分钟）；同时看串口 `[STAT]` 的 `dng/rrab/mig` 与 `info` 的 `live=`。
+3. 全盘 407 MiB H2testw（约 1 小时）——这才是 `RISK-MD-07` / `RISK-CAP-02` 的判据。
+
+以下为原矩阵项：
+
+4. **USB-V07**：写 32–64 MB 随机文件（`fsutil`/PowerShell 生成）→ flush → 拔插 → 哈希。
+5. **USB-V08**：写临时文件时断板子电源 → 重启重挂载 → 检查 FTL 恢复日志
    （`boot type` / `journal_entries` / `[L2P]`）。
-3. **USB-V09**：记录大文件复制耗时，换算 MB/s。
-4. **FTL-V01**：按 `RISK-MD-06` 的 64-region 方法验证回收前 Anchor。
-5. **FTL-V02**：若 `victim read failed` 风暴复现，修 `RISK-MIG-02`。
+6. **USB-V09**：记录大文件复制耗时，换算 MB/s。
+7. **FTL-V01**：按 `RISK-MD-06` 的 64-region 方法验证回收前 Anchor。
+8. **FTL-V02**：若 `victim read failed` 风暴复现，修 `RISK-MIG-02`。
 
 ---
 

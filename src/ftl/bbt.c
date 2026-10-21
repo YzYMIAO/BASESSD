@@ -10,7 +10,7 @@
  *   本文件 —— 扫描/标坏/持久化/替换的实现 + 坏块图打印诊断。
  *
  * 单一数据源：
- *   内存里坏块 = ftl_block_t.state 的 BAD 位（BST 单数据源）；
+ *   内存里坏块 = bst_block_t.state 的 BAD 位（BST 单数据源）；
  *   NAND 持久化仍用紧凑 bad_map[512] 格式（bbt_header_t，一字不改）；
  *   bbt_save 时从 BST 重建 bitmap，bbt_init 时从 bitmap 重建 BST。
  *
@@ -33,7 +33,7 @@
  *   · `bbt_handle`  —— **异步 job**，后台攒批（ftl_service 的 idle/normal 档）。
  *   两者写出的 record 格式与游标推进规则**逐字相同**。
  *
- * 游标/序号是 **per-instance**（收进 ftl_allocator_t.bbt，见 bbt_state_t）——
+ * 游标/序号是 **per-instance**（收进 alc_t.bbt，见 bbt_state_t）——
  * 多实例（多 LUN）下每实例一份，互不干扰。
  */
 
@@ -53,10 +53,10 @@
 #include <string.h>
 
 /*
- * BBT 内部状态：**per-instance**，落在 ftl_allocator_t.bbt（bbt_state_t）。
+ * BBT 内部状态：**per-instance**，落在 alc_t.bbt（bbt_state_t）。
  * 多实例（多 LUN）下每实例一份游标/序号，互不覆盖。
  *
- * 坏块状态已并入 ftl_block_t.state（Block State Table 单数据源；该字段
+ * 坏块状态已并入 bst_block_t.state（Block State Table 单数据源；该字段
  * 是互斥枚举，BAD 为终态），
  * NAND 持久化仍用紧凑 bad_map[512] 格式（bbt_header_t，一字不改），
  * bbt_save 时从 BST 重建 bitmap。
@@ -64,13 +64,24 @@
 
 /* ── 1. 池几何 / 校验 / 探针 ── */
 
-/* ── BBT 池：环形轮转（一条 record = 1 页）── */
-static void bbt_ring_init(metadata_ring_t *ring)
+/* Spare/OP 双空日志节流：第 1 次立即打印，此后每 N 次一条（坏块风暴不刷屏）。
+ * N=64 是本仓观测折中：一次上电最多 64 条同类告警，足以判断趋势又不拖慢 UART。 */
+#define BBT_RESERVE_LOW_LOG_EVERY (64U)
+static DWORD s_reserve_low_logged;
+
+/* ── BBT 池：环形轮转（一条 record = 1 页）──
+ * 候选池已建立时用它（跳过 BAD）；`bbt_init` 自举期间池尚未建立 ⇒ 退回
+ * 「名义 BBT 块 + 全部 shared spare」的物理扫描列表，record 自带 magic/sequence，
+ * 坏块/空块读失败会被 md_ring_locate 自然忽略。 */
+static void bbt_ring_init(md_ring_t *ring, const alc_t *alloc)
 {
-    ring->first_block      = BBT_BLOCK;
-    ring->block_count      = BBT_POOL_BLOCKS;
-    ring->pages_per_record = 1U;
-    ring->plane_mask       = METADATA_MIRROR_PLANE_MASK;
+    if ((alloc != NULL) && (alloc->pools != NULL) && (alloc->pools->bbt.block_count >= 2U))
+    {
+        *ring = alloc->pools->bbt;
+        return;
+    }
+
+    md_pool_build_bbt_bootstrap(ring);
 }
 
 /* 整条校验（一条 record = 1 页）：magic + total_blocks。
@@ -83,19 +94,19 @@ static bool bbt_header_valid(const bbt_header_t *hdr)
 
 typedef struct
 {
-    ftl_topology_t  topo;
-    metadata_ring_t ring;
+    ftl_topo_t topo;
+    md_ring_t  ring;
 } bbt_probe_ctx_t;
 
 /* 本实例的池 + 路由（探针/定位/写点都要这一对，四处共用） */
-static void bbt_ctx_init(const ftl_allocator_t *alloc, bbt_probe_ctx_t *ctx)
+static void bbt_ctx_init(const alc_t *alloc, bbt_probe_ctx_t *ctx)
 {
-    bbt_ring_init(&ctx->ring);
+    bbt_ring_init(&ctx->ring, alloc);
     ctx->topo = alc_topo(alloc);
 }
 
 /* BBT record 探针（见 metadata_ring_probe_fn）。full 与廉价探针等价（record 只有一页）。 */
-static ftl_status_t bbt_record_probe(void *ctx, WORD record_idx, bool full, DWORD *out_sequence)
+static ftl_status_e bbt_record_probe(void *ctx, WORD record_idx, bool full, DWORD *out_sequence)
 {
     (void)full;
 
@@ -132,7 +143,7 @@ static ftl_status_t bbt_record_probe(void *ctx, WORD record_idx, bool full, DWOR
 
 /* 定义在下方「坏块图打印」节（与 bbt_print_bad_map 共用）；
  * bbt_scan_factory 需要它在前面，故先声明。 */
-static bool bbt_probe_block_bad(ftl_allocator_t *alloc, BYTE plane, WORD block, BYTE do_erase);
+static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_erase);
 
 /* --------------------------------------------------------------------
  * bbt_medium_has_ftl_data
@@ -154,7 +165,7 @@ static bool bbt_probe_block_bad(ftl_allocator_t *alloc, BYTE plane, WORD block, 
  *   ⚠ 只探**固定元数据区**：该区的页一律以 FTL_PAGE_CFG_META()（RANDOM_DISABLE）写，
  *     与这里的读配置一致；用户数据页用 DATA 配置（带解扰）写，不在此列、也不需要。
  * -------------------------------------------------------------------- */
-bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
+bool bbt_medium_has_ftl_data(alc_t *alloc)
 {
     BYTE scratch[16];
 
@@ -235,7 +246,7 @@ bool bbt_medium_has_ftl_data(ftl_allocator_t *alloc)
  *   实现要点：读到 BBT 后从 bitmap 重建 BST 的 BAD 位并清 OPEN/CLOSED/FREE/sb_id
  *             （单数据源方向：NAND bitmap → BST）。
  * -------------------------------------------------------------------- */
-void bbt_init(ftl_allocator_t *alloc)
+void bbt_init(alc_t *alloc)
 {
     /* 前置条件（判据 2 / §二十六「子模块公开入口」）：唯一调用者 ftl.c 传 &ftl->alloc。 */
 
@@ -243,6 +254,7 @@ void bbt_init(ftl_allocator_t *alloc)
     alloc->bbt.dirty              = 0U;
     alloc->bbt.dirty_gen          = 0U;
     alloc->bbt.format_in_progress = false;
+    alloc->bbt.rebuild_required   = false;
     /* 清异步 job（alc_init 已零化，此处再钉一次） */
     alloc->bbt.handle.phase       = BBT_JOB_IDLE;
     alloc->bbt.handle.waiting     = 0U;
@@ -326,7 +338,7 @@ void bbt_init(ftl_allocator_t *alloc)
  *               READY；全 FF 既可能是空块也可能是坏块。唯一成立的判据是
  *               OP_READ_COLUMN 读 spare[0]（列 2048）。
  * -------------------------------------------------------------------- */
-int bbt_scan_factory(ftl_allocator_t *alloc)
+int bbt_scan_factory(alc_t *alloc)
 {
     WORD bad_idx = 0U;
 
@@ -356,6 +368,14 @@ int bbt_scan_factory(ftl_allocator_t *alloc)
 
     alloc->bad_count = bad_idx;
     bbt_note_dirty(alloc);
+
+    /* 先按扫描结果建好候选池（BBT 本身可能落在 shared spare），再写 BBT record；
+     * 否则 bbt_save 会沿用自举扫描列表，可能选中刚扫出的坏块。 */
+    if (!md_pool_build_all(alloc))
+    {
+        LOGE("[BBT] factory scan: metadata candidate pool build failed — BBT not saved\r\n");
+        return bad_idx;
+    }
 
     /* 将扫描结果写入 NAND BBT */
     (void)bbt_save(alloc);
@@ -402,7 +422,7 @@ _Static_assert((BLOCKS_PER_PLANE % BBT_MAP_COLS_PER_PLANE) == 0U, "每 plane 块
  *         bbt_print_bad_map（诊断，按 CLI——读图的人须知这不是坏块图）/
  *         注：bbt_format_erase **不**调用本函数（标记读取职责只在 bbt_init）。
  */
-static bool bbt_probe_block_bad(ftl_allocator_t *alloc, BYTE plane, WORD block, BYTE do_erase)
+static bool bbt_probe_block_bad(alc_t *alloc, BYTE plane, WORD block, BYTE do_erase)
 {
     /* page / cw 恒 0：擦除不看它们；列地址由 ftl_sync_read_column 显式给，
      * 不依赖 PBA 的 cw 字段。LUN 必须取本分配器实例的坐标（多 LUN 下不能写 0）。 */
@@ -440,15 +460,18 @@ static bool bbt_probe_block_bad(ftl_allocator_t *alloc, BYTE plane, WORD block, 
  *        先落盘；失败立即返回，用户数据与工厂标记都还完整。
  *     ② 擦除 **BBT 池之外** 的全部块（所有 plane）；擦失败标 BAD。
  *        BBT 池保留，以保存 ① 的 record。
- *     ③ 清 `format_in_progress` 并再 save 一次（best-effort；新 BAD 未落盘时
- *        dirty 留给后台 bbt_handle，工厂坏块图已在 ① 持久化）。
+ *     ③ 再 save 一次，把擦除失败新标坏的块并入 BBT（best-effort；失败只留下
+ *        dirty 给后台 bbt_handle，工厂坏块图已在 ① 持久化）。**不清**
+ *        `format_in_progress`：格式化的提交点是 initial Checkpoint 落盘
+ *        （`ftl_media_format` 末尾），不是擦除结束。
  *
  *   ⚠ **不读出厂坏块标记**：标记读取职责唯一归 bbt_init（且只在空片时做）。
  *     因此「必须在 bbt_init 之后调用」是承重的——出厂标记此时已在 BST 里。
- *   ⚠ ② 中途掉电：最新 BBT record 带 FORMAT_IN_PROGRESS，下次开机会继续格式化，
- *     而不是把“有 BBT、无 CP”误判成损坏介质。
+ *   ⚠ ②/体检/写初始元数据任一步中途掉电：最新 BBT record 仍带
+ *     FORMAT_IN_PROGRESS，下次开机会继续格式化，而不是把“有 BBT、无 CP”
+ *     误判成损坏介质（cp_probe_media_status 的 IO_ERROR 分支）。
  * -------------------------------------------------------------------- */
-ftl_status_t bbt_format_erase(ftl_allocator_t *alloc)
+ftl_status_e bbt_format_erase(alc_t *alloc)
 {
     /* 前置条件（判据 2）：唯一调用者 power_failure_recovery.c 传 &ftl->alloc。 */
 
@@ -463,14 +486,22 @@ ftl_status_t bbt_format_erase(ftl_allocator_t *alloc)
         return FTL_ERROR;
     }
 
-    /* ② 擦除 BBT 池之外的块；擦失败的块标 BAD。BBT 池保留，以保存 ① 的 record。 */
+    /* ② 擦除 BBT 候选池之外的块；擦失败的块标 BAD。候选池保留，以保存 ① 的 record。
+     * 候选池可能含 shared metadata spare（名义 BBT 块坏掉时），因此不能只按
+     * `[BBT_BLOCK, +BBT_POOL_BLOCKS)` 判断。 */
+    const md_ring_t *bbt_ring = (alloc->pools != NULL) ? &alloc->pools->bbt : NULL;
+
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         for (WORD block = 0U; block < BLOCKS_PER_PLANE; block++)
         {
-            if ((block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS)))
+            const bool keep_bbt = ((bbt_ring != NULL) && (bbt_ring->block_count >= 2U))
+                                      ? md_ring_has_block(bbt_ring, block)
+                                      : ((block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS)));
+
+            if (keep_bbt)
             {
-                continue; /* 保留 BBT 池（新坏块图 record 在这里） */
+                continue; /* 保留 BBT 候选池（新坏块图 record 在这里） */
             }
 
             const WORD  gblock = ftl_gblock(plane, block);
@@ -492,9 +523,10 @@ ftl_status_t bbt_format_erase(ftl_allocator_t *alloc)
         }
     }
 
-    /* ③ 清“格式化进行中”，把擦除失败新标坏的块并入 BBT（best-effort；
-     *    工厂坏块图已在 ① 落盘，这里失败只留下 dirty 给后台 bbt_handle）。 */
-    alloc->bbt.format_in_progress = false;
+    /* ③ 把擦除失败新标坏的块并入 BBT（best-effort；工厂坏块图已在 ① 落盘，
+     *    这里失败只留下 dirty 给后台 bbt_handle）。
+     *    **不清 format_in_progress**：清标志归 ftl_media_format 的提交点
+     *    （initial Checkpoint 已读回），否则擦除后复位会让下次开机拒绝格式化。 */
     bbt_note_dirty(alloc);
     (void)bbt_save(alloc);
 
@@ -509,7 +541,7 @@ ftl_status_t bbt_format_erase(ftl_allocator_t *alloc)
  *   实现要点：每格定宽 BBT_MAP_ENTRY_W，两 plane 并排（行长受终端宽度约束，见宏注释）；
  *             坏块打的是**本 plane 绝对块号**而非排内列号（避免与 FF 并排被误读成十六进制）。
  * -------------------------------------------------------------------- */
-void bbt_print_bad_map(ftl_allocator_t *alloc, BYTE do_erase)
+void bbt_print_bad_map(alc_t *alloc, BYTE do_erase)
 {
     char line[BBT_MAP_LINE_MAX];
 
@@ -585,7 +617,7 @@ void bbt_print_bad_map(ftl_allocator_t *alloc, BYTE do_erase)
 /* bbt_note_dirty — BBT 的唯一 dirty 闸门。
  * 每次置位推进 dirty_gen：写 job 组 header 时快照它，完成时只有代际未变才清 dirty，
  * 从而覆盖“写命令在飞期间又标坏了一块”的丢更新窗口。 */
-void bbt_note_dirty(ftl_allocator_t *alloc)
+void bbt_note_dirty(alc_t *alloc)
 {
     alloc->bbt.dirty = 1U;
     alloc->bbt.dirty_gen++;
@@ -600,7 +632,7 @@ void bbt_note_dirty(ftl_allocator_t *alloc)
  *   实现要点：清有效位图是必需的——坏块后残留的 VPC/bitmap 会让 GC/WL 误判其为可回收块；
  *             **不**同步 bbt_save（持久化交后台 bbt_handle 批量）；Spare 耗尽不影响标坏（容量自然下降）。
  * -------------------------------------------------------------------- */
-ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, WORD gblock)
+ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
 {
     if ((alloc == NULL) || (gblock >= BBT_MAX_BLOCKS) || (alloc->blocks == NULL))
     {
@@ -632,16 +664,65 @@ ftl_status_t bbt_mark_bad(ftl_allocator_t *alloc, WORD gblock)
     bbt_note_dirty(alloc);
 
     /* 不同步调 bbt_save() — NAND BBT 持久化由后台 bbt_handle 批量执行。
-     * 坏块替换：从**本块所属 plane** 的 Spare Pool 取块补 free pool
-     * （保容量水位，ADR-11 Block Sparing）。失败（Spare 耗尽）不影响标坏，容量自然下降。 */
-    (void)bbt_spare_pool_refill(alloc, ftl_gblock_plane(gblock));
+     *
+     * 坏块替换分两类（主流 BBT + sparing）：
+     *   · 元数据保留区（block < FTL_METADATA_AREA_END）：由 md_pool_service 重算
+     *     候选池、从 shared metadata spare 补块；**不**弹用户 Spare（否则会把
+     *     元数据的容量损失伪装成用户容量损失）。
+     *   · 用户区：Spare 是第一道替换；Spare 空时从 OP 借一块（第二道），
+     *     避免运行期坏块直接吃用户可用块。两道都空 ⇒ 低水位告警，容量自然下降。 */
+    const BYTE plane = ftl_gblock_plane(gblock);
+    const WORD block = ftl_gblock_block(gblock);
+
+    /* 元数据块有两类：固定保留区（< AREA_END），以及**从 OP 借用的 L2P 日志块**
+     * （物理块在用户区，但 Directory 的 l2p_live/当前日志块指向它）。后者不能
+     * 当数据坏块处理（会错误弹用户 Spare、并漏掉 rebuild 标志）。 */
+    const bool borrowed_log = (alloc->md_dir != NULL) &&
+                              ((alloc->md_dir->l2p_live[gblock] != 0U) ||
+                               (alloc->md_dir->cur_block_valid &&
+                                (alloc->md_dir->cur_metadata_block == gblock)));
+
+    if ((block < FTL_METADATA_AREA_END) || borrowed_log)
+    {
+        if (alloc->pools != NULL)
+        {
+            alloc->pools->dirty = true;
+        }
+
+        /* Journal / L2P 日志块（固定或借用）丢失无法在当前上电周期内恢复其映射 ⇒
+         * 下次开机 full metadata rebuild（本仓自拟的 BBT 持久标志）。Anchor/CP/BBT
+         * 不需要：候选池重算 + 下一次提交即可自愈。 */
+        if (borrowed_log ||
+            ((block >= JOURNAL_BLOCK0) && (block < (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT))) ||
+            ftl_is_l2p_log_block(block))
+        {
+            alloc->bbt.rebuild_required = true;
+            LOGE("[BBT] metadata log block %u lost — rebuild required\r\n", (unsigned)block);
+        }
+    }
+    else if (!alloc->bbt.format_in_progress && (bbt_spare_pool_refill(alloc, plane) != FTL_OK))
+    {
+        if (!alc_refill_free_from_op(alloc, plane))
+        {
+            /* 限速：保留区双空时每次坏块都打会刷屏；只报第 1/64 次。 */
+            if ((s_reserve_low_logged++ % BBT_RESERVE_LOW_LOG_EVERY) == 0U)
+            {
+                LOGW("[BLK] reserve low plane=%u spare=%u op=%u free=%u count=%lu\r\n",
+                     (unsigned)plane,
+                     (unsigned)alc_get_spare_count(alloc, plane),
+                     (unsigned)alc_get_op_count(alloc, plane),
+                     (unsigned)alloc->free_count,
+                     s_reserve_low_logged);
+            }
+        }
+    }
 
     return FTL_OK;
 }
 
 /* 从 BST 重建一条 BBT record 的 header（同步 bbt_save 与异步 bbt_submit_write 共用）。
  * `sequence` 由调用者决定：同步路径刚自增，异步路径在 kick 起步时已自增。 */
-static void bbt_build_header(const ftl_allocator_t *alloc, DWORD sequence, bbt_header_t *header)
+static void bbt_build_header(const alc_t *alloc, DWORD sequence, bbt_header_t *header)
 {
     memset(header, 0, sizeof(*header));
     header->magic        = BBT_MAGIC;
@@ -649,6 +730,7 @@ static void bbt_build_header(const ftl_allocator_t *alloc, DWORD sequence, bbt_h
     header->total_blocks = BBT_MAX_BLOCKS;
     header->bad_count    = alloc->bad_count;
     header->reserved[0]  = alloc->bbt.format_in_progress ? BBT_FLAG_FORMAT_IN_PROGRESS : 0U;
+    header->reserved[1]  = alloc->bbt.rebuild_required ? BBT_FLAG_REBUILD_REQUIRED : 0U;
 
     for (WORD gblock = 0U; gblock < BBT_MAX_BLOCKS; gblock++)
     {
@@ -667,7 +749,7 @@ static void bbt_build_header(const ftl_allocator_t *alloc, DWORD sequence, bbt_h
  *   实现要点：游标未建立时先定位池内最新 record 的下一槽；**无论成败都推进游标**
  *             （半编程槽不可复用）；失败保留 dirty 供下次重试。NAND 格式一字不改。
  * -------------------------------------------------------------------- */
-ftl_status_t bbt_save(ftl_allocator_t *alloc)
+ftl_status_e bbt_save(alc_t *alloc)
 {
     /* 前置条件（判据 2）：唯一调用者 power_failure_recovery.c 传 &ftl->alloc。 */
 
@@ -679,14 +761,22 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
     bbt_probe_ctx_t ctx;
     bbt_ctx_init(alloc, &ctx);
 
-    /* 游标未建立 ⇒ 先定位池内最新有效 record 的下一槽 */
+    /* 游标未建立 ⇒ 先定位池内最新有效 record 的下一槽。
+     * ⚠ sequence 只取 max：候选池可能因 BAD/体检而**缩小**，被移出池的块上仍可能
+     *   留着更高 sequence 的旧 record（bootstrap 扫描仍会读到它）。若这里把 sequence
+     *   降到新池内的最大值，下一次开机可能让旧 record 胜出、读到旧坏块图。 */
     if (alloc->bbt.cursor_valid == 0U)
     {
-        WORD newest = UINT16_MAX;
+        WORD  newest      = UINT16_MAX;
+        DWORD located_seq = 0U;
 
-        if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
+        if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &located_seq, &alloc->bbt.write_idx) != FTL_OK)
         {
             return FTL_ERROR;
+        }
+        if (located_seq > alloc->bbt.sequence)
+        {
+            alloc->bbt.sequence = located_seq;
         }
         alloc->bbt.cursor_valid = 1U;
     }
@@ -731,7 +821,7 @@ ftl_status_t bbt_save(ftl_allocator_t *alloc)
  *             FC buffer 池（同 jrn_freeze 的做法，不需要为异步保留快照缓冲）。
  *             地址按 write_idx 重算（write_idx 写成功才推进 ⇒ 此刻它仍指向本槽）。
  * -------------------------------------------------------------------- */
-static ftl_status_t bbt_submit_write(ftl_allocator_t *alloc)
+static ftl_status_e bbt_submit_write(alc_t *alloc)
 {
     bbt_probe_ctx_t ctx;
     bbt_ctx_init(alloc, &ctx);
@@ -770,7 +860,7 @@ static ftl_status_t bbt_submit_write(ftl_allocator_t *alloc)
  *             命令在飞 ⇒ WAITING（等完成）；phase 未回 IDLE 但无命令 ⇒ RUNNING
  *             （还需续提交）；只剩 dirty ⇒ RUNNING（下一步会起 job）；否则 IDLE。
  * -------------------------------------------------------------------- */
-static void bbt_status_fill(const ftl_allocator_t *alloc, bbt_status_t *out)
+static void bbt_status_fill(const alc_t *alloc, bbt_status_t *out)
 {
     out->base.critical  = false; /* BBT 持久化属预算任务，不占 must-run 正确性关键集 */
     out->base.wants_run = (alloc->bbt.handle.phase != BBT_JOB_IDLE) || (alloc->bbt.dirty != 0U);
@@ -821,7 +911,7 @@ static void bbt_status_fill(const ftl_allocator_t *alloc, bbt_status_t *out)
  *     · sequence 在**起步时**自增；续跑路径不会再自增。
  *       擦失败 ⇒ 回 IDLE、dirty 保留、write_idx 不动，下轮重试。
  * -------------------------------------------------------------------- */
-static void bbt_handle_step(ftl_allocator_t *alloc)
+static void bbt_handle_step(alc_t *alloc)
 {
     /* 前置条件（判据 2）：后台适配器传 &ftl->alloc。 */
 
@@ -912,7 +1002,7 @@ static void bbt_handle_step(ftl_allocator_t *alloc)
     (void)bbt_submit_write(alloc);
 }
 
-void bbt_handle(ftl_allocator_t *alloc, const ftl_bg_info_t *info, bbt_status_t *out)
+void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
 {
     /* info 目前不参与 BBT 决策（dirty 驱动、无周期）；保留形参以统一 typed 入口。 */
     (void)info;
@@ -927,13 +1017,13 @@ void bbt_handle(ftl_allocator_t *alloc, const ftl_bg_info_t *info, bbt_status_t 
  * ftl_bbt_callback
  *   功能：BBT 持久化 job 的完成服务函数（g_op_callbacks[FTL_OP_BBT]）。
  *   参数：ftl —— 实例（**不用**：ctx 已是本实例的 allocator）；
- *         completion —— 完成状态；ctx —— `ftl_allocator_t *`（ftl_op_submit 时传）。
+ *         completion —— 完成状态；ctx —— `alc_t *`（ftl_op_submit 时传）。
  *   返回：无。命令的 release 归本函数。
  *   实现要点：按 job.phase 分派到 bbt_complete_erase / bbt_complete_write（见各自注释）。
  *   ⚠ 本函数**只**收尾/续提交，不调 bbt_handle（续提交是提交侧动作，无需嵌套泵）。
  * -------------------------------------------------------------------- */
 /* 擦完成。失败 ⇒ 游标**不推进**（擦没成，该槽还没被消耗），dirty 保留供下轮重试。 */
-static void bbt_complete_erase(ftl_allocator_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
+static void bbt_complete_erase(alc_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
 {
     if (fc_cw_status_has_error(completion->status))
     {
@@ -954,7 +1044,7 @@ static void bbt_complete_erase(ftl_allocator_t *alloc, fc_command_t *cmd, const 
 
 /* record 写完成。**无论成败都推进游标**：已写过的槽可能半编程，不可复用。
  * dirty 的清除还要比 dirty_gen —— 写飞行期间若又标了坏块，本条 record 是旧快照。 */
-static void bbt_complete_write(ftl_allocator_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
+static void bbt_complete_write(alc_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
 {
     bbt_probe_ctx_t rctx;
 
@@ -981,7 +1071,7 @@ static void bbt_complete_write(ftl_allocator_t *alloc, fc_command_t *cmd, const 
 
 void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
 {
-    ftl_allocator_t *alloc = (ftl_allocator_t *)ctx;
+    alc_t *alloc = (alc_t *)ctx;
 
     (void)ftl; /* 实例无关：ctx 就是本实例的 allocator */
 
@@ -1023,7 +1113,7 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
  *   实现要点：进入即复位 alloc->bbt（找不到时保持 0/无效 ⇒ 后续 save 从池首开始）；
  *             locate 只回序号，header 本体要按该序号**再读一次**并复核 sequence。
  * -------------------------------------------------------------------- */
-ftl_status_t bbt_load(ftl_allocator_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence)
+ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence)
 {
     /* 死守卫（判据 2 / §十附判据 2）：唯一调用者 bbt_init（同文件）传已断言的 alloc、
      * 局部数组 tmp_bad_map 与两个局部变量地址——四个指针结构上恒非空。 */
@@ -1077,6 +1167,7 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, BYTE *bad_map, DWORD *bad_count, D
     }
 
     alloc->bbt.format_in_progress = ((best.reserved[0] & BBT_FLAG_FORMAT_IN_PROGRESS) != 0U);
+    alloc->bbt.rebuild_required   = ((best.reserved[1] & BBT_FLAG_REBUILD_REQUIRED) != 0U);
 
     /* 输出到 caller */
     memcpy(bad_map, best.bad_map, BBT_BITMAP_SIZE);
@@ -1099,7 +1190,7 @@ ftl_status_t bbt_load(ftl_allocator_t *alloc, BYTE *bad_map, DWORD *bad_count, D
  *             ⚠ 必须按 plane 取：Spare 池按 super block 粒度预留，补错 plane 不恢复该
  *             plane 的配对能力（原实现从全局池 LIFO 弹出，实际总补 plane 0）。
  * -------------------------------------------------------------------- */
-ftl_status_t bbt_spare_pool_refill(ftl_allocator_t *alloc, BYTE plane)
+ftl_status_e bbt_spare_pool_refill(alc_t *alloc, BYTE plane)
 {
     /*
      * Spare Pool 坏块替换：出厂时 main.c 已为**每个 plane** 预留

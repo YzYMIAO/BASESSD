@@ -24,15 +24,15 @@
  *   否则那些组永不完成（host 写挂死）。该动作收在 DROP / RESET 触发内部，
  *   **不**由调用者手工维护（见 CLAUDE.md §3.1）。
  *
- * ⚠ 模块边界（docs/design/ftl_module_contracts.md §4.8）：wbuf 不持有 ftl_context；
+ * ⚠ 模块边界（docs/archive/ftl_module_contracts.md §4.8）：wbuf 不持有 ftl_context；
  *   只持有 allocator / pending 表 / migrate handle 三个窄指针，调用它们的 owner API。
  */
 
-#include "allocator.h"  /* ftl_allocator_t */
-#include "ftl_config.h" /* FTL_LBA_PER_PAIR / FTL_IU_BYTES / DWORD / ftl_status_t */
-#include "ftl_module.h" /* ftl_bg_info_t / ftl_module_status_t */
-#include "pending.h"    /* ftl_pending_req_t（端口出参类型） */
-#include "ssd_types.h"  /* ssd_status_t */
+#include "allocator.h"  /* alc_t */
+#include "ftl_config.h" /* FTL_LBA_PER_PAIR / FTL_IU_BYTES / DWORD / ftl_status_e */
+#include "ftl_module.h" /* bg_info_t / ftl_mod_status_t */
+#include "pending.h"    /* pend_req_t（端口出参类型） */
+#include "ssd_types.h"  /* ssd_status_e */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -52,10 +52,10 @@ typedef struct
     int32_t error;
 
     /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
-    ftl_allocator_t     *alloc;
-    ftl_pending_table_t *pending;
-    struct mig_handle   *migrate;
-} wbuf_handle_t;
+    alc_t             *alloc;
+    pend_table_t      *pending;
+    struct mig_handle *migrate;
+} wb_handle_t;
 
 /* ── typed 入口 ── */
 typedef enum
@@ -65,17 +65,17 @@ typedef enum
     WBUF_TRIGGER_DROP,             /* 丢弃某个 LBA（TRIM） */
     WBUF_TRIGGER_RESET,            /* 丢弃整页并按写失败结算 owners */
     WBUF_TRIGGER_MAYBE_FLUSH_IDLE, /* 无后续 append 时编程 */
-} wbuf_trigger_kind_t;
+} wb_trigger_kind_e;
 
 typedef struct
 {
-    wbuf_trigger_kind_t kind;
+    wb_trigger_kind_e kind;
 
     DWORD       lba;  /* APPEND / DROP */
     const void *data; /* APPEND：数据源（n × FTL_IU_BYTES） */
     BYTE        n;    /* APPEND：CW 数 */
     WORD        gi;   /* APPEND：贡献组号 */
-} wbuf_trigger_t;
+} wb_trigger_t;
 
 typedef enum
 {
@@ -83,23 +83,23 @@ typedef enum
     WBUF_STATE_OPEN,     /* 持有一个窗口，尚未 flush */
     WBUF_STATE_FLUSHING, /* 一页正在编程（同步提交即返回；由完成服务收尾） */
     WBUF_STATE_FAILED,   /* 最近一次操作硬失败 */
-} wbuf_state_t;
+} wb_state_e;
 
 typedef struct
 {
-    ftl_module_status_t base;
+    ftl_mod_status_t base;
 
-    wbuf_state_t state;
-    bool         open;
-    BYTE         occupied;
-    DWORD        owners;
-    DWORD        flushed_pages;
-    DWORD        drop_count;
-    bool         timed_out;
-} wbuf_status_t;
+    wb_state_e state;
+    bool       open;
+    BYTE       occupied;
+    DWORD      owners;
+    DWORD      flushed_pages;
+    DWORD      drop_count;
+    bool       timed_out;
+} wb_status_t;
 
 /* wb_init - 绑定窄上下文并复位 handle。 */
-void wb_init(wbuf_handle_t *h, ftl_allocator_t *alloc, ftl_pending_table_t *pending, struct mig_handle *migrate);
+void wb_init(wb_handle_t *h, alc_t *alloc, pend_table_t *pending, struct mig_handle *migrate);
 
 /*
  * wb_handle - 事件驱动入口（docs §4.8）
@@ -111,10 +111,10 @@ void wb_init(wbuf_handle_t *h, ftl_allocator_t *alloc, ftl_pending_table_t *pend
  * APPEND / FLUSH / DROP / RESET / MAYBE_FLUSH_IDLE 失败时缓冲**原样保留**（可重试）；
  * 只有编程成功的 FLUSH 才清空缓冲。`info` 当前不参与决策（保留以统一 typed 入口）。
  */
-ftl_status_t wb_handle(wbuf_handle_t *h, const wbuf_trigger_t *trigger, const ftl_bg_info_t *info, wbuf_status_t *out);
+ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, const bg_info_t *info, wb_status_t *out);
 
 /* ── 查询（读路径；只判不取） ── */
-bool wb_has(const wbuf_handle_t *h, DWORD lba);
-bool wb_read(const wbuf_handle_t *h, DWORD lba, void *out);
+bool wb_has(const wb_handle_t *h, DWORD lba);
+bool wb_read(const wb_handle_t *h, DWORD lba, void *out);
 
 #endif /* FTL_WBUF_H */

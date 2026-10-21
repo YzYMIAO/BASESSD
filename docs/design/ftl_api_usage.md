@@ -11,12 +11,12 @@ FTL 模块通过 `include/ftl/ftl.h` 对外暴露以下接口。
 FTL 对外只提供**非阻塞、长度任意的接口**，不提供同步包装；**plane 配对（访问哪些物理单元）由
 FTL 自行决定**，Controller 只按 FTL 实例边界切连续 run 后提交。一次 `ftl_submit_*` = 一个
 **完成组**，Controller 通过 `complete_flag` 轮询或 `on_complete` 回调跟踪组完成。
-（设计依据与主流对照见 `ftl_host_interface.md`。）
+（设计依据与主流对照见 `../archive/ftl_host_interface.md`。）
 
 ### 1.1 核心数据结构
 
 ```c
-/* FTL 主上下文（完整定义见 include/ftl/ftl.h；模块契约见 ftl_module_contracts.md） */
+/* FTL 主上下文（完整定义见 include/ftl/ftl.h；模块契约见 ftl_design.md §5.1） */
 struct ftl_context {
     ftl_topology_t        topo;               // 拓扑信息（ch/ce/lun）
     l2p_cache_t          *cache;              // 共享 L2P cache（设备级；AXI）
@@ -50,7 +50,7 @@ struct ftl_context {
 | `ftl_init()` | 初始化 | 初始化 L2P cache、allocator、journal、Metadata Directory、BBT | 在 `fc_init()` 之后调用 |
 | `ftl_submit_read()` | 异步读 | 非阻塞提交读，长度任意（组内自拆 plane） | L2P→PBA→FC submit→pending |
 | `ftl_submit_write()` | 异步写 | 非阻塞提交写，长度任意 + Journal + watermark | alloc→FC submit→journal→L2P→pending |
-| `ftl_flush()` | 落盘 | 落已持久化映射：L2P cache 写回 + journal 尾页刷出 | 同步阻塞 |
+| `ftl_flush_begin/step()` | 落盘 | 落已持久化映射：L2P cache 写回 + journal 尾页刷出 | 异步 job（step 每轮推进） |
 | `ftl_trim(ftl,lba,count)` | 取消映射 | 取消 `[lba, lba+count)` 映射（写 NAND_PBA_INVALID 到 L2P Cache，标记 DIRTY） | 同步完成 |
 | `ftl_service()` | 主循环 | 推进 FC 调度 + 统一完成泵 + **Phase 2.5 补发子操作** + 后台任务 | 在 main loop 中频繁调用 |
 
@@ -90,9 +90,10 @@ ftl_status_t ftl_submit_read(ftl_context_t *ftl, const ftl_io_request_t *req);
 ftl_status_t ftl_submit_write(ftl_context_t *ftl, const ftl_io_request_t *req);
 
 /*
- * ftl_flush - 落已持久化映射（L2P cache 写回 + journal 尾页刷出）
+ * ftl_flush_begin/step - 异步 FLUSH job：落已持久化映射
  */
-void ftl_flush(ftl_context_t *ftl);
+void ftl_flush_begin(ftl_ctx_t *ftl);
+bool ftl_flush_step(ftl_ctx_t *ftl);
 
 /*
  * ftl_trim - 取消 [lba, lba+count) 的 L2P 映射（同步完成、非阻塞）
@@ -125,7 +126,7 @@ typedef struct
 
 > **接口演进**：v0.29 `ftl_submit_read/write` 形参由 8 个散落参数收敛为 `(ftl, req)` 结构体传参；
 > **v0.58（策略下沉）** `pages` → `count`（长度交给 FTL，plane 配对离开 HIL）、新增 `ftl_flush`、
-> `ftl_trim` 加 `count`、引入**组完成语义**。设计依据见 `ftl_host_interface.md`。
+> `ftl_trim` 加 `count`、引入**组完成语义**。设计依据见 `../archive/ftl_host_interface.md`。
 
 **`ftl_init` / `allocator_init` 当前签名**（`include/ftl/ftl.h` / `include/ftl/allocator.h`）：
 
@@ -626,7 +627,7 @@ l2p_cache_read()       → 11 个调用点全部按三态改写（host 读下发
                          RR / 搬移 SETTLE / 开机回放 / full metadata rebuild / CLI map）
 l2p_cache_write()      → 写确认 / 搬移 WRITE_SETTLE / journal_replay（F10：回放写 cache）
 l2p_cache_flush_kick   → l2p_cache_evict_one（CLOCK 驱逐脏行时）、l2p_flush_kick_owner
-l2p_cache_flush_owner_sync → ftl_flush（HIL `fl`，显式持久化请求，只刷本 owner）
+l2p_flush_kick_owner / jrn_handle（异步推进）→ ftl_flush_begin/step（HIL `fl` / USB flush）
 l2p_cache_flush_one_sync → l2p_cache_flush_owner_sync / Checkpoint（逐行）
                           （CP job 的 CP_FLUSH_REGIONS 用 l2p_cache_flush_kick：Header 落盘前
                            保证 region 已持久，且不阻塞完成泵）
@@ -1068,7 +1069,7 @@ include/ftl/
 ├── ftl_op.h                     # op tag 枚举 + ftl_op_submit/ftl_op_dispatch（v0.75）
 ├── checkpoint.h                 # Checkpoint + Journal 截断协同
 ├── bbt.h                        # BBT 坏块表（池 + 全片擦除原语）
-├── read_recovery.h              # Read Retry + ECC 趋势预测 + 恢复 job（rr_stage_t/rr_handle）
+├── read_recovery.h              # 读恢复（CRC 重读一次）+ ECC 趋势预测 + 恢复 job（rr_stage_e/rr_handle_t）
 ├── power_failure_recovery.h     # 三类启动恢复 + 介质格式化
 └── wear_leveling.h              # 动态 + 静态磨损均衡
 
@@ -1087,9 +1088,9 @@ src/ftl/
 ├── ftl_op.c                     # op tag + g_op_callbacks[] 服务函数数组（v0.75）
 ├── checkpoint.c                 # 全量 Checkpoint + 三级触发
 ├── bbt.c                        # BBT 加载/扫描/标记/保存 + 全片擦除
-├── read_recovery.c              # Read Retry + 邻近页辅助 + 恢复 job 状态机（v0.75 阶段 3）
+├── read_recovery.c              # 单次读 + CRC 重读 + 恢复 job 状态机
 ├── power_failure_recovery.c     # 三类启动 + 介质版本校验/自动格式化
-└── wear_leveling.c              # 三条件触发 + victim 选择（搬移在 migrate.c）
+└── wear_leveling.c              # UBI 差值触发 + 最冷 victim 选择（搬移在 migrate.c）
 ```
 
 ---
@@ -1124,7 +1125,7 @@ src/ftl/
                  │                                            │
                  │  ftl_submit_read(ftl, &req)                │ ← 长度任意
                  │  ftl_submit_write(ftl, &req)               │   自拆单/双 plane
-                 │  ftl_flush / ftl_trim(lba,count)           │
+                 │  ftl_flush_begin/step / ftl_trim(lba,count)           │
                  │    req = ftl_io_request_t{lba,count,buffer}│
                  │                                            │
                  │  ┌────────────────────────────────────┐   │

@@ -20,7 +20,7 @@
 #include "assertion.h"
 #include "completion_table.h"
 #include "fc.h"               /* fc_submit / fc_command_id_to_command / fc_command_release */
-#include "ftl.h"              /* ftl_context_t */
+#include "ftl.h"              /* ftl_ctx_t */
 #include "ftl_fc_interface.h" /* ftl_cmd_id */
 #include "log.h"
 
@@ -30,7 +30,7 @@ static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_sta
 /* ── 1. 服务函数数组 ──
  *
  * C99 designated initializer 的 const 数组（非"注册函数"）：编译期即可发现重复/
- * 越界，且无 init-order 依赖。**每个非 NONE 的 ftl_op_id_t 都必须在这里有实现**——
+ * 越界，且无 init-order 依赖。**每个非 NONE 的 ftl_op_id_e 都必须在这里有实现**——
  * 未列出的槽恒为 NULL，派发时判为孤儿（release + LOGE）。
  *
  *   · FTL_OP_SYNC_WAIT：所有 ftl_sync_* 经 ftl_sync_submit_wait 登记 ctx 后走这里；
@@ -58,7 +58,7 @@ static ftl_op_callback_fn_t const g_op_callbacks[FTL_OP_COUNT] = {
 
 /* ── 2. 提交 ── */
 
-ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx)
+ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
 {
     WORD cmd_id = ftl_cmd_id(cmd);
 

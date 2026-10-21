@@ -11,11 +11,12 @@
  *         migrate.c 的搬移引擎；异步读路径用 ftl_async_read_page + gc_decode_cw_lba
  *         （gc_read_page_with_lba 是掉电重建专用的同步原语）。
  *
- * 触发三条件（wl_should_trigger，任一命中即搬）：最大/最小差值、最大/平均比值、低擦除区占比。
+ * 触发判据（UBI 模型，见 wl_should_trigger）：是否存在「高擦除空闲块」显著旧于
+ * 「最冷的 used SB」；是则把冷数据搬到高磨损块，低磨损块空出来给热数据。
  *
  * 文件结构：
  *   1. 触发 / 选块     wl_should_trigger / wl_select_victim
- *   2. 磨损统计        wl_get_min_erase
+ *   2. 磨损统计        wl_min_used_erase（文件内 static）
  *
  * ⚠ 搬移在 `ftl/migrate.c` 的异步 job 里完成（GC / WL 共用一台引擎，靠 kind/post 区分）
  *   ——本文件只留触发判定与选块策略。
@@ -35,18 +36,81 @@
 
 /* ── 1. 触发 / 选块 ── */
 
+/* Closed SB 中最小的平均擦除次数（UBI 的 e1）。
+ * 跳过：Open 条目、含坏 plane 的 SB（migrate 读它必 abort）、全哨兵条目、
+ * 有效 CW 不足 WL_MIN_VALID_RATIO 的 SB（与 wl_select_victim 同门限）。 */
+static DWORD wl_min_used_erase(const alc_t *alloc)
+{
+    DWORD min_ec = UINT32_MAX;
+
+    for (WORD i = 0U; i < alloc->closed_sb_count; i++)
+    {
+        const super_block_t *sb = alc_closed_at(alloc, i);
+
+        if (sb->is_open)
+        {
+            continue;
+        }
+
+        bool has_bad_plane = false;
+
+        for (BYTE p = 0U; p < PLANE_NUM; p++)
+        {
+            if (!super_block_has_plane(sb, p))
+            {
+                continue;
+            }
+            if (ftl_block_is_bad(&alloc->blocks[ftl_gblock(p, sb->plane_blocks[p])]))
+            {
+                has_bad_plane = true;
+                break;
+            }
+        }
+        if (has_bad_plane)
+        {
+            continue;
+        }
+
+        alc_sb_stats_t st;
+        alc_get_sb_stats(alloc, sb, &st);
+        if (st.plane_count == 0U)
+        {
+            continue;
+        }
+
+        /* 与 wl_select_victim 同一有效门限：触发判据必须与实际能搬的候选一致，
+         * 否则可能按一个「不可选」的极冷块触发，却把更热的块搬到更冷的空闲块上。 */
+        const WORD min_valid_cw = (WORD)(FTL_CW_PER_SB * WL_MIN_VALID_RATIO / 100U);
+
+        if (st.valid_cw < min_valid_cw)
+        {
+            continue;
+        }
+
+        const DWORD sb_ec = st.erase_sum / st.plane_count;
+
+        if (sb_ec < min_ec)
+        {
+            min_ec = sb_ec;
+        }
+    }
+
+    return (min_ec == UINT32_MAX) ? 0U : min_ec;
+}
+
 /* --------------------------------------------------------------------
  * wl_should_trigger
- *   功能：判定是否该做一轮 WL（三条件任一命中即 true）。
- *   参数：ftl —— FTL 实例。
- *   返回：true 触发；false 不触发（未达最小间隔 / 三条件均未命中）。
- *   ⚠ ftl 非空是**前置条件**（调用者 migrate.c 持有实例指针），不在此复检——
- *     见 docs/design/assertion_guidelines.md §二十六「模块内部不逐函数复检同一入参」。
- *   实现要点：先过 WL_MIN_WRITES 启动门（刚开机不抖）；条件 1 最大/最小差值
- *             ≥ WL_DELTA_THRESHOLD；条件 2 最大 ≥ 平均 × WL_MAX_AVG_RATIO；
- *             条件 3 低擦除区（min + WL_LOW_ZONE_WIDTH 以下）块占比 **>** WL_LOW_BLOCK_PCT%。
+ *   功能：判定是否该做一轮 WL（UBI 模型）。
+ *   参数：alloc —— 分配器；total_writes —— 累计编程次数（启动门）。
+ *   返回：true 触发；false 不触发。
+ *   实现要点：先过 WL_MIN_WRITES 启动门（刚开机不抖）；唯一判据是
+ *             `max_free_ec - min_used_ec >= WL_THRESHOLD`：
+ *               · e1 = 最冷的 used SB（Closed 列表平均擦除次数最小）；
+ *               · e2 = Free Pool 中擦除次数最大的块。
+ *             搬移不改变擦除计数：差值不足时必须停止，否则就是纯写放大
+ *             （板端 `kind=wl vcw=512` 无限搬迁，RISK-WL-08）。
  * -------------------------------------------------------------------- */
-bool wl_should_trigger(const ftl_allocator_t *alloc, DWORD total_writes)
+bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
 {
     /* 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
      * 周期节拍由 mig_handle 的 WL 求值 的 WL_EVAL_INTERVAL_MS 负责。 */
@@ -55,55 +119,28 @@ bool wl_should_trigger(const ftl_allocator_t *alloc, DWORD total_writes)
         return false;
     }
 
-    /* 一次全表扫描取全部派生量（口径由 allocator 定义）。 */
-    allocator_erase_stats_t est;
-    alc_get_erase_stats(alloc, &est);
+    const DWORD min_used = wl_min_used_erase(alloc);
+    const DWORD max_free = alc_free_max_erase(alloc);
 
-    const DWORD max_ec = est.erase_max;
-    const DWORD min_ec = est.erase_min;
-    const DWORD avg_ec = (est.good_count == 0U) ? 0U : (est.erase_sum / est.good_count);
-
-    /* 条件 1：最大/最小差值 */
-    if ((max_ec - min_ec) >= WL_DELTA_THRESHOLD)
-    {
-        return true;
-    }
-
-    /* 条件 2：最大/平均比值 */
-    if ((avg_ec > 0U) && (max_ec >= avg_ec * WL_MAX_AVG_RATIO))
-    {
-        return true;
-    }
-
-    /* 条件 3：低擦除区 Block 占比。
-     * ⚠ 分子由 alc_count_blocks_below 统计（非 BAD/NONE 的全部块，含 RETIRED），
-     *   分母是 alloc->total_blocks（用户区好块数）。RETIRED 极少时两者近似一致；
-     *   分子集合更大 ⇒ 占比略偏高，判据偏保守（更容易触发，均衡方向安全）。 */
-    const DWORD low_zone  = min_ec + WL_LOW_ZONE_WIDTH;
-    const DWORD low_count = alc_count_blocks_below(alloc, low_zone);
-    if (low_count > alloc->total_blocks * WL_LOW_BLOCK_PCT / 100U)
-    {
-        return true;
-    }
-
-    return false;
+    return (max_free > min_used) && ((max_free - min_used) >= WL_THRESHOLD);
 }
 
 /* --------------------------------------------------------------------
  * wl_select_victim
- *   功能：从 Closed SB 列表里挑一个搬运候选（擦得少、有效 CW 多、read_count 高者优先）。
- *   参数：ftl —— FTL 实例；victim —— 出参。
+ *   功能：挑「最冷」的 Closed SB（UBI 的 e1）：平均擦除次数最少。
+ *   参数：alloc —— 分配器；victim —— 出参。
  *   返回：true 找到；false 未找到。
- *   实现要点：只考虑擦除次数落在低擦除区（min + WL_LOW_ZONE_WIDTH 内）的 Closed SB；
- *             有效 CW 须 ≥ 最小有效 CW 门（WL_MIN_VALID_RATIO，太碎不值当搬）；
- *             排序键 = 有效 CW 多（越冷越优先）→ 同有效 CW 下 read_count 高（read disturb 风险高优先）。
+ *   实现要点：有效 CW 须 ≥ WL_MIN_VALID_RATIO（太碎不值当搬）；
+ *             排序键 = SB 平均擦除次数**最少** → 同擦除次数下 valid_cw 多
+ *             （越冷越优先）→ 再按 read_sum 高（read disturb 风险高优先）。
+ *             ⚠ 不再按「低擦除区」过滤：低区阈值在低磨损量下恒真（RISK-WL-08）。
  * -------------------------------------------------------------------- */
-bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim)
+bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
 {
     wl_victim_t best;
     memset(&best, 0, sizeof(best));
 
-    DWORD min_ec = wl_get_min_erase(alloc);
+    DWORD best_ec = UINT32_MAX;
 
     /* 门限单位是**有效 CW**（CW 级映射：1 页 = CW_NUM 个映射单元） */
     WORD total_cw_per_sb = FTL_CW_PER_SB;
@@ -146,7 +183,7 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim)
         /* 各 plane 聚合值由 allocator 统一计算（有效 CW / 擦除平均 / read disturb）。
          * 有效 CW 越多（越冷）越优先；同一有效数下 read_count 高者优先
          * （read disturb 风险高 → 优先搬移；read_count 来自 host 读 + GC/WL 搬移读累加）。 */
-        allocator_sb_stats_t st;
+        alc_sb_stats_t st;
         alc_get_sb_stats(alloc, sb, &st);
         if (st.plane_count == 0U)
         {
@@ -155,23 +192,20 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim)
 
         const DWORD sb_ec = st.erase_sum / st.plane_count;
 
-        /* 不在低擦除区 → 跳过（擦除够多了） */
-        if (sb_ec > (min_ec + WL_LOW_ZONE_WIDTH))
-        {
-            continue;
-        }
-
         if (st.valid_cw < min_valid_cw)
         {
             continue;
         }
 
-        if ((st.valid_cw > best.valid_cw) ||
-            ((st.valid_cw == best.valid_cw) && (st.read_sum > best.read_count)))
+        if ((sb_ec < best_ec) ||
+            ((sb_ec == best_ec) && ((st.valid_cw > best.valid_cw) ||
+                                    ((st.valid_cw == best.valid_cw) && (st.read_sum > best.read_count)))))
         {
+            best_ec         = sb_ec;
             best.found      = true;
             best.valid_cw   = st.valid_cw;
             best.read_count = st.read_sum;
+            best.next_page  = sb->next_page;
             for (BYTE p = 0U; p < PLANE_NUM; p++)
             {
                 best.plane_blocks[p] = sb->plane_blocks[p];
@@ -188,17 +222,6 @@ bool wl_select_victim(const ftl_allocator_t *alloc, wl_victim_t *victim)
     return true;
 }
 
-/* ── 2. 磨损统计（全部跳过坏块）── */
-
-/* 磨损统计访问器 —— 口径（好块 / 坏块排除）由 allocator 定义。
- * 热路径 wl_should_trigger 用 alc_get_erase_stats 一次取全；本访问器只服务
- * wl_select_victim 的低擦除区判定。 */
-
-/* wl_get_min_erase — 全体好块擦除次数的最小值（无好块返回 0） */
-DWORD wl_get_min_erase(const ftl_allocator_t *alloc)
-{
-    allocator_erase_stats_t st;
-
-    alc_get_erase_stats(alloc, &st);
-    return st.erase_min;
-}
+/* ── 2. 磨损统计 ──
+ * 口径（好块 / 坏块排除）由 allocator 定义；本模块只用一个文件内 static 的
+ * used-SB 最小值（wl_min_used_erase），不再导出单点访问器。 */

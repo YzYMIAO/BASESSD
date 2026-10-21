@@ -79,7 +79,9 @@
  * nand_enable_high_speed() 切到 CONFIG_NAND_TIMING_MODE 并重配 FMC 时序。
  */
 #ifndef CONFIG_NAND_TIMING_MODE
-#    define CONFIG_NAND_TIMING_MODE (5U) /* 3.3V 正式配置；可改 0（低速）或 4（对比实验） */
+/* 3.3V 正式配置。Mode 5 运行期写后读回 UNC 的问题仍在查（RISK-NAND-06）；
+ * 对照实验可改 0（低速）或 4（Mode 4），但改完必须重新上板验证，不得默认切换。 */
+#    define CONFIG_NAND_TIMING_MODE (5U)
 #endif
 
 #if (CONFIG_NAND_TIMING_MODE != 0U) && (CONFIG_NAND_TIMING_MODE != 4U) && (CONFIG_NAND_TIMING_MODE != 5U)
@@ -104,5 +106,12 @@ BYTE nand_init(void);
  *         错误码（切换失败时保持调用前的低速状态）。
  */
 BYTE nand_enable_high_speed(DWORD fmc_hz);
+
+/*
+ * nand_get_timing_mode - 当前实际生效的 ONFI timing mode（0 = 低速）
+ *
+ * 用于 [STAT] 心跳与 `info`：切换失败时仍返回 0，不撒谎。
+ */
+BYTE nand_get_timing_mode(void);
 
 #endif /* NAND_DEVICE_MT29F_G08A_H */

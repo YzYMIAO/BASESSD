@@ -141,7 +141,7 @@ _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能�
 #define FTL_CW_PER_PAGE (CW_NUM)
 
 /* 单物理块 / 单个 Super Block 的 CW 容量。
- * ⚠ `ftl_block_t.valid_count` 是**单物理块**计数（0..FTL_CW_PER_BLOCK）；
+ * ⚠ `bst_block_t.valid_count` 是**单物理块**计数（0..FTL_CW_PER_BLOCK）；
  *   victim 评分的 `valid_cw` 是各 plane 之和（0..FTL_CW_PER_SB）。两者不可混用。 */
 #define FTL_CW_PER_BLOCK (PAGES_PER_BLOCK * CW_NUM)
 #define FTL_CW_PER_SB    (PLANE_NUM * FTL_CW_PER_BLOCK)
@@ -534,7 +534,7 @@ static inline DWORD ftl_cw_plane_mask(BYTE plane)
 
 /* 单 plane 内单个 CW 的 flat 位（已左移到该 plane 的段）。
  * ⚠ flat 是**绝对**编号：plane 1 的 CW0 是 bit CW_NUM，不是 bit 0。
- *   所有 CW 位图（含逐 plane 保存的 `migrate_handle_t.cw_bitmap[]`）都用本函数构造，
+ *   所有 CW 位图（含逐 plane 保存的 `mig_handle_t.cw_bitmap[]`）都用本函数构造，
  *   避免同一份位图出现「绝对位置、相对位判」两种写法。 */
 static inline DWORD ftl_cw_bit(BYTE plane, BYTE cw)
 {

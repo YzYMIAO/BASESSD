@@ -8,7 +8,7 @@
  * **异步 job 状态机**。GC / WL / 慢死预测的搬移主体逐字同构，差别只在
  *   · 谁当 victim（gc_select_victim / wl_select_victim / rr_predictive_scan）；
  *   · 擦完怎么处置（GC / WL：归还 Free Pool；慢死预测：退役 RETIRED）。
- * 故共用**一个** migrate_handle_t：`kind` 选 victim，`post` 决定收尾。
+ * 故共用**一个** mig_handle_t：`kind` 选 victim，`post` 决定收尾。
  *
  * ── 为什么必须异步 ──
  *
@@ -60,24 +60,24 @@
  * 硬性的“WL 让 GC 先跑”；真正的互斥是 `active` 单飞行。
  *
  * ⚠ 本文件**不被** gc.h / wear_leveling.h include —— migrate.c 单向依赖它们的选块策略，
- *   反向包含会成环。ftl.h include 本文件以放置 migrate_handle_t。
+ *   反向包含会成环。ftl.h include 本文件以放置 mig_handle_t。
  */
 
 #include "allocator.h"   /* super_block_t */
 #include "fc_command.h"  /* fc_command_status_t（服务函数签名） */
 #include "ftl_config.h"  /* DWORD, CW_NUM, PAGE_MAIN_SIZE */
-#include "ftl_module.h"  /* ftl_bg_info_t / ftl_module_status_t */
+#include "ftl_module.h"  /* bg_info_t / ftl_mod_status_t */
 #include "ftl_type.h"    /* DWORD */
-#include "journal.h"     /* l2p_journal_t（端口） */
+#include "journal.h"     /* l2p_jrn_t（端口） */
 #include "l2p_cache.h"   /* l2p_cache_t（端口） */
 #include "nand_config.h" /* PLANE_NUM, PAGES_PER_BLOCK */
 
 #include <stdbool.h>
 #include <stdint.h>
 
-/* 前向声明（ftl_context_t 在 ftl.h 中定义；本文件被 ftl.h include，用 struct 标签打破环） */
+/* 前向声明（ftl_ctx_t 在 ftl.h 中定义；本文件被 ftl.h include，用 struct 标签打破环） */
 struct ftl_context;
-typedef struct ftl_context ftl_context_t;
+typedef struct ftl_context ftl_ctx_t;
 
 /* ── 提交/等待 deadline（绝对 ms，docs §6.3）──
  * 提交侧（命令池被在飞的 host I/O 占满 ⇒ ftl_async_* 返 FTL_AGAIN）用
@@ -94,6 +94,14 @@ typedef struct ftl_context ftl_context_t;
  * 让 GC 换下一个候选。源块的其他 plane 仍可迁移，数据不丢。 */
 #define MIG_VICTIM_READ_FAIL_MAX (3U)
 
+/* ── 系统性 victim 读失败熔断阈值 ──
+ * 若连续这么多个**不同 victim 块**都读失败（每个都达到 MIG_VICTIM_READ_FAIL_MAX 被
+ * 标 BAD），说明不是单块坏，而是 NAND 时序/读通路/控制器级问题。继续 GC 只会把
+ * 每个 victim 都标 BAD，耗尽 Free/OP 并毁掉 BAD 图。
+ * 达到阈值 ⇒ `mig_handle.paused = true`，停止 GC/WL/predict 直到重启；RAM 态。
+ * 8 = 足够覆盖零星坏块，又能在死亡螺旋早期刹住。 */
+#define MIG_SYSTEMIC_READ_FAIL_MAX (8U)
+
 /* ── 目的页写失败（RISK-GC-02）──
  * 目的页写失败**不能**把整块标 BAD：该冷 SB 可能已有成功迁移的页，L2P 正指向它们。
  * 正确处置是**立即**关闭这个 Cold SB：失败页可能已半编程，不能 rewind；关闭后
@@ -101,7 +109,7 @@ typedef struct ftl_context ftl_context_t;
  * 不能在同一 Open SB 上继续写下一页——那会把失败页留成 hole。 */
 
 /* ── 状态机的 phase ──
- * 约定同 rr_stage_t：纯计算 phase 只从 mig_step 进入、跑完立刻转下一个（不提交命令）；
+ * 约定同 rr_stage_e：纯计算 phase 只从 mig_step 进入、跑完立刻转下一个（不提交命令）；
  * 提交 phase 由 mig_step 提交命令后**原地停留**，等完成服务函数改写。
  * 判「有没有命令在飞」用 waiting 而不是 phase：提交可能因背压失败（phase 不变但无命令）。 */
 typedef enum
@@ -114,7 +122,7 @@ typedef enum
     MIG_FLUSH_JRN,    /* 纯计算：等 Journal job 空闲（F10 屏障） */
     MIG_ERASE,        /* 提交阶段：擦 victim 的当前 plane */
     MIG_DONE          /* 纯计算：收尾（移除 closed 条目 + 计数 + 复位 job） */
-} mig_phase_t;
+} mig_phase_e;
 
 /* 收尾方式（决定擦除后怎么处置 victim 的块）。 */
 typedef enum
@@ -124,7 +132,7 @@ typedef enum
                         * （不再分配、不标坏、仍可读）。
                         * ⚠ 退役块不得进 Free Pool——选块判据是 Free Pool **数组**，
                         *    留在池里会被再次分配 */
-} mig_post_t;
+} mig_post_e;
 
 /* victim 来源（只用于日志与收尾差异）。 */
 typedef enum
@@ -132,7 +140,7 @@ typedef enum
     MIG_KIND_GC = 0, /* 空间回收（gc_select_victim） */
     MIG_KIND_WL,     /* 静态磨损均衡（wl_select_victim） */
     MIG_KIND_PREDICT /* 慢死预测旁路（rr_predictive_scan） */
-} mig_kind_t;
+} mig_kind_e;
 
 /* ── 搬移 job（per-instance，放 ftl->mig_handle）──
  *
@@ -143,36 +151,45 @@ typedef enum
 typedef struct mig_handle
 {
     /* 窄上下文：只持有实际使用的 owner 指针，不持有 ftl_context / 端口结构体。 */
-    ftl_allocator_t *alloc;
-    l2p_journal_t   *journal;
-    l2p_cache_t     *cache;
-    const DWORD     *total_writes;
-    ftl_topology_t   topo;
+    alc_t       *alloc;
+    l2p_jrn_t   *journal;
+    l2p_cache_t *cache;
+    const DWORD *total_writes;
+    ftl_topo_t   topo;
 
-    bool        active;         /* true = job 在跑（单飞行门） */
+    bool active;                /* true = job 在跑（单飞行门） */
+    bool paused;                /* true = 系统性 victim 读失败熔断：暂停 GC/WL/predict 直到重启。
+                                 * 防「每个 victim 都读失败 ⇒ 逐个标 BAD ⇒ free 池耗尽」的死亡螺旋。
+                                 * RAM 态；重启后清，交给修复后的时序/介质重新评估。 */
     bool        waiting;        /* true = 有一条搬移命令在飞（等 g_op_callbacks[FTL_OP_GC]/[FTL_OP_WL]） */
     bool        aborted;        /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
     bool        decode_ok;      /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
     bool        write_ok;       /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
     bool        erase_failed;   /* true = 任一 plane 擦除失败/处置失败（回收计数与 predict 日志不计） */
     bool        closed_removed; /* true = 逐 plane 摘除后 Closed 条目已被移除（RISK-GC-04） */
-    mig_phase_t phase;          /* 异步 job 状态机 */
-    mig_kind_t  kind;           /* victim 来源（GC / WL / predict） */
-    BYTE        post;           /* mig_post_t */
+    mig_phase_e phase;          /* 异步 job 状态机 */
+    mig_kind_e  kind;           /* victim 来源（GC / WL / predict） */
+    BYTE        post;           /* mig_post_e */
     BYTE        page;           /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
     BYTE        plane;          /* 当前 plane（读/写/擦各自迭代） */
     DWORD       stall_ms;       /* 本轮连续「提交不出去」的起点（0 = 未计时） */
     DWORD       wait_ms;        /* 等外部模块（L2P / Journal）的起点（0 = 未计时） */
     DWORD       cmd_wait_ms;    /* 在飞命令的完成 deadline 起点（0 = 未计时） */
     bool        timed_out;      /* true = 本次 job 因 deadline 中止 */
-    mig_phase_t timeout_phase;  /* 超时发生的 phase */
+    mig_phase_e timeout_phase;  /* 超时发生的 phase */
     /* 读失败计数**按 plane 的源块**分别记（RISK-GC-01，跨 job 保留）。
      * ⚠ 判据是「该块整块迁移成功」才清零（mig_finish），**不是**「读到另一页没报错」：
      *   坏页通常在第 N 页，重试时第 0..N-1 页会先成功读一遍；按「任一页成功」清零
      *   会让阈值永不达到 ⇒ 每轮重选同一 victim、永久 abort、容量不再增长。
      *   两个 plane 的块号不同，故计数不能共用一个槽位（交替失败会互相冲掉）。 */
     WORD fail_gblock[PLANE_NUM]; /* 该 plane 的读失败计数对应的源块；UINT16_MAX = 无计数 */
-    BYTE fail_count[PLANE_NUM];  /* 该 plane 源块的连续读失败次数 */
+
+    WORD job_valid_cw; /* 本 job 起点 victim 的有效 CW 数（mig_finish 日志用） */
+
+    /* 系统性读失败熔断计数：**整块迁移成功（擦除成功）**才清零；连续 mark BAD
+     * 达到 MIG_SYSTEMIC_READ_FAIL_MAX ⇒ paused=true。 */
+    BYTE read_fail_streak;
+    BYTE fail_count[PLANE_NUM]; /* 该 plane 源块的连续读失败次数 */
 
     super_block_t victim; /* victim 的**副本**（closed_sb_list 会被 swap-remove 挪动，不持指针） */
 
@@ -193,23 +210,47 @@ typedef struct mig_handle
     DWORD start_ms;
     DWORD log_ms;
 
+    /* 最近一次搬移读的 FC 完成状态（诊断）：abort 日志带上它，区分 ECC 不可纠 /
+     * NAND 失败 / META 不符。只写不参与决策。 */
+    DWORD last_fc_status;
+
     /* ── handle 自持的求值节拍（docs §4.4：GC 10ms / WL 5s / predict 1s）── */
     DWORD gc_eval_last_ms;
     DWORD gc_log_last_ms;
     DWORD wl_eval_last_ms;
+    DWORD wl_last_writes; /* 上次 WL 求值时的 *total_writes 快照：两次求值间有增长 ⇒ host 在写，WL 让路 */
     DWORD predict_last_ms;
+    /* 静态 WL 的目标块方向（RISK-WL-08）：true ⇒ 目的页对取**擦除最多**的空闲块
+     * （`alc_alloc_pair_high_wear`），把冷数据搬到已磨损块。GC / predict 恒 false。 */
+    bool dst_high_wear;
+
+    /* ── GC 收益判据（RISK-GC-13/14）──
+     * host_writing 用 2 s 窗口（GC_HOST_WRITE_WINDOW_MS）：USB 写约 4 KB/13 ms，
+     * 10 ms 单次采样会漏；漏判会让 GC 在写流中切到 IDLE 反复停走。 */
+    DWORD gc_writes_last;   /* 上次求值看到的 *total_writes */
+    DWORD gc_write_last_ms; /* total_writes 最近一次变化的时刻（0 = 尚未见过写） */
+    bool  host_writing;     /* 最近一次求值的 host 写流判定 */
+
+    bool  gc_no_gain;        /* 最近一次空间 GC 结论：没有值得回收的 victim */
+    BYTE  gc_nogain_mode;    /* 产生该结论的 gc_benefit_mode_e（BYTE 存枚举，省 RAM） */
+    DWORD gc_nogain_ms;      /* 结论时刻（退避用） */
+    DWORD gc_nogain_writes;  /* 结论时的 *total_writes 快照 */
+    WORD  gc_nogain_free;    /* 结论时的 free_count 快照 */
+    WORD  gc_best_valid_pct; /* 最近一次扫描见到的最高有效率（0..100，观测） */
+    BYTE  gc_last_mode;      /* 最近一次实际使用的 gc_benefit_mode_e（观测） */
 
     /* ── 观测计数（单调，只增不减）── */
     DWORD   reclaimed_count; /* 成功回收的 SB 数（GC/WL） */
-    DWORD   novictim_count;  /* 触发但选不出 victim 的次数 */
+    DWORD   novictim_count;  /* 触发但选不出 victim 的次数（含 no-gain） */
+    DWORD   nogain_count;    /* 其中「有候选但收益不足」的次数 */
     bool    urgent_gc;       /* mig_trigger(GC_URGENT) 登记（被 handle 消费） */
     int32_t error;           /* 最近一次中止的归因 */
 
     BYTE page_buf[PLANE_NUM][PAGE_MAIN_SIZE]; /* 页镜像（读落此、写从此取） */
-} migrate_handle_t;
+} mig_handle_t;
 
 /* 所有 plane 的读失败计数均已清空（boot 契约审计；纯函数）。 */
-static inline bool mig_is_fail_state_clean(const migrate_handle_t *m)
+static inline bool mig_is_fail_state_clean(const mig_handle_t *m)
 {
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
@@ -229,13 +270,13 @@ static inline bool mig_is_fail_state_clean(const migrate_handle_t *m)
  * @param m     handle（= ftl->mig_handle）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param alloc / journal / cache / total_writes / topo  窄上下文（init 绑定）
  */
-void mig_init(migrate_handle_t *m, ftl_allocator_t *alloc, l2p_journal_t *journal, l2p_cache_t *cache, const DWORD *total_writes, ftl_topology_t topo);
+void mig_init(mig_handle_t *m, alc_t *alloc, l2p_jrn_t *journal, l2p_cache_t *cache, const DWORD *total_writes, ftl_topo_t topo);
 
 /* 显式触发原因（设计 §4.4：只登记紧急/显式原因，周期评估由 handle 自持） */
 typedef enum
 {
     MIGRATE_REASON_GC_URGENT = 0, /* 写路径分配不到页对（wbuf / host 写） */
-} migrate_reason_t;
+} mig_reason_e;
 
 /*
  * mig_trigger - 登记一个显式搬移请求（不立即启动；由下一次 mig_handle 消费）。
@@ -243,23 +284,26 @@ typedef enum
  * @param m      handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
  * @param reason 触发原因
  */
-void mig_trigger(migrate_handle_t *m, migrate_reason_t reason);
+void mig_trigger(mig_handle_t *m, mig_reason_e reason);
 
 typedef struct
 {
-    ftl_module_status_t base;
+    ftl_mod_status_t base;
 
-    mig_phase_t phase;    /* 观测；外部不要据此驱动 */
-    mig_kind_t  kind;     /* GC / WL / PREDICT */
+    mig_phase_e phase;    /* 观测；外部不要据此驱动 */
+    mig_kind_e  kind;     /* GC / WL / PREDICT */
     WORD        migrated; /* 本次 job 已搬 CW 数 */
     WORD        erased;   /* 本次 job 已擦 plane 数 */
     bool        aborted;
     bool        erase_failed;
     bool        timed_out;
-    mig_phase_t timeout_phase;
-    DWORD       reclaimed; /* 累计成功回收 SB 数（单调） */
-    DWORD       novictim;  /* 累计「触发但选不出 victim」次数 */
-} migrate_status_t;
+    mig_phase_e timeout_phase;
+    DWORD       reclaimed;  /* 累计成功回收 SB 数（单调） */
+    DWORD       novictim;   /* 累计「触发但选不出 victim」次数（含 no-gain） */
+    DWORD       nogain;     /* 其中「有候选但收益不足」的次数（单调） */
+    BYTE        gc_mode;    /* 最近一次使用的 gc_benefit_mode_e（0=off/1=idle/2=emg） */
+    bool        gc_no_gain; /* 最近一次空间 GC 结论 = 无收益 victim */
+} mig_status_t;
 
 /*
  * mig_handle - 推进搬移引擎（每轮 must-run；提交即返回）
@@ -274,7 +318,7 @@ typedef struct
  * @param info  本轮动态信息（now_ms / load_level）
  * @param out   出参：本轮结束后的上报（**非空**）
  */
-void mig_handle(migrate_handle_t *m, const ftl_bg_info_t *info, migrate_status_t *out);
+void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out);
 
 /* 完成服务函数 ftl_migrate_callback 的声明在 ftl_op.h —— 那里是 g_op_callbacks 各槽的唯一权威列表。 */
 

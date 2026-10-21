@@ -15,8 +15,11 @@
 #include "common.h"
 #include "crash.h"
 #include "ftl.h"
+#include "ftl_fc_interface.h" /* ftl_sync_read_page / FTL_PAGE_CFG_DATA_ANY（rdpaa 诊断）*/
+#include "gc.h"               /* gc_read_page_with_lba（rdpaa 打印页内 META）*/
 #include "l2p_cache.h"
 #include "log.h"
+#include "metadata.h"               /* md_pool_print（pool 诊断） */
 #include "power_failure_recovery.h" /* ftl_media_format（boot 失败后的恢复格式化） */
 #include "ssd_request.h"
 #include "stack_guard.h"
@@ -76,6 +79,7 @@ static int uart_cli_fl(int argc, char *argv[]);
 static int uart_cli_wp(int argc, char *argv[]); /* 页打包写缓冲合并诊断（§七 方案 A） */
 static int uart_cli_info(int argc, char *argv[]);
 static int uart_cli_map(int argc, char *argv[]);   /* L2P 映射 + 目标块 BST 条目（只读诊断） */
+static int uart_cli_rdpaa(int argc, char *argv[]); /* 按 PAA 读一个 NAND 页（诊断） */
 static int uart_cli_crash(int argc, char *argv[]); /* .noinit 崩溃记录查看/清除 */
 #if defined(FC_NAND_TEST_ENABLE)
 static int uart_cli_test(int argc, char *argv[]);
@@ -132,7 +136,7 @@ static BYTE g_wr_buf[FTL_READ_USER_SIZE * CW_NUM * PLANE_NUM]; /* 16KB → AXI .
 static BYTE g_wp_buf[FTL_LBA_PER_PAIR * FTL_IU_BYTES]; /* 8 × 512B = 4KB */
 /* 每组一个完成标志/状态（wp 不等待，仅作在飞期间的写回目标，避免悬垂指针）。 */
 static volatile BYTE         g_wp_done[FTL_LBA_PER_PAIR];
-static volatile ssd_status_t g_wp_status[FTL_LBA_PER_PAIR];
+static volatile ssd_status_e g_wp_status[FTL_LBA_PER_PAIR];
 
 /* wr/rd 两段式：handler 只提交请求到 controller（异步），结果由
  * cli_service_poll 每轮末尾检查 ssd_controller_is_complete 打印（D11
@@ -178,7 +182,7 @@ static DWORD uart_cli_expect_word(DWORD byte_offset)
 
 /* CLI 诊断命令（map / pair 窗口）按 LBA 取所属 FTL 实例。
  * 复用 l2p_cache.h 的分片公式；8-LBA pair 窗口不跨 region，故按窗口基址取即可。 */
-static ftl_context_t *uart_cli_ftl_for_lba(QWORD lba)
+static ftl_ctx_t *uart_cli_ftl_for_lba(QWORD lba)
 {
     return g_ctrl.ftl[lba_route_ch(lba)][lba_route_ce(lba)][lba_route_lun(lba)];
 }
@@ -233,11 +237,16 @@ static int uart_cli_wr(int argc, char *argv[])
         (void)uart_log_write("error: n exceeds g_wr_buf (max 32 sectors)\r\n", 44U);
         return FUNC_STATUS_ERROR;
     }
-    if (!ssd_controller_lba_range_ok(lba, n))
+    if (!ssd_controller_lba_range_ok(&g_ctrl, lba, n))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
         return FUNC_STATUS_ERROR;
     }
+
+    /* ⚠ `rd` 把读到的数据写进 g_wr_buf（同一块缓冲），会覆盖 pattern。
+     * 若只在 init 里预填一次，`wr` 紧跟在 `rd` 之后时会把**读回的旧数据**当写源，
+     * 表现为「写成功但内容不对」。每次 wr 重新预填，保证命令语义是「写固定 pattern」。 */
+    uart_cli_pattern_init();
 
     g_cli_pending.busy    = 1U;
     g_cli_pending.compare = 0U;
@@ -289,7 +298,7 @@ static int uart_cli_rd(int argc, char *argv[])
         (void)uart_log_write("error: n exceeds g_wr_buf (max 32 sectors)\r\n", 44U);
         return FUNC_STATUS_ERROR;
     }
-    if (!ssd_controller_lba_range_ok(lba, n))
+    if (!ssd_controller_lba_range_ok(&g_ctrl, lba, n))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
         return FUNC_STATUS_ERROR;
@@ -304,7 +313,8 @@ static int uart_cli_rd(int argc, char *argv[])
     g_cli_pending.req.opcode      = SSD_REQUEST_READ;
     g_cli_pending.req.start_lba   = lba;
     g_cli_pending.req.block_count = n;
-    g_cli_pending.req.buffer      = (void *)g_wr_buf; /* 读数据覆盖 pattern；compare 模式直接与 pattern 比对 */
+    /* 读数据覆盖 pattern；`wr` 每次会重新预填（见 uart_cli_wr），所以 rd→wr 相邻也安全。 */
+    g_cli_pending.req.buffer      = (void *)g_wr_buf;
     g_cli_pending.req.buffer_size = sizeof(g_wr_buf); /* 真实缓冲容量（非 n×2KB），见 uart_cli_wr */
 
     if (ssd_controller_submit(&g_ctrl, &g_cli_pending.req) != SSD_STATUS_OK)
@@ -334,7 +344,7 @@ static int uart_cli_tr(int argc, char *argv[])
         (void)uart_log_write("error: invalid lba\r\n", 19U);
         return FUNC_STATUS_ERROR;
     }
-    if (!ssd_controller_lba_range_ok(lba, 1U))
+    if (!ssd_controller_lba_range_ok(&g_ctrl, lba, 1U))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
         return FUNC_STATUS_ERROR;
@@ -378,14 +388,14 @@ static int uart_cli_tr(int argc, char *argv[])
  */
 static int uart_cli_wp(int argc, char *argv[])
 {
-    QWORD          lba;
-    QWORD          n_parsed;
-    QWORD          k_parsed;
-    DWORD          n;
-    DWORD          k;
-    DWORD          i;
-    DWORD          j;
-    ftl_context_t *ftl;
+    QWORD      lba;
+    QWORD      n_parsed;
+    QWORD      k_parsed;
+    DWORD      n;
+    DWORD      k;
+    DWORD      i;
+    DWORD      j;
+    ftl_ctx_t *ftl;
 
     (void)argc;
 
@@ -418,7 +428,7 @@ static int uart_cli_wp(int argc, char *argv[])
     }
     const DWORD sectors = n * k;
 
-    if (!ssd_controller_lba_range_ok(lba, sectors))
+    if (!ssd_controller_lba_range_ok(&g_ctrl, lba, sectors))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
         return FUNC_STATUS_ERROR;
@@ -449,7 +459,7 @@ static int uart_cli_wp(int argc, char *argv[])
      * 各组 complete_flag/status_out 指向静态数组，完成前始终有效。 */
     for (i = 0U; i < k; i++)
     {
-        ftl_io_request_t req;
+        ftl_io_req_t req;
 
         memset(&req, 0, sizeof(req));
         req.lba           = lba + ((QWORD)i * (QWORD)n);
@@ -517,7 +527,7 @@ static int uart_cli_info(int argc, char *argv[])
 
     if (g_ctrl.state <= SSD_CONTROLLER_FAILED)
     {
-        (void)LOGI("controller state=%s lba_max=%lu\r\n", state_names[g_ctrl.state], (unsigned long)FTL_LBA_MAX);
+        (void)LOGI("controller state=%s lba_max=%lu\r\n", state_names[g_ctrl.state], (unsigned long)ssd_controller_host_lba_max(&g_ctrl));
     }
 
     for (ch = 0U; ch < CH_NUM; ch++)
@@ -526,13 +536,13 @@ static int uart_cli_info(int argc, char *argv[])
         {
             for (lun = 0U; lun < LUN_NUM; lun++)
             {
-                const ftl_context_t *ftl = g_ctrl.ftl[ch][ce][lun];
+                const ftl_ctx_t *ftl = g_ctrl.ftl[ch][ce][lun];
 
                 if (ftl == NULL)
                 {
                     continue;
                 }
-                (void)LOGI("ftl[%u][%u][%u] free=%u op=%u/%u spare=%u/%u bad=%u closed=%u live=%u thrash=%u miss=%u%%\r\n",
+                (void)LOGI("ftl[%u][%u][%u] free=%u op=%u/%u spare=%u/%u bad=%u closed=%u live=%u thrash=%u miss=%u%% cp=%lu cpa=%u\r\n",
                            (unsigned)ch,
                            (unsigned)ce,
                            (unsigned)lun,
@@ -545,12 +555,28 @@ static int uart_cli_info(int argc, char *argv[])
                            (unsigned)ftl->alloc.closed_sb_count,
                            (unsigned)md_get_live_block_count(ftl->metadata_dir),
                            (unsigned)ftl->cache->thrashing,
-                           (unsigned)ftl->cache->miss_pct);
+                           (unsigned)ftl->cache->miss_pct,
+                           ftl->cp_handle->cp_state.sequence,
+                           (unsigned)ftl->cp_handle->active);
+
+                /* 计数类诊断（不逐事件打日志，靠这里/`[STAT]` 查）。 */
+                (void)LOGI("diag[%u][%u][%u] dng=%lu rrab=%lu mig=%u/%u erased=%lu streak=%u gcm=%u ng=%lu\r\n",
+                           (unsigned)ch,
+                           (unsigned)ce,
+                           (unsigned)lun,
+                           ftl->dangling_total,
+                           ftl->read_recovery_handle.already_bad_reads,
+                           (unsigned)((ftl->mig_handle->active != 0U) ? 1U : 0U),
+                           (unsigned)((ftl->mig_handle->paused != 0U) ? 1U : 0U),
+                           ftl->mig_handle->erased,
+                           (unsigned)ftl->mig_handle->read_fail_streak,
+                           (unsigned)ftl->mig_handle->gc_last_mode,
+                           ftl->mig_handle->nogain_count);
 
                 /* 元数据整理 job 的现场（心跳默认档不打，靠这里观测）。
                  * 只在有 job 在跑 / 有待回收块时多打一行，空闲时不刷屏。 */
-                const metadata_dir_cache_t *md  = ftl->metadata_dir;
-                const metadata_handle_t    *job = &md->handle;
+                const md_dir_cache_t *md  = ftl->metadata_dir;
+                const md_handle_t    *job = &md->handle;
 
                 if ((job->phase != MD_JOB_IDLE) || (md->reclaim_pending_count != 0U))
                 {
@@ -567,6 +593,9 @@ static int uart_cli_info(int argc, char *argv[])
             }
         }
     }
+
+    usb_msc_io_stats_print(); /* RISK-NAND-04：WRITE(10) 分块直方图 */
+
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -588,8 +617,8 @@ static int uart_cli_info(int argc, char *argv[])
  */
 static int uart_cli_map(int argc, char *argv[])
 {
-    ftl_context_t     *ftl;
-    const ftl_block_t *b;
+    ftl_ctx_t         *ftl;
+    const bst_block_t *b;
     DWORD              pba;
     QWORD              lba;
     WORD               g;
@@ -601,7 +630,7 @@ static int uart_cli_map(int argc, char *argv[])
         (void)uart_log_write("error: invalid lba\r\n", 19U);
         return FUNC_STATUS_ERROR;
     }
-    if (!ssd_controller_lba_range_ok(lba, 1U))
+    if (!ssd_controller_lba_range_ok(&g_ctrl, lba, 1U))
     {
         (void)uart_log_write("error: lba range exceeds lba_max\r\n", 34U);
         return FUNC_STATUS_ERROR;
@@ -744,6 +773,49 @@ static int uart_cli_bbt(int argc, char *argv[])
     BYTE ce;
     BYTE lun;
 
+#ifndef NDEBUG
+    /* 负例注入：bbt fault <plane> <block> —— 把指定物理块标 BAD 并触发候选池重算。
+     * 用于证明「BAD 槽真的被 shared metadata spare 顶替，记录仍可定位」。
+     * ⚠ 若该块持有活元数据，会丢一份副本；只在 debug 档提供。 */
+    if ((argc == 4) && (strcmp(argv[1], "fault") == 0))
+    {
+        ftl_ctx_t *ftl = g_ctrl.ftl[0][0][0];
+
+        if (ftl == NULL)
+        {
+            LOGE("bbt fault: no initialized FTL instance\r\n");
+            return FUNC_STATUS_ERROR;
+        }
+
+        QWORD plane_q = 0U;
+        QWORD block_q = 0U;
+
+        if ((!uart_cli_parse_uint(argv[2], &plane_q)) || (!uart_cli_parse_uint(argv[3], &block_q)) ||
+            (plane_q >= PLANE_NUM) || (block_q >= BLOCKS_PER_PLANE))
+        {
+            LOGE("bbt fault: plane/block out of range\r\n");
+            return FUNC_STATUS_ERROR;
+        }
+
+        const BYTE plane  = (BYTE)plane_q;
+        const WORD block  = (WORD)block_q;
+        const WORD gblock = ftl_gblock(plane, block);
+
+        LOGW("bbt fault: mark gblock=%u (plane=%u block=%u) BAD (debug injection)\r\n", (unsigned)gblock, (unsigned)plane, (unsigned)block);
+
+        (void)bbt_mark_bad(&ftl->alloc, gblock);
+        md_pool_service(ftl); /* 元数据 job 忙时会顺延到下一轮 ftl_service */
+
+        if (ftl->alloc.pools->dirty)
+        {
+            LOGW("bbt fault: pool rebuild deferred (metadata job busy) — run 'pool' again\r\n");
+        }
+
+        md_pool_print(ftl->metadata_dir);
+        return FUNC_STATUS_SUCCESS;
+    }
+#endif
+
     /* 选项**严格**校验：不认识就报错返回，绝不静默降级为只读。
      * 静默忽略曾两次把 `-erase` / `--rease`（拼错）当成合法擦除执行完、实际一条
      * 擦除命令都没发，看图的人只会以为"擦了但没生效"。 */
@@ -764,7 +836,7 @@ static int uart_cli_bbt(int argc, char *argv[])
         {
             for (lun = 0U; lun < LUN_NUM; lun++)
             {
-                ftl_context_t *ftl = g_ctrl.ftl[ch][ce][lun];
+                ftl_ctx_t *ftl = g_ctrl.ftl[ch][ce][lun];
 
                 if (ftl == NULL)
                 {
@@ -781,8 +853,8 @@ static int uart_cli_bbt(int argc, char *argv[])
                      * 走 wbuf 的复位接口（不是裸 memset）：它会一并结算那些写组的在飞数，
                      * 否则 host 写组永不完成。 */
                     {
-                        wbuf_trigger_t trigger;
-                        wbuf_status_t  status;
+                        wb_trigger_t trigger;
+                        wb_status_t  status;
 
                         memset(&trigger, 0, sizeof(trigger));
                         trigger.kind = WBUF_TRIGGER_RESET;
@@ -819,10 +891,22 @@ static int uart_cli_format(int argc, char *argv[])
     BYTE lun;
     BYTE done = 0U;
 
-    (void)argc;
-    (void)argv;
+    /* 可选的 --verify：对**出厂坏块标记已丢失的二手片**做一次全片擦/写/读体检，
+     * 重建可信坏块表（耗时数分钟）。默认不做，避免例行 format 变慢。 */
+    const bool verify = (argc >= 2) && (strcmp(argv[1], "--verify") == 0);
+
+    if ((argc >= 2) && (!verify))
+    {
+        (void)uart_log_write("error: unknown option (only --verify)\r\n", sizeof("error: unknown option (only --verify)\r\n") - 1U);
+        return FUNC_STATUS_ERROR;
+    }
 
     LOGW("format: ERASING every block and writing initial metadata. Do not reset until done.\r\n");
+
+    if (verify)
+    {
+        LOGW("format --verify: full-chip erase check enabled (erase OK = good block).\r\n");
+    }
 
     for (ch = 0U; ch < CH_NUM; ch++)
     {
@@ -830,7 +914,7 @@ static int uart_cli_format(int argc, char *argv[])
         {
             for (lun = 0U; lun < LUN_NUM; lun++)
             {
-                ftl_context_t *ftl = g_ctrl.ftl[ch][ce][lun];
+                ftl_ctx_t *ftl = g_ctrl.ftl[ch][ce][lun];
 
                 if (ftl == NULL)
                 {
@@ -840,15 +924,15 @@ static int uart_cli_format(int argc, char *argv[])
                 /* 格式化期间禁止后台写；与 bbt --erase 同口径。 */
                 ftl->bg_suspend = 1U;
                 {
-                    wbuf_trigger_t trigger;
-                    wbuf_status_t  status;
+                    wb_trigger_t trigger;
+                    wb_status_t  status;
 
                     memset(&trigger, 0, sizeof(trigger));
                     trigger.kind = WBUF_TRIGGER_RESET;
                     (void)wb_handle(ftl->wbuf, &trigger, NULL, &status);
                 }
 
-                if (ftl_media_format(ftl) != FTL_OK)
+                if (ftl_media_format(ftl, verify) != FTL_OK)
                 {
                     LOGE("format: failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
                     return FUNC_STATUS_ERROR;
@@ -867,6 +951,144 @@ static int uart_cli_format(int argc, char *argv[])
     }
 
     LOGW("format: done. POWER-CYCLE NOW.\r\n");
+    return FUNC_STATUS_SUCCESS;
+}
+
+/*
+ * pool — 打印固定元数据分区的候选块池（只读诊断）
+ *
+ * 用于验证 BBT + spare 候选池：nominal 块被标 BAD 后，候选数不变，
+ * 坏块由 shared metadata spare 顶替（打印 remapped -> spare）。
+ */
+static int uart_cli_pool(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    BYTE done = 0U;
+
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+            {
+                const ftl_ctx_t *ftl = g_ctrl.ftl[ch][ce][lun];
+
+                if (ftl == NULL)
+                {
+                    continue;
+                }
+
+                LOGI("[POOL] ch=%u ce=%u lun=%u\r\n", (unsigned)ch, (unsigned)ce, (unsigned)lun);
+                md_pool_print(ftl->metadata_dir);
+                done = 1U;
+            }
+        }
+    }
+
+    if (done == 0U)
+    {
+        LOGE("pool: no initialized FTL instance\r\n");
+        return FUNC_STATUS_ERROR;
+    }
+
+    return FUNC_STATUS_SUCCESS;
+}
+
+/*
+ * rdpaa — 按 PAA 读一个 NAND 页（只读诊断）
+ *
+ * 默认：与 FTL 数据面相同的正常配置（scrambler ON、BCH ECC、per-CW CRC；
+ *       页内 META 提供 LBA，LBA 未知时由 FC 自描述读回）。
+ * --raw：LDPC_RAW 裸读——不做 ECC/解扰，坏页也能拿到原始位（分析 UNC 用）。
+ * 同时用 gc_read_page_with_lba 打印该页逐 CW 的 META（页内反向映射）。
+ * ⚠ PAA 不含 ch/ce：本命令固定用 ch=0/ce=0（当前板单芯片）。
+ */
+static int uart_cli_rdpaa(int argc, char *argv[])
+{
+    char *end = NULL;
+
+    const DWORD paa = strtoul(argv[1], &end, 0); /* DWORD ≡ unsigned long：同型，无强转 */
+    const bool  raw = (argc >= 3) && (strcmp(argv[2], "--raw") == 0);
+
+    if ((argc >= 3) && (!raw))
+    {
+        (void)uart_log_write("error: unknown option (only --raw)\r\n", sizeof("error: unknown option (only --raw)\r\n") - 1U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    if ((end == NULL) || (*end != '\0') || (paa_is_valid_paa(paa) == 0U))
+    {
+        (void)uart_log_write("error: bad paa\r\n", 16U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    if ((g_cli_pending.busy != 0U) || usb_msc_host_busy())
+    {
+        (void)uart_log_write("error: busy, pending request\r\n", 29U);
+        return FUNC_STATUS_ERROR;
+    }
+
+    /* PAA 的 cw 位对整页读无意义：清掉，固定按页基址读。 */
+    const DWORD pba = pba_page(paa_to_pba(0U, 0U, paa));
+
+    /* raw 读需要 4 × 528B；静态缓冲，避免占 CLI 栈。 */
+    static BYTE buf[PAGE_SIZE];
+
+    (void)memset(buf, 0, sizeof(buf));
+
+    const ftl_status_e st = raw ? ftl_sync_read_page_raw(pba, buf)
+                                : ftl_sync_read_page(pba, buf, PAGE_MAIN_SIZE, FTL_PAGE_CFG_DATA_ANY());
+
+    DWORD              cw_lba[CW_NUM];
+    const ftl_status_e meta_st = gc_read_page_with_lba(pba, cw_lba);
+
+    (void)LOGI("rdpaa paa=0x%08lx pba=0x%08lx mode=%s read=%s meta=%s\r\n",
+               paa,
+               pba,
+               raw ? "raw" : "normal",
+               (st == FTL_OK) ? "ok" : "FAIL",
+               (meta_st == FTL_OK) ? "ok" : "FAIL");
+
+    if (meta_st == FTL_OK)
+    {
+        (void)LOGI("  cw_lba: %08lx %08lx %08lx %08lx\r\n",
+                   cw_lba[0],
+                   cw_lba[1],
+                   cw_lba[2],
+                   cw_lba[3]);
+    }
+
+    if (st != FTL_OK)
+    {
+        LOGE("rdpaa: read failed (ECC/CRC/META?) — use --raw 取原始位\r\n");
+        return FUNC_STATUS_ERROR;
+    }
+
+    /* 只 dump 前 256B（16 行）：诊断足够，且不会把串口写满。 */
+    for (DWORD offset = 0U; (offset < 256U) && (offset < PAGE_MAIN_SIZE); offset += 16U)
+    {
+        (void)LOGI("%08lx: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
+                   offset,
+                   (unsigned)buf[offset],
+                   (unsigned)buf[offset + 1U],
+                   (unsigned)buf[offset + 2U],
+                   (unsigned)buf[offset + 3U],
+                   (unsigned)buf[offset + 4U],
+                   (unsigned)buf[offset + 5U],
+                   (unsigned)buf[offset + 6U],
+                   (unsigned)buf[offset + 7U],
+                   (unsigned)buf[offset + 8U],
+                   (unsigned)buf[offset + 9U],
+                   (unsigned)buf[offset + 10U],
+                   (unsigned)buf[offset + 11U],
+                   (unsigned)buf[offset + 12U],
+                   (unsigned)buf[offset + 13U],
+                   (unsigned)buf[offset + 14U],
+                   (unsigned)buf[offset + 15U]);
+    }
+
     return FUNC_STATUS_SUCCESS;
 }
 
@@ -957,26 +1179,28 @@ static void uart_cli_pending_poll(void)
  * 单独注册，不能把 raw NAND 或任意内存访问默认暴露在量产 UART 上。
  */
 static const uart_cli_command_t g_uart_cli_commands[] = {
-    {   "help",                                                                                                           "help",                                            "show command list", 1U,  1U,    uart_cli_help},
-    { "status",                                                                                                         "status",                           "show UART error and queue counters", 1U,  1U,  uart_cli_status},
-    {"version",                                                                                                        "version",                                "show firmware console version", 1U,  1U, uart_cli_version},
-    {    "log",                                                                              "log level <error|warn|info|debug>",                                        "set runtime log level", 3U,  3U,     uart_cli_log},
+    {   "help",                                                                                                           "help",                                                                         "show command list", 1U,  1U,    uart_cli_help},
+    { "status",                                                                                                         "status",                                                        "show UART error and queue counters", 1U,  1U,  uart_cli_status},
+    {"version",                                                                                                        "version",                                                             "show firmware console version", 1U,  1U, uart_cli_version},
+    {    "log",                                                                              "log level <error|warn|info|debug>",                                                                     "set runtime log level", 3U,  3U,     uart_cli_log},
  /* UART CLI 驱动 FTL（C 档，D10）：wr/rd/tr/fl/info 模拟 NVMe host IO */
-    {     "wr",                                                                                                   "wr <lba> <n>",                            "write n blocks with fixed pattern", 3U,  3U,      uart_cli_wr},
-    {     "rd",                                                                                               "rd <lba> <n> [c]",                            "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
-    {     "tr",                                                                                                       "tr <lba>",                                                 "trim one lba", 2U,  2U,      uart_cli_tr},
-    {     "fl",                                                                                                             "fl",                            "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
-    {     "wp",                                                                                               "wp <lba> <n> <k>",        "submit k writes in one pair window (pack-buffer diag)", 4U,  4U,      uart_cli_wp},
-    {   "info",                                                                                                           "info",                             "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
-    {    "map",                                                                                                      "map <lba>",  "print L2P mapping + target block BST entry (read-only diag)", 2U,  2U,     uart_cli_map},
-    {  "crash",                                                                                                  "crash [clear]",                          "show/clear the .noinit crash record", 1U,  2U,   uart_cli_crash},
-    {  "stack",                                                                                                          "stack",           "show stack guard: paint region, peak usage, alarms", 1U,  1U,   uart_cli_stack},
-    {    "bbt",                                                                                                  "bbt [--erase]", "print factory bad block map (--erase: also erase each block)", 1U,  2U,     uart_cli_bbt},
-    { "format",                                                                                                         "format",      "ERASE all blocks + write initial metadata (destructive)", 1U,  1U,  uart_cli_format},
+    {     "wr",                                                                                                   "wr <lba> <n>",                                                         "write n blocks with fixed pattern", 3U,  3U,      uart_cli_wr},
+    {     "rd",                                                                                               "rd <lba> <n> [c]",                                                         "read n blocks (c=compare pattern)", 3U,  4U,      uart_cli_rd},
+    {     "tr",                                                                                                       "tr <lba>",                                                                              "trim one lba", 2U,  2U,      uart_cli_tr},
+    {     "fl",                                                                                                             "fl",                                                         "flush dirty L2P + journal to NAND", 1U,  1U,      uart_cli_fl},
+    {     "wp",                                                                                               "wp <lba> <n> <k>",                                     "submit k writes in one pair window (pack-buffer diag)", 4U,  4U,      uart_cli_wp},
+    {   "info",                                                                                                           "info",                                                          "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
+    {    "map",                                                                                                      "map <lba>",                               "print L2P mapping + target block BST entry (read-only diag)", 2U,  2U,     uart_cli_map},
+    {  "rdpaa",                                                                                            "rdpaa <paa> [--raw]",                  "read one NAND page by PAA (default: ECC/CRC/descramble; --raw: raw bits)", 2U,  3U,   uart_cli_rdpaa},
+    {  "crash",                                                                                                  "crash [clear]",                                                       "show/clear the .noinit crash record", 1U,  2U,   uart_cli_crash},
+    {  "stack",                                                                                                          "stack",                                        "show stack guard: paint region, peak usage, alarms", 1U,  1U,   uart_cli_stack},
+    {    "bbt",                                                                          "bbt [--erase | fault <plane> <block>]",       "print factory bad block map (--erase: erase each block; fault: debug BAD injection)", 1U,  4U,     uart_cli_bbt},
+    { "format",                                                                                              "format [--verify]", "ERASE all blocks + write initial metadata (destructive; --verify = full-chip erase check)", 1U,  2U,  uart_cli_format},
+    {   "pool",                                                                                                           "pool",                               "print fixed-metadata candidate block pools (read-only diag)", 1U,  1U,    uart_cli_pool},
 #if defined(FC_NAND_TEST_ENABLE)
   /* TODO: Level 3 完成后将 uart_cli_nand 替换为 ut_run_all */
   /* { "nand", ... }, */
-    {   "test", "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [test_name...]",                                    "run munit unit test suite", 1U, 10U,    uart_cli_test},
+    {   "test", "test [--seed N] [--iterations N] [--single] [--list] [--list-params] [--log-visible info|debug] [test_name...]",                                                                 "run munit unit test suite", 1U, 10U,    uart_cli_test},
 #endif
 };
 

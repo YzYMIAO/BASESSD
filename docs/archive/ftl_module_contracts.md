@@ -2,7 +2,9 @@
 
 > **性质**：FTL 内部模块的接口设计文档，不是 host API。
 > **范围**：FTL 主调度与模块的边界、各模块 `*_handle()` 的输入/输出、时间与超时、
-> 多 LUN/owner 路由。**本轮只出设计，不改代码。**
+> 多 LUN/owner 路由。设计已在代码落地（Phase 0~8，未上板）；**状态口径以
+> `ftl_design.md` §7.1 与 `known_risks.md` RISK-ARCH-06/10/11 为准**，本文 §12 仅保留
+> 落地时的清单。
 > **结论先行**：共享数据面账本保持共享 device context；模块只拥有执行状态
 > （FSM / 单飞行 / 计时器 / 进度计数）；主流程通过 typed
 > `*_handle(module_handle, trigger, status)` 推进模块，不读模块内部 phase。
@@ -468,7 +470,7 @@ void pending_confirm_service(const ftl_bg_info_t *info);
 - 目标页来自本实例 `allocator_alloc_pair(&ftl->alloc, ...)`（`:524`）；
 - allocator 在 init 绑定本实例 `ch/ce/lun`（`allocator.c:26-34`）；
 - 源页 `super_block_page_pba(ftl->topo, &m->victim, ...)`（`:194,536`）；
-- `multi_lun_generalization.md:26,358-359` 明确跨 LUN 条带/GC 不在当前范围。
+- `../archive/multi_lun_generalization.md:26,358-359` 明确跨 LUN 条带/GC 不在当前范围。
 
 跨 LUN 需要设备级 relocation 引擎 + 跨实例事务（两套 allocator/BST/
 journal/checkpoint 账本同步），不是改 `migrate_handle_t` 入参能解决的。
@@ -608,7 +610,7 @@ typedef struct {
 - `docs/design/ftl_design.md`：各模块职责与不变量。
 - `docs/design/fc_nand_design.md §26 / §13.2`：层间判据与“硬件消费原则”
   （可平移到模块边界的字段级判据）。
-- `docs/design/multi_lun_generalization.md`：多 LUN / 共享 cache / 跨 LUN 边界。
+- `docs/archive/multi_lun_generalization.md`：多 LUN / 共享 cache / 跨 LUN 边界。
 - `docs/reference/pages/spdk_ftl.html:175-188`：SPDK FTL 的 GC/relocation
   模块划分（`reloc`）。
 - `docs/design/known_risks.md`：共享账本决策、跨 LUN GC/WL、无 supervisor 等

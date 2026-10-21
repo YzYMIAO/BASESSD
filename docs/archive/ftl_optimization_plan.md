@@ -47,7 +47,7 @@
 | **thrashing 检测** | ~~**无**（只有 hit/miss 计数）~~ ⇒ P1-4 已落地：窗口化 miss 率 + 滞回 + 停主动 flush | `l2p_cache.{h,c}`、`ftl.c` |
 | GC victim | **多维加权评分**（P1-1 ✅ 已落地）：有效页 / 磨损 / 温度 / 时间 四维（权重 500/200/200/100） | `gc.h:46-49,111` |
 | GC 触发 | **3 条**（P1-2 ✅ + **v0.63 收敛**）：T1 水位 / T4 紧急 / T5 磨损均衡；**T2 写入、T3 定时、T6 碎片率均不实现**（T2/T3 参考层零出处且求值点不可达，见 v0.63） | `gc.h`；`gc.c`（`gc_check_triggers`） |
-| 静态 WL | **已实现**（三条件触发 + 冷块 victim + read_count 权重） | `wear_leveling.c:14-306`；`ftl.c:392` |
+| 静态 WL | **已实现**（UBI 模型：擦除差值触发 + 最冷 victim + 目标取高擦除空闲块） | `wear_leveling.c`；`allocator.c` `alc_alloc_pair_high_wear`；`migrate.c` `mig_begin_wl` |
 | 动态 WL | allocator 每 plane 选擦除最少块 | `allocator.c:119-148` |
 | **擦除计数持久化** | **有**（P0-1 ✅；v0.82 改形态）：磨损计数随 Checkpoint 记录落盘（16 页/record），开机 `checkpoint_load_wear_table` 回填 BST | `include/ftl/checkpoint.h`、`src/ftl/checkpoint.c` |
 | Free Pool | **单一 free 池 + OP 池**；三级**水位**（P1-3 ✅ 定案）；`pre_cond_count ≡ free_count`（**非缺陷**，GC 先擦后归还） | `allocator.c`；`gc.h` |

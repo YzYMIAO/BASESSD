@@ -61,30 +61,31 @@ static void recovery_valid_sub(void *ctx, DWORD pba, bool *ok);
 
 /* PFR 内部恢复原语（full metadata rebuild / fresh / clean / PF）。只在本文件使用 ⇒ static，
  * 上层只可见 ftl_media_check_format / ftl_media_format / ftl_boot_recovery
- * （docs/design/ftl_module_contracts.md §5「PFR boot orchestrator」）。 */
-static ftl_status_t ftl_boot_carve_pools(ftl_context_t *ftl);
-static ftl_status_t ftl_boot_fresh_start(ftl_context_t *ftl, const journal_page_ref_t *ring);
-static ftl_status_t ftl_boot_clean_start(ftl_context_t                 *ftl,
-                                         const l2p_checkpoint_header_t *cp,
-                                         BYTE                           blocks_valid,
-                                         bool                          *blocks_restored,
-                                         const journal_page_ref_t      *ring);
-static ftl_status_t ftl_boot_power_failure(ftl_context_t                 *ftl,
-                                           const l2p_checkpoint_header_t *cp,
-                                           BYTE                           blocks_valid,
-                                           ftl_boot_result_t             *result);
-static void         ftl_rebuild_closed_sb_list(ftl_context_t *ftl, ftl_rebuild_stats_t *stats);
-static BYTE         ftl_recovery_scan_write_pointer(const ftl_context_t *ftl, BYTE plane, WORD block, BYTE *raw_buf);
-static void         ftl_recovery_close_block(ftl_context_t       *ftl,
+ * （docs/archive/ftl_module_contracts.md §5「PFR boot orchestrator」）。 */
+static ftl_status_e ftl_boot_carve_pools(ftl_ctx_t *ftl);
+static ftl_status_e ftl_boot_fresh_start(ftl_ctx_t *ftl, const jrn_page_ref_t *ring);
+static ftl_status_e ftl_boot_clean_start(ftl_ctx_t            *ftl,
+                                         const cp_header_t    *cp,
+                                         BYTE                  blocks_valid,
+                                         bool                  force_rebuild,
+                                         bool                 *blocks_restored,
+                                         const jrn_page_ref_t *ring);
+static ftl_status_e ftl_boot_power_failure(ftl_ctx_t         *ftl,
+                                           const cp_header_t *cp,
+                                           BYTE               blocks_valid,
+                                           pfr_boot_result_t *result);
+static void         ftl_rebuild_closed_sb_list(ftl_ctx_t *ftl, pfr_rebuild_stats_t *stats);
+static BYTE         ftl_recovery_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE *raw_buf);
+static void         ftl_recovery_close_block(ftl_ctx_t           *ftl,
                                              BYTE                 plane,
                                              WORD                 block,
                                              BYTE                 pages_written,
                                              BYTE                 temperature,
-                                             ftl_rebuild_stats_t *stats);
-static bool         ftl_recovery_restore_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK_TOTAL]);
-static void         ftl_recovery_probe_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK_TOTAL], ftl_block_restore_stats_t *stats);
-static bool         ftl_recovery_build_pools(ftl_context_t *ftl, const WORD words[FTL_BLOCK_TOTAL]);
-static void         ftl_recovery_reset_blocks(ftl_context_t *ftl);
+                                             pfr_rebuild_stats_t *stats);
+static bool         ftl_recovery_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL]);
+static void         ftl_recovery_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_block_restore_stats_t *stats);
+static bool         ftl_recovery_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_TOTAL]);
+static void         ftl_recovery_reset_blocks(ftl_ctx_t *ftl);
 
 /* ══════════════════════════════════════════════════════════════════
  * 介质布局版本 —— 开机自动格式化
@@ -100,12 +101,12 @@ static void         ftl_recovery_reset_blocks(ftl_context_t *ftl);
  *             · NO_RECORD / 版本不符 ⇒ 格式化（空片多擦一次，写标记后自愈）；
  *             · IO_ERROR            ⇒ 不格式化，返回错误——一次瞬时读错不能变成整片擦除。
  * -------------------------------------------------------------------- */
-ftl_status_t ftl_media_check_format(struct ftl_context *ftl, bool *out_need_format)
+ftl_status_e ftl_media_check_format(struct ftl_context *ftl, bool *out_need_format)
 {
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与局部 bool。 */
 
     DWORD             media_version = 0U;
-    cp_media_status_t st            = cp_probe_media_status(ftl->cp_handle, &media_version);
+    cp_media_status_e st            = cp_probe_media_status(ftl->cp_handle, &media_version);
 
     switch (st)
     {
@@ -136,7 +137,10 @@ ftl_status_t ftl_media_check_format(struct ftl_context *ftl, bool *out_need_form
  *                FORMAT_IN_PROGRESS），再擦除 BBT 池之外的块（擦失败标 BAD）；
  *             ② `md_init` 把 Directory 复位为"全部未映射"；
  *             ③ `cp_write_initial` 写当前版本标记 ⇒ 下次开机版本判据命中，
- *                格式化只发生一次。
+ *                格式化只发生一次；
+ *             ④ **提交点**：initial CP **读回成功**后才清 FORMAT_IN_PROGRESS。
+ *                中间任一步（含 format --verify 的数分钟体检）复位/掉电，
+ *                下次开机都会继续格式化，而不是拒绝启动。
  *   ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。
  *   ⚠ BST 的 erase_count 保留旧值（开机已从 CP 磨损快照回填）——仅影响磨损均衡起点。
  * -------------------------------------------------------------------- */
@@ -149,14 +153,14 @@ ftl_status_t ftl_media_check_format(struct ftl_context *ftl, bool *out_need_form
  *             ftl_boot_recovery 按 RISK-BOOT-09 拒绝启动。故必须先把空 Directory
  *             写成 Anchor，再写 initial Checkpoint（后者是整条 record 的 commit）。
  * -------------------------------------------------------------------- */
-static ftl_status_t ftl_format_write_initial_anchor(ftl_context_t *ftl)
+static ftl_status_e ftl_format_write_initial_anchor(ftl_ctx_t *ftl)
 {
-    metadata_dir_cache_t *dir = ftl->metadata_dir;
-    metadata_ring_t       ring;
-    DWORD                 base;
-    WORD                  idx;
-    DWORD                 seq;
-    bool                  need_erase = false;
+    md_dir_cache_t *dir = ftl->metadata_dir;
+    md_ring_t       ring;
+    DWORD           base;
+    WORD            idx;
+    DWORD           seq;
+    bool            need_erase = false;
 
     dir->dirty = true; /* 空 Directory 也要落一条 record */
 
@@ -174,9 +178,9 @@ static ftl_status_t ftl_format_write_initial_anchor(ftl_context_t *ftl)
 
     for (BYTE chunk = 0U; chunk < ANCHOR_PAGE_COUNT; chunk++)
     {
-        metadata_anchor_page_t page;
-        const DWORD            anchor_page = pba_to_page(base) + chunk;
-        const DWORD            addr        = pba_with_page(base, anchor_page);
+        md_anchor_page_t page;
+        const DWORD      anchor_page = pba_to_page(base) + chunk;
+        const DWORD      addr        = pba_with_page(base, anchor_page);
 
         md_anchor_page(dir, seq, chunk, &page);
         if (ftl_sync_write_page(addr, &page, sizeof(page), FTL_PAGE_CFG_META()) != FTL_OK)
@@ -186,11 +190,187 @@ static ftl_status_t ftl_format_write_initial_anchor(ftl_context_t *ftl)
         }
     }
 
+    /* 安全回读：候选池已跳过 BAD，但配置错误/候选耗尽仍可能让写点落在不可读块上；
+     * 编程状态可能 OK 而重启读不回来 ⇒ format 谎报成功。这里当场读回第一页。 */
+    if (ok)
+    {
+        md_anchor_page_t probe;
+
+        if ((ftl_sync_read_page(base, &probe, sizeof(probe), FTL_PAGE_CFG_META()) != FTL_OK) ||
+            (probe.magic != ANCHOR_MAGIC) || (probe.sequence != seq) ||
+            (probe.layout_version != FTL_MEDIA_LAYOUT_VERSION))
+        {
+            LOGE("[META] format: Anchor readback failed — fixed metadata block may be BAD\r\n");
+            ok = false;
+        }
+    }
+
     md_anchor_commit(dir, &ring, idx, ok);
     return ok ? FTL_OK : FTL_ERROR;
 }
 
-ftl_status_t ftl_media_format(struct ftl_context *ftl)
+/* ------------------------------------------------------------------
+ * ftl_format_reset_bad_map - 全片体检前清空 BAD 集（保留 BBT 候选池）
+ *
+ *   「从头开始」的判据：旧 BAD 图不再作为既成事实，所有非 BBT-pool 块都重新
+ *   擦/写/读测试。BBT 池持有本轮 FORMAT_IN_PROGRESS record，不能擦，因此保留
+ *   其 BAD 状态并跳过测试。
+ *
+ *   @param alloc    分配器
+ *   @param old_bad  出参：512B 位图，旧 BAD 集（调用者用于统计 recovered）
+ *
+ *   返回：无；副作用：非 BBT-pool 的 BAD 块置回 NONE，alloc->bad_count = 保留数。
+ *   ⚠ 调用前必须清空 allocator 池（ftl_recovery_reset_blocks）：否则失败块
+ *     重新标坏时 alc_remove_from_free 会撞「在池 ⇒ 必须 FREE」断言。
+ * ------------------------------------------------------------------ */
+static void ftl_format_reset_bad_map(alc_t *alloc, BYTE old_bad[BBT_BITMAP_SIZE])
+{
+    const md_ring_t *bbt_ring = (alloc->pools != NULL) ? &alloc->pools->bbt : NULL;
+    WORD             kept     = 0U;
+
+    (void)memset(old_bad, 0, BBT_BITMAP_SIZE);
+
+    for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
+    {
+        const WORD block  = ftl_gblock_block(g);
+        const bool is_bad = ftl_block_is_bad(&alloc->blocks[g]);
+        const bool keep   = ((bbt_ring != NULL) && (bbt_ring->block_count >= 2U))
+                                ? md_ring_has_block(bbt_ring, block)
+                                : ((block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS)));
+
+        if (is_bad)
+        {
+            bbt_set_bad(old_bad, g);
+        }
+        if (!is_bad)
+        {
+            continue;
+        }
+        if (keep)
+        {
+            kept++;
+            continue;
+        }
+
+        ftl_block_set_state(&alloc->blocks[g], FTL_BLOCK_STATE_NONE);
+        ftl_block_clear_valid(&alloc->blocks[g]);
+        ftl_block_set_sb(&alloc->blocks[g], FTL_BLOCK_NO_SB);
+    }
+
+    alloc->bad_count = kept;
+
+    LOGI("[FLT] format --verify: BAD map reset for full re-scan (kept BBT-pool bad=%u)\r\n",
+         (unsigned)kept);
+}
+
+/* ------------------------------------------------------------------
+ * ftl_format_verify_blocks - format --verify 的全片体检
+ *
+ *   逐物理块**只做擦除**：擦除命令成功 ⇒ 好块；失败 ⇒ bbt_mark_bad 并落盘。
+ *   为什么不再「写图样 → 读回比对」：
+ *     · 出厂坏块标记在二手片上已丢失（AN1819：擦除即不可恢复），open-card 的目的
+ *       是重建可信坏块表；**擦除失败**是开卡阶段唯一稳定、且不依赖数据通路的判据。
+ *     · 编程 / 读失败由运行期覆盖：host 写失败 → `ftl_write_retry` 换块重发一次 →
+ *       仍失败则 `ftl_host_io_write_fail` 标坏；读失败 → RR 标坏。两条路径均已上板。
+ *     · 写/读体检只覆盖**单 plane 顺序写**，测不到运行期的 pair 写路径，它的
+ *       「通过」不能证明运行期没问题（RISK-NAND-06），收益与耗时不成比例。
+ *   ⚠ 调用前由 ftl_format_reset_bad_map 清空非 BBT 池的 BAD 集 ⇒ 本函数重新评估
+ *     **所有**非 BBT-pool 块（包括原先标记为 BAD 的块）：擦除成功即 recovered。
+ *     BBT 池跳过（本轮坏块 record 在里面）；体检后所有块保持擦净状态。
+ *   返回：FTL_OK（体检完成，个别块已标坏）；FTL_ERROR = BBT 落盘失败。
+ * ------------------------------------------------------------------ */
+static ftl_status_e ftl_format_verify_blocks(ftl_ctx_t *ftl)
+{
+    alc_t *alloc  = &ftl->alloc;
+    DWORD  tested = 0U;
+    DWORD  bad    = 0U;
+
+    LOGW("[FLT] format --verify: 全片擦除体检开始（擦除成功即判好块）\r\n");
+
+    for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
+    {
+        const BYTE plane = ftl_gblock_plane(g);
+        const WORD block = ftl_gblock_block(g);
+
+        /* BBT 候选池保留：本轮坏块图就在里面（候选可能含 shared metadata spare）。 */
+        {
+            const md_ring_t *bbt_ring = (alloc->pools != NULL) ? &alloc->pools->bbt : NULL;
+            const bool       keep_bbt = ((bbt_ring != NULL) && (bbt_ring->block_count >= 2U))
+                                            ? md_ring_has_block(bbt_ring, block)
+                                            : ((block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS)));
+
+            if (keep_bbt)
+            {
+                continue;
+            }
+        }
+
+        /* 唯一判据：擦除命令成功。carve 假定 Free 块是空白的，擦成功即为空白。 */
+        const DWORD epba = pba_make(alloc->ch, alloc->ce, alloc->lun, block, plane, 0U, 0U);
+        const bool  ok   = (ftl_sync_erase_block(epba) == FTL_OK);
+
+        tested++;
+
+        if (!ok)
+        {
+            bad++;
+            LOGE("[FLT] format --verify: gblock=%u (plane=%u block=%u) failed — mark BAD\r\n",
+                 (unsigned)g,
+                 (unsigned)plane,
+                 (unsigned)block);
+            (void)bbt_mark_bad(alloc, g);
+        }
+
+        if ((tested % 512U) == 0U)
+        {
+            LOGI("[FLT] format --verify: %lu/%u blocks, bad=%lu\r\n",
+                 tested,
+                 (unsigned)FTL_BLOCK_TOTAL,
+                 bad);
+        }
+    }
+
+    bbt_note_dirty(alloc);
+
+    if (bbt_save(alloc) != FTL_OK)
+    {
+        LOGE("[FLT] format --verify: BBT save failed — 体检结果未持久化\r\n");
+        return FTL_ERROR;
+    }
+
+    LOGI("[FLT] format --verify: done, tested=%lu bad=%lu\r\n", tested, bad);
+    return FTL_OK;
+}
+
+/* ------------------------------------------------------------------
+ * ftl_format_end_bbt - 结束「格式化进行中」，把提交状态落盘
+ *
+ *   格式化是跨多次 NAND 写的长事务：擦除 →（可选）全片体检 → 初始 Anchor →
+ *   initial Checkpoint。FORMAT_IN_PROGRESS 从 `bbt_format_erase` 起点保持到
+ *   **initial CP 读回成功**；中途复位/掉电 ⇒ 下次开机按「继续格式化」处理
+ *   （cp_probe_media_status 返回 NO_RECORD），而不是把「有 BBT、无 CP」
+ *   判成损坏介质而拒绝启动。
+ *
+ *   显式失败路径**不**调用本函数：标志保持置位，下次开机重试格式化。
+ *
+ *   返回：false = BBT 落盘失败 —— 持久化记录仍是「格式化中」，下次开机会
+ *         重新格式化（安全方向：宁可重擦，也不在半写元数据上启动）。
+ * ------------------------------------------------------------------ */
+static bool ftl_format_end_bbt(alc_t *alloc)
+{
+    alloc->bbt.format_in_progress = false;
+
+    /* 格式化刚写完全新的 initial CP ⇒ 没有任何「丢失映射需要重建」的旧状态。
+     * verify 期间标记 Journal/L2P 坏块可能置过 REBUILD_REQUIRED，这里一并清掉，
+     * 否则下次开机会在刚格式化完的介质上白跑一次 full rebuild。 */
+    alloc->bbt.rebuild_required = false;
+
+    bbt_note_dirty(alloc);
+
+    return bbt_save(alloc) == FTL_OK;
+}
+
+ftl_status_e ftl_media_format(struct ftl_context *ftl, bool verify)
 {
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun]。 */
 
@@ -199,6 +379,71 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
     if (bbt_format_erase(&ftl->alloc) != FTL_OK)
     {
         LOGE("[BBT] format: pre-erase BBT save failed — 未擦数据，可重试\r\n");
+        return FTL_ERROR;
+    }
+
+    if (verify)
+    {
+        /* 从零开始的全片体检：
+         *   ① 清空 allocator 池（否则清 BAD 后失败块重新标坏会撞 FREE 断言）；
+         *   ② 清空非 BBT-pool 的 BAD 集（保留 BBT 池里本轮 record 的坏块状态）；
+         *   ③ 测试**所有**非 BBT-pool 块（包括原先标记 BAD 的块）。 */
+        ftl_recovery_reset_blocks(ftl);
+
+        BYTE old_bad[BBT_BITMAP_SIZE];
+
+        ftl_format_reset_bad_map(&ftl->alloc, old_bad);
+
+        if (ftl_format_verify_blocks(ftl) != FTL_OK)
+        {
+            return FTL_ERROR;
+        }
+
+        /* 观测判据：旧 BAD 里有多少被本次体检判为好块（recovered），以及新 BAD 总数。 */
+        DWORD old_bad_n = 0U;
+        DWORD recovered = 0U;
+        DWORD new_bad   = 0U;
+
+        for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
+        {
+            const bool now_bad = ftl_block_is_bad(&ftl->alloc.blocks[g]);
+
+            if (bbt_is_bad(old_bad, g))
+            {
+                old_bad_n++;
+                if (!now_bad)
+                {
+                    recovered++;
+                }
+            }
+            if (now_bad)
+            {
+                new_bad++;
+            }
+        }
+
+        LOGI("[FLT] format --verify: full re-scan old_bad=%lu recovered=%lu new_bad=%lu\r\n",
+             old_bad_n,
+             recovered,
+             new_bad);
+    }
+
+    /* 用 verify 后的最终 BAD 集重建候选池（BBT/CP/Journal 可能从 shared spare 补块）。
+     * 失败 ⇒ 元数据区已无足够好块，格式化必须失败（release 拒绝，判据 9）。 */
+    if (!md_pool_build_all(&ftl->alloc))
+    {
+        LOGE("[FTL] format: metadata candidate pool build failed\r\n");
+        return FTL_ERROR;
+    }
+
+    /* BBT 候选可能因 verify 新发现的 BAD 改变 ⇒ 强制 bbt_save 在新池上重新定位，
+     * 把最终 BAD 图落到新的 BBT 候选块；否则下次开机扫旧候选可能读不到最新 record。 */
+    ftl->alloc.bbt.cursor_valid = 0U;
+    bbt_note_dirty(&ftl->alloc);
+
+    if (bbt_save(&ftl->alloc) != FTL_OK)
+    {
+        LOGE("[FTL] format: BBT re-save on new candidate pool failed\r\n");
         return FTL_ERROR;
     }
 
@@ -225,6 +470,28 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
         return FTL_ERROR;
     }
 
+    /* 安全回读：初始 Checkpoint 是否真的可读。候选池已跳过 BAD，但若候选耗尽/
+     * 写点落错，Header 仍可能“写成功、读失败”。当场读回，避免 format 打印 done、
+     * 下次开机却拒绝启动。 */
+    {
+        cp_header_t probe;
+        WORD        probe_idx = UINT16_MAX;
+
+        if (cp_find_latest(ftl->cp_handle, &probe, &probe_idx) != FTL_OK)
+        {
+            LOGE("[FTL] format: CP readback failed — metadata candidate pool may be exhausted\r\n");
+            return FTL_ERROR;
+        }
+    }
+
+    /* 提交点：initial CP 已可读 ⇒ 清 FORMAT_IN_PROGRESS 并落盘。此后掉电，
+     * 下次开机按「干净格式化」启动。落盘失败则保持「格式化中」，重做。 */
+    if (!ftl_format_end_bbt(&ftl->alloc))
+    {
+        LOGE("[BBT] format: 清 FORMAT_IN_PROGRESS 落盘失败 — 下次开机会重新格式化\r\n");
+        return FTL_ERROR;
+    }
+
     /* 同一 boot 随后会跑 ftl_boot_recovery；它从刚写的快照恢复，
      * 因此这里必须把 carve 结果清回空池（保留 BAD），避免 build_pools 的前置冲突。 */
     ftl_recovery_reset_blocks(ftl);
@@ -233,6 +500,78 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
     ftl->md_load_failed = 0U;
 
     return FTL_OK;
+}
+
+void ftl_boot_log_bad_areas(const struct ftl_context *ftl)
+{
+    /* Anchor 是分区表的第一段（基址必须是 0）：这样第一个区间只需判上界，
+     * 避免 `block >= 0` 的恒真比较告警。 */
+    _Static_assert(ANCHOR_BLOCK0 == 0U, "bad-area stats 假定元数据分区从块 0 开始");
+
+    DWORD anchor  = 0U;
+    DWORD cp      = 0U;
+    DWORD bbt     = 0U;
+    DWORD journal = 0U;
+    DWORD l2p_log = 0U;
+    DWORD spare   = 0U;
+    DWORD data    = 0U;
+
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        for (WORD block = 0U; block < BLOCKS_PER_PLANE; block++)
+        {
+            const WORD g = ftl_gblock(plane, block);
+
+            if (!ftl_block_is_bad(&ftl->alloc.blocks[g]))
+            {
+                continue;
+            }
+
+            if (block < (ANCHOR_BLOCK0 + ANCHOR_POOL_BLOCKS))
+            {
+                anchor++;
+            }
+            else if ((block >= CHECKPOINT_BLOCK0) &&
+                     (block < (CHECKPOINT_BLOCK0 + CHECKPOINT_POOL_BLOCKS)))
+            {
+                cp++;
+            }
+            else if ((block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS)))
+            {
+                bbt++;
+            }
+            else if ((block >= JOURNAL_BLOCK0) && (block < (JOURNAL_BLOCK0 + JOURNAL_BLOCK_COUNT)))
+            {
+                journal++;
+            }
+            else if ((block >= L2P_LOG_BLOCK0) && (block < L2P_LOG_AREA_END))
+            {
+                l2p_log++;
+            }
+            else if (ftl_is_metadata_spare_block(block))
+            {
+                spare++;
+            }
+            else
+            {
+                data++;
+            }
+        }
+    }
+
+    /* 只读 BST；不写介质。总量 = bad_count（BBT 与快照并集后的基线）。 */
+    LOGI("[BLK] bad areas ch=%u ce=%u lun=%u: anchor=%lu cp=%lu bbt=%lu journal=%lu l2p_log=%lu spare=%lu data=%lu total=%lu\r\n",
+         (unsigned)ftl->topo.ch,
+         (unsigned)ftl->topo.ce,
+         (unsigned)ftl->topo.lun,
+         anchor,
+         cp,
+         bbt,
+         journal,
+         l2p_log,
+         spare,
+         data,
+         anchor + cp + bbt + journal + l2p_log + spare + data);
 }
 
 /* --------------------------------------------------------------------
@@ -247,35 +586,61 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl)
  *             ② cp_find_latest 取最近快照，找不到 = 首次启动走 fresh_start。
  *             ③ 最新页 page_seq ≤ cp.jrn_get_sequence ⇒ 干净关机；否则异常掉电。
  * -------------------------------------------------------------------- */
-ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result)
+ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *result)
 {
     /* 前置条件（判据 2）：唯一调用者 main.c 传 &g_ftl[ch][ce][lun] 与栈上 &result。 */
 
-    ftl_boot_result_t local_result;
+    pfr_boot_result_t local_result;
     memset(&local_result, 0, sizeof(local_result));
 
     /* ① 扫 Journal 环形块池取最新页（只读）。
      *    判型要用它；三条路径也都要用它恢复写指针——jrn_init 把写指针/序号复位到
      *    (block0, page0)/1，而环形块**并没有被擦**（journal_truncate 只预擦环形下一块），
      *    不接回去就会二次编程 + 序号回退（详见 jrn_resume）。 */
-    journal_page_ref_t ring;
-    bool               ring_read_error = false;
+    jrn_page_ref_t ring;
+    bool           ring_read_error = false;
     (void)jrn_scan_latest(ftl->journal, &ring, &ring_read_error);
 
     /* ② 扫描 Checkpoint + 读取 块元数据快照（快照失败不触发格式化，只影响块元数据路径） */
-    l2p_checkpoint_header_t cp;
-    WORD                    cp_idx = UINT16_MAX;
+    cp_header_t cp;
+    WORD        cp_idx = UINT16_MAX;
 
     if (cp_find_latest(ftl->cp_handle, &cp, &cp_idx) != FTL_OK)
     {
         /* 无有效 Checkpoint → 出厂首次启动。空 Directory 是预期状态。 */
         ftl->md_load_failed = 0U;
 
-        ftl_status_t ret = ftl_boot_fresh_start(ftl, &ring);
+        ftl_status_e ret = ftl_boot_fresh_start(ftl, &ring);
         if (ret == FTL_OK)
         {
             local_result.boot_type       = BOOT_FRESH_START;
             local_result.cp_sequence     = 0U;
+            local_result.journal_entries = 0U;
+            local_result.blocks_restored = false;
+            *result                      = local_result;
+        }
+        return ret;
+    }
+
+    /* 运行期 Journal/L2P 日志块丢失后置的 REBUILD_REQUIRED（本仓自拟）：
+     * 快照不可信，强制走 full metadata rebuild；新 CP 落盘后才清标志（见
+     * cp_complete_hdr_write）。此时即使 Directory 加载失败也继续——重建本身
+     * 就不依赖旧 Directory。 */
+    if (alc_is_bbt_rebuild_required(&ftl->alloc))
+    {
+        LOGE("[BOOT] rebuild required (metadata log lost) — force full metadata rebuild\r\n");
+
+        bool         blocks_restored = false;
+        ftl_status_e ret             = ftl_boot_clean_start(ftl, &cp, 0U, true, &blocks_restored, &ring);
+
+        if (ret == FTL_OK)
+        {
+            /* 让首个 CP 尽快提交重建后的状态并清标志。 */
+            jrn_request_checkpoint(ftl->journal);
+
+            ftl->md_load_failed          = 0U;
+            local_result.boot_type       = BOOT_CLEAN_START;
+            local_result.cp_sequence     = cp.sequence;
             local_result.journal_entries = 0U;
             local_result.blocks_restored = false;
             *result                      = local_result;
@@ -324,7 +689,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
     if ((!ring_read_error) && ((ring.page_seq + ring.entry_count) <= cp.jrn_get_sequence))
     {
         /* 干净关机 */
-        ftl_status_t ret = ftl_boot_clean_start(ftl, &cp, blocks_valid ? 1U : 0U, &local_result.blocks_restored, &ring);
+        ftl_status_e ret = ftl_boot_clean_start(ftl, &cp, blocks_valid ? 1U : 0U, false, &local_result.blocks_restored, &ring);
         if (ret == FTL_OK)
         {
             local_result.boot_type       = BOOT_CLEAN_START;
@@ -337,7 +702,7 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
     else
     {
         /* 异常掉电 */
-        ftl_status_t ret = ftl_boot_power_failure(ftl, &cp, blocks_valid ? 1U : 0U, &local_result);
+        ftl_status_e ret = ftl_boot_power_failure(ftl, &cp, blocks_valid ? 1U : 0U, &local_result);
         if (ret == FTL_OK)
         {
             local_result.boot_type   = BOOT_POWER_FAILURE;
@@ -357,9 +722,9 @@ ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *resul
  *             **只把 state == NONE 的块入池**；full metadata rebuild / 快照已认领的 CLOSED/LOG/RETIRED
  *             只计入 total_blocks。快照路径不调用它（池来自快照），故要求池计数为 0。
  * -------------------------------------------------------------------- */
-static ftl_status_t ftl_boot_carve_pools(struct ftl_context *ftl)
+static ftl_status_e ftl_boot_carve_pools(struct ftl_context *ftl)
 {
-    ftl_allocator_t *alloc = &ftl->alloc;
+    alc_t *alloc = &ftl->alloc;
 
     ASSERT(alloc->free_count == 0U);
     for (BYTE p = 0U; p < PLANE_NUM; p++)
@@ -411,7 +776,7 @@ static ftl_status_t ftl_boot_carve_pools(struct ftl_context *ftl)
 
 /* 开机池建立后：把 CP 快照 BAD 并集 / full metadata rebuild 标坏造成的 Spare 缺口，从 Free Pool 补回。
  * Free 不足时自然停在低水位，并打一行告警（容量下降是真实结果）。 */
-static void recovery_refill_spare_pools(ftl_context_t *ftl)
+static void recovery_refill_spare_pools(ftl_ctx_t *ftl)
 {
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
@@ -439,7 +804,7 @@ static void recovery_refill_spare_pools(ftl_context_t *ftl)
  *             ④ jrn_resume 按环内最新页接回写指针（序号下限 1）。
  *             ⑤ checkpoint sequence 归零。
  * -------------------------------------------------------------------- */
-static ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_page_ref_t *ring)
+static ftl_status_e ftl_boot_fresh_start(struct ftl_context *ftl, const jrn_page_ref_t *ring)
 {
     /* 前置条件（判据 2）：唯一调用者 ftl_boot_recovery 持有实例与 ring 快照。 */
 
@@ -451,7 +816,7 @@ static ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_
     /* ② full metadata rebuild **先于 carve**：写过的块必须先被认领成 CLOSED；否则 carve 把它们放进
      *    Spare/OP 后，full metadata rebuild 再把同块建 Closed ⇒ 池成员与非空闲块重叠。 */
     {
-        ftl_rebuild_stats_t rebuild_stats;
+        pfr_rebuild_stats_t rebuild_stats;
         ftl_rebuild_closed_sb_list(ftl, &rebuild_stats);
     }
 
@@ -475,13 +840,14 @@ static ftl_status_t ftl_boot_fresh_start(struct ftl_context *ftl, const journal_
     return FTL_OK;
 }
 
-static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
-                                         const l2p_checkpoint_header_t *cp);
+static void ftl_boot_apply_region_bitmap(ftl_ctx_t         *ftl,
+                                         const cp_header_t *cp);
 
 /* --------------------------------------------------------------------
  * ftl_boot_clean_start
  *   功能：干净关机恢复——块元数据快照有效时加载块元数据 + 池 + Closed 列表；否则 full metadata rebuild → carve。
  *   参数：ftl —— FTL 实例；cp —— 最近 Checkpoint Header；blocks_valid —— 块元数据快照是否已通过校验；
+ *         force_rebuild —— true = 禁止走「initial CP 跳过重建」捷径（REBUILD_REQUIRED 路径）；
  *         blocks_restored —— 出参：1 = 走 快照路径；ring —— Journal 环形块池快照。
  *   返回：FTL_OK / FTL_ERROR。
  *   实现要点：clean 下 Checkpoint 覆盖全部 journal 条目，不需要回放；但必须
@@ -489,11 +855,12 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
  *             ⚠ 即使判定 clean，也要 probe 池块：本仓无关机 journal flush，
  *               「丢最后一页 journal」与 clean 在介质上不可区分。
  * -------------------------------------------------------------------- */
-static ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
-                                         const l2p_checkpoint_header_t *cp,
-                                         BYTE                           blocks_valid,
-                                         bool                          *blocks_restored,
-                                         const journal_page_ref_t      *ring)
+static ftl_status_e ftl_boot_clean_start(struct ftl_context   *ftl,
+                                         const cp_header_t    *cp,
+                                         BYTE                  blocks_valid,
+                                         bool                  force_rebuild,
+                                         bool                 *blocks_restored,
+                                         const jrn_page_ref_t *ring)
 {
     /* ① 共享 cache 已由设备级 init 置空；本路径只按 CP bitmap 约束本 owner 的行
      *    （首次 miss 时按需从 NAND L2P Table 加载）。 */
@@ -509,7 +876,7 @@ static ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
             /* 预载 CP region，供 probe 的逐 CW L2P 反查复用（未覆盖区懒加载）。 */
             ftl_boot_apply_region_bitmap(ftl, cp);
 
-            ftl_block_restore_stats_t stats;
+            pfr_block_restore_stats_t stats;
             memset(&stats, 0, sizeof(stats));
             ftl_recovery_probe_blocks(ftl, block_words, &stats);
 
@@ -538,7 +905,7 @@ static ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
         /* initial Checkpoint = 全量格式化写的空快照（seq=1 / 无块表 / journal 水位 0）。
          * 此时用户区已由 format 擦净，full metadata rebuild（全盘扫描 4096×64 页）没有信息可恢复，
          * 直接 reset + carve 即可；跳过它把首次启动从几十秒降到一次池切分。 */
-        const bool initial_cp = (cp->sequence == 1U) && (cp->jrn_get_sequence == 0U) &&
+        const bool initial_cp = (!force_rebuild) && (cp->sequence == 1U) && (cp->jrn_get_sequence == 0U) &&
                                 (cp->block_word_count == 0U) && (cp->wear_entry_count == 0U);
 
         if (initial_cp)
@@ -555,7 +922,7 @@ static ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
         /* full metadata rebuild 先认领写过块，carve 再只把 state==NONE 的块入池（避免池成员重叠）。 */
         if (!initial_cp)
         {
-            ftl_rebuild_stats_t rebuild_stats;
+            pfr_rebuild_stats_t rebuild_stats;
 
             ftl_rebuild_closed_sb_list(ftl, &rebuild_stats);
         }
@@ -597,8 +964,8 @@ static ftl_status_t ftl_boot_clean_start(struct ftl_context            *ftl,
  *
  * 必须在 jrn_replay 之后调用。
  * -------------------------------------------------------------------- */
-static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
-                                         const l2p_checkpoint_header_t *cp)
+static void ftl_boot_apply_region_bitmap(ftl_ctx_t         *ftl,
+                                         const cp_header_t *cp)
 {
     const DWORD dim = ftl_topo_dim(ftl->topo);
 
@@ -661,10 +1028,10 @@ static void ftl_boot_apply_region_bitmap(ftl_context_t                 *ftl,
  *             `page_seq + entry_count > cp_sequence`；只回放最大一页会静默丢
  *             ≥2 页条目）；④ full metadata rebuild closed_sb_list（不再恢复 hot_sb/cold_sb 写指针）。
  * -------------------------------------------------------------------- */
-static ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
-                                           const l2p_checkpoint_header_t *cp,
-                                           BYTE                           blocks_valid,
-                                           ftl_boot_result_t             *result)
+static ftl_status_e ftl_boot_power_failure(struct ftl_context *ftl,
+                                           const cp_header_t  *cp,
+                                           BYTE                blocks_valid,
+                                           pfr_boot_result_t  *result)
 {
     /* 前置条件（判据 2）：唯一调用者 ftl_boot_recovery 持有实例与局部结构。 */
 
@@ -674,9 +1041,9 @@ static ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
      *    ⚠ 不能在此整体 re-init：会抹掉前面 LUN 刚回放的 DIRTY 行与全局脏位。 */
 
     /* ② 块元数据快照恢复（若有效）：先恢复块元数据，回放时才能同步维护 valid_count。 */
-    BYTE                       blocks_applied = 0U;
-    WORD                      *block_words    = cp_get_block_words(ftl->cp_handle);
-    journal_replay_block_ctx_t block_ctx;
+    BYTE             blocks_applied = 0U;
+    WORD            *block_words    = cp_get_block_words(ftl->cp_handle);
+    jrn_replay_ctx_t block_ctx;
     memset(&block_ctx, 0, sizeof(block_ctx));
 
     if ((blocks_valid != 0U) && ftl_recovery_restore_blocks(ftl, block_words))
@@ -707,6 +1074,15 @@ static ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
         block_ctx.ok = 0U;
     }
 
+    /* 降级 region 只丢旧映射，不再让快照失效（范围化恢复）。这里先记标记，
+     * probe 阶段即使没扫到相关块也能在 boot 结果里体现（RISK-BOOT-18）。 */
+    if (jrn_replay_degraded_entries() != 0U)
+    {
+        result->scoped = true;
+        LOGW("[BLK] scoped recovery: %lu journal entr(ies) hit degraded L2P region(s) — snapshot kept\r\n",
+             jrn_replay_degraded_entries());
+    }
+
     /* ④ 按 Checkpoint region_bitmap 局部加载（F4）：跳过 DIRTY 回放行，
      *    bitmap 区预载 CLEAN，非 bitmap 区 INVALID（懒加载 CP 时刻快照）。 */
     ftl_boot_apply_region_bitmap(ftl, cp);
@@ -716,7 +1092,7 @@ static ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
 
     if ((blocks_applied != 0U) && (block_ctx.ok != 0U))
     {
-        ftl_block_restore_stats_t stats;
+        pfr_block_restore_stats_t stats;
         memset(&stats, 0, sizeof(stats));
         ftl_recovery_probe_blocks(ftl, block_words, &stats);
 
@@ -724,27 +1100,50 @@ static ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
         {
             LOGW("[BLK] probe: %u L2P read error(s) — fallback to full metadata rebuild\r\n", (unsigned)stats.l2p_read_errors);
         }
-        else if (ftl_recovery_build_pools(ftl, block_words))
+        else
         {
-            restored = 1U;
-            LOGI("[BLK] restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n",
-                 (unsigned)stats.closed_blocks,
-                 (unsigned)stats.log_blocks,
-                 (unsigned)ftl->alloc.free_count,
-                 (unsigned)alc_get_op_total(&ftl->alloc),
-                 (unsigned)alc_get_spare_total(&ftl->alloc),
-                 (unsigned)stats.anomalies,
-                 stats.valid_cw);
+            /* 降级 region 只丢映射、不影响 valid_count 增量 ⇒ 不让它触发全量重建。
+             * 丢失范围由 host 读路径按 IO_ERROR 暴露（RISK-BOOT-18）。 */
+            if (stats.l2p_degraded_cw != 0U)
+            {
+                result->scoped = true;
+                LOGW("[BLK] scoped recovery: %u CW in degraded L2P region(s) — snapshot kept, mappings lost\r\n",
+                     (unsigned)stats.l2p_degraded_cw);
+            }
+
+            if (ftl_recovery_build_pools(ftl, block_words))
+            {
+                restored = 1U;
+                LOGI("[BLK] restore closed=%u log=%u free=%u op=%u spare=%u anomalies=%u valid_cw=%lu\r\n",
+                     (unsigned)stats.closed_blocks,
+                     (unsigned)stats.log_blocks,
+                     (unsigned)ftl->alloc.free_count,
+                     (unsigned)alc_get_op_total(&ftl->alloc),
+                     (unsigned)alc_get_spare_total(&ftl->alloc),
+                     (unsigned)stats.anomalies,
+                     stats.valid_cw);
+            }
         }
     }
 
     if (!restored)
     {
-        LOGW("[BLK] fallback to full metadata rebuild (power failure, ctx_ok=%u)\r\n", (unsigned)block_ctx.ok);
+        /* 走了全量重建 ⇒ 本次启动**不是**范围化恢复。清掉可能由 journal/probe
+         * 提前置上的 scoped，否则 boot 位会把 fallback 谎报成 scoped（R1）。 */
+        result->scoped = false;
+
+        /* 诊断：把「快照是否加载 / 是否应用 / 回放是否成功」一并打出——
+         * ctx_ok=0 有三种来源：blocks_valid=0（快照没读成）、applied=0（快照被
+         * Pass 0 拒绝）、replay_ok=0 或回放内部把 ok 清 0（降级/写失败）。 */
+        LOGW("[BLK] fallback to full metadata rebuild (power failure, blocks_valid=%u applied=%u ctx_ok=%u replay_ok=%u)\r\n",
+             (unsigned)blocks_valid,
+             (unsigned)blocks_applied,
+             (unsigned)block_ctx.ok,
+             (unsigned)(replay_ok ? 1U : 0U));
         ftl_recovery_reset_blocks(ftl);
 
         /* full metadata rebuild 用已回放的 L2P 反查；先认领写过块，carve 再只把 state==NONE 的块入池。 */
-        ftl_rebuild_stats_t rebuild_stats;
+        pfr_rebuild_stats_t rebuild_stats;
         ftl_rebuild_closed_sb_list(ftl, &rebuild_stats);
         (void)ftl_boot_carve_pools(ftl);
     }
@@ -792,7 +1191,7 @@ static ftl_status_t ftl_boot_power_failure(struct ftl_context            *ftl,
  * ⚠ 代价：存在 hole 的块要扫完全部页（正常部分写块仍在第一个空白页停止）。
  *   这类块只可能由写失败产生，属少数；换来的 valid_count 正确性是 GC 选择
  *   victim 的前提。 */
-static BYTE ftl_recovery_scan_write_pointer(const ftl_context_t *ftl, BYTE plane, WORD block, BYTE *raw_buf)
+static BYTE ftl_recovery_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WORD block, BYTE *raw_buf)
 {
     /*
      * 快速判空：page 0 的 4 个 CW META 全 FF ⇒ 整块空白。
@@ -841,17 +1240,48 @@ static BYTE ftl_recovery_scan_write_pointer(const ftl_context_t *ftl, BYTE plane
     return first_blank;
 }
 
+/* rebuild / restore 扫描期的 L2P 异常汇总（每轮扫描一行）。
+ *
+ * `ftl_recovery_close_block` 每扫描到一个写过块就调用一次；逐块/逐 CW 打印会写满
+ * UART TX 环（环满时 uart_log_write 会等待）并拖慢开机（RISK-JN-05）。
+ * 计数是文件级：两条扫描入口各自清零、结束时汇总；boot 路径单线程、多实例顺序执行。 */
+static DWORD s_rebuild_read_fail_cw;
+static DWORD s_rebuild_degraded_cw;
+static DWORD s_rebuild_first_region;
+
+static void rebuild_l2p_stats_reset(void)
+{
+    s_rebuild_read_fail_cw = 0U;
+    s_rebuild_degraded_cw  = 0U;
+    s_rebuild_first_region = UINT32_MAX;
+}
+
+static void rebuild_l2p_stats_report(void)
+{
+    if (s_rebuild_read_fail_cw != 0U)
+    {
+        LOGW("[BLK] rebuild: L2P read failed for %lu CW — valid_count 可能少算\r\n",
+             s_rebuild_read_fail_cw);
+    }
+    if (s_rebuild_degraded_cw != 0U)
+    {
+        LOGW("[BLK] rebuild: L2P region %lu degraded — %lu CW skipped (mapping lost)\r\n",
+             s_rebuild_first_region,
+             s_rebuild_degraded_cw);
+    }
+}
+
 /* 写过的物理块：进 Closed 列表（退化单 plane 条目）+ 逐 CW L2P 双校验回填 valid_count
  * （只计 L2P 仍指向本页本 CW 的真有效 CW，覆盖/torn 页不计；无常驻位图）。
  *
  * Policy B 下配对不再需要被恢复——两 plane 的块各自独立归位即可，故本函数按
  * **单个物理块** 建一条 Closed 条目，另一 plane 记 FTL_BLOCK_NO_PLANE 哨兵。 */
-static void ftl_recovery_close_block(ftl_context_t       *ftl,
+static void ftl_recovery_close_block(ftl_ctx_t           *ftl,
                                      BYTE                 plane,
                                      WORD                 block,
                                      BYTE                 pages_written,
                                      BYTE                 temperature,
-                                     ftl_rebuild_stats_t *stats)
+                                     pfr_rebuild_stats_t *stats)
 {
     /* 前置条件（判据 2）：pages_written 来自 ftl_recovery_scan_write_pointer，调用者已跳过 0。 */
 
@@ -864,7 +1294,7 @@ static void ftl_recovery_close_block(ftl_context_t       *ftl,
     }
     plane_blocks[plane] = block;
 
-    ftl_allocator_t *alloc = &ftl->alloc;
+    alc_t *alloc = &ftl->alloc;
 
     WORD sb_idx = alc_add_closed_sb(alloc, plane_blocks, temperature);
 
@@ -885,7 +1315,7 @@ static void ftl_recovery_close_block(ftl_context_t       *ftl,
      *   读回来也解不出 LBA，纯白读。
      * ⚠ [待上板] 掉电重启后核对 `[BLK] rebuild ... partial=... valid_cw=...`：
      *   valid_cw 应与改前一致（空白页本就不贡献有效 CW），partial 块的读页数减少。 */
-    ftl_block_t *b = &alloc->blocks[ftl_gblock(plane, block)];
+    bst_block_t *b = &alloc->blocks[ftl_gblock(plane, block)];
     for (WORD page = 0U; page < pages_written; page++)
     {
         DWORD pba = super_block_page_pba(ftl->topo, alc_closed_at(alloc, sb_idx), plane, page);
@@ -916,7 +1346,7 @@ static void ftl_recovery_close_block(ftl_context_t       *ftl,
             {
                 /* 读失败 ⇒ 该 CW 无法确认有效；valid_count 会少算。计数向上传播：
                  * 启动快照路径据此回退 full metadata rebuild（RISK-BOOT-11），full metadata rebuild 路径至少可见。 */
-                LOGW("[BLK] L2P read failed lba=%lu — valid_count 可能少算\r\n", cw_lba[cw]);
+                s_rebuild_read_fail_cw++;
                 if (stats != NULL)
                 {
                     stats->l2p_read_errors++;
@@ -925,15 +1355,23 @@ static void ftl_recovery_close_block(ftl_context_t       *ftl,
             }
 
             /* 读成功也可能来自“重试耗尽 → 降级为全未映射”：返回值同样是 OK + INVALID。
-             * boot 必须把这种情况当读错误，否则会误报 restored（RISK-L2P-04）。 */
+             * 降级只丢**该 region 未被 Journal 覆盖的旧映射**，不影响 valid_count 增量
+             * ⇒ 计入 l2p_degraded_cw 并继续，不再据此回退全量重建（RISK-BOOT-18）；
+             * 丢失的映射由 host 读路径按 IO_ERROR 暴露。 */
             const DWORD global_region = lba_to_global_region(cw_lba[cw]);
 
             if (l2p_is_region_degraded(ftl->cache, global_region))
             {
-                LOGW("[BLK] L2P region %lu degraded — snapshot incomplete\r\n", global_region);
+                s_rebuild_degraded_cw++;
+                if (s_rebuild_first_region == UINT32_MAX)
+                {
+                    s_rebuild_first_region = global_region;
+                }
                 if (stats != NULL)
                 {
-                    stats->l2p_read_errors++;
+                    /* 降级 = 映射已丢（范围化恢复接受它）；只有真正的读失败才计入
+                     * l2p_read_errors 并回退全量重建（RISK-BOOT-18）。 */
+                    stats->l2p_degraded_cw++;
                 }
                 continue;
             }
@@ -960,18 +1398,20 @@ static void ftl_recovery_close_block(ftl_context_t       *ftl,
  *   实现要点：Policy B 下两 plane 的块不再同号 ⇒ 按**单物理块**建 Closed 条目
  *             （另一 plane 记 FTL_BLOCK_NO_PLANE 哨兵），配对无需、也无法恢复。
  * -------------------------------------------------------------------- */
-static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, ftl_rebuild_stats_t *stats)
+static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stats_t *stats)
 {
     /* 前置条件（判据 2）：唯一调用者在本文件（boot 三条路径）。 */
 
     BYTE raw_buf[PAGE_SIZE];
 
-    ftl_allocator_t *alloc = &ftl->alloc;
+    alc_t *alloc = &ftl->alloc;
 
     if (stats != NULL)
     {
         memset(stats, 0, sizeof(*stats));
     }
+
+    rebuild_l2p_stats_reset();
 
     /* Policy B：**逐 plane 独立扫描**——两 plane 的块不再同号。配对只在写入时由
      * allocator 创建，之后从不被查找（multi-plane 读的两个 PBA 各自从 L2P 查；
@@ -982,7 +1422,7 @@ static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, ftl_rebuild_stat
         for (WORD block = 0U; block < BLOCKS_PER_PLANE; block++)
         {
             WORD         g = ftl_gblock(plane, block);
-            ftl_block_t *b = &alloc->blocks[g];
+            bst_block_t *b = &alloc->blocks[g];
 
             /* ① 坏块跳过（判据与 main.c free pool 回填一致，per-plane 块号） */
             if (ftl_block_is_bad(b))
@@ -1050,6 +1490,8 @@ static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, ftl_rebuild_stat
              (unsigned)stats->partial_blocks,
              stats->valid_cw);
     }
+
+    rebuild_l2p_stats_report();
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1073,7 +1515,7 @@ static bool recovery_is_fixed_block(WORD g)
 
 /* 把一个物理块发成退化单 plane Closed 条目（与 full metadata rebuild 同口径；Policy B 不要求配对）。
  * 返回 false = closed_sb_list 满（调用者据此判恢复失败，回退 full metadata rebuild）。 */
-static bool recovery_add_closed(ftl_context_t *ftl, WORD g, BYTE temperature)
+static bool recovery_add_closed(ftl_ctx_t *ftl, WORD g, BYTE temperature)
 {
     WORD plane_blocks[PLANE_NUM];
 
@@ -1092,9 +1534,9 @@ static bool recovery_add_closed(ftl_context_t *ftl, WORD g, BYTE temperature)
     return true;
 }
 
-static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK_TOTAL])
+static bool ftl_recovery_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL])
 {
-    ftl_allocator_t *alloc = &ftl->alloc;
+    alc_t *alloc = &ftl->alloc;
 
     /* Pass 0：先全量校验。任何非法 word 必须在**改动任何状态之前**拒绝——
      * 否则后面遇到坏 word 时，前面已应用的 BAD/state 会留下（reset 保留 BAD），
@@ -1148,7 +1590,7 @@ static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK
         const BYTE temp  = cp_block_word_temp(w);
         const BYTE pool  = cp_block_word_pool(w);
 
-        ftl_block_t *b = &alloc->blocks[g];
+        bst_block_t *b = &alloc->blocks[g];
 
         if (recovery_is_fixed_block(g))
         {
@@ -1191,7 +1633,7 @@ static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK
             return false;
         }
 
-        switch ((ftl_block_state_t)st)
+        switch ((bst_state_e)st)
         {
             case FTL_BLOCK_STATE_BAD:
                 /* 快照的 BAD 与 BBT 的并集；bad_count 只对新增项加一，
@@ -1251,7 +1693,7 @@ static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK
         {
             continue;
         }
-        ftl_block_t *b = &alloc->blocks[g];
+        bst_block_t *b = &alloc->blocks[g];
 
         if (ftl_block_is_bad(b))
         {
@@ -1282,7 +1724,7 @@ static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK
         {
             continue;
         }
-        ftl_block_t *b = &alloc->blocks[g];
+        bst_block_t *b = &alloc->blocks[g];
 
         if (ftl_block_is_bad(b) || (ftl_block_state(b) != FTL_BLOCK_STATE_CLOSED))
         {
@@ -1297,15 +1739,17 @@ static bool ftl_recovery_restore_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK
     return true;
 }
 
-static void ftl_recovery_probe_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK_TOTAL], ftl_block_restore_stats_t *stats)
+static void ftl_recovery_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL], pfr_block_restore_stats_t *stats)
 {
-    ftl_allocator_t *alloc = &ftl->alloc;
+    alc_t *alloc = &ftl->alloc;
 
     if (stats != NULL)
     {
         memset(stats, 0, sizeof(*stats));
         stats->closed_blocks = alloc->closed_sb_count; /* restore / replay 已建的条目 */
     }
+
+    rebuild_l2p_stats_reset();
 
     BYTE raw_buf[PAGE_SIZE];
 
@@ -1316,16 +1760,16 @@ static void ftl_recovery_probe_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK_T
             continue;
         }
 
-        ftl_block_t *b = &alloc->blocks[g];
+        bst_block_t *b = &alloc->blocks[g];
 
         if (ftl_block_is_bad(b))
         {
             continue;
         }
 
-        const BYTE              plane = ftl_gblock_plane(g);
-        const WORD              block = ftl_gblock_block(g);
-        const ftl_block_state_t st    = ftl_block_state(b);
+        const BYTE        plane = ftl_gblock_plane(g);
+        const WORD        block = ftl_gblock_block(g);
+        const bst_state_e st    = ftl_block_state(b);
 
         if (st == FTL_BLOCK_STATE_LOG)
         {
@@ -1409,7 +1853,7 @@ static void ftl_recovery_probe_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK_T
         ftl_block_clear_valid(b);
         ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 
-        ftl_rebuild_stats_t rebuild;
+        pfr_rebuild_stats_t rebuild;
         memset(&rebuild, 0, sizeof(rebuild));
         ftl_recovery_close_block(ftl, plane, block, PAGES_PER_BLOCK, FTL_TEMP_HOT, &rebuild);
 
@@ -1417,14 +1861,17 @@ static void ftl_recovery_probe_blocks(ftl_context_t *ftl, WORD words[FTL_BLOCK_T
         {
             stats->anomalies++;
             stats->l2p_read_errors += rebuild.l2p_read_errors;
+            stats->l2p_degraded_cw += rebuild.l2p_degraded_cw;
             stats->valid_cw += rebuild.valid_cw;
         }
     }
+
+    rebuild_l2p_stats_report();
 }
 
-static bool ftl_recovery_build_pools(ftl_context_t *ftl, const WORD words[FTL_BLOCK_TOTAL])
+static bool ftl_recovery_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_TOTAL])
 {
-    ftl_allocator_t *alloc = &ftl->alloc;
+    alc_t *alloc = &ftl->alloc;
 
     /* 此时不应有池条目（restore 不发、replay/probe 只建 Closed）。 */
     ASSERT(alloc->free_count == 0U);
@@ -1443,7 +1890,7 @@ static bool ftl_recovery_build_pools(ftl_context_t *ftl, const WORD words[FTL_BL
             continue;
         }
 
-        ftl_block_t *b = &alloc->blocks[g];
+        bst_block_t *b = &alloc->blocks[g];
 
         if (ftl_block_is_bad(b))
         {
@@ -1500,13 +1947,13 @@ static bool ftl_recovery_build_pools(ftl_context_t *ftl, const WORD words[FTL_BL
     return true;
 }
 
-static void ftl_recovery_reset_blocks(ftl_context_t *ftl)
+static void ftl_recovery_reset_blocks(ftl_ctx_t *ftl)
 {
-    ftl_allocator_t *alloc = &ftl->alloc;
+    alc_t *alloc = &ftl->alloc;
 
     for (WORD g = 0U; g < FTL_BLOCK_TOTAL; g++)
     {
-        ftl_block_t *b = &alloc->blocks[g];
+        bst_block_t *b = &alloc->blocks[g];
 
         if (ftl_block_is_bad(b))
         {
@@ -1534,7 +1981,7 @@ static void ftl_recovery_reset_blocks(ftl_context_t *ftl)
  * 池块（FREE/OP/SPARE）⇒ Closed；BAD 忽略；固定/活 LOG 块 ⇒ false（回放不一致）。 */
 static bool recovery_materialize_pba(void *ctx, DWORD pba)
 {
-    ftl_context_t *ftl = (ftl_context_t *)ctx;
+    ftl_ctx_t *ftl = (ftl_ctx_t *)ctx;
 
     /* journal 条目来自介质（H29 不可信输入）：先校验 PBA 属于本实例且字段合法，
      * 否则会把 valid_count 记到别的块，而 L2P 存下一个越界地址。 */
@@ -1544,15 +1991,15 @@ static bool recovery_materialize_pba(void *ctx, DWORD pba)
         return false; /* block_ctx.ok=0 ⇒ 调用者回退 full metadata rebuild */
     }
 
-    ftl_allocator_t *alloc = &ftl->alloc;
-    const WORD       g     = ftl_pba_gblock(pba);
+    alc_t     *alloc = &ftl->alloc;
+    const WORD g     = ftl_pba_gblock(pba);
 
     if (g >= FTL_BLOCK_TOTAL || recovery_is_fixed_block(g))
     {
         return false;
     }
 
-    ftl_block_t *b = &alloc->blocks[g];
+    bst_block_t *b = &alloc->blocks[g];
 
     if (ftl_block_is_bad(b))
     {
@@ -1600,7 +2047,7 @@ static bool recovery_materialize_pba(void *ctx, DWORD pba)
  * materialize 已保证该块处于可记账状态；这里只做范围检查与 BST 单数据源更新。 */
 static void recovery_valid_add(void *ctx, DWORD pba, bool *ok)
 {
-    ftl_context_t *ftl = (ftl_context_t *)ctx;
+    ftl_ctx_t *ftl = (ftl_ctx_t *)ctx;
 
     const WORD g = ftl_pba_gblock(pba);
 
@@ -1610,7 +2057,7 @@ static void recovery_valid_add(void *ctx, DWORD pba, bool *ok)
         return;
     }
 
-    ftl_block_t *b = &ftl->alloc.blocks[g];
+    bst_block_t *b = &ftl->alloc.blocks[g];
 
     if (ftl_block_is_bad(b))
     {
@@ -1626,7 +2073,7 @@ static void recovery_valid_add(void *ctx, DWORD pba, bool *ok)
 
 static void recovery_valid_sub(void *ctx, DWORD pba, bool *ok)
 {
-    ftl_context_t *ftl = (ftl_context_t *)ctx;
+    ftl_ctx_t *ftl = (ftl_ctx_t *)ctx;
 
     const WORD g = ftl_pba_gblock(pba);
 
@@ -1636,7 +2083,7 @@ static void recovery_valid_sub(void *ctx, DWORD pba, bool *ok)
         return;
     }
 
-    ftl_block_t *b = &ftl->alloc.blocks[g];
+    bst_block_t *b = &ftl->alloc.blocks[g];
 
     if (ftl_block_is_bad(b))
     {

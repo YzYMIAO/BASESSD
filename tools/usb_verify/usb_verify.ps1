@@ -108,7 +108,10 @@ $ErrorActionPreference = 'Stop'
 # ── 目标识别常量 ──────────────────────────────────────────────────────────
 # 这三个常量同时用于“自动找盘”和“防误操作校验”；不要为了省事放宽。
 $VolumeLabel      = 'SOFTSSD'       # format 后写入的卷标
-$ExpectedSize     = 449839104       # 429 MiB = 878,592 × 512B（主机可见容量，见 ftl.h FTL_LBA_MAX）
+$ExpectedSize     = 444596224       # 424 MiB = 868,352 × 512B（0 坏块时的主机可见容量，见 ftl.h FTL_LBA_MAX）
+# 主机可见容量是**运行时动态**的（按实际坏块扣减，RISK-CAP-03）：每个坏块 ≈ 128 KiB。
+# 因此按窗口匹配而不是精确相等；名称/总线仍精确校验，防误碰其它 USB 盘。
+$SizeTolerance    = 67108864        # ±64 MiB ≈ 512 个坏块
 # 2KB = 一个 NAND plane 页；pattern 按 2KB 分组，专门抓 plane 镜像错误。
 $PatternBlockSize = 2048
 $TestFileName     = 'test.bin'
@@ -143,17 +146,17 @@ function Get-TargetDisk {
         $disk = Get-Disk | Where-Object {
             ($_.BusType -eq 'USB') -and
             ($_.FriendlyName -like '*SOFTSSD*') -and
-            ($_.Size -eq $ExpectedSize)
+            ([math]::Abs($_.Size - $ExpectedSize) -le $SizeTolerance)
         } | Select-Object -First 1
     }
 
     if ($null -eq $disk) {
         throw ('SOFTSSD USB disk not found: need FriendlyName=*SOFTSSD*, ' +
-               'Size=449839104, BusType=USB')
+               'Size within 424MiB +/- 64MiB, BusType=USB')
     }
 
     if (($disk.BusType -ne 'USB') -or
-        ($disk.Size -ne $ExpectedSize) -or
+        ([math]::Abs($disk.Size - $ExpectedSize) -gt $SizeTolerance) -or
         ($disk.FriendlyName -notlike '*SOFTSSD*')) {
         throw ("Disk {0} is not the expected SOFTSSD USB disk: name='{1}' size={2} bus={3}" -f `
             $disk.Number, $disk.FriendlyName, $disk.Size, $disk.BusType)

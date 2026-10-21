@@ -14,7 +14,7 @@
  *   ⑤ 擦除各 Plane Block → 归还到 Free Pool
  *
  * ⚠ ②~⑤ 的执行体**不在本文件**：搬移是一个异步 job，GC 与 WL 共用同一台引擎，
- *   见 `ftl/migrate.h` / `migrate.c`（migrate_handle_t + mig_begin_gc / mig_begin_wl /
+ *   见 `ftl/migrate.h` / `migrate.c`（mig_handle_t + mig_begin_gc / mig_begin_wl /
  *   mig_handle + ftl_migrate_callback）。本文件只留**选 victim 与共用原语**：
  *   · gc_select_victim   —— 四项加权评分（GC 侧选块策略）
  *   · gc_decode_cw_lba   —— 已完成读命令的逐 CW META 解码（异步搬移 + 掉电重建共用）
@@ -26,7 +26,7 @@
  *   掉电时最多遗留"孤悬"Block，下次 GC 回收
  */
 
-#include "allocator.h"   /* ftl_allocator_t, super_block_t */
+#include "allocator.h"   /* alc_t, super_block_t */
 #include "fc_command.h"  /* fc_command_t（gc_decode_cw_lba 的形参） */
 #include "ftl_config.h"  /* DWORD */
 #include "ftl_type.h"    /* DWORD */
@@ -78,6 +78,26 @@
 #define GC_WEAR_LEVEL_RATIO     (10U) /* 最大/最小擦除比阈值 */
 #define GC_WEAR_LEVEL_MIN_ERASE (64U) /* 地板：max 擦除次数低于此值不触发 T5 */
 
+/* ── GC 收益判据（空间 GC：T1/T4；T5 磨损不适用）──
+ * 满盘且写入几乎全是有效数据时（实测 victim 96–98% 有效），按水位无限 GC 只会
+ * 以 ~2% 的净收益持续搬移：写放大、磨损、读带宽被抢。
+ *
+ * 判据按场景分三档（见 gc_benefit_mode_e）：
+ *   · host 正在写：不筛（写流必须靠搬移腾出空间，否则满盘写会卡顿）；
+ *   · host 不写（空闲/只读）：victim 有效率 > GC_VICTIM_MAX_VALID_PCT ⇒ 不搬；
+ *   · 紧急水位（free <= FREE_POOL_EMERGENCY）：可回收比例 < GC_EMERGENCY_MIN_GAIN_PCT
+ *     ⇒ 不搬，由写路径按「无进展」上报 IO_ERROR（不再无尽重试）。
+ *
+ * ⚠ 80% / 1% / 500 ms / 2 s 均为**本仓自拟**经验值（无外部出处）：
+ *   · 80% 有意低于实测满盘有效率（96–98%），保证满盘只读时立刻停；
+ *   · 1% ≈ 5 CW / 512-CW SB，低于它的搬移是纯churn；
+ *   · 500 ms 把「无收益」后的 closed-list 复扫从 100 次/秒降到 2 次/秒；
+ *   · 2 s 是 host 写流判定窗口（USB 写约 4 KB/13 ms，10 ms 采样会漏）。 */
+#define GC_VICTIM_MAX_VALID_PCT   (80U)   /* 空闲补池：valid 占比 > 80% 视为无收益 */
+#define GC_EMERGENCY_MIN_GAIN_PCT (1U)    /* 紧急水位：可回收占比 < 1% 视为无收益 */
+#define GC_NO_GAIN_BACKOFF_MS     (500U)  /* NO_GAIN 后的 closed-list 复扫间隔 */
+#define GC_HOST_WRITE_WINDOW_MS   (2000U) /* total_writes 变化后视为 host 在写的窗口 */
+
 /* ── 接口函数 ── */
 
 /*
@@ -99,7 +119,7 @@
  * @param cw_lba  输出：逐 CW 的扇区 LBA，CW_NUM 项；未写过 = FTL_LBA_INVALID（不可为 NULL）
  * @return FTL_OK 成功；FTL_AGAIN 命令池空；FTL_ERROR 读失败 / 全页无写过 CW
  */
-ftl_status_t gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM]);
+ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM]);
 
 /*
  * gc_decode_cw_lba - 从**已完成的读命令**的 desc 链解出逐 CW 的扇区 LBA + 页基址
@@ -123,12 +143,38 @@ typedef enum
     GC_DECODE_OK = 0,
     GC_DECODE_EMPTY,
     GC_DECODE_CORRUPT,
-} gc_decode_result_t;
+} gc_decode_e;
 
-gc_decode_result_t gc_decode_cw_lba(fc_command_t *cmd,
-                                    DWORD         pba,
-                                    DWORD         cw_lba[CW_NUM],
-                                    DWORD        *page_base_out);
+gc_decode_e gc_decode_cw_lba(fc_command_t *cmd,
+                             DWORD         pba,
+                             DWORD         cw_lba[CW_NUM],
+                             DWORD        *page_base_out);
+
+/* GC 收益判据模式（只对空间 GC：T1/T4 有意义；T5 磨损恒用 OFF）。 */
+typedef enum
+{
+    GC_BENEFIT_OFF = 0,   /* 不筛：host 正在写 / 仅 T5 磨损触发（原水位行为） */
+    GC_BENEFIT_IDLE,      /* host 不写：只接受 valid 占比 <= GC_VICTIM_MAX_VALID_PCT 的 victim */
+    GC_BENEFIT_EMERGENCY, /* 紧急水位：只接受可回收占比 >= GC_EMERGENCY_MIN_GAIN_PCT 的 victim */
+} gc_benefit_mode_e;
+
+/* 选块结果：把「没有候选」与「有候选但都不值得搬」分开，后者用于 no-gain 退避与
+ * NO_SPACE 判定（`RISK-GC-13/14`）。 */
+typedef enum
+{
+    GC_SELECT_OK = 0,         /* 已选中，out->victim 有效 */
+    GC_SELECT_NO_CANDIDATE,   /* closed 列表里没有可用候选（空 / 全 open / 全哨兵） */
+    GC_SELECT_NOT_WORTHWHILE, /* 有候选，但全部被收益判据拒绝 */
+} gc_select_e;
+
+/* 选块出参（即使 NOT_WORTHWHILE 也填 best_valid_pct，供日志归因）。 */
+typedef struct
+{
+    const super_block_t *victim;         /* GC_SELECT_OK 时有效 */
+    WORD                 best_valid_pct; /* 域内最低有效率（0..100），无候选时为 0 */
+    WORD                 scanned;        /* 参与评分的候选数 */
+    WORD                 eligible;       /* 通过收益判据的候选数 */
+} gc_select_out_t;
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block
@@ -151,11 +197,24 @@ gc_decode_result_t gc_decode_cw_lba(fc_command_t *cmd,
  * ⚠ cost 相等时取 valid_count 更小者（确定性，且退化为单维贪心）。
  * ⚠ 退化单 plane 条目（掉电重建产物）跳过哨兵 plane；全哨兵条目直接跳过。
  *
+ * **收益判据**（`mode != GC_BENEFIT_OFF` 时）：
+ * 在 cost 评分**之前**逐候选过滤——先筛掉不值得搬的块，再在剩下的里选 cost 最小。
+ * 不能「先选 cost 最小、再检查收益」：那样可能因为最差块仍太有效而报无收益，
+ * 而其实存在另一个更稀疏的候选。
+ *
+ *   IDLE      ：valid * 100 > total * GC_VICTIM_MAX_VALID_PCT            ⇒ 跳过
+ *   EMERGENCY ：(total - valid) * 100 < total * GC_EMERGENCY_MIN_GAIN_PCT ⇒ 跳过
+ *
+ * total = st.plane_count * FTL_CW_PER_BLOCK（`alc_get_sb_stats` 已排除 BAD/哨兵 plane）。
+ * **不要**按 next_page 缩分母：提前关闭的半写块有空洞页，按整块容量算才不会
+ * 把「还有空洞可写」的块误判成 100% 有效。
+ *
  * @param alloc  Allocator 上下文（前置条件；实例绑定由 ftl_contract_audit 证明）
- * @param victim 输出：选中的 victim 指针
- * @return true=找到 victim，false=无可用 victim
+ * @param mode   收益判据模式（GC_BENEFIT_*）
+ * @param out    输出：victim 指针 + 观测计数（非 NULL）
+ * @return GC_SELECT_OK / GC_SELECT_NO_CANDIDATE / GC_SELECT_NOT_WORTHWHILE
  */
-bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim);
+gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_select_out_t *out);
 
 /*
  * gc_should_trigger - 检查是否需要触发 GC，并返回**触发起因位掩码**
@@ -180,6 +239,6 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
  * @param alloc  Allocator 上下文；NULL ⇒ 返回 0（UT 钉住的契约，不触发）
  * @return 触发起因位掩码（GC_TRIGGER_*），0=不需要触发
  */
-DWORD gc_should_trigger(const ftl_allocator_t *alloc);
+DWORD gc_should_trigger(const alc_t *alloc);
 
 #endif /* FTL_GC_H */

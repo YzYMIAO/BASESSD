@@ -433,4 +433,4 @@ for (descriptor_count = 0U; descriptor_count < fc_command_descriptor_count(comma
 
 关于 `buffer_id` 与 `data_ptr` 两种方案的完整讨论（包括企业级 SSD、消费级 SSD、DRAM-less SSD、UFS 的行业实践，以及 4 种方案对比与推荐选择），详见：
 
-👉 **[fc_nand_design.md 第 12 章](./fc_nand_design.md#12-数据-buffer-方案设计讨论)**
+👉 **[fc_nand_design.md 第 12 章](../design/fc_nand_design.md#12-数据-buffer-方案设计讨论)**

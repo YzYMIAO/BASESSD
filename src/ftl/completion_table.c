@@ -2,11 +2,11 @@
  * completion_table.c — cmd_id → ctx 旁表 + CQ 排空派发
  *
  * 职责：
- *   ① 维护旁表（command_id → ctx）与实例路由表（ch/ce/lun → ftl_context_t）；
+ *   ① 维护旁表（command_id → ctx）与实例路由表（ch/ce/lun → ftl_ctx_t）；
  *   ② 排空 CQ：每条 completion 交 ftl_op_dispatch()（按命令的 op_tag 查服务函数数组）。
  *
  * 与 completion_table.h 的分工：
- *   completion_table.h —— 表项结构（completion_entry_t）+ 容量宏 + API 声明；
+ *   completion_table.h —— 表项结构（ct_entry_t）+ 容量宏 + API 声明；
  *   本文件             —— 两张表的实现 + CQ 排空。
  *
  * ⚠ 命令该跑哪个完成服务函数**不在本表**——由命令自己携带（fc_command_t.op_tag →
@@ -25,7 +25,7 @@
 
 #include "assertion.h"
 #include "fc.h"
-#include "ftl.h" /* ftl_context_t（route 表） */
+#include "ftl.h" /* ftl_ctx_t（route 表） */
 #include "ftl_op.h"
 #include "ftl_type.h"
 #include "l2p_cache.h" /* ftl_dim_ch/ce/lun（dim → 坐标的唯一分解点） */
@@ -41,7 +41,7 @@ _Static_assert(COMPLETION_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH,
 
 /* ── 1. 静态资源 ── */
 
-static completion_entry_t g_table[COMPLETION_TABLE_SIZE];
+static ct_entry_t g_table[COMPLETION_TABLE_SIZE];
 
 /* ── 实例路由表：按命令 ch/ce/lun → FTL 实例 ── */
 static struct ftl_context *g_route[CH_NUM][CE_NUM][LUN_NUM];
@@ -73,7 +73,7 @@ void ct_init(void)
  *             覆盖时记 LOGW：这条路径一旦发生必须自己报出来，否则就是静默失效（C8）。
  *             ctx 允许为 NULL（表示"无私有状态"，服务函数自行派生）。
  * -------------------------------------------------------------------- */
-ftl_status_t ct_add(WORD cmd_id, void *ctx)
+ftl_status_e ct_add(WORD cmd_id, void *ctx)
 {
     for (BYTE i = 0U; i < COMPLETION_TABLE_SIZE; i++)
     {
@@ -150,7 +150,7 @@ WORD ct_get_count(void)
 /* --------------------------------------------------------------------
  * ct_set_route
  *   功能：把调用者的 route 数组内容逐格拷进 g_route（实例路由表）。
- *   参数：route —— [ch][ce][lun] → ftl_context_t* 数组；传 NULL 则清空 g_route。
+ *   参数：route —— [ch][ce][lun] → ftl_ctx_t* 数组；传 NULL 则清空 g_route。
  *   返回：无。
  *   实现要点：逐格拷贝而非存指针——调用者的数组可能是栈/局部量，逐格拷贝让 g_route
  *             成为唯一持有者，避免悬垂。
@@ -173,7 +173,7 @@ void ct_set_route(struct ftl_context *route[][CE_NUM][LUN_NUM])
  * ct_get_route
  *   功能：按命令 ch/ce/lun 取所属 FTL 实例（派发时用它找到正确实例）。
  *   参数：ch/ce/lun —— 命令自身 config 的三个坐标。
- *   返回：ftl_context_t*；set_route 之前为 NULL。
+ *   返回：ftl_ctx_t*；set_route 之前为 NULL。
  *   实现要点：越界属编程错误（坐标由 FTL 从 PBA 灌入并经 pba_is_valid 校验）⇒ ASSERT。
  *             返回 NULL 同属编程错误（set_route 漏调）——但**不在此处断言**：判据在
  *             **被调方**（各服务函数入口；实例绑定由 ftl_contract_audit 在 boot 期证明，

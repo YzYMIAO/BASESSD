@@ -313,7 +313,16 @@ static void proc_async_io_done(void *bytes_io) {
       proc_write_io_data(p_msc, (uint32_t) nbytes, nbytes);
       break;
 
-    default: break; // nothing to do
+    default:
+      // 【本仓补丁】无数据 SCSI 命令的异步完成（SYNCHRONIZE CACHE）：
+      // 成功 ⇒ 进入 STATUS 阶段发 CSW；失败 ⇒ 按 SCSI 失败处理。
+      if (nbytes < 0) {
+        set_sense_medium_not_present(p_msc->cbw.lun);
+        fail_scsi_op(p_msc, MSC_CSW_STATUS_FAILED);
+      } else {
+        p_msc->stage = MSC_STAGE_STATUS;
+      }
+      break;
   }
 
   // send status if stage is transitioned to STATUS
@@ -325,7 +334,10 @@ static void proc_async_io_done(void *bytes_io) {
 bool tud_msc_async_io_done(int32_t bytes_io, bool in_isr) {
   // Precheck to avoid queueing multiple RW done callback
   TU_VERIFY(_mscd_itf.pending_io);
-  if (bytes_io == 0) {
+  // 【本仓补丁】仅 READ/WRITE 的 0 字节是错误；无数据 SCSI 命令
+  // （SYNCHRONIZE CACHE）用 0 表示成功（RISK-USB-06）。
+  const uint8_t cmd = _mscd_itf.cbw.command[0];
+  if ((bytes_io == 0) && ((cmd == SCSI_CMD_READ_10) || (cmd == SCSI_CMD_WRITE_10))) {
     bytes_io = TUD_MSC_RET_ERROR; // 0 is treated as error, no reason to call this with BUSY here
   }
   usbd_defer_func(proc_async_io_done, (void *) (intptr_t) bytes_io, in_isr);
@@ -528,6 +540,14 @@ bool mscd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t event, uint32_t
           if ((resplen < 0) && (p_msc->sense_key == 0)) {
             resplen = tud_msc_scsi_cb(p_cbw->lun, p_cbw->command, _mscd_epbuf.buf,
                                       (uint16_t) tu_min32(p_msc->total_len, CFG_TUD_MSC_EP_BUFSIZE));
+          }
+
+          // 【本仓补丁】无数据 SCSI 命令（SYNCHRONIZE CACHE）的异步完成：
+          // 应用层返回 TUD_MSC_RET_ASYNC 时保持 pending_io，等
+          // tud_msc_async_io_done() 到达后再进入 STATUS 阶段（RISK-USB-06）。
+          if ((resplen == TUD_MSC_RET_ASYNC) && (p_cbw->total_bytes == 0)) {
+            p_msc->pending_io = true;
+            return true;
           }
 
           if (resplen < 0) {

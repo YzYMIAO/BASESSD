@@ -2,7 +2,7 @@
  * bg_wiring.c — FTL 后台调度接线（策略层：适配器 / 档位预算 / 任务表 / Phase 3 入口）
  *
  * 引擎在 bg_scheduler.c（通用、零 kick 知识、策略无关）；本文件只做三件事：
- *   ① 10 个 static 适配器：把异构 kick（签名/参数各异）包成 void(ftl_context_t*)；
+ *   ① 10 个 static 适配器：把异构 kick（签名/参数各异）包成 void(ftl_ctx_t*)；
  *   ② g_bg_level_cfg[3]：档位 → 每轮总预算 + l2p flush 条数上界 + 预算任务掩码；
  *   ③ s_bg_tasks 任务表 + ftl_bg_level_select 负载→档位（纯函数）+ ftl_bg_service Phase 3。
  *
@@ -56,14 +56,14 @@ static DWORD ftl_now_ms(void)
 
 /* --------------------------------------------------------------------
  * bg_info
- *   功能：构造 typed 模块入口的 ftl_bg_info_t（本轮动态信息）。
+ *   功能：构造 typed 模块入口的 bg_info_t（本轮动态信息）。
  *   参数：ftl —— 实例。
  *   返回：{now_ms, load_level}。load_level 取引擎本轮发布的档位（bg_scheduler_run
  *         在跑任何任务前写入），不在这里重新选档——重选是第二套读路径。
  * -------------------------------------------------------------------- */
-static ftl_bg_info_t bg_info(const ftl_context_t *ftl)
+static bg_info_t bg_info(const ftl_ctx_t *ftl)
 {
-    ftl_bg_info_t info;
+    bg_info_t info;
 
     info.now_ms     = ftl_now_ms();
     info.load_level = ftl->bg.level;
@@ -112,14 +112,14 @@ static const bg_level_cfg_t g_bg_level_cfg[BG_LEVEL_NUM] = {
     [BG_LEVEL_BUSY] = { .total_budget_us = 700U, .task_mask = BG_TASK_BIT(BG_TASK_L2P_FLUSH)},
 };
 
-/* ── 10 个适配器（包异构 kick → void(ftl_context_t*)）── */
+/* ── 10 个适配器（包异构 kick → void(ftl_ctx_t*)）── */
 
 /* 表首 · must_run（引擎 Pass 0 最先执行）—— 推进**已在飞**的 Checkpoint job。
  * ⚠ 必须排在最前、且不占预算：CP 可能在 BUSY 档被紧急水位起（journal≥95%），后续步骤
  *   要跨多轮跨档位走完——排在预算 pass 里会被低优先级/预算耗尽饿死。 */
-static checkpoint_trigger_t bg_cp_trigger(const ftl_context_t *ftl, checkpoint_reason_t reason, bool force)
+static cp_trigger_t bg_cp_trigger(const ftl_ctx_t *ftl, cp_reason_e reason, bool force)
 {
-    checkpoint_trigger_t trigger;
+    cp_trigger_t trigger;
 
     trigger.now_ms            = ftl_now_ms();
     trigger.total_writes      = ftl->total_writes;
@@ -131,20 +131,20 @@ static checkpoint_trigger_t bg_cp_trigger(const ftl_context_t *ftl, checkpoint_r
     return trigger;
 }
 
-static void bg_a_checkpoint(ftl_context_t *ftl)
+static void bg_a_checkpoint(ftl_ctx_t *ftl)
 {
-    const checkpoint_trigger_t trigger = bg_cp_trigger(ftl, CHECKPOINT_REASON_ADVANCE, false);
-    checkpoint_status_t        status;
+    const cp_trigger_t trigger = bg_cp_trigger(ftl, CHECKPOINT_REASON_ADVANCE, false);
+    cp_status_t        status;
 
     cp_handle(ftl->cp_handle, &trigger, &status);
 }
 
 /* 表 1 · must_run —— 推进 Read Recovery job。
  * host 读在等结果（托管的子操作占着组在飞数），不推进即死等；任何档位都要跑。 */
-static void bg_a_rr(ftl_context_t *ftl)
+static void bg_a_rr(ftl_ctx_t *ftl)
 {
-    const ftl_bg_info_t info = bg_info(ftl);
-    rr_status_t         status;
+    const bg_info_t info = bg_info(ftl);
+    rr_status_t     status;
 
     rr_handle(&ftl->read_recovery_handle, &info, &status);
 }
@@ -152,10 +152,10 @@ static void bg_a_rr(ftl_context_t *ftl)
 /* 表 2 · must_run —— 推进搬移 job（GC/WL/预测共用，已在飞则续跑下一步）。
  * 写路径的紧急 GC 在 BUSY 档起（wb_handle(FLUSH) 分配不到块 ⇒ FTL_AGAIN），
  * 不推进即死锁；任何档位都要跑。 */
-static void bg_a_mig_service(ftl_context_t *ftl)
+static void bg_a_mig_service(ftl_ctx_t *ftl)
 {
-    const ftl_bg_info_t info = bg_info(ftl);
-    migrate_status_t    status;
+    const bg_info_t info = bg_info(ftl);
+    mig_status_t    status;
 
     /* typed 入口：在飞推进 + 不在飞时按 handle 自持节拍评估 GC/WL/predict。 */
     mig_handle(ftl->mig_handle, &info, &status);
@@ -164,10 +164,10 @@ static void bg_a_mig_service(ftl_context_t *ftl)
 /* 表 3 · must_run —— 元数据目录整理 job。
  * compact_wanted 是 append_slot 在**前台写路径**上置的（池吃紧时换块），
  * 不推进就是写路径永久 FTL_AGAIN；任何档位都要跑。 */
-static void bg_a_metadata_dir(ftl_context_t *ftl)
+static void bg_a_metadata_dir(ftl_ctx_t *ftl)
 {
-    const ftl_bg_info_t info = bg_info(ftl);
-    metadata_status_t   status;
+    const bg_info_t info = bg_info(ftl);
+    md_status_t     status;
 
     md_handle(ftl->metadata_dir, &info, &status);
 }
@@ -175,11 +175,11 @@ static void bg_a_metadata_dir(ftl_context_t *ftl)
 /* 表 4 · must_run —— 补「未起的换块擦除」（表 9 的子集；表 9 会被 BUSY 掩掉，本项不会）。
  * 新环形块没擦过就不能往里写 ⇒ 任何档位都要补，否则 host 写路径卡死。
  * 判据（有无待擦块 / 是否已有 job 在飞）在 journal 模块内，本文件不读其内部字段。 */
-static void bg_a_journal_erase(ftl_context_t *ftl)
+static void bg_a_journal_erase(ftl_ctx_t *ftl)
 {
-    const ftl_bg_info_t     info    = bg_info(ftl);
-    const journal_trigger_t trigger = JOURNAL_TRIGGER_ERASE_ONLY;
-    journal_status_t        status;
+    const bg_info_t     info    = bg_info(ftl);
+    const jrn_trigger_e trigger = JOURNAL_TRIGGER_ERASE_ONLY;
+    jrn_status_t        status;
 
     jrn_handle(ftl->journal, &trigger, &info, &status);
 }
@@ -187,10 +187,10 @@ static void bg_a_journal_erase(ftl_context_t *ftl)
 /* 表 5 · must_run —— 紧急 Checkpoint（Journal ≥ 95%）。
  * 紧急水位必须**任何档位都随时响应**（BUSY 档也一样）。cp_begin 只装配 job、
  * 单飞行（cp_handle.active → FTL_AGAIN）幂等 ⇒ 每轮检查无副作用。 */
-static void bg_a_emergency_cp(ftl_context_t *ftl)
+static void bg_a_emergency_cp(ftl_ctx_t *ftl)
 {
-    const checkpoint_trigger_t trigger = bg_cp_trigger(ftl, CHECKPOINT_REASON_EMERGENCY, false);
-    checkpoint_status_t        status;
+    const cp_trigger_t trigger = bg_cp_trigger(ftl, CHECKPOINT_REASON_EMERGENCY, false);
+    cp_status_t        status;
 
     cp_handle(ftl->cp_handle, &trigger, &status);
 }
@@ -198,10 +198,10 @@ static void bg_a_emergency_cp(ftl_context_t *ftl)
 /* 表 6 · 预算 — 后台 flush 脏 L2P region，条数上界取**本轮档位配置**（引擎发布的
  * sched->cfg，见 bg_scheduler.h）。BUSY 档只放行本项 ⇒ 最小预算 = 「must-run + 1 flush」。
  * ⚠ thrashing 降级：主动 flush 大概率白写且挤前台带宽 ⇒ 停主动 flush。 */
-static void bg_a_l2p_flush(ftl_context_t *ftl)
+static void bg_a_l2p_flush(ftl_ctx_t *ftl)
 {
-    const ftl_bg_info_t info = bg_info(ftl);
-    l2p_status_t        status;
+    const bg_info_t info = bg_info(ftl);
+    l2p_status_t    status;
 
     /* typed 入口：档位 → max_kick 的 static const 表在 l2p 模块内；
      * thrashing 降级也在模块内判定。 */
@@ -212,20 +212,20 @@ static void bg_a_l2p_flush(ftl_context_t *ftl)
 
 /* 表 9 · 预算 — 推进 Journal 刷页 job（job 已在飞则空操作）。
  * BUSY 档被掩掉（host 饱和档不主动起页写；页满时 jrn_append 自己会起）。 */
-static void bg_a_journal_flush(ftl_context_t *ftl)
+static void bg_a_journal_flush(ftl_ctx_t *ftl)
 {
-    const ftl_bg_info_t info = bg_info(ftl);
-    journal_status_t    status;
+    const bg_info_t info = bg_info(ftl);
+    jrn_status_t    status;
 
     jrn_handle(ftl->journal, NULL, &info, &status);
 }
 
 /* 表 10 · 预算 — BBT 持久化（攒批写 NAND BBT；job 起步/续跑，提交即返回）。
  * typed 入口：状态只走上报结构（本适配器不读 handle 内部）。 */
-static void bg_a_bbt(ftl_context_t *ftl)
+static void bg_a_bbt(ftl_ctx_t *ftl)
 {
-    const ftl_bg_info_t info = bg_info(ftl);
-    bbt_status_t        status;
+    const bg_info_t info = bg_info(ftl);
+    bbt_status_t    status;
 
     bbt_handle(&ftl->alloc, &info, &status);
 }
@@ -233,10 +233,10 @@ static void bg_a_bbt(ftl_context_t *ftl)
 /* 表 11 · 预算 — Checkpoint 触发检查（T1 Journal 水位 / T2 写入量 / T3 定时 elapsed）。
  * 定时基准**无条件**重置（触发即重置，不看成败——否则失败的 job 会每轮重触发）；
  * job 装配由 cp_begin（提交即返回），成败由 [CP] 心跳判。 */
-static void bg_a_cp_trigger(ftl_context_t *ftl)
+static void bg_a_cp_trigger(ftl_ctx_t *ftl)
 {
-    const checkpoint_trigger_t trigger = bg_cp_trigger(ftl, CHECKPOINT_REASON_TIMER, false);
-    checkpoint_status_t        status;
+    const cp_trigger_t trigger = bg_cp_trigger(ftl, CHECKPOINT_REASON_TIMER, false);
+    cp_status_t        status;
 
     cp_handle(ftl->cp_handle, &trigger, &status);
 }
@@ -267,14 +267,14 @@ _Static_assert((sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])) == BG_TASK_NUM,
 /* ── 装配与 Phase 3 ── */
 
 /* ftl_bg_init —— 把 s_bg_tasks 装载进本实例的调度器。由 ftl_init 在装配末尾调用一次。 */
-void ftl_bg_init(ftl_context_t *ftl)
+void ftl_bg_init(ftl_ctx_t *ftl)
 {
     bg_scheduler_init(&ftl->bg, s_bg_tasks, (sizeof(s_bg_tasks) / sizeof(s_bg_tasks[0])));
 }
 
 /* ftl_bg_level_select — 负载 → 档位（纯函数，无副作用）：
  * inflight 全空 = IDLE；pending > 半池 或 有未决组 = BUSY；中间 = NORMAL。 */
-bg_level_t ftl_bg_level_select(const ftl_context_t *ftl)
+bg_level_e ftl_bg_level_select(const ftl_ctx_t *ftl)
 {
     const WORD pending = pend_get_count(&ftl->pending);
     const WORD queued  = pend_get_group_count(&ftl->pending);
@@ -304,16 +304,16 @@ bg_level_t ftl_bg_level_select(const ftl_context_t *ftl)
  *   completion_table 里，计进来会让「真空闲」永不成立——一个后台 job 在飞就把模式
  *   从 IDLE 顶到 NORMAL，后台反而被自己的命令饿死。后台 job 的活跃度由各自的
  *   各模块**内部**的单飞行门（不在这里窥探 phase/active）单独管，与 host 侧解耦。 */
-void ftl_bg_service(ftl_context_t *ftl)
+void ftl_bg_service(ftl_ctx_t *ftl)
 {
     if (ftl->bg_suspend != 0U)
     {
         return;
     }
 
-    const bg_level_t level = ftl_bg_level_select(ftl);
+    const bg_level_e level = ftl_bg_level_select(ftl);
     /* 档位下标越界不会崩：会静默读到相邻静态数据 ⇒ 预算/掩码全错而无声（H31/H40）。 */
-    /* 档位先发布到调度器：typed 模块入口的 ftl_bg_info_t.load_level 取这里。 */
+    /* 档位先发布到调度器：typed 模块入口的 bg_info_t.load_level 取这里。 */
     ftl->bg.level          = level;
     bg_scheduler_run(&ftl->bg, ftl, &g_bg_level_cfg[level]);
 }

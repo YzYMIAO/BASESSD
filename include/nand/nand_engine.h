@@ -30,7 +30,7 @@ typedef enum
     NAND_RESULT_TIMEOUT          = 0xE2U, /* busy 超时 */
     NAND_RESULT_NOT_READY        = 0xE3U, /* 外设忙，让出（非错误） */
     NAND_RESULT_OPERATION_FAILED = 0xE4U, /* NAND 操作失败（状态字节 FAIL 位） */
-} nand_result_t;
+} nand_result_e;
 
 /*
  * UOP 微指令类型。
@@ -63,12 +63,12 @@ typedef enum
     NAND_UOP_DELAY_US,          /* 固定微秒延时，operand=延时微秒数 */
     NAND_UOP_END,               /* 序列结束 */
     NAND_UOP_COUNT,             /* 枚举数量（数组长度用） */
-} nand_uop_type_t;
+} nand_uop_type_e;
 
 /* 单条微指令：类型 + 参数 */
 typedef struct
 {
-    nand_uop_type_t type;
+    nand_uop_type_e type;
     DWORD           operand;
 } nand_uop_t;
 
@@ -103,7 +103,7 @@ typedef struct
 } nand_operation_timing_t;
 
 /* UOP handler 签名：context 透传给后端（各 handler 自行转换） */
-typedef nand_result_t (*nand_uop_handler_t)(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
+typedef nand_result_e (*nand_uop_handler_t)(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion);
 
 /* 后端抽象：handler 表 + 透传上下文 */
 typedef struct
@@ -157,7 +157,7 @@ typedef struct
  * @deprecated 仅用于初始化阶段的同步调用（nand_init）。
  * 运行时请用 nand_engine_start + nand_engine_step 非阻塞推进。
  * -------------------------------------------------------------------- */
-nand_result_t nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion);
+nand_result_e nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion);
 
 /* --------------------------------------------------------------------
  * nand_engine_start
@@ -171,7 +171,7 @@ nand_result_t nand_engine_execute(const nand_engine_backend_t *backend, const na
  *   实现要点：只复位游标/超时/active 字段，不整体清零——已绑定的
  *         backend/request/completion 必须原样保留。
  * -------------------------------------------------------------------- */
-nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uops, const nand_operation_timing_t *timing);
+nand_result_e nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uops, const nand_operation_timing_t *timing);
 
 /* --------------------------------------------------------------------
  * nand_engine_step
@@ -180,6 +180,6 @@ nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uo
  *   返回：NAND_RESULT_OK / NOT_READY（让出）/ 错误码。
  *   调用方约定：NOT_READY 时稍后重调；active==0 后不得再调。
  * -------------------------------------------------------------------- */
-nand_result_t nand_engine_step(nand_engine_state_t *state);
+nand_result_e nand_engine_step(nand_engine_state_t *state);
 
 #endif /* PLATFORM_STM32H743_NAND_ENGINE_H */

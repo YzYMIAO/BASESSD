@@ -20,7 +20,7 @@ typedef enum
 {
     BOOT_SLOT_A = 0,
     BOOT_SLOT_B = 1
-} boot_slot_t;
+} boot_slot_e;
 
 typedef enum
 {
@@ -31,7 +31,7 @@ typedef enum
     BOOT_POLICY_ROLLBACK         = 4U,
     BOOT_POLICY_AUTH_FAILED      = 5U,
     BOOT_POLICY_NO_BOOTABLE_SLOT = 6U
-} boot_policy_status_t;
+} boot_status_e;
 
 /*
  * 固件镜像头。payload_hash 覆盖紧跟镜像头的完整 payload；signature 的
@@ -95,7 +95,7 @@ int  boot_image_validate(const boot_image_header_t      *header,
                          boot_signature_verify_fn        verify_signature,
                          void                           *verify_context);
 
-void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_t active_slot, DWORD active_firmware_version);
+void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_e active_slot, DWORD active_firmware_version);
 void boot_metadata_finalize(boot_metadata_t *metadata);
 int  boot_metadata_is_valid(const boot_metadata_t *metadata);
 int  boot_metadata_select_latest(const boot_metadata_t copies[2], boot_metadata_t *selected, DWORD *selected_copy);
@@ -104,9 +104,9 @@ int  boot_metadata_select_latest(const boot_metadata_t copies[2], boot_metadata_
  * 根据镜像验证结果选择本次槽位。函数会先扣减 pending 槽的尝试次数，调用者
  * 必须在启动镜像前将更新后的 metadata 原子地写入另一份元数据副本。
  */
-int boot_policy_select_slot(boot_metadata_t *metadata, const BYTE slot_bootable[BOOT_SLOT_COUNT], boot_slot_t *selected_slot, int *metadata_changed);
+int boot_policy_select_slot(boot_metadata_t *metadata, const BYTE slot_bootable[BOOT_SLOT_COUNT], boot_slot_e *selected_slot, int *metadata_changed);
 
 /* 主固件完成最低可用自检后调用，并将返回的记录写入 Flash。 */
-int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_t running_slot, DWORD firmware_version);
+int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_e running_slot, DWORD firmware_version);
 
 #endif /* SSD_FIRMWARE_BOOT_POLICY_H */

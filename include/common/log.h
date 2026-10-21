@@ -14,7 +14,7 @@ typedef enum
     LOG_WARNING,
     LOG_INFO,
     LOG_DEBUG
-} log_level_t;
+} log_level_e;
 
 /* A sink owns transport policy and returns the accepted byte count or LOG_WRITE_INVALID. */
 #define LOG_WRITE_INVALID (UINT32_MAX)
@@ -25,11 +25,11 @@ typedef bool (*log_flush_sink_t)(DWORD timeout_ms);
  * 运行时日志接口。sink 由已注册的平台提供，例如 firmware 的 UART 或 host 的 stderr。
  * 业务模块只依赖本头文件，不应直接操作 UART、文件描述符或平台寄存器。
  */
-DWORD       log_write(log_level_t level, const char *message);
-DWORD       log_printf(log_level_t level, const char *format, ...);
-DWORD       log_vprintf(log_level_t level, const char *format, va_list args);
-void        log_set_level(log_level_t level);
-log_level_t log_get_level(void);
+DWORD       log_write(log_level_e level, const char *message);
+DWORD       log_printf(log_level_e level, const char *format, ...);
+DWORD       log_vprintf(log_level_e level, const char *format, va_list args);
+void        log_set_level(log_level_e level);
+log_level_e log_get_level(void);
 void        log_set_sink(log_sink_t sink);
 bool        log_flush(DWORD timeout_ms);
 void        log_set_flush_sink(log_flush_sink_t sink);

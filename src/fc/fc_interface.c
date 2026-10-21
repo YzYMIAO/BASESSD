@@ -71,7 +71,7 @@ static BYTE __attribute__((unused)) fc_buffer_is_occupied(fc_buffer_id_t buffer_
  * ══════════════════════════════════════════════════════════ */
 
 /* 初始化全局控制器（幂等，可重复调用以重置） */
-fc_status_t fc_init(void)
+fc_status_e fc_init(void)
 {
     return fc_init_internal(&g_fc_controller);
 }
@@ -156,9 +156,9 @@ static BYTE __attribute__((unused)) fc_command_cw_attached(const fc_command_t *c
  *       是不变量，调用方沿链释放即完整回收（fc_descriptor_chain_release_all）。
  *     - **buffer 从哪来由 config.buf_own 决定**（v53）：上层申请（申请位 = 1）时用调用者
  *       传进来的 buffer_id（无失败路径）；FC 申请（默认）时保持既有的「挂链后申请、
- *       池空 → RESOURCE_EMPTY、desc 留链上」语义。归属语义见 fc_buf_own_t。
+ *       池空 → RESOURCE_EMPTY、desc 留链上」语义。归属语义见 fc_buf_own_e。
  * -------------------------------------------------------------------- */
-fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa, fc_buffer_id_t buffer_id)
+fc_status_e fc_command_configure_descriptor_with_buffer(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa, fc_buffer_id_t buffer_id)
 {
     fc_command_id_t  command_id;
     BYTE             plane_first;
@@ -240,7 +240,7 @@ fc_status_t fc_command_configure_descriptor_with_buffer(fc_command_t *command, B
 
 /* 建链入口（FC 申请，默认路径）：等价于 _with_buffer(..., FC_BUFFER_ID_INVALID)。
  * 4 参签名保持不变——FTL 的两个调用点、RAID parity 建链、既有单测都无需改动。 */
-fc_status_t fc_command_configure_descriptor(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa)
+fc_status_e fc_command_configure_descriptor(fc_command_t *command, BYTE plane, BYTE cw, DWORD row_paa)
 {
     return fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, FC_BUFFER_ID_INVALID);
 }
@@ -269,7 +269,7 @@ fc_descriptor_id_t fc_descriptor_chain_release_all(fc_descriptor_id_t head)
  *   前置（违反一律 ASSERT，不返回错误码）：指针在命令池内；状态 ALLOCATED；
  *         validate 通过；desc 链所有权完整。配置错误绝不发到硬件。
  * -------------------------------------------------------------------- */
-fc_status_t fc_submit(fc_command_t *command)
+fc_status_e fc_submit(fc_command_t *command)
 {
     fc_command_id_t command_id;
 
@@ -291,13 +291,13 @@ fc_status_t fc_submit(fc_command_t *command)
  *   功能：服务主循环单步（公共入口）。
  *   返回：FC_STATUS_OK / IO_ERROR / NOT_READY（无命令可推进）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_service(void)
+fc_status_e fc_service(void)
 {
     return fc_poll_internal(&g_fc_controller);
 }
 
 /* 从 CQ 取完成项 */
-fc_status_t fc_poll_completion(fc_command_status_t *completion)
+fc_status_e fc_poll_completion(fc_command_status_t *completion)
 {
     /* completion 为出参前置条件 */
     ASSERT(completion != NULL);
@@ -312,7 +312,7 @@ fc_status_t fc_poll_completion(fc_command_status_t *completion)
  *   返回：取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY（含 max_count==0）。
  *   前置（违反一律 ASSERT）：completions、count 均非空。
  * -------------------------------------------------------------------- */
-fc_status_t fc_poll_completions(fc_command_status_t *completions, WORD max_count, WORD *count)
+fc_status_e fc_poll_completions(fc_command_status_t *completions, WORD max_count, WORD *count)
 {
     ASSERT(completions != NULL);
     ASSERT(count != NULL);
@@ -330,7 +330,7 @@ fc_status_t fc_poll_completions(fc_command_status_t *completions, WORD max_count
  *         调用者不必自己判断"还活着吗"。命令须不在 CQ 中
  *         （FTL 应已 poll_completion 取走完成项）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_command_release(fc_command_t *command)
+fc_status_e fc_command_release(fc_command_t *command)
 {
     fc_command_id_t command_id;
 
@@ -355,7 +355,7 @@ fc_buffer_id_t fc_buffer_alloc(void)
 
 /* 释放 buffer。前置：buffer_id 须已占用（未占用 = 配置错误 → ASSERT，不返回 INVALID_ARGUMENT）。
  * 返回：恒 FC_STATUS_OK。 */
-fc_status_t fc_buffer_release(fc_buffer_id_t buffer_id)
+fc_status_e fc_buffer_release(fc_buffer_id_t buffer_id)
 {
     ASSERT(fc_buffer_is_occupied(buffer_id) != 0U);
     return fc_buffer_release_internal(&g_fc_controller, buffer_id);
@@ -539,7 +539,7 @@ fc_descriptor_t *fc_descriptor_id_to_descriptor(WORD descriptor_id)
  *   参数：stats —— 输出。
  *   返回：FC_STATUS_OK / INVALID_ARGUMENT。
  * -------------------------------------------------------------------- */
-fc_status_t fc_get_resource_stats(fc_resource_stats_t *stats)
+fc_status_e fc_get_resource_stats(fc_resource_stats_t *stats)
 {
     WORD index;
 

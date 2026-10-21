@@ -11,10 +11,10 @@
 #include "controller.h"
 #include "log.h"
 
-void ssd_controller_state_transition(ssd_controller_t      *controller,
-                                     ssd_controller_state_t next_state)
+void ssd_controller_state_transition(ssd_controller_t *controller,
+                                     ssd_ctrl_state_e  next_state)
 {
-    ssd_controller_state_t prev_state;
+    ssd_ctrl_state_e prev_state;
 
     if (controller == NULL)
     {

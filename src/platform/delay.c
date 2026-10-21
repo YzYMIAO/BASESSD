@@ -21,7 +21,7 @@ static DWORD delay_resolve_clock(DWORD core_clock_hz)
 }
 
 #if !DELAY_USE_DWT
-static delay_status_t delay_systick_us_busy(DWORD us)
+static delay_status_e delay_systick_us_busy(DWORD us)
 {
     DWORD reload;
     DWORD ticks;
@@ -170,7 +170,7 @@ DWORD delay_max_busy_us(void)
  *          计数器回绕。最大误差主要来自函数调用和循环本身的固定开销。
  */
 
-delay_status_t delay_us_busy(DWORD us)
+delay_status_e delay_us_busy(DWORD us)
 {
 #if DELAY_USE_DWT
     QWORD cycles64;
@@ -220,7 +220,7 @@ delay_status_t delay_us_busy(DWORD us)
  *          直接使用 32 位乘法造成超时截断。
  */
 
-delay_status_t delay_ms_busy(DWORD ms)
+delay_status_e delay_ms_busy(DWORD ms)
 {
     DWORD max_us;
 

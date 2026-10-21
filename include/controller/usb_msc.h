@@ -43,4 +43,12 @@ void usb_msc_task(void);
  */
 bool usb_msc_host_busy(void);
 
+/*
+ * 打印 WRITE(10) 数据相分块直方图（诊断，RISK-NAND-04）。
+ *
+ * 只在 `info` 命令里调用：运行期零输出。桶 = TinyUSB 每次回调的数据相长度
+ * （≤ CFG_TUD_MSC_EP_BUFSIZE）。<=512B 占多数说明主机按单扇区下发。
+ */
+void usb_msc_io_stats_print(void);
+
 #endif /* SSD_USB_MSC_H */

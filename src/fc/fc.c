@@ -223,7 +223,7 @@ BYTE *fc_buffer_id_to_real_buffer_internal(fc_t *controller, fc_buffer_id_t buff
 }
 
 /* 内部：释放 buffer（状态清零 + 挂回空闲链表头） */
-fc_status_t fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id)
+fc_status_e fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id)
 {
     ASSERT(buffer_id < FC_BUFFER_POOL_DEPTH);
     controller->buffer_state[buffer_id]     = 0U;
@@ -294,9 +294,9 @@ BYTE fc_command_descriptors_owned_internal(const fc_t *controller, fc_command_id
  *   幂等：可重复调用以重置（不释放任何硬件资源）。
  *   流程图见 docs/design/fc_nand_design.md §22（图 15）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_init_internal(fc_t *controller)
+fc_status_e fc_init_internal(fc_t *controller)
 {
-    fc_status_t result;
+    fc_status_e result;
     WORD        index;
 
     /* ── ① 清底：三池本体 + 三条队列的存储 + 命令状态位图全部归零。
@@ -547,7 +547,7 @@ void fc_descriptor_chain_release_all_internal(fc_t *controller, fc_descriptor_id
  *         「buf_own 的释放位 = FC 释放（01/11）」时当场归还（此时完成项已组装完毕，
  *         之后没有任何读者碰 buffer）。抹 INVALID 是为了让随后的链释放自然跳过，
  *         从而不双重归还；命令若没走到完成就释放，buffer 仍有效，链释放照常归还
- *         ⇒ 不泄漏。归属语义见 fc_buf_own_t。
+ *         ⇒ 不泄漏。归属语义见 fc_buf_own_e。
  * -------------------------------------------------------------------- */
 static void fc_command_release_buffers_internal(fc_t *controller, fc_command_t *command)
 {
@@ -605,7 +605,7 @@ fc_buffer_id_t fc_buffer_alloc_internal(fc_t *controller)
  *         （是个合法 desc 号），重复释放会顺着别人的链把别人的 desc 释放掉。
  *         调用方（公共接口）已保证指针在池内、命令不在 CQ 中。
  * -------------------------------------------------------------------- */
-fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *command)
+fc_status_e fc_command_release_internal_api(fc_t *controller, fc_command_t *command)
 {
     fc_command_id_t    command_id;
     fc_descriptor_id_t head;
@@ -676,7 +676,7 @@ void fc_command_chain_append(fc_t *controller, fc_command_t *command, fc_descrip
  *   参数：controller —— FC 控制器；queue —— 目标队列；command —— 命令。
  *   返回：FC_STATUS_OK / QUEUE_FULL。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_submit_to_queue(fc_t *controller, fc_submission_queue_t *queue, fc_command_t *command)
+static fc_status_e fc_submit_to_queue(fc_t *controller, fc_submission_queue_t *queue, fc_command_t *command)
 {
     fc_command_id_t command_id;
 
@@ -696,9 +696,9 @@ static fc_status_t fc_submit_to_queue(fc_t *controller, fc_submission_queue_t *q
  *   返回：FC_STATUS_OK / QUEUE_FULL。
  *   实现要点：投递后刷新寄存器状态位。
  * -------------------------------------------------------------------- */
-fc_status_t fc_submit_internal(fc_t *controller, fc_command_t *command)
+fc_status_e fc_submit_internal(fc_t *controller, fc_command_t *command)
 {
-    fc_status_t result;
+    fc_status_e result;
 
     result = fc_submit_to_queue(controller, (command->high_priority != 0U) ? &controller->hsq : &controller->sq, command);
     return result;
@@ -709,9 +709,9 @@ fc_status_t fc_submit_internal(fc_t *controller, fc_command_t *command)
  * ══════════════════════════════════════════════════════════ */
 
 /* 完成项入 CQ，命令状态置 COMPLETED（供 fc_complete_from_nand 使用） */
-fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *completion)
+fc_status_e fc_complete_internal(fc_t *controller, fc_command_status_t *completion)
 {
-    fc_status_t     result;
+    fc_status_e     result;
     fc_command_id_t command_id;
 
     command_id = completion->command_id;
@@ -736,7 +736,7 @@ fc_status_t fc_complete_internal(fc_t *controller, fc_command_status_t *completi
  *       非 page read 直接透传 NAND 状态。
  *     - CQ 满 → 强制 COMPLETED（数据路径已跑，CQ entry 丢失是 fatal）。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_complete_from_nand(fc_t *controller, const nand_dispatch_completion_t *nand_completion)
+static fc_status_e fc_complete_from_nand(fc_t *controller, const nand_dispatch_completion_t *nand_completion)
 {
     fc_command_status_t completion;
     fc_command_t       *command;
@@ -917,7 +917,7 @@ static void fc_stripe_release_parity(fc_t *controller, fc_command_id_t parity_id
  *
  * 仅处理 PLANE_NUM=2 场景（单数据命令 + 单 parity 命令）。
  */
-static fc_status_t fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc_command_id_t data_cmd_id)
+static fc_status_e fc_stripe_submit(fc_t *controller, fc_command_t *data_cmd, fc_command_id_t data_cmd_id)
 {
     fc_command_t           *parity_cmd;
     fc_command_id_t         parity_id;
@@ -1135,7 +1135,7 @@ static void fc_poll_fail_command(fc_t *controller, fc_command_id_t command_id)
  *       （见分支内注释）。debug 档 ASSERT 停机，release 档返回 INVALID_ARGUMENT 拒绝。
  *     - 只由 fc_build_dispatch_request 的"带数据命令"分支调用。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_build_request_data_planes(const fc_t *controller, const fc_command_t *command, nand_dispatch_request_t *request)
+static fc_status_e fc_build_request_data_planes(const fc_t *controller, const fc_command_t *command, nand_dispatch_request_t *request)
 {
     fc_descriptor_id_t desc_id          = (fc_descriptor_id_t)command->desc_id;
     BYTE               planes_with_desc = 0U; /* bit p = plane p 链上有 desc */
@@ -1326,7 +1326,7 @@ static void fc_dispatch_rewrite_operation(nand_dispatch_request_t *request)
  *   注意：本函数不做 META 预填——buffer[0..3] 的 META 由
  *         fc_data_path_encode 的 Stage 0 写（两条派发路径都经 encode）。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *command, fc_command_id_t command_id, nand_dispatch_request_t *request)
+static fc_status_e fc_build_dispatch_request(fc_t *controller, fc_command_t *command, fc_command_id_t command_id, nand_dispatch_request_t *request)
 {
     /* Pre-resolve descriptor-chain data into a self-contained dispatch request. */
     memset(request, 0, sizeof(*request));
@@ -1471,7 +1471,7 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
     }
     else if (nand_operation_has_data(command->config.operation))
     {
-        const fc_status_t build_result = fc_build_request_data_planes(controller, command, request);
+        const fc_status_e build_result = fc_build_request_data_planes(controller, command, request);
         if (build_result != FC_STATUS_OK)
         {
             /* 唯一失败出口（multi-plane 窄位图）。request 只被写了一半，但调用者拿到
@@ -1509,7 +1509,7 @@ static fc_status_t fc_build_dispatch_request(fc_t *controller, fc_command_t *com
  *     - 只负责占用目标 LUN；完成由后续 fc_service() 推进。
  *     - **运行时唯一活提交路径**（FTL 恒 chain=END，count 恒 1）。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_chain_t *chain)
+static fc_status_e fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_chain_t *chain)
 {
     fc_command_id_t         command_id = chain->ids[0U];
     fc_command_t           *command;
@@ -1534,12 +1534,12 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
     if ((fc_is_page_write(command->config.operation) != 0U) &&
         (command->config.raid == FC_RAID_MODE_ENCODE))
     {
-        fc_status_t stripe_result = fc_stripe_submit(controller, command, command_id);
+        fc_status_e stripe_result = fc_stripe_submit(controller, command, command_id);
         return stripe_result; /* 成功/失败均已在 fc_stripe_submit 中处理 */
     }
 #endif /* CONFIG_FC_RAID */
 
-    const fc_status_t build_result = fc_build_dispatch_request(controller, command, command_id, &request);
+    const fc_status_e build_result = fc_build_dispatch_request(controller, command, command_id, &request);
     if (build_result != FC_STATUS_OK)
     {
         /* 构建失败（multi-plane 窄位图）：debug 档上一条 ASSERT 已停机，这里只在 release
@@ -1584,7 +1584,7 @@ static fc_status_t fc_poll_dispatch_single(fc_t *controller, const fc_scheduler_
  *     - 任一步失败 → 对应/整链命令注 NAND_FAIL 完成并返回 IO_ERROR。
  *     - 运行时不会命中：FTL 恒 chain=END（count==1），本路径仅单测覆盖。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_chain_t *chain)
+static fc_status_e fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_chain_t *chain)
 {
     BYTE                    chain_count = chain->count;
     nand_dispatch_request_t reqs[FC_SCHEDULER_CHAIN_MAX];
@@ -1609,7 +1609,7 @@ static fc_status_t fc_poll_dispatch_chain(fc_t *controller, const fc_scheduler_c
             (void)fc_data_path_encode(command);
         }
 
-        const fc_status_t build_result = fc_build_dispatch_request(controller, command, command_id, &reqs[i]);
+        const fc_status_e build_result = fc_build_dispatch_request(controller, command, command_id, &reqs[i]);
         if (build_result != FC_STATUS_OK)
         {
             /* 构建失败（multi-plane 窄位图）→ 整链注 NAND_FAIL，与下面 submit 失败的兜底
@@ -1715,7 +1715,7 @@ static BYTE fc_poll_chain_length(const fc_submission_queue_t *queue, const fc_co
  *       链成员连续且逐个回推，链头永远排在成员之前，链序不破。
  *     - 提交失败即中止本轮，剩余命令仍在队列里（未被取出），下轮重试。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *queue, BYTE owner, BYTE suspended[CH_NUM][CE_NUM][LUN_NUM], BYTE *dispatched)
+static fc_status_e fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *queue, BYTE owner, BYTE suspended[CH_NUM][CE_NUM][LUN_NUM], BYTE *dispatched)
 {
     WORD total;
     WORD k;
@@ -1730,7 +1730,7 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
         fc_command_id_t      id;
         fc_command_t        *cmd;
         fc_scheduler_chain_t chain;
-        fc_status_t          dispatch_status;
+        fc_status_e          dispatch_status;
         BYTE                 ch;
         BYTE                 ce;
         BYTE                 lun;
@@ -1832,7 +1832,7 @@ static fc_status_t fc_poll_fill_queue(fc_t *controller, fc_submission_queue_t *q
  *       跨趟保留。两者互不影响（链锁准入只回推，不置 suspended）。
  *     - 扫描细节见 fc_poll_fill_queue()。
  * -------------------------------------------------------------------- */
-static fc_status_t fc_poll_fill(fc_t *controller)
+static fc_status_e fc_poll_fill(fc_t *controller)
 {
     fc_scheduler_t *scheduler = &controller->scheduler;
     BYTE            suspended[CH_NUM][CE_NUM][LUN_NUM];
@@ -1909,9 +1909,9 @@ static void fc_nand_completion_sink(const nand_dispatch_completion_t *nand_compl
 #endif /* CONFIG_FC_RAID */
 }
 
-fc_status_t fc_poll_internal(fc_t *controller)
+fc_status_e fc_poll_internal(fc_t *controller)
 {
-    fc_status_t        result;
+    fc_status_e        result;
     fc_nand_sink_ctx_t sink_ctx;
 
     sink_ctx.controller = controller;
@@ -1943,9 +1943,9 @@ fc_status_t fc_poll_internal(fc_t *controller)
  *   参数：controller —— FC 控制器；completion —— 输出。
  *   返回：FC_STATUS_OK / QUEUE_EMPTY。
  * -------------------------------------------------------------------- */
-fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_status_t *completion)
+fc_status_e fc_poll_completion_internal(fc_t *controller, fc_command_status_t *completion)
 {
-    fc_status_t result;
+    fc_status_e result;
 
     result = fc_completion_queue_pop(&controller->cq, completion);
     return result;
@@ -1960,7 +1960,7 @@ fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_status_t *c
  *   要点：循环被 CQ 占用数（≤ FC_CQ_DEPTH）天然封顶，max_count 给多大都不会越界；
  *         语义与单条版一致（有取到 = OK / 一条没有 = QUEUE_EMPTY）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, WORD max_count, WORD *count)
+fc_status_e fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, WORD max_count, WORD *count)
 {
     WORD n = 0U;
 

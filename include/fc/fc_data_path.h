@@ -40,7 +40,7 @@
 
 /* 全自动写管线：加扰 → ECC 编码 → RAID XOR parity。
  * FTL 提交命令后、dispatch 前由 FC 自动调用（对 FTL 透明）。 */
-fc_status_t fc_data_path_encode(const fc_command_t *command);
+fc_status_e fc_data_path_encode(const fc_command_t *command);
 
 #if CONFIG_FC_RAID
 /* ── 跨 Plane Stripe RAID parity 生成（FC 内部） ── */
@@ -58,7 +58,7 @@ fc_status_t fc_data_path_encode(const fc_command_t *command);
  * @return FC_STATUS_OK；ECC 编码失败时透传其返回码。
  *         参数 / desc 链损坏的前置违反一律 ASSERT（不再返回 INVALID_ARGUMENT）。
  */
-fc_status_t fc_data_path_generate_stripe_parity(
+fc_status_e fc_data_path_generate_stripe_parity(
     const fc_command_t *data_cmds[],
     BYTE                data_count,
     const fc_command_t *parity_cmd);
@@ -79,7 +79,7 @@ fc_status_t fc_data_path_generate_stripe_parity(
  * @return FC_STATUS_OK       所有 CW 解码成功，buffer 已解扰
  *         FC_STATUS_IO_ERROR  存在不可纠的 CW（未解扰，需 FTL 处理）
  */
-fc_status_t fc_data_path_process_read(const fc_command_t *command);
+fc_status_e fc_data_path_process_read(const fc_command_t *command);
 
 /* ── 读路径 Stage 2：RAID 恢复（FTL 触发） ── */
 
@@ -99,7 +99,7 @@ fc_status_t fc_data_path_process_read(const fc_command_t *command);
  *         FC_STATUS_IO_ERROR        恢复后 ECC 仍失败
  *         FC_STATUS_INVALID_ARGUMENT 参数无效
  */
-fc_status_t fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_idx);
+fc_status_e fc_data_path_raid_recover(const fc_command_t *cmd, BYTE failed_cw_idx);
 
 /* ── 单 CW 步骤原语（管线与单测共用） ──
  *
@@ -127,10 +127,10 @@ void fc_data_path_scramble(BYTE *cw, DWORD seed);
 
 /* ECC 编码：对 520B 数据区算 8B parity 写入 [520,528)。
  * 引擎未实现（NOT_SUPPORTED）时吞掉返回 OK——与管线行为一致。 */
-fc_status_t fc_data_path_ecc_encode(BYTE *cw);
+fc_status_e fc_data_path_ecc_encode(BYTE *cw);
 
 /* ECC 解码。ecc_bits 出参可为 NULL（不需要纠正位数时）。 */
-fc_status_t fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits);
+fc_status_e fc_data_path_ecc_decode(BYTE *cw, BYTE *ecc_bits);
 
 /* CRC 校验：1 = 重算值与 [4,8) 存的相等（通过），0 = 不通过。 */
 BYTE fc_data_path_crc_check(const BYTE *cw);

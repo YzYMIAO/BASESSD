@@ -19,7 +19,7 @@
  * 语义：预算剩余太少时，再跑一个任务既不划算也无法被诚实度量。 */
 #define MIN_TASK_BUDGET_US (250U)
 
-void bg_scheduler_init(bg_scheduler_t *sched, const bg_task_t *table, BYTE count)
+void bg_scheduler_init(bg_sched_t *sched, const bg_task_t *table, BYTE count)
 {
     /* 前置条件（判据 2）：调用者传自持的 sched 与静态任务表。 */
     /* ⚠ 必须在拷贝循环**之前**：count 超容量时循环本身就会越界写 tasks[]。 */
@@ -33,7 +33,7 @@ void bg_scheduler_init(bg_scheduler_t *sched, const bg_task_t *table, BYTE count
     sched->level      = BG_LEVEL_IDLE;
 }
 
-void bg_scheduler_run(bg_scheduler_t *sched, ftl_context_t *ftl, const bg_level_cfg_t *cfg)
+void bg_scheduler_run(bg_sched_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg)
 {
     /* 前置条件（判据 2）：调用者传 &ftl->bg 与自持的 g_bg_level_cfg[] 表项。 */
 

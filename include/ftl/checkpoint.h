@@ -28,7 +28,7 @@
 
 #include <stdint.h>
 
-/* ── 前向声明（ftl_context_t 在 ftl.h 中定义，ftl.h 会 include 本文件） ── */
+/* ── 前向声明（ftl_ctx_t 在 ftl.h 中定义，ftl.h 会 include 本文件） ── */
 struct ftl_context;
 
 /* ── 异步 Checkpoint job ──
@@ -70,17 +70,17 @@ typedef enum
     CP_TRUNC_PREP,    /* ④ 水位判定：算 journal 预擦块 */
     CP_TRUNC_ERASE,   /* ④ 预擦 journal 环形最旧块 */
     CP_DONE,          /* 收尾：释放 active，记日志 */
-} cp_phase_t;
+} cp_phase_e;
 
 /*
- * cp_flush_step_t - cp_flush_regions 一步的结果（调用点按具名值分派，不写数值魔法）
+ * cp_flush_step_e - cp_flush_regions 一步的结果（调用点按具名值分派，不写数值魔法）
  */
 typedef enum
 {
     CP_FLUSH_PENDING = 0U, /* 仍有脏行在飞：调用者 return，下轮再来 */
     CP_FLUSH_DONE    = 1U, /* 全部 region 已持久：推进 phase */
     CP_FLUSH_FAILED  = 2U, /* 硬失败：调用者 cp_abort */
-} cp_flush_step_t;
+} cp_flush_step_e;
 
 /* ── Checkpoint 池游标/序号（per-instance，归 handle）──
  *
@@ -95,18 +95,18 @@ typedef struct
     WORD  write_idx;             /* 池内下一个待写槽（环形） */
     bool  cursor_valid;          /* 游标是否已建立；未建立则首次写入先扫池定位 */
     bool  advance_next;          /* true = 本 session 首次 CP 先跳过一槽（避开掉电残留的半编程槽） */
-} l2p_cp_state_t;
+} cp_state_t;
 
 typedef struct
 {
     bool       active;        /* true = job 在跑（单飞行：ftl_service 每轮推进它） */
-    cp_phase_t phase;         /* 异步 job 状态机 */
+    cp_phase_e phase;         /* 异步 job 状态机 */
     bool       waiting;       /* true = 有一条本 job 的命令在飞（等完成服务函数） */
     bool       failed;        /* true = 前置步骤失败 ⇒ 中止（不写 Header / 不截断） */
-    cp_phase_t fail_phase;    /* 中止发生在哪个 phase（观测；cp_abort 记录） */
+    cp_phase_e fail_phase;    /* 中止发生在哪个 phase（观测；cp_abort 记录） */
     DWORD      stall_ms;      /* 本轮连续「提交不出去」的起点（0 = 未计时） */
     bool       timed_out;     /* true = 本次 job 因 deadline 中止 */
-    cp_phase_t timeout_phase; /* 超时发生的 phase */
+    cp_phase_e timeout_phase; /* 超时发生的 phase */
 
     /* ① job 起点快照（**必须先于任何 flush**：flush 成功会清 region 脏位）
      * **本 die 的局部 2048-bit 位图**：由共享 cache 的全局脏位图按 owner 过滤、
@@ -115,27 +115,27 @@ typedef struct
     DWORD journal_seq; /* = journal.sequence_counter（截断/回放水位） */
 
     /* ② Anchor（一条 record = ANCHOR_PAGE_COUNT 页，逐页提交） */
-    metadata_ring_t anchor_ring;
-    DWORD           anchor_base;       /* record 第 0 页地址（md_anchor_prepare 回传） */
-    WORD            anchor_idx;        /* 池内槽位（commit 要用） */
-    DWORD           anchor_seq;        /* ++dir->anchor_sequence（prepare 时已自增） */
-    BYTE            anchor_chunk;      /* 下一页要写的页序 */
-    bool            anchor_ok;         /* true = 全部分页写成功（否则整条作废） */
-    bool            anchor_need_erase; /* true = 写之前先擦 *anchor_base 所在块 */
-    bool            anchor_skip;       /* true = Directory 无变更 ⇒ 整段跳过 */
+    md_ring_t anchor_ring;
+    DWORD     anchor_base;       /* record 第 0 页地址（md_anchor_prepare 回传） */
+    WORD      anchor_idx;        /* 池内槽位（commit 要用） */
+    DWORD     anchor_seq;        /* ++dir->anchor_sequence（prepare 时已自增） */
+    BYTE      anchor_chunk;      /* 下一页要写的页序 */
+    bool      anchor_ok;         /* true = 全部分页写成功（否则整条作废） */
+    bool      anchor_need_erase; /* true = 写之前先擦 *anchor_base 所在块 */
+    bool      anchor_skip;       /* true = Directory 无变更 ⇒ 整段跳过 */
 
     /* ③ Header + 块元数据快照（一条 record = 1 + CP_BLOCK_PAGES 页） */
-    metadata_ring_t hdr_ring;
-    DWORD           hdr_addr;
-    WORD            hdr_idx;                                  /* 写这条 Header 用的池内槽位 */
-    DWORD           hdr_seq;                                  /* ++h->cp_state.sequence（槽位确定后取） */
-    bool            hdr_need_erase;                           /* true = 写之前先擦 *hdr_addr 所在块 */
-    BYTE            block_page;                               /* 下一页要写的 块元数据页（0..CP_BLOCK_PAGES） */
-    BYTE            wear_page;                                /* 下一页要写的 磨损页（0..FTL_CHECKPOINT_WEAR_PAGES） */
-    bool            block_ok;                                 /* true = 全部快照页写成功（否则整条作废，不写 Header） */
-    WORD            block_words[FTL_BLOCK_TOTAL];             /* 8KB：CP 起点快照 + boot 加载缓冲 */
-    DWORD           wear_page_crc[FTL_CHECKPOINT_WEAR_PAGES]; /* 每页磨损快照的 CRC32（写进 Header）*/
-    BYTE            wear_page_buf[PAGE_MAIN_SIZE];            /* 组一页磨损快照（2KB）*/
+    md_ring_t hdr_ring;
+    DWORD     hdr_addr;
+    WORD      hdr_idx;                                  /* 写这条 Header 用的池内槽位 */
+    DWORD     hdr_seq;                                  /* ++h->cp_state.sequence（槽位确定后取） */
+    bool      hdr_need_erase;                           /* true = 写之前先擦 *hdr_addr 所在块 */
+    BYTE      block_page;                               /* 下一页要写的 块元数据页（0..CP_BLOCK_PAGES） */
+    BYTE      wear_page;                                /* 下一页要写的 磨损页（0..FTL_CHECKPOINT_WEAR_PAGES） */
+    bool      block_ok;                                 /* true = 全部快照页写成功（否则整条作废，不写 Header） */
+    WORD      block_words[FTL_BLOCK_TOTAL];             /* 8KB：CP 起点快照 + boot 加载缓冲 */
+    DWORD     wear_page_crc[FTL_CHECKPOINT_WEAR_PAGES]; /* 每页磨损快照的 CRC32（写进 Header）*/
+    BYTE      wear_page_buf[PAGE_MAIN_SIZE];            /* 组一页磨损快照（2KB）*/
 
     /* ④ Journal 截断 */
     DWORD trunc_addr; /* 待预擦块基地址（plan 回传） */
@@ -143,26 +143,28 @@ typedef struct
 
     /* 窄上下文：只持有实际使用的 owner 指针（total_writes 端口原本无人读，已删）。
      * 跨 job 保留，不能随 memset 清。 */
-    l2p_cache_t          *cache;
-    l2p_journal_t        *journal;
-    metadata_dir_cache_t *metadata_dir;
-    ftl_allocator_t      *alloc;
-    ftl_topology_t        topo;
+    l2p_cache_t    *cache;
+    l2p_jrn_t      *journal;
+    md_dir_cache_t *metadata_dir;
+    alc_t          *alloc;
+    ftl_topo_t      topo;
 
-    l2p_cp_state_t cp_state;
-    DWORD          last_ms; /* 上次触发的 ms 时基（T3） */
+    cp_state_t cp_state;
+    DWORD      last_ms; /* 上次触发的 ms 时基（T3） */
 
     /* 心跳 */
-    DWORD start_ms; /* job 起点（观测用） */
-    DWORD log_ms;   /* 上次心跳时刻 */
-} checkpoint_handle_t;
+    DWORD start_ms;     /* job 起点（观测用） */
+    DWORD log_ms;       /* 上次心跳时刻 */
+    DWORD log_abort_ms; /* 上次 abort 日志时刻（限流；跨 job 保留） */
+    DWORD log_done_ms;  /* 上次 `done seq=` INFO 时刻（限流；跨 job 保留） */
+} cp_handle_t;
 
 /* cp_handle 的位图是**本 die 的局部**尺寸；共享 cache 的脏位图是全局尺寸，二者
  * 不再同尺寸（阶段 B）。这里钉死本地位图 = L2P_REGIONS_PER_INSTANCE bit。 */
-_Static_assert(sizeof(((checkpoint_handle_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)),
-               "checkpoint_handle_t.region_bitmap 必须是本 die 的局部 2048-bit 位图");
-_Static_assert(sizeof(((checkpoint_handle_t *)0)->block_words) == (FTL_BLOCK_TOTAL * sizeof(WORD)),
-               "checkpoint_handle_t.block_words 必须恰好覆盖全部块");
+_Static_assert(sizeof(((cp_handle_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)),
+               "cp_handle_t.region_bitmap 必须是本 die 的局部 2048-bit 位图");
+_Static_assert(sizeof(((cp_handle_t *)0)->block_words) == (FTL_BLOCK_TOTAL * sizeof(WORD)),
+               "cp_handle_t.block_words 必须恰好覆盖全部块");
 
 /* ── Checkpoint 池位置与块数（CHECKPOINT_BLOCK0 / CHECKPOINT_POOL_BLOCKS）
  *    见 ftl/metadata.h「固定元数据区布局」── */
@@ -230,9 +232,9 @@ static inline BYTE cp_block_word_pool(WORD word)
  * md_dir 是动态 LOG 块身份的权威：live 元数据块即使 BST state 不是 LOG，
  * 也按 LOG 编码（否则下次开机快照校验整份失败，RISK-BOOT-15）。
  * md_dir 允许为 NULL（只按 BST/池编码；格式化后的 initial CP 用）。 */
-void cp_block_snapshot(const ftl_allocator_t      *alloc,
-                       const metadata_dir_cache_t *md_dir,
-                       WORD                        words[FTL_BLOCK_TOTAL]);
+void cp_block_snapshot(const alc_t          *alloc,
+                       const md_dir_cache_t *md_dir,
+                       WORD                  words[FTL_BLOCK_TOTAL]);
 
 /* ── 磨损快照（随 Checkpoint 原子落盘）──
  * 每块 8 B，按 gblock 索引（数组下标即块号，条目里不再存 block 字段）：
@@ -258,7 +260,7 @@ _Static_assert((sizeof(cp_wear_entry_t) * FTL_CHECKPOINT_WEAR_ENTRIES_PER_PAGE) 
                "磨损快照页必须恰好装满一页主区");
 
 /* 把第 page_index 页磨损快照从 BST 组进 page（256 条 × 8 B）。 */
-void cp_wear_page_build(const ftl_allocator_t *alloc, WORD page_index, BYTE page[PAGE_MAIN_SIZE]);
+void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN_SIZE]);
 
 /* T3 定时的最小 journal 增量：一条 CP record 是 21 页，加此门后轻载下不会每个
  * 定时拍都写一条 record（数值为本仓经验值）。 */
@@ -288,10 +290,10 @@ typedef struct
     DWORD wear_page_crc[FTL_CHECKPOINT_WEAR_PAGES]; /* 每页磨损快照的 CRC32 */
     DWORD record_pages;                             /* 1 + block_page_count + wear_page_count */
     BYTE  padding[2048 - 94 * 4];                   /* 补齐到一页主区（1672 B）*/
-} l2p_checkpoint_header_t;
+} cp_header_t;
 
-_Static_assert(sizeof(l2p_checkpoint_header_t) == PAGE_MAIN_SIZE, "Checkpoint Header 必须恰好一页主区");
-_Static_assert(sizeof(((l2p_checkpoint_header_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)),
+_Static_assert(sizeof(cp_header_t) == PAGE_MAIN_SIZE, "Checkpoint Header 必须恰好一页主区");
+_Static_assert(sizeof(((cp_header_t *)0)->region_bitmap) == (L2P_LOCAL_DIRTY_WORDS * sizeof(DWORD)),
                "Header 位图必须是本 die 的局部 2048-bit 位图");
 
 /* ── 接口 ── */
@@ -305,38 +307,38 @@ typedef enum
     CHECKPOINT_REASON_TIMER,       /* 定时 */
     CHECKPOINT_REASON_EMERGENCY,   /* 紧急水位（只认 trigger->emergency） */
     CHECKPOINT_REASON_EXPLICIT,    /* force */
-} checkpoint_reason_t;
+} cp_reason_e;
 
 /*
- * checkpoint_trigger_t — FTL 每轮汇总的触发信息（docs §4.6）
+ * cp_trigger_t — FTL 每轮汇总的触发信息（docs §4.6）
  *
  * 只传**每轮会变**的动态量；编译期常量 / 策略表由本模块自己持有。
  */
 typedef struct
 {
-    DWORD               now_ms;
-    DWORD               total_writes;
-    DWORD               journal_seq;
-    BYTE                jrn_get_watermark; /* 0..100 */
-    bool                emergency;         /* Journal ≥ 95% */
-    bool                force;             /* 显式请求（开机/诊断） */
-    checkpoint_reason_t reason;            /* force 时优先用 */
-} checkpoint_trigger_t;
+    DWORD       now_ms;
+    DWORD       total_writes;
+    DWORD       journal_seq;
+    BYTE        jrn_get_watermark; /* 0..100 */
+    bool        emergency;         /* Journal ≥ 95% */
+    bool        force;             /* 显式请求（开机/诊断） */
+    cp_reason_e reason;            /* force 时优先用 */
+} cp_trigger_t;
 
 typedef struct
 {
-    ftl_module_status_t base;
+    ftl_mod_status_t base;
 
-    cp_phase_t phase; /* 观测；外部不要据此驱动 */
+    cp_phase_e phase; /* 观测；外部不要据此驱动 */
     bool       active;
     DWORD      journal_seq;    /* 本次 job 起点的 journal 水位 */
     BYTE       anchor_pages;   /* 已写 Anchor 页数 */
     bool       header_written; /* Header（commit 页）已写 */
     bool       truncated;      /* 本次已做 journal 截断 */
-    cp_phase_t fail_phase;     /* 中止发生的 phase */
+    cp_phase_e fail_phase;     /* 中止发生的 phase */
     bool       timed_out;
-    cp_phase_t timeout_phase;
-} checkpoint_status_t;
+    cp_phase_e timeout_phase;
+} cp_status_t;
 
 /*
  * cp_handle - 推进 Checkpoint（typed handle；提交即返回）
@@ -348,14 +350,14 @@ typedef struct
  * @param trigger 本轮触发信息（**非空**）
  * @param out    出参：本轮结束后的上报（**非空**）
  */
-void cp_handle(checkpoint_handle_t *h, const checkpoint_trigger_t *trigger, checkpoint_status_t *out);
+void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out);
 
 /* cp_reset_timer - 复位 T3 定时基准（boot 恢复 / 格式化后调用）。 */
-void cp_reset_timer(checkpoint_handle_t *h);
+void cp_reset_timer(cp_handle_t *h);
 
 /* cp_get_block_words - 块元数据快照缓冲（full metadata rebuild / 恢复的端口；FTL_BLOCK_TOTAL 个 word）。
  * 返回的是 handle 内部常驻缓冲，调用者只读/按恢复流程填充。 */
-WORD *cp_get_block_words(checkpoint_handle_t *h);
+WORD *cp_get_block_words(cp_handle_t *h);
 
 /* cp_begin / cp_kick / cp_handle 是本模块内部状态机入口（不对外）。 */
 
@@ -370,7 +372,7 @@ WORD *cp_get_block_words(checkpoint_handle_t *h);
  * @param out_record_idx 输出：该 Header 在池内的槽位（可为 NULL；块元数据快照 加载要用）
  * @return FTL_OK 找到；FTL_ERROR 无有效 Checkpoint / 重读失败 / 校验不符
  */
-ftl_status_t cp_find_latest(checkpoint_handle_t *h, l2p_checkpoint_header_t *cp, WORD *out_record_idx);
+ftl_status_e cp_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_record_idx);
 
 /*
  * cp_probe_media_status - 开机格式化判据：区分“空片 / 版本不符 / 读失败”
@@ -392,9 +394,9 @@ typedef enum
     CP_MEDIA_NO_RECORD,        /* 空片：CP 池无内容 */
     CP_MEDIA_VERSION_MISMATCH, /* 读到 CP 头，但布局版本不是当前 */
     CP_MEDIA_IO_ERROR,         /* 有介质内容但 CP 读不通 / 头损坏 */
-} cp_media_status_t;
+} cp_media_status_e;
 
-cp_media_status_t cp_probe_media_status(checkpoint_handle_t *h, DWORD *out_layout_version);
+cp_media_status_e cp_probe_media_status(cp_handle_t *h, DWORD *out_layout_version);
 
 /*
  * cp_load_block_table - 读取并校验一条 Checkpoint 记录的 块元数据快照
@@ -409,10 +411,10 @@ cp_media_status_t cp_probe_media_status(checkpoint_handle_t *h, DWORD *out_layou
  * @param block_words  输出：FTL_BLOCK_TOTAL 个 16-bit word
  * @return true = 已加载且 CRC 通过；false = 无快照 / 损坏
  */
-bool cp_load_block_table(checkpoint_handle_t           *h,
-                         const l2p_checkpoint_header_t *cp,
-                         WORD                           record_idx,
-                         WORD                           block_words[FTL_BLOCK_TOTAL]);
+bool cp_load_block_table(cp_handle_t       *h,
+                         const cp_header_t *cp,
+                         WORD               record_idx,
+                         WORD               block_words[FTL_BLOCK_TOTAL]);
 
 /*
  * cp_load_wear_table - 读取并校验 Checkpoint 记录里的磨损快照
@@ -428,9 +430,9 @@ bool cp_load_block_table(checkpoint_handle_t           *h,
  * @param record_idx 该 Header 的池内槽位
  * @return true = 已加载并回填；false = 无快照 / 损坏
  */
-bool cp_load_wear_table(checkpoint_handle_t           *h,
-                        const l2p_checkpoint_header_t *cp,
-                        WORD                           record_idx);
+bool cp_load_wear_table(cp_handle_t       *h,
+                        const cp_header_t *cp,
+                        WORD               record_idx);
 
 /*
  * cp_init - 复位 checkpoint handle 并绑定窄上下文
@@ -442,12 +444,12 @@ bool cp_load_wear_table(checkpoint_handle_t           *h,
  * @param alloc        allocator
  * @param topo         本实例拓扑
  */
-void cp_init(checkpoint_handle_t  *h,
-             l2p_cache_t          *cache,
-             l2p_journal_t        *journal,
-             metadata_dir_cache_t *metadata_dir,
-             ftl_allocator_t      *alloc,
-             ftl_topology_t        topo);
+void cp_init(cp_handle_t    *h,
+             l2p_cache_t    *cache,
+             l2p_jrn_t      *journal,
+             md_dir_cache_t *metadata_dir,
+             alc_t          *alloc,
+             ftl_topo_t      topo);
 
 /*
  * cp_write_initial - 全量格式化后写一条完整的 initial Checkpoint
@@ -461,6 +463,6 @@ void cp_init(checkpoint_handle_t  *h,
  * @param ftl  FTL 实例（含 allocator / checkpoint handle / topo）
  * @return FTL_OK / FTL_ERROR（任一分页写失败 ⇒ 不写 Header，无有效 record）
  */
-ftl_status_t cp_write_initial(struct ftl_context *ftl);
+ftl_status_e cp_write_initial(struct ftl_context *ftl);
 
 #endif /* FTL_CHECKPOINT_H */

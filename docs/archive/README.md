@@ -9,7 +9,9 @@
 docs/archive/
 ├── README.md          ← 本文件
 ├── changelog/         ← 原 docs/changelog/：FC / FTL 各版本逐版本落地记录（70 个）
-└── <dated 6 个>       ← 原 docs/design/ 的一次性阶段文档
+├── <dated 6 个>       ← 原 docs/design/ 的一次性阶段文档
+├── images/            ← 历史证据图（h2testw_pass_20261022.png 等）
+└── <计划/历史 10 个>   ← 2026-10-22 文档重组移入（见下节）
 ```
 
 ## changelog/（原 `docs/changelog/`，2026-10-15 移入）
@@ -37,8 +39,26 @@ FC / FTL 层**逐版本**变更记录（「为什么这样做 / 决策反转 / �
 | `ftl_wave0_board_verify.md` | FTL 波 0 上板验证清单（v0.70 已过） |
 | `ftl_v075_board_verify.md` | v0.75 整机回归验证清单（§0~§12 全绿） |
 
+## 2026-10-22 文档重组移入（10 个）
+
+> 原则：有效设计已并入主干（`../design/`）；未实现/未验证项已抽到
+> [`../design/known_iss.md`](../design/known_iss.md)；其余历史/计划稿在此保留全文。
+
+| 文件 | 原用途 | 处置 |
+|---|---|---|
+| `cw_level_mapping_design.md` | CW 级布局与设计决策 | §1.3/1.4 口径表、§2.2 尺寸推导、approach ③ 已并入 `ftl_design.md` §2.1/§2.2 |
+| `multi_lun_generalization.md` | 多 LUN 泛化实施计划 | 内存预算/共享 cache 已并入 `ftl_design.md`；Phase D 等进 `known_iss` §4 |
+| `ftl_optimization_plan.md` | FTL 优化波次与遗留表 | §8 未决项进 `known_iss` §3；其余为历史 |
+| `nand_op_enablement_plan.md` | NAND OP 启用方案 | P1/P2/P3/Phase 0/D1-D5 进 `known_iss` §2 |
+| `hil_ut_design.md` | HIL UT 与系统验收设计 | 用例清单进 `known_iss` §1（未实现） |
+| `ftl_host_interface.md` | FTL 对外接口历史契约 | FLUSH/TRIM 语义已补进 `ftl_design.md` §3.9.10 |
+| `fc_api_usage.md` | FC 对外接口使用指南 | 主干 `fc_nand_design.md` §2.9/§2.10 已覆盖 |
+| `ftl_module_contracts.md` | FTL 模块 handle 契约 | §6 时间归属 / §8 字段所有权并入 `ftl_design.md` §5.1.2；全文保留 |
+| `ftl_ut_munit.md` | FTL L0 UT 设计与用例清单 | UT 冻结状态进 `known_iss` ISS-UT-01；全文保留 |
+| `claude_md_history.md` | `CLAUDE.md` 规则变更史 | 纯历史 |
+
 ## 边界
 
-- 活跃权威设计文档一律在 **`../design/`**（18 个），不要往这里放。
+- 活跃权威设计文档一律在 **`../design/`**（17 个，含 `ftl_revision_history.md`），不要往这里放。
 - 新增「已落地变更」的记录：若只是单版本落地/上板记录，直接放这里 `changelog/`；
   若是对当前设计仍有约束力的决策，进 `../design/` 对应文档。

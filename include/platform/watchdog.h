@@ -28,7 +28,7 @@ typedef enum
     STORAGE_WDG_DOMAIN_DMA,
     STORAGE_WDG_DOMAIN_POWER,
     STORAGE_WDG_DOMAIN_COUNT
-} storage_wdg_domain_t;
+} wdg_domain_e;
 
 /* 将某个域转换成 required_domains 使用的位图，例如 HOST | NAND | FTL。 */
 #define STORAGE_WDG_DOMAIN_MASK(domain) (1UL << (domain))
@@ -39,7 +39,7 @@ typedef enum
     STORAGE_WDG_FAULT_DOMAIN_TIMEOUT,     /* 一个必需域在 deadline 前没有前进。 */
     STORAGE_WDG_FAULT_WWDG_WINDOW_MISSED, /* Supervisor 太晚运行，错过 WWDG 窗口。 */
     STORAGE_WDG_FAULT_WWDG_EARLY_WAKEUP   /* WWDG 即将复位前产生了 EWI。 */
-} storage_wdg_fault_t;
+} wdg_fault_e;
 
 /*
  * 可选的局部恢复回调，例如重置 NAND channel 或重置 PCIe 控制器。
@@ -47,7 +47,7 @@ typedef enum
  * 恢复请求，不会清除全局 fault，也不会恢复 IWDG 喂狗；必需域超时后仍以硬复位和
  * FTL journal/checkpoint 恢复作为一致性保障。
  */
-typedef bool (*storage_wdg_recovery_hook_t)(storage_wdg_domain_t domain, storage_wdg_fault_t fault);
+typedef bool (*storage_wdg_recovery_hook_t)(wdg_domain_e domain, wdg_fault_e fault);
 
 typedef struct
 {
@@ -85,14 +85,14 @@ typedef struct
 
 typedef struct
 {
-    bool                 initialized;                                 /* 硬件和软件状态是否已经完成初始化。 */
-    bool                 iwdg_feeding;                                /* false 表示已故障锁存，不会再刷新 IWDG。 */
-    bool                 wwdg_enabled;                                /* 本次配置是否启用了 WWDG。 */
-    bool                 wwdg_early_warning;                          /* 是否已经收到 WWDG 的 EWI。 */
-    storage_wdg_fault_t  fault;                                       /* 首个故障原因，锁存后不被后续故障覆盖。 */
-    storage_wdg_domain_t fault_domain;                                /* 首个超时或异常关联的健康域。 */
-    DWORD                last_progress_ms[STORAGE_WDG_DOMAIN_COUNT];  /* 各域最后前进时刻。 */
-    DWORD                recovery_attempts[STORAGE_WDG_DOMAIN_COUNT]; /* 每域本次启动的恢复请求次数。 */
+    bool         initialized;                                 /* 硬件和软件状态是否已经完成初始化。 */
+    bool         iwdg_feeding;                                /* false 表示已故障锁存，不会再刷新 IWDG。 */
+    bool         wwdg_enabled;                                /* 本次配置是否启用了 WWDG。 */
+    bool         wwdg_early_warning;                          /* 是否已经收到 WWDG 的 EWI。 */
+    wdg_fault_e  fault;                                       /* 首个故障原因，锁存后不被后续故障覆盖。 */
+    wdg_domain_e fault_domain;                                /* 首个超时或异常关联的健康域。 */
+    DWORD        last_progress_ms[STORAGE_WDG_DOMAIN_COUNT];  /* 各域最后前进时刻。 */
+    DWORD        recovery_attempts[STORAGE_WDG_DOMAIN_COUNT]; /* 每域本次启动的恢复请求次数。 */
 } storage_wdg_status_t;
 
 /* 配置 IWDG 与可选 WWDG，并以当前系统毫秒计数作为所有域的初始心跳时刻。 */
@@ -102,7 +102,7 @@ bool storage_wdg_init(const storage_wdg_config_t *config);
 void storage_wdg_set_recovery_hook(storage_wdg_recovery_hook_t hook);
 
 /* 在指定状态机确认前进时调用，用当前毫秒计数更新该域心跳。 */
-void storage_wdg_report_progress(storage_wdg_domain_t domain);
+void storage_wdg_report_progress(wdg_domain_e domain);
 
 /* 单一 Supervisor 任务或主循环周期调用，执行全部健康判定和唯一的硬件喂狗。 */
 void storage_wdg_service(void);

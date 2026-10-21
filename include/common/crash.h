@@ -15,7 +15,7 @@ typedef enum
     CRASH_KIND_ASSERT = 1U,
     CRASH_KIND_FAULT  = 2U,
     CRASH_KIND_ABORT  = 3U,
-} crash_kind_t;
+} crash_kind_e;
 
 /* CPU 故障现场（kind == CRASH_KIND_FAULT 时有效）。
  * 全为 32 位字，无填充，便于整体校验。 */
@@ -37,7 +37,7 @@ typedef struct
 {
     DWORD                magic;
     DWORD                version;
-    DWORD                kind; /* crash_kind_t */
+    DWORD                kind; /* crash_kind_e */
     DWORD                line;
     DWORD                checksum;
     char                 expression[CRASH_TEXT_CAPACITY];

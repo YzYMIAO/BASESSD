@@ -22,7 +22,7 @@
  *   返回：FC_STATUS_OK。
  *   实现要点：入参前置条件由调用者保证（fc.c 传入本池的调度器与两条队列）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq)
+fc_status_e fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq)
 {
     ASSERT(scheduler != NULL);
     ASSERT(sq != NULL);

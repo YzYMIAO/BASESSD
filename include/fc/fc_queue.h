@@ -41,18 +41,18 @@ typedef struct
 } fc_completion_queue_t;
 
 /* ── 初始化：storage 由调用方提供（固定数组），队列不分配内存 ── */
-fc_status_t fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth);
-fc_status_t fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth);
+fc_status_e fc_submission_queue_init(fc_submission_queue_t *queue, fc_command_id_t *storage, WORD depth);
+fc_status_e fc_completion_queue_init(fc_completion_queue_t *queue, fc_command_status_t *storage, WORD depth);
 
 /* 入队满时返回 FC_STATUS_QUEUE_FULL；出队空时返回 FC_STATUS_QUEUE_EMPTY。
  * push 的 command_id 若为 FC_COMMAND_ID_INVALID（哨兵）属调用者 bug → ASSERT。 */
-fc_status_t fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id);
-fc_status_t fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id);
+fc_status_e fc_submission_queue_push(fc_submission_queue_t *queue, fc_command_id_t command_id);
+fc_status_e fc_submission_queue_pop(fc_submission_queue_t *queue, fc_command_id_t *command_id);
 
 /* Peek 第 offset 条待出队命令（不消耗），offset=0 即队头。 */
 fc_command_id_t fc_submission_queue_peek(const fc_submission_queue_t *queue, WORD offset);
 
-fc_status_t fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion);
-fc_status_t fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion);
+fc_status_e fc_completion_queue_push(fc_completion_queue_t *queue, const fc_command_status_t *completion);
+fc_status_e fc_completion_queue_pop(fc_completion_queue_t *queue, fc_command_status_t *completion);
 
 #endif /* FC_QUEUE_H */

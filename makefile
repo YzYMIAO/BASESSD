@@ -37,6 +37,25 @@ else
     $(error Invalid UT=$(UT), valid values: (empty), FC, FTL)
 endif
 
+# ----------------------------------------------------------------------------
+# 1.6 开卡镜像（**破坏性**）
+#   make format-image            → build/firmware/<type>_fmt/bin/，每次启动先擦全片
+#   make format-image FORMAT_VERIFY=1  → 开卡时追加全片擦除体检（擦除成功即好块）
+#   用途：介质账本已坏、开机 full metadata rebuild 太慢时，先烧这张镜像快速开卡；
+#         开卡完成后**必须换回正常镜像**——这张镜像每次上电都会清数据。
+#   **bin 输出路径与正常镜像相同**（build/firmware/<type>/bin/debug.bin，烧录配置不用改）；
+#   只有对象/库/依赖目录带 _fmt 后缀，避免复用陈旧 .o，无需 make clean。
+# ----------------------------------------------------------------------------
+FORMAT_ON_BOOT ?= 0
+FORMAT_VERIFY  ?= 0
+
+ifeq ($(filter $(FORMAT_ON_BOOT),0 1),)
+    $(error Invalid FORMAT_ON_BOOT=$(FORMAT_ON_BOOT), valid: 0/1)
+endif
+ifeq ($(filter $(FORMAT_VERIFY),0 1),)
+    $(error Invalid FORMAT_VERIFY=$(FORMAT_VERIFY), valid: 0/1)
+endif
+
 include $(PROJECT_ROOT)/config.mk
 
 # ============================================================================
@@ -139,16 +158,34 @@ asan:
 tests:
 	$(MAKE)  BUILD_TARGET=firmware FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FC_NAND_TEST_ENABLE=1 UT=$(UT) CFLAGS_EXTRA=-DMUNIT_ENABLE_TIMING
 
+# 开卡镜像（破坏性）：FORMAT_ON_BOOT=1 ⇒ 每次启动擦全片 + 写初始元数据。
+# bin 路径与正常镜像相同（烧录配置不用改）；对象目录带 _fmt 后缀隔离。
+# 开卡后换回正常镜像（make all）。
+.PHONY: format-image
+format-image:
+	$(MAKE) all BUILD_TARGET=firmware FIRMWARE_PLATFORM=$(FIRMWARE_PLATFORM) BUILD_TYPE=$(BUILD_TYPE) FORMAT_ON_BOOT=1 FORMAT_VERIFY=$(FORMAT_VERIFY)
+
 # ============================================================================
 # 主目标
 # ============================================================================
+# 共用 bin 路径时，正常镜像 / 开卡镜像 / 体检镜像的 ELF/BIN **不能互相复用**：
+# 记录上次构建的 (FORMAT_ON_BOOT/FORMAT_VERIFY)；配置切换时删掉旧输出，强制重链。
+.PHONY: check-build-cfg
+check-build-cfg:
+	@$(MKDIR) $(BIN_DIR)
+	@cfg="$(FORMAT_ON_BOOT)/$(FORMAT_VERIFY)"; \
+	if [ -f "$(TARGET).elf" ] && { [ ! -f "$(BIN_DIR)/.build_cfg" ] || [ "$$(cat "$(BIN_DIR)/.build_cfg")" != "$$cfg" ]; }; then \
+		rm -f "$(TARGET).elf" "$(TARGET).bin" "$(TARGET).map" "$(TARGET).lst" "$(TARGET).sym" "$(TARGET).size"; \
+	fi; \
+	printf '%s\n' "$$cfg" > "$(BIN_DIR)/.build_cfg"
+
 .PHONY: all
 # format 作为 all 的前置目标：每次构建先强制格式化（format 是 .PHONY，恒执行）。
 # 串行 make 下 format 先于编译跑；干净树时 clang-format 不改 mtime（零开销、不触发
 # 重编译），有未格式化改动时先改盘再编译，保证产物与源码一致。
 # 注意：本工程按串行 make 构建；若用 -j，format 会与编译并发，需改为在编译规则上
 # 挂 order-only 前置（见 rules_common.mk）。
-all: format $(ANALYSIS_FILES)
+all: check-build-cfg format $(ANALYSIS_FILES)
 
 .PHONY: reall
 reall: clean all
@@ -254,6 +291,7 @@ help:
 	@echo "    release        - Build release version"
 	@echo "    asan           - Build with AddressSanitizer"
 	@echo "    tests          - Build firmware with UART NAND test commands"
+	@echo "    format-image   - Build **destructive** open-card image (formats on EVERY boot)"
 	@echo ""
 	@echo "  Analysis Targets:"
 	@echo "    preprocess     - Generate .i files"
@@ -271,6 +309,7 @@ help:
 	@echo "  Variables:"
 	@echo "    BUILD_TYPE     - debug, release, asan (default: debug)"
 	@echo "    UT             - unit test scope for 'tests': (empty)=all, FC, FTL"
+	@echo "    FORMAT_VERIFY  - with format-image: 1 = full-chip erase check (erase OK = good block)"
 	@echo "    V=1            - Show full compile commands"
 	@echo "    CROSS_COMPILE  - Cross-compilation prefix"
 	@echo "    COVERAGE=1     - Enable code coverage (gcov)"

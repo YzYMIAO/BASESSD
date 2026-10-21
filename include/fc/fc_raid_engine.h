@@ -68,7 +68,7 @@ void fc_raid_init_ctx(BYTE lun);
  * @param total     本次序列期望的 CW 总数（含第一个）
  * @return          FC_STATUS_OK 或 FC_STATUS_NOT_READY（LUN 忙）
  */
-fc_status_t fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total);
+fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total);
 
 /*
  * 累加一个 CW 到 RAID 累加器。acc_buf ^= cw_buffer。
@@ -78,7 +78,7 @@ fc_status_t fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total);
  * @return          FC_STATUS_OK 或 FC_STATUS_INVALID_ARGUMENT（序列未开始）。
  *                  超出 total 的累加属调用者计数 bug → ASSERT。
  */
-fc_status_t fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer);
+fc_status_e fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer);
 
 /*
  * 结束 RAID 序列，将累加器结果写入 parity_buffer。
@@ -88,7 +88,7 @@ fc_status_t fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer);
  * @param parity_buffer 输出：XOR 结果写入此 buffer
  * @return              FC_STATUS_OK 或 FC_STATUS_INVALID_ARGUMENT
  */
-fc_status_t fc_raid_end(BYTE lun, BYTE *parity_buffer);
+fc_status_e fc_raid_end(BYTE lun, BYTE *parity_buffer);
 
 /* ── 中断保护 ── */
 

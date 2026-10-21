@@ -1,7 +1,7 @@
 #ifndef SSD_REQUEST_H
 #define SSD_REQUEST_H
 
-#include "ftl_type.h" /* ftl_io_request_t */
+#include "ftl_type.h" /* ftl_io_req_t */
 #include "ssd_types.h"
 
 #include <stddef.h>
@@ -13,19 +13,19 @@ typedef enum
     SSD_REQUEST_WRITE,
     SSD_REQUEST_FLUSH,
     SSD_REQUEST_TRIM
-} ssd_request_opcode_t;
+} ssd_req_opcode_e;
 
 typedef struct
 {
-    ssd_request_opcode_t opcode;
-    QWORD                start_lba;
-    DWORD                block_count;
-    void                *buffer;
-    size_t               buffer_size;
-    ssd_status_t         completion_status;
-    volatile BYTE        complete_flag; /* FTL completion handler 置 1 */
-    volatile DWORD       sub_remaining; /* 未完成的子请求数（Controller 拆分用） */
-    ftl_io_request_t     io;            /* 子请求复用模板（lba/buffer/pages 循环内改写） */
+    ssd_req_opcode_e opcode;
+    QWORD            start_lba;
+    DWORD            block_count;
+    void            *buffer;
+    size_t           buffer_size;
+    ssd_status_e     completion_status;
+    volatile BYTE    complete_flag; /* FTL completion handler 置 1 */
+    volatile DWORD   sub_remaining; /* 未完成的子请求数（Controller 拆分用） */
+    ftl_io_req_t     io;            /* 子请求复用模板（lba/buffer/pages 循环内改写） */
 } ssd_request_t;
 
 #endif /* SSD_REQUEST_H */

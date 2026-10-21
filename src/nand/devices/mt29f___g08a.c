@@ -32,6 +32,9 @@
 /* 全局 HAL NAND 句柄：生命周期从 nand_init 起，供 FMC 初始化/时序更新复用 */
 static NAND_HandleTypeDef g_nand_handle;
 
+/* 当前实际生效的 ONFI timing mode（0 = 仍为低速）。[STAT] 诊断用。 */
+static BYTE s_timing_mode;
+
 /* --------------------------------------------------------------------
  * g_nand_timing_high — MT29F4G08 3.3V 时序（数据手册 Table 29/31）
  *   29 个值按 nand_fmc_timing_t 字段顺序初始化（顺序耦合，错一位全错）。
@@ -229,7 +232,7 @@ static void nand_fmc_timing_to_pcc(const nand_fmc_timing_t    *onfi,
  *         后调用 nand_engine_execute 阻塞执行。
  *         契约：仅初始化阶段（armed==0）可调，见下 ASSERT。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_execute(BYTE operation, const nand_fc_request_t *request, nand_fc_completion_t *completion)
+nand_result_e nand_fc_execute(BYTE operation, const nand_fc_request_t *request, nand_fc_completion_t *completion)
 {
     const nand_operation_map_t *map;
     nand_command_request_t      command_request;
@@ -278,7 +281,7 @@ nand_result_t nand_fc_execute(BYTE operation, const nand_fc_request_t *request, 
  *     - engine.backend 由调用者（nand_dispatch_task_load）绑定，恒非空（前置条件断言）。
  *     - nand_engine_start 末尾即 step 一次：无 busy 阶段命令直接完成。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, const nand_fc_request_t *request)
+nand_result_e nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, const nand_fc_request_t *request)
 {
     const nand_operation_map_t *map;
     BYTE                        result;
@@ -338,7 +341,7 @@ nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, 
  *   实现要点：engine step 直到非 NOT_READY 才算完成，完成时回填
  *         completion 并清 active。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *completion)
+nand_result_e nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *completion)
 {
     BYTE result;
 
@@ -363,7 +366,7 @@ nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completio
  *   功能：NAND 复位（同步）。
  *   返回：NAND_RESULT_OK / 错误码。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_reset(nand_fc_completion_t *completion)
+nand_result_e nand_fc_reset(nand_fc_completion_t *completion)
 {
     nand_fc_request_t request;
     memset(&request, 0, sizeof(request));
@@ -380,7 +383,7 @@ nand_result_t nand_fc_reset(nand_fc_completion_t *completion)
  *   参数：id —— 输出缓冲（≥5 字节）；completion —— 状态。
  *   返回：NAND_RESULT_OK / 错误码。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_read_id(BYTE id[5], nand_fc_completion_t *completion)
+nand_result_e nand_fc_read_id(BYTE id[5], nand_fc_completion_t *completion)
 {
     ASSERT(id != NULL);
 
@@ -400,7 +403,7 @@ nand_result_t nand_fc_read_id(BYTE id[5], nand_fc_completion_t *completion)
  *   返回：NAND_RESULT_OK / 错误码。
  *   实现要点：column / row 恒 0——ECh 无地址语义（uop 序列只有 COLUMN_0 = 0）。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_fc_completion_t *completion)
+nand_result_e nand_fc_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_fc_completion_t *completion)
 {
     ASSERT(page != NULL);
 
@@ -420,7 +423,7 @@ nand_result_t nand_fc_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], 
  *   返回：NAND_RESULT_OK / 错误码。
  *   实现要点：column 复用为 feature 地址，data 长度固定 4。
  * -------------------------------------------------------------------- */
-nand_result_t nand_fc_set_features(BYTE feature_address, const BYTE feature_data[4], nand_fc_completion_t *completion)
+nand_result_e nand_fc_set_features(BYTE feature_address, const BYTE feature_data[4], nand_fc_completion_t *completion)
 {
     ASSERT(feature_data != NULL);
 
@@ -768,11 +771,17 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
         }
     }
 
+    s_timing_mode = (BYTE)CONFIG_NAND_TIMING_MODE;
     return NAND_RESULT_OK;
 #else
     LOGI("[NAND] high-speed mode disabled (CONFIG_NAND_TIMING_MODE=0)\r\n");
     return NAND_RESULT_OK;
 #endif /* CONFIG_NAND_TIMING_MODE */
+}
+
+BYTE nand_get_timing_mode(void)
+{
+    return s_timing_mode;
 }
 
 /* --------------------------------------------------------------------

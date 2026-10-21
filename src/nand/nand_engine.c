@@ -41,7 +41,7 @@
  *   实现要点：@deprecated 仅初始化阶段同步调用（nand_init）；
  *         把协作式 step 循环压成 while(NOT_READY) 阻塞调用。
  * -------------------------------------------------------------------- */
-nand_result_t nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion)
+nand_result_e nand_engine_execute(const nand_engine_backend_t *backend, const nand_uop_t *uops, const nand_operation_timing_t *timing, const nand_command_request_t *request, nand_command_completion_t *completion)
 {
     /* 引擎上下文的 backend/request/completion 三指针随 state 固定，先绑定再 start */
     nand_engine_state_t state;
@@ -72,7 +72,7 @@ nand_result_t nand_engine_execute(const nand_engine_backend_t *backend, const na
  *       内即完成（上层 nand_fc_start 据此清 active）。
  *     - 返回值可为 OK 或 NOT_READY，调用方须两者都接受。
  * -------------------------------------------------------------------- */
-nand_result_t nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uops, const nand_operation_timing_t *timing)
+nand_result_e nand_engine_start(nand_engine_state_t *state, const nand_uop_t *uops, const nand_operation_timing_t *timing)
 {
     /* 前置条件由调用者保证（见 nand_engine.h）：state->backend/request/completion 三指针
      * 随事务固定（nand_dispatch_task_load / nand_fc_start 绑定），uops/timing 取自
@@ -194,7 +194,7 @@ static void nand_engine_uop_log_ok(const nand_engine_state_t *state)
  *   忙等/日志的类型特化装饰抽成三个 static helper（见上），本函数只留
  *   解释器骨架：END / JUMP 是控制流（不查表），其余一律走 handler 表。
  * -------------------------------------------------------------------- */
-nand_result_t nand_engine_step(nand_engine_state_t *state)
+nand_result_e nand_engine_step(nand_engine_state_t *state)
 {
     const nand_uop_t  *uop;
     nand_uop_handler_t handler;

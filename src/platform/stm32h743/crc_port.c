@@ -41,6 +41,9 @@ void crc_port_init(void)
      */
     status = HAL_CRC_Init(&g_crc_handle);
     ASSERT(status == HAL_OK);
+    /* release（NDEBUG）下断言被裁空 ⇒ status 只剩「set but not used」告警
+     *（判据 10）。显式丢弃，表明初始化调用本身必须保留。 */
+    (void)status;
 }
 
 void crc_port_set_idr(DWORD value)

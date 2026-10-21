@@ -234,7 +234,7 @@ void fc_ldpc_qc_encode(const fc_ldpc_qc_t *qc,
  *     - 失败计数：对每个失败校验，其关联变量 fi++。
  *     - 翻转：fi ≥ min(3, syn_ones) 的变量翻转；无翻转则提前退出。
  * -------------------------------------------------------------------- */
-fc_status_t fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data)
+fc_status_e fc_ldpc_qc_decode(fc_ldpc_qc_t *qc, BYTE *data)
 {
     BYTE  syndromes[QC_M];
     BYTE  col_failures[QC_N];

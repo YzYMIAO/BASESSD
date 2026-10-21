@@ -4,7 +4,8 @@
  * 职责：TinyUSB MSC class 回调 + SCSI → controller 适配。
  *   READ(10)  → ssd_controller_submit(SSD_REQUEST_READ)  → USB IN 数据
  *   WRITE(10) → ssd_controller_submit(SSD_REQUEST_WRITE) → 数据已在 USB 缓冲
- *   SYNCHRONIZE CACHE(10) → SSD_REQUEST_FLUSH（ftl_flush，全实例）
+ *   SYNCHRONIZE CACHE(10) → SSD_REQUEST_FLUSH（异步：提交即返回 ASYNC，完成走
+ *                            usb_msc_task；FTL 侧是 ftl_flush_begin/step job）
  *   TEST UNIT READY / READ CAPACITY / INQUIRY / START STOP 由 TinyUSB 调本文件的回调。
  *
  * 并发模型（为什么回调不阻塞）：
@@ -73,7 +74,8 @@ typedef struct
     /* state / discard 会被 USB ISR（tud_event_hook_cb）改写，必须 volatile（H16）。 */
     volatile usb_msc_io_state_t state;
     bool                        is_write;
-    volatile bool               discard; /* 主机已复位/拔出：完成后丢弃结果，不回写 USB 缓冲 */
+    bool                        is_flush; /* SYNCHRONIZE CACHE：无数据阶段，完成=CSW */
+    volatile bool               discard;  /* 主机已复位/拔出：完成后丢弃结果，不回写 USB 缓冲 */
     DWORD                       lba;
     DWORD                       offset;
     DWORD                       length;
@@ -86,6 +88,53 @@ static usb_msc_io_t s_msc_io;
 /* FTL 只认这一块缓冲；USB 端点缓冲随时可能被协议栈复用，不能直接交给 FTL。
  * 该缓冲只被 CPU 读写（DWC2 走 PIO），放普通 .bss 即可；4B 对齐满足 FTL 的字访问。 */
 static BYTE s_msc_bounce[CFG_TUD_MSC_EP_BUFSIZE] __attribute__((aligned(4)));
+
+/* WRITE(10) 数据相分块直方图（RISK-NAND-04 取证）。
+ *
+ * TinyUSB 按 CFG_TUD_MSC_EP_BUFSIZE 分块回调，桶值就是本次数据相长度：
+ * 大量 <=512B 说明主机按单扇区下发（BOT 往返主导吞吐）；全为 4KB 则瓶颈不在
+ * 命令粒度。只在 `info` 时打印，运行期不输出，不影响时序。 */
+_Static_assert(CFG_TUD_MSC_EP_BUFSIZE == 4096U, "histogram label <=4K depends on EP bufsize");
+
+typedef struct
+{
+    DWORD calls;    /* 回调次数 = 数据相分块数 */
+    DWORD bytes;    /* 累计字节 */
+    DWORD le_block; /* <= 512 B 的分块数 */
+    DWORD le_epbuf; /* (512, 4096] B */
+    DWORD gt_epbuf; /* > 4096 B（当前配置下不应出现） */
+} usb_msc_wr_hist_t;
+
+static usb_msc_wr_hist_t s_wr_hist;
+
+static void usb_msc_note_write(DWORD bufsize)
+{
+    s_wr_hist.calls++;
+    s_wr_hist.bytes += bufsize;
+
+    if (bufsize <= USB_MSC_BLOCK_SIZE)
+    {
+        s_wr_hist.le_block++;
+    }
+    else if (bufsize <= CFG_TUD_MSC_EP_BUFSIZE)
+    {
+        s_wr_hist.le_epbuf++;
+    }
+    else
+    {
+        s_wr_hist.gt_epbuf++;
+    }
+}
+
+void usb_msc_io_stats_print(void)
+{
+    LOGI("[USB ] wr chunk calls=%lu bytes=%lu <=512=%lu <=4K=%lu >4K=%lu\r\n",
+         s_wr_hist.calls,
+         s_wr_hist.bytes,
+         s_wr_hist.le_block,
+         s_wr_hist.le_epbuf,
+         s_wr_hist.gt_epbuf);
+}
 
 /* CLI 与 USB 共用 host busy gate（本仓自拟）：任一前端有未完成请求时，另一个不提交。 */
 bool usb_msc_host_busy(void)
@@ -114,24 +163,32 @@ static bool usb_msc_io_matches(bool is_write, DWORD lba, DWORD offset, DWORD len
  * 长度/对齐/范围已由 usb_msc_transfer() 在 host 入口校验（H2）；这里不再复检。 */
 static bool usb_msc_submit(void)
 {
-    /* WRITE：先把 USB 端点缓冲拷进 bounce；READ：FTL 直接写 bounce，
-     * 完成后再拷回端点缓冲。两种方向 FTL 都不持有 USB 侧指针。 */
-    if (s_msc_io.is_write)
-    {
-        memcpy(s_msc_bounce, s_msc_io.usb_buffer, s_msc_io.length);
-    }
-
     ssd_request_t *request = &s_msc_io.request;
 
     memset(request, 0, sizeof(*request));
 
-    const DWORD blocks = s_msc_io.length / USB_MSC_BLOCK_SIZE;
+    if (s_msc_io.is_flush)
+    {
+        /* SYNCHRONIZE CACHE：无数据阶段，不碰 bounce（usb_buffer 为 NULL）。 */
+        request->opcode = SSD_REQUEST_FLUSH;
+    }
+    else
+    {
+        /* WRITE：先把 USB 端点缓冲拷进 bounce；READ：FTL 直接写 bounce，
+         * 完成后再拷回端点缓冲。两种方向 FTL 都不持有 USB 侧指针。 */
+        if (s_msc_io.is_write)
+        {
+            memcpy(s_msc_bounce, s_msc_io.usb_buffer, s_msc_io.length);
+        }
 
-    request->opcode      = s_msc_io.is_write ? SSD_REQUEST_WRITE : SSD_REQUEST_READ;
-    request->start_lba   = s_msc_io.lba;
-    request->block_count = blocks;
-    request->buffer      = s_msc_bounce;
-    request->buffer_size = s_msc_io.length;
+        const DWORD blocks = s_msc_io.length / USB_MSC_BLOCK_SIZE;
+
+        request->opcode      = s_msc_io.is_write ? SSD_REQUEST_WRITE : SSD_REQUEST_READ;
+        request->start_lba   = s_msc_io.lba;
+        request->block_count = blocks;
+        request->buffer      = s_msc_bounce;
+        request->buffer_size = s_msc_io.length;
+    }
 
     if (ssd_controller_submit(&g_ctrl, request) != SSD_STATUS_OK)
     {
@@ -179,7 +236,7 @@ static int32_t usb_msc_transfer(bool is_write, DWORD lba, DWORD offset, void *bu
 
     const DWORD blocks = length / USB_MSC_BLOCK_SIZE;
 
-    if (!ssd_controller_lba_range_ok(lba, blocks))
+    if (!ssd_controller_lba_range_ok(&g_ctrl, lba, blocks))
     {
         return TUD_MSC_RET_ERROR;
     }
@@ -191,6 +248,7 @@ static int32_t usb_msc_transfer(bool is_write, DWORD lba, DWORD offset, void *bu
     }
 
     s_msc_io.is_write   = is_write;
+    s_msc_io.is_flush   = false;
     s_msc_io.lba        = lba;
     s_msc_io.offset     = offset;
     s_msc_io.length     = length;
@@ -217,6 +275,7 @@ void usb_msc_task(void)
         {
             /* 等待期间主机复位/拔出：命令作废。仍要回一次 async_io_done 与
              * 之前的 TUD_MSC_RET_ASYNC 配对（pending_io 已清时它返回 false）。 */
+            ssd_controller_cancel_flush(&g_ctrl);
             s_msc_io.state = USB_MSC_IO_IDLE;
             (void)tud_msc_async_io_done(TUD_MSC_RET_ERROR, false);
             return;
@@ -252,6 +311,10 @@ void usb_msc_task(void)
      * 此时既不能回写数据，也不能再调用 async_io_done。 */
     if (s_msc_io.discard || !tud_ready())
     {
+        /* 放弃回执：避免 controller 迟到的 FLUSH 完成写回已被复用的 request
+         * （s_msc_io.request 是静态对象）。 */
+        ssd_controller_cancel_flush(&g_ctrl);
+
         s_msc_io.discard = false;
         s_msc_io.state   = USB_MSC_IO_IDLE;
         /* 与之前的 ASYNC 返回配对；主机已复位时 pending_io 已清，调用无副作用。 */
@@ -259,12 +322,14 @@ void usb_msc_task(void)
         return;
     }
 
-    if (ok && !s_msc_io.is_write)
+    if (ok && !s_msc_io.is_write && !s_msc_io.is_flush)
     {
         memcpy(s_msc_io.usb_buffer, s_msc_bounce, s_msc_io.length);
     }
 
-    const int32_t transfer_result = ok ? (int32_t)s_msc_io.length : TUD_MSC_RET_ERROR;
+    /* FLUSH 无数据阶段：成功回执为 0（TinyUSB 侧已按命令类型区分 0 的语义）。 */
+    const int32_t transfer_result =
+        ok ? (s_msc_io.is_flush ? 0 : (int32_t)s_msc_io.length) : TUD_MSC_RET_ERROR;
 
     s_msc_io.state = USB_MSC_IO_IDLE;
     /* false = 主机已复位、命令已作废（pending_io 被清），无需处理。 */
@@ -290,6 +355,8 @@ int32_t tud_msc_write10_cb(BYTE lun, DWORD lba, DWORD offset, BYTE *buffer, DWOR
     {
         return TUD_MSC_RET_ERROR;
     }
+
+    usb_msc_note_write(bufsize);
 
     return usb_msc_transfer(true, lba, offset, buffer, bufsize);
 }
@@ -326,7 +393,7 @@ void tud_msc_capacity_cb(BYTE lun, DWORD *block_count, WORD *block_size)
         return;
     }
 
-    *block_count = FTL_LBA_MAX;
+    *block_count = ssd_controller_host_lba_max(&g_ctrl);
     *block_size  = USB_MSC_BLOCK_SIZE;
 }
 
@@ -348,8 +415,11 @@ bool tud_msc_is_writable_cb(BYTE lun)
  * SCSI 命令的兜底分支（TinyUSB 的内建命令不会到这里）。
  *
  * SYNCHRONIZE CACHE(10)：PC 在 fsync/sync/卸载时下发，要求把已确认的写数据
- * 落盘。这里转成 controller 的 FLUSH（L2P journal 尾页 + cache 写回）。
- * ⚠ ftl_flush 是 best-effort，不是掉电屏障语义；详见设计文档 §9。
+ * 落盘。转成 controller 的 FLUSH，并**异步**完成：提交后立即返回
+ * TUD_MSC_RET_ASYNC，由 usb_msc_task 轮询 complete_flag，完成时调
+ * tud_msc_async_io_done()（RISK-USB-06：不能在 SCSI 回调里同步自旋——那段时间
+ * 主循环无法抽 USB 事件）。
+ * ⚠ FLUSH 是 best-effort，不是掉电屏障语义；详见设计文档 §9。
  */
 int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bufsize)
 {
@@ -364,24 +434,31 @@ int32_t tud_msc_scsi_cb(BYTE lun, BYTE const scsi_cmd[16], void *buffer, WORD bu
         return TUD_MSC_RET_ERROR;
     }
 
-    if (!usb_msc_ready() || usb_msc_host_busy() || cli_host_busy())
+    /* BOT 串行：同一时刻只允许一条 host 命令在飞（与 READ/WRITE 的 in-flight 门一致）。 */
+    if (!usb_msc_ready() || (s_msc_io.state != USB_MSC_IO_IDLE))
     {
         return TUD_MSC_RET_ERROR;
     }
 
-    ssd_request_t request;
+    s_msc_io.is_write   = false;
+    s_msc_io.is_flush   = true;
+    s_msc_io.lba        = 0U;
+    s_msc_io.offset     = 0U;
+    s_msc_io.length     = 0U;
+    s_msc_io.usb_buffer = NULL;
 
-    memset(&request, 0, sizeof(request));
-    request.opcode = SSD_REQUEST_FLUSH;
-
-    const ssd_status_t status = ssd_controller_submit(&g_ctrl, &request);
-
-    if (status != SSD_STATUS_OK)
+    if (cli_host_busy())
     {
+        /* CLI 占用 host gate：同 READ/WRITE 先排队，由 usb_msc_task 提交。 */
+        s_msc_io.state = USB_MSC_IO_WAIT_GATE;
+    }
+    else if (!usb_msc_submit())
+    {
+        s_msc_io.state = USB_MSC_IO_IDLE;
         return TUD_MSC_RET_ERROR;
     }
 
-    return 0; /* 无数据阶段 */
+    return TUD_MSC_RET_ASYNC;
 }
 
 void tud_msc_read10_complete_cb(BYTE lun)
@@ -520,7 +597,7 @@ WORD const *tud_descriptor_string_cb(BYTE index, WORD langid)
 void tud_mount_cb(void)
 {
     /* 容量按 SCSI 坐标打印：sector 数 × 每 sector 字节。 */
-    const DWORD block_count = FTL_LBA_MAX;
+    const DWORD block_count = ssd_controller_host_lba_max(&g_ctrl);
 
     LOGI("[USB ] mounted (MSC BOT, %lu sectors x %u bytes)\r\n", block_count, USB_MSC_BLOCK_SIZE);
 }

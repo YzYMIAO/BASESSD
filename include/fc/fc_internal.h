@@ -93,14 +93,14 @@ extern "C"
         FC_COMMAND_STATE_QUEUED,    /* 已提交到 SQ/HSQ */
         FC_COMMAND_STATE_ACTIVE,    /* 已出队，NAND 执行中 */
         FC_COMMAND_STATE_COMPLETED  /* 完成项已入 CQ（可释放） */
-    } fc_command_state_t;
+    } fc_cmd_state_e;
 
     /* ══════════════════════════════════════════════════════════
      * 内部实现（fc.c 定义，fc_interface.c 经此调用）
      * ══════════════════════════════════════════════════════════ */
 
     /* 初始化全局控制器（池清零 + 空闲链表 + 队列/调度器/NAND 初始化） */
-    fc_status_t fc_init_internal(fc_t *controller);
+    fc_status_e fc_init_internal(fc_t *controller);
 
     /* 从空闲链表分配命令槽位，置 ALLOCATED */
     fc_command_t *fc_command_alloc_internal(fc_t *controller);
@@ -122,21 +122,21 @@ extern "C"
     void fc_command_chain_append(fc_t *controller, fc_command_t *command, fc_descriptor_t *descriptor);
 
     /* 按优先级把命令投递到 HSQ（high_priority）或 SQ，置 QUEUED */
-    fc_status_t fc_submit_internal(fc_t *controller, fc_command_t *command);
+    fc_status_e fc_submit_internal(fc_t *controller, fc_command_t *command);
 
     /* 服务主循环单步（推进 NAND + 调度提交）——fc_service 的转发目标 */
-    fc_status_t fc_poll_internal(fc_t *controller);
+    fc_status_e fc_poll_internal(fc_t *controller);
 
     /* 从 CQ 取一条完成项 */
-    fc_status_t fc_poll_completion_internal(fc_t *controller, fc_command_status_t *completion);
+    fc_status_e fc_poll_completion_internal(fc_t *controller, fc_command_status_t *completion);
 
     /* 从 CQ 批量取完成项：最多 max_count 条，实际条数写入 *count。
      * 上限由调用方给（FC 不写死）；循环被 CQ 占用数天然封顶。
      * 返回：取到 ≥1 条 = OK；一条没取到 = QUEUE_EMPTY。 */
-    fc_status_t fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, WORD max_count, WORD *count);
+    fc_status_e fc_poll_completions_internal(fc_t *controller, fc_command_status_t *completions, WORD max_count, WORD *count);
 
     /* 释放命令全部资源（desc 链 + buffer + command 槽位）；调用方须已保证状态合法 */
-    fc_status_t fc_command_release_internal_api(fc_t *controller, fc_command_t *command);
+    fc_status_e fc_command_release_internal_api(fc_t *controller, fc_command_t *command);
 
     /* 释放链头那一个 desc（含其 buffer），*head 前移到后继；*head 越界（空链）无操作 */
     void fc_descriptor_chain_release_head_internal(fc_t *controller, fc_descriptor_id_t *head);
@@ -149,7 +149,7 @@ extern "C"
 
     /* 释放 buffer（状态清零 + 挂回空闲链表头）。
      * buffer_id 越界一律 ASSERT（调用者已先校验占用）。 */
-    fc_status_t fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id);
+    fc_status_e fc_buffer_release_internal(fc_t *controller, fc_buffer_id_t buffer_id);
 
     /* 直接返回 CW 基址（528B，含 META/CRC/PARITY），不做 USER 偏移。
      * buffer_id 越界一律 ASSERT（调用者已先校验占用）。 */

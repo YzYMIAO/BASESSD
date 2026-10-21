@@ -179,7 +179,7 @@ static void nand_dispatch_task_load(nand_dispatch_task_t *task, const nand_dispa
  *   调用链：fc_init_internal() → 本函数。因为纯 memset，FC 可以先于
  *          nand_init()（碰 FMC 硬件）执行，见 main.c 的初始化级联。
  * -------------------------------------------------------------------- */
-nand_result_t nand_dispatch_init(void)
+nand_result_e nand_dispatch_init(void)
 {
     memset(g_nand_dispatch_queues, 0, sizeof(g_nand_dispatch_queues));
     g_nand_dispatch_armed = 0U;
@@ -247,7 +247,7 @@ BYTE nand_dispatch_lun_free(BYTE ch, BYTE ce, BYTE lun)
  *     - 逐槽 nand_dispatch_task_load() 到 tasks[(head+count+i)%DEPTH]；
  *       全部预加载完成后才提交 count（poll 不会看到半挂载的批）。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_dispatch_enqueue(const nand_dispatch_request_t *requests, BYTE count)
+static nand_result_e nand_dispatch_enqueue(const nand_dispatch_request_t *requests, BYTE count)
 {
     nand_dispatch_lun_queue_t *queue;
     BYTE                       i;
@@ -300,7 +300,7 @@ static nand_result_t nand_dispatch_enqueue(const nand_dispatch_request_t *reques
  *   实现要点：仅转发 nand_dispatch_enqueue（放行闩锁与 room 检查都在那里）；
  *         实际执行在后续 poll。
  * -------------------------------------------------------------------- */
-nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request)
+nand_result_e nand_dispatch_submit(const nand_dispatch_request_t *request)
 {
     return nand_dispatch_enqueue(request, 1U);
 }
@@ -311,7 +311,7 @@ nand_result_t nand_dispatch_submit(const nand_dispatch_request_t *request)
  *   参数：requests —— 命令数组；count —— 链长（1..NAND_DISPATCH_CHAIN_DEPTH）。
  *   返回：NAND_RESULT_OK / INVALID_ARGUMENT（异步路径未放行）/ NOT_READY（剩余深度不足整链，无副作用）。
  * -------------------------------------------------------------------- */
-nand_result_t nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, BYTE count)
+nand_result_e nand_dispatch_submit_chain(const nand_dispatch_request_t *requests, BYTE count)
 {
     return nand_dispatch_enqueue(requests, count);
 }

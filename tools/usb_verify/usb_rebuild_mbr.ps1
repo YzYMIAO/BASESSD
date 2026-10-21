@@ -56,7 +56,8 @@ $ErrorActionPreference = 'Stop'
 
 # 与 usb_verify.ps1 保持一致：目标识别 + 防误操作校验。
 $VolumeLabel  = 'SOFTSSD'
-$ExpectedSize = 449839104
+$ExpectedSize = 444596224       # 424 MiB = 868,352 × 512B（介质 v12，0 坏块；容量按坏块动态扣减）
+$SizeTolerance = 67108864       # ±64 MiB ≈ 512 个坏块（RISK-CAP-03）
 $LogFile      = Join-Path $env:TEMP 'softssd_usb_rebuild_mbr.log'
 
 Start-Transcript -Path $LogFile -Force | Out-Null
@@ -81,7 +82,7 @@ function Get-TargetDisk {
         $disk = Get-Disk | Where-Object {
             ($_.BusType -eq 'USB') -and
             ($_.FriendlyName -like '*SOFTSSD*') -and
-            ($_.Size -eq $ExpectedSize)
+            ([math]::Abs($_.Size - $ExpectedSize) -le $SizeTolerance)
         } | Select-Object -First 1
     }
 
@@ -89,7 +90,7 @@ function Get-TargetDisk {
         throw 'SOFTSSD USB disk not found'
     }
     if (($disk.BusType -ne 'USB') -or
-        ($disk.Size -ne $ExpectedSize) -or
+        ([math]::Abs($disk.Size - $ExpectedSize) -gt $SizeTolerance) -or
         ($disk.FriendlyName -notlike '*SOFTSSD*')) {
         throw ("Disk {0} is not the expected SOFTSSD USB disk: name='{1}' size={2} bus={3}" -f `
             $disk.Number, $disk.FriendlyName, $disk.Size, $disk.BusType)

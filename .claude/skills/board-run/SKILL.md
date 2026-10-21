@@ -22,8 +22,14 @@ description: 在 stm32h743 目标板上编译、烧写、抓串口日志、判�
 | 跑 FC 单测 | `make tests UT=FC` |
 | 跑 FTL 单测 | `make tests UT=FTL` |
 | 体积/告警对比 | `make release` |
+| **开卡（破坏性）** | `make format-image`（每次启动擦全片；可加 `FORMAT_VERIFY=1`） |
 
 要求 **零新告警**（既有告警不计）。产物在 `build/firmware/<debug\|release>/bin/`。
+
+⚠ **开卡镜像**：`make format-image` 的产物路径与正常镜像**相同**（`build/firmware/<type>/bin/debug.bin`；
+对象目录带 `_fmt` / `_fmt_vf` 隔离），固件在**每次上电**先 `ftl_media_format` 再继续 boot——用于介质账本已坏、
+开机 full metadata rebuild 太慢、等不到 CLI 的情况。开卡完成后**必须换回正常镜像**，
+否则每次上电都会清数据。
 
 ⚠ 对象目录按配置分置（`obj` / `obj_ut` / `obj_ut_FC` / `obj_ut_FTL`），
 **切换构建或 UT 无需 `make clean`**。

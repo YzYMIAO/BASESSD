@@ -22,7 +22,7 @@
  */
 
 #include "allocator.h"
-#include "checkpoint.h" /* l2p_checkpoint_header_t */
+#include "checkpoint.h" /* cp_header_t */
 #include "journal.h"
 #include "l2p_cache.h"
 #include "ssd_types.h"
@@ -38,8 +38,9 @@ typedef struct
     WORD  blocks_rebuilt;  /* 重建的 Closed 条目数（= 扫到的写过物理块数，per-plane） */
     WORD  partial_blocks;  /* 其中部分写块数（写指针 < PAGES_PER_BLOCK，整块交 GC） */
     WORD  l2p_read_errors; /* 逐 CW 反查 L2P 的读失败次数（valid_cw 可能少算） */
+    WORD  l2p_degraded_cw; /* 命中的「降级 region」CW 数：映射已丢，不再计 read_errors */
     DWORD valid_cw;        /* 重建回填的有效 **CW** 总数（全实例；最大 4096×256=1,048,576） */
-} ftl_rebuild_stats_t;
+} pfr_rebuild_stats_t;
 
 /* ── 启动类型 ── */
 typedef enum
@@ -47,16 +48,17 @@ typedef enum
     BOOT_FRESH_START = 0, /* 出厂首次启动 */
     BOOT_CLEAN_START,     /* 干净关机 */
     BOOT_POWER_FAILURE,   /* 异常掉电恢复 */
-} ftl_boot_type_t;
+} pfr_boot_type_e;
 
 /* ── 启动结果 ── */
 typedef struct
 {
-    ftl_boot_type_t boot_type;       /* 启动类型 */
+    pfr_boot_type_e boot_type;       /* 启动类型 */
     DWORD           cp_sequence;     /* Checkpoint sequence（0 = 无） */
     DWORD           journal_entries; /* 回放的 Journal entry 数 */
     bool            blocks_restored; /* true = 块元数据快照已加载；false = full metadata rebuild 兜底 */
-} ftl_boot_result_t;
+    bool            scoped;          /* true = 快照保留，但有降级 region 的旧映射丢失（范围化恢复） */
+} pfr_boot_result_t;
 
 /* ── 块元数据快照恢复（Checkpoint 的 16-bit/块 word）──
  * 格式编码在 checkpoint.h（记录格式的 owner）；恢复编排在本模块（开机恢复的 owner）。
@@ -67,8 +69,9 @@ typedef struct
     WORD  log_blocks;      /* 恢复出的活 LOG 块数 */
     WORD  anomalies;       /* 探测发现的「池块却有数据」块数 */
     WORD  l2p_read_errors; /* 探测中 L2P 反查失败次数（非 0 ⇒ 快照结果不完整，回退 full metadata rebuild） */
+    WORD  l2p_degraded_cw; /* 命中的降级 region CW 数：只丢映射，不回退全量重建（RISK-BOOT-18） */
     DWORD valid_cw;        /* 探测补算出的有效 CW 数 */
-} ftl_block_restore_stats_t;
+} pfr_block_restore_stats_t;
 
 /* ── full metadata rebuild / 块元数据恢复原语是**模块内部实现**（static，定义在 .c）──
  * 上游只能通过 ftl_boot_recovery 触发；full metadata rebuild 的判空/写指针/逐 CW 反查三者同源。 */
@@ -88,21 +91,36 @@ typedef struct
  * @param out_need_format 输出：true = 需要格式化
  * @return FTL_OK 判定完成；FTL_ERROR CP 介质读不通（未格式化）
  */
-ftl_status_t ftl_media_check_format(struct ftl_context *ftl, bool *out_need_format);
+ftl_status_e ftl_media_check_format(struct ftl_context *ftl, bool *out_need_format);
 
 /*
  * ftl_media_format - 全量格式化（擦本实例全部块 + 复位易失元数据状态）
  *
  * ① `bbt_format_erase`（两阶段：先持久化当前坏块图 + FORMAT_IN_PROGRESS，再擦 BBT 池之外的块，
- *    最后 best-effort 并入新 BAD；阶段①失败则不擦用户块）→ ② `md_init` 复位 Directory
- * → ③ `cp_write_initial` 写当前版本标记。
+ *    最后 best-effort 并入新 BAD；阶段①失败则不擦用户块）
+ * → ②（可选）`verify`：逐块「写图样 → 读回比对 → 再擦」，失败块标 BAD 并落盘。
+ *    用于**出厂标记已丢失的二手片**重建可信坏块表（本仓自拟的体检实现；耗时数分钟）
+ * → ③ `md_init` 复位 Directory
+ * → ④ `cp_write_initial` 写当前版本标记。
  *
  * ⚠ 必须在 ftl_init 之后、free pool 回填之前调用（见 main.c ssd_ftl_boot）。
+ * ⚠ `verify=true` 会显著拉长 format（约数分钟），自动格式化路径固定传 false。
  *
- * @param ftl  FTL 上下文
+ * @param ftl    FTL 上下文
+ * @param verify true = 追加全片读写体检（破坏性）
  * @return FTL_OK / FTL_ERROR
  */
-ftl_status_t ftl_media_format(struct ftl_context *ftl);
+ftl_status_e ftl_media_format(struct ftl_context *ftl, bool verify);
+
+/*
+ * ftl_boot_log_bad_areas - 按固定分区统计 BAD 块（只读 BST，不碰介质）
+ *
+ * 在每个实例 boot 完成、BAD 集合（BBT + CP 快照并集）已确定后调用一次。
+ * 目的：区分坏块落在数据区还是元数据区——后者由 v11 候选块池 + shared metadata
+ * spare 吸收（`RISK-BBT-12/13`）；本行是验证「元数据区是否开始出现 BAD」的基线。
+ * ⚠ 这是**开机基线**：运行期新增的 BAD 不在此行体现（下一次开机才计入）。
+ */
+void ftl_boot_log_bad_areas(const struct ftl_context *ftl);
 
 /*
  * ftl_boot_recovery - 主启动恢复入口
@@ -120,6 +138,6 @@ ftl_status_t ftl_media_format(struct ftl_context *ftl);
  * @param result 输出：启动结果
  * @return FTL_OK 成功；FTL_ERROR 失败
  */
-ftl_status_t ftl_boot_recovery(struct ftl_context *ftl, ftl_boot_result_t *result);
+ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *result);
 
 #endif /* FTL_POWER_FAILURE_RECOVERY_H */

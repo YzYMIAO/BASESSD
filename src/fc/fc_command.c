@@ -15,6 +15,74 @@
 #include "onfi_1_0.h"
 
 #include <stddef.h>
+#include <string.h>
+
+/* fc_cw_status_str - 把 FC_CW_STATUS_* 位解码成短字符串（日志用）
+ *
+ * 输出示例："READY|UNC" / "UNC" / "NAND|TIMEOUT"。
+ * 位顺序按严重性/可读性排列；未知位以 "?" 占位。只写 buf，不分配资源。
+ */
+const char *fc_cw_status_str(DWORD status, char *buf, DWORD buflen)
+{
+    static const struct
+    {
+        DWORD       bit;
+        const char *name;
+    } tbl[] = {
+        { FC_CW_STATUS_NAND_FAIL,    "NAND"},
+        {   FC_CW_STATUS_TIMEOUT, "TIMEOUT"},
+        { FC_CW_STATUS_CRC_ERROR,     "CRC"},
+        {       FC_CW_STATUS_UNC,     "UNC"},
+        {FC_CW_STATUS_MATA_ERROR,    "MATA"},
+        {FC_CW_STATUS_RAID_ERROR,    "RAID"},
+        {     FC_CW_STATUS_READY,   "READY"},
+        { FC_CW_STATUS_PROTECTED,    "PROT"},
+        {     FC_CW_STATUS_BLANK,   "BLANK"},
+    };
+
+    if ((buf == NULL) || (buflen == 0U))
+    {
+        return "";
+    }
+    buf[0] = '\0';
+
+    DWORD used  = 0U;
+    DWORD known = 0U;
+
+    for (DWORD i = 0U; i < (sizeof(tbl) / sizeof(tbl[0])); i++)
+    {
+        if ((status & tbl[i].bit) == 0U)
+        {
+            continue;
+        }
+        known |= tbl[i].bit;
+
+        const DWORD len = (DWORD)strlen(tbl[i].name);
+        const DWORD sep = (used != 0U) ? 1U : 0U;
+
+        if ((used + sep + len) >= buflen)
+        {
+            break;
+        }
+        if (sep != 0U)
+        {
+            buf[used++] = '|';
+        }
+        (void)memcpy(&buf[used], tbl[i].name, len);
+        used += len;
+    }
+
+    if ((status & ~known) != 0U)
+    {
+        if ((used + 2U) < buflen)
+        {
+            buf[used++] = '|';
+            buf[used++] = '?';
+        }
+    }
+    buf[used] = '\0';
+    return buf;
+}
 
 /* --------------------------------------------------------------------
  * fc_cw_bitmap_is_plane_symmetric
@@ -58,7 +126,7 @@ BYTE fc_cw_bitmap_is_plane_symmetric(DWORD mask)
  *       FC 只认 desc 链（链长度即真值）。越段检查随枚举逻辑一并上移 FTL，见
  *       ftl_cmd_configure_descriptors()。本函数只确认「有数据的命令必须已有链」。
  * -------------------------------------------------------------------- */
-fc_status_t fc_command_validate(const fc_command_t *command)
+fc_status_e fc_command_validate(const fc_command_t *command)
 {
     ASSERT(command != NULL);
     ASSERT(command->config.operation < OP_COUNT);

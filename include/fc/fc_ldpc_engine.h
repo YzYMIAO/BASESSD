@@ -41,7 +41,7 @@ typedef struct
 
 /* data_length 恒为 FC_BUFFER_DATA_SIZE（520，CW 缓冲 528B 减去 8B parity 尾区）；
  * 前置：data 非空、data_length ∈ [8, FC_BUFFER_DATA_SIZE]（违反一律 ASSERT）。 */
-fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length);
+fc_status_e fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length);
 
 /*
  * fc_ldpc_decode - 解码单个 CW（data + parity 连续缓冲）
@@ -50,6 +50,6 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data
  *   @param err_bits  out，非 NULL 时返回本 CW 解码纠正的错误 bit 数（BCH t=4 → 0..4）；
  *                  IO_ERROR/失败时为 0。无需该信息时传 NULL。
  */
-fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length, BYTE *err_bits);
+fc_status_e fc_ldpc_decode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length, BYTE *err_bits);
 
 #endif /* FC_LDPC_ENGINE_H */

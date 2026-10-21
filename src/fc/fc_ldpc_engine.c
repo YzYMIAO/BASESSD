@@ -74,7 +74,7 @@ const char *fc_ecc_algo_name(void)
  *     - BCH 分支：fc_bch_encode 生成 8B parity 写 data[520..527]。
  *     - LDPC 分支：qc_encode 输入输出均为 528B 完整码字。
  * -------------------------------------------------------------------- */
-fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length)
+fc_status_e fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length)
 {
     (void)config;
 
@@ -140,7 +140,7 @@ fc_status_t fc_ldpc_encode(const fc_ldpc_config_t *config, BYTE *data, WORD data
  *       错误，按位翻转纠正；err_bits = 纠正数（0..t）。
  *     - LDPC 分支：qc_decode 内部按 528B 码字直接操作。
  * -------------------------------------------------------------------- */
-fc_status_t fc_ldpc_decode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length, BYTE *err_bits)
+fc_status_e fc_ldpc_decode(const fc_ldpc_config_t *config, BYTE *data, WORD data_length, BYTE *err_bits)
 {
     (void)config;
 

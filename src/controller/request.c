@@ -15,7 +15,7 @@
 #include "log.h"
 
 /* 外部：controller.c — 按 LBA 路由到 FTL 实例（内部函数，拆分循环共用） */
-ftl_context_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba);
+ftl_ctx_t *ssd_controller_route(const ssd_controller_t *controller, QWORD lba);
 
 /* ── 子请求完成回调 ──
  *
@@ -51,8 +51,8 @@ static void on_sub_complete(void *ctx)
  */
 QWORD ssd_controller_run_end(ssd_controller_t *controller, QWORD lba, QWORD lba_limit)
 {
-    ftl_context_t *ftl = ssd_controller_route(controller, lba);
-    QWORD          end = lba + 1U;
+    ftl_ctx_t *ftl = ssd_controller_route(controller, lba);
+    QWORD      end = lba + 1U;
 
     /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
     ASSERT(ftl != NULL);
@@ -98,12 +98,12 @@ static DWORD ssd_split_count(ssd_controller_t *controller, ssd_request_t *reques
     return count;
 }
 
-ssd_status_t ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
+ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *request)
 {
     QWORD        lba;
     QWORD        lba_end;
     DWORD        submitted = 0U;
-    ssd_status_t err_status;
+    ssd_status_e err_status;
 
     if ((controller == NULL) || (request == NULL) || (request->block_count == 0U))
     {
@@ -135,10 +135,10 @@ ssd_status_t ssd_request_split(ssd_controller_t *controller, ssd_request_t *requ
 
     while (lba < lba_end)
     {
-        QWORD          run_end = ssd_controller_run_end(controller, lba, lba_end);
-        DWORD          run_len = (run_end - lba);
-        ftl_context_t *ftl     = ssd_controller_route(controller, lba);
-        ftl_status_t   st;
+        QWORD        run_end = ssd_controller_run_end(controller, lba, lba_end);
+        DWORD        run_len = (run_end - lba);
+        ftl_ctx_t   *ftl     = ssd_controller_route(controller, lba);
+        ftl_status_e st;
 
         /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
         ASSERT(ftl != NULL);

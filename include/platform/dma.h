@@ -47,23 +47,23 @@ typedef enum
 {
     DMA_RESULT_OK    = 0U,
     DMA_RESULT_ERROR = 1U,
-} nand_dma_result_t;
+} nand_dma_result_e;
 
 extern BYTE g_nand_dma_enable;
 
-nand_dma_result_t nand_dma_init(void);
+nand_dma_result_e nand_dma_init(void);
 
-nand_dma_result_t nand_dma_memory_to_fmc(volatile BYTE *fmc_data_reg,
+nand_dma_result_e nand_dma_memory_to_fmc(volatile BYTE *fmc_data_reg,
                                          const BYTE    *buffer,
                                          WORD           length);
-nand_dma_result_t nand_dma_fmc_to_memory(volatile BYTE *fmc_data_reg,
+nand_dma_result_e nand_dma_fmc_to_memory(volatile BYTE *fmc_data_reg,
                                          BYTE          *buffer,
                                          WORD           length);
 
-nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile BYTE *fmc_data_reg,
+nand_dma_result_e nand_dma_memory_to_fmc_start_IT(volatile BYTE *fmc_data_reg,
                                                   const BYTE    *buffer,
                                                   WORD           length);
-nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile BYTE *fmc_data_reg,
+nand_dma_result_e nand_dma_fmc_to_memory_start_IT(volatile BYTE *fmc_data_reg,
                                                   BYTE          *buffer,
                                                   WORD           length);
 
@@ -89,35 +89,35 @@ typedef enum
 {
     DMA_RESULT_OK    = 0U,
     DMA_RESULT_ERROR = 1U,
-} nand_dma_result_t;
+} nand_dma_result_e;
 
-static inline nand_dma_result_t nand_dma_init(void)
+static inline nand_dma_result_e nand_dma_init(void)
 {
     (void)0;
     return DMA_RESULT_OK;
 }
-static inline nand_dma_result_t nand_dma_memory_to_fmc(volatile BYTE *a, const BYTE *b, WORD c)
+static inline nand_dma_result_e nand_dma_memory_to_fmc(volatile BYTE *a, const BYTE *b, WORD c)
 {
     (void)a;
     (void)b;
     (void)c;
     return DMA_RESULT_OK;
 }
-static inline nand_dma_result_t nand_dma_fmc_to_memory(volatile BYTE *a, BYTE *b, WORD c)
+static inline nand_dma_result_e nand_dma_fmc_to_memory(volatile BYTE *a, BYTE *b, WORD c)
 {
     (void)a;
     (void)b;
     (void)c;
     return DMA_RESULT_OK;
 }
-static inline nand_dma_result_t nand_dma_memory_to_fmc_start_IT(volatile BYTE *a, const BYTE *b, WORD c)
+static inline nand_dma_result_e nand_dma_memory_to_fmc_start_IT(volatile BYTE *a, const BYTE *b, WORD c)
 {
     (void)a;
     (void)b;
     (void)c;
     return DMA_RESULT_OK;
 }
-static inline nand_dma_result_t nand_dma_fmc_to_memory_start_IT(volatile BYTE *a, BYTE *b, WORD c)
+static inline nand_dma_result_e nand_dma_fmc_to_memory_start_IT(volatile BYTE *a, BYTE *b, WORD c)
 {
     (void)a;
     (void)b;

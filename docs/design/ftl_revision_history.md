@@ -2017,7 +2017,7 @@ VPC 簿记 / `wear_mark_dirty`）与写失败分支**都是死代码**，每次�
 `ftl_design.md` §3.7 整节重写为「Free Pool 三级水位（v0.52 更正）」，含水位图 + 三行水位表 +
 「水位之外的两级保留池」表；ADR-9 由「三级池」改为「三级**水位**」；另修正约 15 处连带表述
 （对比表 / 树 / 流程图 / 状态位清单 / 接口清单 / 伪码 / 文件清单）。
-`ftl_ut_munit.md` 的 allocator 套件行与不变量行、`ftl_api_usage.md` 的三处接口描述同步。
+`../archive/ftl_ut_munit.md` 的 allocator 套件行与不变量行、`ftl_api_usage.md` 的三处接口描述同步。
 
 ### 验证
 
@@ -2275,7 +2275,7 @@ v0.55 把逐页位图搬出条目后，揭示了 v0.48 那条「删死字段省 
   `program_count++` ×2 及其 `wear_mark_dirty` ×2
 - `include/ftl/wear.h` / `src/ftl/wear.c` / `include/ftl/ftl_config.h`：条目去两槽、常量 12→8
 - 文档：`ftl_design.md`（§4.9.2/§4.9.3/§4.9.4/§4.9.6、新增 **§4.9.8**、§19 全节）、
-  `ftl_optimization_plan.md`、`cw_level_mapping_design.md`、`ftl_api_usage.md`、`ftl_ut_munit.md`
+  `ftl_optimization_plan.md`、`cw_level_mapping_design.md`、`ftl_api_usage.md`、`../archive/ftl_ut_munit.md`
 
 ### 验证
 
@@ -2426,7 +2426,7 @@ per-block 存是重复的。**v0.12 Policy B**（`cc09580`+`1927762`）已把前
 - `src/controller/request.c`：删 plane 配对，改按实例边界切 run 提交
 - `src/controller/controller.c`：统一提交路径；FLUSH 走 `ftl_flush`；去 l2p/journal 直依赖；buffer_size 校验
 - `src/controller/cli.c`：`buffer_size` 上报真实容量
-- `docs/design/ftl_host_interface.md`（新增）/ `ftl_api_usage.md` / `ftl_ut_munit.md`（§8.6 L1 接口套件）
+- `docs/design/ftl_host_interface.md`（新增）/ `ftl_api_usage.md` / `../archive/ftl_ut_munit.md`（§8.6 L1 接口套件）
 
 ### 验证
 
@@ -2595,7 +2595,7 @@ CW 级映射迁移（波 2 序 2）与 v0.50~v0.60 的一连串元数据改造�
 
 ⇒ `metadata_dir_load` 永远失败 ⇒ 每次开机都走 `metadata_dir_init`（全哨兵 Directory）⇒
 **L2P 映射跨重启全丢**。这正是 `ftl_optimization_plan.md §8.2 P0-2 判据③`「复位后数据仍在
-（`[META] anchor_seq` 非 0、`dyn` 非 0）——**当前必然失败**」与 `ftl_ut_munit.md`「`anchor_seq=0`…
+（`[META] anchor_seq` 非 0、`dyn` 非 0）——**当前必然失败**」与 `../archive/ftl_ut_munit.md`「`anchor_seq=0`…
 根因未闭合」的根因。缺陷在 `c5cb8a0` 引入：旧实现用显式 `offsetof` 常量
 `METADATA_DIR_CRC_OFFSET`（=908，对的），重写时改成了 `sizeof - 4` 而字段顺序已变。
 
@@ -3934,7 +3934,7 @@ include 上层头的文件（`common/` 其余 6 个头只 include libc），且�
 - 删 `include/common/ftl_types.h`；
 - 3 处 include 改路径：`ftl/pending.h`、`ftl/ftl.h`、`controller/ssd_request.h`
   （controller 是 HIL，HIL→FTL 本就是 §26 的正确方向，不需要靠 `common/` 中立化）；
-- 文档同步：`ftl_api_usage.md`、`ftl_ut_munit.md`、`nand_config.h` 注释。
+- 文档同步：`ftl_api_usage.md`、`../archive/ftl_ut_munit.md`、`nand_config.h` 注释。
 
 注释里「打破循环 include」的理由**与目录无关**——那是把 `pending_cb_t` 从 `pending.h`
 搬出来；文件搬到 `ftl/` **不产生环**（`ftl_types.h` 不 include `pending.h`，反之才是）。
@@ -5271,7 +5271,7 @@ v0.75 的三级后台按「未决命令数」分档（IDLE/NORMAL/BUSY），档�
 - ⚠ **未上板**：判据 = 三级行为与 v0.75 等价回归（IO 下 BUSY 无后台刷屏 / 空闲 IDLE
   正常补池）+ `test /ftl/bg/` 板上过 + 断电重启数据仍在。
 - ⚠ 生产适配器（bg_a_* 起 journal 擦 / mig 读 / checkpoint cp_step）的真完成链归异步套件
-  （`ftl_ut_munit.md` §4.9 计划）职责，`/ftl/bg/` 用全 14 计数桩覆盖引擎语义。
+  （`../archive/ftl_ut_munit.md` §4.9 计划）职责，`/ftl/bg/` 用全 14 计数桩覆盖引擎语义。
 
 ## v0.77 — Allocator 不变量收口（账本访问器 + 三池对称 push/pop；纯重构，无介质变更）
 
@@ -5638,9 +5638,229 @@ device formation 时从 surfaced capacity 扣除（`docs/reference/pages/spdk_ft
 
 ---
 
+## v0.86 — 元数据分区改为 BBT + spare 候选池；容量/OP/写重试收口
+
+**日期**：2026-10-21
+
+**起因**：用户要求「按主流做」：固定元数据分区不能再用编译期块号硬碰 BAD；
+容量要反映真正可写容量；OP 要守卫运行期坏块；数据写失败要透明重试。
+
+**判据**：本仓 `docs/design/ftl_design.md §3.3.8` 已写明主流 = **BBT + 预留替换块
+（sparing），不是 block remap 表**（ONFI multi-plane 每 plane 独立行地址）。因此不引入
+持久化 logical→physical 重映射表。
+
+**改动**：
+- 布局 v11：`78..81/plane` 为 shared metadata spare；`FTL_METADATA_AREA_END` 78 → 82；
+  现有 0..77 块号不动（v11 首启仍能读回 v10 BBT，282 data BAD 不丢）。
+- `md_ring_t` 增加候选块表 `blocks[]`；Anchor/CP/BBT/Journal 的地址漏斗改查候选表。
+  候选 = 名义区间内 plane_mask 所有 plane 非 BAD 的块；不足硬下界时从 shared spare 补
+  （分配顺序 BBT → CP → Journal；Anchor/L2P 日志只跳过 BAD）。
+- BBT 自举：直接物理扫描「名义块 + 全部 spare」，record 自带 magic/sequence。
+- 格式化：保留当前 BBT 候选集、verify 跳过它；verify 后用最终 BAD 集重建候选池并
+  在新池上重新定位 BBT 游标再落盘。
+- 运行期元数据 BAD：`bbt_mark_bad` 只置 `pools->dirty`（不弹用户 Spare）；`md_pool_service`
+  在元数据 job 空闲时重建候选池、重定位游标；Journal 候选表变化时用
+  `jrn_scan_latest + jrn_resume` 接回实际写点。Journal/L2P 日志失块置 BBT
+  `REBUILD_REQUIRED`，下次开机强制 full rebuild，新 CP 落盘后清除。
+- 数据 BAD：Spare 为第一道替换，Spare 空时从 OP 取块（`alc_refill_free_from_op`）。
+- 容量：按 `min(plane)`、`min(instance)` 计好块并扣 OP/Spare；新增 `[CAP]` 日志。
+- 写失败：从失败命令的 desc 链读回本页数据，在新块上重建命令重发一次
+  （`FTL_WRITE_RETRY_MAX=1`）；组保持 pending，host 看不到第一次失败。
+- `format --verify` 改为**从头识别**：清空非 BBT 池的旧 BAD 集，测试所有非 BBT 池块
+  （含原先 BAD 的块），打印 `old_bad/recovered/new_bad`；BBT 池保留本轮 record。
+  `bbt_save` 的 sequence 改为只取 max，避免候选池缩小后被移出池的旧 record 在
+  下次开机 bootstrap 扫描中胜出。
+- 诊断：CLI `pool` 打印候选池；debug `bbt fault <plane> <block>` 注入元数据 BAD 做负例。
+- 日志/观测（`docs/design/logging_design.md`）：`[STAT]` 5 s 摘要；dangling 按旧 gblock
+  聚合；RR 已退役块每 gblock 一次、好块首故障全字段 + `st=` 解码；CP done/GC trig 降
+  DEBUG；MIG 单块失败降 WARN；64 条写轨迹飞行记录器（首次 UNC/program-fail dump）；
+  GC 系统性读失败熔断（连续 8 个 victim）；NAND timing mode 可通过
+  `nand_get_timing_mode()` 观测。
+
+**验证**：`make all` / `make release` 零新告警（release 仅有 gc.c 既有 4 条
+`best_*` 未用告警）；`make tests UT=FTL` 仍因冻结测试源编不过（461 error，R4）。
+**未上板**；上板判据见 `docs/design/known_risks.md` RISK-BBT-12/13/14。
+
+---
+
+## v0.87 — 擦除页识别 + GC 按写指针截断 + 系统性读失败熔断修复
+
+**日期**：2026-10-21
+
+**起因**：rev33 板端 279 MB 分区测试复现 `RISK-MIG-07`/`RISK-GC-10`：Free Pool 触底后
+GC 在 250 s 内把 **264 个不同 gblock** 标 BAD（`bad` 156→420），`dng=55`、
+`op=204/204→11/0`、`spare=50/50→0/29`，写入冻结。`rdpaa 0x2DF00` 拿到直接证据：
+gblock 2415（plane1/blk367）page0 **原始读全 FF、normal 读 FAIL(UNC)**，与日志首条
+`[MIG] abort ... plane=1` → `gblk=2415 mark BAD` 逐字对应；同块 page63 正常 ⇒ 半写块的
+空洞页。
+
+**根因（两项）**：
+1. **FC 没有擦除页识别**：全 0xFF 不是合法 BCH 码字，解码返回 UNC；`migrate.c` 却假设
+   「空页 = 无错误 + META 全 FF」⇒ 空洞页永远走不到空页分支。
+2. **熔断计数结构性不可达**：`mig_start` 的 `memset(m, 0, ...)` 不恢复
+   `read_fail_streak`（单 job 最多 +2）；且 `mig_complete_erase` 在单个 plane 擦成功时
+   就清零。两个都让「连续 8 个 victim」永远达不到。
+
+**改动**：
+- FC：新增 `FC_CW_STATUS_BLANK`（bit 8，**不属于** `FC_CW_STATUS_ERROR_MASK`）；Pass 1
+  解码失败后判整条 CW 全 0xFF ⇒ 置 BLANK；Pass 2/3/4 对 BLANK 跳过解扰/CRC/META 自洽；
+  已知期望 LBA 的 host 读仍报 `MATA_ERROR`（映射指向未编程页 = 真实损坏）。
+  `desc->status` / `fc_command_status_t.status` 位宽 8 → 9（RAM 内位域，尺寸不变）。
+- FTL GC：`mig_step_read` 扫描区间截断到 `victim.next_page`；WL/predict 的 victim 构造
+  一并带 `next_page`（`wl_victim_t.next_page` 新增）；重建条目仍记满 64，由 BLANK 兜底。
+- 熔断：`mig_start` 保存/恢复 `read_fail_streak` 与 `paused`；删除 `mig_complete_erase`
+  的逐 plane 清零；只在 `mig_finish` 的「整块迁移成功」分支清零。
+- **第二轮（同日上板暴露）**：`format --verify` 恢复 860 个误标块后，Windows 初始化 U 盘
+  立即出现 `[RR] unc lba=4 ... st=MATA|READY|BLANK` 并连锁退役 9 个好块。`rdpaa` 证明
+  这些页数据与 META 都正确 ⇒ 根因是**稀疏页的空兄弟 CW**：单扇区写只编程 1 个 CW，整页读
+  对其余空 CW 做 META 自洽校验 → `MATA_ERROR` → 整条命令判失败。修法：Pass 4 对
+  `BLANK` **一律**跳过 META 校验（不再区分 `command->meta` 是否已知），见 `RISK-GC-12`。
+
+**验证**：`make all` / `make release` 零新告警；`make tests UT=FTL` 仍因冻结测试源
+编不过（R4，错误全在 `tests/unit/test_ftl.c` / `ftl_test_common.h`）。**未上板**。
+上板判据见 `docs/design/known_risks.md` RISK-GC-10 / RISK-GC-11。
+
+**介质布局**：无变化（未抬 `FTL_MEDIA_LAYOUT_VERSION`）。
+
+---
+
+## v0.88 — 开卡体检判据改为「擦除成功即好块」
+
+**日期**：2026-10-22
+
+**起因**：用户要求简化开卡流程——不再用「写图样 → 读回比对 → 擦」判定好块，
+擦除命令成功即可。
+
+**判据**：open-card 需要的是**不依赖数据通路的稳定判据**。写/读体检只覆盖
+**单 plane 顺序写**，测不到运行期的 pair 写路径（`RISK-NAND-06` 已证明它「通过」
+不能证明运行期无问题），收益与耗时不成比例；而擦除失败是开卡阶段能稳定观测的物理判据。
+
+**改动**：`ftl_format_verify_blocks` 去掉逐页写/读/比对，只对每个非 BBT 池块发一次
+擦除命令：
+- 擦除成功 ⇒ 判为好块（`ftl_format_reset_bad_map` 已先清空非 BBT 池的旧 BAD 集，
+  所以原先 BAD 的块只要擦得动就 recovered）；
+- 擦除失败 ⇒ `bbt_mark_bad` 并落盘。
+编程 / 读失败由运行期兜底：host 写失败 → `ftl_write_retry` 换块重发一次 → 仍失败则
+`ftl_host_io_write_fail` 标坏；读失败 → RR 标坏。
+日志文案与 CLI/makefile 帮助同步改为 erase check。
+
+**附带修复（CLI 测试坑）**：`rd` 把数据读进 `g_wr_buf`，而 `wr` 的写源也是它；pattern 只在
+`cli_init` 预填一次 ⇒ `rd → wr` 相邻时 `wr` 会写回上次读到的数据。`uart_cli_wr()` 现在每次
+先 `uart_cli_pattern_init()`，耗时 ~75 µs（相对一次 4 KB 写的 ~15 ms 可忽略），且不影响
+USB/H2testw 路径。
+
+**验证**：`make all` 零新告警（315,352 B）；上板（2026-10-22 00:13）：`format --verify`
+erase-check 约 10 s、`old_bad=9 recovered=9 new_bad=0`；`wr 4 1`/`rd 4 1 c` PASS、
+`wr 0 8`/`rd 0 8 c` PASS，`bad=0`。**全盘 H2testw 未测**。风险见 `RISK-BBT-16`。
+
+**介质布局**：无变化。
+
+---
+
+## v0.89 — GC 空间回收加收益判据（满盘只读不再空转）
+
+**日期**：2026-10-22
+
+**起因**：全盘 H2testw 写满 425 MiB 后 `free=10`（< 水位 32），每个 victim 512 CW 中
+693–504（96–98%）有效。GC 只看水位、选块无收益下限 ⇒ 只读校验期间仍每 1.8–1.9 s 搬一个
+98% 有效的块，净回收 ~2%，`free` 卡在 10–12；NAND 带宽被占，校验从 ~297 KB/s 降到
+~192 KB/s（`RISK-GC-13`）。
+
+**改动**：
+- `gc_select_victim` 改为 `gc_select_e gc_select_victim(alloc, mode, out)`：在 cost 评分
+  **之前**按收益判据逐候选过滤，返回 `OK / NO_CANDIDATE / NOT_WORTHWHILE`，并输出
+  `best_valid_pct / scanned / eligible` 供日志归因。
+- 三个模式：`OFF`（host 在写 / T5 磨损）、`IDLE`（host 不写且 `free > 8`：valid ≤ 80%）、
+  `EMERGENCY`（`free ≤ 8`：可回收 ≥ 1%）。80% / 1% / 500 ms / 2 s 均为本仓自拟。
+- `mig_handle_t` 增加 host-writing 2 s 窗口、`gc_no_gain` 结论 + 快照、`nogain_count`、
+  `gc_last_mode`；`mig_start` 的 memset 后显式恢复这些字段。
+- 无收益结论按 `GC_NO_GAIN_BACKOFF_MS`（500 ms）退避；新建写、进入紧急水位、时钟缺失时
+  立即重扫。紧急水位下 `mig_abort("no free block")` 同样置 no-gain，避免
+  「选中 → 目的分配失败 → abort」死循环。
+- 写路径不在 `wbuf` 里塞新的错误路径（`wb_reset` 会误结算其它组）；改为依赖既有
+  `ftl_drain_group` 失速预算：GC 停止后连续无进展 ⇒ `SSD_STATUS_IO_ERROR`，并打
+  `[FTL] no space: GC no-gain` 归因行。
+- 观测：`[GC]` 日志加 `nogain/mode/hw/bestvr`；CLI `diag` 加 `gcm/ng`；
+  `mig_status_t` 加 `nogain/gc_mode/gc_no_gain`。
+
+**验证**：`make all` 零新告警（317,216 B）；`make release` 仅 `gc.c` 既有 4 条
+`best_*` 告警（179,800 B）；`make tests UT=FTL` 仍因冻结测试源编不过（R2/R4）。
+**未上板**。风险见 `RISK-GC-13` / `RISK-GC-14`。
+
+**介质布局**：无变化（未抬 `FTL_MEDIA_LAYOUT_VERSION`）。
+
+---
+
+## v0.90 — L2P region 主备副本 + 范围化恢复（单坏页不再全盘重建）
+
+**日期**：2026-10-22
+
+**起因**：开机 `[L2P] region 1200 load failed 3 times — degrade to unmapped` ⇒ Journal 回放
+命中降级基线 ⇒ 全局 `block_ctx.ok=0` ⇒ 整份块元数据快照被丢弃 ⇒ full metadata rebuild，
+实测 **~15 分钟**（`boot type=2 ... bit=fallback`）。快照本身完好（`plane=0 crc=ok`），
+问题在于「快照 + Journal 增量」的组合被判全局不可信（`RISK-BOOT-18`）。
+
+**判据**：主流分层恢复 = 读重试 → 元数据冗余 → 范围化降级/局部重建 → 全量重建。
+本仓器件无 read-retry（0x89 保留）、RAID 关闭，因此补 **L2 副本 + L3 范围化**。
+
+**改动**：
+- **L3 范围化**：`jrn_replay` 对降级 region 不再清 `block_ctx.ok`；probe 的降级 CW 单独
+  计入 `l2p_degraded_cw`，只有真正读失败才回退全量重建；启动结果新增 `bit=scoped`。
+  host 读丢失映射返回 `IO_ERROR`（`l2p_cache_t.region_degraded_bitmap` 让行驱逐后仍识别；
+  `l2p_load_start` 命中降级位图直接合成全 INVALID 行，不再反复读坏页）。
+- **L2 副本**：每个 region 写主/备两份副本——`md_append_slot_pair` 一次预留两槽，
+  `l2p_flush_kick` 串行写（主成功后写备），两份都成功才 `md_commit_region_pair`；
+  读失败自动回退备份并交换主备（`md_commit_region_pair` 原子交换）。
+- **Directory/Anchor**：`md_entry_t` 仍是 7 B 主 PBA，新增平行 `backup_pba[2048]`（8 KiB）；
+  Anchor 记录 8→16 页（主 8 + 备 8），**主半必须完整同 sequence 才算有效**、备份半
+  best-effort；`md_rebuild_live` 两份都计入 `l2p_live`。
+- **压缩**：副本感知——victim 上可能只有主/只有备/两份都有，逐副本搬移，两份都离开前
+  不推进 region 游标；预留槽位 1→2。
+- **布局 v12**：L2P 日志区 32→48 块/plane（96 块 = 12 MiB），`FTL_METADATA_AREA_END`
+  82→98，用户块 3424→**3392**（428→**424 MiB**，`lba_max=868,352`）；介质版本 11→12，
+  **首启自动格式化**。
+
+**验证**：`make all` 零新告警（319,656 B）；`make release` 181,276 B；`make tests UT=FTL`
+仍因冻结测试源编不过（466 处，全在 `tests/unit/*`）；`UT=FC` 的失败是既有
+`fc_status_t` 重命名遗留（测试源）。**未上板**。风险见 `RISK-BOOT-18/19/20`、
+`RISK-MD-14/15`、`RISK-CAP-04`。
+
+**介质布局**：**v12**（见下表）。
+
+---
+
+## v0.91 — 静态 WL 按 UBI 模型重写（idle 无限搬迁修复）
+
+**日期**：2026-10-22
+
+**起因**：板端 host 空闲时每 2.4 s 出现 `[MIG] done kind=wl vcw=512 post=free`，
+`free`/`wr` 不变 ⇒ 纯内部拷贝（~107 KB/s、~9 GiB/天）。根因见 `RISK-WL-08`。
+
+**判据**：Linux MTD UBI 的静态 WL（`drivers/mtd/ubi/wl.c` + `Kconfig`
+`MTD_UBI_WL_THRESHOLD`）：只有当 **Free Pool 中的高擦除块**比**最冷的 used SB**
+高出阈值时，才把冷数据搬过去；每次搬一个单位；方向是低擦除 → 高擦除。
+（dhara 的完美 WL 是小容量 raw flash 分支，本仓不采用。）
+
+**改动**：
+- `wl_should_trigger`：三条件（max-min / max-avg / 低区占比）→ 单一 UBI 判据
+  `max_free_ec − min_used_ec ≥ WL_THRESHOLD(200)`；`min_used_ec` 只统计有效 CW≥70%、
+  无坏 plane 的 Closed SB（与选块同门限）。
+- `wl_select_victim`：去掉"低擦除区"过滤，选平均擦除次数最小的 SB。
+- 目标方向：新增 `alc_alloc_pair_high_wear`（每 plane 取擦除最多的空闲块、无 OP 兜底）
+  与 `alc_prepare_wl_destination`（启动前摘掉 cold SB）；`mig_handle.dst_high_wear`
+  只在 `mig_begin_wl` 置位。
+- 删除 `WL_DELTA_THRESHOLD` / `WL_MAX_AVG_RATIO` / `WL_LOW_ZONE_WIDTH` /
+  `WL_LOW_BLOCK_PCT` / `wl_get_min_erase` / `alc_count_blocks_below`（零消费者）。
+- 顺带修 release 档 `gc.c` 的 4 处 `set but not used`（LOGD 被裁空，H30 显式丢弃）。
+
+**验证**：`make all` / `make release` 零新告警；**未上板**；无介质格式变化
+（不需要重新开卡）。上板判据见 `RISK-WL-08`。
+
+---
+
 ## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
 
-当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（9）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。
+当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（12）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。
 任何改变**介质格式或块布局**的改动（结构体字段 / 块号 / 记录格式 / 字段位序语义）
 都必须把 BASE +1；版本不符或缺失 ⇒ 首启自动全片格式化。
 
@@ -5655,3 +5875,5 @@ device formation 时从 surfaced capacity 扣除（`docs/reference/pages/spdk_ft
 | v8 | Anchor / Checkpoint / BBT 改 P0+P1 跨 plane 镜像；Journal 保持页号奇偶交错；换块擦除统一 multi-plane | 块的写语义与恢复路径变化 |
 | v9 | 删除独立 Wear 块（块 46）；erase/read/ECC 健康并入 Checkpoint（块元数据 4 页 + 磨损快照 16 页），record 5 页 → 21 页 | 块布局与记录格式变化 |
 | v10 | 新增固定预留的 L2P 日志区（46..77/plane，32 块/plane）；`FTL_METADATA_AREA_END` 46 → 78；主机容量 437 → 429 MiB | 块布局变化；老固件会把 46..77 当用户数据/动态日志块 |
+| v11 | 新增 shared metadata spare（78..81/plane）；固定元数据分区改为「候选块池（跳过 BAD + spare 补缺）」；`FTL_METADATA_AREA_END` 78 → 82；主机容量上限 429 → 428 MiB；新增 `REBUILD_REQUIRED` BBT 标志（reserved[1]） | 块布局变化；老固件会把 78..81 当用户数据 |
+| v12 | L2P region 主备双副本：日志区 32→48 块/plane（46..93），shared spare 94..97，`FTL_METADATA_AREA_END` 82 → 98；Anchor 记录 8→16 页（新增备份 PBA 半）；主机容量 428 → **424 MiB**；`lba_max=868,352` | 块布局与 Anchor 记录格式变化；老固件会把 78..93 当用户数据、且读不懂 16 页 Anchor |

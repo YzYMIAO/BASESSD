@@ -44,7 +44,7 @@ void fc_raid_init_ctx(BYTE lun)
  *   参数：lun —— LUN；cw_buffer —— 第一个 CW；total —— 期望 CW 总数。
  *   返回：FC_STATUS_OK / INVALID_ARGUMENT / NOT_READY（该 LUN 序列进行中）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total)
+fc_status_e fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total)
 {
     /* 入参前置条件由调用者保证 */
     ASSERT(lun < LUN_NUM);
@@ -73,7 +73,7 @@ fc_status_t fc_raid_start(BYTE lun, const BYTE *cw_buffer, BYTE total)
  *         已超 total 属调用者计数 bug，转 ASSERT（v20）。
  *   实现要点：按 32 位字对齐 XOR（528B / 4 = 132 字）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer)
+fc_status_e fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer)
 {
     WORD         i;
     DWORD       *acc32;
@@ -111,7 +111,7 @@ fc_status_t fc_raid_accumulate(BYTE lun, const BYTE *cw_buffer)
  *   参数：lun —— LUN；parity_buffer —— 输出。
  *   返回：FC_STATUS_OK / INVALID_ARGUMENT（序列未开始）。
  * -------------------------------------------------------------------- */
-fc_status_t fc_raid_end(BYTE lun, BYTE *parity_buffer)
+fc_status_e fc_raid_end(BYTE lun, BYTE *parity_buffer)
 {
     /* 入参前置条件由调用者保证 */
     ASSERT(lun < LUN_NUM);

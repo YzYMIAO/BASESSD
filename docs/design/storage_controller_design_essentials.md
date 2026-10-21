@@ -374,7 +374,8 @@ channel（通道，主控的一组数据总线）
 | **学习式 (LeaFTL)** | 用回归预测映射 | 极小 | 视情况 | 研究前沿 |
 
 > **本仓**：纯页级 + DRAM-less（SRAM region cache + NAND 兜底）。
-> ⚠ 本仓「文档写 CW 级(512B) vs 代码页级(2048B)」存在**不一致，待核对**（见 `ftl_optimization_plan.md` §七）。
+> 本仓自 2026-10-13 起映射粒度 = **CW（512B）**，与 FC 码字粒度一致；
+> 布局与理由见 `ftl_design.md` §2.2（详细推导在 `../archive/cw_level_mapping_design.md`）。
 
 ### 5.2 L2P 表放哪（最核心的取舍）
 
@@ -397,7 +398,8 @@ channel（通道，主控的一组数据总线）
 | **自适应 / ARC** | 动态平衡 |
 | **thrashing 检测** | 命中率骤降时切 write-through，避免「淘汰→刷→再读」活锁 |
 
-> 本仓用 **CLOCK + write-back + journal**；thrashing 检测**设计有、代码无**（见优化计划 P1-4）。
+> 本仓用 **CLOCK + write-back + journal**；thrashing 检测已落地（P1-4，窗口 miss 率 + 滞回），
+> 见 `ftl_design.md` §3.6。
 
 ### 5.4 GC（垃圾回收）
 
@@ -407,7 +409,8 @@ channel（通道，主控的一组数据总线）
 - **成本-收益 (cost-benefit)**：`(1-valid) × age / (1+erase_count)` 类公式。
 - **场景**：消费级容忍 GC 抖动；企业级要**稳态性能**（GC 不能拖垮尾延迟）。
 
-> 本仓 victim 仍是**单维贪心**（设计写了四维加权未实现，见优化计划 P1-1）。
+> 本仓 victim 已改为**多维加权**（valid / erase / temp / age，P1-1 已落地），
+> 见 `ftl_design.md` §3.13。
 
 ### 5.5 磨损均衡 (WL)
 
@@ -417,7 +420,7 @@ channel（通道，主控的一组数据总线）
 | **静态 WL** | 主动搬移长期不动的冷数据 | 摊平冷数据 |
 
 > **前提**：擦除计数必须**持久化**，否则跨重启归零、WL 失效。
-> ⚠ 本仓擦除计数**已持久化**：随 Checkpoint 磨损快照落盘（介质版本 9；v0.82 起），
+> ⚠ 本仓擦除计数**已持久化**：随 Checkpoint 磨损快照落盘（当前介质版本 **12**；自版本 9 起），
 > 开机 `checkpoint_load_wear_table` 回填 BST。
 
 ### 5.6 坏块管理
@@ -730,7 +733,7 @@ NAND die（写入时可能再叠 on-die ECC）
 | 本仓分层判据（§26） | [`fc_nand_design.md`](fc_nand_design.md) §26 |
 | 本仓 FC/NAND 设计 | [`fc_nand_design.md`](fc_nand_design.md) |
 | 本仓 FTL 设计 | [`ftl_design.md`](ftl_design.md)、[`ftl_revision_history.md`](ftl_revision_history.md) |
-| FTL 优化方向 | [`ftl_optimization_plan.md`](ftl_optimization_plan.md) |
+| FTL 优化方向 | [`../archive/ftl_optimization_plan.md`](../archive/ftl_optimization_plan.md) |
 | 学习路线 + 开源对照 | [`storage_controller_learning.md`](storage_controller_learning.md) |
 | 离线资料索引 | [`../reference/README.md`](../reference/README.md) |
 | 架构 / 硬件契约 / NAND 模型 | [`../architecture.md`](../architecture.md)、[`../hardware_contract.md`](../hardware_contract.md)、[`../nand_model.md`](../nand_model.md) |

@@ -69,11 +69,11 @@
 | **全部块号**（§2.1） | **每实例** | §2.3 顺序累积 | 0..26 |
 | `FTL_IU_TOTAL` | **全局** | `L2P_REGIONS_PER_INSTANCE × 512 × FTL_DIM_TOTAL` | 1,048,576（映射寻址空间） |
 | `FTL_MAPPING_CAPACITY_BYTES` | **全局** | `FTL_IU_TOTAL × 512B` | 512 MiB（映射空间，非主机容量） |
-| `FTL_HOST_CAPACITY_BYTES` | **全局** | `FTL_LBA_MAX × 512B` | **429 MiB**（扣除固定元数据/OP/Spare） |
+| `FTL_HOST_CAPACITY_BYTES` | **全局** | `FTL_LBA_MAX × 512B` | **424 MiB**（v12；扣除固定元数据/spare/OP/Spare；实际对外以 `[CAP]` 动态值为准） |
 
 > **容量是推论不是输入**：映射容量 = `FTL_MAPPING_CAPACITY_BYTES = FTL_IU_TOTAL × FTL_IU_BYTES`；
 > 主机容量 = `FTL_HOST_CAPACITY_BYTES = FTL_LBA_MAX × FTL_IU_BYTES`，其中 `FTL_LBA_MAX`
-> 还要扣除固定元数据（156 块）、OP（408 块）、Spare（100 块）——见 `ftl.h`。
+> 还要扣除固定元数据（196 块）、OP（408 块）、Spare（100 块）——见 `ftl.h`。
 > 改 `nand_config.h` ⇒ 两者自动跟随。
 > `FTL_IU_BYTES` 取 `FC_BUFFER_USER_SIZE`（512）而非 `CW_SIZE`（528）：CW 槽 =
 > `[META:4][CRC:4][USER:512][PARITY:8]`，其中 16B 由 FC 内部管理、不占 LBA 空间。
@@ -91,8 +91,8 @@
 变的只有设备总量 ×`FTL_DIM_TOTAL`。条带粒度恒为 1 个 region = 512 LBA = **256 KiB**（见 §3.6）。
 
 > ⚠ 本表的 **512 MiB / N GiB 是映射表寻址空间**（`FTL_MAPPING_CAPACITY_BYTES`），
-> 不是主机可见容量。主机容量还要扣除固定元数据 156 块、OP 408 块、Spare 100 块：
-> DIM=1 时 `FTL_LBA_MAX = 878,592`（**429 MiB**），见 `include/ftl/ftl.h`。
+> 不是主机可见容量。主机容量还要扣除固定元数据 196 块、OP 408 块、Spare 100 块：
+> DIM=1 时 `FTL_LBA_MAX = 868,352`（**424 MiB**），见 `include/ftl/ftl.h`；运行时按实际坏块取 min(plane)/min(instance)。
 > 多 dim 时按每实例 1716 个数据 region 核对路由。
 
 ---
@@ -116,17 +116,19 @@
 32 .. 39     Checkpoint                    CHECKPOINT_POOL_BLOCKS = 8（块轮转池）
 40 .. 41     BBT                           BBT_POOL_BLOCKS = 2（块轮转池）
 42 .. 45     Journal（4 块）                JOURNAL_BLOCKS = CW_NUM（CW 级 4× 映射流量）
-46 .. 77     L2P log（32/plane，固定预留）  2 × (L2P 表 32 块) = 64 块（current/压缩/坏块余量）
-78 .. 4095   用户数据 / OP / Spare / 坏块
+46 .. 93     L2P log（48/plane，固定预留）  3 × (L2P 表 32 块) = 96 块（主+备两份 = 64 + 1× 余量）
+94 .. 97     shared metadata spare          MD_SPARE_BLOCKS_PER_PLANE = 4
+98 .. 4095   用户数据 / OP / Spare / 坏块
 ────────────────────────────────────────────────────────────
-固定元数据 = 32 + 8 + 2 + 4 + 32 = 78 块（FTL_METADATA_AREA_END = 78）
+固定元数据 = 32 + 8 + 2 + 4 + 48 + 4 = 98 块（FTL_METADATA_AREA_END = 98）
 L2P 表本体 4 MiB（32 块）放在固定日志区；未映射 = Directory 条目 INVALID。
 磨损计数（erase/read/ECC 健康）随 Checkpoint 记录落盘，不占独立块（介质版本 10）。
 ```
 
-> **副本策略（介质版本 10）**：Anchor/Checkpoint/BBT 在 **P0+P1 镜像**（multi-plane 同页
+> **副本策略（介质版本 12）**：Anchor/Checkpoint/BBT 在 **P0+P1 镜像**（multi-plane 同页
 > 写两份，读侧任一副本有效）；Journal 在 P0+P1 **页号奇偶交错**（单副本，擦除必须
-> multi-plane）；L2P log 在 P0/P1 各自独立（单副本）。
+> multi-plane）；L2P log 在 P0/P1 各自独立，且每个 region 记录**主+备两份副本**
+> （`L2P_REGION_COPIES = 2`，Directory 登记两个 PBA，读失败回退副本）。
 
 > ⚠ **v0.50 起 Anchor/Checkpoint/BBT 都是「多块轮转池」**（P0-2 元数据写模型统一：只写
 > 擦除页 + sequence + 池内轮转 + 整条校验最新胜），不再是「主/备 2 块」。旧口径的
@@ -136,7 +138,7 @@ L2P 表本体 4 MiB（32 块）放在固定日志区；未映射 = Directory 条
 **对账**（开机 free pool 统计）：
 
 ```
-4096 − 156(固定元数据) − 100(spare) − 408(op) − 坏块 ≈ 3432 − 坏块 free
+4096 − 196(固定元数据，含 shared spare) − 100(spare) − 408(op) − 坏块 ≈ 3392 − 坏块 free
 ```
 
 ### 2.2 每张表的尺寸推导
@@ -289,7 +291,7 @@ Checkpoint、分配器、BST。
 | 8 | 2048 | 16,384 | 1,048,576 | 8,388,608 | 4 GiB |
 
 （与 §1.4 同表；`FTL_IU_TOTAL = 全局 region × 512`，`映射容量 = FTL_IU_TOTAL × 512B`。
-**主机容量** = `FTL_LBA_MAX × 512B`，DIM=1 为 429 MiB；两者差额是固定元数据/OP/Spare。）
+**主机容量** = `FTL_LBA_MAX × 512B`，DIM=1 为 424 MiB；两者差额是固定元数据/OP/Spare。）
 
 ### 3.4 路由：全局 region → (ch, ce, lun)
 

@@ -279,7 +279,7 @@ struct fc_descriptor_t {
     DWORD buffer_id : 16;   // Buffer Pool ID，0xFFFF=无效
     DWORD next_id   : 16;   // 下一个 Descriptor ID，0xFFFF=链表结束
     DWORD meta;              // 本 CW 的**扇区 LBA**（v24）；读后存放 NAND 读回的 META 值。
-    DWORD status    : 8;    // CW 状态（FC_CW_STATUS_*），完成时由 FC 回写
+    DWORD status    : 9;    // CW 状态（FC_CW_STATUS_*，bit8 = BLANK），完成时由 FC 回写
     DWORD ecc_bits  : 8;    // ECC 纠正比特数，完成时由 FC 回写（0=无错误）
 };
 ```
@@ -329,9 +329,20 @@ FC_CW_STATUS_MATA_ERROR  // MATA 校验错误
 FC_CW_STATUS_RAID_ERROR  // RAID 恢复失败
 FC_CW_STATUS_READY       // 操作完成（= SUCCESS）
 FC_CW_STATUS_PROTECTED   // 目标块受保护
+FC_CW_STATUS_BLANK       // 擦除页（整条 CW 全 0xFF）；**不是错误位**
 ```
 
 状态汇总规则：READY 需要所有有效 CW 就绪；失败位任意 CW 置位即置位。
+
+**`BLANK` 的含义**：整条 CW（META+CRC+USER+ECC）全 0xFF ⇒ 该页**从未编程**。
+全 0xFF 不是合法 BCH 码字，解码必然失败；若不单独识别就会报成 `UNC`，GC 读到半写块
+的空洞页时会把整块误标坏块（`RISK-GC-11`）。识别发生在 `fc_data_path_process_read()`
+Pass 1 解码失败之后：置 `BLANK` 并跳过解扰 / CRC / META 三项（此后三项对擦除页无意义）。
+`FC_CW_STATUS_ERROR_MASK` **不含** BLANK——「页未编程」是介质合法状态，不是读错误。
+⚠ 擦除页**一律跳过 META 自洽校验**（无论 `command->meta` 是否已知）：FC 的整页读恒覆盖本
+plane 全部 CW，而 host 写的稀疏页只编程部分 CW ⇒ 同一页里必然有空兄弟 CW；对它们做 META
+校验会把整条命令判成 `MATA_ERROR`，让 RR/GC 把可读的好页误标坏块（`RISK-GC-12`）。
+「映射指向未编程页」由 FTL 的 dangling 守卫与 L2P 反查负责，不在 FC 判。
 
 **谁在读这些失败位**：
 
@@ -346,10 +357,10 @@ FC_CW_STATUS_PROTECTED   // 目标块受保护
 ```c
 struct fc_command_status_t {
     DWORD command_id : 16;  // 完成命令的 Pool ID
-    DWORD desc_id    : 16;  // 首个 Descriptor ID；失败时标记出错的 Descriptor
-    DWORD module     : 4;   // 命令发起者模块，FTL 无需 ID 查询直接路由完成通知
-    DWORD status     : 8;   // 命令级聚合状态（各 CW 的 FC_CW_STATUS_* 位 OR）
-    DWORD reserved   : 20;  // 保留
+    DWORD desc_id    : 16;  // 首个失败 CW 的 descriptor id；0xFFFF = 无失败
+    DWORD op_tag     : 7;   // 不透明完成标签（FTL 的 ftl_op_id_e），完成派发用
+    DWORD status     : 9;   // 命令级聚合状态（各 CW 的 FC_CW_STATUS_* 位 OR；bit8 = BLANK）
+    DWORD reserved   : 16;  // 保留
     fc_param_t param;       // 命令级返回段：仅 GET_FEATURES=寄存器值 bytes（v28 起无失败位图视图）
 };
 ```
@@ -4382,7 +4393,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 
    **FC 层不用 `ASSUME`。** 起初按"守卫带恢复分支 → `ASSUME`"划分，后来取消：恢复分支既然已经手工删掉，`ASSUME` 的 `__builtin_unreachable()` 就换不来额外代码生成收益（工程未开 LTO，`fc_command_id_to_command()` 这类跨 TU 调用点无从利用该假设）；而它会把"违反即 UB"引入一条本来只会 HardFault 的路径——同样是崩，`ASSERT` 的现场更可定位。`ASSUME` 宏保留在 `assertion.h` 里，留给将来确有热路径需要向编译器证明的场合。
 3. **资源类结果与运行时状态保留返回码**——池耗尽（`FC_STATUS_RESOURCE_EMPTY`）、CQ 满背压（`FC_STATUS_IO_ERROR`）、NAND 报告的错误（`FC_STATUS_IO_ERROR`）、`ctx->active == 0U` / `fc_buffer_is_occupied(...) == 0U` 这类"此刻能不能做"的状态，都是**预期内**的运行结果，不是不变量破坏，必须返回给上层。（`g_crc_ready == 0U` 曾在此列，**v33 起随 CRC 改走 HAL 驱动整体删除**——CRC 自检失败转 `ASSERT`，见 `docs/archive/changelog/fc_crc_hal_driver_v33.md`。）
-4. **单测固化为契约的守卫保留返回码**——判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**：`fc_command_validate`（校验器，返回判决是职责）、FTL 套件的 `allocator_remove_from_free(..., 越界)`（文档化 no-op，见 `ftl_ut_munit.md §4.1`）等保留。（原条目还列了 `fc_scheduler_set_busy/clear_busy` 的越界忽略——**v8 起该 API 与 busy 表已整体删除**，见 §23.9。）反之，**只有测试会走"传非法参数"分支**的（`fc_command_status_set_cw` 的 `cw >= 4`（该函数 2026-10-08 因零生产调用者整体删除）、`fc_scheduler_init(NULL,…)`、`fc_submit(NULL)`、`fc_data_path_encode(NULL)` 等），按判据 2 转 `ASSERT` 并**删掉对应用例**。
+4. **单测固化为契约的守卫保留返回码**——判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**：`fc_command_validate`（校验器，返回判决是职责）、FTL 套件的 `allocator_remove_from_free(..., 越界)`（文档化 no-op，见 `../archive/ftl_ut_munit.md §4.1`）等保留。（原条目还列了 `fc_scheduler_set_busy/clear_busy` 的越界忽略——**v8 起该 API 与 busy 表已整体删除**，见 §23.9。）反之，**只有测试会走"传非法参数"分支**的（`fc_command_status_set_cw` 的 `cw >= 4`（该函数 2026-10-08 因零生产调用者整体删除）、`fc_scheduler_init(NULL,…)`、`fc_submit(NULL)`、`fc_data_path_encode(NULL)` 等），按判据 2 转 `ASSERT` 并**删掉对应用例**。
 
 **判据 4 的边界：什么时候可以删用例而不是保留守卫。** 反例是 `fc_queue.c` 的指针判空：`fc_submission_queue_*` / `fc_completion_queue_*` 的生产调用者只有 `fc.c` 与 `fc_scheduler.c`，**全部传有效指针**——唯一会传 `NULL` 的就是测试自己。这种"只有测试会走的分支"应当按判据 2 转 `ASSERT`，并**删掉对应用例**（它们验证的行为届时已不存在，留着反而是错的）。两轮补扫共删除 `test_fc_level1.c` 的 13 个 `*_null`/越界用例与 `test_fc_level2.c` 的 3 个。
 
@@ -4885,7 +4896,7 @@ plane 与 CW 号都从这一个 `n` 算出，不再有"槽位 → (plane, ordina
 | `src/ftl/ftl.c` / `src/ftl/gc.c` | **v7**：`completion->ecc_bit0..3` max 循环 → `fc_get_cmd_ecc_max(cmd)` |
 | `src/ftl/read_recovery.c` | **v7**：`cmd->parameter0..3` → `cmd->param.parameter0..3` |
 | `tests/unit/test_fc_level1/2/3.c`、`tests/integration/test_fc_nand.c` | **v7**：字段引用机械适配；`fc_nand_test_wait_completion_ex` 回传 CQ；补 flat 语义用例 |
-| `docs/design/fc_api_usage.md`、本文件 §2 / §13 / §14 / §25 | **v7**：flat 掩码 + CQ 返回项同步 |
+| `docs/archive/fc_api_usage.md`、本文件 §2 / §13 / §14 / §25 | **v7**：flat 掩码 + CQ 返回项同步 |
 
 > **v9**（索引空间统一）的逐文件改动见 §25.11——它把上表里 v6/v7 的 `cws[plane][slot]` /
 > `cw_count[PLANE_NUM]` / `cw_paa[][]` 全部删除，上表对应行只作历史记录。

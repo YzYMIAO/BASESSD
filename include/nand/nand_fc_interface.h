@@ -50,15 +50,15 @@ typedef struct
  * 但对上层是器件无关契约：OP_* → g_nand_operation_map → UOP → FMC backend。
  * nand_fc_execute = 同步；nand_fc_start/step = 异步（start 发起 + step 推进）。
  */
-nand_result_t nand_fc_execute(BYTE operation, const nand_fc_request_t *request, nand_fc_completion_t *completion);
-nand_result_t nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, const nand_fc_request_t *request);
-nand_result_t nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *completion);
+nand_result_e nand_fc_execute(BYTE operation, const nand_fc_request_t *request, nand_fc_completion_t *completion);
+nand_result_e nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, const nand_fc_request_t *request);
+nand_result_e nand_fc_step(nand_fc_transaction_t *transaction, nand_fc_completion_t *completion);
 
 /* Typed ONFI operation helpers. No helper writes FMC command/address/data windows directly. */
-nand_result_t nand_fc_reset(nand_fc_completion_t *completion);
-nand_result_t nand_fc_read_id(BYTE id[5], nand_fc_completion_t *completion);
+nand_result_e nand_fc_reset(nand_fc_completion_t *completion);
+nand_result_e nand_fc_read_id(BYTE id[5], nand_fc_completion_t *completion);
 /* 读 ONFI 参数页（ECh，256 字节，同步）。缓冲长度 = NAND_ONFI_PARAM_PAGE_SIZE（nand/onfi_1_0.h）。 */
-nand_result_t nand_fc_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_fc_completion_t *completion);
-nand_result_t nand_fc_set_features(BYTE feature_address, const BYTE feature_data[4], nand_fc_completion_t *completion);
+nand_result_e nand_fc_read_parameter_page(BYTE page[NAND_ONFI_PARAM_PAGE_SIZE], nand_fc_completion_t *completion);
+nand_result_e nand_fc_set_features(BYTE feature_address, const BYTE feature_data[4], nand_fc_completion_t *completion);
 
 #endif /* NAND_FC_INTERFACE_H */

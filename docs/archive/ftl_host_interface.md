@@ -58,7 +58,7 @@ FTL 对外：ftl_init / ftl_service / ftl_submit_read / ftl_submit_write / ftl_t
 | # | 项 | 主流 | 本仓（重构前） | 处置 |
 |---|---|---|---|---|
 | **D1** | **plane 配对（访问哪些物理单元）** | FTL 内部策略 | **HIL 的 `ssd_request_split` 决定 `pages=2`** | **已下沉到 FTL** |
-| **D2** | **FLUSH 落地** | FTL 的一条 op / `ftl_flush` | **HIL 直接调 FTL 内部 `l2p_cache_flush_all`/`journal_flush_page`** | **已新增 `ftl_flush(ftl)`** |
+| **D2** | **FLUSH 落地** | FTL 的一条 op / `ftl_flush` | **HIL 直接调 FTL 内部 `l2p_cache_flush_all`/`journal_flush_page`** | **已新增异步 job `ftl_flush_begin/step`（RISK-USB-06）** |
 | **D3** | TRIM 粒度 | 带长度的 deallocate | `ftl_trim(ftl,lba)` 单 LBA（忽略 `block_count`） | **已改 `ftl_trim(ftl,lba,count)`** |
 | **D4** | 请求 vs 通知 | 请求纯输入；完成走 CQ | 通知字段（`complete_flag`/`status_out`/`on_complete`）与请求混在一起 | **不改**（本仓无 CQ，轮询+回调是既定异步契约；登记） |
 | **D5** | Host 队列+doorbell+CQ | HIL 有 SQ/CQ/doorbell | **HIL 无队列**；队列机制只在 **FC 内部**（SQ64/HSQ16/CQ64） | **不改**（§26.2 已定位在 FC；HIL 侧属更大重构，登记） |
@@ -123,7 +123,7 @@ typedef struct
 | `ftl_service(ftl)` | 主循环：Phase 1 推进 / Phase 2 抽干完成 / **Phase 2.5 补发子操作** / Phase 3 后台 |
 | `ftl_submit_read(ftl, req)` | 非阻塞提交读，长度任意 |
 | `ftl_submit_write(ftl, req)` | 非阻塞提交写，长度任意 |
-| `ftl_flush(ftl)` | 落已持久化映射（L2P cache 写回 + journal 尾页刷出） |
+| `ftl_flush_begin/step(ftl)` | 落已持久化映射（L2P cache 写回 + journal 尾页刷出）；begin 启动、每轮 step 推进，完成经 `complete_flag` 回执（异步） |
 | `ftl_trim(ftl, lba, count)` | 取消 `[lba, lba+count)` 映射（非阻塞、同步完成） |
 
 ### B.4 完成语义：**组（group）**
@@ -182,7 +182,7 @@ Phase 3   三级后台（IDLE / NORMAL / BUSY）
 | 自拆分（`count=5/32`） | `wr 0 5` / `wr 0 32` → `rd … c` | PASS；CW 映射 + 页打包后 **1 次**（`wr 0 5`）/ **4 次**（`wr 0 32`）编程 |
 | 组完成（通知一次） | 观察单次 `wr` 的完成日志 | 恰一次完成（不重复） |
 | 背压 / 大请求 | `wr 0 33` | 被容量校验拒（`g_wr_buf` 16 KB ⇒ `n ≤ 32`） |
-| `ftl_flush` | `wr 0 2` → `fl` → 断电 → 重启 → `rd 0 2 c` | PASS（§B.3） |
+| `ftl_flush_begin/step` | `wr 0 2` → `fl` → 断电 → 重启 → `rd 0 2 c` | PASS（§B.3） |
 | `ftl_trim(lba,n)` | `wr 0 4` → `tr 0` → `rd 0 1 c` | 全 0 |
 
 ### C.2 L0（纯 RAM，板上 `test`）
@@ -207,6 +207,7 @@ UART CLI `wr/rd/tr/fl/wp/info/map/crash/bbt/test` + **物理断电重启**。CLI
   （见 A.3 的 D6 注）⇒ 按 `ftl_optimization_plan.md §九 序 6` 明文允许的「或明确保留分片
   并登记理由」处理；本项**不再是**「与主流偏离」。
 - `ftl_trim` 大范围同步阻塞（超循环长停）——本轮只加 API，范围上界/分块后续定。
-- `ftl_flush` 语义 = "落已持久化映射"，**非** NVMe 式 barrier（不等待在飞/排队写；
-  当前 CLI 靠 `g_cli_pending.busy` 串行化）。
+- `ftl_flush_begin/step` 语义 = "落已持久化映射"，**非** NVMe 式 barrier（不等待在飞/排队写；
+  HIL 靠 `g_cli_pending.busy` / USB BOT 串行化）。完成是异步回执，不在 host 回调里
+  自旋（RISK-USB-06）；1 s 超时按 best-effort 完成。
 - 跨组 LBA 重叠时组间写序未定义（当前 HIL 串行，不成问题）。

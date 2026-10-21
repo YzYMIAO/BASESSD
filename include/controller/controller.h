@@ -12,15 +12,25 @@ typedef enum
     SSD_CONTROLLER_INITIALIZING,
     SSD_CONTROLLER_READY,
     SSD_CONTROLLER_FAILED
-} ssd_controller_state_t;
+} ssd_ctrl_state_e;
 
 typedef struct
 {
-    ssd_controller_state_t state;
+    ssd_ctrl_state_e state;
 
     /* FTL 实例三维路由表：ftl[ch][ce][lun] 指向绑定该 (ch,ce,lun) 的 FTL 实例。
      * CH_NUM/CE_NUM/LUN_NUM 来自 nand_config.h（当前全 1 = 单实例折叠，仅 4B）。 */
-    ftl_context_t *ftl[CH_NUM][CE_NUM][LUN_NUM];
+    ftl_ctx_t *ftl[CH_NUM][CE_NUM][LUN_NUM];
+
+    /* 在飞的 FLUSH 请求（NULL = 无）。FLUSH 是异步命令：submit 只登记并启动
+     * 各实例的 flush job，完成由 ssd_controller_service 每轮推进后置
+     * complete_flag。调用者的 ssd_request_t 必须活到完成（USB/CLI 都是静态对象）。 */
+    ssd_request_t *flush_req;
+
+    /* 主机可见 LBA 上限（HIL 容量口径）。默认 = FTL_LBA_MAX；开机时按实际
+     * 坏块扣减（本仓自拟的容量折中：主流是固定容量 + OP 吸收坏块，不动态缩容）。
+     * ⚠ 这是**运行时**上限，L2P 表仍按编译期 FTL_LBA_MAX 定尺寸。 */
+    DWORD host_lba_max;
 } ssd_controller_t;
 
 /*
@@ -34,10 +44,32 @@ typedef struct
  * @param ftl        FTL 实例三维数组 ftl[CH_NUM][CE_NUM][LUN_NUM]
  * @return SSD_STATUS_OK 成功，SSD_STATUS_INVALID_ARGUMENT 入参非法/槽位缺失/拓扑不符
  */
-ssd_status_t ssd_controller_init(ssd_controller_t *controller,
-                                 ftl_context_t    *ftl[CH_NUM][CE_NUM][LUN_NUM]);
-ssd_status_t ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
+ssd_status_e ssd_controller_init(ssd_controller_t *controller,
+                                 ftl_ctx_t        *ftl[CH_NUM][CE_NUM][LUN_NUM]);
+ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *request);
 BYTE         ssd_controller_is_complete(const ssd_request_t *request);
+
+/*
+ * ssd_controller_service - 推进 Controller 自己的异步命令（当前只有 FLUSH）
+ *
+ * 主循环每轮调用一次（在 FTL 服务之后、USB 任务之前）：本轮把所有实例的
+ * flush job 推进一步；全部完成时给在飞的 FLUSH 请求置 complete_flag。
+ * 无在飞 FLUSH 时立即返回。
+ *
+ * 为什么需要它：FLUSH 不能在 host 回调里同步自旋（RISK-USB-06），但又必须由
+ * HIL 的完成通道回执；FTL 侧拆成 ftl_flush_begin/step 后，这个「每轮推进 +
+ * 完成回执」的职责归 Controller（HIL）。
+ */
+void ssd_controller_service(ssd_controller_t *controller);
+
+/*
+ * ssd_controller_cancel_flush - 放弃在飞的 FLUSH 回执（host 复位 / 拔出 / 前端换命令）
+ *
+ * 只清 `flush_req` 指针，**不**中止 FTL 侧的 flush job：job 会按自己的完成判据或
+ * 1 s 超时收敛。这样避免「请求对象已被前端复用，controller 迟到的完成回执照样写回
+ * 新请求」的竞态（USB 的 `s_msc_io.request` 是静态复用对象）。
+ */
+void ssd_controller_cancel_flush(ssd_controller_t *controller);
 
 /*
  * ssd_controller_lba_range_ok - host LBA 区间是否落在设备容量内
@@ -49,7 +81,19 @@ BYTE         ssd_controller_is_complete(const ssd_request_t *request);
  * @param count  连续 LBA 数
  * @return true  区间完整落在 [0, FTL_LBA_MAX)
  */
-bool ssd_controller_lba_range_ok(QWORD lba, DWORD count);
+bool ssd_controller_lba_range_ok(const ssd_controller_t *controller, QWORD lba, DWORD count);
+
+/*
+ * ssd_controller_host_lba_max - 主机可见 LBA 上限（0 = 未初始化 ⇒ 编译期上限）
+ *
+ * 只有一个读者口径：USB READ CAPACITY、CLI 范围检查与 boot 日志都必须用它，
+ * 不得再直接引用 FTL_LBA_MAX（那是 L2P 表的映射空间上限）。
+ */
+static inline DWORD ssd_controller_host_lba_max(const ssd_controller_t *controller)
+{
+    return ((controller != NULL) && (controller->host_lba_max != 0U)) ? controller->host_lba_max
+                                                                      : (DWORD)FTL_LBA_MAX;
+}
 
 /*
  * ssd_controller_state_transition - Controller 最小状态机（C1，state_machine.c）
@@ -61,8 +105,8 @@ bool ssd_controller_lba_range_ok(QWORD lba, DWORD count);
  * @param controller Controller 上下文
  * @param next_state 目标状态
  */
-void ssd_controller_state_transition(ssd_controller_t      *controller,
-                                     ssd_controller_state_t next_state);
+void ssd_controller_state_transition(ssd_controller_t *controller,
+                                     ssd_ctrl_state_e  next_state);
 
 /*
  * ssd_controller_schedule - Controller 优先级调度钩子（C1b，scheduler.c）

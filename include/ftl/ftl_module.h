@@ -4,7 +4,7 @@
 /*
  * ftl_module.h — FTL 内部模块的统一 handle 契约（公共部分）
  *
- * 设计见 docs/design/ftl_module_contracts.md §3。
+ * 设计见 docs/design/ftl_design.md §5.1（全文 docs/archive/ftl_module_contracts.md §3）。
  *
  * 分工：
  *   · 共享数据面账本（L2P / BST / allocator / journal 水位 / metadata / pending /
@@ -17,7 +17,7 @@
  * 上报字段（见 bbt.h / journal.h / ...）。
  */
 
-#include "ftl_type.h" /* ftl_status_t（FTL_TIMEOUT） */
+#include "ftl_type.h" /* ftl_status_e（FTL_TIMEOUT） */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -38,10 +38,10 @@ typedef enum
     FTL_MODULE_WAITING,
     FTL_MODULE_BLOCKED,
     FTL_MODULE_FAILED,
-} ftl_module_state_t;
+} ftl_mod_state_e;
 
 /*
- * ftl_module_status_t — 所有模块 status 的公共前缀
+ * ftl_mod_status_t — 所有模块 status 的公共前缀
  *
  * 字段语义：
  *   state     本轮结束后的模块状态（见上）；
@@ -53,16 +53,16 @@ typedef enum
  */
 typedef struct
 {
-    ftl_module_state_t state;
-    bool               critical;
-    bool               wants_run;
-    DWORD              progress;
-    DWORD              next_ms;
-    int32_t            error;
-} ftl_module_status_t;
+    ftl_mod_state_e state;
+    bool            critical;
+    bool            wants_run;
+    DWORD           progress;
+    DWORD           next_ms;
+    int32_t         error;
+} ftl_mod_status_t;
 
 /*
- * ftl_bg_info_t — 调度器每轮交给模块的只读动态信息
+ * bg_info_t — 调度器每轮交给模块的只读动态信息
  *
  * 只传**每轮会变**的量；编译期常量由模块自己 include，只读策略表放模块内
  * `static const`，每实例不可变配置在 `*_init` 时绑定进 handle（H10）。
@@ -73,8 +73,8 @@ typedef struct
 typedef struct
 {
     DWORD      now_ms;     /* 单调毫秒（平台时钟缺失时为 0） */
-    bg_level_t load_level; /* 后台档位（ftl_type.h） */
-} ftl_bg_info_t;
+    bg_level_e load_level; /* 后台档位（ftl_type.h） */
+} bg_info_t;
 
 /* ── ms deadline（本仓取值，须上板标定；docs §6.3）──
  * 统一绝对 deadline，不用 rounds（rounds 随主循环速率漂移）。

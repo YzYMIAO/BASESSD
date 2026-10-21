@@ -9,8 +9,8 @@
  * FTL_JOB_LOG_INTERVAL_MS 打一行 phase/age；判据 = 两次心跳之间 phase 不动 ⇒ 卡死。
  *
  * 本头文件只提供「该不该打、上次什么时候打的」这层节拍与公共时钟，**不参与任何
- * 状态机**：每个 job 的 phase 枚举仍由各自的头文件定义（cp_phase_t / metadata_handle_phase_t /
- * mig_phase_t / rr_stage_t / journal_phase_t / bbt_handle_phase_t）。
+ * 状态机**：每个 job 的 phase 枚举仍由各自的头文件定义（cp_phase_e / md_handle_phase_e /
+ * mig_phase_e / rr_stage_e / jrn_phase_e / bbt_handle_phase_e）。
  *
  * ── 用法（每个 *_kick 的固定骨架）──
  *
@@ -35,8 +35,12 @@
 
 #include <stdint.h>
 
-/* 心跳节拍（毫秒）：正常 job 远快于 1s ⇒ 平时静默，只有卡住才持续可见。 */
-#define FTL_JOB_LOG_INTERVAL_MS (1000U)
+/* 心跳节拍（毫秒）：正常 job 远快于 1s ⇒ 平时静默，只有卡住才持续可见。
+ * ⚠ 卡死时 1s/行会刷屏（UART 阻塞、拖慢主循环）：job 超过 SLOW_AFTER 后降到 5s/行，
+ *   既保留“卡在哪一 phase”的证据，又把最坏情况压到 ~1 行/5s。 */
+#define FTL_JOB_LOG_INTERVAL_MS      (1000U)
+#define FTL_JOB_LOG_SLOW_AFTER_MS    (5000U)
+#define FTL_JOB_LOG_SLOW_INTERVAL_MS (5000U)
 
 /*
  * ftl_job_now_ms - 当前单调毫秒（经平台抽象 time_us 换算）。平台未注册时返回 0。
@@ -85,7 +89,11 @@ static inline bool ftl_job_heartbeat(DWORD *log_ms, DWORD *start_ms)
         return false;
     }
 
-    if ((now_ms - *log_ms) < FTL_JOB_LOG_INTERVAL_MS)
+    const DWORD interval = ((now_ms - *start_ms) >= FTL_JOB_LOG_SLOW_AFTER_MS)
+                               ? FTL_JOB_LOG_SLOW_INTERVAL_MS
+                               : FTL_JOB_LOG_INTERVAL_MS;
+
+    if ((now_ms - *log_ms) < interval)
     {
         return false;
     }

@@ -17,8 +17,9 @@ typedef enum
     SSD_STATUS_INVALID_ARGUMENT = 1U,
     SSD_STATUS_NO_SPACE         = 2U,
     SSD_STATUS_IO_ERROR         = 3U,
-    SSD_STATUS_NOT_SUPPORTED    = 4U
-} ssd_status_t;
+    SSD_STATUS_NOT_SUPPORTED    = 4U,
+    SSD_STATUS_BUSY             = 5U /* 同类请求已有一条在飞（如第二条 FLUSH） */
+} ssd_status_e;
 
 /* ── 项目固定宽度整数别名（H9）──
  * 项目代码（src/ / include/，非第三方）统一用 `BYTE/WORD/DWORD/QWORD`，

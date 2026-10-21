@@ -118,7 +118,7 @@ void boot_metadata_finalize(boot_metadata_t *metadata)
     metadata->crc32 = boot_crc32(metadata, sizeof(*metadata));
 }
 
-void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_t active_slot, DWORD active_firmware_version)
+void boot_metadata_initialize(boot_metadata_t *metadata, boot_slot_e active_slot, DWORD active_firmware_version)
 {
     if ((metadata == NULL) || (active_slot >= BOOT_SLOT_COUNT))
     {
@@ -197,7 +197,7 @@ static void boot_metadata_changed(boot_metadata_t *metadata)
     boot_metadata_finalize(metadata);
 }
 
-int boot_policy_select_slot(boot_metadata_t *metadata, const BYTE slot_bootable[BOOT_SLOT_COUNT], boot_slot_t *selected_slot, int *metadata_changed)
+int boot_policy_select_slot(boot_metadata_t *metadata, const BYTE slot_bootable[BOOT_SLOT_COUNT], boot_slot_e *selected_slot, int *metadata_changed)
 {
     DWORD pending;
     DWORD active;
@@ -219,7 +219,7 @@ int boot_policy_select_slot(boot_metadata_t *metadata, const BYTE slot_bootable[
         --metadata->retry_remaining;
         boot_metadata_changed(metadata);
         *metadata_changed = 1;
-        *selected_slot    = (boot_slot_t)pending;
+        *selected_slot    = (boot_slot_e)pending;
         return BOOT_POLICY_OK;
     }
 
@@ -233,20 +233,20 @@ int boot_policy_select_slot(boot_metadata_t *metadata, const BYTE slot_bootable[
 
     if (slot_bootable[active] != 0U)
     {
-        *selected_slot = (boot_slot_t)active;
+        *selected_slot = (boot_slot_e)active;
         return BOOT_POLICY_OK;
     }
 
     fallback = active ^ 1U;
     if (slot_bootable[fallback] != 0U)
     {
-        *selected_slot = (boot_slot_t)fallback;
+        *selected_slot = (boot_slot_e)fallback;
         return BOOT_POLICY_OK;
     }
     return BOOT_POLICY_NO_BOOTABLE_SLOT;
 }
 
-int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_t running_slot, DWORD firmware_version)
+int boot_policy_confirm_success(boot_metadata_t *metadata, boot_slot_e running_slot, DWORD firmware_version)
 {
     DWORD slot = running_slot;
 

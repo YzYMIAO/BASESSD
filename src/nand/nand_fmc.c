@@ -60,7 +60,7 @@ const nand_engine_backend_t *nand_fmc_backend_get(void)
     return &g_nand_fmc_instance.backend;
 }
 
-nand_result_t nand_fmc_init(const nand_fmc_config_t *config)
+nand_result_e nand_fmc_init(const nand_fmc_config_t *config)
 {
     /* 前置条件由调用者保证（nand_init 传入模块内 const config） */
     ASSERT(config != NULL);
@@ -81,7 +81,7 @@ nand_result_t nand_fmc_init(const nand_fmc_config_t *config)
  *         轮询次数兼作超时微秒（每次 delay_us(1)，polls≥busy_timeout_us
  *         即超时）；首读即 HIGH 视为 ready（极短 busy 或无 busy）。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_wait_ready(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     (void)context;
     (void)uop;
@@ -127,7 +127,7 @@ static nand_result_t nand_fmc_exec_wait_ready(void *context, const nand_uop_t *u
  *   实现要点：uop->operand 即命令字节，写入 FMC 命令窗口
  *         （FMC_BASE|CMD_OFFSET，A16=1 选命令口）。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_command(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -145,7 +145,7 @@ static nand_result_t nand_fmc_exec_command(void *context, const nand_uop_t *uop,
  *   返回：恒 NAND_RESULT_OK。
  *   实现要点：ONFI 5 地址周期规则——列地址占 2 字节，COLUMN_0 写低字节。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_column_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -163,7 +163,7 @@ static nand_result_t nand_fmc_exec_column_0(void *context, const nand_uop_t *uop
  *   返回：恒 NAND_RESULT_OK。
  *   实现要点：ONFI 5 地址周期规则——列地址占 2 字节，COLUMN_1 写高字节。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_column_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -182,7 +182,7 @@ static nand_result_t nand_fmc_exec_column_1(void *context, const nand_uop_t *uop
  *   实现要点：uop->operand 作 request->row[] 的 plane 下标
  *         （Multi-Plane 时第 0/1 个 plane 的行地址分两个 ROW 段写）。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -199,7 +199,7 @@ static nand_result_t nand_fmc_exec_row_0(void *context, const nand_uop_t *uop, c
  *   返回：恒 NAND_RESULT_OK。
  *   实现要点：uop->operand 作 plane 下标；取第 8~15 位。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -216,7 +216,7 @@ static nand_result_t nand_fmc_exec_row_1(void *context, const nand_uop_t *uop, c
  *   返回：恒 NAND_RESULT_OK。
  *   实现要点：uop->operand 作 plane 下标；取第 16~23 位。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
 
@@ -240,7 +240,7 @@ static nand_result_t nand_fmc_exec_row_2(void *context, const nand_uop_t *uop, c
  *       （volatile 不保证连续写顺序，写缓冲/DMA 下必须 DMB）。
  *     - 非阻塞协议：本函数可被多次调用（引擎 step 循环驱动）。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_data_in(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
     WORD                     index;
@@ -308,7 +308,7 @@ static nand_result_t nand_fmc_exec_data_in(void *context, const nand_uop_t *uop,
  *       （STM32H7 D-Cache 一致性，关键点）。
  *     - DMA 启动失败回退 PIO。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_data_out(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
     WORD                     index;
@@ -399,7 +399,7 @@ static nand_result_t nand_fmc_exec_data_out(void *context, const nand_uop_t *uop
  *         状态经 completion 链回传上层。状态位含义：
  *         bit6 = READY、bit0 = FAIL。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_data_out_status(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     const nand_fmc_config_t *config = (const nand_fmc_config_t *)context;
     BYTE                     status;
@@ -422,7 +422,7 @@ static nand_result_t nand_fmc_exec_data_out_status(void *context, const nand_uop
  *   实现要点：只查 FAIL 位（bit0），不查 READY 位——READY 由
  *         JUMP_IF_NOT_READY / WAIT_READY 阶段保证。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_check_fail(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     (void)context;
     (void)uop;
@@ -438,7 +438,7 @@ static nand_result_t nand_fmc_exec_check_fail(void *context, const nand_uop_t *u
  *   返回：恒 NAND_RESULT_OK。
  *   实现要点：对应 ONFI 时序参数（tWB/tWHR 等）的软件延时。
  * -------------------------------------------------------------------- */
-static nand_result_t nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+static nand_result_e nand_fmc_exec_delay_us(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
 {
     (void)context;
     (void)request;

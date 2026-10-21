@@ -195,7 +195,7 @@ static void boot_report_console(void)
  * Phase 1.5 的三个挂载块在 AXI .bss（启动清零），ftl_init 仍显式 memset（统一语义）。
  * N=2：AXI ~197KB / SRAM12 247,792B / SRAM3 21,256B / SRAM4 49,320B，均装得下。
  * ══════════════════════════════════════════════════════════════════ */
-static ftl_context_t g_ftl[CH_NUM][CE_NUM][LUN_NUM]; /* 描述符 → AXI_RAM（.bss） */
+static ftl_ctx_t g_ftl[CH_NUM][CE_NUM][LUN_NUM]; /* 描述符 → AXI_RAM（.bss） */
 
 /* 共享 L2P cache：同一 (ch,ce) 下所有 LUN 共用一份（阶段 B）。
  * 设备级初始化一次，由 ssd_l2p_owner_of_region 把全局 region 解析到 owner LUN。 */
@@ -204,20 +204,20 @@ static l2p_cache_t g_l2p_cache[CH_NUM][CE_NUM];
 /* per-instance 大数组（阶段 C）：由 ftl_storage_t 绑定到描述符。
  * 五张表**各自独立定义**，每张可单独换 section/内存域；当前全部落 SRAM12，
  * 将来要挪某一张只改该行的 section 宏，不动别的表。 */
-static ftl_block_t          g_ftl_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD                 g_ftl_free_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
-static WORD                 g_ftl_op_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
-static WORD                 g_ftl_spare_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
-static super_block_t        g_ftl_closed_sb_list[FTL_DIM_TOTAL][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
-static checkpoint_handle_t  g_ftl_checkpoint_handle[FTL_DIM_TOTAL] SRAM3_DATA;
-static l2p_journal_t        g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
-static metadata_dir_cache_t g_ftl_md[FTL_DIM_TOTAL] SRAM4_DATA;
+static bst_block_t    g_ftl_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD           g_ftl_free_blocks[FTL_DIM_TOTAL][FTL_BLOCK_TOTAL] SRAM12_DATA;
+static WORD           g_ftl_op_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_OP_POOL_CAP] SRAM12_DATA;
+static WORD           g_ftl_spare_blocks[FTL_DIM_TOTAL][PLANE_NUM][FTL_SPARE_POOL_PER_PLANE] SRAM12_DATA;
+static super_block_t  g_ftl_closed_sb_list[FTL_DIM_TOTAL][SUPER_BLOCK_LIST_MAX] SRAM12_DATA;
+static cp_handle_t    g_ftl_checkpoint_handle[FTL_DIM_TOTAL] SRAM3_DATA;
+static l2p_jrn_t      g_ftl_journal[FTL_DIM_TOTAL] SRAM3_DATA;
+static md_dir_cache_t g_ftl_md[FTL_DIM_TOTAL] SRAM4_DATA;
 
 /* Phase 1.5：三块大状态挂 storage 指针，仍落 AXI_RAM（默认 .bss）。
- * 挂指针**不减少总 RAM**，只让 ftl_context_t 变小、放置可控、handle 形态统一。 */
-static migrate_handle_t g_ftl_migrate[FTL_DIM_TOTAL];
-static wbuf_handle_t    g_ftl_wbuf[FTL_DIM_TOTAL];
-static BYTE             g_ftl_rr_page_scratch[FTL_DIM_TOTAL][FTL_READ_USER_SIZE];
+ * 挂指针**不减少总 RAM**，只让 ftl_ctx_t 变小、放置可控、handle 形态统一。 */
+static mig_handle_t g_ftl_migrate[FTL_DIM_TOTAL];
+static wb_handle_t  g_ftl_wbuf[FTL_DIM_TOTAL];
+static BYTE         g_ftl_rr_page_scratch[FTL_DIM_TOTAL][FTL_READ_USER_SIZE];
 
 ssd_controller_t g_ctrl; /* controller 路由表（收 g_ftl 三维指针）；非 static：
                           * UART CLI（cli.c）经 extern 引用，见 controller/cli.h */
@@ -250,7 +250,7 @@ _Static_assert(sizeof(g_ftl_md) <= BOARD_SRAM4_SIZE, "metadata_dir 超出 SRAM4"
 /* 指针形式的三维路由表（类型匹配 ssd_controller_init 形参）。
  * 编译器不认可 static 数组直接退化为匹配指针数组参数（GCC 10.3 起
  * -Wincompatible-pointer-types 恒报），此处显式构造。 */
-static ftl_context_t *g_ftl_ptrs[CH_NUM][CE_NUM][LUN_NUM];
+static ftl_ctx_t *g_ftl_ptrs[CH_NUM][CE_NUM][LUN_NUM];
 
 /* 共享 L2P cache 的 owner 端口表（docs §4.7）：每 dim 一份，只暴露
  * {dim, metadata_dir, alloc, topo}，不把整个 ftl_context 交给 l2p_cache。
@@ -285,13 +285,13 @@ static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, DWORD global_region
  * @param ch/ce/lun 本实例绑定拓扑
  * @return 0 成功，负值失败
  */
-static ftl_status_t ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
+static ftl_status_e ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
 {
-    ftl_context_t    *ftl = &g_ftl[ch][ce][lun];
-    ftl_allocator_t  *alloc;
-    ftl_boot_result_t result;
+    ftl_ctx_t        *ftl = &g_ftl[ch][ce][lun];
+    alc_t            *alloc;
+    pfr_boot_result_t result;
 
-    ftl_topology_t topo;
+    ftl_topo_t topo;
     topo.ch  = ch;
     topo.ce  = ce;
     topo.lun = lun;
@@ -340,22 +340,40 @@ static ftl_status_t ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
     ftl_contract_audit(ftl);
 #endif
 
+    /* 坏块落点统计（开机基线，**早于格式判定**）：boot 可能因介质读不通而中止，
+     * 先打一行保证失败时也能看到 BAD 分布。 */
+    ftl_boot_log_bad_areas(ftl);
+
     /* 介质布局版本判据：介质不是当前版本（旧格式 / 空片）⇒ 全片格式化。
      * 放在 ftl_init 之后、free pool 回填之前——bbt_init 已把出厂坏块标记读进 BST
      * （**只在空片时读**；用过的介质上那些字节是 FTL 数据不是标记，bbt_init 会拒绝重扫，
      * 见 bbt.c:bbt_medium_has_ftl_data），且此时回填尚未把未擦的旧块当空白块放进
      * free pool。格式化后写当前版本 Checkpoint 标记 ⇒ 下次开机判据命中，只发生一次。 */
-    bool need_format = false;
+    bool need_format   = false;
+    bool format_verify = false;
 
+#if defined(FORCE_FORMAT_ON_BOOT)
+    /* 开卡镜像（`make format-image`）：**每次启动**都擦全片并写初始元数据。
+     * 用途：介质账本已坏、开机 full metadata rebuild 太慢，先用这张镜像开卡；
+     *       开卡完成后必须换回正常镜像——这张镜像每次上电都会清数据。 */
+    LOGW("[FTL ] FORCE_FORMAT_ON_BOOT: erase + re-init media (destructive, EVERY boot)\r\n");
+    need_format = true;
+#    if defined(FORCE_FORMAT_VERIFY)
+    format_verify = true;
+    LOGW("[FTL ] FORCE_FORMAT_ON_BOOT: full-chip write/read verify enabled\r\n");
+#    endif
+#else
     if (ftl_media_check_format(ftl, &need_format) != FTL_OK)
     {
         LOGE("[FTL ] CP media unreadable — refuse to format ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
         return FTL_ERROR;
     }
+#endif
+
     if (need_format)
     {
         LOGW("[FTL ] media blank / layout mismatch -> format\r\n");
-        if (ftl_media_format(ftl) != FTL_OK)
+        if (ftl_media_format(ftl, format_verify) != FTL_OK)
         {
             LOGE("[FTL ] media format failed ch=%u ce=%u lun=%u\r\n", ch, ce, lun);
             return FTL_ERROR;
@@ -385,9 +403,161 @@ static ftl_status_t ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
          (int)result.boot_type,
          result.cp_sequence,
          result.journal_entries,
-         (result.blocks_restored != 0U) ? "restored" : "fallback");
+         result.scoped ? "scoped" : ((result.blocks_restored != 0U) ? "restored" : "fallback"));
 
     return 0;
+}
+
+/* 主机容量 = 编译期映射上限 − 实际坏块占用的 LBA。
+ *
+ * 本仓自拟的容量折中：主流量产 SSD 的容量在出厂固定，坏块由 OP 吸收、不在
+ * 运行期缩容；本仓的二手片没有可信出厂坏块表，OP/Spare 也只会越用越少，
+ * 容量口径（本仓自拟的动态折中；主流量产是固定容量 + OP 吸收坏块，见 RISK-CAP-03）：
+ *   1. 每 plane 只统计**好**的、非固定元数据的块（`>= FTL_METADATA_AREA_END`）；
+ *   2. 扣掉 OP 与 Spare 两个预留池的目标块数；
+ *   3. **取 plane 最小值**再乘 PLANE_NUM —— Super Block 需要每 plane 一块，
+ *      跨 plane 求和会超卖；
+ *   4. **取实例最小值** —— LBA 按 region 路由，最紧的实例先耗尽，跨实例求和同样超卖。
+ * 扣减粒度：每个物理块 = PAGES_PER_BLOCK × CW_NUM 个 512B LBA。
+ * ⚠ 只在开机算一次：同一会话内 runtime 新增坏块由 Spare/OP 吸收，不改已枚举容量；
+ *   下一次开机按当时的 BAD 集重算。
+ */
+static DWORD ssd_ftl_host_lba_max(void)
+{
+    DWORD cap_blocks = UINT32_MAX;
+
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+            {
+                const ftl_ctx_t *ftl = g_ftl_ptrs[ch][ce][lun];
+
+                if (ftl == NULL)
+                {
+                    continue;
+                }
+
+                DWORD plane_usable_min = UINT32_MAX;
+
+                for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+                {
+                    DWORD good = 0U;
+
+                    for (WORD block = FTL_METADATA_AREA_END; block < BLOCKS_PER_PLANE; block++)
+                    {
+                        const WORD g = ftl_gblock(plane, block);
+
+                        if (!ftl_block_is_bad(&ftl->alloc.blocks[g]))
+                        {
+                            good++;
+                        }
+                    }
+
+                    const DWORD reserved = FTL_OP_BLOCKS_PER_PLANE + FTL_SPARE_POOL_PER_PLANE;
+                    const DWORD usable   = (good > reserved) ? (good - reserved) : 0U;
+
+                    if (usable < plane_usable_min)
+                    {
+                        plane_usable_min = usable;
+                    }
+                }
+
+                const DWORD instance_blocks = plane_usable_min * PLANE_NUM;
+
+                LOGI("[CAP] ch=%u ce=%u lun=%u plane_usable_min=%lu instance_blocks=%lu\r\n",
+                     (unsigned)ch,
+                     (unsigned)ce,
+                     (unsigned)lun,
+                     plane_usable_min,
+                     instance_blocks);
+
+                if (instance_blocks < cap_blocks)
+                {
+                    cap_blocks = instance_blocks;
+                }
+            }
+        }
+    }
+
+    if (cap_blocks == UINT32_MAX)
+    {
+        cap_blocks = 0U;
+    }
+
+    QWORD lba = (QWORD)cap_blocks * PAGES_PER_BLOCK * CW_NUM * FTL_DIM_TOTAL;
+
+    if (lba > FTL_LBA_MAX)
+    {
+        lba = FTL_LBA_MAX;
+    }
+    if (lba == 0U)
+    {
+        lba = 1U; /* 极端坏块：保留至少 1 个 LBA，避免 READ CAPACITY 为 0 */
+    }
+
+    LOGI("[CAP] host_data_blocks=%lu lba_max=%lu (%luMiB)\r\n",
+         cap_blocks,
+         (unsigned long)lba,
+         (unsigned long)((lba * FTL_IU_BYTES) / (1024UL * 1024UL)));
+
+    return (DWORD)lba;
+}
+
+/* --------------------------------------------------------------------
+ * ssd_ftl_log_status - 周期性 [STAT] 一行摘要（每 5 s）
+ *
+ *   把「计数类」信息从逐事件日志里挪出来：free/op/spare/bad、CP/JRN 水位、
+ *   迁移状态、dangling/已退役块重读计数、当前 NAND timing mode。
+ *   逐事件日志只保留首次故障与状态变化（见 docs/design/logging_design.md）。
+ * -------------------------------------------------------------------- */
+static void ssd_ftl_log_status(void)
+{
+    static DWORD last_ms;
+    const DWORD  now = HAL_GetTick();
+
+    if ((last_ms != 0U) && ((now - last_ms) < 5000U))
+    {
+        return;
+    }
+    last_ms = now;
+
+    const BYTE mode = nand_get_timing_mode();
+
+    for (BYTE ch = 0U; ch < CH_NUM; ch++)
+    {
+        for (BYTE ce = 0U; ce < CE_NUM; ce++)
+        {
+            for (BYTE lun = 0U; lun < LUN_NUM; lun++)
+            {
+                const ftl_ctx_t *ftl = g_ftl_ptrs[ch][ce][lun];
+
+                if (ftl == NULL)
+                {
+                    continue;
+                }
+
+                LOGI("[STAT] ch=%u t=%lus mode=%u free=%u op=%u/%u spare=%u/%u bad=%u cp=%lu jrn=%lu wr=%lu mig=%u/%u dng=%lu rrab=%lu\r\n",
+                     (unsigned)ch,
+                     (unsigned long)(now / 1000U),
+                     (unsigned)mode,
+                     (unsigned)ftl->alloc.free_count,
+                     (unsigned)alc_get_op_count(&ftl->alloc, 0U),
+                     (unsigned)alc_get_op_count(&ftl->alloc, 1U),
+                     (unsigned)alc_get_spare_count(&ftl->alloc, 0U),
+                     (unsigned)alc_get_spare_count(&ftl->alloc, 1U),
+                     (unsigned)ftl->alloc.bad_count,
+                     ftl->cp_handle->cp_state.sequence,
+                     (unsigned long)ftl->journal->handle.sequence_counter,
+                     ftl->total_writes,
+                     (unsigned)((ftl->mig_handle->active != 0U) ? 1U : 0U),
+                     (unsigned)((ftl->mig_handle->paused != 0U) ? 1U : 0U),
+                     ftl->dangling_total,
+                     ftl->read_recovery_handle.already_bad_reads);
+            }
+        }
+    }
 }
 
 /* 完整初始化 FTL：全实例 boot + controller 绑定（boot_ok 才置 g_ftl_ready）
@@ -404,7 +574,7 @@ static void ssd_ftl_boot_all(void)
     BYTE         ce;
     BYTE         lun;
     int          boot_ok = 1;
-    ssd_status_t ctrl_ret;
+    ssd_status_e ctrl_ret;
 
     /* ① 全局完成旁表 + 路由表：清一次、填一次、设一次——**全部必须早于逐实例 boot**。
      *    - ct_init() 清的是**全局**资源（旁表 + 路由表），只做一次。
@@ -495,12 +665,16 @@ static void ssd_ftl_boot_all(void)
         return;
     }
 
+    /* ③.5 主机可见容量：按实际坏块扣减（RISK-CAP-03，本仓自拟的容量折中）。
+     * 必须在 USB 枚举之前设置——main 继续往下才初始化 USB 设备栈。 */
+    g_ctrl.host_lba_max = ssd_ftl_host_lba_max();
+
     /* ④ 主循环切换点：此后走 ftl_service（内部先跑 fc_service） */
     g_ftl_ready = 1;
     /* %lu 而非 %llu：newlib-nano 不支持 long long 格式化，见 usart.c 的 _Static_assert。 */
     LOGI("[FTL ] controller ready, lba_max=%lu (%luMiB)\r\n",
-         (unsigned long)FTL_LBA_MAX,
-         (unsigned long)(FTL_HOST_CAPACITY_BYTES / (1024UL * 1024UL)));
+         (unsigned long)g_ctrl.host_lba_max,
+         (unsigned long)(((QWORD)g_ctrl.host_lba_max * FTL_IU_BYTES) / (1024UL * 1024UL)));
 }
 
 /* Newlib-nano calls this hook from __libc_init_array when no CRT provides it. */
@@ -659,11 +833,18 @@ int main(void)
                     }
                 }
             }
+
+            /* 计数类信息每 5 s 一行，替代逐事件刷屏。 */
+            ssd_ftl_log_status();
         }
         else
         {
             (void)fc_service();
         }
+
+        /* Controller 自己的异步命令（当前只有 FLUSH）：每轮推进 + 完成回执。
+         * 必须在 USB 任务之前——USB 前端同一轮就能看到 complete_flag。 */
+        ssd_controller_service(&g_ctrl);
 
         /* USB：先让 MSC 前端检查在飞请求（提交/回填），再让协议栈处理事件
          * （tud_msc_async_io_done 会在这里把数据/CSW 发出去）。两者都非阻塞。 */

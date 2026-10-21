@@ -25,6 +25,7 @@
 
 #include "gc.h"
 
+#include "assertion.h"
 #include "fc.h"
 #include "ftl_fc_interface.h"
 #include "log.h"
@@ -57,7 +58,7 @@
  * @param cw_lba  输出：逐 CW 的扇区 LBA（长度 CW_NUM；未写过 = FTL_LBA_INVALID）
  * @return FTL_OK 成功；FTL_AGAIN 命令池空；FTL_ERROR 读失败 / 全页无写过 CW
  */
-ftl_status_t gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
+ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
 {
     /* 命令池空是**资源类**结果（FTL_AGAIN）；唯一调用者在开机重建期，池结构性充足。 */
     fc_command_t *cmd = fc_command_alloc();
@@ -85,7 +86,7 @@ ftl_status_t gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
     {
         fc_command_status_t completion;
 
-        ftl_status_t ret = ftl_sync_submit_wait(cmd, &completion, 0U);
+        ftl_status_e ret = ftl_sync_submit_wait(cmd, &completion, 0U);
         if (ret != FTL_OK)
         {
             (void)fc_command_release(cmd);
@@ -137,10 +138,10 @@ ftl_status_t gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM])
  * ⚠ 同步版（gc_read_page_with_lba）与异步搬移 job（migrate.c）共用本函数——解码规则
  *   只此一份，避免两处漂移。
  * -------------------------------------------------------------------- */
-gc_decode_result_t gc_decode_cw_lba(fc_command_t *cmd,
-                                    DWORD         pba,
-                                    DWORD         cw_lba[CW_NUM],
-                                    DWORD        *page_base_out)
+gc_decode_e gc_decode_cw_lba(fc_command_t *cmd,
+                             DWORD         pba,
+                             DWORD         cw_lba[CW_NUM],
+                             DWORD        *page_base_out)
 {
     const BYTE phys_plane = pba_to_plane(pba);
 
@@ -227,9 +228,9 @@ typedef struct
     DWORD max_pe_ts; /* 0 = 本上电周期尚无块被擦 ⇒ 时间项中性 */
 } gc_extremes_t;
 
-static void gc_table_extremes(const ftl_allocator_t *alloc, gc_extremes_t *out)
+static void gc_table_extremes(const alc_t *alloc, gc_extremes_t *out)
 {
-    allocator_erase_stats_t st;
+    alc_erase_stats_t st;
 
     alc_get_erase_stats(alloc, &st);
 
@@ -242,17 +243,30 @@ static void gc_table_extremes(const ftl_allocator_t *alloc, gc_extremes_t *out)
 
 /* --------------------------------------------------------------------
  * gc_select_victim
- *   功能：从 Closed SB 列表里按四项加权评分选回收代价最小的 SB 作 victim。
- *   参数：alloc —— 分配器；victim —— 出参（指向 closed_sb_list 内的条目）。
- *   返回：true 找到；false 未找到。
+ *   功能：从 Closed SB 列表里按四项加权评分选回收代价最小的 SB 作 victim，
+ *         并在评分前按收益判据过滤「不值得搬」的候选。
+ *   参数：alloc —— 分配器；mode —— 收益判据模式；out —— 出参（victim + 观测计数）。
+ *   返回：GC_SELECT_OK / GC_SELECT_NO_CANDIDATE / GC_SELECT_NOT_WORTHWHILE。
  *   实现要点：四项各自归一化到 0..1000——vr 有效页率、er 磨损率（越大越**避开**临近寿命块）、
  *             cp 温度（COLD 加分）、yp 年龄（越老越优先）；cost = 加权和，取小者胜；
  *             cost 相等取有效页更少者（确定性）。erase 项用 QWORD 防溢出；
  *             age 项 `max_pe_ts > pe_min` 兜住 max_pe_ts==0 与 pe_min 越界两种退化（取中性 0）。
+ *   ⚠ **先过滤、后评分**：若先选 cost 最小再判收益，可能出现「最差块仍太有效 ⇒ 报无收益，
+ *     而其实还有更稀疏的候选」。过滤条件见 gc.h 的 GC_VICTIM_* 注释。
+ *   ⚠ 分母用 `st.plane_count * FTL_CW_PER_BLOCK`（BAD/哨兵 plane 已被 alc_get_sb_stats 排除）；
+ *     不能按 next_page 缩分母——半写块的空洞页会让它看起来「100% 有效」而被误跳过。
  * -------------------------------------------------------------------- */
-bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim)
+gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_select_out_t *out)
 {
-    /* 前置条件（判据 2）：调用者 migrate.c 传 &ftl->alloc 与栈上 &victim。 */
+    /* 前置条件（判据 2）：调用者 migrate.c 传 &ftl->alloc、合法 mode 与栈上 &out。 */
+    ASSERT(alloc != NULL);
+    ASSERT(out != NULL);
+    ASSERT((mode == GC_BENEFIT_OFF) || (mode == GC_BENEFIT_IDLE) || (mode == GC_BENEFIT_EMERGENCY));
+
+    out->victim         = NULL;
+    out->best_valid_pct = 0U;
+    out->scanned        = 0U;
+    out->eligible       = 0U;
 
     /* 归一化基准：全表极值（一次扫描，与候选数无关）。min_erase 本函数不用（T5 用）。 */
     gc_extremes_t ex;
@@ -264,6 +278,7 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
     DWORD best_cp    = 0U;
     DWORD best_yp    = 0U;
     WORD  best_valid = (FTL_CW_PER_SB + 1U);
+    WORD  best_pct   = 101U; /* >100 = 尚未见到候选 */
     bool  found      = false;
 
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
@@ -277,19 +292,51 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
 
         /* 各 plane 的聚合值（有效 CW / 磨损 / 时间）由 allocator 统一计算：
          * 有效 CW = 各 plane valid_count 之和（CW 级真实计数）；退化单 plane 条目跳过哨兵 plane。 */
-        allocator_sb_stats_t st;
+        alc_sb_stats_t st;
         alc_get_sb_stats(alloc, sb, &st);
         if (st.plane_count == 0U)
         {
             continue; /* 全哨兵条目 */
         }
 
+        const DWORD total_cw = (DWORD)st.plane_count * FTL_CW_PER_BLOCK;
+        const DWORD valid_cw = ((DWORD)st.valid_cw > total_cw) ? total_cw : (DWORD)st.valid_cw;
+        const WORD  pct      = (WORD)((valid_cw * 100U) / total_cw);
+
+        out->scanned++;
+        if (pct < best_pct)
+        {
+            best_pct = pct;
+        }
+
+        /* ── 收益判据（先过滤，再评分）── */
+        if (mode == GC_BENEFIT_IDLE)
+        {
+            if ((valid_cw * 100U) > (total_cw * GC_VICTIM_MAX_VALID_PCT))
+            {
+                continue; /* 有效率太高：搬它得到的空闲块还不够付目的页 */
+            }
+        }
+        else if (mode == GC_BENEFIT_EMERGENCY)
+        {
+            if (((total_cw - valid_cw) * 100U) < (total_cw * GC_EMERGENCY_MIN_GAIN_PCT))
+            {
+                continue; /* 可回收比例不足：紧急水位下也不值得 churn */
+            }
+        }
+        else
+        {
+            /* GC_BENEFIT_OFF：不筛 */
+        }
+
+        out->eligible++;
+
         /* 四项各自归一化到 0..1000；cost 取小 = 越优先回收。
          * erase 项用 QWORD 中间量防溢出（erase_count 是 DWORD，×1000 理论上可溢出）。
          * age 项的 `max_pe_ts > pe_min` 同时兜住两种退化：① max_pe_ts == 0（上电后尚无块被擦）；
          * ② 本 SB 的 plane 块已被标坏 ⇒ 全表统计跳过它 ⇒ pe_min 可能大于 max_pe_ts
          * （相减会下溢成大数、把 yp 绕回）。两者一律取 age_ratio = 0（时间项中性）。 */
-        DWORD vr = (st.valid_cw * 1000U) / (st.plane_count * FTL_CW_PER_BLOCK);
+        DWORD vr = (valid_cw * 1000U) / total_cw;
         DWORD er = (((QWORD)st.erase_max * 1000U) / ex.max_erase);
         DWORD cp = (sb->temperature == FTL_TEMP_HOT) ? 0U : 1000U;
         DWORD yp = 1000U - (((ex.max_pe_ts > st.pe_min) ? (((QWORD)(ex.max_pe_ts - st.pe_min) * 1000U) / ex.max_pe_ts) : 0U));
@@ -299,40 +346,50 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
         /* cost 相等时取有效页更少者（确定性，且退化为单维贪心） */
         if ((cost < best_cost) || ((cost == best_cost) && (st.valid_cw < best_valid)))
         {
-            best_cost  = cost;
-            best_valid = st.valid_cw;
-            best_vr    = vr;
-            best_er    = er;
-            best_cp    = cp;
-            best_yp    = yp;
-            *victim    = sb;
-            found      = true;
+            best_cost   = cost;
+            best_valid  = st.valid_cw;
+            best_vr     = vr;
+            best_er     = er;
+            best_cp     = cp;
+            best_yp     = yp;
+            out->victim = sb;
+            found       = true;
         }
     }
 
+    out->best_valid_pct = (best_pct <= 100U) ? best_pct : 0U;
+
+    /* 这四项只服务 debug 档的 LOGD 观测口；release 下 LOGD 被编译掉 ⇒ 显式丢弃，
+     * 避免 "set but not used" 告警（H30 显式丢弃 / 判据 10）。 */
+    (void)best_vr;
+    (void)best_er;
+    (void)best_cp;
+    (void)best_yp;
+
     if (found)
     {
-        /* 观测口：一次空闲 GC 突发最多打 FREE_POOL_TARGET = 32 行
-         * （每 victim 每 plane 一行；ftl_service_idle 循环调用），
-         * 相对 GC 自身的 NAND 擦除/搬移耗时可忽略。哨兵 plane 不打印。 */
+        /* 观测口（debug 档）：一次空闲 GC 突发最多打 FREE_POOL_TARGET = 32 行
+         * （每 victim 每 plane 一行；ftl_service_idle 循环调用）。默认档不打印——
+         * 持续重选 victim 时这些行会把有效进展淹没（RISK-MIG-05）。哨兵 plane 不打印。 */
         for (BYTE p = 0U; p < PLANE_NUM; p++)
         {
-            if (!super_block_has_plane(*victim, p))
+            if (!super_block_has_plane(out->victim, p))
             {
                 continue;
             }
-            LOGI("[GC] victim plane%u=%u vr=%lu er=%lu cp=%lu yp=%lu cost=%lu\r\n",
+            LOGD("[GC] victim plane%u=%u vr=%lu er=%lu cp=%lu yp=%lu cost=%lu\r\n",
                  (unsigned)p,
-                 (unsigned)(*victim)->plane_blocks[p],
+                 (unsigned)out->victim->plane_blocks[p],
                  best_vr,
                  best_er,
                  best_cp,
                  best_yp,
                  best_cost);
         }
+        return GC_SELECT_OK;
     }
 
-    return found;
+    return (out->scanned == 0U) ? GC_SELECT_NO_CANDIDATE : GC_SELECT_NOT_WORTHWHILE;
 }
 
 /* ── 4. 触发判定 ── */
@@ -347,7 +404,7 @@ bool gc_select_victim(const ftl_allocator_t *alloc, const super_block_t **victim
  *             T5 磨损比 max/min 超标（min==0 不触发——"有块从未被擦"是静态 WL 的职责；
  *             max 地板防早期空跑）。
  * -------------------------------------------------------------------- */
-DWORD gc_should_trigger(const ftl_allocator_t *alloc)
+DWORD gc_should_trigger(const alc_t *alloc)
 {
     /* NULL ⇒ 不触发：这是**文档化契约**（UT `test_gc_check_triggers` 钉住），
      * 不是静默吞（C5 判据 4）。 */

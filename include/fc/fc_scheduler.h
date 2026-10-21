@@ -53,20 +53,20 @@ typedef enum
     FC_CHAIN_OWNER_NONE = 0U, /* 该 LUN 上没有未结束的链 */
     FC_CHAIN_OWNER_SQ,        /* 未结束的链在普通队列里 */
     FC_CHAIN_OWNER_HSQ        /* 未结束的链在高优先队列里 */
-} fc_chain_owner_t;
+} fc_chain_owner_e;
 
 typedef struct
 {
     fc_submission_queue_t *sq;
     fc_submission_queue_t *hsq;
     /* 链锁：链一旦开始，该 LUN 的填充权归链所在的队列独占，直到链的 END 下发。
-     * 取值 fc_chain_owner_t。**跨填充 pass 持久**——fc_poll_fill 的 suspended[] 每趟
+     * 取值 fc_chain_owner_e。**跨填充 pass 持久**——fc_poll_fill 的 suspended[] 每趟
      * memset 清零，做不到跨趟保留，所以这份状态必须挂在控制器上。
      * 生产路径恒 NONE：FTL 全仓恒 FC_CHAIN_END（链长恒 1）⇒ 本表恒不被置位 ⇒ 准入
      * 判断恒假、更新恒写 NONE ⇒ 对既有命令流零行为变化。 */
     BYTE chain_owner[CH_NUM][CE_NUM][LUN_NUM];
 } fc_scheduler_t;
 
-fc_status_t fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq);
+fc_status_e fc_scheduler_init(fc_scheduler_t *scheduler, fc_submission_queue_t *sq, fc_submission_queue_t *hsq);
 
 #endif /* FC_SCHEDULER_H */
