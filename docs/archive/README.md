@@ -10,7 +10,6 @@ docs/archive/
 ├── README.md          ← 本文件
 ├── changelog/         ← 原 docs/changelog/：FC / FTL 各版本逐版本落地记录（70 个）
 ├── <dated 6 个>       ← 原 docs/design/ 的一次性阶段文档
-├── images/            ← 历史证据图（h2testw_pass_20261022.png 等）
 └── <计划/历史 10 个>   ← 2026-10-22 文档重组移入（见下节）
 ```
 
