@@ -1225,8 +1225,8 @@ static MunitResult test_block_erase_verify(const MunitParameter params[], void *
  *
  *  ⚠️ CRC/LDPC/加扰/RAID 全部关闭（LDPC RAW 模式），纯 RAW 数据验证。
  *  ⚠ plane 1 的 cache 路径改造前从未走过（旧代码 plane 恒 0）——参数化新增的覆盖面。
- *     cache 只有单 plane 变体（ONFI 1.0 无 multi-plane；器件侧有 two-plane cache
- *     **编程**、无 two-plane cache **读**）。
+ *     ONFI 1.0 只有单 plane；本器件 MT29F4G08 另有 two-plane cache 读/写扩展，
+ *     由 block_cache_multi_plane 单独覆盖。
  **************************************************************************/
 
 static MunitResult test_block_cache_ops(const MunitParameter params[], void *data)
@@ -1266,7 +1266,45 @@ static MunitResult test_block_cache_ops(const MunitParameter params[], void *dat
     }
 
     /* 证据摘要（--log-visible info）：地址是抽出来的 ⇒ 必须打出来才能从 seed 复现。 */
-    test_trace_summary("cache_ops block=%u plane=%u: cache prog -> 31h x63 -> 3Fh 全 block 数据一致；00h-addr-31h 跳页入口（输出上一页、地址页下一步出）一致", (unsigned)block, (unsigned)plane);
+    test_trace_summary("cache_ops block=%u plane=%u: START_SEQ -> 31h x62 -> 3Fh 全 block 数据一致；00h-addr-31h 跳页入口（输出上一页、地址页下一步出）一致", (unsigned)block, (unsigned)plane);
+
+    return MUNIT_OK;
+}
+
+/**************************************************************************
+ *  test_block_cache_multi_plane — 双 Plane cache 读写
+ *
+ *  流程：
+ *    1. OP_ERASE_BLOCK_MULTI_PLANE 擦双 plane
+ *    2. test_prog_block_cache_multi_plane：
+ *       page 0..62 OP_TWO_PLANE_PROGRAM_CACHE（80h-11h-80h-15h）
+ *       page 63    OP_PROGRAM_PAGE_MULTI_PLANE（80h-11h-80h-10h）
+ *    3. test_read_block_cache_multi_plane：
+ *       START_SEQ_MP(page0) -> SEQ_MP ×62 -> LAST_MP(page63)
+ *       每步 06h P0/P1 分别输出两个 plane
+ *
+ *  验证点：
+ *    - 双 plane cache 写的中间页/末页序列正确
+ *    - 双 plane cache 读的 06h plane 选择正确
+ *    - 两 plane 的 PAA pattern 各自独立校验（读串 plane 必被抓）
+ **************************************************************************/
+
+static MunitResult test_block_cache_multi_plane(const MunitParameter params[], void *data)
+{
+    (void)params;
+    (void)data;
+    const uint16_t block = l3_block_draw("block_cache_multi_plane");
+
+    test_trace_begin();
+
+    test_erase_block(block, TEST_PLANE_BM_ALL, &L3_CONF(OP_ERASE_BLOCK_MULTI_PLANE, FC_CRC_DISABLE));
+
+    test_prog_block_cache_multi_plane(block, &L3_CONF(OP_TWO_PLANE_PROGRAM_CACHE, FC_CRC_DISABLE), NULL);
+
+    test_read_block_cache_multi_plane(block, &L3_CONF(OP_READ_PAGE_CACHE_START_SEQ_MP, FC_CRC_DISABLE), NULL);
+
+    test_trace_summary("cache_multi_plane block=%u: 63 x two-plane 15h + 1 x 10h; START_SEQ_MP + 62 x SEQ_MP + LAST_MP, both planes PAA-verified",
+                       (unsigned)block);
 
     return MUNIT_OK;
 }
@@ -2261,23 +2299,24 @@ static MunitResult test_buf_own_release(const MunitParameter params[], void *dat
  **************************************************************************/
 
 MunitTest g_fc_lifecycle_tests[] = {
-    {      "init_sequence",       test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    { "feature_write_read",  test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    {"chain_priority_lock", test_chain_priority_lock, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {       "status_query",        test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
-    { "internal_data_move",  test_internal_data_move, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    { "block_erase_verify",  test_block_erase_verify, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {   "block_write_read",    test_block_write_read, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {    "block_cache_ops",     test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {  "block_multi_plane",   test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {  "block_random_data",   test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {   "block_load_fetch",    test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {    "block_read_meta",     test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {     "block_lock_ops",      test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {     "mixed_pipeline",      test_mixed_pipeline, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
-    {    "buf_own_release",     test_buf_own_release, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {          "init_sequence",           test_init_sequence, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     "feature_write_read",      test_feature_write_read, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {    "chain_priority_lock",     test_chain_priority_lock, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {           "status_query",            test_status_query, test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL},
+    {     "internal_data_move",      test_internal_data_move, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {     "block_erase_verify",      test_block_erase_verify, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {       "block_write_read",        test_block_write_read, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {        "block_cache_ops",         test_block_cache_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {"block_cache_multi_plane", test_block_cache_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {      "block_multi_plane",       test_block_multi_plane, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {      "block_random_data",       test_block_random_data, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {       "block_load_fetch",        test_block_load_fetch, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {        "block_read_meta",         test_block_read_meta, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {         "block_lock_ops",          test_block_lock_ops, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {         "mixed_pipeline",          test_mixed_pipeline, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
+    {        "buf_own_release",         test_buf_own_release, test_setup, test_tear_down,             MUNIT_TEST_OPTION_NONE, NULL},
 #if 0  /* block_lock_tight 被 #if 0 隔开，此处不注册 */
     { "block_lock_tight",    test_block_lock_tight,    test_setup, test_tear_down, MUNIT_TEST_OPTION_SINGLE_ITERATION, NULL },
 #endif
-    {                 NULL,                     NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
+    {                     NULL,                         NULL,       NULL,           NULL,             MUNIT_TEST_OPTION_NONE, NULL},
 };

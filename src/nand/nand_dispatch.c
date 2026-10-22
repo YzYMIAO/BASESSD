@@ -667,9 +667,9 @@ static nand_dispatch_cw_outcome_t nand_dispatch_task_cw_chain(nand_dispatch_lun_
  *   参数：task —— 已完成任务（自带 ch/ce/lun，定位页缓冲）。
  *   返回：无。
  *   实现要点：两类操作的数据落在页缓冲而非各 CW buffer（FMC 数据路径约定）：
- *     - Cache 读（SEQ/RANDOM/LAST）：单 plane，offset = CW 号 × CW_SIZE。
- *     - Multi-Plane WITH_DATA_OUT：双 plane 数据按 plane 顺序拼接，
- *       offset = plane × PAGE_SIZE + CW 号 × CW_SIZE。
+ *     - 单 plane Cache 读（START_SEQ/SEQ/RANDOM/LAST）：offset = CW 号 × CW_SIZE。
+ *     - 双 plane cache 读（START_SEQ_MP/SEQ_MP/LAST_MP）与 Multi-Plane
+ *       WITH_DATA_OUT：offset = plane × PAGE_SIZE + CW 号 × CW_SIZE。
  *     **遍历只走掩码里的置位**：plane = n / CW_NUM、CW 号 = n % CW_NUM，
  *     不再有独立的槽位号或 PAA 里的 CW 位。
  *     页缓冲按 (ch, ce, lun) 各持一块，故索引一律取自 task 自身。
@@ -679,8 +679,8 @@ static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
     BYTE *page_buffer = g_nand_channel_page_buffer[task->ch][task->ce][task->lun];
     BYTE  n;
 
-    if ((task->operation == OP_READ_PAGE_CACHE_SEQ) || (task->operation == OP_READ_PAGE_CACHE_RANDOM) ||
-        (task->operation == OP_READ_PAGE_CACHE_LAST))
+    if ((task->operation == OP_READ_PAGE_CACHE_START_SEQ) || (task->operation == OP_READ_PAGE_CACHE_SEQ) ||
+        (task->operation == OP_READ_PAGE_CACHE_RANDOM) || (task->operation == OP_READ_PAGE_CACHE_LAST))
     {
         for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
              n = nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))
@@ -690,7 +690,10 @@ static void nand_dispatch_scatter_page_buffer(const nand_dispatch_task_t *task)
         }
     }
 
-    if (task->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT)
+    if ((task->operation == OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT) ||
+        (task->operation == OP_READ_PAGE_CACHE_START_SEQ_MP) ||
+        (task->operation == OP_READ_PAGE_CACHE_SEQ_MP) ||
+        (task->operation == OP_READ_PAGE_CACHE_LAST_MP))
     {
         for (n = nand_dispatch_cw_next(task->cw_bitmap, 0U); n < CW_TOTAL_MAX;
              n = nand_dispatch_cw_next(task->cw_bitmap, (n + 1U)))

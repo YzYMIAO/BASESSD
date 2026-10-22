@@ -12,7 +12,7 @@
 
       "gdbTarget": "localhost:2331",
 
-      "executable": "${workspaceFolder}/build/firmware/release/bin/release.elf",
+      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
 
@@ -43,7 +43,7 @@
       "interface": "swd",
       "serialNumber": "602717758",
 
-      "executable": "${workspaceFolder}/build/firmware/release/bin/release.elf",
+      "executable": "${workspaceFolder}/build/firmware/debug/bin/debug.elf",
 
       "gdbPath": "/usr/bin/gdb-multiarch",
       "armToolchainPath": "/usr/bin",

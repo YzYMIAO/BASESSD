@@ -121,9 +121,13 @@ static BYTE fc_is_page_read(BYTE operation)
     {
         case OP_NORMAL_READ_PAGE_WITH_DATA_OUT:
         case OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT:
+        case OP_READ_PAGE_CACHE_START_SEQ:
         case OP_READ_PAGE_CACHE_SEQ:
         case OP_READ_PAGE_CACHE_RANDOM:
         case OP_READ_PAGE_CACHE_LAST:
+        case OP_READ_PAGE_CACHE_START_SEQ_MP:
+        case OP_READ_PAGE_CACHE_SEQ_MP:
+        case OP_READ_PAGE_CACHE_LAST_MP:
         case OP_RANDOM_DATA_READ:
         case OP_RANDOM_DATA_READ_MULTI_PLANE: /* 06h-E0h 多 plane 逐 CW 取数（与 05h 对称） */
             return 1U;
@@ -145,6 +149,7 @@ static BYTE fc_is_page_write(BYTE operation)
         case OP_NORMAL_PROGRAM_PAGE:
         case OP_PROGRAM_PAGE_CACHE:
         case OP_OTP_DATA_PROGRAM:
+        case OP_TWO_PLANE_PROGRAM_CACHE:
         case OP_PROGRAM_PAGE_MULTI_PLANE:
         case OP_PROGRAM_PAGE_ISSUE: /* Phase V */
             return 1U;

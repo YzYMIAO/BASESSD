@@ -156,6 +156,10 @@ static uint8_t test_is_multi_op(uint8_t operation)
         case (uint8_t)OP_ERASE_BLOCK_MULTI_PLANE:
         case (uint8_t)OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT: /* v45：多 plane 加载 */
         case (uint8_t)OP_RANDOM_DATA_READ_MULTI_PLANE:           /* v45：06h-E0h 多 plane 取数 */
+        case (uint8_t)OP_TWO_PLANE_PROGRAM_CACHE:                /* Figure 74：双 plane cache 写 */
+        case (uint8_t)OP_READ_PAGE_CACHE_START_SEQ_MP:           /* 双 plane cache 读首 pair */
+        case (uint8_t)OP_READ_PAGE_CACHE_SEQ_MP:                 /* 双 plane cache 读顺序 pair */
+        case (uint8_t)OP_READ_PAGE_CACHE_LAST_MP:                /* 双 plane cache 读末 pair */
             return 1U;
         default:
             return 0U;
@@ -430,7 +434,7 @@ fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, u
     ASSERT((plane_bitmap & (uint8_t)~TEST_PLANE_BM_ALL) == 0U);
     ASSERT((block_index < BLOCKS_PER_PLANE) && (page_index < PAGES_PER_BLOCK));
     ASSERT((config->operation == (DWORD)OP_NORMAL_PROGRAM_PAGE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE) ||
-           (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE));
+           (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE));
 
     is_multi = test_is_multi_op((uint8_t)config->operation);
     if (is_multi != 0U)
@@ -570,9 +574,9 @@ void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
     ASSERT((plane_bitmap & (uint8_t)~TEST_PLANE_BM_ALL) == 0U);
-    /* cache 编程只有单 plane 变体（ONFI 无 multi-plane cache program）⇒ 段必须恰好一个 plane。
-     * 不靠 test_prog_page 的 else 分支兜底：那条断言的理由是「非 multi op 只能单 plane」，
-     * 与「cache 没有 multi 变体」是两条不同的约束，各自写明。 */
+    /* 本 helper 是单 plane cache 编程；ONFI 1.0 无 multi-plane，器件的 two-plane
+     * 变体见 test_prog_block_cache_multi_plane()。不靠 test_prog_page 的 else 分支兜底：
+     * 「非 multi op 只能单 plane」与「本 helper 只做单 plane」是两条不同的约束。 */
     ASSERT(test_plane_count(plane_bitmap) == 1U);
     ASSERT(block_index < BLOCKS_PER_PLANE);
 
@@ -602,20 +606,64 @@ void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
     }
 }
 
-/* cache 读的一步（SEQ / LAST）：建链 → 预填 0xCC → 提交 → 轮询 → 拷回 → 释放。
- * output_page 是**本步真正输出的页**——SEQ 输出上一轮加载的页，故调用者要传 page-1；
- * 命令地址页号对设备无意义（31h / 3Fh 无地址周期），一律传 0。
- * meta 与命令地址**刻意解耦**：取 output_page 的 PBA（真正输出的那页），不是地址里的 0。 */
+void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t *config, uint8_t **data)
+{
+    fc_cmd_conf_t conf;
+
+    ASSERT(config != NULL);
+    ASSERT(block_index < BLOCKS_PER_PLANE);
+
+    /* 前 PAGES_PER_BLOCK-1 页：Two-Plane Program Page Cache（80h-11h-80h-15h）；
+     * 末页：现有 multi-plane program（80h-11h-80h-10h），tLPROG 等整批完成。 */
+    for (uint16_t page = 0U; page < (uint16_t)(PAGES_PER_BLOCK - 1U); page++)
+    {
+        fc_command_status_t completion;
+
+        conf           = *config;
+        conf.operation = (DWORD)OP_TWO_PLANE_PROGRAM_CACHE;
+
+        completion = test_prog_page(block_index, TEST_PLANE_BM_ALL, page, &conf, NULL);
+
+        munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+    }
+
+    {
+        fc_command_status_t completion;
+
+        conf           = *config;
+        conf.operation = (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE;
+
+        completion = test_prog_page(block_index, TEST_PLANE_BM_ALL, (uint16_t)(PAGES_PER_BLOCK - 1U), &conf, NULL);
+        munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+    }
+
+    test_trace_summary("multi-plane cache prog block=%u: %u x 80h-11h-80h-15h + 1 x 80h-11h-80h-10h = %u pairs",
+                       (unsigned)block_index,
+                       (unsigned)(PAGES_PER_BLOCK - 1U),
+                       (unsigned)PAGES_PER_BLOCK);
+
+    if (data != NULL)
+    {
+        *data = g_source_data;
+    }
+}
+
+/* cache 读的一步（SEQ/SEQ_MP/LAST/LAST_MP）：建链 → 预填 0xCC → 提交 → 轮询 →
+ * 拷回 → 释放。output_page 是**本步真正输出的页**（单/双 plane 同页号）；
+ * 31h/3Fh 本身无地址周期，但 desc 的 PAA 行地址要取 output_page：双 plane 的
+ * 06h-E0h 要按行地址里的 plane 位选 cache register，页地址也保持与实际输出页一致。
+ * meta 仍取 output_page 的 PBA（真正输出的那页）。
+ * plane_bitmap == TEST_PLANE_BM_ALL 时 test_cmd_build 按 multi-plane op 展开两 plane；
+ * scatter 由 NAND 侧按 plane*PAGE_SIZE 完成。 */
 static fc_command_status_t test_read_cache_step(uint16_t block_index, uint8_t plane_bitmap, uint16_t output_page, const fc_cmd_conf_t *config)
 {
+    nand_addr_t         addr = {.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)output_page};
     fc_command_t       *cmd;
     fc_command_status_t completion;
 
-    cmd = test_cmd_build(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = 0U},
+    cmd = test_cmd_build(&addr,
                          test_plane_cw_bitmap(plane_bitmap),
-                         (uint32_t)pba_from_addr(&(nand_addr_t){.block = block_index,
-                                                                .plane = test_first_plane(plane_bitmap),
-                                                                .page  = output_page}),
+                         (uint32_t)pba_from_addr(&addr),
                          config);
 
     test_memset_read_buffer(cmd);
@@ -633,29 +681,37 @@ static fc_command_status_t test_read_cache_step(uint16_t block_index, uint8_t pl
     return completion;
 }
 
-/* cache 读的武装步（START，00h-addr-30h）：把 page 载入 cache 寄存器，**不输出数据**。
- *
- * NAND 侧数据阶段是 req_no_data、FC 侧 OP_READ_PAGE_CACHE_START 不在 fc_is_page_read
- * 里 ⇒ 不跑 process_read、不拷回、meta 不参与（无 encode / 无 Pass 4）。
- * ⚠ 但它**必须建链**：g_nand_operation_map 里它的 has_data = 1U（「加载型」也算占数据
- * 路径，与 WITHOUT_DATA_OUT 同口径），而 fc_command_validate 断言「has_data ⇒ desc_id 有效」。
- * 所以 cw_bitmap 不能传 0——v27 起 0 是**空集**（不是"整段"），ftl_cmd_resolve_cw_bitmap
- * 会当场 ASSERT。传本 plane 段的全位图，与写路径同口径；meta 仍给本页 PBA，
- * 保持「meta 恒为页 PBA」这条无例外（值本身被忽略）。 */
-static void test_cache_start(uint16_t block_index, uint8_t plane_bitmap, uint16_t page, const fc_cmd_conf_t *config)
+/* cache 读的启动 + 第一页输出（START_SEQ / START_SEQ_MP）：
+ * 00h-addr-30h → tR → 31h → tRCBSY → DATA_OUT（双 plane 再补 06h P1 + DATA_OUT）。
+ * 输出页 == 下发地址页；后续页由 SEQ/SEQ_MP 输出，末页由 LAST/LAST_MP 输出。
+ * meta 取**本页** PBA。 */
+static fc_command_status_t test_cache_start_seq(uint16_t block_index, uint8_t plane_bitmap, uint16_t page, DWORD operation, const fc_cmd_conf_t *config)
 {
     nand_addr_t         addr = {.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)page};
     fc_cmd_conf_t       conf = *config;
     fc_command_t       *cmd;
     fc_command_status_t completion;
 
-    conf.operation = (DWORD)OP_READ_PAGE_CACHE_START;
+    conf.operation = operation;
 
     cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&addr), &conf);
 
+    test_memset_read_buffer(cmd);
+
     completion = test_submit_wait(cmd);
-    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+
+    test_capture_cmd(cmd);
+
+    test_trace_detail("cache start p%02u op=%u declared_meta=0x%08lX bm=0x%02X cw=%u status=0x%X",
+                      (unsigned)page,
+                      (unsigned)operation,
+                      (unsigned long)pba_from_addr(&addr),
+                      (unsigned)plane_bitmap,
+                      (unsigned)test_cw_count(cmd),
+                      (unsigned)completion.status);
+
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
+    return completion;
 }
 
 /* 「输出页 == 声明的 meta」的自描述断言（v48）。
@@ -674,39 +730,37 @@ static void test_assert_read_meta(const fc_command_t *cmd, uint16_t block_index,
 
 void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data)
 {
-    fc_cmd_conf_t conf;
+    fc_cmd_conf_t       conf;
+    fc_command_status_t completion;
 
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
     ASSERT((plane_bitmap & (uint8_t)~TEST_PLANE_BM_ALL) == 0U);
-    /* cache 读只有单 plane 变体（ONFI 无 multi-plane cache 读）⇒ 段必须恰好一个 plane。 */
+    /* 单 plane cache 读：段必须恰好一个 plane。 */
     ASSERT(test_plane_count(plane_bitmap) == 1U);
     ASSERT(block_index < BLOCKS_PER_PLANE);
 
-    /* ① START（00h-addr-30h）：把 page 0 载入 cache，**不输出数据**。
-     *    细节与「为什么必须建链」见 test_cache_start。 */
-    test_cache_start(block_index, plane_bitmap, 0U, config);
+    /* ① START_SEQ（00h-addr-30h + 31h）：输出 page 0，并预取 page 1。 */
+    completion = test_cache_start_seq(block_index, plane_bitmap, 0U, (DWORD)OP_READ_PAGE_CACHE_START_SEQ, config);
+    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+    test_verify_page_paa(g_source_data, block_index, 0U, plane_bitmap);
 
-    /* ② SEQ（31h）：无地址周期，设备自动递增；**输出的是上一轮加载的页**。
-     *    第 i 次 SEQ（i = 1..PAGES_PER_BLOCK-1）输出 page i-1、同时把 page i 载入 cache
-     *    ⇒ meta 必须取 page i-1 的 PBA，否则 Pass 4 ② 拿「输出页的 META」对「加载页的 PBA」当场报错。 */
+    /* ② SEQ（31h）：第 i 次输出 page i、预取 page i+1；
+     *    最后一次 SEQ 输出 page PAGES-2、预取 page PAGES-1，留给 LAST。 */
     conf           = *config;
     conf.operation = (DWORD)OP_READ_PAGE_CACHE_SEQ;
 
-    for (uint16_t page = 1U; page < PAGES_PER_BLOCK; page++)
+    for (uint16_t page = 1U; page < (uint16_t)(PAGES_PER_BLOCK - 1U); page++)
     {
-        uint16_t            out_page   = (uint16_t)(page - 1U);
-        fc_command_status_t completion = test_read_cache_step(block_index, plane_bitmap, out_page, &conf);
+        completion = test_read_cache_step(block_index, plane_bitmap, page, &conf);
 
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
-        test_verify_page_paa(g_source_data, block_index, out_page, plane_bitmap);
+        test_verify_page_paa(g_source_data, block_index, page, plane_bitmap);
     }
 
-    /* ③ LAST（3Fh）：无地址周期，输出 cache 里最后一页（PAGES_PER_BLOCK-1）。
-     *    第 ② 步最后一次 SEQ 已把它载入，故此处不再有「载入」——纯输出收尾。 */
+    /* ③ LAST（3Fh）：输出 data register 里的最后一页（PAGES_PER_BLOCK-1）。 */
     {
-        uint16_t            last_page = (uint16_t)(PAGES_PER_BLOCK - 1U);
-        fc_command_status_t completion;
+        const uint16_t last_page = (uint16_t)(PAGES_PER_BLOCK - 1U);
 
         conf.operation = (DWORD)OP_READ_PAGE_CACHE_LAST;
 
@@ -716,13 +770,59 @@ void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_
         test_verify_page_paa(g_source_data, block_index, last_page, plane_bitmap);
     }
 
-    /* 证据摘要（--log-visible info）：START + (N-1) 次 SEQ + LAST 共 N+1 条命令，
-     * 输出 N 页并逐页校验。裸 [ OK ] 看不出序列真走了这么多步。 */
-    test_trace_summary("cache read block=%u bm=0x%02X: START + %u SEQ + LAST = %u commands, %u pages PAA-verified", (unsigned)block_index, (unsigned)plane_bitmap, (unsigned)(PAGES_PER_BLOCK - 1U), (unsigned)(PAGES_PER_BLOCK + 1U), (unsigned)PAGES_PER_BLOCK);
+    /* 证据摘要（--log-visible info）：START_SEQ + (N-2) 次 SEQ + LAST 共 N 条命令。 */
+    test_trace_summary("cache read block=%u bm=0x%02X: START_SEQ + %u SEQ + LAST = %u commands, %u pages PAA-verified", (unsigned)block_index, (unsigned)plane_bitmap, (unsigned)(PAGES_PER_BLOCK - 2U), (unsigned)PAGES_PER_BLOCK, (unsigned)PAGES_PER_BLOCK);
 
     if (data != NULL)
     {
         *data = g_source_data; /* 最后一页（PAGES_PER_BLOCK-1）的明文 */
+    }
+}
+
+void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t *config, uint8_t **data)
+{
+    fc_cmd_conf_t       conf;
+    fc_command_status_t completion;
+
+    ASSERT(config != NULL);
+    ASSERT(block_index < BLOCKS_PER_PLANE);
+
+    /* ① START_SEQ_MP：输出 page0 pair，预取 page1 pair */
+    completion = test_cache_start_seq(block_index, TEST_PLANE_BM_ALL, 0U, (DWORD)OP_READ_PAGE_CACHE_START_SEQ_MP, config);
+    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+    test_verify_page_paa(g_source_data, block_index, 0U, TEST_PLANE_BM_ALL);
+
+    /* ② SEQ_MP：输出 page1..page62（每步两 plane 都校验） */
+    conf           = *config;
+    conf.operation = (DWORD)OP_READ_PAGE_CACHE_SEQ_MP;
+
+    for (uint16_t page = 1U; page < (uint16_t)(PAGES_PER_BLOCK - 1U); page++)
+    {
+        completion = test_read_cache_step(block_index, TEST_PLANE_BM_ALL, page, &conf);
+
+        munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+        test_verify_page_paa(g_source_data, block_index, page, TEST_PLANE_BM_ALL);
+    }
+
+    /* ③ LAST_MP：输出 page63 pair */
+    {
+        const uint16_t last_page = (uint16_t)(PAGES_PER_BLOCK - 1U);
+
+        conf.operation = (DWORD)OP_READ_PAGE_CACHE_LAST_MP;
+
+        completion = test_read_cache_step(block_index, TEST_PLANE_BM_ALL, last_page, &conf);
+        munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+        test_verify_page_paa(g_source_data, block_index, last_page, TEST_PLANE_BM_ALL);
+    }
+
+    test_trace_summary("multi-plane cache read block=%u: START_SEQ_MP + %u SEQ_MP + LAST_MP = %u commands, both planes PAA-verified",
+                       (unsigned)block_index,
+                       (unsigned)(PAGES_PER_BLOCK - 2U),
+                       (unsigned)PAGES_PER_BLOCK);
+
+    if (data != NULL)
+    {
+        *data = g_source_data;
     }
 }
 
@@ -732,62 +832,58 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
     nand_addr_t         addr;
     fc_command_t       *cmd;
     fc_command_status_t completion;
+    const uint16_t      prefetched = (uint16_t)(prev_page + 1U);
 
     ASSERT(config != NULL);
     ASSERT(plane_bitmap != 0U);
     ASSERT((plane_bitmap & (uint8_t)~TEST_PLANE_BM_ALL) == 0U);
-    /* cache 读只有单 plane 变体（ONFI 无 multi-plane cache 读）⇒ 段必须恰好一个 plane。 */
+    /* 单 plane cache 读：段必须恰好一个 plane。 */
     ASSERT(test_plane_count(plane_bitmap) == 1U);
     ASSERT(block_index < BLOCKS_PER_PLANE);
     ASSERT(prev_page < PAGES_PER_BLOCK);
     ASSERT(addr_page < PAGES_PER_BLOCK);
-    /* 手册：cache 读不能跨块边界 ⇒ 后两步还要取 prev/addr 的下一页。 */
-    ASSERT(prev_page != (uint16_t)(PAGES_PER_BLOCK - 1U));
-    ASSERT(addr_page != (uint16_t)(PAGES_PER_BLOCK - 1U));
+    ASSERT(prefetched < PAGES_PER_BLOCK);
+    ASSERT((uint16_t)(addr_page + 1U) < PAGES_PER_BLOCK);
+    /* START_SEQ 已预取 prev+1；RANDOM 的地址页若要和新输出区分，不能等于 prev+1。 */
+    ASSERT(addr_page != prefetched);
 
-    /* ⚠ 本 op 的语义（v48 按手册订正；v44 的理解是错的）：
-     *   READ PAGE CACHE RANDOM (00h-addr-31h) ——「reads the specified block and page
-     *   **into the data register** while the **previous page is output from the cache
-     *   register**」⇒ **地址页只进 data register（预取），当场输出的是 cache 里的上一页**，
-     *   即「输出页 ≠ 地址页」；且该命令**必须在 00h-30h 或 00h-31h 之后**下发
-     *   （die 地址须与前一命令一致）⇒ 它等价于「带显式下一页地址的 31h」，不能当独立入口用。
-     *
-     * 故本夹具自建一段最小管线，把语义逐条钉死：
-     *   ① START(prev_page)      00h P 30h → cache = P，不输出
-     *   ② RANDOM(addr_page)     00h Q 31h → **输出 P**；Q 进 data register
-     *   ③ SEQ(31h)                         → **输出 Q**（这一步才证明地址页真的生效）
-     *   ④ LAST(3Fh)                        → 输出 Q+1 并收尾（不留活动管线）
-     * ②③ 的 meta 都取「真正输出的那一页」的 PBA——与 test_read_cache_step 同口径。 */
+    /* 语义（按 MT29F4G08 datasheet）：
+     *   START_SEQ(prev) -> 输出 prev，data=prev+1
+     *   RANDOM(addr)    -> 输出 prev+1（上一轮 data register 的页），data=addr
+     *   SEQ(31h)        -> 输出 addr，data=addr+1
+     *   LAST(3Fh)       -> 输出 addr+1
+     * 地址页只进 data register，输出始终落后一页。 */
 
-    /* ① 武装管线 */
-    test_cache_start(block_index, plane_bitmap, prev_page, config);
+    /* ① START_SEQ：输出 prev，预取 prev+1 */
+    completion = test_cache_start_seq(block_index, plane_bitmap, prev_page, (DWORD)OP_READ_PAGE_CACHE_START_SEQ, config);
+    munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
+    test_verify_page_paa(g_source_data, block_index, prev_page, plane_bitmap);
 
-    /* ② 随机跳页：命令地址 = addr_page，但**输出的是 prev_page** */
+    /* ② RANDOM(addr)：输出 prev+1，预取 addr */
     addr           = (nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = (uint8_t)addr_page};
     conf           = *config;
     conf.operation = (DWORD)OP_READ_PAGE_CACHE_RANDOM;
 
-    cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = prev_page}), &conf);
+    cmd = test_cmd_build(&addr, test_plane_cw_bitmap(plane_bitmap), (uint32_t)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = prefetched}), &conf);
 
     test_memset_read_buffer(cmd);
-
     completion = test_submit_wait(cmd);
-
-    /* FC 已跑过 process_read（原地解码），此刻 desc 的 USER 区是明文。 */
     test_capture_cmd(cmd);
 
-    /* 证据明细（--log-visible debug）：本 op 是**唯一**一条「命令地址 ≠ 输出页」的
-     * cache 命令——地址打 addr_page、期望输出打 prev_page，一行里看出两者不是一回事。 */
-    test_trace_detail("cache random addr=p%02u -> out=p%02u declared_meta=0x%08lX bm=0x%02X cw=%u status=0x%X", (unsigned)addr_page, (unsigned)prev_page, (unsigned long)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = prev_page}), (unsigned)plane_bitmap, (unsigned)test_cw_count(cmd), (unsigned)completion.status);
+    test_trace_detail("cache random addr=p%02u -> out=p%02u declared_meta=0x%08lX bm=0x%02X cw=%u status=0x%X",
+                      (unsigned)addr_page,
+                      (unsigned)prefetched,
+                      (unsigned long)pba_from_addr(&(nand_addr_t){.block = block_index, .plane = test_first_plane(plane_bitmap), .page = prefetched}),
+                      (unsigned)plane_bitmap,
+                      (unsigned)test_cw_count(cmd),
+                      (unsigned)completion.status);
 
-    /* 自描述断言在前：万一语义还有偏差，失败信息里直接给出**实际读回了哪一页**。 */
-    test_assert_read_meta(cmd, block_index, plane_bitmap, prev_page);
+    test_assert_read_meta(cmd, block_index, plane_bitmap, prefetched);
     munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
-    test_verify_page_paa(g_source_data, block_index, prev_page, plane_bitmap);
-
+    test_verify_page_paa(g_source_data, block_index, prefetched, plane_bitmap);
     munit_assert_int(fc_command_release(cmd), ==, FC_STATUS_OK);
 
-    /* ③ SEQ(31h)：输出 ② 预取的 addr_page——证「地址真的被载入」 */
+    /* ③ SEQ(31h)：输出 RANDOM 预取的 addr，预取 addr+1 */
     conf           = *config;
     conf.operation = (DWORD)OP_READ_PAGE_CACHE_SEQ;
 
@@ -795,7 +891,7 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
     munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);
     test_verify_page_paa(g_source_data, block_index, addr_page, plane_bitmap);
 
-    /* ④ LAST(3Fh)：收尾（与 Phase 2 同款），顺手把 ③ 预取的下一页也验掉。 */
+    /* ④ LAST(3Fh)：输出 addr+1 */
     {
         const uint16_t next_page = (uint16_t)(addr_page + 1U);
 
@@ -806,7 +902,15 @@ void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t
         test_verify_page_paa(g_source_data, block_index, next_page, plane_bitmap);
     }
 
-    test_trace_summary("cache random block=%u bm=0x%02X: START(p%02u) -> 00h-addr(p%02u)-31h out=p%02u -> 31h out=p%02u -> 3Fh out=p%02u, %u pages PAA-verified", (unsigned)block_index, (unsigned)plane_bitmap, (unsigned)prev_page, (unsigned)addr_page, (unsigned)prev_page, (unsigned)addr_page, (unsigned)(addr_page + 1U), 3U);
+    test_trace_summary("cache random block=%u bm=0x%02X: START_SEQ(p%02u) out=p%02u -> RANDOM(addr=p%02u) out=p%02u -> 31h out=p%02u -> 3Fh out=p%02u, 4 pages PAA-verified",
+                       (unsigned)block_index,
+                       (unsigned)plane_bitmap,
+                       (unsigned)prev_page,
+                       (unsigned)prev_page,
+                       (unsigned)addr_page,
+                       (unsigned)prefetched,
+                       (unsigned)addr_page,
+                       (unsigned)(addr_page + 1U));
 }
 
 /**************************************************************************

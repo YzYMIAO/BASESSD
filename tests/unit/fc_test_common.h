@@ -264,54 +264,56 @@ fc_command_status_t test_read_page(uint16_t block_index, uint8_t plane_bitmap, u
 void test_prog_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
 void test_read_block(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
 
-/* ── cache 整块读写（ONFI cache 序列）──
- * **只有单 plane 变体** ⇒ plane_bitmap 必须恰好一个 plane。依据分两层，别混：
- *   · **ONFI 1.0 根本没有 multi-plane**——Rev 1.0 Table 14 命令集里 cache 只有单 plane 的
- *     `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program`
- *     80h-15h；全文 `plane` 一词出现 **0 次**（1.0 唯一的"多设备"是 multiple LUN，走 D1h / 11h 的
- *     `Interleaved`）。multi-plane 是器件/后续修订版才有的。
- *   · **本器件（Micron MT29F4G08）确实有 two-plane cache 编程**——datasheet Table 7
- *     `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`；但**没有 two-plane cache 读**
- *     （读侧只有单 plane 31h / 3Fh）。
- * 本项目 op 表两种都没有 ⇒ 本 helper 只做单 plane。⚠ 别把「ONFI 1.0 没有」和「器件没有」当同一句。
- * config 只提供模式位（crc / random / ldpc / …）；**operation 被逐步覆盖**，调用者填什么都被忽略。
+/* ── cache 整块读写（ONFI cache + 器件 two-plane 扩展）──
+ * 两层依据别混：
+ *   · **ONFI 1.0 根本没有 multi-plane**——Table 14 只有单 plane 的
+ *     `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h /
+ *     `Page Cache Program` 80h-15h。
+ *   · **本器件 MT29F4G08 有 two-plane cache 读和写**：
+ *     - Figure 74 `80h-11h-80h-15h`（中间页）+ `80h-11h-80h-10h`（末页）；
+ *     - Two-Plane Read Cache：`00h-00h-30h` + `31h/3Fh`，用 `06h-E0h` 选 plane 输出。
+ *   单 plane helper 要求 plane_bitmap 恰好一个 plane；multi-plane helper 固定
+ *   TEST_PLANE_BM_ALL。
  *
- * test_prog_block_cache：前 PAGES_PER_BLOCK-1 页 OP_PROGRAM_PAGE_CACHE（80h-addr-data-15h），
- *   末页 OP_NORMAL_PROGRAM_PAGE（10h）收尾——15h 编的是 cache 寄存器里的当前内容，没有末页的
- *   10h 就没有最后一页真正落盘。meta 与普通写同口径（= 本页 PBA）。
+ * 单 plane 顺序：
+ *   START_SEQ(p0) -> 输出 p0、data=p1；
+ *   SEQ ×(N-2)    -> 输出 p1..pN-2；
+ *   LAST          -> 输出 pN-1。
+ *   共 N 条命令输出 N 页（START_SEQ 已含第一条 31h）。
  *
- * test_read_block_cache：**不能**由 test_read_page 循环拼出——31h / 3Fh 无地址周期（设备自增），
- *   且 31h 输出的是**上一轮加载的页**，「命令地址 = 页、校验该页」的模型在此结构性不成立。
- *   故显式编排 START(p0) → SEQ ×(PAGES_PER_BLOCK-1) → LAST：
- *     · START（00h-addr-30h）把 page 0 载入 cache，**不输出数据**（FC 不跑 process_read），
- *       但 op 表里 has_data = 1U ⇒ **仍要建链**（cw_bitmap = 本 plane 段全位图，不能传 0）；
- *     · 第 i 次 SEQ（i = 1..PAGES_PER_BLOCK-1）输出 page i-1、同时载入 page i ⇒ meta 取
- *       **page i-1 的 PBA**（真正输出的那页）；命令地址页号对设备无意义，传 0；
- *     · LAST（3Fh）输出 cache 里最后一页（PAGES_PER_BLOCK-1）。
- *   共 65 条命令输出 64 页。`data` 收尾指向最后一页的明文。
+ * 双 plane 顺序：
+ *   START_SEQ_MP(p0) -> 输出 pair0；
+ *   SEQ_MP ×(N-2)    -> 输出 pair1..pairN-2；
+ *   LAST_MP          -> 输出 pairN-1。
+ *   每条输出命令内部用 `06h P0 E0h` / `06h P1 E0h` 分别选两个 plane 的 cache register。
+ *
+ * test_prog_block_cache：单 plane：前 N-1 页 OP_PROGRAM_PAGE_CACHE（80h-15h），
+ *   末页 OP_NORMAL_PROGRAM_PAGE（10h）。
+ * test_prog_block_cache_multi_plane：双 plane：前 N-1 页 OP_TWO_PLANE_PROGRAM_CACHE
+ *   （80h-11h-80h-15h），末页 OP_PROGRAM_PAGE_MULTI_PLANE（80h-11h-80h-10h）。
+ *   末页的 10h 是 batch 结束判据（tLPROG），不是可选的“排空”。
  *
  * 两者都是**同步**的（逐条 submit → 轮询 → 释放）⇒ cache 的流水线收益在本夹具里测不到；
  * 这里验的是**数据正确性**：cache 命令序列走得通、META / CRC / 加扰 / ECC 全程不串。 */
 void test_prog_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
 void test_read_block_cache(uint16_t block_index, uint8_t plane_bitmap, const fc_cmd_conf_t *config, uint8_t **data);
+void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t *config, uint8_t **data);
+void test_read_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t *config, uint8_t **data);
 
 /* test_read_cache_random：cache 读的「随机跳页」入口——OP_READ_PAGE_CACHE_RANDOM（00h-addr-31h）。
  *
- *   ⚠ **语义（v48 按手册订正）**：手册原文是「reads the specified block and page **into the
- *   data register** while the **previous page is output from the cache register**」⇒
- *   **地址页只进 data register（预取），当场输出的是 cache 寄存器里的「上一页」**，
- *   即 **输出页 ≠ 地址页**；且该命令**必须在 00h-30h 或 00h-31h 之后**下发（die 地址须与
- *   前一命令一致）⇒ 它等价于「带显式下一页地址的 31h」，**不能当独立入口单发**。
- *   （v44 曾按「载入 + 输出合一、输出页 = 地址页」理解，上板当场 MATA_ERROR——已证伪。）
+ *   手册原文：「reads the specified block and page **into the data register** while the
+ *   **previous page is output from the cache register**」⇒ 地址页只进 data register（预取），
+ *   当场输出 cache 里的上一页；命令必须在 00h-30h/00h-31h 之后下发。
  *
- *   故本函数自建一段最小管线，把语义逐条钉死：
- *     ① START(prev_page)   00h P 30h → cache = P，不输出
- *     ② RANDOM(addr_page)  00h Q 31h → **输出 P**；Q 进 data register
- *     ③ SEQ(31h)                     → **输出 Q**（这一步才证「地址页真的生效」）
- *     ④ LAST(3Fh)                    → 输出 Q+1 并收尾
- *   prev_page / addr_page 都不得是块尾（手册：cache 读不能跨块边界）。
- *   ② 的 meta 取 **prev_page** 的 PBA；FC 侧本 op 在 fc_is_page_read 里（`fc.c:125`）
- *   ⇒ 走 process_read，USER 区回来即明文，逐页 PAA 校验。 */
+ *   本夹具的管线（START_SEQ 已含 31h）：
+ *     ① START_SEQ(prev)   输出 prev、data=prev+1
+ *     ② RANDOM(addr)      输出 prev+1、data=addr
+ *     ③ SEQ(31h)          输出 addr、data=addr+1
+ *     ④ LAST(3Fh)         输出 addr+1
+ *   prev_page / addr_page 都不得是块尾；addr 不能等于 prev+1，否则③④会重复。
+ *   ② 的 meta 取 **prev+1** 的 PBA；后续按实际输出页取 meta。
+ *   31h 可以跨 block，但不能跨 die/LUN（datasheet）。 */
 void test_read_cache_random(uint16_t block_index, uint8_t plane_bitmap, uint16_t prev_page, uint16_t addr_page, const fc_cmd_conf_t *config);
 
 /* ── 加载 / 取数两段式（v45） ──

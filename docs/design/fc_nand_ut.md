@@ -273,9 +273,13 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 - **释放**：只需 `fc_command_release()`（v16 起一并回收 desc + buffer）。
 - **ID 断言**：`fc_command_t` 无 `command_id` 字段（v15 删），断言用 `fc_command_to_id(cmd, &expect_id)` 反查。
 - **PAA 约定**：`ch=0 ce=0 lun=0`，page=0..63，plane 0/1；**block / plane 在用例体内随机抽**（见下「随机地址与种子」节，窗口 = 每 plane 块数的 30%~70% ⇒ `614..1433`；内部搬移的目标块同窗口另抽，`src ≠ dest`）。
-- **cache 的 plane 边界**（决定 helper 为什么只做单 plane，两层依据别混）：**ONFI 1.0 根本没有 multi-plane**——Rev 1.0 Table 14 命令集里 cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，全文 `plane` 一词出现 **0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。而**本器件（Micron MT29F4G08）确实有 two-plane cache 编程**——datasheet Table 7 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`；但**没有 two-plane cache 读**（读侧只有单 plane 31h / 3Fh）。本项目 op 表两种都没有 ⇒ helper 只做单 plane。
-- **cache 整块读写**：夹具新增 `test_prog_block_cache()` / `test_read_block_cache()`（**单 plane**——依据见上「cache 的 plane 边界」；`config` 只提供模式位，`operation` 由 helper 逐步覆盖，调用者填什么都被忽略）。写侧前 63 页 `OP_PROGRAM_PAGE_CACHE`（15h）、末页 `OP_NORMAL_PROGRAM_PAGE`（10h）收尾。读侧**不能**由 `test_read_page` 循环拼出——31h / 3Fh 无地址周期（设备自增），且 31h 输出的是**上一轮加载的页**，故 helper 显式编排 `START(p0) → SEQ ×63 → LAST`，`meta` 取**真正输出页**的 PBA（第 i 次 SEQ 取 page i-1 的 PBA）；共 65 条命令输出 64 页。两者都是同步逐条提交 ⇒ 只验数据正确性（cache 命令序列走得通、编码管线不串），**不验流水线收益**。
-- **cache 读随机跳页（v1.26 加、v1.30 订正语义）**：`test_read_cache_random(block, plane_bitmap, prev_page, addr_page, config)` 覆盖 cache 管线的**跳页入口** `OP_READ_PAGE_CACHE_RANDOM`（00h-addr-31h，带 5 个地址周期）。⚠ **v1.26 的语义理解是错的**（当成「载入 + 输出合一、输出页 = 地址页」，上板当场 `MATA_ERROR` 被证伪）。手册原文：*reads the specified block and page **into the data register** while the **previous page is output from the cache register*** ⇒ **地址页只进 data register（预取），当场输出的是 cache 寄存器里的「上一页」**，地址页要等**下一次 31h** 才出；且该命令**必须在 00h-30h 或 00h-31h 之后**下发（die 地址须与前一命令一致）⇒ 它等价于「带显式下一页地址的 31h」，**不能当独立入口单发**。故 helper 自建最小管线：`START(prev_page)` → `RANDOM(addr_page)`（**输出 prev_page**，`meta` 取 prev_page 的 PBA）→ `SEQ(31h)`（**输出 addr_page**，这一步才证「地址真的生效」）→ `LAST(3Fh)`（输出 addr_page+1 并收尾）；`prev_page` / `addr_page` 都不得是块尾（手册：cache 读不能跨块边界）。FC 侧本 op 在 `fc_is_page_read` 里（`src/fc/fc.c:125`）⇒ 走 `process_read`；NAND 侧 `req_cache_read` + `completion_per_cw`，数据散落在页缓冲（`nand_dispatch.c:662` 显式列出本 op）。`block_cache_ops` Phase 3 用它从 page 16 跳到 page 32。
+- **cache 的 plane 边界**（两层依据别混）：**ONFI 1.0 根本没有 multi-plane**——Rev 1.0 Table 14 命令集里 cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，全文 `plane` 一词出现 **0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。而**本器件（Micron MT29F4G08）有 two-plane cache 读和写**：
+  - 写：datasheet Figure 74 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`，末页 `80h-11h-80h-10h`；
+  - 读：p.62–63 `00h-00h-30h` + `31h/3Fh`，用 `06h-E0h` 选 P0/P1 输出。
+  单 plane helper 只覆盖 ONFI 单 plane；双 plane 由 `test_prog_block_cache_multi_plane` / `test_read_block_cache_multi_plane` 覆盖。
+- **cache 整块读写（单 plane）**：`test_prog_block_cache()` / `test_read_block_cache()`（`config` 只提供模式位，`operation` 由 helper 逐步覆盖）。写侧前 63 页 `OP_PROGRAM_PAGE_CACHE`（15h）、末页 `OP_NORMAL_PROGRAM_PAGE`（10h）收尾。读侧 `START_SEQ(p0) → 31h ×62 → LAST`，`START_SEQ` 已含第一条 `31h` 并输出 page0；共 **64 条命令输出 64 页**。两者同步逐条提交 ⇒ 只验数据正确性，不验流水线收益。
+- **cache 整块读写（双 plane，器件扩展）**：`test_prog_block_cache_multi_plane()` / `test_read_block_cache_multi_plane()`。写侧 page0..62 用 `OP_TWO_PLANE_PROGRAM_CACHE`（`80h-11h-80h-15h`），末页用 `OP_PROGRAM_PAGE_MULTI_PLANE`（`80h-11h-80h-10h`）收尾。读侧 `START_SEQ_MP(page0) → SEQ_MP ×62 → LAST_MP(page63)`；每条输出命令内部用 `06h P0 E0h` / `06h P1 E0h` 分别选两个 plane 的 cache register，逐 plane/逐 CW 校验 PAA pattern。新用例 `block_cache_multi_plane`。
+- **cache 读随机跳页（v1.26 加、v1.30 订正语义）**：`test_read_cache_random()` 覆盖 `OP_READ_PAGE_CACHE_RANDOM`（00h-addr-31h）。手册原文：*reads the specified block and page **into the data register** while the **previous page is output from the cache register*** ⇒ 地址页只进 data register（预取），当场输出 cache 里的上一页。`START_SEQ(prev)` 后：`RANDOM(addr)` 输出 `prev+1`、`SEQ` 输出 `addr`、`LAST` 输出 `addr+1`；`addr` 不能等于 `prev+1`。`31h` 可跨 block，但不能跨 die/LUN（跨 LUN 前用 `3Fh`）。
 - **加载 / 取数两段式（v1.27）**：生产读路径一直是「先加载、再逐 CW 取数」两段——`fc_dispatch_rewrite_operation`（`src/fc/fc.c:1221`）下发前把 `OP_NORMAL_READ_PAGE_WITH_DATA_OUT`(12) 改写成 `OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT`(33)（多 plane：30→29），`nand_dispatch_task_cw_chain`（`src/nand/nand_dispatch.c:574`）再对加载型 op 逐 CW 发取数 op `OP_RANDOM_DATA_READ`(8, 05h-E0h) / `OP_RANDOM_DATA_READ_MULTI_PLANE`(41, 06h-E0h)。**但 op 33/29/8/41 从未作为独立命令被点名过**——它们的 uop 序列、page-read 分类、页缓冲散落全无测试背书。本版把它们**显式拆成两条 FC 命令**下发：`test_load_page()` 发**不带 desc** 的纯加载命令（op 表 `has_data = 0` ⇒ 不需 desc 链、无 CW 位图，只把目标页搬进器件页缓冲、**不输出到总线**），`test_random_data_read()` 再发**带整段掩码 desc 链**的取数命令（单条命令由 CW 链自动遍历掩码内所有 CW）并逐 CW PAA 校验。为支撑这条路径：① op 表 op 33/29 的 `has_data` 由 `1U` 改 `0U`（`src/nand/onfi_1_0.c`）；② `fc_is_page_read` 补 op 41（与 op 8 对称，否则直接下发 41 拿到未解码数据）；③ `fc_build_dispatch_request` 新增「无 desc 加载」分支（op 33/29 从 `command->paa` 填 `plane_paa[]`）；④ `req_read_page` 空掩码时 `data = NULL`（消除残留指针隐患）。⚠ **生产路径零影响**：分支按 FC 命令的 op（12/30）选，op 33/29 只作 rewrite 目标出现；`fc_is_page_read(41)` 在生产里也从不被查（命令 op 恒 30）。⚠ 两段必须**紧邻**——加载与取数是两条独立命令，中间若有别的命令碰器件页缓冲，取数会读到错页。`block_load_fetch` 用它验单 plane（op 33 → op 8）与双 plane（op 29 → op 41）。
 - **META 只读回读（v1.28）**：新增 op `OP_READ_META`（槽位 **11**，原 `OP_READ_MODE` 复用，`OP_COUNT` 保持 42）——**只读**回读指定页、指定 CW 的 **4 字节 META**（CW 布局 `[META:4][CRC:4][USER:512][PARITY:8]`，META 在加扰区之前、**明文**），供上层扫坏块建表。**CW 由 `command->paa` 的 cw 字段选**（PAA 原生含 cw → `plane_paa[]` → `paa_to_cw() * CW_SIZE` 作列地址），**无 desc 链、不占 buffer**（`has_data = 0` ⇒ `ftl_cmd_needs_desc_chain` / `fc_command_validate` 都不要求链）。op 自带页加载（`70h` 轮询 → `00h`+列/行 → `30h` → tR → `DATA_OUT`），uop 复用 `g_nand_normal_read_page_uops`（与普通读页**逐字节相同**），唯一差别是 `request->data_length = 4` ⇒ 只输出 META 四个字节。4 字节落控制器侧暂存 `g_fc_return_staging[command_id]`（与 `OP_GET_FEATURES` **同款**，已在板上跑通），完成时拷进 CQ 的 `fc_param_t param`。**不进 ECC / 数据路径**（op 11 不在 `fc_is_page_read` ⇒ 走非 page-read 分支），**不参与 CW 链**（不是 load/fetch op），**不被 rewrite**（`fc_dispatch_rewrite_operation` 只动 op 12/30）。`block_read_meta` 用它验单 plane：擦除 + 编程后用 `test_read_meta()` 逐 CW 读回，比对 `expected = (prog_cmd->meta & ~PLANE_CW_MASK) | (plane << PBA_PLANE_SHIFT) | cw`（同时验证**页地址**与 **CW 选择**两条轴）。⚠ op 11 **首次上板**；`00h`-addr-`30h` 后只输出 4 字节属**部分页输出**，与 GET_FEATURES 的 4 字节输出同族但作用在页读路径，需上板确认器件接受。
 - **裸页 config**：本文件用 `L3_CONF(operation, crc)` 复合字面量给出「裸页」形态——与改造前 `program_page` / `read_page` / `erase_block` 字段逐字一致（**不加扰** + **LDPC RAW** + **不 RAID**；crc 逐处给，裸页读写沿用池默认的 `FC_CRC_ENABLE`，cache 与 multi-plane 路径显式 `FC_CRC_DISABLE`）。`ch/ce/lun` 由 `test_cmd_build` 从 addr 覆盖，`multi_plane` 由 operation 派生。
@@ -322,7 +326,10 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 
 **`internal_data_move` 的 Step 5 按源坐标比对**：copyback 搬的是源页内容——`READ_FOR_INTERNAL_DATA_MOVE` / `PROGRAM_FOR_INTERNAL_DATA_MOVE` 都**不是** page read/write，数据路径不介入、不重铸 ⇒ 目标页的 USER 仍是**源块坐标**的 PAA。故 Step 5 逐页 `test_read_page(dest, …, tag, …)` + `test_verify_page_paa(g_source_data, src, page, …)`（期望取**源块**），**不能**用 `test_read_block(dest)`——后者按入参 block 重算期望（`fc_test_common.c:644-675`）。数据路径侧照常通过：META 低 3 位 = plane/cw（源/目标同 plane、同 cw 枚举）、META 与命令 meta **同页** ⇒ Pass 4 两项都过；CRC 因 USER 原样搬过而一致。⚠ **v34 起 meta 是页 PBA**：读命令声明的 `tag` 必须是**源页 PBA**——META 存的是「内容的身份」而非「内容现在在哪」，搬移不经过数据路径，源页写入时铸的 PBA 原样跟到了目标块；声明目标页 PBA 反而会被 Pass 4 ② 判成「读到了别的页」。
 
-#### 测试用例（15 个，其中 10 条地址随机化）
+#### 测试用例（16 个，其中 11 条地址随机化）
+
+> **2026-10-23 上板**：`test /fc-nand/` **56/56**（3 skipped，928.61 ms）；
+> `block_cache_ops` 62.16 ms、`block_cache_multi_plane` 114.91 ms，均 OK。
 
 | 测试函数 | 场景 | 验证点 |
 |---|---|---|
@@ -333,7 +340,8 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 | `internal_data_move` | READ_FOR_INTERNAL_DATA_MOVE → PROGRAM_FOR_INTERNAL_DATA_MOVE | 源 block → 目标 block 搬移后 64 页逐字节一致 |
 | `block_erase_verify` | ERASE → 全 0xFF 校验 | 擦除后逐页全 0xFF |
 | `block_write_read` | PROGRAM → READ 全 block | 写读数据一致 |
-| `block_cache_ops` | CACHE_START(p0) → CACHE_SEQ ×63 → CACHE_LAST；+ CACHE_START(p16) → CACHE_RANDOM(p32) → SEQ → LAST | cache 读管线（30h/31h/3Fh）；写侧前 63 页 15h + 末页 10h；Phase 3 用 00h-addr-31h 跳页入口：输出 p16、地址页 p32 在下一步出 |
+| `block_cache_ops` | START_SEQ(p0) → SEQ ×62 → LAST；+ START_SEQ(p16) → RANDOM(p32) → SEQ → LAST | 单 plane cache 读管线（START_SEQ 已含首条 31h）；写侧前 63 页 15h + 末页 10h；RANDOM 输出 p17、地址页 p32 在下一步出 |
+| `block_cache_multi_plane` | MP_ERASE → 63 × TWO_PLANE_PROGRAM_CACHE + MP_PROGRAM → START_SEQ_MP + SEQ_MP ×62 + LAST_MP | 双 plane cache 读写；每条 31h/3Fh 后用 06h P0/P1 分别输出两个 plane；两 plane pattern 独立校验 |
 | `block_multi_plane` | MP_ERASE → MP_PROGRAM → MP_READ | 两 plane 各自 pattern 独立验证（desc 0..3=plane0，4..7=plane1） |
 | `block_random_data` | READ + RANDOM_DATA_READ 抽样 | 抽页集/列集后随机列读，验证列地址解码 |
 | `block_load_fetch` | LOAD(33/29，无 desc) → FETCH(8/41，带 desc) | 加载/取数两段式显式下发：单 plane（33→8）+ 双 plane（29→41）逐 CW PAA 一致 |
@@ -468,7 +476,11 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 | 31 | `OP_PROGRAM_PAGE_MULTI_PLANE` | ❌ | 多 Plane 编程 |
 | 32 | `OP_ERASE_BLOCK_MULTI_PLANE` | ❌ | 多 Plane 擦除 |
 | 33 | `OP_NORMAL_READ_PAGE_WITHOUT_DATA_OUT` | ✅ | 标准读（无数据输出） |
-| 34 | `OP_READ_PAGE_CACHE_START` | ❌ | 缓存读启动（cache 管线） |
+| 34 | `OP_READ_PAGE_CACHE_START_SEQ` | ✅ | 缓存读启动 + 第一页输出（含首条 31h） |
+| 44 | `OP_TWO_PLANE_PROGRAM_CACHE` | ✅ | 双 plane cache 写中间页（80h-11h-80h-15h） |
+| 45 | `OP_READ_PAGE_CACHE_START_SEQ_MP` | ✅ | 双 plane cache 读首 pair |
+| 46 | `OP_READ_PAGE_CACHE_SEQ_MP` | ✅ | 双 plane cache 读顺序 pair |
+| 47 | `OP_READ_PAGE_CACHE_LAST_MP` | ✅ | 双 plane cache 读末 pair |
 | 35 | `OP_READ_PAGE_LOAD` | ❌ | 多 LUN 读 ISSUE 段（Phase V） |
 | 36 | `OP_READ_PAGE_WAIT` | ❌ | 多 LUN 读 WAIT 段（Phase V：tR + 状态，无数据） |
 | 43 | `OP_READ_PAGE_MULTI_PLANE_LOAD` | ❌ | 多 LUN 多 plane 读 LOAD 段（Phase V） |

@@ -41,6 +41,14 @@
 > - **v53 (2026-10-11)**: **命令级 buffer 归属位域 `fc_cmd_conf_t.buf_own : 2`——谁申请 / 谁释放**。用户要一个 2-bit 旋钮表达「这条命令的数据 buffer 由谁申请、由谁归还」，把上层（FTL）频繁的 buffer 申请/释放动作按需**下沉到 FC 层**。编码：**bit1 = 申请方**（0 = FC 申请，1 = 上层申请）、**bit0 = 释放方**（0 = 上层释放，1 = FC 释放），四档 `00` FC申请/上层释放 / `01` FC申请/FC释放 / `10` 上层申请/上层释放 / `11` 上层申请/FC释放。**编码刻意让 `00` = 今天的生产行为**（`fc_cmd_conf_t` 是 32 bit，取原 `reserved : 3` 中的 2 bit 放新字段，命令出池 `(fc_command_t){0}` 清零即得默认 `00`）⇒ **`src/ftl/**` 一行不动**。**机制**：建链机制体改名 `fc_command_configure_descriptor_with_buffer(command, plane, cw, row_paa, buffer_id)`（5 参，上层申请时由调用者 `fc_buffer_alloc()` 后传入），原 4 参入口退化为 `_with_buffer(..., FC_BUFFER_ID_INVALID)` 薄包装（FTL 两个调用点 / RAID parity / 既有单测零改动）；`fc_complete_from_nand` 在 Step 3 组装完 CQ 条目之后、`fc_complete_internal` 之前加 **Step 4**——`buf_own` 释放位 = FC 释放（`01`/`11`）时沿 desc 链归还全部 buffer 并把各 desc 的 `buffer_id` 抹成 `FC_BUFFER_ID_INVALID`（**幂等**：随后的 `fc_command_release` 自然跳过，不双重归还；命令没走到完成就释放则 buffer 仍有效、链释放照常归还 ⇒ 不泄漏）。**释放原语一行不改**（读法 A）：「上层释放」= 上层调 `fc_command_release`，它恒归还链上所有未归还的 buffer，不管谁申请的——`10` 与 `00` 的差别**只在谁调 `fc_buffer_alloc()`**。RAID parity（`#if CONFIG_FC_RAID`，恒关、无法编译验证）补一行 `parity_cmd->config.buf_own = FC_BUF_OWN_FC_ALLOC_FC_FREE`（parity 是 FC 内部命令，不继承 data_cmd 的归属）。用例数 **56 → 57**（Level 3 新增 `buf_own_release`，四档账目闭合 + 空闲链完整性守卫）；`make clean && make tests` 0 warning 0 error、`.bin` **238980 B**（§12.10、§13.3.1；changelog `fc_buf_own_v53.md`）
 > - **2026-10-09（协议查证，非代码版本）**: **multi-plane 不在 ONFI 1.0 里**。逐字读 ONFI 1.0（Rev 1.0, 2006-12-28）Table 14 命令集：cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，**全文 `plane` 一词出现 0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。multi-plane 全部来自器件侧。顺带逐字核对了 Micron「4Gb, 8Gb, and 16Gb x8 NAND Flash Memory」（MT29FxG08xAA, Rev B）的 Table 7 Two-Plane Command Set / §Two-Plane Addressing，并发现两处待办：① 「two-plane 命令族要求 on-die ECC 关闭（Note 4）」的出处对不上（该 PDF 全文无 `on-die`）；② 器件有 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`，本项目 op 表缺此 op（§25.6 前置约束 3、§25.8 风险 2 与风险 8）
 
+> - **2026-10-23（器件扩展 + UT）**: **two-plane cache 读写落地 NAND/FC 层**——新增
+>   `OP_TWO_PLANE_PROGRAM_CACHE`(44)、`OP_READ_PAGE_CACHE_START_SEQ_MP`(45)、
+>   `OP_READ_PAGE_CACHE_SEQ_MP`(46)、`OP_READ_PAGE_CACHE_LAST_MP`(47)；
+>   单 plane `OP_READ_PAGE_CACHE_START`(34) 改为 `START_SEQ`（含首条 `31h`，输出第一页）。
+>   `OP_COUNT` 44→48；新增 `block_cache_multi_plane` UT。**2026-10-23 上板**：`test /fc-nand/`
+>   56/56（3 skipped），`block_cache_ops` / `block_cache_multi_plane` 均 OK。⚠ 本次只到
+>   NAND/FC + UT，FTL batch 与掉电恢复未接；失败注入未验。
+
 目标硬件平台：STM32H743 + MT29F4G08ABADAWP（1 Channel × 1 CE × 1 LUN × 2 Plane × 2048 Block × 64 Page，512 MiB SLC NAND）。
 
 ---
@@ -3313,9 +3321,23 @@ PROGRAM 和 ERASE 不存在"延迟执行"场景，故不分拆。
 | `OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT` | 29 | 70h轮询→00h→C1C2R1R2R3(P0)→00h→C1C2R1R2R3(P1)→30h→tWB→tR→70h轮询→CHECK_FAIL | PAGE_BUFFER_SIZE |
 | `OP_READ_PAGE_MULTI_PLANE_WITH_DATA_OUT` | 30 | 70h轮询→00h→C1C2R1R2R3(P0)→00h→C1C2R1R2R3(P1)→30h→tR→06h→C1C2R1R2R3(P0)→E0h→Dout(P0)→06h→C1C2R1R2R3(P1)→E0h→Dout(P1)→70h轮询→CHECK_FAIL | PAGE_BUFFER_SIZE |
 | `OP_PROGRAM_PAGE_MULTI_PLANE` | 31 | 70h轮询→80h→C1C2R1R2R3(P0)→Din(P0)→**11h→tADL→80h**→C1C2R1R2R3(P1)→Din(P1)→10h→tWB→tPROG→70h轮询→CHECK_FAIL | PAGE_BUFFER_SIZE |
+| `OP_TWO_PLANE_PROGRAM_CACHE` | 44 | 70h轮询→80h→C1C2R1R2R3(P0)→Din(P0)→11h→tADL→80h→C1C2R1R2R3(P1)→Din(P1)→15h→tWB→tCBSY→70h轮询→CHECK_FAIL | PAGE_BUFFER_SIZE |
+| `OP_READ_PAGE_CACHE_START_SEQ_MP` | 45 | 70h轮询→00h(addr P0)→00h(addr P1)→30h→tR→31h→tRCBSY→06h(P0)→E0h→Dout(P0)→06h(P1)→E0h→Dout(P1)→70h轮询→CHECK_FAIL | PAGE_BUFFER_SIZE |
+| `OP_READ_PAGE_CACHE_SEQ_MP` | 46 | 31h→tRCBSY→06h(P0)→E0h→Dout(P0)→06h(P1)→E0h→Dout(P1)→70h轮询→CHECK_FAIL | PAGE_BUFFER_SIZE |
+| `OP_READ_PAGE_CACHE_LAST_MP` | 47 | 3Fh→tRCBSY→06h(P0)→E0h→Dout(P0)→06h(P1)→E0h→Dout(P1)→70h轮询→CHECK_FAIL | PAGE_BUFFER_SIZE |
 | `OP_ERASE_BLOCK_MULTI_PLANE` | 32 | 70h轮询→60h→R1R2R3(P0)→60h→R1R2R3(P1)→D0h→tWB→tBERS→70h轮询→CHECK_FAIL | 0 |
 
-> **Multi-Plane Cache 操作**：MT29F4G08ABADAWP 硬件不支持 Multi-Plane Cache Read/Program，无对应 OP 码。
+> **Two-Plane Cache 操作（器件扩展，非 ONFI 1.0）**：MT29F4G08ABADAWP
+> datasheet Rev. N 明确支持
+> - **Two-Plane Program Page Cache**（Figure 74，p.100–101）：
+>   中间页 `80h-11h-80h-15h`，末页 `80h-11h-80h-10h`；
+> - **Two-Plane Read Cache**（p.62–63）：
+>   `00h-00h-30h` + `31h/3Fh`，用 `06h-E0h` 分别选 P0/P1 的 cache register 输出。
+>
+> 本仓新增的器件扩展 op：`OP_TWO_PLANE_PROGRAM_CACHE`(44)、
+> `OP_READ_PAGE_CACHE_START_SEQ_MP`(45)、`OP_READ_PAGE_CACHE_SEQ_MP`(46)、
+> `OP_READ_PAGE_CACHE_LAST_MP`(47)。OP_COUNT = 48。
+> 单 plane `OP_READ_PAGE_CACHE_START` 已改为 `START_SEQ`（含首条 `31h`，输出第一页）。
 
 ### 17.6 内部搬移 OP 码：片上 Copy-Back
 
@@ -3625,7 +3647,7 @@ LUN 1:                                                   ← FETCH(Dout)
 
 | OP 码 | 接近的企业原语 | 差距 |
 |-------|--------------|------|
-| `OP_READ_PAGE_CACHE_START` | READ_ISSUE | 末尾有 70h 轮询，没做到"发完立即返回" |
+| `OP_READ_PAGE_CACHE_START_SEQ` | READ_ISSUE | 含 30h+tR+31h+DATA_OUT，末尾还有 70h 轮询，没做到"发完立即返回" |
 | `OP_READ_PAGE_WITHOUT_DATA_OUT` | READ_ISSUE | 同上，含 tR + 70h 轮询 |
 | `OP_READ_PAGE_CACHE_SEQ` | READ_FETCH | 结合了 WAIT + FETCH，没拆分 |
 | `OP_NORMAL_READ_PAGE_WITH_DATA_OUT` | 未拆分 | 整条锁住的原子序列 |
@@ -4870,7 +4892,7 @@ plane 与 CW 号都从这一个 `n` 算出，不再有"槽位 → (plane, ordina
 |---|------|------|
 | 1 | **热路径改变（最高）** | 严格统一后，每次整页读多一轮 `70h + 05h-列-E0h + WAIT_READY`（原来 CW0 靠 `00h` 的 DATA_OUT 一次拿到）；多 plane 整页读从 1 条原子事务变成 1 次加载 + `2 × cw_count` 条事务。**必须重新上板验证**。若不可接受，退回方案是「含 CW0 时把 CW0 融进加载」——局部改动 |
 | 2 | **`06h` 的 plane 语义** | 已按 Micron「4Gb, 8Gb, and 16Gb x8 NAND Flash Memory」（**本器件 `MT29F4G08ABADAWP`**，`reference/…/FLASH/MICRON/MT29F4G08ABADAWP.pdf`）**逐字打开核对**（Table 7 Two-Plane Command Set / Table 6 注 / §Two-Plane Addressing）：`06h` 5 地址周期（2 列 + 3 行）✓、plane 由行地址 **BA6** 选择（"The least significant block address bit, BA6, must be different for the two addresses"）✓、`06h` 必须跟在 TWO-PLANE PAGE READ 后（Table 6 注 2："limited to use with the TWO-PLANE PAGE READ command"）✓。⚠ 第 4 项「two-plane 命令族要求 on-die ECC 关闭（**Note 4**）」**未在本 datasheet 对上**——该 PDF 里 Table 6/7 的 Note 4 是"valid during busy … interleaved die operations"，全文 `on-die` 出现 **0 次**；该条出处待重核（疑在 ABADA 专用 datasheet）。**上板未验，on-board 行为仍是最终判据** |
-| 8 | **`multi-plane` 不是 ONFI 1.0 的东西**（2026-10-09 查证） | **ONFI 1.0（Rev 1.0, 2006-12-28）根本没有 multi-plane**：Table 14 命令集里 cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，**全文 `plane` 一词出现 0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。multi-plane 全部来自器件侧（Micron datasheet 的 Table 7 Two-Plane Command Set）。⚠ 因此本文件里凡以「ONFI」泛称 multi-plane 的地方都要写成「器件 / Micron datasheet」，别让读者以为 1.0 里有。**ONFI 版本时间线（2026-10-13 对 ONFI 全集二分查证）**：1.0 / 2.0 / 2.1 / 2.2 全文 `plane` **0 次**；`plane` 首现 **2.3a**；**multi-plane 首成标准 = ONFI 3.2**（§3.1.1 / §6.3 / §6.5 / §6.6）。3.2 §3.1.1 明确要求两 plane **同页地址**（"The page address shall be the same as any other multi-plane operations in the multi-plane command sequence"），§3.1.1.1 则允许块地址位全不同（"No restriction: All block address bits may be different"）——这正是 P2-6（per-plane 独立写指针）**不可实现**的标准级依据（见 `ftl_optimization_plan.md §8.1 P2-6`、`ftl_revision_history.md v0.66`）。**未落地缺口**：本器件有 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`，本项目 op 表**没有**这个 op（cache 编程只有单 plane 的 `OP_PROGRAM_PAGE_CACHE`）；器件**没有** two-plane cache 读 |
+| 8 | **`multi-plane` 不是 ONFI 1.0 的东西**（2026-10-09 查证） | **ONFI 1.0（Rev 1.0, 2006-12-28）根本没有 multi-plane**：Table 14 命令集里 cache 只有单 plane 的 `Read Cache` 31h / `Read Cache End` 3Fh / `Read Cache Enhanced` 00h-31h / `Page Cache Program` 80h-15h，**全文 `plane` 一词出现 0 次**（1.0 唯一的「多设备」是 multiple LUN，走 `Interleaved` D1h / 11h）。multi-plane 全部来自器件侧（Micron datasheet 的 Table 7 Two-Plane Command Set）。⚠ 因此本文件里凡以「ONFI」泛称 multi-plane 的地方都要写成「器件 / Micron datasheet」，别让读者以为 1.0 里有。**ONFI 版本时间线（2026-10-13 对 ONFI 全集二分查证）**：1.0 / 2.0 / 2.1 / 2.2 全文 `plane` **0 次**；`plane` 首现 **2.3a**；**multi-plane 首成标准 = ONFI 3.2**（§3.1.1 / §6.3 / §6.5 / §6.6）。3.2 §3.1.1 明确要求两 plane **同页地址**（"The page address shall be the same as any other multi-plane operations in the multi-plane command sequence"），§3.1.1.1 则允许块地址位全不同（"No restriction: All block address bits may be different"）——这正是 P2-6（per-plane 独立写指针）**不可实现**的标准级依据（见 `ftl_optimization_plan.md §8.1 P2-6`、`ftl_revision_history.md v0.66`）。**已落地（2026-10-23）**：本器件有 `TWO-PLANE PROGRAM PAGE CACHE MODE 80h-11h-80h-15h`（Figure 74）和 **Two-Plane Read Cache**（p.62–63，`00h-00h-30h` + `31h/3Fh` + `06h-E0h`）。旧版本文档曾误写“器件没有 two-plane cache read”，已更正；新增 op44~47（详见 §17.5）。 |
 | 3 | **producer/consumer 索引不一致** | v6 把链槽位与 CW 号解耦后，消费点必须一次改齐；**v9 起两套坐标合一，本条风险随之消失**（见 §25.3 历史注 / §25.11） |
 | 4 | **`LUN_NUM>1` 的 ISSUE/WAIT 拆分** | 转换后的两个加载 op 不再命中 Phase V splittable 拆分，多 LUN 重叠会失效。当前 `LUN_NUM=1` 本就不生效；启用多 LUN 前需重新对齐 |
 | 5 | **`bitmap == 0` 的展开规则（v7 起为最高，v23 重定义，v27 取消重载）** | v7~v22：必须逐 plane 平移，照抄单 plane 的 `(1 << (config.cw+1)) - 1` 只会点亮 plane 0 → 所有 FTL 多 plane 命令当场退化。v23~v26：「0 = 本命令 plane 段内的全部 CW」，与 `config.cw` 解耦，该陷阱消失但引入"两层 0 方向相反"。**v27 起 0 = 空集**（字面位图），整段访问由 `fc_command_plane_span_cw_bitmap()` 显式给出；新风险是「忘填 ⇒ release 下静默空操作」（见 §25.4 v27） |

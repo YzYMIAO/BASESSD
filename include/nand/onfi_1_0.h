@@ -246,15 +246,36 @@
  */
 #define OP_READ_PAGE_CACHE_LAST (15U)
 
-/* OP_READ_PAGE_CACHE_START
+/* OP_READ_PAGE_CACHE_START_SEQ
  * ----------------------------------------------------------------------------------------------
- * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< 30 >~~~~~< 70 >-< Status >
- * Cache 读管线启动：00h-地址-30h 将页加载到 NAND 内部页缓冲，不输出到总线。
- * 数据由后续 READ_PAGE_CACHE_SEQ（31h）被动输出。
- * 语义上等价于 WITHOUT_DATA_OUT，但专用于 Cache 读序列的首条命令。
+ * < 70 >-< Status >-< 00 >-< C1 >-< C2 >-< R1 >-< R2 >-< R3 >-< 30 >~~~~~< 31 >~~~~~< Dout1 >-< Doutn >-< 70 >-< Status >
+ * Cache 读管线启动 + 第一页输出：00h-addr-30h 把地址页读入 cache register，
+ * 随后 31h 输出该页并把下一页读入 data register。
+ * 单 plane 语义：输出页 == 地址页；后续页用 31h，末页用 3Fh。
  * ----------------------------------------------------------------------------------------------
  */
-#define OP_READ_PAGE_CACHE_START (34U)
+#define OP_READ_PAGE_CACHE_START_SEQ (34U)
+
+/* ── 器件扩展：two-plane cache（ONFI 1.0 无 multi-plane；MT29F4G08 datasheet 有）── */
+
+/* OP_TWO_PLANE_PROGRAM_CACHE（Figure 74 中间页）
+ * < 80 >-< addr/data(P0) >-< 11 >-< 80 >-< addr/data(P1) >-< 15 >
+ * 中间页只等 tCBSY；末页必须用 OP_PROGRAM_PAGE_MULTI_PLANE 的 10h 收尾。 */
+#define OP_TWO_PLANE_PROGRAM_CACHE (44U)
+
+/* OP_READ_PAGE_CACHE_START_SEQ_MP（Two-Plane Read Cache 首 pair）
+ * 00h-addr(P0) + 00h-addr(P1) + 30h → 31h → 06h P0 E0h → Dout P0
+ *                                      → 06h P1 E0h → Dout P1
+ * 输出 page0 pair，data register 预取 page1 pair。 */
+#define OP_READ_PAGE_CACHE_START_SEQ_MP (45U)
+
+/* OP_READ_PAGE_CACHE_SEQ_MP（Two-Plane Read Cache 顺序 pair）
+ * 31h → 06h P0 E0h → Dout P0 → 06h P1 E0h → Dout P1 */
+#define OP_READ_PAGE_CACHE_SEQ_MP (46U)
+
+/* OP_READ_PAGE_CACHE_LAST_MP（Two-Plane Read Cache 末 pair）
+ * 3Fh → 06h P0 E0h → Dout P0 → 06h P1 E0h → Dout P1 */
+#define OP_READ_PAGE_CACHE_LAST_MP (47U)
 
 /* ═══ 4. 页写 / Cache 写 / 擦除 / 锁 ═══ */
 
@@ -471,7 +492,7 @@
  */
 #define OP_READ_COLUMN (42U)
 
-#define OP_COUNT (44U) /* 0..43 inclusive */
+#define OP_COUNT (48U) /* 0..47 inclusive */
 
 /* ── Phase V: OP 类型枚举 ── */
 #define OP_TYPE_ATOMIC (0U) /* 原原子 OP 码 */

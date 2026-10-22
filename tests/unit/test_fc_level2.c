@@ -850,7 +850,7 @@ static MunitResult test_ecc_step(const MunitParameter params[], void *data)
     uint8_t             *ref      = test_cw_scratch(1U);
     uint8_t             *inj      = test_cw_scratch(2U); /* 仅 BOUND 用：注入后、解码前的快照 */
     uint8_t              ecc_bits = 0xAAU;
-    fc_status_t          status;
+    fc_status_e          status;
     uint32_t             total;
 
     (void)data;
