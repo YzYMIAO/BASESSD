@@ -8,6 +8,7 @@
 |---|---|
 | `usb_verify.ps1` | 主脚本：`inspect` / `format` / `write` / `check` |
 | `usb_rebuild_mbr.ps1` | 分区表损坏时的恢复：raw 清零前 1MB → 重建 MBR → FAT32 |
+| `measure_io.ps1` | 吞吐定位：采样每个 IO 的大小/延迟/队列深度（只读） |
 
 两个脚本都带完整的 comment-based help，可直接查看：
 
@@ -31,6 +32,30 @@ powershell -NoProfile -File .\usb_verify.ps1 -Step inspect
 
 ⚠ 脚本是 **UTF-8 with BOM**：Windows PowerShell 5.1 读无 BOM 的 UTF-8 中文注释时
 可能把换行吞掉，导致语法错误。编辑脚本后请保持 BOM。
+
+## 吞吐定位（不改固件）
+
+在 H2testw 写入/校验的同时，另开一个普通 PowerShell：
+
+```powershell
+powershell -NoProfile -File .\measure_io.ps1 -Seconds 30
+```
+
+它只读 `Win32_PerfFormattedData_PerfDisk_PhysicalDisk`，输出每个活动采样的
+`Bytes/Transfer`、`Sec/Transfer`、`Transfers/s`、`Queue`。
+
+⚠ **这是文件系统/存储栈的 IO 粒度，不是 USB CBW 的粒度**：H2testw 写 1 MB 文件时，
+Windows 计数器可能显示 `Bytes/Transfer = 1,048,576`，但 USBSTOR 仍会按
+`MaximumTransferLength`（默认约 64 KB）拆分，TinyUSB 再按 `CFG_TUD_MSC_EP_BUFSIZE`
+分块。USB 侧实际分块必须看板端 `info` 的 `[USB] wr chunk` 直方图。
+
+探针能回答的是：
+
+- 每笔**文件系统 IO** 的端到端耗时 `Sec/Transfer`（含缓存/存储栈/USB/设备）；
+- `Queue ≈ 1` ⇒ 应用/BOT 是串行的，没有流水；
+- 应用层是否按 1 MB 还是小块下发。
+
+写入阶段和校验阶段各跑一次，数值分开记录。
 
 ## 步骤
 

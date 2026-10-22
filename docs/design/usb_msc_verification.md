@@ -1,8 +1,9 @@
 # USB MSC U 盘上板验证手册
 
-> 状态：**基础数据面已上板通过（rev30）；2026-10-22 v12 首次全盘 H2testw 通过（历史性突破：415/423 MB 写+校验无错误，读 297 KB/s，`bad=0`）；掉电/吞吐/多分区待测**。
+> 状态：**基础数据面已上板通过（rev30）；2026-10-22 v12 全盘 H2testw 通过（release + 16 KB EP：写 673 KB/s / 读 758 KB/s，415/423 MB 无错误，`bad=0`）；掉电/多分区待测**。
 >
-> 415/423 MB 的差额是 FAT32 元数据（小卷 512 B 簇 + 1 MiB 分区偏移），不是容量算错。
+> 415/423 MB 的差额是 **H2testw 自带的约 2% 安全余量**（用 8 KB 簇格式化后仍是 415），
+> 不是容量算错、也不是文件系统元数据；盘容量以 boot `[CAP]` / `Get-Disk Size` 为准。
 > 目标平台：阿波罗 V2 核心板（STM32H743IIT6 + MT29F4G08 + Type-C USB）。
 > rev30 已确认：Windows `Get-Disk` = 449,839,104 B（429 MiB），FAT 格式化，
 > `usb_verify -Step write/check` 拔插后 `RESULT=PASS`、2KB 块指纹全对。
@@ -22,6 +23,8 @@
 「掉电恢复」混在一次操作里——混在一起时，失败无法归因。
 
 ---
+
+> 吞吐测速方法、实测结果与后续方案：见 [`usb_throughput_optimization.md`](usb_throughput_optimization.md)。
 
 ## 1. 范围
 

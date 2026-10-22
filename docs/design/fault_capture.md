@@ -162,6 +162,11 @@ FPU 扩展帧（S0-S15/FPSCR/保留字）**排在**基本帧（R0-R3,R12,LR,PC,x
 
 `fault_decode_cfsr()` 会把非零位打印成名字，`BFARVALID/MMARVALID` 置位时额外打印 `BFAR`/`MMFAR`。
 
+> ⚠ **PC 落在 `0x5354414A` / `0x5354414B` 是栈哨兵 pattern**（`STACK_GUARD_PATTERN`
+> = `0x5354414B`，"STAK" 的 ASCII），不是代码地址：说明某个保存的 LR / 函数指针
+> 被栈填充值覆盖。已知案例：`stack_guard_init` 用入口 SP 作 `paint_hi`，release `-O2`
+> 下会覆盖自己 `push` 的保存 LR（RISK-PLAT-04；PC 报 `0x5354414A` 是 Thumb 位清零）。
+
 ### 5.4 有界栈扫描
 
 从出错 SP 向上扫 32 个字，落在 Flash 区间 `0x08000000..0x08200000` 的值当作候选返回地址打印（穷人的 backtrace）。

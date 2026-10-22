@@ -10,8 +10,9 @@
  *    OTG_FS_VBUS。打开硬件 VBUS 检测会把引脚复用冲突变成“枚举偶发失败”。
  *    关闭后 DWC2 走 NOVBUSSENS，设备始终认为 VBUS 有效。
  *
- * ⚠ MSC 端点缓冲取 4096B：一次 SCSI READ/WRITE 在 USB 侧按该大小分块，
- *    每块对应 8 个 512B LBA；块越大，主循环里 tud_task() 的切换次数越少。
+ * ⚠ MSC 端点缓冲取 16384B：一次 SCSI READ/WRITE 在 USB 侧按该大小分块。
+ *    4 KB → 16 KB 是为了摊薄「每块一次 FTL 异步完成往返」（BOT 单命令串行时
+ *    每块都要等 async_io_done），不是总线带宽变化；16 KB 对应 32 个 512B LBA。
  *    该缓冲由 TinyUSB 放在 .bss（PIO 从 FIFO 搬运，无 DMA），无需非缓存段。
  */
 
@@ -35,7 +36,7 @@ extern "C"
 #define CFG_TUD_MSC     1
 
 #define CFG_TUD_ENDPOINT0_SIZE 64
-#define CFG_TUD_MSC_EP_BUFSIZE 4096
+#define CFG_TUD_MSC_EP_BUFSIZE 16384
 
 /* USB 事件 FIFO 深度（TinyUSB 默认 16）。
  *

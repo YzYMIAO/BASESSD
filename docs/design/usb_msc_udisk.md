@@ -1,6 +1,6 @@
 # USB MSC U 盘 — 可行性、架构与实施计划
 
-> 状态：**枚举 + 基础数据面已上板通过（rev30）；v12 容量口径已回归（2026-10-22 全盘 H2testw 415/423 MB）；掉电/吞吐/多分区待测**。
+> 状态：**枚举 + 基础数据面已上板通过（rev30）；v12 全盘 H2testw 通过（release + 16 KB EP：写 673 KB/s / 读 758 KB/s，无错误）；掉电/多分区待测**。
 > 目标平台：阿波罗 V2 核心板（STM32H743IIT6 + MT29F4G08 + Type-C USB）。
 > 编译：`make all` / `make release` / `make tests UT=FC` 零新告警。
 > 上板证据（rev27）：Windows 识别 USB 磁盘 → MBR 分区 → FAT 格式化 →
@@ -15,6 +15,8 @@
 > 大文件/GC 压力、`dd` 吞吐、写过程中掉电恢复仍未验证（R1）。
 
 ---
+
+> 吞吐测速方法、实测结果与后续方案：见 [`usb_throughput_optimization.md`](usb_throughput_optimization.md)。
 
 ## 1. 目标与硬件
 
@@ -157,7 +159,7 @@ flowchart TD
 
 ### 4.3 缓冲与并发
 
-- 单命令在飞；静态 bounce buffer（`CFG_TUD_MSC_EP_BUFSIZE = 4096 B`）必须活到
+- 单命令在飞；静态 bounce buffer（`CFG_TUD_MSC_EP_BUFSIZE = 16384 B`）必须活到
   FTL `complete_flag`。
 - READ：USB 端点缓冲 → 提交到 bounce → 完成 → 拷回端点缓冲 → USB IN。
 - WRITE：USB OUT 数据先拷进 bounce → 提交 → 完成 → 发 CSW。
@@ -287,7 +289,7 @@ CBW (Command Block Wrapper) → data → CSW (Command Status Wrapper)
 |---|---|
 | `third_party/tinyusb/`（新增，已裁剪） | MIT USB 协议栈；只保留 device + MSC + DWC2 编译闭包（见其 `README.soft_ssd.md`） |
 | `third_party/tinyusb_vendor.mk`（新增） | 编入源文件与包含路径 |
-| `include/tusb_config.h`（新增） | TinyUSB 编译期配置（H7 / OPT_OS_NONE / MSC / 4096B EP） |
+| `include/tusb_config.h`（新增） | TinyUSB 编译期配置（H7 / OPT_OS_NONE / MSC / 16 KB EP） |
 | `include/platform/usb.h`（新增） | `usb_device_init` / `usb_device_task` 抽象 |
 | `src/platform/stm32h743/usb_port.c`（新增） | USB2_OTG_FS 时钟/引脚/IRQ、`tusb_time_millis_api` |
 | `src/platform/stm32h743/sys_port.c` | USB kernel clock = HSI48 |

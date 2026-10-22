@@ -129,6 +129,18 @@ bool delay_dwt_elapsed_us(DWORD start_cycles, WORD timeout_us)
     timeout_cycles = (QWORD)timeout_us * g_dwt_cycles_per_us;
     return (delay_port_dwt_cycles() - start_cycles) >= timeout_cycles;
 }
+
+DWORD delay_dwt_elapsed_cycles_us(DWORD start_cycles)
+{
+    if (!g_dwt_initialized)
+    {
+        return 0U;
+    }
+
+    const DWORD elapsed = delay_port_dwt_cycles() - start_cycles;
+
+    return elapsed / g_dwt_cycles_per_us;
+}
 /**
  * @brief 获取单次 DWT 忙等待允许的最大时长。
  * @param 无。

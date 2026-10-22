@@ -38,6 +38,8 @@ bool delay_is_initialized(void);
  */
 bool delay_dwt_cycles_now(DWORD *cycles);
 bool delay_dwt_elapsed_us(DWORD start_cycles, WORD timeout_us);
+/* 从 start_cycles 到当前的微秒数（DWT 未初始化时返回 0；用于分段计时）。 */
+DWORD delay_dwt_elapsed_cycles_us(DWORD start_cycles);
 
 /* 忙等待接口：适用于短硬件时序，不适合等待业务事件。 */
 delay_status_e delay_us_busy(DWORD us);

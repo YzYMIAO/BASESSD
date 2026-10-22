@@ -31,6 +31,7 @@
 
 #include "cli.h"
 #include "controller.h"
+#include "delay.h"      /* DWT 分段计时（submit → complete） */
 #include "device/dcd.h" /* DCD_EVENT_*：tusb.h 不导出该枚举 */
 #include "ftl.h"
 #include "log.h"
@@ -79,7 +80,8 @@ typedef struct
     DWORD                       lba;
     DWORD                       offset;
     DWORD                       length;
-    void                       *usb_buffer; /* TinyUSB 端点缓冲；ASYNC 期间协议栈不会复用 */
+    void                       *usb_buffer;    /* TinyUSB 端点缓冲；ASYNC 期间协议栈不会复用 */
+    DWORD                       submit_cycles; /* submit 起点（DWT），完成时算设备侧墙钟 */
     ssd_request_t               request;
 } usb_msc_io_t;
 
@@ -92,20 +94,50 @@ static BYTE s_msc_bounce[CFG_TUD_MSC_EP_BUFSIZE] __attribute__((aligned(4)));
 /* WRITE(10) 数据相分块直方图（RISK-NAND-04 取证）。
  *
  * TinyUSB 按 CFG_TUD_MSC_EP_BUFSIZE 分块回调，桶值就是本次数据相长度：
- * 大量 <=512B 说明主机按单扇区下发（BOT 往返主导吞吐）；全为 4KB 则瓶颈不在
- * 命令粒度。只在 `info` 时打印，运行期不输出，不影响时序。 */
-_Static_assert(CFG_TUD_MSC_EP_BUFSIZE == 4096U, "histogram label <=4K depends on EP bufsize");
+ * 大量 <=512B 说明主机按单扇区下发（BOT 往返主导）；<=4K 说明每块 4 KB；
+ * <=16K 说明 16 KB 端点缓冲生效（每块一次 FTL 异步完成往返）。只在 `info`
+ * 时打印，运行期不输出，不影响时序。 */
+_Static_assert(CFG_TUD_MSC_EP_BUFSIZE == 16384U, "histogram label <=16K depends on EP bufsize");
 
 typedef struct
 {
     DWORD calls;    /* 回调次数 = 数据相分块数 */
     DWORD bytes;    /* 累计字节 */
-    DWORD le_block; /* <= 512 B 的分块数 */
-    DWORD le_epbuf; /* (512, 4096] B */
-    DWORD gt_epbuf; /* > 4096 B（当前配置下不应出现） */
+    DWORD le_block; /* <= 512 B */
+    DWORD le_4k;    /* (512, 4096] B */
+    DWORD le_epbuf; /* (4096, 16384] B */
+    DWORD gt_epbuf; /* > 16384 B（当前配置下不应出现） */
 } usb_msc_wr_hist_t;
 
 static usb_msc_wr_hist_t s_wr_hist;
+
+/* submit → complete 的设备侧墙钟（DWT）。用来区分：
+ *   · 十几 ms：设备处理本身；
+ *   · 只有几 ms：剩余时间在 USB/BOT 主机侧等待，不是 CPU/FTL。
+ * 只在 `info` 打印，运行期零输出。 */
+typedef struct
+{
+    DWORD calls;
+    QWORD total_us;
+    DWORD max_us;
+    DWORD last_us;
+} usb_msc_lat_t;
+
+static usb_msc_lat_t s_lat;
+
+static void usb_msc_note_latency(DWORD start_cycles)
+{
+    const DWORD us = delay_dwt_elapsed_cycles_us(start_cycles);
+
+    s_lat.calls++;
+    s_lat.total_us += us;
+    s_lat.last_us = us;
+
+    if (us > s_lat.max_us)
+    {
+        s_lat.max_us = us;
+    }
+}
 
 static void usb_msc_note_write(DWORD bufsize)
 {
@@ -115,6 +147,10 @@ static void usb_msc_note_write(DWORD bufsize)
     if (bufsize <= USB_MSC_BLOCK_SIZE)
     {
         s_wr_hist.le_block++;
+    }
+    else if (bufsize <= 4096U)
+    {
+        s_wr_hist.le_4k++;
     }
     else if (bufsize <= CFG_TUD_MSC_EP_BUFSIZE)
     {
@@ -128,12 +164,24 @@ static void usb_msc_note_write(DWORD bufsize)
 
 void usb_msc_io_stats_print(void)
 {
-    LOGI("[USB ] wr chunk calls=%lu bytes=%lu <=512=%lu <=4K=%lu >4K=%lu\r\n",
+    LOGI("[USB ] wr chunk calls=%lu bytes=%lu <=512=%lu <=4K=%lu <=16K=%lu >16K=%lu\r\n",
          s_wr_hist.calls,
          s_wr_hist.bytes,
          s_wr_hist.le_block,
+         s_wr_hist.le_4k,
          s_wr_hist.le_epbuf,
          s_wr_hist.gt_epbuf);
+
+    {
+        const DWORD avg_us = (s_lat.calls == 0U) ? 0U : (DWORD)(s_lat.total_us / s_lat.calls);
+
+        LOGI("[USB ] latency n=%lu avg=%luus max=%luus last=%luus total=%lums\r\n",
+             s_lat.calls,
+             avg_us,
+             s_lat.max_us,
+             s_lat.last_us,
+             (unsigned long)(s_lat.total_us / 1000U));
+    }
 }
 
 /* CLI 与 USB 共用 host busy gate（本仓自拟）：任一前端有未完成请求时，另一个不提交。 */
@@ -165,6 +213,10 @@ static bool usb_msc_submit(void)
 {
     ssd_request_t *request = &s_msc_io.request;
 
+    DWORD start_cycles = 0U;
+
+    (void)delay_dwt_cycles_now(&start_cycles);
+
     memset(request, 0, sizeof(*request));
 
     if (s_msc_io.is_flush)
@@ -195,7 +247,8 @@ static bool usb_msc_submit(void)
         return false;
     }
 
-    s_msc_io.state = USB_MSC_IO_IN_FLIGHT;
+    s_msc_io.submit_cycles = start_cycles;
+    s_msc_io.state         = USB_MSC_IO_IN_FLIGHT;
     return true;
 }
 
@@ -226,7 +279,7 @@ static int32_t usb_msc_transfer(bool is_write, DWORD lba, DWORD offset, void *bu
         s_msc_io.state = USB_MSC_IO_IDLE;
     }
 
-    /* offset 只在端点缓冲小于 block 时非零；本仓 4096B ≥ 512B，恒为 0。
+    /* offset 只在端点缓冲小于 block 时非零；本仓 16384B ≥ 512B，恒为 0。
      * length 是主机数据阶段长度，先做边界检查再交给内部（H29/H31）。 */
     if ((offset != 0U) || (length == 0U) || (length > sizeof(s_msc_bounce)) ||
         ((length % USB_MSC_BLOCK_SIZE) != 0U))
@@ -304,6 +357,8 @@ void usb_msc_task(void)
     {
         return;
     }
+
+    usb_msc_note_latency(s_msc_io.submit_cycles);
 
     const bool ok = (s_msc_io.request.completion_status == SSD_STATUS_OK);
 

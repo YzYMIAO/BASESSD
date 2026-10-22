@@ -32,6 +32,12 @@ extern DWORD _estack;
 #    define STACK_GUARD_SCAN_WORDS_PER_CALL (64U)
 #endif
 
+/* init 自己的栈帧（push 的 r4/lr + 局部变量）位于入口 SP 之下；paint_hi
+ * 必须把这段排除，否则 loop 会把保存的 LR 填成 STACK_GUARD_PATTERN，
+ * 函数返回时跳进 0x5354414B（release -O2 实测：PC=0x5354414A，
+ * MemManage IACCVIOL）。64 B 覆盖本函数在 -O2 下的帧并留出编译器余量。 */
+#define STACK_GUARD_INIT_FRAME_MARGIN (64U)
+
 /* 本文件跨 target 共享（同 syscalls.c）：只读 MSP，不 include 任何 SoC 头
  * ——那会依赖设备头提供 IRQn_Type，裸包含编译不过。 */
 static DWORD stack_guard_msp(void)
@@ -65,8 +71,12 @@ static DWORD g_alarm_hits; /* 告警次数（含重复；用于看"是一次还�
  * -------------------------------------------------------------------- */
 void stack_guard_init(void)
 {
-    DWORD lo = ((uintptr_t)&end + 3U) & ~3U;
-    DWORD hi = stack_guard_msp() & ~3U;
+    DWORD lo  = ((uintptr_t)&end + 3U) & ~3U;
+    DWORD msp = stack_guard_msp();
+    DWORD hi  = ((msp > STACK_GUARD_INIT_FRAME_MARGIN)
+                     ? (msp - STACK_GUARD_INIT_FRAME_MARGIN)
+                     : msp) &
+               ~3U;
     DWORD addr;
 
     if (hi <= lo)

@@ -47,7 +47,8 @@ bool usb_msc_host_busy(void);
  * 打印 WRITE(10) 数据相分块直方图（诊断，RISK-NAND-04）。
  *
  * 只在 `info` 命令里调用：运行期零输出。桶 = TinyUSB 每次回调的数据相长度
- * （≤ CFG_TUD_MSC_EP_BUFSIZE）。<=512B 占多数说明主机按单扇区下发。
+ * （≤ CFG_TUD_MSC_EP_BUFSIZE，当前 16 KB）。<=512B 占多数说明主机按单扇区
+ * 下发；<=4K 说明仍是 4 KB 块；<=16K 说明 16 KB 端点缓冲生效。
  */
 void usb_msc_io_stats_print(void);
 
