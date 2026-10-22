@@ -357,7 +357,7 @@ bool l2p_preload_region(l2p_cache_t *cache, DWORD global_region, DWORD pba);
  * ⚠ FTL_OK 时 *out 可能是 NAND_PBA_INVALID —— 那是"**未映射**"，是合法结果；
  *   FTL_AGAIN 才是"**还不知道**"。二者绝不可混同（把后者当前者会让 host 读到假数据）。
  * ⚠ FTL_ERROR 也**会**写 *out（= INVALID）：调用点的既有口径是"读得 INVALID 与未映射
- *   同义"（见 ftl_trim / rr_select_plane），不回填就是未初始化变量。
+ *   同义"（见 TRIM job / rr_select_plane），不回填就是未初始化变量。
  *
  * @param cache  cache 上下文
  * @param lba    **全局** LBA（host LBA；数据通路不做局部/全局预转）
@@ -393,6 +393,23 @@ bool l2p_is_ready(l2p_cache_t *cache, DWORD lba);
  * @return FTL_OK / FTL_AGAIN（行在飞，稍后重试）
  */
 ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba);
+
+/*
+ * l2p_read_entries / l2p_write_entries - 页内批量读/写（写确认收敛）
+ *
+ * `lba` 必须是页对基址（`FTL_LBA_PER_PAIR` 对齐），`mask` 的 bit0..7 对应
+ * `lba+0..lba+7`；全部 LBA 必须落在同一 region（页对对齐 + region 大小是
+ * `FTL_LBA_PER_PAIR` 的整数倍 ⇒ 编译期几何保证，见 l2p_cache.c 的 `_Static_assert`）。
+ * 语义与逐条 `l2p_read`/`l2p_write` 一致：
+ *   · 只处理 mask 置位的条目；每条仍调用 `l2p_note_hit`，thrashing/命中口径不变；
+ *   · `l2p_read_entries` 的 miss 与逐条 `l2p_read` 一致：记一次 miss + 起异步加载，
+ *     返 FTL_AGAIN；当前调用点先 `l2p_is_ready(base)`，正常不会走到该分支；
+ *   · 行未就绪（LOADING；写还含 FLUSHING）⇒ FTL_AGAIN，且**不改任何状态**；
+ *   · 写成功只置一次 `state=DIRTY` + region 脏位。
+ * 用于 `ftl_confirm_write`：`l2p_find` 每页一次，而不是每 CW 一次。
+ */
+ftl_status_e l2p_read_entries(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD out[]);
+ftl_status_e l2p_write_entries(l2p_cache_t *cache, DWORD lba, DWORD mask, const DWORD pba[]);
 
 /* ── 同步逃生口（见文件头；服务函数禁用）── */
 
@@ -460,17 +477,6 @@ void l2p_flush_kick_owner(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick);
  * 等待有界）。
  */
 bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_dim);
-
-/*
- * l2p_flush_one_sync - 同步写回**一行**（自旋等完成）
- *
- * 供 checkpoint：Header 落盘前，快照里的每个 region 必须**已持久**（异步写回会让
- * Header 承诺的映射还没落盘 ⇒ 掉电后 Anchor/Header 指向不存在的记录）。
- * 传入的行若正在 FLUSHING 则等它结束；结束为 CLEAN ⇒ OK，回 DIRTY（写失败）⇒ ERROR。
- *
- * @return FTL_OK / FTL_ERROR
- */
-ftl_status_e l2p_flush_one_sync(l2p_cache_t *cache, int line_idx);
 
 /*
  * l2p_invalidate_owner - 只失效某个 owner 的行与脏位（恢复/格式化用）

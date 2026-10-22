@@ -51,7 +51,7 @@ struct ftl_context {
 | `ftl_submit_read()` | 异步读 | 非阻塞提交读，长度任意（组内自拆 plane） | L2P→PBA→FC submit→pending |
 | `ftl_submit_write()` | 异步写 | 非阻塞提交写，长度任意 + Journal + watermark | alloc→FC submit→journal→L2P→pending |
 | `ftl_flush_begin/step()` | 落盘 | 落已持久化映射：L2P cache 写回 + journal 尾页刷出 | 异步 job（step 每轮推进） |
-| `ftl_trim(ftl,lba,count)` | 取消映射 | 取消 `[lba, lba+count)` 映射（写 NAND_PBA_INVALID 到 L2P Cache，标记 DIRTY） | 同步完成 |
+| `ftl_trim_begin/step()` | 取消映射 | 取消 `[lba, lba+count)` 映射（写 NAND_PBA_INVALID 到 L2P Cache，标记 DIRTY） | 异步 job（step 每轮推进；L2P/Journal 未就绪返 FTL_AGAIN） |
 | `ftl_service()` | 主循环 | 推进 FC 调度 + 统一完成泵 + **Phase 2.5 补发子操作** + 后台任务 | 在 main loop 中频繁调用 |
 
 **注**：
@@ -96,9 +96,11 @@ void ftl_flush_begin(ftl_ctx_t *ftl);
 bool ftl_flush_step(ftl_ctx_t *ftl);
 
 /*
- * ftl_trim - 取消 [lba, lba+count) 的 L2P 映射（同步完成、非阻塞）
+ * ftl_trim_begin/step - 异步取消 [lba, lba+count) 的 L2P 映射
+ * step 每次推进一小段；FTL_AGAIN = 本轮未完成（L2P 加载 / Journal 背压）。
  */
-void ftl_trim(ftl_context_t *ftl, uint64_t lba, uint32_t count);
+ftl_status_e ftl_trim_begin(ftl_ctx_t *ftl, DWORD lba, DWORD count);
+ftl_status_e ftl_trim_step(ftl_ctx_t *ftl);
 ```
 
 **`ftl_io_request_t` 完整定义**（`include/ftl/ftl_type.h`）：
@@ -162,7 +164,8 @@ void         allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, const f
 - **写组**：各子操作 NAND PROGRAM 完成后 → 同上
 - **PBA 无效（读子操作）**：直接 memset 零 → 视同该子操作已同步完成（无需 NAND 操作）
 - **NAND 失败**：读返回全零 / 写标记坏块 → 该子操作置 IO_ERROR → 组聚合为 IO_ERROR
-- **TRIM**：`ftl_trim` 同步完成（只改 L2P Cache，不写 NAND），不走组机制
+- **TRIM**：`ftl_trim_begin/step` 异步 job（只改 L2P Cache + Journal，不写数据 NAND），
+  由 Controller 每轮推进；不走读写的组完成机制，完成由 HIL 的 `complete_flag` 回执
 
 > **背压（`FTL_AGAIN`）**：`ftl_submit_*` 受理后，子操作可能因 FC 资源暂空（命令/desc/buffer
 > 池满、SQ 满、pending 表满）而**排队待发**，由 `ftl_service` Phase 2.5 补发。因此
@@ -1125,7 +1128,7 @@ src/ftl/
                  │                                            │
                  │  ftl_submit_read(ftl, &req)                │ ← 长度任意
                  │  ftl_submit_write(ftl, &req)               │   自拆单/双 plane
-                 │  ftl_flush_begin/step / ftl_trim(lba,count)           │
+                 │  ftl_flush_begin/step / ftl_trim_begin/step           │
                  │    req = ftl_io_request_t{lba,count,buffer}│
                  │                                            │
                  │  ┌────────────────────────────────────┐   │

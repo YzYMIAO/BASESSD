@@ -169,7 +169,7 @@ static ftl_status_e cp_record_probe(void *ctx, WORD record_idx, bool full, DWORD
  *   seq ≤ 末尾水位（boot 视为"已进 L2P 表"而跳过回放）⇒ **两边都不认，静默丢映射**。
  *   故水位与脏位图**一起在 job 起点取定**：此后任何 host 写都有 seq > 快照水位，
  *   boot 必然回放它。代价是 journal_truncate 的水位判据更容易不满足（更少预擦）——
- *   预擦只是磨损优化，跳过它只是让 jrn_flush_page 自己擦（每块每圈仍只擦一次）。
+ *   预擦只是磨损优化，跳过它只是让 jrn_handle 换块时自己异步擦（每块每圈仍只擦一次）。
  *
  * ⚠ **服务函数不推进状态机**（与 migrate 的 ftl_migrate_callback 不同）：本 job 的
  *   CP_ANCHOR_PREP / CP_HDR_PREP 里有同步原语（游标未建立时要 md_ring_locate
@@ -922,7 +922,7 @@ static void cp_complete_hdr_write(cp_handle_t *h, cp_handle_t *j, bool failed)
 }
 
 /* Journal 预擦完成：**擦成功才**记 pre_erased_block。失败时绝不能记账：
- * jrn_flush_page 回切到该块会跳过擦除 ⇒ 写进未擦块（二次编程 = 静默损坏）。
+ * jrn_handle 换块擦除回切到该块会跳过擦除 ⇒ 写进未擦块（二次编程 = 静默损坏）。
  * commit(NONE) 只复位水位标志；该块保持"未预擦"，journal 回切时由 need_erase 重试，
  * 下一次 CP 的 plan 也会再次返回 NEEDS_ERASE。 */
 static void cp_complete_trunc_erase(cp_handle_t *h, cp_handle_t *j, bool failed)

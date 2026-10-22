@@ -13,6 +13,7 @@
  *     端点 FIFO 由 CPU 搬运，缓冲仍在普通 .bss。
  */
 
+#include "log.h"
 #include "ssd_types.h" /* BYTE/WORD/DWORD/QWORD */
 #include "stm32h7xx_hal.h"
 #include "tusb.h"
@@ -59,7 +60,24 @@ bool usb_device_init(void)
     rh_init.speed = TUSB_SPEED_FULL;
 
     /* dcd_init 内部会打开 NVIC 并使能全局中断。 */
-    return tusb_rhport_init(USB_PORT_RHPORT, &rh_init);
+    const bool ok = tusb_rhport_init(USB_PORT_RHPORT, &rh_init);
+
+    /* GHWCFG2.arch[2:0]：0 = slave-only，1 = external DMA，2 = internal DMA。
+     * 本仓走 slave/PIO；这一行用于在板端确认该芯片的 OTG_FS 到底有没有
+     * 内部 DMA（TinyUSB 的 DMA 路径要求 arch == INTERNAL_DMA）。 */
+    const DWORD ghwcfg2 = USB2_OTG_FS->GHWCFG2;
+    const DWORD arch    = ghwcfg2 & 0x7U;
+    const char *arch_s  = (arch == 0U)   ? "slave-only"
+                          : (arch == 1U) ? "external-dma"
+                          : (arch == 2U) ? "internal-dma"
+                                         : "unknown";
+
+    (void)LOGI("[USB ] GHWCFG2=0x%08lx arch=%lu (%s)\r\n",
+               (unsigned long)ghwcfg2,
+               (unsigned long)arch,
+               arch_s);
+
+    return ok;
 }
 
 void usb_device_task(void)

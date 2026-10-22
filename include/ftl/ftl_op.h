@@ -99,7 +99,7 @@ void ftl_op_dispatch(const fc_command_status_t *completion);
  * ftl_op_is_in_dispatch - 当前是否在完成服务函数（或其嵌套调用）里。
  *
  * 用途：给"服务函数内不得同步等待"这条约定一个**可判定的**依据。服务函数里若再
- * 跑一遍完成泵（ftl_sync_submit_wait / jrn_flush_page 的 drain），就是嵌套泵
+ * 跑一遍完成泵（ftl_sync_submit_wait 的 drain），就是嵌套泵
  * ——那正是本次解耦要消除的东西。深度计数（不是布尔）：嵌套 drain 会再进一层。
  *
  * 已落地的一处用法：jrn_append 页满时若异步刷页起不来，**不在**派发上下文里

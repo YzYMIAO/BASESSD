@@ -233,76 +233,35 @@ fc_status_e fc_data_path_encode(const fc_command_t *command)
     /* 入参前置条件由调用者保证（fc.c 写路径传入有效命令） */
     ASSERT(command != NULL);
 
-    /* ── Stage 0: META 写入 — 每个 CW 的 FAA 存入 buffer[0..4] ── */
+    /* 每个 CW 的处理顺序固定：META → CRC → 加扰 → ECC；四步都只依赖
+     * 本 CW 的 buffer ⇒ 合并为一次 desc 链遍历（原来 4 次）。 */
+    for (desc_id = (fc_descriptor_id_t)command->desc_id;
+         desc_id != FC_DESCRIPTOR_ID_INVALID;)
     {
-        for (desc_id = (fc_descriptor_id_t)command->desc_id;
-             desc_id != FC_DESCRIPTOR_ID_INVALID;)
+        /* desc_id 来自 command->desc_id 链，链上 ID 必在池范围内 */
+        fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
+        ASSERT(desc != NULL);
+
+        buffer = fc_buffer_get_base(desc->buffer_id);
+        if (buffer != NULL)
         {
-            /* desc_id 来自 command->desc_id 链，链上 ID 必在池范围内 */
-            fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            ASSERT(desc != NULL);
+            /* Stage 0: META 写入 — 本 CW 的 LBA 存入 buffer[0..4] */
+            fc_data_path_meta_write(buffer, desc->meta);
 
-            buffer = fc_buffer_get_base(desc->buffer_id);
-            if (buffer != NULL)
-            {
-                fc_data_path_meta_write(buffer, desc->meta);
-            }
-            desc_id = (fc_descriptor_id_t)desc->next_id;
-        }
-    }
-
-    /* ── Stage 1: CRC 编码 ── */
-    if (command->config.crc == FC_CRC_ENABLE)
-    {
-        for (desc_id = (fc_descriptor_id_t)command->desc_id;
-             desc_id != FC_DESCRIPTOR_ID_INVALID;)
-        {
-            /* desc_id 来自 command->desc_id 链，链上 ID 必在池范围内 */
-            fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            ASSERT(desc != NULL);
-
-            buffer = fc_buffer_get_base(desc->buffer_id);
-            if (buffer != NULL)
+            /* Stage 1: CRC 编码（覆盖明文 USER 区） */
+            if (command->config.crc == FC_CRC_ENABLE)
             {
                 fc_data_path_crc_write(buffer);
             }
-            desc_id = (fc_descriptor_id_t)desc->next_id;
-        }
-    }
 
-    /* ── Stage 1: Random 加扰 ── */
-    if (command->config.random == 0U)
-    {
-        for (desc_id = (fc_descriptor_id_t)command->desc_id;
-             desc_id != FC_DESCRIPTOR_ID_INVALID;)
-        {
-            /* desc_id 来自 command->desc_id 链，链上 ID 必在池范围内 */
-            fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            ASSERT(desc != NULL);
-
-            buffer = fc_buffer_get_base(desc->buffer_id);
-            if (buffer != NULL)
+            /* Stage 1: 加扰（META/CRC 保持明文；种子 = 本 CW 的逻辑地址） */
+            if (command->config.random == 0U)
             {
-                /* 种子 = 本 CW 的逻辑地址（META 字段），与物理位置解耦：
-                 * GC 搬页后逻辑地址不变 ⇒ 密文不变，无需解扰再重加扰。 */
                 fc_data_path_scramble(buffer, fc_random_seed_from_meta(desc->meta));
             }
-            desc_id = (fc_descriptor_id_t)desc->next_id;
-        }
-    }
 
-    /* ── Stage 2: ECC 编码 ── */
-    if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
-    {
-        for (desc_id = (fc_descriptor_id_t)command->desc_id;
-             desc_id != FC_DESCRIPTOR_ID_INVALID;)
-        {
-            /* desc_id 来自 command->desc_id 链，链上 ID 必在池范围内 */
-            fc_descriptor_t *desc = fc_descriptor_id_to_descriptor(desc_id);
-            ASSERT(desc != NULL);
-
-            buffer = fc_buffer_get_base(desc->buffer_id);
-            if (buffer != NULL)
+            /* Stage 2: ECC 编码（必须在加扰之后） */
+            if (command->config.ldpc != FC_ECC_MODE_LDPC_RAW)
             {
                 result = fc_data_path_ecc_encode(buffer);
                 if (result != FC_STATUS_OK)
@@ -310,8 +269,8 @@ fc_status_e fc_data_path_encode(const fc_command_t *command)
                     return result;
                 }
             }
-            desc_id = (fc_descriptor_id_t)desc->next_id;
         }
+        desc_id = (fc_descriptor_id_t)desc->next_id;
     }
 
     /* ── Stage 3 (removed): 跨命令 stripe RAID 在 fc_data_path_generate_stripe_parity() 中处理 ── */
@@ -578,102 +537,51 @@ fc_status_e fc_data_path_process_read(const fc_command_t *command)
         return FC_STATUS_IO_ERROR;
     }
 
-    /* ── Pass 2: 所有 CW ECC 成功 → 解扰 ── */
-    if (command->config.random == 0U) /* FC_RANDOM_ENABLE */
+    /* ── Pass 2：解扰 + CRC + META（合并为一次逐 CW 遍历）──
+     * 顺序不可换：解扰 → CRC → META。META/CRC 在加扰区之外，先读 META 取种子
+     * 不会改变结果；擦除页永远按「无 LBA」处理（RISK-GC-12）。 */
+    desc_id = (fc_descriptor_id_t)command->desc_id;
+
+    for (cw = 0U; cw < total_desc; cw++)
     {
-        desc_id = (fc_descriptor_id_t)command->desc_id;
-
-        for (cw = 0U; cw < total_desc; cw++)
+        desc = fc_descriptor_id_to_descriptor(desc_id);
+        if (desc == NULL)
         {
-            desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL)
-            {
-                break;
-            }
+            break;
+        }
 
-            buffer = fc_buffer_get_base(desc->buffer_id);
-            if ((buffer != NULL) && (!fc_cw_status_is_blank(desc->status)))
+        buffer = fc_buffer_get_base(desc->buffer_id);
+        if (buffer != NULL)
+        {
+            if (fc_cw_status_is_blank(desc->status))
             {
-                /* 种子**自举**：META 在加扰区之外、保持明文，直接读回本 CW 的扇区 LBA
-                 * 当种子——GC / 掉电重建因此不必预先知道 LBA（v24）。
-                 * 擦除页没有种子（META 全 FF）⇒ 跳过解扰，缓冲保持全 FF。 */
+                desc->meta = FC_META_UNKNOWN;
+            }
+            else
+            {
+                /* 种子自举：META 在加扰区之外、保持明文。 */
                 DWORD cw_meta;
                 (void)memcpy(&cw_meta, buffer, FC_CRC_META_SIZE);
-                fc_data_path_scramble(buffer, fc_random_seed_from_meta(cw_meta));
-            }
 
-            desc_id = (fc_descriptor_id_t)desc->next_id;
-        }
-    }
-
-    /* ── Pass 3: CRC 校验 ── */
-    if (command->config.crc == FC_CRC_ENABLE)
-    {
-        desc_id = (fc_descriptor_id_t)command->desc_id;
-
-        for (cw = 0U; cw < total_desc; cw++)
-        {
-            desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL)
-            {
-                break;
-            }
-
-            buffer = fc_buffer_get_base(desc->buffer_id);
-            /* 擦除页未编程、也未解扰：CRC 字段全 FF 与 USER 区无对应关系，跳过。 */
-            if ((buffer != NULL) && (!fc_cw_status_is_blank(desc->status)))
-            {
-                /*
-                 * CRC 校验失败：标记 desc status。
-                 * 虽然 ECC 纠错成功且解扰完成，但数据内容不正确，
-                 * 可能是 ECC 误纠或数据路径逻辑错误。
-                 */
-                if (fc_data_path_crc_check(buffer) == 0U)
+                if (command->config.random == 0U) /* FC_RANDOM_ENABLE */
                 {
-                    desc->status |= FC_CW_STATUS_CRC_ERROR;
+                    fc_data_path_scramble(buffer, fc_random_seed_from_meta(cw_meta));
                 }
-            }
 
-            desc_id = (fc_descriptor_id_t)desc->next_id;
-        }
-    }
-
-    /* ── Pass 4: META 读回 + 校验 ── */
-    {
-        desc_id = (fc_descriptor_id_t)command->desc_id;
-        for (cw = 0U; cw < total_desc; cw++)
-        {
-            desc = fc_descriptor_id_to_descriptor(desc_id);
-            if (desc == NULL)
-            {
-                break;
-            }
-            buffer = fc_buffer_get_base(desc->buffer_id);
-            if (buffer != NULL)
-            {
-                /* 擦除页**永远**按「无 LBA」处理，与 command->meta 是否已知无关。
-                 * 原因：FC 的整页读（pba_to_cmd）恒覆盖本 plane 的全部 CW，而 host 写的
-                 * 稀疏页只编程部分 CW（512B 写只落 1 个 CW）⇒ 同一页里必然有**空兄弟 CW**。
-                 * 若对这些空 CW 做 META 校验，整条命令会被判 MATA_ERROR，RR/GC 拿着
-                 * 明明可读的好页去标坏块（RISK-GC-12）。
-                 * 「映射指向未编程页」由 FTL 的 dangling 守卫与 L2P 反查负责，不在 FC 判。 */
-                if (fc_cw_status_is_blank(desc->status))
+                if (command->config.crc == FC_CRC_ENABLE)
                 {
-                    desc->meta = FC_META_UNKNOWN;
+                    if (fc_data_path_crc_check(buffer) == 0U)
+                    {
+                        desc->status |= FC_CW_STATUS_CRC_ERROR;
+                    }
                 }
-                else
-                {
-                    DWORD read_meta;
-                    (void)memcpy(&read_meta, buffer, FC_CRC_META_SIZE);
-                    desc->meta = read_meta;
 
-                    /* 两项校验（自洽 + 与本命令 LBA 比对）见 fc_data_path_meta_check；
-                     * 返回 0（通过）时 OR 进去是空操作。 */
-                    desc->status |= fc_data_path_meta_check(buffer, command->meta, desc->paa);
-                }
+                desc->meta = cw_meta;
+                desc->status |= fc_data_path_meta_check(buffer, command->meta, desc->paa);
             }
-            desc_id = (fc_descriptor_id_t)desc->next_id;
         }
+
+        desc_id = (fc_descriptor_id_t)desc->next_id;
     }
 
     return FC_STATUS_OK;

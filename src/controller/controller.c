@@ -54,6 +54,9 @@ ssd_status_e ssd_controller_init(ssd_controller_t *controller,
     }
 
     controller->flush_req    = NULL;
+    controller->trim_req     = NULL;
+    controller->trim_lba     = 0U;
+    controller->trim_started = false;
     controller->host_lba_max = (DWORD)FTL_LBA_MAX;
 
     /* 逐槽校验并绑定 FTL 实例：任一槽位缺失或槽位与实例 topo 不符即失败。
@@ -170,26 +173,27 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
             break;
 
         case SSD_REQUEST_TRIM:
-        {
-            QWORD lba = request->start_lba;
-            QWORD end = request->start_lba + request->block_count;
-
-            /* TRIM 同步完成（无异步回调）；跨实例时逐 run 提交 */
-            while (lba < end)
+            /* TRIM 是**异步命令**：submit 只登记范围，ssd_controller_service 每轮
+             * 按 run 调 ftl_trim_begin/step；完成后置 complete_flag。
+             * 单飞行：同类请求已有一条在飞时返回 BUSY。 */
+            if (controller->trim_req != NULL)
             {
-                QWORD      run_end = ssd_controller_run_end(controller, lba, end);
-                ftl_ctx_t *tftl    = ssd_controller_route(controller, lba);
-
-                /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
-                ASSERT(tftl != NULL);
-                ftl_trim(tftl, lba, (run_end - lba));
-                lba = run_end;
+                request->completion_status = SSD_STATUS_BUSY;
+                request->complete_flag     = 1U;
+                return SSD_STATUS_BUSY;
+            }
+            if (!ssd_controller_lba_range_ok(controller, request->start_lba, request->block_count))
+            {
+                request->completion_status = SSD_STATUS_INVALID_ARGUMENT;
+                request->complete_flag     = 1U;
+                return SSD_STATUS_INVALID_ARGUMENT;
             }
 
+            controller->trim_req       = request;
+            controller->trim_lba       = request->start_lba;
+            controller->trim_started   = false;
             request->completion_status = SSD_STATUS_OK;
-            request->complete_flag     = 1U;
             break;
-        }
 
         case SSD_REQUEST_FLUSH:
             /* FLUSH 是**异步命令**（RISK-USB-06）：提交只登记请求并启动各实例的
@@ -237,9 +241,9 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
     return request->completion_status;
 }
 
-void ssd_controller_service(ssd_controller_t *controller)
+static void ssd_controller_flush_service(ssd_controller_t *controller)
 {
-    if ((controller == NULL) || (controller->flush_req == NULL))
+    if (controller->flush_req == NULL)
     {
         return;
     }
@@ -279,6 +283,85 @@ void ssd_controller_service(ssd_controller_t *controller)
     controller->flush_req->completion_status = SSD_STATUS_OK;
     controller->flush_req->complete_flag     = 1U;
     controller->flush_req                    = NULL;
+}
+
+static void ssd_controller_trim_complete(ssd_controller_t *controller, ssd_status_e status)
+{
+    controller->trim_req->completion_status = status;
+    controller->trim_req->complete_flag     = 1U;
+    controller->trim_req                    = NULL;
+    controller->trim_started                = false;
+}
+
+static void ssd_controller_trim_service(ssd_controller_t *controller)
+{
+    if (controller->trim_req == NULL)
+    {
+        return;
+    }
+
+    const QWORD end = controller->trim_req->start_lba + controller->trim_req->block_count;
+
+    if (controller->trim_lba >= end)
+    {
+        ssd_controller_trim_complete(controller, SSD_STATUS_OK);
+        return;
+    }
+
+    const QWORD run_end = ssd_controller_run_end(controller, controller->trim_lba, end);
+    ftl_ctx_t  *tftl    = ssd_controller_route(controller, controller->trim_lba);
+
+    /* 路由只可能因宏配置错误失败；正常配置下恒非 NULL */
+    ASSERT(tftl != NULL);
+
+    if (!controller->trim_started)
+    {
+        const DWORD        lba   = (DWORD)controller->trim_lba;
+        const DWORD        count = (DWORD)(run_end - controller->trim_lba);
+        const ftl_status_e bst   = ftl_trim_begin(tftl, lba, count);
+
+        if (bst == FTL_AGAIN)
+        {
+            return; /* 实例上已有 job：下一轮重试 */
+        }
+        if (bst != FTL_OK)
+        {
+            ssd_controller_trim_complete(controller, SSD_STATUS_IO_ERROR);
+            return;
+        }
+        controller->trim_started = true;
+    }
+
+    const ftl_status_e st = ftl_trim_step(tftl);
+
+    if (st == FTL_AGAIN)
+    {
+        return; /* 本轮未完成：下一轮继续 */
+    }
+    if (st != FTL_OK)
+    {
+        ssd_controller_trim_complete(controller, SSD_STATUS_IO_ERROR);
+        return;
+    }
+
+    controller->trim_started = false;
+    controller->trim_lba     = run_end;
+
+    if (controller->trim_lba >= end)
+    {
+        ssd_controller_trim_complete(controller, SSD_STATUS_OK);
+    }
+}
+
+void ssd_controller_service(ssd_controller_t *controller)
+{
+    if (controller == NULL)
+    {
+        return;
+    }
+
+    ssd_controller_flush_service(controller);
+    ssd_controller_trim_service(controller);
 }
 
 void ssd_controller_cancel_flush(ssd_controller_t *controller)

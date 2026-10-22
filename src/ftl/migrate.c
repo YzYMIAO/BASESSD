@@ -26,6 +26,8 @@
  *   与刚访问过的 host LBA 无必然联系 ⇒ region miss 是**真实可达**的。放进服务函数里做
  *   就得同步等加载（嵌套泵）；放在纯计算阶段可以「先起异步加载、原地返回、下轮重扫」。
  *   ⚠ 这两个阶段**必须先就绪前置再动账**（否则半途而废会重复记账 / 位图一半有一半没有）。
+ *   ⚠ MIG_WRITE_SETTLE 在动账前还要 `jrn_reserve` 预留 Journal 槽位；不足时只起
+ *     异步刷页并挂起本 job，不同步刷 Journal。
  */
 
 #include "migrate.h"
@@ -731,10 +733,10 @@ static void mig_finish(mig_handle_t *m)
         }
     }
 
-    /* 每个 victim 块收尾打一行（用户要求：能看到搬移在推进）。
-     * pages = 扫过的页数；vcw = 起点有效 CW 数；err 表示擦除失败（未真正回收）。
-     * aborted 不打：abort 日志已限流覆盖，且它没有搬完一个块。 */
-    if (!m->aborted)
+    /* 只在**真正搬了数据**的 victim 上打收尾行。
+     * vcw=0 / pages=0 的“整块已无效、直接擦除归还”在近满盘写负载下每秒几十条，
+     * 会把有效日志淹没（多次反馈）；这类空块回收仍计入 reclaimed_count。 */
+    if ((!m->aborted) && ((m->migrated != 0U) || (m->job_valid_cw != 0U)))
     {
         const char *kind_s  = (m->kind == MIG_KIND_GC) ? "gc" : ((m->kind == MIG_KIND_WL) ? "wl" : "pred");
         const char *post_s  = ((mig_post_e)m->post == MIG_POST_RETIRE) ? "retire" : "free";
@@ -974,7 +976,20 @@ static bool mig_step_write_settle(mig_handle_t *m)
             }
         }
 
-        m->wait_ms = 0U; /* 等待条件解除 */
+        /* Journal 容量预留：本 plane 最多 append popcount(cw_bitmap) 条。不足时
+         * jrn_reserve 只起异步刷页并返 false，本 job 挂起等下一轮 service；不在
+         * migrate 里同步刷 Journal（那会在 service 调用栈里再开完成泵）。
+         * ⚠ wait_ms 必须等容量也拿到才清：否则每轮 L2P ready 都会重置等待超时，
+         *    Journal 永久无容量时 job 永不中止。 */
+        const BYTE n_entries = ftl_cw_bitmap_popcount(m->cw_bitmap[plane]);
+
+        if (!jrn_reserve(m->journal, n_entries))
+        {
+            (void)mig_wait(m, "journal capacity timeout");
+            return true;
+        }
+
+        m->wait_ms = 0U; /* L2P 与 Journal 容量均已就绪 */
 
         for (BYTE cw = 0U; cw < CW_NUM; cw++)
         {
@@ -1034,6 +1049,10 @@ static bool mig_step_write_settle(mig_handle_t *m)
 
             m->migrated++;
         }
+
+        /* GC/WL 的 Journal 追加同样推进水位；漏掉会让 journal 只靠 T2/T3 触发 CP，
+         * 大量搬移时可能撞 ring_full（新背压路径会把 host 写停到超时）。 */
+        jrn_update_watermark(m->journal);
     }
 
     m->write_ok = false;

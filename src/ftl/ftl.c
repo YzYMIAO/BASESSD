@@ -4,7 +4,8 @@
  * 职责：
  *   FTL 的对外门面与主循环——ftl_init 装配各子模块；ftl_service 是**服务主循环**
  *   （NAND 泵 → 完成泵 → 补发 host 子操作 → 时间预算后台调度）；ftl_submit_read/write
- *   把一条 host 请求拆成多个 FC 子操作下发；ftl_flush_begin/step / ftl_trim 供 HIL 调用。
+ *   把一条 host 请求拆成多个 FC 子操作下发；ftl_flush_begin/step / ftl_trim_begin/step
+ *   供 HIL 调用（均为异步推进）。
  *
  * 与子模块的分工：
  *   本文件             —— 编排：调度、拆分、完成聚合、模式切换；不解析介质格式。
@@ -24,7 +25,7 @@
  *                      分支）/ pend_confirm_service
  *   2. 对外接口        ftl_init / ftl_service_pump / ftl_service
  *   3. 子操作下发      ftl_issue_subop / ftl_drain_group（static）+ ftl_submit_read / write
- *   4. 元数据落盘/TRIM ftl_flush_begin/step / ftl_trim
+ *   4. 元数据落盘/TRIM ftl_flush_begin/step / ftl_trim_begin/step
  *
  * ⚠ 后台调度在 `ftl/bg_wiring.c`：10 项任务表 / 档位 IDLE·NORMAL·BUSY → 预算规模 /
  *   mig_gc_evaluate（GC 统一触发求值）/ RR 巡检 / Phase 3 入口 ftl_bg_service。
@@ -149,10 +150,12 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi);
  *     · valid_count 单位是 **CW**：新 CW +1、被替换的旧 CW -1。真有效性一律逐 CW
  *       由页内 META + L2P 反查现判（DRAM-less approach ③，无位图）——见 bst.h 文件头。
  *     · ⚠ **两遍式**：第一遍只做**就绪前置**（region 未驻留则起异步加载并返
- *       FTL_AGAIN），第二遍才动账。绝不能边查边改——l2p_write 对正在加载/写回
- *       的行返 FTL_AGAIN，中途放弃会让同一页里部分 CW 已记账、部分没记，重试时重复
- *       记账（valid_count 虚高、journal 重复条目、total_writes 多计）。
- *       两遍之间无泵（单线程顺序执行）⇒ 就绪判定与第二遍之间状态不可能变。
+ *       FTL_AGAIN）与 Journal 容量预留，第二遍才动账。绝不能边查边改——l2p_write 对
+ *       正在加载/写回的行返 FTL_AGAIN，中途放弃会让同一页里部分 CW 已记账、部分没记，
+ *       重试时重复记账（valid_count 虚高、journal 重复条目、total_writes 多计）。
+ *       **两遍之间无泵**：本函数不同步刷 Journal、不调用 ftl_sync_submit_wait；
+ *       Journal 容量不足时 jrn_reserve 只起异步刷页并返 FTL_AGAIN，确认阶段不碰
+ *       NAND、不重入完成派发 ⇒ 就绪判定与第二遍之间状态不可能变。
  * -------------------------------------------------------------------- */
 static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
 {
@@ -161,32 +164,43 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
      * 同理 pending->lba 恒为**窗口基址**（唯一写点是 wb_handle(FLUSH) 的 wbuf.base）——
      * 下面用 ftl_lba_plane/cw(l) 取代"从位下标反解坐标"就依赖这条。 */
 
-    /* ── 第一遍：就绪前置（只探不动）── */
-    for (BYTE bit = 0U; bit < FTL_LBA_PER_PAIR; bit++)
+    /* 页对基址：8 个 LBA 属于同一 region ⇒ 就绪只需探一次（原来逐 CW 8 次）。 */
+    ASSERT((pending->lba & (FTL_LBA_PER_PAIR - 1U)) == 0U);
+
+    const DWORD mask = pending->cw_bitmap & ((1U << FTL_LBA_PER_PAIR) - 1U);
+
+    if ((mask != 0U) && (!l2p_is_ready(ftl->cache, pending->lba)))
     {
-        if ((pending->cw_bitmap & (1U << bit)) == 0U)
-        {
-            continue;
-        }
-
-        const DWORD lba = (pending->lba + bit);
-
-        if (!l2p_is_ready(ftl->cache, lba))
-        {
-            return FTL_AGAIN; /* 已起加载：本轮**一条都不动** */
-        }
+        return FTL_AGAIN; /* 已起加载：本轮**一条都不动** */
     }
 
-    /* ── 第二遍：应用（此时不可能再返 FTL_AGAIN）── */
-    /* 页打包：pending 描述**一整页**——pending->lba = 窗口基址，cw_bitmap 标记本页哪些
-     * CW 有效，逐**置位**确认。逐 CW 的 LBA = base + bit（bit 与 LBA 低 3 位 [plane][cw]
-     * 同构：bit = plane*CW_NUM + cw，即 ftl_lba_pair_slot）。plane/cw 由 **LBA** 取
-     * （ftl_lba_plane/cw），不从位下标反解——坐标只有一个来源（见本函数头的 ASSERT）。 */
+    /* Journal 容量在动账前预留：不足时 jrn_reserve 只起异步刷页并返回 false，
+     * 本函数直接停泊重试，绝不在这里同步刷 Journal（那会重入完成派发）。
+     * 预留按最坏情况（mask 置位数）并留 1 个空槽 ⇒ 后面的 jrn_append 不会触发
+     * 页满分支。 */
+    const BYTE n_entries = ftl_cw_bitmap_popcount(mask);
+
+    if ((n_entries != 0U) && (!jrn_reserve(ftl->journal, n_entries)))
+    {
+        return FTL_AGAIN;
+    }
+
+    DWORD oldp[FTL_LBA_PER_PAIR];
+    DWORD newp[FTL_LBA_PER_PAIR];
+
+    /* 页内批量读：l2p_find 一次；只读取 mask 置位项（逐项记 hit，口径不变）。
+     * 就绪前置已保证命中；非 OK 仅越界（不可能）⇒ 保守重试，尚未动账。 */
+    if (l2p_read_entries(ftl->cache, pending->lba, mask, oldp) != FTL_OK)
+    {
+        return FTL_AGAIN;
+    }
+
+    /* ── 先 Journal（掉电回放顺序），再一次性更新 L2P 行 ── */
     for (BYTE bit = 0U; bit < FTL_LBA_PER_PAIR; bit++)
     {
-        if ((pending->cw_bitmap & (1U << bit)) == 0U)
+        if ((mask & (1U << bit)) == 0U)
         {
-            continue; /* 本槽未写（页打包后一页可只填部分 CW） */
+            continue;
         }
 
         const DWORD l    = (pending->lba + bit);
@@ -194,35 +208,38 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
         const BYTE  cw   = ftl_lba_cw(l);
         const DWORD page = (pl == 0U) ? pending->new_pba : pending->new_pba1;
 
-        /* 本页只为本命令覆盖到的 plane 分配了页（未覆盖的 plane 不进本循环体）。
-         * 覆盖到的 plane 必有页（alc_alloc_pair 两 plane 都给）。 */
+        newp[bit] = pba_with_cw(page, cw);
+        (void)jrn_append(ftl->journal, l, oldp[bit], newp[bit]);
+    }
 
-        DWORD newp = pba_with_cw(page, cw);
+    /* 整页一次写 L2P（state=DIRTY + region 脏位只置一次）。就绪前置 + 两遍之间
+     * 无泵 ⇒ 行始终保持 CLEAN/DIRTY，写不可能返 FTL_AGAIN；断言仅作结构破坏的
+     * debug 探针（release 由前述不变量保证，不靠断言兜底）。 */
+    const ftl_status_e wst = l2p_write_entries(ftl->cache, pending->lba, mask, newp);
 
-        /* 就绪前置已保证驻留 ⇒ 读必命中、写必不返 FTL_AGAIN。非 OK 只剩"LBA 越界"
-         * 一种可能（L2P 范围外）⇒ 按"未映射"处理并留一行日志。 */
-        DWORD oldp;
-        if (l2p_read(ftl->cache, l, &oldp) != FTL_OK)
+    ASSERT(wst == FTL_OK);
+    (void)wst;
+
+    for (BYTE bit = 0U; bit < FTL_LBA_PER_PAIR; bit++)
+    {
+        if ((mask & (1U << bit)) == 0U)
         {
-            LOGE("[FTL] confirm: l2p read lba=%lu out of range\r\n", l);
-            oldp = NAND_PBA_INVALID;
+            continue;
         }
 
-        (void)jrn_append(ftl->journal, l, oldp, newp);
-        (void)l2p_write(ftl->cache, l, newp);
+        const DWORD l     = (pending->lba + bit);
+        const DWORD new_p = newp[bit];
+        const WORD  newg  = ftl_pba_gblock(new_p);
 
         /* 飞行记录器：记录成功确认的 host 写（kind=0）。 */
-        alc_trace_record(&ftl->alloc, l, newp, 0U);
-
-        const WORD newg = ftl_pba_gblock(newp);
+        alc_trace_record(&ftl->alloc, l, new_p, 0U);
 
         ftl_block_add_valid(&ftl->alloc.blocks[newg]);
 
-        /* 覆盖写：旧 CW 失效。旧页若正是本页（同一 CW 重写）则不动计数——
-         * newp == oldp 只在"重写同一物理 CW"时出现，语义上是同一条映射。 */
-        if ((oldp != NAND_PBA_INVALID) && (oldp != newp))
+        /* 覆盖写：旧 CW 失效。旧页若正是本页（同一 CW 重写）则不动计数。 */
+        if ((oldp[bit] != NAND_PBA_INVALID) && (oldp[bit] != new_p))
         {
-            const WORD gob = ftl_pba_gblock(oldp);
+            const WORD gob = ftl_pba_gblock(oldp[bit]);
 
             /* ⚠ **常驻守卫**（非临时探针，勿删）：L2P 指的旧块在 BST 里 0 有效 ⇒ 下一行
              * 必然撞 `bst.h` 的 `valid_count > 0U` 断言。这是「full metadata rebuild 漏认」类缺陷的
@@ -285,7 +302,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
 
                         (void)LOGE("[FTL] dangling lba=%lu old=%08lx g=%u st=%s sb=%u newg=%u nst=%s supp=%lu\r\n",
                                    l,
-                                   oldp,
+                                   oldp[bit],
                                    (unsigned)gob,
                                    old_state,
                                    (unsigned)ftl->alloc.blocks[gob].sb_id,
@@ -302,8 +319,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
                 }
             }
 
-            /* 坏块 / count 已为 0 时跳过：bbt_mark_bad 清过账，再减会断言/回绕。
-             * 上面的 dangling 日志已把“L2P 仍指向该块”这件事留痕。 */
+            /* 坏块 / count 已为 0 时跳过：bbt_mark_bad 清过账，再减会断言/回绕。 */
             ftl_block_sub_valid_if_live(&ftl->alloc.blocks[gob]);
         }
     }
@@ -689,6 +705,12 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
     ASSERT(pba_fields_layout_matches());
 
     ftl->topo = topo;
+
+    /* 异步 TRIM job 初态（NOLOAD 段不清零，显式复位）。 */
+    ftl->trim_active  = false;
+    ftl->trim_lba     = 0U;
+    ftl->trim_end     = 0U;
+    ftl->trim_wait_ms = 0U;
 
     /* ├─ 绑定外部存储（storage 数组/挂载块由 HIL 按域提供）──
      * ⚠ .sram*_data 是 NOLOAD，启动代码不清零 ⇒ 下面必须逐表 memset。 */
@@ -1712,39 +1734,97 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
 }
 
 /* --------------------------------------------------------------------
- * ftl_trim
- *   功能：逐 LBA 取消映射（TRIM）——减 CW 有效计数 + 写 L2P INVALID + 记 Journal。
- *   参数：ftl —— 实例；lba —— 起始 LBA；count —— LBA 数（0 视为 1，兼容单 LBA 调用）。
- *   返回：无。
- *   实现要点：CW 级映射下 1 个 LBA = 1 个 CW ⇒ 逐 LBA 减 1 个有效 CW 计数
- *             （valid_count 是**精确**的 CW 计数；无常驻位图，有效性逐 CW
- *             由页内 META + L2P 反查判定——见 bst.h 文件头）。
- *             ⚠ **Journal 先于 L2P 写**（同 host 写路径的顺序）：两步之间掉电时，
- *             回放能重放这条 INVALID 条目，而不会因 L2P 已改、Journal 未记而把
- *             已 TRIM 的 LBA 复活。
+ * ftl_trim_begin / ftl_trim_step
+ *   功能：异步取消 [lba, lba+count) 的 LBA 映射（TRIM）——减 CW 有效计数 +
+ *         写 L2P INVALID + 记 Journal。
+ *   返回：begin FTL_OK / FTL_AGAIN（已有 job）/ FTL_ERROR；
+ *         step  FTL_OK（完成）/ FTL_AGAIN（本轮未完成）/ FTL_ERROR。
+ *   实现要点：
+ *     · 每次 step 最多推进 FTL_TRIM_STEP_LBAS 条，避免长 TRIM 占满主循环；
+ *     · L2P region 未就绪 / Journal 容量不足 ⇒ 只起异步加载/刷页并返 FTL_AGAIN，
+ *       游标不前进，下一轮重试（不产生半状态）；
+ *     · Journal 先于 L2P，与 host 写确认同序；`jrn_reserve(1)` 保证 append 不触发
+ *       页满分支；
+ *     · 由 CLI 控制面驱动（controller 的 TRIM 请求），数据面不调用。
  * -------------------------------------------------------------------- */
-void ftl_trim(ftl_ctx_t *ftl, QWORD lba, DWORD count)
-{
-    /* 前置条件（判据 2 / C5）：唯一调用者 controller.c 在调用前已 ASSERT 路由结果非空。 */
+#define FTL_TRIM_STEP_LBAS  (8U)
+#define FTL_TRIM_TIMEOUT_MS (1000U) /* 无进展上限：Journal ring_full / L2P 加载卡死时让 TRIM 失败 */
 
+/* 本轮没有进展时的等待记账：超过上限 ⇒ 中止 TRIM（避免 CLI/USB 永久 BUSY）。
+ * 有进展（processed > 0）就清等待起点；平台时钟缺失时退化为无超时（同 FLUSH）。 */
+static ftl_status_e ftl_trim_defer(ftl_ctx_t *ftl, BYTE processed)
+{
+    if (processed != 0U)
+    {
+        ftl->trim_wait_ms = 0U;
+        jrn_update_watermark(ftl->journal);
+        return FTL_AGAIN;
+    }
+
+    const DWORD now_ms = ftl_job_now_ms();
+
+    if (now_ms != 0U)
+    {
+        if (ftl->trim_wait_ms == 0U)
+        {
+            ftl->trim_wait_ms = now_ms;
+        }
+        else if ((now_ms - ftl->trim_wait_ms) >= FTL_TRIM_TIMEOUT_MS)
+        {
+            LOGE("[FTL] trim: wait timeout lba=%lu\r\n", ftl->trim_lba);
+            ftl->trim_active  = false;
+            ftl->trim_wait_ms = 0U;
+            return FTL_ERROR;
+        }
+    }
+
+    return FTL_AGAIN;
+}
+
+ftl_status_e ftl_trim_begin(ftl_ctx_t *ftl, DWORD lba, DWORD count)
+{
+    ASSERT(ftl != NULL);
+
+    if (ftl->trim_active)
+    {
+        return FTL_AGAIN; /* 单飞行：已有 TRIM job */
+    }
     if (count == 0U)
     {
-        count = 1U; /* 兼容"单 LBA"调用 */
+        return FTL_ERROR;
     }
-    if ((lba + count) > FTL_LBA_MAX)
+    if (((QWORD)lba + count) > (QWORD)FTL_LBA_MAX)
     {
-        return;
+        return FTL_ERROR;
     }
 
-    /* 逐 LBA 取消映射（非阻塞、同步完成）。范围上界/分块后续再定。 */
-    for (DWORD i = 0U; i < count; i++)
+    ftl->trim_lba     = lba;
+    ftl->trim_end     = lba + count;
+    ftl->trim_active  = true;
+    ftl->trim_wait_ms = 0U;
+    return FTL_OK;
+}
+
+ftl_status_e ftl_trim_step(ftl_ctx_t *ftl)
+{
+    ASSERT(ftl != NULL);
+
+    if (!ftl->trim_active)
     {
-        DWORD       old_pba = NAND_PBA_INVALID; /* 越界（FTL_ERROR）由 API 回填，此处再兜一层 */
-        const DWORD l       = (lba + i);        /* 全局 LBA（数据通路统一坐标） */
+        return FTL_OK;
+    }
+
+    BYTE processed = 0U;
+
+    while ((ftl->trim_lba < ftl->trim_end) && (processed < FTL_TRIM_STEP_LBAS))
+    {
+        const DWORD l = ftl->trim_lba;
 
         /* 该 LBA 还在页打包写缓冲里（未编程）：只清缓冲槽，不碰 L2P/journal——它从未
-         * 落盘，无旧映射可失效、也无映射变更需记。缓冲的内部不变量（清空 ⇒ 结算 owners）
-         * 由 wb_handle(DROP) 收口，本函数不手工维护。 */
+         * 落盘，无映射变更需记。缓冲的内部不变量（清空 ⇒ 结算 owners）由 wb_handle(DROP)
+         * 收口。
+         * ⚠ 这里不清旧 L2P 映射：当前依赖 Controller 串行化（TRIM 时该 LBA 没有未完成
+         *   写）。若将来并发 TRIM，drop 后旧映射仍可读 ⇒ 见 RISK-HOST-09。 */
         if (wb_has(ftl->wbuf, l))
         {
             wb_trigger_t trigger;
@@ -1752,33 +1832,68 @@ void ftl_trim(ftl_ctx_t *ftl, QWORD lba, DWORD count)
             trigger.kind = WBUF_TRIGGER_DROP;
             trigger.lba  = l;
             (void)wb_handle(ftl->wbuf, &trigger, NULL, NULL);
+
+            ftl->trim_lba++;
+            processed++;
             continue;
         }
 
-        /* 查旧映射：TRIM 走**同步**逃生口（自旋泵）——它由 CLI 调用，不在完成派发里，
-         * 且契约是"取消映射同步完成"。读得 INVALID 与"未映射"同义，两种都是"无旧映射"。 */
-        (void)l2p_read_sync(ftl->cache, l, &old_pba);
+        if (!l2p_is_ready(ftl->cache, l))
+        {
+            return ftl_trim_defer(ftl, processed); /* 已起异步加载：游标不动 */
+        }
+        if (!jrn_reserve(ftl->journal, 1U))
+        {
+            return ftl_trim_defer(ftl, processed); /* 已起异步刷页：游标不动 */
+        }
 
-        /* ⚠ **Journal 先于 L2P 写**（顺序不可换，同 host 写路径 ftl_confirm_write）。
-         * 取消映射也必须进 Journal（new_pba = INVALID）：L2P 的每一次变更都由 Journal
-         * 承载，掉电恢复靠回放重建——漏记这一条会让**掉电恢复把已 TRIM 的 LBA 复活**
-         * （region 虽被 flush 成 INVALID，但回放按序重放更早的写条目——page_seq 更小
-         * 但 > cp_sequence——会把它改回有效 PBA，且回放行标 DIRTY 后
-         * ftl_boot_apply_region_bitmap 会跳过预载，NAND 上的 INVALID 也不生效）。
-         * 反过来若先写 L2P 再记 Journal，掉电就落在这个窗口：L2P 已 INVALID 而 Journal
-         * 无条目 ⇒ 回放不覆盖 ⇒ 该 region 若随后被淘汰重载，映射复活。 */
+        DWORD old_pba;
+
+        const ftl_status_e rst = l2p_read(ftl->cache, l, &old_pba);
+        if (rst == FTL_AGAIN)
+        {
+            return ftl_trim_defer(ftl, processed);
+        }
+        if (rst != FTL_OK)
+        {
+            LOGE("[FTL] trim: l2p read lba=%lu failed\r\n", l);
+            ftl->trim_active = false;
+            return FTL_ERROR;
+        }
+
+        /* Journal 先于 L2P（同 host 写确认）；预留已保证 append 不触发页满分支。 */
         (void)jrn_append(ftl->journal, l, old_pba, NAND_PBA_INVALID);
 
-        (void)l2p_write_sync(ftl->cache, l, NAND_PBA_INVALID);
+        const ftl_status_e wst = l2p_write(ftl->cache, l, NAND_PBA_INVALID);
 
-        /* 有效计数在两步之后减：它只是 RAM 统计（valid_count 虚高会让 GC 选 victim 不准），
-         * 不进 Journal，位置不影响掉电正确性。 */
+        ASSERT(wst == FTL_OK);
+        (void)wst;
+
+        /* 有效计数在两步之后减：它只是 RAM 统计，不进 Journal。 */
         if (old_pba != NAND_PBA_INVALID)
         {
-            WORD gblock = ftl_pba_gblock(old_pba);
+            const WORD gblock = ftl_pba_gblock(old_pba);
 
             /* 同写确认路径：BAD / count 已清时跳过，避免断言或 `WORD` 回绕。 */
             ftl_block_sub_valid_if_live(&ftl->alloc.blocks[gblock]);
         }
+
+        ftl->trim_lba++;
+        processed++;
     }
+
+    if (processed != 0U)
+    {
+        ftl->trim_wait_ms = 0U;
+        jrn_update_watermark(ftl->journal);
+    }
+
+    if (ftl->trim_lba >= ftl->trim_end)
+    {
+        ftl->trim_active  = false;
+        ftl->trim_wait_ms = 0U;
+        return FTL_OK;
+    }
+
+    return FTL_AGAIN;
 }

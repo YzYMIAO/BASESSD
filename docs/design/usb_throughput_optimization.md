@@ -45,6 +45,7 @@
 | debug + 16 KB EP（近满盘） | 295 KB/s | — | 27.5 ms（max 46.5） | 16 KB 分块已生效（≈96% `<=16K`） |
 | debug + 16 KB EP（FTL format 后空盘） | 322 KB/s | — | 27.5 ms | `free=3218`、`mig=0/0`，排除 GC |
 | **release + 16 KB EP（空盘）** | **673 KB/s** | **758 KB/s** | **6.6 ms（max 13.6）** | **全盘 H2testw 415/423 MB 无错误** |
+| **release + 16 KB EP + 1/4/5 批处理（近满盘、GC 参与）** | **765 KB/s** | **884 KB/s** | 未取（写阶段后已断电） | 18:51:42 镜像；H2testw 415/423 MB 无错误；`free=54→GC` 条件下仍比空盘 baseline 高；断电重启后 `bad=0 dng=0`，`map`/`rd` 抽查通过 |
 
 结论：
 
@@ -78,10 +79,34 @@
 | FC/NAND 子段 DWT（encode/decode、WAIT_READY、PIO、confirm） | 定位剩余 6.6 ms 的可优化部分 | 只加观测，不改行为；debug 构建 | 子段之和能解释 6.6 ms；据此选下一项 |
 | word-wise LFSR（保持同一序列） | 软件加扰成本下降 | 必须逐字节序列一致，不能改随机化算法（介质兼容） | 读回数据一致；encode 时间下降 |
 | BCH 表驱动/内层展开 | 每 CW 编解码下降 | 需 UT 负例覆盖纠错路径 | 纠错结果不变；时间下降 |
-| PIO 按字搬运 / `CONFIG_NAND_DMA=1` | PIO 阶段下降 | 地址/缓存一致性类改动，必须上板；DMA 失败可回退 PIO | 4 KB 读写正确；`bad=0`；时序不退化 |
+| PIO 按字搬运 / `CONFIG_NAND_DMA=1` | 有限；先量化 | ⚠ **FMC NAND 没有专用 DMA 请求线**：`nand_dma.c` 用的是 DMA2 **memory-to-memory**（`DMA_REQUEST_MEM2MEM`）软件触发，FMC data register 仍是逐字节访问；不要把它当“外设 DMA”优化 | 与 PIO 对比 4 KB 读写时间；`bad=0`；时序不退化 |
+| USB 内部 DMA（`CFG_TUD_DWC2_DMA_ENABLE`） | 仅在 `GHWCFG2.arch == internal DMA` 时存在 | ⚠ 板子用的是 **OTG_FS**；ST 资料里内部 DMA 明确属于 OTG_HS。启动日志已加 `[USB] GHWCFG2=... arch=...`（0=slave-only / 1=external / 2=internal）；先读这一行再决定，且要处理 D-Cache 对齐/clean/invalidate | arch=2 才评估；否则不列为优化项 |
 | USB HS 硬件 | 突破 FS 1.2 MB/s 上限 | 需要换板/换 PHY，不在当前硬件范围 | — |
 
 **不建议**为了跑分提前回 CSW 或跨 BOT 命令合并写：那会破坏掉电语义。
+
+## 5.1 第二批已实现（未上板）
+
+按“先做 1/4/5、暂不做 BCH/PIO-DMA”的范围：
+
+- **LFSR 8-step 查表**（`fc_random_engine.c`）：4 张 256 项表（约 1.5 KB RAM），
+  每字节 2 次查表替代 8 次移位；debug 下用旧递推做 64 字节自检，序列要求 bit-exact。
+- **FC 多 Pass 合并**（`fc_data_path.c`）：写路径 4 次 desc 链遍历 → 1 次
+  （META→CRC→加扰→ECC 逐 CW）；读路径保留 ECC Pass，解扰/CRC/META 合并为 1 次。
+- **FTL 确认收敛**（`ftl.c` / `l2p_cache.c`）：页级一次 `l2p_is_ready`；
+  新增 `l2p_read_entries` / `l2p_write_entries`（`l2p_find` 每页一次，逐项仍记 hit）；
+  Journal 仍逐 CW，Journal→L2P→BST 顺序与两遍式不变。
+
+状态：**已上板并通过全盘回归（2026-10-22，18:51:42 release）**。近满盘
+（`free=54`、GC 参与）全盘 H2testw：写 **765 KB/s**、读 **884 KB/s**、
+415/423 MB 无错误；断电重启后 `boot ... restored`、`bad=0 dng=0`，
+`map 100/100000` 有映射、`rd 100/100000` 无 IO_ERROR。相比此前**空盘、无 GC**
+的 673/758 baseline，写 +13.7%、读 +16.6%——条件更差仍更快，说明 1/4/5
+批处理方向有效。
+
+⚠ 单次 H2testw 有 ±10~20% 波动，且读速度可能含 Windows 文件缓存；严格归因
+需同一 free 状态 A/B 或看 `info` 的 `[USB] latency`。本次写阶段结束后已断电，
+**`[USB] latency` 未取**（不补）；`known_risks` RISK-NAND-04 同步更新。
 
 ## 6. 复现命令
 

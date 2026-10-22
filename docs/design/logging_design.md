@@ -79,7 +79,7 @@
 | CP done / GC trig 降 DEBUG；MIG 单块降 WARN | 已改、未上板 |
 | GC 系统性读失败熔断（`MIG_SYSTEMIC_READ_FAIL_MAX=8`） | 已改、未上板（RISK-GC-10） |
 | `info` 增加 `diag[...] dng/rrab/mig/streak` | 已改、未上板 |
-| 每个 victim 块收尾打一行 `[MIG] done ...`（aborted 不打） | 已改、未上板 |
+| 只对**真正搬了数据**的 victim 打 `[MIG] done ...`（`migrated==0 && vcw==0` 的空块擦除不打印；aborted 不打） | 已改、未上板 |
 | 统一 `log_ratelimit_t` 抽象 | 未做（现有各类节流已覆盖；后续收敛） |
 
 ## 6. 验证判据

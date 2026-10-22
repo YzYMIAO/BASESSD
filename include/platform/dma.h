@@ -26,8 +26,9 @@ void dma_port_uart_tx_irq_handler(void);
  *
  * CONFIG_NAND_DMA
  *   0 = PIO（默认），CPU 逐字节读写 FMC 寄存器。
- *   1 = DMA，使用 FMC 专用 DMA 请求线（DMA_REQUEST_FMC），
- *       memory-to-peripheral / peripheral-to-memory 非阻塞模式。
+ *   1 = DMA2 **memory-to-memory**（软件触发）：FMC NAND **没有专用 DMA
+ *       请求线**（`nand_dma.c` 用 DMA_REQUEST_MEM2MEM），只是把 FMC data
+ *       register 当普通源/目的地址搬；不改变每字节 FMC 访问本质。
  *
  * DMA 模式下 DATA_IN/DATA_OUT 阶段用 DMA 启动后 CPU 可处理其他事务，
  * engine step 轮询完成标志。Command/Address 阶段仍走 PIO。

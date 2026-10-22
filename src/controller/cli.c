@@ -1157,13 +1157,20 @@ static void uart_cli_pending_poll(void)
     switch (g_cli_pending.req.opcode)
     {
         case SSD_REQUEST_WRITE:
-            (void)LOGI("wr done lba=%lu n=%lu status=%d\r\n", g_cli_pending.lba, g_cli_pending.nblocks, (int)g_cli_pending.req.completion_status);
+            /* QWORD 必须窄化到 unsigned long 再进可变参数：newlib-nano 不支持 %llu，
+             * 直接传 QWORD 会占两个参数槽，把 n/status 整体错位（n=0、status=lba 高 32 位）。 */
+            (void)LOGI("wr done lba=%lu n=%lu status=%d\r\n",
+                       (unsigned long)g_cli_pending.lba,
+                       g_cli_pending.nblocks,
+                       (int)g_cli_pending.req.completion_status);
             break;
         case SSD_REQUEST_READ:
             uart_cli_rd_report();
             break;
         case SSD_REQUEST_TRIM:
-            (void)LOGI("tr done lba=%lu status=%d\r\n", g_cli_pending.lba, (int)g_cli_pending.req.completion_status);
+            (void)LOGI("tr done lba=%lu status=%d\r\n",
+                       (unsigned long)g_cli_pending.lba,
+                       (int)g_cli_pending.req.completion_status);
             break;
         case SSD_REQUEST_FLUSH:
             (void)LOGI("fl done status=%d\r\n", (int)g_cli_pending.req.completion_status);

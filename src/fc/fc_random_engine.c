@@ -90,51 +90,135 @@ DWORD fc_random_seed_from_meta(DWORD cw_meta)
  */
 #    define FC_LFSR_PERIOD (65535U)
 
-/* 生成一个伪随机字节（8 bit 递推） */
-static BYTE fc_lfsr_byte(DWORD *state)
+/* 8 步递推：输出 8 bit，返回次态。与逐 bit 版本完全一致。 */
+static WORD fc_lfsr_step8(WORD lfsr, BYTE *out)
 {
-    WORD lfsr = (*state & 0xFFFFU);
     BYTE i;
     BYTE result = 0U;
 
     for (i = 0U; i < 8U; i++)
     {
-        result = ((result << 1U) | (lfsr & 1U));
-        /* 反馈位 = bit0 ^ bit2 ^ bit3 ^ bit5（含被移出的 bit0） */
-        {
-            BYTE fb = ((lfsr ^ (lfsr >> 2U) ^ (lfsr >> 3U) ^ (lfsr >> 5U)) & 1U);
+        result = (BYTE)((result << 1U) | (lfsr & 1U));
 
-            lfsr = ((lfsr >> 1U) | (fb << 15U));
+        /* 反馈位 = bit0 ^ bit2 ^ bit3 ^ bit5（含被移出的 bit0） */
+        const BYTE fb = (BYTE)((lfsr ^ (lfsr >> 2U) ^ (lfsr >> 3U) ^ (lfsr >> 5U)) & 1U);
+
+        lfsr = (WORD)((lfsr >> 1U) | ((WORD)fb << 15U));
+    }
+
+    *out = result;
+    return lfsr;
+}
+
+/* 16 位状态 → 8 步输出/次态是 GF(2) 线性变换 ⇒ 可按低/高字节分解：
+ *   out  = out_lo[lo]  ^ out_hi[hi]
+ *   next = next_lo[lo] ^ next_hi[hi]
+ * 4 张 256 项表约 1.5 KB；每字节 2 次查表 + 2 次异或，替代 8 次移位。 */
+typedef struct
+{
+    BYTE out_lo[256];
+    BYTE out_hi[256];
+    WORD next_lo[256];
+    WORD next_hi[256];
+} fc_lfsr_tab_t;
+
+static fc_lfsr_tab_t s_lfsr_tab;
+static BYTE          s_lfsr_tab_ready;
+
+static void fc_lfsr_tab_build(void)
+{
+    for (WORD v = 0U; v < 256U; v++)
+    {
+        s_lfsr_tab.next_lo[v] = fc_lfsr_step8((WORD)v, &s_lfsr_tab.out_lo[v]);
+        s_lfsr_tab.next_hi[v] = fc_lfsr_step8((WORD)(v << 8U), &s_lfsr_tab.out_hi[v]);
+    }
+
+    s_lfsr_tab_ready = 1U;
+}
+
+#    ifndef NDEBUG
+/* 一次性自检：查表路径必须与逐 bit 递推给出完全相同的 64 字节。 */
+static void fc_lfsr_tab_selfcheck(void)
+{
+    static const WORD seeds[] = {1U, 0x1234U, 0xFFFFU};
+
+    for (BYTE s = 0U; s < (BYTE)(sizeof(seeds) / sizeof(seeds[0])); s++)
+    {
+        WORD tab_state = seeds[s];
+        WORD ref_state = seeds[s];
+
+        for (BYTE i = 0U; i < 64U; i++)
+        {
+            const WORD lo      = (WORD)(tab_state & 0xFFU);
+            const WORD hi      = (WORD)(tab_state >> 8U);
+            const BYTE tab_out = (BYTE)(s_lfsr_tab.out_lo[lo] ^ s_lfsr_tab.out_hi[hi]);
+
+            tab_state = (WORD)(s_lfsr_tab.next_lo[lo] ^ s_lfsr_tab.next_hi[hi]);
+
+            BYTE ref_out = 0U;
+            ref_state    = fc_lfsr_step8(ref_state, &ref_out);
+
+            ASSERT(tab_out == ref_out);
         }
     }
-    *state = lfsr;
-    return result;
+}
+#    endif
+
+/* 取下一个伪随机字节（查表版；调用前表已建立）。 */
+static BYTE fc_lfsr_next(WORD *state)
+{
+    const WORD lo  = (WORD)(*state & 0xFFU);
+    const WORD hi  = (WORD)(*state >> 8U);
+    const BYTE out = (BYTE)(s_lfsr_tab.out_lo[lo] ^ s_lfsr_tab.out_hi[hi]);
+
+    *state = (WORD)(s_lfsr_tab.next_lo[lo] ^ s_lfsr_tab.next_hi[hi]);
+    return out;
 }
 
 /* --------------------------------------------------------------------
  * fc_random_transform_impl（LFSR 算法）
  *   功能：用 LFSR 流按字节异或 data（加扰=解扰）。
  *   实现要点：seed 低 16 位作初始状态（0 强制为 1，防全零卡死）；
- *         每字节 8 次移位递推取 8 bit。
+ *         首次调用建立 8 步查表，之后每字节 2 次查表；序列与逐 bit 版一致。
  * -------------------------------------------------------------------- */
 static fc_status_e fc_random_transform_impl(BYTE *data, WORD length, DWORD seed)
 {
-    WORD index;
-
     /* data 前置条件由调用者保证（fc_data_path 传入 CW 缓冲） */
     ASSERT(data != NULL);
 
+    if (s_lfsr_tab_ready == 0U)
+    {
+        fc_lfsr_tab_build();
+#    ifndef NDEBUG
+        fc_lfsr_tab_selfcheck();
+#    endif
+    }
+
     /* 用 seed 初始化为非零 LFSR 状态 */
-    DWORD lfsr_state = (seed & 0xFFFFU);
+    WORD lfsr_state = (WORD)(seed & 0xFFFFU);
     if (lfsr_state == 0U)
     {
         lfsr_state = 1U;
     }
 
-    for (index = 0U; index < length; index++)
+    WORD index = 0U;
+
+    /* 4 字节一组，减少循环开销；尾字节逐个处理。 */
+    while ((DWORD)index + 3U < (DWORD)length)
     {
-        data[index] ^= fc_lfsr_byte(&lfsr_state);
+        data[index] ^= fc_lfsr_next(&lfsr_state);
+        data[index + 1U] ^= fc_lfsr_next(&lfsr_state);
+        data[index + 2U] ^= fc_lfsr_next(&lfsr_state);
+        data[index + 3U] ^= fc_lfsr_next(&lfsr_state);
+        index = (WORD)(index + 4U);
     }
+
+    while (index < length)
+    {
+        data[index] ^= fc_lfsr_next(&lfsr_state);
+        index++;
+    }
+
     return FC_STATUS_OK;
 }
 

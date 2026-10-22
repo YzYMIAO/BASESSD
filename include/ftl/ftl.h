@@ -174,6 +174,14 @@ typedef struct ftl_context
     bool  flush_active;
     DWORD flush_start_ms;
 
+    /* 异步 TRIM job（控制面命令：CLI `tr`）。begin 设置游标，step 每次推进
+     * 一小段（FTL_TRIM_STEP_LBAS 条）；FTL_AGAIN = 本轮未完成，下轮 service 再来。
+     * 数据面 host 写确认不走这里。 */
+    bool  trim_active;
+    DWORD trim_lba;
+    DWORD trim_end;
+    DWORD trim_wait_ms; /* 无进展等待起点（0 = 尚未等待）；超 FTL_TRIM_TIMEOUT_MS 中止 */
+
     /* 时间预算后台调度器（per-instance）。
      * 任务表（10 项：6 must-run + 4 预算）由 ftl_bg_init 从 `ftl/bg_wiring.c` 的静态表
      * 装载；每轮 Phase 3 由 ftl_bg_service 选档后跑 bg_scheduler_run。 */
@@ -364,12 +372,19 @@ bool ftl_flush_step(ftl_ctx_t *ftl);
 void ftl_flush_cancel(ftl_ctx_t *ftl);
 
 /*
- * ftl_trim - 取消 [lba, lba+count) 的 LBA 映射（非阻塞、同步完成）
+ * ftl_trim_begin / ftl_trim_step - 异步取消 [lba, lba+count) 的 LBA 映射
+ *
+ * begin 只登记范围；step 每次异步推进一小段（L2P 未就绪 / Journal 容量不足时
+ * 返 FTL_AGAIN，不产生半状态）。完成后 step 返 FTL_OK 并清 active。
+ * 数据面 host 写确认不走这里；TRIM 只由 CLI 发起（控制面）。
  *
  * @param ftl   FTL 上下文（**前置条件**；实例绑定由 ftl_contract_audit 在 boot 期证明）
- * @param lba   起始逻辑地址（QWORD）
- * @param count 连续 LBA 数（0 视作 1，兼容单 LBA 调用）
+ * @param lba   起始逻辑地址
+ * @param count 连续 LBA 数（>0；越界返 FTL_ERROR）
+ * @return begin: FTL_OK / FTL_AGAIN（已有 TRIM 在飞）/ FTL_ERROR
+ *         step : FTL_OK（完成）/ FTL_AGAIN（继续下一轮）/ FTL_ERROR
  */
-void ftl_trim(ftl_ctx_t *ftl, QWORD lba, DWORD count);
+ftl_status_e ftl_trim_begin(ftl_ctx_t *ftl, DWORD lba, DWORD count);
+ftl_status_e ftl_trim_step(ftl_ctx_t *ftl);
 
 #endif /* FTL_SERVICE_H */

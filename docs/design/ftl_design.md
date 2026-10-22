@@ -2358,7 +2358,7 @@ Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
   回放（两遍扫描）、写指针恢复、截断（plan/commit）。
 - **不做**：不决定 Checkpoint 时机（§3.8）；不管理 region 位置（§3.5）；
   不决定 L2P cache 替换（§3.6）。
-- **调用者**：写完成路径 `jrn_append`、GC/WL 的 `MIG_FLUSH_JRN` 屏障、
+- **调用者**：写完成路径 `jrn_reserve` + `jrn_append`、GC/WL 的 `MIG_FLUSH_JRN` 屏障、
   boot 的 `scan/resume/replay`、CP 的 `truncate_plan/commit`。
 
 #### 3.7.3 结构与不变量
@@ -2397,7 +2397,7 @@ Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
    只比页首会把跨水位那一页整页跳过，丢掉它的新条目。
 2. **同 LBA 合并受 `merge_floor` 约束**：CP 后的覆盖写不能复用 CP 前的 sequence，
    否则块元数据增量回放按 sequence 过滤时漏记。
-3. **同一块每圈只擦一次**：CP 预擦的块记 `pre_erased_block`，`jrn_flush_page`
+3. **同一块每圈只擦一次**：CP 预擦的块记 `pre_erased_block`，`jrn_handle` 换块擦除
    回切时跳过擦除。
 4. **单飞行**：`job.phase != IDLE` 时不再起新页写；两条写会争同一页地址。
 5. **回放不信任页内容**：Journal 模块整体不转断言——页头可能因掉电撕裂而非法，
@@ -2425,9 +2425,16 @@ flowchart TD
     L --> K
 ```
 
-**屏障**：`jrn_flush_page` 是同步屏障（排空在飞 job + 立即落盘），只给结构性同步
-上下文用（HIL `fl`、开机路径、CLI）。GC/WL 的 F10 屏障走 `MIG_FLUSH_JRN`：
-`jrn_handle` 冲刷半满页，等 job 空闲 **且 `write_fail_pending == 0`**。
+**host 写确认（capacity reserve）**：`ftl_confirm_write` 在追加前调用
+`jrn_reserve(n)` 预留本页 `n` 个槽位（按 mask 最坏情况，留 1 个空槽）。不足时
+`jrn_reserve` 只调用 `jrn_freeze` 起**异步**页写并返回 `false`，confirm 直接返
+`FTL_AGAIN` 停泊；**confirm 内不同步刷页、不调 `ftl_sync_submit_wait` / `ct_drain`**。
+预留成功后追加 `n` 条不会触发页满分支，Journal 页由 `jrn_handle` 在后续 service 轮
+异步落盘。Journal 模块**不提供同步刷页出口**。
+
+**屏障**：GC/WL 先在 `MIG_WRITE_SETTLE` 用 `jrn_reserve` 预留槽位（不足则挂起），
+F10 屏障走 `MIG_FLUSH_JRN`：`jrn_handle` 冲刷半满页，等 job 空闲 **且
+`write_fail_pending == 0`**。
 页写失败时 pending 会阻止 victim 擦除，直到一次 Checkpoint Header 成功
 （其 journal 水位 ≥ 失败点）把 L2P 落盘后才清除。
 
@@ -2870,8 +2877,9 @@ pend_group_complete_subop_multi(owners, status)
 **FLUSH 语义边界**（`ftl_flush_begin/step`）：把 wbuf、L2P 脏 region、Journal 刷到 NAND，
 **不是** NVMe barrier——返回时不保证已产生新的 Checkpoint；掉电后仍靠“上一个 CP + Journal
 回放”恢复。USB 侧 FLUSH 走异步 job（不在 SCSI 回调里自旋），并有 1 s 墙钟上限做
-best-effort 完成，避免主机永远等不到 CSW；`ftl_trim` 仍是同步阻塞（范围上界见
-`known_iss.md` ISS-FTL-07 相关项之外的独立优化）。
+best-effort 完成，避免主机永远等不到 CSW。TRIM 也改为异步 job
+（`ftl_trim_begin/step`）：Controller 每轮按 run 推进，L2P region 未就绪或 Journal
+容量不足时返 `FTL_AGAIN`，由下一轮 service 继续。
 
 ---
 
@@ -3898,13 +3906,15 @@ sequenceDiagram
     N-->>C: 完成
     C->>C: ftl_host_io_callback
     alt 写成功且非中间页
-        C->>L: 第一遍 ready 所有覆盖 CW
-        alt 任一 region 未就绪
+        C->>L: 第一遍 ready 页对 + jrn_reserve(n)
+        alt region 未就绪 或 Journal 容量不足
             C->>C: 停泊 WRITE_CONFIRM 下轮 pend_confirm_service
-        else 全部就绪
+        else 就绪且已预留
             loop 每个有效 CW
                 C->>J: jrn_append
-                C->>L: l2p_write
+            end
+            C->>L: l2p_write_entries 批量
+            loop 每个有效 CW
                 C->>C: valid_count 新加一 旧减一
             end
             C->>J: checkpoint_journal_watermark
@@ -3933,6 +3943,8 @@ sequenceDiagram
 - 提交失败 ⇒ 保留 wbuf，下轮重试。
 - PROGRAM 失败 ⇒ 关 SB + 标坏；L2P 不动（旧数据仍可达）。
 - L2P region 未就绪 ⇒ 停泊 `WRITE_CONFIRM`；`pend_confirm_service` 下轮重试，不重复记账。
+- Journal 容量不足 / 页写在飞 / 换块待擦 ⇒ `jrn_reserve` 返 `false` ⇒ 同样停泊
+  `WRITE_CONFIRM`；confirm 内**不同步**刷 Journal，由 `jrn_handle` 异步推进后再重试。
 
 ### 4.6 L2P 脏 region 回写与 Directory commit
 

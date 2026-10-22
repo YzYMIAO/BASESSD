@@ -27,6 +27,13 @@ typedef struct
      * complete_flag。调用者的 ssd_request_t 必须活到完成（USB/CLI 都是静态对象）。 */
     ssd_request_t *flush_req;
 
+    /* 在飞的 TRIM 请求（NULL = 无）。TRIM 现在是异步命令：submit 只登记范围，
+     * ssd_controller_service 每轮按 run 推进 ftl_trim_step；完成时置 complete_flag。
+     * trim_lba 是当前未处理的全局 LBA；trim_started = 当前 run 已调用 begin。 */
+    ssd_request_t *trim_req;
+    QWORD          trim_lba;
+    bool           trim_started;
+
     /* 主机可见 LBA 上限（HIL 容量口径）。默认 = FTL_LBA_MAX；开机时按实际
      * 坏块扣减（本仓自拟的容量折中：主流是固定容量 + OP 吸收坏块，不动态缩容）。
      * ⚠ 这是**运行时**上限，L2P 表仍按编译期 FTL_LBA_MAX 定尺寸。 */
@@ -50,11 +57,12 @@ ssd_status_e ssd_controller_submit(ssd_controller_t *controller, ssd_request_t *
 BYTE         ssd_controller_is_complete(const ssd_request_t *request);
 
 /*
- * ssd_controller_service - 推进 Controller 自己的异步命令（当前只有 FLUSH）
+ * ssd_controller_service - 推进 Controller 自己的异步命令（FLUSH / TRIM）
  *
  * 主循环每轮调用一次（在 FTL 服务之后、USB 任务之前）：本轮把所有实例的
  * flush job 推进一步；全部完成时给在飞的 FLUSH 请求置 complete_flag。
- * 无在飞 FLUSH 时立即返回。
+ * TRIM 请求按 run 逐段调用 ftl_trim_begin/step，全部完成时置 complete_flag。
+ * 无在飞命令时立即返回。
  *
  * 为什么需要它：FLUSH 不能在 host 回调里同步自旋（RISK-USB-06），但又必须由
  * HIL 的完成通道回执；FTL 侧拆成 ftl_flush_begin/step 后，这个「每轮推进 +

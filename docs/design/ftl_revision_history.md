@@ -5858,6 +5858,59 @@ erase-check 约 10 s、`old_bad=9 recovered=9 new_bad=0`；`wr 4 1`/`rd 4 1 c` P
 
 ---
 
+## v0.92 — 写确认 Journal 容量改为非阻塞预留（confirm 内不再同步刷页）
+
+**日期**：2026-10-22
+
+**起因**：`ftl_confirm_write` 的「两遍之间无泵」假设对停泊确认不成立。正常完成路径在
+`ftl_op_dispatch` 内，`jrn_append` 页满时不会同步刷页；但 `pend_confirm_service` 在主循环
+（dispatch 深度 0）调 confirm，`jrn_append` 页满且 `jrn_freeze` 失败时会走
+`jrn_flush_page` → `ftl_sync_write_page` → `ct_drain`，**重入 host 完成回调**。后果：
+批量化在 Journal 循环前一次读完的 `oldp[]` 可能变陈旧（Journal old_pba 链断、
+valid_count 重复扣减）；重入的 `l2p_is_ready`/`l2p_load_start` 还可能把本行 kick 成
+FLUSHING，使 `l2p_write_entries` 返 `FTL_AGAIN`，release 下静默跳过 L2P 更新
+（`RISK-HOST-07`）。
+
+**判据**：主流存储主控的 completion/service handler 不阻塞、不重入完成派发；资源不足
+用背压（不 post completion / 返回可重试状态），Journal 页由后台 job 异步落盘。
+
+**改动**：
+- 新增 `jrn_reserve(journal, entries)`：非阻塞预留当前页槽位；不足时只调 `jrn_freeze`
+  起异步页写并返 false，**不**调 `jrn_flush_page` / `ftl_sync_submit_wait` / `ct_drain`。
+  预留按最坏情况（mask 置位数）并留 1 个空槽 ⇒ 追加结束后不会触发 `jrn_append` 页满分支。
+- `ftl_confirm_write`：在 ready 之后、读 `oldp`/追加之前调用 `jrn_reserve`；失败直接返
+  `FTL_AGAIN` 停泊，由 `jrn_handle` 后续轮推进。`ring_full` 时不再静默成功——停泊超时
+  按 IO_ERROR 结算。
+- `jrn_append` **移除所有上下文中的同步回退**：页满且 `jrn_freeze` 起不来时只丢弃后续
+  条目 + LOGE，整页由 `jrn_handle` 后续轮刷；需要不丢条目的调用者先 `jrn_reserve`。
+- GC/WL 的 `MIG_WRITE_SETTLE` 在改 L2P/Journal 前 `jrn_reserve(popcount(cw_bitmap))`；
+  不足时只起异步刷页并 `mig_wait` 挂起，不再在 migrate 里同步刷 Journal。
+  ⚠ `wait_ms` 只在 L2P 与 Journal 容量都就绪后清零（原先每轮 L2P ready 都清零，
+  使 journal capacity timeout 永不触发）；GC/WL 追加后补 `jrn_update_watermark`，
+  否则大量搬移只靠 T2/T3 触发 CP，可能撞 ring_full。
+- TRIM 改为异步 job：`ftl_trim_begin/step`（step 每次最多 8 条）；L2P region 未就绪或
+  Journal 容量不足时返 `FTL_AGAIN`，游标不动；Controller 的 TRIM 请求改为 submit 登记 +
+  `ssd_controller_service` 每轮按 run 推进，完成走 `complete_flag`。不再调用
+  `l2p_read_sync`/`l2p_write_sync`/`jrn_flush_page`。
+- `jrn_flush_page` 及其专用 helper（`jrn_flush_now` / `jrn_drain` /
+  `jrn_erase_pending_sync`）与零调用者的 `l2p_flush_one_sync` 一并删除：Journal 模块
+  不再提供同步刷页出口。TRIM 增加 1 s 无进展超时，Journal ring_full / L2P 加载卡死时
+  host 请求按 IO_ERROR 收尾，不会永久 BUSY。
+- `l2p_read_entries` 的 miss 分支与逐条 `l2p_read` 对齐（记 miss + 起异步加载），
+  避免未来调用点永久重试（`RISK-L2P-06`）。
+- 删除批量 L2P API 里重复的 NULL/页对齐/同 region 运行期断言（H2/C7）；同 region
+  改为编译期 `_Static_assert`。
+
+**验证**：`make all` / `make release` 零新告警；`make tests UT=FTL` 仍因冻结测试源
+编不过（475 处，全在 `tests/unit/*`）。**TRIM 基本路径已上板**（banner 18:43:34）：
+`wr 100 1` → `n=1 status=0`，`tr 100` → `status=0`，`map 100` 写后新 PBA / 擦后
+INVALID；断电回放（`boot type=2`）后仍 INVALID。写确认/GC 的 Journal 背压与全盘
+H2testw 仍待测。风险见 `RISK-HOST-07/08/09/10`、`RISK-L2P-06`。
+
+**介质布局**：无变化（未抬 `FTL_MEDIA_LAYOUT_VERSION`）。
+
+---
+
 ## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
 
 当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（12）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。

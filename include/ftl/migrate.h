@@ -118,7 +118,7 @@ typedef enum
     MIG_READ,         /* 提交阶段：读 victim 当前页的当前 plane */
     MIG_READ_SETTLE,  /* 纯计算：反查 L2P 得 cw_bitmap（region 未就绪则原地等） */
     MIG_WRITE,        /* 提交阶段：写目标页的当前 plane */
-    MIG_WRITE_SETTLE, /* 纯计算：改 L2P/Journal + 迁移有效计数 */
+    MIG_WRITE_SETTLE, /* 纯计算 + jrn_reserve：改 L2P/Journal + 迁移有效计数 */
     MIG_FLUSH_JRN,    /* 纯计算：等 Journal job 空闲（F10 屏障） */
     MIG_ERASE,        /* 提交阶段：擦 victim 的当前 plane */
     MIG_DONE          /* 纯计算：收尾（移除 closed 条目 + 计数 + 复位 job） */

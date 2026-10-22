@@ -842,7 +842,7 @@ int main(void)
             (void)fc_service();
         }
 
-        /* Controller 自己的异步命令（当前只有 FLUSH）：每轮推进 + 完成回执。
+        /* Controller 自己的异步命令（FLUSH / TRIM）：每轮推进 + 完成回执。
          * 必须在 USB 任务之前——USB 前端同一轮就能看到 complete_flag。 */
         ssd_controller_service(&g_ctrl);
 
