@@ -20,7 +20,8 @@
 - 当前平台：STM32H743 + MT29F4G08，USB2_OTG_FS **Full Speed 12 Mbps**、BOT 单命令，
   主机可见容量 424 MiB。
 - 已通过：H2testw 全盘 415/423 MB 无错误；写 **765 KB/s**、读 **884 KB/s**（近满盘/GC
-  条件）；TRIM 后断电重启不复活；`bad=0 dng=0`。
+  条件）；TRIM 后断电重启不复活；`bad=0`。⚠ 2026-10-23 dirty media 曾出现
+  `[FTL] dangling ... st=CLOSED`，不要再把 `dng` 恒为 0 当默认既成事实（见 RISK-MIG-08）。
 - 4K 随机（128 MB 文件、QD1、`-Suw`）：写 **532 KiB/s / 133 IOPS / 7.5 ms**，
   读 **768 KiB/s / 193 IOPS / 5.2 ms**。
 - 仍缺：`[USB ] latency` 未在写阶段取到；FC UT 上板回归、掉电循环、严格 steady-state
@@ -286,7 +287,7 @@ preconditioning**；若报告引用 PTS，必须按标准补做 preconditioning/
 
 | 配置 | 写 | 读 | 条件 |
 |---|---:|---:|---|
-| release 18:51:42 | **765 KB/s** | **884 KB/s** | 415/423 MB 无错误；断电重启 `restored`、`bad=0 dng=0`、`map/rd` 抽查通过 |
+| release 18:51:42 | **765 KB/s** | **884 KB/s** | 415/423 MB 无错误；断电重启 `restored`、`bad=0`（当时 `dng` 为 0）、`map/rd` 抽查通过 |
 
 ### 7.2 4K 随机（Windows diskspd，128 MB 文件）
 
