@@ -79,7 +79,7 @@ ftl_status_e ct_add(WORD cmd_id, void *ctx)
     {
         if ((g_table[i].used != 0U) && (g_table[i].cmd_id == cmd_id))
         {
-            LOGW("[FTL] completion entry cmd=%u reused — stale ctx overwritten\r\n", (unsigned)cmd_id);
+            LOGW(LOG_TAG_FTL "completion entry cmd=%u reused — stale ctx overwritten\r\n", (unsigned)cmd_id);
             g_table[i].ctx = ctx;
             return FTL_OK;
         }

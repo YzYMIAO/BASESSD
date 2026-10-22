@@ -40,6 +40,44 @@ DWORD       log_get_write_failure_count(void);
  * 企业固件中的业务代码使用这些宏。DEBUG 日志可在 release 构建中完全裁剪，
  * 从而避免格式化参数的计算、栈占用和 UART 队列压力。
  */
+/*
+ * 模块标签固定 4 字符宽，右括号对齐；不足补空格。级别前缀 [ERR]/[WRN]/[INF]/[DBG]
+ * 固定 3 字符，本身已对齐。格式串直接拼接这些宏：编译期完成，无运行期格式化开销。
+ * 例外：[FAULT] / [BOUND] 是断言/故障类别，不是模块标签，不参与对齐。
+ */
+#define LOG_TAG_GC   "[GC  ] "
+#define LOG_TAG_MIG  "[MIG ] "
+#define LOG_TAG_L2P  "[L2P ] "
+#define LOG_TAG_JRN  "[JRN ] "
+#define LOG_TAG_CP   "[CP  ] "
+#define LOG_TAG_RR   "[RR  ] "
+#define LOG_TAG_WL   "[WL  ] "
+#define LOG_TAG_MD   "[MD  ] "
+#define LOG_TAG_BBT  "[BBT ] "
+#define LOG_TAG_USB  "[USB ] "
+#define LOG_TAG_FTL  "[FTL ] "
+#define LOG_TAG_BLK  "[BLK ] "
+#define LOG_TAG_TRC  "[TRC ] "
+#define LOG_TAG_CAP  "[CAP ] "
+#define LOG_TAG_FLT  "[FLT ] "
+#define LOG_TAG_STAT "[STAT] "
+#define LOG_TAG_TRIM "[TRIM] "
+#define LOG_TAG_PRED "[PRED] "
+#define LOG_TAG_NAND "[NAND] "
+#define LOG_TAG_BOOT "[BOOT] "
+#define LOG_TAG_CTRL "[CTRL] "
+#define LOG_TAG_FC   "[FC  ] "
+#define LOG_TAG_SCH  "[SCH ] "
+#define LOG_TAG_DSP  "[DSP ] "
+#define LOG_TAG_ENG  "[ENG ] "
+#define LOG_TAG_FMC  "[FMC ] "
+#define LOG_TAG_DAT  "[DAT ] "
+#define LOG_TAG_TIM  "[TIM ] "
+#define LOG_TAG_RES  "[RES ] "
+#define LOG_TAG_META "[META] "
+#define LOG_TAG_WEAR "[WEAR] "
+#define LOG_TAG_POOL "[POOL] "
+
 #define LOGE(format, ...) log_printf(LOG_ERROR, "[ERR] " format, ##__VA_ARGS__)
 #define LOGW(format, ...) log_printf(LOG_WARNING, "[WRN] " format, ##__VA_ARGS__)
 #define LOGI(format, ...) log_printf(LOG_INFO, "[INF] " format, ##__VA_ARGS__)

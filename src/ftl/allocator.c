@@ -76,7 +76,7 @@ void alc_free_block(alc_t *alloc, WORD gblock)
     ASSERT(gblock < FTL_BLOCK_TOTAL);
     if (gblock >= FTL_BLOCK_TOTAL)
     {
-        LOGE("[FTL] free_block: gblock %u out of range\r\n", (unsigned)gblock);
+        LOGE(LOG_TAG_FTL "free_block: gblock %u out of range\r\n", (unsigned)gblock);
         return;
     }
 
@@ -84,7 +84,7 @@ void alc_free_block(alc_t *alloc, WORD gblock)
     ASSERT(!ftl_block_is_bad(&alloc->blocks[gblock]));
     if (ftl_block_is_bad(&alloc->blocks[gblock]))
     {
-        LOGE("[FTL] free_block: gblock %u is bad, dropped\r\n", (unsigned)gblock);
+        LOGE(LOG_TAG_FTL "free_block: gblock %u is bad, dropped\r\n", (unsigned)gblock);
         return;
     }
 
@@ -92,7 +92,7 @@ void alc_free_block(alc_t *alloc, WORD gblock)
     ASSERT(ftl_block_state(&alloc->blocks[gblock]) != FTL_BLOCK_STATE_FREE);
     if (ftl_block_state(&alloc->blocks[gblock]) == FTL_BLOCK_STATE_FREE)
     {
-        LOGE("[FTL] free_block: gblock %u double free, dropped\r\n", (unsigned)gblock);
+        LOGE(LOG_TAG_FTL "free_block: gblock %u double free, dropped\r\n", (unsigned)gblock);
         return;
     }
 
@@ -100,7 +100,7 @@ void alc_free_block(alc_t *alloc, WORD gblock)
     ASSERT(alloc->free_count < FTL_BLOCK_TOTAL);
     if (alloc->free_count >= FTL_BLOCK_TOTAL)
     {
-        LOGE("[FTL] free_block: free pool full, gblock %u dropped\r\n", (unsigned)gblock);
+        LOGE(LOG_TAG_FTL "free_block: free pool full, gblock %u dropped\r\n", (unsigned)gblock);
         return;
     }
 
@@ -401,7 +401,7 @@ static WORD alc_closed_sb_append(alc_t *alloc, const super_block_t *sb)
     /* release 兜底：结构上不应满；真满时拒绝写入，避免越界。 */
     if (alloc->closed_sb_count >= SUPER_BLOCK_LIST_MAX)
     {
-        LOGE("[FTL] closed_sb_list full, entry dropped\r\n");
+        LOGE(LOG_TAG_FTL "closed_sb_list full, entry dropped\r\n");
         return FTL_BLOCK_NO_SB;
     }
 
@@ -421,7 +421,7 @@ static WORD alc_closed_sb_append(alc_t *alloc, const super_block_t *sb)
         ASSERT(entry.plane_blocks[plane] < BLOCKS_PER_PLANE);
         if (entry.plane_blocks[plane] >= BLOCKS_PER_PLANE)
         {
-            LOGE("[FTL] closed_sb: plane%u block %u out of range\r\n", (unsigned)plane, (unsigned)entry.plane_blocks[plane]);
+            LOGE(LOG_TAG_FTL "closed_sb: plane%u block %u out of range\r\n", (unsigned)plane, (unsigned)entry.plane_blocks[plane]);
             entry.plane_blocks[plane] = FTL_BLOCK_NO_PLANE;
             continue;
         }
@@ -1005,7 +1005,7 @@ void alc_trace_dump(const alc_t *alloc, DWORD lba, DWORD pba)
         }
     }
 
-    LOGW("[TRC] fail lba=%lu pba=0x%08lx match=%lu dup=%lu\r\n", lba, pba, matches, dups);
+    LOGW(LOG_TAG_TRC "fail lba=%lu pba=0x%08lx match=%lu dup=%lu\r\n", lba, pba, matches, dups);
 
     DWORD shown = 0U;
 
@@ -1018,7 +1018,7 @@ void alc_trace_dump(const alc_t *alloc, DWORD lba, DWORD pba)
             continue;
         }
 
-        LOGW("[TRC] seq=%lu lba=%lu pba=0x%08lx pl=%u bk=%u pg=%u cw=%u %s\r\n",
+        LOGW(LOG_TAG_TRC "seq=%lu lba=%lu pba=0x%08lx pl=%u bk=%u pg=%u cw=%u %s\r\n",
              t->seq,
              t->lba,
              t->pba,

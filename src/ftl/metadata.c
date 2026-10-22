@@ -263,7 +263,7 @@ bool md_pool_build_all(alc_t *alloc)
                         2U,
                         spare_used) < 2U)
     {
-        LOGE("[POOL] BBT candidates < 2 — metadata area unusable\r\n");
+        LOGE(LOG_TAG_POOL "BBT candidates < 2 — metadata area unusable\r\n");
         return false;
     }
 
@@ -277,7 +277,7 @@ bool md_pool_build_all(alc_t *alloc)
                         1U,
                         spare_used) < 2U)
     {
-        LOGE("[POOL] Checkpoint candidates < 2\r\n");
+        LOGE(LOG_TAG_POOL "Checkpoint candidates < 2\r\n");
         return false;
     }
 
@@ -291,7 +291,7 @@ bool md_pool_build_all(alc_t *alloc)
                         2U,
                         spare_used) < JOURNAL_BLOCK_COUNT)
     {
-        LOGE("[POOL] Journal candidates < %u\r\n", (unsigned)JOURNAL_BLOCK_COUNT);
+        LOGE(LOG_TAG_POOL "Journal candidates < %u\r\n", (unsigned)JOURNAL_BLOCK_COUNT);
         return false;
     }
 
@@ -305,7 +305,7 @@ bool md_pool_build_all(alc_t *alloc)
                         0U,
                         spare_used) < 2U)
     {
-        LOGE("[POOL] Anchor candidates < 2\r\n");
+        LOGE(LOG_TAG_POOL "Anchor candidates < 2\r\n");
         return false;
     }
 
@@ -819,7 +819,7 @@ static void md_live_add_copy(md_dir_cache_t *dir, DWORD pba, WORD entry_idx, boo
     {
         if (!*warned)
         {
-            LOGW("[META] directory entry %u: plane=%u block=%u out of range — skipped\r\n",
+            LOGW(LOG_TAG_META "directory entry %u: plane=%u block=%u out of range — skipped\r\n",
                  (unsigned)entry_idx,
                  (unsigned)plane,
                  (unsigned)block);
@@ -842,7 +842,7 @@ static void md_live_add_copy(md_dir_cache_t *dir, DWORD pba, WORD entry_idx, boo
     }
     else if (!*warned)
     {
-        LOGW("[META] directory entry %u: gblock %u out of range — skipped\r\n", (unsigned)entry_idx, (unsigned)g);
+        LOGW(LOG_TAG_META "directory entry %u: gblock %u out of range — skipped\r\n", (unsigned)entry_idx, (unsigned)g);
         *warned = true;
     }
 }
@@ -910,7 +910,7 @@ static void md_boot_log(const md_dir_cache_t *dir)
 
     if (dir->cur_block_valid)
     {
-        LOGI("[META] anchor_seq=%lu dyn=%u cur_blk=%u live_blks=%lu\r\n",
+        LOGI(LOG_TAG_META "anchor_seq=%lu dyn=%u cur_blk=%u live_blks=%lu\r\n",
              dir->anchor_sequence,
              dyn,
              (unsigned)dir->cur_metadata_block,
@@ -918,7 +918,7 @@ static void md_boot_log(const md_dir_cache_t *dir)
     }
     else
     {
-        LOGI("[META] anchor_seq=%lu dyn=%u cur_blk=- live_blks=%lu\r\n", dir->anchor_sequence, dyn, live_blocks);
+        LOGI(LOG_TAG_META "anchor_seq=%lu dyn=%u cur_blk=- live_blks=%lu\r\n", dir->anchor_sequence, dyn, live_blocks);
     }
 }
 
@@ -1048,7 +1048,7 @@ void md_update(md_dir_cache_t *dir,
 
     /* 满：不追加。L2P_REGION 按构造不可达；新增元数据类型前必须先扩容量。
      * 静默丢弃会让调用者以为位置已记录 ⇒ 至少留下错误日志。 */
-    LOGE("[META] directory full: type=%u id=%u dropped\r\n", (unsigned)type, (unsigned)id);
+    LOGE(LOG_TAG_META "directory full: type=%u id=%u dropped\r\n", (unsigned)type, (unsigned)id);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1305,7 +1305,7 @@ void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc)
         }
     }
 
-    LOGI("[META] L2P log area: live=%u free=%u reclaim=%u borrow=%u (total=%u/plane)\r\n",
+    LOGI(LOG_TAG_META "L2P log area: live=%u free=%u reclaim=%u borrow=%u (total=%u/plane)\r\n",
          (unsigned)n_live,
          (unsigned)n_free,
          (unsigned)n_reclaim,
@@ -1316,7 +1316,7 @@ void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc)
      * 打破“压缩没有目标块”的死锁；只有 OP 池也空时才真正需要格式化。 */
     if (n_free == 0U)
     {
-        LOGW("[META] L2P log area exhausted (free=0, reclaim=%u) — dynamic borrow up to %u blocks\r\n",
+        LOGW(LOG_TAG_META "L2P log area exhausted (free=0, reclaim=%u) — dynamic borrow up to %u blocks\r\n",
              (unsigned)n_reclaim,
              (unsigned)L2P_LOG_BORROW_MAX);
     }
@@ -1386,7 +1386,7 @@ bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc)
          * ⇒ 掉电后每次开机全量重建（实测 `free=3241 cmd=0 buf=0` 仍 stall）。
          * 压缩/回收 job 会腾块；这里不能回退到用户 Free Pool。 */
         dir->handle.compact_wanted = true;
-        LOGD("[META] log area exhausted: live=%u reclaim=%u cur_page=%u — request compact\r\n",
+        LOGD(LOG_TAG_META "log area exhausted: live=%u reclaim=%u cur_page=%u — request compact\r\n",
              (unsigned)md_get_live_block_count(dir),
              (unsigned)dir->reclaim_pending_count,
              (unsigned)dir->cur_metadata_page);
@@ -1830,7 +1830,7 @@ ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_write
          * loc=0 且 newest<N ⇒ 找到了，看 seq 是否与写侧对得上。
          * ⚠ 必须 INFO：本函数在 ftl_init 里跑，早于 CLI ⇒ `log level debug` 是开机后
          *   才敲的，LOGD 在此处永远看不到。*/
-        LOGI("[META] anchor load: loc=%d newest=%u seq=%lu\r\n", (int)loc, (unsigned)newest, dir->anchor_sequence);
+        LOGI(LOG_TAG_META "anchor load: loc=%d newest=%u seq=%lu\r\n", (int)loc, (unsigned)newest, dir->anchor_sequence);
 
         if ((loc != FTL_OK) || (newest == UINT16_MAX))
         {
@@ -2002,7 +2002,7 @@ void md_pool_print(const md_dir_cache_t *dir)
 {
     if ((dir == NULL) || (dir->alloc == NULL) || (dir->alloc->pools == NULL))
     {
-        LOGW("[POOL] not initialized\r\n");
+        LOGW(LOG_TAG_POOL "not initialized\r\n");
         return;
     }
 
@@ -2025,7 +2025,7 @@ void md_pool_print(const md_dir_cache_t *dir)
                 }
             }
 
-            LOGI("[POOL] %-10s range=%u..%u good(plane-blocks)=%lu\r\n",
+            LOGI(LOG_TAG_POOL "%-10s range=%u..%u good(plane-blocks)=%lu\r\n",
                  part->name,
                  (unsigned)L2P_LOG_BLOCK0,
                  (unsigned)(L2P_LOG_AREA_END - 1U),
@@ -2057,7 +2057,7 @@ void md_pool_print(const md_dir_cache_t *dir)
             continue;
         }
 
-        LOGI("[POOL] %-10s nominal=%u candidates=%u\r\n",
+        LOGI(LOG_TAG_POOL "%-10s nominal=%u candidates=%u\r\n",
              part->name,
              (unsigned)ring->nominal_count,
              (unsigned)ring->block_count);
@@ -2068,7 +2068,7 @@ void md_pool_print(const md_dir_cache_t *dir)
 
             if ((b < ring->first_block) || (b >= (ring->first_block + ring->nominal_count)))
             {
-                LOGI("[POOL] %-10s remapped -> spare block=%u (candidate_idx=%u)\r\n",
+                LOGI(LOG_TAG_POOL "%-10s remapped -> spare block=%u (candidate_idx=%u)\r\n",
                      part->name,
                      (unsigned)b,
                      (unsigned)i);
@@ -2116,7 +2116,7 @@ void md_pool_service(struct ftl_context *ftl)
         alloc->pools->dirty         = false;
         alloc->bbt.rebuild_required = true;
         bbt_note_dirty(alloc);
-        LOGE("[POOL] rebuild failed — metadata area exhausted, rebuild required\r\n");
+        LOGE(LOG_TAG_POOL "rebuild failed — metadata area exhausted, rebuild required\r\n");
         return;
     }
 
@@ -2183,7 +2183,7 @@ void md_pool_service(struct ftl_context *ftl)
 
     if ((s_pool_rebuilt_logged++ % MD_POOL_REBUILT_LOG_EVERY) == 0U)
     {
-        LOGW("[POOL] rebuilt after metadata BAD (jrn_changed=%u rebuild_required=%u count=%lu)\r\n",
+        LOGW(LOG_TAG_POOL "rebuilt after metadata BAD (jrn_changed=%u rebuild_required=%u count=%lu)\r\n",
              (unsigned)(jrn_changed ? 1U : 0U),
              (unsigned)(alloc->bbt.rebuild_required ? 1U : 0U),
              s_pool_rebuilt_logged);

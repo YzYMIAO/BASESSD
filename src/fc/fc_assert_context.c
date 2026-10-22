@@ -21,7 +21,7 @@ void assertion_platform_context(void)
         return;
     }
 
-    LOGE("[RES] cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
+    LOGE(LOG_TAG_RES "cmd=%u/%u desc=%u/%u buf=%u/%u sq=%u hsq=%u cq=%u\r\n",
          (unsigned)stats.command_used,
          (unsigned)FC_COMMAND_POOL_DEPTH,
          (unsigned)stats.descriptor_used,

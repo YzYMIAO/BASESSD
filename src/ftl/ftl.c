@@ -281,7 +281,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
                         slot->first_lba = l;
                         slot->lbas      = 0U;
 
-                        LOGW("[FTL] dangling g=%u first_lba=%lu st=BAD newg=%u (retired; later LBAs aggregated)\r\n",
+                        LOGW(LOG_TAG_FTL "dangling g=%u first_lba=%lu st=BAD newg=%u (retired; later LBAs aggregated)\r\n",
                              (unsigned)gob,
                              l,
                              (unsigned)newg);
@@ -300,7 +300,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
                         const char *old_state = ftl_block_state_name(old_st);
                         const char *new_state = ftl_block_state_name(ftl_block_state(&ftl->alloc.blocks[newg]));
 
-                        (void)LOGE("[FTL] dangling lba=%lu old=%08lx g=%u st=%s sb=%u newg=%u nst=%s supp=%lu\r\n",
+                        (void)LOGE(LOG_TAG_FTL "dangling lba=%lu old=%08lx g=%u st=%s sb=%u newg=%u nst=%s supp=%lu\r\n",
                                    l,
                                    oldp[bit],
                                    (unsigned)gob,
@@ -346,7 +346,7 @@ static ssd_status_e ftl_host_io_read_ok(ftl_ctx_t    *ftl,
 
     if (ftl_cmd_read_data(cmd, pending->buffer, data_size) != FTL_OK)
     {
-        LOGE("[FTL] read data short lba=%lu cmd=%u\r\n", pending->lba, (unsigned)cmd_id);
+        LOGE(LOG_TAG_FTL "read data short lba=%lu cmd=%u\r\n", pending->lba, (unsigned)cmd_id);
         return SSD_STATUS_IO_ERROR;
     }
 
@@ -460,7 +460,7 @@ static void ftl_host_io_write_fail(ftl_ctx_t *ftl, pend_req_t *pending, const fc
     char stbuf[48];
 
     (void)fc_cw_status_str(completion->status, stbuf, sizeof(stbuf));
-    LOGW("[FTL] program-fail lba=%lu pl=0x%lx st=%s\r\n", pending->lba, bad_plane_mask, stbuf);
+    LOGW(LOG_TAG_FTL "program-fail lba=%lu pl=0x%lx st=%s\r\n", pending->lba, bad_plane_mask, stbuf);
 
     if (((bad_plane_mask & 0x1U) != 0U) && (pending->new_pba != NAND_PBA_INVALID))
     {
@@ -504,7 +504,7 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
     {
         if ((s_write_retry_logged++ % FTL_WRITE_RETRY_LOG_EVERY) == 0U)
         {
-            LOGE("[FTL] retry: page readback failed lba=%lu count=%lu\r\n", pending->lba, s_write_retry_logged);
+            LOGE(LOG_TAG_FTL "retry: page readback failed lba=%lu count=%lu\r\n", pending->lba, s_write_retry_logged);
         }
         return FTL_ERROR;
     }
@@ -555,7 +555,7 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
 
     if ((s_write_retry_logged++ % FTL_WRITE_RETRY_LOG_EVERY) == 0U)
     {
-        LOGW("[FTL] write retry lba=%lu cw=0x%02x retry=%u pba=0x%08lx/0x%08lx count=%lu\r\n",
+        LOGW(LOG_TAG_FTL "write retry lba=%lu cw=0x%02x retry=%u pba=0x%08lx/0x%08lx count=%lu\r\n",
              pending->lba,
              (unsigned)pending->cw_bitmap,
              (unsigned)pending->retry_count,
@@ -707,10 +707,12 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
     ftl->topo = topo;
 
     /* 异步 TRIM job 初态（NOLOAD 段不清零，显式复位）。 */
-    ftl->trim_active  = false;
-    ftl->trim_lba     = 0U;
-    ftl->trim_end     = 0U;
-    ftl->trim_wait_ms = 0U;
+    ftl->trim_active    = false;
+    ftl->trim_lba       = 0U;
+    ftl->trim_end       = 0U;
+    ftl->trim_start_lba = 0U;
+    ftl->trim_start_ms  = 0U;
+    ftl->trim_wait_ms   = 0U;
 
     /* ├─ 绑定外部存储（storage 数组/挂载块由 HIL 按域提供）──
      * ⚠ .sram*_data 是 NOLOAD，启动代码不清零 ⇒ 下面必须逐表 memset。 */
@@ -1235,7 +1237,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
              * IO_ERROR 交给 host，不 brick 设备。 */
             if (!pba_is_valid(p))
             {
-                LOGE("[FTL] rd lba=%lu: L2P entry 0x%08lx is not a valid PBA\r\n", l, p);
+                LOGE(LOG_TAG_FTL "rd lba=%lu: L2P entry 0x%08lx is not a valid PBA\r\n", l, p);
                 return FTL_ERROR;
             }
 
@@ -1249,7 +1251,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
              * 属映射表损坏（旧介质格式 / bit rot），不是编程错误。 */
             if (pl != ftl_lba_plane(l))
             {
-                LOGE("[FTL] rd lba=%lu: plane mismatch pba=0x%08lx\r\n", l, p);
+                LOGE(LOG_TAG_FTL "rd lba=%lu: plane mismatch pba=0x%08lx\r\n", l, p);
                 return FTL_ERROR;
             }
 
@@ -1282,7 +1284,7 @@ static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba,
 
                 if (ftl_log_throttle_due(&s_lost_log, &suppressed))
                 {
-                    LOGE("[FTL] rd lba=%lu: mapping lost (degraded L2P region) — IO_ERROR (suppressed=%lu)\r\n",
+                    LOGE(LOG_TAG_FTL "rd lba=%lu: mapping lost (degraded L2P region) — IO_ERROR (suppressed=%lu)\r\n",
                          internal_lba,
                          (unsigned long)suppressed);
                 }
@@ -1446,12 +1448,12 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
                     {
                         if (ftl->mig_handle->gc_no_gain)
                         {
-                            LOGE("[FTL] no space: GC no-gain (free=%u) — IO_ERROR (suppressed=%lu)\r\n",
+                            LOGE(LOG_TAG_FTL "no space: GC no-gain (free=%u) — IO_ERROR (suppressed=%lu)\r\n",
                                  (unsigned)ftl->alloc.free_count,
                                  suppressed);
                         }
 
-                        LOGE("[FTL] drain stalled gi=%u next=%lu/%lu (suppressed=%lu)\r\n",
+                        LOGE(LOG_TAG_FTL "drain stalled gi=%u next=%lu/%lu (suppressed=%lu)\r\n",
                              (unsigned)gi,
                              g->next,
                              g->total,
@@ -1470,7 +1472,7 @@ static void ftl_drain_group(ftl_ctx_t *ftl, WORD gi)
 
         if (ftl_log_throttle_due(&s_subop_fail_log, &suppressed))
         {
-            LOGE("[FTL] subop failed gi=%u next=%lu/%lu (suppressed=%lu)\r\n",
+            LOGE(LOG_TAG_FTL "subop failed gi=%u next=%lu/%lu (suppressed=%lu)\r\n",
                  (unsigned)gi,
                  g->next,
                  g->total,
@@ -1514,7 +1516,7 @@ static ftl_status_e ftl_submit_common(ftl_ctx_t *ftl, const ftl_io_req_t *req, p
     /* LBA 范围检查（含末 LBA）。req->lba 是 QWORD ⇒ 加法按 64 位进行，不回绕。 */
     if ((req->lba + count) > FTL_LBA_MAX)
     {
-        LOGE("[FTL] %s lba out of range lba=%lu count=%lu\r\n", label, (unsigned long)req->lba, count);
+        LOGE(LOG_TAG_FTL "%s lba out of range lba=%lu count=%lu\r\n", label, (unsigned long)req->lba, count);
         return FTL_ERROR;
     }
 
@@ -1523,7 +1525,7 @@ static ftl_status_e ftl_submit_common(ftl_ctx_t *ftl, const ftl_io_req_t *req, p
     int gi = pend_group_alloc(&ftl->pending);
     if (gi < 0)
     {
-        LOGE("[FTL] %s: no free group slot\r\n", label);
+        LOGE(LOG_TAG_FTL "%s: no free group slot\r\n", label);
         return FTL_ERROR;
     }
     pend_group_t *g    = &ftl->pending.groups[gi];
@@ -1698,7 +1700,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
          * jrn_clear_write_failure 清 journal 标志；wbuf FAILED 由下一次成功操作清。 */
         if (ftl_log_throttle_due(&s_flush_err_log, &suppressed))
         {
-            LOGW("[FTL] flush: write failure pending (jrn=%u wb=%u) — complete best-effort (suppressed=%lu)\r\n",
+            LOGW(LOG_TAG_FTL "flush: write failure pending (jrn=%u wb=%u) — complete best-effort (suppressed=%lu)\r\n",
                  (unsigned)jrn_fail,
                  (unsigned)wb_fail,
                  suppressed);
@@ -1708,7 +1710,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     {
         if (ftl_log_throttle_due(&s_flush_err_log, &suppressed))
         {
-            LOGW("[FTL] flush timeout %lums (wb=%u l2p=%u jrn=%u) — best-effort complete (suppressed=%lu)\r\n",
+            LOGW(LOG_TAG_FTL "flush timeout %lums (wb=%u l2p=%u jrn=%u) — best-effort complete (suppressed=%lu)\r\n",
                  flush_ms,
                  (unsigned)wb_done,
                  (unsigned)l2p_done,
@@ -1727,7 +1729,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
         ((s_flush_log_ms == 0U) || ((now_log - s_flush_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
     {
         s_flush_log_ms = now_log;
-        LOGW("[FTL] flush took %lums (async job)\r\n", flush_ms);
+        LOGW(LOG_TAG_FTL "flush took %lums (async job)\r\n", flush_ms);
     }
 
     return true;
@@ -1771,7 +1773,7 @@ static ftl_status_e ftl_trim_defer(ftl_ctx_t *ftl, BYTE processed)
         }
         else if ((now_ms - ftl->trim_wait_ms) >= FTL_TRIM_TIMEOUT_MS)
         {
-            LOGE("[FTL] trim: wait timeout lba=%lu\r\n", ftl->trim_lba);
+            LOGE(LOG_TAG_FTL "trim: wait timeout lba=%lu\r\n", ftl->trim_lba);
             ftl->trim_active  = false;
             ftl->trim_wait_ms = 0U;
             return FTL_ERROR;
@@ -1798,10 +1800,14 @@ ftl_status_e ftl_trim_begin(ftl_ctx_t *ftl, DWORD lba, DWORD count)
         return FTL_ERROR;
     }
 
-    ftl->trim_lba     = lba;
-    ftl->trim_end     = lba + count;
-    ftl->trim_active  = true;
-    ftl->trim_wait_ms = 0U;
+    ftl->trim_lba       = lba;
+    ftl->trim_end       = lba + count;
+    ftl->trim_start_lba = lba;
+    ftl->trim_start_ms  = ftl_job_now_ms();
+    ftl->trim_active    = true;
+    ftl->trim_wait_ms   = 0U;
+
+    LOGI(LOG_TAG_TRIM "start lba=%lu n=%lu\r\n", lba, count);
     return FTL_OK;
 }
 
@@ -1856,7 +1862,7 @@ ftl_status_e ftl_trim_step(ftl_ctx_t *ftl)
         }
         if (rst != FTL_OK)
         {
-            LOGE("[FTL] trim: l2p read lba=%lu failed\r\n", l);
+            LOGE(LOG_TAG_FTL "trim: l2p read lba=%lu failed\r\n", l);
             ftl->trim_active = false;
             return FTL_ERROR;
         }
@@ -1890,8 +1896,14 @@ ftl_status_e ftl_trim_step(ftl_ctx_t *ftl)
 
     if (ftl->trim_lba >= ftl->trim_end)
     {
-        ftl->trim_active  = false;
-        ftl->trim_wait_ms = 0U;
+        const DWORD n       = ftl->trim_end - ftl->trim_start_lba;
+        const DWORD elapsed = (ftl->trim_start_ms != 0U) ? ftl_job_age_ms(&ftl->trim_start_ms) : 0U;
+
+        LOGI(LOG_TAG_TRIM "done n=%lu elapsed=%lums\r\n", n, elapsed);
+        ftl->trim_active    = false;
+        ftl->trim_start_lba = 0U;
+        ftl->trim_start_ms  = 0U;
+        ftl->trim_wait_ms   = 0U;
         return FTL_OK;
     }
 

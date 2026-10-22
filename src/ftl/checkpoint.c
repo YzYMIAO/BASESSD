@@ -92,7 +92,7 @@ static bool cp_header_valid(const cp_header_t *hdr)
     }
     /* sequence 0 = 未写；UINT32_MAX = 半编程 Header（擦除态 0xFF…）。
      * ⚠ 接受 UINT32_MAX 会让下一条 CP 的 `++sequence` 回绕成 0，之后所有 Header 都因
-     *   “sequence==0”在开机被忽略 ⇒ 每次启动仍全量重建（实测 `[CP] done seq=0`）。 */
+     *   “sequence==0”在开机被忽略 ⇒ 每次启动仍全量重建（实测 `[CP  ] done seq=0`）。 */
     if ((hdr->sequence == 0U) || (hdr->sequence == UINT32_MAX))
     {
         return false;
@@ -225,7 +225,7 @@ static bool cp_stall(cp_handle_t *j)
             fc_resource_stats_t rs;
 
             (void)fc_get_resource_stats(&rs);
-            LOGW("[CP] submit stalled %lums — abort phase=%u free=%u cmd=%u buf=%u\r\n",
+            LOGW(LOG_TAG_CP "submit stalled %lums — abort phase=%u free=%u cmd=%u buf=%u\r\n",
                  (now_ms - j->stall_ms),
                  (unsigned)j->phase,
                  (unsigned)j->alloc->free_count,
@@ -410,7 +410,7 @@ static cp_flush_step_e cp_flush_regions(cp_handle_t *h, cp_handle_t *j)
          * FLUSHING 行上清位）。**中止**而非放过：此刻既没在写回、也没有有效数据，
          * 若当作"已持久"写进 Header，boot 会按 bitmap 预载这一区 ⇒ **静默丢映射**。
          * 中止的代价只是本次 CP 不做（journal 与脏位全保留，下轮重来），方向安全。 */
-        LOGW("[CP] region=%lu dirty but state=%u (LOADING) — abort\r\n", line.region_id, (unsigned)line.state);
+        LOGW(LOG_TAG_CP "region=%lu dirty but state=%u (LOADING) — abort\r\n", line.region_id, (unsigned)line.state);
         return CP_FLUSH_FAILED;
     }
 
@@ -527,7 +527,7 @@ static void cp_step(cp_handle_t *h)
 
                     if (!anchor_ok)
                     {
-                        LOGW("[META] anchor write incomplete: idx=%u seq=%lu (chunk 写失败)\r\n", (unsigned)j->anchor_idx, j->anchor_seq);
+                        LOGW(LOG_TAG_META "anchor write incomplete: idx=%u seq=%lu (chunk 写失败)\r\n", (unsigned)j->anchor_idx, j->anchor_seq);
                         cp_abort(j);
                         break;
                     }
@@ -602,7 +602,7 @@ static void cp_step(cp_handle_t *h)
 
                 /* sequence 在最终槽位确定后取（池内已有序号时才能续上）。
                  * LOGD 留作 seq=0 现场的取证：normal build 静默。 */
-                LOGD("[CP] hdr_prep seq_before=%lu idx=%u\r\n",
+                LOGD(LOG_TAG_CP "hdr_prep seq_before=%lu idx=%u\r\n",
                      h->cp_state.sequence,
                      (unsigned)j->hdr_idx);
                 j->hdr_seq = ++h->cp_state.sequence;
@@ -718,7 +718,7 @@ static void cp_step(cp_handle_t *h)
                 {
                     if (cp_abort_log_due(j, ftl_job_now_ms()))
                     {
-                        LOGW("[CP] abort at phase=%u (不写 Header / 不截断，脏区与 journal 保留)\r\n", (unsigned)j->fail_phase);
+                        LOGW(LOG_TAG_CP "abort at phase=%u (不写 Header / 不截断，脏区与 journal 保留)\r\n", (unsigned)j->fail_phase);
                     }
                 }
                 else if (j->hdr_seq == 0U)
@@ -727,7 +727,7 @@ static void cp_step(cp_handle_t *h)
                      * 这是缺陷状态：限流后以 ERR 暴露，不再每 CP 刷一行。 */
                     if (cp_abort_log_due(j, ftl_job_now_ms()))
                     {
-                        LOGE("[CP] done with invalid seq=0 — header ignored at boot\r\n");
+                        LOGE(LOG_TAG_CP "done with invalid seq=0 — header ignored at boot\r\n");
                     }
                 }
                 else
@@ -743,7 +743,7 @@ static void cp_step(cp_handle_t *h)
                                              ((now_done - j->log_done_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS)))
                     {
                         j->log_done_ms = now_done;
-                        LOGD("[CP] done seq=%lu jrn_seq=%lu anchor=%s\r\n",
+                        LOGD(LOG_TAG_CP "done seq=%lu jrn_seq=%lu anchor=%s\r\n",
                              j->hdr_seq,
                              j->journal_seq,
                              (j->anchor_skip != 0U) ? "skip" : "written");
@@ -824,6 +824,7 @@ static ftl_status_e cp_begin(cp_handle_t *h)
     j->start_ms = ftl_job_now_ms();
     j->log_ms   = j->start_ms;
 
+    /* CP 是高频元数据维护（每次水位触发），start 不逐次打；当前序号看 info 的 cp=。 */
     cp_step(h); /* 立刻推进第一步（脏区落盘可当场起异步写回） */
     return FTL_OK;
 }
@@ -842,7 +843,7 @@ static void cp_kick(cp_handle_t *h)
      * ⚠ 起点在 cp_begin 显式记（CP 的"job 起点"是快照时刻，不是首次心跳时刻）。 */
     if (ftl_job_heartbeat(&j->log_ms, &j->start_ms))
     {
-        LOGI("[CP] job phase=%u wait=%u fail=%u age=%lums\r\n",
+        LOGI(LOG_TAG_CP "job phase=%u wait=%u fail=%u age=%lums\r\n",
              (unsigned)j->phase,
              (unsigned)j->waiting,
              (unsigned)j->failed,
@@ -916,7 +917,7 @@ static void cp_complete_hdr_write(cp_handle_t *h, cp_handle_t *j, bool failed)
     {
         h->alloc->bbt.rebuild_required = false;
         bbt_note_dirty(h->alloc);
-        LOGI("[CP] rebuild_required cleared — rebuilt metadata committed\r\n");
+        LOGI(LOG_TAG_CP "rebuild_required cleared — rebuilt metadata committed\r\n");
     }
     j->phase = CP_TRUNC_PREP;
 }
@@ -929,7 +930,7 @@ static void cp_complete_trunc_erase(cp_handle_t *h, cp_handle_t *j, bool failed)
 {
     if (failed)
     {
-        LOGW("[CP] journal pre-erase failed blk=%u — 不记账，等待重试\r\n", (unsigned)j->trunc_next);
+        LOGW(LOG_TAG_CP "journal pre-erase failed blk=%u — 不记账，等待重试\r\n", (unsigned)j->trunc_next);
         jrn_truncate_commit(h->journal, JOURNAL_BLOCK_NONE);
     }
     else
@@ -970,7 +971,7 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
 
     if (j->waiting == 0U)
     {
-        LOGE("[CP] unexpected completion phase=%u (no command in flight)\r\n", (unsigned)j->phase);
+        LOGE(LOG_TAG_CP "unexpected completion phase=%u (no command in flight)\r\n", (unsigned)j->phase);
         (void)fc_command_release(cmd);
         return;
     }
@@ -1027,7 +1028,7 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
         default:
             /* 不该发生：一条命令对应一个提交阶段（ANCHOR_ERASE / ANCHOR_WRITE /
              * HDR_ERASE / HDR_WRITE / TRUNC_ERASE）。 */
-            LOGE("[CP] unexpected completion phase=%u\r\n", (unsigned)j->phase);
+            LOGE(LOG_TAG_CP "unexpected completion phase=%u\r\n", (unsigned)j->phase);
             cp_abort(j);
             return;
     }
@@ -1070,7 +1071,7 @@ ftl_status_e cp_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_record_id
     }
     if (newest == UINT16_MAX)
     {
-        LOGW("[CP] no valid record in pool — boot will fall back to rebuild\r\n");
+        LOGW(LOG_TAG_CP "no valid record in pool — boot will fall back to rebuild\r\n");
         cp_reset_cursor(&h->cp_state);
         return FTL_ERROR; /* 池内无有效 record */
     }
@@ -1113,7 +1114,7 @@ ftl_status_e cp_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_record_id
         *out_record_idx = newest;
     }
 
-    LOGI("[CP] find latest seq=%lu idx=%u jrn_seq=%lu\r\n",
+    LOGI(LOG_TAG_CP "find latest seq=%lu idx=%u jrn_seq=%lu\r\n",
          cp->sequence,
          (unsigned)newest,
          cp->jrn_get_sequence);
@@ -1359,7 +1360,7 @@ bool cp_load_wear_table(cp_handle_t       *h,
         (cp->wear_page_count != FTL_CHECKPOINT_WEAR_PAGES) ||
         (cp->record_pages != CHECKPOINT_RECORD_PAGES))
     {
-        LOGW("[WEAR] snapshot fields inconsistent (entries=%lu bytes=%lu pages=%lu rec=%lu)\r\n",
+        LOGW(LOG_TAG_WEAR "snapshot fields inconsistent (entries=%lu bytes=%lu pages=%lu rec=%lu)\r\n",
              cp->wear_entry_count,
              cp->wear_entry_bytes,
              cp->wear_page_count,
@@ -1393,7 +1394,7 @@ bool cp_load_wear_table(cp_handle_t       *h,
             }
             if (boot_crc32(page, PAGE_MAIN_SIZE) != cp->wear_page_crc[p])
             {
-                LOGW("[WEAR] page %u crc mismatch (plane=%u rec=%u)\r\n", (unsigned)p, (unsigned)plane, (unsigned)record_idx);
+                LOGW(LOG_TAG_WEAR "page %u crc mismatch (plane=%u rec=%u)\r\n", (unsigned)p, (unsigned)plane, (unsigned)record_idx);
                 continue;
             }
 
@@ -1424,7 +1425,7 @@ bool cp_load_wear_table(cp_handle_t       *h,
         if (!loaded)
         {
             /* 逐页应用：前面的页已回填 BST，其余块保持默认计数（软状态，可接受）。 */
-            LOGW("[WEAR] snapshot page %u unavailable (rec=%u) — 已读页保留，其余从 0\r\n", (unsigned)p, (unsigned)record_idx);
+            LOGW(LOG_TAG_WEAR "snapshot page %u unavailable (rec=%u) — 已读页保留，其余从 0\r\n", (unsigned)p, (unsigned)record_idx);
             return false;
         }
     }
@@ -1456,7 +1457,7 @@ bool cp_load_block_table(cp_handle_t       *h,
         (cp->block_page_count != CP_BLOCK_PAGES) ||
         (cp->record_pages != CHECKPOINT_RECORD_PAGES))
     {
-        LOGW("[BLK] header fields inconsistent (words=%lu bytes=%lu pages=%lu rec=%lu)\r\n",
+        LOGW(LOG_TAG_BLK "header fields inconsistent (words=%lu bytes=%lu pages=%lu rec=%lu)\r\n",
              cp->block_word_count,
              cp->block_word_bytes,
              cp->block_page_count,
@@ -1495,17 +1496,17 @@ bool cp_load_block_table(cp_handle_t       *h,
 
         if (!ok)
         {
-            LOGW("[BLK] read failed plane=%u page=%u rec=%u\r\n", (unsigned)plane, (unsigned)fail_page, (unsigned)record_idx);
+            LOGW(LOG_TAG_BLK "read failed plane=%u page=%u rec=%u\r\n", (unsigned)plane, (unsigned)fail_page, (unsigned)record_idx);
             continue;
         }
 
         if (boot_crc32(block_words, sizeof(WORD) * FTL_BLOCK_TOTAL) != cp->block_crc32)
         {
-            LOGW("[BLK] crc mismatch plane=%u rec=%u seq=%lu\r\n", (unsigned)plane, (unsigned)record_idx, cp->sequence);
+            LOGW(LOG_TAG_BLK "crc mismatch plane=%u rec=%u seq=%lu\r\n", (unsigned)plane, (unsigned)record_idx, cp->sequence);
             continue;
         }
 
-        LOGI("[BLK] load plane=%u rec=%u seq=%lu pages=%u crc=ok\r\n", (unsigned)plane, (unsigned)record_idx, cp->sequence, CP_BLOCK_PAGES);
+        LOGI(LOG_TAG_BLK "load plane=%u rec=%u seq=%lu pages=%u crc=ok\r\n", (unsigned)plane, (unsigned)record_idx, cp->sequence, CP_BLOCK_PAGES);
         return true;
     }
 

@@ -328,7 +328,7 @@ nand_result_e nand_fc_start(nand_fc_transaction_t *transaction, BYTE operation, 
          * 引擎在 END 分支已清 active，但入参校验 / 非法 UOP 码 / handler 缺失这三条
          * 错误路径不清，这里统一兜底（OK 时重复清一次无副作用）。 */
         transaction->engine.active = 0U;
-        LOGE_IF(result != NAND_RESULT_OK, "[NAND] start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result, transaction->completion.nand_status);
+        LOGE_IF(result != NAND_RESULT_OK, LOG_TAG_NAND "start failed, op=%u result=0x%02X status=0x%02X\r\n", operation, result, transaction->completion.nand_status);
     }
     return result;
 }
@@ -453,14 +453,14 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
     unsigned long capacity_mib = info->data_bytes_per_page * info->pages_per_block * info->blocks_per_unit *
                                  info->logical_units / (1024UL * 1024UL);
 
-    LOGI("[NAND] ONFI sig=%c%c%c%c rev=0x%04X model=%s\r\n",
+    LOGI(LOG_TAG_NAND "ONFI sig=%c%c%c%c rev=0x%04X model=%s\r\n",
          (int)info->signature[0],
          (int)info->signature[1],
          (int)info->signature[2],
          (int)info->signature[3],
          (unsigned int)info->revision,
          info->model);
-    LOGI("[NAND] ONFI %luMiB page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X(C%u/R%u) bitcell=%u\r\n",
+    LOGI(LOG_TAG_NAND "ONFI %luMiB page=%lu+%u partial=%lu+%u block=%lup blocks=%lu lun=%u addrcyc=0x%02X(C%u/R%u) bitcell=%u\r\n",
          capacity_mib,
          info->data_bytes_per_page,
          (unsigned int)info->spare_bytes_per_page,
@@ -473,7 +473,7 @@ static void nand_onfi_param_print(const nand_onfi_param_info_t *info)
          (unsigned int)info->column_cycles,
          (unsigned int)info->row_cycles,
          (unsigned int)info->bits_per_cell);
-    LOGI("[NAND] ONFI ecc=%ubit prog/pg=%u tprog=%u terase=%u tr=%u tccs=%u timingmodes=0x%04X\r\n",
+    LOGI(LOG_TAG_NAND "ONFI ecc=%ubit prog/pg=%u tprog=%u terase=%u tr=%u tccs=%u timingmodes=0x%04X\r\n",
          (unsigned int)info->ecc_bits,
          (unsigned int)info->programs_per_page,
          (unsigned int)info->tprog_max,
@@ -567,10 +567,10 @@ BYTE nand_init(void)
      *    （使能 FMC/GPIO 时钟 + 配 PD6=R/B#、PG9=NCE、数据总线 AF12）。── */
     if (HAL_NAND_Init(&g_nand_handle, &common_timing, &attribute_timing) != HAL_OK)
     {
-        LOGE("[NAND] HAL_NAND_Init failed\r\n");
+        LOGE(LOG_TAG_NAND "HAL_NAND_Init failed\r\n");
         return NAND_RESULT_OPERATION_FAILED;
     }
-    LOGI("[NAND] FMC ready, R/B#=%u\r\n", (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN));
+    LOGI(LOG_TAG_NAND "FMC ready, R/B#=%u\r\n", (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT, NAND_RB_GPIO_PIN));
 
     {
         /* ── Step 3: FMC 后端实例（单 bank：全 LUN 共享窗口/时序） ──
@@ -586,14 +586,14 @@ BYTE nand_init(void)
 
         if (nand_fmc_init(&fmc_config) != NAND_RESULT_OK)
         {
-            LOGE("[NAND] FMC backend configure failed\r\n");
+            LOGE(LOG_TAG_NAND "FMC backend configure failed\r\n");
             return NAND_RESULT_OPERATION_FAILED;
         }
 
         /* ── Step 4: DMA（CONFIG_NAND_DMA=0 时为 no-op；失败仅回退 PIO）── */
         if (nand_dma_init() != 0U)
         {
-            LOGE("[NAND] DMA init failed, falling back to PIO\r\n");
+            LOGE(LOG_TAG_NAND "DMA init failed, falling back to PIO\r\n");
             /* DMA 失败不是致命错误，回退到 CPU 逐字节搬运 */
         }
     }
@@ -606,26 +606,26 @@ BYTE nand_init(void)
     result = nand_fc_reset(&completion);
     if (result != NAND_RESULT_OK)
     {
-        LOGE("[NAND] reset failed, result=0x%02X status=0x%02X R/B#=%u\r\n",
+        LOGE(LOG_TAG_NAND "reset failed, result=0x%02X status=0x%02X R/B#=%u\r\n",
              (unsigned int)result,
              (unsigned int)completion.nand_status,
              (unsigned int)HAL_GPIO_ReadPin(NAND_RB_GPIO_PORT,
                                             NAND_RB_GPIO_PIN));
         return result;
     }
-    LOGI("[NAND] reset complete, status=0x%02X\r\n", (unsigned int)completion.nand_status);
+    LOGI(LOG_TAG_NAND "reset complete, status=0x%02X\r\n", (unsigned int)completion.nand_status);
     /* ── Step 6: READ_ID + 厂商 ID 校验 ── */
     result = nand_fc_read_id(id, &completion);
     if (result != NAND_RESULT_OK)
     {
-        LOGE("[NAND] read ID failed, result=0x%02X status=0x%02X\r\n", (unsigned int)result, (unsigned int)completion.nand_status);
+        LOGE(LOG_TAG_NAND "read ID failed, result=0x%02X status=0x%02X\r\n", (unsigned int)result, (unsigned int)completion.nand_status);
         return result;
     }
-    LOGI("[NAND] ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0], (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3], (unsigned int)id[4]);
+    LOGI(LOG_TAG_NAND "ID=%02X %02X %02X %02X %02X\r\n", (unsigned int)id[0], (unsigned int)id[1], (unsigned int)id[2], (unsigned int)id[3], (unsigned int)id[4]);
     /* 拼 id[1..4]（跳过厂商字节 id[0]=0x2C）与宏值比较，见 nand/devices/mt29f___g08a.h */
     if ((((DWORD)id[1] << 24U) | ((DWORD)id[2] << 16U) | ((DWORD)id[3] << 8U) | id[4]) != NAND_CHIP_ID)
     {
-        LOGE("[NAND] unexpected ID\r\n");
+        LOGE(LOG_TAG_NAND "unexpected ID\r\n");
         return NAND_RESULT_OPERATION_FAILED;
     }
 
@@ -642,13 +642,13 @@ BYTE nand_init(void)
         result = nand_fc_read_parameter_page(page, &completion);
         if (result != NAND_RESULT_OK)
         {
-            LOGW("[NAND] read parameter page failed, result=0x%02X status=0x%02X\r\n",
+            LOGW(LOG_TAG_NAND "read parameter page failed, result=0x%02X status=0x%02X\r\n",
                  (unsigned int)result,
                  (unsigned int)completion.nand_status);
         }
         else if (nand_onfi_parameter_page_decode(page, &info) == 0U)
         {
-            LOGW("[NAND] parameter page signature mismatch (got %02X %02X %02X %02X)\r\n",
+            LOGW(LOG_TAG_NAND "parameter page signature mismatch (got %02X %02X %02X %02X)\r\n",
                  (unsigned int)page[0],
                  (unsigned int)page[1],
                  (unsigned int)page[2],
@@ -659,7 +659,7 @@ BYTE nand_init(void)
             nand_onfi_param_print(&info);
             if ((info.column_cycles != NAND_COLUMN_ADDR_CYCLES) || (info.row_cycles != NAND_ROW_ADDR_CYCLES))
             {
-                LOGE("[NAND] addr cycle mismatch: device C%u/R%u, driver C%u/R%u\r\n",
+                LOGE(LOG_TAG_NAND "addr cycle mismatch: device C%u/R%u, driver C%u/R%u\r\n",
                      (unsigned int)info.column_cycles,
                      (unsigned int)info.row_cycles,
                      (unsigned int)NAND_COLUMN_ADDR_CYCLES,
@@ -669,7 +669,7 @@ BYTE nand_init(void)
         }
     }
 
-    LOGI("[NAND] init complete (low speed)\r\n");
+    LOGI(LOG_TAG_NAND "init complete (low speed)\r\n");
     return NAND_RESULT_OK;
 }
 
@@ -697,7 +697,7 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
     if (fmc_hz == 0U)
     {
         /* 时钟树读取失败：按当前 sys_port.c 的 200 MHz 兜底，保证不出 0 周期 */
-        LOGE("[NAND] FMC clock unknown, fallback to 200MHz\r\n");
+        LOGE(LOG_TAG_NAND "FMC clock unknown, fallback to 200MHz\r\n");
         fmc_hz = 200000000U;
     }
 
@@ -719,13 +719,13 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
     }
     if (result != NAND_RESULT_OK)
     {
-        LOGE("[NAND] set feature 01h (Mode %u) failed, result=0x%02X status=0x%02X\r\n",
+        LOGE(LOG_TAG_NAND "set feature 01h (Mode %u) failed, result=0x%02X status=0x%02X\r\n",
              (unsigned)CONFIG_NAND_TIMING_MODE,
              (unsigned)result,
              (unsigned)transaction.completion.nand_status);
         return result;
     }
-    LOGI("[NAND] switched NAND to ONFI Mode %u\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+    LOGI(LOG_TAG_NAND "switched NAND to ONFI Mode %u\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
 
     const DWORD tclk_ps = (DWORD)(1000000000000ULL / (QWORD)fmc_hz);
 
@@ -735,7 +735,7 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
     const DWORD tclr = NS_TO_PCC_CYCLES(g_nand_timing_high.t_clr_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
     const DWORD tar  = NS_TO_PCC_CYCLES(g_nand_timing_high.t_ar_ns, tclk_ps) + NAND_PCC_MARGIN_CYCLES;
 
-    LOGI("[NAND] Mode %u PCC SET=%lu WAIT=%lu HOLD=%lu HiZ=%lu TCLR=%lu TAR=%lu (fmc=%luHz tHCLK=%lups)\r\n",
+    LOGI(LOG_TAG_NAND "Mode %u PCC SET=%lu WAIT=%lu HOLD=%lu HiZ=%lu TCLR=%lu TAR=%lu (fmc=%luHz tHCLK=%lups)\r\n",
          (unsigned)CONFIG_NAND_TIMING_MODE,
          fast_pcc.SetupTime,
          fast_pcc.WaitSetupTime,
@@ -750,10 +750,10 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
     g_nand_handle.Init.TARSetupTime  = tar;
     if (HAL_NAND_Init(&g_nand_handle, &fast_pcc, &fast_pcc) != HAL_OK)
     {
-        LOGE("[NAND] HAL_NAND_Init (Mode %u) failed\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+        LOGE(LOG_TAG_NAND "HAL_NAND_Init (Mode %u) failed\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
         return NAND_RESULT_OPERATION_FAILED;
     }
-    LOGI("[NAND] FMC timing updated for Mode %u\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+    LOGI(LOG_TAG_NAND "FMC timing updated for Mode %u\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
 
     {
         nand_fmc_config_t fast_fmc;
@@ -766,7 +766,7 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
 
         if (nand_fmc_init(&fast_fmc) != NAND_RESULT_OK)
         {
-            LOGE("[NAND] FMC backend configure (Mode %u) failed\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
+            LOGE(LOG_TAG_NAND "FMC backend configure (Mode %u) failed\r\n", (unsigned)CONFIG_NAND_TIMING_MODE);
             return NAND_RESULT_OPERATION_FAILED;
         }
     }
@@ -774,7 +774,7 @@ BYTE nand_enable_high_speed(DWORD fmc_hz)
     s_timing_mode = (BYTE)CONFIG_NAND_TIMING_MODE;
     return NAND_RESULT_OK;
 #else
-    LOGI("[NAND] high-speed mode disabled (CONFIG_NAND_TIMING_MODE=0)\r\n");
+    LOGI(LOG_TAG_NAND "high-speed mode disabled (CONFIG_NAND_TIMING_MODE=0)\r\n");
     return NAND_RESULT_OK;
 #endif /* CONFIG_NAND_TIMING_MODE */
 }

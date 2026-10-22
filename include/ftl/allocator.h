@@ -34,9 +34,10 @@
 #define FTL_TEMP_NUM  2U
 
 /* ── Free Pool 三级水位 ──
- * 一个已擦除池 + 软水位，不是三个分区：≥32 正常；8<free<32 后台 GC；≤8 紧急。
- * 32 / 8 为本仓经验值。 */
-#define FREE_POOL_TARGET    (32U)
+ * 一个已擦除池 + 软水位，不是三个分区：≥200 正常；8<free<200 后台 GC；≤8 紧急。
+ * 200 ≈ 实例数据块（3392）的 5.9%，给 GC/写放大留出提前量；8 是池见底的最后手段。
+ * 这两个值是本仓经验值，不是行业标准；调整需同时看写放大、稳态吞吐与 host 延迟。 */
+#define FREE_POOL_TARGET    (200U)
 #define FREE_POOL_EMERGENCY (8U)
 
 /* ── OP / Spare 保留池（按 plane）── */

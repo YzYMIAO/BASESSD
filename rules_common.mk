@@ -56,6 +56,13 @@ endef
 # 展开编译规则
 $(eval $(COMPILE_template))
 $(eval $(ASILE_template))
+
+# 开机横幅的 __DATE__/__TIME__ 来自 main.c 的编译时刻；若只重编其他模块再链接，
+# 横幅会显示旧时间，和实际二进制不一致。强制每次构建重编 main.c，保证 banner
+# 可作为“当前镜像”的判据。
+.PHONY: FORCE
+$(OBJ_DIR)/main.o: FORCE
+FORCE:
 ifneq ($(strip $(THIRD_PARTY_C_OBJS) $(THIRD_PARTY_S_OBJS)),)
 $(eval $(THIRD_PARTY_COMPILE_template))
 endif

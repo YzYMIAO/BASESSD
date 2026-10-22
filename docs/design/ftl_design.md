@@ -1404,7 +1404,7 @@ flowchart TD
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FREE_POOL_TARGET` | 32 | `include/ftl/allocator.h` |
+| `FREE_POOL_TARGET` | 200 | `include/ftl/allocator.h` |
 | `FREE_POOL_EMERGENCY` | 8 | 同上 |
 | `FTL_OP_PERCENT` | 10%（204 块/plane） | 同上 |
 | `FTL_SPARE_POOL_PER_PLANE` | 50 | 同上 |
@@ -3362,8 +3362,8 @@ flowchart TB
 |---|---|---|
 | `triggers` 含 T5（含与 T1 混合） | `OFF` | 不筛（磨损需要搬冷块，加判据会饿死 WL） |
 | `free ≤ 8` | `EMERGENCY` | 可回收 ≥ 1% 才搬，否则记 `no-gain` |
-| `free < 32` 且 host 正在写（2 s 窗口内 `total_writes` 有变化） | `OFF` | 不筛（满盘写必须靠搬移腾空间） |
-| `free < 32` 且 host 不在写 | `IDLE` | `valid ≤ 80%` 才搬 |
+| `free < 200` 且 host 正在写（2 s 窗口内 `total_writes` 有变化） | `OFF` | 不筛（满盘写必须靠搬移腾空间） |
+| `free < 200` 且 host 不在写 | `IDLE` | `valid ≤ 80%` 才搬 |
 
 `no-gain` 结论由 `mig_handle_t.gc_no_gain` 保存，退避 `GC_NO_GAIN_BACKOFF_MS`（500 ms）；
 新建写、进入紧急水位、或时钟缺失（`now_ms == 0`）时立即重扫。紧急水位下若连目的页都分配
@@ -4752,7 +4752,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FREE_POOL_TARGET` | 32 | `include/ftl/allocator.h` |
+| `FREE_POOL_TARGET` | 200 | `include/ftl/allocator.h` |
 | `FREE_POOL_EMERGENCY` | 8 | 同上 |
 | `FTL_OP_PERCENT` | 10%（204 块/plane） | 同上 |
 | `FTL_SPARE_POOL_PER_PLANE` | 50 | 同上 |

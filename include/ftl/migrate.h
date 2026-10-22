@@ -142,6 +142,13 @@ typedef enum
     MIG_KIND_PREDICT /* 慢死预测旁路（rr_predictive_scan） */
 } mig_kind_e;
 
+/* GC 会话的启动原因（只用于观测；不影响选块/回收决策）。 */
+typedef enum
+{
+    MIG_GC_START_URGENT = 0, /* wbuf 分配不到页对 */
+    MIG_GC_START_PERIODIC    /* T1/T4/T5 周期评估 */
+} mig_gc_start_reason_e;
+
 /* ── 搬移 job（per-instance，放 ftl->mig_handle）──
  *
  * ⚠ page_buf 是 **逐 plane** 的页镜像（`PLANE_NUM × PAGE_MAIN_SIZE`，当前共 4KB），
@@ -165,10 +172,13 @@ typedef struct mig_handle
     bool        aborted;        /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
     bool        decode_ok;      /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
     bool        write_ok;       /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
+    bool        dst_allocated;  /* true = 本 job 已成功分配过目的页（dst[] 有效） */
     bool        erase_failed;   /* true = 任一 plane 擦除失败/处置失败（回收计数与 predict 日志不计） */
     bool        closed_removed; /* true = 逐 plane 摘除后 Closed 条目已被移除（RISK-GC-04） */
     mig_phase_e phase;          /* 异步 job 状态机 */
     mig_kind_e  kind;           /* victim 来源（GC / WL / predict） */
+    const char *log_reason;     /* 观测：urgent/periodic/wl/pred（静态字符串） */
+    DWORD       log_triggers;   /* 观测：GC 触发位并集 */
     BYTE        post;           /* mig_post_e */
     BYTE        page;           /* 当前页索引 0..PAGES_PER_BLOCK；== PAGES_PER_BLOCK ⇒ 读阶段结束 */
     BYTE        plane;          /* 当前 plane（读/写/擦各自迭代） */
@@ -236,11 +246,26 @@ typedef struct mig_handle
     DWORD gc_nogain_ms;      /* 结论时刻（退避用） */
     DWORD gc_nogain_writes;  /* 结论时的 *total_writes 快照 */
     WORD  gc_nogain_free;    /* 结论时的 free_count 快照 */
-    WORD  gc_best_valid_pct; /* 最近一次扫描见到的最高有效率（0..100，观测） */
+    WORD  gc_best_valid_pct; /* 最近一次扫描的域内最低有效率（0..100，观测） */
     BYTE  gc_last_mode;      /* 最近一次实际使用的 gc_benefit_mode_e（观测） */
+
+    /* ── GC 会话观测（per-instance；跨 job 保留，[GC  ] end 后清零）──
+     * 一次会话 = 从首个成功启动的 GC job 起，到连续 GC_SESSION_IDLE_MS 无 GC
+     * job 活动为止。用于把「持续 GC」聚合成 start/progress/end，而不是逐 job 刷屏。 */
+    bool  gc_session_active;
+    DWORD gc_session_start_ms;
+    DWORD gc_session_last_ms; /* 最近一次 GC job 活动 */
+    DWORD gc_session_log_ms;  /* 最近一次 [GC  ] progress */
+    DWORD gc_session_jobs;
+    DWORD gc_session_moved;
+    DWORD gc_session_reclaimed;
+    DWORD gc_session_noop;
+    DWORD gc_session_aborted;
 
     /* ── 观测计数（单调，只增不减）── */
     DWORD   reclaimed_count; /* 成功回收的 SB 数（GC/WL） */
+    DWORD   moved_count;     /* 累计真正搬移的 CW 数（所有 kind，诊断用） */
+    DWORD   noop_count;      /* 累计成功回收的**空** victim 数（GC） */
     DWORD   novictim_count;  /* 触发但选不出 victim 的次数（含 no-gain） */
     DWORD   nogain_count;    /* 其中「有候选但收益不足」的次数 */
     bool    urgent_gc;       /* mig_trigger(GC_URGENT) 登记（被 handle 消费） */

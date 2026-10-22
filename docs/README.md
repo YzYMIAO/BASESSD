@@ -18,7 +18,7 @@
 | 断言 / 日志 / 故障捕获 | `design/logging_design.md`（预期/非预期 + 打印预算 + 飞行记录器）+ `design/assertion_guidelines.md` + `design/fault_capture.md` |
 | 设计原则 / 学习 | `design/storage_controller_design_essentials.md` + `design/storage_controller_learning.md`；CW 布局事实已并入 `design/ftl_design.md` §2.1/§2.2 |
 | **模块接口 / 解耦判据** | `design/ftl_design.md` §5.1.1/§5.1.2（handle 契约 / 字段所有权 / 超时 / 多 LUN；全文在 `archive/ftl_module_contracts.md`） |
-| **USB MSC / U 盘** | `design/usb_msc_udisk.md`（可行性 / TinyUSB / BOT 单命令 / 与主控差距）→ `design/usb_msc_verification.md`（上板验证手册 + 判据 + 脚本）→ `design/usb_throughput_optimization.md`（测速方法 / 结果 / 后续方案） |
+| **USB MSC / U 盘** | `design/usb_msc_udisk.md`（可行性 / TinyUSB / BOT 单命令 / 与主控差距）→ `design/usb_msc_verification.md`（上板验证手册 + 判据 + 脚本）→ `design/testing_guide.md`（分层测试 / 工具 / 性能方法 / 实测） |
 | 多 LUN / 共享 L2P cache / 内存域 | `design/ftl_design.md` §2.1/§5.4 + `design/known_iss.md` §4（实施计划已归档） |
 | **未实现 / 未验证项（feature backlog）** | `design/known_iss.md` |
 | **复查已知风险 / 判断是否该修** | **先读 `design/known_risks.md`**（缺陷/残余风险；已闭合条目在文末）→ 再进对应模块文档 |

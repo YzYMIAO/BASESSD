@@ -16,7 +16,7 @@
 
 ---
 
-> 吞吐测速方法、实测结果与后续方案：见 [`usb_throughput_optimization.md`](usb_throughput_optimization.md)。
+> 分层测试流程、工具、性能方法与实测结果：见 [`testing_guide.md`](testing_guide.md)。
 
 ## 1. 目标与硬件
 

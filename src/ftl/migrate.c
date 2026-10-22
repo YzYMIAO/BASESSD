@@ -191,6 +191,54 @@ static ftl_status_e mig_submit_erase(mig_handle_t *m)
 
 /* ── 3. 启动 ── */
 
+static const char *mig_kind_name(mig_kind_e kind)
+{
+    switch (kind)
+    {
+        case MIG_KIND_GC:
+            return "gc";
+        case MIG_KIND_WL:
+            return "wl";
+        case MIG_KIND_PREDICT:
+            return "pred";
+        default:
+            return "?";
+    }
+}
+
+static const char *mig_gc_reason_name(mig_gc_start_reason_e reason)
+{
+    return (reason == MIG_GC_START_URGENT) ? "urgent" : "periodic";
+}
+
+/* SB 的某 plane 对应的全局块号；不存在该 plane ⇒ UINT16_MAX（日志哨兵）。 */
+static WORD mig_sb_gblock(const super_block_t *sb, BYTE plane)
+{
+    if (!super_block_has_plane(sb, plane))
+    {
+        return UINT16_MAX;
+    }
+    return ftl_gblock(plane, sb->plane_blocks[plane]);
+}
+
+static WORD mig_victim_gblock(const mig_handle_t *m, BYTE plane)
+{
+    return mig_sb_gblock(&m->victim, plane);
+}
+
+/* 目标页 PBA 的全局块号；该 plane 没有目标页 ⇒ UINT16_MAX。 */
+static WORD mig_dst_gblock(const mig_handle_t *m, BYTE plane)
+{
+    /* 没有分配过目的页时 dst[] 仍是 memset 的 0（= 合法块 0），不能靠 pba_is_valid；
+     * absent plane 的 dst[] 同样不可信。 */
+    if ((!m->dst_allocated) || (!super_block_has_plane(&m->victim, plane)) ||
+        (!pba_is_valid(m->dst[plane])))
+    {
+        return UINT16_MAX;
+    }
+    return ftl_pba_gblock(m->dst[plane]);
+}
+
 /* --------------------------------------------------------------------
  * mig_start
  *   功能：装配并启动一个搬移 job（SELECT 阶段）。
@@ -205,7 +253,9 @@ static void mig_start(mig_handle_t        *m,
                       const super_block_t *victim,
                       mig_kind_e           kind,
                       mig_post_e           post,
-                      bool                 dst_high_wear)
+                      bool                 dst_high_wear,
+                      const char          *reason,
+                      DWORD                triggers)
 {
     /* 前置条件（判据 2）：唯一调用者是本文件的 mig_begin_*，各自持有实例与 victim；
      * active 是运行时状态（单飞行），由调用者在选块**之前**判过 ⇒ 这里是死守卫。 */
@@ -223,6 +273,8 @@ static void mig_start(mig_handle_t        *m,
     const DWORD        wl_writes        = m->wl_last_writes;
     const DWORD        predict          = m->predict_last_ms;
     const DWORD        reclaimed        = m->reclaimed_count;
+    const DWORD        moved_total      = m->moved_count;
+    const DWORD        noop_total       = m->noop_count;
     const DWORD        novictim         = m->novictim_count;
     const DWORD        nogain_cnt       = m->nogain_count;
     const BYTE         read_fail_streak = m->read_fail_streak;
@@ -238,6 +290,16 @@ static void mig_start(mig_handle_t        *m,
     const WORD  nogain_free             = m->gc_nogain_free;
     const WORD  best_valid_pct          = m->gc_best_valid_pct;
     const BYTE  last_mode               = m->gc_last_mode;
+    /* GC 会话状态属于连续活动，跨 job 的 memset 必须保留。 */
+    const bool  gc_session_active       = m->gc_session_active;
+    const DWORD gc_session_start_ms     = m->gc_session_start_ms;
+    const DWORD gc_session_last_ms      = m->gc_session_last_ms;
+    const DWORD gc_session_log_ms       = m->gc_session_log_ms;
+    const DWORD gc_session_jobs         = m->gc_session_jobs;
+    const DWORD gc_session_moved        = m->gc_session_moved;
+    const DWORD gc_session_reclaimed    = m->gc_session_reclaimed;
+    const DWORD gc_session_noop         = m->gc_session_noop;
+    const DWORD gc_session_aborted      = m->gc_session_aborted;
     WORD        fail_gblock[PLANE_NUM];
     BYTE        fail_count[PLANE_NUM];
 
@@ -249,34 +311,45 @@ static void mig_start(mig_handle_t        *m,
 
     memset(m, 0, sizeof(*m));
 
-    m->alloc             = alloc;
-    m->journal           = journal;
-    m->cache             = cache;
-    m->total_writes      = total_writes;
-    m->topo              = topo;
-    m->gc_eval_last_ms   = gc_eval;
-    m->gc_log_last_ms    = gc_log;
-    m->wl_eval_last_ms   = wl_eval;
-    m->wl_last_writes    = wl_writes;
-    m->predict_last_ms   = predict;
-    m->reclaimed_count   = reclaimed;
-    m->novictim_count    = novictim;
-    m->nogain_count      = nogain_cnt;
-    m->gc_writes_last    = gc_writes_last;
-    m->gc_write_last_ms  = gc_write_last_ms;
-    m->host_writing      = host_writing;
-    m->gc_no_gain        = gc_no_gain;
-    m->gc_nogain_mode    = nogain_mode;
-    m->gc_nogain_ms      = nogain_ms;
-    m->gc_nogain_writes  = nogain_writes;
-    m->gc_nogain_free    = nogain_free;
-    m->gc_best_valid_pct = best_valid_pct;
-    m->gc_last_mode      = last_mode;
+    m->alloc                = alloc;
+    m->journal              = journal;
+    m->cache                = cache;
+    m->total_writes         = total_writes;
+    m->topo                 = topo;
+    m->gc_eval_last_ms      = gc_eval;
+    m->gc_log_last_ms       = gc_log;
+    m->wl_eval_last_ms      = wl_eval;
+    m->wl_last_writes       = wl_writes;
+    m->predict_last_ms      = predict;
+    m->reclaimed_count      = reclaimed;
+    m->moved_count          = moved_total;
+    m->noop_count           = noop_total;
+    m->novictim_count       = novictim;
+    m->nogain_count         = nogain_cnt;
+    m->gc_writes_last       = gc_writes_last;
+    m->gc_write_last_ms     = gc_write_last_ms;
+    m->host_writing         = host_writing;
+    m->gc_no_gain           = gc_no_gain;
+    m->gc_nogain_mode       = nogain_mode;
+    m->gc_nogain_ms         = nogain_ms;
+    m->gc_nogain_writes     = nogain_writes;
+    m->gc_nogain_free       = nogain_free;
+    m->gc_best_valid_pct    = best_valid_pct;
+    m->gc_last_mode         = last_mode;
+    m->gc_session_active    = gc_session_active;
+    m->gc_session_start_ms  = gc_session_start_ms;
+    m->gc_session_last_ms   = gc_session_last_ms;
+    m->gc_session_log_ms    = gc_session_log_ms;
+    m->gc_session_jobs      = gc_session_jobs;
+    m->gc_session_moved     = gc_session_moved;
+    m->gc_session_reclaimed = gc_session_reclaimed;
+    m->gc_session_noop      = gc_session_noop;
+    m->gc_session_aborted   = gc_session_aborted;
     /* 系统性读失败计数必须跨 job 存活：它是「连续多个 victim 都读失败」的判据，
      * 一个 job 最多标 2 块（每 plane 一块）⇒ 若每个 job 都清零，阈值永远到不了。
      * `paused` 同理不能因 memset 丢失：熔断后任何路径误启动新 job 都不得复活 GC。 */
-    m->read_fail_streak  = read_fail_streak;
-    m->paused            = paused;
+    m->read_fail_streak     = read_fail_streak;
+    m->paused               = paused;
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         m->fail_gblock[plane] = fail_gblock[plane];
@@ -287,6 +360,8 @@ static void mig_start(mig_handle_t        *m,
     m->victim.is_open = false; /* 本引擎只处理 Closed SB（见 allocator.h） */
     ASSERT(m->victim.next_page <= PAGES_PER_BLOCK);
     m->kind          = kind;
+    m->log_reason    = reason;
+    m->log_triggers  = triggers;
     m->post          = post;
     m->dst_high_wear = dst_high_wear;
     m->active        = true;
@@ -301,6 +376,12 @@ static void mig_start(mig_handle_t        *m,
     ASSERT((st.valid_cw == 0U) || (m->victim.next_page > 0U));
     m->phase = (st.valid_cw == 0U) ? MIG_ERASE : MIG_READ;
 
+    /* 显式记 job 起点：心跳的懒初始化只在 >=1 s 后才发生，短 job 的 elapsed 否则恒 0。 */
+    m->start_ms = ftl_job_now_ms();
+    m->log_ms   = m->start_ms;
+
+    /* 每个真实 victim 只在 finish 打一行 move（触发/源/目的/结果）；
+     * 空块（vcw==0）完全不进日志，由 GC 会话 noop= 聚合。 */
     mig_step(m);
 }
 
@@ -354,7 +435,7 @@ static void mig_note_no_gain(mig_handle_t *m, gc_benefit_mode_e mode, WORD best_
 
     if (first)
     {
-        LOGW("[GC] no-gain mode=%s bestvr=%u free=%u writes=%lu — suspend until writes/emergency\r\n",
+        LOGD(LOG_TAG_GC "no-gain mode=%s minvr=%u free=%u writes=%lu — suspend until writes/emergency\r\n",
              mig_gc_mode_name(mode),
              (unsigned)best_valid_pct,
              (unsigned)m->alloc->free_count,
@@ -388,7 +469,11 @@ static bool mig_gc_scan_allowed(const mig_handle_t *m, gc_benefit_mode_e mode, D
     return (now_ms - m->gc_nogain_ms) >= GC_NO_GAIN_BACKOFF_MS;
 }
 
-static bool mig_begin_gc(mig_handle_t *m, gc_benefit_mode_e mode, DWORD now_ms)
+static bool mig_begin_gc(mig_handle_t         *m,
+                         gc_benefit_mode_e     mode,
+                         DWORD                 now_ms,
+                         mig_gc_start_reason_e reason,
+                         DWORD                 triggers)
 {
     /* 前置条件（判据 2）：调用者 ftl.c 传 &g_ftl[...]。 */
     if (m->active)
@@ -419,8 +504,36 @@ static bool mig_begin_gc(mig_handle_t *m, gc_benefit_mode_e mode, DWORD now_ms)
         return false;
     }
 
-    m->gc_no_gain = false;
-    mig_start(m, sel.victim, MIG_KIND_GC, MIG_POST_FREE, false);
+    /* 会话边界：只有**选中的 victim 自身有有效 CW** 才开新会话。
+     * ⚠ 不能用 sel.best_valid_pct：它是「域内最低有效率」，只要存在任一空块就会
+     *   为 0，即使选中的 victim 有大量有效数据。必须查 sel.victim 自身的 valid_cw。 */
+    alc_sb_stats_t vst;
+    alc_get_sb_stats(m->alloc, sel.victim, &vst);
+
+    if ((!m->gc_session_active) && (vst.valid_cw != 0U))
+    {
+        m->gc_session_active    = true;
+        m->gc_session_start_ms  = now_ms;
+        m->gc_session_last_ms   = now_ms;
+        m->gc_session_log_ms    = now_ms;
+        m->gc_session_jobs      = 0U;
+        m->gc_session_moved     = 0U;
+        m->gc_session_reclaimed = 0U;
+        m->gc_session_noop      = 0U;
+        m->gc_session_aborted   = 0U;
+        /* 不在 session 起点打 [GC] start：只有实际搬移（[MIG] move）才值得可见；
+         * 事件字段 reason/trig/free 已在 move 行里。 */
+    }
+
+    if (m->gc_session_active)
+    {
+        m->gc_session_jobs++;
+        m->gc_session_last_ms = now_ms;
+    }
+
+    mig_start(m, sel.victim, MIG_KIND_GC, MIG_POST_FREE, false, mig_gc_reason_name(reason), triggers);
+    /* 不在启动时清 no-gain：job 可能先在 READ 阶段起来、随后 dest 分配失败并 abort。
+     * 只有真正回收/搬移成功（mig_finish）才解除退避，见 mig_finish。 */
     return true;
 }
 
@@ -462,7 +575,7 @@ static bool mig_begin_wl(mig_handle_t *m)
     alc_prepare_wl_destination(m->alloc);
 
     /* 静态 WL 的方向：目标取高擦除空闲块（UBI 模型）。 */
-    mig_start(m, &sb, MIG_KIND_WL, MIG_POST_FREE, true);
+    mig_start(m, &sb, MIG_KIND_WL, MIG_POST_FREE, true, "wl", 0U);
     return true;
 }
 
@@ -494,7 +607,7 @@ static bool mig_begin_predict(mig_handle_t *m)
      * plane_blocks 去擦块 = 静默介质破坏。 */
     if (closed_idx >= closed_count)
     {
-        LOGE("[MIG] predict: stale sb_id=%u (closed=%u) — ignored\r\n", (unsigned)closed_idx, (unsigned)closed_count);
+        LOGE(LOG_TAG_MIG "predict: stale sb_id=%u (closed=%u) — ignored\r\n", (unsigned)closed_idx, (unsigned)closed_count);
         return false;
     }
 
@@ -503,7 +616,7 @@ static bool mig_begin_predict(mig_handle_t *m)
 
     mig_victim_from_planes(&sb, closed->plane_blocks, closed->next_page);
 
-    mig_start(m, &sb, MIG_KIND_PREDICT, MIG_POST_RETIRE, false);
+    mig_start(m, &sb, MIG_KIND_PREDICT, MIG_POST_RETIRE, false, "pred", 0U);
     return true;
 }
 
@@ -519,12 +632,19 @@ static bool mig_abort_log_due(DWORD *out_suppressed)
 {
     const DWORD now_ms = ftl_job_now_ms();
 
-    bool due = (s_abort_n >= 64U);
+    /* 有时间源时**按时间**限流（1 行/5 s），count 只作为无时钟时的兜底。
+     * 不能把 count>=64 当成主判据：free=1 的 abort 循环一秒能撞几十次，64 次
+     * 很快到，日志仍会刷屏。 */
+    bool due;
 
-    if ((!due) && (now_ms != 0U))
+    if (now_ms != 0U)
     {
         due = (s_abort_log_ms == 0U) ||
               ((now_ms - s_abort_log_ms) >= FTL_JOB_LOG_SLOW_INTERVAL_MS);
+    }
+    else
+    {
+        due = (s_abort_n >= 64U);
     }
 
     if (!due)
@@ -544,14 +664,21 @@ static bool mig_abort_log_due(DWORD *out_suppressed)
 static void mig_abort(mig_handle_t *m, const char *reason)
 {
     DWORD suppressed = 0U;
+    /* 「没有目的页」且一个 CW 都没搬：这是满盘死路，不是 migrate 进展；
+     * 不在 INFO/WARN 重复打，避免 free=1 时 abort 刷屏。其他原因（读失败/
+     * 写失败/超时）仍保留限流 WARN。 */
+    const bool no_free_no_move =
+        ((m->migrated == 0U) && (strcmp(reason, "no free block") == 0));
 
-    if (mig_abort_log_due(&suppressed))
+    if ((!no_free_no_move) && mig_abort_log_due(&suppressed))
     {
         char stbuf[48];
 
         (void)fc_cw_status_str(m->last_fc_status, stbuf, sizeof(stbuf));
-        LOGW("[MIG] abort kind=%u phase=%u page=%u plane=%u — %s fc=0x%08lx(%s) supp=%lu\r\n",
-             (unsigned)m->kind,
+        LOGW(LOG_TAG_MIG "abort kind=%s g0=%u g1=%u phase=%u page=%u plane=%u — %s fc=0x%08lx(%s) supp=%lu\r\n",
+             mig_kind_name(m->kind),
+             (unsigned)mig_victim_gblock(m, 0U),
+             (unsigned)((PLANE_NUM > 1U) ? mig_victim_gblock(m, 1U) : UINT16_MAX),
              (unsigned)m->phase,
              (unsigned)m->page,
              (unsigned)m->plane,
@@ -560,13 +687,11 @@ static void mig_abort(mig_handle_t *m, const char *reason)
              stbuf,
              suppressed);
     }
-    for (BYTE p = 0U; p < PLANE_NUM; p++)
+
+    if ((m->kind == MIG_KIND_GC) && m->gc_session_active)
     {
-        if (!super_block_has_plane(&m->victim, p))
-        {
-            continue;
-        }
-        LOGD("[MIG] victim plane%u block=%u\r\n", (unsigned)p, (unsigned)m->victim.plane_blocks[p]);
+        m->gc_session_aborted++;
+        m->gc_session_last_ms = ftl_job_now_ms();
     }
 
     m->aborted = true;
@@ -656,12 +781,12 @@ static void mig_dst_fail_cleanup(mig_handle_t *m, bool command_attempted)
 {
     if (command_attempted || mig_dst_pair_has_programmed_plane(m))
     {
-        LOGW("[MIG] dst failure plane=%u — close cold SB\r\n", (unsigned)m->plane);
+        LOGW(LOG_TAG_MIG "dst failure plane=%u — close cold SB\r\n", (unsigned)m->plane);
         (void)alc_close_open_sb(m->alloc, FTL_TEMP_COLD);
     }
     else
     {
-        LOGW("[MIG] dst failure plane=%u — rewind pair\r\n", (unsigned)m->plane);
+        LOGW(LOG_TAG_MIG "dst failure plane=%u — rewind pair\r\n", (unsigned)m->plane);
         alc_rewind_pair(m->alloc, FTL_TEMP_COLD);
     }
 }
@@ -677,6 +802,8 @@ static void mig_dst_fail_cleanup(mig_handle_t *m, bool command_attempted)
  * -------------------------------------------------------------------- */
 static void mig_finish(mig_handle_t *m)
 {
+    bool reclaimed_this = false;
+
     if (!m->aborted)
     {
         /* 整块迁移成功 ⇒ 该块的历史读失败只是瞬态，清零。
@@ -717,6 +844,7 @@ static void mig_finish(mig_handle_t *m)
             if (m->kind == MIG_KIND_GC)
             {
                 m->reclaimed_count++; /* 进展计数（见 ftl.h：区分"在推进"与"卡死"） */
+                reclaimed_this = true;
             }
             else if (m->kind == MIG_KIND_PREDICT)
             {
@@ -727,30 +855,67 @@ static void mig_finish(mig_handle_t *m)
                     {
                         continue;
                     }
-                    LOGW("[FTL] predictive relocate retired plane%u=%u\r\n", (unsigned)p, (unsigned)m->victim.plane_blocks[p]);
+                    LOGW(LOG_TAG_FTL "predictive relocate retired g=%u\r\n",
+                         (unsigned)mig_victim_gblock(m, p));
                 }
             }
         }
     }
 
-    /* 只在**真正搬了数据**的 victim 上打收尾行。
-     * vcw=0 / pages=0 的“整块已无效、直接擦除归还”在近满盘写负载下每秒几十条，
-     * 会把有效日志淹没（多次反馈）；这类空块回收仍计入 reclaimed_count。 */
-    if ((!m->aborted) && ((m->migrated != 0U) || (m->job_valid_cw != 0U)))
+    /* 累计观测（跨 job 单调）：用于确认「真的搬了数据」还是只回收空块。 */
+    if (!m->aborted)
     {
-        const char *kind_s  = (m->kind == MIG_KIND_GC) ? "gc" : ((m->kind == MIG_KIND_WL) ? "wl" : "pred");
-        const char *post_s  = ((mig_post_e)m->post == MIG_POST_RETIRE) ? "retire" : "free";
-        const DWORD elapsed = (m->start_ms != 0U) ? ftl_job_age_ms(&m->start_ms) : 0U;
+        m->moved_count += m->migrated;
 
-        LOGI("[MIG] done kind=%s p0=%u p1=%u vcw=%u pages=%u post=%s err=%u elapsed=%lums\r\n",
-             kind_s,
-             (unsigned)m->victim.plane_blocks[0],
-             (unsigned)m->victim.plane_blocks[1],
+        if ((m->kind == MIG_KIND_GC) && ((m->migrated != 0U) || reclaimed_this))
+        {
+            /* 只有真正搬移/成功回收才解除 no-gain 退避；启动 job 不等价于有收益，
+             * 否则「起 READ → dest 分配失败 → abort」会把边沿日志刷成每轮一行。 */
+            m->gc_no_gain = false;
+        }
+        if ((m->kind == MIG_KIND_GC) && reclaimed_this && (m->job_valid_cw == 0U))
+        {
+            m->noop_count++;
+        }
+    }
+
+    /* GC 会话计数：搬移量、成功回收、空块回收。abort 走 mig_abort 的单独分支。 */
+    if ((!m->aborted) && (m->kind == MIG_KIND_GC) && m->gc_session_active)
+    {
+        m->gc_session_moved += m->migrated;
+        if (reclaimed_this)
+        {
+            m->gc_session_reclaimed++;
+            if (m->job_valid_cw == 0U)
+            {
+                m->gc_session_noop++;
+            }
+        }
+        m->gc_session_last_ms = ftl_job_now_ms();
+    }
+
+    /* 每个真实 victim 只打一行：触发原因 + 源块 → 目的块 + 搬移结果。
+     * 空块（vcw==0）不逐条打；它们在 GC 会话的 noop= 里聚合。 */
+    if ((!m->aborted) && (m->migrated != 0U))
+    {
+        const DWORD elapsed = (m->start_ms != 0U) ? ftl_job_age_ms(&m->start_ms) : 0U;
+        const char *mode_s  = (m->kind == MIG_KIND_GC)
+                                  ? mig_gc_mode_name((gc_benefit_mode_e)m->gc_last_mode)
+                                  : "-";
+
+        LOGI(LOG_TAG_MIG "move kind=%s reason=%s trig=0x%02lx mode=%s src0=%u src1=%u dst0=%u dst1=%u vcw=%u npg=%u moved=%lu elapsed=%lums\r\n",
+             mig_kind_name(m->kind),
+             m->log_reason,
+             m->log_triggers,
+             mode_s,
+             (unsigned)mig_victim_gblock(m, 0U),
+             (unsigned)((PLANE_NUM > 1U) ? mig_victim_gblock(m, 1U) : UINT16_MAX),
+             (unsigned)mig_dst_gblock(m, 0U),
+             (unsigned)((PLANE_NUM > 1U) ? mig_dst_gblock(m, 1U) : UINT16_MAX),
              (unsigned)m->job_valid_cw,
-             (unsigned)m->page,
-             post_s,
-             (unsigned)((m->erase_failed != 0U) ? 1U : 0U),
-             (unsigned long)elapsed);
+             (unsigned)m->victim.next_page,
+             m->migrated,
+             elapsed);
     }
 
     m->active         = false;
@@ -836,8 +1001,9 @@ static bool mig_step_read(mig_handle_t *m)
             return false;
         }
 
-        m->plane = 0U;
-        m->phase = MIG_WRITE;
+        m->dst_allocated = true;
+        m->plane         = 0U;
+        m->phase         = MIG_WRITE;
         return false;
     }
 
@@ -1222,7 +1388,7 @@ static void mig_service_step(mig_handle_t *m)
     if (ftl_job_heartbeat(&m->log_ms, &m->start_ms) &&
         (ftl_job_age_ms(&m->start_ms) >= FTL_JOB_LOG_SLOW_AFTER_MS))
     {
-        LOGI("[MIG] job kind=%u phase=%u page=%u plane=%u aborted=%u age=%lums\r\n",
+        LOGI(LOG_TAG_MIG "job kind=%u phase=%u page=%u plane=%u aborted=%u age=%lums\r\n",
              (unsigned)m->kind,
              (unsigned)m->phase,
              (unsigned)m->page,
@@ -1317,7 +1483,7 @@ static DWORD mig_gc_evaluate(mig_handle_t *m, DWORD now_ms, bool *host_writing)
     if ((m->gc_log_last_ms == 0U) || ((now_ms - m->gc_log_last_ms) >= GC_LOG_INTERVAL_MS))
     {
         m->gc_log_last_ms = now_ms;
-        LOGD("[GC] trig=0x%02lx free=%u op=%u/%u writes=%lu reclaimed=%lu novictim=%lu nogain=%lu mode=%s hw=%u bestvr=%u\r\n",
+        LOGD(LOG_TAG_GC "trig=0x%02lx free=%u op=%u/%u writes=%lu reclaimed=%lu novictim=%lu nogain=%lu mode=%s hw=%u minvr=%u\r\n",
              triggers,
              (unsigned)m->alloc->free_count,
              (unsigned)alc_get_op_count(m->alloc, 0U),
@@ -1382,15 +1548,80 @@ static void mig_status_fill(const mig_handle_t *m, const bg_info_t *info, mig_st
     out->gc_no_gain    = m->gc_no_gain;
 }
 
+/* GC 会话进展：只在会话活跃且距上次 >=5 s 时打；now_ms==0（无时钟）时不打。 */
+static void mig_gc_session_progress(mig_handle_t *m, DWORD now_ms)
+{
+    if ((!m->gc_session_active) || (now_ms == 0U) || (m->gc_session_moved == 0U))
+    {
+        return;
+    }
+    if ((m->gc_session_log_ms != 0U) &&
+        ((now_ms - m->gc_session_log_ms) < FTL_JOB_LOG_SLOW_INTERVAL_MS))
+    {
+        return;
+    }
+
+    m->gc_session_log_ms = now_ms;
+    LOGI(LOG_TAG_GC "progress jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu free=%u\r\n",
+         m->gc_session_jobs,
+         m->gc_session_moved,
+         m->gc_session_reclaimed,
+         m->gc_session_noop,
+         m->gc_session_aborted,
+         (unsigned)m->alloc->free_count);
+}
+
+/* GC 会话收尾：连续 GC_SESSION_IDLE_MS 没有 GC job 活动。 */
+static void mig_gc_session_end(mig_handle_t *m, DWORD now_ms)
+{
+    if ((!m->gc_session_active) || (now_ms == 0U))
+    {
+        return;
+    }
+    if ((now_ms - m->gc_session_last_ms) < GC_SESSION_IDLE_MS)
+    {
+        return;
+    }
+
+    /* 只有真正发生了数据搬移的会话才打 end；纯空块/无搬移会话由 diag/nop 统计。 */
+    if (m->gc_session_moved != 0U)
+    {
+        LOGI(LOG_TAG_GC "end jobs=%lu moved=%lu rec=%lu noop=%lu abort=%lu elapsed=%lums\r\n",
+             m->gc_session_jobs,
+             m->gc_session_moved,
+             m->gc_session_reclaimed,
+             m->gc_session_noop,
+             m->gc_session_aborted,
+             ftl_job_age_ms(&m->gc_session_start_ms));
+    }
+
+    m->gc_session_active    = false;
+    m->gc_session_start_ms  = 0U;
+    m->gc_session_last_ms   = 0U;
+    m->gc_session_log_ms    = 0U;
+    m->gc_session_jobs      = 0U;
+    m->gc_session_moved     = 0U;
+    m->gc_session_reclaimed = 0U;
+    m->gc_session_noop      = 0U;
+    m->gc_session_aborted   = 0U;
+}
+
 void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
 {
+    const DWORD now_ms = info->now_ms;
+
     /* ① 在飞：只服务当前 job（提交即返回）。 */
     if (m->active)
     {
         mig_service_step(m);
+        mig_gc_session_progress(m, now_ms);
         mig_status_fill(m, info, out);
         return;
     }
+
+    /* 会话收尾必须在 paused 早退之前：熔断后仍要留下本次会话的结束行。 */
+    mig_gc_session_end(m, now_ms);
+    mig_gc_session_progress(m, now_ms);
 
     /* ② 系统性命中熔断：不再启动任何 GC/WL/predict（重启才清）。 */
     if (m->paused)
@@ -1399,36 +1630,51 @@ void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
         return;
     }
 
-    /* ③ 不在飞：host 饱和档让路，不评估新工作。 */
-    if (info->load_level == BG_LEVEL_BUSY)
-    {
-        mig_status_fill(m, info, out);
-        return;
-    }
-
-    const DWORD now_ms = info->now_ms;
-
-    /* ④ 紧急/显式触发优先；否则按自持节拍评估 GC → WL → predict。
-     *    每轮最多启动一个 job（单飞行）。 */
+    /* ③ 紧急 GC：写路径分配不到页对（wbuf 调 mig_trigger）时，必须在 BUSY 档也处理。
+     * 否则 host 持续写 → load_level 恒 BUSY → 本函数每次早退 → urgent_gc 永不被消费
+     * ⇒ free_count 卡在目标线附近、写请求永久 FTL_AGAIN（CDM "Preparing" 卡住的现场）。
+     * BUSY 只让**周期评估**（T1/T5/WL/predict）让路，不让“写不进去”的急救让路。 */
     if (m->urgent_gc != 0U)
     {
         m->urgent_gc = 0U;
 
-        /* 写路径分配失败 = 紧急：给一次立即扫描；free 仍高于紧急线时按 OFF（不筛），
-         * 因为 urgent 的语义是「写不进去」，不是「空闲补池」。 */
+        /* free 仍高于紧急线时按 OFF（不筛），因为 urgent 的语义是「写不进去」，
+         * 不是「空闲补池」。 */
         const gc_benefit_mode_e mode = (m->alloc->free_count <= FREE_POOL_EMERGENCY)
                                            ? GC_BENEFIT_EMERGENCY
                                            : GC_BENEFIT_OFF;
-        (void)mig_begin_gc(m, mode, now_ms);
+        (void)mig_begin_gc(m, mode, now_ms, MIG_GC_START_URGENT, 0U);
+        mig_status_fill(m, info, out);
+        return;
     }
-    else
+
+    /* ④ host 饱和档：不跑 WL/predict，也不做普通周期求值；但 free 已跌破
+     * GC 目标线时必须做水位 GC——否则 BUSY 会一直挡到 wbuf 分配失败（free≈1），
+     * 那时已没有目的页可分配，只能 no-gain。目标 200 的水位因此形同虚设。 */
+    if (info->load_level == BG_LEVEL_BUSY)
+    {
+        if (m->alloc->free_count < FREE_POOL_TARGET)
+        {
+            bool        host_writing = false;
+            const DWORD trig         = mig_gc_evaluate(m, now_ms, &host_writing);
+
+            if (trig != 0U)
+            {
+                (void)mig_begin_gc(m, mig_gc_mode(trig, host_writing), now_ms, MIG_GC_START_PERIODIC, trig);
+            }
+        }
+        mig_status_fill(m, info, out);
+        return;
+    }
+
+    /* ⑤ 周期评估 GC → WL → predict；每轮最多启动一个 job（单飞行）。 */
     {
         bool        host_writing = false;
         const DWORD trig         = mig_gc_evaluate(m, now_ms, &host_writing);
 
         if (trig != 0U)
         {
-            (void)mig_begin_gc(m, mig_gc_mode(trig, host_writing), now_ms);
+            (void)mig_begin_gc(m, mig_gc_mode(trig, host_writing), now_ms, MIG_GC_START_PERIODIC, trig);
         }
         else if ((m->wl_eval_last_ms == 0U) ||
                  ((now_ms - m->wl_eval_last_ms) >= WL_EVAL_INTERVAL_MS))
@@ -1542,9 +1788,9 @@ static void mig_complete_read(mig_handle_t              *m,
 
         if (m->fail_count[plane] >= MIG_VICTIM_READ_FAIL_MAX)
         {
-            /* gblk 是全局块号（plane*BLOCKS_PER_PLANE+block），与 mig_abort 的
-             * 「plane%u block=%u」不是同一坐标，故字段名写 gblk（RISK-MIG-06）。 */
-            LOGW("[MIG] victim read failed gblk=%u x%u cause=%s — mark BAD\r\n", (unsigned)gsrc, (unsigned)m->fail_count[plane], cause);
+            /* gblk 是全局块号（plane*BLOCKS_PER_PLANE+block）；与 abort 行的
+             * g0/g1 同一坐标（RISK-MIG-06）。 */
+            LOGW(LOG_TAG_MIG "victim read failed gblk=%u x%u cause=%s — mark BAD\r\n", (unsigned)gsrc, (unsigned)m->fail_count[plane], cause);
             (void)bbt_mark_bad(m->alloc, gsrc);
             if (alc_closed_drop_plane(m->alloc, plane, m->victim.plane_blocks[plane]))
             {
@@ -1562,7 +1808,7 @@ static void mig_complete_read(mig_handle_t              *m,
             if (!m->paused && (m->read_fail_streak >= MIG_SYSTEMIC_READ_FAIL_MAX))
             {
                 m->paused = true;
-                LOGE("[MIG] systemic victim read failures (%u consecutive) — suspend GC until reboot\r\n",
+                LOGE(LOG_TAG_MIG "systemic victim read failures (%u consecutive) — suspend GC until reboot\r\n",
                      (unsigned)m->read_fail_streak);
             }
         }
@@ -1626,7 +1872,7 @@ static void mig_complete_erase(mig_handle_t              *m,
         {
             /* 迁移期间被 RR/BBT 标 BAD：擦成功也不能复活或入池。 */
             m->erase_failed = true;
-            LOGW("[MIG] erase ok but block %u became BAD — not freed/retired\r\n", (unsigned)gsrc);
+            LOGW(LOG_TAG_MIG "erase ok but block %u became BAD — not freed/retired\r\n", (unsigned)gsrc);
         }
         else
         {
@@ -1666,12 +1912,12 @@ static void mig_complete_erase(mig_handle_t              *m,
          *   「GC 源块擦失败」还是「host 写/读失败」。 */
         if (!ftl_block_is_bad(&m->alloc->blocks[gsrc]))
         {
-            LOGW("[MIG] erase failed gblk=%u — mark BAD\r\n", (unsigned)gsrc);
+            LOGW(LOG_TAG_MIG "erase failed gblk=%u — mark BAD\r\n", (unsigned)gsrc);
             (void)bbt_mark_bad(m->alloc, gsrc);
         }
         else
         {
-            LOGW("[MIG] erase failed on already-BAD block %u — not re-marked\r\n", (unsigned)gsrc);
+            LOGW(LOG_TAG_MIG "erase failed on already-BAD block %u — not re-marked\r\n", (unsigned)gsrc);
         }
     }
 
@@ -1709,7 +1955,7 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
      * 对齐 read_recovery.c 的同族守卫；release 下 ASSERT 裁空，必须先判空。 */
     if (m == NULL)
     {
-        LOGE("[MIG] late completion cmd=%u status=0x%02x — released\r\n", (unsigned)completion->command_id, (unsigned)completion->status);
+        LOGE(LOG_TAG_MIG "late completion cmd=%u status=0x%02x — released\r\n", (unsigned)completion->command_id, (unsigned)completion->status);
         (void)fc_command_release(cmd);
         return;
     }
@@ -1722,7 +1968,7 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
      * 否则迟到的完成会按新 job 的 phase 被误解释（同 read_recovery.c 的守卫）。 */
     if ((!m->active) || (!m->waiting))
     {
-        LOGW("[MIG] orphan completion phase=%u active=%u waiting=%u — ignored\r\n",
+        LOGW(LOG_TAG_MIG "orphan completion phase=%u active=%u waiting=%u — ignored\r\n",
              (unsigned)m->phase,
              (unsigned)m->active,
              (unsigned)m->waiting);
@@ -1751,7 +1997,7 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
         case MIG_DONE:
         default:
             /* 不该发生：一条命令对应一个提交阶段（READ / WRITE / ERASE）。 */
-            LOGE("[MIG] unexpected completion phase=%u\r\n", (unsigned)m->phase);
+            LOGE(LOG_TAG_MIG "unexpected completion phase=%u\r\n", (unsigned)m->phase);
             (void)fc_command_release(cmd);
             m->waiting = false;
             mig_abort(m, "unexpected completion");

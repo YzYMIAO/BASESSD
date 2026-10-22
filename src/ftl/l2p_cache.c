@@ -193,7 +193,7 @@ static void l2p_note_access(l2p_cache_t *cache, BYTE is_miss)
     if (cache->thrashing != was_thrashing)
     {
         /* 观测口：miss= 为最近窗口 miss 率；hit/miss= 为开机累计。 */
-        LOGI("[L2P] thrash=%u miss=%u%% hit=%lu miss_total=%lu\r\n",
+        LOGI(LOG_TAG_L2P "thrash=%u miss=%u%% hit=%lu miss_total=%lu\r\n",
              (unsigned)cache->thrashing,
              (unsigned)cache->miss_pct,
              cache->hit_count,
@@ -358,7 +358,7 @@ static void l2p_log_evict_fail(const l2p_cache_t *cache, DWORD region_id)
         }
     }
 
-    LOGW("[L2P] no evictable line: region=%lu inv=%u clean=%u dirty=%u loading=%u flushing=%u suppressed=%lu\r\n",
+    LOGW(LOG_TAG_L2P "no evictable line: region=%lu inv=%u clean=%u dirty=%u loading=%u flushing=%u suppressed=%lu\r\n",
          region_id,
          (unsigned)inv,
          (unsigned)clean,
@@ -468,7 +468,7 @@ static void l2p_log_load_fail(DWORD region_id, const char *cause)
         return;
     }
 
-    LOGW("[L2P] load start failed region=%lu cause=%s suppressed=%lu\r\n", region_id, cause, s_load_fail_n);
+    LOGW(LOG_TAG_L2P "load start failed region=%lu cause=%s suppressed=%lu\r\n", region_id, cause, s_load_fail_n);
     s_load_fail_ms = now_ms;
     s_load_fail_n  = 0U;
 }
@@ -498,7 +498,7 @@ static void l2p_log_degrade(DWORD region_id, BYTE fail_count)
         return;
     }
 
-    LOGE("[L2P] region %lu load failed %u times — degrade to unmapped (suppressed=%lu)\r\n",
+    LOGE(LOG_TAG_L2P "region %lu load failed %u times — degrade to unmapped (suppressed=%lu)\r\n",
          region_id,
          (unsigned)fail_count,
          s_degrade_n);
@@ -854,7 +854,7 @@ ftl_status_e l2p_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out)
         l2p_sync_pump(cache, owner);
     }
 
-    LOGE("[L2P] read_sync timeout lba=%lu\r\n", lba);
+    LOGE(LOG_TAG_L2P "read_sync timeout lba=%lu\r\n", lba);
     return FTL_ERROR;
 }
 
@@ -903,7 +903,7 @@ ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba)
         l2p_sync_pump(cache, owner);
     }
 
-    LOGE("[L2P] write_sync timeout lba=%lu\r\n", lba);
+    LOGE(LOG_TAG_L2P "write_sync timeout lba=%lu\r\n", lba);
     return FTL_ERROR;
 }
 
@@ -917,6 +917,8 @@ ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba)
  * 一旦 FC 池空（FTL_AGAIN），槽位已推进且无法回收 ⇒ 持续背压下白烧日志块。
  * 单线程 superloop 且预检与建链之间不泵 ⇒ 资源不会被别人拿走。
  */
+static WORD l2p_dirty_count(const l2p_cache_t *cache);
+
 static bool l2p_flush_resources_available(void)
 {
     fc_resource_stats_t stats;
@@ -1039,7 +1041,10 @@ void l2p_flush_kick_owner(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick)
     }
     else if (ftl_job_tick(&cache->job_log_ms))
     {
-        LOGI("[L2P] job inflight load=%u flush=%u\r\n", (unsigned)cache->load_inflight, (unsigned)cache->flush_inflight);
+        LOGI(LOG_TAG_L2P "job inflight load=%u flush=%u dirty=%u\r\n",
+             (unsigned)cache->load_inflight,
+             (unsigned)cache->flush_inflight,
+             (unsigned)l2p_dirty_count(cache));
     }
 
     for (WORD i = 0U; (i < L2P_CACHE_SIZE) && (max_kick > 0U); i++)
@@ -1137,7 +1142,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
             /* 数据在 desc 链上 ⇒ 必须早于 release 拷出。 */
             if (ftl_cmd_read_data(cmd, line->entries, L2P_REGION_SIZE) != FTL_OK)
             {
-                LOGW("[L2P] load copy failed region=%lu\r\n", line->region_id);
+                LOGW(LOG_TAG_L2P "load copy failed region=%lu\r\n", line->region_id);
                 load_failed = 1U;
             }
         }
@@ -1160,7 +1165,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
                 if ((primary != NAND_PBA_INVALID) && (backup != NAND_PBA_INVALID) && (primary != backup))
                 {
                     md_commit_region_pair(ftl->metadata_dir, local, backup, primary);
-                    LOGW("[L2P] region %lu primary unreadable — backup OK\r\n", line->region_id);
+                    LOGW(LOG_TAG_L2P "region %lu primary unreadable — backup OK\r\n", line->region_id);
                 }
                 /* primary == INVALID 是「旧介质单副本 / 尚未 flush」的正常路径，不是
                  * 读失败，不打 WRN（否则日志会把合法状态说成故障）。 */
@@ -1278,7 +1283,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
     else
     {
         /* 不该发生：LOADING / FLUSHING 期间行不可被改写状态。 */
-        LOGE("[L2P] unexpected completion state=%u\r\n", (unsigned)line->state);
+        LOGE(LOG_TAG_L2P "unexpected completion state=%u\r\n", (unsigned)line->state);
     }
 
     (void)fc_command_release(cmd);

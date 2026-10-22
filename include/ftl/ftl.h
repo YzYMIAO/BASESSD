@@ -180,7 +180,9 @@ typedef struct ftl_context
     bool  trim_active;
     DWORD trim_lba;
     DWORD trim_end;
-    DWORD trim_wait_ms; /* 无进展等待起点（0 = 尚未等待）；超 FTL_TRIM_TIMEOUT_MS 中止 */
+    DWORD trim_start_lba; /* 本次 TRIM 起始 LBA（完成时 trim_lba 已到 end，不能反推） */
+    DWORD trim_start_ms;  /* 本次 TRIM 起点（观测 elapsed；无时钟为 0） */
+    DWORD trim_wait_ms;   /* 无进展等待起点（0 = 尚未等待）；超 FTL_TRIM_TIMEOUT_MS 中止 */
 
     /* 时间预算后台调度器（per-instance）。
      * 任务表（10 项：6 must-run + 4 预算）由 ftl_bg_init 从 `ftl/bg_wiring.c` 的静态表

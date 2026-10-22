@@ -287,7 +287,7 @@ static void rr_settle_plane(rr_handle_t *rr)
             if ((rr->already_bad_logged[word] & bit) == 0U)
             {
                 rr->already_bad_logged[word] |= bit;
-                LOGW("[RR] retired lba=%lu g=%u st=%s (data lost, count=%lu)\r\n",
+                LOGW(LOG_TAG_RR "retired lba=%lu g=%u st=%s (data lost, count=%lu)\r\n",
                      lba,
                      (unsigned)gblock,
                      stbuf,
@@ -300,7 +300,7 @@ static void rr_settle_plane(rr_handle_t *rr)
 
             if (rr_unrec_log_due(&suppressed))
             {
-                LOGE("[RR] unc lba=%lu pba=0x%08lx paa=0x%08lx g=%u pl=%u bk=%u pg=%u cw=%u retry=%u st=%s supp=%lu\r\n",
+                LOGE(LOG_TAG_RR "unc lba=%lu pba=0x%08lx paa=0x%08lx g=%u pl=%u bk=%u pg=%u cw=%u retry=%u st=%s supp=%lu\r\n",
                      lba,
                      fail_pba,
                      fail_paa,
@@ -336,6 +336,9 @@ static void rr_finish(rr_handle_t *rr)
     /* all_ok 是**所有被覆盖 plane 的聚合**：任一 plane 不可恢复或提交侧 abort
      * 都按 IO_ERROR 结算；全部恢复成功才报 OK（数据已由 rr_settle_plane 拷回）。
      * owners 已在 rr->owner 中按值保存；先释放槽再结算组，顺序与旧端口一致。 */
+    /* 不新增逐次 done 行：读失败现场由 [RR  ] unc（限流）承担，恢复过程由
+     * [RR  ] job 心跳（卡住时才出现）承担。每次恢复都打 done 在坏介质下会刷屏。 */
+
     pend_release_index(rr->pending, rr->owner.pending_idx);
     pend_group_complete_subop_multi(rr->pending, rr->owner.owners, status);
 
@@ -348,7 +351,7 @@ static void rr_finish(rr_handle_t *rr)
  * ⚠ **不**标坏块——卡死是控制器侧资源问题，与介质无关，标坏会白丢一个好块。 */
 static void rr_abort(rr_handle_t *rr)
 {
-    LOGE("[RR] submit stalled, abort lba=%lu\r\n", rr->owner.lba);
+    LOGE(LOG_TAG_RR "submit stalled, abort lba=%lu\r\n", rr->owner.lba);
 
     for (BYTE k = 0U; k < rr->owner.n_cw; k++)
     {
@@ -414,6 +417,8 @@ static void rr_step(rr_handle_t *rr)
                 rr->error            = (int32_t)FTL_OK;
                 rr->all_ok           = 1U; /* 聚合结果：任一 plane 失败才清零 */
                 rr->stall_ms         = 0U; /* 新 job：卡死计数从头算（不复用上一 job 的） */
+                rr->start_ms         = ftl_job_now_ms();
+                rr->log_ms           = rr->start_ms;
                 rr->stage            = RR_STAGE_PLANE;
                 break;
             }
@@ -504,7 +509,7 @@ static void rr_service_step(rr_handle_t *rr)
     }
     else if (ftl_job_heartbeat(&rr->log_ms, &rr->start_ms))
     {
-        LOGI("[RR] job stage=%u plane=%u attempt=%u retry=%u stall=%lums age=%lums\r\n",
+        LOGI(LOG_TAG_RR "job stage=%u plane=%u attempt=%u retry=%u stall=%lums age=%lums\r\n",
              (unsigned)rr->stage,
              (unsigned)rr->plane,
              (unsigned)rr->attempt,

@@ -79,6 +79,7 @@ static int uart_cli_fl(int argc, char *argv[]);
 static int uart_cli_wp(int argc, char *argv[]); /* 页打包写缓冲合并诊断（§七 方案 A） */
 static int uart_cli_info(int argc, char *argv[]);
 static int uart_cli_map(int argc, char *argv[]);   /* L2P 映射 + 目标块 BST 条目（只读诊断） */
+static int uart_cli_addr(int argc, char *argv[]);  /* PBA/PAA/gblock 地址字段转换（只读诊断） */
 static int uart_cli_rdpaa(int argc, char *argv[]); /* 按 PAA 读一个 NAND 页（诊断） */
 static int uart_cli_crash(int argc, char *argv[]); /* .noinit 崩溃记录查看/清除 */
 #if defined(FC_NAND_TEST_ENABLE)
@@ -206,6 +207,19 @@ static bool uart_cli_parse_uint(const char *text, QWORD *out)
     {
         *out = value;
     }
+    return true;
+}
+
+/* 地址字段是 32-bit：先按 QWORD 解析，再显式拒绝超出 DWORD 的输入。 */
+static bool uart_cli_parse_dword(const char *text, DWORD *out)
+{
+    QWORD value;
+
+    if (!uart_cli_parse_uint(text, &value) || (value > UINT32_MAX))
+    {
+        return false;
+    }
+    *out = (DWORD)value;
     return true;
 }
 
@@ -542,10 +556,11 @@ static int uart_cli_info(int argc, char *argv[])
                 {
                     continue;
                 }
-                (void)LOGI("ftl[%u][%u][%u] free=%u op=%u/%u spare=%u/%u bad=%u closed=%u live=%u thrash=%u miss=%u%% cp=%lu cpa=%u\r\n",
+                (void)LOGI("ftl[%u][%u][%u] mode=%u free=%u op=%u/%u spare=%u/%u bad=%u closed=%u live=%u thrash=%u miss=%u%% cp=%lu cpa=%u jrn=%lu wr=%lu\r\n",
                            (unsigned)ch,
                            (unsigned)ce,
                            (unsigned)lun,
+                           (unsigned)nand_get_timing_mode(),
                            (unsigned)ftl->alloc.free_count,
                            (unsigned)alc_get_op_count(&ftl->alloc, 0U),
                            (unsigned)alc_get_op_count(&ftl->alloc, 1U),
@@ -557,10 +572,12 @@ static int uart_cli_info(int argc, char *argv[])
                            (unsigned)ftl->cache->thrashing,
                            (unsigned)ftl->cache->miss_pct,
                            ftl->cp_handle->cp_state.sequence,
-                           (unsigned)ftl->cp_handle->active);
+                           (unsigned)ftl->cp_handle->active,
+                           ftl->journal->handle.sequence_counter,
+                           ftl->total_writes);
 
                 /* 计数类诊断（不逐事件打日志，靠这里/`[STAT]` 查）。 */
-                (void)LOGI("diag[%u][%u][%u] dng=%lu rrab=%lu mig=%u/%u erased=%lu streak=%u gcm=%u ng=%lu\r\n",
+                (void)LOGI("diag[%u][%u][%u] dng=%lu rrab=%lu mig=%u/%u rec=%lu mv=%lu nop=%lu nov=%lu erased=%lu streak=%u gcm=%u ng=%lu\r\n",
                            (unsigned)ch,
                            (unsigned)ce,
                            (unsigned)lun,
@@ -568,6 +585,10 @@ static int uart_cli_info(int argc, char *argv[])
                            ftl->read_recovery_handle.already_bad_reads,
                            (unsigned)((ftl->mig_handle->active != 0U) ? 1U : 0U),
                            (unsigned)((ftl->mig_handle->paused != 0U) ? 1U : 0U),
+                           ftl->mig_handle->reclaimed_count,
+                           ftl->mig_handle->moved_count,
+                           ftl->mig_handle->noop_count,
+                           ftl->mig_handle->novictim_count,
                            ftl->mig_handle->erased,
                            (unsigned)ftl->mig_handle->read_fail_streak,
                            (unsigned)ftl->mig_handle->gc_last_mode,
@@ -658,16 +679,17 @@ static int uart_cli_map(int argc, char *argv[])
 
     g = ftl_pba_gblock(pba);
     b = &ftl->alloc.blocks[g];
-    (void)LOGI("map lba=%lu pba=%08lx ch=%lu ce=%lu lun=%lu plane=%lu blk=%lu pg=%lu cw=%lu g=%u\r\n",
+    (void)LOGI("map lba=%lu pba=%08lx paa=%08lx ch=%u ce=%u lun=%u plane=%u blk=%u pg=%u cw=%u g=%u\r\n",
                (unsigned long)lba,
                pba,
-               pba_to_ch(pba),
-               pba_to_ce(pba),
-               pba_to_lun(pba),
-               pba_to_plane(pba),
-               pba_to_block(pba),
-               pba_to_page(pba),
-               pba_to_cw(pba),
+               pba_to_paa(pba),
+               (unsigned)pba_to_ch(pba),
+               (unsigned)pba_to_ce(pba),
+               (unsigned)pba_to_lun(pba),
+               (unsigned)pba_to_plane(pba),
+               (unsigned)pba_to_block(pba),
+               (unsigned)pba_to_page(pba),
+               (unsigned)pba_to_cw(pba),
                (unsigned)g);
     (void)LOGI("    block g=%u state=%s valid=%u sb=%u ec=%lu\r\n",
                (unsigned)g,
@@ -685,6 +707,140 @@ static int uart_cli_map(int argc, char *argv[])
         (void)LOGI("    VERDICT: ok —— 覆盖写安全\r\n");
     }
     return FUNC_STATUS_SUCCESS;
+}
+
+/*
+ * addr — PBA/PAA/gblock 的只读地址转换。
+ *
+ *   addr pba <pba>                  PBA → PAA + ch/ce/lun/plane/block/page/cw + g
+ *   addr paa <paa> [ch ce]          PAA → PBA + 展开字段（默认单 chip ch=ce=0）
+ *   addr g <g> [ch ce lun]          实例内全局块号 → plane/block + BST 摘要
+ *
+ * LBA → 上述字段的入口是 `map <lba>`；这里不再提供 `addr lba`，避免两套入口（C9）。
+ * 所有字段展开都复用 PBA/PAA getter 与 ftl_gblock helper，不手写位运算。
+ */
+static int uart_cli_addr(int argc, char *argv[])
+{
+    DWORD value;
+
+    if (argc < 3)
+    {
+        (void)LOGE("usage: addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]\r\n");
+        return FUNC_STATUS_ERROR;
+    }
+
+    if (strcmp(argv[1], "pba") == 0)
+    {
+        if ((argc != 3) || (!uart_cli_parse_dword(argv[2], &value)) || (!pba_is_valid(value)))
+        {
+            (void)LOGE("addr: invalid pba\r\n");
+            return FUNC_STATUS_ERROR;
+        }
+
+        (void)LOGI("addr pba=0x%08lx paa=0x%08lx ch=%u ce=%u lun=%u g=%u plane=%u blk=%u pg=%u cw=%u\r\n",
+                   value,
+                   pba_to_paa(value),
+                   (unsigned)pba_to_ch(value),
+                   (unsigned)pba_to_ce(value),
+                   (unsigned)pba_to_lun(value),
+                   (unsigned)ftl_pba_gblock(value),
+                   (unsigned)pba_to_plane(value),
+                   (unsigned)pba_to_block(value),
+                   (unsigned)pba_to_page(value),
+                   (unsigned)pba_to_cw(value));
+        return FUNC_STATUS_SUCCESS;
+    }
+
+    if (strcmp(argv[1], "paa") == 0)
+    {
+        DWORD ch = 0U;
+        DWORD ce = 0U;
+
+        if ((argc != 3) && (argc != 5))
+        {
+            (void)LOGE("usage: addr paa <paa> [ch ce]\r\n");
+            return FUNC_STATUS_ERROR;
+        }
+        if ((!uart_cli_parse_dword(argv[2], &value)) || (paa_is_valid_paa(value) == 0U))
+        {
+            (void)LOGE("addr: invalid paa\r\n");
+            return FUNC_STATUS_ERROR;
+        }
+        if (argc == 5)
+        {
+            if ((!uart_cli_parse_dword(argv[3], &ch)) || (!uart_cli_parse_dword(argv[4], &ce)) ||
+                (ch >= CH_NUM) || (ce >= CE_NUM))
+            {
+                (void)LOGE("addr: invalid ch/ce\r\n");
+                return FUNC_STATUS_ERROR;
+            }
+        }
+
+        const DWORD pba = paa_to_pba(ch, ce, value);
+
+        (void)LOGI("addr paa=0x%08lx pba=0x%08lx ch=%u ce=%u lun=%u g=%u plane=%u blk=%u pg=%u cw=%u\r\n",
+                   value,
+                   pba,
+                   (unsigned)pba_to_ch(pba),
+                   (unsigned)pba_to_ce(pba),
+                   (unsigned)pba_to_lun(pba),
+                   (unsigned)ftl_pba_gblock(pba),
+                   (unsigned)pba_to_plane(pba),
+                   (unsigned)pba_to_block(pba),
+                   (unsigned)pba_to_page(pba),
+                   (unsigned)pba_to_cw(pba));
+        return FUNC_STATUS_SUCCESS;
+    }
+
+    if (strcmp(argv[1], "g") == 0)
+    {
+        DWORD ch  = 0U;
+        DWORD ce  = 0U;
+        DWORD lun = 0U;
+
+        if ((argc != 3) && (argc != 6))
+        {
+            (void)LOGE("usage: addr g <g> [ch ce lun]\r\n");
+            return FUNC_STATUS_ERROR;
+        }
+        if ((!uart_cli_parse_dword(argv[2], &value)) || (value >= FTL_BLOCK_TOTAL))
+        {
+            (void)LOGE("addr: invalid gblock\r\n");
+            return FUNC_STATUS_ERROR;
+        }
+        if (argc == 6)
+        {
+            if ((!uart_cli_parse_dword(argv[3], &ch)) || (!uart_cli_parse_dword(argv[4], &ce)) ||
+                (!uart_cli_parse_dword(argv[5], &lun)) ||
+                (ch >= CH_NUM) || (ce >= CE_NUM) || (lun >= LUN_NUM))
+            {
+                (void)LOGE("addr: invalid ch/ce/lun\r\n");
+                return FUNC_STATUS_ERROR;
+            }
+        }
+
+        const ftl_ctx_t   *ftl = g_ctrl.ftl[ch][ce][lun];
+        const bst_block_t *b;
+
+        if (ftl == NULL)
+        {
+            (void)LOGE("addr: ftl instance not ready\r\n");
+            return FUNC_STATUS_ERROR;
+        }
+        b = &ftl->alloc.blocks[value];
+        (void)LOGI("addr g=%lu plane=%u blk=%u state=%s valid=%u sb=%u ec=%lu\r\n",
+                   value,
+                   (unsigned)ftl_gblock_plane((WORD)value),
+                   (unsigned)ftl_gblock_block((WORD)value),
+                   ftl_block_state_name(ftl_block_state(b)),
+                   (unsigned)b->valid_count,
+                   (unsigned)b->sb_id,
+                   b->erase_count);
+        return FUNC_STATUS_SUCCESS;
+    }
+
+    (void)LOGE("usage: addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]\r\n");
+    return FUNC_STATUS_ERROR;
 }
 
 /*
@@ -980,7 +1136,7 @@ static int uart_cli_pool(int argc, char *argv[])
                     continue;
                 }
 
-                LOGI("[POOL] ch=%u ce=%u lun=%u\r\n", (unsigned)ch, (unsigned)ce, (unsigned)lun);
+                LOGI(LOG_TAG_POOL "ch=%u ce=%u lun=%u\r\n", (unsigned)ch, (unsigned)ce, (unsigned)lun);
                 md_pool_print(ftl->metadata_dir);
                 done = 1U;
             }
@@ -1198,6 +1354,7 @@ static const uart_cli_command_t g_uart_cli_commands[] = {
     {     "wp",                                                                                               "wp <lba> <n> <k>",                                     "submit k writes in one pair window (pack-buffer diag)", 4U,  4U,      uart_cli_wp},
     {   "info",                                                                                                           "info",                                                          "show controller + FTL statistics", 1U,  1U,    uart_cli_info},
     {    "map",                                                                                                      "map <lba>",                               "print L2P mapping + target block BST entry (read-only diag)", 2U,  2U,     uart_cli_map},
+    {   "addr",                                                         "addr pba <pba> | paa <paa> [ch ce] | g <g> [ch ce lun]",                                  "translate PBA/PAA/gblock address fields (read-only diag)", 3U,  6U,    uart_cli_addr},
     {  "rdpaa",                                                                                            "rdpaa <paa> [--raw]",                  "read one NAND page by PAA (default: ECC/CRC/descramble; --raw: raw bits)", 2U,  3U,   uart_cli_rdpaa},
     {  "crash",                                                                                                  "crash [clear]",                                                       "show/clear the .noinit crash record", 1U,  2U,   uart_cli_crash},
     {  "stack",                                                                                                          "stack",                                        "show stack guard: paint region, peak usage, alarms", 1U,  1U,   uart_cli_stack},

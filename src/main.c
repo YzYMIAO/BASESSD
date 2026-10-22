@@ -466,7 +466,7 @@ static DWORD ssd_ftl_host_lba_max(void)
 
                 const DWORD instance_blocks = plane_usable_min * PLANE_NUM;
 
-                LOGI("[CAP] ch=%u ce=%u lun=%u plane_usable_min=%lu instance_blocks=%lu\r\n",
+                LOGI(LOG_TAG_CAP "ch=%u ce=%u lun=%u plane_usable_min=%lu instance_blocks=%lu\r\n",
                      (unsigned)ch,
                      (unsigned)ce,
                      (unsigned)lun,
@@ -497,7 +497,7 @@ static DWORD ssd_ftl_host_lba_max(void)
         lba = 1U; /* 极端坏块：保留至少 1 个 LBA，避免 READ CAPACITY 为 0 */
     }
 
-    LOGI("[CAP] host_data_blocks=%lu lba_max=%lu (%luMiB)\r\n",
+    LOGI(LOG_TAG_CAP "host_data_blocks=%lu lba_max=%lu (%luMiB)\r\n",
          cap_blocks,
          (unsigned long)lba,
          (unsigned long)((lba * FTL_IU_BYTES) / (1024UL * 1024UL)));
@@ -506,10 +506,10 @@ static DWORD ssd_ftl_host_lba_max(void)
 }
 
 /* --------------------------------------------------------------------
- * ssd_ftl_log_status - 周期性 [STAT] 一行摘要（每 5 s）
+ * ssd_ftl_log_status - 周期性 [STAT] 一行摘要（每 10 s）
  *
- *   把「计数类」信息从逐事件日志里挪出来：free/op/spare/bad、CP/JRN 水位、
- *   迁移状态、dangling/已退役块重读计数、当前 NAND timing mode。
+ *   只保留块分配/坏块/搬移状态；op/spare/cp/jrn/wr/dng/rrab/mode 等低频计数
+ *   改由 `info` / `diag` 按需查看，避免长期占用 UART。
  *   逐事件日志只保留首次故障与状态变化（见 docs/design/logging_design.md）。
  * -------------------------------------------------------------------- */
 static void ssd_ftl_log_status(void)
@@ -517,13 +517,11 @@ static void ssd_ftl_log_status(void)
     static DWORD last_ms;
     const DWORD  now = HAL_GetTick();
 
-    if ((last_ms != 0U) && ((now - last_ms) < 5000U))
+    if ((last_ms != 0U) && ((now - last_ms) < 10000U))
     {
         return;
     }
     last_ms = now;
-
-    const BYTE mode = nand_get_timing_mode();
 
     for (BYTE ch = 0U; ch < CH_NUM; ch++)
     {
@@ -538,23 +536,15 @@ static void ssd_ftl_log_status(void)
                     continue;
                 }
 
-                LOGI("[STAT] ch=%u t=%lus mode=%u free=%u op=%u/%u spare=%u/%u bad=%u cp=%lu jrn=%lu wr=%lu mig=%u/%u dng=%lu rrab=%lu\r\n",
+                LOGI(LOG_TAG_STAT "ch=%u t=%lus free=%u bad=%u mig=%u/%u mv=%lu nop=%lu\r\n",
                      (unsigned)ch,
                      (unsigned long)(now / 1000U),
-                     (unsigned)mode,
                      (unsigned)ftl->alloc.free_count,
-                     (unsigned)alc_get_op_count(&ftl->alloc, 0U),
-                     (unsigned)alc_get_op_count(&ftl->alloc, 1U),
-                     (unsigned)alc_get_spare_count(&ftl->alloc, 0U),
-                     (unsigned)alc_get_spare_count(&ftl->alloc, 1U),
                      (unsigned)ftl->alloc.bad_count,
-                     ftl->cp_handle->cp_state.sequence,
-                     (unsigned long)ftl->journal->handle.sequence_counter,
-                     ftl->total_writes,
                      (unsigned)((ftl->mig_handle->active != 0U) ? 1U : 0U),
                      (unsigned)((ftl->mig_handle->paused != 0U) ? 1U : 0U),
-                     ftl->dangling_total,
-                     ftl->read_recovery_handle.already_bad_reads);
+                     ftl->mig_handle->moved_count,
+                     ftl->mig_handle->noop_count);
             }
         }
     }
@@ -757,7 +747,7 @@ int main(void)
 
                 if (high_speed_result != NAND_RESULT_OK)
                 {
-                    LOGW("[NAND] high-speed enable failed: 0x%02X — keep low speed\r\n",
+                    LOGW(LOG_TAG_NAND "high-speed enable failed: 0x%02X — keep low speed\r\n",
                          (unsigned)high_speed_result);
                 }
             }
@@ -834,7 +824,7 @@ int main(void)
                 }
             }
 
-            /* 计数类信息每 5 s 一行，替代逐事件刷屏。 */
+            /* 块相关计数每 10 s 一行，替代逐事件刷屏。 */
             ssd_ftl_log_status();
         }
         else

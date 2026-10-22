@@ -74,49 +74,49 @@
  * ====================================================================== */
 
 #if NAND_DBG_FC
-#    define FC_LOGD(...) LOGI("[FC] " __VA_ARGS__)
+#    define FC_LOGD(...) LOGI(LOG_TAG_FC __VA_ARGS__)
 #else
 #    define FC_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_SCHED
-#    define SCHED_LOGD(...) LOGI("[SCH] " __VA_ARGS__)
+#    define SCHED_LOGD(...) LOGI(LOG_TAG_SCH __VA_ARGS__)
 #else
 #    define SCHED_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_DISPATCH
-#    define DISP_LOGD(...) LOGI("[DSP] " __VA_ARGS__)
+#    define DISP_LOGD(...) LOGI(LOG_TAG_DSP __VA_ARGS__)
 #else
 #    define DISP_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_ENGINE
-#    define ENG_LOGD(...) LOGI("[ENG] " __VA_ARGS__)
+#    define ENG_LOGD(...) LOGI(LOG_TAG_ENG __VA_ARGS__)
 #else
 #    define ENG_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_FMC
-#    define FMC_LOGD(...) LOGI("[FMC] " __VA_ARGS__)
+#    define FMC_LOGD(...) LOGI(LOG_TAG_FMC __VA_ARGS__)
 #else
 #    define FMC_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_DATA
-#    define DATA_LOGD(...) LOGI("[DAT] " __VA_ARGS__)
+#    define DATA_LOGD(...) LOGI(LOG_TAG_DAT __VA_ARGS__)
 #else
 #    define DATA_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_TIMING
-#    define TIM_LOGD(...) LOGI("[TIM] " __VA_ARGS__)
+#    define TIM_LOGD(...) LOGI(LOG_TAG_TIM __VA_ARGS__)
 #else
 #    define TIM_LOGD(...) ((void)0U)
 #endif
 
 #if NAND_DBG_RES
-#    define RES_LOGD(...) LOGI("[RES] " __VA_ARGS__)
+#    define RES_LOGD(...) LOGI(LOG_TAG_RES __VA_ARGS__)
 #else
 #    define RES_LOGD(...) ((void)0U)
 #endif

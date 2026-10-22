@@ -307,7 +307,7 @@ void bbt_init(alc_t *alloc)
      * （PROGRAM/ERASE 失败即标）。 */
     if (bbt_medium_has_ftl_data(alloc))
     {
-        LOGE("[BBT] 无有效 BBT，但介质已被格式化过 —— **拒绝出厂扫描**：\r\n");
+        LOGE(LOG_TAG_BBT "无有效 BBT，但介质已被格式化过 —— **拒绝出厂扫描**：\r\n");
         LOGE("      用过的块 spare[0] 是 FTL 数据而非出厂标记，重扫会把写过的块全判坏。\r\n");
         LOGE("      坏块表从空开始；真坏块由运行时 bbt_mark_bad 兜底。\r\n");
 
@@ -373,7 +373,7 @@ int bbt_scan_factory(alc_t *alloc)
      * 否则 bbt_save 会沿用自举扫描列表，可能选中刚扫出的坏块。 */
     if (!md_pool_build_all(alloc))
     {
-        LOGE("[BBT] factory scan: metadata candidate pool build failed — BBT not saved\r\n");
+        LOGE(LOG_TAG_BBT "factory scan: metadata candidate pool build failed — BBT not saved\r\n");
         return bad_idx;
     }
 
@@ -482,7 +482,7 @@ ftl_status_e bbt_format_erase(alc_t *alloc)
 
     if (bbt_save(alloc) != FTL_OK)
     {
-        LOGE("[BBT] format: pre-erase BBT save failed — abort before erasing data\r\n");
+        LOGE(LOG_TAG_BBT "format: pre-erase BBT save failed — abort before erasing data\r\n");
         return FTL_ERROR;
     }
 
@@ -697,7 +697,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
             ftl_is_l2p_log_block(block))
         {
             alloc->bbt.rebuild_required = true;
-            LOGE("[BBT] metadata log block %u lost — rebuild required\r\n", (unsigned)block);
+            LOGE(LOG_TAG_BBT "metadata log block %u lost — rebuild required\r\n", (unsigned)block);
         }
     }
     else if (!alloc->bbt.format_in_progress && (bbt_spare_pool_refill(alloc, plane) != FTL_OK))
@@ -707,7 +707,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
             /* 限速：保留区双空时每次坏块都打会刷屏；只报第 1/64 次。 */
             if ((s_reserve_low_logged++ % BBT_RESERVE_LOW_LOG_EVERY) == 0U)
             {
-                LOGW("[BLK] reserve low plane=%u spare=%u op=%u free=%u count=%lu\r\n",
+                LOGW(LOG_TAG_BLK "reserve low plane=%u spare=%u op=%u free=%u count=%lu\r\n",
                      (unsigned)plane,
                      (unsigned)alc_get_spare_count(alloc, plane),
                      (unsigned)alc_get_op_count(alloc, plane),
@@ -923,7 +923,7 @@ static void bbt_handle_step(alc_t *alloc)
     }
     else if (ftl_job_heartbeat(&alloc->bbt.handle.log_ms, &alloc->bbt.handle.start_ms))
     {
-        LOGI("[BBT] job phase=%u waiting=%u seq=%lu idx=%u age=%lums\r\n",
+        LOGI(LOG_TAG_BBT "job phase=%u waiting=%u seq=%lu idx=%u age=%lums\r\n",
              (unsigned)alloc->bbt.handle.phase,
              (unsigned)alloc->bbt.handle.waiting,
              alloc->bbt.sequence,
@@ -960,7 +960,7 @@ static void bbt_handle_step(alc_t *alloc)
 
         if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
         {
-            LOGE("[BBT] pool locate failed — 下轮重试\r\n");
+            LOGE(LOG_TAG_BBT "pool locate failed — 下轮重试\r\n");
             return;
         }
         alloc->bbt.cursor_valid = 1U;
@@ -972,7 +972,7 @@ static void bbt_handle_step(alc_t *alloc)
     bool  need_erase = false;
     if (md_ring_prepare_addr(&ctx.ring, &ctx.topo, alloc->bbt.write_idx, &addr, &need_erase) != FTL_OK)
     {
-        LOGE("[BBT] prepare failed idx=%u\r\n", (unsigned)alloc->bbt.write_idx);
+        LOGE(LOG_TAG_BBT "prepare failed idx=%u\r\n", (unsigned)alloc->bbt.write_idx);
         return;
     }
 
@@ -1027,7 +1027,7 @@ static void bbt_complete_erase(alc_t *alloc, fc_command_t *cmd, const fc_command
 {
     if (fc_cw_status_has_error(completion->status))
     {
-        LOGE("[BBT] ring block erase failed status=0x%02x — 游标不推进，下轮重试\r\n", completion->status);
+        LOGE(LOG_TAG_BBT "ring block erase failed status=0x%02x — 游标不推进，下轮重试\r\n", completion->status);
         alloc->bbt.handle.phase   = BBT_JOB_IDLE;
         alloc->bbt.handle.waiting = 0U;
         (void)fc_command_release(cmd);
@@ -1053,7 +1053,7 @@ static void bbt_complete_write(alc_t *alloc, fc_command_t *cmd, const fc_command
 
     if (fc_cw_status_has_error(completion->status))
     {
-        LOGE("[BBT] record write failed status=0x%02x — dirty 保留\r\n", completion->status);
+        LOGE(LOG_TAG_BBT "record write failed status=0x%02x — dirty 保留\r\n", completion->status);
     }
     else if (alloc->bbt.dirty_gen == alloc->bbt.handle.dirty_gen)
     {
@@ -1061,7 +1061,7 @@ static void bbt_complete_write(alc_t *alloc, fc_command_t *cmd, const fc_command
     }
     else
     {
-        LOGE("[BBT] record written but dirty_gen advanced — 再落一条\r\n");
+        LOGE(LOG_TAG_BBT "record written but dirty_gen advanced — 再落一条\r\n");
     }
 
     alloc->bbt.handle.phase   = BBT_JOB_IDLE;
@@ -1080,7 +1080,7 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
     /* 孤儿 / 迟到完成：当前没有在飞命令 ⇒ 只释放，不改状态。 */
     if (alloc->bbt.handle.waiting == 0U)
     {
-        LOGE("[BBT] orphan completion phase=%u — ignored\r\n", (unsigned)alloc->bbt.handle.phase);
+        LOGE(LOG_TAG_BBT "orphan completion phase=%u — ignored\r\n", (unsigned)alloc->bbt.handle.phase);
         (void)fc_command_release(cmd);
         return;
     }
@@ -1096,7 +1096,7 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
     else
     {
         /* 不该发生：一条命令对应一个 job，phase 必为 ERASE / WRITE。 */
-        LOGE("[BBT] unexpected completion phase=%u\r\n", (unsigned)alloc->bbt.handle.phase);
+        LOGE(LOG_TAG_BBT "unexpected completion phase=%u\r\n", (unsigned)alloc->bbt.handle.phase);
         alloc->bbt.handle.phase   = BBT_JOB_IDLE;
         alloc->bbt.handle.waiting = 0U;
         (void)fc_command_release(cmd);

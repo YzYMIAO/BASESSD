@@ -142,7 +142,7 @@ static BYTE nand_engine_wait_timeout(nand_engine_state_t *state, nand_engine_wai
 
     if (delay_dwt_elapsed_us(w->start_cycles, state->timing->busy_timeout_us) || (w->polls >= state->timing->busy_timeout_us))
     {
-        LOGE("[NAND] %s timeout op=%u polls=%u timeout_us=%u\r\n",
+        LOGE(LOG_TAG_NAND "%s timeout op=%u polls=%u timeout_us=%u\r\n",
              op_name,
              state->request->operation,
              w->polls,

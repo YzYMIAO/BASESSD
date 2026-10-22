@@ -154,7 +154,7 @@ ssd_status_e ssd_request_split(ssd_controller_t *controller, ssd_request_t *requ
                                                     : ftl_submit_read(ftl, &request->io);
         if (st != FTL_OK)
         {
-            LOGE("[CTRL] split submit failed lba=%lu count=%lu\r\n", (unsigned long)lba, run_len);
+            LOGE(LOG_TAG_CTRL "split submit failed lba=%lu count=%lu\r\n", (unsigned long)lba, run_len);
             request->completion_status = err_status;
             /* 已提交的 run 仍会回调 on_sub_complete → 把计数收敛到"实际在飞数"，
              * 避免父请求提前完成（旧实现在此处直接置 complete_flag 即此缺陷）。 */

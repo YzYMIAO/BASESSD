@@ -273,10 +273,6 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
     gc_table_extremes(alloc, &ex);
 
     DWORD best_cost  = UINT32_MAX;
-    DWORD best_vr    = 0U;
-    DWORD best_er    = 0U;
-    DWORD best_cp    = 0U;
-    DWORD best_yp    = 0U;
     WORD  best_valid = (FTL_CW_PER_SB + 1U);
     WORD  best_pct   = 101U; /* >100 = 尚未见到候选 */
     bool  found      = false;
@@ -348,10 +344,6 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
         {
             best_cost   = cost;
             best_valid  = st.valid_cw;
-            best_vr     = vr;
-            best_er     = er;
-            best_cp     = cp;
-            best_yp     = yp;
             out->victim = sb;
             found       = true;
         }
@@ -359,33 +351,8 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
 
     out->best_valid_pct = (best_pct <= 100U) ? best_pct : 0U;
 
-    /* 这四项只服务 debug 档的 LOGD 观测口；release 下 LOGD 被编译掉 ⇒ 显式丢弃，
-     * 避免 "set but not used" 告警（H30 显式丢弃 / 判据 10）。 */
-    (void)best_vr;
-    (void)best_er;
-    (void)best_cp;
-    (void)best_yp;
-
     if (found)
     {
-        /* 观测口（debug 档）：一次空闲 GC 突发最多打 FREE_POOL_TARGET = 32 行
-         * （每 victim 每 plane 一行；ftl_service_idle 循环调用）。默认档不打印——
-         * 持续重选 victim 时这些行会把有效进展淹没（RISK-MIG-05）。哨兵 plane 不打印。 */
-        for (BYTE p = 0U; p < PLANE_NUM; p++)
-        {
-            if (!super_block_has_plane(out->victim, p))
-            {
-                continue;
-            }
-            LOGD("[GC] victim plane%u=%u vr=%lu er=%lu cp=%lu yp=%lu cost=%lu\r\n",
-                 (unsigned)p,
-                 (unsigned)out->victim->plane_blocks[p],
-                 best_vr,
-                 best_er,
-                 best_cp,
-                 best_yp,
-                 best_cost);
-        }
         return GC_SELECT_OK;
     }
 
@@ -415,12 +382,32 @@ DWORD gc_should_trigger(const alc_t *alloc)
 
     DWORD triggers = 0U;
 
-    /* T1：空闲块水位（主动补池，还留有余量就开工） */
-    if (alloc->free_count < FREE_POOL_TARGET)
+    /* T1：空闲块水位（主动补池，还留有余量就开工）。
+     * ⚠ 分配器按 **plane 成对**取块；total free 在目标线附近时可能全部落在 plane0，
+     *   而 plane1 已 0 块。旧判据只看 total ⇒ 不触发 GC，host 写只能吃 OP 池
+     *   （现场：`free=32` 但 `op=204/157→112`）。因此总水位之外还要检查
+     *   「任一 plane 无空闲块」。
+     *   扫描到两个 plane 都出现即可提前退出，正常盘通常前几项就覆盖两 plane。 */
+    bool seen[PLANE_NUM];
+    memset(seen, 0, sizeof(seen));
+    BYTE seen_n = 0U;
+
+    for (WORD i = 0U; (i < alloc->free_count) && (seen_n < PLANE_NUM); i++)
+    {
+        const BYTE p = ftl_gblock_plane(alloc->free_blocks[i]);
+
+        if ((p < PLANE_NUM) && (!seen[p]))
+        {
+            seen[p] = true;
+            seen_n++;
+        }
+    }
+
+    if ((alloc->free_count < FREE_POOL_TARGET) || (seen_n < PLANE_NUM))
     {
         triggers |= GC_TRIGGER_WATERMARK;
     }
-    /* T4：紧急（池已见底的最后手段）。与 T1 同源但阈值更低（8 vs 32）。 */
+    /* T4：紧急（池已见底的最后手段）。与 T1 同源但阈值更低（8 vs 200）。 */
     if (alloc->free_count <= FREE_POOL_EMERGENCY)
     {
         triggers |= GC_TRIGGER_EMERGENCY;

@@ -112,7 +112,7 @@ void ftl_op_dispatch(const fc_command_status_t *completion)
     {
         /* 孤儿完成：tag 越界（≥ FTL_OP_COUNT）或 FTL_OP_NONE。
          * 不清旁表则可能泄漏一个槽位，故一并 remove（幂等）。 */
-        LOGE("[FTL] orphan completion cmd=%u op=%u status=0x%02x\r\n", (unsigned)completion->command_id, (unsigned)op, completion->status);
+        LOGE(LOG_TAG_FTL "orphan completion cmd=%u op=%u status=0x%02x\r\n", (unsigned)completion->command_id, (unsigned)op, completion->status);
         ct_remove(completion->command_id);
         (void)fc_command_release(cmd);
         return;
@@ -153,7 +153,7 @@ static void ftl_sync_wait_callback(struct ftl_context *ftl, const fc_command_sta
      * 早已失效，绝不能再解引用；但命令槽位仍必须回收，否则命令池泄漏。 */
     if (ctx == NULL)
     {
-        LOGE("[FTL] late sync completion cmd=%u status=0x%02x — released\r\n", (unsigned)completion->command_id, completion->status);
+        LOGE(LOG_TAG_FTL "late sync completion cmd=%u status=0x%02x — released\r\n", (unsigned)completion->command_id, completion->status);
         (void)fc_command_release(fc_command_id_to_command(completion->command_id));
         return;
     }
