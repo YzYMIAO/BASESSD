@@ -24,7 +24,7 @@
  * 文件结构：
  *   1. 内部辅助        cp_header_is_valid / cp_record_probe
  *                      （单调毫秒 / 心跳基准见 ftl_job.h）
- *   2. 异步 job        cp_job_step（static）/ cp_job_begin / cp_job_kick /
+ *   2. 异步 job        cp_job_step（static）/ cp_job_begin /
  *                      cp_handle / ftl_checkpoint_callback
  *   3. 创建/恢复       cp_pool_find_latest / cp_initial_record_write
  *   4. 触发/上报       cp_should_start / cp_status_fill / cp_handle
@@ -399,18 +399,6 @@ static void cp_header_fill(cp_header_t *cp,
     cp->record_pages = CP_RECORD_PAGES;
 }
 
-/* 组装运行期 Checkpoint Header（一页主区）。调用者持有 2KB 缓冲。 */
-static void cp_header_build(const cp_handle_t *h, cp_header_t *cp)
-{
-    cp_header_fill(cp,
-                   h->hdr_seq,
-                   h->journal_seq,
-                   h->region_bitmap,
-                   h->block_words,
-                   h->wear_page_crc);
-    cp->timestamp = ftl_job_now_ms();
-}
-
 /* --------------------------------------------------------------------
  * cp_regions_flush
  *   功能：按**快照**脏位图把每个脏 region 落盘（阶段②）。返回 CP_FLUSH_DONE = 全部已持久；
@@ -506,6 +494,180 @@ static cp_flush_step_e cp_regions_flush(cp_handle_t *h)
     }
 
     return cp_job_stall(h) ? CP_FLUSH_FAILED : CP_FLUSH_PENDING;
+}
+
+/* ── Checkpoint job 的完成服务（g_op_callbacks[FTL_OP_CHECKPOINT]）── */
+
+/* 每个提交阶段的完成处理（ftl_checkpoint_callback 按 phase 分派）。
+ * 共同前提：命令已 release、job.waiting 已清零（由派发处统一做）。 */
+
+/* 换块擦完成：成功 ⇒ phase 推进到 next；失败 ⇒ 中止本次 CP（**不**推进游标，
+ * dirty 保留 ⇒ 下次在新槽重试整条）。 */
+static void cp_complete_erase(cp_handle_t *h, bool failed, cp_phase_e next)
+{
+    if (failed)
+    {
+        cp_job_abort(h);
+        return;
+    }
+    h->phase = next;
+}
+
+/* 快照页 / 磨损页写完成：失败 ⇒ 整条 record 作废（不写 Header——Header 是 commit），
+ * 游标推进一槽（本条记录的剩余页可能半编程，永不复用）。返回 true = 已中止。 */
+static bool cp_complete_snapshot_page_write(cp_handle_t *h, bool failed)
+{
+    if (!failed)
+    {
+        return false;
+    }
+    h->block_ok           = 0U;
+    h->cp_state.write_idx = ((h->hdr_idx + 1U) % md_ring_total_records(&h->hdr_ring));
+    cp_job_abort(h);
+    return true;
+}
+
+/* Header（commit 页）写完：无论成败都推进游标（已写过的槽可能半编程，不可复用）；
+ * 成功才提交 journal 水位并清持久性失败标记。 */
+static void cp_complete_hdr_write(cp_handle_t *h, bool failed)
+{
+    h->cp_state.write_idx = ((h->hdr_idx + 1U) % md_ring_total_records(&h->hdr_ring));
+
+    if (failed)
+    {
+        /* 失败时不写 journal_truncate、不复位水位标志：脏数据仍由下个 checkpoint 重试。 */
+        cp_job_abort(h);
+        return;
+    }
+    h->cp_state.last_journal_sequence = h->journal_seq; /* T3 空转门 / 增量判据 */
+    /* Header 是 commit 页：此时快照的脏区都已落盘。若本次 CP 起点覆盖了
+     * Journal 的持久性失败点，可清除 pending（见 jrn_clear_write_failure）。 */
+    jrn_clear_write_failure(h->journal, h->journal_seq);
+
+    /* 元数据失块后的 full rebuild：**本次 CP 已把重建后的状态落盘**，才可以清
+     * REBUILD_REQUIRED（本仓自拟）。掉电在 CP 之前 ⇒ 标志仍在 ⇒ 下次开机重建。 */
+    if (h->alloc->bbt.rebuild_required)
+    {
+        h->alloc->bbt.rebuild_required = false;
+        bbt_note_dirty(h->alloc);
+        LOGI(LOG_TAG_CP "rebuild_required cleared — rebuilt metadata committed\r\n");
+    }
+    h->phase = CP_TRUNC_PREP;
+}
+
+/* Journal 预擦完成：**擦成功才**记 pre_erased_block。失败时绝不能记账：
+ * jrn_handle 换块擦除回切到该块会跳过擦除 ⇒ 写进未擦块（二次编程 = 静默损坏）。
+ * commit(NONE) 只复位水位标志；该块保持"未预擦"，journal 回切时由 need_erase 重试，
+ * 下一次 CP 的 plan 也会再次返回 NEEDS_ERASE。 */
+static void cp_complete_trunc_erase(cp_handle_t *h, bool failed)
+{
+    if (failed)
+    {
+        LOGW(LOG_TAG_CP "journal pre-erase failed blk=%u — 不记账，等待重试\r\n", (unsigned)h->trunc_next);
+        jrn_truncate_commit(h->journal, JOURNAL_BLOCK_NONE);
+    }
+    else
+    {
+        /* commit 记账 + 复位水位标志（设计 §7.5.4：本次 CP 已把 seq ≤ 水位
+         * 的条目落盘并截断 ⇒ 清零。不复位会让 T1 永久命中——每圈必 CP）。 */
+        jrn_truncate_commit(h->journal, h->trunc_next);
+    }
+    h->phase = CP_DONE;
+}
+
+/* --------------------------------------------------------------------
+ * ftl_checkpoint_callback
+ *   功能：Checkpoint 命令的完成服务函数——按 job.phase 分派到 cp_complete_* 记结果。
+ *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `cp_handle_t *`（= h）。
+ *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
+ *   实现要点：**本函数不推进状态机**（见文件头：阶段里有同步原语，在完成泵里跑就是
+ *             嵌套泵）——只把 phase 改到"下一步该干什么"，由下一轮 cp_handle 续跑。
+ *             ⚠ Header 的池游标**无论成败都推进**（半编程槽不可复用）；失败时**不**截断
+ *             journal、**不**复位水位标志。
+ * -------------------------------------------------------------------- */
+void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
+{
+    /* 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。 */
+    (void)ftl;
+    cp_handle_t  *h   = (cp_handle_t *)ctx;
+    fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
+
+    /* 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，
+     * 二者必须一致——不一致说明派发路由错了。 */
+    ASSERT(ftl->cp_handle == h);
+
+    /* 没有在飞命令却收到完成 ⇒ 重复/迟到完成。按当前 phase 再走一遍会误推进
+     * chunk/游标（静默 CP 状态破坏），故 release 也必须拒绝（H14 判据 9）。 */
+    ASSERT(h->waiting != 0U);
+
+    if (h->waiting == 0U)
+    {
+        LOGE(LOG_TAG_CP "unexpected completion phase=%u (no command in flight)\r\n", (unsigned)h->phase);
+        (void)fc_command_release(cmd);
+        return;
+    }
+
+    const bool failed = fc_cw_status_has_error(completion->status);
+
+    /* 每个 phase 的完成都以「release + 清在飞标志」开头 ⇒ 提到 switch 之前统一做。
+     * cp_job_abort 只改 phase/failed，不碰 waiting ⇒ 与各分支内的原顺序等价。 */
+    (void)fc_command_release(cmd);
+    h->waiting = 0U;
+
+    switch ((cp_phase_e)h->phase)
+    {
+        case CP_ANCHOR_ERASE:
+            cp_complete_erase(h, failed, CP_ANCHOR_WRITE);
+            return;
+
+        case CP_ANCHOR_WRITE:
+            /* 无论成败都往后写下一页；失败 ⇒ 整条作废（不取半条）。 */
+            if (failed)
+            {
+                h->anchor_ok = 0U;
+            }
+            h->anchor_chunk = (h->anchor_chunk + 1U);
+            return;
+
+        case CP_HDR_ERASE:
+            cp_complete_erase(h, failed, CP_BLOCK_WRITE);
+            return;
+
+        case CP_BLOCK_WRITE:
+            if (!cp_complete_snapshot_page_write(h, failed))
+            {
+                h->block_page = (h->block_page + 1U);
+            }
+            return;
+
+        case CP_WEAR_WRITE:
+            if (!cp_complete_snapshot_page_write(h, failed))
+            {
+                h->wear_page = (h->wear_page + 1U);
+            }
+            return;
+
+        case CP_HDR_WRITE:
+            cp_complete_hdr_write(h, failed);
+            return;
+
+        case CP_TRUNC_ERASE:
+            cp_complete_trunc_erase(h, failed);
+            return;
+
+        case CP_IDLE:
+        case CP_FLUSH_REGIONS:
+        case CP_ANCHOR_PREP:
+        case CP_HDR_PREP:
+        case CP_TRUNC_PREP:
+        case CP_DONE:
+        default:
+            /* 不该发生：一条命令对应一个提交阶段（ANCHOR_ERASE / ANCHOR_WRITE /
+             * HDR_ERASE / HDR_WRITE / TRUNC_ERASE）。 */
+            LOGE(LOG_TAG_CP "unexpected completion phase=%u\r\n", (unsigned)h->phase);
+            cp_job_abort(h);
+            return;
+    }
 }
 
 /* --------------------------------------------------------------------
@@ -748,7 +910,14 @@ static void cp_job_step(cp_handle_t *h)
                 /* 2KB Header 页常驻 handle，避免运行期 CP 路径的 2KB 栈帧。 */
                 cp_header_t *cp = (cp_header_t *)h->hdr_buf;
 
-                cp_header_build(h, cp);
+                cp_header_fill(cp,
+                               h->hdr_seq,
+                               h->journal_seq,
+                               h->region_bitmap,
+                               h->block_words,
+                               h->wear_page_crc);
+                cp->timestamp = ftl_job_now_ms();
+
                 const DWORD        cp_size = sizeof(*cp);
                 const ftl_status_e st      = cp_submit_write(h, h->hdr_addr, cp, cp_size);
 
@@ -894,202 +1063,6 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
     /* CP 是高频元数据维护（每次水位触发），start 不逐次打；当前序号看 info 的 cp=。 */
     cp_job_step(h); /* 立刻推进第一步（脏区落盘可当场起异步写回） */
     return FTL_OK;
-}
-
-static void cp_job_kick(cp_handle_t *h)
-{
-    if (h->active == 0U)
-    {
-        return;
-    }
-
-    /* 心跳（见 ftl_job.h）：正常 CP 远快于 1s ⇒ 平时静默；只有卡在某 phase 才持续可见。
-     * 判据 = 两次心跳之间 phase 不动 ⇒ 卡死（异步后"卡在哪一步"否则完全不可见）。
-     * ⚠ 起点在 cp_job_begin 显式记（CP 的"job 起点"是快照时刻，不是首次心跳时刻）。 */
-    if (ftl_job_heartbeat(&h->log_ms, &h->start_ms))
-    {
-        LOGI(LOG_TAG_CP "job phase=%u wait=%u fail=%u age=%lums\r\n",
-             (unsigned)h->phase,
-             (unsigned)h->waiting,
-             (unsigned)h->failed,
-             ftl_job_age_ms(&h->start_ms));
-    }
-
-    cp_job_step(h);
-}
-
-/* ── Checkpoint job 的完成服务（g_op_callbacks[FTL_OP_CHECKPOINT]）── */
-
-/* 每个提交阶段的完成处理（ftl_checkpoint_callback 按 phase 分派）。
- * 共同前提：命令已 release、job.waiting 已清零（由派发处统一做）。 */
-
-/* 换块擦完成：成功 ⇒ phase 推进到 next；失败 ⇒ 中止本次 CP（**不**推进游标，
- * dirty 保留 ⇒ 下次在新槽重试整条）。 */
-static void cp_complete_erase(cp_handle_t *h, bool failed, cp_phase_e next)
-{
-    if (failed)
-    {
-        cp_job_abort(h);
-        return;
-    }
-    h->phase = next;
-}
-
-/* 快照页 / 磨损页写完成：失败 ⇒ 整条 record 作废（不写 Header——Header 是 commit），
- * 游标推进一槽（本条记录的剩余页可能半编程，永不复用）。返回 true = 已中止。 */
-static bool cp_complete_snapshot_page_write(cp_handle_t *h, bool failed)
-{
-    if (!failed)
-    {
-        return false;
-    }
-    h->block_ok           = 0U;
-    h->cp_state.write_idx = ((h->hdr_idx + 1U) % md_ring_total_records(&h->hdr_ring));
-    cp_job_abort(h);
-    return true;
-}
-
-/* Header（commit 页）写完：无论成败都推进游标（已写过的槽可能半编程，不可复用）；
- * 成功才提交 journal 水位并清持久性失败标记。 */
-static void cp_complete_hdr_write(cp_handle_t *h, bool failed)
-{
-    h->cp_state.write_idx = ((h->hdr_idx + 1U) % md_ring_total_records(&h->hdr_ring));
-
-    if (failed)
-    {
-        /* 失败时不写 journal_truncate、不复位水位标志：脏数据仍由下个 checkpoint 重试。 */
-        cp_job_abort(h);
-        return;
-    }
-    h->cp_state.last_journal_sequence = h->journal_seq; /* T3 空转门 / 增量判据 */
-    /* Header 是 commit 页：此时快照的脏区都已落盘。若本次 CP 起点覆盖了
-     * Journal 的持久性失败点，可清除 pending（见 jrn_clear_write_failure）。 */
-    jrn_clear_write_failure(h->journal, h->journal_seq);
-
-    /* 元数据失块后的 full rebuild：**本次 CP 已把重建后的状态落盘**，才可以清
-     * REBUILD_REQUIRED（本仓自拟）。掉电在 CP 之前 ⇒ 标志仍在 ⇒ 下次开机重建。 */
-    if (h->alloc->bbt.rebuild_required)
-    {
-        h->alloc->bbt.rebuild_required = false;
-        bbt_note_dirty(h->alloc);
-        LOGI(LOG_TAG_CP "rebuild_required cleared — rebuilt metadata committed\r\n");
-    }
-    h->phase = CP_TRUNC_PREP;
-}
-
-/* Journal 预擦完成：**擦成功才**记 pre_erased_block。失败时绝不能记账：
- * jrn_handle 换块擦除回切到该块会跳过擦除 ⇒ 写进未擦块（二次编程 = 静默损坏）。
- * commit(NONE) 只复位水位标志；该块保持"未预擦"，journal 回切时由 need_erase 重试，
- * 下一次 CP 的 plan 也会再次返回 NEEDS_ERASE。 */
-static void cp_complete_trunc_erase(cp_handle_t *h, bool failed)
-{
-    if (failed)
-    {
-        LOGW(LOG_TAG_CP "journal pre-erase failed blk=%u — 不记账，等待重试\r\n", (unsigned)h->trunc_next);
-        jrn_truncate_commit(h->journal, JOURNAL_BLOCK_NONE);
-    }
-    else
-    {
-        /* commit 记账 + 复位水位标志（设计 §7.5.4：本次 CP 已把 seq ≤ 水位
-         * 的条目落盘并截断 ⇒ 清零。不复位会让 T1 永久命中——每圈必 CP）。 */
-        jrn_truncate_commit(h->journal, h->trunc_next);
-    }
-    h->phase = CP_DONE;
-}
-
-/* --------------------------------------------------------------------
- * ftl_checkpoint_callback
- *   功能：Checkpoint 命令的完成服务函数——按 job.phase 分派到 cp_complete_* 记结果。
- *   参数：ftl —— 实例；completion —— 完成状态；ctx —— `cp_handle_t *`（= h）。
- *   返回：无。命令的 release 归本函数（见 ftl_op.h 的所有权表）。
- *   实现要点：**本函数不推进状态机**（见文件头：阶段里有同步原语，在完成泵里跑就是
- *             嵌套泵）——只把 phase 改到"下一步该干什么"，由下一轮 cp_handle 续跑。
- *             ⚠ Header 的池游标**无论成败都推进**（半编程槽不可复用）；失败时**不**截断
- *             journal、**不**复位水位标志。
- * -------------------------------------------------------------------- */
-void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
-{
-    /* 形参由完成派发签名固定；release 下 ASSERT 裁空 ⇒ 显式丢弃（H30）。 */
-    (void)ftl;
-    cp_handle_t  *h   = (cp_handle_t *)ctx;
-    fc_command_t *cmd = fc_command_id_to_command(completion->command_id);
-
-    /* 实例由 ctx 反推；ftl 形参是 dispatch 解析出的归属实例，
-     * 二者必须一致——不一致说明派发路由错了。 */
-    ASSERT(ftl->cp_handle == h);
-
-    /* 没有在飞命令却收到完成 ⇒ 重复/迟到完成。按当前 phase 再走一遍会误推进
-     * chunk/游标（静默 CP 状态破坏），故 release 也必须拒绝（H14 判据 9）。 */
-    ASSERT(h->waiting != 0U);
-
-    if (h->waiting == 0U)
-    {
-        LOGE(LOG_TAG_CP "unexpected completion phase=%u (no command in flight)\r\n", (unsigned)h->phase);
-        (void)fc_command_release(cmd);
-        return;
-    }
-
-    const bool failed = fc_cw_status_has_error(completion->status);
-
-    /* 每个 phase 的完成都以「release + 清在飞标志」开头 ⇒ 提到 switch 之前统一做。
-     * cp_job_abort 只改 phase/failed，不碰 waiting ⇒ 与各分支内的原顺序等价。 */
-    (void)fc_command_release(cmd);
-    h->waiting = 0U;
-
-    switch ((cp_phase_e)h->phase)
-    {
-        case CP_ANCHOR_ERASE:
-            cp_complete_erase(h, failed, CP_ANCHOR_WRITE);
-            return;
-
-        case CP_ANCHOR_WRITE:
-            /* 无论成败都往后写下一页；失败 ⇒ 整条作废（不取半条）。 */
-            if (failed)
-            {
-                h->anchor_ok = 0U;
-            }
-            h->anchor_chunk = (h->anchor_chunk + 1U);
-            return;
-
-        case CP_HDR_ERASE:
-            cp_complete_erase(h, failed, CP_BLOCK_WRITE);
-            return;
-
-        case CP_BLOCK_WRITE:
-            if (!cp_complete_snapshot_page_write(h, failed))
-            {
-                h->block_page = (h->block_page + 1U);
-            }
-            return;
-
-        case CP_WEAR_WRITE:
-            if (!cp_complete_snapshot_page_write(h, failed))
-            {
-                h->wear_page = (h->wear_page + 1U);
-            }
-            return;
-
-        case CP_HDR_WRITE:
-            cp_complete_hdr_write(h, failed);
-            return;
-
-        case CP_TRUNC_ERASE:
-            cp_complete_trunc_erase(h, failed);
-            return;
-
-        case CP_IDLE:
-        case CP_FLUSH_REGIONS:
-        case CP_ANCHOR_PREP:
-        case CP_HDR_PREP:
-        case CP_TRUNC_PREP:
-        case CP_DONE:
-        default:
-            /* 不该发生：一条命令对应一个提交阶段（ANCHOR_ERASE / ANCHOR_WRITE /
-             * HDR_ERASE / HDR_WRITE / TRUNC_ERASE）。 */
-            LOGE(LOG_TAG_CP "unexpected completion phase=%u\r\n", (unsigned)h->phase);
-            cp_job_abort(h);
-            return;
-    }
 }
 
 /* 复位本实例的 CP 池游标/序号（找不到有效 record 时保持 0/无效）。 */
@@ -1861,7 +1834,19 @@ void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out)
          * job 在飞时只上报、不再推进（否则一轮会被推进 3 次，行为漂移）。 */
         if (trigger->reason == CP_REASON_ADVANCE)
         {
-            cp_job_kick(h);
+            /* 心跳（见 ftl_job.h）：正常 CP 远快于 1s ⇒ 平时静默；只有卡在某 phase
+             * 才持续可见。判据 = 两次心跳之间 phase 不动 ⇒ 卡死。
+             * ⚠ 起点在 cp_job_begin 显式记（CP 的"job 起点"是快照时刻，不是首次心跳时刻）。 */
+            if (ftl_job_heartbeat(&h->log_ms, &h->start_ms))
+            {
+                LOGI(LOG_TAG_CP "job phase=%u wait=%u fail=%u age=%lums\r\n",
+                     (unsigned)h->phase,
+                     (unsigned)h->waiting,
+                     (unsigned)h->failed,
+                     ftl_job_age_ms(&h->start_ms));
+            }
+
+            cp_job_step(h);
         }
     }
     else if (cp_should_start(h, trigger))

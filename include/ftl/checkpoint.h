@@ -295,36 +295,24 @@ static inline BYTE cp_block_word_pool(WORD word)
 
 /* ── 接口 ── */
 
-/* 把当前 BST + OP/Spare 池归属编码成块元数据快照（Checkpoint 起点调用）。
- * md_dir 是动态 LOG 块身份的权威：live 元数据块即使 BST state 不是 LOG，
- * 也按 LOG 编码（否则下次开机快照校验整份失败，RISK-BOOT-15）。
- * md_dir 允许为 NULL（只按 BST/池编码；格式化后的 initial CP 用）。 */
-void cp_block_snapshot(const alc_t          *alloc,
-                       const md_dir_cache_t *md_dir,
-                       WORD                  words[FTL_BLOCK_TOTAL]);
-
-/* 把第 page_index 页磨损快照从 BST 组进 page（256 条 × 8 B）。
- * 条目格式是 checkpoint.c 的内部布局；调用者只提供输出页。 */
-void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN_SIZE]);
+/* ── 初始化 / 恢复 ── */
 
 /*
- * cp_handle - 推进 Checkpoint（typed handle；提交即返回）
+ * cp_init - 复位 checkpoint handle 并绑定窄上下文
  *
- * 未在跑时按 trigger 判定是否启动：emergency / force / T1 水位 / T2 写入量 / T3 定时
- * （T3 带最小 journal 增量门，见 checkpoint.c）。已在跑则续跑下一步（任何档位都要调）。
- *
- * @param h       handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param trigger 本轮触发信息（**非空**）
- * @param out    出参：本轮结束后的上报（**非空**）
+ * @param h            checkpoint handle（由 storage 提供）
+ * @param cache        L2P cache
+ * @param journal      Journal
+ * @param metadata_dir Directory
+ * @param alloc        allocator
+ * @param topo         本实例拓扑
  */
-void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out);
-
-/* cp_timer_reset - 复位 T3 定时基准（boot 恢复 / 格式化后调用）。 */
-void cp_timer_reset(cp_handle_t *h);
-
-/* cp_block_words_get - 块元数据快照缓冲（full metadata rebuild / 恢复的端口；FTL_BLOCK_TOTAL 个 word）。
- * 返回的是 handle 内部常驻缓冲，调用者只读/按恢复流程填充。 */
-WORD *cp_block_words_get(cp_handle_t *h);
+void cp_init(cp_handle_t    *h,
+             l2p_cache_t    *cache,
+             l2p_jrn_t      *journal,
+             md_dir_cache_t *metadata_dir,
+             alc_t          *alloc,
+             ftl_topo_t      topo);
 
 /*
  * cp_pool_find_latest - 扫描 Checkpoint 池找最新有效 Header
@@ -391,22 +379,28 @@ bool cp_wear_table_load(cp_handle_t       *h,
                         const cp_header_t *cp,
                         WORD               record_idx);
 
+/* cp_block_words_get - 块元数据快照缓冲（full metadata rebuild / 恢复的端口；FTL_BLOCK_TOTAL 个 word）。
+ * 返回的是 handle 内部常驻缓冲，调用者只读/按恢复流程填充。 */
+WORD *cp_block_words_get(cp_handle_t *h);
+
+/* ── 运行期 Checkpoint ── */
+
 /*
- * cp_init - 复位 checkpoint handle 并绑定窄上下文
+ * cp_handle - 推进 Checkpoint（typed handle；提交即返回）
  *
- * @param h            checkpoint handle（由 storage 提供）
- * @param cache        L2P cache
- * @param journal      Journal
- * @param metadata_dir Directory
- * @param alloc        allocator
- * @param topo         本实例拓扑
+ * 未在跑时按 trigger 判定是否启动：emergency / force / T1 水位 / T2 写入量 / T3 定时
+ * （T3 带最小 journal 增量门，见 checkpoint.c）。已在跑则续跑下一步（任何档位都要调）。
+ *
+ * @param h       handle；**前置条件**（实例绑定由 ftl_contract_audit 证明）
+ * @param trigger 本轮触发信息（**非空**）
+ * @param out    出参：本轮结束后的上报（**非空**）
  */
-void cp_init(cp_handle_t    *h,
-             l2p_cache_t    *cache,
-             l2p_jrn_t      *journal,
-             md_dir_cache_t *metadata_dir,
-             alc_t          *alloc,
-             ftl_topo_t      topo);
+void cp_handle(cp_handle_t *h, const cp_trigger_t *trigger, cp_status_t *out);
+
+/* cp_timer_reset - 复位 T3 定时基准（boot 恢复 / 格式化后调用）。 */
+void cp_timer_reset(cp_handle_t *h);
+
+/* ── 格式化 / 快照辅助 ── */
 
 /*
  * cp_initial_record_write - 全量格式化后写一条完整的 initial Checkpoint
@@ -421,5 +415,17 @@ void cp_init(cp_handle_t    *h,
  * @return FTL_OK / FTL_ERROR（任一分页写失败 ⇒ 不写 Header，无有效 record）
  */
 ftl_status_e cp_initial_record_write(struct ftl_context *ftl);
+
+/* 把当前 BST + OP/Spare 池归属编码成块元数据快照（Checkpoint 起点调用）。
+ * md_dir 是动态 LOG 块身份的权威：live 元数据块即使 BST state 不是 LOG，
+ * 也按 LOG 编码（否则下次开机快照校验整份失败，RISK-BOOT-15）。
+ * md_dir 允许为 NULL（只按 BST/池编码；格式化后的 initial CP 用）。 */
+void cp_block_snapshot(const alc_t          *alloc,
+                       const md_dir_cache_t *md_dir,
+                       WORD                  words[FTL_BLOCK_TOTAL]);
+
+/* 把第 page_index 页磨损快照从 BST 组进 page（256 条 × 8 B）。
+ * 条目格式是 checkpoint.c 的内部布局；调用者只提供输出页。 */
+void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN_SIZE]);
 
 #endif /* FTL_CHECKPOINT_H */
