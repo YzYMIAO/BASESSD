@@ -8,7 +8,7 @@
  *
  * 文件结构：
  *   1. 内部工具       mig_src_gblock / mig_victim_from_planes / mig_next_*（static）
- *   2. 提交原语       mig_submit / mig_submit_read / mig_submit_write / mig_submit_erase（static）
+ *   2. 提交原语       mig_command_submit / mig_read_submit / mig_write_submit / mig_erase_submit（static）
  *   3. 启动           mig_start（static）/ mig_begin_gc / mig_begin_wl / mig_begin_predict
  *   4. 收尾           mig_abort / mig_stall / mig_next_page / mig_finish（static）
  *   5. 推进           ／各 phase 处理函数（static）/ mig_step（static）/ mig_handle
@@ -124,7 +124,7 @@ static BYTE mig_next_data_plane(const mig_handle_t *m, BYTE from)
 /* 提交一条已建好的搬移命令：置 waiting、提交、失败回滚。
  * ⚠ stall_ms 只在**提交成功之后**清零：`ftl_op_submit` 自身失败（完成表满 / SQ 满）
  *   也属于"提交不出去"，提前清零会让 deadline 永不触发。 */
-static ftl_status_e mig_submit(mig_handle_t *m, fc_command_t *cmd)
+static ftl_status_e mig_command_submit(mig_handle_t *m, fc_command_t *cmd)
 {
     m->waiting = true;
 
@@ -146,7 +146,7 @@ static ftl_status_e mig_submit(mig_handle_t *m, fc_command_t *cmd)
 
 /* 提交一条 victim 页读（整页，4 CW）。数据在完成时由服务函数拷进 m->page_buf
  * ——**读**不像写那样在 prepare 阶段搬数据（见 ftl_async_read_page 的注释）。 */
-static ftl_status_e mig_submit_read(mig_handle_t *m)
+static ftl_status_e mig_read_submit(mig_handle_t *m)
 {
     fc_command_t      *cmd;
     const ftl_status_e ret = ftl_async_read_page(&cmd, m->src[m->plane], FTL_PAGE_CFG_DATA_ANY());
@@ -155,14 +155,14 @@ static ftl_status_e mig_submit_read(mig_handle_t *m)
         return ret; /* FTL_AGAIN 命令池空 / FTL_ERROR 永久错误，由调用点区分 */
     }
 
-    return mig_submit(m, cmd);
+    return mig_command_submit(m, cmd);
 }
 
 /* 提交一条目标页 CW 子集写。只编有效 CW（cw_bitmap 外的 CW 不建链、不编程）——
  * 整页重写会把无效 CW 连同其（陈旧的）META 一起搬过去，污染新页且多搬无用数据。
  * ⚠ 目标页的 plane 位就是 plane（alc_super_open_alloc_pair 的契约），故写进去的 META
  *   逐 CW 仍是正确的扇区 LBA。 */
-static ftl_status_e mig_submit_write(mig_handle_t *m)
+static ftl_status_e mig_write_submit(mig_handle_t *m)
 {
     /* page0 异步写屏障：同 plane 的 page>0 必须等 page0 成功。
      * 若该 plane 的 page0 本来无数据，先写一页零补齐（不映射），再重试本页——
@@ -185,7 +185,7 @@ static ftl_status_e mig_submit_write(mig_handle_t *m)
 
         m->dummy_page0 = true;
         m->dummy_pba   = pba0;
-        return mig_submit(m, zero_cmd);
+        return mig_command_submit(m, zero_cmd);
     }
 
     fc_command_t      *cmd;
@@ -199,11 +199,11 @@ static ftl_status_e mig_submit_write(mig_handle_t *m)
         return ret; /* FTL_AGAIN 命令池空 / FTL_ERROR 永久错误，由调用点区分 */
     }
 
-    return mig_submit(m, cmd);
+    return mig_command_submit(m, cmd);
 }
 
 /* 提交一条 victim 块擦除。 */
-static ftl_status_e mig_submit_erase(mig_handle_t *m)
+static ftl_status_e mig_erase_submit(mig_handle_t *m)
 {
     const DWORD block_addr = super_block_page_pba(m->topo, &m->victim, m->plane, 0U);
 
@@ -214,7 +214,7 @@ static ftl_status_e mig_submit_erase(mig_handle_t *m)
         return ret; /* FTL_AGAIN 命令池空 / FTL_ERROR 永久错误，由调用点区分 */
     }
 
-    return mig_submit(m, cmd);
+    return mig_command_submit(m, cmd);
 }
 
 /* ── 3. 启动 ── */
@@ -449,7 +449,7 @@ static gc_benefit_mode_e mig_gc_mode(DWORD triggers, bool host_writing)
 
 /* 记录一次「空间 GC 没有值得搬的 victim」结论：退避 + 写路径 NO_SPACE 判据都依赖它。
  * ⚠ 只由空间 GC（mode != OFF）调用。 */
-static void mig_note_no_gain(mig_handle_t *m, gc_benefit_mode_e mode, WORD best_valid_pct, DWORD now_ms)
+static void mig_gc_no_gain_note(mig_handle_t *m, gc_benefit_mode_e mode, WORD best_valid_pct, DWORD now_ms)
 {
     const bool first = !m->gc_no_gain;
 
@@ -525,7 +525,7 @@ static bool mig_begin_gc(mig_handle_t         *m,
     {
         if (pick == GC_SELECT_NOT_WORTHWHILE)
         {
-            mig_note_no_gain(m, mode, sel.best_valid_pct, now_ms);
+            mig_gc_no_gain_note(m, mode, sel.best_valid_pct, now_ms);
         }
         else
         {
@@ -1287,7 +1287,7 @@ static bool mig_step_read(mig_handle_t *m)
              * 「选中 → 目的分配失败 → abort」（RISK-GC-14）。 */
             if (m->kind == MIG_KIND_GC)
             {
-                mig_note_no_gain(m, GC_BENEFIT_EMERGENCY, m->gc_best_valid_pct, ftl_job_now_ms());
+                mig_gc_no_gain_note(m, GC_BENEFIT_EMERGENCY, m->gc_best_valid_pct, ftl_job_now_ms());
             }
             mig_abort(m, "no free block");
             return false;
@@ -1303,7 +1303,7 @@ static bool mig_step_read(mig_handle_t *m)
     m->src[m->plane] = super_block_page_pba(m->topo, &m->victim, m->plane, m->page);
     memset(m->page_buf[m->plane], 0, PAGE_MAIN_SIZE);
 
-    const ftl_status_e ret = mig_submit_read(m);
+    const ftl_status_e ret = mig_read_submit(m);
     if (ret == FTL_AGAIN)
     {
         (void)mig_stall(m);
@@ -1331,7 +1331,7 @@ static bool mig_step_read_settle(mig_handle_t *m)
     if (!m->decode_ok)
     {
         /* 空页（无错误 + META 全 FF）：本 plane 无有效 CW。
-         * NAND 读错误已在 mig_complete_read 里中止 job，不会走到这里。 */
+         * NAND 读错误已在 mig_read_complete 里中止 job，不会走到这里。 */
         m->cw_bitmap[plane] = 0U;
     }
     else
@@ -1392,7 +1392,7 @@ static bool mig_step_write(mig_handle_t *m)
         return false;
     }
 
-    const ftl_status_e ret = mig_submit_write(m);
+    const ftl_status_e ret = mig_write_submit(m);
     if (ret == FTL_AGAIN)
     {
         if (mig_stall(m))
@@ -1708,7 +1708,7 @@ static bool mig_step_erase(mig_handle_t *m)
         return false;
     }
 
-    const ftl_status_e ret = mig_submit_erase(m);
+    const ftl_status_e ret = mig_erase_submit(m);
     if (ret == FTL_AGAIN)
     {
         (void)mig_stall(m);
@@ -2154,7 +2154,7 @@ void mig_handle(mig_handle_t *m, const bg_info_t *info, mig_status_t *out)
 
 /* MIG_READ 完成：拷数据 + 解 META 得逐 CW 的扇区 LBA；顺带记 ECC 趋势 + read_count
  * （慢死预测闭环）。失败 / 全页空洞 ⇒ 该 plane 无有效 CW，不影响另一 plane。 */
-static void mig_complete_read(mig_handle_t              *m,
+static void mig_read_complete(mig_handle_t              *m,
                               fc_command_t              *cmd,
                               const fc_command_status_t *completion)
 {
@@ -2272,7 +2272,7 @@ static void mig_complete_read(mig_handle_t              *m,
 
 /* MIG_WRITE 完成：只记成败，L2P/Journal/有效计数的改动在 MIG_WRITE_SETTLE。
  * 写失败 ⇒ **中止 job，victim 不擦**（源数据仍有效，下轮再搬）；绝不能继续到 ERASE。 */
-static void mig_complete_write(mig_handle_t              *m,
+static void mig_write_complete(mig_handle_t              *m,
                                fc_command_t              *cmd,
                                const fc_command_status_t *completion)
 {
@@ -2323,7 +2323,7 @@ static void mig_complete_write(mig_handle_t              *m,
 /* MIG_WRITE_BATCH 完成：逐条 release，只有全部成功才进入两遍式确认。
  * 任一失败 ⇒ 立即关闭 cold SB 并 abort（victim 不擦）；其余在飞命令由孤儿守卫 release。
  * 没有映射被提交，因此未确认的 batch 页只是垃圾。 */
-static void mig_complete_write_batch(mig_handle_t              *m,
+static void mig_write_batch_complete(mig_handle_t              *m,
                                      fc_command_t              *cmd,
                                      const fc_command_status_t *completion)
 {
@@ -2373,7 +2373,7 @@ static void mig_complete_write_batch(mig_handle_t              *m,
 
 /* MIG_ERASE 完成：成功 ⇒ erase_count++ / last_pe_ts / 清 valid，
  * 然后按 post 二选一（FREE 入池 / RETIRE 退役）；失败 ⇒ bbt_mark_bad。 */
-static void mig_complete_erase(mig_handle_t              *m,
+static void mig_erase_complete(mig_handle_t              *m,
                                fc_command_t              *cmd,
                                const fc_command_status_t *completion)
 {
@@ -2495,19 +2495,19 @@ void ftl_migrate_callback(struct ftl_context *ftl, const fc_command_status_t *co
     switch ((mig_phase_e)m->phase)
     {
         case MIG_READ:
-            mig_complete_read(m, cmd, completion);
+            mig_read_complete(m, cmd, completion);
             return;
 
         case MIG_WRITE:
-            mig_complete_write(m, cmd, completion);
+            mig_write_complete(m, cmd, completion);
             return;
 
         case MIG_WRITE_BATCH:
-            mig_complete_write_batch(m, cmd, completion);
+            mig_write_batch_complete(m, cmd, completion);
             return;
 
         case MIG_ERASE:
-            mig_complete_erase(m, cmd, completion);
+            mig_erase_complete(m, cmd, completion);
             return;
 
         case MIG_IDLE:

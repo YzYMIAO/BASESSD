@@ -327,7 +327,7 @@ static ftl_status_e ftl_format_verify_blocks(ftl_ctx_t *ftl)
         }
     }
 
-    bbt_note_dirty(alloc);
+    bbt_dirty_note(alloc);
 
     if (bbt_save(alloc) != FTL_OK)
     {
@@ -362,7 +362,7 @@ static bool ftl_format_end_bbt(alc_t *alloc)
      * 否则下次开机会在刚格式化完的介质上白跑一次 full rebuild。 */
     alloc->bbt.rebuild_required = false;
 
-    bbt_note_dirty(alloc);
+    bbt_dirty_note(alloc);
 
     return bbt_save(alloc) == FTL_OK;
 }
@@ -436,7 +436,7 @@ ftl_status_e ftl_media_format(struct ftl_context *ftl, bool verify)
     /* BBT 候选可能因 verify 新发现的 BAD 改变 ⇒ 强制 bbt_save 在新池上重新定位，
      * 把最终 BAD 图落到新的 BBT 候选块；否则下次开机扫旧候选可能读不到最新 record。 */
     ftl->alloc.bbt.cursor_valid = 0U;
-    bbt_note_dirty(&ftl->alloc);
+    bbt_dirty_note(&ftl->alloc);
 
     if (bbt_save(&ftl->alloc) != FTL_OK)
     {
@@ -621,7 +621,7 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
 
     /* 运行期 Journal/L2P 日志块丢失后置的 REBUILD_REQUIRED（本仓自拟）：
      * 快照不可信，强制走 full metadata rebuild；新 CP 落盘后才清标志（见
-     * cp_complete_hdr_write）。此时即使 Directory 加载失败也继续——重建本身
+     * cp_hdr_write_complete）。此时即使 Directory 加载失败也继续——重建本身
      * 就不依赖旧 Directory。 */
     if (alc_bbt_is_rebuild_required(&ftl->alloc))
     {
@@ -1663,7 +1663,7 @@ static bool ftl_recovery_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOT
                 alloc->bad_count++;
                 /* boot 期并集：不走 bbt_mark_bad（Spare/Free Pool 尚未建），
                  * 但 dirty 必须走同一闸门，避免丢掉 dirty_gen。 */
-                bbt_note_dirty(alloc);
+                bbt_dirty_note(alloc);
                 break;
 
             case FTL_BLOCK_STATE_LOG:

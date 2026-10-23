@@ -1485,7 +1485,7 @@ bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc)
 bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION_COPIES])
 {
     /* 前置条件：调用者传 ftl->metadata_dir / &ftl->alloc / 栈上数组（调用链已保证）。 */
-    if (!md_is_handle_idle(dir))
+    if (!md_handle_is_idle(dir))
     {
         return false; /* 整理 job 在飞：背压语义（见 md_log_rotate 的 job 让路说明） */
     }
@@ -1508,8 +1508,8 @@ bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION
         }
     }
 
-    out[0] = md_take_slot(dir);
-    out[1] = md_take_slot(dir);
+    out[0] = md_slot_take(dir);
+    out[1] = md_slot_take(dir);
 
     return (out[0] != NAND_PBA_INVALID) && (out[1] != NAND_PBA_INVALID);
 }
@@ -1562,7 +1562,7 @@ static void md_region_copy_commit(md_dir_cache_t *dir, DWORD old, DWORD new_pba)
      * ⚠ 压缩期间**抑制**本登记：搬移 victim 的最后一个 region 时它会归零，此时 Anchor
      *   还没指向新位置 ⇒ 擦了就会掉电丢映射（③④ 契约）。压缩期间归零的块由 job 自己
      *   在 CP_RECLAIM 里擦。 */
-    if ((old_g != UINT16_MAX) && (!md_is_compacting(dir)) && md_log_block_idle(dir, old_g))
+    if ((old_g != UINT16_MAX) && (!md_handle_is_compacting(dir)) && md_log_block_is_idle(dir, old_g))
     {
         (void)md_reclaim_mark(dir, old_g);
     }
@@ -2189,7 +2189,7 @@ void md_pool_service(struct ftl_context *ftl)
         /* 元数据区已无足够好块：停止重试（避免每轮刷屏），下次开机由 BBT/rebuild 兜底。 */
         alloc->pools->dirty         = false;
         alloc->bbt.rebuild_required = true;
-        bbt_note_dirty(alloc);
+        bbt_dirty_note(alloc);
         LOGE(LOG_TAG_POOL "rebuild failed — metadata area exhausted, rebuild required\r\n");
         return;
     }
@@ -2258,7 +2258,7 @@ void md_pool_service(struct ftl_context *ftl)
     /* 触发一次 Anchor 提交 + Checkpoint：把 RAM 里的权威状态重新落到新候选池。 */
     dir->dirty = true;
     jrn_checkpoint_request(journal);
-    bbt_note_dirty(alloc);
+    bbt_dirty_note(alloc);
 
     if ((s_pool_rebuilt_logged++ % MD_POOL_REBUILT_LOG_EVERY) == 0U)
     {

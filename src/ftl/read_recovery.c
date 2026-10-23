@@ -123,7 +123,7 @@ void rr_retire_block_at(alc_t *alloc, WORD gblock)
 
 /* 提交一条页读（目标页或邻居页）。数据在完成时由服务函数拷进 rr->page_scratch
  * ——**读**不像写那样在 prepare 阶段搬数据（见 ftl_async_read_page 的注释）。 */
-static ftl_status_e rr_submit_read(rr_handle_t *rr, DWORD pba, const ftl_page_cfg_t *cfg)
+static ftl_status_e rr_read_submit(rr_handle_t *rr, DWORD pba, const ftl_page_cfg_t *cfg)
 {
     fc_command_t *cmd;
 
@@ -457,7 +457,7 @@ static void rr_step(rr_handle_t *rr)
             case RR_STAGE_READ:
             {
                 const ftl_page_cfg_t *cfg = FTL_PAGE_CFG_DATA(rr->page_lba);
-                const ftl_status_e    st  = rr_submit_read(rr, rr->page, cfg);
+                const ftl_status_e    st  = rr_read_submit(rr, rr->page, cfg);
 
                 /* FTL_ERROR = 地址/建链硬失败 ⇒ 立即 abort；FTL_AGAIN = 背压 ⇒
                  * stage 不变，下轮 rr_handle 重试。 */
@@ -629,7 +629,7 @@ void rr_handle(rr_handle_t *rr, const bg_info_t *info, rr_status_t *out)
  *     `0x89` 读电压重试在本器件是保留地址（空操作），邻居页辅助也无法恢复目标页，
  *     二者已删除（RISK-MIG-07）。
  */
-static void rr_complete_read(rr_handle_t *rr, fc_command_t *cmd, const fc_command_status_t *completion)
+static void rr_read_complete(rr_handle_t *rr, fc_command_t *cmd, const fc_command_status_t *completion)
 {
     rr->retry_count = rr->attempt;
     rr->last_status = completion->status; /* 收尾日志解码用 */
@@ -694,7 +694,7 @@ void ftl_read_recovery_callback(struct ftl_context *ftl, const fc_command_status
     switch ((rr_stage_e)rr->stage)
     {
         case RR_STAGE_READ:
-            rr_complete_read(rr, cmd, completion);
+            rr_read_complete(rr, cmd, completion);
             break;
 
         default:

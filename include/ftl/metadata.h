@@ -714,7 +714,7 @@ typedef enum
     MD_COMPACT_BACKPRESSURE = 0U, /* 背压未提交：保留游标/槽，**下轮重试**（调用者 return）*/
     MD_COMPACT_SUBMITTED    = 1U, /* 已提交异步命令：等完成服务函数 */
     MD_COMPACT_SCANNED      = 2U, /* 全表扫完、无更多 region 待搬（read 专有）*/
-    MD_COMPACT_FAILED       = 3U, /* 硬失败（md_stall 无进展）：调用者 md_handle_abort */
+    MD_COMPACT_FAILED       = 3U, /* 硬失败（md_handle_stall 无进展）：调用者 md_handle_abort */
 } md_compact_step_e;
 
 /*
@@ -849,7 +849,7 @@ typedef struct md_dir_cache
      *   ① **抑制逐次立即回收**（搬移 victim 的最后一个活 region 时 l2p_live[victim]
      *      归零，若就地擦掉就是**在 Anchor 落盘之前**擦 victim ⇒ 掉电丢映射）；
      *   ② **防重入 / 防抢槽**（压缩搬移要往当前块写，期间再发放槽位会打乱空槽预算）。
-     * 判据分别是 md_is_compacting()（①）与 job.phase != IDLE（②）。 */
+     * 判据分别是 md_handle_is_compacting()（①）与 job.phase != IDLE（②）。 */
     md_handle_t handle;
 
     /* Anchor 池游标（ring 写点槽位；anchor_cursor_valid=false 时尚未定位）*/

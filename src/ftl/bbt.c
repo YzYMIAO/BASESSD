@@ -385,7 +385,7 @@ int bbt_factory_scan(alc_t *alloc)
     }
 
     alloc->bad_count = bad_idx;
-    bbt_note_dirty(alloc);
+    bbt_dirty_note(alloc);
 
     /* 先按扫描结果建好候选池（BBT 本身可能落在 shared spare），再写 BBT record；
      * 否则 bbt_save 会沿用自举扫描列表，可能选中刚扫出的坏块。 */
@@ -488,7 +488,7 @@ ftl_status_e bbt_format_erase(alc_t *alloc)
     /* ① 先持久化当前坏块图（工厂标记 + CP 快照并集都在 BST），并置“格式化进行中”。
      *    失败 ⇒ 不擦任何用户块：工厂标记仍完整，可下次重试。 */
     alloc->bbt.format_in_progress = true;
-    bbt_note_dirty(alloc);
+    bbt_dirty_note(alloc);
 
     if (bbt_save(alloc) != FTL_OK)
     {
@@ -535,7 +535,7 @@ ftl_status_e bbt_format_erase(alc_t *alloc)
      *    这里失败只留下 dirty 给后台 bbt_handle）。
      *    **不清 format_in_progress**：清标志归 ftl_media_format 的提交点
      *    （initial Checkpoint 已读回），否则擦除后复位会让下次开机拒绝格式化。 */
-    bbt_note_dirty(alloc);
+    bbt_dirty_note(alloc);
     (void)bbt_save(alloc);
 
     return FTL_OK;
@@ -581,7 +581,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
     ftl_block_clear_valid(&alloc->blocks[gblock]);
     ftl_block_set_sb(&alloc->blocks[gblock], FTL_BLOCK_NO_SB);
     alloc->bad_count++;
-    bbt_note_dirty(alloc);
+    bbt_dirty_note(alloc);
 
     /* 不同步调 bbt_save() — NAND BBT 持久化由后台 bbt_handle 批量执行。
      *
@@ -641,10 +641,10 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
     return FTL_OK;
 }
 
-/* bbt_note_dirty — BBT 的唯一 dirty 闸门。
+/* bbt_dirty_note — BBT 的唯一 dirty 闸门。
  * 每次置位推进 dirty_gen：写 job 组 header 时快照它，完成时只有代际未变才清 dirty，
  * 从而覆盖“写命令在飞期间又标坏了一块”的丢更新窗口。 */
-void bbt_note_dirty(alc_t *alloc)
+void bbt_dirty_note(alc_t *alloc)
 {
     alloc->bbt.dirty = 1U;
     alloc->bbt.dirty_gen++;
@@ -652,7 +652,7 @@ void bbt_note_dirty(alc_t *alloc)
 
 /* ── 5. 同步持久化 ── */
 
-/* 从 BST 重建一条 BBT record 的 header（同步 bbt_save 与异步 bbt_submit_write 共用）。
+/* 从 BST 重建一条 BBT record 的 header（同步 bbt_save 与异步 bbt_write_submit 共用）。
  * `sequence` 由调用者决定：同步路径刚自增，异步路径在 kick 起步时已自增。 */
 static void bbt_build_header(const alc_t *alloc, DWORD sequence, bbt_header_t *header)
 {
@@ -819,7 +819,7 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
 /* ── 6. 异步 job ── */
 
 /* --------------------------------------------------------------------
- * bbt_submit_write
+ * bbt_write_submit
  *   功能：把当前 BST 重建为一条 BBT record，**异步**提交写（phase = BBT_JOB_WRITE）。
  *   参数：alloc —— 分配器（写点 = alloc->bbt.write_idx）。
  *   返回：FTL_OK 已提交（waiting = 1）；FTL_ERROR 建链/提交失败（**waiting 保持 0**，
@@ -830,7 +830,7 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
  *             FC buffer 池（同 jrn_freeze 的做法，不需要为异步保留快照缓冲）。
  *             地址按 write_idx 重算（write_idx 写成功才推进 ⇒ 此刻它仍指向本槽）。
  * -------------------------------------------------------------------- */
-static ftl_status_e bbt_submit_write(alc_t *alloc)
+static ftl_status_e bbt_write_submit(alc_t *alloc)
 {
     bbt_probe_ctx_t ctx;
     bbt_ctx_init(alloc, &ctx);
@@ -952,7 +952,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
         }
         if (alloc->bbt.handle.phase == BBT_JOB_WRITE)
         {
-            (void)bbt_submit_write(alloc); /* ② 背压后续提交（擦已完成） */
+            (void)bbt_write_submit(alloc); /* ② 背压后续提交（擦已完成） */
             break;
         }
         if (alloc->bbt.handle.phase != BBT_JOB_IDLE)
@@ -1016,7 +1016,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
         /* 不必换块 ⇒ 直接起写。先落 phase，提交被背压拒就停在 WRITE/waiting=0 等续跑 */
         alloc->bbt.handle.phase   = BBT_JOB_WRITE;
         alloc->bbt.handle.waiting = 0U;
-        (void)bbt_submit_write(alloc);
+        (void)bbt_write_submit(alloc);
     } while (0);
 
     /* 统一上报出口：无论推进是否早退，主流程都拿本轮状态。 */
@@ -1024,7 +1024,7 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
 }
 
 /* 擦完成。失败 ⇒ 游标**不推进**（擦没成，该槽还没被消耗），dirty 保留供下轮重试。 */
-static void bbt_complete_erase(alc_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
+static void bbt_erase_complete(alc_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
 {
     if (fc_cw_status_has_error(completion->status))
     {
@@ -1039,13 +1039,13 @@ static void bbt_complete_erase(alc_t *alloc, fc_command_t *cmd, const fc_command
      * （**不再回 IDLE**——回 IDLE 会让下轮 kick 重走 prepare_addr 再擦一次同一块）。 */
     alloc->bbt.handle.phase   = BBT_JOB_WRITE;
     alloc->bbt.handle.waiting = 0U;
-    (void)bbt_submit_write(alloc);
+    (void)bbt_write_submit(alloc);
     (void)fc_command_release(cmd);
 }
 
 /* record 写完成。**无论成败都推进游标**：已写过的槽可能半编程，不可复用。
  * dirty 的清除还要比 dirty_gen —— 写飞行期间若又标了坏块，本条 record 是旧快照。 */
-static void bbt_complete_write(alc_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
+static void bbt_write_complete(alc_t *alloc, fc_command_t *cmd, const fc_command_status_t *completion)
 {
     bbt_probe_ctx_t rctx;
 
@@ -1076,7 +1076,7 @@ static void bbt_complete_write(alc_t *alloc, fc_command_t *cmd, const fc_command
  *   参数：ftl —— 实例（**不用**：ctx 已是本实例的 allocator）；
  *         completion —— 完成状态；ctx —— `alc_t *`（ftl_op_submit 时传）。
  *   返回：无。命令的 release 归本函数。
- *   实现要点：按 job.phase 分派到 bbt_complete_erase / bbt_complete_write（见各自注释）。
+ *   实现要点：按 job.phase 分派到 bbt_erase_complete / bbt_write_complete（见各自注释）。
  *   ⚠ 本函数**只**收尾/续提交，不调 bbt_handle（续提交是提交侧动作，无需嵌套泵）。
  * -------------------------------------------------------------------- */
 void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *completion, void *ctx)
@@ -1097,11 +1097,11 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
 
     if (alloc->bbt.handle.phase == BBT_JOB_ERASE)
     {
-        bbt_complete_erase(alloc, cmd, completion);
+        bbt_erase_complete(alloc, cmd, completion);
     }
     else if (alloc->bbt.handle.phase == BBT_JOB_WRITE)
     {
-        bbt_complete_write(alloc, cmd, completion);
+        bbt_write_complete(alloc, cmd, completion);
     }
     else
     {

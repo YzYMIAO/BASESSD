@@ -290,7 +290,7 @@ static bool cp_job_stall(cp_handle_t *h)
 }
 
 /* 提交一条已建好的 CP 命令（写 / 擦共用）。成功才清零卡死计数。 */
-static ftl_status_e cp_submit_cmd(cp_handle_t *h, fc_command_t *cmd)
+static ftl_status_e cp_command_submit(cp_handle_t *h, fc_command_t *cmd)
 {
     h->waiting = 1U; /* 先置位、提交失败再回滚 */
 
@@ -309,7 +309,7 @@ static ftl_status_e cp_submit_cmd(cp_handle_t *h, fc_command_t *cmd)
  * 提交结果处理：true = 调用者必须 return（已中止，或已计卡死等待重试）。
  * FTL_ERROR = 配置/地址硬失败 ⇒ 立即中止；FTL_AGAIN = 瞬态背压 ⇒ 下轮重试。
  */
-static bool cp_submit_result(cp_handle_t *h, ftl_status_e st)
+static bool cp_command_result_handle(cp_handle_t *h, ftl_status_e st)
 {
     if (st == FTL_OK)
     {
@@ -328,7 +328,7 @@ static bool cp_submit_result(cp_handle_t *h, ftl_status_e st)
 /* 提交一条异步写（Anchor 分页 / Checkpoint Header 共用）。同步镜像到 P0+P1：
  * 同一页数据用 multi-plane 一次写两个 plane；data 在本函数内已拷进 FC buffer
  * ⇒ 调用者的栈缓冲随即可复用。 */
-static ftl_status_e cp_submit_write(cp_handle_t *h, DWORD addr, const void *data, DWORD length)
+static ftl_status_e cp_write_submit(cp_handle_t *h, DWORD addr, const void *data, DWORD length)
 {
     fc_command_t *cmd;
 
@@ -338,12 +338,12 @@ static ftl_status_e cp_submit_write(cp_handle_t *h, DWORD addr, const void *data
     {
         return st; /* FTL_AGAIN 池空 / FTL_ERROR 建链失败 */
     }
-    return cp_submit_cmd(h, cmd);
+    return cp_command_submit(h, cmd);
 }
 
 /* 提交一条异步擦除（Anchor 换块 / Checkpoint 换块 / Journal 预擦共用）。
  * 固定元数据池是 P0+P1 镜像 ⇒ 换块必须 multi-plane 擦，否则副本 plane 不会清。 */
-static ftl_status_e cp_submit_erase(cp_handle_t *h, DWORD addr)
+static ftl_status_e cp_erase_submit(cp_handle_t *h, DWORD addr)
 {
     fc_command_t *cmd;
 
@@ -353,7 +353,7 @@ static ftl_status_e cp_submit_erase(cp_handle_t *h, DWORD addr)
     {
         return st;
     }
-    return cp_submit_cmd(h, cmd);
+    return cp_command_submit(h, cmd);
 }
 
 /* 填写 Checkpoint Header 的固定字段；调用者随后按需补 timestamp。
@@ -503,7 +503,7 @@ static cp_flush_step_e cp_regions_flush(cp_handle_t *h)
 
 /* 换块擦完成：成功 ⇒ phase 推进到 next；失败 ⇒ 中止本次 CP（**不**推进游标，
  * dirty 保留 ⇒ 下次在新槽重试整条）。 */
-static void cp_complete_erase(cp_handle_t *h, bool failed, cp_phase_e next)
+static void cp_erase_complete(cp_handle_t *h, bool failed, cp_phase_e next)
 {
     if (failed)
     {
@@ -515,7 +515,7 @@ static void cp_complete_erase(cp_handle_t *h, bool failed, cp_phase_e next)
 
 /* 快照页 / 磨损页写完成：失败 ⇒ 整条 record 作废（不写 Header——Header 是 commit），
  * 游标推进一槽（本条记录的剩余页可能半编程，永不复用）。返回 true = 已中止。 */
-static bool cp_complete_snapshot_page_write(cp_handle_t *h, bool failed)
+static bool cp_snapshot_page_write_complete(cp_handle_t *h, bool failed)
 {
     if (!failed)
     {
@@ -529,7 +529,7 @@ static bool cp_complete_snapshot_page_write(cp_handle_t *h, bool failed)
 
 /* Header（commit 页）写完：无论成败都推进游标（已写过的槽可能半编程，不可复用）；
  * 成功才提交 journal 水位并清持久性失败标记。 */
-static void cp_complete_hdr_write(cp_handle_t *h, bool failed)
+static void cp_hdr_write_complete(cp_handle_t *h, bool failed)
 {
     h->cp_state.write_idx = ((h->hdr_idx + 1U) % md_ring_total_records(&h->hdr_ring));
 
@@ -549,7 +549,7 @@ static void cp_complete_hdr_write(cp_handle_t *h, bool failed)
     if (h->alloc->bbt.rebuild_required)
     {
         h->alloc->bbt.rebuild_required = false;
-        bbt_note_dirty(h->alloc);
+        bbt_dirty_note(h->alloc);
         LOGI(LOG_TAG_CP "rebuild_required cleared — rebuilt metadata committed\r\n");
     }
     h->phase = CP_TRUNC_PREP;
@@ -559,7 +559,7 @@ static void cp_complete_hdr_write(cp_handle_t *h, bool failed)
  * jrn_handle 换块擦除回切到该块会跳过擦除 ⇒ 写进未擦块（二次编程 = 静默损坏）。
  * commit(NONE) 只复位水位标志；该块保持"未预擦"，journal 回切时由 need_erase 重试，
  * 下一次 CP 的 plan 也会再次返回 NEEDS_ERASE。 */
-static void cp_complete_trunc_erase(cp_handle_t *h, bool failed)
+static void cp_trunc_erase_complete(cp_handle_t *h, bool failed)
 {
     if (failed)
     {
@@ -617,7 +617,7 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
     switch ((cp_phase_e)h->phase)
     {
         case CP_ANCHOR_ERASE:
-            cp_complete_erase(h, failed, CP_ANCHOR_WRITE);
+            cp_erase_complete(h, failed, CP_ANCHOR_WRITE);
             return;
 
         case CP_ANCHOR_WRITE:
@@ -630,29 +630,29 @@ void ftl_checkpoint_callback(struct ftl_context *ftl, const fc_command_status_t 
             return;
 
         case CP_HDR_ERASE:
-            cp_complete_erase(h, failed, CP_BLOCK_WRITE);
+            cp_erase_complete(h, failed, CP_BLOCK_WRITE);
             return;
 
         case CP_BLOCK_WRITE:
-            if (!cp_complete_snapshot_page_write(h, failed))
+            if (!cp_snapshot_page_write_complete(h, failed))
             {
                 h->block_page = (h->block_page + 1U);
             }
             return;
 
         case CP_WEAR_WRITE:
-            if (!cp_complete_snapshot_page_write(h, failed))
+            if (!cp_snapshot_page_write_complete(h, failed))
             {
                 h->wear_page = (h->wear_page + 1U);
             }
             return;
 
         case CP_HDR_WRITE:
-            cp_complete_hdr_write(h, failed);
+            cp_hdr_write_complete(h, failed);
             return;
 
         case CP_TRUNC_ERASE:
-            cp_complete_trunc_erase(h, failed);
+            cp_trunc_erase_complete(h, failed);
             return;
 
         case CP_IDLE:
@@ -741,7 +741,7 @@ static void cp_job_step(cp_handle_t *h)
             }
 
             case CP_ANCHOR_ERASE:
-                (void)cp_submit_result(h, cp_submit_erase(h, h->anchor_base));
+                (void)cp_command_result_handle(h, cp_erase_submit(h, h->anchor_base));
                 return;
 
             case CP_ANCHOR_WRITE:
@@ -773,9 +773,9 @@ static void cp_job_step(cp_handle_t *h)
                 md_anchor_page(h->metadata_dir, h->anchor_seq, h->anchor_chunk, page);
 
                 const DWORD        page_size = sizeof(*page);
-                const ftl_status_e st        = cp_submit_write(h, aaddr, page, page_size);
+                const ftl_status_e st        = cp_write_submit(h, aaddr, page, page_size);
 
-                (void)cp_submit_result(h, st);
+                (void)cp_command_result_handle(h, st);
                 return;
             }
 
@@ -846,7 +846,7 @@ static void cp_job_step(cp_handle_t *h)
             }
 
             case CP_HDR_ERASE:
-                (void)cp_submit_result(h, cp_submit_erase(h, h->hdr_addr));
+                (void)cp_command_result_handle(h, cp_erase_submit(h, h->hdr_addr));
                 return;
 
             case CP_BLOCK_WRITE:
@@ -869,9 +869,9 @@ static void cp_job_step(cp_handle_t *h)
                 const BYTE         page_index = (1U + h->block_page);
                 const WORD        *words      = &h->block_words[h->block_page * CP_BLOCK_WORDS_PER_PAGE];
                 DWORD              a          = md_ring_addr(&h->hdr_ring, &h->topo, h->hdr_idx, page_index);
-                const ftl_status_e st         = cp_submit_write(h, a, words, PAGE_MAIN_SIZE);
+                const ftl_status_e st         = cp_write_submit(h, a, words, PAGE_MAIN_SIZE);
 
-                (void)cp_submit_result(h, st);
+                (void)cp_command_result_handle(h, st);
                 return;
             }
 
@@ -900,9 +900,9 @@ static void cp_job_step(cp_handle_t *h)
                                        h->hdr_idx,
                                        wear_page_index);
 
-                const ftl_status_e st = cp_submit_write(h, a, h->wear_page_buf, PAGE_MAIN_SIZE);
+                const ftl_status_e st = cp_write_submit(h, a, h->wear_page_buf, PAGE_MAIN_SIZE);
 
-                (void)cp_submit_result(h, st);
+                (void)cp_command_result_handle(h, st);
                 return;
             }
 
@@ -920,9 +920,9 @@ static void cp_job_step(cp_handle_t *h)
                 cp->timestamp = ftl_job_now_ms();
 
                 const DWORD        cp_size = sizeof(*cp);
-                const ftl_status_e st      = cp_submit_write(h, h->hdr_addr, cp, cp_size);
+                const ftl_status_e st      = cp_write_submit(h, h->hdr_addr, cp, cp_size);
 
-                (void)cp_submit_result(h, st);
+                (void)cp_command_result_handle(h, st);
                 return;
             }
 
@@ -948,7 +948,7 @@ static void cp_job_step(cp_handle_t *h)
             }
 
             case CP_TRUNC_ERASE:
-                (void)cp_submit_result(h, cp_submit_erase(h, h->trunc_addr));
+                (void)cp_command_result_handle(h, cp_erase_submit(h, h->trunc_addr));
                 return;
 
             case CP_DONE:

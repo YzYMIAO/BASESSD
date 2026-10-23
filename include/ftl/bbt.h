@@ -194,7 +194,7 @@ int bbt_factory_scan(alc_t *alloc);
 /*
  * bbt_format_erase - 格式化用的两阶段擦除：先落 BBT，再擦 BBT 池之外的块
  *
- * ① `bbt_note_dirty + bbt_save`：把当前 BST 坏块图（含工厂标记 / CP 快照并集）
+ * ① `bbt_dirty_note + bbt_save`：把当前 BST 坏块图（含工厂标记 / CP 快照并集）
  *    追加成一条 record，并置 `BBT_FLAG_FORMAT_IN_PROGRESS`。失败 ⇒ FTL_ERROR，
  *    **不擦任何用户块**（工厂标记仍完整）。
  * ② 擦除**除 BBT 池之外**的全部块（所有 plane）；擦失败的块标 BAD。
@@ -225,9 +225,9 @@ ftl_status_e bbt_format_erase(alc_t *alloc);
  */
 ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock);
 
-/* bbt_note_dirty - 标记 BBT 有未落盘变更（唯一 dirty 闸门）。
+/* bbt_dirty_note - 标记 BBT 有未落盘变更（唯一 dirty 闸门）。
  * 每次置位推进 `dirty_gen`；写 job 用它检测“组 header 之后又标坏”的丢更新。 */
-void bbt_note_dirty(alc_t *alloc);
+void bbt_dirty_note(alc_t *alloc);
 
 /*
  * bbt_save - 将 BBT 追加写入 NAND BBT 池
