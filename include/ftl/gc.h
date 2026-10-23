@@ -34,20 +34,6 @@
 
 #include <stdint.h>
 
-/* ── GC victim 多维加权评分（设计 §4.3）──
- * 权重为**千分比整数**：本仓无 FPU 便利、newlib-nano 无 %f ⇒ 全整数，四项各自
- * 归一化到 0..1000 后再加权，cost 上限 (500+200+200+100)×1000 = 1,000,000。
- *
- * 符号约定（必须与评分口径一起读）：
- *   · **cost 取小 = 越优先回收**；
- *   · 擦除项取 **+erase_ratio**（避开临近寿命的 Block；取 (1-erase_ratio) 会在
- *     取小约定下偏向磨损重的块）；
- *   · 温度项定义 **HOT 优先当 victim**（COLD 数据有效页几乎不变，下次 GC 还得搬）。 */
-#define GC_WEIGHT_VALID (500U) /* 有效页占比（核心指标，直接决定写放大） */
-#define GC_WEIGHT_ERASE (200U) /* 擦除次数占比（磨损均衡，避开临近寿命块） */
-#define GC_WEIGHT_TEMP  (200U) /* 温度（HOT 数据自然死亡快，投资未来无效收益） */
-#define GC_WEIGHT_AGE   (100U) /* 时间（保证每个 Block 都有机会被回收） */
-
 /* ── GC 触发位（设计 §4.4：只有**空间压力与磨损**三条）──
  * gc_should_trigger() 返回的**位掩码**：命中的位即触发起因（可多位同时命中）。
  * 只用于调用点打日志/调参，"要不要 GC" 的判定仍是 `!= 0`。
@@ -76,25 +62,48 @@
  * 2 s 足以跨过单 victim 的正常间隙，又不会让一次短暂写入把会话拖成永远不结束。 */
 #define GC_SESSION_IDLE_MS (2000U)
 
-/* ── GC 收益判据（空间 GC：T1/T4）──
- * 满盘且写入几乎全是有效数据时（实测 victim 96–98% 有效），按水位无限 GC 只会
- * 以 ~2% 的净收益持续搬移：写放大、磨损、读带宽被抢。
- *
- * 判据按场景分三档（见 gc_benefit_mode_e）：
- *   · host 正在写：不筛（写流必须靠搬移腾出空间，否则满盘写会卡顿）；
- *   · host 不写（空闲/只读）：victim 有效率 > GC_VICTIM_MAX_VALID_PCT ⇒ 不搬；
- *   · 紧急水位（free <= FREE_POOL_EMERGENCY）：可回收比例 < GC_EMERGENCY_MIN_GAIN_PCT
- *     ⇒ 不搬，由写路径按「无进展」上报 IO_ERROR（不再无尽重试）。
- *
- * ⚠ 80% / 1% / 500 ms / 2 s 均为**本仓自拟**经验值（无外部出处）：
- *   · 80% 有意低于实测满盘有效率（96–98%），保证满盘只读时立刻停；
- *   · 1% ≈ 5 CW / 512-CW SB，低于它的搬移是纯churn；
- *   · 500 ms 把「无收益」后的 closed-list 复扫从 100 次/秒降到 2 次/秒；
- *   · 2 s 是 host 写流判定窗口（USB 写约 4 KB/13 ms，10 ms 采样会漏）。 */
-#define GC_VICTIM_MAX_VALID_PCT   (80U)   /* 空闲补池：valid 占比 > 80% 视为无收益 */
-#define GC_EMERGENCY_MIN_GAIN_PCT (1U)    /* 紧急水位：可回收占比 < 1% 视为无收益 */
-#define GC_NO_GAIN_BACKOFF_MS     (500U)  /* NO_GAIN 后的 closed-list 复扫间隔 */
-#define GC_HOST_WRITE_WINDOW_MS   (2000U) /* total_writes 变化后视为 host 在写的窗口 */
+/* 无收益结论后的 closed-list 复扫间隔（migrate 消费）。 */
+#define GC_NO_GAIN_BACKOFF_MS (500U)
+
+/* host 写流判定窗口（migrate 消费）：total_writes 变化后这么久内视为 host 在写。 */
+#define GC_HOST_WRITE_WINDOW_MS (2000U)
+
+/* ── 类型 ── */
+
+/* 逐 CW META 解码结果。 */
+typedef enum
+{
+    GC_DECODE_OK = 0,
+    GC_DECODE_EMPTY,
+    GC_DECODE_CORRUPT,
+} gc_decode_e;
+
+/* GC 收益判据模式（只对空间 GC T1/T4 有意义；磨损均衡走独立 WL 路径）。
+ * 具体阈值是 gc.c 的内部策略参数（IDLE 80% / EMERGENCY 1%）。 */
+typedef enum
+{
+    GC_BENEFIT_OFF = 0,   /* 不筛：host 正在写（原水位行为） */
+    GC_BENEFIT_IDLE,      /* host 不写：只接受 valid 占比不高的 victim */
+    GC_BENEFIT_EMERGENCY, /* 紧急水位：只接受可回收占比足够的 victim */
+} gc_benefit_mode_e;
+
+/* 选块结果：把「没有候选」与「有候选但都不值得搬」分开，后者用于 no-gain 退避与
+ * NO_SPACE 判定（`RISK-GC-13/14`）。 */
+typedef enum
+{
+    GC_SELECT_OK = 0,         /* 已选中，out->victim 有效 */
+    GC_SELECT_NO_CANDIDATE,   /* closed 列表里没有可用候选（空 / 全 open / 全哨兵） */
+    GC_SELECT_NOT_WORTHWHILE, /* 有候选，但全部被收益判据拒绝 */
+} gc_select_e;
+
+/* 选块出参（即使 NOT_WORTHWHILE 也填 best_valid_pct，供日志归因）。 */
+typedef struct
+{
+    const super_block_t *victim;         /* GC_SELECT_OK 时有效 */
+    WORD                 best_valid_pct; /* 域内最低有效率（0..100），无候选时为 0 */
+    WORD                 scanned;        /* 参与评分的候选数 */
+    WORD                 eligible;       /* 通过收益判据的候选数 */
+} gc_select_out_t;
 
 /* ── 接口函数 ── */
 
@@ -136,51 +145,18 @@ ftl_status_e gc_read_page_with_lba(DWORD pba, DWORD cw_lba[CW_NUM]);
  *         （无有效数据，调用者跳过）；GC_DECODE_CORRUPT = 写过的 CW 页基址不一致
  *         （META 损坏，调用者必须按不可迁移处理，**不得**擦 victim）。
  */
-typedef enum
-{
-    GC_DECODE_OK = 0,
-    GC_DECODE_EMPTY,
-    GC_DECODE_CORRUPT,
-} gc_decode_e;
-
 gc_decode_e gc_decode_cw_lba(fc_command_t *cmd,
                              DWORD         pba,
                              DWORD         cw_lba[CW_NUM],
                              DWORD        *page_base_out);
-
-/* GC 收益判据模式（只对空间 GC T1/T4 有意义；磨损均衡走独立 WL 路径）。 */
-typedef enum
-{
-    GC_BENEFIT_OFF = 0,   /* 不筛：host 正在写（原水位行为） */
-    GC_BENEFIT_IDLE,      /* host 不写：只接受 valid 占比 <= GC_VICTIM_MAX_VALID_PCT 的 victim */
-    GC_BENEFIT_EMERGENCY, /* 紧急水位：只接受可回收占比 >= GC_EMERGENCY_MIN_GAIN_PCT 的 victim */
-} gc_benefit_mode_e;
-
-/* 选块结果：把「没有候选」与「有候选但都不值得搬」分开，后者用于 no-gain 退避与
- * NO_SPACE 判定（`RISK-GC-13/14`）。 */
-typedef enum
-{
-    GC_SELECT_OK = 0,         /* 已选中，out->victim 有效 */
-    GC_SELECT_NO_CANDIDATE,   /* closed 列表里没有可用候选（空 / 全 open / 全哨兵） */
-    GC_SELECT_NOT_WORTHWHILE, /* 有候选，但全部被收益判据拒绝 */
-} gc_select_e;
-
-/* 选块出参（即使 NOT_WORTHWHILE 也填 best_valid_pct，供日志归因）。 */
-typedef struct
-{
-    const super_block_t *victim;         /* GC_SELECT_OK 时有效 */
-    WORD                 best_valid_pct; /* 域内最低有效率（0..100），无候选时为 0 */
-    WORD                 scanned;        /* 参与评分的候选数 */
-    WORD                 eligible;       /* 通过收益判据的候选数 */
-} gc_select_out_t;
 
 /*
  * gc_select_victim - 从 closed_sb_list 选择一个 victim Super Block
  *
  * 多维加权评分（设计 §4.3），cost 取小者胜：
  *
- *   cost = GC_WEIGHT_VALID·valid_ratio + GC_WEIGHT_ERASE·erase_ratio
- *        + GC_WEIGHT_TEMP·cold_penalty + GC_WEIGHT_AGE·youth_penalty
+ *   cost = 500·valid_ratio + 200·erase_ratio
+ *        + 200·cold_penalty + 100·youth_penalty
  *
  *   ① valid_ratio   有效 CW 占比（各 plane valid_count 之和 ÷ CW 容量）——核心项
  *   ② erase_ratio   擦除次数占比（本 SB 各 plane 取大 ÷ 全表最大）——避开临近寿命块
@@ -191,7 +167,7 @@ typedef struct
  * ⚠ last_pe_ts **刻意不持久化**：上电后全表为 0 ⇒ 时间项对所有条目
  *   同值（常量偏移，不影响排序）；开机后被 GC 擦过的块才有非零时间戳，于是"本上电
  *   周期内还没被回收过"的块优先——正是公平性语义本身。
- * ⚠ 权重与符号约定的完整说明见 gc.h 的 GC_WEIGHT_* 块注释。
+ * ⚠ 权重与符号约定的完整说明见 gc.c 的内部策略注释。
  * ⚠ cost 相等时取 valid_count 更小者（确定性，且退化为单维贪心）。
  * ⚠ 退化单 plane 条目（掉电重建产物）跳过哨兵 plane；全哨兵条目直接跳过。
  *
@@ -200,8 +176,9 @@ typedef struct
  * 不能「先选 cost 最小、再检查收益」：那样可能因为最差块仍太有效而报无收益，
  * 而其实存在另一个更稀疏的候选。
  *
- *   IDLE      ：valid * 100 > total * GC_VICTIM_MAX_VALID_PCT            ⇒ 跳过
- *   EMERGENCY ：(total - valid) * 100 < total * GC_EMERGENCY_MIN_GAIN_PCT ⇒ 跳过
+ *   IDLE      ：valid 占比 > 80% ⇒ 跳过
+ *   EMERGENCY ：可回收占比 < 1% ⇒ 跳过
+ *   （阈值常量定义在 gc.c，属本仓自拟经验值。）
  *
  * total = st.plane_count * FTL_CW_PER_BLOCK（`alc_super_get_stats` 已排除 BAD/哨兵 plane）。
  * **不要**按 next_page 缩分母：提前关闭的半写块有空洞页，按整块容量算才不会

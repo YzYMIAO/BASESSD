@@ -829,7 +829,7 @@ ftl_status_t allocator_alloc_pair(ftl_allocator_t *alloc, uint8_t temperature,
 void allocator_free_block(ftl_allocator_t *alloc, uint16_t gblock);
 
 /* 运行时标记坏块（已删除：统一走 bbt_mark_bad，BBT 单数据源）*/
-/* 检查是否需要 GC（已删除：GC 触发单一数据源 = ftl/gc.h 的 gc_check_triggers，
+/* 检查是否需要 GC（已删除：GC 触发单一数据源 = ftl/gc.h 的 gc_should_trigger，
  * 唯一求值点 = ftl.c 的 mig_gc_evaluate，v0.63）*/
 ```
 

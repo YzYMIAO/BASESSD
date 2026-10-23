@@ -1196,8 +1196,8 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 | host 入口返回码 | `ftl_submit_read`/`ftl_submit_write` 的 `req`/`req->buffer` | 判据 1 |
 | 资源类结果 | 全部 `fc_command_alloc()` 后的 `cmd == NULL`、`pending_alloc()` 后的 `p == NULL`、`ftl_fc_interface.c` 的 `buf == NULL` | 判据 3 |
 | 介质读回数据 | `journal.c` 的 `count > JOURNAL_ENTRIES_PER_PAGE` | 判据 3 + H29（§六） |
-| 运行时/依赖态 | `l2p_cache.c` 的 `cache->md_dir == NULL \|\| cache->alloc == NULL`（Region 加载中）、`ftl.c` 的 `platform->time_us == NULL`、`gc_check_triggers` 的 `alloc == NULL`（0 无触发） | 判据 3 |
-| **UT 钉住的文档化契约** | `checkpoint_check_trigger(NULL)`/`checkpoint_is_emergency(NULL)`/`gc_check_triggers(NULL)`/`rr_check_predictive(NULL,…)`/`rr_get_health(NULL)`、`bbt.c` 两处 | **判据 4**（`tests/unit/test_ftl.c` 逐条钉住 ⇒ 转 `ASSERT` 会当场打红 UT） |
+| 运行时/依赖态 | `l2p_cache.c` 的 `cache->md_dir == NULL \|\| cache->alloc == NULL`（Region 加载中）、`ftl.c` 的 `platform->time_us == NULL`、`gc_should_trigger` 的 `alloc == NULL`（0 无触发） | 判据 3 |
+| **UT 钉住的文档化契约** | `checkpoint_check_trigger(NULL)`/`checkpoint_is_emergency(NULL)`/`gc_should_trigger(NULL)`/`rr_check_predictive(NULL,…)`/`rr_get_health(NULL)`、`bbt.c` 两处 | **判据 4**（`tests/unit/test_ftl.c` 逐条钉住 ⇒ 转 `ASSERT` 会当场打红 UT） |
 | 可选参数 / 可选出参 | `ftl_op_submit(cmd, op, ctx)` 的 `ctx != NULL`、`l2p_cache_flush_*` 的 `out`、`journal_scan_latest`/`journal_resume` 的 `latest` | §四 可选参数语义、辨析 B |
 | 幂等早退 | `allocator_close_open_sb` 已关闭 → `FTL_ERROR` | §十三 `fc_command_release` 先例 |
 
@@ -1270,7 +1270,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 2. **无文档化 NULL 语义**：12 个访问器的注释**没有一条**写过 NULL；且其默认值**语义上是错的**
    （`get_temp(NULL) → HOT` 读作"没有这个块 ⇒ 是热的"、`state_is(NULL, st) → false` 读作
    "没有这个块 ⇒ 不是这个状态"）。对比判据 4 那 5 个被 UT 钉住的查询函数
-   （`gc_check_triggers(NULL) → 0` = "没有 allocator ⇒ 无触发"），后者的默认值是**连贯的**。
+   （`gc_should_trigger(NULL) → 0` = "没有 allocator ⇒ 无触发"），后者的默认值是**连贯的**。
 3. **调用点普查：全仓零 NULL**（逐条核实 `src/` 11 个 .c + `tests/unit/test_ftl.c`）。
    实参只有两种形态：`&<…>->blocks[<索引>]`，或紧邻使用前赋值的局部/形参（其右值同样是
    `&…blocks[<索引>]`）。**根因**：`ftl_allocator_t.blocks` 由 `ftl_table_refs_t` 绑定到

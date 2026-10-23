@@ -17,9 +17,8 @@
  *
  * 文件结构：
  *   1. 共用原语        gc_read_page_with_lba / gc_decode_cw_lba
- *   2. 全表极值        gc_table_extremes（static）
- *   3. 选 victim       gc_select_victim（四项加权评分）
- *   4. 触发判定        gc_should_trigger
+ *   2. 选 victim       gc_select_victim（四项加权评分）
+ *   3. 触发判定        gc_should_trigger
  *
  * ⚠ 全部按**全局块号**索引 BST（跨 plane），退化单 plane 条目跳过哨兵 plane。
  */
@@ -33,6 +32,19 @@
 #include "onfi_1_0.h"
 
 #include <string.h>
+
+/* ── 内部策略参数（仅 gc.c 使用）──
+ * 权重为**千分比整数**：本仓无 FPU 便利、newlib-nano 无 %f ⇒ 全整数，四项各自
+ * 归一化到 0..1000 后再加权。符号约定：cost 取小 = 越优先回收；
+ * 擦除项取 +erase_ratio（避开临近寿命块）；温度项 HOT 优先当 victim。 */
+#define GC_WEIGHT_VALID (500U) /* 有效页占比（核心指标，直接决定写放大） */
+#define GC_WEIGHT_ERASE (200U) /* 擦除次数占比（磨损均衡，避开临近寿命块） */
+#define GC_WEIGHT_TEMP  (200U) /* 温度（HOT 数据自然死亡快） */
+#define GC_WEIGHT_AGE   (100U) /* 时间（保证每个 Block 都有机会被回收） */
+
+/* 收益判据阈值（本仓自拟经验值）。详见 gc_select_victim 的注释。 */
+#define GC_VICTIM_MAX_VALID_PCT   (80U) /* 空闲补池：valid 占比 > 80% 视为无收益 */
+#define GC_EMERGENCY_MIN_GAIN_PCT (1U)  /* 紧急水位：可回收占比 < 1% 视为无收益 */
 
 /* ── 1. 共用原语 ── */
 
@@ -207,38 +219,7 @@ gc_decode_e gc_decode_cw_lba(fc_command_t *cmd,
     return GC_DECODE_OK;
 }
 
-/* ── 2. 全表极值 ── */
-
-/*
- * gc_table_extremes - 全表（非坏块）磨损/时间极值
- *
- * 两个消费方**各自调用一次**（不共享扫描）：
- *   ① gc_select_victim —— 评分归一化分母（max_erase / max_pe_ts）；
- *   ② gc_select_victim 的评分归一化分母（max_erase）。
- * 求值点由 `mig_gc_evaluate` 的 10 ms 节拍门兜成本；不要为省这一次扫描把
- * 结构体穿过 bg 适配器 / mig_begin_gc 的公开 API（会把策略耦合进引擎）。
- *
- * 统计口径（好块 / 坏块排除）由 allocator 定义；本函数只把退化值折算成 GC 需要的语义：
- *   · 无任何可统计块 ⇒ max_erase 兜底 1，防除零；
- *   · max_erase 兜底 >= 1U，防除零。
- */
-typedef struct
-{
-    DWORD max_erase; /* >= 1U */
-    DWORD max_pe_ts; /* 0 = 本上电周期尚无块被擦 ⇒ 时间项中性 */
-} gc_extremes_t;
-
-static void gc_table_extremes(const alc_t *alloc, gc_extremes_t *out)
-{
-    alc_bst_erase_stats_t st;
-
-    alc_bst_get_erase_stats(alloc, &st);
-
-    out->max_erase = (st.erase_max > 0U) ? st.erase_max : 1U;
-    out->max_pe_ts = st.max_pe_ts;
-}
-
-/* ── 3. 选 victim ── */
+/* ── 2. 选 victim ── */
 
 /* --------------------------------------------------------------------
  * gc_select_victim
@@ -251,7 +232,7 @@ static void gc_table_extremes(const alc_t *alloc, gc_extremes_t *out)
  *             cost 相等取有效页更少者（确定性）。erase 项用 QWORD 防溢出；
  *             age 项 `max_pe_ts > pe_min` 兜住 max_pe_ts==0 与 pe_min 越界两种退化（取中性 0）。
  *   ⚠ **先过滤、后评分**：若先选 cost 最小再判收益，可能出现「最差块仍太有效 ⇒ 报无收益，
- *     而其实还有更稀疏的候选」。过滤条件见 gc.h 的 GC_VICTIM_* 注释。
+ *     而其实还有更稀疏的候选」。过滤条件见本文件的收益判据阈值注释。
  *   ⚠ 分母用 `st.plane_count * FTL_CW_PER_BLOCK`（BAD/哨兵 plane 已被 alc_super_get_stats 排除）；
  *     不能按 next_page 缩分母——半写块的空洞页会让它看起来「100% 有效」而被误跳过。
  * -------------------------------------------------------------------- */
@@ -267,9 +248,14 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
     out->scanned        = 0U;
     out->eligible       = 0U;
 
-    /* 归一化基准：全表最大擦除/时间（一次扫描，与候选数无关）。 */
-    gc_extremes_t ex;
-    gc_table_extremes(alloc, &ex);
+    /* 归一化基准：全表最大擦除/时间（一次扫描，与候选数无关）。
+     * 退化值：无任何可统计块 ⇒ max_erase 兜底 1 防除零；max_pe_ts==0 ⇒ 时间项中性。 */
+    alc_bst_erase_stats_t erase_stats;
+
+    alc_bst_get_erase_stats(alloc, &erase_stats);
+
+    const DWORD max_erase = (erase_stats.erase_max > 0U) ? erase_stats.erase_max : 1U;
+    const DWORD max_pe_ts = erase_stats.max_pe_ts;
 
     DWORD best_cost  = UINT32_MAX;
     WORD  best_valid = (FTL_CW_PER_SB + 1U);
@@ -332,9 +318,9 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
          * ② 本 SB 的 plane 块已被标坏 ⇒ 全表统计跳过它 ⇒ pe_min 可能大于 max_pe_ts
          * （相减会下溢成大数、把 yp 绕回）。两者一律取 age_ratio = 0（时间项中性）。 */
         DWORD vr = (valid_cw * 1000U) / total_cw;
-        DWORD er = (((QWORD)st.erase_max * 1000U) / ex.max_erase);
+        DWORD er = (((QWORD)st.erase_max * 1000U) / max_erase);
         DWORD cp = (sb->temperature == FTL_TEMP_HOT) ? 0U : 1000U;
-        DWORD yp = 1000U - (((ex.max_pe_ts > st.pe_min) ? (((QWORD)(ex.max_pe_ts - st.pe_min) * 1000U) / ex.max_pe_ts) : 0U));
+        DWORD yp = 1000U - (((max_pe_ts > st.pe_min) ? (((QWORD)(max_pe_ts - st.pe_min) * 1000U) / max_pe_ts) : 0U));
 
         DWORD cost = (GC_WEIGHT_VALID * vr) + (GC_WEIGHT_ERASE * er) + (GC_WEIGHT_TEMP * cp) + (GC_WEIGHT_AGE * yp);
 
@@ -358,7 +344,7 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
     return (out->scanned == 0U) ? GC_SELECT_NO_CANDIDATE : GC_SELECT_NOT_WORTHWHILE;
 }
 
-/* ── 4. 触发判定 ── */
+/* ── 3. 触发判定 ── */
 
 /* --------------------------------------------------------------------
  * gc_should_trigger

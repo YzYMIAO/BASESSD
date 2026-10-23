@@ -3443,7 +3443,7 @@ flowchart TD
 
 #### 3.13.6 关键流程
 
-1. 触发求值在 migrate 内部 `mig_gc_evaluate`（`gc_check_triggers`）；`mig_begin_gc`（内部）只
+1. 触发求值在 migrate 内部 `mig_gc_evaluate`（`gc_should_trigger`）；`mig_begin_gc`（内部）只
    `gc_select_victim` → `mig_start(GC, FREE)`。
 2. `MIG_READ`：逐页逐 plane 异步读 victim；完成时解 META 得 `cw_lba`，
    记 `rr_record_ecc` / `read_count`（慢死预测闭环）。**读错误 ⇒ 中止**（该 plane
@@ -3494,7 +3494,7 @@ flowchart TD
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `GC_WEIGHT_VALID/ERASE/TEMP/AGE` | 500/200/200/100 | `include/ftl/gc.h` |
+| `GC_WEIGHT_VALID/ERASE/TEMP/AGE` | 500/200/200/100 | `src/ftl/gc.c` |
 | `GC_TRIGGER_WATERMARK/EMERGENCY` | 0x01/0x08 | 同上 |
 | `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_module.h`（migrate 提交 deadline） |
 | `FTL_WAIT_TIMEOUT_MS` | 50 | 同上（migrate 等 L2P/Journal） |
@@ -4820,7 +4820,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `GC_WEIGHT_VALID/ERASE/TEMP/AGE` | 500/200/200/100 | `include/ftl/gc.h` |
+| `GC_WEIGHT_VALID/ERASE/TEMP/AGE` | 500/200/200/100 | `src/ftl/gc.c` |
 | `GC_TRIGGER_WATERMARK/EMERGENCY` | 0x01/0x08 | 同上 |
 | `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_module.h`（migrate 提交 deadline） |
 | `FTL_WAIT_TIMEOUT_MS` | 50 | 同上（migrate 等 L2P/Journal） |
@@ -4889,7 +4889,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | FC 命令池/描述符池 + 队列（DTCM P1） | ~9 KB + 776 B | DTCM |
 | `g_nand_channel_page_buffer` | 4,224 B | AXI_NOCACHE（DTCM 会破坏 multi-plane program） |
 | BCH 静态表（`s_bch`，含 roots bitmap） | 42,656 B | DTCM |
-| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,616 / 62,072 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
+| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,624 / 62,072 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
 | `.dtcm_data` 合计（release） | 67,832 B | DTCM |
 
 ⚠ `.sram*_data` 是 NOLOAD，启动代码不清零；`ftl_init` 必须显式 memset 五张表与六个 storage 对象
