@@ -239,9 +239,7 @@ static void ftl_format_reset_bad_map(alc_t *alloc, BYTE old_bad[BBT_BITMAP_SIZE]
     {
         const WORD block  = ftl_gblock_block(g);
         const bool is_bad = ftl_block_is_bad(&alloc->blocks[g]);
-        const bool keep   = ((bbt_ring != NULL) && (bbt_ring->block_count >= 2U))
-                                ? md_ring_has_block(bbt_ring, block)
-                                : ((block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS)));
+        const bool keep   = bbt_block_is_candidate(bbt_ring, block);
 
         if (is_bad)
         {
@@ -300,9 +298,7 @@ static ftl_status_e ftl_format_verify_blocks(ftl_ctx_t *ftl)
         /* BBT 候选池保留：本轮坏块图就在里面（候选可能含 shared metadata spare）。 */
         {
             const md_ring_t *bbt_ring = (alloc->pools != NULL) ? &alloc->pools->bbt : NULL;
-            const bool       keep_bbt = ((bbt_ring != NULL) && (bbt_ring->block_count >= 2U))
-                                            ? md_ring_has_block(bbt_ring, block)
-                                            : ((block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS)));
+            const bool       keep_bbt = bbt_block_is_candidate(bbt_ring, block);
 
             if (keep_bbt)
             {

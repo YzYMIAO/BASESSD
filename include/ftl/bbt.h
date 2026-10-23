@@ -306,4 +306,24 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
  */
 ftl_status_e bbt_spare_pool_refill(alc_t *alloc, BYTE plane);
 
+/*
+ * bbt_block_is_candidate - 该物理块是否属于当前 BBT 候选池
+ *
+ * BBT record 的候选池优先来自 `pools->bbt` 的实时候选表（v0.86 起，可能含
+ * shared metadata spare）；ring 未建立或不足 2 块时才退回名义区间
+ * `[BBT_BLOCK, BBT_BLOCK + BBT_POOL_BLOCKS)`。
+ *
+ * 纯函数；格式化/重建路径按块调用，放头文件供 bbt.c 与 PFR 共用，避免三份手写
+ * 条件在后续修改时漂移。
+ */
+static inline bool bbt_block_is_candidate(const md_ring_t *ring, WORD block)
+{
+    if ((ring != NULL) && (ring->block_count >= 2U))
+    {
+        return md_ring_has_block(ring, block);
+    }
+
+    return (block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS));
+}
+
 #endif /* FTL_BBT_H */

@@ -187,6 +187,22 @@ typedef struct
 } alc_t;
 
 /*
+ * BBT 状态谓词
+ *
+ * 纯 getter：不检查值域、不隐藏数组，但跨模块读的是 allocator 的 BBT 子状态，
+ * 按 RISK-ALLOC-03 的判定保留访问器；放头文件 static inline，避免每次调用跨 TU。
+ */
+static inline bool alc_is_bbt_format_in_progress(const alc_t *alloc)
+{
+    return alloc->bbt.format_in_progress;
+}
+
+static inline bool alc_is_bbt_rebuild_required(const alc_t *alloc)
+{
+    return alloc->bbt.rebuild_required;
+}
+
+/*
  * alc_trace_record - 记录一次 host 写/程序失败到飞行记录器（环形覆盖）
  * @param alloc 分配器
  * @param lba   host LBA
@@ -312,9 +328,9 @@ bool alc_spare_refill_from_free(alc_t *alloc, BYTE plane);
  * 避免运行期坏块直接吃用户可用块。
  *
  * @param alloc 分配器；plane 目标 plane
- * @return true = 补到一块并已入 Free；false = OP 池也空
+ * @return 取到的 gblock（已入 Free）；FTL_GBLOCK_INVALID = OP 池也空
  */
-bool alc_refill_free_from_op(alc_t *alloc, BYTE plane);
+WORD alc_refill_free_from_op(alc_t *alloc, BYTE plane);
 
 /* ── 对外接口 ── */
 
@@ -542,44 +558,18 @@ void alc_get_erase_stats(const alc_t *alloc, alc_erase_stats_t *out);
 DWORD alc_free_max_erase(const alc_t *alloc);
 
 /*
- * alc_is_bbt_format_in_progress - BBT 是否处于格式化中
- * 参数：alloc — 分配器。
- * 返回：true = 最新 BBT record 带 FORMAT_IN_PROGRESS。
- */
-bool alc_is_bbt_format_in_progress(const alc_t *alloc);
-
-/*
- * alc_is_bbt_rebuild_required - 下次开机是否需要 full metadata rebuild
- * 参数：alloc — 分配器。
- * 返回：true = 最新 BBT record 带 REBUILD_REQUIRED（Journal/L2P 失块后的兜底）。
- */
-bool alc_is_bbt_rebuild_required(const alc_t *alloc);
-
-/*
  * alc_block_restore_wear - 从 Checkpoint 磨损快照恢复一个块的磨损/ECC 状态
- * 参数：alloc — 分配器；gblock — 全局块号；其余为快照字段。
+ * 参数：alloc — 分配器；gblock — 全局块号；wear — 快照。
  * 返回：无。
  */
-void alc_block_restore_wear(alc_t *alloc,
-                            WORD   gblock,
-                            DWORD  erase_count,
-                            DWORD  read_count,
-                            BYTE   last_ecc,
-                            BYTE   rising_count,
-                            BYTE   health);
+void alc_block_restore_wear(alc_t *alloc, WORD gblock, const bst_wear_t *wear);
 
 /*
- * alc_block_wear_get - 读取一个块的磨损/ECC 快照字段
- * 参数：alloc — 分配器；gblock — 全局块号；其余为出参。
+ * alc_block_wear_get - 读取一个块的磨损/ECC 快照
+ * 参数：alloc — 分配器；gblock — 全局块号；out — 输出快照。
  * 返回：无。
  */
-void alc_block_wear_get(const alc_t *alloc,
-                        WORD         gblock,
-                        DWORD       *erase_count,
-                        DWORD       *read_count,
-                        BYTE        *last_ecc,
-                        BYTE        *rising_count,
-                        BYTE        *health);
+void alc_block_wear_get(const alc_t *alloc, WORD gblock, bst_wear_t *out);
 
 /*
  * alc_get_op_at / alc_get_spare_at - OP / Spare 池元素只读访问

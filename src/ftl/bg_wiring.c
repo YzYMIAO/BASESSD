@@ -19,6 +19,7 @@
 #include "bbt.h"
 #include "checkpoint.h"
 #include "ftl.h"
+#include "ftl_job.h" /* ftl_job_now_ms()：全仓唯一时钟换算 */
 #include "gc.h"
 #include "journal.h"
 #include "l2p_cache.h"
@@ -26,33 +27,12 @@
 #include "metadata.h"
 #include "migrate.h"
 #include "pending.h"
-#include "platform.h"
 #include "read_recovery.h"
 #include "wear_leveling.h" /* WL_EVAL_INTERVAL_MS */
 
 /* 慢死预测巡检节拍：≥1s 才扫一轮（read disturb 是慢变量，频繁全扫无谓开销）。
  * 同时用作调度器 interval_ms 与 mig_handle 的 predict 求值 的内部门。 */
 #define RR_SCAN_INTERVAL_MS (1000U)
-
-/* --------------------------------------------------------------------
- * ftl_now_ms
- *   功能：当前单调毫秒（经平台抽象 time_us 换算）。
- *   参数：无。
- *   返回：毫秒；平台未注册（time_us 缺失）时返回 0。
- *   实现要点：返回 0 的后果按调用者分岔——T3 定时因 elapsed = 0 - start < 阈值恒不
- *             触发；GC 求值的节拍门则因 0 作「尚未求值」哨兵而退化为「每轮求值」
- *             （GC 不能因缺时钟停摆）。
- * -------------------------------------------------------------------- */
-static DWORD ftl_now_ms(void)
-{
-    const ssd_platform_ops_t *platform = ssd_platform_get();
-
-    if ((platform == NULL) || (platform->time_us == NULL))
-    {
-        return 0U;
-    }
-    return (platform->time_us() / 1000U);
-}
 
 /* --------------------------------------------------------------------
  * bg_info
@@ -65,7 +45,7 @@ static bg_info_t bg_info(const ftl_ctx_t *ftl)
 {
     bg_info_t info;
 
-    info.now_ms     = ftl_now_ms();
+    info.now_ms     = ftl_job_now_ms();
     info.load_level = ftl->bg.level;
     return info;
 }
@@ -121,7 +101,7 @@ static cp_trigger_t bg_cp_trigger(const ftl_ctx_t *ftl, cp_reason_e reason, bool
 {
     cp_trigger_t trigger;
 
-    trigger.now_ms            = ftl_now_ms();
+    trigger.now_ms            = ftl_job_now_ms();
     trigger.total_writes      = ftl->total_writes;
     trigger.journal_seq       = jrn_get_sequence(ftl->journal);
     trigger.jrn_get_watermark = jrn_get_watermark(ftl->journal);

@@ -499,9 +499,7 @@ ftl_status_e bbt_format_erase(alc_t *alloc)
     {
         for (WORD block = 0U; block < BLOCKS_PER_PLANE; block++)
         {
-            const bool keep_bbt = ((bbt_ring != NULL) && (bbt_ring->block_count >= 2U))
-                                      ? md_ring_has_block(bbt_ring, block)
-                                      : ((block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS)));
+            const bool keep_bbt = bbt_block_is_candidate(bbt_ring, block);
 
             if (keep_bbt)
             {
@@ -681,10 +679,11 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
     /* 元数据块有两类：固定保留区（< AREA_END），以及**从 OP 借用的 L2P 日志块**
      * （物理块在用户区，但 Directory 的 l2p_live/当前日志块指向它）。后者不能
      * 当数据坏块处理（会错误弹用户 Spare、并漏掉 rebuild 标志）。 */
-    const bool borrowed_log = (alloc->md_dir != NULL) &&
-                              ((alloc->md_dir->l2p_live[gblock] != 0U) ||
-                               (alloc->md_dir->cur_block_valid &&
-                                (alloc->md_dir->cur_metadata_block == gblock)));
+    const bool has_md_dir     = (alloc->md_dir != NULL);
+    const bool is_l2p_live    = has_md_dir && (alloc->md_dir->l2p_live[gblock] != 0U);
+    const bool is_current_log = has_md_dir && alloc->md_dir->cur_block_valid &&
+                                (alloc->md_dir->cur_metadata_block == gblock);
+    const bool borrowed_log = is_l2p_live || is_current_log;
 
     if ((block < FTL_METADATA_AREA_END) || borrowed_log)
     {
@@ -706,7 +705,7 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
     }
     else if (!alloc->bbt.format_in_progress && (bbt_spare_pool_refill(alloc, plane) != FTL_OK))
     {
-        if (!alc_refill_free_from_op(alloc, plane))
+        if (alc_refill_free_from_op(alloc, plane) == FTL_GBLOCK_INVALID)
         {
             /* 限速：保留区双空时每次坏块都打会刷屏；只报第 1/64 次。 */
             if ((s_reserve_low_logged++ % BBT_RESERVE_LOW_LOG_EVERY) == 0U)

@@ -4633,6 +4633,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | v0.83 回收前 Anchor + L2P 降级可见性（`RISK-MD-06` / `RISK-L2P-04`） | **已提交、未专项上板** | 编译三关通过；需按 `known_risks` 的 64-region 复现 / 故障注入；**不得**据“普通读写通过”声称已验证 |
 | v0.94 cache program（host 16 KiB + GC/WL 批次） | **host 正常路径已上板；GC batch/负例未验** | H2testw 415/423 MB 通过，`cw=24906/99624/0 abort`；`mb=0`（GC batch 未触发）；FAILC 负例、失败注入、掉电注入仍见 `known_risks` RISK-CACHE-02..07 |
 | v0.97 DTCM/ITCM 热路径 | **正常路径已上板；压力/掉电未覆盖** | 页缓冲 AXI_NOCACHE 后 `format` + H2testw **840/885 KB/s、415/423 MB 无错误**（`.dtcm_data` 58,952 B、BCH SRAM4）。交换版：BCH 42,656 B→DTCM、`g_ftl_md`→SRAM4，`.dtcm_data`=67,832 B、free≈63 KB；release 额外 ITCM 集使 `.ssd_code_high` 29,728→61,384 B（debug 61,992 B 不变）。2026-10-23 该组合 H2testw **843/887 KB/s、415/423 MB 0 错误**，`bad=0`；相对 840/885 为噪声级，且 `mig=0/0`/`gcm=0` ⇒ 额外 ITCM 集收益未证实（RISK-TCM-05/09） |
+| v0.98 可读性重构 | **未上板** | BBT helper、allocator close/refill 收薄、cache read/write 长函数拆分、`bst_wear_t` 快照、bg 时钟去重；行为目标不变。ITCM release 61,304 B / debug 62,592 B；`make all/release/tests UT=FC` 零新告警；UT=FTL 冻结测试源失败 |
 | `RISK-MIG-02` / `RISK-GC-07` 迁移读失败活锁 | **已修；rev32 上板已观测 3 次标坏** | 改为按 plane 源块累计失败计数、单页读成功不清零；rev32 实机出现 `x3 — mark BAD` 并继续换候选。rev33（固定日志区）未上板 |
 
 > `RISK-WB-06`（wbuf pair 镜像填装）已于 **rev27 上板验证**：Windows FAT 格式化 +
@@ -4888,7 +4889,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | FC 命令池/描述符池 + 队列（DTCM P1） | ~9 KB + 776 B | DTCM |
 | `g_nand_channel_page_buffer` | 4,224 B | AXI_NOCACHE（DTCM 会破坏 multi-plane program） |
 | BCH 静态表（`s_bch`，含 roots bitmap） | 42,656 B | DTCM |
-| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,384 / 61,992 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
+| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,304 / 62,592 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
 | `.dtcm_data` 合计（release） | 67,832 B | DTCM |
 
 ⚠ `.sram*_data` 是 NOLOAD，启动代码不清零；`ftl_init` 必须显式 memset 五张表与六个 storage 对象

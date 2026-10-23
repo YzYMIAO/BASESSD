@@ -45,10 +45,8 @@
 /*
  * ftl_job_now_ms - 当前单调毫秒（经平台抽象 time_us 换算）。平台未注册时返回 0。
  *
- * ⚠ `ftl/bg_wiring.c` 另有一份等价的 ftl_now_ms()（用于 GC 求值/日志节拍、RR 巡检、
- *   CP 定时触发）——同一个平台时钟，只是归属不同模块（那边是**功能**节拍，这里是
- *   **观测**心跳）。两份各自 static / static inline，未合并：合并要把观测心跳的
- *   归属从本头挪走，而本头是各 job 心跳节拍的唯一来源。
+ * 本函数是**全仓唯一**的平台时钟→毫秒换算：job 心跳（观测）与 bg_wiring 的
+ * GC/RR/CP 功能节拍都调用它，避免两份同语义实现漂移。
  */
 static inline DWORD ftl_job_now_ms(void)
 {

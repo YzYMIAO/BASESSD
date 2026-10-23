@@ -33,20 +33,11 @@ void bg_scheduler_init(bg_sched_t *sched, const bg_task_t *table, BYTE count)
     sched->level      = BG_LEVEL_IDLE;
 }
 
-void bg_scheduler_run(bg_sched_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg)
+/* Pass 0：must-run 正确性关键集（不 gate、不占预算）。
+ * 表序即执行序：cp_handle（表首）必须最先——在飞的 CP 要跨轮推进，
+ * 拖到预算 pass 里会被低优先级/预算耗尽饿死。 */
+static void bg_run_must_run(bg_sched_t *sched, ftl_ctx_t *ftl)
 {
-    /* 前置条件（判据 2）：调用者传 &ftl->bg 与自持的 g_bg_level_cfg[] 表项。 */
-
-    const ssd_platform_ops_t *platform = ssd_platform_get();
-    const bool                clock_ok = (platform != NULL) && (platform->time_us != NULL);
-
-    /* 发布本轮配置：任务（如 l2p flush 的条数上界）从这里读，不再各自反查档位表。
-     * 档位（sched->level）由策略层 ftl_bg_service 在同轮先写入，本引擎不改。 */
-    sched->cfg = cfg;
-
-    /* ── Pass 0：must-run 正确性关键集（不 gate、不占预算）──
-     * 表序即执行序：cp_handle（表首）必须最先——在飞的 CP 要跨轮推进，
-     * 拖到预算 pass 里会被低优先级/预算耗尽饿死。 */
     for (BYTE i = 0U; i < sched->task_count; i++)
     {
         if ((sched->tasks[i].func != NULL) && sched->tasks[i].must_run)
@@ -54,8 +45,15 @@ void bg_scheduler_run(bg_sched_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *c
             sched->tasks[i].func(ftl);
         }
     }
+}
 
-    /* ── Pass 1：预算 + interval + 优先级（表按执行序预排序，线性扫）── */
+/* Pass 1：预算 + interval + 优先级（表按执行序预排序，线性扫）。 */
+static void bg_run_budget(bg_sched_t               *sched,
+                          ftl_ctx_t                *ftl,
+                          const bg_level_cfg_t     *cfg,
+                          bool                      clock_ok,
+                          const ssd_platform_ops_t *platform)
+{
     DWORD budget_remaining = cfg->total_budget_us;
 
     for (BYTE i = 0U; i < sched->task_count; i++)
@@ -102,4 +100,19 @@ void bg_scheduler_run(bg_sched_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *c
             break; /* 预算耗尽：截断 */
         }
     }
+}
+
+void bg_scheduler_run(bg_sched_t *sched, ftl_ctx_t *ftl, const bg_level_cfg_t *cfg)
+{
+    /* 前置条件（判据 2）：调用者传 &ftl->bg 与自持的 g_bg_level_cfg[] 表项。 */
+
+    const ssd_platform_ops_t *platform = ssd_platform_get();
+    const bool                clock_ok = (platform != NULL) && (platform->time_us != NULL);
+
+    /* 发布本轮配置：任务（如 l2p flush 的条数上界）从这里读，不再各自反查档位表。
+     * 档位（sched->level）由策略层 ftl_bg_service 在同轮先写入，本引擎不改。 */
+    sched->cfg = cfg;
+
+    bg_run_must_run(sched, ftl);
+    bg_run_budget(sched, ftl, cfg, clock_ok, platform);
 }

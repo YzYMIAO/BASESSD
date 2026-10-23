@@ -54,59 +54,91 @@ static void cache_wb_discard(ftl_ctx_t *ftl, cache_wb_build_t *b)
     ftl->cache_wb.active = false;
 }
 
+/* 分配第 j 个页对；失败时保证调用者按 n_alloc 回退。 */
+static ftl_status_e cache_wb_alloc_pair(ftl_ctx_t *ftl, BYTE j, cache_wb_build_t *b)
+{
+    if (alc_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, b->pba[j]) != FTL_OK)
+    {
+        mig_trigger(ftl->mig_handle, MIGRATE_REASON_GC_URGENT);
+        return FTL_AGAIN;
+    }
+
+    b->n_alloc++;
+    return FTL_OK;
+}
+
+/* 构建第 j 条 cache program 命令；失败时不增加 n_cmd。 */
+static ftl_status_e cache_wb_build_cmd(DWORD lba, const void *buffer, BYTE j, cache_wb_build_t *b)
+{
+    const DWORD           page_lba = lba + ((DWORD)j * FTL_LBA_PER_PAIR);
+    const BYTE           *src      = (const BYTE *)buffer + ((DWORD)j * FTL_LBA_PER_PAIR * FTL_IU_BYTES);
+    const ftl_page_cfg_t *cfg      = FTL_PAGE_CFG_DATA(ftl_lba_page(page_lba));
+
+    const ftl_status_e st = ftl_async_write_pair_cmd(&b->cmds[j],
+                                                     b->pba[j],
+                                                     src,
+                                                     FTL_CACHE_FULL_CW,
+                                                     ftl_cache_prog_op(j, FTL_CACHE_WRITE_MAX_PAGES),
+                                                     cfg);
+
+    if (st != FTL_OK)
+    {
+        return st;
+    }
+
+    b->n_cmd++;
+    return FTL_OK;
+}
+
+/* 登记第 j 条命令的 pending；失败时不增加 n_pending。 */
+static ftl_status_e cache_wb_build_pending(ftl_ctx_t *ftl, WORD gi, DWORD lba, BYTE j, cache_wb_build_t *b)
+{
+    pend_req_t *pending = pend_alloc(&ftl->pending);
+
+    if (pending == NULL)
+    {
+        return FTL_AGAIN;
+    }
+
+    const DWORD page_lba = lba + ((DWORD)j * FTL_LBA_PER_PAIR);
+
+    pending->command_id         = ftl_cmd_id(b->cmds[j]);
+    pending->owners             = ftl_group_bit(gi);
+    pending->op                 = PENDING_OP_WRITE_CACHE;
+    pending->n_cw               = FTL_LBA_PER_PAIR;
+    pending->cw_bitmap          = (BYTE)((1U << FTL_LBA_PER_PAIR) - 1U);
+    pending->lba                = page_lba;
+    pending->buffer             = NULL;
+    pending->new_pba            = b->pba[j][0];
+    pending->new_pba1           = b->pba[j][1];
+    pending->cache_intermediate = (j + 1U < FTL_CACHE_WRITE_MAX_PAGES);
+    pend_validate(pending);
+
+    ftl->cache_wb.pending_idx[j] = (BYTE)(pending - ftl->pending.slots);
+    b->n_pending++;
+    return FTL_OK;
+}
+
 /* 分配 4 个页对、建 4 条命令、登记 4 个 pending（尚未提交）。 */
 static ftl_status_e cache_wb_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const void *buffer, cache_wb_build_t *b)
 {
     for (BYTE j = 0U; j < FTL_CACHE_WRITE_MAX_PAGES; j++)
     {
-        if (alc_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, b->pba[j]) != FTL_OK)
+        ftl_status_e st = cache_wb_alloc_pair(ftl, j, b);
+
+        if (st == FTL_OK)
         {
-            mig_trigger(ftl->mig_handle, MIGRATE_REASON_GC_URGENT);
-            cache_wb_discard(ftl, b);
-            return FTL_AGAIN;
+            st = cache_wb_build_cmd(lba, buffer, j, b);
         }
-        b->n_alloc++;
-
-        const DWORD           page_lba = lba + ((DWORD)j * FTL_LBA_PER_PAIR);
-        const BYTE           *src      = (const BYTE *)buffer + ((DWORD)j * FTL_LBA_PER_PAIR * FTL_IU_BYTES);
-        const ftl_page_cfg_t *cfg      = FTL_PAGE_CFG_DATA(ftl_lba_page(page_lba));
-
-        const ftl_status_e st = ftl_async_write_pair_cmd(&b->cmds[j],
-                                                         b->pba[j],
-                                                         src,
-                                                         FTL_CACHE_FULL_CW,
-                                                         ftl_cache_prog_op(j, FTL_CACHE_WRITE_MAX_PAGES),
-                                                         cfg);
-
+        if (st == FTL_OK)
+        {
+            st = cache_wb_build_pending(ftl, gi, lba, j, b);
+        }
         if (st != FTL_OK)
         {
             cache_wb_discard(ftl, b);
             return st;
         }
-        b->n_cmd++;
-
-        pend_req_t *pending = pend_alloc(&ftl->pending);
-
-        if (pending == NULL)
-        {
-            cache_wb_discard(ftl, b);
-            return FTL_AGAIN;
-        }
-
-        pending->command_id         = ftl_cmd_id(b->cmds[j]);
-        pending->owners             = ftl_group_bit(gi);
-        pending->op                 = PENDING_OP_WRITE_CACHE;
-        pending->n_cw               = FTL_LBA_PER_PAIR;
-        pending->cw_bitmap          = (BYTE)((1U << FTL_LBA_PER_PAIR) - 1U);
-        pending->lba                = page_lba;
-        pending->buffer             = NULL;
-        pending->new_pba            = b->pba[j][0];
-        pending->new_pba1           = b->pba[j][1];
-        pending->cache_intermediate = (j + 1U < FTL_CACHE_WRITE_MAX_PAGES);
-        pend_validate(pending);
-
-        ftl->cache_wb.pending_idx[j] = (BYTE)(pending - ftl->pending.slots);
-        b->n_pending++;
     }
 
     ASSERT(b->n_cmd == FTL_CACHE_WRITE_MAX_PAGES);
@@ -126,10 +158,15 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl,
 
     /* 条件不满足 = 正常回退，不是错误。
      * alc_open_pair_room>=4 已蕴含：SB 开着、所有 plane 的 page0 已成功、剩余 ≥4 页。 */
-    if (ftl->cache_wb.active || (remain < FTL_CACHE_WRITE_LBAS) ||
-        ((lba & (FTL_LBA_PER_PAIR - 1U)) != 0U) || (!wb_is_idle(ftl->wbuf)) ||
-        (alc_open_pair_room(&ftl->alloc, FTL_TEMP_HOT) < FTL_CACHE_WRITE_MAX_PAGES) ||
-        (!ftl_cache_budget_ok(ftl, FTL_CACHE_WRITE_MAX_PAGES)))
+    const bool batch_active = ftl->cache_wb.active;
+    const bool enough_lbas  = (remain >= FTL_CACHE_WRITE_LBAS);
+    const bool lba_aligned  = ((lba & (FTL_LBA_PER_PAIR - 1U)) == 0U);
+    const bool wbuf_idle    = wb_is_idle(ftl->wbuf);
+    const bool room_ok      = (alc_open_pair_room(&ftl->alloc, FTL_TEMP_HOT) >= FTL_CACHE_WRITE_MAX_PAGES);
+    const bool budget_ok    = ftl_cache_budget_ok(ftl, FTL_CACHE_WRITE_MAX_PAGES);
+
+    if (batch_active || (!enough_lbas) || (!lba_aligned) || (!wbuf_idle) ||
+        (!room_ok) || (!budget_ok))
     {
         ftl->cache_wb_declines++;
         return FTL_CACHE_WRITE_DECLINED;

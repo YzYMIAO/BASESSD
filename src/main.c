@@ -200,7 +200,7 @@ static void boot_report_console(void)
  *
  * `.dtcm_data` / `.sram*_data` 都是 **NOLOAD**（启动不清零）⇒ ftl_init 显式 memset。
  * Phase 1.5 的挂载块：wbuf 移 DTCM，migrate/rr 仍在 AXI .bss；ftl_init 统一 memset。
- * DIM=1：`.dtcm_data` 67,832B / ITCM 61,384B（release）、61,992B（debug）；
+ * DIM=1：`.dtcm_data` 67,832B / ITCM 61,304B（release）、62,592B（debug）；
  * BCH 静态表在 DTCM，NAND 页缓冲在 AXI_NOCACHE。release 额外模块按对象路径
  * `release/obj/` 匹配进 ITCM，debug 不匹配（见 linker/stm32h743xx_flash.ld）。
  * 完整容量由 linker ASSERT 核对。栈预留按历史实测 5,448B + 余量取 20KB。

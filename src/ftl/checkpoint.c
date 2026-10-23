@@ -1313,22 +1313,21 @@ void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN
 
         if (g < FTL_BLOCK_TOTAL)
         {
-            DWORD erase_count = 0U;
-            DWORD read_count  = 0U;
-            BYTE  last_ecc    = 0U;
-            BYTE  rising      = 0U;
-            BYTE  health      = 0U;
+            bst_wear_t wear;
 
-            alc_block_wear_get(alloc, g, &erase_count, &read_count, &last_ecc, &rising, &health);
+            alc_block_wear_get(alloc, g, &wear);
+
+            BYTE rising = wear.rr.rising_count;
+            BYTE health = (BYTE)wear.rr.health;
 
             if (rising > CP_WEAR_RISING_MASK)
             {
                 rising = CP_WEAR_RISING_MASK;
             }
 
-            entries[i].erase_count = erase_count;
-            entries[i].read_count  = read_count;
-            entries[i].last_ecc    = last_ecc;
+            entries[i].erase_count = wear.erase_count;
+            entries[i].read_count  = wear.read_count;
+            entries[i].last_ecc    = wear.rr.last_ecc;
             entries[i].flags       = ((rising & CP_WEAR_RISING_MASK) |
                                 ((health & CP_WEAR_HEALTH_MASK) << CP_WEAR_HEALTH_SHIFT));
         }
@@ -1415,13 +1414,16 @@ bool cp_load_wear_table(cp_handle_t       *h,
                     break;
                 }
 
-                alc_block_restore_wear(h->alloc,
-                                       g,
-                                       entries[i].erase_count,
-                                       entries[i].read_count,
-                                       entries[i].last_ecc,
-                                       (BYTE)(entries[i].flags & CP_WEAR_RISING_MASK),
-                                       (BYTE)((entries[i].flags >> CP_WEAR_HEALTH_SHIFT) & CP_WEAR_HEALTH_MASK));
+                bst_wear_t wear;
+
+                wear.erase_count     = entries[i].erase_count;
+                wear.read_count      = entries[i].read_count;
+                wear.rr.last_ecc     = entries[i].last_ecc;
+                wear.rr.rising_count = (BYTE)(entries[i].flags & CP_WEAR_RISING_MASK);
+                wear.rr.health       = (rr_block_health_e)((entries[i].flags >> CP_WEAR_HEALTH_SHIFT) &
+                                                     CP_WEAR_HEALTH_MASK);
+
+                alc_block_restore_wear(h->alloc, g, &wear);
             }
 
             loaded = true;

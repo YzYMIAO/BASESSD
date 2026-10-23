@@ -66,6 +66,15 @@ typedef struct
     rr_block_health_e health;       /* 慢死趋势 */
 } rr_ecc_track_t;                   /* 3B */
 
+/* 磨损/ECC 快照：Checkpoint 的 per-block wear 条目与 BST 之间的搬运单元。
+ * 把原本 5 个同类型/异类型出参收成一个结构体，避免调用点按位置传参写反。 */
+typedef struct
+{
+    DWORD          erase_count; /* 擦除次数 */
+    WORD           read_count;  /* read disturb 计数 */
+    rr_ecc_track_t rr;          /* ECC 健康趋势 */
+} bst_wear_t;
+
 /* ── bst_block_t 状态机（互斥态，枚举而非位图）──
  * 块**位置**同一时刻只能有一个，故用枚举而非位图：
  *   · 枚举保证互斥，非法组合不可表达；

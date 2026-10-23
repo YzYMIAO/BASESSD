@@ -268,13 +268,13 @@ static bool alc_op_try_pop(alc_t *alloc, BYTE plane, WORD *out_gblock)
 }
 
 /*
- * alc_pull_from_op - 从指定 plane 的 OP 池取一块并归还 Free Pool
+ * alc_refill_free_from_op - 从指定 plane 的 OP 池取一块并归还 Free Pool
  * 功能：OP 是 GC 缓冲池，取出的块直接进入 Free Pool。
- * 参数：alloc — 分配器；plane — 目标 plane；out_gblock — 出参。
- * 返回：true 取到；false 该 plane OP 池已空。
+ * 参数：alloc — 分配器；plane — 目标 plane。
+ * 返回：取到的 gblock；FTL_GBLOCK_INVALID = 该 plane OP 池已空。
  * 实现要点：跳过运行时被标坏的块；坏块弹出即丢弃，不回 Free Pool。
  */
-static bool alc_pull_from_op(alc_t *alloc, BYTE plane, WORD *out_gblock)
+WORD alc_refill_free_from_op(alc_t *alloc, BYTE plane)
 {
     WORD gblock;
 
@@ -286,17 +286,9 @@ static bool alc_pull_from_op(alc_t *alloc, BYTE plane, WORD *out_gblock)
         }
 
         alc_free_block(alloc, gblock);
-        *out_gblock = gblock;
-        return true;
+        return gblock;
     }
-    return false;
-}
-
-bool alc_refill_free_from_op(alc_t *alloc, BYTE plane)
-{
-    WORD gblock = FTL_GBLOCK_INVALID;
-
-    return alc_pull_from_op(alloc, plane, &gblock);
+    return FTL_GBLOCK_INVALID;
 }
 
 /*
@@ -355,10 +347,7 @@ static bool alc_open_sb(alc_t *alloc, super_block_t *sb, BYTE temperature, bool 
         gblock[plane] = alc_select_plane_block_from_pool(alloc, plane, high_wear);
         if ((gblock[plane] == FTL_GBLOCK_INVALID) && allow_op)
         {
-            if (!alc_pull_from_op(alloc, plane, &gblock[plane]))
-            {
-                return false;
-            }
+            gblock[plane] = alc_refill_free_from_op(alloc, plane);
         }
         if (gblock[plane] == FTL_GBLOCK_INVALID)
         {
@@ -388,28 +377,31 @@ static bool alc_open_sb(alc_t *alloc, super_block_t *sb, BYTE temperature, bool 
 }
 
 /*
- * alc_closed_sb_append - 把一个 SB 追加进 closed_sb_list
- * 功能：逐 plane 置 CLOSED / 温度 / sb_id；返回列表索引。
- * 参数：alloc — 分配器；sb — 源条目。
- * 返回：新条目在 closed_sb_list 的索引。
- * 实现要点：BAD 是终态——该 plane 在列表副本里改记哨兵，状态不动；
- *           容量 = FTL_BLOCK_TOTAL，满在结构上不可能。
+ * alc_close_sb - Open → Closed：唯一 live setter + 列表追加
+ * 功能：置 live SB 的 is_open=false，并把副本追加进 closed_sb_list。
+ * 参数：alloc — 分配器；sb — 待关闭 SB（live 或重建时的临时条目）。
+ * 返回：新列表索引；FTL_BLOCK_NO_SB = 列表满，条目被拒绝。
+ * 实现要点：live 标志与列表副本必须在同一函数内完成——只改副本会让 Open SB
+ *   继续被分配、或被重复关闭（RISK-ALLOC-01）。调用者必须检查失败码；列表满
+ *   属结构异常，不能静默吞掉。
  */
-static WORD alc_closed_sb_append(alc_t *alloc, const super_block_t *sb)
+static WORD alc_close_sb(alc_t *alloc, super_block_t *sb)
 {
     ASSERT(alloc->closed_sb_count < SUPER_BLOCK_LIST_MAX);
 
-    /* release 兜底：结构上不应满；真满时拒绝写入，避免越界。 */
+    /* release 兜底：结构上不应满；真满时拒绝写入，避免越界。
+     * 此时不改变 live is_open：让调用者看到失败并保留原状态，避免“已关闭但
+     * 未进列表”的不可恢复漏账。 */
     if (alloc->closed_sb_count >= SUPER_BLOCK_LIST_MAX)
     {
         LOGE(LOG_TAG_FTL "closed_sb_list full, entry dropped\r\n");
         return FTL_BLOCK_NO_SB;
     }
 
+    sb->is_open = false;
+
     const WORD    closed_idx = alloc->closed_sb_count;
     super_block_t entry      = *sb;
-
-    entry.is_open = false;
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
@@ -444,21 +436,6 @@ static WORD alc_closed_sb_append(alc_t *alloc, const super_block_t *sb)
     return closed_idx;
 }
 
-/*
- * alc_close_sb - Open → Closed
- * 功能：置 is_open=false 并追加进 closed_sb_list。
- * 参数：alloc — 分配器；sb — Open SB。
- * 返回：无。
- * 实现要点：live SB 的 is_open 必须清掉，否则它会继续被当作 Open SB 分配、
- *   或被重复关闭。列表条目的 is_open 由 alc_closed_sb_append 在副本上统一置 false，
- *   与这里的 live 赋值是两件事——GC/WL 只看列表副本，不看 live 字段。
- */
-static void alc_close_sb(alc_t *alloc, super_block_t *sb)
-{
-    sb->is_open = false;
-    (void)alc_closed_sb_append(alloc, sb);
-}
-
 /* ── 4. 分配与 SB 生命周期 ── */
 
 /* 从 **OP 池**借一块作为动态 L2P 日志块（固定日志区满时的有界溢出）。
@@ -470,10 +447,10 @@ WORD alc_alloc_log_block(alc_t *alloc, BYTE plane)
     ASSERT(alloc != NULL);
     ASSERT(plane < PLANE_NUM);
 
-    WORD gblock = FTL_GBLOCK_INVALID;
+    /* alc_refill_free_from_op 弹出后会把块放进 Free Pool（state FREE）；这里立即再摘出来。 */
+    WORD gblock = alc_refill_free_from_op(alloc, plane);
 
-    /* alc_pull_from_op 弹出后会把块放进 Free Pool（state FREE）；这里立即再摘出来。 */
-    if (!alc_pull_from_op(alloc, plane, &gblock))
+    if (gblock == FTL_GBLOCK_INVALID)
     {
         return FTL_GBLOCK_INVALID;
     }
@@ -489,6 +466,19 @@ WORD alc_alloc_log_block(alc_t *alloc, BYTE plane)
     return gblock;
 }
 
+/* 温度流 → Open SB 槽位。集中温度校验，避免调用点重复三目表达式。 */
+static super_block_t *alc_sb_for(alc_t *alloc, BYTE temperature)
+{
+    ASSERT((temperature == FTL_TEMP_HOT) || (temperature == FTL_TEMP_COLD));
+    return (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+}
+
+static const super_block_t *alc_sb_for_const(const alc_t *alloc, BYTE temperature)
+{
+    ASSERT((temperature == FTL_TEMP_HOT) || (temperature == FTL_TEMP_COLD));
+    return (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+}
+
 /* 实现要点：SB 未开、写满或含已标坏块时先换新 SB；各 plane 取同一页。
  * high_wear 只影响**新开** SB 的选块方向：每 plane 取擦除最多的空闲块（UBI 模型：
  * 冷数据搬到已磨损块）。默认路径（false）保持动态 WL：取擦除最少。
@@ -496,7 +486,7 @@ WORD alc_alloc_log_block(alc_t *alloc, BYTE plane)
  *   `alc_prepare_wl_destination` 摘掉 host 的 cold SB，保证第一次分配是新开。 */
 static ftl_status_e alc_alloc_pair_impl(alc_t *alloc, BYTE temperature, DWORD out[PLANE_NUM], bool high_wear)
 {
-    super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+    super_block_t *sb = alc_sb_for(alloc, temperature);
 
     /* 读恢复 / 擦除失败可能把 Open SB 内的块标 BAD；BAD 终态不能再写。 */
     if (sb->is_open)
@@ -509,7 +499,10 @@ static ftl_status_e alc_alloc_pair_impl(alc_t *alloc, BYTE temperature, DWORD ou
             }
             if (ftl_block_is_bad(&alloc->blocks[ftl_gblock(plane, sb->plane_blocks[plane])]))
             {
-                alc_close_sb(alloc, sb);
+                if (alc_close_sb(alloc, sb) == FTL_BLOCK_NO_SB)
+                {
+                    return FTL_ERROR;
+                }
                 break;
             }
         }
@@ -519,7 +512,10 @@ static ftl_status_e alc_alloc_pair_impl(alc_t *alloc, BYTE temperature, DWORD ou
     {
         if (sb->is_open)
         {
-            alc_close_sb(alloc, sb);
+            if (alc_close_sb(alloc, sb) == FTL_BLOCK_NO_SB)
+            {
+                return FTL_ERROR;
+            }
         }
         /* high_wear 只影响**新开** SB 的选块方向；已打开的 SB 继续追加（同一 job 内
          * 连续写页）。high_wear 不允许 OP 兜底：OP 块擦除次数不受本策略控制。 */
@@ -549,9 +545,7 @@ ftl_status_e alc_alloc_pair(alc_t *alloc, BYTE temperature, DWORD out[PLANE_NUM]
 
 void alc_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD pba)
 {
-    ASSERT((temperature == FTL_TEMP_HOT) || (temperature == FTL_TEMP_COLD));
-
-    super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+    super_block_t *sb = alc_sb_for(alloc, temperature);
 
     if ((!sb->is_open) || (pba == NAND_PBA_INVALID) || (pba_to_page(pba) != 0U))
     {
@@ -586,9 +580,7 @@ static bool alc_pba_matches_sb(const super_block_t *sb, DWORD pba)
 
 bool alc_page0_programmed(const alc_t *alloc, BYTE temperature, DWORD pba)
 {
-    ASSERT((temperature == FTL_TEMP_HOT) || (temperature == FTL_TEMP_COLD));
-
-    const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+    const super_block_t *sb = alc_sb_for_const(alloc, temperature);
 
     if (!alc_pba_matches_sb(sb, pba))
     {
@@ -600,18 +592,14 @@ bool alc_page0_programmed(const alc_t *alloc, BYTE temperature, DWORD pba)
 
 bool alc_pba_belongs_to_open_sb(const alc_t *alloc, BYTE temperature, DWORD pba)
 {
-    ASSERT((temperature == FTL_TEMP_HOT) || (temperature == FTL_TEMP_COLD));
-
-    const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+    const super_block_t *sb = alc_sb_for_const(alloc, temperature);
 
     return alc_pba_matches_sb(sb, pba);
 }
 
 BYTE alc_open_pair_room(const alc_t *alloc, BYTE temperature)
 {
-    ASSERT((temperature == FTL_TEMP_HOT) || (temperature == FTL_TEMP_COLD));
-
-    const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+    const super_block_t *sb = alc_sb_for_const(alloc, temperature);
 
     if ((!sb->is_open) || (sb->next_page >= PAGES_PER_BLOCK))
     {
@@ -675,7 +663,9 @@ void alc_prepare_wl_destination(alc_t *alloc)
         return;
     }
 
-    alc_close_sb(alloc, sb);
+    /* 返回 void 的既有接口：列表满属结构异常，debug 由 alc_close_sb 的 ASSERT 抓；
+     * release 下拒绝写入并打 LOG。此处没有可上抛的返回码。 */
+    (void)alc_close_sb(alloc, sb);
 }
 
 /* Free Pool 中「各 plane 最大擦除次数」的最小值（UBI 的 e2，按 plane 取限制侧）。
@@ -726,7 +716,7 @@ DWORD alc_free_max_erase(const alc_t *alloc)
  * 归还后若 SB 恰是刚开的，next_page == 0 是合法态（等价于「刚开、未写」）。 */
 void alc_rewind_pair(alc_t *alloc, BYTE temperature)
 {
-    super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+    super_block_t *sb = alc_sb_for(alloc, temperature);
 
     ASSERT(sb->is_open);
     ASSERT(sb->next_page > 0U);
@@ -737,15 +727,14 @@ void alc_rewind_pair(alc_t *alloc, BYTE temperature)
 /* 实现要点：已关闭的槽再关一次是合法 no-op ⇒ 返回 FTL_ERROR，不转 ASSERT。 */
 ftl_status_e alc_close_open_sb(alc_t *alloc, BYTE temperature)
 {
-    super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+    super_block_t *sb = alc_sb_for(alloc, temperature);
 
     if (!sb->is_open)
     {
         return FTL_ERROR;
     }
 
-    alc_close_sb(alloc, sb);
-    return FTL_OK;
+    return (alc_close_sb(alloc, sb) == FTL_BLOCK_NO_SB) ? FTL_ERROR : FTL_OK;
 }
 
 /* 实现要点：重建按单个物理块建条目，另一 plane 记哨兵；next_page 记满。 */
@@ -765,7 +754,7 @@ WORD alc_add_closed_sb(alc_t     *alloc,
         sb.plane_blocks[plane] = plane_blocks[plane];
     }
 
-    return alc_closed_sb_append(alloc, &sb);
+    return alc_close_sb(alloc, &sb);
 }
 
 /* 实现要点：swap-remove；末位条目搬家后修正其各 plane 的 sb_id。
@@ -952,37 +941,15 @@ void alc_get_erase_stats(const alc_t *alloc, alc_erase_stats_t *out)
     out->good_count = n;
 }
 
-bool alc_is_bbt_format_in_progress(const alc_t *alloc)
+void alc_block_wear_get(const alc_t *alloc, WORD gblock, bst_wear_t *out)
 {
-    return alloc->bbt.format_in_progress;
-}
-
-bool alc_is_bbt_rebuild_required(const alc_t *alloc)
-{
-    return alloc->bbt.rebuild_required;
-}
-
-void alc_block_wear_get(const alc_t *alloc,
-                        WORD         gblock,
-                        DWORD       *erase_count,
-                        DWORD       *read_count,
-                        BYTE        *last_ecc,
-                        BYTE        *rising_count,
-                        BYTE        *health)
-{
-    ASSERT(erase_count != NULL);
-    ASSERT(read_count != NULL);
-    ASSERT(last_ecc != NULL);
-    ASSERT(rising_count != NULL);
-    ASSERT(health != NULL);
+    ASSERT(out != NULL);
 
     const bst_block_t *blk = &alloc->blocks[gblock];
 
-    *erase_count  = blk->erase_count;
-    *read_count   = blk->read_count;
-    *last_ecc     = blk->rr.last_ecc;
-    *rising_count = blk->rr.rising_count;
-    *health       = blk->rr.health;
+    out->erase_count = blk->erase_count;
+    out->read_count  = blk->read_count;
+    out->rr          = blk->rr;
 }
 
 WORD alc_get_op_at(const alc_t *alloc, BYTE plane, WORD index)
@@ -1001,21 +968,15 @@ WORD alc_get_spare_at(const alc_t *alloc, BYTE plane, WORD index)
     return alloc->spare_blocks[plane][index];
 }
 
-void alc_block_restore_wear(alc_t *alloc,
-                            WORD   gblock,
-                            DWORD  erase_count,
-                            DWORD  read_count,
-                            BYTE   last_ecc,
-                            BYTE   rising_count,
-                            BYTE   health)
+void alc_block_restore_wear(alc_t *alloc, WORD gblock, const bst_wear_t *wear)
 {
+    ASSERT(wear != NULL);
+
     bst_block_t *blk = &alloc->blocks[gblock];
 
-    blk->erase_count     = erase_count;
-    blk->read_count      = read_count;
-    blk->rr.last_ecc     = last_ecc;
-    blk->rr.rising_count = rising_count;
-    blk->rr.health       = health;
+    blk->erase_count = wear->erase_count;
+    blk->read_count  = wear->read_count;
+    blk->rr          = wear->rr;
 }
 
 /* 实现要点：比较全部 plane——不同 SB 的哨兵 plane 可能相同，只比一个会误中。 */
