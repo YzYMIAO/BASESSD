@@ -87,7 +87,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
 
     /* 资源次序：先查 pending 表余量（不占资源），再取页对；命令/desc/buffer 由
      * ftl_async_write_pair_cmd() 在页对之后分配。取不到页对时无资源占用；页对之后的
-     * 任何失败都由统一错误出口 alc_rewind_pair 归还（否则页对凭空蒸发，
+     * 任何失败都由统一错误出口 alc_super_open_rewind_pair 归还（否则页对凭空蒸发，
      * 表现为容量无声流失，见 CLAUDE.md §3.1）。 */
     if (pend_get_count(h->pending) >= FTL_PENDING_MAX)
     {
@@ -101,7 +101,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
      *   这里**只登记**原因，由 must-run 的 mig_handle 下一轮启动。 */
     DWORD pba[PLANE_NUM];
 
-    if (alc_alloc_pair(h->alloc, FTL_TEMP_HOT, pba) != FTL_OK)
+    if (alc_super_open_alloc_pair(h->alloc, ALC_SUPER_ALLOC_HOT, pba) != FTL_OK)
     {
         mig_trigger(h->migrate, MIGRATE_REASON_GC_URGENT);
         return FTL_AGAIN;
@@ -112,9 +112,9 @@ static ftl_status_e wb_flush(wb_handle_t *h)
     {
         if (bit_mask_any(h->occupied, ftl_cw_plane_mask(p)) &&
             (pba_to_page(pba[p]) > 0U) &&
-            (!alc_page0_programmed(h->alloc, FTL_TEMP_HOT, pba[p])))
+            (alc_super_open_get_pba_state(h->alloc, FTL_TEMP_HOT, pba[p]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
         {
-            alc_rewind_pair(h->alloc, FTL_TEMP_HOT);
+            alc_super_open_rewind_pair(h->alloc, FTL_TEMP_HOT);
             return FTL_AGAIN;
         }
     }
@@ -211,7 +211,7 @@ wbuf_flush_fail:
     {
         (void)fc_command_release(cmd);
     }
-    alc_rewind_pair(h->alloc, FTL_TEMP_HOT);
+    alc_super_open_rewind_pair(h->alloc, FTL_TEMP_HOT);
     return ret;
 }
 

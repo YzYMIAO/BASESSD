@@ -6106,8 +6106,9 @@ H2testw 415/423 MB **840/885 KB/s、0 错误**（基线 843/889）；`info avg=4
 - BBT 候选池判断去重：新增 `bbt_block_is_candidate()`，`bbt.c` 与
   `power_failure_recovery.c` 三处手写表达式统一；`borrowed_log` 拆具名 bool。
 - allocator 收薄：`alc_refill_free_from_op` 合并为返回 gblock 的单一函数；
-  `alc_close_sb` 与列表追加合并为唯一 live setter，并上抛 `FTL_BLOCK_NO_SB`；
-  温度→SB 槽位抽 `alc_sb_for()` / `alc_sb_for_const()`。
+  `alc_close_sb` 与列表追加合并为唯一 live setter，并上抛 `FTL_BLOCK_NO_SB`。
+  分配策略收敛为 `alc_alloc_mode_e`（HOT / COLD / COLD_HIGH_WEAR），删除
+  `alc_alloc_pair_impl` 与 `alc_alloc_pair_high_wear`。
 - 磨损快照：新增 `bst_wear_t`，`alc_block_wear_get/restore_wear` 由 7 参数收为 3 参数。
 - `alc_is_bbt_format_in_progress/rebuild_required` 移到 `allocator.h` `static inline`。
 - cache 可读性：`ftl_cache_write_try` 条件拆具名 bool；`cache_read.c` 拆
@@ -6120,8 +6121,30 @@ H2testw 415/423 MB **840/885 KB/s、0 错误**（基线 843/889）；`info avg=4
 
 **验证**：`make all` / `make release` / `make tests UT=FC` 通过，零新告警；
 `make tests UT=FTL` 仍因冻结测试源不可用（未改测试、未回退生产代码）。
-ITCM：release **61,352 B**、debug **62,080 B**；`.dtcm_data` 67,832 B、
+ITCM：release **61,296 B**、debug **62,064 B**；`.dtcm_data` 67,832 B、
 `.sram4_data` 33,760 B 不变。**未上板**；需 `format` + H2testw 回归。
+
+**介质布局**：无变化。
+
+---
+
+## v0.99 — allocator 命名统一（未上板）
+
+**日期**：2026-10-24
+
+**内容**：
+- 函数名统一为 `alc_<resource>[_<state>]_<action>[_<detail>]`：
+  `free` / `op` / `spare` / `super` / `bst` / `bbt` / `pool`；
+  `super` 状态用 `open` / `closed`。
+- 删除旧名混用：`alc_free_block`、`alc_remove_from_free`、`alc_alloc_pair`、
+  `alc_close_open_sb`、`alc_get_sb_stats`、`alc_block_wear_get` 等改为资源前缀。
+- 公开枚举/类型同步：`alc_super_alloc_mode_e`、`alc_super_pba_state_e`、
+  `alc_super_stats_t`、`alc_bst_erase_stats_t`。
+- `allocator.h` 的 pointer-to-array 字段改为数组 typedef，避免
+  `WORD(*op_blocks)` 被 clang-format 拆行。
+
+**验证**：`make all` / `make release` / `make tests UT=FC` 通过，零新告警；
+`UT=FTL` 仍因冻结测试源失败。**未上板**；纯命名/声明整理，不改行为。
 
 **介质布局**：无变化。
 

@@ -1170,7 +1170,7 @@ cp_media_status_e cp_probe_media_status(cp_handle_t *h, DWORD *out_layout_versio
 
     /* BBT 最新 record 带 FORMAT_IN_PROGRESS ⇒ 上次格式化在擦除中途掉电：
      * 继续格式化（BBT 坏块图已在擦用户块之前落盘）。 */
-    if (alc_is_bbt_format_in_progress(h->alloc))
+    if (alc_bbt_is_format_in_progress(h->alloc))
     {
         return CP_MEDIA_NO_RECORD;
     }
@@ -1266,9 +1266,9 @@ void cp_block_snapshot(const alc_t          *alloc,
 
     for (BYTE p = 0U; p < PLANE_NUM; p++)
     {
-        for (WORD i = 0U; i < alc_get_op_count(alloc, p); i++)
+        for (WORD i = 0U; i < alc_op_get_count(alloc, p); i++)
         {
-            const WORD g = alc_get_op_at(alloc, p, i);
+            const WORD g = alc_op_get_at(alloc, p, i);
 
             if (!ftl_block_is_bad(&alloc->blocks[g]))
             {
@@ -1276,9 +1276,9 @@ void cp_block_snapshot(const alc_t          *alloc,
                             (CP_BLOCK_POOL_OP << CP_BLOCK_WORD_POOL_SHIFT));
             }
         }
-        for (WORD i = 0U; i < alc_get_spare_count(alloc, p); i++)
+        for (WORD i = 0U; i < alc_spare_get_count(alloc, p); i++)
         {
-            const WORD g = alc_get_spare_at(alloc, p, i);
+            const WORD g = alc_spare_get_at(alloc, p, i);
 
             if (!ftl_block_is_bad(&alloc->blocks[g]))
             {
@@ -1310,7 +1310,7 @@ void cp_wear_page_build(const alc_t *alloc, WORD page_index, BYTE page[PAGE_MAIN
         {
             bst_wear_t wear;
 
-            alc_block_wear_get(alloc, g, &wear);
+            alc_bst_get_wear(alloc, g, &wear);
 
             BYTE rising = wear.rr.rising_count;
             BYTE health = (BYTE)wear.rr.health;
@@ -1418,7 +1418,7 @@ bool cp_load_wear_table(cp_handle_t       *h,
                 wear.rr.health       = (rr_block_health_e)((entries[i].flags >> CP_WEAR_HEALTH_SHIFT) &
                                                      CP_WEAR_HEALTH_MASK);
 
-                alc_block_restore_wear(h->alloc, g, &wear);
+                alc_bst_set_wear(h->alloc, g, &wear);
             }
 
             loaded = true;

@@ -200,7 +200,7 @@ static void boot_report_console(void)
  *
  * `.dtcm_data` / `.sram*_data` 都是 **NOLOAD**（启动不清零）⇒ ftl_init 显式 memset。
  * Phase 1.5 的挂载块：wbuf 移 DTCM，migrate/rr 仍在 AXI .bss；ftl_init 统一 memset。
- * DIM=1：`.dtcm_data` 67,832B / ITCM 61,352B（release）、62,080B（debug）；
+ * DIM=1：`.dtcm_data` 67,832B / ITCM 61,296B（release）、62,064B（debug）；
  * BCH 静态表在 DTCM，NAND 页缓冲在 AXI_NOCACHE。release 额外模块按对象路径
  * `release/obj/` 匹配进 ITCM，debug 不匹配（见 linker/stm32h743xx_flash.ld）。
  * 完整容量由 linker ASSERT 核对。栈预留按历史实测 5,448B + 余量取 20KB。
@@ -415,8 +415,8 @@ static ftl_status_e ssd_ftl_boot(BYTE ch, BYTE ce, BYTE lun)
          ce,
          lun,
          (unsigned)alloc->free_count,
-         (unsigned)alc_get_op_total(alloc),
-         (unsigned)alc_get_spare_total(alloc));
+         (unsigned)alc_pool_sum_counts(alloc->op_count, PLANE_NUM),
+         (unsigned)alc_pool_sum_counts(alloc->spare_count, PLANE_NUM));
 
     LOGI("[FTL ] boot type=%d cp_seq=%lu journal_entries=%lu bit=%s\r\n",
          (int)result.boot_type,

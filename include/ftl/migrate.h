@@ -27,7 +27,7 @@
  *   · READ_SETTLE 纯计算：逐 CW 反查 L2P 得 cw_bitmap。**先就绪前置**——
  *           region 未驻留会起异步加载并**原地等待**，全部就绪才动 bitmap；否则半途而废
  *           会让 bitmap 一半有一半没有（重试时又从头 `|=`，语义静默错乱）。
- *   · WRITE 本页各 plane 都读完且有有效 CW ⇒ alc_alloc_pair 拿目标页，逐 plane
+ *   · WRITE 本页各 plane 都读完且有有效 CW ⇒ alc_super_open_alloc_pair 拿目标页，逐 plane
  *           提交 CW 子集写。**任一写完成错误 ⇒ 中止 job（victim 不擦）**，绝不继续擦。
  *   · WRITE_SETTLE 纯计算：逐 CW **重查 L2P**（host 写/TRIM 可能已抢先），仍指向
  *           源 CW 才 jrn_append → l2p_write → 有效计数迁移。
@@ -35,13 +35,13 @@
  *   · FLUSH_JRN 等 Journal job 空闲，并检查 `write_fail_pending`
  *           （**F10 契约**：搬移条目先落盘再擦 victim；页写失败 ⇒ 条目已丢，
  *           pending 会阻止擦除，直到 Checkpoint 把 L2P 落盘）。
- *   · ERASE 逐 plane 异步擦：成功走 `alc_note_erase`（erase_count / last_pe_ts /
+ *   · ERASE 逐 plane 异步擦：成功走 `alc_bst_note_erase`（erase_count / last_pe_ts /
  *           清 valid），然后按 `post` 二选一——`MIG_POST_FREE` 归还 Free Pool（入池，
  *           GC 与静态 WL 用），`MIG_POST_RETIRE` **不入池** + `rr_retire_block` 退役
  *           （慢死预测用，见 allocator.h 不变量②）；
  *           失败（且尚未 BAD）`bbt_mark_bad`，并置 `erase_failed`：该 SB 不计入
  *           `gc_reclaimed_count`、不打印 predict 退役日志。
- *   · DONE  alc_find_closed_sb + alc_remove_closed_sb + 进展计数
+ *   · DONE  alc_super_closed_find + alc_super_closed_remove + 进展计数
  *           （gc_reclaimed_count）/ 预测命中日志。
  *
  * ── 中止语义（数据安全约束）──
@@ -224,7 +224,7 @@ typedef struct mig_handle
     DWORD base[PLANE_NUM];           /* 本页各 plane 的页基址（CW0 的扇区 LBA） */
     DWORD cw_lba[PLANE_NUM][CW_NUM]; /* 本页逐 CW 的扇区 LBA（未写过 = FTL_LBA_INVALID） */
     DWORD src[PLANE_NUM];            /* 本页各 plane 的源 PBA */
-    DWORD dst[PLANE_NUM];            /* 本页各 plane 的目标 PBA（alc_alloc_pair 出参） */
+    DWORD dst[PLANE_NUM];            /* 本页各 plane 的目标 PBA（alc_super_open_alloc_pair 出参） */
 
     /* ⚠ 源块的全局块号（BST 索引）**不缓存**在 job 里：真值是 victim.plane_blocks[plane]，
      *   快路径（valid_total == 0 ⇒ 直接 ERASE）不经过 READ 阶段，缓存的字段在快路径下
@@ -264,7 +264,7 @@ typedef struct mig_handle
     DWORD wl_last_writes; /* 上次 WL 求值时的 *total_writes 快照：两次求值间有增长 ⇒ host 在写，WL 让路 */
     DWORD predict_last_ms;
     /* 静态 WL 的目标块方向（RISK-WL-08）：true ⇒ 目的页对取**擦除最多**的空闲块
-     * （`alc_alloc_pair_high_wear`），把冷数据搬到已磨损块。GC / predict 恒 false。 */
+     * （`alc_super_open_alloc_pair(..., ALC_SUPER_ALLOC_COLD_HIGH_WEAR)`），把冷数据搬到已磨损块。GC / predict 恒 false。 */
     bool dst_high_wear;
 
     /* ── GC 收益判据（RISK-GC-13/14）──

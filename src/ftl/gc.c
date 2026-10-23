@@ -230,9 +230,9 @@ typedef struct
 
 static void gc_table_extremes(const alc_t *alloc, gc_extremes_t *out)
 {
-    alc_erase_stats_t st;
+    alc_bst_erase_stats_t st;
 
-    alc_get_erase_stats(alloc, &st);
+    alc_bst_get_erase_stats(alloc, &st);
 
     out->max_erase = (st.erase_max > 0U) ? st.erase_max : 1U;
     out->max_pe_ts = st.max_pe_ts;
@@ -252,7 +252,7 @@ static void gc_table_extremes(const alc_t *alloc, gc_extremes_t *out)
  *             age 项 `max_pe_ts > pe_min` 兜住 max_pe_ts==0 与 pe_min 越界两种退化（取中性 0）。
  *   ⚠ **先过滤、后评分**：若先选 cost 最小再判收益，可能出现「最差块仍太有效 ⇒ 报无收益，
  *     而其实还有更稀疏的候选」。过滤条件见 gc.h 的 GC_VICTIM_* 注释。
- *   ⚠ 分母用 `st.plane_count * FTL_CW_PER_BLOCK`（BAD/哨兵 plane 已被 alc_get_sb_stats 排除）；
+ *   ⚠ 分母用 `st.plane_count * FTL_CW_PER_BLOCK`（BAD/哨兵 plane 已被 alc_super_get_stats 排除）；
  *     不能按 next_page 缩分母——半写块的空洞页会让它看起来「100% 有效」而被误跳过。
  * -------------------------------------------------------------------- */
 gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_select_out_t *out)
@@ -278,7 +278,7 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
 
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
-        const super_block_t *sb = alc_closed_at(alloc, i);
+        const super_block_t *sb = alc_super_closed_get_at(alloc, i);
 
         if (sb->is_open)
         {
@@ -287,8 +287,8 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
 
         /* 各 plane 的聚合值（有效 CW / 磨损 / 时间）由 allocator 统一计算：
          * 有效 CW = 各 plane valid_count 之和（CW 级真实计数）；退化单 plane 条目跳过哨兵 plane。 */
-        alc_sb_stats_t st;
-        alc_get_sb_stats(alloc, sb, &st);
+        alc_super_stats_t st;
+        alc_super_get_stats(alloc, sb, &st);
         if (st.plane_count == 0U)
         {
             continue; /* 全哨兵条目 */

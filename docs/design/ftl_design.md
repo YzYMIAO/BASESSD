@@ -271,7 +271,7 @@ flowchart TB
         R3 -- "miss LOADING" --> R5["起 region load FTL_AGAIN,下轮重试"]
         R3 -- "未映射" --> R6["零填充"]
         D1 -- "写" --> W1["wb_append S3-11"]
-        W1 --> W2["wb_flush alc_alloc_pair S3-2"]
+        W1 --> W2["wb_flush alc_super_open_alloc_pair S3-2"]
     end
 
     subgraph "命令与完成"
@@ -1341,9 +1341,9 @@ NAND 的写必须落在**已擦除**的页上，而擦除以块为单位。FTL �
 
 **不变量**（`include/ftl/allocator.h` 文件头）：
 
-1. **四本账各有唯一闸门**：Free 只走 `alc_free_block` / `alc_remove_from_free`；
-   OP/Spare 只走 `allocator_*_try_push/pop`；Closed 只走 `alc_add_closed_sb` /
-   `alc_remove_closed_sb`。外部模块不裸写数组，读走访问器。
+1. **四本账各有唯一闸门**：Free 只走 `alc_free_push` / `alc_free_remove`；
+   OP 只走 `alc_op_push`（出池由 `alc_free_refill_from_op` 内部完成）；Spare 只走 `alc_spare_push/pop`；Closed 只走 `alc_super_closed_add` /
+   `alc_super_closed_remove`。外部模块不裸写数组，读走访问器。
 2. **`state == FREE` ⟺ 在 Free Pool 里**。入池置 FREE；出池只校验、不赋态，新态由转移
    归属者紧随其后赋值。**BAD 永不进池**（入池闸门 debug ASSERT + release 拒绝）。
 3. **`closed_sb_list` 是 swap-remove 活列表**：借出的指针不跨调用有效；跨调用按值拷贝
@@ -1365,7 +1365,7 @@ flowchart TD
     BAD["BAD 坏块"]
     START -- "固定元数据 OP Spare" --> NONE
     START -- "建池 擦除归还" --> FREE
-    FREE -- "alc_alloc_pair" --> OPEN
+    FREE -- "alc_super_open_alloc_pair" --> OPEN
     OPEN -- "64 页写满" --> CLOSED
     CLOSED -- "GC / 静态 WL 搬移 擦除 归还" --> FREE
     CLOSED -- "慢死预测 出池 不标坏" --> RETIRED
@@ -1378,14 +1378,14 @@ flowchart TD
 
 #### 3.2.5 关键流程
 
-1. **分配一页**（`alc_alloc_pair`）：
-   - 取对应温度的 Open SB；写满 → `alc_close_open_sb` → Closed 列表；
+1. **分配一页**（`alc_super_open_alloc_pair`）：
+   - 取对应温度的 Open SB；写满 → `alc_super_close` → Closed 列表；
    - 从 Free Pool 逐 plane 独立选擦除次数最少的块（Policy B，不要求同号）；
    - 填 `out[plane]` 为当前页 PBA，`next_page++`；
    - Free Pool 空 → `FTL_AGAIN`（写路径触发紧急 GC 后重试）。
 2. **关闭 SB**：`is_open=false` → 加入 Closed 列表；各 plane 块状态 CLOSED + `sb_id`。
-3. **归还**：搬移擦除成功后 `alc_free_block` 入池并置 FREE；退役走
-   `alc_remove_from_free` + RETIRED，**不得**先入池。
+3. **归还**：搬移擦除成功后 `alc_free_push` 入池并置 FREE；退役走
+   `alc_free_remove` + RETIRED，**不得**先入池。
 4. **日志块**：`md_log_alloc` 从**固定 L2P 日志区**（`[46,94)/plane`）取一块已擦净的
    空闲块（置 LOG）；擦除完成后 `md_log_release` 置 NONE，**不回 Free Pool**
    （`RISK-MD-07` / `RISK-CAP-02`）。
@@ -1458,7 +1458,7 @@ spare[0] 变成 FTL 自己的数据；此时重扫会把所有写过的块（含
 
 1. **出厂扫描只在空片执行**：`bbt_medium_has_ftl_data()` 命中 ⇒ 拒绝扫描 + LOGE。
 2. **先读后擦**：出厂标记必须在任何 PROGRAM/ERASE 之前读。
-3. **标坏先出池、再置 BAD**：`alc_remove_from_free` 的断言要求块此刻仍是 FREE。
+3. **标坏先出池、再置 BAD**：`alc_free_remove` 的断言要求块此刻仍是 FREE。
 4. **RAM 只信 BST**：`bbt_is_bad()` 只用于读持久化位图；运行时判定一律 `ftl_block_is_bad()`。
 5. **候选池（v11）**：BBT 名义块 + shared metadata spare（78..81）中、在 plane_mask 所有
    plane 上都非 BAD 的块组成候选表；自举期间直接扫描「名义块 + 全部 spare」，record 靠
@@ -1482,7 +1482,7 @@ flowchart TD
     REJECT --> RUN
     SAVE --> RUN
     RUN --> MARK["PROGRAM ERASE 失败 或 RR 耗尽"]
-    MARK --> EXPEL["alc_remove_from_free"]
+    MARK --> EXPEL["alc_free_remove"]
     EXPEL --> BAD["BST 置 BAD bbt-dirty 为 1"]
     BAD --> KICK["bbt_handle 异步写回"]
 ```
@@ -1565,7 +1565,7 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
   不再有独立 Wear 块。
 - **wear_leveling.c**：静态 WL 的触发判定与 victim 选择；搬移交给 `migrate.c`。
 - **不做**：不执行擦除/搬移；不决定 GC（`gc.c`）；不维护 BST（`allocator.h`）。
-- **动态 WL** 不在本模块：它是 `alc_select_plane_block_from_pool` 的选块策略
+- **动态 WL** 不在本模块：它是 `alc_free_find_block` 的选块策略
   （选擦除最少者）。
 
 #### 3.4.3 结构与不变量
@@ -1584,8 +1584,8 @@ BST 里的 `erase_count` / `read_count` / `rr` 是**纯 RAM**，`ftl_init` 的 m
 3. **WL 只选 Closed 块**：跳过 Open / 含坏 plane 的 SB；有效 CW ≥ 70%；
    按**平均擦除次数最少**（最冷）优先，同擦除次数下 valid_cw 多、read_count 高优先。
 4. **目标方向固定**：静态 WL 的目的页对取 **Free Pool 中擦除次数最多**的块
-   （`alc_alloc_pair_high_wear`），且不允许 OP 兜底；启动前沿
-   `alc_prepare_wl_destination` 摘掉当前 cold SB，保证第一页新开 high-wear SB。
+   （`alc_super_open_alloc_pair(..., ALC_SUPER_ALLOC_COLD_HIGH_WEAR)`），且不允许 OP 兜底；启动前沿
+   `alc_super_prepare_wl_destination` 摘掉当前 cold SB，保证第一页新开 high-wear SB。
 5. **WL 与 GC 共用一台迁移引擎与同一收尾（FREE）**：WL 只改 victim 来源；
    擦完归还 Free Pool，源块由动态 WL 优先选中写入，擦除计数回升。
    退役只属于慢死预测 / read recovery。
@@ -1620,8 +1620,8 @@ flowchart TD
    `total_writes ≥ WL_MIN_WRITES`，求值节拍 `WL_EVAL_INTERVAL_MS = 5000`。
    搬移不改变擦除计数 ⇒ 差值不足时必须停止（否则是纯写放大，RISK-WL-08）。
 4. **选 victim**：与触发同门限，选平均擦除次数最小的 SB；平手看 valid_cw / read_count。
-5. **搬移**：`mig_begin_wl` 先 `alc_prepare_wl_destination` 摘掉当前 cold SB，再起
-   job；目标页对走 `alc_alloc_pair_high_wear`（每 plane 取擦除最多的空闲块，无 OP
+5. **搬移**：`mig_begin_wl` 先 `alc_super_prepare_wl_destination` 摘掉当前 cold SB，再起
+   job；目标页对走 `alc_super_open_alloc_pair(..., ALC_SUPER_ALLOC_COLD_HIGH_WEAR)`（每 plane 取擦除最多的空闲块，无 OP
    兜底）。收尾 `MIG_POST_FREE`：擦完归还 Free Pool，源块由动态 WL 优先选中写入。
 
 #### 3.4.6 失败语义
@@ -3101,7 +3101,7 @@ flowchart TD
 ```text
 ① pending 表空间检查（不够 ⇒ FTL_AGAIN；此时未占用任何资源）
 ② fc_command_alloc（命令池空 ⇒ FTL_AGAIN；命令槽有 release ⇒ 排在页对之前）
-③ alc_alloc_pair(FTL_TEMP_HOT, pba)
+③ alc_super_open_alloc_pair(ALC_SUPER_ALLOC_HOT, pba)
      失败 ⇒ 释放命令槽 + mig_trigger(GC_URGENT) + FTL_AGAIN
 ④ nplanes = ftl_cw_bitmap_plane_count(occupied)；n_cw = ftl_cw_bitmap_popcount(occupied)
 ⑤ wb_program_page：命令头 + ftl_cmd_setup_ppa_pair_cw + ftl_cmd_write_data_pair_cw（plane-major pair 镜像）
@@ -3110,11 +3110,11 @@ flowchart TD
 ⑧ 提交成功后才清 wbuf（open=0/occupied=0/owners=0）；打一行 LOGD 观测
 
 错误出口（④~⑦ 任一失败，H8 的唯一 goto 出口）：
-     fc_command_release（幂等）+ alc_rewind_pair（归还那对页）
+     fc_command_release（幂等）+ alc_super_open_rewind_pair（归还那对页）
      缓冲原样保留 ⇒ 下轮重试
 ```
 
-⚠ 取到页对后**任何**失败都必须 `alc_rewind_pair` 归还：命令从未提交 ⇒ 页从未被编程，
+⚠ 取到页对后**任何**失败都必须 `alc_super_open_rewind_pair` 归还：命令从未提交 ⇒ 页从未被编程，
 归还是安全的；不归还则每次重试白烧 2 页，表现为**容量无声流失**（CLAUDE.md §3.1）。
 
 **空闲 flush**：`wb_handle(MAYBE_FLUSH_IDLE)` 在 `ftl_service` Phase 2.5 检查“是否还有写组
@@ -3451,7 +3451,7 @@ flowchart TD
    META 全 FF”的空页才跳过。
 3. `MIG_READ_SETTLE`：**先 `l2p_is_ready` 前置**，全部就绪后才逐 CW 反查 L2P；
    仍指向本物理 CW 才置 `cw_bitmap`。半途而废会让 bitmap 一半有一半没有。
-4. `MIG_WRITE`：本页有有效 CW ⇒ `alc_alloc_pair(COLD)` → 提交 CW 子集写。
+4. `MIG_WRITE`：本页有有效 CW ⇒ `alc_super_open_alloc_pair(ALC_SUPER_ALLOC_COLD)` → 提交 CW 子集写。
    **写错误 ⇒ 中止**（victim 不擦）。
 5. `MIG_WRITE_SETTLE`：先就绪前置；再逐 CW **重查 L2P**（host 写/TRIM 可能已抢先），
    仍指向源 CW 才 `jrn_append` → `l2p_write` → 源块 `sub_valid` / 新块
@@ -3470,7 +3470,7 @@ flowchart TD
    「page0 空白⇒整块空白」捷径始终成立。
 6. `MIG_FLUSH_JRN`：等 Journal job 空闲 **且 `write_fail_pending == 0`**（F10）。
    `jrn_handle` 冲刷半满页；页写失败时 pending 会阻止擦除，直到 CP 把 L2P 落盘。
-7. `MIG_ERASE`：逐 plane 擦；成功走 `alc_note_erase`（erase_count / last_pe_ts /
+7. `MIG_ERASE`：逐 plane 擦；成功走 `alc_bst_note_erase`（erase_count / last_pe_ts /
    clear_valid）；`post==FREE` ⇒ 归还 Free Pool；`post==RETIRE` ⇒ 出池 + `rr_retire_block`；
    擦除失败且未 BAD ⇒ `bbt_mark_bad`，置 `erase_failed`。
 8. `MIG_DONE`：移除 Closed 条目；只有擦除成功且条目确实移除才
@@ -3670,7 +3670,7 @@ FTL 只应该表达“读写哪一页/哪些 CW、数据在哪”。FC 层负责
 #### 3.15.4 写序列
 
 ```text
-① alc_alloc_pair → 各 plane 的新 PBA
+① alc_super_open_alloc_pair → 各 plane 的新 PBA
 ② cmd->config.operation = (nplanes==2) ? MULTI_PLANE : NORMAL
    cmd->config.multi_plane = nplanes
    cmd->config.crc/random/ldpc/page_type 按上表
@@ -3941,7 +3941,7 @@ sequenceDiagram
     F->>F: 校验 建组
     F->>W: wb_append 按窗口
     alt 窗口切换 / 页满 / 空闲
-        W->>A: alc_alloc_pair HOT
+        W->>A: alc_super_open_alloc_pair HOT
         A-->>W: new_pba plane
         W->>N: PROGRAM 单 双 plane
         W->>C: 清 wbuf 提交成功后
@@ -4100,7 +4100,7 @@ flowchart TD
     M -- "是" --> N["MIG_FLUSH_JRN 等 journal 空闲 F10"]
     N --> O["MIG_ERASE 逐 plane 擦"]
     O --> P{"post 类型"}
-    P -- "FREE GC 或 WL" --> Q["alc_free_block 入池"]
+    P -- "FREE GC 或 WL" --> Q["alc_free_push 入池"]
     P -- "RETIRE 慢死预测" --> R["remove_from_free RETIRED"]
     Q --> S["MIG_DONE 移除 closed 条目 计数"]
     R --> S
@@ -4378,7 +4378,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 |---|---|---|---|
 | Allocator | 四本账各有唯一闸门 | `allocator_*` | 容量无声流失 |
 | Allocator | `state == FREE` ⟺ 在 Free Pool | 入池/出池闸门 | 重复分配/漏账 |
-| Allocator | BAD 永不进池 | `alc_free_block` | 坏块被当空闲块 |
+| Allocator | BAD 永不进池 | `alc_free_push` | 坏块被当空闲块 |
 | Allocator | Closed 列表 swap-remove，指针不跨调用 | `allocator_*_closed_*` | 悬空指针指向别的条目 |
 | Allocator | 退役先出池再 RETIRED | `migrate.c` | 退役块被再次分配 |
 | BST | `valid_count` = CW 级真值 | 写/搬移/TRIM/擦除 | GC 选错 victim |
@@ -4633,7 +4633,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | v0.83 回收前 Anchor + L2P 降级可见性（`RISK-MD-06` / `RISK-L2P-04`） | **已提交、未专项上板** | 编译三关通过；需按 `known_risks` 的 64-region 复现 / 故障注入；**不得**据“普通读写通过”声称已验证 |
 | v0.94 cache program（host 16 KiB + GC/WL 批次） | **host 正常路径已上板；GC batch/负例未验** | H2testw 415/423 MB 通过，`cw=24906/99624/0 abort`；`mb=0`（GC batch 未触发）；FAILC 负例、失败注入、掉电注入仍见 `known_risks` RISK-CACHE-02..07 |
 | v0.97 DTCM/ITCM 热路径 | **正常路径已上板；压力/掉电未覆盖** | 页缓冲 AXI_NOCACHE 后 `format` + H2testw **840/885 KB/s、415/423 MB 无错误**（`.dtcm_data` 58,952 B、BCH SRAM4）。交换版：BCH 42,656 B→DTCM、`g_ftl_md`→SRAM4，`.dtcm_data`=67,832 B、free≈63 KB；release 额外 ITCM 集使 `.ssd_code_high` 29,728→61,384 B（debug 61,992 B 不变）。2026-10-23 该组合 H2testw **843/887 KB/s、415/423 MB 0 错误**，`bad=0`；相对 840/885 为噪声级，且 `mig=0/0`/`gcm=0` ⇒ 额外 ITCM 集收益未证实（RISK-TCM-05/09） |
-| v0.98 可读性重构 | **未上板** | BBT helper、allocator close/refill 收薄、cache read/write 长函数拆分、`bst_wear_t` 快照、bg 时钟去重；行为目标不变。ITCM release 61,352 B / debug 62,080 B；`make all/release/tests UT=FC` 零新告警；UT=FTL 冻结测试源失败 |
+| v0.98 可读性重构 | **未上板** | BBT helper、allocator close/refill 收薄、cache read/write 长函数拆分、`bst_wear_t` 快照、bg 时钟去重；行为目标不变。ITCM release 61,296 B / debug 62,064 B；`make all/release/tests UT=FC` 零新告警；UT=FTL 冻结测试源失败 |
 | `RISK-MIG-02` / `RISK-GC-07` 迁移读失败活锁 | **已修；rev32 上板已观测 3 次标坏** | 改为按 plane 源块累计失败计数、单页读成功不清零；rev32 实机出现 `x3 — mark BAD` 并继续换候选。rev33（固定日志区）未上板 |
 
 > `RISK-WB-06`（wbuf pair 镜像填装）已于 **rev27 上板验证**：Windows FAT 格式化 +
@@ -4889,7 +4889,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | FC 命令池/描述符池 + 队列（DTCM P1） | ~9 KB + 776 B | DTCM |
 | `g_nand_channel_page_buffer` | 4,224 B | AXI_NOCACHE（DTCM 会破坏 multi-plane program） |
 | BCH 静态表（`s_bch`，含 roots bitmap） | 42,656 B | DTCM |
-| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,352 / 62,080 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
+| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,296 / 62,064 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
 | `.dtcm_data` 合计（release） | 67,832 B | DTCM |
 
 ⚠ `.sram*_data` 是 NOLOAD，启动代码不清零；`ftl_init` 必须显式 memset 五张表与六个 storage 对象

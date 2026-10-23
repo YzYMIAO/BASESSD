@@ -4,13 +4,14 @@
 /*
  * allocator.h — 块分配器：账本结构 + 对外接口
  *
- * 只管账本，不碰介质：块的擦除由调用者在 alc_free_block 之前完成。
+ * 只管账本，不碰介质：块的擦除由调用者在 alc_free_push 之前完成。
  *
  * 不变量：
- *   ① 四本账各有唯一闸门：Free Pool = alc_free_block / alc_remove_from_free；
- *      OP/Spare = allocator_*_try_push/pop；Closed = alc_add_closed_sb /
- *      alc_remove_closed_sb。标量计数（free_count / closed_sb_count）直接读；
- *      数组/边界/借出访问走 alc_get_op_count / spare_count / closed_at。
+ *   ① 四本账各有唯一闸门：Free Pool = alc_free_push / alc_free_remove；
+ *      OP = alc_op_push（出池由 alc_free_refill_from_op 内部完成）；Spare = alc_spare_push/pop；
+ *      Closed = alc_super_closed_add /
+ *      alc_super_closed_remove。标量计数（free_count / closed_sb_count）直接读；
+ *      数组/边界/借出访问走 alc_op_get_count / alc_spare_get_count / alc_super_closed_get_at。
  *   ② state == FTL_BLOCK_STATE_FREE ⟺ 在 Free Pool。BAD 是终态，永不进池；
  *      无归属块（固定元数据 / OP / Spare / 未初始化）为 NONE。
  *   ③ closed_sb_list 是 swap-remove 活列表：跨调用持有条目必须按值拷贝；
@@ -32,6 +33,15 @@
 #define FTL_TEMP_HOT  0U /* 用户 IO */
 #define FTL_TEMP_COLD 1U /* GC 搬移 */
 #define FTL_TEMP_NUM  2U
+
+/* 分配策略：温度流 + 选块方向 + 是否允许 OP 兜底。
+ * 合在一个闭枚举里，避免 `temperature` 与 `high_wear` 组合出非法状态。 */
+typedef enum
+{
+    ALC_SUPER_ALLOC_HOT            = 0, /* HOT SB；动态 WL 取擦除最少；允许 OP 兜底 */
+    ALC_SUPER_ALLOC_COLD           = 1, /* COLD SB；动态 WL 取擦除最少；允许 OP 兜底 */
+    ALC_SUPER_ALLOC_COLD_HIGH_WEAR = 2, /* COLD SB；取擦除最多；禁止 OP 兜底（静态 WL） */
+} alc_super_alloc_mode_e;
 
 /* ── Free Pool 三级水位 ──
  * 一个已擦除池 + 软水位，不是三个分区：≥32 正常；8<free<32 后台 GC；≤8 紧急。
@@ -70,19 +80,22 @@ typedef struct
     BYTE page0_programmed;        /* bit p = plane p 的 page0 写命令已成功（异步写屏障） */
 } super_block_t;
 
+/* per-plane 池表：用数组 typedef 保持 `name[plane][index]` 的二维语义，
+ * 同时避免 clang-format 把 pointer-to-array 声明拆成两行。 */
+typedef WORD alc_op_block_table_t[FTL_OP_POOL_CAP];
+typedef WORD alc_spare_block_table_t[FTL_SPARE_POOL_PER_PLANE];
+
 /* ── FTL 表的引用 ──
  * 五张大数组由 HIL（main.c）**各自独立定义、独立选内存域**（section 属性），
  * 本结构只持有它们的指针；表本体不在本结构里，故放置不受本类型约束。
  * 由 ftl_storage_t 传入，内存预算在 main.c 的 _Static_assert 单点可见。 */
 typedef struct
 {
-    bst_block_t *blocks;      /* BST */
-    WORD        *free_blocks; /* Free Pool */
-    WORD(*op_blocks)
-    [FTL_OP_POOL_CAP]; /* OP 预留池 */
-    WORD(*spare_blocks)
-    [FTL_SPARE_POOL_PER_PLANE];    /* Spare 池 */
-    super_block_t *closed_sb_list; /* Closed 列表 */
+    bst_block_t             *blocks;         /* BST */
+    WORD                    *free_blocks;    /* Free Pool */
+    alc_op_block_table_t    *op_blocks;      /* OP 预留池 */
+    alc_spare_block_table_t *spare_blocks;   /* Spare 池 */
+    super_block_t           *closed_sb_list; /* Closed 列表 */
 } ftl_table_refs_t;
 
 /* ── BBT 持久化状态（per-instance）──
@@ -150,12 +163,10 @@ typedef struct
     WORD  free_count;
 
     /* OP / Spare（per-plane） */
-    WORD(*op_blocks)
-    [FTL_OP_POOL_CAP];
-    WORD op_count[PLANE_NUM];
-    WORD(*spare_blocks)
-    [FTL_SPARE_POOL_PER_PLANE];
-    WORD spare_count[PLANE_NUM];
+    alc_op_block_table_t    *op_blocks;
+    WORD                     op_count[PLANE_NUM];
+    alc_spare_block_table_t *spare_blocks;
+    WORD                     spare_count[PLANE_NUM];
 
     /* Open Super Block */
     super_block_t hot_sb;
@@ -192,12 +203,12 @@ typedef struct
  * 纯 getter：不检查值域、不隐藏数组，但跨模块读的是 allocator 的 BBT 子状态，
  * 按 RISK-ALLOC-03 的判定保留访问器；放头文件 static inline，避免每次调用跨 TU。
  */
-static inline bool alc_is_bbt_format_in_progress(const alc_t *alloc)
+static inline bool alc_bbt_is_format_in_progress(const alc_t *alloc)
 {
     return alloc->bbt.format_in_progress;
 }
 
-static inline bool alc_is_bbt_rebuild_required(const alc_t *alloc)
+static inline bool alc_bbt_is_rebuild_required(const alc_t *alloc)
 {
     return alloc->bbt.rebuild_required;
 }
@@ -248,34 +259,30 @@ static inline ftl_topo_t alc_topo(const alc_t *alloc)
  * 数组/边界/借出语义走这里；标量计数（free_count / closed_sb_count）直接读字段。 */
 
 /* 各 plane OP 池剩余块数（带 plane 边界检查）。 */
-static inline WORD alc_get_op_count(const alc_t *alloc, BYTE plane)
+static inline WORD alc_op_get_count(const alc_t *alloc, BYTE plane)
 {
     return alloc->op_count[plane];
 }
 
 /* 各 plane Spare 池剩余块数（带 plane 边界检查）。 */
-static inline WORD alc_get_spare_count(const alc_t *alloc, BYTE plane)
+static inline WORD alc_spare_get_count(const alc_t *alloc, BYTE plane)
 {
     return alloc->spare_count[plane];
 }
 
 /*
- * alc_get_op_total - 全 plane OP 池剩余块数
- * 参数：alloc — 分配器。
- * 返回：各 plane 之和。
+ * alc_pool_sum_counts - 对 per-plane 计数数组求和
+ * 参数：counts — 首地址（WORD[]）；count — 元素个数。
+ * 返回：各元素之和。
+ *
+ * 调用点直接传 `alloc->op_count` / `alloc->spare_count` + `PLANE_NUM`；
+ * 元素宽度由 `WORD *` 类型确定，不再为两个池各包一层 getter。
  */
-WORD alc_get_op_total(const alc_t *alloc);
-
-/*
- * alc_get_spare_total - 全 plane Spare 池剩余块数
- * 参数：alloc — 分配器。
- * 返回：各 plane 之和。
- */
-WORD alc_get_spare_total(const alc_t *alloc);
+WORD alc_pool_sum_counts(const WORD *counts, BYTE count);
 
 /* closed_sb_list 第 idx 项（借出，不转移所有权）。
  * swap-remove 会让先前指针失效：跨调用持有请按值拷贝。 */
-static inline const super_block_t *alc_closed_at(const alc_t *alloc, WORD idx)
+static inline const super_block_t *alc_super_closed_get_at(const alc_t *alloc, WORD idx)
 {
     return &alloc->closed_sb_list[idx];
 }
@@ -285,28 +292,28 @@ static inline const super_block_t *alc_closed_at(const alc_t *alloc, WORD idx)
  * 定义在 allocator.c，保证唯一实现；OP 出池只在 .c 内部使用，不对外声明。 */
 
 /*
- * alc_op_try_push - OP 池入池
+ * alc_op_push - OP 池入池
  * 功能：按 plane 追加；满则返回 false。
  * 参数：alloc — 分配器；plane — 目标 plane；gblock — 全局块号。
  * 返回：true 入池；false 池满。
  */
-bool alc_op_try_push(alc_t *alloc, BYTE plane, WORD gblock);
+bool alc_op_push(alc_t *alloc, BYTE plane, WORD gblock);
 
 /*
- * alc_spare_try_push - Spare 池入池
+ * alc_spare_push - Spare 池入池
  * 功能：按 plane 追加；满则返回 false。
  * 参数：alloc — 分配器；plane — 目标 plane；gblock — 全局块号。
  * 返回：true 入池；false 池满。
  */
-bool alc_spare_try_push(alc_t *alloc, BYTE plane, WORD gblock);
+bool alc_spare_push(alc_t *alloc, BYTE plane, WORD gblock);
 
 /*
- * alc_spare_try_pop - Spare 池出池
+ * alc_spare_pop - Spare 池出池
  * 功能：按 plane 弹出一个块；空则返回 false。
  * 参数：alloc — 分配器；plane — 目标 plane；out_gblock — 出参。
  * 返回：true 取到；false 池空。
  */
-bool alc_spare_try_pop(alc_t *alloc, BYTE plane, WORD *out_gblock);
+bool alc_spare_pop(alc_t *alloc, BYTE plane, WORD *out_gblock);
 
 /*
  * alc_spare_refill_from_free - 从 Free Pool 补 Spare 池到目标（逐 plane）
@@ -321,7 +328,7 @@ bool alc_spare_try_pop(alc_t *alloc, BYTE plane, WORD *out_gblock);
 bool alc_spare_refill_from_free(alc_t *alloc, BYTE plane);
 
 /*
- * alc_refill_free_from_op - Spare 耗尽时的第二道坏块替换：从 OP 池取一块补 Free
+ * alc_free_refill_from_op - Spare 耗尽时的第二道坏块替换：从 OP 池取一块补 Free
  *
  * 主流 spare/OP 共用同一块预留区；本仓分两池，Spare 是坏块替换的第一道，
  * OP 是 GC 余量。Spare 空时允许从 OP 借一块补 Free（不改变已枚举容量），
@@ -330,7 +337,7 @@ bool alc_spare_refill_from_free(alc_t *alloc, BYTE plane);
  * @param alloc 分配器；plane 目标 plane
  * @return 取到的 gblock（已入 Free）；FTL_GBLOCK_INVALID = OP 池也空
  */
-WORD alc_refill_free_from_op(alc_t *alloc, BYTE plane);
+WORD alc_free_refill_from_op(alc_t *alloc, BYTE plane);
 
 /* ── 对外接口 ── */
 
@@ -343,32 +350,32 @@ WORD alc_refill_free_from_op(alc_t *alloc, BYTE plane);
 void alc_init(alc_t *alloc, ftl_topo_t topo, const ftl_table_refs_t *refs);
 
 /*
- * alc_free_block - 归还一个已擦除块到 Free Pool
+ * alc_free_push - 归还一个已擦除块到 Free Pool
  * 功能：入池并置 FREE、清 sb_id。
  * 参数：alloc — 分配器；gblock — 全局块号。
  * 返回：无。
  */
-void alc_free_block(alc_t *alloc, WORD gblock);
+void alc_free_push(alc_t *alloc, WORD gblock);
 
 /*
- * alc_remove_from_free - 从 Free Pool 移除一个块（出池不改状态）
+ * alc_free_remove - 从 Free Pool 移除一个块（出池不改状态）
  * 功能：swap-remove；块不在池内是合法 no-op。
  * 参数：alloc — 分配器；gblock — 全局块号。
  * 返回：无。
  */
-void alc_remove_from_free(alc_t *alloc, WORD gblock);
+void alc_free_remove(alc_t *alloc, WORD gblock);
 
 /*
- * alc_note_erase - 记录一次成功的擦除
+ * alc_bst_note_erase - 记录一次成功的擦除
  * 功能：erase_count++、last_pe_ts = now、valid_count 与 read_count 清零
  *       （read disturb 按“自上次擦除以来”计；rr 健康趋势保留）。
  * 参数：alloc — 分配器；gblock — 全局块号；now — 当前时间戳。
  * 返回：无。
  */
-void alc_note_erase(alc_t *alloc, WORD gblock, DWORD now);
+void alc_bst_note_erase(alc_t *alloc, WORD gblock, DWORD now);
 
 /*
- * alc_alloc_log_block - 从 OP 池借一块作动态 L2P 日志块
+ * alc_op_alloc_log_block - 从 OP 池借一块作动态 L2P 日志块
  * 参数：alloc — 分配器；plane — 目标 plane。
  * 返回：gblock（已出池、state=LOG）；FTL_GBLOCK_INVALID = 该 plane Free Pool 空。
  *
@@ -376,10 +383,10 @@ void alc_note_erase(alc_t *alloc, WORD gblock, DWORD now);
  * 不动用户容量；借出的块由 metadata 的 `l2p_live` / `ftl_is_metadata_block`
  * 动态识别，擦空后回 OP。
  */
-WORD alc_alloc_log_block(alc_t *alloc, BYTE plane);
+WORD alc_op_alloc_log_block(alc_t *alloc, BYTE plane);
 
 /*
- * alc_open_pair_room - 当前 Open SB 还能连续写多少页对
+ * alc_super_open_get_room - 当前 Open SB 还能连续写多少页对
  *
  * 返回各 **存在 plane** 的 `PAGES_PER_BLOCK - next_page` 的最小值；无 Open SB、
  * 某 plane 槽位无块（FTL_BLOCK_NO_PLANE）、或该 plane 的 page0 尚未成功编程 ⇒ 0。
@@ -391,75 +398,65 @@ WORD alc_alloc_log_block(alc_t *alloc, BYTE plane);
  * @param temperature FTL_TEMP_HOT / FTL_TEMP_COLD
  * @return 可连续分配的页对数（0..PAGES_PER_BLOCK）
  */
-BYTE alc_open_pair_room(const alc_t *alloc, BYTE temperature);
+BYTE alc_super_open_get_room(const alc_t *alloc, BYTE temperature);
 
 /*
- * alc_note_page_programmed - 记录某个 Open SB 的页编程成功（page0 异步写屏障）
+ * alc_super_open_note_page_programmed - 记录某个 Open SB 的页编程成功（page0 异步写屏障）
  *
- * 只关心 page 0：在它成功前，`alc_alloc_pair` 拒绝对同一 SB 分配 page ≥1，
+ * 只关心 page 0：在它成功前，`alc_super_open_alloc_pair` 拒绝对同一 SB 分配 page ≥1，
  * 防止「page0 失败但后续页已编程」击穿掉电恢复的 page0 空白捷径。
- * 失败/关闭由 alc_close_open_sb 处理（新 SB 的 flag 为 false）。
+ * 失败/关闭由 alc_super_close 处理（新 SB 的 flag 为 false）。
  */
-void alc_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD pba);
+void alc_super_open_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD pba);
+
+/* PBA 相对指定温度 Open SB 的位置/状态。 */
+typedef enum
+{
+    ALC_SUPER_PBA_NOT_OPEN           = 0, /* 不属于当前 Open SB（旧 SB / 非法 PBA） */
+    ALC_SUPER_PBA_OPEN_PAGE0_PENDING = 1, /* 属于 Open SB，但该 plane 的 page0 未成功 */
+    ALC_SUPER_PBA_OPEN_PAGE0_DONE    = 2, /* 属于 Open SB，且该 plane 的 page0 已成功 */
+} alc_super_pba_state_e;
 
 /*
- * alc_page0_programmed - 该 PBA 所属 Open SB plane 的 page0 是否已成功编程
+ * alc_super_open_get_pba_state - PBA 相对指定温度 Open SB 的状态
  *
- * 写提交点用它做异步写屏障：page>0 的写必须等**同一 plane** 的 page0 成功。
- * 返回 false 还包括：SB 未开 / PBA 不属于当前 Open SB（迟到的旧 SB 命令）。
+ * 按 plane+block 判断（不是按页号）：
+ *   · NOT_OPEN：旧 SB 的迟到命令 / 非法 PBA，batch 失败时不得因此关闭当前 SB；
+ *   · PAGE0_PENDING：属于当前 SB，但 page0 写屏障未通过 ⇒ page>0 的写必须等待；
+ *   · PAGE0_DONE：属于当前 SB 且 page0 已成功。
  */
-bool alc_page0_programmed(const alc_t *alloc, BYTE temperature, DWORD pba);
+alc_super_pba_state_e alc_super_open_get_pba_state(const alc_t *alloc, BYTE temperature, DWORD pba);
 
 /*
- * alc_pba_belongs_to_open_sb - 该 PBA 是否属于指定温度的当前 Open SB
- *
- * 按 plane+block 判断（不是按页号），供 batch 失败时只关闭**真正承载 batch 页**
- * 的 SB；旧 SB 的迟到完成不会误关后来新开的 SB。
- */
-bool alc_pba_belongs_to_open_sb(const alc_t *alloc, BYTE temperature, DWORD pba);
-
-/*
- * alc_alloc_pair - 分配各 plane 当前页的 PBA
- * 功能：推进指定温度的 Open SB 写指针；SB 未开/写满/含坏块时先换新 SB。
- * 参数：alloc — 分配器；temperature — FTL_TEMP_HOT / FTL_TEMP_COLD；
+ * alc_super_open_alloc_pair - 按策略分配各 plane 当前页的 PBA
+ * 功能：推进对应温度流的 Open SB 写指针；SB 未开/写满/含坏块时先换新 SB。
+ * 参数：alloc — 分配器；mode — 分配策略（温度流 + 选块方向 + OP 兜底）；
  *       out[PLANE_NUM] — 各 plane 页基址 PBA。
  * 返回：FTL_OK；FTL_AGAIN = 某 plane 无块（瞬态，调用者触发 GC）。
+ *
+ * `ALC_SUPER_ALLOC_COLD_HIGH_WEAR` 是静态 WL 目标：强制新开 cold SB、每 plane 取
+ * erase_count 最大的空闲块、不允许 OP 兜底（OP 块擦除次数不受该策略控制）。
  */
-ftl_status_e alc_alloc_pair(alc_t *alloc, BYTE temperature, DWORD out[PLANE_NUM]);
+ftl_status_e alc_super_open_alloc_pair(alc_t *alloc, alc_super_alloc_mode_e mode, DWORD out[PLANE_NUM]);
 
 /*
- * alc_alloc_pair_high_wear - 静态 WL 的目标页对：**擦除次数最多**的空闲块
- *
- * 与 alc_alloc_pair 的区别（UBI 静态 WL 模型）：
- *   · 强制新开 cold SB（不复用当前 Open SB 的低擦除块）；
- *   · 每 plane 从 Free Pool 取 erase_count 最大的块；
- *   · 不允许 OP 兜底（OP 块擦除次数不受该策略控制）⇒ 无可用块时返回 FTL_AGAIN。
- * 用途：`mig_begin_wl` 的搬移目标——把冷数据搬到已磨损块，低磨损块留给热数据。
- *
- * @param alloc 分配器
- * @param out[PLANE_NUM] 各 plane 页基址 PBA
- * @return FTL_OK；FTL_AGAIN = Free Pool 不足
- */
-ftl_status_e alc_alloc_pair_high_wear(alc_t *alloc, DWORD out[PLANE_NUM]);
-
-/*
- * alc_prepare_wl_destination - 静态 WL 启动前摘掉当前 cold SB
+ * alc_super_prepare_wl_destination - 静态 WL 启动前摘掉当前 cold SB
  *
  * 保证 WL 的第一次分配会**新开**一个 high-wear SB（否则会续写动态 WL 选出的
  * 低擦除块）。已写过 ⇒ 关闭入 Closed 列表；未写过 ⇒ 块归还 Free Pool。
  * 只有 `mig_begin_wl` 在 host 空闲时调用。
  */
-void alc_prepare_wl_destination(alc_t *alloc);
+void alc_super_prepare_wl_destination(alc_t *alloc);
 
 /*
- * alc_rewind_pair - 撤销**紧邻的**一次 alc_alloc_pair
+ * alc_super_open_rewind_pair - 撤销**紧邻的**一次 alc_super_open_alloc_pair
  * 功能：把指定温度 Open SB 的写指针退一页（next_page--），供「已取到页对、但在编程之前
  *       失败」的调用者归还该页。
  * 参数：alloc — 分配器；temperature — FTL_TEMP_HOT / FTL_TEMP_COLD（须与那次 alloc 相同）。
  * 返回：无。
  *
  * ⚠ 两条前提（违反会**还错页**，且编译期完全无声）：
- *   ① 自那次 alc_alloc_pair 起**没有**其他页对分配发生——本函数只回退写指针，
+ *   ① 自那次 alc_super_open_alloc_pair 起**没有**其他页对分配发生——本函数只回退写指针，
  *      不回退「可能刚发生过的开新 SB」；
  *   ② 归还的页**从未被编程**（已下发的命令引用着它）。
  *   ⚠ 若那次 alloc 顺带开了一个新 SB，归还后该 SB 处于 next_page == 0 的**合法态**
@@ -468,37 +465,37 @@ void alc_prepare_wl_destination(alc_t *alloc);
  * 用途：`wb_handle(FLUSH)` 的取页后失败路径——不归还则每次重试白烧一对页，
  *       表现为**容量无声流失**（CLAUDE.md §3.1）。
  */
-void alc_rewind_pair(alc_t *alloc, BYTE temperature);
+void alc_super_open_rewind_pair(alc_t *alloc, BYTE temperature);
 
 /*
- * alc_close_open_sb - 关闭指定温度的 Open SB
+ * alc_super_close - 关闭指定温度的 Open SB
  * 功能：置 CLOSED、进 closed_sb_list；已关闭时幂等早退。
  * 参数：alloc — 分配器；temperature — FTL_TEMP_HOT / FTL_TEMP_COLD。
  * 返回：FTL_OK；FTL_ERROR = 该温度无 Open SB。
  */
-ftl_status_e alc_close_open_sb(alc_t *alloc, BYTE temperature);
+ftl_status_e alc_super_close(alc_t *alloc, BYTE temperature);
 
 /*
- * alc_add_closed_sb - 掉电重建时直接追加一个 Closed SB 条目
+ * alc_super_closed_add - 掉电重建时直接追加一个 Closed SB 条目
  * 功能：按 plane 块号组装条目并置 CLOSED；允许退化单 plane。
  * 参数：alloc — 分配器；plane_blocks[PLANE_NUM] — 各 plane 块号；
  *       temperature — 温度流。
  * 返回：新条目在 closed_sb_list 的索引；列表满（release 兜底）返回 FTL_BLOCK_NO_SB。
  */
-WORD alc_add_closed_sb(alc_t     *alloc,
-                       const WORD plane_blocks[PLANE_NUM],
-                       BYTE       temperature);
+WORD alc_super_closed_add(alc_t     *alloc,
+                          const WORD plane_blocks[PLANE_NUM],
+                          BYTE       temperature);
 
 /*
- * alc_remove_closed_sb - 从 Closed 列表移除条目（swap-remove）
+ * alc_super_closed_remove - 从 Closed 列表移除条目（swap-remove）
  * 功能：修正被搬移条目的 sb_id，O(1)。
  * 参数：alloc — 分配器；closed_idx — 条目索引。
  * 返回：无。
  */
-void alc_remove_closed_sb(alc_t *alloc, WORD closed_idx);
+void alc_super_closed_remove(alc_t *alloc, WORD closed_idx);
 
 /*
- * alc_closed_drop_plane - 从 Closed 条目摘除一个已擦除/已标坏的 plane 块
+ * alc_super_closed_drop_plane - 从 Closed 条目摘除一个已擦除/已标坏的 plane 块
  *
  * GC/WL/predict 逐 plane 擦 victim。若擦完一个 plane 后 job 中止，旧条目仍引用
  * 已归还 Free Pool 的块；该块被重新分配并再次 Closed 后会被旧条目误认
@@ -509,7 +506,7 @@ void alc_remove_closed_sb(alc_t *alloc, WORD closed_idx);
  * @param block  该 plane 内的块号
  * @return true = 条目已无任何 plane（条目被移除）；false = 仍有其他 plane 或未找到
  */
-bool alc_closed_drop_plane(alc_t *alloc, BYTE plane, WORD block);
+bool alc_super_closed_drop_plane(alc_t *alloc, BYTE plane, WORD block);
 
 /* ── 只读统计 ──
  * 口径：跳过 BAD 与 state == NONE（固定元数据 / OP / Spare / 未初始化）；
@@ -523,14 +520,14 @@ typedef struct
     DWORD erase_sum;   /* erase_count 之和 */
     DWORD pe_min;      /* 最小 last_pe_ts；无 plane 时 UINT32_MAX */
     DWORD read_sum;    /* read_count 之和 */
-} alc_sb_stats_t;
+} alc_super_stats_t;
 
 /*
- * alc_get_sb_stats - 计算一个 Super Block 的聚合值
+ * alc_super_get_stats - 计算一个 Super Block 的聚合值
  * 参数：alloc — 分配器；sb — 目标条目；out — 出参。
  * 返回：无。
  */
-void alc_get_sb_stats(const alc_t *alloc, const super_block_t *sb, alc_sb_stats_t *out);
+void alc_super_get_stats(const alc_t *alloc, const super_block_t *sb, alc_super_stats_t *out);
 
 typedef struct
 {
@@ -539,49 +536,49 @@ typedef struct
     DWORD erase_sum;  /* 擦除次数之和 */
     DWORD max_pe_ts;  /* 最大 last_pe_ts */
     WORD  good_count; /* 已归属好块数 */
-} alc_erase_stats_t;
+} alc_bst_erase_stats_t;
 
 /*
- * alc_get_erase_stats - 已归属好块的磨损统计（一次扫描）
+ * alc_bst_get_erase_stats - 已归属好块的磨损统计（一次扫描）
  * 参数：alloc — 分配器；out — 出参。
  * 返回：无。
  */
-void alc_get_erase_stats(const alc_t *alloc, alc_erase_stats_t *out);
+void alc_bst_get_erase_stats(const alc_t *alloc, alc_bst_erase_stats_t *out);
 
 /*
- * alc_free_max_erase - Free Pool 中「各 plane 最大擦除次数」的最小值
+ * alc_free_get_max_erase - Free Pool 中「各 plane 最大擦除次数」的最小值
  *
  * 静态 WL 的触发判据（UBI 的 e2）：高擦除空闲块是否足以接收冷数据。
  * 目的页对每 plane 各取一块，受最紧的 plane 限制 ⇒ 返回 per-plane 最大值的 min；
  * 任一 plane 无空闲块返回 0（此时也无法分配目标页对）。
  */
-DWORD alc_free_max_erase(const alc_t *alloc);
+DWORD alc_free_get_max_erase(const alc_t *alloc);
 
 /*
- * alc_block_restore_wear - 从 Checkpoint 磨损快照恢复一个块的磨损/ECC 状态
+ * alc_bst_set_wear - 从 Checkpoint 磨损快照恢复一个块的磨损/ECC 状态
  * 参数：alloc — 分配器；gblock — 全局块号；wear — 快照。
  * 返回：无。
  */
-void alc_block_restore_wear(alc_t *alloc, WORD gblock, const bst_wear_t *wear);
+void alc_bst_set_wear(alc_t *alloc, WORD gblock, const bst_wear_t *wear);
 
 /*
- * alc_block_wear_get - 读取一个块的磨损/ECC 快照
+ * alc_bst_get_wear - 读取一个块的磨损/ECC 快照
  * 参数：alloc — 分配器；gblock — 全局块号；out — 输出快照。
  * 返回：无。
  */
-void alc_block_wear_get(const alc_t *alloc, WORD gblock, bst_wear_t *out);
+void alc_bst_get_wear(const alc_t *alloc, WORD gblock, bst_wear_t *out);
 
 /*
- * alc_get_op_at / alc_get_spare_at - OP / Spare 池元素只读访问
+ * alc_op_get_at / alc_spare_get_at - OP / Spare 池元素只读访问
  */
-WORD alc_get_op_at(const alc_t *alloc, BYTE plane, WORD index);
-WORD alc_get_spare_at(const alc_t *alloc, BYTE plane, WORD index);
+WORD alc_op_get_at(const alc_t *alloc, BYTE plane, WORD index);
+WORD alc_spare_get_at(const alc_t *alloc, BYTE plane, WORD index);
 
 /*
- * alc_find_closed_sb - 按全部 plane 块号在 Closed 列表定位条目
+ * alc_super_closed_find - 按全部 plane 块号在 Closed 列表定位条目
  * 参数：alloc — 分配器；sb — 目标条目；out_idx — 出参索引。
  * 返回：true = 找到；false = 不在列表。
  */
-bool alc_find_closed_sb(const alc_t *alloc, const super_block_t *sb, WORD *out_idx);
+bool alc_super_closed_find(const alc_t *alloc, const super_block_t *sb, WORD *out_idx);
 
 #endif /* FTL_ALLOCATOR_H */

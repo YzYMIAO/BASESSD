@@ -203,7 +203,7 @@ typedef struct
  *   IDLE      ：valid * 100 > total * GC_VICTIM_MAX_VALID_PCT            ⇒ 跳过
  *   EMERGENCY ：(total - valid) * 100 < total * GC_EMERGENCY_MIN_GAIN_PCT ⇒ 跳过
  *
- * total = st.plane_count * FTL_CW_PER_BLOCK（`alc_get_sb_stats` 已排除 BAD/哨兵 plane）。
+ * total = st.plane_count * FTL_CW_PER_BLOCK（`alc_super_get_stats` 已排除 BAD/哨兵 plane）。
  * **不要**按 next_page 缩分母：提前关闭的半写块有空洞页，按整块容量算才不会
  * 把「还有空洞可写」的块误判成 100% 有效。
  *

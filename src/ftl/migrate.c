@@ -160,7 +160,7 @@ static ftl_status_e mig_submit_read(mig_handle_t *m)
 
 /* 提交一条目标页 CW 子集写。只编有效 CW（cw_bitmap 外的 CW 不建链、不编程）——
  * 整页重写会把无效 CW 连同其（陈旧的）META 一起搬过去，污染新页且多搬无用数据。
- * ⚠ 目标页的 plane 位就是 plane（alc_alloc_pair 的契约），故写进去的 META
+ * ⚠ 目标页的 plane 位就是 plane（alc_super_open_alloc_pair 的契约），故写进去的 META
  *   逐 CW 仍是正确的扇区 LBA。 */
 static ftl_status_e mig_submit_write(mig_handle_t *m)
 {
@@ -168,7 +168,7 @@ static ftl_status_e mig_submit_write(mig_handle_t *m)
      * 若该 plane 的 page0 本来无数据，先写一页零补齐（不映射），再重试本页——
      * 这样 full rebuild 的「page0 空白⇒整块空白」捷径仍然成立。 */
     if ((pba_to_page(m->dst[m->plane]) > 0U) &&
-        (!alc_page0_programmed(m->alloc, FTL_TEMP_COLD, m->dst[m->plane])))
+        (alc_super_open_get_pba_state(m->alloc, FTL_TEMP_COLD, m->dst[m->plane]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
     {
         const DWORD   pba0 = super_block_page_pba(m->topo, &m->alloc->cold_sb, m->plane, 0U);
         fc_command_t *zero_cmd;
@@ -402,8 +402,8 @@ static void mig_start(mig_handle_t        *m,
     m->error         = (int32_t)FTL_OK;
 
     /* 快路径：无任何有效 CW ⇒ 无可搬移，直接进擦除。 */
-    alc_sb_stats_t st;
-    alc_get_sb_stats(m->alloc, &m->victim, &st);
+    alc_super_stats_t st;
+    alc_super_get_stats(m->alloc, &m->victim, &st);
     m->job_valid_cw = st.valid_cw;
     /* 有有效 CW ⇒ 必然写过至少一页。写指针为 0 说明 victim 构造时漏了 next_page，
      * 后果是「一页不读就擦」= 静默丢数据。 */
@@ -537,8 +537,8 @@ static bool mig_begin_gc(mig_handle_t         *m,
     /* 会话边界：只有**选中的 victim 自身有有效 CW** 才开新会话。
      * ⚠ 不能用 sel.best_valid_pct：它是「域内最低有效率」，只要存在任一空块就会
      *   为 0，即使选中的 victim 有大量有效数据。必须查 sel.victim 自身的 valid_cw。 */
-    alc_sb_stats_t vst;
-    alc_get_sb_stats(m->alloc, sel.victim, &vst);
+    alc_super_stats_t vst;
+    alc_super_get_stats(m->alloc, sel.victim, &vst);
 
     if ((!m->gc_session_active) && (vst.valid_cw != 0U))
     {
@@ -607,7 +607,7 @@ static bool mig_begin_wl(mig_handle_t *m)
     mig_victim_from_planes(&sb, victim.plane_blocks, victim.next_page);
 
     /* 目标块方向：先把 host 的 cold SB 摘掉，让 job 的第一页新开 high-wear SB。 */
-    alc_prepare_wl_destination(m->alloc);
+    alc_super_prepare_wl_destination(m->alloc);
 
     /* 静态 WL 是空闲态慢过程，每个 job 一行，便于与 GC 区分。 */
     LOGI(LOG_TAG_WL "start free=%u writes=%lu\r\n",
@@ -651,7 +651,7 @@ static bool mig_begin_predict(mig_handle_t *m)
         return false;
     }
 
-    const super_block_t *closed = alc_closed_at(m->alloc, closed_idx);
+    const super_block_t *closed = alc_super_closed_get_at(m->alloc, closed_idx);
     super_block_t        sb;
 
     mig_victim_from_planes(&sb, closed->plane_blocks, closed->next_page);
@@ -822,12 +822,12 @@ static void mig_dst_fail_cleanup(mig_handle_t *m, bool command_attempted)
     if (command_attempted || mig_dst_pair_has_programmed_plane(m))
     {
         LOGD(LOG_TAG_MIG "dst failure plane=%u — close cold SB\r\n", (unsigned)m->plane);
-        (void)alc_close_open_sb(m->alloc, FTL_TEMP_COLD);
+        (void)alc_super_close(m->alloc, FTL_TEMP_COLD);
     }
     else
     {
         LOGD(LOG_TAG_MIG "dst failure plane=%u — rewind pair\r\n", (unsigned)m->plane);
-        alc_rewind_pair(m->alloc, FTL_TEMP_COLD);
+        alc_super_open_rewind_pair(m->alloc, FTL_TEMP_COLD);
     }
 }
 
@@ -865,16 +865,16 @@ static void mig_finish(mig_handle_t *m)
         }
 
         WORD closed_idx;
-        /* 逐 plane 擦除时条目可能已被 alc_closed_drop_plane 摘空并移除
+        /* 逐 plane 擦除时条目可能已被 alc_super_closed_drop_plane 摘空并移除
          * （最后一个 plane 摘除即删条目）⇒ 此时按原值查找必然失败。 */
         bool removed = m->closed_removed;
 
         /* 移除已回收条目（swap-remove）——防 closed_sb_count 只增不减导致列表爆炸
          * + 已回收 SB 被再次选为 victim 的无限 GC 空转。
          * 擦除失败也移除：该 SB 已坏/不可再用，留在列表里只会反复被选。 */
-        if ((!removed) && alc_find_closed_sb(m->alloc, &m->victim, &closed_idx))
+        if ((!removed) && alc_super_closed_find(m->alloc, &m->victim, &closed_idx))
         {
-            alc_remove_closed_sb(m->alloc, closed_idx);
+            alc_super_closed_remove(m->alloc, closed_idx);
             removed = true;
         }
 
@@ -977,18 +977,6 @@ static void mig_finish(mig_handle_t *m)
 }
 
 /* ── 4.1 cache program 批次辅助（GC/WL）── */
-
-/* 只有普通 GC/预测搬移走 batch；静态 WL 的 high-wear 目标选块与连续页假设冲突。 */
-static bool mig_batch_can_start(const mig_handle_t *m)
-{
-    if (m->dst_high_wear || m->batch_disabled)
-    {
-        return false;
-    }
-
-    /* room 已蕴含：SB 开着、所有 plane 的 page0 已成功、剩余 ≥4 页。 */
-    return alc_open_pair_room(m->alloc, FTL_TEMP_COLD) >= MIG_BATCH_PAGES;
-}
 
 /* 当前页有数据的 plane 是否共享同一页基址。pair 命令只有一个 cmd->meta，
  * 两 plane 都有数据时基址不一致会把 plane1 的 META 写错。 */
@@ -1235,7 +1223,10 @@ static bool mig_step_read(mig_handle_t *m)
             return false;
         }
 
-        if (!m->batch_mode && mig_batch_can_start(m))
+        /* 只有普通 GC/预测搬移走 batch；静态 WL 的 high-wear 目标选块与连续页假设
+         * 冲突；room 已蕴含：SB 开着、所有 plane 的 page0 已成功、剩余 ≥4 页。 */
+        if (!m->batch_mode && !m->dst_high_wear && !m->batch_disabled &&
+            (alc_super_open_get_room(m->alloc, FTL_TEMP_COLD) >= MIG_BATCH_PAGES))
         {
             m->batch_mode = true;
         }
@@ -1285,9 +1276,9 @@ static bool mig_step_read(mig_handle_t *m)
         /* 成对分配目标页（Cold 流）。池耗尽 ⇒ 中止（不擦 victim，源数据仍在、
          * L2P 未动，下轮 GC 再来）——**不得**先擦后搬。
          * 静态 WL 走 high-wear 变体：目标取擦除最多的空闲块（RISK-WL-08）。 */
-        const ftl_status_e dst_st = m->dst_high_wear
-                                        ? alc_alloc_pair_high_wear(m->alloc, m->dst)
-                                        : alc_alloc_pair(m->alloc, FTL_TEMP_COLD, m->dst);
+        const alc_super_alloc_mode_e dst_mode = m->dst_high_wear ? ALC_SUPER_ALLOC_COLD_HIGH_WEAR
+                                                                 : ALC_SUPER_ALLOC_COLD;
+        const ftl_status_e           dst_st   = alc_super_open_alloc_pair(m->alloc, dst_mode, m->dst);
 
         if (dst_st != FTL_OK)
         {
@@ -1504,7 +1495,7 @@ static void mig_batch_rewind_dst(mig_handle_t *m, BYTE n)
 {
     for (BYTE k = 0U; k < n; k++)
     {
-        alc_rewind_pair(m->alloc, FTL_TEMP_COLD);
+        alc_super_open_rewind_pair(m->alloc, FTL_TEMP_COLD);
     }
 }
 
@@ -1540,7 +1531,7 @@ static bool mig_batch_alloc_dst(mig_handle_t *m, BYTE n)
 {
     for (BYTE j = 0U; j < n; j++)
     {
-        if (alc_alloc_pair(m->alloc, FTL_TEMP_COLD, m->batch[j].dst) != FTL_OK)
+        if (alc_super_open_alloc_pair(m->alloc, ALC_SUPER_ALLOC_COLD, m->batch[j].dst) != FTL_OK)
         {
             mig_batch_rewind_dst(m, j);
             return false;
@@ -1630,7 +1621,7 @@ static bool mig_step_write_settle_batch(mig_handle_t *m)
     {
         if (m->aborted)
         {
-            (void)alc_close_open_sb(m->alloc, FTL_TEMP_COLD);
+            (void)alc_super_close(m->alloc, FTL_TEMP_COLD);
         }
         return true;
     }
@@ -1939,8 +1930,8 @@ static DWORD mig_gc_evaluate(mig_handle_t *m, DWORD now_ms, bool *host_writing)
         LOGD(LOG_TAG_GC "trig=0x%02lx free=%u op=%u/%u writes=%lu reclaimed=%lu novictim=%lu nogain=%lu mode=%s hw=%u minvr=%u\r\n",
              triggers,
              (unsigned)m->alloc->free_count,
-             (unsigned)alc_get_op_count(m->alloc, 0U),
-             (unsigned)alc_get_op_count(m->alloc, 1U),
+             (unsigned)alc_op_get_count(m->alloc, 0U),
+             (unsigned)alc_op_get_count(m->alloc, 1U),
              *m->total_writes,
              m->reclaimed_count,
              m->novictim_count,
@@ -2245,7 +2236,7 @@ static void mig_complete_read(mig_handle_t              *m,
              * g0/g1 同一坐标（RISK-MIG-06）。 */
             LOGW(LOG_TAG_MIG "victim read failed gblk=%u x%u cause=%s — mark BAD\r\n", (unsigned)gsrc, (unsigned)m->fail_count[plane], cause);
             (void)bbt_mark_bad(m->alloc, gsrc);
-            if (alc_closed_drop_plane(m->alloc, plane, m->victim.plane_blocks[plane]))
+            if (alc_super_closed_drop_plane(m->alloc, plane, m->victim.plane_blocks[plane]))
             {
                 m->closed_removed = true;
             }
@@ -2303,7 +2294,7 @@ static void mig_complete_write(mig_handle_t              *m,
             return;
         }
 
-        alc_note_page_programmed(m->alloc, FTL_TEMP_COLD, m->dummy_pba);
+        alc_super_open_note_page_programmed(m->alloc, FTL_TEMP_COLD, m->dummy_pba);
         m->phase = MIG_WRITE; /* 重试原 page>0 的写 */
         mig_step(m);
         return;
@@ -2322,7 +2313,7 @@ static void mig_complete_write(mig_handle_t              *m,
     }
 
     /* page0 异步写屏障：只记**本 plane**；另一 plane 可能没有数据、page0 仍未编程。 */
-    alc_note_page_programmed(m->alloc, FTL_TEMP_COLD, m->dst[m->plane]);
+    alc_super_open_note_page_programmed(m->alloc, FTL_TEMP_COLD, m->dst[m->plane]);
 
     m->write_ok = true;
     m->phase    = MIG_WRITE_SETTLE;
@@ -2354,7 +2345,7 @@ static void mig_complete_write_batch(mig_handle_t              *m,
     {
         if (!m->batch_cleanup_done)
         {
-            (void)alc_close_open_sb(m->alloc, FTL_TEMP_COLD);
+            (void)alc_super_close(m->alloc, FTL_TEMP_COLD);
             m->batch_aborts++;
             m->batch_cleanup_done = true;
         }
@@ -2407,7 +2398,7 @@ static void mig_complete_erase(mig_handle_t              *m,
              * mig_finish 的「整块迁移成功」分支。 */
 
             /* 擦除成功：统一走 allocator 的擦除记账（含 !bad 断言 + 清 valid）。 */
-            alc_note_erase(m->alloc, gsrc, total_writes);
+            alc_bst_note_erase(m->alloc, gsrc, total_writes);
 
             /* 去向二选一——**退役块不得先进池**：
              * 退役直接 RETIRED，与「state == FREE ⟺ 在池」不变量一致（allocator.h ②）。 */
@@ -2418,12 +2409,12 @@ static void mig_complete_erase(mig_handle_t              *m,
                  * victim 正常是 CLOSED、从未入池 ⇒ remove_from_free 是文档化 no-op
                  * （allocator.h 判据 4）；保留它是为了让「退役块绝不留在池里」不依赖调用顺序。
                  * rr_retire_block 内部把 read_count 归零（read disturb 重计）。 */
-                alc_remove_from_free(m->alloc, gsrc);
+                alc_free_remove(m->alloc, gsrc);
                 rr_retire_block_at(m->alloc, gsrc);
             }
             else
             {
-                alc_free_block(m->alloc, gsrc);
+                alc_free_push(m->alloc, gsrc);
             }
         }
     }
@@ -2449,7 +2440,7 @@ static void mig_complete_erase(mig_handle_t              *m,
     /* 逐 plane 摘除已处理的块：擦完后该块已归还 Free Pool（或已标坏），旧 Closed 条目
      * 不得继续引用它——否则块被重新分配并再次 Closed 后会被旧条目误认（RISK-GC-04）。
      * 条目在最后一个 plane 摘除时自动移除。 */
-    if (alc_closed_drop_plane(m->alloc, plane, m->victim.plane_blocks[plane]))
+    if (alc_super_closed_drop_plane(m->alloc, plane, m->victim.plane_blocks[plane]))
     {
         m->closed_removed = true;
     }

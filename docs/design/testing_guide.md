@@ -495,12 +495,12 @@ addr g <g> [ch ce lun]            # 实例内全局块号 → plane/block + BST 
 
 | 项 | 当前值 | 判据 |
 |---|---|---|
-| `.ssd_code_high`（ITCM） | release 61,352 B / debug 62,080 B / 64 KB | VMA `0x00000000`；启动复制后 USB/NAND 正常；release 余量 4,184 B |
+| `.ssd_code_high`（ITCM） | release 61,296 B / debug 62,064 B / 64 KB | VMA `0x00000000`；启动复制后 USB/NAND 正常；release 余量 4,240 B |
 | `.dtcm_data` | release 67,832 B / 128 KB | 预留 20 KB stack；交换版：BCH 进 DTCM、`g_ftl_md` 回 SRAM4 |
 | DTCM 内容 | 整对象放置：`ftl.o`（`g_ftl`/`g_ftl_wbuf`/`g_ftl_journal`）、`fc.o`（命令池+描述符池+SQ/HSQ/CQ+簿记）、`nand_dispatch.o`（dispatch queues）、`fc_bch_engine.o`（BCH 静态表） | 均为 CPU-only；**NAND 页缓冲不放 DTCM** |
 | SRAM4 内容 | `metadata.o` 的 `g_ftl_md`（33,752 B，NOLOAD，init 时 memset） | 回到 TCM 之前的基线域；基线 843/889 已验证 |
 | ITCM 内容 | 公共集（debug/release）：`ftl.o`、`l2p_cache.o`、`wbuf.o`、`pending.o`、`cache_batch.o`、`fc.o`、`fc_data_path.o`、`fc_bch_engine.o`、`nand_dispatch.o`、`nand_fmc.o`。release 额外集：`allocator.o`、`journal.o`、`metadata.o`、`metadata_job.o`、`migrate.o`、`gc.o`、`wear_leveling.o`、`bg_scheduler.o`、`bg_wiring.o`、`completion_table.o`、`ftl_op.o`、`fc_interface.o`、`fc_queue.o`、`fc_command.o`、`nand_engine.o` | 用对象路径 `*release/obj/...` 做 build-type 选择，不是 C 预处理器；debug 对象在 `debug/obj/`，不匹配额外集。超过 64 KB 或出现 relocation truncated 时按目标文件收窄 |
-| 板端 A/B | 基线 843/889 KB/s；TCM 版（release ITCM 29,728 B）840/885 KB/s；当前 release ITCM 61,352 B（板端结果为重构前 61,384 B 镜像）+ BCH↔md 交换版 **843/887 KB/s**，`info avg=4171us`、`cw=24906/99624/7891/0`、`bad=0`、`mig=0/0`、`gcm=0`，H2testw 415/423 MB 无错误 | 与 840/885 差 +3/+2 KB/s，属测量抖动；本次未触发 GC/迁移，额外 ITCM 集收益未覆盖 |
+| 板端 A/B | 基线 843/889 KB/s；TCM 版（release ITCM 29,728 B）840/885 KB/s；当前 release ITCM 61,296 B（板端结果为重构前 61,384 B 镜像）+ BCH↔md 交换版 **843/887 KB/s**，`info avg=4171us`、`cw=24906/99624/7891/0`、`bad=0`、`mig=0/0`、`gcm=0`，H2testw 415/423 MB 无错误 | 与 840/885 差 +3/+2 KB/s，属测量抖动；本次未触发 GC/迁移，额外 ITCM 集收益未覆盖 |
 | BCH/堆 A/B | 旧实现 BCH 需 41 KB 表 + 32 KB roots 的 DTCM 堆；TCM 版只剩约 67 KB 堆，疑似初始化失败并静默跳过 ECC | 启动日志应出现 `[FC ] BCH ready: static tables, no heap`；写速恢复 ≥843 KB/s |
 | BCH↔md 交换（正常路径已上板） | BCH 42,656 B → DTCM；`g_ftl_md` 33,752 B → SRAM4；DTCM 67,832 B，free≈63 KB | 2026-10-23 boot `BCH ready` + 恢复 + H2testw 415/423 MB 0 错误（843/887 KB/s）通过；压力/掉电仍按 RISK-TCM-04 |
 | 页缓冲域 A/B | 页缓冲放 DTCM：multi-plane handler 数据正确但 NAND 读回全 FF，`format` 全候选失败；放 AXI_NOCACHE：`format` 成功且 H2testw 415/423 MB 通过（840/885 KB/s） | 页缓冲必须 AXI_NOCACHE；不得再条件放 DTCM |

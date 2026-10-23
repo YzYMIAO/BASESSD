@@ -5,7 +5,7 @@
  * Wear Leveling — 动态 + 静态磨损均衡
  *
  * 动态磨损均衡（Dynamic WL）：
- *   alc_select_plane_block_from_pool() 每次为**每个 plane 各自**从 Free Pool 选该 plane
+ *   alc_free_find_block() 每次为**每个 plane 各自**从 Free Pool 选该 plane
  *   擦除次数最少的 Block（Policy B：各 plane 独立分配，不要求 block 同号），
  *   确保新分配的 Block 磨损均匀。已在 allocator 中实现。
  *
@@ -91,8 +91,8 @@ bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim);
  */
 
 /*
- * 磨损统计 —— 口径（好块 / 坏块排除）由 allocator 定义。本模块只用
- * `alc_free_max_erase` 与文件内的 used-SB 最小值，不再导出单点访问器。
+ * 磨损统计 —— 口径（好块 / 坏块排除）由 allocator 定义；used-SB 最小值内联在
+ * `wl_should_trigger`，Free Pool 最大擦除值仍走 allocator 的 `alc_free_get_max_erase`。
  */
 
 #endif /* FTL_WEAR_LEVELING_H */

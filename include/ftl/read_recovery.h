@@ -50,7 +50,7 @@ typedef struct ftl_context ftl_ctx_t;
 /* read disturb 慢死阈值——单块自上次擦除以来的累计读次数超此值即视为慢死候选。
  * read_count 由 host 读 completion（ftl.c）与 GC/WL 搬移读（migrate.c）共同累加；
  * 取 SLC MT29F4G08 读干扰容忍度量级（NAND 读寿命 ~10^5 次，保守取每块 1000 次
- * 触发搬移，远早于数据损坏）。擦除成功会把 read_count 清零（alc_note_erase）。 */
+ * 触发搬移，远早于数据损坏）。擦除成功会把 read_count 清零（alc_bst_note_erase）。 */
 #define RR_READ_DISTURB_THRESHOLD (1000U)
 
 /* 慢死预测巡检节拍（由 migrate handle 自持）：≥1s 才扫一轮（read disturb 是慢变量，

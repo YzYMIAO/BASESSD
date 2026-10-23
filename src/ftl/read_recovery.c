@@ -780,7 +780,7 @@ bool rr_predictive_scan(const alc_t *alloc, WORD *gblock)
                 continue; /* 状态与闭链表不一致（不应发生）：不拿它冒险 */
             }
 
-            const super_block_t *sb       = alc_closed_at(alloc, sb_id);
+            const super_block_t *sb       = alc_super_closed_get_at(alloc, sb_id);
             bool                 bad_peer = false;
 
             for (BYTE p = 0U; p < PLANE_NUM; p++)
@@ -824,9 +824,9 @@ void rr_retire_block(bst_block_t *b)
 
     /* 退役：不再分配新数据（RETIRED 态），不标坏（BBT 不删、仍可读）。
      * ⚠ **调用者负责先把该块驱逐出 Free Pool**（本函数只拿 bst_block_t*，拿不到 gblock）——
-     *   只置 RETIRED 挡不住分配：alc_select_plane_block_from_pool 的判据是
+     *   只置 RETIRED 挡不住分配：alc_free_find_block 的判据是
      *   Free Pool **数组**（只跳过 is_bad），留在池里的退役块照样会被选中。
-     *   由 migrate.c 的 MIG_ERASE RETIRE 分支调 alc_remove_from_free 完成。 */
+     *   由 migrate.c 的 MIG_ERASE RETIRE 分支调 alc_free_remove 完成。 */
     ftl_block_set_state(b, FTL_BLOCK_STATE_RETIRED);
     ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 

@@ -648,12 +648,12 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
         return FTL_OK;
     }
 
-    /* 驱逐出 Free Pool —— **必须先于置 BAD**：alc_remove_from_free 校验「在池 ⇒ state == FREE」
+    /* 驱逐出 Free Pool —— **必须先于置 BAD**：alc_free_remove 校验「在池 ⇒ state == FREE」
      * （allocator.h 不变量②）。块若在池里，此刻它正是 FREE；先置 BAD 再出池就会命中断言。
      * 不驱逐则留下「在池却不是 FREE」的反向不一致（运行时标坏：擦除失败 / 预测性标坏）。
-     * 不在池内 ⇒ no-op（alc_remove_from_free 的文档化契约，判据 4）。
+     * 不在池内 ⇒ no-op（alc_free_remove 的文档化契约，判据 4）。
      * 注：出厂扫描 / BBT 加载路径跑在建池之前（池还是空的）⇒ 恒 no-op，无需特判。 */
-    alc_remove_from_free(alloc, gblock);
+    alc_free_remove(alloc, gblock);
 
     /* BST 置 BAD（单数据源，后台 bbt_handle 持久化到 NAND）。BAD 是状态机**终态** ⇒
      * 一行赋值即抹掉 OPEN/CLOSED/FREE/LOG（原掩码漏位的风险消失）；温度字段不动（与状态正交）。
@@ -705,15 +705,15 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock)
     }
     else if (!alloc->bbt.format_in_progress && (bbt_spare_pool_refill(alloc, plane) != FTL_OK))
     {
-        if (alc_refill_free_from_op(alloc, plane) == FTL_GBLOCK_INVALID)
+        if (alc_free_refill_from_op(alloc, plane) == FTL_GBLOCK_INVALID)
         {
             /* 限速：保留区双空时每次坏块都打会刷屏；只报第 1/64 次。 */
             if ((s_reserve_low_logged++ % BBT_RESERVE_LOW_LOG_EVERY) == 0U)
             {
                 LOGW(LOG_TAG_BLK "reserve low plane=%u spare=%u op=%u free=%u count=%lu\r\n",
                      (unsigned)plane,
-                     (unsigned)alc_get_spare_count(alloc, plane),
-                     (unsigned)alc_get_op_count(alloc, plane),
+                     (unsigned)alc_spare_get_count(alloc, plane),
+                     (unsigned)alc_op_get_count(alloc, plane),
                      (unsigned)alloc->free_count,
                      s_reserve_low_logged);
             }
@@ -1189,7 +1189,7 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
  *   参数：alloc —— 分配器；plane —— 坏块所属 plane（取同 plane 的替换块）。
  *   返回：FTL_OK 成功；FTL_ERROR 参数非法 / 该 plane Spare Pool 耗尽（容量自然下降）。
  *   实现要点：只出不进（出厂每 plane 预留 FTL_SPARE_POOL_PER_PLANE 个）。调用者保证
- *             该块已擦除（alc_free_block 契约）。
+ *             该块已擦除（alc_free_push 契约）。
  *             ⚠ 必须按 plane 取：Spare 池按 super block 粒度预留，补错 plane 不恢复该
  *             plane 的配对能力（原实现从全局池 LIFO 弹出，实际总补 plane 0）。
  * -------------------------------------------------------------------- */
@@ -1198,7 +1198,7 @@ ftl_status_e bbt_spare_pool_refill(alc_t *alloc, BYTE plane)
     /*
      * Spare Pool 坏块替换：出厂时 main.c 已为**每个 plane** 预留
      * FTL_SPARE_POOL_PER_PLANE=50 个好块到 alloc->spare_blocks[plane]。运行时
-     * bbt_mark_bad 标坏一块后，从该块所属 plane 取一个好块 alc_free_block
+     * bbt_mark_bad 标坏一块后，从该块所属 plane 取一个好块 alc_free_push
      * 补进 free pool，保用户容量水位。
      * 只出不进，该 plane Spare Pool 耗尽后返回 FTL_ERROR（容量自然下降）。
      */
@@ -1208,11 +1208,11 @@ ftl_status_e bbt_spare_pool_refill(alc_t *alloc, BYTE plane)
     }
 
     WORD gblock;
-    if (!alc_spare_try_pop(alloc, plane, &gblock))
+    if (!alc_spare_pop(alloc, plane, &gblock))
     {
         return FTL_ERROR; /* 该 plane Spare Pool 耗尽 */
     }
-    alc_free_block(alloc, gblock);
+    alc_free_push(alloc, gblock);
 
     return FTL_OK;
 }

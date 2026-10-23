@@ -494,7 +494,7 @@ static void ftl_host_io_write_fail(ftl_ctx_t *ftl, pend_req_t *pending, const fc
         (void)bbt_mark_bad(&ftl->alloc, ftl_pba_gblock(pending->new_pba1));
     }
 
-    (void)alc_close_open_sb(&ftl->alloc, FTL_TEMP_HOT);
+    (void)alc_super_close(&ftl->alloc, FTL_TEMP_HOT);
 }
 
 /* --------------------------------------------------------------------
@@ -530,7 +530,7 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
 
     DWORD pba[PLANE_NUM];
 
-    if (alc_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, pba) != FTL_OK)
+    if (alc_super_open_alloc_pair(&ftl->alloc, ALC_SUPER_ALLOC_HOT, pba) != FTL_OK)
     {
         return FTL_AGAIN; /* Free/OP 耗尽：无法替换 */
     }
@@ -539,9 +539,9 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
     {
         if (bit_mask_any(pending->cw_bitmap, ftl_cw_plane_mask(p)) &&
             (pba_to_page(pba[p]) > 0U) &&
-            (!alc_page0_programmed(&ftl->alloc, FTL_TEMP_HOT, pba[p])))
+            (alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, pba[p]) != ALC_SUPER_PBA_OPEN_PAGE0_DONE))
         {
-            alc_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
+            alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
             return FTL_AGAIN;
         }
     }
@@ -550,7 +550,7 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
 
     if (cmd == NULL)
     {
-        alc_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
+        alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
         return FTL_AGAIN;
     }
 
@@ -566,14 +566,14 @@ static ftl_status_e ftl_write_retry(ftl_ctx_t *ftl, pend_req_t *pending, fc_comm
     if (st != FTL_OK)
     {
         (void)fc_command_release(cmd);
-        alc_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
+        alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
         return st;
     }
 
     if (ftl_op_submit(cmd, FTL_OP_HOST_IO, NULL) != FTL_OK)
     {
         (void)fc_command_release(cmd);
-        alc_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
+        alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
         return FTL_AGAIN;
     }
 
@@ -691,10 +691,10 @@ static void ftl_cache_wb_fail(ftl_ctx_t *ftl, const fc_command_status_t *complet
 
             const pend_req_t *p = &ftl->pending.slots[idx];
 
-            if (alc_pba_belongs_to_open_sb(&ftl->alloc, FTL_TEMP_HOT, p->new_pba) ||
-                alc_pba_belongs_to_open_sb(&ftl->alloc, FTL_TEMP_HOT, p->new_pba1))
+            if ((alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, p->new_pba) != ALC_SUPER_PBA_NOT_OPEN) ||
+                (alc_super_open_get_pba_state(&ftl->alloc, FTL_TEMP_HOT, p->new_pba1) != ALC_SUPER_PBA_NOT_OPEN))
             {
-                (void)alc_close_open_sb(&ftl->alloc, FTL_TEMP_HOT);
+                (void)alc_super_close(&ftl->alloc, FTL_TEMP_HOT);
                 break;
             }
         }
@@ -863,8 +863,8 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
                  * 覆盖两 plane（缺失 plane 写零），两个 page0 都已编程。 */
                 if (pending->op == PENDING_OP_WRITE_PAGE0)
                 {
-                    alc_note_page_programmed(&ftl->alloc, FTL_TEMP_HOT, pending->new_pba);
-                    alc_note_page_programmed(&ftl->alloc, FTL_TEMP_HOT, pending->new_pba1);
+                    alc_super_open_note_page_programmed(&ftl->alloc, FTL_TEMP_HOT, pending->new_pba);
+                    alc_super_open_note_page_programmed(&ftl->alloc, FTL_TEMP_HOT, pending->new_pba1);
                 }
                 else
                 {
@@ -874,7 +874,7 @@ void ftl_host_io_callback(struct ftl_context *ftl, const fc_command_status_t *co
                         {
                             const DWORD pba = (p == 0U) ? pending->new_pba : pending->new_pba1;
 
-                            alc_note_page_programmed(&ftl->alloc, FTL_TEMP_HOT, pba);
+                            alc_super_open_note_page_programmed(&ftl->alloc, FTL_TEMP_HOT, pba);
                         }
                     }
                 }
@@ -1457,7 +1457,7 @@ void ftl_service(ftl_ctx_t *ftl)
  *             · 读：逐 LBA 查 L2P，按 (物理 plane, 页) 分组——未映射、或同 plane 换了页
  *               即收缩；首个 LBA 就未映射则同步零填 1 个 LBA 并消费它。
  *             · 写：按窗口内 LBA 段算 flat 位图（每个 LBA 落自己 plane 位的页 + 自己的
- *               CW），一次 alc_alloc_pair 拿两个 plane 的页。
+ *               CW），一次 alc_super_open_alloc_pair 拿两个 plane 的页。
  * -------------------------------------------------------------------- */
 static ftl_status_e ftl_issue_subop(ftl_ctx_t *ftl, WORD gi, DWORD internal_lba, void *buffer, BYTE *n_cw)
 {

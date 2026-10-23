@@ -1106,7 +1106,7 @@ WORD md_log_alloc(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
      * ftl_is_metadata_block 动态识别，擦空后由 md_log_release 回 OP 池。 */
     if (dir->log_borrow_count < L2P_LOG_BORROW_MAX)
     {
-        const WORD borrowed = alc_alloc_log_block(alloc, plane);
+        const WORD borrowed = alc_op_alloc_log_block(alloc, plane);
 
         if (borrowed != FTL_GBLOCK_INVALID)
         {
@@ -1143,16 +1143,16 @@ void md_log_release(md_dir_cache_t *dir, WORD gblock)
 
     if (borrowed)
     {
-        /* 借来的动态日志块回 OP 池（与 alc_alloc_log_block 成对）；OP 满则回 Free Pool。 */
+        /* 借来的动态日志块回 OP 池（与 alc_op_alloc_log_block 成对）；OP 满则回 Free Pool。 */
         ftl_block_set_state(b, FTL_BLOCK_STATE_NONE);
         ftl_block_clear_valid(b);
         ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
 
         const BYTE plane = ftl_gblock_plane(gblock);
 
-        if (!alc_op_try_push(alloc, plane, gblock))
+        if (!alc_op_push(alloc, plane, gblock))
         {
-            alc_free_block(alloc, gblock);
+            alc_free_push(alloc, gblock);
         }
         return;
     }

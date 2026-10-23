@@ -978,7 +978,7 @@ static void md_note_block_erased(md_dir_cache_t *dir, WORD gblock)
 {
     const DWORD total_writes = *dir->total_writes;
 
-    alc_note_erase(dir->alloc, gblock, total_writes);
+    alc_bst_note_erase(dir->alloc, gblock, total_writes);
     md_log_release(dir, gblock);
 }
 

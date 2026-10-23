@@ -16,7 +16,6 @@
  *
  * 文件结构：
  *   1. 触发 / 选块     wl_should_trigger / wl_select_victim
- *   2. 磨损统计        wl_min_used_erase（文件内 static）
  *
  * ⚠ 搬移在 `ftl/migrate.c` 的异步 job 里完成（GC / WL 共用一台引擎，靠 kind/post 区分）
  *   ——本文件只留触发判定与选块策略。
@@ -36,16 +35,34 @@
 
 /* ── 1. 触发 / 选块 ── */
 
-/* Closed SB 中最小的平均擦除次数（UBI 的 e1）。
- * 跳过：Open 条目、含坏 plane 的 SB（migrate 读它必 abort）、全哨兵条目、
- * 有效 CW 不足 WL_MIN_VALID_RATIO 的 SB（与 wl_select_victim 同门限）。 */
-static DWORD wl_min_used_erase(const alc_t *alloc)
+/* --------------------------------------------------------------------
+ * wl_should_trigger
+ *   功能：判定是否该做一轮 WL（UBI 模型）。
+ *   参数：alloc —— 分配器；total_writes —— 累计编程次数（启动门）。
+ *   返回：true 触发；false 不触发。
+ *   实现要点：先过 WL_MIN_WRITES 启动门（刚开机不抖）；唯一判据是
+ *             `max_free_ec - min_used_ec >= WL_THRESHOLD`：
+ *               · e1 = 最冷的 used SB（Closed 列表平均擦除次数最小）；
+ *               · e2 = Free Pool 中擦除次数最大的块。
+ *             搬移不改变擦除计数：差值不足时必须停止，否则就是纯写放大
+ *             （板端 `kind=wl vcw=512` 无限搬迁，RISK-WL-08）。
+ * -------------------------------------------------------------------- */
+bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
 {
-    DWORD min_ec = UINT32_MAX;
+    /* 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
+     * 周期节拍由 mig_handle 的 WL 求值 的 WL_EVAL_INTERVAL_MS 负责。 */
+    if (total_writes < WL_MIN_WRITES)
+    {
+        return false;
+    }
+
+    /* e1：最冷的 used SB（Closed 列表平均擦除次数最小）。
+     * 跳过 Open、含坏 plane、全哨兵、有效 CW 不足的 SB。 */
+    DWORD min_used = UINT32_MAX;
 
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
-        const super_block_t *sb = alc_closed_at(alloc, i);
+        const super_block_t *sb = alc_super_closed_get_at(alloc, i);
 
         if (sb->is_open)
         {
@@ -71,15 +88,14 @@ static DWORD wl_min_used_erase(const alc_t *alloc)
             continue;
         }
 
-        alc_sb_stats_t st;
-        alc_get_sb_stats(alloc, sb, &st);
+        alc_super_stats_t st;
+        alc_super_get_stats(alloc, sb, &st);
         if (st.plane_count == 0U)
         {
             continue;
         }
 
-        /* 与 wl_select_victim 同一有效门限：触发判据必须与实际能搬的候选一致，
-         * 否则可能按一个「不可选」的极冷块触发，却把更热的块搬到更冷的空闲块上。 */
+        /* 与 wl_select_victim 同一有效门限：触发判据必须与实际能搬的候选一致。 */
         const WORD min_valid_cw = (WORD)(FTL_CW_PER_SB * WL_MIN_VALID_RATIO / 100U);
 
         if (st.valid_cw < min_valid_cw)
@@ -89,38 +105,18 @@ static DWORD wl_min_used_erase(const alc_t *alloc)
 
         const DWORD sb_ec = st.erase_sum / st.plane_count;
 
-        if (sb_ec < min_ec)
+        if (sb_ec < min_used)
         {
-            min_ec = sb_ec;
+            min_used = sb_ec;
         }
     }
 
-    return (min_ec == UINT32_MAX) ? 0U : min_ec;
-}
-
-/* --------------------------------------------------------------------
- * wl_should_trigger
- *   功能：判定是否该做一轮 WL（UBI 模型）。
- *   参数：alloc —— 分配器；total_writes —— 累计编程次数（启动门）。
- *   返回：true 触发；false 不触发。
- *   实现要点：先过 WL_MIN_WRITES 启动门（刚开机不抖）；唯一判据是
- *             `max_free_ec - min_used_ec >= WL_THRESHOLD`：
- *               · e1 = 最冷的 used SB（Closed 列表平均擦除次数最小）；
- *               · e2 = Free Pool 中擦除次数最大的块。
- *             搬移不改变擦除计数：差值不足时必须停止，否则就是纯写放大
- *             （板端 `kind=wl vcw=512` 无限搬迁，RISK-WL-08）。
- * -------------------------------------------------------------------- */
-bool wl_should_trigger(const alc_t *alloc, DWORD total_writes)
-{
-    /* 启动门：累计编程次数不足时不求值。这是一次性门，不是周期节拍；
-     * 周期节拍由 mig_handle 的 WL 求值 的 WL_EVAL_INTERVAL_MS 负责。 */
-    if (total_writes < WL_MIN_WRITES)
+    if (min_used == UINT32_MAX)
     {
-        return false;
+        min_used = 0U;
     }
 
-    const DWORD min_used = wl_min_used_erase(alloc);
-    const DWORD max_free = alc_free_max_erase(alloc);
+    const DWORD max_free = alc_free_get_max_erase(alloc);
 
     return (max_free > min_used) && ((max_free - min_used) >= WL_THRESHOLD);
 }
@@ -148,7 +144,7 @@ bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
 
     for (WORD i = 0U; i < alloc->closed_sb_count; i++)
     {
-        const super_block_t *sb = alc_closed_at(alloc, i);
+        const super_block_t *sb = alc_super_closed_get_at(alloc, i);
 
         /* 跳过仍为 Open 的 SB */
         if (sb->is_open)
@@ -183,8 +179,8 @@ bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
         /* 各 plane 聚合值由 allocator 统一计算（有效 CW / 擦除平均 / read disturb）。
          * 有效 CW 越多（越冷）越优先；同一有效数下 read_count 高者优先
          * （read disturb 风险高 → 优先搬移；read_count 来自 host 读 + GC/WL 搬移读累加）。 */
-        alc_sb_stats_t st;
-        alc_get_sb_stats(alloc, sb, &st);
+        alc_super_stats_t st;
+        alc_super_get_stats(alloc, sb, &st);
         if (st.plane_count == 0U)
         {
             continue; /* 全哨兵条目 */
@@ -221,7 +217,3 @@ bool wl_select_victim(const alc_t *alloc, wl_victim_t *victim)
     *victim = best;
     return true;
 }
-
-/* ── 2. 磨损统计 ──
- * 口径（好块 / 坏块排除）由 allocator 定义；本模块只用一个文件内 static 的
- * used-SB 最小值（wl_min_used_erase），不再导出单点访问器。 */

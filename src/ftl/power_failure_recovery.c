@@ -226,7 +226,7 @@ static ftl_status_e ftl_format_write_initial_anchor(ftl_ctx_t *ftl)
  *
  *   返回：无；副作用：非 BBT-pool 的 BAD 块置回 NONE，alloc->bad_count = 保留数。
  *   ⚠ 调用前必须清空 allocator 池（ftl_recovery_reset_blocks）：否则失败块
- *     重新标坏时 alc_remove_from_free 会撞「在池 ⇒ 必须 FREE」断言。
+ *     重新标坏时 alc_free_remove 会撞「在池 ⇒ 必须 FREE」断言。
  * ------------------------------------------------------------------ */
 static void ftl_format_reset_bad_map(alc_t *alloc, BYTE old_bad[BBT_BITMAP_SIZE])
 {
@@ -627,7 +627,7 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
      * 快照不可信，强制走 full metadata rebuild；新 CP 落盘后才清标志（见
      * cp_complete_hdr_write）。此时即使 Directory 加载失败也继续——重建本身
      * 就不依赖旧 Directory。 */
-    if (alc_is_bbt_rebuild_required(&ftl->alloc))
+    if (alc_bbt_is_rebuild_required(&ftl->alloc))
     {
         LOGE(LOG_TAG_BOOT "rebuild required (metadata log lost) — force full metadata rebuild\r\n");
 
@@ -760,15 +760,15 @@ static ftl_status_e ftl_boot_carve_pools(struct ftl_context *ftl)
             continue;
         }
 
-        if (alc_spare_try_push(alloc, plane, gblock))
+        if (alc_spare_push(alloc, plane, gblock))
         {
             continue;
         }
-        if (alc_op_try_push(alloc, plane, gblock))
+        if (alc_op_push(alloc, plane, gblock))
         {
             continue;
         }
-        alc_free_block(alloc, gblock);
+        alc_free_push(alloc, gblock);
     }
 
     alloc->total_blocks = good_n;
@@ -783,7 +783,7 @@ static void recovery_refill_spare_pools(ftl_ctx_t *ftl)
     {
         (void)alc_spare_refill_from_free(&ftl->alloc, p);
 
-        const WORD n = alc_get_spare_count(&ftl->alloc, p);
+        const WORD n = alc_spare_get_count(&ftl->alloc, p);
 
         if (n < FTL_SPARE_POOL_PER_PLANE)
         {
@@ -893,8 +893,8 @@ static ftl_status_e ftl_boot_clean_start(struct ftl_context   *ftl,
                      (unsigned)stats.closed_blocks,
                      (unsigned)stats.log_blocks,
                      (unsigned)ftl->alloc.free_count,
-                     (unsigned)alc_get_op_total(&ftl->alloc),
-                     (unsigned)alc_get_spare_total(&ftl->alloc),
+                     (unsigned)alc_pool_sum_counts(ftl->alloc.op_count, PLANE_NUM),
+                     (unsigned)alc_pool_sum_counts(ftl->alloc.spare_count, PLANE_NUM),
                      (unsigned)stats.anomalies,
                      stats.valid_cw);
             }
@@ -1119,8 +1119,8 @@ static ftl_status_e ftl_boot_power_failure(struct ftl_context *ftl,
                      (unsigned)stats.closed_blocks,
                      (unsigned)stats.log_blocks,
                      (unsigned)ftl->alloc.free_count,
-                     (unsigned)alc_get_op_total(&ftl->alloc),
-                     (unsigned)alc_get_spare_total(&ftl->alloc),
+                     (unsigned)alc_pool_sum_counts(ftl->alloc.op_count, PLANE_NUM),
+                     (unsigned)alc_pool_sum_counts(ftl->alloc.spare_count, PLANE_NUM),
                      (unsigned)stats.anomalies,
                      stats.valid_cw);
             }
@@ -1319,7 +1319,7 @@ static void ftl_recovery_close_block(ftl_ctx_t           *ftl,
 
     alc_t *alloc = &ftl->alloc;
 
-    WORD sb_idx = alc_add_closed_sb(alloc, plane_blocks, temperature);
+    WORD sb_idx = alc_super_closed_add(alloc, plane_blocks, temperature);
 
     /* 列表满（结构上不应发生）：放弃本块，避免用非法索引继续扫描。 */
     if (sb_idx == FTL_BLOCK_NO_SB)
@@ -1341,7 +1341,7 @@ static void ftl_recovery_close_block(ftl_ctx_t           *ftl,
     bst_block_t *b = &alloc->blocks[ftl_gblock(plane, block)];
     for (WORD page = 0U; page < pages_written; page++)
     {
-        DWORD pba = super_block_page_pba(ftl->topo, alc_closed_at(alloc, sb_idx), plane, page);
+        DWORD pba = super_block_page_pba(ftl->topo, alc_super_closed_get_at(alloc, sb_idx), plane, page);
 
         /* 读失败 / 全页无写过 CW → 该页不可用，跳过。
          * CW 级映射：逐 CW 从页内 META（= OOB 反向映射）取回扇区 LBA。 */
@@ -1484,7 +1484,7 @@ static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stat
             }
 
             /* 写过：从 free pool 拉出（防止开机后当作空白块复用覆盖） */
-            alc_remove_from_free(alloc, g);
+            alc_free_remove(alloc, g);
 
             /* ④ 写过的块一律进 Closed——含写满块与掉电时的部分写块。
              *    部分写块不再"续写"（旧 recover_open_sb 行为）：per-block 下无法确定两个
@@ -1548,7 +1548,7 @@ static bool recovery_add_closed(ftl_ctx_t *ftl, WORD g, BYTE temperature)
     }
     plane_blocks[ftl_gblock_plane(g)] = ftl_gblock_block(g);
 
-    if (alc_add_closed_sb(&ftl->alloc, plane_blocks, temperature) == FTL_BLOCK_NO_SB)
+    if (alc_super_closed_add(&ftl->alloc, plane_blocks, temperature) == FTL_BLOCK_NO_SB)
     {
         LOGE(LOG_TAG_BLK "restore: closed_sb_list full, g=%u dropped\r\n", (unsigned)g);
         return false;
@@ -1697,7 +1697,7 @@ static bool ftl_recovery_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOT
             case FTL_BLOCK_STATE_FREE:
             case FTL_BLOCK_STATE_NONE:
                 /* FREE / OP / SPARE 一律先留 NONE：build_pools 之后才入池
-                 * （alc_free_block 拒绝重复归还，预置 FREE 会触发闸门）。 */
+                 * （alc_free_push 拒绝重复归还，预置 FREE 会触发闸门）。 */
                 ftl_block_set_state(b, FTL_BLOCK_STATE_NONE);
                 ftl_block_clear_valid(b);
                 ftl_block_set_temp(b, 0U);
@@ -1963,11 +1963,11 @@ static bool ftl_recovery_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_
 
         if ((st == FTL_BLOCK_STATE_FREE) && (pool == CP_BLOCK_POOL_NONE))
         {
-            alc_free_block(alloc, g);
+            alc_free_push(alloc, g);
         }
         else if (pool == CP_BLOCK_POOL_OP)
         {
-            if (!alc_op_try_push(alloc, plane, g))
+            if (!alc_op_push(alloc, plane, g))
             {
                 LOGE(LOG_TAG_BLK "OP pool overflow at g=%u\r\n", (unsigned)g);
                 return false;
@@ -1975,7 +1975,7 @@ static bool ftl_recovery_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_
         }
         else if (pool == CP_BLOCK_POOL_SPARE)
         {
-            if (!alc_spare_try_push(alloc, plane, g))
+            if (!alc_spare_push(alloc, plane, g))
             {
                 LOGE(LOG_TAG_BLK "Spare pool overflow at g=%u\r\n", (unsigned)g);
                 return false;

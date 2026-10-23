@@ -197,7 +197,7 @@ void ftl_bbt_callback(struct ftl_context *ftl, const fc_command_status_t *comple
  * 由 g_op_callbacks[FTL_OP_METADATA] 引用；ctx = `md_dir_cache_t *`
  * （模块上下文；服务函数内部取 `&dir->handle`）。
  * 服务函数按 job.phase 记完成结果、改 phase、release 命令：
- *   · RECLAIM     ⇒ 成功清待回收位 + alc_free_block；失败保留位，下轮重试；
+ *   · RECLAIM     ⇒ 成功清待回收位 + alc_free_push；失败保留位，下轮重试；
  *   · CP_READ     ⇒ 成功 ftl_cmd_read_data 拷进 job.cp_buf（**须早于 release**）→ CP_WRITE；
  *   · CP_WRITE    ⇒ 成功 md_commit_region 登记 → CP_READ；失败中止（victim 不擦）；
  *   · CP_ANCHOR_* ⇒ 逐页写 + commit（无论成败都推进游标）；

@@ -373,7 +373,7 @@ static void cache_wb_discard(ftl_ctx_t *ftl, cache_wb_build_t *b)
 
     for (BYTE i = 0U; i < b->n_alloc; i++)
     {
-        alc_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
+        alc_super_open_rewind_pair(&ftl->alloc, FTL_TEMP_HOT);
     }
 
     ftl->cache_wb.active = false;
@@ -384,7 +384,7 @@ static ftl_status_e cache_wb_build(ftl_ctx_t *ftl, WORD gi, DWORD lba, const voi
 {
     for (BYTE j = 0U; j < FTL_CACHE_WRITE_MAX_PAGES; j++)
     {
-        if (alc_alloc_pair(&ftl->alloc, FTL_TEMP_HOT, b->pba[j]) != FTL_OK)
+        if (alc_super_open_alloc_pair(&ftl->alloc, ALC_SUPER_ALLOC_HOT, b->pba[j]) != FTL_OK)
         {
             mig_trigger(ftl->mig_handle, MIGRATE_REASON_GC_URGENT);
             cache_wb_discard(ftl, b);
@@ -448,12 +448,12 @@ ftl_cache_write_result_e ftl_cache_write_try(ftl_ctx_t *ftl,
     ASSERT(used != NULL);
 
     /* 条件不满足 = 正常回退，不是错误。
-     * alc_open_pair_room>=4 已蕴含：SB 开着、所有 plane 的 page0 已成功、剩余 ≥4 页。 */
+     * alc_super_open_get_room>=4 已蕴含：SB 开着、所有 plane 的 page0 已成功、剩余 ≥4 页。 */
     const bool batch_active = ftl->cache_wb.active;
     const bool enough_lbas  = (remain >= FTL_CACHE_WRITE_LBAS);
     const bool lba_aligned  = ((lba & (FTL_LBA_PER_PAIR - 1U)) == 0U);
     const bool wbuf_idle    = wb_is_idle(ftl->wbuf);
-    const bool room_ok      = (alc_open_pair_room(&ftl->alloc, FTL_TEMP_HOT) >= FTL_CACHE_WRITE_MAX_PAGES);
+    const bool room_ok      = (alc_super_open_get_room(&ftl->alloc, FTL_TEMP_HOT) >= FTL_CACHE_WRITE_MAX_PAGES);
     const bool budget_ok    = ftl_cache_budget_ok(ftl, FTL_CACHE_WRITE_MAX_PAGES);
 
     if (batch_active || (!enough_lbas) || (!lba_aligned) || (!wbuf_idle) ||
