@@ -45,13 +45,13 @@
 #include "l2p_cache.h"
 
 #include "assertion.h"
-#include "bg_scheduler.h" /* BG_LEVEL_*（档位 → max_kick 表） */
 #include "fc.h"
 #include "fc_interface.h" /* fc_get_resource_stats（写回前的资源预检） */
 #include "ftl.h"          /* ftl_ctx_t / ftl_service_pump（同步逃生口用） */
 #include "ftl_fc_interface.h"
-#include "ftl_job.h" /* 心跳（[JOB] 观测口）*/
-#include "ftl_op.h"  /* ftl_op_submit / ftl_op_is_in_dispatch */
+#include "ftl_job.h"  /* 心跳（[JOB] 观测口）*/
+#include "ftl_op.h"   /* ftl_op_submit / ftl_op_is_in_dispatch */
+#include "ftl_type.h" /* BG_LEVEL_* / BG_LEVEL_NUM（档位 → max_kick 表） */
 #include "log.h"
 #include "onfi_1_0.h"
 

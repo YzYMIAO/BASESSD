@@ -48,8 +48,8 @@ typedef struct ftl_context ftl_ctx_t;
  * bg_scheduler_init 的装载数直接取表长，不接收运行期 count 参数。 */
 #define BG_TASK_COUNT (10U)
 
-/* ── 档位（负载 → 预算规模，见 bg_scheduler.c s_bg_level_cfg；枚举在 ftl_type.h）── */
-#define BG_LEVEL_NUM (3U) /* 档位表数组维度 */
+/* ── 档位（负载 → 预算规模，见 bg_scheduler.c s_bg_level_cfg；
+ *    bg_level_e / BG_LEVEL_NUM 在 ftl_type.h）── */
 
 /* 统一任务签名：适配器包异构 kick → void(ftl_ctx_t*) */
 typedef void (*bg_task_func_t)(ftl_ctx_t *ftl);

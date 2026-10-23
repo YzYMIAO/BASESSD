@@ -61,6 +61,9 @@ typedef enum
     BG_LEVEL_BUSY   = 2,
 } bg_level_e;
 
+/* 档位值域上界：档位表数组维度 + 遍历/边界用（H40）。 */
+#define BG_LEVEL_NUM (3U)
+
 /*
  * ftl_topo_t — FTL 拓扑描述
  *

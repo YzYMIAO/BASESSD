@@ -34,13 +34,13 @@
 
 #include "assertion.h"
 #include "bbt.h"              /* bbt_mark_bad */
-#include "bg_scheduler.h"     /* BG_LEVEL_*（bg_info_t.load_level） */
 #include "bst.h"              /* ftl_block_state / ftl_gblock */
 #include "fc.h"               /* fc_command_release / fc_command_id_to_command */
 #include "ftl.h"              /* ftl_ctx_t（仅完成服务的路由断言） */
 #include "ftl_fc_interface.h" /* ftl_async_read_page / ftl_async_write_page_cw / ftl_async_erase_block */
 #include "ftl_job.h"          /* 心跳（[JOB] 观测口）*/
 #include "ftl_op.h"           /* ftl_op_submit / FTL_OP_GC / FTL_OP_WL */
+#include "ftl_type.h"         /* BG_LEVEL_*（bg_info_t.load_level） */
 #include "gc.h"               /* gc_select_victim / gc_decode_cw_lba */
 #include "journal.h"          /* jrn_handle / jrn_append / JRN_IDLE */
 #include "l2p_cache.h"        /* l2p_read / l2p_write */
