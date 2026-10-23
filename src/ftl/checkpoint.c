@@ -712,13 +712,8 @@ static void cp_job_step(cp_handle_t *h)
             {
                 /* ③ Anchor：定位游标 + 取槽（游标未建立时会**同步**扫池定位——
                  *    这是本 job 唯一可能瞬时阻塞的点，且只在冷启动后首次 CP 出现）。 */
-                bool             need_erase = false;
-                md_anchor_step_e r          = md_anchor_prepare(h->metadata_dir,
-                                                       &h->anchor_ring,
-                                                       &h->anchor_base,
-                                                       &h->anchor_idx,
-                                                       &h->anchor_seq,
-                                                       &need_erase);
+                md_anchor_prepare_out_t anchor;
+                md_anchor_step_e        r = md_anchor_prepare(h->metadata_dir, &anchor);
 
                 if (r == MD_ANCHOR_FAILED)
                 {
@@ -734,10 +729,14 @@ static void cp_job_step(cp_handle_t *h)
                     break;
                 }
 
-                h->anchor_need_erase = need_erase;
+                h->anchor_ring       = anchor.ring;
+                h->anchor_base       = anchor.base;
+                h->anchor_idx        = anchor.idx;
+                h->anchor_seq        = anchor.seq;
+                h->anchor_need_erase = anchor.need_erase;
                 h->anchor_chunk      = 0U;
                 h->anchor_ok         = 1U;
-                h->phase             = need_erase ? CP_ANCHOR_ERASE : CP_ANCHOR_WRITE;
+                h->phase             = anchor.need_erase ? CP_ANCHOR_ERASE : CP_ANCHOR_WRITE;
                 break;
             }
 
@@ -788,18 +787,20 @@ static void cp_job_step(cp_handle_t *h)
 
                 if (h->cp_state.cursor_valid == 0U)
                 {
-                    WORD                   newest = UINT16_MAX;
+                    md_ring_locate_out_t   loc;
                     checkpoint_probe_ctx_t probe_ctx;
 
                     probe_ctx.topo        = h->topo;
                     probe_ctx.ring        = h->hdr_ring;
                     probe_ctx.any_version = false;
 
-                    if (md_ring_locate(&h->hdr_ring, cp_record_probe, &probe_ctx, &newest, &h->cp_state.sequence, &h->cp_state.write_idx) != FTL_OK)
+                    if (md_ring_locate(&h->hdr_ring, cp_record_probe, &probe_ctx, &loc) != FTL_OK)
                     {
                         cp_job_abort(h);
                         break;
                     }
+                    h->cp_state.sequence     = loc.sequence;
+                    h->cp_state.write_idx    = loc.write_idx;
                     h->cp_state.cursor_valid = 1U;
                     /* 刚定位到的游标同样可能指向掉电残留的半编程槽 ⇒ 首次写入也跳一槽。 */
                     h->cp_state.advance_next = 1U;
@@ -1095,18 +1096,21 @@ ftl_status_e cp_pool_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_reco
     probe_ctx.topo        = h->topo;
     probe_ctx.any_version = false;
 
-    WORD newest = UINT16_MAX;
-    if (md_ring_locate(&probe_ctx.ring, cp_record_probe, &probe_ctx, &newest, &h->cp_state.sequence, &h->cp_state.write_idx) != FTL_OK)
+    md_ring_locate_out_t loc;
+
+    if (md_ring_locate(&probe_ctx.ring, cp_record_probe, &probe_ctx, &loc) != FTL_OK)
     {
         return FTL_ERROR;
     }
-    if (newest == UINT16_MAX)
+    if (loc.newest_idx == UINT16_MAX)
     {
         LOGW(LOG_TAG_CP "no valid record in pool — boot will fall back to rebuild\r\n");
         cp_cursor_reset(&h->cp_state);
         return FTL_ERROR; /* 池内无有效 record */
     }
 
+    h->cp_state.sequence     = loc.sequence;
+    h->cp_state.write_idx    = loc.write_idx;
     h->cp_state.cursor_valid = 1U;
 
     /* 重读胜者（locate 只返回序号，Header 本体要再读一次）。
@@ -1115,7 +1119,7 @@ ftl_status_e cp_pool_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_reco
     for (BYTE pi = 0U; pi < md_ring_plane_count(probe_ctx.ring.plane_mask); pi++)
     {
         const BYTE plane = md_ring_plane_at(probe_ctx.ring.plane_mask, pi);
-        DWORD      addr  = md_ring_addr_plane(&probe_ctx.ring, &probe_ctx.topo, newest, 0U, plane);
+        DWORD      addr  = md_ring_addr_plane(&probe_ctx.ring, &probe_ctx.topo, loc.newest_idx, 0U, plane);
 
         if (ftl_sync_read_page(addr, cp, sizeof(*cp), FTL_PAGE_CFG_META()) != FTL_OK)
         {
@@ -1142,12 +1146,12 @@ ftl_status_e cp_pool_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_reco
 
     if (out_record_idx != NULL)
     {
-        *out_record_idx = newest;
+        *out_record_idx = loc.newest_idx;
     }
 
     LOGI(LOG_TAG_CP "find latest seq=%lu idx=%u jrn_seq=%lu\r\n",
          cp->sequence,
-         (unsigned)newest,
+         (unsigned)loc.newest_idx,
          cp->journal_sequence);
     return FTL_OK;
 }
@@ -1159,23 +1163,21 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
     ctx.topo        = h->topo;
     ctx.any_version = true; /* 只校验 magic：版本不符也要能定位出来 */
 
-    WORD  newest    = UINT16_MAX;
-    DWORD seq       = 0U;
-    WORD  write_idx = 0U;
+    md_ring_locate_out_t loc;
 
-    if (md_ring_locate(&ctx.ring, cp_record_probe, &ctx, &newest, &seq, &write_idx) != FTL_OK)
+    if (md_ring_locate(&ctx.ring, cp_record_probe, &ctx, &loc) != FTL_OK)
     {
         return CP_MEDIA_IO_ERROR; /* 池几何/配置错误：不格式化 */
     }
 
-    if (newest != UINT16_MAX)
+    if (loc.newest_idx != UINT16_MAX)
     {
         const BYTE plane_count = md_ring_plane_count(ctx.ring.plane_mask);
 
         for (BYTE pi = 0U; pi < plane_count; pi++)
         {
             const BYTE   plane = md_ring_plane_at(ctx.ring.plane_mask, pi);
-            DWORD        addr  = md_ring_addr_plane(&ctx.ring, &ctx.topo, newest, 0U, plane);
+            DWORD        addr  = md_ring_addr_plane(&ctx.ring, &ctx.topo, loc.newest_idx, 0U, plane);
             cp_header_t *hdr   = &s_probe_hdr; /* 文件级 scratch，避免 2KB 栈帧 */
 
             if (ftl_sync_read_page(addr, hdr, sizeof(*hdr), FTL_PAGE_CFG_META()) != FTL_OK)

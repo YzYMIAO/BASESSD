@@ -589,6 +589,14 @@ typedef ftl_status_e (*metadata_ring_probe_fn)(void  *ctx,
                                                bool   full,
                                                DWORD *out_sequence);
 
+/* md_ring_locate 的输出：最新有效 record + 写游标。 */
+typedef struct
+{
+    WORD  newest_idx; /* 最新有效 record 槽位；池空 = UINT16_MAX */
+    DWORD sequence;   /* 该 record 的 sequence；池空 = 0 */
+    WORD  write_idx;  /* 下一个可写槽位 */
+} md_ring_locate_out_t;
+
 /*
  * md_ring_locate - 定位池内最新有效 record 与下一个可写槽
  *
@@ -609,17 +617,13 @@ typedef ftl_status_e (*metadata_ring_probe_fn)(void  *ctx,
  * @param ring           池几何
  * @param probe          调用方探针
  * @param ctx            探针上下文
- * @param out_newest_idx 输出：最新有效 record 槽位；**池内无有效 record 时为 UINT16_MAX**
- * @param out_sequence   输出：该 record 的 sequence；**池内无有效 record 时为 0**
- * @param out_write_idx  输出：下一个可写槽位
+ * @param out 输出：最新有效 record 槽位 / sequence / 写游标（池空时 newest=UINT16_MAX、seq=0）
  * @return FTL_OK = 定位完成（含"池为空"）；FTL_ERROR = ring 几何非法
  */
 ftl_status_e md_ring_locate(const md_ring_t       *ring,
                             metadata_ring_probe_fn probe,
                             void                  *ctx,
-                            WORD                  *out_newest_idx,
-                            DWORD                 *out_sequence,
-                            WORD                  *out_write_idx);
+                            md_ring_locate_out_t  *out);
 
 /*
  * md_ring_prepare_addr - 算写点槽位地址 + 判定是否需先擦该块（**不动介质**）
@@ -741,6 +745,16 @@ typedef enum
     MD_ANCHOR_READY  = 1U, /* 出参全部有效，可以写 Anchor */
     MD_ANCHOR_FAILED = 2U, /* 定位/取槽失败：调用者中止 job */
 } md_anchor_step_e;
+
+/* md_anchor_prepare 的输出：READY 时全部有效。 */
+typedef struct
+{
+    md_ring_t ring;       /* Anchor 池几何（commit 要用） */
+    DWORD     base;       /* 本 record 第 0 页地址 */
+    WORD      idx;        /* 本 record 的池内槽位号（commit 要用） */
+    DWORD     seq;        /* 本 record 的 sequence（prepare 内自增 anchor_sequence） */
+    bool      need_erase; /* true = 写之前必须先擦 base 所在块 */
+} md_anchor_prepare_out_t;
 
 /* 布尔量直接用 bool；**不压位域**——位域布局是 implementation-defined，
  * `_Static_assert` 证不了（C4），且这里没有 RAM 压力。 */
@@ -1038,21 +1052,12 @@ void  md_commit_region_pair(md_dir_cache_t *dir, WORD region_id, DWORD new_prima
 /*
  * md_anchor_prepare - 定位游标 + 取槽 + 算是否需换块擦（**不动介质**）
  *
- * @param dir            Directory
- * @param out_ring       出参：Anchor 池几何
- * @param out_base       出参：本 record 第 0 页地址
- * @param out_idx        出参：本 record 的池内槽位号（commit 要用）
- * @param out_seq        出参：本 record 的 sequence（本函数内自增 anchor_sequence）
- * @param out_need_erase 出参：true = 写之前必须先擦 *out_base 所在块
+ * @param dir Directory
+ * @param out 出参：池几何 / 地址 / 槽位 / sequence / 是否需先擦（仅 READY 时全部有效）
  * @return md_anchor_step_e：MD_ANCHOR_READY 需要写（出参全部有效）；
  *         MD_ANCHOR_CLEAN 无需写（dir 不脏）；MD_ANCHOR_FAILED 失败（定位失败）
  */
-md_anchor_step_e md_anchor_prepare(md_dir_cache_t *dir,
-                                   md_ring_t      *out_ring,
-                                   DWORD          *out_base,
-                                   WORD           *out_idx,
-                                   DWORD          *out_seq,
-                                   bool           *out_need_erase);
+md_anchor_step_e md_anchor_prepare(md_dir_cache_t *dir, md_anchor_prepare_out_t *out);
 
 /*
  * md_anchor_page - 组第 chunk 页 Anchor 数据（纯 RAM）

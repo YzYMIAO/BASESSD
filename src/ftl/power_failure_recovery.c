@@ -159,21 +159,17 @@ ftl_status_e ftl_media_check_format(struct ftl_context *ftl, bool *out_need_form
  * -------------------------------------------------------------------- */
 static ftl_status_e ftl_format_write_initial_anchor(ftl_ctx_t *ftl)
 {
-    md_dir_cache_t *dir = ftl->metadata_dir;
-    md_ring_t       ring;
-    DWORD           base;
-    WORD            idx;
-    DWORD           seq;
-    bool            need_erase = false;
+    md_dir_cache_t         *dir = ftl->metadata_dir;
+    md_anchor_prepare_out_t anchor;
 
     dir->dirty = true; /* 空 Directory 也要落一条 record */
 
-    if (md_anchor_prepare(dir, &ring, &base, &idx, &seq, &need_erase) != MD_ANCHOR_READY)
+    if (md_anchor_prepare(dir, &anchor) != MD_ANCHOR_READY)
     {
         return FTL_ERROR;
     }
 
-    if (need_erase && (ftl_sync_erase_block(base) != FTL_OK))
+    if (anchor.need_erase && (ftl_sync_erase_block(anchor.base) != FTL_OK))
     {
         return FTL_ERROR;
     }
@@ -184,10 +180,10 @@ static ftl_status_e ftl_format_write_initial_anchor(ftl_ctx_t *ftl)
     {
         /* 2KB Anchor 页常驻 handle（与 CP 共用 scratch；format 路径串行，无重入）。 */
         md_anchor_page_t *page        = (md_anchor_page_t *)ftl->cp_handle->hdr_buf;
-        const DWORD       anchor_page = pba_to_page(base) + chunk;
-        const DWORD       addr        = pba_with_page(base, anchor_page);
+        const DWORD       anchor_page = pba_to_page(anchor.base) + chunk;
+        const DWORD       addr        = pba_with_page(anchor.base, anchor_page);
 
-        md_anchor_page(dir, seq, chunk, page);
+        md_anchor_page(dir, anchor.seq, chunk, page);
         if (ftl_sync_write_page(addr, page, sizeof(*page), FTL_PAGE_CFG_META()) != FTL_OK)
         {
             ok = false;
@@ -201,8 +197,8 @@ static ftl_status_e ftl_format_write_initial_anchor(ftl_ctx_t *ftl)
     {
         md_anchor_page_t *probe = (md_anchor_page_t *)ftl->cp_handle->hdr_buf;
 
-        if ((ftl_sync_read_page(base, probe, sizeof(*probe), FTL_PAGE_CFG_META()) != FTL_OK) ||
-            (probe->magic != ANCHOR_MAGIC) || (probe->sequence != seq) ||
+        if ((ftl_sync_read_page(anchor.base, probe, sizeof(*probe), FTL_PAGE_CFG_META()) != FTL_OK) ||
+            (probe->magic != ANCHOR_MAGIC) || (probe->sequence != anchor.seq) ||
             (probe->layout_version != FTL_MEDIA_LAYOUT_VERSION))
         {
             LOGE(LOG_TAG_META "format: Anchor readback failed — fixed metadata block may be BAD\r\n");
@@ -210,7 +206,7 @@ static ftl_status_e ftl_format_write_initial_anchor(ftl_ctx_t *ftl)
         }
     }
 
-    md_anchor_commit(dir, &ring, idx, ok);
+    md_anchor_commit(dir, &anchor.ring, anchor.idx, ok);
     return ok ? FTL_OK : FTL_ERROR;
 }
 

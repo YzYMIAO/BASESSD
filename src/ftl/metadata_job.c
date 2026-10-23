@@ -787,13 +787,8 @@ static void md_handle_step(md_dir_cache_t *dir)
             {
                 /* ③ Anchor：定位游标 + 取槽。游标未建立时会**同步**扫池定位——本 job
                  *   唯一可能瞬时阻塞的点，且只在冷启动后首次整理出现。 */
-                bool             need_erase = false;
-                md_anchor_step_e r          = md_anchor_prepare(dir,
-                                                       &j->anchor_ring,
-                                                       &j->anchor_base,
-                                                       &j->anchor_idx,
-                                                       &j->anchor_seq,
-                                                       &need_erase);
+                md_anchor_prepare_out_t anchor;
+                md_anchor_step_e        r = md_anchor_prepare(dir, &anchor);
 
                 if (r == MD_ANCHOR_FAILED)
                 {
@@ -811,10 +806,14 @@ static void md_handle_step(md_dir_cache_t *dir)
                     break;
                 }
 
-                j->anchor_need_erase = need_erase;
+                j->anchor_ring       = anchor.ring;
+                j->anchor_base       = anchor.base;
+                j->anchor_idx        = anchor.idx;
+                j->anchor_seq        = anchor.seq;
+                j->anchor_need_erase = anchor.need_erase;
                 j->anchor_chunk      = 0U;
                 j->anchor_ok         = true;
-                j->phase             = need_erase ? MD_JOB_CP_ANCHOR_ERASE : MD_JOB_CP_ANCHOR_WRITE;
+                j->phase             = anchor.need_erase ? MD_JOB_CP_ANCHOR_ERASE : MD_JOB_CP_ANCHOR_WRITE;
                 break;
             }
 

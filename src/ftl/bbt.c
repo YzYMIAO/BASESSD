@@ -699,16 +699,16 @@ ftl_status_e bbt_save(alc_t *alloc)
      *   降到新池内的最大值，下一次开机可能让旧 record 胜出、读到旧坏块图。 */
     if (alloc->bbt.cursor_valid == 0U)
     {
-        WORD  newest      = UINT16_MAX;
-        DWORD located_seq = 0U;
+        md_ring_locate_out_t loc;
 
-        if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &located_seq, &alloc->bbt.write_idx) != FTL_OK)
+        if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &loc) != FTL_OK)
         {
             return FTL_ERROR;
         }
-        if (located_seq > alloc->bbt.sequence)
+        alloc->bbt.write_idx = loc.write_idx;
+        if (loc.sequence > alloc->bbt.sequence)
         {
-            alloc->bbt.sequence = located_seq;
+            alloc->bbt.sequence = loc.sequence;
         }
         alloc->bbt.cursor_valid = 1U;
     }
@@ -763,12 +763,15 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
     bbt_probe_ctx_t ctx;
     bbt_ctx_init(alloc, &ctx);
 
-    WORD newest = UINT16_MAX;
-    if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
+    md_ring_locate_out_t loc;
+
+    if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &loc) != FTL_OK)
     {
         return FTL_ERROR;
     }
-    if (newest == UINT16_MAX)
+    alloc->bbt.sequence  = loc.sequence;
+    alloc->bbt.write_idx = loc.write_idx;
+    if (loc.newest_idx == UINT16_MAX)
     {
         alloc->bbt.sequence  = 0U;
         alloc->bbt.write_idx = 0U;
@@ -784,7 +787,7 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
     for (BYTE pi = 0U; pi < md_ring_plane_count(ctx.ring.plane_mask); pi++)
     {
         const BYTE plane = md_ring_plane_at(ctx.ring.plane_mask, pi);
-        DWORD      addr  = md_ring_addr_plane(&ctx.ring, &ctx.topo, newest, 0U, plane);
+        DWORD      addr  = md_ring_addr_plane(&ctx.ring, &ctx.topo, loc.newest_idx, 0U, plane);
 
         if (ftl_sync_read_page(addr, &best, sizeof(best), FTL_PAGE_CFG_META()) != 0)
         {
@@ -968,13 +971,15 @@ void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out)
         /* 游标未建立 ⇒ 先定位池内最新有效 record 的下一槽 */
         if (alloc->bbt.cursor_valid == 0U)
         {
-            WORD newest = UINT16_MAX;
+            md_ring_locate_out_t loc;
 
-            if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &newest, &alloc->bbt.sequence, &alloc->bbt.write_idx) != FTL_OK)
+            if (md_ring_locate(&ctx.ring, bbt_record_probe, &ctx, &loc) != FTL_OK)
             {
                 LOGE(LOG_TAG_BBT "pool locate failed — 下轮重试\r\n");
                 break;
             }
+            alloc->bbt.sequence     = loc.sequence;
+            alloc->bbt.write_idx    = loc.write_idx;
             alloc->bbt.cursor_valid = 1U;
         }
 

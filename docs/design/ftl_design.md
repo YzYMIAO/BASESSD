@@ -2037,13 +2037,13 @@ Directory（`anchor_for_reclaim`），否则就是同一个掉电丢映射。
 三段式（所有落盘站点统一）：
 
 ```text
-md_anchor_prepare(dir, &ring, &base, &idx, &seq, &need_erase)
+md_anchor_prepare(dir, &anchor)   ← anchor = {ring, base, idx, seq, need_erase}
     ├─ 定位游标 + 取槽 + 自增 sequence；判定是否需先擦块
     └─ 返回 READY / CLEAN（不脏，跳过）/ FAILED
-[metadata_dir_anchor_erase]  ← 仅 need_erase
-md_anchor_page(dir, seq, chunk, &page) × 8   ← 纯 RAM 组页
+[metadata_dir_anchor_erase]  ← 仅 anchor.need_erase
+md_anchor_page(dir, anchor.seq, chunk, &page) × 8   ← 纯 RAM 组页
 写 8 页（异步命令）
-md_anchor_commit(dir, &ring, idx, ok)
+md_anchor_commit(dir, &anchor.ring, anchor.idx, ok)
     ├─ 无论成败推进游标（半编程槽不可复用）
     └─ ok **且** dirty_gen == anchor_gen 才清 dirty；失败/过期整条作废，保留 dirty
 ```
