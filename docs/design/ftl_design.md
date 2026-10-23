@@ -1096,7 +1096,7 @@ L2P region log（固定预留区，追加块）
 | Host 提交 / 组 / pending | `ftl.c`、`pending.c/h` | §3.9 |
 | 完成路由 / op dispatch | `completion_table.c/h`、`ftl_op.c/h` | §3.10 |
 | 页打包写缓冲 | `wbuf.c`、`wbuf.h` | §3.11 |
-| Service / 后台调度 | `ftl.c`、`bg_scheduler.c/h`、`bg_wiring.c` | §3.12 |
+| Service / 后台调度 | `ftl.c`、`bg_scheduler.c/h` | §3.12 |
 | GC / 迁移 | `gc.c/h`、`migrate.c/h` | §3.13 |
 | 读恢复 | `read_recovery.c/h` | §3.14 |
 | FTL↔FC 接口 | `ftl_fc_interface.c/h`、`ftl_config.h` | §3.15 |
@@ -3172,14 +3172,13 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
 - **`ftl_service(ftl)`**（每实例一次）：
   - Phase 2.5：`pend_confirm_service` → 遍历组 `ftl_drain_group` → `wb_handle(MAYBE_FLUSH_IDLE)`；
   - Phase 3：`ftl_bg_service(ftl)`（`ftl.c` 里只有这一行调用）。
-- **`bg_scheduler.c/h`**：纯引擎（must-run pass + 预算 pass + interval 门 + 预算截断），
-  零 kick 知识、策略无关；不 include 任何 kick 头。
-- **`bg_wiring.c`**：接线层——10 个 `static` 适配器（异构 kick → `void(ftl_ctx_t*)`）+
-  任务表 `s_bg_tasks` + 档位预算表 `g_bg_level_cfg` + `ftl_bg_init`（装载表）+
-  `ftl_bg_level_select`（负载 → 档位）+ `ftl_bg_service`（Phase 3 入口，含 `bg_suspend`
-  判定）。GC / WL / predict 的求值节拍在 **migrate handle 内自持**，不在接线层。
-- **不做**：不实现各后台任务（各模块的 `*_handle`）；引擎不决定档位（档位是 FTL 域策略，
-  归 `bg_wiring.c`）。
+- **`bg_scheduler.c/h`**：一个模块承载两层内容——引擎（must-run pass + 预算 pass +
+  interval 门 + 预算截断，函数本身零 kick 知识）与 FTL 策略段（10 个 `static` 适配器把
+  异构 kick 包成 `void(ftl_ctx_t*)` + 任务表 `s_bg_tasks` + 档位预算表 `g_bg_level_cfg` +
+  `ftl_bg_init` / `ftl_bg_level_select` / `ftl_bg_service`）。GC / WL / predict 的求值
+  节拍在 **migrate handle 内自持**，不在策略段。
+- **不做**：不实现各后台任务（各模块的 `*_handle`）；引擎函数不决定档位（档位是 FTL 域
+  策略，归策略段）。
 
 #### 3.12.3 结构与不变量
 
@@ -3280,7 +3279,7 @@ flowchart TB
 | `GC_LOG_INTERVAL_MS` | 1000 | `include/ftl/gc.h` |
 | `RR_SCAN_INTERVAL_MS` | 1000 | `include/ftl/read_recovery.h` |
 | `BG_TASK_COUNT` | 10 | `include/ftl/bg_scheduler.h` |
-| 档位预算 | 2000 / 2000 / 700 µs | `src/ftl/bg_wiring.c` |
+| 档位预算 | 2000 / 2000 / 700 µs | `src/ftl/bg_scheduler.c` |
 | `MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
 
 #### 3.12.8 主流对照
@@ -4860,7 +4859,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `GC_EVAL_INTERVAL_MS` | 10 | `include/ftl/gc.h` |
 | `GC_LOG_INTERVAL_MS` | 1000 | `include/ftl/gc.h` |
 | `RR_SCAN_INTERVAL_MS` | 1000 | `include/ftl/read_recovery.h` |
-| 档位预算 | IDLE 2000 / NORMAL 2000 / BUSY 700 µs | `src/ftl/bg_wiring.c` |
+| 档位预算 | IDLE 2000 / NORMAL 2000 / BUSY 700 µs | `src/ftl/bg_scheduler.c` |
 | `MIN_TASK_BUDGET_US` | 250 | `src/ftl/bg_scheduler.c` |
 
 #### FC 资源
@@ -4889,7 +4888,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | FC 命令池/描述符池 + 队列（DTCM P1） | ~9 KB + 776 B | DTCM |
 | `g_nand_channel_page_buffer` | 4,224 B | AXI_NOCACHE（DTCM 会破坏 multi-plane program） |
 | BCH 静态表（`s_bch`，含 roots bitmap） | 42,656 B | DTCM |
-| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,296 / 62,064 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
+| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,360 / 62,064 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
 | `.dtcm_data` 合计（release） | 67,832 B | DTCM |
 
 ⚠ `.sram*_data` 是 NOLOAD，启动代码不清零；`ftl_init` 必须显式 memset 五张表与六个 storage 对象

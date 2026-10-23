@@ -214,7 +214,7 @@ typedef struct ftl_context
     DWORD trim_wait_ms;   /* 无进展等待起点（0 = 尚未等待）；超 FTL_TRIM_TIMEOUT_MS 中止 */
 
     /* 时间预算后台调度器（per-instance）。
-     * 任务表（10 项：6 must-run + 4 预算）由 ftl_bg_init 从 `ftl/bg_wiring.c` 的静态表
+     * 任务表（10 项：6 must-run + 4 预算）由 ftl_bg_init 从 `ftl/bg_scheduler.c` 的静态表
      * 装载；每轮 Phase 3 由 ftl_bg_service 选档后跑 bg_scheduler_run。 */
     bg_sched_t bg;
 
@@ -330,38 +330,6 @@ void ftl_service_pump(void);
  * @param ftl  FTL 上下文（**非 NULL**；实例绑定由 ftl_contract_audit 在 boot 期证明）
  */
 void ftl_service(ftl_ctx_t *ftl);
-
-/*
- * ftl_bg_init - 装配实例的时间预算后台调度器
- *
- * 把 `ftl/bg_wiring.c` 的静态任务表（10 项：6 must-run 正确性关键集 + 4 预算任务，
- * 含 bg_a_* 适配器）装载进 ftl->bg。由 ftl_init 末尾调用一次。
- *
- * ⚠ 为什么不做成 ftl.c 直接调 bg_scheduler_init：任务表是 bg_wiring.c 的 static 数据，
- *   外部模块（ftl.c）不该看到它——本函数是这张表的**唯一装配口**（H13 三问：隐藏数组 /
- *   边界检查 / 单点读写，三者皆是）。
- */
-void ftl_bg_init(ftl_ctx_t *ftl);
-
-/*
- * ftl_bg_service - Phase 3 入口：bg_suspend 判定 → 选档 → 档位配置 → 引擎跑一轮
- *
- * ⚠ bg_suspend 判定在函数内**最先**做（早于 must-run pass）：`bbt --erase` 之后介质已空
- *   而 RAM 状态陈旧，任何后台写都是往干净芯片上倒垃圾。调用方不要在外层重复判。
- *
- * @param ftl  FTL 上下文（**非 NULL**；唯一调用点 ftl_service 已保证）
- */
-void ftl_bg_service(ftl_ctx_t *ftl);
-
-/*
- * ftl_bg_level_select - 负载 → 后台档位（纯函数）
- *
- * 判据：
- *   inflight = pend_get_count + pend_get_group_count
- *   inflight==0 ⇒ IDLE；pending > FTL_PENDING_MAX/2 或 queued!=0 ⇒ BUSY；否则 NORMAL。
- * 返回 BG_LEVEL_IDLE / BG_LEVEL_NORMAL / BG_LEVEL_BUSY（bg_scheduler.h）。
- */
-bg_level_e ftl_bg_level_select(const ftl_ctx_t *ftl);
 
 /*
  * ftl_submit_read - 非阻塞提交读请求（长度任意）

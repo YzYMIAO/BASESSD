@@ -45,7 +45,7 @@
 /*
  * ftl_job_now_ms - 当前单调毫秒（经平台抽象 time_us 换算）。平台未注册时返回 0。
  *
- * 本函数是**全仓唯一**的平台时钟→毫秒换算：job 心跳（观测）与 bg_wiring 的
+ * 本函数是**全仓唯一**的平台时钟→毫秒换算：job 心跳（观测）与 bg_scheduler 的
  * GC/RR/CP 功能节拍都调用它，避免两份同语义实现漂移。
  */
 static inline DWORD ftl_job_now_ms(void)
