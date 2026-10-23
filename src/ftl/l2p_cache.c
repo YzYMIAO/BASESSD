@@ -1279,7 +1279,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
 
                 if ((primary != NAND_PBA_INVALID) && (backup != NAND_PBA_INVALID) && (primary != backup))
                 {
-                    md_commit_region_pair(ftl->metadata_dir, local, backup, primary);
+                    md_commit_region(ftl->metadata_dir, local, MD_COMMIT_PAIR, backup, primary);
                     LOGW(LOG_TAG_L2P "region %lu primary unreadable — backup OK\r\n", line->region_id);
                 }
                 /* primary == INVALID 是「旧介质单副本 / 尚未 flush」的正常路径，不是
@@ -1377,10 +1377,12 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
         {
             if ((!line->flush_fail) && (line->flush_issued == 2U))
             {
-                const WORD local_region = l2p_global_to_local_region(line->region_id);
+                const WORD  local_region = l2p_global_to_local_region(line->region_id);
+                const DWORD primary      = line->flush_pba[0];
+                const DWORD backup       = line->flush_pba[1];
 
                 /* 顺序不可倒：先写后记账（掉电最多多留一份旧记录）。 */
-                md_commit_region_pair(ftl->metadata_dir, local_region, line->flush_pba[0], line->flush_pba[1]);
+                md_commit_region(ftl->metadata_dir, local_region, MD_COMMIT_PAIR, primary, backup);
 
                 line->state = L2P_CACHE_CLEAN;
 

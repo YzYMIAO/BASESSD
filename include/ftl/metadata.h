@@ -924,7 +924,7 @@ void md_entry_update(md_dir_cache_t *dir,
  * md_slot_pair_append - 一次预留**两个连续槽**（主/备副本，RISK-BOOT-18 的 L2）
  *
  * **只取槽，不登记**：调用方先往返回的地址写 region 页，两份都写成功后再调
- * md_commit_region_pair 登记（写失败则位置不变，槽被跳过——已编程页不可复用）。
+ * md_commit_region(MD_COMMIT_PAIR) 登记（写失败则位置不变，槽被跳过——已编程页不可复用）。
  * 两份副本落在同一当前块的两个连续页上：剩余页不足 2 时**先换块再取**，避免
  * “第一个槽已消耗、第二个换块失败”烧掉半对。整理 job 在飞 / 换块失败 ⇒ false
  * （未消耗任何槽）。
@@ -1012,10 +1012,24 @@ WORD md_log_area_free_count(const alc_t *alloc);
 /* 当前仍有活 region 的日志块数（观测：应保持有界，理想 ~32）。 */
 WORD md_live_block_count_get(const md_dir_cache_t *dir);
 
+/* md_commit_region 的提交粒度（单副本 / 成对）。 */
+typedef enum
+{
+    MD_COMMIT_PRIMARY = 0U, /* 只提交主副本 */
+    MD_COMMIT_BACKUP  = 1U, /* 只提交备副本 */
+    MD_COMMIT_PAIR    = 2U, /* 主/备同批提交：两份都写成功后调用 */
+    MD_COMMIT_MODE_NUM,
+} md_commit_mode_e;
+
 /*
- * md_commit_region - 写成功后登记 region 的新位置
+ * md_commit_region - 写成功后登记 region 的副本位置
  *
- * 更新 entries[region_id].pba + l2p_live（旧日志块 -1、新日志块 +1）+ dirty。
+ * 按 mode 提交一个或两个副本：
+ *   · MD_COMMIT_PRIMARY / MD_COMMIT_BACKUP —— 只提交对应副本；
+ *   · MD_COMMIT_PAIR —— 主/备都提交，要求两个 PBA 都有效且不相等
+ *     （同一次 flush 两份都写成功后才调用，不做半对提交）。
+ *
+ * 更新 entries / backup_pba + l2p_live（旧日志块 -1、新日志块 +1）+ dirty。
  * 旧块活计数归零且非当前块 ⇒ 把块号置进 `reclaim_pending` 位图，
  * 由后台 job 异步擦除后**归还固定 L2P 日志区**（置 NONE，不回用户 Free Pool）。
  *
@@ -1027,19 +1041,19 @@ WORD md_live_block_count_get(const md_dir_cache_t *dir);
  *
  * @param dir       Directory cache
  * @param region_id L2P region_id（内部调用者保证 < METADATA_DIR_ENTRIES）
- * @param new_pba   刚写成功的位置（PBA，内部调用者保证非 NAND_PBA_INVALID）
+ * @param mode      提交粒度（见 md_commit_mode_e）
+ * @param new_primary 主副本新位置；MD_COMMIT_BACKUP 时忽略（传 NAND_PBA_INVALID 占位）
+ * @param new_backup  备副本新位置；MD_COMMIT_PRIMARY 时忽略（传 NAND_PBA_INVALID 占位）
  */
-void md_commit_region(md_dir_cache_t *dir,
-                      WORD            region_id,
-                      DWORD           new_pba);
+void md_commit_region(md_dir_cache_t  *dir,
+                      WORD             region_id,
+                      md_commit_mode_e mode,
+                      DWORD            new_primary,
+                      DWORD            new_backup);
 
 /* ── 第二副本（RISK-BOOT-18 的 L2）──
- * `md_backup_find` 返回该 region 的备份 PBA（NAND_PBA_INVALID = 无副本）；
- * `md_commit_region_copy` 按副本粒度提交（copy 0=主 / 1=备，压缩搬移用）；
- * `md_commit_region_pair` 双副本原子提交（同一次 flush 两份都写成功后才调用）。 */
+ * `md_backup_find` 返回该 region 的备份 PBA（NAND_PBA_INVALID = 无副本）。 */
 DWORD md_backup_find(const md_dir_cache_t *dir, WORD region_id);
-void  md_commit_region_copy(md_dir_cache_t *dir, WORD region_id, BYTE copy, DWORD new_pba);
-void  md_commit_region_pair(md_dir_cache_t *dir, WORD region_id, DWORD new_primary, DWORD new_backup);
 
 /* ── Anchor 落盘的三段式（唯一形态）──
  *

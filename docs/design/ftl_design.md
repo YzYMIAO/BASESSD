@@ -293,7 +293,7 @@ flowchart TB
         M3 --> M5["l2p_flush_kick DIRTY 到 FLUSHING"]
         M5 --> M6["md_slot_pair_append S3-5"]
         M6 --> M7["写主副本页 再到 备副本页"]
-        M7 --> M8["md_commit_region_pair S3-5"]
+        M7 --> M8["md_commit_region(MD_COMMIT_PAIR) S3-5"]
         M2 --> M9["checkpoint_journal_watermark 85 百分比 95 百分比 S3-7"]
         M9 --> M10["cp_job_begin S3-8"]
         M10 --> M11["flush regions 到 Anchor 到 块元数据快照 到 磨损快照 到 Header 到 截断 Journal"]
@@ -1914,7 +1914,7 @@ sequenceDiagram
     C->>N: 写备副本页 异步（主成功后串行）
     N-->>C: 完成
     alt 两份都成功
-        C->>D: md_commit_region_pair
+        C->>D: md_commit_region(MD_COMMIT_PAIR)
         D->>D: 更新 region 的主/备 pba
         D->>D: l2p_live 旧各减一、新各加一
         D->>D: dirty 为 1, 旧块归零则置 reclaim_pending 位

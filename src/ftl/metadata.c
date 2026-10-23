@@ -17,6 +17,7 @@
  *   非 INVALID ⇒ region 页在日志块上的真实 PBA（从固定 L2P 日志区取块、追加写）。
  *
  * 文件结构：
+ *   〇、文件级类型与常量（探针上下文 / 池策略表 / 固定元数据分区表）
  *   一、元数据 record 池（环形轮转）—— Anchor / Checkpoint / BBT 共用
  *   二、Anchor 池（Metadata Directory 的 record 池）
  *   三、Directory 基础层 / 查询 / 更新
@@ -66,6 +67,87 @@ md_dir_cache_t g_ftl_md[FTL_DIM_TOTAL];
  * ⚠ 位于 DTCM NOLOAD ⇒ 必须在 md_init 显式复位。 */
 #define MD_POOL_REBUILT_LOG_EVERY (16U)
 static DWORD s_pool_rebuilt_logged;
+
+/* ══════════════════════════════════════════════════════════════════
+ * 文件级类型与常量
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Anchor 池探针上下文：record 扫描同时需要 Directory 与池几何。 */
+typedef struct
+{
+    const md_dir_cache_t *dir;
+    const md_ring_t      *ring;
+} anchor_probe_ctx_t;
+
+/* 单个固定池的几何/补齐策略（池内容在 md_pool_build_all 里构建）。 */
+typedef struct
+{
+    WORD first;
+    WORD nominal;
+    BYTE pages_per_record;
+    BYTE plane_mask;
+    WORD min_blocks;
+    WORD spare_budget;
+} md_pool_spec_t;
+
+/* 固定池的行号（表下标）。 */
+typedef enum
+{
+    MD_POOL_BBT = 0,
+    MD_POOL_CP,
+    MD_POOL_JRN,
+    MD_POOL_ANCHOR,
+    MD_POOL_NUM,
+} md_pool_id_e;
+
+/* 固定池的几何/补齐策略（数组表；加池时只加一行）。 */
+static const md_pool_spec_t s_pool_specs[] = {
+  /* 列序：first / nominal / pages_per_record / plane_mask / min_blocks / spare_budget */
+    {        BBT_BLOCK,        BBT_POOL_BLOCKS,                          1U, METADATA_MIRROR_PLANE_MASK,                  2U, 2U},
+    {CHECKPOINT_BLOCK0, CHECKPOINT_POOL_BLOCKS, FTL_CHECKPOINT_RECORD_PAGES, METADATA_MIRROR_PLANE_MASK,                  2U, 1U},
+    {   JOURNAL_BLOCK0,    JOURNAL_BLOCK_COUNT,                          1U, METADATA_MIRROR_PLANE_MASK, JOURNAL_BLOCK_COUNT, 2U},
+    {    ANCHOR_BLOCK0,     ANCHOR_POOL_BLOCKS,           ANCHOR_PAGE_COUNT, METADATA_MIRROR_PLANE_MASK,                  2U, 0U},
+};
+
+/* 加池时枚举与表必须同时加一行：行数不符即编译失败。 */
+_Static_assert((sizeof(s_pool_specs) / sizeof(s_pool_specs[0])) == (size_t)MD_POOL_NUM,
+               "s_pool_specs rows must match md_pool_id_e");
+
+/* 一次池扫描的中间结果（①~③ 步）。 */
+typedef struct
+{
+    WORD  cursor_block;  /* 第一个未写满的块；全满时为"最新满块之后" */
+    WORD  best_full_idx; /* 全部满块末条中 sequence 最大者（UINT16_MAX = 无）*/
+    DWORD best_full_seq;
+    WORD  cursor_last_idx; /* 游标块内最后一条有效 record（UINT16_MAX = 无）*/
+    DWORD cursor_last_seq;
+    bool  ring_full; /* 池已写满一圈 */
+} md_ring_scan_t;
+
+/*
+ * 固定元数据分区表 —— 单一事实来源（类型声明在 metadata.h）
+ *
+ * 区间为 [first_block, first_block + block_count)；**各 (ch,ce,lun) 用同一份块号**
+ * （分片模型：每个 die 一套完整元数据，分区不随维度错开）。
+ *
+ * Anchor / Checkpoint / BBT 都是**多块轮转池**：池内每块容纳 `records_per_block`
+ * 条 record，块满换池内下一块（先擦后写）。
+ *
+ * 每项完全由 metadata.h 的宏派生——块号 / 块数 / 每块 record 数 / 表字节均无手写数字。
+ */
+static const md_partition_t s_md_partitions[] = {
+  /* name, first_block, block_count, plane_mask, redundancy, table_bytes */
+    {    "Anchor",     ANCHOR_BLOCK0,       ANCHOR_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK,         ANCHOR_RECORDS_PER_BLOCK,                       FTL_ANCHOR_TABLE_BYTES},
+    {"Checkpoint", CHECKPOINT_BLOCK0,   CHECKPOINT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK, FTL_CHECKPOINT_RECORDS_PER_BLOCK,                   FTL_CHECKPOINT_TABLE_BYTES},
+    {       "BBT",         BBT_BLOCK,          BBT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK,                  PAGES_PER_BLOCK,                          FTL_BBT_TABLE_BYTES},
+    {   "Journal",    JOURNAL_BLOCK0,      JOURNAL_BLOCK_COUNT, METADATA_MIRROR_PLANE_MASK,                               1U,                      FTL_JOURNAL_TABLE_BYTES},
+ /* L2P region 日志区：固定预留（RISK-MD-07/CAP-02）。redundancy 填 1（不是 record 池）；
+  * table_bytes = region 数 × 每个 region 的 2 KB。 */
+    {   "L2P log",    L2P_LOG_BLOCK0, L2P_LOG_BLOCKS_PER_PLANE, METADATA_MIRROR_PLANE_MASK,                               1U, (L2P_REGIONS_PER_INSTANCE * L2P_REGION_SIZE)},
+};
+
+/* 分区数（表长）。sizeof 派生 ⇒ 加/删分区项时自动跟随。 */
+static const DWORD s_md_partition_count = (sizeof(s_md_partitions) / sizeof(s_md_partitions[0]));
 
 /* ══════════════════════════════════════════════════════════════════
  * 一、元数据 record 池（环形轮转）—— Anchor / Checkpoint / BBT 共用
@@ -173,17 +255,6 @@ static bool md_block_good_on_mask(const alc_t *alloc, WORD block, BYTE plane_mas
     return true;
 }
 
-/* 单个固定池的几何/补齐策略（文件级常量；池内容在 md_pool_build_all 里构建）。 */
-typedef struct
-{
-    WORD first;
-    WORD nominal;
-    BYTE pages_per_record;
-    BYTE plane_mask;
-    WORD min_blocks;
-    WORD spare_budget;
-} md_pool_spec_t;
-
 /* 收名义区间的好块；不足 min_blocks 时从 shared spare 按升序补（受 spare_budget
  * 与全局 spare_used 双重限制）。**只补到硬下界，不强行补满名义数**：CP 少一块
  * 仍可轮转，把 spare 留给更紧的 BBT/Journal。 */
@@ -258,40 +329,6 @@ void md_pool_build_bbt_bootstrap(md_ring_t *ring)
     }
 }
 
-/* 固定池的几何/补齐策略（文件名常量；加池时只加一条）。 */
-static const md_pool_spec_t s_pool_spec_bbt = {
-    .first            = BBT_BLOCK,
-    .nominal          = BBT_POOL_BLOCKS,
-    .pages_per_record = 1U,
-    .plane_mask       = METADATA_MIRROR_PLANE_MASK,
-    .min_blocks       = 2U,
-    .spare_budget     = 2U,
-};
-static const md_pool_spec_t s_pool_spec_cp = {
-    .first            = CHECKPOINT_BLOCK0,
-    .nominal          = CHECKPOINT_POOL_BLOCKS,
-    .pages_per_record = FTL_CHECKPOINT_RECORD_PAGES,
-    .plane_mask       = METADATA_MIRROR_PLANE_MASK,
-    .min_blocks       = 2U,
-    .spare_budget     = 1U,
-};
-static const md_pool_spec_t s_pool_spec_jrn = {
-    .first            = JOURNAL_BLOCK0,
-    .nominal          = JOURNAL_BLOCK_COUNT,
-    .pages_per_record = 1U,
-    .plane_mask       = METADATA_MIRROR_PLANE_MASK,
-    .min_blocks       = JOURNAL_BLOCK_COUNT,
-    .spare_budget     = 2U,
-};
-static const md_pool_spec_t s_pool_spec_anchor = {
-    .first            = ANCHOR_BLOCK0,
-    .nominal          = ANCHOR_POOL_BLOCKS,
-    .pages_per_record = ANCHOR_PAGE_COUNT,
-    .plane_mask       = METADATA_MIRROR_PLANE_MASK,
-    .min_blocks       = 2U,
-    .spare_budget     = 0U,
-};
-
 bool md_pool_build_all(alc_t *alloc)
 {
     if ((alloc == NULL) || (alloc->pools == NULL))
@@ -312,27 +349,27 @@ bool md_pool_build_all(alc_t *alloc)
 
     (void)memset(spare_used, 0, sizeof(spare_used));
 
-    if (md_pool_collect(&next.bbt, alloc, &s_pool_spec_bbt, spare_used) < s_pool_spec_bbt.min_blocks)
+    if (md_pool_collect(&next.bbt, alloc, &s_pool_specs[MD_POOL_BBT], spare_used) < s_pool_specs[MD_POOL_BBT].min_blocks)
     {
-        LOGE(LOG_TAG_POOL "BBT candidates < %u — metadata area unusable\r\n", (unsigned)s_pool_spec_bbt.min_blocks);
+        LOGE(LOG_TAG_POOL "BBT candidates < %u — metadata area unusable\r\n", (unsigned)s_pool_specs[MD_POOL_BBT].min_blocks);
         return false;
     }
 
-    if (md_pool_collect(&next.cp, alloc, &s_pool_spec_cp, spare_used) < s_pool_spec_cp.min_blocks)
+    if (md_pool_collect(&next.cp, alloc, &s_pool_specs[MD_POOL_CP], spare_used) < s_pool_specs[MD_POOL_CP].min_blocks)
     {
-        LOGE(LOG_TAG_POOL "Checkpoint candidates < %u\r\n", (unsigned)s_pool_spec_cp.min_blocks);
+        LOGE(LOG_TAG_POOL "Checkpoint candidates < %u\r\n", (unsigned)s_pool_specs[MD_POOL_CP].min_blocks);
         return false;
     }
 
-    if (md_pool_collect(&next.jrn, alloc, &s_pool_spec_jrn, spare_used) < s_pool_spec_jrn.min_blocks)
+    if (md_pool_collect(&next.jrn, alloc, &s_pool_specs[MD_POOL_JRN], spare_used) < s_pool_specs[MD_POOL_JRN].min_blocks)
     {
-        LOGE(LOG_TAG_POOL "Journal candidates < %u\r\n", (unsigned)s_pool_spec_jrn.min_blocks);
+        LOGE(LOG_TAG_POOL "Journal candidates < %u\r\n", (unsigned)s_pool_specs[MD_POOL_JRN].min_blocks);
         return false;
     }
 
-    if (md_pool_collect(&next.anchor, alloc, &s_pool_spec_anchor, spare_used) < s_pool_spec_anchor.min_blocks)
+    if (md_pool_collect(&next.anchor, alloc, &s_pool_specs[MD_POOL_ANCHOR], spare_used) < s_pool_specs[MD_POOL_ANCHOR].min_blocks)
     {
-        LOGE(LOG_TAG_POOL "Anchor candidates < %u\r\n", (unsigned)s_pool_spec_anchor.min_blocks);
+        LOGE(LOG_TAG_POOL "Anchor candidates < %u\r\n", (unsigned)s_pool_specs[MD_POOL_ANCHOR].min_blocks);
         return false;
     }
 
@@ -355,17 +392,6 @@ DWORD md_ring_addr(const md_ring_t  *ring,
 
     return md_ring_addr_plane(ring, topo, record_idx, page_in_record, plane);
 }
-
-/* 一次池扫描的中间结果（①~③ 步）。 */
-typedef struct
-{
-    WORD  cursor_block;  /* 第一个未写满的块；全满时为"最新满块之后" */
-    WORD  best_full_idx; /* 全部满块末条中 sequence 最大者（UINT16_MAX = 无）*/
-    DWORD best_full_seq;
-    WORD  cursor_last_idx; /* 游标块内最后一条有效 record（UINT16_MAX = 无）*/
-    DWORD cursor_last_seq;
-    bool  ring_full; /* 池已写满一圈 */
-} md_ring_scan_t;
 
 /* ①~③：逐块探末条 → 找游标块 → 游标块内找末条。 */
 static void md_ring_scan(const md_ring_t       *ring,
@@ -688,12 +714,6 @@ static void md_anchor_ring_init(const md_dir_cache_t *dir, md_ring_t *ring)
         ring->blocks[i] = (WORD)(ANCHOR_BLOCK0 + i);
     }
 }
-
-typedef struct
-{
-    const md_dir_cache_t *dir;
-    const md_ring_t      *ring;
-} anchor_probe_ctx_t;
 
 /* 廉价探针：只读 chunk 0 的 20 字节页头取 sequence。
  * FC 读整页并校验 per-CW CRC + ECC，`length` 只限制拷出字节数。 */
@@ -1497,7 +1517,8 @@ bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION
 /* --------------------------------------------------------------------
  * md_commit_region
  *   功能：登记 region 的新位置——旧位置活计数 -1、新位置 +1、更新 entries；旧块归零即登记回收。
- *   参数：dir —— Directory；region_id；new_pba —— 新位置。
+ *   参数：dir —— Directory；region_id；mode —— 单副本 / 成对提交；
+ *         new_primary/new_backup —— 副本新位置（单副本模式下另一个参数忽略）。
  *   返回：无（越界/INVALID 在 release 下 no-op）。
  *   实现要点：只对**动态日志块**位置（非固定元数据块）增减活计数——INVALID（未映射）
  *             不计。旧块归零且非当前块 ⇒ 置进 `reclaim_pending` 位图，由后台 job
@@ -1553,59 +1574,96 @@ DWORD md_backup_find(const md_dir_cache_t *dir, WORD region_id)
     return (region_id < METADATA_DIR_ENTRIES) ? dir->backup_pba[region_id] : NAND_PBA_INVALID;
 }
 
-/* 更新**单个副本**的位置（copy 0 = 主，1 = 备）。压缩搬移按副本粒度调用。 */
-void md_commit_region_copy(md_dir_cache_t *dir,
-                           WORD            region_id,
-                           BYTE            copy,
-                           DWORD           new_pba)
+/*
+ * md_commit_region - 按 mode 提交一个或两个副本。
+ *
+ * 单副本模式只走一个 copy；MD_COMMIT_PAIR 走两个 copy。账本迁移原语是
+ * md_region_copy_commit（旧位置 -1、新位置 +1、旧块归零登记回收）。
+ */
+void md_commit_region(md_dir_cache_t  *dir,
+                      WORD             region_id,
+                      md_commit_mode_e mode,
+                      DWORD            new_primary,
+                      DWORD            new_backup)
 {
     ASSERT(region_id < METADATA_DIR_ENTRIES);
-    ASSERT(new_pba != NAND_PBA_INVALID);
-    ASSERT(copy < L2P_REGION_COPIES);
+    ASSERT(mode < MD_COMMIT_MODE_NUM);
 
-    if ((region_id >= METADATA_DIR_ENTRIES) || (new_pba == NAND_PBA_INVALID) || (copy >= L2P_REGION_COPIES))
+    if (region_id >= METADATA_DIR_ENTRIES)
     {
         return;
     }
 
-    if (copy == 0U)
-    {
-        const DWORD old = md_entry_find(dir, METADATA_TYPE_L2P_REGION, region_id);
+    BYTE first;
+    BYTE count;
 
-        md_region_copy_commit(dir, old, new_pba);
-        md_entry_update(dir, METADATA_TYPE_L2P_REGION, region_id, new_pba);
+    switch (mode)
+    {
+        case MD_COMMIT_PRIMARY:
+            first = 0U;
+            count = 1U;
+            break;
+        case MD_COMMIT_BACKUP:
+            first = 1U;
+            count = 1U;
+            break;
+        case MD_COMMIT_PAIR:
+            first = 0U;
+            count = L2P_REGION_COPIES;
+            break;
+        default:
+            ASSERT(0); /* H40：枚举入口断言；release 下静默 no-op */
+            return;
+    }
+
+    /* 成对提交先整体校验：避免只提交了主副本才发现备份参数无效（半对不是原子提交）。 */
+    if (mode == MD_COMMIT_PAIR)
+    {
+        ASSERT(new_primary != new_backup);
+        ASSERT(new_primary != NAND_PBA_INVALID);
+        ASSERT(new_backup != NAND_PBA_INVALID);
+
+        if ((new_primary == new_backup) || (new_primary == NAND_PBA_INVALID) || (new_backup == NAND_PBA_INVALID))
+        {
+            return;
+        }
     }
     else
     {
-        const DWORD old = md_backup_find(dir, region_id);
+        const DWORD pba = (mode == MD_COMMIT_PRIMARY) ? new_primary : new_backup;
 
-        md_region_copy_commit(dir, old, new_pba);
-
-        /* region_id 已由本函数入口校验；备份副本没有额外条目结构，只更新账本并置脏。 */
-        dir->backup_pba[region_id] = new_pba;
-        dir->dirty                 = true;
-        dir->dirty_gen++;
+        ASSERT(pba != NAND_PBA_INVALID);
+        if (pba == NAND_PBA_INVALID)
+        {
+            return;
+        }
     }
-}
 
-/* 双副本原子提交：主/备都在**同一次 flush** 写成功后才调用。 */
-void md_commit_region_pair(md_dir_cache_t *dir,
-                           WORD            region_id,
-                           DWORD           new_primary,
-                           DWORD           new_backup)
-{
-    ASSERT(new_primary != new_backup);
+    const BYTE end = (BYTE)(first + count);
 
-    md_commit_region_copy(dir, region_id, 0U, new_primary);
-    md_commit_region_copy(dir, region_id, 1U, new_backup);
-}
+    for (BYTE copy = first; copy < end; copy++)
+    {
+        const DWORD new_pba = (copy == 0U) ? new_primary : new_backup;
 
-/* 主副本提交（保持旧签名：压缩/兼容路径用单副本）。 */
-void md_commit_region(md_dir_cache_t *dir,
-                      WORD            region_id,
-                      DWORD           new_pba)
-{
-    md_commit_region_copy(dir, region_id, 0U, new_pba);
+        if (copy == 0U)
+        {
+            const DWORD old = md_entry_find(dir, METADATA_TYPE_L2P_REGION, region_id);
+
+            md_region_copy_commit(dir, old, new_pba);
+            md_entry_update(dir, METADATA_TYPE_L2P_REGION, region_id, new_pba);
+        }
+        else
+        {
+            const DWORD old = md_backup_find(dir, region_id);
+
+            md_region_copy_commit(dir, old, new_pba);
+
+            /* 备份副本没有额外条目结构，只更新账本并置脏。 */
+            dir->backup_pba[region_id] = new_pba;
+            dir->dirty                 = true;
+            dir->dirty_gen++;
+        }
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1896,31 +1954,6 @@ ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_write
 /* ══════════════════════════════════════════════════════════════════
  * 六、元数据块判定
  * ══════════════════════════════════════════════════════════════════ */
-
-/*
- * 固定元数据分区表 —— 单一事实来源（类型声明在 metadata.h）
- *
- * 区间为 [first_block, first_block + block_count)；**各 (ch,ce,lun) 用同一份块号**
- * （分片模型：每个 die 一套完整元数据，分区不随维度错开）。
- *
- * Anchor / Checkpoint / BBT 都是**多块轮转池**：池内每块容纳 `records_per_block`
- * 条 record，块满换池内下一块（先擦后写）。
- *
- * 每项完全由 metadata.h 的宏派生——块号 / 块数 / 每块 record 数 / 表字节均无手写数字。
- */
-static const md_partition_t s_md_partitions[] = {
-  /* name, first_block, block_count, plane_mask, redundancy, table_bytes */
-    {    "Anchor",     ANCHOR_BLOCK0,       ANCHOR_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK,         ANCHOR_RECORDS_PER_BLOCK,                       FTL_ANCHOR_TABLE_BYTES},
-    {"Checkpoint", CHECKPOINT_BLOCK0,   CHECKPOINT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK, FTL_CHECKPOINT_RECORDS_PER_BLOCK,                   FTL_CHECKPOINT_TABLE_BYTES},
-    {       "BBT",         BBT_BLOCK,          BBT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK,                  PAGES_PER_BLOCK,                          FTL_BBT_TABLE_BYTES},
-    {   "Journal",    JOURNAL_BLOCK0,      JOURNAL_BLOCK_COUNT, METADATA_MIRROR_PLANE_MASK,                               1U,                      FTL_JOURNAL_TABLE_BYTES},
- /* L2P region 日志区：固定预留（RISK-MD-07/CAP-02）。redundancy 填 1（不是 record 池）；
-  * table_bytes = region 数 × 每个 region 的 2 KB。 */
-    {   "L2P log",    L2P_LOG_BLOCK0, L2P_LOG_BLOCKS_PER_PLANE, METADATA_MIRROR_PLANE_MASK,                               1U, (L2P_REGIONS_PER_INSTANCE * L2P_REGION_SIZE)},
-};
-
-/* 分区数（表长）。sizeof 派生 ⇒ 加/删分区项时自动跟随。 */
-static const DWORD s_md_partition_count = (sizeof(s_md_partitions) / sizeof(s_md_partitions[0]));
 
 /* --------------------------------------------------------------------
  * md_block_is_metadata

@@ -1061,7 +1061,11 @@ static void md_complete_cp_write(md_dir_cache_t *dir, md_handle_t *j, fc_command
         return;
     }
 
-    md_commit_region_copy(dir, j->cur_region, j->cur_copy, j->slot);
+    const md_commit_mode_e mode        = (j->cur_copy == 0U) ? MD_COMMIT_PRIMARY : MD_COMMIT_BACKUP;
+    const DWORD            new_primary = (j->cur_copy == 0U) ? j->slot : NAND_PBA_INVALID;
+    const DWORD            new_backup  = (j->cur_copy == 1U) ? j->slot : NAND_PBA_INVALID;
+
+    md_commit_region(dir, j->cur_region, mode, new_primary, new_backup);
     j->slot  = NAND_PBA_INVALID;
     j->moved = (j->moved + 1U);
     j->phase = MD_JOB_CP_READ;
