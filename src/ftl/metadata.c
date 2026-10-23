@@ -200,21 +200,30 @@ static WORD md_pool_collect(md_ring_t            *ring,
 
     const WORD end = (WORD)(spec->first + spec->nominal);
 
-    for (WORD b = spec->first; (b < end) && (ring->block_count < MD_RING_MAX_BLOCKS); b++)
+    for (WORD b = spec->first; b < end; b++)
     {
+        if (ring->block_count >= MD_RING_MAX_BLOCKS)
+        {
+            break; /* candidates 数组容量 */
+        }
         if (md_block_good_on_mask(alloc, b, spec->plane_mask))
         {
             ring->blocks[ring->block_count++] = b;
         }
     }
 
-    WORD used = 0U;
+    /* 停止点 = min(硬下界, candidates 数组容量)：两者任一到达后继续扫也不会再收。 */
+    const WORD spare_end = (WORD)FTL_METADATA_AREA_END;
+    const WORD target    = (spec->min_blocks < MD_RING_MAX_BLOCKS) ? spec->min_blocks : MD_RING_MAX_BLOCKS;
+    WORD       used      = 0U;
 
-    for (WORD s = MD_SPARE_BLOCK0;
-         (s < (MD_SPARE_BLOCK0 + MD_SPARE_BLOCKS_PER_PLANE)) && (used < spec->spare_budget) &&
-         (ring->block_count < spec->min_blocks) && (ring->block_count < MD_RING_MAX_BLOCKS);
-         s++)
+    for (WORD s = MD_SPARE_BLOCK0; s < spare_end; s++)
     {
+        if ((used >= spec->spare_budget) || (ring->block_count >= target))
+        {
+            break;
+        }
+
         const WORD si = (WORD)(s - MD_SPARE_BLOCK0);
 
         if (spare_used[si] || !md_block_good_on_mask(alloc, s, spec->plane_mask))
@@ -243,7 +252,7 @@ void md_pool_build_bbt_bootstrap(md_ring_t *ring)
     {
         ring->blocks[ring->block_count++] = b;
     }
-    for (WORD s = MD_SPARE_BLOCK0; s < (MD_SPARE_BLOCK0 + MD_SPARE_BLOCKS_PER_PLANE); s++)
+    for (WORD s = MD_SPARE_BLOCK0; s < FTL_METADATA_AREA_END; s++)
     {
         ring->blocks[ring->block_count++] = s;
     }
@@ -303,27 +312,27 @@ bool md_pool_build_all(alc_t *alloc)
 
     (void)memset(spare_used, 0, sizeof(spare_used));
 
-    if (md_pool_collect(&next.bbt, alloc, &s_pool_spec_bbt, spare_used) < 2U)
+    if (md_pool_collect(&next.bbt, alloc, &s_pool_spec_bbt, spare_used) < s_pool_spec_bbt.min_blocks)
     {
-        LOGE(LOG_TAG_POOL "BBT candidates < 2 — metadata area unusable\r\n");
+        LOGE(LOG_TAG_POOL "BBT candidates < %u — metadata area unusable\r\n", (unsigned)s_pool_spec_bbt.min_blocks);
         return false;
     }
 
-    if (md_pool_collect(&next.cp, alloc, &s_pool_spec_cp, spare_used) < 2U)
+    if (md_pool_collect(&next.cp, alloc, &s_pool_spec_cp, spare_used) < s_pool_spec_cp.min_blocks)
     {
-        LOGE(LOG_TAG_POOL "Checkpoint candidates < 2\r\n");
+        LOGE(LOG_TAG_POOL "Checkpoint candidates < %u\r\n", (unsigned)s_pool_spec_cp.min_blocks);
         return false;
     }
 
-    if (md_pool_collect(&next.jrn, alloc, &s_pool_spec_jrn, spare_used) < JOURNAL_BLOCK_COUNT)
+    if (md_pool_collect(&next.jrn, alloc, &s_pool_spec_jrn, spare_used) < s_pool_spec_jrn.min_blocks)
     {
-        LOGE(LOG_TAG_POOL "Journal candidates < %u\r\n", (unsigned)JOURNAL_BLOCK_COUNT);
+        LOGE(LOG_TAG_POOL "Journal candidates < %u\r\n", (unsigned)s_pool_spec_jrn.min_blocks);
         return false;
     }
 
-    if (md_pool_collect(&next.anchor, alloc, &s_pool_spec_anchor, spare_used) < 2U)
+    if (md_pool_collect(&next.anchor, alloc, &s_pool_spec_anchor, spare_used) < s_pool_spec_anchor.min_blocks)
     {
-        LOGE(LOG_TAG_POOL "Anchor candidates < 2\r\n");
+        LOGE(LOG_TAG_POOL "Anchor candidates < %u\r\n", (unsigned)s_pool_spec_anchor.min_blocks);
         return false;
     }
 
@@ -592,13 +601,17 @@ ftl_status_e md_ring_prepare_addr(const md_ring_t  *ring,
     {
         return FTL_ERROR;
     }
-    if (write_idx >= md_ring_total_records(ring))
+
+    const WORD total = md_ring_total_records(ring);
+    const WORD rpb   = md_ring_records_per_block(ring);
+
+    if (write_idx >= total)
     {
         return FTL_ERROR;
     }
 
     *out_addr       = md_ring_addr(ring, topo, write_idx, 0U);
-    *out_need_erase = ((write_idx % md_ring_records_per_block(ring)) == 0U);
+    *out_need_erase = ((write_idx % rpb) == 0U);
     if (*out_addr == NAND_PBA_INVALID)
     {
         return FTL_ERROR;
@@ -815,10 +828,12 @@ static void md_fixed_fill(md_dir_cache_t *dir)
 
     for (WORD i = 0U; i < L2P_REGIONS_PER_INSTANCE; i++)
     {
-        dir->entries[dir->count].type = METADATA_TYPE_L2P_REGION;
-        dir->entries[dir->count].id   = i;
-        dir->entries[dir->count].pba  = NAND_PBA_INVALID;
-        dir->backup_pba[i]            = NAND_PBA_INVALID;
+        md_entry_t *entry = &dir->entries[dir->count];
+
+        entry->type        = METADATA_TYPE_L2P_REGION;
+        entry->id          = i;
+        entry->pba         = NAND_PBA_INVALID;
+        dir->backup_pba[i] = NAND_PBA_INVALID;
         dir->count++;
     }
 }
@@ -871,7 +886,6 @@ static void md_live_copy_add(md_dir_cache_t *dir, DWORD pba, WORD entry_idx, boo
 static void md_live_rebuild(md_dir_cache_t *dir)
 {
     memset(dir->l2p_live, 0, sizeof(dir->l2p_live));
-    dir->log_borrow_count = 0U;
 
     bool warned = false;
 
@@ -1059,9 +1073,11 @@ void md_entry_update(md_dir_cache_t *dir,
     /* 新增 entry（往 entries 数组尾部追加）*/
     if (dir->count < METADATA_DIR_ENTRIES)
     {
-        dir->entries[dir->count].type = type;
-        dir->entries[dir->count].id   = id;
-        dir->entries[dir->count].pba  = new_pba;
+        md_entry_t *entry = &dir->entries[dir->count];
+
+        entry->type = type;
+        entry->id   = id;
+        entry->pba  = new_pba;
         dir->count++;
         dir->dirty = true;
         dir->dirty_gen++;
@@ -1454,7 +1470,9 @@ bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION
         return false; /* 整理 job 在飞：背压语义（见 md_log_rotate 的 job 让路说明） */
     }
 
-    if (dir->cur_block_valid && ftl_block_is_bad(&alloc->blocks[dir->cur_metadata_block]))
+    const bst_block_t *cur = &alloc->blocks[dir->cur_metadata_block];
+
+    if (dir->cur_block_valid && ftl_block_is_bad(cur))
     {
         dir->cur_block_valid = false;
     }
@@ -1668,8 +1686,8 @@ void md_anchor_page(const md_dir_cache_t *dir, DWORD seq, BYTE chunk, md_anchor_
     const bool backup      = (chunk >= ANCHOR_DIR_PRIMARY_PAGES);
     const BYTE local_chunk = backup ? (BYTE)(chunk - ANCHOR_DIR_PRIMARY_PAGES) : chunk;
 
-    WORD base_entry = (local_chunk * METADATA_DIR_ENTRIES_PER_PAGE);
-    WORD n;
+    const WORD base_entry = (WORD)(local_chunk * METADATA_DIR_ENTRIES_PER_PAGE);
+    WORD       n;
 
     if (base_entry >= dir->count)
     {
@@ -1692,25 +1710,26 @@ void md_anchor_page(const md_dir_cache_t *dir, DWORD seq, BYTE chunk, md_anchor_
     page->entry_count    = n;
     page->layout_version = FTL_MEDIA_LAYOUT_VERSION;
 
-    for (WORD k = 0U; k < METADATA_DIR_ENTRIES_PER_PAGE; k++)
+    /* 有效条目：本页区间与全局有效范围 [0,count) 的交。 */
+    for (WORD k = 0U; k < n; k++)
     {
-        if (k < n)
+        const WORD entry_idx = (WORD)(base_entry + k);
+
+        page->entries[k] = dir->entries[entry_idx];
+        if (backup)
         {
-            page->entries[k] = dir->entries[base_entry + k];
-            if (backup)
-            {
-                /* 备份半：type/id 沿用主条目，pba 换成本 region 的第二副本位置。 */
-                page->entries[k].pba = dir->backup_pba[base_entry + k];
-            }
+            /* 备份半：type/id 沿用主条目，pba 换成本 region 的第二副本位置。 */
+            page->entries[k].pba = dir->backup_pba[entry_idx];
         }
-        else
-        {
-            /* ⚠ memset 只给 0，不能替代这里的 NAND_PBA_INVALID 哨兵：
-             *   尾部条目的 pba 必须是 0xFFFFFFFF，否则会被当成"指向 block 0"的映射。 */
-            page->entries[k].type = 0U;
-            page->entries[k].id   = 0U;
-            page->entries[k].pba  = NAND_PBA_INVALID;
-        }
+    }
+
+    /* 尾部 padding：⚠ memset 只给 0，不能替代这里的 NAND_PBA_INVALID 哨兵——
+     * 否则会被当成"指向 block 0"的映射。 */
+    for (WORD k = n; k < METADATA_DIR_ENTRIES_PER_PAGE; k++)
+    {
+        page->entries[k].type = 0U;
+        page->entries[k].id   = 0U;
+        page->entries[k].pba  = NAND_PBA_INVALID;
     }
 }
 
@@ -1762,19 +1781,29 @@ static void md_load_assemble(md_dir_cache_t *dir, const md_ring_t *ring, WORD ne
                 continue; /* 该副本不可信：试另一个 plane；都失败则保留基础层的"未映射" */
             }
 
-            WORD n = ((page.entry_count < METADATA_DIR_ENTRIES_PER_PAGE) ? page.entry_count : METADATA_DIR_ENTRIES_PER_PAGE);
+            /* entry_count 来自介质（不可信）：先夹到本页容量再窄化到 WORD。 */
+            const WORD n = (WORD)((page.entry_count < METADATA_DIR_ENTRIES_PER_PAGE)
+                                      ? page.entry_count
+                                      : METADATA_DIR_ENTRIES_PER_PAGE);
 
-            for (WORD k = 0U; (k < n) && ((base_entry + k) < METADATA_DIR_ENTRIES); k++)
+            for (WORD k = 0U; k < n; k++)
             {
+                const WORD entry_idx = (WORD)(base_entry + k);
+
+                /* entry_count 来自介质（不可信，H29）：越界即停。 */
+                if (entry_idx >= METADATA_DIR_ENTRIES)
+                {
+                    break;
+                }
+
                 if (!backup)
                 {
-                    dir->entries[base_entry + k] = page.entries[k];
+                    dir->entries[entry_idx] = page.entries[k];
                 }
-                else if ((page.entries[k].type == METADATA_TYPE_L2P_REGION) &&
-                         (page.entries[k].id == (base_entry + k)))
+                else if ((page.entries[k].type == METADATA_TYPE_L2P_REGION) && (page.entries[k].id == entry_idx))
                 {
                     /* 备份半 best-effort：缺页/损坏的页保留基础层的 INVALID（单副本运行）。 */
-                    dir->backup_pba[base_entry + k] = page.entries[k].pba;
+                    dir->backup_pba[entry_idx] = page.entries[k].pba;
                 }
                 else
                 {
@@ -1946,7 +1975,7 @@ bool md_block_is_metadata(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
      * 避免损坏介质上的条目让调试版误报。 */
     bool slow = false;
 
-    for (WORD i = 0U; (!slow) && (i < md_dir->count); i++)
+    for (WORD i = 0U; i < md_dir->count; i++)
     {
         if (md_dir->entries[i].type != METADATA_TYPE_L2P_REGION)
         {
@@ -1956,11 +1985,22 @@ bool md_block_is_metadata(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
         /* 主/备两份都参与差分（副本只占备份位置时，只扫主会让 fast != slow）。 */
         const WORD rid = md_dir->entries[i].id;
 
-        for (BYTE copy = 0U; (!slow) && (copy < L2P_REGION_COPIES); copy++)
+        for (BYTE copy = 0U; copy < L2P_REGION_COPIES; copy++)
         {
-            const DWORD pba = (copy == 0U)
-                                  ? md_dir->entries[i].pba
-                                  : ((rid < METADATA_DIR_ENTRIES) ? md_dir->backup_pba[rid] : NAND_PBA_INVALID);
+            DWORD pba;
+
+            if (copy == 0U)
+            {
+                pba = md_dir->entries[i].pba;
+            }
+            else if (rid < METADATA_DIR_ENTRIES)
+            {
+                pba = md_dir->backup_pba[rid];
+            }
+            else
+            {
+                pba = NAND_PBA_INVALID;
+            }
 
             if (pba == NAND_PBA_INVALID)
             {
@@ -1978,7 +2018,13 @@ bool md_block_is_metadata(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
             if ((ep == plane) && (eb == block))
             {
                 slow = true;
+                break;
             }
+        }
+
+        if (slow)
+        {
+            break;
         }
     }
     ASSERT(fast == slow);
@@ -2169,7 +2215,9 @@ void md_pool_service(struct ftl_context *ftl)
     }
 
     /* 当前 L2P 日志块若已 BAD ⇒ 下次 append 重新分配。 */
-    if (dir->cur_block_valid && ftl_block_is_bad(&alloc->blocks[dir->cur_metadata_block]))
+    const bst_block_t *cur = &alloc->blocks[dir->cur_metadata_block];
+
+    if (dir->cur_block_valid && ftl_block_is_bad(cur))
     {
         dir->cur_block_valid = false;
     }

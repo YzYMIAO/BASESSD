@@ -257,8 +257,7 @@ static inline bool ftl_is_l2p_log_block(WORD block)
 /* 块号是否落在 shared metadata spare 区。 */
 static inline bool ftl_is_metadata_spare_block(WORD block)
 {
-    return (block >= MD_SPARE_BLOCK0) &&
-           (block < (MD_SPARE_BLOCK0 + MD_SPARE_BLOCKS_PER_PLANE));
+    return (block >= MD_SPARE_BLOCK0) && (block < FTL_METADATA_AREA_END);
 }
 
 /* gblock 是否落在固定 L2P 日志区。 */
