@@ -79,7 +79,6 @@ SECTIONS
     KEEP(*release/obj/ftl/gc.o(.text .text.*))
     KEEP(*release/obj/ftl/wear_leveling.o(.text .text.*))
     KEEP(*release/obj/ftl/bg_scheduler.o(.text .text.*))
-    KEEP(*release/obj/ftl/completion_table.o(.text .text.*))
     KEEP(*release/obj/ftl/ftl_op.o(.text .text.*))
     KEEP(*release/obj/fc/fc_interface.o(.text .text.*))
     KEEP(*release/obj/fc/fc_queue.o(.text .text.*))

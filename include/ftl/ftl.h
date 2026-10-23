@@ -311,7 +311,7 @@ void ftl_contract_audit(const ftl_ctx_t *ftl);
  * ftl_service_pump - 实例无关的每轮泵（superloop 每轮调一次）
  *
  * Phase 1: fc_service() 推进 NAND（≤ NAND_SUBMIT_BUDGET 次，首轮即抽干完成）
- * Phase 2: ct_drain() 处理完成回调（按命令 ch/ce/lun 路由回实例）
+ * Phase 2: ftl_op_drain() 处理完成回调（按命令 ch/ce/lun 路由回实例）
  *
  * ⚠ 必须在所有 ftl_service() 之前调，且**每轮只调一次**——NAND 引擎与完成表都是
  *   全局单份，per-instance 调用会把 fc_service 预算重复消耗 N 遍。
@@ -338,7 +338,7 @@ void ftl_service(ftl_ctx_t *ftl);
  *   ① 建完成组（一条 host 请求 = 一个组）
  *   ② 逐子操作下发（每个子操作 2 页 Multi-Plane，末条奇数页时单 plane）
  *   ③ 未映射子操作同步返回全零；余下子操作遇资源背压留待 ftl_service Phase 2.5
- *   ④ 数据在 ct_drain 中路由回 buffer
+ *   ④ 数据在 ftl_op_drain 中路由回 buffer
  *
  * ⚠ 一次调用的完成通知（complete_flag/status_out/on_complete）**只在全部子操作
  *   完成后触发一次**。返回 FTL_OK 仅表示已受理（含部分子操作排队），不代表已完成。

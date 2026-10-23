@@ -11,7 +11,7 @@
 
 2. **调用者已保证的前置条件转断言**
    `static` 函数、层内模块头里的接口，以及**跨层入口中调用者必然传有效值的指针/索引参数**，前置条件由调用者保证。守卫一律写成 `ASSERT(条件)`，并**删掉原来的 `return` 与恢复/降级分支**（"跳过坏 ID 继续找"、"回滚分配再返回"、"防御性降级"这类）。
-   层内模块头指：`include/nand/nand_engine.h`、`nand_fmc.h`；`include/ftl/*.h`（除 `ftl.h` 外，含 `allocator.h`/`gc.h`/`bbt.h`/`journal.h`/`metadata.h`/`l2p_cache.h`/`checkpoint.h`/`pending.h`/`read_recovery.h`/`wear_leveling.h`/`completion_table.h`/`bst.h`）。
+   层内模块头指：`include/nand/nand_engine.h`、`nand_fmc.h`；`include/ftl/*.h`（除 `ftl.h` 外，含 `allocator.h`/`gc.h`/`bbt.h`/`journal.h`/`metadata.h`/`l2p_cache.h`/`checkpoint.h`/`pending.h`/`read_recovery.h`/`wear_leveling.h`/`ftl_op.h`/`bst.h`）。
    **`static inline` 的纯 getter/setter 一并适用**（2026-10-17 C 批明确）：判据**不是**"它是不是模块入口"，
    而是**该函数的 NULL 语义有没有被文档化或被 UT 钉住** —— 有 ⇒ 是契约，保留（辨析 B / 判据 4）；
    没有 ⇒ 指针就是前置条件，`if (p != NULL)` 是**恒真的静默吞**（§十附判据 1）⇒ 转 `ASSERT`。
@@ -205,8 +205,8 @@ v8（`f8c005c`）把 `fc_poll_fill` 里 ch/ce/lun 的防御性回推改成 `ASSE
 |---|---|---|
 | `nand_dispatch.c` | `nand_dispatch_lun_free` 的 ch/ce/lun 越界 | 返回 0 → 该 LUN 在 `fc_poll_fill` 里永久挂起（静默活锁） |
 | `nand_dispatch.c` | `nand_dispatch_enqueue` 的逐条前置校验：**扩到整批**（原只查 `requests[0]`），并新增「链成员同 ch/ce/lun」 | 链成员异 LUN 时队列按 `requests[0]` 选错 LUN，`cw_count` 越界则在 `completion_multi_plane` 越界写 `cw_status[]` |
-| `completion_table.c` | `completion_table_route` 的 ch/ce/lun 越界 | 返回 NULL → 上层释放命令后静默丢弃该 completion |
-| `completion_table.c` | `ftl_sync_waiter_handler_with_release` 的 `cmd != NULL`（**v0.75 起该函数已删**，同点由 `ftl_op_dispatch` 的 `cmd != NULL` 承担） | 静默不释放命令 |
+| `ftl_op.c` | `ftl_op_route_get` 的 ch/ce/lun 越界 | 返回 NULL → 上层释放命令后静默丢弃该 completion |
+| `ftl_op.c` | `ftl_sync_waiter_handler_with_release` 的 `cmd != NULL`（**v0.75 起该函数已删**，同点由 `ftl_op_dispatch` 的 `cmd != NULL` 承担） | 静默不释放命令 |
 | `ftl_op.c` | `ftl_op_dispatch` 的 `cmd == NULL`（v0.75 前在 `ftl_handle_completion`） | 静默吞 completion，命令永不完成也不报错 |
 | `fc.c` | `fc_command_configure_descriptors_internal` 的 `plane_count > PLANE_NUM` | 与紧邻的 `ASSERT` 重复；release 下由返回码兜底（本次删除，接受 UB） |
 | `fc.c` | `fc_poll_chain_length` 的「链成员同 target」`break` | 静默把一条链截成两条，链语义丢失 |
@@ -218,7 +218,7 @@ v8（`f8c005c`）把 `fc_poll_fill` 里 ch/ce/lun 的防御性回推改成 `ASSE
 
 | 位置 | 类别 |
 |---|---|
-| `completion_table_route` 的「`g_route[..] == NULL`（`set_route` 之前）」 | 运行时状态（判据 3）；调用方 `ftl.c` 据此释放命令 |
+| `ftl_op_route_get` 的「`g_op_route[..] == NULL`（`set_route` 之前）」 | 运行时状态（判据 3）；调用方 `ftl.c` 据此释放命令 |
 | `fc_data_path.c` 11 处 `desc/dsc == NULL`、`fc.c` 的 `desc_id < POOL_DEPTH ? … : NULL` | 链遍历降级（§九 已裁定） |
 | `fc_interface.c` 的 `buffer_id == FC_BUFFER_ID_INVALID` | 生命周期状态 |
 | `fc_interface.c` / `fc.c` 的 `*_get` 查询函数越界哨兵 | 查询 API 契约 |
@@ -1000,14 +1000,14 @@ NAND 侧多 plane handler 会**无条件遍历 `PLANE_NUM`** 下行地址，未�
 吞掉本应交给其它 job 的 completion，表现为**偶发的命令丢失 / 进度错乱**，极难复现。
 
 > **判据 11：当一条约定是「某个函数**不得**在某上下文里被调用」时，把该上下文做成一个
-> 可查询的**深度计数**（`ftl_op_in_dispatch()`），并在被禁函数的入口写
-> `ASSERT(ftl_op_in_dispatch() == 0)`。**约定从此可测**——任何新调用点一旦越界，debug 档
+> 可查询的**深度计数**（`ftl_op_is_in_dispatch()`），并在被禁函数的入口写
+> `ASSERT(ftl_op_is_in_dispatch() == 0)`。**约定从此可测**——任何新调用点一旦越界，debug 档
 > 当场停机，而不是留到上板后靠"偶发丢命令"去猜。**
 
-**落地形态**：`src/ftl/ftl_op.c` 里 `g_op_depth` 深度计数（单线程顺序主循环 ⇒ 普通变量，
-无需原子），`ftl_op_dispatch` 用 `g_op_depth++` / `g_op_depth--` 包住服务函数调用
+**落地形态**：`src/ftl/ftl_op.c` 里 `g_dispatch_depth` 深度计数（单线程顺序主循环 ⇒ 普通变量，
+无需原子），`ftl_op_dispatch` 用 `g_dispatch_depth++` / `g_dispatch_depth--` 包住服务函数调用
 （含它内部的嵌套派发，故计数天然覆盖嵌套）。`l2p_sync_pump()`（`l2p_cache.c`，四个 `*_sync`
-逃生口的自旋泵）第一行就是 `ASSERT(ftl_op_in_dispatch() == 0)`。
+逃生口的自旋泵）第一行就是 `ASSERT(ftl_op_is_in_dispatch() == 0)`。
 
 **与判据 2 / 9 的关系**：判据 2 的断言守的是**值**（指针/索引非空/在域内），判据 9 守的是
 **静默介质破坏**，本条守的是**控制流位置**。三者互补：本条不检查任何入参，只回答
@@ -1042,7 +1042,7 @@ debug 档暴露；release 档即便误调，也只是多泵一轮（后果与阶
 
 **保留什么（一处不动）**：host 入口（用返回码，判据 1，本就无 ASSERT）+ **FTL↔FC 命令边界**（[I]，
 「配置错误一律 ASSERT」）+ **子模块公开入口**（[BOUND]）+ 内部**高价值不变量**（[INV]：状态机非法态
-`ASSERT(0)` / 实例归属 `&ftl->xxx == ctx` / 簿记计数 / 运行时上下文 `ftl_op_in_dispatch()`）。
+`ASSERT(0)` / 实例归属 `&ftl->xxx == ctx` / 簿记计数 / 运行时上下文 `ftl_op_is_in_dispatch()`）。
 
 **固化约定（防回加）**：**模块内部不逐函数复检同一入参。** 边界 = host 入口返回码 +
 FTL↔FC 命令边界 / 子模块公开入口 ASSERT；内部只留高价值不变量。新增内部函数时，入参有效性

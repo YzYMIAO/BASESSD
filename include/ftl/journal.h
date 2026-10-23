@@ -238,7 +238,7 @@ void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc);
  * 失败 ⇒ 当前页不够且异步刷页起不来（在飞 / 待擦 / 池空 / 环满），调用者应返
  * FTL_AGAIN 停泊，**不得**追加条目或改 L2P。
  *
- * ⚠ 本函数只可能起一条**异步**页写，绝不同步刷页 / 等待 / ct_drain：
+ * ⚠ 本函数只可能起一条**异步**页写，绝不同步刷页 / 等待 / ftl_op_drain：
  *   它会被 ftl_confirm_write 调用，必须保持 completion/service 调用栈无泵。
  * @param journal Journal
  * @param entries 本次最多追加的条目数（1..JOURNAL_ENTRIES_PER_PAGE-1）

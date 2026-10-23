@@ -36,7 +36,6 @@
 
 #include "assertion.h"
 #include "bst.h" /* ftl_pba_gblock（逐块 ECC 记账） */
-#include "completion_table.h"
 #include "fc.h"
 #include "ftl_op.h" /* ftl_op_submit / FTL_OP_SYNC_WAIT */
 #include "ftl_type.h"
@@ -497,7 +496,7 @@ ftl_status_e ftl_cmd_read_data(fc_command_t *cmd, void *buffer, DWORD length)
  *   返回：FTL_OK 完成；FTL_ERROR 提交失败 / 超时 / 旁表满。
  *   实现要点：① ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter) —— 打 tag、登记栈上
  *             waiter、提交（登记早于提交）；② 自旋 fc_service() +
- *             ct_drain() 直到 waiter.done；③ 超时摘链返回 FTL_ERROR。
+ *             ftl_op_drain() 直到 waiter.done；③ 超时摘链返回 FTL_ERROR。
  *             ⚠ 非目标 completion 由 drain 按各自的 op_tag 派发，本函数无需处理。
  *             ⚠ **不 release**：调用者要在返回后读 cmd 数据才 release（见 ftl_op.h）。
  * -------------------------------------------------------------------- */
@@ -507,7 +506,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     DWORD max_wait = (timeout_us > 0U) ? timeout_us : 10000U;
 
     /* ⚠ **服务函数内不得同步等待**（贯穿机制 2）：在完成派发里再开一个完成泵
-     * （本函数自旋 fc_service + ct_drain）= 嵌套泵，正是本次异步化要
+     * （本函数自旋 fc_service + ftl_op_drain）= 嵌套泵，正是本次异步化要
      * 消灭的形态——调用者的栈帧被钉住，且泵里再跑泵使重入面不可枚举。
      * 目标终态：本函数只被开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI 调用
      * （那些路径在 superloop 之前，没有别人 drain CQ，必须同步）。
@@ -526,7 +525,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
     for (;;)
     {
         (void)fc_service();
-        ct_drain();
+        ftl_op_drain();
 
         if (waiter.done)
         {
@@ -537,7 +536,7 @@ ftl_status_e ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
         elapsed++;
         if (elapsed > max_wait)
         {
-            ct_remove(waiter.cmd_id);
+            ftl_op_ctx_remove(waiter.cmd_id);
             return FTL_ERROR;
         }
     }

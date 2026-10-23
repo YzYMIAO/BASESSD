@@ -280,7 +280,7 @@ flowchart TB
         C1 --> C2["FC descriptor chain S3-15"]
         C2 --> C3["NAND 执行"]
         C3 --> C4["FC CQ"]
-        C4 --> C5["ftl_service_pump ct_drain S3-10"]
+        C4 --> C5["ftl_service_pump ftl_op_drain S3-10"]
         C5 --> C6["ftl_op_dispatch op tag 选服务函数"]
         C6 --> C7["ftl_host_io_callback 读 拷回 写 confirm"]
     end
@@ -1094,7 +1094,7 @@ L2P region log（固定预留区，追加块）
 | Journal | `journal.c/h` | §3.7 |
 | Checkpoint | `checkpoint.c/h` | §3.8 |
 | Host 提交 / 组 / pending | `ftl.c`、`pending.c/h` | §3.9 |
-| 完成路由 / op dispatch | `completion_table.c/h`、`ftl_op.c/h` | §3.10 |
+| 完成派发面 | `ftl_op.c/h` | §3.10 |
 | 页打包写缓冲 | `wbuf.c`、`wbuf.h` | §3.11 |
 | Service / 后台调度 | `ftl.c`、`bg_scheduler.c/h` | §3.12 |
 | GC / 迁移 | `gc.c/h`、`migrate.c/h` | §3.13 |
@@ -2436,7 +2436,7 @@ flowchart TD
 **host 写确认（capacity reserve）**：`ftl_confirm_write` 在追加前调用
 `jrn_reserve(n)` 预留本页 `n` 个槽位（按 mask 最坏情况，留 1 个空槽）。不足时
 `jrn_reserve` 只调用 `jrn_freeze` 起**异步**页写并返回 `false`，confirm 直接返
-`FTL_AGAIN` 停泊；**confirm 内不同步刷页、不调 `ftl_sync_submit_wait` / `ct_drain`**。
+`FTL_AGAIN` 停泊；**confirm 内不同步刷页、不调 `ftl_sync_submit_wait` / `ftl_op_drain`**。
 预留成功后追加 `n` 条不会触发页满分支，Journal 页由 `jrn_handle` 在后续 service 轮
 异步落盘。Journal 模块**不提供同步刷页出口**。
 
@@ -2916,7 +2916,7 @@ best-effort 完成，避免主机永远等不到 CSW。TRIM 也改为异步 job
 
 <a id="s3-10" name="s3-10"></a>
 
-### 3.10 完成路由与 op dispatch（completion_table + ftl_op）
+### 3.10 完成派发面（ftl_op：ctx 旁表 + 实例路由 + op dispatch）
 
 #### 3.10.1 背景与需求
 
@@ -2936,28 +2936,28 @@ FTL 需要回答两个问题：
   同步等待器。
 - **不做**：不拥有各服务函数（各模块自己实现，`g_op_callbacks[]` 只登记）；不做 NAND 调度
   （FC 层）。
-- **入口**：`ftl_service_pump` 的 `ct_drain`；**出口**：`g_op_callbacks[tag]`。
+- **入口**：`ftl_service_pump` 的 `ftl_op_drain`；**出口**：`g_op_callbacks[tag]`。
 
 #### 3.10.3 结构与不变量
 
 | 结构 | 字段 | 说明 |
 |---|---|---|
-| `ct_entry_t` | cmd_id / ctx | `COMPLETION_TABLE_SIZE` 项旁表（容量推导见 §3.10.7） |
-| `g_route[CH][CE][LUN]` | `ftl_ctx_t *` | 实例路由 |
-| `ftl_op_id_e` | `FTL_OP_HOST_IO / L2P / JOURNAL / CHECKPOINT / METADATA / GC / WL / BBT / WEAR / READ_RECOVERY / ...` | `g_op_callbacks[]` 下标 |
+| `ftl_op_ctx_entry_t` | cmd_id / ctx | `FTL_OP_CTX_TABLE_SIZE` 项旁表（容量推导见 §3.10.7） |
+| `g_op_route[CH][CE][LUN]` | `ftl_ctx_t *` | 实例路由 |
+| `ftl_op_id_e` | `FTL_OP_HOST_IO / L2P / JOURNAL / CHECKPOINT / METADATA / GC / WL / BBT / READ_RECOVERY / ...` | `g_op_callbacks[]` 下标 |
 | `ftl_sync_waiter_t` | cmd_id / done / status | 同步逃生口的等待器 |
 
 **不变量**：
 
-1. **先 take 再 dispatch**：`ct_take(cmd_id)` 先摘链，防止服务函数重入踩项。
+1. **先 take 再 dispatch**：`ftl_op_ctx_take(cmd_id)` 先摘链，防止服务函数重入踩项。
 2. **按命令自身的 ch/ce/lun 路由**，不是按提交者；跨实例命令必须回到正确实例。
 3. **op tag 必须是 `g_op_callbacks[]` 的合法下标**；未知 tag 按孤儿处理。
 4. **服务函数不得自旋完成泵**：`l2p_sync_pump` 有 `ftl_op_is_in_dispatch()==0` 断言；
    服务函数只能提交命令或改状态，推进留给下一轮。
 5. **ctx 生命周期覆盖命令在飞期**：同步等待器用栈，其余用静态 job/line/pending 槽。
-6. **同一 cmd_id 至多一条表项**：由 `ct_add` 唯一闸门保证——它先全表查
+6. **同一 cmd_id 至多一条表项**：由 `ftl_op_ctx_add` 唯一闸门保证——它先全表查
    cmd_id，命中则**原地覆盖 ctx** 并 `LOGW`，未命中才取空槽。
-   理由：`ct_take` 取的是**首个**匹配项；若允许两条，泄漏（如 FC 的 CQ 满
+   理由：`ftl_op_ctx_take` 取的是**首个**匹配项；若允许两条，泄漏（如 FC 的 CQ 满
    强制完成、FTL 观测不到）之后 cmd_id 被复用，`take` 就会把**别人的 ctx** 交给服务函数，
    而本命令自己的表项永久泄漏。
 
@@ -2965,19 +2965,19 @@ FTL 需要回答两个问题：
 
 ```mermaid
 flowchart LR
-    A["fc_poll_completion"] --> B["ct_drain"]
+    A["fc_poll_completion"] --> B["ftl_op_drain"]
     B --> C["ftl_op_dispatch completion"]
     C --> D{"op_tag 合法"}
-    D -- "否" --> E["ct_remove fc_command_release LOGE 孤儿"]
-    D -- "是" --> F["ct_take cmd_id"]
-    F --> G["ct_get_route ch,ce,lun"]
+    D -- "否" --> E["ftl_op_ctx_remove fc_command_release LOGE 孤儿"]
+    D -- "是" --> F["ftl_op_ctx_take cmd_id"]
+    F --> G["ftl_op_route_get ch,ce,lun"]
     G --> H["g_op_callbacks tag ftl, completion, ctx"]
 ```
 
 #### 3.10.5 关键流程
 
 1. `ftl_op_submit(cmd, tag, ctx)`：
-   - `ct_add(cmd->id, ctx)`（ctx 可为 NULL，如 host IO）；
+   - `ftl_op_ctx_add(cmd->id, ctx)`（ctx 可为 NULL，如 host IO）；
    - 设置命令的 `op_tag`；
    - 提交到 FC SQ；失败则 remove + release。
 2. `ftl_op_dispatch`：
@@ -3000,7 +3000,7 @@ flowchart LR
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `COMPLETION_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH`（= 64） | `include/ftl/completion_table.h`。**推导**：表按 `command_id` 键 ⇒ 表项数 ≤ 同时在飞命令数 ≤ FC 命令池深度。原值 32 < 池深 64，满则 `ftl_op_submit` 返 `FTL_ERROR`（非背压）⇒ 结构性不可达；`src/ftl/completion_table.c` 有 `_Static_assert(COMPLETION_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH)` 防池深漂移 |
+| `FTL_OP_CTX_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH`（= 64） | `include/ftl/ftl_op.h`。**推导**：表按 `command_id` 键 ⇒ 表项数 ≤ 同时在飞命令数 ≤ FC 命令池深度。原值 32 < 池深 64，满则 `ftl_op_submit` 返 `FTL_ERROR`（非背压）⇒ 结构性不可达；`src/ftl/ftl_op.c` 有 `_Static_assert(FTL_OP_CTX_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH)` 防池深漂移 |
 | `g_op_callbacks[]` 槽位 | 按 `ftl_op_id_e` 顺序 | `src/ftl/ftl_op.c` |
 | 同步自旋预算 | `L2P_SYNC_GUARD_MAX` / 各 job 的 stall 上限 | `include/ftl/l2p_cache.h` 等 |
 
@@ -3236,7 +3236,7 @@ Free Pool 耗尽后写会永久失败。需要一套**确定性的前台保护**
 ```mermaid
 flowchart TB
     subgraph "ftl_service_pump 每轮一次"
-        P1["fc_service x 最多 4 次"] --> P2["ct_drain"]
+        P1["fc_service x 最多 4 次"] --> P2["ftl_op_drain"]
     end
     subgraph "ftl_service ftl 每实例"
         S1["pend_confirm_service"] --> S2["逐组 ftl_drain_group"]
@@ -4168,8 +4168,8 @@ CP 可能推进一个 phase；RR 可能提交一条命令。真正的完成在�
 ```mermaid
 flowchart TB
     subgraph "设备级 启动时一次"
-        ROUTE["g_route CH CE LUN 实例路由"]
-        CT["completion_table cmd_id 到 ctx"]
+        ROUTE["g_op_route CH CE LUN 实例路由"]
+        CT["ftl_op ctx 旁表 cmd_id 到 ctx"]
         LC["g_l2p_cache CH CE 共享 L2P cache"]
     end
 
@@ -4278,7 +4278,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | journal 持久性状态 | `journal.c` | `jrn_append` / 查询 |
 | metadata directory | `metadata.c` / `metadata_job.c` | `metadata_dir_*` / `md_is_busy` |
 | pending / groups | `pending.c` | `pending_*`（含 `pending_view_op` / `pending_group_window_pending`） |
-| completion table | `completion_table.c` | `completion_table_*`、`g_op_callbacks` |
+| 完成派发面 | `ftl_op.c` | `ftl_op_*`、`g_op_callbacks` |
 | 各 job FSM | 各模块 handle | status / 查询 |
 | 调度定时器 | 各模块 handle | `now_ms` + status |
 | 观测计数 | 各模块 handle | status / log |
@@ -4351,7 +4351,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 全局 LBA | host LBA | 数据通路唯一坐标 |
 | 全局 region | `LBA >> 9` | cache 行键、脏位图键 |
 | 局部 region | `global_region / FTL_DIM_TOTAL` | 映射页在 owner die 的落盘位置 |
-| owner | `lba_route_*` / `ct_get_route` | 全局 region → 实例 |
+| owner | `lba_route_*` / `ftl_op_route_get` | 全局 region → 实例 |
 | 实例 | `g_ftl[ch][ce][lun]` | 独立 L2P / 池 / Journal / CP / MD |
 | 共享 cache | `g_l2p_cache[ch][ce]` | 同 `(ch,ce)` 下所有 LUN 共用 |
 
@@ -4754,7 +4754,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | `FTL_PENDING_CMD_NONE` | `0xFFFF` | 同上 |
 | `FTL_DRAIN_STALL_MAX` | 8 | `include/ftl/ftl.h` |
 | `FTL_LBA_MAX` | `FTL_HOST_DATA_BLOCKS_PER_INSTANCE × PAGES_PER_BLOCK × CW_NUM × FTL_DIM_TOTAL`（= 868,352） | 同上 |
-| `COMPLETION_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH`（= 64） | `include/ftl/completion_table.h`。**推导**：表按 `command_id` 键 ⇒ 表项数 ≤ 同时在飞命令数 ≤ FC 命令池深度。原值 32 < 池深 64，满则 `ftl_op_submit` 返 `FTL_ERROR`（非背压）⇒ 结构性不可达；`src/ftl/completion_table.c` 有 `_Static_assert(COMPLETION_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH)` 防池深漂移 |
+| `FTL_OP_CTX_TABLE_SIZE` | `FC_COMMAND_POOL_DEPTH`（= 64） | `include/ftl/ftl_op.h`。**推导**：表按 `command_id` 键 ⇒ 表项数 ≤ 同时在飞命令数 ≤ FC 命令池深度。原值 32 < 池深 64，满则 `ftl_op_submit` 返 `FTL_ERROR`（非背压）⇒ 结构性不可达；`src/ftl/ftl_op.c` 有 `_Static_assert(FTL_OP_CTX_TABLE_SIZE >= FC_COMMAND_POOL_DEPTH)` 防池深漂移 |
 
 #### Journal
 
@@ -4889,7 +4889,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | FC 命令池/描述符池 + 队列（DTCM P1） | ~9 KB + 776 B | DTCM |
 | `g_nand_channel_page_buffer` | 4,224 B | AXI_NOCACHE（DTCM 会破坏 multi-plane program） |
 | BCH 静态表（`s_bch`，含 roots bitmap） | 42,656 B | DTCM |
-| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,336 / 62,072 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
+| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,616 / 62,072 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
 | `.dtcm_data` 合计（release） | 67,832 B | DTCM |
 
 ⚠ `.sram*_data` 是 NOLOAD，启动代码不清零；`ftl_init` 必须显式 memset 五张表与六个 storage 对象

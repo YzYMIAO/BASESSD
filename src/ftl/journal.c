@@ -215,7 +215,7 @@ static bool jrn_freeze(l2p_jrn_t *journal);
  *                 调用者应返 FTL_AGAIN 停泊，**不得**追加或改 L2P。
  *   实现要点：
  *     · **不阻塞**：只可能调用 jrn_freeze() 起一条异步页写，绝不同步刷页 /
- *       调 ftl_sync_submit_wait / ct_drain。成功与否由后续 service 轮推进。
+ *       调 ftl_sync_submit_wait / ftl_op_drain。成功与否由后续 service 轮推进。
  *     · **留 1 个空槽**：要求 current_entry + entries < JOURNAL_ENTRIES_PER_PAGE。
  *       追加结束后 current_entry 不会达到页满，jrn_append 的页满分支
  *       在调用链上结构性不可达。

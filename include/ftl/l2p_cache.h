@@ -248,7 +248,7 @@ typedef struct
  *
  * cache 跨 LUN 共享后，load/flush/commit 需要知道某个全局 region 属于哪个
  * FTL 实例（owner die）。端口只暴露**共享服务的最小集**，不返回整个 ftl_context。
- * 回调由设备级 init 注入（main.c），内部复用 lba_route_* + ct_get_route。
+ * 回调由设备级 init 注入（main.c），内部复用 lba_route_* + ftl_op_route_get。
  */
 typedef struct
 {
@@ -318,7 +318,7 @@ typedef struct
      * ⚠ 本模块没有"单 job"结构（在飞的是若干 cache line）⇒ 只报计数，不报 phase/age。 */
     DWORD job_log_ms;
 
-    /* 全局 region → owner FTL 实例（按 lba_route_* / ct_get_route 解析）。
+    /* 全局 region → owner FTL 实例（按 lba_route_* / ftl_op_route_get 解析）。
      * load/flush/commit 用 owner 的 metadata_dir / alloc / topo，cache 自身不再持有
      * 单一实例的依赖指针。设备级 init 注入一次，生命周期到复位。 */
     l2p_owner_fn_t owner_of_region;

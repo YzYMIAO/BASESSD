@@ -10,13 +10,13 @@
  * 与子模块的分工：
  *   本文件             —— 编排：调度、拆分、完成聚合、模式切换；不解析介质格式。
  *   pending.c          —— 子操作登记 + 组完成聚合（一条 host 请求 = 一个 group）。
- *   completion_table.c —— cmd_id → ctx 旁表 + 实例路由 + CQ 排空（派发给 ftl_op.c）。
+ *   ftl_op.c           —— ctx 旁表 + 实例路由 + 提交 + CQ 排空/派发（Phase 2）。
  *   其余模块（gc / wl / journal / checkpoint / bbt / l2p_cache）各司其职，
  *   见各自文件头。
  *
  * 服务主循环（ftl_service）四阶段：
  *   Phase 1    fc_service × NAND_SUBMIT_BUDGET —— 推进 NAND
- *   Phase 2    ct_drain —— 统一完成泵（按命令 op_tag 派发到服务函数数组）
+ *   Phase 2    ftl_op_drain —— 统一完成泵（按命令 op_tag 派发到服务函数数组）
  *   Phase 2.5  逐组补发 host 子操作（host IO 优先于后台任务）
  *   Phase 3    bg_scheduler_service —— 时间预算后台调度（本文件只有一行调用）
  *
@@ -49,7 +49,6 @@
 #include "bbt.h"
 #include "cache_batch.h"
 #include "checkpoint.h"
-#include "completion_table.h"
 #include "fc.h"
 #include "ftl_fc_interface.h"
 #include "ftl_job.h" /* ftl_job_now_ms（flush 触发 CP 的定时） */
@@ -1023,8 +1022,8 @@ ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const
     ftl->wbuf            = storage->wbuf;
     ftl->rr_page_scratch = storage->rr_page_scratch;
 
-    /* ⚠ 这里**不**调 ct_init()：旁表与实例路由表都是**全局**资源
-     *    （completion_table.c 的 file-static），而本函数是**逐实例**调用的 ——
+    /* ⚠ 这里**不**调 ftl_op_init()：旁表与实例路由表都是**全局**资源
+     *    （ftl_op.c 的 file-static），而本函数是**逐实例**调用的 ——
      *    在此清表会抹掉其它实例在飞的 ctx 登记，也会抹掉 main.c 已设好的路由表。
      *    该函数由 main.c 的 ssd_ftl_boot_all 在**所有实例 boot 之前**调用一次。
      *    （完成派发不需要在此注册 handler：命令自己带 op_tag，g_op_callbacks[] 是
@@ -1242,7 +1241,7 @@ static void contract_check_identity(const ftl_ctx_t *ftl)
     const DWORD      dim  = ftl_topo_dim(topo);
 
     ASSERT(ftl->cache->owner_of_region != NULL);
-    ASSERT(ct_get_route(topo.ch, topo.ce, topo.lun) == ftl);
+    ASSERT(ftl_op_route_get(topo.ch, topo.ce, topo.lun) == ftl);
 
     /* 只查本实例拥有的 region：其他 LUN 的 owner 可能尚未 boot。 */
     for (DWORD local = 0U; local < L2P_REGIONS_PER_INSTANCE; local++)
@@ -1257,7 +1256,7 @@ static void contract_check_identity(const ftl_ctx_t *ftl)
                (owner->topo.ch == ftl->cache->ch) && (owner->topo.ce == ftl->cache->ce) &&
                (owner->topo.lun == ftl->topo.lun) && (ftl_topo_dim(owner->topo) == dim));
 
-        ASSERT((ct_get_route_region(global) == ftl) &&
+        ASSERT((ftl_op_route_get_region(global) == ftl) &&
                (lba_route_ch(lba) == ftl->cache->ch) &&
                (lba_route_ce(lba) == ftl->cache->ce));
     }
@@ -1350,7 +1349,7 @@ void ftl_contract_audit(const ftl_ctx_t *ftl)
  *   参数：无。
  *   返回：无。
  *   实现要点：这两段不依赖任何实例：NAND 引擎（fc_service）是全局的，完成表
- *             （completion_table）也是全局的、按命令的 ch/ce/lun 路由回实例。
+ *             （ftl_op ctx 旁表/路由）也是全局的、按命令的 ch/ce/lun 路由回实例。
  *             故 superloop 每轮**只调一次**，而不是每个实例调一次
  *             （per-instance 调用会把 fc_service 预算重复消耗 N 遍）。
  * -------------------------------------------------------------------- */
@@ -1367,8 +1366,8 @@ void ftl_service_pump(void)
         }
     }
 
-    /* Phase 2: 统一完成泵（按命令 op_tag 派发到服务函数数组，见 completion_table.c） */
-    ct_drain();
+    /* Phase 2: 统一完成泵（按命令 op_tag 派发到服务函数数组，见 ftl_op.c） */
+    ftl_op_drain();
 }
 
 /* --------------------------------------------------------------------
@@ -2032,7 +2031,7 @@ static ftl_status_e ftl_submit_common(ftl_ctx_t *ftl, const ftl_io_req_t *req, p
     }
 
     /* 快路径：小请求当场下发完；遇背压则余下留待 ftl_service Phase 2.5 补发。
-     * 数据在 ct_drain 中拷贝回 buffer（读），Journal + L2P 在完成
+     * 数据在 ftl_op_drain 中拷贝回 buffer（读），Journal + L2P 在完成
      * handler 中确认 NAND PROGRAM 成功后执行（写）。 */
     ftl_drain_group(ftl, gi);
 

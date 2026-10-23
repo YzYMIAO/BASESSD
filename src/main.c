@@ -26,11 +26,11 @@
 #include "bst.h"
 #include "btim.h"
 #include "cli.h"
-#include "completion_table.h"
 #include "controller.h"
 #include "delay.h"
 #include "fc.h"
 #include "ftl.h"
+#include "ftl_op.h"
 #include "log.h"
 #include "metadata.h"
 #include "power_failure_recovery.h"
@@ -280,7 +280,7 @@ static l2p_owner_t g_l2p_owner[FTL_DIM_TOTAL];
  * ssd_l2p_owner_of_region - 全局 L2P region → owner FTL 实例
  *
  * 共享 cache 的 load/flush/commit 用它找 owner die。region→(ch,ce,lun) 的分解
- * 复用 ct_get_route_region（与 lba_route_* 同一套公式，避免第二套坐标）。
+ * 复用 ftl_op_route_get_region（与 lba_route_* 同一套公式，避免第二套坐标）。
  */
 static const l2p_owner_t *ssd_l2p_owner_of_region(void *ctx, DWORD global_region)
 {
@@ -571,7 +571,7 @@ static void ssd_ftl_log_status(void)
 
 /* 完整初始化 FTL：全实例 boot + controller 绑定（boot_ok 才置 g_ftl_ready）
  *
- *   ① 建 g_ftl_ptrs 三维指针表 + ct_set_route —— **必须早于逐实例 boot**，
+ *   ① 建 g_ftl_ptrs 三维指针表 + ftl_op_route_set —— **必须早于逐实例 boot**，
  *      理由见函数内注释（boot 期 full metadata rebuild会经 l2p_read_sync 抽完成表）。
  *   ② 逐 (ch,ce,lun) boot —— 任一失败则 boot_ok=0，整体回退 fc_service。
  *   ③ ssd_controller_init(&g_ctrl, g_ftl_ptrs) —— 对外 controller 就绪。
@@ -586,7 +586,7 @@ static void ssd_ftl_boot_all(void)
     ssd_status_e ctrl_ret;
 
     /* ① 全局完成旁表 + 路由表：清一次、填一次、设一次——**全部必须早于逐实例 boot**。
-     *    - ct_init() 清的是**全局**资源（旁表 + 路由表），只做一次。
+     *    - ftl_op_init() 清的是**全局**资源（旁表 + 路由表），只做一次。
      *      ⚠ 它原在 ftl_init 里（逐实例调用）⇒ 实例 1 的 init 会抹掉实例 0 在飞的
      *      ctx 登记与已设好的路由表；已移到此处。
      *    - g_ftl_ptrs 只是对静态数组 g_ftl 取址，不依赖 ftl_init。
@@ -598,7 +598,7 @@ static void ssd_ftl_boot_all(void)
      *    命令能在完成时拿到非 NULL 实例，前提是该实例的 ftl_init 已跑过——boot 循环
      *    逐实例推进，任一时刻在飞的命令只可能属于已 boot 的实例。 */
     ftl_global_init();
-    ct_init();
+    ftl_op_init();
     for (ch = 0U; ch < CH_NUM; ch++)
     {
         for (ce = 0U; ce < CE_NUM; ce++)
@@ -614,7 +614,7 @@ static void ssd_ftl_boot_all(void)
             }
         }
     }
-    ct_set_route(g_ftl_ptrs);
+    ftl_op_route_set(g_ftl_ptrs);
 
     /* ①.5 共享 L2P cache：每个 (ch,ce) 一份，**设备级只初始化一次**。
      * 必须早于逐实例 boot（ftl_boot_recovery 的 full metadata rebuild / journal 回放就会访问 cache）；
@@ -646,7 +646,7 @@ static void ssd_ftl_boot_all(void)
     {
         /* 实例未必 init 完成 ⇒ 撤销路由，恢复「路由未设」语义（此时主循环退回
          * fc_service，无人 drain 完成表，派发不会发生）。 */
-        ct_set_route(NULL);
+        ftl_op_route_set(NULL);
         LOGE("[FTL ] boot failed, fallback to fc_service\r\n");
         return;
     }
@@ -657,12 +657,12 @@ static void ssd_ftl_boot_all(void)
      * （H14 判据 9 的同类：静默错路由比停机更贵）。 */
     for (DWORD dim = 0U; dim < FTL_DIM_TOTAL; dim++)
     {
-        const struct ftl_context *owner = ct_get_route_region(dim);
+        const struct ftl_context *owner = ftl_op_route_get_region(dim);
 
         if ((owner == NULL) || (ftl_topo_dim(owner->topo) != dim))
         {
             LOGE("[FTL ] route/dim mismatch dim=%lu\r\n", dim);
-            ct_set_route(NULL);
+            ftl_op_route_set(NULL);
             return;
         }
     }

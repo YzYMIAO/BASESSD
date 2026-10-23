@@ -172,45 +172,45 @@ void         allocator_init(ftl_allocator_t *alloc, ftl_topology_t topo, const f
 > `ftl_submit_*` 返回 `FTL_OK` 仅表示**已受理**，不代表已完成。连续背压且无进展超过
 > `FTL_DRAIN_STALL_MAX`（8 轮）⇒ 判真卡死，弃未下发者并报 IO_ERROR。
 
-### 1.5 Completion Table + op tag（统一完成路由，v0.75 起）
+### 1.5 ftl_op 完成派发面（ctx 旁表 + op tag，v0.75 起）
 
-`completion_table.h/c` 提供统一完成事件分发，消除两处各自 `fc_poll_completion` 造成的
+`ftl_op.h/c` 提供统一完成事件分发，消除两处各自 `fc_poll_completion` 造成的
 completion 丢失问题。**v0.75 起**派发**唯一出口**是 `ftl_op_dispatch()`：旁表只存 `ctx`，
 handler 由命令携带的 **op tag** 查 `g_op_callbacks[]` 得到（见 `ftl_op.h`）。
 
 ```c
-// completion_table.h — 接口（v0.75 起表项只留 ctx）
+// ftl_op.h — 接口（v0.75 起表项只留 ctx）
 
-#define COMPLETION_TABLE_SIZE (32U)
+#define FTL_OP_CTX_TABLE_SIZE (64U)
 
 /* 登记一条命令的私有状态（服务函数的选择由命令的 op_tag 决定） */
-ftl_status_t completion_table_add(uint16_t cmd_id, void *ctx);
+ftl_status_e ftl_op_ctx_add(WORD cmd_id, void *ctx);
 
 /* 查 + 摘链 + 返回 ctx（先摘再回调，容许服务函数重入登记） */
-void *completion_table_take(uint16_t cmd_id);
+void *ftl_op_ctx_take(WORD cmd_id);
 
 /* 消费所有 CQ entry → ftl_op_dispatch() */
-void completion_table_drain(void);
+void ftl_op_drain(void);
 
 /* 同步等待器（FTL_OP_SYNC_WAIT 的 ctx，由同步原语在**自己栈上**持有） */
 typedef struct {
-    uint16_t             cmd_id;
-    uint8_t              done;               /* 服务函数置 1 */
+    WORD                 cmd_id;
+    bool                 done;               /* 服务函数置 1 */
     fc_command_status_t  completion;          /* 保存的完成状态 */
 } ftl_sync_waiter_t;
 
 // ftl_op.h — 提交侧 / 服务函数数组
-ftl_status_t ftl_op_submit(fc_command_t *cmd, ftl_op_id_t op, void *ctx);
+ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx);
 void         ftl_op_dispatch(const fc_command_status_t *completion);
-int          ftl_op_in_dispatch(void);
+bool         ftl_op_is_in_dispatch(void);
 ```
 
 **路由规则**（`ftl_op_dispatch`）：
 1. `op = completion->op_tag`；越界或 `g_op_callbacks[op] == NULL` ⇒ **孤儿命令**：
-   `completion_table_remove` + `fc_command_release` + LOGE（正常不应发生）。
-2. 命中 ⇒ `ctx = completion_table_take(command_id)`（**先摘链再回调**）。
-3. 实例由**命令自身**的 `config.ch/ce/lun` 经 `completion_table_route` 解析
-   （开机早期可为 NULL，是正常状态）。
+   `ftl_op_ctx_remove` + `fc_command_release` + LOGE（正常不应发生）。
+2. 命中 ⇒ `ctx = ftl_op_ctx_take(command_id)`（**先摘链再回调**）。
+3. 实例由**命令自身**的 `config.ch/ce/lun` 经 `ftl_op_route_get` 解析
+   （路由表在逐实例 boot 之前设好；NULL 属编程错误）。
 
 **op tag 的语义 = 完成服务函数选择器，不是「这是哪个功能」**：同步提交的命令一律带
 `FTL_OP_SYNC_WAIT`（其服务函数 = 唤醒等待者），因为阻塞调用方的收尾是**调用者在
@@ -886,7 +886,7 @@ plane, page, cw)` 或 `pba_pack((nand_pba_fields_t){…})`；反向读取用 `pb
 /*
  * 同步等待指定 command_id 完成。
  * v0.75：内部走 ftl_op_submit(cmd, FTL_OP_SYNC_WAIT, &waiter)，再自旋
- * fc_service + completion_table_drain 直到 waiter.done。**只用于结构性顺序路径**
+ * fc_service + ftl_op_drain 直到 waiter.done。**只用于结构性顺序路径**
  * （开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI）；host I/O 与后台 job 一律异步。
  */
 ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status_out,
@@ -901,7 +901,7 @@ ftl_status_t ftl_sync_submit_wait(fc_command_t *cmd, fc_command_status_t *status
 | `wear_leveling.c` | ❌ **零**（阶段 4） | 搬移主体并入 `migrate.c` |
 | `read_recovery.c` | ❌ **零**（阶段 3/5） | 三级恢复全异步；`rr_select_plane` 的 L2P 查询已三态化 |
 | `gc.c` | ⚠ 1 处 | `gc_read_page_with_lba`（`ftl_sync_submit_wait`）——唯一调用者是 `ftl_rebuild_closed_sb_list`（**开机**重建，结构性同步） |
-| `journal.c` | ⚠ 7 处 | ① 非派发上下文的**同步回退**（`journal_append` 页满且 `ftl_op_in_dispatch()==0`）；② 开机 `journal_scan_latest` / `replay` / `truncate` 的擦除与读 |
+| `journal.c` | ⚠ 7 处 | ① 非派发上下文的**同步回退**（`journal_append` 页满且 `ftl_op_is_in_dispatch()==0`）；② 开机 `journal_scan_latest` / `replay` / `truncate` 的擦除与读 |
 | `checkpoint.c` | ⚠ 4 处 | 记录读 ×2 / 写 ×2（**阶段 6** 转 job） |
 | `metadata.c` | ⚠ 3 处 | 目录压缩 / 回收 / Anchor 落盘全在异步 job（`metadata_job.c`：`metadata_handle` + `ftl_metadata_callback`）；运行期无同步擦除。剩下 3 处全是结构性的：`metadata_ring_prepare_write` 的换块擦（`bbt_save` / `checkpoint_write_initial` 用）、`metadata_ring_locate` 的扫池读（冷启动定位游标）、`metadata_dir_load` 的 Anchor 读（开机） |
 | `bbt.c` | ⚠ 7 处 | 记录读 ×2、出厂标记读、擦除、持久化写（**阶段 7**） |
@@ -946,7 +946,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
     └── 推进 NAND 命令执行
 
     Phase 2 ── 处理完成回调
-    ├── completion_table_drain()（统一完成泵）
+    ├── ftl_op_drain()（统一完成泵）
     └── ftl_op_dispatch() 按 op_tag 查 g_op_callbacks[]
           ├── FTL      → 子操作簿记（数据拷贝到该 slice）→ 组聚合 → pending_remove
           │              → 组可能完成（发一次组通知）
@@ -1005,7 +1005,7 @@ CLI 路径调用，剩余同步站点**全部**落在上表标 ⚠ 的行里，�
 > 不设上限会把 FC 池吃光 ⇒ host I/O 拿不到命令、全系统 `FTL_AGAIN`）。
 
 > `inflight = pending_count + pending_group_count`（⚠ v0.75 阶段 4 起**不再计入
-> `completion_table_count`**：后台 job 的命令也登记在那里，计进来会让"真空闲"永不成立，
+> `ftl_op_ctx_count`**：后台 job 的命令也登记在那里，计进来会让"真空闲"永不成立，
 > 后台反被自己的命令饿死；后台活跃度由各自的单飞行门单独管）。
 > ⚠ `main.c` 的主循环**遍历全部实例**调 `ftl_service`（序 4：只跑 `[0][0][0]` 会让其余实例的
 > journal / checkpoint / bbt / GC 永不推进）；`ftl_service_pump()` 每轮只调一次。
@@ -1018,7 +1018,7 @@ void ftl_service_pump(void) {
     for (uint8_t i = 0U; i < NAND_SUBMIT_BUDGET; i++) {      /* Phase 1 */
         if (fc_service() != FC_STATUS_OK) break;
     }
-    completion_table_drain();                                /* Phase 2 */
+    ftl_op_drain();                                /* Phase 2 */
 }
 
 /* 单个实例（对每个实例都要调） */
@@ -1037,7 +1037,7 @@ void ftl_service(ftl_context_t *ftl) {
 
     /* Phase 3: 三级后台模式（判据 = 未决命令数近似空闲度） */
     queued   = pending_group_count(ftl);
-    inflight = (uint16_t)(pending_count(ftl) + queued + completion_table_count());
+    inflight = (uint16_t)(pending_count(ftl) + queued + ftl_op_ctx_count());
 
     if (ftl->bg_suspend != 0U) return;   /* `bbt --erase` 后整体跳过 Phase 3 */
 
@@ -1069,8 +1069,7 @@ include/ftl/
 ├── migrate.h                    # 搬移 job（migrate_handle_t / mig_begin_* / migrate_handle），v0.75 阶段 4
 ├── metadata.h                   # ★ 固定元数据区布局（单一事实来源）+ FTL_MEDIA_LAYOUT_VERSION + Metadata Directory
 ├── pending.h                    # Pending Request 表 + 完成组表
-├── completion_table.h           # 统一完成路由表（表项只留 ctx，v0.75）
-├── ftl_op.h                     # op tag 枚举 + ftl_op_submit/ftl_op_dispatch（v0.75）
+├── ftl_op.h                     # ctx 旁表 + 路由 + op tag/回调 + CQ 排空（v0.75）
 ├── checkpoint.h                 # Checkpoint + Journal 截断协同
 ├── bbt.h                        # BBT 坏块表（池 + 全片擦除原语）
 ├── read_recovery.h              # 读恢复（CRC 重读一次）+ ECC 趋势预测 + 恢复 job（rr_stage_e/rr_handle_t）
@@ -1088,8 +1087,7 @@ src/ftl/
 ├── migrate.c                    # GC/WL/慢死预测共用搬移 job（v0.75 阶段 4）
 ├── metadata.c                   # Directory init/lookup/update/flush/load + g_ftl_partitions[] 分区表
 ├── pending.c                    # Pending 表 + 组 add/lookup/remove
-├── completion_table.c           # 统一完成泵（唯一出口 ftl_op_dispatch，v0.75）
-├── ftl_op.c                     # op tag + g_op_callbacks[] 服务函数数组（v0.75）
+├── ftl_op.c                     # ctx 旁表 + 路由 + 提交 + 派发/排空（v0.75）
 ├── checkpoint.c                 # 全量 Checkpoint + 三级触发
 ├── bbt.c                        # BBT 加载/扫描/标记/保存 + 全片擦除
 ├── read_recovery.c              # 单次读 + CRC 重读 + 恢复 job 状态机

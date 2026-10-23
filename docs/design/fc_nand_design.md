@@ -2393,7 +2393,7 @@ service(ftl, &completion, ctx);
 ```
 
 ⚠ **FC 对 `op_tag` 是不透明的**：7 位整数，FC 不解释、不分支，只在完成时原样拷贝。
-取值语义（= FTL 的 `ftl_op_id_t`）由上层定义 —— 见 `include/ftl/ftl_op.h`。FC 侧**不声明**
+取值语义（= FTL 的 `ftl_op_id_e`）由上层定义 —— 见 `include/ftl/ftl_op.h`。FC 侧**不声明**
 这套枚举（v0.75 删除了原 `fc_command_module_t`：它是 FTL 概念，不该由 FC 声明）。
 
 为什么是 7 位：原 `module : 4` + 紧随其后的 `reserved1 : 3` 合并而成（见
@@ -4131,7 +4131,7 @@ main() (src/main.c)          fc_init()                  nand_init()             
   └─ ssd_ftl_boot_all() ───────────────────────────────────────────────────▶ (main.c)
                                 ① 逐实例 ssd_ftl_boot → ftl_init / boot_recovery
                                 ② 建 g_ftl_ptrs 三维指针表
-                                ③ completion_table_set_route(g_ftl_ptrs)
+                                ③ ftl_op_route_set(g_ftl_ptrs)
                                 ④ ssd_controller_init(&g_ctrl, g_ftl_ptrs)
                                 ⑤ g_ftl_ready = 1   ★主循环切换点
 
@@ -4149,7 +4149,7 @@ g_fc_*_free_next[]       ───▶ 三张「下标即 ID」静态链：0→1�
                               分配 = 取 head 并把 head 推到 next；释放 = 头插
 g_fc_sq_storage[64]      ───▶ controller->sq    ◀─ fc_submit_to_queue（HSQ 优先门控）
 g_fc_hsq_storage[16]     ───▶ controller->hsq   ◀─ config.high_priority 命令
-g_fc_cq_storage[64]      ───▶ controller->cq    ◀─ fc_complete_internal → FTL completion_table_drain
+g_fc_cq_storage[64]      ───▶ controller->cq    ◀─ fc_complete_internal → FTL ftl_op_drain
 ```
 
 要点：三池与队列存储都是**文件作用域静态数组**，地址在链接期固定；`fc_t` 只存指向它们的**指针**。因此三池的 DMA 物理地址在 `fc_init` 之后恒定不变——这是"先 `memset` 归零、后挂指针"这一顺序的原因。
@@ -4205,7 +4205,7 @@ nand_init()
 
 - 驱动源只有一个：`main()` 的 `while(1)`。**没有任何 ISR 调用 `fc_service()` / `ftl_service()`**；WAIT_READY 为纯 GPIO 轮询，无中断参与（原 R/B# EXTI 方案已移除）。
 - 两个阻塞调用方：
-  - `ftl_service()`（`ftl.c`）——每轮先跑 `fc_service()` **≤ `NAND_SUBMIT_BUDGET`（=4）次**推进 NAND，再 `completion_table_drain()` 消费完成项并回调 FTL。
+  - `ftl_service()`（`ftl.c`）——每轮先跑 `fc_service()` **≤ `NAND_SUBMIT_BUDGET`（=4）次**推进 NAND，再 `ftl_op_drain()` 消费完成项并回调 FTL。
   - `ftl_sync_submit_wait()`（`ftl_fc_interface.c`，v0.75 前叫 `ftl_internal_sync_wait`）——**仅结构性顺序路径**（开机初始化 / 全片格式化 / 出厂坏块扫描 / CLI）用它阻塞轮询 `fc_service()` 直到指定命令完成；host I/O 与后台 job 一律 `ftl_op_submit` 后异步完成。
 
 ### 23.2 流程图：一条命令的端到端生命周期（图 17）
@@ -4239,7 +4239,7 @@ nand_init()
   │         写 cw_status/ecc_bits 回 desc；fc_data_path_process_read（解扰 / ECC / RAID，图 5）
   │         → fc_complete_internal → CQ push；状态 COMPLETED
   ▼
-[FTL]      completion_table_drain → fc_poll_completion → FTL 回调拷贝数据
+[FTL]      ftl_op_drain → fc_poll_completion → FTL 回调拷贝数据
            → fc_command_release（回收 command + desc 链 + buffer）
 ```
 
@@ -4383,7 +4383,7 @@ HSQ/SQ 共用同一张挂起表（HSQ 挂起的 LUN，SQ 本轮也跳过，避�
 | 11 | `scatter_page_buffer` | 页缓冲拆回各 CW buffer |
 | 12 | 返回 completion → `fc_complete_from_nand` | 写 cw_status/ecc_bits 回 desc；`fc_data_path_process_read` 解扰/ECC/RAID |
 | 13 | `fc_complete_internal` | CQ push；状态 COMPLETED |
-| 14 | `completion_table_drain` → `fc_poll_completion` → FTL 回调 | FTL 拿到数据 |
+| 14 | `ftl_op_drain` → `fc_poll_completion` → FTL 回调 | FTL 拿到数据 |
 
 ### 23.9 澄清：运行时其实不走命令链
 
