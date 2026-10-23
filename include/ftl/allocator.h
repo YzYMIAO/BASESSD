@@ -34,10 +34,10 @@
 #define FTL_TEMP_NUM  2U
 
 /* ── Free Pool 三级水位 ──
- * 一个已擦除池 + 软水位，不是三个分区：≥200 正常；8<free<200 后台 GC；≤8 紧急。
- * 200 ≈ 实例数据块（3392）的 5.9%，给 GC/写放大留出提前量；8 是池见底的最后手段。
+ * 一个已擦除池 + 软水位，不是三个分区：≥32 正常；8<free<32 后台 GC；≤8 紧急。
+ * 32 ≈ 实例数据块（3392）的 1%，给 GC/写放大留出提前量；8 是池见底的最后手段。
  * 这两个值是本仓经验值，不是行业标准；调整需同时看写放大、稳态吞吐与 host 延迟。 */
-#define FREE_POOL_TARGET    (200U)
+#define FREE_POOL_TARGET    (32U)
 #define FREE_POOL_EMERGENCY (8U)
 
 /* ── OP / Spare 保留池（按 plane）── */
@@ -67,6 +67,7 @@ typedef struct
     BYTE next_page;               /* 当前写入页（0..PAGES_PER_BLOCK） */
     BYTE temperature;             /* FTL_TEMP_HOT / FTL_TEMP_COLD */
     bool is_open;                 /* true = 仍在写；false = 已关闭 */
+    BYTE page0_programmed;        /* bit p = plane p 的 page0 写命令已成功（异步写屏障） */
 } super_block_t;
 
 /* ── FTL 表的引用 ──
@@ -360,6 +361,46 @@ void alc_note_erase(alc_t *alloc, WORD gblock, DWORD now);
  * 动态识别，擦空后回 OP。
  */
 WORD alc_alloc_log_block(alc_t *alloc, BYTE plane);
+
+/*
+ * alc_open_pair_room - 当前 Open SB 还能连续写多少页对
+ *
+ * 返回各 **存在 plane** 的 `PAGES_PER_BLOCK - next_page` 的最小值；无 Open SB、
+ * 某 plane 槽位无块（FTL_BLOCK_NO_PLANE）、或该 plane 的 page0 尚未成功编程 ⇒ 0。
+ *
+ * 用途：cache program 批次要求同一 Open SB 内至少 N 个连续页对；先查余量可
+ * 避免一次 batch 分配跨块（跨块会让失败清理与 page0 约束复杂化）。
+ *
+ * @param alloc      分配器
+ * @param temperature FTL_TEMP_HOT / FTL_TEMP_COLD
+ * @return 可连续分配的页对数（0..PAGES_PER_BLOCK）
+ */
+BYTE alc_open_pair_room(const alc_t *alloc, BYTE temperature);
+
+/*
+ * alc_note_page_programmed - 记录某个 Open SB 的页编程成功（page0 异步写屏障）
+ *
+ * 只关心 page 0：在它成功前，`alc_alloc_pair` 拒绝对同一 SB 分配 page ≥1，
+ * 防止「page0 失败但后续页已编程」击穿掉电恢复的 page0 空白捷径。
+ * 失败/关闭由 alc_close_open_sb 处理（新 SB 的 flag 为 false）。
+ */
+void alc_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD pba);
+
+/*
+ * alc_page0_programmed - 该 PBA 所属 Open SB plane 的 page0 是否已成功编程
+ *
+ * 写提交点用它做异步写屏障：page>0 的写必须等**同一 plane** 的 page0 成功。
+ * 返回 false 还包括：SB 未开 / PBA 不属于当前 Open SB（迟到的旧 SB 命令）。
+ */
+bool alc_page0_programmed(const alc_t *alloc, BYTE temperature, DWORD pba);
+
+/*
+ * alc_pba_belongs_to_open_sb - 该 PBA 是否属于指定温度的当前 Open SB
+ *
+ * 按 plane+block 判断（不是按页号），供 batch 失败时只关闭**真正承载 batch 页**
+ * 的 SB；旧 SB 的迟到完成不会误关后来新开的 SB。
+ */
+bool alc_pba_belongs_to_open_sb(const alc_t *alloc, BYTE temperature, DWORD pba);
 
 /*
  * alc_alloc_pair - 分配各 plane 当前页的 PBA

@@ -1181,6 +1181,10 @@ static ftl_status_e ftl_boot_power_failure(struct ftl_context *ftl,
 /* 判空统一走 ftl_fc_interface.c 的 ftl_page_is_blank_raw（C2：唯一实现；
  * full rebuild / BBT 探针 / 元数据日志区恢复共用）。 */
 
+/* page0 空白时补探的页数 = cache program 批次上限（4 页）。
+ * 超出该范围的 page0 空洞依赖 page0 异步写屏障（allocator）保证。 */
+#define RECOVERY_PAGE0_PROBE_PAGES (4U)
+
 /* 扫出某 Block 的写指针（第一个空白页），并检测写失败留下的 hole。
  *
  * 返回值语义：0 = 整块空白；k = 从页 0 到 k-1 连续写过、页 k 起全空；
@@ -1211,7 +1215,25 @@ static BYTE ftl_recovery_scan_write_pointer(const ftl_ctx_t *ftl, BYTE plane, WO
 
     if (ftl_page_is_blank_raw(first, raw_buf))
     {
-        return 0U; /* 整块空白 */
+        /* page0 空白还不能判定整块空白：cache program 批次 / 异步写可能留下
+         * 「page0 失败、page1..3 已编程」的块。探测前 4 页（batch 上限），
+         * 任一非空 ⇒ 按有 hole 处理，走全块扫描/关闭，绝不当空闲块复用。 */
+        for (BYTE page = 1U; page < RECOVERY_PAGE0_PROBE_PAGES; page++)
+        {
+            if (page >= PAGES_PER_BLOCK)
+            {
+                break;
+            }
+
+            DWORD addr = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
+
+            if (!ftl_page_is_blank_raw(addr, raw_buf))
+            {
+                return PAGES_PER_BLOCK;
+            }
+        }
+
+        return 0U; /* 前 4 页全空白 */
     }
 
     /* page 0 已写过：从 page 1 起继续找第一个空白页，并检测 hole
@@ -1846,7 +1868,29 @@ static void ftl_recovery_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL
 
         if (ftl_page_is_blank_raw(pba0, raw_buf))
         {
-            continue;
+            bool later_written = false;
+
+            /* 同 scan_write_pointer：page0 空白时补探 page1..3（cache batch 上限）。 */
+            for (BYTE page = 1U; page < RECOVERY_PAGE0_PROBE_PAGES; page++)
+            {
+                if (page >= PAGES_PER_BLOCK)
+                {
+                    break;
+                }
+
+                DWORD pba = pba_make(ftl->topo.ch, ftl->topo.ce, ftl->topo.lun, block, plane, page, 0U);
+
+                if (!ftl_page_is_blank_raw(pba, raw_buf))
+                {
+                    later_written = true;
+                    break;
+                }
+            }
+
+            if (!later_written)
+            {
+                continue;
+            }
         }
 
         ftl_block_set_state(b, FTL_BLOCK_STATE_CLOSED);

@@ -15,6 +15,7 @@
 
 #include "allocator.h"    /* ftl_table_refs_t, super_block_t */
 #include "bg_scheduler.h" /* 时间预算后台调度器（ftl_ctx_t 含调度器） */
+#include "cache_write.h"  /* cache_wb_t（host cache program 批次） */
 #include "checkpoint.h"
 #include "ftl_type.h" /* ftl_io_req_t */
 #include "gc.h"
@@ -59,6 +60,12 @@
 /* 写失败透明重试次数上限（H4：只重试一次就够覆盖「遇到一个新坏块」的情形；
  * 第二次仍失败说明介质/通道有问题，如实返回 IO_ERROR，不掩盖故障）。 */
 #define FTL_WRITE_RETRY_MAX (1U)
+
+/* 顺序读 L2P region 预取（本仓自定）：连续 2 个 host 读请求才算顺序；
+ * 距 region 末尾 64 LBA（32 KiB，约两个 16 KiB 请求）时预取下一个 region。
+ * 每次最多预取 1 个 region，在飞上限见 L2P_PREFETCH_MAX_INFLIGHT。 */
+#define FTL_SEQ_PREFETCH_MIN_RUN    (2U)
+#define FTL_SEQ_PREFETCH_AHEAD_LBAS (64U)
 
 /*
  * 主机可见的最大 LBA = 实际可用于用户数据的块 × 每块 CW 数。
@@ -145,6 +152,28 @@ typedef struct ftl_context
     /* 统计 */
     DWORD total_writes;
     DWORD dangling_total; /* L2P 指向 valid_count==0 的累计覆盖写次数（[STAT]/info 用） */
+
+    /* 顺序读检测（per-instance；ftl_submit_common 更新）。
+     * seq_run 在非连续读/写/flush/trim 时归零；只用于 L2P region 预取。 */
+    DWORD seq_last_end_lba;    /* 上一读请求末 LBA（exclusive） */
+    DWORD seq_run;             /* 连续读请求计数 */
+    DWORD seq_run_max;         /* 本次开机最大连续读长度（观测） */
+    DWORD seq_generation;      /* 每次检测更新/重置递增，防 on_complete 重入覆盖 */
+    DWORD seq_prefetch_target; /* 本次检测算出的目标 region */
+    bool  seq_prefetch_valid;  /* target 有效且尚未执行 */
+
+    /* FTL cache read 批量提交的观测计数（未上板前仅计数，不参与决策）。 */
+    DWORD cache_read_batches;
+    DWORD cache_read_pairs;
+    DWORD cache_read_declines;
+    DWORD cache_read_fallbacks;
+
+    /* host cache program 批次（per-instance，单 LUN 单批）。 */
+    cache_wb_t cache_wb;
+    DWORD      cache_wb_batches;
+    DWORD      cache_wb_pages;
+    DWORD      cache_wb_declines;
+    DWORD      cache_wb_aborts;
 
     /* 后台写闸门（`bbt --erase` 置位）。
      * 全片擦除后介质已空，而本实例 RAM 里的 BST/L2P/Journal 仍描述着**已不存在**的
@@ -249,6 +278,14 @@ typedef struct
  * @return FTL_OK 成功
  */
 ftl_status_e ftl_init(ftl_ctx_t *ftl, ftl_topo_t topo, l2p_cache_t *cache, const ftl_storage_t *storage);
+
+/*
+ * ftl_cache_budget_ok - host cache batch（读/写）共享的资源判据
+ *
+ * = FC 命令/desc/buffer/SQ/HSQ 余量（ftl_fc_host_budget_ok_n） +
+ *   pending 表余量。读/写 batch 都走这一个入口，避免两份逐字重复的资源检查。
+ */
+bool ftl_cache_budget_ok(const ftl_ctx_t *ftl, DWORD n);
 
 /*
  * ftl_contract_audit - debug-only 初始化契约自检（release 下空实现）

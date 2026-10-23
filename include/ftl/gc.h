@@ -59,7 +59,9 @@
  *   三类触发在参考层查无出处，且碎片率会自激。 */
 #define GC_TRIGGER_WATERMARK (0x01U) /* T1: free_count < FREE_POOL_TARGET */
 #define GC_TRIGGER_EMERGENCY (0x08U) /* T4: free_count <= FREE_POOL_EMERGENCY */
-#define GC_TRIGGER_WEAR      (0x10U) /* T5: 全表擦除比 max/min > GC_WEAR_LEVEL_RATIO */
+/* 磨损均衡不再作为 GC 触发位：静态 WL 由 wear_leveling 的 UBI 判据
+ * （max_free_ec − min_used_ec ≥ WL_THRESHOLD）在 host 空闲时独立启动。
+ * 旧 T5 用“全表 max/min”比较，min 可能来自从未使用的空闲块 ⇒ 比值永不收敛。 */
 
 /* ── GC 触发判定的求值节拍（由 migrate handle 自持）──
  * 判据本身是**事件**（空间压力/磨损），但求值含一次**全表扫描**，不能按主循环 pass 跑。 */
@@ -74,15 +76,7 @@
  * 2 s 足以跨过单 victim 的正常间隙，又不会让一次短暂写入把会话拖成永远不结束。 */
 #define GC_SESSION_IDLE_MS (2000U)
 
-/* ── T5 磨损均衡阈值（设计 §4.7）──
- * ⚠ GC_WEAR_LEVEL_MIN_ERASE 是**地板**：max 没到该值前不触发。没有它时，早期
- *   （max 才擦过几次）就可能满足比例条件而反复空跑 GC。
- * ⚠ 另要求 min > 0：对 0 求比值无意义（"从未被擦过的块"是**静态磨损均衡**
- *   mig_begin_wl 的职责——它专门搬冷数据；T5 只管"所有块都在轮转、但轮得不均"）。 */
-#define GC_WEAR_LEVEL_RATIO     (10U) /* 最大/最小擦除比阈值 */
-#define GC_WEAR_LEVEL_MIN_ERASE (64U) /* 地板：max 擦除次数低于此值不触发 T5 */
-
-/* ── GC 收益判据（空间 GC：T1/T4；T5 磨损不适用）──
+/* ── GC 收益判据（空间 GC：T1/T4）──
  * 满盘且写入几乎全是有效数据时（实测 victim 96–98% 有效），按水位无限 GC 只会
  * 以 ~2% 的净收益持续搬移：写放大、磨损、读带宽被抢。
  *
@@ -154,10 +148,10 @@ gc_decode_e gc_decode_cw_lba(fc_command_t *cmd,
                              DWORD         cw_lba[CW_NUM],
                              DWORD        *page_base_out);
 
-/* GC 收益判据模式（只对空间 GC：T1/T4 有意义；T5 磨损恒用 OFF）。 */
+/* GC 收益判据模式（只对空间 GC T1/T4 有意义；磨损均衡走独立 WL 路径）。 */
 typedef enum
 {
-    GC_BENEFIT_OFF = 0,   /* 不筛：host 正在写 / 仅 T5 磨损触发（原水位行为） */
+    GC_BENEFIT_OFF = 0,   /* 不筛：host 正在写（原水位行为） */
     GC_BENEFIT_IDLE,      /* host 不写：只接受 valid 占比 <= GC_VICTIM_MAX_VALID_PCT 的 victim */
     GC_BENEFIT_EMERGENCY, /* 紧急水位：只接受可回收占比 >= GC_EMERGENCY_MIN_GAIN_PCT 的 victim */
 } gc_benefit_mode_e;
@@ -226,11 +220,12 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
  * 三条触发（设计 §4.4），可多位同时命中：
  *   T1 GC_TRIGGER_WATERMARK  free_count < FREE_POOL_TARGET          🔴 主动补池
  *   T4 GC_TRIGGER_EMERGENCY  free_count <= FREE_POOL_EMERGENCY      🔴 最后手段
- *   T5 GC_TRIGGER_WEAR       全表擦除比 max/min > GC_WEAR_LEVEL_RATIO 🟡 均衡
+ *   磨损均衡不属于 GC 触发：由 `wear_leveling` 的 UBI 判据（free-max vs used-min，
+ *   差值阈值）在 host 空闲时独立启动。
  *
  * ⚠ T1 与 T4 同源（都是"空闲块不够"），但阈值不同：T1 是**主动**补池（还留有余量
  *   时就开工），T4 是**最后手段**（池已见底）。
- * ⚠ T5 每被调用一次就多一次 O(FTL_BLOCK_TOTAL) 全表扫描；求值点由
+ * ⚠ GC 触发求值仍需 O(FTL_BLOCK_TOTAL) 的全表极值扫描；求值点由
  *   `mig_gc_evaluate` 的节拍门（GC_EVAL_INTERVAL_MS）兜成本，不在本函数内节流。
  * ⚠ **调用点 = FTL 后台服务里唯一的 GC 求值点** `mig_gc_evaluate`（ftl.c）：
  *   **IDLE 与 NORMAL 两条后台路径都从这里过**（IDLE 据此决定是否启动补池突发，

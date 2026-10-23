@@ -149,6 +149,10 @@ _Static_assert((FTL_CW_TOTAL % L2P_ENTRIES_PER_REGION) == 0U, "CW 总数不能�
 /* 一对 plane 页覆盖的 LBA 数（8 = 2 plane × 4 CW） */
 #define FTL_LBA_PER_PAIR (PLANE_NUM * CW_NUM)
 
+/* 一个 pair 页的 flat CW 全掩码（bit = plane*CW_NUM+cw）。
+ * cache read/write 批次共用，避免各模块重复写 `(1U << (PLANE_NUM*CW_NUM))-1`。 */
+#define FTL_CACHE_FULL_CW ((DWORD)((1U << (PLANE_NUM * CW_NUM)) - 1U))
+
 /* LBA → 页基址（低 CW_WIDTH 位 = cw 清零；plane 位保留） */
 static inline DWORD ftl_lba_page_base(DWORD lba)
 {

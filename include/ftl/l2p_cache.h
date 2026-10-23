@@ -36,7 +36,8 @@
 
 /* 在飞写回上限（背压闸门，见 l2p_cache_t.flush_inflight）：每次写回占 1 条命令 + 4 buffer，
  * 4 条在飞 = 16 buffer，占 FC buffer 池（128）的 1/8，给 host I/O 留足余量。 */
-#define L2P_FLUSH_MAX_INFLIGHT (4U)
+#define L2P_FLUSH_MAX_INFLIGHT    (4U)
+#define L2P_PREFETCH_MAX_INFLIGHT (2U) /* 本仓自定：host load + prefetch 合计上限 */
 
 /* 后台主动 flush 的每轮条数上界（按档位；docs §4.7 的 static const 策略表）。
  * BUSY 档只放行 1 条 ⇒ 最小预算 = 「must-run + 1 flush」。 */
@@ -236,6 +237,11 @@ typedef struct
     /* 本次加载读的是哪一份（主备回退，RISK-BOOT-18 的 L2）。 */
     DWORD load_pba;        /* 在飞/最近一次加载的 PBA */
     bool  load_use_backup; /* true = 当前这次读的是备份副本 */
+
+    /* 本行由顺序读预取发起（本仓自定）。
+     * 预取加载完成时 fresh=0，第一次 host 命中计 hit 并清本标志；
+     * 异步失败/降级/行被驱逐/初始化时清。 */
+    bool prefetch;
 } l2p_cache_line_t;
 
 /* ── Owner 端口（docs §4.7）──
@@ -263,6 +269,11 @@ typedef struct
     DWORD            hit_count;             /* 统计：命中次数（开机累计，观测用） */
     DWORD            miss_count;            /* 统计：未命中次数（开机累计，观测用） */
     DWORD            eviction_count;        /* 统计：被驱逐的行数（开机累计） */
+    DWORD            prefetch_calls;        /* 顺序读预取调用次数 */
+    DWORD            prefetch_started;      /* 成功起加载 / 直接置 CLEAN 的次数 */
+    DWORD            prefetch_skipped;      /* 资源/行/thrashing/越界跳过 */
+    DWORD            prefetch_resident;     /* 目标已驻留 */
+    DWORD            prefetch_hits;         /* 预取行第一次被 host 命中的次数 */
     int32_t          error;                 /* 最近一次硬失败（status.error） */
 
     /* ── Thrashing 检测窗口（阈值见文件头 L2P_THRASH_*）──
@@ -344,6 +355,17 @@ void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_regi
  * @return true = 已驻留或预载成功；false = 无 INVALID 行 / 读失败
  */
 bool l2p_preload_region(l2p_cache_t *cache, DWORD global_region, DWORD pba);
+
+/*
+ * l2p_prefetch_region - 顺序读 best-effort 预取一个 region（非阻塞）
+ *
+ * 与 l2p_preload_region 的区别：可在运行期调用；会走 CLOCK 驱逐，但**不踢 DIRTY
+ * 写回**（预取不制造写回）。已驻留/LOADING ⇒ 直接返回 true；thrashing / 在飞
+ * load 达 L2P_PREFETCH_MAX_INFLIGHT / FC 资源不足 / 无 CLEAN 候选 ⇒ 跳过并计数。
+ *
+ * @return true = 已驻留或加载已起；false = 本次跳过（host 路径无影响）
+ */
+bool l2p_prefetch_region(l2p_cache_t *cache, DWORD global_region);
 
 /*
  * l2p_read - 读取**全局 LBA** 对应的 PBA 映射（**三态**）

@@ -20,7 +20,7 @@
 | 格式/体检 | start、每 512 块进度、done tested/bad、`old_bad/recovered/new_bad` | INFO/WARN | 进度 + 汇总 |
 | 首次故障 | RR UNC/CRC：lba/pba/paa/g/plane/block/page/cw/retry/解码状态；program-fail；GC victim；erase-fail；dangling（非 BAD）；候选池/BBT 失败；CP abort；USB CSW | ERROR/WARN | 首次全上下文 |
 | 状态变化 | format required/done、FORMAT_IN_PROGRESS、REBUILD_REQUIRED、GC pause/resume、free/spare/OP 跨水位、journal 水位、L2P degrade、timing switch | INFO/WARN | 变化时 |
-| 搬移进度 | **每个真实 victim 一行**：`[MIG] move kind=... reason=... trig=... src0/src1 → dst0/dst1 vcw npg moved elapsed` | INFO | 仅 `moved>0` |
+| 搬移进度 | `[GC] start` 一行带触发上下文；逐 victim 的 `[MIG] move` 只在 DEBUG 打变化字段 | INFO / DEBUG | start 每会话一次；move 仅 `moved>0` |
 | 周期摘要 | `[STAT]`：ch/t/free/bad/mig（活跃/暂停）；op/spare/cp/jrn/wr/dng/rrab/mode 见 `info`/`diag` | INFO | **10 s** |
 | DEBUG | per-CP done、per-GC trig、wbuf flush、per-region load、ECC 趋势 | DEBUG | 默认关闭 |
 
@@ -56,9 +56,11 @@
 
 | 事件 | 级别 | 落点 | 字段 | 频率 |
 |---|---|---|---|---|
+| `[GC  ] start` | INFO | `mig_begin_gc` | `reason trig mode free` | 每会话一次（仅选中有效 victim 时） |
 | `[GC  ] progress` | INFO | `mig_handle` | `jobs moved rec noop abort free` | 仅会话有实际搬移时，5 s |
 | `[GC  ] end` | INFO | `mig_handle` | `jobs moved rec noop abort elapsed` | 仅 `moved>0` 的会话收尾 1 行 |
-| `[MIG ] move` | INFO（仅 `vcw>0`；空块完全不生成） | `mig_finish` | `kind reason trig src0 src1 dst0 dst1 vcw npg moved elapsed` | 每个真实 victim 1 行 |
+| `[WL  ] start` | INFO | `mig_begin_wl` | `free writes` | 每个静态 WL job 1 行（只在 host 空闲档启动） |
+| `[MIG ] move` | DEBUG（仅 `vcw>0`；空块完全不生成） | `mig_finish` | `k r trig src0 src1 dst0 dst1 v mv t` | 每个真实 victim 1 行，默认不输出 |
 | `[MIG ] abort` | WARN（限流） | `mig_abort` | `kind g0 g1 phase page plane cause fc supp` | 首次/限流 |
 | `[L2P ] job inflight` | INFO | `l2p_flush_kick_owner` | `load flush dirty` | 有在飞时 1 s |
 | `[TRIM] start/done` | INFO | `ftl_trim_begin/step` | start `lba n`；done `n elapsed` | 每次控制面 TRIM |
@@ -67,10 +69,10 @@
 | `[FTL ] predictive relocate retired` | WARN | `mig_finish` | `g` | 每次 predict 命中 |
 
 空 victim（`vcw==0`）**不产生任何** `[MIG ] move`，也不会开启可见的 GC
-会话；`[GC  ] progress/end` 只在 `moved>0` 时出现。`[GC  ] start` 不再逐次打：
-触发原因/源/目的/结果已经全部在 `[MIG ] move` 行里。
+会话；`[GC  ] progress/end` 只在 `moved>0` 时出现。`[GC  ] start` 每会话只打一次，
+带 `reason/trig/mode/free`；逐 victim 的 `[MIG ] move` 降为 DEBUG，且只保留
+`src/dst/v/mv/t` 等变化字段，避免大批搬移时重复打印同一上下文。
 ⚠ 不能用 `sel.best_valid_pct` 判断：它是域内**最低**有效率，存在任一空块就为 0。
-每个真实 victim 只打一行 `move`，避免 200 水位下 start/dst/done 三行刷屏。
 
 CP / Journal 是高频元数据维护（CP 每次水位触发、JRN 每页/换块）：**不逐次打
 start/rotate**；当前序号看 `info` 的 `cp=` / `jrn=`，异常仍按原 ERROR/WARN 输出。
@@ -125,7 +127,7 @@ start/rotate**；当前序号看 `info` 的 `cp=` / `jrn=`，异常仍按原 ERR
 | CP start / JRN rotate 高频元数据事件不逐次打（看 `info` 的 `cp=`/`jrn=`） | 已改、未上板 |
 | 模块标签 4 字符对齐（log.h + src 批量替换） | 已改、未上板 |
 | `map` 增加 `paa=`；新增 `addr pba/paa/g`（cli.c） | 已改、未上板 |
-| `FREE_POOL_TARGET` 32→200；BUSY 档 `free<200` 仍做水位 GC | 已改、未上板 |
+| `FREE_POOL_TARGET` = 32（2026-10-23 回退）；BUSY 档 `free<32` 仍做水位 GC | 已上板（H2testw 后 free=64，未触发 T1） |
 | DEBUG 收敛：GC trig 5 s、删逐页/逐 CW MIG/JRN/RR 流水 | 已改、未上板 |
 | dangling 按旧 gblock 聚合（ftl.c） | 已改、未上板 |
 | RR：已退役块每 gblock 一次、好块首故障全字段 + `st=`（read_recovery.c） | 已改、未上板 |
@@ -143,6 +145,6 @@ start/rotate**；当前序号看 `info` 的 `cp=` / `jrn=`，异常仍按原 ERR
 2. 已退役块被 host 反复读时，每个 gblock 只出现一次 `[RR  ] retired ...`，`rrab` 增长。
 3. `[TRC ] dup>0` ⇒ 同页二次编程；`dup=0` ⇒ 写后读坏/时序。
 4. 系统性读失败时，`[MIG ] victim read failed` 最多 8 行后出现 `suspend GC until reboot`，之后不再有 GC 触发。
-5. GC 正常时只看真实搬移：每个真实 victim 一行 `[MIG ] move`，有实际搬移的会话才有一行 `[GC  ] end`；空 victim/无搬移会话不打印。
+5. GC 正常（INFO 档）只出现：每会话一行 `[GC  ] start`、5 s 一行 `[GC  ] progress`、有实际搬移的会话一行 `[GC  ] end`；逐 victim 的 `[MIG ] move` 只在 `log level debug` 出现，空 victim/无搬移会话不打印。
 6. `log level debug` 下也不出现逐页/逐 CW 的 `[MIG ] read/move`、逐页 `[JRN ] flush`、逐次 `[RR  ] start/done`；`[GC  ] trig` ≤1 行/5 s。
 7. 所有模块标签右括号在同一列（`[GC  ]` / `[MIG ]` / `[STAT]`）；`[FAULT]`/`[BOUND]` 例外。

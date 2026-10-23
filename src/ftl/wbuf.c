@@ -71,45 +71,6 @@ bool wb_read(const wb_handle_t *h, DWORD lba, void *out)
 
 static ftl_status_e wb_flush(wb_handle_t *h);
 
-/* wb_program_page — 配置命令头 + 建 desc 链 + 按页内 CW 偏移散射填数据。
- * ⚠ 失败**不**释放 cmd——由 wb_flush 的统一错误出口释放（fc_command_release 幂等）。 */
-static ftl_status_e wb_program_page(wb_handle_t  *h,
-                                    fc_command_t *cmd,
-                                    const DWORD   pba[PLANE_NUM],
-                                    BYTE          nplanes)
-{
-    cmd->config.operation   = ftl_plane_write_op(nplanes);
-    cmd->config.multi_plane = ftl_plane_multi_field(nplanes);
-    cmd->config.cw          = CW_NUM - 1U;
-    cmd->config.crc         = FC_CRC_ENABLE;
-    cmd->config.random      = FC_RANDOM_ENABLE;
-    cmd->config.ldpc        = FC_ECC_MODE_BCH;
-    cmd->config.chain       = FC_CHAIN_END;
-    cmd->config.page_type   = FC_PAGE_TYPE_LP;
-    /* 窗口基址：FC 侧 desc->meta = (meta & ~PLANE_CW_MASK) | (plane<<2) | cw
-     * ⇒ 逐 CW 铸出该 CW 的扇区 LBA（同 ftl_issue_subop）。 */
-    cmd->meta               = h->base;
-
-    /* 建 desc 链（位图 = 本页实际覆盖的 CW；desc/buffer 池空 → 瞬态背压） */
-    ftl_status_e ret = ftl_cmd_setup_ppa_pair_cw(cmd, pba, h->occupied);
-
-    if (ret != FTL_OK)
-    {
-        return ret; /* FTL_AGAIN（池空，瞬态）/ FTL_ERROR 原样上抛 */
-    }
-
-    /* 按 plane-major pair 镜像的槽位**散射**取数（槽位 = plane*CW_NUM + cw）。
-     * 稀疏页必须散射——顺序打包会把槽 0 的数据塞进第一个链槽而非它自己的 CW 偏移。
-     * ⚠ 必须用 pair 版本：单页版本会让 plane1 复制 plane0 的前 2KB。 */
-    ret = ftl_cmd_write_data_pair_cw(cmd, h->data, h->occupied);
-    if (ret != FTL_OK)
-    {
-        return FTL_ERROR;
-    }
-
-    return FTL_OK;
-}
-
 static ftl_status_e wb_flush(wb_handle_t *h)
 {
     if ((h->open == 0U) || (h->occupied == 0U))
@@ -124,19 +85,11 @@ static ftl_status_e wb_flush(wb_handle_t *h)
         return FTL_AGAIN;
     }
 
-    /* 资源次序：**按有无归还路径排序**——先查 pending 表余量（不占资源），再取**可释放**的
-     * 命令槽，最后才取**不可归还**的页对。取不到命令槽时一个资源都还没占用；页对之后的
+    /* 资源次序：先查 pending 表余量（不占资源），再取页对；命令/desc/buffer 由
+     * ftl_async_write_pair_cmd() 在页对之后分配。取不到页对时无资源占用；页对之后的
      * 任何失败都由统一错误出口 alc_rewind_pair 归还（否则页对凭空蒸发，
-     * 表现为容量无声流失，见 CLAUDE.md §3.1）。
-     * 单线程 superloop ⇒ 查到这里登记之间没有别的消费者。 */
+     * 表现为容量无声流失，见 CLAUDE.md §3.1）。 */
     if (pend_get_count(h->pending) >= FTL_PENDING_MAX)
-    {
-        return FTL_AGAIN;
-    }
-
-    fc_command_t *cmd = fc_command_alloc();
-
-    if (cmd == NULL)
     {
         return FTL_AGAIN;
     }
@@ -150,18 +103,55 @@ static ftl_status_e wb_flush(wb_handle_t *h)
 
     if (alc_alloc_pair(h->alloc, FTL_TEMP_HOT, pba) != FTL_OK)
     {
-        (void)fc_command_release(cmd); /* 页对尚未取到 ⇒ 无页可还 */
         mig_trigger(h->migrate, MIGRATE_REASON_GC_URGENT);
         return FTL_AGAIN;
     }
 
-    /* 本页覆盖的 plane 数（决定 operation 码与 plane 段）与实际 CW 数。
-     * nplanes 的值域断言在 ftl_plane_write_op 内（界 = PLANE_NUM，与
-     * fc_command_plane_span 同源）——不再在这里复检。 */
-    BYTE nplanes = ftl_cw_bitmap_plane_count(h->occupied);
-    BYTE n_cw    = ftl_cw_bitmap_popcount(h->occupied);
+    /* page0 异步写屏障：page>0 的写必须等同一 plane 的 page0 成功完成。 */
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        if (bit_mask_any(h->occupied, ftl_cw_plane_mask(p)) &&
+            (pba_to_page(pba[p]) > 0U) &&
+            (!alc_page0_programmed(h->alloc, FTL_TEMP_HOT, pba[p])))
+        {
+            alc_rewind_pair(h->alloc, FTL_TEMP_HOT);
+            return FTL_AGAIN;
+        }
+    }
 
-    ftl_status_e ret = wb_program_page(h, cmd, pba, nplanes);
+    /* 本页覆盖的 plane 数（决定 operation 码与 plane 段）与实际 CW 数。 */
+    const BYTE nplanes = ftl_cw_bitmap_plane_count(h->occupied);
+    const BYTE n_cw    = ftl_cw_bitmap_popcount(h->occupied);
+    const bool page0   = (pba_to_page(pba[0]) == 0U);
+
+    /* page0 补全：缺失 plane 补零，命令按 full pair 写，保证两个 plane 的 page0
+     * 都非空白（page0 异步写屏障 / full rebuild 的 page0 捷径前提）。
+     * 映射仍只按原 occupied 位图确认，补出的 CW 不指向任何 LBA。 */
+    DWORD write_bitmap = h->occupied;
+    BYTE  write_planes = nplanes;
+
+    if (page0)
+    {
+        for (BYTE p = 0U; p < PLANE_NUM; p++)
+        {
+            if (!bit_mask_any(h->occupied, ftl_cw_plane_mask(p)))
+            {
+                memset(&h->data[p * CW_NUM * FTL_IU_BYTES], 0, CW_NUM * FTL_IU_BYTES);
+            }
+        }
+        write_bitmap = FTL_CACHE_FULL_CW;
+        write_planes = PLANE_NUM;
+    }
+
+    const ftl_page_cfg_t *cfg = FTL_PAGE_CFG_DATA(ftl_lba_page(h->base));
+    fc_command_t         *cmd = NULL;
+
+    ftl_status_e ret = ftl_async_write_pair_cmd(&cmd,
+                                                pba,
+                                                h->data,
+                                                write_bitmap,
+                                                ftl_plane_write_op(write_planes),
+                                                cfg);
 
     if (ret != FTL_OK)
     {
@@ -180,7 +170,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
 
     pending->command_id         = ftl_cmd_id(cmd);
     pending->owners             = h->owners;
-    pending->op                 = PENDING_OP_WRITE;
+    pending->op                 = page0 ? PENDING_OP_WRITE_PAGE0 : PENDING_OP_WRITE;
     pending->n_cw               = n_cw;
     pending->cw_bitmap          = h->occupied;
     pending->lba                = h->base;
@@ -203,7 +193,7 @@ static ftl_status_e wb_flush(wb_handle_t *h)
 
     /* 观测口：一页一次编程；base/cw/nplanes/owners 即"合并了多少"的判据。
      * ⚠ LOGD（不是 LOGI）：批量写下每 4KB 一行、UART 阻塞 ~5ms，比 NAND 编程慢一个量级。 */
-    LOGD(LOG_TAG_FTL "wbuf flush base=%lu cw=%u nplanes=%u owners=0x%lx\r\n", h->base, (unsigned)n_cw, (unsigned)nplanes, h->owners);
+    LOGD(LOG_TAG_FTL "wbuf flush base=%lu cw=%u nplanes=%u owners=0x%lx\r\n", h->base, (unsigned)n_cw, (unsigned)write_planes, h->owners);
 
     /* 提交成功才清缓冲 */
     h->open     = 0U;
@@ -217,7 +207,10 @@ static ftl_status_e wb_flush(wb_handle_t *h)
 /* 统一错误出口（H8 允许的唯一 goto）：释放命令 + **归还页对**。缓冲原样保留 ⇒ 下轮重试；
  * 页对尚未编程（命令从未提交）⇒ 归还是安全的。 */
 wbuf_flush_fail:
-    (void)fc_command_release(cmd);
+    if (cmd != NULL)
+    {
+        (void)fc_command_release(cmd);
+    }
     alc_rewind_pair(h->alloc, FTL_TEMP_HOT);
     return ret;
 }

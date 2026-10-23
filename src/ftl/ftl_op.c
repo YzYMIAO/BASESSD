@@ -90,6 +90,53 @@ ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx)
     return FTL_OK;
 }
 
+/* ── 批量提交（cache program 批次）── */
+ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_e op, void *ctx)
+{
+    ASSERT(cmds != NULL);
+    ASSERT(n > 0U);
+
+    DWORD added = 0U;
+
+    for (DWORD i = 0U; i < n; i++)
+    {
+        const WORD cmd_id = ftl_cmd_id(cmds[i]);
+
+        cmds[i]->op_tag = op;
+
+        if (ctx != NULL)
+        {
+            if (ct_add(cmd_id, ctx) != FTL_OK)
+            {
+                for (DWORD k = 0U; k < added; k++)
+                {
+                    ct_remove(ftl_cmd_id(cmds[k]));
+                }
+                return FTL_ERROR;
+            }
+        }
+        else
+        {
+            ct_remove(cmd_id);
+        }
+        added++;
+    }
+
+    if (fc_submit_batch(cmds, n) != FC_STATUS_OK)
+    {
+        if (ctx != NULL)
+        {
+            for (DWORD i = 0U; i < n; i++)
+            {
+                ct_remove(ftl_cmd_id(cmds[i]));
+            }
+        }
+        return FTL_AGAIN;
+    }
+
+    return FTL_OK;
+}
+
 /* ── 3. 派发 ── */
 
 /* 派发深度（见 ftl_op_is_in_dispatch）。单线程顺序主循环 ⇒ 普通变量即可，无需原子。 */

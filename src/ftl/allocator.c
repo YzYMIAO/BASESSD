@@ -379,9 +379,10 @@ static bool alc_open_sb(alc_t *alloc, super_block_t *sb, BYTE temperature, bool 
         ftl_block_set_sb(b, FTL_BLOCK_NO_SB);
     }
 
-    sb->next_page   = 0U;
-    sb->temperature = temperature;
-    sb->is_open     = true;
+    sb->next_page        = 0U;
+    sb->temperature      = temperature;
+    sb->is_open          = true;
+    sb->page0_programmed = 0U;
 
     return true;
 }
@@ -528,6 +529,10 @@ static ftl_status_e alc_alloc_pair_impl(alc_t *alloc, BYTE temperature, DWORD ou
         }
     }
 
+    /* 注：page0 异步写屏障在**写提交点**检查（alc_page0_programmed），不在分配点。
+     * 分配本身不产生介质写；稀疏 plane 可能永远不写 page0，在分配点拒绝会饿死
+     * 另一 plane 的正常追加。 */
+
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
     {
         out[plane] = super_block_page_pba(alc_topo(alloc), sb, plane, sb->next_page);
@@ -540,6 +545,100 @@ static ftl_status_e alc_alloc_pair_impl(alc_t *alloc, BYTE temperature, DWORD ou
 ftl_status_e alc_alloc_pair(alc_t *alloc, BYTE temperature, DWORD out[PLANE_NUM])
 {
     return alc_alloc_pair_impl(alloc, temperature, out, false);
+}
+
+void alc_note_page_programmed(alc_t *alloc, BYTE temperature, DWORD pba)
+{
+    ASSERT((temperature == FTL_TEMP_HOT) || (temperature == FTL_TEMP_COLD));
+
+    super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+
+    if ((!sb->is_open) || (pba == NAND_PBA_INVALID) || (pba_to_page(pba) != 0U))
+    {
+        return;
+    }
+
+    /* 迟到的完成可能属于已关闭的旧 SB：必须按 plane+block 确认它仍指向当前 Open SB，
+     * 否则会把新 SB 的 page0 屏障误置为已通过。 */
+    const BYTE plane = pba_to_plane(pba);
+
+    if ((!super_block_has_plane(sb, plane)) || (sb->plane_blocks[plane] != pba_to_block(pba)))
+    {
+        return;
+    }
+
+    sb->page0_programmed |= (BYTE)(1U << plane);
+}
+
+/* PBA 是否指向指定 SB 的 plane/block（同一 identity，不看 CW/page）。 */
+static bool alc_pba_matches_sb(const super_block_t *sb, DWORD pba)
+{
+    if ((!sb->is_open) || (pba == NAND_PBA_INVALID))
+    {
+        return false;
+    }
+
+    const BYTE plane = pba_to_plane(pba);
+
+    return super_block_has_plane(sb, plane) &&
+           (sb->plane_blocks[plane] == pba_to_block(pba));
+}
+
+bool alc_page0_programmed(const alc_t *alloc, BYTE temperature, DWORD pba)
+{
+    ASSERT((temperature == FTL_TEMP_HOT) || (temperature == FTL_TEMP_COLD));
+
+    const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+
+    if (!alc_pba_matches_sb(sb, pba))
+    {
+        return false; /* 旧 SB 的迟到命令 */
+    }
+
+    return (sb->page0_programmed & (BYTE)(1U << pba_to_plane(pba))) != 0U;
+}
+
+bool alc_pba_belongs_to_open_sb(const alc_t *alloc, BYTE temperature, DWORD pba)
+{
+    ASSERT((temperature == FTL_TEMP_HOT) || (temperature == FTL_TEMP_COLD));
+
+    const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+
+    return alc_pba_matches_sb(sb, pba);
+}
+
+BYTE alc_open_pair_room(const alc_t *alloc, BYTE temperature)
+{
+    ASSERT((temperature == FTL_TEMP_HOT) || (temperature == FTL_TEMP_COLD));
+
+    const super_block_t *sb = (temperature == FTL_TEMP_HOT) ? &alloc->hot_sb : &alloc->cold_sb;
+
+    if ((!sb->is_open) || (sb->next_page >= PAGES_PER_BLOCK))
+    {
+        return 0U;
+    }
+
+    BYTE room = (BYTE)(PAGES_PER_BLOCK - sb->next_page);
+
+    for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
+    {
+        if (!super_block_has_plane(sb, plane))
+        {
+            return 0U;
+        }
+        /* page0 屏障：未成功编程的 plane 不允许继续分配。 */
+        if ((sb->page0_programmed & (BYTE)(1U << plane)) == 0U)
+        {
+            return 0U;
+        }
+        /* BAD 块不能继续写；alloc 主路径会关闭该 SB，这里同样按 0 处理。 */
+        if (ftl_block_is_bad(&alloc->blocks[ftl_gblock(plane, sb->plane_blocks[plane])]))
+        {
+            return 0U;
+        }
+    }
+
+    return room;
 }
 
 ftl_status_e alc_alloc_pair_high_wear(alc_t *alloc, DWORD out[PLANE_NUM])

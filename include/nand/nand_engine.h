@@ -60,6 +60,7 @@ typedef enum
     NAND_UOP_DATA_OUT_STATUS,   /* 直读 70h 状态字节 */
     NAND_UOP_JUMP_IF_NOT_READY, /* 条件跳转：busy 则回跳 operand 步 */
     NAND_UOP_CHECK_FAIL,        /* 检查状态字节 FAIL 位 */
+    NAND_UOP_CHECK_FAIL_CACHE,  /* 检查 FAIL + FAILC（cache program 当前/上一页） */
     NAND_UOP_DELAY_US,          /* 固定微秒延时，operand=延时微秒数 */
     NAND_UOP_END,               /* 序列结束 */
     NAND_UOP_COUNT,             /* 枚举数量（数组长度用） */

@@ -157,6 +157,8 @@ static uint8_t test_is_multi_op(uint8_t operation)
         case (uint8_t)OP_READ_PAGE_MULTI_PLANE_WITHOUT_DATA_OUT: /* v45：多 plane 加载 */
         case (uint8_t)OP_RANDOM_DATA_READ_MULTI_PLANE:           /* v45：06h-E0h 多 plane 取数 */
         case (uint8_t)OP_TWO_PLANE_PROGRAM_CACHE:                /* Figure 74：双 plane cache 写 */
+        case (uint8_t)OP_TWO_PLANE_PROGRAM_CACHE_END:            /* Figure 74：末页 10h 收尾 */
+        case (uint8_t)OP_TWO_PLANE_PROGRAM_CACHE_FIRST:          /* Figure 74：首页（只查 FAIL） */
         case (uint8_t)OP_READ_PAGE_CACHE_START_SEQ_MP:           /* 双 plane cache 读首 pair */
         case (uint8_t)OP_READ_PAGE_CACHE_SEQ_MP:                 /* 双 plane cache 读顺序 pair */
         case (uint8_t)OP_READ_PAGE_CACHE_LAST_MP:                /* 双 plane cache 读末 pair */
@@ -434,7 +436,8 @@ fc_command_status_t test_prog_page(uint16_t block_index, uint8_t plane_bitmap, u
     ASSERT((plane_bitmap & (uint8_t)~TEST_PLANE_BM_ALL) == 0U);
     ASSERT((block_index < BLOCKS_PER_PLANE) && (page_index < PAGES_PER_BLOCK));
     ASSERT((config->operation == (DWORD)OP_NORMAL_PROGRAM_PAGE) || (config->operation == (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE) ||
-           (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE));
+           (config->operation == (DWORD)OP_PROGRAM_PAGE_CACHE) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE) ||
+           (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END) || (config->operation == (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST));
 
     is_multi = test_is_multi_op((uint8_t)config->operation);
     if (is_multi != 0U)
@@ -614,13 +617,15 @@ void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t
     ASSERT(block_index < BLOCKS_PER_PLANE);
 
     /* 前 PAGES_PER_BLOCK-1 页：Two-Plane Program Page Cache（80h-11h-80h-15h）；
-     * 末页：现有 multi-plane program（80h-11h-80h-10h），tLPROG 等整批完成。 */
+     * 末页：OP_TWO_PLANE_PROGRAM_CACHE_END（80h-11h-80h-10h + FAILC 检查），
+     * tLPROG 等整批完成。 */
     for (uint16_t page = 0U; page < (uint16_t)(PAGES_PER_BLOCK - 1U); page++)
     {
         fc_command_status_t completion;
 
         conf           = *config;
-        conf.operation = (DWORD)OP_TWO_PLANE_PROGRAM_CACHE;
+        conf.operation = (page == 0U) ? (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_FIRST
+                                      : (DWORD)OP_TWO_PLANE_PROGRAM_CACHE;
 
         completion = test_prog_page(block_index, TEST_PLANE_BM_ALL, page, &conf, NULL);
 
@@ -631,7 +636,7 @@ void test_prog_block_cache_multi_plane(uint16_t block_index, const fc_cmd_conf_t
         fc_command_status_t completion;
 
         conf           = *config;
-        conf.operation = (DWORD)OP_PROGRAM_PAGE_MULTI_PLANE;
+        conf.operation = (DWORD)OP_TWO_PLANE_PROGRAM_CACHE_END;
 
         completion = test_prog_page(block_index, TEST_PLANE_BM_ALL, (uint16_t)(PAGES_PER_BLOCK - 1U), &conf, NULL);
         munit_assert_uint32(completion.status & FC_CW_STATUS_ERROR_MASK, ==, 0U);

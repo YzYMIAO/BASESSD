@@ -174,7 +174,21 @@ fl
 ### 5.2 板端
 
 - `test /fc-nand/...`：FC ECC/CRC/加扰/建链/多 plane/压力；
-- `info` / `diag`：`free/op/bad/dng/mig/cp/jrn`；
+- `info` / `diag`：`free/op/bad/dng/mig/cp/jrn`；新增
+  两行：`l2p[ch][ce][lun] seq=<run>/<max> pf=<calls>/<started>/<skipped>/<resident>/<hits>
+  cr=<batches>/<pairs>/<declines>/<fallbacks>` 与
+  `l2p[ch][ce][lun] cw=<batches>/<pages>/<declines>/<aborts> mb=<jobs>/<pages>/<aborts>`；
+- **顺序读预取 / cache read**：先 `wr` 一段连续数据，再连续执行
+  `rd <lba> 32`（每次 16 KiB，跨 512-LBA region）。`info` 的 `seq` 应增长、
+  `pf started/hits` 增长；`cr batches/pairs` 增长说明 cache read 批次真的生效；
+  随机/非对齐读应只让 `cr declines` 增长而数据正确；`wr`/`fl` 后 `seq` 归零。
+- **host cache program**：先写满一个块的前一页（让 hot SB 的 page0 成功），再
+  `wr <8 对齐 lba> 32` → `rd <同 lba> 32`；`cw batches/pages` 应增长且数据一致。
+  非对齐/小请求/wbuf 非空时只应 `cw declines` 增长，写仍成功。batch 在飞时
+  `fl` 必须等它结算后才返回。
+- **GC/WL cache batch**：写满触发 GC，`mb jobs/pages` 应增长；H2testw 全盘写+校验
+  通过，`free/bad/dangling` 与既有回归一致。静态 WL high-wear 路径不批（`mb` 不增长
+  是预期）。
 - `map <lba>`：L2P 映射 + BST 状态；
 - `rdpaa <paa> --raw`：原始页字节，验证加扰/ECC/布局；
 - `wp`：页打包写缓冲合并；
@@ -244,7 +258,7 @@ preconditioning**；若报告引用 PTS，必须按标准补做 preconditioning/
 - 424 MiB ≈ 3392 个用户块 ⇒ 每块约 **128 KiB**；
 - 256 MiB ≈ **2048 块**；
 - 空盘 `free≈3300`，写 256 MB 后仍剩 ≈1250 块；
-- GC 触发线是 `free < 200` 块（约 25 MiB）⇒ 256 MiB 仍够不到；
+- GC 触发线是 `free < 32` 块（约 4 MiB）⇒ 256 MiB 仍够不到；
 - 近满盘（H2testw 写满后 `free≈64`）时，再写少量新数据就会触发 GC。
   **CDM 的“已用 0%”只是 Windows 文件系统视角，不等于 FTL free 高。**
 
@@ -400,17 +414,18 @@ info
 - GC 事件看：
 
 ```text
-[MIG ] move kind=gc reason=periodic trig=0x01 mode=... src0=... src1=... dst0=... dst1=... vcw=... npg=... moved=... elapsed=...ms
-...（每个真实 victim 一行 move；无实际搬移不打）
+[GC  ] start reason=periodic trig=0x10 mode=off free=...
+[GC  ] progress jobs=... moved=... rec=... noop=... abort=... free=...
 [GC  ] end jobs=... moved=... rec=... noop=... abort=... elapsed=...ms
 ```
 
+- 默认 INFO 只打上面三种；逐 victim 的
+  `[MIG ] move k=gc src0=... dst0=... v=... mv=... t=...ms` 只在 `log level debug` 输出；
 - `vcw=0` 的空块回收不打任何 `[MIG ] move`，只让 `[GC  ] end noop=` /
   `diag rec=` 增长；
-- `[GC  ] trig` 只在 `log level debug` 的 debug 镜像里每 5 s 一行；
-  `[MIG ] read/move` 不再打（debug 也不打），地址细节用
-  `map <lba>` / `addr pba|paa|g` 反查；
-- `free=200` 是 GC 目标线，触发条件是 **`free < 200`**；200 本身不触发；
+- `[GC  ] trig` 只在 `log level debug` 里每 5 s 一行；
+  地址细节用 `map <lba>` / `addr pba|paa|g` 反查；
+- `free=32` 是 GC 目标线，触发条件是 **`free < 32`**；32 本身不触发；
 - BUSY 档跳过 WL/predict 与普通周期评估，但 **`free < FREE_POOL_TARGET` 时仍做
   水位 GC**；写路径分配失败的 urgent GC 也在 BUSY 执行（`RISK-GC-15`），
   否则会等到 free≈1、已无目的页可分配，只能 no-gain；
@@ -442,9 +457,10 @@ addr g <g> [ch ce lun]            # 实例内全局块号 → plane/block + BST 
 | debug + 16 KB EP | 295~322 KB/s | — | 27.5 ms | `-O0` 主因 |
 | **release + 16 KB EP（空盘）** | **673 KB/s** | **758 KB/s** | **6.6 ms** | H2testw 无错误 |
 | **release + 16 KB EP + 1/4/5 批处理（近满盘/GC）** | **765 KB/s** | **884 KB/s** | 未取（写后断电） | H2testw 无错误 |
+| **release + 16 KB EP + cache program + T5 移除（2026-10-23）** | **843 KB/s** | **889 KB/s** | **4.1 ms** | H2testw 415/423 MB；`cw=24906/99624/0 abort`；无 T5/无 GC |
 
-结论：`-O0` 是设备侧主因；16 KB EP 有效；GC/近满盘不是主因；USB FS 总线约
-13.5 ms/16 KB + 设备 6.6 ms ≈ 20 ms ⇒ 实用上限约 800 KB/s。
+结论：`-O0` 是设备侧主因；16 KB EP 有效；GC/近满盘不是主因；USB FS BOT
+仍是主瓶颈，本板 release + cache program 实测 **843/889 KB/s**（avg latency 4.1 ms）。
 
 ### 9.2 已做改动
 

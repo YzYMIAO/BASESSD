@@ -117,4 +117,11 @@ ftl_status_e wb_handle(wb_handle_t *h, const wb_trigger_t *trigger, const bg_inf
 bool wb_has(const wb_handle_t *h, DWORD lba);
 bool wb_read(const wb_handle_t *h, DWORD lba, void *out);
 
+/* wbuf 是否完全空闲（无打开窗口、无未编程数据）。
+ * 不变量：open/occupied 必须同时为空；外部 batch 只在空闲时接管写路径。 */
+static inline bool wb_is_idle(const wb_handle_t *h)
+{
+    return (h->open == 0U) && (h->occupied == 0U);
+}
+
 #endif /* FTL_WBUF_H */

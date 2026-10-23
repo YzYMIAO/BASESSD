@@ -95,6 +95,11 @@ extern "C"
      * 返回：OK / QUEUE_FULL（队列满 = 资源，模仿硬件行为）。 */
     fc_status_e fc_submit(fc_command_t *command);
 
+    /* 批量提交：n 条命令要么全进 SQ/HSQ，要么一条都不进。
+     * 供 two-plane cache program 批次使用——不允许“前几条已提交、末条失败”留下
+     * 未终结的 cache sequence。前置与 fc_submit 相同；返回 OK / QUEUE_FULL。 */
+    fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n);
+
     /* 调度执行（上层 while(1) 轮询调用） */
     fc_status_e fc_service(void);
 

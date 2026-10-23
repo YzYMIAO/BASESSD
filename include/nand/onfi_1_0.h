@@ -56,6 +56,9 @@
 /* 70h 状态字节位定义：bit6=READY、bit0=FAIL */
 #define NAND_STATUS_READY 0x40U
 #define NAND_STATUS_FAIL  0x01U
+/* bit1 = FAILC：**上一页** cache program 的成败。15h 后当前页 FAIL 尚未反映阵列结果，
+ * 必须同时看 FAILC；只查 FAIL 会把中间页失败静默当成成功。 */
+#define NAND_STATUS_FAILC 0x02U
 
 /* ═══ 1. 基础操作（RESET / 读 ID / 参数页 / 特性） ═══ */
 
@@ -260,8 +263,19 @@
 
 /* OP_TWO_PLANE_PROGRAM_CACHE（Figure 74 中间页）
  * < 80 >-< addr/data(P0) >-< 11 >-< 80 >-< addr/data(P1) >-< 15 >
- * 中间页只等 tCBSY；末页必须用 OP_PROGRAM_PAGE_MULTI_PLANE 的 10h 收尾。 */
+ * 中间页只等 tCBSY；末页必须用 OP_TWO_PLANE_PROGRAM_CACHE_END 的 10h 收尾
+ * （普通 op31 只查 FAIL，会漏掉上一页 FAILC）。 */
 #define OP_TWO_PLANE_PROGRAM_CACHE (44U)
+
+/* OP_TWO_PLANE_PROGRAM_CACHE_END（Figure 74 末页）
+ * 先看上一页 FAILC，再 80h-11h-80h-10h 收尾；状态检查同时覆盖 FAIL 与 FAILC。
+ * 普通 op31 不能替代：它只查 FAIL，会把上一页 cache program 的失败漏掉。 */
+#define OP_TWO_PLANE_PROGRAM_CACHE_END (48U)
+
+/* OP_TWO_PLANE_PROGRAM_CACHE_FIRST（批次首页）
+ * 与 op44 相同，但只查 FAIL：首页之前没有本批的 cache 页，FAILC 可能残留上一批/别的
+ * cache 操作结果，查它会把首页误判失败。从第二页起才用 op44/op48 查 FAILC。 */
+#define OP_TWO_PLANE_PROGRAM_CACHE_FIRST (49U)
 
 /* OP_READ_PAGE_CACHE_START_SEQ_MP（Two-Plane Read Cache 首 pair）
  * 00h-addr(P0) + 00h-addr(P1) + 30h → 31h → 06h P0 E0h → Dout P0
@@ -492,7 +506,7 @@
  */
 #define OP_READ_COLUMN (42U)
 
-#define OP_COUNT (48U) /* 0..47 inclusive */
+#define OP_COUNT (50U) /* 0..49 inclusive */
 
 /* ── Phase V: OP 类型枚举 ── */
 #define OP_TYPE_ATOMIC (0U) /* 原原子 OP 码 */

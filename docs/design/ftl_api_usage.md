@@ -331,7 +331,7 @@ typedef struct {
     DWORD new_pba;            /* 新分配 plane0 页 PBA（未覆盖 plane0 ⇒ NAND_PBA_INVALID） */
     DWORD new_pba1;           /* 新分配 plane1 页 PBA（未覆盖 plane1 ⇒ NAND_PBA_INVALID） */
     /* ⚠ 不存 old_pba：完成时按 LBA 重查 L2P 得"此刻被替换的映射"（比提交时快照更正确）*/
-    uint8_t    cache_intermediate; /* 1: Cache Program 中间页（15h），跳过 L2P/Journal */
+    uint8_t    cache_intermediate; /* 1: Cache Program 中间页（15h）：不确认 L2P/Journal、不递减组 */
 } ftl_pending_req_t;
 ```
 
@@ -770,7 +770,7 @@ Padding: (127 - N) × 16B = 0xFF
 #define FTL_TEMP_COLD   1U      /* GC 搬移 / 元数据 */
 
 /* Free Pool 三级水位（一个已擦除池，见 ftl_design §3.7） */
-#define FREE_POOL_TARGET        (200U)  /* 水位①/②分界 */
+#define FREE_POOL_TARGET        (32U)  /* 水位①/②分界 */
 #define FREE_POOL_EMERGENCY     (8U)    /* 水位②/③分界 */
 #define SUPER_BLOCK_LIST_MAX    (FTL_BLOCK_TOTAL) /* Closed SB 列表容量 = 块总数（结构上界，见 §3.6） */
 

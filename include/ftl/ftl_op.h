@@ -88,6 +88,17 @@ typedef void (*ftl_op_callback_fn_t)(struct ftl_context        *ftl,
 ftl_status_e ftl_op_submit(fc_command_t *cmd, ftl_op_id_e op, void *ctx);
 
 /*
+ * ftl_op_submit_batch - 批量版本：n 条命令共用同一 op tag / ctx，全进或全不进。
+ *
+ * 语义与 ftl_op_submit 相同（先登记、后提交），但用 fc_submit_batch 保证 batch
+ * 的原子性。任一登记失败 ⇒ 回滚已登记项并返回 FTL_ERROR；队列不足 ⇒ 回滚并返回
+ * FTL_AGAIN。调用者仍拥有全部命令（失败时须自行 release）。
+ *
+ * @param cmds 命令数组（非空、n>0）；op/ctx 同 ftl_op_submit。
+ */
+ftl_status_e ftl_op_submit_batch(fc_command_t *const cmds[], DWORD n, ftl_op_id_e op, void *ctx);
+
+/*
  * ftl_op_dispatch - 完成派发（ct_drain 的唯一出口）。
  *
  * 按 completion->op_tag 查 g_op_callbacks[]；未知 tag ⇒ 孤儿，release + LOGE。

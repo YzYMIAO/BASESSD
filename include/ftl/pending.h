@@ -71,6 +71,14 @@ typedef enum
                                    *   与 READ_RECOVERY 的差别：无外部引擎，由 pend_confirm_service
                                    *   每轮扫描推进（pend_find_op 按下标序找它）。
                                    *   ⚠ 停泊项**不可被 pend_find 撞到**：id 已置哨兵。 */
+    PENDING_OP_READ_CACHE    = 4, /* FTL cache read 批次成员：完成拷回 host，
+                                   *   但失败**不**托管给 RR（RR 会向同 LUN 插命令，
+                                   *   破坏仍在队列里的 cache sequence）——直接报 IO_ERROR。 */
+    PENDING_OP_WRITE_CACHE   = 5, /* FTL cache program 批次成员：中间页只释放命令，
+                                   *   不确认映射/不递减组；末页成功后整批统一确认。
+                                   *   cache_intermediate 区分中间页（1）与末页（0）。 */
+    PENDING_OP_WRITE_PAGE0   = 6, /* 页0 补全写：命令覆盖两 plane（缺失 plane 写零），
+                                   *   映射只按 cw_bitmap 的原始位图确认。 */
 } pend_op_e;
 
 /* ── op 谓词（判别一律走这里，调用点不裸比枚举值）──
@@ -83,17 +91,23 @@ typedef enum
  *   （READ_RECOVERY 同为停泊态，但判别走 pend_find_op 的**搜索实参**，不是谓词。） */
 static inline bool pend_op_is_read(BYTE op)
 {
-    return op == PENDING_OP_READ;
+    return (op == PENDING_OP_READ) || (op == PENDING_OP_READ_CACHE);
 }
 
 static inline bool pend_op_is_write(BYTE op)
 {
-    return op == PENDING_OP_WRITE;
+    return (op == PENDING_OP_WRITE) || (op == PENDING_OP_WRITE_PAGE0);
 }
 
 static inline bool pend_op_is_write_confirm(BYTE op)
 {
     return op == PENDING_OP_WRITE_CONFIRM;
+}
+
+/* cache program 批次成员（中间页或末页）。 */
+static inline bool pend_op_is_write_cache(BYTE op)
+{
+    return op == PENDING_OP_WRITE_CACHE;
 }
 
 /* 字段按对齐从大到小排列：32 槽 × 4B 尾部填充 = 128B，见下方 static_assert。 */
@@ -127,6 +141,10 @@ typedef struct
 } pend_req_t;
 
 _Static_assert(sizeof(pend_req_t) == 32, "pend_req_t 布局漂移（期望 32B）");
+
+/* pending 只有 new_pba/new_pba1 两个 plane 字段：维度一旦 >2，必须显式改结构，
+ * 不能靠 `pba[0]/pba[1]` 静默漏掉新增 plane（H39）。 */
+_Static_assert(PLANE_NUM == 2U, "pend_req_t 固定两 plane 字段；PLANE_NUM>2 需扩展结构");
 
 /*
  * pend_group_t — 一条 host 请求的完成组（见文件头）

@@ -35,6 +35,12 @@ docs/reference/
 | `SoftSSD_FITEE2023.pdf` | 基于 SoftSSD 的快速固态硬盘固件原型开发（FITEE 2023，中文，7 页） |
 | `zns-tools.pdf` | zns-tools 配套论文（ZNS 工具链） |
 
+### 外部 datasheet（未本地存档）
+
+| 来源 | 用途 |
+|---|---|
+| [Micron `MT29F4G08` 4Gb/8Gb/16Gb x8 NAND datasheet（Rev. N）](https://pdf.ttic.cc/pdfdet/MT29F4G08ABADAWP-IT:D_1288386_1288386_55.html#subpage) | Two-Plane Program Page Cache（Figure 74）与状态寄存器 **FAILC（bit1，上一页 cache program）** 语义；本仓 `include/nand/onfi_1_0.h` 的 op44/op48/op49 依据。datasheet 原文未随仓备份，引用处见 `docs/design/fc_nand_design.md` §17.5。 |
+
 ### 网页存档（`pages/`）
 
 | 文件 | 来源 |

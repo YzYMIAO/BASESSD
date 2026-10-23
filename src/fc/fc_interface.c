@@ -287,6 +287,64 @@ fc_status_e fc_submit(fc_command_t *command)
 }
 
 /* --------------------------------------------------------------------
+ * fc_submit_batch
+ *   功能：把 n 条已建好的命令**整体**投递到 SQ/HSQ；全放得下才入队，否则一条都不入。
+ *   参数：cmds —— 命令指针数组；n —— 条数（>0）。
+ *   返回：FC_STATUS_OK / QUEUE_FULL（队列余量不足）。
+ *   前置：每条命令已 ALLOCATED、validate 通过、desc 链所有权完整（违反 ASSERT）。
+ *   实现要点：先精确预检两条队列余量，再逐条入队。单线程 superloop 下预检与入队之间
+ *         没有其他生产者；若仍失败说明不变量被破坏，ASSERT 留现场（release 下返回错误）。
+ *         cache program 批次依赖“全进或全不进”——不允许前 3 条已入队、第 4 条失败。
+ * -------------------------------------------------------------------- */
+fc_status_e fc_submit_batch(fc_command_t *const cmds[], DWORD n)
+{
+    ASSERT(cmds != NULL);
+    ASSERT(n > 0U);
+
+    WORD sq_need  = 0U;
+    WORD hsq_need = 0U;
+
+    for (DWORD i = 0U; i < n; i++)
+    {
+        fc_command_t   *command = cmds[i];
+        fc_command_id_t command_id;
+
+        ASSERT(command != NULL);
+        ASSERT(fc_command_to_id(command, &command_id) != 0U);
+        ASSERT(fc_command_state_get(&g_fc_controller, command_id) == FC_COMMAND_STATE_ALLOCATED);
+        ASSERT(fc_command_validate(command) == FC_STATUS_OK);
+        ASSERT(fc_command_descriptors_owned_internal(&g_fc_controller, command_id, command) != 0U);
+        (void)command_id; /* release 下 ASSERT 裁空，避免 unused 告警 */
+
+        if (command->high_priority != 0U)
+        {
+            hsq_need++;
+        }
+        else
+        {
+            sq_need++;
+        }
+    }
+
+    if (((WORD)(fc_get_sq_count(&g_fc_controller) + sq_need) > FC_SQ_DEPTH) ||
+        ((WORD)(fc_get_hsq_count(&g_fc_controller) + hsq_need) > FC_HSQ_DEPTH))
+    {
+        return FC_STATUS_QUEUE_FULL;
+    }
+
+    for (DWORD i = 0U; i < n; i++)
+    {
+        const fc_status_e st = fc_submit_internal(&g_fc_controller, cmds[i]);
+
+        /* 预检通过后入队不可能失败；失败即队列不变量被破坏。 */
+        ASSERT(st == FC_STATUS_OK);
+        (void)st;
+    }
+
+    return FC_STATUS_OK;
+}
+
+/* --------------------------------------------------------------------
  * fc_service
  *   功能：服务主循环单步（公共入口）。
  *   返回：FC_STATUS_OK / IO_ERROR / NOT_READY（无命令可推进）。

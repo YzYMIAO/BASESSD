@@ -114,15 +114,30 @@ typedef struct ftl_context ftl_ctx_t;
  * 判「有没有命令在飞」用 waiting 而不是 phase：提交可能因背压失败（phase 不变但无命令）。 */
 typedef enum
 {
-    MIG_IDLE = 0,     /* 空闲：无 job */
-    MIG_READ,         /* 提交阶段：读 victim 当前页的当前 plane */
-    MIG_READ_SETTLE,  /* 纯计算：反查 L2P 得 cw_bitmap（region 未就绪则原地等） */
-    MIG_WRITE,        /* 提交阶段：写目标页的当前 plane */
-    MIG_WRITE_SETTLE, /* 纯计算 + jrn_reserve：改 L2P/Journal + 迁移有效计数 */
-    MIG_FLUSH_JRN,    /* 纯计算：等 Journal job 空闲（F10 屏障） */
-    MIG_ERASE,        /* 提交阶段：擦 victim 的当前 plane */
-    MIG_DONE          /* 纯计算：收尾（移除 closed 条目 + 计数 + 复位 job） */
+    MIG_IDLE = 0,           /* 空闲：无 job */
+    MIG_READ,               /* 提交阶段：读 victim 当前页的当前 plane */
+    MIG_READ_SETTLE,        /* 纯计算：反查 L2P 得 cw_bitmap（region 未就绪则原地等） */
+    MIG_WRITE,              /* 提交阶段：写目标页的当前 plane */
+    MIG_WRITE_SETTLE,       /* 纯计算 + jrn_reserve：改 L2P/Journal + 迁移有效计数 */
+    MIG_WRITE_BATCH,        /* 提交阶段：一次提交 N 页 cache program 批次 */
+    MIG_WRITE_SETTLE_BATCH, /* 纯计算：批内所有页两遍式确认（就绪 + Journal 预留后统一记账） */
+    MIG_FLUSH_JRN,          /* 纯计算：等 Journal job 空闲（F10 屏障） */
+    MIG_ERASE,              /* 提交阶段：擦 victim 的当前 plane */
+    MIG_DONE                /* 纯计算：收尾（移除 closed 条目 + 计数 + 复位 job） */
 } mig_phase_e;
+
+/* cache program 批次最多 4 页（= NAND per-LUN FIFO 深度）。 */
+#define MIG_BATCH_PAGES (4U)
+
+/* 批内单页的搬运元数据（数据在 batch_buf 的同下标槽）。 */
+typedef struct
+{
+    DWORD base[PLANE_NUM];
+    DWORD cw_bitmap[PLANE_NUM];
+    DWORD cw_lba[PLANE_NUM][CW_NUM];
+    DWORD src[PLANE_NUM];
+    DWORD dst[PLANE_NUM];
+} mig_batch_page_t;
 
 /* 收尾方式（决定擦除后怎么处置 victim 的块）。 */
 typedef enum
@@ -146,7 +161,7 @@ typedef enum
 typedef enum
 {
     MIG_GC_START_URGENT = 0, /* wbuf 分配不到页对 */
-    MIG_GC_START_PERIODIC    /* T1/T4/T5 周期评估 */
+    MIG_GC_START_PERIODIC    /* T1/T4 周期评估（磨损均衡走独立 WL） */
 } mig_gc_start_reason_e;
 
 /* ── 搬移 job（per-instance，放 ftl->mig_handle）──
@@ -172,6 +187,8 @@ typedef struct mig_handle
     bool        aborted;        /* true = 中止（不擦 victim、不移除 closed 条目、不计数） */
     bool        decode_ok;      /* true = 本 plane 的 READ 解 META 成功（决定 SETTLE 要不要反查 L2P） */
     bool        write_ok;       /* true = 本 plane 的 WRITE 成功（决定 SETTLE 要不要改 L2P/Journal） */
+    bool        dummy_page0;    /* true = 当前在飞命令是 page0 补零写（不结算映射） */
+    DWORD       dummy_pba;      /* page0 补零写的目标 PBA */
     bool        dst_allocated;  /* true = 本 job 已成功分配过目的页（dst[] 有效） */
     bool        erase_failed;   /* true = 任一 plane 擦除失败/处置失败（回收计数与 predict 日志不计） */
     bool        closed_removed; /* true = 逐 plane 摘除后 Closed 条目已被移除（RISK-GC-04） */
@@ -215,6 +232,22 @@ typedef struct mig_handle
 
     DWORD migrated; /* 本 job 累计搬移的有效 CW 数（>0 才需要 F10 屏障） */
     WORD  erased;   /* 本 job 已成功擦除的 plane 数（观测） */
+
+    /* ── cache program 批次（GC/WL）──
+     * 读仍逐页走 READ/READ_SETTLE；满足条件时把最多 4 页攒进 batch_buf，
+     * 一次提交 op44×(N-1) + op49。批次未结算前不启动新 job。 */
+    bool  batch_mode;         /* true = 正在收集/提交 batch */
+    bool  batch_disabled;     /* true = 本 job 禁用 batch（页面两 plane 基址不一致等） */
+    BYTE  batch_count;        /* 已收集页数（0..MIG_BATCH_PAGES） */
+    BYTE  batch_outstanding;  /* 已提交、未完成的命令数 */
+    bool  batch_failed;       /* 任一成员失败 */
+    bool  batch_cleanup_done; /* 失败后已关闭 cold SB（只做一次） */
+    DWORD batch_jobs;         /* 成功提交的批数（观测） */
+    DWORD batch_pages;        /* 成功提交的页数（观测） */
+    DWORD batch_aborts;       /* 批次失败次数（观测） */
+
+    mig_batch_page_t batch[MIG_BATCH_PAGES];
+    BYTE             batch_buf[MIG_BATCH_PAGES][PLANE_NUM][PAGE_MAIN_SIZE];
 
     /* 心跳基准（见 ftl_job.h）：在飞期间每满 1s 打一行 kind/phase/page/age */
     DWORD start_ms;

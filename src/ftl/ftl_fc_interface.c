@@ -1112,6 +1112,85 @@ ftl_status_e ftl_async_write_page_cw(fc_command_t **out_cmd, DWORD pba, const BY
 }
 
 /* --------------------------------------------------------------------
+ * ftl_async_write_pair_cmd
+ *   功能：双 plane pair 写建链 + plane-major 数据散射，**不提交**。
+ *   参数：pba[PLANE_NUM] —— 各 plane 目标页；pair_buf —— plane0/plane1 页镜像；
+ *         cw_bitmap —— flat 绝对位图；operation —— op44 / cache-end / op31；
+ *         cfg —— 页配置（lba 必须是该 pair 窗口的页 LBA）。
+ *   返回：FTL_OK / FTL_AGAIN（命令池空）/ FTL_ERROR（入参/地址/建链失败）。
+ *   实现要点：wbuf 的普通页写与 FTL cache program 批次共用本函数（C2/R9）。
+ *             支持稀疏位图（单 plane 普通写）；cache op 必须覆盖全部 plane。
+ *             多 plane 命令的 desc 链必须覆盖每个 plane；各 plane 必须同 ch/ce/lun。
+ * -------------------------------------------------------------------- */
+ftl_status_e ftl_async_write_pair_cmd(fc_command_t        **out_cmd,
+                                      const DWORD           pba[PLANE_NUM],
+                                      const BYTE           *pair_buf,
+                                      DWORD                 cw_bitmap,
+                                      BYTE                  operation,
+                                      const ftl_page_cfg_t *cfg)
+{
+    fc_command_t *cmd = page_prepare_alloc(operation, cfg);
+
+    if (cmd == NULL)
+    {
+        return FTL_AGAIN;
+    }
+
+    const BYTE nplanes  = ftl_cw_bitmap_plane_count(cw_bitmap);
+    const bool cache_op = (operation == OP_TWO_PLANE_PROGRAM_CACHE) ||
+                          (operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST) ||
+                          (operation == OP_TWO_PLANE_PROGRAM_CACHE_END);
+
+    ASSERT(nplanes > 0U);
+    ASSERT((!cache_op) || (nplanes == PLANE_NUM));
+    (void)cache_op; /* release 下 ASSERT 裁空 */
+
+    cmd->config.multi_plane = ftl_plane_multi_field(nplanes);
+
+    DWORD first_pba = NAND_PBA_INVALID;
+
+    for (BYTE p = 0U; p < PLANE_NUM; p++)
+    {
+        if (!bit_mask_any(cw_bitmap, ftl_cw_plane_mask(p)))
+        {
+            continue;
+        }
+
+        ASSERT(pba_is_valid(pba[p]));
+
+        if (first_pba == NAND_PBA_INVALID)
+        {
+            first_pba = pba[p];
+        }
+        else
+        {
+            ASSERT((pba_to_ch(pba[p]) == pba_to_ch(first_pba)) &&
+                   (pba_to_ce(pba[p]) == pba_to_ce(first_pba)) &&
+                   (pba_to_lun(pba[p]) == pba_to_lun(first_pba)));
+        }
+    }
+
+    {
+        const ftl_status_e st = ftl_cmd_setup_ppa_pair_cw(cmd, pba, cw_bitmap);
+
+        if (st != FTL_OK)
+        {
+            (void)fc_command_release(cmd);
+            return st; /* FTL_AGAIN（desc/buffer 池空，瞬态）/ FTL_ERROR */
+        }
+    }
+
+    if (ftl_cmd_write_data_pair_cw(cmd, pair_buf, cw_bitmap) != FTL_OK)
+    {
+        (void)fc_command_release(cmd);
+        return FTL_ERROR;
+    }
+
+    *out_cmd = cmd;
+    return FTL_OK;
+}
+
+/* --------------------------------------------------------------------
  * ftl_async_erase_block
  *   功能：建链（无数据），**不提交**，命令经 out_cmd 交回。
  *   参数：out_cmd —— 出参命令（非 NULL）；pba —— 目标块 PBA。

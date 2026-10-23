@@ -594,6 +594,35 @@ static int uart_cli_info(int argc, char *argv[])
                            (unsigned)ftl->mig_handle->gc_last_mode,
                            ftl->mig_handle->nogain_count);
 
+                /* 顺序读预取 / cache read 观测（只读计数，不逐事件打日志）。
+                 * 拆两行：单行最坏值会超过 log_vprintf 的 192 B 缓冲。 */
+                (void)LOGI("l2p[%u][%u][%u] seq=%lu/%lu pf=%lu/%lu/%lu/%lu/%lu cr=%lu/%lu/%lu/%lu\r\n",
+                           (unsigned)ch,
+                           (unsigned)ce,
+                           (unsigned)lun,
+                           ftl->seq_run,
+                           ftl->seq_run_max,
+                           ftl->cache->prefetch_calls,
+                           ftl->cache->prefetch_started,
+                           ftl->cache->prefetch_skipped,
+                           ftl->cache->prefetch_resident,
+                           ftl->cache->prefetch_hits,
+                           ftl->cache_read_batches,
+                           ftl->cache_read_pairs,
+                           ftl->cache_read_declines,
+                           ftl->cache_read_fallbacks);
+                (void)LOGI("l2p[%u][%u][%u] cw=%lu/%lu/%lu/%lu mb=%lu/%lu/%lu\r\n",
+                           (unsigned)ch,
+                           (unsigned)ce,
+                           (unsigned)lun,
+                           ftl->cache_wb_batches,
+                           ftl->cache_wb_pages,
+                           ftl->cache_wb_declines,
+                           ftl->cache_wb_aborts,
+                           ftl->mig_handle->batch_jobs,
+                           ftl->mig_handle->batch_pages,
+                           ftl->mig_handle->batch_aborts);
+
                 /* 元数据整理 job 的现场（心跳默认档不打，靠这里观测）。
                  * 只在有 job 在跑 / 有待回收块时多打一行，空闲时不刷屏。 */
                 const md_dir_cache_t *md  = ftl->metadata_dir;

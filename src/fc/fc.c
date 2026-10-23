@@ -150,6 +150,8 @@ static BYTE fc_is_page_write(BYTE operation)
         case OP_PROGRAM_PAGE_CACHE:
         case OP_OTP_DATA_PROGRAM:
         case OP_TWO_PLANE_PROGRAM_CACHE:
+        case OP_TWO_PLANE_PROGRAM_CACHE_END:
+        case OP_TWO_PLANE_PROGRAM_CACHE_FIRST:
         case OP_PROGRAM_PAGE_MULTI_PLANE:
         case OP_PROGRAM_PAGE_ISSUE: /* Phase V */
             return 1U;

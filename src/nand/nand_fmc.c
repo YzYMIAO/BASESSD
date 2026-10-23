@@ -432,6 +432,27 @@ static nand_result_e nand_fmc_exec_check_fail(void *context, const nand_uop_t *u
 }
 
 /* --------------------------------------------------------------------
+ * nand_fmc_exec_check_fail_cache
+ *   功能：cache program 状态检查——同时看当前页 FAIL（bit0）与上一页 FAILC（bit1）。
+ *   实现要点：15h 完成时当前页的 FAIL 未必已反映阵列编程结果；上一页结果在 FAILC。
+ *         只查 FAIL 会把中间页失败当成成功，随后末页 10h 再确认映射 = 静默坏数据。
+ * -------------------------------------------------------------------- */
+static nand_result_e nand_fmc_exec_check_fail_cache(void *context, const nand_uop_t *uop, const nand_command_request_t *request, const nand_operation_timing_t *timing, nand_command_completion_t *completion)
+{
+    (void)context;
+    (void)uop;
+    (void)timing;
+
+    /* 首页之前没有本批的 cache 页：FAILC 可能残留上一批结果，只查 FAIL。
+     * 其余 cache 页必须同时查 FAILC（上一页 cache program 的成败）。 */
+    const BYTE bad = (request->operation == OP_TWO_PLANE_PROGRAM_CACHE_FIRST)
+                         ? NAND_STATUS_FAIL
+                         : (BYTE)(NAND_STATUS_FAIL | NAND_STATUS_FAILC);
+
+    return ((completion->nand_status & bad) == 0U) ? NAND_RESULT_OK : NAND_RESULT_OPERATION_FAILED;
+}
+
+/* --------------------------------------------------------------------
  * nand_fmc_exec_delay_us
  *   功能：固定微秒延时（DELAY_US 微指令）。
  *   参数：uop —— operand 即延时微秒数。
@@ -466,5 +487,6 @@ static const nand_uop_handler_t g_nand_fmc_handlers[NAND_UOP_COUNT] =
         [NAND_UOP_DATA_OUT_STATUS]   = nand_fmc_exec_data_out_status,
         [NAND_UOP_JUMP_IF_NOT_READY] = NULL,
         [NAND_UOP_CHECK_FAIL]        = nand_fmc_exec_check_fail,
+        [NAND_UOP_CHECK_FAIL_CACHE]  = nand_fmc_exec_check_fail_cache,
         [NAND_UOP_DELAY_US]          = nand_fmc_exec_delay_us,
 };

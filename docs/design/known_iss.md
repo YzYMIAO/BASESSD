@@ -25,7 +25,7 @@
 |---|---|---|---|---|
 | ISS-OP-01 | 未实现 | **P1：GC/WL 用现有 multi-plane 写（OP 31）**；当前 `mig_submit_write` 仍逐 plane 提交（与 RISK-PERF-02 同一问题） | `../archive/nand_op_enablement_plan.md` §3.1 | 先完成 ISS-OP-04 的 Phase 0；P1 的判据是写放大下降、host 写速不降 |
 | ISS-OP-02 | 未实现 | **P2：Copy-Back 复合 op 45**；仅限整页全有效、同 plane、非 metadata、源 ECC 干净四条件 | 同上 §3.2 | 依赖 P1 与 Phase 0 结论；方案 A/B 选型待定 |
-| ISS-OP-03 | 未实现 | **P3：Two-plane Cache Program（op 44）**；需批次模型、中间页不更新 L2P、掉电 modify-after-program、最终 `10h` 确认 | 同上 §3.3 | 高风险，最后做；必须做掉电注入（§7.5） |
+| ISS-OP-03 | 部分实现 / 部分上板 | **P3：Two-plane Cache Program（op 44）**：host 16 KiB 正常路径已上板（H2testw 415/423 MB，843/889 KB/s，`cw` 24906/99624/0 abort）；GC/WL batch 已接 FTL 但本次 `mb=0` 未触发；FAILC 负例、失败注入、掉电注入、静态 WL high-wear 批次未做 | 同上 §3.3；`docs/design/ftl_design.md` ADR-15；`ftl_revision_history.md` v0.94/v0.96 | 补 FAILC 负例/掉电注入；GC batch 需要构造可批的 victim 后再验 |
 | ISS-OP-04 | 未实现 | **Phase 0 测量**：5 项假设埋点（host 写分块 / NAND program 次数 / GC 占比等）+ Stop/Go 判据 | 同上 §5 | 只加计数器不改行为；Stop 条件见 §5.4 |
 | ISS-OP-05 | 待决策 | D1~D5（是否先做 P1、copy-back 选项 A/B、cache program 是否进入路线、op 表扩展方式等） | 同上 §8 | 需用户裁决后才能排期 |
 | ISS-OP-06 | 未实现（边界） | Cache Read、ISSUE/WAIT/FETCH、Block Lock/OTP/on-die ECC：**当前明确不做**，不属于待办 | 同上 §3.4/§3.5 | 换器件或多 LUN 后重估；不要按“op 表剩余码全开”实现 |

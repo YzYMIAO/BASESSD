@@ -33,4 +33,18 @@ typedef uint16_t WORD;
 typedef uint32_t DWORD;
 typedef uint64_t QWORD;
 
+/* ── 位掩码判断（H15）──
+ * `bit_mask_any` = 任一位置位；`bit_mask_all` = 指定位全部置位。
+ * 两个语义只差一个运算符，手写时靠人眼分辨；这里用名字把语义写出来。
+ * 只用于位掩码/位标志；C 位域不在此列。 */
+static inline bool bit_mask_any(DWORD value, DWORD mask)
+{
+    return (value & mask) != 0U;
+}
+
+static inline bool bit_mask_all(DWORD value, DWORD mask)
+{
+    return (value & mask) == mask;
+}
+
 #endif /* SSD_TYPES_H */

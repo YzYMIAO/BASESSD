@@ -1404,7 +1404,7 @@ flowchart TD
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FREE_POOL_TARGET` | 200 | `include/ftl/allocator.h` |
+| `FREE_POOL_TARGET` | 32 | `include/ftl/allocator.h` |
 | `FREE_POOL_EMERGENCY` | 8 | 同上 |
 | `FTL_OP_PERCENT` | 10%（204 块/plane） | 同上 |
 | `FTL_SPARE_POOL_PER_PLANE` | 50 | 同上 |
@@ -2159,7 +2159,8 @@ Cache 带来三个新问题，模块必须正面回答：
 #### 3.6.2 职责与边界
 
 - **做**：64 行 cache、CLOCK 替换、三态读/写、异步载入/写回、全局 region 脏位图、
-  thrashing 检测、owner 解析（共享 cache 跨 LUN）。
+  thrashing 检测、owner 解析（共享 cache 跨 LUN）、**顺序读触发的下一 region 预取**
+  （best-effort，不制造写回）。
 - **不做**：不决定 region 页落在哪个物理位置（§3.5）；不写 Journal（§3.7）；
   不决定 Checkpoint 时机（§3.8）。
 - **共享模型**：一个 `(ch, ce)` 一份 cache，同 `(ch,ce)` 下的多个 LUN 共用；
@@ -2186,6 +2187,7 @@ Cache 带来三个新问题，模块必须正面回答：
 | `flush_fail` | 1 B | 任一副本失败 ⇒ 不提交 Directory |
 | `load_pba` | 4 B | 在飞/最近一次加载的 PBA |
 | `load_use_backup` | 1 B | 本次加载读的是备份副本（成功即交换主备） |
+| `prefetch` | 1 B | 本行由顺序读预取发起；完成时 fresh=0，首次 host 命中计 hit 并清标志 |
 
 `l2p_cache_t`：
 
@@ -2303,8 +2305,11 @@ l2p_flush_kick(line)
 ```
 
 持久性不受影响：L2P 更新在写完成路径里先入 Journal；Checkpoint 也会无条件 flush
-快照内的脏 region。**刻意不做** write-through（整页追加模型下省不掉 load，反而放弃合并收益）
-和预取（thrashing 的成因恰恰是没有空间局部性）。
+快照内的脏 region。**刻意不做** write-through（整页追加模型下省不掉 load，反而放弃合并收益）。
+**不做无条件预取**：只做顺序读触发、距 region 末尾 64 LBA 内的下一 region 预取；
+`thrashing` / `flush_active` / `trim_active` / 资源不足 / 在飞 load 达 2 时停。
+预取只驱逐 INVALID/CLEAN（遇 DIRTY 跳过，不 kick 写回），不计 miss/hit；预取行
+第一次被 host 命中时才计 hit。
 
 #### 3.6.7 失败语义
 
@@ -2326,13 +2331,16 @@ l2p_flush_kick(line)
 | `L2P_THRASH_WINDOW` | 256 | 同上 |
 | `L2P_THRASH_ENTER_PCT` / `EXIT_PCT` | 90 / 70 | 同上 |
 | `L2P_SYNC_GUARD_MAX` | 100,000 轮 | 同上 |
+| `L2P_PREFETCH_MAX_INFLIGHT` | 2 | 同上（本仓自定） |
+| `FTL_SEQ_PREFETCH_MIN_RUN` / `AHEAD_LBAS` | 2 / 64 | `include/ftl/ftl.h`（本仓自定） |
 | `L2P_ENTRIES_PER_REGION` | 512 | `include/ftl/ftl_config.h` |
 
 #### 3.6.9 主流对照
 
 DRAM-less 主控的 L2P cache 普遍采用“按需加载 + 近似 LRU（CLOCK/2Q）+ write-back”，
-并用日志/快照保一致性；区别在 cache 行数、替换算法与是否共享。**本仓自定**的是
-64 行、CLOCK、thrashing 滞回 90/70，以及“加载失败按全未映射处理”的语义。
+并用日志/快照保一致性；区别在 cache 行数、替换算法、是否共享与是否做 read-ahead。
+**本仓自定**的是 64 行、CLOCK、thrashing 滞回 90/70、“加载失败按全未映射处理”，
+以及顺序读触发的单 region 预取（阈值 2 个请求 / 提前 64 LBA / 最多 2 个在飞）。
 
 ---
 
@@ -2740,12 +2748,12 @@ plane 配对由 FTL 内部决定，不暴露 `pages`。
 |---|---|
 | `used` / `command_id` | 槽占用 / FC 命令 id；停泊时 = `FTL_PENDING_CMD_NONE` |
 | `owners` | 贡献本子操作的组位掩码（bit gi） |
-| `op` | READ / WRITE / READ_RECOVERY / WRITE_CONFIRM |
+| `op` | READ / WRITE / READ_RECOVERY / WRITE_CONFIRM / READ_CACHE |
 | `n_cw` / `cw_bitmap` | 搬运的 CW 数 / 写页的有效 CW 位图 |
 | `lba` | 子操作起始**全局** LBA；写页打包时是窗口基址 |
 | `buffer` | 读的写回地址；写恒 NULL（数据在 wbuf） |
 | `new_pba` / `new_pba1` | 新分配的 plane0/plane1 页 PBA |
-| `cache_intermediate` | Cache Program 中间页（本仓不使用，保留字段） |
+| `cache_intermediate` | Cache Program 中间页（15h）：完成时不确认 L2P/Journal、不递减组 |
 
 **不变量**：
 
@@ -2810,6 +2818,28 @@ ftl_issue_subop(read) 对每个 LBA：
 `l2p_defer` 的作用：region 加载在飞是“有进展”，不能计入 `stalls`；否则一次正常的
 随机读会吃掉 8 轮预算，被误判成卡死。
 
+**FTL cache read 批次（本仓自定）**：`ftl_drain_group` 在下发普通子操作前，先尝试
+`ftl_cache_read_try()`。条件：读组、LBA pair 对齐、剩余 ≥2 pair、8 个 LBA 全部映射且
+无 wbuf 命中、两 plane 页号相同且后续 pair 物理页 +1/同 block、资源足够。满足时一次
+提交 `START_SEQ_MP + SEQ_MP×(N-2) + LAST_MP`（N≤4，对应 NAND per-LUN FIFO 深度），
+每条命令一个 pair、8 CW；否则回退现有单 pair 普通读。**不使用 FC chain**：4 条命令
+在同一 SQ 内连续提交，FTL 当前全部命令 `high_priority=0`，后续命令只会排在 sequence
+之后。成员失败**不**启动 RR（RR 会向同 LUN 插命令，破坏 31h/3Fh 管线），直接报组
+IO_ERROR。详见 `include/ftl/cache_read.h` / `src/ftl/cache_read.c`。
+
+**FTL cache program 批次（host 16 KiB，本仓自定）**：`ftl_drain_group` 在写分支、wbuf
+之前先尝试 `ftl_cache_write_try()`。条件：剩余 ≥32 LBA、LBA 8 对齐、wbuf 完全空闲、
+当前 hot Open SB 的 page0 已成功编程且余量 ≥4 页、资源足够。满足时一次提交 4 条
+two-plane 命令：首页 `OP_TWO_PLANE_PROGRAM_CACHE_FIRST`（只查 FAIL，避免残留 FAILC
+误判），中间 2 页 `OP_TWO_PLANE_PROGRAM_CACHE`（15h），末页
+`OP_TWO_PLANE_PROGRAM_CACHE_END`（10h，查 FAIL/FAILC）。**15h 成功只释放命令，不更新 L2P/Journal、
+不递减 host 组**；末页成功后逐页 `ftl_confirm_write`（region 未就绪则停泊）。任一成员
+失败 ⇒ 关闭 hot SB、不确认映射；已完成的成员立即按 IO_ERROR 结算，仍在飞的成员等各自
+完成回调结算。命令经 `ftl_op_submit_batch()` 一次全进 SQ，不依赖 FC chain。详见
+`include/ftl/cache_write.h` / `src/ftl/cache_write.c`。
+wbuf 写 **page0** 时按 full pair 写（缺失 plane 补零、映射仍按原 CW 位图），保证同 SB
+的 page>0 写屏障与恢复 page0 捷径成立。
+
 #### 3.9.6 写子操作
 
 写路径不在 `issue_subop` 里建 NAND 命令，而是交给 wbuf（§3.11）：
@@ -2855,6 +2885,7 @@ pend_group_complete_subop_multi(owners, status)
 | 读 NAND 失败 | 停泊 → RR；不递减 outstanding | 恢复成功则拷回，失败则 IO_ERROR |
 | 读成败判据 | **全错误位**（`fc_cw_status_has_error`），非仅 `NAND_FAIL` | UNC / MATA_ERROR 不带 `NAND_FAIL`，单看它会把加扰页当成功搬给 host |
 | 读 desc 链短于请求 | 立即 `SSD_STATUS_IO_ERROR` | 尾部缓冲未写，不得当数据交给 host |
+| cache program 批次任一成员失败 | 关闭目的 SB；整批不确认映射；已完成的成员立即 IO_ERROR，在飞成员等各自完成回调 | 未确认页成为无映射垃圾，由 GC 回收；host 可重试 |
 | 写 NAND 失败 | 关 SB + 标坏；L2P 不动 | 自动回滚到旧数据 |
 | 写成功但 L2P 未就绪 | 停泊 → `pend_confirm_service` | 下轮补齐，不重复记账 |
 
@@ -3290,7 +3321,7 @@ flowchart TB
 | 字段 | 含义 |
 |---|---|
 | `active` / `waiting` / `aborted` | 单飞行 / 有命令在飞 / 中止 |
-| `phase` | `MIG_READ → READ_SETTLE → WRITE → WRITE_SETTLE → FLUSH_JRN → ERASE → DONE` |
+| `phase` | `MIG_READ → READ_SETTLE → (WRITE → WRITE_SETTLE | WRITE_BATCH → WRITE_SETTLE_BATCH) → FLUSH_JRN → ERASE → DONE` |
 | `kind` / `post` | GC/WL/PREDICT；GC+WL=FREE，PREDICT=RETIRE |
 | `page` / `plane` | 当前页/plane |
 | `victim` | **按值拷贝**的 SB（closed 列表 swap-remove，不能持指针） |
@@ -3340,7 +3371,7 @@ flowchart TB
     选块前逐候选过滤：
     - host **不在写**（`total_writes` 近 2 s 无变化）且 `free > 8`：`valid > 80%` 不搬；
     - `free ≤ 8`（紧急）：可回收 `< 1%` 不搬；
-    - host **正在写** / 仅 T5 磨损触发：不筛（`GC_BENEFIT_OFF`）。
+    - host **正在写**：不筛（`GC_BENEFIT_OFF`）。
     80% / 1% / 500 ms / 2 s 均为本仓自拟。过滤在 cost 评分**之前**做（否则可能因为
     「最差的块仍太有效」而漏掉更稀疏的候选）。
 14. **无收益结论要退避，且能变成 NO_SPACE**：`GC_SELECT_NOT_WORTHWHILE` ⇒ 置
@@ -3354,16 +3385,17 @@ flowchart TB
 |---|---|---|
 | T1 水位 | `free_count < 32` | 主动补池 |
 | T4 紧急 | `free_count ≤ 8` | 最后手段；写路径也兜底 |
-| T5 磨损 | `max/min > 10` 且 `max ≥ 64` 且 `min > 0` | 均衡 |
 
-**收益判据模式**（只对空间 GC；T5 恒 `OFF`）：
+> 磨损均衡不在 GC 触发表中：由 `wear_leveling` 的 UBI 判据
+> （`max_free_ec − min_used_ec ≥ WL_THRESHOLD`）在 host 空闲时独立启动。
+
+**收益判据模式**（只对空间 GC）：
 
 | 条件 | 模式 | 选块规则 |
 |---|---|---|
-| `triggers` 含 T5（含与 T1 混合） | `OFF` | 不筛（磨损需要搬冷块，加判据会饿死 WL） |
 | `free ≤ 8` | `EMERGENCY` | 可回收 ≥ 1% 才搬，否则记 `no-gain` |
-| `free < 200` 且 host 正在写（2 s 窗口内 `total_writes` 有变化） | `OFF` | 不筛（满盘写必须靠搬移腾空间） |
-| `free < 200` 且 host 不在写 | `IDLE` | `valid ≤ 80%` 才搬 |
+| `free < 32` 且 host 正在写（2 s 窗口内 `total_writes` 有变化） | `OFF` | 不筛（满盘写必须靠搬移腾空间） |
+| `free < 32` 且 host 不在写 | `IDLE` | `valid ≤ 80%` 才搬 |
 
 `no-gain` 结论由 `mig_handle_t.gc_no_gain` 保存，退避 `GC_NO_GAIN_BACKOFF_MS`（500 ms）；
 新建写、进入紧急水位、或时钟缺失（`now_ms == 0`）时立即重扫。紧急水位下若连目的页都分配
@@ -3424,6 +3456,18 @@ flowchart TD
 5. `MIG_WRITE_SETTLE`：先就绪前置；再逐 CW **重查 L2P**（host 写/TRIM 可能已抢先），
    仍指向源 CW 才 `jrn_append` → `l2p_write` → 源块 `sub_valid` / 新块
    `add_valid`。append/L2P 失败 ⇒ 中止。
+   **cache program 批次**：读仍逐页走 READ/READ_SETTLE；当 cold SB 的 page0 已成功、
+   余量 ≥4 页且非静态 WL high-wear 时，把最多 4 页攒进 `batch_buf`。满 4 页或到 victim
+   末尾后进入 `MIG_WRITE_BATCH`：一次连续分配 N 个目的页对，提交 N 条 pair 命令
+   （N≥2：首页只查 FAIL 的 15h、其余中间页查 FAILC 的 15h、末条 10h；N=1：普通
+   op31），经 `ftl_op_submit_batch()` 一次
+   全进 SQ。**中间页完成不记账**；全部成功后进入 `MIG_WRITE_SETTLE_BATCH`，先对 N 页
+   做统一 L2P 就绪 + Journal 总容量预留，再逐页 `jrn_append → l2p_write → valid_count`。
+   任一成员失败 ⇒ 关闭 cold SB、不擦 victim、不提交任何映射。
+   **静态 WL 的 high-wear 目标选块**（每次强制新 SB、首块 page0）暂不批，走普通逐 plane 路径。
+   **page0 补全**：wbuf 写 page0 时按 full pair 补零；GC 某 plane 的 page0 无数据时，
+   在写该 plane 的 page>0 之前先写一页零。这样 page0 屏障可满足，full rebuild 的
+   「page0 空白⇒整块空白」捷径始终成立。
 6. `MIG_FLUSH_JRN`：等 Journal job 空闲 **且 `write_fail_pending == 0`**（F10）。
    `jrn_handle` 冲刷半满页；页写失败时 pending 会阻止擦除，直到 CP 把 L2P 落盘。
 7. `MIG_ERASE`：逐 plane 擦；成功走 `alc_note_erase`（erase_count / last_pe_ts /
@@ -3451,8 +3495,7 @@ flowchart TD
 | 常量 | 值 | 来源 |
 |---|---|---|
 | `GC_WEIGHT_VALID/ERASE/TEMP/AGE` | 500/200/200/100 | `include/ftl/gc.h` |
-| `GC_TRIGGER_WATERMARK/EMERGENCY/WEAR` | 0x01/0x08/0x10 | 同上 |
-| `GC_WEAR_LEVEL_RATIO` / `MIN_ERASE` | 10 / 64 | 同上 |
+| `GC_TRIGGER_WATERMARK/EMERGENCY` | 0x01/0x08 | 同上 |
 | `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_module.h`（migrate 提交 deadline） |
 | `FTL_WAIT_TIMEOUT_MS` | 50 | 同上（migrate 等 L2P/Journal） |
 | 页镜像 | 2 × 2048 B | `mig_handle_t.page_buf` |
@@ -4531,18 +4574,25 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 重估触发 | 多 LUN 并发导致 pending 经常打满；或接入 NVMe host |
 | 出处 | 旧 D6 分析（现并入本节）；`include/ftl/pending.h` 的隐式背压注释 |
 
-### ADR-15 NAND 流水线：Multi-Plane + ISSUE/WAIT/FETCH，不启用 Cache Program
+### ADR-15 NAND 流水线：Multi-Plane + 受限 Cache Program
 
 | 项 | 内容 |
 |---|---|
 | 背景 | 需要重叠 NAND 延迟；三种技术：Multi-Plane、Cache Program、ISSUE/WAIT/FETCH |
 | 选项 | 只用单命令 / Multi-Plane / + Cache Program / + ISSUE/WAIT |
-| 选择 | **写用 Multi-Plane（窗口覆盖两 plane 时）；读在 LUN>1 时走 ISSUE/WAIT/FETCH；Cache Program 不启用** |
-| 理由 | Multi-Plane 收益确定且 FC 已支持；Cache Program 的 15h 完成只代表 cache→data 拷贝，tPROG 仍在后台 ⇒ 掉电窗口与 modify-after-confirm 冲突；ISSUE/WAIT 用于多 LUN 时间片 |
-| 主流 | 主流主控用 Multi-Plane + 流水线；Cache Program 有掉电语义代价 |
-| 代价 | 单 LUN 大块顺序写少了 Cache Program 的重叠收益 |
-| 重估触发 | 需要更高顺序写吞吐，且能接受中间页的掉电语义（`cache_intermediate` 字段已预留） |
-| 出处 | ONFI 2.3 / 器件数据手册的 PROGRAM CACHE 说明；FC 的 Phase V 实现 |
+| 选择 | **写用 Multi-Plane；host 16 KiB 与 GC/WL 顺序搬移使用受限 Cache Program 批次；读在 LUN>1 时走 ISSUE/WAIT/FETCH** |
+| 理由 | 器件支持 `80h-11h-80h-15h`（中间页）与 `80h-11h-80h-10h`（末页）；15h 完成只代表 cache 可复用、tPROG 仍在后台。**不提前确认**：中间页只释放命令，只有末页 10h 成功且 FAILC/FAIL 均无错误后才统一更新 L2P/Journal，因此不违反 modify-after-confirm。掉电时未确认页没有映射，恢复会关闭部分写块（不续写），安全。 |
+| 主流 | 主流主控用 Multi-Plane + 流水线；cache program 属器件特性，批次策略是**本仓自拟**，不是行业标准形态 |
+| 代价 | 需要 FAILC 状态检查；批次失败只能关闭目的 SB（不能 rewind）；GC 批次多占约 16 KiB SRAM |
+| 重估触发 | 引入 HSQ / FC chain 或跨 LUN batch；或器件 datasheet 的 FAILC 语义变化 |
+| 出处 | Micron MT29FxG08xAA datasheet Figure 74（Two-Plane Program Page Cache）与状态寄存器 FAILC 说明；`include/nand/onfi_1_0.h` op44/op48；FC Phase V |
+
+> ⚠ 15h 后状态寄存器 bit1 = `FAILC` 表示**上一页** cache program 的成败；只检查 bit0
+> `FAIL` 会把中间页失败静默当成成功。op44 与末页 op48 都使用 `CHECK_FAIL_CACHE`
+> （FAIL | FAILC）；首页用 op49 只查 FAIL，避免残留 FAILC 误判。
+> **host 16 KiB 正常路径已上板**（2026-10-23 H2testw 415/423 MB 通过、843/889 KB/s，
+> `cw` 24906/99624/0 abort）；**FAILC 负例、失败注入、掉电注入仍未做**，
+> 不得据此声称 cache program 全部已验证。
 
 ### ADR-16 后台调度：时间预算 + must-run
 
@@ -4579,6 +4629,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | FTL UT | **冻结** | `tests/unit/test_ftl.c` 仍引用已删字段；不为让 UT 编过而回退生产代码 |
 | 文档重构 | 本文 | 文档改动不涉及固件，不需要上板；不得写成“功能已验证” |
 | v0.83 回收前 Anchor + L2P 降级可见性（`RISK-MD-06` / `RISK-L2P-04`） | **已提交、未专项上板** | 编译三关通过；需按 `known_risks` 的 64-region 复现 / 故障注入；**不得**据“普通读写通过”声称已验证 |
+| v0.94 cache program（host 16 KiB + GC/WL 批次） | **host 正常路径已上板；GC batch/负例未验** | H2testw 415/423 MB 通过，`cw=24906/99624/0 abort`；`mb=0`（GC batch 未触发）；FAILC 负例、失败注入、掉电注入仍见 `known_risks` RISK-CACHE-02..07 |
 | `RISK-MIG-02` / `RISK-GC-07` 迁移读失败活锁 | **已修；rev32 上板已观测 3 次标坏** | 改为按 plane 源块累计失败计数、单页读成功不清零；rev32 实机出现 `x3 — mark BAD` 并继续换候选。rev33（固定日志区）未上板 |
 
 > `RISK-WB-06`（wbuf pair 镜像填装）已于 **rev27 上板验证**：Windows FAT 格式化 +
@@ -4603,10 +4654,10 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 限制 | 影响 | 备注 |
 |---|---|---|
-| CLOCK-pro / 自适应预取未实现 | 热点/顺序负载命中率有提升空间 | 当前 CLOCK 已满足基本形态；见 §3.6 |
+| CLOCK-pro / 自适应预取未实现 | 热点命中率有提升空间 | 顺序读单 region 预取已实现；自适应/多 region 预取未做；见 §3.6 |
 | 读路径不查 Journal overlay | thrashing 下多一次 region load | 独立改造，未纳入当前范围 |
 | GC Bitmap（Layer 2）未实现 | 掉电后 GC 从头重搬 | 用“擦除前 flush Journal”闭合等价窗口 |
-| Cache Program 未启用 | 单 LUN 大块顺序写少一层重叠 | `cache_intermediate` 字段已预留；掉电语义是主因 |
+| Cache Program 仅限 host 16 KiB / GC 全 pair 批次 | 小请求、静态 WL、跨块边界仍走普通 multi-plane | 15h 中间页不确认；失败关闭目的 SB；掉电注入未做（见 `known_risks` RISK-CACHE-02） |
 | N=4 未就绪 | SRAM12/3/4 装不下 4 实例 | 需要表瘦身或 SDRAM；N=2 已能链接 |
 | SDRAM 未启用 | 无外置大缓冲 | 链接脚本无 SDRAM 段；`sdram_init` 无调用点 |
 | 无 NVMe host / RTOS | host 入口是 UART CLI | 有意不实现；学习主控的两段式等待足够 |
@@ -4643,7 +4694,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 |---|---|
 | RAID / XOR 恢复 | `CONFIG_FC_RAID` 保持 0；SLC 单盘优先级低（ADR-3） |
 | SLC Cache | 介质本身是 SLC（ADR-10） |
-| Cache Program | 中间页掉电语义与 modify-after-confirm 冲突（ADR-15） |
+| Cache Program 的提前确认 / write-back | 15h 不确认映射；见 ADR-15 的受限批次 |
 | NVMe host / doorbell 流控 | 学习主控不实现 NVMe；host = UART CLI（ADR-14） |
 | RTOS | 单线程 superloop + ISR 足够；主控常见形态 |
 | SDRAM 参与 FTL | 当前链接脚本未启用；DRAM-less 设计不依赖它 |
@@ -4752,7 +4803,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 
 | 常量 | 值 | 来源 |
 |---|---|---|
-| `FREE_POOL_TARGET` | 200 | `include/ftl/allocator.h` |
+| `FREE_POOL_TARGET` | 32 | `include/ftl/allocator.h` |
 | `FREE_POOL_EMERGENCY` | 8 | 同上 |
 | `FTL_OP_PERCENT` | 10%（204 块/plane） | 同上 |
 | `FTL_SPARE_POOL_PER_PLANE` | 50 | 同上 |
@@ -4766,8 +4817,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 常量 | 值 | 来源 |
 |---|---|---|
 | `GC_WEIGHT_VALID/ERASE/TEMP/AGE` | 500/200/200/100 | `include/ftl/gc.h` |
-| `GC_TRIGGER_WATERMARK/EMERGENCY/WEAR` | 0x01/0x08/0x10 | 同上 |
-| `GC_WEAR_LEVEL_RATIO` / `MIN_ERASE` | 10 / 64 | 同上 |
+| `GC_TRIGGER_WATERMARK/EMERGENCY` | 0x01/0x08 | 同上 |
 | `FTL_SUBMIT_TIMEOUT_MS` | 10 | `include/ftl/ftl_module.h`（migrate 提交 deadline） |
 | `FTL_WAIT_TIMEOUT_MS` | 50 | 同上（migrate 等 L2P/Journal） |
 | `WL_THRESHOLD` | 200（UBI 模型；默认值本仓自拟） | `include/ftl/wear_leveling.h` |

@@ -5911,6 +5911,130 @@ H2testw 仍待测。风险见 `RISK-HOST-07/08/09/10`、`RISK-L2P-06`。
 
 ---
 
+## v0.93 — L2P 顺序预取 + FTL two-plane cache read（未上板）
+
+**日期**：2026-10-23
+
+**内容**：
+
+- **L2P region 顺序预取**：每实例记录连续 host 读请求；连续 2 个请求且距 region
+  末尾 64 LBA 内时，预取 `last_region + FTL_DIM_TOTAL` 的下一个 region。
+  - 新增 `l2p_prefetch_region()`；复用 `l2p_load_begin()`；
+  - 预取只驱逐 INVALID/CLEAN，遇 DIRTY 跳过、不 kick 写回；
+  - `thrashing` / `flush_active` / `trim_active` / `bg_suspend` / 资源不足 /
+    在飞 load 达 2 时停；
+  - 不计 miss/hit；预取行首次被 host 命中时计 hit（`prefetch` 行标志）。
+- **FTL cache read 批次**：一次 host 读请求内，最多 4 个物理连续 pair 用
+  `START_SEQ_MP + SEQ_MP×(N-2) + LAST_MP` 提交；任一条件不满足回退普通读。
+  - 新增 `include/ftl/cache_read.h` / `src/ftl/cache_read.c`；
+  - `PENDING_OP_READ_CACHE`：失败不启动 RR（避免向同 LUN 插命令破坏 sequence）；
+  - 不使用 FC chain，依赖当前 FTL 全 SQ、命令连续提交的顺序；
+  - `info` 输出 `seq=` / `pf=` / `cr=` 计数。
+- 不改 wbuf / migrate / journal / checkpoint；不做 cache program（写）。
+- **日志收敛**：GC 会话只在开始打一行 `[GC] start reason/trig/mode/free`；
+  逐 victim 的 `[MIG] move` 降为 DEBUG，且只保留变化字段；INFO 只保留
+  `[GC] start/progress/end` 与 10 s `[STAT]`。
+
+**验证**：`make all` / `make release` 零新告警；`make tests UT=FC` 通过；
+`make tests UT=FTL` 仍因冻结测试源编不过。**未上板**。
+
+**介质布局**：无变化。
+
+---
+
+## v0.94 — FTL cache program（host 16 KiB + GC/WL 批次，host 正常路径已上板）
+
+**日期**：2026-10-23
+
+**内容**：
+
+- **NAND/FC 状态语义**：新增 `NAND_STATUS_FAILC`（bit1，上一页 cache program 的结果）
+  与 `CHECK_FAIL_CACHE`；op44 中间页检查 FAIL|FAILC。新增
+  `OP_TWO_PLANE_PROGRAM_CACHE_END`（op48，末页 10h）与
+  `OP_TWO_PLANE_PROGRAM_CACHE_FIRST`（op49，首页只查 FAIL，避免残留 FAILC 误判）；
+  末页开始前先查上一页 FAILC，结束后同时查 FAIL/FAILC。普通 op31 不用于 cache 批次末页。
+- **FC 批量提交**：`fc_submit_batch()` + `ftl_op_submit_batch()`，保证 N 条命令全进
+  SQ 或全不进；不依赖 FC chain。
+- **host 16 KiB batch**：新增 `cache_write.c/.h`。条件：wbuf 空闲、hot SB 的 page0 已成功
+  编程且余量 ≥4 页、32 LBA 对齐。一次提交 op49（首页，只查 FAIL）+ 2×op44 +
+  op48（末页）；中间页不确认映射、不递减组；
+  末页成功后逐页 confirm（region 未就绪则停泊）。失败关闭 hot SB，已完成的成员立即
+  报 IO_ERROR，在飞成员等各自完成回调结算。
+- **GC/WL batch**：读仍逐页 READ/READ_SETTLE；满足 cold SB page0 已成功、余量 ≥4 页时
+  攒最多 4 页，进入 `MIG_WRITE_BATCH` 一次提交 N 条 pair 命令（N≥2 用 15h+10h，N=1 用
+  op31）；全部成功后 `MIG_WRITE_SETTLE_BATCH` 两遍式统一确认。失败关闭 cold SB、
+  victim 不擦。静态 WL high-wear 路径暂不批。
+- **page0 异步写屏障**：`super_block_t.page0_programmed`；page0 写成功前
+  `alc_alloc_pair` 拒绝同 SB 的 page≥1。恢复扫描在 page0 空白时补探 page1..3。
+- **观测**：`info` 增加 `cw=batches/pages/declines/aborts` 与 `mb=jobs/pages/aborts`。
+- ADR-15 由“不启用”改为“受限启用”。
+
+**review 收口（同日）**：host batch 失败按 PBA 归属关闭目标 SB；GC batch 对
+`FTL_AGAIN` 重试、失败 drain 加硬 deadline；`info` 拆两行避免 192 B 截断；
+`ftl_async_write_pair_cmd` 收敛 wbuf 的 pair 构造；Journal→L2P 提交循环由
+`mig_commit_plane_meta` 共用；资源检查收敛到 `ftl_cache_budget_ok`；删除
+`cache_wb.gi` / `source_page` 死字段；page0 屏障改为 wbuf page0 补全写 + GC dummy page0，不再在 `alc_alloc_pair` 直接拒绝 page≥1。
+
+**验证**：`make all` / `make release` / `make tests UT=FC` 通过；`make tests UT=FTL`
+仍因冻结测试源编不过。
+
+**板端（2026-10-23，release 08:23:13）**：H2testw 415/423 MB 写+校验通过
+（`Test finished without errors`），写 **843 KB/s**、读 **889 KB/s**；`info`：
+`cw=24906/99624/7891/0`（host 16 KiB batch 生效，0 abort）、`mb=0/0/0`
+（GC batch 未触发）。**FAILC 负例、失败注入、掉电注入仍未做**，host 正常路径
+通过不等于 cache program 全部验证。
+
+**介质布局**：无变化。
+
+---
+
+## v0.95 — Free Pool 水位回退 32
+
+**日期**：2026-10-23
+
+**内容**：
+
+- `FREE_POOL_TARGET` 由 200 回退到 **32**；`FREE_POOL_EMERGENCY` 保持 8；
+- GC T1 / BUSY 档水位 GC / WL 让路判据仍统一使用 `FREE_POOL_TARGET`，不新增第二套水位变量；
+- 同步更新 `allocator.h`、`ftl_design.md`、`ftl_api_usage.md`、`testing_guide.md`、
+  `logging_design.md`、`known_risks.md` 中的当前取值。
+- 历史版本里的 `32→200` 记录保留不改写（H37）。
+
+**验证**：`make all` / `make release` / `make tests UT=FC` 通过。
+
+**板端（2026-10-23）**：H2testw 全盘写后 `free` 从 3392 降到 64 后稳定；
+`free=64 > FREE_POOL_TARGET=32`，**T1 未被触发**，符合新阈值；未做 `free<32` 的
+强制触发验证。
+
+**介质布局**：无变化。
+
+---
+
+## v0.96 — 移除 T5 磨损 GC，磨损均衡统一走 WL（已上板）
+
+**日期**：2026-10-23
+
+**内容**：
+
+- **问题**：T5 用全表 `max_erase/min_erase` 比较；`min_erase` 可能来自从未使用的空闲块，
+  比值在数据搬移后仍不下降。板端 H2testw 期间 GC 持续运行，`free` 从 3388 被搬到 64
+  后仍不停止，读写吞吐下降。
+- **修复**：从 `gc_should_trigger()` 移除 T5（`GC_TRIGGER_WEAR` / `GC_WEAR_LEVEL_*` 删除）。
+  磨损维护统一由 `wear_leveling` 的 UBI 判据
+  （`max_free_ec − min_used_ec ≥ WL_THRESHOLD`）在 host 空闲时独立启动。
+- `mig_begin_wl` 增加 `[WL] start free/writes` 日志；GC 日志不再出现 `trig=0x10`。
+
+**验证**：`make all` / `make release` / `make tests UT=FC` 通过。
+
+**板端（2026-10-23，release 08:23:13）**：H2testw 读写期间**无 `[GC] start` / 无 `trig=0x10`**，
+`mig=0/0`、`mv=0`；写 **843 KB/s**、读 **889 KB/s**，恢复到/超过无 cache 基线
+（765/884 KB/s）。`free` 下降由 host 写满盘造成，不是 T5。**空闲态 `[WL] start` 未观测**
+（本次 free=64 且 UBI 阈值未满足）。
+
+**介质布局**：无变化。
+
+---
+
 ## 介质布局版本（`FTL_MEDIA_LAYOUT_VERSION`）演进表
 
 当前值 = `FTL_MEDIA_LAYOUT_VERSION_BASE`（12）+ `(FTL_DIM_TOTAL > 1 ? 1 : 0)`。

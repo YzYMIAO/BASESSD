@@ -12,7 +12,8 @@
  *         `gc_read_page_with_lba` 只服务掉电重建的同步路径。
  *
  * 三条触发（gc_should_trigger，位掩码）：
- *   T1 空闲水位 < FREE_POOL_TARGET；T4 紧急 ≤ FREE_POOL_EMERGENCY；T5 磨损比超标。
+ *   T1 空闲水位 < FREE_POOL_TARGET；T4 紧急 ≤ FREE_POOL_EMERGENCY。
+ *   磨损维护不在 GC 触发里，由 wear_leveling 的 UBI 判据独立启动。
  *
  * 文件结构：
  *   1. 共用原语        gc_read_page_with_lba / gc_decode_cw_lba
@@ -213,17 +214,16 @@ gc_decode_e gc_decode_cw_lba(fc_command_t *cmd,
  *
  * 两个消费方**各自调用一次**（不共享扫描）：
  *   ① gc_select_victim —— 评分归一化分母（max_erase / max_pe_ts）；
- *   ② gc_should_trigger 的 T5 —— 磨损比 max_erase/min_erase。
+ *   ② gc_select_victim 的评分归一化分母（max_erase）。
  * 求值点由 `mig_gc_evaluate` 的 10 ms 节拍门兜成本；不要为省这一次扫描把
  * 结构体穿过 bg 适配器 / mig_begin_gc 的公开 API（会把策略耦合进引擎）。
  *
  * 统计口径（好块 / 坏块排除）由 allocator 定义；本函数只把退化值折算成 GC 需要的语义：
- *   · 无任何可统计块 ⇒ min_erase = 0（T5 视为"比值无意义"）；
+ *   · 无任何可统计块 ⇒ max_erase 兜底 1，防除零；
  *   · max_erase 兜底 >= 1U，防除零。
  */
 typedef struct
 {
-    DWORD min_erase;
     DWORD max_erase; /* >= 1U */
     DWORD max_pe_ts; /* 0 = 本上电周期尚无块被擦 ⇒ 时间项中性 */
 } gc_extremes_t;
@@ -234,7 +234,6 @@ static void gc_table_extremes(const alc_t *alloc, gc_extremes_t *out)
 
     alc_get_erase_stats(alloc, &st);
 
-    out->min_erase = st.erase_min;
     out->max_erase = (st.erase_max > 0U) ? st.erase_max : 1U;
     out->max_pe_ts = st.max_pe_ts;
 }
@@ -268,7 +267,7 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
     out->scanned        = 0U;
     out->eligible       = 0U;
 
-    /* 归一化基准：全表极值（一次扫描，与候选数无关）。min_erase 本函数不用（T5 用）。 */
+    /* 归一化基准：全表最大擦除/时间（一次扫描，与候选数无关）。 */
     gc_extremes_t ex;
     gc_table_extremes(alloc, &ex);
 
@@ -368,8 +367,7 @@ gc_select_e gc_select_victim(const alc_t *alloc, gc_benefit_mode_e mode, gc_sele
  *   返回：GC_TRIGGER_* 位掩码；0 无触发。
  *   实现要点：只看**空间与磨损**——T1 水位 < FREE_POOL_TARGET（主动补池）；
  *             T4 紧急 ≤ FREE_POOL_EMERGENCY（与 T1 同源但阈值更低，池见底）；
- *             T5 磨损比 max/min 超标（min==0 不触发——"有块从未被擦"是静态 WL 的职责；
- *             max 地板防早期空跑）。
+ *             磨损维护由 wear_leveling 的 UBI 判据独立触发，不占 GC 触发位。
  * -------------------------------------------------------------------- */
 DWORD gc_should_trigger(const alc_t *alloc)
 {
@@ -407,24 +405,15 @@ DWORD gc_should_trigger(const alc_t *alloc)
     {
         triggers |= GC_TRIGGER_WATERMARK;
     }
-    /* T4：紧急（池已见底的最后手段）。与 T1 同源但阈值更低（8 vs 200）。 */
+    /* T4：紧急（池已见底的最后手段）。与 T1 同源但阈值更低（8 vs 32）。 */
     if (alloc->free_count <= FREE_POOL_EMERGENCY)
     {
         triggers |= GC_TRIGGER_EMERGENCY;
     }
-    /* T5：磨损均衡（全表擦除比）。min_erase == 0 时比值无意义（对 0 除）⇒ 不触发：
-     * "有块从未被擦过"是静态 WL（mig_begin_wl 搬冷数据）的职责，T5 只管
-     * "所有块都在轮转、但轮得不均"。max_erase 地板防早期（max 才几次）空跑。 */
-    {
-        gc_extremes_t ex;
 
-        gc_table_extremes(alloc, &ex);
-        if ((ex.max_erase >= GC_WEAR_LEVEL_MIN_ERASE) && (ex.min_erase > 0U) &&
-            ((QWORD)ex.max_erase > ((QWORD)ex.min_erase * GC_WEAR_LEVEL_RATIO)))
-        {
-            triggers |= GC_TRIGGER_WEAR;
-        }
-    }
+    /* 磨损均衡不在这里触发：全表 max/min 比较会把“从未使用的空闲块”当作 min，
+     * 比值可能永不收敛（板端曾因此持续 GC、free 被搬到 64）。磨损维护由
+     * wear_leveling 的 UBI 判据（free-max vs used-min）在 host 空闲时独立启动。 */
 
     return triggers;
 }
