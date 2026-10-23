@@ -1159,7 +1159,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 | `metadata.c` | 31 | 20 | 最大一批；含 `metadata_ring_locate` 的**废形参删除**（见三、） |
 | `journal.c` | 12 | 9 | 句柄族转 `ASSERT`；**回放数据校验与环翻转控制流不动**（§六 收窄） |
 | `l2p_cache.c` | 12 | 8 | 含 `line_idx` 界内断言；`line == NULL`（cache miss）与依赖态判空**保留** |
-| `bbt.c` | 7 | 7 | 5 转 + 2 删（`bbt_scan_factory` / `bbt_load` 同文件调用者） |
+| `bbt.c` | 7 | 7 | 5 转 + 2 删（`bbt_factory_scan` / `bbt_load` 同文件调用者） |
 | `ftl_fc_interface.c` | 7 | 6 | 全为**出参**（FTL↔FC 边界）；`cmd == NULL`（池空，判据 3）**保留** |
 | `migrate.c` | 4 | 5 | `mig_begin_*`/`migrate_handle` 转；`mig_start`（static）删 |
 | `power_failure_recovery.c` | 4 | 9 | 3 个**对外入口**转；6 个同文件内部路径函数删 |

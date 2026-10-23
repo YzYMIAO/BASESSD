@@ -57,6 +57,64 @@ typedef struct
 _Static_assert(sizeof(bbt_header_t) == 540U, "BBT header 布局漂移（期望 540B）");
 _Static_assert(sizeof(bbt_header_t) <= PAGE_MAIN_SIZE, "BBT header 必须装得进一页主区");
 
+/* ── bitmap / 候选块原语 ── */
+
+/*
+ * bbt_is_bad - 查询 Block 是否坏块
+ *
+ * @param bad_map  BBT bitmap
+ * @param block    Block 编号
+ * @return true 坏块，false 好块
+ */
+static inline bool bbt_is_bad(const BYTE *bad_map, WORD block)
+{
+    ASSERT(block < BBT_MAX_BLOCKS);
+
+    if (block >= BBT_MAX_BLOCKS)
+    {
+        return true; /* 越界是编程错误：release 下保守判坏，避免把非法块当好块使用 */
+    }
+    if (bad_map == NULL)
+    {
+        return false;
+    }
+    return ((bad_map[block >> 3] >> (block & 7U)) & 1U) != 0U;
+}
+
+/*
+ * bbt_set_bad - 在 bitmap 中将 Block 标记为坏块
+ *
+ * @param bad_map  BBT bitmap
+ * @param block    Block 编号
+ */
+static inline void bbt_set_bad(BYTE *bad_map, WORD block)
+{
+    if ((bad_map != NULL) && (block < BBT_MAX_BLOCKS))
+    {
+        bad_map[block >> 3] |= (1U << (block & 7U));
+    }
+}
+
+/*
+ * bbt_block_is_candidate - 该物理块是否属于当前 BBT 候选池
+ *
+ * BBT record 的候选池优先来自 `pools->bbt` 的实时候选表（v0.86 起，可能含
+ * shared metadata spare）；ring 未建立或不足 2 块时才退回名义区间
+ * `[BBT_BLOCK, BBT_BLOCK + BBT_POOL_BLOCKS)`。
+ *
+ * 纯函数；格式化/重建路径按块调用，放头文件供 bbt.c 与 PFR 共用，避免三份手写
+ * 条件在后续修改时漂移。
+ */
+static inline bool bbt_block_is_candidate(const md_ring_t *ring, WORD block)
+{
+    if ((ring != NULL) && (ring->block_count >= 2U))
+    {
+        return md_ring_has_block(ring, block);
+    }
+
+    return (block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS));
+}
+
 /* ── 接口 ── */
 
 /*
@@ -94,7 +152,7 @@ void bbt_init(alc_t *alloc);
 bool bbt_medium_has_ftl_data(alc_t *alloc);
 
 /*
- * bbt_scan_factory - 出厂坏块扫描
+ * bbt_factory_scan - 出厂坏块扫描
  *
  * 遍历所有 Block（**跳过 Block 0**）的 Page 0，读 **spare 区首字节**（列 2048，
  * `OP_READ_COLUMN`）的**出厂坏块标记**：
@@ -114,42 +172,7 @@ bool bbt_medium_has_ftl_data(alc_t *alloc);
  * @param alloc   Allocator 上下文（blocks 输出）
  * @return 检测到的坏块数
  */
-int bbt_scan_factory(alc_t *alloc);
-
-/*
- * bbt_print_bad_map - 逐块探测并打印坏块图（**诊断用**）
- *
- * 默认**只读**：对每个块读 Page 0 的 spare 首字节（**列 2048** = `PAGE_MAIN_SIZE`），
- * 非 0xFF ⇒ 出厂坏块。不写介质，可反复调用。
- *
- * ⚠ do_erase != 0 时**额外擦除本实例每个 plane 的每一个块**（含
- *   0..FTL_METADATA_AREA_END 的元数据区）⇒ 会抹掉该实例的全部 FTL 元数据与用户数据。
- *   只在专门的坏块体检时用，绝不可放进开机路径。
- *   擦除是**无条件**的：即使 ① 已判定该块坏，也照擦（"全片擦除"必须连坏块一起抹掉，
- *   否则元数据块被跳过 ⇒ 擦完 FTL 仍读回旧状态）。
- *
- * 判定（两条任一成立即坏块）：
- *   ① **擦除前**读该块 Page 0 列 2048 的 spare 首字节，非 0xFF（出厂坏块标记，x8 为 00h）；
- *   ② do_erase 非 0 且擦除命令失败（stuck-at-0 / 不可擦）。
- *
- * ① 必须**先于任何 PROGRAM/ERASE** 读——器件手册（Micron AN1819）逐字：
- *   *"the bad block information is erasable and cannot be recovered once erased"*。
- *   必须先读后擦；列 2048 由 ftl_sync_read_column()（OP_READ_COLUMN）够到。
- *
- * 打印（每排 BBT_MAP_COLS_PER_PLANE 个块，各 plane 一组、组间留空；每格定宽 4）：
- *     CH=0  CE=0  LUN=0
- *                      PLANE=0                          PLANE=1
- *       FF   FF 2047   FF   FF   FF   FF   FF      FF   FF   FF   FF   FF   FF   FF   FF
- *   好块打 `FF`，坏块打**本 plane 的绝对块号**（0..BLOCKS_PER_PLANE-1，十进制）。
- *   ⚠ 不是排内列号——列号每排重新计数（0..15），读图的人得自己算 `排号×列数+列号`，
- *     且 1~2 位的数字与 `FF` 并排极易被误读成十六进制字节值。
- *
- * ⚠ 本片芯片若已被整片擦过，出厂标记即已丢失 ⇒ 只会读到全 0xFF（不是 bug）。
- *
- * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
- * @param do_erase  0 = 只读（非破坏性）；非 0 = 逐块擦除并额外判擦除失败
- */
-void bbt_print_bad_map(alc_t *alloc, BYTE do_erase);
+int bbt_factory_scan(alc_t *alloc);
 
 /*
  * bbt_format_erase - 格式化用的两阶段擦除：先落 BBT，再擦 BBT 池之外的块
@@ -190,42 +213,6 @@ ftl_status_e bbt_mark_bad(alc_t *alloc, WORD gblock);
 void bbt_note_dirty(alc_t *alloc);
 
 /*
- * bbt_is_bad - 查询 Block 是否坏块
- *
- * @param bad_map  BBT bitmap
- * @param block    Block 编号
- * @return true 坏块，false 好块
- */
-static inline bool bbt_is_bad(const BYTE *bad_map, WORD block)
-{
-    ASSERT(block < BBT_MAX_BLOCKS);
-
-    if (block >= BBT_MAX_BLOCKS)
-    {
-        return true; /* 越界是编程错误：release 下保守判坏，避免把非法块当好块使用 */
-    }
-    if (bad_map == NULL)
-    {
-        return false;
-    }
-    return ((bad_map[block >> 3] >> (block & 7U)) & 1U) != 0U;
-}
-
-/*
- * bbt_set_bad - 在 bitmap 中将 Block 标记为坏块
- *
- * @param bad_map  BBT bitmap
- * @param block    Block 编号
- */
-static inline void bbt_set_bad(BYTE *bad_map, WORD block)
-{
-    if ((bad_map != NULL) && (block < BBT_MAX_BLOCKS))
-    {
-        bad_map[block >> 3] |= (1U << (block & 7U));
-    }
-}
-
-/*
  * bbt_save - 将 BBT 追加写入 NAND BBT 池
  *
  * 池内下一槽追加一条 record（块满先擦池内下一块）。sequence 递增。
@@ -234,6 +221,21 @@ static inline void bbt_set_bad(BYTE *bad_map, WORD block)
  * @return FTL_OK 成功（含 dirty==0 早退）；FTL_ERROR 池定位 / prepare / 写失败。
  */
 ftl_status_e bbt_save(alc_t *alloc);
+
+/*
+ * bbt_load - 从 NAND BBT 池加载 BBT
+ *
+ * 池内轮转扫描（md_ring_locate），选 magic 正确且 sequence 最大者。
+ * 命中时同时恢复本实例的 sequence 计数与写游标（alloc->bbt）。
+ *
+ * @param alloc       Allocator 上下文（池路由取其 ch/ce/lun；游标/序号写回 alloc->bbt）；
+ *                    alloc 由 ftl_contract_audit 证明；出参由调用者提供
+ * @param bad_map     输出：bt_bitmap[512]
+ * @param bad_count   输出：坏块数
+ * @param sequence    输出：最新 sequence
+ * @return FTL_OK 成功，FTL_ERROR 无有效 BBT
+ */
+ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence);
 
 /* ── BBT 模块 handle 的上报结构（docs/archive/ftl_module_contracts.md §4.1）──
  *
@@ -277,22 +279,7 @@ typedef struct
 void bbt_handle(alc_t *alloc, const bg_info_t *info, bbt_status_t *out);
 
 /*
- * bbt_load - 从 NAND BBT 池加载 BBT
- *
- * 池内轮转扫描（md_ring_locate），选 magic 正确且 sequence 最大者。
- * 命中时同时恢复本实例的 sequence 计数与写游标（alloc->bbt）。
- *
- * @param alloc       Allocator 上下文（池路由取其 ch/ce/lun；游标/序号写回 alloc->bbt）；
- *                    alloc 由 ftl_contract_audit 证明；出参由调用者提供
- * @param bad_map     输出：bt_bitmap[512]
- * @param bad_count   输出：坏块数
- * @param sequence    输出：最新 sequence
- * @return FTL_OK 成功，FTL_ERROR 无有效 BBT
- */
-ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence);
-
-/*
- * bbt_spare_pool_refill - 从**指定 plane 的** Spare Pool 补充 Free Pool
+ * bbt_spare_refill - 从**指定 plane 的** Spare Pool 补充 Free Pool
  *
  * PROGRAM/ERASE 失败标记坏块后，从 Spare Pool 取一个好块
  * 加入 alloc->free_blocks 保容量水位。
@@ -304,26 +291,41 @@ ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequ
  * @param plane  坏块所属 plane（取同 plane 的替换块）
  * @return FTL_OK 补充成功；FTL_ERROR 参数非法 / 该 plane Spare Pool 耗尽（容量自然下降）
  */
-ftl_status_e bbt_spare_pool_refill(alc_t *alloc, BYTE plane);
+ftl_status_e bbt_spare_refill(alc_t *alloc, BYTE plane);
 
 /*
- * bbt_block_is_candidate - 该物理块是否属于当前 BBT 候选池
+ * bbt_print_bad_map - 逐块探测并打印坏块图（**诊断用**）
  *
- * BBT record 的候选池优先来自 `pools->bbt` 的实时候选表（v0.86 起，可能含
- * shared metadata spare）；ring 未建立或不足 2 块时才退回名义区间
- * `[BBT_BLOCK, BBT_BLOCK + BBT_POOL_BLOCKS)`。
+ * 默认**只读**：对每个块读 Page 0 的 spare 首字节（**列 2048** = `PAGE_MAIN_SIZE`），
+ * 非 0xFF ⇒ 出厂坏块。不写介质，可反复调用。
  *
- * 纯函数；格式化/重建路径按块调用，放头文件供 bbt.c 与 PFR 共用，避免三份手写
- * 条件在后续修改时漂移。
+ * ⚠ do_erase != 0 时**额外擦除本实例每个 plane 的每一个块**（含
+ *   0..FTL_METADATA_AREA_END 的元数据区）⇒ 会抹掉该实例的全部 FTL 元数据与用户数据。
+ *   只在专门的坏块体检时用，绝不可放进开机路径。
+ *   擦除是**无条件**的：即使 ① 已判定该块坏，也照擦（"全片擦除"必须连坏块一起抹掉，
+ *   否则元数据块被跳过 ⇒ 擦完 FTL 仍读回旧状态）。
+ *
+ * 判定（两条任一成立即坏块）：
+ *   ① **擦除前**读该块 Page 0 列 2048 的 spare 首字节，非 0xFF（出厂坏块标记，x8 为 00h）；
+ *   ② do_erase 非 0 且擦除命令失败（stuck-at-0 / 不可擦）。
+ *
+ * ① 必须**先于任何 PROGRAM/ERASE** 读——器件手册（Micron AN1819）逐字：
+ *   *"the bad block information is erasable and cannot be recovered once erased"*。
+ *   必须先读后擦；列 2048 由 ftl_sync_read_column()（OP_READ_COLUMN）够到。
+ *
+ * 打印（每排 BBT_MAP_COLS_PER_PLANE 个块，各 plane 一组、组间留空；每格定宽 4）：
+ *     CH=0  CE=0  LUN=0
+ *                      PLANE=0                          PLANE=1
+ *       FF   FF 2047   FF   FF   FF   FF   FF      FF   FF   FF   FF   FF   FF   FF   FF
+ *   好块打 `FF`，坏块打**本 plane 的绝对块号**（0..BLOCKS_PER_PLANE-1，十进制）。
+ *   ⚠ 不是排内列号——列号每排重新计数（0..15），读图的人得自己算 `排号×列数+列号`，
+ *     且 1~2 位的数字与 `FF` 并排极易被误读成十六进制字节值。
+ *
+ * ⚠ 本片芯片若已被整片擦过，出厂标记即已丢失 ⇒ 只会读到全 0xFF（不是 bug）。
+ *
+ * @param alloc     Allocator 上下文（取 ch/ce/lun 与块几何）；**前置条件**（实例绑定由 ftl_contract_audit 证明）
+ * @param do_erase  0 = 只读（非破坏性）；非 0 = 逐块擦除并额外判擦除失败
  */
-static inline bool bbt_block_is_candidate(const md_ring_t *ring, WORD block)
-{
-    if ((ring != NULL) && (ring->block_count >= 2U))
-    {
-        return md_ring_has_block(ring, block);
-    }
-
-    return (block >= BBT_BLOCK) && (block < (BBT_BLOCK + BBT_POOL_BLOCKS));
-}
+void bbt_print_bad_map(alc_t *alloc, BYTE do_erase);
 
 #endif /* FTL_BBT_H */

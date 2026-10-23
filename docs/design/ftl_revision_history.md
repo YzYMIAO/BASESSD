@@ -6142,6 +6142,9 @@ ITCM：release **61,296 B**、debug **62,064 B**；`.dtcm_data` 67,832 B、
   `alc_super_stats_t`、`alc_bst_erase_stats_t`。
 - `allocator.h` 的 pointer-to-array 字段改为数组 typedef，避免
   `WORD(*op_blocks)` 被 clang-format 拆行。
+- BBT：`bbt_scan_factory` → `bbt_factory_scan`、`bbt_spare_pool_refill` →
+  `bbt_spare_refill`；`bbt.c` / `bbt.h` 按池几何→初始化/扫描→格式化→标坏/持久化→
+  异步 job→Spare→诊断重排。
 
 **验证**：`make all` / `make release` / `make tests UT=FC` 通过，零新告警；
 `UT=FTL` 仍因冻结测试源失败。**未上板**；纯命名/声明整理，不改行为。

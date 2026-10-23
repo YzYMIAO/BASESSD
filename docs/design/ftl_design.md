@@ -1325,7 +1325,7 @@ NAND 的写必须落在**已擦除**的页上，而擦除以块为单位。FTL �
 |---|---:|---|---|
 | Free | 全部已擦除块 | 写分配、GC 归还 | 三级水位（下表） |
 | OP | 204 块/plane | GC 性能缓冲，防止前台等 GC | 该 plane 的 Free 给出不块时补入 |
-| Spare | 50 块/plane | 坏块替换，只出不进 | `bbt_spare_pool_refill(plane)` |
+| Spare | 50 块/plane | 坏块替换，只出不进 | `bbt_spare_refill(plane)` |
 
 | 水位 | 条件 | 动作 |
 |---|---|---|
@@ -1502,7 +1502,7 @@ flowchart TD
    `[FTL] dangling` 日志留痕。
 4. **持久化**：`bbt_handle` 装配 job；换块先异步擦，再写 1 页 record；完成由
    `ftl_bbt_callback` 推进游标。失败保留 dirty，下轮重试。
-5. **补充**：`bbt_spare_pool_refill(alloc, plane)` 从**坏块所属 plane** 的 Spare 池取一块，
+5. **补充**：`bbt_spare_refill(alloc, plane)` 从**坏块所属 plane** 的 Spare 池取一块，
    归还 Free Pool；池空则容量自然减少。
 
 #### 3.3.6 失败语义
