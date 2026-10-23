@@ -1282,7 +1282,7 @@ static void contract_check_jobs_idle(const ftl_ctx_t *ftl)
            (j->sequence_counter == 1U) && (j->merge_floor == 0U) && (j->need_erase == 0U) &&
            (j->checkpoint_needed == 0U) && (j->emergency == 0U) &&
            (j->write_fail_count == 0U) && (j->write_fail_pending == 0U) &&
-           (j->pre_erased_block == JOURNAL_BLOCK_NONE) && (j->bad_mask == 0U) &&
+           (j->pre_erased_block == JRN_BLOCK_NONE) && (j->bad_mask == 0U) &&
            (j->erase_fail_count == 0U) && (j->ring_full == 0U));
 
     const cp_handle_t *cp = ftl->cp_handle;
@@ -2166,7 +2166,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     l2p_flush_kick_owner(ftl->cache, dim, L2P_CACHE_SIZE);
 
     /* ③ Journal：推进异步刷页 job。 */
-    const jrn_trigger_e jrn_trigger = JOURNAL_TRIGGER_FLUSH;
+    const jrn_trigger_e jrn_trigger = JRN_TRIGGER_FLUSH;
     jrn_status_t        jrn_status;
     jrn_handle(ftl->journal, &jrn_trigger, NULL, &jrn_status);
 

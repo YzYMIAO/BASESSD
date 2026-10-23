@@ -2155,9 +2155,9 @@ void md_pool_service(struct ftl_context *ftl)
 
         /* 旧下标的失败记录先清掉，否则 jrn_resume 会把新候选误判成坏块。 */
         ftl->journal->handle.bad_mask         = 0U;
-        ftl->journal->handle.pre_erased_block = JOURNAL_BLOCK_NONE;
+        ftl->journal->handle.pre_erased_block = JRN_BLOCK_NONE;
         ftl->journal->handle.erase_fail_count = 0U;
-        ftl->journal->handle.erase_fail_block = JOURNAL_BLOCK_NONE;
+        ftl->journal->handle.erase_fail_block = JRN_BLOCK_NONE;
         ftl->journal->handle.ring_full        = false; /* 新候选池可能已补回 spare */
         (void)memset(ftl->journal->handle.page_buf, 0xFF, sizeof(ftl->journal->handle.page_buf));
 

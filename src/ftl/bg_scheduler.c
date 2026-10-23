@@ -235,7 +235,7 @@ static void bg_task_metadata(ftl_ctx_t *ftl)
 static void bg_task_journal_erase(ftl_ctx_t *ftl)
 {
     const bg_info_t     info    = bg_info_build(ftl);
-    const jrn_trigger_e trigger = JOURNAL_TRIGGER_ERASE_ONLY;
+    const jrn_trigger_e trigger = JRN_TRIGGER_ERASE_ONLY;
     jrn_status_t        status;
 
     jrn_handle(ftl->journal, &trigger, &info, &status);

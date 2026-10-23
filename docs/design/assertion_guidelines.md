@@ -61,7 +61,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 
 判据 2 只适用于**调用者编程错误**造成的违反。若某处的"异常值"来自**上电/掉电后从介质读回的字节**，那它属于判据 3——损坏数据是掉电的**预期情形**，必须返回错误码让上层走恢复流程，不能断言。
 
-典型：`journal.c` 回放时 `count > JOURNAL_ENTRIES_PER_PAGE`——回放读的是 NAND 上的 journal 页，页头可能因掉电撕裂而非法。这里返回错误、停止回放才是正确行为。同理，`journal.c` 里页/块翻转的控制流（`page++`、`block` 切换）也只是普通分支，不是守卫。
+典型：`journal.c` 回放时 `count > JRN_ENTRIES_PER_PAGE`——回放读的是 NAND 上的 journal 页，页头可能因掉电撕裂而非法。这里返回错误、停止回放才是正确行为。同理，`journal.c` 里页/块翻转的控制流（`page++`、`block` 切换）也只是普通分支，不是守卫。
 
 > ⚠️ **2026-10-17 收窄**：本节原结论写作「**`journal.c` 整个文件不转断言**」——那是把
 > **文件**当成了豁免单位，而判据的适用面是**值从哪来**，不是**代码在哪个文件**。
@@ -70,7 +70,7 @@ FC 层第一轮据此删除了 `test_fc_level1.c` 的 7 个 `*_null` 用例；�
 > `out_addr == NULL` …）收的是**调用者自己持有的指针**，属判据 2，**已全部转 `ASSERT`**
 > （9 处，见 §二十八）；只有**下面这两类**留在本节豁免内：
 >
-> 1. **回放读回的字节**（`count > JOURNAL_ENTRIES_PER_PAGE` 一类）——数据来自介质，
+> 1. **回放读回的字节**（`count > JRN_ENTRIES_PER_PAGE` 一类）——数据来自介质，
 >    坏数据是掉电的**预期情形**（判据 3，H29）；
 > 2. **页/块翻转的控制流**（`page++`、`block` 切换）——普通分支，不是守卫。
 >
@@ -1195,7 +1195,7 @@ NULL 解引用留现场（可诊断停机）。**⚠ 形态 B 不动**：非法 
 |---|---|---|
 | host 入口返回码 | `ftl_submit_read`/`ftl_submit_write` 的 `req`/`req->buffer` | 判据 1 |
 | 资源类结果 | 全部 `fc_command_alloc()` 后的 `cmd == NULL`、`pending_alloc()` 后的 `p == NULL`、`ftl_fc_interface.c` 的 `buf == NULL` | 判据 3 |
-| 介质读回数据 | `journal.c` 的 `count > JOURNAL_ENTRIES_PER_PAGE` | 判据 3 + H29（§六） |
+| 介质读回数据 | `journal.c` 的 `count > JRN_ENTRIES_PER_PAGE` | 判据 3 + H29（§六） |
 | 运行时/依赖态 | `l2p_cache.c` 的 `cache->md_dir == NULL \|\| cache->alloc == NULL`（Region 加载中）、`ftl.c` 的 `platform->time_us == NULL`、`gc_should_trigger` 的 `alloc == NULL`（0 无触发） | 判据 3 |
 | **UT 钉住的文档化契约** | `checkpoint_check_trigger(NULL)`/`checkpoint_is_emergency(NULL)`/`gc_should_trigger(NULL)`/`rr_check_predictive(NULL,…)`/`rr_get_health(NULL)`、`bbt.c` 两处 | **判据 4**（`tests/unit/test_ftl.c` 逐条钉住 ⇒ 转 `ASSERT` 会当场打红 UT） |
 | 可选参数 / 可选出参 | `ftl_op_submit(cmd, op, ctx)` 的 `ctx != NULL`、`l2p_cache_flush_*` 的 `out`、`journal_scan_latest`/`journal_resume` 的 `latest` | §四 可选参数语义、辨析 B |

@@ -674,11 +674,11 @@ l2p_cache_load_start(cache, region_id):            ← static，由 read/ready/w
 ```c
 #define JOURNAL_BLOCK_COUNT       (CW_NUM)  // 环形 4 blocks（= CW_NUM）
 #define JOURNAL_BLOCK0            (BBT_BLOCK + BBT_POOL_BLOCKS)  // J0 起始 Block（当前 = 42，见 metadata.h）
-#define JOURNAL_PAGE_SIZE         (PAGE_MAIN_SIZE)  // = 2048
-#define JOURNAL_ENTRIES_PER_PAGE  ((JOURNAL_PAGE_SIZE - JOURNAL_HEADER_SIZE) / 16)  // 推导 = 127
-#define JOURNAL_HEADER_SIZE       (12)      // Header 大小
-#define JOURNAL_MAGIC             (0x524F554AUL)  // "JOUR"
-#define JOURNAL_BLOCK_NONE        (0xFFU)   // 「无预擦除块」哨兵（v0.54）
+#define JRN_PAGE_SIZE         (PAGE_MAIN_SIZE)  // = 2048
+#define JRN_ENTRIES_PER_PAGE  ((JRN_PAGE_SIZE - JRN_HEADER_SIZE) / 16)  // 推导 = 127
+#define JRN_HEADER_SIZE       (12)      // Header 大小
+#define JRN_MAGIC             (0x524F554AUL)  // "JOUR"
+#define JRN_BLOCK_NONE        (0xFFU)   // 「无预擦除块」哨兵（v0.54）
 
 /* Journal entry — 16B */
 typedef struct {
@@ -697,7 +697,7 @@ typedef struct {
     uint8_t        current_entry;              // 当前页内 entry 偏移 (0..126)
     uint32_t       sequence_counter;           // 全局序号
     uint8_t        pre_erased_block;           // v0.54：被 truncate 预擦除的环形块号
-    uint8_t        page_buf[JOURNAL_PAGE_SIZE];// SRAM buffer
+    uint8_t        page_buf[JRN_PAGE_SIZE];// SRAM buffer
     uint8_t        checkpoint_needed;          // 水位标志
     uint8_t        emergency;                  // 紧急标志（≥95%）
 } l2p_journal_t;
@@ -750,7 +750,7 @@ void journal_truncate(l2p_journal_t *journal, uint32_t up_to_sequence);
 Header (12B):
   magic       (4B) = 0x524F554A ("JOUR")
   page_seq    (4B) = 本页第一条 entry 的全局序号
-  entry_count (2B) = 本页有效 entry 数 (0~JOURNAL_ENTRIES_PER_PAGE=127)
+  entry_count (2B) = 本页有效 entry 数 (0~JRN_ENTRIES_PER_PAGE=127)
   block_seq   (2B) = 本 Journal Block 写入轮次
 
 Entries (N × 16B, N ≤ 127):

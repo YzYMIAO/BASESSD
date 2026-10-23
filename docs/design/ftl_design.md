@@ -2379,7 +2379,7 @@ Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
 | Entries | N × 16 B | N ≤ 127；每项 lba / old_pba / new_pba / sequence |
 | Padding | 余量 | 0xFF |
 
-`JOURNAL_ENTRIES_PER_PAGE = (2048 - 12) / 16 = 127`（向下取整；写死 128 会写穿 `page_buf`）。
+`JRN_ENTRIES_PER_PAGE = (2048 - 12) / 16 = 127`（向下取整；写死 128 会写穿 `page_buf`）。
 
 **`l2p_jrn_t` / `jrn_handle_t`**：
 
@@ -2495,12 +2495,12 @@ jrn_replay(journal, cache, cp_sequence, &entries, block_ctx)
 | 常量 | 值 | 来源 |
 |---|---|---|
 | `JOURNAL_BLOCKS` | `CW_NUM` = 4 | `include/ftl/metadata.h` |
-| `JOURNAL_PAGE_SIZE` | 2048 | `include/ftl/journal.h` |
-| `JOURNAL_HEADER_SIZE` | 12 | 同上 |
-| `JOURNAL_ENTRIES_PER_PAGE` | 127 | 同上 |
-| `JOURNAL_FULL_THRESHOLD` | 85% | 同上 |
-| `JOURNAL_CRITICAL` | 95% | 同上 |
-| `JOURNAL_MAGIC` | `0x524F554A` ("JOUR") | 同上 |
+| `JRN_PAGE_SIZE` | 2048 | `include/ftl/journal.h` |
+| `JRN_HEADER_SIZE` | 12 | 同上 |
+| `JRN_ENTRIES_PER_PAGE` | 127 | 同上 |
+| `JRN_FULL_THRESHOLD` | 85% | `src/ftl/journal.c` |
+| `JRN_CRITICAL` | 95% | `src/ftl/journal.c` |
+| `JRN_MAGIC` | `0x524F554A` ("JOUR") | `include/ftl/journal.h` |
 | `JOURNAL_DRAIN_SPIN_MAX` | 100,000 | `src/ftl/journal.c` |
 
 #### 3.7.9 主流对照
@@ -4761,12 +4761,12 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | 常量 | 值 | 来源 |
 |---|---|---|
 | `JOURNAL_BLOCKS` | `CW_NUM` = 4 | `include/ftl/metadata.h` |
-| `JOURNAL_PAGE_SIZE` | 2048 | `include/ftl/journal.h` |
-| `JOURNAL_HEADER_SIZE` | 12 | 同上 |
-| `JOURNAL_ENTRIES_PER_PAGE` | 127 | 同上 |
-| `JOURNAL_FULL_THRESHOLD` / `CRITICAL` | 85% / 95% | 同上 |
-| `JOURNAL_MAGIC` | `0x524F554A` | 同上 |
-| `JOURNAL_BLOCK_NONE` | `0xFF` | 同上 |
+| `JRN_PAGE_SIZE` | 2048 | `include/ftl/journal.h` |
+| `JRN_HEADER_SIZE` | 12 | 同上 |
+| `JRN_ENTRIES_PER_PAGE` | 127 | 同上 |
+| `JRN_FULL_THRESHOLD` / `CRITICAL` | 85% / 95% | `src/ftl/journal.c` |
+| `JRN_MAGIC` | `0x524F554A` | `include/ftl/journal.h` |
+| `JRN_BLOCK_NONE` | `0xFF` | `include/ftl/journal.h` |
 
 #### Checkpoint
 

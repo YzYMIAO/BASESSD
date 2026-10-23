@@ -564,7 +564,7 @@ static void cp_complete_trunc_erase(cp_handle_t *h, bool failed)
     if (failed)
     {
         LOGW(LOG_TAG_CP "journal pre-erase failed blk=%u — 不记账，等待重试\r\n", (unsigned)h->trunc_next);
-        jrn_truncate_commit(h->journal, JOURNAL_BLOCK_NONE);
+        jrn_truncate_commit(h->journal, JRN_BLOCK_NONE);
     }
     else
     {
@@ -936,7 +936,7 @@ static void cp_job_step(cp_handle_t *h)
                 if (jrn_truncate_plan(h->journal, h->journal_seq, &addr, &h->trunc_next) !=
                     JRN_TRUNC_NEEDS_ERASE)
                 {
-                    jrn_truncate_commit(h->journal, JOURNAL_BLOCK_NONE);
+                    jrn_truncate_commit(h->journal, JRN_BLOCK_NONE);
                     h->phase = CP_DONE;
                     break;
                 }
