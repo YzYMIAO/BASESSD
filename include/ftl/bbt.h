@@ -57,6 +57,23 @@ typedef struct
 _Static_assert(sizeof(bbt_header_t) == 540U, "BBT header 布局漂移（期望 540B）");
 _Static_assert(sizeof(bbt_header_t) <= PAGE_MAIN_SIZE, "BBT header 必须装得进一页主区");
 
+/* ── BBT 模块 handle 的上报结构（docs/archive/ftl_module_contracts.md §4.1）──
+ *
+ * `base` 是公共前缀（state / critical / wants_run / progress / next_ms / error）。
+ * BBT 只做提交背压，**无周期** ⇒ next_ms 恒 0。
+ */
+typedef struct
+{
+    ftl_mod_status_t base;
+
+    bbt_handle_phase_e phase;     /* 观测；外部不要据此驱动 */
+    bool               dirty;     /* 是否有未落盘变更 */
+    DWORD              dirty_gen; /* dirty 代际（写飞行期间的新变更） */
+    DWORD              sequence;  /* 本池单调序号 */
+    WORD               write_idx; /* 池内下一个待写槽 */
+    WORD               bad_count; /* 当前坏块数 */
+} bbt_status_t;
+
 /* ── bitmap / 候选块原语 ── */
 
 /*
@@ -236,23 +253,6 @@ ftl_status_e bbt_save(alc_t *alloc);
  * @return FTL_OK 成功，FTL_ERROR 无有效 BBT
  */
 ftl_status_e bbt_load(alc_t *alloc, BYTE *bad_map, DWORD *bad_count, DWORD *sequence);
-
-/* ── BBT 模块 handle 的上报结构（docs/archive/ftl_module_contracts.md §4.1）──
- *
- * `base` 是公共前缀（state / critical / wants_run / progress / next_ms / error）。
- * BBT 只做提交背压，**无周期** ⇒ next_ms 恒 0。
- */
-typedef struct
-{
-    ftl_mod_status_t base;
-
-    bbt_handle_phase_e phase;     /* 观测；外部不要据此驱动 */
-    bool               dirty;     /* 是否有未落盘变更 */
-    DWORD              dirty_gen; /* dirty 代际（写飞行期间的新变更） */
-    DWORD              sequence;  /* 本池单调序号 */
-    WORD               write_idx; /* 池内下一个待写槽 */
-    WORD               bad_count; /* 当前坏块数 */
-} bbt_status_t;
 
 /*
  * bbt_handle - BBT 后台持久化入口（typed handle；提交即返回）
