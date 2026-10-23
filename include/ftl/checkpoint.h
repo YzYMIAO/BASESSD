@@ -151,7 +151,7 @@ typedef struct
 
     /* ① job 起点快照（**必须先于任何 flush**：flush 成功会清 region 脏位）
      * **本 die 的局部 2048-bit 位图**：由共享 cache 的全局脏位图按 owner 过滤、
-     * global→local 映射得到（l2p_snapshot_owner_bitmap）。 */
+     * global→local 映射得到（l2p_owner_bitmap_snapshot）。 */
     DWORD region_bitmap[L2P_LOCAL_DIRTY_WORDS];
     DWORD journal_seq; /* = journal.sequence_counter（截断/回放水位） */
 

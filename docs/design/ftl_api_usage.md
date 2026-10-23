@@ -609,7 +609,7 @@ ftl_status_t l2p_cache_write(l2p_cache_t *cache, DWORD lba, DWORD pba);
 ftl_status_t l2p_cache_flush_kick(l2p_cache_t *cache, int line_idx);
 
 /* 后台写回推进：每轮 ftl_service 调一次，只处理本 owner，最多起 max_kick 行 */
-void l2p_flush_kick_owner(l2p_cache_t *cache, uint32_t owner_dim, uint8_t max_kick);
+void l2p_owner_flush_kick(l2p_cache_t *cache, uint32_t owner_dim, uint8_t max_kick);
 
 /* ── 同步逃生口（自旋泵；只许结构性同步上下文，服务函数禁用）── */
 ftl_status_t l2p_cache_read_sync(l2p_cache_t *cache, DWORD lba, DWORD *out);
@@ -630,8 +630,8 @@ void l2p_cache_snapshot_owner_bitmap(const l2p_cache_t *cache, uint32_t owner_di
 l2p_cache_read()       → 11 个调用点全部按三态改写（host 读下发 / 写确认 / TRIM /
                          RR / 搬移 SETTLE / 开机回放 / full metadata rebuild / CLI map）
 l2p_cache_write()      → 写确认 / 搬移 WRITE_SETTLE / journal_replay（F10：回放写 cache）
-l2p_cache_flush_kick   → l2p_cache_evict_one（CLOCK 驱逐脏行时）、l2p_flush_kick_owner
-l2p_flush_kick_owner / jrn_handle（异步推进）→ ftl_flush_begin/step（HIL `fl` / USB flush）
+l2p_cache_flush_kick   → l2p_cache_evict_one（CLOCK 驱逐脏行时）、l2p_owner_flush_kick
+l2p_owner_flush_kick / jrn_handle（异步推进）→ ftl_flush_begin/step（HIL `fl` / USB flush）
 l2p_cache_flush_one_sync → l2p_cache_flush_owner_sync / Checkpoint（逐行）
                           （CP job 的 CP_FLUSH_REGIONS 用 l2p_cache_flush_kick：Header 落盘前
                            保证 region 已持久，且不阻塞完成泵）

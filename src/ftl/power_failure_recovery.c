@@ -812,7 +812,7 @@ static ftl_status_e ftl_boot_fresh_start(struct ftl_context *ftl, const jrn_page
     /* ① 只失效本 owner 的行/脏位（设备级 init 已清全体；这里覆盖格式化后的场景） */
     const DWORD dim = ftl_topo_dim(ftl->topo);
 
-    l2p_invalidate_owner(ftl->cache, dim);
+    l2p_owner_invalidate(ftl->cache, dim);
 
     /* ② full metadata rebuild **先于 carve**：写过的块必须先被认领成 CLOSED；否则 carve 把它们放进
      *    Spare/OP 后，full metadata rebuild 再把同块建 Closed ⇒ 池成员与非空闲块重叠。 */
@@ -954,7 +954,7 @@ static ftl_status_e ftl_boot_clean_start(struct ftl_context   *ftl,
  *     ① 只处理 resident **CLEAN** 行：bitmap 未置位 ⇒ INVALID（懒加载 CP 时刻快照）。
  *        DIRTY（journal 回放数据）保持待 flush；FLUSHING/LOADING 有命令在飞，跳过。
  *     ② 按 CP bitmap **逐位预载**：每个置位 local region 由
- *        `l2p_preload_region` 分配一条 INVALID 行、写 region_id、同步读页。
+ *        `l2p_region_preload` 分配一条 INVALID 行、写 region_id、同步读页。
  *        **绝不**按 INVALID 行的 region_id 反查 bitmap——init 时所有 INVALID 行
  *        region_id=0，按行遍历会让所有行别名到 region 0。
  *     ③ 目录条目为 INVALID（region 从未写过 / 刷盘未成功）⇒ 无页可预载，留给懒加载。
@@ -975,7 +975,7 @@ static void ftl_boot_apply_region_bitmap(ftl_ctx_t         *ftl,
     {
         l2p_line_info_t line;
 
-        l2p_get_line(ftl->cache, i, &line);
+        l2p_line_get(ftl->cache, i, &line);
 
         if (line.state != L2P_CACHE_CLEAN)
         {
@@ -990,7 +990,7 @@ static void ftl_boot_apply_region_bitmap(ftl_ctx_t         *ftl,
 
         if ((cp->region_bitmap[local / 32U] & (1UL << (local & 31U))) == 0U)
         {
-            l2p_invalidate_line(ftl->cache, i);
+            l2p_line_invalidate(ftl->cache, i);
         }
     }
 
@@ -1013,7 +1013,7 @@ static void ftl_boot_apply_region_bitmap(ftl_ctx_t         *ftl,
 
         const DWORD global = (local * FTL_DIM_TOTAL) + dim;
 
-        if (!l2p_preload_region(ftl->cache, global, addr))
+        if (!l2p_region_preload(ftl->cache, global, addr))
         {
             LOGW(LOG_TAG_BLK "preload region %lu failed\r\n", local);
         }

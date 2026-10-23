@@ -325,6 +325,27 @@ typedef struct
     void          *owner_ctx;
 } l2p_cache_t;
 
+/* ── 模块 handle（typed 入口，docs §4.7） ── */
+typedef struct
+{
+    ftl_mod_status_t base;
+
+    BYTE  load_inflight;
+    BYTE  flush_inflight;
+    WORD  dirty_regions;  /* 本 (ch,ce) 全局脏位图的置位数 */
+    WORD  resident_lines; /* 非 INVALID 行数 */
+    bool  thrashing;
+    BYTE  miss_pct;
+    DWORD evictions;
+} l2p_status_t;
+
+/* ── 查询（替代外部直读 cache 内部） ── */
+typedef struct
+{
+    DWORD             region_id; /* 全局 region（INVALID 行无意义） */
+    l2p_cache_state_e state;     /* 行状态（枚举，不是裸 BYTE） */
+} l2p_line_info_t;
+
 /* ── 接口 ── */
 
 /*
@@ -342,7 +363,7 @@ typedef struct
 void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_region, void *owner_ctx);
 
 /*
- * l2p_preload_region - 开机恢复（F4）专用：把一个 region 页同步预载进 cache。
+ * l2p_region_preload - 开机恢复（F4）专用：把一个 region 页同步预载进 cache。
  *
  * 在 cache 中找一条 INVALID 行，先写 region_id，再把 pba 的 region 页同步读进 entries；
  * 成功置 CLEAN，失败置 INVALID（交给懒加载兜底）。
@@ -354,18 +375,18 @@ void l2p_init(l2p_cache_t *cache, BYTE ch, BYTE ce, l2p_owner_fn_t owner_of_regi
  * @param pba           Directory 给出的 region 页物理地址
  * @return true = 已驻留或预载成功；false = 无 INVALID 行 / 读失败
  */
-bool l2p_preload_region(l2p_cache_t *cache, DWORD global_region, DWORD pba);
+bool l2p_region_preload(l2p_cache_t *cache, DWORD global_region, DWORD pba);
 
 /*
- * l2p_prefetch_region - 顺序读 best-effort 预取一个 region（非阻塞）
+ * l2p_region_prefetch - 顺序读 best-effort 预取一个 region（非阻塞）
  *
- * 与 l2p_preload_region 的区别：可在运行期调用；会走 CLOCK 驱逐，但**不踢 DIRTY
+ * 与 l2p_region_preload 的区别：可在运行期调用；会走 CLOCK 驱逐，但**不踢 DIRTY
  * 写回**（预取不制造写回）。已驻留/LOADING ⇒ 直接返回 true；thrashing / 在飞
  * load 达 L2P_PREFETCH_MAX_INFLIGHT / FC 资源不足 / 无 CLEAN 候选 ⇒ 跳过并计数。
  *
  * @return true = 已驻留或加载已起；false = 本次跳过（host 路径无影响）
  */
-bool l2p_prefetch_region(l2p_cache_t *cache, DWORD global_region);
+bool l2p_region_prefetch(l2p_cache_t *cache, DWORD global_region);
 
 /*
  * l2p_read - 读取**全局 LBA** 对应的 PBA 映射（**三态**）
@@ -417,21 +438,21 @@ bool l2p_is_ready(l2p_cache_t *cache, DWORD lba);
 ftl_status_e l2p_write(l2p_cache_t *cache, DWORD lba, DWORD pba);
 
 /*
- * l2p_read_entries / l2p_write_entries - 页内批量读/写（写确认收敛）
+ * l2p_entries_read / l2p_entries_write - 页内批量读/写（写确认收敛）
  *
  * `lba` 必须是页对基址（`FTL_LBA_PER_PAIR` 对齐），`mask` 的 bit0..7 对应
  * `lba+0..lba+7`；全部 LBA 必须落在同一 region（页对对齐 + region 大小是
  * `FTL_LBA_PER_PAIR` 的整数倍 ⇒ 编译期几何保证，见 l2p_cache.c 的 `_Static_assert`）。
  * 语义与逐条 `l2p_read`/`l2p_write` 一致：
  *   · 只处理 mask 置位的条目；每条仍调用 `l2p_note_hit`，thrashing/命中口径不变；
- *   · `l2p_read_entries` 的 miss 与逐条 `l2p_read` 一致：记一次 miss + 起异步加载，
+ *   · `l2p_entries_read` 的 miss 与逐条 `l2p_read` 一致：记一次 miss + 起异步加载，
  *     返 FTL_AGAIN；当前调用点先 `l2p_is_ready(base)`，正常不会走到该分支；
  *   · 行未就绪（LOADING；写还含 FLUSHING）⇒ FTL_AGAIN，且**不改任何状态**；
  *   · 写成功只置一次 `state=DIRTY` + region 脏位。
  * 用于 `ftl_confirm_write`：`l2p_find` 每页一次，而不是每 CW 一次。
  */
-ftl_status_e l2p_read_entries(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD out[]);
-ftl_status_e l2p_write_entries(l2p_cache_t *cache, DWORD lba, DWORD mask, const DWORD pba[]);
+ftl_status_e l2p_entries_read(l2p_cache_t *cache, DWORD lba, DWORD mask, DWORD out[]);
+ftl_status_e l2p_entries_write(l2p_cache_t *cache, DWORD lba, DWORD mask, const DWORD pba[]);
 
 /* ── 同步逃生口（见文件头；服务函数禁用）── */
 
@@ -481,7 +502,7 @@ ftl_status_e l2p_write_sync(l2p_cache_t *cache, DWORD lba, DWORD pba);
 ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx);
 
 /*
- * l2p_flush_kick_owner - 后台写回推进（每轮 ftl_service 调一次，只处理本 owner）
+ * l2p_owner_flush_kick - 后台写回推进（每轮 ftl_service 调一次，只处理本 owner）
  *
  * 从下标 0 起扫，最多启动 max_kick 行 DIRTY（受共享 L2P_FLUSH_MAX_INFLIGHT 闸门）；
  * 跳过不属于 owner_dim 的行——一个 LUN 的后台刷写不应替别的 LUN 做决定。
@@ -489,7 +510,7 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx);
  * @param owner_dim 本实例的 dim（ftl_topo_dim(ftl->topo)）
  * @param max_kick  本轮最多起几条（档位表见 l2p_cache.c 的 s_l2p_flush_max）
  */
-void l2p_flush_kick_owner(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick);
+void l2p_owner_flush_kick(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick);
 
 /*
  * l2p_flush_owner_idle - 本 owner 是否已无待落盘的 L2P 行
@@ -501,37 +522,23 @@ void l2p_flush_kick_owner(l2p_cache_t *cache, DWORD owner_dim, BYTE max_kick);
 bool l2p_flush_owner_idle(const l2p_cache_t *cache, DWORD owner_dim);
 
 /*
- * l2p_invalidate_owner - 只失效某个 owner 的行与脏位（恢复/格式化用）
+ * l2p_owner_invalidate - 只失效某个 owner 的行与脏位（恢复/格式化用）
  *
  * 共享 cache 下**不能**再按实例重新 init（会抹掉别的 LUN 刚回放的 DIRTY 行）。
  * 本函数只处理 l2p_region_owned_by(line->region_id, owner_dim) 的 resident 行：
  * entries 填 0xFF、region_id 清零、置 INVALID，并清该 owner 的全局脏位。
  * ⚠ 行处于 FLUSHING/LOADING 是编程错误（恢复期不应有在飞命令）⇒ ASSERT。
  */
-void l2p_invalidate_owner(l2p_cache_t *cache, DWORD owner_dim);
+void l2p_owner_invalidate(l2p_cache_t *cache, DWORD owner_dim);
 
 /*
- * l2p_snapshot_owner_bitmap - 全局脏位图 → 本 die 的局部 2048-bit 快照
+ * l2p_owner_bitmap_snapshot - 全局脏位图 → 本 die 的局部 2048-bit 快照
  *
  * Checkpoint 起点调用（先快照再 flush）。`out` 为 L2P_LOCAL_DIRTY_WORDS 个 word；
  * 映射关系：global_region = local_region * FTL_DIM_TOTAL + owner_dim。
  * DIM=1 时等价于整份位图拷贝。
  */
-void l2p_snapshot_owner_bitmap(const l2p_cache_t *cache, DWORD owner_dim, DWORD out[L2P_LOCAL_DIRTY_WORDS]);
-
-/* ── 模块 handle（typed 入口，docs §4.7） ── */
-typedef struct
-{
-    ftl_mod_status_t base;
-
-    BYTE  load_inflight;
-    BYTE  flush_inflight;
-    WORD  dirty_regions;  /* 本 (ch,ce) 全局脏位图的置位数 */
-    WORD  resident_lines; /* 非 INVALID 行数 */
-    bool  thrashing;
-    BYTE  miss_pct;
-    DWORD evictions;
-} l2p_status_t;
+void l2p_owner_bitmap_snapshot(const l2p_cache_t *cache, DWORD owner_dim, DWORD out[L2P_LOCAL_DIRTY_WORDS]);
 
 /*
  * l2p_handle - 后台写回推进（每轮调用；不阻塞、不遍历 cache 内部）
@@ -546,18 +553,11 @@ typedef struct
  */
 void l2p_handle(l2p_cache_t *cache, DWORD dim, const bg_info_t *info, l2p_status_t *out);
 
-/* ── 查询（替代外部直读 cache 内部） ── */
-typedef struct
-{
-    DWORD region_id; /* 全局 region（INVALID 行无意义） */
-    BYTE  state;     /* l2p_cache_state_e */
-} l2p_line_info_t;
-
 /* 读一行元信息（idx 越界/空行时 state == INVALID）。 */
-void l2p_get_line(const l2p_cache_t *cache, WORD idx, l2p_line_info_t *out);
+void l2p_line_get(const l2p_cache_t *cache, WORD idx, l2p_line_info_t *out);
 
 /* 失效一行（仅 CLEAN/INVALID；恢复/格式化用）。 */
-void l2p_invalidate_line(l2p_cache_t *cache, WORD idx);
+void l2p_line_invalidate(l2p_cache_t *cache, WORD idx);
 
 /* 是否有在飞写回（背压/进展判据；不暴露 flush_inflight 字段）。 */
 bool l2p_has_flush_inflight(const l2p_cache_t *cache);

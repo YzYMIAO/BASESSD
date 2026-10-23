@@ -208,7 +208,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
 
     /* 页内批量读：l2p_find 一次；只读取 mask 置位项（逐项记 hit，口径不变）。
      * 就绪前置已保证命中；非 OK 仅越界（不可能）⇒ 保守重试，尚未动账。 */
-    if (l2p_read_entries(ftl->cache, pending->lba, mask, oldp) != FTL_OK)
+    if (l2p_entries_read(ftl->cache, pending->lba, mask, oldp) != FTL_OK)
     {
         return FTL_AGAIN;
     }
@@ -233,7 +233,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
     /* 整页一次写 L2P（state=DIRTY + region 脏位只置一次）。就绪前置 + 两遍之间
      * 无泵 ⇒ 行始终保持 CLEAN/DIRTY，写不可能返 FTL_AGAIN；断言仅作结构破坏的
      * debug 探针（release 由前述不变量保证，不靠断言兜底）。 */
-    const ftl_status_e wst = l2p_write_entries(ftl->cache, pending->lba, mask, newp);
+    const ftl_status_e wst = l2p_entries_write(ftl->cache, pending->lba, mask, newp);
 
     ASSERT(wst == FTL_OK);
     (void)wst;
@@ -1954,7 +1954,7 @@ static void ftl_seq_prefetch_pending(ftl_ctx_t *ftl, DWORD generation)
         return;
     }
 
-    (void)l2p_prefetch_region(ftl->cache, target);
+    (void)l2p_region_prefetch(ftl->cache, target);
 }
 
 /* --------------------------------------------------------------------
@@ -2163,7 +2163,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     (void)wb_handle(ftl->wbuf, &wb_trigger, NULL, &wb_status);
 
     /* ② L2P：继续 kick 本 owner 的脏行（受共享 credit 池门控）。 */
-    l2p_flush_kick_owner(ftl->cache, dim, L2P_CACHE_SIZE);
+    l2p_owner_flush_kick(ftl->cache, dim, L2P_CACHE_SIZE);
 
     /* ③ Journal：推进异步刷页 job。 */
     const jrn_trigger_e jrn_trigger = JRN_TRIGGER_FLUSH;

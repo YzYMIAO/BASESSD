@@ -62,7 +62,7 @@
 | `[WL  ] start` | INFO | `mig_begin_wl` | `free writes` | 每个静态 WL job 1 行（只在 host 空闲档启动） |
 | `[MIG ] move` | DEBUG（仅 `vcw>0`；空块完全不生成） | `mig_finish` | `k r trig src0 src1 dst0 dst1 v mv t` | 每个真实 victim 1 行，默认不输出 |
 | `[MIG ] abort` | WARN（限流） | `mig_abort` | `kind g0 g1 phase page plane cause fc supp` | 首次/限流 |
-| `[L2P ] job inflight` | INFO | `l2p_flush_kick_owner` | `load flush dirty` | 有在飞时 1 s |
+| `[L2P ] job inflight` | INFO | `l2p_owner_flush_kick` | `load flush dirty` | 有在飞时 1 s |
 | `[TRIM] start/done` | INFO | `ftl_trim_begin/step` | start `lba n`；done `n elapsed` | 每次控制面 TRIM |
 | `[RR  ] unc` | ERROR（限流） | `rr_settle_plane` | `lba pba paa g pl bk pg cw retry st supp` | 首次故障 |
 | `[RR  ] job` | INFO | `rr_service_step` | `stage plane attempt retry stall age` | 卡住后 5 s |

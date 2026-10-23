@@ -419,7 +419,7 @@ static cp_flush_step_e cp_regions_flush(cp_handle_t *h)
     {
         l2p_line_info_t line;
 
-        l2p_get_line(h->cache, i, &line);
+        l2p_line_get(h->cache, i, &line);
 
         if (line.state == L2P_CACHE_INVALID)
         {
@@ -1042,7 +1042,7 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
      *    共享 cache 的脏位图是全局的；本 job 只需要本 die 的局部 2048-bit 快照。 */
     const DWORD dim = ftl_topo_dim(h->topo);
 
-    l2p_snapshot_owner_bitmap(h->cache, dim, h->region_bitmap);
+    l2p_owner_bitmap_snapshot(h->cache, dim, h->region_bitmap);
     h->journal_seq = jrn_sequence_get(h->journal);
 
     /* 块元数据快照与 region_bitmap / journal_seq 在**同一个协作点**取定：
