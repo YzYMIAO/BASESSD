@@ -482,7 +482,7 @@ bool l2p_is_region_degraded(const l2p_cache_t *cache, DWORD global_region);
 /*
  * l2p_flush_kick - 起一行 DIRTY 的异步写回（提交即返回）
  *
- * ① md_append_slot_pair 一次取主/备两个空槽（块满先取新块）
+ * ① md_slot_pair_append 一次取主/备两个空槽（块满先取新块）
  * ② ftl_async_write_page 建链主副本 + 把 entries 拷进 FC buffer 并提交
  * ③ line->state = FLUSHING；主副本成功后在完成回调里串行提交备副本
  * 完成时（ftl_l2p_callback）：两份都成功 ⇒ md_commit_region_pair + CLEAN + 清 region

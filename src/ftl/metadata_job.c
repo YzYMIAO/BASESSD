@@ -481,8 +481,8 @@ static md_compact_step_e md_compact_read(md_dir_cache_t *dir)
     while (j->region_id < METADATA_DIR_ENTRIES)
     {
         const WORD  rid     = j->region_id;
-        const DWORD primary = md_find_entry(dir, METADATA_TYPE_L2P_REGION, rid);
-        const DWORD backup  = md_find_backup(dir, rid);
+        const DWORD primary = md_entry_find(dir, METADATA_TYPE_L2P_REGION, rid);
+        const DWORD backup  = md_backup_find(dir, rid);
         DWORD       old     = NAND_PBA_INVALID;
         BYTE        copy    = 0U;
 

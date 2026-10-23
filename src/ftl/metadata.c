@@ -23,6 +23,7 @@
  *   四、L2P 日志块：追加槽 / 登记
  *   五、Anchor 落盘 / 加载
  *   六、元数据块判定
+ *   七、池诊断与服务
  *
  * ⚠ 同步 / 异步的分界：
  *   · **异步**：日志块的回收与压缩（`md_handle_t` + g_op_callbacks[FTL_OP_METADATA]，
@@ -347,14 +348,14 @@ typedef struct
     WORD  cursor_last_idx; /* 游标块内最后一条有效 record（UINT16_MAX = 无）*/
     DWORD cursor_last_seq;
     bool  ring_full; /* 池已写满一圈 */
-} ring_scan_t;
+} md_ring_scan_t;
 
 /* ①~③：逐块探末条 → 找游标块 → 游标块内找末条。 */
-static void ring_scan(const md_ring_t       *ring,
-                      metadata_ring_probe_fn probe,
-                      void                  *ctx,
-                      WORD                   rpb,
-                      ring_scan_t           *s)
+static void md_ring_scan(const md_ring_t       *ring,
+                         metadata_ring_probe_fn probe,
+                         void                  *ctx,
+                         WORD                   rpb,
+                         md_ring_scan_t        *s)
 {
     s->cursor_block    = UINT16_MAX;
     s->best_full_idx   = UINT16_MAX;
@@ -410,11 +411,11 @@ static void ring_scan(const md_ring_t       *ring,
 
 /* ⑥ 慢路径：快路径候选整条校验全失败（局部损坏）⇒ 全池廉价探针取 sequence 最大者，
  *    整条校验；失败则排除该 sequence 继续找次新。仅在损坏时付出全池代价。 */
-static bool ring_locate_fallback(metadata_ring_probe_fn probe,
-                                 void                  *ctx,
-                                 WORD                   total,
-                                 WORD                  *out_newest_idx,
-                                 DWORD                 *out_sequence)
+static bool md_ring_locate_fallback(metadata_ring_probe_fn probe,
+                                    void                  *ctx,
+                                    WORD                   total,
+                                    WORD                  *out_newest_idx,
+                                    DWORD                 *out_sequence)
 {
     DWORD limit = UINT32_MAX;
 
@@ -469,7 +470,7 @@ static bool ring_locate_fallback(metadata_ring_probe_fn probe,
  *   返回：FTL_OK（池空时 out_newest_idx=UINT16_MAX、out_sequence=0 也是 OK）；
  *         FTL_ERROR ring 几何非法（判据 9 运行期拒绝）。
  *   实现要点（六步）：
- *     ①②③ 由 ring_scan 完成：找游标块与最新满块；
+ *     ①②③ 由 md_ring_scan 完成：找游标块与最新满块；
  *     ④ 写点 = 游标块末条的下一条（跨块处理）；
  *     ⑤ 快路径：只在「最新满块」+「游标块末条」两个候选里整条校验（正常路径）；
  *     ⑥ 慢路径：快路径全失败（局部损坏）才全池扫描取次新，整条校验，逐轮降 limit。
@@ -495,9 +496,9 @@ ftl_status_e md_ring_locate(const md_ring_t       *ring,
     *out_sequence   = 0U;
     *out_newest_idx = UINT16_MAX;
 
-    ring_scan_t scan;
+    md_ring_scan_t scan;
 
-    ring_scan(ring, probe, ctx, rpb, &scan);
+    md_ring_scan(ring, probe, ctx, rpb, &scan);
 
     /* ④ 写点 = 游标块末条的下一条（末条是块内最后一条时跨到下一块槽 0）；
      *    游标块内无有效 record ⇒ 写点 = 游标块的槽 0 */
@@ -555,7 +556,7 @@ ftl_status_e md_ring_locate(const md_ring_t       *ring,
     }
 
     /* ⑥ 局部损坏时的全池回退。找不到也返回 FTL_OK（池内无有效 record）。 */
-    (void)ring_locate_fallback(probe, ctx, total, out_newest_idx, out_sequence);
+    (void)md_ring_locate_fallback(probe, ctx, total, out_newest_idx, out_sequence);
 
     return FTL_OK;
 }
@@ -640,7 +641,7 @@ ftl_status_e md_ring_prepare_write(const md_ring_t  *ring,
  * ══════════════════════════════════════════════════════════════════ */
 
 /* 页头字段校验：magic + chunk_count + 布局版本。 */
-static bool anchor_header_fields_valid(DWORD magic, WORD chunk_count, DWORD layout_version)
+static bool md_anchor_header_valid(DWORD magic, WORD chunk_count, DWORD layout_version)
 {
     return (magic == ANCHOR_MAGIC) && (chunk_count == ANCHOR_PAGE_COUNT) &&
            (layout_version == FTL_MEDIA_LAYOUT_VERSION);
@@ -648,7 +649,7 @@ static bool anchor_header_fields_valid(DWORD magic, WORD chunk_count, DWORD layo
 
 /* Anchor 池几何：优先用 md_pool_build_all() 生成的候选池（跳过 BAD）；
  * 池尚未建立时退回名义区间（开机早期/测试），BAD 由后续 rebuild 修正。 */
-static void anchor_ring_init(const md_dir_cache_t *dir, md_ring_t *ring)
+static void md_anchor_ring_init(const md_dir_cache_t *dir, md_ring_t *ring)
 {
     if ((dir->alloc != NULL) && (dir->alloc->pools != NULL))
     {
@@ -675,9 +676,9 @@ typedef struct
 
 /* 廉价探针：只读 chunk 0 的 20 字节页头取 sequence。
  * FC 读整页并校验 per-CW CRC + ECC，`length` 只限制拷出字节数。 */
-static ftl_status_e anchor_record_probe_cheap(const anchor_probe_ctx_t *c,
-                                              WORD                      record_idx,
-                                              DWORD                    *out_sequence)
+static ftl_status_e md_anchor_record_probe_cheap(const anchor_probe_ctx_t *c,
+                                                 WORD                      record_idx,
+                                                 DWORD                    *out_sequence)
 {
     const BYTE plane_count = md_ring_plane_count(c->ring->plane_mask);
 
@@ -691,7 +692,7 @@ static ftl_status_e anchor_record_probe_cheap(const anchor_probe_ctx_t *c,
         {
             continue;
         }
-        if ((!anchor_header_fields_valid(hdr.magic, hdr.chunk_count, hdr.layout_version)) ||
+        if ((!md_anchor_header_valid(hdr.magic, hdr.chunk_count, hdr.layout_version)) ||
             (hdr.chunk_index != 0U) || (hdr.sequence == 0U))
         {
             continue;
@@ -705,9 +706,9 @@ static ftl_status_e anchor_record_probe_cheap(const anchor_probe_ctx_t *c,
 }
 
 /* 整条校验：全部页有效、chunk 序完整、各页 sequence 一致；不跨 plane 拼半条。 */
-static ftl_status_e anchor_record_probe_full(const anchor_probe_ctx_t *c,
-                                             WORD                      record_idx,
-                                             DWORD                    *out_sequence)
+static ftl_status_e md_anchor_record_probe_full(const anchor_probe_ctx_t *c,
+                                                WORD                      record_idx,
+                                                DWORD                    *out_sequence)
 {
     md_anchor_page_t page;
     const BYTE       plane_count = md_ring_plane_count(c->ring->plane_mask);
@@ -734,7 +735,7 @@ static ftl_status_e anchor_record_probe_full(const anchor_probe_ctx_t *c,
                 primary_ok = false;
                 break;
             }
-            const bool header_ok = anchor_header_fields_valid(page.magic, page.chunk_count, page.layout_version);
+            const bool header_ok = md_anchor_header_valid(page.magic, page.chunk_count, page.layout_version);
 
             if ((!header_ok) || (page.chunk_index != chunk))
             {
@@ -777,12 +778,12 @@ static ftl_status_e anchor_record_probe_full(const anchor_probe_ctx_t *c,
 }
 
 /* 探针入口：按 full 分派到廉价/整条两档。 */
-static ftl_status_e anchor_record_probe(void *ctx, WORD record_idx, bool full, DWORD *out_sequence)
+static ftl_status_e md_anchor_record_probe(void *ctx, WORD record_idx, bool full, DWORD *out_sequence)
 {
     const anchor_probe_ctx_t *c = (const anchor_probe_ctx_t *)ctx;
 
-    return full ? anchor_record_probe_full(c, record_idx, out_sequence)
-                : anchor_record_probe_cheap(c, record_idx, out_sequence);
+    return full ? md_anchor_record_probe_full(c, record_idx, out_sequence)
+                : md_anchor_record_probe_cheap(c, record_idx, out_sequence);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -790,17 +791,17 @@ static ftl_status_e anchor_record_probe(void *ctx, WORD record_idx, bool full, D
  * ══════════════════════════════════════════════════════════════════ */
 
 /*
- * md_fill_fixed - 为全部 region 登记"未映射"（见 metadata.h「固定元数据区布局」）
+ * md_fixed_fill - 为全部 region 登记"未映射"（见 metadata.h「固定元数据区布局」）
  *
  * 每个实例的 L2P_REGIONS_PER_INSTANCE 个 region **全部登记为 NAND_PBA_INVALID**；
  * 某个 region 刷新到日志块后由 md_commit_region 就地覆盖成真实 PBA。
  * "全部预登记"同时保证 Directory 容量（= region 数）按构造不会溢出 ——
- * md_update 的"满则丢弃"分支对 L2P region 不可达。
+ * md_entry_update 的"满则丢弃"分支对 L2P region 不可达。
  *
  * 共用于 md_init（首次格式化）与 md_load（基础层）：
  * Anchor 损坏时该层即"全部未映射"，不需要任何闪存读。
  */
-static void md_fill_fixed(md_dir_cache_t *dir)
+static void md_fixed_fill(md_dir_cache_t *dir)
 {
     dir->count = 0U;
 
@@ -816,7 +817,7 @@ static void md_fill_fixed(md_dir_cache_t *dir)
 
 /* 把一个 region 副本的 PBA 计入 l2p_live（主/备共用同一套校验）。
  * `*warned` 保证整轮只警告一次；越界/固定非日志区一律跳过。 */
-static void md_live_add_copy(md_dir_cache_t *dir, DWORD pba, WORD entry_idx, bool *warned)
+static void md_live_copy_add(md_dir_cache_t *dir, DWORD pba, WORD entry_idx, bool *warned)
 {
     if (pba == NAND_PBA_INVALID)
     {
@@ -859,7 +860,7 @@ static void md_live_add_copy(md_dir_cache_t *dir, DWORD pba, WORD entry_idx, boo
 }
 
 /* 由 entries 重建 l2p_live（日志块 = 非固定元数据块）。 */
-static void md_rebuild_live(md_dir_cache_t *dir)
+static void md_live_rebuild(md_dir_cache_t *dir)
 {
     memset(dir->l2p_live, 0, sizeof(dir->l2p_live));
     dir->log_borrow_count = 0U;
@@ -877,10 +878,10 @@ static void md_rebuild_live(md_dir_cache_t *dir)
          * ⚠ INVALID/越界/固定非日志区的校验在 helper 里统一（介质输入不可信，H29）。 */
         const WORD rid = dir->entries[i].id;
 
-        md_live_add_copy(dir, dir->entries[i].pba, i, &warned);
+        md_live_copy_add(dir, dir->entries[i].pba, i, &warned);
         if (rid < METADATA_DIR_ENTRIES)
         {
-            md_live_add_copy(dir, dir->backup_pba[rid], i, &warned);
+            md_live_copy_add(dir, dir->backup_pba[rid], i, &warned);
         }
     }
 
@@ -897,7 +898,7 @@ static void md_rebuild_live(md_dir_cache_t *dir)
         const BYTE plane = ftl_gblock_plane(g);
         const WORD block = ftl_gblock_block(g);
 
-        if (!ftl_is_metadata_block(NULL, plane, block))
+        if (!md_block_is_metadata(NULL, plane, block))
         {
             dir->log_borrow_count++;
         }
@@ -905,7 +906,7 @@ static void md_rebuild_live(md_dir_cache_t *dir)
 }
 
 /* 开机观测口（判据②「走动态分配」/ 判据③「Anchor 真的落盘」的唯一观测口）*/
-static void md_boot_log(const md_dir_cache_t *dir)
+static void md_boot_status_log(const md_dir_cache_t *dir)
 {
     DWORD live_blocks = 0U;
 
@@ -943,10 +944,7 @@ static void md_boot_log(const md_dir_cache_t *dir)
  * -------------------------------------------------------------------- */
 void md_init(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
 {
-    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
-    ASSERT(alloc != NULL);
-    ASSERT(total_writes != NULL);
-
+    /* 前置条件：唯一调用点 ftl_init 传 &ftl->alloc / &ftl->total_writes（调用链已保证）。 */
     dir->alloc        = alloc;
     dir->total_writes = total_writes;
 
@@ -957,8 +955,8 @@ void md_init(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
     dir->dirty_gen       = 0U;
     dir->anchor_gen      = 0U;
 
-    md_fill_fixed(dir);
-    md_rebuild_live(dir);
+    md_fixed_fill(dir);
+    md_live_rebuild(dir);
 
     /* 游标全部置无效：首次追加才从固定 L2P 日志区取块（绝不复用可能已编程的旧页）*/
     dir->cur_metadata_block  = 0U;
@@ -976,12 +974,12 @@ void md_init(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
 
 /* 查 (type,id) 的下标；未找到返回 dir->count（调用者用它判 < count）。
  *
- * ⚠ 必须先走**稠密快路径**：Directory 的 L2P_REGION 条目由 `md_fill_fixed` 按
+ * ⚠ 必须先走**稠密快路径**：Directory 的 L2P_REGION 条目由 `md_fixed_fill` 按
  * `entries[id].id == id` 稠密预登记（Anchor 也按同一顺序读写），查找是 O(1)。
  * 只做线性扫描时，`md_compact_read` 对每个 region_id 各查一次 ⇒ O(N²)
  * （N = 2048，约 400 万次比较 ≈ 100 ms），元数据压缩期间主循环被拖住、USB
  * 事件得不到服务（表现为设备消失）。慢路径保留给非稠密/历史格式。 */
-static WORD md_find_index(const md_dir_cache_t *dir, BYTE type, WORD id)
+static WORD md_entry_index_find(const md_dir_cache_t *dir, BYTE type, WORD id)
 {
     if ((id < dir->count) && (dir->entries[id].type == type) && (dir->entries[id].id == id))
     {
@@ -999,20 +997,20 @@ static WORD md_find_index(const md_dir_cache_t *dir, BYTE type, WORD id)
     return dir->count;
 }
 
-/* md_find_entry — 线性查 (type,id) 的登记位置；未找到返回 NAND_PBA_INVALID。
+/* md_entry_find — 线性查 (type,id) 的登记位置；未找到返回 NAND_PBA_INVALID。
  * Directory 当前只登记 L2P_REGION；其余元数据是固定位置，不经过本函数。 */
-DWORD md_find_entry(const md_dir_cache_t *dir,
+DWORD md_entry_find(const md_dir_cache_t *dir,
                     BYTE                  type,
                     WORD                  id)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
 
-    const WORD i = md_find_index(dir, type, id);
+    const WORD i = md_entry_index_find(dir, type, id);
 
     return (i < dir->count) ? dir->entries[i].pba : NAND_PBA_INVALID;
 }
 
-WORD md_get_live_count(const md_dir_cache_t *dir, WORD gblock)
+WORD md_live_count_get(const md_dir_cache_t *dir, WORD gblock)
 {
     if (gblock >= FTL_BLOCK_TOTAL)
     {
@@ -1022,22 +1020,22 @@ WORD md_get_live_count(const md_dir_cache_t *dir, WORD gblock)
 }
 
 /* --------------------------------------------------------------------
- * md_update
+ * md_entry_update
  *   功能：更新 (type,id) 的登记位置；已有则覆盖，无则尾部追加；置 dirty。
  *   参数：dir —— Directory；type/id —— 元数据标识；new_pba —— 新位置。
  *   返回：无。
  *   实现要点：容量满时**不追加**并 LOGE。对本项目的 L2P_REGION 不可达
  *             （容量 == region 数，全部在 fill_fixed 已登记）。
  * -------------------------------------------------------------------- */
-void md_update(md_dir_cache_t *dir,
-               BYTE            type,
-               WORD            id,
-               DWORD           new_pba)
+void md_entry_update(md_dir_cache_t *dir,
+                     BYTE            type,
+                     WORD            id,
+                     DWORD           new_pba)
 {
     /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
 
     /* 查找现有 entry（覆盖旧位置） */
-    const WORD i = md_find_index(dir, type, id);
+    const WORD i = md_entry_index_find(dir, type, id);
 
     if (i < dir->count)
     {
@@ -1073,8 +1071,6 @@ void md_update(md_dir_cache_t *dir,
 
 WORD md_log_alloc(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
 {
-    ASSERT(dir != NULL);
-    ASSERT(alloc != NULL);
     ASSERT(plane < PLANE_NUM);
 
     for (WORD block = L2P_LOG_BLOCK0; block < L2P_LOG_AREA_END; block++)
@@ -1103,7 +1099,7 @@ WORD md_log_alloc(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
 
     /* 固定区无空闲块：从 **OP 池**有界借用动态日志块（L2P_LOG_BORROW_MAX）。
      * 不借则压缩没有目标块、CP 永远拿不到槽（RISK-MD-08）。借出的块由 l2p_live /
-     * ftl_is_metadata_block 动态识别，擦空后由 md_log_release 回 OP 池。 */
+     * md_block_is_metadata 动态识别，擦空后由 md_log_release 回 OP 池。 */
     if (dir->log_borrow_count < L2P_LOG_BORROW_MAX)
     {
         const WORD borrowed = alc_op_alloc_log_block(alloc, plane);
@@ -1120,7 +1116,6 @@ WORD md_log_alloc(md_dir_cache_t *dir, alc_t *alloc, BYTE plane)
 
 void md_log_release(md_dir_cache_t *dir, WORD gblock)
 {
-    ASSERT(dir != NULL);
     ASSERT(gblock < FTL_BLOCK_TOTAL);
 
     alc_t *alloc = dir->alloc;
@@ -1167,8 +1162,6 @@ void md_log_release(md_dir_cache_t *dir, WORD gblock)
  * live 接近上限时压缩已经没有目标块，只能死锁（RISK-MD-08）。 */
 WORD md_log_area_free_count(const alc_t *alloc)
 {
-    ASSERT(alloc != NULL);
-
     WORD n = 0U;
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
@@ -1192,10 +1185,8 @@ WORD md_log_area_free_count(const alc_t *alloc)
     return n;
 }
 
-WORD md_get_live_block_count(const md_dir_cache_t *dir)
+WORD md_live_block_count_get(const md_dir_cache_t *dir)
 {
-    ASSERT(dir != NULL);
-
     WORD n = 0U;
 
     for (BYTE plane = 0U; plane < PLANE_NUM; plane++)
@@ -1235,9 +1226,6 @@ static bool md_log_block_erased(const alc_t *alloc, BYTE plane, WORD block)
 
 void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc)
 {
-    ASSERT(dir != NULL);
-    ASSERT(alloc != NULL);
-
     WORD n_live    = 0U;
     WORD n_free    = 0U;
     WORD n_reclaim = 0U;
@@ -1295,7 +1283,7 @@ void md_log_area_restore(md_dir_cache_t *dir, alc_t *alloc)
         const WORD   block = ftl_gblock_block(g);
         bst_block_t *b     = &alloc->blocks[g];
 
-        if (ftl_is_metadata_block(NULL, plane, block) || ftl_block_is_bad(b))
+        if (md_block_is_metadata(NULL, plane, block) || ftl_block_is_bad(b))
         {
             continue;
         }
@@ -1400,7 +1388,7 @@ bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc)
          * 压缩/回收 job 会腾块；这里不能回退到用户 Free Pool。 */
         dir->handle.compact_wanted = true;
         LOGD(LOG_TAG_META "log area exhausted: live=%u reclaim=%u cur_page=%u — request compact\r\n",
-             (unsigned)md_get_live_block_count(dir),
+             (unsigned)md_live_block_count_get(dir),
              (unsigned)dir->reclaim_pending_count,
              (unsigned)dir->cur_metadata_page);
         return false;
@@ -1427,7 +1415,7 @@ bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc)
      * 32 块一路涨到上千块，把用户容量吃光（RISK-MD-07 / RISK-CAP-02）。
      * 只**登记请求**，本次不发放槽位：调用者收到 NAND_PBA_INVALID 返回 FTL_AGAIN，
      * 下轮重试；若 job 已起则继续让路直到压缩走完。 */
-    if (md_get_live_block_count(dir) > L2P_LOG_COMPACT_TRIGGER)
+    if (md_live_block_count_get(dir) > L2P_LOG_COMPACT_TRIGGER)
     {
         dir->handle.compact_wanted = true;
         return false;
@@ -1437,7 +1425,7 @@ bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc)
 }
 
 /* --------------------------------------------------------------------
- * md_append_slot_pair
+ * md_slot_pair_append
  *   功能：一次预留主/备两个连续槽（L2P region 写点），并推进写指针。
  *   参数：dir —— Directory；alloc —— 分配器（取新块）；out —— 两个槽位置。
  *   返回：true = out[0]/out[1] 已发放；false = job 在飞 / 换块失败（未消耗槽）。
@@ -1445,13 +1433,9 @@ bool md_log_rotate(md_dir_cache_t *dir, alc_t *alloc)
  *             后**立即推进** cur_metadata_page（写失败页可能半编程不可复用）。
  *             运行期擦除全部由后台 job 异步做。
  * -------------------------------------------------------------------- */
-bool md_append_slot_pair(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION_COPIES])
+bool md_slot_pair_append(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION_COPIES])
 {
-    /* 前置条件（判据 2）：调用者传 ftl->metadata_dir / &ftl->alloc / 栈上数组。 */
-    ASSERT(dir != NULL);
-    ASSERT(alloc != NULL);
-    ASSERT(out != NULL);
-
+    /* 前置条件：调用者传 ftl->metadata_dir / &ftl->alloc / 栈上数组（调用链已保证）。 */
     if (!md_is_handle_idle(dir))
     {
         return false; /* 整理 job 在飞：背压语义（见 md_log_rotate 的 job 让路说明） */
@@ -1492,13 +1476,13 @@ bool md_append_slot_pair(md_dir_cache_t *dir, alc_t *alloc, DWORD out[L2P_REGION
  * -------------------------------------------------------------------- */
 /* 单个 PBA 的账本迁移：旧位置 -1、新位置 +1、旧块归零则登记回收。
  * 主/备副本共用（RISK-BOOT-18 的 L2 双副本）。 */
-static void md_commit_one_copy(md_dir_cache_t *dir, DWORD old, DWORD new_pba)
+static void md_region_copy_commit(md_dir_cache_t *dir, DWORD old, DWORD new_pba)
 {
     WORD old_g = UINT16_MAX;
 
     /* 旧位置必须真的可能是 L2P region 槽位：只排除非日志固定区（0..L2P_LOG_BLOCK0−1）。
      * Anchor 条目来自介质（H29），损坏条目可能指向 Anchor/CP/BBT/Journal ⇒ 跳过。
-     * ⚠ **不能**用 `ftl_is_metadata_block(NULL, ...)`：L2P 日志区是固定分区，会被一起
+     * ⚠ **不能**用 `md_block_is_metadata(NULL, ...)`：L2P 日志区是固定分区，会被一起
      *   排除 ⇒ 旧位置的活计数永不递减、`l2p_live` 只增不减（RISK-MD-13）。 */
     if ((old != NAND_PBA_INVALID) && (pba_to_plane(old) < PLANE_NUM) &&
         (pba_to_block(old) >= L2P_LOG_BLOCK0))
@@ -1532,20 +1516,8 @@ static void md_commit_one_copy(md_dir_cache_t *dir, DWORD old, DWORD new_pba)
     }
 }
 
-/* 更新备份 PBA 并置 Directory 脏。 */
-static void md_update_backup(md_dir_cache_t *dir, WORD region_id, DWORD pba)
-{
-    if (region_id >= METADATA_DIR_ENTRIES)
-    {
-        return;
-    }
-    dir->backup_pba[region_id] = pba;
-    dir->dirty                 = true;
-    dir->dirty_gen++;
-}
-
 /* 读某个 region 的备份 PBA（INVALID = 无副本）。 */
-DWORD md_find_backup(const md_dir_cache_t *dir, WORD region_id)
+DWORD md_backup_find(const md_dir_cache_t *dir, WORD region_id)
 {
     return (region_id < METADATA_DIR_ENTRIES) ? dir->backup_pba[region_id] : NAND_PBA_INVALID;
 }
@@ -1567,17 +1539,21 @@ void md_commit_region_copy(md_dir_cache_t *dir,
 
     if (copy == 0U)
     {
-        const DWORD old = md_find_entry(dir, METADATA_TYPE_L2P_REGION, region_id);
+        const DWORD old = md_entry_find(dir, METADATA_TYPE_L2P_REGION, region_id);
 
-        md_commit_one_copy(dir, old, new_pba);
-        md_update(dir, METADATA_TYPE_L2P_REGION, region_id, new_pba);
+        md_region_copy_commit(dir, old, new_pba);
+        md_entry_update(dir, METADATA_TYPE_L2P_REGION, region_id, new_pba);
     }
     else
     {
-        const DWORD old = md_find_backup(dir, region_id);
+        const DWORD old = md_backup_find(dir, region_id);
 
-        md_commit_one_copy(dir, old, new_pba);
-        md_update_backup(dir, region_id, new_pba);
+        md_region_copy_commit(dir, old, new_pba);
+
+        /* region_id 已由本函数入口校验；备份副本没有额外条目结构，只更新账本并置脏。 */
+        dir->backup_pba[region_id] = new_pba;
+        dir->dirty                 = true;
+        dir->dirty_gen++;
     }
 }
 
@@ -1639,7 +1615,7 @@ md_anchor_step_e md_anchor_prepare(md_dir_cache_t *dir,
      * dirty 清掉（否则 on-media Anchor 落后于 RAM Directory，旧块可能被误回收）。 */
     dir->anchor_gen = dir->dirty_gen;
 
-    anchor_ring_init(dir, out_ring);
+    md_anchor_ring_init(dir, out_ring);
 
     /* 游标未建立（冷启动后首次 flush）⇒ 先定位池内最新有效 record 的下一槽 */
     if (!dir->anchor_cursor_valid)
@@ -1650,7 +1626,7 @@ md_anchor_step_e md_anchor_prepare(md_dir_cache_t *dir,
         ctx.dir  = dir;
         ctx.ring = out_ring;
 
-        if (md_ring_locate(out_ring, anchor_record_probe, &ctx, &newest, &dir->anchor_sequence, &dir->anchor_write_idx) != FTL_OK)
+        if (md_ring_locate(out_ring, md_anchor_record_probe, &ctx, &newest, &dir->anchor_sequence, &dir->anchor_write_idx) != FTL_OK)
         {
             return MD_ANCHOR_FAILED;
         }
@@ -1768,7 +1744,7 @@ static void md_load_assemble(md_dir_cache_t *dir, const md_ring_t *ring, WORD ne
             {
                 continue;
             }
-            const bool header_ok = anchor_header_fields_valid(page.magic, page.chunk_count, page.layout_version);
+            const bool header_ok = md_anchor_header_valid(page.magic, page.chunk_count, page.layout_version);
 
             if ((!header_ok) || (page.sequence != dir->anchor_sequence) || (page.chunk_index != chunk))
             {
@@ -1810,29 +1786,26 @@ static void md_load_assemble(md_dir_cache_t *dir, const md_ring_t *ring, WORD ne
  * -------------------------------------------------------------------- */
 ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_writes)
 {
-    /* 前置条件（判据 2）：调用者一律传 ftl->metadata_dir。 */
-    ASSERT(alloc != NULL);
-    ASSERT(total_writes != NULL);
-
+    /* 前置条件：唯一调用点传 ftl->metadata_dir / &ftl->alloc / &ftl->total_writes。 */
     dir->alloc        = alloc;
     dir->total_writes = total_writes;
 
     /* 基础层：全部 region = NAND_PBA_INVALID（未映射）。
      * Anchor 缺页/损坏时该区间回落"未映射"，不会出现"未登记"的空洞。 */
-    md_fill_fixed(dir);
-    md_rebuild_live(dir); /* 失败路径也要给出确定的活计数（开机日志用）*/
+    md_fixed_fill(dir);
+    md_live_rebuild(dir); /* 失败路径也要给出确定的活计数（开机日志用）*/
 
     md_ring_t          ring;
     anchor_probe_ctx_t ctx;
     WORD               newest = UINT16_MAX;
 
-    anchor_ring_init(dir, &ring);
+    md_anchor_ring_init(dir, &ring);
     ctx.dir  = dir;
     ctx.ring = &ring;
 
     {
         const ftl_status_e loc = md_ring_locate(&ring,
-                                                anchor_record_probe,
+                                                md_anchor_record_probe,
                                                 &ctx,
                                                 &newest,
                                                 &dir->anchor_sequence,
@@ -1853,7 +1826,7 @@ ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_write
             dir->dirty               = false;
             dir->dirty_gen           = 0U;
             dir->anchor_gen          = 0U;
-            md_boot_log(dir);
+            md_boot_status_log(dir);
             return FTL_ERROR; /* 无有效 Anchor：调用者转 md_init */
         }
     }
@@ -1869,7 +1842,7 @@ ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_write
     /* 由装配后的 entries 重建活计数；**日志块游标不跨重启恢复**：首次追加时从**固定
      * L2P 日志区**新取一块（绝不复用可能已编程的旧页）。旧日志块仍被 Directory 引用 ⇒
      * 由 l2p_live 保住，待其 region 全部改写后由后台整理 job 异步擦除归还。 */
-    md_rebuild_live(dir);
+    md_live_rebuild(dir);
     dir->cur_metadata_block = 0U;
     dir->cur_metadata_page  = 0U;
     dir->cur_block_valid    = false;
@@ -1877,7 +1850,7 @@ ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_write
     md_reclaim_reset(dir); /* 待回收位图不跨重启（同 job：全是 RAM 态）*/
     md_handle_reset(dir);  /* 整理 job 不跨重启（同游标：phase / 游标 / 请求位全是 RAM 态）*/
 
-    md_boot_log(dir);
+    md_boot_status_log(dir);
 
     return FTL_OK;
 }
@@ -1897,7 +1870,7 @@ ftl_status_e md_load(md_dir_cache_t *dir, alc_t *alloc, const DWORD *total_write
  *
  * 每项完全由 metadata.h 的宏派生——块号 / 块数 / 每块 record 数 / 表字节均无手写数字。
  */
-static const md_partition_t g_ftl_partitions[] = {
+static const md_partition_t s_md_partitions[] = {
   /* name, first_block, block_count, plane_mask, redundancy, table_bytes */
     {    "Anchor",     ANCHOR_BLOCK0,       ANCHOR_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK,         ANCHOR_RECORDS_PER_BLOCK,                       FTL_ANCHOR_TABLE_BYTES},
     {"Checkpoint", CHECKPOINT_BLOCK0,   CHECKPOINT_POOL_BLOCKS, METADATA_MIRROR_PLANE_MASK, FTL_CHECKPOINT_RECORDS_PER_BLOCK,                   FTL_CHECKPOINT_TABLE_BYTES},
@@ -1909,10 +1882,10 @@ static const md_partition_t g_ftl_partitions[] = {
 };
 
 /* 分区数（表长）。sizeof 派生 ⇒ 加/删分区项时自动跟随。 */
-static const DWORD g_ftl_partition_count = (sizeof(g_ftl_partitions) / sizeof(g_ftl_partitions[0]));
+static const DWORD s_md_partition_count = (sizeof(s_md_partitions) / sizeof(s_md_partitions[0]));
 
 /* --------------------------------------------------------------------
- * ftl_is_metadata_block
+ * md_block_is_metadata
  *   功能：判定 (plane, per-plane 块号 block) 是否属于元数据（固定分区 / 当前日志块 /
  *         已登记日志块）。
  *   参数：md_dir —— Directory（可 NULL：只判固定分区）；plane —— 物理 plane 号；
@@ -1926,7 +1899,7 @@ static const DWORD g_ftl_partition_count = (sizeof(g_ftl_partitions) / sizeof(g_
  *   ②③ 是**从用户区动态取的**块 ⇒ 必须带 plane 比较；只比块号会连带掩掉另一 plane
  *   的同号块（既出不了 free pool、又被 full metadata rebuild 跳过，白丢一个可用块）。
  * -------------------------------------------------------------------- */
-bool ftl_is_metadata_block(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
+bool md_block_is_metadata(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
 {
     /* ── 固定元数据块：v11 起 0..FTL_METADATA_AREA_END-1 **全部保留** ──
      * 包含 shared metadata spare；名义块即使 BAD 也不回归数据池（否则 BBT 记录的
@@ -1960,7 +1933,7 @@ bool ftl_is_metadata_block(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
 
 #ifndef NDEBUG
     /* 差分自检：证明 O(1) 账本判据与 Directory 逐条扫描完全等价。release 编译期消失。
-     * 扫描使用与 md_rebuild_live 相同的过滤条件（挡越界 / 固定块），
+     * 扫描使用与 md_live_rebuild 相同的过滤条件（挡越界 / 固定块），
      * 避免损坏介质上的条目让调试版误报。 */
     bool slow = false;
 
@@ -1989,7 +1962,7 @@ bool ftl_is_metadata_block(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
             const WORD eb = pba_to_block(pba);
 
             if ((ep >= PLANE_NUM) || (eb >= BLOCKS_PER_PLANE) ||
-                ftl_is_metadata_block(NULL, ep, eb))
+                md_block_is_metadata(NULL, ep, eb))
             {
                 continue;
             }
@@ -2005,6 +1978,10 @@ bool ftl_is_metadata_block(const md_dir_cache_t *md_dir, BYTE plane, WORD block)
     return fast;
 }
 
+/* ══════════════════════════════════════════════════════════════════
+ * 七、池诊断与服务
+ * ══════════════════════════════════════════════════════════════════ */
+
 /* --------------------------------------------------------------------
  * md_pool_print - 打印固定元数据分区的候选块池（CLI `pool` / 负例验证）
  *
@@ -2019,9 +1996,9 @@ void md_pool_print(const md_dir_cache_t *dir)
         return;
     }
 
-    for (DWORD p = 0U; p < g_ftl_partition_count; p++)
+    for (DWORD p = 0U; p < s_md_partition_count; p++)
     {
-        const md_partition_t *part = &g_ftl_partitions[p];
+        const md_partition_t *part = &s_md_partitions[p];
 
         if (part->first_block == L2P_LOG_BLOCK0)
         {

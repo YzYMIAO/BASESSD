@@ -24,7 +24,7 @@
    同理**运行时状态**保留返回码：`g_nand_dispatch_armed == 0U`（异步路径未放行）、`g_initialized == 0U`（惰性初始化未完成）、`ctx->active == 0U`、`fc_buffer_is_occupied(...) == 0U`（生命周期）、`map->uops == NULL`（操作表缺项）——这些是"此刻能不能做"，不是"调用者传错"。（原条目还列了 `g_crc_ready == 0U`——**v33 起该标志随 CRC 改走 HAL 驱动整体删除**，CRC 自检失败转 `ASSERT`，不再有「静默降级」这条运行结果，见 `docs/archive/changelog/fc_crc_hal_driver_v33.md`。）
 
 4. **单测固化为契约的守卫保留返回码**
-   这是判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**。`tests/` 里拿**文档化合法输入**调内部函数验证行为（如 `allocator_remove_from_free(..., 越界)` 是文档化的 no-op、`ftl_is_metadata_block(NULL,…)` 是文档化分类——两者都是 `../archive/ftl_ut_munit.md §4.1/§4.6` 的用例）的，按判据 1 保留返回码。
+   这是判据 2 的例外，但**只在测试是被测函数的正当调用者时成立**。`tests/` 里拿**文档化合法输入**调内部函数验证行为（如 `allocator_remove_from_free(..., 越界)` 是文档化的 no-op、`md_block_is_metadata(NULL,…)` 是文档化分类——两者都是 `../archive/ftl_ut_munit.md §4.1/§4.6` 的用例）的，按判据 1 保留返回码。
    反之，**只有测试会走"传非法参数"这条分支**（生产调用者从不传）的，按判据 2 转断言并**删掉对应用例**——见 §四。
 
 ## 二、两条辨析（最容易搞错的地方）
@@ -33,7 +33,7 @@
 来自 `fc_command_alloc()` / `mem_alloc` 的是**资源**（判据 3，保留）；来自函数入参的才是**前置条件**（判据 2，转断言）。FTL 里满屏的 `cmd == NULL` 绝大多数是前者。
 
 **辨析 B：语义分支不是前置条件。**
-用 `NULL` 表达"这个可选参数没给"的，是有意设计的语义，不是调用者的编程错误。例：`ds_deque.c` 的 `cp == NULL`（浅拷贝选择器）、`ftl_is_metadata_block(md_dir == NULL, …)`（固定区间照常分类）、`fc_ldpc_decode(..., err_bits == NULL)`（不取纠正位数）。~~`fc_submission_queue_pop_n(ids == NULL)`（仅消耗队列）、`fc_command_status_init(status, command == NULL)`（无命令来源时填哨兵值）~~ **（2026-10-08：两函数因零生产调用者被整体删除，见 §十七）**。
+用 `NULL` 表达"这个可选参数没给"的，是有意设计的语义，不是调用者的编程错误。例：`ds_deque.c` 的 `cp == NULL`（浅拷贝选择器）、`md_block_is_metadata(md_dir == NULL, …)`（固定区间照常分类）、`fc_ldpc_decode(..., err_bits == NULL)`（不取纠正位数）。~~`fc_submission_queue_pop_n(ids == NULL)`（仅消耗队列）、`fc_command_status_init(status, command == NULL)`（无命令来源时填哨兵值）~~ **（2026-10-08：两函数因零生产调用者被整体删除，见 §十七）**。
 
 ## 三、`ASSUME` 的取舍
 

@@ -583,10 +583,10 @@ static bool l2p_load_begin(l2p_cache_t *cache, l2p_cache_line_t *line, DWORD reg
      * 已恢复的映射在行驱逐后消失（host 误报 IO_ERROR，GC 还可能漏搬有效 CW）。
      * 位图只用于 host 读的「未映射 ⇒ IO_ERROR」判定（RISK-BOOT-18）。 */
 
-    const DWORD primary = md_find_entry(owner->metadata_dir,
+    const DWORD primary = md_entry_find(owner->metadata_dir,
                                         METADATA_TYPE_L2P_REGION,
                                         local_region);
-    const DWORD backup  = md_find_backup(owner->metadata_dir, local_region);
+    const DWORD backup  = md_backup_find(owner->metadata_dir, local_region);
 
     if ((primary == NAND_PBA_INVALID) && (backup == NAND_PBA_INVALID))
     {
@@ -1060,7 +1060,7 @@ static bool l2p_flush_resources_available(void)
  *     · 追加写绝不就地覆盖；**先写后记账**（顺序不可倒）：掉电最多多留一份旧记录，
  *       不会丢映射。
  *     · **取不到槽 ⇒ FTL_AGAIN**：
- *       md_append_slot_pair 返回 false 有三种来源——
+ *       md_slot_pair_append 返回 false 有三种来源——
  *       ① 全部 plane 的 Free Pool 都空；② 目录整理 job 在飞（它要独占当前块的空槽）；
  *       ③ 刚换新块且 Free Pool 吃紧，本函数只登记压缩请求、本次不发放槽位。
  *       三者都是**瞬态**（GC 会补池 / job 会走完），报 FTL_ERROR 会被调用者当硬失败
@@ -1099,7 +1099,7 @@ ftl_status_e l2p_flush_kick(l2p_cache_t *cache, int line_idx)
     /* 双副本：一次预留主/备两个槽（剩余页不足先换块，避免烧掉半对）。 */
     DWORD region_addr[L2P_REGION_COPIES];
 
-    if (!md_append_slot_pair(owner->metadata_dir, owner->alloc, region_addr))
+    if (!md_slot_pair_append(owner->metadata_dir, owner->alloc, region_addr))
     {
         /* 瞬态：Free Pool 空（等 GC 补池）或目录整理 job 在飞（等它走完）⇒ 背压。
          * ⚠ 不能报 FTL_ERROR：l2p_owner_flush_kick 会跳过本行、cp_regions_flush 会**中止
@@ -1274,8 +1274,8 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
             if (line->load_use_backup)
             {
                 const WORD  local   = l2p_global_to_local_region(line->region_id);
-                const DWORD primary = md_find_entry(ftl->metadata_dir, METADATA_TYPE_L2P_REGION, local);
-                const DWORD backup  = md_find_backup(ftl->metadata_dir, local);
+                const DWORD primary = md_entry_find(ftl->metadata_dir, METADATA_TYPE_L2P_REGION, local);
+                const DWORD backup  = md_backup_find(ftl->metadata_dir, local);
 
                 if ((primary != NAND_PBA_INVALID) && (backup != NAND_PBA_INVALID) && (primary != backup))
                 {
@@ -1290,7 +1290,7 @@ void ftl_l2p_callback(struct ftl_context *ftl, const fc_command_status_t *comple
         {
             /* 主副本失败且存在有效的另一份 ⇒ 立即改读备份（不消耗重试预算）。 */
             const WORD  local   = l2p_global_to_local_region(line->region_id);
-            const DWORD backup  = md_find_backup(ftl->metadata_dir, local);
+            const DWORD backup  = md_backup_find(ftl->metadata_dir, local);
             bool        retried = false;
 
             if ((!line->load_use_backup) && (backup != NAND_PBA_INVALID) && (backup != line->load_pba))

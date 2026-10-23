@@ -291,7 +291,7 @@ flowchart TB
         M1 --> M3["l2p_write CLEAN 到 DIRTY S3-6"]
         M1 --> M4["BST valid_count 加一或减一 S3-2"]
         M3 --> M5["l2p_flush_kick DIRTY 到 FLUSHING"]
-        M5 --> M6["md_append_slot_pair S3-5"]
+        M5 --> M6["md_slot_pair_append S3-5"]
         M6 --> M7["写主副本页 再到 备副本页"]
         M7 --> M8["md_commit_region_pair S3-5"]
         M2 --> M9["checkpoint_journal_watermark 85 百分比 95 百分比 S3-7"]
@@ -504,7 +504,7 @@ spare 在 device formation 时从 surfaced capacity 扣除）。旧版把 L2P �
 
 可枚举视图是 `g_ftl_partitions[]`（`src/ftl/metadata.c` 内的 `static const`），每项
 `md_partition_t { name, first_block, block_count, plane_mask, redundancy, table_bytes }`；
-只有 `ftl_is_metadata_block()` 读这张表。`redundancy` = 每块容纳的 record 数，
+只有 `md_block_is_metadata()` 读这张表。`redundancy` = 每块容纳的 record 数，
 Journal 不是 record 池，填 1。`plane_mask` 决定固定块在哪些 plane 上占用：
 Anchor/CP/BBT/Journal/L2P log = `METADATA_MIRROR_PLANE_MASK`（当前 2 plane ⇒ `0x03`；
 L2P log 在每个 plane 上各留一段同号区间，region 页**不按 plane 镜像**，而是每个
@@ -670,7 +670,7 @@ Directory 指向的 region 页优先放在**固定预留的 L2P 日志区** `[46
   固定区无空闲块时再借用户块；`l2p_live` 归零 ⇒ `reclaim_pending` ⇒ 后台擦除后
   `md_log_release`：固定块置 NONE，借来的块回 OP 池（§3.5）。
 - **动态块的识别**：`dir->l2p_live[g] != 0`（Directory 条目的账本）是
-  `ftl_is_metadata_block` 的唯一动态判据（C9），借来的块因此不会被当作普通用户块回收，
+  `md_block_is_metadata` 的唯一动态判据（C9），借来的块因此不会被当作普通用户块回收，
   full metadata rebuild 也会把它当 LOG 跳过。
 - **压缩**：主判据是 **free 水位**（固定区空闲块 ≤ `L2P_LOG_FREE_WATERMARK = 8`），
   辅以 `live > L2P_LOG_COMPACT_TRIGGER`（= 64，两份活数据的理想水位）。一次新生块可连续搬多个稀疏
@@ -770,7 +770,7 @@ L2P log 4096 region 页）是
   - **磨损计数不再占独立块**：随 Checkpoint 记录一起落盘（§2.3.5）；用户数据从块号
     `FTL_METADATA_AREA_END`（= 98）起。
 - 这条布局满足"预留必用"：P1 的 Anchor/CP/BBT 块是**真实副本**，不是闲置。
-  `ftl_is_metadata_block()` 按 `(plane & plane_mask)` 判固定块。
+  `md_block_is_metadata()` 按 `(plane & plane_mask)` 判固定块。
 
 #### 2.3.8 结构分布图（一）：空间布局
 
@@ -1190,7 +1190,7 @@ flowchart TD
    最后 `jrn_resume(floor=cp_seq)`。
    - **live L2P 日志块的自愈**（`RISK-BOOT-15`）：这类块归 `metadata_dir` 所有、
      不在 allocator 池里，合法 word 是 `NONE + no pool tag`。校验阶段对
-     `md_get_live_count(dir, g) > 0` 的块放行，Pass 2 按 Directory 修正为 `LOG`
+     `md_live_count_get(dir, g) > 0` 的块放行，Pass 2 按 Directory 修正为 `LOG`
      （Directory 是 live 日志块身份的唯一权威）。否则旧版 full rebuild 留下的
      NONE/no-pool 会让**整份**快照被拒绝，每次冷启动都全盘重建。
 5. **PF**：先恢复块元数据 → `jrn_replay`（所有 `page_seq+entry_count > cp_seq` 的页，
@@ -1675,7 +1675,7 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | Directory 的查找/更新/落盘（Anchor） | Journal 记录格式与回放（§3.7） |
 | L2P 日志块的追加/提交/回收/压缩 | Checkpoint 的阶段编排（§3.8） |
 | 通用元数据 record 池原语（`metadata_ring_*`） | 块分配（调用 `allocator_alloc_log_block`，§3.2） |
-| `ftl_is_metadata_block()` 判定 | 坏块内容判定（§3.3） |
+| `md_block_is_metadata()` 判定 | 坏块内容判定（§3.3） |
 
 **上游调用者**：
 
@@ -1684,7 +1684,7 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `l2p_cache.c` | `lookup` / `append_slot` / `commit_region` / `snapshot` 前的 Directory |
 | `checkpoint.c` | `metadata_ring_*`、`anchor_prepare/page/commit` |
 | `bbt.c` | `metadata_ring_*`（固定块池） |
-| `power_failure_recovery.c` | `md_load`、`ftl_is_metadata_block` |
+| `power_failure_recovery.c` | `md_load`、`md_block_is_metadata` |
 | `ftl.c` | `md_handle`（后台 job） |
 
 #### 3.5.3 元数据位置模型
@@ -1753,7 +1753,7 @@ L2P 表按 region 分片，每个 region 是一页（2 KiB）。如果所有 reg
 | `count` | 2 B | 有效 entry 数（固定层全填，通常 = 2048） |
 | `anchor_sequence` | 4 B | 当前 Anchor 序号 |
 | `dirty` | 1 B | 有未写回 Anchor 的变更 |
-| `dirty_gen` | 4 B | Directory 变更代数；每次 `md_update` 自增 |
+| `dirty_gen` | 4 B | Directory 变更代数；每次 `md_entry_update` 自增 |
 | `anchor_gen` | 4 B | 本次 Anchor 写入所覆盖的 `dirty_gen` 快照（过期保护） |
 | `l2p_live[4096]` | 8 KiB | 每个 gblock 上还有多少 region 的**最新位置**；也是 live 日志块判据（防御分支 / probe） |
 | `cur_metadata_block` | 2 B | 当前日志块 gblock |
@@ -1832,7 +1832,7 @@ return pba_make(topo->ch, topo->ce, topo->lun, block, plane, page, 0)
 `(cur_metadata_block, cur_metadata_page, cur_metadata_plane)`。块满时：
 
 ```text
-md_append_slot_pair
+md_slot_pair_append
   ├─ 当前块剩余 ≥ 2 页 ⇒ 返回连续两页 PBA，page += 2
   ├─ 剩余不足 2 页/无当前块
   │   ├─ 当前块已满且 l2p_live==0 ⇒ 先摘掉当前身份并登记（否则永远换不了块）
@@ -1857,21 +1857,21 @@ flowchart LR
     A["l2p_read miss"] --> B["l2p_load_start"]
     B --> C["owner = owner_of_region(global_region) → l2p_owner_t"]
     C --> D["local_region 为 global FTL_DIM_TOTAL"]
-    D --> E["md_find_entry L2P_REGION, local_region"]
+    D --> E["md_entry_find L2P_REGION, local_region"]
     E --> F{"pba 有效"}
     F -- "是" --> G["ftl_async_read_page pba"]
     G --> I["ftl_l2p_callback 填入 cache line：LOADING → CLEAN"]
     F -- "否" --> H["line 直接置 CLEAN（entries 全 INVALID，不读 NAND）"]
 ```
 
-`md_find_entry` 是 `entries[]` 线性扫描（2048 条）。**它不读 NAND**——Directory
+`md_entry_find` 是 `entries[]` 线性扫描（2048 条）。**它不读 NAND**——Directory
 是 SRAM 常驻的；读 NAND 的是随后加载 region 页的命令（未映射则根本不发命令）。
-`ftl_is_metadata_block` 的 live 日志块判定改用 `l2p_live[g]`（O(1)，不再扫 entries）。
+`md_block_is_metadata` 的 live 日志块判定改用 `l2p_live[g]`（O(1)，不再扫 entries）。
 
 **启动加载**（`md_load`）：
 
 ```text
-① md_fill_fixed：铺基础层（与 md_init 共用）
+① md_fixed_fill：铺基础层（与 md_init 共用）
    对 r = 0..2047：entries[r] = {type=L2P_REGION, id=r, pba=NAND_PBA_INVALID}
    （= 未映射；没有物理页，也没有固定回退位置）
 ② md_ring_locate(Anchor 池) 找最新“整条校验通过”的 record
@@ -1899,7 +1899,7 @@ sequenceDiagram
     participant N as NAND
     participant J as md_job
 
-    C->>D: md_append_slot_pair
+    C->>D: md_slot_pair_append
     alt 当前块剩余 ≥ 2 页
         D->>D: 返回连续两页 PBA, page 加二
     else 块满/无当前块
@@ -1931,7 +1931,7 @@ sequenceDiagram
 - 写成功但掉电在 commit 之前：新页是“孤儿”，Directory 仍指旧位置；同样由 Journal 恢复。
 - **绝不出现**“Directory 指向未写页”——这是掉电安全的关键。
 
-**`md_update` 的定位**：它是“直接覆盖 entry”的低层写入，供固定层铺设、
+**`md_entry_update` 的定位**：它是“直接覆盖 entry”的低层写入，供固定层铺设、
 Anchor 装配、测试使用；运行期 L2P region 的更新走 `commit_region`，以维护 `l2p_live`。
 两者不要混用。
 
@@ -2031,7 +2031,7 @@ Directory（`anchor_for_reclaim`），否则就是同一个掉电丢映射。
 | 池 | 32 块，每块 8 条 record（64 页 / 8 页） |
 | 写序 | 池内 ring 轮转；写满一块先擦池内下一块 |
 | 读取 | 找“整条校验通过”中 sequence 最大者；不取半条 |
-| 触发 | `dirty` 置位后由元数据 job 异步 flush（无变更阈值），**或** 普通回收在擦除前强制 flush（`anchor_for_reclaim`）；Checkpoint 前也要求 flush；不在 `md_update` 里同步做 |
+| 触发 | `dirty` 置位后由元数据 job 异步 flush（无变更阈值），**或** 普通回收在擦除前强制 flush（`anchor_for_reclaim`）；Checkpoint 前也要求 flush；不在 `md_entry_update` 里同步做 |
 | CRC | 无本层 CRC；完整性由下层 FC 的 per-CW CRC + ECC 保证 |
 
 三段式（所有落盘站点统一）：
@@ -2066,7 +2066,7 @@ Anchor 仍引用的旧块）。
 | CP 的 Anchor 阶段 | `md_anchor_prepare/page/commit`，与压缩 job 共用同一套三段式 |
 | 共享 cache 的 owner | `owner_of_region(global_region)` 返回 `l2p_owner_t {dim, metadata_dir, alloc, topo}`；不返回整个 `ftl_ctx_t` |
 
-**`ftl_is_metadata_block` 的三条分支**（full metadata rebuild / 建池共用）：
+**`md_block_is_metadata` 的三条分支**（full metadata rebuild / 建池共用）：
 
 1. **固定分区**：遍历 `g_ftl_partitions[]` 按 `first_block/block_count` 判区间；
    固定块号各 die 相同，**与 plane 无关**。v10 起 L2P 日志区（46..93）也在这张表里，
@@ -2278,7 +2278,7 @@ l2p_write(lba, pba)
 l2p_flush_kick(line)
     ├─ 非 DIRTY / 已在 FLUSHING ⇒ 返回
     ├─ flush_inflight 达上限 ⇒ FTL_AGAIN
-    ├─ md_append_slot_pair 取两槽（失败 ⇒ 行保持 DIRTY）
+    ├─ md_slot_pair_append 取两槽（失败 ⇒ 行保持 DIRTY）
     ├─ 起异步写主副本；state = FLUSHING
     ├─ 主副本完成 ⇒ 串行提交备副本
     └─ 完成：两份都成功 ⇒ commit_region_pair + CLEAN + 清脏位
@@ -4005,7 +4005,7 @@ sequenceDiagram
     S->>C: l2p_flush_kick
     C->>C: 非 DIRTY 已在 FLUSHING 则 返回
     C->>C: flush_inflight 达上限 则 FTL_AGAIN
-    C->>D: md_append_slot_pair
+    C->>D: md_slot_pair_append
     alt 当前日志块剩余 ≥ 2 页
         D-->>C: 连续两页 PBA（主/备）
     else 剩余不足 2 页

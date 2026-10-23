@@ -745,7 +745,7 @@ static ftl_status_e ftl_boot_carve_pools(struct ftl_context *ftl)
         {
             continue;
         }
-        if (ftl_is_metadata_block(ftl->metadata_dir, plane, block))
+        if (md_block_is_metadata(ftl->metadata_dir, plane, block))
         {
             continue;
         }
@@ -1002,7 +1002,7 @@ static void ftl_boot_apply_region_bitmap(ftl_ctx_t         *ftl,
             continue;
         }
 
-        const DWORD addr = md_find_entry(ftl->metadata_dir,
+        const DWORD addr = md_entry_find(ftl->metadata_dir,
                                          METADATA_TYPE_L2P_REGION,
                                          local);
 
@@ -1454,7 +1454,7 @@ static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stat
             }
 
             /* 固定元数据块不参与块账本，保持 NONE（恢复校验对固定块整段跳过）。 */
-            if (ftl_is_metadata_block(NULL, plane, block))
+            if (md_block_is_metadata(NULL, plane, block))
             {
                 continue;
             }
@@ -1465,7 +1465,7 @@ static void ftl_rebuild_closed_sb_list(struct ftl_context *ftl, pfr_rebuild_stat
              * `ftl_recovery_restore_blocks()` Pass 0 判为非法并拒绝**整份**快照
              * ⇒ 又走全盘 build，形成每次冷启动都 rebuild 的循环（RISK-BOOT-15）。
              * Directory 是动态 LOG 块身份的唯一权威，这里按它落 state。 */
-            if (ftl_is_metadata_block(ftl->metadata_dir, plane, block))
+            if (md_block_is_metadata(ftl->metadata_dir, plane, block))
             {
                 ftl_block_set_state(b, FTL_BLOCK_STATE_LOG);
                 ftl_block_clear_valid(b);
@@ -1533,7 +1533,7 @@ static bool recovery_is_fixed_block(WORD g)
 {
     /* 必须按分区表的 plane_mask 判：分区只在 mask 覆盖的 plane 上预留，表外同号块
      * 是用户数据。不要写死 "block < 某常量"——布局随介质版本演进。 */
-    return ftl_is_metadata_block(NULL, ftl_gblock_plane(g), ftl_gblock_block(g));
+    return md_block_is_metadata(NULL, ftl_gblock_plane(g), ftl_gblock_block(g));
 }
 
 /* 把一个物理块发成退化单 plane Closed 条目（与 full metadata rebuild 同口径；Policy B 不要求配对）。
@@ -1597,7 +1597,7 @@ static bool ftl_recovery_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOT
          * word 就是 NONE/no-pool。Directory 是身份的唯一权威 ⇒ 放行；Pass 2 会把它
          * 修正为 LOG（RISK-BOOT-15 的自愈路径，不再为一处旧快照做全盘 rebuild）。 */
         if ((st == FTL_BLOCK_STATE_NONE) && (pool == CP_BLOCK_POOL_NONE) &&
-            (md_get_live_count(ftl->metadata_dir, g) == 0U))
+            (md_live_count_get(ftl->metadata_dir, g) == 0U))
         {
             LOGE(LOG_TAG_BLK "g=%u NONE with no pool tag\r\n", (unsigned)g);
             return false;
@@ -1722,7 +1722,7 @@ static bool ftl_recovery_restore_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOT
         {
             continue;
         }
-        if (md_get_live_count(ftl->metadata_dir, g) > 0U)
+        if (md_live_count_get(ftl->metadata_dir, g) > 0U)
         {
             /* NONE = 旧版 full rebuild 留下的 NONE/no-pool（RISK-BOOT-15 自愈路径，
              * 可能上百块，不逐块告警）；其他非 LOG 状态才是真冲突，留痕一次。 */
@@ -1796,7 +1796,7 @@ static void ftl_recovery_probe_blocks(ftl_ctx_t *ftl, WORD words[FTL_BLOCK_TOTAL
 
         if (st == FTL_BLOCK_STATE_LOG)
         {
-            if (md_get_live_count(ftl->metadata_dir, g) > 0U)
+            if (md_live_count_get(ftl->metadata_dir, g) > 0U)
             {
                 if (stats != NULL)
                 {
@@ -1945,7 +1945,7 @@ static bool ftl_recovery_build_pools(ftl_ctx_t *ftl, const WORD words[FTL_BLOCK_
         const BYTE plane = ftl_gblock_plane(g);
         const WORD block = ftl_gblock_block(g);
 
-        if (ftl_is_metadata_block(ftl->metadata_dir, plane, block))
+        if (md_block_is_metadata(ftl->metadata_dir, plane, block))
         {
             continue; /* 固定区（已在上面跳过）/ 活的动态 LOG 块 */
         }
@@ -2050,7 +2050,7 @@ static bool recovery_materialize_pba(void *ctx, DWORD pba)
     {
         return true; /* 坏块不记账；数据已不可信 */
     }
-    if (ftl_is_metadata_block(ftl->metadata_dir, ftl_gblock_plane(g), ftl_gblock_block(g)))
+    if (md_block_is_metadata(ftl->metadata_dir, ftl_gblock_plane(g), ftl_gblock_block(g)))
     {
         return false; /* journal 不应指向 L2P 日志块 */
     }
@@ -2064,7 +2064,7 @@ static bool recovery_materialize_pba(void *ctx, DWORD pba)
             return true;
 
         case FTL_BLOCK_STATE_LOG:
-            /* 快照说 LOG、但 Directory 已不引用（上面的 ftl_is_metadata_block 为假）
+            /* 快照说 LOG、但 Directory 已不引用（上面的 md_block_is_metadata 为假）
              * ⇒ 该块在 CP 后被回收并复用；journal 指向它就是新用户数据。
              * 按陈旧 LOG 处理：转 Closed（旧 L2P 页交给 GC 擦除）。 */
             ftl_block_set_state(b, FTL_BLOCK_STATE_CLOSED);

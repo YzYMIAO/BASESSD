@@ -571,7 +571,7 @@ static int uart_cli_info(int argc, char *argv[])
                            (unsigned)alc_spare_get_count(&ftl->alloc, 1U),
                            (unsigned)ftl->alloc.bad_count,
                            (unsigned)ftl->alloc.closed_sb_count,
-                           (unsigned)md_get_live_block_count(ftl->metadata_dir),
+                           (unsigned)md_live_block_count_get(ftl->metadata_dir),
                            (unsigned)ftl->cache->thrashing,
                            (unsigned)ftl->cache->miss_pct,
                            ftl->cp_handle->cp_state.sequence,
@@ -655,7 +655,7 @@ static int uart_cli_info(int argc, char *argv[])
 /*
  * map <lba> — 只读诊断：打印该 LBA 的 L2P 映射与**目标块**的 BST 条目。
  *
- * 起因：`ftl_is_metadata_block` 缺 plane 掩码（v0.69 修）时，被日志块掩住的用户块
+ * 起因：`md_block_is_metadata` 缺 plane 掩码（v0.69 修）时，被日志块掩住的用户块
  * 进不了 Free Pool、也被 full metadata rebuild 跳过 ⇒ `valid_count` 恒 0，而 L2P 仍可能指向它
  * ⇒ 此后**每次**覆盖写该 LBA 都撞 `bst.h` 的 `b->valid_count > 0U` 断言。
  * 本命令把「L2P 指向谁」与「BST 怎么看那个块」摆在一起，用于在**不复现崩溃**的前提下

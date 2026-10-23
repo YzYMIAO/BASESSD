@@ -298,7 +298,7 @@ Level 3 不验证数据变换正确性（那是 Level 2 的职责），只验证
 | `L3_BLOCK_LO` | `2048 * 30 / 100` = **614** | 窗口下界 |
 | `L3_BLOCK_HI` | `2048 * 70 / 100` = **1433** | 窗口上界 |
 
-地址里的 `block` 字段是 **per-plane** 号，窗口取每 plane 块数的 30%~70% 以避开**固定**元数据区（本仓 per-plane 编号下落在 0..41 一带：L2P 0..31 / Anchor 33,34 / BBT 36,39 / Checkpoint 37,38 / Journal 40,41，见 `src/ftl/metadata.c` 的 `ftl_is_metadata_block`）。
+地址里的 `block` 字段是 **per-plane** 号，窗口取每 plane 块数的 30%~70% 以避开**固定**元数据区（本仓 per-plane 编号下落在 0..41 一带：L2P 0..31 / Anchor 33,34 / BBT 36,39 / Checkpoint 37,38 / Journal 40,41，见 `src/ftl/metadata.c` 的 `md_block_is_metadata`）。
 
 **抽样函数**（都在 `test_fc_level3.c`，用途标签区分同一用例内的不同抽取）：
 

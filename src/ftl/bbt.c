@@ -191,7 +191,7 @@ bool bbt_medium_has_ftl_data(alc_t *alloc)
     {
         for (WORD block = 0U; block < FTL_METADATA_AREA_END; block++)
         {
-            if (!ftl_is_metadata_block(NULL, plane, block))
+            if (!md_block_is_metadata(NULL, plane, block))
             {
                 continue; /* 该 plane 的这个块号不是固定元数据（可能是用户数据） */
             }

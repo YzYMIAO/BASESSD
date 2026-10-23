@@ -305,7 +305,7 @@ bool alc_op_push(alc_t *alloc, BYTE plane, WORD gblock);
  * 返回：gblock（已出池、state=LOG）；FTL_GBLOCK_INVALID = 该 plane Free Pool 空。
  *
  * 用途：固定 L2P 日志区满时的**有界溢出**。从 OP（GC headroom）借还闭环，
- * 不动用户容量；借出的块由 metadata 的 `l2p_live` / `ftl_is_metadata_block`
+ * 不动用户容量；借出的块由 metadata 的 `l2p_live` / `md_block_is_metadata`
  * 动态识别，擦空后回 OP。
  */
 WORD alc_op_alloc_log_block(alc_t *alloc, BYTE plane);
