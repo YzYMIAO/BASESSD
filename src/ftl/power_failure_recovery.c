@@ -581,11 +581,11 @@ void ftl_boot_log_bad_areas(const struct ftl_context *ftl)
  *   参数：ftl —— FTL 实例（由 main.c 的调用链保证）；result —— 出参启动结果
  *         （boot_type / cp_sequence / journal_entries，由调用者提供）。
  *   返回：FTL_OK 成功；FTL_ERROR 子路径失败。
- *   实现要点：① 扫 Journal 环形块池取最新页（jrn_scan_latest）——**只读不改状态**，
+ *   实现要点：① 扫 Journal 环形块池取最新页（jrn_page_scan_latest）——**只读不改状态**，
  *                故不调 jrn_replay（后者会修改 journal 内部状态）。三条启动路径
  *                都要拿这份快照恢复 Journal RAM 写态（jrn_resume）。
  *             ② cp_pool_find_latest 取最近快照，找不到 = 首次启动走 fresh_start。
- *             ③ 最新页 page_seq ≤ cp->jrn_get_sequence ⇒ 干净关机；否则异常掉电。
+ *             ③ 最新页 page_seq ≤ cp->journal_sequence ⇒ 干净关机；否则异常掉电。
  * -------------------------------------------------------------------- */
 ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *result)
 {
@@ -600,7 +600,7 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
      *    不接回去就会二次编程 + 序号回退（详见 jrn_resume）。 */
     jrn_page_ref_t ring;
     bool           ring_read_error = false;
-    (void)jrn_scan_latest(ftl->journal, &ring, &ring_read_error);
+    (void)jrn_page_scan_latest(ftl->journal, &ring, &ring_read_error);
 
     /* ② 扫描 Checkpoint + 读取 块元数据快照（快照失败不触发格式化，只影响块元数据路径） */
     cp_header_t *cp     = (cp_header_t *)ftl->cp_handle->hdr_buf; /* handle 常驻 2KB */
@@ -637,7 +637,7 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
         if (ret == FTL_OK)
         {
             /* 让首个 CP 尽快提交重建后的状态并清标志。 */
-            jrn_request_checkpoint(ftl->journal);
+            jrn_checkpoint_request(ftl->journal);
 
             ftl->md_load_failed          = 0U;
             local_result.boot_type       = BOOT_CLEAN_START;
@@ -675,19 +675,19 @@ ftl_status_e ftl_boot_recovery(struct ftl_context *ftl, pfr_boot_result_t *resul
     /* ③ 判型：最新页**整页**都被 Checkpoint 覆盖 ⇒ 干净关机；否则异常掉电。
      *
      * ⚠ 判据必须是**整页**的 `page_seq + entry_count`，与 jrn_replay 的回放过滤
-     *   同口径。`cp->jrn_get_sequence` 的语义是「下一个待分配序号」（Checkpoint job
+     *   同口径。`cp->journal_sequence` 的语义是「下一个待分配序号」（Checkpoint job
      *   直接取 sequence_counter，journal_truncate 的注释亦如此声明）⇒ 被 CP 覆盖的条目
-     *   是 seq < cp->jrn_get_sequence。一页占 seq [page_seq, page_seq+entry_count-1]，
-     *   全被覆盖 ⟺ page_seq + entry_count ≤ cp->jrn_get_sequence。
+     *   是 seq < cp->journal_sequence。一页占 seq [page_seq, page_seq+entry_count-1]，
+     *   全被覆盖 ⟺ page_seq + entry_count ≤ cp->journal_sequence。
      *
-     * ⚠ 不能只看页首（page_seq ≤ cp->jrn_get_sequence）：Checkpoint 之后写入的第一页
-     * page_seq 正好 == cp->jrn_get_sequence，只看页首会把「写→掉电」判成干净、不回放
+     * ⚠ 不能只看页首（page_seq ≤ cp->journal_sequence）：Checkpoint 之后写入的第一页
+     * page_seq 正好 == cp->journal_sequence，只看页首会把「写→掉电」判成干净、不回放
      * ⇒ 数据静默丢失。上板签名：`boot type=1 journal_entries=0` +
      * `[BLK] rebuild blocks=N valid_cw=0` + `rd FAIL ... got 00000000`。 */
     /* ⚠ 环内有读失败页 ⇒ 最新页与判型都不可信：不能据此判「干净关机」
      *   （否则可能少回放条目）。保守走掉电回放路径；回放也会因读失败返回
      *   FTL_ERROR，再由 ftl_boot_power_failure 回退 full metadata rebuild。 */
-    if ((!ring_read_error) && ((ring.page_seq + ring.entry_count) <= cp->jrn_get_sequence))
+    if ((!ring_read_error) && ((ring.page_seq + ring.entry_count) <= cp->journal_sequence))
     {
         /* 干净关机 */
         ftl_status_e ret = ftl_boot_clean_start(ftl, cp, blocks_valid ? 1U : 0U, false, &local_result.blocks_restored, &ring);
@@ -906,7 +906,7 @@ static ftl_status_e ftl_boot_clean_start(struct ftl_context   *ftl,
         /* initial Checkpoint = 全量格式化写的空快照（seq=1 / 无块表 / journal 水位 0）。
          * 此时用户区已由 format 擦净，full metadata rebuild（全盘扫描 4096×64 页）没有信息可恢复，
          * 直接 reset + carve 即可；跳过它把首次启动从几十秒降到一次池切分。 */
-        const bool initial_cp = (!force_rebuild) && (cp->sequence == 1U) && (cp->jrn_get_sequence == 0U) &&
+        const bool initial_cp = (!force_rebuild) && (cp->sequence == 1U) && (cp->journal_sequence == 0U) &&
                                 (cp->block_word_count == 0U) && (cp->wear_entry_count == 0U);
 
         if (initial_cp)
@@ -933,7 +933,7 @@ static ftl_status_e ftl_boot_clean_start(struct ftl_context   *ftl,
     recovery_refill_spare_pools(ftl);
 
     /* ② Journal RAM 写态恢复（环形块未被擦，必须接回写指针/序号）。 */
-    jrn_resume(ftl->journal, ring, cp->jrn_get_sequence);
+    jrn_resume(ftl->journal, ring, cp->journal_sequence);
 
     /* ③ Controller → Ready */
     cp_timer_reset(ftl->cp_handle);
@@ -1036,7 +1036,7 @@ static ftl_status_e ftl_boot_power_failure(struct ftl_context *ftl,
 {
     /* 前置条件（判据 2）：唯一调用者 ftl_boot_recovery 持有实例与局部结构。 */
 
-    DWORD cp_sequence = cp->jrn_get_sequence;
+    DWORD cp_sequence = cp->journal_sequence;
 
     /* ① 共享 cache 已由设备级 init 置空；journal 回放把本 owner 的映射写进 cache。
      *    ⚠ 不能在此整体 re-init：会抹掉前面 LUN 刚回放的 DIRTY 行与全局脏位。 */
@@ -1054,7 +1054,7 @@ static ftl_status_e ftl_boot_power_failure(struct ftl_context *ftl,
         block_ctx.valid_add   = recovery_valid_add;
         block_ctx.valid_sub   = recovery_valid_sub;
         block_ctx.ctx         = ftl;
-        block_ctx.ok          = 1U;
+        block_ctx.ok          = true;
     }
 
     /* ③ Journal 回放：映射写入 L2P Cache；block_ctx 有效时同步记 valid 增量。
@@ -1072,7 +1072,7 @@ static ftl_status_e ftl_boot_power_failure(struct ftl_context *ftl,
         /* 回放不完整（环内有读失败页）：journal 写态已恢复，但映射可能缺失
          * ⇒ 强制回退 full metadata rebuild（见下方 restored 判定）。 */
         LOGW(LOG_TAG_BLK "journal replay incomplete — force full metadata rebuild\r\n");
-        block_ctx.ok = 0U;
+        block_ctx.ok = false;
     }
 
     /* 降级 region 只丢旧映射，不再让快照失效（范围化恢复）。这里先记标记，
@@ -1091,7 +1091,7 @@ static ftl_status_e ftl_boot_power_failure(struct ftl_context *ftl,
     /* ⑤ 块元数据快照收尾：探测池块 + 唯一入池点；任一步失败 ⇒ 丢弃快照结果走 full metadata rebuild。 */
     BYTE restored = 0U;
 
-    if ((blocks_applied != 0U) && (block_ctx.ok != 0U))
+    if ((blocks_applied != 0U) && block_ctx.ok)
     {
         pfr_block_restore_stats_t stats;
         memset(&stats, 0, sizeof(stats));
@@ -1134,8 +1134,8 @@ static ftl_status_e ftl_boot_power_failure(struct ftl_context *ftl,
         result->scoped = false;
 
         /* 诊断：把「快照是否加载 / 是否应用 / 回放是否成功」一并打出——
-         * ctx_ok=0 有三种来源：blocks_valid=0（快照没读成）、applied=0（快照被
-         * Pass 0 拒绝）、replay_ok=0 或回放内部把 ok 清 0（降级/写失败）。 */
+         * ctx_ok=false 有三种来源：blocks_valid=0（快照没读成）、applied=0（快照被
+         * Pass 0 拒绝）、replay_ok=false 或回放内部把 ok 清 0（降级/写失败）。 */
         LOGW(LOG_TAG_BLK "fallback to full metadata rebuild (power failure, blocks_valid=%u applied=%u ctx_ok=%u replay_ok=%u)\r\n",
              (unsigned)blocks_valid,
              (unsigned)blocks_applied,
@@ -2033,7 +2033,7 @@ static bool recovery_materialize_pba(void *ctx, DWORD pba)
     if ((!pba_is_valid(pba)) || (pba_to_ch(pba) != ftl->topo.ch) ||
         (pba_to_ce(pba) != ftl->topo.ce) || (pba_to_lun(pba) != ftl->topo.lun))
     {
-        return false; /* block_ctx.ok=0 ⇒ 调用者回退 full metadata rebuild */
+        return false; /* block_ctx.ok=false ⇒ 调用者回退 full metadata rebuild */
     }
 
     alc_t     *alloc = &ftl->alloc;
@@ -2088,7 +2088,7 @@ static bool recovery_materialize_pba(void *ctx, DWORD pba)
     }
 }
 
-/* jrn_replay 的 valid_count 增量端口（带守卫：越界/上溢/下溢置 *ok=0）。
+/* jrn_replay 的 valid_count 增量端口（带守卫：越界/上溢/下溢置 *ok=false）。
  * materialize 已保证该块处于可记账状态；这里只做范围检查与 BST 单数据源更新。 */
 static void recovery_valid_add(void *ctx, DWORD pba, bool *ok)
 {

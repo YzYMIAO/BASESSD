@@ -342,7 +342,7 @@ static ftl_status_e ftl_confirm_write(ftl_ctx_t *ftl, const pend_req_t *pending)
         }
     }
 
-    jrn_update_watermark(ftl->journal);
+    jrn_watermark_update(ftl->journal);
     ftl->total_writes++; /* 计「编程次数」（页打包后一页 = 一次编程），不是 CW 数 */
     return FTL_OK;
 }
@@ -2107,8 +2107,8 @@ static void ftl_flush_kick_cp(ftl_ctx_t *ftl)
     memset(&trigger, 0, sizeof(trigger));
     trigger.now_ms            = now_ms;
     trigger.total_writes      = ftl->total_writes;
-    trigger.journal_seq       = jrn_get_sequence(ftl->journal);
-    trigger.jrn_get_watermark = jrn_get_watermark(ftl->journal);
+    trigger.journal_seq       = jrn_sequence_get(ftl->journal);
+    trigger.journal_watermark = jrn_watermark_get(ftl->journal);
     trigger.emergency         = jrn_is_emergency(ftl->journal);
     trigger.force             = true;
     trigger.reason            = CP_REASON_EXPLICIT;
@@ -2197,7 +2197,7 @@ bool ftl_flush_step(ftl_ctx_t *ftl)
     if (fail)
     {
         /* best-effort：journal 页写/擦或 wbuf 编程持续失败。CP 成功后
-         * jrn_clear_write_failure 清 journal 标志；wbuf FAILED 由下一次成功操作清。 */
+         * jrn_write_failure_clear 清 journal 标志；wbuf FAILED 由下一次成功操作清。 */
         if (ftl_log_throttle_due(&s_flush_err_log, &suppressed))
         {
             LOGW(LOG_TAG_FTL "flush: write failure pending (jrn=%u wb=%u) — complete best-effort (suppressed=%lu)\r\n",
@@ -2259,7 +2259,7 @@ static ftl_status_e ftl_trim_defer(ftl_ctx_t *ftl, BYTE processed)
     if (processed != 0U)
     {
         ftl->trim_wait_ms = 0U;
-        jrn_update_watermark(ftl->journal);
+        jrn_watermark_update(ftl->journal);
         return FTL_AGAIN;
     }
 
@@ -2392,7 +2392,7 @@ ftl_status_e ftl_trim_step(ftl_ctx_t *ftl)
     if (processed != 0U)
     {
         ftl->trim_wait_ms = 0U;
-        jrn_update_watermark(ftl->journal);
+        jrn_watermark_update(ftl->journal);
     }
 
     if (ftl->trim_lba >= ftl->trim_end)

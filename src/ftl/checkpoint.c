@@ -386,7 +386,7 @@ static void cp_header_fill(cp_header_t *cp,
 
     cp->magic            = CP_MAGIC;
     cp->sequence         = sequence;    /* 本池自己的单调序号 */
-    cp->jrn_get_sequence = journal_seq; /* 截断到此 seq（job 起点快照） */
+    cp->journal_sequence = journal_seq; /* 截断到此 seq（job 起点快照） */
     cp->layout_version   = FTL_MEDIA_LAYOUT_VERSION;
     cp->block_word_count = FTL_BLOCK_TOTAL;
     cp->block_word_bytes = CP_BLOCK_WORD_BYTES;
@@ -541,8 +541,8 @@ static void cp_complete_hdr_write(cp_handle_t *h, bool failed)
     }
     h->cp_state.last_journal_sequence = h->journal_seq; /* T3 空转门 / 增量判据 */
     /* Header 是 commit 页：此时快照的脏区都已落盘。若本次 CP 起点覆盖了
-     * Journal 的持久性失败点，可清除 pending（见 jrn_clear_write_failure）。 */
-    jrn_clear_write_failure(h->journal, h->journal_seq);
+     * Journal 的持久性失败点，可清除 pending（见 jrn_write_failure_clear）。 */
+    jrn_write_failure_clear(h->journal, h->journal_seq);
 
     /* 元数据失块后的 full rebuild：**本次 CP 已把重建后的状态落盘**，才可以清
      * REBUILD_REQUIRED（本仓自拟）。掉电在 CP 之前 ⇒ 标志仍在 ⇒ 下次开机重建。 */
@@ -1043,7 +1043,7 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
     const DWORD dim = ftl_topo_dim(h->topo);
 
     l2p_snapshot_owner_bitmap(h->cache, dim, h->region_bitmap);
-    h->journal_seq = jrn_get_sequence(h->journal);
+    h->journal_seq = jrn_sequence_get(h->journal);
 
     /* 块元数据快照与 region_bitmap / journal_seq 在**同一个协作点**取定：
      * 单线程 superloop 里本函数不会被完成回调打断 ⇒ 三者是同一个 cut。
@@ -1053,7 +1053,7 @@ static ftl_status_e cp_job_begin(cp_handle_t *h)
 
     /* CP 之后的同 LBA append 不得合并进水位之前的条目——否则 sequence 还是旧的、
      * new_pba 却是新的，delta 回放会漏记（见 journal.c 的 merge_floor）。 */
-    jrn_set_merge_floor(h->journal, h->journal_seq);
+    jrn_merge_floor_set(h->journal, h->journal_seq);
 
     h->active   = 1U;
     h->phase    = CP_FLUSH_REGIONS;
@@ -1136,7 +1136,7 @@ ftl_status_e cp_pool_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_reco
         return FTL_ERROR;
     }
 
-    h->cp_state.last_journal_sequence = cp->jrn_get_sequence;
+    h->cp_state.last_journal_sequence = cp->journal_sequence;
     /* 本 session 首次 CP 先跳一槽：避开掉电残留的「快照已写 / Header 未写」半编程槽。 */
     h->cp_state.advance_next          = 1U;
 
@@ -1148,7 +1148,7 @@ ftl_status_e cp_pool_find_latest(cp_handle_t *h, cp_header_t *cp, WORD *out_reco
     LOGI(LOG_TAG_CP "find latest seq=%lu idx=%u jrn_seq=%lu\r\n",
          cp->sequence,
          (unsigned)newest,
-         cp->jrn_get_sequence);
+         cp->journal_sequence);
     return FTL_OK;
 }
 
@@ -1261,7 +1261,7 @@ cp_media_status_e cp_media_status_probe(cp_handle_t *h, DWORD *out_layout_versio
  * cp_block_snapshot
  *   功能：把当前 BST（state/valid_count/temp）与 OP/Spare 池归属编码成块元数据快照。
  *   参数：alloc —— 分配器（前置条件）；words —— 输出（FTL_BLOCK_TOTAL 个 16-bit word）。
- *   实现要点：在 Checkpoint job 起点调用，与 region_bitmap / jrn_get_sequence 同一
+ *   实现要点：在 Checkpoint job 起点调用，与 region_bitmap / journal_sequence 同一
  *             协作点取定（单线程 superloop 不会被完成回调打断）。
  *             池归属不在 BST state 里（OP/Spare 都是 NONE）⇒ 从两个数组补写。
  *             **动态 LOG 块以 Directory 为准**（md_get_live_count）：即使 BST state
@@ -1733,7 +1733,7 @@ ftl_status_e cp_initial_record_write(struct ftl_context *ftl)
  *   功能：判定是否该做 Checkpoint（三路触发，任一命中即 true）。
  *   参数：h —— checkpoint handle；trigger —— 本轮触发信息。
  *   返回：true 触发；false 不触发。
- *   实现要点：T1 Journal 水位（checkpoint_needed，由 jrn_update_watermark 置）；
+ *   实现要点：T1 Journal 水位（checkpoint_needed，由 jrn_watermark_update 置）；
  *             T2 写入量（total_writes 整除 CP_WRITE_INTERVAL，且 >0 防开机即命中）；
  *             T3 定时（elapsed_ms ≥ CP_TIME_INTERVAL_MS）。
  * -------------------------------------------------------------------- */

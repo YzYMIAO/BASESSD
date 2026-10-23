@@ -2135,7 +2135,7 @@ void md_pool_service(struct ftl_context *ftl)
 
     /* Journal 候选表变了 ⇒ 环形下标到物理块的映射已变。不能把游标简单归零
      * （新下标可能指向未擦块；直接写 = 二次编程）。按新候选表重新扫环、接回
-     * 最新好页（jrn_scan_latest + jrn_resume），坏块上的条目由 REBUILD_REQUIRED
+     * 最新好页（jrn_page_scan_latest + jrn_resume），坏块上的条目由 REBUILD_REQUIRED
      * 在下次开机 full rebuild 恢复。 */
     bool jrn_changed = false;
 
@@ -2161,7 +2161,7 @@ void md_pool_service(struct ftl_context *ftl)
         ftl->journal->handle.ring_full        = false; /* 新候选池可能已补回 spare */
         (void)memset(ftl->journal->handle.page_buf, 0xFF, sizeof(ftl->journal->handle.page_buf));
 
-        (void)jrn_scan_latest(ftl->journal, &latest, &read_error);
+        (void)jrn_page_scan_latest(ftl->journal, &latest, &read_error);
 
         /* floor 取当前序号，保证 resume 不回退；merge_floor 取最近 CP 水位，
          * 阻止跨 CP 的旧条目就地合并。 */
@@ -2186,7 +2186,7 @@ void md_pool_service(struct ftl_context *ftl)
 
     /* 触发一次 Anchor 提交 + Checkpoint：把 RAM 里的权威状态重新落到新候选池。 */
     dir->dirty = true;
-    jrn_request_checkpoint(ftl->journal);
+    jrn_checkpoint_request(ftl->journal);
     bbt_note_dirty(alloc);
 
     if ((s_pool_rebuilt_logged++ % MD_POOL_REBUILT_LOG_EVERY) == 0U)

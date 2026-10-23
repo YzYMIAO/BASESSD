@@ -314,7 +314,7 @@ flowchart TB
 
     subgraph "上电与恢复"
         P1["ftl_init S3-1"] --> P2["介质版本检查 S2-5"]
-        P2 --> P3["jrn_scan_latest cp_pool_find_latest S3-7 S3-8"]
+        P2 --> P3["jrn_page_scan_latest cp_pool_find_latest S3-7 S3-8"]
         P3 --> P4{"fresh clean PF"}
         P4 --> P5["块元数据快照恢复 journal replay full metadata rebuild S4-1 至 S4-3"]
         P5 --> P6["carve build pools 到 Ready"]
@@ -561,7 +561,7 @@ region 自持**主+备两份记录**（`L2P_REGION_COPIES = 2`，见 §2.3.6）�
 | `timestamp` | 4 B | 写 Header 时的毫秒时钟快照 |
 | `region_count` | 4 B | 本次 CP 覆盖的 region 数 |
 | `region_bitmap[64]` | 256 B | 本 die 的 2048-bit 局部脏位图（哪些 region 在本次 CP 中） |
-| `jrn_get_sequence` | 4 B | Journal 截断水位：回放只取 sequence 之后 |
+| `journal_sequence` | 4 B | Journal 截断水位：回放只取 sequence 之后 |
 | `layout_version` | 4 B | 介质布局版本 |
 | `block_word_count` / `block_word_bytes` / `block_page_count` | 4 + 4 + 4 B | 块元数据快照几何（4096 / 2 / 4；0 = 无快照） |
 | `block_crc32` | 4 B | 块元数据快照 words 的 CRC32 |
@@ -630,7 +630,7 @@ dirty（覆盖“写飞行期间又标坏”的丢更新窗口）。同步 `bbt_
 
 **几何**：每页 127 条（⌊(2048−12)/16⌋）；每块 64 页；**4 块环形**（`JOURNAL_BLOCKS =
 CW_NUM`）⇒ 总容量 4 × 64 × 127 = **32,512 条**。块写满 ⇒ 擦环形下一块再续写；
-Checkpoint 成功后按 `jrn_get_sequence` 截断/回收。
+Checkpoint 成功后按 `journal_sequence` 截断/回收。
 **副本**：**单副本**，页号奇偶交错到 P0/P1（不是镜像——日志写频率最高，镜像会 2× 写放大）。
 因此换块擦除必须用 `OP_ERASE_BLOCK_MULTI_PLANE`，否则 P1 的页不会被擦。
 
@@ -901,7 +901,7 @@ flowchart LR
 | **Anchor** | `commit_region` 置脏 → CP/后台 job 组页写 | 开机 `md_load` | 池内 ring：块满轮转；最新 sequence 胜；旧块整块擦 | 重建 Directory；缺页回退"未映射" |
 | **Checkpoint** | CP job：快照 bitmap → flush region → flush Anchor → 写块元数据快照 + 磨损快照 → 写 Header | 开机 `cp_pool_find_latest` + `cp_block_table_load` / `cp_wear_table_load` | 池内 ring：8 块 × 3 条（21 页/条）；最新 sequence 胜 | Header 给 Journal 水位；块元数据快照给 state/valid/temp/池归属；磨损快照给 erase/read/rr |
 | **BBT** | 出厂扫描 / 运行时 `bbt_mark_bad` → BBT job | `bbt_init`（开机） | 池内 ring：2 块 × 64 条；最新 sequence 胜 | 坏块图；无有效 BBT 时按空片/拒扫策略 |
-| **Journal** | 每次 host 写确认 `jrn_append` | 开机 `jrn_replay`；CP 截断 | 4 块环形：页满换块；CP 按水位截断 | 回放 `seq > CP jrn_get_sequence` 的条目 |
+| **Journal** | 每次 host 写确认 `jrn_append` | 开机 `jrn_replay`；CP 截断 | 4 块环形：页满换块；CP 按水位截断 | 回放 `seq > CP journal_sequence` 的条目 |
 | **磨损计数（CP 内）** | 运行时 `erase/read/rr` 更新 BST → CP job 组页 | 开机 `cp_wear_table_load` | 随 CP record 轮转覆盖；无独立回收 | 从 CP 磨损快照回填；丢失只退化 WL（软状态） |
 | **L2P region log**（固定预留区） | L2P cache 刷脏 → `append_slot` + FC 写 | cache miss 读回；GC/compaction | 块满换块（固定区）；`l2p_live==0` → `reclaim_pending`；活块数 >40 → compaction | Directory 指向最新页；Journal 补差量 |
 | **Directory（SRAM）** | `commit_region` / journal replay 写入 cache 后 flush | L2P lookup；Anchor 快照源 | 覆盖 entry；Anchor 全量落盘 | Anchor 重建 Directory；Journal 回放补 L2P cache 增量 |
@@ -918,7 +918,7 @@ flowchart TD
     VER -- "I/O 错误" --> HALT["拒绝格式化 / 启动失败"]
     VER -- "CURRENT" --> BR["ftl_boot_recovery"]
     FMT --> BR
-    BR --> JS["jrn_scan_latest"]
+    BR --> JS["jrn_page_scan_latest"]
     JS --> CPF["cp_pool_find_latest"]
     CPF -- "无 CP" --> FRESH["fresh: full metadata rebuild → carve"]
     CPF -- "有 CP" --> LS["块元数据 + 磨损快照 load"]
@@ -980,7 +980,7 @@ flowchart LR
 | 数据 | 最后落点 | 掉电后怎么恢复 |
 |---|---|---|
 | 用户数据 | data block 页 + 页内 META（CW 的 LBA） | ECC / read retry / RAID（若启用） |
-| L2P 增量 | Journal（lba / old_pba / new_pba / seq） | replay `seq > CP jrn_get_sequence` |
+| L2P 增量 | Journal（lba / old_pba / new_pba / seq） | replay `seq > CP journal_sequence` |
 | L2P region 页 | L2P log block（Directory 指向最新页） | Directory 加载后按 PBA 读回 |
 | Directory | Anchor（全量快照，P0+P1 镜像） | `md_load` 取最新完整 record |
 | 块元数据快照 | Checkpoint（4 页 word，P0+P1 镜像） | `cp_block_table_load`；失败走 full metadata rebuild |
@@ -997,7 +997,7 @@ Anchor / BBT（record 池）
 
 Journal（页环形）
   page 0 → … → page 63 → block+1 page 0 → … → block 0（先擦环形下一块）
-  CP 成功后按 jrn_get_sequence 截断/预擦；回放只取 seq > CP 水位
+  CP 成功后按 journal_sequence 截断/预擦；回放只取 seq > CP 水位
 
 Checkpoint（21 页/record：Header 1 + 块元数据 4 + 磨损 16）
   slot 0 → slot 1 → slot 2 → 下一块 slot 0 → …
@@ -1143,7 +1143,7 @@ FTL 的运行时状态分两类：
 不变量：
 
 1. **块元数据快照先于 Journal 回放恢复**：回放要同步维护 `valid_count`，没有块元数据就没有记账对象。
-2. **判型用整页**：`page_seq + entry_count <= cp.jrn_get_sequence` 才是干净关机；
+2. **判型用整页**：`page_seq + entry_count <= cp.journal_sequence` 才是干净关机；
    只比页首页序号会漏掉跨水位那一页的新条目。
 3. **三条路径都要 `jrn_resume`**：环形块没有被擦，写指针/序号必须接回；
    否则二次编程或序号回退。
@@ -1155,13 +1155,13 @@ FTL 的运行时状态分两类：
 
 ```mermaid
 flowchart TD
-    BOOT["ftl_boot_recovery"] --> LATEST["jrn_scan_latest 只读,不改状态"]
+    BOOT["ftl_boot_recovery"] --> LATEST["jrn_page_scan_latest 只读,不改状态"]
     LATEST --> FIND{"cp_pool_find_latest 有当前版本有效 Header"}
     FIND -- "否" --> FRESH["fresh full metadata rebuild 全扫 → carve"]
     FIND -- "是" --> LOAD{"cp_block_table_load"}
     LOAD -- "否" --> PFALL["块元数据走 full metadata rebuild 兜底"]
     LOAD -- "是" --> WEAR["cp_wear_table_load 软状态，失败只从 0 起算"]
-    WEAR --> JUDGE{"page_seq entry_count 不高于 cp-jrn_get_sequence"}
+    WEAR --> JUDGE{"page_seq entry_count 不高于 cp-journal_sequence"}
     JUDGE -- "是" --> CLEAN["clean restore probe build_pools"]
     JUDGE -- "否" --> PF["PF restore journal replay F4 probe build_pools"]
     PFALL --> FULL_SCAN["reset → full metadata rebuild → carve"]
@@ -1175,12 +1175,12 @@ flowchart TD
 
 #### 3.1.5 关键流程
 
-1. **扫描**：`jrn_scan_latest()` 只读环形池，取 `(block, page, page_seq, entry_count)`；
+1. **扫描**：`jrn_page_scan_latest()` 只读环形池，取 `(block, page, page_seq, entry_count)`；
    `cp_pool_find_latest()` 用 `md_ring_locate` 扫 Checkpoint 池，取最新有效 Header，
    同时恢复本实例的 CP 序号与写游标。
 2. **分类**：
    - 无有效 CP → **fresh**；
-   - `page_seq + entry_count <= cp.jrn_get_sequence` → **clean**（Journal 已全部落入 L2P）；
+   - `page_seq + entry_count <= cp.journal_sequence` → **clean**（Journal 已全部落入 L2P）；
    - 否则 → **power failure**（有未回放的增量）。
 3. **fresh**：失效本 owner 的 cache 行/脏位 → **full metadata rebuild（重建 Closed 列表）→ carve 池**
    （carve 只把 state==NONE 的块入池）→ Spare 补池 → `jrn_resume(floor=1)`。
@@ -2413,7 +2413,7 @@ Journal 追加是小的、顺序的；region 写回可以攒批、后台做。
 6. **环形块持续擦除失败的处理**：同一块连续失败 `JRN_ERASE_FAIL_MAX`（3）次 ⇒
    置 `bad_mask` + `bbt_mark_bad`（两个 plane），跳到下一个可用块；全部不可用 ⇒
    `ring_full`，停止写入并拒绝新条目（绝不写未擦块，也不再无限重试）。坏块在
-   `jrn_scan_ring` 中被跳过，不会把回放误判为“不完整”。
+   `jrn_ring_scan` 中被跳过，不会把回放误判为“不完整”。
 
 #### 3.7.4 写路径
 
@@ -2548,7 +2548,7 @@ Checkpoint 的作用是：
 | `timestamp` | 4 B | 观测 |
 | `region_count` | 4 B | 本 CP 覆盖的 region 数 |
 | `region_bitmap[64]` | 256 B | 本 die 的局部 2048-bit 位图 |
-| `jrn_get_sequence` | 4 B | 截断/回放水位 |
+| `journal_sequence` | 4 B | 截断/回放水位 |
 | `layout_version` | 4 B | 介质版本 |
 | `block_word_count` | 4 B | 块元数据 word 数（0 = 无快照） |
 | `block_word_bytes` | 4 B | 每 word 字节数（2） |
@@ -2593,7 +2593,7 @@ pool: 0=NONE / 1=OP / 2=SPARE
 
 **不变量**：
 
-1. **快照点在 job 起点**：脏位图与 `jrn_get_sequence` 一起取定。异步 CP 跨多轮，
+1. **快照点在 job 起点**：脏位图与 `journal_sequence` 一起取定。异步 CP 跨多轮，
    若取“CP 末尾”的水位，CP 期间完成的 host 写会两边都不认（不 flush、不回放）⇒ 丢映射。
 2. **顺序不可换**：flush regions → Anchor → 块元数据快照 → 磨损快照 → Header → 截断 Journal。
    Header 一旦落盘，boot 就信 `region_bitmap` 里的 region 已在 NAND 上。
@@ -3793,7 +3793,7 @@ flowchart TD
 ### 4.2 干净启动（clean start）
 
 **触发**：有当前版本 Checkpoint，且
-`ring.page_seq + ring.entry_count <= cp.jrn_get_sequence`（Journal 已全部落入 L2P）。
+`ring.page_seq + ring.entry_count <= cp.journal_sequence`（Journal 已全部落入 L2P）。
 
 ```mermaid
 sequenceDiagram
@@ -3803,7 +3803,7 @@ sequenceDiagram
     participant A as Allocator
     participant L as L2P cache
 
-    B->>J: jrn_scan_latest 只读
+    B->>J: jrn_page_scan_latest 只读
     B->>C: cp_pool_find_latest
     C-->>B: Header 池游标
     B->>C: cp_block_table_load
@@ -4071,7 +4071,7 @@ sequenceDiagram
 |---|---|
 | L2P region | 快照内的脏 region 全部落盘 |
 | Anchor | 新 record（Directory 全量快照） |
-| Checkpoint | 新 Header（含 `jrn_get_sequence`、块元数据 CRC、磨损页 CRC） |
+| Checkpoint | 新 Header（含 `journal_sequence`、块元数据 CRC、磨损页 CRC） |
 | Journal | 水位标志复位；最旧块预擦 |
 
 **失败分支**：flush 失败 ⇒ 中止，不写 Header；Anchor 分页失败 ⇒ 整条作废；
@@ -4247,7 +4247,7 @@ flowchart TB
 | 模块 | handle / 上下文 | typed 入口 | status / 查询 |
 |---|---|---|---|
 | BBT | `alloc->bbt.handle` | `bbt_handle(alloc, info, out)` | `bbt_status_t` |
-| Journal | `l2p_jrn_t.handle` | `jrn_handle(j, trigger, info, out)` | `jrn_status_t`；`jrn_is_idle` / `jrn_can_erase_victim` / `jrn_get_sequence` / `jrn_get_watermark` / `jrn_has_write_failure` |
+| Journal | `l2p_jrn_t.handle` | `jrn_handle(j, trigger, info, out)` | `jrn_status_t`；`jrn_is_idle` / `jrn_can_erase_victim` / `jrn_sequence_get` / `jrn_watermark_get` / `jrn_has_write_failure` |
 | Metadata | `md_dir_cache_t.handle` | `md_handle(dir, info, out)` | `md_status_t`；`md_is_busy` |
 | Migrate | `mig_handle_t` | `mig_handle(h, info, out)` / `mig_trigger(h, reason)` | `mig_status_t`；`mig_is_active` / `mig_reclaimed_count` / `mig_novictim_count` |
 | RR | `rr_handle_t` | `rr_handle(h, info, out)` / `rr_trigger(h, owner)` | `rr_status_t` |
@@ -4889,7 +4889,7 @@ context；模块 handle 只拥有执行状态（FSM / 单飞行 / 计时器 / �
 | FC 命令池/描述符池 + 队列（DTCM P1） | ~9 KB + 776 B | DTCM |
 | `g_nand_channel_page_buffer` | 4,224 B | AXI_NOCACHE（DTCM 会破坏 multi-plane program） |
 | BCH 静态表（`s_bch`，含 roots bitmap） | 42,656 B | DTCM |
-| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,624 / 62,072 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
+| `.ssd_code_high`（ITCM 热代码，release / debug） | 61,608 / 62,072 B | ITCM（release 额外模块按 `release/obj/` 路径选择） |
 | `.dtcm_data` 合计（release） | 67,832 B | DTCM |
 
 ⚠ `.sram*_data` 是 NOLOAD，启动代码不清零；`ftl_init` 必须显式 memset 五张表与六个 storage 对象

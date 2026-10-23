@@ -129,7 +129,7 @@ void ftl_boot_log_bad_areas(const struct ftl_context *ftl);
  * 在 fc_init() 之后、ftl_service() 开始之前调用。
  *
  * 流程：
- *   ① 扫描 Journal（jrn_scan_latest，获取最新页/sequence）
+ *   ① 扫描 Journal（jrn_page_scan_latest，获取最新页/sequence）
  *   ② 扫描 Checkpoint（cp_pool_find_latest）
  *   ③ 判断类型 → fresh / clean / power failure
  *   ④ 对应恢复路径

@@ -175,8 +175,8 @@ static cp_trigger_t bg_cp_trigger_build(const ftl_ctx_t *ftl, cp_reason_e reason
 
     trigger.now_ms            = ftl_job_now_ms();
     trigger.total_writes      = ftl->total_writes;
-    trigger.journal_seq       = jrn_get_sequence(ftl->journal);
-    trigger.jrn_get_watermark = jrn_get_watermark(ftl->journal);
+    trigger.journal_seq       = jrn_sequence_get(ftl->journal);
+    trigger.journal_watermark = jrn_watermark_get(ftl->journal);
     trigger.emergency         = jrn_is_emergency(ftl->journal);
     trigger.force             = force;
     trigger.reason            = reason;

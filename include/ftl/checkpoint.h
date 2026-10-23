@@ -5,7 +5,7 @@
  * Checkpoint — L2P 快照 + Journal 回收协同
  *
  * Checkpoint 定期 flush 所有 dirty L2P Cache → NAND L2P Table，
- * 写 Checkpoint Header（含当前 jrn_get_sequence），截断 Journal。
+ * 写 Checkpoint Header（含当前 journal_sequence），截断 Journal。
  *
  * Journal 中 sequence ≤ cp_journal_sequence 的条目已全部写入 L2P Table，
  * 可在 Journal 回切时安全擦除。
@@ -42,7 +42,7 @@ struct ftl_context;
  *   NAND 上，故任何被 Header 声称的落盘必须**先于** Header 完成。
  *
  * ⚠ **快照点在 job 起点**（见 checkpoint.c 的长注释）：region_bitmap 与
- *   jrn_get_sequence 在 job **起点**一次取定。CP 跨多轮，期间完成的 host 写会在
+ *   journal_sequence 在 job **起点**一次取定。CP 跨多轮，期间完成的 host 写会在
  *   journal 里留下 > 快照水位的新条目——水位取早 ⇒ 它们一定被回放，不会丢。
  *
  * 完成服务函数 `ftl_checkpoint_callback` 声明在 ftl/ftl_op.h（与其余 op 服务函数同处）；
@@ -117,7 +117,7 @@ typedef struct
     DWORD       now_ms;
     DWORD       total_writes;
     DWORD       journal_seq;
-    BYTE        jrn_get_watermark; /* 0..100 */
+    BYTE        journal_watermark; /* 0..100 */
     bool        emergency;         /* Journal ≥ 95% */
     bool        force;             /* 显式请求（开机/诊断） */
     cp_reason_e reason;            /* force 时优先用 */
@@ -228,7 +228,7 @@ typedef struct
     DWORD timestamp;                                /* timer_get_ms() 快照 */
     DWORD region_count;                             /* 非零 bitmap word 数（无消费方，仅信息量）*/
     DWORD region_bitmap[64];                        /* 2048 bit，哪些 region 在 checkpoint 中 */
-    DWORD jrn_get_sequence;                         /* 截断到此 sequence 之前的 journal */
+    DWORD journal_sequence;                         /* 截断到此 sequence 之前的 journal */
     DWORD layout_version;                           /* FTL_MEDIA_LAYOUT_VERSION（版本不符 ⇒ 该记录作废）*/
     DWORD block_word_count;                         /* 块元数据 word 数（= FTL_BLOCK_TOTAL；0 = 无快照）*/
     DWORD block_word_bytes;                         /* 每 word 字节数（2；0 = 无快照）*/
@@ -407,7 +407,7 @@ void cp_timer_reset(cp_handle_t *h);
  *
  * 只由 ftl_media_format() 在擦完全片后调用。写出完整 21 页 record：
  * 4 页 per-block metadata snapshot + 16 页磨损快照 + Header（最后写 = commit）。
- * sequence=1、jrn_get_sequence=0；下次开机 cp_pool_find_latest 立即命中，
+ * sequence=1、journal_sequence=0；下次开机 cp_pool_find_latest 立即命中，
  * 版本判据只格式化一次；即使随后发生 power failure，也能用这份快照 + journal
  * 增量恢复，不必 full metadata rebuild。
  *

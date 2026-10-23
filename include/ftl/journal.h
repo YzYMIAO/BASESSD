@@ -181,7 +181,7 @@ typedef struct
     jrn_handle_t handle;
 } l2p_jrn_t;
 
-/* Journal 环形页引用：位置 + 页序号 + 条目数（jrn_scan_latest 出参） */
+/* Journal 环形页引用：位置 + 页序号 + 条目数（jrn_page_scan_latest 出参） */
 typedef struct
 {
     DWORD page_seq;    /* 页头记录的**首条**条目序号 */
@@ -252,7 +252,7 @@ typedef struct
 void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc);
 
 /*
- * jrn_scan_latest - 只读扫环，取**最新页**（最大 page_seq）。
+ * jrn_page_scan_latest - 只读扫环，取**最新页**（最大 page_seq）。
  *
  * 用途：① 启动判型（干净关机 / 掉电）；② 干净关机的写指针恢复。**不改 journal 状态**，
  * 与回放共用同一套页头判定。
@@ -262,7 +262,7 @@ void jrn_init(l2p_jrn_t *journal, ftl_topo_t topo, alc_t *alloc);
  *        「干净/掉电」判型都不可信，启动恢复应走掉电回放路径
  * @return true = 环非空（*out 有效）；false = 环空（全部擦除 / 无有效页）
  */
-bool jrn_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *out_read_error);
+bool jrn_page_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *out_read_error);
 
 /*
  * jrn_resume - 恢复 Journal 的 RAM 写态（写指针 + 序号），**不回放任何条目**。
@@ -280,8 +280,8 @@ bool jrn_scan_latest(const l2p_jrn_t *journal, jrn_page_ref_t *out, bool *out_re
  * 绝不能把新页写进未擦块。
  *
  * @param journal Journal
- * @param latest  jrn_scan_latest 的结果（NULL 或 page_seq==0 视为环空）
- * @param floor_sequence 序号下限 = Checkpoint 的 jrn_get_sequence（「下一个待分配」），
+ * @param latest  jrn_page_scan_latest 的结果（NULL 或 page_seq==0 视为环空）
+ * @param floor_sequence 序号下限 = Checkpoint 的 jrn_sequence_get（「下一个待分配」），
  *        兜住「环空」与「环内最新页序号反而落后」两种情形（0 会被抬到 1）
  */
 void jrn_resume(l2p_jrn_t *journal, const jrn_page_ref_t *latest, DWORD floor_sequence);
@@ -325,19 +325,19 @@ void jrn_handle(l2p_jrn_t *journal, const jrn_trigger_e *trigger, const bg_info_
 /* jrn_is_idle — 无在飞 job（写 / 擦都完成）。 */
 bool jrn_is_idle(const l2p_jrn_t *journal);
 
-/* jrn_get_sequence — 下一个待分配序号（= CP 截断水位）。 */
-DWORD jrn_get_sequence(const l2p_jrn_t *journal);
+/* jrn_sequence_get — 下一个待分配序号（= CP 截断水位）。 */
+DWORD jrn_sequence_get(const l2p_jrn_t *journal);
 
-/* jrn_get_watermark — 当前使用率（0..100，全局写位置 / 全环容量）。 */
-BYTE jrn_get_watermark(const l2p_jrn_t *journal);
+/* jrn_watermark_get — 当前使用率（0..100，全局写位置 / 全环容量）。 */
+BYTE jrn_watermark_get(const l2p_jrn_t *journal);
 
 /* jrn_has_write_failure — 持久性失败 pending 是否置位。 */
 bool jrn_has_write_failure(const l2p_jrn_t *journal);
 
-/* jrn_clear_write_failure - Checkpoint Header 成功后清除持久性失败 pending。
+/* jrn_write_failure_clear - Checkpoint Header 成功后清除持久性失败 pending。
  * 仅当该 CP 的 journal 水位（起点快照）≥ 失败时刻的 sequence 才清除：说明 CP 在
  * 失败之后启动，已把迁移后的 L2P 区域落盘；否则保留 pending，让下一次 CP 再试。 */
-void jrn_clear_write_failure(l2p_jrn_t *journal, DWORD cp_journal_seq);
+void jrn_write_failure_clear(l2p_jrn_t *journal, DWORD cp_journal_seq);
 
 /* jrn_has_pending_entries — 页缓冲里是否有未落盘条目。 */
 bool jrn_has_pending_entries(const l2p_jrn_t *journal);
@@ -349,20 +349,20 @@ bool jrn_has_erase_pending(const l2p_jrn_t *journal);
 bool jrn_needs_checkpoint(const l2p_jrn_t *journal);
 bool jrn_is_emergency(const l2p_jrn_t *journal);
 
-/* jrn_set_merge_floor — CP Header 成功后设置合并边界（Checkpoint 模块调用）。 */
-void jrn_set_merge_floor(l2p_jrn_t *journal, DWORD sequence);
+/* jrn_merge_floor_set — CP Header 成功后设置合并边界（Checkpoint 模块调用）。 */
+void jrn_merge_floor_set(l2p_jrn_t *journal, DWORD sequence);
 
-/* jrn_update_watermark - 按当前写位置重算并置位 CP 水位标志。
- * 由写确认路径在每次 L2P 更新后调用（原 jrn_update_watermark 的归属收回
+/* jrn_watermark_update - 按当前写位置重算并置位 CP 水位标志。
+ * 由写确认路径在每次 L2P 更新后调用（原 jrn_watermark_update 的归属收回
  * journal 模块：它是 journal 自己的状态）。 */
-void jrn_update_watermark(l2p_jrn_t *journal);
+void jrn_watermark_update(l2p_jrn_t *journal);
 
 /*
- * jrn_request_checkpoint - 强制请求一次 Checkpoint（元数据失块后的恢复动作）
+ * jrn_checkpoint_request - 强制请求一次 Checkpoint（元数据失块后的恢复动作）
  *
  * 只置水位标志；由后台 CP 任务在安全点执行。不直接写介质。
  */
-void jrn_request_checkpoint(l2p_jrn_t *journal);
+void jrn_checkpoint_request(l2p_jrn_t *journal);
 
 /* F10：全量回放**未进 L2P 表**的页（按 (page_seq, entry_index) 递增序应用，
  * per-LBA last-write-wins）。cp_sequence 为 checkpoint 截断水位（旧 jrn_replay

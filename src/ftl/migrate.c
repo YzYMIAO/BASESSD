@@ -1458,7 +1458,7 @@ static bool mig_step_write_settle(mig_handle_t *m)
 
         /* GC/WL 的 Journal 追加同样推进水位；漏掉会让 journal 只靠 T2/T3 触发 CP，
          * 大量搬移时可能撞 ring_full（新背压路径会把 host 写停到超时）。 */
-        jrn_update_watermark(m->journal);
+        jrn_watermark_update(m->journal);
     }
 
     m->write_ok = false;
@@ -1638,7 +1638,7 @@ static bool mig_step_write_settle_batch(mig_handle_t *m)
         }
     }
 
-    jrn_update_watermark(m->journal);
+    jrn_watermark_update(m->journal);
 
     m->batch_count   = 0U;
     m->batch_mode    = false;
